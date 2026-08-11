@@ -16,7 +16,7 @@ export class App {
     container.appendChild(renderer.domElement);
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x9cc8de);
+    // background comes from the sky dome (T15); fog color synced by sky rig
     this.scene.fog = new THREE.Fog(0x9cc8de, 400, 2500);
 
     this.camera = new THREE.PerspectiveCamera(
@@ -32,10 +32,7 @@ export class App {
     this.controls.maxPolarAngle = Math.PI * 0.495;
     this.controls.update();
 
-    const sun = new THREE.DirectionalLight(0xfff4e0, 3.0);
-    sun.position.set(200, 300, 100);
-    this.scene.add(sun);
-    this.scene.add(new THREE.AmbientLight(0xbcd8e8, 0.6));
+    // lighting owned by the sky system (src/sky), attached in main.ts
 
     window.addEventListener('resize', () => this.onResize(container));
   }
