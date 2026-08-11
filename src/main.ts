@@ -38,12 +38,12 @@ import { ropeParams } from './params/ropes';
 
 // bisect switches for the renderer-freeze hunt — all true = full game
 const FEATURES = {
-  spray: false,
-  bowSpray: false,
+  spray: true, // re-enabled: B5 NaN guards landed
+  bowSpray: true, // re-enabled: B5 NaN guards landed
   flowFoam: true, // re-enabled: T13 wake rework verification (see flowfoam report)
   // ropes+blocks wired and ready — kept OFF pending the freeze-hunt bisect;
   // flip to true for the T11 rig visual check once Chrome is back
-  ropes: false,
+  ropes: true,
 };
 
 async function boot(): Promise<void> {
