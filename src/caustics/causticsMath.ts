@@ -46,6 +46,34 @@ export type Vec3 = [number, number, number];
 /** vertical component of a refracted/reflected ray is floored here (§V.28) */
 export const MIN_VERTICAL = 0.05;
 
+/**
+ * Cap on lateral drift per metre of span (§B.11).
+ *
+ * Flooring the divisor keeps the DIVISION safe but leaves the QUOTIENT free
+ * to reach |ray|/MIN_VERTICAL = 20, and that is not a safe number: the
+ * finite difference of a field that saturates at ±20 over an epsilon of
+ * ~0.35 m reaches |∂w| ≈ 50, so det M(span) acquires coefficients in the
+ * hundreds and flips sign between neighbouring pixels. The gain then
+ * oscillates between ~0 and its |detA|/σ ceiling per pixel — speckle.
+ *
+ * Refraction has a physical ceiling here: air→water can never bend more
+ * than 48.6° from the surface normal (Snell's window), so tan(48.6°) = 1.135
+ * relative to the normal, and a few times that relative to vertical once the
+ * wave tilts. Reflection has NO such bound — a wave face can throw the sun
+ * horizontally or downward — which is why the reflected branch must be
+ * gated on the ray actually travelling upward as well as clamped.
+ */
+export const MAX_DRIFT = 2.5;
+
+/** limit a drift vector's magnitude, preserving direction (§V.28) */
+export function clampDrift(drift: Vec2, maxDrift: number): Vec2 {
+  const limit = Math.max(maxDrift, 1e-3);
+  const len = Math.hypot(drift[0], drift[1]);
+  if (!(len > limit)) return len > 0 || len === 0 ? drift : [0, 0];
+  const s = limit / len;
+  return [drift[0] * s, drift[1] * s];
+}
+
 export function clamp01(v: number): number {
   if (!Number.isFinite(v)) return 0;
   return v < 0 ? 0 : v > 1 ? 1 : v;
@@ -102,23 +130,51 @@ export interface Drift {
  * `sun` points FROM the surface TOWARD the sun (the engine's convention,
  * cf. ocean/surfaceMaterial `normalWorld.dot(sunDirectionUniform)`).
  */
-export function refractedDrift(sun: Vec3, gx: number, gz: number, eta: number): Drift {
+export function refractedDrift(
+  sun: Vec3,
+  gx: number,
+  gz: number,
+  eta: number,
+  maxDrift: number = MAX_DRIFT,
+): Drift {
   const N = normalFromSlope(gx, gz);
   const cosI = N[0] * sun[0] + N[1] * sun[1] + N[2] * sun[2];
   if (cosI <= 0) return { drift: [0, 0], vertical: MIN_VERTICAL, valid: 0 };
   const T = refract([-sun[0], -sun[1], -sun[2]], N, eta);
   const down = Math.max(-T[1], MIN_VERTICAL);
-  return { drift: [T[0] / down, T[2] / down], vertical: down, valid: 1 };
+  return {
+    drift: clampDrift([T[0] / down, T[2] / down], maxDrift),
+    vertical: down,
+    valid: 1,
+  };
 }
 
-/** Sun ray specularly reflected UP off the surface — above-water caustics. */
-export function reflectedDrift(sun: Vec3, gx: number, gz: number): Drift {
+/**
+ * Sun ray specularly reflected UP off the surface — above-water caustics.
+ *
+ * Unlike refraction this has NO angular bound: a steep wave face can throw
+ * the reflected ray horizontal or straight back down into the sea. Such a
+ * ray cannot illuminate anything above the water, so it is gated out
+ * entirely (§B.11) rather than divided by a floored near-zero vertical.
+ */
+export function reflectedDrift(
+  sun: Vec3,
+  gx: number,
+  gz: number,
+  maxDrift: number = MAX_DRIFT,
+): Drift {
   const N = normalFromSlope(gx, gz);
   const cosI = N[0] * sun[0] + N[1] * sun[1] + N[2] * sun[2];
-  if (cosI <= 0) return { drift: [0, 0], vertical: MIN_VERTICAL, valid: 0 };
   const R = reflect([-sun[0], -sun[1], -sun[2]], N);
-  const up = Math.max(R[1], MIN_VERTICAL);
-  return { drift: [R[0] / up, R[2] / up], vertical: up, valid: 1 };
+  // the ray must both come from a sunlit face AND travel upward
+  if (cosI <= 0 || R[1] <= MIN_VERTICAL) {
+    return { drift: [0, 0], vertical: MIN_VERTICAL, valid: 0 };
+  }
+  return {
+    drift: clampDrift([R[0] / R[1], R[2] / R[1]], maxDrift),
+    vertical: R[1],
+    valid: 1,
+  };
 }
 
 /**
@@ -192,20 +248,42 @@ export function causticGain(detA: number, detM: number, softness: number): numbe
   return Math.abs(detA) / Math.sqrt(detM * detM + s * s);
 }
 
+export interface CausticResponse {
+  /** ≥ 0, Reinhard-capped below `maxGain` — ADDITIVE light */
+  bright: number;
+  /** ∈ [1 − darkStrength, 1] — MULTIPLICATIVE on albedo */
+  darken: number;
+}
+
 /**
- * Split the gain into a Reinhard-capped bright lobe (ray convergence) and a
- * scaled dark lobe (divergence). Flat water → 0, so this ADDS nothing where
- * the sea is glass instead of uniformly washing the receiver.
+ * Split the gain into a bright lobe (ray convergence) and a dark lobe
+ * (divergence). Flat water → { bright: 0, darken: 1 }, so this changes
+ * nothing where the sea is glass instead of washing the receiver.
+ *
+ * §B.11 — WHY THE TWO LOBES TAKE DIFFERENT ROUTES. The dark lobe used to be
+ * returned as a negative number added into the same additive term, which
+ * reached the hull as a NEGATIVE emissive: it subtracted light, crushed
+ * timber to black, and (because the additive term carries per-channel Jerlov
+ * extinction, which removes blue and green fastest) left the remainder
+ * glowing red. Divergence physically means LESS of the incoming light
+ * arrives, which is a multiplication, not a subtraction. Returning it as a
+ * factor in [1 − darkStrength, 1] makes negative light impossible by
+ * construction rather than by clamping after the fact.
  */
 export function causticResponse(
   gain: number,
   maxGain: number,
   darkStrength: number,
-): number {
-  const raw = gain - 1;
-  if (raw <= 0) return raw * clamp01(darkStrength);
+): CausticResponse {
+  const raw = Number.isFinite(gain) ? gain - 1 : 0;
   const cap = Math.max(maxGain, 1e-3);
-  return raw / (1 + raw / cap);
+  const lit = Math.max(raw, 0);
+  // gain ≥ 0 by construction, so raw ≥ −1 and this shortfall is already 0..1
+  const shortfall = clamp01(-Math.min(raw, 0));
+  return {
+    bright: lit / (1 + lit / cap),
+    darken: 1 - shortfall * clamp01(darkStrength),
+  };
 }
 
 /** Beer–Lambert along the actual slanted path, not straight down. */

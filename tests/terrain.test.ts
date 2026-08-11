@@ -267,6 +267,28 @@ describe('material construction (node graph builds without a renderer)', () => {
     handle.dispose();
   });
 
+  it('exposes the waterline gate that keeps §V34 caustics off dry land', async () => {
+    // causticsNode hard-codes `submerged = 1` for mode:'below', and its only
+    // depth budget (maxDepth) culls water that is too DEEP — so nothing in the
+    // module stops a 35 m hilltop being lit as if it sat just under the
+    // surface. One material shades our seabed AND our peak, so the gate has to
+    // live here. §V16: it is a tunable, so it is a param.
+    const { getParamsEntry } = await import('../src/params/registry');
+    expect(getParamsEntry('terrain')?.params).toBe(terrainParams);
+    expect(terrainParams.causticsWaterlineBand).toBeGreaterThan(0);
+    const { createSandUniforms, updateSandUniforms } = await import('../src/terrain/sandMaterial');
+    const u = createSandUniforms();
+    expect(u.causticsBand.value).toBe(terrainParams.causticsWaterlineBand);
+    const prev = terrainParams.causticsWaterlineBand;
+    terrainParams.causticsWaterlineBand = 1.25;
+    try {
+      updateSandUniforms(u);
+      expect(u.causticsBand.value).toBe(1.25); // live, not baked
+    } finally {
+      terrainParams.causticsWaterlineBand = prev;
+    }
+  });
+
   it('falls back to the flat waterline when no caustics instance is bound', async () => {
     // §V34 receivers must degrade, not explode: with nothing bound the sea
     // height is the uniform the island drives from CpuOcean, and waterLighting

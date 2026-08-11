@@ -67,3 +67,24 @@ export function quatFromAxisAngle(axis: Vec3, angle: number): Quat {
   const s = Math.sin(h);
   return [axis[0] * s, axis[1] * s, axis[2] * s, Math.cos(h)];
 }
+
+/**
+ * Unit quaternion from XYZ-order Euler radians — the convention
+ * `PieceTransform.rotation` uses (three's Object3D.rotation default order),
+ * so q = qx ⊗ qy ⊗ qz reproduces what the assembly puts in the scene graph.
+ */
+export function quatFromEulerXYZ(e: Vec3): Quat {
+  const [x, y, z] = e;
+  const cx = Math.cos(x / 2);
+  const sx = Math.sin(x / 2);
+  const cy = Math.cos(y / 2);
+  const sy = Math.sin(y / 2);
+  const cz = Math.cos(z / 2);
+  const sz = Math.sin(z / 2);
+  return [
+    sx * cy * cz + cx * sy * sz,
+    cx * sy * cz - sx * cy * sz,
+    cx * cy * sz + sx * sy * cz,
+    cx * cy * cz - sx * sy * sz,
+  ];
+}

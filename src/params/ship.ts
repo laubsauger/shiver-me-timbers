@@ -372,6 +372,10 @@ export interface ShipMaterialParams {
   wetSmooth: number; // …and smoother (roughness multiplier reduction)
   wetlineFade: number; // metres over which the boot-top fades in
   roughBase: number; // dry timber base roughness
+  /** how strongly the deck heightfield's per-board offsets show as relief */
+  deckFieldRelief: number;
+  /** …and as a tone shift, so proud boards read in flat daylight too */
+  deckFieldTone: number;
 }
 
 export const shipMaterialParams: ShipMaterialParams = registerParams(
@@ -399,6 +403,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     waleRelief: 0.02, plankToneVar: 0.05,
     bleachColor: 0xd8c9a8, bleachStrength: 0.22,
     wetDarken: 0, wetSmooth: 0, wetlineFade: 0.5, roughBase: 0.74,
+    deckFieldRelief: 2.4, deckFieldTone: 9,
   },
   {
     grainScale: { min: 0.1, max: 8, step: 0.05 },
@@ -442,6 +447,8 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     wetSmooth: { min: 0, max: 0.9, step: 0.01 },
     wetlineFade: { min: 0.05, max: 3, step: 0.05 },
     roughBase: { min: 0.1, max: 1, step: 0.01 },
+    deckFieldRelief: { min: 0, max: 8, step: 0.1 },
+    deckFieldTone: { min: 0, max: 30, step: 0.5 },
   },
 );
 

@@ -62,6 +62,17 @@ export interface IslandParams {
   palmSlopeLimit: number;
   /** min terrain height above waterline (m) a palm accepts */
   palmMinHeight: number;
+  /**
+   * Palms grow in GROVES, not scattered (§V43 — evenly-spaced palms measured
+   * an angular-gap CV of 0.84, i.e. Poisson-random, and that reads as the
+   * single most "generated" tell on an island). These control the groves:
+   * how many stands ring the island, and how tightly each one packs.
+   */
+  palmGroveCount: number;
+  /** arc half-width (m) of a grove along the shoreline — small = tight stand */
+  palmGroveSpread: number;
+  /** how much wider the inland tail of a grove spreads than its beach front */
+  palmGroveInlandFlare: number;
 
   // -- rocks -----------------------------------------------------------------
   rockCount: number;
@@ -137,7 +148,7 @@ export const islandParams: IslandParams = registerParams(
   {
     radius: 90,
     gridSize: 128,
-    peakHeight: 26,
+    peakHeight: 32,
     minPeakHeight: 12,
     falloffPower: 2.2,
     noiseScale: 0.035,
@@ -151,15 +162,18 @@ export const islandParams: IslandParams = registerParams(
     rimDepth: 6,
     skirtDepth: 8,
     palmCount: 28,
-    palmBeachFraction: 0.7,
+    palmBeachFraction: 0.82,
     palmBeachSetback: 5,
     palmInteriorRadius: 0.55,
     palmSlopeLimit: 0.55,
     palmMinHeight: 0.3,
-    rockCount: 14,
-    rockSpread: 7,
-    rockMinScale: 0.8,
-    rockMaxScale: 3.0,
+    palmGroveCount: 4,
+    palmGroveSpread: 26,
+    palmGroveInlandFlare: 2.4,
+    rockCount: 18,
+    rockSpread: 14,
+    rockMinScale: 3.0,
+    rockMaxScale: 8.0,
     rockSquashMin: 0.55,
     rockSquashMax: 0.9,
     rockNoiseAmp: 0.35,
@@ -167,7 +181,7 @@ export const islandParams: IslandParams = registerParams(
     rockNoiseOctaves: 3,
     rockDetail: 2,
     rockGeoVariants: 4,
-    rockEmbed: 0.35,
+    rockEmbed: 0.5,
     islandCount: 5,
     // the sky agent's haze test case wants objects at 2-4 km; the near end
     // keeps one island reachable within a couple of minutes of sailing
@@ -215,10 +229,13 @@ function islandParamsMeta(): Partial<Record<keyof IslandParams, ParamMeta>> {
     palmInteriorRadius: { min: 0.1, max: 0.9, step: 0.05 },
     palmSlopeLimit: { min: 0.1, max: 1.5, step: 0.05 },
     palmMinHeight: { min: 0, max: 5, step: 0.05 },
+    palmGroveCount: { min: 1, max: 12, step: 1 },
+    palmGroveSpread: { min: 2, max: 120, step: 1 },
+    palmGroveInlandFlare: { min: 1, max: 6, step: 0.1 },
     rockCount: { min: 0, max: 64, step: 1 },
     rockSpread: { min: 0, max: 30, step: 0.5 },
-    rockMinScale: { min: 0.2, max: 6, step: 0.1 },
-    rockMaxScale: { min: 0.2, max: 10, step: 0.1 },
+    rockMinScale: { min: 0.2, max: 12, step: 0.1 },
+    rockMaxScale: { min: 0.2, max: 20, step: 0.1 },
     rockSquashMin: { min: 0.2, max: 1.5, step: 0.05 },
     rockSquashMax: { min: 0.2, max: 1.5, step: 0.05 },
     rockNoiseAmp: { min: 0, max: 0.8, step: 0.05 },

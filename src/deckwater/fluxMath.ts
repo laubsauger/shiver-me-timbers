@@ -25,6 +25,15 @@ export interface OutflowParams {
   fluxRate: number;
   /** head units added per unit tilt gradient component */
   tiltBiasStrength: number;
+  /**
+   * Hydraulic head presented by everything that is not deck — off the grid,
+   * and (on the GPU) every drain cell. MUST sit below the lowest point of the
+   * deck: the ship's field measures heights relative to the deck plane and
+   * the waterway gutter is NEGATIVE, so a drain left at datum would stand
+   * higher than the gutter and the water would pool in it forever instead of
+   * running out through the freeing ports. Defaults to EDGE_DRAIN_HEAD.
+   */
+  drainHead?: number;
 }
 
 export interface ResolveParams {
@@ -58,7 +67,7 @@ export function computeOutflow(
   let total = 0;
   for (let i = 0; i < 4; i++) {
     const [dx, dy] = DIRECTIONS[i];
-    const nHead = neighborHeads[i] ?? EDGE_DRAIN_HEAD;
+    const nHead = neighborHeads[i] ?? p.drainHead ?? EDGE_DRAIN_HEAD;
     const bias = p.tiltBiasStrength * (tiltGradient[0] * dx + tiltGradient[1] * dy);
     const f = Math.max(0, (head - nHead + bias) * p.fluxRate);
     flux[i] = f;
@@ -87,7 +96,15 @@ export function applyInflow(
   outflow: Readonly<Flux4>,
   inflowSum: number,
   p: ResolveParams,
+  /**
+   * DeckField.drain: this cell is off the deck outline, a scupper cut or an
+   * open hatchway. Water that reaches it has left the ship, so it holds none
+   * — which makes it a permanent low-head sink its neighbours pour into,
+   * without the outflow pass needing to know anything about masks.
+   */
+  drain = false,
 ): CellResolve {
+  if (drain) return { volume: 0, wetness: 0 };
   const outSum = outflow[0] + outflow[1] + outflow[2] + outflow[3];
   const settled = Math.max(0, volume - outSum + inflowSum);
   let wet = Math.max(wetness, Math.min(1, settled * p.wetnessGain));

@@ -17,6 +17,7 @@ import {
   airToWaterEta,
   bounceWeight,
   causticGain,
+  clampDrift,
   causticResponse,
   depthAttenuation,
   foldSoftness,
@@ -25,6 +26,7 @@ import {
   rayJacobian,
   reflect,
   reflectedDrift,
+  smoothstep,
   refract,
   refractedDrift,
   surfaceStretch,
@@ -288,31 +290,172 @@ describe('fold clamp (§V.28 — 1/det is +∞ exactly where we want it)', () =>
 });
 
 describe('caustic response curve', () => {
-  it('adds NOTHING on flat water — gain 1 must map to 0', () => {
+  it('changes NOTHING on flat water — gain 1 is the identity', () => {
     // the invariant that stops caustics being a uniform wash on every receiver
-    expect(causticResponse(1, 3, 0.5)).toBe(0);
+    const r = causticResponse(1, 3, 0.5);
+    expect(r.bright).toBe(0);
+    expect(r.darken).toBe(1);
   });
 
   it('caps the bright lobe below maxGain however hard it focuses', () => {
     for (const g of [2, 5, 50, 1e6]) {
-      expect(causticResponse(g, 3.2, 0.5)).toBeLessThan(3.2);
+      expect(causticResponse(g, 3.2, 0.5).bright).toBeLessThan(3.2);
     }
-    expect(causticResponse(1e6, 3.2, 0.5)).toBeGreaterThan(3.0);
+    expect(causticResponse(1e6, 3.2, 0.5).bright).toBeGreaterThan(3.0);
   });
 
-  it('keeps a scaled dark lobe where rays diverge', () => {
-    expect(causticResponse(0.5, 3, 1)).toBeCloseTo(-0.5, 12);
-    expect(causticResponse(0.5, 3, 0)).toBeCloseTo(0, 12);
-    expect(causticResponse(0.5, 3, 0.4)).toBeCloseTo(-0.2, 12);
+  it('withholds light where rays diverge — MULTIPLICATIVE, never negative', () => {
+    // §B.11: divergence means less light ARRIVES. Returning it as a negative
+    // addend put negative light on emissiveNode and crushed the hull to black.
+    expect(causticResponse(0.5, 3, 1).darken).toBeCloseTo(0.5, 12);
+    expect(causticResponse(0.5, 3, 0).darken).toBeCloseTo(1, 12);
+    expect(causticResponse(0.5, 3, 0.4).darken).toBeCloseTo(0.8, 12);
+    // the dark lobe contributes nothing additive, at any gain
+    for (let g = 0; g <= 3; g += 0.01) {
+      expect(causticResponse(g, 3.2, 1).bright).toBeGreaterThanOrEqual(0);
+    }
   });
 
-  it('is monotone in gain', () => {
-    let prev = -Infinity;
+  it('bounds darken to [1−darkStrength, 1] for every reachable gain', () => {
+    for (const dark of [0, 0.3, 0.45, 1]) {
+      for (let g = 0; g <= 50; g += 0.05) {
+        const d = causticResponse(g, 3.2, dark).darken;
+        expect(d).toBeGreaterThanOrEqual(1 - dark - 1e-12);
+        expect(d).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('is monotone in gain on both lobes', () => {
+    let prevBright = -Infinity;
+    let prevDarken = -Infinity;
     for (let g = 0; g < 8; g += 0.05) {
-      const v = causticResponse(g, 3.2, 0.45);
-      expect(v).toBeGreaterThan(prev);
-      prev = v;
+      const r = causticResponse(g, 3.2, 0.45);
+      expect(r.bright).toBeGreaterThanOrEqual(prevBright);
+      expect(r.darken).toBeGreaterThanOrEqual(prevDarken);
+      prevBright = r.bright;
+      prevDarken = r.darken;
     }
+  });
+});
+
+/**
+ * §B.11 regression. The hull shipped covered in red/black speckle because
+ * the response could reach ±large per pixel and landed on emissiveNode.
+ * These sweep the pathological inputs directly.
+ */
+describe('§B.11 — output is finite and bounded across a fold', () => {
+  const MAXG = 1.6;
+  const DARK = 0.45;
+
+  it('never yields NaN, Inf, negative light, or an out-of-range tint', () => {
+    // det M swept straight through zero — the fold — at many softnesses,
+    // with detA spanning the degenerate and the exaggerated.
+    // Violations are accumulated and asserted once: 72k assertion calls cost
+    // 19 s and this costs milliseconds for identical coverage.
+    const bad: string[] = [];
+    let minBright = Infinity;
+    let maxBright = -Infinity;
+    let minDarken = Infinity;
+    let maxDarken = -Infinity;
+    let samples = 0;
+    for (const detA of [0, 1e-6, 0.25, 1, 4, 25]) {
+      for (const sigma of [1e-4, 0.05, 0.16, 1]) {
+        for (let detM = -3; detM <= 3; detM += 0.002) {
+          const gain = causticGain(detA, detM, sigma);
+          const r = causticResponse(gain, MAXG, DARK);
+          samples++;
+          if (
+            !Number.isFinite(gain) || !Number.isFinite(r.bright) ||
+            !Number.isFinite(r.darken) || r.bright < 0 || r.bright >= MAXG ||
+            r.darken < 1 - DARK - 1e-12 || r.darken > 1
+          ) {
+            if (bad.length < 5) {
+              bad.push(`detA=${detA} σ=${sigma} detM=${detM.toFixed(3)} → ${JSON.stringify(r)}`);
+            }
+          }
+          minBright = Math.min(minBright, r.bright);
+          maxBright = Math.max(maxBright, r.bright);
+          minDarken = Math.min(minDarken, r.darken);
+          maxDarken = Math.max(maxDarken, r.darken);
+        }
+      }
+    }
+    expect(bad).toEqual([]);
+    expect(samples).toBeGreaterThan(70000);
+    // and the sweep must actually EXERCISE both lobes, or it proves nothing
+    expect(minBright).toBe(0);
+    expect(maxBright).toBeGreaterThan(1);
+    expect(minDarken).toBeCloseTo(1 - DARK, 6);
+    expect(maxDarken).toBe(1);
+  });
+
+  it('survives non-finite gain rather than propagating it', () => {
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      const r = causticResponse(bad, MAXG, DARK);
+      expect(Number.isFinite(r.bright)).toBe(true);
+      expect(Number.isFinite(r.darken)).toBe(true);
+      expect(r.bright).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('clamps ray drift, so the finite difference behind det M stays bounded', () => {
+    // the actual §B.11 root cause: a near-horizontal REFLECTED ray divided by
+    // a floored vertical pinned drift at ray/MIN_VERTICAL = 20, and its
+    // finite difference reached |∂w| ≈ 50 — enough to flip det M's sign
+    // between neighbouring pixels.
+    expect(clampDrift([100, 0], 2.5)).toEqual([2.5, 0]);
+    expect(clampDrift([0, -80], 2.5)).toEqual([0, -2.5]);
+    expect(clampDrift([0.3, 0.4], 2.5)).toEqual([0.3, 0.4]); // under the cap
+    const d = clampDrift([30, 40], 2.5);
+    expect(Math.hypot(...d)).toBeCloseTo(2.5, 12);
+    expect(d[0] / d[1]).toBeCloseTo(30 / 40, 12); // direction preserved
+    expect(clampDrift([0, 0], 2.5)).toEqual([0, 0]);
+  });
+
+  it('bounds drift over a full sweep of sun angles and wave slopes', () => {
+    const bad: string[] = [];
+    let peak = 0;
+    for (let elev = 2; elev <= 88; elev += 2) {
+      const e = (elev * Math.PI) / 180;
+      const sun: Vec3 = [Math.cos(e), Math.sin(e), 0];
+      for (let gx = -6; gx <= 6; gx += 0.25) {
+        for (const gz of [-3, 0, 3]) {
+          for (const d of [
+            refractedDrift(sun, gx, gz, ETA),
+            reflectedDrift(sun, gx, gz),
+          ]) {
+            const len = Math.hypot(...d.drift);
+            peak = Math.max(peak, len);
+            if (!Number.isFinite(len) || len > 2.5 + 1e-9 || d.vertical < MIN_VERTICAL) {
+              if (bad.length < 5) bad.push(`elev=${elev} g=(${gx},${gz}) |w|=${len}`);
+            }
+          }
+        }
+      }
+    }
+    expect(bad).toEqual([]);
+    // the cap must actually BIND somewhere, or this sweep is vacuous — it is
+    // the unclamped version of exactly these inputs that shipped the speckle
+    expect(peak).toBeCloseTo(2.5, 6);
+  });
+
+  it('gates reflected rays that do not travel upward', () => {
+    // a wave face can throw the sun horizontally or back down into the sea;
+    // such a ray cannot light a hull side above the water
+    let gated = 0;
+    let total = 0;
+    const e = (12 * Math.PI) / 180;
+    const sun: Vec3 = [Math.cos(e), Math.sin(e), 0];
+    for (let gx = -4; gx <= 4; gx += 0.05) {
+      const r = reflectedDrift(sun, gx, 0);
+      total++;
+      if (r.valid === 0) gated++;
+      // whenever it IS valid the ray must genuinely be going up
+      if (r.valid === 1) expect(r.vertical).toBeGreaterThan(MIN_VERTICAL);
+    }
+    expect(gated).toBeGreaterThan(0);
+    expect(gated).toBeLessThan(total); // but not everything
   });
 });
 
@@ -470,6 +613,120 @@ describe('hull wetline drying memory ("where the water LAPPED")', () => {
     }
     // at the trough the band sits most of a wave height above the water
     expect(maxLag).toBeGreaterThan(amp);
+  });
+});
+
+/**
+ * §B.12 regression: the shadowed topsides rendered as a flat slab of sea
+ * colour. These pin the two ways dry timber several metres in the air can be
+ * wrongly treated as underwater.
+ */
+describe('§B.12 — dry topsides must stay dry', () => {
+  const p = causticsParams;
+  const density: Vec3 = [
+    p.submergedAbsorptionR,
+    p.submergedAbsorptionG,
+    p.submergedAbsorptionB,
+  ];
+
+  it('applies ZERO absorption above the waterline, at any height', () => {
+    // absorption is gated on max(depth, 0); a negative depth must not tint
+    for (const above of [0.01, 0.5, 3, 12, 40]) {
+      expect(absorptionTint(-above, density, p.submergedPathScale)).toEqual([1, 1, 1]);
+    }
+  });
+
+  it('reads bone dry, not waterline-wet, from a freshly built wetline', () => {
+    // a zero-initialised texture would mean "the sea reached ship-local y=0",
+    // which is plausible enough to hide a wiring failure. The seed must be
+    // unambiguous instead.
+    const w = new HullWetline({ bowZ: 15, sternZ: -15, stations: 8 });
+    const data = w.texture.image.data as Float32Array;
+    expect(data.every((v) => Number.isFinite(v))).toBe(true);
+    for (let i = 0; i < w.stations * 2; i++) expect(data[i * 4]).toBeLessThan(-100);
+    expect(w.texture.version).toBeGreaterThan(0); // published before frame 1
+  });
+
+  it('keeps the sea-physics sign convention: +depth = submerged', () => {
+    // stations sit on the design waterline (ship-local y = 0), so a station
+    // immersed by `d` means the sea reached ship-local +d. A flip here would
+    // mark the dry topsides as the wettest part of the hull.
+    const w = new HullWetline({ bowZ: 10, sternZ: -10, stations: 4 });
+    const stations = [
+      { x: -1, z: -10 }, { x: 1, z: -10 },
+      { x: -1, z: 10 }, { x: 1, z: 10 },
+    ];
+    // bow clear of the water by 0.8 m, stern buried by 1.5 m
+    w.updateFromHullContact(1 / 60, stations, [1.5, 1.5, -0.8, -0.8]);
+    expect(w.wetHeight[0]).toBeCloseTo(1.5, 4); // stern-most, submerged
+    expect(w.wetHeight[w.stations - 1]).toBeCloseTo(-0.8, 4); // bow, dry
+    expect(w.wetHeight[0]).toBeGreaterThan(w.wetHeight[w.stations - 1]);
+  });
+
+  it('leaves a point 3 m up a dry hull fully un-wet', () => {
+    const w = new HullWetline({ bowZ: 10, sternZ: -10, stations: 4 });
+    const stations = [{ x: -1, z: -10 }, { x: -1, z: 10 }];
+    w.updateFromHullContact(1 / 60, stations, [0.4, 0.4]);
+    // shader does wetTop − shipLocalPos.y + rise, then the wet band
+    const wetDepth = w.wetHeight[0] - 3.0 + p.wetRise;
+    expect(wetness(wetDepth, p.wetBandAbove, p.wetBandBelow)).toBe(0);
+  });
+});
+
+/**
+ * §B.17 regression: `mode: 'below'` hard-coded the submersion mask to 1, so
+ * an island — ONE material spanning seabed to hilltop — had its entire dry
+ * landmass lit with underwater caustics. These pin the gate semantics that
+ * made it possible; only a GPU frame can prove the node itself.
+ */
+describe('§B.17 — dry ground must not be treated as submerged', () => {
+  const p = causticsParams;
+
+  it('the submersion mask really is 0 above the waterline', () => {
+    const submerged = (d: number) => smoothstep(-p.waterlineBlend, p.waterlineBlend, d);
+    expect(submerged(-0.5)).toBe(0);
+    expect(submerged(-5)).toBe(0);
+    expect(submerged(-35)).toBe(0); // a hilltop
+    expect(submerged(0)).toBeCloseTo(0.5, 6);
+    expect(submerged(1)).toBe(1);
+  });
+
+  it('the maxDepth ramp CANNOT serve as the above-water gate', () => {
+    // this is the trap: it is a DECREASING ramp that culls water too deep to
+    // matter, so it returns 1 for every negative depth. Reading it as "the
+    // depth budget" and assuming it also excluded dry land is what let the
+    // bug through, so its true shape is pinned here.
+    const budget = (d: number) => smoothstep(p.maxDepth, p.maxDepth * 0.7, d);
+    expect(budget(-35)).toBe(1);
+    expect(budget(-1)).toBe(1);
+    expect(budget(0)).toBe(1);
+    expect(budget(p.maxDepth + 1)).toBe(0);
+  });
+
+  it('minEffectiveDepth clamps dry ground UP, so span alone never gates it', () => {
+    // dry land has negative depth but a positive span — the span cannot be
+    // used to detect "above water", which is why the mask is load-bearing
+    for (const dry of [-0.5, -8, -35]) {
+      expect(Math.max(dry, p.minEffectiveDepth)).toBe(p.minEffectiveDepth);
+    }
+  });
+
+  it('keeps the finite-difference stencil tied to the span in use', () => {
+    // above water the light travels aboveSpan, not belowSpan; deriving eps
+    // from belowSpan alone pinned every dry fragment to the narrowest legal
+    // stencil, the worst-conditioned point in the model
+    const stencil = (depth: number) => {
+      const below = Math.max(depth, p.minEffectiveDepth);
+      const above = Math.max(-depth, 0);
+      return Math.max(
+        p.curvatureEpsilon + p.curvatureEpsilonPerMeter * Math.max(below, above),
+        0.05,
+      );
+    };
+    // a point 10 m up must get a WIDER stencil than one just under the surface
+    expect(stencil(-10)).toBeGreaterThan(stencil(0.1));
+    // and never finer than one texel of the finest cascade
+    for (let d = -40; d <= 40; d += 0.5) expect(stencil(d)).toBeGreaterThanOrEqual(0.044);
   });
 });
 

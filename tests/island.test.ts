@@ -24,11 +24,11 @@ import {
   gradientAt,
 } from '../src/island/heightmap';
 import { generateRockPlacements } from '../src/island/rocks';
-import { islandPalmPlacement, palmLodCount } from '../src/island/palms';
+import { islandPalmPlacement, palmLodCount, palmGroveAngles } from '../src/island/palms';
 import { generateIslandSites } from '../src/island/archipelago';
 import { sampleSeabedHeight } from '../src/island/seabed';
 import { buildIslandGeometry, selectTerrainLod } from '../src/island/islandMesh';
-import { islandPalmCount } from '../src/island/island';
+import { islandPalmCount, islandPeakHeights } from '../src/island/island';
 import { generatePlacements } from '../src/vegetation/scatter';
 import { islandParams } from '../src/params/island';
 import { getParamsEntry } from '../src/params/registry';
@@ -369,5 +369,146 @@ describe('LOD selection (§V17 — scenery has to be cheap)', () => {
     expect(islandPalmCount(islandParams.radius)).toBe(islandParams.palmCount);
     expect(islandPalmCount(islandParams.radius * 2)).toBe(islandParams.palmCount * 2);
     expect(islandPalmCount(0)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §V43 — Sea of Thieves parity. These are QUALITY contracts, and they are here
+// because the failures they guard were all invisible to the old tests: the
+// islands generated fine, passed every structural check, and looked silly.
+// Each number below was measured against docs/final-full-result*.png and
+// docs/ship-full-view.png before it was chosen.
+// ---------------------------------------------------------------------------
+
+describe('§V43 silhouette: island shape must not flatten as it grows', () => {
+  const sites = generateIslandSites(WORLD_SEED);
+  const built = sites.map((s) => {
+    const hm = generateIslandHeightmap(s.seed, {
+      ...islandParams,
+      radius: s.radius,
+      ...islandPeakHeights(s.radius),
+    });
+    let peak = -Infinity;
+    for (const h of hm.data) if (h > peak) peak = h;
+    return { radius: s.radius, peak, ratio: peak / s.radius, hm };
+  });
+
+  it('peak height scales with footprint — bigger islands are not flatter', () => {
+    // THE BUG: peakHeight was a fixed 26 m while the scatter varied radius
+    // 110-260 m, so peak/radius ran 0.198 at the smallest island down to
+    // 0.149 at the largest. Growth made them MORE pancake-like and all five
+    // landed in one narrow band of identical gentle dome.
+    const ratios = built.map((b) => b.ratio);
+    const spread = Math.max(...ratios) - Math.min(...ratios);
+    expect(spread).toBeLessThan(0.08); // shape is now size-independent
+    // and the correlation is positive: a wider island is also a taller one
+    const sorted = [...built].sort((a, b) => a.radius - b.radius);
+    expect(sorted[sorted.length - 1].peak).toBeGreaterThan(sorted[0].peak);
+  });
+
+  it('islands read as landmasses, not sandbars', () => {
+    // the references are recognisable silhouettes from kilometres away; a
+    // 0.15 ratio dome is a smudge on the horizon at 2 km
+    for (const b of built) expect(b.ratio).toBeGreaterThan(0.3);
+  });
+
+  it('still leaves ground shallow enough to plant a grove on', () => {
+    // steepening trades away plantable area — if this ever drops too far,
+    // islandPalmPlacement starts throwing rather than degrading (§Rule 8)
+    for (const b of built) {
+      let plantable = 0;
+      let land = 0;
+      const R = b.hm.worldRadius;
+      for (let k = 0; k < 2000; k++) {
+        const a = (k * 2.399963) % (Math.PI * 2);
+        const r = Math.sqrt((k % 101) / 101) * R * 0.95;
+        const x = Math.cos(a) * r;
+        const z = Math.sin(a) * r;
+        if (b.hm.heightAt(x, z) <= 0) continue;
+        land++;
+        if (gradientAt(b.hm, x, z) <= islandParams.palmSlopeLimit) plantable++;
+      }
+      expect(plantable / land).toBeGreaterThan(0.25);
+    }
+  });
+});
+
+describe('§V43 rocks: outcrops at reference scale, not pebbles', () => {
+  const hmBig = generateIslandHeightmap(WORLD_SEED, {
+    ...islandParams,
+    radius: 200,
+    ...islandPeakHeights(200),
+  });
+  const rocks = generateRockPlacements(WORLD_SEED + 1013, hmBig);
+
+  it('reads at the scale of the reference cove, not as gravel', () => {
+    // docs/ship-full-view.png: the shore rocks are comparable to the ship's
+    // bow — 8-15 m. Ours measured 1.6-5.8 m, which is why they disappeared
+    // against the beach instead of framing it.
+    const diameters = rocks.map((r) => r.scale * 2);
+    expect(Math.max(...diameters)).toBeGreaterThan(8);
+    expect(Math.min(...diameters)).toBeGreaterThan(4);
+    // …but not so large they become the island
+    expect(Math.max(...diameters)).toBeLessThan(hmBig.worldRadius * 0.2);
+  });
+
+  it('enough of them straddle the waterline to give §V10 something to break on', () => {
+    // rocks in the surf are half the reason a shore reads as a shore
+    expect(rocks.filter((r) => r.foamTarget).length).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe('§V43 vegetation: palms grow in groves, not scattered', () => {
+  const sites = generateIslandSites(WORLD_SEED);
+
+  /** coefficient of variation of angular gaps: 0 = even ring, 1 = Poisson */
+  const clusterCV = (positions: [number, number, number][]): number => {
+    const ang = positions.map((p) => Math.atan2(p[2], p[0])).sort((a, b) => a - b);
+    const gaps: number[] = [];
+    for (let i = 1; i < ang.length; i++) gaps.push(ang[i] - ang[i - 1]);
+    gaps.push(ang[0] + Math.PI * 2 - ang[ang.length - 1]);
+    const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+    const varr = gaps.reduce((a, b) => a + (b - mean) ** 2, 0) / gaps.length;
+    return Math.sqrt(varr) / mean;
+  };
+
+  it('clusters into stands with genuinely empty beach between them', () => {
+    // measured CV was 0.84 — statistically indistinguishable from random,
+    // which is exactly what "evenly scattered palms" looks like and the most
+    // obvious generated tell on an island (§V43). Poisson is CV = 1.
+    for (const s of sites) {
+      const hm = generateIslandHeightmap(s.seed, {
+        ...islandParams,
+        radius: s.radius,
+        ...islandPeakHeights(s.radius),
+      });
+      const palms = generatePlacements(
+        islandPalmCount(s.radius),
+        s.seed + 2027,
+        islandPalmPlacement(hm, islandParams, s.seed + 2027),
+      );
+      expect(clusterCV(palms.map((p) => p.position))).toBeGreaterThan(1.5);
+    }
+  });
+
+  it('grove positions are deterministic and differ between islands (§V2)', () => {
+    expect(palmGroveAngles(11)).toEqual(palmGroveAngles(11));
+    expect(palmGroveAngles(11)).not.toEqual(palmGroveAngles(12));
+    expect(palmGroveAngles(11)).toHaveLength(islandParams.palmGroveCount);
+  });
+
+  it('every palm still obeys the terrain rules it did before', () => {
+    // clustering must not smuggle palms into the sea or onto a cliff
+    const hm = generateIslandHeightmap(sites[0].seed, {
+      ...islandParams,
+      radius: sites[0].radius,
+      ...islandPeakHeights(sites[0].radius),
+    });
+    for (const pl of generatePlacements(40, 5, islandPalmPlacement(hm, islandParams, 5))) {
+      const [x, y, z] = pl.position;
+      expect(y).toBeGreaterThanOrEqual(islandParams.palmMinHeight);
+      expect(y).toBe(hm.heightAt(x, z));
+      expect(gradientAt(hm, x, z)).toBeLessThanOrEqual(islandParams.palmSlopeLimit);
+    }
   });
 });

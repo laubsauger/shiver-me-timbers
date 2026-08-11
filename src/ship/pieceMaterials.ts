@@ -14,13 +14,28 @@ import {
   type WoodTones,
 } from './woodMaterial';
 import { createSailClothMaterial } from './sailMaterial';
+import { createFlagClothMaterial } from './flagMaterial';
+import { createGlassMaterial, createIronMaterial } from './fittingMaterials';
+import type { DeckFieldSampler } from './deckFieldTexture';
 
 export { uShipSunDirection } from './sailMaterial';
 export { setShipWorldMatrix } from './woodMaterial';
 
-type Family = 'hull' | 'deck' | 'spar' | 'trim' | 'sail';
+type Family = 'hull' | 'deck' | 'spar' | 'trim' | 'sail' | 'flag' | 'iron' | 'glass';
 
 const FAMILY_OF: Record<PieceKind, Family> = {
+  pennant: 'flag',
+  figurehead: 'trim',
+  ratlines: 'trim', // tarred hemp — the darkest cordage aboard
+  gunport: 'hull',
+  channel: 'iron',
+  headrail: 'trim',
+  cathead: 'trim',
+  anchor: 'iron',
+  'pin-rail': 'trim',
+  binnacle: 'trim',
+  window: 'glass',
+  moulding: 'trim',
   cannon: 'trim',
   wheel: 'trim',
   capstan: 'trim',
@@ -53,17 +68,45 @@ const FAMILY_OF: Record<PieceKind, Family> = {
  */
 const WATERLINE_KINDS = new Set<PieceKind>(['hull-section', 'bow', 'transom']);
 
-function woodTones(family: Exclude<Family, 'sail'>, waterline: boolean): WoodTones {
+/**
+ * Which piece-local axis a spar runs along. Spars are built of staves LENGTHWISE
+ * — without this the seam function stacks its courses up the local y of a
+ * cylinder and wraps them into barrel hoops (see WoodTones.sparAxis).
+ */
+export const SPAR_AXIS: Partial<Record<PieceKind, 'x' | 'y'>> = {
+  mast: 'y',
+  bowsprit: 'y',
+  'crow-nest': 'y',
+  yard: 'x',
+};
+
+type WoodFamily = Exclude<Family, 'sail' | 'flag' | 'iron' | 'glass'>;
+
+function woodTones(
+  family: WoodFamily,
+  kind: PieceKind,
+  waterline: boolean,
+  deckField?: DeckFieldSampler,
+): WoodTones {
   const p = shipMaterialParams;
+  const sparAxis = SPAR_AXIS[kind];
+  const base = sparAxis === undefined ? {} : { sparAxis };
   switch (family) {
     case 'hull':
-      return { light: p.hullLight, dark: p.hullDark, wale: true, waterline };
+      return { ...base, light: p.hullLight, dark: p.hullDark, wale: true, waterline };
     case 'deck':
-      return { light: p.deckLight, dark: p.deckDark, wale: false, waterline: false };
+      return {
+        ...base,
+        light: p.deckLight,
+        dark: p.deckDark,
+        wale: false,
+        waterline: false,
+        ...(deckField === undefined ? {} : { deckField }),
+      };
     case 'spar':
-      return { light: p.sparLight, dark: p.sparDark, wale: false, waterline: false };
+      return { ...base, light: p.sparLight, dark: p.sparDark, wale: false, waterline: false };
     case 'trim':
-      return { light: p.trimLight, dark: p.trimDark, wale: false, waterline: false };
+      return { ...base, light: p.trimLight, dark: p.trimDark, wale: false, waterline: false };
   }
 }
 
@@ -95,12 +138,30 @@ const OPEN_SHELL_KINDS = new Set<PieceKind>([
   'crow-nest',
 ]);
 
-export function createPieceMaterial(kind: PieceKind): THREE.MeshStandardNodeMaterial {
+export function createPieceMaterial(
+  kind: PieceKind,
+  deckField?: DeckFieldSampler,
+): THREE.MeshStandardNodeMaterial {
   const family = FAMILY_OF[kind];
-  const handle =
-    family === 'sail'
-      ? createSailClothMaterial()
-      : createWoodMaterial(woodTones(family, WATERLINE_KINDS.has(kind)));
+  let handle: ShipMaterialHandle;
+  switch (family) {
+    case 'sail':
+      handle = createSailClothMaterial();
+      break;
+    case 'flag':
+      handle = createFlagClothMaterial();
+      break;
+    case 'iron':
+      handle = createIronMaterial();
+      break;
+    case 'glass':
+      handle = createGlassMaterial();
+      break;
+    default:
+      handle = createWoodMaterial(
+        woodTones(family, kind, WATERLINE_KINDS.has(kind), deckField),
+      );
+  }
   if (OPEN_SHELL_KINDS.has(kind)) handle.material.side = THREE.DoubleSide;
   // double-sided hull shells: cast from front faces only, otherwise coplanar
   // back faces self-shadow (acne) under the sun map
@@ -108,7 +169,10 @@ export function createPieceMaterial(kind: PieceKind): THREE.MeshStandardNodeMate
   // sails must cast from BOTH faces: front-face-only culled the whole sail
   // out of the shadow map whenever the sun was behind it, so sails never
   // shadowed the deck or each other (§V22 self-shadow critique)
-  if (family === 'sail') handle.material.shadowSide = THREE.DoubleSide;
+  if (family === 'sail' || family === 'flag') handle.material.shadowSide = THREE.DoubleSide;
+  // ratlines and flags are thin: shrinking them out of the shadow map is
+  // cheaper than the acne they produce, and a flag's shadow is a wash anyway
+  if (family === 'flag') handle.material.side = THREE.DoubleSide;
   return tracked(handle, `piece-${kind}`);
 }
 

@@ -93,10 +93,17 @@ export function buildCurvedRail(
   s: HullShape,
   aabb: AABB,
   railInset: number,
+  shape?: Record<string, number>,
 ): THREE.BufferGeometry {
   const stations = 13;
+  // POST HEIGHT ABOVE THE DECK, not the piece's total extent. The aabb top is
+  // railHeight + the sheer at the ENDS OF THE HULL, but each post already
+  // starts at its own station's sheer — so subtracting only the sheer over the
+  // rail RUN (which is 80% of the hull, well short of stem and transom) left
+  // every post 0.6 m too tall. That is the "midship rail is visibly too tall"
+  // report: a bug in what the number meant, not a tuning miss.
   const sheerEnd = Math.max(hullSheer(s.z0, s), hullSheer(s.z1, s));
-  const height = Math.max(0.5, aabb.max[1] - sheerEnd);
+  const height = Math.max(0.5, shape?.railHeight ?? aabb.max[1] - sheerEnd);
   const capH = Math.min(0.12, height * 0.2);
   const t = 0.09;
   const pts: Array<[number, number, number]> = [];

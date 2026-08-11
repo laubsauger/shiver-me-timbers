@@ -58,6 +58,7 @@ export interface CausticsUniforms {
   choppiness: TslNode;
   waterlineBlend: TslNode;
   faceGate: TslNode;
+  maxDrift: TslNode;
 }
 
 export function createCausticsUniforms(): CausticsUniforms {
@@ -88,6 +89,7 @@ export function createCausticsUniforms(): CausticsUniforms {
     choppiness: uniform(oceanParams.choppiness),
     waterlineBlend: uniform(cp.waterlineBlend),
     faceGate: uniform(cp.faceGateSoftness),
+    maxDrift: uniform(cp.maxDrift),
   };
 }
 
@@ -112,6 +114,7 @@ export function refreshCausticsUniforms(u: CausticsUniforms): void {
   u.choppiness.value = oceanParams.choppiness;
   u.waterlineBlend.value = cp.waterlineBlend;
   u.faceGate.value = cp.faceGateSoftness;
+  u.maxDrift.value = cp.maxDrift;
 }
 
 /** cascade uv for a world XZ — matches ocean/surfaceMaterial's convention */
@@ -163,15 +166,37 @@ export function driftNode(u: CausticsUniforms, g: TslNode, below: boolean) {
   const incident = u.sunDirection.negate();
   // anti-aliased form of causticsMath's hard `cosI > 0` predicate: a step()
   // here stair-steps along every wave face turning away from the sun
-  const valid = smoothstep(float(0), u.faceGate, n.dot(u.sunDirection));
+  const faceLit = smoothstep(float(0), u.faceGate, n.dot(u.sunDirection));
+
+  /**
+   * §B.11: flooring the divisor keeps the DIVISION finite but lets the
+   * QUOTIENT reach ray/MIN_VERTICAL. Clamping the magnitude is what actually
+   * bounds the finite difference that builds det M.
+   */
+  const limit = (v: TslNode) => {
+    const cap = u.maxDrift.max(1e-3);
+    // floored divisor, and length ≥ 0 so the ratio never goes negative
+    return v.mul(cap.div(v.length().max(cap)));
+  };
+
   if (below) {
     const t = refract(incident, n, u.eta);
     const down = t.y.negate().max(MIN_VERTICAL); // §V28 floored divisor
-    return { drift: vec2(t.x.div(down), t.z.div(down)).mul(valid), vertical: down, valid };
+    const drift = limit(vec2(t.x.div(down), t.z.div(down)));
+    return { drift: drift.mul(faceLit), vertical: down, valid: faceLit };
   }
+
   const r = reflect(incident, n);
+  // §B.11: reflection has no Snell bound. A wave face can throw the sun
+  // horizontally or back down into the sea, and such a ray cannot light
+  // anything above the water — gate it out instead of dividing by a floored
+  // near-zero, which pinned drift at 20 over 28% of the surface at a low sun
+  // and made det M flip sign between neighbouring pixels.
+  const goesUp = smoothstep(float(MIN_VERTICAL), u.faceGate.add(MIN_VERTICAL), r.y);
+  const valid = faceLit.mul(goesUp);
   const up = r.y.max(MIN_VERTICAL);
-  return { drift: vec2(r.x.div(up), r.z.div(up)).mul(valid), vertical: up, valid };
+  const drift = limit(vec2(r.x.div(up), r.z.div(up)));
+  return { drift: drift.mul(valid), vertical: up, valid };
 }
 
 /** coefficients of det M(span) = detC + span·mixed + span²·detB */
@@ -210,19 +235,35 @@ function causticGainNode(j: TslNode, span: TslNode, u: CausticsUniforms): TslNod
   return j.detA.abs().div(det.mul(det).add(sigma.mul(sigma)).sqrt());
 }
 
-/** bright lobe with a Reinhard ceiling + a scaled dark lobe; 0 on flat water */
-function causticResponseNode(gain: TslNode, u: CausticsUniforms): TslNode {
+/**
+ * Bright lobe (ADDITIVE, Reinhard-capped) and dark lobe (MULTIPLICATIVE).
+ *
+ * §B.11: the dark lobe used to be a negative number folded into the same
+ * additive result, which reached `emissiveNode` as negative light. Ray
+ * divergence means less light ARRIVES — a multiplication — so it now leaves
+ * as a factor in [1 − darkStrength, 1] and negative light is impossible by
+ * construction. Flat water → { bright: 0, darken: 1 }.
+ */
+function causticResponseNode(gain: TslNode, u: CausticsUniforms) {
   const raw = gain.sub(1);
   const lit = raw.max(0);
-  const bright = lit.div(float(1).add(lit.div(u.maxGain.max(1e-3))));
-  return bright.add(raw.min(0).mul(u.darkStrength));
+  // gain ≥ 0 by construction, so raw ≥ −1 and the shortfall is already 0..1
+  const shortfall = raw.min(0).negate().clamp(0, 1);
+  return {
+    bright: lit.div(float(1).add(lit.div(u.maxGain.max(1e-3)))),
+    darken: float(1).sub(shortfall.mul(u.darkStrength.clamp(0, 1))),
+  };
 }
 
 /**
  * Full caustic evaluation for one receiver.
  * `depth` is metres below the sea surface (positive submerged, negative
- * above). Returns a vec3: one greyscale caustic carrying its own per-channel
- * Jerlov extinction, which is what shifts it blue-green with depth.
+ * above). Returns TWO terms, and they are not interchangeable (§B.11):
+ *   bright — vec3 ≥ 0, ADDITIVE, carrying its own per-channel Jerlov
+ *            extinction, which is what shifts it blue-green with depth.
+ *   darken — float in [0,1], MULTIPLICATIVE on albedo, the divergent gaps
+ *            between filaments. Never additive, so it cannot make light
+ *            negative however badly the Jacobian behaves.
  *
  * Note the depth response is TWO-SIDED and emergent, not an authored curve.
  * det M(span) starts at det C ≈ 1 (no contrast at the surface), sharpens as
@@ -242,12 +283,18 @@ export function causticsNode(
   worldPos: TslNode,
   depth: TslNode,
   /**
-   * 'below' compiles the reflected branch away entirely — use it for seabed
-   * and beach receivers that are never above the waterline. Roughly halves
-   * the ALU (not the taps, which are shared).
+   * 'below' compiles the ABOVE-WATER (reflected) branch away — an ALU
+   * saving for receivers that never want sun bouncing off the waves onto
+   * them, i.e. seabed, beach and shoreline.
+   *
+   * §B.17: it does NOT assert that the fragment is submerged. It used to,
+   * and that was a bug: a beach or an island is one material spanning
+   * seabed to hilltop, so hard-coding `submerged = 1` lit an entire
+   * landmass with underwater caustics. Both modes now gate on the real
+   * depth; `mode` only chooses which branches exist.
    */
   mode: 'both' | 'below' = 'both',
-): TslNode {
+): { bright: TslNode; darken: TslNode } {
   const worldXZ = vec2(worldPos.x, worldPos.z);
   // span travelled through/over water. Below the line the receiver borrows a
   // little virtual depth: real caustics have no focal length at depth 0, so a
@@ -257,9 +304,17 @@ export function causticsNode(
   // 1 below the waterline, 0 above — the two branches share every texture tap.
   // The band is wide enough to smear the step `minEffectiveDepth` puts at
   // depth 0, which would otherwise draw a crisp line along the hull.
-  const submerged = mode === 'below'
-    ? float(1)
-    : smoothstep(u.waterlineBlend.negate(), u.waterlineBlend, depth);
+  //
+  // §B.17: this is computed for BOTH modes. `mode: 'below'` used to replace
+  // it with a constant 1, which asserted "this fragment is underwater"
+  // rather than merely "this receiver wants no reflected branch". Nothing
+  // else in the chain could catch that: `belowSpan` clamps negative depths
+  // up to `minEffectiveDepth`, and the maxDepth ramp is DECREASING so it
+  // returns 1 for every negative depth. Dry land therefore passed every
+  // gate at full strength, out to `fadeEnd`.
+  const submerged = smoothstep(
+    u.waterlineBlend.negate(), u.waterlineBlend, depth,
+  );
 
   // ── back-projection: find the surface point that actually lights us ──
   let entry: TslNode = worldXZ;
@@ -272,7 +327,17 @@ export function causticsNode(
   }
 
   // ── one tap set at the entry point and two finite-difference neighbours ──
-  const eps = u.epsilon.add(u.epsilonPerMeter.mul(belowSpan)).max(0.01);
+  // §B.17: the stencil must track the span ACTUALLY in use. Deriving it from
+  // belowSpan alone meant every above-water fragment — which travels
+  // `aboveSpan`, not `belowSpan` — was evaluated at the narrowest legal
+  // stencil, because belowSpan had been clamped up to `minEffectiveDepth`.
+  // The two spans are mutually exclusive (one is always 0), so the max is
+  // simply "whichever applies".
+  const travel = belowSpan.max(aboveSpan);
+  // floored at one texel of the FINEST cascade (22.7 m / 512 ≈ 0.044 m):
+  // below that the difference only reads the bilinear interpolant and the
+  // caustic goes blocky, and |∂w| ≤ 2·maxDrift/eps stops being a bound
+  const eps = u.epsilon.add(u.epsilonPerMeter.mul(travel)).max(0.05);
   const s0 = surfaceSlopeNode(sim, u, entry);
   const sx = surfaceSlopeNode(sim, u, entry.add(vec2(eps, 0)));
   const sz = surfaceSlopeNode(sim, u, entry.add(vec2(0, eps)));
@@ -293,6 +358,7 @@ export function causticsNode(
     causticResponseNode(causticGainNode(j, span, u), u);
 
   const refr = build(true);
+  const refrResp = response(refr.j, belowSpan);
 
   // Beer–Lambert PER CHANNEL down the SLANTED path, not straight down. Red
   // dies ~19× faster than blue (Jerlov K_d), so a single greyscale caustic
@@ -307,24 +373,43 @@ export function causticsNode(
     // smoothstep(e0,e1,x) with e0 > e1: 1 while shallower than maxDepth
     .mul(smoothstep(u.maxDepth, u.maxDepth.mul(0.7), depth));
 
-  const underwater = attenuation.mul(response(refr.j, belowSpan)).mul(refr.valid);
+  const underwater = attenuation.mul(refrResp.bright).mul(refr.valid);
 
   // sun below the horizon → no caustics at all (matches the water's own gate)
   const sunUp = smoothstep(float(-0.02), float(0.06), u.sunDirection.y);
   // smoothstep(e0,e1,x) with e0 > e1: 1 inside fadeStart, 0 past fadeEnd
   const distFade = smoothstep(u.fade.y, u.fade.x, worldPos.sub(cameraPosition).length());
 
-  let combined: TslNode = underwater;
+  // every global gate must scale the DARKENING toward 1 as well, or a sunset
+  // or a distant hull would keep a shadow the sun is no longer casting
+  const gate = sunUp.mul(distFade);
+  // §B.17: the underwater lobes are gated on the REAL submersion mask in
+  // both modes. Without this a dry hilltop 150 m away is lit as seabed.
+  let bright: TslNode = underwater.mul(submerged);
+  let darken: TslNode = mix(
+    float(1), refrResp.darken, refr.valid.mul(gate).mul(submerged),
+  );
+
   if (mode === 'both') {
     // sun specularly reflected UP off the waves onto the hull side — this is
     // the "light dancing on the boat" half, and it reuses every tap above
     const refl = build(false);
-    const overwater = vec3(response(refl.j, aboveSpan))
-      .mul(aboveSpan.div(u.reflectedFalloff.max(0.01)).negate().exp())
+    const reflResp = response(refl.j, aboveSpan);
+    const heightFade = aboveSpan.div(u.reflectedFalloff.max(0.01)).negate().exp();
+    const overwater = vec3(reflResp.bright)
+      .mul(heightFade)
       .mul(u.reflectedStrength)
       .mul(refl.valid);
-    combined = mix(overwater, underwater, submerged);
+    bright = mix(overwater, underwater, submerged);
+    darken = mix(
+      mix(float(1), reflResp.darken, refl.valid.mul(heightFade).mul(gate)),
+      darken,
+      submerged,
+    );
   }
 
-  return combined.mul(u.strength).mul(sunUp).mul(distFade);
+  return {
+    bright: bright.mul(u.strength).mul(gate).max(0),
+    darken: darken.clamp(0, 1),
+  };
 }

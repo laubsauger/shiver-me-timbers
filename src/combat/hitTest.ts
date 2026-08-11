@@ -14,6 +14,7 @@
 import type { Quat, SimState, ProjectileState, Vec3 } from '../state/simState';
 import type { AABB } from '../ship/pieceTypes';
 import { SIM_DT } from '../core/loop';
+import { combatParams } from '../params/combat';
 import { invRotateVec, lerp, scale, sub } from './quatMath';
 
 export interface HitTarget {
@@ -32,13 +33,27 @@ export interface HitEvent {
   projectileId: number;
 }
 
+/**
+ * Resolve this tick's segment for every projectile against `targets`,
+ * nearest hit wins. Hit projectiles are removed from state.
+ *
+ * A projectile NEVER tests against pieces of the ship that fired it
+ * (`ProjectileState.owner`): cannon-mount sockets sit inside their own hull
+ * section's AABB, so self-testing scores a hull breach on the firing tick of
+ * every single shot.
+ *
+ * `radius` grows each box by the ball's own radius (Minkowski sum), so
+ * grazing shots on thin pieces — masts above all — connect.
+ */
 export function testHits(
   state: SimState,
-  targets: HitTarget[],
+  targets: readonly HitTarget[],
   dt: number = SIM_DT,
+  radius: number = combatParams.ballRadius,
 ): HitEvent[] {
   const events: HitEvent[] = [];
   const surviving: ProjectileState[] = [];
+  const r = Number.isFinite(radius) ? Math.max(0, radius) : 0;
 
   for (const p of state.projectiles) {
     const curr = p.position;
@@ -46,7 +61,8 @@ export function testHits(
     let bestT = Infinity;
     let bestTarget: HitTarget | null = null;
     for (const target of targets) {
-      const t = segmentVsObb(prev, curr, target);
+      if (target.shipIndex === p.owner) continue; // never shoot yourself
+      const t = segmentVsObb(prev, curr, target, r);
       if (t !== null && t < bestT) {
         bestT = t;
         bestTarget = target;
@@ -69,10 +85,10 @@ export function testHits(
 }
 
 /**
- * Segment a→b vs target OBB. Returns entry parameter t ∈ [0,1] along the
- * segment, or null on miss. Slab test in the target's local frame.
+ * Segment a→b vs target OBB grown by `r`. Returns entry parameter t ∈ [0,1]
+ * along the segment, or null on miss. Slab test in the target's local frame.
  */
-function segmentVsObb(a: Vec3, b: Vec3, target: HitTarget): number | null {
+function segmentVsObb(a: Vec3, b: Vec3, target: HitTarget, r: number): number | null {
   const { position, quaternion } = target.worldTransform;
   const la = invRotateVec(quaternion, sub(a, position));
   const lb = invRotateVec(quaternion, sub(b, position));
@@ -81,13 +97,15 @@ function segmentVsObb(a: Vec3, b: Vec3, target: HitTarget): number | null {
   let tMin = 0;
   let tMax = 1;
   for (let i = 0; i < 3; i++) {
+    const lo = min[i] - r;
+    const hi = max[i] + r;
     const d = lb[i] - la[i];
     if (Math.abs(d) < 1e-9) {
       // parallel to this slab: inside or miss outright
-      if (la[i] < min[i] || la[i] > max[i]) return null;
+      if (la[i] < lo || la[i] > hi) return null;
     } else {
-      let t1 = (min[i] - la[i]) / d;
-      let t2 = (max[i] - la[i]) / d;
+      let t1 = (lo - la[i]) / d;
+      let t2 = (hi - la[i]) / d;
       if (t1 > t2) [t1, t2] = [t2, t1];
       tMin = Math.max(tMin, t1);
       tMax = Math.min(tMax, t2);

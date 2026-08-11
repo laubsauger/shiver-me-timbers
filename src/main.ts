@@ -40,6 +40,8 @@ import { stepShipGrounding } from './sea-physics/grounding';
 import { galleonParams } from './params/ship';
 import { floodingHoles } from './ship/destruction';
 import { createCaustics, setActiveCaustics } from './caustics';
+import { buildDeckHeightfield } from './ship/deckHeightfield';
+import { createDeckWater, setActiveDeckWater } from './deckwater';
 import { createPlanarReflection } from './reflection';
 import { createArchipelago } from './island';
 import { palmWindStrength } from './vegetation';
@@ -168,6 +170,19 @@ async function boot(): Promise<void> {
   // ops when combat wiring lands (T17); hp values live in ShipState.damage
   const playerZoneStates: Record<string, import('./ship/pieceTypes').DamageStateId> = {};
   const galleonBlueprint = buildGalleonBlueprint();
+
+  // §T.12/§T.31 deck water. ONE procedurally-generated deck heightfield (per
+  // the talk's "artist supplied static heightfield") serves two consumers: the
+  // Mei solver pools water in its low spots, and the deck material derives
+  // plank relief from the same field — so the timber and the water agree about
+  // where the low spots are. MUST bind before ShipAssembly: TSL bakes material
+  // graphs at construction, and a late bind is silent (§T.32's lesson).
+  // null when the blueprint exposes no deck the field can be derived from —
+  // the solver then falls back to its own frame rather than failing to build
+  const deckField = buildDeckHeightfield(galleonBlueprint) ?? undefined;
+  const deckWater = createDeckWater({ source: deckField });
+  setActiveDeckWater(deckWater);
+
   const shipAssembly = new ShipAssembly(galleonBlueprint);
   app.scene.add(shipAssembly.group);
 
@@ -314,6 +329,19 @@ async function boot(): Promise<void> {
       // grounding reuses this tick's station world positions — no second pose
       // pass, no extra ocean sampling. Touches, slows, lists, holds.
       stepShipGrounding(playerShip, hullContact, archipelago.seabed, galleonParams.draft, dt);
+      // §V27 event-driven: the bow-immersion sensor reads the SAME cutwater
+      // signal as the bow spray, so splash, spray and wake agree about when
+      // she buries. Passive always-on splashing is explicitly forbidden.
+      deckWater.update(
+        app.renderer,
+        {
+          quaternion: playerShip.quaternion,
+          speed: Math.hypot(playerShip.velocity[0], playerShip.velocity[2]),
+          seaSigma: ocean.heightRms, // σ, not amplitude (§V36)
+          cutwater: hullContact.cutwater,
+        },
+        dt,
+      );
       prevPos.copy(currPos);
       prevQuat.copy(currQuat);
       currPos.fromArray(playerShip.position);

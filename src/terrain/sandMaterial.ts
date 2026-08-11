@@ -24,6 +24,7 @@ import {
   mix,
   normalWorld,
   positionWorld,
+  smoothstep,
   step,
   uniform,
   vec2,
@@ -76,6 +77,37 @@ function seaDepthNode(u: SandUniforms, worldXZ: any) {
   return { seaY, depthBelow: seaY.sub(positionWorld.y), live: Boolean(active) };
 }
 
+/**
+ * Apply §V34 water lighting to a receiver, gated on actually being in the
+ * water. See `terrainParams.causticsWaterlineBand` for why the gate is ours
+ * and not the caustics module's: `mode: 'below'` asserts "this receiver is
+ * never above the waterline", which is true of a seabed and false of an
+ * island that runs from the seabed to a 35 m peak in one material.
+ *
+ * Gating here also settles the double-wetness overlap: above the band the
+ * caustics module's own wet tint is gone entirely and the swash owns the
+ * beach, which is the model that actually knows where the waves have been.
+ */
+function applyWaterLighting(
+  base: { color: any; roughness: any; emissive: any },
+  depthBelow: any,
+  band: any,
+) {
+  const w = waterLighting({
+    worldPos: positionWorld,
+    normal: normalWorld,
+    depthBelowSurface: depthBelow,
+    mode: 'below',
+  });
+  // increasing ramp: 0 a band above the waterline, 1 a band below it
+  const inWater = smoothstep(band.negate(), band, depthBelow);
+  return {
+    color: base.color.mul(mix(vec3(1, 1, 1), w.tint, inWater)),
+    roughness: base.roughness.mul(mix(float(1), w.roughnessScale, inWater)),
+    emissive: base.emissive.add(w.addLight.mul(inWater)),
+  };
+}
+
 /** Live GPU uniforms mirroring the sand/shore section of terrainParams. */
 export function createSandUniforms(opts: SandMaterialOptions = {}) {
   const p = terrainParams;
@@ -92,6 +124,7 @@ export function createSandUniforms(opts: SandMaterialOptions = {}) {
     roughnessDry: uniform(p.sandRoughnessDry),
     roughnessWet: uniform(p.sandRoughnessWet),
     waterline: uniform(p.waterline),
+    causticsBand: uniform(p.causticsWaterlineBand),
     wetBand: uniform(p.wetBand),
     wetDarken: uniform(p.wetDarken),
     /** update per frame from the sky/sun system (T15) */
@@ -118,6 +151,7 @@ export function updateSandUniforms(u: SandUniforms): void {
   u.roughnessDry.value = p.sandRoughnessDry;
   u.roughnessWet.value = p.sandRoughnessWet;
   u.waterline.value = p.waterline;
+  u.causticsBand.value = p.causticsWaterlineBand;
   u.wetBand.value = p.wetBand;
   u.wetDarken.value = p.wetDarken;
 }
@@ -220,15 +254,10 @@ export function createSandMaterial(opts: SandMaterialOptions = {}) {
   const nodes = buildSandNodes(uniforms, terrainParams.noiseOctaves, shore);
   const material = new THREE.MeshStandardNodeMaterial();
   // §V34 water lighting, same contract as terrainBlendMaterial below
-  const w = waterLighting({
-    worldPos: positionWorld,
-    normal: normalWorld,
-    depthBelowSurface: nodes.depthBelow,
-    mode: 'below',
-  });
-  material.colorNode = nodes.color.mul(w.tint);
-  material.roughnessNode = nodes.roughness.mul(w.roughnessScale);
-  material.emissiveNode = nodes.emissive.add(w.addLight);
+  const lit = applyWaterLighting(nodes, nodes.depthBelow, uniforms.causticsBand);
+  material.colorNode = lit.color;
+  material.roughnessNode = lit.roughness;
+  material.emissiveNode = lit.emissive;
   material.metalness = 0;
   return {
     material,
@@ -327,15 +356,14 @@ export function terrainBlendMaterial(
   // waterline (`tint`), which lands on top of the swash's wet sand in the
   // permanently-damp strip. Same physical phenomenon from two models — if it
   // reads too dark in the browser, `terrainParams.wetDarken` is the live knob.
-  const w = waterLighting({
-    worldPos: positionWorld,
-    normal: normalWorld,
-    depthBelowSurface: sandNodes.depthBelow,
-    mode: 'below',
-  });
-  material.colorNode = albedo.mul(w.tint);
-  material.roughnessNode = roughness.mul(w.roughnessScale);
-  material.emissiveNode = sandNodes.emissive.mul(sandW).add(w.addLight);
+  const lit = applyWaterLighting(
+    { color: albedo, roughness, emissive: sandNodes.emissive.mul(sandW) },
+    sandNodes.depthBelow,
+    sand.causticsBand,
+  );
+  material.colorNode = lit.color;
+  material.roughnessNode = lit.roughness;
+  material.emissiveNode = lit.emissive;
   material.metalness = 0;
 
   const sunDirection = (v: THREE.Vector3): void => {

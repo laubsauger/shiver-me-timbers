@@ -83,7 +83,9 @@ export function createRopes(opts: RopesOptions): Ropes {
         throw new RangeError(`setRopeCount: ${n} outside [0, ${maxRopes}]`);
       }
       rc.uRopeCount.value = n;
-      (rm.mesh as THREE.InstancedMesh).count = n * segments;
+      // both §V41 regimes cover the same segment range; which one is visible
+      // is decided per-vertex by projected width, not by the instance count
+      rm.setCount(n * segments);
     },
     markDirty,
     computeNode: rc.computeNode,

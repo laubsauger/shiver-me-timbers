@@ -15,6 +15,13 @@ import {
 import { buildBowAndTransom, buildRails, buildRudder } from './blueprintEnds';
 import { buildCastles, buildFurniture } from './blueprintCastles';
 import { buildBowsprit, buildMastRig } from './blueprintRig';
+import {
+  buildDeckRails,
+  buildHeadWorks,
+  buildHullFittings,
+  buildRigDetail,
+  buildSternDetail,
+} from './blueprintDetail';
 
 /**
  * Two-masted brigantine, ~30 m. Guns are hull-mounted (4/side across the
@@ -32,18 +39,21 @@ export function buildBrigantineBlueprint(
       { name: 'main', z: p.mainMastZ, baseY: p.freeboard },
     ],
   });
-  return [
+  const core = [
     buildKeel(p),
     buildDeck(p, { deckCannons: false, capstan: false }),
     ...hull,
     ...buildCannons(hull),
-    ...buildBowAndTransom(p),
+    ...buildBowAndTransom(p, { figurehead: false }),
     ...buildMastRig(p, 'fore', p.foreMastZ, p.foreMastHeight, p.freeboard, rig),
     ...buildMastRig(p, 'main', p.mainMastZ, p.mainMastHeight, p.freeboard, rig),
-    buildBowsprit(p, { figurehead: false }),
+    buildBowsprit(p),
     ...buildRails(p, { sternBalustrade: false }),
     buildRudder(p),
   ];
+  // §T.34 fittings are DERIVED from the core pieces (see blueprintDetail.ts),
+  // so they are appended after it rather than woven into it
+  return [...core, ...buildHullFittings(p, hull), ...buildRigDetail(p, core)];
 }
 
 /**
@@ -57,21 +67,22 @@ export function buildGalleonBlueprint(
 ): PieceDef[] {
   const rearBaseY = p.freeboard + p.sterncastleRise;
   const deck = buildDeck(p, { deckCannons: true, capstan: true });
-  return [
+  const hull = buildHullSections(p, {
+    hullCannons: false,
+    // baseY = the deck each mast is STEPPED on; the mizzen stands on the
+    // quarterdeck, so its chainplates belong up there too (§V12 clearance)
+    channels: [
+      { name: 'fore', z: p.foreMastZ, baseY: p.freeboard },
+      { name: 'main', z: p.mainMastZ, baseY: p.freeboard },
+      { name: 'rear', z: p.rearMastZ, baseY: p.freeboard + p.sterncastleRise },
+    ],
+  });
+  const core = [
     buildKeel(p),
     deck,
     ...buildCannons([deck]),
-    ...buildHullSections(p, {
-      hullCannons: false,
-      // baseY = the deck each mast is STEPPED on; the mizzen stands on the
-      // quarterdeck, so its chainplates belong up there too (§V12 clearance)
-      channels: [
-        { name: 'fore', z: p.foreMastZ, baseY: p.freeboard },
-        { name: 'main', z: p.mainMastZ, baseY: p.freeboard },
-        { name: 'rear', z: p.rearMastZ, baseY: p.freeboard + p.sterncastleRise },
-      ],
-    }),
-    ...buildBowAndTransom(p),
+    ...hull,
+    ...buildBowAndTransom(p, { figurehead: true }),
     ...buildCastles(p),
     ...buildFurniture(p),
     ...buildMastRig(p, 'fore', p.foreMastZ, p.foreMastHeight, p.freeboard, {
@@ -83,8 +94,16 @@ export function buildGalleonBlueprint(
     ...buildMastRig(p, 'rear', p.rearMastZ, p.rearMastHeight, rearBaseY, {
       sails: true, crowNest: false,
     }),
-    buildBowsprit(p, { figurehead: true }),
+    buildBowsprit(p),
     ...buildRails(p, { sternBalustrade: true }),
     buildRudder(p),
+  ];
+  return [
+    ...core,
+    ...buildHullFittings(p, hull),
+    ...buildRigDetail(p, core),
+    ...buildHeadWorks(p),
+    ...buildDeckRails(p),
+    ...buildSternDetail(p),
   ];
 }

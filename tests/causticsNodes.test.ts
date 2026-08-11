@@ -61,6 +61,17 @@ describe('water lighting integration surface', () => {
     });
     expect(seabed.addLight).toBeTruthy();
     expect(seabed.caustics).toBeTruthy();
+    expect(seabed.causticDarken).toBeTruthy();
+  });
+
+  it('exposes the two caustic lobes separately (§B.11)', () => {
+    // `caustics` is additive and ≥0; `causticDarken` is multiplicative and
+    // already folded into `tint`. They are not interchangeable — folding the
+    // dark lobe into the additive term is what put negative light on the hull.
+    const w = waterLighting({ worldPos: positionWorld, normal: normalWorld });
+    expect(w.caustics).toBeTruthy();
+    expect(w.causticDarken).toBeTruthy();
+    expect(w.causticDarken).not.toBe(w.caustics);
   });
 
   it('accepts a receiver-supplied depth, skipping the height taps', () => {

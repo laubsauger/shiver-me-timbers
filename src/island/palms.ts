@@ -29,21 +29,58 @@ import type { PalmMaterial } from '../vegetation/palmMaterial';
 import type { WindSway } from '../vegetation/windSway';
 import { vegetationParams } from '../params/vegetation';
 import { islandParams, type IslandParams } from '../params/island';
+import { createRng } from '../state/rng';
 import { findShoreRadius, gradientAt, type IslandHeightmap } from './heightmap';
 
 /** re-rolls per palm before giving up — algorithm bound, not a look tunable */
 const PLACEMENT_ATTEMPTS = 64;
 
-/** terrain-aware PlacementFn for scatterPalms/generatePlacements */
+/**
+ * Grove centre angles: `palmGroveCount` stands spaced around the island, each
+ * jittered inside its own sector so the ring is never regular. Derived from a
+ * seed rather than the placement rng because every palm has to agree on where
+ * the groves ARE — drawing them per-palm would just be scatter again.
+ */
+export function palmGroveAngles(seed: number, p: IslandParams = islandParams): number[] {
+  const rng = createRng(seed);
+  const count = Math.max(1, Math.floor(p.palmGroveCount));
+  const phase = rng();
+  const angles: number[] = [];
+  for (let i = 0; i < count; i++) {
+    angles.push(((i + 0.15 + rng() * 0.7) / count + phase) * Math.PI * 2);
+  }
+  return angles;
+}
+
+/**
+ * Terrain-aware PlacementFn for scatterPalms/generatePlacements.
+ *
+ * §V43: palms grow in GROVES. Measured angular-gap CV was 0.84 with a uniform
+ * random angle — statistically Poisson, which is what "evenly scattered" looks
+ * like and the most obvious generated tell on an island. Each palm now picks a
+ * stand and sits inside it, so the coast alternates between dense stands and
+ * genuinely empty beach the way the references do.
+ *
+ * `seed` fixes the grove positions; omit it and every island gets the same
+ * ring of stands, which is why createIslandPalms always passes one.
+ */
 export function islandPalmPlacement(
   hm: IslandHeightmap,
   p: IslandParams = islandParams,
+  seed = 0,
 ): PlacementFn {
   const v = vegetationParams;
+  const groves = palmGroveAngles(seed, p);
+  // metres of arc → radians, at the scale of this island
+  const radiusForArc = Math.max(hm.worldRadius, 1e-3); // §V28 floored divisor
   return (rng) => {
     for (let attempt = 0; attempt < PLACEMENT_ATTEMPTS; attempt++) {
       const beach = rng() < p.palmBeachFraction;
-      const angle = rng() * Math.PI * 2;
+      const centre = groves[Math.floor(rng() * groves.length) % groves.length];
+      // triangular jitter (sum of two uniforms): packs the stand toward its
+      // centre and thins at the edges, instead of a hard-edged uniform blob
+      const spread = (p.palmGroveSpread / radiusForArc) * (beach ? 1 : p.palmGroveInlandFlare);
+      const angle = centre + (rng() + rng() - 1) * spread;
       let x: number;
       let z: number;
       if (beach) {
@@ -52,7 +89,8 @@ export function islandPalmPlacement(
         x = Math.cos(angle) * r;
         z = Math.sin(angle) * r;
       } else {
-        // sparse interior: uniform over a disc (sqrt for area uniformity)
+        // the stand's inland tail — same bearing, drawn back up the slope, so
+        // vegetation reads as a mass running inland rather than a beach fringe
         const r = Math.sqrt(rng()) * hm.worldRadius * p.palmInteriorRadius;
         x = Math.cos(angle) * r;
         z = Math.sin(angle) * r;
@@ -139,7 +177,7 @@ export function createIslandPalms(opts: CreateIslandPalmsOptions): IslandPalms {
     seed: opts.seed,
     geometry,
     material: palmMaterial.material,
-    placementFn: islandPalmPlacement(opts.heightmap),
+    placementFn: islandPalmPlacement(opts.heightmap, islandParams, opts.seed),
     lodSort: true,
   });
   mesh.name = 'island-palms';

@@ -29,6 +29,9 @@ const P: FloodingParams = {
   sinkDuration: 12,
   listStrength: 1,
   massGain: 0.8,
+  sunkDepth: 14,
+  sunkDrag: 0.9,
+  founderFraction: 0.6,
 };
 
 function ship(flood = 0): ShipState {

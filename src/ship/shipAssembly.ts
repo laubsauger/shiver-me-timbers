@@ -7,11 +7,21 @@ import * as THREE from 'three';
 import type { DamageStateId, PieceDef, PieceKind, SailStateId, Vec3 } from './pieceTypes';
 import { buildHoledVariant, buildPieceGeometry, buildSailGeometry } from './pieceGeometry';
 import { createHoleMaterial, createPieceMaterial } from './pieceMaterials';
+import { buildDeckHeightfield, type DeckHeightfield } from './deckHeightfield';
+import { createDeckFieldTexture, type DeckFieldSampler } from './deckFieldTexture';
 
 export type MaterialFactory = (kind: PieceKind, role: 'base' | 'hole') => THREE.Material;
 
-const defaultMaterialFactory: MaterialFactory = (kind, role) =>
-  role === 'hole' ? createHoleMaterial() : createPieceMaterial(kind);
+/**
+ * The default factory is built PER ASSEMBLY so it can close over that ship's
+ * own deck heightfield (deckHeightfield.ts) — the field is a function of the
+ * blueprint, so a brigantine and a galleon must not share one. Callers that
+ * pass their own factory (tests, greybox previews) never build a field at all.
+ */
+function makeDefaultMaterialFactory(deckField?: DeckFieldSampler): MaterialFactory {
+  return (kind, role) =>
+    role === 'hole' ? createHoleMaterial() : createPieceMaterial(kind, deckField);
+}
 
 interface PieceRuntime {
   def: PieceDef;
@@ -24,6 +34,15 @@ interface PieceRuntime {
 
 export class ShipAssembly {
   readonly group: THREE.Group;
+  /**
+   * This ship's procedural deck heightfield (§T.34 / talk "Surface Water:
+   * Setup"), or null when a caller supplied its own material factory and the
+   * field was never needed. The deck-water solver reads it for its terrain —
+   * see deckHeightfield.ts for the channel contract.
+   */
+  readonly deckField: DeckHeightfield | null = null;
+  /** GPU view of `deckField`, shared with the piece materials */
+  readonly deckFieldTexture: DeckFieldSampler | null = null;
   private readonly pieces = new Map<string, PieceRuntime>();
   private readonly socketOwner = new Map<string, string>();
   private readonly materials = new Map<string, THREE.Material>();
@@ -31,8 +50,15 @@ export class ShipAssembly {
   /** live yard brace angle (rad), applied to every yard node */
   private rigTrim = 0;
 
-  constructor(blueprint: PieceDef[], materialFactory: MaterialFactory = defaultMaterialFactory) {
-    this.materialFactory = materialFactory;
+  constructor(blueprint: PieceDef[], materialFactory?: MaterialFactory) {
+    if (materialFactory === undefined) {
+      this.deckField = buildDeckHeightfield(blueprint);
+      this.deckFieldTexture =
+        this.deckField === null ? null : createDeckFieldTexture(this.deckField);
+      this.materialFactory = makeDefaultMaterialFactory(this.deckFieldTexture ?? undefined);
+    } else {
+      this.materialFactory = materialFactory;
+    }
     this.group = new THREE.Group();
     this.group.name = 'ship';
 

@@ -139,6 +139,32 @@ export function buildSailGeometry(state: SailStateId, aabb: AABB): THREE.BufferG
   return mergeNonIndexed([roll, skirt, ...sailTies(width, drop)]);
 }
 
+/**
+ * Thin cylinder spanning two points — the primitive every rope-ish and
+ * bar-ish fitting is made of (ratline rungs, lanyards, head rails, straps).
+ * Degenerate spans are dropped to a zero-length stub rather than producing a
+ * NaN orientation (§V28 in spirit: no non-finite vertex ever reaches a buffer).
+ */
+export function barBetween(
+  a: THREE.Vector3,
+  b: THREE.Vector3,
+  radius: number,
+  sides = 5,
+): THREE.BufferGeometry {
+  const dir = new THREE.Vector3().subVectors(b, a);
+  const len = dir.length();
+  const geo = new THREE.CylinderGeometry(radius, radius, Math.max(1e-4, len), sides, 1, true);
+  if (len > 1e-5) {
+    const q = new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0, 1, 0),
+      dir.divideScalar(len),
+    );
+    geo.applyQuaternion(q);
+  }
+  geo.translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
+  return geo;
+}
+
 /** merge helper — normalises indexed/non-indexed before merging */
 export function mergeNonIndexed(geos: THREE.BufferGeometry[], useGroups = false): THREE.BufferGeometry {
   const flat = geos.map((g) => {

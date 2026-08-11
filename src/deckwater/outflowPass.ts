@@ -6,14 +6,16 @@
  * gradient that biases the head difference directionally, so water slides
  * across the deck as the ship rocks. Total outflow is clamped to the
  * available volume (no negative water). Off-deck neighbors drain against
- * EDGE_DRAIN_HEAD ("leaky deck").
+ * EDGE_DRAIN_HEAD ("leaky deck"), and so — without any branch here — do
+ * DeckField.drain cells: they are seeded at EDGE_DRAIN_HEAD and the resolve
+ * pass keeps their volume at zero, so their head is permanently the lowest
+ * on the deck and neighbours pour into them.
  * CPU mirror of this exact math: fluxMath.computeOutflow (tested).
  */
 import * as THREE from 'three/webgpu';
 import {
   Fn,
   If,
-  float,
   instanceIndex,
   int,
   ivec2,
@@ -42,6 +44,8 @@ export function createDeckWaterUniforms(p: DeckWaterParams) {
     uEvapWetness: uniform(0),
     uWetnessGain: uniform(p.wetnessGain),
     uSplashRadius: uniform(p.splashRadius),
+    /** head of everything that is not deck — see OutflowParams.drainHead */
+    uDrainHead: uniform(EDGE_DRAIN_HEAD),
   };
 }
 
@@ -77,7 +81,7 @@ export function createOutflowPass(
           .and(sy.greaterThanEqual(int(0)))
           .and(sy.lessThan(int(h)));
         const nc = textureLoad(state, ivec2(sx.clamp(0, w - 1), sy.clamp(0, h - 1)));
-        return select(inside, nc.r.add(nc.b), float(EDGE_DRAIN_HEAD));
+        return select(inside, nc.r.add(nc.b), u.uDrainHead);
       };
 
       // flux ∝ max(0, headDiff + tilt bias·direction) — rocking slosh (§V9)

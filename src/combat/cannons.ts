@@ -61,11 +61,19 @@ export function fireCannon(
     ce * Math.sin(azimuth),
   ];
 
+  // walk out along the barrel so the ball leaves the muzzle, not the carriage
+  const muzzleLocal: Vec3 = [
+    offset[0] + dirLocal[0] * params.muzzleForward,
+    offset[1] + dirLocal[1] * params.muzzleForward,
+    offset[2] + dirLocal[2] * params.muzzleForward,
+  ];
+
   const projectile: ProjectileState = {
     id,
-    position: add(ship.position, rotateVec(ship.quaternion, offset)),
+    position: add(ship.position, rotateVec(ship.quaternion, muzzleLocal)),
     velocity: scale(rotateVec(ship.quaternion, dirLocal), params.muzzleVelocity),
     age: 0,
+    owner: shipIndex,
   };
   state.projectiles.push(projectile);
   return projectile;

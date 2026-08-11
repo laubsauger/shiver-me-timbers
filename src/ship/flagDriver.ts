@@ -17,8 +17,10 @@ import { oceanParams } from '../params/ocean';
 import type { ShipFlagParams } from '../params/ship';
 import {
   advanceFlag,
+  angleDelta,
   apparentWind,
   streamStrength,
+  wrapAngle,
   type FlagState,
 } from './flagDynamics';
 
@@ -64,8 +66,15 @@ function sampleMotion(
 export interface FlagWindUniforms {
   /** angle (rad) the cloth leaves the staff at, in the flag's LOCAL frame */
   rootAngle: ReturnType<typeof uniform>;
-  /** angle the fly tip trails at — root − tip is the whip */
-  tipAngle: ReturnType<typeof uniform>;
+  /**
+   * tip angle MINUS root angle — the whip, spread along the fly in the
+   * shader. Sent as a difference, not as a second absolute angle, because the
+   * damped angles accumulate without bound: a ship that circles for an hour
+   * would hand sin()/cos() a number large enough to lose the low bits and the
+   * flag would start to judder. The root is wrapped to (−π, π] and the lag
+   * rides along with it, so the pair stays small forever.
+   */
+  lagAngle: ReturnType<typeof uniform>;
   /** 0..1 stream strength: 1 = board stiff, 0 = hanging dead */
   strength: ReturnType<typeof uniform>;
 }
@@ -75,7 +84,7 @@ export function createFlagWindUniforms(p: ShipFlagParams): FlagWindUniforms {
   // runs (headless probe, renderer swap) the cloth still reads as a flag
   // rather than collapsing into the mast — fail visible, not silently worse
   const rootAngle = uniform(0).setGroup(objectGroup);
-  const tipAngle = uniform(0).setGroup(objectGroup);
+  const lagAngle = uniform(0).setGroup(objectGroup);
   const strength = uniform(0.75).setGroup(objectGroup);
   const states = new WeakMap<THREE.Object3D, FlagState>();
 
@@ -108,10 +117,10 @@ export function createFlagWindUniforms(p: ShipFlagParams): FlagWindUniforms {
     };
     const next = advanceFlag(prev, target, streamStrength(wind.speed, p), motion.dt, p);
     states.set(object, next);
-    rootAngle.value = next.root;
-    tipAngle.value = next.tip;
+    rootAngle.value = wrapAngle(next.root);
+    lagAngle.value = angleDelta(next.root, next.tip);
     strength.value = next.strength;
   });
 
-  return { rootAngle, tipAngle, strength };
+  return { rootAngle, lagAngle, strength };
 }

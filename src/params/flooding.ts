@@ -21,6 +21,21 @@ export interface FloodingParams {
   listStrength: number;
   /** extra mass fraction at full flood (floodMassFactor = 1 + gain·flood) */
   massGain: number;
+  /**
+   * m — depth below the live sea surface at which a fully-flooded hull stops
+   * descending (T18 terminal stage, src/combat/sinking.ts). Buoyancy support
+   * reaches 0 at flood = 1, and with it the probe DAMPING goes too, so an
+   * unclamped wreck free-falls forever: after a minute it is kilometres down,
+   * far outside camera.far, with velocities that swamp every other term.
+   */
+  sunkDepth: number;
+  /** 1/s — velocity + spin bleed-off once the wreck has settled */
+  sunkDrag: number;
+  /**
+   * fraction of the sinkThreshold→1 run after which the ship is 'foundering'
+   * — decks awash, helm and sheets no longer answer (controlAuthority → 0).
+   */
+  founderFraction: number;
 }
 
 export const floodingParams: FloodingParams = registerParams(
@@ -33,6 +48,9 @@ export const floodingParams: FloodingParams = registerParams(
     sinkDuration: 12,
     listStrength: 3e5,
     massGain: 0.8,
+    sunkDepth: 14,
+    sunkDrag: 0.9,
+    founderFraction: 0.6,
   },
   {
     ingressRatePerHole: { min: 0, max: 0.2, step: 0.005 },
@@ -42,5 +60,8 @@ export const floodingParams: FloodingParams = registerParams(
     sinkDuration: { min: 1, max: 60, step: 1 },
     listStrength: { min: 0, max: 2e6, step: 1e4 },
     massGain: { min: 0, max: 3, step: 0.05 },
+    sunkDepth: { min: 2, max: 60, step: 1 },
+    sunkDrag: { min: 0, max: 5, step: 0.05 },
+    founderFraction: { min: 0, max: 1, step: 0.05 },
   },
 );

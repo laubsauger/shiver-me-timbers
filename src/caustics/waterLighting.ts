@@ -41,8 +41,10 @@ import type { HullWetline } from './hullWetline';
 export interface WaterLightingUniforms {
   causticColor: TslNode;
   bounceColor: TslNode;
-  bounce: TslNode; // (strength, heightFalloff, sunFloor, sunGain)
+  bounce: TslNode; // (liftStrength, heightFalloff, sunFloor, sunGain)
+  bounceTint: TslNode;
   bounceFlicker: TslNode;
+  maxAddLight: TslNode;
   wetTint: TslNode;
   wetBand: TslNode; // (above, below)
   wetRoughness: TslNode;
@@ -61,7 +63,9 @@ export function createWaterLightingUniforms(): WaterLightingUniforms {
         cp.bounceStrength, cp.bounceHeightFalloff, cp.bounceSunFloor, cp.bounceSunGain,
       ),
     ),
+    bounceTint: uniform(cp.bounceTint),
     bounceFlicker: uniform(cp.bounceFlicker),
+    maxAddLight: uniform(cp.maxAddLight),
     wetTint: uniform(color(cp.wetTintColor)),
     wetBand: uniform(new THREE.Vector2(cp.wetBandAbove, cp.wetBandBelow)),
     wetRoughness: uniform(cp.wetRoughness),
@@ -78,7 +82,9 @@ export function refreshWaterLightingUniforms(u: WaterLightingUniforms): void {
   (u.bounce.value as THREE.Vector4).set(
     cp.bounceStrength, cp.bounceHeightFalloff, cp.bounceSunFloor, cp.bounceSunGain,
   );
+  u.bounceTint.value = cp.bounceTint;
   u.bounceFlicker.value = cp.bounceFlicker;
+  u.maxAddLight.value = cp.maxAddLight;
   (u.wetTint.value as THREE.Color).set(cp.wetTintColor);
   (u.wetBand.value as THREE.Vector2).set(cp.wetBandAbove, cp.wetBandBelow);
   u.wetRoughness.value = cp.wetRoughness;
@@ -118,8 +124,10 @@ export interface WaterLighting {
   roughnessScale: TslNode;
   /** float ≤1 — MULTIPLY into any bump/normal relief strength */
   reliefScale: TslNode;
-  /** raw caustic contribution, if a receiver wants it on its own */
+  /** additive caustic contribution (≥0), if a receiver wants it on its own */
   caustics: TslNode;
+  /** multiplicative caustic darkening in [0,1] — already folded into `tint` */
+  causticDarken: TslNode;
   /** 0..1 wetness, for a receiver that wants to drive its own response */
   wet: TslNode;
   /** 0..1 below the waterline */
@@ -196,26 +204,51 @@ export function waterLightingNode(
   const heightAbove = depth.negate().max(0);
   const heightFade = heightAbove.div(L.bounce.y.max(0.01)).negate().exp();
   const sunTerm = L.bounce.z.add(L.bounce.w.mul(ctx.caustics.sunDirection.y.clamp(0, 1)));
-  // the bounce off a wavy sea is not steady — the reflected caustic pattern
-  // is exactly its flicker, and it is already computed
-  const flicker = float(1).add(caustics.g.mul(L.bounceFlicker));
-  const bounce = L.bounceColor
-    .mul(L.bounce.x)
-    .mul(facing)
-    .mul(heightFade)
-    .mul(sunTerm)
-    .mul(flicker);
+  // the bounce off a wavy sea is not steady — the caustic pattern is exactly
+  // its flicker, and it is already computed. `bright` is ≥ 0 so this only
+  // ever brightens; it can never invert the bounce (§B.11).
+  const flicker = float(1).add(caustics.bright.g.mul(L.bounceFlicker));
+  // §B.12: the bounce is DIFFUSE reflection, so most of it scales with the
+  // receiver's albedo — but `addLight` lands on emissiveNode, which does
+  // not. Split it: `bounceTint` is the albedo-coupled majority (bounded
+  // multiplicative, cannot overwhelm the timber even in full shade) and
+  // `bounce.x` is only the small genuine shadow lift.
+  // conceptually "how much lit sea does this point see", so it belongs in
+  // [0,1]. sunTerm and flicker are each individually bounded but their
+  // product is not, and an unclamped bounceAmount drives the tint mix to a
+  // FULL teal wash — symptom 2 all over again, just via a different route.
+  const bounceAmount = facing.mul(heightFade).mul(sunTerm).mul(flicker).clamp(0, 1);
+  const bounceLift = L.bounceColor.mul(L.bounce.x).mul(bounceAmount);
+  const bounceTint = mix(
+    vec3(1, 1, 1),
+    L.bounceColor,
+    bounceAmount.mul(L.bounceTint).clamp(0, 1),
+  );
+
+  // caustics are direct sun and must obey the sun shadow; the bounce is
+  // ambient sky/sea light and legitimately survives in shade.
+  // The caustic already carries its own per-channel Jerlov attenuation, so
+  // `causticColor` is the SURFACE colour of the sunlight only.
+  const addLight = bounceLift
+    .add(L.causticColor.mul(caustics.bright).mul(shadow))
+    // §V.28 backstop: this lands on emissiveNode where nothing downstream
+    // will save a bad value, so clamping is the last thing that happens.
+    .clamp(0, L.maxAddLight);
 
   return {
-    tint: mix(vec3(1, 1, 1), L.wetTint, wet).mul(absorb),
-    // caustics are direct sun and must obey the sun shadow; the bounce is
-    // ambient sky/sea light and survives in shade
-    // the caustic already carries its own per-channel Jerlov attenuation, so
-    // this tint is the SURFACE colour of the sunlight only
-    addLight: bounce.add(L.causticColor.mul(caustics).mul(shadow)),
+    // every factor here is in [0,1] by construction: wet tint, absorption,
+    // caustic darkening and bounce tint. The albedo can be dimmed or
+    // coloured, never driven negative or above its own value.
+    tint: mix(vec3(1, 1, 1), L.wetTint, wet)
+      .mul(absorb)
+      .mul(caustics.darken)
+      .mul(bounceTint)
+      .clamp(0, 1),
+    addLight,
     roughnessScale: mix(float(1), L.wetRoughness, wet),
     reliefScale: mix(float(1), L.wetRelief, wet),
-    caustics,
+    caustics: caustics.bright,
+    causticDarken: caustics.darken,
     wet,
     submerged,
     depth,

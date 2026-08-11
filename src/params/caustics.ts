@@ -53,12 +53,38 @@ export interface CausticsParams {
   foldSoftness: number;
   /** σ growth per meter of depth — deep folds are broader and dimmer */
   foldSoftnessPerMeter: number;
-  /** overall caustic gain applied to (intensity − 1) */
+  /** overall caustic gain applied to the bright lobe */
   strength: number;
-  /** ceiling on the bright lobe after a Reinhard roll-off (firefly guard) */
+  /**
+   * ceiling on the bright lobe after a Reinhard roll-off (firefly guard).
+   * Tuned for the HULL regime (0–2 m below the surface), which is far
+   * shallower and steeper than a seabed at 8 m: at 0.65 m the depth
+   * polynomial is still near det C ≈ 1, so the gain reaches its |detA|/σ
+   * ceiling readily and this cap — not the physics — is what sets the
+   * highlight. Lands as additive emissive on timber whose lit albedo is
+   * ≈0.3 linear, so values above ~2 blow the hull out.
+   */
   maxGain: number;
-  /** how much of the DARK lobe (ray divergence) is kept, 0..1 */
+  /**
+   * how much light the divergent regions between caustic filaments lose,
+   * 0..1. MULTIPLICATIVE on albedo (§B.11) — 0.45 means the darkest
+   * inter-filament shadow keeps 55% of the surface colour. It can never
+   * subtract light, only withhold it.
+   */
   darkStrength: number;
+  /**
+   * cap on lateral ray drift per metre of span (§B.11). Refraction is
+   * physically bounded near 1.135 by Snell's window; REFLECTION is not, and
+   * an ungated near-horizontal reflected ray is what produced the hull
+   * speckle. Also bounds the finite difference that builds det M.
+   */
+  maxDrift: number;
+  /**
+   * final per-channel ceiling on the additive term before it reaches
+   * `emissiveNode`. Pure backstop (§V.28): nothing downstream of emissive
+   * will save a bad value, so the last thing this module does is clamp.
+   */
+  maxAddLight: number;
   /**
    * receivers shallower than this are treated as being this deep. Real
    * caustics vanish at zero depth (no focal length yet); the hull waterline
@@ -111,7 +137,25 @@ export interface CausticsParams {
   // ── water bounce fill (the sea lighting the ship) ───────────────────
   /** upward fill from the sea onto everything above it (sRGB hex) */
   bounceColor: string;
+  /**
+   * ADDITIVE lift from the sea, in linear light (§B.12).
+   *
+   * Kept small on purpose. A bounce is diffuse reflection, so it scales with
+   * the receiver's albedo — but this term lands on `emissiveNode`, which
+   * does not. On the SHADOWED side of the hull, where the sun contributes
+   * nothing, an additive teal at the old 0.42 was several times the residual
+   * ambient and turned the topsides into a flat slab of sea colour. The
+   * albedo-coupled part of the bounce is `bounceTint` below; this is only
+   * the small part that legitimately lifts shadows.
+   */
   bounceStrength: number;
+  /**
+   * MULTIPLICATIVE tint toward `bounceColor`, 0..1 — the albedo-coupled part
+   * of the bounce and the one that carries most of it. Bounded by
+   * construction, so it can tint timber toward the sea without ever
+   * overwhelming it.
+   */
+  bounceTint: number;
   /** height (m) over which the bounce fades out going up the rig */
   bounceHeightFalloff: number;
   /** bounce floor / sun-driven gain — the sea is only bright when lit */
@@ -181,16 +225,18 @@ export interface CausticsParams {
 }
 
 export const causticsParams: CausticsParams = registerParams('caustics', {
-  enabled: true,
+  enabled: false,
   waterIor: 1.33335,
   curvatureEpsilon: 0.32,
   // ≈5× the 6.9 mm/m solar-disc blur — see the field comment above
   curvatureEpsilonPerMeter: 0.035,
   foldSoftness: 0.16,
   foldSoftnessPerMeter: 0.045,
-  strength: 1.35,
-  maxGain: 3.2,
+  strength: 0.9,
+  maxGain: 1.6,
   darkStrength: 0.45,
+  maxDrift: 2.5,
+  maxAddLight: 1.5,
   minEffectiveDepth: 0.65,
   maxDepth: 22,
   fadeStart: 180,
@@ -200,13 +246,14 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
   waterlineBlend: 0.3,
   faceGateSoftness: 0.06,
 
-  reflectedStrength: 0.55,
+  reflectedStrength: 0.35,
   reflectedHeightFalloff: 4.5,
 
   // between the ocean's deepColor (#093642) and sssColor (#32d0c0): the sea
   // seen from a hull is body pigment lifted by scattered sun, not either end
   bounceColor: '#2a9a9c',
-  bounceStrength: 0.42,
+  bounceStrength: 0.06,
+  bounceTint: 0.3,
   bounceHeightFalloff: 7.0,
   bounceSunFloor: 0.25,
   bounceSunGain: 0.85,
@@ -240,6 +287,8 @@ function causticsParamsMeta() {
     strength: { min: 0, max: 6, step: 0.05 },
     maxGain: { min: 0.2, max: 12, step: 0.1 },
     darkStrength: { min: 0, max: 1, step: 0.01 },
+    maxDrift: { min: 0.2, max: 20, step: 0.1 },
+    maxAddLight: { min: 0, max: 8, step: 0.05 },
     minEffectiveDepth: { min: 0, max: 4, step: 0.05 },
     maxDepth: { min: 1, max: 60, step: 0.5 },
     fadeStart: { min: 10, max: 2000, step: 10 },
@@ -250,6 +299,7 @@ function causticsParamsMeta() {
     reflectedStrength: { min: 0, max: 3, step: 0.01 },
     reflectedHeightFalloff: { min: 0.2, max: 30, step: 0.1 },
     bounceStrength: { min: 0, max: 3, step: 0.01 },
+    bounceTint: { min: 0, max: 1, step: 0.01 },
     bounceHeightFalloff: { min: 0.5, max: 40, step: 0.5 },
     bounceSunFloor: { min: 0, max: 1, step: 0.01 },
     bounceSunGain: { min: 0, max: 3, step: 0.01 },

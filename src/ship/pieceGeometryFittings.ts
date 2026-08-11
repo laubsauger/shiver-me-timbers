@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import type { AABB } from './pieceTypes';
 import { aabbCenter, aabbSize, mergeNonIndexed } from './pieceGeometryShapes';
+import { COAMING_HEIGHT, COAMING_WIDTH, GRATING_HEIGHT } from './deckHeightfield';
 
 /**
  * Cannon: tapered barrel along +z (outboard once the piece is rotated),
@@ -78,22 +79,45 @@ export function buildCapstanGeometry(aabb: AABB): THREE.BufferGeometry {
   return mergeNonIndexed(parts);
 }
 
-/** hatch grating: frame + crossed lattice strips */
+/**
+ * Hatch grating with its COAMING — the raised curb round the opening. The
+ * grating had no curb at all, so the deck-water sim would have poured straight
+ * down the hatch and the eye had nothing telling it there was an opening
+ * there. Curb height/width come from deckHeightfield.ts so the lip the water
+ * banks against is the lip you can see (§T.34 / talk "Surface Water: Setup").
+ */
 export function buildGratingGeometry(aabb: AABB): THREE.BufferGeometry {
   const s = aabbSize(aabb);
   const c = aabbCenter(aabb);
   const parts: THREE.BufferGeometry[] = [];
-  const frame = new THREE.BoxGeometry(s.x, s.y * 0.5, s.z);
-  frame.translate(c.x, aabb.min[1] + s.y * 0.25, c.z);
+
+  // coaming: four curb timbers standing proud of the deck round the opening
+  for (const [sx, sz, wx, wz] of [
+    [-1, 0, COAMING_WIDTH, s.z + COAMING_WIDTH * 2],
+    [1, 0, COAMING_WIDTH, s.z + COAMING_WIDTH * 2],
+    [0, -1, s.x, COAMING_WIDTH],
+    [0, 1, s.x, COAMING_WIDTH],
+  ] as const) {
+    const curb = new THREE.BoxGeometry(wx, COAMING_HEIGHT, wz);
+    curb.translate(
+      c.x + (sx * (s.x + COAMING_WIDTH)) / 2,
+      aabb.min[1] + COAMING_HEIGHT / 2,
+      c.z + (sz * (s.z + COAMING_WIDTH)) / 2,
+    );
+    parts.push(curb);
+  }
+
+  const frame = new THREE.BoxGeometry(s.x, GRATING_HEIGHT * 0.5, s.z);
+  frame.translate(c.x, aabb.min[1] + GRATING_HEIGHT * 0.25, c.z);
   parts.push(frame);
   const bars = 5;
   for (let i = 0; i < bars; i++) {
     const off = -0.4 + (0.8 * i) / (bars - 1);
-    const alongZ = new THREE.BoxGeometry(s.x * 0.08, s.y * 0.5, s.z * 0.94);
-    alongZ.translate(c.x + off * s.x, aabb.min[1] + s.y * 0.75, c.z);
+    const alongZ = new THREE.BoxGeometry(s.x * 0.08, GRATING_HEIGHT * 0.6, s.z * 0.94);
+    alongZ.translate(c.x + off * s.x, aabb.min[1] + GRATING_HEIGHT * 0.7, c.z);
     parts.push(alongZ);
-    const alongX = new THREE.BoxGeometry(s.x * 0.94, s.y * 0.5, s.z * 0.08);
-    alongX.translate(c.x, aabb.min[1] + s.y * 0.75, c.z + off * s.z);
+    const alongX = new THREE.BoxGeometry(s.x * 0.94, GRATING_HEIGHT * 0.6, s.z * 0.08);
+    alongX.translate(c.x, aabb.min[1] + GRATING_HEIGHT * 0.7, c.z + off * s.z);
     parts.push(alongX);
   }
   return mergeNonIndexed(parts);

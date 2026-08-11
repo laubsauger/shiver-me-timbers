@@ -6,6 +6,9 @@
  * channel rules: B = volume, G = persistent wetness (ratchets up from
  * standing water, decays independently — wet planks outlive the puddle),
  * constant evaporation subtracted from BOTH each step so the deck dries.
+ * A = DeckField.drain, seeded once and passed through: a drain cell holds no
+ * water, which is how the deck OUTLINE, the scuppers and open hatchways are
+ * expressed without the outflow pass knowing about masks at all.
  * Off-grid neighbors contribute nothing (their flux fell off the deck).
  * CPU mirror of this exact math: fluxMath.applyInflow/gatherInflow (tested).
  */
@@ -92,12 +95,16 @@ export function createInflowPass(
       // resolve (mirror: fluxMath.applyInflow) — §V9 evaporation on B AND G
       const settled = cell.b.sub(outSum).add(inflow).add(splash).max(0);
       const wet = cell.g.max(settled.mul(u.uWetnessGain).min(1));
-      const volumeOut = settled.sub(u.uEvapVolume).max(0);
-      const wetnessOut = wet.sub(u.uEvapWetness).max(0);
+      // A carries DeckField.drain (seeded once, passed through here — writing
+      // 0 into it would erase the mask on the first step and quietly restore
+      // the flat-rectangle deck the field exists to replace)
+      const drain = cell.a.greaterThan(0.5);
+      const volumeOut = select(drain, float(0), settled.sub(u.uEvapVolume).max(0));
+      const wetnessOut = select(drain, float(0), wet.sub(u.uEvapWetness).max(0));
       textureStore(
         stateDst,
         uvec2(ivec2(x, y)),
-        vec4(cell.r, wetnessOut, volumeOut, 0),
+        vec4(cell.r, wetnessOut, volumeOut, cell.a),
       ).toWriteOnly();
     });
   })().compute(w * h);

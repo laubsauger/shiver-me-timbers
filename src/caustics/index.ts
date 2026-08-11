@@ -154,6 +154,7 @@ function neutral(depth: TslNode): WaterLighting {
     roughnessScale: float(1),
     reliefScale: float(1),
     caustics: vec3(0, 0, 0),
+    causticDarken: float(1),
     wet: float(0),
     submerged: float(0),
     depth,

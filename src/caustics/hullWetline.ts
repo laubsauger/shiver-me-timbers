@@ -104,7 +104,13 @@ export class HullWetline {
     this.texture.wrapS = THREE.ClampToEdgeWrapping;
     this.texture.wrapT = THREE.ClampToEdgeWrapping;
     this.texture.generateMipmaps = false;
-    this.texture.needsUpdate = true;
+    // §V.28 / §B.8 class: publish the seed BEFORE the first update, so the
+    // texture never spends a frame holding an implicit zero. A raw zero here
+    // would read as "the sea reached ship-local y = 0" — plausible enough to
+    // hide a wiring failure, which is exactly the silent-wrongness this
+    // project keeps paying for. The seed is bone dry instead: unambiguous,
+    // and the first updateFromHullContact corrects it the same frame.
+    this.publish();
   }
 
   /** ship-local z of grid station `i` (0 = stern, stations−1 = bow) */
@@ -174,6 +180,10 @@ export class HullWetline {
     for (let k = n; k < this.wetHeight.length; k++) {
       this.wetHeight[k] = dryStep(this.wetHeight[k], -Infinity, cp.wetDryRate, dt);
     }
+    this.publish();
+  }
+
+  private publish(): void {
     for (let k = 0; k < this.wetHeight.length; k++) {
       const v = this.wetHeight[k];
       // −Infinity is the "never touched" seed; the shader wants a finite

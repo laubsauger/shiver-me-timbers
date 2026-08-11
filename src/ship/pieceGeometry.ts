@@ -39,6 +39,24 @@ import {
   buildTransomGeometry,
   type TransomShape,
 } from './pieceGeometryStern';
+import {
+  buildChannelGeometry,
+  buildGunportGeometry,
+  buildMouldingGeometry,
+} from './pieceGeometryDetail';
+import {
+  buildAnchorGeometry,
+  buildCatheadGeometry,
+  buildFigureheadGeometry,
+  buildHeadrailGeometry,
+} from './pieceGeometryHead';
+import {
+  buildBinnacleGeometry,
+  buildPennantGeometry,
+  buildPinRailGeometry,
+  buildRatlinesGeometry,
+  buildWindowGeometry,
+} from './pieceGeometryRig';
 
 export { buildSailGeometry } from './pieceGeometryShapes';
 export { buildHoledVariant } from './pieceGeometryHoled';
@@ -144,7 +162,7 @@ export function buildPieceGeometry(
       // side rails carry hull hints → curve with taper + sheer;
       // straight runs (stern balustrade) keep the post-run builder
       return hull !== null
-        ? buildCurvedRail(hull, aabb, shape?.railInset ?? 0.2)
+        ? buildCurvedRail(hull, aabb, shape?.railInset ?? 0.2, shape)
         : buildRailGeometry(aabb);
     case 'transom':
       // lofted cap matching the shell's aft section (closes the stern);
@@ -152,6 +170,34 @@ export function buildPieceGeometry(
       return hull !== null ? buildTransomGeometry(hull as TransomShape) : box(aabb);
     case 'gallery':
       return buildGalleryGeometry(aabb);
+    // --- §T.34 detail fittings. The four that must lie ON the lofted shell
+    // (gunports, channels, head rails, mouldings) need the hull hints to find
+    // the surface; without them they fall back to a box rather than floating
+    // off the planking, so a hint-free AI piece still renders (§V18).
+    case 'gunport':
+      return shape !== undefined ? buildGunportGeometry(shape) : box(aabb);
+    case 'channel':
+      return shape !== undefined ? buildChannelGeometry(shape) : box(aabb);
+    case 'headrail':
+      return shape !== undefined ? buildHeadrailGeometry(shape) : box(aabb);
+    case 'moulding':
+      return shape !== undefined ? buildMouldingGeometry(shape) : box(aabb);
+    case 'pennant':
+      return buildPennantGeometry(shape ?? {});
+    case 'ratlines':
+      return shape !== undefined ? buildRatlinesGeometry(shape) : box(aabb);
+    case 'figurehead':
+      return buildFigureheadGeometry(aabb);
+    case 'cathead':
+      return buildCatheadGeometry(aabb);
+    case 'anchor':
+      return buildAnchorGeometry(aabb);
+    case 'pin-rail':
+      return buildPinRailGeometry(aabb);
+    case 'binnacle':
+      return buildBinnacleGeometry(aabb);
+    case 'window':
+      return buildWindowGeometry(aabb);
     case 'keel':
     case 'rudder':
       return box(aabb);

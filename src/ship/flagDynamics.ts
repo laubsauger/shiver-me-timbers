@@ -63,6 +63,14 @@ export function apparentWind(input: ApparentWindInput): ApparentWind {
   return { x: x / mag, z: z / mag, speed: mag };
 }
 
+/** fold an angle into (−π, π] — keeps the value a shader trig call sees small */
+export function wrapAngle(a: number): number {
+  let x = finite(a) % TAU;
+  if (x > Math.PI) x -= TAU;
+  else if (x <= -Math.PI) x += TAU;
+  return x;
+}
+
 /** signed shortest difference a → b, in (−π, π] */
 export function angleDelta(a: number, b: number): number {
   let d = (finite(b) - finite(a)) % TAU;

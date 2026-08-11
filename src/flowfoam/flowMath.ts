@@ -162,6 +162,31 @@ export function advectLookupUv(
  * The ramp ends where the near region's own `edgeFade` begins, so the far tier
  * is at full weight precisely as the near one fades out — no seam, no gap.
  */
+/**
+ * RADIAL region edge fade. Replaces the old product of two per-axis
+ * smoothsteps, which faded over a SQUARE and therefore ended in straight
+ * lines — the user saw the near region's border directly: "a straight straight
+ * hard line cutoff whenever our wake disappears behind us". A circular falloff
+ * cannot produce a straight edge at any camera angle.
+ *
+ * Note this is the WINDOW's fade only. It must never be what actually ends the
+ * wake — the wake has to have dissipated on its own well before it reaches the
+ * border, or the window clips a still-bright trail and no amount of softening
+ * hides it.
+ */
+export function regionEdgeFadeCpu(
+  dx: number,
+  dz: number,
+  size: number,
+  edgeFade: number,
+): number {
+  const outer = size * 0.5;
+  const inner = Math.max(outer * (1 - edgeFade), 1e-6);
+  const d = Math.hypot(dx, dz);
+  const t = Math.min(1, Math.max(0, (d - outer) / (inner - outer)));
+  return t * t * (3 - 2 * t);
+}
+
 export function farBlendWeightCpu(
   dist: number,
   nearSize: number,

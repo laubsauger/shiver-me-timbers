@@ -22,6 +22,10 @@ export interface FlowFoamParams {
   farResolution: number;
   /** far-tier decay half-life (s) — the long settle, minutes not seconds */
   farDecayHalfLife: number;
+  /** far-tier radial edge fade, as a fraction of its half-size. Much wider than
+   * the near tier's: it is the LAST thing before bare ocean, so its falloff has
+   * to be long enough to read as dissipation rather than as a border */
+  farEdgeFade: number;
   /** far-tier foam weight (0 disables the long trail entirely) */
   farStrength: number;
   /** fraction of the near region size at which the far tier starts fading in —
@@ -184,9 +188,10 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     resolution: 512,
     farRegionSize: 640,
     farResolution: 256,
-    farDecayHalfLife: 30,
-    farStrength: 0.6,
-    farInject: 0.25,
+    farDecayHalfLife: 6,
+    farStrength: 1.0,
+    farEdgeFade: 0.45,
+    farInject: 0.85,
     farBlendStart: 0.3,
     captureHeight: 50,
     depthThreshold: 0.35,
@@ -262,7 +267,8 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     farRegionSize: { min: 120, max: 2000, step: 20 },
     farDecayHalfLife: { min: 1, max: 300, step: 1 },
     farStrength: { min: 0, max: 1, step: 0.05 },
-    farInject: { min: 0, max: 1, step: 0.005 },
+    farEdgeFade: { min: 0.05, max: 0.8, step: 0.01 },
+    farInject: { min: 0, max: 3, step: 0.01 },
     farBlendStart: { min: 0.05, max: 0.45, step: 0.01 },
     captureHeight: { min: 5, max: 200, step: 1 },
     depthThreshold: { min: 0.05, max: 3, step: 0.05 },

@@ -16,8 +16,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   advectLookupUv,
+  farBlendWeightCpu,
   flowPotentialCpu,
   flowVectorCpu,
+  regionEdgeFadeCpu,
   regionShiftUv,
   snapToTexel,
   uvForWorld,
@@ -837,8 +839,13 @@ describe('wake field in the track frame (bow vs aft, §V10 follow-up)', () => {
     //    saturated region cannot have however it is tuned
     expect(near.filter((v) => v > 0.15).length).toBeGreaterThan(0);
     expect(near.filter((v) => v < 0.05).length).toBeGreaterThan(0);
-    // 4. the far tier stays a faint remnant, never louder than the near detail
-    expect(Math.max(...far)).toBeLessThan(Math.max(...near));
+    // 4. the tiers are BRIGHTNESS-MATCHED in the handover band. This replaces
+    //    an older "far must be fainter" rule: a fainter far tier is exactly
+    //    what produced the visible step at the near window's border. What the
+    //    seamless handover actually requires is that they agree.
+    const n = Math.max(...near);
+    const f = Math.max(...far);
+    expect(Math.abs(f - n)).toBeLessThan(n * 0.3);
   });
 
   it('HOVE TO: a stopped hull generates no wake and the sea recovers', () => {
@@ -926,6 +933,120 @@ describe('wake field in the track frame (bow vs aft, §V10 follow-up)', () => {
       return w;
     };
     expect(core(8.2)).toBeGreaterThan(core(3));
+  });
+
+  it('NO HARD CUT: the rendered wake fades smoothly, tier handover invisible', () => {
+    // The user's repeated complaint: "there's a straight straight hard line
+    // cutoff whenever our wake disappears behind us". Three compounding causes,
+    // all pinned here:
+    //   1. the near tier hit its window border still at ~0.65 while the far
+    //      tier only carried ~0.19 — a 3.4x brightness step;
+    //   2. the tiers were combined with max(), which steps whenever they differ;
+    //   3. the edge fade was a product of two per-axis smoothsteps, i.e. a
+    //      SQUARE, so the border was literally a straight line.
+    // This models what the OCEAN MATERIAL actually receives — both sliding
+    // windows, both radial fades and the crossfade — not just the field. The
+    // earlier mirror omitted the windows entirely and so measured a beautiful
+    // gradient the GPU never produced.
+    const speed = 8.2;
+    const decayN = decayFactorPerFrame(flowFoamParams.decayHalfLife, DT);
+    const decayF = decayFactorPerFrame(flowFoamParams.farDecayHalfLife, DT);
+    const t = createWakeTrack();
+    const pose = { x: 0, z: 0, fx: 0, fz: 1, speed };
+    let ms = 0;
+    for (let i = 0; i < 120 / DT; i++) {
+      pose.z += speed * DT;
+      advanceTrack(t, pose, DT, CFG);
+      ms = approachExp(ms, speed, DT, flowFoamParams.moundLag);
+    }
+    const pts = trackPoints(t, pose);
+    const cz = pose.z - 12; // ship origin; regions are centred here
+
+    /** accumulate one world cell's history, EARLIEST → now, inside its window */
+    const accum = (y: number, dAstern: number, decay: number, scale: number, win: number) => {
+      let a = 0;
+      const steps = Math.ceil((dAstern + 40) / speed / DT);
+      for (let n = steps - 1; n >= 0; n--) {
+        const dThen = dAstern - speed * n * DT;
+        if (Math.abs(dThen) > win / 2 || Math.abs(y) > win / 2) {
+          a *= decay; // scrolled out of the sliding window: content is gone
+          continue;
+        }
+        a = Math.min(1, a * decay + wakeRateCpu(pts, y, cz - dThen, HULL, WP, ms) * DT * scale);
+      }
+      return a;
+    };
+    const rendered = (y: number, dAstern: number) => {
+      const n =
+        accum(y, dAstern, decayN, 1, flowFoamParams.regionSize) *
+        regionEdgeFadeCpu(y, dAstern, flowFoamParams.regionSize, flowFoamParams.edgeFade);
+      const f =
+        accum(y, dAstern, decayF, flowFoamParams.farInject, flowFoamParams.farRegionSize) *
+        regionEdgeFadeCpu(y, dAstern, flowFoamParams.farRegionSize, flowFoamParams.farEdgeFade) *
+        flowFoamParams.farStrength;
+      const w = farBlendWeightCpu(
+        Math.hypot(y, dAstern),
+        flowFoamParams.regionSize,
+        flowFoamParams.farBlendStart,
+        flowFoamParams.edgeFade,
+      );
+      return n * (1 - w) + f * w;
+    };
+
+    const dists = [10, 25, 40, 48, 52, 56, 60, 64, 70, 80, 100, 140, 200, 280];
+    const peak = dists.map((d) => {
+      let mx = 0;
+      for (let y = -80; y <= 80; y += 2) mx = Math.max(mx, rendered(y, d));
+      return mx;
+    });
+    // 1. MONOTONE: no re-brightening anywhere along the trail
+    for (let i = 1; i < peak.length; i++) {
+      expect(peak[i]).toBeLessThanOrEqual(peak[i - 1] + 1e-9);
+    }
+    // 2. NO STEP across the tier handover (the near window border, ~50-60 m):
+    //    consecutive samples 4 m apart may not drop by more than a tenth
+    for (let i = 1; i < dists.length; i++) {
+      if (dists[i] > 70 || dists[i] < 40) continue;
+      expect(peak[i - 1] - peak[i]).toBeLessThan(0.1);
+    }
+    // 3. and it does actually reach far astern before dying
+    expect(peak[0]).toBeGreaterThan(0.4);
+    expect(peak[dists.indexOf(200)]).toBeGreaterThan(0.05);
+    expect(peak[dists.length - 1]).toBeLessThan(0.15);
+  });
+
+  it('the edge fade is RADIAL — a window border can never be a straight line', () => {
+    // WHY: a per-axis product fades over a square, and a square border seen
+    // from any angle is a straight line across the sea. Radial cannot be.
+    const size = 120;
+    const ef = 0.16;
+    // equal radius in any direction => equal fade (that IS the invariant)
+    const r = 55;
+    const base = regionEdgeFadeCpu(r, 0, size, ef);
+    for (const ang of [0.3, 0.9, 1.4, 2.2, 3.9, 5.1]) {
+      expect(regionEdgeFadeCpu(r * Math.cos(ang), r * Math.sin(ang), size, ef)).toBeCloseTo(base, 12);
+    }
+    // the OLD square fade did not have this property: along a diagonal it
+    // survived far past where it died along an axis
+    const sqFade = (dx: number, dz: number) => {
+      const inner = 0.5 * (1 - ef);
+      const f = (u: number) => {
+        const t = Math.min(1, Math.max(0, (Math.abs(u) - 0.5) / (inner - 0.5)));
+        return t * t * (3 - 2 * t);
+      };
+      return f(dx / size) * f(dz / size);
+    };
+    expect(sqFade(r, 0)).not.toBeCloseTo(sqFade(r * Math.SQRT1_2, r * Math.SQRT1_2), 2);
+    // fully inside => 1, at the rim => 0, monotone between
+    expect(regionEdgeFadeCpu(0, 0, size, ef)).toBeCloseTo(1, 12);
+    expect(regionEdgeFadeCpu(size / 2, 0, size, ef)).toBe(0);
+    // strictly decreasing THROUGH the fade band (inner 50.4 m -> rim 60 m);
+    // everything inside the band is untouched at 1
+    expect(regionEdgeFadeCpu(30, 0, size, ef)).toBeCloseTo(1, 12);
+    expect(regionEdgeFadeCpu(52, 0, size, ef)).toBeGreaterThan(
+      regionEdgeFadeCpu(58, 0, size, ef),
+    );
+    expect(regionEdgeFadeCpu(58, 0, size, ef)).toBeGreaterThan(0);
   });
 
   it('breakup factor is bounded [1−wakeBreakup, 1] and deterministic', () => {

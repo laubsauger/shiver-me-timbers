@@ -91,22 +91,15 @@ export function buildMastRig(
 }
 
 /** Bowsprit: local +y runs along the spar; pitched up from the bow. */
-export function buildBowsprit(
-  p: ShipClassParams,
-  opts: { figurehead: boolean },
-): PieceDef {
+export function buildBowsprit(p: ShipClassParams): PieceDef {
   const r = p.bowspritRadius;
   const len = p.bowspritLength;
   const sockets: SocketDef[] = [
     { id: 'anchor-bowsprit-tip', type: 'rope-anchor', position: [0, len, 0] },
   ];
-  if (opts.figurehead) {
-    sockets.push({
-      id: 'socket-figurehead',
-      type: 'fixture',
-      position: [0, len * 0.9, 0],
-    });
-  }
+  // NOTE: `socket-figurehead` used to live here, 90% of the way out the spar.
+  // A figurehead belongs on the STEM HEAD, so the socket moved to the bow
+  // piece (blueprintParts.figureheadStation) and now actually carries a piece.
   // base sits inboard on the fore deck so the spar visibly roots in the
   // ship and runs out over the stem — no floating joint
   return mkPiece('bowsprit', 'bowsprit',

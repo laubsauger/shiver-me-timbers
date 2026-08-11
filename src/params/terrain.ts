@@ -129,6 +129,20 @@ export interface TerrainParams {
    * uniform.
    */
   receiveCaustics: boolean;
+  /**
+   * Half-width (m) of the band around the waterline over which §V34 water
+   * lighting fades out going up the beach.
+   *
+   * WHY THIS EXISTS: `mode: 'below'` hard-codes the caustics module's own
+   * `submerged` term to 1 — correct for a seabed, wrong for terrain, because
+   * ONE material here shades everything from the −45 m seabed to a +35 m
+   * peak. Without this gate `belowSpan` clamps to `minDepth` on dry ground and
+   * the depth budget (`maxDepth`) only culls water that is too DEEP, so a
+   * hilltop gets lit as though it sat just under the surface. Caustics
+   * crawling over dry sand and dunes is exactly the kind of thing that reads
+   * as "silly" (§V43).
+   */
+  causticsWaterlineBand: number;
 
   // -- slope blend (sand on flat, rock on steep) — terrainBlendMaterial -----
   /** normal.y at the sand↔rock midpoint (1 = flat up, 0 = vertical) */
@@ -194,6 +208,7 @@ export const terrainParams: TerrainParams = registerParams(
     swashFoamNoiseStrength: 0.7,
     dryTime: 11,
     receiveCaustics: true,
+    causticsWaterlineBand: 0.6,
 
     slopeThreshold: 0.72,
     slopeBlendWidth: 0.1,
@@ -229,6 +244,7 @@ function terrainParamsMeta(): Partial<Record<keyof TerrainParams, ParamMeta>> {
     waterline: { min: -5, max: 5, step: 0.05 },
     wetBand: { min: 0, max: 5, step: 0.05 },
     wetDarken: { min: 0, max: 1, step: 0.05 },
+    causticsWaterlineBand: { min: 0.05, max: 5, step: 0.05 },
     runupPeriod: { min: 2, max: 25, step: 0.1 },
     runupRiseFraction: { min: 0.05, max: 0.8, step: 0.01 },
     runupHeightMin: { min: 0, max: 4, step: 0.05 },

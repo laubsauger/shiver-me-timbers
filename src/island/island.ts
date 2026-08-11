@@ -92,6 +92,25 @@ export interface Island {
  * reads bald. Linear (not area) on purpose — quadratic would put ~250 palms
  * on one island and blow §V17 the moment the ship anchors off it.
  */
+/**
+ * Peak height and its floor for a given footprint radius.
+ *
+ * §V43 — this was a straight bug. `peakHeight` was a fixed 26 m while the
+ * scatter varied radius 110-260 m, so peak/radius measured 0.149 at the
+ * biggest island and 0.198 at the smallest: growth made them MORE pancake-
+ * like, and all five landed within one narrow band of gentle dome. Scaling
+ * with radius (same pattern as islandPalmCount) makes the params authored for
+ * the default radius mean the same SHAPE at every size.
+ */
+export function islandPeakHeights(
+  radius: number,
+  ref = islandParams,
+): { peakHeight: number; minPeakHeight: number } {
+  const base = Math.max(ref.radius, 1e-3); // §V28 floored divisor
+  const k = radius / base;
+  return { peakHeight: ref.peakHeight * k, minPeakHeight: ref.minPeakHeight * k };
+}
+
 export function islandPalmCount(radius: number, ref = islandParams): number {
   // `ref` is the UNOVERRIDDEN params: ref.palmCount is authored for
   // ref.radius, and passing the per-island copy (whose radius is the override)
@@ -130,7 +149,10 @@ function buildWaterfallSocket(hm: IslandHeightmap): THREE.Object3D {
 }
 
 export function createIsland(opts: CreateIslandOptions): Island {
-  const p = opts.radius !== undefined ? { ...islandParams, radius: opts.radius } : islandParams;
+  const p =
+    opts.radius !== undefined
+      ? { ...islandParams, radius: opts.radius, ...islandPeakHeights(opts.radius) }
+      : islandParams;
   const heightmap = generateIslandHeightmap(opts.seed, p);
 
   const shared = opts.materials;

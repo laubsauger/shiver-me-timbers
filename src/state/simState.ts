@@ -26,6 +26,14 @@ export interface ProjectileState {
   position: Vec3;
   velocity: Vec3;
   age: number;
+  /**
+   * index into `ships` of the gun that fired this ball. Hit tests skip the
+   * owner's own pieces: deck-mounted cannon-mount sockets sit INSIDE their
+   * own hull-section AABB (galleon mounts at |x| = 3.25 m inside a 4.25 m
+   * half-beam), so without this every shot holes the firing ship on the tick
+   * it is fired — the ship then floods and sinks from its own broadside.
+   */
+  owner: number;
 }
 
 export interface SimState {

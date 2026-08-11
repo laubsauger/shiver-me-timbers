@@ -1,114 +1,212 @@
 /**
- * Placeholder deck heightfield for the §V9 shallow water sim: top-down 2D
- * height grid of the ship deck (x = along length, y = across beam). Encodes
- * deck camber (center crown so water runs to the sides), plank seam grooves
- * (water lingers in crevices), and raised rails at every edge so water pools
- * before draining through a few scupper gaps cut to deck level.
- * Deterministic pure function — ship piece-graph integration replaces this
- * later (§V13) but must keep the same Float32Array row-major contract.
+ * The static deck heightfield the §V9 solve runs on — the Rare talk's
+ * "Surface Water: Setup" slide's *artist supplied static heightfield texture*,
+ * which for us is generated from the ship's own pieces (src/ship's
+ * deckHeightfield.ts) rather than painted.
+ *
+ * WHY IT IS THE WHOLE EFFECT, not a detail: on a flat plane the Mei solve
+ * produces a uniform sheet that slides bodily around as the ship rotates and
+ * reads as a moving decal. The field is what turns rotation bias into water
+ * FINDING the low side — running to the waterway inboard of the bulwark,
+ * held out of a hatch by its coaming, lingering in the cup of an old board,
+ * and leaving through the freeing ports in channels instead of as a wall.
+ *
+ * ONE FIELD, TWO CONSUMERS. src/ship drives the deck's plank relief and tone
+ * from the SAME array. That is the point of not generating our own: two
+ * independently authored fields would disagree about where the low spots are,
+ * the water would pool where the timber does not dish, and no test would
+ * notice. This module therefore AUTHORS NOTHING except a synthetic field for
+ * headless tests — it adapts.
+ *
+ * AXES — src/ship's, adopted wholesale rather than transposed:
+ *   grid x (0 … width−1)  = ACROSS THE BEAM, ship +x (toward starboard)
+ *   grid y (0 … height−1) = ALONG THE LENGTH, ship +z (toward the bow)
+ * so the talk's 512 × 192 is `width` 192 across the beam and `height` 512
+ * along the length, row-major with x fastest. Everything downstream — uv,
+ * the tilt gradient, splash placement — follows this and nothing transposes
+ * anywhere, because a transpose that is right in three places and wrong in
+ * the fourth is invisible until the deck is on screen.
  */
+import { deckWaterParams } from '../params/deckwater';
+import type { DeckFrame } from './deckFrame';
 
-export interface DeckHeightfieldOptions {
-  /** cells along ship length (x) */
+/**
+ * Structural view of `DeckHeightfield` from src/ship/deckHeightfield.ts —
+ * declared here rather than imported, the same convention foam/bowSpray uses
+ * for hullContact's cutwater: this module stays out of the ship's import
+ * graph and testable without one. Field names and units match exactly.
+ *
+ * `solid` (bulwarks, coamings, mast partners, the capstan drum) is
+ * deliberately NOT consumed: those obstacles are already standing proud in
+ * `data`, so the hydraulic head keeps water out of them for free. Treating
+ * them as drains instead would make the bulwark a sink and quietly empty the
+ * deck through its own rail.
+ */
+export interface DeckHeightfieldSource {
+  /** texels across the beam (ship x) */
   width: number;
-  /** cells across the beam (y) */
+  /** texels along the length (ship z) */
   height: number;
-  /** camber crown height at beam centerline (height units) */
-  camberHeight?: number;
-  /** cells between plank seams — planks run lengthwise (seams at const y) */
-  plankSpacing?: number;
-  /** seam groove depth (height units) */
-  plankGrooveDepth?: number;
-  /** seam groove width in cells */
-  plankGrooveWidth?: number;
-  /** rail height above deck at the grid border (height units) */
-  railHeight?: number;
-  /** rail thickness in cells */
-  railWidth?: number;
-  /** scupper gaps per side (long) rail, cut down to deck level */
-  scupperCount?: number;
-  /** scupper gap width in cells */
-  scupperWidth?: number;
+  /** ship-space rectangle the field covers */
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+  /** ship-space y of the reference deck plane — the field's height 0 */
+  deckY: number;
+  /** terrain height in metres relative to `deckY`, row-major, x fastest */
+  data: Float32Array;
+  /** 0..1 coverage of the water domain; 0 = outboard of the planking */
+  mask: Float32Array;
+}
+
+/** what the solver actually seeds its state texture from */
+export interface DeckField {
+  width: number;
+  height: number;
+  /** metres above the deck plane, row-major (index = y * width + x) */
+  heights: Float32Array;
+  /**
+   * Where water LEAVES the ship: 1 = drain, 0 = deck. Derived from the
+   * source's coverage mask — the grid is a rectangle and the deck is not, so
+   * the corners abreast of the stem are thin air. A drain cell holds no
+   * water: the resolve zeroes its volume and wetness every step, which makes
+   * it a permanent low-head sink its neighbours pour into, with no mask
+   * branch anywhere in either compute pass.
+   */
+  drain: Uint8Array;
+}
+
+/** every cell finite and both arrays the right length (Rule 8, §V28) */
+export function validateDeckField(f: DeckField): void {
+  const n = f.width * f.height;
+  if (!(f.width > 1 && f.height > 1)) {
+    throw new Error(`deckwater: DeckField dims ${f.width}×${f.height} must exceed 1`);
+  }
+  if (f.heights.length !== n) {
+    throw new Error(`deckwater: DeckField heights ${f.heights.length} ≠ ${f.width}×${f.height}`);
+  }
+  if (f.drain.length !== n) {
+    throw new Error(`deckwater: DeckField drain ${f.drain.length} ≠ ${f.width}×${f.height}`);
+  }
+  for (let i = 0; i < n; i++) {
+    if (!Number.isFinite(f.heights[i])) {
+      throw new Error(`deckwater: DeckField height[${i}] is not finite`);
+    }
+  }
+}
+
+/** where the source's ship-space rectangle puts the grid (§T31 mapping) */
+export function frameFromSource(src: DeckHeightfieldSource): DeckFrame {
+  return {
+    minX: src.minX,
+    maxX: src.maxX,
+    minZ: src.minZ,
+    maxZ: src.maxZ,
+    planeY: src.deckY,
+  };
 }
 
 /**
- * Row-major Float32Array, index = y * width + x. Height 0 = deck base at the
- * rail line; interior deck rises with camber; rails sit railHeight above.
- * Off-grid hydraulic head is 0 (fluxMath.EDGE_DRAIN_HEAD) so scupper cells
- * (height 0) are the preferred drain paths.
+ * Adapt src/ship's field to what the solver seeds from. The only real work is
+ * the drain mask: coverage is fractional at the outline, and a texel that is
+ * mostly outboard is not deck.
  */
-export function generateDeckHeightfield(o: DeckHeightfieldOptions): Float32Array {
-  const {
-    width: w,
-    height: h,
-    camberHeight = 0.03,
-    plankSpacing = 8,
-    plankGrooveDepth = 0.008,
-    plankGrooveWidth = 1,
-    railHeight = 0.15,
-    railWidth = 3,
-    scupperCount = 4,
-    scupperWidth = 6,
-  } = o;
-
-  const field = new Float32Array(w * h);
-  const halfBeam = (h - 1) / 2;
-
-  for (let y = 0; y < h; y++) {
-    // camber: parabolic crown, max at beam center, 0 at the rail line
-    const t = (y - halfBeam) / halfBeam; // -1..1 across the beam
-    const camber = camberHeight * (1 - t * t);
-    // plank seam grooves run lengthwise → rows at regular y intervals
-    const seam = y % plankSpacing < plankGrooveWidth;
-    for (let x = 0; x < w; x++) {
-      let v = camber;
-      if (seam) v = Math.max(0, v - plankGrooveDepth);
-      if (isRail(x, y, w, h, railWidth, scupperCount, scupperWidth)) {
-        v = camberHeight + railHeight; // rails top out above any deck point
-      } else if (isScupper(x, y, w, h, railWidth, scupperCount, scupperWidth)) {
-        v = 0; // scupper: rail cut to base level — drains overboard
-      }
-      field[y * w + x] = v;
-    }
+export function deckFieldFromSource(src: DeckHeightfieldSource): DeckField {
+  const n = src.width * src.height;
+  if (src.data.length !== n || src.mask.length !== n) {
+    throw new Error(
+      `deckwater: source arrays (${src.data.length}/${src.mask.length}) ` +
+      `≠ ${src.width}×${src.height} — deck field contract broken`,
+    );
   }
+  const drain = new Uint8Array(n);
+  const cut = deckWaterParams.maskDrainBelow;
+  for (let i = 0; i < n; i++) {
+    // NaN coverage counts as off-deck: a hole in the mask must drain, never
+    // become a cell that hoards water no head difference can reach
+    if (!(src.mask[i] >= cut)) drain[i] = 1;
+  }
+  const field: DeckField = {
+    width: src.width,
+    height: src.height,
+    heights: src.data,
+    drain,
+  };
+  validateDeckField(field);
   return field;
 }
 
-/** cell is inside the rail band along any edge (and not a scupper gap) */
-function isRail(
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  railWidth: number,
-  scupperCount: number,
-  scupperWidth: number,
-): boolean {
-  const inBand = x < railWidth || x >= w - railWidth || y < railWidth || y >= h - railWidth;
-  if (!inBand) return false;
-  return !isScupper(x, y, w, h, railWidth, scupperCount, scupperWidth);
+export interface SyntheticDeckOptions {
+  /** cells across the beam (ship x) */
+  width: number;
+  /** cells along the length (ship z) */
+  height: number;
+  /** crown at the centreline, metres — decks shed water outboard */
+  camber?: number;
+  /** gutter depth inboard of the bulwark, metres */
+  waterwayDepth?: number;
+  /** bulwark ring height, metres */
+  bulwarkHeight?: number;
+  /** freeing ports per side, cut through the bulwark to waterway level */
+  portCount?: number;
 }
 
 /**
- * Scupper gaps: evenly spaced cuts in the two long (side) rails only,
- * excluding the corners so bow/stern rails stay closed.
+ * A synthetic stand-in for the ship's field, for headless tests and for
+ * bringing the solver up before the ship exists. Deliberately crude — camber,
+ * a waterway, a bulwark ring, freeing ports — because anything richer would
+ * be a second authority on deck shape competing with src/ship's, which is the
+ * one failure this module's header exists to prevent. Deterministic (§V2).
  */
-function isScupper(
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  railWidth: number,
-  scupperCount: number,
-  scupperWidth: number,
-): boolean {
-  if (scupperCount <= 0) return false;
-  const onSideRail = y < railWidth || y >= h - railWidth;
-  if (!onSideRail) return false;
-  if (x < railWidth || x >= w - railWidth) return false; // keep corners closed
-  for (let i = 0; i < scupperCount; i++) {
-    const center = ((i + 1) * w) / (scupperCount + 1);
-    if (Math.abs(x - center) <= scupperWidth / 2) return true;
+export function syntheticDeckField(o: SyntheticDeckOptions): DeckHeightfieldSource {
+  const w = Math.max(4, Math.round(o.width));
+  const h = Math.max(4, Math.round(o.height));
+  const camber = o.camber ?? 0.085;
+  const waterway = o.waterwayDepth ?? 0.028;
+  const bulwark = o.bulwarkHeight ?? 0.95;
+  const ports = Math.max(0, Math.round(o.portCount ?? 4));
+  const data = new Float32Array(w * h);
+  const mask = new Float32Array(w * h);
+  const ring = Math.max(1, Math.round(w * 0.04)); // bulwark thickness in cells
+
+  for (let y = 0; y < h; y++) {
+    // elliptical plan view, pointed at the stem — the same silhouette family
+    // as sea-physics' waterlineFromBox fallback
+    const t = (y + 0.5) / h; // 0 = transom, 1 = stem
+    const halfSpan = 0.5 * Math.sqrt(Math.max(0, 1 - Math.pow(t * 1.9 - 0.9, 6)));
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const u = (x + 0.5) / w - 0.5; // −0.5 … +0.5 across the beam
+      const inside = Math.abs(u) <= halfSpan;
+      mask[i] = inside ? 1 : 0;
+      if (!inside) {
+        data[i] = 0;
+        continue;
+      }
+      const across = halfSpan > 0 ? u / halfSpan : 0; // −1 … 1
+      let height = camber * (1 - across * across);
+      const edge = (1 - Math.abs(across)) * halfSpan * w; // cells from the outline
+      if (edge < ring) {
+        // freeing ports: cut the bulwark to waterway level at intervals, so
+        // the deck has real drain paths rather than leaking off the border
+        const port = ports > 0 && Math.abs(((y / h) * (ports + 1)) % 1 - 0.5) < 0.06;
+        height = port ? -waterway : bulwark;
+      } else if (edge < ring * 2.4) {
+        height = -waterway; // the waterway gutter
+      }
+      data[i] = height;
+    }
   }
-  return false;
+  return {
+    width: w,
+    height: h,
+    minX: -0.5,
+    maxX: 0.5,
+    minZ: -0.5,
+    maxZ: 0.5,
+    deckY: 0,
+    data,
+    mask,
+  };
 }

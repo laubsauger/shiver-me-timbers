@@ -9,10 +9,28 @@ import { registerParams, type ParamMeta } from './registry';
 export interface DeckWaterParams {
   /** master switch — false compiles the deck material hook out entirely */
   enabled: boolean;
-  /** grid cells along ship length (x) */
+  /**
+   * Fallback grid dims, used ONLY for the synthetic field. When the ship's
+   * generated deck heightfield is supplied (it always is in-game) the field
+   * dictates the dims and these are ignored — src/ship's DECK_FIELD_BEAM /
+   * DECK_FIELD_LENGTH are the shared 192 × 512.
+   * Axes: width = across the beam (ship x), height = along the length (ship z).
+   */
   gridWidth: number;
-  /** grid cells across the beam (y) */
   gridHeight: number;
+  /**
+   * A source texel whose water-domain coverage falls below this is off the
+   * deck outline and becomes a drain. The grid is a rectangle and the deck is
+   * not — the corners abreast of the stem are thin air.
+   */
+  maskDrainBelow: number;
+  /**
+   * How far below the deck's LOWEST point a drain cell's hydraulic head sits
+   * (m). The waterway gutter is below deck datum, so a drain at datum would
+   * stand higher than the gutter and water would pool in it rather than
+   * running out through the freeing ports.
+   */
+  drainDrop: number;
   /**
    * Solver substeps per update. MUST be even: the ping-pong lands back on the
    * front texture, so the material's sampler never changes binding mid-flight
@@ -33,16 +51,6 @@ export interface DeckWaterParams {
   wetnessGain: number;
   /** splash splat gaussian radius in cells */
   splashRadius: number;
-  /** deck heightfield: camber crown height at beam center (height units) */
-  camberHeight: number;
-  /** plank seam groove depth (height units) */
-  plankGrooveDepth: number;
-  /** cells between plank seams (planks run lengthwise) */
-  plankSpacing: number;
-  /** raised rail height at deck edges — water pools before scupper drain */
-  railHeight: number;
-  /** scupper gaps per side rail (rail cut to deck level → drains overboard) */
-  scupperCount: number;
 
   // ── §V27 bow-immersion sensor: EVENT gates, not a passive emitter ───────
   /**
@@ -108,8 +116,10 @@ export const deckWaterParams: DeckWaterParams = registerParams(
   'deckwater',
   {
     enabled: true,
-    gridWidth: 512,
-    gridHeight: 192,
+    gridWidth: 192, // across the beam
+    gridHeight: 512, // along the length
+    maskDrainBelow: 0.5,
+    drainDrop: 0.05,
     substeps: 2,
     fluxRate: 18,
     tiltBiasStrength: 0.25,
@@ -117,11 +127,6 @@ export const deckWaterParams: DeckWaterParams = registerParams(
     evapWetness: 0.012,
     wetnessGain: 30,
     splashRadius: 6,
-    camberHeight: 0.03,
-    plankGrooveDepth: 0.008,
-    plankSpacing: 8,
-    railHeight: 0.15,
-    scupperCount: 4,
 
     immersionSigma: 0.55,
     immersionFullSigma: 1.6,
@@ -154,16 +159,36 @@ export const deckWaterParams: DeckWaterParams = registerParams(
 function deckWaterParamsMeta(): Partial<Record<keyof DeckWaterParams, ParamMeta>> {
   return {
     substeps: { min: 2, max: 8, step: 2 }, // even only — see DeckWaterParams
+    maskDrainBelow: { min: 0.05, max: 0.95, step: 0.05 },
+    drainDrop: { min: 0.005, max: 0.5, step: 0.005 },
     fluxRate: { min: 0, max: 60, step: 0.5 },
     tiltBiasStrength: { min: 0, max: 2, step: 0.01 },
     evapVolume: { min: 0, max: 0.5, step: 0.001 },
     evapWetness: { min: 0, max: 0.2, step: 0.001 },
     wetnessGain: { min: 0, max: 100, step: 0.5 },
     splashRadius: { min: 1, max: 32, step: 1 },
-    camberHeight: { min: 0, max: 0.2, step: 0.005 },
-    plankGrooveDepth: { min: 0, max: 0.05, step: 0.001 },
-    plankSpacing: { min: 2, max: 32, step: 1 },
-    railHeight: { min: 0, max: 0.5, step: 0.01 },
-    scupperCount: { min: 0, max: 16, step: 1 },
+
+    immersionSigma: { min: 0, max: 3, step: 0.05 },
+    immersionFullSigma: { min: 0.1, max: 4, step: 0.05 },
+    rearmSigma: { min: 0, max: 2, step: 0.05 },
+    sigmaFloor: { min: 0.01, max: 1, step: 0.01 },
+    speedThreshold: { min: 0, max: 12, step: 0.1 },
+    speedFull: { min: 0.5, max: 20, step: 0.1 },
+    burialRate: { min: 0, max: 8, step: 0.05 },
+    burialRateFull: { min: 0.1, max: 12, step: 0.05 },
+    refractory: { min: 0, max: 3, step: 0.05 },
+    splashVolume: { min: 0, max: 20, step: 0.1 },
+    splashCount: { min: 1, max: 8, step: 1 },
+    splashSetback: { min: 0, max: 0.5, step: 0.005 },
+    splashMargin: { min: 0, max: 0.3, step: 0.005 },
+    splashBeamSpread: { min: 0, max: 2, step: 0.05 },
+
+    wetRoughness: { min: 0.02, max: 1, step: 0.01 },
+    wetRelief: { min: 0, max: 1, step: 0.01 },
+    poolDepthRef: { min: 0.005, max: 0.5, step: 0.005 },
+    poolRoughness: { min: 0.02, max: 1, step: 0.01 },
+    waterHeightScale: { min: 0, max: 4, step: 0.05 },
+    deckBandInner: { min: 0, max: 3, step: 0.05 },
+    deckBandOuter: { min: 0.05, max: 5, step: 0.05 },
   };
 }

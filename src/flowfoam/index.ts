@@ -32,7 +32,7 @@
  * against docs/flows.png is pending main-thread integration + screenshot.
  */
 import type * as THREE from 'three/webgpu';
-import { float, smoothstep, texture, uniform, vec2 } from 'three/tsl';
+import { float, mix, smoothstep, texture, uniform, vec2 } from 'three/tsl';
 import { flowFoamParams, type FlowFoamParams } from '../params/flowfoam';
 import { createFlowNoiseUniforms } from './flowNoise';
 import { createAccumulation, FOAM_INJECTION_LAYER } from './accumulation';
@@ -69,6 +69,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
   const uEdgeFade = uniform(p.edgeFade);
   const uFarStrength = uniform(p.farStrength);
   const uFarBlendStart = uniform(p.farBlendStart);
+  const uFarEdgeFade = uniform(p.farEdgeFade);
   let time = 0;
 
   return {
@@ -136,6 +137,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       uEdgeFade.value = p.edgeFade;
       uFarStrength.value = p.farStrength;
       uFarBlendStart.value = p.farBlendStart;
+      uFarEdgeFade.value = p.farEdgeFade;
       // age + extend the world-space cutwater track BEFORE the computes read it
       wake.advance(dt);
       wake.pushParams();
@@ -151,15 +153,17 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
      * same idiom as surfaceMaterial's distance fades.
      */
     foamSampleNode(worldXZ: any): any {
-      const sampleRegion = (a: typeof acc, tex: THREE.StorageTexture) => {
+      // RADIAL edge fade (flowMath.regionEdgeFadeCpu): the old per-axis product
+      // faded over a square, so the window border was a straight line and that
+      // is precisely what the user saw cutting the wake off.
+      const sampleRegion = (a: typeof acc, tex: THREE.StorageTexture, fade: any) => {
         const c = a.uniforms.uCenter;
         const s = a.uniforms.uSize;
         const u = worldXZ.x.sub(c.x).div(s).add(0.5);
         const v = float(0.5).sub(worldXZ.y.sub(c.y).div(s)); // v flip (flowMath.ts)
-        const inner = float(0.5).mul(uEdgeFade.oneMinus());
-        const edge = smoothstep(float(0.5), inner, u.sub(0.5).abs()).mul(
-          smoothstep(float(0.5), inner, v.sub(0.5).abs()),
-        );
+        const outer = s.mul(0.5);
+        const inner = outer.mul(fade.oneMinus()).max(1e-6);
+        const edge = smoothstep(outer, inner, worldXZ.sub(c).length());
         return texture(tex, vec2(u, v)).r.mul(edge);
       };
       // Crossfade, not a plain max: the far tier is smooth and long-lived, so
@@ -172,8 +176,14 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       const e0 = nearSize.mul(uFarBlendStart);
       const e1 = nearSize.mul(0.5).mul(uEdgeFade.oneMinus()).max(e0.add(1e-6));
       const farW = smoothstep(e0, e1, dist);
-      return sampleRegion(acc, acc.foamTexture).max(
-        sampleRegion(far, far.foamTexture).mul(uFarStrength).mul(farW),
+      // MIX, not max: a max between two tiers of different brightness steps at
+      // the handover however well they are faded. A lerp is continuous by
+      // construction — near detail inside, far coverage outside, and the band
+      // between is a genuine blend. §V23 functional mix(a, b, t).
+      return mix(
+        sampleRegion(acc, acc.foamTexture, uEdgeFade),
+        sampleRegion(far, far.foamTexture, uFarEdgeFade).mul(uFarStrength),
+        farW,
       );
     },
 

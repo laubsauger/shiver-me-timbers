@@ -66,6 +66,21 @@ export function hullShapeHints(
   };
 }
 
+/**
+ * Where a figurehead mounts: on the STEM HEAD, under the bowsprit's root.
+ *
+ * `socket-figurehead` used to be declared 90% of the way out along the
+ * bowsprit — that is the dolphin-striker station, not a figurehead's, and
+ * nothing was mounted on it anyway. Shared by the socket (blueprintEnds) and
+ * the piece that sits on it (blueprintDetail) so the two cannot drift.
+ */
+export function figureheadStation(p: ShipClassParams): { y: number; z: number } {
+  const L2 = p.hullLength / 2;
+  const z = L2 + p.bowLength * 0.72;
+  const shape = hullShapeHints(p, 0, L2, L2 + p.bowLength) as unknown as HullShape;
+  return { y: hullTopY(z, shape) - 0.55, z };
+}
+
 export function buildKeel(p: ShipClassParams): PieceDef {
   return mkPiece('keel', 'keel', [0, -p.draft, 0], {
     min: [-p.keelWidth / 2, -p.keelHeight, -p.hullLength / 2],

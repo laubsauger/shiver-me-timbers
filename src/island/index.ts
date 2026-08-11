@@ -24,10 +24,16 @@ export {
 } from './heightmap';
 export { buildIslandGeometry, createIslandMesh, selectTerrainLod } from './islandMesh';
 export { generateRockPlacements, deformRockGeometry, createRocks } from './rocks';
-export { islandPalmPlacement, createIslandPalms, palmLodCount } from './palms';
+export {
+  islandPalmPlacement,
+  createIslandPalms,
+  palmLodCount,
+  palmGroveAngles,
+} from './palms';
 export {
   createIsland,
   islandPalmCount,
+  islandPeakHeights,
   type Island,
   type IslandFrame,
   type CreateIslandOptions,

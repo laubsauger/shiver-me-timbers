@@ -5,10 +5,13 @@
  */
 import type { ShipClassParams } from '../params/ship';
 import type { PieceDef, SocketDef, Vec3 } from './pieceTypes';
-import { hullShapeHints, mkPiece } from './blueprintParts';
+import { figureheadStation, hullShapeHints, mkPiece } from './blueprintParts';
 import { hullEnvelope, hullHalfWidthAt, hullTopY, type HullShape } from './hullMath';
 
-export function buildBowAndTransom(p: ShipClassParams): PieceDef[] {
+export function buildBowAndTransom(
+  p: ShipClassParams,
+  opts: { figurehead?: boolean } = {},
+): PieceDef[] {
   const L2 = p.hullLength / 2;
   // widest point of the shell's aft section — the transom can never be
   // wider than the hull it caps (that was the panel poking out astern)
@@ -49,6 +52,13 @@ export function buildBowAndTransom(p: ShipClassParams): PieceDef[] {
       sockets: [
         cleat('bow-port', [-bowCleatX, bowDeckY, bowZ - L2]),
         cleat('bow-starboard', [bowCleatX, bowDeckY, bowZ - L2]),
+        ...(opts.figurehead === true
+          ? [{
+              id: 'socket-figurehead',
+              type: 'fixture' as const,
+              position: [0, figureheadStation(p).y, figureheadStation(p).z - L2] as Vec3,
+            }]
+          : []),
       ],
       shape: hullShapeHints(p, 0, L2, L2 + p.bowLength),
     }),
@@ -92,6 +102,9 @@ export function buildRails(
           shape: {
             ...hullShapeHints(p, sign, -len / 2, len / 2),
             railInset: p.railInset,
+            // the stanchion height ABOVE THE DECK; the sheer is added per
+            // station on top of it (see buildCurvedRail)
+            railHeight: p.railHeight,
           },
         }),
     );

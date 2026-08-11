@@ -19,11 +19,13 @@ import {
   positionWorld,
   sin,
   smoothstep,
+  texture as textureNode,
   uniform,
   vec2,
   vec3,
   vec4,
 } from 'three/tsl';
+import type { DeckFieldSampler } from './deckFieldTexture';
 import { waterLighting } from '../caustics';
 import { hash2, triplanarFbm } from '../terrain/noise';
 import { reliefNormal } from './surfaceRelief';
@@ -70,6 +72,13 @@ export interface WoodTones {
    * ship, and it came from a coordinate choice, not from a missing feature.
    */
   sparAxis?: 'x' | 'y';
+  /**
+   * Deck-family pieces read the procedural deck heightfield so their boards
+   * genuinely sit at slightly different heights — the same field the deck-water
+   * solver flows over, so a puddle pools in a hollow you can SEE
+   * (deckHeightfield.ts). Absent on every other family.
+   */
+  deckField?: DeckFieldSampler;
 }
 
 /**
@@ -121,6 +130,8 @@ export function createWoodMaterial(
   const uWetSmooth = uniform(p.wetSmooth);
   const uWetlineFade = uniform(p.wetlineFade);
   const uRoughBase = uniform(p.roughBase);
+  const uDeckRelief = uniform(p.deckFieldRelief);
+  const uDeckTone = uniform(p.deckFieldTone);
 
   // grain: fbm stretched along z (plank axis) so streaks read lengthwise
   const samplePos = positionLocal
@@ -204,6 +215,30 @@ export function createWoodMaterial(
     height = height.add(band.oneMinus().mul(uWaleRelief));
   }
 
+  // --- the deck heightfield (§T.34 / talk "Surface Water: Setup") -----------
+  // One generated field drives BOTH this relief and the deck-water solver, so
+  // the boards you can see standing proud are the boards the water runs off,
+  // and the hollows worn by the capstan are where it pools. Only the B channel
+  // (per-board offsets) is read here: the structural channel is real geometry
+  // already — coamings, castle steps and the bulwark are pieces, and adding
+  // them again as shading relief would double-count them.
+  if (tones.deckField !== undefined) {
+    const fld = tones.deckField;
+    // ship-local, not piece-local: the four deck-family kinds sit at four
+    // different origins, and one projection has to serve all of them
+    const local = uShipWorldInverse.mul(vec4(positionWorld, 1)).xyz;
+    const fu = local.x.sub(fld.minX).div(Math.max(1e-3, fld.maxX - fld.minX));
+    const fv = local.z.sub(fld.minZ).div(Math.max(1e-3, fld.maxZ - fld.minZ));
+    const sample = textureNode(fld.texture, vec2(fu, fv));
+    // horizontal faces only — a top-down field smeared down a bulkhead reads
+    // as vertical streaks
+    const onDeck = sample.g.mul(upness);
+    height = height.add(sample.b.mul(uDeckRelief).mul(onDeck));
+    // and the tone shift that makes the variation readable in daylight, not
+    // just in raking light: a proud board is a shade lighter than a sunk one
+    color = color.mul(float(1).add(sample.b.mul(uDeckTone).mul(onDeck)));
+  }
+
   // sun-bleached upper surfaces: horizontal faces take the weather, going
   // paler and chalkier than the sheltered vertical planking
   color = mix(color, mix(color, uBleach, uBleachStrength), upness);
@@ -272,6 +307,8 @@ export function createWoodMaterial(
       uWetSmooth.value = p.wetSmooth;
       uWetlineFade.value = p.wetlineFade;
       uRoughBase.value = p.roughBase;
+      uDeckRelief.value = p.deckFieldRelief;
+      uDeckTone.value = p.deckFieldTone;
     },
   };
 }

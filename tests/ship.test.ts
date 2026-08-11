@@ -147,13 +147,37 @@ describe('galleon specifics (docs/ship-reference-schema.png)', () => {
     }
   });
 
-  it('declares the fixture sockets: wheel, capstan, lookout, figurehead', () => {
+  it('declares the fixture sockets: wheel, capstan, lookout, figurehead, catheads', () => {
     const fixtures = pieces
       .flatMap((p) => p.sockets)
       .filter((s) => s.type === 'fixture')
       .map((s) => s.id)
       .sort();
-    expect(fixtures).toEqual(['socket-capstan', 'socket-figurehead', 'socket-lookout', 'socket-wheel']);
+    expect(fixtures).toEqual([
+      'socket-capstan',
+      'socket-cathead-port',
+      'socket-cathead-starboard',
+      'socket-figurehead',
+      'socket-lookout',
+      'socket-wheel',
+    ]);
+  });
+
+  it('mounts a piece on socket-figurehead, at the station it declares', () => {
+    // WHY: `socket-figurehead` was declared for many sessions with NOTHING
+    // mounted on it, so the most-looked-at point of the silhouette was bare
+    // planking — and the socket itself sat 90% of the way out the bowsprit,
+    // which is not where a figurehead goes. A declared fixture socket with no
+    // piece on it is an invisible gap; assert the pairing, not just the socket.
+    const carrier = pieces.find((x) => x.sockets.some((s) => s.id === 'socket-figurehead'))!;
+    const socket = carrier.sockets.find((s) => s.id === 'socket-figurehead')!;
+    const figurehead = pieces.find((x) => x.kind === 'figurehead')!;
+    expect(figurehead.parent).toBe(carrier.id);
+    expect(figurehead.transform.position).toEqual(socket.position);
+    // and it is forward of the stem, not amidships or out on the spar
+    expect(carrier.transform.position[2] + socket.position[2]).toBeGreaterThan(
+      galleonParams.hullLength / 2,
+    );
   });
 
   it('cannons are deck-mounted, not hull gunports', () => {

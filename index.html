@@ -42,28 +42,14 @@
         visibility: visible;
         transition: opacity 650ms ease, visibility 650ms step-end;
       }
-      #boot-splash::before,
-      #boot-splash::after {
-        content: '';
+      .boot-splash__seascape {
         position: absolute;
-        left: -8rem;
-        width: calc(100% + 16rem);
-        height: 9rem;
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 240 144'%3E%3Cpath d='M0 28C20 4 40 4 60 28S100 52 120 28 160 4 180 28 220 52 240 28V144H0Z' fill='%23198b97' fill-opacity='.2'/%3E%3Cpath d='M0 28C20 4 40 4 60 28S100 52 120 28 160 4 180 28 220 52 240 28' fill='none' stroke='%232ab3b4' stroke-opacity='.28' stroke-width='2'/%3E%3C/svg%3E");
-        background-position: left top;
-        background-repeat: repeat-x;
-        background-size: 15rem 9rem;
-        animation: boot-swell 5s ease-in-out infinite alternate;
-      }
-      #boot-splash::before {
-        bottom: -2rem;
-      }
-      #boot-splash::after {
-        bottom: -3.75rem;
-        opacity: 0.58;
-        background-size: 18rem 10.8rem;
-        animation-delay: -2.5s;
-        animation-direction: alternate-reverse;
+        inset: -2%;
+        background: url('/assets/branding/loading-seascape.jpg') center bottom / cover no-repeat;
+        opacity: 0.92;
+        pointer-events: none;
+        transform: scale(1.025) translate3d(-0.3%, 0.4%, 0);
+        animation: boot-seascape-drift 14s cubic-bezier(0.37, 0, 0.63, 1) infinite alternate;
       }
       #boot-splash.boot-splash--ready {
         opacity: 0;
@@ -131,9 +117,10 @@
         0%, 100% { transform: translateY(0) rotate(-0.4deg); }
         50% { transform: translateY(-0.55rem) rotate(0.4deg); }
       }
-      @keyframes boot-swell {
-        from { transform: translate3d(-2rem, 0.25rem, 0); }
-        to { transform: translate3d(2rem, -0.55rem, 0); }
+      @keyframes boot-seascape-drift {
+        0% { transform: scale(1.025) translate3d(-0.3%, 0.4%, 0); }
+        43% { transform: scale(1.035) translate3d(0.15%, -0.2%, 0); }
+        100% { transform: scale(1.045) translate3d(0.4%, -0.55%, 0); }
       }
       @keyframes boot-load {
         from { transform: translateX(-110%); }
@@ -142,8 +129,7 @@
       @media (prefers-reduced-motion: reduce) {
         .boot-splash__mark,
         .boot-splash__loader::after,
-        #boot-splash::before,
-        #boot-splash::after {
+        .boot-splash__seascape {
           animation: none;
         }
       }
@@ -152,6 +138,7 @@
   <body>
     <div id="app"></div>
     <div id="boot-splash" role="status" aria-live="polite" aria-label="Loading Shiver Me Timbers">
+      <div class="boot-splash__seascape" aria-hidden="true"></div>
       <div class="boot-splash__content">
         <img
           class="boot-splash__mark"
