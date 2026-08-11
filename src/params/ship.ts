@@ -49,6 +49,10 @@ export interface ShipClassParams {
   rudderHeight: number;
   rudderChord: number;
   rudderThickness: number;
+  sheerBow: number; // rail rise toward the stem (m)
+  sheerStern: number; // rail rise toward the transom (m)
+  tumblehome: number; // inward lean of topsides, fraction of half-beam
+  keelPinch: number; // hull half-width at the keel, fraction of half-beam
   cannonMountHeight: number; // hull-mounted guns: height above waterline
   cannonInset: number; // deck-mounted guns: offset inboard from side
   cannonSpacing: number; // z distance between neighbouring guns
@@ -75,6 +79,7 @@ export const brigantineParams: ShipClassParams = registerParams(
     bowspritLength: 7, bowspritRadius: 0.18, bowspritPitch: 0.28,
     railHeight: 0.9, railThickness: 0.12, railInset: 0.2, railLengthFactor: 0.85,
     rudderHeight: 2.2, rudderChord: 1.2, rudderThickness: 0.15,
+    sheerBow: 0.8, sheerStern: 0.5, tumblehome: 0.1, keelPinch: 0.12,
     cannonMountHeight: 1.3, cannonInset: 0, cannonSpacing: 4, cannonsPerSide: 4,
   },
   shipParamsMeta(),
@@ -100,6 +105,7 @@ export const galleonParams: ShipClassParams = registerParams(
     bowspritLength: 9, bowspritRadius: 0.22, bowspritPitch: 0.35, // ~20°
     railHeight: 1.0, railThickness: 0.13, railInset: 0.22, railLengthFactor: 0.8,
     rudderHeight: 2.6, rudderChord: 1.4, rudderThickness: 0.18,
+    sheerBow: 1.1, sheerStern: 0.7, tumblehome: 0.12, keelPinch: 0.1,
     cannonMountHeight: 0, cannonInset: 1.0, cannonSpacing: 4, cannonsPerSide: 4,
   },
   shipParamsMeta(),
@@ -130,6 +136,10 @@ export interface ShipMaterialParams {
   sailWeaveScale: number; // warp/weft noise frequency
   sailBacklitColor: number;
   sailBacklitStrength: number;
+  sailBillow: number; // full-trim belly depth, fraction of sail drop
+  sailFlutterAmp: number; // wind ripple amplitude (m) at the free foot
+  sailFlutterFreq: number; // ripple speed (rad/s)
+  sailRippleCount: number; // ripple wavelengths across the cloth
   holeColor: number;
 }
 
@@ -145,6 +155,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     trimLight: 0x54381f, trimDark: 0x362412,
     sailLight: 0xe9e1cd, sailDark: 0xd2c5aa,
     sailWeaveScale: 18, sailBacklitColor: 0xfff0d2, sailBacklitStrength: 0.35,
+    sailBillow: 0.34, sailFlutterAmp: 0.16, sailFlutterFreq: 2.4, sailRippleCount: 2.5,
     holeColor: 0x120c07,
   },
   {
@@ -159,6 +170,10 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     waleDarken: { min: 0, max: 1, step: 0.01 },
     sailWeaveScale: { min: 2, max: 60, step: 0.5 },
     sailBacklitStrength: { min: 0, max: 2, step: 0.01 },
+    sailBillow: { min: 0, max: 0.8, step: 0.01 },
+    sailFlutterAmp: { min: 0, max: 0.6, step: 0.01 },
+    sailFlutterFreq: { min: 0, max: 10, step: 0.1 },
+    sailRippleCount: { min: 0.5, max: 8, step: 0.1 },
   },
 );
 

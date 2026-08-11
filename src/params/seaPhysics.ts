@@ -37,9 +37,11 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     updateEveryTicks: 1,
     inverseDisplacementIterations: 3,
     probeLayoutScale: 1,
-    buoyancySpring: 2.5e5,
-    buoyancyDamping: 6e4,
-    mass: 2e5,
+    // spring/mass ratio sets ride height — user report: deck awash, waves
+    // constantly breaking over the ship → stiffer spring, lighter hull
+    buoyancySpring: 4.2e5,
+    buoyancyDamping: 9e4,
+    mass: 1.5e5,
     inertiaPitch: 1.6e7,
     inertiaYaw: 1.6e7,
     inertiaRoll: 1.5e6,

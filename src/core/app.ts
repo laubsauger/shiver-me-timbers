@@ -16,8 +16,11 @@ export class App {
     container.appendChild(renderer.domElement);
 
     this.scene = new THREE.Scene();
-    // background comes from the sky dome (T15); fog color synced by sky rig
-    this.scene.fog = new THREE.Fog(0x9cc8de, 400, 2500);
+    // background comes from the sky dome (T15); fog color synced by sky rig.
+    // Start far out — a near fog start reads as a "wall of haze" that kills
+    // ocean vision range (user report); the sky dome's haze band owns the
+    // horizon melt, fog only softens the last stretch before the dome.
+    this.scene.fog = new THREE.Fog(0x9cc8de, 900, 4200);
 
     this.camera = new THREE.PerspectiveCamera(
       55,

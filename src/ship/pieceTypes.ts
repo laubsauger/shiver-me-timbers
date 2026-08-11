@@ -24,6 +24,7 @@ export type PieceKind =
   | 'sail'
   | 'bowsprit'
   | 'rail'
+  | 'cannon'
   | 'rudder';
 
 /**
@@ -79,4 +80,10 @@ export interface PieceDef {
   parent?: string;
   /** present on 'sail' pieces only */
   sailStates?: SailStateDef[];
+  /**
+   * Optional numeric shaping hints for the geometry builder (hull loft:
+   * taper/sheer/tumblehome inputs). Plain serializable numbers — an
+   * AI-mesh generator gets the same hints (§V18).
+   */
+  shape?: Record<string, number>;
 }

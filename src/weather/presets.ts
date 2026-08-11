@@ -48,7 +48,7 @@ export const weatherPresets: Readonly<
       jacobianFoamBias: 0.3, // 0.25 below swell: foam only on rare true folds
     },
     sky: {
-      hazeStrength: 0.8, // clear day, slight milky horizon
+      hazeStrength: 0.45, // clear day, slight milky horizon
       sunIntensity: 3.4, // full unclouded sun
       ambientIntensity: 0.9, // bright open-sky bounce
     },
@@ -69,12 +69,12 @@ export const weatherPresets: Readonly<
       jacobianFoamBias: 0.55, // = oceanParams default (inject where J < bias)
     },
     sky: {
-      hazeStrength: 0.9, // = skyParams default
+      hazeStrength: 0.55, // = skyParams default (clear-blue baseline)
       sunIntensity: 3.2, // = skyParams default
       ambientIntensity: 0.85, // = skyParams default
     },
     clouds: {
-      coverage: 0.65, // = cloudParams default
+      coverage: 0.35, // = cloudParams default (fair-weather baseline)
       sunColor: 0xfff1d4, // = cloudParams default
       skyColor: 0xe9eff5, // = cloudParams default
     },

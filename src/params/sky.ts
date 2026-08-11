@@ -55,9 +55,11 @@ export const skyParams: SkyParams = registerParams(
     timeOfDay: 10.5,
     latitude: 15,
     domeRadius: 4200,
-    zenithColor: 0x3d8fd6,
-    horizonColor: 0xd6ecf5,
-    hazeStrength: 0.9,
+    // baseline = brilliant clear tropical day per docs/ship-side-sails-fully-reefed.png
+    // (deep saturated blue overhead, haze only hugging the horizon)
+    zenithColor: 0x2679c8,
+    horizonColor: 0xcfeaf5,
+    hazeStrength: 0.55,
     hazeFalloff: 0.22,
     horizonWarmColor: 0xffe0b0,
     horizonWarmStrength: 0.35,

@@ -66,7 +66,7 @@ export const cloudParams: CloudParams = {
   puffScaleMin: 70,
   puffScaleMax: 170,
   maxCloudDist: 4000,
-  coverage: 0.65,
+  coverage: 0.35, // baseline: scattered fair-weather cumulus, mostly clear blue
   blurRadiusNear: 4.5,
   blurRadiusFar: 1.5,
   distortScale: 3.0,

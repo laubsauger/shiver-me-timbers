@@ -63,6 +63,7 @@ export function buildOceanSurfaceMaterial(
   const uSssPower = uniform(sp.sssPower);
   const uSssChoppy = uniform(sp.sssChoppyScale);
   const uRoughness = uniform(sp.roughness);
+  const uReflStrength = uniform(sp.reflectionStrength);
   const uSparkleStrength = uniform(sp.sparkleStrength);
   const uSparkleScale = uniform(sp.sparkleScale);
   const uFoamThreshold = uniform(sp.foamThreshold);
@@ -152,20 +153,32 @@ export function buildOceanSurfaceMaterial(
       .mul(uSssStrength);
     waterCol.assign(waterCol.add(uSss.mul(sss)));
 
-    // analytic sky reflection
+    // analytic sky reflection — capped so body color dominates (§V.20
+    // watercolor look: references show pigment, not mirror)
     const refl = reflect(viewDir.negate(), normalWorld);
     const skyCol = mix(uHorizon, uZenith, refl.y.clamp(0, 1).pow(0.6));
-    const col = mix(waterCol, skyCol, fresnel.mul(0.65)).toVar();
+    const col = mix(waterCol, skyCol, fresnel.mul(uReflStrength)).toVar();
 
-    // sparkle glints: thresholded hash on world XZ, gated by spec direction
+    // sparkle glints: thresholded hash on world XZ, gated by spec direction.
+    // Per-cell phase offset (2nd hash) so cells twinkle independently —
+    // a shared time offset pulses the whole ocean in sync (§B.4).
     const cell = worldXZ.mul(uSparkleScale).floor();
     const sparkleHash = cell.dot(vec2(127.1, 311.7)).sin().mul(43758.5453).fract();
+    const phase = cell.dot(vec2(269.5, 183.3)).sin().mul(19741.77).fract();
     const halfVec = normalize(viewDir.add(sunDirectionUniform));
-    const specGate = pow(normalWorld.dot(halfVec).max(0), 64);
-    // x.step(edge) = step(edge, x) = 1 when x ≥ edge → keep top 12% of cells
-    const twinkle = sparkleHash.add(timeUniform.mul(0.7)).fract().step(0.88);
-    const sparkle = specGate.mul(twinkle).mul(uSparkleStrength).mul(normFade);
-    col.assign(col.add(vec3(1.0, 0.97, 0.88).mul(sparkle)));
+    const ndoth = normalWorld.dot(halfVec).max(0);
+    // glint train footprint (broad) vs sparkle brightness gate (tight):
+    // reference (§V20) = dense sparkles inside the sun path, sparse outside
+    const glintTrain = pow(ndoth, 48);
+    const wobble = phase.mul(6.28).add(timeUniform.mul(0.9)).sin().mul(0.05);
+    // density threshold: ~2% of cells outside the train, ~15% inside
+    const thr = mix(float(0.978), float(0.85), glintTrain);
+    const twinkle = smoothstep(thr, thr.add(0.012), sparkleHash.add(wobble));
+    const sparkle = twinkle
+      .mul(pow(ndoth, 24))
+      .mul(uSparkleStrength)
+      .mul(normFade);
+    col.assign(col.add(vec3(1.0, 0.95, 0.82).mul(sparkle)));
 
     // §V.6 foam: progressive-blur sim mask (T5) with crest→soft detail
     // blend; falls back to raw jacobian threshold when no sim is wired.
@@ -202,6 +215,7 @@ export function buildOceanSurfaceMaterial(
     uSssPower.value = sp.sssPower;
     uSssChoppy.value = sp.sssChoppyScale;
     uRoughness.value = sp.roughness;
+    uReflStrength.value = sp.reflectionStrength;
     uSparkleStrength.value = sp.sparkleStrength;
     uSparkleScale.value = sp.sparkleScale;
     uFoamThreshold.value = sp.foamThreshold;

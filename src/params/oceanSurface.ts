@@ -8,18 +8,20 @@ import { registerParams } from './registry';
 export const oceanSurfaceParams = registerParams(
   'oceanSurface',
   {
-    deepColor: '#0d3d4d',
-    shallowColor: '#1a7f8a',
-    sssColor: '#2ec4b6',
-    sssStrength: 1.6,
-    sssPower: 3.0,
+    deepColor: '#0a3d45',
+    shallowColor: '#178c8d',
+    sssColor: '#32d0c0',
+    sssStrength: 1.7,
+    sssPower: 4.0,
     /** horizontal-displacement mask scale for the SSS side-of-wave isolation (§V.5) */
     sssChoppyScale: 0.9,
-    skyHorizonColor: '#cfe8f0',
-    skyZenithColor: '#5aa7d4',
-    roughness: 0.16,
+    skyHorizonColor: '#a8d4e8',
+    skyZenithColor: '#4694cc',
+    /** fresnel sky-reflection blend cap — high = mirror sheen, low = body color */
+    reflectionStrength: 0.18,
+    roughness: 0.3,
     /** analytic sun glint */
-    sparkleStrength: 1.2,
+    sparkleStrength: 1.6,
     sparkleScale: 220.0,
     /** temporary direct-jacobian crest foam until T5 progressive blur lands */
     foamThreshold: 0.55,
@@ -38,6 +40,7 @@ export const oceanSurfaceParams = registerParams(
   },
   {
     sssStrength: { min: 0, max: 5, step: 0.05 },
+    reflectionStrength: { min: 0, max: 1, step: 0.01 },
     sssPower: { min: 0.5, max: 8, step: 0.1 },
     sssChoppyScale: { min: 0, max: 3, step: 0.05 },
     roughness: { min: 0.01, max: 1, step: 0.01 },

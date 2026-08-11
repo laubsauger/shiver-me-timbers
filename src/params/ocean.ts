@@ -39,14 +39,14 @@ export const oceanParams: OceanParams = registerParams('ocean', {
   resolution: 512,
   cascades: [{ domain: 250 }, { domain: 60 }, { domain: 15 }],
   splitWavelengths: [24, 5],
-  amplitude: 1.0,
-  windSpeed: 9,
+  amplitude: 0.7,
+  windSpeed: 8,
   windDirection: Math.PI * 0.25,
-  directionality: 6,
+  directionality: 10,
   oppositeWaveDamp: 0.06,
   smallWaveCutoff: 0.02,
-  choppiness: 1.4,
-  jacobianFoamBias: 0.55,
+  choppiness: 1.05,
+  jacobianFoamBias: 0.3,
 }, oceanParamsMeta());
 
 function oceanParamsMeta() {

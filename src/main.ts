@@ -94,6 +94,19 @@ async function boot(): Promise<void> {
 
   const audio = createAudio();
 
+  // render-side interpolation caches (§V.2: sim ticks at 60Hz, render at
+  // display rate — lerping prev→curr tick kills transform micro-stutter)
+  const prevPos = new Vector3();
+  const currPos = new Vector3();
+  const prevQuat = new Quaternion();
+  const currQuat = new Quaternion();
+  currPos.fromArray(playerShip.position);
+  currQuat.fromArray(playerShip.quaternion);
+  prevPos.copy(currPos);
+  prevQuat.copy(currQuat);
+  // interpolated view of the player ship handed to render-side consumers
+  const renderShipView = structuredClone(playerShip);
+
   const loop = new GameLoop(
     (dt) => {
       if (paused) return;
@@ -107,8 +120,12 @@ async function boot(): Promise<void> {
       stepShipSailing(playerShip, snapshot, state.wind, dt);
       cpuOcean.update(state.time);
       stepShipBuoyancy(playerShip, cpuOcean, dt);
+      prevPos.copy(currPos);
+      prevQuat.copy(currQuat);
+      currPos.fromArray(playerShip.position);
+      currQuat.fromArray(playerShip.quaternion);
     },
-    (_alpha, frameDt) => {
+    (alpha, frameDt) => {
       debug.hud.frame(frameDt * 1000);
 
       sky.update(skyParams.timeOfDay);
@@ -122,10 +139,19 @@ async function boot(): Promise<void> {
       clouds.update(state.time, sky.sunDirection);
       debug.hud.setPassTiming('clouds cpu-dispatch', performance.now() - t);
 
-      // render reads SimState (§V.3)
-      shipAssembly.group.position.fromArray(playerShip.position);
-      shipAssembly.group.quaternion.fromArray(playerShip.quaternion);
-      followCam.update(playerShip, frameDt, (x, z) => cpuOcean.heightAt(x, z, state.time));
+      // render reads SimState (§V.3), interpolated between ticks — the
+      // camera must chase the same interpolated pose or IT stutters instead
+      shipAssembly.group.position.lerpVectors(prevPos, currPos, alpha);
+      shipAssembly.group.quaternion.slerpQuaternions(prevQuat, currQuat, alpha);
+      renderShipView.position[0] = shipAssembly.group.position.x;
+      renderShipView.position[1] = shipAssembly.group.position.y;
+      renderShipView.position[2] = shipAssembly.group.position.z;
+      renderShipView.quaternion[0] = shipAssembly.group.quaternion.x;
+      renderShipView.quaternion[1] = shipAssembly.group.quaternion.y;
+      renderShipView.quaternion[2] = shipAssembly.group.quaternion.z;
+      renderShipView.quaternion[3] = shipAssembly.group.quaternion.w;
+      renderShipView.velocity = playerShip.velocity;
+      followCam.update(renderShipView, frameDt, (x, z) => cpuOcean.heightAt(x, z, state.time));
 
       const speed = Math.hypot(playerShip.velocity[0], playerShip.velocity[2]);
       ui.setSpeed(speed * 1.944); // m/s → knots
@@ -154,7 +180,7 @@ async function boot(): Promise<void> {
   };
 }
 
-import { Vector3 } from 'three/webgpu';
+import { Quaternion, Vector3 } from 'three/webgpu';
 const tmpDir = new Vector3();
 
 boot();
