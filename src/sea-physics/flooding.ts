@@ -106,7 +106,8 @@ export function floodListTorque(
   if (n === 0 || flood <= 0) return [0, 0, 0];
   const s = (p.listStrength * clamp01(flood) * buoyancyScale(ship, p)) / n;
   // mean offset × down [0,−1,0] = [z̄, 0, −x̄]: flooded side rolls under
-  return [mz * s, 0, -mx * s];
+  // (+0 guard: −0 would survive into serialized SimState hashes, §V2)
+  return [mz * s + 0, 0, -mx * s + 0];
 }
 
 /** flood past the point of no return — the sink sequence has begun */

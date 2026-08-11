@@ -42,10 +42,10 @@ export const weatherPresets: Readonly<
   // gentlest): low energy, light breeze, foam only where waves truly fold.
   calm: {
     ocean: {
-      amplitude: 0.35, // ~1/3 of swell energy: gentle rollers, no whitecaps
+      amplitude: 0.3, // gentle rollers, no whitecaps
       windSpeed: 4, // light breeze (m/s) → short, soft spectrum
-      choppiness: 0.9, // rounded crests — little horizontal pinching
-      jacobianFoamBias: 0.3, // 0.25 below swell: foam only on rare true folds
+      choppiness: 0.85, // rounded crests — little horizontal pinching
+      jacobianFoamBias: 0.12, // well below swell: foam only on rare true folds
     },
     sky: {
       hazeStrength: 0.45, // clear day, slight milky horizon
@@ -63,10 +63,10 @@ export const weatherPresets: Readonly<
   // defaults (tests assert this) so applying it restores factory values.
   swell: {
     ocean: {
-      amplitude: 1.0, // = oceanParams default
-      windSpeed: 9, // = oceanParams default
-      choppiness: 1.4, // = oceanParams default
-      jacobianFoamBias: 0.55, // = oceanParams default (inject where J < bias)
+      amplitude: 0.7, // = oceanParams default (retuned vs SoT reference)
+      windSpeed: 8, // = oceanParams default
+      choppiness: 1.05, // = oceanParams default
+      jacobianFoamBias: 0.3, // = oceanParams default (inject where J < bias)
     },
     sky: {
       hazeStrength: 0.55, // = skyParams default (clear-blue baseline)

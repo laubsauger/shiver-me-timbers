@@ -20,6 +20,8 @@ import { createGameUI } from './ui';
 import { createAudio } from './audio';
 import { CpuOcean } from './sea-physics/cpuOcean';
 import { stepShipBuoyancy } from './sea-physics/buoyancy';
+import { stepFlooding } from './sea-physics/flooding';
+import { floodingHoles } from './ship/destruction';
 import { createRopes } from './ropes';
 import { applyRiggingPlan, buildRiggingPlan } from './ropes/shipRigging';
 
@@ -74,6 +76,9 @@ async function boot(): Promise<void> {
     damage: {},
   });
   const playerShip = state.ships[0];
+  // piece damage states (intact|holed|destroyed) — written by destruction
+  // ops when combat wiring lands (T17); hp values live in ShipState.damage
+  const playerZoneStates: Record<string, import('./ship/pieceTypes').DamageStateId> = {};
   const galleonBlueprint = buildGalleonBlueprint();
   const shipAssembly = new ShipAssembly(galleonBlueprint);
   app.scene.add(shipAssembly.group);
@@ -127,7 +132,10 @@ async function boot(): Promise<void> {
       const snapshot = input.sample(dt);
       stepShipSailing(playerShip, snapshot, state.wind, dt);
       cpuOcean.update(state.time);
-      stepShipBuoyancy(playerShip, cpuOcean, dt);
+      // §V.14 flooding: holes from damaged zones (inert while undamaged)
+      const holes = floodingHoles(galleonBlueprint, playerZoneStates, playerShip.quaternion, 0);
+      stepFlooding(playerShip, holes.positions, dt);
+      stepShipBuoyancy(playerShip, cpuOcean, dt, undefined, holes.positions);
       prevPos.copy(currPos);
       prevQuat.copy(currQuat);
       currPos.fromArray(playerShip.position);

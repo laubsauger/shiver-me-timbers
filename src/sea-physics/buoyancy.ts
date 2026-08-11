@@ -12,6 +12,7 @@ import type { Quat, ShipState, Vec3 } from '../state/simState';
 import { GRAVITY } from '../ocean/oceanMath';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../params/seaPhysics';
 import type { CpuOcean } from './cpuOcean';
+import { buoyancyScale, floodListTorque, floodMassFactor } from './flooding';
 
 /**
  * Canonical probe layout for a ~30 m hull at probeLayoutScale 1, on the
@@ -71,11 +72,16 @@ export function stepShipBuoyancy(
   ocean: CpuOcean,
   dt: number,
   p: SeaPhysicsParams = seaPhysicsParams,
+  /** world-frame hole offsets for flood listing (§V.14); empty = intact */
+  floodHoles: readonly Vec3[] = [],
 ): void {
   const q = ship.quaternion;
   const pos = ship.position;
   const vel = ship.velocity;
   const w = ship.angularVelocity;
+  // §V.14 flooding hooks: heavier when flooded, support fades when sinking
+  const mass = p.mass * floodMassFactor(ship.flood);
+  const support = buoyancyScale(ship);
 
   const time = ocean.currentTime;
   if (Number.isNaN(time)) {
@@ -83,7 +89,7 @@ export function stepShipBuoyancy(
     throw new Error('stepShipBuoyancy: call ocean.update(time) first');
   }
 
-  const force: Vec3 = [0, -p.mass * GRAVITY, 0];
+  const force: Vec3 = [0, -mass * GRAVITY, 0];
   const torque: Vec3 = [0, 0, 0];
 
   for (const local of PROBE_LAYOUT) {
@@ -99,7 +105,7 @@ export function stepShipBuoyancy(
     if (depth <= 0) continue;
     // vertical velocity of the probe point = v.y + (ω × r).y
     const vy = vel[1] + (w[2] * r[0] - w[0] * r[2]);
-    const f = p.buoyancySpring * depth - p.buoyancyDamping * vy;
+    const f = (p.buoyancySpring * depth - p.buoyancyDamping * vy) * support;
     force[1] += f;
     const t = cross(r, [0, f, 0]);
     torque[0] += t[0];
@@ -107,10 +113,18 @@ export function stepShipBuoyancy(
     torque[2] += t[2];
   }
 
+  // flood listing: torque toward flooded side, grows with flood (§V.14)
+  if (floodHoles.length > 0 && ship.flood > 0) {
+    const listT = floodListTorque(ship, floodHoles, ship.flood);
+    torque[0] += listT[0];
+    torque[1] += listT[1];
+    torque[2] += listT[2];
+  }
+
   // semi-implicit Euler: velocity first, then position from new velocity
-  vel[0] += (force[0] / p.mass) * dt;
-  vel[1] += (force[1] / p.mass) * dt;
-  vel[2] += (force[2] / p.mass) * dt;
+  vel[0] += (force[0] / mass) * dt;
+  vel[1] += (force[1] / mass) * dt;
+  vel[2] += (force[2] / mass) * dt;
   pos[0] += vel[0] * dt;
   pos[1] += vel[1] * dt;
   pos[2] += vel[2] * dt;
