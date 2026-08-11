@@ -52,6 +52,8 @@ V22: ∀ visual system (ocean, clouds, sky, ship, foam, terrain, ropes, fx): age
 V23: TSL chained math w/ reordered args (`a.mix(b,t)` → receiver=FACTOR via mixElement) ⊥. ! use functional forms `mix(a,b,t)`, `smoothstep(e0,e1,x)` for 3-arg math. Chained `x.smoothstep(e0,e1)`/`x.step(edge)` OK (receiver=x) but ! comment the reading at use site.
 V24: water transparency (refs docs/underwater-*.png): near-surface see-through — submerged geo visible, tinted by depth (turquoise→deep teal, exp falloff), screen-space refraction distortion via scene color+depth textures. Opaque-wall water @ grazing/shallow view ⊥.
 V25: underwater camera: submerged → full-screen underwater grade (teal exp fog by dist, desat blue-green, soft god-ray fake OK, slight view wobble), waterline crossing → split view w/ meniscus band, no pop. Weather/day-cycle drive underwater tint too.
+V26: ocean reflections = PLANAR (mirrored scene pass: ship, islands, clouds visible in water) per talk 03:59 — SSR ⊥, analytic-sky-only ⊥ final. Reflection res ≤ half, blur ok, fresnel-blended.
+V27: deck water = event-driven per talk 11:12: bow-immersion sensor (immersion+speed gates, same signal as bow spray) → splash() injection; runs for player ship only (1 ship budget). Passive always-on splashing ⊥.
 
 ## §T TASKS
 id|status|task|cites
@@ -84,6 +86,8 @@ T26|~|palms+vegetation: proc palm geo, TSL wind sway (trunk+frond flutter), inst
 T27|~|terrain materials: stylized tri-planar rock, sand/beach w/ shore blend + sparkle, proc noise texs|V16
 T28|~|water transparency: depth-tinted see-through + screen-space refraction in surface material|V24,V20
 T29|~|underwater mode: submersion detect, underwater grade, waterline split + meniscus|V25
+T30|.|planar water reflections: mirrored scene RT, half-res, fresnel blend in surface material|V26,V20
+T31|.|deck water wiring: bow sensor → splash(), stateTexture → deck material wet hook, ship-rotation tilt feed|V27,V9
 
 ## §B BUGS
 id|date|cause|fix

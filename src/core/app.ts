@@ -4,6 +4,9 @@
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
+/** kill switch while the shadow-variant GPU stall is bisected */
+const SHADOWS_ENABLED = false;
+
 export class App {
   readonly renderer: THREE.WebGPURenderer;
   readonly scene: THREE.Scene;
@@ -44,7 +47,10 @@ export class App {
     const renderer = new THREE.WebGPURenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.shadowMap.enabled = true;
+    // NOTE: shadow-map variant compilation of the huge ocean/ship TSL
+    // materials stalled the GPU process (black screen, frozen rAF) — under
+    // investigation; re-enable via this flag once isolated (§B candidate)
+    renderer.shadowMap.enabled = SHADOWS_ENABLED;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     await renderer.init();
     return new App(container, renderer);

@@ -107,13 +107,17 @@ export class FollowCam {
       this.smoothed.y += (desiredY - this.smoothed.y) * k;
       this.smoothed.z += (desiredZ - this.smoothed.z) * k;
     }
-    const y = enforceMinHeight(
-      this.smoothed.y,
-      this.smoothed.x,
-      this.smoothed.z,
-      p.minHeightAboveWater,
-      heightFn,
-    );
+    // clamp only when diving is disabled — the underwater mode (T29) owns
+    // the below-surface experience and we need free dives for debugging
+    const y = p.allowUnderwater
+      ? this.smoothed.y
+      : enforceMinHeight(
+          this.smoothed.y,
+          this.smoothed.x,
+          this.smoothed.z,
+          p.minHeightAboveWater,
+          heightFn,
+        );
 
     this.camera.position.set(this.smoothed.x, y, this.smoothed.z);
     this.lookTarget.set(

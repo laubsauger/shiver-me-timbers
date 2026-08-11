@@ -6,7 +6,9 @@ import { registerParams } from './registry';
 export const postParams = registerParams(
   'post',
   {
-    enabled: true,
+    // default OFF until the pipeline is browser-verified — enabling it
+    // stalled the renderer on first try (§V22: no unverified visuals)
+    enabled: false,
     aoEnabled: true,
     bloomThreshold: 0.85,
     bloomStrength: 0.22,

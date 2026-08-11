@@ -21,6 +21,8 @@ export interface CameraParams {
   pitchMax: number;
   /** camera never closer than this above the sampled water height, m */
   minHeightAboveWater: number;
+  /** free-dive: pitch the camera below the surface (underwater mode T29) */
+  allowUnderwater: boolean;
   /** look-ahead: seconds of ship velocity added to the look target */
   lookAhead: number;
   /** rad of orbit per pixel of mouse drag */
@@ -41,6 +43,7 @@ export const cameraParams: CameraParams = registerParams(
     pitchMin: -0.15,
     pitchMax: 1.2,
     minHeightAboveWater: 1.5,
+    allowUnderwater: true,
     lookAhead: 0.6,
     orbitSpeed: 0.005,
     zoomSpeed: 0.0012,

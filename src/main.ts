@@ -27,7 +27,22 @@ import { stepShipBuoyancy } from './sea-physics/buoyancy';
 import { stepFlooding } from './sea-physics/flooding';
 import { floodingHoles } from './ship/destruction';
 import { createRopes } from './ropes';
-import { applyRiggingPlan, buildRiggingPlan } from './ropes/shipRigging';
+import { createBlocks } from './ropes/blocks';
+import {
+  applyBlocks,
+  applyRiggingPlan,
+  buildRiggingPlan,
+  selectBlockSockets,
+} from './ropes/shipRigging';
+import { ropeParams } from './params/ropes';
+
+// bisect switches for the renderer-freeze hunt — all true = full game
+const FEATURES = {
+  spray: false,
+  bowSpray: false,
+  flowFoam: true, // re-enabled: T13 wake rework verification (see flowfoam report)
+  ropes: false,
+};
 
 async function boot(): Promise<void> {
   const root = document.getElementById('app');
@@ -103,6 +118,10 @@ async function boot(): Promise<void> {
   const riggingPlan = buildRiggingPlan(galleonBlueprint);
   const ropes = createRopes({ maxRopes: Math.max(riggingPlan.length, 32) });
   app.scene.add(ropes.mesh);
+  // wooden blocks (pulleys) at running-rigging terminations
+  const blockSockets = selectBlockSockets(riggingPlan, ropeParams.maxBlocks);
+  const blocks = createBlocks(blockSockets.length);
+  app.scene.add(blocks.mesh);
 
   // hull dims for wake + bow spray, from blueprint hull AABBs
   let bowZ = 0;
@@ -209,7 +228,7 @@ async function boot(): Promise<void> {
       const shipSpeed = Math.hypot(playerShip.velocity[0], playerShip.velocity[2]);
       spray.centerUniform.value.set(playerShip.position[0], playerShip.position[2]);
       windDirTmp.set(Math.cos(state.wind.direction), Math.sin(state.wind.direction));
-      spray.update(app.renderer, windDirTmp);
+      if (FEATURES.spray) spray.update(app.renderer, windDirTmp);
       const bowLocal = rotateVec(playerShip.quaternion, [0, 0, bowZ]);
       bowWorldTmp.set(
         playerShip.position[0] + bowLocal[0],
@@ -217,24 +236,28 @@ async function boot(): Promise<void> {
         playerShip.position[2] + bowLocal[2],
       );
       shipVelTmp.fromArray(playerShip.velocity);
-      bowSpray.update(app.renderer, {
-        bowWorldPos: bowWorldTmp,
-        shipVelocity: shipVelTmp,
-        immersionDepth:
-          cpuOcean.heightAt(bowWorldTmp.x, bowWorldTmp.z, state.time) - bowWorldTmp.y,
-      });
-      flowFoam.setCenter(playerShip.position[0], playerShip.position[2]);
-      flowFoam.setFlowDir([-playerShip.velocity[0], -playerShip.velocity[2]]);
-      flowFoam.setShip(
-        [playerShip.position[0], playerShip.position[2]],
-        shipYaw,
-        shipSpeed,
-        bowZ,
-        sternZ,
-        beamHalf * 2,
-      );
-      flowFoam.renderInjection(app.renderer, app.scene);
-      flowFoam.update(app.renderer, frameDt);
+      if (FEATURES.bowSpray) {
+        bowSpray.update(app.renderer, {
+          bowWorldPos: bowWorldTmp,
+          shipVelocity: shipVelTmp,
+          immersionDepth:
+            cpuOcean.heightAt(bowWorldTmp.x, bowWorldTmp.z, state.time) - bowWorldTmp.y,
+        });
+      }
+      if (FEATURES.flowFoam) {
+        flowFoam.setCenter(playerShip.position[0], playerShip.position[2]);
+        flowFoam.setFlowDir([-playerShip.velocity[0], -playerShip.velocity[2]]);
+        flowFoam.setShip(
+          [playerShip.position[0], playerShip.position[2]],
+          shipYaw,
+          shipSpeed,
+          bowZ,
+          sternZ,
+          beamHalf * 2,
+        );
+        flowFoam.renderInjection(app.renderer, app.scene);
+        flowFoam.update(app.renderer, frameDt);
+      }
 
       // render reads SimState (§V.3), interpolated between ticks — the
       // camera must chase the same interpolated pose or IT stutters instead
@@ -251,9 +274,12 @@ async function boot(): Promise<void> {
       followCam.update(renderShipView, frameDt, (x, z) => cpuOcean.heightAt(x, z, state.time));
 
       // rigging follows the moving ship: rewrite anchors, GPU re-solves (§V.12)
-      shipAssembly.group.updateMatrixWorld(true);
-      applyRiggingPlan(riggingPlan, ropes, (id) => shipAssembly.socketWorldPosition(id));
-      app.renderer.compute(ropes.computeNode);
+      if (FEATURES.ropes) {
+        shipAssembly.group.updateMatrixWorld(true);
+        applyRiggingPlan(riggingPlan, ropes, (id) => shipAssembly.socketWorldPosition(id));
+        applyBlocks(blockSockets, blocks, (id) => shipAssembly.socketWorldPosition(id));
+        app.renderer.compute(ropes.computeNode);
+      }
 
       const speed = Math.hypot(playerShip.velocity[0], playerShip.velocity[2]);
       ui.setSpeed(speed * 1.944); // m/s → knots
