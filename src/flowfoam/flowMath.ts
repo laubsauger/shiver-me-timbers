@@ -146,3 +146,30 @@ export function advectLookupUv(
     v + (vz * advectDt) / size + shiftV,
   ];
 }
+
+/**
+ * Weight of the COARSE far foam tier at `dist` metres from the near region's
+ * centre. 0 inside the near window, ramping to 1 by the time the near region
+ * starts fading at its border.
+ *
+ * WHY A CROSSFADE AND NOT max(): the two tiers hold the same wake at different
+ * scales, and the far one — long decay, 2.5 m texels, no flow advection — is
+ * smooth. Taken as a plain max it out-reads the near tier's actual structure a
+ * few tens of metres astern and paints over exactly the detail the near tier
+ * exists to provide. The far tier's only job is to carry the trail PAST the
+ * near window, so it must be silent inside it.
+ *
+ * The ramp ends where the near region's own `edgeFade` begins, so the far tier
+ * is at full weight precisely as the near one fades out — no seam, no gap.
+ */
+export function farBlendWeightCpu(
+  dist: number,
+  nearSize: number,
+  blendStart: number,
+  edgeFade: number,
+): number {
+  const e0 = nearSize * blendStart;
+  const e1 = Math.max(nearSize * 0.5 * (1 - edgeFade), e0 + 1e-6);
+  const t = Math.min(1, Math.max(0, (dist - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+}

@@ -9,6 +9,7 @@ import type { Material, Mesh } from 'three';
 import { buildBrigantineBlueprint, buildGalleonBlueprint } from '../src/ship/shipBlueprint';
 import { buildHoledVariant, buildPieceGeometry, buildSailGeometry } from '../src/ship/pieceGeometry';
 import { ShipAssembly } from '../src/ship/shipAssembly';
+import { createWoodMaterial } from '../src/ship/woodMaterial';
 import { galleonParams, shipMaterialParams, shipRigParams } from '../src/params/ship';
 import type { PieceDef } from '../src/ship/pieceTypes';
 import {
@@ -371,6 +372,36 @@ describe.each(blueprints)('%s hull shell is watertight (§V22)', (_name, build) 
     }
     expect(nonManifold).toBe(0);
     expect(flipped).toBe(0);
+  });
+});
+
+describe('wood material consumes the water-lighting hook (§T.32/§V.34)', () => {
+  /**
+   * WHY: the ship reading as "pasted on top of the water" is the user's
+   * standing complaint, and the fix is that the hull RECEIVES caustics and
+   * wave-bounce. Every one of those arrives through a node slot on the
+   * material. Drop any single assignment and the ship silently stops
+   * receiving that channel — no error, no test failure, just a hull that
+   * looks detached again. This pins all four slots, including emissiveNode,
+   * which carries the caustics + bounce and is the one with no other reason
+   * to exist on an opaque wood material.
+   */
+  const handle = createWoodMaterial({
+    light: 0xa97c50,
+    dark: 0x4a3520,
+    wale: true,
+    waterline: true,
+  });
+
+  it('populates colour, roughness, relief and the caustics/bounce slot', () => {
+    expect(handle.material.colorNode, 'colorNode (albedo × water tint)').toBeDefined();
+    expect(handle.material.roughnessNode, 'roughnessNode (× roughnessScale)').toBeDefined();
+    expect(handle.material.normalNode, 'normalNode (relief × reliefScale)').toBeDefined();
+    expect(handle.material.emissiveNode, 'emissiveNode — caustics + bounce').toBeDefined();
+  });
+
+  it('re-reads live params without throwing (§V16 panel drives it)', () => {
+    expect(() => handle.refresh()).not.toThrow();
   });
 });
 

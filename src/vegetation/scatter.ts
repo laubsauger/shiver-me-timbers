@@ -132,7 +132,20 @@ export function scatterPalms(opts: ScatterOptions): THREE.InstancedMesh {
   opts.geometry.setAttribute('instancePhase', new THREE.InstancedBufferAttribute(phases, 1));
   opts.geometry.setAttribute('instanceSway', new THREE.InstancedBufferAttribute(sways, 1));
 
-  // vertices move in the wind shader; skip per-instance culling surprises
-  mesh.frustumCulled = false;
+  // Frustum culling ON, with the bounds grown to cover the wind sway (§V17).
+  // This used to be `frustumCulled = false` to dodge "culling surprises" from
+  // vertices that move in the shader — but that submits every palm batch on
+  // every island, every frame, in the main pass AND the shadow pass, however
+  // far over the horizon it is. The real fix is the honest one: take the
+  // instance-aware bounding sphere and inflate it by the most the sway shader
+  // can displace a vertex, so a palm can never leave its own culling volume.
+  mesh.computeBoundingSphere();
+  if (mesh.boundingSphere) {
+    const vp = vegetationParams;
+    const maxScale = Math.max(vp.scaleMax, vp.scaleMin) * (1 + vp.heightJitter);
+    // trunk bend peaks at ~1.4× amplitude (two summed sines) plus flutter
+    mesh.boundingSphere.radius +=
+      (vp.swayAmplitude * (1 + vp.swayHarmonic) + vp.flutterAmplitude) * maxScale;
+  }
   return mesh;
 }

@@ -23,13 +23,18 @@
  *   blurDecay: blur3x3(B) · decay    → A     ← A is always the output
  */
 import type * as THREE from 'three/webgpu';
-import { clamp, float, texture } from 'three/tsl';
+import { cameraPosition, clamp, float, mix, smoothstep, texture, uniform } from 'three/tsl';
 import { SIM_DT } from '../core/loop';
 import { createOutputTexture } from '../ocean/oceanTextures';
 import { foamParams } from '../params/foam';
 import { oceanParams } from '../params/ocean';
-import { decayFactorPerFrame } from './foamMath';
-import { createBlurDecayPass, createInjectPass, createFoamUniforms } from './foamPasses';
+import { decayFactorPerFrame, foamTexelMetres } from './foamMath';
+import {
+  createBlurDecayPass,
+  createInjectPass,
+  createFoamUniforms,
+  createReducePass,
+} from './foamPasses';
 import {
   capVariationNode,
   foamDetailMask,
@@ -46,6 +51,13 @@ export interface FoamCascadeInput {
   /** world-space meters this cascade tiles over (§V19) */
   domain: number;
 }
+
+/** box-reduction step per pass; two of these build the far tier (16× total) */
+const REDUCE_FACTOR = 4;
+
+/** distance fades for the cascade bands, in texel widths (foamMath) */
+const uCascadeFadeTexels = uniform(2300);
+const uCascadeFadeSpan = uniform(3);
 
 export function createFoamSim(cascades: FoamCascadeInput[], resolution: number) {
   // fail loud at construction (freeze audit): resolution bakes the dispatch
@@ -65,16 +77,52 @@ export function createFoamSim(cascades: FoamCascadeInput[], resolution: number) 
   const uFine = createFoamUniforms();
   let time = 0;
 
+  // Filtered far-field tier (§V6 sampling, ocean agent's horizon-sizzle
+  // finding): StorageTextures have NO mip chain, so a distant pixel covering
+  // thousands of texels gets ONE of them and shimmers. Only the COARSEST
+  // cascade needs the tier — the finer bands are sub-pixel long before this
+  // distance and simply retire (cascadeDetailWeight). Two 4× box reductions
+  // rather than one 16× so the taps stay unrolled and cheap.
+  // fail loud rather than build a tier that reads outside its source: the
+  // reductions assume exact division, and an out-of-range textureLoad returns
+  // zero in WGSL — which would silently DIM distant foam instead of erroring
+  const tierDivisor = REDUCE_FACTOR * REDUCE_FACTOR;
+  const canTier = resolution % tierDivisor === 0 && resolution >= tierDivisor;
+  if (!canTier) {
+    throw new Error(
+      `foam: resolution ${resolution} must be a multiple of ${tierDivisor} to ` +
+        'build the filtered far tier (StorageTextures carry no mips, so the ' +
+        'tier is what keeps distant foam from aliasing)',
+    );
+  }
+  const coarseMidN = resolution / REDUCE_FACTOR;
+  const coarseN = coarseMidN / REDUCE_FACTOR;
+
   const lanes = cascades.map((c, i) => {
     const lu = i === cascades.length - 1 ? uFine : u;
     const front = createOutputTexture(resolution); // A — stable output
     const back = createOutputTexture(resolution); // B — inject scratch
+    const coarsest = i === 0;
+    const coarseMid = coarsest ? createOutputTexture(coarseMidN) : null;
+    const coarse = coarsest ? createOutputTexture(coarseN) : null;
     return {
       domain: c.domain,
+      texelMetres: foamTexelMetres(c.domain, resolution),
       front,
       back,
+      coarse,
       inject: createInjectPass(c.displacement, front, back, resolution, lu),
       blurDecay: createBlurDecayPass(back, front, resolution, lu),
+      // reductions run off `front`, i.e. AFTER the blur+decay of this tick,
+      // so the tier is always a filtered view of what is actually on screen
+      reduce:
+        coarseMid && coarse
+          ? [
+              createReducePass(front, coarseMid, coarseMidN, REDUCE_FACTOR),
+              createReducePass(coarseMid, coarse, coarseN, REDUCE_FACTOR),
+            ]
+          : [],
+      coarseMid,
     };
   });
 
@@ -107,10 +155,15 @@ export function createFoamSim(cascades: FoamCascadeInput[], resolution: number) 
       uFine.uAcross.value = u.uAcross.value;
       uFine.uAcrossX.value = u.uAcrossX.value;
       uFine.uAcrossZ.value = u.uAcrossZ.value;
+      uCascadeFadeTexels.value = Math.max(1, foamParams.cascadeFadeTexels);
+      uCascadeFadeSpan.value = Math.max(1.05, foamParams.cascadeFadeSpan);
       updateFoamShadingUniforms(foamParams, time, oceanParams.windDirection);
       for (const lane of lanes) {
         renderer.compute(lane.inject as Parameters<THREE.WebGPURenderer['compute']>[0]);
         renderer.compute(lane.blurDecay as Parameters<THREE.WebGPURenderer['compute']>[0]);
+        for (const pass of lane.reduce) {
+          renderer.compute(pass as Parameters<THREE.WebGPURenderer['compute']>[0]);
+        }
       }
     },
 
@@ -124,9 +177,22 @@ export function createFoamSim(cascades: FoamCascadeInput[], resolution: number) 
       // fbm domain-warp on the LOOKUP (world meters) — the low-res sim RT's
       // texel grid otherwise reads as boxy patches (§V20 critique)
       const warped = worldXZ.add(foamWarpVec(worldXZ));
+      // Distance-driven band retirement + filtered far tier. Each cascade's
+      // full-res sample is worth reading only while its texels resolve on
+      // screen; past that it is noise and must hand over to the pre-filtered
+      // coarse tier (the coarsest band) or simply retire (the finer ones).
+      const camDist = worldXZ.sub(cameraPosition.xz).length();
       let raw: any = float(0);
       for (const lane of lanes) {
-        raw = raw.add(texture(lane.front, warped.div(lane.domain)).r);
+        const uv = warped.div(lane.domain);
+        const fine = texture(lane.front, uv).r;
+        const start = float(lane.texelMetres).mul(uCascadeFadeTexels);
+        const w = smoothstep(start, start.mul(uCascadeFadeSpan.max(1.05)), camDist)
+          .oneMinus();
+        // coarsest band cross-fades into its filtered tier so broad foam
+        // still reaches the horizon — just band-limited instead of sizzling;
+        // finer bands fade to nothing, which is what averaging them out means
+        raw = raw.add(lane.coarse ? mix(texture(lane.coarse, uv).r, fine, w) : fine.mul(w));
       }
       // world-space cap variation (NON-tiling, drifts slowly): the FFT field
       // repeats per domain, so identical caps pulse in sync on a lattice —
@@ -140,6 +206,8 @@ export function createFoamSim(cascades: FoamCascadeInput[], resolution: number) 
       for (const lane of lanes) {
         lane.front.dispose();
         lane.back.dispose();
+        lane.coarseMid?.dispose();
+        lane.coarse?.dispose();
       }
     },
   };

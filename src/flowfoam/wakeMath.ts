@@ -35,7 +35,7 @@
  *      near the hull (`hullBoost`) for the "heaving water out" read.
  *
  *   AT THE TRANSOM (dist = hull length — the hull has to pass first)
- *   3. stern churn — wide centreline band, ∝ speed², spreading turbulently
+ *   3. stern churn — wide centreline band, ∝ speed, spreading turbulently
  *      with AGE (slow, ~0.5 m/s) not with the Kelvin slope. Reads as a broad
  *      flat rooster tail, visibly unlike the two thin diverging arms.
  *   4. shed vortex pair — two discrete lobes off the transom corners drifting
@@ -61,6 +61,17 @@ export function smoothstepCpu(e0: number, e1: number, x: number): number {
 /** falling edge: 1 at x=0, 0 at x=e — the fade idiom used all over the field */
 const fadeTo = (e: number, x: number): number => 1 - smoothstepCpu(0, Math.max(e, 1e-6), x);
 
+/**
+ * TRUE DISSIPATION with age: exp(−a/τ). Replaces the smoothstep "life" fades,
+ * which were flat near a = 0 — 87% brightness still at 82 m astern — so the
+ * wake read as a fixed-length ribbon of constant intensity that then stopped.
+ * User: "it seems like our wake is only modulated by distance and not by time…
+ * it's too intense too far behind the boat… we need a nice gradient that makes
+ * this disappear slowly instead of instantly." An exponential falls from the
+ * first second and never reaches a hard edge, which is what dissipation does.
+ */
+const dissipate = (tau: number, a: number): number => Math.exp(-a / Math.max(tau, 1e-6));
+
 /** wake tunables subset of FlowFoamParams (pure, structural) */
 export interface WakeParams {
   shoulderIntensity: number;
@@ -78,21 +89,22 @@ export interface WakeParams {
   trackCoarsenStart: number;
   hullBoost: number;
   hullBoostDist: number;
-  bowLife: number;
+  bowDecay: number;
   cutIntensity: number;
   cutWidth: number;
   cutLength: number;
   sternIntensity: number;
   sternWidth: number;
+  sternWidthSlow: number;
   sternSpread: number;
-  sternLife: number;
+  sternDecay: number;
   sternOnset: number;
   vortexIntensity: number;
   vortexOffset: number;
   vortexSpread: number;
   vortexWidth: number;
   vortexSpacing: number;
-  vortexLife: number;
+  vortexDecay: number;
   moundIntensity: number;
   moundLead: number;
   moundSweep: number;
@@ -109,6 +121,7 @@ export interface WakeParams {
   wakeNoiseScale: number;
   wakeNoiseContrast: number;
   wakeBreakup: number;
+  breakupSmoothAge: number;
 }
 
 /** hull geometry the wake needs (from the blueprint AABB, main.ts) */
@@ -243,9 +256,24 @@ export function wakeTrailCpu(
   wz: number,
   hull: WakeHull,
   p: WakeParams,
+  /** LAGGED CURRENT hull speed — wake is only being GENERATED while under way */
+  liveSpeed = points[0]?.speed ?? 0,
 ): number {
   const n = projectOnTrack(points, wx, wz);
   if (!n.found) return 0;
+  // A hove-to ship generates no wake. This term is a SOURCE re-evaluated every
+  // frame, not a one-off deposit: while under way the pattern sweeps outward so
+  // each texel gets a bounded dose, but the instant the hull stops the pattern
+  // freezes and that same dose lands on the same texels for ever, piling up to
+  // solid white. User: "if you're stationary then it should be like a very very
+  // very tiny amount around the hull directly, if anything." Gating generation
+  // on live speed lets the already-deposited foam simply decay away.
+  const liveGate = smoothstepCpu(
+    p.speedThreshold,
+    Math.max(p.speedThreshold * 2, p.speedThreshold + 1e-6),
+    liveSpeed,
+  );
+  if (liveGate <= 0) return 0;
 
   const s = n.speed;
   // §V28: both smoothstep spans floored so e0 === e1 can never divide by 0
@@ -260,7 +288,7 @@ export function wakeTrailCpu(
 
   // --- 1. cutwater core: the stem tearing the surface, right at the bow ---
   const cut =
-    p.cutIntensity * s * sf * fadeTo(p.cutWidth, ay) * fadeTo(p.cutLength, d);
+    p.cutIntensity * s * sf * fadeTo(p.cutWidth, ay) * fadeTo(p.cutLength, d) * dissipate(p.bowDecay, a);
 
   // --- 2. Kelvin arms: crest at dist·tanθ, vertex ON the stem ---
   // The crest position is d·tanθ and is famously INDEPENDENT of speed — that
@@ -270,9 +298,16 @@ export function wakeTrailCpu(
   // reaches. Capped.
   const kelvin = d * tanK; // the physical envelope every aft feature lives in
   const armW = Math.min(p.armWidth + p.armWidthGrowth * d, p.armWidthMax);
-  const arm = fadeTo(armW, Math.abs(ay - kelvin));
+  // DILUTION: a crest spread over a wider band carries the same water more
+  // thinly. User: "while it goes white it kind of distributes and gets diluted
+  // — it needs to fade out to the sides too, really organically."
+  const armDilute = p.armWidth / armW;
+  const arm = fadeTo(armW, Math.abs(ay - kelvin)) * armDilute;
   const boost = 1 + p.hullBoost * fadeTo(p.hullBoostDist, d);
-  const bow = p.bowIntensity * s * sf * arm * boost * fadeTo(p.bowLife, a);
+  // sf SQUARED on the arms only: the user's rule is that a slow ship shows no
+  // spread to the side at all, just a little disturbance aft. A single sf left
+  // the V still out-reading the (speed-scaled) churn at drift speed.
+  const bow = p.bowIntensity * s * sf * sf * arm * boost * dissipate(p.bowDecay, a);
 
   // --- 2b. hull shoulder: the mass of water the forebody shoulders ASIDE ---
   // User: "it doesn't really feel like we're actually pushing away and
@@ -289,7 +324,12 @@ export function wakeTrailCpu(
   // diverged to roughly the same offset — see the continuity test)
   const shoulderHold = 1 - smoothstepCpu(p.shoulderLength * 0.55, p.shoulderLength, d);
   const shoulder =
-    p.shoulderIntensity * s * sf * fadeTo(p.shoulderWidth, Math.abs(ay - shoulderOff)) * shoulderHold;
+    p.shoulderIntensity *
+    s *
+    sf *
+    fadeTo(p.shoulderWidth, Math.abs(ay - shoulderOff)) *
+    shoulderHold *
+    dissipate(p.bowDecay, a);
 
   // --- aft features: only where the TRANSOM has already passed ---
   const ds = d - hull.length;
@@ -306,9 +346,26 @@ export function wakeTrailCpu(
     // physical envelope the arms obey.
     const aftCap = hull.beam * 0.5 + p.aftSpreadCap * kelvin;
 
-    // --- 3. stern churn: wide, flat, centreline-peaked, ∝ speed² ---
-    const churnW = Math.min(hull.beam * 0.5 * p.sternWidth + p.sternSpread * as, aftCap);
-    stern = p.sternIntensity * s * s * fadeTo(churnW, ay) * fadeTo(p.sternLife, as) * onset;
+    // --- 3. stern churn: the TURBULENT CORE, a few beams wide — not the wedge.
+    // It fills only a small fraction of the Kelvin envelope; letting it track
+    // the envelope (aftSpreadCap 0.8) made it 120 m wide at 200 m astern, which
+    // is the "very very wide, looks like a crazy one" the user saw.
+    // LINEAR in speed, not squared: squared collapsed the churn to nothing at
+    // drift speed, and "only some slight disturbance at the aft" is exactly
+    // what the user asks to see when barely making way.
+    // The Kelvin ENVELOPE is speed-independent (arcsin(1/3), a constant), but
+    // the bright turbulent core behind the transom genuinely is not: a slow
+    // hull drags a narrow thread, a fast one a broad boil. This is where speed
+    // may legitimately change the wake's apparent angle.
+    const churnW0 = hull.beam * 0.5 * p.sternWidth * (p.sternWidthSlow + (1 - p.sternWidthSlow) * sf);
+    const churnW = Math.min(churnW0 + p.sternSpread * as, aftCap);
+    stern =
+      p.sternIntensity *
+      s *
+      fadeTo(churnW, ay) *
+      (churnW0 / churnW) * // dilution: same water spread wider reads fainter
+      dissipate(p.sternDecay, as) *
+      onset;
 
     // --- 4. shed vortex pair: two lobes, alternating port/starboard puffs ---
     const vOff = Math.min(hull.beam * 0.5 * p.vortexOffset + p.vortexSpread * as, aftCap);
@@ -318,10 +375,9 @@ export function wakeTrailCpu(
     vortex =
       p.vortexIntensity *
       s *
-      s *
       fadeTo(p.vortexWidth, Math.abs(ay - vOff)) *
       puff *
-      fadeTo(p.vortexLife, as) *
+      dissipate(p.vortexDecay, as) *
       onset;
   }
 
@@ -348,7 +404,7 @@ export function wakeTrailCpu(
   const ahead = (wx - h.x) * h.fx + (wz - h.z) * h.fz;
   const clip = fadeTo(p.bowClip, ahead);
 
-  return (cut + bow + shoulder + stern + vortex) * gate * tail * clip;
+  return (cut + bow + shoulder + stern + vortex) * gate * liveGate * tail * clip;
 }
 
 /**
@@ -366,7 +422,7 @@ export function wakeEnvelopeCpu(
   moundSpeed = points[0]?.speed ?? 0,
 ): number {
   const mound = points.length >= 2 ? bowMoundCpu(points[0], wx, wz, moundSpeed, p) : 0;
-  return wakeTrailCpu(points, wx, wz, hull, p) + mound;
+  return wakeTrailCpu(points, wx, wz, hull, p, moundSpeed) + mound;
 }
 
 /** cos(45°) = sin(45°) — math constant for the rotated noise lattice */
@@ -405,8 +461,16 @@ export function wakeRateCpu(
   moundSpeed = points[0]?.speed ?? 0,
 ): number {
   const mound = points.length >= 2 ? bowMoundCpu(points[0], wx, wz, moundSpeed, p) : 0;
-  const trail = wakeTrailCpu(points, wx, wz, hull, p);
-  return (trail === 0 ? 0 : trail * wakeBreakupCpu(wx, wz, p)) + mound;
+  const trail = wakeTrailCpu(points, wx, wz, hull, p, moundSpeed);
+  if (trail === 0) return mound;
+  // Breakup COARSENS with age: turbulence loses its fine structure as it
+  // decays, so old wake must become a soft wash rather than the high-frequency
+  // stipple the user saw. Blended toward the noise's own mean so smoothing
+  // changes the texture without changing the brightness.
+  const age = Math.max(projectOnTrack(points, wx, wz).age, 0);
+  const t = smoothstepCpu(0, Math.max(p.breakupSmoothAge, 1e-6), age);
+  const breakup = wakeBreakupCpu(wx, wz, p) * (1 - t) + (1 - p.wakeBreakup * 0.5) * t;
+  return trail * breakup + mound;
 }
 
 /**
@@ -419,7 +483,7 @@ export function wakeReachCpu(maxDist: number, hull: WakeHull, p: WakeParams): nu
   const arms = maxDist * (tanK + p.armWidthGrowth) + p.armWidth;
   const aft =
     hull.beam * 0.5 * Math.max(p.sternWidth, p.vortexOffset) +
-    Math.max(p.sternSpread * p.sternLife, p.vortexSpread * p.vortexLife + p.vortexWidth);
+    Math.max(p.sternSpread * p.sternDecay * 3, p.vortexSpread * p.vortexDecay * 3 + p.vortexWidth);
   // the mound reaches forward of the head and outboard of the centreline
   const mound = Math.max(p.moundSpan, p.moundLead + p.moundThick * p.moundFill);
   const shoulder = hull.beam * 0.5 + p.shoulderPush + p.shoulderWidth;

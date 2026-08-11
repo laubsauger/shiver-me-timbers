@@ -110,6 +110,14 @@ export interface HullContactResult {
 export interface HullContact extends HullContactResult {
   readonly stations: readonly ContactStation[];
   readonly sliceZ: Float64Array;
+  /**
+   * Hull half-breadth (m) at each slice — constant geometry, bow → stern.
+   * With `sliceDepth` this is the wetted outline a wake needs: the hull is
+   * pushing water aside over `sliceHalfWidth[s]` wherever `sliceDepth[s]`
+   * is positive, and over nothing where it is not. Feather on depth rather
+   * than gating hard if the wake should fade in as the bow settles.
+   */
+  readonly sliceHalfWidth: Float64Array;
   /** one fixed-dt sample; ocean must already be advanced to `time` */
   update(ship: ShipState, ocean: OceanHeightField, time: number): void;
 }
@@ -218,6 +226,7 @@ export function createHullContact(
   const self: HullContact = {
     stations,
     sliceZ,
+    sliceHalfWidth: halfWidth,
     time: Number.NaN,
     depth: new Float64Array(n),
     rate: new Float64Array(n),

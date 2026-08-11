@@ -76,6 +76,44 @@ export function createInjectPass(
 }
 
 /**
+ * Box-reduction pass: dst[i] = mean of the factor×factor source block.
+ *
+ * WHY (ocean agent, horizon sizzle): StorageTextures carry NO mip chain, so a
+ * grazing-angle pixel covering thousands of foam texels receives exactly ONE
+ * of them, re-picked every frame — textbook minification aliasing, and the
+ * real cause of the shimmering white band. A distance fade or a compositing
+ * cap only hides it. This builds the missing filtered tier explicitly.
+ *
+ * `factor` is a build-time literal so the taps unroll (§V28 forbids dynamic
+ * loop bounds), and the weights are a plain mean: this must not sharpen or
+ * dim foam, only band-limit it.
+ */
+export function createReducePass(
+  src: THREE.StorageTexture,
+  dst: THREE.StorageTexture,
+  dstN: number,
+  factor: number,
+) {
+  if (!Number.isInteger(factor) || factor < 2) {
+    throw new Error(`foam: reduce factor must be an integer ≥ 2, got ${factor}`);
+  }
+  const inv = 1 / (factor * factor);
+  return Fn(() => {
+    const x = int(instanceIndex.mod(dstN)).toVar();
+    const y = int(instanceIndex.div(dstN)).toVar();
+    const sx = x.mul(int(factor)).toVar();
+    const sy = y.mul(int(factor)).toVar();
+    const sum = float(0).toVar();
+    for (let dy = 0; dy < factor; dy++) {
+      for (let dx = 0; dx < factor; dx++) {
+        sum.addAssign(textureLoad(src, ivec2(sx.add(int(dx)), sy.add(int(dy)))).r);
+      }
+    }
+    textureStore(dst, ivec2(x, y), vec4(sum.mul(inv), 0, 0, 1)).toWriteOnly();
+  })().compute(dstN * dstN);
+}
+
+/**
  * Decay+blur pass: dst = min(1, blur3x3(src) · decay), taps rotated into the
  * CREST frame and stretched along the ridge (§V6 shape, user critique
  * "caps too circular"). Gaussian weights sum to 1 (foamMath.GAUSSIAN_3X3) so

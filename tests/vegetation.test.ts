@@ -109,6 +109,7 @@ describe('vegetation params (§V16)', () => {
   });
 });
 
+import { Matrix4, Vector3 } from 'three/webgpu';
 import { sortForLod } from '../src/vegetation/scatter';
 
 describe('LOD instance order (§V17)', () => {
@@ -126,5 +127,36 @@ describe('LOD instance order (§V17)', () => {
     }
     // deterministic: sorting a deterministic list stays deterministic (§V2)
     expect(sortForLod(generatePlacements(24, 99))).toEqual(sorted);
+  });
+});
+
+describe('frustum culling bounds (§V17)', () => {
+  it('the instanced bounds cover every palm plus the sway the shader adds', () => {
+    // culling was OFF, so every palm batch on every island was submitted in
+    // the main AND shadow pass regardless of distance. Turning it on is only
+    // safe if the bounds account for vertices the wind shader moves.
+    const geometry = buildPalmGeometry(3);
+    const mesh = scatterPalms({ count: 20, seed: 3, geometry });
+    expect(mesh.frustumCulled).toBe(true);
+    expect(mesh.boundingSphere).not.toBeNull();
+
+    const p = vegetationParams;
+    const swayMargin =
+      (p.swayAmplitude * (1 + p.swayHarmonic) + p.flutterAmplitude) *
+      Math.max(p.scaleMax, p.scaleMin) * (1 + p.heightJitter);
+    const sphere = mesh.boundingSphere!;
+
+    // every instance origin, plus the palm's own reach, plus sway, fits
+    const m = new Matrix4();
+    const pos = new Vector3();
+    for (let i = 0; i < mesh.count; i++) {
+      mesh.getMatrixAt(i, m);
+      pos.setFromMatrixPosition(m);
+      expect(pos.distanceTo(sphere.center)).toBeLessThanOrEqual(sphere.radius);
+    }
+    // and the margin is actually present, not an accident of the geometry
+    const tight = mesh.boundingSphere!.radius - swayMargin;
+    expect(swayMargin).toBeGreaterThan(0);
+    expect(tight).toBeGreaterThan(0);
   });
 });

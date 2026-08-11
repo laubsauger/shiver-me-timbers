@@ -32,6 +32,7 @@ import {
   wakeEnvelopeCpu,
   wakeRateCpu,
   wakeReachCpu,
+  wakeTrailCpu,
   type WakeHull,
   type WakeParams,
 } from '../src/flowfoam/wakeMath';
@@ -211,54 +212,11 @@ describe('decay factor (§V10 accumulation fade, shared with §V6)', () => {
   });
 });
 
-const WP: WakeParams = {
-  kelvinAngle: 19.47,
-  bowIntensity: 0.3,
-  armWidth: 0.9,
-  armWidthGrowth: 0.02,
-  armWidthMax: 4.0,
-  aftSpreadCap: 0.8,
-  trackCoarsen: 20,
-  trackCoarsenStart: 30,
-  shoulderIntensity: 1.2,
-  shoulderLength: 14,
-  shoulderPush: 2.0,
-  shoulderWidth: 1.3,
-  shoulderEntry: 8,
-  hullBoost: 1.6,
-  hullBoostDist: 14,
-  bowLife: 45,
-  cutIntensity: 1.0,
-  cutWidth: 1.1,
-  cutLength: 7,
-  sternIntensity: 0.05,
-  sternWidth: 0.9,
-  sternSpread: 0.55,
-  sternLife: 40,
-  sternOnset: 3,
-  vortexIntensity: 0.05,
-  vortexOffset: 1.15,
-  vortexSpread: 0.28,
-  vortexWidth: 1.3,
-  vortexSpacing: 11,
-  vortexLife: 45,
-  moundIntensity: 0.5,
-  moundLead: 1.6,
-  moundSweep: 0.9,
-  moundSpan: 5.0,
-  moundThick: 1.4,
-  moundFill: 3.0,
-  moundLag: 1.1,
-  speedThreshold: 0.5,
-  fullWakeSpeed: 5,
-  trackSpacing: 2.2,
-  trackLife: 200,
-  tailFade: 0.35,
-  bowClip: 0.8,
-  wakeNoiseScale: 0.3,
-  wakeNoiseContrast: 0.18,
-  wakeBreakup: 0.85,
-};
+// The SHIPPED defaults, not a hand-picked fixture: WakeParams is a structural
+// subset of FlowFoamParams, so spreading it means these tests validate what the
+// game actually runs. A tuning pass that breaks an invariant (aft inside the
+// Kelvin wedge, shoulder meeting the arms, no saturation) now fails here.
+const WP: WakeParams = { ...flowFoamParams };
 /** galleon-ish: bow z=+12, stern z=−10 → 22 m between stem and transom */
 const HULL: WakeHull = { length: 22, beam: 6 };
 const CFG: TrackConfig = {
@@ -840,6 +798,136 @@ describe('wake field in the track frame (bow vs aft, §V10 follow-up)', () => {
     );
   });
 
+  it('ACCUMULATION must not saturate into a formless slab (user screenshots)', () => {
+    // THE BUG THIS PINS: foam under a sustained source settles at
+    // `rate × halfLife/ln2`. Raising decayHalfLife 2.8 → 14 s multiplied every
+    // equilibrium by 5 and pinned the whole region to 1.0 — the user saw "a
+    // large oval cloud of dense white foam" with no taper, detached-looking,
+    // because a saturated mask has no structure left and all you see is the
+    // region's edge fade. Injection rates and decay are COUPLED; neither can be
+    // tuned alone. Simulating the accumulation is the only way to catch it.
+    const decay = decayFactorPerFrame(flowFoamParams.decayHalfLife, DT);
+    const farDecay = decayFactorPerFrame(flowFoamParams.farDecayHalfLife, DT);
+    const speed = 8.2; // ~16 knots, the speed in the screenshots
+    const t = createWakeTrack();
+    const pose = { x: 0, z: 0, fx: 0, fz: 1, speed };
+    // a transect across the wake, 30 m astern of the stem, world-anchored
+    const probes = Array.from({ length: 25 }, (_, i) => ({ x: -24 + i * 2, near: 0, far: 0 }));
+    const probeZ = speed * 40 - 30; // 30 m astern of where the ship ENDS
+    let ms = 0;
+    for (let step = 0; step < 40 / DT; step++) {
+      pose.z += speed * DT;
+      advanceTrack(t, pose, DT, CFG);
+      ms = approachExp(ms, speed, DT, flowFoamParams.moundLag);
+      const pts = trackPoints(t, pose);
+      for (const p of probes) {
+        const r = wakeRateCpu(pts, p.x, probeZ, HULL, WP, ms);
+        p.near = Math.min(1, p.near * decay + r * DT);
+        p.far = Math.min(1, p.far * farDecay + r * DT * flowFoamParams.farInject);
+      }
+    }
+    const near = probes.map((p) => p.near);
+    const far = probes.map((p) => p.far * flowFoamParams.farStrength);
+    // 1. nothing pins to white — that is the slab
+    expect(Math.max(...near)).toBeLessThan(0.98);
+    expect(Math.max(...far)).toBeLessThan(0.98);
+    // 2. ...but 30 m astern the wake is still plainly THERE and readable
+    expect(Math.max(...near)).toBeGreaterThan(0.2);
+    // 3. and it has STRUCTURE: wet and dry across the same transect, which a
+    //    saturated region cannot have however it is tuned
+    expect(near.filter((v) => v > 0.15).length).toBeGreaterThan(0);
+    expect(near.filter((v) => v < 0.05).length).toBeGreaterThan(0);
+    // 4. the far tier stays a faint remnant, never louder than the near detail
+    expect(Math.max(...far)).toBeLessThan(Math.max(...near));
+  });
+
+  it('HOVE TO: a stopped hull generates no wake and the sea recovers', () => {
+    // User's unambiguous acceptance test: "if you're stationary then it should
+    // be like a very very very tiny amount around the hull directly, if
+    // anything." The trap is that the analytic field is a SOURCE re-evaluated
+    // every frame — under way its pattern sweeps outward so each texel gets a
+    // bounded dose, but stopped it freezes and the same dose lands on the same
+    // texels for ever. Before the live-speed gate this pinned to 1.0 and STAYED
+    // there; the wake got BRIGHTER after dropping anchor.
+    const decay = decayFactorPerFrame(flowFoamParams.decayHalfLife, DT);
+    const speed = 8.2;
+    const t = createWakeTrack();
+    const pose = { x: 0, z: 0, fx: 0, fz: 1, speed };
+    const probes = Array.from({ length: 21 }, (_, i) => ({ x: -20 + i * 2, v: 0 }));
+    const probeZ = speed * 30 - 25;
+    let ms = 0;
+    const tick = (dt: number) => {
+      if (pose.speed > 0) pose.z += pose.speed * dt;
+      advanceTrack(t, pose, dt, CFG);
+      ms = approachExp(ms, pose.speed, dt, flowFoamParams.moundLag);
+      const pts = trackPoints(t, pose);
+      for (const p of probes) {
+        p.v = Math.min(1, p.v * decay + wakeRateCpu(pts, p.x, probeZ, HULL, WP, ms) * dt);
+      }
+    };
+    for (let i = 0; i < 30 / DT; i++) tick(DT);
+    const underway = Math.max(...probes.map((p) => p.v));
+    expect(underway).toBeGreaterThan(0.2); // a real wake while making way
+
+    pose.speed = 0; // hove to
+    for (let i = 0; i < 30 / DT; i++) tick(DT);
+    const stopped = Math.max(...probes.map((p) => p.v));
+    // it must FALL, not grow — and end as barely a trace
+    expect(stopped).toBeLessThan(underway * 0.25);
+    expect(stopped).toBeLessThan(0.15);
+    for (let i = 0; i < 60 / DT; i++) tick(DT);
+    expect(Math.max(...probes.map((p) => p.v))).toBeLessThan(0.05);
+  });
+
+  it('speed drives intensity AND length; the Kelvin ENVELOPE stays constant', () => {
+    // User: "velocity is relevant, both for intensity and length and angle."
+    // Intensity and length: yes, and they must scale. Angle: the Kelvin
+    // half-angle is arcsin(1/3) ≈ 19.47° and is famously INDEPENDENT of speed
+    // in deep water, so the envelope must NOT move — what changes with speed is
+    // the brightness and the width of the turbulent core inside it.
+    const peakAt = (speed: number, dAstern: number) => {
+      const s = sail([{ fx: 0, fz: 1, seconds: 40 }], speed);
+      let mx = 0;
+      for (let y = -40; y <= 40; y += 0.5) {
+        mx = Math.max(mx, wakeEnvelopeCpu(s.points, y, s.z - dAstern, HULL, WP, speed));
+      }
+      return mx;
+    };
+    expect(peakAt(1.2, 30)).toBeLessThan(peakAt(3, 30));
+    expect(peakAt(3, 30)).toBeLessThan(peakAt(6, 30));
+    expect(peakAt(6, 30)).toBeLessThan(peakAt(8.2, 30));
+    expect(peakAt(0.3, 30)).toBe(0); // below threshold: nothing at all
+
+    // the arm CREST sits at dist·tan(19.47°) at every speed — the one thing
+    // about a wake that is exactly constant
+    for (const speed of [3, 6, 8.2]) {
+      const s = sail([{ fx: 0, fz: 1, seconds: 40 }], speed);
+      for (const d of [20, 40, 60]) {
+        const on = wakeEnvelopeCpu(s.points, d * TAN, s.z - d, HULL, WP, speed);
+        const outside = wakeEnvelopeCpu(
+          s.points,
+          d * TAN + WP.armWidthMax + WP.cutWidth + 1,
+          s.z - d,
+          HULL,
+          WP,
+          speed,
+        );
+        expect(on).toBeGreaterThan(0);
+        expect(outside).toBe(0);
+      }
+    }
+    // ...while the turbulent CORE inside it does widen with speed
+    const core = (speed: number) => {
+      const s = sail([{ fx: 0, fz: 1, seconds: 40 }], speed);
+      let w = 0;
+      for (let y = 0; y <= 12; y += 0.25) {
+        if (wakeEnvelopeCpu(s.points, y, s.z - (HULL.length + 10), HULL, WP, speed) > 0.05) w = y;
+      }
+      return w;
+    };
+    expect(core(8.2)).toBeGreaterThan(core(3));
+  });
+
   it('breakup factor is bounded [1−wakeBreakup, 1] and deterministic', () => {
     // WHY: breakup may only REMOVE injected foam (gaps), never amplify it —
     // otherwise intensities in the params panel would lie.
@@ -849,10 +937,30 @@ describe('wake field in the track frame (bow vs aft, §V10 follow-up)', () => {
       expect(b).toBeLessThanOrEqual(1 + 1e-12);
       expect(wakeBreakupCpu(x, z, WP)).toBe(b);
     }
-    const [px, pz] = [2.5, STRAIGHT.z - 30];
-    expect(wakeRateCpu(STRAIGHT.points, px, pz, HULL, WP)).toBeCloseTo(
-      wakeEnvelopeCpu(STRAIGHT.points, px, pz, HULL, WP) * wakeBreakupCpu(px, pz, WP),
-      12,
+    // The rate is trail x breakup, but breakup COARSENS with age: fresh water
+    // carries the raw gappy noise, old water is blended toward the noise's mean
+    // so it reads as a soft wash instead of high-frequency stipple.
+    const fresh: [number, number] = [1.2, STRAIGHT.z - 3];
+    const freshAge = projectOnTrack(STRAIGHT.points, fresh[0], fresh[1]).age;
+    const ct = smooth(0, WP.breakupSmoothAge, freshAge);
+    const coarsened =
+      wakeBreakupCpu(fresh[0], fresh[1], WP) * (1 - ct) + (1 - WP.wakeBreakup * 0.5) * ct;
+    // + the bow mound, which rides outside the trail's breakup (a gappy mound
+    // flickers; the user asked for a constant reaction at the stem)
+    const moundHere = bowMoundCpu(STRAIGHT.points[0], fresh[0], fresh[1], 6, WP);
+    expect(wakeRateCpu(STRAIGHT.points, fresh[0], fresh[1], HULL, WP)).toBeCloseTo(
+      wakeTrailCpu(STRAIGHT.points, fresh[0], fresh[1], HULL, WP) * coarsened + moundHere,
+      10,
+    );
+    expect(moundHere).toBeGreaterThan(0);
+    // far astern the gaps have smoothed away: the effective breakup sits much
+    // closer to the mean than the raw noise does
+    const old: [number, number] = [2.5, STRAIGHT.z - 45];
+    const trail = wakeTrailCpu(STRAIGHT.points, old[0], old[1], HULL, WP);
+    const effective = wakeRateCpu(STRAIGHT.points, old[0], old[1], HULL, WP) / trail;
+    const mean = 1 - WP.wakeBreakup * 0.5;
+    expect(Math.abs(effective - mean)).toBeLessThan(
+      Math.abs(wakeBreakupCpu(old[0], old[1], WP) - mean),
     );
   });
 
@@ -924,8 +1032,8 @@ describe('flowfoam params (§V16 registry contract)', () => {
       flowFoamParams.regionSize * 0.7,
     );
     // fades must not outlive the samples that feed them (dead injection cost)
-    expect(flowFoamParams.bowLife).toBeLessThanOrEqual(flowFoamParams.trackLife);
-    expect(flowFoamParams.sternLife).toBeLessThanOrEqual(flowFoamParams.trackLife);
+    expect(flowFoamParams.bowDecay).toBeLessThanOrEqual(flowFoamParams.trackLife);
+    expect(flowFoamParams.sternDecay).toBeLessThanOrEqual(flowFoamParams.trackLife);
     expect(flowFoamParams.tailFade).toBeGreaterThan(0);
     expect(flowFoamParams.tailFade).toBeLessThan(1);
     expect(flowFoamParams.vortexSpacing).toBeGreaterThan(0);

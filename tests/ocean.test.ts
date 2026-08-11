@@ -492,3 +492,34 @@ describe('significant wave height accessor (§V8 shared sea-state scale)', () =>
     expect(hs({ amplitude: 1.5, windSpeed: 14 })).toBeGreaterThan(newSea);
   });
 });
+
+
+/**
+ * Integration-hook contracts (§V24 shallows, §V26 reflections). These are
+ * shape/param guards, not renders: both hooks must be no-ops when their input
+ * is absent, so the main thread can wire them independently of the ocean and
+ * an open-ocean scene is bit-identical either way.
+ */
+describe('optional material inputs stay optional (§V24, §V26)', () => {
+  it('shallow tint is bounded and only meaningful with a seabed', () => {
+    // strength is live now that islands ship a seabed field; the FACTOR is
+    // what keeps it off open water, so strength alone must never be a
+    // deep-ocean tint. Guarded here so nobody "fixes" a missing shore tint
+    // by pushing strength past 1 and turning the whole sea turquoise.
+    expect(oceanSurfaceParams.shallowTintStrength).toBeGreaterThan(0);
+    expect(oceanSurfaceParams.shallowTintStrength).toBeLessThanOrEqual(1);
+    expect(oceanSurfaceParams.shallowFullDepth).toBeGreaterThan(0);
+  });
+
+  it('refraction ramps in with water thickness, not as a constant offset', () => {
+    // depthFull must be a real distance or the ramp degenerates back to the
+    // constant offset that haloed hulls at the waterline
+    expect(oceanSurfaceParams.refractionDepthFull).toBeGreaterThan(0.1);
+    expect(oceanSurfaceParams.refractionStrength).toBeGreaterThan(0);
+  });
+
+  it('far-field foam damping is a cap, never a boost', () => {
+    expect(oceanSurfaceParams.foamFarDamp).toBeGreaterThanOrEqual(0);
+    expect(oceanSurfaceParams.foamFarDamp).toBeLessThanOrEqual(1);
+  });
+});

@@ -68,6 +68,17 @@ export interface AccumProfile {
   useFlow: boolean;
   /** composite the ortho hull-waterline capture (near only) */
   useCapture: boolean;
+  /**
+   * Scale on the analytic wake injection rate for this tier.
+   *
+   * WHY IT MUST EXIST: accumulated foam under a persistent source settles at
+   * `rate × halfLife/ln2`, so the SAME injection rate that reads correctly in a
+   * 5 s-half-life tier pins to solid white in a 30 s one. The far tier holds
+   * the aged, dispersed remnant of the wake, not fresh foam, and needs a much
+   * smaller rate to land in range. Getting this wrong turns the whole region
+   * into a saturated slab with no structure — which is exactly what it did.
+   */
+  wakeScale: () => number;
 }
 
 export function createAccumulation(
@@ -81,6 +92,7 @@ export function createAccumulation(
     decayHalfLife: () => p.decayHalfLife,
     useFlow: true,
     useCapture: true,
+    wakeScale: () => 1,
   },
 ) {
   const res = profile.res;
@@ -111,6 +123,7 @@ export function createAccumulation(
   const uAdvectDt = uniform(0);
   const uInjectPerFrame = uniform(0);
   const uDt = uniform(0); // wake rate is foam/sec; scaled per fixed tick (§V2)
+  const uWakeScale = uniform(profile.wakeScale());
   const uBlurRadius = uniform(p.blurRadius);
   const uBlurMix = uniform(p.blurMix);
   const uWakeChurn = uniform(p.wakeChurn);
@@ -191,7 +204,7 @@ export function createAccumulation(
         ? textureLoad(injectionRT.texture, ivec2(x, y)).r
         : float(0);
       // analytic ship wake composes ADDITIVELY with the ortho capture
-      const wake = wakeRateNode ? wakeRateNode(vec2(wx, wz)).mul(uDt) : float(0);
+      const wake = wakeRateNode ? wakeRateNode(vec2(wx, wz)).mul(uDt).mul(uWakeScale) : float(0);
       const foam = prev.mul(uDecay).add(inject.mul(uInjectPerFrame)).add(wake).min(1);
       textureStore(texB, ivec2(x, y), vec4(foam, 0, 0, 1)).toWriteOnly();
     });
@@ -286,6 +299,7 @@ export function createAccumulation(
       uAdvectDt.value = p.advectSpeed * dt;
       uInjectPerFrame.value = p.injectStrength * dt;
       uDt.value = dt;
+      uWakeScale.value = profile.wakeScale();
       uBlurRadius.value = p.blurRadius;
       uBlurMix.value = p.blurMix;
       uWakeChurn.value = p.wakeChurn;

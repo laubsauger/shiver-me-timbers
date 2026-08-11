@@ -13,13 +13,17 @@ import {
   fract,
   mix,
   normalLocal,
+  normalWorldGeometry,
   positionLocal,
+  positionWorld,
   sin,
   smoothstep,
   uniform,
   vec2,
   vec3,
+  vec4,
 } from 'three/tsl';
+import { waterLighting } from '../caustics';
 import { hash2, triplanarFbm } from '../terrain/noise';
 import { reliefNormal } from './surfaceRelief';
 import { shipMaterialParams, type ShipMaterialParams } from '../params/ship';
@@ -28,6 +32,23 @@ import { shipMaterialParams, type ShipMaterialParams } from '../params/ship';
  *  reassigned across mix/add/mul so they need the loose node type */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyNode = any;
+
+/**
+ * Ship world matrix INVERSE, so a shared piece material can turn a world
+ * position into a ship-local one — the coordinate the hull wetline's drying
+ * memory is indexed by. Module-level and set from the main loop, mirroring
+ * `uShipSunDirection` in sailMaterial.ts (same pattern, same reason: piece
+ * materials are built per assembly but this is per frame).
+ *
+ * UNTIL main.ts calls setShipWorldMatrix() each frame this stays identity,
+ * which means the wetline reads ship-local == world and the drying band
+ * lands in the wrong place. Caustics and bounce do NOT depend on it.
+ */
+export const uShipWorldInverse = uniform(new THREE.Matrix4());
+
+export function setShipWorldMatrix(m: THREE.Matrix4): void {
+  uShipWorldInverse.value.copy(m).invert();
+}
 
 export interface WoodTones {
   light: number;
@@ -136,8 +157,29 @@ export function createWoodMaterial(
     rough = mix(rough, rough.mul(float(1).sub(uWetSmooth)), wet);
   }
 
+  // --- the ship as an object that is IN the sea (§T.32/§V.34).
+  // Submerged planking gets refracted caustics; the topsides get the
+  // above-water REFLECTED branch — sunlight bouncing off the wave surface
+  // and playing up the hull sides, which is the effect that stops the ship
+  // reading as pasted onto the water. Every output modulates our own
+  // material rather than replacing it, including the relief: timber under a
+  // water film loses its grain, so the height field is scaled, not the
+  // normal. normalWorldGeometry (NOT normalWorld) — normalWorld resolves to
+  // this material's own normalNode, and that node is built from `height`
+  // below, so feeding it back here would be a cycle.
+  const water = waterLighting({
+    worldPos: positionWorld,
+    normal: normalWorldGeometry,
+    shipLocalPos: uShipWorldInverse.mul(vec4(positionWorld, 1)).xyz,
+    mode: 'both',
+  });
+  color = color.mul(water.tint);
+  rough = rough.mul(water.roughnessScale);
+  height = height.mul(water.reliefScale);
+
   material.colorNode = color;
   material.roughnessNode = rough.clamp(0.04, 1);
+  material.emissiveNode = water.addLight;
   // relief from the SAME height field — no textures, no tangents, no UVs
   material.normalNode = reliefNormal(height, uBumpScale);
 

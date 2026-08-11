@@ -16,6 +16,7 @@ import {
   sunDiscCosines,
   sunElevation,
 } from '../src/sky/sunCycle';
+import { shadowBasis, shadowTexelSize, snapShadowCenter } from '../src/sky/shadowMath';
 
 const len = (v: [number, number, number]) => Math.hypot(v[0], v[1], v[2]);
 const angleBetween = (a: [number, number, number], b: [number, number, number]) =>
@@ -105,6 +106,109 @@ describe('color ramps (multiplied into materials — must stay 0..1)', () => {
     expect(daylight(1.0)).toBe(1);
     expect(lowSunWarmth(0.02)).toBeGreaterThan(lowSunWarmth(1.0));
     expect(lowSunWarmth(0.02)).toBeGreaterThan(lowSunWarmth(-0.3));
+  });
+});
+
+describe('shadow texel snapping (why: unsnapped = crawling shadow edges)', () => {
+  const sun = sunDirection(16.4, 15);
+  const texel = shadowTexelSize(80, 2048); // 7.8 cm at the shipped settings
+
+  it('derives the texel size the renderer actually uses', () => {
+    expect(texel).toBeCloseTo(0.078125, 10);
+    expect(shadowTexelSize(80, 4096)).toBeCloseTo(texel / 2, 10);
+  });
+
+  it('refuses to divide by nonsense — snapping off, never NaN (§V28)', () => {
+    for (const [e, m] of [[0, 2048], [80, 0], [-80, 2048], [NaN, 2048], [80, NaN]] as Array<
+      [number, number]
+    >) {
+      expect(shadowTexelSize(e, m)).toBe(0);
+    }
+    // texel 0 must pass the centre straight through, not emit NaN
+    const c: [number, number, number] = [12.3, 0, -4.5];
+    expect(snapShadowCenter(c, sun, 0)).toEqual(c);
+    expect(snapShadowCenter(c, sun, NaN)).toEqual(c);
+    expect(snapShadowCenter(c, [0, 0, 0], texel).every(Number.isFinite)).toBe(true);
+    expect(snapShadowCenter(c, [0, 1, 0], texel).every(Number.isFinite)).toBe(true);
+  });
+
+  it('holds the frustum STILL while the ship moves within one texel', () => {
+    // this is the whole point: sub-texel ship motion must not move the grid,
+    // or every shadow edge re-samples on a new grid and visibly crawls
+    const base = snapShadowCenter([100, 0, 100], sun, texel);
+    const { x, y } = shadowBasis(sun);
+    for (const f of [0, 0.1, -0.2, 0.35, -0.45, 0.49]) {
+      const nudged: [number, number, number] = [
+        base[0] + x[0] * f * texel + y[0] * f * texel,
+        base[1] + x[1] * f * texel + y[1] * f * texel,
+        base[2] + x[2] * f * texel + y[2] * f * texel,
+      ];
+      const snapped = snapShadowCenter(nudged, sun, texel);
+      for (let i = 0; i < 3; i++) expect(snapped[i]).toBeCloseTo(base[i], 9);
+    }
+  });
+
+  it('moves by WHOLE texels when the ship crosses cell boundaries', () => {
+    const { x } = shadowBasis(sun);
+    const start = snapShadowCenter([0, 0, 0], sun, texel);
+    for (const n of [1, 2, 7, 40]) {
+      const moved: [number, number, number] = [
+        start[0] + x[0] * n * texel,
+        start[1] + x[1] * n * texel,
+        start[2] + x[2] * n * texel,
+      ];
+      const snapped = snapShadowCenter(moved, sun, texel);
+      const du =
+        (snapped[0] - start[0]) * x[0] +
+        (snapped[1] - start[1]) * x[1] +
+        (snapped[2] - start[2]) * x[2];
+      expect(du / texel).toBeCloseTo(n, 6); // exactly n texels, no drift
+    }
+  });
+
+  it('never strays more than half a texel — the ship stays framed', () => {
+    const { x, y } = shadowBasis(sun);
+    for (let i = 0; i < 200; i++) {
+      const c: [number, number, number] = [i * 3.7 - 300, 0, i * -2.9 + 120];
+      const s = snapShadowCenter(c, sun, texel);
+      const d: [number, number, number] = [s[0] - c[0], s[1] - c[1], s[2] - c[2]];
+      const du = d[0] * x[0] + d[1] * x[1] + d[2] * x[2];
+      const dv = d[0] * y[0] + d[1] * y[1] + d[2] * y[2];
+      expect(Math.abs(du)).toBeLessThanOrEqual(texel / 2 + 1e-9);
+      expect(Math.abs(dv)).toBeLessThanOrEqual(texel / 2 + 1e-9);
+    }
+  });
+
+  it('never slides along the light axis — that would move near/far', () => {
+    const { z } = shadowBasis(sun);
+    for (const c of [
+      [10, 2, -30],
+      [-1234, 5, 987],
+      [0.001, 0, 0.001],
+    ] as Array<[number, number, number]>) {
+      const s = snapShadowCenter(c, sun, texel);
+      const before = c[0] * z[0] + c[1] * z[1] + c[2] * z[2];
+      const after = s[0] * z[0] + s[1] * z[1] + s[2] * z[2];
+      expect(after).toBeCloseTo(before, 9);
+    }
+  });
+
+  it('builds an orthonormal basis at every sun position of the day', () => {
+    // if this basis drifts from three's lookAt the snap quantises against a
+    // grid the renderer never uses, and the flicker survives the "fix"
+    for (let t = 0; t <= 24; t += 0.25) {
+      for (const lat of [-60, 0, 15, 70]) {
+        const { x, y, z } = shadowBasis(sunDirection(t, lat));
+        for (const v of [x, y, z]) {
+          expect(Math.hypot(v[0], v[1], v[2])).toBeCloseTo(1, 9);
+        }
+        const d = (a: [number, number, number], b: [number, number, number]) =>
+          a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        expect(d(x, y)).toBeCloseTo(0, 9);
+        expect(d(x, z)).toBeCloseTo(0, 9);
+        expect(d(y, z)).toBeCloseTo(0, 9);
+      }
+    }
   });
 });
 

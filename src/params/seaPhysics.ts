@@ -42,6 +42,12 @@ export interface SeaPhysicsParams {
   inertiaRoll: number;
   /** global angular velocity decay 1/s (covers yaw, which probes can't damp) */
   angularDamping: number;
+  /** seabed contact: N per meter the keel is buried in the bank */
+  groundingSpring: number;
+  /** seabed contact: N·s/m against the keel driving further in */
+  groundingDamping: number;
+  /** seabed friction coefficient — planar decel per newton of bed support */
+  groundingFriction: number;
 }
 
 export const seaPhysicsParams: SeaPhysicsParams = registerParams(
@@ -62,9 +68,17 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     // spring/mass ratio sets ride height — user report: deck awash, waves
     // constantly breaking over the ship → stiffer spring, lighter hull
     buoyancySpring: 4.2e5,
-    // ζ_heave ≈ 0.5 with the added mass below: settles without bobbing,
-    // and since it damps RELATIVE to the surface it never fights swell
-    buoyancyDamping: 1.6e5,
+    // ζ_heave ≈ 0.9 with the added mass below. Raised from 1.6e5 (ζ 0.5)
+    // on the user report "sometimes we're losing contact with the waves —
+    // we start to fly a little bit early": at 8 m/s in a beam or following
+    // sea the stem's keel line was clear of the water 13% of the time, and
+    // damping was the only lever that moved it (13.1 → 9.1%, pitch p95 6.1
+    // → 4.7°). It costs nothing in feel because this damper works RELATIVE
+    // to the surface: more of it means the hull tracks the swell's motion
+    // more closely, so the vertical accel RMS went DOWN too (1.01 → 0.88).
+    // Past ~4e5 the hull starts to sit in the water rather than ride it
+    // (swell tracking 0.94 → 0.82) — the old "way too static" complaint.
+    buoyancyDamping: 2.8e5,
     mass: 1.5e5,
     // 2× displacement of entrained water: heave T 1.3 s → 2.3 s. Draft is
     // spring/mass-locked, so this is the ONLY knob that slows heave
@@ -82,6 +96,14 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     // light global decay only (yaw cover) — 0.65 added ζ≈0.36 to roll and
     // pinned the ship upright through storms ("way too static")
     angularDamping: 0.2,
+    // 22 keel stations share the load, so ~1e6 N/m each settles the hull
+    // ~0.07 m into the bank at rest: she sits ON it, not in it, and the
+    // stations that touch first carry more — that IS the list.
+    groundingSpring: 1e6,
+    groundingDamping: 2e5,
+    // μ=0.5: a light touch at 8 kn scrubs speed off over a couple of
+    // seconds, a hard one stops her; higher reads as hitting a wall
+    groundingFriction: 0.5,
   },
   {
     updateEveryTicks: { min: 1, max: 10, step: 1 },
@@ -96,5 +118,8 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     inertiaPitch: { min: 1e5, max: 5e8, step: 1e5 },
     inertiaRoll: { min: 1e5, max: 5e8, step: 1e5 },
     angularDamping: { min: 0, max: 5, step: 0.01 },
+    groundingSpring: { min: 0, max: 5e6, step: 1e4 },
+    groundingDamping: { min: 0, max: 2e6, step: 1e4 },
+    groundingFriction: { min: 0, max: 3, step: 0.05 },
   },
 );

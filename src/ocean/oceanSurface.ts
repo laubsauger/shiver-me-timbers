@@ -4,7 +4,11 @@
  * Follows the camera in whole core-spacing steps so near vertices never swim.
  *
  * INTEGRATION (main thread owns the call):
- *   new OceanSurface(sim, foam, flowFoam, { sunLight: sky.sunLight })
+ *   new OceanSurface(sim, foam, flowFoam, {
+ *     sunLight: sky.sunLight,          // §V20 water receives sun shadows
+ *     seabed: archipelago.seabed,      // §V24 shallows tint (optional)
+ *     reflection,                      // §V26 planar reflections (optional)
+ *   })
  *   surface.update(camera, time, sky.sunDirection)   // per frame
  * `sunLight` is optional but without it the water receives no sun shadows
  * (§V20 — the material is MeshBasicNodeMaterial on purpose, so receiveShadow
@@ -18,10 +22,22 @@ import { buildOceanSurfaceMaterial, type OceanSurfaceMaterial } from './surfaceM
 import { buildOceanGrid, snapToGrid, type SurfaceGridOptions } from './surfaceGeometry';
 import { oceanSurfaceParams as sp } from '../params/oceanSurface';
 import { skyParams } from '../params/sky';
+import type { SeabedField } from '../island/seabed';
+import type { PlanarReflection } from '../reflection';
 
 export interface OceanSurfaceOptions {
   /** the scene's sun — enables the in-material shadow sample (§V20) */
   sunLight?: THREE.DirectionalLight;
+  /**
+   * Seabed depth field from the archipelago (§V24 shallows tint). Absent →
+   * the shallow term compiles out entirely and open ocean is unaffected.
+   */
+  seabed?: SeabedField | null;
+  /**
+   * Planar reflection (§V26). Absent → the analytic sky term is used, so this
+   * is a no-op the main thread can wire whenever the perf picture allows.
+   */
+  reflection?: PlanarReflection | null;
   /** grid override; defaults to the params values (reload to apply) */
   grid?: SurfaceGridOptions;
 }
@@ -57,6 +73,8 @@ export class OceanSurface {
       flowFoam,
       this.grid,
       sp.shadowsEnabled ? opts.sunLight : undefined,
+      opts.seabed,
+      opts.reflection,
     );
     this.group = new THREE.Group();
     this.mesh = new THREE.Mesh(buildOceanGrid(this.grid), this.surface.material);

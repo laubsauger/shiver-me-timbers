@@ -29,9 +29,11 @@ import { SIM_DT } from '../core/loop';
 import {
   cascadeBand,
   cpuButterflyIFFT,
+  effectiveChoppiness,
   generateButterfly,
   generateH0,
   GRAVITY,
+  spectralSteepness,
 } from '../ocean/oceanMath';
 import { oceanParams, type OceanParams } from '../params/ocean';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../params/seaPhysics';
@@ -228,6 +230,27 @@ function mirrorSignature(p: OceanParams, seaP: SeaPhysicsParams): string {
   ].join('|');
 }
 
+/**
+ * Σ-over-cascades displacement-gradient RMS, exactly as OceanSimulation
+ * .refreshSeaState aggregates it: variance summed over ALL THREE GPU
+ * cascades (not just the two mirrored here — the fold cap the GPU applies
+ * is one number for the whole sea) then square-rooted. Cached with the
+ * spectrum: it only moves when a spectrum-shaping param moves.
+ */
+function totalSteepnessRms(p: OceanParams): number {
+  let variance = 0;
+  for (let i = 0; i < p.cascades.length; i++) {
+    const s = spectralSteepness(
+      p.resolution,
+      p.cascades[i].domain,
+      p,
+      cascadeBand(i, p.splitWavelengths),
+    );
+    variance += s * s;
+  }
+  return Math.sqrt(Math.max(0, variance));
+}
+
 export class CpuOcean {
   private cascades: MirrorCascade[];
   private butterfly: Float32Array;
@@ -235,6 +258,7 @@ export class CpuOcean {
   private readonly oceanP: OceanParams;
   private readonly seaP: SeaPhysicsParams;
   private signature: string;
+  private steepnessRms: number;
   private rebuildCountdown = -1;
   private time = NaN;
   private gridTime = NaN;
@@ -248,6 +272,7 @@ export class CpuOcean {
     this.oceanP = oceanP;
     this.seaP = seaP;
     this.signature = mirrorSignature(oceanP, seaP);
+    this.steepnessRms = totalSteepnessRms(oceanP);
     const n = seaP.mirrorResolution;
     this.butterfly = generateButterfly(n);
     this.cascades = [];
@@ -259,6 +284,24 @@ export class CpuOcean {
   /** sim time of the last update() call (grids may lag ≤ updateEveryTicks) */
   get currentTime(): number {
     return this.time;
+  }
+
+  /**
+   * The Tessendorf λ this mirror displaces with — the FOLD-CAPPED value,
+   * never the raw slider (§V.8). The GPU caps λ so that λ·σ_gradient stays
+   * under choppinessFoldLimit, which is what stops a storm sea folding into
+   * shards; a mirror that kept using the raw slider would put every crest
+   * at a different horizontal position than the one drawn, and the ship
+   * would float on a sea nobody can see — §B.7 by another route. Derived
+   * per call from the cached steepness, exactly as OceanSimulation does it,
+   * so a live choppiness tweak tracks on both sides within a frame.
+   */
+  effectiveChoppiness(): number {
+    return effectiveChoppiness(
+      this.oceanP.choppiness,
+      this.steepnessRms,
+      this.oceanP.choppinessFoldLimit,
+    );
   }
 
   /** advance mirror to sim time; grids recompute every updateEveryTicks */
@@ -278,12 +321,15 @@ export class CpuOcean {
       for (let i = 0; i < MIRRORED_CASCADES; i++) {
         this.cascades.push(new MirrorCascade(i, this.seed, this.oceanP, n));
       }
+      // the fold cap is measured on the spectrum, so it moves with it
+      this.steepnessRms = totalSteepnessRms(this.oceanP);
       this.gridTime = NaN; // force recompute below
     }
     const staleFor = Math.abs(time - this.gridTime);
     if (staleFor < this.seaP.updateEveryTicks * SIM_DT - 1e-9) return;
+    const lambda = this.effectiveChoppiness();
     for (const c of this.cascades) {
-      c.compute(time, this.butterfly, this.oceanP.choppiness);
+      c.compute(time, this.butterfly, lambda);
     }
     this.gridTime = time;
   }

@@ -16,6 +16,7 @@ import {
 import { createSailClothMaterial } from './sailMaterial';
 
 export { uShipSunDirection } from './sailMaterial';
+export { setShipWorldMatrix } from './woodMaterial';
 
 type Family = 'hull' | 'deck' | 'spar' | 'trim' | 'sail';
 

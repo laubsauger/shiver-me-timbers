@@ -5,7 +5,14 @@
  * must be stable and self-righting (or ships jitter, flip, or explode).
  */
 import { describe, expect, it } from 'vitest';
-import { generateButterfly, naiveIDFT } from '../src/ocean/oceanMath';
+import {
+  cascadeBand,
+  effectiveChoppiness,
+  generateButterfly,
+  naiveIDFT,
+  spectralSteepness,
+} from '../src/ocean/oceanMath';
+import { weatherPresets } from '../src/weather/presets';
 import { oceanParams, type OceanParams } from '../src/params/ocean';
 import {
   seaPhysicsParams,
@@ -457,6 +464,55 @@ describe('feel targets: added mass (a heaving hull drags water with it)', () => 
     expect(heavy.period / cork.period).toBeCloseTo(expected, 1);
     // and it still floats at exactly the same draft (§V.8 ride height)
     expect(heavy.rest).toBeCloseTo(cork.rest, 9);
+  });
+});
+
+describe('§V.8: CPU mirror and GPU agree on the FOLD-CAPPED choppiness', () => {
+  // WHY: the GPU displaces with effectiveChoppiness() — λ capped so that
+  // λ·σ_gradient ≤ choppinessFoldLimit, which is what stops a storm sea
+  // folding into shards. A mirror that kept using the raw p.choppiness puts
+  // every crest at a different horizontal position than the one drawn, so
+  // the ship floats on a sea nobody can see. That is §V.8 exactly, and the
+  // §B.7 failure class (mirror silently describing a different ocean).
+  // Pinned against the aggregation the GPU class performs — over ALL THREE
+  // cascades, variance-summed — not against our own implementation, so
+  // mirroring only the two cascades we simulate would fail here.
+  const gpuLambda = (p: OceanParams): number => {
+    let variance = 0;
+    for (let i = 0; i < p.cascades.length; i++) {
+      const s = spectralSteepness(p.resolution, p.cascades[i].domain, p, cascadeBand(i, p.splitWavelengths));
+      variance += s * s;
+    }
+    return effectiveChoppiness(p.choppiness, Math.sqrt(variance), p.choppinessFoldLimit);
+  };
+
+  for (const name of ['calm', 'swell', 'storm'] as const) {
+    it(`agrees under the ${name} preset`, () => {
+      const op = testOceanParams({ ...weatherPresets[name].ocean });
+      const mirror = new CpuOcean(5, op, testSeaParams());
+      expect(mirror.effectiveChoppiness()).toBeCloseTo(gpuLambda(op), 12);
+    });
+  }
+
+  it('tracks a live choppiness tweak without waiting for an h0 rebuild', () => {
+    // the GPU derives λ per frame from a cached steepness; so must we, or a
+    // slider drag desynchronises the two seas until the next rebuild
+    const op = testOceanParams({ ...weatherPresets.storm.ocean });
+    const mirror = new CpuOcean(5, op, testSeaParams());
+    const before = mirror.effectiveChoppiness();
+    op.choppiness *= 0.5;
+    expect(mirror.effectiveChoppiness()).toBeCloseTo(gpuLambda(op), 12);
+    expect(mirror.effectiveChoppiness()).toBeLessThan(before);
+  });
+
+  it('the cap actually BITES somewhere, or this test guards nothing', () => {
+    // fail loud: if no preset ever folds, a broken cap would look identical
+    // to a working one here
+    const capped = (['calm', 'swell', 'storm'] as const).filter((n) => {
+      const op = testOceanParams({ ...weatherPresets[n].ocean });
+      return gpuLambda(op) < op.choppiness - 1e-9;
+    });
+    expect(capped.length).toBeGreaterThan(0);
   });
 });
 

@@ -101,21 +101,23 @@ export function createWakeInjector(p: FlowFoamParams) {
   const uShoulderEntry = uniform(p.shoulderEntry);
   const uHullBoost = uniform(p.hullBoost);
   const uHullBoostDist = uniform(p.hullBoostDist);
-  const uBowLife = uniform(p.bowLife);
+  const uBowDecay = uniform(p.bowDecay);
   const uCutIntensity = uniform(p.cutIntensity);
   const uCutWidth = uniform(p.cutWidth);
   const uCutLength = uniform(p.cutLength);
   const uSternIntensity = uniform(p.sternIntensity);
   const uSternWidth = uniform(p.sternWidth);
+  const uSternWidthSlow = uniform(p.sternWidthSlow);
+  const uBreakupSmoothAge = uniform(p.breakupSmoothAge);
   const uSternSpread = uniform(p.sternSpread);
-  const uSternLife = uniform(p.sternLife);
+  const uSternDecay = uniform(p.sternDecay);
   const uSternOnset = uniform(p.sternOnset);
   const uVortexIntensity = uniform(p.vortexIntensity);
   const uVortexOffset = uniform(p.vortexOffset);
   const uVortexSpread = uniform(p.vortexSpread);
   const uVortexWidth = uniform(p.vortexWidth);
   const uVortexSpacing = uniform(p.vortexSpacing);
-  const uVortexLife = uniform(p.vortexLife);
+  const uVortexDecay = uniform(p.vortexDecay);
   const uSpeedThreshold = uniform(p.speedThreshold);
   const uFullWakeSpeed = uniform(p.fullWakeSpeed);
   const uTrackLife = uniform(p.trackLife);
@@ -142,6 +144,8 @@ export function createWakeInjector(p: FlowFoamParams) {
 
   /** falling edge: 1 at x = 0, 0 at x = e (§V23 functional smoothstep) */
   const fadeTo = (e: any, x: any): any => smoothstep(float(0), e.max(EPS), x).oneMinus();
+  /** true dissipation exp(−a/τ) — see wakeMath.dissipate for why not smoothstep */
+  const dissipate = (tau: any, a: any): any => a.div(tau.max(EPS)).negate().exp();
 
   return {
     /**
@@ -201,21 +205,26 @@ export function createWakeInjector(p: FlowFoamParams) {
           .mul(s)
           .mul(sf)
           .mul(fadeTo(uCutWidth, ay))
-          .mul(fadeTo(uCutLength, d));
+          .mul(fadeTo(uCutLength, d))
+          .mul(dissipate(uBowDecay, age));
 
         // 2. Kelvin arms — crest at dist·tanθ (speed-INDEPENDENT, as it must
         //    be), thickness capped so the V never swells into a wedge-shaped
         //    blob at the ranges the trail now reaches
         const kelvin = d.mul(uKelvinTan); // the envelope every aft feature obeys
         const armW = uArmWidth.add(uArmWidthGrowth.mul(d)).min(uArmWidthMax);
-        const arm = fadeTo(armW, ay.sub(kelvin).abs());
+        // dilution: a crest spread wider carries the same water more thinly
+        const arm = fadeTo(armW, ay.sub(kelvin).abs()).mul(uArmWidth.div(armW.max(EPS)));
         const boost = float(1).add(uHullBoost.mul(fadeTo(uHullBoostDist, d)));
+        // sf SQUARED on the arms only — see wakeMath: a drifting ship must
+        // show no lateral spread, only a little churn aft
         const bow = uBowIntensity
           .mul(s)
           .mul(sf)
+          .mul(sf)
           .mul(arm)
           .mul(boost)
-          .mul(fadeTo(uBowLife, age));
+          .mul(dissipate(uBowDecay, age));
 
         // 2b. hull shoulder — the water the forebody shoulders ASIDE, pressed
         //     out past the hull side along the whole immersed forebody and
@@ -236,7 +245,8 @@ export function createWakeInjector(p: FlowFoamParams) {
           .mul(s)
           .mul(sf)
           .mul(fadeTo(uShoulderWidth, ay.sub(shoulderOff).abs()))
-          .mul(shoulderHold);
+          .mul(shoulderHold)
+          .mul(dissipate(uBowDecay, age));
 
         // aft features start only where the TRANSOM has passed (onset = 0 ahead)
         const ds = d.sub(uHullLength);
@@ -247,12 +257,19 @@ export function createWakeInjector(p: FlowFoamParams) {
         const aftCap = uBeam.mul(0.5).add(uAftSpreadCap.mul(kelvin));
 
         // 3. stern churn — wide flat centreline band, ∝ speed², spreads with AGE
-        const churnW = uBeam.mul(0.5).mul(uSternWidth).add(uSternSpread.mul(as)).min(aftCap);
+        // envelope is speed-independent; the turbulent CORE is not (wakeMath)
+        const churnW0 = uBeam
+          .mul(0.5)
+          .mul(uSternWidth)
+          .mul(mix(uSternWidthSlow, float(1), sf));
+        const churnW = churnW0.add(uSternSpread.mul(as)).min(aftCap);
+        // LINEAR in speed (see wakeMath) so drift still churns aft; dilution
+        // and exp dissipation so it thins and fades instead of ending hard
         const stern = uSternIntensity
           .mul(s)
-          .mul(s)
           .mul(fadeTo(churnW, ay))
-          .mul(fadeTo(uSternLife, as))
+          .mul(churnW0.div(churnW.max(EPS)))
+          .mul(dissipate(uSternDecay, as))
           .mul(onset);
 
         // 4. shed vortex pair — lobes off the transom corners, alternating
@@ -263,10 +280,9 @@ export function createWakeInjector(p: FlowFoamParams) {
         const puff = phase.sin().mul(0.5).add(0.5);
         const vortex = uVortexIntensity
           .mul(s)
-          .mul(s)
           .mul(fadeTo(uVortexWidth, ay.sub(vOff).abs()))
           .mul(puff)
-          .mul(fadeTo(uVortexLife, as))
+          .mul(dissipate(uVortexDecay, as))
           .mul(onset);
 
         // Tail fade so an evicted sample never pops out of existence — BOTH
@@ -295,7 +311,11 @@ export function createWakeInjector(p: FlowFoamParams) {
           float(0.5).add(uWakeNoiseContrast).max(float(0.5).sub(uWakeNoiseContrast).add(EPS)),
           n,
         );
-        const breakup = mix(uWakeBreakup.oneMinus(), float(1), patch);
+        // coarsen with age toward the noise's own mean — old wake is a soft
+        // wash, not stipple (wakeMath.wakeRateCpu twin)
+        const rawBreakup = mix(uWakeBreakup.oneMinus(), float(1), patch);
+        const coarse = smoothstep(float(0), uBreakupSmoothAge.max(EPS), age);
+        const breakup = mix(rawBreakup, float(1).sub(uWakeBreakup.mul(0.5)), coarse);
 
         // --- 0. bow mound: the displacement bow wave, the one feature FORWARD
         //     of the stem, so it sits outside `clip`. Evaluated in the live
@@ -322,6 +342,13 @@ export function createWakeInjector(p: FlowFoamParams) {
 
         // the mound skips `breakup` on purpose: the user asked for a CONSTANT
         // reaction at the stem, and gappy noise makes it flicker in and out
+        // a hove-to hull generates no wake — see wakeMath.wakeTrailCpu for why
+        // this must gate on LIVE speed, not the speed each sample was laid at
+        const liveGate = smoothstep(
+          uSpeedThreshold,
+          uSpeedThreshold.mul(2).max(uSpeedThreshold.add(EPS)),
+          uMoundSpeed,
+        );
         rate.assign(
           cut
             .add(bow)
@@ -329,6 +356,7 @@ export function createWakeInjector(p: FlowFoamParams) {
             .add(stern)
             .add(vortex)
             .mul(gate)
+            .mul(liveGate)
             .mul(tail)
             .mul(clip)
             .mul(breakup)
@@ -431,21 +459,23 @@ export function createWakeInjector(p: FlowFoamParams) {
       uShoulderEntry.value = p.shoulderEntry;
       uHullBoost.value = p.hullBoost;
       uHullBoostDist.value = p.hullBoostDist;
-      uBowLife.value = p.bowLife;
+      uBowDecay.value = p.bowDecay;
       uCutIntensity.value = p.cutIntensity;
       uCutWidth.value = p.cutWidth;
       uCutLength.value = p.cutLength;
       uSternIntensity.value = p.sternIntensity;
       uSternWidth.value = p.sternWidth;
+      uSternWidthSlow.value = p.sternWidthSlow;
+      uBreakupSmoothAge.value = p.breakupSmoothAge;
       uSternSpread.value = p.sternSpread;
-      uSternLife.value = p.sternLife;
+      uSternDecay.value = p.sternDecay;
       uSternOnset.value = p.sternOnset;
       uVortexIntensity.value = p.vortexIntensity;
       uVortexOffset.value = p.vortexOffset;
       uVortexSpread.value = p.vortexSpread;
       uVortexWidth.value = p.vortexWidth;
       uVortexSpacing.value = p.vortexSpacing;
-      uVortexLife.value = p.vortexLife;
+      uVortexDecay.value = p.vortexDecay;
       uSpeedThreshold.value = p.speedThreshold;
       uFullWakeSpeed.value = p.fullWakeSpeed;
       uTrackLife.value = p.trackLife;

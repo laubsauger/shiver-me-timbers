@@ -23,6 +23,7 @@
  */
 import * as THREE from 'three/webgpu';
 import type { SkyParams } from '../params/sky';
+import { shadowTexelSize, snapShadowCenter } from './shadowMath';
 import {
   daylight,
   fogRange,
@@ -98,12 +99,26 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
         sc.bottom = -appliedExtent;
         sc.updateProjectionMatrix();
       }
-      sunLight.position.set(
-        followTarget.x + sunDir[0] * p.sunDistance,
-        followTarget.y + sunDir[1] * p.sunDistance,
-        followTarget.z + sunDir[2] * p.sunDistance,
+      // Texel-snap the frustum centre before placing the light. Following
+      // the ship at continuous coordinates slides the shadow map's texel
+      // grid under the scene every frame, which makes every shadow edge
+      // crawl; quantising to whole texels makes the map move in discrete
+      // steps so a static edge keeps landing on the same texels. Snap
+      // against the ALLOCATED map size, not the param — mapSize only takes
+      // effect on reload, and snapping to a grid the renderer isn't using
+      // would leave the flicker exactly as it was.
+      const texel = shadowTexelSize(appliedExtent, sunLight.shadow.mapSize.x);
+      const [cx, cy, cz] = snapShadowCenter(
+        [followTarget.x, followTarget.y, followTarget.z],
+        sunDir,
+        texel,
       );
-      sunLight.target.position.copy(followTarget);
+      sunLight.position.set(
+        cx + sunDir[0] * p.sunDistance,
+        cy + sunDir[1] * p.sunDistance,
+        cz + sunDir[2] * p.sunDistance,
+      );
+      sunLight.target.position.set(cx, cy, cz);
       const sun = sunColor(elevation);
       const day = daylight(elevation);
       setSrgb(sunLight.color, sun);

@@ -20,6 +20,7 @@
 import * as THREE from 'three/webgpu';
 import {
   cameraPosition,
+  float,
   mix,
   normalWorld,
   positionWorld,
@@ -29,6 +30,12 @@ import {
   vec3,
 } from 'three/tsl';
 import { terrainParams } from '../params/terrain';
+// §V34 receiver hook. Safe before setActiveCaustics() and with caustics
+// disabled — it returns identity nodes that fold away. It does WARN once,
+// though, because TSL bakes the graph at construction: main.ts must call
+// setActiveCaustics() BEFORE createArchipelago() or the beaches are baked
+// without caustics and only a rebuild can give them any.
+import { activeCaustics, waterLighting } from '../caustics';
 import { fbm2, hash2, valueNoise2 } from './noise';
 import {
   buildShoreNodes,
@@ -46,6 +53,27 @@ import {
 export interface SandMaterialOptions {
   /** initial world-space sun direction (unit, pointing AT the sun) */
   sunDirection?: THREE.Vector3;
+}
+
+/**
+ * Sea surface height at a world XZ, and the depth below it (positive
+ * submerged — the sign convention §V34's `depthBelowSurface` wants).
+ *
+ * With caustics bound this is the LIVE displaced FFT surface sampled per
+ * fragment. That costs 3 texture taps, but they are the SAME 3 taps the
+ * caustics receiver call would otherwise make for itself, so passing the
+ * result on as `depthBelowSurface` pays them once — and it upgrades the swash
+ * from a per-island scalar sea level to a waterline that follows the actual
+ * waves. A 69 m swell moves the shoreline metres in and out along a flat
+ * beach; a scalar drew that as one breathing contour.
+ *
+ * With nothing bound (tests, a stand-alone beach, `receiveCaustics` off) it
+ * falls back to the flat `waterline` uniform the island drives from CpuOcean.
+ */
+function seaDepthNode(u: SandUniforms, worldXZ: any) {
+  const active = terrainParams.receiveCaustics ? activeCaustics() : undefined;
+  const seaY: any = active ? active.waterHeight(worldXZ) : u.waterline;
+  return { seaY, depthBelow: seaY.sub(positionWorld.y), live: Boolean(active) };
 }
 
 /** Live GPU uniforms mirroring the sand/shore section of terrainParams. */
@@ -125,17 +153,20 @@ export function buildSandNodes(
   const grain = valueNoise2(ground.mul(u.grainScale));
   albedo = albedo.mul(grain.sub(0.5).mul(u.grainStrength).add(1));
 
+  // elevation above the live sea surface (m) — the axis everything shore-side
+  // is expressed on. Negated depth so the two can never disagree about where
+  // the water is.
+  const sea = seaDepthNode(u, ground);
+  const heightAbove = sea.depthBelow.negate();
+
   // Static shore wetness: the permanently-damp band right at the water; the
   // swash model below adds the part that MOVES.
-  // §V23 chained form — receiver is x: smoothstep(waterline, waterline+band,
-  // positionWorld.y) is 0 at/below the waterline and 1 a band above it, so
-  // oneMinus() gives 1 at the water fading to 0 up the beach.
-  const staticWet = positionWorld.y
-    .smoothstep(u.waterline, u.waterline.add(u.wetBand.max(1e-3)))
-    .oneMinus();
+  // §V23 chained form — receiver is x: smoothstep(0, wetBand, heightAbove) is
+  // 0 at the waterline and 1 a band above it, so oneMinus() gives 1 at the
+  // water fading to 0 up the beach.
+  const staticWet = heightAbove.smoothstep(float(0), u.wetBand.max(1e-3)).oneMinus();
 
   // T33 swash: the wave tongue, its foam line, and the drying wet memory
-  const heightAbove = positionWorld.y.sub(u.waterline);
   const swash = shore ? buildShoreNodes(shore, heightAbove, ground) : null;
   const wet = swash ? staticWet.max(swash.wet) : staticWet;
   albedo = albedo.mul(wet.mul(u.wetDarken).oneMinus());
@@ -175,6 +206,10 @@ export function buildSandNodes(
     emissive: vec3(glint),
     wet,
     swash,
+    /** metres below the live sea surface, positive submerged (§V34 receiver) */
+    depthBelow: sea.depthBelow,
+    /** true when the sea height is the live FFT surface, not the flat uniform */
+    liveWaterHeight: sea.live,
   };
 }
 
@@ -184,9 +219,16 @@ export function createSandMaterial(opts: SandMaterialOptions = {}) {
   const shore = terrainParams.runupEnabled ? createShoreUniforms() : null;
   const nodes = buildSandNodes(uniforms, terrainParams.noiseOctaves, shore);
   const material = new THREE.MeshStandardNodeMaterial();
-  material.colorNode = nodes.color;
-  material.roughnessNode = nodes.roughness;
-  material.emissiveNode = nodes.emissive;
+  // §V34 water lighting, same contract as terrainBlendMaterial below
+  const w = waterLighting({
+    worldPos: positionWorld,
+    normal: normalWorld,
+    depthBelowSurface: nodes.depthBelow,
+    mode: 'below',
+  });
+  material.colorNode = nodes.color.mul(w.tint);
+  material.roughnessNode = nodes.roughness.mul(w.roughnessScale);
+  material.emissiveNode = nodes.emissive.add(w.addLight);
   material.metalness = 0;
   return {
     material,
@@ -272,9 +314,28 @@ export function terrainBlendMaterial(
   // rock pierces the waterline the foam ring comes from the intersection-foam
   // machinery (flowfoam depth-compare), which is why this is a plain blend and
   // not a second foam source competing with it.
-  material.colorNode = mix(rockNodes.color, sandNodes.color, sandW);
-  material.roughnessNode = mix(rockNodes.roughness, sandNodes.roughness, sandW);
-  material.emissiveNode = sandNodes.emissive.mul(sandW);
+  const albedo = mix(rockNodes.color, sandNodes.color, sandW);
+  const roughness = mix(rockNodes.roughness, sandNodes.roughness, sandW);
+
+  // §V34: sun caustics over the shallows, sea bounce-fill, depth absorption.
+  // The seabed and beach are the receivers the invariant names, and this is
+  // the biggest one in the scene by screen coverage. `mode: 'below'` compiles
+  // the reflected above-water branch away; `depthBelowSurface` is handed over
+  // rather than re-derived so its 3 surface taps are shared with the swash.
+  //
+  // NOTE the overlap: water lighting carries its own wetness band around the
+  // waterline (`tint`), which lands on top of the swash's wet sand in the
+  // permanently-damp strip. Same physical phenomenon from two models — if it
+  // reads too dark in the browser, `terrainParams.wetDarken` is the live knob.
+  const w = waterLighting({
+    worldPos: positionWorld,
+    normal: normalWorld,
+    depthBelowSurface: sandNodes.depthBelow,
+    mode: 'below',
+  });
+  material.colorNode = albedo.mul(w.tint);
+  material.roughnessNode = roughness.mul(w.roughnessScale);
+  material.emissiveNode = sandNodes.emissive.mul(sandW).add(w.addLight);
   material.metalness = 0;
 
   const sunDirection = (v: THREE.Vector3): void => {

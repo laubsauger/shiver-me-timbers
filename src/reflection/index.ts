@@ -1,78 +1,85 @@
 /**
  * Planar water reflections (T30, §V26) — integration surface.
  *
- * ── OCEAN MATERIAL (src/ocean/surfaceMaterial.ts, ocean agent owns the file)
+ * DEFAULT STATE: `reflectionParams.live` ships at 0 — the mirror pass is
+ * BUILT and wired but does not run until the panel (or the graphics quality
+ * setting) turns it on. See the comment on that param for the §V17 numbers
+ * behind the decision; §V26 still requires this to end up on for the final
+ * look. Wiring it in costs nothing while `live` is 0, so wire it now.
+ *
+ * ── OCEAN MATERIAL (src/ocean/surfaceMaterial.ts) — ALREADY LANDED
  * The reflection replaces the CONTENT of the reflected colour, never its
  * weight — the ocean keeps `fresnel × reflectionStrength` (0.13), so §V20's
- * painted-water bar cannot be broken by turning this on. Three edits:
+ * painted-water bar cannot be broken by turning this on. The hook is a `? :`
+ * on the optional `reflection` argument, so it is a no-op until main.ts
+ * passes one in. No new uniforms and no `updateFromParams` entries on the
+ * ocean side — this module owns its uniforms and pushes them itself.
  *
- *   // 1. option in OceanSurfaceOptions / buildOceanSurfaceMaterial args
- *   import type { PlanarReflection } from '../reflection';
- *   ... reflection?: PlanarReflection | null
+ * ── MAIN THREAD (src/main.ts) — exact sequence
  *
- *   // 2. in the colorNode, replace the single line
- *   //      const col = mix(waterCol, skyReflCol, fresnel.mul(uReflStrength)).toVar();
- *   const reflCol = reflection
- *     ? reflection.shade({
- *         skyColor: skyReflCol,          // the existing analytic sky term
- *         normalWorld,                   // already computed above
- *         chop: totalDisp.xz.length(),   // horizontal displacement, metres
- *         camDist,                       // already computed above
- *       })
- *     : skyReflCol;
- *   const col = mix(waterCol, reflCol, fresnel.mul(uReflStrength)).toVar();
+ * ① after `createClouds(...)` and `sky`, BEFORE `new OceanSurface(...)`
+ *   (the material needs the handle at build time):
  *
- *   // 3. nothing else. No new uniforms, no updateFromParams entries — the
- *   //    reflection module owns its own uniforms and pushes them itself.
+ *     import { createPlanarReflection } from './reflection';
  *
- * ── MAIN THREAD (src/main.ts)
- *   const reflection = createPlanarReflection({
- *     sunLight: sky.sunLight,
- *     planeY: 0,
- *     clouds: { blurred: clouds.blurredTexture, seed: state.seed },  // optional
- *   });
- *   const surface = new OceanSurface(ocean, foam, flowFoam, {
- *     sunLight: sky.sunLight,
- *     reflection,
- *   });
- *   reflection?.attachTo(app.scene);
+ *     const reflection = createPlanarReflection({
+ *       sunLight: sky.sunLight,   // pins the shadow camera mask, see LAYERS
+ *       planeY: 0,                // the ocean's rest plane
+ *       clouds: { blurred: clouds.blurredTexture, seed: state.seed },
+ *     });
  *
- *   // cost control (§V17): keep out of the mirror pass anything that costs
- *   // fill rate and adds nothing to a reflection
- *   reflection?.excludeFromReflection(spray.mesh);
- *   reflection?.excludeFromReflection(bowSpray.mesh);
- *   reflection?.excludeFromReflection(ropes.mesh);
- *   reflection?.excludeFromReflection(blocks.mesh);
- *   reflection?.excludeFromReflection(cloudCompositeQuad);  // see note below
+ * ② pass it to the surface (replacing the existing options object):
  *
- *   // per frame, AFTER the camera has its final pose (followCam.update) and
- *   // BEFORE surface.update()/post.render(). The mirror pass itself runs
- *   // inside the main render, when the ocean material draws; this call only
- *   // publishes the pose, the layer masks and the live params it will use.
- *   reflection?.update(app.camera, state.time);
+ *     const surface = new OceanSurface(ocean, foam, flowFoam, {
+ *       sunLight: sky.sunLight,
+ *       reflection,
+ *     });
+ *
+ * ③ once, after the scene objects exist — order within the group does not
+ *   matter, but all of it must happen before the first render:
+ *
+ *     reflection?.attachTo(app.scene);          // adds the cloud stand-in
+ *
+ *     // REQUIRED (§V11): the composite quad is pinned to the MAIN camera and
+ *     // samples through screenUV. From the mirror camera it smears garbage
+ *     // across the whole reflection. This is the one exclusion that is not
+ *     // an optimisation.
+ *     reflection?.excludeFromReflection(clouds.compositeQuad);
+ *
+ *     // cost control (§V17): fill-rate spenders that add nothing to a
+ *     // reflection at this distance
+ *     reflection?.excludeFromReflection(spray.mesh);
+ *     reflection?.excludeFromReflection(bowSpray.mesh);
+ *     reflection?.excludeFromReflection(ropes.mesh);
+ *     reflection?.excludeFromReflection(blocks.mesh);
+ *
+ * ④ per frame, in the render callback — AFTER `followCam.update(...)` (the
+ *   camera pose must be final) and BEFORE `surface.update(...)` /
+ *   `post.render()`. The mirror pass itself runs later, inside the main
+ *   render, at the moment the ocean material draws; this call only publishes
+ *   the pose, the layer masks and the live params it will use:
+ *
+ *     reflection?.update(app.camera, state.time);
+ *
+ * ⑤ optional: expose `reflectionParams.live` in the graphics quality
+ *   settings. 0 skips the entire second scene render, 1 restores it, live,
+ *   with no rebuild.
  *
  * The ocean does NOT need excluding — three hides the reflector's own
  * material for the duration of the mirror pass, and the sea is a single mesh
  * with a single material, so the whole clipmap vanishes together. Excluding
  * it by layer as well would be harmless but redundant.
  *
+ * The ISLANDS deliberately stay in the mirror pass: §V26 names them, and they
+ * are the payoff shot. They are also the main reason the cost will grow.
+ *
  * `excludeFromReflection` / `reflectionOnly` only move an object off layer 0;
  * every other layer bit survives (flowfoam tags hull meshes on layer 27).
  *
- * ── CLOUDS (§V26 wants clouds visible in the water)
- * Needs two things this module cannot do from its own directory:
- *   a) `src/clouds/index.ts` must expose the blurred RT it already builds —
- *      add `blurredTexture: blur.output` to the returned object and to
- *      `CloudsHandle`. That is the texture `clouds` above wants.
- *   b) the main composite quad must be excluded from the mirror pass, so
- *      `createClouds` (or main.ts via a getter) has to hand out the quad for
- *      `excludeFromReflection`. Without (b) the camera-pinned quad renders
- *      from the mirror camera and smears its screenUV lookup across the
- *      reflection — see the header of cloudMirror.ts.
- * Skip the `clouds` option entirely and everything else still works; the
- * reflection then shows the sky gradient (scene.backgroundNode is
- * camera-anchored, §V32, so the mirror camera gets it for free), the ship and
- * the islands, but no clouds.
+ * Omitting the `clouds` option is safe: everything else still works and the
+ * reflection shows the sky gradient (scene.backgroundNode is camera-anchored,
+ * §V32, so the mirror camera gets it for free), the ship and the islands —
+ * just no clouds, which §V26 asks for by name.
  *
  * ── LAYERS
  *   11 REFLECTION_HIDDEN_LAYER — main view only

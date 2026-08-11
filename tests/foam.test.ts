@@ -13,7 +13,11 @@ import {
   accumulateFoam,
   blurDecayAnisoAt,
   blurDecayAt,
+  boxReduceAt,
+  cascadeDetailWeight,
+  cascadeFadeDistance,
   crestTapOffset,
+  foamTexelMetres,
   decayFactorPerFrame,
   injectAmount,
   wrapIndex,
@@ -257,6 +261,88 @@ describe('crest-aligned blur (§V6 cap SHAPE: ridges, not round blobs)', () => {
         for (let x = 0; x < n; x++)
           sum += blurDecayAnisoAt(src, dx, dz, n, x, y, 1, 3, 0.34, 1);
       expect(sum, `dir=${dx},${dz}`).toBeCloseTo(1, 10);
+    }
+  });
+});
+
+describe('far-field filtering (§V6 sampling: StorageTextures carry no mips)', () => {
+  // WHY this whole block exists: the ocean samples the foam RT with texture(),
+  // and a storage texture has NO mip chain. At grazing angles one pixel covers
+  // thousands of foam texels and receives exactly ONE of them, re-picked every
+  // frame — that is the shimmering white horizon band. A distance fade or a
+  // compositing cap hides it; a real filtered tier removes it.
+
+  it('reduction takes the MEAN — the far tier must not dim or brighten foam', () => {
+    // WHY: a sum, or a kernel that does not sum to 1, would make distant water
+    // systematically darker or whiter than near water at the exact distance
+    // the tier takes over — a visible seam in the middle of the sea.
+    const srcN = 8;
+    const flat = new Float32Array(srcN * srcN).fill(0.37);
+    // f32 precision: Float32Array rounds exactly like the GPU's rgba32f
+    expect(boxReduceAt(flat, srcN, 0, 0, 4)).toBeCloseTo(0.37, 6);
+    expect(boxReduceAt(flat, srcN, 1, 1, 4)).toBeCloseTo(0.37, 6);
+
+    // and the mean over the whole field survives the reduction
+    const noisy = new Float32Array(srcN * srcN);
+    for (let i = 0; i < noisy.length; i++) noisy[i] = (i * 37) % 11 / 10;
+    const dstN = srcN / 4;
+    let reduced = 0;
+    for (let y = 0; y < dstN; y++)
+      for (let x = 0; x < dstN; x++) reduced += boxReduceAt(noisy, srcN, x, y, 4);
+    const srcMean = noisy.reduce((a, b) => a + b, 0) / noisy.length;
+    expect(reduced / (dstN * dstN)).toBeCloseTo(srcMean, 6);
+  });
+
+  it('reduction kills the per-texel variance that causes the sizzle', () => {
+    // a checkerboard is the worst case: alternate texels 0 and 1, so a
+    // point-sampled distant pixel flickers between them. Filtered, it is flat.
+    const srcN = 8;
+    const checker = new Float32Array(srcN * srcN);
+    for (let y = 0; y < srcN; y++)
+      for (let x = 0; x < srcN; x++) checker[y * srcN + x] = (x + y) % 2;
+    for (let y = 0; y < srcN / 4; y++)
+      for (let x = 0; x < srcN / 4; x++)
+        expect(boxReduceAt(checker, srcN, x, y, 4)).toBeCloseTo(0.5, 6);
+  });
+
+  it('texel size and fade distance derive from the cascade, not a constant', () => {
+    // §V36's lesson applied to a distance gate: retuning a domain or the sim
+    // resolution must re-derive the fade, not silently invalidate it.
+    expect(foamTexelMetres(253, 512)).toBeCloseTo(0.494, 3);
+    expect(foamTexelMetres(13.7, 512)).toBeCloseTo(0.0268, 4);
+    // the fine cascade's texels go sub-pixel ~18× closer than the coarse one
+    const coarse = cascadeFadeDistance(foamTexelMetres(253, 512), 2300);
+    const fine = cascadeFadeDistance(foamTexelMetres(13.7, 512), 2300);
+    expect(coarse / fine).toBeCloseTo(253 / 13.7, 6);
+  });
+
+  it('bands retire in order: fine first, coarse last, none abruptly', () => {
+    // WHY smoothstep and not a cut: a hard switch-off draws a visible ring on
+    // the sea where a whole cascade vanished.
+    const w = (domain: number, d: number) =>
+      cascadeDetailWeight(d, foamTexelMetres(domain, 512), 2300, 3);
+    expect(w(13.7, 10)).toBe(1); // near: fine band fully resolved
+    expect(w(13.7, 400)).toBe(0); // far: fine band is sub-pixel noise
+    expect(w(253, 400)).toBe(1); // coarse band still resolves there
+    expect(w(253, 1e5)).toBe(0);
+    // monotone, and strictly between 0 and 1 across the transition
+    const mid = w(13.7, 120);
+    expect(mid).toBeGreaterThan(0);
+    expect(mid).toBeLessThan(1);
+    expect(w(13.7, 100)).toBeGreaterThan(w(13.7, 140));
+  });
+
+  it('degenerate fade settings never produce NaN weights (§V28)', () => {
+    for (const [d, t, span] of [
+      [100, 0, 3],
+      [100, 2300, 1],
+      [100, 0, 0],
+      [0, 0, 0],
+    ]) {
+      const v = cascadeDetailWeight(d, foamTexelMetres(253, 512), t, span);
+      expect(Number.isFinite(v)).toBe(true);
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThanOrEqual(1);
     }
   });
 });

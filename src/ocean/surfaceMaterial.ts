@@ -46,6 +46,8 @@ import type { FlowFoam } from '../flowfoam';
 import { oceanSurfaceParams as sp } from '../params/oceanSurface';
 import { oceanParams } from '../params/ocean';
 import { solveGrowthRate, type SurfaceGridOptions } from './surfaceGeometry';
+import { seabedShallowFactorNode, type SeabedField } from '../island/seabed';
+import type { PlanarReflection } from '../reflection';
 
 export interface OceanSurfaceMaterial {
   material: THREE.MeshBasicNodeMaterial;
@@ -94,6 +96,8 @@ export function buildOceanSurfaceMaterial(
   flowFoam?: FlowFoam,
   grid?: SurfaceGridOptions,
   sunLight?: THREE.DirectionalLight,
+  seabed?: SeabedField | null,
+  reflection?: PlanarReflection | null,
 ): OceanSurfaceMaterial {
   const originUniform = uniform(new THREE.Vector2());
   const sunDirectionUniform = uniform(new THREE.Vector3(0.5, 0.6, 0.2).normalize());
@@ -111,6 +115,9 @@ export function buildOceanSurfaceMaterial(
   const uSssPower = uniform(sp.sssPower);
   const uSssAmbient = uniform(sp.sssAmbient);
   const uShallowMix = uniform(sp.shallowTintStrength);
+  const uShallowFullDepth = uniform(sp.shallowFullDepth);
+  const uRefractDepthFull = uniform(sp.refractionDepthFull);
+  const uFoamFarDamp = uniform(sp.foamFarDamp);
   const uSssChoppy = uniform(sp.sssChoppyScale);
   const uSssAmbientSunGate = uniform(sp.sssAmbientSunGate);
   const uCrestBand = uniform(new THREE.Vector2(sp.crestBandLow, sp.crestBandHigh));
@@ -280,19 +287,36 @@ export function buildOceanSurfaceMaterial(
       .sub(1); // −1..1, so it darkens as often as it lightens
     waterCol.assign(waterCol.mul(float(1).add(bodyNoise.mul(uVariationStrength))));
 
-    // shallows hook: seabed-depth tint for coasts (T20/T27 islands) — uniform
-    // stays 0 on open ocean until a depth input exists
-    waterCol.assign(mix(waterCol, uShallow, uShallowMix));
+    // §V24 shallows: seabed depth under the DISPLACED water height, so the
+    // tint breathes with the swell instead of sitting as a flat stencil.
+    // Without a seabed (open-ocean scene) the factor is a constant 0 and the
+    // whole term compiles out — the tint can never leak onto deep water,
+    // which matters because this is the ONE legitimate path to bright
+    // turquoise (user: acceptable "on a shore"), as opposed to §B.12's
+    // sun-independent ambient glow that painted it everywhere.
+    const shallowFactor = seabed
+      ? seabedShallowFactorNode(seabed, worldXZ, totalDisp.y, uShallowFullDepth)
+      : float(0);
+    waterCol.assign(mix(waterCol, uShallow, uShallowMix.mul(shallowFactor)));
 
     // §V.24 transparency: refract the scene behind the surface, absorb by
     // water thickness along the view ray (turquoise → deep teal).
-    const refractedUV = screenUV.add(
-      vec2(normalWorld.x, normalWorld.z).mul(uRefractStrength),
-    );
     // linearDepth() is normalized 0..1 over the camera range — scale by
     // far to get METERS or absorption density is meaningless (§B.3)
-    const sceneDepthBehind = linearDepth(viewportDepthTexture(refractedUV));
     const ownDepth = viewportLinearDepth;
+    // Refraction displacement must scale with how much WATER is actually in
+    // front of the geometry. A constant screen-space offset bends the image
+    // of something touching the surface just as hard as the deep seabed, so
+    // hulls and shorelines got a shimmering halo of pixels that belong to
+    // neither side of the waterline. Probe depth straight first (cheap, one
+    // extra fetch), then bend by the offset that thickness earns.
+    const straightDepth = linearDepth(viewportDepthTexture(screenUV));
+    const probeThickness = straightDepth.sub(ownDepth).max(0).mul(uCameraFar);
+    const refractRamp = smoothstep(float(0), uRefractDepthFull.max(0.05), probeThickness);
+    const refractedUV = screenUV.add(
+      vec2(normalWorld.x, normalWorld.z).mul(uRefractStrength).mul(refractRamp),
+    );
+    const sceneDepthBehind = linearDepth(viewportDepthTexture(refractedUV));
     const thicknessMeters = sceneDepthBehind.sub(ownDepth).max(0).mul(uCameraFar);
     // nothing meaningfully close behind → fully water-colored (also guards
     // refraction pulling foreground pixels: fall back to straight UV)
@@ -354,12 +378,30 @@ export function buildOceanSurfaceMaterial(
     const bodyPeak = waterCol.r.max(waterCol.g).max(waterCol.b).max(0.001);
     const bodyTint = waterCol.div(bodyPeak); // hue with its brightest channel at 1
     const skyReflCol = mix(skyCol, skyCol.mul(bodyTint), uGrazingSat);
-    const col = mix(waterCol, skyReflCol, fresnel.mul(uReflStrength)).toVar();
+    // §V26 planar reflections: the module replaces the CONTENT of the
+    // reflected colour, never its WEIGHT — fresnel × reflectionStrength stays
+    // here, so the worst a mirror pass can do is change what that 13% is made
+    // of, and §V20's painted-water bar cannot be broken by enabling it.
+    // Absent reflection → the analytic sky term, unchanged.
+    const reflCol = reflection
+      ? reflection.shade({
+          skyColor: skyReflCol,
+          normalWorld,
+          chop: totalDisp.xz.length(),
+          camDist,
+        })
+      : skyReflCol;
+    const col = mix(waterCol, reflCol, fresnel.mul(uReflStrength)).toVar();
 
     // §V.6 foam: progressive-blur sim mask (T5) with crest→soft detail
     // blend; §V.10 wake/intersection foam (T13) combines via max — foam is
     // foam, whichever system shed it. Falls back to raw jacobian threshold
     // when no sim is wired.
+    // far-field foam damping rides the same distance ramp as the haze (both
+    // are "how much atmosphere is in the way"), computed early because the
+    // foam composite happens before the haze mix
+    const foamFar = pow(smoothstep(uHaze.x, uHaze.y, camDist), uHazeCurve).clamp(0, 1);
+    const foamGain = mix(float(1), uFoamFarDamp, foamFar);
     const foamAmount = float(0).toVar();
     if (foam || flowFoam) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
@@ -380,11 +422,11 @@ export function buildOceanSurfaceMaterial(
       const foamCol = uFoam
         .mul(foamTintNode())
         .mul(ndl.mul(uLightGain.mul(0.6)).mul(shade).add(uLightFloor.add(0.1)));
-      foamAmount.assign(foamMask.clamp(0, 1).mul(0.9));
+      foamAmount.assign(foamMask.clamp(0, 1).mul(0.9).mul(foamGain));
       col.assign(mix(col, foamCol, foamAmount));
     } else {
       const foamMask = smoothstep(uFoamThreshold, uFoamThreshold.sub(0.35), jacobian);
-      foamAmount.assign(foamMask.mul(0.85));
+      foamAmount.assign(foamMask.mul(0.85).mul(foamGain));
       col.assign(mix(col, uFoam, foamAmount));
     }
 
@@ -501,6 +543,9 @@ export function buildOceanSurfaceMaterial(
     uSssPower.value = sp.sssPower;
     uSssAmbient.value = sp.sssAmbient;
     uShallowMix.value = sp.shallowTintStrength;
+    uShallowFullDepth.value = sp.shallowFullDepth;
+    uRefractDepthFull.value = sp.refractionDepthFull;
+    uFoamFarDamp.value = sp.foamFarDamp;
     uSssChoppy.value = sp.sssChoppyScale;
     uSssAmbientSunGate.value = sp.sssAmbientSunGate;
     (uCrestBand.value as THREE.Vector2).set(sp.crestBandLow, sp.crestBandHigh);

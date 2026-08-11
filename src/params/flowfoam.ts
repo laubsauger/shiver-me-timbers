@@ -24,6 +24,13 @@ export interface FlowFoamParams {
   farDecayHalfLife: number;
   /** far-tier foam weight (0 disables the long trail entirely) */
   farStrength: number;
+  /** fraction of the near region size at which the far tier starts fading in —
+   * it must stay silent inside the near window or it paints over the detail */
+  farBlendStart: number;
+  /** far-tier injection scale — the aged remnant, NOT fresh foam. Accumulated
+   * foam settles at rate x halfLife/ln2, so the long-decay tier needs a far
+   * smaller rate or it pins to a solid white slab */
+  farInject: number;
   /** injection ortho camera height above water (m); capture range = ±height */
   captureHeight: number;
   /** |scene depth − water depth| (m) below which a pixel counts as intersecting */
@@ -116,8 +123,9 @@ export interface FlowFoamParams {
   hullBoost: number;
   /** track distance (m) over which hullBoost fades to 0 */
   hullBoostDist: number;
-  /** seconds an arm keeps injecting before it fades out */
-  bowLife: number;
+  /** e-folding time (s) of bow-feature dissipation — exp(-age/τ), a true
+   * decaying gradient rather than a flat-then-cliff "lifetime" */
+  bowDecay: number;
   /** cutwater core foam per second per m/s — the stem tearing the surface open */
   cutIntensity: number;
   /** cutwater core half-width (m) */
@@ -126,17 +134,20 @@ export interface FlowFoamParams {
   cutLength: number;
 
   // --- aft: transom churn + shed vortex pair ---
-  /** stern churn foam injected per second per (m/s)² of ship speed */
+  /** stern churn foam injected per second per m/s of ship speed */
   sternIntensity: number;
   /** stern churn half-width as a multiple of ship beam (≈1 → width ≈ beam) */
   sternWidth: number;
+  /** fraction of the turbulent core width remaining at drift speed — the
+   * Kelvin envelope is speed-independent, the bright core is not */
+  sternWidthSlow: number;
   /** turbulent lateral spread of the stern churn (m/s of water age) */
   sternSpread: number;
-  /** seconds the stern churn keeps injecting after the transom passes */
-  sternLife: number;
+  /** e-folding time (s) of stern-churn dissipation, measured from the transom */
+  sternDecay: number;
   /** track distance (m) aft of the transom over which the aft features fade IN */
   sternOnset: number;
-  /** shed vortex foam per second per (m/s)² — the aft's distinguishing feature */
+  /** shed vortex foam per second per m/s — the aft's distinguishing feature */
   vortexIntensity: number;
   /** vortex lobe offset from the centreline, × beam half-width */
   vortexOffset: number;
@@ -146,8 +157,8 @@ export interface FlowFoamParams {
   vortexWidth: number;
   /** metres of track between shed puffs — port/starboard alternate (von Kármán) */
   vortexSpacing: number;
-  /** seconds a shed vortex keeps injecting */
-  vortexLife: number;
+  /** e-folding time (s) of shed-vortex dissipation */
+  vortexDecay: number;
 
   /** ship speed (m/s) below which no wake is injected (feathers over 1× more) */
   speedThreshold: number;
@@ -161,6 +172,9 @@ export interface FlowFoamParams {
   wakeNoiseContrast: number;
   /** 0 = solid painted bands, 1 = fully gappy/broken foam patches */
   wakeBreakup: number;
+  /** age (s) over which breakup gaps smooth away — turbulence coarsens as it
+   * decays, so old wake should be a soft wash, not high-frequency stipple */
+  breakupSmoothAge: number;
 }
 
 export const flowFoamParams: FlowFoamParams = registerParams(
@@ -170,13 +184,15 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     resolution: 512,
     farRegionSize: 640,
     farResolution: 256,
-    farDecayHalfLife: 55,
-    farStrength: 0.85,
+    farDecayHalfLife: 30,
+    farStrength: 0.6,
+    farInject: 0.25,
+    farBlendStart: 0.3,
     captureHeight: 50,
     depthThreshold: 0.35,
     maskFeather: 0.5,
-    injectStrength: 0.6,
-    decayHalfLife: 14,
+    injectStrength: 0.03,
+    decayHalfLife: 5,
     advectSpeed: 1.0,
     blurRadius: 1.0,
     blurMix: 0.35,
@@ -194,7 +210,7 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     trackLife: 200,
     tailFade: 0.35,
     bowClip: 0.8,
-    moundIntensity: 0.5,
+    moundIntensity: 0.06,
     moundLead: 1.6,
     moundSweep: 0.9,
     moundSpan: 5.0,
@@ -202,38 +218,40 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     moundFill: 3.0,
     moundLag: 1.1,
     kelvinAngle: 19.47,
-    bowIntensity: 0.3,
+    bowIntensity: 0.14,
     armWidth: 0.9,
     armWidthGrowth: 0.02,
-    armWidthMax: 4.0,
-    aftSpreadCap: 0.8,
-    shoulderIntensity: 1.2,
+    armWidthMax: 2.6,
+    aftSpreadCap: 0.22,
+    shoulderIntensity: 0.05,
     shoulderLength: 14,
     shoulderPush: 2.0,
     shoulderWidth: 1.3,
     shoulderEntry: 8,
     hullBoost: 1.6,
     hullBoostDist: 14,
-    bowLife: 45,
-    cutIntensity: 1.0,
+    bowDecay: 16,
+    cutIntensity: 0.13,
     cutWidth: 1.1,
     cutLength: 7,
-    sternIntensity: 0.05,
+    sternIntensity: 0.016,
     sternWidth: 0.9,
-    sternSpread: 0.55,
-    sternLife: 40,
+    sternWidthSlow: 0.35,
+    sternSpread: 0.09,
+    sternDecay: 13,
     sternOnset: 3,
-    vortexIntensity: 0.05,
+    vortexIntensity: 0.033,
     vortexOffset: 1.15,
-    vortexSpread: 0.28,
+    vortexSpread: 0.05,
     vortexWidth: 1.3,
     vortexSpacing: 11,
-    vortexLife: 45,
+    vortexDecay: 15,
     speedThreshold: 0.5,
     fullWakeSpeed: 5.0,
     wakeNoiseScale: 0.3,
     wakeNoiseContrast: 0.18,
-    wakeBreakup: 0.85,
+    wakeBreakup: 0.55,
+    breakupSmoothAge: 12,
   },
   flowFoamParamsMeta(),
 );
@@ -244,10 +262,12 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     farRegionSize: { min: 120, max: 2000, step: 20 },
     farDecayHalfLife: { min: 1, max: 300, step: 1 },
     farStrength: { min: 0, max: 1, step: 0.05 },
+    farInject: { min: 0, max: 1, step: 0.005 },
+    farBlendStart: { min: 0.05, max: 0.45, step: 0.01 },
     captureHeight: { min: 5, max: 200, step: 1 },
     depthThreshold: { min: 0.05, max: 3, step: 0.05 },
     maskFeather: { min: 0.05, max: 1, step: 0.05 },
-    injectStrength: { min: 0, max: 20, step: 0.1 },
+    injectStrength: { min: 0, max: 2, step: 0.005 },
     decayHalfLife: { min: 0.05, max: 120, step: 0.05 },
     advectSpeed: { min: 0, max: 4, step: 0.05 },
     blurRadius: { min: 0, max: 4, step: 0.25 },
@@ -286,25 +306,27 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     shoulderEntry: { min: 0.5, max: 40, step: 0.5 },
     hullBoost: { min: 0, max: 8, step: 0.1 },
     hullBoostDist: { min: 1, max: 60, step: 1 },
-    bowLife: { min: 0.5, max: 200, step: 0.5 },
+    bowDecay: { min: 0.5, max: 120, step: 0.5 },
     cutIntensity: { min: 0, max: 8, step: 0.05 },
     cutWidth: { min: 0.1, max: 8, step: 0.1 },
     cutLength: { min: 0.5, max: 40, step: 0.5 },
-    sternIntensity: { min: 0, max: 2, step: 0.005 },
+    sternIntensity: { min: 0, max: 0.5, step: 0.002 },
     sternWidth: { min: 0.2, max: 4, step: 0.05 },
+    sternWidthSlow: { min: 0.05, max: 1, step: 0.05 },
     sternSpread: { min: 0, max: 4, step: 0.05 },
-    sternLife: { min: 0.5, max: 200, step: 0.5 },
+    sternDecay: { min: 0.5, max: 120, step: 0.5 },
     sternOnset: { min: 0.5, max: 20, step: 0.5 },
-    vortexIntensity: { min: 0, max: 2, step: 0.005 },
+    vortexIntensity: { min: 0, max: 0.5, step: 0.002 },
     vortexOffset: { min: 0.2, max: 4, step: 0.05 },
     vortexSpread: { min: 0, max: 3, step: 0.02 },
     vortexWidth: { min: 0.2, max: 6, step: 0.1 },
     vortexSpacing: { min: 2, max: 60, step: 0.5 },
-    vortexLife: { min: 0.5, max: 200, step: 0.5 },
+    vortexDecay: { min: 0.5, max: 120, step: 0.5 },
     speedThreshold: { min: 0, max: 5, step: 0.05 },
     fullWakeSpeed: { min: 1, max: 15, step: 0.25 },
     wakeNoiseScale: { min: 0.02, max: 2, step: 0.01 },
     wakeNoiseContrast: { min: 0.02, max: 0.5, step: 0.01 },
     wakeBreakup: { min: 0, max: 1, step: 0.05 },
+    breakupSmoothAge: { min: 1, max: 90, step: 1 },
   };
 }

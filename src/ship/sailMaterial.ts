@@ -172,8 +172,15 @@ export function createSailClothMaterial(
   // shading normal in world space — normalWorld resolves to the material's
   // own normalNode (set above), so this is the billowed, face-flipped normal
   const sunDot = normalWorld.dot(uShipSunDirection);
-  // lee face: real albedo drop so the shaded side reads dark, not "ambient"
-  const lit = smoothstep(float(-0.15), float(0.4), sunDot);
+  // Lee face albedo drop, but ONLY once the face is genuinely turned away.
+  // MEASURED BUG (in-browser): the band used to open at −0.15 and not close
+  // until +0.4, so a sun GRAZING the cloth (sunDot ≈ 0, which is most of the
+  // day for square sails — their normals are fore-and-aft) darkened BOTH
+  // faces to ~0.59 albedo. Sun-side and lee-side screenshots came out
+  // identically dark grey, and switching the sun's shadows off changed
+  // nothing, which is what proved it was this term and not self-shadowing.
+  // Grazing light must now read as fully lit; only a real back-face darkens.
+  const lit = smoothstep(float(-0.45), float(-0.02), sunDot);
   material.colorNode = cloth3.mul(mix(uLeeDarken, float(1), lit));
 
   // transmission: the sun must be BEHIND the cloth and the viewer looking

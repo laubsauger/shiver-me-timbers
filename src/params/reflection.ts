@@ -72,8 +72,30 @@ export interface ReflectionParams {
 export const reflectionParams: ReflectionParams = registerParams(
   'reflection',
   {
+    // BUILT, but OFF by default — a §V17 decision, not a §V26 retreat.
+    //
+    // Measured budget (§V39 method: renderAsync + onSubmittedWorkDone, never
+    // rAF-derived fps): the whole frame is 8.1 ms against a §V17 render
+    // ceiling of 8 ms, with islands, caustics and the new foam reduction
+    // passes still to be accounted for. The mirror pass is a SECOND scene
+    // render — estimated +1.0–2.0 ms at half resolution — which would put the
+    // frame around 10 ms. Shipping that on by default would be choosing this
+    // feature over §V17 before the user has seen either side of the trade.
+    //
+    // §V26 still stands: analytic-sky-only is ⊥ as the FINAL look, so this
+    // has to end up on. `live` is the lever — flipping it in the panel skips
+    // or restores the entire second scene render, live, so the look and its
+    // cost can be judged side by side and the call made on real numbers.
+    //
+    // Why `enabled: 1` while `live: 0`: `enabled` is the CONSTRUCTION gate,
+    // so leaving it on keeps the reflector node compiled into the ocean
+    // material and makes the toggle instant instead of reload-gated. The
+    // residual cost of that is one fetch of a 1×1 default texture per water
+    // pixel, multiplied by a zero weight — fully cached, well under 0.05 ms.
+    // No render target is allocated until the pass first runs. Set `enabled`
+    // to 0 for a genuinely zero-cost build (reload to apply).
     enabled: 1,
-    live: 1,
+    live: 0,
     resolutionScale: 0.5,
     strength: 1.0,
     // reflections read hard next to watercolour pigment; a touch cool and

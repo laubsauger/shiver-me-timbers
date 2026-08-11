@@ -115,6 +115,20 @@ export interface TerrainParams {
   swashFoamNoiseStrength: number;
   /** seconds for wet sand left by a wave to dry back out */
   dryTime: number;
+  /**
+   * Receive §V34 water lighting on the terrain — sun caustics over the
+   * shallows, sea bounce-fill, depth absorption. BUILD-TIME (it branches the
+   * node graph, like `runupEnabled`): flipping it needs a material rebuild.
+   * Kept as a switch because the shallows are the largest caustics receiver in
+   * the scene by screen coverage, so this is the first thing to bisect if the
+   * frame time moves when you moor next to a beach (§V17).
+   *
+   * It also decides where the still-water level comes from. ON: the live
+   * displaced FFT surface, per fragment, shared with the caustics call — so
+   * the swash waterline follows the actual waves. OFF: the flat `waterline`
+   * uniform.
+   */
+  receiveCaustics: boolean;
 
   // -- slope blend (sand on flat, rock on steep) — terrainBlendMaterial -----
   /** normal.y at the sand↔rock midpoint (1 = flat up, 0 = vertical) */
@@ -179,6 +193,7 @@ export const terrainParams: TerrainParams = registerParams(
     swashFoamNoiseScale: 0.6,
     swashFoamNoiseStrength: 0.7,
     dryTime: 11,
+    receiveCaustics: true,
 
     slopeThreshold: 0.72,
     slopeBlendWidth: 0.1,

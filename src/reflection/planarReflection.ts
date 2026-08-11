@@ -21,6 +21,13 @@
  *     ever stops ticking, every FRAME-type node freezes at its first result
  *     (this reflection, the post pipeline's PassNode, the ocean's
  *     viewportSharedTexture) with no error anywhere.
+ *     §V39 makes that concrete: Chrome suspends rAF in a hidden tab, and
+ *     three's loop is a plain rAF, so a hidden automated tab freezes these
+ *     nodes too. The app's GameLoop rAF and three's are SEPARATE callbacks —
+ *     a forced paint may service one and not the other, so a screenshot taken
+ *     from a hidden tab can show a stale reflection over a fresh frame. Judge
+ *     this pass from a foreground tab only; a wrong-looking capture there is
+ *     a capture artefact, not a bug in the mirror.
  *   - resolutionScale clamped to ≤ 0.5 in code (§V26), finite-guarded (§V28).
  *   - a layer split, so the mirror pass is not simply "the whole frame again":
  *     spray, rigging and the camera-pinned cloud quad are excluded, and the

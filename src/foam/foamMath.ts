@@ -79,6 +79,72 @@ export function blurDecayAt(
 export const CREST_GRAD_EPS = 1e-4;
 
 /**
+ * One texel of the box-reduction pass (GPU mirror: createReducePass): the
+ * plain MEAN of the factor×factor source block. Mean, not sum and not a
+ * weighted kernel — the far tier must be the same foam, band-limited, or
+ * distant water would silently darken or blow out relative to near water.
+ */
+export function boxReduceAt(
+  src: Float32Array,
+  srcN: number,
+  x: number,
+  y: number,
+  factor: number,
+): number {
+  let sum = 0;
+  for (let dy = 0; dy < factor; dy++) {
+    for (let dx = 0; dx < factor; dx++) {
+      sum += src[(y * factor + dy) * srcN + (x * factor + dx)];
+    }
+  }
+  return sum / (factor * factor);
+}
+
+/**
+ * World size of one foam texel for a cascade: its tiling domain over the sim
+ * resolution. This is the quantity every distance fade below is expressed in,
+ * so changing a domain or the resolution re-derives the fades automatically
+ * instead of silently invalidating a metre constant (§V36's lesson applied to
+ * a distance gate).
+ */
+export function foamTexelMetres(domain: number, resolution: number): number {
+  return domain / Math.max(1, resolution);
+}
+
+/**
+ * Distance at which a cascade's foam texels drop below the screen sampling
+ * rate and start aliasing — the Nyquist point for THIS band.
+ *
+ * A pixel's world footprint grows roughly linearly with distance, so a texel
+ * of size t becomes sub-pixel at d ≈ t · fadeTexels, where fadeTexels folds
+ * the camera's angular pixel size and the 2× Nyquist margin into one
+ * dimensionless tunable. Grazing angles stretch the along-view footprint far
+ * beyond this, which is why the fade must START here rather than end here.
+ */
+export function cascadeFadeDistance(texelMetres: number, fadeTexels: number): number {
+  return Math.max(0, texelMetres) * Math.max(0, fadeTexels);
+}
+
+/**
+ * Weight for a cascade's FULL-RESOLUTION contribution at a camera distance:
+ * 1 while its texels resolve, ramping to 0 once they are sub-pixel noise.
+ * Smoothstep so bands retire gradually — a hard cut-off would draw a visible
+ * ring on the sea where a whole cascade switched off.
+ */
+export function cascadeDetailWeight(
+  camDist: number,
+  texelMetres: number,
+  fadeTexels: number,
+  fadeSpan: number,
+): number {
+  const start = cascadeFadeDistance(texelMetres, fadeTexels);
+  const end = start * Math.max(1.05, fadeSpan);
+  if (!(end > start)) return camDist <= start ? 1 : 0;
+  const t = Math.min(1, Math.max(0, (camDist - start) / (end - start)));
+  return 1 - t * t * (3 - 2 * t);
+}
+
+/**
  * Crest-aligned blur tap offset in texels (GPU mirror: blurDecayPass).
  *
  * WHY (user critique "foam caps are too circular, not following the cap of

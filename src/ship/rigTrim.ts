@@ -18,6 +18,7 @@
  */
 import type * as THREE from 'three';
 import { shipRigParams } from '../params/ship';
+import { setShipWorldMatrix } from './woodMaterial';
 import { oceanParams } from '../params/ocean';
 import type { ShipAssembly } from './shipAssembly';
 import { braceAngle, sailStateForTrim, trimDropScale } from './sailDynamics';
@@ -35,6 +36,16 @@ function shipForward(group: THREE.Object3D): { x: number; z: number } {
 export function updateRig(assembly: ShipAssembly, dt: number, trim = 1): void {
   const p = shipRigParams;
   const step = Math.min(0.25, Math.max(0, Number.isFinite(dt) ? dt : 0));
+
+  // Publish the ship's world transform to the piece materials, so the hull
+  // wetline's drying memory can be looked up in SHIP-local space (§T.32).
+  // Done here rather than handed to main.ts because a stale identity matrix
+  // is not a graceful degradation — it would place the wet band at world
+  // origin, hundreds of metres from the hull. The group hangs directly off
+  // the scene, so its local matrix IS its world matrix; composing it costs
+  // one matrix and avoids traversing the whole 50-piece subtree.
+  assembly.group.updateMatrix();
+  setShipWorldMatrix(assembly.group.matrix);
 
   // --- brace: yards swing toward the wind-derived target, never snap ------
   const fwd = shipForward(assembly.group);

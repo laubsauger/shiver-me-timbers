@@ -267,6 +267,18 @@ describe('material construction (node graph builds without a renderer)', () => {
     handle.dispose();
   });
 
+  it('falls back to the flat waterline when no caustics instance is bound', async () => {
+    // §V34 receivers must degrade, not explode: with nothing bound the sea
+    // height is the uniform the island drives from CpuOcean, and waterLighting
+    // returns identity nodes. This is also the `receiveCaustics = false`
+    // bisect path (§V17) — the beach still shades, just without caustics.
+    const { buildSandNodes, createSandUniforms } = await import('../src/terrain/sandMaterial');
+    const nodes = buildSandNodes(createSandUniforms(), 2, null);
+    expect(nodes.liveWaterHeight).toBe(false);
+    expect(nodes.depthBelow).toBeTruthy(); // still supplied to the receiver hook
+    expect(nodes.color).toBeTruthy();
+  });
+
   it('runupEnabled = false builds a plain beach with no swash uniforms', async () => {
     const { createSandMaterial } = await import('../src/terrain/sandMaterial');
     const prev = terrainParams.runupEnabled;

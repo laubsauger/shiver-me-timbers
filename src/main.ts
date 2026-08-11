@@ -36,7 +36,11 @@ import {
   waterlineFromBox,
 } from './sea-physics/hullContact';
 import { stepFlooding } from './sea-physics/flooding';
+import { stepShipGrounding } from './sea-physics/grounding';
+import { galleonParams } from './params/ship';
 import { floodingHoles } from './ship/destruction';
+import { createCaustics, setActiveCaustics } from './caustics';
+import { createPlanarReflection } from './reflection';
 import { createArchipelago } from './island';
 import { palmWindStrength } from './vegetation';
 import { createRopes } from './ropes';
@@ -90,10 +94,52 @@ async function boot(): Promise<void> {
   // so the material can sample the wake mask
   const flowFoam = createFlowFoam();
 
+  // clouds are built here (not after the surface) because the planar
+  // reflection needs their blurred RT at construction, and the reflection in
+  // turn has to exist before the ocean material is built
+  const clouds = createClouds({
+    renderer: app.renderer,
+    camera: app.camera,
+    seed: state.seed,
+  });
+  clouds.attachTo(app.scene);
+
+  // §T.32 caustics — MUST be created and bound BEFORE any receiver material
+  // is built. TSL bakes graphs at construction, so binding later yields
+  // receivers with no caustics and no error (the guard warns once, but the
+  // visual failure is silent).
+  const caustics = createCaustics(ocean, { sunLight: sky.sunLight });
+  setActiveCaustics(caustics);
+
+  // §T.33 islands: 5 at 1.2–3.1km sharing 3 materials. Built BEFORE the ocean
+  // surface because its seabed field feeds the shallows tint, and TSL bakes
+  // material graphs at construction.
+  const archipelago = createArchipelago({ seed: state.seed });
+  app.scene.add(archipelago.group);
+
+  // §T.30 planar reflections (§V26). Compiled into the material but DORMANT:
+  // reflectionParams.live defaults 0, because the mirror pass costs ~1.0–1.5ms
+  // on top of a frame already at 8.1ms against §V17's 8ms render ceiling. The
+  // ship's "negative cost" does NOT carry into the mirror pass — the ocean is
+  // excluded there, so the hull occludes only sky and pays full price.
+  // Exposed as a graphics quality toggle so the look/cost call is the user's.
+  const reflection = createPlanarReflection({
+    sunLight: sky.sunLight,
+    planeY: 0,
+    clouds: { blurred: clouds.blurredTexture, seed: state.seed },
+  });
+
   // sunLight enables the in-material shadow sample: the water is
   // MeshBasicNodeMaterial on purpose (§V20), so mesh.receiveShadow is inert
   // and the shadow map has to be read inside the material instead.
-  const surface = new OceanSurface(ocean, foam, flowFoam, { sunLight: sky.sunLight });
+  // seabed drives the §V24 shallows tint — zero in open water, so the term
+  // compiles out entirely when no seabed rises (the legitimate turquoise
+  // path, as opposed to §B.12's sun-independent ambient SSS).
+  const surface = new OceanSurface(ocean, foam, flowFoam, {
+    sunLight: sky.sunLight,
+    seabed: archipelago.seabed,
+    reflection,
+  });
   app.scene.add(surface.group);
 
   // crest + bow spray particles (T5 follow-up)
@@ -103,13 +149,6 @@ async function boot(): Promise<void> {
   );
   const bowSpray = createBowSpray();
   app.scene.add(spray.mesh, bowSpray.mesh);
-
-  const clouds = createClouds({
-    renderer: app.renderer,
-    camera: app.camera,
-    seed: state.seed,
-  });
-  clouds.attachTo(app.scene);
 
   // player ship (§V.13): galleon assembly rendered from SimState (§V.3)
   state.ships.push({
@@ -141,6 +180,18 @@ async function boot(): Promise<void> {
   const blocks = createBlocks(blockSockets.length);
   app.scene.add(blocks.mesh);
 
+  // Islands stay IN the mirror pass — §V26 names them and they are the payoff.
+  // The cloud quad exclusion is NOT an optimisation: it is camera-pinned and
+  // samples through screenUV, so from the mirror camera it smears across the
+  // whole reflection. The ocean needs no exclusion — three hides the
+  // reflector's own material, and the sea is one mesh with one material.
+  reflection?.attachTo(app.scene);
+  reflection?.excludeFromReflection(clouds.compositeQuad);
+  reflection?.excludeFromReflection(spray.mesh);
+  reflection?.excludeFromReflection(bowSpray.mesh);
+  reflection?.excludeFromReflection(ropes.mesh);
+  reflection?.excludeFromReflection(blocks.mesh);
+
   // hull dims for wake + bow spray, from blueprint hull AABBs
   let bowZ = 0;
   let sternZ = 0;
@@ -171,13 +222,6 @@ async function boot(): Promise<void> {
   // §V.8: CPU mirror of the same seeded spectrum the GPU renders
   const cpuOcean = new CpuOcean(state.seed);
 
-  // §T.33 islands: 5 islands at 1.2–3.1km, sharing 3 materials. The ocean
-  // clipmap already covers them and its FFT displacement surges up the beach,
-  // so the geometric waterline (and §V10 foam breaking on it) comes free —
-  // shoreRunup only adds what the ocean can't know about sand.
-  const archipelago = createArchipelago({ seed: state.seed });
-  app.scene.add(archipelago.group);
-
   // hull waterline contact (§T.33 support): coarse stations round the hull
   // outline, sampled against the SAME sea every tick. Consumers: bow spray
   // (emit from the real cutwater, silent when the bow is airborne) and the
@@ -186,6 +230,10 @@ async function boot(): Promise<void> {
     waterlineFromBlueprint(galleonBlueprint) ??
     waterlineFromBox(bowZ, sternZ, beamHalf);
   const hullContact = createHullContact(hullWaterline);
+  // hull wetness with MEMORY: keeps the highest recent contact per station and
+  // decays it, so timber stays wet where the sea just was rather than tracking
+  // the instantaneous waterline (user: "wetness where the water LAPPED")
+  const hullWetline = caustics.attachHullWetline({ bowZ, sternZ });
 
   const input = createInputCollector(window);
   const followCam = createFollowCam(app.camera, app.renderer.domElement);
@@ -254,13 +302,18 @@ async function boot(): Promise<void> {
       const snapshot = input.sample(dt);
       stepShipSailing(playerShip, snapshot, state.wind, dt);
       cpuOcean.update(state.time);
-      // must follow cpuOcean.update — hullContact throws if the mirror was
-      // never computed for this time (§B.7 fail-loud)
-      hullContact.update(playerShip, cpuOcean, state.time);
       // §V.14 flooding: holes from damaged zones (inert while undamaged)
       const holes = floodingHoles(galleonBlueprint, playerZoneStates, playerShip.quaternion, 0);
       stepFlooding(playerShip, holes.positions, dt);
       stepShipBuoyancy(playerShip, cpuOcean, dt, undefined, holes.positions);
+      // AFTER buoyancy, so the pose is final for this tick. Throws if the
+      // ocean mirror was never advanced to this time (§B.7 fail-loud).
+      // Measured: the stem is dry 40–47% of ticks at cruising speed — that is
+      // how often the old fixed-point emitter was firing into thin air.
+      hullContact.update(playerShip, cpuOcean, state.time);
+      // grounding reuses this tick's station world positions — no second pose
+      // pass, no extra ocean sampling. Touches, slows, lists, holds.
+      stepShipGrounding(playerShip, hullContact, archipelago.seabed, galleonParams.draft, dt);
       prevPos.copy(currPos);
       prevQuat.copy(currQuat);
       currPos.fromArray(playerShip.position);
@@ -276,6 +329,9 @@ async function boot(): Promise<void> {
       ocean.update(app.renderer, state.time);
       foam.update(app.renderer);
       debug.hud.setPassTiming('ocean+foam cpu-dispatch', performance.now() - t);
+
+      caustics.update(sky.sunDirection);
+      hullWetline.updateFromHullContact(frameDt, hullContact.stations, hullContact.depth);
 
       t = performance.now();
       clouds.update(state.time, sky.sunDirection);
@@ -363,6 +419,11 @@ async function boot(): Promise<void> {
       renderShipView.quaternion[3] = shipAssembly.group.quaternion.w;
       renderShipView.velocity = playerShip.velocity;
       followCam.update(renderShipView, frameDt, (x, z) => cpuOcean.heightAt(x, z, state.time));
+
+      // after the camera pose is final, before surface.update/render. This
+      // only publishes pose, layer masks and live params — the mirror pass
+      // itself runs inside the main render, when the ocean material draws.
+      reflection?.update(app.camera, state.time);
 
       // yards brace round to the apparent wind + reef state follows trim.
       // MUST run before the ropes block: yards rotate → the block's

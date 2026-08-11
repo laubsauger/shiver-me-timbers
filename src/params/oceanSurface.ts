@@ -46,7 +46,15 @@ export const oceanSurfaceParams = registerParams(
     /** coast/shallows tint — mixed in by shallowTintStrength (seabed-depth
      *  input pending islands T20; keep 0 on open ocean) */
     shallowColor: '#1a8a8a',
-    shallowTintStrength: 0.0,
+    /**
+     * §V24 shallows tint. Live now that islands ship a seabed field — the
+     * factor is 0 in open water, so this only ever fires near a shore. This
+     * is the LEGITIMATE bright-turquoise path (user: acceptable "on a shore")
+     * as opposed to §B.12's sun-independent ambient glow.
+     */
+    shallowTintStrength: 0.6,
+    /** water depth (m) at which the shallow tint is fully gone */
+    shallowFullDepth: 18,
     /** world-space wavelength (m) of the largest body-variation octave */
     variationScale: 900,
     /**
@@ -119,6 +127,14 @@ export const oceanSurfaceParams = registerParams(
     sparkleGrazeStart: 0.72,
     sparkleGrazeEnd: 0.95,
 
+    /**
+     * Far-field foam compositing cap. Foam detail itself is faded by the foam
+     * system in crackle-feature widths; this is the compositing-side guard,
+     * scaled by the SAME haze ramp, so the horizon band cannot composite to
+     * pure white when a pixel covers thousands of foam texels at a grazing
+     * angle. 1 = no damping.
+     */
+    foamFarDamp: 0.55,
     /** temporary direct-jacobian crest foam until T5 progressive blur lands */
     foamThreshold: 0.55,
     foamColor: '#eef6f2',
@@ -139,8 +155,16 @@ export const oceanSurfaceParams = registerParams(
 
     /** §V.24 transparency: view-space absorption density per meter */
     absorptionDensity: 0.35,
-    /** refraction offset strength (screen-space) */
+    /** refraction offset strength (screen-space) at full water thickness */
     refractionStrength: 0.06,
+    /**
+     * Water thickness (m) that earns the FULL refraction offset. Below it the
+     * bend ramps to zero, so geometry touching the surface (hull at the
+     * waterline, shoreline sand) is not smeared with pixels from the wrong
+     * side of the water — a constant offset bends contact and deep seabed
+     * equally hard, which read as a shimmering halo.
+     */
+    refractionDepthFull: 6,
     /** water body tint applied to refracted scene */
     refractionTint: '#7fd4c9',
 
@@ -163,6 +187,9 @@ export const oceanSurfaceParams = registerParams(
     sssStrength: { min: 0, max: 5, step: 0.05 },
     sssAmbient: { min: 0, max: 1, step: 0.01 },
     shallowTintStrength: { min: 0, max: 1, step: 0.01 },
+    shallowFullDepth: { min: 1, max: 60, step: 0.5 },
+    refractionDepthFull: { min: 0.2, max: 30, step: 0.1 },
+    foamFarDamp: { min: 0, max: 1, step: 0.01 },
     variationScale: { min: 100, max: 4000, step: 10 },
     variationStrength: { min: 0, max: 0.25, step: 0.005 },
     reflectionStrength: { min: 0, max: 1, step: 0.01 },

@@ -64,9 +64,11 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
     decayHalfLife: () => p.farDecayHalfLife,
     useFlow: false,
     useCapture: false,
+    wakeScale: () => p.farInject,
   });
   const uEdgeFade = uniform(p.edgeFade);
   const uFarStrength = uniform(p.farStrength);
+  const uFarBlendStart = uniform(p.farBlendStart);
   let time = 0;
 
   return {
@@ -133,6 +135,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       flowU.uCurlStep.value = p.curlStep;
       uEdgeFade.value = p.edgeFade;
       uFarStrength.value = p.farStrength;
+      uFarBlendStart.value = p.farBlendStart;
       // age + extend the world-space cutwater track BEFORE the computes read it
       wake.advance(dt);
       wake.pushParams();
@@ -159,11 +162,18 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
         );
         return texture(tex, vec2(u, v)).r.mul(edge);
       };
-      // MAX, not add: the two tiers hold the same wake at different scales, so
-      // summing would double it wherever they overlap. Max lets the near tier's
-      // detail win where it exists and the far tier carry on past its border.
+      // Crossfade, not a plain max: the far tier is smooth and long-lived, so
+      // inside the near window it would paint over the very structure the near
+      // tier exists to carry (see flowMath.farBlendWeightCpu). It is silenced
+      // inside and takes over exactly as the near region fades at its border.
+      const c = acc.uniforms.uCenter;
+      const nearSize = acc.uniforms.uSize;
+      const dist = worldXZ.sub(c).length();
+      const e0 = nearSize.mul(uFarBlendStart);
+      const e1 = nearSize.mul(0.5).mul(uEdgeFade.oneMinus()).max(e0.add(1e-6));
+      const farW = smoothstep(e0, e1, dist);
       return sampleRegion(acc, acc.foamTexture).max(
-        sampleRegion(far, far.foamTexture).mul(uFarStrength),
+        sampleRegion(far, far.foamTexture).mul(uFarStrength).mul(farW),
       );
     },
 
