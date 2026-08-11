@@ -74,10 +74,51 @@ export function respawnCandidate(
 export function crestBreaking(
   jacobian: number,
   height: number,
-  bias: number,
-  p: Pick<SprayParams, 'sprayBiasOffset' | 'crestHeightMin'>,
+  jacobianThreshold: number,
+  heightThreshold: number,
 ): boolean {
-  return jacobian < bias + p.sprayBiasOffset && height > p.crestHeightMin;
+  return jacobian < jacobianThreshold && height > heightThreshold;
+}
+
+/**
+ * Absolute jacobian threshold for a spray spawn.
+ *
+ * Tracks the foam bias so storms spray harder (§V7) — but CEILED. The storm
+ * preset sets jacobianFoamBias to 0.9, i.e. "foam wherever the surface is
+ * compressed by 10%", which is very nearly the whole sea; carried into spray
+ * unchecked that is a blizzard of particles. The ceiling keeps the trigger
+ * within physical meaning (J < 0 is genuine folding) no matter what weather
+ * does to the foam bias, WITHOUT desensitising the foam injection itself —
+ * foam's coverage is the ocean/§V6 trigger's business, not spray's.
+ */
+export function sprayJacobianThreshold(
+  foamBias: number,
+  offset: number,
+  ceiling: number,
+): number {
+  return Math.min(foamBias + offset, ceiling);
+}
+
+/**
+ * Crest-height gate as a multiple of the sea's height RMS σ (§V36: absolute
+ * metre gates are forbidden for crest/foam thresholds).
+ *
+ * WHY σ and not `amplitude`: amplitude is a spectrum SCALE, not a height. The
+ * two move independently — a retune took amplitude 0.75 → 0.32 while the
+ * significant wave height ROSE 2.3 → 2.8 m, so anything normalised by
+ * amplitude would have gated the wrong way. σ is the actual height statistic,
+ * so a multiple of it means the same fraction of the sea in any weather:
+ * Gaussian crest elevations put 1.5σ at roughly the top 7% of crests, which
+ * is the band that genuinely breaks (the ocean material's own crest band is
+ * 1.6σ–2.6σ for the same reason).
+ *
+ * Non-finite/zero σ (before the first spectrum build) → gate disabled rather
+ * than a NaN comparison that would silently pass or fail every candidate.
+ */
+export function crestHeightThreshold(sigmaMultiple: number, seaRms: number): number {
+  if (!Number.isFinite(seaRms) || seaRms <= 0) return Infinity; // gate shut
+  if (!Number.isFinite(sigmaMultiple)) return Infinity;
+  return sigmaMultiple * seaRms;
 }
 
 /**
@@ -238,6 +279,7 @@ export function bowEmission(
   immersionDepth: number,
   speed: number,
   burialRate: number,
+  inContact: boolean,
   p: Pick<
     SprayParams,
     | 'bowImmersionThreshold'
@@ -245,19 +287,28 @@ export function bowEmission(
     | 'bowSpeedThreshold'
     | 'bowSpeedFull'
     | 'bowImpactRef'
+    | 'bowContactDepth'
     | 'bowBurstRate'
     | 'bowCruiseRate'
     | 'bowCruiseSheet'
   >,
 ): { rate: number; sheet: number } {
+  const cruiseSheet = Math.min(1, Math.max(0, p.bowCruiseSheet));
+  // AIRBORNE STEM THROWS NOTHING. Water leaving a hull that is touching no
+  // water is the detachment the user reported ("it comes out from something
+  // that is in the air, where there's nothing touching the water").
+  if (!inContact) return { rate: 0, sheet: cruiseSheet };
   const speedN = ramp01(speed, p.bowSpeedThreshold, p.bowSpeedFull);
   const immN = ramp01(immersionDepth, p.bowImmersionThreshold, p.bowImmersionFull);
   const impactN = ramp01(burialRate, 0, p.bowImpactRef);
+  // contact ramp saturates almost immediately: ANY real immersion means the
+  // stem is working water, so the cruise mist is continuous while in contact —
+  // "the stem is always working the water", not "particles always exist".
+  const contactN = ramp01(immersionDepth, 0, p.bowContactDepth);
   const burst = speedN * immN * (BURIED_BASE + (1 - BURIED_BASE) * impactN);
-  const cruise = Math.min(1, Math.max(0, p.bowCruiseSheet));
   return {
-    rate: Math.max(0, p.bowCruiseRate * speedN + p.bowBurstRate * burst),
-    sheet: Math.min(1, cruise + (1 - cruise) * burst),
+    rate: Math.max(0, p.bowCruiseRate * speedN * contactN + p.bowBurstRate * burst),
+    sheet: Math.min(1, cruiseSheet + (1 - cruiseSheet) * burst),
   };
 }
 
@@ -279,7 +330,13 @@ export function bowSpawnOffset(
   const sideSign = rSide < 0.5 ? -1 : 1;
   // |side offset| grows with the flank draw so the sheet thickens outboard
   const lateral = p.bowSideOffset * (0.35 + 0.65 * Math.abs(rSide * 2 - 1)) * sideSign;
-  const stem = p.bowStemLength * rStem;
+  // AFT of the contact point, never ahead of it: the emitter sits at the
+  // forward-most part of the hull TOUCHING water, and the hull shoulders
+  // water aside from there BACKWARD along its immersed length. Seeding ahead
+  // of contact puts droplets in mid-air in front of the stem — the same
+  // detachment as emitting from an airborne bow. Water is pushed forward by
+  // the launch VELOCITY, not by spawning it out in front of the ship.
+  const stem = -p.bowStemLength * rStem;
   return [-fwdZ * lateral + fwdX * stem, fwdX * lateral + fwdZ * stem];
 }
 

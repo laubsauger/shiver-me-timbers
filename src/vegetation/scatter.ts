@@ -75,6 +75,21 @@ export interface ScatterOptions {
   /** material is optional so tests never need to construct one */
   material?: THREE.Material;
   placementFn?: PlacementFn;
+  /**
+   * Write instances largest-first (§V17). InstancedMesh.count truncates from
+   * the END, so a distance LOD that lowers `count` then drops the smallest,
+   * least readable palms first instead of a random subset. Sorting a
+   * deterministic list stays deterministic (§V2).
+   */
+  lodSort?: boolean;
+}
+
+/** stable largest-first order used by the distance LOD (see ScatterOptions) */
+export function sortForLod(placements: PalmPlacement[]): PalmPlacement[] {
+  return placements
+    .map((pl, i) => ({ pl, i }))
+    .sort((a, b) => b.pl.scale * b.pl.heightScale - a.pl.scale * a.pl.heightScale || a.i - b.i)
+    .map((e) => e.pl);
 }
 
 /**
@@ -83,7 +98,8 @@ export interface ScatterOptions {
  * shader-side variation for windSway.
  */
 export function scatterPalms(opts: ScatterOptions): THREE.InstancedMesh {
-  const placements = generatePlacements(opts.count, opts.seed, opts.placementFn);
+  const generated = generatePlacements(opts.count, opts.seed, opts.placementFn);
+  const placements = opts.lodSort ? sortForLod(generated) : generated;
   const mesh = new THREE.InstancedMesh(opts.geometry, opts.material, opts.count);
 
   const matrix = new THREE.Matrix4();

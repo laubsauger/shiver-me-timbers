@@ -54,6 +54,92 @@ export function phillips(
 }
 
 /**
+ * RMS of ∂Dx/∂x for one cascade's band — the quantity that decides whether
+ * the Tessendorf surface FOLDS (§B, storm report).
+ *
+ * The horizontal displacement is Dx = i(kx/|k|)·h scaled by choppiness λ, so
+ * the map x → x + λ·D has Jacobian 1 + λ·∂Dx/∂x. Once λ·∂Dx/∂x reaches −1 the
+ * sheet turns inside out: crests shear into faceted shards AND the Jacobian
+ * goes negative over huge areas, which is exactly the foam trigger (§V6) —
+ * so "foam going crazy" and "wave shapes breaking apart" are ONE bug, the
+ * foam faithfully reporting a folded surface.
+ *
+ * Transfer function of ∂Dx/∂x acting on h is kx²/|k|, so the variance is
+ * Σ (kx²/|k|)²·E(k) with E(k) = 2·amp(k)² (the same energy bookkeeping
+ * generateH0 uses). Returns σ, in units of 1/λ: multiply by choppiness to get
+ * the typical gradient. Deterministic, RNG-free, testable.
+ */
+export function spectralSteepness(
+  N: number,
+  domain: number,
+  p: OceanParams,
+  band: SpectrumBand,
+): number {
+  let variance = 0;
+  for (let m = 0; m < N; m++) {
+    for (let n = 0; n < N; n++) {
+      const kx = (2 * Math.PI * (n - N / 2)) / domain;
+      const kz = (2 * Math.PI * (m - N / 2)) / domain;
+      const k = Math.hypot(kx, kz);
+      if (!(k > band.kMin && k <= band.kMax) || k < 1e-9) continue;
+      const amp = Math.sqrt(phillips(kx, kz, p) / 2) / domain;
+      const transfer = (kx * kx) / k;
+      variance += 2 * (transfer * amp) ** 2;
+    }
+  }
+  return Math.sqrt(Math.max(0, variance));
+}
+
+/**
+ * RMS surface elevation contributed by one cascade's band (σ_h). Summed in
+ * quadrature across cascades this is the sea state's scale: significant wave
+ * height Hs = 4σ. Shading thresholds that mean "a crest" must be expressed in
+ * MULTIPLES of this, never in absolute metres (§B cow-pattern) — an absolute
+ * 0.25 m gate meant "the top 9% of a 2.3 m sea" when it was written and
+ * "36% of a 2.8 m sea" after the swell retune, which is why large turquoise
+ * blobs appeared. Same loop shape as spectralSteepness, transfer function 1.
+ */
+export function spectralHeightVariance(
+  N: number,
+  domain: number,
+  p: OceanParams,
+  band: SpectrumBand,
+): number {
+  let variance = 0;
+  for (let m = 0; m < N; m++) {
+    for (let n = 0; n < N; n++) {
+      const kx = (2 * Math.PI * (n - N / 2)) / domain;
+      const kz = (2 * Math.PI * (m - N / 2)) / domain;
+      const k = Math.hypot(kx, kz);
+      if (!(k > band.kMin && k <= band.kMax) || k < 1e-9) continue;
+      const amp = Math.sqrt(phillips(kx, kz, p) / 2) / domain;
+      variance += 2 * amp * amp;
+    }
+  }
+  return Math.max(0, variance);
+}
+
+/**
+ * Choppiness actually handed to the GPU for a cascade (§V7 keeps presets pure
+ * params, so the safety lives HERE and covers every preset — including ones
+ * nobody has written yet).
+ *
+ * Capping λ·σ at foldLimit < 1 keeps the surface single-valued with margin.
+ * Because σ scales as √amplitude, raising amplitude automatically pulls
+ * choppiness down: storm can keep its energy and its rolling swell without
+ * the sheet self-intersecting. Never RAISES the artist's value.
+ */
+export function effectiveChoppiness(
+  choppiness: number,
+  steepness: number,
+  foldLimit: number,
+): number {
+  if (!Number.isFinite(choppiness) || choppiness <= 0) return 0;
+  const limit = Math.max(0, foldLimit) / Math.max(1e-6, steepness);
+  return Math.min(choppiness, limit);
+}
+
+/**
  * Initial spectrum h0 for one cascade.
  * Texel (n,m) → k = 2π(n − N/2)/L. RGBA texel packs:
  *   [h0(k).re, h0(k).im, h0(−k).re, h0(−k).im]

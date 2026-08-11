@@ -25,20 +25,33 @@ import type { IslandHeightmap } from './heightmap';
 export function buildIslandGeometry(
   hm: IslandHeightmap,
   skirtDepth: number = islandParams.skirtDepth,
+  /**
+   * LOD decimation: take every `stride`-th heightmap vertex (§V17). The last
+   * row/column is clamped to the source edge so the footprint — and with it
+   * the guaranteed-submerged rim — is identical at every level; only the
+   * interior tessellation drops.
+   */
+  stride = 1,
 ): THREE.BufferGeometry {
-  const n = hm.size;
+  const src = hm.size;
   const R = hm.worldRadius;
-  const cell = (2 * R) / (n - 1);
+  const cell = (2 * R) / (src - 1);
+  const s = Math.max(1, Math.floor(stride));
+  const n = s === 1 ? src : Math.ceil((src - 1) / s) + 1;
+  /** decimated column/row index → source heightmap index */
+  const srcIdx = (i: number): number => Math.min(i * s, src - 1);
   const perim = 4 * (n - 1);
   const positions = new Float32Array((n * n + perim) * 3);
 
   // interior grid vertices
   for (let iz = 0; iz < n; iz++) {
+    const sz = srcIdx(iz);
     for (let ix = 0; ix < n; ix++) {
+      const sx = srcIdx(ix);
       const v = (iz * n + ix) * 3;
-      positions[v] = -R + ix * cell;
-      positions[v + 1] = hm.data[iz * n + ix];
-      positions[v + 2] = -R + iz * cell;
+      positions[v] = -R + sx * cell;
+      positions[v + 1] = hm.data[sz * src + sx];
+      positions[v + 2] = -R + sz * cell;
     }
   }
 
@@ -108,32 +121,74 @@ export interface IslandMeshHandle {
    * ocean system may drive it directly per frame via setWaterline().
    */
   setWaterline(y: number): void;
+  /** swap tessellation level: 0 = full heightmap grid, 1 = decimated (§V17) */
+  setLod(level: number): void;
+  /** currently mounted LOD level */
+  readonly lod: number;
   /** push live Tweakpane edits of terrain params into GPU uniforms */
   updateFromParams(): void;
   dispose(): void;
+}
+
+/**
+ * LOD level for a camera distance (§V17). Pure so tests pin the switch
+ * without a renderer; hysteresis is deliberately absent because the swap is a
+ * geometry pointer change with no cost and no visual pop at 900 m.
+ */
+export function selectTerrainLod(
+  cameraDistance: number,
+  p = islandParams,
+): number {
+  return cameraDistance > p.lodTerrainDistance ? 1 : 0;
 }
 
 /** Build the island terrain mesh with the sand↔rock blend material. */
 export function createIslandMesh(
   hm: IslandHeightmap,
   skirtDepth: number = islandParams.skirtDepth,
+  /**
+   * Shared blend material (islandMaterials.ts). Omit and the mesh builds and
+   * owns its own — convenient for a single island, wasteful for an
+   * archipelago (§V17: one node graph per island for shaders that differ in
+   * nothing).
+   */
+  shared?: TerrainBlendMaterialHandle,
 ): IslandMeshHandle {
-  const geometry = buildIslandGeometry(hm, skirtDepth);
-  const material = terrainBlendMaterial();
+  const near = buildIslandGeometry(hm, skirtDepth, 1);
+  const far = buildIslandGeometry(hm, skirtDepth, islandParams.lodTerrainStride);
+  const levels = [near, far];
+  const material = shared ?? terrainBlendMaterial();
   material.uniforms.sand.waterline.value = terrainParams.waterline;
-  const mesh = new THREE.Mesh(geometry, material.material);
+  const mesh = new THREE.Mesh(near, material.material);
+  mesh.name = 'island-terrain';
+  // §V10: the shoreline is an intersection-foam target exactly like a hull —
+  // flowfoam's injection pass picks this up by traversal, so the surf line at
+  // the beach comes out of the SAME machinery as the wake, not a second one
+  mesh.userData.foamTarget = true;
+  mesh.receiveShadow = true;
+  mesh.castShadow = islandParams.castShadows;
+  let lod = 0;
   return {
     mesh,
     material,
+    get lod(): number {
+      return lod;
+    },
     setWaterline(y: number): void {
       material.uniforms.sand.waterline.value = y;
+    },
+    setLod(level: number): void {
+      const clamped = Math.min(Math.max(Math.floor(level), 0), levels.length - 1);
+      if (clamped === lod) return;
+      lod = clamped;
+      mesh.geometry = levels[clamped];
     },
     updateFromParams(): void {
       material.updateFromParams();
     },
     dispose(): void {
-      geometry.dispose();
-      material.dispose();
+      for (const g of levels) g.dispose();
+      if (!shared) material.dispose(); // injected materials belong to the caller
     },
   };
 }

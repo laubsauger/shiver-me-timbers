@@ -101,7 +101,10 @@ export function createSailClothMaterial(
   const shapeAttr = attribute('sailShape', 'vec3');
   const clothWeight = shapeAttr.x;
   const width = max(shapeAttr.y, float(0.01)); // §V28 floored divisor
-  const drop = max(shapeAttr.z, float(0.01));
+  // live drop = built drop × the sim's trim scale, so easing the sheets
+  // shortens the canvas continuously instead of popping between trim states
+  const clothScale = mix(float(1), wind.dropScale, clothWeight);
+  const drop = max(shapeAttr.z.mul(clothScale), float(0.01));
   // per-sail phase from its own dimensions — no two sails ripple in step (§B.4)
   const phase = hash2(vec2(width.mul(3.71), drop.mul(1.17))).mul(TAU);
 
@@ -131,7 +134,10 @@ export function createSailClothMaterial(
   const u0 = cloth.x;
   const v0 = cloth.y;
   const z0 = clothZ(u0, v0);
-  material.positionNode = positionLocal.add(vec3(0, 0, z0.mul(clothWeight)));
+  // cloth hangs from the head (local y = 0), so scaling y shortens it from
+  // the foot up and leaves it bent to its yard
+  const hung = positionLocal.mul(vec3(1, clothScale, 1));
+  material.positionNode = hung.add(vec3(0, 0, z0.mul(clothWeight)));
 
   // normals rebuilt from the live surface (finite differences in cloth
   // space) — without this the billow is invisible to the lighting

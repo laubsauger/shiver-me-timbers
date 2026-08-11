@@ -14,19 +14,28 @@ import {
   mix,
   normalLocal,
   positionLocal,
+  sin,
   smoothstep,
-  step,
   uniform,
+  vec2,
   vec3,
 } from 'three/tsl';
-import { triplanarFbm } from '../terrain/noise';
+import { hash2, triplanarFbm } from '../terrain/noise';
+import { reliefNormal } from './surfaceRelief';
 import { shipMaterialParams, type ShipMaterialParams } from '../params/ship';
+
+/** TSL nodes are structurally different per operation; these locals are
+ *  reassigned across mix/add/mul so they need the loose node type */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyNode = any;
 
 export interface WoodTones {
   light: number;
   dark: number;
   /** darker horizontal wale strakes (hull family only) */
   wale: boolean;
+  /** darken + smooth below y=0, the waterline (hull family only) */
+  waterline: boolean;
 }
 
 export interface ShipMaterialHandle {
@@ -54,6 +63,19 @@ export function createWoodMaterial(
   const uWaleRatio = uniform(p.waleRatio);
   const uWaleDarken = uniform(p.waleDarken);
 
+  const uBumpScale = uniform(p.bumpScale);
+  const uGrainRelief = uniform(p.grainRelief);
+  const uPlankRelief = uniform(p.plankRelief);
+  const uSeamDepth = uniform(p.seamDepth);
+  const uWaleRelief = uniform(p.waleRelief);
+  const uPlankToneVar = uniform(p.plankToneVar);
+  const uBleach = uniform(new THREE.Color(p.bleachColor));
+  const uBleachStrength = uniform(p.bleachStrength);
+  const uWetDarken = uniform(p.wetDarken);
+  const uWetSmooth = uniform(p.wetSmooth);
+  const uWetlineFade = uniform(p.wetlineFade);
+  const uRoughBase = uniform(p.roughBase);
+
   // grain: fbm stretched along z (plank axis) so streaks read lengthwise
   const samplePos = positionLocal
     .mul(uGrainScale)
@@ -63,22 +85,61 @@ export function createWoodMaterial(
   // plank seams: stacked in y on vertical faces, side-by-side in x on decks
   const upness = smoothstep(float(0.6), float(0.9), normalLocal.y.abs());
   const across = mix(positionLocal.y, positionLocal.x, upness);
-  const f = fract(across.div(uPlankWidth));
+  const plankCoord = across.div(uPlankWidth);
+  const f = fract(plankCoord);
   const edgeDistance = f.min(f.oneMinus()); // 0 at a seam, 0.5 mid-plank
   const seamMask = smoothstep(float(0), uSeamWidth, edgeDistance); // 0 = seam
+  const seamGroove = seamMask.oneMinus(); // 1 IN the caulked groove
 
-  const base = mix(uDark, uLight, grain);
-  let color = mix(base.mul(uSeamDarken), base, seamMask);
+  // every plank is its own board: slightly different tone, and laid a hair
+  // proud or shy of its neighbours. This is most of what reads as planking
+  // rather than a painted stripe pattern.
+  const plankId = hash2(vec2(plankCoord.floor(), 17.3));
+  // CROWNED, not stepped: the lift rises to the middle of each board and
+  // returns to zero at both seams. A per-plank constant would be a step in
+  // the height field, and the relief normal differentiates that field in
+  // screen space — a step differentiates to a one-pixel spike at every seam.
+  const crown = sin(f.mul(Math.PI));
+  const plankLift = plankId.sub(0.5).mul(2).mul(crown); // −1..1, continuous
+
+  // --- one height field, shared by colour, roughness and the relief normal
+  let height: AnyNode = grain.sub(0.5).mul(uGrainRelief).add(plankLift.mul(uPlankRelief));
+  height = height.sub(seamGroove.mul(uSeamDepth)); // caulking sits recessed
+
+  const base = mix(uDark, uLight, grain).mul(
+    mix(float(1).sub(uPlankToneVar), float(1).add(uPlankToneVar), plankId),
+  );
+  let color: AnyNode = mix(base.mul(uSeamDarken), base, seamMask);
+  let rough: AnyNode = uRoughBase.add(grain.mul(0.18)).add(seamGroove.mul(0.12));
 
   if (tones.wale) {
-    // wale strakes: periodic darker horizontal bands along hull height
-    const band = step(uWaleRatio, fract(positionLocal.y.mul(uWaleFrequency)));
+    // wale strakes: a THICKER belt of planking — darker, and standing proud.
+    // Smoothstepped rather than step()ped for the same reason as the crown:
+    // a hard edge in the height field spikes its screen-space derivative.
+    const waleT = fract(positionLocal.y.mul(uWaleFrequency));
+    const band = smoothstep(uWaleRatio.sub(0.03), uWaleRatio.add(0.03), waleT);
     color = mix(color.mul(uWaleDarken), color, band);
+    height = height.add(band.oneMinus().mul(uWaleRelief));
+  }
+
+  // sun-bleached upper surfaces: horizontal faces take the weather, going
+  // paler and chalkier than the sheltered vertical planking
+  color = mix(color, mix(color, uBleach, uBleachStrength), upness);
+  rough = rough.add(upness.mul(0.08));
+
+  if (tones.waterline) {
+    // …and the opposite below: constantly wet, so darker and far smoother.
+    // Hull pieces keep ship-space Y in their local geometry, so y < 0 is
+    // genuinely below the waterline (see hull loft — piece transform y = 0).
+    const wet = smoothstep(float(0), uWetlineFade, positionLocal.y.negate());
+    color = mix(color, color.mul(float(1).sub(uWetDarken)), wet);
+    rough = mix(rough, rough.mul(float(1).sub(uWetSmooth)), wet);
   }
 
   material.colorNode = color;
-  // weathered wood: rougher in the grain valleys
-  material.roughnessNode = float(0.78).add(grain.mul(0.18));
+  material.roughnessNode = rough.clamp(0.04, 1);
+  // relief from the SAME height field — no textures, no tangents, no UVs
+  material.normalNode = reliefNormal(height, uBumpScale);
 
   return {
     material,
@@ -94,6 +155,18 @@ export function createWoodMaterial(
       uWaleFrequency.value = p.waleFrequency;
       uWaleRatio.value = p.waleRatio;
       uWaleDarken.value = p.waleDarken;
+      uBumpScale.value = p.bumpScale;
+      uGrainRelief.value = p.grainRelief;
+      uPlankRelief.value = p.plankRelief;
+      uSeamDepth.value = p.seamDepth;
+      uWaleRelief.value = p.waleRelief;
+      uPlankToneVar.value = p.plankToneVar;
+      uBleach.value.set(p.bleachColor); // sRGB via Color.set (§V31/§B.9)
+      uBleachStrength.value = p.bleachStrength;
+      uWetDarken.value = p.wetDarken;
+      uWetSmooth.value = p.wetSmooth;
+      uWetlineFade.value = p.wetlineFade;
+      uRoughBase.value = p.roughBase;
     },
   };
 }

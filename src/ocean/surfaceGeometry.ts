@@ -129,30 +129,23 @@ export function buildOceanGrid(o: SurfaceGridOptions): THREE.BufferGeometry {
       normals[idx + 1] = 1;
     }
   }
-  // Indices are emitted RING BY RING, innermost first. The mesh is centered
-  // on the camera, so ring order is front-to-back order in every view
-  // direction: with depth writes on, a crest already drawn rejects every
-  // wave behind it via early-Z. Row-major order is back-to-front for half of
-  // all headings and lets the near-horizon band pile up hundreds of blended
-  // layers of a heavy shader — a fill-rate wedge (§V28, cf. §B.5).
-  const half = n / 2;
-  const quadRing = (i: number, j: number) =>
-    Math.max(Math.abs(i + 0.5 - half), Math.abs(j + 0.5 - half)) - 0.5;
-  const perRing = new Uint32Array(half + 1);
-  for (let j = 0; j < n; j++) {
-    for (let i = 0; i < n; i++) perRing[quadRing(i, j)]++;
-  }
-  const ringStart = new Uint32Array(half + 2);
-  for (let r = 0; r <= half; r++) ringStart[r + 1] = ringStart[r] + perRing[r];
-  const cursor = Uint32Array.from(ringStart.subarray(0, half + 1));
+  // Index order is ROW-MAJOR, and that is load bearing (§V28, §B).
+  // A "front-to-back" ring-by-ring order looks like a free early-Z win and is
+  // a GPU-process wedge on Apple Silicon: consecutive triangles of a ring land
+  // in completely different screen tiles, so a tile-based deferred renderer
+  // has to keep every tile's primitive list open at once. Measured: 512² in
+  // ring order never finished its first frame (main thread blocked > 45 s, tab
+  // killed) at BOTH 4600 m and 600 m rim, while the identical mesh in
+  // row-major order boots instantly at 100 fps. Row-major keeps spatially
+  // coherent runs. Do not "optimise" this into ring order again.
   const indices = new Uint32Array(n * n * 6);
+  let t = 0;
   for (let j = 0; j < n; j++) {
     for (let i = 0; i < n; i++) {
       const a = j * cols + i;
       const b = a + 1;
       const c = a + cols;
       const d = c + 1;
-      let t = cursor[quadRing(i, j)]++ * 6;
       // (a,c,b) winds counter-clockwise seen from +Y → front faces point up
       indices[t++] = a;
       indices[t++] = c;

@@ -45,13 +45,45 @@ import type { FlowFoamParams } from '../params/flowfoam';
 /** scene layer owned by the injection capture (tagged meshes get it) */
 export const FOAM_INJECTION_LAYER = 27;
 
+/**
+ * Which tier of the foam region this instance is. TWO tiers exist because one
+ * cannot serve both jobs: the user wants sub-metre detail at the hull AND a
+ * wake running hundreds of metres astern, and a single 512² texture can only
+ * buy one by giving up the other.
+ *   near — 512² over ~120 m (0.23 m/texel): hull capture, flow advection, all
+ *          the structure the eye resolves.
+ *   far  — 256² over ~600 m (2.3 m/texel): the long fading streak only. No
+ *          hull capture and no flow-noise advection (3 fbm evaluations per
+ *          texel) — at that range the trail is a smooth band that neither
+ *          needs nor shows either.
+ */
+export interface AccumProfile {
+  /** texels per side — startup constant (allocation + dispatch size) */
+  res: number;
+  /** live region side length (m) */
+  size: () => number;
+  /** live decay half-life (s) */
+  decayHalfLife: () => number;
+  /** advect by the flow-noise field (near only — 3 fbm per texel) */
+  useFlow: boolean;
+  /** composite the ortho hull-waterline capture (near only) */
+  useCapture: boolean;
+}
+
 export function createAccumulation(
   p: FlowFoamParams,
   flowU: FlowNoiseUniforms,
   /** extra analytic injection rate (foam/sec) at a world-XZ node — ship wake */
   wakeRateNode?: (worldXZ: any) => any,
+  profile: AccumProfile = {
+    res: p.resolution,
+    size: () => p.regionSize,
+    decayHalfLife: () => p.decayHalfLife,
+    useFlow: true,
+    useCapture: true,
+  },
 ) {
-  const res = p.resolution;
+  const res = profile.res;
 
   const makeState = (): THREE.StorageTexture => {
     const t = new THREE.StorageTexture(res, res);
@@ -65,14 +97,15 @@ export function createAccumulation(
   const texA = makeState(); // front — sampled by materials, blur output
   const texB = makeState(); // scratch — advect output
 
-  const injectionRT = new THREE.RenderTarget(res, res, {
+  // far tier never captures, so it never allocates the RT (1×1 placeholder)
+  const injectionRT = new THREE.RenderTarget(profile.useCapture ? res : 1, profile.useCapture ? res : 1, {
     depthBuffer: false,
     type: THREE.HalfFloatType,
   });
   injectionRT.texture.name = 'flowfoam/injection';
 
   const uCenter = uniform(new THREE.Vector2(0, 0));
-  const uSize = uniform(p.regionSize);
+  const uSize = uniform(profile.size());
   const uShift = uniform(new THREE.Vector2(0, 0));
   const uDecay = uniform(1);
   const uAdvectDt = uniform(0);
@@ -86,7 +119,7 @@ export function createAccumulation(
   const uFeather = uniform(p.maskFeather);
 
   // --- injection capture (ortho top-down, world-space fallback mask) ---
-  const half = p.regionSize / 2;
+  const half = profile.size() / 2;
   const camera = new THREE.OrthographicCamera(-half, half, half, -half, 0.1, p.captureHeight * 2);
   camera.up.set(0, 0, -1); // camera x = world +x, camera y = world −z (flowMath uv convention)
   camera.layers.set(FOAM_INJECTION_LAYER);
@@ -134,7 +167,10 @@ export function createAccumulation(
       // foam-scaled churn: eddies spin up INSIDE the trail (user review:
       // "internal motion, water pushed aside"), open ocean stays calm
       const foamLocal = textureLoad(texA, ivec2(x, y)).r;
-      const flow = flowVectorNode(vec2(wx, wz), flowU, foamLocal.mul(uWakeChurn).add(1));
+      // far tier skips the flow field entirely — pure shift + decay + wake
+      const flow = profile.useFlow
+        ? flowVectorNode(vec2(wx, wz), flowU, foamLocal.mul(uWakeChurn).add(1))
+        : vec2(0, 0);
       // backward semi-Lagrangian source uv (flowMath.advectLookupUv mirror)
       const su = u.sub(flow.x.mul(uAdvectDt).div(uSize)).add(uShift.x);
       const sv = v.add(flow.y.mul(uAdvectDt).div(uSize)).add(uShift.y);
@@ -151,7 +187,9 @@ export function createAccumulation(
       const t11 = loadZero(texA, x0.add(1), y0.add(1));
       // §V23 functional mix(a, b, t)
       const prev = mix(mix(t00, t10, fx), mix(t01, t11, fx), fy);
-      const inject = textureLoad(injectionRT.texture, ivec2(x, y)).r;
+      const inject = profile.useCapture
+        ? textureLoad(injectionRT.texture, ivec2(x, y)).r
+        : float(0);
       // analytic ship wake composes ADDITIVELY with the ortho capture
       const wake = wakeRateNode ? wakeRateNode(vec2(wx, wz)).mul(uDt) : float(0);
       const foam = prev.mul(uDecay).add(inject.mul(uInjectPerFrame)).add(wake).min(1);
@@ -192,9 +230,10 @@ export function createAccumulation(
 
     /** move the region (world XZ). Snaps to the texel grid (see header). */
     setCenter(x: number, z: number): void {
-      const sx = snapToTexel(x, p.regionSize, res);
-      const sz = snapToTexel(z, p.regionSize, res);
-      const [du, dv] = regionShiftUv(center.x, center.y, sx, sz, p.regionSize);
+      const size = profile.size();
+      const sx = snapToTexel(x, size, res);
+      const sz = snapToTexel(z, size, res);
+      const [du, dv] = regionShiftUv(center.x, center.y, sx, sz, size);
       pendingShift.x += du;
       pendingShift.y += dv;
       center.set(sx, sz);
@@ -208,7 +247,8 @@ export function createAccumulation(
      * material and scene background.
      */
     renderInjection(renderer: THREE.WebGPURenderer, scene: THREE.Scene): void {
-      const s = p.regionSize;
+      if (!profile.useCapture) return;
+      const s = profile.size();
       camera.left = -s / 2;
       camera.right = s / 2;
       camera.top = s / 2;
@@ -241,8 +281,8 @@ export function createAccumulation(
 
     /** one sim step (§V2 fixed dt): pushes live params, advect+blur computes */
     step(renderer: THREE.WebGPURenderer, dt: number): void {
-      uSize.value = p.regionSize;
-      uDecay.value = decayFactorPerFrame(p.decayHalfLife, dt);
+      uSize.value = profile.size();
+      uDecay.value = decayFactorPerFrame(profile.decayHalfLife(), dt);
       uAdvectDt.value = p.advectSpeed * dt;
       uInjectPerFrame.value = p.injectStrength * dt;
       uDt.value = dt;

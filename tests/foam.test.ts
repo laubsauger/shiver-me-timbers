@@ -165,22 +165,17 @@ describe('progressive blur (§V6: sharp at birth, then spreads and dissipates)',
 
 describe('crest-aligned blur (§V6 cap SHAPE: ridges, not round blobs)', () => {
   const n = 16;
-  // a wave face rolling along +x: height varies with x only, so ∇h ∥ x
-  // EVERYWHERE (the wrapped seam flips its sign, which leaves the ± tap set
-  // unchanged) and the crest line runs along y — foam must smear along y
-  const heightField = (): Float32Array => {
-    const h = new Float32Array(n * n);
-    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) h[y * n + x] = x;
-    return h;
-  };
+  // waves rolling along +x → crest lines run along y, so foam must smear in y
+  const AX = 1;
+  const AZ = 0;
   const impulse = (x: number, y: number): Float32Array => {
     const g = new Float32Array(n * n);
     g[y * n + x] = 1;
     return g;
   };
 
-  it('tap frame is orthonormal-rotated: along the ridge, across the gradient', () => {
-    // ∇h = (0, 1) → crest runs along x → dx taps move in x, dy taps in y
+  it('tap frame is orthonormal-rotated: along the ridge, across the propagation', () => {
+    // propagation = (0, 1) → crest runs along x → dx taps move in x, dy in y
     const [ax, ay] = crestTapOffset(0, 1, 1, 0, 3, 0.5);
     expect(Math.abs(ax)).toBeCloseTo(3, 12);
     expect(ay).toBeCloseTo(0, 12);
@@ -189,9 +184,9 @@ describe('crest-aligned blur (§V6 cap SHAPE: ridges, not round blobs)', () => {
     expect(by).toBeCloseTo(0.5, 12);
   });
 
-  it('degenerate gradient falls back to the axis frame (flat water is safe)', () => {
-    // WHY §V28: a zero gradient must never divide-by-zero into NaN texel
-    // offsets — flat water simply blurs isotropically like before.
+  it('degenerate direction falls back to the axis frame (never NaN offsets)', () => {
+    // WHY §V28: a zero direction must never divide-by-zero into NaN texel
+    // offsets — it simply blurs isotropically like before.
     const [ox, oy] = crestTapOffset(0, 0, 1, 1, 1, 1);
     expect(Number.isFinite(ox)).toBe(true);
     expect(Number.isFinite(oy)).toBe(true);
@@ -201,10 +196,9 @@ describe('crest-aligned blur (§V6 cap SHAPE: ridges, not round blobs)', () => {
     // WHY: the crest frame is a ROTATION — it must not change how much foam
     // spreads, only its direction. This pins that the knob is shape-only.
     const src = impulse(8, 8);
-    const h = heightField();
     for (let y = 0; y < n; y++) {
       for (let x = 0; x < n; x++) {
-        expect(blurDecayAnisoAt(src, h, n, x, y, 1, 1, 1, 0.9)).toBeCloseTo(
+        expect(blurDecayAnisoAt(src, AX, AZ, n, x, y, 1, 1, 1, 0.9)).toBeCloseTo(
           blurDecayAt(src, n, x, y, 1, 0.9),
           12,
         );
@@ -217,9 +211,8 @@ describe('crest-aligned blur (§V6 cap SHAPE: ridges, not round blobs)', () => {
     // cap of the wave"): with along ≫ across the same injected fold becomes
     // a ridge-following streak instead of a disc.
     const src = impulse(4, 8);
-    const h = heightField();
     const at = (x: number, y: number) =>
-      blurDecayAnisoAt(src, h, n, x, y, 1, 3, 0.34, 1);
+      blurDecayAnisoAt(src, AX, AZ, n, x, y, 1, 3, 0.34, 1);
     // crest tangent is ±y here: foam reaches 3 texels along y…
     expect(at(4, 11)).toBeGreaterThan(0);
     expect(at(4, 5)).toBeGreaterThan(0);
@@ -228,17 +221,43 @@ describe('crest-aligned blur (§V6 cap SHAPE: ridges, not round blobs)', () => {
     expect(at(1, 8)).toBe(0);
   });
 
-  it('conserves foam mass where the crest frame is locally constant', () => {
-    // WHY: the crest frame is a rotation, so a uniform ridge must redistribute
-    // foam without losing any — decayHalfLife stays the lifetime clock (§V6).
-    // (Where the frame swirls, the gather form redistributes unevenly; see
-    // foamMath.blurDecayAnisoAt.)
-    const src = impulse(4, 8);
-    const h = heightField();
-    let sum = 0;
-    for (let y = 0; y < n; y++)
-      for (let x = 0; x < n; x++) sum += blurDecayAnisoAt(src, h, n, x, y, 1, 3, 0.34, 1);
-    expect(sum).toBeCloseTo(1, 10);
+  it('conserves foam mass EXACTLY at any stretch — decay owns lifetime alone', () => {
+    // WHY this is not a nicety (user: "I think we're missing some foam caps"):
+    // a per-texel crest frame derived from ∇h rotates fastest exactly where
+    // foam lives (∇h vanishes and flips sign ON the crest line), and a
+    // rotating gather kernel is NOT conservative — it sheds foam every frame,
+    // so caps quietly died faster than decayHalfLife promised. A uniform
+    // frame is shift-invariant, which is what makes this exact.
+    for (const [along, across] of [
+      [1, 1],
+      [3, 0.34],
+      [2.6, 0.5],
+      [4, 0.25],
+    ]) {
+      const src = impulse(4, 8);
+      let sum = 0;
+      for (let y = 0; y < n; y++)
+        for (let x = 0; x < n; x++)
+          sum += blurDecayAnisoAt(src, AX, AZ, n, x, y, 1, along, across, 1);
+      expect(sum, `along=${along} across=${across}`).toBeCloseTo(1, 10);
+    }
+  });
+
+  it('conserves foam for ANY propagation direction, not just the axes', () => {
+    // a diagonal swell must not lose foam either — the gradient-derived frame
+    // failed precisely on fields whose direction was not axis-aligned
+    const src = impulse(8, 8);
+    for (const [dx, dz] of [
+      [1, 1],
+      [-2, 1],
+      [0.3, -0.9],
+    ]) {
+      let sum = 0;
+      for (let y = 0; y < n; y++)
+        for (let x = 0; x < n; x++)
+          sum += blurDecayAnisoAt(src, dx, dz, n, x, y, 1, 3, 0.34, 1);
+      expect(sum, `dir=${dx},${dz}`).toBeCloseTo(1, 10);
+    }
   });
 });
 

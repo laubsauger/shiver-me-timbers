@@ -47,12 +47,14 @@ export const oceanSurfaceParams = registerParams(
      *  input pending islands T20; keep 0 on open ocean) */
     shallowColor: '#1a8a8a',
     shallowTintStrength: 0.0,
-    /** second body tone drifted in by low-frequency noise — breaks the
-     *  "one flat pigment repeating" read (user critique) */
-    variationColor: '#0d4f55',
-    /** world-space wavelength (m) of the largest colour-variation octave */
+    /** world-space wavelength (m) of the largest body-variation octave */
     variationScale: 900,
-    variationStrength: 0.35,
+    /**
+     * ±brightness ripple on the body colour, NO hue shift (user rule): a
+     * second tone at this scale reads as cow-pattern blotches on open ocean.
+     * Keep it under ~0.08 — perceivable as a shape means too strong.
+     */
+    variationStrength: 0.05,
     sssColor: '#32d0c0',
     sssStrength: 2.3,
     sssPower: 4.0,
@@ -61,6 +63,23 @@ export const oceanSurfaceParams = registerParams(
     sssAmbient: 0.08,
     /** horizontal-displacement mask scale for the SSS side-of-wave isolation (§V.5) */
     sssChoppyScale: 0.9,
+    /**
+     * 0..1 how much of the ambient crest glow requires real sun backlighting.
+     * The user's rule: on open ocean bright turquoise is only allowed where
+     * sun comes through the water toward the viewer. 1 = fully sun-gated.
+     */
+    sssAmbientSunGate: 0.85,
+    /**
+     * Crest band for the ambient glow, in units of RMS surface elevation σ
+     * (NOT metres — an absolute gate changes meaning whenever the sea state
+     * changes and repainted the ocean in turquoise blobs, §B). 1.6σ..2.6σ is
+     * the top ~5%..0.5% of the surface: actual crest tops.
+     */
+    crestBandLow: 1.6,
+    crestBandHigh: 2.6,
+    /** body value lift band, also in σ — troughs darker, crests lighter */
+    bodyBandLow: -1.7,
+    bodyBandHigh: 2.3,
     skyHorizonColor: '#a8d4e8',
     skyZenithColor: '#4694cc',
     /** fresnel sky-reflection blend cap — high = mirror sheen, low = body color */
@@ -75,6 +94,10 @@ export const oceanSurfaceParams = registerParams(
     sunTint: '#fff2dc',
     /** how much the sun shadow map darkens the water (0 = ignore shadows) */
     shadowStrength: 0.85,
+    /** build the in-material sun-shadow sample at all (reload to apply) —
+     *  kill switch for the shadow node, separate from shadowStrength which
+     *  only scales an already-compiled sample */
+    shadowsEnabled: true,
 
     // ── sparkle / glint train (§V20 "dense sun sparkle glints") ─────────
     sparkleStrength: 1.0,
@@ -141,11 +164,16 @@ export const oceanSurfaceParams = registerParams(
     sssAmbient: { min: 0, max: 1, step: 0.01 },
     shallowTintStrength: { min: 0, max: 1, step: 0.01 },
     variationScale: { min: 100, max: 4000, step: 10 },
-    variationStrength: { min: 0, max: 1, step: 0.01 },
+    variationStrength: { min: 0, max: 0.25, step: 0.005 },
     reflectionStrength: { min: 0, max: 1, step: 0.01 },
     grazingSaturation: { min: 0, max: 1, step: 0.01 },
     sssPower: { min: 0.5, max: 8, step: 0.1 },
     sssChoppyScale: { min: 0, max: 3, step: 0.05 },
+    sssAmbientSunGate: { min: 0, max: 1, step: 0.01 },
+    crestBandLow: { min: 0, max: 4, step: 0.05 },
+    crestBandHigh: { min: 0.2, max: 6, step: 0.05 },
+    bodyBandLow: { min: -4, max: 0, step: 0.05 },
+    bodyBandHigh: { min: 0.2, max: 6, step: 0.05 },
     lightFloor: { min: 0, max: 1.5, step: 0.01 },
     lightGain: { min: 0, max: 2, step: 0.01 },
     shadowStrength: { min: 0, max: 1, step: 0.01 },

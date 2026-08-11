@@ -36,12 +36,15 @@ import {
   type WakeParams,
 } from '../src/flowfoam/wakeMath';
 import {
+  COARSEN_MAX_MUL,
   TRACK_CAPACITY,
   advanceTrack,
   approachExp,
   createWakeTrack,
   trackBounds,
   trackPoints,
+  trackReachCpu,
+  trackSpacingAt,
   type TrackConfig,
   type TrackSample,
 } from '../src/flowfoam/wakeTrack';
@@ -212,24 +215,33 @@ const WP: WakeParams = {
   kelvinAngle: 19.47,
   bowIntensity: 0.3,
   armWidth: 0.9,
-  armWidthGrowth: 0.05,
+  armWidthGrowth: 0.02,
+  armWidthMax: 4.0,
+  aftSpreadCap: 0.8,
+  trackCoarsen: 20,
+  trackCoarsenStart: 30,
+  shoulderIntensity: 1.2,
+  shoulderLength: 14,
+  shoulderPush: 2.0,
+  shoulderWidth: 1.3,
+  shoulderEntry: 8,
   hullBoost: 1.6,
   hullBoostDist: 14,
-  bowLife: 9,
+  bowLife: 45,
   cutIntensity: 1.0,
   cutWidth: 1.1,
   cutLength: 7,
   sternIntensity: 0.05,
   sternWidth: 0.9,
   sternSpread: 0.55,
-  sternLife: 8,
+  sternLife: 40,
   sternOnset: 3,
   vortexIntensity: 0.05,
   vortexOffset: 1.15,
   vortexSpread: 0.28,
   vortexWidth: 1.3,
   vortexSpacing: 11,
-  vortexLife: 10,
+  vortexLife: 45,
   moundIntensity: 0.5,
   moundLead: 1.6,
   moundSweep: 0.9,
@@ -240,7 +252,7 @@ const WP: WakeParams = {
   speedThreshold: 0.5,
   fullWakeSpeed: 5,
   trackSpacing: 2.2,
-  trackLife: 30,
+  trackLife: 200,
   tailFade: 0.35,
   bowClip: 0.8,
   wakeNoiseScale: 0.3,
@@ -255,6 +267,8 @@ const CFG: TrackConfig = {
   life: WP.trackLife,
   minSpeed: WP.speedThreshold,
   maxTurn: (6 * Math.PI) / 180,
+  coarsen: WP.trackCoarsen,
+  coarsenStart: WP.trackCoarsenStart,
 };
 const TAN = Math.tan((WP.kelvinAngle * Math.PI) / 180);
 const DT = 1 / 60;
@@ -310,13 +324,13 @@ describe('wake track: the water remembers (§V10 follow-up, user regression)', (
       if (t.samples[0] !== before) laidAt.set(t.samples[0], yaw);
     };
 
-    for (let i = 0; i < 180; i++) tick(); // 3 s due north at heading A = 0
+    for (let i = 0; i < 360; i++) tick(); // 6 s due north at heading A = 0
     const turnTicks = Math.round(1.5 / DT); // ~1 s yaw ramp, eased in and out
     for (let i = 1; i <= turnTicks; i++) {
       yaw = (Math.PI / 2) * smooth(0, 1, i / turnTicks);
       tick();
     }
-    for (let i = 0; i < 180; i++) tick(); // 3 s due east at heading B = π/2
+    for (let i = 0; i < 360; i++) tick(); // 6 s due east at heading B = π/2
 
     let fromA = 0;
     let fromTurn = 0;
@@ -332,10 +346,14 @@ describe('wake track: the water remembers (§V10 follow-up, user regression)', (
       else fromTurn++;
     }
     // all three populations coexist: heading-A water astern, heading-B water at
-    // the stem, and the arc between them — the trail is a history, not a shape
-    expect(fromA).toBeGreaterThan(3);
-    expect(fromB).toBeGreaterThan(3);
+    // the stem, and the arc between them — the trail is a history, not a shape.
+    // A is the oldest and therefore the most aggressively thinned by the
+    // distance grading, so it is measured by EXTENT rather than sample count.
     expect(fromTurn).toBeGreaterThan(3);
+    expect(fromB).toBeGreaterThan(3);
+    expect(fromA).toBeGreaterThanOrEqual(2);
+    const aDists = t.samples.filter((s) => laidAt.get(s) === 0).map((s) => s.dist);
+    expect(Math.max(...aDists) - Math.min(...aDists)).toBeGreaterThan(20);
 
     // and the turn is deposited as a CURVE: read oldest → newest, the stored
     // headings climb smoothly from A to B with no hinge bigger than trackTurn
@@ -716,6 +734,112 @@ describe('wake field in the track frame (bow vs aft, §V10 follow-up)', () => {
     }
   });
 
+  it('LENGTH: the trail reaches hundreds of metres, not ~100 (user review)', () => {
+    // User: "disappearing too immediately... not fading out over a long enough
+    // distance." Uniform 2.2 m spacing spent all 48 samples in 105 m. Distance
+    // grading buys the reach without touching the GPU loop bound, which is the
+    // constraint that actually matters (§V17).
+    expect(trackReachCpu(CFG)).toBeGreaterThan(400);
+    const uniform = trackReachCpu({ ...CFG, coarsenStart: 1e9 }); // grading off
+    expect(uniform).toBeLessThan(120);
+    expect(trackReachCpu(CFG) / uniform).toBeGreaterThan(3);
+    // the near field keeps FULL resolution — grading may not cost near detail
+    expect(trackSpacingAt(0, CFG)).toBe(0); // 0 = never thinned
+    expect(trackSpacingAt(CFG.coarsenStart - 1, CFG)).toBe(0);
+    expect(trackSpacingAt(CFG.coarsenStart + 1, CFG)).toBeGreaterThan(0);
+    // ...and the grade is BOUNDED, or thinning never reaches a fixed point
+    expect(trackSpacingAt(1e6, CFG)).toBe(CFG.spacing * COARSEN_MAX_MUL);
+  });
+
+  it('thinning reaches a FIXED POINT — the track cannot collapse to its ends', () => {
+    // The bug this caught: with an unbounded grade, `required(dist)` outgrows
+    // every gap however often it has already been thinned, so each tick drops
+    // more samples than are laid and the whole history collapses to 2 points.
+    const t = createWakeTrack();
+    const pose = { x: 0, z: 0, fx: 0, fz: 1, speed: 8 };
+    for (let i = 0; i < 60 * 120; i++) {
+      pose.z += 8 * DT;
+      advanceTrack(t, pose, DT, CFG);
+    }
+    expect(t.samples.length).toBeGreaterThan(20); // a real history, not 2 ends
+    expect(t.samples.length).toBeLessThanOrEqual(CFG.capacity);
+    expect(t.samples[t.samples.length - 1].dist).toBeGreaterThan(300);
+    // every surviving gap respects the grade (no runaway thinning)
+    for (let i = 1; i < t.samples.length - 1; i++) {
+      const gap = Math.hypot(
+        t.samples[i].x - t.samples[i - 1].x,
+        t.samples[i].z - t.samples[i - 1].z,
+      );
+      expect(gap).toBeLessThanOrEqual(CFG.spacing * COARSEN_MAX_MUL * 2 + 1e-6);
+    }
+  });
+
+  it('AFT STRUCTURE never pans out past the Kelvin wedge (user review)', () => {
+    // User: "the structure of it, especially in the back... maybe it's panning
+    // out too heavily." The Kelvin half-angle is a physical constant and is
+    // speed-INDEPENDENT; turbulent spread is a rate, so uncapped it overtakes
+    // the wedge — worst at LOW speed, where the ship travels little per second.
+    // isolate the aft features: no bow mound, cutwater, arms or shoulder
+    const aftOnly: WakeParams = {
+      ...WP,
+      bowIntensity: 0,
+      cutIntensity: 0,
+      shoulderIntensity: 0,
+      moundIntensity: 0,
+    };
+    for (const speed of [1.2, 3, 6, 10]) {
+      const s = sail([{ fx: 0, fz: 1, seconds: 60 }], speed);
+      for (let d = HULL.length + 1; d <= 200; d += 2) {
+        const cap = HULL.beam * 0.5 + WP.aftSpreadCap * d * TAN;
+        // churn and shed vortices stay inside the capped wedge at EVERY speed
+        expect(wakeEnvelopeCpu(s.points, cap + WP.vortexWidth + 0.5, s.z - d, HULL, aftOnly, 0)).toBe(0);
+        // and the whole wake stays inside the Kelvin arms themselves
+        const beyondArms = d * TAN + WP.armWidthMax + WP.cutWidth + 1;
+        expect(wakeEnvelopeCpu(s.points, beyondArms, s.z - d, HULL, WP, 0)).toBe(0);
+      }
+    }
+    // the cap BINDS at low speed — that is the case it exists for (turbulent
+    // spread is a rate, the wedge is a slope, so slow ships are where an
+    // uncapped churn overtakes the V)
+    const slowAge = 60;
+    expect(HULL.beam * 0.5 * WP.sternWidth + WP.sternSpread * slowAge).toBeGreaterThan(
+      HULL.beam * 0.5 + WP.aftSpreadCap * 30 * TAN,
+    );
+    // and the arm THICKNESS is capped, so the V stays a V far astern
+    expect(WP.armWidth + WP.armWidthGrowth * 400).toBeGreaterThan(WP.armWidthMax);
+  });
+
+  it('SHOULDER: displaced water runs the whole forebody and meets the arms', () => {
+    // User: "it doesn't really feel like we're actually pushing away and
+    // displacing water to the side... reads as if the boat is flying through
+    // the water instead of plowing through it."
+    const halfBeam = HULL.beam * 0.5;
+    // a continuous band of foam pressed OUT along the hull side, sustained the
+    // whole length of the forebody rather than a dab at the stem
+    for (let d = 2; d <= WP.shoulderLength * 0.5; d += 1) {
+      const off =
+        halfBeam * smooth(0, WP.shoulderEntry, d) +
+        WP.shoulderPush * smooth(0, WP.shoulderLength, d);
+      expect(at(d, off)).toBeGreaterThan(0);
+      expect(off).toBeGreaterThan(0);
+    }
+    // it is pressed OUTBOARD of the hull side by the end of the forebody
+    const endOff =
+      halfBeam * smooth(0, WP.shoulderEntry, WP.shoulderLength) +
+      WP.shoulderPush * smooth(0, WP.shoulderLength, WP.shoulderLength);
+    expect(endOff).toBeGreaterThan(halfBeam);
+    // ...and hands over to the Kelvin arms: at the end of the forebody the arm
+    // crest has diverged to roughly the same offset, so there is no gap or step
+    expect(Math.abs(endOff - WP.shoulderLength * TAN)).toBeLessThan(WP.shoulderWidth);
+    // turning the shoulder off measurably empties the hull sides
+    const flat: WakeParams = { ...WP, shoulderIntensity: 0 };
+    const mid = WP.shoulderLength * 0.4;
+    const midOff = halfBeam * smooth(0, WP.shoulderEntry, mid) + WP.shoulderPush * smooth(0, WP.shoulderLength, mid);
+    expect(wakeEnvelopeCpu(STRAIGHT.points, midOff, STRAIGHT.z - mid, HULL, flat, 0)).toBeLessThan(
+      at(mid, midOff),
+    );
+  });
+
   it('breakup factor is bounded [1−wakeBreakup, 1] and deterministic', () => {
     // WHY: breakup may only REMOVE injected foam (gaps), never amplify it —
     // otherwise intensities in the params panel would lie.
@@ -806,5 +930,28 @@ describe('flowfoam params (§V16 registry contract)', () => {
     expect(flowFoamParams.tailFade).toBeLessThan(1);
     expect(flowFoamParams.vortexSpacing).toBeGreaterThan(0);
     expect(flowFoamParams.fullWakeSpeed).toBeGreaterThan(flowFoamParams.speedThreshold);
+
+    // two-tier foam region: the near tier buys DETAIL, the far tier buys
+    // LENGTH, and neither can do the other's job with one 512² texture
+    expect(Math.log2(flowFoamParams.farResolution) % 1).toBe(0);
+    const nearTexel = flowFoamParams.regionSize / flowFoamParams.resolution;
+    const farTexel = flowFoamParams.farRegionSize / flowFoamParams.farResolution;
+    expect(nearTexel).toBeLessThan(farTexel); // near is the detailed one
+    expect(nearTexel).toBeLessThan(0.5); // sub-metre: arms/cutwater are ~1 m
+    expect(flowFoamParams.farRegionSize).toBeGreaterThan(flowFoamParams.regionSize * 3);
+    // the far tier must not outrun the history that feeds it, or the trail
+    // would simply stop mid-window with a hard edge
+    const reach = trackReachCpu({
+      capacity: TRACK_CAPACITY,
+      spacing: flowFoamParams.trackSpacing,
+      coarsen: flowFoamParams.trackCoarsen,
+      coarsenStart: flowFoamParams.trackCoarsenStart,
+      life: flowFoamParams.trackLife,
+      minSpeed: flowFoamParams.speedThreshold,
+      maxTurn: 1,
+    });
+    expect(reach).toBeGreaterThanOrEqual(flowFoamParams.farRegionSize / 2);
+    // and the far decay must outlast the time it takes to sail that far
+    expect(flowFoamParams.farDecayHalfLife).toBeGreaterThan(flowFoamParams.decayHalfLife);
   });
 });

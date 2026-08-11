@@ -104,13 +104,21 @@ export interface Rocks {
   group: THREE.Group;
   placements: RockPlacement[];
   /** meshes tagged userData.foamTarget — T13 intersection-foam targets */
-  foamTargets: THREE.Mesh[];
+  foamTargets: THREE.Object3D[];
+  /** LOD hook (§V17): hide the whole outcrop set beyond the cull distance */
+  setVisible(visible: boolean): void;
   /** push live Tweakpane rock-material edits (no-op if material injected) */
   updateFromParams(): void;
   dispose(): void;
 }
 
-/** Assemble rock meshes (few meshes sharing geometry variants + material). */
+/**
+ * Assemble rock outcrops as ONE InstancedMesh per deformed geometry variant
+ * (§V17: rockCount × islandCount separate meshes was rockCount draw calls per
+ * island; instancing makes it rockGeoVariants). Instances of a variant share
+ * the foam tag — the injection mask is a waterline height compare, so rocks
+ * that sit clear of the water contribute nothing to it anyway (§V10).
+ */
 export function createRocks(opts: CreateRocksOptions): Rocks {
   const p = islandParams;
   const placements = generateRockPlacements(opts.seed, opts.heightmap, p);
@@ -123,13 +131,33 @@ export function createRocks(opts: CreateRocksOptions): Rocks {
 
   const group = new THREE.Group();
   group.name = 'island-rocks';
-  const foamTargets: THREE.Mesh[] = [];
-  for (const pl of placements) {
-    const mesh = new THREE.Mesh(variants[pl.variant], material);
-    mesh.position.set(...pl.position);
-    mesh.rotation.y = pl.yaw;
-    mesh.scale.set(pl.scale, pl.scale * pl.squash, pl.scale);
-    if (pl.foamTarget) {
+  const foamTargets: THREE.Object3D[] = [];
+
+  const matrix = new THREE.Matrix4();
+  const position = new THREE.Vector3();
+  const quat = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  const up = new THREE.Vector3(0, 1, 0);
+
+  for (let v = 0; v < variants.length; v++) {
+    const forVariant = placements.filter((pl) => pl.variant === v);
+    if (forVariant.length === 0) continue;
+    const mesh = new THREE.InstancedMesh(variants[v], material, forVariant.length);
+    mesh.name = `island-rocks-${v}`;
+    let straddles = false;
+    for (let i = 0; i < forVariant.length; i++) {
+      const pl = forVariant[i];
+      position.set(...pl.position);
+      quat.setFromAxisAngle(up, pl.yaw);
+      scale.set(pl.scale, pl.scale * pl.squash, pl.scale);
+      mesh.setMatrixAt(i, matrix.compose(position, quat, scale));
+      straddles = straddles || pl.foamTarget;
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    // instance matrices are baked, so the default unit-icosahedron bounds
+    // would cull the whole batch the moment the origin leaves the frustum
+    mesh.computeBoundingSphere();
+    if (straddles) {
       mesh.userData.foamTarget = true; // T13 socket, §V10
       foamTargets.push(mesh);
     }
@@ -140,11 +168,15 @@ export function createRocks(opts: CreateRocksOptions): Rocks {
     group,
     placements,
     foamTargets,
+    setVisible(visible: boolean): void {
+      group.visible = visible;
+    },
     updateFromParams(): void {
       ownMaterial?.updateFromParams();
     },
     dispose(): void {
       for (const g of variants) g.dispose();
+      for (const child of group.children) (child as THREE.InstancedMesh).dispose?.();
       ownMaterial?.dispose();
     },
   };

@@ -8,7 +8,7 @@
  * small, soft, short-lived, thrown off the few crests that are genuinely
  * breaking and off the hull. A uniform field of round white dots across the
  * whole visible ocean is the failure mode; the gates below (sprayBiasOffset,
- * crestHeightMin, spawnChance, fadeNear/Far) are what keep it local.
+ * crestHeightSigma, spawnChance, fadeNear/Far) are what keep it local.
  */
 import { registerParams, type ParamMeta } from './registry';
 
@@ -27,8 +27,20 @@ export interface SprayParams {
    * absolute value drifts off −0.10.
    */
   sprayBiasOffset: number;
-  /** minimum wave height (m, above mean level) for a crest to throw spray */
-  crestHeightMin: number;
+  /**
+   * minimum crest elevation for a candidate to throw spray, as a MULTIPLE OF
+   * σ (the sea's height RMS, published by the ocean as heightRms). §V36: no
+   * absolute metre gates — 1.5σ is the same fraction of the sea (~top 7% of
+   * crests) in calm, swell and storm alike, where a metre constant silently
+   * changes meaning every time the swell is retuned.
+   */
+  crestHeightSigma: number;
+  /**
+   * hard ceiling on the absolute jacobian spawn threshold. J ≈ 1 at rest and
+   * < 0 where the surface folds; the storm preset's foam bias of 0.9 would
+   * otherwise drag the spray trigger up to "compressed by 10%" = everywhere.
+   */
+  sprayThresholdMax: number;
   /** fraction of qualifying candidates that actually spawn — thins the field */
   spawnChance: number;
   /**
@@ -83,6 +95,13 @@ export interface SprayParams {
   bowCruiseSheet: number;
   /** burial rate (m/s of immersion gain) that counts as a full-force impact */
   bowImpactRef: number;
+  /**
+   * immersion (m) at which the cutwater counts as fully in contact. Small on
+   * purpose: any real touch means the stem is working water, so the cruise
+   * mist is continuous WHILE IN CONTACT — but it stops dead when the bow
+   * lifts clear, instead of spraying out of thin air.
+   */
+  bowContactDepth: number;
   /** outboard launch spread as a fraction of ship speed */
   bowLaunchSpread: number;
   /**
@@ -93,8 +112,17 @@ export interface SprayParams {
   bowForwardThrow: number;
   /** upward launch as a fraction of ship speed */
   bowRise: number;
-  /** half-width (m) of the cutwater emission line, outboard of the stem */
+  /**
+   * half-width (m) of the cutwater emission line — FALLBACK only, used until
+   * the hull-contact sampler supplies the real half-breadth at the crossing.
+   */
   bowSideOffset: number;
+  /**
+   * fraction of the hull's half-breadth AT THE CUTWATER that the sheet spans.
+   * Hull-relative on purpose: a fine entry throws a narrow sheet and the full
+   * beam a wide one, with no metre constant to retune per ship (§V18).
+   */
+  bowSideFraction: number;
   /** metres above the bow waterline that sheets are born at (see spawnLift) */
   bowSpawnLift: number;
   /** length (m) of the emission line along the stem, ahead of the bow point */
@@ -119,7 +147,8 @@ export const sprayParams: SprayParams = registerParams(
     // UP from a clean sea than to judge anything through a snow globe.
     count: 2048,
     sprayBiasOffset: -0.65, // = -0.10 absolute against foam bias 0.55
-    crestHeightMin: 1.4,
+    crestHeightSigma: 1.5,
+    sprayThresholdMax: 0.05,
     spawnChance: 0.15,
     spawnLift: 0.18,
     launchSpeed: 2.6,
@@ -141,16 +170,18 @@ export const sprayParams: SprayParams = registerParams(
     bowBurstRate: 600,
     bowCruiseRate: 200,
     bowCruiseSheet: 0.35,
-    bowImpactRef: 1.2,
+    bowImpactRef: 0.6,
+    bowContactDepth: 0.12,
     bowLaunchSpread: 0.85,
     bowForwardThrow: 1.3,
     bowRise: 0.55,
     bowSideOffset: 1.6,
+    bowSideFraction: 0.9,
     bowSpawnLift: 0.35,
     bowStemLength: 3.0,
     bowSizeScale: 2.6,
     bowImmersionThreshold: 0.02,
-    bowImmersionFull: 0.6,
+    bowImmersionFull: 0.45,
     bowSpeedThreshold: 1.0,
     bowSpeedFull: 5.0,
   },
@@ -161,7 +192,8 @@ function sprayParamsMeta(): Partial<Record<keyof SprayParams, ParamMeta>> {
   return {
     count: { min: 256, max: 16384, step: 256 },
     sprayBiasOffset: { min: -2, max: 0.5, step: 0.01 },
-    crestHeightMin: { min: -2, max: 6, step: 0.05 },
+    crestHeightSigma: { min: 0, max: 4, step: 0.05 },
+    sprayThresholdMax: { min: -1, max: 1, step: 0.01 },
     spawnChance: { min: 0, max: 1, step: 0.01 },
     spawnLift: { min: 0, max: 1.5, step: 0.01 },
     launchSpeed: { min: 0, max: 15, step: 0.1 },
@@ -184,10 +216,12 @@ function sprayParamsMeta(): Partial<Record<keyof SprayParams, ParamMeta>> {
     bowCruiseRate: { min: 0, max: 2000, step: 10 },
     bowCruiseSheet: { min: 0, max: 1, step: 0.01 },
     bowImpactRef: { min: 0.05, max: 6, step: 0.05 },
+    bowContactDepth: { min: 0.01, max: 1, step: 0.01 },
     bowLaunchSpread: { min: 0, max: 2, step: 0.01 },
     bowForwardThrow: { min: 0, max: 3, step: 0.05 },
     bowRise: { min: 0, max: 2, step: 0.05 },
     bowSideOffset: { min: 0, max: 4, step: 0.05 },
+    bowSideFraction: { min: 0, max: 2, step: 0.05 },
     bowSpawnLift: { min: 0, max: 2, step: 0.05 },
     bowStemLength: { min: 0, max: 8, step: 0.1 },
     bowSizeScale: { min: 0.2, max: 4, step: 0.1 },

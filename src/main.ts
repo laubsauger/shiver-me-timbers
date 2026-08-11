@@ -14,6 +14,7 @@ import { createClouds } from './clouds';
 import { skyParams } from './params/sky';
 import { buildGalleonBlueprint } from './ship/shipBlueprint';
 import { ShipAssembly } from './ship/shipAssembly';
+import { updateRig } from './ship/rigTrim';
 import { createInputCollector } from './sailing/input';
 import { stepShipSailing } from './sailing/shipKinematics';
 import { createFollowCam } from './camera';
@@ -29,8 +30,15 @@ import {
 } from './audio';
 import { CpuOcean } from './sea-physics/cpuOcean';
 import { stepShipBuoyancy } from './sea-physics/buoyancy';
+import {
+  createHullContact,
+  waterlineFromBlueprint,
+  waterlineFromBox,
+} from './sea-physics/hullContact';
 import { stepFlooding } from './sea-physics/flooding';
 import { floodingHoles } from './ship/destruction';
+import { createArchipelago } from './island';
+import { palmWindStrength } from './vegetation';
 import { createRopes } from './ropes';
 import { createBlocks } from './ropes/blocks';
 import {
@@ -163,6 +171,22 @@ async function boot(): Promise<void> {
   // §V.8: CPU mirror of the same seeded spectrum the GPU renders
   const cpuOcean = new CpuOcean(state.seed);
 
+  // §T.33 islands: 5 islands at 1.2–3.1km, sharing 3 materials. The ocean
+  // clipmap already covers them and its FFT displacement surges up the beach,
+  // so the geometric waterline (and §V10 foam breaking on it) comes free —
+  // shoreRunup only adds what the ocean can't know about sand.
+  const archipelago = createArchipelago({ seed: state.seed });
+  app.scene.add(archipelago.group);
+
+  // hull waterline contact (§T.33 support): coarse stations round the hull
+  // outline, sampled against the SAME sea every tick. Consumers: bow spray
+  // (emit from the real cutwater, silent when the bow is airborne) and the
+  // wake (shoulder displaced water along the actually-wetted side).
+  const hullWaterline =
+    waterlineFromBlueprint(galleonBlueprint) ??
+    waterlineFromBox(bowZ, sternZ, beamHalf);
+  const hullContact = createHullContact(hullWaterline);
+
   const input = createInputCollector(window);
   const followCam = createFollowCam(app.camera, app.renderer.domElement);
   app.controls.enabled = false; // follow cam owns the pointer now
@@ -230,6 +254,9 @@ async function boot(): Promise<void> {
       const snapshot = input.sample(dt);
       stepShipSailing(playerShip, snapshot, state.wind, dt);
       cpuOcean.update(state.time);
+      // must follow cpuOcean.update — hullContact throws if the mirror was
+      // never computed for this time (§B.7 fail-loud)
+      hullContact.update(playerShip, cpuOcean, state.time);
       // §V.14 flooding: holes from damaged zones (inert while undamaged)
       const holes = floodingHoles(galleonBlueprint, playerZoneStates, playerShip.quaternion, 0);
       stepFlooding(playerShip, holes.positions, dt);
@@ -262,7 +289,10 @@ async function boot(): Promise<void> {
       const shipSpeed = Math.hypot(playerShip.velocity[0], playerShip.velocity[2]);
       spray.centerUniform.value.set(playerShip.position[0], playerShip.position[2]);
       windDirTmp.set(Math.cos(state.wind.direction), Math.sin(state.wind.direction));
-      if (FEATURES.spray) spray.update(app.renderer, windDirTmp);
+      // σ feeds the σ-relative crest gate (§V.36) — omitting it makes the
+      // emitter fall back to a bootstrap sigma and warn, because silently
+      // gating on a constant is the exact bug that invariant exists to stop
+      if (FEATURES.spray) spray.update(app.renderer, windDirTmp, ocean.heightRms);
       const bowLocal = rotateVec(playerShip.quaternion, [0, 0, bowZ]);
       bowWorldTmp.set(
         playerShip.position[0] + bowLocal[0],
@@ -285,8 +315,26 @@ async function boot(): Promise<void> {
           shipVelocity: shipVelTmp,
           shipForward: shipFwdTmp,
           immersionDepth: bowImmersion,
+          // real cutwater: `world` is the surface crossing itself (depth 0),
+          // so the emitter must NOT re-add immersion to it. inContact false
+          // (bow airborne over a trough) means rate 0 — no spray from air.
+          cutwater: hullContact.cutwater,
         });
       }
+      // MUST precede flowFoam.renderInjection: it traverses the scene for
+      // userData.foamTarget, so this frame's island foam tags must be current
+      archipelago.update(
+        {
+          time: state.time,
+          windDir: [Math.cos(state.wind.direction), Math.sin(state.wind.direction)],
+          windStrength: palmWindStrength(state.wind.speed),
+          swell: ocean.heightRms * 2, // Hs/2; heightRms is σ
+          sunDirection: sky.sunDirection,
+          cameraPosition: app.camera.position,
+        },
+        (x, z) => cpuOcean.heightAt(x, z, state.time),
+      );
+
       if (FEATURES.flowFoam) {
         flowFoam.setCenter(playerShip.position[0], playerShip.position[2]);
         flowFoam.setFlowDir([-playerShip.velocity[0], -playerShip.velocity[2]]);
@@ -315,6 +363,13 @@ async function boot(): Promise<void> {
       renderShipView.quaternion[3] = shipAssembly.group.quaternion.w;
       renderShipView.velocity = playerShip.velocity;
       followCam.update(renderShipView, frameDt, (x, z) => cpuOcean.heightAt(x, z, state.time));
+
+      // yards brace round to the apparent wind + reef state follows trim.
+      // MUST run before the ropes block: yards rotate → the block's
+      // updateMatrixWorld(true) picks it up → rope anchors resolve braced.
+      // updateRig owns the trim→state predicate and is edge-triggered
+      // internally, so passing the raw scalar every frame is safe.
+      updateRig(shipAssembly, frameDt, playerShip.sailTrim);
 
       // rigging follows the moving ship: rewrite anchors, GPU re-solves (§V.12)
       if (FEATURES.ropes) {

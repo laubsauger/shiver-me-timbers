@@ -89,7 +89,12 @@ export const weatherPresets: Readonly<
       amplitude: 2.2, // heavy seas, > 2× swell energy
       windSpeed: 18, // near-gale (m/s) → long steep spectrum
       choppiness: 1.9, // hard-pinched crests that overlap and fold
-      jacobianFoamBias: 0.9, // 0.35 above swell → big foam patches (§V7)
+      // 0.9 meant "foam wherever the surface is compressed by 10%" (J≈1 at
+      // rest) — very nearly the whole sea on ANY spectrum, which is what made
+      // storm read as blobby noise. Storm's extra foam must come from the sea
+      // genuinely folding more (amplitude + choppiness), not from lowering the
+      // detection bar: sits just above swell's 0.55 (§V7).
+      jacobianFoamBias: 0.62,
     },
     sky: {
       hazeStrength: 1.0, // horizon fully washed out in spray/mist

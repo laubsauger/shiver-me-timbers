@@ -31,6 +31,12 @@ import {
 import { terrainParams } from '../params/terrain';
 import { fbm2, hash2, valueNoise2 } from './noise';
 import {
+  buildShoreNodes,
+  createShoreUniforms,
+  updateShoreUniforms,
+  type ShoreUniforms,
+} from './shoreRunup';
+import {
   buildRockNodes,
   createRockUniforms,
   updateRockUniforms,
@@ -93,7 +99,16 @@ export function updateSandUniforms(u: SandUniforms): void {
  * Sand is sampled on the world XZ plane (beaches are near-horizontal; the
  * blend material hands steep faces to rock, so no tri-planar needed here).
  */
-export function buildSandNodes(u: SandUniforms, octaves: number) {
+export function buildSandNodes(
+  u: SandUniforms,
+  octaves: number,
+  /**
+   * Shore swash (T33). Pass null for a plain beach with only the static wet
+   * band. Like `octaves`, this is a BUILD-TIME branch (terrainParams
+   * .runupEnabled) — flipping it needs a material rebuild, not a uniform push.
+   */
+  shore: ShoreUniforms | null = null,
+) {
   const p = terrainParams;
   const ground = positionWorld.xz;
 
@@ -110,11 +125,25 @@ export function buildSandNodes(u: SandUniforms, octaves: number) {
   const grain = valueNoise2(ground.mul(u.grainScale));
   albedo = albedo.mul(grain.sub(0.5).mul(u.grainStrength).add(1));
 
-  // shore wetness: 1 at/below waterline → 0 at waterline+wetBand
-  const wet = positionWorld.y
+  // Static shore wetness: the permanently-damp band right at the water; the
+  // swash model below adds the part that MOVES.
+  // §V23 chained form — receiver is x: smoothstep(waterline, waterline+band,
+  // positionWorld.y) is 0 at/below the waterline and 1 a band above it, so
+  // oneMinus() gives 1 at the water fading to 0 up the beach.
+  const staticWet = positionWorld.y
     .smoothstep(u.waterline, u.waterline.add(u.wetBand.max(1e-3)))
     .oneMinus();
+
+  // T33 swash: the wave tongue, its foam line, and the drying wet memory
+  const heightAbove = positionWorld.y.sub(u.waterline);
+  const swash = shore ? buildShoreNodes(shore, heightAbove, ground) : null;
+  const wet = swash ? staticWet.max(swash.wet) : staticWet;
   albedo = albedo.mul(wet.mul(u.wetDarken).oneMinus());
+  if (swash && shore) {
+    // thin water film over sand reads turquoise, not blue-black
+    albedo = mix(albedo, shore.sheetColor, swash.sheet.mul(shore.sheetStrength));
+    albedo = mix(albedo, shore.foamColor, swash.foam);
+  }
 
   // sparkle glints: hashed cells, random facet normal, sun/view half-vector
   const cell = ground.mul(u.sparkleDensity).floor();
@@ -127,25 +156,33 @@ export function buildSandNodes(u: SandUniforms, octaves: number) {
   const facet = normalWorld.add(jitter).normalize();
   const viewDir = cameraPosition.sub(positionWorld).normalize();
   const halfDir = viewDir.add(u.sunDirection).normalize();
+  // dry sand glitters; a wet or foamed patch does not — gating on `wet` is
+  // what makes the swash edge read as a material change, not just a tint
   const glint = facet
     .dot(halfDir)
     .clamp(0, 1)
     .pow(u.sparklePower)
     .mul(gate)
-    .mul(u.sparkleStrength);
+    .mul(u.sparkleStrength)
+    .mul(wet.oneMinus());
+
+  // wet sand is glossy, foam is not — foam pulls roughness back up
+  const gloss = swash ? wet.max(swash.sheet).mul(swash.foam.oneMinus()) : wet;
 
   return {
     color: albedo,
-    roughness: mix(u.roughnessDry, u.roughnessWet, wet),
+    roughness: mix(u.roughnessDry, u.roughnessWet, gloss),
     emissive: vec3(glint),
     wet,
+    swash,
   };
 }
 
 /** Stand-alone sand material (flat beach meshes, decks of sand, etc). */
 export function createSandMaterial(opts: SandMaterialOptions = {}) {
   const uniforms = createSandUniforms(opts);
-  const nodes = buildSandNodes(uniforms, terrainParams.noiseOctaves);
+  const shore = terrainParams.runupEnabled ? createShoreUniforms() : null;
+  const nodes = buildSandNodes(uniforms, terrainParams.noiseOctaves, shore);
   const material = new THREE.MeshStandardNodeMaterial();
   material.colorNode = nodes.color;
   material.roughnessNode = nodes.roughness;
@@ -154,11 +191,42 @@ export function createSandMaterial(opts: SandMaterialOptions = {}) {
   return {
     material,
     uniforms,
+    shore,
+    ...shoreControls(uniforms, shore),
     updateFromParams(): void {
       updateSandUniforms(uniforms);
+      if (shore) updateShoreUniforms(shore);
     },
     dispose(): void {
       material.dispose();
+    },
+  };
+}
+
+/**
+ * The three per-frame inputs the swash needs from outside the terrain system.
+ * Shared by both sand-bearing materials so the island wires them once.
+ */
+function shoreControls(sand: SandUniforms, shore: ShoreUniforms | null) {
+  return {
+    /** sim time (s) — drives the swash cycle (§V2: sim time, not wall clock) */
+    setTime(seconds: number): void {
+      if (shore) shore.time.value = seconds;
+    },
+    /**
+     * Live still-water level (m) at this shore. Drive it from the SAME CPU
+     * ocean mirror buoyancy samples (§V8) or the painted bands drift off the
+     * waterline the ocean mesh actually draws.
+     */
+    setWaterline(y: number): void {
+      sand.waterline.value = y;
+    },
+    /**
+     * Swell AMPLITUDE (m) ≈ Hs/2 — deeper runup in heavier weather. Wire it
+     * to `oceanSim.heightRms * 2` (heightRms is σ; Hs = 4σ).
+     */
+    setSwell(meters: number): void {
+      if (shore) shore.swell.value = meters;
     },
   };
 }
@@ -183,8 +251,9 @@ export function terrainBlendMaterial(
     slopeNoiseAmount: uniform(p.slopeNoiseAmount),
   };
 
+  const shore = p.runupEnabled ? createShoreUniforms() : null;
   const rockNodes = buildRockNodes(rock, p.noiseOctaves);
-  const sandNodes = buildSandNodes(sand, p.noiseOctaves);
+  const sandNodes = buildSandNodes(sand, p.noiseOctaves, shore);
 
   const edgeNoise = fbm2(
     positionWorld.xz.mul(rock.scale),
@@ -199,6 +268,10 @@ export function terrainBlendMaterial(
   );
 
   const material = new THREE.MeshStandardNodeMaterial();
+  // §V10 composition note: the swash foam is painted on the SAND only. Where
+  // rock pierces the waterline the foam ring comes from the intersection-foam
+  // machinery (flowfoam depth-compare), which is why this is a plain blend and
+  // not a second foam source competing with it.
   material.colorNode = mix(rockNodes.color, sandNodes.color, sandW);
   material.roughnessNode = mix(rockNodes.roughness, sandNodes.roughness, sandW);
   material.emissiveNode = sandNodes.emissive.mul(sandW);
@@ -211,12 +284,15 @@ export function terrainBlendMaterial(
 
   return {
     material,
-    uniforms: { rock, sand, blend },
+    uniforms: { rock, sand, blend, shore },
+    shore,
     /** set both sub-materials' sun direction (world, pointing at the sun) */
     setSunDirection: sunDirection,
+    ...shoreControls(sand, shore),
     updateFromParams(): void {
       updateRockUniforms(rock);
       updateSandUniforms(sand);
+      if (shore) updateShoreUniforms(shore);
       blend.slopeThreshold.value = terrainParams.slopeThreshold;
       blend.slopeBlendWidth.value = terrainParams.slopeBlendWidth;
       blend.slopeNoiseAmount.value = terrainParams.slopeNoiseAmount;

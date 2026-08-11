@@ -126,12 +126,20 @@ export function buildCannons(host: PieceDef[]): PieceDef[] {
   return cannons;
 }
 
-/** a mast whose shrouds need a chainplate on the hull side abeam of it */
+/** a mast whose shrouds need chainplates on the hull side abeam of it */
 export interface ChannelStation {
-  /** mast name — socket id becomes `anchor-channel-{side}-{name}` */
+  /** mast name — socket ids become `anchor-channel-{side}-{name}[-i]` */
   name: string;
   /** ship-space z of the mast */
   z: number;
+  /**
+   * Y of the DECK THE MAST IS STEPPED ON. Critical: the mizzen is stepped on
+   * the quarterdeck (4.8 m), two metres above the main deck, so a chainplate
+   * placed on the main shell's sheer line put its shrouds THROUGH the
+   * quarterdeck — src/ropes had to drop the mizzen shrouds entirely. A
+   * chainplate belongs on the deck its mast stands on.
+   */
+  baseY: number;
 }
 
 /** 3 sections per side, each a damage-zone carrier (§V.14 targets). */
@@ -158,21 +166,29 @@ export function buildHullSections(
           position: [sign * bh * 0.85, -0.4, 0],
         },
       ];
-      // CHAINPLATES: real shroud landings on the hull side abeam of each
-      // mast, ON the shell just under the cap rail. src/ropes derived these
-      // by interpolating the bow/stern cleats because the ship declared no
-      // such socket; a derived point drifts inboard and lines then run
-      // through the deck. Owned by the section they sit on, so a blown-out
-      // hull section takes its shrouds with it (§V13/§V14).
+      // CHAINPLATES: real shroud landings just outboard of the deck edge
+      // abeam of each mast, raked aft into a FAN (docs/ship-reference-
+      // schema.png — one plate per mast gives one token shroud). src/ropes
+      // used to derive these by interpolating the bow/stern cleats; a derived
+      // point drifts inboard and the lines then run through the deck. Owned
+      // by the section they sit on, so a blown-out hull section takes its
+      // shrouds with it (§V13/§V14).
       for (const station of opts.channels ?? []) {
         if (station.z < seg.zc - segLen / 2 || station.z >= seg.zc + segLen / 2) continue;
         const shape = hints as unknown as HullShape;
-        const y = hullTopY(station.z, shape) - 0.28;
-        sockets.push({
-          id: `anchor-channel-${side}-${station.name}`,
-          type: 'rope-anchor',
-          position: [sign * (hullHalfWidthAt(station.z, y, shape) + 0.06), y, station.z - seg.zc],
-        });
+        // the plate sits a cap-rail's depth below the deck the mast stands
+        // on — never below the shell's own sheer line
+        const y = Math.max(station.baseY, hullTopY(station.z, shape)) - 0.28;
+        const plates = Math.max(1, Math.round(p.channelPlates));
+        for (let i = 0; i < plates; i++) {
+          const z = station.z - i * p.channelPlateSpacing; // fan rakes aft
+          const x = sign * (hullHalfWidthAt(z, y, shape) + 0.06);
+          sockets.push({
+            id: `anchor-channel-${side}-${station.name}-${i + 1}`,
+            type: 'rope-anchor',
+            position: [x, y, z - seg.zc],
+          });
+        }
       }
       if (opts.hullCannons) {
         seg.cannons.forEach((z, i) => {

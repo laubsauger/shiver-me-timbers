@@ -40,6 +40,12 @@ export interface VegetationParams {
   phaseCoupling: number; // how much phaseOffset desyncs the trunk sway
   flutterAmplitude: number; // frond flutter along normal (m)
   flutterFrequency: number; // flutter frequency (rad/s)
+  /**
+   * Wind speed (m/s) at which sway amplitude is exactly `swayAmplitude`.
+   * Palms and sea agree because both read the same sea state: the render side
+   * passes `palmWindStrength(oceanParams.windSpeed)`, not a hand-tuned number.
+   */
+  windReferenceSpeed: number;
 
   // -- scatter distribution --------------------------------------------------
   clusterCount: number;
@@ -91,6 +97,7 @@ export const vegetationParams: VegetationParams = registerParams(
     phaseCoupling: 0.3,
     flutterAmplitude: 0.09,
     flutterFrequency: 4.5,
+    windReferenceSpeed: 11,
     clusterCount: 5,
     ringInner: 22,
     ringOuter: 48,
@@ -135,6 +142,7 @@ export const vegetationParams: VegetationParams = registerParams(
     phaseCoupling: { min: 0, max: 1, step: 0.01 },
     flutterAmplitude: { min: 0, max: 0.5, step: 0.005 },
     flutterFrequency: { min: 0, max: 12, step: 0.1 },
+    windReferenceSpeed: { min: 1, max: 40, step: 0.5 },
     clusterCount: { min: 1, max: 12, step: 1 },
     ringInner: { min: 0, max: 200, step: 1 },
     ringOuter: { min: 0, max: 400, step: 1 },

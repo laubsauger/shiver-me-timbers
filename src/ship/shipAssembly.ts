@@ -18,6 +18,8 @@ interface PieceRuntime {
   node: THREE.Group;
   mesh: THREE.Mesh;
   damage: DamageStateId;
+  /** trim state of a 'sail' piece; 'full' (and unused) on everything else */
+  sail: SailStateId;
 }
 
 export class ShipAssembly {
@@ -26,6 +28,8 @@ export class ShipAssembly {
   private readonly socketOwner = new Map<string, string>();
   private readonly materials = new Map<string, THREE.Material>();
   private readonly materialFactory: MaterialFactory;
+  /** live yard brace angle (rad), applied to every yard node */
+  private rigTrim = 0;
 
   constructor(blueprint: PieceDef[], materialFactory: MaterialFactory = defaultMaterialFactory) {
     this.materialFactory = materialFactory;
@@ -47,7 +51,7 @@ export class ShipAssembly {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       node.add(mesh);
-      this.pieces.set(def.id, { def, node, mesh, damage: 'intact' });
+      this.pieces.set(def.id, { def, node, mesh, damage: 'intact', sail: 'full' });
       for (const socket of def.sockets) {
         if (this.socketOwner.has(socket.id)) throw new Error(`duplicate socket id: ${socket.id}`);
         this.socketOwner.set(socket.id, def.id);
@@ -100,8 +104,54 @@ export class ShipAssembly {
     if (!rt.def.sailStates?.some((s) => s.id === stateId)) {
       throw new Error(`piece ${pieceId} has no sail state ${stateId}`);
     }
+    if (rt.sail === stateId) return; // rebuilds geometry: never do it twice
     rt.mesh.geometry.dispose();
     rt.mesh.geometry = buildSailGeometry(stateId, rt.def.aabb);
+    rt.sail = stateId;
+  }
+
+  /** current trim state of a sail piece */
+  sailState(pieceId: string): SailStateId {
+    return this.piece(pieceId).sail;
+  }
+
+  /**
+   * Continuous cloth-drop scale (0..1) for a sail piece — read per object by
+   * the cloth shader, so easing the sheets shortens the canvas smoothly
+   * instead of popping between the three discrete states. Stored on the mesh
+   * so it stays per-object with one shared material (and survives a
+   * detached mast).
+   */
+  setSailDropScale(pieceId: string, scale: number): void {
+    if (!Number.isFinite(scale)) return; // §V28
+    this.piece(pieceId).mesh.userData.sailDropScale = scale;
+  }
+
+  /** every sail piece id, in blueprint order */
+  sailPieceIds(): string[] {
+    const ids: string[] = [];
+    for (const [id, rt] of this.pieces) if (rt.def.kind === 'sail') ids.push(id);
+    return ids;
+  }
+
+  /**
+   * §V13 piece op: swing every yard (and the sail + rope anchors riding it)
+   * about the mast. Absolute angle in radians; the caller owns the rate
+   * limit. Yards keep their blueprint rotation on the other two axes.
+   */
+  setRigTrim(angle: number): void {
+    if (!Number.isFinite(angle)) return; // §V28: never poison a transform
+    if (angle === this.rigTrim) return;
+    this.rigTrim = angle;
+    for (const rt of this.pieces.values()) {
+      if (rt.def.kind !== 'yard') continue;
+      rt.node.rotation.y = rt.def.transform.rotation[1] + angle;
+    }
+  }
+
+  /** current yard brace angle (rad) */
+  get braceAngle(): number {
+    return this.rigTrim;
   }
 
   socketWorldPosition(socketId: string): Vec3 {

@@ -57,6 +57,7 @@ import {
   advanceTrack,
   approachExp,
   createWakeTrack,
+  trackReachCpu,
   trackBounds,
   trackPoints,
   type TrackPose,
@@ -91,6 +92,13 @@ export function createWakeInjector(p: FlowFoamParams) {
   const uBowIntensity = uniform(p.bowIntensity);
   const uArmWidth = uniform(p.armWidth);
   const uArmWidthGrowth = uniform(p.armWidthGrowth);
+  const uArmWidthMax = uniform(p.armWidthMax);
+  const uAftSpreadCap = uniform(p.aftSpreadCap);
+  const uShoulderIntensity = uniform(p.shoulderIntensity);
+  const uShoulderLength = uniform(p.shoulderLength);
+  const uShoulderPush = uniform(p.shoulderPush);
+  const uShoulderWidth = uniform(p.shoulderWidth);
+  const uShoulderEntry = uniform(p.shoulderEntry);
   const uHullBoost = uniform(p.hullBoost);
   const uHullBoostDist = uniform(p.hullBoostDist);
   const uBowLife = uniform(p.bowLife);
@@ -112,7 +120,7 @@ export function createWakeInjector(p: FlowFoamParams) {
   const uFullWakeSpeed = uniform(p.fullWakeSpeed);
   const uTrackLife = uniform(p.trackLife);
   /** capacity-limited track length (m) — the OTHER eviction edge to fade over */
-  const uTrackCapDist = uniform(p.trackSpacing * TRACK_CAPACITY);
+  const uTrackCapDist = uniform(0);
   const uTailFade = uniform(p.tailFade);
   const uBowClip = uniform(p.bowClip);
   const uMoundIntensity = uniform(p.moundIntensity);
@@ -195,9 +203,12 @@ export function createWakeInjector(p: FlowFoamParams) {
           .mul(fadeTo(uCutWidth, ay))
           .mul(fadeTo(uCutLength, d));
 
-        // 2. Kelvin arms — crest at dist·tanθ, vertex ON the stem
-        const armW = uArmWidth.add(uArmWidthGrowth.mul(d));
-        const arm = fadeTo(armW, ay.sub(d.mul(uKelvinTan)).abs());
+        // 2. Kelvin arms — crest at dist·tanθ (speed-INDEPENDENT, as it must
+        //    be), thickness capped so the V never swells into a wedge-shaped
+        //    blob at the ranges the trail now reaches
+        const kelvin = d.mul(uKelvinTan); // the envelope every aft feature obeys
+        const armW = uArmWidth.add(uArmWidthGrowth.mul(d)).min(uArmWidthMax);
+        const arm = fadeTo(armW, ay.sub(kelvin).abs());
         const boost = float(1).add(uHullBoost.mul(fadeTo(uHullBoostDist, d)));
         const bow = uBowIntensity
           .mul(s)
@@ -206,13 +217,37 @@ export function createWakeInjector(p: FlowFoamParams) {
           .mul(boost)
           .mul(fadeTo(uBowLife, age));
 
+        // 2b. hull shoulder — the water the forebody shoulders ASIDE, pressed
+        //     out past the hull side along the whole immersed forebody and
+        //     peeling into the arms. Mirror: wakeMath (see there for the
+        //     "plowing, not flying" rationale). `halfBeam` is the wetted
+        //     half-beam profile and is where the physics agent's per-station
+        //     immersion table will plug in.
+        const halfBeam = uBeam.mul(0.5).mul(smoothstep(float(0), uShoulderEntry.max(EPS), d));
+        const shoulderOff = halfBeam.add(
+          uShoulderPush.mul(smoothstep(float(0), uShoulderLength.max(EPS), d)),
+        );
+        const shoulderHold = smoothstep(
+          uShoulderLength.mul(0.55),
+          uShoulderLength.max(uShoulderLength.mul(0.55).add(EPS)),
+          d,
+        ).oneMinus();
+        const shoulder = uShoulderIntensity
+          .mul(s)
+          .mul(sf)
+          .mul(fadeTo(uShoulderWidth, ay.sub(shoulderOff).abs()))
+          .mul(shoulderHold);
+
         // aft features start only where the TRANSOM has passed (onset = 0 ahead)
         const ds = d.sub(uHullLength);
         const onset = smoothstep(float(0), uSternOnset.max(EPS), ds);
         const as = age.sub(uHullLength.div(s.max(uSpeedThreshold).max(EPS))).max(0);
 
+        // nothing aft may pan out past the Kelvin wedge (see wakeMath)
+        const aftCap = uBeam.mul(0.5).add(uAftSpreadCap.mul(kelvin));
+
         // 3. stern churn — wide flat centreline band, ∝ speed², spreads with AGE
-        const churnW = uBeam.mul(0.5).mul(uSternWidth).add(uSternSpread.mul(as));
+        const churnW = uBeam.mul(0.5).mul(uSternWidth).add(uSternSpread.mul(as)).min(aftCap);
         const stern = uSternIntensity
           .mul(s)
           .mul(s)
@@ -222,7 +257,7 @@ export function createWakeInjector(p: FlowFoamParams) {
 
         // 4. shed vortex pair — lobes off the transom corners, alternating
         //    port/starboard (§B.4: phased by track DISTANCE, per-position)
-        const vOff = uBeam.mul(0.5).mul(uVortexOffset).add(uVortexSpread.mul(as));
+        const vOff = uBeam.mul(0.5).mul(uVortexOffset).add(uVortexSpread.mul(as)).min(aftCap);
         const side = select(bestLat.lessThan(0), float(Math.PI), float(0));
         const phase = ds.div(uVortexSpacing.max(EPS)).mul(Math.PI * 2).add(side);
         const puff = phase.sin().mul(0.5).add(0.5);
@@ -288,7 +323,16 @@ export function createWakeInjector(p: FlowFoamParams) {
         // the mound skips `breakup` on purpose: the user asked for a CONSTANT
         // reaction at the stem, and gappy noise makes it flicker in and out
         rate.assign(
-          cut.add(bow).add(stern).add(vortex).mul(gate).mul(tail).mul(clip).mul(breakup).add(mound),
+          cut
+            .add(bow)
+            .add(shoulder)
+            .add(stern)
+            .add(vortex)
+            .mul(gate)
+            .mul(tail)
+            .mul(clip)
+            .mul(breakup)
+            .add(mound),
         );
       });
       return rate;
@@ -340,6 +384,8 @@ export function createWakeInjector(p: FlowFoamParams) {
         life: Math.max(p.trackLife, EPS),
         minSpeed: p.speedThreshold,
         maxTurn: (Math.max(p.trackTurn, EPS) * Math.PI) / 180,
+        coarsen: Math.max(p.trackCoarsen, EPS),
+        coarsenStart: Math.max(p.trackCoarsenStart, 0),
       });
       const pts = trackPoints(track, pose);
       const count = Math.min(pts.length, TRACK_SLOTS);
@@ -376,6 +422,13 @@ export function createWakeInjector(p: FlowFoamParams) {
       uBowIntensity.value = p.bowIntensity;
       uArmWidth.value = p.armWidth;
       uArmWidthGrowth.value = p.armWidthGrowth;
+      uArmWidthMax.value = p.armWidthMax;
+      uAftSpreadCap.value = p.aftSpreadCap;
+      uShoulderIntensity.value = p.shoulderIntensity;
+      uShoulderLength.value = p.shoulderLength;
+      uShoulderPush.value = p.shoulderPush;
+      uShoulderWidth.value = p.shoulderWidth;
+      uShoulderEntry.value = p.shoulderEntry;
       uHullBoost.value = p.hullBoost;
       uHullBoostDist.value = p.hullBoostDist;
       uBowLife.value = p.bowLife;
@@ -396,7 +449,15 @@ export function createWakeInjector(p: FlowFoamParams) {
       uSpeedThreshold.value = p.speedThreshold;
       uFullWakeSpeed.value = p.fullWakeSpeed;
       uTrackLife.value = p.trackLife;
-      uTrackCapDist.value = Math.max(p.trackSpacing, EPS) * TRACK_CAPACITY;
+      uTrackCapDist.value = trackReachCpu({
+        capacity: TRACK_CAPACITY,
+        spacing: Math.max(p.trackSpacing, EPS),
+        coarsen: Math.max(p.trackCoarsen, EPS),
+        coarsenStart: Math.max(p.trackCoarsenStart, 0),
+        life: p.trackLife,
+        minSpeed: p.speedThreshold,
+        maxTurn: 1,
+      });
       uTailFade.value = p.tailFade;
       uBowClip.value = p.bowClip;
       uMoundIntensity.value = p.moundIntensity;

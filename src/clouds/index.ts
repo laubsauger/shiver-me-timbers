@@ -26,6 +26,12 @@ export interface CloudsHandle {
   update(time: number, sunDir: THREE.Vector3): void;
   attachTo(scene: THREE.Scene): void;
   setCoverage(v: number): void;
+  /** blurred 4-channel cloud RT — the planar reflection's mirrored cloud
+   *  stand-in samples this same texture (§V26 clouds visible in water) */
+  readonly blurredTexture: THREE.Texture;
+  /** the camera-pinned composite quad — must be layer-excluded from the
+   *  mirror pass, since it is fitted to the MAIN camera */
+  readonly compositeQuad: THREE.Mesh;
   dispose(): void;
 }
 
@@ -107,6 +113,9 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
       // params module is the single source of truth; update() pushes it on
       p.coverage = clampCoverage(v);
     },
+
+    blurredTexture: blur.output,
+    compositeQuad: composite.quad,
 
     dispose(): void {
       attachedScene?.remove(composite.quad);

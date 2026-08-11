@@ -50,7 +50,7 @@
  */
 import { fbm2Cpu } from '../terrain/noiseCpu';
 import { FLOW_OCTAVES } from './flowMath';
-import { TRACK_CAPACITY, type TrackSample } from './wakeTrack';
+import { TRACK_CAPACITY, trackReachCpu, type TrackSample } from './wakeTrack';
 
 /** clamped hermite smoothstep — mirror of the TSL smoothstep used on GPU */
 export function smoothstepCpu(e0: number, e1: number, x: number): number {
@@ -63,10 +63,19 @@ const fadeTo = (e: number, x: number): number => 1 - smoothstepCpu(0, Math.max(e
 
 /** wake tunables subset of FlowFoamParams (pure, structural) */
 export interface WakeParams {
+  shoulderIntensity: number;
+  shoulderLength: number;
+  shoulderPush: number;
+  shoulderWidth: number;
+  shoulderEntry: number;
   kelvinAngle: number;
   bowIntensity: number;
   armWidth: number;
   armWidthGrowth: number;
+  armWidthMax: number;
+  aftSpreadCap: number;
+  trackCoarsen: number;
+  trackCoarsenStart: number;
   hullBoost: number;
   hullBoostDist: number;
   bowLife: number;
@@ -254,10 +263,33 @@ export function wakeTrailCpu(
     p.cutIntensity * s * sf * fadeTo(p.cutWidth, ay) * fadeTo(p.cutLength, d);
 
   // --- 2. Kelvin arms: crest at dist·tanθ, vertex ON the stem ---
-  const armW = p.armWidth + p.armWidthGrowth * d;
-  const arm = fadeTo(armW, Math.abs(ay - d * tanK));
+  // The crest position is d·tanθ and is famously INDEPENDENT of speed — that
+  // part was already right. What read as "panning out too heavily" is the arm
+  // THICKNESS: growing it 0.05 m per metre turns the V into a wedge-shaped
+  // blob a few hundred metres astern, which is exactly the range the wake now
+  // reaches. Capped.
+  const kelvin = d * tanK; // the physical envelope every aft feature lives in
+  const armW = Math.min(p.armWidth + p.armWidthGrowth * d, p.armWidthMax);
+  const arm = fadeTo(armW, Math.abs(ay - kelvin));
   const boost = 1 + p.hullBoost * fadeTo(p.hullBoostDist, d);
   const bow = p.bowIntensity * s * sf * arm * boost * fadeTo(p.bowLife, a);
+
+  // --- 2b. hull shoulder: the mass of water the forebody shoulders ASIDE ---
+  // User: "it doesn't really feel like we're actually pushing away and
+  // displacing water to the side... reads as if the boat is flying through the
+  // water instead of plowing through it." A crescent at the stem alone cannot
+  // sell that — displacement has to be visible along the whole immersed
+  // forebody, pressed OUT past the hull side, and then peel into the arms.
+  // `halfBeamAt` is the wetted half-beam profile: analytic for now, and the
+  // single place the physics agent's per-station immersion table will land.
+  const halfBeam = hull.beam * 0.5 * smoothstepCpu(0, Math.max(p.shoulderEntry, 1e-6), d);
+  const shoulderOff =
+    halfBeam + p.shoulderPush * smoothstepCpu(0, Math.max(p.shoulderLength, 1e-6), d);
+  // plateau over the forebody, then hand over to the arms (which by then have
+  // diverged to roughly the same offset — see the continuity test)
+  const shoulderHold = 1 - smoothstepCpu(p.shoulderLength * 0.55, p.shoulderLength, d);
+  const shoulder =
+    p.shoulderIntensity * s * sf * fadeTo(p.shoulderWidth, Math.abs(ay - shoulderOff)) * shoulderHold;
 
   // --- aft features: only where the TRANSOM has already passed ---
   const ds = d - hull.length;
@@ -267,13 +299,19 @@ export function wakeTrailCpu(
     // age of the water measured from the transom, not the stem
     const as = Math.max(a - hull.length / Math.max(s, p.speedThreshold), 0);
     const onset = smoothstepCpu(0, Math.max(p.sternOnset, 1e-6), ds);
+    // Nothing aft may pan out past the Kelvin wedge. Turbulent spread is a
+    // rate (m/s of water age) while the wedge is a slope (m per m of travel),
+    // so at low speed an uncapped churn overtakes the V and the whole aft
+    // structure fans out wrong. The cap ties both aft features to the same
+    // physical envelope the arms obey.
+    const aftCap = hull.beam * 0.5 + p.aftSpreadCap * kelvin;
 
     // --- 3. stern churn: wide, flat, centreline-peaked, ∝ speed² ---
-    const churnW = hull.beam * 0.5 * p.sternWidth + p.sternSpread * as;
+    const churnW = Math.min(hull.beam * 0.5 * p.sternWidth + p.sternSpread * as, aftCap);
     stern = p.sternIntensity * s * s * fadeTo(churnW, ay) * fadeTo(p.sternLife, as) * onset;
 
     // --- 4. shed vortex pair: two lobes, alternating port/starboard puffs ---
-    const vOff = hull.beam * 0.5 * p.vortexOffset + p.vortexSpread * as;
+    const vOff = Math.min(hull.beam * 0.5 * p.vortexOffset + p.vortexSpread * as, aftCap);
     const side = n.lateral < 0 ? Math.PI : 0; // von Kármán: sides π out of phase
     const phase = (2 * Math.PI * ds) / Math.max(p.vortexSpacing, 1e-6) + side;
     const puff = 0.5 + 0.5 * Math.sin(phase);
@@ -291,7 +329,17 @@ export function wakeTrailCpu(
   // BOTH eviction routes need one — at speed the track is capped by CAPACITY
   // (a length), adrift it is capped by trackLife (a time), and covering only
   // one leaves a hard edge in the other regime.
-  const capDist = p.trackSpacing * TRACK_CAPACITY;
+  // Anchored to the GRADED track's nominal reach — with distance-graded
+  // spacing the capacity no longer implies `spacing × capacity` metres.
+  const capDist = trackReachCpu({
+    capacity: TRACK_CAPACITY,
+    spacing: p.trackSpacing,
+    coarsen: p.trackCoarsen,
+    coarsenStart: p.trackCoarsenStart,
+    life: p.trackLife,
+    minSpeed: p.speedThreshold,
+    maxTurn: 1,
+  });
   const tail =
     (1 - smoothstepCpu(p.trackLife * (1 - p.tailFade), p.trackLife, a)) *
     (1 - smoothstepCpu(capDist * (1 - p.tailFade), capDist, d));
@@ -300,7 +348,7 @@ export function wakeTrailCpu(
   const ahead = (wx - h.x) * h.fx + (wz - h.z) * h.fz;
   const clip = fadeTo(p.bowClip, ahead);
 
-  return (cut + bow + stern + vortex) * gate * tail * clip;
+  return (cut + bow + shoulder + stern + vortex) * gate * tail * clip;
 }
 
 /**
@@ -374,5 +422,6 @@ export function wakeReachCpu(maxDist: number, hull: WakeHull, p: WakeParams): nu
     Math.max(p.sternSpread * p.sternLife, p.vortexSpread * p.vortexLife + p.vortexWidth);
   // the mound reaches forward of the head and outboard of the centreline
   const mound = Math.max(p.moundSpan, p.moundLead + p.moundThick * p.moundFill);
-  return Math.max(arms, aft, mound) + p.cutWidth + p.bowClip;
+  const shoulder = hull.beam * 0.5 + p.shoulderPush + p.shoulderWidth;
+  return Math.max(arms, aft, mound, shoulder) + p.cutWidth + p.bowClip;
 }

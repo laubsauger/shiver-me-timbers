@@ -56,6 +56,10 @@ export interface ShipClassParams {
   rudderThickness: number;
   /** how far the middle of the transom bulges aft (m) — rounded stern */
   transomCrown: number;
+  /** chainplates per mast per side — the shroud fan width (§V12) */
+  channelPlates: number;
+  /** fore-aft spacing between chainplates (m); the fan rakes aft */
+  channelPlateSpacing: number;
   sheerBow: number; // rail rise toward the stem (m)
   sheerStern: number; // rail rise toward the transom (m)
   tumblehome: number; // inward lean of topsides, fraction of half-beam
@@ -87,7 +91,7 @@ export const brigantineParams: ShipClassParams = registerParams(
     bowspritLength: 7, bowspritRadius: 0.18, bowspritPitch: 0.28,
     railHeight: 0.9, railThickness: 0.12, railInset: 0.2, railLengthFactor: 0.85,
     rudderHeight: 2.2, rudderChord: 1.2, rudderThickness: 0.15,
-    transomCrown: 0.35,
+    transomCrown: 0.35, channelPlates: 3, channelPlateSpacing: 0.7,
     sheerBow: 0.8, sheerStern: 0.5, tumblehome: 0.1, keelPinch: 0.12,
     cannonMountHeight: 1.3, cannonInset: 0, cannonSpacing: 4, cannonsPerSide: 4,
   },
@@ -115,11 +119,59 @@ export const galleonParams: ShipClassParams = registerParams(
     bowspritLength: 9, bowspritRadius: 0.22, bowspritPitch: 0.35, // ~20°
     railHeight: 1.0, railThickness: 0.13, railInset: 0.22, railLengthFactor: 0.8,
     rudderHeight: 2.6, rudderChord: 1.4, rudderThickness: 0.18,
-    transomCrown: 0.45,
+    transomCrown: 0.45, channelPlates: 3, channelPlateSpacing: 0.8,
     sheerBow: 1.1, sheerStern: 0.7, tumblehome: 0.12, keelPinch: 0.1,
     cannonMountHeight: 0, cannonInset: 1.0, cannonSpacing: 4, cannonsPerSide: 4,
   },
   shipParamsMeta(),
+);
+
+/**
+ * Rig BEHAVIOUR tunables (§V16) — how the yards brace and how sail trim maps
+ * to the §V13 sail states. Read render-side each frame; no geometry depends
+ * on them, so they are safe to drag live in the panel.
+ */
+export interface ShipRigParams {
+  /** max yard swing from athwartships (rad) — beyond this yards foul shrouds */
+  braceMax: number;
+  /** how fast yards swing toward their brace target (rad/s) */
+  braceRate: number;
+  /** how much of the "bisect the apparent wind" angle the crew actually uses */
+  braceBisect: number;
+  /** blend width of the tack flip, in units of the lateral wind component */
+  braceTackWidth: number;
+  /** sailTrim below this → furled */
+  reefFurledBelow: number;
+  /** sailTrim below this → reefed */
+  reefReefedBelow: number;
+  /** extra trim needed to shake out a reef — kills flicker at the threshold */
+  reefHysteresis: number;
+  /** cloth drop scale at the bottom of the 'full' band (continuous trim) */
+  trimDropMin: number;
+}
+
+export const shipRigParams: ShipRigParams = registerParams(
+  'ship-rig',
+  {
+    braceMax: 0.61, // ~35°
+    braceRate: 0.35,
+    braceBisect: 0.9,
+    braceTackWidth: 0.18,
+    reefFurledBelow: 0.15,
+    reefReefedBelow: 0.55,
+    reefHysteresis: 0.06,
+    trimDropMin: 0.55,
+  },
+  {
+    braceMax: { min: 0, max: 1.2, step: 0.01 },
+    braceRate: { min: 0.02, max: 3, step: 0.01 },
+    braceBisect: { min: 0, max: 1.5, step: 0.01 },
+    braceTackWidth: { min: 0.02, max: 1, step: 0.01 },
+    reefFurledBelow: { min: 0, max: 0.5, step: 0.01 },
+    reefReefedBelow: { min: 0.1, max: 0.95, step: 0.01 },
+    reefHysteresis: { min: 0, max: 0.3, step: 0.01 },
+    trimDropMin: { min: 0.2, max: 1, step: 0.01 },
+  },
 );
 
 /** Wood/sail material tunables (§V16) — live TSL uniforms unless noted. */
@@ -165,6 +217,21 @@ export interface ShipMaterialParams {
   sailLeeDarken: number; // 0..1 tint multiplier on the shaded (lee) face
   sailStainStrength: number; // weathering mottle darkening 0..1
   holeColor: number;
+  // --- surface relief (§V22 "they look like solid covered materials all
+  // over"). One procedural height field drives the shading normal, so all of
+  // these are in METRES of apparent relief; bumpScale is the master dial.
+  bumpScale: number;
+  grainRelief: number; // grain ridges
+  plankRelief: number; // per-board proud/shy offset — reads as planking
+  seamDepth: number; // caulked groove between boards
+  waleRelief: number; // wale strakes stand proud of the planking
+  plankToneVar: number; // per-board colour variation, ± fraction
+  bleachColor: number; // sun-bleached horizontal surfaces
+  bleachStrength: number;
+  wetDarken: number; // below the waterline: darker…
+  wetSmooth: number; // …and smoother (roughness multiplier reduction)
+  wetlineFade: number; // metres over which the boot-top fades in
+  roughBase: number; // dry timber base roughness
 }
 
 export const shipMaterialParams: ShipMaterialParams = registerParams(
@@ -185,6 +252,10 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailPanelCount: 7, sailSeamDarken: 0.82, sailAmbientLift: 0.035,
     sailBacklitFocus: 3, sailLeeDarken: 0.42, sailStainStrength: 0.24,
     holeColor: 0x120c07,
+    bumpScale: 1, grainRelief: 0.004, plankRelief: 0.006, seamDepth: 0.012,
+    waleRelief: 0.02, plankToneVar: 0.05,
+    bleachColor: 0xd8c9a8, bleachStrength: 0.22,
+    wetDarken: 0.38, wetSmooth: 0.55, wetlineFade: 0.5, roughBase: 0.74,
   },
   {
     grainScale: { min: 0.1, max: 8, step: 0.05 },
@@ -215,6 +286,17 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailSeamDarken: { min: 0.4, max: 1, step: 0.01 },
     sailAmbientLift: { min: 0, max: 0.6, step: 0.01 },
     sailStainStrength: { min: 0, max: 0.8, step: 0.01 },
+    bumpScale: { min: 0, max: 6, step: 0.05 },
+    grainRelief: { min: 0, max: 0.03, step: 0.0005 },
+    plankRelief: { min: 0, max: 0.04, step: 0.0005 },
+    seamDepth: { min: 0, max: 0.06, step: 0.001 },
+    waleRelief: { min: 0, max: 0.08, step: 0.002 },
+    plankToneVar: { min: 0, max: 0.3, step: 0.005 },
+    bleachStrength: { min: 0, max: 1, step: 0.01 },
+    wetDarken: { min: 0, max: 0.8, step: 0.01 },
+    wetSmooth: { min: 0, max: 0.9, step: 0.01 },
+    wetlineFade: { min: 0.05, max: 3, step: 0.05 },
+    roughBase: { min: 0.1, max: 1, step: 0.01 },
   },
 );
 
@@ -233,6 +315,8 @@ function shipParamsMeta(): Partial<Record<keyof ShipClassParams, ParamMeta>> {
     yardMastClearance: { min: 0, max: 1, step: 0.01 },
     sailYardOffset: { min: 0, max: 1.5, step: 0.01 },
     transomCrown: { min: 0, max: 1.5, step: 0.01 },
+    channelPlates: { min: 1, max: 5, step: 1 },
+    channelPlateSpacing: { min: 0.3, max: 2, step: 0.05 },
     cannonsPerSide: { min: 0, max: 8, step: 1 },
   };
 }

@@ -47,6 +47,15 @@ export {
   type RockUniforms,
 } from './rockMaterial';
 export {
+  createShoreUniforms,
+  updateShoreUniforms,
+  buildShoreNodes,
+  swashShapeCpu,
+  wetLevelCpu,
+  type ShoreUniforms,
+  type ShoreNodes,
+} from './shoreRunup';
+export {
   createSandMaterial,
   createSandUniforms,
   updateSandUniforms,

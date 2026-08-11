@@ -9,7 +9,7 @@ import type { Material, Mesh } from 'three';
 import { buildBrigantineBlueprint, buildGalleonBlueprint } from '../src/ship/shipBlueprint';
 import { buildHoledVariant, buildPieceGeometry, buildSailGeometry } from '../src/ship/pieceGeometry';
 import { ShipAssembly } from '../src/ship/shipAssembly';
-import { galleonParams, shipMaterialParams } from '../src/params/ship';
+import { galleonParams, shipMaterialParams, shipRigParams } from '../src/params/ship';
 import type { PieceDef } from '../src/ship/pieceTypes';
 import {
   hullEnvelope,
@@ -17,7 +17,14 @@ import {
   hullTopY,
   type HullShape,
 } from '../src/ship/hullMath';
-import { sailDrive } from '../src/ship/sailDynamics';
+import {
+  braceAngle,
+  sailDrive,
+  sailStateForTrim,
+  trimDropScale,
+} from '../src/ship/sailDynamics';
+import { updateRig } from '../src/ship/rigTrim';
+import { oceanParams } from '../src/params/ocean';
 
 const stubFactory = () => ({ dispose(): void {} }) as unknown as Material;
 
@@ -258,6 +265,115 @@ describe('hull silhouette is closed and nothing overhangs it (§V22)', () => {
   });
 });
 
+describe.each(blueprints)('%s hull shell is watertight (§V22)', (_name, build) => {
+  /**
+   * WHY this exists, and why the silhouette test above was NOT enough:
+   * containment proves no piece pokes OUT of the outline. It says nothing
+   * about whether the surfaces meet. Two real holes hid behind a green
+   * containment sweep — the two side shells stopped at the keel line leaving
+   * a 0.125 m slot per side down most of the hull, and the transom sampled
+   * its height in 10 steps against the shell's 8, so its side edge diverged
+   * from the planking by up to 0.35 m. Both read as "you can look through
+   * the back plate into the interior of the ship".
+   *
+   * The assertion: weld every shell piece into one surface and count how
+   * many triangles use each edge. An edge used ONCE is an open boundary.
+   * The only legitimate boundary is the top rim (sheer line, counter top,
+   * beakhead edge) — anything open below that is a hole you can see through.
+   */
+  const pieces = build();
+  const SHELL_KINDS = new Set(['hull-section', 'bow', 'transom']);
+  const shape = pieces.find((p) => p.kind === 'deck')!.shape as unknown as HullShape;
+
+  const weld = (): {
+    pts: number[][];
+    directed: Map<string, number>;
+    undirected: Map<string, number>;
+  } => {
+    const key = new Map<string, number>();
+    const pts: number[][] = [];
+    const id = (x: number, y: number, z: number): number => {
+      const k = `${Math.round(x * 1e3)},${Math.round(y * 1e3)},${Math.round(z * 1e3)}`;
+      let v = key.get(k);
+      if (v === undefined) {
+        v = pts.length;
+        key.set(k, v);
+        pts.push([x, y, z]);
+      }
+      return v;
+    };
+    const directed = new Map<string, number>();
+    const undirected = new Map<string, number>();
+    for (const piece of pieces) {
+      if (!SHELL_KINDS.has(piece.kind)) continue;
+      const geo = buildPieceGeometry(piece.kind, piece.aabb, piece.shape);
+      const pos = geo.attributes.position;
+      const index = geo.getIndex();
+      const count = index ? index.count : pos.count;
+      const vid: number[] = [];
+      for (let i = 0; i < count; i++) {
+        const k = index ? index.getX(i) : i;
+        vid.push(
+          id(
+            pos.getX(k) + piece.transform.position[0],
+            pos.getY(k) + piece.transform.position[1],
+            pos.getZ(k) + piece.transform.position[2],
+          ),
+        );
+      }
+      for (let i = 0; i + 2 < vid.length; i += 3) {
+        const [a, b, c] = [vid[i], vid[i + 1], vid[i + 2]];
+        if (a === b || b === c || a === c) continue; // degenerate
+        for (const [u, v] of [
+          [a, b],
+          [b, c],
+          [c, a],
+        ]) {
+          directed.set(`${u}>${v}`, (directed.get(`${u}>${v}`) ?? 0) + 1);
+          const uk = u < v ? `${u}|${v}` : `${v}|${u}`;
+          undirected.set(uk, (undirected.get(uk) ?? 0) + 1);
+        }
+      }
+      geo.dispose();
+    }
+    return { pts, directed, undirected };
+  };
+
+  const welded = weld();
+
+  it('has no open edge below the sheer — nothing to see through', () => {
+    const holes: string[] = [];
+    for (const [uk, count] of welded.undirected) {
+      if (count !== 1) continue;
+      const [u, v] = uk.split('|').map(Number);
+      const y = Math.max(welded.pts[u][1], welded.pts[v][1]);
+      const z = (welded.pts[u][2] + welded.pts[v][2]) / 2;
+      // the top rim is meant to be open; anything below it is a hole
+      if (y < hullTopY(z, shape) - 0.15) {
+        holes.push(`(${welded.pts[u].map((n) => n.toFixed(2)).join(',')})`);
+      }
+    }
+    expect(holes.slice(0, 8).join(' ')).toBe('');
+    expect(holes).toHaveLength(0);
+  });
+
+  it('is manifold and consistently wound — no face shows its back to the sea', () => {
+    // WHY: a flipped strip renders inside-out, which with a double-sided
+    // material looks exactly like a hole into the hull.
+    let nonManifold = 0;
+    let flipped = 0;
+    for (const [uk, count] of welded.undirected) {
+      const [u, v] = uk.split('|').map(Number);
+      if (count > 2) nonManifold++;
+      // a shared edge must be traversed in OPPOSITE directions by its two
+      // faces; twice the same way means one of them is wound backwards
+      else if (welded.directed.get(`${u}>${v}`) === 2) flipped++;
+    }
+    expect(nonManifold).toBe(0);
+    expect(flipped).toBe(0);
+  });
+});
+
 describe('rig clears the mast, cloth is shader-driven (§V22)', () => {
   const p = galleonParams;
   const pieces = buildGalleonBlueprint();
@@ -365,6 +481,152 @@ describe('sail wind response (§V22 "the sails appear too static")', () => {
   });
 });
 
+describe('yards brace round with the wind (§V22 "static, especially turning")', () => {
+  const p = shipRigParams;
+  const ahead = { forwardX: 0, forwardZ: 1 }; // ship heading world +z
+
+  it('is square on a run and swings round as the ship comes up to the wind', () => {
+    // WHY: frozen athwartships yards are the visible half of the complaint,
+    // and a rig braced hard round while running is just as wrong as one that
+    // never moves. windDirection = blowing TOWARD (src/sailing convention).
+    const running = braceAngle({ ...ahead, windDirection: 0 }, p);
+    const beam = braceAngle({ ...ahead, windDirection: Math.PI / 2 }, p);
+    expect(Math.abs(running)).toBeLessThan(0.02);
+    expect(Math.abs(beam)).toBeGreaterThan(0.3);
+  });
+
+  it('braces the WINDWARD yardarm forward, and flips with the tack', () => {
+    // wind blowing toward +x = coming from port → port arm leads. A positive
+    // rotation about +y sends the starboard arm aft, so port tack = positive.
+    const portTack = braceAngle({ ...ahead, windDirection: Math.PI / 2 }, p);
+    const starboardTack = braceAngle({ ...ahead, windDirection: -Math.PI / 2 }, p);
+    expect(portTack).toBeGreaterThan(0);
+    expect(starboardTack).toBeLessThan(0);
+    expect(portTack).toBeCloseTo(-starboardTack, 6);
+  });
+
+  it('never exceeds the clamp — beyond it a yard fouls its own shrouds', () => {
+    for (let a = 0; a < Math.PI * 2; a += 0.05) {
+      const angle = braceAngle({ ...ahead, windDirection: a }, p);
+      expect(Math.abs(angle), `wind ${a.toFixed(2)}`).toBeLessThanOrEqual(p.braceMax + 1e-9);
+      expect(Number.isFinite(angle)).toBe(true);
+    }
+  });
+
+  it('crosses the eye of the wind without snapping the rig over', () => {
+    // WHY: a hard sign flip at head-to-wind would whip every yard across the
+    // ship in one frame. The tack blend must be continuous through it.
+    let prev = braceAngle({ ...ahead, windDirection: Math.PI - 0.4 }, p);
+    for (let d = -0.4; d <= 0.4; d += 0.02) {
+      const angle = braceAngle({ ...ahead, windDirection: Math.PI + d }, p);
+      expect(Math.abs(angle - prev), `step at ${d.toFixed(2)}`).toBeLessThan(0.2);
+      prev = angle;
+    }
+  });
+
+  it('setRigTrim swings the yards AND the sails and anchors riding them', () => {
+    // WHY: bracing has to be a piece-graph op (§V13) — the sail is a child of
+    // the yard and the brace/sheet anchors are its sockets, so they must
+    // follow for free or the rig comes apart when the yards move.
+    const asm = new ShipAssembly(buildGalleonBlueprint(), stubFactory);
+    const before = asm.socketWorldPosition('anchor-yard-main-lower-starboard');
+    asm.setRigTrim(0.5);
+    const after = asm.socketWorldPosition('anchor-yard-main-lower-starboard');
+    expect(after[2]).toBeLessThan(before[2]); // starboard arm swings aft
+    expect(asm.group.getObjectByName('yard-main-lower')!.rotation.y).toBeCloseTo(0.5, 9);
+    expect(asm.group.getObjectByName('sail-main-lower')).toBeDefined();
+    asm.setRigTrim(NaN); // §V28: a bad angle must never poison a transform
+    expect(asm.braceAngle).toBe(0.5);
+    asm.dispose();
+  });
+});
+
+describe('updateRig — the one call main.ts makes per frame', () => {
+  it('rate-limits the swing and never jumps the rig across in one frame', () => {
+    // WHY: this is the integration surface. An unlimited setRigTrim would
+    // teleport six yards (and their sails and rope anchors) whenever the wind
+    // or heading changed, which reads worse than not bracing at all.
+    const asm = new ShipAssembly(buildGalleonBlueprint(), stubFactory);
+    const saved = oceanParams.windDirection;
+    try {
+      oceanParams.windDirection = Math.PI / 2; // beam wind, hard brace target
+      asm.group.updateMatrixWorld(true);
+      const dt = 1 / 60;
+      let prev = asm.braceAngle;
+      for (let i = 0; i < 400; i++) {
+        updateRig(asm, dt, 1);
+        expect(Math.abs(asm.braceAngle - prev)).toBeLessThanOrEqual(
+          shipRigParams.braceRate * dt + 1e-9,
+        );
+        prev = asm.braceAngle;
+      }
+      expect(asm.braceAngle).toBeCloseTo(shipRigParams.braceMax, 6); // settled
+      updateRig(asm, NaN, 1); // §V28: a bad dt must not move anything
+      expect(asm.braceAngle).toBeCloseTo(shipRigParams.braceMax, 6);
+    } finally {
+      oceanParams.windDirection = saved;
+    }
+    asm.dispose();
+  });
+
+  it('reefs every sail together when the sim trim comes in', () => {
+    const asm = new ShipAssembly(buildGalleonBlueprint(), stubFactory);
+    asm.group.updateMatrixWorld(true);
+    updateRig(asm, 1 / 60, 1);
+    expect(asm.sailState('sail-main-lower')).toBe('full');
+    updateRig(asm, 1 / 60, 0.3);
+    for (const id of asm.sailPieceIds()) expect(asm.sailState(id), id).toBe('reefed');
+    updateRig(asm, 1 / 60, 0);
+    for (const id of asm.sailPieceIds()) expect(asm.sailState(id), id).toBe('furled');
+    asm.dispose();
+  });
+});
+
+describe('sail trim → §V13 sail states (docs/side-sails-fully-reefed.png)', () => {
+  const p = shipRigParams;
+
+  it('maps trim to furled / reefed / full', () => {
+    expect(sailStateForTrim(0, 'full', p)).toBe('furled');
+    expect(sailStateForTrim(0.35, 'full', p)).toBe('reefed');
+    expect(sailStateForTrim(1, 'full', p)).toBe('full');
+  });
+
+  it('holds its state inside the hysteresis band — each flip rebuilds geometry', () => {
+    // WHY: a trim resting exactly on a threshold would dispose and rebuild
+    // six sail geometries every frame.
+    const edge = p.reefReefedBelow;
+    expect(sailStateForTrim(edge + p.reefHysteresis * 0.5, 'reefed', p)).toBe('reefed');
+    expect(sailStateForTrim(edge + p.reefHysteresis * 1.5, 'reefed', p)).toBe('full');
+    expect(sailStateForTrim(edge - 0.01, 'full', p)).toBe('reefed');
+  });
+
+  it('drop scale is continuous across the band so trim does not pop', () => {
+    expect(trimDropScale(1, p)).toBeCloseTo(1, 6);
+    expect(trimDropScale(p.reefReefedBelow, p)).toBeCloseTo(p.trimDropMin, 6);
+    let prev = trimDropScale(0, p);
+    for (let t = 0; t <= 1; t += 0.02) {
+      const v = trimDropScale(t, p);
+      expect(v).toBeGreaterThanOrEqual(prev - 1e-9); // monotonic
+      expect(Math.abs(v - prev)).toBeLessThan(0.05); // no step
+      prev = v;
+    }
+  });
+
+  it('setSailState is edge-triggered — a repeat call keeps the same geometry', () => {
+    const asm = new ShipAssembly(buildGalleonBlueprint(), stubFactory);
+    const mesh = asm.group.getObjectByName('sail-main-lower-mesh') as Mesh;
+    asm.setSailState('sail-main-lower', 'reefed');
+    const reefed = mesh.geometry;
+    asm.setSailState('sail-main-lower', 'reefed');
+    expect(mesh.geometry).toBe(reefed); // no dispose/rebuild churn
+    expect(asm.sailState('sail-main-lower')).toBe('reefed');
+    asm.setSailState('sail-main-lower', 'full');
+    expect(mesh.geometry).not.toBe(reefed);
+    expect(asm.sailPieceIds()).toHaveLength(6);
+    asm.dispose();
+  });
+});
+
 describe('rope anchors are reachable, not buried (§V12 endpoints)', () => {
   it('no rope-anchor socket sits inside solid hull volume', () => {
     // WHY: the bow/stern cleats sat below the sheer inside the planking, so
@@ -390,23 +652,47 @@ describe('rope anchors are reachable, not buried (§V12 endpoints)', () => {
     asm.dispose();
   });
 
-  it('declares a chainplate per mast per side for the shrouds', () => {
+  it('declares a chainplate FAN per mast per side for the shrouds', () => {
     // WHY: src/ropes had to DERIVE shroud feet by interpolating the bow and
     // stern cleats, which lands them inboard of the hull — lines then pass
-    // through the deck. Real sockets on the shell fix that at the source.
-    const ids = buildGalleonBlueprint()
+    // through the deck. Real sockets on the shell fix that at the source, and
+    // one plate per mast can only ever carry one token shroud where
+    // docs/ship-reference-schema.png shows a fan.
+    const p = galleonParams;
+    const sockets = buildGalleonBlueprint()
       .flatMap((x) => x.sockets)
-      .filter((s) => s.type === 'rope-anchor' && s.id.startsWith('anchor-channel-'))
-      .map((s) => s.id)
-      .sort();
-    expect(ids).toEqual([
-      'anchor-channel-port-fore',
-      'anchor-channel-port-main',
-      'anchor-channel-port-rear',
-      'anchor-channel-starboard-fore',
-      'anchor-channel-starboard-main',
-      'anchor-channel-starboard-rear',
-    ]);
+      .filter((s) => s.type === 'rope-anchor' && s.id.startsWith('anchor-channel-'));
+    for (const side of ['port', 'starboard']) {
+      for (const mast of ['fore', 'main', 'rear']) {
+        const fan = sockets.filter((s) =>
+          new RegExp(`^anchor-channel-${side}-${mast}-\\d+$`).test(s.id),
+        );
+        expect(fan, `${side}/${mast}`).toHaveLength(p.channelPlates);
+        // the unnumbered form is GONE: src/ropes iterates the fan and has a
+        // test rejecting it, so one token shroud per mast cannot come back
+        expect(sockets.some((s) => s.id === `anchor-channel-${side}-${mast}`)).toBe(false);
+      }
+    }
+  });
+
+  it('mizzen chainplates sit on the deck the mizzen is STEPPED on', () => {
+    // WHY (§B-class bug): sized from the main shell's sheer line, they sat
+    // 2 m below the quarterdeck the mast stands on, so every mizzen shroud
+    // speared the deck — src/ropes had to drop those shrouds entirely.
+    const p = galleonParams;
+    const blueprint = buildGalleonBlueprint();
+    const asm = new ShipAssembly(blueprint, stubFactory);
+    const quarterdeck = p.freeboard + p.sterncastleRise;
+    for (const side of ['port', 'starboard']) {
+      const [x, y] = asm.socketWorldPosition(`anchor-channel-${side}-rear-1`);
+      expect(y).toBeGreaterThan(quarterdeck - 0.4);
+      expect(y).toBeLessThan(quarterdeck);
+      // and outboard of the quarterdeck edge, where a chainplate belongs
+      const hints = blueprint.find((b) => b.id === `hull-${side}-stern`)!
+        .shape as unknown as HullShape;
+      expect(Math.abs(x)).toBeGreaterThan(hullHalfWidthAt(p.rearMastZ, y, hints));
+    }
+    asm.dispose();
   });
 });
 

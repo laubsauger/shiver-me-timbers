@@ -48,6 +48,8 @@ export interface SailWindUniforms {
   luff: ReturnType<typeof uniform>;
   /** −1..1 sideways belly lag while turning */
   skew: ReturnType<typeof uniform>;
+  /** 0..1 cloth drop scale from sim sail trim (set via setSailDropScale) */
+  dropScale: ReturnType<typeof uniform>;
 }
 
 /** object-group uniforms that track the live wind for whichever sail is drawn */
@@ -58,13 +60,18 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
   const drive = uniform(0.8).setGroup(objectGroup);
   const luff = uniform(0.05).setGroup(objectGroup);
   const skew = uniform(0).setGroup(objectGroup);
+  // 1 = full canvas; ShipAssembly.setSailDropScale writes the sim's trim onto
+  // each sail mesh, so one shared material still serves per-ship trim
+  const dropScale = uniform(1).setGroup(objectGroup);
   const smoothed = new WeakMap<THREE.Object3D, SailDriveState>();
 
   drive.onObjectUpdate((frame: { object: THREE.Object3D | null; time: number }): void => {
     const object = frame.object;
     if (object === null || object === undefined) return;
     const m = object.matrixWorld.elements;
-    // 3rd basis column = the sail's forward (= ship forward: yards are square)
+    // 3rd basis column = the SAIL's own forward. Once the yards brace round
+    // (rigTrim.ts) this is no longer the ship's heading, and that is the
+    // point: the cloth then answers the wind across its own braced face.
     const fx = m[8];
     const fz = m[10];
     const now = frame.time;
@@ -94,7 +101,9 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
     drive.value = s.drive;
     luff.value = s.luff;
     skew.value = s.skew;
+    const trimDrop = object.userData.sailDropScale;
+    dropScale.value = typeof trimDrop === 'number' && Number.isFinite(trimDrop) ? trimDrop : 1;
   });
 
-  return { drive, luff, skew };
+  return { drive, luff, skew, dropScale };
 }

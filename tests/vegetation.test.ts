@@ -108,3 +108,23 @@ describe('vegetation params (§V16)', () => {
     expect(getParamsEntry('vegetation')?.params).toBe(vegetationParams);
   });
 });
+
+import { sortForLod } from '../src/vegetation/scatter';
+
+describe('LOD instance order (§V17)', () => {
+  it('sorts largest-first so a lowered instance count drops the small palms', () => {
+    // InstancedMesh.count truncates from the END, so the distance LOD keeps
+    // whatever the scatter wrote first — that has to be the readable palms,
+    // not a random subset
+    const placements = generatePlacements(24, 99);
+    const sorted = sortForLod(placements);
+    expect(sorted).toHaveLength(placements.length);
+    for (let i = 1; i < sorted.length; i++) {
+      const a = sorted[i - 1].scale * sorted[i - 1].heightScale;
+      const b = sorted[i].scale * sorted[i].heightScale;
+      expect(a).toBeGreaterThanOrEqual(b);
+    }
+    // deterministic: sorting a deterministic list stays deterministic (§V2)
+    expect(sortForLod(generatePlacements(24, 99))).toEqual(sorted);
+  });
+});

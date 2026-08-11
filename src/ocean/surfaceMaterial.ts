@@ -57,6 +57,10 @@ export interface OceanSurfaceMaterial {
   cameraFarUniform: { value: number };
   /** haze target colour — copied from the scene fog so water and objects melt alike */
   hazeColorUniform: { value: THREE.Color };
+  /** RMS surface elevation (m) — sea-state scale for every crest threshold */
+  seaRmsUniform: { value: number };
+  /** fold-capped choppiness λ — must match what the displacement was built with */
+  choppinessUniform: { value: number };
   /** push live param values into uniforms (call per frame) */
   updateFromParams(): void;
 }
@@ -97,7 +101,6 @@ export function buildOceanSurfaceMaterial(
 
   const uDeep = uniform(color(sp.deepColor));
   const uShallow = uniform(color(sp.shallowColor));
-  const uVariation = uniform(color(sp.variationColor));
   const uVariationScale = uniform(sp.variationScale);
   const uVariationStrength = uniform(sp.variationStrength);
   const uSss = uniform(color(sp.sssColor));
@@ -109,6 +112,14 @@ export function buildOceanSurfaceMaterial(
   const uSssAmbient = uniform(sp.sssAmbient);
   const uShallowMix = uniform(sp.shallowTintStrength);
   const uSssChoppy = uniform(sp.sssChoppyScale);
+  const uSssAmbientSunGate = uniform(sp.sssAmbientSunGate);
+  const uCrestBand = uniform(new THREE.Vector2(sp.crestBandLow, sp.crestBandHigh));
+  const uBodyBand = uniform(new THREE.Vector2(sp.bodyBandLow, sp.bodyBandHigh));
+  // sea-state scale (RMS surface elevation, m) — every "is this a crest"
+  // threshold is a MULTIPLE of this, never absolute metres (§B cow-pattern)
+  const uSeaRms = uniform(0.7);
+  // effective (fold-capped) Tessendorf λ — see OceanSimulation.effectiveChoppiness
+  const uChoppiness = uniform(oceanParams.choppiness);
   const uReflStrength = uniform(sp.reflectionStrength);
   const uGrazingSat = uniform(sp.grazingSaturation);
   const uLightFloor = uniform(sp.lightFloor);
@@ -199,7 +210,11 @@ export function buildOceanSurfaceMaterial(
     .add(sampleDeriv(1).mul(normLod[1]))
     .add(sampleDeriv(2).mul(normLod[2]))
     .mul(normFade);
-  const lambda = float(oceanParams.choppiness);
+  // the SAME λ the vertex displacement was built with (anti-fold cap applied),
+  // pushed per frame — a baked oceanParams.choppiness read here meant the
+  // normals solved a different surface than the geometry drew whenever the
+  // cap engaged or the slider moved
+  const lambda = uChoppiness;
   const denomX = float(1).add(der.z.mul(lambda)).max(0.05);
   const denomZ = float(1).add(der.w.mul(lambda)).max(0.05);
   const slopeX = der.x.div(denomX);
@@ -235,17 +250,35 @@ export function buildOceanSurfaceMaterial(
     // A height-keyed hue shift painted wandering turquoise patches on open
     // ocean (user critique); turquoise now arrives via SSS (sun-angled) or
     // the shallows hook below.
-    const heightMask = smoothstep(-1.2, 1.6, totalDisp.y);
+    // both bands are in units of σ (RMS elevation), so they keep meaning the
+    // same thing when wind/amplitude change — an absolute metre gate silently
+    // went from "top 9% of the sea" to "36% of the sea" after the swell
+    // retune, which is what painted the turquoise cow pattern (§B)
+    const sigma = uSeaRms.max(0.05);
+    const heightMask = smoothstep(
+      sigma.mul(uBodyBand.x),
+      sigma.mul(uBodyBand.y),
+      totalDisp.y,
+    );
     const waterCol = uDeep.mul(mix(float(0.85), float(1.18), heightMask)).toVar();
 
-    // §V20 repetition break: two octaves of low-frequency value noise drift
-    // the body tone over hundreds of metres, so the eye stops reading one
-    // flat pigment tiling with the cascades (user: "colouring is repetitive").
+    // §V20 repetition break — VALUE ONLY, never hue (user rule, §B).
+    // v1 lerped the body toward a second, greener tone at 900 m scale and the
+    // open sea read as bright turquoise blotches on deep teal — "a cow
+    // pattern". Real open ocean does not change HUE in patches; its variation
+    // comes from slope, foam, sky reflection and glint. Bright turquoise is
+    // allowed only where it is physically motivated: sun through a crest
+    // (the SSS path below, §V5) or genuine shallows (shallowTintStrength).
+    // So this is a symmetric ±strength brightness ripple on the SAME pigment,
+    // sized to stop a flat sheet reading dead — if you can see it as a shape
+    // with a boundary, it is too strong.
     const nUv = worldXZ.div(uVariationScale.max(1));
     const bodyNoise = valueNoise(nUv)
       .mul(0.65)
-      .add(valueNoise(nUv.mul(2.37).add(vec2(17.3, 5.1))).mul(0.35));
-    waterCol.assign(mix(waterCol, uVariation, bodyNoise.mul(uVariationStrength)));
+      .add(valueNoise(nUv.mul(2.37).add(vec2(17.3, 5.1))).mul(0.35))
+      .mul(2)
+      .sub(1); // −1..1, so it darkens as often as it lightens
+    waterCol.assign(waterCol.mul(float(1).add(bodyNoise.mul(uVariationStrength))));
 
     // shallows hook: seabed-depth tint for coasts (T20/T27 islands) — uniform
     // stays 0 on open ocean until a depth input exists
@@ -288,12 +321,24 @@ export function buildOceanSurfaceMaterial(
     // boost where the camera looks toward the sun through the crest.
     const choppyMask = totalDisp.xz.length().mul(uSssChoppy).clamp(0, 1);
     const backlight = viewDir.negate().dot(sunDirectionUniform).max(0);
-    // ambient crest glow gated by a TIGHT crest band — a broad gate tinted
-    // the whole surface electric cyan (over-glow bug)
-    const crestMask = smoothstep(0.25, 0.95, totalDisp.y);
+    // Ambient crest glow: a TIGHT band in σ units (top few % of crests), and
+    // gated on real sun backlighting. The user's rule for open ocean is that
+    // bright turquoise is only allowed where sun actually comes THROUGH the
+    // water toward the eye (this term) or in genuine shallows
+    // (shallowTintStrength) — never as a saturated second hue in big patches.
+    // The old version added a sun-INDEPENDENT slug over any water above
+    // 0.25 m, i.e. 36% of the sea, at 4× the body colour's green: the blobs.
+    const crestMask = smoothstep(
+      sigma.mul(uCrestBand.x),
+      sigma.mul(uCrestBand.y),
+      totalDisp.y,
+    );
+    // mix(floor,1,backlight): keeps a whisper of translucency on crests facing
+    // away from the sun, but the glow only really lights up looking into it
+    const ambientSunGate = mix(float(1).sub(uSssAmbientSunGate), float(1), backlight);
     const sss = pow(backlight, uSssPower)
       .mul(heightMask)
-      .add(uSssAmbient.mul(crestMask))
+      .add(uSssAmbient.mul(crestMask).mul(ambientSunGate))
       .mul(choppyMask)
       .mul(uSssStrength)
       .mul(shade);
@@ -432,10 +477,10 @@ export function buildOceanSurfaceMaterial(
   // depthWrite ON (§V28 fill-rate safety). Those viewport copies happen once
   // per FRAME, before the first object that reads them, so the water's own
   // depth never lands in the captured texture — the reason it used to be off.
-  // With displacement now reaching kilometres, a depth-write-less ocean piles
-  // hundreds of blended wave layers into the horizon band and wedges the GPU
-  // process (same failure class as §B.5). Writing depth + drawing rings
-  // front-to-back (surfaceGeometry) collapses that to ~1 layer.
+  // With displacement now reaching kilometres, a depth-write-less ocean would
+  // blend every wave layer along the view ray in the horizon band; writing
+  // depth lets early-Z drop the hidden ones. Measured 100 fps / 9.8 ms with
+  // this on at 512² and a 4.6 km rim.
   material.depthWrite = true;
   // §V25: visible from below (see the Snell's-window branch above)
   material.side = THREE.DoubleSide;
@@ -446,7 +491,6 @@ export function buildOceanSurfaceMaterial(
   const updateFromParams = () => {
     (uDeep.value as THREE.Color).set(sp.deepColor);
     (uShallow.value as THREE.Color).set(sp.shallowColor);
-    (uVariation.value as THREE.Color).set(sp.variationColor);
     uVariationScale.value = sp.variationScale;
     uVariationStrength.value = sp.variationStrength;
     (uSss.value as THREE.Color).set(sp.sssColor);
@@ -458,6 +502,9 @@ export function buildOceanSurfaceMaterial(
     uSssAmbient.value = sp.sssAmbient;
     uShallowMix.value = sp.shallowTintStrength;
     uSssChoppy.value = sp.sssChoppyScale;
+    uSssAmbientSunGate.value = sp.sssAmbientSunGate;
+    (uCrestBand.value as THREE.Vector2).set(sp.crestBandLow, sp.crestBandHigh);
+    (uBodyBand.value as THREE.Vector2).set(sp.bodyBandLow, sp.bodyBandHigh);
     uLightFloor.value = sp.lightFloor;
     uLightGain.value = sp.lightGain;
     (uSunTint.value as THREE.Color).set(sp.sunTint);
@@ -499,6 +546,8 @@ export function buildOceanSurfaceMaterial(
     timeUniform: timeUniform as unknown as { value: number },
     cameraFarUniform: uCameraFar as unknown as { value: number },
     hazeColorUniform: uHazeColor as unknown as { value: THREE.Color },
+    seaRmsUniform: uSeaRms as unknown as { value: number },
+    choppinessUniform: uChoppiness as unknown as { value: number },
     updateFromParams,
   };
 }

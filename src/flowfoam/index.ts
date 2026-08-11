@@ -54,7 +54,19 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
   const wake = createWakeInjector(p);
   const acc = createAccumulation(p, flowU, wake.wakeRateNode);
   acc.uniforms.uWaterHeight.value = opts.waterHeight ?? 0;
+  // Coarse FAR tier: the same analytic wake, accumulated over a region several
+  // hundred metres across so the trail does not simply stop at the near
+  // region's border (user: "disappearing too immediately... not fading out over
+  // a long enough distance"). No hull capture, no flow noise — see AccumProfile.
+  const far = createAccumulation(p, flowU, wake.wakeRateNode, {
+    res: p.farResolution,
+    size: () => p.farRegionSize,
+    decayHalfLife: () => p.farDecayHalfLife,
+    useFlow: false,
+    useCapture: false,
+  });
   const uEdgeFade = uniform(p.edgeFade);
+  const uFarStrength = uniform(p.farStrength);
   let time = 0;
 
   return {
@@ -69,7 +81,15 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
     /** screen-space depth-compare mask factory for the water material (§V10) */
     maskNodeFactory: intersectionMaskNode,
 
-    setCenter: acc.setCenter,
+    /** coarse long-range wake texture (R = foam mask), stable identity */
+    get farFoamTexture(): THREE.StorageTexture {
+      return far.foamTexture;
+    },
+
+    setCenter(x: number, z: number): void {
+      acc.setCenter(x, z);
+      far.setCenter(x, z);
+    },
     renderInjection: acc.renderInjection,
 
     /** base flow direction (world XZ) — normalized; [0,0] disables base drift */
@@ -112,10 +132,12 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       flowU.uBaseSpeed.value = p.baseFlowSpeed;
       flowU.uCurlStep.value = p.curlStep;
       uEdgeFade.value = p.edgeFade;
+      uFarStrength.value = p.farStrength;
       // age + extend the world-space cutwater track BEFORE the computes read it
       wake.advance(dt);
       wake.pushParams();
       acc.step(renderer, dt);
+      far.step(renderer, dt);
     },
 
     /**
@@ -126,19 +148,28 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
      * same idiom as surfaceMaterial's distance fades.
      */
     foamSampleNode(worldXZ: any): any {
-      const c = acc.uniforms.uCenter;
-      const s = acc.uniforms.uSize;
-      const u = worldXZ.x.sub(c.x).div(s).add(0.5);
-      const v = float(0.5).sub(worldXZ.y.sub(c.y).div(s)); // v flip (flowMath.ts)
-      const inner = float(0.5).mul(uEdgeFade.oneMinus());
-      const edge = smoothstep(float(0.5), inner, u.sub(0.5).abs()).mul(
-        smoothstep(float(0.5), inner, v.sub(0.5).abs()),
+      const sampleRegion = (a: typeof acc, tex: THREE.StorageTexture) => {
+        const c = a.uniforms.uCenter;
+        const s = a.uniforms.uSize;
+        const u = worldXZ.x.sub(c.x).div(s).add(0.5);
+        const v = float(0.5).sub(worldXZ.y.sub(c.y).div(s)); // v flip (flowMath.ts)
+        const inner = float(0.5).mul(uEdgeFade.oneMinus());
+        const edge = smoothstep(float(0.5), inner, u.sub(0.5).abs()).mul(
+          smoothstep(float(0.5), inner, v.sub(0.5).abs()),
+        );
+        return texture(tex, vec2(u, v)).r.mul(edge);
+      };
+      // MAX, not add: the two tiers hold the same wake at different scales, so
+      // summing would double it wherever they overlap. Max lets the near tier's
+      // detail win where it exists and the far tier carry on past its border.
+      return sampleRegion(acc, acc.foamTexture).max(
+        sampleRegion(far, far.foamTexture).mul(uFarStrength),
       );
-      return texture(acc.foamTexture, vec2(u, v)).r.mul(edge);
     },
 
     dispose(): void {
       acc.dispose();
+      far.dispose();
     },
   };
 }

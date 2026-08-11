@@ -16,6 +16,14 @@ export interface FlowFoamParams {
   regionSize: number;
   /** foam RT resolution (texels per side, power of two — startup constant) */
   resolution: number;
+  /** coarse far-tier region side length (m) — how far astern the trail survives */
+  farRegionSize: number;
+  /** far-tier resolution (texels per side, startup constant) */
+  farResolution: number;
+  /** far-tier decay half-life (s) — the long settle, minutes not seconds */
+  farDecayHalfLife: number;
+  /** far-tier foam weight (0 disables the long trail entirely) */
+  farStrength: number;
   /** injection ortho camera height above water (m); capture range = ±height */
   captureHeight: number;
   /** |scene depth − water depth| (m) below which a pixel counts as intersecting */
@@ -51,6 +59,11 @@ export interface FlowFoamParams {
   trackSpacing: number;
   /** heading change (deg) that also lays a sample — keeps hard turns curved, not faceted */
   trackTurn: number;
+  /** distance (m) over which required sample spacing grows — dense at the hull,
+   * sparse astern, so 48 samples reach hundreds of metres at zero GPU cost */
+  trackCoarsen: number;
+  /** track distance (m) inside which history is never thinned — the detail zone */
+  trackCoarsenStart: number;
   /** seconds a track sample survives; with trackSpacing this sets trail length */
   trackLife: number;
   /** fraction of trackLife over which the oldest wake fades out (no eviction pop) */
@@ -83,6 +96,22 @@ export interface FlowFoamParams {
   armWidth: number;
   /** extra arm half-width per metre of track distance — the V thickens as it trails */
   armWidthGrowth: number;
+  /** hard cap (m) on arm half-width — stops the V swelling into a blob far astern */
+  armWidthMax: number;
+  /** aft features may not spread past this fraction of the Kelvin half-width */
+  aftSpreadCap: number;
+
+  // --- hull shoulder: water the forebody shoulders aside ("plowing") ---
+  /** shoulder foam per second per m/s — the displaced water along the hull sides */
+  shoulderIntensity: number;
+  /** forebody length (m of track) over which the shoulder runs before the arms take over */
+  shoulderLength: number;
+  /** metres the shoulder is pressed OUT beyond the hull side by the end of the forebody */
+  shoulderPush: number;
+  /** shoulder half-width (m) */
+  shoulderWidth: number;
+  /** track distance (m) over which the wetted half-beam opens from the stem */
+  shoulderEntry: number;
   /** extra arm intensity multiplier at the hull (0 = flat) — "heaving water out" read */
   hullBoost: number;
   /** track distance (m) over which hullBoost fades to 0 */
@@ -139,11 +168,15 @@ export const flowFoamParams: FlowFoamParams = registerParams(
   {
     regionSize: 120,
     resolution: 512,
+    farRegionSize: 640,
+    farResolution: 256,
+    farDecayHalfLife: 55,
+    farStrength: 0.85,
     captureHeight: 50,
     depthThreshold: 0.35,
     maskFeather: 0.5,
     injectStrength: 0.6,
-    decayHalfLife: 2.8,
+    decayHalfLife: 14,
     advectSpeed: 1.0,
     blurRadius: 1.0,
     blurMix: 0.35,
@@ -156,7 +189,9 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     curlStep: 1.2,
     trackSpacing: 2.2,
     trackTurn: 6,
-    trackLife: 30,
+    trackCoarsen: 20,
+    trackCoarsenStart: 30,
+    trackLife: 200,
     tailFade: 0.35,
     bowClip: 0.8,
     moundIntensity: 0.5,
@@ -169,24 +204,31 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     kelvinAngle: 19.47,
     bowIntensity: 0.3,
     armWidth: 0.9,
-    armWidthGrowth: 0.05,
+    armWidthGrowth: 0.02,
+    armWidthMax: 4.0,
+    aftSpreadCap: 0.8,
+    shoulderIntensity: 1.2,
+    shoulderLength: 14,
+    shoulderPush: 2.0,
+    shoulderWidth: 1.3,
+    shoulderEntry: 8,
     hullBoost: 1.6,
     hullBoostDist: 14,
-    bowLife: 9,
+    bowLife: 45,
     cutIntensity: 1.0,
     cutWidth: 1.1,
     cutLength: 7,
     sternIntensity: 0.05,
     sternWidth: 0.9,
     sternSpread: 0.55,
-    sternLife: 8,
+    sternLife: 40,
     sternOnset: 3,
     vortexIntensity: 0.05,
     vortexOffset: 1.15,
     vortexSpread: 0.28,
     vortexWidth: 1.3,
     vortexSpacing: 11,
-    vortexLife: 10,
+    vortexLife: 45,
     speedThreshold: 0.5,
     fullWakeSpeed: 5.0,
     wakeNoiseScale: 0.3,
@@ -199,11 +241,14 @@ export const flowFoamParams: FlowFoamParams = registerParams(
 function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> {
   return {
     regionSize: { min: 30, max: 500, step: 5 },
+    farRegionSize: { min: 120, max: 2000, step: 20 },
+    farDecayHalfLife: { min: 1, max: 300, step: 1 },
+    farStrength: { min: 0, max: 1, step: 0.05 },
     captureHeight: { min: 5, max: 200, step: 1 },
     depthThreshold: { min: 0.05, max: 3, step: 0.05 },
     maskFeather: { min: 0.05, max: 1, step: 0.05 },
     injectStrength: { min: 0, max: 20, step: 0.1 },
-    decayHalfLife: { min: 0.05, max: 15, step: 0.05 },
+    decayHalfLife: { min: 0.05, max: 120, step: 0.05 },
     advectSpeed: { min: 0, max: 4, step: 0.05 },
     blurRadius: { min: 0, max: 4, step: 0.25 },
     blurMix: { min: 0, max: 1, step: 0.05 },
@@ -216,7 +261,9 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     curlStep: { min: 0.1, max: 8, step: 0.1 },
     trackSpacing: { min: 0.5, max: 10, step: 0.1 },
     trackTurn: { min: 1, max: 45, step: 0.5 },
-    trackLife: { min: 1, max: 60, step: 0.5 },
+    trackCoarsen: { min: 5, max: 400, step: 5 },
+    trackCoarsenStart: { min: 5, max: 200, step: 1 },
+    trackLife: { min: 1, max: 600, step: 1 },
     tailFade: { min: 0.05, max: 0.9, step: 0.05 },
     bowClip: { min: 0.1, max: 8, step: 0.1 },
     moundIntensity: { min: 0, max: 5, step: 0.05 },
@@ -230,23 +277,30 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     bowIntensity: { min: 0, max: 5, step: 0.05 },
     armWidth: { min: 0.1, max: 10, step: 0.1 },
     armWidthGrowth: { min: 0, max: 0.5, step: 0.005 },
+    armWidthMax: { min: 0.5, max: 30, step: 0.5 },
+    aftSpreadCap: { min: 0.1, max: 2, step: 0.05 },
+    shoulderIntensity: { min: 0, max: 6, step: 0.05 },
+    shoulderLength: { min: 2, max: 60, step: 0.5 },
+    shoulderPush: { min: 0, max: 12, step: 0.1 },
+    shoulderWidth: { min: 0.2, max: 8, step: 0.1 },
+    shoulderEntry: { min: 0.5, max: 40, step: 0.5 },
     hullBoost: { min: 0, max: 8, step: 0.1 },
     hullBoostDist: { min: 1, max: 60, step: 1 },
-    bowLife: { min: 0.5, max: 30, step: 0.5 },
+    bowLife: { min: 0.5, max: 200, step: 0.5 },
     cutIntensity: { min: 0, max: 8, step: 0.05 },
     cutWidth: { min: 0.1, max: 8, step: 0.1 },
     cutLength: { min: 0.5, max: 40, step: 0.5 },
     sternIntensity: { min: 0, max: 2, step: 0.005 },
     sternWidth: { min: 0.2, max: 4, step: 0.05 },
     sternSpread: { min: 0, max: 4, step: 0.05 },
-    sternLife: { min: 0.5, max: 20, step: 0.5 },
+    sternLife: { min: 0.5, max: 200, step: 0.5 },
     sternOnset: { min: 0.5, max: 20, step: 0.5 },
     vortexIntensity: { min: 0, max: 2, step: 0.005 },
     vortexOffset: { min: 0.2, max: 4, step: 0.05 },
     vortexSpread: { min: 0, max: 3, step: 0.02 },
     vortexWidth: { min: 0.2, max: 6, step: 0.1 },
     vortexSpacing: { min: 2, max: 60, step: 0.5 },
-    vortexLife: { min: 0.5, max: 25, step: 0.5 },
+    vortexLife: { min: 0.5, max: 200, step: 0.5 },
     speedThreshold: { min: 0, max: 5, step: 0.05 },
     fullWakeSpeed: { min: 1, max: 15, step: 0.25 },
     wakeNoiseScale: { min: 0.02, max: 2, step: 0.01 },

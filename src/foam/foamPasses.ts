@@ -39,6 +39,10 @@ export function createFoamUniforms() {
     uAlong: uniform(1),
     /** tap stretch ACROSS the ridge — < along keeps caps ridge-shaped */
     uAcross: uniform(1),
+    /** across-crest (wave propagation) direction, world XZ — uniform over
+     *  the field so the kernel stays shift-invariant and conserves foam */
+    uAcrossX: uniform(1),
+    uAcrossZ: uniform(0),
   };
 }
 
@@ -73,12 +77,11 @@ export function createInjectPass(
 
 /**
  * Decay+blur pass: dst = min(1, blur3x3(src) · decay), taps rotated into the
- * local CREST frame and stretched along the ridge (§V6 shape, user critique
+ * CREST frame and stretched along the ridge (§V6 shape, user critique
  * "caps too circular"). Gaussian weights sum to 1 (foamMath.GAUSSIAN_3X3) so
  * only uDecay removes foam. CPU mirror: foamMath.blurDecayAnisoAt.
  */
 export function createBlurDecayPass(
-  displacement: THREE.StorageTexture,
   src: THREE.StorageTexture,
   dst: THREE.StorageTexture,
   n: number,
@@ -89,19 +92,17 @@ export function createBlurDecayPass(
     const x = int(instanceIndex.mod(n)).toVar();
     const y = int(instanceIndex.div(n)).toVar();
 
-    // crest frame from the height gradient (displacement.y): the ridge runs
-    // perpendicular to ∇h — central differences, wrapped like the taps
-    const hL = textureLoad(displacement, ivec2(wrap(x.sub(1)), y)).y;
-    const hR = textureLoad(displacement, ivec2(wrap(x.add(1)), y)).y;
-    const hD = textureLoad(displacement, ivec2(x, wrap(y.sub(1)))).y;
-    const hU = textureLoad(displacement, ivec2(x, wrap(y.add(1)))).y;
-    const grad = vec2(hR.sub(hL), hU.sub(hD)).toVar();
-    const len = grad.length().toVar();
-    // flat water → axis frame (identical to the isotropic blur for a
-    // symmetric kernel); the divisor is floored regardless (§V28)
+    // crest frame from the UNIFORM propagation direction — never per-texel
+    // from ∇h, which vanishes and flips sign exactly on the crest line and
+    // makes this gather-form blur shed foam every frame (foamMath
+    // .crestTapOffset). Constant frame = shift-invariant = mass-conserving.
+    const across = vec2(u.uAcrossX, u.uAcrossZ).toVar();
+    const len = across.length().toVar();
+    // degenerate direction → axis frame (identical to the isotropic blur for
+    // a symmetric kernel); the divisor is floored regardless (§V28)
     const nrm = select(
       len.greaterThan(CREST_GRAD_EPS),
-      grad.div(len.max(CREST_GRAD_EPS)),
+      across.div(len.max(CREST_GRAD_EPS)),
       vec2(0, 1),
     ).toVar();
     const tan = vec2(nrm.y.negate(), nrm.x).toVar();

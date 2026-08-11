@@ -18,8 +18,61 @@ import {
 export { asHullShape, hullEnvelope, hullHalfWidthAt, hullSheer, hullTopY } from './hullMath';
 export type { HullShape } from './hullMath';
 
-const Z_SLICES = 12;
-const H_STEPS = 8;
+/**
+ * SHARED SAMPLING — every surface that mates with the shell must land on the
+ * SAME stations, or the seam opens. The transom used to sample its height in
+ * 10 steps against the shell's 8 and the two polylines diverged by up to
+ * 0.35 m: an open crack up both stern quarters that a silhouette-containment
+ * check cannot see. Exported so pieceGeometryStern.ts cannot drift again.
+ */
+export const Z_SLICES = 12;
+export const H_STEPS = 8;
+/** half-width samples across the hull bottom (transom bottom row matches) */
+export const U_HALF = 7;
+
+/** half-width of the flat hull bottom at station z (the garboard line) */
+export function hullBottomHalf(z: number, s: HullShape): number {
+  return s.beamHalf * sectionHalf(hullEnvelope(z, s), 0, s);
+}
+
+/**
+ * Bottom closure for ONE side, centreline → that side's garboard edge.
+ * Without it the two side shells simply stop at the keel line, leaving a
+ * 0.125 m slot per side running most of the hull — you could see straight
+ * into the interior (the keel box is only 0.6 m wide and covers none of it
+ * amidships). Each half-shell owns its own patch, so a blown-out hull
+ * section takes its piece of the bottom with it (§V13/§V14).
+ */
+function bottomHalf(s: HullShape, side: number): THREE.BufferGeometry {
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  for (let i = 0; i <= Z_SLICES; i++) {
+    const z = s.z0 + ((s.z1 - s.z0) * i) / Z_SLICES;
+    const half = hullBottomHalf(z, s);
+    for (let k = 0; k <= U_HALF; k++) {
+      const t = k / U_HALF; // 0 = centreline, 1 = garboard seam w/ the side
+      positions.push(side * half * t, -s.draft, z);
+      uvs.push(i / Z_SLICES, t);
+    }
+  }
+  const row = U_HALF + 1;
+  for (let i = 0; i < Z_SLICES; i++) {
+    for (let k = 0; k < U_HALF; k++) {
+      const a = i * row + k;
+      const b = (i + 1) * row + k;
+      // wound so the face normal points DOWN (−y) on both sides
+      if (side >= 0) indices.push(a, a + 1, b, b, a + 1, b + 1);
+      else indices.push(a, b, a + 1, a + 1, b, b + 1);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
 
 /** one side shell strip over [z0,z1] in SHIP space (indexed grid) */
 function sideStrip(s: HullShape, side: number): THREE.BufferGeometry {
@@ -54,9 +107,10 @@ function sideStrip(s: HullShape, side: number): THREE.BufferGeometry {
   return geo;
 }
 
-/** one hull side section, translated into piece-local (origin x=0, z=center) */
+/** one hull half-shell (side planking + its half of the bottom), translated
+ *  into piece-local (origin x=0, z=center) */
 export function buildLoftedHullSection(s: HullShape): THREE.BufferGeometry {
-  const geo = sideStrip(s, s.side);
+  const geo = mergeStrips([sideStrip(s, s.side), bottomHalf(s, s.side)]);
   geo.translate(0, 0, -(s.z0 + s.z1) / 2);
   return geo;
 }
@@ -94,7 +148,14 @@ export function buildLoftedBow(s: HullShape): THREE.BufferGeometry {
   const starboard = sideStrip(s, 1);
   const port = sideStrip(s, -1);
   const deck = bowDeckStrip(s);
-  const merged = mergeStrips([starboard, port, deck]);
+  // …and the forefoot underneath, or the hull is open along the stem too
+  const merged = mergeStrips([
+    starboard,
+    port,
+    bottomHalf(s, 1),
+    bottomHalf(s, -1),
+    deck,
+  ]);
   merged.translate(0, 0, -s.z0); // bow piece origin sits at hull end
   return merged;
 }

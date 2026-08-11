@@ -31,6 +31,13 @@ export interface OceanParams {
   smallWaveCutoff: number;
   /** horizontal displacement scale (Tessendorf choppiness λ) */
   choppiness: number;
+  /**
+   * Anti-fold cap: λ is limited so λ·RMS(∂Dx/∂x) ≤ this, summed over cascades.
+   * Read it as 1/n: the surface folds where the gradient reaches n sigma, so
+   * 0.2857 = folds only past 3.5σ (≈0.02% of the surface). At 1.0 folds start
+   * at 1σ — a third of the sea — which is what shattered storm.
+   */
+  choppinessFoldLimit: number;
   /** foam: jacobian below this injects foam (§V.6, biased down in storms §V.7) */
   jacobianFoamBias: number;
 }
@@ -59,6 +66,10 @@ export const oceanParams: OceanParams = registerParams('ocean', {
   oppositeWaveDamp: 0.06,
   smallWaveCutoff: 0.03,
   choppiness: 0.95,
+  // 1/3.5: measured, not guessed. At the shipped presets calm folds at 14.3σ
+  // and swell at 9.9σ, so neither is touched; storm folded at 2.18σ = 1.45%
+  // of the surface and is pulled from λ 1.9 → 1.19, folding past 3.5σ (§B).
+  choppinessFoldLimit: 0.2857,
   // longer swell at the same height is LESS steep → less jacobian folding,
   // so the foam gate opens slightly to keep whitecap coverage (§V6)
   jacobianFoamBias: 0.55,
@@ -73,6 +84,7 @@ function oceanParamsMeta() {
     oppositeWaveDamp: { min: 0, max: 1, step: 0.01 },
     smallWaveCutoff: { min: 0, max: 0.5, step: 0.005 },
     choppiness: { min: 0, max: 3, step: 0.01 },
+    choppinessFoldLimit: { min: 0.05, max: 1.2, step: 0.005 },
     jacobianFoamBias: { min: -1, max: 1, step: 0.01 },
   };
 }

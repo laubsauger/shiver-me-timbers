@@ -10,11 +10,14 @@ import {
   cascadeBand,
   cpuButterflyIFFT,
   dispersion,
+  effectiveChoppiness,
   gaussianPair,
   generateButterfly,
   generateH0,
   naiveIDFT,
   phillips,
+  spectralHeightVariance,
+  spectralSteepness,
 } from '../src/ocean/oceanMath';
 import { oceanParams } from '../src/params/ocean';
 import { oceanSurfaceParams } from '../src/params/oceanSurface';
@@ -275,12 +278,13 @@ describe('ocean surface clipmap (§V30 open 360° horizon)', () => {
     expect(Math.abs(x - 123.456)).toBeLessThanOrEqual(grid.coreSpacing);
   });
 
-  it('emits triangles ring-by-ring, front-to-back from the camera (§V28)', () => {
-    // the mesh is camera-centered, so ring order IS front-to-back order for
-    // every heading. With depth writes that costs the horizon band ~1 shaded
-    // layer instead of hundreds of blended ones — the fill-rate wedge class
-    // of §B.5. Row-major order would be back-to-front for half of all
-    // headings, so this ordering is load bearing, not cosmetic.
+  it('emits triangles in ROW-MAJOR order — ring order wedges the GPU (§V28)', () => {
+    // Not a style preference. Ring-by-ring ("front-to-back") order was tried
+    // as an early-Z win and never finished its first frame on Apple Silicon:
+    // a ring's consecutive triangles scatter across every screen tile, which
+    // is pathological for a tile-based deferred renderer. Row-major keeps
+    // spatially coherent runs and boots at 100 fps with the same mesh. This
+    // test fails the moment someone reorders the index buffer again.
     const small: SurfaceGridOptions = {
       segments: 16,
       coreSpacing: 1,
@@ -291,21 +295,18 @@ describe('ocean surface clipmap (§V30 open 360° horizon)', () => {
     const pos = geo.getAttribute('position');
     const idx = geo.getIndex();
     expect(idx).not.toBeNull();
+    const cols = small.segments + 1;
     const seen = new Set<number>();
-    const quarter = Math.floor(idx!.count / 3 / 4) * 3;
-    const means = [0, 0, 0, 0];
-    for (let t = 0; t < idx!.count; t += 3) {
-      let r = 0;
-      for (let c = 0; c < 3; c++) {
-        const v = idx!.getX(t + c);
-        seen.add(v);
-        r = Math.max(r, Math.hypot(pos.getX(v), pos.getZ(v)));
-      }
-      const q = Math.min(3, Math.floor(t / quarter));
-      means[q] += r;
+    for (let q = 0; q < small.segments * small.segments; q++) {
+      const j = Math.floor(q / small.segments);
+      const i = q % small.segments;
+      const a = j * cols + i;
+      // quad q occupies indices [6q, 6q+6) — row-major, in place
+      expect(idx!.getX(q * 6)).toBe(a);
+      expect(idx!.getX(q * 6 + 1)).toBe(a + cols);
+      expect(idx!.getX(q * 6 + 2)).toBe(a + 1);
+      for (let c = 0; c < 6; c++) seen.add(idx!.getX(q * 6 + c));
     }
-    // each quarter of the draw is further from the camera than the last
-    for (let q = 1; q < 4; q++) expect(means[q]).toBeGreaterThan(means[q - 1]);
     // every vertex is used — no orphan rows, no holes in the sea
     expect(seen.size).toBe(pos.count);
   });
@@ -334,5 +335,160 @@ describe('ocean cascades vs the CPU buoyancy mirror (§V8)', () => {
     // wide (user critique); the longest band wavelength is splitWavelengths[0]
     expect(oceanParams.cascades[0].domain / oceanParams.splitWavelengths[0])
       .toBeGreaterThan(8);
+  });
+});
+
+
+/**
+ * §B storm fold. The user saw storm shatter the surface into faceted shards
+ * with sea-wide blobby foam. Both symptoms are ONE cause: λ·∂Dx/∂x reaching
+ * −1 turns the parametric surface inside out, and a negative Jacobian is
+ * precisely the foam trigger (§V6). These tests encode the contract that no
+ * weather preset can drive the sea into a folded state (§V7 keeps presets as
+ * pure params, so the guarantee has to live in the cascade math).
+ */
+describe('anti-fold choppiness cap (§B storm, §V6, §V7)', () => {
+  // combined RMS ∂Dx/∂x at λ=1, exactly what OceanSimulation.refreshSeaState
+  // computes: cascades are independent so their variances add
+  const sigmaTotal = (patch: Partial<typeof oceanParams>) => {
+    const p = { ...oceanParams, ...patch };
+    let variance = 0;
+    for (let i = 0; i < 3; i++) {
+      const s = spectralSteepness(
+        128,
+        p.cascades[i].domain,
+        p,
+        cascadeBand(i, p.splitWavelengths),
+      );
+      variance += s * s;
+    }
+    return Math.sqrt(variance);
+  };
+  const limit = oceanParams.choppinessFoldLimit;
+
+  it('leaves the SHIPPED sea alone — the cap must not quietly flatten swell', () => {
+    // this is the regression guard: a cap that engages on the default sea
+    // would silently override the artist's choppiness on every load
+    const sigma = sigmaTotal({});
+    expect(effectiveChoppiness(oceanParams.choppiness, sigma, limit)).toBe(
+      oceanParams.choppiness,
+    );
+  });
+
+  it('DOES engage on a storm sea — otherwise the guard is decorative', () => {
+    // storm preset territory: amplitude and choppiness both up
+    const sigma = sigmaTotal({ amplitude: 1.5, windSpeed: 14 });
+    const lambda = effectiveChoppiness(1.9, sigma, limit);
+    expect(lambda).toBeLessThan(1.9);
+  });
+
+  it('folds only past 1/foldLimit sigma, whatever the preset', () => {
+    // λ·σ ≤ limit ⇔ the displacement gradient reaches −1 only at ≥1/limit σ.
+    // Below ~2σ a fold is common enough to shred the surface AND to flip the
+    // Jacobian negative over huge areas, which is the foam explosion (§V6).
+    for (const patch of [
+      {},
+      { amplitude: 0.3, windSpeed: 4 },
+      { amplitude: 1.5, windSpeed: 14 },
+      { amplitude: 4, windSpeed: 20 },
+    ]) {
+      const sigma = sigmaTotal(patch);
+      const lambda = effectiveChoppiness(1.9, sigma, limit);
+      expect(lambda * sigma).toBeLessThanOrEqual(limit + 1e-9);
+      expect(1 / (lambda * sigma)).toBeGreaterThanOrEqual(1 / limit - 1e-6);
+    }
+  });
+
+  it('never RAISES the artist value — it is a cap, not a target', () => {
+    // a glassy sea must stay glassy; the guard may only take choppiness away
+    expect(effectiveChoppiness(0.2, 1e-6, limit)).toBe(0.2);
+    expect(effectiveChoppiness(0, 5, limit)).toBe(0);
+  });
+
+  it('is finite and non-negative for degenerate input (§V28)', () => {
+    for (const sig of [0, 1e-12, Number.POSITIVE_INFINITY]) {
+      const v = effectiveChoppiness(0.95, sig, limit);
+      expect(Number.isFinite(v)).toBe(true);
+      expect(v).toBeGreaterThanOrEqual(0);
+    }
+    expect(effectiveChoppiness(Number.NaN, 1, limit)).toBe(0);
+  });
+});
+
+describe('sea-state scale drives crest thresholds (§B cow pattern)', () => {
+  const rmsFor = (amplitude: number, windSpeed: number) => {
+    let variance = 0;
+    for (let i = 0; i < 3; i++) {
+      variance += spectralHeightVariance(
+        128,
+        oceanParams.cascades[i].domain,
+        { ...oceanParams, amplitude, windSpeed },
+        cascadeBand(i, oceanParams.splitWavelengths),
+      );
+    }
+    return Math.sqrt(variance);
+  };
+
+  it('RMS elevation tracks amplitude and wind — it is a real sea-state scale', () => {
+    const calm = rmsFor(0.3, 4);
+    const swell = rmsFor(0.32, 11);
+    const storm = rmsFor(1.5, 14);
+    expect(calm).toBeLessThan(swell);
+    expect(swell).toBeLessThan(storm);
+    expect(Number.isFinite(storm)).toBe(true);
+  });
+
+  it('the crest band selects a small minority of the surface at ANY sea state', () => {
+    // gaussian surface: fraction above n·σ is independent of σ, which is the
+    // whole point — the band cannot drift into "most of the ocean" again
+    const erfc = (x: number) => {
+      const t = 1 / (1 + 0.3275911 * Math.abs(x));
+      const y =
+        1 -
+        ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t +
+          0.254829592) *
+          t *
+          Math.exp(-x * x);
+      return x >= 0 ? 1 - y : 1 + y;
+    };
+    const fractionAbove = (n: number) => 0.5 * erfc(n / Math.SQRT2);
+    expect(fractionAbove(oceanSurfaceParams.crestBandLow)).toBeLessThan(0.1);
+    expect(fractionAbove(oceanSurfaceParams.crestBandHigh)).toBeLessThan(0.02);
+    // and the old absolute gate, expressed in sigma for the CURRENT sea,
+    // would have caught a third of it — the regression this pins
+    const sigmaNow = rmsFor(oceanParams.amplitude, oceanParams.windSpeed);
+    expect(fractionAbove(0.25 / sigmaNow)).toBeGreaterThan(0.25);
+  });
+
+  it('the crest band is ordered and above the body band', () => {
+    expect(oceanSurfaceParams.crestBandHigh).toBeGreaterThan(oceanSurfaceParams.crestBandLow);
+    expect(oceanSurfaceParams.bodyBandHigh).toBeGreaterThan(oceanSurfaceParams.bodyBandLow);
+    expect(oceanSurfaceParams.crestBandLow).toBeGreaterThan(0);
+  });
+});
+
+
+describe('significant wave height accessor (§V8 shared sea-state scale)', () => {
+  it('Hs = 4√m₀ and tracks the spectrum, not the amplitude slider', () => {
+    // the trap this exists to close: amplitude fell 0.75 → 0.32 in the swell
+    // retune while Hs ROSE, so anything normalising by amplitude is as wrong
+    // as a constant
+    const hs = (patch: Partial<typeof oceanParams>) => {
+      const p = { ...oceanParams, ...patch };
+      let m0 = 0;
+      for (let i = 0; i < 3; i++) {
+        m0 += spectralHeightVariance(
+          128,
+          p.cascades[i].domain,
+          p,
+          cascadeBand(i, p.splitWavelengths),
+        );
+      }
+      return 4 * Math.sqrt(m0);
+    };
+    const oldSea = hs({ amplitude: 0.75, windSpeed: 8 });
+    const newSea = hs({ amplitude: 0.32, windSpeed: 11 });
+    expect(newSea).toBeGreaterThan(oldSea); // Hs up while amplitude went down
+    expect(hs({ amplitude: 1.5, windSpeed: 14 })).toBeGreaterThan(newSea);
   });
 });

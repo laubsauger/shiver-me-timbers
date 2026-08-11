@@ -1,0 +1,196 @@
+/**
+ * Clouds inside the planar reflection (§V26: "ship, islands, clouds visible
+ * in water").
+ *
+ * WHY THIS EXISTS AT ALL. The clouds (§V11) are not geometry — they are a
+ * blurred 4-channel RT composited by a quad pinned to the MAIN camera that
+ * samples the RT through `screenUV`. Rendered from the mirror camera that
+ * quad is nonsense: it hangs at the main camera's position at some oblique
+ * angle and smears its screen-space lookup across the reflection. So it is
+ * excluded from the mirror pass (REFLECTION_HIDDEN_LAYER) and this stand-in
+ * takes its place on REFLECTION_ONLY_LAYER.
+ *
+ * WHERE THE CLOUD LOOKUP COMES FROM. The stand-in is fitted to the mirror
+ * camera, so its fragments cover the reflection exactly. For each fragment:
+ *   R  = the mirror camera's ray through it (an UPWARD direction — this is
+ *        the reflected ray the water shows)
+ *   d  = M(R), R mirrored back across the water plane, i.e. the direction the
+ *        MAIN camera would look along to see that same piece of sky
+ * and the cloud RT stores clouds at the main camera's projection of d. So the
+ * lookup is `project(mainViewProjection, d)`, one mat4 multiply per fragment.
+ *
+ * The tempting shortcut — fit the quad to the mirror camera and keep sampling
+ * with `screenUV` (optionally flipped) — is WRONG and looks it: mirror-screen
+ * (s,t) corresponds to main-screen (1-s,t), which for a water pixel is a
+ * DOWNWARD direction, i.e. the part of the cloud RT that holds no clouds.
+ * Reflections would come back empty near the horizon and smeared elsewhere.
+ *
+ * Still an approximation, and honestly so: the cloud RT was rasterized from
+ * the main camera, so anything the main camera cannot see has no cloud data.
+ * That region is faded out rather than clamped (a clamped edge tap smears one
+ * texel column across half the reflection), and it lands where reflections
+ * matter least — steep view angles, where fresnel is near zero.
+ */
+import * as THREE from 'three/webgpu';
+import {
+  cameraPosition,
+  float,
+  positionWorld,
+  smoothstep,
+  texture,
+  texture3D,
+  uniform,
+  vec2,
+  vec3,
+  vec4,
+} from 'three/tsl';
+import { createNoiseTexture } from '../clouds/cloudComposite';
+import type { CloudParams } from '../params/clouds';
+import { REFLECTION_ONLY_LAYER } from './mirrorMath';
+
+/** §V28: floored divisor for the perspective divide */
+const EPS = 1e-4;
+
+export interface CloudMirrorSource {
+  /**
+   * The blurred cloud texture — the SAME one the main composite samples
+   * (`blur.output` inside src/clouds). Not currently exposed by CloudsHandle;
+   * see src/reflection/index.ts for the one-line integration note.
+   */
+  blurred: THREE.Texture;
+  /** cloud seed — the erosion noise must match the main composite's */
+  seed: number;
+  /** live cloud params (shared object, read every frame) */
+  params: CloudParams;
+}
+
+export interface CloudMirror {
+  readonly quad: THREE.Mesh;
+  /**
+   * Per frame, BEFORE the mirror pass runs: place the quad on the mirror
+   * camera's frustum and publish the main camera's viewProjection.
+   */
+  update(
+    mainCamera: THREE.PerspectiveCamera,
+    mirrorPosition: THREE.Vector3,
+    mirrorQuaternion: THREE.Quaternion,
+    time: number,
+  ): void;
+  dispose(): void;
+}
+
+export function createCloudMirror(src: CloudMirrorSource): CloudMirror {
+  const p = src.params;
+  const noiseTex = createNoiseTexture(src.seed);
+
+  const uTime = uniform(0);
+  const uSunColor = uniform(new THREE.Color(p.sunColor));
+  const uSkyColor = uniform(new THREE.Color(p.skyColor));
+  const uDistortScale = uniform(p.distortScale);
+  const uDistortStrength = uniform(p.distortStrength);
+  const uEdgeErode = uniform(p.edgeErode);
+  const uAlphaGain = uniform(p.alphaGain);
+  /** projection × view of the MAIN camera — the cloud RT's own frame */
+  const uMainViewProj = uniform(new THREE.Matrix4());
+
+  const material = new THREE.MeshBasicNodeMaterial();
+
+  // reflected ray → the main camera's view direction for the same sky
+  const rayMirror = positionWorld.sub(cameraPosition).normalize();
+  const viewDir = vec3(rayMirror.x, rayMirror.y.negate(), rayMirror.z);
+
+  // project that direction with the main camera (w-component of a direction
+  // is 0, so the translation column drops out and this is a pure rotation +
+  // projection — no need to strip the eye position by hand)
+  const clip = uMainViewProj.mul(vec4(viewDir, 0));
+  // w ≤ 0 = the direction is behind the main camera: there is no cloud data
+  // for it. Floor the divisor (§V28) and mask the result out below.
+  const inFront = clip.w.greaterThan(EPS);
+  const ndc = clip.xy.div(clip.w.max(EPS));
+  // WebGPU: NDC y is +1 at the TOP, and screen/RT UV v is 0 at the top
+  // (WGSLNodeBuilder.isFlipY() === false), so v flips while u does not.
+  const cloudUV = vec2(ndc.x.mul(0.5).add(0.5), ndc.y.mul(-0.5).add(0.5));
+
+  // same scrolled 3D value noise as the main composite, driven by the SAME
+  // view direction, so a cloud and its reflection erode identically
+  const scroll = vec3(uTime.mul(0.7), uTime.mul(0.43), uTime);
+  const noise = texture3D(
+    noiseTex,
+    viewDir.mul(uDistortScale).mul(0.5).add(0.5).add(scroll),
+    null,
+  ).rgb;
+
+  const packed = texture(
+    src.blurred,
+    cloudUV.add(noise.xy.sub(0.5).mul(uDistortStrength)).clamp(0, 1),
+  );
+  const coverage = packed.b;
+  const denom = coverage.max(1e-4);
+  material.colorNode = uSunColor
+    .mul(packed.r.div(denom))
+    .add(uSkyColor.mul(packed.g.div(denom)));
+
+  // alpha: identical body/rim construction to cloudComposite, times a soft
+  // border mask so the no-data region outside the main frustum fades instead
+  // of smearing a clamped edge texel across the reflection.
+  // smoothstep(e0,e1,x) with e0 > e1 reads "1 below e1, 0 above e0" (§V23).
+  const border = float(0.04);
+  const edgeMask = smoothstep(float(0), border, cloudUV.x)
+    .mul(smoothstep(float(1), float(1).sub(border), cloudUV.x))
+    .mul(smoothstep(float(0), border, cloudUV.y))
+    .mul(smoothstep(float(1), float(1).sub(border), cloudUV.y));
+
+  const cov = coverage.mul(uAlphaGain);
+  const body = cov.mul(-1.6).exp().oneMinus();
+  const rimT = noise.z.mul(uEdgeErode);
+  material.opacityNode = body
+    .mul(smoothstep(rimT, rimT.add(0.55), cov))
+    .mul(edgeMask)
+    .mul(inFront.select(float(1), float(0)))
+    .clamp(0, 1);
+  material.transparent = true;
+  material.depthWrite = false;
+  material.fog = false;
+
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+  quad.name = 'reflection/cloud-mirror';
+  quad.frustumCulled = false;
+  quad.renderOrder = 1000;
+  // mirror pass only — the main camera must never see this stand-in
+  quad.layers.set(REFLECTION_ONLY_LAYER);
+
+  return {
+    quad,
+    update(mainCamera, mirrorPosition, mirrorQuaternion, time): void {
+      uTime.value = time * p.distortSpeed;
+      uSunColor.value.setHex(p.sunColor);
+      uSkyColor.value.setHex(p.skyColor);
+      uDistortScale.value = p.distortScale;
+      uDistortStrength.value = p.distortStrength;
+      uEdgeErode.value = p.edgeErode;
+      uAlphaGain.value = p.alphaGain;
+
+      mainCamera.updateMatrixWorld();
+      uMainViewProj.value.multiplyMatrices(
+        mainCamera.projectionMatrix,
+        mainCamera.matrixWorldInverse,
+      );
+
+      // the mirror camera copies the main camera's projection matrix, so the
+      // frustum it must cover has the same fov and aspect
+      const d = Math.max(1, p.quadDistance);
+      const height = 2 * d * Math.tan(THREE.MathUtils.degToRad(mainCamera.fov) * 0.5);
+      const margin = 1.15; // oversize: distortion must never reveal the border
+      quad.scale.set(height * mainCamera.aspect * margin, height * margin, 1);
+      quad.position.copy(mirrorPosition);
+      quad.quaternion.copy(mirrorQuaternion);
+      quad.translateZ(-d);
+      quad.updateMatrixWorld();
+    },
+    dispose(): void {
+      quad.geometry.dispose();
+      material.dispose();
+      noiseTex.dispose();
+    },
+  };
+}

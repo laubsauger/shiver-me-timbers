@@ -14,7 +14,7 @@
  *   stays      forestay (foremost masthead → bowsprit tip), inter-mast stays
  *              (masthead → next masthead), backstays from the AFTMOST masthead
  *              only, bobstays (bowsprit tip → bow cleats)
- *   shrouds    masthead → the CHAINPLATE abeam of that same mast
+ *   shrouds    masthead → the chainplate FAN abeam of that same mast
  *   lifts      upper yard ends → their own masthead
  *   braces     yard ends → the chainplate of the NEXT MAST AFT (the aftmost
  *              mast's yards → the stern cleats)
@@ -26,9 +26,10 @@
  * RULE 2 — NO ROPE MAY END INSIDE THE HULL OR HANG THROUGH THE DECK. The
  * catenary solver knows nothing about the ship, so clearance is a property of
  * WHERE a line is anchored and HOW MUCH slack it carries, and nothing else.
- * Hull-side ends therefore go to `anchor-channel-{side}-{mast}` — chainplates
- * the ship system places on the shell just under the cap rail — never to a
- * belaying cleat sitting inboard on the deck. Standing rigging is kept nearly
+ * Hull-side ends therefore go to `anchor-channel-{side}-{mast}-{n}` — the
+ * chainplate fan the ship system places just outboard of the deck edge each
+ * mast is STEPPED on — never to a belaying cleat sitting inboard on the deck,
+ * and never to a plate below that deck. Standing rigging is kept nearly
  * taut (STYLE below) because a bowing stay is what dips through a deck it
  * passes over. tests/shipRigging.test.ts samples the solved curve of every
  * rope against the ship's own loft and fails if any of it enters the solid.
@@ -88,6 +89,10 @@ const SIDES = ['port', 'starboard'] as const;
  */
 const STEPPED_DECK_MARGIN = 1;
 
+/** literal ceiling on the chainplate-fan probe — the fan is discovered from
+ *  the blueprint, this only bounds the loop (§V28 in spirit: no open scan) */
+const MAX_CHANNEL_PLATES = 8;
+
 /** ids of every rope-anchor socket in the blueprint (other socket types are
  *  not valid rope endpoints) */
 export function collectRopeAnchorIds(blueprint: PieceDef[]): Set<string> {
@@ -145,7 +150,13 @@ export function buildRiggingPlan(blueprint: PieceDef[]): RiggingRope[] {
   const foremost = masts[0];
   const aftmost = masts[masts.length - 1];
   const masthead = (m: string): string => `anchor-masthead-${m}`;
-  const chainplate = (side: string, m: string): string => `anchor-channel-${side}-${m}`;
+  /** where a brace or sheet is belayed at a mast: the forward-most plate of
+   *  its chainplate fan. Falls back to the deprecated unnumbered alias so an
+   *  older blueprint still rigs (the ship system may delete that alias). */
+  const belay = (side: string, m: string): string => {
+    const plate = `anchor-channel-${side}-${m}-1`;
+    return ids.has(plate) ? plate : `anchor-channel-${side}-${m}`;
+  };
 
   // stays: forestay, inter-mast, backstays from the AFTMOST masthead only (a
   // backstay off every masthead is what dragged lines the length of the ship),
@@ -165,23 +176,27 @@ export function buildRiggingPlan(blueprint: PieceDef[]): RiggingRope[] {
   if (crowNest?.parent !== undefined) {
     add('anchor-crow-nest', masthead(crowNest.parent.replace(/^mast-/, '')), 'halyard');
   }
-  // shrouds: straight down the ship's side to the chainplate ABEAM of the same
-  // mast — never to a cleat at the far end of the hull
+  // shrouds: a FAN down the ship's side to the chainplates abeam of the same
+  // mast — never to a cleat at the far end of the hull. The ship system sizes
+  // the fan (params/ship channelPlates/channelPlateSpacing) and exposes it as
+  // `anchor-channel-{side}-{mast}-{1..n}`; consume every plate it declares
+  // rather than second-guessing the count here (§V16 owns the tunable).
   const socketY = socketHeights(blueprint);
   for (const piece of mastPieces) {
     const m = piece.id.replace(/^mast-/, '');
     for (const side of SIDES) {
-      const foot = chainplate(side, m);
-      // A mast stepped on a raised deck (the galleon's rear mast stands on the
-      // quarterdeck) whose chainplate is still down on the main shell would
-      // have to run its shrouds THROUGH that deck — the fault the user saw as
-      // rope "going into the ship". Skip rather than draw it; the mast keeps
-      // its backstays and inter-mast stay. Fixed ship-side by lifting
-      // anchor-channel-*-rear to the deck the mast is stepped on, after which
-      // this guard stops firing on its own.
-      const drop = piece.transform.position[1] - (socketY.get(foot) ?? -Infinity);
-      if (drop > STEPPED_DECK_MARGIN) continue;
-      add(masthead(m), foot, 'shroud');
+      for (let plate = 1; plate <= MAX_CHANNEL_PLATES; plate++) {
+        const foot = `anchor-channel-${side}-${m}-${plate}`;
+        if (!ids.has(foot)) break;
+        // A mast stepped on a raised deck (the galleon's mizzen stands on the
+        // quarterdeck) whose chainplate is still down on the main shell would
+        // have to run its shrouds THROUGH that deck — the fault the user saw
+        // as rope "going into the ship". Skip such a plate rather than draw
+        // it; the mast keeps its backstays and inter-mast stay meanwhile.
+        const drop = piece.transform.position[1] - (socketY.get(foot) ?? -Infinity);
+        if (drop > STEPPED_DECK_MARGIN) continue;
+        add(masthead(m), foot, 'shroud');
+      }
     }
   }
   // yard lines: lift up to the own masthead (upper yards), brace aft into the
@@ -200,11 +215,11 @@ export function buildRiggingPlan(blueprint: PieceDef[]): RiggingRope[] {
       if (level === 'upper') add(end, masthead(m), 'lift');
       add(end, aftMast === undefined
         ? `anchor-cleat-stern-${side}`
-        : chainplate(side, aftMast), 'brace');
+        : belay(side, aftMast), 'brace');
       if (level !== 'lower') continue;
       add(end, foreMast === undefined
         ? `anchor-cleat-bow-${side}`
-        : chainplate(side, foreMast), 'sheet');
+        : belay(side, foreMast), 'sheet');
     }
   }
 

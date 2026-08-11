@@ -25,6 +25,8 @@ import {
   scatterPalms,
 } from '../vegetation';
 import type { PlacementFn } from '../vegetation/scatter';
+import type { PalmMaterial } from '../vegetation/palmMaterial';
+import type { WindSway } from '../vegetation/windSway';
 import { vegetationParams } from '../params/vegetation';
 import { islandParams, type IslandParams } from '../params/island';
 import { findShoreRadius, gradientAt, type IslandHeightmap } from './heightmap';
@@ -75,13 +77,46 @@ export interface CreateIslandPalmsOptions {
   heightmap: IslandHeightmap;
   /** defaults to islandParams.palmCount */
   count?: number;
+  /**
+   * Shared palm material + its wind sway (islandMaterials.ts). Omit and this
+   * builds and owns its own; the archipelago injects one set for every island
+   * (§V17). Geometry stays per-island — that is where the seed variation is.
+   */
+  shared?: { palm: PalmMaterial; sway: WindSway };
 }
 
 export interface IslandPalms {
   mesh: THREE.InstancedMesh;
+  /** instances the scatter produced (the LOD ceiling) */
+  readonly maxCount: number;
   /** per-frame: sim time (s), wind direction xz, wind strength 0..1+ */
   update(time: number, windDir: [number, number], windStrength: number): void;
+  /** per-frame LOD (§V17): thin the instance count by camera distance */
+  setLodDistance(cameraDistance: number): void;
+  /** world sun direction (unit, pointing AT the sun) for the backlit fronds */
+  setSunDirection(v: THREE.Vector3): void;
   dispose(): void;
+}
+
+/**
+ * Instances kept at a camera distance (§V17). Palms are the single most
+ * expensive thing on an island (~6k tris each), and an island at 2 km puts
+ * them under a few pixels, so the count ramps to zero rather than paying for
+ * geometry nobody can resolve. Pure so tests pin the ramp without a renderer.
+ * Instances are written largest-first (scatter `lodSort`), so the survivors
+ * are always the palms that read best.
+ */
+export function palmLodCount(
+  maxCount: number,
+  cameraDistance: number,
+  p: IslandParams = islandParams,
+): number {
+  const full = p.lodPalmFull;
+  const cull = Math.max(p.lodPalmCull, full + 1e-3); // §V28 floored divisor
+  if (cameraDistance <= full) return maxCount;
+  if (cameraDistance >= cull) return 0;
+  const t = (cameraDistance - full) / (cull - full);
+  return Math.round(maxCount * (1 - t));
 }
 
 /**
@@ -92,29 +127,45 @@ export interface IslandPalms {
 export function createIslandPalms(opts: CreateIslandPalmsOptions): IslandPalms {
   const count = opts.count ?? islandParams.palmCount;
   const geometry = buildPalmGeometry(opts.seed);
-  const palmMaterial = createPalmMaterial();
-  const sway = applyWindSway(palmMaterial.material, {
-    instancePhase: attribute('instancePhase', 'float'),
-    amplitudeScale: attribute('instanceSway', 'float'),
-  });
+  const palmMaterial = opts.shared?.palm ?? createPalmMaterial();
+  const sway =
+    opts.shared?.sway ??
+    applyWindSway(palmMaterial.material, {
+      instancePhase: attribute('instancePhase', 'float'),
+      amplitudeScale: attribute('instanceSway', 'float'),
+    });
   const mesh = scatterPalms({
     count,
     seed: opts.seed,
     geometry,
     material: palmMaterial.material,
     placementFn: islandPalmPlacement(opts.heightmap),
+    lodSort: true,
   });
+  mesh.name = 'island-palms';
+  mesh.castShadow = islandParams.castShadows;
+  mesh.receiveShadow = true;
 
   return {
     mesh,
+    maxCount: count,
     update(time, windDir, windStrength): void {
       sway.setWind(time, windDir, windStrength);
       sway.syncParams();
       palmMaterial.refresh();
     },
+    setLodDistance(cameraDistance: number): void {
+      const n = palmLodCount(count, cameraDistance);
+      mesh.count = n;
+      // a zero-instance draw is still a draw + a shadow-pass draw; skip it
+      mesh.visible = n > 0;
+    },
+    setSunDirection(v: THREE.Vector3): void {
+      (palmMaterial.uSunDirection.value as THREE.Vector3).copy(v).normalize();
+    },
     dispose(): void {
       geometry.dispose();
-      palmMaterial.material.dispose();
+      if (!opts.shared) palmMaterial.material.dispose(); // shared: caller owns it
       mesh.dispose();
     },
   };

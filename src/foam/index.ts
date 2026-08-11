@@ -74,9 +74,7 @@ export function createFoamSim(cascades: FoamCascadeInput[], resolution: number) 
       front,
       back,
       inject: createInjectPass(c.displacement, front, back, resolution, lu),
-      // blur reads the cascade displacement too: the crest frame that shapes
-      // the taps comes from its height gradient (§V6 cap shape)
-      blurDecay: createBlurDecayPass(c.displacement, back, front, resolution, lu),
+      blurDecay: createBlurDecayPass(back, front, resolution, lu),
     };
   });
 
@@ -97,6 +95,9 @@ export function createFoamSim(cascades: FoamCascadeInput[], resolution: number) 
       // slider can't mirror the kernel into itself
       u.uAlong.value = Math.max(0, foamParams.crestBlurAlong);
       u.uAcross.value = Math.max(0, foamParams.crestBlurAcross);
+      // crest lines run ACROSS the wave propagation (≈ wind) direction
+      u.uAcrossX.value = Math.cos(oceanParams.windDirection);
+      u.uAcrossZ.value = Math.sin(oceanParams.windDirection);
       uFine.uBias.value =
         foamParams.injectFineCascade >= 1 ? oceanParams.jacobianFoamBias : -10;
       uFine.uInjectPerFrame.value = u.uInjectPerFrame.value;
@@ -104,6 +105,8 @@ export function createFoamSim(cascades: FoamCascadeInput[], resolution: number) 
       uFine.uRadius.value = u.uRadius.value;
       uFine.uAlong.value = u.uAlong.value;
       uFine.uAcross.value = u.uAcross.value;
+      uFine.uAcrossX.value = u.uAcrossX.value;
+      uFine.uAcrossZ.value = u.uAcrossZ.value;
       updateFoamShadingUniforms(foamParams, time, oceanParams.windDirection);
       for (const lane of lanes) {
         renderer.compute(lane.inject as Parameters<THREE.WebGPURenderer['compute']>[0]);

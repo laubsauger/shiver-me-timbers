@@ -14,6 +14,7 @@ import {
   bowEmission,
   bowSpawnOffset,
   crestBreaking,
+  crestHeightThreshold,
   distanceFade,
   dragFactorPerFrame,
   goldenSeed,
@@ -23,6 +24,7 @@ import {
   respawnCandidate,
   sanitizePoolCount,
   spawnAccepted,
+  sprayJacobianThreshold,
   spriteScale,
   stepParticle,
   type ParticleState,
@@ -225,38 +227,51 @@ describe('bow launch velocity cone (thrown FORWARD + outboard off the cutwater)'
 describe('bow emission regimes (constant cutwater mist + impact sheets)', () => {
   const E = {
     bowImmersionThreshold: 0.02,
-    bowImmersionFull: 0.6,
+    bowImmersionFull: 0.45,
     bowSpeedThreshold: 1.0,
     bowSpeedFull: 5.0,
-    bowImpactRef: 1.2,
+    bowImpactRef: 0.6,
+    bowContactDepth: 0.12,
     bowBurstRate: 600,
     bowCruiseRate: 200,
     bowCruiseSheet: 0.35,
   };
 
-  it('emits continuously while making way, even with a dry-ish bow', () => {
-    // WHY (user: "the cutting of the front into the waves looks disconnected…
-    // we need a constant little bow wake whenever we're moving"): a hull at
-    // speed always works water at the stem. Zero immersion must still mist.
-    const cruise = bowEmission(0, 6, 0, E);
+  it('mists continuously while making way — as long as the stem is IN the water', () => {
+    // WHY (user: "we need a constant little bow wake whenever we're moving"):
+    // a hull at speed always works water at the stem, so shallow contact must
+    // still emit. But it is CONTACT, not motion, that licenses the mist.
+    // barely wetted stem (below the burst threshold) but touching: mist only
+    const cruise = bowEmission(0.02, 6, 0, true, E);
     expect(cruise.rate).toBeGreaterThan(0);
     expect(cruise.sheet).toBeCloseTo(E.bowCruiseSheet, 12); // mist, not sheet
   });
 
+  it('an AIRBORNE bow throws nothing — the detachment defect', () => {
+    // WHY (user: "we see it detach when we're lifting out of the water… it
+    // comes out from something that is in the air, where there's nothing
+    // touching the water"). Full speed, mid-trough, no station in contact:
+    // emission must be exactly zero, not merely reduced.
+    expect(bowEmission(0, 8, 0, false, E).rate).toBe(0);
+    expect(bowEmission(0.9, 8, 2, false, E).rate).toBe(0); // even mid-slam data
+    // and with contact but zero immersion, the contact ramp still floors it
+    expect(bowEmission(0, 8, 0, true, E).rate).toBe(0);
+  });
+
   it('is silent at rest — no fizzing at anchor', () => {
-    expect(bowEmission(0.9, 0, 0, E).rate).toBe(0);
-    expect(bowEmission(0.9, 1.0, 0, E).rate).toBe(0); // at speed threshold
+    expect(bowEmission(0.9, 0, 0, true, E).rate).toBe(0);
+    expect(bowEmission(0.9, 1.0, 0, true, E).rate).toBe(0); // at speed threshold
   });
 
   it('a hard burial emits more AND bigger than a slow one', () => {
     // WHY: "let the size relate to how hard the bow just buried (impact
     // velocity × immersion depth)" — both rate and sheet must respond.
-    const slow = bowEmission(0.6, 6, 0, E);
-    const slam = bowEmission(0.6, 6, 2.0, E);
+    const slow = bowEmission(0.6, 6, 0, true, E);
+    const slam = bowEmission(0.6, 6, 2.0, true, E);
     expect(slam.rate).toBeGreaterThan(slow.rate);
     expect(slam.sheet).toBeGreaterThan(slow.sheet);
     expect(slam.sheet).toBe(1); // full sheet at/above bowImpactRef
-    expect(slow.rate).toBeGreaterThan(bowEmission(0, 6, 0, E).rate); // depth counts
+    expect(slow.rate).toBeGreaterThan(bowEmission(0, 6, 0, true, E).rate); // depth counts
   });
 
   it('rate and sheet stay bounded and finite for absurd inputs (§V28)', () => {
@@ -265,7 +280,7 @@ describe('bow emission regimes (constant cutwater mist + impact sheets)', () => 
       [-5, -5, -5],
       [NaN, NaN, NaN],
     ]) {
-      const e = bowEmission(imm, spd, rate, E);
+      const e = bowEmission(imm, spd, rate, true, E);
       expect(Number.isFinite(e.rate)).toBe(true);
       expect(e.rate).toBeGreaterThanOrEqual(0);
       expect(e.rate).toBeLessThanOrEqual(E.bowCruiseRate + E.bowBurstRate);
@@ -278,19 +293,21 @@ describe('bow emission regimes (constant cutwater mist + impact sheets)', () => 
 describe('cutwater emission line (spray leaves the hull, not a point)', () => {
   const O = { bowSideOffset: 1.0, bowStemLength: 2.0 };
 
-  it('offsets spread along the stem AHEAD of the bow and to both flanks', () => {
-    // WHY (user: "white circle bouncy particles only at the bow" — a point
-    // emitter reads as a fountain of balls): the sheet must be seeded along
-    // the cutwater, forward of the bow point and outboard on both sides.
+  it('runs AFT of the crossing and out to both flanks, never ahead of it', () => {
+    // WHY (user: spray "comes out from something that is in the air"): the
+    // emitter sits where the hull ENTERS the water, and the hull shoulders
+    // water backward from there along its immersed length. Seeding ahead of
+    // the crossing puts droplets in mid-air in front of the stem. Water is
+    // pushed forward by the launch VELOCITY, not by spawning it out front.
     const offs = seeds.slice(0, 64).map((s) => bowSpawnOffset(s, 2.2, 1, 0, O));
-    // ship forward = +x → stem run is +x, flanks are ±z
-    expect(Math.min(...offs.map((o) => o[0]))).toBeGreaterThanOrEqual(0);
-    expect(Math.max(...offs.map((o) => o[0]))).toBeGreaterThan(0.5);
+    // ship forward = +x → stem run is −x (aft), flanks are ±z
+    expect(Math.max(...offs.map((o) => o[0]))).toBeLessThanOrEqual(0);
+    expect(Math.min(...offs.map((o) => o[0]))).toBeLessThan(-0.5);
     expect(Math.max(...offs.map((o) => o[1]))).toBeGreaterThan(0);
     expect(Math.min(...offs.map((o) => o[1]))).toBeLessThan(0);
     for (const [ox, oz] of offs) {
       expect(Math.abs(oz)).toBeLessThanOrEqual(O.bowSideOffset + 1e-12);
-      expect(ox).toBeLessThanOrEqual(O.bowStemLength + 1e-12);
+      expect(Math.abs(ox)).toBeLessThanOrEqual(O.bowStemLength + 1e-12);
     }
   });
 
@@ -298,24 +315,58 @@ describe('cutwater emission line (spray leaves the hull, not a point)', () => {
     expect(bowSpawnOffset(0.37, 2.2, 1, 0, O)).toEqual(bowSpawnOffset(0.37, 2.2, 1, 0, O));
     expect(bowSpawnOffset(0.37, 2.2, 1, 0, O)).not.toEqual(bowSpawnOffset(0.41, 2.2, 1, 0, O));
   });
+
+  it('rotates with the heading — the line follows the hull, not world axes', () => {
+    const a = bowSpawnOffset(0.37, 2.2, 1, 0, O); // heading +x
+    const b = bowSpawnOffset(0.37, 2.2, 0, 1, O); // heading +z
+    expect(b[1]).toBeCloseTo(a[0], 12);
+    expect(b[0]).toBeCloseTo(-a[1], 12);
+  });
 });
 
 describe('crest spawn gating (§V6 — only genuinely breaking crests spray)', () => {
-  const C = { sprayBiasOffset: -0.55, crestHeightMin: 0.9 };
-
   it('needs a FOLDING jacobian and a crest top, not merely low jacobian', () => {
     // WHY (user: white dots "all over the place", a snow globe over the whole
     // ocean): the jacobian dips below the foam bias across most of a choppy
     // sea. Spray marks water actually tearing off a wave TOP — both gates.
-    expect(crestBreaking(-0.2, 1.5, 0.5, C)).toBe(true);
-    expect(crestBreaking(0.3, 1.5, 0.5, C)).toBe(false); // foamy, not folding
-    expect(crestBreaking(-0.2, 0.2, 0.5, C)).toBe(false); // fold in a trough
+    expect(crestBreaking(-0.2, 1.5, -0.1, 1.4)).toBe(true);
+    expect(crestBreaking(0.3, 1.5, -0.1, 1.4)).toBe(false); // foamy, not folding
+    expect(crestBreaking(-0.2, 0.2, -0.1, 1.4)).toBe(false); // fold in a trough
   });
 
-  it('tracks the live foam bias so storms spray harder (§V7)', () => {
-    // bias biased DOWN in storms → more of the sea qualifies
-    expect(crestBreaking(-0.4, 1.5, 0.5, C)).toBe(true);
-    expect(crestBreaking(-0.4, 1.5, 0.0, C)).toBe(false);
+  it('threshold tracks the foam bias (§V7) but is CEILED at physical sense', () => {
+    // WHY: storm lowers the bar for foam on purpose, and spray should follow —
+    // but the storm preset sets jacobianFoamBias to 0.9, i.e. "compressed by
+    // 10%", which is nearly the entire sea. Uncapped that is a blizzard.
+    expect(sprayJacobianThreshold(0.55, -0.65, 0.05)).toBeCloseTo(-0.1, 12);
+    expect(sprayJacobianThreshold(0.9, -0.65, 0.05)).toBeCloseTo(0.05, 12);
+    expect(sprayJacobianThreshold(2.0, 0, 0.05)).toBe(0.05); // never runaway
+    // storms still spray harder than calm, just not unboundedly
+    expect(sprayJacobianThreshold(0.12, -0.65, 0.05)).toBeLessThan(
+      sprayJacobianThreshold(0.55, -0.65, 0.05),
+    );
+  });
+
+  it('height gate is a MULTIPLE OF σ, never metres (§V36)', () => {
+    // WHY: a metre constant silently changes meaning whenever the swell is
+    // retuned — 1.4 m was a rare breaking crest at one spectrum and an
+    // ordinary wave top at the next. σ is the sea's own height statistic, so
+    // 1.5σ selects the same fraction of crests in calm, swell and storm.
+    expect(crestHeightThreshold(1.5, 0.703)).toBeCloseTo(1.0545, 6);
+    // doubling the sea doubles the bar — the gate stays equally selective
+    expect(crestHeightThreshold(1.5, 1.4)).toBeCloseTo(2 * crestHeightThreshold(1.5, 0.7), 12);
+    // and it must never gate on `amplitude`, which moves the OTHER way:
+    // amplitude fell 0.75 → 0.32 while significant wave height rose 2.3 → 2.8
+  });
+
+  it('an unbuilt spectrum shuts the gate rather than passing everything', () => {
+    // WHY §V28: σ is 0 until the first spectrum build. A zero threshold would
+    // pass every candidate above sea level — the whole ocean spraying on the
+    // first frames — and NaN would compare false in one direction only.
+    expect(crestHeightThreshold(1.5, 0)).toBe(Infinity);
+    expect(crestHeightThreshold(1.5, NaN)).toBe(Infinity);
+    expect(crestHeightThreshold(NaN, 0.7)).toBe(Infinity);
+    expect(crestBreaking(-0.5, 99, -0.1, crestHeightThreshold(1.5, 0))).toBe(false);
   });
 
   it('lottery thins each breaking band, deterministically (§V2)', () => {

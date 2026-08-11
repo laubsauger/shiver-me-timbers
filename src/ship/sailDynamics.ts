@@ -11,7 +11,8 @@
  * §V28: every output is finite-guarded and clamped — these values feed
  * shader uniforms, and a NaN here becomes NaN vertices.
  */
-import type { ShipMaterialParams } from '../params/ship';
+import type { ShipMaterialParams, ShipRigParams } from '../params/ship';
+import type { SailStateId } from './pieceTypes';
 import { trimEfficiency } from '../sailing/shipKinematics';
 
 export interface SailWindInput {
@@ -85,4 +86,76 @@ export function sailDrive(input: SailWindInput, p: ShipMaterialParams): SailDriv
 
   const skew = clamp(yawRate * p.sailTurnSkew, -1, 1);
   return { drive, luff, skew };
+}
+
+/**
+ * Yard brace angle (rad about the ship's vertical) for a square rig, from
+ * the ship's OWN heading — not a sail's, which is already braced.
+ *
+ * Rule of thumb the crew uses: the yard bisects the angle between the
+ * apparent wind and the centreline, so it is square when running and swings
+ * round as the ship comes up toward the wind. Sign: the WINDWARD yardarm
+ * goes forward (on a port tack, the port arm leads), which for three's
+ * left-handed +y rotation means a positive angle when the wind is on the
+ * port bow. Clamped — beyond ~35° a yard fouls its own shrouds.
+ *
+ * Continuous through both dead-astern and head-to-wind: the magnitude goes
+ * to zero on a run, and the tack flip is a smooth blend over
+ * `braceTackWidth`, so a ship rolling through the eye of the wind does not
+ * snap its whole rig from one side to the other.
+ */
+export function braceAngle(
+  input: Pick<SailWindInput, 'forwardX' | 'forwardZ' | 'windDirection'>,
+  p: ShipRigParams,
+): number {
+  const fx = finite(input.forwardX);
+  const fz = finite(input.forwardZ, 1);
+  const len = Math.max(1e-4, Math.hypot(fx, fz)); // §V28 floored divisor
+  const ux = fx / len;
+  const uz = fz / len;
+  const wx = Math.sin(finite(input.windDirection));
+  const wz = Math.cos(finite(input.windDirection));
+  // SAME convention as sailDrive above and as src/sailing: windDirection is
+  // where the wind blows TOWARD, so +1 here is the wind dead astern
+  const along = clamp(ux * wx + uz * wz, -1, 1);
+  const theta = Math.acos(clamp(-along, -1, 1)); // 0 = head to wind, π = running
+  const magnitude = Math.min((Math.PI - theta) * p.braceBisect * 0.5, p.braceMax);
+  // starboard = forward rotated −90° about +y
+  const lateral = clamp(uz * -wx + -ux * -wz, -1, 1); // wind FROM, to starboard
+  const tack = clamp(-lateral / Math.max(0.01, p.braceTackWidth), -1, 1);
+  const brace = magnitude * tack;
+  return Number.isFinite(brace) ? brace : 0;
+}
+
+/**
+ * sailTrim (0..1, the sim's value) → §V13 sail state, with hysteresis so a
+ * trim resting on a threshold cannot flip states every frame — each flip
+ * disposes and rebuilds six sail geometries.
+ */
+export function sailStateForTrim(
+  trim: number,
+  current: SailStateId,
+  p: ShipRigParams,
+): SailStateId {
+  const t = clamp(finite(trim, 1), 0, 1);
+  const h = Math.max(0, p.reefHysteresis);
+  // shaking canvas OUT (trim rising) needs to clear the threshold by `h`;
+  // taking it in happens at the bare threshold
+  const furledTop = current === 'furled' ? p.reefFurledBelow + h : p.reefFurledBelow;
+  const reefedTop = current === 'full' ? p.reefReefedBelow : p.reefReefedBelow + h;
+  if (t < furledTop) return 'furled';
+  if (t < reefedTop) return 'reefed';
+  return 'full';
+}
+
+/**
+ * Continuous cloth-drop scale within a state, so hauling on the sheets reads
+ * as the canvas gradually coming in rather than three snapping silhouettes.
+ * 1 at full trim, `trimDropMin` at the point the sail reefs.
+ */
+export function trimDropScale(trim: number, p: ShipRigParams): number {
+  const t = clamp(finite(trim, 1), 0, 1);
+  const span = Math.max(0.05, 1 - p.reefReefedBelow); // §V28 floored divisor
+  const k = clamp((t - p.reefReefedBelow) / span, 0, 1);
+  return p.trimDropMin + (1 - p.trimDropMin) * k;
 }

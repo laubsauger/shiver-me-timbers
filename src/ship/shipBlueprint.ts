@@ -28,8 +28,8 @@ export function buildBrigantineBlueprint(
   const hull = buildHullSections(p, {
     hullCannons: true,
     channels: [
-      { name: 'fore', z: p.foreMastZ },
-      { name: 'main', z: p.mainMastZ },
+      { name: 'fore', z: p.foreMastZ, baseY: p.freeboard },
+      { name: 'main', z: p.mainMastZ, baseY: p.freeboard },
     ],
   });
   return [
@@ -63,10 +63,12 @@ export function buildGalleonBlueprint(
     ...buildCannons([deck]),
     ...buildHullSections(p, {
       hullCannons: false,
+      // baseY = the deck each mast is STEPPED on; the mizzen stands on the
+      // quarterdeck, so its chainplates belong up there too (§V12 clearance)
       channels: [
-        { name: 'fore', z: p.foreMastZ },
-        { name: 'main', z: p.mainMastZ },
-        { name: 'rear', z: p.rearMastZ },
+        { name: 'fore', z: p.foreMastZ, baseY: p.freeboard },
+        { name: 'main', z: p.mainMastZ, baseY: p.freeboard },
+        { name: 'rear', z: p.rearMastZ, baseY: p.freeboard + p.sterncastleRise },
       ],
     }),
     ...buildBowAndTransom(p),

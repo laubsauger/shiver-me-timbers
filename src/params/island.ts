@@ -83,6 +83,53 @@ export interface IslandParams {
   rockGeoVariants: number;
   /** how deep a rock sinks into the ground, fraction of its half-height */
   rockEmbed: number;
+
+  // -- archipelago scatter (T33; §V2: same seed ⇒ same world) ----------------
+  /** islands scattered around the play area */
+  islandCount: number;
+  /** annulus (m) from the world origin islands are placed in */
+  scatterMinDistance: number;
+  scatterMaxDistance: number;
+  /** no island footprint may come within this of the spawn point (m) */
+  spawnClearance: number;
+  /** minimum open-water gap between two island footprints (m) */
+  islandGap: number;
+  /** per-island footprint radius range (m) — scatter overrides `radius` */
+  scatterRadiusMin: number;
+  scatterRadiusMax: number;
+
+  // -- seabed depth field (T33 keystone: ocean shallows tint + §V8 grounding) -
+  /** open-ocean seabed height (m, negative) reported away from any island */
+  seabedOpenDepth: number;
+  /** submerged shelf width (m) blending the island rim out to open depth —
+   *  this is what paints the turquoise halo, so it is a LOOK tunable */
+  seabedShelfWidth: number;
+  /** GPU seabed height texture resolution (texels per side, build time) */
+  seabedTextureSize: number;
+  /** margin (m) added around the island bounds when fitting the texture */
+  seabedTextureMargin: number;
+
+  // -- LOD + shadows (§V17 — the budget is spent, scenery must be cheap) -----
+  /** beyond this camera distance the terrain swaps to the decimated grid (m) */
+  lodTerrainDistance: number;
+  /** vertex stride of the far terrain grid (1 = no decimation) */
+  lodTerrainStride: number;
+  /** palm instance count ramps from full to zero between these distances (m) */
+  lodPalmFull: number;
+  lodPalmCull: number;
+  /** rocks hidden beyond this camera distance (m) */
+  lodRockCull: number;
+  /**
+   * How far outside its own footprint an island stays tagged as a §V10
+   * intersection-foam target (m). flowfoam's injection pass captures every
+   * `userData.foamTarget` mesh in the scene each frame, and its ortho region
+   * is only ~120 m wide around the ship — so islands on the far side of the
+   * map would be 20-odd wasted draws per frame. Must comfortably exceed half
+   * the flowfoam region size.
+   */
+  foamTargetMargin: number;
+  /** island geometry casts sun shadows (the shadow frustum follows the ship) */
+  castShadows: boolean;
 }
 
 export const islandParams: IslandParams = registerParams(
@@ -121,6 +168,26 @@ export const islandParams: IslandParams = registerParams(
     rockDetail: 2,
     rockGeoVariants: 4,
     rockEmbed: 0.35,
+    islandCount: 5,
+    // the sky agent's haze test case wants objects at 2-4 km; the near end
+    // keeps one island reachable within a couple of minutes of sailing
+    scatterMinDistance: 700,
+    scatterMaxDistance: 3600,
+    spawnClearance: 450,
+    islandGap: 400,
+    scatterRadiusMin: 110,
+    scatterRadiusMax: 260,
+    seabedOpenDepth: 45,
+    seabedShelfWidth: 260,
+    seabedTextureSize: 1024,
+    seabedTextureMargin: 400,
+    lodTerrainDistance: 900,
+    lodTerrainStride: 4,
+    lodPalmFull: 500,
+    lodPalmCull: 1400,
+    lodRockCull: 1800,
+    foamTargetMargin: 220,
+    castShadows: true,
   },
   islandParamsMeta(),
 );
@@ -160,5 +227,22 @@ function islandParamsMeta(): Partial<Record<keyof IslandParams, ParamMeta>> {
     rockDetail: { min: 1, max: 4, step: 1 },
     rockGeoVariants: { min: 1, max: 8, step: 1 },
     rockEmbed: { min: 0, max: 1, step: 0.05 },
+    islandCount: { min: 0, max: 12, step: 1 },
+    scatterMinDistance: { min: 200, max: 4000, step: 50 },
+    scatterMaxDistance: { min: 400, max: 4500, step: 50 },
+    spawnClearance: { min: 100, max: 2000, step: 25 },
+    islandGap: { min: 50, max: 1500, step: 25 },
+    scatterRadiusMin: { min: 40, max: 400, step: 10 },
+    scatterRadiusMax: { min: 40, max: 600, step: 10 },
+    seabedOpenDepth: { min: 10, max: 200, step: 1 },
+    seabedShelfWidth: { min: 20, max: 800, step: 10 },
+    seabedTextureSize: { min: 128, max: 2048, step: 128 },
+    seabedTextureMargin: { min: 0, max: 2000, step: 50 },
+    lodTerrainDistance: { min: 100, max: 4000, step: 50 },
+    lodTerrainStride: { min: 1, max: 8, step: 1 },
+    lodPalmFull: { min: 50, max: 3000, step: 25 },
+    lodPalmCull: { min: 50, max: 4000, step: 25 },
+    lodRockCull: { min: 50, max: 4600, step: 25 },
+    foamTargetMargin: { min: 20, max: 1000, step: 10 },
   };
 }

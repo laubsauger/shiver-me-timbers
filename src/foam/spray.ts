@@ -7,9 +7,11 @@
  * inside the spawn square around `centerUniform`; sample every cascade
  * displacement texture there and combine the jacobian like the surface
  * material (Σw − (n−1)). Three gates must ALL pass (sprayMath.crestBreaking /
- * spawnAccepted): jacobian below jacobianFoamBias + sprayBiasOffset (surface
- * genuinely folding), height above crestHeightMin (a crest TOP, not a trough)
- * and the per-candidate lottery. Then respawn at the DISPLACED surface point
+ * spawnAccepted): jacobian below the CEILED threshold that tracks the foam
+ * bias (sprayJacobianThreshold — surface genuinely folding, and no weather
+ * preset can raise it onto flat water), height above the sea-state-scaled
+ * crest gate (crestHeightThreshold — a crest TOP, not a trough, and equally
+ * selective in calm and storm) and the per-candidate lottery. Then respawn at the DISPLACED surface point
  * (candidate + Σ(λDx, λDz), height Σh) with an upward hash-jittered +
  * wind-carried velocity. Candidates that miss a breaking crest stay dead, so
  * emission density scales with breaking area — storms spray hard (§V7), calm
@@ -52,6 +54,8 @@ import {
   T_OFF_UP,
   T_OFF_YAW,
   T_OFF_Z,
+  crestHeightThreshold,
+  sprayJacobianThreshold,
 } from './sprayMath';
 
 export { createBowSpray } from './bowSpray';
@@ -71,9 +75,11 @@ export function createSpray(cascades: FoamCascadeInput[], resolution: number) {
   const count = pool.count; // sanitized — sizes the spawn dispatch too
   const n = resolution;
 
-  const uBias = uniform(0); // oceanParams.jacobianFoamBias, live (§V7)
-  const uBiasOffset = uniform(sprayParams.sprayBiasOffset);
-  const uCrestHeight = uniform(sprayParams.crestHeightMin);
+  // absolute spawn thresholds, recomputed CPU-side per tick from the live
+  // foam bias + sea state (sprayMath.sprayJacobianThreshold /
+  // crestHeightThreshold) — the shader just compares
+  const uJacThreshold = uniform(0);
+  const uCrestHeight = uniform(0);
   const uChance = uniform(sprayParams.spawnChance);
   const uSpawnLift = uniform(sprayParams.spawnLift);
   const uLaunchSpeed = uniform(sprayParams.launchSpeed);
@@ -84,6 +90,11 @@ export function createSpray(cascades: FoamCascadeInput[], resolution: number) {
   const uTime = uniform(0);
   /** spray region center (world XZ) — main thread snaps this to the camera */
   const centerUniform = uniform(new THREE.Vector2());
+  // sea height RMS: bootstrap value only, replaced the first tick a caller
+  // supplies one (and warned about loudly if none ever does)
+  let rms = 0.7;
+  let rmsSupplied = false;
+  let warnedNoRms = false;
 
   const spawnPass = Fn(() => {
     const pa = pool.posAge.element(instanceIndex);
@@ -115,7 +126,7 @@ export function createSpray(cascades: FoamCascadeInput[], resolution: number) {
       // keeps spray on crest TOPS and the lottery thins each breaking band —
       // together they are what stops the whole ocean fizzing (§V6).
       const breaking = jac
-        .lessThan(uBias.add(uBiasOffset))
+        .lessThan(uJacThreshold)
         .and(disp.y.greaterThan(uCrestHeight));
       const roll = hash2(vec2(s.mul(H_CHANCE), uTime.add(T_OFF_CHANCE)));
       If(breaking.and(roll.lessThan(uChance)), () => {
@@ -155,11 +166,34 @@ export function createSpray(cascades: FoamCascadeInput[], resolution: number) {
     centerUniform,
 
     /** run once per fixed sim tick (§V2), after the ocean cascade update;
-     *  windDir = horizontal wind vector (m/s) */
-    update(renderer: THREE.WebGPURenderer, windDir: THREE.Vector2): void {
-      uBias.value = oceanParams.jacobianFoamBias; // storms spray hard (§V7)
-      uBiasOffset.value = sprayParams.sprayBiasOffset;
-      uCrestHeight.value = sprayParams.crestHeightMin;
+     *  windDir = horizontal wind vector (m/s), seaRms = ocean.heightRms */
+    update(
+      renderer: THREE.WebGPURenderer,
+      windDir: THREE.Vector2,
+      /** sea height RMS σ (ocean.heightRms) — drives the §V36 crest gate */
+      seaRms?: number,
+    ): void {
+      // storms spray harder (§V7) via the foam bias, but ceiled so a storm
+      // preset can't drag the trigger onto near-flat water
+      uJacThreshold.value = sprayJacobianThreshold(
+        oceanParams.jacobianFoamBias,
+        sprayParams.sprayBiasOffset,
+        sprayParams.sprayThresholdMax,
+      );
+      // §V36: crest gate is a multiple of the sea's height RMS, never metres
+      if (seaRms !== undefined && Number.isFinite(seaRms)) {
+        rms = seaRms;
+        rmsSupplied = true;
+      } else if (!rmsSupplied && !warnedNoRms) {
+        // fail loud rather than silently gating on a bootstrap constant — the
+        // exact class of bug §V36 exists to prevent
+        warnedNoRms = true;
+        console.warn(
+          'spray: no seaRms supplied to update() — crest gate is running on a ' +
+            'bootstrap σ and will not track weather. Pass ocean.heightRms.',
+        );
+      }
+      uCrestHeight.value = crestHeightThreshold(sprayParams.crestHeightSigma, rms);
       uChance.value = sprayParams.spawnChance;
       uSpawnLift.value = sprayParams.spawnLift;
       uLaunchSpeed.value = sprayParams.launchSpeed;

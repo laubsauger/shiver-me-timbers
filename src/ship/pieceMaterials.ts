@@ -44,17 +44,25 @@ const FAMILY_OF: Record<PieceKind, Family> = {
   sail: 'sail',
 };
 
-function woodTones(family: Exclude<Family, 'sail'>): WoodTones {
+/**
+ * Pieces whose LOCAL y is ship-space y, so `y < 0` genuinely means below the
+ * waterline. Only these may wear the wet boot-top: `cabin` and `gallery` are
+ * also 'hull' family, but they sit high on the stern with their own local
+ * origins — the gallery's would put a dark waterline band across its windows.
+ */
+const WATERLINE_KINDS = new Set<PieceKind>(['hull-section', 'bow', 'transom']);
+
+function woodTones(family: Exclude<Family, 'sail'>, waterline: boolean): WoodTones {
   const p = shipMaterialParams;
   switch (family) {
     case 'hull':
-      return { light: p.hullLight, dark: p.hullDark, wale: true };
+      return { light: p.hullLight, dark: p.hullDark, wale: true, waterline };
     case 'deck':
-      return { light: p.deckLight, dark: p.deckDark, wale: false };
+      return { light: p.deckLight, dark: p.deckDark, wale: false, waterline: false };
     case 'spar':
-      return { light: p.sparLight, dark: p.sparDark, wale: false };
+      return { light: p.sparLight, dark: p.sparDark, wale: false, waterline: false };
     case 'trim':
-      return { light: p.trimLight, dark: p.trimDark, wale: false };
+      return { light: p.trimLight, dark: p.trimDark, wale: false, waterline: false };
   }
 }
 
@@ -89,7 +97,9 @@ const OPEN_SHELL_KINDS = new Set<PieceKind>([
 export function createPieceMaterial(kind: PieceKind): THREE.MeshStandardNodeMaterial {
   const family = FAMILY_OF[kind];
   const handle =
-    family === 'sail' ? createSailClothMaterial() : createWoodMaterial(woodTones(family));
+    family === 'sail'
+      ? createSailClothMaterial()
+      : createWoodMaterial(woodTones(family, WATERLINE_KINDS.has(kind)));
   if (OPEN_SHELL_KINDS.has(kind)) handle.material.side = THREE.DoubleSide;
   // double-sided hull shells: cast from front faces only, otherwise coplanar
   // back faces self-shadow (acne) under the sun map

@@ -36,7 +36,7 @@ import {
 } from '../src/ship/shipBlueprint';
 import { ShipAssembly } from '../src/ship/shipAssembly';
 import { asHullShape, hullHalfWidthAt, hullTopY, type HullShape } from '../src/ship/hullMath';
-import { brigantineParams, galleonParams } from '../src/params/ship';
+import { brigantineParams, galleonParams, shipRigParams } from '../src/params/ship';
 import type { PieceDef } from '../src/ship/pieceTypes';
 
 const stubFactory = (): Material => ({ dispose(): void {} }) as unknown as Material;
@@ -53,9 +53,12 @@ interface ResolvedRope {
 
 /** the plan as the GPU sees it: every rope resolved through the real ship
  *  piece graph. The ship sits at the origin, so world == ship-local. */
-function resolvePlan(blueprint: PieceDef[]): ResolvedRope[] {
+function resolvePlan(blueprint: PieceDef[], brace = 0): ResolvedRope[] {
   const plan = buildRiggingPlan(blueprint);
   const assembly = new ShipAssembly(blueprint, stubFactory);
+  // main.ts calls updateRig() before the ropes block, so the yards may be
+  // braced round to the apparent wind when the anchors are resolved
+  assembly.setRigTrim(brace);
   assembly.group.updateWorldMatrix(true, true);
   const out: ResolvedRope[] = [];
   applyRiggingPlan(plan, {
@@ -96,7 +99,17 @@ function hullSolid(blueprint: PieceDef[]): {
   return { shape, decks };
 }
 
-/** how far INSIDE the ship a point is, in metres (≤ 0 = outside/clear) */
+/**
+ * How far INSIDE the ship a point is, in metres (≤ 0 = outside/clear).
+ *
+ * This is the rope's CENTRELINE, not its tube surface. The margins are thin
+ * on purpose: chainplates stand 0.06 m proud of the shell and rope radii are
+ * 0.022–0.05 m, so a shroud is meant to lie against the topsides at its foot —
+ * a line floating a hand's width off the hull reads as detached. Worst
+ * measured clearance is ~0.015 m (a brace, yards hard over), i.e. the tube
+ * grazes the planking. That is a look question for the browser pass, not a
+ * geometry failure; what must never happen is the centreline going inside.
+ */
 function penetration(p: Point, solid: ReturnType<typeof hullSolid>): number {
   const [x, y, z] = p;
   const { shape, decks } = solid;
@@ -173,16 +186,24 @@ describe('buildRiggingPlan (§V13 sockets → §V12 ropes)', () => {
       const plan = buildRiggingPlan(build());
       const shrouds = plan.filter((r) => r.role === 'shroud');
       expect(shrouds.length).toBeGreaterThanOrEqual(4);
+      const perMastSide = new Map<string, number>();
       for (const shroud of shrouds) {
         const mast = /^anchor-masthead-(\w+)$/.exec(shroud.socketA)?.[1];
         expect(mast, shroud.socketA).toBeDefined();
-        expect(shroud.socketB).toMatch(
-          new RegExp(`^anchor-channel-(port|starboard)-${mast}$`),
-        );
+        // NUMBERED plate: the unnumbered `anchor-channel-{side}-{mast}` is a
+        // deprecated alias the ship system keeps only until this consumes the
+        // fan. Matching it here would silently pin us to one token shroud.
+        const plate = new RegExp(`^anchor-channel-(port|starboard)-${mast}-(\\d+)$`)
+          .exec(shroud.socketB);
+        expect(plate, shroud.socketB).not.toBeNull();
+        const key = `${mast}|${plate![1]}`;
+        perMastSide.set(key, (perMastSide.get(key) ?? 0) + 1);
       }
-      // every mast is shrouded, both sides
-      const masts = new Set(shrouds.map((s) => s.socketA));
-      expect(shrouds.length).toBe(masts.size * 2);
+      // a FAN, not one line: every mast/side pair carries the same ≥2 plates
+      const widths = [...perMastSide.values()];
+      expect(perMastSide.size).toBe(new Set(shrouds.map((r) => r.socketA)).size * 2);
+      expect(Math.min(...widths)).toBeGreaterThanOrEqual(2);
+      expect(new Set(widths).size, 'fan width differs between masts/sides').toBe(1);
     }
   });
 });
@@ -208,6 +229,7 @@ describe('rig LOCALITY (anti spider-web — docs/ship-reference-schema.png)', ()
     expect(shrouds.length).toBeGreaterThanOrEqual(4);
     for (const { rope, a, b } of shrouds) {
       expect(String(rope.socketA)).toMatch(/^anchor-masthead-/);
+      // within the fan's own rake of its mast — never a bay away
       expect(Math.abs(b[2] - a[2]), String(rope.socketA)).toBeLessThanOrEqual(4);
       expect(Math.abs(b[0])).toBeGreaterThan(galleonParams.beam * 0.3);
       expect(b[1]).toBeLessThan(a[1]); // a shroud drops, never rises
@@ -260,14 +282,19 @@ describe('rig LOCALITY (anti spider-web — docs/ship-reference-schema.png)', ()
     }
   });
 
-  it('total line length stays well below the old full-length layout', () => {
-    // WHY: "a little bit excessive" was about how much rope is on screen, not
-    // only where it goes. The pre-rework galleon plan was 48 ropes / 1049 m;
-    // this holds the budget so a new category cannot quietly double it.
+  it('the rig crosses the ship fore-and-aft less than half as much as it did', () => {
+    // WHY: rope COUNT is the wrong budget — a shroud fan adds lines but reads
+    // as rigging, while one stem-to-transom brace reads as web. What makes the
+    // web is line spent travelling ALONG the ship, so measure exactly that:
+    // Σ|Δz| over every rope. Same blueprint, old plan vs new: 584 m → 249 m,
+    // while total length barely moved (974 m → 950 m). This ceiling fails if
+    // a future category starts reaching down the hull again.
     const resolved = resolvePlan(buildGalleonBlueprint());
+    const crossing = resolved.reduce((sum, r) => sum + r.zSpan, 0);
     const total = resolved.reduce((sum, r) => sum + r.length, 0);
-    expect(resolved.length).toBeLessThanOrEqual(46);
-    expect(total).toBeLessThan(900);
+    expect(crossing, 'fore-aft travel — the spider-web metric').toBeLessThan(350);
+    // and a plain sanity ceiling so nothing doubles the rig outright
+    expect(total).toBeLessThan(1100);
   });
 });
 
@@ -313,32 +340,28 @@ describe('rig CLEARANCE (no rope inside the hull or through the deck)', () => {
     }
   });
 
-  it('a mast stepped on a raised deck gets shrouds only once its chainplate is', () => {
-    // WHY: the galleon's rear mast stands on the quarterdeck while
-    // `anchor-channel-*-rear` is still down on the main shell, so its shrouds
-    // would run straight through the castle deck — one of the user's "goes
-    // into the ship" lines. The plan drops them rather than draw that. This
-    // pins BOTH halves: dropped while the socket is low, and restored (and
-    // clear) the moment the ship system lifts it, so nobody has to remember.
-    const low = buildGalleonBlueprint();
+  it('drops a shroud whose chainplate sits below the deck its mast stands on', () => {
+    // WHY: the galleon's mizzen is stepped on the quarterdeck, ~2 m above the
+    // main deck. When its chainplates were on the main shell the shrouds ran
+    // straight THROUGH the quarterdeck — one of the user's "goes into the
+    // ship" lines. The ship system now places a plate on the deck its mast is
+    // stepped on, so the shipped blueprint must rig the mizzen; the guard has
+    // to stay anyway, because nothing stops a future hull rework from
+    // reintroducing the drop. So: shipped ⇒ rigged and clear, sunk ⇒ dropped.
     const mizzen = (plan: RiggingRope[]): RiggingRope[] =>
       plan.filter((r) => r.role === 'shroud' && r.socketA === 'anchor-masthead-rear');
-    expect(mizzen(buildRiggingPlan(low))).toHaveLength(0);
 
-    // lift the two rear chainplates onto the deck the rear mast is stepped on
-    const stepY = low.find((p) => p.id === 'mast-rear')!.transform.position[1];
-    const lifted = buildGalleonBlueprint();
-    for (const piece of lifted) {
-      for (const socket of piece.sockets) {
-        if (!/^anchor-channel-\w+-rear$/.test(socket.id)) continue;
-        socket.position[1] = stepY - piece.transform.position[1] - 0.28;
-      }
-    }
-    const raisedPlan = buildRiggingPlan(lifted);
-    expect(mizzen(raisedPlan)).toHaveLength(2);
-    const solid = hullSolid(lifted);
-    for (const { rope, a, b, length } of resolvePlan(lifted)) {
-      if (rope.role !== 'shroud') continue;
+    const shipped = buildGalleonBlueprint();
+    const plates = [...collectRopeAnchorIds(shipped)].filter((id) =>
+      /^anchor-channel-port-rear-\d+$/.test(id),
+    ).length;
+    expect(plates, 'ship declares a mizzen chainplate fan').toBeGreaterThanOrEqual(1);
+    expect(mizzen(buildRiggingPlan(shipped))).toHaveLength(plates * 2);
+
+    // …and every mizzen shroud clears the castle it runs past
+    const solid = hullSolid(shipped);
+    for (const { rope, a, b, length } of resolvePlan(shipped)) {
+      if (rope.role !== 'shroud' || rope.socketA !== 'anchor-masthead-rear') continue;
       for (const pt of solveCatenary(
         { x: a[0], y: a[1], z: a[2] },
         { x: b[0], y: b[1], z: b[2] },
@@ -346,6 +369,55 @@ describe('rig CLEARANCE (no rope inside the hull or through the deck)', () => {
         24,
       )) {
         expect(penetration([pt.x, pt.y, pt.z], solid)).toBeLessThanOrEqual(0);
+      }
+    }
+
+    // sink the mizzen plates back onto the main shell: the guard must fire
+    const sunk = buildGalleonBlueprint();
+    const mainDeckY = galleonParams.freeboard;
+    for (const piece of sunk) {
+      for (const socket of piece.sockets) {
+        if (!/^anchor-channel-\w+-rear(-\d+)?$/.test(socket.id)) continue;
+        socket.position[1] = mainDeckY - piece.transform.position[1] - 0.28;
+      }
+    }
+    expect(mizzen(buildRiggingPlan(sunk))).toHaveLength(0);
+  });
+
+  it.each(shipCases)('%s: stays clear with the yards braced hard over, either tack', (_n, build) => {
+    // WHY: main.ts now calls updateRig() before the ropes block, so the yards
+    // swing up to ±braceMax about their masts and the running rigging is
+    // resolved against the SWUNG anchor. That geometry never existed when the
+    // brace/sheet leads were chosen: a yard end swinging inboard drags its
+    // brace over the rail, and on the galleon's rear mast the yard half-length
+    // is close to the hull half-breadth. Both tacks, since the fan is
+    // symmetric but the leads are not.
+    const blueprint = build();
+    const solid = hullSolid(blueprint);
+    // guard the guard: if setRigTrim ever stops moving the yard anchors this
+    // whole test silently becomes three copies of the square-yard case
+    const square = resolvePlan(blueprint, 0);
+    const hardOver = resolvePlan(blueprint, shipRigParams.braceMax);
+    const moved = square.reduce(
+      (max, r, i) => Math.max(max, Math.hypot(...r.a.map((v, k) => v - hardOver[i].a[k]))),
+      0,
+    );
+    expect(moved, 'bracing must actually swing the yard anchors').toBeGreaterThan(1);
+
+    for (const brace of [-shipRigParams.braceMax, 0, shipRigParams.braceMax]) {
+      for (const { rope, a, b, length } of resolvePlan(blueprint, brace)) {
+        const curve = solveCatenary(
+          { x: a[0], y: a[1], z: a[2] },
+          { x: b[0], y: b[1], z: b[2] },
+          length,
+          24,
+        );
+        let worst = -Infinity;
+        for (const pt of curve) worst = Math.max(worst, penetration([pt.x, pt.y, pt.z], solid));
+        expect(
+          worst,
+          `${rope.role} ${rope.socketA}→${rope.socketB} enters the ship at brace ${brace.toFixed(2)} rad`,
+        ).toBeLessThanOrEqual(0);
       }
     }
   });

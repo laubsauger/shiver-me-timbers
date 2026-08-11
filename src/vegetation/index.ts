@@ -7,7 +7,7 @@
  */
 import { attribute } from 'three/tsl';
 import type * as THREE from 'three/webgpu';
-import { vegetationParams } from '../params/vegetation';
+import { vegetationParams, type VegetationParams } from '../params/vegetation';
 import { buildPalmGeometry } from './palmGeometry';
 import { createPalmMaterial } from './palmMaterial';
 import { applyWindSway } from './windSway';
@@ -16,7 +16,19 @@ import { scatterPalms } from './scatter';
 export { buildPalmGeometry } from './palmGeometry';
 export { createPalmMaterial } from './palmMaterial';
 export { applyWindSway, type WindSway } from './windSway';
-export { scatterPalms, generatePlacements, ringClusterPlacement } from './scatter';
+export { scatterPalms, generatePlacements, ringClusterPlacement, sortForLod } from './scatter';
+
+/**
+ * Sea state → sway strength. Keeps the reference wind speed in params (§V16)
+ * instead of a literal at the call site, so retuning the sea retunes the
+ * palms with it.
+ */
+export function palmWindStrength(
+  windSpeed: number,
+  p: VegetationParams = vegetationParams,
+): number {
+  return windSpeed / Math.max(p.windReferenceSpeed, 1e-3); // §V28 floored divisor
+}
 
 export interface CreatePalmsOptions {
   seed: number;

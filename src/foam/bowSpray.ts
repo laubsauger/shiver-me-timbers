@@ -20,12 +20,13 @@
  * Physics/render: sprayPool.ts.
  *
  *   createBowSpray() => {
- *     update(renderer, bow: { bowWorldPos: Vector3;   // stem point on the hull
- *                             shipVelocity: Vector3;  // world m/s
- *                             immersionDepth: number; // bow submersion (m),
- *                                                     //   from buoyancy §V8
- *                             shipForward?: Vector3;  // unit heading, OPTIONAL
- *                           }): void;                 //   (falls back to vel)
+ *     update(renderer, bow: { cutwater?: CutwaterState; // §V8 hullContact —
+ *                                                      //   the real emitter
+ *                             bowWorldPos: Vector3;    // fallback stem point
+ *                             shipVelocity: Vector3;   // world m/s
+ *                             immersionDepth: number;  // fallback submersion
+ *                             shipForward?: Vector3;   // unit heading
+ *                           }): void;
  *     mesh; dispose();
  *   }
  */
@@ -57,11 +58,41 @@ import {
   bowEmission,
 } from './sprayMath';
 
+/**
+ * The cutwater slice of `HullContactResult` from src/sea-physics/hullContact
+ * (§V8 — physics owns the sampling, this module only consumes it). Declared
+ * structurally rather than imported so the emitter stays engine-agnostic and
+ * testable; the field names and units match that module exactly.
+ *
+ * NOTE `world` is the interpolated crossing point ON THE SURFACE (depth 0 by
+ * construction) — NOT a hull point. Spray spawns there directly; adding
+ * `depth` to it would lift every sheet a second time.
+ */
+export interface CutwaterState {
+  /** false when the bow is clear of the water — emit nothing */
+  inContact: boolean;
+  /** world crossing point, already on the surface: [x, y, z] */
+  world: readonly number[];
+  /** immersion of the forward-most WET slice (m, ≥ 0) — burst intensity */
+  depth: number;
+  /** burial rate there (m/s, > 0 = driving under) */
+  rate: number;
+  /** hull half-breadth at the crossing (m) — how wide a sheet to throw */
+  halfWidth: number;
+}
+
 export interface BowState {
   bowWorldPos: THREE.Vector3;
   shipVelocity: THREE.Vector3;
   /** how far the bow waterline point is submerged this frame (m, ≥ 0) */
   immersionDepth: number;
+  /**
+   * Live cutwater from createHullContact(...).cutwater (optional only until
+   * main.ts wires it). When absent the emitter falls back to the geometric
+   * bow point and differences immersion itself — which IS the detaching
+   * behaviour the user reported, so supply this.
+   */
+  cutwater?: CutwaterState;
   /**
    * Unit heading of the hull in world XZ (optional). PREFERRED over the
    * velocity direction: a ship making leeway crabs, and basing the ejection
@@ -109,12 +140,13 @@ export function createBowSpray() {
       const rMag = hash2(vec2(s.mul(H_BOW_MAG), uTime.add(T_BOW_MAG)));
       const sideSign = select(rSide.lessThan(0.5), float(-1), float(1));
 
-      // CPU mirror: sprayMath.bowSpawnOffset — seed along the cutwater LINE
-      // (stem run ahead of the bow point + outboard flank), not one point
+      // CPU mirror: sprayMath.bowSpawnOffset — seed along the cutwater LINE:
+      // outboard flank + a run AFT of the crossing (negative: the hull
+      // shoulders water backward from where it enters, never ahead of it).
       const lateral = uSideOffset
         .mul(rSide.mul(2).sub(1).abs().mul(0.65).add(0.35))
         .mul(sideSign);
-      const stem = uStemLength.mul(rMag);
+      const stem = uStemLength.mul(rMag).negate();
       const offXZ = side.mul(lateral).add(forward.mul(stem));
 
       // CPU mirror: sprayMath.bowLaunchVelocity — shoved FORWARD past the bow
@@ -145,23 +177,42 @@ export function createBowSpray() {
       uSpread.value = sprayParams.bowLaunchSpread;
       uForwardThrow.value = sprayParams.bowForwardThrow;
       uRise.value = sprayParams.bowRise;
-      uSideOffset.value = sprayParams.bowSideOffset;
       uStemLength.value = sprayParams.bowStemLength;
       // NaN from a broken buoyancy frame must not reach the spawn buffers —
       // it would persist in pos/vel for a full particle lifetime
       const fin = (v: number) => (Number.isFinite(v) ? v : 0);
-      const immersion = Math.max(0, fin(bow.immersionDepth));
-      // the caller's bow point sits on the HULL, and immersion is how far the
-      // water surface is above it — spray must leave the WATERLINE or it
-      // fountains out of the planking / fires from mid-air (user: "the
-      // piercing effect is disconnected from the bow"). The extra lift keeps
-      // the sprite out of the surface's depth buffer: the ocean writes depth
-      // now, so a sheet born coplanar with the water is depth-rejected.
-      (uBowPos.value as THREE.Vector3).set(
-        fin(bow.bowWorldPos.x),
-        fin(bow.bowWorldPos.y) + immersion + Math.max(0, sprayParams.bowSpawnLift),
-        fin(bow.bowWorldPos.z),
-      );
+      // Emit from the TRUE cutwater — the point where the hull outline crosses
+      // the surface this instant — falling back to the geometric bow only
+      // until the sampler is wired. A fixed stem point lifts clear in a trough
+      // and keeps spraying from mid-air; the crossing point cannot, since it
+      // is defined as being on the water.
+      const cut = bow.cutwater;
+      const lift = Math.max(0, sprayParams.bowSpawnLift);
+      // cutwater.world is ALREADY on the surface (depth 0); the fallback bow
+      // point is on the HULL with the surface `immersion` above it. Only the
+      // fallback needs the immersion added — the lift keeps the sprite out of
+      // the surface's depth buffer either way (the ocean writes depth now, so
+      // a sheet born coplanar with the water is depth-rejected).
+      const immersion = Math.max(0, fin(cut ? cut.depth : bow.immersionDepth));
+      if (cut) {
+        (uBowPos.value as THREE.Vector3).set(
+          fin(cut.world[0]),
+          fin(cut.world[1]) + lift,
+          fin(cut.world[2]),
+        );
+      } else {
+        (uBowPos.value as THREE.Vector3).set(
+          fin(bow.bowWorldPos.x),
+          fin(bow.bowWorldPos.y) + immersion + lift,
+          fin(bow.bowWorldPos.z),
+        );
+      }
+      // sheet width follows the HULL's actual breadth where it enters the
+      // water — a fine entry throws a narrow sheet, the full beam a wide one.
+      // Hull-relative, so it survives a different ship (§V18) without retuning.
+      uSideOffset.value = cut
+        ? Math.max(0, fin(cut.halfWidth)) * sprayParams.bowSideFraction
+        : sprayParams.bowSideOffset;
       uTime.value += SIM_DT;
       pool.step(renderer); // physics always runs — airborne spray keeps falling
 
@@ -179,15 +230,27 @@ export function createBowSpray() {
         (uForward.value as THREE.Vector2).set(hx / hLen, hz / hLen);
       }
 
-      // burial rate = how fast the stem is diving INTO the water this tick.
-      // It is what separates "shouldering water aside at cruise" from
-      // "slamming a swell", and it is derivable here — no new main-thread
-      // signal needed. First frame has no history → no impact.
-      const burialRate =
-        prevImmersion === null ? 0 : Math.max(0, (immersion - prevImmersion) / SIM_DT);
+      // Burial rate = how fast the cutwater is diving INTO the water. Prefer
+      // the sampler's value: differencing our own immersion also registers the
+      // emitter JUMPING between stations (or between hull and contact point),
+      // which would read as a slam that never happened.
+      const burialRate = cut
+        ? Math.max(0, fin(cut.rate))
+        : prevImmersion === null
+          ? 0
+          : Math.max(0, (immersion - prevImmersion) / SIM_DT);
       prevImmersion = immersion;
 
-      const { rate, sheet } = bowEmission(immersion, speed, burialRate, sprayParams);
+      // no contact signal yet → fall back to "immersed at all", the best
+      // proxy a fixed geometric bow point can offer
+      const inContact = cut ? cut.inContact : immersion > 0;
+      const { rate, sheet } = bowEmission(
+        immersion,
+        speed,
+        burialRate,
+        inContact,
+        sprayParams,
+      );
       if (rate <= 0) return;
       uSheet.value = sheet;
       const next = advanceBurstCursor(cursorState, rate, SIM_DT, count);

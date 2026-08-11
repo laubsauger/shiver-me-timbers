@@ -1,0 +1,206 @@
+/**
+ * Seabed depth field (T33) — the single source of "how deep is the water at
+ * this world XZ", shared by three consumers that must not disagree:
+ *
+ *  1. ocean surface material  → shallows turquoise tint over sand (§V20)
+ *  2. buoyancy (§V8)          → the ship shoals and grounds instead of
+ *                               floating over land
+ *  3. caustics (§V34, T32)    → seabed/shallows receiver depth attenuation
+ *
+ * Two faces of the SAME function so those consumers cannot drift:
+ *  - CPU: `heightAt(x,z)` / `depthAt(x,z, waterY)` — exact, reads the island
+ *    heightmaps directly (bilinear, identical to the rendered terrain at
+ *    vertices), for sim code.
+ *  - GPU: a single world-space height texture + TSL sampler nodes, for
+ *    materials. The texture is BAKED FROM the CPU sampler, so it is the same
+ *    field quantized, never a second implementation.
+ *
+ * Shape away from an island: the heightmap only spans its own footprint and
+ * reports `-rimDepth` outside it, which would put a hard depth cliff (and so
+ * a hard tint ring) at the footprint edge. `seabedShelfWidth` blends the rim
+ * out to `seabedOpenDepth` — that ramp IS the turquoise halo, so it is a look
+ * tunable, not an implementation detail.
+ *
+ * Zero magic constants: everything comes from params/island.ts (§V16).
+ */
+import * as THREE from 'three/webgpu';
+import { float, smoothstep, texture, uniform } from 'three/tsl';
+import { islandParams, type IslandParams } from '../params/island';
+import type { IslandHeightmap } from './heightmap';
+
+/** one island's contribution: its local heightmap plus its world centre */
+export interface SeabedIsland {
+  heightmap: IslandHeightmap;
+  /** island centre on the world XZ plane (waterline stays world y = 0) */
+  center: [number, number];
+}
+
+/** smoothstep(0, w, x) — CPU mirror of the shader-side shelf ramp */
+function shelfRamp(x: number, w: number): number {
+  const t = Math.min(Math.max(x / Math.max(w, 1e-3), 0), 1);
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * Seabed height (m, waterline = 0, negative below) at a world XZ. Pure over
+ * (islands, params): no GPU, no three types — sim code and tests call this.
+ */
+export function sampleSeabedHeight(
+  islands: readonly SeabedIsland[],
+  x: number,
+  z: number,
+  p: IslandParams = islandParams,
+): number {
+  const open = -p.seabedOpenDepth;
+  let h = open;
+  for (const isl of islands) {
+    const lx = x - isl.center[0];
+    const lz = z - isl.center[1];
+    const d = Math.hypot(lx, lz);
+    const R = isl.heightmap.worldRadius;
+    if (d > R + p.seabedShelfWidth) continue;
+    // heightAt already reports -rimDepth outside the footprint, so the local
+    // value is continuous across d = R; the shelf ramp carries it to open sea
+    const local = isl.heightmap.heightAt(lx, lz);
+    const t = shelfRamp(d - R, p.seabedShelfWidth);
+    const hi = local + (open - local) * t;
+    if (hi > h) h = hi;
+  }
+  return h;
+}
+
+export interface SeabedField {
+  /** seabed height (m, waterline 0, negative below) at a world XZ */
+  heightAt(x: number, z: number): number;
+  /** water column depth (m, ≥ 0) under `waterY` — 0 where the seabed is dry */
+  depthAt(x: number, z: number, waterY?: number): number;
+  /** baked height texture (r16f, meters) for materials — see the node helpers */
+  texture: THREE.DataTexture;
+  /** world XZ of texel (0,0); uv = (worldXZ − origin) / size */
+  origin: [number, number];
+  /** world span (m) the texture covers on both axes */
+  size: number;
+  /** seabed height reported where no island reaches (m, negative) */
+  openHeight: number;
+  /** live uniforms backing the TSL helpers (origin, 1/size) */
+  uniforms: {
+    origin: ReturnType<typeof uniform>;
+    invSize: ReturnType<typeof uniform>;
+  };
+  dispose(): void;
+}
+
+/** square world AABB covering every island footprint + shelf + margin */
+function fitBounds(
+  islands: readonly SeabedIsland[],
+  p: IslandParams,
+): { origin: [number, number]; size: number } {
+  if (islands.length === 0) return { origin: [-1, -1], size: 2 };
+  let minX = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxZ = -Infinity;
+  for (const isl of islands) {
+    const reach = isl.heightmap.worldRadius + p.seabedShelfWidth + p.seabedTextureMargin;
+    minX = Math.min(minX, isl.center[0] - reach);
+    maxX = Math.max(maxX, isl.center[0] + reach);
+    minZ = Math.min(minZ, isl.center[1] - reach);
+    maxZ = Math.max(maxZ, isl.center[1] + reach);
+  }
+  // square, centred: one `size` scalar keeps the shader mapping a single mul
+  const size = Math.max(maxX - minX, maxZ - minZ, 1);
+  const cx = (minX + maxX) / 2;
+  const cz = (minZ + maxZ) / 2;
+  return { origin: [cx - size / 2, cz - size / 2], size };
+}
+
+/**
+ * Build the shared seabed field. The texture is filled by evaluating
+ * `sampleSeabedHeight` per texel, so GPU and CPU can only differ by
+ * quantization (texel size = size / resolution, half-float height).
+ */
+export function createSeabedField(
+  islands: readonly SeabedIsland[],
+  p: IslandParams = islandParams,
+): SeabedField {
+  const res = Math.max(4, Math.floor(p.seabedTextureSize));
+  const { origin, size } = fitBounds(islands, p);
+  const openHeight = -p.seabedOpenDepth;
+
+  // half float keeps a 1024² field at 2 MB and stays LINEAR-FILTERABLE on
+  // WebGPU (r32float is not, without the float32-filterable feature)
+  const data = new Uint16Array(res * res);
+  const cell = size / res;
+  for (let iz = 0; iz < res; iz++) {
+    const wz = origin[1] + (iz + 0.5) * cell;
+    for (let ix = 0; ix < res; ix++) {
+      const wx = origin[0] + (ix + 0.5) * cell;
+      data[iz * res + ix] = THREE.DataUtils.toHalfFloat(
+        sampleSeabedHeight(islands, wx, wz, p),
+      );
+    }
+  }
+
+  const tex = new THREE.DataTexture(data, res, res, THREE.RedFormat, THREE.HalfFloatType);
+  tex.name = 'island/seabedHeight';
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  // clamp is correct, not a fallback: the margin guarantees the border ring is
+  // already open-ocean depth, so sampling far outside reads open sea
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+
+  const uniforms = {
+    origin: uniform(new THREE.Vector2(origin[0], origin[1])),
+    invSize: uniform(1 / size),
+  };
+
+  return {
+    heightAt: (x, z) => sampleSeabedHeight(islands, x, z, p),
+    depthAt: (x, z, waterY = 0) =>
+      Math.max(waterY - sampleSeabedHeight(islands, x, z, p), 0),
+    texture: tex,
+    origin,
+    size,
+    openHeight,
+    uniforms,
+    dispose(): void {
+      tex.dispose();
+    },
+  };
+}
+
+/**
+ * TSL: seabed height (m, waterline 0) at a world-XZ node. `worldXZ` is a vec2
+ * of world (x, z) — e.g. the ocean surface material's own `worldXZ`.
+ */
+export function seabedHeightNode(field: SeabedField, worldXZ: any): any {
+  const uv = worldXZ.sub(field.uniforms.origin).mul(field.uniforms.invSize);
+  return texture(field.texture, uv).r;
+}
+
+/**
+ * TSL: shallowness 0..1 — 0 in water at least `fullDepth` deep, 1 where the
+ * seabed reaches the water surface. This is the factor the ocean material
+ * should feed to its shallow-tint mix.
+ *
+ * `waterY` is the water surface height at the same XZ (the displaced FFT
+ * height, so the tint breathes with the swell); `fullDepth` is the depth (m)
+ * at which the shallow tint has completely given way to the deep body colour
+ * — it belongs to whoever owns the look, hence a caller-supplied node.
+ *
+ * §V23: functional smoothstep, and e0 > e1 reads "1 at/below e1, 0 at/above
+ * e0" — here 1 at depth 0, 0 at depth fullDepth.
+ * §V28: fullDepth is floored so a 0 from the panel cannot divide by zero.
+ */
+export function seabedShallowFactorNode(
+  field: SeabedField,
+  worldXZ: any,
+  waterY: any,
+  fullDepth: any,
+): any {
+  const depth = waterY.sub(seabedHeightNode(field, worldXZ)).max(0);
+  return smoothstep(float(fullDepth).max(1e-3), float(0), depth);
+}

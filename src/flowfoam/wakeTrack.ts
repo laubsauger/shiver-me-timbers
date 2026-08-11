@@ -79,7 +79,35 @@ export interface TrackConfig {
    * turn rate spends capacity where the trail actually bends.
    */
   maxTurn: number;
+  /**
+   * Distance (m) over which the required sample spacing DOUBLES-ish: spacing
+   * grows linearly as `spacing · (1 + dist/coarsen)`, so the track is dense at
+   * the hull and progressively sparser astern — the same idea as the ocean's
+   * clipmap, applied to wake history.
+   *
+   * WHY: the user wants a wake that runs for hundreds of metres, but the GPU
+   * walks every segment for every texel, so capacity is the one thing that
+   * must not grow. Uniform 2.2 m spacing spends all 48 samples in the first
+   * 105 m. Grading the spacing buys ~5× the reach for ZERO extra GPU cost,
+   * and the far tail is a smooth fading streak that needs no detail anyway.
+   */
+  coarsen: number;
+  /**
+   * Track distance (m) inside which samples are NEVER thinned. All the detail
+   * the eye can resolve — hull shoulder, cutwater, the near V — lives here, and
+   * this is also the zone a turn has to stay crisp in.
+   */
+  coarsenStart: number;
 }
+
+/**
+ * Hard ceiling on the spacing multiplier. Structural, not a look knob (same
+ * class as TRACK_CAPACITY): without it `required` grows without bound, every
+ * interior sample eventually violates it however far it has already been
+ * thinned, and the track collapses to its two endpoints. Capping the grade is
+ * what makes the thinning converge instead of run away.
+ */
+export const COARSEN_MAX_MUL = 8;
 
 /**
  * Minimum travel (as a fraction of `spacing`) before a turn may trigger a
@@ -127,6 +155,76 @@ export function approachExp(current: number, target: number, dt: number, tau: nu
   if (!Number.isFinite(current) || !Number.isFinite(target)) return 0;
   if (!(tau > 0) || !(dt > 0)) return target;
   return current + (target - current) * (1 - Math.exp(-dt / tau));
+}
+
+/**
+ * Required spacing (m) at track distance `d`: flat inside `coarsenStart`,
+ * then growing linearly, then flat again at COARSEN_MAX_MUL× — dense at the
+ * hull, sparse astern, and BOUNDED so the thinning has a fixed point.
+ * Returns 0 inside the protected zone (0 ≤ any gap → never thinned).
+ */
+export function trackSpacingAt(d: number, cfg: TrackConfig): number {
+  const u = Math.max(d, 0) - cfg.coarsenStart;
+  if (u <= 0) return 0;
+  const mul = Math.min(1 + u / Math.max(cfg.coarsen, 1e-6), COARSEN_MAX_MUL);
+  return cfg.spacing * mul;
+}
+
+/**
+ * Nominal reach (m) of a full-capacity graded track. Integrating
+ * dn = dd / spacing(d) over the capacity gives the closed form below.
+ *
+ * A pure function of the params (NOT of the live track), because the wake's
+ * tail fade is anchored to it: using the live maximum would fade the whole
+ * young wake to nothing in the first seconds after leaving harbour.
+ */
+export function trackReachCpu(cfg: TrackConfig): number {
+  const s0 = Math.max(cfg.spacing, 1e-6);
+  const L = Math.max(cfg.coarsen, 1e-6);
+  let n = cfg.capacity;
+  // zone 1 — protected, spacing s0
+  const n1 = Math.min(n, cfg.coarsenStart / s0);
+  let d = n1 * s0;
+  n -= n1;
+  if (n <= 0) return d;
+  // zone 2 — graded, spacing s0·(1 + u/L); ∫du/spacing = (L/s0)·ln(1 + U/L)
+  const n2 = (L / s0) * Math.log(COARSEN_MAX_MUL);
+  if (n <= n2) return d + L * (Math.exp((n * s0) / L) - 1);
+  d += L * (COARSEN_MAX_MUL - 1);
+  n -= n2;
+  // zone 3 — capped, constant spacing s0·COARSEN_MAX_MUL
+  return d + n * s0 * COARSEN_MAX_MUL;
+}
+
+/**
+ * Thin the history to the graded spacing: walk newest → oldest and drop any
+ * sample that sits closer to the last kept one than `trackSpacingAt` requires.
+ * Samples that carry real heading change are kept regardless, so a turn stays
+ * a curve however far astern it drifts — straights, which is where nearly all
+ * the samples live, are what actually get thinned. The tail is never dropped
+ * (it is the end of the trail).
+ */
+export function coarsenTrack(t: WakeTrack, cfg: TrackConfig): void {
+  const s = t.samples;
+  if (s.length < 3) return;
+  const n = s.length;
+  // ANCHOR AT THE TAIL and walk inward. Walking outward from the head instead
+  // is a meat grinder: the protected zone always supplies a neighbour one
+  // emission-spacing behind, so every sample crossing `coarsenStart` measures
+  // the same 2.2 m gap against a fresh dense neighbour, fails the (slightly
+  // larger) requirement, and is dropped — for ever. Nothing can accumulate in
+  // the graded zone and the whole history collapses to the protected zone plus
+  // the tail. Anchored at the tail, gaps accumulate outward-in and each spacing
+  // tier reaches a stable fixed point.
+  const out: TrackSample[] = [s[n - 1]];
+  for (let i = n - 2; i >= 0; i--) {
+    const keep = out[out.length - 1];
+    const gap = Math.hypot(s[i].x - keep.x, s[i].z - keep.z);
+    const turn = Math.acos(Math.min(1, Math.max(-1, s[i].fx * keep.fx + s[i].fz * keep.fz)));
+    if (i === 0 || gap >= trackSpacingAt(s[i].dist, cfg) || turn >= cfg.maxTurn) out.push(s[i]);
+  }
+  out.reverse(); // back to newest-first
+  t.samples = out;
 }
 
 const isFinite2 = (a: number, b: number): boolean => Number.isFinite(a) && Number.isFinite(b);
@@ -189,8 +287,11 @@ export function advanceTrack(t: WakeTrack, pose: TrackPose, dt: number, cfg: Tra
       age: 0,
       dist: 0,
     });
-    while (t.samples.length > cfg.capacity) t.samples.pop();
   }
+  // grade the spacing FIRST so length is bounded by thinning, not truncation —
+  // truncating would cut the trail short exactly where the user wants it long
+  coarsenTrack(t, cfg);
+  while (t.samples.length > cfg.capacity) t.samples.pop();
 }
 
 /**

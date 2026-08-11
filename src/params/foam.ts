@@ -42,6 +42,30 @@ export interface FoamParams {
   crestBlurAcross: number;
   /** detail-noise stretch along the crest line (1 = isotropic blobs) */
   crestElongation: number;
+  /**
+   * foam value above which coverage counts as SATURATED (storm seas). Past
+   * it the detail noise broadens and flattens into wind-driven sheets —
+   * detail tuned for 10% coverage reads as noise at 80% (§V7 big patches).
+   */
+  sheetKnee: number;
+  /** detail frequency multiplier at full saturation (< 1 = broader patches) */
+  sheetBroaden: number;
+  /** how far saturated foam flattens toward an unbroken sheet, 0..1 */
+  sheetFlatten: number;
+  /**
+   * distance at which foam DETAIL starts fading out, measured in crackle
+   * FEATURE WIDTHS (1/crackleScale metres each) rather than metres, so
+   * retuning the detail frequency cannot silently un-fix the horizon sizzle.
+   */
+  detailFadeFeatures: number;
+  /** multiplier from fade start to fully faded (≥ 1.05) */
+  detailFadeSpan: number;
+  /**
+   * 0..1 — how much the far-field fade also removes foam COVERAGE, not just
+   * its detail. 0 = off (default): distant whitecaps stay as lighter sea.
+   * Raise only if the horizon still reads too white after the detail fade.
+   */
+  farFoamFade: number;
 }
 
 export const foamParams: FoamParams = registerParams(
@@ -50,7 +74,7 @@ export const foamParams: FoamParams = registerParams(
     injectStrength: 4.0,
     decayHalfLife: 0.9,
     blurRadius: 1.0,
-    crackleScale: 3.0,
+    crackleScale: 2.4,
     mottleScale: 0.35,
     tintWarmth: 0.12,
     uvWarpScale: 0.12,
@@ -62,6 +86,12 @@ export const foamParams: FoamParams = registerParams(
     crestBlurAlong: 2.6,
     crestBlurAcross: 0.5,
     crestElongation: 3.0,
+    sheetKnee: 0.7,
+    sheetBroaden: 0.35,
+    sheetFlatten: 0.5,
+    detailFadeFeatures: 260,
+    detailFadeSpan: 3.5,
+    farFoamFade: 0,
   },
   foamParamsMeta(),
 );
@@ -83,5 +113,11 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
     crestBlurAlong: { min: 0.25, max: 5, step: 0.05 },
     crestBlurAcross: { min: 0.1, max: 3, step: 0.05 },
     crestElongation: { min: 1, max: 8, step: 0.1 },
+    sheetKnee: { min: 0.1, max: 1, step: 0.01 },
+    sheetBroaden: { min: 0.05, max: 1, step: 0.01 },
+    sheetFlatten: { min: 0, max: 1, step: 0.01 },
+    detailFadeFeatures: { min: 10, max: 2000, step: 10 },
+    detailFadeSpan: { min: 1.05, max: 10, step: 0.05 },
+    farFoamFade: { min: 0, max: 1, step: 0.05 },
   };
 }

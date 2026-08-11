@@ -39,6 +39,7 @@ function gridFromParams(): SurfaceGridOptions {
 export class OceanSurface {
   readonly group: THREE.Group;
   readonly mesh: THREE.Mesh;
+  private sim: OceanSimulation;
   private surface: OceanSurfaceMaterial;
   private grid: SurfaceGridOptions;
 
@@ -48,13 +49,14 @@ export class OceanSurface {
     flowFoam?: FlowFoam,
     opts: OceanSurfaceOptions = {},
   ) {
+    this.sim = sim;
     this.grid = opts.grid ?? gridFromParams();
     this.surface = buildOceanSurfaceMaterial(
       sim,
       foam,
       flowFoam,
       this.grid,
-      opts.sunLight,
+      sp.shadowsEnabled ? opts.sunLight : undefined,
     );
     this.group = new THREE.Group();
     this.mesh = new THREE.Mesh(buildOceanGrid(this.grid), this.surface.material);
@@ -74,6 +76,11 @@ export class OceanSurface {
     this.group.position.set(ox, 0, oz);
     this.surface.originUniform.value.set(ox, oz);
     this.surface.timeUniform.value = time;
+    // sea-state scale for the shading's crest thresholds — the sim recomputes
+    // it whenever the spectrum is rebuilt, so weather changes carry through
+    this.surface.seaRmsUniform.value = this.sim.heightRms;
+    // normals must solve the same surface the vertices drew (§B storm fold)
+    this.surface.choppinessUniform.value = this.sim.effectiveChoppiness();
     if (sunDirection) this.surface.sunDirectionUniform.value.copy(sunDirection);
     // §B.3: linearDepth() is normalized over the camera range — the material
     // needs the live far plane to turn it back into meters

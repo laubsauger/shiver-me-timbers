@@ -17,10 +17,17 @@
 import * as THREE from 'three';
 import type { AABB } from './pieceTypes';
 import { hullEnvelope, hullTopY, sectionHalf, type HullShape } from './hullMath';
+import { H_STEPS, U_HALF } from './pieceGeometryHull';
 import { mergeNonIndexed } from './pieceGeometryShapes';
 
-const U_STEPS = 14;
-const H_STEPS = 10;
+/**
+ * The transom's grid MUST land on the shell's own stations or the seam opens.
+ * Its side edge shares the shell's height samples (H_STEPS) and its bottom
+ * row shares the hull bottom's width samples (2 × U_HALF); only the counter
+ * ABOVE the sheer line, which mates with nothing, uses its own rows.
+ */
+const U_STEPS = 2 * U_HALF;
+const COUNTER_ROWS = 3;
 
 /** extra hints the transom piece carries beyond the shared hull set */
 export interface TransomShape extends HullShape {
@@ -54,12 +61,18 @@ export function buildTransomGeometry(s: TransomShape): THREE.BufferGeometry {
   const rise = Math.max(0, s.counterRise ?? 0);
   const crown = Math.max(0, s.crown ?? 0);
   const span = topY + s.draft; // shell height at the stern
-  const hTop = 1 + rise / Math.max(0.1, span); // grid runs 0..hTop
+  const hTop = 1 + rise / Math.max(0.1, span);
+  // rows 0..H_STEPS are the shell's OWN height samples (shared seam), then
+  // the counter carries on above the sheer where nothing has to match
+  const rows: number[] = [];
+  for (let j = 0; j <= H_STEPS; j++) rows.push(j / H_STEPS);
+  if (hTop > 1.001) {
+    for (let j = 1; j <= COUNTER_ROWS; j++) rows.push(1 + ((hTop - 1) * j) / COUNTER_ROWS);
+  }
   const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
-  for (let j = 0; j <= H_STEPS; j++) {
-    const h = (hTop * j) / H_STEPS;
+  for (const h of rows) {
     const half = transomHalf(h, s);
     const y = -s.draft + span * h;
     // crown vanishes at the bottom and top edges (sin) and at both sides
@@ -72,7 +85,7 @@ export function buildTransomGeometry(s: TransomShape): THREE.BufferGeometry {
     }
   }
   const row = U_STEPS + 1;
-  for (let j = 0; j < H_STEPS; j++) {
+  for (let j = 0; j < rows.length - 1; j++) {
     for (let i = 0; i < U_STEPS; i++) {
       const a = j * row + i;
       const b = (j + 1) * row + i;
