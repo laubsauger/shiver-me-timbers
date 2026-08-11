@@ -55,6 +55,8 @@ V25: underwater camera: submerged → full-screen underwater grade (teal exp fog
 V26: ocean reflections = PLANAR (mirrored scene pass: ship, islands, clouds visible in water) per talk 03:59 — SSR ⊥, analytic-sky-only ⊥ final. Reflection res ≤ half, blur ok, fresnel-blended.
 V27: deck water = event-driven per talk 11:12: bow-immersion sensor (immersion+speed gates, same signal as bow spray) → splash() injection; runs for player ship only (1 ship budget). Passive always-on splashing ⊥.
 V28: GPU safety: ∀ shader division ! floored divisor (`.max(ε)`); ∀ dispatch count & buffer size from sanitized construction-time ints; ∀ caller-fed uniform ! finite-guarded; dead/invisible particles ! zero-size (no opacity-0 rasterization). TSL Loop ! literal bounds.
+V29: compute-written storage buffer sampled by render ! SEPARATE read-only view (`storage(buf.value,type,count).toReadOnly()`). `.toReadOnly()` on the write-side node ⊥ — setAccess returns `this`, mutates the shared node, compute writes then compile vs a read-only binding & vanish SILENT (no error, no NaN, buffer stays 0). ∀ new compute→render buffer ! one browser readback proving non-zero.
+V30: ocean view = open 360° horizon, ≥ ~4km readable sea. Visible world-edge/cutoff ⊥, fog wall ⊥, "square of water" ⊥. Displacement/normal fades ! ride LOD, never end in a hard ring.
 
 ## §T TASKS
 id|status|task|cites
@@ -99,3 +101,4 @@ B4|2026-08-11|3s global ocean pulse: sparkle twinkle shared one time phase — a
 B5|2026-08-11|GPU wedge: spray life=0 → 0/0 NaN age → NaN-size additive quads ×4096 = fill-rate hang; also dead particles rasterized at sizeMax|V28
 B6|2026-08-11|ship never pitched: sailing recompose = pure yaw∘heel, erased buoyancy pitch 60×/s; fixed: Tait-Bryan decompose preserves pitch, heel=offset, yaw single-owner|-
 B7|2026-08-11|ships floated on launch-time sea: CpuOcean never rebuilt h0 on param change while GPU did → V8 divergence under weather|-
+B8|2026-08-11|`.toReadOnly()` mutates shared StorageBufferNode (setAccess→`this`, no clone) → render-side view downgraded the compute's WRITE binding → ropes invisible many sessions (mesh.count=768, descs uploaded, points all-zero) + whole spray pool frozen @ buffer-zero. Silent: no error, no NaN|V29

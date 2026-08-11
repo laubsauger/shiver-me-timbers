@@ -9,7 +9,7 @@
 import type * as THREE from 'three/webgpu';
 import { ropeParams } from '../params/ropes';
 import type { Vec3Like } from './catenaryMath';
-import { createRopeCompute } from './ropeCompute';
+import { createRopeCompute, type RopeCompute } from './ropeCompute';
 import { createRopeMesh } from './ropeMesh';
 
 export interface RopesOptions {
@@ -38,6 +38,8 @@ export interface Ropes {
   computeNode: THREE.ComputeNode;
   /** add to the scene once; draws all rope segments in one instanced call */
   mesh: THREE.Object3D;
+  /** dev handle: the GPU-written buffers, for readback verification */
+  buffers: Pick<RopeCompute, 'points' | 'tangents' | 'descA' | 'descB' | 'pointsPerRope'>;
   dispose(): void;
 }
 
@@ -86,6 +88,7 @@ export function createRopes(opts: RopesOptions): Ropes {
     markDirty,
     computeNode: rc.computeNode,
     mesh: rm.mesh,
+    buffers: rc,
     dispose(): void {
       rm.dispose();
     },

@@ -46,9 +46,11 @@ export function createRopeMesh(rc: RopeCompute, maxRopes: number, segments: numb
   material.colorNode = uColor;
   material.roughnessNode = uRoughness;
 
-  // storage reads in the vertex stage must be read-only bindings
-  const pts = rc.points.toReadOnly();
-  const tans = rc.tangents.toReadOnly();
+  // storage reads in the vertex stage must be read-only bindings — these are
+  // separate read-only VIEWS over the compute buffers, never the write nodes
+  // themselves (§B.8: toReadOnly() mutates in place and kills the writes)
+  const pts = rc.pointsRead;
+  const tans = rc.tangentsRead;
 
   const ropeIdx = int(instanceIndex.div(uint(segments)));
   const segIdx = int(instanceIndex.modInt(segments));

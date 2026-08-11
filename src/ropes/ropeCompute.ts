@@ -35,6 +35,7 @@ import {
   select,
   sin,
   sqrt,
+  storage,
   time,
   uniform,
   vec3,
@@ -67,6 +68,13 @@ export function createRopeCompute(maxRopes: number, segments: number) {
   const descB = instancedArray(maxRopes, 'vec4');
   const points = instancedArray(maxRopes * pointsPerRope, 'vec4');
   const tangents = instancedArray(maxRopes * pointsPerRope, 'vec4');
+  // Read-only VIEWS for the vertex stage, over the same attributes. Calling
+  // points.toReadOnly() would mutate the shared node (setAccess returns
+  // `this`, it does not clone) and the compute kernel's writes would compile
+  // against a read-only binding and vanish — see §B.8.
+  const sampleCount = maxRopes * pointsPerRope;
+  const pointsRead = storage(points.value, 'vec4', sampleCount).toReadOnly();
+  const tangentsRead = storage(tangents.value, 'vec4', sampleCount).toReadOnly();
 
   const uRopeCount = uniform(0);
   const uSwayAmplitude = uniform(ropeParams.swayAmplitude);
@@ -156,6 +164,8 @@ export function createRopeCompute(maxRopes: number, segments: number) {
     descB,
     points,
     tangents,
+    pointsRead,
+    tangentsRead,
     uRopeCount,
     uSwayAmplitude,
     uSwaySpeed,

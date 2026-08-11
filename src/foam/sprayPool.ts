@@ -19,6 +19,7 @@ import {
   instancedArray,
   mix,
   select,
+  storage,
   uniform,
   uv,
   vec3,
@@ -33,6 +34,10 @@ export function createSprayPool(rawCount: number) {
   const count = sanitizePoolCount(rawCount, 1024);
   const posAge = instancedArray(count, 'vec4');
   const velSeed = instancedArray(count, 'vec4');
+  // separate read-only VIEW for the sprite vertex stage: posAge.toReadOnly()
+  // would mutate the shared node and silently drop every compute write to it
+  // (init + physics), freezing the whole pool at buffer-zero — see §B.8
+  const posAgeRead = storage(posAge.value, 'vec4', count).toReadOnly();
 
   const uLife = uniform(sprayParams.life);
   const uGravity = uniform(sprayParams.gravity);
@@ -64,7 +69,7 @@ export function createSprayPool(rawCount: number) {
 
   // render: instanced camera-facing sprites; dead → ageN = 1 → alpha 0
   const material = new THREE.SpriteNodeMaterial();
-  const el = posAge.toReadOnly().element(instanceIndex);
+  const el = posAgeRead.element(instanceIndex);
   // divisor floor: uLife is CPU-clamped too, but 0/0 here would be a NaN
   // scale → screen-covering quad × pool size = fill-rate wedge. Never risk it.
   const ageN = el.w.div(uLife.max(1e-6)).clamp(0, 1);

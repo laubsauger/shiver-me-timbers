@@ -312,6 +312,10 @@ async function boot(): Promise<void> {
     clouds,
     shipAssembly,
     ui,
+    ropes,
+    blocks,
+    riggingPlan,
+    blockSockets,
   };
 }
 

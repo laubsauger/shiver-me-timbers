@@ -6,9 +6,10 @@ import { registerParams } from './registry';
 export const postParams = registerParams(
   'post',
   {
-    // default OFF until the pipeline is browser-verified — enabling it
-    // stalled the renderer on first try (§V22: no unverified visuals)
-    enabled: false,
+    // ON: the first-try renderer stall was §B.5 (NaN spray → fill-rate wedge),
+    // not the post chain — re-verified in-browser after the B5 guards landed
+    // (§V22). Same story as the sun shadows.
+    enabled: true,
     aoEnabled: true,
     bloomThreshold: 0.85,
     bloomStrength: 0.22,
