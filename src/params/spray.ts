@@ -30,6 +30,18 @@ export interface SprayParams {
   opacity: number;
   /** side length (m) of the respawn-candidate square around the spray center */
   spawnExtent: number;
+  /** bow-spray pool size (build-time: changing requires recreating the sim) */
+  bowCount: number;
+  /** bow particles released per second while the burst gate is open */
+  bowBurstRate: number;
+  /** outboard launch spread as a fraction of ship speed */
+  bowLaunchSpread: number;
+  /** fraction of ship velocity kept — spray arcs backward relative to ship */
+  bowForwardKeep: number;
+  /** bow submersion (m) below which no burst fires */
+  bowImmersionThreshold: number;
+  /** ship speed (m/s) below which no burst fires */
+  bowSpeedThreshold: number;
 }
 
 export const sprayParams: SprayParams = registerParams(
@@ -47,6 +59,12 @@ export const sprayParams: SprayParams = registerParams(
     sizeMax: 0.6,
     opacity: 0.6,
     spawnExtent: 140,
+    bowCount: 1024,
+    bowBurstRate: 600,
+    bowLaunchSpread: 0.6,
+    bowForwardKeep: 0.3,
+    bowImmersionThreshold: 0.15,
+    bowSpeedThreshold: 1.5,
   },
   sprayParamsMeta(),
 );
@@ -65,5 +83,11 @@ function sprayParamsMeta(): Partial<Record<keyof SprayParams, ParamMeta>> {
     sizeMax: { min: 0.05, max: 3, step: 0.05 },
     opacity: { min: 0, max: 1, step: 0.01 },
     spawnExtent: { min: 20, max: 500, step: 5 },
+    bowCount: { min: 128, max: 4096, step: 128 },
+    bowBurstRate: { min: 0, max: 5000, step: 10 },
+    bowLaunchSpread: { min: 0, max: 2, step: 0.01 },
+    bowForwardKeep: { min: 0, max: 1, step: 0.01 },
+    bowImmersionThreshold: { min: 0, max: 2, step: 0.01 },
+    bowSpeedThreshold: { min: 0, max: 10, step: 0.1 },
   };
 }

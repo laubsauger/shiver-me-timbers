@@ -5,6 +5,7 @@
  *   // per frame, BEFORE the main renderer.render():
  *   ff.setCenter(ship.position.x, ship.position.z);   // region follows ship
  *   ff.setFlowDir([-shipVel.x, -shipVel.z]);          // wake trails behind
+ *   ff.setShip([ship.x, ship.z], yaw, speed, bowOff, sternOff, beam); // wake V
  *   ff.renderInjection(renderer, scene);  // ortho capture of foam targets
  *   ff.update(renderer, dt);              // advect + blur compute passes
  *
@@ -36,6 +37,7 @@ import { flowFoamParams, type FlowFoamParams } from '../params/flowfoam';
 import { createFlowNoiseUniforms } from './flowNoise';
 import { createAccumulation, FOAM_INJECTION_LAYER } from './accumulation';
 import { intersectionMaskNode } from './intersectionMask';
+import { createWakeInjector } from './wakeInjection';
 
 export { FOAM_INJECTION_LAYER };
 export { intersectionMaskNode, worldIntersectionMaskNode } from './intersectionMask';
@@ -49,7 +51,8 @@ export interface FlowFoamOptions {
 export function createFlowFoam(opts: FlowFoamOptions = {}) {
   const p = opts.params ?? flowFoamParams;
   const flowU = createFlowNoiseUniforms(p);
-  const acc = createAccumulation(p, flowU);
+  const wake = createWakeInjector(p);
+  const acc = createAccumulation(p, flowU, wake.wakeRateNode);
   acc.uniforms.uWaterHeight.value = opts.waterHeight ?? 0;
   const uEdgeFade = uniform(p.edgeFade);
   let time = 0;
@@ -80,6 +83,14 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       acc.uniforms.uWaterHeight.value = h;
     },
 
+    /**
+     * Analytic ship wake (bow Kelvin V + stern band, wakeInjection.ts):
+     * call per tick with ship state; bow/stern offsets + beam come from the
+     * ship blueprint AABB (main.ts). Wake foam is injected near the hull and
+     * trails naturally via advection + decay.
+     */
+    setShip: wake.setShip,
+
     /** advance the sim one fixed tick (§V2): pushes live params, runs computes */
     update(renderer: THREE.WebGPURenderer, dt: number): void {
       time += dt;
@@ -90,6 +101,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       flowU.uBaseSpeed.value = p.baseFlowSpeed;
       flowU.uCurlStep.value = p.curlStep;
       uEdgeFade.value = p.edgeFade;
+      wake.pushParams();
       acc.step(renderer, dt);
     },
 

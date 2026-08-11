@@ -42,6 +42,22 @@ export interface FlowFoamParams {
   baseFlowSpeed: number;
   /** finite-difference offset (m) for the pseudo-curl gradient samples */
   curlStep: number;
+  /** bow wake V half-angle (deg) — 19.47 is the physical Kelvin angle */
+  kelvinAngle: number;
+  /** bow arm foam injected per second per m/s of ship speed */
+  bowIntensity: number;
+  /** stern band foam injected per second per (m/s)² of ship speed */
+  sternIntensity: number;
+  /** ship speed (m/s) below which no wake is injected (feathers over 1× more) */
+  speedThreshold: number;
+  /** bow arm half-width (m) at the bow point */
+  armWidth: number;
+  /** extra arm half-width per meter aft — the V thickens as it trails */
+  armWidthGrowth: number;
+  /** stern band half-width as a multiple of ship beam (≈1 → width ≈ beam) */
+  sternWidth: number;
+  /** distance aft (m) over which wake injection fades to 0 — the advected field carries it further */
+  wakeRange: number;
 }
 
 export const flowFoamParams: FlowFoamParams = registerParams(
@@ -62,6 +78,14 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     noiseScrollSpeed: 0.4,
     baseFlowSpeed: 0.8,
     curlStep: 1.2,
+    kelvinAngle: 19.47,
+    bowIntensity: 3.0,
+    sternIntensity: 1.2,
+    speedThreshold: 0.5,
+    armWidth: 1.2,
+    armWidthGrowth: 0.06,
+    sternWidth: 1.0,
+    wakeRange: 60,
   },
   flowFoamParamsMeta(),
 );
@@ -82,5 +106,13 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     noiseScrollSpeed: { min: 0, max: 4, step: 0.05 },
     baseFlowSpeed: { min: 0, max: 6, step: 0.05 },
     curlStep: { min: 0.1, max: 8, step: 0.1 },
+    kelvinAngle: { min: 5, max: 45, step: 0.01 },
+    bowIntensity: { min: 0, max: 20, step: 0.1 },
+    sternIntensity: { min: 0, max: 10, step: 0.05 },
+    speedThreshold: { min: 0, max: 5, step: 0.05 },
+    armWidth: { min: 0.1, max: 10, step: 0.1 },
+    armWidthGrowth: { min: 0, max: 0.5, step: 0.005 },
+    sternWidth: { min: 0.2, max: 3, step: 0.05 },
+    wakeRange: { min: 5, max: 300, step: 5 },
   };
 }

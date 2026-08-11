@@ -23,6 +23,18 @@ export const T_OFF_UP = 5.3;
 export const T_OFF_YAW = 9.1;
 export const T_OFF_MAG = 2.7;
 
+/** golden-ratio conjugate — low-discrepancy per-particle seed sequence */
+export const PHI = 0.61803398875;
+
+/** age written by the init pass — beyond any life slider value → dead pool */
+export const DEAD_AGE = 1e4;
+
+/** deterministic per-particle seed in [0, 1): fract((i+1)·φ), no Math.random */
+export function goldenSeed(index: number): number {
+  const v = (index + 1) * PHI;
+  return v - Math.floor(v);
+}
+
 /**
  * Respawn candidate offset from the spray center, in meters (GPU mirror:
  * the spawn pass). Deterministic in (seed, time): the sim tick drives time
@@ -76,6 +88,92 @@ export function isDead(age: number, life: number): boolean {
 /** sprite alpha by age: 1 at birth → 0 at death, never negative */
 export function ageOpacity(age: number, life: number): number {
   return Math.max(0, 1 - age / life);
+}
+
+/** bow-spray hash streams — distinct from crest streams above */
+export const H_BOW_UP = 419.2;
+export const H_BOW_SIDE = 91.7;
+export const H_BOW_MAG = 233.9;
+export const T_BOW_UP = 3.7;
+export const T_BOW_SIDE = 11.3;
+export const T_BOW_MAG = 7.9;
+
+/**
+ * Bow burst gate (CPU-side, Rule: code answers — one scalar per emitter):
+ * BOTH conditions must hold. Immersion alone (bobbing at anchor) or speed
+ * alone (flat water, bow riding high) must NOT fizz spray constantly —
+ * spray marks the hull PUNCHING through a wave.
+ */
+export function burstGate(
+  immersionDepth: number,
+  speed: number,
+  p: { bowImmersionThreshold: number; bowSpeedThreshold: number },
+): boolean {
+  return immersionDepth > p.bowImmersionThreshold && speed > p.bowSpeedThreshold;
+}
+
+/**
+ * Rotating spawn window: at most `budget` pool slots are respawn-eligible
+ * per frame, starting at `cursor` (wrapping). Bounds burst emission to
+ * bowBurstRate regardless of how many particles happen to be dead.
+ */
+export function inSpawnWindow(
+  index: number,
+  cursor: number,
+  budget: number,
+  count: number,
+): boolean {
+  return (((index - cursor) % count) + count) % count < budget;
+}
+
+/**
+ * Accumulate fractional per-frame budget from a per-second rate and advance
+ * the cursor — deterministic (§V2), emits exactly rate·t particles over time
+ * even when rate·dt is fractional.
+ */
+export function advanceBurstCursor(
+  state: { cursor: number; acc: number },
+  ratePerSecond: number,
+  dt: number,
+  count: number,
+): { cursor: number; acc: number; budget: number } {
+  const acc = state.acc + ratePerSecond * dt;
+  const budget = Math.min(Math.floor(acc), count);
+  return {
+    cursor: (state.cursor + budget) % count,
+    acc: Math.min(acc - budget, count), // carry the fraction, cap the backlog
+    budget,
+  };
+}
+
+/**
+ * Bow launch velocity (GPU mirror: bowSpray spawn pass): the ship's speed is
+ * reflected up and outboard — up component 0.5..1 × speed, outboard along
+ * ±side (hash-chosen flank) ≤ spread × speed, plus forwardKeep × ship
+ * velocity so the sheet arcs backward RELATIVE TO THE SHIP while keeping
+ * some world-frame forward momentum. Zero ship speed → zero burst.
+ */
+export function bowLaunchVelocity(
+  seed: number,
+  time: number,
+  shipVelX: number,
+  shipVelZ: number,
+  p: { bowLaunchSpread: number; bowForwardKeep: number },
+): [number, number, number] {
+  const speed = Math.hypot(shipVelX, shipVelZ);
+  if (speed < 1e-6) return [0, 0, 0];
+  const fx = shipVelX / speed;
+  const fz = shipVelZ / speed;
+  const rUp = hash2Cpu(seed * H_BOW_UP, time + T_BOW_UP);
+  const rSide = hash2Cpu(seed * H_BOW_SIDE, time + T_BOW_SIDE);
+  const rMag = hash2Cpu(seed * H_BOW_MAG, time + T_BOW_MAG);
+  const sideSign = rSide < 0.5 ? -1 : 1;
+  const out = speed * p.bowLaunchSpread * rMag * sideSign;
+  return [
+    -fz * out + fx * speed * p.bowForwardKeep,
+    speed * (0.5 + 0.5 * rUp),
+    fx * out + fz * speed * p.bowForwardKeep,
+  ];
 }
 
 export interface ParticleState {

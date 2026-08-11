@@ -16,13 +16,17 @@
 import { describe, expect, it } from 'vitest';
 import {
   advectLookupUv,
+  bowArmDistCpu,
   flowPotentialCpu,
   flowVectorCpu,
   regionShiftUv,
   snapToTexel,
   uvForWorld,
+  wakeRateCpu,
   worldForUv,
   type FlowFieldParams,
+  type WakeParams,
+  type WakeShip,
 } from '../src/flowfoam/flowMath';
 import { decayFactorPerFrame } from '../src/foam/foamMath';
 import { flowFoamParams } from '../src/params/flowfoam';
@@ -187,6 +191,70 @@ describe('decay factor (§V10 accumulation fade, shared with §V6)', () => {
   });
 });
 
+describe('ship wake injection (§V10 follow-up: bow V + stern band)', () => {
+  const WP: WakeParams = {
+    kelvinAngle: 19.47,
+    bowIntensity: 3,
+    sternIntensity: 1.2,
+    speedThreshold: 0.5,
+    armWidth: 1.2,
+    armWidthGrowth: 0.06,
+    sternWidth: 1.0,
+    wakeRange: 60,
+  };
+  // ship at origin heading +z (yaw 0): bow at z=+12, stern z=−10, beam 6
+  const SHIP: WakeShip = { x: 0, z: 0, yaw: 0, speed: 4, bowOffset: 12, sternOffset: -10, beam: 6 };
+  const tan = Math.tan((WP.kelvinAngle * Math.PI) / 180);
+
+  it('arm distance: zero exactly on the V centerlines, |across| at the vertex', () => {
+    // WHY: the V must originate AT the bow point and open at the Kelvin
+    // angle — a wrong distance function draws the arms at the wrong slope
+    // and the wake reads as generic noise, not a ship wake.
+    expect(bowArmDistCpu(10, 10 * tan, WP.kelvinAngle)).toBeCloseTo(0, 12); // starboard arm
+    expect(bowArmDistCpu(10, -10 * tan, WP.kelvinAngle)).toBeCloseTo(0, 12); // port arm
+    expect(bowArmDistCpu(0, 2.5, WP.kelvinAngle)).toBeCloseTo(2.5, 12); // vertex
+    expect(bowArmDistCpu(20, 0, WP.kelvinAngle)).toBeCloseTo(20 * tan, 12); // centerline between arms
+  });
+
+  it('wake is port/starboard symmetric', () => {
+    for (const z of [10, 0, -12, -30]) {
+      for (const x of [1.5, 4, 9]) {
+        expect(wakeRateCpu(x, z, SHIP, WP)).toBeCloseTo(wakeRateCpu(-x, z, SHIP, WP), 12);
+      }
+    }
+  });
+
+  it('no wake at anchor: rate is exactly 0 below speedThreshold', () => {
+    // WHY: a moored ship ringed by foam reads as a rendering bug.
+    const slow = { ...SHIP, speed: 0.49 };
+    expect(wakeRateCpu(0, -11, slow, WP)).toBe(0); // right behind the stern
+    expect(wakeRateCpu(11 * tan, 1, slow, WP)).toBe(0); // on a bow arm
+    expect(wakeRateCpu(0, -11, { ...SHIP, speed: 0 }, WP)).toBe(0);
+  });
+
+  it('bow arms and stern band inject where expected, nothing ahead of the bow', () => {
+    const sAft = 8; // 8 m behind the bow point (z = 12 − 8 = 4)
+    const onArm = wakeRateCpu(sAft * tan, SHIP.bowOffset - sAft, SHIP, WP);
+    const offArm = wakeRateCpu(sAft * tan + 15, SHIP.bowOffset - sAft, SHIP, WP);
+    expect(onArm).toBeGreaterThan(0);
+    expect(offArm).toBe(0);
+    const sternCenter = wakeRateCpu(0, -14, SHIP, WP); // 4 m aft of stern
+    const sternEdge = wakeRateCpu(2.9, -14, SHIP, WP); // near band edge (halfW=3)
+    expect(sternCenter).toBeGreaterThan(sternEdge); // centerline hump = rooster tail
+    expect(sternEdge).toBeGreaterThanOrEqual(0);
+    expect(wakeRateCpu(0, SHIP.bowOffset + 5, SHIP, WP)).toBe(0); // ahead of bow
+  });
+
+  it('deterministic and heading-aware', () => {
+    expect(wakeRateCpu(3.3, -7.7, SHIP, WP)).toBe(wakeRateCpu(3.3, -7.7, SHIP, WP));
+    // rotate ship 90° (bow toward +x): the old astern point is now abeam
+    const turned = { ...SHIP, yaw: Math.PI / 2 };
+    const astern = wakeRateCpu(-14, 0, turned, WP); // behind stern in new frame
+    expect(astern).toBeGreaterThan(0);
+    expect(astern).toBeCloseTo(wakeRateCpu(0, -14, SHIP, WP), 12); // frame-invariant
+  });
+});
+
 describe('flowfoam params (§V16 registry contract)', () => {
   it('registers under "flowfoam" with the live object', () => {
     const entry = getParamsEntry('flowfoam');
@@ -214,5 +282,11 @@ describe('flowfoam params (§V16 registry contract)', () => {
     expect(flowFoamParams.edgeFade).toBeGreaterThan(0);
     expect(flowFoamParams.edgeFade).toBeLessThan(0.5);
     expect(flowFoamParams.curlStep).toBeGreaterThan(0);
+    // Kelvin default is the physical wake half-angle (arcsin(1/3) ≈ 19.47°)
+    expect(flowFoamParams.kelvinAngle).toBeCloseTo(19.47, 2);
+    expect(flowFoamParams.speedThreshold).toBeGreaterThanOrEqual(0);
+    expect(flowFoamParams.armWidth).toBeGreaterThan(0);
+    expect(flowFoamParams.sternWidth).toBeGreaterThan(0);
+    expect(flowFoamParams.wakeRange).toBeGreaterThan(0);
   });
 });

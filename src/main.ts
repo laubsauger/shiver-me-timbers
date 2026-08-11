@@ -7,7 +7,9 @@ import { createDebugShell } from './debug';
 import { createSky } from './sky';
 import { createOceanSim, oceanParams } from './ocean';
 import { OceanSurface } from './ocean/oceanSurface';
-import { createFoamSim } from './foam';
+import { createFoamSim, createSpray, createBowSpray } from './foam';
+import { createFlowFoam } from './flowfoam';
+import { rotateVec } from './combat/quatMath';
 import { createClouds } from './clouds';
 import { skyParams } from './params/sky';
 import { buildGalleonBlueprint } from './ship/shipBlueprint';
@@ -55,6 +57,17 @@ async function boot(): Promise<void> {
   const surface = new OceanSurface(ocean, foam);
   app.scene.add(surface.group);
 
+  // crest + bow spray particles (T5 follow-up)
+  const spray = createSpray(
+    ocean.cascades.map((c) => ({ displacement: c.displacement, domain: c.domain })),
+    oceanParams.resolution,
+  );
+  const bowSpray = createBowSpray();
+  app.scene.add(spray.mesh, bowSpray.mesh);
+
+  // §V.10 intersection foam + ship wake (T13)
+  const flowFoam = createFlowFoam();
+
   const clouds = createClouds({
     renderer: app.renderer,
     camera: app.camera,
@@ -87,6 +100,23 @@ async function boot(): Promise<void> {
   const riggingPlan = buildRiggingPlan(galleonBlueprint);
   const ropes = createRopes({ maxRopes: Math.max(riggingPlan.length, 32) });
   app.scene.add(ropes.mesh);
+
+  // hull dims for wake + bow spray, from blueprint hull AABBs
+  let bowZ = 0;
+  let sternZ = 0;
+  let beamHalf = 2;
+  for (const piece of galleonBlueprint) {
+    if (piece.kind !== 'hull-section') continue;
+    bowZ = Math.max(bowZ, piece.transform.position[2] + piece.aabb.max[2]);
+    sternZ = Math.min(sternZ, piece.transform.position[2] + piece.aabb.min[2]);
+    beamHalf = Math.max(beamHalf, Math.abs(piece.transform.position[0]) + piece.aabb.max[0]);
+  }
+  // tag hull meshes as intersection-foam targets (§V.10)
+  shipAssembly.group.traverse((o) => {
+    if (o.name.startsWith('hull') || o.name.includes('-hull')) {
+      o.userData.foamTarget = true;
+    }
+  });
 
   // §V.8: CPU mirror of the same seeded spectrum the GPU renders
   const cpuOcean = new CpuOcean(state.seed);
@@ -155,6 +185,41 @@ async function boot(): Promise<void> {
       clouds.update(state.time, sky.sunDirection);
       debug.hud.setPassTiming('clouds cpu-dispatch', performance.now() - t);
 
+      // spray + wake systems follow the ship (§V.6, §V.10)
+      const shipYaw = Math.atan2(
+        rotateVec(playerShip.quaternion, [0, 0, 1])[0],
+        rotateVec(playerShip.quaternion, [0, 0, 1])[2],
+      );
+      const shipSpeed = Math.hypot(playerShip.velocity[0], playerShip.velocity[2]);
+      spray.centerUniform.value.set(playerShip.position[0], playerShip.position[2]);
+      windDirTmp.set(Math.cos(state.wind.direction), Math.sin(state.wind.direction));
+      spray.update(app.renderer, windDirTmp);
+      const bowLocal = rotateVec(playerShip.quaternion, [0, 0, bowZ]);
+      bowWorldTmp.set(
+        playerShip.position[0] + bowLocal[0],
+        playerShip.position[1] + bowLocal[1],
+        playerShip.position[2] + bowLocal[2],
+      );
+      shipVelTmp.fromArray(playerShip.velocity);
+      bowSpray.update(app.renderer, {
+        bowWorldPos: bowWorldTmp,
+        shipVelocity: shipVelTmp,
+        immersionDepth:
+          cpuOcean.heightAt(bowWorldTmp.x, bowWorldTmp.z, state.time) - bowWorldTmp.y,
+      });
+      flowFoam.setCenter(playerShip.position[0], playerShip.position[2]);
+      flowFoam.setFlowDir([-playerShip.velocity[0], -playerShip.velocity[2]]);
+      flowFoam.setShip(
+        [playerShip.position[0], playerShip.position[2]],
+        shipYaw,
+        shipSpeed,
+        bowZ,
+        sternZ,
+        beamHalf * 2,
+      );
+      flowFoam.renderInjection(app.renderer, app.scene);
+      flowFoam.update(app.renderer, frameDt);
+
       // render reads SimState (§V.3), interpolated between ticks — the
       // camera must chase the same interpolated pose or IT stutters instead
       shipAssembly.group.position.lerpVectors(prevPos, currPos, alpha);
@@ -201,7 +266,10 @@ async function boot(): Promise<void> {
   };
 }
 
-import { Quaternion, Vector3 } from 'three/webgpu';
+import { Quaternion, Vector2, Vector3 } from 'three/webgpu';
 const tmpDir = new Vector3();
+const windDirTmp = new Vector2();
+const bowWorldTmp = new Vector3();
+const shipVelTmp = new Vector3();
 
 boot();

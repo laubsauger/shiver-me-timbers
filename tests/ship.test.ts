@@ -69,10 +69,38 @@ describe.each(blueprints)('%s blueprint (§V.13/§V.18)', (_name, build) => {
 
   it('every piece kind builds greybox geometry with vertices', () => {
     for (const p of pieces) {
-      const geo = buildPieceGeometry(p.kind, p.aabb);
+      const geo = buildPieceGeometry(p.kind, p.aabb, p.shape);
       expect(geo.attributes.position.count).toBeGreaterThan(0);
       geo.dispose();
     }
+  });
+
+  it('mounts a gun piece at every cannon-mount socket (visible cannons)', () => {
+    const guns = pieces.filter((p) => p.kind === 'cannon');
+    const mounts = pieces.flatMap((p) => p.sockets.filter((s) => s.type === 'cannon-mount'));
+    expect(guns).toHaveLength(mounts.length);
+    const ids = new Set(pieces.map((p) => p.id));
+    for (const gun of guns) expect(ids.has(gun.parent!)).toBe(true);
+  });
+
+  it('hull loft tapers toward the stem — no boxy bow (§V22 silhouette)', () => {
+    // widest |x| among vertices forward of `minLocalZ` in piece space
+    const halfBreadth = (id: string, minLocalZ: number): number => {
+      const piece = pieces.find((x) => x.id === id)!;
+      const geo = buildPieceGeometry(piece.kind, piece.aabb, piece.shape);
+      const pos = geo.attributes.position;
+      let max = 0;
+      for (let i = 0; i < pos.count; i++) {
+        if (pos.getZ(i) > minLocalZ) max = Math.max(max, Math.abs(pos.getX(i)));
+      }
+      geo.dispose();
+      return max;
+    };
+    const midWidth = halfBreadth('hull-starboard-mid', -Infinity);
+    const forwardWidth = halfBreadth('hull-starboard-bow', 3); // fwd quarter
+    const stemWidth = halfBreadth('bow', -Infinity);
+    expect(forwardWidth).toBeLessThan(midWidth * 0.75);
+    expect(stemWidth).toBeLessThan(forwardWidth);
   });
 });
 

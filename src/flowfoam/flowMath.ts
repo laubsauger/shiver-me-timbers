@@ -143,3 +143,96 @@ export function advectLookupUv(
     v + (vz * advectDt) / size + shiftV,
   ];
 }
+
+// ---------------------------------------------------------------------------
+// Ship wake injection mirrors (GPU twin: wakeInjection.wakeRateNode)
+// ---------------------------------------------------------------------------
+
+/** clamped hermite smoothstep — mirror of the TSL smoothstep used on GPU */
+export function smoothstepCpu(e0: number, e1: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+}
+
+/** wake tunables subset of FlowFoamParams (pure, structural) */
+export interface WakeParams {
+  kelvinAngle: number;
+  bowIntensity: number;
+  sternIntensity: number;
+  speedThreshold: number;
+  armWidth: number;
+  armWidthGrowth: number;
+  sternWidth: number;
+  wakeRange: number;
+}
+
+/** ship state + geometry offsets (ship-local z, from blueprint AABBs) */
+export interface WakeShip {
+  x: number;
+  z: number;
+  /** heading, three.js rotation.y convention: forward = (sin yaw, cos yaw) in XZ */
+  yaw: number;
+  /** m/s over water */
+  speed: number;
+  /** bow point distance ahead of ship origin (m, along forward) */
+  bowOffset: number;
+  /** stern point offset along forward (m, typically negative) */
+  sternOffset: number;
+  /** hull width (m) */
+  beam: number;
+}
+
+/** world XZ → ship-local [along (toward bow), across (starboard +)] */
+export function shipLocalCpu(
+  wx: number,
+  wz: number,
+  x: number,
+  z: number,
+  yaw: number,
+): [number, number] {
+  const fx = Math.sin(yaw);
+  const fz = Math.cos(yaw);
+  const dx = wx - x;
+  const dz = wz - z;
+  // right = (fz, −fx): forward rotated −90° about +y
+  return [dx * fx + dz * fz, dx * fz - dz * fx];
+}
+
+/**
+ * Lateral distance from a point to the nearest bow-V arm centerline:
+ * sAft meters behind the bow the arms sit at ±sAft·tan(kelvin). |across|
+ * folds port onto starboard — the V is symmetric by construction.
+ */
+export function bowArmDistCpu(sAft: number, across: number, kelvinDeg: number): number {
+  return Math.abs(Math.abs(across) - sAft * Math.tan((kelvinDeg * Math.PI) / 180));
+}
+
+/**
+ * Analytic wake injection rate (foam/second) at a world point — bow V arms
+ * (∝ speed, width growing aft) + stern turbulence band (∝ speed², width ≈
+ * beam, peaked at the centerline = the modest rooster hump). Injection is
+ * local (fades over wakeRange); the advected field does the long trailing.
+ * Gate feathers in over [speedThreshold, 2·speedThreshold] — exactly 0 at
+ * anchor. GPU twin: wakeInjection.ts, keep formulas identical.
+ */
+export function wakeRateCpu(wx: number, wz: number, ship: WakeShip, p: WakeParams): number {
+  const gate = smoothstepCpu(p.speedThreshold, p.speedThreshold * 2, ship.speed);
+  if (gate === 0) return 0;
+  const [along, across] = shipLocalCpu(wx, wz, ship.x, ship.z, ship.yaw);
+
+  const sBow = ship.bowOffset - along; // distance aft of the bow point
+  const behindBow = sBow >= 0 ? 1 : 0;
+  const armW = p.armWidth + sBow * p.armWidthGrowth;
+  const armMask = 1 - smoothstepCpu(0, armW, bowArmDistCpu(sBow, across, p.kelvinAngle));
+  const bowFade = 1 - smoothstepCpu(0, p.wakeRange, sBow);
+  const bow = p.bowIntensity * ship.speed * armMask * bowFade * behindBow;
+
+  const sStern = ship.sternOffset - along; // distance aft of the stern
+  const behindStern = sStern >= 0 ? 1 : 0;
+  const halfW = ship.beam * p.sternWidth * 0.5;
+  const sternMask = 1 - smoothstepCpu(0, halfW, Math.abs(across));
+  const sternFade = 1 - smoothstepCpu(0, p.wakeRange, sStern);
+  const stern = p.sternIntensity * ship.speed * ship.speed * sternMask * sternFade * behindStern;
+
+  return (bow + stern) * gate;
+}

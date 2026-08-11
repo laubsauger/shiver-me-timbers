@@ -1,0 +1,143 @@
+/**
+ * Crest spray particles (§V6 jacobian trigger, §V7 storm density, §V4
+ * spirit: ALL per-particle work is GPU compute — CPU never touches one).
+ * Pool/physics/render live in sprayPool.ts; this file adds the crest spawn:
+ *
+ * Spawn pass, per dead particle (age ≥ life) each tick: hash a candidate XZ
+ * inside the spawn square around `centerUniform`; sample every cascade
+ * displacement texture there and combine the jacobian like the surface
+ * material (Σw − (n−1)); where it falls below jacobianFoamBias +
+ * sprayBiasOffset the crest is breaking → respawn at the DISPLACED surface
+ * point (candidate + Σ(λDx, λDz), height Σh) with an upward hash-jittered +
+ * wind-carried velocity. Candidates that miss a breaking crest stay dead, so
+ * emission density scales with breaking area — storms spray hard (§V7).
+ * CPU mirrors: sprayMath goldenSeed / respawnCandidate / launchVelocity.
+ *
+ *   createSpray(cascades: {displacement, domain}[], resolution) =>
+ *     { update(renderer, windDir): void; mesh; centerUniform; dispose() }
+ */
+import * as THREE from 'three/webgpu';
+import {
+  Fn,
+  If,
+  float,
+  instanceIndex,
+  int,
+  ivec2,
+  textureLoad,
+  uniform,
+  vec2,
+  vec3,
+  vec4,
+} from 'three/tsl';
+import { SIM_DT } from '../core/loop';
+import { hash2 } from '../terrain/noise';
+import { sprayParams } from '../params/spray';
+import { oceanParams } from '../params/ocean';
+import type { FoamCascadeInput } from './index';
+import { createSprayPool } from './sprayPool';
+import {
+  H_CAND_X,
+  H_CAND_Z,
+  H_MAG,
+  H_UP,
+  H_YAW,
+  PHI,
+  T_OFF_MAG,
+  T_OFF_UP,
+  T_OFF_YAW,
+  T_OFF_Z,
+} from './sprayMath';
+
+export { createBowSpray } from './bowSpray';
+
+export function createSpray(cascades: FoamCascadeInput[], resolution: number) {
+  const count = sprayParams.count; // build-time: pool size fixed at creation
+  const n = resolution;
+  const pool = createSprayPool(count);
+
+  const uBias = uniform(0); // oceanParams.jacobianFoamBias, live (§V7)
+  const uBiasOffset = uniform(sprayParams.sprayBiasOffset);
+  const uLaunchSpeed = uniform(sprayParams.launchSpeed);
+  const uLateral = uniform(sprayParams.lateralSpread);
+  const uWindCarry = uniform(sprayParams.windCarry);
+  const uExtent = uniform(sprayParams.spawnExtent);
+  const uWind = uniform(new THREE.Vector2());
+  const uTime = uniform(0);
+  /** spray region center (world XZ) — main thread snaps this to the camera */
+  const centerUniform = uniform(new THREE.Vector2());
+
+  const spawnPass = Fn(() => {
+    const pa = pool.posAge.element(instanceIndex);
+    If(pa.w.greaterThanEqual(pool.uLife), () => {
+      // golden-ratio per-particle seed (sprayMath.goldenSeed — no Math.random)
+      const s = float(instanceIndex).add(1).mul(PHI).fract().toVar();
+      const rx = hash2(vec2(s.mul(H_CAND_X), uTime));
+      const rz = hash2(vec2(s.mul(H_CAND_Z), uTime.add(T_OFF_Z)));
+      const cand = centerUniform
+        .add(vec2(rx.sub(0.5), rz.sub(0.5)).mul(uExtent))
+        .toVar();
+
+      // combined cascade sample at the candidate (like surfaceMaterial:
+      // jacobian = Σw − (n−1) ≈ 1 at rest, displacement/height = Σxyz)
+      let jac: any = float(1 - cascades.length);
+      let disp: any = vec3(0);
+      for (const c of cascades) {
+        const tuv = cand.div(c.domain).fract();
+        const texel = ivec2(
+          int(tuv.x.mul(n)).clamp(0, n - 1),
+          int(tuv.y.mul(n)).clamp(0, n - 1),
+        );
+        const d = textureLoad(c.displacement, texel);
+        jac = jac.add(d.w);
+        disp = disp.add(d.xyz);
+      }
+
+      If(jac.lessThan(uBias.add(uBiasOffset)), () => {
+        // CPU mirror: sprayMath.launchVelocity
+        const rUp = hash2(vec2(s.mul(H_UP), uTime.add(T_OFF_UP)));
+        const rYaw = hash2(vec2(s.mul(H_YAW), uTime.add(T_OFF_YAW)));
+        const rMag = hash2(vec2(s.mul(H_MAG), uTime.add(T_OFF_MAG)));
+        const vy = uLaunchSpeed.mul(rUp.mul(0.5).add(0.5));
+        const angle = rYaw.mul(Math.PI * 2);
+        const mag = uLaunchSpeed.mul(uLateral).mul(rMag);
+        const wind = uWind.mul(uWindCarry);
+        const vel = vec3(
+          angle.cos().mul(mag).add(wind.x),
+          vy,
+          angle.sin().mul(mag).add(wind.y),
+        );
+        // burst from the displaced surface point of the breaking crest
+        const pos = vec3(cand.x.add(disp.x), disp.y, cand.y.add(disp.z));
+        pool.posAge.element(instanceIndex).assign(vec4(pos, 0));
+        pool.velSeed.element(instanceIndex).assign(vec4(vel, s));
+      });
+    });
+  })().compute(count);
+
+  return {
+    mesh: pool.mesh,
+    centerUniform,
+
+    /** run once per fixed sim tick (§V2), after the ocean cascade update;
+     *  windDir = horizontal wind vector (m/s) */
+    update(renderer: THREE.WebGPURenderer, windDir: THREE.Vector2): void {
+      uBias.value = oceanParams.jacobianFoamBias; // storms spray hard (§V7)
+      uBiasOffset.value = sprayParams.sprayBiasOffset;
+      uLaunchSpeed.value = sprayParams.launchSpeed;
+      uLateral.value = sprayParams.lateralSpread;
+      uWindCarry.value = sprayParams.windCarry;
+      uExtent.value = sprayParams.spawnExtent;
+      (uWind.value as THREE.Vector2).copy(windDir);
+      uTime.value += SIM_DT;
+      pool.step(renderer);
+      pool.run(renderer, spawnPass);
+    },
+
+    dispose(): void {
+      pool.dispose();
+    },
+  };
+}
+
+export type Spray = ReturnType<typeof createSpray>;

@@ -135,6 +135,11 @@ describe('floodingHoles (§V14 → T18 flooding)', () => {
     expect(floodingHoles(blueprint, starboard, portDown, 0).count).toBe(0);
   });
 
+  it('accepts raw zone hp (ShipState.damage) — hp ≤ threshold is breached', () => {
+    expect(floodingHoles(blueprint, { 'hull-port-mid': 0.3 }, IDENTITY, 0).count).toBe(1);
+    expect(floodingHoles(blueprint, { 'hull-port-mid': 0.9 }, IDENTITY, 0).count).toBe(0);
+  });
+
   it('returns JSON-serializable plain data', () => {
     const holes = floodingHoles(blueprint, { 'hull-port-stern': 'holed' }, IDENTITY, 0);
     expect(JSON.parse(JSON.stringify(holes))).toEqual(holes);

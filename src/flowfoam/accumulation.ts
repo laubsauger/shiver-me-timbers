@@ -2,25 +2,21 @@
  * Flow-foam accumulation (§V10, §C: heavy sims = `Fn().compute()`): a
  * top-down world-space foam region following a target (ship). Per frame:
  *   1. renderInjection(): ortho capture of `userData.foamTarget` meshes with
- *      a cheap white waterline-band material (worldIntersectionMaskNode —
- *      |world height − water height| < threshold) → injection RT.
+ *      a cheap white waterline-band material → injection RT.
  *   2. advect pass: dst = bilerp(prevFoam @ backward flow lookup + region
- *      shift) · decay + injection · injectPerFrame, clamped ≤ 1.
+ *      shift) · decay + capture·injectPerFrame + wakeRate·dt, clamped ≤ 1.
  *   3. blur pass: 3×3 gaussian (weights sum to 1 — §V6 lesson: only decay
  *      may remove foam) written back to the front texture.
  * Fixed pass directions (advect A→B, blur B→A) keep the material-facing
  * texture identity stable (always texA) — no ping-pong retargeting.
  *
  * WORLD ANCHORING + UV/SHIFT MATH: flowMath.ts header is the single source
- * of truth (v axis flips world z; setCenter snaps to whole texels so the
- * advect shift is an exact texel offset — standing foam never resample-blurs
- * while the window slides). Taps outside the region read 0: foam "leaks" off
+ * of truth (v flips world z; setCenter snaps to whole texels → exact-texel
+ * shifts, no resample blur). Taps outside the region read 0: foam leaks off
  * the border, which with the material edge fade hides window pops.
- * Injection capture: the ortho camera renders ONLY layer FOAM_INJECTION_LAYER
- * (27 — owned by this module; renderInjection re-tags meshes from
- * userData.foamTarget every call). depthTest OFF + additive blending so
- * submerged hull surfaces near the waterline contribute even when occluded
- * from above.
+ * Injection capture renders ONLY layer FOAM_INJECTION_LAYER (27, owned here;
+ * re-tagged from userData.foamTarget every call), depthTest OFF + additive
+ * blending so submerged hull near the waterline contributes when occluded.
  */
 import * as THREE from 'three/webgpu';
 import {
@@ -49,7 +45,12 @@ import type { FlowFoamParams } from '../params/flowfoam';
 /** scene layer owned by the injection capture (tagged meshes get it) */
 export const FOAM_INJECTION_LAYER = 27;
 
-export function createAccumulation(p: FlowFoamParams, flowU: FlowNoiseUniforms) {
+export function createAccumulation(
+  p: FlowFoamParams,
+  flowU: FlowNoiseUniforms,
+  /** extra analytic injection rate (foam/sec) at a world-XZ node — ship wake */
+  wakeRateNode?: (worldXZ: any) => any,
+) {
   const res = p.resolution;
 
   const makeState = (): THREE.StorageTexture => {
@@ -76,6 +77,7 @@ export function createAccumulation(p: FlowFoamParams, flowU: FlowNoiseUniforms) 
   const uDecay = uniform(1);
   const uAdvectDt = uniform(0);
   const uInjectPerFrame = uniform(0);
+  const uDt = uniform(0); // wake rate is foam/sec; scaled per fixed tick (§V2)
   const uBlurRadius = uniform(p.blurRadius);
   const uWaterHeight = uniform(0);
   const uThreshold = uniform(p.depthThreshold);
@@ -145,7 +147,9 @@ export function createAccumulation(p: FlowFoamParams, flowU: FlowNoiseUniforms) 
       // §V23 functional mix(a, b, t)
       const prev = mix(mix(t00, t10, fx), mix(t01, t11, fx), fy);
       const inject = textureLoad(injectionRT.texture, ivec2(x, y)).r;
-      const foam = prev.mul(uDecay).add(inject.mul(uInjectPerFrame)).min(1);
+      // analytic ship wake composes ADDITIVELY with the ortho capture
+      const wake = wakeRateNode ? wakeRateNode(vec2(wx, wz)).mul(uDt) : float(0);
+      const foam = prev.mul(uDecay).add(inject.mul(uInjectPerFrame)).add(wake).min(1);
       textureStore(texB, ivec2(x, y), vec4(foam, 0, 0, 1)).toWriteOnly();
     });
   })().compute(res * res);
@@ -232,6 +236,7 @@ export function createAccumulation(p: FlowFoamParams, flowU: FlowNoiseUniforms) 
       uDecay.value = decayFactorPerFrame(p.decayHalfLife, dt);
       uAdvectDt.value = p.advectSpeed * dt;
       uInjectPerFrame.value = p.injectStrength * dt;
+      uDt.value = dt;
       uBlurRadius.value = p.blurRadius;
       uThreshold.value = p.depthThreshold;
       uFeather.value = p.maskFeather;

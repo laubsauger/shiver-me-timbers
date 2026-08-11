@@ -33,6 +33,7 @@ import { createBlurDecayPass, createInjectPass, createFoamUniforms } from './foa
 import { foamDetailMask, updateFoamShadingUniforms } from './foamShading';
 
 export { foamShadingNode, foamTintNode } from './foamShading';
+export { createSpray, createBowSpray } from './spray'; // crest + bow spray (see spray.ts/bowSpray.ts headers)
 
 export interface FoamCascadeInput {
   /** ocean unpack output: (λDx, h, λDz, J) — w = jacobian (§V6) */
