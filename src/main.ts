@@ -20,6 +20,8 @@ import { createGameUI } from './ui';
 import { createAudio } from './audio';
 import { CpuOcean } from './sea-physics/cpuOcean';
 import { stepShipBuoyancy } from './sea-physics/buoyancy';
+import { createRopes } from './ropes';
+import { applyRiggingPlan, buildRiggingPlan } from './ropes/shipRigging';
 
 async function boot(): Promise<void> {
   const root = document.getElementById('app');
@@ -72,8 +74,14 @@ async function boot(): Promise<void> {
     damage: {},
   });
   const playerShip = state.ships[0];
-  const shipAssembly = new ShipAssembly(buildGalleonBlueprint());
+  const galleonBlueprint = buildGalleonBlueprint();
+  const shipAssembly = new ShipAssembly(galleonBlueprint);
   app.scene.add(shipAssembly.group);
+
+  // §V.12 rigging: catenary compute ropes anchored to blueprint sockets
+  const riggingPlan = buildRiggingPlan(galleonBlueprint);
+  const ropes = createRopes({ maxRopes: Math.max(riggingPlan.length, 32) });
+  app.scene.add(ropes.mesh);
 
   // §V.8: CPU mirror of the same seeded spectrum the GPU renders
   const cpuOcean = new CpuOcean(state.seed);
@@ -152,6 +160,11 @@ async function boot(): Promise<void> {
       renderShipView.quaternion[3] = shipAssembly.group.quaternion.w;
       renderShipView.velocity = playerShip.velocity;
       followCam.update(renderShipView, frameDt, (x, z) => cpuOcean.heightAt(x, z, state.time));
+
+      // rigging follows the moving ship: rewrite anchors, GPU re-solves (§V.12)
+      shipAssembly.group.updateMatrixWorld(true);
+      applyRiggingPlan(riggingPlan, ropes, (id) => shipAssembly.socketWorldPosition(id));
+      app.renderer.compute(ropes.computeNode);
 
       const speed = Math.hypot(playerShip.velocity[0], playerShip.velocity[2]);
       ui.setSpeed(speed * 1.944); // m/s → knots
