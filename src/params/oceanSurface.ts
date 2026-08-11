@@ -29,6 +29,12 @@ export const oceanSurfaceParams = registerParams(
     displacementFadeEnd: 900,
     normalFadeStart: 250,
     normalFadeEnd: 1200,
+    /** §V.24 transparency: view-space absorption density per meter */
+    absorptionDensity: 0.35,
+    /** refraction offset strength (screen-space) */
+    refractionStrength: 0.06,
+    /** water body tint applied to refracted scene */
+    refractionTint: '#7fd4c9',
   },
   {
     sssStrength: { min: 0, max: 5, step: 0.05 },
@@ -42,5 +48,7 @@ export const oceanSurfaceParams = registerParams(
     displacementFadeEnd: { min: 100, max: 3000, step: 10 },
     normalFadeStart: { min: 50, max: 2000, step: 10 },
     normalFadeEnd: { min: 100, max: 3000, step: 10 },
+    absorptionDensity: { min: 0.02, max: 2, step: 0.01 },
+    refractionStrength: { min: 0, max: 0.3, step: 0.005 },
   },
 );

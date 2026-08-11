@@ -5,8 +5,9 @@ import { createInitialState } from './state/simState';
 import type { SimState } from './state/simState';
 import { createDebugShell } from './debug';
 import { createSky } from './sky';
-import { createOceanSim } from './ocean';
+import { createOceanSim, oceanParams } from './ocean';
 import { OceanSurface } from './ocean/oceanSurface';
+import { createFoamSim } from './foam';
 import { createClouds } from './clouds';
 import { skyParams } from './params/sky';
 
@@ -33,7 +34,11 @@ async function boot(): Promise<void> {
   sky.configureRenderer(app.renderer);
 
   const ocean = createOceanSim(state.seed);
-  const surface = new OceanSurface(ocean);
+  const foam = createFoamSim(
+    ocean.cascades.map((c) => ({ displacement: c.displacement, domain: c.domain })),
+    oceanParams.resolution,
+  );
+  const surface = new OceanSurface(ocean, foam);
   app.scene.add(surface.group);
 
   const clouds = createClouds({
@@ -41,7 +46,7 @@ async function boot(): Promise<void> {
     camera: app.camera,
     seed: state.seed,
   });
-  // clouds.attachTo(app.scene); // DEBUG: detached during sky-dome bisect
+  clouds.attachTo(app.scene);
 
   const loop = new GameLoop(
     (dt) => {
@@ -55,7 +60,8 @@ async function boot(): Promise<void> {
 
       let t = performance.now();
       ocean.update(app.renderer, state.time);
-      debug.hud.setPassTiming('ocean cpu-dispatch', performance.now() - t);
+      foam.update(app.renderer);
+      debug.hud.setPassTiming('ocean+foam cpu-dispatch', performance.now() - t);
 
       t = performance.now();
       clouds.update(state.time, sky.sunDirection);

@@ -12,19 +12,26 @@ import {
   cameraPosition,
   color,
   float,
+  linearDepth,
   mix,
   normalize,
   positionLocal,
   pow,
   reflect,
+  screenUV,
   smoothstep,
   texture,
   transformNormalToView,
   uniform,
   vec2,
   vec3,
+  viewportDepthTexture,
+  viewportLinearDepth,
+  viewportSharedTexture,
 } from 'three/tsl';
 import type { OceanSimulation } from './oceanCascades';
+import type { FoamSim } from '../foam';
+import { foamTintNode } from '../foam';
 import { oceanSurfaceParams as sp } from '../params/oceanSurface';
 import { oceanParams } from '../params/ocean';
 
@@ -38,7 +45,10 @@ export interface OceanSurfaceMaterial {
   updateFromParams(): void;
 }
 
-export function buildOceanSurfaceMaterial(sim: OceanSimulation): OceanSurfaceMaterial {
+export function buildOceanSurfaceMaterial(
+  sim: OceanSimulation,
+  foam?: FoamSim,
+): OceanSurfaceMaterial {
   const originUniform = uniform(new THREE.Vector2());
   const sunDirectionUniform = uniform(new THREE.Vector3(0.5, 0.6, 0.2).normalize());
   const timeUniform = uniform(0);
@@ -58,6 +68,10 @@ export function buildOceanSurfaceMaterial(sim: OceanSimulation): OceanSurfaceMat
   const uFoamThreshold = uniform(sp.foamThreshold);
   const uDispFade = uniform(new THREE.Vector2(sp.displacementFadeStart, sp.displacementFadeEnd));
   const uNormFade = uniform(new THREE.Vector2(sp.normalFadeStart, sp.normalFadeEnd));
+  const uAbsorption = uniform(sp.absorptionDensity);
+  const uRefractStrength = uniform(sp.refractionStrength);
+  const uRefractTint = uniform(color(sp.refractionTint));
+  const uCameraFar = uniform(5000); // synced in update()
 
   const worldXZ = positionLocal.xz.add(originUniform);
 
@@ -76,10 +90,17 @@ export function buildOceanSurfaceMaterial(sim: OceanSimulation): OceanSurfaceMat
 
   const positionNode = positionLocal.add(totalDisp);
 
-  // fragment normal from Σ derivatives: (∂h/∂x, ∂h/∂z, ∂Dx/∂x, ∂Dz/∂z)
+  // fragment normal from Σ derivatives: (∂h/∂x, ∂h/∂z, ∂Dx/∂x, ∂Dz/∂z).
+  // Per-cascade distance fade: fine cascades die early or their high-freq
+  // slopes alias into white sizzle at grazing angles (user-reported).
   const sampleDeriv = (i: number) =>
     texture(sim.cascades[i].derivatives, worldXZ.div(sim.cascades[i].domain).fract());
-  const der = sampleDeriv(0).add(sampleDeriv(1)).add(sampleDeriv(2)).mul(normFade);
+  const fade2 = smoothstep(180, 45, camDist); // 15m ripple cascade
+  const fade1 = smoothstep(700, 160, camDist); // 60m cascade
+  const der = sampleDeriv(0)
+    .add(sampleDeriv(1).mul(fade1))
+    .add(sampleDeriv(2).mul(fade2))
+    .mul(normFade);
   const lambda = float(oceanParams.choppiness);
   const denomX = float(1).add(der.z.mul(lambda)).max(0.05);
   const denomZ = float(1).add(der.w.mul(lambda)).max(0.05);
@@ -95,6 +116,31 @@ export function buildOceanSurfaceMaterial(sim: OceanSimulation): OceanSurfaceMat
     // base water: deep → shallow by wave height
     const heightMask = smoothstep(-1.2, 1.6, totalDisp.y);
     const waterCol = mix(uDeep, uShallow, heightMask).toVar();
+
+    // §V.24 transparency: refract the scene behind the surface, absorb by
+    // water thickness along the view ray (turquoise → deep teal).
+    const refractedUV = screenUV.add(
+      vec2(normalWorld.x, normalWorld.z).mul(uRefractStrength),
+    );
+    // linearDepth() is normalized 0..1 over the camera range — scale by
+    // far to get METERS or absorption density is meaningless (§B.3)
+    const sceneDepthBehind = linearDepth(viewportDepthTexture(refractedUV));
+    const ownDepth = viewportLinearDepth;
+    const thicknessMeters = sceneDepthBehind.sub(ownDepth).max(0).mul(uCameraFar);
+    // nothing meaningfully close behind → fully water-colored (also guards
+    // refraction pulling foreground pixels: fall back to straight UV)
+    const validRefraction = sceneDepthBehind.greaterThan(ownDepth.add(1e-5));
+    const seeThrough = thicknessMeters
+      .mul(uAbsorption)
+      .negate()
+      .exp()
+      .mul(validRefraction.select(float(1), float(0)));
+    const sceneCol = viewportSharedTexture(
+      validRefraction.select(refractedUV, screenUV),
+    ).rgb;
+    waterCol.assign(
+      mix(waterCol, sceneCol.mul(uRefractTint), seeThrough.mul(0.9)),
+    );
 
     // §V.5 SSS fake: choppy horizontal offset isolates wave sides;
     // boost where the camera looks toward the sun through the crest.
@@ -121,9 +167,16 @@ export function buildOceanSurfaceMaterial(sim: OceanSimulation): OceanSurfaceMat
     const sparkle = specGate.mul(twinkle).mul(uSparkleStrength).mul(normFade);
     col.assign(col.add(vec3(1.0, 0.97, 0.88).mul(sparkle)));
 
-    // temporary crest foam straight from jacobian (proper sim = T5)
-    const foamMask = smoothstep(uFoamThreshold, uFoamThreshold.sub(0.35), jacobian);
-    col.assign(mix(col, uFoam, foamMask.mul(0.85)));
+    // §V.6 foam: progressive-blur sim mask (T5) with crest→soft detail
+    // blend; falls back to raw jacobian threshold when no sim is wired.
+    if (foam) {
+      const foamMask = foam.shadingNode(worldXZ);
+      const foamCol = uFoam.mul(foamTintNode());
+      col.assign(mix(col, foamCol, foamMask.clamp(0, 1).mul(0.9)));
+    } else {
+      const foamMask = smoothstep(uFoamThreshold, uFoamThreshold.sub(0.35), jacobian);
+      col.assign(mix(col, uFoam, foamMask.mul(0.85)));
+    }
     return col;
   })();
 
@@ -132,6 +185,11 @@ export function buildOceanSurfaceMaterial(sim: OceanSimulation): OceanSurfaceMat
   material.normalNode = normalNode;
   material.colorNode = colorNode;
   material.roughnessNode = uRoughness;
+  // §V.24: transparent flag routes the mesh into the transparent pass where
+  // viewportSharedTexture/viewportDepthTexture hold the opaque scene behind.
+  // depthWrite OFF so the captured depth never contains the water itself.
+  material.transparent = true;
+  material.depthWrite = false;
 
   const updateFromParams = () => {
     (uDeep.value as THREE.Color).set(sp.deepColor);
@@ -149,6 +207,9 @@ export function buildOceanSurfaceMaterial(sim: OceanSimulation): OceanSurfaceMat
     uFoamThreshold.value = sp.foamThreshold;
     (uDispFade.value as THREE.Vector2).set(sp.displacementFadeStart, sp.displacementFadeEnd);
     (uNormFade.value as THREE.Vector2).set(sp.normalFadeStart, sp.normalFadeEnd);
+    uAbsorption.value = sp.absorptionDensity;
+    uRefractStrength.value = sp.refractionStrength;
+    (uRefractTint.value as THREE.Color).set(sp.refractionTint);
   };
 
   return {

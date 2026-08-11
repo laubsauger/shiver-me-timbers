@@ -60,20 +60,20 @@ T2|x|debug shell: Tweakpane auto-bind params modules, perf HUD per-pass timers|V
 T3|~|FFT ocean compute: spectrum gen (Phillips+wind), IFFT passes, 3-cascade displacement+choppy+Jacobian StorageTextures|V4,V19
 T4|.|ocean surface mesh+material: clipmap grid, TSL cascade-blend displace, SSS fake, specular+sparkle glints, depth-based color|V4,V5,V20
 T5|~|foam sim: Jacobian inject compute, progressive blur ping StorageTextures, crest/soft tex blend|V6
-T6|.|weather presets: calm/swell/storm param sets, wind vector, storm foam bias|V7
+T6|~|weather presets: calm/swell/storm param sets, wind vector, storm foam bias|V7
 T7|~|buoyancy: CPU spectrum mirror or readback, sample heights @ ship probe points, float+righting torque|V8
 T8|~|proc ship: piece graph gen, 2 classes (galleon 3-mast per docs/ship-*.png + brigantine 2-mast), sockets, sail states, wood PBR tri-planar|V13,V18
 T9|~|sail+steer: rudder, sail trim vs wind, ship kinematics on water|V2,V8
 T10|~|camera: follow+orbit, deck walk optional later|-
 T11|~|ropes: catenary compute + instanced render, anchor @ sockets, re-solve on mast move|V12,V13
 T12|~|deck water: Mei 2-pass compute 512x192, rotation bias, wet material hook|V9
-T13|.|intersection foam: depth mask in water material, advect+accum compute, flowmap noise tex|V10
+T13|~|intersection foam: depth mask in water material, advect+accum compute, flowmap noise tex|V10
 T14|~|clouds: core billboards/geo → 4ch RT, depth-scaled blur compute, frustum quad + distort cubemap|V11
 T15|~|sky+light: day cycle, sun/sky params, tonemap, fits painterly look|V16
 T16|~|cannons: aim, fire, ball ballistic in sim, muzzle fx|V2,V3
-T17|.|destruction: damage zones, piece swap holed, splinters, mast break + rope re-solve|V13,V14,V12
+T17|~|destruction: damage zones, piece swap holed, splinters, mast break + rope re-solve|V13,V14,V12
 T18|.|flooding+sink: hole-below-waterline ingress, list/trim, sink sequence|V14,V8
-T19|.|enemy AI ship: state machine, broadside logic, uses same ship systems|V15
+T19|~|enemy AI ship: state machine, broadside logic, uses same ship systems|V15
 T20|~|island: heightmap terrain, rock intersection foam, waterfall plane w/ flow foam|V10
 T21|~|audio: waves, creaks, cannon, ambience (howler or WebAudio thin)|-
 T22|.|polish pass: LUT/grade, vignette, foam art tex, param tuning vs talk footage|V17
@@ -82,8 +82,8 @@ T24|.|ocean acceptance: side-by-side capture vs reference PNGs+footage, iterate 
 T25|~|game UI: pause menu (Esc), settings screens (graphics res-scale/quality, audio volumes), HUD frame — frontend-design skill, pirate AAA theme|V21,V16
 T26|~|palms+vegetation: proc palm geo, TSL wind sway (trunk+frond flutter), instanced scatter API|V16
 T27|~|terrain materials: stylized tri-planar rock, sand/beach w/ shore blend + sparkle, proc noise texs|V16
-T28|.|water transparency: depth-tinted see-through + screen-space refraction in surface material|V24,V20
-T29|.|underwater mode: submersion detect, underwater grade, waterline split + meniscus|V25
+T28|~|water transparency: depth-tinted see-through + screen-space refraction in surface material|V24,V20
+T29|~|underwater mode: submersion detect, underwater grade, waterline split + meniscus|V25
 
 ## §B BUGS
 id|date|cause|fix

@@ -46,7 +46,7 @@ export const oceanParams: OceanParams = registerParams('ocean', {
   oppositeWaveDamp: 0.06,
   smallWaveCutoff: 0.02,
   choppiness: 1.4,
-  jacobianFoamBias: 0.0,
+  jacobianFoamBias: 0.55,
 }, oceanParamsMeta());
 
 function oceanParamsMeta() {

@@ -105,6 +105,63 @@ export const galleonParams: ShipClassParams = registerParams(
   shipParamsMeta(),
 );
 
+/** Wood/sail material tunables (§V16) — live TSL uniforms unless noted. */
+export interface ShipMaterialParams {
+  grainScale: number; // fbm sample frequency (1/m)
+  grainStretch: number; // <1 elongates grain along the plank axis (z)
+  grainOctaves: number; // build-time: changing rebuilds node graph
+  triplanarSharpness: number;
+  plankWidth: number; // m between plank seams
+  seamWidth: number; // seam falloff as fraction of a plank
+  seamDarken: number; // 0..1 multiplier at the seam line
+  waleFrequency: number; // horizontal wale strakes per metre of hull height
+  waleRatio: number; // 0..1 band coverage
+  waleDarken: number; // 0..1 multiplier inside a wale band
+  hullLight: number; // warm mid-tone hull (docs/ship-full-view.png)
+  hullDark: number;
+  deckLight: number; // pale scrubbed deck planks
+  deckDark: number;
+  sparLight: number;
+  sparDark: number;
+  trimLight: number; // rails/rudder/keel — darkest wood
+  trimDark: number;
+  sailLight: number;
+  sailDark: number;
+  sailWeaveScale: number; // warp/weft noise frequency
+  sailBacklitColor: number;
+  sailBacklitStrength: number;
+  holeColor: number;
+}
+
+export const shipMaterialParams: ShipMaterialParams = registerParams(
+  'ship-material',
+  {
+    grainScale: 1.6, grainStretch: 0.22, grainOctaves: 3, triplanarSharpness: 8,
+    plankWidth: 0.55, seamWidth: 0.08, seamDarken: 0.55,
+    waleFrequency: 0.9, waleRatio: 0.28, waleDarken: 0.62,
+    hullLight: 0x9a6b3f, hullDark: 0x63401f,
+    deckLight: 0xc9a96e, deckDark: 0x9a7a4a,
+    sparLight: 0x8a6a42, sparDark: 0x5f452a,
+    trimLight: 0x54381f, trimDark: 0x362412,
+    sailLight: 0xe9e1cd, sailDark: 0xd2c5aa,
+    sailWeaveScale: 18, sailBacklitColor: 0xfff0d2, sailBacklitStrength: 0.35,
+    holeColor: 0x120c07,
+  },
+  {
+    grainScale: { min: 0.1, max: 8, step: 0.05 },
+    grainStretch: { min: 0.05, max: 1, step: 0.01 },
+    triplanarSharpness: { min: 1, max: 24, step: 0.5 },
+    plankWidth: { min: 0.2, max: 2, step: 0.01 },
+    seamWidth: { min: 0.01, max: 0.3, step: 0.005 },
+    seamDarken: { min: 0, max: 1, step: 0.01 },
+    waleFrequency: { min: 0.1, max: 3, step: 0.05 },
+    waleRatio: { min: 0, max: 1, step: 0.01 },
+    waleDarken: { min: 0, max: 1, step: 0.01 },
+    sailWeaveScale: { min: 2, max: 60, step: 0.5 },
+    sailBacklitStrength: { min: 0, max: 2, step: 0.01 },
+  },
+);
+
 function shipParamsMeta(): Partial<Record<keyof ShipClassParams, ParamMeta>> {
   return {
     hullLength: { min: 10, max: 60, step: 0.5 },
