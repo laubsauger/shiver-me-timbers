@@ -4,8 +4,8 @@
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-/** kill switch while the shadow-variant GPU stall is bisected */
-const SHADOWS_ENABLED = false;
+/** re-enabled after B5 (spray NaN) proved to be the wedge, not shadows */
+const SHADOWS_ENABLED = true;
 
 export class App {
   readonly renderer: THREE.WebGPURenderer;
