@@ -37,18 +37,31 @@ export interface OceanParams {
 
 export const oceanParams: OceanParams = registerParams('ocean', {
   resolution: 512,
-  // non-commensurate domains (§V19): 253/59 ≈ 4.29, 59/13.7 ≈ 4.31 — no pair
-  // re-aligns on a short world period, so foam/wave repeats don't grid up
-  cascades: [{ domain: 253 }, { domain: 59 }, { domain: 13.7 }],
-  splitWavelengths: [24, 5],
-  amplitude: 0.75,
-  windSpeed: 8,
+  // non-commensurate domains (§V19): 420/98 ≈ 4.29, 98/22.7 ≈ 4.32 — no pair
+  // re-aligns on a short world period, so foam/wave repeats don't grid up.
+  // Scaled 1.66× off the old 253/59/13.7 to carry OPEN-OCEAN swell: at the
+  // wind below the energy-weighted mean wavelength is ≈69 m, and 3.7 waves
+  // per tile (the old 253 m domain) reads as repetition (user: "wave
+  // frequency for open ocean is a little high", "pattern is repetitive").
+  cascades: [{ domain: 420 }, { domain: 98 }, { domain: 22.7 }],
+  // band edges scale with the domains so no cascade is asked for wavelengths
+  // its grid can't hold (also keeps the CPU buoyancy mirror's kMax inside its
+  // reduced grid — see sea-physics/cpuOcean ctor guard)
+  splitWavelengths: [40, 8.3],
+  // wave SCALE is windSpeed (Phillips peak ∝ V²/g), not domain: 8 → 11 m/s
+  // moves the mean wavelength 37 m → 69 m. Amplitude drops 0.75 → 0.32 to
+  // hold significant wave height near the old sea state (Hs ≈ 2.3 → 2.8 m)
+  // instead of letting longer waves also get much taller.
+  amplitude: 0.32,
+  windSpeed: 11,
   windDirection: Math.PI * 0.25,
   directionality: 10,
   oppositeWaveDamp: 0.06,
   smallWaveCutoff: 0.03,
   choppiness: 0.95,
-  jacobianFoamBias: 0.5,
+  // longer swell at the same height is LESS steep → less jacobian folding,
+  // so the foam gate opens slightly to keep whitecap coverage (§V6)
+  jacobianFoamBias: 0.55,
 }, oceanParamsMeta());
 
 function oceanParamsMeta() {

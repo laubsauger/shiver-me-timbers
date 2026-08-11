@@ -4,9 +4,11 @@
  * §V.3: sim-side — no three.js; mutates only ShipState plain data.
  *
  * SPLIT CONTRACT with buoyancy (src/sea-physics, §B.6 fix):
- * sailing owns yaw, a wind-heel OFFSET on roll, and PLANAR velocity/
- * position only. It never writes position[1]/velocity[1], PRESERVES the
- * pitch buoyancy integrated (recompose is yaw∘pitch∘roll, never yaw∘heel),
+ * sailing owns yaw — the angle AND the rate in angularVelocity[1], which
+ * buoyancy leaves strictly alone — plus a wind-heel OFFSET on roll and
+ * PLANAR velocity/position only. It never writes position[1]/velocity[1],
+ * PRESERVES the pitch buoyancy integrated (recompose is yaw∘pitch∘roll,
+ * never yaw∘heel),
  * and never relaxes total roll: wind heel is tracked separately and added
  * on top of the wave-roll component, so buoyancy's roll dynamics pass
  * through untouched. Buoyancy's pitch-memory workaround detects surviving
@@ -120,13 +122,22 @@ export function stepShipSailing(
   ship.position[0] += ship.velocity[0] * dt;
   ship.position[2] += ship.velocity[2] * dt;
 
-  // --- rudder: yaw rate ∝ forward speed, min steerage once under way ---
+  // --- rudder: yaw rate ∝ forward speed, min steerage once under way.
+  // The rudder sets a TARGET rate; the actual rate lags it with time
+  // constant 1/yawResponse, because a few hundred tons of ship take
+  // seconds to spin up about its own mast and seconds to stop. Momentum
+  // lives in ship.angularVelocity[1] — sailing is its sole owner (§B.6,
+  // buoyancy never writes it), so it is real sim state: centre the helm
+  // mid-turn and the ship keeps swinging round before it settles.
   const way = Math.abs(f);
   const steer =
     way < params.steerageSpeed
       ? 0
       : clamp(way / params.rudderRefSpeed, params.minSteerFactor, 1);
-  const yawRate = ship.rudder * params.rudderRate * steer;
+  const targetYawRate = ship.rudder * params.rudderRate * steer;
+  const yawRate =
+    ship.angularVelocity[1] +
+    (targetYawRate - ship.angularVelocity[1]) * (1 - Math.exp(-params.yawResponse * dt));
   const newYaw = yaw + yawRate * dt;
   ship.angularVelocity[1] = yawRate;
 

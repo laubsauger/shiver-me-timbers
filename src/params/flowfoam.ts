@@ -46,28 +46,86 @@ export interface FlowFoamParams {
   baseFlowSpeed: number;
   /** finite-difference offset (m) for the pseudo-curl gradient samples */
   curlStep: number;
+  // --- wake track history (world-space memory: src/flowfoam/wakeTrack.ts) ---
+  /** metres of travel between recorded cutwater samples — the trail's resolution */
+  trackSpacing: number;
+  /** heading change (deg) that also lays a sample — keeps hard turns curved, not faceted */
+  trackTurn: number;
+  /** seconds a track sample survives; with trackSpacing this sets trail length */
+  trackLife: number;
+  /** fraction of trackLife over which the oldest wake fades out (no eviction pop) */
+  tailFade: number;
+  /** feather distance (m) ahead of the cutwater over which wake is clipped to 0 */
+  bowClip: number;
+
+  // --- bow mound: the displacement bow wave, FORWARD of the stem ---
+  /** bow mound foam per second per m/s — the water shoved ahead of the stem */
+  moundIntensity: number;
+  /** metres AHEAD of the stem where the mound crest peaks (must be > 0: it leads) */
+  moundLead: number;
+  /** crest aft-sweep per metre outboard — how the mound peels into the V arms */
+  moundSweep: number;
+  /** outboard half-extent (m) of the mound before it hands over to the arms */
+  moundSpan: number;
+  /** fore-aft thickness (m) of the mound's leading face */
+  moundThick: number;
+  /** aft thickness as a multiple of moundThick — fills the gap back to the hull */
+  moundFill: number;
+  /** seconds for the mound to build/subside toward the hull's speed (inertia) */
+  moundLag: number;
+
+  // --- bow: cutwater core + Kelvin arms ---
   /** bow wake V half-angle (deg) — 19.47 is the physical Kelvin angle */
   kelvinAngle: number;
-  /** bow arm foam injected per second per m/s of ship speed */
+  /** Kelvin arm foam injected per second per m/s of ship speed */
   bowIntensity: number;
-  /** stern band foam injected per second per (m/s)² of ship speed */
+  /** arm half-width (m) at the stem */
+  armWidth: number;
+  /** extra arm half-width per metre of track distance — the V thickens as it trails */
+  armWidthGrowth: number;
+  /** extra arm intensity multiplier at the hull (0 = flat) — "heaving water out" read */
+  hullBoost: number;
+  /** track distance (m) over which hullBoost fades to 0 */
+  hullBoostDist: number;
+  /** seconds an arm keeps injecting before it fades out */
+  bowLife: number;
+  /** cutwater core foam per second per m/s — the stem tearing the surface open */
+  cutIntensity: number;
+  /** cutwater core half-width (m) */
+  cutWidth: number;
+  /** track distance (m) over which the cutwater core fades */
+  cutLength: number;
+
+  // --- aft: transom churn + shed vortex pair ---
+  /** stern churn foam injected per second per (m/s)² of ship speed */
   sternIntensity: number;
+  /** stern churn half-width as a multiple of ship beam (≈1 → width ≈ beam) */
+  sternWidth: number;
+  /** turbulent lateral spread of the stern churn (m/s of water age) */
+  sternSpread: number;
+  /** seconds the stern churn keeps injecting after the transom passes */
+  sternLife: number;
+  /** track distance (m) aft of the transom over which the aft features fade IN */
+  sternOnset: number;
+  /** shed vortex foam per second per (m/s)² — the aft's distinguishing feature */
+  vortexIntensity: number;
+  /** vortex lobe offset from the centreline, × beam half-width */
+  vortexOffset: number;
+  /** outboard drift of the vortex lobes (m/s of water age) */
+  vortexSpread: number;
+  /** vortex lobe half-width (m) */
+  vortexWidth: number;
+  /** metres of track between shed puffs — port/starboard alternate (von Kármán) */
+  vortexSpacing: number;
+  /** seconds a shed vortex keeps injecting */
+  vortexLife: number;
+
   /** ship speed (m/s) below which no wake is injected (feathers over 1× more) */
   speedThreshold: number;
-  /** speed (m/s) at which the wake is fully developed — V arms, width and
-   * range all scale with smoothstep(speedThreshold, fullWakeSpeed, speed);
-   * slow drift shows only faint narrow stern churn, no V */
+  /** speed (m/s) at which the bow wake is fully developed — arm intensity
+   * scales with smoothstep(speedThreshold, fullWakeSpeed, speed); slow drift
+   * shows only faint stern churn, no V */
   fullWakeSpeed: number;
-  /** fraction of full wake width/range remaining at threshold speed */
-  slowWakeWidth: number;
-  /** bow arm half-width (m) at the bow point, at full speed */
-  armWidth: number;
-  /** extra arm half-width per meter aft — the V thickens as it trails */
-  armWidthGrowth: number;
-  /** stern band half-width as a multiple of ship beam (≈1 → width ≈ beam) */
-  sternWidth: number;
-  /** distance aft (m) over which wake injection fades to 0 — the advected field carries it further */
-  wakeRange: number;
   /** world-space frequency (1/m) of the wake breakup noise */
   wakeNoiseScale: number;
   /** smoothstep half-band around 0.5 thresholding the breakup noise — small = hard gaps, large = soft mottle */
@@ -96,16 +154,41 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     noiseScrollSpeed: 0.4,
     baseFlowSpeed: 0.8,
     curlStep: 1.2,
+    trackSpacing: 2.2,
+    trackTurn: 6,
+    trackLife: 30,
+    tailFade: 0.35,
+    bowClip: 0.8,
+    moundIntensity: 0.5,
+    moundLead: 1.6,
+    moundSweep: 0.9,
+    moundSpan: 5.0,
+    moundThick: 1.4,
+    moundFill: 3.0,
+    moundLag: 1.1,
     kelvinAngle: 19.47,
-    bowIntensity: 0.5,
-    sternIntensity: 0.2,
+    bowIntensity: 0.3,
+    armWidth: 0.9,
+    armWidthGrowth: 0.05,
+    hullBoost: 1.6,
+    hullBoostDist: 14,
+    bowLife: 9,
+    cutIntensity: 1.0,
+    cutWidth: 1.1,
+    cutLength: 7,
+    sternIntensity: 0.05,
+    sternWidth: 0.9,
+    sternSpread: 0.55,
+    sternLife: 8,
+    sternOnset: 3,
+    vortexIntensity: 0.05,
+    vortexOffset: 1.15,
+    vortexSpread: 0.28,
+    vortexWidth: 1.3,
+    vortexSpacing: 11,
+    vortexLife: 10,
     speedThreshold: 0.5,
     fullWakeSpeed: 5.0,
-    slowWakeWidth: 0.3,
-    armWidth: 0.6,
-    armWidthGrowth: 0.045,
-    sternWidth: 0.6,
-    wakeRange: 40,
     wakeNoiseScale: 0.3,
     wakeNoiseContrast: 0.18,
     wakeBreakup: 0.85,
@@ -131,16 +214,41 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     noiseScrollSpeed: { min: 0, max: 4, step: 0.05 },
     baseFlowSpeed: { min: 0, max: 6, step: 0.05 },
     curlStep: { min: 0.1, max: 8, step: 0.1 },
+    trackSpacing: { min: 0.5, max: 10, step: 0.1 },
+    trackTurn: { min: 1, max: 45, step: 0.5 },
+    trackLife: { min: 1, max: 60, step: 0.5 },
+    tailFade: { min: 0.05, max: 0.9, step: 0.05 },
+    bowClip: { min: 0.1, max: 8, step: 0.1 },
+    moundIntensity: { min: 0, max: 5, step: 0.05 },
+    moundLead: { min: 0.1, max: 10, step: 0.1 },
+    moundSweep: { min: 0, max: 4, step: 0.05 },
+    moundSpan: { min: 0.5, max: 20, step: 0.25 },
+    moundThick: { min: 0.2, max: 8, step: 0.1 },
+    moundFill: { min: 1, max: 8, step: 0.1 },
+    moundLag: { min: 0.05, max: 6, step: 0.05 },
     kelvinAngle: { min: 5, max: 45, step: 0.01 },
-    bowIntensity: { min: 0, max: 20, step: 0.1 },
-    sternIntensity: { min: 0, max: 10, step: 0.05 },
-    speedThreshold: { min: 0, max: 5, step: 0.05 },
-    fullWakeSpeed: { min: 1, max: 15, step: 0.25 },
-    slowWakeWidth: { min: 0.05, max: 1, step: 0.05 },
+    bowIntensity: { min: 0, max: 5, step: 0.05 },
     armWidth: { min: 0.1, max: 10, step: 0.1 },
     armWidthGrowth: { min: 0, max: 0.5, step: 0.005 },
-    sternWidth: { min: 0.2, max: 3, step: 0.05 },
-    wakeRange: { min: 5, max: 300, step: 5 },
+    hullBoost: { min: 0, max: 8, step: 0.1 },
+    hullBoostDist: { min: 1, max: 60, step: 1 },
+    bowLife: { min: 0.5, max: 30, step: 0.5 },
+    cutIntensity: { min: 0, max: 8, step: 0.05 },
+    cutWidth: { min: 0.1, max: 8, step: 0.1 },
+    cutLength: { min: 0.5, max: 40, step: 0.5 },
+    sternIntensity: { min: 0, max: 2, step: 0.005 },
+    sternWidth: { min: 0.2, max: 4, step: 0.05 },
+    sternSpread: { min: 0, max: 4, step: 0.05 },
+    sternLife: { min: 0.5, max: 20, step: 0.5 },
+    sternOnset: { min: 0.5, max: 20, step: 0.5 },
+    vortexIntensity: { min: 0, max: 2, step: 0.005 },
+    vortexOffset: { min: 0.2, max: 4, step: 0.05 },
+    vortexSpread: { min: 0, max: 3, step: 0.02 },
+    vortexWidth: { min: 0.2, max: 6, step: 0.1 },
+    vortexSpacing: { min: 2, max: 60, step: 0.5 },
+    vortexLife: { min: 0.5, max: 25, step: 0.5 },
+    speedThreshold: { min: 0, max: 5, step: 0.05 },
+    fullWakeSpeed: { min: 1, max: 15, step: 0.25 },
     wakeNoiseScale: { min: 0.02, max: 2, step: 0.01 },
     wakeNoiseContrast: { min: 0.02, max: 0.5, step: 0.01 },
     wakeBreakup: { min: 0, max: 1, step: 0.05 },

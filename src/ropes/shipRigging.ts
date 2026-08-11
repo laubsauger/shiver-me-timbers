@@ -4,22 +4,38 @@
  * is plain deterministic data keyed by SOCKET IDS, not positions — world
  * positions are resolved only in applyRiggingPlan, so main.ts re-applies the
  * same plan every time anchors move and the compute pass re-solves the
- * catenaries (§V14 → §V12). Rig layout per docs/ship-reference-schema.png +
- * docs/ship-full-view.png:
+ * catenaries (§V14 → §V12).
+ *
+ * RULE 1 — RIGGING IS LOCAL (docs/ship-reference-schema.png, ship-full-view).
+ * Every line stays inside its own mast bay; nothing fans from the stem to the
+ * transom. A previous plan ran shrouds from EVERY masthead to BOTH end cleats
+ * and braces from every yard to the transom: 20 of its 48 lines spanned the
+ * whole hull and the ship read as a spider web. Layout now:
  *   stays      forestay (foremost masthead → bowsprit tip), inter-mast stays
- *              (masthead → next masthead aft), backstays (aftmost masthead →
- *              stern cleats), bobstays (bowsprit tip → bow cleats)
- *   halyard    crow's nest → its masthead (flag/topsail line)
- *   shrouds    each masthead → bow + stern cleat per side (2/side/mast)
- *   yard lifts each yard end → its own masthead
- *   braces     BOTH yards' ends → stern deck cleats aft, side-matched
- *   sheets     lower yard ends → bow cleats, side-matched (clew sheet run —
- *              the blueprint has no sail-clew sockets, so the run starts at
- *              the yard end; adapt when the ship system adds clew anchors)
- * Duplicate socket pairs are deduped (e.g. aftmost mast's stern shrouds ARE
- * the backstays). Only sockets present in the blueprint are referenced, and
- * validateRiggingPlan re-checks that — a socket rename in src/ship/ fails
- * loud here instead of silently mis-rigging.
+ *              (masthead → next masthead), backstays from the AFTMOST masthead
+ *              only, bobstays (bowsprit tip → bow cleats)
+ *   shrouds    masthead → the CHAINPLATE abeam of that same mast
+ *   lifts      upper yard ends → their own masthead
+ *   braces     yard ends → the chainplate of the NEXT MAST AFT (the aftmost
+ *              mast's yards → the stern cleats)
+ *   sheets     lower yard ends → the chainplate of the NEXT MAST FORWARD (the
+ *              foremost mast's → the bow cleats). No sail-clew sockets exist
+ *              yet, so the run starts at the yard end; adapt when they land.
+ *   halyard    crow's nest → its masthead
+ *
+ * RULE 2 — NO ROPE MAY END INSIDE THE HULL OR HANG THROUGH THE DECK. The
+ * catenary solver knows nothing about the ship, so clearance is a property of
+ * WHERE a line is anchored and HOW MUCH slack it carries, and nothing else.
+ * Hull-side ends therefore go to `anchor-channel-{side}-{mast}` — chainplates
+ * the ship system places on the shell just under the cap rail — never to a
+ * belaying cleat sitting inboard on the deck. Standing rigging is kept nearly
+ * taut (STYLE below) because a bowing stay is what dips through a deck it
+ * passes over. tests/shipRigging.test.ts samples the solved curve of every
+ * rope against the ship's own loft and fails if any of it enters the solid.
+ *
+ * Only sockets present in the blueprint are referenced, and validateRiggingPlan
+ * re-checks that — a socket rename in src/ship/ fails loud here instead of
+ * silently mis-rigging.
  */
 import type { PieceDef } from '../ship/pieceTypes';
 import type { Vec3Like } from './catenaryMath';
@@ -43,19 +59,34 @@ export interface RiggingRope {
 export type RopesHandle = Pick<Ropes, 'setRope' | 'setRopeCount'>;
 export type BlocksHandle = Pick<Blocks, 'setBlock' | 'setBlockCount'>;
 
-/** per-role slack/thickness — rig design data: standing rigging (stays/
- *  shrouds) tauter and thicker than running rigging (lifts/braces/sheets) */
+/**
+ * Per-role slack/thickness — rig design data. Standing rigging (stays,
+ * shrouds) is set up nearly TAUT: it holds the mast up, and slack is also
+ * exactly what lets a line bow far enough to sink through the deck it passes
+ * over (user report). Running rigging is slacker and thinner, and is only led
+ * outboard where a sag has nothing to intersect.
+ */
 const STYLE: Record<RigRole, { slack: number; thickness: number }> = {
-  stay: { slack: 1.03, thickness: 0.05 },
-  halyard: { slack: 1.05, thickness: 0.028 },
-  shroud: { slack: 1.04, thickness: 0.04 },
-  lift: { slack: 1.07, thickness: 0.03 },
-  brace: { slack: 1.1, thickness: 0.025 },
-  sheet: { slack: 1.12, thickness: 0.02 },
+  stay: { slack: 1.004, thickness: 0.05 },
+  halyard: { slack: 1.03, thickness: 0.028 },
+  shroud: { slack: 1.004, thickness: 0.04 },
+  lift: { slack: 1.02, thickness: 0.03 },
+  brace: { slack: 1.02, thickness: 0.025 },
+  sheet: { slack: 1.02, thickness: 0.022 },
 };
 
 /** running rigging is worked through blocks; standing rigging is seized */
 const BLOCK_ROLES: ReadonlySet<RigRole> = new Set(['halyard', 'lift', 'brace', 'sheet']);
+
+const SIDES = ['port', 'starboard'] as const;
+
+/**
+ * How far below a mast's step its chainplate may sit before the shroud would
+ * have to cross a deck (see the shroud loop). Chainplates are set a cap-rail's
+ * depth (~0.3 m) under the sheer by design, so the margin only has to clear
+ * that — anything approaching a castle's rise (~2 m) is a stepped deck.
+ */
+const STEPPED_DECK_MARGIN = 1;
 
 /** ids of every rope-anchor socket in the blueprint (other socket types are
  *  not valid rope endpoints) */
@@ -87,8 +118,6 @@ export function validateRiggingPlan(
   }
 }
 
-const SIDES = ['port', 'starboard'] as const;
-
 /**
  * Build the standard rigging set for a blueprint (works for both ship
  * classes: entries whose sockets a class lacks — e.g. brigantine rear mast /
@@ -101,7 +130,8 @@ export function buildRiggingPlan(blueprint: PieceDef[]): RiggingRope[] {
   const seen = new Set<string>();
   const add = (socketA: string, socketB: string, role: RigRole): void => {
     const key = `${socketA}|${socketB}`;
-    if (!ids.has(socketA) || !ids.has(socketB) || seen.has(key)) return;
+    if (!ids.has(socketA) || !ids.has(socketB) || socketA === socketB) return;
+    if (seen.has(key)) return;
     seen.add(key);
     plan.push({ socketA, socketB, role, ...STYLE[role] });
   };
@@ -115,8 +145,11 @@ export function buildRiggingPlan(blueprint: PieceDef[]): RiggingRope[] {
   const foremost = masts[0];
   const aftmost = masts[masts.length - 1];
   const masthead = (m: string): string => `anchor-masthead-${m}`;
+  const chainplate = (side: string, m: string): string => `anchor-channel-${side}-${m}`;
 
-  // stays: forestay, inter-mast, backstays, bobstays (bow runs)
+  // stays: forestay, inter-mast, backstays from the AFTMOST masthead only (a
+  // backstay off every masthead is what dragged lines the length of the ship),
+  // bobstays holding the bowsprit down against the forestay's pull
   add(masthead(foremost), 'anchor-bowsprit-tip', 'stay');
   for (let i = 0; i < masts.length - 1; i++) {
     add(masthead(masts[i]), masthead(masts[i + 1]), 'stay');
@@ -132,31 +165,67 @@ export function buildRiggingPlan(blueprint: PieceDef[]): RiggingRope[] {
   if (crowNest?.parent !== undefined) {
     add('anchor-crow-nest', masthead(crowNest.parent.replace(/^mast-/, '')), 'halyard');
   }
-  // shrouds — 2 per side per mast (bow + stern cleat); the aftmost mast's
-  // stern pair dedupes against its backstays
-  for (const m of masts) {
+  // shrouds: straight down the ship's side to the chainplate ABEAM of the same
+  // mast — never to a cleat at the far end of the hull
+  const socketY = socketHeights(blueprint);
+  for (const piece of mastPieces) {
+    const m = piece.id.replace(/^mast-/, '');
     for (const side of SIDES) {
-      add(masthead(m), `anchor-cleat-bow-${side}`, 'shroud');
-      add(masthead(m), `anchor-cleat-stern-${side}`, 'shroud');
+      const foot = chainplate(side, m);
+      // A mast stepped on a raised deck (the galleon's rear mast stands on the
+      // quarterdeck) whose chainplate is still down on the main shell would
+      // have to run its shrouds THROUGH that deck — the fault the user saw as
+      // rope "going into the ship". Skip rather than draw it; the mast keeps
+      // its backstays and inter-mast stay. Fixed ship-side by lifting
+      // anchor-channel-*-rear to the deck the mast is stepped on, after which
+      // this guard stops firing on its own.
+      const drop = piece.transform.position[1] - (socketY.get(foot) ?? -Infinity);
+      if (drop > STEPPED_DECK_MARGIN) continue;
+      add(masthead(m), foot, 'shroud');
     }
   }
-  // yard lifts + braces (both yard levels) + sheets, in blueprint order
+  // yard lines: lift up to the own masthead (upper yards), brace aft into the
+  // next bay, sheet forward into the previous one — never end to end
   for (const piece of blueprint) {
     if (piece.kind !== 'yard') continue;
     const match = /^yard-(\w+)-(\w+)$/.exec(piece.id);
     if (match === null) continue;
     const [, m, level] = match;
+    const index = masts.indexOf(m);
+    if (index < 0) continue;
+    const aftMast = index + 1 < masts.length ? masts[index + 1] : undefined;
+    const foreMast = index > 0 ? masts[index - 1] : undefined;
     for (const side of SIDES) {
-      add(`anchor-${piece.id}-${side}`, masthead(m), 'lift');
-      add(`anchor-${piece.id}-${side}`, `anchor-cleat-stern-${side}`, 'brace');
-      if (level === 'lower') {
-        add(`anchor-${piece.id}-${side}`, `anchor-cleat-bow-${side}`, 'sheet');
-      }
+      const end = `anchor-${piece.id}-${side}`;
+      if (level === 'upper') add(end, masthead(m), 'lift');
+      add(end, aftMast === undefined
+        ? `anchor-cleat-stern-${side}`
+        : chainplate(side, aftMast), 'brace');
+      if (level !== 'lower') continue;
+      add(end, foreMast === undefined
+        ? `anchor-cleat-bow-${side}`
+        : chainplate(side, foreMast), 'sheet');
     }
   }
 
   validateRiggingPlan(plan, blueprint);
   return plan;
+}
+
+/**
+ * Ship-local height of every socket (carrier piece + socket offset). Hull
+ * pieces are axis-aligned in ship space so the sum is exact for the sockets
+ * this is used on; it only ever gates the shroud guard above, never a
+ * position that reaches the GPU.
+ */
+function socketHeights(blueprint: PieceDef[]): Map<string, number> {
+  const heights = new Map<string, number>();
+  for (const piece of blueprint) {
+    for (const socket of piece.sockets) {
+      heights.set(socket.id, piece.transform.position[1] + socket.position[1]);
+    }
+  }
+  return heights;
 }
 
 /**
@@ -181,17 +250,27 @@ export function selectBlockSockets(plan: RiggingRope[], cap: number): string[] {
  * to its CURRENT world position (ship transform × piece graph — supplied by
  * the ship system); rope length = chord × slack. Call again whenever anchors
  * move (§V14 mast break → §V12 re-solve); the descriptor upload is the only
- * CPU work, the curve math stays on the GPU. Throws (from setRope) if the
- * plan exceeds the handle's maxRopes capacity.
+ * CPU work, the curve math stays on the GPU. Socket lookups are memoised for
+ * the call — the whole rig shares ~25 sockets across ~38 ropes. Throws (from
+ * setRope) if the plan exceeds the handle's maxRopes capacity.
  */
 export function applyRiggingPlan(
   plan: RiggingRope[],
   ropes: RopesHandle,
   socketWorldPosition: (id: string) => [number, number, number],
 ): void {
+  const cache = new Map<string, [number, number, number]>();
+  const at = (id: string): [number, number, number] => {
+    let p = cache.get(id);
+    if (p === undefined) {
+      p = socketWorldPosition(id);
+      cache.set(id, p);
+    }
+    return p;
+  };
   plan.forEach((rope, index) => {
-    const [ax, ay, az] = socketWorldPosition(rope.socketA);
-    const [bx, by, bz] = socketWorldPosition(rope.socketB);
+    const [ax, ay, az] = at(rope.socketA);
+    const [bx, by, bz] = at(rope.socketB);
     const a: Vec3Like = { x: ax, y: ay, z: az };
     const b: Vec3Like = { x: bx, y: by, z: bz };
     const chord = Math.hypot(bx - ax, by - ay, bz - az);

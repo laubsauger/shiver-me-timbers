@@ -36,6 +36,12 @@ export interface FoamParams {
   capVariationScale: number;
   /** 0 = uniform caps, 1 = strong per-site strength/lifecycle variation */
   capVariationStrength: number;
+  /** blur tap stretch ALONG the wave crest ridge (1 = isotropic/round caps) */
+  crestBlurAlong: number;
+  /** blur tap stretch ACROSS the ridge — keep < along or caps go circular */
+  crestBlurAcross: number;
+  /** detail-noise stretch along the crest line (1 = isotropic blobs) */
+  crestElongation: number;
 }
 
 export const foamParams: FoamParams = registerParams(
@@ -53,6 +59,9 @@ export const foamParams: FoamParams = registerParams(
     injectFineCascade: 0,
     capVariationScale: 0.03,
     capVariationStrength: 0.8,
+    crestBlurAlong: 2.6,
+    crestBlurAcross: 0.5,
+    crestElongation: 3.0,
   },
   foamParamsMeta(),
 );
@@ -71,5 +80,8 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
     injectFineCascade: { min: 0, max: 1, step: 1 },
     capVariationScale: { min: 0.002, max: 0.2, step: 0.002 },
     capVariationStrength: { min: 0, max: 1, step: 0.05 },
+    crestBlurAlong: { min: 0.25, max: 5, step: 0.05 },
+    crestBlurAcross: { min: 0.1, max: 3, step: 0.05 },
+    crestElongation: { min: 1, max: 8, step: 0.1 },
   };
 }

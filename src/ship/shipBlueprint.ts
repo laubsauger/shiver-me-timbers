@@ -7,14 +7,12 @@
 import { brigantineParams, galleonParams, type ShipClassParams } from '../params/ship';
 import type { PieceDef } from './pieceTypes';
 import {
-  buildBowAndTransom,
   buildCannons,
   buildDeck,
   buildHullSections,
   buildKeel,
-  buildRails,
-  buildRudder,
 } from './blueprintParts';
+import { buildBowAndTransom, buildRails, buildRudder } from './blueprintEnds';
 import { buildCastles, buildFurniture } from './blueprintCastles';
 import { buildBowsprit, buildMastRig } from './blueprintRig';
 
@@ -26,7 +24,14 @@ export function buildBrigantineBlueprint(
   p: ShipClassParams = brigantineParams,
 ): PieceDef[] {
   const rig = { sails: false, crowNest: false };
-  const hull = buildHullSections(p, { hullCannons: true });
+  // chainplates abeam each mast that exists on this class (§V12 shroud feet)
+  const hull = buildHullSections(p, {
+    hullCannons: true,
+    channels: [
+      { name: 'fore', z: p.foreMastZ },
+      { name: 'main', z: p.mainMastZ },
+    ],
+  });
   return [
     buildKeel(p),
     buildDeck(p, { deckCannons: false, capstan: false }),
@@ -56,7 +61,14 @@ export function buildGalleonBlueprint(
     buildKeel(p),
     deck,
     ...buildCannons([deck]),
-    ...buildHullSections(p, { hullCannons: false }),
+    ...buildHullSections(p, {
+      hullCannons: false,
+      channels: [
+        { name: 'fore', z: p.foreMastZ },
+        { name: 'main', z: p.mainMastZ },
+        { name: 'rear', z: p.rearMastZ },
+      ],
+    }),
     ...buildBowAndTransom(p),
     ...buildCastles(p),
     ...buildFurniture(p),

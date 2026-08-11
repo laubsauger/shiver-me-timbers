@@ -198,6 +198,20 @@ export interface SurfaceSample {
 }
 
 /**
+ * The slice of the mirror buoyancy actually consumes. Declared structurally
+ * so tests can drive the hull with an analytic sea (a single sine of known
+ * wavelength) and assert the hull's frequency response directly — with the
+ * concrete class the only available sea is a full FFT spectrum, where every
+ * wavelength is present at once and "does short chop move the ship?" cannot
+ * be isolated. CpuOcean satisfies it without implementing it.
+ */
+export interface OceanHeightField {
+  /** sim time of the last update() (NaN before the first) */
+  readonly currentTime: number;
+  heightAt(x: number, z: number, time: number): number;
+}
+
+/**
  * Params whose change requires h0 regeneration — MUST match the GPU's
  * spectrumSignature (oceanCascades.ts): weather transitions lerp
  * amplitude/windSpeed live, the GPU rebuilds its spectrum, and a mirror

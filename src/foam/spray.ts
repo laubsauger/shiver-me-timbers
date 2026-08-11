@@ -6,11 +6,14 @@
  * Spawn pass, per dead particle (age ≥ life) each tick: hash a candidate XZ
  * inside the spawn square around `centerUniform`; sample every cascade
  * displacement texture there and combine the jacobian like the surface
- * material (Σw − (n−1)); where it falls below jacobianFoamBias +
- * sprayBiasOffset the crest is breaking → respawn at the DISPLACED surface
- * point (candidate + Σ(λDx, λDz), height Σh) with an upward hash-jittered +
+ * material (Σw − (n−1)). Three gates must ALL pass (sprayMath.crestBreaking /
+ * spawnAccepted): jacobian below jacobianFoamBias + sprayBiasOffset (surface
+ * genuinely folding), height above crestHeightMin (a crest TOP, not a trough)
+ * and the per-candidate lottery. Then respawn at the DISPLACED surface point
+ * (candidate + Σ(λDx, λDz), height Σh) with an upward hash-jittered +
  * wind-carried velocity. Candidates that miss a breaking crest stay dead, so
- * emission density scales with breaking area — storms spray hard (§V7).
+ * emission density scales with breaking area — storms spray hard (§V7), calm
+ * seas stay clean instead of stippling white dots everywhere (user critique).
  * CPU mirrors: sprayMath goldenSeed / respawnCandidate / launchVelocity.
  *
  *   createSpray(cascades: {displacement, domain}[], resolution) =>
@@ -39,10 +42,12 @@ import { createSprayPool } from './sprayPool';
 import {
   H_CAND_X,
   H_CAND_Z,
+  H_CHANCE,
   H_MAG,
   H_UP,
   H_YAW,
   PHI,
+  T_OFF_CHANCE,
   T_OFF_MAG,
   T_OFF_UP,
   T_OFF_YAW,
@@ -68,6 +73,9 @@ export function createSpray(cascades: FoamCascadeInput[], resolution: number) {
 
   const uBias = uniform(0); // oceanParams.jacobianFoamBias, live (§V7)
   const uBiasOffset = uniform(sprayParams.sprayBiasOffset);
+  const uCrestHeight = uniform(sprayParams.crestHeightMin);
+  const uChance = uniform(sprayParams.spawnChance);
+  const uSpawnLift = uniform(sprayParams.spawnLift);
   const uLaunchSpeed = uniform(sprayParams.launchSpeed);
   const uLateral = uniform(sprayParams.lateralSpread);
   const uWindCarry = uniform(sprayParams.windCarry);
@@ -103,7 +111,14 @@ export function createSpray(cascades: FoamCascadeInput[], resolution: number) {
         disp = disp.add(d.xyz);
       }
 
-      If(jac.lessThan(uBias.add(uBiasOffset)), () => {
+      // CPU mirrors: sprayMath.crestBreaking / spawnAccepted. The height gate
+      // keeps spray on crest TOPS and the lottery thins each breaking band —
+      // together they are what stops the whole ocean fizzing (§V6).
+      const breaking = jac
+        .lessThan(uBias.add(uBiasOffset))
+        .and(disp.y.greaterThan(uCrestHeight));
+      const roll = hash2(vec2(s.mul(H_CHANCE), uTime.add(T_OFF_CHANCE)));
+      If(breaking.and(roll.lessThan(uChance)), () => {
         // CPU mirror: sprayMath.launchVelocity
         const rUp = hash2(vec2(s.mul(H_UP), uTime.add(T_OFF_UP)));
         const rYaw = hash2(vec2(s.mul(H_YAW), uTime.add(T_OFF_YAW)));
@@ -117,10 +132,20 @@ export function createSpray(cascades: FoamCascadeInput[], resolution: number) {
           vy,
           angle.sin().mul(mag).add(wind.y),
         );
-        // burst from the displaced surface point of the breaking crest
-        const pos = vec3(cand.x.add(disp.x), disp.y, cand.y.add(disp.z));
+        // Burst from the displaced surface point of the breaking crest,
+        // LIFTED clear of it. The ocean surface writes depth now, so a sprite
+        // spawned exactly ON the surface z-fights it and is depth-rejected at
+        // the grazing angles this camera lives at — spray must be born in the
+        // air above the crest, not coplanar with it.
+        const pos = vec3(
+          cand.x.add(disp.x),
+          disp.y.add(uSpawnLift),
+          cand.y.add(disp.z),
+        );
         pool.posAge.element(instanceIndex).assign(vec4(pos, 0));
-        pool.velSeed.element(instanceIndex).assign(vec4(vel, s));
+        // w = size multiplier: crest mist is one size class (the bow emitter
+        // is the one that varies it, sheet vs cruise)
+        pool.velSize.element(instanceIndex).assign(vec4(vel, 1));
       });
     });
   })().compute(count);
@@ -134,6 +159,9 @@ export function createSpray(cascades: FoamCascadeInput[], resolution: number) {
     update(renderer: THREE.WebGPURenderer, windDir: THREE.Vector2): void {
       uBias.value = oceanParams.jacobianFoamBias; // storms spray hard (§V7)
       uBiasOffset.value = sprayParams.sprayBiasOffset;
+      uCrestHeight.value = sprayParams.crestHeightMin;
+      uChance.value = sprayParams.spawnChance;
+      uSpawnLift.value = sprayParams.spawnLift;
       uLaunchSpeed.value = sprayParams.launchSpeed;
       uLateral.value = sprayParams.lateralSpread;
       uWindCarry.value = sprayParams.windCarry;

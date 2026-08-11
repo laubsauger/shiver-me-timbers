@@ -14,13 +14,15 @@ import {
   instanceIndex,
   int,
   ivec2,
+  select,
   textureLoad,
   textureStore,
   uniform,
+  vec2,
   vec4,
 } from 'three/tsl';
 import type * as THREE from 'three/webgpu';
-import { GAUSSIAN_3X3 } from './foamMath';
+import { CREST_GRAD_EPS, GAUSSIAN_3X3 } from './foamMath';
 
 /** live-tweaked uniforms shared by every cascade's passes */
 export function createFoamUniforms() {
@@ -33,6 +35,10 @@ export function createFoamUniforms() {
     uDecay: uniform(1),
     /** blur tap offset in texels */
     uRadius: uniform(1),
+    /** tap stretch ALONG the crest ridge (foamMath.crestTapOffset) */
+    uAlong: uniform(1),
+    /** tap stretch ACROSS the ridge — < along keeps caps ridge-shaped */
+    uAcross: uniform(1),
   };
 }
 
@@ -66,25 +72,51 @@ export function createInjectPass(
 }
 
 /**
- * Decay+blur pass: dst = min(1, blur3x3(src) · decay). Gaussian weights sum
- * to 1 (foamMath.GAUSSIAN_3X3) so only uDecay removes foam.
+ * Decay+blur pass: dst = min(1, blur3x3(src) · decay), taps rotated into the
+ * local CREST frame and stretched along the ridge (§V6 shape, user critique
+ * "caps too circular"). Gaussian weights sum to 1 (foamMath.GAUSSIAN_3X3) so
+ * only uDecay removes foam. CPU mirror: foamMath.blurDecayAnisoAt.
  */
 export function createBlurDecayPass(
+  displacement: THREE.StorageTexture,
   src: THREE.StorageTexture,
   dst: THREE.StorageTexture,
   n: number,
   u: FoamUniforms,
 ) {
+  const wrap = (v: any) => v.add(int(n)).mod(int(n));
   return Fn(() => {
     const x = int(instanceIndex.mod(n)).toVar();
     const y = int(instanceIndex.div(n)).toVar();
 
+    // crest frame from the height gradient (displacement.y): the ridge runs
+    // perpendicular to ∇h — central differences, wrapped like the taps
+    const hL = textureLoad(displacement, ivec2(wrap(x.sub(1)), y)).y;
+    const hR = textureLoad(displacement, ivec2(wrap(x.add(1)), y)).y;
+    const hD = textureLoad(displacement, ivec2(x, wrap(y.sub(1)))).y;
+    const hU = textureLoad(displacement, ivec2(x, wrap(y.add(1)))).y;
+    const grad = vec2(hR.sub(hL), hU.sub(hD)).toVar();
+    const len = grad.length().toVar();
+    // flat water → axis frame (identical to the isotropic blur for a
+    // symmetric kernel); the divisor is floored regardless (§V28)
+    const nrm = select(
+      len.greaterThan(CREST_GRAD_EPS),
+      grad.div(len.max(CREST_GRAD_EPS)),
+      vec2(0, 1),
+    ).toVar();
+    const tan = vec2(nrm.y.negate(), nrm.x).toVar();
+
     const sum = float(0).toVar();
     for (let dy = -1; dy <= 1; dy++) {
       for (let dx = -1; dx <= 1; dx++) {
-        // tap offset scaled by radius; +n before mod keeps the wrap positive
-        const sx = x.add(int(u.uRadius.mul(dx).round())).add(int(n)).mod(int(n));
-        const sy = y.add(int(u.uRadius.mul(dy).round())).add(int(n)).mod(int(n));
+        // tap offset in the crest frame, scaled by radius; +n before mod
+        // keeps the wrap positive
+        const off = tan
+          .mul(u.uAlong.mul(dx))
+          .add(nrm.mul(u.uAcross.mul(dy)))
+          .mul(u.uRadius);
+        const sx = wrap(x.add(int(off.x.round())));
+        const sy = wrap(y.add(int(off.y.round())));
         const w = GAUSSIAN_3X3[(dy + 1) * 3 + (dx + 1)];
         sum.addAssign(textureLoad(src, ivec2(sx, sy)).r.mul(w));
       }

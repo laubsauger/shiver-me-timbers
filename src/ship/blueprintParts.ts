@@ -1,10 +1,12 @@
 /**
- * Shared blueprint part generators — hull, decks, stern works, rails.
+ * Shared blueprint part generators — keel, deck, cannons, hull sections.
+ * Hull ends (stem/transom), rails and rudder live in blueprintEnds.ts.
  * §V.13: pieces + named sockets only, no meshes. Pure functions of params;
  * both ship classes compose these (§V.18 contract stays identical).
  */
 import type { ShipClassParams } from '../params/ship';
 import type { DamageStateDef, PieceDef, SocketDef, Vec3 } from './pieceTypes';
+import { hullHalfWidthAt, hullTopY, type HullShape } from './hullMath';
 
 export const BASIC_STATES: DamageStateDef[] = [{ id: 'intact' }, { id: 'destroyed' }];
 export const HULL_STATES: DamageStateDef[] = [
@@ -124,10 +126,18 @@ export function buildCannons(host: PieceDef[]): PieceDef[] {
   return cannons;
 }
 
+/** a mast whose shrouds need a chainplate on the hull side abeam of it */
+export interface ChannelStation {
+  /** mast name — socket id becomes `anchor-channel-{side}-{name}` */
+  name: string;
+  /** ship-space z of the mast */
+  z: number;
+}
+
 /** 3 sections per side, each a damage-zone carrier (§V.14 targets). */
 export function buildHullSections(
   p: ShipClassParams,
-  opts: { hullCannons: boolean },
+  opts: { hullCannons: boolean; channels?: ChannelStation[] },
 ): PieceDef[] {
   const segLen = p.hullLength / 3;
   const bh = p.beam / 2;
@@ -140,6 +150,7 @@ export function buildHullSections(
   const pieces: PieceDef[] = [];
   for (const [side, sign] of [['port', -1], ['starboard', 1]] as const) {
     for (const seg of segs) {
+      const hints = hullShapeHints(p, sign, seg.zc - segLen / 2, seg.zc + segLen / 2);
       const sockets: SocketDef[] = [
         {
           id: `dz-hull-${side}-${seg.name}`,
@@ -147,6 +158,22 @@ export function buildHullSections(
           position: [sign * bh * 0.85, -0.4, 0],
         },
       ];
+      // CHAINPLATES: real shroud landings on the hull side abeam of each
+      // mast, ON the shell just under the cap rail. src/ropes derived these
+      // by interpolating the bow/stern cleats because the ship declared no
+      // such socket; a derived point drifts inboard and lines then run
+      // through the deck. Owned by the section they sit on, so a blown-out
+      // hull section takes its shrouds with it (§V13/§V14).
+      for (const station of opts.channels ?? []) {
+        if (station.z < seg.zc - segLen / 2 || station.z >= seg.zc + segLen / 2) continue;
+        const shape = hints as unknown as HullShape;
+        const y = hullTopY(station.z, shape) - 0.28;
+        sockets.push({
+          id: `anchor-channel-${side}-${station.name}`,
+          type: 'rope-anchor',
+          position: [sign * (hullHalfWidthAt(station.z, y, shape) + 0.06), y, station.z - seg.zc],
+        });
+      }
       if (opts.hullCannons) {
         seg.cannons.forEach((z, i) => {
           sockets.push({
@@ -168,87 +195,10 @@ export function buildHullSections(
           {
             sockets,
             damageStates: HULL_STATES.map((s) => ({ ...s })),
-            shape: hullShapeHints(p, sign, seg.zc - segLen / 2, seg.zc + segLen / 2),
+            shape: hints,
           }),
       );
     }
   }
   return pieces;
-}
-
-export function buildBowAndTransom(p: ShipClassParams): PieceDef[] {
-  const L2 = p.hullLength / 2;
-  const cleat = (name: string, pos: Vec3): SocketDef => ({
-    id: `anchor-cleat-${name}`,
-    type: 'rope-anchor',
-    position: pos,
-  });
-  return [
-    // stem: continues the hull loft from the sections' end to the point
-    mkPiece('bow', 'bow', [0, 0, L2], {
-      min: [-p.beam * 0.35, -p.draft, 0],
-      max: [p.beam * 0.35, p.freeboard + p.sheerBow, p.bowLength],
-    }, {
-      sockets: [
-        cleat('bow-port', [-p.beam * 0.15, p.freeboard + 0.05, p.bowLength * 0.25]),
-        cleat('bow-starboard', [p.beam * 0.15, p.freeboard + 0.05, p.bowLength * 0.25]),
-      ],
-      shape: hullShapeHints(p, 0, L2, L2 + p.bowLength),
-    }),
-    // transom plate matches the rounded-in stern envelope (~55% beam)
-    mkPiece('transom', 'transom', [0, 0, -L2], {
-      min: [-p.beam * 0.29, -p.draft * 0.6, -0.35],
-      max: [p.beam * 0.29, p.freeboard + p.sheerStern, 0],
-    }, {
-      sockets: [
-        cleat('stern-port', [-p.beam * 0.2, p.freeboard + 0.05, -0.1]),
-        cleat('stern-starboard', [p.beam * 0.2, p.freeboard + 0.05, -0.1]),
-      ],
-    }),
-  ];
-}
-
-export function buildRails(
-  p: ShipClassParams,
-  opts: { sternBalustrade: boolean },
-): PieceDef[] {
-  const len = p.hullLength * p.railLengthFactor;
-  const t = p.railThickness;
-  const maxSheer = Math.max(p.sheerBow, p.sheerStern);
-  const pieces: PieceDef[] = [];
-  for (const [side, sign] of [['port', -1], ['starboard', 1]] as const) {
-    // origin on the centreline: the run curves with taper + sheer (hints)
-    pieces.push(
-      mkPiece(`rail-${side}`, 'rail',
-        [0, p.freeboard, 0],
-        {
-          min: [sign < 0 ? -p.beam / 2 : t, 0, -len / 2],
-          max: [sign < 0 ? -t : p.beam / 2, p.railHeight + maxSheer, len / 2],
-        },
-        {
-          shape: {
-            ...hullShapeHints(p, sign, -len / 2, len / 2),
-            railInset: p.railInset,
-          },
-        }),
-    );
-  }
-  if (opts.sternBalustrade) {
-    pieces.push(
-      mkPiece('balustrade-stern', 'rail',
-        [0, p.freeboard + p.sterncastleRise + p.cabinHeight, -(p.hullLength / 2 - 0.6)],
-        {
-          min: [-p.beam * 0.35, 0, -t / 2],
-          max: [p.beam * 0.35, p.railHeight, t / 2],
-        }),
-    );
-  }
-  return pieces;
-}
-
-export function buildRudder(p: ShipClassParams): PieceDef {
-  return mkPiece('rudder', 'rudder', [0, -0.6, -(p.hullLength / 2 + 0.15)], {
-    min: [-p.rudderThickness / 2, -p.rudderHeight / 2, -p.rudderChord],
-    max: [p.rudderThickness / 2, p.rudderHeight / 2, 0],
-  });
 }

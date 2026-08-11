@@ -28,9 +28,20 @@ const uScroll = uniform(0.05);
 const uCapVarScale = uniform(0.03);
 const uCapVarStrength = uniform(0.8);
 const uTime = uniform(0);
+const uElong = uniform(3.0);
+// unit wave-propagation direction (world XZ) — crest lines run ACROSS it.
+// Two scalar uniforms, not a vec2: this module imports three only as a TYPE,
+// and `uniform(vec2(...))` would seed the uniform with a NODE whose .value
+// has no .x/.y to write — the direction would silently never update.
+const uPropX = uniform(1);
+const uPropZ = uniform(0);
 
 /** push live param values + sim time into the shading uniforms (per tick) */
-export function updateFoamShadingUniforms(p: FoamParams, time?: number): void {
+export function updateFoamShadingUniforms(
+  p: FoamParams,
+  time?: number,
+  windDirRadians?: number,
+): void {
   uCrackleScale.value = p.crackleScale;
   uMottleScale.value = p.mottleScale;
   uTintWarmth.value = p.tintWarmth;
@@ -39,7 +50,28 @@ export function updateFoamShadingUniforms(p: FoamParams, time?: number): void {
   uScroll.value = p.detailScrollSpeed;
   uCapVarScale.value = p.capVariationScale;
   uCapVarStrength.value = p.capVariationStrength;
+  uElong.value = Math.max(1, p.crestElongation);
   if (time !== undefined) uTime.value = time;
+  if (windDirRadians !== undefined && Number.isFinite(windDirRadians)) {
+    uPropX.value = Math.cos(windDirRadians);
+    uPropZ.value = Math.sin(windDirRadians);
+  }
+}
+
+/**
+ * Anisotropic noise coordinate (user critique "caps too circular"): compress
+ * the coordinate ALONG the crest tangent so every noise feature drawn in this
+ * space comes out elongated along the crest and short across it. Crests run
+ * perpendicular to the wave propagation (≈ wind) direction, so the frame is
+ * (propDir, perp(propDir)); the across-crest axis is left untouched, which
+ * keeps the detail frequency band the same as before across the ridge.
+ */
+export function crestAnisoCoord(coord: any): any {
+  const prop = vec2(uPropX, uPropZ);
+  const tan = vec2(uPropZ.negate(), uPropX); // perp(prop) — along the crest
+  const along = coord.dot(tan).div(uElong.max(1)); // floored divisor (§V28)
+  const across = coord.dot(prop);
+  return tan.mul(along).add(prop.mul(across));
 }
 
 /**
@@ -80,10 +112,12 @@ export function foamDetailMask(rawFoam: any, coord: any): any {
   const t = uTime.add(phase).mul(uScroll);
   // shared low-freq churn warps both detail layers (internal motion)
   const churn = foamWarpVec(coord).mul(0.6);
+  // crest-aligned detail space: streaks along the ridge, not round cells
+  const aniso = crestAnisoCoord(coord.add(churn));
 
   // fresh foam: broken high-freq crackle cells (thresholded fbm), drifting
   const crackleNoise = fbm2(
-    coord.add(churn).mul(uCrackleScale).add(vec2(t, t.mul(-0.7))),
+    aniso.mul(uCrackleScale).add(vec2(t, t.mul(-0.7))),
     3,
   );
   const crackle = smoothstep(float(0.35), float(0.7), crackleNoise);
@@ -92,7 +126,7 @@ export function foamDetailMask(rawFoam: any, coord: any): any {
   // dissipated foam: gentle low-freq mottling, counter-drifts vs crackle,
   // never cuts foam fully out
   const mottleNoise = fbm2(
-    coord.add(churn).mul(uMottleScale).sub(vec2(t.mul(0.4), t.mul(-0.3))),
+    aniso.mul(uMottleScale).sub(vec2(t.mul(0.4), t.mul(-0.3))),
     2,
   );
   const mottleLayer = mix(float(0.55), float(1.0), mottleNoise);

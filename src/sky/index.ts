@@ -1,5 +1,5 @@
 /**
- * Sky system entry (§V16). Integration surface:
+ * Sky system entry (§V16). Integration surface — unchanged for main.ts:
  *
  *   const sky = createSky({ scene });
  *   sky.configureRenderer(renderer);      // ACESFilmic + exposure, once
@@ -9,13 +9,17 @@
  *   sky.dispose();
  *
  * update() re-derives sun direction from skyParams.latitude, then drives the
- * dome uniforms, light rig, and scene fog color in lockstep — one time value
+ * background uniforms, light rig, and scene fog in lockstep — one time value
  * moves the entire scene's light.
+ *
+ * The sky renders through `scene.backgroundNode`, so three pins it to the
+ * camera itself: no per-frame camera hand-off is needed here and the sky can
+ * never fall behind the camera or outside the far plane (§B9).
  */
 import * as THREE from 'three/webgpu';
 import { skyParams } from '../params/sky';
 import { createLighting } from './lighting';
-import { createSkyDome } from './skyDome';
+import { createSkyBackground } from './skyBackground';
 import { sunDirection as computeSunDirection, sunElevation } from './sunCycle';
 
 export interface SkyHandle {
@@ -31,9 +35,9 @@ export interface SkyHandle {
 
 export function createSky(opts: { scene: THREE.Scene }): SkyHandle {
   const { scene } = opts;
-  const dome = createSkyDome(skyParams);
+  const background = createSkyBackground(skyParams);
   const rig = createLighting(scene, skyParams);
-  scene.add(dome.mesh);
+  scene.backgroundNode = background.colorNode;
 
   const sunDirection = new THREE.Vector3(0, 1, 0);
 
@@ -45,15 +49,15 @@ export function createSky(opts: { scene: THREE.Scene }): SkyHandle {
       const dir = computeSunDirection(timeOfDay, skyParams.latitude);
       const elevation = sunElevation(timeOfDay, skyParams.latitude);
       sunDirection.set(dir[0], dir[1], dir[2]);
-      dome.update(dir, elevation);
+      background.update(dir, elevation);
       rig.update(dir, elevation);
+      rig.syncExposure();
     },
     configureRenderer(renderer: THREE.WebGPURenderer): void {
       rig.configureRenderer(renderer);
     },
     dispose(): void {
-      scene.remove(dome.mesh);
-      dome.dispose();
+      scene.backgroundNode = null;
       rig.dispose();
     },
   };

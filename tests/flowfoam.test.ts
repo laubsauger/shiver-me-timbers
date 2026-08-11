@@ -25,14 +25,26 @@ import {
   type FlowFieldParams,
 } from '../src/flowfoam/flowMath';
 import {
-  bowArmDistCpu,
+  bowMoundCpu,
+  projectOnTrack,
+  smoothstepCpu as smooth,
   wakeBreakupCpu,
   wakeEnvelopeCpu,
   wakeRateCpu,
-  wakeSpeedFactorCpu,
+  wakeReachCpu,
+  type WakeHull,
   type WakeParams,
-  type WakeShip,
 } from '../src/flowfoam/wakeMath';
+import {
+  TRACK_CAPACITY,
+  advanceTrack,
+  approachExp,
+  createWakeTrack,
+  trackBounds,
+  trackPoints,
+  type TrackConfig,
+  type TrackSample,
+} from '../src/flowfoam/wakeTrack';
 import { decayFactorPerFrame } from '../src/foam/foamMath';
 import { flowFoamParams } from '../src/params/flowfoam';
 import { getParamsEntry } from '../src/params/registry';
@@ -196,43 +208,510 @@ describe('decay factor (§V10 accumulation fade, shared with §V6)', () => {
   });
 });
 
-describe('ship wake injection (§V10 follow-up: bow V + stern band)', () => {
-  const WP: WakeParams = {
-    kelvinAngle: 19.47,
-    bowIntensity: 5,
-    sternIntensity: 1.6,
-    speedThreshold: 0.5,
-    fullWakeSpeed: 5,
-    slowWakeWidth: 0.3,
-    armWidth: 0.6,
-    armWidthGrowth: 0.045,
-    sternWidth: 1.0,
-    wakeRange: 60,
-    wakeNoiseScale: 0.3,
-    wakeNoiseContrast: 0.18,
-    wakeBreakup: 0.85,
-  };
-  // ship at origin heading +z (yaw 0): bow at z=+12, stern z=−10, beam 6
-  const SHIP: WakeShip = { x: 0, z: 0, yaw: 0, speed: 4, bowOffset: 12, sternOffset: -10, beam: 6 };
-  const tan = Math.tan((WP.kelvinAngle * Math.PI) / 180);
+const WP: WakeParams = {
+  kelvinAngle: 19.47,
+  bowIntensity: 0.3,
+  armWidth: 0.9,
+  armWidthGrowth: 0.05,
+  hullBoost: 1.6,
+  hullBoostDist: 14,
+  bowLife: 9,
+  cutIntensity: 1.0,
+  cutWidth: 1.1,
+  cutLength: 7,
+  sternIntensity: 0.05,
+  sternWidth: 0.9,
+  sternSpread: 0.55,
+  sternLife: 8,
+  sternOnset: 3,
+  vortexIntensity: 0.05,
+  vortexOffset: 1.15,
+  vortexSpread: 0.28,
+  vortexWidth: 1.3,
+  vortexSpacing: 11,
+  vortexLife: 10,
+  moundIntensity: 0.5,
+  moundLead: 1.6,
+  moundSweep: 0.9,
+  moundSpan: 5.0,
+  moundThick: 1.4,
+  moundFill: 3.0,
+  moundLag: 1.1,
+  speedThreshold: 0.5,
+  fullWakeSpeed: 5,
+  trackSpacing: 2.2,
+  trackLife: 30,
+  tailFade: 0.35,
+  bowClip: 0.8,
+  wakeNoiseScale: 0.3,
+  wakeNoiseContrast: 0.18,
+  wakeBreakup: 0.85,
+};
+/** galleon-ish: bow z=+12, stern z=−10 → 22 m between stem and transom */
+const HULL: WakeHull = { length: 22, beam: 6 };
+const CFG: TrackConfig = {
+  capacity: TRACK_CAPACITY,
+  spacing: WP.trackSpacing,
+  life: WP.trackLife,
+  minSpeed: WP.speedThreshold,
+  maxTurn: (6 * Math.PI) / 180,
+};
+const TAN = Math.tan((WP.kelvinAngle * Math.PI) / 180);
+const DT = 1 / 60;
 
-  it('arm distance: zero exactly on the V centerlines, |across| at the vertex', () => {
-    // WHY: the V must originate AT the bow point and open at the Kelvin
-    // angle — a wrong distance function draws the arms at the wrong slope
-    // and the wake reads as generic noise, not a ship wake.
-    expect(bowArmDistCpu(10, 10 * tan, WP.kelvinAngle)).toBeCloseTo(0, 12); // starboard arm
-    expect(bowArmDistCpu(10, -10 * tan, WP.kelvinAngle)).toBeCloseTo(0, 12); // port arm
-    expect(bowArmDistCpu(0, 2.5, WP.kelvinAngle)).toBeCloseTo(2.5, 12); // vertex
-    expect(bowArmDistCpu(20, 0, WP.kelvinAngle)).toBeCloseTo(20 * tan, 12); // centerline between arms
+/**
+ * Drive the track like the game does: `legs` of (heading, seconds) sailed at
+ * `speed`, integrating the cutwater position at the fixed tick. Returns the
+ * GPU-facing polyline (live pose prepended) and where the cutwater ended up.
+ */
+function sail(
+  legs: { fx: number; fz: number; seconds: number }[],
+  speed: number,
+  start: [number, number] = [0, 0],
+): { points: TrackSample[]; x: number; z: number; fx: number; fz: number } {
+  const t = createWakeTrack();
+  const pose = { x: start[0], z: start[1], fx: 0, fz: 1, speed };
+  for (const leg of legs) {
+    pose.fx = leg.fx;
+    pose.fz = leg.fz;
+    for (let i = 0; i < Math.round(leg.seconds / DT); i++) {
+      pose.x += leg.fx * speed * DT;
+      pose.z += leg.fz * speed * DT;
+      advanceTrack(t, pose, DT, CFG);
+    }
+  }
+  return { points: trackPoints(t, pose), x: pose.x, z: pose.z, fx: pose.fx, fz: pose.fz };
+}
+
+describe('wake track: the water remembers (§V10 follow-up, user regression)', () => {
+  // THE bug this whole model exists to kill. User, twice: "the trail we leave
+  // in the water is very statically moving and immediately spraying out at a
+  // new angle at full distance", "as if it's actually propelled out of the air
+  // when you turn". The old wake was a ship-LOCAL shape evaluated along the
+  // live heading, so a turn re-pointed every metre of already-laid wake.
+
+  it('THE PRIZE: a deposit made at heading A is still at heading A after the turn', () => {
+    // The single claim the whole rework rests on, driven the way the hull now
+    // actually behaves: the physics agent's yaw builds over ~1 s and carries
+    // past the helm, so the heading SWEEPS instead of snapping. Every sample
+    // is checked against the heading recorded at the instant it was laid.
+    const t = createWakeTrack();
+    const pose = { x: 0, z: 0, fx: 0, fz: 1, speed: 6 };
+    const laidAt = new Map<TrackSample, number>(); // sample → yaw when deposited
+    let yaw = 0;
+
+    const tick = () => {
+      pose.fx = Math.sin(yaw);
+      pose.fz = Math.cos(yaw);
+      pose.x += pose.fx * pose.speed * DT;
+      pose.z += pose.fz * pose.speed * DT;
+      const before = t.samples[0];
+      advanceTrack(t, pose, DT, CFG);
+      if (t.samples[0] !== before) laidAt.set(t.samples[0], yaw);
+    };
+
+    for (let i = 0; i < 180; i++) tick(); // 3 s due north at heading A = 0
+    const turnTicks = Math.round(1.5 / DT); // ~1 s yaw ramp, eased in and out
+    for (let i = 1; i <= turnTicks; i++) {
+      yaw = (Math.PI / 2) * smooth(0, 1, i / turnTicks);
+      tick();
+    }
+    for (let i = 0; i < 180; i++) tick(); // 3 s due east at heading B = π/2
+
+    let fromA = 0;
+    let fromTurn = 0;
+    let fromB = 0;
+    for (const s of t.samples) {
+      const when = laidAt.get(s);
+      expect(when).toBeDefined();
+      // the deposit still carries the heading it was laid with, exactly
+      expect(s.fx).toBe(Math.sin(when!));
+      expect(s.fz).toBe(Math.cos(when!));
+      if (when! === 0) fromA++;
+      else if (when! === Math.PI / 2) fromB++;
+      else fromTurn++;
+    }
+    // all three populations coexist: heading-A water astern, heading-B water at
+    // the stem, and the arc between them — the trail is a history, not a shape
+    expect(fromA).toBeGreaterThan(3);
+    expect(fromB).toBeGreaterThan(3);
+    expect(fromTurn).toBeGreaterThan(3);
+
+    // and the turn is deposited as a CURVE: read oldest → newest, the stored
+    // headings climb smoothly from A to B with no hinge bigger than trackTurn
+    const headings = [...t.samples].reverse().map((s) => Math.atan2(s.fx, s.fz));
+    for (let i = 1; i < headings.length; i++) {
+      expect(headings[i]).toBeGreaterThanOrEqual(headings[i - 1] - 1e-9);
+      expect(headings[i] - headings[i - 1]).toBeLessThan((CFG.maxTurn * 180) / Math.PI);
+    }
+    expect(headings[0]).toBeCloseTo(0, 9);
+    expect(headings[headings.length - 1]).toBeCloseTo(Math.PI / 2, 9);
   });
 
-  it('wake ENVELOPE is port/starboard symmetric (noise breaks it up after)', () => {
-    // WHY: the underlying V must be symmetric about the keel line — only the
-    // world-anchored breakup noise may differ side to side, or the ship
-    // would appear to permanently cut harder on one side.
-    for (const z of [10, 0, -12, -30]) {
-      for (const x of [1.5, 4, 9]) {
-        expect(wakeEnvelopeCpu(x, z, SHIP, WP)).toBeCloseTo(wakeEnvelopeCpu(-x, z, SHIP, WP), 12);
+  it('a deposited sample never moves or re-orients, whatever the ship does after', () => {
+    const t = createWakeTrack();
+    const pose = { x: 0, z: 0, fx: 0, fz: 1, speed: 6 };
+    for (let i = 0; i < 60; i++) {
+      pose.z += 6 * DT;
+      advanceTrack(t, pose, DT, CFG);
+    }
+    const frozen = t.samples.map((s) => ({ ...s }));
+    // now turn hard to starboard and keep sailing
+    pose.fx = 1;
+    pose.fz = 0;
+    for (let i = 0; i < 60; i++) {
+      pose.x += 6 * DT;
+      advanceTrack(t, pose, DT, CFG);
+    }
+    for (const old of frozen) {
+      const still = t.samples.find((s) => s.x === old.x && s.z === old.z);
+      expect(still).toBeDefined();
+      expect(still!.fx).toBe(old.fx); // heading at emission, not the live one
+      expect(still!.fz).toBe(old.fz);
+      expect(still!.speed).toBe(old.speed);
+      expect(still!.age).toBeGreaterThan(old.age); // only ageing may change it
+      expect(still!.dist).toBeGreaterThan(old.dist); // and arclength to the stem
+    }
+  });
+
+  it('after a 90° turn the wake follows the PATH, not the new heading', () => {
+    // Sail 6 s north (+z), then 6 s east (+x) — an L-shaped track. A wake
+    // parented to the current heading would lie ~36 m astern along −x; the
+    // real one lies along the northward leg it was actually laid on.
+    const s = sail(
+      [
+        { fx: 0, fz: 1, seconds: 6 },
+        { fx: 1, fz: 0, seconds: 6 },
+      ],
+      6,
+    );
+    expect(s.x).toBeCloseTo(36, 6);
+    expect(s.z).toBeCloseTo(36, 6);
+
+    const onOldLeg = wakeEnvelopeCpu(s.points, 0, 20, HULL, WP); // 52 m back along the path
+    const behindNewHeading = wakeEnvelopeCpu(s.points, -16, 36, HULL, WP); // 52 m astern
+    expect(onOldLeg).toBeGreaterThan(0);
+    expect(behindNewHeading).toBe(0);
+
+    // and the old leg is still oriented the OLD way: a point 3 m to its east
+    // reads +3 m starboard of a NORTHBOUND track (right = (fz, −fx) = (1, 0))
+    const proj = projectOnTrack(s.points, 3, 20);
+    expect(proj.found).toBe(true);
+    expect(proj.lateral).toBeCloseTo(3, 6);
+    expect(proj.dist).toBeCloseTo(52, 6); // 16 m to the corner + 36 m of new leg
+  });
+
+  it('the SHIP-LOCAL model fails these exact probes — the test discriminates', () => {
+    // Archived copy of the wake this module used to inject: a V + stern band
+    // evaluated in the ship's LIVE frame out to wakeRange metres. Kept here
+    // (and nowhere else) so the regression above is provably not vacuous — it
+    // must be RED for the old shape and GREEN for the track model. Old
+    // defaults: wakeRange 40, slowWakeWidth 0.3, bowIntensity 0.5,
+    // sternIntensity 0.2, armWidth 0.6, armWidthGrowth 0.045, sternWidth 0.6.
+    const shipLocalWakeRef = (
+      wx: number,
+      wz: number,
+      ship: { x: number; z: number; yaw: number; speed: number },
+    ): number => {
+      const [bowOffset, sternOffset, beam] = [12, -10, 6];
+      const gate = smooth(0.5, 1.0, ship.speed);
+      const sf = smooth(0.5, 5.0, ship.speed);
+      const widthScale = 0.3 + 0.7 * sf;
+      const range = 40 * widthScale;
+      const fx = Math.sin(ship.yaw);
+      const fz = Math.cos(ship.yaw);
+      const dx = wx - ship.x;
+      const dz = wz - ship.z;
+      const along = dx * fx + dz * fz;
+      const across = dx * fz - dz * fx;
+      const sBow = bowOffset - along;
+      const armW = (0.6 + sBow * 0.045) * widthScale;
+      const bow =
+        sBow < 0
+          ? 0
+          : 0.5 *
+            ship.speed *
+            sf *
+            (1 - smooth(0, armW, Math.abs(Math.abs(across) - sBow * TAN))) *
+            (1 - smooth(0, range, sBow));
+      const sStern = sternOffset - along;
+      const stern =
+        sStern < 0
+          ? 0
+          : 0.2 *
+            ship.speed *
+            ship.speed *
+            (1 - smooth(0, beam * 0.6 * 0.5 * widthScale, Math.abs(across))) *
+            (1 - smooth(0, range, sStern));
+      return (bow + stern) * gate;
+    };
+
+    const s = sail(
+      [
+        { fx: 0, fz: 1, seconds: 6 },
+        { fx: 1, fz: 0, seconds: 6 },
+      ],
+      6,
+    );
+    // the ship ORIGIN is bowOffset behind the cutwater, heading +x (yaw π/2)
+    const ship = { x: s.x - 12, z: s.z, yaw: Math.PI / 2, speed: 6 };
+    const onOldLeg: [number, number] = [0, 20]; // 52 m back along the PATH
+    const behindNewHeading: [number, number] = [-16, 36]; // 52 m dead astern
+
+    // OLD: nothing where the ship actually sailed, a full rooster tail hanging
+    // off the current heading in water the hull never touched — the bug.
+    expect(shipLocalWakeRef(...onOldLeg, ship)).toBe(0);
+    expect(shipLocalWakeRef(...behindNewHeading, ship)).toBeGreaterThan(0);
+    // NEW: exactly inverted.
+    expect(wakeEnvelopeCpu(s.points, ...onOldLeg, HULL, WP)).toBeGreaterThan(0);
+    expect(wakeEnvelopeCpu(s.points, ...behindNewHeading, HULL, WP)).toBe(0);
+  });
+
+  it('the rooster tail BUILDS UP over travel instead of snapping to full length', () => {
+    // User: "instead of it taking a while to build up after the turn". The old
+    // model injected the full wakeRange the instant the ship moved.
+    const reach = (secs: number): number => {
+      const s = sail([{ fx: 0, fz: 1, seconds: secs }], 6);
+      let far = 0;
+      for (let d = 0; d <= 90; d += 0.5) {
+        for (let y = -30; y <= 30; y += 0.5) {
+          if (wakeEnvelopeCpu(s.points, y, s.z - d, HULL, WP) > 0) far = Math.max(far, d);
+        }
+      }
+      return far;
+    };
+    const early = reach(1); // 6 m travelled
+    const mid = reach(4); // 24 m
+    const late = reach(9); // 54 m
+    // after 1 s the trail is a few metres long — it cannot exceed what we
+    // sailed (plus an arm half-width). The old ship-local model painted its
+    // full 40 m wakeRange on frame one, which is exactly the reported bug.
+    expect(early).toBeLessThanOrEqual(10);
+    expect(mid).toBeGreaterThan(early + 8);
+    expect(late).toBeGreaterThan(mid + 8);
+  });
+
+  it('the V opens with travel: fresh track is narrow, old track is wide', () => {
+    // same build-up, measured laterally — the arms have to be walked outward
+    const s = sail([{ fx: 0, fz: 1, seconds: 9 }], 6);
+    const widthAt = (d: number): number => {
+      let w = 0;
+      for (let y = 0; y <= 30; y += 0.25) {
+        if (wakeEnvelopeCpu(s.points, y, s.z - d, HULL, WP) > 0) w = y;
+      }
+      return w;
+    };
+    expect(widthAt(4)).toBeLessThan(widthAt(20));
+    expect(widthAt(20)).toBeLessThan(widthAt(45));
+    // the crest tracks the Kelvin angle: arm centre at dist·tan θ
+    for (const d of [15, 30, 45]) {
+      expect(wakeEnvelopeCpu(s.points, d * TAN, s.z - d, HULL, WP)).toBeGreaterThan(0);
+      expect(wakeEnvelopeCpu(s.points, d * TAN + 8, s.z - d, HULL, WP)).toBe(0);
+    }
+  });
+
+  it('samples age out, capacity is capped, a teleport resets instead of streaking', () => {
+    const t = createWakeTrack();
+    const pose = { x: 0, z: 0, fx: 0, fz: 1, speed: 8 };
+    for (let i = 0; i < 60 * 30; i++) {
+      pose.z += 8 * DT;
+      advanceTrack(t, pose, DT, CFG);
+    }
+    expect(t.samples.length).toBeLessThanOrEqual(CFG.capacity); // GPU loop bound
+    expect(t.samples.length).toBeGreaterThan(2);
+    for (const s of t.samples) expect(s.age).toBeLessThanOrEqual(CFG.life + DT);
+    // ages/dists must stay monotone — the GPU interpolates along them
+    for (let i = 1; i < t.samples.length; i++) {
+      expect(t.samples[i].age).toBeGreaterThan(t.samples[i - 1].age);
+      expect(t.samples[i].dist).toBeGreaterThan(t.samples[i - 1].dist);
+    }
+    pose.x += 5000; // respawn across the map
+    advanceTrack(t, pose, DT, CFG);
+    expect(t.samples.length).toBeLessThanOrEqual(1);
+  });
+
+  it('no track, no wake: a ship at anchor is not ringed by foam', () => {
+    const t = createWakeTrack();
+    const pose = { x: 0, z: 0, fx: 0, fz: 1, speed: 0.2 }; // below minSpeed
+    for (let i = 0; i < 600; i++) advanceTrack(t, pose, DT, CFG);
+    expect(t.samples).toHaveLength(0);
+    const pts = trackPoints(t, pose);
+    expect(wakeEnvelopeCpu(pts, 0, -14, HULL, WP)).toBe(0);
+    expect(wakeRateCpu(pts, 3, -30, HULL, WP)).toBe(0);
+    expect(trackBounds(pts, 40)).toBeNull(); // → GPU skips the segment walk
+  });
+
+  it('non-finite ship state is ignored, never written into the track (§V28)', () => {
+    const t = createWakeTrack();
+    const pose = { x: 0, z: 0, fx: 0, fz: 1, speed: 6 };
+    for (let i = 0; i < 120; i++) {
+      pose.z += 6 * DT;
+      advanceTrack(t, pose, DT, CFG);
+    }
+    const before = t.samples.length;
+    advanceTrack(t, { x: NaN, z: 0, fx: 0, fz: 1, speed: 6 }, DT, CFG);
+    advanceTrack(t, { x: 0, z: 0, fx: 0, fz: 1, speed: NaN }, DT, CFG);
+    expect(t.samples).toHaveLength(before);
+    for (const s of t.samples) {
+      expect(Number.isFinite(s.x + s.z + s.fx + s.fz + s.age + s.dist + s.speed)).toBe(true);
+    }
+  });
+});
+
+describe('wake field in the track frame (bow vs aft, §V10 follow-up)', () => {
+  const STRAIGHT = sail([{ fx: 0, fz: 1, seconds: 9 }], 6);
+  /** wake at a point `d` metres back along the (northbound) track, `y` abeam */
+  const at = (d: number, y: number, s = STRAIGHT) =>
+    wakeEnvelopeCpu(s.points, y, s.z - d, HULL, WP);
+
+  it('the disturbance starts AT the cutwater, not metres aft of it', () => {
+    // User: "the bow wake is not appearing far enough at the front... the very
+    // front of the boat is perfectly clean most of the time." The live pose is
+    // prepended to the polyline, so dist = 0 exists every frame.
+    expect(at(0, 0)).toBeGreaterThan(0);
+    expect(at(0.5, 0.4)).toBeGreaterThan(0);
+  });
+
+  it('the bow MOUND leads the stem — water is shoved ahead of the hull', () => {
+    // User: "there's some sort of reaction with the water actually being
+    // thrown away forwards from more or less the spearhead of the boat".
+    // Negative d = ahead of the stem.
+    expect(at(-WP.moundLead, 0)).toBeGreaterThan(0); // crest, ahead of the stem
+    // the crest is the PEAK: water piles up against the stem and thins going
+    // forward, so the mound is strongest at moundLead, not at the hull
+    expect(at(-WP.moundLead, 0)).toBeGreaterThan(at(-WP.moundLead - WP.moundThick * 0.8, 0));
+    // ...and the sea well ahead of the mound is still untouched
+    expect(at(-(WP.moundLead + WP.moundThick + 1), 0)).toBe(0);
+  });
+
+  it('the mound peels outboard and hands over to the Kelvin arms', () => {
+    // "must connect visually and continuously to the stern churn and the
+    // trailing wake". The crest sweeps aft as it goes outboard, so at the
+    // outboard edge it has crossed behind the stem and meets the arms.
+    const outboard = WP.moundSpan * 0.7;
+    const crestAt = (aside: number) => WP.moundLead - WP.moundSweep * aside;
+    expect(crestAt(outboard)).toBeLessThan(0); // tips are abaft the stem
+    expect(at(-crestAt(outboard), outboard)).toBeGreaterThan(0);
+    // and it does NOT extend indefinitely sideways — the arms take over
+    expect(at(-crestAt(outboard), WP.moundSpan + 2)).toBe(0);
+    // no gap between the mound's aft edge and the cutwater core on the keel
+    // line: sweep from ahead of the stem to well behind it, all wetted
+    for (let d = -WP.moundLead; d <= WP.cutLength * 0.5; d += 0.25) {
+      expect(at(d, 0)).toBeGreaterThan(0);
+    }
+  });
+
+  it('the mound rides a LAGGED speed so it builds and subsides, never pops', () => {
+    // User wants a heavier, more inertial ship: the mound must follow the
+    // hull's motion, not snap to a throttle value.
+    const probe: [number, number] = [0, STRAIGHT.z + WP.moundLead]; // on the crest
+    const amp = (ms: number) =>
+      wakeEnvelopeCpu(STRAIGHT.points, probe[0], probe[1], HULL, WP, ms);
+    expect(amp(6)).toBeGreaterThan(amp(3)); // taller mound for a faster hull
+    expect(amp(3)).toBeGreaterThan(amp(1.5));
+    expect(amp(0)).toBe(0); // dead in the water, no mound
+    // the lag itself: a step in speed is approached, not jumped to
+    let ms = 0;
+    for (let i = 0; i < 30; i++) ms = approachExp(ms, 6, DT, WP.moundLag);
+    expect(ms).toBeGreaterThan(0.2);
+    expect(ms).toBeLessThan(5.4); // half a second in, nowhere near settled
+    // ...and it is frame-rate independent (exact under subdivision)
+    const full = approachExp(2, 6, 0.2, WP.moundLag);
+    const halves = approachExp(approachExp(2, 6, 0.1, WP.moundLag), 6, 0.1, WP.moundLag);
+    expect(halves).toBeCloseTo(full, 12);
+  });
+
+  it('the mound is emitted at the live stem, so it never trails the old heading', () => {
+    // The mound is the ONE feature read off the live pose. It must therefore
+    // sit at the CURRENT stem after a turn — the deposited trail behind it is
+    // what keeps the old orientation (tested above).
+    const turned = sail(
+      [
+        { fx: 0, fz: 1, seconds: 6 },
+        { fx: 1, fz: 0, seconds: 6 },
+      ],
+      6,
+    );
+    const head = turned.points[0];
+    // the mound is on the crest ahead of the CURRENT stem, along +x...
+    expect(bowMoundCpu(head, turned.x + WP.moundLead, turned.z, 6, WP)).toBeGreaterThan(0);
+    // ...and there is no leftover mound at the corner where the ship turned,
+    // nor one still pointing the old way (+z) from the current stem
+    expect(bowMoundCpu(head, 0, 36 + WP.moundLead, 6, WP)).toBe(0);
+    expect(bowMoundCpu(head, turned.x, turned.z + WP.moundSpan + 2, 6, WP)).toBe(0);
+  });
+
+  it('bow and aft disturbances are emitted at DIFFERENT spots', () => {
+    // User: "a clear distinction between the disturbance caused by the front of
+    // the boat and that caused by the aft — they're also emitted in different
+    // spots." Aft features cannot exist until the hull has gone by.
+    const dMid = HULL.length * 0.5; // amidships
+    const dAft = HULL.length + 12; // well aft of the transom
+    // Amidships the water carries TWO SEPARATED CRESTS: foam on the arms, a
+    // gap between them and the keel line, nothing on the centreline (the hull
+    // is still sitting there).
+    expect(at(dMid, dMid * TAN)).toBeGreaterThan(0);
+    expect(at(dMid, dMid * TAN * 0.4)).toBe(0); // the gap
+    expect(at(dMid, 0)).toBe(0);
+    // Aft of the transom it is ONE FILLED BAND about a beam wide, centreline
+    // included — a different shape from a different emission point.
+    for (const y of [0, HULL.beam * 0.25, HULL.beam * 0.45]) {
+      expect(at(dAft, y)).toBeGreaterThan(0);
+    }
+  });
+
+  it('shed vortices alternate port/starboard (von Kármán street, not a band)', () => {
+    // the aft's signature: discrete lobes off the transom corners, sides half a
+    // period apart. A symmetric result here would mean the street collapsed
+    // into the churn band and aft would read the same as bow again.
+    const lobe = HULL.beam * 0.5 * WP.vortexOffset;
+    const d0 = HULL.length + WP.vortexSpacing * 0.25; // starboard puff peak
+    const d1 = d0 + WP.vortexSpacing * 0.5; // port puff peak
+    const stbd0 = at(d0, lobe + 0.6);
+    const port0 = at(d0, -(lobe + 0.6));
+    const stbd1 = at(d1, lobe + 0.6);
+    const port1 = at(d1, -(lobe + 0.6));
+    expect(stbd0).toBeGreaterThan(port0);
+    expect(port1).toBeGreaterThan(stbd1);
+  });
+
+  it('the V reads strongest close to the hull (hullBoost, user review)', () => {
+    // User: "V-arm readability near the hull is still weak"; wanted a "heaving
+    // water out" feel. Intensity on the arm crest must fall off with distance.
+    const near = at(6, 6 * TAN);
+    const far = at(50, 50 * TAN);
+    expect(near).toBeGreaterThan(far * 1.5);
+    // and turning hullBoost off must measurably weaken exactly that
+    const flat = wakeEnvelopeCpu(
+      STRAIGHT.points,
+      6 * TAN,
+      STRAIGHT.z - 6,
+      HULL,
+      { ...WP, hullBoost: 0 },
+    );
+    expect(flat).toBeLessThan(near);
+  });
+
+  it('slow drift: faint aft churn only, no developed V (user review)', () => {
+    // "if we're going very slow we wouldn't see it spread out to the side;
+    // only some slight disturbance at the aft."
+    const slow = sail([{ fx: 0, fz: 1, seconds: 40 }], 1.1);
+    const onArm = wakeEnvelopeCpu(slow.points, 25 * TAN, slow.z - 25, HULL, WP);
+    const churn = wakeEnvelopeCpu(slow.points, 0, slow.z - (HULL.length + 8), HULL, WP);
+    expect(churn).toBeGreaterThan(0);
+    expect(onArm).toBeLessThan(churn * 0.15);
+  });
+
+  it('the envelope is port/starboard symmetric apart from the vortex street', () => {
+    // WHY: the bow V and the churn band must be symmetric about the keel line
+    // or the ship looks like it permanently cuts harder on one side. Only the
+    // shed street (tested above) and the world-anchored breakup may differ.
+    const noStreet: WakeParams = { ...WP, vortexIntensity: 0 };
+    for (const d of [2, 10, 25, 44]) {
+      for (const y of [1.5, 4, 9]) {
+        const s = wakeEnvelopeCpu(STRAIGHT.points, y, STRAIGHT.z - d, HULL, noStreet);
+        const pgt = wakeEnvelopeCpu(STRAIGHT.points, -y, STRAIGHT.z - d, HULL, noStreet);
+        expect(s).toBeCloseTo(pgt, 9);
       }
     }
   });
@@ -246,63 +725,38 @@ describe('ship wake injection (§V10 follow-up: bow V + stern band)', () => {
       expect(b).toBeLessThanOrEqual(1 + 1e-12);
       expect(wakeBreakupCpu(x, z, WP)).toBe(b);
     }
-    expect(wakeRateCpu(0, -14, SHIP, WP)).toBeCloseTo(
-      wakeEnvelopeCpu(0, -14, SHIP, WP) * wakeBreakupCpu(0, -14, WP),
+    const [px, pz] = [2.5, STRAIGHT.z - 30];
+    expect(wakeRateCpu(STRAIGHT.points, px, pz, HULL, WP)).toBeCloseTo(
+      wakeEnvelopeCpu(STRAIGHT.points, px, pz, HULL, WP) * wakeBreakupCpu(px, pz, WP),
       12,
     );
   });
 
-  it('slow drift: faint narrow stern churn only, NO V-arms (user review)', () => {
-    // WHY: "if we're going very slow we wouldn't see it spread out to the
-    // side; only some slight disturbance at the aft."
-    const drift = { ...SHIP, speed: 1.1 }; // above threshold, well below full
-    const sf = wakeSpeedFactorCpu(drift.speed, WP);
-    expect(sf).toBeLessThan(0.05); // arms are suppressed by sf...
-    const onArm = wakeEnvelopeCpu(8 * tan, SHIP.bowOffset - 8, drift, WP);
-    const sternChurn = wakeEnvelopeCpu(0, -12, drift, WP);
-    expect(sternChurn).toBeGreaterThan(0); // ...but the stern still churns
-    expect(onArm).toBeLessThan(sternChurn * 0.15); // V practically invisible
-    // and the churn is NARROW: full-speed stern width reaches ~beam, slow ~30%
-    const slowEdge = wakeEnvelopeCpu(1.6, -12, drift, WP); // outside 0.3·halfW=0.9
-    expect(slowEdge).toBe(0);
-    expect(wakeEnvelopeCpu(1.6, -12, SHIP, WP)).toBeGreaterThan(0); // inside at speed
+  it('deterministic (§V2) and never NaN, including off the ends of the track', () => {
+    const a = wakeRateCpu(STRAIGHT.points, 3.3, STRAIGHT.z - 17, HULL, WP);
+    expect(wakeRateCpu(STRAIGHT.points, 3.3, STRAIGHT.z - 17, HULL, WP)).toBe(a);
+    for (const [x, z] of [[0, 1e4], [0, -1e4], [1e4, 0], [0, STRAIGHT.z + 200]]) {
+      const v = wakeEnvelopeCpu(STRAIGHT.points, x, z, HULL, WP);
+      expect(Number.isFinite(v)).toBe(true);
+      expect(v).toBe(0);
+    }
   });
 
-  it('wake development is monotonic with speed', () => {
-    const at = (speed: number) =>
-      wakeEnvelopeCpu(8 * tan, SHIP.bowOffset - 8, { ...SHIP, speed }, WP);
-    expect(at(1)).toBeLessThan(at(2.5));
-    expect(at(2.5)).toBeLessThan(at(5));
-  });
-
-  it('no wake at anchor: rate is exactly 0 below speedThreshold', () => {
-    // WHY: a moored ship ringed by foam reads as a rendering bug.
-    const slow = { ...SHIP, speed: 0.49 };
-    expect(wakeRateCpu(0, -11, slow, WP)).toBe(0); // right behind the stern
-    expect(wakeRateCpu(11 * tan, 1, slow, WP)).toBe(0); // on a bow arm
-    expect(wakeRateCpu(0, -11, { ...SHIP, speed: 0 }, WP)).toBe(0);
-  });
-
-  it('bow arms and stern band inject where expected, nothing ahead of the bow', () => {
-    const sAft = 8; // 8 m behind the bow point (z = 12 − 8 = 4)
-    const onArm = wakeEnvelopeCpu(sAft * tan, SHIP.bowOffset - sAft, SHIP, WP);
-    const offArm = wakeEnvelopeCpu(sAft * tan + 15, SHIP.bowOffset - sAft, SHIP, WP);
-    expect(onArm).toBeGreaterThan(0);
-    expect(offArm).toBe(0);
-    const sternCenter = wakeEnvelopeCpu(0, -14, SHIP, WP); // 4 m aft of stern
-    const sternEdge = wakeEnvelopeCpu(2.9, -14, SHIP, WP); // near scaled band edge
-    expect(sternCenter).toBeGreaterThan(sternEdge); // centerline hump = rooster tail
-    expect(sternEdge).toBeGreaterThanOrEqual(0);
-    expect(wakeEnvelopeCpu(0, SHIP.bowOffset + 5, SHIP, WP)).toBe(0); // ahead of bow
-  });
-
-  it('deterministic; envelope is ship-frame invariant (breakup is world-anchored)', () => {
-    expect(wakeRateCpu(3.3, -7.7, SHIP, WP)).toBe(wakeRateCpu(3.3, -7.7, SHIP, WP));
-    // rotate ship 90° (bow toward +x): the old astern point is now abeam
-    const turned = { ...SHIP, yaw: Math.PI / 2 };
-    const astern = wakeEnvelopeCpu(-14, 0, turned, WP); // behind stern in new frame
-    expect(astern).toBeGreaterThan(0);
-    expect(astern).toBeCloseTo(wakeEnvelopeCpu(0, -14, SHIP, WP), 12);
+  it('trackBounds contains every point the wake can reach', () => {
+    // WHY: the GPU skips the whole segment walk outside this AABB — a margin
+    // that under-estimates the arms would clip the outer V into a hard edge.
+    const maxDist = STRAIGHT.points[STRAIGHT.points.length - 1].dist;
+    const b = trackBounds(STRAIGHT.points, wakeReachCpu(maxDist, HULL, WP))!;
+    expect(b).not.toBeNull();
+    for (let d = 0; d <= maxDist; d += 1) {
+      for (let y = -40; y <= 40; y += 0.5) {
+        if (wakeEnvelopeCpu(STRAIGHT.points, y, STRAIGHT.z - d, HULL, WP) <= 0) continue;
+        expect(y).toBeGreaterThanOrEqual(b.minX);
+        expect(y).toBeLessThanOrEqual(b.maxX);
+        expect(STRAIGHT.z - d).toBeGreaterThanOrEqual(b.minZ);
+        expect(STRAIGHT.z - d).toBeLessThanOrEqual(b.maxZ);
+      }
+    }
   });
 });
 
@@ -338,6 +792,19 @@ describe('flowfoam params (§V16 registry contract)', () => {
     expect(flowFoamParams.speedThreshold).toBeGreaterThanOrEqual(0);
     expect(flowFoamParams.armWidth).toBeGreaterThan(0);
     expect(flowFoamParams.sternWidth).toBeGreaterThan(0);
-    expect(flowFoamParams.wakeRange).toBeGreaterThan(0);
+    // track history: spacing/life must actually span the foam region, or the
+    // trail would end inside the visible window with a hard edge
+    expect(flowFoamParams.trackSpacing).toBeGreaterThan(0);
+    expect(flowFoamParams.trackLife).toBeGreaterThan(0);
+    expect(flowFoamParams.trackSpacing * TRACK_CAPACITY).toBeGreaterThan(
+      flowFoamParams.regionSize * 0.7,
+    );
+    // fades must not outlive the samples that feed them (dead injection cost)
+    expect(flowFoamParams.bowLife).toBeLessThanOrEqual(flowFoamParams.trackLife);
+    expect(flowFoamParams.sternLife).toBeLessThanOrEqual(flowFoamParams.trackLife);
+    expect(flowFoamParams.tailFade).toBeGreaterThan(0);
+    expect(flowFoamParams.tailFade).toBeLessThan(1);
+    expect(flowFoamParams.vortexSpacing).toBeGreaterThan(0);
+    expect(flowFoamParams.fullWakeSpeed).toBeGreaterThan(flowFoamParams.speedThreshold);
   });
 });

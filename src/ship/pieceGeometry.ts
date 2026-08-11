@@ -34,6 +34,11 @@ import {
   buildCastleDeck,
   buildCurvedRail,
 } from './pieceGeometryCastle';
+import {
+  buildGalleryGeometry,
+  buildTransomGeometry,
+  type TransomShape,
+} from './pieceGeometryStern';
 
 export { buildSailGeometry } from './pieceGeometryShapes';
 export { buildHoledVariant } from './pieceGeometryHoled';
@@ -141,9 +146,13 @@ export function buildPieceGeometry(
       return hull !== null
         ? buildCurvedRail(hull, aabb, shape?.railInset ?? 0.2)
         : buildRailGeometry(aabb);
-    case 'keel':
     case 'transom':
+      // lofted cap matching the shell's aft section (closes the stern);
+      // box fallback only for piece data without hull hints
+      return hull !== null ? buildTransomGeometry(hull as TransomShape) : box(aabb);
     case 'gallery':
+      return buildGalleryGeometry(aabb);
+    case 'keel':
     case 'rudder':
       return box(aabb);
   }

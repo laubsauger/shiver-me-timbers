@@ -8,10 +8,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   daylight,
+  fogRange,
   lowSunWarmth,
   skyTint,
   sunColor,
   sunDirection,
+  sunDiscCosines,
   sunElevation,
 } from '../src/sky/sunCycle';
 
@@ -103,5 +105,65 @@ describe('color ramps (multiplied into materials — must stay 0..1)', () => {
     expect(daylight(1.0)).toBe(1);
     expect(lowSunWarmth(0.02)).toBeGreaterThan(lowSunWarmth(1.0));
     expect(lowSunWarmth(0.02)).toBeGreaterThan(lowSunWarmth(-0.3));
+  });
+});
+
+describe('sunDiscCosines (edges of the sky shader smoothstep)', () => {
+  it('orders the edges so smoothstep(outer, inner, dot) grows toward the sun', () => {
+    // cosine falls as the angle grows, so the outer (wider) edge must be the
+    // SMALLER number — swap them and the disc inverts into a hole in the sky
+    const [outer, inner] = sunDiscCosines(1.1, 0.35);
+    expect(outer).toBeLessThan(inner);
+    expect(inner).toBeCloseTo(Math.cos((1.1 * Math.PI) / 180), 12);
+    expect(outer).toBeCloseTo(Math.cos((1.45 * Math.PI) / 180), 12);
+  });
+
+  it('never collapses both edges together — equal edges are a NaN sky (§V28)', () => {
+    // the panel lets softness be typed to 0 (or garbage); smoothstep divides
+    // by (inner - outer), so a zero gap NaNs every pixel of the background
+    for (const [size, soft] of [
+      [1.1, 0],
+      [0, 0],
+      [3, -2],
+      [1, NaN],
+      [NaN, NaN],
+    ] as Array<[number, number]>) {
+      const [outer, inner] = sunDiscCosines(size, soft);
+      expect(Number.isFinite(outer)).toBe(true);
+      expect(Number.isFinite(inner)).toBe(true);
+      expect(inner - outer).toBeGreaterThan(0);
+    }
+  });
+
+  it('a bigger disc reaches further from the sun axis', () => {
+    expect(sunDiscCosines(3, 0.5)[1]).toBeLessThan(sunDiscCosines(1, 0.5)[1]);
+  });
+});
+
+describe('fogRange (distance haze must never become a divide-by-zero)', () => {
+  it('passes sane authored ranges through untouched', () => {
+    expect(fogRange(700, 4500)).toEqual([700, 4500]);
+  });
+
+  it('keeps far strictly above near — three divides by (far - near) (§V28)', () => {
+    for (const [n, f] of [
+      [4000, 4000],
+      [4000, 100],
+      [900, NaN],
+      [NaN, 5000],
+      [-500, 200],
+    ] as Array<[number, number]>) {
+      const [near, far] = fogRange(n, f);
+      expect(Number.isFinite(near)).toBe(true);
+      expect(Number.isFinite(far)).toBe(true);
+      expect(far).toBeGreaterThan(near);
+      expect(near).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('leaves room for a kilometre-scale sea — no clamp to a few hundred m (§V30)', () => {
+    // the ocean draws to kilometres; a fog range that saturated before the
+    // water ends is exactly the "wall" the user reported
+    expect(fogRange(1500, 16000)).toEqual([1500, 16000]);
   });
 });

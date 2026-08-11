@@ -37,6 +37,11 @@ export interface ShipClassParams {
   yardLowerLenFactor: number; // yard length as fraction of mast height
   yardUpperLenFactor: number;
   yardRadius: number;
+  /** gap between mast surface and yard surface (m) — yards ride forward of
+   *  the mast so the sail never cuts into it */
+  yardMastClearance: number;
+  /** sail cloth offset forward of its yard axis (m) */
+  sailYardOffset: number;
   sailDropLowerFactor: number; // sail drop as fraction of mast height
   sailDropUpperFactor: number;
   bowspritLength: number;
@@ -49,6 +54,8 @@ export interface ShipClassParams {
   rudderHeight: number;
   rudderChord: number;
   rudderThickness: number;
+  /** how far the middle of the transom bulges aft (m) — rounded stern */
+  transomCrown: number;
   sheerBow: number; // rail rise toward the stem (m)
   sheerStern: number; // rail rise toward the transom (m)
   tumblehome: number; // inward lean of topsides, fraction of half-beam
@@ -75,10 +82,12 @@ export const brigantineParams: ShipClassParams = registerParams(
     crowNestRadius: 0, crowNestHeight: 0, crowNestFrac: 0,
     yardLowerFrac: 0.52, yardUpperFrac: 0.78,
     yardLowerLenFactor: 0.5, yardUpperLenFactor: 0.36, yardRadius: 0.12,
+    yardMastClearance: 0.1, sailYardOffset: 0.16,
     sailDropLowerFactor: 0.22, sailDropUpperFactor: 0.16,
     bowspritLength: 7, bowspritRadius: 0.18, bowspritPitch: 0.28,
     railHeight: 0.9, railThickness: 0.12, railInset: 0.2, railLengthFactor: 0.85,
     rudderHeight: 2.2, rudderChord: 1.2, rudderThickness: 0.15,
+    transomCrown: 0.35,
     sheerBow: 0.8, sheerStern: 0.5, tumblehome: 0.1, keelPinch: 0.12,
     cannonMountHeight: 1.3, cannonInset: 0, cannonSpacing: 4, cannonsPerSide: 4,
   },
@@ -101,10 +110,12 @@ export const galleonParams: ShipClassParams = registerParams(
     crowNestRadius: 0.85, crowNestHeight: 0.9, crowNestFrac: 0.86,
     yardLowerFrac: 0.5, yardUpperFrac: 0.76,
     yardLowerLenFactor: 0.42, yardUpperLenFactor: 0.3, yardRadius: 0.15,
+    yardMastClearance: 0.12, sailYardOffset: 0.2,
     sailDropLowerFactor: 0.2, sailDropUpperFactor: 0.15,
     bowspritLength: 9, bowspritRadius: 0.22, bowspritPitch: 0.35, // ~20°
     railHeight: 1.0, railThickness: 0.13, railInset: 0.22, railLengthFactor: 0.8,
     rudderHeight: 2.6, rudderChord: 1.4, rudderThickness: 0.18,
+    transomCrown: 0.45,
     sheerBow: 1.1, sheerStern: 0.7, tumblehome: 0.12, keelPinch: 0.1,
     cannonMountHeight: 0, cannonInset: 1.0, cannonSpacing: 4, cannonsPerSide: 4,
   },
@@ -136,13 +147,22 @@ export interface ShipMaterialParams {
   sailWeaveScale: number; // warp/weft noise frequency
   sailBacklitColor: number;
   sailBacklitStrength: number;
-  sailBillow: number; // full-trim belly depth, fraction of sail drop
+  sailBillow: number; // full belly depth, fraction of sail drop, at windRef
+  sailWindRef: number; // m/s of following wind that fills the sail completely
+  sailBackBillow: number; // max belly INVERSION when the wind heads the sail
+  sailLuffFlap: number; // extra ripple amplitude when the sail is not drawing
+  sailGustAmp: number; // gust modulation depth 0..1
+  sailGustFreq: number; // gust rate (rad/s)
+  sailTurnSkew: number; // belly sideways lag per rad/s of ship yaw rate
+  sailResponse: number; // how fast the cloth chases the wind (1/s)
   sailFlutterAmp: number; // wind ripple amplitude (m) at the free foot
   sailFlutterFreq: number; // ripple speed (rad/s)
   sailRippleCount: number; // ripple wavelengths across the cloth
   sailPanelCount: number; // vertical cloth panels (seam stripes)
   sailSeamDarken: number; // 0..1 multiplier on panel seams / hem edges
   sailAmbientLift: number; // emissive floor so cloth never reads dead black
+  sailBacklitFocus: number; // transmission lobe tightness (looking sunward)
+  sailLeeDarken: number; // 0..1 tint multiplier on the shaded (lee) face
   sailStainStrength: number; // weathering mottle darkening 0..1
   holeColor: number;
 }
@@ -158,9 +178,12 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sparLight: 0x8a6a42, sparDark: 0x5f452a,
     trimLight: 0x54381f, trimDark: 0x362412,
     sailLight: 0xe9e1cd, sailDark: 0xd2c5aa,
-    sailWeaveScale: 18, sailBacklitColor: 0xfff0d2, sailBacklitStrength: 0.35,
-    sailBillow: 0.34, sailFlutterAmp: 0.16, sailFlutterFreq: 2.4, sailRippleCount: 2.5,
-    sailPanelCount: 7, sailSeamDarken: 0.82, sailAmbientLift: 0.16, sailStainStrength: 0.24,
+    sailWeaveScale: 18, sailBacklitColor: 0xfff0d2, sailBacklitStrength: 0.5,
+    sailBillow: 0.34, sailWindRef: 11, sailBackBillow: 0.18, sailLuffFlap: 2.6,
+    sailGustAmp: 0.3, sailGustFreq: 0.55, sailTurnSkew: 1.6, sailResponse: 2.2,
+    sailFlutterAmp: 0.14, sailFlutterFreq: 2.4, sailRippleCount: 2.5,
+    sailPanelCount: 7, sailSeamDarken: 0.82, sailAmbientLift: 0.035,
+    sailBacklitFocus: 3, sailLeeDarken: 0.42, sailStainStrength: 0.24,
     holeColor: 0x120c07,
   },
   {
@@ -176,6 +199,15 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailWeaveScale: { min: 2, max: 60, step: 0.5 },
     sailBacklitStrength: { min: 0, max: 2, step: 0.01 },
     sailBillow: { min: 0, max: 0.8, step: 0.01 },
+    sailWindRef: { min: 1, max: 30, step: 0.5 },
+    sailBackBillow: { min: 0, max: 0.8, step: 0.01 },
+    sailLuffFlap: { min: 0, max: 6, step: 0.05 },
+    sailGustAmp: { min: 0, max: 1, step: 0.01 },
+    sailGustFreq: { min: 0.05, max: 3, step: 0.05 },
+    sailTurnSkew: { min: 0, max: 6, step: 0.05 },
+    sailResponse: { min: 0.2, max: 12, step: 0.1 },
+    sailBacklitFocus: { min: 1, max: 12, step: 0.1 },
+    sailLeeDarken: { min: 0.1, max: 1, step: 0.01 },
     sailFlutterAmp: { min: 0, max: 0.6, step: 0.01 },
     sailFlutterFreq: { min: 0, max: 10, step: 0.1 },
     sailRippleCount: { min: 0.5, max: 8, step: 0.1 },
@@ -198,6 +230,9 @@ function shipParamsMeta(): Partial<Record<keyof ShipClassParams, ParamMeta>> {
     bowspritLength: { min: 0, max: 15, step: 0.25 },
     bowspritPitch: { min: 0, max: 0.8, step: 0.01 },
     railHeight: { min: 0.2, max: 2, step: 0.05 },
+    yardMastClearance: { min: 0, max: 1, step: 0.01 },
+    sailYardOffset: { min: 0, max: 1.5, step: 0.01 },
+    transomCrown: { min: 0, max: 1.5, step: 0.01 },
     cannonsPerSide: { min: 0, max: 8, step: 1 },
   };
 }

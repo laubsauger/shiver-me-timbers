@@ -17,6 +17,17 @@ import {
   phillips,
 } from '../src/ocean/oceanMath';
 import { oceanParams } from '../src/params/ocean';
+import { oceanSurfaceParams } from '../src/params/oceanSurface';
+import { seaPhysicsParams } from '../src/params/seaPhysics';
+import {
+  buildOceanGrid,
+  ringRadius,
+  snapToGrid,
+  solveGrowthRate,
+  spacingAtRadius,
+  warpVertex,
+  type SurfaceGridOptions,
+} from '../src/ocean/surfaceGeometry';
 import { createRng } from '../src/state/rng';
 
 describe('dispersion (§V.4 wave speed realism)', () => {
@@ -181,5 +192,147 @@ describe('gaussianPair', () => {
     expect(Math.abs(mean)).toBeLessThan(0.1);
     expect(variance).toBeGreaterThan(0.8);
     expect(variance).toBeLessThan(1.2);
+  });
+});
+
+/**
+ * §V30 clipmap LOD. These encode WHY the warp exists: constant screen-space
+ * triangle size out to kilometres, a circular rim inside the camera far
+ * plane, and a spacing law the shader can reproduce analytically (it drives
+ * the Nyquist cascade fades — get it wrong and detail either aliases or ends
+ * in the visible ring §V30 forbids).
+ */
+describe('ocean surface clipmap (§V30 open 360° horizon)', () => {
+  const grid: SurfaceGridOptions = {
+    segments: oceanSurfaceParams.gridSegments,
+    coreSpacing: oceanSurfaceParams.gridCoreSpacing,
+    horizonRadius: oceanSurfaceParams.gridHorizonRadius,
+    rimRound: oceanSurfaceParams.gridRimRound,
+  };
+  const k = solveGrowthRate(grid);
+
+  it('the outermost ring lands on horizonRadius', () => {
+    const half = grid.segments / 2;
+    expect(ringRadius(half, grid.coreSpacing, k)).toBeCloseTo(grid.horizonRadius, 1);
+  });
+
+  it('spacing law matches the ring radii it came from (shader parity)', () => {
+    // the material computes spacing = s0 + k·dist; it must equal the actual
+    // gap between consecutive rings, or the cascade fades cut at the wrong
+    // distance and detail aliases or vanishes early
+    for (const n of [1, 40, 120, 200, 255]) {
+      const r0 = ringRadius(n, grid.coreSpacing, k);
+      const r1 = ringRadius(n + 1, grid.coreSpacing, k);
+      // spacingAtRadius is the derivative, r1−r0 its integral over one ring:
+      // they agree to O(k/2) ≈ 1%, which is far tighter than any fade needs
+      expect(spacingAtRadius(r0, grid.coreSpacing, k) / (r1 - r0)).toBeCloseTo(1, 1);
+    }
+  });
+
+  it('keeps triangles at a near-constant screen angle (spacing/distance)', () => {
+    // this is the whole point of the warp: no vertex budget wasted at 400 m,
+    // none starved at 4 km
+    for (const r of [50, 200, 800, 2000, 4000]) {
+      const ratio = spacingAtRadius(r, grid.coreSpacing, k) / r;
+      expect(ratio).toBeGreaterThan(0.01);
+      expect(ratio).toBeLessThan(0.045);
+    }
+  });
+
+  it('radius grows monotonically along every direction — no folded triangles', () => {
+    for (const dir of [
+      [1, 0],
+      [1, 1],
+      [0.3, 1],
+    ]) {
+      let prev = -1;
+      for (let i = 0; i <= 64; i++) {
+        const t = i / 64;
+        const [x, z] = warpVertex(dir[0] * t, dir[1] * t, grid, k);
+        const r = Math.hypot(x, z);
+        expect(r).toBeGreaterThanOrEqual(prev);
+        prev = r;
+      }
+    }
+  });
+
+  it('rim is circular, so no corner pokes through the camera far plane', () => {
+    // a square rim would put its corners at √2·horizonRadius and get sliced —
+    // a notched horizon is exactly the cutoff §V30 bans
+    for (let i = 0; i <= 32; i++) {
+      const a = (i / 32) * Math.PI * 2;
+      // walk the parameter-space boundary of the unit square
+      const s = Math.max(Math.abs(Math.cos(a)), Math.abs(Math.sin(a)));
+      const [x, z] = warpVertex(Math.cos(a) / s, Math.sin(a) / s, grid, k);
+      expect(Math.hypot(x, z)).toBeCloseTo(grid.horizonRadius, 0);
+    }
+  });
+
+  it('snaps the mesh origin to whole core steps (near vertices never swim)', () => {
+    const [x, z] = snapToGrid(123.456, -78.9, grid);
+    expect(x / grid.coreSpacing).toBeCloseTo(Math.round(x / grid.coreSpacing), 6);
+    expect(z / grid.coreSpacing).toBeCloseTo(Math.round(z / grid.coreSpacing), 6);
+    expect(Math.abs(x - 123.456)).toBeLessThanOrEqual(grid.coreSpacing);
+  });
+
+  it('emits triangles ring-by-ring, front-to-back from the camera (§V28)', () => {
+    // the mesh is camera-centered, so ring order IS front-to-back order for
+    // every heading. With depth writes that costs the horizon band ~1 shaded
+    // layer instead of hundreds of blended ones — the fill-rate wedge class
+    // of §B.5. Row-major order would be back-to-front for half of all
+    // headings, so this ordering is load bearing, not cosmetic.
+    const small: SurfaceGridOptions = {
+      segments: 16,
+      coreSpacing: 1,
+      horizonRadius: 400,
+      rimRound: 0.3,
+    };
+    const geo = buildOceanGrid(small);
+    const pos = geo.getAttribute('position');
+    const idx = geo.getIndex();
+    expect(idx).not.toBeNull();
+    const seen = new Set<number>();
+    const quarter = Math.floor(idx!.count / 3 / 4) * 3;
+    const means = [0, 0, 0, 0];
+    for (let t = 0; t < idx!.count; t += 3) {
+      let r = 0;
+      for (let c = 0; c < 3; c++) {
+        const v = idx!.getX(t + c);
+        seen.add(v);
+        r = Math.max(r, Math.hypot(pos.getX(v), pos.getZ(v)));
+      }
+      const q = Math.min(3, Math.floor(t / quarter));
+      means[q] += r;
+    }
+    // each quarter of the draw is further from the camera than the last
+    for (let q = 1; q < 4; q++) expect(means[q]).toBeGreaterThan(means[q - 1]);
+    // every vertex is used — no orphan rows, no holes in the sea
+    expect(seen.size).toBe(pos.count);
+  });
+
+  it('degrades to a uniform grid when the horizon is inside the core reach', () => {
+    const tiny = { segments: 64, coreSpacing: 10, horizonRadius: 100, rimRound: 0.3 };
+    expect(solveGrowthRate(tiny)).toBe(0);
+    expect(ringRadius(32, tiny.coreSpacing, 0)).toBe(320);
+  });
+});
+
+describe('ocean cascades vs the CPU buoyancy mirror (§V8)', () => {
+  it('every cascade band fits inside the mirror grid', () => {
+    // cpuOcean throws if a band's kMax falls outside its reduced grid — the
+    // wave-scale retune must never silently float ships on a different sea
+    for (let i = 0; i < 2; i++) {
+      const band = cascadeBand(i, oceanParams.splitWavelengths);
+      const kEdge =
+        (Math.PI * seaPhysicsParams.mirrorResolution) / oceanParams.cascades[i].domain;
+      expect(band.kMax).toBeLessThan(kEdge);
+    }
+  });
+
+  it('the coarse cascade holds several swell wavelengths per tile (§V19)', () => {
+    // tiling reads as repetition once the domain is only a couple of waves
+    // wide (user critique); the longest band wavelength is splitWavelengths[0]
+    expect(oceanParams.cascades[0].domain / oceanParams.splitWavelengths[0])
+      .toBeGreaterThan(8);
   });
 });

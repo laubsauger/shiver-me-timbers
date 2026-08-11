@@ -7,6 +7,7 @@
 import type { ShipClassParams } from '../params/ship';
 import type { PieceDef } from './pieceTypes';
 import { hullShapeHints, mkPiece } from './blueprintParts';
+import { hullHalfWidthAt, type HullShape } from './hullMath';
 
 /** Raised bow/stern works: forecastle, quarterdeck + cabin (stepped stern
  *  ~2 levels above main deck), gallery band, lantern posts. Galleon only. */
@@ -14,6 +15,11 @@ export function buildCastles(p: ShipClassParams): PieceDef[] {
   const L2 = p.hullLength / 2;
   const cabinLen = p.sterncastleLength * 0.5;
   const roofY = p.freeboard + p.sterncastleRise + p.cabinHeight;
+  // cabin/gallery/lantern stations size themselves from the same envelope
+  // the shell uses — nothing aft may be wider than the hull under it
+  const sternHints = hullShapeHints(p, 0, -L2, -L2) as unknown as HullShape;
+  const cabinAftHalf = hullHalfWidthAt(-(L2 - 0.1), roofY, sternHints) * 0.92;
+  const galleryHalf = cabinAftHalf * 0.94;
   return [
     // castle decks taper with the hull plan (shape hints) and carry their
     // bulkhead + posts down to the main deck — never a floating slab
@@ -56,17 +62,19 @@ export function buildCastles(p: ShipClassParams): PieceDef[] {
         max: [p.beam * 0.42, p.cabinHeight, cabinLen / 2],
       },
       { shape: hullShapeHints(p, 0, -(L2 - 0.1), -(L2 - 0.1 - cabinLen)) }),
+    // window band on the cabin's aft face — width taken from the stern
+    // envelope so it can't overhang the transom (§V22 "ugly panels")
     mkPiece('gallery', 'gallery',
-      [0, p.freeboard + p.sterncastleRise + p.cabinHeight * 0.5, -(L2 + 0.15)],
+      [0, p.freeboard + p.sterncastleRise + p.cabinHeight * 0.5, -(L2 - 0.16)],
       {
-        min: [-p.beam * 0.38, -p.galleryHeight / 2, -0.12],
-        max: [p.beam * 0.38, p.galleryHeight / 2, 0.12],
+        min: [-galleryHalf, -p.galleryHeight / 2, -0.18],
+        max: [galleryHalf, p.galleryHeight / 2, 0],
       }),
     mkPiece('lantern-post-port', 'lantern-post',
-      [-p.beam * 0.32, roofY, -(L2 - 0.5)],
+      [-cabinAftHalf * 0.82, roofY, -(L2 - 0.5)],
       { min: [-0.1, 0, -0.1], max: [0.1, p.lanternPostHeight, 0.1] }),
     mkPiece('lantern-post-starboard', 'lantern-post',
-      [p.beam * 0.32, roofY, -(L2 - 0.5)],
+      [cabinAftHalf * 0.82, roofY, -(L2 - 0.5)],
       { min: [-0.1, 0, -0.1], max: [0.1, p.lanternPostHeight, 0.1] }),
   ];
 }

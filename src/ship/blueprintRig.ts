@@ -40,6 +40,10 @@ export function buildMastRig(
     { level: 'lower', frac: p.yardLowerFrac, lenF: p.yardLowerLenFactor, dropF: p.sailDropLowerFactor },
     { level: 'upper', frac: p.yardUpperFrac, lenF: p.yardUpperLenFactor, dropF: p.sailDropUpperFactor },
   ] as const;
+  // yards ride FORWARD of their mast (real square rig, and §V22 critique:
+  // "the yard shouldn't go through the mast, the sail shouldn't cut into
+  // it"). Socket ids are unchanged — only their world station moves.
+  const yardZ = r + p.yardRadius + p.yardMastClearance;
   for (const { level, frac, lenF, dropF } of levels) {
     const yardId = `yard-${name}-${level}`;
     const len = height * lenF;
@@ -49,14 +53,15 @@ export function buildMastRig(
       { id: `anchor-${yardId}-starboard`, type: 'rope-anchor', position: [len / 2, 0, 0] },
     ];
     pieces.push(
-      mkPiece(yardId, 'yard', [0, height * frac, 0], {
+      mkPiece(yardId, 'yard', [0, height * frac, yardZ], {
         min: [-len / 2, -yr, -yr],
         max: [len / 2, yr, yr],
       }, { parent: mastId, sockets: ends }),
     );
     if (opts.sails) {
+      // cloth hangs off the FRONT of its spar, clear of both spar and mast
       pieces.push(
-        mkPiece(`sail-${name}-${level}`, 'sail', [0, 0, 0], {
+        mkPiece(`sail-${name}-${level}`, 'sail', [0, -yr, p.sailYardOffset], {
           min: [-len * 0.46, -height * dropF, -0.5],
           max: [len * 0.46, 0.15, 0.5],
         }, {

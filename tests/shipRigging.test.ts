@@ -2,10 +2,24 @@
  * §V12/§V13 rigging plan tests. The plan is the contract between the ship
  * piece graph (socket ids) and the GPU rope solver (createRopes indices) —
  * if it references a socket that does not exist, or drifts between runs,
- * ropes attach to nothing after a ship-side rename. Pure data tests; no
- * three.js/WebGPU is imported at runtime (shipRigging uses type-only imports).
+ * ropes attach to nothing after a ship-side rename.
+ *
+ * The rest of these tests guard the LAYOUT, against two user-reported faults:
+ *
+ *  1. SPIDER WEB. The rig once ran shrouds from every masthead to BOTH end
+ *     cleats and braces from every yard to the transom: 20 of 48 lines
+ *     spanned the whole hull. Rigging is local — a line belongs to its bay.
+ *  2. ROPES THROUGH THE DECK. Endpoints sat inboard/below the deck surface
+ *     and lines sagged through it. The catenary solver knows nothing about
+ *     the ship, so both the endpoints and the whole solved curve have to be
+ *     outside the hull solid.
+ *
+ * Both are geometric, so these tests resolve the plan through a real
+ * ShipAssembly and solve the real catenary — a "does it name a valid socket"
+ * test cannot see either failure.
  */
 import { describe, expect, it } from 'vitest';
+import type { Material } from 'three';
 import {
   applyBlocks,
   applyRiggingPlan,
@@ -15,10 +29,90 @@ import {
   validateRiggingPlan,
   type RiggingRope,
 } from '../src/ropes/shipRigging';
+import { solveCatenary } from '../src/ropes/catenaryMath';
 import {
   buildBrigantineBlueprint,
   buildGalleonBlueprint,
 } from '../src/ship/shipBlueprint';
+import { ShipAssembly } from '../src/ship/shipAssembly';
+import { asHullShape, hullHalfWidthAt, hullTopY, type HullShape } from '../src/ship/hullMath';
+import { brigantineParams, galleonParams } from '../src/params/ship';
+import type { PieceDef } from '../src/ship/pieceTypes';
+
+const stubFactory = (): Material => ({ dispose(): void {} }) as unknown as Material;
+
+type Point = [number, number, number];
+interface ResolvedRope {
+  rope: RiggingRope;
+  a: Point;
+  b: Point;
+  length: number;
+  /** fore-aft extent of the line — the spider-web metric */
+  zSpan: number;
+}
+
+/** the plan as the GPU sees it: every rope resolved through the real ship
+ *  piece graph. The ship sits at the origin, so world == ship-local. */
+function resolvePlan(blueprint: PieceDef[]): ResolvedRope[] {
+  const plan = buildRiggingPlan(blueprint);
+  const assembly = new ShipAssembly(blueprint, stubFactory);
+  assembly.group.updateWorldMatrix(true, true);
+  const out: ResolvedRope[] = [];
+  applyRiggingPlan(plan, {
+    setRope(index, a, b, length): void {
+      out[index] = {
+        rope: plan[index],
+        a: [a.x, a.y, a.z],
+        b: [b.x, b.y, b.z],
+        length: length ?? 0,
+        zSpan: Math.abs(b.z - a.z),
+      };
+    },
+    setRopeCount(): void {},
+  }, (id) => assembly.socketWorldPosition(id));
+  return out;
+}
+
+/**
+ * The solid volume of the ship a rope must never enter. Half-breadth comes
+ * from the ship's OWN loft (castle slabs and the cabin taper to the same
+ * envelope by construction — see blueprintCastles), so the only thing the
+ * raised works change is how high the walking surface is over their span.
+ */
+function hullSolid(blueprint: PieceDef[]): {
+  shape: HullShape;
+  decks: Array<{ topY: number; z0: number; z1: number }>;
+} {
+  const shape = asHullShape(blueprint.find((p) => p.kind === 'deck')?.shape);
+  if (shape === null) throw new Error('blueprint has no deck shape hints');
+  const raised = new Set(['forecastle-deck', 'sterncastle-deck', 'cabin']);
+  const decks = blueprint
+    .filter((p) => raised.has(p.kind) && p.parent === undefined)
+    .map((p) => ({
+      topY: p.transform.position[1] + p.aabb.max[1],
+      z0: p.transform.position[2] + p.aabb.min[2],
+      z1: p.transform.position[2] + p.aabb.max[2],
+    }));
+  return { shape, decks };
+}
+
+/** how far INSIDE the ship a point is, in metres (≤ 0 = outside/clear) */
+function penetration(p: Point, solid: ReturnType<typeof hullSolid>): number {
+  const [x, y, z] = p;
+  const { shape, decks } = solid;
+  if (z > shape.bowZ || z < shape.sternZ || y < -shape.draft) return -1;
+  let top = hullTopY(z, shape);
+  for (const deck of decks) {
+    if (z >= deck.z0 && z <= deck.z1) top = Math.max(top, deck.topY);
+  }
+  if (y > top) return -1;
+  return hullHalfWidthAt(z, y, shape) - Math.abs(x);
+}
+
+const shipCases = [
+  ['galleon', buildGalleonBlueprint, galleonParams],
+  ['brigantine', buildBrigantineBlueprint, brigantineParams],
+] as const;
 
 describe('buildRiggingPlan (§V13 sockets → §V12 ropes)', () => {
   it('is deterministic: identical blueprints → identical plans', () => {
@@ -36,26 +130,24 @@ describe('buildRiggingPlan (§V13 sockets → §V12 ropes)', () => {
     // WHY: ship geometry is being reworked independently (§V18 swappable
     // pieces); this pins the socket-id contract so a rename fails here, not
     // as ropes anchored to nothing in the demo.
-    for (const blueprint of [buildGalleonBlueprint(), buildBrigantineBlueprint()]) {
+    for (const [, build] of shipCases) {
+      const blueprint = build();
       const plan = buildRiggingPlan(blueprint);
       const ids = collectRopeAnchorIds(blueprint);
       for (const rope of plan) {
-        expect(ids.has(rope.socketA), rope.socketA).toBe(true);
-        expect(ids.has(rope.socketB), rope.socketB).toBe(true);
+        for (const id of [rope.socketA, rope.socketB]) expect(ids.has(id), id).toBe(true);
       }
       expect(() => validateRiggingPlan(plan, blueprint)).not.toThrow();
     }
   });
 
-  it('galleon rig is substantial (≥ 12 ropes) and never self-ties', () => {
-    // WHY: the SoT look needs a dense rig (forestay/backstays/shrouds/
-    // lifts/braces); a near-empty plan means categories silently dropped.
+  it('galleon rig is substantial (≥ 24 ropes) and never self-ties', () => {
+    // WHY: the SoT look needs a real rig (stays/shrouds/lifts/braces/sheets);
+    // a near-empty plan means whole categories were silently dropped — the
+    // opposite failure mode from the spider web.
     const plan = buildRiggingPlan(buildGalleonBlueprint());
-    expect(plan.length).toBeGreaterThanOrEqual(12);
-    for (const rope of plan) {
-      expect(rope.socketA).not.toBe(rope.socketB);
-    }
-    // no duplicate rope between the same socket pair (backstay/shroud dedupe)
+    expect(plan.length).toBeGreaterThanOrEqual(24);
+    for (const rope of plan) expect(rope.socketA).not.toBe(rope.socketB);
     const keys = plan.map((r) => `${r.socketA}|${r.socketB}`);
     expect(new Set(keys).size).toBe(keys.length);
   });
@@ -63,38 +155,214 @@ describe('buildRiggingPlan (§V13 sockets → §V12 ropes)', () => {
   it('every rope has slack > 1 — ropes sag, never taut-clamped', () => {
     // WHY: length = chord × slack; slack ≤ 1 hits the solver's taut clamp
     // (straight line) and the signature catenary sag disappears (§V12).
-    for (const blueprint of [buildGalleonBlueprint(), buildBrigantineBlueprint()]) {
-      for (const rope of buildRiggingPlan(blueprint)) {
+    for (const [, build] of shipCases) {
+      for (const rope of buildRiggingPlan(build())) {
         expect(rope.slack).toBeGreaterThan(1);
         expect(rope.thickness).toBeGreaterThan(0);
       }
     }
   });
+
+  it('shroud feet are the ship\'s chainplates, one abeam each mast', () => {
+    // WHY: shrouds used to run to the extreme bow AND stern cleats from every
+    // masthead — the spider web. They must land on `anchor-channel-*`, the
+    // chainplate sockets the ship system places on the shell abeam each mast,
+    // so a shroud never crosses a bay. Naming them explicitly also means a
+    // ship-side rename fails here rather than silently re-webbing the rig.
+    for (const [, build] of shipCases) {
+      const plan = buildRiggingPlan(build());
+      const shrouds = plan.filter((r) => r.role === 'shroud');
+      expect(shrouds.length).toBeGreaterThanOrEqual(4);
+      for (const shroud of shrouds) {
+        const mast = /^anchor-masthead-(\w+)$/.exec(shroud.socketA)?.[1];
+        expect(mast, shroud.socketA).toBeDefined();
+        expect(shroud.socketB).toMatch(
+          new RegExp(`^anchor-channel-(port|starboard)-${mast}$`),
+        );
+      }
+      // every mast is shrouded, both sides
+      const masts = new Set(shrouds.map((s) => s.socketA));
+      expect(shrouds.length).toBe(masts.size * 2);
+    }
+  });
 });
 
-describe('expanded rig ("whole shebang" — sheets, both-yard braces, halyard)', () => {
-  it('braces serve BOTH yard levels on every mast', () => {
-    // WHY: the reference schema shows braces on upper and lower yards; a
-    // regression back to lower-only silently halves the running rigging.
-    const plan = buildRiggingPlan(buildGalleonBlueprint());
-    const braces = plan.filter((r) => r.role === 'brace');
-    expect(braces).toHaveLength(12); // 3 masts × 2 yards × 2 sides
-    expect(braces.some((r) => r.socketA.includes('-upper-'))).toBe(true);
+describe('rig LOCALITY (anti spider-web — docs/ship-reference-schema.png)', () => {
+  it.each(shipCases)('%s: no rope spans more than half the hull fore-aft', (_n, build, params) => {
+    // WHY: THE regression the user flagged. Lines running stem to transom
+    // cross every other line and read as a web; real rigging stays inside one
+    // mast bay. The old layout peaked at 28.9 m on a 35 m hull with 20 such
+    // lines — anything over half the hull is that bug coming back.
+    const worst = resolvePlan(build()).reduce((a, b) => (a.zSpan > b.zSpan ? a : b));
+    expect(
+      worst.zSpan,
+      `${worst.rope.role} spans ${worst.zSpan.toFixed(1)} m fore-aft`,
+    ).toBeLessThanOrEqual(params.hullLength * 0.5);
   });
 
-  it('sheets run from lower yard ends to bow cleats (clew stand-in)', () => {
-    // WHY: the blueprint has no sail-clew sockets yet, so sheets start at
-    // the lower yard ends by design — this pins that stand-in so it gets
-    // revisited (fails) when clew sockets appear and the rule changes.
-    const plan = buildRiggingPlan(buildGalleonBlueprint());
-    const sheets = plan.filter((r) => r.role === 'sheet');
-    expect(sheets).toHaveLength(6); // 3 masts × lower yard × 2 sides
-    for (const s of sheets) {
-      expect(s.socketA).toMatch(/^anchor-yard-\w+-lower-/);
-      expect(s.socketB).toMatch(/^anchor-cleat-bow-/);
+  it('shrouds drop to the hull ABEAM of their own mast, not to the end cleats', () => {
+    // WHY: shrouds to the bow AND stern cleats from every masthead was the
+    // single biggest source of long crossing lines. A shroud's foot must sit
+    // at its own mast's station and outboard on the hull side.
+    const shrouds = resolvePlan(buildGalleonBlueprint()).filter((r) => r.rope.role === 'shroud');
+    expect(shrouds.length).toBeGreaterThanOrEqual(4);
+    for (const { rope, a, b } of shrouds) {
+      expect(String(rope.socketA)).toMatch(/^anchor-masthead-/);
+      expect(Math.abs(b[2] - a[2]), String(rope.socketA)).toBeLessThanOrEqual(4);
+      expect(Math.abs(b[0])).toBeGreaterThan(galleonParams.beam * 0.3);
+      expect(b[1]).toBeLessThan(a[1]); // a shroud drops, never rises
+    }
+    // the fan reaches both sides of every mast
+    const sides = new Set(shrouds.map((s) => Math.sign(s.b[0])));
+    expect([...sides].sort()).toEqual([-1, 1]);
+  });
+
+  it('only the AFTMOST masthead carries backstays aft', () => {
+    // WHY: a backstay from every masthead drags the fore mast's lines the
+    // whole length of the ship. Aftmost-only keeps them a stern-quarter run.
+    const resolved = resolvePlan(buildGalleonBlueprint());
+    const sternZ = galleonParams.hullLength / -2;
+    for (const { rope, a, b } of resolved) {
+      if (typeof rope.socketA !== 'string' || !rope.socketA.startsWith('anchor-masthead-')) continue;
+      if (b[2] > sternZ + 6) continue; // not a stern-quarter termination
+      expect(rope.socketA, `${rope.socketA} reaches the stern`).toBe('anchor-masthead-rear');
+      expect(a[2]).toBeGreaterThan(b[2]);
+    }
+    const backstays = resolved.filter(
+      (r) => r.rope.socketA === 'anchor-masthead-rear' && r.rope.role === 'stay',
+    );
+    expect(backstays).toHaveLength(2);
+  });
+
+  it('braces lead AFT and sheets lead FORWARD, each one mast bay at most', () => {
+    // WHY: braces used to run from every yard end to the transom and sheets
+    // from every yard end to the stem. Direction is what makes them read as
+    // rigging; bay length is what stops them webbing.
+    const resolved = resolvePlan(buildGalleonBlueprint());
+    const braces = resolved.filter((r) => r.rope.role === 'brace');
+    const sheets = resolved.filter((r) => r.rope.role === 'sheet');
+    expect(braces.length).toBeGreaterThanOrEqual(8);
+    expect(sheets.length).toBeGreaterThanOrEqual(4);
+    for (const { a, b } of braces) expect(b[2]).toBeLessThan(a[2]); // aft = -z
+    for (const { a, b } of sheets) expect(b[2]).toBeGreaterThan(a[2]); // fwd = +z
+    for (const { a, b } of [...braces, ...sheets]) expect(b[1]).toBeLessThan(a[1]);
+  });
+
+  it('lifts stay on their own mast: upper yard end → that mast head', () => {
+    // WHY: a lift is the shortest line in the rig; if it ever targeted another
+    // mast it would become a diagonal across a whole bay.
+    const lifts = buildRiggingPlan(buildGalleonBlueprint()).filter((r) => r.role === 'lift');
+    expect(lifts).toHaveLength(6); // 3 masts × upper yard × 2 sides
+    for (const lift of lifts) {
+      const mast = /^anchor-yard-(\w+)-upper-/.exec(String(lift.socketA))?.[1];
+      expect(mast, String(lift.socketA)).toBeDefined();
+      expect(lift.socketB).toBe(`anchor-masthead-${mast}`);
     }
   });
 
+  it('total line length stays well below the old full-length layout', () => {
+    // WHY: "a little bit excessive" was about how much rope is on screen, not
+    // only where it goes. The pre-rework galleon plan was 48 ropes / 1049 m;
+    // this holds the budget so a new category cannot quietly double it.
+    const resolved = resolvePlan(buildGalleonBlueprint());
+    const total = resolved.reduce((sum, r) => sum + r.length, 0);
+    expect(resolved.length).toBeLessThanOrEqual(46);
+    expect(total).toBeLessThan(900);
+  });
+});
+
+describe('rig CLEARANCE (no rope inside the hull or through the deck)', () => {
+  it.each(shipCases)('%s: every rope ENDPOINT is outside the ship solid', (_n, build) => {
+    // WHY: user report — "some of it doesn't seem to be connected to the top
+    // of the deck but rather goes into the ship". The blueprint's belaying
+    // cleats sit inboard on the deck, so hull-side ends are placed on the
+    // loft's sheer line standing proud of the topsides instead. If an anchor
+    // ever moves inboard of the shell again, this fails.
+    const blueprint = build();
+    const solid = hullSolid(blueprint);
+    for (const { rope, a, b } of resolvePlan(blueprint)) {
+      for (const [label, p] of [['A', a], ['B', b]] as const) {
+        expect(
+          penetration(p, solid),
+          `${rope.role} end ${label} at ${p.map((v) => v.toFixed(2)).join(',')}`,
+        ).toBeLessThanOrEqual(0);
+      }
+    }
+  });
+
+  it.each(shipCases)('%s: no solved catenary passes through the deck', (_n, build) => {
+    // WHY: the other half of the same report — "it seems to kinda hang
+    // through the top of the deck". Nothing in the §V12 solve knows the deck
+    // exists, so clearance has to come from slack + routing. This samples the
+    // SAME curve the GPU draws (catenaryMath is the tested mirror of it).
+    const blueprint = build();
+    const solid = hullSolid(blueprint);
+    for (const { rope, a, b, length } of resolvePlan(blueprint)) {
+      const curve = solveCatenary(
+        { x: a[0], y: a[1], z: a[2] },
+        { x: b[0], y: b[1], z: b[2] },
+        length,
+        24,
+      );
+      let worst = -Infinity;
+      for (const pt of curve) worst = Math.max(worst, penetration([pt.x, pt.y, pt.z], solid));
+      expect(
+        worst,
+        `${rope.role} sags ${worst.toFixed(2)} m into the ship`,
+      ).toBeLessThanOrEqual(0);
+    }
+  });
+
+  it('a mast stepped on a raised deck gets shrouds only once its chainplate is', () => {
+    // WHY: the galleon's rear mast stands on the quarterdeck while
+    // `anchor-channel-*-rear` is still down on the main shell, so its shrouds
+    // would run straight through the castle deck — one of the user's "goes
+    // into the ship" lines. The plan drops them rather than draw that. This
+    // pins BOTH halves: dropped while the socket is low, and restored (and
+    // clear) the moment the ship system lifts it, so nobody has to remember.
+    const low = buildGalleonBlueprint();
+    const mizzen = (plan: RiggingRope[]): RiggingRope[] =>
+      plan.filter((r) => r.role === 'shroud' && r.socketA === 'anchor-masthead-rear');
+    expect(mizzen(buildRiggingPlan(low))).toHaveLength(0);
+
+    // lift the two rear chainplates onto the deck the rear mast is stepped on
+    const stepY = low.find((p) => p.id === 'mast-rear')!.transform.position[1];
+    const lifted = buildGalleonBlueprint();
+    for (const piece of lifted) {
+      for (const socket of piece.sockets) {
+        if (!/^anchor-channel-\w+-rear$/.test(socket.id)) continue;
+        socket.position[1] = stepY - piece.transform.position[1] - 0.28;
+      }
+    }
+    const raisedPlan = buildRiggingPlan(lifted);
+    expect(mizzen(raisedPlan)).toHaveLength(2);
+    const solid = hullSolid(lifted);
+    for (const { rope, a, b, length } of resolvePlan(lifted)) {
+      if (rope.role !== 'shroud') continue;
+      for (const pt of solveCatenary(
+        { x: a[0], y: a[1], z: a[2] },
+        { x: b[0], y: b[1], z: b[2] },
+        length,
+        24,
+      )) {
+        expect(penetration([pt.x, pt.y, pt.z], solid)).toBeLessThanOrEqual(0);
+      }
+    }
+  });
+
+  it('standing rigging is taut enough that it cannot bow into the ship', () => {
+    // WHY: the clearance above is a geometric result of slack. Slack is a
+    // tunable (§V16) and a well-meaning bump to "more rope sag" is exactly
+    // what would put stays back through the deck — pin the ceiling here so
+    // that edit fails a test instead of shipping.
+    for (const rope of buildRiggingPlan(buildGalleonBlueprint())) {
+      const cap = rope.role === 'stay' || rope.role === 'shroud' ? 1.01 : 1.06;
+      expect(rope.slack, rope.role).toBeLessThanOrEqual(cap);
+    }
+  });
+});
+
+describe('rig completeness (every declared anchor is used)', () => {
   it('halyard ties the crow-nest socket into the rig (galleon only)', () => {
     // WHY: the crow's nest anchor was the one unused rope socket; the rig
     // should consume every anchor the ship declares or say why not.
@@ -104,14 +372,31 @@ describe('expanded rig ("whole shebang" — sheets, both-yard braces, halyard)',
     expect(brig.some((r) => r.role === 'halyard')).toBe(false); // no nest
   });
 
-  it('bobstays anchor the bowsprit tip down to the bow cleats', () => {
-    // WHY: the schema shows the bowsprit held by bow-side runs; without
-    // them the forestay pulls the spar visually unsupported.
-    const plan = buildRiggingPlan(buildGalleonBlueprint());
-    const bobstays = plan.filter(
-      (r) => r.socketA === 'anchor-bowsprit-tip' && r.socketB.startsWith('anchor-cleat-bow-'),
-    );
+  it('bobstays hold the bowsprit down onto the stem', () => {
+    // WHY: the schema shows the bowsprit held down against the forestay's
+    // pull; without them the spar reads as unsupported. They must land on the
+    // STEM (well forward, below the head) — the clearance suite proves they
+    // land outside it rather than inside the bow.
+    const resolved = resolvePlan(buildGalleonBlueprint());
+    const bobstays = resolved.filter((r) => r.rope.socketA === 'anchor-bowsprit-tip');
     expect(bobstays).toHaveLength(2);
+    for (const { a, b } of bobstays) {
+      expect(b[1]).toBeLessThan(a[1]); // pulls DOWN
+      expect(b[2]).toBeGreaterThan(galleonParams.hullLength / 2); // on the stem
+    }
+  });
+
+  it('every yard end carries at least one line', () => {
+    // WHY: yards without rigging read as floating sticks; this catches a
+    // brace/sheet/lift rule that silently misses a mast or a level.
+    const blueprint = buildGalleonBlueprint();
+    const plan = buildRiggingPlan(blueprint);
+    const used = new Set(plan.flatMap((r) => [r.socketA, r.socketB]).filter(
+      (a): a is string => typeof a === 'string',
+    ));
+    const yardEnds = [...collectRopeAnchorIds(blueprint)].filter((id) => id.includes('-yard-'));
+    expect(yardEnds.length).toBeGreaterThan(0);
+    for (const id of yardEnds) expect(used.has(id), id).toBe(true);
   });
 });
 
@@ -119,6 +404,7 @@ describe('selectBlockSockets (§V12 blocks at running-rigging ends)', () => {
   it('is deterministic, unique, capped, and references real sockets', () => {
     // WHY: block instances are placed by plan order — nondeterminism or
     // unknown ids would scatter pulleys into thin air after a re-apply.
+    // Hull anchors are derived points, so a block must never pick one.
     const plan = buildRiggingPlan(buildGalleonBlueprint());
     const sockets = selectBlockSockets(plan, 20);
     expect(sockets).toEqual(selectBlockSockets(plan, 20));
@@ -143,12 +429,29 @@ describe('validateRiggingPlan (fail loud on unknown sockets)', () => {
         socketA: 'anchor-masthead-fore',
         socketB: 'anchor-nope',
         role: 'stay',
-        slack: 1.1,
+        slack: 1.006,
         thickness: 0.03,
       },
     ];
+    expect(() => validateRiggingPlan(bogus, buildGalleonBlueprint())).toThrow(/anchor-nope/);
+  });
+
+  it('throws if the chainplate sockets the shrouds need ever disappear', () => {
+    // WHY: shroud feet depend on `anchor-channel-*`, which the ship system
+    // added for this rig. If a hull rework drops or renames them the plan must
+    // fail loudly here rather than quietly falling back to the end cleats —
+    // that fallback IS the spider web.
+    const bogus: RiggingRope[] = [
+      {
+        socketA: 'anchor-masthead-fore',
+        socketB: 'anchor-channel-port-mizzen',
+        role: 'shroud',
+        slack: 1.004,
+        thickness: 0.04,
+      },
+    ];
     expect(() => validateRiggingPlan(bogus, buildGalleonBlueprint())).toThrow(
-      /anchor-nope/,
+      /anchor-channel-port-mizzen/,
     );
   });
 });
@@ -159,26 +462,45 @@ describe('applyRiggingPlan (§V12 re-solve entry point)', () => {
     // index↔plan-entry mapping and length formula must stay stable or
     // re-application scrambles the rig.
     const plan = buildRiggingPlan(buildGalleonBlueprint());
-    const calls: Array<{ index: number; length: number }> = [];
+    const calls: number[] = [];
     let count = -1;
-    const positions = new Map<string, [number, number, number]>();
+    const positions = new Map<string, Point>();
     let n = 0;
-    const socketWorldPosition = (id: string): [number, number, number] => {
+    const socketWorldPosition = (id: string): Point => {
       if (!positions.has(id)) positions.set(id, [n++, n * 2, -n]);
       return positions.get(id)!;
     };
     applyRiggingPlan(plan, {
-      setRope(index, a, b, length) {
+      setRope(index, a, b, length): void {
         const chord = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
         expect(length).toBeCloseTo(chord * plan[index].slack, 10);
-        calls.push({ index, length: length ?? NaN });
+        calls.push(index);
       },
-      setRopeCount(c) {
+      setRopeCount(c): void {
         count = c;
       },
     }, socketWorldPosition);
-    expect(calls.map((c) => c.index)).toEqual(plan.map((_, i) => i));
+    expect(calls).toEqual(plan.map((_, i) => i));
     expect(count).toBe(plan.length);
+  });
+
+  it('never emits a NaN endpoint, even when every socket collapses to a point', () => {
+    // WHY: §V28 — a NaN endpoint reaches the storage buffer and the compute
+    // pass turns it into NaN-sized geometry (the §B5 class of GPU wedge).
+    // Hull anchors are pure weighted sums precisely so no resolve-time
+    // division exists to blow up; this pins that property.
+    const plan = buildRiggingPlan(buildGalleonBlueprint());
+    let checked = 0;
+    applyRiggingPlan(plan, {
+      setRope(_i, a, b, length): void {
+        for (const v of [a.x, a.y, a.z, b.x, b.y, b.z, length ?? 0]) {
+          expect(Number.isFinite(v)).toBe(true);
+        }
+        checked++;
+      },
+      setRopeCount(): void {},
+    }, () => [0, 0, 0]);
+    expect(checked).toBe(plan.length);
   });
 
   it('applyBlocks mirrors the same index/count contract for pulleys', () => {
@@ -189,11 +511,11 @@ describe('applyRiggingPlan (§V12 re-solve entry point)', () => {
     const placed: number[] = [];
     let count = -1;
     applyBlocks(sockets, {
-      setBlock(index, position) {
+      setBlock(index, position): void {
         expect(Number.isFinite(position.x)).toBe(true);
         placed.push(index);
       },
-      setBlockCount(n) {
+      setBlockCount(n): void {
         count = n;
       },
     }, () => [1, 2, 3]);

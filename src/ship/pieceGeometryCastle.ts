@@ -7,12 +7,17 @@
  */
 import * as THREE from 'three';
 import type { AABB } from './pieceTypes';
-import { hullEnvelope, hullSheer, type HullShape } from './pieceGeometryHull';
+import { hullHalfWidthAt, hullSheer, hullTopY, type HullShape } from './pieceGeometryHull';
 import { mergeNonIndexed } from './pieceGeometryShapes';
 
-/** deck half-width at ship-space z, slightly inset from the shell */
+/**
+ * Deck half-width at ship-space z, inset from the shell AT THE RAIL LINE.
+ * Using the plan envelope alone ignored tumblehome, so castle slabs and the
+ * cabin were wider than the topsides they sat on and their corners broke out
+ * through the hull as flat panels (§V22 stern critique).
+ */
 function halfWidthAt(z: number, s: HullShape, inset = 0.97): number {
-  return s.beamHalf * hullEnvelope(z, s) * inset;
+  return hullHalfWidthAt(z, hullTopY(z, s), s) * inset;
 }
 
 /** plan-taper-following slab between s.z0..s.z1, top at local y=0 */
@@ -97,7 +102,9 @@ export function buildCurvedRail(
   const pts: Array<[number, number, number]> = [];
   for (let i = 0; i <= stations; i++) {
     const z = s.z0 + ((s.z1 - s.z0) * i) / stations;
-    const x = s.side * (s.beamHalf * hullEnvelope(z, s) - railInset);
+    // rail stands inboard of the SHELL at the rail line (tumblehome-aware),
+    // not of the plan envelope — otherwise the run floats outboard of the hull
+    const x = s.side * Math.max(0.1, hullHalfWidthAt(z, hullTopY(z, s), s) - railInset);
     pts.push([x, hullSheer(z, s), z]);
   }
   const parts: THREE.BufferGeometry[] = [];

@@ -19,6 +19,7 @@ Web pirate combat demo (SoT-class water/sky/ropes/destruction) @ WebGPU three.js
 - app: `npm run dev` → Vite @ localhost, single page canvas.
 - gate: no WebGPU → static "WebGPU required" page, zero crash.
 - input: WASD/mouse sail+steer, camera orbit+follow, Space fire cannon, Tab debug panel.
+- input/freecam: `C` toggles free↔follow. Free: WASD fly view-axes, R/F rise/descend, Shift fast ×12, Ctrl slow ×0.1, mouse look, wheel = travel speed. Free swallows WASD/R/F in capture phase (⊥ leak to rudder); keyup never swallowed; Q/E sail trim still live. Free ⊥ ship-relative → no snap-back by construction; dives to `freeMinY` −300m.
 - debug: Tweakpane — ∀ params/* groups, weather presets (calm|swell|storm), perf HUD (fps, ms per pass).
 - file: `src/params/*.ts` — one module per system, typed, hot-reload.
 - state: `SimState` plain JSON-serializable object — ships, wind, time, seed, projectiles, damage.
@@ -57,6 +58,9 @@ V27: deck water = event-driven per talk 11:12: bow-immersion sensor (immersion+s
 V28: GPU safety: ∀ shader division ! floored divisor (`.max(ε)`); ∀ dispatch count & buffer size from sanitized construction-time ints; ∀ caller-fed uniform ! finite-guarded; dead/invisible particles ! zero-size (no opacity-0 rasterization). TSL Loop ! literal bounds.
 V29: compute-written storage buffer sampled by render ! SEPARATE read-only view (`storage(buf.value,type,count).toReadOnly()`). `.toReadOnly()` on the write-side node ⊥ — setAccess returns `this`, mutates the shared node, compute writes then compile vs a read-only binding & vanish SILENT (no error, no NaN, buffer stays 0). ∀ new compute→render buffer ! one browser readback proving non-zero.
 V30: ocean view = open 360° horizon, ≥ ~4km readable sea. Visible world-edge/cutoff ⊥, fog wall ⊥, "square of water" ⊥. Displacement/normal fades ! ride LOD, never end in a hard ring.
+V31: colors authored sRGB (hex/params) ! enter via `new THREE.Color(hex)` or `setRGB(r,g,b,THREE.SRGBColorSpace)`. Bare `setRGB(r,g,b)` / `new THREE.Color(r,g,b)` ⊥ — writes LINEAR working space w/ no transfer fn → ~2× too bright + desaturated, silently. Applies ∀ color: material, light, fog, uniform.
+V32: sky background ! camera-anchored @ infinity (`scene.backgroundNode`, depth off). Finite world-fixed dome ⊥ — ship travels unbounded, so any radius eventually clips vs camera.far (→ clear-color void cone) or is exited entirely (→ pale ball). Fog far ! saturate exactly where water ends: earlier = haze wall (V30), later = hard water/sky seam.
+V33: ship orientation single-owner (was §B.6, promoted after 2nd near-miss): sailing owns yaw ANGLE **and** yaw RATE (`angularVelocity[1]`) + heel-as-offset, and ! preserve buoyancy's pitch (Tait-Bryan decompose). Buoyancy owns pitch/roll dynamics & ⊥ write `angularVelocity[1]` at all — even decay/smear. Physically free: vertical probe forces give `cross(r,[0,f,0]).y ≡ 0`, flood-list torque y-free. Silent overwrite = helm's built-up turn bleeds away.
 
 ## §T TASKS
 id|status|task|cites
@@ -102,3 +106,5 @@ B5|2026-08-11|GPU wedge: spray life=0 → 0/0 NaN age → NaN-size additive quad
 B6|2026-08-11|ship never pitched: sailing recompose = pure yaw∘heel, erased buoyancy pitch 60×/s; fixed: Tait-Bryan decompose preserves pitch, heel=offset, yaw single-owner|-
 B7|2026-08-11|ships floated on launch-time sea: CpuOcean never rebuilt h0 on param change while GPU did → V8 divergence under weather|-
 B8|2026-08-11|`.toReadOnly()` mutates shared StorageBufferNode (setAccess→`this`, no clone) → render-side view downgraded the compute's WRITE binding → ropes invisible many sessions (mesh.count=768, descs uploaded, points all-zero) + whole spray pool frozen @ buffer-zero. Silent: no error, no NaN|V29
+B9|2026-08-11|sky/sun/hemi/fog all washed white-grey: `setRGB(r,g,b)` + `new THREE.Color(r,g,b)` write the LINEAR working space, so sRGB-authored params entered ~2× bright & desaturated. Fog inherited it → far water whited out too|V31
+B10|2026-08-11|phantom pale sphere + black void sky: dome = BackSide sphere r4200 fixed @ world origin, ship sails away → far wall crosses camera.far=5000 → clipped cone renders clear color; past 4200m camera exits dome entirely → far wall reads as one pale ball|V32

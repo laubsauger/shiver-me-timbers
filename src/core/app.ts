@@ -19,17 +19,23 @@ export class App {
     container.appendChild(renderer.domElement);
 
     this.scene = new THREE.Scene();
-    // background comes from the sky dome (T15); fog color synced by sky rig.
-    // Start far out — a near fog start reads as a "wall of haze" that kills
-    // ocean vision range (user report); the sky dome's haze band owns the
-    // horizon melt, fog only softens the last stretch before the dome.
-    this.scene.fog = new THREE.Fog(0x9cc8de, 900, 4200);
+    // Sky owns the background (scene.backgroundNode, pinned to the camera at
+    // infinity) AND this fog: createSky() overwrites near/far/color from
+    // skyParams before the first frame, so these literals are only the
+    // pre-sky defaults. Keep them in step with skyParams.fogNear/fogFar —
+    // fog must saturate exactly where the water ends: earlier is the "wall of
+    // haze" that kills vision range (§V30, user report), later leaves a hard
+    // water/sky seam at the horizon.
+    this.scene.fog = new THREE.Fog(0xa1e7ff, 700, 4500);
 
+    // far must exceed the ocean clipmap's horizon radius (§V30) — the sea disc
+    // now reaches ~4.6km, and the sky is camera-anchored at infinity (§V32) so
+    // far is purely a geometry budget, no longer a sky constraint.
     this.camera = new THREE.PerspectiveCamera(
       55,
       container.clientWidth / container.clientHeight,
       0.1,
-      5000,
+      8000,
     );
     this.camera.position.set(30, 12, 40);
 

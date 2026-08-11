@@ -111,3 +111,35 @@ export function daylight(elevation: number): number {
 export function lowSunWarmth(elevation: number): number {
   return smoothstep(-0.12, 0.0, elevation) * (1 - smoothstep(0.08, 0.4, elevation));
 }
+
+/** smallest gap we allow between two smoothstep edges (§V28: e0 == e1 → 0/0) */
+const MIN_EDGE_GAP = 1e-5;
+
+/**
+ * Cosine edges for the analytic sun disc, from its angular radius and soft
+ * edge in DEGREES. Returned as [outer, inner] for `smoothstep(outer, inner,
+ * dot(view, sun))` — cosine falls as the angle grows, so the OUTER edge is
+ * the SMALLER number and must stay strictly below the inner one. A zero or
+ * negative softness (param typed to 0) would collapse both edges onto each
+ * other and smoothstep divides by (e1 - e0) → NaN across the whole sky, so
+ * the gap is floored here rather than trusted from the panel (§V28).
+ */
+export function sunDiscCosines(sizeDeg: number, softnessDeg: number): [number, number] {
+  const size = Number.isFinite(sizeDeg) ? Math.max(0, sizeDeg) : 0;
+  const soft = Number.isFinite(softnessDeg) ? Math.max(0, softnessDeg) : 0;
+  const inner = Math.cos((size * Math.PI) / 180);
+  const outer = Math.cos(((size + soft) * Math.PI) / 180);
+  return [Math.min(outer, inner - MIN_EDGE_GAP), inner];
+}
+
+/**
+ * Sanitized linear-fog range in meters. three's fog factor is
+ * (far - depth) / (far - near) — equal or inverted endpoints divide by zero
+ * and NaN out every fogged fragment, so the ordering is enforced here (§V28).
+ * Callers keep authoring near/far freely in the panel.
+ */
+export function fogRange(near: number, far: number): [number, number] {
+  const n = Number.isFinite(near) ? Math.max(0, near) : 0;
+  const f = Number.isFinite(far) ? far : n + 1;
+  return [n, Math.max(f, n + 1)];
+}

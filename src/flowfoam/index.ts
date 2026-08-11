@@ -84,12 +84,23 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
     },
 
     /**
-     * Analytic ship wake (bow Kelvin V + stern band, wakeInjection.ts):
-     * call per tick with ship state; bow/stern offsets + beam come from the
-     * ship blueprint AABB (main.ts). Wake foam is injected near the hull and
-     * trails naturally via advection + decay.
+     * Ship wake state (wakeInjection.ts): call per tick with ship state;
+     * bow/stern offsets + beam come from the ship blueprint AABB (main.ts).
+     * The module records the cutwater's WORLD-SPACE track internally, so a
+     * turn leaves a curved trail behind instead of re-pointing the whole wake
+     * (wakeTrack.ts). No extra inputs needed — same signature as before.
+     *
+     * `speed` should be speed OVER WATER at the hull: it drives the bow mound
+     * amplitude (via a lag) and every feature's intensity. If it ever becomes
+     * available, true speed-through-water (including current) would be a
+     * strictly better feed than |velocity|.
      */
     setShip: wake.setShip,
+
+    /** debug/tests: the live world-space cutwater history (index 0 = newest) */
+    get wakeTrack() {
+      return wake.trackSamples;
+    },
 
     /** advance the sim one fixed tick (§V2): pushes live params, runs computes */
     update(renderer: THREE.WebGPURenderer, dt: number): void {
@@ -101,6 +112,8 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       flowU.uBaseSpeed.value = p.baseFlowSpeed;
       flowU.uCurlStep.value = p.curlStep;
       uEdgeFade.value = p.edgeFade;
+      // age + extend the world-space cutwater track BEFORE the computes read it
+      wake.advance(dt);
       wake.pushParams();
       acc.step(renderer, dt);
     },

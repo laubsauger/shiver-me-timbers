@@ -7,37 +7,52 @@
  * (SpriteNodeMaterial: white, radial falloff, alpha fades with age,
  * additive blend, §V23 functional mix). Emitters add only their spawn pass.
  *
- * Buffers: posAge [xyz = world pos, w = age], velSeed [xyz = vel, w = seed].
+ * Buffers: posAge [xyz = world pos, w = age], velSize [xyz = vel, w = size
+ * multiplier 0..1 chosen at spawn — how big a puff this particle is, e.g. a
+ * bow slamming a swell throws a full sheet while cruising throws mist].
  * Dead = age ≥ life (init writes DEAD_AGE, far beyond any life slider).
+ * (The per-particle hash seed is NOT stored: it is fract((i+1)·φ), pure in
+ * instanceIndex, so any pass that needs it recomputes it — sprayMath.goldenSeed.)
  */
 import * as THREE from 'three/webgpu';
 import {
   Fn,
   If,
+  cameraPosition,
+  cameraViewMatrix,
   float,
   instanceIndex,
   instancedArray,
   mix,
   select,
+  smoothstep,
   storage,
   uniform,
   uv,
+  vec2,
   vec3,
   vec4,
 } from 'three/tsl';
 import { SIM_DT } from '../core/loop';
 import { sprayParams } from '../params/spray';
+import { foamTintNode } from './foamShading';
 import { DEAD_AGE, sanitizePoolCount } from './sprayMath';
 
-export function createSprayPool(rawCount: number) {
+export interface SprayPoolOptions {
+  /** multiplies sizeMin/sizeMax for this pool (bow sheets > crest mist) */
+  sizeScale?: number;
+}
+
+export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}) {
   // counts feed buffer sizes + dispatch counts at construction — sanitize
   const count = sanitizePoolCount(rawCount, 1024);
   const posAge = instancedArray(count, 'vec4');
-  const velSeed = instancedArray(count, 'vec4');
-  // separate read-only VIEW for the sprite vertex stage: posAge.toReadOnly()
+  const velSize = instancedArray(count, 'vec4');
+  // separate read-only VIEWS for the sprite vertex stage: posAge.toReadOnly()
   // would mutate the shared node and silently drop every compute write to it
   // (init + physics), freezing the whole pool at buffer-zero — see §B.8
   const posAgeRead = storage(posAge.value, 'vec4', count).toReadOnly();
+  const velSizeRead = storage(velSize.value, 'vec4', count).toReadOnly();
 
   const uLife = uniform(sprayParams.life);
   const uGravity = uniform(sprayParams.gravity);
@@ -45,43 +60,95 @@ export function createSprayPool(rawCount: number) {
   const uSizeMin = uniform(sprayParams.sizeMin);
   const uSizeMax = uniform(sprayParams.sizeMax);
   const uOpacity = uniform(sprayParams.opacity);
+  const uSoftness = uniform(sprayParams.softness);
+  const uStreak = uniform(sprayParams.streak);
+  const uStreakRef = uniform(sprayParams.streakRefSpeed);
+  const uFadeNear = uniform(sprayParams.fadeNear);
+  const uFadeFar = uniform(sprayParams.fadeFar);
+  const sizeScale = Number.isFinite(options.sizeScale ?? 1)
+    ? Math.max(0, options.sizeScale ?? 1)
+    : 1;
 
   // whole pool starts dead far below the surface
   const initPass = Fn(() => {
     posAge.element(instanceIndex).assign(vec4(0, -1000, 0, DEAD_AGE));
-    velSeed.element(instanceIndex).assign(vec4(0, 0, 0, 0));
+    velSize.element(instanceIndex).assign(vec4(0, 0, 0, 0));
   })().compute(count);
 
   // physics update — CPU mirror: sprayMath.stepParticle
   const updatePass = Fn(() => {
     const pa = posAge.element(instanceIndex);
-    const vs = velSeed.element(instanceIndex);
+    const vs = velSize.element(instanceIndex);
     If(pa.w.lessThan(uLife), () => {
       const vel = vec3(vs.x, vs.y.sub(uGravity.mul(SIM_DT)), vs.z)
         .mul(uDragFactor)
         .toVar();
-      velSeed.element(instanceIndex).assign(vec4(vel, vs.w));
+      velSize.element(instanceIndex).assign(vec4(vel, vs.w));
       posAge
         .element(instanceIndex)
         .assign(vec4(pa.xyz.add(vel.mul(SIM_DT)), pa.w.add(SIM_DT)));
     });
   })().compute(count);
 
-  // render: instanced camera-facing sprites; dead → ageN = 1 → alpha 0
+  // render: instanced camera-facing sprites; dead → ageN = 1 → zero size
   const material = new THREE.SpriteNodeMaterial();
   const el = posAgeRead.element(instanceIndex);
+  const vel = velSizeRead.element(instanceIndex).xyz;
   // divisor floor: uLife is CPU-clamped too, but 0/0 here would be a NaN
   // scale → screen-covering quad × pool size = fill-rate wedge. Never risk it.
   const ageN = el.w.div(uLife.max(1e-6)).clamp(0, 1);
   material.positionNode = el.xyz;
-  // dead particles collapse to zero size: a degenerate quad rasterizes no
-  // fragments, so the idle pool costs no fill rate (alpha-0 quads still would)
-  const size = mix(uSizeMin, uSizeMax, ageN); // puffs grow as they fly
-  material.scaleNode = select(ageN.greaterThanEqual(1), float(0), size);
+
+  // distance falloff (user critique: dots stippled out to the horizon).
+  // Particles are a NEAR-FIELD effect — far crests carry painted foam, not
+  // sprites. Inverted smoothstep, functional form only (§V23).
+  const camDist = el.xyz.sub(cameraPosition).length();
+  const distFade = smoothstep(uFadeNear, uFadeFar.max(uFadeNear.add(1)), camDist)
+    .oneMinus();
+
+  // dead OR fully faded particles collapse to zero size: a degenerate quad
+  // rasterizes no fragments, so the idle pool costs no fill rate (alpha-0
+  // quads still would — §V28/§B.5)
+  // per-particle size multiplier chosen at spawn (bow sheet vs cruise mist),
+  // clamped so a garbage buffer value can never inflate a quad (§V28)
+  const sizeMul = velSizeRead.element(instanceIndex).w.clamp(0, 1);
+  const size = mix(uSizeMin, uSizeMax, ageN).mul(sizeScale).mul(sizeMul);
+  const hidden = ageN.greaterThanEqual(1).or(distFade.lessThan(0.01));
+  material.scaleNode = select(hidden, float(0), size);
+
+  // motion streak: squash the radial falloff ACROSS the screen-space velocity
+  // so fast droplets read as short dashes of mist, not bouncy balls. The
+  // sprite quad is built in view space, so the view-space velocity direction
+  // is the quad's own axis frame.
   const q = uv().mul(2).sub(1);
-  const shape = q.dot(q).oneMinus().max(0); // soft round falloff
-  material.colorNode = vec3(1);
-  material.opacityNode = shape.pow(1.5).mul(ageN.oneMinus()).mul(uOpacity);
+  const viewVel = cameraViewMatrix.mul(vec4(vel, 0)).xy;
+  const viewSpeed = viewVel.length().toVar();
+  // a zero-length direction would make BOTH quad axes read 0 → shape = 1 over
+  // the whole quad → a hard bright SQUARE at additive blend (the §B.5 class
+  // of failure). Fall back to a fixed axis; the streak factor is ~0 there.
+  const dir = select(
+    viewSpeed.greaterThan(1e-4),
+    viewVel.div(viewSpeed.max(1e-4)), // floored divisor (§V28)
+    vec2(1, 0),
+  );
+  const along = q.dot(dir);
+  const across = q.dot(vec2(dir.y.negate(), dir.x));
+  const streakN = smoothstep(float(0), uStreakRef.max(1e-3), vel.length());
+  const squash = mix(float(1), uStreak.max(1), streakN);
+  const r2 = along.mul(along).add(across.mul(squash).pow(2));
+  // pow of a clamped-non-negative base: softness ≥ 1 gives a mist-soft edge
+  const shape = r2.oneMinus().max(0).pow(uSoftness.max(1));
+
+  // birth fade-in kills the pop of a sprite appearing at full size/alpha
+  const born = smoothstep(float(0), float(0.12), ageN);
+  const decayN = ageN.oneMinus().pow(1.4);
+  material.colorNode = foamTintNode(); // warm-white, shared with sea foam
+  material.opacityNode = shape
+    .mul(born)
+    .mul(decayN)
+    .mul(distFade)
+    .mul(uOpacity)
+    .clamp(0, 1);
   material.transparent = true;
   material.blending = THREE.AdditiveBlending;
   material.depthWrite = false;
@@ -102,7 +169,7 @@ export function createSprayPool(rawCount: number) {
 
   return {
     posAge,
-    velSeed,
+    velSize,
     mesh,
     /** sanitized pool size — emitters must size their spawn passes with THIS */
     count,
@@ -117,6 +184,14 @@ export function createSprayPool(rawCount: number) {
       uSizeMin.value = fin(sprayParams.sizeMin, 0);
       uSizeMax.value = fin(sprayParams.sizeMax, 0);
       uOpacity.value = fin(sprayParams.opacity, 0);
+      uSoftness.value = Math.max(1, fin(sprayParams.softness, 1));
+      uStreak.value = Math.max(1, fin(sprayParams.streak, 1));
+      uStreakRef.value = Math.max(1e-3, fin(sprayParams.streakRefSpeed, 1));
+      uFadeNear.value = Math.max(0, fin(sprayParams.fadeNear, 40));
+      uFadeFar.value = Math.max(
+        uFadeNear.value + 1,
+        fin(sprayParams.fadeFar, 90),
+      );
       if (!initialized) {
         run(renderer, initPass);
         initialized = true;

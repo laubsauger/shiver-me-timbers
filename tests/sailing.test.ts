@@ -154,6 +154,54 @@ describe('force model', () => {
     expect(Math.abs(speed - prevSpeed)).toBeLessThan(1e-6); // settled
   });
 
+  it('yaw rate BUILDS over seconds under sustained rudder — no snap', () => {
+    // WHY (user, sailing live): "the movements are a little bit too quick —
+    // we're not really respecting the inertia we've built". A yaw rate
+    // assigned straight from the rudder makes a 200-ton hull pivot like a
+    // cursor. It must spin up against its own rotational inertia.
+    const ship = makeShip(Math.PI / 2);
+    for (let i = 0; i < 1200; i++) stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
+    const helm = { ...neutralInput(), rudder: 1 };
+    const rateAfter = (seconds: number): number => {
+      for (let i = 0; i < Math.round(seconds / SIM_DT); i++) {
+        stepShipSailing(ship, helm, WIND, SIM_DT);
+      }
+      return ship.angularVelocity[1];
+    };
+    const quarterSec = rateAfter(0.25);
+    const oneSec = rateAfter(0.75);
+    const settled = rateAfter(11);
+    // a snap-to-rudder helm would already be at the steady rate in 1 tick
+    expect(quarterSec).toBeLessThan(settled * 0.25);
+    expect(oneSec).toBeGreaterThan(quarterSec * 2); // still climbing
+    expect(oneSec).toBeLessThan(settled * 0.65);
+    expect(settled).toBeGreaterThan(0); // and it does get there
+  });
+
+  it('a centred helm keeps swinging — the turn carries its momentum', () => {
+    // WHY: the flip side of the build-up. Releasing the wheel mid-turn must
+    // not stop the swing dead, or every course correction reads weightless.
+    const ship = makeShip(Math.PI / 2);
+    const helm = { ...neutralInput(), rudder: 1 };
+    for (let i = 0; i < 1200; i++) stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
+    for (let i = 0; i < 600; i++) stepShipSailing(ship, helm, WIND, SIM_DT);
+    const rateAtRelease = ship.angularVelocity[1];
+    const yawAtRelease = yawOf(ship.quaternion);
+    let carried = 0;
+    let prev = yawAtRelease;
+    for (let i = 0; i < 300; i++) {
+      stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
+      const y = yawOf(ship.quaternion);
+      carried += wrapPi(y - prev);
+      prev = y;
+    }
+    expect(rateAtRelease).toBeGreaterThan(0.3);
+    // keeps turning tens of degrees after the helm is centred...
+    expect(carried).toBeGreaterThan(0.5);
+    // ...but the swing does wind down, it is a lag and not a flywheel
+    expect(ship.angularVelocity[1]).toBeLessThan(rateAtRelease * 0.2);
+  });
+
   it('sailing never touches the vertical channel (buoyancy contract)', () => {
     const ship = makeShip(Math.PI / 2);
     ship.position[1] = 1.23;
@@ -228,6 +276,30 @@ describe('orientation contract with buoyancy (§B.6)', () => {
     const maxPitchDeg = (maxPitch * 180) / Math.PI;
     expect(maxPitchDeg).toBeGreaterThan(0.2); // waves actually pitch the bow
     expect(maxPitchDeg).toBeLessThan(15); // and nothing double-adds/runs away
+  });
+
+  it('buoyancy leaves the yaw RATE alone — sailing stores its turn there', () => {
+    // WHY §B.6 (extended): the built-up turn rate now lives in
+    // angularVelocity[1] across ticks. Buoyancy used to rewrite that slot
+    // every tick (angularDamping decay + roll/pitch smearing while heeled),
+    // which would quietly bleed the helm's momentum away — a ship that
+    // refuses to hold a turn, with nothing in the sailing code to blame.
+    const ocean = new CpuOcean(7);
+    const ship = makeShip(Math.PI / 2);
+    const helm = { ...neutralInput(), rudder: 1 };
+    for (let i = 0; i < 900; i++) {
+      const t = (i + 1) * SIM_DT;
+      ocean.update(t);
+      stepShipSailing(ship, helm, WIND, SIM_DT);
+      stepShipBuoyancy(ship, ocean, SIM_DT);
+    }
+    // rolling in a seaway must not change the answer: the rate is whatever
+    // sailing set it to on the last tick
+    const beforeBuoyancy = ship.angularVelocity[1];
+    ocean.update(901 * SIM_DT);
+    stepShipBuoyancy(ship, ocean, SIM_DT);
+    expect(ship.angularVelocity[1]).toBe(beforeBuoyancy);
+    expect(Math.abs(beforeBuoyancy)).toBeGreaterThan(0.3); // a real turn
   });
 });
 

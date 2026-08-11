@@ -1,5 +1,6 @@
 /**
- * Tri-planar plank wood + sail cloth TSL builders (T8 wood PBR, §V16).
+ * Tri-planar plank wood TSL builder (T8 wood PBR, §V16). Sail cloth moved to
+ * sailMaterial.ts when it grew wind dynamics (file cap, §C).
  * Sampled in PIECE-LOCAL space (positionLocal/normalLocal) so grain sticks
  * to each piece while the ship moves and rolls; no UVs needed. fbm and
  * tri-planar helpers come from src/terrain/noise.ts — not duplicated.
@@ -12,17 +13,13 @@ import {
   fract,
   mix,
   normalLocal,
-  normalWorld,
   positionLocal,
-  sin,
   smoothstep,
   step,
   uniform,
-  uv,
-  vec2,
   vec3,
 } from 'three/tsl';
-import { fbm2, hash2, triplanarFbm } from '../terrain/noise';
+import { triplanarFbm } from '../terrain/noise';
 import { shipMaterialParams, type ShipMaterialParams } from '../params/ship';
 
 export interface WoodTones {
@@ -37,18 +34,6 @@ export interface ShipMaterialHandle {
   /** re-read live params (Tweakpane mutates them in place, §V16) */
   refresh(): void;
 }
-
-/** shared sun direction for sail backlight — app updates once per frame */
-export const uShipSunDirection = /*@__PURE__*/ uniform(
-  new THREE.Vector3(0.4, 0.75, 0.3).normalize(),
-);
-
-/** shared clock for sail flutter — app sets to sim time once per frame
- *  (windSway.ts pattern: uniforms driven from outside, no Date.now in shader) */
-export const uShipTime = /*@__PURE__*/ uniform(0);
-
-/** wind strength multiplier for sail motion (0 becalmed .. ~1 stiff) */
-export const uShipWindStrength = /*@__PURE__*/ uniform(1);
 
 export function createWoodMaterial(
   tones: WoodTones,
@@ -109,91 +94,6 @@ export function createWoodMaterial(
       uWaleFrequency.value = p.waleFrequency;
       uWaleRatio.value = p.waleRatio;
       uWaleDarken.value = p.waleDarken;
-    },
-  };
-}
-
-/** off-white weathered canvas w/ warp+weft noise and backlit translucency
- *  fake (emissive when the sun is behind the cloth, palmMaterial-style). */
-export function createSailClothMaterial(
-  p: ShipMaterialParams = shipMaterialParams,
-): ShipMaterialHandle {
-  const material = new THREE.MeshStandardNodeMaterial();
-  material.side = THREE.DoubleSide; // sails are single surfaces
-  material.metalness = 0;
-  material.roughness = 0.95;
-
-  const uLight = uniform(new THREE.Color(p.sailLight));
-  const uDark = uniform(new THREE.Color(p.sailDark));
-  const uWeaveScale = uniform(p.sailWeaveScale);
-  const uBacklitColor = uniform(new THREE.Color(p.sailBacklitColor));
-  const uBacklitStrength = uniform(p.sailBacklitStrength);
-  const uFlutterAmp = uniform(p.sailFlutterAmp);
-  const uFlutterFreq = uniform(p.sailFlutterFreq);
-  const uRippleCount = uniform(p.sailRippleCount);
-  const uPanelCount = uniform(p.sailPanelCount);
-  const uSeamDarken = uniform(p.sailSeamDarken);
-  const uAmbientLift = uniform(p.sailAmbientLift);
-  const uStain = uniform(p.sailStainStrength);
-
-  // wind luff: ripples travel across the cloth; the head (uv.y=1, at the
-  // yard) stays pinned, the free foot rides widest — windSway.ts pattern
-  const cloth = uv();
-  const footWeight = cloth.y.oneMinus();
-  const ripplePhase = uShipTime
-    .mul(uFlutterFreq)
-    .add(cloth.x.add(cloth.y.mul(0.35)).mul(uRippleCount.mul(Math.PI * 2)));
-  const ripple = sin(ripplePhase)
-    .mul(uFlutterAmp)
-    .mul(uShipWindStrength)
-    .mul(footWeight);
-  material.positionNode = positionLocal.add(vec3(0, 0, 1).mul(ripple));
-
-  // warp/weft: two crossed fbm bands in the sail's local plane (sails are
-  // built in local XY), summed for a woven shimmer
-  const warp = fbm2(positionLocal.xy.mul(uWeaveScale).mul(vec3(1, 6, 0).xy), 2);
-  const weft = fbm2(positionLocal.xy.mul(uWeaveScale).mul(vec3(6, 1, 0).xy), 2);
-  const weave = warp.add(weft).mul(0.5);
-  // weathered canvas: broad stain mottling + per-panel cloth tone shift
-  const stain = fbm2(positionLocal.xy.mul(0.35), 3);
-  const panelTone = hash2(vec2(cloth.x.mul(uPanelCount).floor(), 3.7));
-  const base = mix(uDark, uLight, weave)
-    .mul(mix(float(1).sub(uStain), float(1), stain))
-    .mul(mix(float(0.92), float(1.03), panelTone));
-
-  // cloth structure: vertical panel seams + bolt-rope hem on the free
-  // edges (leeches u≈0/1, foot v≈0 — the head hangs at the yard)
-  const pf = fract(cloth.x.mul(uPanelCount));
-  const panelMask = smoothstep(float(0), float(0.045), pf.min(pf.oneMinus()));
-  const hemMask = smoothstep(
-    float(0),
-    float(0.03),
-    cloth.x.min(cloth.x.oneMinus()).min(cloth.y),
-  );
-  material.colorNode = mix(base.mul(uSeamDarken), base, panelMask.min(hemMask));
-
-  // translucency fake (sun behind cloth glows through) + ambient floor so
-  // unlit faces read as canvas, never dead black (§V22 review)
-  const backlit = normalWorld.dot(uShipSunDirection).min(0).negate();
-  material.emissiveNode = uBacklitColor.mul(
-    backlit.mul(uBacklitStrength).add(uAmbientLift),
-  );
-
-  return {
-    material,
-    refresh(): void {
-      uLight.value.set(p.sailLight);
-      uDark.value.set(p.sailDark);
-      uWeaveScale.value = p.sailWeaveScale;
-      uBacklitColor.value.set(p.sailBacklitColor);
-      uBacklitStrength.value = p.sailBacklitStrength;
-      uFlutterAmp.value = p.sailFlutterAmp;
-      uFlutterFreq.value = p.sailFlutterFreq;
-      uRippleCount.value = p.sailRippleCount;
-      uPanelCount.value = p.sailPanelCount;
-      uSeamDarken.value = p.sailSeamDarken;
-      uAmbientLift.value = p.sailAmbientLift;
-      uStain.value = p.sailStainStrength;
     },
   };
 }

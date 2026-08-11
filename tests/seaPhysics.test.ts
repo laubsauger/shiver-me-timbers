@@ -324,6 +324,142 @@ describe('feel targets: roll period (calm-water free decay)', () => {
   });
 });
 
+/**
+ * Analytic monochromatic deep-water sea — one wavelength at a time, which
+ * an FFT spectrum can never give us. `dir` is the travel direction in the
+ * xz plane: [0,1] = head/following sea (crests athwartships), [1,0] = beam
+ * sea (crests along the hull). Satisfies OceanHeightField structurally.
+ */
+function sineSea(amp: number, lambda: number, dir: [number, number]) {
+  const k = (2 * Math.PI) / lambda;
+  const omega = Math.sqrt(9.81 * k);
+  let t = 0;
+  return {
+    period: (2 * Math.PI) / omega,
+    get currentTime(): number {
+      return t;
+    },
+    update(time: number): void {
+      t = time;
+    },
+    heightAt(x: number, z: number, time: number): number {
+      return amp * Math.sin(k * (dir[0] * x + dir[1] * z) - omega * time);
+    },
+  };
+}
+
+/** peak-to-peak/2 of ship y, pitch and roll over the settled second half */
+function rideIn(
+  sea: ReturnType<typeof sineSea>,
+  sp: SeaPhysicsParams,
+  amp: number,
+): { heave: number; pitchDeg: number; rollDeg: number } {
+  const ship = makeShip();
+  ship.position[1] = equilibriumY(sp);
+  const ticks = Math.round(Math.max(40, sea.period * 12) / DT);
+  let hi = -Infinity;
+  let lo = Infinity;
+  let pitch = 0;
+  let roll = 0;
+  for (let i = 0; i < ticks; i++) {
+    sea.update((i + 1) * DT);
+    stepShipBuoyancy(ship, sea, DT, sp);
+    if (i < ticks / 2) continue;
+    hi = Math.max(hi, ship.position[1]);
+    lo = Math.min(lo, ship.position[1]);
+    pitch = Math.max(pitch, Math.abs(pitchOf(ship)));
+    roll = Math.max(roll, Math.abs(rollOf(ship)));
+  }
+  return {
+    heave: (hi - lo) / 2 / amp,
+    pitchDeg: (pitch * 180) / Math.PI,
+    rollDeg: (roll * 180) / Math.PI,
+  };
+}
+
+describe('feel targets: a 35 m hull filters the sea by WAVELENGTH', () => {
+  // WHY (user, sailing live): "movements are a little bit too quick — we're
+  // not really respecting the inertia. Small waves up and down can be
+  // immediately shifted." A probe reading one point of the surface makes
+  // the ship a cork on a stick: every ripple shorter than the hull shoves
+  // it at nearly full strength. Real hulls integrate pressure over their
+  // footprint AND lose short-wave pressure with depth, so chop passes under
+  // them. These tests pin that selectivity — they fail the moment the hull
+  // goes back to point-sampling (hullFootprint* → 0).
+  const sp = testSeaParams();
+  const amp = 1;
+
+  it('ripples barely lift the hull while swell of equal height carries it', () => {
+    const chop = rideIn(sineSea(amp, 8, [0, 1]), sp, amp);
+    const swell = rideIn(sineSea(amp, 150, [0, 1]), sp, amp);
+    // 8 m chop against a 35 m ship: essentially invisible in heave
+    expect(chop.heave).toBeLessThan(0.1);
+    // 150 m swell: the ship rides it, as a ship must (§V.8 — it may not
+    // sit still while a visible swell passes THROUGH the hull)
+    expect(swell.heave).toBeGreaterThan(0.8);
+    expect(swell.heave).toBeGreaterThan(chop.heave * 8);
+  });
+
+  it('ripples barely pitch the hull while swell pitches it degrees', () => {
+    const chop = rideIn(sineSea(amp, 8, [0, 1]), sp, amp);
+    const swell = rideIn(sineSea(amp, 150, [0, 1]), sp, amp);
+    expect(chop.pitchDeg).toBeLessThan(0.2);
+    expect(swell.pitchDeg).toBeGreaterThan(1.5);
+  });
+
+  it('short BEAM chop barely rolls the hull, beam swell rolls it properly', () => {
+    // the fore-aft footprint can do nothing about crests running parallel
+    // to the hull — that is what hullFootprintBeam is for
+    const chop = rideIn(sineSea(amp, 8, [1, 0]), sp, amp);
+    const swell = rideIn(sineSea(amp, 60, [1, 0]), sp, amp);
+    expect(chop.rollDeg).toBeLessThan(0.5);
+    expect(swell.rollDeg).toBeGreaterThan(4);
+  });
+
+  it('point-sampling the surface WOULD make it a cork (the guard is real)', () => {
+    // fail loud: if this ever stops holding, the sea got so long-period
+    // that the tests above pass for free and no longer defend anything
+    const cork = testSeaParams({ hullFootprintLength: 0, hullFootprintBeam: 0 });
+    const chop = rideIn(sineSea(amp, 8, [0, 1]), cork, amp);
+    expect(chop.heave).toBeGreaterThan(0.3);
+  });
+});
+
+describe('feel targets: added mass (a heaving hull drags water with it)', () => {
+  it('stretches the heave period ≈√(1+a) without changing where it floats', () => {
+    // WHY: draft is locked by spring/mass (ω=√(g/draft)≈4.7 rad/s), so no
+    // spring tuning can slow the bob without floating the ship higher or
+    // drowning the deck. Added mass is the one honest knob: entrained
+    // water is inertia, not weight.
+    const measure = (a: number): { period: number; rest: number } => {
+      const sp = testSeaParams({ addedMassHeave: a, buoyancyDamping: 0 });
+      const ocean = new CpuOcean(1, testOceanParams({ amplitude: 0 }), sp);
+      ocean.update(0);
+      const ship = makeShip();
+      ship.position[1] = equilibriumY(sp) + 0.3; // pluck it, let it ring
+      const crossings: number[] = [];
+      let prev = ship.position[1] - equilibriumY(sp);
+      for (let i = 0; i < 1200; i++) {
+        stepShipBuoyancy(ship, ocean, DT, sp);
+        const d = ship.position[1] - equilibriumY(sp);
+        if (prev > 0 !== d > 0) crossings.push(i * DT);
+        prev = d;
+      }
+      const half =
+        (crossings[crossings.length - 1] - crossings[0]) / (crossings.length - 1);
+      return { period: 2 * half, rest: equilibriumY(sp) };
+    };
+    const cork = measure(0);
+    const heavy = measure(seaPhysicsParams.addedMassHeave);
+    expect(cork.period).toBeGreaterThan(1.1);
+    expect(cork.period).toBeLessThan(1.6); // √(g/draft), the cork bound
+    const expected = Math.sqrt(1 + seaPhysicsParams.addedMassHeave);
+    expect(heavy.period / cork.period).toBeCloseTo(expected, 1);
+    // and it still floats at exactly the same draft (§V.8 ride height)
+    expect(heavy.rest).toBeCloseTo(cork.rest, 9);
+  });
+});
+
 describe('live spectrum-param changes (§V.8: weather transitions re-shape the sea)', () => {
   it('rebuilds h0 after amplitude changes, matching a fresh mirror exactly', () => {
     // WHY: weather presets lerp oceanParams live and the GPU regenerates

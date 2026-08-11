@@ -9,13 +9,13 @@ import * as THREE from 'three/webgpu';
 import type { PieceKind } from './pieceTypes';
 import { shipMaterialParams } from '../params/ship';
 import {
-  createSailClothMaterial,
   createWoodMaterial,
   type ShipMaterialHandle,
   type WoodTones,
 } from './woodMaterial';
+import { createSailClothMaterial } from './sailMaterial';
 
-export { uShipSunDirection, uShipTime, uShipWindStrength } from './woodMaterial';
+export { uShipSunDirection } from './sailMaterial';
 
 type Family = 'hull' | 'deck' | 'spar' | 'trim' | 'sail';
 
@@ -79,18 +79,25 @@ function tracked(handle: ShipMaterialHandle, name: string): THREE.MeshStandardNo
 
 /** open shells (lofted hull strips, lookout basket) render both faces so
  *  looking inside never shows culled holes (§V22 critique) */
-const OPEN_SHELL_KINDS = new Set<PieceKind>(['hull-section', 'bow', 'crow-nest']);
+const OPEN_SHELL_KINDS = new Set<PieceKind>([
+  'hull-section',
+  'bow',
+  'transom',
+  'crow-nest',
+]);
 
 export function createPieceMaterial(kind: PieceKind): THREE.MeshStandardNodeMaterial {
   const family = FAMILY_OF[kind];
   const handle =
     family === 'sail' ? createSailClothMaterial() : createWoodMaterial(woodTones(family));
   if (OPEN_SHELL_KINDS.has(kind)) handle.material.side = THREE.DoubleSide;
-  // double-sided shells + thin cloth: cast shadows from front faces only,
-  // otherwise coplanar back faces self-shadow (acne) under the sun map
-  if (OPEN_SHELL_KINDS.has(kind) || family === 'sail') {
-    handle.material.shadowSide = THREE.FrontSide;
-  }
+  // double-sided hull shells: cast from front faces only, otherwise coplanar
+  // back faces self-shadow (acne) under the sun map
+  if (OPEN_SHELL_KINDS.has(kind)) handle.material.shadowSide = THREE.FrontSide;
+  // sails must cast from BOTH faces: front-face-only culled the whole sail
+  // out of the shadow map whenever the sun was behind it, so sails never
+  // shadowed the deck or each other (§V22 self-shadow critique)
+  if (family === 'sail') handle.material.shadowSide = THREE.DoubleSide;
   return tracked(handle, `piece-${kind}`);
 }
 

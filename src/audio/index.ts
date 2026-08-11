@@ -1,34 +1,64 @@
 /**
- * Procedural audio system facade (T21). main.ts creates one AudioSystem and
- * calls update() every render frame with {windSpeed: state.wind.speed,
- * weather: state.weather} pulled from SimState — audio only READS sim data,
- * never writes it (§V3 one-way flow). Everything is synthesized at runtime:
- * zero audio asset files. Volume keys match §I settings (master/sfx/
- * ambience) so the settings store can call setVolumes directly.
+ * Audio system facade (T21). One entry point for main.ts: create it, hand it
+ * a frame of render-side state every rAF, and forget about it.
  *
- * Browsers gate audio behind a user gesture: createAudio() auto-attaches a
- * one-time pointerdown/keydown unlock; play()/update() are safe no-ops until
- * the context is running.
+ *   assets/audio/sfx  ──lazy, sequential, silent-fail──┐
+ *                                                      ▼
+ *   bed.ts      layered ambience (ocean/wind/sailing) → ambience bus ┐
+ *   shipAudio   panners: bow, stern, hull, rigging, 3 masts ─────────┼→ master
+ *   oneshots    procedural cannon/hull-hit/creak ──────→ sfx bus ────┘
+ *
+ * §V3: every value read here comes from SimState or the render transforms
+ * derived from it; audio writes nothing back and cannot affect determinism.
+ * §V17: per frame this is a handful of AudioParam writes and pure math — all
+ * decoding happens off the main thread inside decodeAudioData.
+ *
+ * Failure policy: audio may never take the renderer down. No context, no
+ * gesture yet, a 404 on a sample, a decode error — every one of those paths
+ * ends in a silent no-op, and if the samples never arrive the old procedural
+ * ambience takes over so the world is not dead quiet.
  */
 import { createAmbience, type Ambience, type AmbienceEnv } from './ambience';
 import { attachGestureResume, createEngine, type Volumes } from './engine';
 import { cannonBoom, creak, hullHit, splash } from './oneshots';
+import { createSampleLoader, type SampleLoader } from './assets';
+import { createBed, type AmbienceBed } from './bed';
+import { applyListenerPose, listenerPoseFromMatrix, type HasWorldMatrix } from './emitters';
+import { createShipAudio, type ShipAudio, type ShipAudioInput } from './shipAudio';
+import type { Weather } from './mix';
 import { createRng, type Rng } from '../state/rng';
 
 export type { AmbienceEnv } from './ambience';
 export type { Volumes } from './engine';
+export type { ShipAudioInput } from './shipAudio';
+export type { HasWorldMatrix } from './emitters';
+export { attachAudioSettings } from './settingsBridge';
 
 export type OneShotName = 'cannonBoom' | 'splash' | 'creak' | 'hullHit';
 
 export interface PlayOpts {
-  /** seeded rng for randomized one-shots (creak); defaults to an internal seeded stream */
+  /** seeded rng for randomized one-shots (creak); defaults to an internal stream */
   rng?: Rng;
+}
+
+/** everything the audio system wants from one render frame */
+export interface AudioFrame {
+  /** render frame dt in seconds (clamped internally) */
+  dt: number;
+  /** the render camera — drives the listener, so turning it turns the field */
+  camera?: HasWorldMatrix | null;
+  wind: { speed: number; direction: number };
+  weather: Weather;
+  /** player ship pose/state; null before the ship exists */
+  ship?: ShipAudioInput | null;
 }
 
 export interface AudioSystem {
   /** create/resume the AudioContext (also fired by the auto gesture unlock) */
   resume(): Promise<void>;
-  /** call once per frame with wind/weather read from SimState */
+  /** per render frame */
+  update(frame: AudioFrame): void;
+  /** legacy shape kept alive so existing wiring keeps working */
   update(env: AmbienceEnv, dt: number): void;
   play(name: OneShotName, opts?: PlayOpts): void;
   setVolumes(v: Partial<Volumes>): void;
@@ -36,11 +66,20 @@ export interface AudioSystem {
 }
 
 const DEFAULT_RNG_SEED = 0xc0ffee;
+const MAX_DT = 0.25;
+
+function isFrame(a: AudioFrame | AmbienceEnv): a is AudioFrame {
+  return (a as AudioFrame).wind !== undefined;
+}
 
 export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
   const engine = createEngine(initialVolumes);
-  let ambience: Ambience | null = null;
   const fallbackRng = createRng(DEFAULT_RNG_SEED);
+  let bed: AmbienceBed | null = null;
+  let ship: ShipAudio | null = null;
+  let loader: SampleLoader | null = null;
+  /** procedural bed — only built if the samples never showed up */
+  let synth: Ambience | null = null;
   const detachGesture =
     typeof window !== 'undefined' ? attachGestureResume(engine) : () => undefined;
 
@@ -48,18 +87,50 @@ export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
     await engine.resume();
     const ctx = engine.getContext();
     const buses = engine.getBuses();
-    if (!ambience && ctx && buses) ambience = createAmbience(ctx, buses.ambience);
+    if (!ctx || !buses || bed) return;
+    bed = createBed(ctx, buses.ambience);
+    ship = createShipAudio(ctx, buses);
+    loader = createSampleLoader(ctx, (name, buffer) => {
+      bed?.onSample(name, buffer);
+      ship?.onSample(name, buffer);
+    });
+    void loader.loadAll().then(() => {
+      // nothing decoded at all (offline build, blocked fetch…) → keep the
+      // world alive with the synthesized bed rather than going silent
+      if (!bed?.active() && !synth) synth = createAmbience(ctx, buses.ambience);
+    });
   };
 
   return {
     resume,
-    update(env, dt) {
-      ambience?.update(env, dt);
+    update(a: AudioFrame | AmbienceEnv, legacyDt?: number): void {
+      const frame: AudioFrame = isFrame(a)
+        ? a
+        : { dt: legacyDt ?? 1 / 60, wind: { speed: a.windSpeed, direction: 0 }, weather: a.weather };
+      const ctx = engine.getContext();
+      if (!ctx || ctx.state !== 'running') return; // pre-gesture: no-op
+      const dt = Math.min(MAX_DT, Math.max(0, Number.isFinite(frame.dt) ? frame.dt : 0));
+      const shipSpeed = frame.ship
+        ? Math.hypot(frame.ship.velocity[0], frame.ship.velocity[2])
+        : 0;
+
+      if (frame.camera) {
+        applyListenerPose(ctx.listener, listenerPoseFromMatrix(frame.camera.matrixWorld.elements));
+      }
+      bed?.update({ windSpeed: frame.wind.speed, weather: frame.weather, shipSpeed }, dt);
+      if (frame.ship) {
+        ship?.update(
+          frame.ship,
+          { windSpeed: frame.wind.speed, windDirection: frame.wind.direction },
+          dt,
+        );
+      }
+      synth?.update({ windSpeed: frame.wind.speed, weather: frame.weather }, dt);
     },
     play(name, opts) {
       const ctx = engine.getContext();
       const buses = engine.getBuses();
-      if (!ctx || !buses || ctx.state !== 'running') return; // pre-gesture: no-op
+      if (!ctx || !buses || ctx.state !== 'running') return;
       switch (name) {
         case 'cannonBoom':
           cannonBoom(ctx, buses.sfx);
@@ -80,8 +151,13 @@ export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
     },
     dispose() {
       detachGesture();
-      ambience?.dispose();
-      ambience = null;
+      bed?.dispose();
+      ship?.dispose();
+      synth?.dispose();
+      bed = null;
+      ship = null;
+      synth = null;
+      loader = null;
       engine.dispose();
     },
   };

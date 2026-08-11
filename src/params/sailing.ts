@@ -16,6 +16,12 @@ export interface SailingParams {
   brakeDrag: number;
   /** max yaw rate at/above reference speed, rad/s */
   rudderRate: number;
+  /**
+   * how fast the actual yaw rate converges on the rudder's target, 1/s
+   * (time constant 1/x). Low = heavy: the turn builds over seconds and
+   * keeps swinging after the helm centres. High = arcade snap-to-rudder.
+   */
+  yawResponse: number;
   /** forward speed at which the rudder reaches full authority, m/s */
   rudderRefSpeed: number;
   /** rudder authority floor once the ship has steerage way (0..1) */
@@ -47,9 +53,15 @@ export const sailingParams: SailingParams = registerParams(
   {
     thrustScale: 0.03,
     dragCoef: 0.02,
-    keelGrip: 3,
+    // the keel bites, but not instantly: 1.5/s leaves ~0.7 s of sideways
+    // carry so the hull skids a little through a hard turn instead of the
+    // velocity vector snapping to the new heading
+    keelGrip: 1.5,
     brakeDrag: 0.8,
     rudderRate: 0.5,
+    // τ = 2 s to spin up or wind down a turn — the ship leans into the
+    // circle rather than stepping onto it
+    yawResponse: 0.5,
     rudderRefSpeed: 4,
     minSteerFactor: 0.25,
     steerageSpeed: 0.05,
@@ -69,6 +81,7 @@ export const sailingParams: SailingParams = registerParams(
     keelGrip: { min: 0, max: 10, step: 0.1 },
     brakeDrag: { min: 0, max: 5, step: 0.05 },
     rudderRate: { min: 0, max: 2, step: 0.01 },
+    yawResponse: { min: 0.05, max: 5, step: 0.05 },
     rudderRefSpeed: { min: 0.5, max: 15, step: 0.1 },
     minSteerFactor: { min: 0, max: 1, step: 0.01 },
     steerageSpeed: { min: 0, max: 1, step: 0.01 },

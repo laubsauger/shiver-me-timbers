@@ -21,7 +21,12 @@ import { createWeatherSystem } from './weather';
 import { createPostPipeline } from './core/postPipeline';
 import { postParams } from './params/post';
 import { createGameUI } from './ui';
-import { createAudio } from './audio';
+import {
+  createAudio,
+  attachAudioSettings,
+  type AudioFrame,
+  type ShipAudioInput,
+} from './audio';
 import { CpuOcean } from './sea-physics/cpuOcean';
 import { stepShipBuoyancy } from './sea-physics/buoyancy';
 import { stepFlooding } from './sea-physics/flooding';
@@ -77,7 +82,10 @@ async function boot(): Promise<void> {
   // so the material can sample the wake mask
   const flowFoam = createFlowFoam();
 
-  const surface = new OceanSurface(ocean, foam, flowFoam);
+  // sunLight enables the in-material shadow sample: the water is
+  // MeshBasicNodeMaterial on purpose (§V20), so mesh.receiveShadow is inert
+  // and the shadow map has to be read inside the material instead.
+  const surface = new OceanSurface(ocean, foam, flowFoam, { sunLight: sky.sunLight });
   app.scene.add(surface.group);
 
   // crest + bow spray particles (T5 follow-up)
@@ -169,7 +177,31 @@ async function boot(): Promise<void> {
     },
   });
 
-  const audio = createAudio();
+  // volumes come from the persisted settings store, and stay bound to it so
+  // pause-menu changes apply live and survive reload (§I, §V21)
+  const audio = createAudio(ui.settings.get().audio);
+  attachAudioSettings(audio, ui.settings);
+  // hoisted + mutated per frame: the render callback runs every frame and a
+  // fresh object graph here would be pure GC churn
+  // held as its own non-optional binding so the per-frame writes below don't
+  // have to re-narrow AudioFrame['ship'] (which is optional by contract)
+  const audioShip: ShipAudioInput = {
+    position: playerShip.position,
+    quaternion: playerShip.quaternion,
+    velocity: playerShip.velocity,
+    angularVelocity: playerShip.angularVelocity,
+    sailTrim: playerShip.sailTrim,
+    bowImmersion: 0,
+    bowWorld: [0, 0, 0],
+  };
+  const audioBowWorld = audioShip.bowWorld as [number, number, number];
+  const audioFrame: AudioFrame = {
+    dt: 0,
+    camera: app.camera,
+    wind: { speed: 0, direction: 0 },
+    weather: state.weather,
+    ship: audioShip,
+  };
 
   const post = createPostPipeline(app.renderer, app.scene, app.camera);
 
@@ -238,12 +270,21 @@ async function boot(): Promise<void> {
         playerShip.position[2] + bowLocal[2],
       );
       shipVelTmp.fromArray(playerShip.velocity);
+      // hull heading, NOT the track: a ship making leeway crabs, so basing
+      // the ejection frame on velocity throws spray off at an angle to the
+      // stem (user: "flows in a little bit of a weird angle")
+      const shipFwd = rotateVec(playerShip.quaternion, [0, 0, 1]);
+      shipFwdTmp.set(shipFwd[0], shipFwd[1], shipFwd[2]).normalize();
+      // one heightAt for both the spray emitter and the splash audio gate —
+      // the CPU ocean sample is not free
+      const bowImmersion =
+        cpuOcean.heightAt(bowWorldTmp.x, bowWorldTmp.z, state.time) - bowWorldTmp.y;
       if (FEATURES.bowSpray) {
         bowSpray.update(app.renderer, {
           bowWorldPos: bowWorldTmp,
           shipVelocity: shipVelTmp,
-          immersionDepth:
-            cpuOcean.heightAt(bowWorldTmp.x, bowWorldTmp.z, state.time) - bowWorldTmp.y,
+          shipForward: shipFwdTmp,
+          immersionDepth: bowImmersion,
         });
       }
       if (FEATURES.flowFoam) {
@@ -288,8 +329,6 @@ async function boot(): Promise<void> {
       const fwd = shipAssembly.group.getWorldDirection(tmpDir);
       ui.setHeading(Math.atan2(fwd.x, fwd.z));
 
-      audio.update({ windSpeed: state.wind.speed, weather: state.weather }, frameDt);
-
       surface.update(app.camera, state.time, sky.sunDirection);
       if (postParams.enabled) {
         post.updateFromParams();
@@ -298,6 +337,24 @@ async function boot(): Promise<void> {
         app.render();
       }
       debug.hud.setRenderStats(app.renderer.info.render);
+
+      // audio LAST: the panner listener reads camera.matrixWorld, which is
+      // only final after the render — updating earlier lags it one frame.
+      // Frame object is hoisted + mutated to keep this allocation-free.
+      audioFrame.dt = frameDt;
+      audioFrame.wind.speed = state.wind.speed;
+      audioFrame.wind.direction = state.wind.direction;
+      audioFrame.weather = state.weather;
+      audioShip.position = renderShipView.position;
+      audioShip.quaternion = renderShipView.quaternion;
+      audioShip.velocity = playerShip.velocity;
+      audioShip.angularVelocity = playerShip.angularVelocity;
+      audioShip.sailTrim = playerShip.sailTrim;
+      audioShip.bowImmersion = bowImmersion;
+      audioBowWorld[0] = bowWorldTmp.x;
+      audioBowWorld[1] = bowWorldTmp.y;
+      audioBowWorld[2] = bowWorldTmp.z;
+      audio.update(audioFrame);
     },
   );
   loop.start();
@@ -312,6 +369,7 @@ async function boot(): Promise<void> {
     clouds,
     shipAssembly,
     ui,
+    followCam,
     ropes,
     blocks,
     riggingPlan,
@@ -324,5 +382,6 @@ const tmpDir = new Vector3();
 const windDirTmp = new Vector2();
 const bowWorldTmp = new Vector3();
 const shipVelTmp = new Vector3();
+const shipFwdTmp = new Vector3();
 
 boot();

@@ -6,11 +6,26 @@ import { registerParams } from './registry';
 export const postParams = registerParams(
   'post',
   {
-    // ON: the first-try renderer stall was §B.5 (NaN spray → fill-rate wedge),
-    // not the post chain — re-verified in-browser after the B5 guards landed
-    // (§V22). Same story as the sun shadows.
-    enabled: true,
+    // OFF pending fix: the pipeline currently renders a black frame (§V22
+    // in-browser check, 2026-08-11). §B.5 was NOT the cause — the renderer
+    // keeps ticking, the post chain just outputs black. Default stays false
+    // so the shared tree is always reviewable; flip it at RUNTIME
+    // (`await import('/src/params/post.ts')` → postParams.enabled = true)
+    // to work on it. Per-stage gates below bisect which stage blackens it.
+    enabled: false,
+    // per-stage gates (§V.16). The `*Enabled` flags are read when the
+    // pipeline is CONSTRUCTED: they add/omit whole nodes, so flipping one
+    // needs a reload — that is deliberate, a misbehaving pass has to leave
+    // the graph to be ruled out, damping its output is not enough. The
+    // numeric knobs below are live uniforms with 0 as an exact identity,
+    // so a value-level regression can still be faded out from the panel.
     aoEnabled: true,
+    // conservative: full-strength AO flattens the stylised pigment look
+    // (§V.20) even where it grounds the hull. Needs a visual tuning pass.
+    aoStrength: 0.6,
+    bloomEnabled: true,
+    vibranceEnabled: true,
+    vignetteEnabled: true,
     bloomThreshold: 0.85,
     bloomStrength: 0.22,
     bloomRadius: 0.4,
@@ -19,6 +34,7 @@ export const postParams = registerParams(
     vignetteStart: 0.55,
   },
   {
+    aoStrength: { min: 0, max: 1, step: 0.01 },
     bloomThreshold: { min: 0, max: 2, step: 0.01 },
     bloomStrength: { min: 0, max: 2, step: 0.01 },
     bloomRadius: { min: 0, max: 1, step: 0.01 },
