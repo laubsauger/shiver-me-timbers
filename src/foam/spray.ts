@@ -52,9 +52,19 @@ import {
 export { createBowSpray } from './bowSpray';
 
 export function createSpray(cascades: FoamCascadeInput[], resolution: number) {
-  const count = sprayParams.count; // build-time: pool size fixed at creation
+  // fail loud at construction: a zero/NaN domain would put Inf/NaN into the
+  // texel math; a bad resolution would bake a garbage dispatch count
+  for (const c of cascades) {
+    if (!Number.isFinite(c.domain) || c.domain <= 0) {
+      throw new Error(`spray: invalid cascade domain ${c.domain}`);
+    }
+  }
+  if (!Number.isInteger(resolution) || resolution < 1) {
+    throw new Error(`spray: invalid resolution ${resolution}`);
+  }
+  const pool = createSprayPool(sprayParams.count); // build-time pool size
+  const count = pool.count; // sanitized — sizes the spawn dispatch too
   const n = resolution;
-  const pool = createSprayPool(count);
 
   const uBias = uniform(0); // oceanParams.jacobianFoamBias, live (§V7)
   const uBiasOffset = uniform(sprayParams.sprayBiasOffset);
@@ -128,7 +138,12 @@ export function createSpray(cascades: FoamCascadeInput[], resolution: number) {
       uLateral.value = sprayParams.lateralSpread;
       uWindCarry.value = sprayParams.windCarry;
       uExtent.value = sprayParams.spawnExtent;
-      (uWind.value as THREE.Vector2).copy(windDir);
+      // NaN wind would be written into velocity buffers at spawn and persist
+      // for a full particle lifetime — zero it instead
+      (uWind.value as THREE.Vector2).set(
+        Number.isFinite(windDir.x) ? windDir.x : 0,
+        Number.isFinite(windDir.y) ? windDir.y : 0,
+      );
       uTime.value += SIM_DT;
       pool.step(renderer);
       pool.run(renderer, spawnPass);

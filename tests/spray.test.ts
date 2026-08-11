@@ -18,6 +18,7 @@ import {
   isDead,
   launchVelocity,
   respawnCandidate,
+  sanitizePoolCount,
   stepParticle,
   type ParticleState,
 } from '../src/foam/sprayMath';
@@ -217,5 +218,35 @@ describe('spray params (§V16 registered, bounded)', () => {
     expect(sprayParams.sizeMin).toBeGreaterThanOrEqual(0.2);
     expect(sprayParams.sizeMax).toBeLessThanOrEqual(0.6);
     expect(sprayParams.sizeMin).toBeLessThanOrEqual(sprayParams.sizeMax);
+  });
+});
+
+describe('freeze-audit guards (NaN/dispatch hardening)', () => {
+  it('pool count sanitizer: counts size buffers and dispatches at construction', () => {
+    // WHY: a fractional/zero/NaN count would corrupt instancedArray
+    // allocation or bake a dead dispatch — permanently, not per-frame.
+    expect(sanitizePoolCount(4096, 1024)).toBe(4096);
+    expect(sanitizePoolCount(100.7, 1024)).toBe(100);
+    expect(sanitizePoolCount(0, 1024)).toBe(1);
+    expect(sanitizePoolCount(-5, 1024)).toBe(1);
+    expect(sanitizePoolCount(NaN, 1024)).toBe(1024);
+    expect(sanitizePoolCount(Infinity, 1024)).toBe(1024);
+  });
+
+  it('drag guard math: only drag ≥ 0 keeps the velocity factor ≤ 1', () => {
+    // WHY: factor > 1 is exponential velocity GROWTH — positions reach
+    // Infinity in seconds and infinite sprite quads wedge the rasterizer.
+    // The pool clamps drag to ≥ 0 before exp(); this pins the boundary.
+    expect(dragFactorPerFrame(Math.max(0, -3), DT)).toBe(1);
+    expect(dragFactorPerFrame(Math.max(0, 0.6), DT)).toBeLessThan(1);
+  });
+
+  it('age/opacity math stays finite for the guarded life floor', () => {
+    // WHY: ageN = age/life feeds the sprite SCALE — a NaN there is a
+    // screen-covering quad at additive blend × the whole pool (fill-rate
+    // freeze). The pool floors life at 1e-3; verify the floor is NaN-free.
+    const lifeFloor = Math.max(0, 1e-3);
+    expect(Number.isFinite(ageOpacity(0, lifeFloor))).toBe(true);
+    expect(ageOpacity(1, lifeFloor)).toBe(0); // long-dead → fully faded
   });
 });

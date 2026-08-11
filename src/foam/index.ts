@@ -48,6 +48,16 @@ export interface FoamCascadeInput {
 }
 
 export function createFoamSim(cascades: FoamCascadeInput[], resolution: number) {
+  // fail loud at construction (freeze audit): resolution bakes the dispatch
+  // count (n·n) and texture sizes; domains divide world coords in shadingNode
+  for (const c of cascades) {
+    if (!Number.isFinite(c.domain) || c.domain <= 0) {
+      throw new Error(`foam: invalid cascade domain ${c.domain}`);
+    }
+  }
+  if (!Number.isInteger(resolution) || resolution < 1) {
+    throw new Error(`foam: invalid resolution ${resolution}`);
+  }
   const u = createFoamUniforms();
   // fine ripple cascade gets its OWN uniforms: its ~14m jacobian tile stamps
   // whitecaps on a perfect world grid (§V19, user-reported), so its inject is
@@ -76,7 +86,9 @@ export function createFoamSim(cascades: FoamCascadeInput[], resolution: number) 
     update(renderer: THREE.WebGPURenderer): void {
       time += SIM_DT; // fixed-tick clock for the detail churn (§V2)
       u.uBias.value = oceanParams.jacobianFoamBias; // live, storm-driven §V7
-      u.uInjectPerFrame.value = foamParams.injectStrength * SIM_DT;
+      // clamp ≥ 0: a negative strength would pump NEGATIVE foam into the
+      // accumulator (min-1 clamp has no floor) — nonsense mask, not injection
+      u.uInjectPerFrame.value = Math.max(0, foamParams.injectStrength) * SIM_DT;
       u.uDecay.value = decayFactorPerFrame(foamParams.decayHalfLife, SIM_DT);
       u.uRadius.value = foamParams.blurRadius;
       uFine.uBias.value =

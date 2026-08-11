@@ -90,19 +90,28 @@ export function createSprayPool(rawCount: number) {
   const run = (renderer: THREE.WebGPURenderer, pass: unknown) =>
     renderer.compute(pass as Parameters<THREE.WebGPURenderer['compute']>[0]);
 
+  // non-finite params must never reach uniforms: NaN reaching the position
+  // or scale path renders garbage quads (fill-rate hazard), and it would
+  // persist in the storage buffers until every particle respawned.
+  const fin = (v: number, fallback: number) => (Number.isFinite(v) ? v : fallback);
+
   return {
     posAge,
     velSeed,
     mesh,
+    /** sanitized pool size — emitters must size their spawn passes with THIS */
+    count,
 
     /** refresh shared uniforms from live params, then init (once) + physics */
     step(renderer: THREE.WebGPURenderer): void {
-      uLife.value = sprayParams.life;
-      uGravity.value = sprayParams.gravity;
-      uDragFactor.value = Math.exp(-sprayParams.drag * SIM_DT);
-      uSizeMin.value = sprayParams.sizeMin;
-      uSizeMax.value = sprayParams.sizeMax;
-      uOpacity.value = sprayParams.opacity;
+      // life floor: ageN divides by life; drag floor: negative drag would be
+      // exponential velocity GROWTH → positions at Infinity within seconds
+      uLife.value = Math.max(fin(sprayParams.life, 1), 1e-3);
+      uGravity.value = fin(sprayParams.gravity, 0);
+      uDragFactor.value = Math.exp(-Math.max(0, fin(sprayParams.drag, 0)) * SIM_DT);
+      uSizeMin.value = fin(sprayParams.sizeMin, 0);
+      uSizeMax.value = fin(sprayParams.sizeMax, 0);
+      uOpacity.value = fin(sprayParams.opacity, 0);
       if (!initialized) {
         run(renderer, initPass);
         initialized = true;

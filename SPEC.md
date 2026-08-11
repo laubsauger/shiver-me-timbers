@@ -54,6 +54,7 @@ V24: water transparency (refs docs/underwater-*.png): near-surface see-through �
 V25: underwater camera: submerged → full-screen underwater grade (teal exp fog by dist, desat blue-green, soft god-ray fake OK, slight view wobble), waterline crossing → split view w/ meniscus band, no pop. Weather/day-cycle drive underwater tint too.
 V26: ocean reflections = PLANAR (mirrored scene pass: ship, islands, clouds visible in water) per talk 03:59 — SSR ⊥, analytic-sky-only ⊥ final. Reflection res ≤ half, blur ok, fresnel-blended.
 V27: deck water = event-driven per talk 11:12: bow-immersion sensor (immersion+speed gates, same signal as bow spray) → splash() injection; runs for player ship only (1 ship budget). Passive always-on splashing ⊥.
+V28: GPU safety: ∀ shader division ! floored divisor (`.max(ε)`); ∀ dispatch count & buffer size from sanitized construction-time ints; ∀ caller-fed uniform ! finite-guarded; dead/invisible particles ! zero-size (no opacity-0 rasterization). TSL Loop ! literal bounds.
 
 ## §T TASKS
 id|status|task|cites
@@ -93,3 +94,6 @@ T31|.|deck water wiring: bow sensor → splash(), stateTexture → deck material
 id|date|cause|fix
 B1|2026-08-11|sky dome brown: `a.mix(b,t)` chained TSL = mixElement(t,e1,e2) → receiver read as factor, blend inverted+washed|V23
 B2|2026-08-11|ocean sparkle 88% dense not 12%: `x.step(0.12)` = step(edge=0.12,x) — edge/x order misread|V23
+B3|2026-08-11|water transparency mint-wash: linearDepth normalized 0..1 treated as meters — absorption meaningless|-
+B4|2026-08-11|3s global ocean pulse: sparkle twinkle shared one time phase — all cells flipped in sync|-
+B5|2026-08-11|GPU wedge: spray life=0 → 0/0 NaN age → NaN-size additive quads ×4096 = fill-rate hang; also dead particles rasterized at sizeMax|V28

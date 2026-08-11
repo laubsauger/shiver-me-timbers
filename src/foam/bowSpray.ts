@@ -58,8 +58,8 @@ export interface BowState {
 }
 
 export function createBowSpray() {
-  const count = sprayParams.bowCount; // build-time pool size
-  const pool = createSprayPool(count);
+  const pool = createSprayPool(sprayParams.bowCount); // build-time pool size
+  const count = pool.count; // sanitized — sizes the spawn dispatch too
 
   const uBowPos = uniform(new THREE.Vector3());
   const uShipVel = uniform(new THREE.Vector3());
@@ -102,13 +102,20 @@ export function createBowSpray() {
     update(renderer: THREE.WebGPURenderer, bow: BowState): void {
       uSpread.value = sprayParams.bowLaunchSpread;
       uForwardKeep.value = sprayParams.bowForwardKeep;
-      (uBowPos.value as THREE.Vector3).copy(bow.bowWorldPos);
-      (uShipVel.value as THREE.Vector3).copy(bow.shipVelocity);
+      // NaN from a broken buoyancy frame must not reach the spawn buffers —
+      // it would persist in pos/vel for a full particle lifetime
+      const fin = (v: number) => (Number.isFinite(v) ? v : 0);
+      (uBowPos.value as THREE.Vector3).set(
+        fin(bow.bowWorldPos.x), fin(bow.bowWorldPos.y), fin(bow.bowWorldPos.z),
+      );
+      (uShipVel.value as THREE.Vector3).set(
+        fin(bow.shipVelocity.x), fin(bow.shipVelocity.y), fin(bow.shipVelocity.z),
+      );
       uTime.value += SIM_DT;
       pool.step(renderer); // physics always runs — airborne spray keeps falling
 
-      const speed = Math.hypot(bow.shipVelocity.x, bow.shipVelocity.z);
-      if (!burstGate(bow.immersionDepth, speed, sprayParams)) return;
+      const speed = Math.hypot(fin(bow.shipVelocity.x), fin(bow.shipVelocity.z));
+      if (!burstGate(fin(bow.immersionDepth), speed, sprayParams)) return;
       const next = advanceBurstCursor(
         cursorState,
         sprayParams.bowBurstRate,
