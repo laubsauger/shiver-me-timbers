@@ -46,20 +46,22 @@
       #boot-splash::after {
         content: '';
         position: absolute;
-        left: -10%;
-        width: 120%;
-        height: 13rem;
-        border-radius: 50%;
-        background: rgba(25, 139, 151, 0.08);
-        transform-origin: 50% 100%;
+        left: -8rem;
+        width: calc(100% + 16rem);
+        height: 9rem;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 240 144'%3E%3Cpath d='M0 28C20 4 40 4 60 28S100 52 120 28 160 4 180 28 220 52 240 28V144H0Z' fill='%23198b97' fill-opacity='.2'/%3E%3Cpath d='M0 28C20 4 40 4 60 28S100 52 120 28 160 4 180 28 220 52 240 28' fill='none' stroke='%232ab3b4' stroke-opacity='.28' stroke-width='2'/%3E%3C/svg%3E");
+        background-position: left top;
+        background-repeat: repeat-x;
+        background-size: 15rem 9rem;
         animation: boot-swell 5s ease-in-out infinite alternate;
       }
       #boot-splash::before {
-        bottom: -9rem;
+        bottom: -2rem;
       }
       #boot-splash::after {
-        bottom: -11rem;
-        opacity: 0.7;
+        bottom: -3.75rem;
+        opacity: 0.58;
+        background-size: 18rem 10.8rem;
         animation-delay: -2.5s;
         animation-direction: alternate-reverse;
       }
@@ -130,8 +132,8 @@
         50% { transform: translateY(-0.55rem) rotate(0.4deg); }
       }
       @keyframes boot-swell {
-        from { transform: rotate(-1.5deg) scaleY(0.85); }
-        to { transform: rotate(1.5deg) scaleY(1.1); }
+        from { transform: translate3d(-2rem, 0.25rem, 0); }
+        to { transform: translate3d(2rem, -0.55rem, 0); }
       }
       @keyframes boot-load {
         from { transform: translateX(-110%); }

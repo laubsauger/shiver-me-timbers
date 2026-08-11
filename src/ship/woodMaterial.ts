@@ -9,6 +9,7 @@
  */
 import * as THREE from 'three/webgpu';
 import {
+  atan,
   float,
   fract,
   mix,
@@ -57,7 +58,29 @@ export interface WoodTones {
   wale: boolean;
   /** darken + smooth below y=0, the waterline (hull family only) */
   waterline: boolean;
+  /**
+   * Spars are made of STAVES running along the spar, not of courses stacked
+   * across it. Set to the piece-local axis the spar runs along ('y' for masts
+   * and the bowsprit, 'x' for yards).
+   *
+   * §B-class bug this fixes: the seam function stacked seams along local y for
+   * every non-horizontal face. On a cylinder that wraps them into HOOPS — the
+   * "mast rings" in the §T.34 gap list. A mast reading as a stack of barrel
+   * bands instead of a spar is the single most obviously-wrong surface on the
+   * ship, and it came from a coordinate choice, not from a missing feature.
+   */
+  sparAxis?: 'x' | 'y';
 }
+
+/**
+ * Staves around a spar. Must be an INTEGER: the stave coordinate is the
+ * circumferential angle, which jumps by 2π at the ±π branch cut of atan, and
+ * only an integer number of staves per turn makes `fract()` of it continuous
+ * across that cut. A fractional count would paint one hard vertical seam down
+ * the back of every mast, and the relief normal differentiates the height
+ * field, so that seam would spike to a one-pixel line (§V38).
+ */
+const SPAR_STAVES = 8;
 
 export interface ShipMaterialHandle {
   material: THREE.MeshStandardNodeMaterial;
@@ -80,6 +103,8 @@ export function createWoodMaterial(
   const uPlankWidth = uniform(p.plankWidth);
   const uSeamWidth = uniform(p.seamWidth);
   const uSeamDarken = uniform(p.seamDarken);
+  const uPlankLength = uniform(p.plankLength);
+  const uButtWidth = uniform(p.buttWidth);
   const uWaleFrequency = uniform(p.waleFrequency);
   const uWaleRatio = uniform(p.waleRatio);
   const uWaleDarken = uniform(p.waleDarken);
@@ -103,10 +128,23 @@ export function createWoodMaterial(
     .mul(vec3(1, 1, uGrainStretch));
   const grain = triplanarFbm(samplePos, normalLocal, uSharpness, p.grainOctaves);
 
-  // plank seams: stacked in y on vertical faces, side-by-side in x on decks
+  // plank seams: stacked in y on vertical faces, side-by-side in x on decks,
+  // and AROUND a spar (see WoodTones.sparAxis) rather than stacked up it.
   const upness = smoothstep(float(0.6), float(0.9), normalLocal.y.abs());
-  const across = mix(positionLocal.y, positionLocal.x, upness);
-  const plankCoord = across.div(uPlankWidth);
+  let plankCoord: AnyNode;
+  let alongPlank: AnyNode; // the board's own length axis — where butts land
+  if (tones.sparAxis === undefined) {
+    const across = mix(positionLocal.y, positionLocal.x, upness);
+    plankCoord = across.div(uPlankWidth);
+    alongPlank = positionLocal.z; // hull and deck planking runs fore-and-aft
+  } else if (tones.sparAxis === 'y') {
+    // angle about the spar × an integer stave count (see SPAR_STAVES)
+    plankCoord = atan(positionLocal.z, positionLocal.x).mul(SPAR_STAVES / (Math.PI * 2));
+    alongPlank = positionLocal.y;
+  } else {
+    plankCoord = atan(positionLocal.z, positionLocal.y).mul(SPAR_STAVES / (Math.PI * 2));
+    alongPlank = positionLocal.x;
+  }
   const f = fract(plankCoord);
   const edgeDistance = f.min(f.oneMinus()); // 0 at a seam, 0.5 mid-plank
   const seamMask = smoothstep(float(0), uSeamWidth, edgeDistance); // 0 = seam
@@ -123,14 +161,37 @@ export function createWoodMaterial(
   const crown = sin(f.mul(Math.PI));
   const plankLift = plankId.sub(0.5).mul(2).mul(crown); // −1..1, continuous
 
+  // BUTT JOINTS. Real planking is short boards butted end to end, and the
+  // butts of neighbouring courses are deliberately STAGGERED (two butts in
+  // line is a weak spot a shipwright would never build). Continuous courses
+  // running the whole 35 m hull are the loudest remaining "ultra regular"
+  // tell on the topsides. Each course gets its own phase AND its own board
+  // length from `plankId`, so no two courses butt at the same station and the
+  // spacing itself is irregular. Spars have no butts — staves run full length.
+  const buttPhase = hash2(vec2(plankCoord.floor(), 41.9));
+  const boardLength = uPlankLength.mul(mix(float(0.7), float(1.35), plankId)).max(0.25);
+  const bt = fract(alongPlank.div(boardLength).add(buttPhase));
+  const buttDistance = bt.min(bt.oneMinus()).mul(boardLength); // metres to a butt
+  const buttMask = smoothstep(float(0), uButtWidth, buttDistance); // 0 = butt
+  const buttGroove = buttMask.oneMinus();
+
   // --- one height field, shared by colour, roughness and the relief normal
   let height: AnyNode = grain.sub(0.5).mul(uGrainRelief).add(plankLift.mul(uPlankRelief));
   height = height.sub(seamGroove.mul(uSeamDepth)); // caulking sits recessed
+  // the butt groove fades out at the plank seams (× crown). Without that the
+  // height field STEPS across a seam — one board grooved, its neighbour not —
+  // and §V38's differentiation turns that step into a one-pixel spike.
+  if (tones.sparAxis === undefined) {
+    height = height.sub(buttGroove.mul(uSeamDepth).mul(0.8).mul(crown));
+  }
 
   const base = mix(uDark, uLight, grain).mul(
     mix(float(1).sub(uPlankToneVar), float(1).add(uPlankToneVar), plankId),
   );
   let color: AnyNode = mix(base.mul(uSeamDarken), base, seamMask);
+  if (tones.sparAxis === undefined) {
+    color = mix(color.mul(uSeamDarken), color, buttMask);
+  }
   let rough: AnyNode = uRoughBase.add(grain.mul(0.18)).add(seamGroove.mul(0.12));
 
   if (tones.wale) {
@@ -194,6 +255,8 @@ export function createWoodMaterial(
       uPlankWidth.value = p.plankWidth;
       uSeamWidth.value = p.seamWidth;
       uSeamDarken.value = p.seamDarken;
+      uPlankLength.value = p.plankLength;
+      uButtWidth.value = p.buttWidth;
       uWaleFrequency.value = p.waleFrequency;
       uWaleRatio.value = p.waleRatio;
       uWaleDarken.value = p.waleDarken;

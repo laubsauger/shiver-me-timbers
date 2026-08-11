@@ -29,7 +29,23 @@ export type PieceKind =
   | 'capstan'
   | 'grating'
   | 'stairs'
-  | 'rudder';
+  | 'rudder'
+  // --- §T.34 detail pass. Every one is a real piece with its own sockets and
+  // damage states (§V13/§V18), NOT decoration welded into a shell: a blown-off
+  // hull section must take its gunports and channels with it, and a broken
+  // mast must take its ratlines and its pennant.
+  | 'pennant' // masthead streamer / ensign — the wind telltale
+  | 'figurehead'
+  | 'ratlines' // rung ladder across a shroud fan
+  | 'gunport' // port frames + lids along a hull section
+  | 'channel' // chainplate ironwork + deadeyes + lanyards
+  | 'headrail' // beakhead rails, stem → bowsprit
+  | 'cathead'
+  | 'anchor'
+  | 'pin-rail' // belaying pin rack at a mast foot
+  | 'binnacle'
+  | 'window' // glazed lights (stern gallery)
+  | 'moulding'; // decorative sheer batten
 
 /**
  * 'fixture' = named attach point for deck furniture / ornaments

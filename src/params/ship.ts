@@ -127,6 +127,140 @@ export const galleonParams: ShipClassParams = registerParams(
 );
 
 /**
+ * §T.34 detail-pass dimensions (§V16). Kept in ONE group rather than smeared
+ * across ShipClassParams because they are fittings, not naval architecture:
+ * both ship classes want the same deadeye size and the same ratline spacing,
+ * and only the pieces that exist on a class get built.
+ *
+ * Geometry reads these at BUILD time, so dragging them in the panel needs a
+ * ship rebuild — same as every other dimension in this module.
+ */
+export interface ShipDetailParams {
+  /** vertical gap between ratline rungs (m) */
+  ratlineSpacing: number;
+  /** fraction of the shroud run that carries rungs (they stop below the top) */
+  ratlineTopFrac: number;
+  ratlineRadius: number;
+  /** deadeye disc diameter (m) at each chainplate */
+  deadeyeRadius: number;
+  /** gunport opening, square-ish (m) */
+  gunportSize: number;
+  /** height of the port sills above the waterline (m) */
+  gunportY: number;
+  /** ports per hull section per side */
+  gunportsPerSection: number;
+  /** railing height on the raised decks (m) */
+  castleRailHeight: number;
+  /** belaying pins per rack */
+  pinCount: number;
+  /** masthead pennant: fly length and hoist depth (m) */
+  pennantFly: number;
+  pennantHoist: number;
+  /** the pirate flag at the mainmast truck is bigger and squarer */
+  flagFly: number;
+  flagHoist: number;
+  /** stern ensign staff height (m) */
+  ensignStaff: number;
+  /** anchor stock length (m) */
+  anchorSize: number;
+  /** decorative sheer moulding section (m) */
+  mouldingSize: number;
+  /** how much every detail generator jitters its stations, 0..1 (§V2 seeded) */
+  irregularity: number;
+}
+
+export const shipDetailParams: ShipDetailParams = registerParams(
+  'ship-detail',
+  {
+    ratlineSpacing: 0.42, ratlineTopFrac: 0.66, ratlineRadius: 0.022,
+    deadeyeRadius: 0.15,
+    gunportSize: 0.78, gunportY: 1.55, gunportsPerSection: 2,
+    castleRailHeight: 0.95,
+    pinCount: 7,
+    pennantFly: 4.2, pennantHoist: 0.55,
+    flagFly: 2.2, flagHoist: 1.35,
+    ensignStaff: 2.4,
+    anchorSize: 2.1,
+    mouldingSize: 0.14,
+    irregularity: 1,
+  },
+  {
+    ratlineSpacing: { min: 0.2, max: 1, step: 0.01 },
+    ratlineTopFrac: { min: 0.2, max: 0.95, step: 0.01 },
+    ratlineRadius: { min: 0.008, max: 0.06, step: 0.002 },
+    deadeyeRadius: { min: 0.05, max: 0.4, step: 0.01 },
+    gunportSize: { min: 0.3, max: 1.6, step: 0.02 },
+    gunportY: { min: 0.4, max: 3, step: 0.05 },
+    gunportsPerSection: { min: 0, max: 5, step: 1 },
+    castleRailHeight: { min: 0.4, max: 1.8, step: 0.05 },
+    pinCount: { min: 0, max: 14, step: 1 },
+    pennantFly: { min: 0.5, max: 10, step: 0.1 },
+    pennantHoist: { min: 0.1, max: 2, step: 0.05 },
+    flagFly: { min: 0.5, max: 6, step: 0.1 },
+    flagHoist: { min: 0.3, max: 4, step: 0.05 },
+    ensignStaff: { min: 0.5, max: 6, step: 0.1 },
+    anchorSize: { min: 0.5, max: 5, step: 0.1 },
+    mouldingSize: { min: 0.03, max: 0.5, step: 0.01 },
+    irregularity: { min: 0, max: 2, step: 0.05 },
+  },
+);
+
+/**
+ * Flag / pennant cloth (§V16). Separate group from ShipMaterialParams because
+ * a flag is not a sail: it is a WIND INSTRUMENT. A masthead pennant streaming
+ * off the truck is a continuous readable signal of where the wind is relative
+ * to the heading, which is information a sailing game needs and this one
+ * exposed nowhere. It is driven by APPARENT wind (true wind combined with the
+ * ship's own motion) so it answers the helm — it must visibly swing when she
+ * comes about, and fall slack when she runs downwind at speed.
+ */
+export interface ShipFlagParams {
+  /** apparent wind speed (m/s) at which the flag streams dead straight */
+  flagStreamRef: number;
+  /** droop of the fly when becalmed, as a fraction of the fly length */
+  flagSag: number;
+  /** travelling-ripple amplitude, fraction of the hoist */
+  flagWaveAmp: number;
+  flagWaveFreq: number; // rad/s
+  flagWaveCount: number; // wavelengths along the fly
+  /** extra crack/snap depth at the leech when the wind is up */
+  flagSnap: number;
+  /** how fast the cloth chases a change in apparent wind (1/s) */
+  flagResponse: number;
+  fieldColor: number; // jolly roger ground
+  badgeColor: number; // bone white
+  pennantColor: number; // masthead streamer
+  pennantStripe: number;
+  flagLeeDarken: number;
+  flagAmbientLift: number;
+}
+
+export const shipFlagParams: ShipFlagParams = registerParams(
+  'ship-flag',
+  {
+    flagStreamRef: 7,
+    flagSag: 0.42,
+    flagWaveAmp: 0.55, flagWaveFreq: 5.5, flagWaveCount: 1.6,
+    flagSnap: 0.5,
+    flagResponse: 2.6,
+    fieldColor: 0x14100f, badgeColor: 0xe8e2d2,
+    pennantColor: 0xa8202a, pennantStripe: 0xe6ded0,
+    flagLeeDarken: 0.72, flagAmbientLift: 0.08,
+  },
+  {
+    flagStreamRef: { min: 1, max: 25, step: 0.5 },
+    flagSag: { min: 0, max: 1.2, step: 0.01 },
+    flagWaveAmp: { min: 0, max: 2, step: 0.01 },
+    flagWaveFreq: { min: 0, max: 16, step: 0.1 },
+    flagWaveCount: { min: 0.2, max: 6, step: 0.1 },
+    flagSnap: { min: 0, max: 2, step: 0.01 },
+    flagResponse: { min: 0.2, max: 12, step: 0.1 },
+    flagLeeDarken: { min: 0.1, max: 1, step: 0.01 },
+    flagAmbientLift: { min: 0, max: 0.5, step: 0.01 },
+  },
+);
+
+/**
  * Rig BEHAVIOUR tunables (§V16) — how the yards brace and how sail trim maps
  * to the §V13 sail states. Read render-side each frame; no geometry depends
  * on them, so they are safe to drag live in the panel.
@@ -183,6 +317,8 @@ export interface ShipMaterialParams {
   plankWidth: number; // m between plank seams
   seamWidth: number; // seam falloff as fraction of a plank
   seamDarken: number; // 0..1 multiplier at the seam line
+  plankLength: number; // m between BUTT joints along a board
+  buttWidth: number; // butt seam falloff (m)
   waleFrequency: number; // horizontal wale strakes per metre of hull height
   waleRatio: number; // 0..1 band coverage
   waleDarken: number; // 0..1 multiplier inside a wale band
@@ -194,6 +330,10 @@ export interface ShipMaterialParams {
   sparDark: number;
   trimLight: number; // rails/rudder/keel — darkest wood
   trimDark: number;
+  ironLight: number; // anchors, chainplate straps, deadeye bands
+  ironDark: number;
+  glassColor: number; // stern cabin lights
+  glassLit: number; // warm glow behind them (emissive floor)
   sailLight: number;
   sailDark: number;
   sailWeaveScale: number; // warp/weft noise frequency
@@ -239,11 +379,14 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
   {
     grainScale: 1.6, grainStretch: 0.22, grainOctaves: 3, triplanarSharpness: 8,
     plankWidth: 0.55, seamWidth: 0.08, seamDarken: 0.55,
+    plankLength: 4.6, buttWidth: 0.05,
     waleFrequency: 0.9, waleRatio: 0.28, waleDarken: 0.62,
     hullLight: 0x9a6b3f, hullDark: 0x63401f,
     deckLight: 0xc9a96e, deckDark: 0x9a7a4a,
     sparLight: 0x8a6a42, sparDark: 0x5f452a,
     trimLight: 0x54381f, trimDark: 0x362412,
+    ironLight: 0x4a4640, ironDark: 0x24211d,
+    glassColor: 0x3c4a44, glassLit: 0x2a1c0c,
     sailLight: 0xe9e1cd, sailDark: 0xd2c5aa,
     sailWeaveScale: 18, sailBacklitColor: 0xfff0d2, sailBacklitStrength: 0.5,
     sailBillow: 0.34, sailWindRef: 11, sailBackBillow: 0.18, sailLuffFlap: 2.6,
@@ -264,6 +407,8 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     plankWidth: { min: 0.2, max: 2, step: 0.01 },
     seamWidth: { min: 0.01, max: 0.3, step: 0.005 },
     seamDarken: { min: 0, max: 1, step: 0.01 },
+    plankLength: { min: 0.5, max: 20, step: 0.1 },
+    buttWidth: { min: 0.005, max: 0.2, step: 0.005 },
     waleFrequency: { min: 0.1, max: 3, step: 0.05 },
     waleRatio: { min: 0, max: 1, step: 0.01 },
     waleDarken: { min: 0, max: 1, step: 0.01 },

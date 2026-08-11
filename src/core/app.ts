@@ -50,7 +50,25 @@ export class App {
   }
 
   static async create(container: HTMLElement): Promise<App> {
-    const renderer = new THREE.WebGPURenderer({ antialias: true });
+    // The ocean material samples well past WebGPU's DEFAULT 16 sampled
+    // textures per stage (3 cascades × displacement+derivatives, foam and its
+    // reduced tiers, wake, seabed, shadow map, reflection, viewport colour +
+    // depth…). Exceeding it fails pipeline creation outright — the material
+    // never draws and the render pass aborts. Adapters commonly allow far
+    // more, but you only get it by ASKING at device-request time.
+    // Always clamp to what this adapter actually reports (§V.40).
+    const requiredLimits: Record<string, number> = {};
+    const adapter = await navigator.gpu?.requestAdapter();
+    for (const key of [
+      'maxSampledTexturesPerShaderStage',
+      'maxSamplersPerShaderStage',
+      'maxStorageTexturesPerShaderStage',
+      'maxUniformBuffersPerShaderStage',
+    ] as const) {
+      const supported = adapter?.limits?.[key];
+      if (typeof supported === 'number') requiredLimits[key] = supported;
+    }
+    const renderer = new THREE.WebGPURenderer({ antialias: true, requiredLimits });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(container.clientWidth, container.clientHeight);
     // NOTE: shadow-map variant compilation of the huge ocean/ship TSL

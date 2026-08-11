@@ -92,8 +92,15 @@ export function createEngine(initial?: Partial<Volumes>): AudioEngine {
  * engine.resume(), then both listeners detach. Returns a cancel function
  * (also idempotent if the gesture already fired).
  */
+/**
+ * Takes anything with a resume() — NOT necessarily the raw engine. The caller
+ * must pass whichever resume actually builds the graph: resuming only the
+ * AudioContext leaves the bed and emitters null, so update() sails past its
+ * `ctx.state === 'running'` check and every layer is a no-op on a null object.
+ * Silent, error-free, and indistinguishable from "audio is just quiet".
+ */
 export function attachGestureResume(
-  engine: AudioEngine,
+  engine: Pick<AudioEngine, 'resume'>,
   target: Pick<EventTarget, 'addEventListener' | 'removeEventListener'> = window,
 ): () => void {
   const onGesture = (): void => {

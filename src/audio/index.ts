@@ -80,9 +80,6 @@ export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
   let loader: SampleLoader | null = null;
   /** procedural bed — only built if the samples never showed up */
   let synth: Ambience | null = null;
-  const detachGesture =
-    typeof window !== 'undefined' ? attachGestureResume(engine) : () => undefined;
-
   const resume = async (): Promise<void> => {
     await engine.resume();
     const ctx = engine.getContext();
@@ -100,6 +97,12 @@ export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
       if (!bed?.active() && !synth) synth = createAmbience(ctx, buses.ambience);
     });
   };
+
+  // MUST be `resume`, not `engine` — engine.resume() only unlocks the
+  // AudioContext, leaving bed/ship/loader null forever, which is silent and
+  // errorless. Declared after resume() so the closure exists to hand over.
+  const detachGesture =
+    typeof window !== 'undefined' ? attachGestureResume({ resume }) : () => undefined;
 
   return {
     resume,
