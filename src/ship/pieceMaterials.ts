@@ -1,45 +1,88 @@
 /**
- * Greybox wood-tone materials per PieceKind (§V.13 readability pass).
- * Kept in their own module so tests/blueprint code never import GPU-facing
- * material classes. TODO(T22): tri-planar wood PBR replaces these tones.
+ * Piece materials (§V16): tri-planar plank wood per piece family + sail
+ * cloth, node builders in woodMaterial.ts. Two-tone weathered wood per
+ * docs/ship-full-view.png — warm mid-tone hull w/ darker wale stripes,
+ * pale deck, dark trim. Kept apart from geometry so tests stay GPU-free.
+ * §V23: no chained 3-arg TSL math anywhere in this module tree.
  */
 import * as THREE from 'three/webgpu';
 import type { PieceKind } from './pieceTypes';
+import { shipMaterialParams } from '../params/ship';
+import {
+  createSailClothMaterial,
+  createWoodMaterial,
+  type ShipMaterialHandle,
+  type WoodTones,
+} from './woodMaterial';
 
-const WOOD_TONES: Record<PieceKind, number> = {
-  'hull-section': 0x6b4a2c,
-  keel: 0x4a341f,
-  deck: 0x9c7a4e,
-  bow: 0x6b4a2c,
-  transom: 0x7a5533,
-  gallery: 0xb08d57,
-  'forecastle-deck': 0x9c7a4e,
-  'sterncastle-deck': 0x9c7a4e,
-  cabin: 0x7a5533,
-  'lantern-post': 0x3f2f1d,
-  mast: 0x8a6a42,
-  'crow-nest': 0x6b4a2c,
-  yard: 0x8a6a42,
-  sail: 0xe8e0cc,
-  bowsprit: 0x8a6a42,
-  rail: 0x5c4026,
-  rudder: 0x5c4026,
+export { uShipSunDirection } from './woodMaterial';
+
+type Family = 'hull' | 'deck' | 'spar' | 'trim' | 'sail';
+
+const FAMILY_OF: Record<PieceKind, Family> = {
+  'hull-section': 'hull',
+  bow: 'hull',
+  transom: 'hull',
+  cabin: 'hull',
+  gallery: 'hull',
+  deck: 'deck',
+  'forecastle-deck': 'deck',
+  'sterncastle-deck': 'deck',
+  mast: 'spar',
+  yard: 'spar',
+  bowsprit: 'spar',
+  'crow-nest': 'spar',
+  keel: 'trim',
+  rail: 'trim',
+  rudder: 'trim',
+  'lantern-post': 'trim',
+  sail: 'sail',
 };
 
+function woodTones(family: Exclude<Family, 'sail'>): WoodTones {
+  const p = shipMaterialParams;
+  switch (family) {
+    case 'hull':
+      return { light: p.hullLight, dark: p.hullDark, wale: true };
+    case 'deck':
+      return { light: p.deckLight, dark: p.deckDark, wale: false };
+    case 'spar':
+      return { light: p.sparLight, dark: p.sparDark, wale: false };
+    case 'trim':
+      return { light: p.trimLight, dark: p.trimDark, wale: false };
+  }
+}
+
+/** every live handle, so the debug panel can refresh all ships (§V16) */
+const liveHandles = new Set<ShipMaterialHandle>();
+
+export function refreshShipMaterials(): void {
+  for (const handle of liveHandles) handle.refresh();
+}
+
+/** track for live refresh; untrack when the material is disposed */
+function tracked(handle: ShipMaterialHandle, name: string): THREE.MeshStandardNodeMaterial {
+  liveHandles.add(handle);
+  const dispose = handle.material.dispose.bind(handle.material);
+  handle.material.dispose = () => {
+    liveHandles.delete(handle);
+    dispose();
+  };
+  handle.material.name = name;
+  return handle.material;
+}
+
 export function createPieceMaterial(kind: PieceKind): THREE.MeshStandardNodeMaterial {
-  const mat = new THREE.MeshStandardNodeMaterial();
-  mat.color.setHex(WOOD_TONES[kind]);
-  mat.roughness = kind === 'sail' ? 0.95 : 0.85;
-  mat.metalness = 0;
-  if (kind === 'sail') mat.side = THREE.DoubleSide;
-  mat.name = `piece-${kind}`;
-  return mat;
+  const family = FAMILY_OF[kind];
+  const handle =
+    family === 'sail' ? createSailClothMaterial() : createWoodMaterial(woodTones(family));
+  return tracked(handle, `piece-${kind}`);
 }
 
 /** dark interior seen through a breach (holed variant group 1) */
 export function createHoleMaterial(): THREE.MeshStandardNodeMaterial {
   const mat = new THREE.MeshStandardNodeMaterial();
-  mat.color.setHex(0x120c07);
+  mat.color.setHex(shipMaterialParams.holeColor);
   mat.roughness = 1;
   mat.metalness = 0;
   mat.name = 'piece-hole';

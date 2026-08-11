@@ -60,6 +60,10 @@ export interface UnderwaterParams {
   vignetteDepthScale: number;
   /** how many CPU-sampled waterline height columns across the screen */
   waterlineSamples: number;
+  /** 0..1 underwater brightness floor when the sun is down (moonlit) */
+  nightFloor: number;
+  /** forward·sunDir span over which god rays fade as the sun leaves view */
+  sunVisEdge: number;
 }
 
 export const underwaterParams: UnderwaterParams = registerParams(
@@ -91,6 +95,8 @@ export const underwaterParams: UnderwaterParams = registerParams(
     vignetteStrength: 0.35,
     vignetteDepthScale: 0.01,
     waterlineSamples: 16,
+    nightFloor: 0.06,
+    sunVisEdge: 0.2,
   },
   {
     fogDensity: { min: 0, max: 0.4, step: 0.001 },
@@ -116,5 +122,7 @@ export const underwaterParams: UnderwaterParams = registerParams(
     vignetteStrength: { min: 0, max: 1, step: 0.01 },
     vignetteDepthScale: { min: 0, max: 0.1, step: 0.001 },
     waterlineSamples: { min: 4, max: 64, step: 1 },
+    nightFloor: { min: 0, max: 0.5, step: 0.01 },
+    sunVisEdge: { min: 0.05, max: 1, step: 0.01 },
   },
 );

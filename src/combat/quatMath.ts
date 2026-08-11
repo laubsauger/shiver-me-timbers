@@ -49,6 +49,18 @@ export function invRotateVec(q: Quat, v: Vec3): Vec3 {
   return rotateVec([-q[0], -q[1], -q[2], q[3]], v);
 }
 
+/** Hamilton product a⊗b: rotation that applies b first, then a. */
+export function quatMul(a: Quat, b: Quat): Quat {
+  const [ax, ay, az, aw] = a;
+  const [bx, by, bz, bw] = b;
+  return [
+    aw * bx + ax * bw + ay * bz - az * by,
+    aw * by - ax * bz + ay * bw + az * bx,
+    aw * bz + ax * by - ay * bx + az * bw,
+    aw * bw - ax * bx - ay * by - az * bz,
+  ];
+}
+
 /** Unit quaternion from a normalized axis and an angle in radians. */
 export function quatFromAxisAngle(axis: Vec3, angle: number): Quat {
   const h = angle / 2;

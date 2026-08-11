@@ -76,6 +76,7 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
       // view-space light directions for the fake-sphere puff shading
       camera.updateMatrixWorld();
       invView.copy(camera.matrixWorld).invert();
+      cores.uSunWorld.value.copy(sunDir).normalize();
       cores.uSunView.value.copy(sunDir).normalize().transformDirection(invView);
       cores.uUpView.value.set(0, 1, 0).transformDirection(invView);
 

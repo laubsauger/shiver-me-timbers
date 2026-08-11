@@ -1,0 +1,86 @@
+/**
+ * Pure steering helpers for enemy AI (T19, §V.15).
+ * §V.2/§V.3: deterministic plain math over SimState data — no three.js,
+ * no side effects, safe for headless lockstep replay.
+ *
+ * Conventions (match ship blueprint + combat/cannons.ts, §V.13):
+ *  - ship-local +z = bow, +x = starboard;
+ *  - yaw θ ⇒ world forward [sin θ, 0, cos θ]; increasing yaw = turn to
+ *    starboard; positive rudder = turn to starboard;
+ *  - wind.direction = bearing the wind blows TOWARD, so dead upwind
+ *    (the "no-go" bearing) = direction + π.
+ */
+import type { Quat, Vec3 } from '../state/simState';
+import { rotateVec } from '../combat/quatMath';
+import type { AiParams } from '../params/ai';
+
+/** Wrap an angle to (-π, π]. */
+export function wrapAngle(a: number): number {
+  const t = a % (2 * Math.PI);
+  if (t > Math.PI) return t - 2 * Math.PI;
+  if (t < -Math.PI) return t + 2 * Math.PI;
+  return t;
+}
+
+/** Yaw of a ship quaternion: heading of the world-space bow direction. */
+export function yawOf(q: Quat): number {
+  const f = rotateVec(q, [0, 0, 1]);
+  return Math.atan2(f[0], f[2]);
+}
+
+/** World bearing from `from` to the point (x, z), same convention as yaw. */
+export function bearingTo(from: Vec3, x: number, z: number): number {
+  return Math.atan2(x - from[0], z - from[2]);
+}
+
+/** Signed heading error, positive = target lies to starboard. */
+export function headingError(yaw: number, targetYaw: number): number {
+  return wrapAngle(targetYaw - yaw);
+}
+
+/** Proportional rudder with deadband, clamped to [-1, 1]. */
+export function rudderFromError(error: number, p: AiParams): number {
+  if (Math.abs(error) < p.rudderDeadband) return 0;
+  return Math.max(-1, Math.min(1, error * p.rudderGain));
+}
+
+/**
+ * Point-of-sail aware heading: if the desired heading sits inside the
+ * irons cone around dead upwind, tack instead — hold the ~45°-off-wind
+ * heading on the side the bow already points to. The tackHysteresis band
+ * around the wind line keeps the choice from oscillating: the side only
+ * flips once yaw has actually crossed the line by more than the band
+ * (inside the band the stable desired-target side decides).
+ */
+export function resolveHeading(
+  desiredYaw: number,
+  currentYaw: number,
+  windDirection: number,
+  p: AiParams,
+): number {
+  const upwind = wrapAngle(windDirection + Math.PI);
+  const offUpwind = wrapAngle(desiredYaw - upwind);
+  if (Math.abs(offUpwind) >= p.ironsCone) return desiredYaw; // directly sailable
+  const relYaw = wrapAngle(currentYaw - upwind);
+  let side: number;
+  if (Math.abs(relYaw) > p.tackHysteresis) side = relYaw >= 0 ? 1 : -1;
+  else side = offUpwind !== 0 ? Math.sign(offUpwind) : 1;
+  return wrapAngle(upwind + side * p.tackAngle);
+}
+
+/**
+ * Sail trim for the current point of sail: minSailTrim when pinching at
+ * the irons cone, ramping linearly to 1 at fullTrimAngle off the wind.
+ * Always inside [minSailTrim, 1] ⊂ [0, 1].
+ */
+export function sailTrimFor(
+  yaw: number,
+  windDirection: number,
+  p: AiParams,
+): number {
+  const upwind = wrapAngle(windDirection + Math.PI);
+  const off = Math.abs(wrapAngle(yaw - upwind));
+  const span = Math.max(1e-6, p.fullTrimAngle - p.ironsCone);
+  const t = Math.max(0, Math.min(1, (off - p.ironsCone) / span));
+  return p.minSailTrim + (1 - p.minSailTrim) * t;
+}

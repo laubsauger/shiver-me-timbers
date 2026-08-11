@@ -115,10 +115,11 @@ describe('heightAt inverse displacement (§V.8: FFT heights live at displaced po
   it('querying at a displaced surface point recovers that point height', () => {
     // Without inversion, choppy waves shift crests sideways and the ship
     // would float on water ~Dx meters away from where it visually sits.
-    // Choppiness 1.0: below the wave-folding regime (J>0) where the
-    // fixed-point map is contractive — at λ→1.4 crests can fold and no
-    // finite iteration count recovers a unique surface point.
-    const op = testOceanParams({ choppiness: 1.0 });
+    // Moderate sea (amp 0.4, λ 1.0): keeps the surface in the contractive
+    // regime (J>0, |∇D|<1) where fixed-point iteration converges — folded
+    // storm crests have no unique surface point for ANY iteration count,
+    // so testing there would measure the sea, not the algorithm.
+    const op = testOceanParams({ choppiness: 1.0, amplitude: 0.4 });
     const sp = testSeaParams();
     const ocean = new CpuOcean(7, op, sp);
     const t = 10;
@@ -131,7 +132,7 @@ describe('heightAt inverse displacement (§V.8: FFT heights live at displaced po
       const s = ocean.sampleRaw(x, z);
       if (Math.hypot(s.dx, s.dz) < 0.2) continue;
       const found = ocean.heightAt(x + s.dx, z + s.dz, t);
-      expect(Math.abs(found - s.height)).toBeLessThan(0.2);
+      expect(Math.abs(found - s.height)).toBeLessThan(0.15);
       tested++;
     }
     // fail loud if the sea was too calm for the test to mean anything

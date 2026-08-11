@@ -61,10 +61,10 @@ T3|~|FFT ocean compute: spectrum gen (Phillips+wind), IFFT passes, 3-cascade dis
 T4|.|ocean surface mesh+material: clipmap grid, TSL cascade-blend displace, SSS fake, specular+sparkle glints, depth-based color|V4,V5,V20
 T5|~|foam sim: Jacobian inject compute, progressive blur ping StorageTextures, crest/soft tex blend|V6
 T6|~|weather presets: calm/swell/storm param sets, wind vector, storm foam bias|V7
-T7|~|buoyancy: CPU spectrum mirror or readback, sample heights @ ship probe points, float+righting torque|V8
+T7|x|buoyancy: CPU spectrum mirror or readback, sample heights @ ship probe points, float+righting torque|V8
 T8|~|proc ship: piece graph gen, 2 classes (galleon 3-mast per docs/ship-*.png + brigantine 2-mast), sockets, sail states, wood PBR tri-planar|V13,V18
 T9|~|sail+steer: rudder, sail trim vs wind, ship kinematics on water|V2,V8
-T10|~|camera: follow+orbit, deck walk optional later|-
+T10|x|camera: follow+orbit, deck walk optional later|-
 T11|~|ropes: catenary compute + instanced render, anchor @ sockets, re-solve on mast move|V12,V13
 T12|~|deck water: Mei 2-pass compute 512x192, rotation bias, wet material hook|V9
 T13|~|intersection foam: depth mask in water material, advect+accum compute, flowmap noise tex|V10
@@ -75,7 +75,7 @@ T17|~|destruction: damage zones, piece swap holed, splinters, mast break + rope 
 T18|.|flooding+sink: hole-below-waterline ingress, list/trim, sink sequence|V14,V8
 T19|~|enemy AI ship: state machine, broadside logic, uses same ship systems|V15
 T20|~|island: heightmap terrain, rock intersection foam, waterfall plane w/ flow foam|V10
-T21|~|audio: waves, creaks, cannon, ambience (howler or WebAudio thin)|-
+T21|x|audio: waves, creaks, cannon, ambience (howler or WebAudio thin)|-
 T22|.|polish pass: LUT/grade, vignette, foam art tex, param tuning vs talk footage|V17
 T23|.|perf pass: budget audit, pass timings vs V17, resolution scaling knob|V17
 T24|.|ocean acceptance: side-by-side capture vs reference PNGs+footage, iterate until user signoff|V20

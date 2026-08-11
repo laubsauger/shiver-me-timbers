@@ -12,6 +12,7 @@ import {
   cameraPosition,
   positionWorld,
   screenUV,
+  smoothstep,
   texture,
   texture3D,
   uniform,
@@ -109,14 +110,20 @@ export function createCloudComposite(
 
   const packed = texture(blurred, screenUV.add(noise.xy.sub(0.5).mul(uDistortStrength)));
   const coverage = packed.b;
-  const erode = noise.z.sub(0.5).mul(uEdgeErode);
   // channel/B recovers the weighted average from the premultiplied pack
   const denom = coverage.max(1e-4);
   material.colorNode = uSunColor
     .mul(packed.r.div(denom))
     .add(uSkyColor.mul(packed.g.div(denom)));
-  material.opacityNode = coverage.add(erode.mul(coverage.oneMinus()))
-    .mul(uAlphaGain)
+  // alpha: soft exponential body (never a hard step) gated by a noisy rim
+  // threshold — erosion only removes coverage, so empty sky stays alpha 0
+  // (the old additive erosion tinted the whole sky grey). smoothstep in
+  // functional form per §V23: smoothstep(edge0, edge1, x).
+  const cov = coverage.mul(uAlphaGain);
+  const body = cov.mul(-1.6).exp().oneMinus();
+  const rimT = noise.z.mul(uEdgeErode);
+  material.opacityNode = body
+    .mul(smoothstep(rimT, rimT.add(0.55), cov))
     .clamp(0, 1);
   material.transparent = true;
   material.depthWrite = false;
