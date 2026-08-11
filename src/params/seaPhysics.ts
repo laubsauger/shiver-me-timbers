@@ -42,10 +42,12 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     buoyancySpring: 4.2e5,
     buoyancyDamping: 9e4,
     mass: 1.5e5,
-    inertiaPitch: 1.6e7,
-    inertiaYaw: 1.6e7,
-    inertiaRoll: 1.5e6,
-    angularDamping: 0.4,
+    // a laden galleon carries enormous rotational inertia — roll period
+    // target ~6-8s, slow ponderous response, never dinghy-snappy
+    inertiaPitch: 2.4e7,
+    inertiaYaw: 2.4e7,
+    inertiaRoll: 1.4e7,
+    angularDamping: 0.65,
   },
   {
     updateEveryTicks: { min: 1, max: 10, step: 1 },

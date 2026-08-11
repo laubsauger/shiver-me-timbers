@@ -23,6 +23,8 @@ export interface SkyHandle {
   /** live normalized world-space direction toward the sun */
   sunDirection: THREE.Vector3;
   sunLight: THREE.DirectionalLight;
+  /** keep the sun-shadow frustum centered on the player ship */
+  setShadowFocus(x: number, y: number, z: number): void;
   configureRenderer(renderer: THREE.WebGPURenderer): void;
   dispose(): void;
 }
@@ -38,6 +40,7 @@ export function createSky(opts: { scene: THREE.Scene }): SkyHandle {
   const handle: SkyHandle = {
     sunDirection,
     sunLight: rig.sunLight,
+    setShadowFocus: (x, y, z) => rig.setShadowFocus(x, y, z),
     update(timeOfDay: number): void {
       const dir = computeSunDirection(timeOfDay, skyParams.latitude);
       const elevation = sunElevation(timeOfDay, skyParams.latitude);

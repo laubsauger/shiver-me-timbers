@@ -11,9 +11,9 @@
  * Value refs: docs/final-full-result.png (bright tropical, ≈calm→swell) and
  * docs/handoff.md §2 (storm: amplitude up + heavier foam bias → big patches).
  */
-import type { OceanParams } from '../params/ocean';
-import type { SkyParams } from '../params/sky';
-import type { CloudParams } from '../params/clouds';
+import { oceanParams, type OceanParams } from '../params/ocean';
+import { skyParams, type SkyParams } from '../params/sky';
+import { cloudParams, type CloudParams } from '../params/clouds';
 
 /**
  * The tunables every preset must provide. `Pick` (required keys) is the
@@ -63,20 +63,22 @@ export const weatherPresets: Readonly<
   // defaults (tests assert this) so applying it restores factory values.
   swell: {
     ocean: {
-      amplitude: 0.7, // = oceanParams default (retuned vs SoT reference)
-      windSpeed: 8, // = oceanParams default
-      choppiness: 1.05, // = oceanParams default
-      jacobianFoamBias: 0.3, // = oceanParams default (inject where J < bias)
+      // captured from the live params modules at import time — swell IS the
+      // factory default, so ocean-tuning iterations can't desync this preset
+      amplitude: oceanParams.amplitude,
+      windSpeed: oceanParams.windSpeed,
+      choppiness: oceanParams.choppiness,
+      jacobianFoamBias: oceanParams.jacobianFoamBias,
     },
     sky: {
-      hazeStrength: 0.55, // = skyParams default (clear-blue baseline)
-      sunIntensity: 3.2, // = skyParams default
-      ambientIntensity: 0.85, // = skyParams default
+      hazeStrength: skyParams.hazeStrength,
+      sunIntensity: skyParams.sunIntensity,
+      ambientIntensity: skyParams.ambientIntensity,
     },
     clouds: {
-      coverage: 0.35, // = cloudParams default (fair-weather baseline)
-      sunColor: 0xfff1d4, // = cloudParams default
-      skyColor: 0xe9eff5, // = cloudParams default
+      coverage: cloudParams.coverage,
+      sunColor: cloudParams.sunColor,
+      skyColor: cloudParams.skyColor,
     },
   },
 

@@ -44,6 +44,8 @@ export class App {
     const renderer = new THREE.WebGPURenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     await renderer.init();
     return new App(container, renderer);
   }

@@ -37,17 +37,37 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
   scene.add(sunLight.target);
   scene.add(hemi);
 
+  // dynamic shadows: sun casts, ortho frustum tracks a follow target so the
+  // ship (sails → deck → water) always sits inside the shadow map
+  sunLight.castShadow = true;
+  sunLight.shadow.mapSize.set(2048, 2048);
+  const sc = sunLight.shadow.camera;
+  sc.near = 50;
+  sc.far = 2600;
+  sc.left = -80;
+  sc.right = 80;
+  sc.top = 80;
+  sc.bottom = -80;
+  sunLight.shadow.bias = -0.0004;
+  sunLight.shadow.normalBias = 0.5;
+
+  const followTarget = new THREE.Vector3();
+
   return {
     sunLight,
     hemi,
+    /** shadow frustum follows this point (the player ship) */
+    setShadowFocus(x: number, y: number, z: number): void {
+      followTarget.set(x, y, z);
+    },
     /** move + recolor lights and sync fog for a new sun state */
     update(sunDir: Vec3, elevation: number): void {
       sunLight.position.set(
-        sunDir[0] * p.sunDistance,
-        sunDir[1] * p.sunDistance,
-        sunDir[2] * p.sunDistance,
+        followTarget.x + sunDir[0] * p.sunDistance,
+        followTarget.y + sunDir[1] * p.sunDistance,
+        followTarget.z + sunDir[2] * p.sunDistance,
       );
-      sunLight.target.position.set(0, 0, 0);
+      sunLight.target.position.copy(followTarget);
       const sun = sunColor(elevation);
       const day = daylight(elevation);
       sunLight.color.setRGB(sun[0], sun[1], sun[2]);

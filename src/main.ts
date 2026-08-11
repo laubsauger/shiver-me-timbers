@@ -18,6 +18,8 @@ import { createInputCollector } from './sailing/input';
 import { stepShipSailing } from './sailing/shipKinematics';
 import { createFollowCam } from './camera';
 import { createWeatherSystem } from './weather';
+import { createPostPipeline } from './core/postPipeline';
+import { postParams } from './params/post';
 import { createGameUI } from './ui';
 import { createAudio } from './audio';
 import { CpuOcean } from './sea-physics/cpuOcean';
@@ -54,7 +56,11 @@ async function boot(): Promise<void> {
     ocean.cascades.map((c) => ({ displacement: c.displacement, domain: c.domain })),
     oceanParams.resolution,
   );
-  const surface = new OceanSurface(ocean, foam);
+  // §V.10 intersection foam + ship wake (T13) — created before the surface
+  // so the material can sample the wake mask
+  const flowFoam = createFlowFoam();
+
+  const surface = new OceanSurface(ocean, foam, flowFoam);
   app.scene.add(surface.group);
 
   // crest + bow spray particles (T5 follow-up)
@@ -64,9 +70,6 @@ async function boot(): Promise<void> {
   );
   const bowSpray = createBowSpray();
   app.scene.add(spray.mesh, bowSpray.mesh);
-
-  // §V.10 intersection foam + ship wake (T13)
-  const flowFoam = createFlowFoam();
 
   const clouds = createClouds({
     renderer: app.renderer,
@@ -111,12 +114,22 @@ async function boot(): Promise<void> {
     sternZ = Math.min(sternZ, piece.transform.position[2] + piece.aabb.min[2]);
     beamHalf = Math.max(beamHalf, Math.abs(piece.transform.position[0]) + piece.aabb.max[0]);
   }
-  // tag hull meshes as intersection-foam targets (§V.10)
+  // tag hull meshes as intersection-foam targets (§V.10); everything on the
+  // ship casts + receives sun shadows (sails onto deck, masts onto sails…)
   shipAssembly.group.traverse((o) => {
     if (o.name.startsWith('hull') || o.name.includes('-hull')) {
       o.userData.foamTarget = true;
     }
+    if ((o as Mesh).isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
   });
+  // the water receives ship shadows too
+  surface.group.traverse((o) => {
+    if ((o as Mesh).isMesh) o.receiveShadow = true;
+  });
+  ropes.mesh.castShadow = true;
 
   // §V.8: CPU mirror of the same seeded spectrum the GPU renders
   const cpuOcean = new CpuOcean(state.seed);
@@ -136,6 +149,8 @@ async function boot(): Promise<void> {
   });
 
   const audio = createAudio();
+
+  const post = createPostPipeline(app.renderer, app.scene, app.camera);
 
   // render-side interpolation caches (§V.2: sim ticks at 60Hz, render at
   // display rate — lerping prev→curr tick kills transform micro-stutter)
@@ -174,6 +189,7 @@ async function boot(): Promise<void> {
     (alpha, frameDt) => {
       debug.hud.frame(frameDt * 1000);
 
+      sky.setShadowFocus(playerShip.position[0], playerShip.position[1], playerShip.position[2]);
       sky.update(skyParams.timeOfDay);
 
       let t = performance.now();
@@ -247,7 +263,12 @@ async function boot(): Promise<void> {
       audio.update({ windSpeed: state.wind.speed, weather: state.weather }, frameDt);
 
       surface.update(app.camera, state.time, sky.sunDirection);
-      app.render();
+      if (postParams.enabled) {
+        post.updateFromParams();
+        post.render();
+      } else {
+        app.render();
+      }
       debug.hud.setRenderStats(app.renderer.info.render);
     },
   );
@@ -266,7 +287,7 @@ async function boot(): Promise<void> {
   };
 }
 
-import { Quaternion, Vector2, Vector3 } from 'three/webgpu';
+import { Quaternion, Vector2, Vector3, type Mesh } from 'three/webgpu';
 const tmpDir = new Vector3();
 const windDirTmp = new Vector2();
 const bowWorldTmp = new Vector3();
