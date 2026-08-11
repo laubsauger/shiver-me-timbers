@@ -17,8 +17,10 @@ import {
   type Vec3,
 } from '../src/state/simState';
 import { SIM_DT } from '../src/core/loop';
-import { quatFromAxisAngle, rotateVec } from '../src/combat/quatMath';
+import { quatFromAxisAngle, quatMul, rotateVec } from '../src/combat/quatMath';
 import { stepShipSailing, type Wind } from '../src/sailing/shipKinematics';
+import { CpuOcean } from '../src/sea-physics/cpuOcean';
+import { stepShipBuoyancy } from '../src/sea-physics/buoyancy';
 import { KeyboardInput, neutralInput, type InputState } from '../src/sailing/input';
 import { sailingParams } from '../src/params/sailing';
 
@@ -46,6 +48,18 @@ function yawOf(q: Quat): number {
 
 function planarSpeed(v: Vec3): number {
   return Math.hypot(v[0], v[2]);
+}
+
+/** bow elevation, rad — matches buoyancy's stored-pitch convention */
+function pitchOf(q: Quat): number {
+  const y = rotateVec(q, [0, 0, 1])[1];
+  return Math.asin(y < -1 ? -1 : y > 1 ? 1 : y);
+}
+
+/** roll, rad, starboard-up positive — exact while pitch is 0 */
+function rollOf(q: Quat): number {
+  const y = rotateVec(q, [1, 0, 0])[1];
+  return Math.asin(y < -1 ? -1 : y > 1 ? 1 : y);
 }
 
 function wrapPi(a: number): number {
@@ -147,6 +161,73 @@ describe('force model', () => {
     for (let i = 0; i < 200; i++) stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
     expect(ship.position[1]).toBe(1.23);
     expect(ship.velocity[1]).toBe(-0.5);
+  });
+});
+
+describe('orientation contract with buoyancy (§B.6)', () => {
+  it('preserves buoyancy pitch through the recompose — bow stays up', () => {
+    // WHY §B.6a: the old yaw∘heel recompose erased buoyancy's pitch 60×/s
+    // (ship never pitched). Recompose must be yaw∘pitch∘roll.
+    const ship = makeShip(0, 0);
+    ship.quaternion = quatMul(
+      quatFromAxisAngle([0, 1, 0], 0.5),
+      quatFromAxisAngle([1, 0, 0], -0.1), // pitch +0.1 = bow up
+    );
+    for (let i = 0; i < 300; i++) stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
+    expect(pitchOf(ship.quaternion)).toBeCloseTo(0.1, 6);
+    // buoyancy's pitch-memory workaround keys off forward.y ≈ 0; surviving
+    // pitch keeps that branch dormant → no double-pitch
+    expect(Math.abs(rotateVec(ship.quaternion, [0, 0, 1])[1])).toBeGreaterThan(1e-6);
+  });
+
+  it('with sails furled, orientation is a fixed point of the recompose', () => {
+    // decompose→recompose roundtrip: no thrust, no way, no heel target →
+    // yaw, pitch AND roll must all pass through bit-near-exactly
+    const q0 = quatMul(
+      quatFromAxisAngle([0, 1, 0], 0.5),
+      quatMul(quatFromAxisAngle([1, 0, 0], -0.15), quatFromAxisAngle([0, 0, 1], 0.2)),
+    );
+    const ship = makeShip(0, 0);
+    ship.quaternion = [...q0] as Quat;
+    for (let i = 0; i < 300; i++) stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
+    for (let k = 0; k < 4; k++) expect(ship.quaternion[k]).toBeCloseTo(q0[k], 6);
+  });
+
+  it('wind heel is an OFFSET on wave roll, not a relax of total roll', () => {
+    // WHY §B.6b: heelResponse used to pull TOTAL roll toward wind-heel,
+    // eating ~half of buoyancy's wave-roll amplitude. A pre-existing roll
+    // must survive intact with the wind heel added on top.
+    const p = sailingParams;
+    const waveRoll = 0.2;
+    const ship = makeShip(Math.PI / 2); // beam wind, full trim
+    ship.quaternion = quatMul(ship.quaternion, quatFromAxisAngle([0, 0, 1], waveRoll));
+    for (let i = 0; i < 900; i++) stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
+    // beam wind: latWindForce = -speed², targetHeel = +heelGain·speed²
+    const targetHeel = Math.min(p.heelGain * WIND.speed * WIND.speed, p.maxHeel);
+    expect(rollOf(ship.quaternion)).toBeCloseTo(waveRoll + targetHeel, 3);
+  });
+
+  it('full tick order sailing→buoyancy: pitch alive, bounded, no double-add', () => {
+    // WHY: buoyancy re-applies remembered pitch ONLY when the incoming quat
+    // is pitch-stripped. If both systems contributed pitch, it would grow
+    // tick over tick; if sailing still stripped it, it would stay ~0.
+    const ocean = new CpuOcean(7);
+    const ship = makeShip(Math.PI / 2);
+    const input = neutralInput();
+    let maxPitch = 0;
+    for (let i = 0; i < 1800; i++) {
+      const t = (i + 1) * SIM_DT;
+      ocean.update(t);
+      stepShipSailing(ship, input, WIND, SIM_DT);
+      stepShipBuoyancy(ship, ocean, SIM_DT);
+      if (i >= 600) maxPitch = Math.max(maxPitch, Math.abs(pitchOf(ship.quaternion)));
+      if (!ship.quaternion.every(Number.isFinite)) {
+        throw new Error(`quaternion went non-finite at tick ${i}`);
+      }
+    }
+    const maxPitchDeg = (maxPitch * 180) / Math.PI;
+    expect(maxPitchDeg).toBeGreaterThan(0.2); // waves actually pitch the bow
+    expect(maxPitchDeg).toBeLessThan(15); // and nothing double-adds/runs away
   });
 });
 

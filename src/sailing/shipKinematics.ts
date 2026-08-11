@@ -3,20 +3,21 @@
  * §V.2: pure deterministic fixed-tick math, no randomness, no wall clock.
  * §V.3: sim-side — no three.js; mutates only ShipState plain data.
  *
- * SPLIT CONTRACT with buoyancy (src/sea-physics, T7 — not yet landed):
- * sailing owns yaw, heel-toward-wind, and PLANAR velocity/position only.
- * It never writes position[1] or velocity[1] — vertical float, pitch and
- * roll-restore belong to buoyancy. Until sea-physics exists, sailing
- * self-bounds heel by steering toward a clamped target angle; once
- * buoyancy lands, it must compose orientation from sailing's yaw/heel
- * rates instead of both systems writing the quaternion independently.
+ * SPLIT CONTRACT with buoyancy (src/sea-physics, §B.6 fix):
+ * sailing owns yaw, a wind-heel OFFSET on roll, and PLANAR velocity/
+ * position only. It never writes position[1]/velocity[1], PRESERVES the
+ * pitch buoyancy integrated (recompose is yaw∘pitch∘roll, never yaw∘heel),
+ * and never relaxes total roll: wind heel is tracked separately and added
+ * on top of the wave-roll component, so buoyancy's roll dynamics pass
+ * through untouched. Buoyancy's pitch-memory workaround detects surviving
+ * pitch (forward.y ≠ 0) and self-deactivates — no double-pitch.
  *
  * Conventions: ship forward = local +z; yaw about +y, yaw 0 → world +z,
  * heading = [sin yaw, 0, cos yaw]; starboard = [cos yaw, 0, -sin yaw].
  * wind.direction is the direction the wind blows TOWARD (same convention
  * as yaw). Positive rudder (D) turns to starboard (yaw increases).
  */
-import type { ShipState } from '../state/simState';
+import type { Quat, ShipState } from '../state/simState';
 import type { InputState } from './input';
 import { quatFromAxisAngle, quatMul, rotateVec } from '../combat/quatMath';
 import { sailingParams, type SailingParams } from '../params/sailing';
@@ -26,6 +27,16 @@ export interface Wind {
   speed: number; // m/s
 }
 
+/**
+ * Wind-heel memory keyed by ShipState identity (plain-data state stays
+ * untouched, §V.3 — same pattern as buoyancy's seaMemory). Derived cache
+ * only: windHeel re-converges from ship+wind within ~1/heelResponse s, so
+ * losing it (reload) costs a brief heel blend restart, nothing
+ * sim-hash-relevant accumulates here. Deterministic under §V.2: its value
+ * is a pure function of the tick-ordered ship+wind history.
+ */
+const heelMemory = new WeakMap<ShipState, { windHeel: number }>();
+
 function clamp(x: number, lo: number, hi: number): number {
   return x < lo ? lo : x > hi ? hi : x;
 }
@@ -33,6 +44,13 @@ function clamp(x: number, lo: number, hi: number): number {
 function smoothstep01(t: number): number {
   const x = clamp(t, 0, 1);
   return x * x * (3 - 2 * x);
+}
+
+function wrapPi(a: number): number {
+  let x = a % (Math.PI * 2);
+  if (x <= -Math.PI) x += Math.PI * 2;
+  else if (x > Math.PI) x -= Math.PI * 2;
+  return x;
 }
 
 /**
@@ -53,11 +71,19 @@ export function stepShipSailing(
   dt: number,
   params: SailingParams = sailingParams,
 ): void {
-  // --- decompose current orientation (yaw ∘ heel; pitch is buoyancy's) ---
+  // --- decompose q = yaw(Y) ∘ pitch(X) ∘ roll(Z), Tait-Bryan y-x'-z''.
+  // forward = [cos p·sin y, sin p, cos p·cos y] gives yaw+pitch directly
+  // (|pitch| < π/2 for any floating hull, so cos p > 0 and atan2 is safe);
+  // roll = residual rotation about local z after removing yaw∘pitch.
   const fwd3 = rotateVec(ship.quaternion, [0, 0, 1]);
+  const pitch = Math.asin(clamp(fwd3[1], -1, 1));
   const yaw = Math.atan2(fwd3[0], fwd3[2]);
-  const right3 = rotateVec(ship.quaternion, [1, 0, 0]);
-  let heel = Math.asin(clamp(right3[1], -1, 1));
+  // R_x(−pitch) maps forward [0,0,1] → [0, sin pitch, cos pitch] — same
+  // sign convention as buoyancy's stored pitch (asin of forward.y)
+  const qPitch = quatFromAxisAngle([1, 0, 0], -pitch);
+  const qYP = quatMul(quatFromAxisAngle([0, 1, 0], yaw), qPitch);
+  const qRes: Quat = quatMul([-qYP[0], -qYP[1], -qYP[2], qYP[3]], ship.quaternion);
+  const roll = wrapPi(2 * Math.atan2(qRes[2], qRes[3]));
 
   const fx = Math.sin(yaw);
   const fz = Math.cos(yaw);
@@ -104,14 +130,21 @@ export function stepShipSailing(
   const newYaw = yaw + yawRate * dt;
   ship.angularVelocity[1] = yawRate;
 
-  // --- heel: bounded target ∝ lateral wind force on the set sail, exp
-  // approach (self-righting stands in for buoyancy until T7 lands) ---
+  // --- wind heel: bounded target ∝ lateral wind force on the set sail.
+  // Applied as an OFFSET on top of the wave roll (roll − previous heel):
+  // only sailing's own contribution is relaxed, buoyancy's roll survives.
+  let mem = heelMemory.get(ship);
+  if (mem === undefined) {
+    mem = { windHeel: 0 };
+    heelMemory.set(ship, mem);
+  }
+  const waveRoll = roll - mem.windHeel;
   const latWindForce = wind.speed * wind.speed * ship.sailTrim * (wx * rx + wz * rz);
   const targetHeel = clamp(-params.heelGain * latWindForce, -params.maxHeel, params.maxHeel);
-  heel += (targetHeel - heel) * (1 - Math.exp(-params.heelResponse * dt));
+  mem.windHeel += (targetHeel - mem.windHeel) * (1 - Math.exp(-params.heelResponse * dt));
 
   ship.quaternion = quatMul(
     quatFromAxisAngle([0, 1, 0], newYaw),
-    quatFromAxisAngle([0, 0, 1], heel),
+    quatMul(qPitch, quatFromAxisAngle([0, 0, 1], waveRoll + mem.windHeel)),
   );
 }

@@ -197,7 +197,10 @@ export function stepShipBuoyancy(
   w[1] = wWorld[1] * decay;
   w[2] = wWorld[2] * decay;
 
-  ship.quaternion = integrateQuat(q, w, dt);
+  // yaw is integrated by SAILING directly into the quaternion (§B.6 split
+  // contract); integrating w[1] here again would double-count rudder turns.
+  // w[1] stays populated as info for AI/replay consumers.
+  ship.quaternion = integrateQuat(q, [w[0], 0, w[2]], dt);
   // remember our pitch (bow elevation) for next tick's strip-detection
   const fwd = rotateVec(ship.quaternion, [0, 0, 1]);
   const fy = fwd[1] < -1 ? -1 : fwd[1] > 1 ? 1 : fwd[1];
