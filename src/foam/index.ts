@@ -30,9 +30,14 @@ import { foamParams } from '../params/foam';
 import { oceanParams } from '../params/ocean';
 import { decayFactorPerFrame } from './foamMath';
 import { createBlurDecayPass, createInjectPass, createFoamUniforms } from './foamPasses';
-import { foamDetailMask, updateFoamShadingUniforms } from './foamShading';
+import {
+  capVariationNode,
+  foamDetailMask,
+  foamWarpVec,
+  updateFoamShadingUniforms,
+} from './foamShading';
 
-export { foamShadingNode, foamTintNode } from './foamShading';
+export { foamDetailMask, foamShadingNode, foamTintNode } from './foamShading';
 export { createSpray, createBowSpray } from './spray'; // crest + bow spray (see spray.ts/bowSpray.ts headers)
 
 export interface FoamCascadeInput {
@@ -44,16 +49,22 @@ export interface FoamCascadeInput {
 
 export function createFoamSim(cascades: FoamCascadeInput[], resolution: number) {
   const u = createFoamUniforms();
+  // fine ripple cascade gets its OWN uniforms: its ~14m jacobian tile stamps
+  // whitecaps on a perfect world grid (§V19, user-reported), so its inject is
+  // gated separately (bias sunk to -10 = never injects; decay still drains)
+  const uFine = createFoamUniforms();
+  let time = 0;
 
-  const lanes = cascades.map((c) => {
+  const lanes = cascades.map((c, i) => {
+    const lu = i === cascades.length - 1 ? uFine : u;
     const front = createOutputTexture(resolution); // A — stable output
     const back = createOutputTexture(resolution); // B — inject scratch
     return {
       domain: c.domain,
       front,
       back,
-      inject: createInjectPass(c.displacement, front, back, resolution, u),
-      blurDecay: createBlurDecayPass(back, front, resolution, u),
+      inject: createInjectPass(c.displacement, front, back, resolution, lu),
+      blurDecay: createBlurDecayPass(back, front, resolution, lu),
     };
   });
 
@@ -63,11 +74,17 @@ export function createFoamSim(cascades: FoamCascadeInput[], resolution: number) 
 
     /** run once per fixed sim tick (§V2), after the ocean cascade update */
     update(renderer: THREE.WebGPURenderer): void {
+      time += SIM_DT; // fixed-tick clock for the detail churn (§V2)
       u.uBias.value = oceanParams.jacobianFoamBias; // live, storm-driven §V7
       u.uInjectPerFrame.value = foamParams.injectStrength * SIM_DT;
       u.uDecay.value = decayFactorPerFrame(foamParams.decayHalfLife, SIM_DT);
       u.uRadius.value = foamParams.blurRadius;
-      updateFoamShadingUniforms(foamParams);
+      uFine.uBias.value =
+        foamParams.injectFineCascade >= 1 ? oceanParams.jacobianFoamBias : -10;
+      uFine.uInjectPerFrame.value = u.uInjectPerFrame.value;
+      uFine.uDecay.value = u.uDecay.value;
+      uFine.uRadius.value = u.uRadius.value;
+      updateFoamShadingUniforms(foamParams, time);
       for (const lane of lanes) {
         renderer.compute(lane.inject as Parameters<THREE.WebGPURenderer['compute']>[0]);
         renderer.compute(lane.blurDecay as Parameters<THREE.WebGPURenderer['compute']>[0]);
@@ -81,10 +98,18 @@ export function createFoamSim(cascades: FoamCascadeInput[], resolution: number) 
      * `worldXZ` = same node the material uses to sample displacement.
      */
     shadingNode(worldXZ: any): any {
+      // fbm domain-warp on the LOOKUP (world meters) — the low-res sim RT's
+      // texel grid otherwise reads as boxy patches (§V20 critique)
+      const warped = worldXZ.add(foamWarpVec(worldXZ));
       let raw: any = float(0);
       for (const lane of lanes) {
-        raw = raw.add(texture(lane.front, worldXZ.div(lane.domain)).r);
+        raw = raw.add(texture(lane.front, warped.div(lane.domain)).r);
       }
+      // world-space cap variation (NON-tiling, drifts slowly): the FFT field
+      // repeats per domain, so identical caps pulse in sync on a lattice —
+      // this mask gives every world position its own strength/lifecycle,
+      // and the detail knee then culls the weakened ones (§B.4 class fix)
+      raw = raw.mul(capVariationNode(worldXZ));
       return foamDetailMask(clamp(raw, 0, 1), worldXZ);
     },
 

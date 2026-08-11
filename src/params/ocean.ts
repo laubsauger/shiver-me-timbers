@@ -37,16 +37,18 @@ export interface OceanParams {
 
 export const oceanParams: OceanParams = registerParams('ocean', {
   resolution: 512,
-  cascades: [{ domain: 250 }, { domain: 60 }, { domain: 15 }],
+  // non-commensurate domains (§V19): 253/59 ≈ 4.29, 59/13.7 ≈ 4.31 — no pair
+  // re-aligns on a short world period, so foam/wave repeats don't grid up
+  cascades: [{ domain: 253 }, { domain: 59 }, { domain: 13.7 }],
   splitWavelengths: [24, 5],
-  amplitude: 0.7,
+  amplitude: 0.75,
   windSpeed: 8,
   windDirection: Math.PI * 0.25,
   directionality: 10,
   oppositeWaveDamp: 0.06,
-  smallWaveCutoff: 0.02,
-  choppiness: 1.05,
-  jacobianFoamBias: 0.3,
+  smallWaveCutoff: 0.03,
+  choppiness: 0.95,
+  jacobianFoamBias: 0.5,
 }, oceanParamsMeta());
 
 function oceanParamsMeta() {

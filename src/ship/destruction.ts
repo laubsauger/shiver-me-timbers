@@ -85,18 +85,24 @@ export interface FloodingHoles {
  * relative, so a rolled ship submerges different holes). T18 consumes.
  * Damage-zone carriers are unrotated pieces, so the parent-chain walk
  * accumulates translations only.
+ *
+ * `damageStates` accepts either explicit state ids or raw zone hp
+ * (ShipState.damage): hp ≤ holedThreshold counts as breached.
  */
 export function floodingHoles(
   blueprint: PieceDef[],
-  damageStates: Record<string, DamageStateId>,
+  damageStates: Record<string, DamageStateId | number>,
   shipQuat: Quat,
   waterlineY: number,
+  params: DestructionParams = destructionParams,
 ): FloodingHoles {
   const byId = new Map(blueprint.map((p) => [p.id, p]));
   const positions: Vec3[] = [];
   for (const piece of blueprint) {
     const state = damageStates[piece.id] ?? 'intact';
-    if (state === 'intact') continue;
+    const breached =
+      typeof state === 'number' ? state <= params.holedThreshold : state !== 'intact';
+    if (!breached) continue;
     for (const socket of piece.sockets) {
       if (socket.type !== 'damage-zone') continue;
       let local: Vec3 = [socket.position[0], socket.position[1], socket.position[2]];

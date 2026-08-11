@@ -36,16 +36,20 @@ export type FlowNoiseUniforms = ReturnType<typeof createFlowNoiseUniforms>;
 
 /**
  * TSL flow vector (m/s in world XZ) at a world position node.
+ * `curlScale` (optional node, default 1) multiplies ONLY the curl/eddy part,
+ * not the base drift — the accumulation pass feeds the local foam value in,
+ * so the wake trail itself churns with eddies while open ocean stays calm.
  * CPU mirror: flowMath.flowVectorCpu.
  */
-export function flowVectorNode(worldXZ: any, u: FlowNoiseUniforms): any {
+export function flowVectorNode(worldXZ: any, u: FlowNoiseUniforms, curlScale?: any): any {
   const scroll = u.uFlowDir.mul(u.uTime.mul(u.uScrollSpeed));
   const pot = (w: any) => fbm2(w.sub(scroll).mul(u.uNoiseScale), FLOW_OCTAVES);
   const p0 = pot(worldXZ);
   const dpdx = pot(worldXZ.add(vec2(u.uCurlStep, 0))).sub(p0).div(u.uCurlStep);
   const dpdz = pot(worldXZ.add(vec2(0, u.uCurlStep))).sub(p0).div(u.uCurlStep);
+  const strength = curlScale === undefined ? u.uNoiseStrength : u.uNoiseStrength.mul(curlScale);
   return vec2(
-    dpdz.mul(u.uNoiseStrength).add(u.uFlowDir.x.mul(u.uBaseSpeed)),
-    dpdx.negate().mul(u.uNoiseStrength).add(u.uFlowDir.y.mul(u.uBaseSpeed)),
+    dpdz.mul(strength).add(u.uFlowDir.x.mul(u.uBaseSpeed)),
+    dpdx.negate().mul(strength).add(u.uFlowDir.y.mul(u.uBaseSpeed)),
   );
 }

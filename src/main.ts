@@ -41,6 +41,8 @@ const FEATURES = {
   spray: false,
   bowSpray: false,
   flowFoam: true, // re-enabled: T13 wake rework verification (see flowfoam report)
+  // ropes+blocks wired and ready — kept OFF pending the freeze-hunt bisect;
+  // flip to true for the T11 rig visual check once Chrome is back
   ropes: false,
 };
 

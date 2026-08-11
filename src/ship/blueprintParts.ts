@@ -24,6 +24,7 @@ export function mkPiece(
     damageStates?: DamageStateDef[];
     parent?: string;
     sailStates?: PieceDef['sailStates'];
+    shape?: Record<string, number>;
   } = {},
 ): PieceDef {
   const piece: PieceDef = {
@@ -36,7 +37,31 @@ export function mkPiece(
   };
   if (opts.parent !== undefined) piece.parent = opts.parent;
   if (opts.sailStates !== undefined) piece.sailStates = opts.sailStates;
+  if (opts.shape !== undefined) piece.shape = opts.shape;
   return piece;
+}
+
+/** hull-loft shape hints shared by hull sections / bow / deck (§V18 data) */
+export function hullShapeHints(
+  p: ShipClassParams,
+  side: number,
+  z0: number,
+  z1: number,
+): Record<string, number> {
+  return {
+    side,
+    z0,
+    z1,
+    beamHalf: p.beam / 2,
+    bowZ: p.hullLength / 2 + p.bowLength,
+    sternZ: -p.hullLength / 2,
+    draft: p.draft,
+    freeboard: p.freeboard,
+    sheerBow: p.sheerBow,
+    sheerStern: p.sheerStern,
+    tumblehome: p.tumblehome,
+    keelPinch: p.keelPinch,
+  };
 }
 
 export function buildKeel(p: ShipClassParams): PieceDef {
@@ -74,7 +99,29 @@ export function buildDeck(
   return mkPiece('deck', 'deck', [0, p.freeboard, 0], {
     min: [-p.beam / 2, -p.deckThickness, -p.hullLength / 2],
     max: [p.beam / 2, 0, p.hullLength / 2],
-  }, { sockets });
+  }, {
+    sockets,
+    shape: hullShapeHints(p, 0, -p.hullLength / 2, p.hullLength / 2),
+  });
+}
+
+/** greybox gun (barrel + carriage) per cannon-mount socket, parented to
+ *  the socket's carrier and rotated to fire outboard */
+export function buildCannons(host: PieceDef[]): PieceDef[] {
+  const cannons: PieceDef[] = [];
+  for (const piece of host) {
+    for (const socket of piece.sockets) {
+      if (socket.type !== 'cannon-mount') continue;
+      const sign = socket.position[0] >= 0 ? 1 : -1;
+      cannons.push(
+        mkPiece(socket.id.replace('cannon-', 'gun-'), 'cannon',
+          [socket.position[0], socket.position[1], socket.position[2]],
+          { min: [-0.35, 0, -1.1], max: [0.35, 0.9, 1.3] },
+          { parent: piece.id, rotation: [0, (sign * Math.PI) / 2, 0] }),
+      );
+    }
+  }
+  return cannons;
 }
 
 /** 3 sections per side, each a damage-zone carrier (§V.14 targets). */
@@ -83,7 +130,8 @@ export function buildHullSections(
   opts: { hullCannons: boolean },
 ): PieceDef[] {
   const segLen = p.hullLength / 3;
-  const t = p.hullThickness;
+  const bh = p.beam / 2;
+  const topY = p.freeboard + Math.max(p.sheerBow, p.sheerStern);
   const segs = [
     { name: 'bow', zc: segLen, cannons: [0], first: 1 },
     { name: 'mid', zc: 0, cannons: [segLen / 4, -segLen / 4], first: 2 },
@@ -96,7 +144,7 @@ export function buildHullSections(
         {
           id: `dz-hull-${side}-${seg.name}`,
           type: 'damage-zone',
-          position: [(sign * t) / 2, -0.4, 0],
+          position: [sign * bh * 0.85, -0.4, 0],
         },
       ];
       if (opts.hullCannons) {
@@ -104,18 +152,24 @@ export function buildHullSections(
           sockets.push({
             id: `cannon-${side}-${seg.first + i}`,
             type: 'cannon-mount',
-            position: [(sign * t) / 2, p.cannonMountHeight, z],
+            position: [sign * bh * 0.92, p.cannonMountHeight, z],
           });
         });
       }
       pieces.push(
+        // half-shell strip of the loft: piece origin on the centreline so
+        // the curved shell lives in piece space (aabb covers the half hull)
         mkPiece(`hull-${side}-${seg.name}`, 'hull-section',
-          [sign * ((p.beam - t) / 2), 0, seg.zc],
+          [0, 0, seg.zc],
           {
-            min: [-t / 2, -p.draft, -segLen / 2],
-            max: [t / 2, p.freeboard, segLen / 2],
+            min: [sign < 0 ? -bh : 0, -p.draft, -segLen / 2],
+            max: [sign < 0 ? 0 : bh, topY, segLen / 2],
           },
-          { sockets, damageStates: HULL_STATES.map((s) => ({ ...s })) }),
+          {
+            sockets,
+            damageStates: HULL_STATES.map((s) => ({ ...s })),
+            shape: hullShapeHints(p, sign, seg.zc - segLen / 2, seg.zc + segLen / 2),
+          }),
       );
     }
   }
@@ -130,18 +184,21 @@ export function buildBowAndTransom(p: ShipClassParams): PieceDef[] {
     position: pos,
   });
   return [
+    // stem: continues the hull loft from the sections' end to the point
     mkPiece('bow', 'bow', [0, 0, L2], {
       min: [-p.beam * 0.35, -p.draft, 0],
-      max: [p.beam * 0.35, p.freeboard, p.bowLength],
+      max: [p.beam * 0.35, p.freeboard + p.sheerBow, p.bowLength],
     }, {
       sockets: [
         cleat('bow-port', [-p.beam * 0.15, p.freeboard + 0.05, p.bowLength * 0.25]),
         cleat('bow-starboard', [p.beam * 0.15, p.freeboard + 0.05, p.bowLength * 0.25]),
       ],
+      shape: hullShapeHints(p, 0, L2, L2 + p.bowLength),
     }),
+    // transom plate matches the rounded-in stern envelope (~55% beam)
     mkPiece('transom', 'transom', [0, 0, -L2], {
-      min: [-p.beam * 0.4, -p.draft * 0.6, -0.35],
-      max: [p.beam * 0.4, p.freeboard, 0],
+      min: [-p.beam * 0.29, -p.draft * 0.6, -0.35],
+      max: [p.beam * 0.29, p.freeboard + p.sheerStern, 0],
     }, {
       sockets: [
         cleat('stern-port', [-p.beam * 0.2, p.freeboard + 0.05, -0.1]),
@@ -151,65 +208,29 @@ export function buildBowAndTransom(p: ShipClassParams): PieceDef[] {
   ];
 }
 
-/** Raised bow/stern works: forecastle, quarterdeck + cabin (stepped stern
- *  ~2 levels above main deck), gallery band, lantern posts. Galleon only. */
-export function buildCastles(p: ShipClassParams): PieceDef[] {
-  const L2 = p.hullLength / 2;
-  const cabinLen = p.sterncastleLength * 0.5;
-  const roofY = p.freeboard + p.sterncastleRise + p.cabinHeight;
-  return [
-    mkPiece('forecastle-deck', 'forecastle-deck',
-      [0, p.freeboard + p.forecastleRise, L2 - p.forecastleLength / 2],
-      {
-        min: [-p.beam * 0.425, -p.deckThickness, -p.forecastleLength / 2],
-        max: [p.beam * 0.425, 0, p.forecastleLength / 2],
-      }),
-    mkPiece('sterncastle-deck', 'sterncastle-deck',
-      [0, p.freeboard + p.sterncastleRise, -(L2 - p.sterncastleLength / 2)],
-      {
-        min: [-p.beam * 0.475, -p.deckThickness, -p.sterncastleLength / 2],
-        max: [p.beam * 0.475, 0, p.sterncastleLength / 2],
-      },
-      {
-        sockets: [{
-          id: 'socket-wheel',
-          type: 'fixture',
-          position: [0, 0.05, p.sterncastleLength / 2 - 0.4],
-        }],
-      }),
-    mkPiece('cabin', 'cabin',
-      [0, p.freeboard + p.sterncastleRise, -(L2 - cabinLen / 2 - 0.1)],
-      {
-        min: [-p.beam * 0.42, 0, -cabinLen / 2],
-        max: [p.beam * 0.42, p.cabinHeight, cabinLen / 2],
-      }),
-    mkPiece('gallery', 'gallery',
-      [0, p.freeboard + p.sterncastleRise + p.cabinHeight * 0.5, -(L2 + 0.15)],
-      {
-        min: [-p.beam * 0.38, -p.galleryHeight / 2, -0.12],
-        max: [p.beam * 0.38, p.galleryHeight / 2, 0.12],
-      }),
-    mkPiece('lantern-post-port', 'lantern-post',
-      [-p.beam * 0.32, roofY, -(L2 - 0.5)],
-      { min: [-0.1, 0, -0.1], max: [0.1, p.lanternPostHeight, 0.1] }),
-    mkPiece('lantern-post-starboard', 'lantern-post',
-      [p.beam * 0.32, roofY, -(L2 - 0.5)],
-      { min: [-0.1, 0, -0.1], max: [0.1, p.lanternPostHeight, 0.1] }),
-  ];
-}
-
 export function buildRails(
   p: ShipClassParams,
   opts: { sternBalustrade: boolean },
 ): PieceDef[] {
   const len = p.hullLength * p.railLengthFactor;
   const t = p.railThickness;
+  const maxSheer = Math.max(p.sheerBow, p.sheerStern);
   const pieces: PieceDef[] = [];
   for (const [side, sign] of [['port', -1], ['starboard', 1]] as const) {
+    // origin on the centreline: the run curves with taper + sheer (hints)
     pieces.push(
       mkPiece(`rail-${side}`, 'rail',
-        [sign * (p.beam / 2 - p.railInset), p.freeboard, 0],
-        { min: [-t / 2, 0, -len / 2], max: [t / 2, p.railHeight, len / 2] }),
+        [0, p.freeboard, 0],
+        {
+          min: [sign < 0 ? -p.beam / 2 : t, 0, -len / 2],
+          max: [sign < 0 ? -t : p.beam / 2, p.railHeight + maxSheer, len / 2],
+        },
+        {
+          shape: {
+            ...hullShapeHints(p, sign, -len / 2, len / 2),
+            railInset: p.railInset,
+          },
+        }),
     );
   }
   if (opts.sternBalustrade) {

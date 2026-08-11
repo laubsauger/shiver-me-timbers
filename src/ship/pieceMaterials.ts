@@ -15,11 +15,16 @@ import {
   type WoodTones,
 } from './woodMaterial';
 
-export { uShipSunDirection } from './woodMaterial';
+export { uShipSunDirection, uShipTime, uShipWindStrength } from './woodMaterial';
 
 type Family = 'hull' | 'deck' | 'spar' | 'trim' | 'sail';
 
 const FAMILY_OF: Record<PieceKind, Family> = {
+  cannon: 'trim',
+  wheel: 'trim',
+  capstan: 'trim',
+  grating: 'trim',
+  stairs: 'deck',
   'hull-section': 'hull',
   bow: 'hull',
   transom: 'hull',
@@ -72,10 +77,20 @@ function tracked(handle: ShipMaterialHandle, name: string): THREE.MeshStandardNo
   return handle.material;
 }
 
+/** open shells (lofted hull strips, lookout basket) render both faces so
+ *  looking inside never shows culled holes (§V22 critique) */
+const OPEN_SHELL_KINDS = new Set<PieceKind>(['hull-section', 'bow', 'crow-nest']);
+
 export function createPieceMaterial(kind: PieceKind): THREE.MeshStandardNodeMaterial {
   const family = FAMILY_OF[kind];
   const handle =
     family === 'sail' ? createSailClothMaterial() : createWoodMaterial(woodTones(family));
+  if (OPEN_SHELL_KINDS.has(kind)) handle.material.side = THREE.DoubleSide;
+  // double-sided shells + thin cloth: cast shadows from front faces only,
+  // otherwise coplanar back faces self-shadow (acne) under the sun map
+  if (OPEN_SHELL_KINDS.has(kind) || family === 'sail') {
+    handle.material.shadowSide = THREE.FrontSide;
+  }
   return tracked(handle, `piece-${kind}`);
 }
 

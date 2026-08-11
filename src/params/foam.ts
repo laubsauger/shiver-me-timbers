@@ -23,17 +23,36 @@ export interface FoamParams {
   mottleScale: number;
   /** 0 = pure white foam, 1 = fully warm-tinted (§V20 warm-tinted foam) */
   tintWarmth: number;
+  /** world-space frequency of the fbm domain-warp on the sim-texture lookup */
+  uvWarpScale: number;
+  /** warp amplitude in world meters — breaks the sim RT's texel grid */
+  uvWarpMeters: number;
+  /** drift speed of the foam detail noise (units of noise-space per second) */
+  detailScrollSpeed: number;
+  /** inject foam from the fine ripple cascade, 0|1 (default 0 — its ~14m
+   *  tile stamps caps on a visible world grid, §V19) */
+  injectFineCascade: number;
+  /** world-space frequency of the non-tiling cap-strength variation (§B.4) */
+  capVariationScale: number;
+  /** 0 = uniform caps, 1 = strong per-site strength/lifecycle variation */
+  capVariationStrength: number;
 }
 
 export const foamParams: FoamParams = registerParams(
   'foam',
   {
     injectStrength: 4.0,
-    decayHalfLife: 1.2,
+    decayHalfLife: 0.9,
     blurRadius: 1.0,
     crackleScale: 3.0,
     mottleScale: 0.35,
-    tintWarmth: 0.35,
+    tintWarmth: 0.12,
+    uvWarpScale: 0.12,
+    uvWarpMeters: 1.4,
+    detailScrollSpeed: 0.05,
+    injectFineCascade: 0,
+    capVariationScale: 0.03,
+    capVariationStrength: 0.8,
   },
   foamParamsMeta(),
 );
@@ -46,5 +65,11 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
     crackleScale: { min: 0.1, max: 20, step: 0.1 },
     mottleScale: { min: 0.01, max: 5, step: 0.01 },
     tintWarmth: { min: 0, max: 1, step: 0.01 },
+    uvWarpScale: { min: 0.01, max: 1, step: 0.01 },
+    uvWarpMeters: { min: 0, max: 6, step: 0.1 },
+    detailScrollSpeed: { min: 0, max: 0.5, step: 0.005 },
+    injectFineCascade: { min: 0, max: 1, step: 1 },
+    capVariationScale: { min: 0.002, max: 0.2, step: 0.002 },
+    capVariationStrength: { min: 0, max: 1, step: 0.05 },
   };
 }

@@ -79,6 +79,8 @@ export function createAccumulation(
   const uInjectPerFrame = uniform(0);
   const uDt = uniform(0); // wake rate is foam/sec; scaled per fixed tick (§V2)
   const uBlurRadius = uniform(p.blurRadius);
+  const uBlurMix = uniform(p.blurMix);
+  const uWakeChurn = uniform(p.wakeChurn);
   const uWaterHeight = uniform(0);
   const uThreshold = uniform(p.depthThreshold);
   const uFeather = uniform(p.maskFeather);
@@ -129,7 +131,10 @@ export function createAccumulation(
       const v = float(y).add(0.5).div(res);
       const wx = uCenter.x.add(u.sub(0.5).mul(uSize));
       const wz = uCenter.y.sub(v.sub(0.5).mul(uSize));
-      const flow = flowVectorNode(vec2(wx, wz), flowU);
+      // foam-scaled churn: eddies spin up INSIDE the trail (user review:
+      // "internal motion, water pushed aside"), open ocean stays calm
+      const foamLocal = textureLoad(texA, ivec2(x, y)).r;
+      const flow = flowVectorNode(vec2(wx, wz), flowU, foamLocal.mul(uWakeChurn).add(1));
       // backward semi-Lagrangian source uv (flowMath.advectLookupUv mirror)
       const su = u.sub(flow.x.mul(uAdvectDt).div(uSize)).add(uShift.x);
       const sv = v.add(flow.y.mul(uAdvectDt).div(uSize)).add(uShift.y);
@@ -167,7 +172,11 @@ export function createAccumulation(
           sum.addAssign(loadZero(texB, sx, sy).mul(w));
         }
       }
-      textureStore(texA, ivec2(x, y), vec4(sum.min(1), 0, 0, 1)).toWriteOnly();
+      // partial blur (§V23 functional mix): full 3×3 every frame at 60+fps
+      // flattens streaks to mush — blurMix keeps structure while softening
+      const center = loadZero(texB, x, y);
+      const foam = mix(center, sum, uBlurMix).min(1);
+      textureStore(texA, ivec2(x, y), vec4(foam, 0, 0, 1)).toWriteOnly();
     });
   })().compute(res * res);
 
@@ -238,6 +247,8 @@ export function createAccumulation(
       uInjectPerFrame.value = p.injectStrength * dt;
       uDt.value = dt;
       uBlurRadius.value = p.blurRadius;
+      uBlurMix.value = p.blurMix;
+      uWakeChurn.value = p.wakeChurn;
       uThreshold.value = p.depthThreshold;
       uFeather.value = p.maskFeather;
       uShift.value.copy(pendingShift);

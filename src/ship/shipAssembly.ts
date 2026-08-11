@@ -39,9 +39,13 @@ export class ShipAssembly {
       node.position.fromArray(def.transform.position);
       node.rotation.set(...def.transform.rotation);
       const geometry =
-        def.kind === 'sail' ? buildSailGeometry('full', def.aabb) : buildPieceGeometry(def.kind, def.aabb);
+        def.kind === 'sail'
+          ? buildSailGeometry('full', def.aabb)
+          : buildPieceGeometry(def.kind, def.aabb, def.shape);
       const mesh = new THREE.Mesh(geometry, this.material(def.kind, 'base'));
       mesh.name = `${def.id}-mesh`;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       node.add(mesh);
       this.pieces.set(def.id, { def, node, mesh, damage: 'intact' });
       for (const socket of def.sockets) {
@@ -73,11 +77,13 @@ export class ShipAssembly {
       rt.mesh.visible = false;
     } else {
       rt.mesh.visible = true;
-      const faceSign: 1 | -1 = rt.def.transform.position[0] < 0 ? -1 : 1;
+      // outboard face: loft hints know their side; fallback = origin side
+      const side = rt.def.shape?.side ?? rt.def.transform.position[0];
+      const faceSign: 1 | -1 = side < 0 ? -1 : 1;
       const next =
         stateId === 'holed'
-          ? buildHoledVariant(rt.def.kind, rt.def.aabb, faceSign)
-          : buildPieceGeometry(rt.def.kind, rt.def.aabb);
+          ? buildHoledVariant(rt.def.kind, rt.def.aabb, faceSign, rt.def.shape)
+          : buildPieceGeometry(rt.def.kind, rt.def.aabb, rt.def.shape);
       rt.mesh.geometry.dispose();
       rt.mesh.geometry = next;
       rt.mesh.material =

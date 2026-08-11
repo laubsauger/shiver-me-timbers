@@ -14,9 +14,11 @@ import * as THREE from 'three/webgpu';
 import {
   Fn,
   If,
+  float,
   instanceIndex,
   instancedArray,
   mix,
+  select,
   uniform,
   uv,
   vec3,
@@ -24,9 +26,11 @@ import {
 } from 'three/tsl';
 import { SIM_DT } from '../core/loop';
 import { sprayParams } from '../params/spray';
-import { DEAD_AGE } from './sprayMath';
+import { DEAD_AGE, sanitizePoolCount } from './sprayMath';
 
-export function createSprayPool(count: number) {
+export function createSprayPool(rawCount: number) {
+  // counts feed buffer sizes + dispatch counts at construction — sanitize
+  const count = sanitizePoolCount(rawCount, 1024);
   const posAge = instancedArray(count, 'vec4');
   const velSeed = instancedArray(count, 'vec4');
 
@@ -61,9 +65,14 @@ export function createSprayPool(count: number) {
   // render: instanced camera-facing sprites; dead → ageN = 1 → alpha 0
   const material = new THREE.SpriteNodeMaterial();
   const el = posAge.toReadOnly().element(instanceIndex);
-  const ageN = el.w.div(uLife).clamp(0, 1);
+  // divisor floor: uLife is CPU-clamped too, but 0/0 here would be a NaN
+  // scale → screen-covering quad × pool size = fill-rate wedge. Never risk it.
+  const ageN = el.w.div(uLife.max(1e-6)).clamp(0, 1);
   material.positionNode = el.xyz;
-  material.scaleNode = mix(uSizeMin, uSizeMax, ageN); // puffs grow as they fly
+  // dead particles collapse to zero size: a degenerate quad rasterizes no
+  // fragments, so the idle pool costs no fill rate (alpha-0 quads still would)
+  const size = mix(uSizeMin, uSizeMax, ageN); // puffs grow as they fly
+  material.scaleNode = select(ageN.greaterThanEqual(1), float(0), size);
   const q = uv().mul(2).sub(1);
   const shape = q.dot(q).oneMinus().max(0); // soft round falloff
   material.colorNode = vec3(1);

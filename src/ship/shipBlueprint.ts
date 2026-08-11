@@ -8,13 +8,14 @@ import { brigantineParams, galleonParams, type ShipClassParams } from '../params
 import type { PieceDef } from './pieceTypes';
 import {
   buildBowAndTransom,
-  buildCastles,
+  buildCannons,
   buildDeck,
   buildHullSections,
   buildKeel,
   buildRails,
   buildRudder,
 } from './blueprintParts';
+import { buildCastles, buildFurniture } from './blueprintCastles';
 import { buildBowsprit, buildMastRig } from './blueprintRig';
 
 /**
@@ -25,10 +26,12 @@ export function buildBrigantineBlueprint(
   p: ShipClassParams = brigantineParams,
 ): PieceDef[] {
   const rig = { sails: false, crowNest: false };
+  const hull = buildHullSections(p, { hullCannons: true });
   return [
     buildKeel(p),
     buildDeck(p, { deckCannons: false, capstan: false }),
-    ...buildHullSections(p, { hullCannons: true }),
+    ...hull,
+    ...buildCannons(hull),
     ...buildBowAndTransom(p),
     ...buildMastRig(p, 'fore', p.foreMastZ, p.foreMastHeight, p.freeboard, rig),
     ...buildMastRig(p, 'main', p.mainMastZ, p.mainMastHeight, p.freeboard, rig),
@@ -48,12 +51,15 @@ export function buildGalleonBlueprint(
   p: ShipClassParams = galleonParams,
 ): PieceDef[] {
   const rearBaseY = p.freeboard + p.sterncastleRise;
+  const deck = buildDeck(p, { deckCannons: true, capstan: true });
   return [
     buildKeel(p),
-    buildDeck(p, { deckCannons: true, capstan: true }),
+    deck,
+    ...buildCannons([deck]),
     ...buildHullSections(p, { hullCannons: false }),
     ...buildBowAndTransom(p),
     ...buildCastles(p),
+    ...buildFurniture(p),
     ...buildMastRig(p, 'fore', p.foreMastZ, p.foreMastHeight, p.freeboard, {
       sails: true, crowNest: false,
     }),

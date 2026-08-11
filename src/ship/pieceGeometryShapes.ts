@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import type { AABB, SailStateId } from './pieceTypes';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { shipMaterialParams } from '../params/ship';
 
 export function aabbSize(aabb: AABB): THREE.Vector3 {
   return new THREE.Vector3(
@@ -74,32 +75,54 @@ export function buildBowGeometry(aabb: AABB): THREE.BufferGeometry {
  * full = billowed curved plane, reefed = roll at the yard + short skirt,
  * furled = tight roll only. Top edge hangs at y≈0 (the yard line).
  */
+/** robands: short tie loops lashing the cloth to its yard (y≈0) */
+function sailTies(width: number): THREE.BufferGeometry[] {
+  const ties: THREE.BufferGeometry[] = [];
+  const count = 7;
+  for (let i = 0; i < count; i++) {
+    const x = -width * 0.44 + (width * 0.88 * i) / (count - 1);
+    const tie = new THREE.CylinderGeometry(0.035, 0.035, 0.32, 5);
+    tie.translate(x, 0.06, 0);
+    ties.push(tie);
+  }
+  return ties;
+}
+
 export function buildSailGeometry(state: SailStateId, aabb: AABB): THREE.BufferGeometry {
   const s = aabbSize(aabb);
   const width = s.x;
   const drop = -aabb.min[1];
   if (state === 'full') {
-    const geo = new THREE.PlaneGeometry(width, drop, 10, 8);
+    const geo = new THREE.PlaneGeometry(width, drop, 14, 10);
     geo.translate(0, -drop / 2, 0);
-    const billow = drop * 0.18;
+    // belly bulges downwind (+z = toward the bow, wind astern), fullest
+    // near the free foot, pinned at the yard (v=1) and at both leeches.
+    // sin² across / smoothstep down → ZERO slope at every edge, so edge
+    // normals stay face-on (kills the dark rim the review flagged).
+    const billow = drop * shipMaterialParams.sailBillow;
+    const smooth01 = (x: number): number => {
+      const t = Math.min(1, Math.max(0, x));
+      return t * t * (3 - 2 * t);
+    };
     const pos = geo.attributes.position;
     for (let i = 0; i < pos.count; i++) {
       const u = pos.getX(i) / width + 0.5;
       const v = (pos.getY(i) + drop) / drop; // 0 = foot, 1 = head
-      pos.setZ(i, -billow * Math.sin(Math.PI * u) * Math.sin(Math.PI * (1 - v) * 0.8));
+      const belly = Math.sin(Math.PI * u) ** 2 * smooth01((1 - v) / 0.9);
+      pos.setZ(i, billow * belly);
     }
     geo.computeVertexNormals();
-    return geo;
+    return mergeNonIndexed([geo, ...sailTies(width)]);
   }
   const rollRadius = Math.max(0.15, drop * 0.05) * (state === 'furled' ? 0.7 : 1.15);
   const roll = new THREE.CylinderGeometry(rollRadius, rollRadius, width * 0.96, 8);
   roll.rotateZ(Math.PI / 2); // axis along the yard (x)
-  if (state === 'furled') return roll;
+  if (state === 'furled') return mergeNonIndexed([roll, ...sailTies(width)]);
   // reefed: rolled bundle plus a short hanging skirt of cloth
   const skirtDrop = drop * 0.22;
   const skirt = new THREE.PlaneGeometry(width * 0.9, skirtDrop, 6, 2);
   skirt.translate(0, -skirtDrop / 2 - rollRadius * 0.5, 0);
-  return mergeNonIndexed([roll, skirt]);
+  return mergeNonIndexed([roll, skirt, ...sailTies(width)]);
 }
 
 /** merge helper — normalises indexed/non-indexed before merging */

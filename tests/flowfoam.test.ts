@@ -16,18 +16,23 @@
 import { describe, expect, it } from 'vitest';
 import {
   advectLookupUv,
-  bowArmDistCpu,
   flowPotentialCpu,
   flowVectorCpu,
   regionShiftUv,
   snapToTexel,
   uvForWorld,
-  wakeRateCpu,
   worldForUv,
   type FlowFieldParams,
+} from '../src/flowfoam/flowMath';
+import {
+  bowArmDistCpu,
+  wakeBreakupCpu,
+  wakeEnvelopeCpu,
+  wakeRateCpu,
+  wakeSpeedFactorCpu,
   type WakeParams,
   type WakeShip,
-} from '../src/flowfoam/flowMath';
+} from '../src/flowfoam/wakeMath';
 import { decayFactorPerFrame } from '../src/foam/foamMath';
 import { flowFoamParams } from '../src/params/flowfoam';
 import { getParamsEntry } from '../src/params/registry';
@@ -194,13 +199,18 @@ describe('decay factor (§V10 accumulation fade, shared with §V6)', () => {
 describe('ship wake injection (§V10 follow-up: bow V + stern band)', () => {
   const WP: WakeParams = {
     kelvinAngle: 19.47,
-    bowIntensity: 3,
-    sternIntensity: 1.2,
+    bowIntensity: 5,
+    sternIntensity: 1.6,
     speedThreshold: 0.5,
-    armWidth: 1.2,
-    armWidthGrowth: 0.06,
+    fullWakeSpeed: 5,
+    slowWakeWidth: 0.3,
+    armWidth: 0.6,
+    armWidthGrowth: 0.045,
     sternWidth: 1.0,
     wakeRange: 60,
+    wakeNoiseScale: 0.3,
+    wakeNoiseContrast: 0.18,
+    wakeBreakup: 0.85,
   };
   // ship at origin heading +z (yaw 0): bow at z=+12, stern z=−10, beam 6
   const SHIP: WakeShip = { x: 0, z: 0, yaw: 0, speed: 4, bowOffset: 12, sternOffset: -10, beam: 6 };
@@ -216,12 +226,53 @@ describe('ship wake injection (§V10 follow-up: bow V + stern band)', () => {
     expect(bowArmDistCpu(20, 0, WP.kelvinAngle)).toBeCloseTo(20 * tan, 12); // centerline between arms
   });
 
-  it('wake is port/starboard symmetric', () => {
+  it('wake ENVELOPE is port/starboard symmetric (noise breaks it up after)', () => {
+    // WHY: the underlying V must be symmetric about the keel line — only the
+    // world-anchored breakup noise may differ side to side, or the ship
+    // would appear to permanently cut harder on one side.
     for (const z of [10, 0, -12, -30]) {
       for (const x of [1.5, 4, 9]) {
-        expect(wakeRateCpu(x, z, SHIP, WP)).toBeCloseTo(wakeRateCpu(-x, z, SHIP, WP), 12);
+        expect(wakeEnvelopeCpu(x, z, SHIP, WP)).toBeCloseTo(wakeEnvelopeCpu(-x, z, SHIP, WP), 12);
       }
     }
+  });
+
+  it('breakup factor is bounded [1−wakeBreakup, 1] and deterministic', () => {
+    // WHY: breakup may only REMOVE injected foam (gaps), never amplify it —
+    // otherwise intensities in the params panel would lie.
+    for (const [x, z] of [[0, -14], [3, -20], [-7, 4], [15.5, -33]]) {
+      const b = wakeBreakupCpu(x, z, WP);
+      expect(b).toBeGreaterThanOrEqual(1 - WP.wakeBreakup - 1e-12);
+      expect(b).toBeLessThanOrEqual(1 + 1e-12);
+      expect(wakeBreakupCpu(x, z, WP)).toBe(b);
+    }
+    expect(wakeRateCpu(0, -14, SHIP, WP)).toBeCloseTo(
+      wakeEnvelopeCpu(0, -14, SHIP, WP) * wakeBreakupCpu(0, -14, WP),
+      12,
+    );
+  });
+
+  it('slow drift: faint narrow stern churn only, NO V-arms (user review)', () => {
+    // WHY: "if we're going very slow we wouldn't see it spread out to the
+    // side; only some slight disturbance at the aft."
+    const drift = { ...SHIP, speed: 1.1 }; // above threshold, well below full
+    const sf = wakeSpeedFactorCpu(drift.speed, WP);
+    expect(sf).toBeLessThan(0.05); // arms are suppressed by sf...
+    const onArm = wakeEnvelopeCpu(8 * tan, SHIP.bowOffset - 8, drift, WP);
+    const sternChurn = wakeEnvelopeCpu(0, -12, drift, WP);
+    expect(sternChurn).toBeGreaterThan(0); // ...but the stern still churns
+    expect(onArm).toBeLessThan(sternChurn * 0.15); // V practically invisible
+    // and the churn is NARROW: full-speed stern width reaches ~beam, slow ~30%
+    const slowEdge = wakeEnvelopeCpu(1.6, -12, drift, WP); // outside 0.3·halfW=0.9
+    expect(slowEdge).toBe(0);
+    expect(wakeEnvelopeCpu(1.6, -12, SHIP, WP)).toBeGreaterThan(0); // inside at speed
+  });
+
+  it('wake development is monotonic with speed', () => {
+    const at = (speed: number) =>
+      wakeEnvelopeCpu(8 * tan, SHIP.bowOffset - 8, { ...SHIP, speed }, WP);
+    expect(at(1)).toBeLessThan(at(2.5));
+    expect(at(2.5)).toBeLessThan(at(5));
   });
 
   it('no wake at anchor: rate is exactly 0 below speedThreshold', () => {
@@ -234,24 +285,24 @@ describe('ship wake injection (§V10 follow-up: bow V + stern band)', () => {
 
   it('bow arms and stern band inject where expected, nothing ahead of the bow', () => {
     const sAft = 8; // 8 m behind the bow point (z = 12 − 8 = 4)
-    const onArm = wakeRateCpu(sAft * tan, SHIP.bowOffset - sAft, SHIP, WP);
-    const offArm = wakeRateCpu(sAft * tan + 15, SHIP.bowOffset - sAft, SHIP, WP);
+    const onArm = wakeEnvelopeCpu(sAft * tan, SHIP.bowOffset - sAft, SHIP, WP);
+    const offArm = wakeEnvelopeCpu(sAft * tan + 15, SHIP.bowOffset - sAft, SHIP, WP);
     expect(onArm).toBeGreaterThan(0);
     expect(offArm).toBe(0);
-    const sternCenter = wakeRateCpu(0, -14, SHIP, WP); // 4 m aft of stern
-    const sternEdge = wakeRateCpu(2.9, -14, SHIP, WP); // near band edge (halfW=3)
+    const sternCenter = wakeEnvelopeCpu(0, -14, SHIP, WP); // 4 m aft of stern
+    const sternEdge = wakeEnvelopeCpu(2.9, -14, SHIP, WP); // near scaled band edge
     expect(sternCenter).toBeGreaterThan(sternEdge); // centerline hump = rooster tail
     expect(sternEdge).toBeGreaterThanOrEqual(0);
-    expect(wakeRateCpu(0, SHIP.bowOffset + 5, SHIP, WP)).toBe(0); // ahead of bow
+    expect(wakeEnvelopeCpu(0, SHIP.bowOffset + 5, SHIP, WP)).toBe(0); // ahead of bow
   });
 
-  it('deterministic and heading-aware', () => {
+  it('deterministic; envelope is ship-frame invariant (breakup is world-anchored)', () => {
     expect(wakeRateCpu(3.3, -7.7, SHIP, WP)).toBe(wakeRateCpu(3.3, -7.7, SHIP, WP));
     // rotate ship 90° (bow toward +x): the old astern point is now abeam
     const turned = { ...SHIP, yaw: Math.PI / 2 };
-    const astern = wakeRateCpu(-14, 0, turned, WP); // behind stern in new frame
+    const astern = wakeEnvelopeCpu(-14, 0, turned, WP); // behind stern in new frame
     expect(astern).toBeGreaterThan(0);
-    expect(astern).toBeCloseTo(wakeRateCpu(0, -14, SHIP, WP), 12); // frame-invariant
+    expect(astern).toBeCloseTo(wakeEnvelopeCpu(0, -14, SHIP, WP), 12);
   });
 });
 

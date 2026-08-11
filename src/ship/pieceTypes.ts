@@ -25,6 +25,10 @@ export type PieceKind =
   | 'bowsprit'
   | 'rail'
   | 'cannon'
+  | 'wheel'
+  | 'capstan'
+  | 'grating'
+  | 'stairs'
   | 'rudder';
 
 /**

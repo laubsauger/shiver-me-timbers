@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import type { AABB, PieceKind } from './pieceTypes';
 import { buildPieceGeometry } from './pieceGeometry';
 import { aabbCenter, aabbSize, mergeNonIndexed } from './pieceGeometryShapes';
+import { asHullShape, hullEnvelope } from './pieceGeometryHull';
 
 const SPIKES = 9;
 
@@ -38,11 +39,12 @@ export function buildHoledVariant(
   kind: PieceKind,
   aabb: AABB,
   faceSign: 1 | -1 = 1,
+  shape?: Record<string, number>,
 ): THREE.BufferGeometry {
-  const base = buildPieceGeometry(kind, aabb);
+  const base = buildPieceGeometry(kind, aabb, shape);
   const s = aabbSize(aabb);
   const c = aabbCenter(aabb);
-  const outerR = Math.max(0.3, Math.min(s.y, s.z) * 0.35);
+  const outerR = Math.max(0.3, Math.min(s.y, s.z) * 0.3);
   const innerR = outerR * 0.55;
 
   const ring = new THREE.ShapeGeometry(tornRingShape(outerR, innerR), 12);
@@ -50,9 +52,16 @@ export function buildHoledVariant(
   for (const overlay of [ring, disc]) {
     overlay.rotateY((faceSign * Math.PI) / 2); // face normal → ±x (outboard)
   }
-  const halfX = s.x / 2;
-  ring.translate(c.x + faceSign * (halfX + 0.02), c.y, c.z);
-  disc.translate(c.x + faceSign * (halfX - 0.03), c.y, c.z);
+  // lofted hull: sit the breach on the actual shell near the waterline,
+  // otherwise proud of the AABB face
+  const hull = asHullShape(shape);
+  const surfaceX =
+    hull !== null
+      ? hull.beamHalf * hullEnvelope((hull.z0 + hull.z1) / 2, hull) * 0.93
+      : Math.abs(c.x) + s.x / 2;
+  const holeY = hull !== null ? -hull.draft * 0.25 : c.y;
+  ring.translate(faceSign * (surfaceX + 0.02), holeY, c.z);
+  disc.translate(faceSign * (surfaceX - 0.03), holeY, c.z);
 
   // groups: [0] = base + torn edge (wood), [1] = dark hole disc
   const wood = mergeNonIndexed([base, ring]);

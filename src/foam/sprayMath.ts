@@ -36,6 +36,17 @@ export function goldenSeed(index: number): number {
 }
 
 /**
+ * Pool-size sanitizer: counts feed instancedArray sizes and compute dispatch
+ * counts at CONSTRUCTION — a fractional/zero/NaN value there would corrupt
+ * buffer allocation or dispatch nothing forever. Non-finite → fallback;
+ * otherwise floored and clamped ≥ 1.
+ */
+export function sanitizePoolCount(raw: number, fallback: number): number {
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.max(1, Math.floor(raw));
+}
+
+/**
  * Respawn candidate offset from the spray center, in meters (GPU mirror:
  * the spawn pass). Deterministic in (seed, time): the sim tick drives time
  * (§V2), so a replay produces the identical spray field.

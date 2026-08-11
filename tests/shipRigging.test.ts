@@ -7,9 +7,11 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  applyBlocks,
   applyRiggingPlan,
   buildRiggingPlan,
   collectRopeAnchorIds,
+  selectBlockSockets,
   validateRiggingPlan,
   type RiggingRope,
 } from '../src/ropes/shipRigging';
@@ -70,12 +72,80 @@ describe('buildRiggingPlan (§V13 sockets → §V12 ropes)', () => {
   });
 });
 
+describe('expanded rig ("whole shebang" — sheets, both-yard braces, halyard)', () => {
+  it('braces serve BOTH yard levels on every mast', () => {
+    // WHY: the reference schema shows braces on upper and lower yards; a
+    // regression back to lower-only silently halves the running rigging.
+    const plan = buildRiggingPlan(buildGalleonBlueprint());
+    const braces = plan.filter((r) => r.role === 'brace');
+    expect(braces).toHaveLength(12); // 3 masts × 2 yards × 2 sides
+    expect(braces.some((r) => r.socketA.includes('-upper-'))).toBe(true);
+  });
+
+  it('sheets run from lower yard ends to bow cleats (clew stand-in)', () => {
+    // WHY: the blueprint has no sail-clew sockets yet, so sheets start at
+    // the lower yard ends by design — this pins that stand-in so it gets
+    // revisited (fails) when clew sockets appear and the rule changes.
+    const plan = buildRiggingPlan(buildGalleonBlueprint());
+    const sheets = plan.filter((r) => r.role === 'sheet');
+    expect(sheets).toHaveLength(6); // 3 masts × lower yard × 2 sides
+    for (const s of sheets) {
+      expect(s.socketA).toMatch(/^anchor-yard-\w+-lower-/);
+      expect(s.socketB).toMatch(/^anchor-cleat-bow-/);
+    }
+  });
+
+  it('halyard ties the crow-nest socket into the rig (galleon only)', () => {
+    // WHY: the crow's nest anchor was the one unused rope socket; the rig
+    // should consume every anchor the ship declares or say why not.
+    const galleon = buildRiggingPlan(buildGalleonBlueprint());
+    expect(galleon.some((r) => r.role === 'halyard' && r.socketA === 'anchor-crow-nest')).toBe(true);
+    const brig = buildRiggingPlan(buildBrigantineBlueprint());
+    expect(brig.some((r) => r.role === 'halyard')).toBe(false); // no nest
+  });
+
+  it('bobstays anchor the bowsprit tip down to the bow cleats', () => {
+    // WHY: the schema shows the bowsprit held by bow-side runs; without
+    // them the forestay pulls the spar visually unsupported.
+    const plan = buildRiggingPlan(buildGalleonBlueprint());
+    const bobstays = plan.filter(
+      (r) => r.socketA === 'anchor-bowsprit-tip' && r.socketB.startsWith('anchor-cleat-bow-'),
+    );
+    expect(bobstays).toHaveLength(2);
+  });
+});
+
+describe('selectBlockSockets (§V12 blocks at running-rigging ends)', () => {
+  it('is deterministic, unique, capped, and references real sockets', () => {
+    // WHY: block instances are placed by plan order — nondeterminism or
+    // unknown ids would scatter pulleys into thin air after a re-apply.
+    const plan = buildRiggingPlan(buildGalleonBlueprint());
+    const sockets = selectBlockSockets(plan, 20);
+    expect(sockets).toEqual(selectBlockSockets(plan, 20));
+    expect(new Set(sockets).size).toBe(sockets.length);
+    expect(sockets.length).toBeLessThanOrEqual(20);
+    expect(sockets.length).toBeGreaterThan(0);
+    const ids = collectRopeAnchorIds(buildGalleonBlueprint());
+    for (const id of sockets) expect(ids.has(id), id).toBe(true);
+    // yard ends dominate: that's where lifts/braces/sheets terminate
+    expect(sockets.filter((id) => id.includes('yard')).length).toBeGreaterThanOrEqual(8);
+    // a tighter cap truncates deterministically
+    expect(selectBlockSockets(plan, 5)).toEqual(sockets.slice(0, 5));
+  });
+});
+
 describe('validateRiggingPlan (fail loud on unknown sockets)', () => {
   it('throws when a plan references a socket id the blueprint lacks', () => {
     // WHY: the concurrent ship rework may rename sockets; silent mis-rig is
     // the §B bug class this guards against.
     const bogus: RiggingRope[] = [
-      { socketA: 'anchor-masthead-fore', socketB: 'anchor-nope', slack: 1.1, thickness: 0.03 },
+      {
+        socketA: 'anchor-masthead-fore',
+        socketB: 'anchor-nope',
+        role: 'stay',
+        slack: 1.1,
+        thickness: 0.03,
+      },
     ];
     expect(() => validateRiggingPlan(bogus, buildGalleonBlueprint())).toThrow(
       /anchor-nope/,
@@ -109,5 +179,25 @@ describe('applyRiggingPlan (§V12 re-solve entry point)', () => {
     }, socketWorldPosition);
     expect(calls.map((c) => c.index)).toEqual(plan.map((_, i) => i));
     expect(count).toBe(plan.length);
+  });
+
+  it('applyBlocks mirrors the same index/count contract for pulleys', () => {
+    // WHY: blocks ride their sockets exactly like rope anchors; a drifting
+    // index mapping would leave pulleys behind when the ship moves.
+    const plan = buildRiggingPlan(buildGalleonBlueprint());
+    const sockets = selectBlockSockets(plan, 20);
+    const placed: number[] = [];
+    let count = -1;
+    applyBlocks(sockets, {
+      setBlock(index, position) {
+        expect(Number.isFinite(position.x)).toBe(true);
+        placed.push(index);
+      },
+      setBlockCount(n) {
+        count = n;
+      },
+    }, () => [1, 2, 3]);
+    expect(placed).toEqual(sockets.map((_, i) => i));
+    expect(count).toBe(sockets.length);
   });
 });

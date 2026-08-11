@@ -102,8 +102,10 @@ export function buildBowsprit(
       position: [0, len * 0.9, 0],
     });
   }
+  // base sits inboard on the fore deck so the spar visibly roots in the
+  // ship and runs out over the stem — no floating joint
   return mkPiece('bowsprit', 'bowsprit',
-    [0, p.freeboard + p.forecastleRise + 0.2, p.hullLength / 2 + p.bowLength * 0.5],
+    [0, p.freeboard + p.forecastleRise * 0.6 + 0.15, p.hullLength / 2 - 1.2],
     { min: [-r, 0, -r], max: [r, len, r] },
     { rotation: [Math.PI / 2 - p.bowspritPitch, 0, 0], sockets });
 }

@@ -21,7 +21,6 @@ import {
   screenUV,
   smoothstep,
   texture,
-  transformNormalToView,
   uniform,
   vec2,
   vec3,
@@ -31,12 +30,13 @@ import {
 } from 'three/tsl';
 import type { OceanSimulation } from './oceanCascades';
 import type { FoamSim } from '../foam';
-import { foamTintNode } from '../foam';
+import { foamDetailMask, foamTintNode } from '../foam';
+import type { FlowFoam } from '../flowfoam';
 import { oceanSurfaceParams as sp } from '../params/oceanSurface';
 import { oceanParams } from '../params/ocean';
 
 export interface OceanSurfaceMaterial {
-  material: THREE.MeshStandardNodeMaterial;
+  material: THREE.MeshBasicNodeMaterial;
   /** world-space XZ of the mesh origin — set on camera snap */
   originUniform: { value: THREE.Vector2 };
   sunDirectionUniform: { value: THREE.Vector3 };
@@ -48,6 +48,7 @@ export interface OceanSurfaceMaterial {
 export function buildOceanSurfaceMaterial(
   sim: OceanSimulation,
   foam?: FoamSim,
+  flowFoam?: FlowFoam,
 ): OceanSurfaceMaterial {
   const originUniform = uniform(new THREE.Vector2());
   const sunDirectionUniform = uniform(new THREE.Vector3(0.5, 0.6, 0.2).normalize());
@@ -61,9 +62,13 @@ export function buildOceanSurfaceMaterial(
   const uFoam = uniform(color(sp.foamColor));
   const uSssStrength = uniform(sp.sssStrength);
   const uSssPower = uniform(sp.sssPower);
+  const uSssAmbient = uniform(sp.sssAmbient);
+  const uShallowMix = uniform(sp.shallowTintStrength);
   const uSssChoppy = uniform(sp.sssChoppyScale);
-  const uRoughness = uniform(sp.roughness);
   const uReflStrength = uniform(sp.reflectionStrength);
+  const uLightFloor = uniform(sp.lightFloor);
+  const uLightGain = uniform(sp.lightGain);
+  const uSunTint = uniform(color(sp.sunTint));
   const uSparkleStrength = uniform(sp.sparkleStrength);
   const uSparkleScale = uniform(sp.sparkleScale);
   const uFoamThreshold = uniform(sp.foamThreshold);
@@ -108,15 +113,21 @@ export function buildOceanSurfaceMaterial(
   const slopeX = der.x.div(denomX);
   const slopeZ = der.y.div(denomZ);
   const normalWorld = normalize(vec3(slopeX.negate(), 1, slopeZ.negate()));
-  const normalNode = transformNormalToView(normalWorld);
 
   const colorNode = Fn(() => {
     const viewDir = normalize(cameraPosition.sub(vec3(worldXZ.x, totalDisp.y, worldXZ.y)));
     const fresnel = pow(float(1).sub(viewDir.dot(normalWorld).max(0)), 5).clamp(0, 1);
 
-    // base water: deep → shallow by wave height
+    // base water: ONE deep body tone — height only lightens value subtly.
+    // A height-keyed hue shift painted wandering turquoise patches on open
+    // ocean (user critique); turquoise now arrives via SSS (sun-angled) or
+    // the shallows hook below.
     const heightMask = smoothstep(-1.2, 1.6, totalDisp.y);
-    const waterCol = mix(uDeep, uShallow, heightMask).toVar();
+    const waterCol = uDeep.mul(mix(float(0.85), float(1.18), heightMask)).toVar();
+
+    // shallows hook: seabed-depth tint for coasts (T20/T27 islands) — uniform
+    // stays 0 on open ocean until a depth input exists
+    waterCol.assign(mix(waterCol, uShallow, uShallowMix));
 
     // §V.24 transparency: refract the scene behind the surface, absorb by
     // water thickness along the view ray (turquoise → deep teal).
@@ -143,13 +154,24 @@ export function buildOceanSurfaceMaterial(
       mix(waterCol, sceneCol.mul(uRefractTint), seeThrough.mul(0.9)),
     );
 
+    // stylized wrap lighting (§V20): the material owns light — PBR white
+    // sun+hemi washed the pigment to gray (user critique). Troughs keep
+    // saturated body color via the floor; crest faces pick up warm sun.
+    const ndl = normalWorld.dot(sunDirectionUniform).max(0);
+    const lightWrap = uSunTint.mul(ndl.mul(uLightGain).add(uLightFloor));
+    waterCol.assign(waterCol.mul(lightWrap));
+
     // §V.5 SSS fake: choppy horizontal offset isolates wave sides;
     // boost where the camera looks toward the sun through the crest.
     const choppyMask = totalDisp.xz.length().mul(uSssChoppy).clamp(0, 1);
     const backlight = viewDir.negate().dot(sunDirectionUniform).max(0);
+    // ambient crest glow gated by a TIGHT crest band — a broad gate tinted
+    // the whole surface electric cyan (over-glow bug)
+    const crestMask = smoothstep(0.25, 0.95, totalDisp.y);
     const sss = pow(backlight, uSssPower)
-      .mul(choppyMask)
       .mul(heightMask)
+      .add(uSssAmbient.mul(crestMask))
+      .mul(choppyMask)
       .mul(uSssStrength);
     waterCol.assign(waterCol.add(uSss.mul(sss)));
 
@@ -171,20 +193,42 @@ export function buildOceanSurfaceMaterial(
     // reference (§V20) = dense sparkles inside the sun path, sparse outside
     const glintTrain = pow(ndoth, 48);
     const wobble = phase.mul(6.28).add(timeUniform.mul(0.9)).sin().mul(0.05);
-    // density threshold: ~2% of cells outside the train, ~15% inside
-    const thr = mix(float(0.978), float(0.85), glintTrain);
+    // density threshold: ~1% of cells outside the train, ~11% inside
+    const thr = mix(float(0.99), float(0.89), glintTrain);
     const twinkle = smoothstep(thr, thr.add(0.012), sparkleHash.add(wobble));
+    // straight-down views (noon sun) turn the whole field into starfield
+    // noise — fade sparkles as the view leaves grazing/mid angles.
+    // smoothstep args e0>e1: reads "1 below viewDir.y 0.6, 0 above 0.85"
+    const grazeFade = smoothstep(0.85, 0.6, viewDir.y);
     const sparkle = twinkle
-      .mul(pow(ndoth, 24))
+      .mul(pow(ndoth, 40))
       .mul(uSparkleStrength)
-      .mul(normFade);
+      .mul(normFade)
+      .mul(grazeFade);
     col.assign(col.add(vec3(1.0, 0.95, 0.82).mul(sparkle)));
 
     // §V.6 foam: progressive-blur sim mask (T5) with crest→soft detail
-    // blend; falls back to raw jacobian threshold when no sim is wired.
-    if (foam) {
-      const foamMask = foam.shadingNode(worldXZ);
-      const foamCol = uFoam.mul(foamTintNode());
+    // blend; §V.10 wake/intersection foam (T13) combines via max — foam is
+    // foam, whichever system shed it. Falls back to raw jacobian threshold
+    // when no sim is wired.
+    if (foam || flowFoam) {
+      let foamMask: any = float(0);
+      if (foam) foamMask = foam.shadingNode(worldXZ);
+      if (flowFoam) {
+        // wake foam runs through the same crackle/mottle detail blend but
+        // slightly damped — bow/stern trails read softer than whitecaps
+        const wakeMask = foamDetailMask(
+          flowFoam.foamSampleNode(worldXZ).clamp(0, 1),
+          worldXZ,
+        );
+        foamMask = foamMask.max(wakeMask.mul(0.85));
+      }
+      // foam sits in the same light as the water (wrap floor+gain). Scalar
+      // light only — sunTint here would double the warm tint (foamTintNode
+      // already warms it) and low-alpha foam went beige-brown on deep teal.
+      const foamCol = uFoam
+        .mul(foamTintNode())
+        .mul(ndl.mul(uLightGain.mul(0.6)).add(uLightFloor.add(0.1)));
       col.assign(mix(col, foamCol, foamMask.clamp(0, 1).mul(0.9)));
     } else {
       const foamMask = smoothstep(uFoamThreshold, uFoamThreshold.sub(0.35), jacobian);
@@ -193,11 +237,11 @@ export function buildOceanSurfaceMaterial(
     return col;
   })();
 
-  const material = new THREE.MeshStandardNodeMaterial({ roughness: sp.roughness, metalness: 0 });
+  // MeshBasicNodeMaterial: scene lights bypassed — colorNode owns lighting
+  // (§V20 stylized pigment; PBR spec/hemi wash was the "white sheen" bug)
+  const material = new THREE.MeshBasicNodeMaterial();
   material.positionNode = positionNode;
-  material.normalNode = normalNode;
   material.colorNode = colorNode;
-  material.roughnessNode = uRoughness;
   // §V.24: transparent flag routes the mesh into the transparent pass where
   // viewportSharedTexture/viewportDepthTexture hold the opaque scene behind.
   // depthWrite OFF so the captured depth never contains the water itself.
@@ -213,8 +257,12 @@ export function buildOceanSurfaceMaterial(
     (uFoam.value as THREE.Color).set(sp.foamColor);
     uSssStrength.value = sp.sssStrength;
     uSssPower.value = sp.sssPower;
+    uSssAmbient.value = sp.sssAmbient;
+    uShallowMix.value = sp.shallowTintStrength;
     uSssChoppy.value = sp.sssChoppyScale;
-    uRoughness.value = sp.roughness;
+    uLightFloor.value = sp.lightFloor;
+    uLightGain.value = sp.lightGain;
+    (uSunTint.value as THREE.Color).set(sp.sunTint);
     uReflStrength.value = sp.reflectionStrength;
     uSparkleStrength.value = sp.sparkleStrength;
     uSparkleScale.value = sp.sparkleScale;

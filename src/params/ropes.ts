@@ -26,6 +26,12 @@ export interface RopeParams {
   colorHex: number;
   /** high roughness with a slight sheen left in the specular lobe */
   roughness: number;
+  /** rigging block (pulley) mesh cap per ship — keep modest */
+  maxBlocks: number;
+  /** block height (m); width/depth scale from this (startup-only) */
+  blockSize: number;
+  /** weathered block wood albedo */
+  blockColorHex: number;
 }
 
 const meta: Partial<Record<keyof RopeParams, ParamMeta>> = {
@@ -37,6 +43,8 @@ const meta: Partial<Record<keyof RopeParams, ParamMeta>> = {
   swaySpeed: { min: 0, max: 8, step: 0.05 },
   swayPhaseStep: { min: 0, max: 6.28, step: 0.01 },
   roughness: { min: 0, max: 1, step: 0.01 },
+  maxBlocks: { min: 0, max: 64, step: 1 },
+  blockSize: { min: 0.1, max: 0.6, step: 0.01 },
 };
 
 export const ropeParams: RopeParams = registerParams(
@@ -51,6 +59,9 @@ export const ropeParams: RopeParams = registerParams(
     swayPhaseStep: 2.399, // ≈ golden angle: no two ropes share a phase
     colorHex: 0x4a3826,
     roughness: 0.72,
+    maxBlocks: 20,
+    blockSize: 0.25,
+    blockColorHex: 0x5a4632,
   },
   meta,
 );

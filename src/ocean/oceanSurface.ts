@@ -5,6 +5,7 @@
 import * as THREE from 'three/webgpu';
 import type { OceanSimulation } from './oceanCascades';
 import type { FoamSim } from '../foam';
+import type { FlowFoam } from '../flowfoam';
 import { buildOceanSurfaceMaterial, type OceanSurfaceMaterial } from './surfaceMaterial';
 import { buildHorizonRing, buildInnerGrid, snapToGrid, type SurfaceGridOptions } from './surfaceGeometry';
 
@@ -21,9 +22,14 @@ export class OceanSurface {
   private surface: OceanSurfaceMaterial;
   private grid: SurfaceGridOptions;
 
-  constructor(sim: OceanSimulation, foam?: FoamSim, grid: SurfaceGridOptions = DEFAULT_GRID) {
+  constructor(
+    sim: OceanSimulation,
+    foam?: FoamSim,
+    flowFoam?: FlowFoam,
+    grid: SurfaceGridOptions = DEFAULT_GRID,
+  ) {
     this.grid = grid;
-    this.surface = buildOceanSurfaceMaterial(sim, foam);
+    this.surface = buildOceanSurfaceMaterial(sim, foam, flowFoam);
     this.group = new THREE.Group();
 
     const inner = new THREE.Mesh(buildInnerGrid(grid), this.surface.material);

@@ -30,6 +30,10 @@ export interface FlowFoamParams {
   advectSpeed: number;
   /** 3×3 blur tap offset in texels — spread speed of the progressive blur */
   blurRadius: number;
+  /** 0 = no blur, 1 = full 3×3 gaussian per frame — partial blur keeps streaky structure */
+  blurMix: number;
+  /** curl/eddy multiplier where foam = 1 — the trail churns, open ocean stays calm */
+  wakeChurn: number;
   /** fraction of the region half-width over which sampled foam fades at the border */
   edgeFade: number;
   /** flow noise frequency (1/m) — lower = larger, lazier eddies */
@@ -50,7 +54,13 @@ export interface FlowFoamParams {
   sternIntensity: number;
   /** ship speed (m/s) below which no wake is injected (feathers over 1× more) */
   speedThreshold: number;
-  /** bow arm half-width (m) at the bow point */
+  /** speed (m/s) at which the wake is fully developed — V arms, width and
+   * range all scale with smoothstep(speedThreshold, fullWakeSpeed, speed);
+   * slow drift shows only faint narrow stern churn, no V */
+  fullWakeSpeed: number;
+  /** fraction of full wake width/range remaining at threshold speed */
+  slowWakeWidth: number;
+  /** bow arm half-width (m) at the bow point, at full speed */
   armWidth: number;
   /** extra arm half-width per meter aft — the V thickens as it trails */
   armWidthGrowth: number;
@@ -58,6 +68,12 @@ export interface FlowFoamParams {
   sternWidth: number;
   /** distance aft (m) over which wake injection fades to 0 — the advected field carries it further */
   wakeRange: number;
+  /** world-space frequency (1/m) of the wake breakup noise */
+  wakeNoiseScale: number;
+  /** smoothstep half-band around 0.5 thresholding the breakup noise — small = hard gaps, large = soft mottle */
+  wakeNoiseContrast: number;
+  /** 0 = solid painted bands, 1 = fully gappy/broken foam patches */
+  wakeBreakup: number;
 }
 
 export const flowFoamParams: FlowFoamParams = registerParams(
@@ -68,24 +84,31 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     captureHeight: 50,
     depthThreshold: 0.35,
     maskFeather: 0.5,
-    injectStrength: 2.5,
-    decayHalfLife: 3.0,
+    injectStrength: 0.6,
+    decayHalfLife: 2.8,
     advectSpeed: 1.0,
     blurRadius: 1.0,
-    edgeFade: 0.08,
-    noiseScale: 0.06,
-    noiseStrength: 3.0,
+    blurMix: 0.35,
+    wakeChurn: 1.8,
+    edgeFade: 0.16,
+    noiseScale: 0.12,
+    noiseStrength: 8.0,
     noiseScrollSpeed: 0.4,
     baseFlowSpeed: 0.8,
     curlStep: 1.2,
     kelvinAngle: 19.47,
-    bowIntensity: 3.0,
-    sternIntensity: 1.2,
+    bowIntensity: 0.5,
+    sternIntensity: 0.2,
     speedThreshold: 0.5,
-    armWidth: 1.2,
-    armWidthGrowth: 0.06,
-    sternWidth: 1.0,
-    wakeRange: 60,
+    fullWakeSpeed: 5.0,
+    slowWakeWidth: 0.3,
+    armWidth: 0.6,
+    armWidthGrowth: 0.045,
+    sternWidth: 0.6,
+    wakeRange: 40,
+    wakeNoiseScale: 0.3,
+    wakeNoiseContrast: 0.18,
+    wakeBreakup: 0.85,
   },
   flowFoamParamsMeta(),
 );
@@ -100,6 +123,8 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     decayHalfLife: { min: 0.05, max: 15, step: 0.05 },
     advectSpeed: { min: 0, max: 4, step: 0.05 },
     blurRadius: { min: 0, max: 4, step: 0.25 },
+    blurMix: { min: 0, max: 1, step: 0.05 },
+    wakeChurn: { min: 0, max: 8, step: 0.1 },
     edgeFade: { min: 0.01, max: 0.45, step: 0.01 },
     noiseScale: { min: 0.005, max: 0.5, step: 0.005 },
     noiseStrength: { min: 0, max: 12, step: 0.1 },
@@ -110,9 +135,14 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     bowIntensity: { min: 0, max: 20, step: 0.1 },
     sternIntensity: { min: 0, max: 10, step: 0.05 },
     speedThreshold: { min: 0, max: 5, step: 0.05 },
+    fullWakeSpeed: { min: 1, max: 15, step: 0.25 },
+    slowWakeWidth: { min: 0.05, max: 1, step: 0.05 },
     armWidth: { min: 0.1, max: 10, step: 0.1 },
     armWidthGrowth: { min: 0, max: 0.5, step: 0.005 },
     sternWidth: { min: 0.2, max: 3, step: 0.05 },
     wakeRange: { min: 5, max: 300, step: 5 },
+    wakeNoiseScale: { min: 0.02, max: 2, step: 0.01 },
+    wakeNoiseContrast: { min: 0.02, max: 0.5, step: 0.01 },
+    wakeBreakup: { min: 0, max: 1, step: 0.05 },
   };
 }

@@ -140,6 +140,10 @@ export interface ShipMaterialParams {
   sailFlutterAmp: number; // wind ripple amplitude (m) at the free foot
   sailFlutterFreq: number; // ripple speed (rad/s)
   sailRippleCount: number; // ripple wavelengths across the cloth
+  sailPanelCount: number; // vertical cloth panels (seam stripes)
+  sailSeamDarken: number; // 0..1 multiplier on panel seams / hem edges
+  sailAmbientLift: number; // emissive floor so cloth never reads dead black
+  sailStainStrength: number; // weathering mottle darkening 0..1
   holeColor: number;
 }
 
@@ -156,6 +160,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailLight: 0xe9e1cd, sailDark: 0xd2c5aa,
     sailWeaveScale: 18, sailBacklitColor: 0xfff0d2, sailBacklitStrength: 0.35,
     sailBillow: 0.34, sailFlutterAmp: 0.16, sailFlutterFreq: 2.4, sailRippleCount: 2.5,
+    sailPanelCount: 7, sailSeamDarken: 0.82, sailAmbientLift: 0.16, sailStainStrength: 0.24,
     holeColor: 0x120c07,
   },
   {
@@ -174,6 +179,10 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailFlutterAmp: { min: 0, max: 0.6, step: 0.01 },
     sailFlutterFreq: { min: 0, max: 10, step: 0.1 },
     sailRippleCount: { min: 0.5, max: 8, step: 0.1 },
+    sailPanelCount: { min: 2, max: 16, step: 1 },
+    sailSeamDarken: { min: 0.4, max: 1, step: 0.01 },
+    sailAmbientLift: { min: 0, max: 0.6, step: 0.01 },
+    sailStainStrength: { min: 0, max: 0.8, step: 0.01 },
   },
 );
 

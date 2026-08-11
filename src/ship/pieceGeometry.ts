@@ -15,6 +15,25 @@ import {
   buildSailGeometry,
   mergeNonIndexed,
 } from './pieceGeometryShapes';
+import {
+  asHullShape,
+  buildEnvelopeDeck,
+  buildLoftedBow,
+  buildLoftedHullSection,
+} from './pieceGeometryHull';
+import {
+  buildCannonGeometry,
+  buildCapstanGeometry,
+  buildGratingGeometry,
+  buildRailGeometry,
+  buildStairsGeometry,
+  buildWheelGeometry,
+} from './pieceGeometryFittings';
+import {
+  buildCabinGeometry,
+  buildCastleDeck,
+  buildCurvedRail,
+} from './pieceGeometryCastle';
 
 export { buildSailGeometry } from './pieceGeometryShapes';
 export { buildHoledVariant } from './pieceGeometryHoled';
@@ -66,14 +85,44 @@ function lanternPost(aabb: AABB): THREE.BufferGeometry {
   return mergeNonIndexed([post, bulb]);
 }
 
-export function buildPieceGeometry(kind: PieceKind, aabb: AABB): THREE.BufferGeometry {
+export function buildPieceGeometry(
+  kind: PieceKind,
+  aabb: AABB,
+  shape?: Record<string, number>,
+): THREE.BufferGeometry {
+  const hull = asHullShape(shape);
   switch (kind) {
     case 'hull-section':
-      return buildHullSectionGeometry(aabb);
+      // lofted (pointed bow / rounded stern / sheer / tumblehome) when the
+      // piece carries shape hints; plain tapered panel fallback otherwise
+      return hull !== null ? buildLoftedHullSection(hull) : buildHullSectionGeometry(aabb);
     case 'deck':
-      return buildDeckGeometry(aabb);
+      return hull !== null ? buildEnvelopeDeck(aabb, hull) : buildDeckGeometry(aabb);
     case 'bow':
-      return buildBowGeometry(aabb);
+      return hull !== null ? buildLoftedBow(hull) : buildBowGeometry(aabb);
+    case 'cannon':
+      return buildCannonGeometry(aabb);
+    case 'wheel':
+      return buildWheelGeometry(aabb);
+    case 'capstan':
+      return buildCapstanGeometry(aabb);
+    case 'grating':
+      return buildGratingGeometry(aabb);
+    case 'stairs':
+      return buildStairsGeometry(aabb);
+    case 'forecastle-deck':
+    case 'sterncastle-deck':
+      // taper-following slab + bulkhead + posts; box fallback sans hints
+      return hull !== null
+        ? buildCastleDeck(
+            hull,
+            shape?.rise ?? 1,
+            aabbSize(aabb).y,
+            (shape?.bulkheadAft ?? 1) === 1,
+          )
+        : box(aabb);
+    case 'cabin':
+      return hull !== null ? buildCabinGeometry(hull, aabbSize(aabb).y) : box(aabb);
     case 'mast':
       return taperedSpar(aabb, 0.45);
     case 'bowsprit':
@@ -86,13 +135,15 @@ export function buildPieceGeometry(kind: PieceKind, aabb: AABB): THREE.BufferGeo
       return crowNest(aabb);
     case 'lantern-post':
       return lanternPost(aabb);
+    case 'rail':
+      // side rails carry hull hints → curve with taper + sheer;
+      // straight runs (stern balustrade) keep the post-run builder
+      return hull !== null
+        ? buildCurvedRail(hull, aabb, shape?.railInset ?? 0.2)
+        : buildRailGeometry(aabb);
     case 'keel':
     case 'transom':
     case 'gallery':
-    case 'forecastle-deck':
-    case 'sterncastle-deck':
-    case 'cabin':
-    case 'rail':
     case 'rudder':
       return box(aabb);
   }
