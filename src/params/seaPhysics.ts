@@ -42,12 +42,18 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     buoyancySpring: 4.2e5,
     buoyancyDamping: 9e4,
     mass: 1.5e5,
-    // a laden galleon carries enormous rotational inertia — roll period
-    // target ~6-8s, slow ponderous response, never dinghy-snappy
-    inertiaPitch: 2.4e7,
+    // Rotational feel (probe layout spans the galleon, Σz²≈1417 Σx²≈97):
+    // pitch ω=√(k·Σz²/I)≈3.1 rad/s (T≈2s, ζ≈0.37) — ponderous slope-
+    // tracking: bow rises into swells with visible lag, no dinghy-snap.
+    // roll ω≈0.9 rad/s → the target 6-8s roll period, ζ≈0.2 so beam
+    // swells (same band) actually roll the ship and it swings a few
+    // cycles before settling.
+    inertiaPitch: 6e7,
     inertiaYaw: 2.4e7,
-    inertiaRoll: 1.4e7,
-    angularDamping: 0.65,
+    inertiaRoll: 5e7,
+    // light global decay only (yaw cover) — 0.65 added ζ≈0.36 to roll and
+    // pinned the ship upright through storms ("way too static")
+    angularDamping: 0.2,
   },
   {
     updateEveryTicks: { min: 1, max: 10, step: 1 },

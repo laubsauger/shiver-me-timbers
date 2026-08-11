@@ -7,7 +7,7 @@
  *
  * Ship body frame matches the proc ship (§V.13): forward +z, beam x, up y.
  */
-import { rotateVec, invRotateVec } from '../combat/quatMath';
+import { rotateVec, invRotateVec, quatFromAxisAngle, quatMul } from '../combat/quatMath';
 import type { Quat, ShipState, Vec3 } from '../state/simState';
 import { GRAVITY } from '../ocean/oceanMath';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../params/seaPhysics';
@@ -15,21 +15,52 @@ import type { CpuOcean } from './cpuOcean';
 import { buoyancyScale, floodListTorque, floodMassFactor } from './flooding';
 
 /**
- * Canonical probe layout for a ~30 m hull at probeLayoutScale 1, on the
- * ship-local waterline plane (y=0): 4 corners + bow/stern + 2 midship.
- * Spread (not count) is the tunable — 8 points is enough to feel roll,
- * pitch and heave from swell-length waves.
+ * Canonical probe layout for the galleon hull (hullLength 35 + bow 3.5,
+ * beam 8.5) at probeLayoutScale 1, on the ship-local waterline plane
+ * (y=0): 4 quarters + bow/stern + 2 midship beam extents. Spread (not
+ * count) is the tunable — probes must reach the true bow/stern/beam
+ * extremes or wave slope under-torques pitch and roll.
  */
 export const PROBE_LAYOUT: readonly Vec3[] = [
-  [-3.6, 0, 13],
-  [3.6, 0, 13],
-  [-3.6, 0, -13],
-  [3.6, 0, -13],
-  [0, 0, 15],
-  [0, 0, -15],
-  [-4, 0, 0],
-  [4, 0, 0],
+  // quarters sit 1.25 m aft-biased so Σz = 0 against the long bow probe:
+  // flat water then yields zero net pitch torque (no phantom static trim)
+  [-3.9, 0, 13.5],
+  [3.9, 0, 13.5],
+  [-3.9, 0, -14.75],
+  [3.9, 0, -14.75],
+  [0, 0, 19],
+  [0, 0, -16.5],
+  [-4.25, 0, 0],
+  [4.25, 0, 0],
 ];
+
+/**
+ * Per-ship buoyancy memory, keyed by ShipState identity (plain-data state
+ * stays untouched, §V.3):
+ * - `pitch`: sailing recomposes the quaternion as pure yaw∘heel every tick
+ *   (see shipKinematics SPLIT CONTRACT), which strips the pitch buoyancy
+ *   integrated. We remember our own pitch and re-apply it when the
+ *   incoming quat arrives pitch-stripped, so the bow actually rises and
+ *   dips instead of resetting flat 60×/s.
+ * - `prevHeights`/`prevTime`: last tick's water height under each probe,
+ *   for the surface vertical velocity estimate (damp RELATIVE to the
+ *   moving surface — absolute damping fights swell-tracking with ~40% of
+ *   ship weight and leaves the hull static while waves roll over it).
+ * Derived caches only: losing them (reload) costs one tick of damping and
+ * a pitch snap, nothing sim-hash-relevant accumulates here.
+ */
+interface ShipSeaMemory {
+  pitch: number;
+  prevHeights: Float64Array;
+  prevTime: number;
+}
+
+const seaMemory = new WeakMap<ShipState, ShipSeaMemory>();
+
+/** water surface vy is clamped: K-tick mirror recomputes (updateEveryTicks
+ * > 1) make heights jump discretely, and an unclamped spike would kick the
+ * hull (impulse-free forces, feel target #4) */
+const MAX_SURFACE_VY = 8;
 
 function cross(a: Vec3, b: Vec3): Vec3 {
   return [
@@ -39,19 +70,9 @@ function cross(a: Vec3, b: Vec3): Vec3 {
   ];
 }
 
-/** Hamilton product a·b — quatMath (reused above) has no multiply yet */
-function quatMultiply(a: Quat, b: Quat): Quat {
-  return [
-    a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-    a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-    a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-    a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-  ];
-}
-
 /** integrate world-space angular velocity into the orientation quat */
 function integrateQuat(q: Quat, w: Vec3, dt: number): Quat {
-  const dq = quatMultiply([w[0], w[1], w[2], 0], q);
+  const dq = quatMul([w[0], w[1], w[2], 0], q);
   const out: Quat = [
     q[0] + 0.5 * dt * dq[0],
     q[1] + 0.5 * dt * dq[1],
@@ -75,7 +96,6 @@ export function stepShipBuoyancy(
   /** world-frame hole offsets for flood listing (§V.14); empty = intact */
   floodHoles: readonly Vec3[] = [],
 ): void {
-  const q = ship.quaternion;
   const pos = ship.position;
   const vel = ship.velocity;
   const w = ship.angularVelocity;
@@ -89,10 +109,33 @@ export function stepShipBuoyancy(
     throw new Error('stepShipBuoyancy: call ocean.update(time) first');
   }
 
+  let mem = seaMemory.get(ship);
+  if (mem === undefined) {
+    mem = {
+      pitch: 0,
+      prevHeights: new Float64Array(PROBE_LAYOUT.length).fill(Number.NaN),
+      prevTime: Number.NaN,
+    };
+    seaMemory.set(ship, mem);
+  }
+
+  // Re-apply pitch if sailing's yaw∘heel recompose stripped it: such a
+  // quat has an exactly horizontal forward vector. When pitch survived
+  // (no sailing ran, or the contract gets fixed), forward.y equals our
+  // stored pitch's sine and this branch self-deactivates — no double-add.
+  let q = ship.quaternion;
+  const fwdY = rotateVec(q, [0, 0, 1])[1];
+  if (Math.abs(fwdY) < 1e-6 && Math.abs(mem.pitch) >= 1e-6) {
+    // R_x(a) maps forward [0,0,1]→[0,−sin a,cos a]: −pitch lifts the bow
+    q = quatMul(q, quatFromAxisAngle([1, 0, 0], -mem.pitch));
+  }
+
   const force: Vec3 = [0, -mass * GRAVITY, 0];
   const torque: Vec3 = [0, 0, 0];
+  const dtWater = time - mem.prevTime;
 
-  for (const local of PROBE_LAYOUT) {
+  for (let i = 0; i < PROBE_LAYOUT.length; i++) {
+    const local = PROBE_LAYOUT[i];
     const r = rotateVec(q, [
       local[0] * p.probeLayoutScale,
       local[1] * p.probeLayoutScale,
@@ -101,17 +144,30 @@ export function stepShipBuoyancy(
     const px = pos[0] + r[0];
     const py = pos[1] + r[1];
     const pz = pos[2] + r[2];
-    const depth = ocean.heightAt(px, pz, time) - py;
+    const h = ocean.heightAt(px, pz, time);
+    // water surface vertical velocity under this probe (0 on first tick)
+    let waterVy = 0;
+    if (dtWater > 0 && Number.isFinite(mem.prevHeights[i])) {
+      const raw = (h - mem.prevHeights[i]) / dtWater;
+      waterVy = Math.max(-MAX_SURFACE_VY, Math.min(MAX_SURFACE_VY, raw));
+    }
+    mem.prevHeights[i] = h;
+    const depth = h - py;
     if (depth <= 0) continue;
-    // vertical velocity of the probe point = v.y + (ω × r).y
+    // damp probe velocity RELATIVE to the surface so the hull rides a
+    // passing swell instead of being braked against it; calm water
+    // (waterVy 0) reproduces the old absolute damping exactly
     const vy = vel[1] + (w[2] * r[0] - w[0] * r[2]);
-    const f = (p.buoyancySpring * depth - p.buoyancyDamping * vy) * support;
+    const f =
+      (p.buoyancySpring * depth - p.buoyancyDamping * (vy - waterVy)) *
+      support;
     force[1] += f;
     const t = cross(r, [0, f, 0]);
     torque[0] += t[0];
     torque[1] += t[1];
     torque[2] += t[2];
   }
+  mem.prevTime = time;
 
   // flood listing: torque toward flooded side, grows with flood (§V.14)
   if (floodHoles.length > 0 && ship.flood > 0) {
@@ -142,4 +198,8 @@ export function stepShipBuoyancy(
   w[2] = wWorld[2] * decay;
 
   ship.quaternion = integrateQuat(q, w, dt);
+  // remember our pitch (bow elevation) for next tick's strip-detection
+  const fwd = rotateVec(ship.quaternion, [0, 0, 1]);
+  const fy = fwd[1] < -1 ? -1 : fwd[1] > 1 ? 1 : fwd[1];
+  mem.pitch = Math.asin(fy);
 }

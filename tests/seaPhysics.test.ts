@@ -13,7 +13,7 @@ import {
 } from '../src/params/seaPhysics';
 import { CpuOcean, cpuIFFT2D } from '../src/sea-physics/cpuOcean';
 import { stepShipBuoyancy, PROBE_LAYOUT } from '../src/sea-physics/buoyancy';
-import { quatFromAxisAngle, rotateVec } from '../src/combat/quatMath';
+import { quatFromAxisAngle, quatMul, rotateVec } from '../src/combat/quatMath';
 import { createRng } from '../src/state/rng';
 import type { ShipState } from '../src/state/simState';
 
@@ -200,6 +200,157 @@ describe('buoyancy on flat calm water (amplitude → 0)', () => {
     const spread = Math.max(...tail) - Math.min(...tail);
     expect(spread).toBeLessThan(0.05);
     expect(Math.abs(ship.position[1] - equilibriumY(sp))).toBeLessThan(0.05);
+  });
+});
+
+function clamp1(x: number): number {
+  return x < -1 ? -1 : x > 1 ? 1 : x;
+}
+
+/** bow elevation angle, rad — positive = bow up */
+function pitchOf(ship: ShipState): number {
+  return Math.asin(clamp1(rotateVec(ship.quaternion, [0, 0, 1])[1]));
+}
+
+/** roll angle, rad — starboard-up positive (asin of right.y, as sailing) */
+function rollOf(ship: ShipState): number {
+  return Math.asin(clamp1(rotateVec(ship.quaternion, [1, 0, 0])[1]));
+}
+
+/**
+ * Emulate stepShipSailing's quaternion recompose (shipKinematics SPLIT
+ * CONTRACT): every tick it rebuilds the quat as yaw∘heel ONLY, which
+ * strips any pitch buoyancy accumulated. Feel tests must run under this
+ * hostile-but-real tick order or they'd pass while the game stays flat.
+ */
+function stripPitchLikeSailing(ship: ShipState): void {
+  const fwd3 = rotateVec(ship.quaternion, [0, 0, 1]);
+  const yaw = Math.atan2(fwd3[0], fwd3[2]);
+  const heel = Math.asin(clamp1(rotateVec(ship.quaternion, [1, 0, 0])[1]));
+  ship.quaternion = quatMul(
+    quatFromAxisAngle([0, 1, 0], yaw),
+    quatFromAxisAngle([0, 0, 1], heel),
+  );
+}
+
+describe('feel targets: ponderous but ALIVE in a swell', () => {
+  // One shared 40 s storm-swell run (amplitude 1.0): sea state + ship
+  // trajectory sampled per tick. Cheap tests then assert each feel target.
+  const op = testOceanParams({ amplitude: 1.0 });
+  const sp = testSeaParams();
+  const ocean = new CpuOcean(7, op, sp);
+  const ship = makeShip();
+  ship.position[1] = equilibriumY(sp);
+  const shipY: number[] = [];
+  const waterY: number[] = [];
+  const pitches: number[] = [];
+  const rolls: number[] = [];
+  const settle = 600; // discard 10 s transient
+  for (let i = 0; i < 2400; i++) {
+    const t = (i + 1) * DT;
+    ocean.update(t);
+    stripPitchLikeSailing(ship); // real main.ts tick order (sailing first)
+    stepShipBuoyancy(ship, ocean, DT, sp);
+    if (i < settle) continue;
+    shipY.push(ship.position[1]);
+    waterY.push(ocean.heightAt(ship.position[0], ship.position[2], t));
+    pitches.push(pitchOf(ship));
+    rolls.push(rollOf(ship));
+  }
+  const std = (a: number[]) => {
+    const m = a.reduce((s, v) => s + v, 0) / a.length;
+    return Math.sqrt(a.reduce((s, v) => s + (v - m) * (v - m), 0) / a.length);
+  };
+
+  it('the sea itself is rough enough for these assertions to mean anything', () => {
+    // fail loud (guard for every test below): a param change that calms
+    // the mirrored sea would green-wash the feel targets
+    expect(std(waterY)).toBeGreaterThan(0.25);
+  });
+
+  it('ship pitches visibly into swells DESPITE sailing stripping pitch each tick', () => {
+    // WHY: user report "never tips forward/backward — feels like improper
+    // probes". Sailing recomposes yaw∘heel 60×/s; buoyancy must persist
+    // its own pitch or the bow never rises/dips more than ω·dt ≈ 0.05°.
+    const maxPitchDeg = (Math.max(...pitches.map(Math.abs)) * 180) / Math.PI;
+    expect(maxPitchDeg).toBeGreaterThan(2);
+    // ...but ponderous, not dinghy-snappy ("bobbing like 10 grams")
+    expect(maxPitchDeg).toBeLessThan(15);
+  });
+
+  it('hull rides UP with a passing swell instead of letting it roll over the deck', () => {
+    // WHY: user report "way too static — waves roll OVER the boat".
+    // Damping relative to the surface lets heave track the swell: the
+    // ship's vertical excursion must carry most of the water's.
+    expect(std(shipY)).toBeGreaterThan(0.6 * std(waterY));
+    // deck (freeboard 2.6 m above the waterline plane) stays above water
+    // except rare big-wave washes
+    const submergedTicks = waterY.filter((h, i) => h > shipY[i] + 2.6).length;
+    expect(submergedTicks / waterY.length).toBeLessThan(0.02);
+  });
+
+  it('swell actually rolls the ship (angularDamping must not pin it upright)', () => {
+    const maxRollDeg = (Math.max(...rolls.map(Math.abs)) * 180) / Math.PI;
+    expect(maxRollDeg).toBeGreaterThan(1);
+    expect(maxRollDeg).toBeLessThan(20);
+  });
+});
+
+describe('feel targets: roll period (calm-water free decay)', () => {
+  it('rolls with a ~6-8 s natural period, swinging several cycles', () => {
+    // WHY: many-tons galleon feel — 1.4e7 roll inertia gave a ~4 s yacht
+    // wobble; too much damping would stop the swing dead (static ship).
+    const op = testOceanParams({ amplitude: 0 });
+    const sp = testSeaParams();
+    const ocean = new CpuOcean(1, op, sp);
+    ocean.update(0);
+    const ship = makeShip();
+    ship.position[1] = equilibriumY(sp);
+    ship.quaternion = quatFromAxisAngle([0, 0, 1], 0.25);
+    const crossings: number[] = [];
+    let prev = rollOf(ship);
+    for (let i = 0; i < 1800; i++) {
+      stepShipBuoyancy(ship, ocean, DT, sp);
+      const r = rollOf(ship);
+      if (prev > 0 !== r > 0) crossings.push(i * DT);
+      prev = r;
+    }
+    // still oscillating: at least 3 half-periods within 30 s
+    expect(crossings.length).toBeGreaterThanOrEqual(3);
+    const halfPeriods = crossings.slice(1).map((t, i) => t - crossings[i]);
+    const period = 2 * (halfPeriods.reduce((s, v) => s + v, 0) / halfPeriods.length);
+    expect(period).toBeGreaterThan(5);
+    expect(period).toBeLessThan(9);
+  });
+});
+
+describe('live spectrum-param changes (§V.8: weather transitions re-shape the sea)', () => {
+  it('rebuilds h0 after amplitude changes, matching a fresh mirror exactly', () => {
+    // WHY: weather presets lerp oceanParams live and the GPU regenerates
+    // its spectrum (oceanCascades spectrumSignature). A mirror pinned to
+    // the launch-time sea floats ships on calm physics under storm waves —
+    // the exact "waves roll over an unaffected ship" drift V8 forbids.
+    const op = testOceanParams({ amplitude: 0.5 });
+    const sp = testSeaParams();
+    const mirror = new CpuOcean(99, op, sp);
+    let t = 1;
+    mirror.update(t);
+    const before = mirror.heightAt(31.7, -12.4, t);
+    op.amplitude = 1.5; // live tweak, same object (registry-style mutation)
+    // within the 15-tick debounce the old sea persists (slider-drag calm)
+    t += DT;
+    mirror.update(t);
+    const during = mirror.heightAt(31.7, -12.4, t);
+    const fresh = new CpuOcean(99, op, sp);
+    for (let i = 0; i < 20; i++) {
+      t += DT;
+      mirror.update(t);
+    }
+    fresh.update(t);
+    const after = mirror.heightAt(31.7, -12.4, t);
+    expect(after).toBe(fresh.heightAt(31.7, -12.4, t)); // exact parity
+    expect(after).not.toBe(before);
+    expect(Math.abs(during - before)).toBeLessThan(0.2); // debounce held
   });
 });
 

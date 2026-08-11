@@ -197,11 +197,31 @@ export interface SurfaceSample {
   dz: number;
 }
 
+/**
+ * Params whose change requires h0 regeneration — MUST match the GPU's
+ * spectrumSignature (oceanCascades.ts): weather transitions lerp
+ * amplitude/windSpeed live, the GPU rebuilds its spectrum, and a mirror
+ * that kept floating ships on the launch-time sea is exactly the drift V8
+ * forbids ("storm waves roll over an unaffected ship").
+ * mirrorResolution is CPU-only but rebuild-shaped too, so it's included.
+ */
+function mirrorSignature(p: OceanParams, seaP: SeaPhysicsParams): string {
+  return [
+    p.resolution, p.amplitude, p.windSpeed, p.windDirection,
+    p.directionality, p.oppositeWaveDamp, p.smallWaveCutoff,
+    p.splitWavelengths, p.cascades.map((c) => c.domain),
+    seaP.mirrorResolution,
+  ].join('|');
+}
+
 export class CpuOcean {
-  private readonly cascades: MirrorCascade[];
-  private readonly butterfly: Float32Array;
+  private cascades: MirrorCascade[];
+  private butterfly: Float32Array;
+  private readonly seed: number;
   private readonly oceanP: OceanParams;
   private readonly seaP: SeaPhysicsParams;
+  private signature: string;
+  private rebuildCountdown = -1;
   private time = NaN;
   private gridTime = NaN;
 
@@ -210,8 +230,10 @@ export class CpuOcean {
     oceanP: OceanParams = oceanParams,
     seaP: SeaPhysicsParams = seaPhysicsParams,
   ) {
+    this.seed = seed;
     this.oceanP = oceanP;
     this.seaP = seaP;
+    this.signature = mirrorSignature(oceanP, seaP);
     const n = seaP.mirrorResolution;
     this.butterfly = generateButterfly(n);
     this.cascades = [];
@@ -228,6 +250,22 @@ export class CpuOcean {
   /** advance mirror to sim time; grids recompute every updateEveryTicks */
   update(time: number): void {
     this.time = time;
+    // track live spectrum-shaping tweaks; same 15-tick debounce (~250 ms)
+    // as the GPU so both sides settle on the new sea near-simultaneously
+    const sig = mirrorSignature(this.oceanP, this.seaP);
+    if (sig !== this.signature) {
+      this.signature = sig;
+      this.rebuildCountdown = 15;
+    }
+    if (this.rebuildCountdown >= 0 && this.rebuildCountdown-- === 0) {
+      const n = this.seaP.mirrorResolution;
+      this.butterfly = generateButterfly(n);
+      this.cascades = [];
+      for (let i = 0; i < MIRRORED_CASCADES; i++) {
+        this.cascades.push(new MirrorCascade(i, this.seed, this.oceanP, n));
+      }
+      this.gridTime = NaN; // force recompute below
+    }
     const staleFor = Math.abs(time - this.gridTime);
     if (staleFor < this.seaP.updateEveryTicks * SIM_DT - 1e-9) return;
     for (const c of this.cascades) {
