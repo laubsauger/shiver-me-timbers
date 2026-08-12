@@ -15,8 +15,6 @@
  */
 import * as THREE from 'three/webgpu';
 import {
-  If,
-  Loop,
   cross,
   float,
   instanceIndex,
@@ -32,6 +30,7 @@ import {
   uniform,
   vec3,
 } from 'three/tsl';
+import type { ShaderNodeObject } from 'three/tsl';
 import { Z_MIN } from './catenaryMath';
 import { MIN_RUNG } from '../ship/ratlinePlan';
 import { ropeParams } from '../params/ropes';
@@ -40,6 +39,11 @@ import { phoneWireRegime, type RegimeUniforms } from './ropeMesh';
 
 /** |tangent.y| above this → rung ~vertical, swap frame reference to +x */
 const REF_SWAP = 0.99;
+
+/** any TSL node — same alias, and same reason, as ropeMesh.ts: an accumulator
+ *  changes node class as it is folded, which `let` inference will not allow */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type TSLNode = ShaderNodeObject<any>;
 
 /**
  * Tube segments per rung. A rung's belly is only a few centimetres, but at the
@@ -93,42 +97,50 @@ export function createRatlineMesh(
    * chain's rest lengths are per-link arc lengths, so a station stays put on
    * the rope as it swings. Same measurement with this: 45.3° → 2.7° max.
    *
-   * Cost is two fixed 16-step loops per end (§V28: literal bounds, no early
-   * exit). That is the price of the rope's parameterisation not being uniform;
-   * see the report for the cheaper fix at the source.
+   * UNROLLED, BRANCH-FREE, AND NO `toVar` — this cost a live regression, so
+   * the reason is worth stating. The first version accumulated the arc length
+   * in a `float(0).toVar()` written inside a TSL `Loop`, in a VERTEX stage
+   * built outside any `Fn()`. A VarNode's declaration is emitted where it is
+   * first GENERATED, and the only reference to that var was inside the loop
+   * body — so the declaration landed in the loop's own scope, reset every
+   * iteration, and the read after the loop saw 0. Total arc length 0 means
+   * both ends resolve to sample 0, and both shrouds of a fan SHARE their
+   * masthead, so every rung collapsed to a point and the MIN_RUNG cutoff then
+   * correctly drew nothing: all 486 gone, no error, no NaN. Every other TSL
+   * loop in this codebase lives inside `Fn()`, which pushes a stack and gives
+   * its vars a scope; this one did not.
+   *
+   * `segments` is a startup constant, so the whole lookup unrolls into a pure
+   * expression tree instead: no Loop, no If, no vars, nothing whose scope can
+   * be got wrong, and it is stage-agnostic by construction. The points and
+   * link lengths are built ONCE as node objects and reused, so the builder
+   * emits 17 storage reads rather than one per use.
    */
   function sampleRope(rope: ReturnType<typeof float>, t: ReturnType<typeof float>) {
     const base0 = int(rope).mul(pointsPerRope);
-    // three types a Loop's index as `number` though it is a node at runtime —
-    // the same looseness ropeMesh.ts documents with its own TSLNode alias
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    type Idx = any;
-    const pointAt = (i: Idx) => pts.element(base0.add(int(i))).xyz;
-    const linkLength = (i: Idx) =>
-      max(pointAt(int(i).add(1)).sub(pointAt(i)).length(), float(Z_MIN));
+    const p = Array.from({ length: segments + 1 }, (_, i) =>
+      pts.element(base0.add(int(i))).xyz);
+    const link = Array.from({ length: segments }, (_, i) =>
+      max(p[i + 1].sub(p[i]).length(), float(Z_MIN)));
 
-    const total = float(0).toVar();
-    Loop({ start: int(0), end: int(segments), condition: '<' }, ({ i }) => {
-      total.addAssign(linkLength(i));
-    });
+    let total: TSLNode = link[0];
+    for (let i = 1; i < segments; i++) total = total.add(link[i]);
 
     // distance to walk from the MASTHEAD end (sample 0), clamped so a t that
     // has drifted outside [0,1] lands on an endpoint instead of wrapping to
     // sample 0 and drawing a rung across open air
-    const want = float(1).sub(t).mul(total).clamp(0, total).toVar();
-    const acc = float(0).toVar();
-    // defaults put an unmatched walk at the far end, never at index 0
-    const idx = int(segments - 1).toVar();
-    const frac = float(1).toVar();
-    Loop({ start: int(0), end: int(segments), condition: '<' }, ({ i }) => {
-      const segLen = linkLength(i);
-      If(want.greaterThanEqual(acc).and(want.lessThanEqual(acc.add(segLen))), () => {
-        idx.assign(i);
-        frac.assign(want.sub(acc).div(segLen));
-      });
-      acc.addAssign(segLen);
-    });
-    return mix(pointAt(idx), pointAt(idx.add(1)), frac);
+    const want = float(1).sub(t).mul(total).clamp(0, total);
+
+    // fold: pick the segment the station falls in, selecting the POSITION
+    // rather than an index, so nothing has to index an array by a node
+    let acc: TSLNode = float(0);
+    let out: TSLNode = p[segments]; // default: the far end, never sample 0
+    for (let i = 0; i < segments; i++) {
+      const hit = want.greaterThanEqual(acc).and(want.lessThanEqual(acc.add(link[i])));
+      out = select(hit, mix(p[i], p[i + 1], want.sub(acc).div(link[i])), out);
+      acc = acc.add(link[i]);
+    }
+    return out;
   }
 
   function segmentNodes() {
