@@ -75,13 +75,13 @@ export const postParams = registerParams(
     godRayFalloff: 0.9,
     /** §V.44 — bounds every tap the march can read, in linear scene units */
     godRayClamp: 12,
-    /** NDC distance OUTSIDE the frame over which the sun fades out. Not a
-     *  hard cut at the border: real shafts continue when the source is just
-     *  off-screen, and cutting there is what makes this technique snap. */
-    godRayEdgeFade: 0.35,
-    /** dot(cameraForward, sunDir) band over which the sun fades as it swings
-     *  behind the camera, where projection stops meaning anything */
-    godRayFacingEdge: 0.25,
+    /** DEGREES past the frame corner over which the sun fades out. Not a hard
+     *  cut at the border: real shafts continue when the source is just
+     *  off-screen, and cutting there is what makes this technique snap.
+     *  Measured in angle, not NDC — NDC is tan(θ)/tan(halfFov) and runs to
+     *  infinity at the frustum plane, which compressed the whole fade into
+     *  ~8° of camera rotation (caught by tests/postGodRays.test.ts). */
+    godRayEdgeFade: 25,
     /** BUILD-TIME (§V.28: Loop bounds must be literal). Reload to change. */
     godRayTaps: 32,
     /** BUILD-TIME resolution scale for both god-ray targets. Reload. */
@@ -148,8 +148,7 @@ export const postParams = registerParams(
     godRayLength: { min: 0, max: 1.5, step: 0.01 },
     godRayFalloff: { min: 0.05, max: 2, step: 0.01 },
     godRayClamp: { min: 1, max: 64, step: 0.5 },
-    godRayEdgeFade: { min: 0.01, max: 1.5, step: 0.01 },
-    godRayFacingEdge: { min: 0.01, max: 1, step: 0.01 },
+    godRayEdgeFade: { min: 1, max: 90, step: 1 },
     godRayTaps: { min: 4, max: 128, step: 1 },
     godRayScale: { min: 0.1, max: 1, step: 0.05 },
     dofFocus: { min: 1, max: 400, step: 0.5 },

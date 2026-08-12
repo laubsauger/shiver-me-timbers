@@ -40,7 +40,8 @@
  */
 import type { PieceDef } from '../ship/pieceTypes';
 import type { Vec3Like } from './catenaryMath';
-import type { Blocks } from './blocks';
+import type { BlockDescriptor } from './blockMath';
+import { ropeParams } from '../params/ropes';
 import type { Ropes } from './index';
 
 export type RigRole =
@@ -65,10 +66,9 @@ export interface RiggingRope {
   thickness: number;
 }
 
-/** the subsets of the ropes/blocks APIs the rigging needs — keeps this
- *  module free of runtime three.js imports (type-only) */
+/** the subset of the ropes API the rigging needs — keeps this module free of
+ *  runtime three.js imports (type-only) */
 export type RopesHandle = Pick<Ropes, 'setRope' | 'setRopeCount'>;
-export type BlocksHandle = Pick<Blocks, 'setBlock' | 'setBlockCount'>;
 
 /**
  * Per-role slack/thickness — rig design data. Standing rigging (stays,
@@ -326,19 +326,34 @@ function socketHeights(blueprint: PieceDef[]): Map<string, number> {
 }
 
 /**
- * Sockets that get a wooden block (pulley) mesh: the socketA termination of
- * running-rigging entries, deduped in plan order and capped. Deterministic —
- * same plan, same blocks.
+ * Blocks (pulleys): one at the socketA termination of each running-rigging
+ * entry, deduped by socket in plan order and capped. Deterministic — same
+ * plan, same blocks, same order.
+ *
+ * A descriptor addresses the block into the ROPE's index space (rope, t), not
+ * to a socket position, because that is what lets it hang off the solved curve
+ * and ride the rope's sag and swing — §V45's rule for ratlines, and the fix for
+ * the pulleys that "were not playing with the physics". `t` is a small offset
+ * down the line rather than 0 so the block is seized into the LINE: at exactly
+ * 0 the curve sample is the socket, and the block would once again ride only
+ * the ship.
  */
-export function selectBlockSockets(plan: RiggingRope[], cap: number): string[] {
-  const out: string[] = [];
+export function buildBlockDescriptors(
+  plan: RiggingRope[],
+  cap: number,
+  t: number = ropeParams.blockAnchorT,
+  size: number = ropeParams.blockSize,
+): BlockDescriptor[] {
+  const out: BlockDescriptor[] = [];
   const used = new Set<string>();
-  for (const rope of plan) {
-    if (!BLOCK_ROLES.has(rope.role) || used.has(rope.socketA)) continue;
+  const tt = Math.min(0.5, Math.max(0, Number.isFinite(t) ? t : 0));
+  plan.forEach((rope, index) => {
+    if (out.length >= cap) return;
+    if (!BLOCK_ROLES.has(rope.role) || used.has(rope.socketA)) return;
     used.add(rope.socketA);
-    out.push(rope.socketA);
-    if (out.length >= cap) break;
-  }
+    // t < 0.5, so the line always runs away from the block toward +t
+    out.push({ rope: index, t: tt, size, away: 1, socket: rope.socketA });
+  });
   return out;
 }
 
@@ -376,18 +391,4 @@ export function applyRiggingPlan(
     ropes.setRope(index, a, b, chord * slack, rope.thickness);
   });
   ropes.setRopeCount(plan.length);
-}
-
-/** Place block meshes at the selected sockets — same call pattern/cadence as
- *  applyRiggingPlan so blocks ride their anchors. */
-export function applyBlocks(
-  sockets: string[],
-  blocks: BlocksHandle,
-  socketWorldPosition: (id: string) => [number, number, number],
-): void {
-  sockets.forEach((id, index) => {
-    const [x, y, z] = socketWorldPosition(id);
-    blocks.setBlock(index, { x, y, z });
-  });
-  blocks.setBlockCount(sockets.length);
 }

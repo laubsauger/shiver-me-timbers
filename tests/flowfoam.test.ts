@@ -39,6 +39,14 @@ import {
   type WakeParams,
 } from '../src/flowfoam/wakeMath';
 import {
+  KELVIN_HALF_ANGLE_DEG,
+  bandKeepCpu,
+  slickDampCpu,
+  slickFieldCpu,
+  transverseWavelengthCpu,
+  type SlickParams,
+} from '../src/flowfoam/slickMath';
+import {
   COARSEN_MAX_MUL,
   TRACK_CAPACITY,
   advanceTrack,
@@ -1110,6 +1118,317 @@ describe('wake field in the track frame (bow vs aft, §V10 follow-up)', () => {
         expect(STRAIGHT.z - d).toBeLessThanOrEqual(b.maxZ);
       }
     }
+  });
+});
+
+// ─── the wake's effect on the WATER, not on its colour ──────────────────────
+// User: "I would expect an actual influence on the surface ripple / wave noise
+// structure caused by the bow wake, by the trail that we leave in the water. It
+// still feels not really believable enough." Everything above this line paints
+// FOAM — white on top of an otherwise undisturbed sea, i.e. a decal. These
+// tests pin the two mechanisms that make it a wake (src/flowfoam/slickMath.ts).
+const SP: SlickParams = { ...flowFoamParams };
+
+describe('capillary-damping lane (the glassy track, §V10 follow-up)', () => {
+  it('THE CLAIM: the lane follows the TRACK, not the live heading', () => {
+    // Same discriminator as the foam's: a wake that re-points when the ship
+    // turns is not a wake. The damping lane is derived from the same recorded
+    // polyline, so it inherits the property — and this test would fail loudly
+    // if someone re-derived it from the ship's current frame.
+    // same 36 m north / 36 m east course and the same two probes the foam's
+    // "wake follows the PATH" test uses, so the two systems are pinned to one
+    // geometry: 52 m back along the PATH vs 52 m dead astern of the new heading
+    const s = sail(
+      [
+        { fx: 0, fz: 1, seconds: 6 },
+        { fx: 1, fz: 0, seconds: 6 },
+      ],
+      6,
+    );
+    expect(slickFieldCpu(s.points, 0, 20, HULL, SP).slick).toBeGreaterThan(0);
+    // west of the corner the hull never went — it came from the south
+    expect(slickFieldCpu(s.points, -16, 36, HULL, SP).slick).toBe(0);
+  });
+
+  it('it is a LANE on the centreline, not the foam arms — a different shape', () => {
+    // The physical claim: turbulence smooths the water the HULL passed through,
+    // while the Kelvin arms are crests at ±dist·tanθ. If the damping simply
+    // reused the foam mask the two would peak in the same place, the lane would
+    // be gappy, and the whole effect would read as "shinier foam".
+    const s = sail([{ fx: 0, fz: 1, seconds: 15 }], 6);
+    const at = (lat: number, d: number) => ({
+      slick: slickFieldCpu(s.points, lat, s.z - d, HULL, SP).slick,
+      foam: wakeRateCpu(s.points, lat, s.z - d, HULL, WP),
+    });
+    const d = 40;
+    const centre = at(0, d);
+    const arm = at(d * TAN, d);
+    expect(centre.slick).toBeGreaterThan(arm.slick); // lane is centred
+    expect(arm.foam).toBeGreaterThan(centre.foam); // foam is on the arms
+    // …and the lane never fans out past the wedge the whole wake lives in
+    expect(slickFieldCpu(s.points, d * TAN + 6, s.z - d, HULL, SP).slick).toBe(0);
+  });
+
+  it('the lane is SMOOTH — no breakup stipple, because §V49 amplifies it', () => {
+    // THE reason this field cannot simply be the foam mask. The ocean material
+    // multiplies this factor into a slope it then differentiates in screen
+    // space (dFdx(normalWorld) → Toksvig lobe widening), so the product rule
+    // hands the normal H·dS/dx: any high-frequency structure in S comes back
+    // amplified by the wave slope's own magnitude. The foam carries deliberate
+    // gappy breakup noise; the lane must not.
+    const s = sail([{ fx: 0, fz: 1, seconds: 15 }], 6);
+    // Measured as the largest step per sample as a fraction of the field's OWN
+    // peak — that is the quantity a screen-space derivative sees, and it is
+    // scale-free so the two fields can be compared directly.
+    const step = 0.05; // ~a fifth of a near-tier texel
+    const roughness = (f: (x: number) => number): number => {
+      let peak = 0;
+      let jump = 0;
+      let prev = f(0);
+      for (let x = step; x <= 12; x += step) {
+        const cur = f(x);
+        peak = Math.max(peak, cur);
+        jump = Math.max(jump, Math.abs(cur - prev));
+        prev = cur;
+      }
+      return jump / Math.max(peak, 1e-9);
+    };
+    const slickRough = roughness((x) => slickFieldCpu(s.points, x, s.z - 20, HULL, SP).slick);
+    // The bound is DERIVED, not tuned: the lane's only lateral structure is one
+    // smoothstep shoulder, whose peak gradient is 1.5/span, and the span is at
+    // worst `slickEdge × halfBeam` metres (the narrowest the lane ever gets, at
+    // the stem). So the step per sample can never exceed 1.5·step/that — metres
+    // of transition against centimetres of sample, which is the whole claim.
+    const shoulderBound = (1.5 * step) / (SP.slickEdge * HULL.beam * 0.5);
+    expect(slickRough).toBeLessThan(shoulderBound);
+    expect(shoulderBound).toBeLessThan(0.05);
+
+    // And UNIMODAL: one plateau, one shoulder, no interior bumps. The foam
+    // along the very same line is multi-modal — arm crests plus deliberate
+    // breakup gaps — which is exactly the structure that must not reach a
+    // differentiated normal. If the lane is ever re-derived from the foam mask
+    // this count goes up and the test fails.
+    // Measured ALONG the trail, which is where the breakup lattice lives.
+    const bumps = (f: (d: number) => number): number => {
+      const v: number[] = [];
+      for (let d = 10; d <= 80; d += 0.25) v.push(f(d));
+      const peak = Math.max(...v, 1e-9);
+      let n = 0;
+      for (let i = 1; i + 1 < v.length; i++) {
+        if (v[i] > v[i - 1] && v[i] > v[i + 1] && v[i] > peak * 0.1) n++;
+      }
+      return n;
+    };
+    // the lane down the centreline: one monotone decay, no patches at all
+    expect(bumps((d) => slickFieldCpu(s.points, 0, s.z - d, HULL, SP).slick)).toBe(0);
+    // the foam down its own arm crest: broken into patches, as it should be
+    expect(bumps((d) => wakeRateCpu(s.points, d * TAN, s.z - d, HULL, WP))).toBeGreaterThan(3);
+  });
+
+  it('BUILDS UP over time and RELAXES after the ship has gone', () => {
+    // A slick is a state of the water, not an instantaneous field: it has to
+    // accumulate under the hull and then take (much) longer than the foam to
+    // fade. Mirrors the accumulation arithmetic in accumulation.ts exactly.
+    const s = sail([{ fx: 0, fz: 1, seconds: 15 }], 6);
+    const rate = slickFieldCpu(s.points, 0, s.z - 20, HULL, SP).slick;
+    expect(rate).toBeGreaterThan(0);
+    const keep = decayFactorPerFrame(flowFoamParams.slickHalfLife, DT);
+    let cover = 0;
+    const grow: number[] = [];
+    for (let i = 0; i < 120; i++) {
+      cover = Math.min(cover * keep + rate * DT, 1);
+      if (i % 40 === 39) grow.push(cover);
+    }
+    expect(grow[0]).toBeLessThan(grow[1]);
+    expect(grow[1]).toBeLessThan(grow[2]); // still building, never snapping
+    // ship gone: injection stops, and the lane must halve in slickHalfLife —
+    // an order of magnitude slower than the foam, which is the whole point
+    const settled = cover;
+    for (let i = 0; i < Math.round(flowFoamParams.slickHalfLife / DT); i++) cover *= keep;
+    expect(cover).toBeCloseTo(settled * 0.5, 4);
+    expect(flowFoamParams.slickHalfLife).toBeGreaterThan(flowFoamParams.decayHalfLife * 4);
+  });
+
+  it('must not saturate into a formless slab — the accumulation arithmetic', () => {
+    // The AccumProfile.wakeScale trap, in the slick's own units: a persistent
+    // source settles at rate x halfLife/ln2, so a long INJECTION decay stacked
+    // on a long ACCUMULATION half-life pins every texel at 1 and the lane loses
+    // every gradient it has. Measured 8.4 with the first defaults — 8x clipped.
+    // The cure is the physical one: turbulence is generated in the first
+    // seconds behind the hull (slickDecay), the water then heals slowly
+    // (slickHalfLife). Integrate the ODE the compute pass runs and check.
+    const k = Math.LN2 / flowFoamParams.slickHalfLife;
+    const tau = flowFoamParams.slickDecay;
+    let cover = 0;
+    let peak = 0;
+    let peakAt = 0;
+    for (let i = 1; i <= Math.round(400 / DT); i++) {
+      const t = i * DT;
+      cover += (flowFoamParams.slickIntensity * Math.exp(-t / tau) - k * cover) * DT;
+      if (cover > peak) {
+        peak = cover;
+        peakAt = t;
+      }
+    }
+    expect(peak).toBeLessThanOrEqual(1); // never clipped ⟹ the gradient survives
+    expect(peak).toBeGreaterThan(0.7); // …but the lane does read strongly
+    expect(peakAt).toBeGreaterThan(5); // and it BUILDS: no snap to full effect
+    expect(cover).toBeLessThan(peak * 0.2); // and heals, hundreds of m astern
+  });
+
+  it('injection DECAYS with the water age, so the lane has a gradient', () => {
+    // Not a fixed-length ribbon that stops: exp(−age/slickDecay), the same
+    // dissipation shape the foam features were reworked onto (wakeMath header).
+    const s = sail([{ fx: 0, fz: 1, seconds: 60 }], 6);
+    const young = slickFieldCpu(s.points, 0, s.z - 10, HULL, SP).slick;
+    const mid = slickFieldCpu(s.points, 0, s.z - 120, HULL, SP).slick;
+    const old = slickFieldCpu(s.points, 0, s.z - 300, HULL, SP).slick;
+    expect(young).toBeGreaterThan(mid);
+    expect(mid).toBeGreaterThan(old);
+    expect(old).toBeGreaterThanOrEqual(0);
+  });
+
+  it('HOVE TO: a stopped hull lays no new lane (else it pins solid white)', () => {
+    // Same trap as the foam's (wakeMath.wakeTrailCpu): this is a SOURCE
+    // re-evaluated every frame. Stop the ship and the pattern freezes, so the
+    // same dose lands on the same texels for ever. Gating on LIVE speed lets
+    // the deposit simply decay. User: "if you're stationary it should be a very
+    // very tiny amount around the hull directly, if anything."
+    const s = sail([{ fx: 0, fz: 1, seconds: 15 }], 6);
+    const under = slickFieldCpu(s.points, 0, s.z - 20, HULL, SP, 6).slick;
+    const stopped = slickFieldCpu(s.points, 0, s.z - 20, HULL, SP, 0).slick;
+    expect(under).toBeGreaterThan(0);
+    expect(stopped).toBe(0);
+  });
+});
+
+describe('transverse Kelvin waves (λ = 2πv²/g, the speed-dependent half)', () => {
+  it('the WEDGE ANGLE is speed-independent, the WAVELENGTH is not', () => {
+    // Kelvin's result: the half-angle is asin(1/3), fixed by the deep-water
+    // dispersion relation alone — it is not a look knob and must not be tuned.
+    expect(flowFoamParams.kelvinAngle).toBeCloseTo(KELVIN_HALF_ANGLE_DEG, 2);
+    expect(KELVIN_HALF_ANGLE_DEG).toBeCloseTo(19.4712, 3);
+    // the rendered envelope agrees: the arm crest sits at dist·tanθ at ANY
+    // speed, so a fast ship and a slow one draw the same V (different lengths
+    // and intensities — that part is speed-driven, and tested above)
+    for (const speed of [3, 12]) {
+      const s = sail([{ fx: 0, fz: 1, seconds: 20 }], speed);
+      const d = 40;
+      const onCrest = wakeEnvelopeCpu(s.points, d * TAN, s.z - d, HULL, WP);
+      const outside = wakeEnvelopeCpu(s.points, d * TAN + 8, s.z - d, HULL, WP);
+      expect(onCrest).toBeGreaterThan(0);
+      expect(outside).toBe(0);
+    }
+    // the transverse wavelength, by contrast, goes as v²: double the speed and
+    // the crests spread four-fold. Getting this constant means the wake reads
+    // differently under way than at a crawl, which is what sells the speed.
+    expect(transverseWavelengthCpu(4)).toBeCloseTo(transverseWavelengthCpu(2) * 4, 6);
+    expect(transverseWavelengthCpu(6)).toBeCloseTo((2 * Math.PI * 36) / 9.80665, 6);
+  });
+
+  it('the crest SPACING measured off the field really scales as v²', () => {
+    // Not just the formula — the field the GPU twin evaluates. Count sign
+    // changes of the transverse slope along the centreline over a fixed run:
+    // a longer wavelength must cross zero fewer times.
+    const crossings = (speed: number): number => {
+      const s = sail([{ fx: 0, fz: 1, seconds: 40 }], speed);
+      let n = 0;
+      let prev = 0;
+      for (let d = 2; d <= 120; d += 0.25) {
+        const v = slickFieldCpu(s.points, 0, s.z - d, HULL, SP).slopeZ;
+        if (prev !== 0 && Math.sign(v) !== Math.sign(prev) && v !== 0) n++;
+        prev = v;
+      }
+      return n;
+    };
+    const slow = crossings(3); // λ ≈ 5.8 m
+    const fast = crossings(7); // λ ≈ 31.4 m
+    expect(slow).toBeGreaterThan(fast * 3);
+    expect(fast).toBeGreaterThan(0); // and the fast one is still a wave train
+  });
+
+  it('crests stay INSIDE the wedge and point across the track', () => {
+    const s = sail([{ fx: 0, fz: 1, seconds: 20 }], 6);
+    const d = 50;
+    // outside the V there is no transverse wave at all
+    expect(slickFieldCpu(s.points, d * TAN + 2, s.z - d, HULL, SP).slopeZ).toBe(0);
+    // sailing due north (fwd = +z), so the slope must be purely along z —
+    // crests run ACROSS the track, which is what makes them read as a ladder
+    const on = slickFieldCpu(s.points, 2, s.z - d, HULL, SP);
+    expect(Math.abs(on.slopeX)).toBeLessThan(1e-9);
+    expect(Math.abs(on.slopeZ)).toBeGreaterThan(0);
+  });
+});
+
+describe('§V44/§V48/§V49 — what the ocean is allowed to multiply', () => {
+  it('BOUNDED AT SOURCE over the whole field, including off the track', () => {
+    // §V44: the damping multiplier ends up scaling a surface slope and the
+    // transverse term is ADDED to one. Both must be provably bounded where they
+    // are produced, not clamped by the consumer.
+    const s = sail([{ fx: 0, fz: 1, seconds: 20 }, { fx: 1, fz: 0, seconds: 6 }], 7);
+    for (let x = -80; x <= 80; x += 3.5) {
+      for (let z = -160; z <= 40; z += 3.5) {
+        const f = slickFieldCpu(s.points, x, z, HULL, SP);
+        expect(Number.isFinite(f.slick)).toBe(true);
+        expect(f.slick).toBeGreaterThanOrEqual(0);
+        expect(f.slick).toBeLessThanOrEqual(flowFoamParams.slickIntensity);
+        expect(Math.hypot(f.slopeX, f.slopeZ)).toBeLessThanOrEqual(
+          flowFoamParams.transSlope + 1e-9,
+        );
+        const m = slickDampCpu(f.slick, 1, SP);
+        expect(m).toBeLessThanOrEqual(1);
+        expect(m).toBeGreaterThanOrEqual(1 - flowFoamParams.slickDamp - 1e-9);
+      }
+    }
+  });
+
+  it('FAILS SAFE: a non-finite coverage damps nothing rather than NaNing a normal', () => {
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      expect(slickDampCpu(bad, 1, SP)).toBe(1);
+      expect(slickDampCpu(0.5, bad, SP)).toBe(1);
+      expect(bandKeepCpu(bad, 0.234, SP)).toBe(0);
+    }
+    // and out-of-range inputs saturate instead of extrapolating
+    expect(slickDampCpu(5, 1, SP)).toBeCloseTo(1 - flowFoamParams.slickDamp, 9);
+    expect(slickDampCpu(-5, 1, SP)).toBe(1);
+  });
+
+  it('BAND-LIMITED: the product tends to the UNDAMPED slope at minification', () => {
+    // §V48 + §V49 in one. The accumulation texture is compute-written, so it
+    // can carry no mip chain: once one screen pixel spans more than a texel a
+    // texture() fetch is a point sample, and §V49 says the material's own
+    // dFdx(normal) then returns that aliasing amplified by the slope magnitude.
+    // The fix has to be applied by THIS owner, against the caller's footprint.
+    const texel = flowFoamParams.regionSize / flowFoamParams.resolution; // 0.234 m
+    const keep = (px: number) => bandKeepCpu(px, texel, SP);
+    // resolved: full effect
+    expect(keep(texel * 0.5)).toBeCloseTo(1, 6);
+    // monotone, never rising back
+    let prev = 1;
+    for (let m = 0.5; m <= 6; m += 0.1) {
+      const k = keep(texel * m);
+      expect(k).toBeLessThanOrEqual(prev + 1e-12);
+      prev = k;
+    }
+    // past the cut it is exactly zero, so the PRODUCT is fineSlope × 1 — i.e.
+    // precisely what the ocean draws with no wake at all. Nothing to alias.
+    expect(keep(texel * flowFoamParams.slickBandCut * 1.01)).toBe(0);
+    expect(slickDampCpu(1, keep(texel * 8), SP)).toBe(1);
+    // fading to "no damping" is also the honest AVERAGE: a lane a few metres
+    // wide occupies a vanishing fraction of a footprint that large.
+    expect(flowFoamParams.slickBandCut).toBeGreaterThan(flowFoamParams.slickBandFull);
+  });
+
+  it('the FAR tier is coarser than the shortest transverse wave it could hold', () => {
+    // Which is exactly why accumulation's `useDetail` is false there: 2.5 m
+    // texels cannot carry a 5.8 m wave (2.3 samples per period, below Nyquist),
+    // and that field ends up in the surface NORMAL.
+    const farTexel = flowFoamParams.farRegionSize / flowFoamParams.farResolution;
+    const shortest = transverseWavelengthCpu(flowFoamParams.speedThreshold * 6);
+    expect(shortest / farTexel).toBeLessThan(4);
+    // the near tier, by contrast, resolves it comfortably
+    const nearTexel = flowFoamParams.regionSize / flowFoamParams.resolution;
+    expect(shortest / nearTexel).toBeGreaterThan(20);
   });
 });
 

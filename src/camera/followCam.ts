@@ -19,12 +19,12 @@
  * (free). Mode switches blend position AND look target so neither cut is a
  * jump. Bindings live in camInput.ts.
  */
-import { PerspectiveCamera, Vector3 } from 'three';
+import { PerspectiveCamera, Quaternion, Vector3 } from 'three';
 import type { ShipState } from '../state/simState';
 import { cameraParams } from '../params/camera';
 import { FreeCam } from './freeCam';
 import { attachCamInput } from './camInput';
-import { DebugPose, type Vec3Like } from './debugPose';
+import { DebugPose, readVec3, type Vec3Like } from './debugPose';
 import {
   clamp,
   dampFactor,
@@ -34,7 +34,7 @@ import {
   wrapAngle,
 } from './camMath';
 
-export type CamMode = 'follow' | 'orbit' | 'free';
+export type CamMode = 'follow' | 'orbit' | 'free' | 'helm';
 export type HeightFn = (x: number, z: number) => number;
 export type { Vec3Like } from './debugPose';
 
@@ -58,6 +58,18 @@ export class FollowCam {
   private lastPivot = new Vector3();
   /** debug vantage: pinned pose that outranks all modes (§V22) */
   private pin = new DebugPose();
+  /**
+   * Helm POV, all SHIP-LOCAL. The anchor is the wheel's own socket, handed in
+   * from main.ts rather than hardcoded here, so the eye tracks the model if
+   * the sterncastle moves. Free-look angles are their own pair, NOT the orbit
+   * yaw/pitch: stepping to the helm and back must not disturb the chase
+   * framing the shot was set up with.
+   */
+  private helmAnchor = new Vector3(0, 6.2, -13);
+  private helmYaw = 0;
+  private helmPitch = 0;
+  private helmQuat = new Quaternion();
+  private helmEye = new Vector3();
   private detach: () => void;
 
   constructor(
@@ -67,6 +79,7 @@ export class FollowCam {
     this.detach = attachCamInput(domElement, {
       isFree: () => this.mode === 'free',
       toggleFree: () => this.setMode(this.mode === 'free' ? 'follow' : 'free'),
+      toggleHelm: () => this.setMode(this.mode === 'helm' ? 'follow' : 'helm'),
       setDragging: (d) => {
         this.dragging = d;
       },
@@ -75,6 +88,21 @@ export class FollowCam {
         const p = cameraParams;
         if (this.mode === 'free') {
           this.free.look(dx, dy);
+          return;
+        }
+        if (this.mode === 'helm') {
+          // free-look about the ship's OWN heading, so the view stays put
+          // relative to the deck as she yaws instead of swinging with her
+          this.helmYaw = clamp(
+            this.helmYaw - dx * p.freeLookSpeed,
+            -p.helmYawLimit,
+            p.helmYawLimit,
+          );
+          this.helmPitch = clamp(
+            this.helmPitch - dy * p.freeLookSpeed,
+            -p.freePitchLimit,
+            p.freePitchLimit,
+          );
           return;
         }
         this.yaw = wrapAngle(this.yaw - dx * p.orbitSpeed);
@@ -123,6 +151,16 @@ export class FollowCam {
     this.pin.set(this.camera, position, target, this.tmp);
   }
 
+  /**
+   * Ship-LOCAL position of the helm (the wheel's own socket). main.ts resolves
+   * it from the assembly at boot so this file never has to know the galleon's
+   * dimensions — and so a change to the sterncastle moves the captain's eye
+   * with it instead of leaving him standing in mid-air.
+   */
+  setHelmAnchor(local: Vec3Like): void {
+    readVec3(local, this.helmAnchor);
+  }
+
   /** Release the pin. The camera does NOT jump: free mode adopts the
    *  parked pose as its own, follow mode glides back to the chase. */
   clearDebugPose(): void {
@@ -143,6 +181,20 @@ export class FollowCam {
     const p = cameraParams;
     // switching modes is an explicit "give me the camera back" gesture
     this.clearDebugPose();
+    if (mode === 'helm') {
+      // an INSTANT cut, deliberately — "POV the captain in an instant" is the
+      // whole point, and easing a 30 m move would read as a swoop, not a cut.
+      // Angles reset so H always lands looking dead ahead over the bow.
+      this.helmYaw = 0;
+      this.helmPitch = 0;
+    } else if (this.mode === 'helm') {
+      // leaving the helm glides: start the chase from where the eye actually
+      // is, or the camera teleports astern on the first frame
+      this.smoothed.copy(this.camera.position);
+      this.lookSmoothed.copy(this.lastPivot);
+      this.initialized = true;
+      this.blend = p.modeSwitchTime;
+    }
     if (mode === 'free') {
       // adopt the live pose: entering free mode is a cut with zero motion
       this.free.seedFrom(this.camera, this.tmp);
@@ -193,6 +245,34 @@ export class FollowCam {
       this.free.applyTo(this.camera, this.tmp);
       return;
     }
+
+    // HELM POV: the eye is rigidly parented to the deck, so it inherits every
+    // bit of heel, pitch and heave for free — that IS the shot. No smoothing
+    // at all: damping the position here would slide the captain around his own
+    // deck, and damping the aim would make the horizon lag the roll.
+    if (this.mode === 'helm') {
+      this.helmQuat.set(q[0], q[1], q[2], q[3]);
+      this.helmEye
+        .set(this.helmAnchor.x, this.helmAnchor.y + p.helmEyeHeight, this.helmAnchor.z - p.helmAft)
+        .applyQuaternion(this.helmQuat);
+      this.helmEye.x += ship.position[0];
+      this.helmEye.y += ship.position[1];
+      this.helmEye.z += ship.position[2];
+      this.camera.position.copy(this.helmEye);
+      // aim in the SHIP's frame too, so a look to starboard stays to starboard
+      // through a tack rather than being unwound by her turn
+      this.tmp.set(
+        Math.sin(this.helmYaw) * Math.cos(this.helmPitch),
+        Math.sin(this.helmPitch),
+        Math.cos(this.helmYaw) * Math.cos(this.helmPitch),
+      );
+      this.tmp.applyQuaternion(this.helmQuat).add(this.helmEye);
+      this.camera.up.set(0, 1, 0).applyQuaternion(this.helmQuat);
+      this.camera.lookAt(this.tmp);
+      return;
+    }
+    // every other mode is world-up; helm is the only one that heels the lens
+    this.camera.up.set(0, 1, 0);
 
     // yaw is an OFFSET from the stern heading (see stepFollowYaw): swings
     // with the ship's turns, never crawls back to a default framing

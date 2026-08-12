@@ -27,6 +27,8 @@ import {
   reflect,
   reflectedDrift,
   smoothstep,
+  receiverFacing,
+  reflectedReach,
   refract,
   refractedDrift,
   surfaceStretch,
@@ -821,5 +823,86 @@ describe('params sanity (§V.16)', () => {
     expect(p.foldSoftness).toBeGreaterThan(0);
     expect(p.maxDepth).toBeGreaterThan(p.minEffectiveDepth);
     expect(p.curvatureEpsilon).toBeGreaterThan(22.7 / 512);
+  });
+});
+
+/**
+ * REFLECTED-BRANCH BOUNDS (user report, showcase blocker).
+ *
+ * "The caustics are spilling up way too high on the boats, and they're
+ * spilling across the deck and a little bit onto the other side."
+ *
+ * Two separate defects behind one symptom, and this is the speckle that was
+ * mis-attributed to wood grain, then spray, then deck water across three
+ * rounds of investigation:
+ *
+ *   1. the height term was an exp() decay with NO floor — decaying is not
+ *      bounded, so it climbed the topsides forever;
+ *   2. the RECEIVER's own normal was never consulted at all. Every face gate
+ *      in this module is about the water's normal (is the wave face lit, does
+ *      its reflected ray go up); nothing asked whether the lit surface could
+ *      physically see the sea.
+ */
+describe('reflected caustics stay on surfaces that can see the water', () => {
+  const P = causticsParams;
+
+  it('reaches EXACTLY zero by the ceiling, which exp() alone never does', () => {
+    const bare = Math.exp(-P.reflectedMaxHeight / P.reflectedHeightFalloff);
+    // the un-bounded term is still meaningfully alive at the ceiling — this is
+    // the assertion that would have caught the original bug
+    expect(bare).toBeGreaterThan(0.05);
+    expect(reflectedReach(P.reflectedMaxHeight, P.reflectedHeightFalloff, P.reflectedMaxHeight))
+      .toBe(0);
+    // and stays zero above it rather than creeping back
+    for (const h of [6, 9, 14, 30, 60]) {
+      if (h < P.reflectedMaxHeight) continue;
+      expect(reflectedReach(h, P.reflectedHeightFalloff, P.reflectedMaxHeight)).toBe(0);
+    }
+  });
+
+  it('still lights the waterline, so the bound did not kill the effect', () => {
+    // the whole point of the branch: sun off the waves onto the wet topside
+    expect(reflectedReach(0, P.reflectedHeightFalloff, P.reflectedMaxHeight)).toBeCloseTo(1, 6);
+    expect(reflectedReach(1, P.reflectedHeightFalloff, P.reflectedMaxHeight)).toBeGreaterThan(0.5);
+  });
+
+  it('decreases monotonically — no band of re-brightening up the hull', () => {
+    let prev = Infinity;
+    for (let h = 0; h <= P.reflectedMaxHeight * 1.5; h += 0.05) {
+      const v = reflectedReach(h, P.reflectedHeightFalloff, P.reflectedMaxHeight);
+      expect(v).toBeLessThanOrEqual(prev + 1e-12);
+      prev = v;
+    }
+  });
+
+  it('gives a DECK nothing: light going up cannot strike an upward face', () => {
+    expect(receiverFacing(1, P.reflectedFaceLimit)).toBe(0);
+    expect(receiverFacing(0.8, P.reflectedFaceLimit)).toBe(0);
+    expect(receiverFacing(P.reflectedFaceLimit, P.reflectedFaceLimit)).toBe(0);
+  });
+
+  it('gives a vertical hull side everything, which is the effect itself', () => {
+    expect(receiverFacing(0, P.reflectedFaceLimit)).toBe(1);
+    // an overhanging counter or the underside of a channel faces downward and
+    // is the surface real sea-bounce lights most strongly of all
+    expect(receiverFacing(-0.5, P.reflectedFaceLimit)).toBe(1);
+    expect(receiverFacing(-1, P.reflectedFaceLimit)).toBe(1);
+  });
+
+  it('rolls off smoothly across flared topsides — no hard line up the hull', () => {
+    const a = receiverFacing(0.05, P.reflectedFaceLimit);
+    const b = receiverFacing(0.2, P.reflectedFaceLimit);
+    expect(a).toBeGreaterThan(b);
+    expect(b).toBeGreaterThan(0);
+    expect(a).toBeLessThan(1);
+  });
+
+  it('the two gates are independent: deck height alone would not have fixed it', () => {
+    // a waist deck LOW enough to pass the height gate must still be dark,
+    // because it is the facing gate that owns "this is a deck"
+    const lowDeck = 2.0;
+    expect(reflectedReach(lowDeck, P.reflectedHeightFalloff, P.reflectedMaxHeight))
+      .toBeGreaterThan(0.3);
+    expect(receiverFacing(1, P.reflectedFaceLimit)).toBe(0);
   });
 });

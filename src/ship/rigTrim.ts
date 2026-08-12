@@ -21,7 +21,7 @@ import { shipRigParams } from '../params/ship';
 import { setShipWorldMatrix } from './woodMaterial';
 import { oceanParams } from '../params/ocean';
 import type { ShipAssembly } from './shipAssembly';
-import { braceAngle, sailStateForTrim, trimDropScale } from './sailDynamics';
+import { braceAngle, sailGeometryState, trimDropScale } from './sailDynamics';
 
 /** ship forward (world XZ) from the assembly's own matrix — 3rd basis column */
 function shipForward(group: THREE.Object3D): { x: number; z: number } {
@@ -60,10 +60,15 @@ export function updateRig(assembly: ShipAssembly, dt: number, trim = 1): void {
     Math.abs(delta) <= maxStep ? target : current + Math.sign(delta) * maxStep;
   assembly.setRigTrim(next);
 
-  // --- trim: discrete §V13 sail state + continuous cloth drop -------------
+  // --- trim: continuous cloth drop, and ONE geometry swap at the bottom ----
+  // The §V13 label (sailStateForTrim) deliberately does NOT appear here. It is
+  // hysteretic and three-valued, so keying geometry off it made the cloth jump
+  // 34% of its drop at mid-travel going in and 41% at a different trim coming
+  // out, with a 39%-wide dead band between. The reef is the continuous scale;
+  // the mesh only changes once, where the two silhouettes already match.
   const sails = assembly.sailPieceIds();
   if (sails.length === 0) return;
-  const state = sailStateForTrim(trim, assembly.sailState(sails[0]), p);
+  const state = sailGeometryState(trim, assembly.sailState(sails[0]), p);
   const drop = trimDropScale(trim, p);
   for (const id of sails) {
     assembly.setSailState(id, state); // no-op unless the state changed

@@ -77,6 +77,29 @@ export class App {
     renderer.shadowMap.enabled = SHADOWS_ENABLED;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     await renderer.init();
+
+    // §T.40 fail-loud: the GPU process died three times in one boot session
+    // and left NO trace — three swallows the loss (`_isDeviceLost` just makes
+    // every later call a silent no-op) and the page simply stops updating,
+    // which reads as a hang rather than a crash. Both hooks are diagnostic
+    // only: nothing here changes rendering.
+    const device = (renderer.backend as { device?: GPUDevice }).device;
+    if (device !== undefined) {
+      void device.lost.then((info) => {
+        console.error(`[gpu] DEVICE LOST (${info.reason || 'unknown'}): ${info.message}`);
+        (window as unknown as Record<string, unknown>).__gpuLost = {
+          reason: info.reason,
+          message: info.message,
+          at: performance.now(),
+        };
+      });
+      // validation/out-of-memory errors that no one awaited. A pipeline that
+      // fails to create is otherwise invisible: the material just never draws.
+      device.addEventListener('uncapturederror', (event) => {
+        console.error('[gpu] uncaptured error:', (event as GPUUncapturedErrorEvent).error.message);
+      });
+    }
+
     return new App(container, renderer);
   }
 

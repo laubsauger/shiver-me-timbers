@@ -14,6 +14,8 @@ import { weatherParams } from '../src/params/weather';
 import { oceanParams } from '../src/params/ocean';
 import { skyParams } from '../src/params/sky';
 import { cloudParams } from '../src/params/clouds';
+import { cascadeBand, effectiveChoppiness, spectralSteepness } from '../src/ocean/oceanMath';
+import { jacobianSigma } from '../src/foam/foamMath';
 import {
   advanceDrift,
   applyWeatherPreset,
@@ -125,20 +127,57 @@ describe('presets are pure data (§V7: only param values, no code)', () => {
 });
 
 describe('storm vs swell (§V7: amp up + foam bias up → big foam patches)', () => {
-  it('raises amplitude AND raises jacobianFoamBias (inject where J < bias)', () => {
+  /**
+   * How rare a foam event each preset asks for, as a σ-multiple of ITS OWN
+   * sea (§V36): z = (1 − bias) / σ(summed jacobian), with σ built from the
+   * live spectrum. SMALLER z = more of the surface foams.
+   *
+   * This is the promise §V7 actually makes; `jacobianFoamBias` on its own is
+   * NOT a proxy for it. A storm sea is ~3× steeper than a swell sea, so the
+   * identical bias number already foams far more there — which is why the
+   * storm preset can (and now does) sit BELOW swell's number while producing
+   * ~18× the coverage. Asserting "storm's bias is the bigger number" passed
+   * happily through the entire period when the foam sim produced no swell
+   * whitecaps at all, because it never looked at a sea.
+   */
+  const foamRarity = (patch: { amplitude: number; windSpeed: number; choppiness: number; jacobianFoamBias: number }) => {
+    const p = { ...oceanParams, ...patch };
+    let steepnessVariance = 0;
+    for (let i = 0; i < 3; i++) {
+      const s = spectralSteepness(
+        p.resolution,
+        p.cascades[i].domain,
+        p,
+        cascadeBand(i, p.splitWavelengths),
+      );
+      steepnessVariance += s * s;
+    }
+    const steepnessRms = Math.sqrt(steepnessVariance);
+    const lambda = effectiveChoppiness(p.choppiness, steepnessRms, p.choppinessFoldLimit);
+    return (1 - patch.jacobianFoamBias) / jacobianSigma(steepnessRms, lambda);
+  };
+
+  it('storm foams far more than swell: bigger seas AND a lower σ-bar', () => {
     const { swell, storm } = weatherPresets;
     expect(storm.ocean.amplitude).toBeGreaterThan(swell.ocean.amplitude);
-    expect(storm.ocean.jacobianFoamBias).toBeGreaterThan(
-      swell.ocean.jacobianFoamBias,
-    );
+    // storm ≈1.3σ (broad patches), swell ≈2.5σ (sparse caps)
+    expect(foamRarity(storm.ocean)).toBeLessThan(foamRarity(swell.ocean));
+    expect(foamRarity(storm.ocean)).toBeLessThan(1.6);
+    expect(foamRarity(swell.ocean)).toBeGreaterThan(2);
+  });
+
+  it('swell still foams: sparse caps, not a bare sea (the user-visible bug)', () => {
+    // §B: the sim was gating each cascade at 5–8σ, i.e. nothing, for a long
+    // time. A swell sea must sit in the range where whitecaps are occasional
+    // but present — "in some little spots here and there" (user).
+    expect(foamRarity(weatherPresets.swell.ocean)).toBeLessThan(3);
   });
 
   it('calm sits below swell on both — the same dial, turned the other way', () => {
     const { calm, swell } = weatherPresets;
     expect(calm.ocean.amplitude).toBeLessThan(swell.ocean.amplitude);
-    expect(calm.ocean.jacobianFoamBias).toBeLessThan(
-      swell.ocean.jacobianFoamBias,
-    );
+    // rarer than swell: a glassy sea foams only where it truly folds
+    expect(foamRarity(calm.ocean)).toBeGreaterThan(foamRarity(swell.ocean));
   });
 });
 

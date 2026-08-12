@@ -40,6 +40,26 @@ export const oceanSurfaceParams = registerParams(
      * this factor.
      */
     normalDetailStretch: 3.0,
+    /**
+     * §V.48 filtered tier for the cascade NORMALS, measured in "how many of
+     * this cascade's texels does one pixel cover". The derivative textures are
+     * compute-written StorageTextures and cannot carry a mip chain, so a
+     * minified fetch is a point sample of a zero-mean slope field — per-pixel
+     * noise, which the pow(N·H,180) glint then amplifies into the fibrous
+     * golden hair covering the whole sea when zoomed out (user).
+     * Full strength while a pixel covers ≤ `Full` texels, gone by `Cut`. The
+     * next coarser cascade, still resolved, carries the large-scale shading —
+     * the cascade pyramid IS the mip chain here.
+     *
+     * Tuned in-browser at the §T.39 sunset framing: 0.65/2.2 killed the noise
+     * completely but took the mid-field with it — the sea went to smooth mush
+     * and the glint road washed out, because a pixel covers ~2 texels of even
+     * the 420 m cascade by 200 m out. 1.0/3.5 keeps the wave texture and
+     * leaves the residual highlight chatter to `specularAaStrength`, which is
+     * the term that is actually supposed to handle it.
+     */
+    normalTexelFull: 1.0,
+    normalTexelCut: 3.5,
 
     // ── colour ──────────────────────────────────────────────────────────
     deepColor: '#093642',
@@ -65,6 +85,17 @@ export const oceanSurfaceParams = registerParams(
     variationStrength: 0.05,
     sssColor: '#32d0c0',
     sssStrength: 2.3,
+    /**
+     * HARD CEILING on the backscatter lobe (§V.44 bounded at source). The lobe
+     * is keyed on view·sun, so facing a low sun it covers the whole visible
+     * sea at once. As an unbounded add it hit ~40x the lit body luminance in a
+     * saturated cyan — rotating the camera restaged the scene. It is now a MIX
+     * capped here, so the sea can take the scatter colour but never exceed it,
+     * at ANY sun elevation. Raising this past ~0.6 re-opens that bug.
+     */
+    sssMaxMix: 0.45,
+    /** brightness of the transmitted-light colour the lobe mixes toward */
+    sssBrightness: 0.55,
     sssPower: 4.0,
     /** baseline crest glow independent of sun alignment — crests always read
      *  translucent (§V20), the backlight term only amplifies toward the sun */
@@ -146,11 +177,21 @@ export const oceanSurfaceParams = registerParams(
      * — at 2.5 the cap was binding and quietly under-warming the sea.
      */
     skyTintMax: 3.2,
-    /** fresnel sky-reflection blend cap — high = mirror sheen, low = body color */
-    reflectionStrength: 0.13,
+    /**
+     * Water's normal-incidence reflectance (Schlick R0). 0.02 is the real
+     * value; the sea reflects ~2% looking straight down and ~100% at grazing.
+     */
+    fresnelR0: 0.02,
+    /**
+     * Artistic TRIM on that physical reflectance — not a cap. It was 0.13 used
+     * as a hard cap, which meant the sea could never show more than 13% sky:
+     * roughly right at midday from above, badly wrong at grazing, and a sunset
+     * frame is entirely grazing. 1.0 = physically correct.
+     */
+    reflectionStrength: 1.0,
     /** re-saturation of the body colour under a white sky at grazing angles;
      *  0 = raw fresnel wash (reads gray/desaturated), 1 = full pigment */
-    grazingSaturation: 0.55,
+    grazingSaturation: 0.15,
     /**
      * Sun-elevation gate (sunDir.y) for every sun-driven water term. Below
      * `low` there is no direct sun at all; above `high` the terms are at full
@@ -205,9 +246,44 @@ export const oceanSurfaceParams = registerParams(
 
     // ── sparkle / glint train (§V20 "dense sun sparkle glints") ─────────
     sparkleStrength: 1.0,
-    /** sparkle hash cells per meter — ~5cm glint cells; sub-cm reads as
-     *  per-pixel starfield noise (user critique) */
+    /** sparkle hash cells per meter — legacy world-locked density, superseded
+     *  by the angular sizing below (kept: other tuning refers to it) */
     sparkleScale: 18.0,
+    /**
+     * Sparkle cell size in PIXELS — the hash lattice is sized from the pixel's
+     * own world footprint (`fwidth(worldXZ)`), so a cell stays this many
+     * pixels across at every distance AND every view angle (§V.48). The
+     * previous distance × view-angle estimate is only correct looking straight
+     * down: at a grazing framing the footprint is stretched by 1/sin(grazing)
+     * and the cells went sub-pixel again, which is the stipple the user still
+     * saw from a low camera. Below ~2 the on/off threshold aliases; above ~4
+     * the cells read as visible blocks.
+     */
+    sparkleCellPixels: 2.6,
+    /** floor on cell size (m) — §V28, keeps the hash divisor away from zero */
+    sparkleMinCell: 0.004,
+    /**
+     * §V.48 specular antialiasing (Kaplanyan, "filtering distributions of
+     * normals"). Scales the screen-space normal variance σ² that widens every
+     * specular lobe. A pow(N·H, 180) lobe point-sampled on a normal field that
+     * swings through many wave faces inside one pixel is a coin flip per pixel
+     * and boils under motion — the noise the user reports when zoomed out.
+     * Widening the lobe by σ² and rescaling its peak by p'/p conserves energy,
+     * so the glint road survives at full brightness while the isolated
+     * pixel-sized sparkles are spread back into the average they should have
+     * been. Turning specular DOWN instead would flatten the whole sea. 0 = off.
+     * 2.2 measured in-browser at the §T.39 sunset framing: below ~1 the
+     * near-field still reads as fibrous golden hair, and the sea is grazing
+     * almost everywhere in that shot, so the variance it has to swallow is
+     * large.
+     */
+    specularAaStrength: 2.2,
+    /**
+     * Cap on that variance (§V.44 bounded at source). Also the floor on lobe
+     * width: p' ≥ p/(1 + p·max), so the horizon band cannot collapse to a
+     * uniform sheen.
+     */
+    specularAaMax: 0.35,
     /** specular tightness of an individual glint */
     sparklePower: 40,
     /** tightness of the glint-train footprint (the sun path on the water) */
@@ -234,6 +310,50 @@ export const oceanSurfaceParams = registerParams(
     /** temporary direct-jacobian crest foam until T5 progressive blur lands */
     foamThreshold: 0.55,
     foamColor: '#eef6f2',
+    /**
+     * INTERIM crest foam (NOT §T.5 — no temporal decay, no trailing streaks).
+     * σ-relative band (§V.36) so the numbers keep meaning "crest tops" when
+     * the spectrum moves. 1.9σ..2.7σ is the top ~2.9%..0.35% of the surface.
+     * Narrowed and raised from 1.5..2.4 after the user called the result "too
+     * thick, too big, too chunky" at the default swell preset.
+     */
+    crestFoamBandLow: 1.9,
+    crestFoamBandHigh: 2.7,
+    /**
+     * Opacity of the PATCH BODY, not of foam in general. Foam that is not
+     * actively breaking is thin and translucent — it takes the water and sky
+     * under it. At 0.55 the body composited to ~0.5 alpha of a near-white and
+     * read as "a milk cut" (user). Only `crestFoamEdgeStrength` is allowed
+     * near opaque.
+     */
+    crestFoamStrength: 0.34,
+    /** only the steep faces foam — flat crest tops do not break */
+    crestFoamSlopeGate: 0.3,
+    /**
+     * Break-up field (§V.48 band-limited). Coverage is multiplied by a
+     * world-locked 2-octave noise gate, because a smooth threshold on the
+     * smooth σ/slope fields produces a connected CONTOUR — one unbroken ribbon
+     * per crest line, which is the "too long / too regular" complaint. Scale
+     * is the coarse octave's wavelength in metres; the fine octave is 0.34× it.
+     */
+    crestFoamPatchScale: 13,
+    /**
+     * Gate on that field. The window is deliberately narrow and high: it is
+     * what turns "most crests foam a bit" into "a few crests foam", which is
+     * the user's low end — "in some little spots here and there".
+     */
+    crestFoamPatchLow: 0.46,
+    crestFoamPatchHigh: 0.72,
+    /**
+     * Breaking edge (docs/ref-storm-whitecaps.png: a bright lip at the break).
+     * Width in σ ABOVE crestFoamBandHigh over which the edge reaches full
+     * strength, and its opacity — the one place foam may read white.
+     */
+    crestFoamEdgeWidth: 0.35,
+    crestFoamEdgeStrength: 0.85,
+    /** how far foam takes the sky's colour — the reference's foam is warm
+     *  cream, ours is authored cool near-white and reads wrong at sunset */
+    foamSkyTint: 0.35,
 
     // ── distance haze (§V30: this replaces scene fog ON THE WATER) ──────
     /** the water melts into haze between these radii (m) */
@@ -263,6 +383,24 @@ export const oceanSurfaceParams = registerParams(
     refractionDepthFull: 6,
     /** water body tint applied to refracted scene */
     refractionTint: '#7fd4c9',
+    /**
+     * §V.24 TRANSMISSION FLOOR. Fresnel splits energy between reflection and
+     * transmission; it never deletes transmission. But a physical Schlick
+     * weight (fresnelR0 above) reaches 1 at grazing incidence, and a mirror at
+     * weight 1 erases the submerged geometry §V.24 requires to stay visible —
+     * "opaque-wall water @ grazing/shallow view ⊥" is exactly that case, and
+     * the reference the user linked states the rule as maintaining a
+     * transmission channel REGARDLESS of incident angle.
+     *
+     * So the reflection weight is capped at 1 − this, but ONLY in proportion
+     * to `seeThrough`, i.e. only where there is actually something submerged
+     * behind the surface. Open water has nothing behind it (seeThrough → 0
+     * through the Beer-Lambert term), so the grazing sunset sea keeps its full
+     * physical mirror and the §T.39 look is untouched. 0 = pure Schlick (the
+     * opaque wall returns); 0.45 = a submerged hull always keeps at least 45%
+     * of the pixel.
+     */
+    transmissionFloor: 0.45,
 
     // ── underside (§V.24/§V.25: camera below the waterline) ─────────────
     /** total-internal-reflection ceiling colour seen outside Snell's window */
@@ -280,6 +418,8 @@ export const oceanSurfaceParams = registerParams(
     lodSamplesFull: { min: 4, max: 32, step: 0.5 },
     lodSamplesCut: { min: 2, max: 24, step: 0.5 },
     normalDetailStretch: { min: 1, max: 8, step: 0.1 },
+    normalTexelFull: { min: 0.1, max: 4, step: 0.05 },
+    normalTexelCut: { min: 0.2, max: 8, step: 0.05 },
     sssStrength: { min: 0, max: 5, step: 0.05 },
     sssAmbient: { min: 0, max: 1, step: 0.01 },
     shallowTintStrength: { min: 0, max: 1, step: 0.01 },
@@ -317,6 +457,23 @@ export const oceanSurfaceParams = registerParams(
     shadowStrength: { min: 0, max: 1, step: 0.01 },
     sparkleStrength: { min: 0, max: 4, step: 0.05 },
     sparkleScale: { min: 2, max: 120, step: 1 },
+    sparkleCellPixels: { min: 1, max: 8, step: 0.1 },
+    sparkleMinCell: { min: 0.001, max: 0.5, step: 0.001 },
+    specularAaStrength: { min: 0, max: 3, step: 0.01 },
+    specularAaMax: { min: 0.01, max: 2, step: 0.01 },
+    sssMaxMix: { min: 0, max: 1, step: 0.01 },
+    sssBrightness: { min: 0, max: 2, step: 0.01 },
+    fresnelR0: { min: 0, max: 0.2, step: 0.005 },
+    crestFoamBandLow: { min: 0, max: 4, step: 0.05 },
+    crestFoamBandHigh: { min: 0.2, max: 6, step: 0.05 },
+    crestFoamStrength: { min: 0, max: 1, step: 0.01 },
+    crestFoamSlopeGate: { min: 0.02, max: 1.5, step: 0.01 },
+    crestFoamPatchScale: { min: 1, max: 80, step: 0.5 },
+    crestFoamPatchLow: { min: 0, max: 1, step: 0.01 },
+    crestFoamPatchHigh: { min: 0, max: 1, step: 0.01 },
+    crestFoamEdgeWidth: { min: 0.05, max: 2, step: 0.05 },
+    crestFoamEdgeStrength: { min: 0, max: 1, step: 0.01 },
+    foamSkyTint: { min: 0, max: 1, step: 0.01 },
     sparklePower: { min: 4, max: 256, step: 1 },
     glintTrainPower: { min: 1, max: 128, step: 1 },
     sparkleDensityBase: { min: 0.5, max: 1, step: 0.001 },
@@ -335,6 +492,7 @@ export const oceanSurfaceParams = registerParams(
     normalFadeEnd: { min: 100, max: 20000, step: 50 },
     absorptionDensity: { min: 0.02, max: 2, step: 0.01 },
     refractionStrength: { min: 0, max: 0.3, step: 0.005 },
+    transmissionFloor: { min: 0, max: 0.9, step: 0.01 },
     underWindowBrightness: { min: 0, max: 3, step: 0.01 },
     underWindowSoftness: { min: 0.01, max: 0.5, step: 0.01 },
   },

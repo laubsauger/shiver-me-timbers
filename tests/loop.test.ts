@@ -4,7 +4,41 @@
  * multiplayer lockstep) breaks with it.
  */
 import { describe, expect, it } from 'vitest';
-import { advanceAccumulator, MAX_SUBSTEPS, SIM_DT } from '../src/core/loop';
+import { advanceAccumulator, GameLoop, MAX_SUBSTEPS, SIM_DT } from '../src/core/loop';
+
+/**
+ * Drive GameLoop by hand: a stub rAF that records the pending callback so the
+ * test can advance wall-clock time deliberately instead of waiting for a real
+ * display. Returns a `step(ms)` that runs exactly one frame.
+ */
+function driveLoop(loop: GameLoop): { step(ms: number): void; stop(): void } {
+  let pending: ((t: number) => void) | null = null;
+  let now = 0;
+  const g = globalThis as Record<string, unknown>;
+  const prevRaf = g.requestAnimationFrame;
+  const prevCancel = g.cancelAnimationFrame;
+  g.requestAnimationFrame = (cb: (t: number) => void): number => {
+    pending = cb;
+    return 1;
+  };
+  g.cancelAnimationFrame = (): void => {
+    pending = null;
+  };
+  loop.start();
+  return {
+    step(ms: number): void {
+      now += ms;
+      const cb = pending;
+      pending = null;
+      cb?.(now);
+    },
+    stop(): void {
+      loop.stop();
+      g.requestAnimationFrame = prevRaf;
+      g.cancelAnimationFrame = prevCancel;
+    },
+  };
+}
 
 function runFrames(frameDts: number[]): number {
   let acc = 0;
@@ -47,6 +81,104 @@ describe('fixed-step accumulator (§V.2)', () => {
       acc = res.accumulator;
       expect(res.alpha).toBeGreaterThanOrEqual(0);
       expect(res.alpha).toBeLessThan(1);
+    }
+  });
+});
+
+/**
+ * PAUSE IS A RENDER-VISIBLE CONTRACT, not just "stop calling tick".
+ *
+ * The pause menu leaves the renderer running so the player can see the effect
+ * of a setting change. That only works if the picture is STILL. Gating the
+ * tick alone left the accumulator advancing, so alpha kept saw-toothing 0→1
+ * while the sim's prev/curr poses stayed frozen one tick apart — main.ts lerps
+ * the ship between them and the follow camera chases the result, so the whole
+ * scene shook for as long as the menu was open.
+ */
+describe('pause holds the picture still (§V.21)', () => {
+  it('stops the sim clock without freezing the renderer', () => {
+    let paused = false;
+    let ticks = 0;
+    let renders = 0;
+    const loop = new GameLoop(
+      () => {
+        ticks++;
+      },
+      () => {
+        renders++;
+      },
+      () => paused,
+    );
+    const d = driveLoop(loop);
+    try {
+      d.step(0); // first frame only seeds lastTime
+      for (let i = 0; i < 10; i++) d.step(16.7);
+      const tickedWhileRunning = ticks;
+      expect(tickedWhileRunning).toBeGreaterThan(0);
+      const renderedWhileRunning = renders;
+
+      paused = true;
+      for (let i = 0; i < 10; i++) d.step(16.7);
+      // the sim clock stopped dead...
+      expect(ticks).toBe(tickedWhileRunning);
+      // ...but the renderer kept drawing, which is the whole point of §V.21
+      expect(renders).toBeGreaterThan(renderedWhileRunning);
+    } finally {
+      d.stop();
+    }
+  });
+
+  it('holds the interpolation alpha FLAT while paused, so nothing jitters', () => {
+    let paused = false;
+    const alphas: number[] = [];
+    const loop = new GameLoop(
+      () => {},
+      (alpha) => alphas.push(alpha),
+      () => paused,
+    );
+    const d = driveLoop(loop);
+    try {
+      d.step(0);
+      // a frame time that is NOT a whole multiple of SIM_DT, so a live
+      // accumulator is guaranteed to produce a moving alpha
+      for (let i = 0; i < 5; i++) d.step(16.7);
+      paused = true;
+      alphas.length = 0;
+      for (let i = 0; i < 30; i++) d.step(16.7);
+
+      expect(alphas).toHaveLength(30);
+      // every paused frame reports the SAME alpha — the render lerp is then a
+      // constant, whatever prev/curr happen to be
+      expect(new Set(alphas).size).toBe(1);
+    } finally {
+      d.stop();
+    }
+  });
+
+  it('resumes without a catch-up burst of the paused wall-clock time', () => {
+    let paused = true;
+    let ticks = 0;
+    const loop = new GameLoop(
+      () => {
+        ticks++;
+      },
+      () => {},
+      () => paused,
+    );
+    const d = driveLoop(loop);
+    try {
+      d.step(0);
+      // ten seconds sat in the menu
+      for (let i = 0; i < 600; i++) d.step(16.7);
+      expect(ticks).toBe(0);
+
+      paused = false;
+      d.step(16.7);
+      // one frame's worth of sim, not ten seconds of debt: freezing the
+      // accumulator means the paused time was never owed in the first place
+      expect(ticks).toBeLessThanOrEqual(MAX_SUBSTEPS);
+    } finally {
+      d.stop();
     }
   });
 });

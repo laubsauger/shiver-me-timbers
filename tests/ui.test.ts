@@ -16,6 +16,7 @@ import {
   sanitizeSettings,
 } from '../src/ui/settingsStore';
 import type { Quality, QualityHints, StorageLike } from '../src/ui/settingsStore';
+import { skyParams } from '../src/params/sky';
 import {
   GRAPHICS_FEATURES,
   GRAPHICS_FEATURE_IDS,
@@ -330,13 +331,26 @@ describe('quality presets are bundles of the switches, not a parallel mechanism'
     expect(presetIntact(store.get().graphics)).toBe(true);
   });
 
-  it('the shipped default is the tier whose bundle matches the engine defaults', () => {
-    // a fresh install must render exactly what the engine renders today, or the
-    // first thing the settings screen does is change the game (§V17 reflections
-    // stay off until the player asks for them)
+  it('the shipped default bundle agrees with the engine params it overwrites', () => {
+    // THE BUNDLE WINS. applyGraphicsSettings() writes this over params/* on
+    // every boot, so a feature switched on in params/reflection.ts but absent
+    // from this list is simply OFF — silently, at the default quality, for
+    // every player. That happened: `live: 1` sat in the param file doing
+    // nothing because `medium` did not name 'reflections'.
     expect(DEFAULT_SETTINGS.graphics.quality).toBe('medium');
-    expect(DEFAULT_SETTINGS.graphics.features.reflections).toBe(false);
+
+    // Reflections are ON at medium as of the measurement that overturned the
+    // original "stay off until the player asks" decision: GPU timestamp
+    // queries at the §T.39 sunset framing put the whole planar pass at
+    // +0.9-1.1ms (367 -> 556 draw calls). That decision predated any
+    // measurement, and the feature is what puts the ship into the water she
+    // floats on — at a grazing sunset the dark shape beside a hull IS its
+    // reflection, since a shadow cannot darken reflected sky.
+    expect(DEFAULT_SETTINGS.graphics.features.reflections).toBe(true);
     expect(QUALITY_BUNDLES.high.features.reflections).toBe(true);
+    // low stays off: it is the tier that exists to buy frames back, and
+    // `enabled: 0` (construction gate) is the genuinely free setting there
+    expect(QUALITY_BUNDLES.low.features.reflections).toBe(false);
   });
 
   it('feature switches survive a reload', () => {
@@ -550,5 +564,60 @@ describe('dev-layer channel (debug shell and UI never import each other)', () =>
     expect(seen).toEqual([true, false]); // initial catch-up, then the change
     expect(devLayerAttached()).toBe(false);
     expect(devLayerVisible()).toBe(true); // state still tracked for the next sink
+  });
+});
+
+/**
+ * TIME OF DAY IN SETTINGS (user request, alpha workflow).
+ *
+ * "I would really like if time of day would be easily accessible in the pause
+ * menu or in settings at least, so that we could make it fixed or whatever and
+ * then quickly set it to whatever we want. Especially in alpha dev it's very
+ * important."
+ *
+ * Two properties carry that request, and both are easy to break later:
+ * it must SURVIVE A RELOAD (otherwise you re-dial the light every session),
+ * and a graphics quality preset must NEVER move it — quality is a performance
+ * decision, and silently restaging the scene's lighting behind the user is the
+ * bug that makes a settings screen untrustworthy.
+ */
+describe('time of day is a first-class setting', () => {
+  it('persists across a reload, so you return to the light you left', () => {
+    const mem = fakeStorage();
+    const a = createSettingsStore(mem);
+    a.set({ world: { timeOfDay: 17.7 } });
+    // a fresh store over the SAME storage is what a page reload actually is
+    const b = createSettingsStore(mem);
+    expect(b.get().world.timeOfDay).toBeCloseTo(17.7, 6);
+  });
+
+  it('is NOT touched by a quality preset — quality is performance, not staging', () => {
+    const store = createSettingsStore(fakeStorage());
+    store.set({ world: { timeOfDay: 17.7 } });
+    for (const q of ['low', 'medium', 'high'] as const) {
+      store.applyQuality(q);
+      expect(store.get().world.timeOfDay).toBeCloseTo(17.7, 6);
+    }
+  });
+
+  it('survives corrupt or absent persisted data instead of taking the game down', () => {
+    expect(sanitizeSettings(undefined).world.timeOfDay)
+      .toBe(DEFAULT_SETTINGS.world.timeOfDay);
+    expect(sanitizeSettings({ world: { timeOfDay: 'sunset' } }).world.timeOfDay)
+      .toBe(DEFAULT_SETTINGS.world.timeOfDay);
+    expect(sanitizeSettings({ world: { timeOfDay: NaN } }).world.timeOfDay)
+      .toBe(DEFAULT_SETTINGS.world.timeOfDay);
+  });
+
+  it('clamps to a real hour, and never onto the wrapping 24 boundary', () => {
+    expect(sanitizeSettings({ world: { timeOfDay: -5 } }).world.timeOfDay).toBe(0);
+    // 24 IS 0. Allowing it stores an hour that means midnight while reading as
+    // midnight-tomorrow, which is a needless ambiguity in a persisted value.
+    expect(sanitizeSettings({ world: { timeOfDay: 99 } }).world.timeOfDay).toBeLessThan(24);
+    expect(sanitizeSettings({ world: { timeOfDay: 24 } }).world.timeOfDay).toBeLessThan(24);
+  });
+
+  it('defaults to the sky params value, so there are not two drifting defaults', () => {
+    expect(DEFAULT_SETTINGS.world.timeOfDay).toBe(skyParams.timeOfDay);
   });
 });

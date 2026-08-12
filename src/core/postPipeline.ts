@@ -69,8 +69,23 @@ export interface PostPipeline {
   render(): void;
   /** push live params (call per frame) */
   updateFromParams(): void;
-  /** build every post pipeline before the splash lifts (§boot cost) */
+  /**
+   * Build every post pipeline before the splash lifts (§T.40). Compiles only —
+   * `presentAsync()` draws the frame, so boot can time the two separately.
+   */
   warmup(): Promise<void>;
+  /** render one frame through post and wait for it to be submitted (§V.39) */
+  presentAsync(): Promise<void>;
+  /**
+   * Compile ONE object against the post scene pass's render context (§T.40).
+   *
+   * The object does NOT have to be in the scene yet — that is the point. A
+   * deferred subsystem is built, warmed here while invisible, and only then
+   * added, so it never compiles on its first draw (which is synchronous, i.e.
+   * a visible hitch). `scene` is passed as the target scene so lights, fog and
+   * environment match what the object will actually be drawn with.
+   */
+  warmObject(object: THREE.Object3D): Promise<void>;
 }
 
 /** §V.28: no caller-fed uniform reaches a shader unguarded. */
@@ -242,17 +257,62 @@ export function createPostPipeline(
   };
   updateFromParams();
 
+  /**
+   * §T.40. `PassNode.setup()` copies the sample count and colour-buffer type
+   * onto its render target — but setup runs on the first RENDER, which is
+   * after every warm-up. A pipeline's cache key contains the sample count and
+   * the colour/depth formats, so compiling against the target in its
+   * construction-time state (samples 0) produces pipelines that are DISCARDED
+   * and rebuilt synchronously on the first real frame — the whole compile
+   * paid twice, the second time blocking. Mirror setup() first.
+   */
+  const syncPassTarget = (): void => {
+    scenePass.renderTarget.samples = readsDepth ? 0 : renderer.samples;
+    scenePass.renderTarget.texture.type = renderer.getColorBufferType();
+  };
+
   return {
     render(): void {
       post.render();
     },
     updateFromParams,
     async warmup(): Promise<void> {
-      // main.ts's compileAsync(scene, camera) warms the SCENE materials but
-      // knows nothing about the post quads (bloom alone adds ~12 pipelines).
-      // Without this the first post frame stalls right after the splash lifts.
-      await scenePass.compileAsync(renderer);
+      // Warms the scene materials against the PASS target (which is where they
+      // are actually drawn when post is on) plus the post quads themselves
+      // (bloom alone adds ~12 pipelines, and they are full-screen quads that
+      // live outside the scene graph, so `compileAsync(scene, camera)` never
+      // sees them). That plain call also warms the CANVAS context — a
+      // different sample count and colour format, therefore a different
+      // pipeline cache key, therefore work the first post frame throws away
+      // and redoes SYNCHRONOUSLY, right as the splash lifts.
+      syncPassTarget();
+      const prevTarget = renderer.getRenderTarget();
+      const prevMRT = renderer.getMRT();
+      renderer.setRenderTarget(scenePass.renderTarget);
+      renderer.setMRT(scenePass.getMRT());
+      // restore before yielding — see warmObject()
+      const pending = renderer.compileAsync(scene, camera, scene);
+      renderer.setRenderTarget(prevTarget);
+      renderer.setMRT(prevMRT);
+      await pending;
+    },
+    async presentAsync(): Promise<void> {
       await post.renderAsync();
+    },
+    async warmObject(object: THREE.Object3D): Promise<void> {
+      syncPassTarget();
+      const prevTarget = renderer.getRenderTarget();
+      const prevMRT = renderer.getMRT();
+      renderer.setRenderTarget(scenePass.renderTarget);
+      renderer.setMRT(scenePass.getMRT());
+      // compileAsync runs SYNCHRONOUSLY up to its final await, so restoring
+      // the target before awaiting is both safe and REQUIRED: yielding with
+      // the pass target still bound would send the next frame's render into
+      // it. (PassNode.compileAsync gets this wrong; we do not call it here.)
+      const pending = renderer.compileAsync(object, camera, scene);
+      renderer.setRenderTarget(prevTarget);
+      renderer.setMRT(prevMRT);
+      await pending;
     },
   };
 }

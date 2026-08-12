@@ -23,8 +23,19 @@ import { CpuOcean } from '../src/sea-physics/cpuOcean';
 import { stepShipBuoyancy } from '../src/sea-physics/buoyancy';
 import { KeyboardInput, neutralInput, type InputState } from '../src/sailing/input';
 import { sailingParams } from '../src/params/sailing';
+import { oceanParams } from '../src/params/ocean';
 
 const WIND: Wind = { direction: 0, speed: 8 }; // blowing toward +z
+
+/**
+ * Sailing params with the SEA's hands off the helm: weather helm and
+ * roll-driven hunting both write the yaw target (§B.23), which is the point
+ * of them, but a test that pins an equilibrium speed or a heel angle is
+ * asking "what does the force model settle at on THIS heading" and must
+ * hold the heading still to mean anything. Anything asserting the wander
+ * itself uses the shipped params instead.
+ */
+const HELM_STEADY = { ...sailingParams, weatherHelmGain: 0, rollYawGain: 0 };
 
 function makeShip(yaw: number, sailTrim = 1): ShipState {
   return {
@@ -139,12 +150,12 @@ describe('force model', () => {
   });
 
   it('speed reaches drag equilibrium below the analytic cap — no runaway', () => {
-    const p = sailingParams;
+    const p = HELM_STEADY;
     const vMax = Math.sqrt((WIND.speed * WIND.speed * p.thrustScale) / p.dragCoef);
     const ship = makeShip(Math.PI / 2);
     let prevSpeed = 0;
     for (let i = 0; i < 4000; i++) {
-      stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
+      stepShipSailing(ship, neutralInput(), WIND, SIM_DT, p);
       if (i === 3899) prevSpeed = planarSpeed(ship.velocity);
     }
     const speed = planarSpeed(ship.velocity);
@@ -245,11 +256,11 @@ describe('orientation contract with buoyancy (§B.6)', () => {
     // WHY §B.6b: heelResponse used to pull TOTAL roll toward wind-heel,
     // eating ~half of buoyancy's wave-roll amplitude. A pre-existing roll
     // must survive intact with the wind heel added on top.
-    const p = sailingParams;
+    const p = HELM_STEADY;
     const waveRoll = 0.2;
     const ship = makeShip(Math.PI / 2); // beam wind, full trim
     ship.quaternion = quatMul(ship.quaternion, quatFromAxisAngle([0, 0, 1], waveRoll));
-    for (let i = 0; i < 900; i++) stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
+    for (let i = 0; i < 900; i++) stepShipSailing(ship, neutralInput(), WIND, SIM_DT, p);
     // beam wind: latWindForce = -speed², targetHeel = +heelGain·speed²
     const targetHeel = Math.min(p.heelGain * WIND.speed * WIND.speed, p.maxHeel);
     expect(rollOf(ship.quaternion)).toBeCloseTo(waveRoll + targetHeel, 3);
@@ -263,19 +274,34 @@ describe('orientation contract with buoyancy (§B.6)', () => {
     const ship = makeShip(Math.PI / 2);
     const input = neutralInput();
     let maxPitch = 0;
+    let sum2 = 0;
+    let n = 0;
     for (let i = 0; i < 1800; i++) {
       const t = (i + 1) * SIM_DT;
       ocean.update(t);
       stepShipSailing(ship, input, WIND, SIM_DT);
       stepShipBuoyancy(ship, ocean, SIM_DT);
-      if (i >= 600) maxPitch = Math.max(maxPitch, Math.abs(pitchOf(ship.quaternion)));
+      if (i >= 600) {
+        const pitch = pitchOf(ship.quaternion);
+        maxPitch = Math.max(maxPitch, Math.abs(pitch));
+        sum2 += pitch * pitch;
+        n++;
+      }
       if (!ship.quaternion.every(Number.isFinite)) {
         throw new Error(`quaternion went non-finite at tick ${i}`);
       }
     }
     const maxPitchDeg = (maxPitch * 180) / Math.PI;
-    expect(maxPitchDeg).toBeGreaterThan(0.2); // waves actually pitch the bow
-    expect(maxPitchDeg).toBeLessThan(15); // and nothing double-adds/runs away
+    const rmsPitchDeg = (Math.sqrt(sum2 / n) * 180) / Math.PI;
+    // The RMS is the feel number and the one worth pinning: a 35 m hull in
+    // a 3.5 m sea works, visibly, without hobby-horsing. The MAX is only a
+    // runaway guard — it is a ~4σ outlier of the same signal, so bounding
+    // it tightly (it was 15°) says nothing about feel and everything about
+    // how strongly the hull is allowed to answer at all. Pinned loosely on
+    // purpose, with the RMS carrying the real assertion.
+    expect(rmsPitchDeg).toBeGreaterThan(1.5); // she works in a seaway
+    expect(rmsPitchDeg).toBeLessThan(7); // and does not hobby-horse
+    expect(maxPitchDeg).toBeLessThan(25); // nothing double-adds/runs away
   });
 
   it('buoyancy leaves the yaw RATE alone — sailing stores its turn there', () => {
@@ -328,5 +354,153 @@ describe('input snapshots (replay contract, V3)', () => {
     let last = -1;
     for (let i = 0; i < 120; i++) last = kb.sample(SIM_DT).rudder;
     expect(last).toBe(0); // exact zero: no residual drift in the log
+  });
+});
+
+/**
+ * §B.23 — "it goes always way too straight constantly." Measured before
+ * this existed: leeway 0.00° at every point of sail, and 0.14° of heading
+ * change over two minutes of open-water sailing at swell. A ship that
+ * travels exactly where she points and holds a heading to a tenth of a
+ * degree is a vehicle on rails; these tests hold the model to the two
+ * things that make a square-rigger not one.
+ */
+describe('§B.23: she crabs and she hunts — a ship, not a rail vehicle', () => {
+  /** steady-state leeway angle (deg, magnitude) at a given angle off the wind */
+  function leewayAt(theta: number): { deg: number; fwd: number } {
+    const ship = makeShip(theta);
+    for (let i = 0; i < 4000; i++) {
+      stepShipSailing(ship, neutralInput(), WIND, SIM_DT, HELM_STEADY);
+    }
+    const yaw = yawOf(ship.quaternion);
+    const f = ship.velocity[0] * Math.sin(yaw) + ship.velocity[2] * Math.cos(yaw);
+    const l = ship.velocity[0] * Math.cos(yaw) - ship.velocity[2] * Math.sin(yaw);
+    return { deg: Math.abs((Math.atan2(l, f) * 180) / Math.PI), fwd: f };
+  }
+
+  it('she makes leeway, and MORE of it the closer she points', () => {
+    // The sail force is perpendicular to the canvas: only part of it is
+    // drive. Close-hauled most of it is side force, which is why a
+    // square-rigger crabs to leeward and why she cannot work upwind well.
+    // Running dead downwind there is nothing sideways left to give.
+    const close = leewayAt(Math.PI / 2 + Math.PI / 4); // 45° off the eye… but
+    const beam = leewayAt(Math.PI / 2); // 90° off the eye
+    const running = leewayAt(Math.PI / 12); // nearly dead downwind
+    expect(beam.deg).toBeGreaterThan(1); // she does not go where she points
+    expect(beam.deg).toBeLessThan(12); // …but she is not sliding sideways
+    expect(close.deg).toBeGreaterThan(beam.deg * 1.3); // pointing up costs
+    expect(running.deg).toBeLessThan(beam.deg * 0.6); // running costs nothing
+    // and she is still SAILING at each of them — leeway that only exists
+    // because she stopped would be a stall, not leeway
+    expect(beam.fwd).toBeGreaterThan(3);
+    expect(close.fwd).toBeGreaterThan(3);
+  });
+
+  it('a heeled ship gripes up into the wind (weather helm)', () => {
+    // Heel makes the hull asymmetric and she carries weather helm: the
+    // heading must NOT be a fixed point of an unattended tick. Small,
+    // though — a nuisance for the helmsman, not a spin.
+    const ship = makeShip(Math.PI / 2);
+    const start = yawOf(ship.quaternion);
+    for (let i = 0; i < 3600; i++) {
+      stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
+    }
+    const turned = Math.abs(wrapPi(yawOf(ship.quaternion) - start));
+    const deg = (turned * 180) / Math.PI;
+    expect(deg).toBeGreaterThan(2); // in 60 s hands off, she has moved
+    expect(deg).toBeLessThan(45); // …but has not rounded up into irons
+    // she is still drawing: rounding up must not have stalled her
+    expect(planarSpeed(ship.velocity)).toBeGreaterThan(5);
+  });
+
+  it('the SWELL makes her hunt — flat water does not', () => {
+    // The hunting reads roll RATE, so it is the SEA doing it, not a bias:
+    // in flat water the same ship on the same heading must be quiet, or
+    // what we built is a drift, not a response. (It was: driving the helm
+    // from the roll ANGLE picked up the few degrees by which sailing's heel
+    // offset and buoyancy's righting moment disagree, and turned her 58° in
+    // 120 s of dead calm.)
+    const wander = (amplitude: number): number => {
+      const ocean = new CpuOcean(5, { ...oceanParams, resolution: 128, amplitude });
+      const ship = makeShip(Math.PI / 2);
+      const yaws: number[] = [];
+      for (let i = 0; i < 7200; i++) {
+        const t = (i + 1) * SIM_DT;
+        ocean.update(t);
+        stepShipSailing(ship, neutralInput(), WIND, SIM_DT, {
+          ...sailingParams,
+          weatherHelmGain: 0, // isolate the SEA's contribution from the wind's
+        });
+        stepShipBuoyancy(ship, ocean, SIM_DT);
+        if (i >= 1800) yaws.push(yawOf(ship.quaternion));
+      }
+      // RMS about the straight-line trend: pure wander, not net drift
+      const n = yaws.length;
+      let sx = 0;
+      let sy = 0;
+      let sxx = 0;
+      let sxy = 0;
+      for (let i = 0; i < n; i++) {
+        sx += i;
+        sy += yaws[i];
+        sxx += i * i;
+        sxy += i * yaws[i];
+      }
+      const slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+      const inter = (sy - slope * sx) / n;
+      let s2 = 0;
+      for (let i = 0; i < n; i++) {
+        const r = yaws[i] - (inter + slope * i);
+        s2 += r * r;
+      }
+      return (Math.sqrt(s2 / n) * 180) / Math.PI;
+    };
+    const flat = wander(0);
+    const seaway = wander(oceanParams.amplitude);
+    expect(flat).toBeLessThan(0.05); // glass: she tracks
+    expect(seaway).toBeGreaterThan(0.5); // swell: she hunts, visibly
+    expect(seaway).toBeLessThan(15); // …but she is not broaching
+  });
+});
+
+describe('§B.22: the planar channel has ONE owner', () => {
+  it('buoyancy never moves her horizontally — sailing integrates position', () => {
+    // Both systems ran `position += velocity·dt` on the same tick, so every
+    // ship travelled EXACTLY TWICE her own velocity over the ground: she
+    // outran her own wake, her own drag equilibrium and the sea's encounter
+    // frequency, at 26 knots of "13 m/s". This is the same shape as the
+    // grounding bug (two owners of one channel) and it is worth a standing
+    // guard: buoyancy may add horizontal FORCE, it may not integrate.
+    const ocean = new CpuOcean(3);
+    const ship = makeShip(0.7);
+    ship.velocity[0] = 3;
+    ship.velocity[2] = 4;
+    ocean.update(SIM_DT);
+    const before: Vec3 = [...ship.position];
+    stepShipBuoyancy(ship, ocean, SIM_DT);
+    expect(ship.position[0]).toBe(before[0]);
+    expect(ship.position[2]).toBe(before[2]);
+    expect(ship.position[1]).not.toBe(before[1]); // it DOES own the vertical
+  });
+
+  it('a full tick advances the ground track by exactly velocity·dt', () => {
+    // the end-to-end version: whatever each module does internally, one
+    // sim tick must move her one tick's worth
+    const ocean = new CpuOcean(3);
+    const ship = makeShip(Math.PI / 2);
+    for (let i = 0; i < 600; i++) {
+      const t = (i + 1) * SIM_DT;
+      stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
+      ocean.update(t);
+      stepShipBuoyancy(ship, ocean, SIM_DT);
+    }
+    const before: Vec3 = [...ship.position];
+    stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
+    const expectX = before[0] + ship.velocity[0] * SIM_DT;
+    const expectZ = before[2] + ship.velocity[2] * SIM_DT;
+    ocean.update(601 * SIM_DT);
+    stepShipBuoyancy(ship, ocean, SIM_DT);
+    expect(ship.position[0]).toBeCloseTo(expectX, 12);
+    expect(ship.position[2]).toBeCloseTo(expectZ, 12);
   });
 });

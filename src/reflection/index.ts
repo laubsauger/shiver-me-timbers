@@ -25,7 +25,14 @@
  *     const reflection = createPlanarReflection({
  *       sunLight: sky.sunLight,   // pins the shadow camera mask, see LAYERS
  *       planeY: 0,                // the ocean's rest plane
- *       clouds: { blurred: clouds.blurredTexture, seed: state.seed },
+ *       clouds: {
+ *         blurred: clouds.blurredTexture,
+ *         seed: state.seed,
+ *         // live day-cycle pair — pass these, not params hexes, or the
+ *         // reflected clouds stay cold while the real ones warm (§T.39)
+ *         sunColorLive: clouds.sunColorLive,
+ *         skyColorLive: clouds.skyColorLive,
+ *       },
  *     });
  *
  * ② pass it to the surface (replacing the existing options object):
@@ -52,6 +59,14 @@
  *     reflection?.excludeFromReflection(bowSpray.mesh);
  *     reflection?.excludeFromReflection(ropes.mesh);
  *     reflection?.excludeFromReflection(blocks.mesh);
+ *
+ *     // FIRST LEVER if the mirror pass turns out to be over budget: palms.
+ *     // Alpha-tested instanced foliage is the classic reflection killer —
+ *     // high instance count, overdraw, and completely unreadable once the
+ *     // reflection is half-res and blurred. The ISLANDS themselves stay
+ *     // (§V26 names them, and their silhouette is the payoff); it is only
+ *     // the fronds that cost more than they show.
+ *     //   reflection?.excludeFromReflection(vegetation.group);
  *
  * ④ per frame, in the render callback — AFTER `followCam.update(...)` (the
  *   camera pose must be final) and BEFORE `surface.update(...)` /

@@ -13,7 +13,13 @@ import { buildBrigantineBlueprint, buildGalleonBlueprint } from '../src/ship/shi
 import { buildPieceGeometry } from '../src/ship/pieceGeometry';
 import { galleonParams, shipDetailParams, shipFlagParams } from '../src/params/ship';
 import type { PieceDef } from '../src/ship/pieceTypes';
-import { hullHalfWidthAt, hullTopY, type HullShape } from '../src/ship/hullMath';
+import {
+  hullEnvelope,
+  hullHalfWidthAt,
+  hullTopY,
+  sectionHalf,
+  type HullShape,
+} from '../src/ship/hullMath';
 import { SPAR_AXIS, createPieceMaterial } from '../src/ship/pieceMaterials';
 import { createDeckFieldTexture } from '../src/ship/deckFieldTexture';
 import {
@@ -793,5 +799,220 @@ describe('§V.48 band limiting of procedural periodic terms', () => {
     // and it is still a belt: dark inside, clear outside
     expect(band(ratio / 2)).toBeLessThan(0.05);
     expect(band(ratio + 0.5 * (1 - ratio))).toBeGreaterThan(0.95);
+  });
+});
+
+/**
+ * HULL PLANKING — the strake coordinate (user report: "we have this nice
+ * normal map with the gap between planks on the deck, but on the sides and
+ * on most of the back we are not doing that").
+ *
+ * WHAT WAS ACTUALLY WRONG. The seams were never missing: hull and deck share
+ * one `createWoodMaterial`, so the topsides always had caulk grooves, butt
+ * joints and per-board relief. What they did not have was the right SHAPE.
+ * The coordinate was `positionLocal.y / plankWidth` — level slices of world
+ * height — which draws waterlines, not strakes: they cut across the sheer at
+ * both ends and hold one width for the whole 35 m. On top of that a wale
+ * every 1.11 m of height (0.9 per metre against a 0.55 m board) put a proud
+ * dark belt on every other plank, so what read at any distance was the belts.
+ *
+ * WHAT THESE PIN is the contract the material now leans on: the loft's own
+ * `uv.y` is the height fraction between the keel and the SHEER-FOLLOWING rail
+ * line, so lines of constant uv.y are the strakes and nothing has to guess at
+ * the hull's shape a second time (§V37 — two parameterisations of one curve
+ * agree only at the ends).
+ */
+describe('hull planking follows the strakes, not world height', () => {
+  const shellShape = (kind: 'hull-section' | 'bow' | 'transom'): HullShape =>
+    galleon.find((p) => p.kind === kind)!.shape as unknown as HullShape;
+
+  it('parameterises the shell by height fraction to the RAIL, so uv.y is the strake', () => {
+    // the material reads uv().y as "how far up the section am I, 0 keel to 1
+    // rail". If the loft ever re-parameterises, the planking silently lands
+    // somewhere else — that is the failure this catches.
+    const piece = galleon.find((p) => p.kind === 'hull-section')!;
+    const s = shellShape('hull-section');
+    const geo = buildPieceGeometry(piece.kind, piece.aabb, piece.shape);
+    const pos = geo.attributes.position;
+    const uv = geo.attributes.uv;
+    expect(uv).toBeDefined(); // no uv ⟹ the strake coordinate is garbage
+    const zOffset = (s.z0 + s.z1) / 2; // buildLoftedHullSection translates by this
+    let checked = 0;
+    for (let i = 0; i < pos.count; i++) {
+      const y = pos.getY(i);
+      if (y < -s.draft + 0.01) continue; // the bottom patch parameterises across
+      const z = pos.getZ(i) + zOffset;
+      const expected = (y + s.draft) / (hullTopY(z, s) + s.draft);
+      expect(uv.getY(i)).toBeCloseTo(expected, 3);
+      checked++;
+    }
+    expect(checked).toBeGreaterThan(50);
+  });
+
+  it('carries the strakes UP with the sheer instead of slicing level', () => {
+    // the visible tell in every reference of a real hull: the planking sweeps
+    // up toward stem and stern parallel to the rail. Level slices do not.
+    const s = shellShape('hull-section');
+    const yOfStrake = (h: number, z: number): number => -s.draft + (hullTopY(z, s) + s.draft) * h;
+    const midship = yOfStrake(0.9, 0);
+    expect(yOfStrake(0.9, s.bowZ * 0.9)).toBeGreaterThan(midship + 0.5);
+    expect(yOfStrake(0.9, s.sternZ * 0.9)).toBeGreaterThan(midship + 0.3);
+    // and the rail line itself is what they are parallel to
+    expect(hullTopY(s.bowZ, s)).toBeCloseTo(hullTopY(0, s) + s.sheerBow, 6);
+  });
+
+  it('narrows the boards toward both ends, because a plank runs the whole hull', () => {
+    // a strake is continuous stem to stern, so the COUNT is fixed and the
+    // width is girth/count — which is why real planking tapers into the ends.
+    // A fixed metre width (the old coordinate) cannot express that at all.
+    const s = shellShape('hull-section');
+    const girth = (z: number): number => {
+      const env = hullEnvelope(z, s);
+      const span = hullTopY(z, s) + s.draft;
+      let total = 0;
+      let px = s.beamHalf * sectionHalf(env, 0, s);
+      let py = -s.draft;
+      for (let i = 1; i <= 64; i++) {
+        const h = i / 64;
+        const x = s.beamHalf * sectionHalf(env, h, s);
+        const y = -s.draft + span * h;
+        total += Math.hypot(x - px, y - py);
+        px = x;
+        py = y;
+      }
+      return total;
+    };
+    const mid = girth(0);
+    expect(girth(s.bowZ * 0.9)).toBeLessThan(mid * 0.95); // taper into the stem
+    expect(girth(s.sternZ * 0.95)).toBeLessThan(mid * 0.95); // …and into the stern
+    // the strake count is chosen so the boards read the same size amidships
+    // as the deck's: girth / plankWidth
+    const implied = mid / shipMaterialParams.plankWidth;
+    expect(shipMaterialParams.hullStrakes).toBeGreaterThan(implied * 0.8);
+    expect(shipMaterialParams.hullStrakes).toBeLessThan(implied * 1.25);
+  });
+
+  it('cannot run butt joints down the transom in z — the plate has no z', () => {
+    // WHY the along-plank axis is chosen from the surface normal now. A
+    // transom is planked ACROSS the ship, and its piece-local z is the crown
+    // bulge only, far less than one board long: keyed on z, every course of
+    // the plate sat at one fixed phase of the butt pattern, so the joints
+    // stopped being joints and became a per-strake darkening of the whole
+    // stern. That is "on most spots on the back we are not doing that".
+    const piece = galleon.find((p) => p.kind === 'transom')!;
+    const geo = buildPieceGeometry(piece.kind, piece.aabb, piece.shape);
+    const pos = geo.attributes.position;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    for (let i = 0; i < pos.count; i++) {
+      minZ = Math.min(minZ, pos.getZ(i));
+      maxZ = Math.max(maxZ, pos.getZ(i));
+      minX = Math.min(minX, pos.getX(i));
+      maxX = Math.max(maxX, pos.getX(i));
+    }
+    expect(maxZ - minZ).toBeLessThan(shipMaterialParams.plankLength * 0.5); // under one board
+    expect(maxX - minX).toBeGreaterThan(shipMaterialParams.plankLength); // several boards
+  });
+
+  it('lays each wale on a whole number of strakes, so its edges land on seams', () => {
+    // a wale IS a strake — a thicker board in the run — so it is counted in
+    // planks. An integer repeat also means the belt's two band-limited edges
+    // coincide with plank seams instead of splitting a board down the middle.
+    const perWale = 1 / shipMaterialParams.waleFrequency;
+    expect(perWale).toBeCloseTo(Math.round(perWale), 6);
+    expect(Math.round(perWale)).toBeGreaterThan(1); // 1 would make EVERY board a wale
+    // and the belt itself is a whole number of boards, so its two feathered
+    // edges sit in the caulk lines rather than splitting a board in half
+    const boardsWide = shipMaterialParams.waleRatio / shipMaterialParams.waleFrequency;
+    expect(boardsWide).toBeCloseTo(Math.round(boardsWide), 6);
+    expect(Math.round(boardsWide)).toBeGreaterThanOrEqual(1);
+    // …and the ship carries a few of them, not one every other plank. The old
+    // 0.9-per-metre value works out at ~0.5 per board, which is the setting
+    // that buried the planking under belts.
+    const wales = shipMaterialParams.hullStrakes * shipMaterialParams.waleFrequency;
+    expect(wales).toBeGreaterThanOrEqual(2);
+    expect(wales).toBeLessThanOrEqual(5);
+  });
+});
+
+/**
+ * §V.48 again, on the surface this task carries the relief onto. The lesson
+ * §B.20 cost three rounds of misattribution to learn is that a band limit
+ * keyed on the wrong LENGTH SCALE passes every unit test and speckles on
+ * screen: the mast fix gated `fwidth(plankCoord)` against the plank PERIOD,
+ * and a 0.08-of-a-plank seam goes sub-pixel 12× before the plank does, so
+ * every distance in that band was left aliasing. These pin the gate to the
+ * seam's own width by making the period-keyed answer visibly wrong.
+ */
+describe('§V.48 the hull seam gate is keyed on the SEAM, not the plank', () => {
+  const SEAM = shipMaterialParams.seamWidth; // fraction of a plank
+
+  /** neighbour-to-neighbour difference of the drawn mask — what aliases */
+  const step = (filter: number, limited: boolean): number => {
+    const at = (x: number): number => {
+      const f = x - Math.floor(x);
+      const d = Math.min(f, 1 - f);
+      if (limited) return bandLimitedEdgeValue(d, SEAM, filter);
+      const t = Math.min(1, Math.max(0, d / SEAM));
+      return t * t * (3 - 2 * t);
+    };
+    let worst = 0;
+    for (let x = 0; x < 1; x += 1 / 4000) worst = Math.max(worst, Math.abs(at(x + filter) - at(x)));
+    return worst;
+  };
+
+  it('is at full strength only while the seam still spans two pixels', () => {
+    // the widening threshold IS the seam width — not the period, not the
+    // board. Two pixels rather than one: at exactly one, neighbouring samples
+    // still land on opposite ends of the groove wall (see FILTER_PIXELS).
+    expect(bandLimitEnergy(SEAM, SEAM / 2)).toBe(1); // seam = 2 px: untouched
+    expect(bandLimitEnergy(SEAM, SEAM / 2 + 1e-6)).toBeLessThan(1); // one hair past: fading
+  });
+
+  it('has already collapsed where a period-keyed gate still reads "all fine"', () => {
+    // THE REGRESSION PIN for §B.20. Across this whole band the plank repeat is
+    // comfortably resolved, so the gate that fixed the masts does nothing at
+    // all — and the seam inside it is a sub-pixel step, i.e. random normals.
+    for (const filter of [SEAM, 2 * SEAM, 4 * SEAM]) {
+      expect(periodResolvedValue(filter)).toBe(1); // period says: no problem
+      expect(bandLimitEnergy(SEAM, filter)).toBeLessThanOrEqual(0.5); // seam disagrees
+      expect(step(filter, false)).toBeGreaterThan(0.9); // unlimited: a full step per pixel
+    }
+    // and the limit reaches nothing by the time the seam is under a pixel,
+    // rather than merely starting to fade there
+    expect(step(SEAM, true)).toBeLessThan(0.5); // 1 px per seam: already a slope
+    expect(step(2 * SEAM, true)).toBeLessThan(0.25); // half a pixel: going
+    expect(step(4 * SEAM, true)).toBeLessThan(0.1); // a quarter: gone
+  });
+
+  it('§V.49 — the relief factor scales the NORMAL, never the height it differentiates', () => {
+    // The wetline factor multiplies the hull's relief. Fold it into the height
+    // field and reliefNormal differentiates the PRODUCT, so the product rule
+    // hands the normal an H·dS/dx term: the factor's own sampling jitter,
+    // amplified by the full magnitude of the wood grain. Applying it after the
+    // derivative (reliefNormal scales dH/dx, not H) cannot produce that term.
+    // Invisible while the hull is dry, because a constant S has no derivative.
+    const PIXEL = 1e-3; // one pixel of whatever coordinate this is measured in
+    const H = (x: number): number => 0.012 * Math.sin(x * 40); // wood height, metres
+    // a factor read from a minified sampler: it changes by a few percent
+    // between neighbouring pixels, which on its own is nothing to look at
+    const S = (x: number): number => 0.5 + 0.25 * Math.sin(x * 3000);
+    // swept, not spot-checked: aliasing IS sub-pixel phase dependence, and a
+    // single sample can land anywhere on the beat (this test first shipped
+    // spot-checked and read 1.02× on a phase where dS happened to vanish)
+    const worst = (f: (x: number) => number): number => {
+      let out = 0;
+      for (let x = 0; x < 1; x += PIXEL / 4) out = Math.max(out, Math.abs(f(x + PIXEL) - f(x)));
+      return out;
+    };
+    const scaledHeight = worst((x) => H(x) * S(x)); // the §V.49 bug
+    const scaledNormal = worst(H) * 1; // what the material does now, S bounded by 1
+    expect(scaledHeight).toBeGreaterThan(scaledNormal * 3);
+    // and with a dry hull the two are the SAME function, which is why a bug
+    // of this shape can sit in the deck material unseen until it rains
+    const dry = worst((x) => H(x) * 1);
+    expect(dry).toBeCloseTo(worst(H), 12);
   });
 });

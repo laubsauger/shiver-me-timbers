@@ -30,6 +30,121 @@ export function injectAmount(
   return Math.max(0, bias - jacobian) * strengthPerSecond * dt;
 }
 
+/* -------------------------------------------------------------------------
+ * §V36 for the JACOBIAN gate (§B: `jacobianFoamBias` applied to the wrong
+ * statistic). `oceanParams.jacobianFoamBias` is calibrated against the
+ * SUMMED three-cascade jacobian — surfaceMaterial computes `d0.w+d1.w+d2.w−2`
+ * and its own fallback threshold is that same number. The foam sim injects
+ * PER CASCADE, and one band's det J is a much narrower distribution than the
+ * sum of three: measured on the shipped swell spectrum, σ is 0.055 / 0.093 /
+ * 0.147 per band against 0.183 for the sum. Applying 0.55 to each band
+ * therefore asked for a 8.2σ / 4.9σ / 3.1σ event instead of the 2.5σ event
+ * the number means — ≈0.15 texels of 262144 firing per frame, i.e. no foam
+ * at all at swell, while storm's ~3× wider bands still cleared it. Exactly
+ * §B.12's failure: a constant calibrated against one statistic, applied to
+ * another, changing meaning in silence.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * σ(det J of one cascade) ÷ (λ · RMS(∂Dx/∂x) of that cascade).
+ *
+ * det J = (1+λa)(1+λb) − (λc)² with (a,b,c) = (∂Dx/∂x, ∂Dz/∂z, ∂Dx/∂z), so
+ * its spread is driven by a+b, whose spectral transfer is |k| — NOT the
+ * kx²/|k| that `spectralSteepness` measures. The two differ only by a factor
+ * fixed by the spectrum's DIRECTIONAL SHAPE, so one constant converts
+ * between them: measured 1.79 for every cascade of every shipped preset
+ * (calm/swell/storm, all three bands, spread from the live `directionality` /
+ * `oppositeWaveDamp`). tests/foam.test.ts recomputes it from the real
+ * spectrum and fails if a spread retune moves it — which is the whole point:
+ * the alternative is a foam gate whose σ silently drifts (§V36).
+ */
+export const JACOBIAN_SIGMA_PER_STEEPNESS = 1.79;
+
+/** absolute floor: a sea with no spectrum at all has no bands to gate (§V28) */
+export const MIN_BAND_JACOBIAN_SIGMA = 1e-9;
+
+/**
+ * A band holding less than this fraction of the sea's jacobian σ is DEAD, not
+ * merely quiet, and is switched off rather than gated.
+ *
+ * Not a nicety — it is the failure mode of a purely relative gate. Calm has
+ * essentially nothing in the 420 m band (σ ≈ 6e-6 against the sea's 0.125), so
+ * "the same σ-multiple" puts its threshold at 0.99996 while its det J is
+ * 1 ± 6e-6: half the texels of the whole cascade would clear it, and the
+ * σ-relative injection would then treat that float noise as a real fold and
+ * foam over half the sea. A band that cannot fold must not be normalised into
+ * relevance.
+ */
+export const DEAD_BAND_SIGMA_FRACTION = 1e-3;
+
+/** bias value that provably never injects (det J ≥ 0 in any sane sea) */
+export const NEVER_INJECT_BIAS = -10;
+
+/** can this band produce a real fold, or is it float noise? (see above) */
+export function bandCanFold(bandSigma: number, seaSigma: number): boolean {
+  if (!Number.isFinite(bandSigma) || !Number.isFinite(seaSigma)) return false;
+  if (!(seaSigma > MIN_BAND_JACOBIAN_SIGMA)) return false;
+  return bandSigma > Math.max(MIN_BAND_JACOBIAN_SIGMA, DEAD_BAND_SIGMA_FRACTION * seaSigma);
+}
+
+/**
+ * σ of one band's det J, from the moments the ocean already publishes:
+ * `OceanCascade.steepnessRms` (at λ=1) × the effective choppiness λ actually
+ * sent to the GPU × the shape constant above. Pass the sea-wide
+ * `OceanSimulation.steepnessRms` to get σ of the summed jacobian.
+ */
+export function jacobianSigma(steepnessRms: number, choppiness: number): number {
+  if (!Number.isFinite(steepnessRms) || !Number.isFinite(choppiness)) return 0;
+  return JACOBIAN_SIGMA_PER_STEEPNESS * Math.max(0, steepnessRms) * Math.max(0, choppiness);
+}
+
+/**
+ * Per-cascade inject threshold that carries the SAME σ-multiple the artist's
+ * `jacobianFoamBias` means on the summed jacobian (§V36).
+ *
+ * The summed gate fires at z = (1 − bias)/σ_sea below the rest value 1. A
+ * band whose own σ is σ_band must therefore sit at 1 − (1 − bias)·σ_band/σ_sea
+ * to fire at that same z. At swell this turns the flat 0.55 into
+ * 0.864 / 0.771 / 0.637 and every band fires at 2.48σ instead of 8.2 / 4.9 /
+ * 3.1σ. A band with no energy in it (calm's 420 m cascade) can never fold, so
+ * it is gated off outright rather than handed a divide-by-nothing.
+ */
+export function cascadeFoamBias(
+  bias: number,
+  bandSigma: number,
+  seaSigma: number,
+): number {
+  if (!bandCanFold(bandSigma, seaSigma)) return NEVER_INJECT_BIAS;
+  // ratio ≤ 1 by quadrature (σ_sea² = Σ σ_band²); clamped anyway so a stale
+  // moment can never bias a band ABOVE the rest value and foam the flat sea
+  return 1 - (1 - bias) * Math.min(1, bandSigma / seaSigma);
+}
+
+/**
+ * Per-cascade injection scale, in units of σ of fold depth per second (§V36
+ * again — the AMOUNT injected has to be σ-relative for the same reason the
+ * THRESHOLD does).
+ *
+ * The GPU multiplies the raw deficit (bias − J) by this. Dividing by the
+ * band's own σ makes `injectStrength` mean "foam per second per σ that the
+ * jacobian sits below the gate", identical across bands and across weather.
+ * Without it the deficit at a 2.5σ fold is ~0.02 in the coarse band and ~0.05
+ * in the fine one, so the same setting produced 2.5× the foam in one band as
+ * another and roughly 20× less foam at swell than at storm — the amplitude
+ * half of the "no whitecaps" report, distinct from the threshold half above.
+ */
+export function cascadeInjectPerStep(
+  strengthPerSecond: number,
+  dt: number,
+  bandSigma: number,
+  seaSigma: number,
+): number {
+  // dead bands return 0 rather than a huge 1/σ: their bias is NEVER_INJECT so
+  // the deficit is already clamped to 0, and 0 × Infinity is NaN (§V28)
+  if (!bandCanFold(bandSigma, seaSigma) || !(dt > 0)) return 0;
+  return (Math.max(0, strengthPerSecond) * dt) / bandSigma;
+}
+
 /** accumulate with existing foam, clamped ≤ 1 (§V6: mask feeds a mix factor) */
 export function accumulateFoam(previous: number, injected: number): number {
   return Math.min(1, previous + injected);

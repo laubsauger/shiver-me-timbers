@@ -11,7 +11,7 @@ import { buildHoledVariant, buildPieceGeometry, buildSailGeometry } from '../src
 import { ShipAssembly } from '../src/ship/shipAssembly';
 import { createWoodMaterial } from '../src/ship/woodMaterial';
 import { galleonParams, shipMaterialParams, shipRigParams } from '../src/params/ship';
-import type { PieceDef } from '../src/ship/pieceTypes';
+import type { PieceDef, SailStateId } from '../src/ship/pieceTypes';
 import {
   hullEnvelope,
   hullHalfWidthAt,
@@ -21,11 +21,23 @@ import {
 import {
   braceAngle,
   sailDrive,
+  sailGeometryState,
   sailStateForTrim,
   trimDropScale,
 } from '../src/ship/sailDynamics';
 import { updateRig } from '../src/ship/rigTrim';
 import { oceanParams } from '../src/params/ocean';
+import {
+  SAIL_BELLY_FOOT,
+  SAIL_DRAFT_MAX,
+  SAIL_DRAFT_MIN,
+  SAIL_FOOT_FILL,
+  sailBellyProfile,
+  sailClothOffset,
+  sailDraftLead,
+  sailDraftProfile,
+  sailFurlLift,
+} from '../src/ship/sailShape';
 
 const stubFactory = () => ({ dispose(): void {} }) as unknown as Material;
 
@@ -624,13 +636,19 @@ describe('updateRig — the one call main.ts makes per frame', () => {
     asm.dispose();
   });
 
-  it('reefs every sail together when the sim trim comes in', () => {
+  it('reefs every sail together, and does it WITHOUT a mid-travel mesh swap', () => {
     const asm = new ShipAssembly(buildGalleonBlueprint(), stubFactory);
     asm.group.updateMatrixWorld(true);
     updateRig(asm, 1 / 60, 1);
     expect(asm.sailState('sail-main-lower')).toBe('full');
-    updateRig(asm, 1 / 60, 0.3);
-    for (const id of asm.sailPieceIds()) expect(asm.sailState(id), id).toBe('reefed');
+    // WHY: a third of the way in used to rebuild every sail as the 'reefed'
+    // mesh, which is where the user's "it suddenly jumps when it's like half
+    // unfurled" came from. At any working trim the cloth is the SAME mesh,
+    // shortened continuously — the reef is a scale, not a swap.
+    for (const t of [0.8, 0.6, 0.45, 0.3, 0.1]) {
+      updateRig(asm, 1 / 60, t);
+      for (const id of asm.sailPieceIds()) expect(asm.sailState(id), `${id} @ ${t}`).toBe('full');
+    }
     updateRig(asm, 1 / 60, 0);
     for (const id of asm.sailPieceIds()) expect(asm.sailState(id), id).toBe('furled');
     asm.dispose();
@@ -655,16 +673,69 @@ describe('sail trim → §V13 sail states (docs/side-sails-fully-reefed.png)', (
     expect(sailStateForTrim(edge - 0.01, 'full', p)).toBe('reefed');
   });
 
-  it('drop scale is continuous across the band so trim does not pop', () => {
+  it('drop scale moves over the WHOLE range — no plateau anywhere', () => {
+    // WHY, and this is the whole bug: this test used to assert only that the
+    // scale was monotone and stepless, which `min + (1−min)·clamp(…)` satisfies
+    // while being PINNED for the bottom 55% of the travel. A flat interval is a
+    // stretch of the player's control that does nothing, and the user feels it
+    // as a skip — measured, the old form was constant at 0.55 for every trim
+    // below 0.55, and the sail's foot did not move through 39% of the range.
     expect(trimDropScale(1, p)).toBeCloseTo(1, 6);
-    expect(trimDropScale(p.reefReefedBelow, p)).toBeCloseTo(p.trimDropMin, 6);
+    expect(trimDropScale(0, p)).toBeCloseTo(p.trimDropMin, 6);
+    const span = 1 - p.trimDropMin;
     let prev = trimDropScale(0, p);
-    for (let t = 0; t <= 1; t += 0.02) {
+    for (let t = 0.01; t <= 1.0001; t += 0.01) {
       const v = trimDropScale(t, p);
-      expect(v).toBeGreaterThanOrEqual(prev - 1e-9); // monotonic
-      expect(Math.abs(v - prev)).toBeLessThan(0.05); // no step
+      const step = v - prev;
+      expect(step).toBeGreaterThan(span * 0.005); // every 1% of trim MOVES it…
+      expect(step).toBeLessThan(span * 0.02); // …and none of them lurches
       prev = v;
     }
+  });
+
+  it('swaps the mesh ONCE, at the bottom, not at mid-travel', () => {
+    // WHY: hysteresis is right for a label and fatal for a shape. The old path
+    // keyed geometry off `sailStateForTrim`, so the cloth jumped 34% of its
+    // drop at trim 0.55 going in and 41% at trim 0.62 coming out — "it does
+    // the same on the way out" is the hysteresis band, seen.
+    let state = sailGeometryState(1, 'full', p);
+    const swaps: number[] = [];
+    for (let i = 200; i >= 0; i--) {
+      const t = i / 200;
+      const next = sailGeometryState(t, state, p);
+      if (next !== state) swaps.push(t);
+      state = next;
+    }
+    expect(swaps).toHaveLength(1);
+    expect(swaps[0]).toBeLessThan(0.05); // …and at the very bottom of travel
+    // coming back out it must not cost much more trim than it took to furl,
+    // or the control feels like it has backlash
+    const outSwaps: number[] = [];
+    for (let i = 0; i <= 200; i++) {
+      const t = i / 200;
+      const next = sailGeometryState(t, state, p);
+      if (next !== state) outSwaps.push(t);
+      state = next;
+    }
+    expect(outSwaps).toHaveLength(1);
+    // the hysteresis band is bounded BY the threshold, so shaking the canvas
+    // back out can never cost more than twice the trim it took to furl — the
+    // old label band was a flat 0.06 sitting at mid-travel, which is why the
+    // jump landed at 0.55 going in and 0.62 coming out
+    expect(outSwaps[0]).toBeLessThanOrEqual(2 * p.furlGeometryBelow + 1e-9);
+    expect(outSwaps[0]).toBeGreaterThanOrEqual(swaps[0] - 1e-9);
+    // never 'reefed': an intermediate mesh is a jump wherever you put it
+    for (let i = 0; i <= 200; i++) {
+      expect(sailGeometryState(i / 200, 'full', p)).not.toBe('reefed');
+      expect(sailGeometryState(i / 200, 'furled', p)).not.toBe('reefed');
+    }
+  });
+
+  it('the label keeps its three states and its hysteresis (HUD, audio)', () => {
+    // WHY: separating shape from label must not cost the label. The plaque
+    // still reads "reefed" at mid-trim and still must not flicker on an edge.
+    expect(sailStateForTrim(0.35, 'full', p)).toBe('reefed');
+    expect(sailStateForTrim(p.reefReefedBelow + p.reefHysteresis * 0.5, 'reefed', p)).toBe('reefed');
   });
 
   it('setSailState is edge-triggered — a repeat call keeps the same geometry', () => {
@@ -679,6 +750,116 @@ describe('sail trim → §V13 sail states (docs/side-sails-fully-reefed.png)', (
     expect(mesh.geometry).not.toBe(reefed);
     expect(asm.sailPieceIds()).toHaveLength(6);
     asm.dispose();
+  });
+});
+
+/**
+ * §V22 — "pulling up and down the sails still skips. It's not a smooth
+ * transition to packed-up sails. It suddenly jumps when it's like half
+ * unfurled, and then it suddenly snaps and they're in — and on the way out it
+ * does the same."
+ *
+ * A REPEAT complaint (earlier: "sail reefing skips 30–40%"), and everything
+ * upstream of this file already looked fine: the drop scale was monotone and
+ * stepless, and its own unit test said so. The jump was never in the scale, it
+ * was in the GEOMETRY the scale was applied to, so it could only be caught by
+ * measuring the thing the player actually watches — where the foot of the
+ * canvas is — through the whole real path, at every trim, in both directions.
+ * That is what this does.
+ */
+describe('hauling the canvas up and down is SMOOTH end to end (§V22)', () => {
+  const p = shipRigParams;
+  const mp = shipMaterialParams;
+
+  /** exactly what the vertex stage builds: the hung y plus the gather lift */
+  function canvasFoot(aabb: PieceDef['aabb'], state: ReturnType<typeof sailGeometryState>, scale: number): number {
+    const geo = buildSailGeometry(state, aabb);
+    const pos = geo.getAttribute('position');
+    const shape = geo.getAttribute('sailShape');
+    const uvs = geo.getAttribute('uv');
+    const s = { drive: 0, luff: 0, skew: 0, dropScale: scale, time: 0, phase: 0 };
+    let lo = 0;
+    for (let i = 0; i < pos.count; i++) {
+      const w = shape.getX(i);
+      const y =
+        pos.getY(i) * (1 + (scale - 1) * w) +
+        sailFurlLift(uvs.getX(i), uvs.getY(i), shape.getZ(i), s, mp) * w;
+      if (y < lo) lo = y;
+    }
+    geo.dispose();
+    return lo;
+  }
+
+  const sails = buildGalleonBlueprint().filter((s) => s.id.startsWith('sail-'));
+
+  it.each(['down', 'up'] as const)('shows no jump hauling %s', (dir) => {
+    for (const sail of sails) {
+      const drop = -sail.aabb.min[1];
+      let state: SailStateId = dir === 'down' ? 'full' : 'furled';
+      let prev: number | null = null;
+      let worst = 0;
+      let worstAt = 0;
+      for (let i = 0; i <= 200; i++) {
+        const t = dir === 'down' ? 1 - i / 200 : i / 200;
+        state = sailGeometryState(t, state, p);
+        const y = canvasFoot(sail.aabb, state, trimDropScale(t, p));
+        if (prev !== null && Math.abs(y - prev) / drop > worst) {
+          worst = Math.abs(y - prev) / drop;
+          worstAt = t;
+        }
+        prev = y;
+      }
+      // MEASURED BEFORE THE FIX: 0.34 hauling down (at trim 0.55) and 0.41
+      // hauling up (at trim 0.62 — a different place, which is the hysteresis
+      // band showing through). Half a percent of trim may not move the foot of
+      // the sail by a twentieth of its own drop.
+      expect(worst, `${sail.id} ${dir} @ trim ${worstAt.toFixed(3)}`).toBeLessThan(0.05);
+    }
+  });
+
+  it('has no dead zone: every part of the travel does something', () => {
+    // WHY: the other half of the complaint. Trim 0.15..0.54 used to be 39% of
+    // the player's control in which the canvas did not move at all, which is
+    // where "skips 30–40%" came from. Below `furlGeometryBelow` she is furled
+    // and is SUPPOSED to be inert, so the sweep starts above it.
+    const sail = sails.find((s) => s.id === 'sail-main-lower')!;
+    const drop = -sail.aabb.min[1];
+    const from = p.furlGeometryBelow + p.reefHysteresis;
+    let prev: number | null = null;
+    for (let t = from; t <= 1.0001; t += 0.02) {
+      const y = canvasFoot(sail.aabb, sailGeometryState(t, 'full', p), trimDropScale(t, p));
+      if (prev !== null) expect(Math.abs(y - prev) / drop, `trim ${t.toFixed(2)}`).toBeGreaterThan(0.005);
+      prev = y;
+    }
+  });
+
+  it('gathers the foot into bays as it comes in, and lets it hang when set', () => {
+    // WHY: the continuous scale alone slides a flat rectangle of canvas up a
+    // slot, which is not "packed-up sails". The foot must rise at the stations
+    // its buntlines are made fast to and swag between them — the user's
+    // standing note about reefed canvas showing "lines… in the centre or at
+    // thirds, instead of just a completely straight line rolled up".
+    const drop = 6.3;
+    const at = (trim: number, u: number): number =>
+      sailFurlLift(u, 0, drop, { drive: 0, luff: 0, skew: 0, dropScale: trimDropScale(trim, p), time: 0, phase: 0 }, mp);
+
+    // a set sail is NOT gathered — this must not disturb the belly (§B.21)
+    for (let u = 0; u <= 1; u += 0.1) expect(at(1, u)).toBeCloseTo(0, 9);
+
+    // hauled almost in, the foot is scalloped: stations up, mid-bays hanging
+    const bays = mp.sailFurlBays;
+    for (let b = 0; b < bays; b++) {
+      const station = b / bays;
+      const midBay = (b + 0.5) / bays;
+      expect(at(0.05, station)).toBeGreaterThan(at(0.05, midBay) + drop * 0.05);
+    }
+    // and the gather grows monotonically as she comes in — no step of its own
+    let prev = at(1, 0);
+    for (let t = 0.98; t >= 0; t -= 0.02) {
+      const v = at(t, 0);
+      expect(v).toBeGreaterThan(prev - 1e-9);
+      prev = v;
+    }
   });
 });
 
@@ -803,5 +984,192 @@ describe('ShipAssembly piece ops (§V.13: destruction only via piece graph)', ()
     asm.setDamageState('hull-starboard-bow', 'holed');
     expect(asm.socketWorldPosition('cannon-port-1')).toHaveLength(3);
     asm.dispose();
+  });
+});
+
+/**
+ * §V22 / §T.34 — "Sails are certainly not getting blown hard enough to look
+ * interesting. They have no billow to them."
+ *
+ * The belly was already being COMPUTED (proved earlier by locking
+ * sailDropScale and watching the sails shrink), so these tests pin the two
+ * things that made a live belly read as flat cloth: a vertical profile with no
+ * inflection, and a drive term with no headroom above the wind the game
+ * actually runs at.
+ */
+describe('sail belly reads as a curved surface (§V22 "no billow")', () => {
+  const p = shipMaterialParams;
+  const base = { forwardX: 0, forwardZ: 1, yawRate: 0, time: 0 };
+  const state = (drive: number) => ({ drive, luff: 0, skew: 0, dropScale: 1, time: 0, phase: 0 });
+
+  it('is deepest around mid-height and comes back at BOTH ends', () => {
+    // the old profile was smoothstep(0, 0.9, 1−v): monotone, deepest at the
+    // free foot, zero only at the head. A monotone section has no inflection,
+    // so the lower sail swings forward as one piece and shades like a tilted
+    // plane however deep it is.
+    const peak = sailBellyProfile(SAIL_BELLY_FOOT);
+    expect(peak).toBeCloseTo(1, 6); // full depth at the draft
+    expect(sailBellyProfile(1)).toBeCloseTo(0, 6); // bent to the yard at the head
+    // the foot is a FREE edge — it eases back but never returns to the yard
+    expect(sailBellyProfile(0)).toBeCloseTo(SAIL_FOOT_FILL, 6);
+    expect(sailBellyProfile(0)).toBeLessThan(peak * 0.7);
+
+    // and the section genuinely turns over rather than ramping: sampling from
+    // foot to head the profile must rise, reach the peak, then fall
+    const xs = Array.from({ length: 41 }, (_, i) => i / 40);
+    const ys = xs.map(sailBellyProfile);
+    const argmax = ys.indexOf(Math.max(...ys));
+    expect(xs[argmax]).toBeGreaterThan(0.15); // not pinned at the foot…
+    expect(xs[argmax]).toBeLessThan(0.85); // …nor at the head
+    for (let i = 1; i <= argmax; i++) expect(ys[i]).toBeGreaterThanOrEqual(ys[i - 1] - 1e-9);
+    for (let i = argmax + 1; i < ys.length; i++) expect(ys[i]).toBeLessThanOrEqual(ys[i - 1] + 1e-9);
+  });
+
+  it('still pins the cloth at both leeches and at the head', () => {
+    // the bolt ropes hold the sides; a belly that did not go to zero here
+    // would tear the cloth off its own edges
+    const drop = 7;
+    for (const v of [0, 0.45, 0.9]) {
+      expect(Math.abs(sailClothOffset(0, v, drop, state(1), p))).toBeLessThan(0.02);
+      expect(Math.abs(sailClothOffset(1, v, drop, state(1), p))).toBeLessThan(0.02);
+    }
+    expect(Math.abs(sailClothOffset(0.5, 1, drop, state(1), p))).toBeLessThan(0.02);
+  });
+
+  it('leaves real headroom above the wind the game actually sails in', () => {
+    // THE FLAG BUG, again (§B: flagStreamRef 7 against a default wind of 11
+    // pinned the telltale at maximum, so it carried no information). If drive
+    // is already at its ceiling in ordinary conditions, a breeze and a gale
+    // produce identical canvas and the sail stops reporting anything.
+    const ordinary = sailDrive({ ...base, windDirection: 0, windSpeed: oceanParams.windSpeed }, p);
+    expect(p.sailWindRef).toBeGreaterThan(oceanParams.windSpeed); // ref above the working wind
+    expect(ordinary.drive).toBeGreaterThan(0.4); // she is drawing…
+    expect(ordinary.drive).toBeLessThan(0.8); // …with room left above her
+  });
+
+  it('deepens visibly from light air to a gale', () => {
+    const depthAt = (windSpeed: number): number => {
+      const d = sailDrive({ ...base, windDirection: 0, windSpeed }, p).drive;
+      // peak of the belly: mid-width, at the draft, on a 7 m course
+      return sailClothOffset(0.5, SAIL_BELLY_FOOT, 7, state(d), p);
+    };
+    const light = depthAt(5);
+    const ordinary = depthAt(oceanParams.windSpeed);
+    const gale = depthAt(22);
+    expect(light).toBeLessThan(ordinary);
+    expect(ordinary).toBeLessThan(gale);
+    // the whole point: the range has to be READABLE, not a few percent
+    expect(gale / Math.max(light, 1e-6)).toBeGreaterThan(2.5);
+    // and ordinary conditions must give a belly worth looking at on a 7 m sail
+    expect(ordinary).toBeGreaterThan(1.8);
+  });
+
+  it('goes slack in irons and inverts when the wind backs the sail', () => {
+    const irons = sailDrive({ ...base, windDirection: Math.PI, windSpeed: 12 }, p);
+    const backed = sailClothOffset(0.5, SAIL_BELLY_FOOT, 7, state(irons.drive), p);
+    expect(backed).toBeLessThan(0); // pressed back against the rig, not filled
+  });
+});
+
+/**
+ * §V22 / §V43 — "the sail blow is like a way too steep bulge in the middle and
+ * then nothing towards the sides. It has to be more distributed."
+ *
+ * The FOURTH sail complaint, and the first one about the HORIZONTAL section:
+ * §B.21 fixed the vertical profile and left `sin²(πu)` across, MULTIPLIED into
+ * it. A product of two centred bumps puts the whole shape in a lens in the
+ * middle — measured 0.31 of the peak as a mean over a whole course, with the
+ * cloth at 9.5% of full one tenth of the way in from a leech.
+ *
+ * These tests are about DISTRIBUTION, which is the thing no depth or
+ * displacement-magnitude assertion can see: every one of them passes on a sail
+ * of any depth and fails the moment the bulge is re-centred or re-narrowed.
+ */
+describe('the draft is DISTRIBUTED across the cloth (§V43 SoT parity)', () => {
+  const p = shipMaterialParams;
+  const lead = sailDraftLead(p.sailDraftPos);
+  const section = (u: number): number => sailDraftProfile(u, lead, p.sailDraftFullness);
+  const peak = Math.max(...Array.from({ length: 2001 }, (_, i) => section(i / 2000)));
+
+  it('carries real depth out toward the leeches, not a lens in the middle', () => {
+    // sin²(πu) — the shape this replaced — scores 0.095 / 0.095 / 0.500 here.
+    // A membrane parabola scores 0.46 / 0.25 / 0.66. The gap IS the complaint.
+    expect(section(0.1) / peak).toBeGreaterThan(0.35); // a tenth in from the luff
+    expect(section(0.9) / peak).toBeGreaterThan(0.2); // …and from the leech
+
+    // the honest summary: how much of the peak the sail carries ON AVERAGE.
+    // Anything that narrows the section drops this, whatever it does to depth.
+    const N = 2000;
+    let sum = 0;
+    for (let i = 0; i <= N; i++) sum += section(i / N);
+    expect(sum / (N + 1) / peak).toBeGreaterThan(0.6);
+  });
+
+  it('is still pinned to the bolt rope at both leeches', () => {
+    // "distributed" must not become "detached": the leeches are roped and
+    // sheeted, so the falloff is a boundary layer at the edge, not an open one
+    expect(section(0)).toBeCloseTo(0, 6);
+    expect(section(1)).toBeCloseTo(0, 6);
+  });
+
+  it('puts the deepest point AFT OF THE LUFF, not at the midpoint', () => {
+    // real canvas draws at roughly 40% aft of the luff: a fast entry curve and
+    // a long flat exit to the leech. A symmetric section is the tell that
+    // someone has gone back to a centred bump.
+    const N = 2000;
+    let argmax = 0;
+    let best = -1;
+    for (let i = 0; i <= N; i++) {
+      const y = section(i / N);
+      if (y > best) {
+        best = y;
+        argmax = i / N;
+      }
+    }
+    expect(argmax).toBeGreaterThan(0.3);
+    expect(argmax).toBeLessThan(0.48);
+    // and the asymmetry is real, not a rounding: equal distances either side
+    // of the MIDPOINT are not equally full
+    expect(section(0.3)).toBeGreaterThan(section(0.7) * 1.15);
+  });
+
+  it('never folds the cloth back over itself, anywhere in the tunable band', () => {
+    // the draft is moved by warping u, and a warp that is not monotone maps two
+    // points of canvas onto one — a self-intersecting sail. The clamp on the
+    // warp lead is what prevents it, so the guard has to hold across the whole
+    // range Tweakpane exposes AND the extra swing `skew` adds on top.
+    for (let k = 0; k <= 20; k++) {
+      const dp = SAIL_DRAFT_MIN - 0.3 + ((SAIL_DRAFT_MAX + 0.6 - SAIL_DRAFT_MIN) * k) / 20;
+      const l = sailDraftLead(dp);
+      let prev = -1;
+      for (let i = 0; i <= 500; i++) {
+        const u = i / 500;
+        const w = u + l * Math.sin(Math.PI * u);
+        expect(w).toBeGreaterThanOrEqual(prev - 1e-9);
+        prev = w;
+      }
+    }
+  });
+
+  it('lags the DRAFT to leeward while turning, and never walks off the leech', () => {
+    // the ship's swing used to translate the whole section sideways, which at
+    // full skew left 41% of the peak standing at the port bolt rope — the cloth
+    // torn off its own edge. Moving the draft position instead keeps both
+    // leeches at zero at every skew.
+    const drop = 7;
+    const at = (skew: number, u: number, v: number): number =>
+      sailClothOffset(u, v, drop, { drive: 1, luff: 0, skew, dropScale: 1, time: 0, phase: 0 },
+        { ...p, sailFlutterAmp: 0 });
+    for (const skew of [-1, -0.5, 0, 0.5, 1]) {
+      for (const v of [0, 0.45, 0.9]) {
+        expect(Math.abs(at(skew, 0, v))).toBeLessThan(1e-6);
+        expect(Math.abs(at(skew, 1, v))).toBeLessThan(1e-6);
+      }
+    }
+    // it still MOVES, or the skew term has silently become a no-op: at the free
+    // foot the two tacks put visibly different amounts of cloth at mid-width
+    expect(at(1, 0.5, 0)).not.toBeCloseTo(at(-1, 0.5, 0), 3);
+    // …and the head cannot lag at all — it is bent to its yard
+    expect(at(1, 0.4, 1)).toBeCloseTo(at(-1, 0.4, 1), 6);
   });
 });

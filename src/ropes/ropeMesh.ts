@@ -77,21 +77,26 @@ export interface RegimeUniforms {
  * Returns the widened radius to draw at, the alpha that pays that widening
  * back, and how far into the cheap unlit regime the geometry is.
  */
-export function phoneWireRegime(
-  worldPos: TSLNode,
-  radius: TSLNode,
-  u: RegimeUniforms,
-) {
+export function projectedWidthPx(worldPos: TSLNode, radius: TSLNode): TSLNode {
   // A view-space offset of `radius` along X pushed through the projection
   // matrix gives the NDC half-width directly; dividing by the point's own clip
   // w applies the perspective foreshortening, and NDC spans 2 across the
   // viewport so the full width covers (ndcHalf · viewportWidth) pixels. No
   // FOV, aspect or resolution appears explicitly — which is the point: the
   // same code is correct in the half-res reflection pass (§V36 lesson).
+  // src/ropes/phoneWireAA.ts projectedWidthPx() is the tested CPU mirror.
   const clip = cameraProjectionMatrix.mul(cameraViewMatrix.mul(vec4(worldPos, 1)));
   const clipW = max(clip.w, float(Z_MIN));
   const ndcHalf = cameraProjectionMatrix.mul(vec4(radius, 0, 0, 0)).x.abs();
-  const widthPx = ndcHalf.div(clipW).mul(viewport.z);
+  return ndcHalf.div(clipW).mul(viewport.z);
+}
+
+export function phoneWireRegime(
+  worldPos: TSLNode,
+  radius: TSLNode,
+  u: RegimeUniforms,
+) {
+  const widthPx = projectedWidthPx(worldPos, radius);
 
   const widen = max(float(1), u.uMinWidthPx.div(max(widthPx, float(Z_MIN))));
   const aaAlpha = min(float(1), widthPx.div(max(u.uMinWidthPx, float(Z_MIN))));

@@ -16,11 +16,15 @@ import { FreeCam } from './freeCam';
 
 /** C = toggle free camera (§I; W/A/S/D/R/F fly while free) */
 export const TOGGLE_FREE_CODE = 'KeyC';
+/** H = snap to the captain's eye at the helm, and back out again */
+export const TOGGLE_HELM_CODE = 'KeyH';
 
 export interface CamInputHost {
   /** true while the detached fly camera owns the lens */
   isFree(): boolean;
   toggleFree(): void;
+  /** helm POV ↔ chase — one key, both directions */
+  toggleHelm(): void;
   setDragging(dragging: boolean): void;
   /** pointer drag delta — free-look when free, orbit otherwise */
   drag(dx: number, dy: number): void;
@@ -56,6 +60,10 @@ export function attachCamInput(domElement: HTMLElement, host: CamInputHost): () 
     if (e.metaKey || e.altKey || inTextField(e)) return;
     if (e.code === TOGGLE_FREE_CODE && !e.repeat) {
       host.toggleFree();
+      return;
+    }
+    if (e.code === TOGGLE_HELM_CODE && !e.repeat) {
+      host.toggleHelm();
       return;
     }
     if (!host.isFree()) return;

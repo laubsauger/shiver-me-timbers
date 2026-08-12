@@ -173,6 +173,8 @@ export function createPlanarReflection(
     cloudMirror = createCloudMirror({
       blurred: opts.clouds.blurred,
       seed: opts.clouds.seed,
+      sunColorLive: opts.clouds.sunColorLive,
+      skyColorLive: opts.clouds.skyColorLive,
       params: opts.clouds.params ?? cloudParams,
     });
   }

@@ -36,6 +36,30 @@ export interface SettingsScreen {
 
 const QUALITY_LABELS: Record<Quality, string> = { low: 'Low', medium: 'Medium', high: 'High' };
 
+/**
+ * Named hours worth one click. `Sunset` is the §T.39 showcase value: the sun
+ * sits at 4.35°, which is where the golden-hour palette is fully saturated AND
+ * the key is still at 93% — the only window where both hold (see sunCycle).
+ * `Golden` is the brighter alternative one notch earlier.
+ */
+const TIME_PRESETS: readonly { value: number; label: string }[] = [
+  { value: 6.3, label: 'Dawn' },
+  { value: 9, label: 'Morning' },
+  { value: 12, label: 'Noon' },
+  { value: 17.3, label: 'Golden' },
+  { value: 17.7, label: 'Sunset' },
+  { value: 21, label: 'Night' },
+];
+
+/** 17.7 → "17:42" — hours are not decimal and reading them as such is a trap */
+function clockLabel(v: number): string {
+  const h = Math.floor(v);
+  const m = Math.round((v - h) * 60);
+  // 17.999 rounds minutes to 60; carry it rather than printing "17:60"
+  const hh = m === 60 ? (h + 1) % 24 : h;
+  return `${String(hh).padStart(2, '0')}:${String(m === 60 ? 0 : m).padStart(2, '0')}`;
+}
+
 /** section title → the switches it holds, in reading order */
 const SECTIONS: readonly { title: string; ids: GraphicsFeatureId[] }[] = [
   { title: 'Effects', ids: ['reflections', 'caustics', 'deckWater', 'spray', 'rain'] },
@@ -118,10 +142,28 @@ export function createSettingsScreen(store: SettingsStore, onBack: () => void): 
     onInput: (v) => store.set({ graphics: { foliageDensity: v } }),
   });
 
+  // — time of day —
+  // A creative control, deliberately NOT in a quality bundle. Presets first
+  // because the common case is "put me at sunset now"; the slider is there for
+  // the case the presets do not cover. Both write the same setting.
+  const todPreset = segmentRow<number>({
+    label: 'Time of day',
+    hint: 'The sun sets at 18:00. Golden hour is the last half hour before it.',
+    options: TIME_PRESETS,
+    onSelect: (v) => store.set({ world: { timeOfDay: v } }),
+  });
+  const todSlider = sliderRow({
+    label: 'Exact hour',
+    hint: 'Fine control, for framing a shot the presets do not land on.',
+    min: 0, max: 23.9, step: 0.05, format: clockLabel,
+    onInput: (v) => store.set({ world: { timeOfDay: v } }),
+  });
+
   const graphicsRows = div(
     'smt-rows',
     div('smt-section', sectionHead('Preset'), quality.root),
     div('smt-section', sectionHead('Display'), resolution.root),
+    div('smt-section', sectionHead('World'), todPreset.root, todSlider.root),
     ...featureSections,
     div('smt-section', sectionHead('Scenery'), foliage.root),
   );
@@ -195,6 +237,10 @@ export function createSettingsScreen(store: SettingsStore, onBack: () => void): 
     shadowMap.set(s.graphics.shadowMapSize);
     shadowMap.setPendingReload(shadowMapSizeNeedsReload(s.graphics.shadowMapSize));
     foliage.set(s.graphics.foliageDensity);
+    // the slider always shows the truth; the preset row highlights nothing
+    // when the hour sits between named times, which is the honest state
+    todPreset.set(s.world.timeOfDay);
+    todSlider.set(s.world.timeOfDay);
     for (const [id, row] of switches) {
       const on = s.graphics.features[id];
       const f = GRAPHICS_FEATURES.find((x) => x.id === id)!;

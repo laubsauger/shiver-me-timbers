@@ -133,10 +133,31 @@ export interface CausticsParams {
   reflectedStrength: number;
   /** reflected caustics fade over this height above the waterline (m) */
   reflectedHeightFalloff: number;
+  /**
+   * Hard ceiling on the reflected branch (m above the waterline). The
+   * exponential falloff above only DECAYS — it never reaches zero, so without
+   * this the sun-off-wave light climbs the topsides into the rig.
+   */
+  reflectedMaxHeight: number;
+  /**
+   * Receiver-normal cutoff for the reflected branch: n.y at and above which a
+   * surface receives none of it. Sea-bounced light travels UPWARD, so a deck
+   * (n.y = 1) cannot catch any while a vertical hull side (n.y = 0) catches it
+   * square. 0 would clip flared topsides; much above ~0.5 lets the deck glow.
+   */
+  reflectedFaceLimit: number;
 
   // ── water bounce fill (the sea lighting the ship) ───────────────────
   /** upward fill from the sea onto everything above it (sRGB hex) */
   bounceColor: string;
+  /**
+   * 0..1 how far `bounceColor` is pulled toward the LIVE sea colour that
+   * `skyPalette().ground` already computes. 1 = the hull's up-fill warms with
+   * the sky, the fog and the ambient off the one shared weight (§T.39); 0 =
+   * the authored hex, fixed, which is what it used to be and which stayed teal
+   * through a full amber sunset.
+   */
+  bounceFollowSky: number;
   /**
    * ADDITIVE lift from the sea, in linear light (§B.12).
    *
@@ -259,10 +280,15 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
 
   reflectedStrength: 0.35,
   reflectedHeightFalloff: 4.5,
+  // just above the galleon's waist rail: high enough to keep the wet topside
+  // sparkle the branch is for, low enough that nothing reaches the sterncastle
+  reflectedMaxHeight: 5.5,
+  reflectedFaceLimit: 0.35,
 
   // between the ocean's deepColor (#093642) and sssColor (#32d0c0): the sea
   // seen from a hull is body pigment lifted by scattered sun, not either end
   bounceColor: '#2a9a9c',
+  bounceFollowSky: 1,
   bounceStrength: 0.06,
   // 0.3 → 0.12: the sky hemisphere already supplies the flat sea bounce
   bounceTint: 0.12,
@@ -313,7 +339,10 @@ function causticsParamsMeta() {
     faceGateSoftness: { min: 0.005, max: 0.5, step: 0.005 },
     reflectedStrength: { min: 0, max: 3, step: 0.01 },
     reflectedHeightFalloff: { min: 0.2, max: 30, step: 0.1 },
+    reflectedMaxHeight: { min: 0.5, max: 40, step: 0.5 },
+    reflectedFaceLimit: { min: 0.02, max: 1, step: 0.01 },
     bounceStrength: { min: 0, max: 3, step: 0.01 },
+    bounceFollowSky: { min: 0, max: 1, step: 0.01 },
     bounceTint: { min: 0, max: 1, step: 0.01 },
     bounceHeightFalloff: { min: 0.5, max: 40, step: 0.5 },
     bounceSunFloor: { min: 0, max: 1, step: 0.01 },

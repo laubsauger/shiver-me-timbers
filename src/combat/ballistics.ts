@@ -17,6 +17,7 @@
  * clause is about, and it fails by quietly producing zero hits.
  */
 import type { SimState, ProjectileState, Vec3 } from '../state/simState';
+import { SIM_DT } from '../core/loop';
 import { combatParams, type CombatParams } from '../params/combat';
 import { lerp } from './quatMath';
 
@@ -114,6 +115,75 @@ export function resolveWaterEntry(
 
   state.projectiles = alive;
   return events;
+}
+
+/** iterations of the bisection: 0.72 rad / 2^16 ≈ 0.0006° — far past aim spread */
+const LAY_ITERATIONS = 16;
+/** shots that never come down (all elevation, no gravity) must still terminate */
+const LAY_MAX_STEPS = 2000;
+
+/**
+ * Horizontal distance a ball fired at `elevation` from `height` above the sea
+ * travels before it crosses the surface. Uses THIS module's own integrator at
+ * the sim step, so the answer is the shot the sim will actually fire rather
+ * than a drag-free textbook parabola — the two disagree by 40% at these
+ * numbers, and the difference is the whole reason this function exists.
+ */
+export function shotRange(
+  elevation: number,
+  height: number,
+  params: CombatParams = combatParams,
+): number {
+  let x = 0;
+  let y = Number.isFinite(height) ? height : 0;
+  let vx = params.muzzleVelocity * Math.cos(elevation);
+  let vy = params.muzzleVelocity * Math.sin(elevation);
+  for (let i = 0; i < LAY_MAX_STEPS; i++) {
+    const k = params.drag * Math.hypot(vx, vy);
+    vx -= k * vx * SIM_DT;
+    vy -= (params.gravity + k * vy) * SIM_DT;
+    x += vx * SIM_DT;
+    y += vy * SIM_DT;
+    if (y <= 0) return x;
+  }
+  return x;
+}
+
+/**
+ * Lay the guns for a target at `range` metres, `height` metres below the
+ * muzzle. Bisects the elevation clamp because shot range is monotone in
+ * elevation over [minElevation, maxElevation] (the ballistic maximum sits
+ * near 45°, well outside the clamp).
+ *
+ * WHY this is not a constant: `defaultElevation` puts a 60 m/s ball 56 m
+ * downrange, while §V.15's broadside state holds station at 90 m and opens
+ * at 130 m. A fixed elevation therefore means every enemy broadside falls
+ * short by half the range — guns that fire, smoke that blooms, and not one
+ * hit, ever. §V14's whole damage clause is unreachable in play while every
+ * unit test stays green, which is this project's signature failure.
+ *
+ * Out of reach in either direction returns the corresponding clamp: short
+ * of the minimum she still shoots (and splashes beyond), past the maximum
+ * she elevates fully and falls short honestly.
+ */
+export function elevationForRange(
+  range: number,
+  height: number,
+  params: CombatParams = combatParams,
+): number {
+  const lo = Math.min(params.minElevation, params.maxElevation);
+  const hi = Math.max(params.minElevation, params.maxElevation);
+  if (!Number.isFinite(range) || range <= 0) return lo;
+  if (range >= shotRange(hi, height, params)) return hi;
+  if (range <= shotRange(lo, height, params)) return lo;
+  let a = lo;
+  let b = hi;
+  for (let i = 0; i < LAY_ITERATIONS; i++) {
+    const mid = (a + b) * 0.5;
+    if (shotRange(mid, height, params) < range) a = mid;
+    else b = mid;
+  }
+  return (a + b) * 0.5;
 }
 
 /** non-finite sea heights would send a splash to NaN and poison fx uniforms */

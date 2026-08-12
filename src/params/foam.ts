@@ -8,7 +8,14 @@
 import { registerParams, type ParamMeta } from './registry';
 
 export interface FoamParams {
-  /** foam amount injected per second per unit of jacobian deficit (bias − J) */
+  /**
+   * foam injected per second per SIGMA that the band's jacobian sits below
+   * its gate (§V36, foamMath.cascadeInjectPerStep). Not per unit of raw
+   * deficit: a raw deficit means 2.5× more fold in the fine band than in the
+   * coarse one and ~10× more at storm than at swell, so the same number used
+   * to produce wildly different foam depending on which band and which
+   * weather happened to fire it.
+   */
   injectStrength: number;
   /**
    * seconds for undisturbed foam to fade to half its value — converted to a
@@ -29,8 +36,21 @@ export interface FoamParams {
   uvWarpMeters: number;
   /** drift speed of the foam detail noise (units of noise-space per second) */
   detailScrollSpeed: number;
-  /** inject foam from the fine ripple cascade, 0|1 (default 0 — its ~14m
-   *  tile stamps caps on a visible world grid, §V19) */
+  /**
+   * inject foam from the fine ripple cascade, 0|1 (default 1).
+   *
+   * It was 0 for a real reason and the reason is gone. Under the old FLAT
+   * jacobian bias the finest band — the one with the largest σ — was the only
+   * band that ever cleared the gate (at storm: 16% of its texels against 5%
+   * and 6% for the other two), so essentially ALL foam came from one ~14 m
+   * tile and stamped whitecaps on a visible world lattice (§V19, user-
+   * reported). Switching it off cured the lattice and left swell with nothing
+   * at all, because the other two bands were sitting at 8σ and 5σ. With the
+   * σ-relative gate all three bands fire at the same rate, so the fine band is
+   * one contributor among three instead of the whole signal — and its detail
+   * is what puts foam on the small crests between the big ones. Kept as a
+   * switch because it is the first thing to try if lattice ever returns.
+   */
   injectFineCascade: number;
   /** world-space frequency of the non-tiling cap-strength variation (§B.4) */
   capVariationScale: number;
@@ -75,6 +95,21 @@ export interface FoamParams {
    * Raise only if the horizon still reads too white after the detail fade.
    */
   farFoamFade: number;
+  /**
+   * Low-residue knee, in raw sim-mask units: foam below `residueKneeLow`
+   * is cut entirely, foam above `residueKneeHigh` passes at full strength.
+   * Its job is real — a few percent of foam mixed over deep teal reads as a
+   * dirty beige smudge, not as thin foam (§V20 critique).
+   *
+   * TUNABLE, not a shader literal, because it is the SECOND gate in series
+   * with the injection gate and the two have to be moved together. Hard-coded
+   * at (0.03, 0.12) it silently cancelled the injection fix during this
+   * rework: raising coverage put more foam through the jacobian gate and this
+   * knee zeroed all of it, which reads exactly like "the fix did nothing".
+   * If injectStrength or decayHalfLife move, check this (§V16).
+   */
+  residueKneeLow: number;
+  residueKneeHigh: number;
 }
 
 export const foamParams: FoamParams = registerParams(
@@ -89,7 +124,7 @@ export const foamParams: FoamParams = registerParams(
     uvWarpScale: 0.12,
     uvWarpMeters: 1.4,
     detailScrollSpeed: 0.05,
-    injectFineCascade: 0,
+    injectFineCascade: 1,
     capVariationScale: 0.03,
     capVariationStrength: 0.8,
     crestBlurAlong: 2.6,
@@ -103,6 +138,12 @@ export const foamParams: FoamParams = registerParams(
     detailFadeFeatures: 260,
     detailFadeSpan: 3.5,
     farFoamFade: 0,
+    // deliberately the SAME numbers the shader literal held: this change makes
+    // the knee reachable, it does not move it. Loosening it at the same time as
+    // fixing the injection gate would have put two unmeasured changes into one
+    // coverage report — and coverage is exactly what is under dispute.
+    residueKneeLow: 0.03,
+    residueKneeHigh: 0.12,
   },
   foamParamsMeta(),
 );
@@ -132,5 +173,7 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
     detailFadeFeatures: { min: 10, max: 2000, step: 10 },
     detailFadeSpan: { min: 1.05, max: 10, step: 0.05 },
     farFoamFade: { min: 0, max: 1, step: 0.05 },
+    residueKneeLow: { min: 0, max: 0.5, step: 0.005 },
+    residueKneeHigh: { min: 0.005, max: 1, step: 0.005 },
   };
 }

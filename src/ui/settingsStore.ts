@@ -9,6 +9,7 @@
  * parallel mechanism: picking "High" writes every switch, and touching any
  * switch afterwards simply leaves the bundle — `isPresetIntact()` reports it.
  */
+import { skyParams } from '../params/sky';
 import { GRAPHICS_FEATURE_IDS, SHADOW_MAP_SIZES } from './graphicsFeatures';
 import type { GraphicsFeatureId } from './graphicsFeatures';
 
@@ -38,9 +39,23 @@ export interface AudioSettings {
   ambience: number;
 }
 
+/**
+ * World state the player can set directly (§I ui/settings).
+ *
+ * Time of day is NOT part of the graphics quality bundles: it is a creative
+ * choice, not a performance one, and a quality preset must never silently
+ * restage the scene. It lives here so it survives a reload — during alpha the
+ * whole point is to come back to the same light you were last looking at.
+ */
+export interface WorldSettings {
+  /** simulated hour 0..24; drives sun position and every light ramp */
+  timeOfDay: number;
+}
+
 export interface GameSettings {
   graphics: GraphicsSettings;
   audio: AudioSettings;
+  world: WorldSettings;
 }
 
 /**
@@ -82,8 +97,11 @@ function features(on: GraphicsFeatureId[]): GraphicsFeatureState {
  * because the pipeline currently renders black (§T22 in flight) — a preset
  * must never be the thing that blanks the screen.
  *
- * MEDIUM is the shipped default and matches the engine's own param defaults
- * exactly, so a fresh install renders precisely what it renders today.
+ * MEDIUM is the shipped default. It is NOT automatically the same thing as the
+ * engine's param defaults, and assuming it was cost real time: `reflections`
+ * was absent here while `params/reflection.ts` said `live: 1`, and since this
+ * bundle is applied over the params on every boot, the param file lost. A
+ * feature switched on in `params/*` is OFF unless this list also names it.
  */
 export const QUALITY_BUNDLES: Record<Quality, QualityBundle> = {
   low: {
@@ -95,6 +113,14 @@ export const QUALITY_BUNDLES: Record<Quality, QualityBundle> = {
   medium: {
     resolutionScale: 1,
     features: features([
+      // 'reflections' is IN medium on purpose. Measured with GPU timestamp
+      // queries at the §T.39 sunset framing: +0.9 to +1.1 ms (367 → 556 draw
+      // calls). It is what puts the ship INTO the water she floats on, and at
+      // a grazing sunset the dark shape beside a hull is its reflection, not
+      // its shadow — a shadow cannot darken reflected sky. Leaving it out made
+      // `reflectionParams.live = 1` dead at the default quality, because this
+      // bundle is written over the params on every boot.
+      'reflections',
       'caustics', 'deckWater', 'spray', 'rain', 'shadows', 'islandShadows',
       'postAo', 'postBloom', 'postVibrance', 'postVignette',
     ]),
@@ -115,6 +141,8 @@ export const QUALITY_BUNDLES: Record<Quality, QualityBundle> = {
 export const DEFAULT_SETTINGS: GameSettings = {
   graphics: { quality: 'medium', ...QUALITY_BUNDLES.medium },
   audio: { master: 0.8, music: 0.7, sfx: 1, ambience: 0.7 },
+  // seeded from the sky params so there is ONE default, not two that drift
+  world: { timeOfDay: skyParams.timeOfDay },
 };
 
 const STORAGE_KEY = 'smt.settings.v1';
@@ -131,6 +159,7 @@ export interface SettingsPatch {
     features?: Partial<GraphicsFeatureState>;
   };
   audio?: Partial<AudioSettings>;
+  world?: Partial<WorldSettings>;
 }
 
 export type SettingsListener = (settings: GameSettings) => void;
@@ -170,6 +199,7 @@ export function sanitizeSettings(raw: unknown): GameSettings {
   const r = asRecord(raw);
   const g = asRecord(r.graphics);
   const a = asRecord(r.audio);
+  const w = asRecord(r.world);
   const d = DEFAULT_SETTINGS;
   const rawFeatures = asRecord(g.features);
   const featureState = {} as GraphicsFeatureState;
@@ -191,6 +221,9 @@ export function sanitizeSettings(raw: unknown): GameSettings {
       sfx: clampNum(a.sfx, 0, 1, d.audio.sfx),
       ambience: clampNum(a.ambience, 0, 1, d.audio.ambience),
     },
+    // 24 is the same instant as 0; clamping to 24 would let a stored value sit
+    // on an hour that wraps, so the top of the range is just under it
+    world: { timeOfDay: clampNum(w.timeOfDay, 0, 23.99, d.world.timeOfDay) },
   };
 }
 
@@ -198,6 +231,7 @@ function clone(s: GameSettings): GameSettings {
   return {
     graphics: { ...s.graphics, features: { ...s.graphics.features } },
     audio: { ...s.audio },
+    world: { ...s.world },
   };
 }
 
@@ -257,11 +291,14 @@ export function createSettingsStore(storage: StorageLike | undefined = defaultSt
           features: { ...state.graphics.features, ...patch.graphics?.features },
         },
         audio: { ...state.audio, ...patch.audio },
+        world: { ...state.world, ...patch.world },
       });
     },
     applyQuality(q: Quality): void {
       const bundle = QUALITY_BUNDLES[q] ?? QUALITY_BUNDLES[DEFAULT_SETTINGS.graphics.quality];
-      commit({ graphics: { quality: q, ...bundle }, audio: state.audio });
+      // `world` is carried through untouched: a quality preset is a performance
+      // decision and must never restage the scene's lighting behind the player
+      commit({ graphics: { quality: q, ...bundle }, audio: state.audio, world: state.world });
     },
     isPresetIntact: () => presetIntact(state.graphics),
     hints: () => ({ ...QUALITY_PRESETS[state.graphics.quality] }),

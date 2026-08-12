@@ -51,6 +51,7 @@ import {
 } from 'three/tsl';
 import { fbm2 } from '../terrain/noise';
 import { FLOW_OCTAVES } from './flowMath';
+import { createSlickInjector } from './slickInjection';
 import { INV_SQRT2, wakeReachCpu, type WakeHull } from './wakeMath';
 import {
   TRACK_CAPACITY,
@@ -137,6 +138,11 @@ export function createWakeInjector(p: FlowFoamParams) {
   const uWakeNoiseContrast = uniform(p.wakeNoiseContrast);
   const uWakeBreakup = uniform(p.wakeBreakup);
 
+  // the wake's effect on the WATER (glassy lane + transverse crests). It rides
+  // this module's track projection instead of walking the polyline itself —
+  // that walk is the only expensive part and the foam already pays for it.
+  const slick = createSlickInjector(p);
+
   const track = createWakeTrack();
   const pose: TrackPose = { x: 0, z: 0, fx: 0, fz: 1, speed: 0 };
   const hull: WakeHull = { length: 20, beam: 6 };
@@ -149,11 +155,16 @@ export function createWakeInjector(p: FlowFoamParams) {
 
   return {
     /**
-     * TSL wake injection rate (foam/second) at a world-XZ node.
-     * CPU mirror: wakeMath.wakeRateCpu (track-frame envelope × world breakup).
+     * TSL wake field at a world-XZ node:
+     *   x = foam injection rate  (foam/second)  — CPU mirror wakeMath.wakeRateCpu
+     *   y = slick coverage rate  (1/second)     — CPU mirror slickMath.slickFieldCpu
+     *   zw = transverse-wave world slope        — same mirror
+     *
+     * ONE polyline walk feeds all four. `detail = false` (the far tier) drops
+     * the transverse crests, which are below Nyquist at 2.5 m per texel.
      */
-    wakeRateNode(worldXZ: any): any {
-      const rate = float(0).toVar();
+    wakeFieldNode(worldXZ: any, detail = true): any {
+      const rate = vec4(0, 0, 0, 0).toVar();
       // AABB early-out: most of a 512² region is open water far from the track
       const inRange = worldXZ.x
         .greaterThanEqual(uTrackMin.x)
@@ -166,6 +177,9 @@ export function createWakeInjector(p: FlowFoamParams) {
         // nearest track point: (squared distance, dist, age, speed) + lateral
         const best = vec4(FAR, 0, 0, 0).toVar();
         const bestLat = float(0).toVar();
+        // the track's own forward at the winning segment — the transverse
+        // crests run across it, so the slope they add points ALONG it
+        const bestFwd = vec2(0, 1).toVar();
         Loop(TRACK_SEGMENTS, ({ i }) => {
           const a = uTrackPos.element(int(i));
           const b = uTrackPos.element(int(i).add(1));
@@ -190,6 +204,7 @@ export function createWakeInjector(p: FlowFoamParams) {
           );
           // right = (fz, −fx): a.z = fx, a.w = fz (sign only; |lat| = √d2)
           bestLat.assign(select(better, diff.x.mul(a.w).sub(diff.y.mul(a.z)), bestLat));
+          bestFwd.assign(select(better, vec2(a.z, a.w), bestFwd));
         });
 
         const s = best.w;
@@ -349,19 +364,38 @@ export function createWakeInjector(p: FlowFoamParams) {
           uSpeedThreshold.mul(2).max(uSpeedThreshold.add(EPS)),
           uMoundSpeed,
         );
-        rate.assign(
-          cut
-            .add(bow)
-            .add(shoulder)
-            .add(stern)
-            .add(vortex)
-            .mul(gate)
-            .mul(liveGate)
-            .mul(tail)
-            .mul(clip)
-            .mul(breakup)
-            .add(mound),
+        const foam = cut
+          .add(bow)
+          .add(shoulder)
+          .add(stern)
+          .add(vortex)
+          .mul(gate)
+          .mul(liveGate)
+          .mul(tail)
+          .mul(clip)
+          .mul(breakup)
+          .add(mound);
+
+        // the water's own response, off the SAME projection. It deliberately
+        // shares tail/clip/liveGate with the foam (one wake, one envelope) and
+        // deliberately does NOT take `breakup`: this feeds a slope the material
+        // differentiates in screen space, so a stippled factor would come back
+        // as per-pixel noise amplified by the wave normals (§V49).
+        const sk = slick.slickFieldNode(
+          {
+            speed: s,
+            sf,
+            ay,
+            d,
+            age,
+            kelvin,
+            halfBeam: uBeam.mul(0.5),
+            fwd: bestFwd,
+            envelope: liveGate.mul(tail).mul(clip),
+          },
+          detail,
         );
+        rate.assign(vec4(foam, sk.x, sk.y, sk.z));
       });
       return rate;
     },
@@ -499,6 +533,7 @@ export function createWakeInjector(p: FlowFoamParams) {
       uWakeNoiseScale.value = p.wakeNoiseScale;
       uWakeNoiseContrast.value = p.wakeNoiseContrast;
       uWakeBreakup.value = p.wakeBreakup;
+      slick.pushParams();
     },
   };
 }

@@ -179,6 +179,58 @@ export interface FlowFoamParams {
   /** age (s) over which breakup gaps smooth away — turbulence coarsens as it
    * decays, so old wake should be a soft wash, not high-frequency stipple */
   breakupSmoothAge: number;
+
+  // --- SLICK: the wake's effect on the WATER, not on its colour -------------
+  // Turbulence and surfactant in a ship's track kill the short capillary waves,
+  // leaving a smooth glassy lane astern that reads as a darker, more
+  // mirror-like stripe. src/flowfoam/slickMath.ts owns the model; the ocean
+  // material consumes it as a MULTIPLIER on its fine slope terms.
+  /** lane coverage added per second at full speed (settles at rate x
+   * slickHalfLife/ln2 — the same accumulation arithmetic as the foam) */
+  slickIntensity: number;
+  /** lane half-width at the stem, x hull half-beam */
+  slickWidth: number;
+  /** turbulent widening of the lane (m per second of water age) */
+  slickSpread: number;
+  /** the lane may not exceed halfBeam + this x the Kelvin half-width — one
+   * wake, one envelope, so the slick can never fan out wider than the foam */
+  slickSpreadCap: number;
+  /** e-folding time (s) of the lane's INJECTION with water age. SHORT on
+   * purpose: turbulence is GENERATED in the first seconds behind the hull, and
+   * slickHalfLife then carries the persistence. Making both long instead pins
+   * the whole lane at coverage 1 (the AccumProfile.wakeScale trap: a source
+   * settles at rate x halfLife/ln2, which was 8.4 before this was measured) and
+   * the lane becomes a formless slab with no gradient at all */
+  slickDecay: number;
+  /** fraction of the lane half-width that is soft shoulder (0 = hard edge).
+   * The lane must be smooth: it multiplies a slope the ocean differentiates in
+   * screen space, so any sharp/stippled structure returns amplified (§V49) */
+  slickEdge: number;
+  /** seconds for accumulated slick to halve. Deliberately MUCH longer than
+   * decayHalfLife — a real slick outlives the whitewater that made it */
+  slickHalfLife: number;
+  /** max suppression of the fine ripple inside a fully slicked lane (0..1).
+   * 1 would make the lane a perfect mirror; real tracks keep some texture */
+  slickDamp: number;
+  /** pixels-per-texel below which the slick reads at full strength (§V48) */
+  slickBandFull: number;
+  /** pixels-per-texel at which it has faded to nothing — past this the
+   * unmipped StorageTexture is being point-sampled and would alias INTO the
+   * surface normal (§V49) */
+  slickBandCut: number;
+
+  // --- transverse Kelvin waves (inside the V, crests across the track) ------
+  /** peak world surface SLOPE added by the transverse crests. Slope, not
+   * height: the ocean owns displacement, this only shades */
+  transSlope: number;
+  /** e-folding time (s) of the transverse crests with water age */
+  transDecay: number;
+  /** track distance (m) over which the crest amplitude falls like 1/sqrt —
+   * the wave energy spreads over a widening front */
+  transSpread: number;
+  /** fraction of the Kelvin half-width inside which the crests are at full
+   * amplitude; they fade to 0 at the wedge boundary */
+  transInner: number;
 }
 
 export const flowFoamParams: FlowFoamParams = registerParams(
@@ -257,6 +309,20 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     wakeNoiseContrast: 0.18,
     wakeBreakup: 0.55,
     breakupSmoothAge: 12,
+    slickIntensity: 0.2,
+    slickWidth: 1.6,
+    slickSpread: 0.16,
+    slickSpreadCap: 0.55,
+    slickDecay: 6,
+    slickEdge: 0.55,
+    slickHalfLife: 50,
+    slickDamp: 0.8,
+    slickBandFull: 1.0,
+    slickBandCut: 3.0,
+    transSlope: 0.06,
+    transDecay: 26,
+    transSpread: 40,
+    transInner: 0.75,
   },
   flowFoamParamsMeta(),
 );
@@ -334,5 +400,19 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     wakeNoiseContrast: { min: 0.02, max: 0.5, step: 0.01 },
     wakeBreakup: { min: 0, max: 1, step: 0.05 },
     breakupSmoothAge: { min: 1, max: 90, step: 1 },
+    slickIntensity: { min: 0, max: 3, step: 0.01 },
+    slickWidth: { min: 0.5, max: 8, step: 0.1 },
+    slickSpread: { min: 0, max: 2, step: 0.01 },
+    slickSpreadCap: { min: 0.05, max: 2, step: 0.05 },
+    slickDecay: { min: 1, max: 240, step: 1 },
+    slickEdge: { min: 0.05, max: 1, step: 0.05 },
+    slickHalfLife: { min: 1, max: 300, step: 1 },
+    slickDamp: { min: 0, max: 1, step: 0.05 },
+    slickBandFull: { min: 0.1, max: 4, step: 0.05 },
+    slickBandCut: { min: 0.2, max: 12, step: 0.1 },
+    transSlope: { min: 0, max: 0.6, step: 0.005 },
+    transDecay: { min: 1, max: 240, step: 1 },
+    transSpread: { min: 1, max: 400, step: 1 },
+    transInner: { min: 0.05, max: 1, step: 0.05 },
   };
 }

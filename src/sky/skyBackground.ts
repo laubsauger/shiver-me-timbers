@@ -23,6 +23,7 @@
  */
 import * as THREE from 'three/webgpu';
 import {
+  Fn,
   cameraPosition,
   mix,
   positionWorld,
@@ -32,6 +33,7 @@ import {
 } from 'three/tsl';
 import type { SkyParams } from '../params/sky';
 import {
+  bandGeometry,
   hexToRgb,
   skyPalette,
   skyTint,
@@ -77,30 +79,54 @@ export function createSkyBackground(p: SkyParams) {
   const uHaloPower = uniform(p.sunHaloPower);
   const uHaloStrength = uniform(p.sunHaloStrength);
 
+  // ── THE directional sky colour, for ANY direction ────────────────────
+  // SINGLE SOURCE OF TRUTH (§T39, same rule as skyPalette for colour and
+  // bandGeometry for shape). This is the sky's radiance toward `dir`,
+  // EXCLUDING the sun disc/glow/halo — a reflection must not re-add the HDR
+  // disc, which the water's own specular and glint road already own.
+  //
+  // Exposed as `skyDomeColor` so the ocean's reflected sky can call it
+  // instead of re-deriving a two-stop elevation ramp from uZenith/uHorizon.
+  // That duplicate is why the sea reflects the same warm cream in every
+  // direction at sunset ("too much sunlight colour all around"): a gradient
+  // in elevation ONLY has no azimuth, so the anti-sun water is as warm as
+  // the sun-side water, and the sun-side halo then stacks on top of it.
+  // Everything azimuthal here rides `band`, so a consumer gets the sun-side
+  // warmth — and any anti-solar cooling added later — for free.
+  //
+  // Cost note: this is evaluated per WATER pixel, and the ocean is the
+  // frame's dominant cost. Two transcendentals (`pow` for the body curve,
+  // `exp` for the haze wedge) and no texture fetches; sunSide is squared with
+  // a multiply rather than pow(2) for that reason. Keep it that cheap.
+  //
+  // NOTE §B1/§V23: functional mix(a,b,t) ONLY — chained a.mix(b,t) reads the
+  // RECEIVER as the factor (mixElement) and silently inverts the blend.
+  const skyDome = Fn(([dir]: [ReturnType<typeof vec3>]) => {
+    const lift = dir.y.max(0); // sin(elevation), 0 at and below the horizon
+
+    // 1. sky body: mid → zenith with height
+    const height = lift.pow(uGradCurve.max(EPS));
+    const body = mix(vec3(uMid), vec3(uZenith), height);
+
+    // 2. haze band: exponential wedge hugging the horizon, thickened on the
+    //    sun's side (forward scattering makes the sun's quarter of the sky
+    //    paler — visible in docs/final-full-result.png)
+    const d = dir.dot(uSunDir);
+    const sunSide = d.mul(0.5).add(0.5);
+    const band = lift.div(uHazeFalloff.max(EPS)).negate().exp().clamp(0, 1);
+    const hazeAmt = band.mul(uHazeStrength.add(sunSide.mul(uSunHaze))).clamp(0, 1);
+    const hazed = mix(body, vec3(uHaze), hazeAmt);
+
+    // 3. golden-hour warmth, strongest in the band on the sun's side
+    const warmMask = band.mul(sunSide.mul(sunSide)).mul(uWarmAmount).clamp(0, 1);
+    return mix(hazed, vec3(uWarm), warmMask);
+  });
+
   // three pins the background mesh to the camera (matrixWorld.copyPosition),
   // so world position minus camera position is exactly the view ray.
   const viewDir = positionWorld.sub(cameraPosition).normalize();
-  const lift = viewDir.y.max(0); // sin(elevation), 0 at and below the horizon
-
-  // NOTE §B1/§V23: functional mix(a,b,t) ONLY — chained a.mix(b,t) reads the
-  // RECEIVER as the factor (mixElement) and silently inverts the blend.
-
-  // 1. sky body: mid blue → zenith blue with height
-  const height = lift.pow(uGradCurve.max(EPS));
-  const body = mix(vec3(uMid), vec3(uZenith), height);
-
-  // 2. haze band: exponential wedge hugging the horizon, thickened on the
-  //    sun's side (forward scattering makes the sun's quarter of the sky
-  //    paler — visible in docs/final-full-result.png)
   const d = viewDir.dot(uSunDir);
-  const sunSide = d.mul(0.5).add(0.5);
-  const band = lift.div(uHazeFalloff.max(EPS)).negate().exp().clamp(0, 1);
-  const hazeAmt = band.mul(uHazeStrength.add(sunSide.mul(uSunHaze))).clamp(0, 1);
-  const hazed = mix(body, vec3(uHaze), hazeAmt);
-
-  // 3. golden-hour warmth, strongest in the band on the sun's side
-  const warmMask = band.mul(sunSide.pow(2)).mul(uWarmAmount).clamp(0, 1);
-  const warmed = mix(hazed, vec3(uWarm), warmMask);
+  const warmed = skyDome(viewDir);
 
   // 4. analytic sun: HDR disc + tight glow + wide halo, all additive.
   //    smoothstep(e0,e1,x) functional form; e0 = cos(outer) < e1 = cos(inner)
@@ -113,6 +139,16 @@ export function createSkyBackground(p: SkyParams) {
 
   return {
     colorNode,
+    /**
+     * The sky's radiance toward an arbitrary direction, sun disc EXCLUDED.
+     * Give it a normalized world-space vec3 (a reflection ray is fine —
+     * downward rays clamp to the horizon colour rather than going negative).
+     *
+     * This is the ocean's reflected-sky term. Call it rather than rebuilding
+     * a horizon→zenith ramp: a second implementation cannot see the sun's
+     * azimuth and drifts from this one the moment either is tuned (§T39).
+     */
+    skyDomeColor: (dir: ReturnType<typeof vec3>) => skyDome(dir),
     uniforms: { uSunDir, uSunColor, uZenith, uMid, uHaze, uWarm },
     /** re-derive all ramp-driven uniforms for a new sun state */
     update(sunDir: Vec3, elevation: number): void {
@@ -128,9 +164,12 @@ export function createSkyBackground(p: SkyParams) {
       uSunColor.value.setRGB(sun[0], sun[1], sun[2], THREE.SRGBColorSpace);
       uWarmAmount.value = p.horizonWarmStrength * pal.warm;
       uHazeStrength.value = p.hazeStrength;
-      uHazeFalloff.value = p.hazeFalloff;
       uSunHaze.value = p.sunHazeStrength;
-      uGradCurve.value = p.gradientCurve;
+      // band SHAPE crossfades on the same weight as the palette's colours,
+      // so the signed-off midday geometry is untouched at warm = 0 (§T39)
+      const band = bandGeometry(pal.warm, p);
+      uHazeFalloff.value = band.hazeFalloff;
+      uGradCurve.value = band.gradientCurve;
       uDiscIntensity.value = p.sunDiscIntensity;
       uGlowPower.value = p.sunGlowPower;
       uGlowStrength.value = p.sunGlowStrength;

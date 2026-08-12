@@ -30,6 +30,9 @@ import * as THREE from 'three/webgpu';
 import { color, float, mix, smoothstep, texture, uniform, vec2, vec3 } from 'three/tsl';
 import type { OceanSimulation } from '../ocean/oceanCascades';
 import { causticsParams as cp } from '../params/caustics';
+// the sea's own bounce colour is a SKY quantity — see setBounceColor (§T.39)
+import { skyParams } from '../params/sky';
+import { skyPalette, sunElevation } from '../sky/sunCycle';
 import {
   causticsNode,
   waterHeightNode,
@@ -76,9 +79,56 @@ export function createWaterLightingUniforms(): WaterLightingUniforms {
   };
 }
 
+/**
+ * The colour the SEA throws up onto whatever floats on it.
+ *
+ * TWO SOURCES OF TRUTH, ONE OF WHICH NEVER HEARD ABOUT SUNSET. `bounceColor`
+ * is an authored teal (#2a9a9c) while `skyPalette()` already computes this very
+ * quantity — its `ground` channel, whose own sunset hex is documented as "sea
+ * bounce at golden hour — the water throws back the orange sky" — and crossfades
+ * it with the same shared `warm` weight that moves the sky, the fog and the
+ * ambient together. The hull was reading the one that could not warm, which is
+ * the §T.39 "warm sky over a cold scene" split reappearing on the one surface
+ * the user looks at most. It is a concrete part of why the ship reads as pasted
+ * onto the scene rather than sitting in it.
+ *
+ * So the palette is the source and the authored hex is a tint applied over it.
+ * `bounceFollowSky` at 0 restores the old fixed colour exactly.
+ *
+ * §V.31: `skyPalette()` returns sRGB triples and `Color.set(hex)` also applies
+ * the sRGB transfer, so both sides are in the same space before the mix and the
+ * result is written with the sRGB overload. Mixing one of each would look like
+ * the same operation and silently under-correct — that is §B.9.
+ */
+const bounceScratch = new THREE.Color();
+const bounceSrgb = { r: 0, g: 0, b: 0 };
+
+function setBounceColor(target: THREE.Color): void {
+  const follow = Math.min(Math.max(cp.bounceFollowSky, 0), 1);
+  if (follow <= 0) {
+    target.set(cp.bounceColor);
+    return;
+  }
+  // READ the authored hex back out in sRGB. `Color.set(hex)` stores LINEAR, so
+  // its .r/.g/.b are linear and mixing them against skyPalette's sRGB triples
+  // would be the §B.9 error wearing the right variable names.
+  bounceScratch.set(cp.bounceColor);
+  bounceScratch.getRGB(bounceSrgb, THREE.SRGBColorSpace);
+  const ground = skyPalette(
+    sunElevation(skyParams.timeOfDay, skyParams.latitude),
+    skyParams,
+  ).ground;
+  target.setRGB(
+    bounceSrgb.r + (ground[0] - bounceSrgb.r) * follow,
+    bounceSrgb.g + (ground[1] - bounceSrgb.g) * follow,
+    bounceSrgb.b + (ground[2] - bounceSrgb.b) * follow,
+    THREE.SRGBColorSpace,
+  );
+}
+
 export function refreshWaterLightingUniforms(u: WaterLightingUniforms): void {
   (u.causticColor.value as THREE.Color).set(cp.causticColor);
-  (u.bounceColor.value as THREE.Color).set(cp.bounceColor);
+  setBounceColor(u.bounceColor.value as THREE.Color);
   (u.bounce.value as THREE.Vector4).set(
     cp.bounceStrength, cp.bounceHeightFalloff, cp.bounceSunFloor, cp.bounceSunGain,
   );
@@ -181,7 +231,13 @@ export function waterLightingNode(
   const depth = r.depthBelowSurface
     ?? (r.waterHeight ?? waterHeightNode(ctx.sim, worldXZ)).sub(r.worldPos.y);
 
-  const caustics = causticsNode(ctx.sim, ctx.caustics, r.worldPos, depth, r.mode ?? 'both');
+  // `normal` is handed through so the reflected branch can tell a deck from a
+  // hull side. It was already computed here and simply not passed — which is
+  // how sea-bounced light ended up lit on upward-facing surfaces it can never
+  // physically reach.
+  const caustics = causticsNode(
+    ctx.sim, ctx.caustics, r.worldPos, depth, r.mode ?? 'both', normal,
+  );
   const submerged = smoothstep(
     ctx.caustics.waterlineBlend.negate(), ctx.caustics.waterlineBlend, depth,
   );

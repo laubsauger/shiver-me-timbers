@@ -119,6 +119,14 @@ export function neutralDeckWetness(): DeckWetness {
 export interface DeckWetnessContext {
   /** the solver's FRONT state texture (stable across substeps by design) */
   state: THREE.Texture;
+  /**
+   * Band-limited tier of the same state (reducePass.ts). Feeds ONLY
+   * `reliefScale`, because that is the output the ship's material multiplies
+   * its whole height field by — and `reliefNormal` then differentiates the
+   * product in screen space, so an unmipped `dS/dx` would land in the shading
+   * normal amplified by the grain (§V.48).
+   */
+  coarse: THREE.Texture;
   frame: DeckFrame;
   u: DeckWetnessUniforms;
 }
@@ -164,6 +172,13 @@ export function deckWetnessNode(ctx: DeckWetnessContext, r: DeckReceiver): DeckW
   // do not look alike
   const pool = smoothstep(float(0), u.poolDepth.max(1e-4), state.b).mul(mask).clamp(0, 1);
 
+  // the band-limited pair, for the relief term only — see DeckWetnessContext
+  const coarse = texture(ctx.coarse, uv);
+  const wetCoarse = coarse.g.mul(mask).clamp(0, 1);
+  const poolCoarse = smoothstep(float(0), u.poolDepth.max(1e-4), coarse.b)
+    .mul(mask)
+    .clamp(0, 1);
+
   return {
     tint: mix(vec3(1, 1, 1), u.wetTint, wet).mul(mix(vec3(1, 1, 1), u.poolTint, pool)),
     roughnessScale: mix(float(1), u.wetRoughness, wet).mul(
@@ -172,7 +187,12 @@ export function deckWetnessNode(ctx: DeckWetnessContext, r: DeckReceiver): DeckW
     // Water FLATTENS. A film fills the grain and a pool drowns it entirely,
     // so standing water keeps flattening after the wetness term has saturated
     // — this is the whole of the water's contribution to the surface normal.
-    reliefScale: mix(float(1), u.wetRelief, wet).mul(mix(float(1), u.poolRelief, pool)),
+    // From the COARSE tier (§V.48): this value scales the receiver's entire
+    // height field, so its own gradient becomes part of the normal. Smooth by
+    // construction is the only safe thing to put here.
+    reliefScale: mix(float(1), u.wetRelief, wetCoarse).mul(
+      mix(float(1), u.poolRelief, poolCoarse),
+    ),
     // ...and it does NOT emboss. `heightScale` defaults to 0 because a puddle
     // surface is flat: adding depth to a field that reliefNormal differentiates
     // in SCREEN space turns a 4.5 cm/texel state texture into high-frequency

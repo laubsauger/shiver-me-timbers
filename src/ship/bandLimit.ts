@@ -97,6 +97,17 @@ export function bandLimitedEdgeValue(
 }
 
 /**
+ * Screen-space footprint of one coordinate — |∂c/∂x| + |∂c/∂y|, in the
+ * coordinate's own units. This is the filter width every limit here is
+ * measured against, and it is exported so a caller that BLENDS two
+ * coordinates can blend their footprints instead of differentiating the
+ * blend (see {@link bandLimitedEdge}'s `filterOverride`).
+ */
+export function coordFilter(coord: AnyNode): AnyNode {
+  return coord.dFdx().abs().add(coord.dFdy().abs());
+}
+
+/**
  * TSL builder. Transliteration of {@link bandLimitedEdgeValue}.
  *
  * @param distance a node giving distance to the feature in `coord`'s units
@@ -106,9 +117,29 @@ export function bandLimitedEdgeValue(
  *                 per-plank step differentiates to a spike and would report a
  *                 huge filter width along every seam.
  * @param feature  authored feature width, in `coord`'s units (uniform or float)
+ * @param filterOverride the footprint to use instead of `fwidth(coord)`.
+ *
+ * WHY AN OVERRIDE EXISTS. The wood material selects its plank coordinate by
+ * BLENDING two candidates with a normal-derived weight — `mix(strake, x, upness)`
+ * across the turn of the bilge, `mix(z, x, aftness)` around the stern quarters
+ * — so the boards follow the surface instead of one world axis. The blend is
+ * smooth, but its derivative carries a `(b − a)·∂weight` term, and the two
+ * candidates are TENS of units apart. Differentiating the blend therefore
+ * reports a filter width of tens exactly where the weight turns over, and the
+ * limit below reads that as "sub-pixel" and fades the detail to flat — a
+ * bald ring round the bilge and both stern quarters, which is the SHAPE of
+ * the complaint this work started from. Blending the two honest footprints
+ * instead keeps the limit measuring what is actually drawn. Failure is safe
+ * either way (over-fade flattens, it does not speckle), but "safe" here means
+ * "silently deletes the feature", which is the §B.20 failure mode inverted.
  */
-export function bandLimitedEdge(distance: AnyNode, coord: AnyNode, feature: AnyNode): AnyNode {
-  const filter = coord.dFdx().abs().add(coord.dFdy().abs());
+export function bandLimitedEdge(
+  distance: AnyNode,
+  coord: AnyNode,
+  feature: AnyNode,
+  filterOverride?: AnyNode,
+): AnyNode {
+  const filter = filterOverride ?? coordFilter(coord);
   const eff = feature.max(filter.mul(FILTER_PIXELS)).max(EPS);
   const energy = feature.div(eff);
   return mix(float(1), smoothstep(float(0), eff, distance), energy);
@@ -122,8 +153,8 @@ export function bandLimitedEdge(distance: AnyNode, coord: AnyNode, feature: AnyN
  *
  * @returns 1 while one period spans a couple of pixels, 0 once it does not
  */
-export function periodResolved(coord: AnyNode): AnyNode {
-  const filter = coord.dFdx().abs().add(coord.dFdy().abs());
+export function periodResolved(coord: AnyNode, filterOverride?: AnyNode): AnyNode {
+  const filter = filterOverride ?? coordFilter(coord);
   return float(1).sub(smoothstep(float(0.4), float(1.1), filter));
 }
 

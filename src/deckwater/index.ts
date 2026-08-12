@@ -72,6 +72,7 @@ import {
 import { EDGE_DRAIN_HEAD } from './fluxMath';
 import { createDeckWaterUniforms, createOutflowPass } from './outflowPass';
 import { createInflowPass, MAX_SPLASHES } from './inflowPass';
+import { createReducePass, reducedSize } from './reducePass';
 import { deckTiltGradient, isValidDeckFrame } from './deckFrame';
 import {
   createBowWaterSensor,
@@ -210,6 +211,23 @@ export function createDeckWater(opts: DeckWaterOptions = {}) {
   outflowTex.magFilter = THREE.NearestFilter;
   outflowTex.generateMipmaps = false;
 
+  // §V.48 band-limiting tiers: StorageTextures carry no mips, and the deck
+  // material differentiates our wetness through its height field. See
+  // reducePass.ts — 192×512 → 48×128 → 12×32, rebuilt every frame.
+  const c1w = reducedSize(w), c1h = reducedSize(h);
+  const c2w = reducedSize(c1w), c2h = reducedSize(c1h);
+  const makeTier = (tw: number, th: number): THREE.StorageTexture => {
+    const t = new THREE.StorageTexture(tw, th);
+    t.type = THREE.FloatType;
+    t.format = THREE.RGBAFormat;
+    t.minFilter = THREE.LinearFilter;
+    t.magFilter = THREE.LinearFilter;
+    t.generateMipmaps = false;
+    return t;
+  };
+  const coarse1 = makeTier(c1w, c1h);
+  const coarse2 = makeTier(c2w, c2h);
+
   const u = createDeckWaterUniforms(p);
   const splashVecs = Array.from({ length: MAX_SPLASHES }, () => new THREE.Vector4());
   const uSplashes = uniformArray(splashVecs);
@@ -239,6 +257,9 @@ export function createDeckWater(opts: DeckWaterOptions = {}) {
   const outflowFromB = createOutflowPass(stateB, outflowTex, w, h, u, cellSize);
   const inflowA2B = createInflowPass(stateA, outflowTex, stateB, w, h, u, uSplashes);
   const inflowB2A = createInflowPass(stateB, outflowTex, stateA, w, h, u, uSplashes);
+  // off the FRONT texture, so the tier always reflects what is on screen
+  const reduce1 = createReducePass(stateA, coarse1, w, h, c1w, c1h);
+  const reduce2 = createReducePass(coarse1, coarse2, c1w, c1h, c2w, c2h);
 
   let initialized = false;
   const splashQueue: QueuedSplash[] = [];
@@ -357,6 +378,10 @@ export function createDeckWater(opts: DeckWaterOptions = {}) {
         renderer.compute(fromA ? outflowFromA : outflowFromB);
         renderer.compute(fromA ? inflowA2B : inflowB2A);
       }
+      // AFTER the substeps: the band-limited tier must show this frame's water,
+      // not last frame's (§V.48, foam agent's reduction-chain precedent)
+      renderer.compute(reduce1);
+      renderer.compute(reduce2);
       refreshDeckWetnessUniforms(wetU);
     },
 
@@ -371,7 +396,7 @@ export function createDeckWater(opts: DeckWaterOptions = {}) {
 
     /** build the deck material's shading nodes (see deckMaterialNode.ts) */
     node(r: DeckReceiver): DeckWetness {
-      return deckWetnessNode({ state: stateA, frame, u: wetU }, r);
+      return deckWetnessNode({ state: stateA, coarse: coarse2, frame, u: wetU }, r);
     },
 
     /**
@@ -454,6 +479,8 @@ export function createDeckWater(opts: DeckWaterOptions = {}) {
       stateA.dispose();
       stateB.dispose();
       outflowTex.dispose();
+      coarse1.dispose();
+      coarse2.dispose();
       seedTex.dispose();
       probeTarget?.dispose();
     },

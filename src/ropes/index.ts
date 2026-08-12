@@ -12,6 +12,8 @@ import type { Vec3Like } from './catenaryMath';
 import { createRopeCompute, type RopeCompute } from './ropeCompute';
 import { createRopeMesh } from './ropeMesh';
 import { createRatlineMesh } from './ratlineMesh';
+import { createBlocks, type Blocks } from './blocks';
+import type { BlockDescriptor } from './blockMath';
 import { packRungs, type RungDescriptor } from './ratlines';
 
 export interface RopesOptions {
@@ -26,6 +28,14 @@ export interface RopesOptions {
    * whose masts have no chainplate fan.
    */
   rungs?: RungDescriptor[];
+  /**
+   * Rigging blocks (pulleys), from buildBlockDescriptors(riggingPlan, cap).
+   * Same deal as the rungs and for the same §V45 reason: a block is addressed
+   * by (rope, t) and hangs off the SOLVED curve, so it rides the rope's sag now
+   * and its §V42 swing later without another line of CPU code. Omitted or empty
+   * means no pulleys — correct for a rig with no running gear.
+   */
+  blocks?: BlockDescriptor[];
 }
 
 export interface Ropes {
@@ -53,6 +63,8 @@ export interface Ropes {
   buffers: Pick<RopeCompute, 'points' | 'tangents' | 'descA' | 'descB' | 'pointsPerRope'>;
   /** §V45 rung meshes, or null when the ship has no chainplate fans */
   ratlines: ReturnType<typeof createRatlineMesh> | null;
+  /** the pulley instances, or null when no block descriptors were given */
+  blocks: Blocks | null;
   dispose(): void;
 }
 
@@ -78,6 +90,16 @@ export function createRopes(opts: RopesOptions): Ropes {
     ratlines.setRungCount(rungs.length);
     rm.mesh.add(ratlines.nearMesh, ratlines.farMesh);
   }
+
+  // blocks join the SAME group, for the same reason the rungs do: they are
+  // part of this rig, they read this rig's buffers, and one scene add keeps
+  // every consumer (reflection exclusion, deferred boot) from having to know
+  // that pulleys exist as a separate object.
+  const blockDescs = opts.blocks ?? [];
+  const blocks = blockDescs.length > 0
+    ? createBlocks(rc, blockDescs, maxRopes, segments)
+    : null;
+  if (blocks !== null) rm.mesh.add(blocks.mesh);
 
   // §V42 LOD needs the camera, but a compute pass has no camera context —
   // reading a render-stage camera node inside the kernel dereferences null at
@@ -132,9 +154,11 @@ export function createRopes(opts: RopesOptions): Ropes {
     mesh: rm.mesh,
     buffers: rc,
     ratlines,
+    blocks,
     dispose(): void {
       rm.dispose();
       ratlines?.dispose();
+      blocks?.dispose();
     },
   };
 }

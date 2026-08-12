@@ -124,10 +124,34 @@ export function stepShipSailing(
   let l = vx * rx + vz * rz;
   const speed = Math.hypot(f, l);
 
+  // LEEWAY (§B.23). A square-rigger does not go where she points: the sail
+  // force is perpendicular to the canvas, so only part of it is drive and
+  // the rest shoves her bodily to leeward. The ratio is geometric — the
+  // sail is braced to roughly bisect the wind and the centreline, so
+  // side/drive ≈ cot(θ/2): ~0 dead downwind, 1 on a beam reach, and it
+  // climbs steeply as she points up, which is exactly why a square-rigger
+  // makes so much leeway close-hauled and why nobody sails one to windward
+  // if they can help it. Measured before this existed: leeway 0.00° at
+  // every point of sail — the user's "she goes always way too straight".
+  const halfTheta = Math.max(1e-3, theta / 2);
+  const sideOverDrive = Math.min(
+    params.maxSideForceRatio,
+    Math.cos(halfTheta) / Math.sin(halfTheta),
+  );
+  // to leeward = the side the wind is blowing toward, i.e. the sign of the
+  // wind's own starboard projection
+  const leeSign = wx * rx + wz * rz;
+  // off `drive`, NOT `thrust`: a hull the bank is holding cannot be pushed
+  // sideways by canvas either. Gating the forward channel and leaving the
+  // lateral one ungated is the §B.6 "sails magically continue to propulse
+  // us" bug in the other axis — measured, she crabbed off a bank at 0.35 m/s
+  // with her drive fully gated.
+  const sideForce = drive * sideOverDrive * params.leewayRatio * Math.sign(leeSign);
+
   // semi-implicit Euler: quadratic hull drag opposes each component,
   // brake adds linear decel on forward way only
   f += (drive - params.dragCoef * speed * f - (input.brake ? params.brakeDrag * f : 0)) * dt;
-  l += -params.dragCoef * speed * l * dt;
+  l += (sideForce - params.dragCoef * speed * l) * dt;
   // keel grip: kill a frame-rate-scaled fraction of sideways velocity
   l *= Math.max(0, 1 - params.keelGrip * dt);
 
@@ -135,25 +159,6 @@ export function stepShipSailing(
   ship.velocity[2] = f * fz + l * rz;
   ship.position[0] += ship.velocity[0] * dt;
   ship.position[2] += ship.velocity[2] * dt;
-
-  // --- rudder: yaw rate ∝ forward speed, min steerage once under way.
-  // The rudder sets a TARGET rate; the actual rate lags it with time
-  // constant 1/yawResponse, because a few hundred tons of ship take
-  // seconds to spin up about its own mast and seconds to stop. Momentum
-  // lives in ship.angularVelocity[1] — sailing is its sole owner (§B.6,
-  // buoyancy never writes it), so it is real sim state: centre the helm
-  // mid-turn and the ship keeps swinging round before it settles.
-  const way = Math.abs(f);
-  const steer =
-    way < params.steerageSpeed
-      ? 0
-      : clamp(way / params.rudderRefSpeed, params.minSteerFactor, 1);
-  const targetYawRate = ship.rudder * params.rudderRate * steer;
-  const yawRate =
-    ship.angularVelocity[1] +
-    (targetYawRate - ship.angularVelocity[1]) * (1 - Math.exp(-params.yawResponse * dt));
-  const newYaw = yaw + yawRate * dt;
-  ship.angularVelocity[1] = yawRate;
 
   // --- wind heel: bounded target ∝ lateral wind force on the set sail.
   // Applied as an OFFSET on top of the wave roll (roll − previous heel):
@@ -167,9 +172,55 @@ export function stepShipSailing(
   const latWindForce = wind.speed * wind.speed * ship.sailTrim * (wx * rx + wz * rz);
   const targetHeel = clamp(-params.heelGain * latWindForce, -params.maxHeel, params.maxHeel);
   mem.windHeel += (targetHeel - mem.windHeel) * (1 - Math.exp(-params.heelResponse * dt));
+  const totalRoll = waveRoll + mem.windHeel;
+
+  // --- rudder: yaw rate ∝ forward speed, min steerage once under way.
+  // The rudder sets a TARGET rate; the actual rate lags it with time
+  // constant 1/yawResponse, because a few hundred tons of ship take
+  // seconds to spin up about its own mast and seconds to stop. Momentum
+  // lives in ship.angularVelocity[1] — sailing is its sole owner (§B.6,
+  // buoyancy never writes it), so it is real sim state: centre the helm
+  // mid-turn and the ship keeps swinging round before it settles.
+  const way = Math.abs(f);
+  const steer =
+    way < params.steerageSpeed
+      ? 0
+      : clamp(way / params.rudderRefSpeed, params.minSteerFactor, 1);
+  // WEATHER HELM AND YAW HUNTING (§B.23). Both come from the hull being
+  // asymmetric while she is over on one side — the immersed lee bow pushes
+  // her head round — but they are read off DIFFERENT signals, on purpose.
+  //
+  // Weather helm is the STEADY gripe up into the wind, so it reads the wind
+  // heel and its gain is tiny: it should be a nuisance the helmsman answers,
+  // not a spin. One gain for both, sized for the wander, rounds her up into
+  // irons inside a minute hands off (measured 9.8 → 3.0 m/s over 66 s).
+  //
+  // Hunting reads the ROLL RATE, not the roll angle, and that choice is
+  // load-bearing: `waveRoll` carries a DC offset, because sailing re-imposes
+  // the heel as an offset every tick while buoyancy's righting moment pulls
+  // the total roll back toward upright, and the two settle a few degrees
+  // apart. Feeding that to the helm turned a "wander" into a steady 0.48°/s
+  // turn (measured: 58° of unasked-for heading change in 120 s of calm). A
+  // rate signal cannot have a DC offset — a ship lying at a steady angle is
+  // not rolling — so the hunt is zero-mean by construction.
+  //
+  // Bounded (§V.44): in a storm the sea drives roll rates that would
+  // otherwise hand the helm more authority than the rudder has.
+  const rollRate = ship.angularVelocity[0] * fx + ship.angularVelocity[2] * fz;
+  const seaHelm = clamp(
+    params.weatherHelmGain * mem.windHeel + params.rollYawGain * rollRate,
+    -params.maxSeaHelmRate,
+    params.maxSeaHelmRate,
+  );
+  const targetYawRate = (ship.rudder * params.rudderRate + seaHelm) * steer;
+  const yawRate =
+    ship.angularVelocity[1] +
+    (targetYawRate - ship.angularVelocity[1]) * (1 - Math.exp(-params.yawResponse * dt));
+  const newYaw = yaw + yawRate * dt;
+  ship.angularVelocity[1] = yawRate;
 
   ship.quaternion = quatMul(
     quatFromAxisAngle([0, 1, 0], newYaw),
-    quatMul(qPitch, quatFromAxisAngle([0, 0, 1], waveRoll + mem.windHeel)),
+    quatMul(qPitch, quatFromAxisAngle([0, 0, 1], totalRoll)),
   );
 }

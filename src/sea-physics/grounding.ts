@@ -26,6 +26,7 @@
  * against any drag. It never touches yaw or the quaternion directly.
  */
 import { rotateVec, invRotateVec } from '../combat/quatMath';
+import { GRAVITY } from '../ocean/oceanMath';
 import type { ShipState, Vec3 } from '../state/simState';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../params/seaPhysics';
 import type { HullContact } from './hullContact';
@@ -167,9 +168,33 @@ export function stepShipGrounding(
 
   out.aground = true;
   out.extent = touched / n;
-  out.normalForce = fy;
 
   const mass = p.mass;
+  // THE BED CANNOT THROW HER (§V.44, §B.24). `spring · pen` is unbounded in
+  // penetration, and penetration is unbounded in geometry: a ship that meets
+  // a cliff shelf, or spawns inside a bank, generates hundreds of times her
+  // own weight in reaction. Measured on the shelf archetype: 7 m of bite →
+  // 1.5e8 N = 100× her weight → she was CATAPULTED 16 m into the air, came
+  // down 215° round (a hull rotating hard about a horizontal axis precesses
+  // its own heading, whatever the yaw torque is), and sailed off on the new
+  // course. Every part of that reads to a player as the hull exploding off
+  // the island, and none of it is what "aground" should mean.
+  //
+  // Bounding the divisor is not enough here and neither is bounding the
+  // spring: bound the RESULT. The seabed may carry a few times the weight it
+  // is being asked to carry — enough to arrest her hard and hold her — and
+  // no more. Force AND torque scale together so the list geometry (which
+  // station is taking the load) survives the clamp untouched. At the resting
+  // penetrations this model is built around (~0.07 m) the cap never binds.
+  const maxSupport = p.groundingMaxSupport * mass * GRAVITY;
+  if (fy > maxSupport && fy > 0) {
+    const k = maxSupport / fy;
+    fy *= k;
+    torque[0] *= k;
+    torque[2] *= k;
+  }
+  out.normalForce = fy;
+
   vel[1] += (fy / mass) * dt;
 
   // Coulomb friction on the planar channel: the bank drags on the hull in

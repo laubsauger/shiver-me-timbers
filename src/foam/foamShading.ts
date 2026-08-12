@@ -44,6 +44,8 @@ const uSheetFlatten = uniform(0.5);
 const uDetailFadeFeatures = uniform(260);
 const uDetailFadeSpan = uniform(3.5);
 const uFarFoamFade = uniform(0);
+const uKneeLow = uniform(0.03);
+const uKneeHigh = uniform(0.12);
 // unit wave-propagation direction (world XZ) — crest lines run ACROSS it.
 // Two scalar uniforms, not a vec2: this module imports three only as a TYPE,
 // and `uniform(vec2(...))` would seed the uniform with a NODE whose .value
@@ -72,6 +74,10 @@ export function updateFoamShadingUniforms(
   uDetailFadeFeatures.value = Math.max(1, p.detailFadeFeatures);
   uDetailFadeSpan.value = Math.max(1.05, p.detailFadeSpan);
   uFarFoamFade.value = p.farFoamFade;
+  // ordered pair: a low ≥ high inverts the smoothstep and the knee becomes a
+  // high-pass that deletes the STRONG foam instead of the residue
+  uKneeLow.value = Math.max(0, p.residueKneeLow);
+  uKneeHigh.value = Math.max(uKneeLow.value + 1e-4, p.residueKneeHigh);
   if (time !== undefined) uTime.value = time;
   if (windDirRadians !== undefined && Number.isFinite(windDirRadians)) {
     uPropX.value = Math.cos(windDirRadians);
@@ -183,9 +189,12 @@ export function foamDetailMask(rawFoam: any, coord: any): any {
   const camDist = coord.sub(cameraPosition.xz).length();
   const detailFade = smoothstep(fadeStart, fadeEnd, camDist).oneMinus();
   const detail = mix(float(1), sheeted, detailFade);
-  // low-residue knee: sub-3% foam mixes as a dirty beige smudge on deep
-  // teal (§V20 critique) — fade it out entirely, keep the soft skirt above
-  const knee = smoothstep(float(0.03), float(0.12), rawFoam);
+  // Low-residue knee: a few percent of foam mixed over deep teal reads as a
+  // dirty beige smudge, not as thin foam (§V20 critique) — cut it, keep the
+  // soft skirt above. TUNABLE (§V16): this sits in SERIES with the jacobian
+  // injection gate, so the two must be retuned together. As a shader literal
+  // at (0.03, 0.12) it silently swallowed the whole injection fix.
+  const knee = smoothstep(uKneeLow, uKneeHigh, rawFoam);
   // optional far-field COVERAGE softening on top of the detail fade, off by
   // default: reach for this only if the horizon still reads too white once
   // the detail shimmer is gone — it removes real foam, the detail fade does not

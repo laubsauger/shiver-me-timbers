@@ -44,10 +44,14 @@ export class GameLoop {
   private lastTime = -1;
   private rafId = 0;
   private running = false;
+  /** last alpha handed to render — held flat while paused, see frame() */
+  private alpha = 0;
 
   constructor(
     private tick: TickFn,
     private render: RenderFn,
+    /** pause is the LOOP's business, not the tick's — see frame() */
+    private isPaused: () => boolean = () => false,
   ) {}
 
   start(): void {
@@ -63,8 +67,20 @@ export class GameLoop {
       }
       const frameDt = Math.min((timeMs - this.lastTime) / 1000, 0.25);
       this.lastTime = timeMs;
+      // PAUSE FREEZES THE ACCUMULATOR, not merely the tick. Gating only the
+      // tick leaves the accumulator advancing, so alpha saw-tooths 0→1 every
+      // SIM_DT while prev/curr sim poses stay frozen ONE TICK APART — render
+      // then lerps the ship between two different poses at display rate and
+      // the camera, which chases that interpolated pose, shakes the entire
+      // scene. Holding alpha flat is what makes "sim halts, render continues"
+      // actually mean a still picture.
+      if (this.isPaused()) {
+        this.render(this.alpha, frameDt);
+        return;
+      }
       const res = advanceAccumulator(this.accumulator, frameDt);
       this.accumulator = res.accumulator;
+      this.alpha = res.alpha;
       for (let i = 0; i < res.steps; i++) this.tick(SIM_DT);
       this.render(res.alpha, frameDt);
     };

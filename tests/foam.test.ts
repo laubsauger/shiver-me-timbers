@@ -10,19 +10,33 @@
 import { describe, expect, it } from 'vitest';
 import {
   GAUSSIAN_3X3,
+  JACOBIAN_SIGMA_PER_STEEPNESS,
+  NEVER_INJECT_BIAS,
   accumulateFoam,
   blurDecayAnisoAt,
   blurDecayAt,
   boxReduceAt,
   cascadeDetailWeight,
   cascadeFadeDistance,
+  cascadeFoamBias,
+  cascadeInjectPerStep,
   crestTapOffset,
   foamTexelMetres,
   decayFactorPerFrame,
   injectAmount,
+  jacobianSigma,
   wrapIndex,
 } from '../src/foam/foamMath';
 import { foamParams } from '../src/params/foam';
+import { oceanParams, type OceanParams } from '../src/params/ocean';
+import {
+  cascadeBand,
+  effectiveChoppiness,
+  phillips,
+  spectralSteepness,
+} from '../src/ocean/oceanMath';
+import { weatherPresets } from '../src/weather/presets';
+import { advanceAccumulator, SIM_DT } from '../src/core/loop';
 import { getParamsEntry } from '../src/params/registry';
 
 const DT = 1 / 60; // §V2 fixed sim tick
@@ -344,6 +358,242 @@ describe('far-field filtering (§V6 sampling: StorageTextures carry no mips)', (
       expect(v).toBeGreaterThanOrEqual(0);
       expect(v).toBeLessThanOrEqual(1);
     }
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * §V36 for the jacobian gate. `jacobianFoamBias` is a threshold on the SUMMED
+ * three-cascade jacobian; the sim injects per cascade, where σ is 2–3× tighter.
+ * Applying the number flat per band turned a 2.5σ event into a 5–8σ one and
+ * swell went completely bare. These tests measure the gate against a real
+ * spectrum, so they fail if it ever drifts back off its statistic.
+ * ------------------------------------------------------------------------ */
+
+/** exact one-point σ of a band's det J, from the spectrum, at choppiness λ */
+function measuredJacobianSigma(p: OceanParams, index: number, lambda: number): number {
+  const N = p.resolution;
+  const domain = p.cascades[index].domain;
+  const band = cascadeBand(index, p.splitWavelengths);
+  // det J = (1+λa)(1+λb) − (λc)²; to first order its spread is λ·σ(a+b), and
+  // the transfer of a+b = ∂Dx/∂x + ∂Dz/∂z onto the height field is exactly |k|
+  let variance = 0;
+  for (let m = 0; m < N; m++) {
+    for (let n = 0; n < N; n++) {
+      const kx = (2 * Math.PI * (n - N / 2)) / domain;
+      const kz = (2 * Math.PI * (m - N / 2)) / domain;
+      const k = Math.hypot(kx, kz);
+      if (!(k > band.kMin && k <= band.kMax) || k < 1e-9) continue;
+      const amp = Math.sqrt(phillips(kx, kz, p) / 2) / domain;
+      variance += 2 * (k * amp) ** 2;
+    }
+  }
+  return lambda * Math.sqrt(variance);
+}
+
+function seaFor(name: keyof typeof weatherPresets) {
+  const p: OceanParams = { ...oceanParams, ...weatherPresets[name].ocean };
+  const steep = [0, 1, 2].map((i) =>
+    spectralSteepness(p.resolution, p.cascades[i].domain, p, cascadeBand(i, p.splitWavelengths)),
+  );
+  const steepnessRms = Math.sqrt(steep.reduce((s, v) => s + v * v, 0));
+  const lambda = effectiveChoppiness(p.choppiness, steepnessRms, p.choppinessFoldLimit);
+  return { p, steep, steepnessRms, lambda, bias: p.jacobianFoamBias };
+}
+
+describe('§V36 jacobian gate: per-cascade bias tracks each band\'s own σ', () => {
+  it('the σ constant matches the real spectrum in every band of every preset', () => {
+    // WHY a constant at all: `steepnessRms` measures RMS ∂Dx/∂x (transfer
+    // kx²/|k|) while det J's spread is driven by ∂Dx/∂x + ∂Dz/∂z (transfer
+    // |k|). One ratio converts between them, fixed by the spectrum's
+    // DIRECTIONAL SHAPE — so this test is the tripwire on a spread retune:
+    // change `directionality`/`oppositeWaveDamp` and the foam gate's σ moves
+    // under it, which is precisely how a threshold silently changes meaning.
+    for (const name of ['calm', 'swell', 'storm'] as const) {
+      const sea = seaFor(name);
+      for (let i = 0; i < 3; i++) {
+        if (sea.steep[i] < 1e-6) continue; // band carries no energy (calm's swell band)
+        const measured = measuredJacobianSigma(sea.p, i, sea.lambda);
+        const predicted = jacobianSigma(sea.steep[i], sea.lambda);
+        expect(predicted / measured, `${name} cascade ${i}`).toBeCloseTo(1, 1);
+      }
+    }
+    expect(JACOBIAN_SIGMA_PER_STEEPNESS).toBeGreaterThan(1);
+  });
+
+  it('every band fires at the SAME σ-multiple, which is what the bias means', () => {
+    // The whole point: bias 0.55 means "2.5σ of fold" on the summed jacobian,
+    // so it must mean 2.5σ in each band too — not 8σ, 5σ and 3σ.
+    const sea = seaFor('swell');
+    const seaSigma = jacobianSigma(sea.steepnessRms, sea.lambda);
+    const zSummed = (1 - sea.bias) / seaSigma;
+    for (let i = 0; i < 3; i++) {
+      const bandSigma = jacobianSigma(sea.steep[i], sea.lambda);
+      const bandBias = cascadeFoamBias(sea.bias, bandSigma, seaSigma);
+      expect((1 - bandBias) / bandSigma, `cascade ${i}`).toBeCloseTo(zSummed, 6);
+    }
+  });
+
+  it('§B regression: the flat bias asked swell for a 5–8σ event, i.e. nothing', () => {
+    // This is the bug as the user met it — "no whitecaps at the default sea".
+    // Numbers here are the measured ones: at swell the flat 0.55 sat 8.2σ /
+    // 4.9σ / 3.1σ below the bands' rest value, ≈0.15 of 262144 texels per
+    // frame. Storm's bands are ~3× wider so it cleared them and foam appeared
+    // there — which is exactly why this read as "storm-only foam" for months.
+    const sea = seaFor('swell');
+    const seaSigma = jacobianSigma(sea.steepnessRms, sea.lambda);
+    const flatZ: number[] = [];
+    const fixedZ: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const bandSigma = jacobianSigma(sea.steep[i], sea.lambda);
+      flatZ.push((1 - sea.bias) / bandSigma);
+      fixedZ.push((1 - cascadeFoamBias(sea.bias, bandSigma, seaSigma)) / bandSigma);
+    }
+    expect(Math.min(...flatZ)).toBeGreaterThan(3); // even the LOOSEST band
+    expect(Math.max(...flatZ)).toBeGreaterThan(7); // and the tightest is hopeless
+    for (const z of fixedZ) expect(z).toBeLessThan(2.6);
+    // and the fix must not have simply opened the gate everywhere
+    for (const z of fixedZ) expect(z).toBeGreaterThan(2.2);
+  });
+
+  it('a band with no energy in it is gated OFF, never divided into', () => {
+    // calm has nothing in the 420 m band: its det J is identically 1, so it
+    // can never fold. Handing it a σ of zero must switch it off, not produce
+    // an infinite bias or an infinite injection (§V28).
+    const sea = seaFor('calm');
+    const seaSigma = jacobianSigma(sea.steepnessRms, sea.lambda);
+    const dead = jacobianSigma(sea.steep[0], sea.lambda);
+    // it is not exactly zero — it is float dust, 5 orders below the sea's σ,
+    // which is worse than zero: a purely relative gate would set its threshold
+    // at 0.99996 against a det J of 1 ± 6e-6 and foam half the cascade
+    expect(dead / seaSigma).toBeLessThan(1e-4);
+    expect(dead).toBeGreaterThan(0);
+    expect(cascadeFoamBias(sea.bias, dead, seaSigma)).toBe(NEVER_INJECT_BIAS);
+    expect(cascadeInjectPerStep(4, DT, dead, seaSigma)).toBe(0);
+    expect(cascadeInjectPerStep(4, DT, 0, seaSigma)).toBe(0);
+    // a dead sea (no spectrum at all) gates every band off rather than NaN
+    expect(cascadeFoamBias(0.55, 0, 0)).toBe(NEVER_INJECT_BIAS);
+  });
+
+  it('never biases a band above the rest value — flat water must stay bare', () => {
+    // det J ≈ 1 on undisturbed water. A bias ≥ 1 would foam the entire sea,
+    // so a stale or inconsistent moment must not be able to produce one.
+    expect(cascadeFoamBias(0.55, 5, 1)).toBeLessThan(1);
+    expect(cascadeFoamBias(0.99, 1, 1)).toBeLessThan(1);
+  });
+
+  it('injection is σ-relative too: equal folds inject equal foam in any band', () => {
+    // The AMOUNT half of the same bug. A raw deficit at a 2.5σ fold is ~0.02
+    // in the coarse band and ~0.05 in the fine one, so a single
+    // `injectStrength` used to mean 2.5× more foam in one band than another
+    // and ~10× more at storm than at swell — the knee downstream then ate the
+    // weak end entirely.
+    const sea = seaFor('swell');
+    const seaSigma = jacobianSigma(sea.steepnessRms, sea.lambda);
+    const injected = [0, 1, 2].map((i) => {
+      const bandSigma = jacobianSigma(sea.steep[i], sea.lambda);
+      const deficit = 0.4 * bandSigma; // the same fold depth, in each band's σ
+      return (
+        deficit *
+        cascadeInjectPerStep(foamParams.injectStrength, DT, bandSigma, seaSigma)
+      );
+    });
+    expect(injected[1]).toBeCloseTo(injected[0], 9);
+    expect(injected[2]).toBeCloseTo(injected[0], 9);
+    // and a storm band injects the same for the same σ-deep fold
+    const storm = seaFor('storm');
+    const stormSigma = jacobianSigma(storm.steep[0], storm.lambda);
+    const stormSeaSigma = jacobianSigma(storm.steepnessRms, storm.lambda);
+    expect(
+      0.4 *
+        stormSigma *
+        cascadeInjectPerStep(foamParams.injectStrength, DT, stormSigma, stormSeaSigma),
+    ).toBeCloseTo(injected[0], 9);
+  });
+
+  it('storm still foams much more than swell — the sea folds more, not the bar', () => {
+    // §V7's promise survives the retune: storm's coverage comes from a
+    // genuinely steeper sea, so its bias NUMBER is now lower than swell's
+    // while the gate it produces is far easier to clear.
+    const swell = seaFor('swell');
+    const storm = seaFor('storm');
+    const z = (s: ReturnType<typeof seaFor>) =>
+      (1 - s.bias) / jacobianSigma(s.steepnessRms, s.lambda);
+    expect(z(storm)).toBeLessThan(z(swell) - 1);
+    expect(z(seaFor('calm'))).toBeGreaterThan(z(swell));
+  });
+});
+
+describe('far tier handover (§V48: no step bigger than the reduction itself)', () => {
+  // The reduce chain is 512² → 128² → 32². shadingNode must hand over
+  // fine→mid→coarse, each at ITS OWN texel size. Cross-fading fine straight
+  // into coarse (what it used to do, leaving the 128² tier computed and
+  // unread) jumps 16× in texel AREA at a distance that justifies 4×, so the
+  // whole coarsest cascade gets read from a 32×32 texture — and bilinear on
+  // 32×32 stretched over kilometres is a lattice of 13 m quads. Because the
+  // surface material divides its specular by the foam mask, that lattice
+  // shows up as hard quantised squares in the sun glint road.
+  const DOMAIN = 420;
+  const N = 512;
+  const fineT = foamTexelMetres(DOMAIN, N);
+  const midT = foamTexelMetres(DOMAIN, N / 4);
+  const coarseT = foamTexelMetres(DOMAIN, N / 16);
+  const FADE = foamParams.cascadeFadeTexels;
+  const SPAN = foamParams.cascadeFadeSpan;
+
+  it('the chain builds 4× steps — so a 4× handover is available, if it is used', () => {
+    expect(midT / fineT).toBeCloseTo(4, 6);
+    expect(coarseT / midT).toBeCloseTo(4, 6);
+  });
+
+  it('records the SIZE of the jump shadingNode currently takes (the defect)', () => {
+    // shadingNode cross-fades fine → coarse and never samples the mid tier, so
+    // the step it actually takes is 16× in texel area, at the distance where
+    // only 4× was warranted. This pins the number so the fix can be measured
+    // against it; see the DIAGNOSED, NOT YET FIXED block in src/foam/index.ts.
+    expect(coarseT / fineT).toBeCloseTo(16, 6);
+    const w = (t: number, d: number) => cascadeDetailWeight(d, t, FADE, SPAN);
+    const fineGone = cascadeFadeDistance(fineT, FADE) * SPAN * 1.01;
+    expect(w(fineT, fineGone)).toBeCloseTo(0, 6);
+    // the mid tier is still fully resolved at that distance — i.e. there is a
+    // whole distance band being served by 32² when 128² was available
+    expect(w(midT, fineGone)).toBeCloseTo(1, 6);
+  });
+});
+
+describe('§V2: foam decays on the sim clock, not the display clock', () => {
+  /** total decay applied over one second of frames at a given display rate */
+  const decayOverOneSecond = (fps: number) => {
+    let acc = 0;
+    let steps = 0;
+    for (let f = 0; f < fps; f++) {
+      const r = advanceAccumulator(acc, 1 / fps, SIM_DT);
+      acc = r.accumulator;
+      steps += r.steps;
+    }
+    return decayFactorPerFrame(foamParams.decayHalfLife, SIM_DT) ** steps;
+  };
+
+  it('30, 60 and 144 fps all decay foam at the same rate per SECOND', () => {
+    // WHY: foam is an ACCUMULATOR — inject, decay and blur all compound once
+    // per dispatch. One dispatch per rendered frame made `decayHalfLife` mean
+    // half as long on a 120 Hz machine as on a 60 Hz one, on identical sim
+    // input. Stepping on the fixed clock is what makes the tunable honest.
+    const at60 = decayOverOneSecond(60);
+    for (const fps of [30, 90, 144]) {
+      // within one tick's worth of decay (±1 step per second is float dust in
+      // the accumulator, not a rate that follows the display). The OLD path
+      // was off by the full frame-rate ratio: 0.46 at 60 fps vs 0.21 at 144.
+      expect(decayOverOneSecond(fps) / at60).toBeGreaterThan(0.98);
+      expect(decayOverOneSecond(fps) / at60).toBeLessThan(1.02);
+    }
+    // sanity: that number IS the half-life the artist asked for
+    expect(at60).toBeCloseTo(2 ** (-1 / foamParams.decayHalfLife), 2);
+  });
+
+  it('a slow frame pays its whole debt in steps, not in a bigger step', () => {
+    // 4 ticks' worth of stall must run 4 identical SIM_DT steps: scaling one
+    // step by dt instead would spread the blur 4× farther in one go.
+    expect(advanceAccumulator(0, 4 * SIM_DT, SIM_DT).steps).toBe(4);
   });
 });
 

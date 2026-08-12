@@ -21,11 +21,12 @@ import {
   smoothstep,
   texture as textureNode,
   uniform,
+  uv,
   vec2,
   vec3,
   vec4,
 } from 'three/tsl';
-import { bandLimitedEdge, periodResolved } from './bandLimit';
+import { bandLimitedEdge, coordFilter, periodResolved } from './bandLimit';
 import type { DeckFieldSampler } from './deckFieldTexture';
 import { waterLighting } from '../caustics';
 import { deckWetness } from '../deckwater';
@@ -75,6 +76,36 @@ export interface WoodTones {
    */
   sparAxis?: 'x' | 'y';
   /**
+   * Set on the LOFTED SHELL pieces only (hull-section, bow, transom): plank
+   * the topsides in the loft's own surface parameter instead of in world y.
+   *
+   * WHY. A hull is not planked in horizontal slices. Strakes run fore-and-aft
+   * from stem to stern, parallel to the sheer, and because a plank is
+   * continuous the STRAKE COUNT is fixed while the plank's width follows the
+   * girth of the section — so the boards narrow toward both ends. Coordinate
+   * `positionLocal.y / plankWidth` gives none of that: it draws level
+   * waterlines that cut across the sheer at the bow and stern and hold one
+   * width the whole length. That reads as wallpaper on a curved surface,
+   * which is the "too regular" note this project keeps collecting.
+   *
+   * The fix costs nothing to compute because the loft ALREADY carries the
+   * right coordinate: pieceGeometryHull's `sideStrip` writes uv = (station,
+   * h) with h = 0 at the keel and 1 at the rail line, and the transom cap
+   * writes the same h normalised over its own counter. Lines of constant h
+   * ARE the strakes — they ride the sheer by construction and they converge
+   * wherever `sectionHalf` pinches the section in. Reading uv.y is therefore
+   * exact agreement with the geometry rather than a second guess at it
+   * (§V.37's "mating surfaces share their sampling"), and it needs no hull
+   * shape plumbed into a material that is cached per piece KIND and shared
+   * between ships.
+   *
+   * REQUIRES a `uv` attribute whose y is that height fraction — true for the
+   * three lofted shell kinds and their holed variants, false for the boxes
+   * the rest of the hull family is built from, which is why this is a flag
+   * and not the default.
+   */
+  strake?: boolean;
+  /**
    * Deck-family pieces read the procedural deck heightfield so their boards
    * genuinely sit at slightly different heights — the same field the deck-water
    * solver flows over, so a puddle pools in a hollow you can SEE
@@ -120,6 +151,7 @@ export function createWoodMaterial(
   const uGrainStretch = uniform(p.grainStretch);
   const uSharpness = uniform(p.triplanarSharpness);
   const uPlankWidth = uniform(p.plankWidth);
+  const uHullStrakes = uniform(p.hullStrakes);
   const uSeamWidth = uniform(p.seamWidth);
   const uSeamDarken = uniform(p.seamDarken);
   const uPlankLength = uniform(p.plankLength);
@@ -166,22 +198,52 @@ export function createWoodMaterial(
     smoothstep(float(0.4), float(1.1), gw.x.max(gw.y).max(gw.z)),
   );
 
-  // plank seams: stacked in y on vertical faces, side-by-side in x on decks,
-  // and AROUND a spar (see WoodTones.sparAxis) rather than stacked up it.
+  // plank seams: along the strakes on a lofted shell, stacked in y on other
+  // vertical faces, side-by-side in x on decks, and AROUND a spar (see
+  // WoodTones.sparAxis) rather than stacked up it.
   const upness = smoothstep(float(0.6), float(0.9), normalLocal.y.abs());
+  /**
+   * …and the third case the material never had: a face looking FORE or AFT.
+   * The transom is planked in courses running athwartships, so its boards'
+   * length axis is x, not z. Without this the transom's butt joints were
+   * evaluated at `positionLocal.z`, which on a stern plate whose origin sits
+   * at z = sternZ is very nearly the CONSTANT zero — so every course landed
+   * at one fixed phase of the butt pattern and the joints became a random
+   * per-strake darkening of the whole plate instead of joints. The bow's
+   * beakhead face is the same shape of surface and gets the same treatment.
+   */
+  const aftness = smoothstep(float(0.6), float(0.9), normalLocal.z.abs());
   let plankCoord: AnyNode;
   let alongPlank: AnyNode; // the board's own length axis — where butts land
+  // screen-space footprints of the two coordinates above, carried separately:
+  // see bandLimitedEdge()'s `filterOverride` for why a blended coordinate must
+  // not be differentiated directly.
+  let plankFilter: AnyNode;
+  let alongFilter: AnyNode;
   if (tones.sparAxis === undefined) {
-    const across = mix(positionLocal.y, positionLocal.x, upness);
-    plankCoord = across.div(uPlankWidth);
-    alongPlank = positionLocal.z; // hull and deck planking runs fore-and-aft
+    const deckCoord = positionLocal.x.div(uPlankWidth);
+    // the strake coordinate is ALREADY in boards (uv.y ∈ [0,1] × strake
+    // count), so the blend happens in board units, not in metres
+    const sideCoord =
+      tones.strake === true
+        ? uv().y.mul(uHullStrakes)
+        : positionLocal.y.div(uPlankWidth);
+    plankCoord = mix(sideCoord, deckCoord, upness);
+    plankFilter = mix(coordFilter(sideCoord), coordFilter(deckCoord), upness);
+    // hull and deck planking runs fore-and-aft; a transom's runs athwart
+    alongPlank = mix(positionLocal.z, positionLocal.x, aftness);
+    alongFilter = mix(coordFilter(positionLocal.z), coordFilter(positionLocal.x), aftness);
   } else if (tones.sparAxis === 'y') {
     // angle about the spar × an integer stave count (see SPAR_STAVES)
     plankCoord = atan(positionLocal.z, positionLocal.x).mul(SPAR_STAVES / (Math.PI * 2));
     alongPlank = positionLocal.y;
+    plankFilter = coordFilter(plankCoord);
+    alongFilter = coordFilter(alongPlank);
   } else {
     plankCoord = atan(positionLocal.z, positionLocal.y).mul(SPAR_STAVES / (Math.PI * 2));
     alongPlank = positionLocal.x;
+    plankFilter = coordFilter(plankCoord);
+    alongFilter = coordFilter(alongPlank);
   }
   /**
    * BAND LIMIT (§V.48, and the reason masts rendered BLACK at range).
@@ -199,12 +261,16 @@ export function createWoodMaterial(
    * on the period was the bug that left the hull speckling after the mast fix:
    * a 0.044 m seam inside a 0.55 m plank goes sub-pixel twelve times sooner
    * than the plank does, and every distance in between is the speckle band.
+   *
+   * One unit of `plankCoord` is ONE BOARD however it was built — metres over
+   * plankWidth on a deck, one strake of the loft on a shell — so `seamWidth`
+   * stays a fraction of a plank and the limit keeps measuring the seam.
    */
-  const resolved = periodResolved(plankCoord);
+  const resolved = periodResolved(plankCoord, plankFilter);
 
   const f = fract(plankCoord);
   const edgeDistance = f.min(f.oneMinus()); // 0 at a seam, 0.5 mid-plank
-  const seamMask = bandLimitedEdge(edgeDistance, plankCoord, uSeamWidth); // 0 = seam
+  const seamMask = bandLimitedEdge(edgeDistance, plankCoord, uSeamWidth, plankFilter); // 0 = seam
   const seamGroove = seamMask.oneMinus(); // 1 IN the caulked groove
 
   // every plank is its own board: slightly different tone, and laid a hair
@@ -243,7 +309,7 @@ export function createWoodMaterial(
    * covers far more than 5 cm of fore-and-aft deck long before the ship is
    * even far away.
    */
-  const buttMask = bandLimitedEdge(buttDistance, alongPlank, uButtWidth); // 0 = butt
+  const buttMask = bandLimitedEdge(buttDistance, alongPlank, uButtWidth, alongFilter); // 0 = butt
   const buttGroove = buttMask.oneMinus();
 
   // --- one height field, shared by colour, roughness and the relief normal
@@ -285,14 +351,30 @@ export function createWoodMaterial(
      * length of the ship, exactly the artifact the old comment claimed to have
      * avoided. Centring the coordinate on the belt makes both edges the same
      * edge, and then one band limit covers both (§V.48).
+     *
+     * COUNTED IN PLANKS, not in metres of world height. A wale is not a
+     * stripe painted over the planking, it IS a strake — a thicker board in
+     * the run — so it has to be laid out in the same coordinate the boards
+     * are, or it crosses them: level bands over strakes that ride the sheer
+     * would have converged and diverged along the ship. `waleFrequency` is
+     * therefore wales per board (0.25 = every fourth strake).
+     *
+     * The +0.5 puts the belt's CENTRE on a board's centre rather than on a
+     * seam. With `waleRatio` × the repeat coming to a whole number of planks,
+     * that makes the wale exactly one strake wide with its feathered edges
+     * landing in the caulk lines either side — a thick board in the run,
+     * which is what a wale is. Without the offset the belt is centred on a
+     * seam and takes half of each neighbouring board, and the wale's own
+     * edge then cuts across the planking it is supposed to punctuate.
      */
-    const waleCoord = positionLocal.y.mul(uWaleFrequency);
+    const waleCoord = plankCoord.add(0.5).mul(uWaleFrequency);
+    const waleFilter = plankFilter.mul(uWaleFrequency);
     const half = uWaleRatio.mul(0.5);
     const centred = fract(waleCoord.sub(half).add(0.5)).sub(0.5);
     // <0 inside the belt, >0 outside; +half the edge width centres the
     // transition on the true boundary, matching the old ±0.03 feathering
     const waleDistance = centred.abs().sub(half).add(WALE_EDGE * 0.5);
-    const band = bandLimitedEdge(waleDistance, waleCoord, float(WALE_EDGE));
+    const band = bandLimitedEdge(waleDistance, waleCoord, float(WALE_EDGE), waleFilter);
     color = mix(color.mul(uWaleDarken), color, band);
     height = height.add(band.oneMinus().mul(uWaleRelief));
   }
@@ -358,8 +440,10 @@ export function createWoodMaterial(
   // and playing up the hull sides, which is the effect that stops the ship
   // reading as pasted onto the water. Every output modulates our own
   // material rather than replacing it, including the relief: timber under a
-  // water film loses its grain, so the height field is scaled, not the
-  // normal. normalWorldGeometry (NOT normalWorld) — normalWorld resolves to
+  // water film loses its grain, so `reliefScale` damps the relief — applied
+  // to the STRENGTH at the reliefNormal call below rather than to the height
+  // field, for the product-rule reason set out there (§V.49).
+  // normalWorldGeometry (NOT normalWorld) — normalWorld resolves to
   // this material's own normalNode, and that node is built from `height`
   // below, so feeding it back here would be a cycle.
   const water = waterLighting({
@@ -370,13 +454,30 @@ export function createWoodMaterial(
   });
   color = color.mul(water.tint);
   rough = rough.mul(water.roughnessScale);
-  height = height.mul(water.reliefScale);
 
   material.colorNode = color;
   material.roughnessNode = rough.clamp(0.04, 1);
   material.emissiveNode = water.addLight;
-  // relief from the SAME height field — no textures, no tangents, no UVs
-  material.normalNode = reliefNormal(height, uBumpScale);
+  /**
+   * Relief from the SAME height field — no textures, no tangents, no UVs.
+   *
+   * §V.49: `water.reliefScale` scales the STRENGTH, not the height. It used
+   * to multiply `height`, and `reliefNormal` differentiates whatever it is
+   * given, so the product rule handed the normal an `H · dS/dx` term — the
+   * hull wetline's own sampling noise, amplified by the full magnitude of
+   * the wood grain, and invisible on a dry hull because a constant S has no
+   * derivative. Now that the topsides carry plank relief the wetline band
+   * runs straight through it, so H is at its largest exactly where S varies.
+   * `reliefNormal` applies `scale` AFTER taking dH/dx, so folding the factor
+   * in here differentiates the height alone and the cross term cannot exist
+   * — the same wet-timber-flattens look with no product to alias.
+   *
+   * The deck-water factor is deliberately NOT moved: deckwater documents
+   * `heightAdd` as adding to the field AFTER `reliefScale` (the film's own
+   * surface, which must not be flattened by its own wetness), and it already
+   * band-limits its factor on a reduced tier at its own end.
+   */
+  material.normalNode = reliefNormal(height, uBumpScale.mul(water.reliefScale));
 
   return {
     material,
@@ -387,6 +488,7 @@ export function createWoodMaterial(
       uGrainStretch.value = p.grainStretch;
       uSharpness.value = p.triplanarSharpness;
       uPlankWidth.value = p.plankWidth;
+      uHullStrakes.value = p.hullStrakes;
       uSeamWidth.value = p.seamWidth;
       uSeamDarken.value = p.seamDarken;
       uPlankLength.value = p.plankLength;

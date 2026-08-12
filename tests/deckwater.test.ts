@@ -32,6 +32,7 @@ import { deckWaterParams } from '../src/params/deckwater';
 // sensor keeps its own copy so it can run without the TSL import graph, and
 // this is what stops the two drifting apart
 import { MAX_SPLASHES } from '../src/deckwater/inflowPass';
+import { REDUCE_FACTOR, reducedSize } from '../src/deckwater/reducePass';
 
 const flow: OutflowParams = { fluxRate: 0.2, tiltBiasStrength: 0.5 };
 const resolve: ResolveParams = { evapVolume: 0.01, evapWetness: 0.002, wetnessGain: 30 };
@@ -666,5 +667,25 @@ describe('bow water sensor (§V27 event-driven, §V36 σ-relative)', () => {
     const s = createBowWaterSensor();
     expect(s.update(sample({ depth: NaN }), 1 / 60, p, frame)).toEqual([]);
     expect(s.update(sample({}, { speed: NaN }), 1 / 60, p, frame)).toEqual([]);
+  });
+});
+
+describe('§V.48 band-limiting tier (reducePass)', () => {
+  it('halves twice per step and never collapses to nothing', () => {
+    // The talk grid: 192 × 512 → 48 × 128 → 12 × 32, ~36 × 54 cm per texel at
+    // the tier the relief term reads. Plenty for "is this stretch wet".
+    expect(reducedSize(192)).toBe(48);
+    expect(reducedSize(512)).toBe(128);
+    expect(reducedSize(reducedSize(192))).toBe(12);
+    expect(reducedSize(reducedSize(512))).toBe(32);
+    expect(REDUCE_FACTOR).toBe(4);
+  });
+
+  it('rounds UP, so no source texel falls outside the tier', () => {
+    // A floor here would leave the last partial block unrepresented, and the
+    // clamped taps would smear the edge row across the whole margin.
+    expect(reducedSize(193)).toBe(49);
+    expect(reducedSize(1)).toBe(1);
+    expect(reducedSize(0)).toBe(1); // §V28: dispatch counts stay ≥ 1
   });
 });

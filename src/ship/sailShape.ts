@@ -32,7 +32,36 @@ import type { ShipMaterialParams } from '../params/ship';
  * happening. There is no cost to sharing them: they are plain numbers, and
  * only the expressions around them have to be transliterated.
  */
-export const SAIL_SKEW_LEAD = 0.22; // how far the belly shifts to leeward
+export const SAIL_SKEW_LEAD = 0.22; // how far the DRAFT shifts to leeward
+/**
+ * HORIZONTAL DRAFT PROFILE (user: "way too steep a bulge in the middle and
+ * then nothing towards the sides… it has to be more distributed").
+ *
+ * This used to be `sin²(πu)`, and the vertical profile below was MULTIPLIED
+ * into it. Two centred bumps in a product is the worst possible arrangement:
+ * measured over a whole course, the mean depth came to 0.31 of the peak, and
+ * one tenth of the way in from a leech the cloth was at 9.5% of full — i.e.
+ * the outer fifth of the sail on each side was flat panel, with all the shape
+ * crammed into a lens in the middle. sin² also leaves BOTH edges with zero
+ * slope, so the canvas lies down tangent to the flat plane at the leeches
+ * rather than pulling away from them.
+ *
+ * The replacement is the actual small-deflection solution for a membrane
+ * under uniform pressure with both edges held: a PARABOLA. It carries 0.66 of
+ * its peak as a mean (+29% of average depth at the same peak) and leaves each
+ * leech at a real angle. `sailDraftFullness` is the exponent on it — 1 is the
+ * membrane, higher narrows back toward the old lens — and `sailDraftPos`
+ * moves the deepest point, which on real canvas sits about 40% aft of the
+ * luff rather than at the midpoint.
+ *
+ * Both leeches still go to exactly zero. They are bolt-roped and sheeted, so
+ * a belly that did not close there would tear the cloth off its own edges —
+ * "distributed" means the falloff is a boundary layer at the edge, not the
+ * whole half-width.
+ */
+export const SAIL_DRAFT_MIN = 0.28; // draft cannot crowd the luff…
+export const SAIL_DRAFT_MAX = 0.72; // …nor the leech
+export const SAIL_LEAD_MAX = 0.3; // |lead|·π < 1 keeps the warp monotone
 /**
  * VERTICAL BELLY PROFILE (user: "they have no billow to them").
  *
@@ -68,8 +97,41 @@ export function sailBellyProfile(v: number): number {
   return headTaper * footEase;
 }
 
+/**
+ * Warp lead that puts the section's deepest point at `draftPos`.
+ *
+ * The section itself is symmetric, so the draft is moved by warping u through
+ * `u + lead·sin(πu)` — endpoints fixed (the leeches stay pinned), smooth, and
+ * monotone as long as |lead|·π < 1. That last part is not cosmetic: a warp
+ * that folds maps two points of cloth onto one, which is a self-intersecting
+ * sail. Hence SAIL_LEAD_MAX, and the draft band it corresponds to.
+ */
+export function sailDraftLead(draftPos: number): number {
+  const d = clamp(finite(draftPos, 0.4), SAIL_DRAFT_MIN, SAIL_DRAFT_MAX);
+  const lead = (0.5 - d) / Math.max(1e-3, Math.sin(Math.PI * d)); // §V28 floored
+  return clamp(lead, -SAIL_LEAD_MAX, SAIL_LEAD_MAX);
+}
+
+/**
+ * Section depth as a fraction of the draft, across the cloth from the port
+ * leech (u = 0) to the starboard one (u = 1). Exported so the DISTRIBUTION can
+ * be asserted directly — a re-centred or re-narrowed bulge is a shape bug that
+ * no displacement-magnitude test can see.
+ */
+export function sailDraftProfile(u: number, lead: number, fullness: number): number {
+  const uu = clamp01(finite(u));
+  const w = clamp01(uu + finite(lead) * Math.sin(Math.PI * uu));
+  // membrane under uniform pressure, both edges held
+  const arc = Math.max(0, 4 * w * (1 - w));
+  return Math.pow(arc, Math.max(0.5, finite(fullness, 1)));
+}
+
 function finite(x: number, fallback = 0): number {
   return Number.isFinite(x) ? x : fallback;
+}
+
+function clamp(x: number, lo: number, hi: number): number {
+  return x < lo ? lo : x > hi ? hi : x;
 }
 
 function clamp01(x: number): number {
@@ -114,10 +176,13 @@ export function sailClothOffset(
   const vv = clamp01(finite(v));
   const drop = Math.max(0.01, finite(builtDrop) * clamp01(finite(s.dropScale, 1)));
 
-  // belly: sin² across, pinned at the head, shifted to leeward while turning
-  const us = clamp01(uu + finite(s.skew) * SAIL_SKEW_LEAD * (1 - vv));
-  const arch = Math.sin(us * Math.PI);
-  const across = arch * arch;
+  // belly: a membrane section across the cloth × the vertical profile. The
+  // ship's swing lags the DRAFT to leeward rather than translating the whole
+  // curve — translating it walked the belly off the leech (at full skew the
+  // old form left 44% of the peak standing at the bolt rope), and the leeches
+  // are held. The head cannot lag at all, hence (1 − v).
+  const lead = sailDraftLead(p.sailDraftPos - finite(s.skew) * SAIL_SKEW_LEAD * (1 - vv));
+  const across = sailDraftProfile(uu, lead, p.sailDraftFullness);
   const down = sailBellyProfile(vv);
   const belly = across * down * finite(s.drive) * p.sailBillow * drop;
 
@@ -138,9 +203,43 @@ export function sailClothOffset(
 }
 
 /**
+ * How far a point of canvas is hauled UP as the sail gathers, in metres.
+ *
+ * The reef is now one continuous ramp (sailDynamics.trimDropScale), which fixes
+ * the jerk but on its own would slide a flat rectangle of canvas up a slot —
+ * not "packed-up sails". Real canvas comes up on its BUNTLINES and CLEWLINES,
+ * which are made fast at a handful of stations along the foot, so the foot
+ * rises at those stations and swags down between them. That is also the user's
+ * standing note about the reefed look: "some lines… either in the centre or at
+ * thirds, instead of just being like a completely straight line rolled up".
+ *
+ * Zero at full canvas, so a flying sail is untouched — this must not disturb
+ * the belly (§B.21, and the draft work above it).
+ */
+export function sailFurlLift(
+  u: number,
+  v: number,
+  builtDrop: number,
+  s: SailClothState,
+  p: ShipMaterialParams,
+): number {
+  const uu = clamp01(finite(u));
+  const vv = clamp01(finite(v));
+  const furl = 1 - clamp01(finite(s.dropScale, 1));
+  const bays = Math.max(1, finite(p.sailFurlBays, 3));
+  // 0 at each station (where a line is made fast), 1 in the middle of a bay
+  const station = Math.abs(Math.sin(Math.PI * bays * uu));
+  const drop = Math.max(0.01, finite(builtDrop));
+  // the head is bent to its yard and cannot rise, hence (1 − v)
+  return furl * finite(p.sailFurlSwag) * drop * (1 - vv) * (1 - station);
+}
+
+/**
  * Full piece-local position of a point of canvas: the flat panel position,
- * shortened from the foot up by the trim scale, plus the cloth displacement.
- * This is the function a sail-attached socket resolves through.
+ * shortened from the foot up by the trim scale and gathered at its stations,
+ * plus the cloth displacement. This is the function a sail-attached socket
+ * resolves through — §V.45: a buntline whose end did not ride the gather would
+ * hang beside the cloth it is supposed to be hauling.
  */
 export function sailClothPoint(
   u: number,
@@ -156,7 +255,8 @@ export function sailClothPoint(
   // the panel spans x ∈ [−width/2, width/2] and hangs from y = 0 down to
   // y = −drop; the shader scales y about the head, so the foot comes UP
   const x = (uu - 0.5) * width;
-  const y = -(1 - vv) * Math.max(0.01, finite(builtDrop)) * scale;
+  const y =
+    -(1 - vv) * Math.max(0.01, finite(builtDrop)) * scale + sailFurlLift(uu, vv, builtDrop, s, p);
   return [x, y, sailClothOffset(uu, vv, builtDrop, s, p)];
 }
 

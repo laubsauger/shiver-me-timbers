@@ -56,14 +56,31 @@ export interface CameraParams {
   modeSwitchTime: number;
   /** vertical field of view, deg */
   fov: number;
+
+  // --- helm POV (H) — captain's eye, rides with the ship (§V22) ---
+  /** eye height above the wheel's own socket, m */
+  helmEyeHeight: number;
+  /**
+   * how far AFT of the wheel the eye sits, m. Non-zero on purpose: at 0 the
+   * lens is inside the wheel's hub and the near plane slices the spokes, and
+   * the shot wants the wheel in frame anyway — it is what says "captain".
+   */
+  helmAft: number;
+  /** free-look yaw clamp either side of dead ahead, rad (0 = locked forward) */
+  helmYawLimit: number;
 }
 
 export const cameraParams: CameraParams = registerParams(
   'camera',
   {
     radius: 28,
-    minRadius: 8,
-    maxRadius: 90,
+    // range is for FRAMING SHOTS, not just for play: 2.5 m gets the lens onto
+    // a single carved rail or the wheel's spokes, 500 m puts the whole galleon
+    // against the horizon and the storm cell behind her. The old 8..90 could
+    // do neither, and a showcase camera that cannot get close or far is the
+    // one tool the recording actually needs.
+    minRadius: 2.5,
+    maxRadius: 500,
     pivotHeight: 6,
     posHalfLife: 0.12,
     yawFollowHalfLife: 1.2,
@@ -87,11 +104,14 @@ export const cameraParams: CameraParams = registerParams(
     modeSwitchHalfLife: 0.5,
     modeSwitchTime: 1.5,
     fov: 55,
+    helmEyeHeight: 1.62,
+    helmAft: 0.85,
+    helmYawLimit: 2.6, // ~150° — can look over either shoulder, not behind
   },
   {
-    radius: { min: 5, max: 120, step: 1 },
-    minRadius: { min: 2, max: 40, step: 1 },
-    maxRadius: { min: 20, max: 300, step: 5 },
+    radius: { min: 2, max: 500, step: 1 },
+    minRadius: { min: 0.5, max: 40, step: 0.5 },
+    maxRadius: { min: 20, max: 1500, step: 10 },
     pivotHeight: { min: 0, max: 30, step: 0.5 },
     posHalfLife: { min: 0, max: 1, step: 0.01 },
     yawFollowHalfLife: { min: 0.05, max: 5, step: 0.05 },
@@ -114,5 +134,8 @@ export const cameraParams: CameraParams = registerParams(
     modeSwitchHalfLife: { min: 0.05, max: 2, step: 0.05 },
     modeSwitchTime: { min: 0, max: 5, step: 0.1 },
     fov: { min: 20, max: 110, step: 1 },
+    helmEyeHeight: { min: 0.5, max: 4, step: 0.01 },
+    helmAft: { min: -2, max: 4, step: 0.05 },
+    helmYawLimit: { min: 0, max: 3.14, step: 0.01 },
   },
 );

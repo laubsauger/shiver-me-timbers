@@ -40,6 +40,8 @@ export interface FollowCamHandle {
   /** release the vantage without jumping the camera */
   clearDebugPose(): void;
   isDebugPinned(): boolean;
+  /** ship-local position of the wheel — where the H key puts the captain */
+  setHelmAnchor(local: Vec3Like): void;
   dispose(): void;
 }
 
@@ -56,6 +58,7 @@ export function createFollowCam(
     setDebugPose: (position, target) => cam.setDebugPose(position, target),
     clearDebugPose: () => cam.clearDebugPose(),
     isDebugPinned: () => cam.isDebugPinned(),
+    setHelmAnchor: (local) => cam.setHelmAnchor(local),
     dispose: () => cam.dispose(),
   };
 }

@@ -1,7 +1,7 @@
 /**
  * SoT-style 2.5D clouds (§V11, task T14) — integration surface:
  *
- *   createClouds({ renderer, camera, seed }) => {
+ *   createClouds({ renderer, camera, seed, stormAt }) => {
  *     update(time, sunDir)  // renders offscreen cores pass + blur compute;
  *                           // MUST be called each frame BEFORE the main
  *                           // renderer.render() — it does the
@@ -16,12 +16,31 @@
  * StorageTexture) → camera-pinned composite quad.
  * All tunables live in src/params/clouds.ts (§V16) and are pushed to GPU
  * uniforms every update, so panel tweaks apply live.
+ *
+ * TWO THINGS THIS READS FROM OUTSIDE ITSELF:
+ *
+ *  - `opts.stormAt` (§V46) — pass `weather.stormAt` and each cluster shapes
+ *    itself from the storm field at its OWN world XZ: fair-weather cumulus in
+ *    the clear, an anvil monument over a cell. Omit it and every cluster is
+ *    fair weather, which is the old global behaviour §V46 replaced. This is
+ *    the ONE line that makes "blue sky, sunny, storm cloud in the distance"
+ *    the default sky rather than a preset.
+ *
+ *  - `scene.fog.color` (§T.39) — picked up from the scene passed to
+ *    `attachTo`, no extra plumbing, and used to swing the cloud palette
+ *    through the day cycle. See cloudPalette.ts for why it drives hue only.
  */
 import * as THREE from 'three/webgpu';
 import { cloudParams, clampCoverage, cloudLayoutKey } from '../params/clouds';
-import { generateClusters, createCloudCores } from './cloudCores';
+import {
+  generateClusters,
+  createCloudCores,
+  stormFieldKey,
+  type StormSampler,
+} from './cloudCores';
 import { createCloudBlur } from './cloudBlur';
 import { createCloudComposite } from './cloudComposite';
+import { resolveCloudPalette } from './cloudPalette';
 
 export interface CloudsHandle {
   update(time: number, sunDir: THREE.Vector3): void;
@@ -33,6 +52,12 @@ export interface CloudsHandle {
   /** the camera-pinned composite quad — must be layer-excluded from the
    *  mirror pass, since it is fitted to the MAIN camera */
   readonly compositeQuad: THREE.Mesh;
+  /** this frame's resolved sun/sky pair (§T.39 day cycle). The reflection's
+   *  cloud stand-in reconstructs colour with the same two values and must
+   *  read them from HERE, not from the raw params hexes, or reflected clouds
+   *  stay cold while the real ones warm. */
+  readonly sunColorLive: THREE.Color;
+  readonly skyColorLive: THREE.Color;
   dispose(): void;
 }
 
@@ -40,13 +65,17 @@ export interface CloudsOptions {
   renderer: THREE.WebGPURenderer;
   camera: THREE.PerspectiveCamera;
   seed: number;
+  /** §V46 localised storm field — pass `weather.stormAt`. Default: clear. */
+  stormAt?: StormSampler;
 }
 
 export function createClouds(opts: CloudsOptions): CloudsHandle {
   const { renderer, camera, seed } = opts;
   const p = cloudParams;
+  const sampleStorm: StormSampler = opts.stormAt ?? (() => 0);
 
-  const cores = createCloudCores(generateClusters(seed, p), p);
+  let clusters = generateClusters(seed, p, sampleStorm);
+  const cores = createCloudCores(clusters, p);
   const coreScene = new THREE.Scene();
   coreScene.add(cores.object);
 
@@ -59,12 +88,14 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
   const blur = createCloudBlur(coresRT.texture, p);
   const composite = createCloudComposite(blur.output, p, seed);
 
-  // Shape params (§V11b silhouette family) only take effect through CPU
-  // regeneration, so a weather preset lerping `anvilSpread` would otherwise
-  // silently do nothing until reload. Regenerate when the layout key moves —
-  // ~400 lobes of scalar math, only on frames where something actually
-  // changed, and the instance buffers are refilled in place.
+  // Cluster SHAPE is CPU-side, so it only takes effect through regeneration.
+  // Two things move it and both would otherwise silently do nothing: a panel
+  // edit or preset lerp (layoutKey), and the storm field drifting under the
+  // clusters (stormKey, quantised to p.stormQuantSteps so a continuously
+  // drifting field does not rebuild every single frame). Regeneration is
+  // ~400 lobes of scalar math refilled into the existing instance buffers.
   let layoutKey = cloudLayoutKey(p);
+  let stormKey = stormFieldKey(clusters, sampleStorm, p.stormQuantSteps);
 
   const invView = new THREE.Matrix4();
   // runtime getClearColor just target.copy()s, so a plain Color works;
@@ -74,10 +105,14 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
 
   return {
     update(time: number, sunDir: THREE.Vector3): void {
-      const key = cloudLayoutKey(p);
-      if (key !== layoutKey) {
-        layoutKey = key;
-        cores.rebuild(generateClusters(seed, p));
+      const lKey = cloudLayoutKey(p);
+      const sKey = stormFieldKey(clusters, sampleStorm, p.stormQuantSteps);
+      if (lKey !== layoutKey || sKey !== stormKey) {
+        layoutKey = lKey;
+        clusters = generateClusters(seed, p, sampleStorm);
+        // re-key off the NEW sites: layout params may have moved them
+        stormKey = stormFieldKey(clusters, sampleStorm, p.stormQuantSteps);
+        cores.rebuild(clusters);
       }
 
       // push live params → uniforms (Tweakpane edits apply without rebuild)
@@ -95,11 +130,19 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
       cores.uFluffScale.value = p.fluffScale;
       cores.uFluffAlpha.value = p.fluffAlpha;
       cores.uFluffPower.value = p.fluffPower;
+      cores.uStormSunCut.value = p.stormSunCut;
+      cores.uStormSkyCut.value = p.stormSkyCut;
       blur.uRadiusNear.value = p.blurRadiusNear;
       blur.uRadiusFar.value = p.blurRadiusFar;
       composite.uTime.value = time * p.distortSpeed;
-      composite.uSunColor.value.setHex(p.sunColor);
-      composite.uSkyColor.value.setHex(p.skyColor);
+      // §T.39: swing the pair through the day cycle off the sky rig's live
+      // horizon haze. Hue only — see cloudPalette.ts for the §B.19 guard.
+      resolveCloudPalette(
+        p,
+        attachedScene?.fog?.color ?? null,
+        composite.uSunColor.value,
+        composite.uSkyColor.value,
+      );
       composite.uDistortScale.value = p.distortScale;
       composite.uDistortStrength.value = p.distortStrength;
       composite.uEdgeErode.value = p.edgeErode;
@@ -142,6 +185,8 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
 
     blurredTexture: blur.output,
     compositeQuad: composite.quad,
+    sunColorLive: composite.uSunColor.value,
+    skyColorLive: composite.uSkyColor.value,
 
     dispose(): void {
       attachedScene?.remove(composite.quad);

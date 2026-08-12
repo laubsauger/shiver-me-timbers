@@ -98,6 +98,12 @@ export interface CombatFxParams {
   splashPerHit: number;
   /** overall additive brightness */
   intensity: number;
+  /** rad/s — tumble of a detached mast on the way down (§V.14) */
+  wreckTumble: number;
+  /** m/s — settle rate once the spar is in the water (it stops falling) */
+  wreckSinkSpeed: number;
+  /** m below the LIVE surface at which wreckage is removed from the scene */
+  wreckSinkDepth: number;
 }
 
 export const combatFxParams: CombatFxParams = registerParams(
@@ -122,6 +128,9 @@ export const combatFxParams: CombatFxParams = registerParams(
     splintersPerBreach: 18,
     splashPerHit: 10,
     intensity: 1,
+    wreckTumble: 0.7,
+    wreckSinkSpeed: 1.2,
+    wreckSinkDepth: 12,
   },
   {
     particleCount: { min: 64, max: 4096, step: 64 },
@@ -143,5 +152,8 @@ export const combatFxParams: CombatFxParams = registerParams(
     splintersPerBreach: { min: 0, max: 64, step: 1 },
     splashPerHit: { min: 0, max: 64, step: 1 },
     intensity: { min: 0, max: 3, step: 0.05 },
+    wreckTumble: { min: 0, max: 4, step: 0.05 },
+    wreckSinkSpeed: { min: 0.1, max: 10, step: 0.1 },
+    wreckSinkDepth: { min: 2, max: 40, step: 1 },
   },
 );

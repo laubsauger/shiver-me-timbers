@@ -55,6 +55,10 @@ export interface CausticsUniforms {
   fade: TslNode;
   reflectedStrength: TslNode;
   reflectedFalloff: TslNode;
+  /** hard ceiling on the reflected branch, m above the waterline */
+  reflectedMaxHeight: TslNode;
+  /** receiver n.y at which sea-bounced light stops reaching it */
+  reflectedFaceLimit: TslNode;
   choppiness: TslNode;
   waterlineBlend: TslNode;
   faceGate: TslNode;
@@ -86,6 +90,8 @@ export function createCausticsUniforms(): CausticsUniforms {
     fade: uniform(new THREE.Vector2(cp.fadeStart, cp.fadeEnd)),
     reflectedStrength: uniform(cp.reflectedStrength),
     reflectedFalloff: uniform(cp.reflectedHeightFalloff),
+    reflectedMaxHeight: uniform(cp.reflectedMaxHeight),
+    reflectedFaceLimit: uniform(cp.reflectedFaceLimit),
     choppiness: uniform(oceanParams.choppiness),
     waterlineBlend: uniform(cp.waterlineBlend),
     faceGate: uniform(cp.faceGateSoftness),
@@ -111,6 +117,8 @@ export function refreshCausticsUniforms(u: CausticsUniforms): void {
   u.fade.value.set(cp.fadeStart, cp.fadeEnd);
   u.reflectedStrength.value = cp.reflectedStrength;
   u.reflectedFalloff.value = cp.reflectedHeightFalloff;
+  u.reflectedMaxHeight.value = cp.reflectedMaxHeight;
+  u.reflectedFaceLimit.value = cp.reflectedFaceLimit;
   u.choppiness.value = oceanParams.choppiness;
   u.waterlineBlend.value = cp.waterlineBlend;
   u.faceGate.value = cp.faceGateSoftness;
@@ -294,6 +302,13 @@ export function causticsNode(
    * depth; `mode` only chooses which branches exist.
    */
   mode: 'both' | 'below' = 'both',
+  /**
+   * The RECEIVER's own world normal. Only the reflected branch uses it, and
+   * omitting it leaves that branch ungated — which is what it was until the
+   * user reported caustics "spilling way too high up on the boats, across the
+   * deck and a little bit onto the other side".
+   */
+  receiverNormal?: TslNode,
 ): { bright: TslNode; darken: TslNode } {
   const worldXZ = vec2(worldPos.x, worldPos.z);
   // span travelled through/over water. Below the line the receiver borrows a
@@ -395,14 +410,41 @@ export function causticsNode(
     // the "light dancing on the boat" half, and it reuses every tap above
     const refl = build(false);
     const reflResp = response(refl.j, aboveSpan);
-    const heightFade = aboveSpan.div(u.reflectedFalloff.max(0.01)).negate().exp();
+    // TWO BOUNDS, and they kill different symptoms.
+    //
+    // 1. exp() NEVER REACHES ZERO. At the shipped 4.5 m falloff a deck 6 m up
+    //    still receives exp(-1.33) = 26%, and the upper works keep a few per
+    //    cent all the way into the rig. A decaying term is not a bounded one —
+    //    §V.48's lesson about band-limiting, in the vertical. So ramp it hard
+    //    to zero by reflectedMaxHeight and let the ALU stop there.
+    const heightFade = aboveSpan
+      .div(u.reflectedFalloff.max(0.01))
+      .negate()
+      .exp()
+      // decreasing smoothstep (e0 > e1): 1 while well under the ceiling, 0 above
+      .mul(smoothstep(u.reflectedMaxHeight, u.reflectedMaxHeight.mul(0.6), aboveSpan));
+    // 2. THE RECEIVER'S OWN ORIENTATION WAS NEVER CONSULTED. Every face gate
+    //    in driftNode() is about the WATER's normal — is this wave face lit,
+    //    does its reflected ray travel upward. Nothing asked whether the
+    //    surface being lit can physically see the sea. This light is going UP,
+    //    so a deck (n.y = +1) cannot be struck by it at all, while a vertical
+    //    topside (n.y = 0) catches it square — which is the "light dancing on
+    //    the hull" this branch exists to draw. Absent a normal the gate is 1,
+    //    so existing callers keep their old behaviour rather than going dark.
+    const facing =
+      receiverNormal === undefined
+        ? float(1)
+        : smoothstep(u.reflectedFaceLimit.max(1e-3), float(0), receiverNormal.y);
     const overwater = vec3(reflResp.bright)
       .mul(heightFade)
+      .mul(facing)
       .mul(u.reflectedStrength)
       .mul(refl.valid);
     bright = mix(overwater, underwater, submerged);
     darken = mix(
-      mix(float(1), reflResp.darken, refl.valid.mul(heightFade).mul(gate)),
+      // the darkening rides the SAME two gates — a gate applied to the bright
+      // lobe alone leaves a shadow cast by light that is no longer arriving
+      mix(float(1), reflResp.darken, refl.valid.mul(heightFade).mul(facing).mul(gate)),
       darken,
       submerged,
     );

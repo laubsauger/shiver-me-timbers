@@ -93,8 +93,15 @@ const _forward = /*@__PURE__*/ new THREE.Vector3();
  *     vis 0 is invisible, whereas resetting it to a default would snap the
  *     instant vis rises again.
  *  2. Cutting the effect at the frame border. Real shafts keep coming when
- *     the source is just off-screen, so the fade starts AT the border and runs
- *     `edgeFade` further out in NDC.
+ *     the source is just off-screen, so the fade begins where the sun reaches
+ *     the frame CORNER and runs `fadeDeg` further out.
+ *
+ * The fade is measured in ANGLE off the view axis, not in NDC. NDC was the
+ * obvious choice and it is the wrong one: it is `tan(θ)/tan(halfFov)`, which
+ * runs to infinity at the frustum plane, so a fade authored as "0.35 NDC past
+ * the edge" silently compresses into ~8° of camera rotation and the tests
+ * below measured it stepping 0.09 per half-degree. In angle the same knob is
+ * uniform everywhere and the aspect ratio comes from the camera itself.
  *
  * The user has already reported lighting that "disappears entirely" when
  * rotating away from the sun; a hard edge in either of these is that same
@@ -104,13 +111,11 @@ export function updateSunScreen(
   state: SunScreenState,
   camera: THREE.PerspectiveCamera,
   sunDir: THREE.Vector3,
-  edgeFade: number,
-  facingEdge: number,
+  fadeDeg: number,
 ): SunScreenState {
   camera.getWorldDirection(_forward);
   const facing = _forward.dot(sunDir);
 
-  let frameFade = 0;
   if (facing > 1e-4) {
     // The sun sits at infinity (§V.32), so any positive distance along the
     // direction projects to the same screen point.
@@ -118,16 +123,18 @@ export function updateSunScreen(
     _sunWorld.project(camera);
     state.x = _sunWorld.x * 0.5 + 0.5;
     state.y = _sunWorld.y * 0.5 + 0.5;
-    // how far OUTSIDE the frame, in NDC; zero while it is on screen
-    const outside = Math.max(
-      Math.abs(_sunWorld.x) - 1,
-      Math.abs(_sunWorld.y) - 1,
-      0,
-    );
-    frameFade = 1 - smoothstep01(outside / Math.max(edgeFade, 1e-3));
   }
 
-  state.vis = frameFade * smoothstep01(facing / Math.max(facingEdge, 1e-3));
+  // cos of the half-angle to the frame CORNER — full strength anywhere inside
+  const tanY = Math.tan((camera.fov * Math.PI) / 360);
+  const tanX = tanY * camera.aspect;
+  const cosCorner = 1 / Math.sqrt(1 + tanX * tanX + tanY * tanY);
+  const fade = Math.max(fadeDeg, 0.1) * (Math.PI / 180);
+  const cosOut = Math.cos(Math.min(Math.acos(cosCorner) + fade, Math.PI));
+
+  // functional smoothstep, ascending: cosOut < cosCorner because cos falls
+  // as the angle grows. Reversing these two silently inverts the fade.
+  state.vis = smoothstep01((facing - cosOut) / Math.max(cosCorner - cosOut, 1e-6));
   return state;
 }
 
@@ -217,8 +224,7 @@ export function buildGodRays(opts: {
   const raysTex = rtt(raysFn(), 2, 2);
 
   // --- CPU per-frame -----------------------------------------------------
-  const sunWorld = new THREE.Vector3();
-  const forward = new THREE.Vector3();
+  const sunState: SunScreenState = { x: 0.5, y: 0.9, vis: 0 };
   const size = new THREE.Vector2();
   let rtW = 0;
   let rtH = 0;
@@ -237,45 +243,14 @@ export function buildGodRays(opts: {
       uTexel.value.set(1 / w, 1 / h);
     }
 
-    // --- sun screen position + visibility ---
-    // The sun lives at infinity (§V.32), so any positive distance along the
-    // direction projects to the same screen point.
-    const dir = sunDirection();
-    camera.getWorldDirection(forward);
-    const facing = forward.dot(dir);
-
-    let frameFade = 0;
-    if (facing > 1e-4) {
-      sunWorld.copy(camera.position).addScaledVector(dir, 100);
-      sunWorld.project(camera);
-      uSunScreen.value.set(sunWorld.x * 0.5 + 0.5, sunWorld.y * 0.5 + 0.5);
-      // How far OUTSIDE the frame the sun sits, in NDC. Zero while it is on
-      // screen, then fades over godRayEdgeFade. Shafts genuinely do continue
-      // when the source is just past the edge, so this deliberately does not
-      // cut at the border — cutting there is what makes naive implementations
-      // snap. The user has already flagged lighting that "disappears entirely"
-      // when turning away from the sun; a hard edge here is the same
-      // complaint wearing a different hat.
-      const outside = Math.max(
-        Math.abs(sunWorld.x) - 1,
-        Math.abs(sunWorld.y) - 1,
-        0,
-      );
-      const edge = Math.max(finite(pp.godRayEdgeFade, 0.35), 1e-3);
-      frameFade = 1 - smoothstep01(outside / edge);
-    }
-    // Behind the camera, `Vector3.project()` MIRRORS the point to the opposite
-    // side of the screen, so the position is simply left at its last value and
-    // faded out by `facing` instead — nothing to snap back from when the
-    // camera swings round.
-    const facingEdge = Math.max(finite(pp.godRayFacingEdge, 0.25), 1e-3);
-    const vis = frameFade * smoothstep01(facing / facingEdge);
-
+    // --- sun screen position + visibility (see updateSunScreen) ---
     // NOTE: no elevation gate. §T.39 is a SUNSET showcase — the sun sitting on
     // the horizon is the money shot, not an edge case. Below the horizon the
     // sky stops drawing a sun disc, so the bright pass finds nothing and the
     // rays fade on their own.
-    uSunVis.value = vis;
+    updateSunScreen(sunState, camera, sunDirection(), finite(pp.godRayEdgeFade, 25));
+    uSunScreen.value.set(sunState.x, sunState.y);
+    uSunVis.value = sunState.vis;
 
     // display-referred → scene-linear pre-exposure, same convention as bloom
     // (§V.31b: the same maths in the wrong space under-corrects silently)

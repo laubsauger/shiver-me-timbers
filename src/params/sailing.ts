@@ -36,6 +36,31 @@ export interface SailingParams {
   downwindEff: number;
   /** sailTrim units per second from trim keys */
   trimSpeed: number;
+  /**
+   * Leeway: fraction of the sail's geometric side force (drive × cot(θ/2))
+   * that actually pushes the hull sideways after the keel and deadwood have
+   * had their say. 0 = the ship travels exactly where she points, which is
+   * a car, not a square-rigger.
+   */
+  leewayRatio: number;
+  /** cap on cot(θ/2) — the ratio diverges head to wind, where the sails
+   * are shaking anyway and the number means nothing */
+  maxSideForceRatio: number;
+  /**
+   * Yaw rate (rad/s) added per radian of WIND heel at full rudder authority:
+   * weather helm, the steady gripe up into the wind. Small on purpose — it
+   * is a nuisance to be corrected, not a spin. 0 = perfectly balanced helm.
+   */
+  weatherHelmGain: number;
+  /**
+   * Yaw rate added per rad/s of ROLL RATE: how much the swell makes her hunt
+   * about her course. Reads the rate, not the angle, so a steady heel adds
+   * nothing (see shipKinematics). 0 = a ship on rails.
+   */
+  rollYawGain: number;
+  /** hard bound (rad/s) on the sea's total contribution to the yaw target —
+   * the helm must stay the player's, whatever a storm is doing */
+  maxSeaHelmRate: number;
   /** rad of target heel per (m/s)² of lateral wind force */
   heelGain: number;
   /** heel bound, rad */
@@ -69,6 +94,19 @@ export const sailingParams: SailingParams = registerParams(
     deadZoneRamp: 0.35,
     downwindEff: 0.55,
     trimSpeed: 0.5,
+    // measured leeway at the shipped wind: ~1° running, ~3° on a beam
+    // reach, ~7° close-hauled — the classic square-rigger shape, and enough
+    // that the wake trails visibly off the quarter instead of dead astern
+    leewayRatio: 0.4,
+    maxSideForceRatio: 3,
+    // 15° of wind heel gripes her up at 0.22°/s — 13° a minute hands off,
+    // enough that the helm is a live thing, far short of rounding up
+    weatherHelmGain: 0.015,
+    // at the swell's roll rates (±0.2 rad/s) this swings the heading a
+    // couple of degrees either side of her course, at the roll period
+    rollYawGain: 0.35,
+    // 20% of full rudder: a storm can make her wander, never steer her
+    maxSeaHelmRate: 0.1,
     heelGain: 0.004,
     maxHeel: 0.35,
     heelResponse: 1.5,
@@ -89,6 +127,11 @@ export const sailingParams: SailingParams = registerParams(
     deadZoneRamp: { min: 0.01, max: 1, step: 0.01 },
     downwindEff: { min: 0, max: 1, step: 0.01 },
     trimSpeed: { min: 0.1, max: 3, step: 0.05 },
+    leewayRatio: { min: 0, max: 2, step: 0.01 },
+    maxSideForceRatio: { min: 1, max: 10, step: 0.1 },
+    weatherHelmGain: { min: 0, max: 0.2, step: 0.001 },
+    rollYawGain: { min: 0, max: 2, step: 0.01 },
+    maxSeaHelmRate: { min: 0, max: 0.5, step: 0.005 },
     heelGain: { min: 0, max: 0.02, step: 0.0005 },
     maxHeel: { min: 0, max: 0.8, step: 0.01 },
     heelResponse: { min: 0.1, max: 8, step: 0.1 },

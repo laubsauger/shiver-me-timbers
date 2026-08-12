@@ -154,8 +154,14 @@ export function createViewModes(root: HTMLElement, fullscreen: FullscreenControl
     // P as well as F2: on the reference machine the F-row is media keys unless
     // the player has changed a system setting, and a capture binding that
     // needs Fn held is not a capture binding
-    if (e.key === 'F1') {
-      e.preventDefault(); // F1 is the browser's help key
+    // Tab is the ONE key for the dev overlays, both directions. F1 stays as a
+    // synonym because the captions have taught it, but Tab is what a hand
+    // already on the keyboard reaches for and it must never be split across
+    // two owners — the debug panel used to bind Tab for its own pane while F1
+    // gated the layer, so "hide the dev stuff" took two keys and the state of
+    // one was invisible from the other.
+    if (e.key === 'Tab' || e.key === 'F1') {
+      e.preventDefault(); // Tab would move focus; F1 is the browser's help key
       dispatch({ type: 'toggleDev' });
     } else if (e.key === 'F2' || e.key === 'p' || e.key === 'P') {
       e.preventDefault();

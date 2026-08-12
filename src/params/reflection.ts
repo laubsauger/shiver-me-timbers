@@ -89,13 +89,27 @@ export const reflectionParams: ReflectionParams = registerParams(
     //
     // Why `enabled: 1` while `live: 0`: `enabled` is the CONSTRUCTION gate,
     // so leaving it on keeps the reflector node compiled into the ocean
-    // material and makes the toggle instant instead of reload-gated. The
-    // residual cost of that is one fetch of a 1×1 default texture per water
-    // pixel, multiplied by a zero weight — fully cached, well under 0.05 ms.
-    // No render target is allocated until the pass first runs. Set `enabled`
-    // to 0 for a genuinely zero-cost build (reload to apply).
+    // material and makes the toggle instant instead of reload-gated.
+    //
+    // That is NOT free, and the honest number matters. three's
+    // ReflectorBaseNode.setup() resizes its shared module-level `_defaultRT`
+    // to drawingBuffer × resolutionScale, and that target is what the ocean
+    // samples until the pass first runs. So the residual is one texture fetch
+    // per water pixel from an UNINITIALISED half-res RGBA16F target (~7 MB at
+    // 1440p), multiplied by a zero weight, plus a few ALU ops — call it
+    // 0.1–0.3 ms of bandwidth over a fill-heavy ocean, not the "1×1, fully
+    // cached" this comment used to claim. Set `enabled: 0` for a genuinely
+    // zero-cost build (reload to apply); that is the right setting for a low
+    // graphics preset, while `live` is the right one for an in-game toggle.
     enabled: 1,
-    live: 0,
+    // ON by default. Measured with GPU timestamp queries at the §T.39 sunset
+    // framing: +0.9 to +1.1 ms (367 → 556 draw calls, 978k → 1.37M tris), which
+    // matches main.ts's own estimate. It is the ONLY thing that puts the ship
+    // into the water she is floating on — the user's "floaty and disconnected"
+    // note is largely a missing reflection, and at a grazing sunset the dark
+    // shape beside a hull is its reflection, not its shadow (a shadow cannot
+    // darken reflected sky). A millisecond is the cheapest fix on the list.
+    live: 1,
     resolutionScale: 0.5,
     strength: 1.0,
     // reflections read hard next to watercolour pigment; a touch cool and

@@ -38,7 +38,18 @@ export interface OceanParams {
    * at 1σ — a third of the sea — which is what shattered storm.
    */
   choppinessFoldLimit: number;
-  /** foam: jacobian below this injects foam (§V.6, biased down in storms §V.7) */
+  /**
+   * Foam gate (§V.6, §V.7). Threshold on the SUMMED three-cascade jacobian
+   * `d0.w+d1.w+d2.w−2`, which is ≈1 at rest — read it as a σ-multiple below
+   * that rest value: at the shipped swell spectrum σ(ΣJ)=0.183, so 0.55 means
+   * "the sea is folding 2.5σ worth here", ≈0.5% of the surface.
+   *
+   * It is NOT an absolute number for one cascade's own det J (§V36, §B): a
+   * single band's σ is 2–3× narrower, so the same value there is a 5–8σ event
+   * and injects nothing. src/foam re-expresses this per band against that
+   * band's live σ (foamMath.cascadeFoamBias) — anything else reading a
+   * per-cascade `displacement.w` must do the same.
+   */
   jacobianFoamBias: number;
 }
 

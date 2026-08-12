@@ -50,10 +50,13 @@ import { bandLimitedEdge, periodResolved } from './bandLimit';
 import {
   SAIL_BELLY_FOOT,
   SAIL_BELLY_HEAD,
+  SAIL_DRAFT_MAX,
+  SAIL_DRAFT_MIN,
   SAIL_FLUTTER_BASE,
   SAIL_FLUTTER_EDGE,
   SAIL_FLUTTER_V,
   SAIL_FOOT_FILL,
+  SAIL_LEAD_MAX,
   SAIL_SKEW_LEAD,
 } from './sailShape';
 import { skyParams } from '../params/sky';
@@ -94,6 +97,10 @@ export function createSailClothMaterial(
   const uBacklitFocus = uniform(p.sailBacklitFocus);
   const uLeeDarken = uniform(p.sailLeeDarken);
   const uBillow = uniform(p.sailBillow);
+  const uDraftPos = uniform(p.sailDraftPos);
+  const uDraftFullness = uniform(p.sailDraftFullness);
+  const uFurlSwag = uniform(p.sailFurlSwag);
+  const uFurlBays = uniform(p.sailFurlBays);
   const uFlutterAmp = uniform(p.sailFlutterAmp);
   const uFlutterFreq = uniform(p.sailFlutterFreq);
   const uLuffFlap = uniform(p.sailLuffFlap);
@@ -118,20 +125,36 @@ export function createSailClothMaterial(
   // live drop = built drop × the sim's trim scale, so easing the sheets
   // shortens the canvas continuously instead of popping between trim states
   const clothScale = mix(float(1), wind.dropScale, clothWeight);
+  const builtDrop = max(shapeAttr.z, float(0.01)); // BEFORE the trim scale
   const drop = max(shapeAttr.z.mul(clothScale), float(0.01));
   // per-sail phase from its own dimensions — no two sails ripple in step (§B.4)
   const phase = hash2(vec2(width.mul(3.71), drop.mul(1.17))).mul(TAU);
 
   /** billow + flutter offset (m, along local +z = forward of the yard) */
   const clothZ = Fn(([u, v]: [ReturnType<typeof float>, ReturnType<typeof float>]) => {
-    // belly: sin² across, pinned at both leeches, shifted to leeward while
-    // turning. Transliteration of sailShape.sailClothOffset — same constants
-    // (imported, not copied), same expression order.
-    const us = clamp(u.add(uSkew.mul(SAIL_SKEW_LEAD).mul(v.oneMinus())), float(0), float(1));
-    // squared by multiplication, NOT pow(): WGSL pow() with a base that
-    // rounds a hair below zero is undefined → NaN vertices (§V28, §B.5)
-    const arch = sin(us.mul(Math.PI));
-    const across = arch.mul(arch);
+    // belly across the cloth, pinned at both leeches. Transliteration of
+    // sailShape.sailClothOffset / sailDraftLead / sailDraftProfile — same
+    // constants (imported, not copied), same expression order.
+    //
+    // The deepest point sits `sailDraftPos` aft of the luff and lags to
+    // leeward while the ship swings. Clamped to the band where the warp below
+    // stays monotone: a folded warp maps two points of cloth onto one.
+    const draft = clamp(
+      uDraftPos.sub(uSkew.mul(SAIL_SKEW_LEAD).mul(v.oneMinus())),
+      float(SAIL_DRAFT_MIN),
+      float(SAIL_DRAFT_MAX),
+    );
+    const lead = clamp(
+      float(0.5).sub(draft).div(max(sin(draft.mul(Math.PI)), float(1e-3))), // §V28 floored
+      float(-SAIL_LEAD_MAX),
+      float(SAIL_LEAD_MAX),
+    );
+    const w = clamp(u.add(lead.mul(sin(u.mul(Math.PI)))), float(0), float(1));
+    // membrane under uniform pressure with both edges held = a parabola.
+    // max() BEFORE pow(): WGSL pow() with a base that rounds a hair below zero
+    // is undefined → NaN vertices (§V28, §B.5). Chained .pow() reads
+    // receiver^arg, i.e. arc^fullness (§V23: 2-arg chained form, receiver=base)
+    const across = max(w.mul(w.oneMinus()).mul(4), float(0)).pow(uDraftFullness);
     // deepest around mid-height, tapering to the yard at the head and easing
     // back at the free foot — see sailShape.sailBellyProfile for why a single
     // monotone ramp reads as a tilted plane rather than as a belly
@@ -159,20 +182,44 @@ export function createSailClothMaterial(
     return belly.add(flutter);
   });
 
+  /**
+   * How far a point of canvas is hauled UP as the sail gathers (m).
+   * Transliteration of sailShape.sailFurlLift — same params, same order.
+   *
+   * The reef itself is the continuous `clothScale` below; this is what stops
+   * that reading as a flat rectangle sliding up a slot. The foot rises at each
+   * buntline station and swags between them, so the canvas gathers into bays.
+   */
+  const clothY = Fn(([u, v]: [ReturnType<typeof float>, ReturnType<typeof float>]) => {
+    const furl = clamp(wind.dropScale, float(0), float(1)).oneMinus();
+    // 0 at each station (a line made fast), 1 in the middle of a bay
+    const station = sin(u.mul(max(uFurlBays, float(1))).mul(Math.PI)).abs();
+    return furl.mul(uFurlSwag).mul(builtDrop).mul(v.oneMinus()).mul(station.oneMinus());
+  });
+
   const cloth = uv();
   const u0 = cloth.x;
   const v0 = cloth.y;
   const z0 = clothZ(u0, v0);
+  const y0 = clothY(u0, v0);
   // cloth hangs from the head (local y = 0), so scaling y shortens it from
   // the foot up and leaves it bent to its yard
   const hung = positionLocal.mul(vec3(1, clothScale, 1));
-  material.positionNode = hung.add(vec3(0, 0, z0.mul(clothWeight)));
+  material.positionNode = hung.add(vec3(0, y0.mul(clothWeight), z0.mul(clothWeight)));
 
   // normals rebuilt from the live surface (finite differences in cloth
-  // space) — without this the billow is invisible to the lighting
+  // space) — without this the billow is invisible to the lighting.
+  // The y components used to be (0, drop·e), i.e. the tangents pretended the
+  // panel was a plain rectangle. That was harmless while nothing moved a
+  // vertex vertically; the gather does, so both tangents now carry it or the
+  // swags would show in silhouette and not shade at all.
   const e = float(0.03);
-  const du = vec3(width.mul(e), 0, clothZ(u0.add(e), v0).sub(z0));
-  const dv = vec3(0, drop.mul(e), clothZ(u0, v0.add(e)).sub(z0));
+  const du = vec3(width.mul(e), clothY(u0.add(e), v0).sub(y0), clothZ(u0.add(e), v0).sub(z0));
+  const dv = vec3(
+    0,
+    drop.mul(e).add(clothY(u0, v0.add(e)).sub(y0)),
+    clothZ(u0, v0.add(e)).sub(z0),
+  );
   const billowNormal = cross(du, dv).normalize();
   const localNormal = mix(normalLocal, billowNormal, clothWeight).normalize();
   material.normalNode = directionToFaceDirection(
@@ -268,6 +315,10 @@ export function createSailClothMaterial(
       uBacklitFocus.value = p.sailBacklitFocus;
       uLeeDarken.value = p.sailLeeDarken;
       uBillow.value = p.sailBillow;
+      uDraftPos.value = p.sailDraftPos;
+      uDraftFullness.value = p.sailDraftFullness;
+      uFurlSwag.value = p.sailFurlSwag;
+      uFurlBays.value = p.sailFurlBays;
       uFlutterAmp.value = p.sailFlutterAmp;
       uFlutterFreq.value = p.sailFlutterFreq;
       uLuffFlap.value = p.sailLuffFlap;

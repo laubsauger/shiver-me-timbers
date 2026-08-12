@@ -325,3 +325,39 @@ export function bounceWeight(
 export function wetness(depth: number, bandAbove: number, bandBelow: number): number {
   return smoothstep(-Math.max(bandAbove, 0), Math.max(bandBelow, 1e-3), depth);
 }
+
+/**
+ * Reflected-branch reach above the waterline: exponential falloff with a HARD
+ * ceiling. The exponential ALONE only decays — it never reaches zero, so at the
+ * shipped 4.5 m falloff a deck 6 m up still receives 26% of full strength and
+ * the upper works keep a percent or two all the way into the rig. That is what
+ * the user saw as caustics "spilling way too high up on the boats". The ramp to
+ * zero at `maxHeight` is the bound; the exponential is only the shape.
+ *
+ * Mirrored by `heightFade` in causticsNode.ts.
+ */
+export function reflectedReach(
+  heightAbove: number,
+  falloff: number,
+  maxHeight: number,
+): number {
+  const h = Math.max(heightAbove, 0);
+  const decay = Math.exp(-h / Math.max(falloff, 0.01));
+  const ceil = Math.max(maxHeight, 1e-3);
+  // decreasing smoothstep (edge0 > edge1): 1 well under the ceiling, 0 above it
+  return decay * smoothstep(ceil, ceil * 0.6, h);
+}
+
+/**
+ * How much sea-bounced light a receiver whose world normal has y = `nY` can
+ * catch. This light is travelling UPWARD off the wave faces, so a deck
+ * (nY = +1) cannot be struck by it at all, while a vertical hull side (nY = 0)
+ * catches it square — which is the "light dancing on the boat" the reflected
+ * branch exists to draw. Every other face gate in this module is about the
+ * WATER's normal; this is the only one about the RECEIVER's.
+ *
+ * Mirrored by `facing` in causticsNode.ts.
+ */
+export function receiverFacing(nY: number, limit: number): number {
+  return smoothstep(Math.max(limit, 1e-3), 0, nY);
+}

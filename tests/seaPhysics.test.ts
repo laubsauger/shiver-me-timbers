@@ -19,10 +19,14 @@ import {
   type SeaPhysicsParams,
 } from '../src/params/seaPhysics';
 import { CpuOcean, cpuIFFT2D } from '../src/sea-physics/cpuOcean';
-import { stepShipBuoyancy, PROBE_LAYOUT } from '../src/sea-physics/buoyancy';
+import {
+  equilibriumDraft,
+  probeStations,
+  stepShipBuoyancy,
+} from '../src/sea-physics/buoyancy';
 import { quatFromAxisAngle, quatMul, rotateVec } from '../src/combat/quatMath';
 import { createRng } from '../src/state/rng';
-import type { ShipState } from '../src/state/simState';
+import type { ShipState, Vec3 } from '../src/state/simState';
 
 const DT = 1 / 60;
 
@@ -50,9 +54,9 @@ function makeShip(): ShipState {
   };
 }
 
-/** equilibrium draft: all probes submerged, N·k·d = m·g */
+/** equilibrium draft: whole waterplane submerged, k·d = m·g */
 function equilibriumY(p: SeaPhysicsParams): number {
-  return -(p.mass * 9.81) / (PROBE_LAYOUT.length * p.buoyancySpring);
+  return equilibriumDraft(p);
 }
 
 describe('cpuIFFT2D (§V.8: 2D transform must equal the math the GPU runs)', () => {
@@ -173,19 +177,38 @@ describe('buoyancy on flat calm water (amplitude → 0)', () => {
     expect(Math.abs(ship.velocity[1])).toBeLessThan(0.01);
   });
 
-  it('tilted ship rights itself: roll decays toward upright', () => {
-    // WHY: righting must EMERGE from probe geometry (§V.8) — if the probe
+  it('tilted ship rights itself: roll RINGS DOWN, it does not stop dead', () => {
+    // WHY: righting must EMERGE from station geometry (§V.8) — if the
     // torque sign or inertia frame is wrong the ship capsizes instead.
+    // But "upright within 15 s" was the WRONG assertion and it silently
+    // encoded a defect: it only passed while roll was damped at ζ ≈ 0.41,
+    // which is 4× a real hull's and is what made her feel dead in a seaway
+    // (§B.22). A galleon knocked over by a wave swings back PAST upright and
+    // keeps swinging for several cycles. So assert the shape, not the speed:
+    // she crosses upright repeatedly, and each swing is smaller than the
+    // last (energy leaves — no capsize, no self-excitation).
     const ocean = new CpuOcean(1, op, sp);
     ocean.update(0);
     const ship = makeShip();
     ship.position[1] = equilibriumY(sp);
     ship.quaternion = quatFromAxisAngle([0, 0, 1], 0.35); // roll about forward
-    const upStart = rotateVec(ship.quaternion, [0, 1, 0])[1];
-    for (let i = 0; i < 900; i++) stepShipBuoyancy(ship, ocean, DT, sp);
-    const upEnd = rotateVec(ship.quaternion, [0, 1, 0])[1];
-    expect(upEnd).toBeGreaterThan(upStart);
-    expect(upEnd).toBeGreaterThan(0.998); // ≈ upright
+    const rolls: number[] = [];
+    for (let i = 0; i < 3600; i++) {
+      stepShipBuoyancy(ship, ocean, DT, sp);
+      rolls.push(rollOf(ship));
+    }
+    // she swings THROUGH upright, several times: a ship, not a damper
+    let crossings = 0;
+    for (let i = 1; i < rolls.length; i++) {
+      if (rolls[i - 1] > 0 !== rolls[i] > 0) crossings++;
+    }
+    expect(crossings).toBeGreaterThanOrEqual(6); // ≥ 3 full cycles in 60 s
+    // ...and each swing is smaller: peak roll in the last 20 s is a small
+    // fraction of the first 20 s, and never exceeds where she started
+    const peak = (from: number, to: number): number =>
+      Math.max(...rolls.slice(from, to).map(Math.abs));
+    expect(peak(0, 1200)).toBeLessThanOrEqual(0.35 + 1e-6);
+    expect(peak(2400, 3600)).toBeLessThan(peak(0, 1200) * 0.5);
     expect(Number.isFinite(ship.position[1])).toBe(true);
   });
 
@@ -423,12 +446,25 @@ describe('feel targets: a 35 m hull filters the sea by WAVELENGTH', () => {
     expect(swell.rollDeg).toBeGreaterThan(4);
   });
 
-  it('point-sampling the surface WOULD make it a cork (the guard is real)', () => {
+  it('a ONE-STATION hull would be a cork (the guard is real)', () => {
     // fail loud: if this ever stops holding, the sea got so long-period
-    // that the tests above pass for free and no longer defend anything
-    const cork = testSeaParams({ hullFootprintLength: 0, hullFootprintBeam: 0 });
+    // that the tests above pass for free and no longer defend anything.
+    // The guard now collapses the hull to a single waterplane station,
+    // because that is where the fore-aft selectivity actually comes from
+    // (§B.22): the ∫ along 35 m of hull. Killing the footprint kernel no
+    // longer makes a cork, and a test that only proved the kernel was
+    // alive would defend a mechanism the ship no longer relies on.
+    const cork = testSeaParams({
+      probeSlices: 1,
+      hullFootprintLength: 0,
+      hullFootprintBeam: 0,
+    });
     const chop = rideIn(sineSea(amp, 8, [0, 1]), cork, amp);
     expect(chop.heave).toBeGreaterThan(0.3);
+    // and the shipped hull rejects the same ripple by ~an order of magnitude
+    expect(rideIn(sineSea(amp, 8, [0, 1]), sp, amp).heave).toBeLessThan(
+      chop.heave * 0.2,
+    );
   });
 });
 
@@ -446,7 +482,8 @@ describe('feel targets: added mass (a heaving hull drags water with it)', () => 
       ship.position[1] = equilibriumY(sp) + 0.3; // pluck it, let it ring
       const crossings: number[] = [];
       let prev = ship.position[1] - equilibriumY(sp);
-      for (let i = 0; i < 1200; i++) {
+      // 60 s: the periods being measured are now seconds long, not tenths
+      for (let i = 0; i < 3600; i++) {
         stepShipBuoyancy(ship, ocean, DT, sp);
         const d = ship.position[1] - equilibriumY(sp);
         if (prev > 0 !== d > 0) crossings.push(i * DT);
@@ -458,8 +495,18 @@ describe('feel targets: added mass (a heaving hull drags water with it)', () => 
     };
     const cork = measure(0);
     const heavy = measure(seaPhysicsParams.addedMassHeave);
-    expect(cork.period).toBeGreaterThan(1.1);
-    expect(cork.period).toBeLessThan(1.6); // √(g/draft), the cork bound
+    // The un-added-mass bound is 2π√(immersion/g), and the immersion is the
+    // hull's OWN — 2.44 m, her 2 m of draft plus the 0.44 m she floats down
+    // past her marks. It read 1.1–1.6 s while she displaced 150 t and sat
+    // 0.44 m into the water, which is a rowing boat's bob, and that number
+    // WAS the "feels too light" complaint (§B.27): a hull cannot read as
+    // heavy while it bobs at twice a ship's frequency, whatever it weighs.
+    const bare = testSeaParams();
+    const bareBound =
+      (2 * Math.PI * Math.sqrt(-equilibriumY(bare) + bare.hullDraft)) /
+      Math.sqrt(9.81);
+    expect(cork.period).toBeGreaterThan(bareBound * 0.9);
+    expect(cork.period).toBeLessThan(bareBound * 1.1);
     const expected = Math.sqrt(1 + seaPhysicsParams.addedMassHeave);
     expect(heavy.period / cork.period).toBeCloseTo(expected, 1);
     // and it still floats at exactly the same draft (§V.8 ride height)
@@ -554,5 +601,327 @@ describe('mirror config guards (§V.8)', () => {
     expect(
       () => new CpuOcean(1, op, testSeaParams({ mirrorResolution: 16 })),
     ).toThrow(/mirrorResolution/);
+  });
+});
+
+/**
+ * §B.22 — the four things the user said the ship was doing wrong, each as a
+ * number the sim can be held to. These are FEEL tests: every one of them is
+ * written so that it FAILS if the motion stops reading like a ship, not
+ * merely if some quantity leaves a window. Where a bound is one-sided the
+ * opposite side is asserted too, because "she barely moves" and "she is
+ * thrown about" are both wrong answers and a one-sided test greenlights one
+ * of them.
+ */
+describe('§B.22 feel: the hull answers the sea, in the right places', () => {
+  const sp = testSeaParams();
+  const amp = 1;
+
+  it('heave RAO is smooth and IN PHASE across the whole swell band', () => {
+    // THE defect behind "she dips into the water too heavily" and "she
+    // doesn't feel dynamic": 8 hand-placed probes sampled ∫b(z)h(z)dz at 8
+    // points, and 8 points cannot represent a wave the length of the ship.
+    // Measured on the old layout: λ40 → −0.28 where the true integral is
+    // +0.10 (SIGN-INVERTED — she rose on crests), λ50 → 0.18 (a null), λ70
+    // → 0.42. The sea's energy sits exactly there (mean λ ≈ 69 m), so the
+    // ship answered the swell weakly, erratically and sometimes backwards.
+    //
+    // The guard is the SHAPE, not one number: a hull shorter than the wave
+    // must ride most of it, and the response must not collapse and revive
+    // as λ sweeps. A single "λ=150 rides fine" assertion passes on the
+    // broken layout too — the notch is in the middle of the band.
+    const band = [40, 50, 60, 70, 90, 120, 150];
+    const rao = band.map((L) => rideIn(sineSea(amp, L, [0, 1]), sp, amp).heave);
+    // MONOTONE. This, not any level, is the guard: the broken layout's
+    // signature was a curve that collapsed and revived as λ swept, and a
+    // level bound can be met by a hull that is simply stiff everywhere.
+    for (let i = 1; i < rao.length; i++) {
+      expect(rao[i]).toBeGreaterThan(rao[i - 1]);
+    }
+    // she RIDES long swell (λ ≥ 2·L) and does not amplify it
+    for (let i = 0; i < band.length; i++) {
+      if (band[i] >= 90) expect(rao[i]).toBeGreaterThan(0.85);
+      expect(rao[i]).toBeLessThan(1.25);
+    }
+    // ...and she does it IN PHASE. Peak-to-peak cannot see a sign flip, and
+    // a sign flip is exactly what the old layout did at λ40: it summed to
+    // −0.28 where the integral is +0.10, so the hull ROSE INTO crests. A
+    // ship whose heave is anti-correlated with the water under her reads as
+    // erratic no matter how big the number is.
+    for (const L of [40, 90, 150]) {
+      const sea = sineSea(amp, L, [0, 1]);
+      const ship = makeShip();
+      ship.position[1] = equilibriumY(sp);
+      const ys: number[] = [];
+      const hs: number[] = [];
+      const ticks = Math.round(Math.max(60, sea.period * 16) / DT);
+      for (let i = 0; i < ticks; i++) {
+        sea.update((i + 1) * DT);
+        stepShipBuoyancy(ship, sea, DT, sp);
+        if (i < ticks * 0.6) continue;
+        ys.push(ship.position[1]);
+        hs.push(sea.heightAt(ship.position[0], ship.position[2], sea.currentTime));
+      }
+      const mean = (a: number[]) => a.reduce((x, v) => x + v, 0) / a.length;
+      const my = mean(ys);
+      const mh = mean(hs);
+      let num = 0;
+      let dy = 0;
+      let dh = 0;
+      for (let i = 0; i < ys.length; i++) {
+        num += (ys[i] - my) * (hs[i] - mh);
+        dy += (ys[i] - my) ** 2;
+        dh += (hs[i] - mh) ** 2;
+      }
+      expect(num / Math.sqrt(dy * dh)).toBeGreaterThan(0.8);
+    }
+    // and the selectivity survives: chop under half the hull's length is
+    // still averaged away, or we bought the swell back by becoming a cork
+    expect(rideIn(sineSea(amp, 12, [0, 1]), sp, amp).heave).toBeLessThan(0.15);
+  });
+
+  it('she rolls in a BEAM sea and much less in a following one', () => {
+    // Roll that does not depend on heading is not roll, it is a wobble
+    // animation. A wave running along the hull cannot roll her; one running
+    // across her must. (Old numbers: beam 6.5°, following 0.9° — the ratio
+    // was fine, the beam roll was the problem.)
+    const beam = rideIn(sineSea(amp, 90, [1, 0]), sp, amp).rollDeg;
+    const following = rideIn(sineSea(amp, 90, [0, 1]), sp, amp).rollDeg;
+    expect(beam).toBeGreaterThan(8); // a 2 m beam swell lays her over
+    expect(beam).toBeLessThan(35); // but she is not a dinghy
+    expect(beam).toBeGreaterThan(following * 5);
+  });
+
+  it('roll RINGS: ζ ≈ 0.1, so she swings, and hard rolling still stops', () => {
+    // The single number behind "it doesn't feel dynamic". A ship's roll
+    // damping ratio is 0.05–0.10 and she swings for many cycles; this hull
+    // measured 0.41 because ONE damper served heave, roll and pitch, so the
+    // (correct) decision to damp heave hard pinned her upright.
+    //
+    // The second half is why the fix needed a nonlinear term: at a flat
+    // ζ 0.10 the storm preset rolled her 180° — she went over. Damping that
+    // rises with roll RATE keeps the swing at swell rates and kills it at
+    // storm rates, which is what a real bilge does.
+    const decayZeta = (startDeg: number): number => {
+      const ocean = new CpuOcean(1, testOceanParams({ amplitude: 0 }), sp);
+      ocean.update(0);
+      const ship = makeShip();
+      ship.position[1] = equilibriumY(sp);
+      ship.quaternion = quatFromAxisAngle([0, 0, 1], (startDeg * Math.PI) / 180);
+      const peaks: number[] = [];
+      let prev = 0;
+      let prev2 = 0;
+      for (let i = 0; i < 3600; i++) {
+        stepShipBuoyancy(ship, ocean, DT, sp);
+        const r = rollOf(ship);
+        if (i > 1 && Math.abs(prev) > Math.abs(prev2) && Math.abs(prev) >= Math.abs(r)) {
+          peaks.push(Math.abs(prev));
+        }
+        prev2 = prev;
+        prev = r;
+      }
+      // log decrement over two half-cycles
+      const d = Math.log(peaks[0] / peaks[2]);
+      return d / Math.sqrt(4 * Math.PI * Math.PI + d * d);
+    };
+    const gentle = decayZeta(6);
+    expect(gentle).toBeGreaterThan(0.05); // she does settle
+    expect(gentle).toBeLessThan(0.18); // but she rings first
+    // and a violent roll is damped HARDER — the nonlinear half is live
+    expect(decayZeta(35)).toBeGreaterThan(gentle * 1.2);
+  });
+
+  it('the sea drives her FORWARD and BACK — the surge channel is not deaf', () => {
+    // "It's maybe not interacting with the water enough." Buoyancy applied
+    // no horizontal force at all: measured forward-acceleration RMS 0.000
+    // m/s² in a swell, so her speed was a pure function of wind and drag
+    // and the sea could not touch it. A hull on a wave face slides down it.
+    const run = (gain: number): number => {
+      const spx = testSeaParams({ waveSurgeGain: gain });
+      const sea = sineSea(1.5, 90, [0, 1]);
+      const ship = makeShip();
+      ship.position[1] = equilibriumY(spx);
+      let vMin = Infinity;
+      let vMax = -Infinity;
+      for (let i = 0; i < 3600; i++) {
+        sea.update((i + 1) * DT);
+        stepShipBuoyancy(ship, sea, DT, spx);
+        if (i < 1800) continue;
+        vMin = Math.min(vMin, ship.velocity[2]);
+        vMax = Math.max(vMax, ship.velocity[2]);
+      }
+      return vMax - vMin;
+    };
+    // it is the SEA doing this: at gain 0 the horizontal channel is silent
+    expect(run(0)).toBeLessThan(1e-9);
+    const swing = run(seaPhysicsParams.waveSurgeGain);
+    expect(swing).toBeGreaterThan(0.6); // felt, not a rounding error
+    expect(swing).toBeLessThan(8); // and not a surfboard
+  });
+
+  it('she takes the water "too heavily and too easily" no longer', () => {
+    // The user's second complaint, in the words they used. Freeboard is
+    // 2.6 m above the ship-space waterline plane and she floats 0.44 m
+    // below it, so immersion past 2.6 m IS green water over the rail.
+    //
+    // The complaint has two halves and both are asserted, because fixing
+    // one alone is how you get the other: "too heavily" is how DEEP, and
+    // "too easily" is how OFTEN. Old numbers in the shipped swell: peak
+    // immersion 2.75–3.10 m, i.e. she buried the rail, because she rode
+    // less than half of each passing swell instead of rising over it.
+    const measure = (amplitude: number) => {
+      const ocean = new CpuOcean(11, testOceanParams({ amplitude }), sp);
+      const ship = makeShip();
+      ship.position[1] = equilibriumY(sp);
+      let worst = 0;
+      let under = 0;
+      let n = 0;
+      let sum2 = 0;
+      for (let i = 0; i < 5400; i++) {
+        const t = (i + 1) * DT;
+        ocean.update(t);
+        stripPitchLikeSailing(ship); // real tick order (sailing runs first)
+        stepShipBuoyancy(ship, ocean, DT, sp);
+        if (i < 600) continue;
+        const h = ocean.heightAt(ship.position[0], ship.position[2], t);
+        const immersion = h - ship.position[1];
+        worst = Math.max(worst, immersion);
+        if (immersion > 2.6) under++;
+        sum2 += h * h;
+        n++;
+      }
+      return { worst, underFrac: under / n, sigma: Math.sqrt(sum2 / n) };
+    };
+
+    // the sea she is normally sailed in
+    const swell = measure(oceanParams.amplitude);
+    // guard: a calm sea would make this pass for free (§V.36 — measure
+    // against the live sea, never an absolute metre gate)
+    expect(swell.sigma).toBeGreaterThan(0.4);
+    expect(swell.worst).toBeLessThan(2.6); // the rail stays dry, always
+    // ...and she is not simply riding a foot proud of everything: the hull
+    // DOES bury, it just does not drown. A ship that never wets her topsides
+    // has stopped interacting with the water, which is complaint THREE.
+    expect(swell.worst).toBeGreaterThan(1.0);
+
+    // three times that energy: she may ship water, but rarely, and the
+    // deck must not be a permanent feature of the waterline
+    const heavy = measure(1.0);
+    expect(heavy.sigma).toBeGreaterThan(swell.sigma * 1.5);
+    expect(heavy.underFrac).toBeLessThan(0.01);
+    // runaway guard, sized off the hull and not off the last measurement:
+    // freeboard 2.6 + draft 2.0, i.e. she is never wholly under the sea
+    expect(heavy.worst).toBeLessThan(4.6);
+  });
+});
+
+/**
+ * §V.53/§V.54 — the hull as a 35 m × 8.5 m ship, not as a set of numbers
+ * that happen to produce ship-like periods.
+ *
+ * WHY this block exists: every constant in seaPhysics was individually
+ * defensible and the ensemble was still a 150 t model of a 600 t ship, which
+ * the user felt immediately ("a little bit too light… it can kinda catch
+ * airtime over the waves") and no test could see, because every test asserted
+ * an EFFECT and the effects had all been tuned to be right. These assert the
+ * constants against the object instead, in dimensionless form, so they keep
+ * their meaning through any future retune.
+ */
+describe('§V.53: the constants describe a real 35 m galleon', () => {
+  const p = testSeaParams();
+  const RHO = 1025;
+  const G = 9.81;
+  const LWL = 35.5; // waterline length the station model spans
+  const BEAM = 8.5;
+
+  it('displaces what a hull this size displaces', () => {
+    // 150 t was a large yacht. The check is against the volume she actually
+    // pushes aside: mass = ρ·∇, and ∇ is the waterplane times how deep she
+    // sits in it.
+    const immersion = -equilibriumDraft(p) + p.hullDraft;
+    const Awp = p.buoyancySpring / (RHO * G);
+    const volume = p.mass / RHO;
+    expect(p.mass).toBeGreaterThan(4.5e5); // 450 t
+    expect(p.mass).toBeLessThan(8e5); // 800 t
+    // the waterplane is the one the hull actually has
+    expect(Awp).toBeGreaterThan(0.6 * LWL * BEAM);
+    expect(Awp).toBeLessThan(0.95 * LWL * BEAM);
+    // and the three agree with each other: ∇ = A_wp · immersion is what
+    // "she floats where she floats" means, and it is the identity that was
+    // broken — 146 m³ of hull under a 302 m² waterplane is a raft
+    expect(volume / (Awp * immersion)).toBeCloseTo(1, 1);
+    // block coefficient of a tubby square-rigger, not a barge or a needle
+    const cb = volume / (LWL * BEAM * immersion);
+    expect(cb).toBeGreaterThan(0.5);
+    expect(cb).toBeLessThan(0.9);
+  });
+
+  it('has the mass distribution of a ship, not of its own periods', () => {
+    // Roll and pitch periods can be made right at ANY mass by moving the
+    // inertias, and that is exactly what had happened. The gyradius is the
+    // number that cannot be faked: it is a length, and it has to be a
+    // fraction of the hull.
+    const kPitch = Math.sqrt(p.inertiaPitch / p.mass);
+    const kRoll = Math.sqrt(p.inertiaRoll / p.mass);
+    expect(kPitch / LWL).toBeGreaterThan(0.2);
+    expect(kPitch / LWL).toBeLessThan(0.4); // was 0.73·L
+    // a square-rigger carries a lot of weight aloft, so she sits above the
+    // 0.35–0.40·B of a merchant hull — but not at 1.32·B, which is a mast
+    // with a boat attached
+    expect(kRoll / BEAM).toBeGreaterThan(0.3);
+    expect(kRoll / BEAM).toBeLessThan(0.7);
+  });
+
+  it('heaves at the period its own draft implies', () => {
+    // 2π√(immersion·(1+a)/g) is not a target, it is what a floating body
+    // DOES. Reading 2.30 s against a closed form of 4.91 s meant the hull
+    // was bobbing at twice a ship's frequency — the "too light" complaint,
+    // available as a one-line check the whole time.
+    const immersion = -equilibriumDraft(p) + p.hullDraft;
+    const closedForm =
+      2 * Math.PI * Math.sqrt((immersion * (1 + p.addedMassHeave)) / G);
+    const modelled =
+      2 * Math.PI * Math.sqrt((p.mass * (1 + p.addedMassHeave)) / p.buoyancySpring);
+    expect(modelled).toBeCloseTo(closedForm, 6);
+    expect(modelled).toBeGreaterThan(4); // a ship, not a cork
+    expect(modelled).toBeLessThan(7);
+  });
+
+  it('§V.54: she is never ballistic in the sea she is sailed in', () => {
+    // "It can kinda catch airtime over the waves." A hull whose stations sit
+    // on one plane loses ALL buoyancy 0.44 m above equilibrium and then
+    // free-falls at exactly −g. Measured before the fix: 0% of ticks at
+    // swell but peak vertical accelerations of 19.2 m/s² (2 g), and 15.4% of
+    // ticks with 1.87 s of continuous air in storm.
+    const op = testOceanParams({ amplitude: 1.0 }); // 3× the shipped swell
+    const ocean = new CpuOcean(21, op, p);
+    const ship = makeShip();
+    ship.position[1] = equilibriumY(p);
+    const stations = probeStations(p.probeSlices).stations;
+    let unsupported = 0;
+    let worstAccel = 0;
+    let n = 0;
+    for (let i = 0; i < 5400; i++) {
+      const t = (i + 1) * DT;
+      ocean.update(t);
+      const vy = ship.velocity[1];
+      let support = 0;
+      for (const st of stations) {
+        const r = rotateVec(ship.quaternion, st.local as Vec3);
+        const h = ocean.heightAt(ship.position[0] + r[0], ship.position[2] + r[2], t);
+        const d = h - (ship.position[1] + r[1]);
+        const imm = Math.min(p.hullDraft + p.hullFreeboard, Math.max(0, d + p.hullDraft));
+        support += st.weight * p.buoyancySpring * imm;
+      }
+      stepShipBuoyancy(ship, ocean, DT, p);
+      if (i < 600) continue;
+      n++;
+      if (support < 0.02 * p.mass * 9.81) unsupported++;
+      worstAccel = Math.max(worstAccel, Math.abs((ship.velocity[1] - vy) / DT));
+    }
+    expect(unsupported / n).toBeLessThan(0.005); // she stays in the water
+    expect(worstAccel).toBeLessThan(2 * 9.81); // and is never flung out of it
+    // guard: a hull that simply never moves would pass both of the above
+    expect(worstAccel).toBeGreaterThan(1);
   });
 });

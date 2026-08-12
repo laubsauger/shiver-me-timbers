@@ -197,19 +197,11 @@ export function createDebugPanel(opts: DebugPanelOpts = {}): DebugPanel {
     layerVisible = v;
     applyVisibility();
   };
-  const onKeyDown = (e: KeyboardEvent): void => {
-    if (e.key !== 'Tab') return;
-    // while the dev layer is hidden there is no panel to toggle — F1 is the
-    // way back, and silently flipping a hidden panel's state is a trap
-    if (!layerVisible) return;
-    const target = e.target as HTMLElement | null;
-    // let Tab behave normally while editing a panel text field
-    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'))
-      return;
-    e.preventDefault();
-    toggle();
-  };
-  window.addEventListener('keydown', onKeyDown);
+  // NO key binding here. Tab is bound once, in src/ui/viewModes.ts, and drives
+  // the whole dev layer through setLayerVisible(). This file used to bind Tab
+  // for its own `open` flag while F1 gated the layer, which meant two keys,
+  // two hidden states, and a Tab press that did nothing whenever the layer was
+  // already down. `open` survives only for the programmatic toggle() below.
 
   return {
     pane,
@@ -221,7 +213,6 @@ export function createDebugPanel(opts: DebugPanelOpts = {}): DebugPanel {
       applyFilter();
     },
     dispose(): void {
-      window.removeEventListener('keydown', onKeyDown);
       unsubscribe();
       pane.dispose();
       host.remove();

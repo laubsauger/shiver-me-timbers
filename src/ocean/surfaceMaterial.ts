@@ -20,9 +20,14 @@ import {
   Fn,
   cameraPosition,
   color,
+  dFdx,
+  dFdy,
   float,
   frontFacing,
+  exp2,
+  fwidth,
   linearDepth,
+  log2,
   mix,
   normalize,
   positionLocal,
@@ -65,6 +70,8 @@ export interface OceanSurfaceMaterial {
   choppinessUniform: { value: number };
   /** true when the scene-colour copy target was built for a half-float pass */
   readonly hdrSceneTarget: boolean;
+  /** live sun colour — push from the DirectionalLight every frame */
+  sunColorUniform: { value: THREE.Color };
   /** push live param values into uniforms (call per frame) */
   updateFromParams(): void;
 }
@@ -174,6 +181,28 @@ export function buildOceanSurfaceMaterial(
   const uSkySunGlow = uniform(new THREE.Vector2(sp.skySunGlowStrength, sp.skySunGlowPower));
   const uLightGain = uniform(sp.lightGain);
   const uSunTint = uniform(color(sp.sunTint));
+  /** LIVE sun colour, pushed from the DirectionalLight each frame. Every
+   *  sun-driven term must be tinted by this or the water is lit by a static
+   *  near-white sun while the sky burns amber (§T.39). */
+  const uSunLightColor = uniform(color(sp.sunTint));
+  const uSssMaxMix = uniform(sp.sssMaxMix);
+  const uSssBrightness = uniform(sp.sssBrightness);
+  const uFresnelR0 = uniform(sp.fresnelR0);
+  const uSparkleCell = uniform(
+    new THREE.Vector2(sp.sparkleCellPixels, sp.sparkleMinCell),
+  );
+  const uSpecAA = uniform(new THREE.Vector2(sp.specularAaStrength, sp.specularAaMax));
+  const uCrestFoam = uniform(
+    new THREE.Vector3(sp.crestFoamBandLow, sp.crestFoamBandHigh, sp.crestFoamStrength),
+  );
+  const uCrestFoamSlope = uniform(sp.crestFoamSlopeGate);
+  const uFoamPatch = uniform(
+    new THREE.Vector3(sp.crestFoamPatchScale, sp.crestFoamPatchLow, sp.crestFoamPatchHigh),
+  );
+  const uFoamEdge = uniform(
+    new THREE.Vector2(sp.crestFoamEdgeWidth, sp.crestFoamEdgeStrength),
+  );
+  const uFoamSkyTint = uniform(sp.foamSkyTint);
   const uShadowStrength = uniform(sp.shadowStrength);
   const uSparkleStrength = uniform(sp.sparkleStrength);
   const uSparkleScale = uniform(sp.sparkleScale);
@@ -189,6 +218,7 @@ export function buildOceanSurfaceMaterial(
   const uAbsorption = uniform(sp.absorptionDensity);
   const uRefractStrength = uniform(sp.refractionStrength);
   const uRefractTint = uniform(color(sp.refractionTint));
+  const uTransmitFloor = uniform(sp.transmissionFloor);
   const uCameraFar = uniform(5000); // synced from the live camera in update()
   // haze target colour: driven per frame from the scene fog / sky horizon
   // (see OceanSurface.update) — this literal is only the pre-first-frame value
@@ -211,6 +241,9 @@ export function buildOceanSurfaceMaterial(
   );
   const uLodSamples = uniform(new THREE.Vector2(sp.lodSamplesFull, sp.lodSamplesCut));
   const uNormalStretch = uniform(sp.normalDetailStretch);
+  const uNormPix = uniform(
+    new THREE.Vector2(sp.normalTexelFull, sp.normalTexelCut),
+  );
 
   const worldXZ = positionLocal.xz.add(originUniform);
   const camDist = worldXZ.sub(cameraPosition.xz).length();
@@ -231,7 +264,46 @@ export function buildOceanSurfaceMaterial(
   };
   const one = float(1);
   const dispLod = sim.cascades.map((c) => lodWeight(c.domain, one));
-  const normLod = sim.cascades.map((c) => lodWeight(c.domain, uNormalStretch));
+
+  /**
+   * World size of one PIXEL on the water — `fwidth` of the very coordinate
+   * every world-locked term below is evaluated at, so it is the footprint by
+   * construction. Needed at module scope because the fragment normals are
+   * band-limited against it (see normLod); also reused inside colorNode.
+   * Distance × view-angle is NOT a substitute: on a plane seen at a grazing
+   * angle the footprint is stretched by 1/sin(grazing) and runs to tens of
+   * metres, which is precisely the sunset framing.
+   */
+  const foot = fwidth(worldXZ);
+  const pixWorld = foot.x.max(foot.y).max(1e-4);
+
+  /**
+   * §V.48, this surface's own occurrence. The cascade DERIVATIVE textures are
+   * compute-written StorageTextures, so they cannot carry a mip chain: a
+   * minified `texture()` fetch is a point sample of a zero-mean slope field,
+   * i.e. per-pixel noise, and the specular lobes downstream amplify it into
+   * the fibrous golden "hair" that covers the whole sea when zoomed out
+   * (user). The gate below is the missing filtered tier: each cascade's
+   * NORMAL contribution is measured against ITS OWN texel size (domain/N —
+   * the sharpest feature it can carry, per §V.48's "measure against the
+   * feature, not the repeat") and faded out once a pixel spans more than one
+   * of them. Fading to ZERO is the correct average here, because the mean of
+   * a zero-mean slope field over a large footprint is zero — and the coarser
+   * cascade, whose texels are still resolved, keeps carrying the large-scale
+   * wave shading. That is the cascade pyramid acting as the mip chain the
+   * textures cannot have.
+   *
+   * The vertex gate above deliberately stays on VERTEX SPACING: that is the
+   * mesh's Nyquist limit, a different quantity from the screen's.
+   */
+  const texelWorld = (c: { domain: number }) =>
+    c.domain / Math.max(1, oceanParams.resolution);
+  const normLod = sim.cascades.map((c) => {
+    // smoothstep(e0,e1,x), e0 > e1: 1 below `full`, 0 above `cut` (§V23)
+    const pxPerTexel = pixWorld.div(Math.max(1e-4, texelWorld(c)));
+    const filtered = smoothstep(uNormPix.y, uNormPix.x, pxPerTexel);
+    return lodWeight(c.domain, uNormalStretch).mul(filtered);
+  });
 
   // vertex displacement: Σ cascades (λDx, h, λDz, J), each Nyquist-gated
   const sampleDisp = (i: number) =>
@@ -328,8 +400,50 @@ export function buildOceanSurfaceMaterial(
   const colorNode = Fn(() => {
     const surfacePos = vec3(worldXZ.x, totalDisp.y, worldXZ.y);
     const viewDir = normalize(cameraPosition.sub(surfacePos)); // surface → eye
-    const fresnel = pow(float(1).sub(viewDir.dot(normalWorld).max(0)), 5).clamp(0, 1);
+
+    // ── filtered specular (§V.48, Kaplanyan "filtering distributions of
+    // normals") ────────────────────────────────────────────────────────
+    // A pow(N·H, 180) lobe point-sampled on a normal field that swings
+    // through many wave faces inside one pixel returns "blazing" or "nothing"
+    // essentially at random, and boils under motion — the noise the user sees
+    // zoomed out. The cure is NOT less specular (that flattens the sea): it is
+    // to carry the sub-pixel normal VARIANCE into the lobe width, so the lobe
+    // broadens exactly where the normals are noisy and stays tight where they
+    // are coherent. σ² from screen-space derivatives, because the normals here
+    // are procedural/FFT — there is no authored normal map to mip (Toksvig).
+    // Blinn-Phong form of α'² = α² + 2σ²  ⟹  p' = p / (1 + p·σ²), and the
+    // peak scales by p'/p so the lobe's ENERGY is conserved: the glint road
+    // (low variance, coherent) survives at full brightness while isolated
+    // pixel-sized sparkles are spread back into the average they should have
+    // been. §V.44: σ² is a sum of squares (≥0) and is capped, so `gain` ∈ (0,1]
+    // and no term can grow.
+    const nDx = dFdx(normalWorld);
+    const nDy = dFdy(normalWorld);
+    const normalVar = nDx
+      .dot(nDx)
+      .add(nDy.dot(nDy))
+      .mul(uSpecAA.x)
+      .clamp(0, uSpecAA.y.max(1e-5));
+    // Schlick with the real R0 for water (0.02). The old form dropped R0 and
+    // then multiplied by a 0.13 CAP, so the sea could never show more than 13%
+    // sky — roughly right looking straight down, badly wrong at grazing
+    // incidence, and a sunset frame is nothing but grazing incidence. Physical
+    // Fresnel gives the reference's own description for free: pigment close in
+    // (steep view), sky-dominated further out (grazing).
+    const cosTheta = viewDir.dot(normalWorld).max(0);
+    const fresnel = uFresnelR0
+      .add(float(1).sub(uFresnelR0).mul(pow(float(1).sub(cosTheta), 5)))
+      .clamp(0, 1);
     const shade = mix(float(1), shadowMask, uShadowStrength);
+    // Sun-elevation gate: below the low edge there is no direct sun at all
+    // (§B: at 18.5h the sun has SET, which is why the water went dead — not a
+    // shader gate). The high edge must stay LOW or a horizon-kissing sunset
+    // loses the water's sun terms exactly where the money shot lives (§T.39).
+    const sunUpFactor = smoothstep(
+      uSunHorizonFade.x,
+      uSunHorizonFade.y.max(uSunHorizonFade.x.add(1e-4)),
+      sunDirectionUniform.y,
+    );
 
     // base water: ONE deep body tone — height only lightens value subtly.
     // A height-keyed hue shift painted wandering turquoise patches on open
@@ -409,9 +523,9 @@ export function buildOceanSurfaceMaterial(
       null,
       sceneColorTexture,
     ).rgb;
-    waterCol.assign(
-      mix(waterCol, sceneCol.mul(uRefractTint), seeThrough.mul(0.9)),
-    );
+    // NOTE: `sceneCol`/`seeThrough` are deliberately NOT composited into
+    // `waterCol` here — see the transmission channel at the fresnel split
+    // below. `waterCol` from this point on is the water's BODY radiance only.
 
     // ── light (§V20): the material owns lighting, but it owns it as TWO
     // physically distinct sources, which the single sun-tinted wrap term did
@@ -429,7 +543,7 @@ export function buildOceanSurfaceMaterial(
     const skylightCol = mix(uHazeColor, vec3(skyLum), uSkylightDesat.clamp(0, 1));
     const lightWrap = skylightCol
       .mul(uLightFloor)
-      .add(uSunTint.mul(ndl.mul(uLightGain).mul(shade)));
+      .add(uSunLightColor.mul(ndl.mul(uLightGain).mul(shade)));
     waterCol.assign(waterCol.mul(lightWrap));
 
     // Sunlight that entered the water, scattered, and came back out — the
@@ -441,7 +555,7 @@ export function buildOceanSurfaceMaterial(
     // and still vanishes when you look away, because that is correct. What
     // must not vanish is the sea looking sunlit (user).
     const bodyScatter = pow(ndl, uScatter.y.max(0.05)).mul(uScatter.x).mul(shade);
-    waterCol.assign(waterCol.add(uSss.mul(bodyScatter)));
+    waterCol.assign(waterCol.add(uSss.mul(uSunLightColor).mul(bodyScatter)));
 
     // §V.5 SSS fake: choppy horizontal offset isolates wave sides;
     // boost where the camera looks toward the sun through the crest.
@@ -473,23 +587,32 @@ export function buildOceanSurfaceMaterial(
       float(1),
       backlight,
     );
-    const sss = pow(backlight, uSssPower)
-      .mul(heightMask)
+    // §V.44 BOUNDED AT SOURCE. This lobe is keyed on view·sun, so when the
+    // camera faces a low sun the alignment holds across the WHOLE visible sea
+    // at once — not a glint road, the entire frame. As an unbounded additive
+    // term (peak 2.3 x a saturated cyan, ~40x the lit body luminance) that
+    // turned the sea electric cyan facing the sun and left it dark teal facing
+    // away: rotating the camera restaged the scene (user, 4-angle set).
+    // Three changes, all bounding rather than scaling:
+    //   1. a MIX, not an add — the sea can take the scatter colour but can
+    //      never exceed it, at any sun elevation or view angle;
+    //   2. gated by the TIGHT crest band (top ~5% of the surface), because
+    //      light only transmits where the wave is genuinely thin — the old
+    //      heightMask let it fire over every raised face;
+    //   3. tinted by the LIVE sun colour and gated by sun elevation, so a dim
+    //      amber sunset scatters dim amber light, not vivid noon cyan.
+    // Away-facing frames are untouched (backlight = 0 there), which is the
+    // point: this must not re-open the "scene goes unlit on rotation" fix.
+    const sssDrive = pow(backlight, uSssPower)
+      .mul(crestMask)
       .add(uSssAmbient.mul(crestMask).mul(ambientSunGate))
       .mul(choppyMask)
       .mul(uSssStrength)
-      .mul(shade);
-    waterCol.assign(waterCol.add(uSss.mul(sss)));
-
-    // Sun-elevation gate: below the low edge there is no direct sun at all
-    // (§B: at 18.5h the sun has SET, which is why the water went dead — not a
-    // shader gate). The high edge must stay LOW or a horizon-kissing sunset
-    // loses the water's sun terms exactly where the money shot lives (§T.39).
-    const sunUpFactor = smoothstep(
-      uSunHorizonFade.x,
-      uSunHorizonFade.y.max(uSunHorizonFade.x.add(1e-4)),
-      sunDirectionUniform.y,
-    );
+      .mul(shade)
+      .mul(sunUpFactor);
+    const sssAmount = sssDrive.clamp(0, uSssMaxMix.clamp(0, 1));
+    const scatterCol = uSss.mul(uSunLightColor).mul(uSssBrightness);
+    waterCol.assign(mix(waterCol, scatterCol, sssAmount));
 
     // ── reflected sky, unified with the live day cycle ──────────────────
     // The authored pair above is the SHAPE of the sky (horizon lighter than
@@ -532,8 +655,7 @@ export function buildOceanSurfaceMaterial(
     const skyReflCol = mix(skyCol, skyCol.mul(bodyTint), uGrazingSat);
     // §V26 planar reflections: the module replaces the CONTENT of the
     // reflected colour, never its WEIGHT — fresnel × reflectionStrength stays
-    // here, so the worst a mirror pass can do is change what that 13% is made
-    // of, and §V20's painted-water bar cannot be broken by enabling it.
+    // here, so §V20's painted-water bar is owned by this file alone.
     // Absent reflection → the analytic sky term, unchanged.
     const reflCol = reflection
       ? reflection.shade({
@@ -543,7 +665,37 @@ export function buildOceanSurfaceMaterial(
           camDist,
         })
       : skyReflCol;
-    const col = mix(waterCol, reflCol, fresnel.mul(uReflStrength)).toVar();
+
+    // ── §V.24 interface split: reflection and transmission are COMPLEMENTS ──
+    // §V.49, and both halves landed from different owners. (a) the 0.13 hard
+    // cap on `reflectionStrength` was replaced by physical Schlick at R0=0.02,
+    // which is ~9× more reflection at an ordinary 20° view (old: pow(1−cos,5)
+    // ×0.13 = 0.015; new: 0.02+0.98·pow(1−cos,5) = 0.134) and →1 at grazing;
+    // (b) `reflection.live` went 1, so that weight now carries a bright, real
+    // mirror instead of the analytic sky. Neither is wrong alone. The PRODUCT
+    // was an opaque wall, because the refracted scene was composited into
+    // `waterCol` ~150 lines up and then (i) multiplied by the water's own wrap
+    // light, (ii) mixed away by the SSS/scatter terms, and (iii) finally
+    // painted over by the mirror. A submerged hull is TRANSMITTED light; it
+    // must not be crushed together with the pigment.
+    //
+    // So: absorption stays INSIDE the volume (Beer-Lambert between the body
+    // pigment and what is behind the water — cf. the reference's "absorption
+    // applies within water, not to the interface itself"), and the interface
+    // splits that transmitted radiance against the reflection exactly once:
+    //   L = F·L_refl + (1−F)·[ T·L_behind + (1−T)·L_body ]
+    const transmitted = mix(waterCol, sceneCol.mul(uRefractTint), seeThrough.mul(0.9));
+    // §V.24 forbids "opaque-wall water @ grazing/shallow view", and Schlick
+    // alone produces exactly that: F→1 deletes the submerged geometry. Cap the
+    // mirror in proportion to `seeThrough`, so the floor exists ONLY where
+    // there is something submerged to see. Open water has nothing behind it
+    // (thickness → ∞ ⟹ seeThrough → 0), so the grazing sunset sea keeps its
+    // full physical Fresnel mirror and §T.39 is untouched.
+    const reflWeight = fresnel
+      .mul(uReflStrength)
+      .min(float(1).sub(uTransmitFloor.clamp(0, 0.9).mul(seeThrough)))
+      .clamp(0, 1);
+    const col = mix(transmitted, reflCol, reflWeight).toVar();
 
     // §V.6 foam: progressive-blur sim mask (T5) with crest→soft detail
     // blend; §V.10 wake/intersection foam (T13) combines via max — foam is
@@ -571,7 +723,80 @@ export function buildOceanSurfaceMaterial(
       // foam sits in the same light as the water (wrap floor+gain). Scalar
       // light only — sunTint here would double the warm tint (foamTintNode
       // already warms it) and low-alpha foam went beige-brown on deep teal.
-      const foamCol = uFoam
+      // INTERIM (§Rule 8 — this is NOT §T.5). The foam sim owns real whitecap
+      // injection; at normal swell it currently produces nothing, so the sea
+      // reads "synthetic, like a weird liquid" (user). This adds sparse foam on
+      // the steepest crest tops so swell is not bare, and it is σ-RELATIVE
+      // (§V.36): the same multiple of heightRms gives sparse patches in swell
+      // and heavy coverage in storm with no per-preset tuning. It combines by
+      // max, so it never fights the sim where the sim is producing foam.
+      //
+      // v2 (user, at the default swell preset): "too long, too white, too
+      // thick, too regular, too big — just too chunky, like a milk cut."
+      // ROOT SHAPE PROBLEM: a smooth gate on a smooth field. Both σ-height and
+      // slope are band-limited continuous fields, so their super-level set is
+      // a smooth connected CONTOUR — one unbroken ribbon following every crest
+      // line. That is what reads as painted-on rather than as water. Real
+      // whitecaps are patchy because breaking is a threshold on an
+      // intermittent quantity. Three changes, none of which drop the mechanism:
+      //   (a) BREAK UP — multiply coverage by a world-locked noise field, so
+      //       the ribbon becomes patches. Band-limited per §V.48 (each octave
+      //       fades to its own mean once a pixel spans a lattice cell) or this
+      //       trades chunky foam for the stipple the user already reported;
+      //   (b) TRANSLUCENT BODY — the patch body no longer reaches full
+      //       opacity. Thin foam takes the water and sky beneath it; only the
+      //       breaking edge is allowed to read white;
+      //   (c) BREAKING EDGE — a separate, much narrower gate on the extreme
+      //       crest tops AND the steepest faces, which is the bright lip in
+      //       docs/ref-storm-whitecaps.png.
+      // STILL MISSING, say so (§Rule 8): temporal decay and the trailing
+      // streaks down the wave face. Both need foam to PERSIST after the crest
+      // that made it has moved on, i.e. state — that is the foam sim's job
+      // (§T.5), not a per-pixel gate's, and it is the single biggest remaining
+      // gap between this and the reference.
+      const bandNoise = (scale: TslNode) => {
+        const s = scale.max(0.05);
+        // §V.48(b): fade the octave toward its own MEAN once one pixel spans a
+        // lattice cell — that mean IS the average the pixel should have seen.
+        // smoothstep(e0,e1,x), e0 > e1: 1 below 0.3, 0 above 1.
+        const keep = smoothstep(float(1), float(0.3), pixWorld.div(s));
+        return mix(float(0.5), valueNoise(worldXZ.div(s)), keep);
+      };
+      const patchScale = uFoamPatch.x.max(0.5);
+      const patch = bandNoise(patchScale)
+        .mul(0.62)
+        .add(bandNoise(patchScale.mul(0.34)).mul(0.38));
+      const patchGate = smoothstep(uFoamPatch.y, uFoamPatch.z, patch).clamp(0, 1);
+      const slopeGate = uCrestFoamSlope.max(0.02);
+      // σ-relative HEIGHT band (§V.36 — keeps meaning "crest tops" at any sea
+      // state) × ABSOLUTE slope gate. The slope gate is deliberately NOT
+      // σ-relative: a σ-relative pair on both axes would give literally
+      // constant coverage at every sea state, and the user wants sparse in
+      // swell, heavy in storm. Steepness is the physically honest carrier of
+      // that difference — a storm sea really is steeper, not just taller — so
+      // one pair of numbers serves calm/swell/storm without preset tuning.
+      const crestFoam = smoothstep(
+        sigma.mul(uCrestFoam.x),
+        sigma.mul(uCrestFoam.y),
+        totalDisp.y,
+      )
+        .mul(smoothstep(float(0), slopeGate, slopeMag))
+        .mul(patchGate)
+        .mul(uCrestFoam.z);
+      const breakEdge = smoothstep(
+        sigma.mul(uCrestFoam.y),
+        sigma.mul(uCrestFoam.y.add(uFoamEdge.x.max(0.05))),
+        totalDisp.y,
+      )
+        .mul(smoothstep(slopeGate, slopeGate.mul(1.9), slopeMag))
+        .mul(patchGate)
+        .mul(uFoamEdge.y);
+      foamMask = foamMask.max(crestFoam.max(breakEdge));
+      // foam takes the sky's colour — the reference's foam is warm cream, not
+      // the cool near-white it is authored as, and against a warm sunset sky a
+      // cool white foam reads wrong even once coverage is right
+      const foamBase = mix(uFoam, uHazeColor, uFoamSkyTint.clamp(0, 1));
+      const foamCol = foamBase
         .mul(foamTintNode())
         .mul(ndl.mul(uLightGain.mul(0.6)).mul(shade).add(uLightFloor.add(0.1)));
       foamAmount.assign(foamMask.clamp(0, 1).mul(0.9).mul(foamGain));
@@ -590,10 +815,27 @@ export function buildOceanSurfaceMaterial(
     const halfVec = normalize(viewDir.add(sunDirectionUniform));
     const ndoth = normalWorld.dot(halfVec).max(0);
     const sunUp = sunUpFactor;
-    const glintTrain = pow(ndoth, uGlintTrainPower);
+    // widened exponent + energy-conserving peak for one lobe (see normalVar)
+    const widen = (p: TslNode) => float(1).add(float(p).mul(normalVar));
+    const trainWiden = widen(uGlintTrainPower);
+    // the train is a FOOTPRINT (it selects where sparkles are dense), not a
+    // radiance, so it takes the widened exponent WITHOUT the energy rescale —
+    // damping it would thin the sun path instead of just de-aliasing it
+    const glintTrain = pow(ndoth, uGlintTrainPower.div(trainWiden));
     // per-cell phase offset (2nd hash) so cells twinkle independently — one
     // shared time offset pulses the whole ocean in sync (§B.4)
-    const cell = worldXZ.mul(uSparkleScale).floor();
+    // §V.48 band-limiting. World-locked 5.6 cm cells are ~24 px blocks at 2 m
+    // (white squares beside the hull) and ~0.25 px at 200 m, where the on/off
+    // threshold becomes per-pixel noise — the dense stipple over mid-distance
+    // water. Sizing cells by the pixel's own WORLD FOOTPRINT keeps them a
+    // fixed number of pixels across at every distance AND every view angle;
+    // quantising to octaves keeps them world-locked within a band so the
+    // pattern does not boil as the camera moves. (v2: the previous
+    // distance × angle estimate ignored grazing stretch, so a low camera —
+    // exactly the sunset framing — still stippled everything past mid-field.)
+    const cellTarget = pixWorld.mul(uSparkleCell.x).max(uSparkleCell.y);
+    const cellSize = exp2(log2(cellTarget).floor()).max(uSparkleCell.y);
+    const cell = worldXZ.div(cellSize).floor();
     const sparkleHash = cell.dot(vec2(127.1, 311.7)).sin().mul(43758.5453).fract();
     const phase = cell.dot(vec2(269.5, 183.3)).sin().mul(19741.77).fract();
     const wobble = phase.mul(6.28).add(timeUniform.mul(0.9)).sin().mul(0.05);
@@ -606,9 +848,13 @@ export function buildOceanSurfaceMaterial(
     const grazeFade = smoothstep(uGraze.y, uGraze.x, viewDir.y);
     // the road survives everywhere the sparkles do not: it is what makes the
     // sun's reflection READ as a path on the water rather than dots
-    const road = pow(ndoth, uGlintRoad.y).mul(uGlintRoad.x);
+    const roadWiden = widen(uGlintRoad.y);
+    const road = pow(ndoth, uGlintRoad.y.div(roadWiden))
+      .div(roadWiden)
+      .mul(uGlintRoad.x);
+    const sparkWiden = widen(uSparklePower);
     const sparkle = twinkle
-      .mul(pow(ndoth, uSparklePower))
+      .mul(pow(ndoth, uSparklePower.div(sparkWiden)).div(sparkWiden))
       .mul(uSparkleStrength)
       .mul(grazeFade)
       // hash sparkle is high-frequency detail, so it obeys the same far fade
@@ -674,8 +920,15 @@ export function buildOceanSurfaceMaterial(
   // depth lets early-Z drop the hidden ones. Measured 100 fps / 9.8 ms with
   // this on at 512² and a 4.6 km rim.
   material.depthWrite = true;
-  // §V25: visible from below (see the Snell's-window branch above)
+  // §V25: visible from below (see the Snell's-window branch above).
+  // forceSinglePass keeps DoubleSide but stops three compiling AND drawing a
+  // separate back-side pipeline: without it this material's 524k triangles are
+  // rasterised twice per frame through the heaviest fragment shader in the
+  // project. Single-pass loses the back-then-front draw ordering, which only
+  // matters where front and back faces of the SAME surface overlap in one
+  // pixel — at the §V25 waterline crossing. Watch that case.
   material.side = THREE.DoubleSide;
+  material.forceSinglePass = true;
   // §V30: the water does its own distance haze; scene fog would double it
   // and its linear ramp is the "wall" the user sees
   material.fog = false;
@@ -721,6 +974,27 @@ export function buildOceanSurfaceMaterial(
     (uSkySunGlow.value as THREE.Vector2).set(sp.skySunGlowStrength, sp.skySunGlowPower);
     uLightGain.value = sp.lightGain;
     (uSunTint.value as THREE.Color).set(sp.sunTint);
+    uSssMaxMix.value = sp.sssMaxMix;
+    uSssBrightness.value = sp.sssBrightness;
+    uFresnelR0.value = sp.fresnelR0;
+    (uSparkleCell.value as THREE.Vector2).set(sp.sparkleCellPixels, sp.sparkleMinCell);
+    (uSpecAA.value as THREE.Vector2).set(sp.specularAaStrength, sp.specularAaMax);
+    (uCrestFoam.value as THREE.Vector3).set(
+      sp.crestFoamBandLow,
+      sp.crestFoamBandHigh,
+      sp.crestFoamStrength,
+    );
+    uCrestFoamSlope.value = sp.crestFoamSlopeGate;
+    (uFoamPatch.value as THREE.Vector3).set(
+      sp.crestFoamPatchScale,
+      sp.crestFoamPatchLow,
+      sp.crestFoamPatchHigh,
+    );
+    (uFoamEdge.value as THREE.Vector2).set(
+      sp.crestFoamEdgeWidth,
+      sp.crestFoamEdgeStrength,
+    );
+    uFoamSkyTint.value = sp.foamSkyTint;
     uShadowStrength.value = sp.shadowStrength;
     uReflStrength.value = sp.reflectionStrength;
     uGrazingSat.value = sp.grazingSaturation;
@@ -739,6 +1013,7 @@ export function buildOceanSurfaceMaterial(
     uAbsorption.value = sp.absorptionDensity;
     uRefractStrength.value = sp.refractionStrength;
     (uRefractTint.value as THREE.Color).set(sp.refractionTint);
+    uTransmitFloor.value = sp.transmissionFloor;
     (uHaze.value as THREE.Vector2).set(sp.hazeStart, sp.hazeEnd);
     uHazeCurve.value = sp.hazeCurve;
     uHazeStrength.value = sp.hazeStrength;
@@ -750,6 +1025,7 @@ export function buildOceanSurfaceMaterial(
     );
     (uLodSamples.value as THREE.Vector2).set(sp.lodSamplesFull, sp.lodSamplesCut);
     uNormalStretch.value = sp.normalDetailStretch;
+    (uNormPix.value as THREE.Vector2).set(sp.normalTexelFull, sp.normalTexelCut);
   };
 
   return {
@@ -762,6 +1038,7 @@ export function buildOceanSurfaceMaterial(
     seaRmsUniform: uSeaRms as unknown as { value: number },
     choppinessUniform: uChoppiness as unknown as { value: number },
     hdrSceneTarget,
+    sunColorUniform: uSunLightColor as unknown as { value: THREE.Color },
     updateFromParams,
   };
 }

@@ -149,6 +149,21 @@ export interface CloudParams {
   /** lighting reconstruction colors: color = sunColor*R + skyColor*G */
   sunColor: number;
   skyColor: number;
+  /** §T.39 day cycle: 0..1 how far the SKYLIGHT hue follows the live horizon
+   *  haze (scene.fog.color). Hue and saturation only — the authored lightness
+   *  is pinned, which is what keeps §B.19 from coming back. */
+  skyTint: number;
+  /** 0..1 the same for the SUNLIGHT, scaled by how warm the light actually
+   *  is — at midday the haze is cyan and the sunlit faces must not follow it */
+  sunTint: number;
+  /** maps the haze's (r-b) in sRGB to that 0..1 warmth */
+  paletteWarmthGain: number;
+  /** 0..1 how far SATURATION follows the haze, separately from hue — low on
+   *  purpose, see cloudPalette.ts */
+  paletteSatFollow: number;
+  /** 0..1 how far the SUNLIGHT darkens toward the live haze brightness at
+   *  full warmth — one-directional, it can never brighten */
+  sunDarken: number;
 }
 
 const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
@@ -199,6 +214,11 @@ const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   distortStrength: { min: 0, max: 0.15, step: 0.001 },
   edgeErode: { min: 0, max: 1, step: 0.01 },
   alphaGain: { min: 0, max: 4, step: 0.05 },
+  skyTint: { min: 0, max: 1, step: 0.01 },
+  sunTint: { min: 0, max: 1, step: 0.01 },
+  paletteWarmthGain: { min: 0, max: 4, step: 0.05 },
+  paletteSatFollow: { min: 0, max: 1, step: 0.01 },
+  sunDarken: { min: 0, max: 1, step: 0.01 },
 };
 
 export const cloudParams: CloudParams = registerParams(
@@ -290,6 +310,13 @@ export const cloudParams: CloudParams = registerParams(
     // sun term, which is what gives a cloud its lit-side/shadow-side read.
     sunColor: 0xfff0d8,
     skyColor: 0x4a80b4,
+    skyTint: 0.85,
+    sunTint: 0.9,
+    // #fdb669 at the §T.39 sunset → r-b = 0.58 → warmth 0.93; #99def9 at
+    // midday → r-b negative → warmth 0, so the sun term stays as authored
+    paletteWarmthGain: 1.6,
+    paletteSatFollow: 0.35,
+    sunDarken: 0.75,
   },
   cloudParamsMeta,
 );

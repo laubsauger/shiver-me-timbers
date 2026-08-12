@@ -17,6 +17,15 @@
  * Injection capture renders ONLY layer FOAM_INJECTION_LAYER (27, owned here;
  * re-tagged from userData.foamTarget every call), depthTest OFF + additive
  * blending so submerged hull near the waterline contributes when occluded.
+ *
+ * CHANNELS of the state texture (RGBA32F — all four cost the same bandwidth as
+ * one, the format was already allocated):
+ *   r  foam coverage   accumulate + advect + decay(decayHalfLife)
+ *   g  slick coverage  accumulate + advect + decay(slickHalfLife) — the glassy
+ *                      lane that DAMPS capillary ripple (slickMath.ts)
+ *   ba transverse Kelvin slope (signed) — OVERWRITTEN every frame, never
+ *      accumulated: the Kelvin pattern is steady in the SHIP's frame, so at a
+ *      fixed world texel its phase advances and a time integral averages to 0.
  */
 import * as THREE from 'three/webgpu';
 import {
@@ -69,6 +78,13 @@ export interface AccumProfile {
   /** composite the ortho hull-waterline capture (near only) */
   useCapture: boolean;
   /**
+   * Write the transverse Kelvin crests into .ba (near only). The far tier is
+   * 2.5 m per texel and the shortest transverse wavelength in play is 5.8 m
+   * (3 m/s) — 2.3 texels per wave, below Nyquist. Writing it there would be
+   * pure aliasing into a field that ends up in the surface NORMAL (§V48/§V49).
+   */
+  useDetail: boolean;
+  /**
    * Scale on the analytic wake injection rate for this tier.
    *
    * WHY IT MUST EXIST: accumulated foam under a persistent source settles at
@@ -84,14 +100,21 @@ export interface AccumProfile {
 export function createAccumulation(
   p: FlowFoamParams,
   flowU: FlowNoiseUniforms,
-  /** extra analytic injection rate (foam/sec) at a world-XZ node — ship wake */
-  wakeRateNode?: (worldXZ: any) => any,
+  /**
+   * Analytic ship wake at a world-XZ node — vec4(foamRate, slickRate, slopeX,
+   * slopeZ). See wakeInjection.wakeFieldNode; .rg accumulate, .ba are written
+   * fresh every frame (an oscillating source integrated over time averages to
+   * zero — slickMath's header explains why the Kelvin phase must not be
+   * accumulated).
+   */
+  wakeFieldNode?: (worldXZ: any, detail: boolean) => any,
   profile: AccumProfile = {
     res: p.resolution,
     size: () => p.regionSize,
     decayHalfLife: () => p.decayHalfLife,
     useFlow: true,
     useCapture: true,
+    useDetail: true,
     wakeScale: () => 1,
   },
 ) {
@@ -120,6 +143,8 @@ export function createAccumulation(
   const uSize = uniform(profile.size());
   const uShift = uniform(new THREE.Vector2(0, 0));
   const uDecay = uniform(1);
+  /** the slick outlives the foam by an order of magnitude — see params header */
+  const uSlickDecay = uniform(1);
   const uAdvectDt = uniform(0);
   const uInjectPerFrame = uniform(0);
   const uDt = uniform(0); // wake rate is foam/sec; scaled per fixed tick (§V2)
@@ -157,7 +182,12 @@ export function createAccumulation(
   injectionMaterial.fog = false;
 
   // --- compute passes ---
-  /** load with taps outside [0,res) reading 0 (region does NOT tile) */
+  /**
+   * Load with taps outside [0,res) reading 0 (region does NOT tile).
+   * RGBA: r = foam, g = slick, ba = transverse slope. The format is RGBA32F, so
+   * a vec4 load costs exactly what the old .r load cost — the extra channels
+   * are free in bandwidth and only add ALU.
+   */
   const loadZero = (src: THREE.Texture, xi: any, yi: any) => {
     const inside = xi
       .greaterThanEqual(int(0))
@@ -165,7 +195,7 @@ export function createAccumulation(
       .and(yi.greaterThanEqual(int(0)))
       .and(yi.lessThan(int(res)));
     const clamped = ivec2(xi.clamp(0, res - 1), yi.clamp(0, res - 1));
-    return select(inside, textureLoad(src, clamped).r, float(0));
+    return select(inside, textureLoad(src, clamped), vec4(0, 0, 0, 0));
   };
 
   const advectPass = Fn(() => {
@@ -194,19 +224,33 @@ export function createAccumulation(
       const y0 = int(ty.floor());
       const fx = tx.fract();
       const fy = ty.fract();
-      const t00 = loadZero(texA, x0, y0);
-      const t10 = loadZero(texA, x0.add(1), y0);
-      const t01 = loadZero(texA, x0, y0.add(1));
-      const t11 = loadZero(texA, x0.add(1), y0.add(1));
+      // only .rg advect — the transverse slope is a fresh analytic write
+      const t00 = loadZero(texA, x0, y0).rg;
+      const t10 = loadZero(texA, x0.add(1), y0).rg;
+      const t01 = loadZero(texA, x0, y0.add(1)).rg;
+      const t11 = loadZero(texA, x0.add(1), y0.add(1)).rg;
       // §V23 functional mix(a, b, t)
       const prev = mix(mix(t00, t10, fx), mix(t01, t11, fx), fy);
       const inject = profile.useCapture
         ? textureLoad(injectionRT.texture, ivec2(x, y)).r
         : float(0);
       // analytic ship wake composes ADDITIVELY with the ortho capture
-      const wake = wakeRateNode ? wakeRateNode(vec2(wx, wz)).mul(uDt).mul(uWakeScale) : float(0);
-      const foam = prev.mul(uDecay).add(inject.mul(uInjectPerFrame)).add(wake).min(1);
-      textureStore(texB, ivec2(x, y), vec4(foam, 0, 0, 1)).toWriteOnly();
+      const wake = wakeFieldNode
+        ? wakeFieldNode(vec2(wx, wz), profile.useDetail)
+        : vec4(0, 0, 0, 0);
+      const rate = wake.mul(uDt).mul(uWakeScale);
+      const foam = prev.x.mul(uDecay).add(inject.mul(uInjectPerFrame)).add(rate.x).min(1);
+      // the slick is a coverage that BUILDS and then relaxes — same accumulate/
+      // decay shape as the foam, an order of magnitude slower (a real slick
+      // outlives the whitewater that made it by minutes)
+      const slick = prev.y.mul(uSlickDecay).add(rate.y).min(1);
+      // .ba: NOT accumulated. §V44 clamped at source — the material adds these
+      // straight onto the surface slope.
+      textureStore(
+        texB,
+        ivec2(x, y),
+        vec4(foam, slick, wake.z.clamp(-1, 1), wake.w.clamp(-1, 1)),
+      ).toWriteOnly();
     });
   })().compute(res * res);
 
@@ -214,7 +258,7 @@ export function createAccumulation(
     If(instanceIndex.lessThan(uint(res * res)), () => {
       const x = int(instanceIndex.modInt(res));
       const y = int(instanceIndex.div(uint(res)));
-      const sum = float(0).toVar();
+      const sum = vec4(0, 0, 0, 0).toVar();
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
           const sx = x.add(int(uBlurRadius.mul(dx).round()));
@@ -224,10 +268,17 @@ export function createAccumulation(
         }
       }
       // partial blur (§V23 functional mix): full 3×3 every frame at 60+fps
-      // flattens streaks to mush — blurMix keeps structure while softening
+      // flattens streaks to mush — blurMix keeps structure while softening.
+      // All four channels take the same kernel: the weights sum to 1, so the
+      // signed slope in .ba is low-passed (a 1-texel kernel barely touches a
+      // 6 m wave) rather than biased.
       const center = loadZero(texB, x, y);
-      const foam = mix(center, sum, uBlurMix).min(1);
-      textureStore(texA, ivec2(x, y), vec4(foam, 0, 0, 1)).toWriteOnly();
+      const v = mix(center, sum, uBlurMix);
+      textureStore(
+        texA,
+        ivec2(x, y),
+        vec4(v.x.min(1), v.y.min(1), v.z.clamp(-1, 1), v.w.clamp(-1, 1)),
+      ).toWriteOnly();
     });
   })().compute(res * res);
 
@@ -296,6 +347,7 @@ export function createAccumulation(
     step(renderer: THREE.WebGPURenderer, dt: number): void {
       uSize.value = profile.size();
       uDecay.value = decayFactorPerFrame(profile.decayHalfLife(), dt);
+      uSlickDecay.value = decayFactorPerFrame(p.slickHalfLife, dt);
       uAdvectDt.value = p.advectSpeed * dt;
       uInjectPerFrame.value = p.injectStrength * dt;
       uDt.value = dt;

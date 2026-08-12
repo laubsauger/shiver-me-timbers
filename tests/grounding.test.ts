@@ -16,7 +16,7 @@ import { createHullContact, waterlineFromBox } from '../src/sea-physics/hullCont
 import { groundGrip, stepShipGrounding, type SeabedField } from '../src/sea-physics/grounding';
 import { stepShipSailing, type Wind } from '../src/sailing/shipKinematics';
 import { neutralInput } from '../src/sailing/input';
-import { stepShipBuoyancy, PROBE_LAYOUT } from '../src/sea-physics/buoyancy';
+import { equilibriumDraft, stepShipBuoyancy } from '../src/sea-physics/buoyancy';
 import type { ShipState } from '../src/state/simState';
 
 const DT = 1 / 60;
@@ -40,8 +40,7 @@ function makeShip(): ShipState {
     damage: {},
   };
 }
-const equilibriumY = (p: SeaPhysicsParams): number =>
-  -(p.mass * 9.81) / (PROBE_LAYOUT.length * p.buoyancySpring);
+const equilibriumY = (p: SeaPhysicsParams): number => equilibriumDraft(p);
 
 const flatSea = (level = 0) => {
   let t = 0;
@@ -77,6 +76,29 @@ const SHOAL = (bedY: number): SeabedField => ({ heightAt: () => bedY });
  */
 const bitesKeelBy = (bite: number, sp: SeaPhysicsParams): SeabedField =>
   SHOAL(equilibriumY(sp) - DRAFT + bite);
+
+/**
+ * A shoal that makes the SEABED CARRY `frac` of the ship's weight once she
+ * has settled on it — which is the quantity every test below actually means
+ * by "hard aground" or "a light touch", because grip is μ·N/m and N is
+ * exactly that load.
+ *
+ * WHY this exists (§B.27): the depths used to be written as metres of bite,
+ * and metres of bite stopped meaning what they meant the moment the hull got
+ * its real displacement and its real reserve buoyancy. She now floats 2.44 m
+ * into her own hull instead of 0.44 m, and — the part that actually bit —
+ * her buoyancy no longer VANISHES when the waterline plane clears the water,
+ * it fades over the whole 2 m of draft. So a bank that lifts her 1.2 m used
+ * to leave her with nothing under her but sand, and now leaves her 83%
+ * afloat: a light touch, correctly, and the sails walked her over it at 4
+ * m/s. Nothing in grounding changed and its force balance still closes.
+ *
+ * She rests where buoyancy + bed = weight, and with the plane a height `−B`
+ * above the sea the buoyancy is K·(−B) (see buoyancy.immersedDepth), so the
+ * bed level for a given load fraction is algebra, not a magic number.
+ */
+const takesWeight = (frac: number, sp: SeaPhysicsParams): SeabedField =>
+  SHOAL(-((sp.mass * 9.81 * (1 - frac)) / sp.buoyancySpring));
 
 function sail(
   seabed: SeabedField,
@@ -157,8 +179,12 @@ describe('the four words: touches, slows, lists, holds', () => {
     const speed = Math.hypot(r.ship.velocity[0], r.ship.velocity[2]);
     expect(r.everAground).toBe(true);
     expect(speed).toBeLessThan(1); // she is stopped by the end...
-    // ...but she travelled to get there: a wall would stop her in ~0 m
-    expect(r.ship.position[2]).toBeGreaterThan(3);
+    // ...but she travelled to get there: a wall would stop her in ~0 m.
+    // 1.5 m is ~90 ticks of decelerating from 8 m/s. (It was 3 m while
+    // buoyancy was ALSO integrating the planar channel that this harness
+    // integrates above — every distance in this file read exactly 2×,
+    // §B.22.)
+    expect(r.ship.position[2]).toBeGreaterThan(1.5);
   });
 
   it('HOLDS: aground and stopped, she stays stopped', () => {
@@ -263,7 +289,9 @@ describe('the sails cannot drive her over the bank (user bug)', () => {
   });
 
   it('hard aground under full sail: she STOPS and stays stopped', () => {
-    const r = voyage(SHOAL(-(DRAFT - 0.8)), 25);
+    // the bank takes three quarters of her weight: μ·N/m = 7.4 m/s² against
+    // a best-case 3.6 m/s² of thrust, so canvas cannot move her
+    const r = voyage(takesWeight(0.75, testSeaParams()), 25);
     expect(r.speed).toBeLessThan(0.3);
     // the whole point: no crawling onward while the sails are still drawing
     expect(r.crept).toBeLessThan(0.5);
@@ -280,10 +308,11 @@ describe('the sails cannot drive her over the bank (user bug)', () => {
   it('a light touch only slows her — grounding is not a binary wall', () => {
     // WHY: a hard "aground = stopped" switch would make every shoal a
     // cliff. Brushing a bank should scrub speed and let her sail clear.
-    // Measured gradient at 11 m/s of wind: 0.03 m of bite → 12.6 m/s,
-    // 0.08 → 11.0, 0.15 → 8.3, 0.3 → stopped. One model, no switch.
+    // Measured gradient at 11 m/s of wind, by the load the bank takes:
+    // 10% of her weight → 11.5 m/s, 25% → 9.2, 40% → 6.0, 60% → stopped.
+    // One model, no switch.
     const sp = testSeaParams();
-    const light = voyage(bitesKeelBy(0.08, sp), 20, sp);
+    const light = voyage(takesWeight(0.1, sp), 20, sp);
     const free = voyage(OPEN, 20, sp);
     expect(light.speed).toBeGreaterThan(0.5); // still moving...
     expect(light.speed).toBeLessThan(free.speed * 0.95); // ...but held back
@@ -291,7 +320,7 @@ describe('the sails cannot drive her over the bank (user bug)', () => {
 
   it('and the hold deepens smoothly as she drives further on', () => {
     const sp = testSeaParams();
-    const speeds = [0.03, 0.08, 0.15, 0.3].map((b) => voyage(bitesKeelBy(b, sp), 20, sp).speed);
+    const speeds = [0.1, 0.25, 0.4, 0.6].map((f) => voyage(takesWeight(f, sp), 20, sp).speed);
     for (let i = 1; i < speeds.length; i++) expect(speeds[i]).toBeLessThan(speeds[i - 1]);
     expect(speeds[speeds.length - 1]).toBeLessThan(0.3); // ...and finally holds
   });

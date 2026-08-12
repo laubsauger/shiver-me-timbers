@@ -183,7 +183,23 @@ export const weatherPresets: Readonly<
       // rest) — very nearly the whole sea on ANY spectrum, which is what made
       // storm read as blobby noise. Storm's extra foam must come from the sea
       // genuinely folding more (amplitude + choppiness), not from lowering the
-      // detection bar: sits just above swell's 0.55 (§V7).
+      // detection bar (§V7).
+      //
+      //
+      // PARKED, DO NOT TUNE (2026-08-12). Once src/foam's §V36 gate was fixed
+      // this value puts 22.7% of EACH band into foam (~54% of the sea in
+      // union) and the obvious move was to drop it to ~0.35. That move is
+      // WRONG while the user is also reporting storm crests that "cross over
+      // and twist": a surface whose choppy displacement has gone
+      // non-monotonic has det J ≤ 0 over large areas BY DEFINITION, and det J
+      // is exactly what foam injects from. Heavy storm foam would then be the
+      // foam sim faithfully reporting a folded surface, and lowering this
+      // number would hide an ocean-side defect inside a foam threshold —
+      // §V44's "bound it at the source" applied to the fold: a fold cannot be
+      // un-folded downstream. It would also have to be un-hidden the moment
+      // the choppiness clamp lands, at which point storm foam vanishes again
+      // and reads as a fresh regression. Retune only AFTER the clamp, and
+      // measure the fold fraction first.
       jacobianFoamBias: 0.62,
     },
     sky: {

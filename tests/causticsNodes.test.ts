@@ -20,6 +20,11 @@ import {
   waterLighting,
 } from '../src/caustics';
 import { causticsParams } from '../src/params/caustics';
+import { skyParams } from '../src/params/sky';
+import {
+  createWaterLightingUniforms,
+  refreshWaterLightingUniforms,
+} from '../src/caustics/waterLighting';
 
 const sim = createOceanSim(1234);
 
@@ -127,5 +132,65 @@ describe('water lighting integration surface', () => {
   it('rejects a reversed hull loudly rather than mapping every fragment to one end', () => {
     expect(() => createCaustics(sim).attachHullWetline({ bowZ: -5, sternZ: 5 }))
       .toThrow(/bowZ/);
+  });
+});
+
+/**
+ * THE SEA'S BOUNCE COLOUR IS A SKY QUANTITY (§T.39).
+ *
+ * The user: "the water is not really affecting what happens to the ship… that
+ * makes stuff floaty and disconnected in terms of lighting situation."
+ *
+ * There were TWO sources of truth for "what colour is the sea throwing up onto
+ * the hull": an authored teal `bounceColor` (#2a9a9c), and `skyPalette().ground`
+ * — whose sunset hex is documented as "sea bounce at golden hour, the water
+ * throws back the orange sky" and which crossfades on the same shared `warm`
+ * weight as the sky, the fog and the ambient. The hull read the one that could
+ * not warm, so at a full amber sunset the sea lit the ship teal.
+ *
+ * These tests pin the coupling, because a colour that silently stops following
+ * is exactly the failure §B.9 and §T.39 keep producing.
+ */
+describe('water bounce fill follows the live sky', () => {
+  const readBounce = (timeOfDay: number): THREE.Color => {
+    const prev = skyParams.timeOfDay;
+    skyParams.timeOfDay = timeOfDay;
+    try {
+      const u = createWaterLightingUniforms();
+      refreshWaterLightingUniforms(u);
+      return (u.bounceColor.value as THREE.Color).clone();
+    } finally {
+      skyParams.timeOfDay = prev;
+    }
+  };
+
+  it('warms toward the sunset ground colour as the sun drops', () => {
+    const noon = readBounce(12);
+    const sunset = readBounce(17.7);
+    // red/blue ratio is the honest measure of "warm" — absolute brightness
+    // moves for other reasons, the HUE shift is what we are asserting
+    const warmth = (c: THREE.Color): number => c.r / Math.max(c.b, 1e-6);
+    expect(warmth(sunset)).toBeGreaterThan(warmth(noon) * 1.5);
+  });
+
+  it('is teal-dominated at noon — the authored look is not thrown away', () => {
+    const noon = readBounce(12);
+    expect(noon.b).toBeGreaterThan(noon.r);
+    expect(noon.g).toBeGreaterThan(noon.r);
+  });
+
+  it('bounceFollowSky = 0 restores the fixed authored colour exactly', () => {
+    const prev = causticsParams.bounceFollowSky;
+    causticsParams.bounceFollowSky = 0;
+    try {
+      const noon = readBounce(12);
+      const sunset = readBounce(17.7);
+      expect(sunset.getHexString()).toBe(noon.getHexString());
+      expect(sunset.getHexString()).toBe(
+        new THREE.Color(causticsParams.bounceColor).getHexString(),
+      );
+    } finally {
+      causticsParams.bounceFollowSky = prev;
+    }
   });
 });

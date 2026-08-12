@@ -84,6 +84,27 @@ export interface RopeParams {
   blockSize: number;
   /** weathered block wood albedo */
   blockColorHex: number;
+  /** the sheave (the wheel in the slot) — darker end-grain, and the ONLY
+   *  high-contrast feature on the shell, so it is band-limited by distance */
+  blockSheaveColorHex: number;
+  /** faces around the shell's lathe (startup-only: it sizes the geometry).
+   *  A block is a 0.25 m object read at 3 px on the hero shots — 8 is already
+   *  past the point where more faces change the silhouette */
+  blockSegments: number;
+  /** where along its rope a block hangs, as a curve parameter. 0 puts the
+   *  crown exactly on the socket, which is where a block seized to a yard end
+   *  belongs; a small offset seizes it into the LINE instead, so it rides the
+   *  rope's sag and swing rather than only the ship */
+  blockAnchorT: number;
+  /** slack (length ÷ chord − 1) at which a line stops pulling on its block at
+   *  all: at 0 slack the block lies along the line, at this much it hangs
+   *  plumb. Standing rigging runs ~0.004, running gear ~0.02 (§V46 moves it) */
+  blockSlackSpan: number;
+  /** §V48: projected shell width (px) below which the sheave/strop contrast is
+   *  fully faded into the shell tone, and above which it is drawn in full.
+   *  The slot is ~1/6 of the shell, so it goes sub-pixel that much sooner */
+  blockDetailMinPx: number;
+  blockDetailMaxPx: number;
 }
 
 const meta: Partial<Record<keyof RopeParams, ParamMeta>> = {
@@ -111,6 +132,11 @@ const meta: Partial<Record<keyof RopeParams, ParamMeta>> = {
   farRadialSegments: { min: 3, max: 8, step: 1 },
   maxBlocks: { min: 0, max: 64, step: 1 },
   blockSize: { min: 0.1, max: 0.6, step: 0.01 },
+  blockSegments: { min: 5, max: 16, step: 1 },
+  blockAnchorT: { min: 0, max: 0.3, step: 0.005 },
+  blockSlackSpan: { min: 0.002, max: 0.2, step: 0.002 },
+  blockDetailMinPx: { min: 1, max: 40, step: 0.5 },
+  blockDetailMaxPx: { min: 2, max: 120, step: 1 },
 };
 
 export const ropeParams: RopeParams = registerParams(
@@ -143,6 +169,12 @@ export const ropeParams: RopeParams = registerParams(
     maxBlocks: 20,
     blockSize: 0.25,
     blockColorHex: 0x5a4632,
+    blockSheaveColorHex: 0x33251a,
+    blockSegments: 8,
+    blockAnchorT: 0.04,
+    blockSlackSpan: 0.03,
+    blockDetailMinPx: 5,
+    blockDetailMaxPx: 22,
   },
   meta,
 );

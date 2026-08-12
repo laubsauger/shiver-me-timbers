@@ -1,7 +1,7 @@
 /**
  * Pure CPU mirrors of the ship-wake GPU math (§V10 follow-up) — ZERO three
  * imports, same mirror contract as flowMath.ts. GPU twin:
- * wakeInjection.wakeRateNode; change one side → change the other.
+ * wakeInjection.wakeFieldNode; change one side → change the other.
  *
  * THE MODEL (see wakeTrack.ts for why the old ship-local one was thrown out):
  * every feature is a function of a point's position in the CUTWATER TRACK
@@ -144,6 +144,10 @@ export interface TrackProjection {
   speed: number;
   /** signed lateral offset (m); + = starboard of the track */
   lateral: number;
+  /** unit forward X the track had here — the frame's along-track axis */
+  fx: number;
+  /** unit forward Z the track had here */
+  fz: number;
 }
 
 const NO_PROJECTION: TrackProjection = {
@@ -152,11 +156,13 @@ const NO_PROJECTION: TrackProjection = {
   age: 0,
   speed: 0,
   lateral: 0,
+  fx: 0,
+  fz: 1,
 };
 
 /**
  * Nearest point on the cutwater polyline, with age/dist/speed interpolated
- * along the hit segment. GPU twin: the Loop in wakeInjection.wakeRateNode.
+ * along the hit segment. GPU twin: the Loop in wakeInjection.wakeFieldNode.
  *
  * WHY nearest-point is the right frame: on a straight course the nearest track
  * point to a wake query sits exactly abeam of it, so `dist` equals the classic
@@ -170,7 +176,7 @@ const NO_PROJECTION: TrackProjection = {
 export function projectOnTrack(points: TrackSample[], wx: number, wz: number): TrackProjection {
   if (points.length < 2) return NO_PROJECTION;
   let best = Infinity;
-  const out: TrackProjection = { found: true, dist: 0, age: 0, speed: 0, lateral: 0 };
+  const out: TrackProjection = { found: true, dist: 0, age: 0, speed: 0, lateral: 0, fx: 0, fz: 1 };
   for (let i = 0; i + 1 < points.length; i++) {
     const a = points[i];
     const b = points[i + 1];
@@ -194,6 +200,10 @@ export function projectOnTrack(points: TrackSample[], wx: number, wz: number): T
     out.age = a.age + (b.age - a.age) * t;
     out.speed = a.speed + (b.speed - a.speed) * t;
     out.lateral = (lat < 0 ? -1 : 1) * Math.sqrt(d2);
+    // the frame's forward, from the SAME endpoint the lateral sign came from —
+    // the transverse-wave slope points along it (slickMath)
+    out.fx = a.fx;
+    out.fz = a.fz;
   }
   return out;
 }
@@ -201,7 +211,7 @@ export function projectOnTrack(points: TrackSample[], wx: number, wz: number): T
 /**
  * Displacement bow wave (foam/second) in the LIVE stem frame — the mound of
  * water a hull shoves ahead of itself. GPU twin: the mound block in
- * wakeInjection.wakeRateNode.
+ * wakeInjection.wakeFieldNode.
  *
  * Shape: the crest peaks `moundLead` metres AHEAD of the stem on the
  * centreline and sweeps aft by `moundSweep` per metre outboard, so its tips
@@ -248,7 +258,7 @@ export function bowMoundCpu(
  * evaluated in the track frame. Port/starboard symmetric EXCEPT the shed
  * vortex street, which alternates sides by construction (that asymmetry is the
  * signature of a real vortex street, and the tests pin it).
- * GPU twin: wakeInjection.wakeRateNode — keep formulas identical.
+ * GPU twin: wakeInjection.wakeFieldNode — keep formulas identical.
  */
 export function wakeTrailCpu(
   points: TrackSample[],

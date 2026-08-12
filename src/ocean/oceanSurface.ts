@@ -65,6 +65,7 @@ export class OceanSurface {
   readonly group: THREE.Group;
   readonly mesh: THREE.Mesh;
   private sim: OceanSimulation;
+  private sunLight: THREE.DirectionalLight | null;
   /** guards the one-shot warning below */
   private warnedHdrMismatch = false;
   private surface: OceanSurfaceMaterial;
@@ -77,6 +78,7 @@ export class OceanSurface {
     opts: OceanSurfaceOptions = {},
   ) {
     this.sim = sim;
+    this.sunLight = opts.sunLight ?? null;
     this.grid = opts.grid ?? gridFromParams();
     this.surface = buildOceanSurfaceMaterial(
       sim,
@@ -112,6 +114,9 @@ export class OceanSurface {
     // normals must solve the same surface the vertices drew (§B storm fold)
     this.surface.choppinessUniform.value = this.sim.effectiveChoppiness();
     if (sunDirection) this.surface.sunDirectionUniform.value.copy(sunDirection);
+    // live sun COLOUR: every sun-driven water term is tinted by it, so a dim
+    // amber sunset scatters dim amber light instead of static near-white
+    if (this.sunLight) this.surface.sunColorUniform.value.copy(this.sunLight.color);
     // §B.3: linearDepth() is normalized over the camera range — the material
     // needs the live far plane to turn it back into meters
     const persp = camera as THREE.PerspectiveCamera;

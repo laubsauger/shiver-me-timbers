@@ -54,12 +54,31 @@ const EPS = 1e-4;
 export interface CloudMirrorSource {
   /**
    * The blurred cloud texture — the SAME one the main composite samples
-   * (`blur.output` inside src/clouds). Not currently exposed by CloudsHandle;
-   * see src/reflection/index.ts for the one-line integration note.
+   * (`CloudsHandle.blurredTexture`).
    */
   blurred: THREE.Texture;
   /** cloud seed — the erosion noise must match the main composite's */
   seed: number;
+  /**
+   * This frame's resolved sun/sky pair (`CloudsHandle.sunColorLive` /
+   * `skyColorLive`). These are the composite's own uniform values: Color
+   * objects the clouds system MUTATES IN PLACE every frame from the live sky
+   * palette (§T.39, driven off `scene.fog.color`). Held by reference and
+   * copied each frame.
+   *
+   * Reading `params.sunColor` / `params.skyColor` instead is the bug this
+   * replaced: those hexes are the midday authoring values, so at the golden
+   * hour the real clouds warm to #fdb669 while their reflection stays cold —
+   * warm sky over a cold sea, the exact failure the ocean and clouds have
+   * both just fixed on their side.
+   *
+   * §V31 note: these are already in the LINEAR working space (the clouds
+   * system converted them at its own uniform boundary). Copy them; never
+   * re-enter them through set()/setHex(), which would apply the sRGB
+   * transfer a second time.
+   */
+  sunColorLive: THREE.Color;
+  skyColorLive: THREE.Color;
   /** live cloud params (shared object, read every frame) */
   params: CloudParams;
 }
@@ -84,8 +103,9 @@ export function createCloudMirror(src: CloudMirrorSource): CloudMirror {
   const noiseTex = createNoiseTexture(src.seed);
 
   const uTime = uniform(0);
-  const uSunColor = uniform(new THREE.Color(p.sunColor));
-  const uSkyColor = uniform(new THREE.Color(p.skyColor));
+  // seeded from the LIVE pair, not the params hexes — see CloudMirrorSource
+  const uSunColor = uniform(new THREE.Color().copy(src.sunColorLive));
+  const uSkyColor = uniform(new THREE.Color().copy(src.skyColorLive));
   const uDistortScale = uniform(p.distortScale);
   const uDistortStrength = uniform(p.distortStrength);
   const uEdgeErode = uniform(p.edgeErode);
@@ -163,8 +183,10 @@ export function createCloudMirror(src: CloudMirrorSource): CloudMirror {
     quad,
     update(mainCamera, mirrorPosition, mirrorQuaternion, time): void {
       uTime.value = time * p.distortSpeed;
-      uSunColor.value.setHex(p.sunColor);
-      uSkyColor.value.setHex(p.skyColor);
+      // track the day cycle: the clouds system rewrote these in place this
+      // frame, before this call (main.ts runs clouds.update() first)
+      uSunColor.value.copy(src.sunColorLive);
+      uSkyColor.value.copy(src.skyColorLive);
       uDistortScale.value = p.distortScale;
       uDistortStrength.value = p.distortStrength;
       uEdgeErode.value = p.edgeErode;

@@ -465,8 +465,13 @@ describe('debug vantage (setDebugPose)', () => {
   it('holds a vantage right up against the hull — no minRadius floor', () => {
     const rig = mountCam();
     try {
-      // the caustics agent needed metres, not the ~25 m follow mode gave
-      const close: [number, number, number] = [1.5, 1.2, 3];
+      // the caustics agent needed metres, not the ~25 m follow mode gave.
+      // Derived from minRadius rather than written as a literal: the point of
+      // this test is that the pin OUTRANKS the zoom floor, so it has to stay
+      // inside whatever that floor currently is. A hardcoded 3.56 m silently
+      // stopped testing anything the day minRadius dropped below it.
+      const d = cameraParams.minRadius * 0.4;
+      const close: [number, number, number] = [d * 0.45, d * 0.36, d * 0.81];
       rig.cam.setDebugPose(close, [0, 1, 3]);
       for (let i = 0; i < 300; i++) rig.cam.update(rig.ship, 1 / 60);
       expect(rig.camera.position.toArray()).toEqual(close);
@@ -662,6 +667,113 @@ describe('camera vs the interpolated render view', () => {
         expect(steps[i]).toBeLessThanOrEqual(steps[i - 1] + 1e-9);
       }
       expect(camera.position.distanceTo(pivot)).toBeCloseTo(cameraParams.radius, 1);
+    } finally {
+      rig.done();
+    }
+  });
+});
+
+/**
+ * HELM POV (H) — the captain's eye. Requested for the showcase recording:
+ * "a way to snap to a nice position at the helm that doesn't clip through
+ * stuff so we can POV the captain on the helm in an instant."
+ *
+ * The eye is rigidly parented to the deck. That is not an implementation
+ * detail — it is the shot: heel, pitch and heave all arrive for free, and any
+ * smoothing would slide the captain around his own deck instead.
+ */
+describe('helm POV rides the deck', () => {
+  const WHEEL: [number, number, number] = [0, 6.1, -12.4];
+
+  it('snaps instantly — no glide, no smoothing lag', () => {
+    const rig = mountCam();
+    try {
+      rig.cam.setHelmAnchor(WHEEL);
+      rig.cam.setMode('helm');
+      rig.cam.update(rig.ship, 1 / 60);
+      const firstFrame = rig.camera.position.clone();
+      // a mode that eased in would still be travelling many frames later
+      for (let i = 0; i < 60; i++) rig.cam.update(rig.ship, 1 / 60);
+      expect(rig.camera.position.distanceTo(firstFrame)).toBeLessThan(1e-9);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('sits at the wheel, at eye height, and ABAFT it — not inside the hub', () => {
+    const rig = mountCam();
+    try {
+      rig.cam.setHelmAnchor(WHEEL);
+      rig.cam.setMode('helm');
+      rig.cam.update(rig.ship, 1 / 60);
+      const p = rig.camera.position;
+      expect(p.y).toBeCloseTo(WHEEL[1] + cameraParams.helmEyeHeight, 6);
+      // ship forward is local +z, so aft is -z: the lens must be BEHIND the
+      // wheel or the near plane slices its spokes and the shot loses the prop
+      expect(p.z).toBeCloseTo(WHEEL[2] - cameraParams.helmAft, 6);
+      expect(cameraParams.helmAft).toBeGreaterThan(0);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('inherits the ship’s heel — the horizon rolls, which is the whole shot', () => {
+    const rig = mountCam();
+    try {
+      rig.cam.setHelmAnchor(WHEEL);
+      rig.cam.setMode('helm');
+      rig.cam.update(rig.ship, 1 / 60);
+      const upright = rig.camera.position.clone();
+
+      // heel 20° to starboard: rotation about the ship's own forward axis (+z)
+      const a = (20 * Math.PI) / 180 / 2;
+      rig.ship.quaternion = [0, 0, Math.sin(a), Math.cos(a)];
+      rig.cam.update(rig.ship, 1 / 60);
+
+      // the eye swings out with the deck rather than staying world-vertical
+      expect(rig.camera.position.distanceTo(upright)).toBeGreaterThan(0.5);
+      // and the lens rolls with her: world-up is no longer the camera's up
+      expect(rig.camera.up.y).toBeLessThan(0.999);
+      expect(rig.camera.up.length()).toBeCloseTo(1, 6);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('tracks the ship as she sails, with zero lag', () => {
+    const rig = mountCam();
+    try {
+      rig.cam.setHelmAnchor(WHEEL);
+      rig.cam.setMode('helm');
+      rig.cam.update(rig.ship, 1 / 60);
+      const before = rig.camera.position.clone();
+
+      rig.ship.position = [120, 0, -80];
+      rig.cam.update(rig.ship, 1 / 60);
+      // a chase camera would still be catching up a frame later; a parented
+      // one has already arrived, exactly one ship-displacement away
+      expect(rig.camera.position.x - before.x).toBeCloseTo(120, 6);
+      expect(rig.camera.position.z - before.z).toBeCloseTo(-80, 6);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('leaving the helm glides back rather than teleporting astern', () => {
+    const rig = mountCam();
+    try {
+      rig.cam.setHelmAnchor(WHEEL);
+      rig.cam.setMode('helm');
+      rig.cam.update(rig.ship, 1 / 60);
+      const atHelm = rig.camera.position.clone();
+
+      rig.cam.setMode('follow');
+      rig.cam.update(rig.ship, 1 / 60);
+      // one frame after the switch the lens is still near the helm...
+      expect(rig.camera.position.distanceTo(atHelm)).toBeLessThan(3);
+      // ...and only reaches the chase distance over the blend
+      for (let i = 0; i < 600; i++) rig.cam.update(rig.ship, 1 / 60);
+      expect(rig.camera.position.distanceTo(atHelm)).toBeGreaterThan(5);
     } finally {
       rig.done();
     }

@@ -294,8 +294,14 @@ export interface ShipRigParams {
   reefReefedBelow: number;
   /** extra trim needed to shake out a reef — kills flicker at the threshold */
   reefHysteresis: number;
-  /** cloth drop scale at the bottom of the 'full' band (continuous trim) */
+  /**
+   * Cloth drop scale at trim 0 — the bottom of the ONE continuous ramp that
+   * animates a reef. Tuned to the gathered bundle's own height (~0.26 of drop)
+   * so the single geometry swap at `furlGeometryBelow` changes nothing visible.
+   */
   trimDropMin: number;
+  /** trim below which the cloth panel is swapped for the gathered bundle */
+  furlGeometryBelow: number;
 }
 
 export const shipRigParams: ShipRigParams = registerParams(
@@ -308,7 +314,8 @@ export const shipRigParams: ShipRigParams = registerParams(
     reefFurledBelow: 0.15,
     reefReefedBelow: 0.55,
     reefHysteresis: 0.06,
-    trimDropMin: 0.55,
+    trimDropMin: 0.24, // measured: minimises the swap step over all 10 sails
+    furlGeometryBelow: 0.02,
   },
   {
     braceMax: { min: 0, max: 1.2, step: 0.01 },
@@ -318,7 +325,8 @@ export const shipRigParams: ShipRigParams = registerParams(
     reefFurledBelow: { min: 0, max: 0.5, step: 0.01 },
     reefReefedBelow: { min: 0.1, max: 0.95, step: 0.01 },
     reefHysteresis: { min: 0, max: 0.3, step: 0.01 },
-    trimDropMin: { min: 0.2, max: 1, step: 0.01 },
+    trimDropMin: { min: 0.05, max: 1, step: 0.01 },
+    furlGeometryBelow: { min: 0, max: 0.2, step: 0.005 },
   },
 );
 
@@ -329,12 +337,27 @@ export interface ShipMaterialParams {
   grainOctaves: number; // build-time: changing rebuilds node graph
   triplanarSharpness: number;
   plankWidth: number; // m between plank seams
+  /**
+   * Strakes from keel to rail on the LOFTED SHELL pieces (hull-section, bow,
+   * transom), which plank in the loft's own surface parameter rather than in
+   * metres of world height — see WoodTones.strake. A plank runs the length of
+   * the hull, so the COUNT is what is fixed and the width follows the girth,
+   * narrowing toward both ends the way real planking does. ≈ midship girth /
+   * plankWidth, so the boards read the same size amidships either way.
+   */
+  hullStrakes: number;
   seamWidth: number; // seam falloff as fraction of a plank
   seamDarken: number; // 0..1 multiplier at the seam line
   plankLength: number; // m between BUTT joints along a board
   buttWidth: number; // butt seam falloff (m)
-  waleFrequency: number; // horizontal wale strakes per metre of hull height
-  waleRatio: number; // 0..1 band coverage
+  /**
+   * Wale strakes per PLANK, not per metre — a wale is a thickened board in
+   * the run, so it is laid out in the same coordinate the planking is or it
+   * crosses it. 0.25 = every fourth strake, which also puts both of the
+   * wale's edges exactly on plank seams (integer repeat).
+   */
+  waleFrequency: number;
+  waleRatio: number; // 0..1 band coverage, as a fraction of the wale repeat
   waleDarken: number; // 0..1 multiplier inside a wale band
   hullLight: number; // warm mid-tone hull (docs/ship-full-view.png)
   hullDark: number;
@@ -354,6 +377,10 @@ export interface ShipMaterialParams {
   sailBacklitColor: number;
   sailBacklitStrength: number;
   sailBillow: number; // full belly depth, fraction of sail drop, at windRef
+  sailDraftPos: number; // deepest point of the section, fraction aft of the luff
+  sailDraftFullness: number; // section exponent: 1 = membrane parabola, >1 narrows it
+  sailFurlSwag: number; // foot gather depth as a fraction of drop, at full furl
+  sailFurlBays: number; // gathering bays across the foot (buntline stations)
   sailWindRef: number; // m/s of following wind that fills the sail completely
   sailBackBillow: number; // max belly INVERSION when the wind heads the sail
   sailLuffFlap: number; // extra ripple amplitude when the sail is not drawing
@@ -403,9 +430,18 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
   'ship-material',
   {
     grainScale: 1.6, grainStretch: 0.22, grainOctaves: 3, triplanarSharpness: 8,
-    plankWidth: 0.55, seamWidth: 0.08, seamDarken: 0.55,
+    plankWidth: 0.55, hullStrakes: 12, seamWidth: 0.08, seamDarken: 0.55,
     plankLength: 4.6, buttWidth: 0.05,
-    waleFrequency: 0.9, waleRatio: 0.28, waleDarken: 0.62,
+    // 12 strakes ≈ the galleon's 6.6 m midship girth at 0.55 m a board, so
+    // amidships the shell planking matches the deck's; ~7 of them are above
+    // the waterline, which is what the SoT topsides read as.
+    // A wale every FOURTH strake (was 0.9 per METRE of hull height = a proud
+    // dark belt every other board, which buried the planking it is supposed
+    // to punctuate — the "no plank detail on the sides" report was largely
+    // this). 12/4 puts wales on the garboard, the bilge, the main wale just
+    // above the waterline and the sheer strake.
+    // waleRatio × the 4-plank repeat = exactly ONE board wide.
+    waleFrequency: 0.25, waleRatio: 0.25, waleDarken: 0.62,
     hullLight: 0x9a6b3f, hullDark: 0x63401f,
     deckLight: 0xc9a96e, deckDark: 0x9a7a4a,
     sparLight: 0x8a6a42, sparDark: 0x5f452a,
@@ -414,7 +450,9 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     glassColor: 0x3c4a44, glassLit: 0x2a1c0c,
     sailLight: 0xe6dcc2, sailDark: 0xa8977a,
     sailWeaveScale: 18, sailBacklitColor: 0xfff0d2, sailBacklitStrength: 0.5,
-    sailBillow: 0.62, sailWindRef: 16, sailBackBillow: 0.18, sailLuffFlap: 2.6,
+    sailBillow: 0.68, sailDraftPos: 0.4, sailDraftFullness: 1,
+    sailFurlSwag: 0.16, sailFurlBays: 3,
+    sailWindRef: 16, sailBackBillow: 0.18, sailLuffFlap: 2.6,
     sailGustAmp: 0.3, sailGustFreq: 0.55, sailTurnSkew: 1.6, sailResponse: 2.2,
     sailFlutterAmp: 0.14, sailFlutterFreq: 2.4, sailRippleCount: 2.5,
     sailPanelCount: 7, sailSeamDarken: 0.7, sailAmbientLift: 0.09,
@@ -431,16 +469,24 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     grainStretch: { min: 0.05, max: 1, step: 0.01 },
     triplanarSharpness: { min: 1, max: 24, step: 0.5 },
     plankWidth: { min: 0.2, max: 2, step: 0.01 },
+    hullStrakes: { min: 4, max: 40, step: 1 },
     seamWidth: { min: 0.01, max: 0.3, step: 0.005 },
     seamDarken: { min: 0, max: 1, step: 0.01 },
     plankLength: { min: 0.5, max: 20, step: 0.1 },
     buttWidth: { min: 0.005, max: 0.2, step: 0.005 },
-    waleFrequency: { min: 0.1, max: 3, step: 0.05 },
+    waleFrequency: { min: 0.02, max: 1, step: 0.01 }, // wales per PLANK
     waleRatio: { min: 0, max: 1, step: 0.01 },
     waleDarken: { min: 0, max: 1, step: 0.01 },
     sailWeaveScale: { min: 2, max: 60, step: 0.5 },
     sailBacklitStrength: { min: 0, max: 2, step: 0.01 },
     sailBillow: { min: 0, max: 0.8, step: 0.01 },
+    // bounds = the band where the draft warp stays monotone (SAIL_DRAFT_MIN/MAX)
+    sailDraftPos: { min: 0.28, max: 0.72, step: 0.01 },
+    sailDraftFullness: { min: 0.5, max: 2.5, step: 0.05 },
+    sailFurlSwag: { min: 0, max: 0.5, step: 0.01 },
+    // should track the buntline count (shipDetail.sailBuntBays) — the swags
+    // are the cloth those lines gather
+    sailFurlBays: { min: 1, max: 6, step: 1 },
     sailWindRef: { min: 1, max: 30, step: 0.5 },
     sailBackBillow: { min: 0, max: 0.8, step: 0.01 },
     sailLuffFlap: { min: 0, max: 6, step: 0.05 },

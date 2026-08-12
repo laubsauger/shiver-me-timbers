@@ -102,11 +102,75 @@ export function skyTint(elevation: number): Rgb {
 }
 
 /**
+ * Is the sun's DISC above the horizon, 0..1. The geometric half of
+ * `daylight()`, and the only half that is allowed to reach 0: below the
+ * horizon the earth occludes the beam, full stop.
+ *
+ * Edges are the APPARENT sunset, not the mathematical one — refraction lifts
+ * the disc ~0.57° and the disc itself is ~0.53° across, so the direct beam
+ * really dies over roughly ±1°. Widened to [-2.0°, +1.15°] so an accelerated
+ * day clock dims rather than snaps: at a 1:1 clock the elevation rate near
+ * the horizon is 0.253 rad/h, which walks this window in ~13 sim-minutes.
+ */
+const SUN_BELOW = -0.035; // rad, -2.0°: disc fully set
+const SUN_CLEAR = 0.02; //  rad, +1.15°: disc fully clear of the horizon
+
+export function sunAboveHorizon(elevation: number): number {
+  return smoothstep(SUN_BELOW, SUN_CLEAR, elevation);
+}
+
+/**
+ * Residual broadband strength of the beam, KEY_FLOOR..1 — never 0 while the
+ * sun is up. The art-directed half of `daylight()`.
+ *
+ * WHY THIS IS NOT A PHOTOMETRIC AIR-MASS CURVE. Of the three things a real
+ * low sun does to a scene, two are already modelled elsewhere and the third
+ * we deliberately cannot model:
+ *
+ *  1. SPECTRAL extinction — the sun going orange — is `sunColor()`. Measured:
+ *     `sunColorLow` (0xff9440) carries 0.473× the Rec.709 luminance of
+ *     `sunColorNoon` (0xfff3da) in LINEAR space, so the colour term alone
+ *     already more than halves the key's output by the time it reaches the
+ *     horizon. A photometric brightness ramp stacked on top double-counts the
+ *     same physics.
+ *  2. cos(incidence) — the beam raking the deck and the sea rather than
+ *     hitting them square — is N·L in every material. Free and correct.
+ *  3. EXPOSURE. A real golden-hour photograph has a bright warm key on the
+ *     subject because the photographer opened up ~2 stops. We tonemap at a
+ *     FIXED exposure (1.1) with no adaptation, so a photometric ramp — the
+ *     Kasten-Young beam is 0.18× the noon value at 4° elevation — renders
+ *     golden hour as a silhouette against a still-bright sky. That is exactly
+ *     the murk §T39 has to avoid. KEY_FLOOR is that missing exposure
+ *     compensation, applied once, in the single place that owns the key.
+ *
+ * So the beam holds full strength through the whole golden hour and tapers
+ * only inside the last ~6°, where the sky's own light is going too and the
+ * taper reads as atmosphere instead of as a dimmer.
+ *
+ * The previous single ramp `smoothstep(-0.02, 0.18, e)` conflated (1)+(3)
+ * with the horizon gate and did not reach full until 10.3°, while
+ * `lowSunWarmth()` does not reach full until 4.6° — the two windows did not
+ * overlap, so NO time of day had both a saturated sunset palette and a
+ * full-strength key. Splitting the gate off is what makes them overlap; see
+ * the "golden hour needs both" test.
+ */
+const KEY_FLOOR = 0.35; // beam strength left at the moment of sunset
+const HAZE_EDGE = 0.1; //  rad, 5.7°: above this the beam is unattenuated
+
+export function beamStrength(elevation: number): number {
+  return KEY_FLOOR + (1 - KEY_FLOOR) * smoothstep(-0.02, HAZE_EDGE, elevation);
+}
+
+/**
  * 0..1 daylight factor for light intensities: 0 below the horizon, full
- * strength once the sun clears ~10°. Smooth so shadows never pop.
+ * strength from ~6° up. Product of a geometric gate and an attenuation, so
+ * it is bounded 0..1 and non-decreasing BY CONSTRUCTION (§V44 — bounded at
+ * source, both factors are smoothsteps, never clamped after the fact).
+ * Smooth so shadows never pop: the steepest point moves 9.5e-4 per
+ * sim-second on a 1:1 clock.
  */
 export function daylight(elevation: number): number {
-  return smoothstep(-0.02, 0.18, elevation);
+  return sunAboveHorizon(elevation) * beamStrength(elevation);
 }
 
 /**
@@ -185,6 +249,43 @@ export function skyPalette(elevation: number, p: SkyParams): SkyPalette {
     horizon: blend(p.horizonColor, p.sunsetHorizonColor),
     ground: blend(p.groundBounceColor, p.sunsetGroundColor),
     warm,
+  };
+}
+
+/**
+ * The sky background's BAND GEOMETRY for a given golden-hour weight.
+ *
+ * Sole owner of "what shape is the sky", the same way skyPalette() owns
+ * "what colour is the sky", and driven by the SAME `warm` weight so the two
+ * can never disagree (§T39). Kept here rather than inline in the background
+ * module so the shape is one testable function instead of two lerps buried
+ * next to uniform writes.
+ *
+ * WHY THE SHAPE HAS TO MOVE AT ALL. The day geometry is correct for the day:
+ * a broad pale haze wedge and a high-biased zenith curve are what
+ * docs/final-full-result.png shows at a midday sun, and that look is signed
+ * off. But `height = lift^gradientCurve` uses lift = sin(elevation), so at
+ * 30° — the top of a frame that is mostly sea — lift is only 0.5 and a curve
+ * of 1.5 leaves height at 0.35. The sky is still 65% midColor there, and the
+ * zenith hue never enters the shot at all. With the sunset palette that
+ * strands the rose-indigo overhead and leaves the visible window running
+ * cream → terracotta, every stop an orange: the "single-coloured" report.
+ *
+ * Measured RGB spread across the 0-30° window at warm=1: 0.411 with the day
+ * geometry, 0.561 with this one (+36%). The curve is the dominant term
+ * (0.514 on its own) and the haze wedge the smaller half (0.446 on its own),
+ * so both move together — neither alone clears the bar the test pins.
+ */
+export interface BandGeometry {
+  hazeFalloff: number;
+  gradientCurve: number;
+}
+
+export function bandGeometry(warm: number, p: SkyParams): BandGeometry {
+  const w = clamp01(warm);
+  return {
+    hazeFalloff: p.hazeFalloff + (p.sunsetHazeFalloff - p.hazeFalloff) * w,
+    gradientCurve: p.gradientCurve + (p.sunsetGradientCurve - p.gradientCurve) * w,
   };
 }
 

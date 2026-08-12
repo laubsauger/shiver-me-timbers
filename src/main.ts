@@ -10,10 +10,13 @@ import { OceanSurface } from './ocean/oceanSurface';
 import { createFoamSim, createSpray, createBowSpray } from './foam';
 import { createFlowFoam } from './flowfoam';
 import { rotateVec } from './combat/quatMath';
+import { createCombatRuntime, viewBearing } from './combat';
 import { createClouds } from './clouds';
 import { skyParams } from './params/sky';
 import { buildGalleonBlueprint } from './ship/shipBlueprint';
-import { ShipAssembly } from './ship/shipAssembly';
+import { ShipAssembly, type MaterialFactory } from './ship/shipAssembly';
+import { createHoleMaterial, createPieceMaterial } from './ship/pieceMaterials';
+import { createDeckFieldTexture } from './ship/deckFieldTexture';
 import { updateRig } from './ship/rigTrim';
 import { trimDropScale } from './ship/sailDynamics';
 import { createInputCollector } from './sailing/input';
@@ -22,6 +25,13 @@ import { createFollowCam } from './camera';
 import { createWeatherSystem, createWeatherSample } from './weather';
 import { createRain } from './rain';
 import { createPostPipeline } from './core/postPipeline';
+import {
+  logCompileProfile,
+  profileCompile,
+  rankCompile,
+  type CompilePhase,
+} from './core/compileProfile';
+// exposed on __game so a browser check can re-rank without a reload
 import { postParams } from './params/post';
 import { createGameUI, initGraphicsSettings, setFeatureSink } from './ui';
 import {
@@ -40,7 +50,6 @@ import {
 import { stepFlooding } from './sea-physics/flooding';
 import { stepShipGrounding } from './sea-physics/grounding';
 import { galleonParams, shipRigParams } from './params/ship';
-import { floodingHoles } from './ship/destruction';
 import { createCaustics, setActiveCaustics } from './caustics';
 import { buildDeckHeightfield } from './ship/deckHeightfield';
 import { createDeckWater, setActiveDeckWater } from './deckwater';
@@ -48,12 +57,10 @@ import { createPlanarReflection } from './reflection';
 import { createArchipelago } from './island';
 import { palmWindStrength } from './vegetation';
 import { createRopes } from './ropes';
-import { createBlocks } from './ropes/blocks';
 import {
-  applyBlocks,
   applyRiggingPlan,
+  buildBlockDescriptors,
   buildRiggingPlan,
-  selectBlockSockets,
 } from './ropes/shipRigging';
 import { ropeParams } from './params/ropes';
 import { buildRatlinePlan } from './ship/ratlinePlan';
@@ -73,6 +80,106 @@ const FEATURES = {
   ropes: true,
 };
 
+/**
+ * §T.40 A/B lever. `?boot=baseline` restores the pre-optimisation boot —
+ * every subsystem in the scene before the first compile, and a separate
+ * material set per ship — so the before/after can be measured on ONE machine
+ * in ONE session. Anything else (i.e. the normal load) gets the staged boot.
+ * Kept rather than deleted: it is the only honest way to re-check the boot
+ * budget after a subsystem lands, and it costs one branch.
+ */
+const BOOT_BASELINE =
+  new URLSearchParams(window.location.search).get('boot') === 'baseline';
+
+/**
+ * Bound a COSMETIC wait so it can never gate boot (§V.39, §B.21).
+ *
+ * Everything the presentation layer offers to wait on — `requestAnimationFrame`
+ * and the Web Animations `finished` promise alike — is driven by the frame
+ * clock, and Chrome STOPS that clock in a hidden tab. Measured on this page:
+ * 3037ms of wall clock, 0 rAF callbacks, animation `currentTime` still 0 with
+ * `playState: 'running'`. A promise from that clock does not resolve late in a
+ * background tab, it resolves NEVER — and every automated verification of this
+ * project runs in exactly that tab.
+ *
+ * So: race the pretty thing against a real timer, and swallow its rejection.
+ * `setTimeout` keeps running when hidden; that is the whole reason it is here
+ * and not another rAF.
+ */
+function atMost(work: Promise<unknown>, ms: number): Promise<void> {
+  return Promise.race([
+    // a cancelled animation REJECTS (AbortError) — cosmetics must not throw
+    // into the boot chain, so the rejection is absorbed here.
+    work.then(
+      () => undefined,
+      () => undefined,
+    ),
+    new Promise<void>((resolve) => {
+      window.setTimeout(resolve, ms);
+    }),
+  ]);
+}
+
+const afterSplashPaint = (): Promise<void> => {
+  // a hidden tab paints nothing and fires no rAF, so there is no paint to wait
+  // for — skip rather than pay the deadline once per boot phase.
+  if (document.visibilityState === 'hidden') return Promise.resolve();
+  return atMost(
+    new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    }),
+    PAINT_DEADLINE_MS,
+  );
+};
+
+/** two frames at 60Hz plus slack; a hidden tab pays this once per phase */
+const PAINT_DEADLINE_MS = 120;
+/** last letter lands at ~1.71s (888ms delay + 820ms); slack for a slow load */
+const ENTRANCE_DEADLINE_MS = 2500;
+
+/**
+ * Let the splash title complete its entrance before scene construction takes
+ * the main thread. CSS animation time keeps advancing during a long task, but
+ * its intermediate frames cannot be painted; starting the build immediately
+ * therefore left the title visibly stranded halfway through the word.
+ *
+ * This waits on the real final-letter animation rather than duplicating its
+ * duration here. Two animation frames after `finished` are intentional: rAF
+ * callbacks run before paint, so the first frame commits the final style and
+ * the second proves that final style has actually had a paint opportunity.
+ *
+ * Every wait in here is a COURTESY to a human watching, and is bounded
+ * accordingly (see `atMost`). Nothing cosmetic may throw either: a missing
+ * splash element means the entrance cannot be watched, which is worth a
+ * warning and nothing more — it is not worth the whole application.
+ */
+async function finishSplashTitleEntrance(): Promise<void> {
+  // nobody is watching a hidden tab, and its frame clock is stopped anyway
+  if (document.visibilityState === 'hidden') return;
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+  const letters = document.querySelectorAll<HTMLElement>('.boot-splash__letter');
+  const lastLetter = letters.item(letters.length - 1);
+  if (!lastLetter) {
+    console.warn('[boot] no splash title letters — skipping the entrance wait');
+    return;
+  }
+
+  const entrance = lastLetter
+    .getAnimations()
+    .find(
+      (animation) =>
+        animation instanceof CSSAnimation && animation.animationName === 'boot-letter-rise',
+    );
+  if (!entrance) {
+    console.warn('[boot] no splash title entrance animation — skipping the wait');
+    return;
+  }
+
+  await atMost(entrance.finished, ENTRANCE_DEADLINE_MS);
+  await afterSplashPaint();
+}
+
 async function boot(): Promise<void> {
   const root = document.getElementById('app');
   if (!root) throw new Error('missing #app root');
@@ -81,6 +188,12 @@ async function boot(): Promise<void> {
     renderGatePage(root);
     return;
   }
+
+  await finishSplashTitleEntrance();
+  const showBootPhase = async (label: string): Promise<void> => {
+    (window as unknown as { __bootProgress?: (s: string) => void }).__bootProgress?.(label);
+    await afterSplashPaint();
+  };
 
   // boot timing — the splash now holds until a real frame exists, so every ms
   // here is user-visible waiting. Phase marks land on __game.bootTimings and
@@ -98,12 +211,27 @@ async function boot(): Promise<void> {
     const now = performance.now();
     bootTimings.push([label, +(now - bootLast).toFixed(1)]);
     bootLast = now;
-    (window as unknown as { __bootProgress?: (s: string) => void }).__bootProgress?.(label);
   };
 
+  await showBootPhase('renderer');
   const app = await App.create(root);
   bootMark('renderer');
+  await showBootPhase('scene build');
   const state: SimState = createInitialState(1337);
+
+  // §T.40 staged warm-up. Anything the FIRST PICTURE does not need is built
+  // as usual but kept OUT of the scene until its pipelines exist, then added.
+  // Hiding it instead would not work: `visible = false` also hides it from
+  // compileAsync, and a material that first compiles on a DRAW compiles
+  // SYNCHRONOUSLY — the visible hitch this whole mechanism exists to avoid.
+  // Sim is untouched by any of it (§V.2): nothing here reads scene membership.
+  const deferred: Array<{ label: string; object: Object3D }> = [];
+  const addOrDefer = (label: string, ...objects: Object3D[]): void => {
+    for (const object of objects) {
+      if (BOOT_BASELINE) app.scene.add(object);
+      else deferred.push({ label, object });
+    }
+  };
 
   const weather = createWeatherSystem({
     seed: state.seed,
@@ -122,6 +250,9 @@ async function boot(): Promise<void> {
   const foam = createFoamSim(
     ocean.cascades.map((c) => ({ displacement: c.displacement, domain: c.domain })),
     oceanParams.resolution,
+    // LIVE moments, held by reference: the foam gate is a multiple of each
+    // band's own σ (§V36), so it has to see spectrum rebuilds, not a snapshot
+    ocean,
   );
   // §V.10 intersection foam + ship wake (T13) — created before the surface
   // so the material can sample the wake mask
@@ -134,6 +265,10 @@ async function boot(): Promise<void> {
     renderer: app.renderer,
     camera: app.camera,
     seed: state.seed,
+    // §V.46: cluster silhouette reads the LOCAL storm strength, so a squall on
+    // the horizon builds as a monument while the sky overhead stays fair.
+    // Omitting this leaves every cluster fair-weather — silently.
+    stormAt: weather.stormAt,
   });
   clouds.attachTo(app.scene);
 
@@ -148,7 +283,10 @@ async function boot(): Promise<void> {
   // surface because its seabed field feeds the shallows tint, and TSL bakes
   // material graphs at construction.
   const archipelago = createArchipelago({ seed: state.seed });
-  app.scene.add(archipelago.group);
+  // DEFERRED (§T.40): 1.2–3.1km away and three heavy materials (terrain, rock,
+  // palm). Their seabed field still feeds the ocean material and grounding
+  // from the moment it is built — only the DRAWING waits.
+  addOrDefer('islands', archipelago.group);
 
   // §T.30 planar reflections (§V26). Compiled into the material but DORMANT:
   // reflectionParams.live defaults 0, because the mirror pass costs ~1.0–1.5ms
@@ -159,7 +297,15 @@ async function boot(): Promise<void> {
   const reflection = createPlanarReflection({
     sunLight: sky.sunLight,
     planeY: 0,
-    clouds: { blurred: clouds.blurredTexture, seed: state.seed },
+    clouds: {
+      blurred: clouds.blurredTexture,
+      seed: state.seed,
+      // the LIVE resolved pair, held by reference: the clouds system mutates
+      // these in place each frame from the sky palette, so the reflection
+      // warms with the real clouds instead of staying at the midday hexes.
+      sunColorLive: clouds.sunColorLive,
+      skyColorLive: clouds.skyColorLive,
+    },
   });
 
   // sunLight enables the in-material shadow sample: the water is
@@ -182,7 +328,10 @@ async function boot(): Promise<void> {
   );
   const bowSpray = createBowSpray();
   const rain = createRain();
-  app.scene.add(spray.mesh, bowSpray.mesh, rain.mesh);
+  // DEFERRED (§T.40): all three pools are EMPTY on frame one — the ship is
+  // stationary and it is not raining — so nothing they would draw exists yet.
+  // Warmed within a second, long before the first crest breaks.
+  addOrDefer('spray + rain', spray.mesh, bowSpray.mesh, rain.mesh);
 
   // player ship (§V.13): galleon assembly rendered from SimState (§V.3)
   state.ships.push({
@@ -198,9 +347,6 @@ async function boot(): Promise<void> {
     damage: {},
   });
   const playerShip = state.ships[0];
-  // piece damage states (intact|holed|destroyed) — written by destruction
-  // ops when combat wiring lands (T17); hp values live in ShipState.damage
-  const playerZoneStates: Record<string, import('./ship/pieceTypes').DamageStateId> = {};
   const galleonBlueprint = buildGalleonBlueprint();
 
   // §T.12/§T.31 deck water. ONE procedurally-generated deck heightfield (per
@@ -215,7 +361,30 @@ async function boot(): Promise<void> {
   const deckWater = createDeckWater({ source: deckField });
   setActiveDeckWater(deckWater);
 
-  const shipAssembly = new ShipAssembly(galleonBlueprint);
+  // §T.40: ONE material set shared by BOTH galleons. three's node cache key is
+  // built from node INSTANCE ids, so two structurally identical materials
+  // share no codegen and no pipeline — the enemy was a second full set of
+  // ~30 piece shaders, and the wood family is the heaviest in the project.
+  // Semantically free: piece materials already key nothing off which ship they
+  // sit on — `uShipWorldInverse` and `uShipSunDirection` are module-level
+  // singletons that every assembly has always shared.
+  const sharedPieceMaterials = ((): MaterialFactory | undefined => {
+    if (BOOT_BASELINE || deckField === undefined) return undefined;
+    const deckFieldTexture = createDeckFieldTexture(deckField);
+    const cache = new Map<string, Material>();
+    return (kind, role) => {
+      const key = `${kind}:${role}`;
+      let material = cache.get(key);
+      if (material === undefined) {
+        material =
+          role === 'hole' ? createHoleMaterial() : createPieceMaterial(kind, deckFieldTexture);
+        cache.set(key, material);
+      }
+      return material;
+    };
+  })();
+
+  const shipAssembly = new ShipAssembly(galleonBlueprint, sharedPieceMaterials);
   app.scene.add(shipAssembly.group);
 
   // ENEMY SHIP (§T.19/§V.15). Placed off the starboard bow at a distance that
@@ -237,7 +406,10 @@ async function boot(): Promise<void> {
   });
   const enemyShip = state.ships[1];
   const enemyBlueprint = buildGalleonBlueprint();
-  const enemyAssembly = new ShipAssembly(enemyBlueprint);
+  const enemyAssembly = new ShipAssembly(enemyBlueprint, sharedPieceMaterials);
+  // stays in the scene from frame one: sharing the player's materials means
+  // she brings NO new pipelines, so deferring her would buy nothing and cost
+  // a pop-in on a ship that is meant to be looked at.
   app.scene.add(enemyAssembly.group);
   const enemyAi = createAiShip(1, ENEMY_SPAWN);
 
@@ -248,12 +420,17 @@ async function boot(): Promise<void> {
   // shrouds actually do (sag now, swing when §V42 lands, a mast going over the
   // side for free). Authored geometry could never track that.
   const rungs = buildRungDescriptors(buildRatlinePlan(galleonBlueprint), riggingPlan);
-  const ropes = createRopes({ maxRopes: Math.max(riggingPlan.length, 32), rungs });
+  // wooden blocks (pulleys) at the running-rigging terminations. Same §V45
+  // treatment as the rungs: addressed by (rope, t) and hung off the solved
+  // curve, so they swing with the line rather than only with the ship, and
+  // they cost the CPU nothing per frame.
+  const blockDescriptors = buildBlockDescriptors(riggingPlan, ropeParams.maxBlocks);
+  const ropes = createRopes({
+    maxRopes: Math.max(riggingPlan.length, 32),
+    rungs,
+    blocks: blockDescriptors,
+  });
   app.scene.add(ropes.mesh);
-  // wooden blocks (pulleys) at running-rigging terminations
-  const blockSockets = selectBlockSockets(riggingPlan, ropeParams.maxBlocks);
-  const blocks = createBlocks(blockSockets.length);
-  app.scene.add(blocks.mesh);
 
   // second rope instance for the enemy — see the note at her spawn
   const enemyRiggingPlan = buildRiggingPlan(enemyBlueprint);
@@ -265,7 +442,11 @@ async function boot(): Promise<void> {
     maxRopes: Math.max(enemyRiggingPlan.length, 32),
     rungs: enemyRungs,
   });
-  app.scene.add(enemyRopes.mesh);
+  // DEFERRED (§T.40): createRopes takes no material injection, so this second
+  // instance is a second full set of FOUR shaders (near/far tube × rope/
+  // ratline). At 240m her rigging arriving a second late is not visible —
+  // whereas compiling four rope shaders before the first picture is.
+  addOrDefer('enemy rigging', enemyRopes.mesh);
 
   // Islands stay IN the mirror pass — §V26 names them and they are the payoff.
   // The cloud quad exclusion is NOT an optimisation: it is camera-pinned and
@@ -276,8 +457,8 @@ async function boot(): Promise<void> {
   reflection?.excludeFromReflection(clouds.compositeQuad);
   reflection?.excludeFromReflection(spray.mesh);
   reflection?.excludeFromReflection(bowSpray.mesh);
+  // the blocks live INSIDE ropes.mesh now, so this one exclusion covers them
   reflection?.excludeFromReflection(ropes.mesh);
-  reflection?.excludeFromReflection(blocks.mesh);
 
   // hull dims for wake + bow spray, from blueprint hull AABBs
   let bowZ = 0;
@@ -326,6 +507,14 @@ async function boot(): Promise<void> {
   const followCam = createFollowCam(app.camera, app.renderer.domElement);
   app.controls.enabled = false; // follow cam owns the pointer now
 
+  // H = captain's eye at the helm. The anchor is resolved from the wheel's own
+  // socket rather than typed in, so it follows the model; the assembly is still
+  // at the origin here, so the world position IS the ship-local one. Throws
+  // loudly if the socket ever disappears — a silently mis-placed POV that puts
+  // the camera inside the transom is worse than a boot failure.
+  shipAssembly.group.updateMatrixWorld(true);
+  followCam.setHelmAnchor(shipAssembly.socketWorldPosition('socket-wheel'));
+
   let paused = false;
   // two switches have no params key yet — the sinks drive them until their
   // owning agents ship one, at which point the switch goes live unchanged
@@ -360,10 +549,35 @@ async function boot(): Promise<void> {
   applyResolution();
   settings.subscribe(applyResolution);
 
+  // time of day: the UI owns the setting, the sky reads the param. Pushed on
+  // every change AND once up front, so a stored hour survives a reload — during
+  // alpha the point is to come back to the light you were last looking at.
+  const applyTimeOfDay = (s = settings.get()): void => {
+    skyParams.timeOfDay = s.world.timeOfDay;
+  };
+  applyTimeOfDay();
+  settings.subscribe(applyTimeOfDay);
+
   // volumes come from the persisted settings store, and stay bound to it so
   // pause-menu changes apply live and survive reload (§I, §V21)
   const audio = createAudio(ui.settings.get().audio);
   attachAudioSettings(audio, ui.settings);
+
+  // §T.16/§T.17/§T.18/§V.14 combat. Built here because it needs BOTH ship
+  // assemblies (it fires piece-graph ops at them) and the audio facade (guns
+  // and breaches are positional events). DEFERRED (§T.40): its two materials
+  // draw nothing on frame one — no shot has been fired yet.
+  const combat = createCombatRuntime({
+    ships: [
+      { shipIndex: 0, blueprint: galleonBlueprint, assembly: shipAssembly },
+      { shipIndex: 1, blueprint: enemyBlueprint, assembly: enemyAssembly },
+    ],
+    // the SAME sea the hulls float on: a ball pitches into the wave that is
+    // actually there, and a breach floods against the live surface (§V.8)
+    waterHeightAt: (x, z) => cpuOcean.heightAt(x, z, state.time),
+    audio,
+  });
+  addOrDefer('combat fx', combat.group);
   // hoisted + mutated per frame: the render callback runs every frame and a
   // fresh object graph here would be pure GC churn
   // held as its own non-optional binding so the per-frame writes below don't
@@ -387,6 +601,32 @@ async function boot(): Promise<void> {
   };
 
   const post = createPostPipeline(app.renderer, app.scene, app.camera);
+
+  // §T.40. The post switch has `reload: false`, so it can flip mid-session —
+  // and post renders the scene into its OWN target, whose colour format and
+  // sample count give every material a different pipeline cache key. Flipping
+  // it on cold recompiles the entire scene synchronously inside one frame
+  // (seconds, frozen). So: warm it in the background on the first request and
+  // keep drawing direct to the canvas until the pipelines exist.
+  // `compilePhases` is filled in below; this closure only ever pushes to it.
+  const compilePhases: CompilePhase[] = [];
+  let postWarm = postParams.enabled;
+  let postWarming = false;
+  const usePost = (): boolean => {
+    if (!postParams.enabled) return false;
+    if (postWarm) return true;
+    if (!postWarming) {
+      postWarming = true;
+      void (async (): Promise<void> => {
+        const phase = await profileCompile(app.renderer, 'warm:post', () => post.warmup());
+        compilePhases.push(phase);
+        postWarm = true;
+        postWarming = false;
+        console.info(`[boot] post path warmed in ${phase.wall}ms`);
+      })();
+    }
+    return false;
+  };
 
   // render-side interpolation caches (§V.2: sim ticks at 60Hz, render at
   // display rate — lerping prev→curr tick kills transform micro-stutter)
@@ -421,13 +661,32 @@ async function boot(): Promise<void> {
       stepShipSailing(playerShip, snapshot, state.wind, dt);
       // §V.15: the AI emits the SAME InputState a keyboard produces, so she
       // sails the player's exact code path rather than a parallel model
-      stepShipSailing(enemyShip, stepAiShip(enemyAi, state, 0).input, state.wind, dt);
+      const enemyCommands = stepAiShip(enemyAi, state, 0);
+      stepShipSailing(enemyShip, enemyCommands.input, state.wind, dt);
       cpuOcean.update(state.time);
-      // §V.14 flooding: holes from damaged zones (inert while undamaged)
-      const holes = floodingHoles(galleonBlueprint, playerZoneStates, playerShip.quaternion, 0);
-      stepFlooding(playerShip, holes.positions, dt);
-      stepShipBuoyancy(playerShip, cpuOcean, dt, undefined, holes.positions);
-      stepShipBuoyancy(enemyShip, cpuOcean, dt);
+      // §T.16: Space fires the battery the CAMERA bears on (§I gives the
+      // player one key, so the side has to be inferred from where she is
+      // looking). The enemy's order comes out of the SAME state machine that
+      // steers her — §V.15's broadside state, finally connected to a gun.
+      // Runs before flooding: a breach opened this tick ships water this tick.
+      combat.tick(state, dt, [
+        {
+          shipIndex: 0,
+          fire: snapshot.fire,
+          aimBearing: viewBearing(app.camera.matrixWorld.elements),
+        },
+        enemyCommands.order,
+      ]);
+      // §V.14 flooding: breaches recorded by combat, measured against the sea
+      const playerHoles = combat.floodHoles(state, 0);
+      stepFlooding(playerShip, playerHoles, dt);
+      stepShipBuoyancy(playerShip, cpuOcean, dt, undefined, playerHoles);
+      const enemyHoles = combat.floodHoles(state, 1);
+      stepFlooding(enemyShip, enemyHoles, dt);
+      stepShipBuoyancy(enemyShip, cpuOcean, dt, undefined, enemyHoles);
+      // AFTER buoyancy: at flood = 1 support and probe damping are both gone,
+      // so this is the only floor under the wreck (§T.18, sinking.ts).
+      combat.settle(state, dt);
       // AFTER buoyancy, so the pose is final for this tick. Throws if the
       // ocean mirror was never advanced to this time (§B.7 fail-loud).
       // Measured: the stem is dry 40–47% of ticks at cruising speed — that is
@@ -465,7 +724,9 @@ async function boot(): Promise<void> {
 
       let t = performance.now();
       ocean.update(app.renderer, state.time);
-      foam.update(app.renderer);
+      // frameDt, not nothing: foam accumulates/decays per dispatch, so it
+      // steps itself on the fixed clock instead of at display rate (§V2)
+      foam.update(app.renderer, frameDt);
       debug.hud.setPassTiming('ocean+foam cpu-dispatch', performance.now() - t);
 
       caustics.update(sky.sunDirection);
@@ -611,7 +872,8 @@ async function boot(): Promise<void> {
           (id) => shipAssembly.socketWorldPosition(id),
           furl,
         );
-        applyBlocks(blockSockets, blocks, (id) => shipAssembly.socketWorldPosition(id));
+        // no applyBlocks: the pulleys hang off the solved curve on the GPU, so
+        // re-anchoring the ropes above is the only CPU work the rig needs
         app.renderer.compute(ropes.computeNode);
 
         enemyAssembly.group.updateMatrixWorld(true);
@@ -627,10 +889,31 @@ async function boot(): Promise<void> {
       const speed = Math.hypot(playerShip.velocity[0], playerShip.velocity[2]);
       ui.setSpeed(speed * 1.944); // m/s → knots
       const fwd = shipAssembly.group.getWorldDirection(tmpDir);
-      ui.setHeading(Math.atan2(fwd.x, fwd.z));
+      const headingRad = Math.atan2(fwd.x, fwd.z);
+      ui.setHeading(headingRad);
+      // The wind plaque and vane read APPARENT wind, which the HUD derives
+      // itself from these four numbers using the same apparentWind() the flags
+      // and sails use — so what the player reads and what the canvas answers to
+      // cannot drift apart. `state.wind` is the LIVE wind (weather transitions
+      // write it every tick), not the params default.
+      ui.setWind({
+        windDirection: state.wind.direction,
+        windSpeed: state.wind.speed,
+        shipVelX: playerShip.velocity[0],
+        shipVelZ: playerShip.velocity[2],
+        headingRad,
+      });
+      // canvas plaque: raw trim 0..1. The HUD re-runs sailStateForTrim() with
+      // the SAME hysteresis the rig uses, so the plaque flips on the exact
+      // frame the canvas does rather than a frame either side of it (§I hud).
+      ui.setTrim(playerShip.sailTrim);
+
+      // smoke, splinters, splashes, balls in flight and fallen spars —
+      // render-clock particles reading sim-owned projectiles (§V.3)
+      combat.update(frameDt, state);
 
       surface.update(app.camera, state.time, sky.sunDirection);
-      if (postParams.enabled) {
+      if (usePost()) {
         post.updateFromParams();
         post.render();
       } else {
@@ -663,15 +946,80 @@ async function boot(): Promise<void> {
       audioBowWorld[2] = bowWorldTmp.z;
       audio.update(audioFrame);
     },
+    // the loop owns the pause, so the accumulator stops with the sim and the
+    // interpolation alpha holds flat (§V.21) — see GameLoop.frame
+    () => paused,
   );
   // Warm up BEFORE showing the world. compileAsync walks the scene and builds
   // every material's pipeline up front — otherwise the first frames stall for
   // seconds compiling shaders one material at a time, which is what the boot
   // splash was hiding badly (it dismissed on the canvas being appended, long
   // before anything drew, leaving a blank screen).
+  //
+  // §T.40: the cost is not hidden, it is made smaller and paid in two parts.
+  // Part one is everything the first picture needs; part two runs after the
+  // splash lifts, spread across frames, so the game is sailing while it
+  // finishes. Every phase is measured per material (compileProfile.ts) —
+  // "which subsystem feels heavy" is exactly how this got to 52s.
+
+  /**
+   * COVERAGE GUARD, and it is a real hole rather than a precaution.
+   * `Renderer.compileAsync()` runs the same `_projectObject` walk a render
+   * does — including the frustum cull — but it never rebuilds `_frustum`
+   * (only `_renderScene` does, three r180 Renderer.js:1410). So the warm-up
+   * culls against whatever was left there: on a cold boot, a default Frustum
+   * whose six planes are all `x + 0 = 0`, which rejects every object whose
+   * centre sits at negative world X. Those materials are then MISSING from
+   * the warm-up and compile synchronously on their first draw — a hitch,
+   * silently, and exactly what the splash is meant to have already paid for.
+   * Nor does it update matrices, so the cull runs on stale ones.
+   *
+   * Turn culling off for the walk, restore precisely what was there. The
+   * restore happens BEFORE the await: compileAsync is synchronous up to its
+   * final `Promise.all`, so by then the walk is done, and leaving the flags
+   * off across the wait would silently un-cull the running game.
+   */
+  const withFullCoverage = (root: Object3D, compile: () => Promise<unknown>): Promise<unknown> => {
+    const culled: boolean[] = [];
+    root.updateMatrixWorld(true);
+    root.traverse((o) => {
+      culled.push(o.frustumCulled);
+      o.frustumCulled = false;
+    });
+    const pending = compile();
+    let i = 0;
+    root.traverse((o) => {
+      o.frustumCulled = culled[i++] ?? o.frustumCulled;
+    });
+    return pending;
+  };
+
+  /** compile ONE object against the context it will actually be drawn in. */
+  const warmObject = async (object: Object3D): Promise<void> => {
+    await withFullCoverage(object, () =>
+      postParams.enabled
+        ? post.warmObject(object)
+        : app.renderer.compileAsync(object, app.camera, app.scene),
+    );
+  };
+
   bootMark('scene build');
-  await app.renderer.compileAsync(app.scene, app.camera);
+  await showBootPhase('shader compile');
+  compilePhases.push(
+    await profileCompile(app.renderer, 'core scene', () =>
+      withFullCoverage(app.scene, () =>
+        // post is the real render path when it is on, and its pass target has
+        // a different sample count and colour format than the canvas — hence a
+        // different pipeline cache key. Compiling against the wrong one means
+        // paying the whole cost twice, the second time synchronously.
+        postParams.enabled
+          ? post.warmup()
+          : app.renderer.compileAsync(app.scene, app.camera),
+      ),
+    ),
+  );
   bootMark('shader compile');
+  await showBootPhase('first frame');
   // one real presented frame, so the splash lifts on a picture and not on a
   // promise: the ocean/foam/rope compute passes also have to run once before
   // the surface has anything to show.
@@ -679,13 +1027,47 @@ async function boot(): Promise<void> {
   foam.update(app.renderer);
   clouds.update(state.time, sky.sunDirection);
   surface.update(app.camera, state.time, sky.sunDirection);
-  await app.renderer.renderAsync(app.scene, app.camera);
+  if (postParams.enabled) {
+    post.updateFromParams();
+    await post.presentAsync();
+  } else {
+    await app.renderer.renderAsync(app.scene, app.camera);
+  }
 
   bootMark('first frame');
   loop.start();
   bootTimings.push(['TOTAL', +(performance.now() - bootT0).toFixed(1)]);
   console.info('[boot]', bootTimings.map(([k, v]) => `${k} ${v}ms`).join('  ·  '));
   (window as unknown as { __bootReady?: () => void }).__bootReady?.();
+
+  // --- part two: warm the deferred subsystems, one per turn of the event
+  // loop, and add each only once its pipelines exist (§T.40).
+  //
+  // setTimeout, NOT rAF: Chrome suspends rAF entirely in a hidden tab (§V.39),
+  // and a warm-up that never finishes in a background tab would hand the first
+  // visible frame the exact synchronous compile it exists to prevent.
+  const nextTurn = (): Promise<void> =>
+    new Promise((resolve) => {
+      window.setTimeout(resolve, 0);
+    });
+  const warmDeferred = async (): Promise<void> => {
+    for (const { label, object } of deferred) {
+      await nextTurn();
+      const phase = await profileCompile(app.renderer, `warm:${label}`, () =>
+        warmObject(object),
+      );
+      compilePhases.push(phase);
+      app.scene.add(object);
+      bootTimings.push([`warm:${label}`, phase.wall]);
+    }
+    console.info(
+      '[boot] background warm-up done',
+      deferred.map((d) => d.label).join(', ') || '(nothing deferred)',
+    );
+    logCompileProfile(compilePhases);
+  };
+  void warmDeferred();
+
 
   // dev console handle (not part of any interface contract)
   (window as unknown as Record<string, unknown>).__game = {
@@ -699,9 +1081,8 @@ async function boot(): Promise<void> {
     ui,
     followCam,
     ropes,
-    blocks,
     riggingPlan,
-    blockSockets,
+    blockDescriptors,
     // verification handles: agents need these reachable from the console to
     // do §V29 readbacks and to isolate subsystems without a rebuild
     flowFoam,
@@ -712,7 +1093,13 @@ async function boot(): Promise<void> {
     archipelago,
     hullContact,
     cpuOcean,
+    combat,
+    enemyAi,
     bootTimings,
+    // §T.40 verification handles: the per-material compile ranking, and a
+    // re-rank over whatever has been warmed so far.
+    compilePhases,
+    compileRanking: (): ReturnType<typeof rankCompile> => rankCompile(compilePhases),
     /** debug: put the hull at a speed without waiting on the wind */
     setSpeed(knots: number): void {
       const ms = knots / 1.944;
@@ -723,7 +1110,14 @@ async function boot(): Promise<void> {
   };
 }
 
-import { Quaternion, Vector2, Vector3, type Mesh } from 'three/webgpu';
+import {
+  Quaternion,
+  Vector2,
+  Vector3,
+  type Material,
+  type Mesh,
+  type Object3D,
+} from 'three/webgpu';
 const tmpDir = new Vector3();
 const windDirTmp = new Vector2();
 const bowWorldTmp = new Vector3();

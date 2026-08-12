@@ -21,11 +21,10 @@
 import { describe, expect, it } from 'vitest';
 import type { Material } from 'three';
 import {
-  applyBlocks,
   applyRiggingPlan,
+  buildBlockDescriptors,
   buildRiggingPlan,
   collectRopeAnchorIds,
-  selectBlockSockets,
   slackForFurl,
   validateRiggingPlan,
   type RiggingRope,
@@ -577,17 +576,18 @@ describe('§V46 reefing: running gear takes in and eases with the sail', () => {
   });
 });
 
-describe('selectBlockSockets (§V12 blocks at running-rigging ends)', () => {
+describe('buildBlockDescriptors (§V12 blocks at running-rigging ends)', () => {
   it('is deterministic, unique, capped, and references real sockets', () => {
     // WHY: block instances are placed by plan order — nondeterminism or
     // unknown ids would scatter pulleys into thin air after a re-apply.
     // Hull anchors are derived points, so a block must never pick one.
     const plan = buildRiggingPlan(buildGalleonBlueprint());
-    const sockets = selectBlockSockets(plan, 20);
-    expect(sockets).toEqual(selectBlockSockets(plan, 20));
+    const blocks = buildBlockDescriptors(plan, 20);
+    const sockets = blocks.map((b) => b.socket);
+    expect(blocks).toEqual(buildBlockDescriptors(plan, 20));
     expect(new Set(sockets).size).toBe(sockets.length);
-    expect(sockets.length).toBeLessThanOrEqual(20);
-    expect(sockets.length).toBeGreaterThan(0);
+    expect(blocks.length).toBeLessThanOrEqual(20);
+    expect(blocks.length).toBeGreaterThan(0);
     const ids = collectRopeAnchorIds(buildGalleonBlueprint());
     for (const id of sockets) expect(ids.has(id), id).toBe(true);
     // blocks sit where running rigging is worked: yard ends and, now that the
@@ -596,7 +596,26 @@ describe('selectBlockSockets (§V12 blocks at running-rigging ends)', () => {
       sockets.filter((id) => id.includes('yard') || id.startsWith('anchor-sail-')).length,
     ).toBeGreaterThanOrEqual(8);
     // a tighter cap truncates deterministically
-    expect(selectBlockSockets(plan, 5)).toEqual(sockets.slice(0, 5));
+    expect(buildBlockDescriptors(plan, 5)).toEqual(blocks.slice(0, 5));
+  });
+
+  it('addresses each block into the ROPE it hangs on, at that rope\'s own end', () => {
+    // WHY: this is the whole fix for "the blocks are not playing with the
+    // physics". A descriptor that names a socket can only ever ride the ship;
+    // one that names (rope, t) rides the SOLVED curve — sag now, §V42 swing
+    // later. If `rope` ever stopped indexing the rigging plan, every pulley
+    // would hang off an unrelated line and nothing would throw.
+    const plan = buildRiggingPlan(buildGalleonBlueprint());
+    const blocks = buildBlockDescriptors(plan, 20);
+    for (const b of blocks) {
+      expect(plan[b.rope].socketA).toBe(b.socket);
+      // t must be off the endpoint: at t = 0 the solved sample IS the socket,
+      // which is exactly the static placement this replaced
+      expect(b.t).toBeGreaterThan(0);
+      expect(b.t).toBeLessThan(0.5); // …and the line runs away toward +t
+      expect(b.away).toBe(1);
+      expect(b.size).toBeGreaterThan(0);
+    }
   });
 });
 
@@ -683,23 +702,4 @@ describe('applyRiggingPlan (§V12 re-solve entry point)', () => {
     expect(checked).toBe(plan.length);
   });
 
-  it('applyBlocks mirrors the same index/count contract for pulleys', () => {
-    // WHY: blocks ride their sockets exactly like rope anchors; a drifting
-    // index mapping would leave pulleys behind when the ship moves.
-    const plan = buildRiggingPlan(buildGalleonBlueprint());
-    const sockets = selectBlockSockets(plan, 20);
-    const placed: number[] = [];
-    let count = -1;
-    applyBlocks(sockets, {
-      setBlock(index, position): void {
-        expect(Number.isFinite(position.x)).toBe(true);
-        placed.push(index);
-      },
-      setBlockCount(n): void {
-        count = n;
-      },
-    }, () => [1, 2, 3]);
-    expect(placed).toEqual(sockets.map((_, i) => i));
-    expect(count).toBe(sockets.length);
-  });
 });

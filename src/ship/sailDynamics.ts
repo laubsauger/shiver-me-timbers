@@ -147,6 +147,10 @@ export function braceAngle(
  * sailTrim (0..1, the sim's value) → §V13 sail state, with hysteresis so a
  * trim resting on a threshold cannot flip states every frame — each flip
  * disposes and rebuilds six sail geometries.
+ *
+ * THIS IS A LABEL, NOT A SHAPE. It names the point of trim for the HUD plaque,
+ * the haul audio and any state-machine logic. It must NOT drive geometry: see
+ * `sailGeometryState` below for why, and use that instead.
  */
 export function sailStateForTrim(
   trim: number,
@@ -165,13 +169,62 @@ export function sailStateForTrim(
 }
 
 /**
- * Continuous cloth-drop scale within a state, so hauling on the sheets reads
- * as the canvas gradually coming in rather than three snapping silhouettes.
- * 1 at full trim, `trimDropMin` at the point the sail reefs.
+ * WHICH GEOMETRY the cloth is built from (user: "pulling up and down the sails
+ * still skips… it suddenly jumps when it's like half unfurled, and then it
+ * suddenly snaps and they're in — on the way out it does the same").
+ *
+ * `sailStateForTrim` used to drive this, and a hysteretic three-way switch
+ * CANNOT produce a smooth transition — the cloth has to jump at every flip, by
+ * construction. Measured on the main course before this changed:
+ *
+ *   hauling down: at trim 0.55 the canvas foot moved 2.11 m in one frame
+ *                 (34% of the sail's drop), then trim 0.15..0.54 was a DEAD
+ *                 ZONE — 39% of the range in which nothing moved at all
+ *   hauling up:   the same jump happened at trim 0.62, and measured 2.55 m
+ *                 (41%), because the hysteresis puts it somewhere else
+ *
+ * Both halves of the user's report, and both readings of the earlier "reefing
+ * skips 30–40%": the jump is 34–41% of the drop AND the dead band is 39–40% of
+ * the range.
+ *
+ * So the reef is now carried ENTIRELY by the continuous `trimDropScale`, and
+ * geometry only swaps once, at the very bottom, where the collapsed panel and
+ * the gathered bundle are the same height (that is what `trimDropMin` is tuned
+ * to). There is no 'reefed' geometry on the trim path any more: an intermediate
+ * mesh swap is a jump wherever you put it.
+ */
+export function sailGeometryState(
+  trim: number,
+  current: SailStateId,
+  p: ShipRigParams,
+): SailStateId {
+  const t = clamp(finite(trim, 1), 0, 1);
+  const below = Math.max(0, finite(p.furlGeometryBelow, 0.02));
+  // still edge-triggered — a swap disposes and rebuilds six geometries — but
+  // the band is bounded BY the threshold, so shaking the canvas back out can
+  // never cost more than twice the trim it took to furl (at these values, 4%
+  // of the range, against the 6% band that used to sit at mid-travel)
+  const h = Math.min(Math.max(0, p.reefHysteresis), below);
+  return t < (current === 'furled' ? below + h : below) ? 'furled' : 'full';
+}
+
+/**
+ * Continuous cloth-drop scale — the ONE thing that animates a reef, now over
+ * the whole of trim rather than the top 45% of it.
+ *
+ * LINEAR ON PURPOSE. Any interval on which this is flat is a stretch of the
+ * player's control that does nothing, and that is precisely what the user feels
+ * as a skip: the old form pinned at `trimDropMin` for every trim below
+ * `reefReefedBelow`, i.e. 55% of the travel. A smoothstep would be worse, not
+ * better — it is flat at BOTH ends, so it would put a fresh dead zone at full
+ * sail and another at furled.
+ *
+ * 1 at full trim, `trimDropMin` at trim 0. It is read by the cloth (via
+ * `setSailDropScale`), by the rigging's furl response, and by the haul audio,
+ * so all three stay in step by construction.
  */
 export function trimDropScale(trim: number, p: ShipRigParams): number {
   const t = clamp(finite(trim, 1), 0, 1);
-  const span = Math.max(0.05, 1 - p.reefReefedBelow); // §V28 floored divisor
-  const k = clamp((t - p.reefReefedBelow) / span, 0, 1);
-  return p.trimDropMin + (1 - p.trimDropMin) * k;
+  const min = clamp(finite(p.trimDropMin, 0.26), 0, 1);
+  return min + (1 - min) * t;
 }

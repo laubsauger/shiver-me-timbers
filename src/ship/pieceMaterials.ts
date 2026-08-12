@@ -68,6 +68,21 @@ const FAMILY_OF: Record<PieceKind, Family> = {
 const WATERLINE_KINDS = new Set<PieceKind>(['hull-section', 'bow', 'transom']);
 
 /**
+ * The LOFTED SHELL kinds — the only pieces whose `uv` carries the hull's own
+ * surface parameter (station, height-fraction) rather than a box's face UVs.
+ * They plank in strakes off that parameter so the boards ride the sheer and
+ * narrow toward the ends; see WoodTones.strake. The rest of the 'hull' family
+ * (`cabin`, `gallery`, `gunport`) are box-built joinery sitting on top of the
+ * shell, and keep the level-course coordinate — which is right for them: a
+ * cabin side really is planked in level courses.
+ *
+ * Same three kinds as WATERLINE_KINDS today, and for the same underlying
+ * reason (these are the loft), but kept separate: one set is about where the
+ * water is, the other about what the UVs mean.
+ */
+const STRAKE_KINDS = new Set<PieceKind>(['hull-section', 'bow', 'transom']);
+
+/**
  * Which piece-local axis a spar runs along. Spars are built of staves LENGTHWISE
  * — without this the seam function stacks its courses up the local y of a
  * cylinder and wraps them into barrel hoops (see WoodTones.sparAxis).
@@ -92,7 +107,14 @@ function woodTones(
   const base = sparAxis === undefined ? {} : { sparAxis };
   switch (family) {
     case 'hull':
-      return { ...base, light: p.hullLight, dark: p.hullDark, wale: true, waterline };
+      return {
+        ...base,
+        light: p.hullLight,
+        dark: p.hullDark,
+        wale: true,
+        waterline,
+        ...(STRAKE_KINDS.has(kind) ? { strake: true } : {}),
+      };
     case 'deck':
       return {
         ...base,

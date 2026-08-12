@@ -41,6 +41,22 @@ export interface SkyParams {
   sunsetGroundColor: number;
   /** 0..1 master on the whole crossfade; 0 = no sunset grade at all */
   sunsetStrength: number;
+  /**
+   * GOLDEN-HOUR BAND GEOMETRY. The sunset needs a different SHAPE of sky, not
+   * just different colours: the day's broad pale haze wedge and its
+   * high-biased zenith curve between them hold the whole 0-30° window — the
+   * only part of the sky a camera framing the sea ever sees — inside one
+   * hue. Measured at warm=1 with the day geometry, that window runs #ffc26f →
+   * #c17063: cream to terracotta, every stop an orange, with the rose-indigo
+   * zenith stranded overhead where the shot never looks. That is the user's
+   * "feels like a very bit single-coloured".
+   *
+   * These two crossfade by the SAME `warm` weight as the colours (§T39, one
+   * weight moves everything), so at warm=0 the signed-off midday look from
+   * docs/final-full-result.png is bit-for-bit what it always was.
+   */
+  sunsetHazeFalloff: number;
+  sunsetGradientCurve: number;
   /** warm tint blended into the haze around the sun's side */
   horizonWarmColor: number;
   /** 0..1 peak warm-tint amount (scaled up as the sun drops) */
@@ -71,9 +87,40 @@ export interface SkyParams {
    * normal, so it deletes the contact shadow of any object thinner than
    * itself — keep it under the smallest caster that matters (deck rail posts
    * are 0.09 m) and near one shadow texel, which is 2*extent/mapSize.
-   * `shadowExtent` is the ortho half-width: shrinking it sharpens fixtures
-   * but CLIPS long shadows — a 40 m mast at a 20° sun throws ~110 m, so an
-   * extent below ~70 truncates the ship's shadow on the water.
+   * `shadowExtent` is the ortho half-width IN THE LIGHT'S OWN uv PLANE, and
+   * that is not the same thing as the length of the shadow on the ground.
+   * This comment used to claim "a 40 m mast at a 20° sun throws ~110 m, so an
+   * extent below ~70 truncates the ship's shadow", and it is WRONG in a way
+   * that costs real money: it sent a reader toward cascades and a 4096 map to
+   * chase a 526 m shadow at a 4.35° sun. A caster and the shadow it casts are
+   * displaced from each other ALONG THE LIGHT AXIS, which is the shadow
+   * camera's DEPTH axis — so they land on the same (u,v), i.e. the same texel
+   * column of the map, at every elevation. Measured at 17.7: du = dv = 0,
+   * dw = -527.8. The extent never clipped it. Length of shadow is bounded by
+   * near/far (50..2600 against sunDistance 1200), never by extent.
+   * What the extent must actually cover is the CASTER's own light-space
+   * footprint — about max(halfLength, height * cos(elevation)) — plus the
+   * receiver swath you want shadowed. That term GROWS as the sun drops (the
+   * mast turns side-on to the light) but is bounded above by the mast HEIGHT,
+   * 40 m, never by the 526 m shadow. Worst case over the whole day is a sun
+   * on the horizon, and even that needs half of 80. Coverage on the water is a strip
+   * ±extent crosswind by ±extent/sin(elevation) along the sun azimuth: at
+   * 4.35° that is ±80 m by ±1056 m, against the 526 m the ship needs.
+   *
+   * BUT DO NOT GENERALISE THAT TO "THE EXTENT IS FINE" — that was the second
+   * wrong conclusion drawn here. du = dv = 0 holds for a caster and ITS OWN
+   * shadow; it says nothing about casters displaced sideways from the
+   * frustum centre, and the centre is the PLAYER. The ±extent/sin(elevation)
+   * reach exists ONLY along the sun azimuth, so at a low sun the covered
+   * water is a long thin STRIP, not a disc — measured at 17.7 with extent 80:
+   * 1055 m along the sun line, 160 m at 30° off it, 80 m crosswind. Any
+   * caster off that strip is absent from the map and casts NOTHING: the
+   * enemy ship at ENEMY_SPAWN [190,-150] lands at u = -146 and is excluded.
+   * That anisotropy is visible to the user as "islands cast no shadow, but it
+   * does receive shadow at some point very far away". Fixing it is a
+   * cascade/coverage problem and CANNOT be solved by raising this number —
+   * an extent of 500 costs 0.49 m texels at 2048, which deletes every deck
+   * fixture (rail posts are 0.09 m). One frustum cannot serve both jobs.
    * `shadowMapSize` is read once at construction (reload to change).
    */
   shadowNormalBias: number;
@@ -121,9 +168,36 @@ export interface SkyParams {
 export const skyParams: SkyParams = registerParams(
   'sky',
   {
-    // afternoon sun ~22° up: high enough for a bright blue sky, low enough
-    // that the disc sits in frame and throws a glint path across the water
-    timeOfDay: 16.4,
+    // GOLDEN HOUR (§T39) — the showcase/recording default. Sun at 10.14°.
+    //
+    // Was 16.4 (23.13°), where the sun sat three hundredths of a radian PAST
+    // lowSunWarmth()'s 0.4 upper edge, so warm was exactly 0 and the whole
+    // sunset palette below multiplied by zero and had never once rendered.
+    //
+    // Then 17.7 (4.35°), chosen because warm saturates at 1.000 there. That
+    // was too low, for two measured reasons that both key off N·L on flat
+    // water = sin(elevation):
+    //   - 4.35° gives N·L 0.0758. Sun*N·L = 0.240, and that product is the
+    //     ONLY thing a shadow on the water can darken, so ship and island
+    //     shadows were invisible (user: "still missing a proper shadow cast
+    //     on the water"). At 10.14°, N·L 0.1760 → 0.599: 2.49x.
+    //     Under the storm preset (sunIntensity 3.4 → 1.6) 17.7 falls to
+    //     0.113 — "in the storm we see nothing at all" — while 17.3 holds
+    //     0.282, still above CLEAR-sky 17.7. Shadows survive the weather.
+    //   - warm 1.000 made every surface maximally molten (user: "golden hour
+    //     but not insane all the time"). 0.780 keeps the grade clearly warm
+    //     without saturating it.
+    // And it costs almost nothing: because bandGeometry() crossfades on the
+    // same weight, warm 0.78 still yields hazeFalloff 0.118 / curve 0.80,
+    // holding 97% of 17.7's vertical gradient (spread 0.545 vs 0.561) with
+    // slightly BETTER azimuthal variety. The 0-30° ramp reads
+    // #f2c885 → #8e6879: cream through rose, less molten than 17.7's
+    // #ffc26f → #985f69.
+    // Trade-off accepted: warm 0.78 is on a slope, not the plateau, so the
+    // grade does move if this number moves. Keep nudges under ~0.1 h.
+    // Alternatives: 17.6 (5.79°, warm 0.987) for a more saturated grade at
+    // half the shadow visibility. Do not go past ~17.9 — sunset is 18.0.
+    timeOfDay: 17.3,
     latitude: 15,
     // Sampled from docs/final-full-result.png: horizon band (219,236,240),
     // sky body at ~20° (105,165,201), extrapolated zenith (47,127,196).
@@ -146,6 +220,24 @@ export const skyParams: SkyParams = registerParams(
     sunsetHorizonColor: 0xffd183,
     sunsetGroundColor: 0x6d5b53,
     sunsetStrength: 1,
+    // 0.18 → 0.10: a real horizon band ~4° tall instead of a wedge that
+    // washes the whole lower sky to cream. Not smaller: the band has to stay
+    // wide enough to cover the steep region of lift^0.6 near the horizon,
+    // where a sub-1 exponent rises very fast, and 0.06 also deletes the
+    // bright horizon glow the reference has.
+    sunsetHazeFalloff: 0.1,
+    // 1.5 → 0.60: the dominant lever. `height = lift^curve` with lift =
+    // sin(elevation), so at 30° lift is only 0.5 and the shipped 1.5 leaves
+    // height at 0.35 — the sky is still 65% midColor at the top of frame and
+    // the zenith hue never arrives. At 0.60 the 0-30° window runs
+    // #ffc26f → #985f69, cream → orange → dusty rose.
+    // Measured RGB spread across the 0-30° window a sea-framing camera sees:
+    //   day geometry .18/1.5   0.411   (every stop an orange)
+    //   haze wedge alone .10   0.446   (+8%)
+    //   curve alone 0.60       0.514   (+25%)
+    //   both, as shipped here  0.561   (+36%)
+    // Both are needed; neither alone clears the bar the test pins.
+    sunsetGradientCurve: 0.6,
     horizonWarmColor: 0xffaf57,
     horizonWarmStrength: 0.45,
     sunColorLow: 0xff9440,
@@ -181,6 +273,8 @@ export const skyParams: SkyParams = registerParams(
     sunsetStrength: { min: 0, max: 1, step: 0.01 },
     hazeStrength: { min: 0, max: 1, step: 0.01 },
     hazeFalloff: { min: 0.02, max: 1, step: 0.01 },
+    sunsetHazeFalloff: { min: 0.02, max: 1, step: 0.01 },
+    sunsetGradientCurve: { min: 0.2, max: 4, step: 0.01 },
     sunHazeStrength: { min: 0, max: 1, step: 0.01 },
     horizonWarmStrength: { min: 0, max: 1, step: 0.01 },
     sunDiscSize: { min: 0.2, max: 6, step: 0.05 },

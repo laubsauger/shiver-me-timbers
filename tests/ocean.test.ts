@@ -714,3 +714,245 @@ describe('sun-elevation gate clears a horizon-kissing sunset (§T.39)', () => {
     );
   });
 });
+
+/**
+ * §V.44 rotation blowout. The user shot one position from four azimuths: the
+ * sea was electric cyan facing the sun and dark teal facing away — "just by
+ * rotating the camera the whole scenery changes". The cause was a view·sun
+ * lobe added without a ceiling, so facing a low sun it fired across the whole
+ * visible sea at once. These tests encode WHY the bound exists: rotating the
+ * camera must not restage the scene, and the bound has to hold at EVERY sun
+ * elevation, not just the one it was tuned at.
+ */
+describe('backscatter lobe is bounded at source (§V.44)', () => {
+  const sp = oceanSurfaceParams;
+
+  it('has a hard ceiling below full replacement', () => {
+    // it is a mix, so the ceiling is the maximum fraction of the body colour
+    // the lobe can ever replace. At 1.0 the sea becomes the scatter colour
+    // outright; past ~0.6 the toward-sun frame runs away again.
+    expect(sp.sssMaxMix).toBeGreaterThan(0);
+    expect(sp.sssMaxMix).toBeLessThanOrEqual(0.6);
+  });
+
+  it('the colour it mixes toward cannot out-brighten a lit sea', () => {
+    // a mix bounds the WEIGHT; this bounds the TARGET. Both are needed — an
+    // unbounded target with a bounded weight is still a blowout.
+    expect(sp.sssBrightness).toBeLessThanOrEqual(1);
+  });
+
+  it('worst-case lobe contribution stays a minority of the pixel', () => {
+    // the property that actually fixes the user's complaint: even with the
+    // lobe fully saturated (camera facing the sun, crest, full choppiness)
+    // most of the pixel is still the sea, not the scatter colour
+    expect(sp.sssMaxMix).toBeLessThan(0.5);
+  });
+
+  it('is gated on sun elevation, so it cannot fire from a set sun', () => {
+    expect(sp.sunHorizonFadeHigh).toBeGreaterThan(sp.sunHorizonFadeLow);
+    expect(sp.sunHorizonFadeLow).toBeGreaterThanOrEqual(0);
+  });
+});
+
+/**
+ * §V.48 band-limiting. A world-locked hash grid is scale-invariant in WORLD
+ * space, which means it is wrong in SCREEN space at every distance except the
+ * one it was tuned at: 24 px blocks near the hull, per-pixel stipple in the
+ * mid-distance.
+ *
+ * The FIRST fix sized cells by distance × view angle. That is only correct
+ * looking straight down. On a plane seen at a grazing angle the world
+ * footprint of one pixel is stretched by 1/sin(grazing), so at the sunset
+ * framing (low camera, water running to the horizon) the cells went
+ * sub-pixel again and the whole mid-field stippled — which the user
+ * reported. CPU transliteration of both laws, so the regression is a test
+ * failure and not another screenshot.
+ */
+describe('sparkle cells are sized by the pixel footprint (§V.48)', () => {
+  const sp = oceanSurfaceParams;
+  // 55 deg vertical fov over ~840 px
+  const radPerPx = (55 * Math.PI) / 180 / 840;
+  /**
+   * World-space size of one pixel ON THE WATER, for a camera `h` above the
+   * plane looking at a point `d` away horizontally. The 1/sin(grazing) term
+   * is the whole point: it is what the angular law omitted.
+   */
+  const footprint = (d: number, h: number) => ((h * h + d * d) * radPerPx) / h;
+  const quantise = (target: number) =>
+    Math.max(sp.sparkleMinCell, 2 ** Math.floor(Math.log2(target)));
+  const cellPx = (d: number, h: number) => {
+    const f = footprint(d, h);
+    return quantise(Math.max(sp.sparkleMinCell, f * sp.sparkleCellPixels)) / f;
+  };
+
+  it('holds its pixel size across four orders of distance', () => {
+    // the old world-locked grid ran 24 px -> 0.25 px over this same range
+    for (const d of [2, 10, 50, 200, 1000, 4000]) {
+      expect(cellPx(d, 22)).toBeGreaterThan(1); // not per-pixel noise
+      expect(cellPx(d, 22)).toBeLessThan(6); // not visible blocks
+    }
+  });
+
+  it('holds it at a GRAZING framing too, where the angular law failed', () => {
+    // low camera, sea running to the horizon: the §T.39 sunset shot
+    for (const d of [50, 400, 1500, 4000]) {
+      expect(cellPx(d, 3)).toBeGreaterThan(1);
+      expect(cellPx(d, 3)).toBeLessThan(6);
+    }
+    // and prove the superseded law really did collapse there, so nobody
+    // "simplifies" the footprint back into a distance × angle estimate
+    const angular = (d: number, h: number) =>
+      quantise(Math.max(sp.sparkleMinCell, d * 0.0028)) / footprint(d, h);
+    expect(angular(1500, 3)).toBeLessThan(0.05); // ~1/20 px => pure stipple
+  });
+
+  it('quantises to octaves so the pattern does not boil under motion', () => {
+    // within an octave the cell size is constant => world-locked, so the
+    // pattern does not crawl as the camera dollies. Footprints are picked
+    // RELATIVE to an octave boundary so the test survives retuning the
+    // cells-per-pixel target.
+    const size = (f: number) => quantise(f * sp.sparkleCellPixels);
+    const at = (t: number) => (4 * t) / sp.sparkleCellPixels; // t ∈ (1,2) = one octave
+    expect(size(at(1.1))).toBe(size(at(1.8)));
+    expect(size(at(1.1))).not.toBe(size(at(2.5))); // ...and it does step
+  });
+});
+
+/**
+ * §V.48 specular antialiasing. A narrow specular lobe point-sampled on a
+ * normal field that swings through many wave faces inside one pixel is a coin
+ * flip per pixel; the user sees it as the whole sea glittering and boiling
+ * when zoomed out. Carrying the sub-pixel normal variance into the lobe WIDTH
+ * fixes it. Turning the specular down would too — and would flatten the sea —
+ * so these tests are written against the thing that distinguishes them:
+ * neighbouring pixels must AGREE more, while the lobe keeps its energy.
+ */
+describe('specular lobes are filtered by normal variance (§V.48)', () => {
+  const sp = oceanSurfaceParams;
+  /** the shader's own form: p' = p/(1 + p·σ²), peak × p'/p (energy conserved) */
+  const lobe = (ndoth: number, p: number, varSq: number) => {
+    const k = 1 + p * varSq;
+    return Math.pow(ndoth, p / k) / k;
+  };
+
+  it('is the identity where the normals are coherent — the glint road stays', () => {
+    for (const nh of [0.9, 0.99, 0.999]) {
+      expect(lobe(nh, sp.glintRoadPower, 0)).toBeCloseTo(
+        Math.pow(nh, sp.glintRoadPower),
+        10,
+      );
+    }
+  });
+
+  it('collapses the pixel-to-pixel swing where they are not', () => {
+    const p = sp.glintRoadPower; // 180: the tightest lobe in the material
+    const a = 0.999;
+    const b = 0.985; // one neighbouring pixel, a slightly different wave face
+    const raw = lobe(a, p, 0) / lobe(b, p, 0);
+    expect(raw).toBeGreaterThan(8); // unfiltered: neighbours differ ~13x
+    const filtered = lobe(a, p, 0.05) / lobe(b, p, 0.05);
+    expect(filtered).toBeLessThan(2); // filtered: they now agree
+  });
+
+  it('can only ever attenuate, never amplify (§V.44 bounded at source)', () => {
+    // gain = 1/(1 + p·σ²) with σ² ≥ 0 and capped, so the term is bounded
+    // WITHOUT a clamp after the fact
+    expect(sp.specularAaStrength).toBeGreaterThanOrEqual(0);
+    expect(sp.specularAaMax).toBeGreaterThan(0);
+    for (const p of [sp.sparklePower, sp.glintRoadPower, sp.glintTrainPower]) {
+      const gain = 1 / (1 + p * sp.specularAaMax);
+      expect(gain).toBeGreaterThan(0);
+      expect(gain).toBeLessThanOrEqual(1);
+    }
+  });
+});
+
+/**
+ * §V.36 crest foam. The user: whitecaps missing entirely, sea reads
+ * "synthetic, like a weird liquid", and they want sparse foam even in normal
+ * swell. A σ-relative gate gives sparse-in-swell and heavy-in-storm from one
+ * number, and cannot rot when the spectrum moves (§B.12 was the same bug).
+ */
+describe('crest foam gate is sea-state relative (§V.36)', () => {
+  const sp = oceanSurfaceParams;
+
+  it('is expressed in sigma, never in metres', () => {
+    // a metre constant means "top 7%" on the sea it was written for and
+    // something else entirely after any spectrum change
+    expect(sp.crestFoamBandHigh).toBeGreaterThan(sp.crestFoamBandLow);
+    expect(sp.crestFoamBandLow).toBeGreaterThan(0);
+    expect(sp.crestFoamBandLow).toBeLessThan(4);
+  });
+
+  it('selects a sparse minority of crests, not a band across the sea', () => {
+    const erfc = (x: number) => {
+      const t = 1 / (1 + 0.3275911 * Math.abs(x));
+      const y =
+        1 -
+        ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t +
+          0.254829592) *
+          t *
+          Math.exp(-x * x);
+      return x >= 0 ? 1 - y : 1 + y;
+    };
+    const above = (n: number) => 0.5 * erfc(n / Math.SQRT2);
+    expect(above(sp.crestFoamBandLow)).toBeLessThan(0.12); // sparse in swell
+    expect(above(sp.crestFoamBandLow)).toBeGreaterThan(0.01); // but not zero
+  });
+
+  it('foam takes some of the sky colour — reference foam is warm cream', () => {
+    expect(sp.foamSkyTint).toBeGreaterThan(0);
+    expect(sp.foamSkyTint).toBeLessThan(1);
+  });
+
+  /**
+   * User at the default swell preset: "too long, too white, too thick, too
+   * regular, too big — just too chunky, like a milk cut." The shape cause is
+   * that a smooth gate on a smooth field yields a connected CONTOUR, i.e. one
+   * unbroken ribbon per crest line.
+   */
+  it('is broken up by a noise gate, or it draws ribbons along every crest', () => {
+    // the gate has to exist and be a real window, not a pass-through
+    expect(sp.crestFoamPatchHigh).toBeGreaterThan(sp.crestFoamPatchLow);
+    expect(sp.crestFoamPatchLow).toBeGreaterThan(0);
+    expect(sp.crestFoamPatchHigh).toBeLessThanOrEqual(1);
+    // and it has to select the UPPER part of the break-up field (mean 0.5),
+    // so it removes coverage rather than merely modulating it — a window
+    // centred at or below the mean would leave the ribbon essentially intact
+    expect((sp.crestFoamPatchLow + sp.crestFoamPatchHigh) / 2).toBeGreaterThan(0.5);
+    // and its features must be big enough to read as patches on a wave, not
+    // as a texture: a metre-scale field would just look like grain
+    expect(sp.crestFoamPatchScale).toBeGreaterThan(5);
+  });
+
+  it('keeps the patch BODY translucent and only the breaking edge white', () => {
+    // thin foam takes the water and sky under it; "milk cut" is what a
+    // near-opaque body reads as
+    expect(sp.crestFoamStrength).toBeLessThan(0.45);
+    expect(sp.crestFoamEdgeStrength).toBeGreaterThan(sp.crestFoamStrength * 2);
+    expect(sp.crestFoamEdgeStrength).toBeLessThanOrEqual(1);
+    // the edge sits ABOVE the crest band, so it is a lip and not a second
+    // coat over the whole patch
+    expect(sp.crestFoamEdgeWidth).toBeGreaterThan(0);
+  });
+
+  /**
+   * §V.36's promise is that ONE pair of numbers serves calm/swell/storm. That
+   * only holds if something in the gate is NOT σ-relative: a σ-relative pair
+   * on both axes gives literally constant coverage at every sea state, and
+   * the user wants sparse in swell and heavy in storm.
+   */
+  it('scales with sea state through the SLOPE gate, not the height band', () => {
+    // the height band is in σ (keeps meaning "crest tops" when the spectrum
+    // moves — §B.12), the slope gate is absolute (a storm sea is genuinely
+    // steeper, so coverage rises without any per-preset number)
+    expect(sp.crestFoamSlopeGate).toBeGreaterThan(0);
+    expect(sp.crestFoamSlopeGate).toBeLessThan(1.5);
+    // sanity: an absolute slope gate must sit inside the range real sea
+    // slopes span, or it is either always on or always off
+    const coverage = (slopeRms: number) =>
+      Math.min(1, slopeRms / sp.crestFoamSlopeGate);
+    expect(coverage(0.12)).toBeLessThan(0.6); // swell: sparse
+    expect(coverage(0.34)).toBeGreaterThan(0.9); // storm: heavy
+  });
+});
