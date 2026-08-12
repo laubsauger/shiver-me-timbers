@@ -176,7 +176,28 @@ export const weatherPresets: Readonly<
   // so far more of the surface reads as folding → massive foam patches (§V7).
   storm: {
     ocean: {
-      amplitude: 2.2, // heavy seas, > 2× swell energy
+      /**
+       * 2.2 → 1.15. TWO agents measured this independently and reached the
+       * same verdict from opposite ends: the ocean agent found Hs = 20.4 m
+       * (7× swell, worse than the worst recorded North Atlantic sea, with
+       * 20.07 m of it in cascade 0 alone — only two wavelengths per 420 m
+       * tile, which is also a §V.19 tiling exposure), and the sea-physics
+       * agent independently measured Hs ≈ 22 m and the hull fully clear of
+       * the water 8–14% of ticks.
+       *
+       * It was the cause of TWO separate user reports — crests "crossing over,
+       * twisting… bulgy over-cresting" (waves too big for the vertex spacing
+       * to carry, NOT a choppiness fold: the λ clamp was verified working and
+       * storm's effective λ is 0.94, below swell's 0.95) and the ship
+       * "catching airtime… too light". A 35 m hull with 2.6 m of freeboard in
+       * a 20 m sea is not a sailing scenario; the physics was right and the
+       * sea was wrong.
+       *
+       * 1.15 lands near Hs 8–10 m — a genuine gale a galleon can survive and
+       * be filmed in. One number, and it is the whole revert if a bigger sea
+       * is wanted for a shot.
+       */
+      amplitude: 1.15,
       windSpeed: 18, // near-gale (m/s) → long steep spectrum
       choppiness: 1.9, // hard-pinched crests that overlap and fold
       // 0.9 meant "foam wherever the surface is compressed by 10%" (J≈1 at

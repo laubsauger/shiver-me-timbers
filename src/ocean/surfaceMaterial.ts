@@ -41,7 +41,6 @@ import {
   vec2,
   vec3,
   viewportDepthTexture,
-  viewportLinearDepth,
   viewportTexture,
 } from 'three/tsl';
 import type { OceanSimulation } from './oceanCascades';
@@ -495,7 +494,18 @@ export function buildOceanSurfaceMaterial(
     // water thickness along the view ray (turquoise → deep teal).
     // linearDepth() is normalized 0..1 over the camera range — scale by
     // far to get METERS or absorption density is meaningless (§B.3)
-    const ownDepth = viewportLinearDepth;
+    // THIS FRAGMENT's depth, not the scene's. `viewportLinearDepth` reads as if
+    // it were ours — three's own docstring above it even says "of the current
+    // fragment" — but it is defined as `linearDepth(viewportDepthTexture())`,
+    // i.e. the depth of whatever is already in the buffer at screenUV. It was
+    // therefore byte-identical to `straightDepth` below, so `probeThickness`
+    // was IDENTICALLY ZERO, `refractRamp` zero, `validRefraction` always false
+    // and `seeThrough` always zero. The entire §V.24 transmission channel —
+    // refraction offset, absorption by thickness, and the transmitFloor cap on
+    // the mirror — was multiplied by nothing, and the water could never show a
+    // submerged hull however the Fresnel was tuned. `linearDepth()` with no
+    // argument is the fragment's own (ViewportDepthNode.js:281).
+    const ownDepth = linearDepth();
     // Refraction displacement must scale with how much WATER is actually in
     // front of the geometry. A constant screen-space offset bends the image
     // of something touching the surface just as hard as the deep seabed, so
