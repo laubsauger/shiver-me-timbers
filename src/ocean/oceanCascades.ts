@@ -17,7 +17,13 @@ import {
   spectralJacobianRms,
   spectralSteepness,
 } from './oceanMath';
-import { createDataTexture, createOutputTexture, createSpectrumTexture } from './oceanTextures';
+import {
+  createDataTexture,
+  createOutputArrayTexture,
+  createOutputTexture,
+  createSpectrumTexture,
+  type CascadeLayer,
+} from './oceanTextures';
 import { buildSpectrumPass } from './spectrumPass';
 import { buildFftPasses } from './fftPasses';
 import { buildUnpackPass } from './unpackPass';
@@ -25,7 +31,19 @@ import { buildUnpackPass } from './unpackPass';
 export class OceanCascade {
   readonly domain: number;
   readonly displacement: THREE.StorageTexture;
-  readonly derivatives: THREE.StorageTexture;
+  /**
+   * This cascade's LAYER of the simulation's shared derivatives array texture,
+   * not a texture of its own (§V.40). All three cascades write and read one
+   * `StorageArrayTexture`, which is one binding and — the part that was
+   * actually scarce — ONE SAMPLER for all three instead of three of each.
+   * Sample it through `sampleCascadeLayer`, never with a bare `texture()`.
+   *
+   * `displacement` above deliberately stays three separate 2D textures: it is
+   * sampled in the VERTEX stage by `positionNode`, and three r180 cannot sample
+   * a filterable array texture there at all (the layer index is dropped from
+   * the emitted WGSL). See tests/oceanBindingBudget.test.ts.
+   */
+  readonly derivatives: CascadeLayer;
 
   /** RMS ∂Dx/∂x of this cascade's band — feeds the anti-fold choppiness cap */
   steepnessRms = 0;
@@ -51,7 +69,13 @@ export class OceanCascade {
   private readonly index: number;
   private readonly seed: number;
 
-  constructor(index: number, seed: number, butterfly: THREE.DataTexture, p: OceanParams) {
+  constructor(
+    index: number,
+    seed: number,
+    butterfly: THREE.DataTexture,
+    derivatives: THREE.StorageArrayTexture,
+    p: OceanParams,
+  ) {
     this.index = index;
     this.seed = seed;
     this.domain = p.cascades[index].domain;
@@ -59,7 +83,8 @@ export class OceanCascade {
 
     this.h0Texture = createDataTexture(this.generateSpectrumData(p), n, n);
     this.displacement = createOutputTexture(n);
-    this.derivatives = createOutputTexture(n);
+    // the array is owned by OceanSimulation; this cascade owns layer `index`
+    this.derivatives = { texture: derivatives, layer: index };
 
     const spec0 = { ping: createSpectrumTexture(n), pong: createSpectrumTexture(n) };
     const spec1 = { ping: createSpectrumTexture(n), pong: createSpectrumTexture(n) };
@@ -144,8 +169,18 @@ export function spectrumSignature(p: OceanParams): string {
   ].join('|');
 }
 
+/** §V.19 floor: three independent bands. Also the derivatives array's depth. */
+const CASCADE_COUNT = 3;
+
 export class OceanSimulation {
   readonly cascades: OceanCascade[];
+  /**
+   * The shared derivatives array texture (§V.40) — one binding and one sampler
+   * for all three cascades. Consumers normally reach it through
+   * `cascade.derivatives` + `sampleCascadeLayer`; it is public so the ledger
+   * has one owner to point at.
+   */
+  readonly derivatives: THREE.StorageArrayTexture;
   /**
    * RMS surface elevation of the whole sea (m) — √m₀, the zeroth spectral
    * moment. Shading reads this so that "a crest" scales with the sea state
@@ -171,7 +206,13 @@ export class OceanSimulation {
       p.resolution,
       Math.log2(p.resolution),
     );
-    this.cascades = [0, 1, 2].map((i) => new OceanCascade(i, seed, butterfly, p));
+    // ONE array texture, one layer per cascade — see OceanCascade.derivatives.
+    // Allocated here rather than per cascade because the whole point is that
+    // the three cascades share a single binding and a single sampler (§V.40).
+    this.derivatives = createOutputArrayTexture(p.resolution, CASCADE_COUNT);
+    this.cascades = [0, 1, 2].map(
+      (i) => new OceanCascade(i, seed, butterfly, this.derivatives, p),
+    );
     this.signature = spectrumSignature(p);
     this.refreshSeaState();
   }

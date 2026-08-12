@@ -39,6 +39,7 @@ import {
   vec4,
 } from 'three/tsl';
 import { SIM_DT } from '../core/loop';
+import { loadCascadeLayer, type CascadeLayer } from '../ocean/oceanTextures';
 import { hash2 } from '../terrain/noise';
 import { sprayParams } from '../params/spray';
 import { oceanParams } from '../params/ocean';
@@ -50,7 +51,7 @@ import { oceanParams } from '../params/ocean';
  */
 export interface SprayCascadeInput {
   displacement: THREE.StorageTexture;
-  derivatives: THREE.StorageTexture;
+  derivatives: CascadeLayer;
   domain: number;
 }
 
@@ -155,7 +156,8 @@ export function createSpray(cascades: SprayCascadeInput[], resolution: number) {
         const d = textureLoad(c.displacement, texel);
         det = det.add(d.w);
         disp = disp.add(d.xyz);
-        const g = textureLoad(c.derivatives, texel);
+        // a LAYER of the ocean's shared derivatives array texture (§V.40)
+        const g = loadCascadeLayer(c.derivatives, texel);
         traceSum = traceSum.add(g.z.add(g.w));
       }
       // CPU mirror: sprayMath.seaMinEigenvalue. λ− = ½(tr − √(tr²−4det)) is

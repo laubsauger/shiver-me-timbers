@@ -48,18 +48,30 @@
  *    on `light.shadow.shadowNode`, so the `shadow()` call site below is a
  *    fallback that never fires and costs ONE texture, not two.
  *
- * THE NEXT RECLAMATION, AND THE THREE TRAPS IN IT (all read out of
+ * THE CASCADE ARRAY TEXTURE, AND THE THREE TRAPS IN IT (all read out of
  * node_modules/three@0.180.0 — do not re-derive, but do re-verify the EMITTED
- * WGSL, because the array path silently diverges from the 2D path).
+ * WGSL if you extend it, because the array path silently diverges from the 2D
+ * path).
  *
- * A 2D-array texture is ONE texture and ONE sampler for all its layers, so
- * folding the three cascades into one `THREE.StorageArrayTexture(n, n, 3)` and
- * sampling `texture(arr, uv).depth(i)` turns 3 bindings into 1. The whole path
- * exists in r180 and is wired end to end: `WGSLNodeBuilder.js:1753` emits
- * `texture_2d_array<f32>`, `:1749` emits `texture_storage_2d_array`,
- * `WebGPUBindingUtils.js:119/193` sets `viewDimension: '2d-array'`, and
- * `Textures.js:403` takes the layer count from `image.depth`. It has ZERO
- * usages and ZERO tests inside three itself — we would be its first user.
+ * A 2D-array texture is ONE texture and ONE sampler for all its layers, so the
+ * three cascades' `derivatives` are folded into one
+ * `THREE.StorageArrayTexture(n, n, 3)` (src/ocean/oceanTextures.ts) — 3
+ * bindings and 3 samplers become 1 and 1 in every fragment shader that reads
+ * them. The whole path exists in r180 and is wired end to end:
+ * `WGSLNodeBuilder.js:1753` emits `texture_2d_array<f32>`, `:1749` emits
+ * `texture_storage_2d_array`, `WebGPUBindingUtils.js:119/193` sets
+ * `viewDimension: '2d-array'`, and `Textures.js:403` takes the layer count from
+ * `image.depth`. `Textures.js:252` short-circuits storage textures to
+ * create-only, so the `updateTexture` array branch that would try to upload
+ * non-existent image data is unreachable. It has ZERO other usages and ZERO
+ * tests inside three itself — we are its first user, so the traps below are
+ * ours to remember.
+ *
+ * Go through `sampleCascadeLayer` / `loadCascadeLayer` / `storeCascadeLayer`
+ * rather than calling the TSL accessors directly. Each of the three traps is a
+ * way to write something that looks right and emits invalid WGSL, and invalid
+ * WGSL here means the §V.40 failure mode: the pipeline never builds and the
+ * console blames the descriptor.
  *
  *  1. A FILTERABLE ARRAY TEXTURE CANNOT BE SAMPLED IN THE VERTEX STAGE AT ALL.
  *     `WGSLNodeBuilder.generateTextureSampleLevel` (and `generateTextureLevel`)
@@ -70,9 +82,10 @@
  *     `textureSample` is fragment-only). `generateTextureGrad` is no escape
  *     either: it also drops the index AND `console.error`s outside fragment.
  *     Only the UNFILTERABLE path (`generateTextureLod` → `generateTextureLoad`)
- *     carries the index. ⟹ `derivatives` (fragment-only) is convertible;
- *     `displacement` (vertex AND fragment) is NOT, without giving up bilinear
- *     in the vertex stage.
+ *     carries the index. ⟹ `derivatives` (fragment-only in every consumer, and
+ *     `textureLoad`-only in the foam/spray COMPUTE passes, which is the path
+ *     that works) IS an array; `displacement` (sampled filtered in the VERTEX
+ *     stage by `positionNode`) is NOT and must not become one.
  *
  *  2. `textureStore(tex, uv, val).depth(i)` STACKS THE WRONG NODE.
  *     `textureStore` calls `node.toStack()` IMMEDIATELY (StorageTextureNode.js
@@ -113,6 +126,7 @@ import seabedSource from '../src/island/seabed.ts?raw';
 import reflectionShadingSource from '../src/reflection/reflectionShading.ts?raw';
 import planarReflectionSource from '../src/reflection/planarReflection.ts?raw';
 import uncoloredShadowSource from '../src/sky/uncoloredShadowNode.ts?raw';
+import oceanTexturesSource from '../src/ocean/oceanTextures.ts?raw';
 
 /** WebGPU's DEFAULT per-stage limits — what an adapter grants if nobody asks */
 const WEBGPU_DEFAULT_SAMPLED_TEXTURES_PER_STAGE = 16;
@@ -147,19 +161,40 @@ const LEDGER: readonly LedgerEntry[] = [
   {
     file: 'src/ocean/surfaceMaterial.ts',
     source: surfaceMaterialSource,
-    sites: 6,
-    // 3 displacement + 3 derivatives (sampleDisp/sampleDeriv, once per
-    // cascade) + shadow map DEPTH ONLY (§V.40: the coloured-shadow colour RT
-    // is gone, see uncoloredShadowNode.ts) + the shared viewport depth buffer
-    // (2 call sites, ONE texture) + the scene-colour FramebufferTexture
-    fragmentTextures: 6 + 1 + 1 + 1,
+    sites: 5,
+    // 3 displacement (sampleDisp, once per cascade — still three separate 2D
+    // textures, see the vertex-stage note in the header) + ONE derivatives
+    // ARRAY texture for all three cascades (sampleDeriv → sampleCascadeLayer,
+    // three calls, one binding) + shadow map DEPTH ONLY (§V.40: the
+    // coloured-shadow colour RT is gone, see uncoloredShadowNode.ts) + the
+    // shared viewport depth buffer (2 call sites, ONE texture) + the
+    // scene-colour FramebufferTexture
+    fragmentTextures: 3 + 1 + 1 + 1 + 1,
     // the FramebufferTexture (Nearest/Nearest) and the shared DepthTexture
     // (Nearest/Nearest, no compareFunction) are unfilterable → textureLoad
-    fragmentSamplers: 6 + 1,
-    // positionNode re-samples the same three displacement textures
+    fragmentSamplers: 3 + 1 + 1,
+    // positionNode re-samples the same three displacement textures. NOT the
+    // array — three r180 cannot sample a filterable array texture in the
+    // vertex stage at all; see the header.
     vertexTextures: 3,
     vertexSamplers: 3,
-    why: 'texture()×2 helpers × 3 cascades, shadow()=1 (depth only), viewportDepthTexture()×2=1, viewportTexture()=1',
+    why: 'texture(displacement)×3 via sampleDisp, sampleCascadeLayer×3=1 array, shadow()=1 (depth only), viewportDepthTexture()×2=1, viewportTexture()=1',
+  },
+  {
+    file: 'src/ocean/oceanTextures.ts',
+    source: oceanTexturesSource,
+    // `sampleCascadeLayer` (a filtered `texture()`) and `loadCascadeLayer`
+    // (a `textureLoad()`). Both are HELPERS: the binding they create is
+    // counted against whichever material calls them, exactly as
+    // planarReflection's `reflector()` is counted in reflectionShading.
+    // They are listed so that adding a THIRD accessor here — which would
+    // silently add a binding to every ocean-path material at once — trips.
+    sites: 2,
+    fragmentTextures: 0,
+    fragmentSamplers: 0,
+    vertexTextures: 0,
+    vertexSamplers: 0,
+    why: 'sampleCascadeLayer + loadCascadeLayer — accessors only, counted at the caller',
   },
   {
     file: 'src/sky/uncoloredShadowNode.ts',
@@ -306,34 +341,51 @@ describe('§V.40 ocean material binding budget', () => {
     }
   });
 
-  it('sits exactly ON the FRAGMENT sampler ceiling — nothing spare', () => {
+  it('leaves the FRAGMENT stage two samplers of headroom', () => {
     const samplers = sum((e) => e.fragmentSamplers);
-    // 16 of 16. The one sampler that was spare was bought by dropping three's
-    // coloured-shadow colour texture (uncoloredShadowNode.ts) and it has now
-    // been SPENT, deliberately and after measuring: it buys the second foam
-    // filtered tier (cascade 1), without which that band either aliases into a
-    // field of hard specks from a high camera or has to be retired entirely,
-    // taking the sea's whole 1–3 m cap scale with it. See src/foam/index.ts
-    // `wantsTier`.
+    // 14 of 16, reclaimed in two moves and spent once:
+    //   −1  three's coloured-shadow colour texture (uncoloredShadowNode.ts)
+    //   +1  SPENT on the second foam filtered tier (cascade 1), deliberately
+    //       and after measuring — without it that band either aliases into a
+    //       field of hard specks from a high camera or has to be retired
+    //       entirely, taking the sea's whole 1–3 m cap scale with it
+    //   −2  the three `derivatives` textures folded into ONE array texture
+    //       (src/ocean/oceanTextures.ts) — see the header
     //
-    // THERE IS NOW NO HEADROOM. Nothing may be added to this stage without
-    // reclaiming a sampler first — the next candidate on the list is moving
-    // `totalDisp` to a varying (−3/−3, but crest bands go vertex-interpolated).
+    // The two spare are for the foam art textures (§I/§T.5/§T.22: the
+    // crest/soft pair the talk's stage 3 interpolates between, which this
+    // project has been substituting procedural noise for since the beginning).
+    // The foam plan needs ONE — two samples of the same texture at different UV
+    // scales dedupe by UUID to a single binding. The second spare covers the
+    // soft tier if crest and soft end up as two distinct textures.
     //
     // Still far too tight for a 3-cascade CSMShadowNode: three builds one full
-    // ShadowNode per cascade, so even with this subclass that is +1 texture
-    // and +1 sampler PER EXTRA CASCADE on top of the 15 here.
-    expect(samplers).toBe(16);
+    // ShadowNode per cascade, so even with the uncoloured subclass that is
+    // +1 texture and +1 sampler PER EXTRA CASCADE on top of the 14 here.
+    expect(samplers).toBe(14);
     expect(samplers).toBeLessThanOrEqual(SAMPLER_CEILING);
     expect(sum((e) => e.vertexSamplers)).toBeLessThanOrEqual(SAMPLER_CEILING);
   });
 
-  it('exceeds the DEFAULT sampled-texture limit, so app.ts must raise it', () => {
+  it('has come back INSIDE the default sampled-texture limit, exactly', () => {
     const textures = sum((e) => e.fragmentTextures);
-    expect(textures).toBe(18);
-    // The whole point of §V.40: this material cannot be drawn by a device
-    // created with the WebGPU defaults.
-    expect(textures).toBeGreaterThan(WEBGPU_DEFAULT_SAMPLED_TEXTURES_PER_STAGE);
+    expect(textures).toBe(16);
+    // This assertion used to read "exceeds the DEFAULT limit, so app.ts must
+    // raise it" and it was true at 18. It is not true any more: the array
+    // texture took two off and the uncoloured shadow node a third, so for the
+    // first time the material fits a device created with the WebGPU defaults —
+    // exactly, with nothing to spare.
+    //
+    // Do NOT read that as "the raise in app.ts is dead code". It is one texture
+    // of margin, and the foam art textures are about to spend it; the moment
+    // this goes to 17 the raise is load-bearing again and its absence is a
+    // material that never draws. The test below still pins it.
+    //
+    // The real point is that TEXTURES ARE NO LONGER THE AXIS THAT BINDS. On
+    // Apple silicon the adapter grants far more than 16 textures once asked,
+    // while `maxSamplersPerShaderStage` IS 16 and asking changes nothing. Count
+    // samplers; the texture number is a leading indicator, not a limit.
+    expect(textures).toBeLessThanOrEqual(WEBGPU_DEFAULT_SAMPLED_TEXTURES_PER_STAGE);
     // 3/3 and under no pressure — the vertex stage samples only the three
     // displacement textures. If the FRAGMENT side ever needs them, see "THE
     // VERTEX ESCAPE HATCH" in this file's header: an array displacement with a
@@ -343,9 +395,11 @@ describe('§V.40 ocean material binding budget', () => {
 
   it('still requests the raised limits at device creation', () => {
     const app = appSource;
-    // Deleting any of these silently returns the device to the 16-texture
-    // default and the ocean stops drawing — with an error naming the
-    // descriptor, not this change.
+    // The material fits the 16-texture default today (see above) with ZERO
+    // margin, so deleting these is not safe merely because it happens to pass
+    // right now: one more texture anywhere on the ocean path and the device
+    // must have been created with the raise, or the ocean stops drawing — with
+    // an error naming the descriptor, not the change that caused it.
     for (const limit of [
       'maxSampledTexturesPerShaderStage',
       'maxSamplersPerShaderStage',

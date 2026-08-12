@@ -30,6 +30,7 @@ import {
   vec3,
 } from 'three/tsl';
 import type { OceanSimulation } from '../ocean/oceanCascades';
+import { sampleCascadeLayer } from '../ocean/oceanTextures';
 import { oceanParams } from '../params/ocean';
 import { causticsParams as cp } from '../params/caustics';
 import { MIN_VERTICAL } from './causticsMath';
@@ -142,7 +143,8 @@ const cascadeUv = (worldXZ: TslNode, domain: number) =>
 export function surfaceSlopeNode(sim: OceanSimulation, u: CausticsUniforms, worldXZ: TslNode) {
   let der: TslNode = null;
   for (const c of sim.cascades) {
-    const t = texture(c.derivatives, cascadeUv(worldXZ, c.domain));
+    // one array texture, one sampler, all three cascades (§V.40)
+    const t = sampleCascadeLayer(c.derivatives, cascadeUv(worldXZ, c.domain));
     der = der === null ? t : der.add(t);
   }
   // (∂h/∂x, ∂h/∂z, ∂Dx/∂x, ∂Dz/∂z) → true slope needs the choppy stretch out

@@ -7,6 +7,12 @@
  * Outputs:
  *   displacement = (λ·Dx, h, λ·Dz, J)
  *   derivatives  = (∂h/∂x, ∂h/∂z, ∂Dx/∂x, ∂Dz/∂z)  — for slope-correct normals
+ *
+ * `derivatives` is a LAYER of one array texture shared by all three cascades,
+ * not a texture per cascade (§V.40) — one binding and one sampler instead of
+ * three of each in every fragment shader that reads it. `displacement` is not,
+ * because it is also sampled in the vertex stage, where three r180 cannot
+ * sample a filterable array texture.
  */
 import {
   Fn,
@@ -20,6 +26,7 @@ import {
   vec4,
 } from 'three/tsl';
 import type * as THREE from 'three/webgpu';
+import { storeCascadeLayer, type CascadeLayer } from './oceanTextures';
 
 export interface UnpackPass {
   computeNode: unknown;
@@ -30,7 +37,7 @@ export function buildUnpackPass(
   spec0Final: THREE.StorageTexture,
   spec1Final: THREE.StorageTexture,
   displacementOut: THREE.StorageTexture,
-  derivativesOut: THREE.StorageTexture,
+  derivativesOut: CascadeLayer,
   n: number,
 ): UnpackPass {
   const choppinessUniform = uniform(1.0);
@@ -67,11 +74,9 @@ export function buildUnpackPass(
       coord,
       vec4(lambda.mul(dx), h, lambda.mul(dz), jacobian),
     ).toWriteOnly();
-    textureStore(
-      derivativesOut,
-      coord,
-      vec4(dhdx, dhdz, dDxdx, dDzdz),
-    ).toWriteOnly();
+    // this cascade's LAYER of the shared array texture (§V.40). The obvious
+    // `textureStore(tex, coord, v).depth(i)` is WRONG — see storeCascadeLayer.
+    storeCascadeLayer(derivativesOut, coord, vec4(dhdx, dhdz, dDxdx, dDzdz));
   });
 
   return {

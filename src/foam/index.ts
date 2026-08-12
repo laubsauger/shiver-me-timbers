@@ -27,7 +27,7 @@
 import type * as THREE from 'three/webgpu';
 import { clamp, float, mix, smoothstep, texture, uniform } from 'three/tsl';
 import { advanceAccumulator, SIM_DT } from '../core/loop';
-import { createOutputTexture } from '../ocean/oceanTextures';
+import { createOutputTexture, type CascadeLayer } from '../ocean/oceanTextures';
 import { foamParams } from '../params/foam';
 import { oceanParams } from '../params/ocean';
 import {
@@ -67,7 +67,7 @@ export interface FoamCascadeInput {
    * is why the fix for the round, same-sized, same-angle caps costs the ocean
    * nothing: both textures were already being written every frame.
    */
-  derivatives: THREE.StorageTexture;
+  derivatives: CascadeLayer;
   /** world-space meters this cascade tiles over (§V19) */
   domain: number;
 }

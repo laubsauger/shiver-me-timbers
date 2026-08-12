@@ -44,6 +44,7 @@ import {
   viewportTexture,
 } from 'three/tsl';
 import type { OceanSimulation } from './oceanCascades';
+import { sampleCascadeLayer } from './oceanTextures';
 import type { FoamSim } from '../foam';
 import { foamDetailMask, foamTintNode } from '../foam';
 import type { FlowFoam } from '../flowfoam';
@@ -361,8 +362,14 @@ export function buildOceanSurfaceMaterial(
   // fragment normal from Σ derivatives: (∂h/∂x, ∂h/∂z, ∂Dx/∂x, ∂Dz/∂z).
   // Normals are per-pixel so they outlive the geometry (normalDetailStretch),
   // then a global far fade turns the last kilometre to glass under the haze.
+  // All three cascades are LAYERS of one array texture, so these three calls
+  // are ONE texture and ONE sampler in this stage, not three of each (§V.40).
+  // Never swap this back to a bare texture() — see sampleCascadeLayer.
   const sampleDeriv = (i: number) =>
-    texture(sim.cascades[i].derivatives, worldXZ.div(sim.cascades[i].domain).fract());
+    sampleCascadeLayer(
+      sim.cascades[i].derivatives,
+      worldXZ.div(sim.cascades[i].domain).fract(),
+    );
   // smoothstep(e0,e1,x), e0 > e1: 1 inside normalFadeStart, 0 past End
   const normFade = smoothstep(uNormFade.y, uNormFade.x, camDist);
   /**

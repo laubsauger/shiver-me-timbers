@@ -24,6 +24,7 @@ import {
   vec4,
 } from 'three/tsl';
 import type * as THREE from 'three/webgpu';
+import { loadCascadeLayer, type CascadeLayer } from '../ocean/oceanTextures';
 import { GAUSSIAN_3X3 } from './foamMath';
 
 /** live-tweaked uniforms shared by every cascade's passes */
@@ -77,7 +78,7 @@ export type FoamUniforms = ReturnType<typeof createFoamUniforms>;
  */
 export function createInjectPass(
   displacement: THREE.StorageTexture,
-  derivatives: THREE.StorageTexture,
+  derivatives: CascadeLayer,
   src: THREE.StorageTexture,
   dst: THREE.StorageTexture,
   n: number,
@@ -90,7 +91,8 @@ export function createInjectPass(
 
     // (λDx, h, λDz, det J) and (∂h/∂x, ∂h/∂z, ∂Dx/∂x, ∂Dz/∂z) — see unpackPass
     const det = textureLoad(displacement, coord).w;
-    const d = textureLoad(derivatives, coord);
+    // derivatives is a LAYER of the ocean's shared array texture (§V.40)
+    const d = loadCascadeLayer(derivatives, coord);
     // tr J = 2 + λ(∂Dx/∂x + ∂Dz/∂z)
     const trace = float(2).add(u.uChoppiness.mul(d.z.add(d.w))).toVar();
     // foamMath.minEigenvalue. The discriminant is ≥ 0 for a real symmetric
