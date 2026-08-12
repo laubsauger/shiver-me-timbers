@@ -8,12 +8,13 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  expFogFactor,
   smooth01,
   submersionState,
   type SubmersionState,
 } from '../src/underwater/submersion';
+import { submergedFraction, transmittance } from '../src/underwater/waterVolume';
 import { underwaterParams } from '../src/params/underwater';
+import { causticsParams } from '../src/params/caustics';
 import { getParamsEntry } from '../src/params/registry';
 
 const cfg = { hysteresisBand: 0.5, maxBlendStep: 0.1 };
@@ -103,29 +104,99 @@ describe('blend continuity (V25: no pop — fullscreen effect must fade)', () =>
   });
 });
 
-describe('fog falloff math (mirrors the TSL exp fog in underwaterGrade)', () => {
-  it('is strictly monotonic in distance — nearer is always clearer', () => {
-    let last = -1;
-    for (let d = 0; d <= 200; d += 5) {
-      const f = expFogFactor(d, 0.045);
-      expect(f).toBeGreaterThan(last);
-      last = f;
+/**
+ * The submerged FRACTION is what makes the waterline split a split rather than
+ * a full-screen filter: at the crossing the camera sits on the surface and the
+ * same frame contains rays that are entirely in air and rays that are entirely
+ * in water. A single submersion scalar cannot say that; this can.
+ */
+describe('submerged path fraction (the meridian, mirrors waterVolume.ts)', () => {
+  it('both ends under → the whole ray is in water, in either order', () => {
+    // order-independence is the property the branchless form BUYS us: the
+    // fraction of a segment under a plane cannot depend on which end you
+    // walk from, and the min/max form encodes exactly that.
+    expect(submergedFraction(-5, -1)).toBe(1);
+    expect(submergedFraction(-1, -5)).toBe(1);
+  });
+
+  it('both ends above → no water on the path at all (above-water frames are untouched)', () => {
+    expect(submergedFraction(1, 5)).toBe(0);
+    expect(submergedFraction(5, 1)).toBe(0);
+  });
+
+  it('a crossing ray splits at the plane, symmetrically', () => {
+    // camera under / fragment above, and the mirror case: both are half water
+    expect(submergedFraction(-1, 1)).toBeCloseTo(0.5, 12);
+    expect(submergedFraction(1, -1)).toBeCloseTo(0.5, 12);
+    // a shallow camera looking at something deep is mostly water
+    expect(submergedFraction(-3, 1)).toBeCloseTo(0.75, 12);
+  });
+
+  it('the HORIZONTAL ray resolves through the floored divisor, not in spite of it', () => {
+    // a == b makes the denominator zero. §V.28 floors it, and the sign of
+    // -min then carries the answer to the correct saturated end. This is the
+    // case that fires across the whole horizon band while swimming level, so
+    // getting it wrong is a full-screen artifact, not an edge case.
+    expect(submergedFraction(-2, -2)).toBe(1);
+    expect(submergedFraction(2, 2)).toBe(0);
+    expect(submergedFraction(0, 0)).toBe(0);
+  });
+
+  it('is bounded [0,1] for absurd inputs (a bad heightFn must not blow the frame)', () => {
+    for (const [a, b] of [[-1e9, 1e9], [1e9, -1e9], [-1e-9, 1e-9], [0, -1e9]]) {
+      const f = submergedFraction(a, b);
+      expect(f).toBeGreaterThanOrEqual(0);
+      expect(f).toBeLessThanOrEqual(1);
     }
   });
+});
 
-  it('is bounded [0,1): fog can approach but never exceed full occlusion', () => {
-    expect(expFogFactor(0, 0.045)).toBe(0);
-    expect(expFogFactor(1e6, 0.045)).toBeLessThanOrEqual(1);
-    expect(expFogFactor(1e6, 0.045)).toBeGreaterThan(0.999);
+describe('aquatic perspective (Beer–Lambert on the SHARED Jerlov coefficients)', () => {
+  const { submergedAbsorptionR: KR, submergedAbsorptionG: KG, submergedAbsorptionB: KB } =
+    causticsParams;
+
+  it('red dies first — the defining fact of looking through water', () => {
+    // At 10 m the ordering must be strict, not merely "tinted": this is the
+    // reason a submerged hull reads blue-green instead of grey.
+    const r = transmittance(KR, 10);
+    const g = transmittance(KG, 10);
+    const b = transmittance(KB, 10);
+    expect(r).toBeLessThan(g);
+    expect(g).toBeLessThan(b);
+    // and red must be substantially GONE, not just reduced
+    expect(r).toBeLessThan(0.05);
+    expect(b).toBeGreaterThan(0.5);
   });
 
-  it('higher density fogs more at equal distance (storm water reads murkier)', () => {
-    expect(expFogFactor(20, 0.1)).toBeGreaterThan(expFogFactor(20, 0.02));
+  it('closes the horizon on its own — §V.30 stops applying under the surface', () => {
+    // The visibility limit is not a separate far-clip or fog wall; it is the
+    // same exponential. Nothing survives 4 km of water in ANY channel.
+    expect(transmittance(KB, 4000)).toBeLessThan(1e-6);
+    // and the useful range is tens of metres, not kilometres
+    expect(transmittance(KB, 150)).toBeLessThan(0.02);
   });
 
-  it('clamps negative inputs instead of exploding (bad heightFn data)', () => {
-    expect(expFogFactor(-5, 0.045)).toBe(0);
-    expect(expFogFactor(10, -1)).toBe(0);
+  it('murkiness scales all three channels together (a water TYPE, not a new set)', () => {
+    // The whole point of the scalar: it may not re-order the channels, or it
+    // would be authoring a second absorption vector by the back door.
+    const murk = 3;
+    expect(transmittance(KR, 5, murk)).toBeLessThan(transmittance(KR, 5, 1));
+    expect(transmittance(KR, 5, murk)).toBeLessThan(transmittance(KG, 5, murk));
+    expect(transmittance(KG, 5, murk)).toBeLessThan(transmittance(KB, 5, murk));
+  });
+
+  it('is the identity at zero path length — above water costs nothing', () => {
+    expect(transmittance(KR, 0)).toBe(1);
+    expect(transmittance(KG, 0)).toBe(1);
+    expect(transmittance(KB, 0)).toBe(1);
+  });
+
+  it('clamps negative inputs instead of exploding (bad heightFn / camera data)', () => {
+    // a negative length through exp() would AMPLIFY, i.e. an unbounded
+    // additive-looking term in a multiply slot (§V.44).
+    expect(transmittance(KR, -50)).toBe(1);
+    expect(transmittance(-1, 50)).toBe(1);
+    expect(transmittance(KR, 50, -2)).toBe(1);
   });
 });
 

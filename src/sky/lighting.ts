@@ -1,8 +1,16 @@
 /**
- * Sun + ambient light rig driven by sun elevation (§V16 tunables in params).
- * One DirectionalLight is THE sun — every system that reads light direction
- * (ocean sparkle, cloud sunlight channel) keys off it — plus a
- * HemisphereLight for sky/sea bounce so shadows stay airy, not black.
+ * Key + ambient light rig (§V16 tunables in params). One DirectionalLight is
+ * THE KEY — every system that reads light direction (ocean sparkle, cloud
+ * sunlight channel, caustics, god rays) keys off it — plus a HemisphereLight
+ * for sky/sea bounce so shadows stay airy, not black.
+ *
+ * THE KEY IS NOT ALWAYS THE SUN. A moon is a directional source too (it is
+ * 384,000 km away; its rays are parallel), so at night this same light is
+ * re-aimed at the moon and retinted, which hands every downstream system a
+ * moon glint road, moonlit caustics and moon shadows without any of them
+ * knowing the moon exists. `src/sky/moonCycle.ts` owns which body has the key
+ * and engineers the handover so the direction only ever swings while the
+ * intensity is exactly zero; this file just applies the answer.
  *
  * Colour space (§B9): params are authored in sRGB against the reference
  * screenshots, so every write into a three.Color goes through
@@ -25,8 +33,8 @@ import * as THREE from 'three/webgpu';
 import type { SkyParams } from '../params/sky';
 import { shadowTexelSize, snapShadowCenter } from './shadowMath';
 import { installUncoloredShadow } from './uncoloredShadowNode';
+import type { KeyLight } from './moonCycle';
 import {
-  daylight,
   fogRange,
   hemisphereColors,
   lowSunWarmth,
@@ -34,7 +42,6 @@ import {
   skyTint,
   sunColor,
   type Rgb,
-  type Vec3,
 } from './sunCycle';
 
 function mulRgb(c: Rgb, tint: Rgb): Rgb {
@@ -103,8 +110,18 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
     setShadowFocus(x: number, y: number, z: number): void {
       followTarget.set(x, y, z);
     },
-    /** move + recolor lights and sync fog for a new sun state */
-    update(sunDir: Vec3, elevation: number): void {
+    /**
+     * Move + recolour the lights and sync fog for a new KEY state.
+     *
+     * Note the split: the light follows `key` (sun or moon), while every
+     * PALETTE ramp below still reads `key.sunElevation`. The sky's colour is
+     * set by where the SUN is even at midnight — that is what makes a dusk a
+     * dusk and a night a night — and only the key changes hands. Drive the
+     * palette off the key instead and a rising moon warms the horizon.
+     */
+    update(key: KeyLight): void {
+      const sunDir = key.direction;
+      const elevation = key.sunElevation;
       // live shadow tuning: bias/normalBias are plain numbers, but a changed
       // ortho extent needs the projection rebuilt — only when it moves
       sunLight.shadow.bias = p.shadowBias;
@@ -137,12 +154,16 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
         cz + sunDir[2] * p.sunDistance,
       );
       sunLight.target.position.set(cx, cy, cz);
+      // The key's own colour and intensity — moonCycle already crossfaded
+      // them, so at night this is the moon and at 17.3 it is bit-for-bit the
+      // sunset that was signed off (moonWeight is exactly 0 above the horizon)
+      setSrgb(sunLight.color, key.color);
+      sunLight.intensity = key.intensity;
+      // the fog/haze block below still wants the SUN's own colour: haze is
+      // painted by the sky, and the sky is the sun's even after it has set
       const sun = sunColor(elevation);
-      const day = daylight(elevation);
-      setSrgb(sunLight.color, sun);
-      sunLight.intensity = p.sunIntensity * day;
 
-      const tint = skyTint(elevation);
+      const tint = skyTint(elevation, key.moonWeight);
       const pal = skyPalette(elevation, p);
       // Hemisphere ambient is IRRADIANCE, not the painted sky (see
       // desaturate()'s header — this is the teal-hull bug). Two corrections:
@@ -158,8 +179,9 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
       const ambient = hemisphereColors(pal.mid, pal.ground, tint, p.ambientDesaturation);
       setLinear(hemi.color, ambient.sky);
       setLinear(hemi.groundColor, ambient.ground);
-      // moonless-night floor of 15% keeps silhouettes readable after dark
-      hemi.intensity = p.ambientIntensity * (0.15 + 0.85 * day);
+      // nightAmbientFloor keeps silhouettes readable on a MOONLESS night; a
+      // moon lifts it further. Bounded 0..1 at source in ambientLevel().
+      hemi.intensity = p.ambientIntensity * key.ambient;
 
       // Fog colour must equal what the SKY paints at eye level, or the far
       // water meets the horizon on a visible seam. The background node

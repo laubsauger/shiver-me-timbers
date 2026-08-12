@@ -22,6 +22,11 @@ import {
   spectralJacobianRms,
   slopeWavelengthHistogram,
   slopeResolutionFootprint,
+  swellEffectiveDirectionality,
+  swellPeakWavenumber,
+  swellReferenceDomain,
+  windSeaPeakWavenumber,
+  windSeaSpread,
 } from '../src/ocean/oceanMath';
 import { oceanParams } from '../src/params/ocean';
 import { oceanSurfaceParams } from '../src/params/oceanSurface';
@@ -486,6 +491,156 @@ describe('§V.19 the swell is a wave TRAIN, not one sinusoid', () => {
   });
 });
 
+/**
+ * "This very obvious sine-wavy feeling that our waves still tend to give us"
+ * (user, third report on the surface).
+ *
+ * A comb is a spread that is the SAME WIDTH at every scale. Both halves of the
+ * defect were that, on the two trains, and both are grid/physics facts rather
+ * than taste — so these assert the SHAPE of the spread across wavenumber, never
+ * a particular constant.
+ */
+describe('§V.19 directional spread is a function of SCALE, not a constant', () => {
+  const N = 128;
+  /** axial (2nd-moment) circular spread of a band's slope energy, degrees */
+  const axialSpread = (
+    p: OceanParams,
+    i: number,
+    spec: (kx: number, kz: number, q: OceanParams) => number,
+  ) => {
+    const c = p.cascades[i];
+    const band = cascadeBand(i, p.splitWavelengths);
+    let e = 0;
+    let a2 = 0;
+    let b2 = 0;
+    for (let m = 0; m < N; m++) {
+      for (let n = 0; n < N; n++) {
+        const kx = (2 * Math.PI * (n - N / 2)) / c.domain;
+        const kz = (2 * Math.PI * (m - N / 2)) / c.domain;
+        const k = Math.hypot(kx, kz);
+        if (!(k > band.kMin && k <= band.kMax) || k < 1e-9) continue;
+        const S = spec(kx, kz, p);
+        if (!(S > 0)) continue;
+        const E = S * k * k;
+        const th = Math.atan2(kz, kx);
+        e += E;
+        a2 += E * Math.cos(2 * th);
+        b2 += E * Math.sin(2 * th);
+      }
+    }
+    return e > 0
+      ? (Math.sqrt(2 * Math.max(0, 1 - Math.hypot(a2, b2) / e)) * 90) / Math.PI
+      : NaN;
+  };
+
+  it('THE BUG: the chop must not be combed as tightly as the rollers', () => {
+    // the old cos^n form measured 16.5° / 16.5° / 16.4° across the cascades —
+    // one fan, every scale, which is what a corduroy sea IS
+    const fine = axialSpread(oceanParams, 2, phillips);
+    const coarse = axialSpread(oceanParams, 0, phillips);
+    expect(fine).toBeGreaterThan(coarse * 1.2);
+    // and the short waves specifically must be near the isotropic limit,
+    // which is where Mitsuyasu's fit puts them at ~3× the peak frequency
+    expect(fine).toBeGreaterThan(30);
+  });
+
+  it('is narrowest AT the peak and broadens either side of it', () => {
+    // the physical shape: one wind raised the peak, so it is the only place
+    // the fan is tight. A monotone spread in k would be a different bug.
+    const kp = windSeaPeakWavenumber(oceanParams);
+    const at = (k: number) => {
+      let best = 0;
+      for (let a = 0; a < 64; a++) {
+        const th = (a / 64) * 2 * Math.PI;
+        best = Math.max(
+          best,
+          windSeaSpread(Math.cos(th - oceanParams.windDirection), k, oceanParams),
+        );
+      }
+      return best; // peak of the lobe: higher = narrower fan
+    };
+    expect(at(kp)).toBeGreaterThan(at(kp * 6));
+    expect(at(kp)).toBeGreaterThan(at(kp / 6));
+  });
+
+  it('widening the spread must NOT change the sea state (§B.12)', () => {
+    // a shape knob that silently moves Hs is the trap `swellScale` exists to
+    // avoid on the other train; the directional factor is normalised, so the
+    // omnidirectional E(k) — and therefore Hs, the foam gate and the fold cap
+    // — is invariant under every spread param.
+    const base = { ...oceanParams };
+    const hs = (p: OceanParams) => {
+      let v = 0;
+      for (const [i, c] of p.cascades.entries())
+        v += spectralHeightVariance(N, c.domain, p, cascadeBand(i, p.splitWavelengths));
+      return 4 * Math.sqrt(v);
+    };
+    const ref = hs(base);
+    for (const patch of [
+      { spreadPeak: 3 },
+      { spreadPeak: 25 },
+      { spreadAbovePeak: 0.5 },
+      { spreadBelowPeak: 1 },
+    ]) {
+      expect(hs({ ...base, ...patch })).toBeCloseTo(ref, 2);
+    }
+  });
+
+  it('the same normalisation holds jacobianRms, so the fold cap is untouched', () => {
+    // transfer |k| is direction-free ⟹ a function of E(k) alone (§V.59)
+    const jr = (p: OceanParams) => {
+      let v = 0;
+      for (const [i, c] of p.cascades.entries()) {
+        const j = spectralJacobianRms(N, c.domain, p, cascadeBand(i, p.splitWavelengths));
+        v += j * j;
+      }
+      return Math.sqrt(v);
+    };
+    expect(jr({ ...oceanParams, spreadPeak: 3 })).toBeCloseTo(jr(oceanParams), 3);
+  });
+
+  it('the SWELL cannot be narrower than the grid can aim (the missing floor)', () => {
+    // `swellGridModes` floored the RADIAL bandwidth and nothing floored the
+    // ANGULAR width, so a cos^24 lobe at calm's 264 m period fitted inside one
+    // ray of modes — a plane wave, which is the sinusoid §V.19 forbids.
+    for (const name of ['calm', 'swell', 'storm'] as const) {
+      const p: OceanParams = {
+        ...oceanParams,
+        ...(weatherPresets[name].ocean as Partial<OceanParams>),
+      };
+      const n = swellEffectiveDirectionality(p);
+      expect(n).toBeLessThanOrEqual(p.swellDirectionality);
+      // the lobe must span at least `swellGridModes` angular grid steps
+      const kp = swellPeakWavenumber(p.swellPeriod);
+      const dTheta = (2 * Math.PI) / swellReferenceDomain(p) / kp;
+      expect(1 / Math.sqrt(n)).toBeGreaterThanOrEqual(p.swellGridModes * dTheta - 1e-9);
+    }
+  });
+
+  it('and the swell keeps its authored HEIGHT through that floor (§B.12)', () => {
+    // the normalisation reads the EFFECTIVE spread, so widening for the grid
+    // must not change how tall the swell is
+    const p: OceanParams = { ...oceanParams, swellDirectionality: 64 };
+    const swellVar = (q: OceanParams) => {
+      let v = 0;
+      const c = q.cascades[0];
+      const band = cascadeBand(0, q.splitWavelengths);
+      for (let m = 0; m < N; m++) {
+        for (let n = 0; n < N; n++) {
+          const kx = (2 * Math.PI * (n - N / 2)) / c.domain;
+          const kz = (2 * Math.PI * (m - N / 2)) / c.domain;
+          const k = Math.hypot(kx, kz);
+          if (!(k > band.kMin && k <= band.kMax) || k < 1e-9) continue;
+          v += (2 * (swellSpectrum(kx, kz, q) / 2)) / (c.domain * c.domain);
+        }
+      }
+      return v;
+    };
+    // 64 and 24 both clamp to the same grid ceiling ⟹ identical height
+    expect(swellVar(p)).toBeCloseTo(swellVar(oceanParams), 4);
+  });
+});
+
 describe('§B.7 every spectrum-shaping param forces a rebuild', () => {
   /** params that do NOT shape h0 — everything else must be in the signature */
   const NOT_SPECTRAL = new Set(['choppiness', 'choppinessFoldLimit', 'jacobianFoamBias']);
@@ -504,7 +659,7 @@ describe('§B.7 every spectrum-shaping param forces a rebuild', () => {
       amplitude: oceanParams.amplitude + 0.1,
       windSpeed: oceanParams.windSpeed + 1,
       windDirection: oceanParams.windDirection + 0.1,
-      directionality: oceanParams.directionality + 1,
+      spreadPeak: oceanParams.spreadPeak + 1,
       oppositeWaveDamp: oceanParams.oppositeWaveDamp + 0.1,
       smallWaveCutoff: oceanParams.smallWaveCutoff + 0.01,
       swellPeriod: oceanParams.swellPeriod + 1,

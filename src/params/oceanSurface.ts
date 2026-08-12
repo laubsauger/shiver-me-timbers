@@ -227,17 +227,46 @@ export const oceanSurfaceParams = registerParams(
      * this axis). So the window this governs is roughly 150–900 m — the
      * mid-field — and it hands over to the sky beyond that.
      *
-     * `Far` was 0.55 for one round and that was too much: at 0.55 the whole
-     * distance band converged on ONE hue, because re-saturation this strong
-     * pins the reflected sky's colour instead of nudging it, and everything
-     * that varies out there (normals, sparkle, foam, the mirror) has already
-     * been faded out by §V.48 — so the result is a flat fill, not water.
-     * 0.28 leaves the sky's own azimuthal variation legible and lets the
-     * floor below be the guarantee, which is what §V.56 actually says.
+     * `Far` was 0.55 for one round and was cut to 0.28 because "the whole
+     * distance band converged on ONE hue… a flat fill, not water" — AND THAT
+     * VERDICT WAS REACHED AGAINST A SURFACE THAT NO LONGER EXISTS. Read the
+     * reasoning it was written with: "everything that varies out there
+     * (normals, sparkle, foam, the mirror) has already been faded out by
+     * §V.48". That was literally true — the normal LOD deleted every cascade
+     * by 365 m, so the far field had a measured slope RMS of EXACTLY ZERO and
+     * re-saturating a perfect mirror could only ever produce a flat fill. With
+     * the LOD measured against each band's own content instead of its texel
+     * size, the same distances now carry 59% (300 m), 31% (500 m) and 28%
+     * (700 m) of the sea's true slope RMS, so there is real variation for the
+     * re-saturation to ride and the objection that killed 0.55 no longer
+     * applies.
+     *
+     * 0.28 → 0.46. MEASURED on the neutral-overcast worst case, composite
+     * chroma against a body chroma of 0.857:
+     *     Far   300 m   400 m   700 m
+     *     0.28  0.242   0.258   0.258      ← the user's "overpowered by sky"
+     *     0.40  0.305   0.346   0.358
+     *     0.46  ~0.33   ~0.38   ~0.40
+     *     0.50  0.357   0.419   0.441
+     * Deliberately short of the 0.55 that failed, because that failure was
+     * about VARIATION and only some of the variation is back.
+     *
+     * WHY THIS LEVER AND NOT THE FLOOR BELOW: the floor is INERT out here.
+     * Measured, raising `pigmentFloorChroma` 0.14 → 0.26 moves the 400 m
+     * composite by 0.0001 — the pixel is at chroma 0.26, comfortably above the
+     * floor, so the floor never fires. The sea is not grey by the metric; it
+     * is 81% reflected sky BY WEIGHT (mean Fresnel 0.81 at 400 m, and only
+     * 0.837 → 0.809 from restoring the geometry, because at a 2° grazing angle
+     * Schlick has saturated and roughness adds VARIANCE without moving the
+     * MEAN). That is why the geometry fix visibly fixed the structure and did
+     * almost nothing to the tint: they are different quantities.
+     * If the user's "overpowered" turns out to mean VALUE rather than hue, the
+     * knob is `reflectionStrength` instead — measured 1.0 → 0.8 takes the same
+     * 400 m composite to 0.331. NEEDS THE BROWSER to choose between them.
      * CPU transliteration: src/ocean/seaChroma.ts `grazingSaturationAt`.
      */
     grazingSaturation: 0.15,
-    grazingSaturationFar: 0.28,
+    grazingSaturationFar: 0.46,
     grazingSaturationFullDist: 500,
     /**
      * §V.56 lever 2 — THE FLOOR ITSELF, and the material's one named

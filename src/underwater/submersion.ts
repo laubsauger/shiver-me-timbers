@@ -39,14 +39,6 @@ export function smooth01(edge0: number, edge1: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
-/**
- * Exponential fog amount for a view distance — pure mirror of the grade
- * shader's `1 - exp(-dist * density)`. Monotonic in both args, ∈ [0, 1).
- */
-export function expFogFactor(distance: number, density: number): number {
-  return 1 - Math.exp(-Math.max(0, distance) * Math.max(0, density));
-}
-
 function defaults(): SubmersionConfig {
   return {
     hysteresisBand: underwaterParams.hysteresisBand,

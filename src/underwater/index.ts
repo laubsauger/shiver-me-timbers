@@ -1,25 +1,36 @@
 /**
  * Underwater camera mode entry (§V25, feeds §V24's look underwater).
  *
- * MAIN.TS WIRING ORDER (post pass wraps the main render):
+ * THIS MODULE WAS DEAD CODE UNTIL NOW. It landed complete in one wave commit
+ * and `createUnderwater` was never called from anywhere — which is precisely
+ * the user report "it looks like empty space below the sea": submersion
+ * detection, the grade, the god rays and the meniscus band all existed, fully
+ * written and fully unreachable. The reason it was never wired is visible in
+ * the signature it used to have: it built its OWN `THREE.PostProcessing` and
+ * its OWN `pass(scene, camera)`, which is a SECOND full scene render and is
+ * mutually exclusive with `core/postPipeline.ts`. Two agents built two post
+ * chains in parallel and neither could be switched on without deleting the
+ * other. It is now a STAGE inside the one real pipeline, sharing its scenePass.
  *
- *   const uw = createUnderwater({
- *     camera: app.camera,
- *     sunDirProvider: () => sky.sunDirection,
- *   });
- *   app.scene.add(uw.waterlineMesh);            // clip-space quad, scene pass
- *   const post = uw.buildPost(app.renderer, app.scene, app.camera);
- *   // frame loop — INSTEAD of app.render():
- *   uw.update(frameDt, waterHeightFn, state.time);  // heightFn: sea-physics
- *   post.render();                                   // (defaults to y=0)
+ * MAIN.TS WIRING ORDER:
+ *
+ *   const uw = createUnderwater({ camera: app.camera,
+ *                                 sunDirProvider: () => sky.sunDirection });
+ *   app.scene.add(uw.waterlineMesh);        // clip-space quad, scene pass
+ *   const post = createPostPipeline(renderer, scene, camera, { underwater: uw });
+ *   // frame loop, BEFORE post.render():
+ *   uw.update(frameDt, (x, z) => cpuOcean.heightAt(x, z, state.time), state.time);
  *
  * update() advances the hysteresis submersion state (submersion.ts), drives
- * the shared uniforms (blend, camera depth, sun screen pos/visibility,
- * day-cycle tint from sun elevation), refreshes the waterline band columns,
- * and pushes live params into every effect uniform (V16).
+ * the shared uniforms (blend, camera depth, camera matrices + sea plane for
+ * the volume, sun screen pos/visibility, day-cycle tint from sun elevation),
+ * refreshes the waterline band columns, and pushes live params into every
+ * effect uniform (V16).
  */
 import * as THREE from 'three/webgpu';
-import { float, pass, uniform, vec4 } from 'three/tsl';
+import { uniform } from 'three/tsl';
+import type { Node, PassNode } from 'three/webgpu';
+import type { ShaderNodeObject } from 'three/tsl';
 import { underwaterParams as p } from '../params/underwater';
 import {
   submersionState,
@@ -29,18 +40,28 @@ import {
 import { buildUnderwaterGrade, type UnderwaterUniforms } from './underwaterGrade';
 import { buildGodRays } from './godRays';
 import { createWaterlineBand } from './waterlineBand';
+import { buildWaterVolume, createVolumeUniforms } from './waterVolume';
 
 export type WaterHeightFn = (x: number, z: number) => number;
+
+/** what postPipeline needs from us — one stage over its own scene pass */
+export interface UnderwaterStage {
+  /** scene-linear HDR rgb in → rgb out (volume + lens grade) */
+  apply(rgb: ShaderNodeObject<Node>): ShaderNodeObject<Node>;
+  /** additive god-ray shafts, already masked by submersion + sun visibility */
+  additive: ShaderNodeObject<Node>;
+  updateFromParams(): void;
+}
 
 export interface UnderwaterHandle {
   /** add to the scene — renders inside the scene pass, over everything */
   waterlineMesh: THREE.Mesh;
-  /** build the post pipeline; call once, render via the returned object */
-  buildPost(
-    renderer: THREE.WebGPURenderer,
-    scene: THREE.Scene,
-    camera: THREE.PerspectiveCamera,
-  ): THREE.PostProcessing;
+  /**
+   * Build the underwater stage against the pipeline's EXISTING scene pass.
+   * Called once by createPostPipeline; there is deliberately no second
+   * `pass()` here (see header).
+   */
+  buildStage(scenePass: ShaderNodeObject<PassNode>): UnderwaterStage;
   /** per-frame; heightFn defaults to a flat sea at y=0 until sea-physics */
   update(dt: number, waterHeightFn?: WaterHeightFn, time?: number): void;
   /** extra {value:number} uniforms to receive blend each update (e.g. to
@@ -49,6 +70,11 @@ export interface UnderwaterHandle {
   readonly mode: SubmersionMode;
   readonly blend: number;
   dispose(): void;
+}
+
+/** §V.28: no caller-fed value reaches a uniform unguarded. */
+function finite(v: number, fallback: number): number {
+  return Number.isFinite(v) ? v : fallback;
 }
 
 const FLAT_SEA: WaterHeightFn = () => 0;
@@ -69,12 +95,11 @@ export function createUnderwater(opts: {
   };
 
   const band = createWaterlineBand();
+  const vol = createVolumeUniforms();
 
   let state: SubmersionState | undefined;
   let blendTargets: Array<{ value: number }> = [];
-  let updateGradeParams: (() => void) | undefined;
-  let updateRayParams: (() => void) | undefined;
-  let post: THREE.PostProcessing | undefined;
+  let updateStageParams: (() => void) | undefined;
 
   const sunWorld = new THREE.Vector3();
   const forward = new THREE.Vector3();
@@ -82,15 +107,22 @@ export function createUnderwater(opts: {
   return {
     waterlineMesh: band.mesh,
 
-    buildPost(renderer, scene, cam): THREE.PostProcessing {
-      const scenePass = pass(scene, cam);
+    buildStage(scenePass): UnderwaterStage {
       const grade = buildUnderwaterGrade(scenePass, uniforms);
       const rays = buildGodRays(scenePass, uniforms);
-      updateGradeParams = grade.updateFromParams;
-      updateRayParams = rays.updateFromParams;
-      post = new THREE.PostProcessing(renderer);
-      post.outputNode = grade.node.add(vec4(rays.node, float(0)));
-      return post;
+      const volume = buildWaterVolume(scenePass, vol, uniforms.dayTint, uniforms.blend);
+      updateStageParams = (): void => {
+        grade.updateFromParams();
+        rays.updateFromParams();
+        volume.updateFromParams();
+      };
+      return {
+        // ORDER (see underwaterGrade.ts): refract the incoming image, then
+        // extinguish it over the submerged path, then grade what arrived.
+        apply: (rgb) => grade.finish(volume.apply(grade.lens(rgb))),
+        additive: rays.node,
+        updateFromParams: updateStageParams,
+      };
     },
 
     update(dt, waterHeightFn = FLAT_SEA, time = 0): void {
@@ -104,6 +136,18 @@ export function createUnderwater(opts: {
       uniforms.camDepth.value = Math.max(0, h - camera.position.y);
       uniforms.time.value = time;
       for (const t of blendTargets) t.value = state.blend;
+
+      // --- volume: the SCENE camera's own matrices + the local sea plane.
+      // Fed explicitly because PostProcessing draws its output node through an
+      // internal fullscreen-quad camera, so TSL's built-in camera accessors do
+      // not resolve to this one (see waterVolume.ts header).
+      camera.updateMatrixWorld();
+      vol.invProj.value.copy(camera.projectionMatrixInverse);
+      vol.camWorld.value.copy(camera.matrixWorld);
+      vol.camPos.value.copy(camera.position);
+      // The split plane is the sea at the CAMERA's XZ, so the meridian rides
+      // the swell with the lens instead of sitting at a world-fixed y = 0.
+      vol.seaY.value = finite(h, 0);
 
       // sun screen position + visibility (in front of camera, smooth edge)
       const sunDir = sunDirProvider();
@@ -130,8 +174,7 @@ export function createUnderwater(opts: {
       band.update(camera, waterHeightFn, crossFade, time);
 
       band.updateFromParams();
-      updateGradeParams?.();
-      updateRayParams?.();
+      updateStageParams?.();
     },
 
     setBlendTargets(...targets): void {
@@ -147,7 +190,6 @@ export function createUnderwater(opts: {
 
     dispose(): void {
       band.dispose();
-      post?.dispose();
       blendTargets = [];
     },
   };

@@ -5,11 +5,15 @@
  * jacobian-driven while bow bursts are per-ship events — separate pools keep
  * the emitters from starving each other, and a second ship can own its own.
  *
- * CPU side per tick (Rule: code answers — two scalars per emitter, no GPU
- * round-trip): sprayMath.bowEmission returns {rate, sheet} from speed,
- * immersion and the BURIAL RATE (d immersion/dt, tracked here). Two regimes
- * on one path — a constant cutwater mist whenever the ship is making way, and
- * an impact burst on top scaled by how hard the stem just buried. A rotating
+ * CPU side per tick (Rule: code answers — three scalars per emitter, no GPU
+ * round-trip): sprayMath.bowEmission returns {rate, sheet, slam} from speed,
+ * immersion and the BURIAL RATE (d immersion/dt, from the sampler). Three
+ * regimes on one path — a constant cutwater mist whenever the ship is making
+ * way, an impact burst on top scaled by how hard the stem just buried, and
+ * the SLAM: a forefoot coming down on the sea, which is keyed on the closing
+ * speed ALONE (no hull-speed term anywhere in it) and launches water upward
+ * by a multiple of that speed, because that is the event the user asked to
+ * see and the only one that throws water clear of the surface. A rotating
  * cursor window releases rate·dt dead particles per tick (advanceBurstCursor /
  * inSpawnWindow) so density is rate-bound, not pool-bound.
  * GPU spawn per windowed dead particle: respawn ON THE WATERLINE along the
@@ -50,10 +54,12 @@ import {
   H_BOW_MAG,
   H_BOW_SIDE,
   H_BOW_UP,
+  H_SIZE,
   PHI,
   T_BOW_MAG,
   T_BOW_SIDE,
   T_BOW_UP,
+  T_SIZE,
   advanceBurstCursor,
   bowEmission,
 } from './sprayMath';
@@ -120,6 +126,11 @@ export function createBowSpray() {
   const uRise = uniform(sprayParams.bowRise);
   const uSideOffset = uniform(sprayParams.bowSideOffset);
   const uStemLength = uniform(sprayParams.bowStemLength);
+  /** closing speed of the slam (m/s) and its launch multipliers */
+  const uSlamSpeed = uniform(0);
+  const uSlamRise = uniform(sprayParams.bowSlamRise);
+  const uSlamSpread = uniform(sprayParams.bowSlamSpread);
+  const uSizeVar = uniform(sprayParams.sizeVariation);
   /** 0..1 how much of a full sheet this tick throws (size + rise) */
   const uSheet = uniform(0);
   const uCursor = uniform(0);
@@ -130,7 +141,7 @@ export function createBowSpray() {
     const pa = pool.posAge.element(instanceIndex);
     // rotating window (sprayMath.inSpawnWindow): only budgeted slots respawn
     const rel = float(instanceIndex).sub(uCursor).add(count).mod(count);
-    If(pa.w.greaterThanEqual(pool.uLife).and(rel.lessThan(uBudget)), () => {
+    If(pa.w.greaterThanEqual(pool.lifeNode()).and(rel.lessThan(uBudget)), () => {
       const s = float(instanceIndex).add(1).mul(PHI).fract().toVar();
       // ejection basis = the HULL's frame (heading + its perpendicular), not
       // a world axis and not the ship's track — see BowState.shipForward
@@ -154,17 +165,32 @@ export function createBowSpray() {
       // CPU mirror: sprayMath.bowLaunchVelocity — shoved FORWARD past the bow
       // (throw > 1 outruns the hull) and OUTBOARD on the flank it was seeded
       // on, fanning away from the centreline. Horizontal throw follows ship
-      // speed alone; only the RISE scales with the sheet, so a cruising stem
-      // throws water flat and forward while a burial launches it high.
-      const out = uSpeed.mul(uSpread).mul(rMag).mul(sideSign);
+      // speed alone; the RISE scales with the sheet, so a cruising stem throws
+      // water flat and forward while a burial launches it high — PLUS the
+      // slam's own closing speed, which owes nothing to how fast the ship is
+      // going and is what actually detaches water from the surface.
+      const out = uSpeed
+        .mul(uSpread)
+        .add(uSlamSpeed.mul(uSlamSpread))
+        .mul(rMag)
+        .mul(sideSign);
       const fwd = uSpeed.mul(uForwardThrow).mul(rMag.mul(0.4).add(0.6));
       const velXZ = side.mul(out).add(forward.mul(fwd));
-      const vy = uSpeed.mul(uRise).mul(rUp.mul(0.5).add(0.5)).mul(uSheet);
+      const vy = uSpeed
+        .mul(uRise)
+        .mul(uSheet)
+        .add(uSlamSpeed.mul(uSlamRise))
+        .mul(rUp.mul(0.5).add(0.5));
 
       const pos = uBowPos.add(vec3(offXZ.x, 0, offXZ.y));
       pool.posAge.element(instanceIndex).assign(vec4(pos, 0));
-      // w = per-particle size multiplier: this tick's sheet fraction
-      pool.velSize.element(instanceIndex).assign(vec4(velXZ.x, vy, velXZ.y, uSheet));
+      // w = per-particle size multiplier: this tick's sheet fraction, jittered
+      // per droplet (CPU mirror: sprayMath.sizeJitter) so a sheet is made of
+      // different-sized water rather than one repeated sprite
+      const rSize = hash2(vec2(s.mul(H_SIZE), uTime.add(T_SIZE)));
+      pool.velSize
+        .element(instanceIndex)
+        .assign(vec4(velXZ.x, vy, velXZ.y, uSheet.mul(uSizeVar.mul(rSize).oneMinus())));
     });
   })().compute(count);
 
@@ -179,6 +205,9 @@ export function createBowSpray() {
       uSpread.value = sprayParams.bowLaunchSpread;
       uForwardThrow.value = sprayParams.bowForwardThrow;
       uRise.value = sprayParams.bowRise;
+      uSlamRise.value = Math.max(0, sprayParams.bowSlamRise);
+      uSlamSpread.value = Math.max(0, sprayParams.bowSlamSpread);
+      uSizeVar.value = Math.min(1, Math.max(0, sprayParams.sizeVariation));
       uStemLength.value = sprayParams.bowStemLength;
       // NaN from a broken buoyancy frame must not reach the spawn buffers —
       // it would persist in pos/vel for a full particle lifetime
@@ -246,7 +275,7 @@ export function createBowSpray() {
       // no contact signal yet → fall back to "immersed at all", the best
       // proxy a fixed geometric bow point can offer
       const inContact = cut ? cut.inContact : immersion > 0;
-      const { rate, sheet } = bowEmission(
+      const { rate, sheet, slam } = bowEmission(
         immersion,
         speed,
         burialRate,
@@ -255,6 +284,10 @@ export function createBowSpray() {
       );
       if (rate <= 0) return;
       uSheet.value = sheet;
+      // the LAUNCH takes the real closing speed, gated by the slam ramp so a
+      // gentle settling into a trough does not fling water; `slam` is already
+      // 0 below bowSlamRateOn and 1 at bowSlamRateFull
+      uSlamSpeed.value = burialRate * slam;
       const next = advanceBurstCursor(cursorState, rate, SIM_DT, count);
       cursorState = { cursor: next.cursor, acc: next.acc };
       if (next.budget === 0) return;

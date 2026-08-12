@@ -20,7 +20,6 @@
  * §V20: warm-tinted foam via foamTintNode.
  */
 import {
-  cameraPosition,
   float,
   mix,
   smoothstep,
@@ -46,7 +45,7 @@ const uElong = uniform(3.0);
 const uSheetKnee = uniform(0.7);
 const uSheetBroaden = uniform(0.35);
 const uSheetFlatten = uniform(0.5);
-const uDetailFadeFeatures = uniform(260);
+const uDetailKeepPixels = uniform(2);
 const uDetailFadeSpan = uniform(3.5);
 const uFarFoamFade = uniform(0);
 const uKneeLow = uniform(0.03);
@@ -96,7 +95,7 @@ export function updateFoamShadingUniforms(
   uSheetKnee.value = p.sheetKnee;
   uSheetBroaden.value = p.sheetBroaden;
   uSheetFlatten.value = p.sheetFlatten;
-  uDetailFadeFeatures.value = Math.max(1, p.detailFadeFeatures);
+  uDetailKeepPixels.value = Math.max(0.5, p.detailKeepPixels);
   uDetailFadeSpan.value = Math.max(1.05, p.detailFadeSpan);
   uFarFoamFade.value = p.farFoamFade;
   // ordered pair: a low ≥ high inverts the smoothstep and the knee becomes a
@@ -278,18 +277,37 @@ export function foamDetailMask(rawFoam: AnyNode, coord: AnyNode): AnyNode {
   // saturated foam settles toward an unbroken sheet
   const sheeted = mix(textured, float(1), sheetN.mul(uSheetFlatten).clamp(0, 1));
 
-  // FAR-FIELD DETAIL FADE — now a BACKSTOP, not the band limit.
-  // It is kept because it is cheap and because it also retires the mottle
-  // layer's very low frequencies, which never alias but stop meaning anything
-  // once a whole cap is a pixel wide. The actual anti-aliasing is the
-  // per-octave fwidth limit above (§V48): this fade is measured against the
-  // BASE feature and so is ~4× too late for the sharpest octave, which is the
-  // bug it used to be the only defence against.
-  const featureMetres = float(1).div(uCrackleScale.max(0.01)); // floored §V28
-  const fadeStart = featureMetres.mul(uDetailFadeFeatures);
-  const fadeEnd = fadeStart.mul(uDetailFadeSpan.max(1.05));
-  const camDist = coord.sub(cameraPosition.xz).length();
-  const detailFade = smoothstep(fadeStart, fadeEnd, camDist).oneMinus();
+  // FAR-FIELD DETAIL FADE — a BACKSTOP, not the band limit, and now keyed on
+  // the PIXEL FOOTPRINT rather than on camera distance.
+  //
+  // It is kept because it is cheap and because it retires the mottle layer's
+  // very low frequencies, which never alias but stop meaning anything once a
+  // whole cap is a pixel wide. The actual anti-aliasing is the per-octave
+  // fwidth limit above (§V48).
+  //
+  // IT USED TO BE `length(coord − cameraPosition.xz)` against 108→379 m, and
+  // that is the "very much view-angle dependent" report in one line: distance
+  // is a proxy for footprint that is only calibrated for ONE camera. From the
+  // near-vertical camera the user shot docs/bug-foam-topdown.jpeg from (~620 m
+  // altitude) every pixel of sea is past 379 m, so this multiplied the entire
+  // detail composite out of the frame and left the bare blurred sim mask —
+  // measured detailFade 1.000 / 0.936 / 0.206 / 0.000 at a 20 m deck camera,
+  // 150 m grazing, a 300 m top-down and a 620 m top-down. Meanwhile the actual
+  // footprint from that camera is well under a metre, i.e. the detail resolved
+  // perfectly and was deleted anyway. Fourth occurrence of distance-for-
+  // footprint in this project (`cascadeFadeTexels`, ocean sparkle, sand
+  // sparkle). Measured against the COARSEST layer in the composite (the mottle
+  // cell), because this gate retires the WHOLE composite — the sharp end is
+  // already handled per octave.
+  const featureMetres = float(1).div(uMottleScale.max(0.01)); // floored §V28
+  const keepMetres = featureMetres.div(uDetailKeepPixels.max(0.5));
+  // e0 > e1 → 1 while a cell still spans the keep width, 0 once it is smaller
+  // than one pixel by `detailFadeSpan` (§V23: functional smoothstep)
+  const detailFade = smoothstep(
+    keepMetres.mul(uDetailFadeSpan.max(1.05)),
+    keepMetres,
+    coordFootprint(coord),
+  );
   const detail = mix(float(1), sheeted, detailFade);
   // Low-residue knee: a few percent of foam mixed over deep teal reads as a
   // dirty beige smudge, not as thin foam (§V20 critique) — cut it, keep the

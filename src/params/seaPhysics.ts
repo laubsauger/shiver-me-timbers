@@ -173,7 +173,17 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     // is what keeps her the right way up. At 1.0, sharing heave's damper,
     // it measured 0.41 flat: dead in a cycle and a half.
     rollDampingScale: 0.09,
-    // ζ_pitch 0.41. Pitch was never the over-damped axis — what suppressed
+    // ζ_pitch 0.41 — the PHYSICAL value (real ships 0.2–0.4), and it took a
+    // measurement to stop compromising on it. It sat at 0.62 through two
+    // rounds as a "lumped model has no pitch added-inertia" concession, on
+    // the assumption that damping the bow harder must at least keep her dry.
+    // Swept against the short-crested sea, the opposite is true — median
+    // green water over 8 runs: ζ 0.41 → 1.33%, ζ 0.61 → 2.17%, ζ 0.85 →
+    // 2.94%. A bow held rigid PLOUGHS a crest; a bow free to lift rides over
+    // it. So the physical value is also the one that answers "it dips into
+    // the water too heavily", and it costs only pitch MOTION (RMS 4.9° →
+    // 6.0° in that severe sea), which is the thing the user asked for more
+    // of. Pitch was never the over-damped axis — what suppressed
     // the bow was the probe layout aliasing the swell away (§B.22). With
     // that fixed, ζ 0.29 gave pitch RMS 9.7° in the shipped swell, which is
     // hobby-horsing, not life; 0.41 sits at 3–4°, still ~2.5× the old hull.
@@ -182,7 +192,7 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     // immersion climbs again. A bow that cannot pitch cannot ride a wave,
     // so over-damping this axis brings back the complaint it was raised to
     // answer ("dipping into the water too heavily").
-    pitchDampingScale: 0.5,
+    pitchDampingScale: 0.33,
     // ×2 at a gentle swell roll, ×6 at a hard one, ×25+ in a storm. Raised
     // from 10 when the hull got its real displacement (§B.27): giving the
     // stations a BODY means the ones over a trough still make torque, which

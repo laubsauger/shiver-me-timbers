@@ -24,6 +24,29 @@ export interface FoamParams {
   decayHalfLife: number;
   /** 3×3 blur tap offset in texels — spread speed of the progressive blur */
   blurRadius: number;
+  /**
+   * How far, IN WORLD METRES, the progressive blur is allowed to spread a cap
+   * over its visible life (σ of the accumulated diffusion). Each band solves
+   * for its own per-tick kernel weight from this and its own texel size
+   * (foamMath.blurMixPerStep), so the diffusion is one physical process at one
+   * rate instead of three grid-dependent ones.
+   *
+   * THIS NUMBER IS DERIVED, NOT TASTED. An isotropic diffusion adds the same
+   * variance to both axes, so it drives ANY shape to a disc — the only
+   * question is how fast relative to the feature. Measured on the real
+   * spectrum at full resolution, the injected cap's MINOR axis is 2.65 m in
+   * cascade 0 and 0.72 m in cascade 1 (swell; 5.09 / 0.93 at storm). A spread
+   * at or below the smallest of those keeps ~75% of the injected aspect
+   * everywhere; above it the blur wins and every cap is a dot. It was
+   * effectively 12.27 m in cascade 0 — 4.6× that band's own cap — which is
+   * why the user photographed round discs from directly above while the
+   * injection measured aspect 3.3 at 18.5° of spread.
+   *
+   * Raise it and caps soften and merge; lower it and the sim texture's own
+   * texel grid starts to read (cascade 0's texel is 1.97 m — `uvWarpMeters`
+   * is the thing that hides it).
+   */
+  blurSpreadMetres: number;
   /** world-space frequency of the high-freq crackle layer on fresh foam */
   crackleScale: number;
   /** world-space frequency of the soft mottling on dissipated foam */
@@ -72,8 +95,9 @@ export interface FoamParams {
   /**
    * world-space frequency of the field that TURNS the detail elongation.
    * 1/this is roughly how far you travel before the streaks point somewhere
-   * else. Keep it well below every cascade domain (420/98/22.7 m) so it adds
-   * no repeat of its own — its whole job is to destroy one.
+   * else. Keep it well below every cascade domain (1010/98/22.7 m — cascade 0
+   * grew from 420 m to carry the 189 m swell train) so it adds no repeat of
+   * its own; its whole job is to destroy one.
    */
   crestDirectionScale: number;
   /**
@@ -93,11 +117,27 @@ export interface FoamParams {
   /** how far saturated foam flattens toward an unbroken sheet, 0..1 */
   sheetFlatten: number;
   /**
-   * distance at which foam DETAIL starts fading out, measured in crackle
-   * FEATURE WIDTHS (1/crackleScale metres each) rather than metres, so
-   * retuning the detail frequency cannot silently un-fix the horizon sizzle.
+   * PIXELS the COARSEST detail layer (1/mottleScale metres) must still span
+   * for the detail composite to be worth evaluating at all.
+   *
+   * IT WAS A CAMERA DISTANCE, and that is the whole "very much view-angle
+   * dependent" report. The old form faded detail out between 108 m and 379 m
+   * of camera distance, which is a statement about a grazing camera and
+   * nothing else: from the near-vertical camera in docs/bug-foam-topdown.jpeg
+   * (~620 m altitude) EVERY pixel of sea is past 379 m, so the fade was fully
+   * engaged over the entire frame and the crackle/mottle layers — the only
+   * things breaking the sim mask's smooth blobs into foam — were multiplied
+   * out completely. What is left is the raw blurred mask, i.e. discs. Measured
+   * detailFade: 1.000 at a 20 m deck camera, 0.936 at 150 m, 0.206 at a 300 m
+   * top-down, 0.000 at 620 m.
+   *
+   * This is the FOURTH gate in this project keyed on distance where the real
+   * quantity is the PIXEL FOOTPRINT (after `cascadeFadeTexels`, the ocean
+   * sparkle cells and the sand sparkle). A footprint knows about the grazing
+   * stretch AND about altitude; a distance knows about neither. 2 is Nyquist,
+   * the same constant `tierKeepPixels` and ship/bandLimit use.
    */
-  detailFadeFeatures: number;
+  detailKeepPixels: number;
   /** multiplier from fade start to fully faded (≥ 1.05) */
   detailFadeSpan: number;
   /**
@@ -146,6 +186,9 @@ export const foamParams: FoamParams = registerParams(
     injectStrength: 4.0,
     decayHalfLife: 0.9,
     blurRadius: 1.0,
+    // = the smallest injected minor axis measured across bands and presets
+    // (cascade 1 at swell, 0.72 m), so no band's caps are re-rounded
+    blurSpreadMetres: 0.6,
     crackleScale: 2.4,
     mottleScale: 0.35,
     tintWarmth: 0.12,
@@ -165,7 +208,7 @@ export const foamParams: FoamParams = registerParams(
     sheetFlatten: 0.5,
     tierKeepPixels: 2,
     tierFadeSpan: 2,
-    detailFadeFeatures: 260,
+    detailKeepPixels: 2,
     detailFadeSpan: 3.5,
     farFoamFade: 0,
     // deliberately the SAME numbers the shader literal held: this change makes
@@ -183,6 +226,7 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
     injectStrength: { min: 0, max: 20, step: 0.1 },
     decayHalfLife: { min: 0.05, max: 10, step: 0.05 },
     blurRadius: { min: 0, max: 4, step: 0.25 },
+    blurSpreadMetres: { min: 0, max: 8, step: 0.05 },
     crackleScale: { min: 0.1, max: 20, step: 0.1 },
     mottleScale: { min: 0.01, max: 5, step: 0.01 },
     tintWarmth: { min: 0, max: 1, step: 0.01 },
@@ -200,7 +244,7 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
     sheetFlatten: { min: 0, max: 1, step: 0.01 },
     tierKeepPixels: { min: 0.5, max: 12, step: 0.25 },
     tierFadeSpan: { min: 1.05, max: 6, step: 0.05 },
-    detailFadeFeatures: { min: 10, max: 2000, step: 10 },
+    detailKeepPixels: { min: 0.5, max: 12, step: 0.25 },
     detailFadeSpan: { min: 1.05, max: 10, step: 0.05 },
     farFoamFade: { min: 0, max: 1, step: 0.05 },
     residueKneeLow: { min: 0, max: 0.5, step: 0.005 },

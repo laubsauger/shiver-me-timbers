@@ -23,9 +23,46 @@ export interface OceanParams {
   amplitude: number;
   windSpeed: number; // m/s
   windDirection: number; // radians
-  /** directional spreading exponent — higher = waves align with wind */
-  directionality: number;
-  /** damping for waves travelling against the wind, 0..1 */
+  /**
+   * Longuet-Higgins spreading exponent s AT THE SPECTRAL PEAK. The wind sea's
+   * directional factor is cos^{2s}(Δθ/2) with s a function of ω/ω_p
+   * (Hasselmann/Mitsuyasu, as used by Horvath 2015) — see `windSeaSpread`.
+   * Higher = a tighter fan at the peak. 9.8 measures 22.9° of axial spread
+   * there, which is a fully developed wind sea.
+   *
+   * This REPLACES `directionality`, which was a single cos^n applied at every
+   * wavenumber and measured a flat 16.5°/16.5°/16.4° across the three
+   * cascades — the same narrow comb on the 2 m ripples as on the 100 m
+   * rollers, which is what "very obvious sine-wavy feeling" (user) is.
+   */
+  spreadPeak: number;
+  /**
+   * Exponent μ on (ω/ω_p) BELOW the peak — swell-ward of the wind sea, where
+   * the fan re-broadens because those components were raised by a different,
+   * older wind. Mitsuyasu's fit is 5.
+   */
+  spreadBelowPeak: number;
+  /**
+   * Exponent μ on (ω/ω_p)^−1 ABOVE the peak — the short waves. This is the
+   * number that fixes the chop: at 2.5 the spread reaches ~39° (very nearly
+   * isotropic) by λ ≈ 8 m, against the 16.4° the flat cos¹⁰ gave. Lower it
+   * toward 0 and the whole sea combs into one direction again.
+   */
+  spreadAbovePeak: number;
+  /**
+   * Floor on s. Below ~1 the spread has already saturated at the isotropic
+   * limit (39.1° at s=0.5 vs 40.5° at s=1), so this costs no realism; it
+   * exists to keep the closed-form normalisation away from Γ's small-argument
+   * behaviour and to give a knob if fully isotropic chop reads as mush.
+   */
+  spreadMin: number;
+  /**
+   * Fraction of the energy that runs ISOTROPICALLY rather than with the wind —
+   * a real sea always has some. It used to be a hard multiplier on the
+   * upwind half-plane, i.e. a step at 90°; cos^{2s}(Δθ/2) already reaches zero
+   * at 180° on its own, so this is now a smooth pedestal with the same
+   * meaning and no corner.
+   */
   oppositeWaveDamp: number;
   /** small-wave suppression length (m) — kills sub-texel chop */
   smallWaveCutoff: number;
@@ -60,8 +97,15 @@ export interface OceanParams {
   swellDirection: number;
   /**
    * cos^n directional spread. Swell is far more unidirectional than wind sea
-   * after travelling (compare `directionality`, 10): a distant storm's fan has
-   * long since sorted itself out by dispersion and angular spreading.
+   * after travelling: a distant storm's fan has long since sorted itself out by
+   * dispersion and angular spreading.
+   *
+   * CEILED BY THE GRID (`swellEffectiveDirectionality`) exactly as
+   * `swellBandwidth` is by `swellGridModes`, and for the same reason on the
+   * other axis: a spread narrower than the grid's angular resolution at k_p
+   * lands the whole train on one ray of modes, i.e. a plane wave. The authored
+   * 24 is above that ceiling on every shipped preset (calm 3.7, swell 7.1,
+   * storm 16.0), so this reads as "as narrow as the grid can carry".
    */
   swellDirectionality: number;
   /**
@@ -147,7 +191,14 @@ export const oceanParams: OceanParams = registerParams('ocean', {
   amplitude: 0.24,
   windSpeed: 11,
   windDirection: Math.PI * 0.25,
-  directionality: 10,
+  // Hasselmann/Mitsuyasu, the fit Horvath 2015 uses. Measured axial spread
+  // that these produce, against the flat 16.4° they replace:
+  //   λ 189 m  37.7°   λ 95 m (peak)  22.9°   λ 40 m  32.8°
+  //   λ 20 m   39.0°   λ 8.3 m        39.1°   λ 2.4 m 39.3°
+  spreadPeak: 9.8,
+  spreadBelowPeak: 5,
+  spreadAbovePeak: 2.5,
+  spreadMin: 0.5,
   oppositeWaveDamp: 0.06,
   smallWaveCutoff: 0.03,
   choppiness: 0.95,
@@ -185,7 +236,10 @@ function oceanParamsMeta() {
     amplitude: { min: 0, max: 4, step: 0.01 },
     windSpeed: { min: 0.5, max: 30, step: 0.1 },
     windDirection: { min: 0, max: Math.PI * 2, step: 0.01 },
-    directionality: { min: 0, max: 16, step: 0.5 },
+    spreadPeak: { min: 0.5, max: 40, step: 0.1 },
+    spreadBelowPeak: { min: 0, max: 10, step: 0.1 },
+    spreadAbovePeak: { min: 0, max: 8, step: 0.1 },
+    spreadMin: { min: 0.1, max: 8, step: 0.1 },
     oppositeWaveDamp: { min: 0, max: 1, step: 0.01 },
     smallWaveCutoff: { min: 0, max: 0.5, step: 0.005 },
     choppiness: { min: 0, max: 3, step: 0.01 },

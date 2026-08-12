@@ -19,14 +19,36 @@
 import * as THREE from 'three/webgpu';
 import { skyParams } from '../params/sky';
 import { createLighting } from './lighting';
+import { keyLight } from './moonCycle';
 import { createSkyBackground } from './skyBackground';
-import { sunDirection as computeSunDirection, sunElevation } from './sunCycle';
 
 export interface SkyHandle {
   update(timeOfDay: number): void;
-  /** live normalized world-space direction toward the sun */
+  /**
+   * Live normalized world-space direction toward THE KEY — the sun by day,
+   * the MOON at night. The name is kept because every consumer in the project
+   * reads it (ocean glints, caustics, clouds, god rays, terrain), and that is
+   * precisely the point: a moon is a directional source, so re-aiming this
+   * one vector hands all of them a moon glint road and moonlit caustics with
+   * no changes on their side. See src/sky/moonCycle.ts.
+   */
   sunDirection: THREE.Vector3;
+  /** THE KEY light. Sun-coloured by day, moon-coloured at night. */
   sunLight: THREE.DirectionalLight;
+  /**
+   * 0..1 "how dark is it" — THE single clock for every practical light in the
+   * world: the ship's lanterns, the lighthouse lamp, hut windows, any
+   * emissive that must be off in daylight. Live; refreshed by update().
+   *
+   * Read this rather than deriving a second dusk from `timeOfDay`. It is a
+   * pure function of sun elevation, which `sunCycle` already owns, so there
+   * is exactly one clock in the project — two that agree today will drift the
+   * moment either is tuned.
+   *
+   * NOT the same as moonlight: a new-moon night has nightFactor 1 and no moon
+   * at all, and that is precisely the night that most needs lamps lit.
+   */
+  nightFactor: number;
   /**
    * The sky's radiance toward an arbitrary world direction, sun disc/glow/halo
    * EXCLUDED — the single source of truth for anything that REFLECTS the sky
@@ -52,15 +74,20 @@ export function createSky(opts: { scene: THREE.Scene }): SkyHandle {
 
   const handle: SkyHandle = {
     sunDirection,
+    nightFactor: 0,
     sunLight: rig.sunLight,
     skyDomeColor: background.skyDomeColor,
     setShadowFocus: (x, y, z) => rig.setShadowFocus(x, y, z),
     update(timeOfDay: number): void {
-      const dir = computeSunDirection(timeOfDay, skyParams.latitude);
-      const elevation = sunElevation(timeOfDay, skyParams.latitude);
-      sunDirection.set(dir[0], dir[1], dir[2]);
-      background.update(dir, elevation);
-      rig.update(dir, elevation);
+      // ONE call resolves who owns the key — sun, moon, or mid-handover — and
+      // both the background and the light rig are driven from that single
+      // answer. Deriving it twice is how the sky and the light that lights
+      // the scene drift apart (§T39's whole argument for skyPalette).
+      const key = keyLight(timeOfDay, skyParams);
+      sunDirection.set(key.direction[0], key.direction[1], key.direction[2]);
+      handle.nightFactor = key.nightFactor;
+      background.update(key);
+      rig.update(key);
       rig.syncExposure();
     },
     configureRenderer(renderer: THREE.WebGPURenderer): void {

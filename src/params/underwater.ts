@@ -7,14 +7,31 @@
 import { registerParams } from './registry';
 
 export interface UnderwaterParams {
-  /** exp fog density per meter of view distance while submerged */
-  fogDensity: number;
+  /**
+   * Jerlov water TYPE scalar on the SHARED extinction vector — multiplies
+   * `causticsParams.submergedAbsorption*` (K_d, 1/m) for the volume.
+   *
+   * This is deliberately NOT a second set of coefficients. The hull tint, the
+   * caustics and the volume must all agree about how deep a thing is, so they
+   * read one vector; this scalar moves all three channels together, which is
+   * what "clear tropical → murky coastal" physically is. 1 = the authored
+   * Jerlov I–IB water. (§V.34 header, params/caustics colour contract.)
+   */
+  murkiness: number;
   /** fog color just under the surface (turquoise, ref: SoT underwater) */
   fogColorShallow: number;
   /** fog color at depth (deep teal) */
   fogColorDeep: number;
   /** camera depth (m below surface) at which fog color is fully deep */
   fogDepthRange: number;
+  /**
+   * 0..1 how much darker the inscattered water is for a ray pointing straight
+   * DOWN than for one pointing up. Skylight enters from above, so looking down
+   * into open water is the dark half of the shot — without this the volume is
+   * one flat tint and reads as a filter over the lens rather than a body of
+   * water the camera is inside of.
+   */
+  downwardDarkening: number;
   /** 0..1 how strongly the blue-green grade tints the submerged image */
   gradeStrength: number;
   /** blue-green multiply tint of the grade */
@@ -69,10 +86,11 @@ export interface UnderwaterParams {
 export const underwaterParams: UnderwaterParams = registerParams(
   'underwater',
   {
-    fogDensity: 0.045,
+    murkiness: 1,
     fogColorShallow: 0x2e8f86,
     fogColorDeep: 0x0b3d43,
     fogDepthRange: 25,
+    downwardDarkening: 0.55,
     gradeStrength: 0.55,
     gradeTint: 0x9fd8cf,
     desaturation: 0.35,
@@ -99,8 +117,9 @@ export const underwaterParams: UnderwaterParams = registerParams(
     sunVisEdge: 0.2,
   },
   {
-    fogDensity: { min: 0, max: 0.4, step: 0.001 },
+    murkiness: { min: 0.1, max: 8, step: 0.05 },
     fogDepthRange: { min: 1, max: 100, step: 1 },
+    downwardDarkening: { min: 0, max: 1, step: 0.01 },
     gradeStrength: { min: 0, max: 1, step: 0.01 },
     desaturation: { min: 0, max: 1, step: 0.01 },
     wobbleAmp: { min: 0, max: 0.02, step: 0.0005 },

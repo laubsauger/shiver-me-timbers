@@ -1,10 +1,16 @@
 /**
- * Underwater full-screen grade (§V25): depth-based teal exp fog, desaturated
- * blue-green grade, subtle time-based screen wobble, depth-scaled vignette.
- * Built as a TSL node graph over the scene `pass()` color/viewZ (post pass —
- * see index.ts for the PostProcessing wiring). Everything is scaled by the
- * shared `blend` uniform so the whole look fades continuously across the
- * waterline crossing band — no pop (V25).
+ * Underwater LENS treatment (§V25): refractive screen wobble, desaturated
+ * blue-green grade, depth-scaled vignette. Built as a TSL node graph over the
+ * post pipeline's shared scene pass (see index.ts for the stage wiring).
+ * Everything is scaled by the shared `blend` uniform so the whole look fades
+ * continuously across the waterline crossing band — no pop (V25).
+ *
+ * THIS FILE NO LONGER DOES FOG. Distance extinction moved to waterVolume.ts,
+ * where it is per-channel, per-pixel, and driven by the SAME Jerlov
+ * coefficients the hull and the caustics use. What is left here is what
+ * happens to the image at the CAMERA rather than to the light in the water —
+ * which is why `blend` (a property of the camera) is the right gate for all of
+ * it, and would have been the wrong gate for the fog.
  *
  * V23: 3-arg math uses functional `mix`/`smoothstep` forms only.
  * V16: every tunable is a uniform fed from params/underwater via
@@ -13,7 +19,6 @@
 import * as THREE from 'three/webgpu';
 import {
   float,
-  exp,
   luminance,
   mix,
   screenUV,
@@ -22,7 +27,6 @@ import {
   uniform,
   vec2,
   vec3,
-  vec4,
 } from 'three/tsl';
 import type { Node, PassNode, UniformNode } from 'three/webgpu';
 import type { ShaderNodeObject } from 'three/tsl';
@@ -44,9 +48,22 @@ export interface UnderwaterUniforms {
   dayTint: ShaderNodeObject<UniformNode<THREE.Color>>;
 }
 
+/**
+ * The lens treatment, split in two around the water volume.
+ *
+ * The order matters and is not cosmetic: `lens` RESAMPLES the scene (the
+ * wobble is a refractive displacement of the incoming image, so it has to
+ * happen to the image before anything is composited onto it), the volume then
+ * extinguishes what that ray carried, and only then does `finish` grade what
+ * finally reached the sensor. Running the grade first would tint light the
+ * water had already absorbed, and running the wobble last would resample the
+ * raw scene and throw the fog away.
+ */
 export interface UnderwaterGrade {
-  /** vec4 output node — plug into PostProcessing.outputNode */
-  node: ShaderNodeObject<Node>;
+  /** refractive wobble — pass the RAW scene rgb, blend-gated to identity above water */
+  lens(rgb: ShaderNodeObject<Node>): ShaderNodeObject<Node>;
+  /** desaturate + blue-green grade + depth vignette, blend-gated */
+  finish(rgb: ShaderNodeObject<Node>): ShaderNodeObject<Node>;
   /** push live param values into uniforms (call per frame) */
   updateFromParams(): void;
 }
@@ -55,10 +72,6 @@ export function buildUnderwaterGrade(
   scenePass: ShaderNodeObject<PassNode>,
   u: UnderwaterUniforms,
 ): UnderwaterGrade {
-  const uFogDensity = uniform(p.fogDensity);
-  const uFogShallow = uniform(new THREE.Color(p.fogColorShallow));
-  const uFogDeep = uniform(new THREE.Color(p.fogColorDeep));
-  const uFogDepthRange = uniform(p.fogDepthRange);
   const uGradeStrength = uniform(p.gradeStrength);
   const uGradeTint = uniform(new THREE.Color(p.gradeTint));
   const uDesat = uniform(p.desaturation);
@@ -69,9 +82,6 @@ export function buildUnderwaterGrade(
   const uVigDepthScale = uniform(p.vignetteDepthScale);
 
   const sceneColor = scenePass.getTextureNode('output');
-  // viewZ sampled at the un-wobbled UV: the wobble offset is ≤ ~0.4% of the
-  // screen, so the fog-distance error is invisible and we skip a depth fetch
-  const viewZ = scenePass.getViewZNode();
 
   // --- wobble: tiny sin-based UV offset, scaled by blend so above water = 0
   const phaseX = screenUV.y.mul(uWobbleFreq).add(u.time.mul(uWobbleSpeed));
@@ -84,18 +94,14 @@ export function buildUnderwaterGrade(
     .mul(u.blend);
   const wobbled = sceneColor.sample(screenUV.add(wobble)).rgb;
 
-  // --- teal exp fog by view distance; color deepens with camera depth
-  const viewDist = viewZ.negate(); // viewZ is negative into the screen
-  // fogAmount = 1 - e^(-dist * density) — mirrored by expFogFactor() in
-  // submersion.ts for the unit tests
-  const fogAmount = float(1).sub(exp(viewDist.mul(uFogDensity).negate()));
-  const depthT = smoothstep(float(0), uFogDepthRange, u.camDepth);
-  const fogColor = mix(uFogShallow, uFogDeep, depthT).mul(u.dayTint);
-  const fogged = mix(wobbled, fogColor, fogAmount);
-
-  // --- desaturate toward luminance, then blue-green multiply grade
-  const desat = mix(fogged, vec3(luminance(fogged)), uDesat);
-  const graded = mix(desat, desat.mul(uGradeTint), uGradeStrength);
+  // NOTE: the exponential distance fog that used to live here is GONE. It was
+  // a second, hand-authored extinction set (`fogDensity` + two colours) racing
+  // the physical one — the hull and the caustics attenuate by Jerlov K_d from
+  // params/caustics, so a scalar density here made the water and the things in
+  // it disagree about depth. Extinction now happens ONCE, per channel and per
+  // pixel, in waterVolume.ts. What is left in this file is lens treatment
+  // (wobble, grade, vignette) — things that happen to the CAMERA, not to the
+  // light on its way to it.
 
   // --- vignette, strengthened by camera depth
   const radial = screenUV.sub(0.5).length().mul(2); // 0 center → ~1.41 corner
@@ -104,17 +110,17 @@ export function buildUnderwaterGrade(
     smoothstep(float(0.5), float(1.4), radial).mul(vigAmount),
   );
 
-  // fade the whole treatment in with blend — crossing band never pops (V25)
-  const outRGB = mix(sceneColor.rgb, graded.mul(vignette), u.blend);
-  const node = vec4(outRGB, 1);
-
   return {
-    node,
+    // above water blend = 0 ⟹ both halves are the exact identity, so the
+    // stage costs nothing visually until the lens actually goes under (V25:
+    // the crossing band never pops).
+    lens: (rgb) => mix(rgb, wobbled, u.blend),
+    finish: (rgb) => {
+      const desat = mix(rgb, vec3(luminance(rgb)), uDesat);
+      const graded = mix(desat, desat.mul(uGradeTint), uGradeStrength);
+      return mix(rgb, graded.mul(vignette), u.blend);
+    },
     updateFromParams(): void {
-      uFogDensity.value = p.fogDensity;
-      uFogShallow.value.set(p.fogColorShallow);
-      uFogDeep.value.set(p.fogColorDeep);
-      uFogDepthRange.value = p.fogDepthRange;
       uGradeStrength.value = p.gradeStrength;
       uGradeTint.value.set(p.gradeTint);
       uDesat.value = p.desaturation;

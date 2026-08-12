@@ -325,7 +325,8 @@ export interface OceanHeightField {
 function mirrorSignature(p: OceanParams, seaP: SeaPhysicsParams): string {
   return [
     p.resolution, p.amplitude, p.windSpeed, p.windDirection,
-    p.directionality, p.oppositeWaveDamp, p.smallWaveCutoff,
+    p.spreadPeak, p.spreadBelowPeak, p.spreadAbovePeak, p.spreadMin,
+    p.oppositeWaveDamp, p.smallWaveCutoff,
     p.splitWavelengths, p.cascades.map((c) => c.domain),
     // the SWELL train too — the presets lerp all three of these, and a mirror
     // that misses them is §B.7 in its original form (§V.8)

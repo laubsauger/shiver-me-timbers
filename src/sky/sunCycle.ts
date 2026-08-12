@@ -90,9 +90,22 @@ export function sunColor(elevation: number): Rgb {
  * Sky tint multiplier vs elevation: night navy → full white by mid-morning.
  * Applied to zenith/horizon colors and the fog color so the whole scene
  * darkens as one.
+ *
+ * `moonLift` (0..1, default 0 = the moonless night this function always
+ * described) crossfades the NIGHT END of the ramp from `nightTint` to
+ * `moonlitNightTint`. It only ever touches the night endpoint, so the ramp
+ * above the horizon — and therefore the whole §T39 sunset — is bit-identical
+ * whatever the moon is doing. The lift is the sky's OWN response to
+ * moonlight: without it a full moon lights the ship and the water while the
+ * dome behind them stays the same dead navy, which reads as a spotlight in a
+ * cave rather than as a moonlit night.
  */
-export function skyTint(elevation: number): Rgb {
-  const night = hexToRgb(skyParams.nightTint);
+export function skyTint(elevation: number, moonLift: number = 0): Rgb {
+  const night = mixRgb(
+    hexToRgb(skyParams.nightTint),
+    hexToRgb(skyParams.moonlitNightTint),
+    moonLift,
+  );
   // Edges are BELOW the horizon on purpose. They used to run to +0.28 rad,
   // which meant everything under ~16° elevation was being multiplied by a
   // navy tint — i.e. golden hour was quietly cooled and dimmed by ~40% more
@@ -112,8 +125,8 @@ export function skyTint(elevation: number): Rgb {
  * day clock dims rather than snaps: at a 1:1 clock the elevation rate near
  * the horizon is 0.253 rad/h, which walks this window in ~13 sim-minutes.
  */
-const SUN_BELOW = -0.035; // rad, -2.0°: disc fully set
-const SUN_CLEAR = 0.02; //  rad, +1.15°: disc fully clear of the horizon
+export const SUN_BELOW = -0.035; // rad, -2.0°: disc fully set
+export const SUN_CLEAR = 0.02; //  rad, +1.15°: disc fully clear of the horizon
 
 export function sunAboveHorizon(elevation: number): number {
   return smoothstep(SUN_BELOW, SUN_CLEAR, elevation);

@@ -124,8 +124,45 @@ export function swellSpectrum(kx: number, kz: number, p: OceanParams): number {
   // Swell runs ONE way. Unlike wind sea there is no opposing train to damp:
   // it was radiated by a single distant storm and has travelled since.
   if (dotKW <= 0) return 0;
-  const spread = Math.pow(dotKW, p.swellDirectionality);
+  const spread = Math.pow(dotKW, swellEffectiveDirectionality(p));
   return (swellScale(p) * radial * spread) / k;
+}
+
+/**
+ * THE ANGULAR HALF OF THE GRID FLOOR, and it was missing.
+ *
+ * `swellBandSigma` floors the swell's RADIAL bandwidth at `swellGridModes`
+ * grid steps because "a truly narrow band lands on one mode and tiles the
+ * world as a sinusoid". A 2-D spectrum has TWO axes and only one of them was
+ * floored. At |k| the grid's angular resolution is Δk/|k| radians, and a
+ * cos^n spread has an angular width of about 1/√n — so once n exceeds
+ * (|k|/(m·Δk))² the whole train fits inside ONE ray of modes, which is a
+ * plane wave whichever way the radial band was widened.
+ *
+ * Measured on the shipped presets, all three were over that ceiling with
+ * `swellDirectionality: 24`:
+ *     calm  (T 13 s, λ 264 m)  Δk/kp = 0.261 ⟹ ceiling 3.7
+ *     swell (T 11 s, λ 189 m)  Δk/kp = 0.187 ⟹ ceiling 7.1
+ *     storm (T  9 s, λ 126 m)  Δk/kp = 0.125 ⟹ ceiling 16.0
+ * and `calm` — 90.4% swell by variance, 15.2 effective modes — was the sea
+ * the user was most likely looking at when they called the waves sinusoidal.
+ * Longer swell is WORSE, which is the opposite of the intuition: a longer
+ * wave sits at smaller |k|, where the grid's fixed Δk is a larger fraction of
+ * it, so the same authored spread buys fewer directions.
+ *
+ * Same shape as §V.48 and the same cure: never ask the grid for a feature
+ * finer than it can represent — widen instead. Applied here rather than at the
+ * param so `swellScale` normalises against the spread that is ACTUALLY used
+ * and `swellAmplitude` keeps meaning metres of RMS elevation (§B.12).
+ */
+export function swellEffectiveDirectionality(p: OceanParams): number {
+  const authored = Math.max(0, p.swellDirectionality);
+  const kp = swellPeakWavenumber(p.swellPeriod);
+  const dk = (2 * Math.PI) / swellReferenceDomain(p);
+  const modes = Math.max(0.5, p.swellGridModes);
+  // want angular width 1/√n ≥ modes·Δk/kp  ⟹  n ≤ (kp/(modes·Δk))²
+  const ratio = kp / Math.max(1e-9, modes * dk);
+  return Math.min(authored, Math.max(0.5, ratio * ratio));
 }
 
 /**
@@ -174,7 +211,9 @@ export function swellReferenceDomain(p: OceanParams): number {
 export function swellScale(p: OceanParams): number {
   const targetVariance = p.swellAmplitude * p.swellAmplitude;
   const sigmaK = swellBandSigma(p);
-  const dirI = Math.max(1e-6, directionalIntegral(p.swellDirectionality));
+  // the spread the grid can actually carry, not the authored one — otherwise
+  // the floor above would quietly change the swell's HEIGHT (§B.12)
+  const dirI = Math.max(1e-6, directionalIntegral(swellEffectiveDirectionality(p)));
   return (targetVariance * 4 * Math.PI * Math.PI) /
     (sigmaK * Math.sqrt(2 * Math.PI) * dirI);
 }
@@ -186,6 +225,104 @@ export function swellScale(p: OceanParams): number {
  */
 export function waveSpectrum(kx: number, kz: number, p: OceanParams): number {
   return phillips(kx, kz, p) + swellSpectrum(kx, kz, p);
+}
+
+/**
+ * Wind-sea PEAK wavenumber, in closed form from the Phillips shape itself.
+ *
+ * The omnidirectional energy density is E(k) ∝ k·S(k) ∝ exp(−1/(k²L²))/k³ with
+ * L = U²/g, so d/dk[−3 ln k − 1/(k²L²)] = 0 gives k_p = √(2/3)/L. It is
+ * derived rather than authored because the directional spread below is a
+ * function of ω/ω_p: a second knob for the peak could disagree with the
+ * spectrum that actually gets sampled (the trap `swellPeriod` avoids by
+ * deriving its wavelength).
+ */
+export function windSeaPeakWavenumber(p: OceanParams): number {
+  const Lw = Math.max(1e-6, (p.windSpeed * p.windSpeed) / GRAVITY);
+  return Math.sqrt(2 / 3) / Lw;
+}
+
+/**
+ * DIRECTIONAL SPREAD OF THE WIND SEA — and the whole point is that it is a
+ * FUNCTION OF WAVENUMBER (§V.58's family: the shape of a feature comes from
+ * the spectrum that made it).
+ *
+ * WHAT WAS THERE AND WHY IT READ AS SINUSOIDS. `spread = |k̂·ŵ|^directionality`
+ * with `directionality: 10`, applied identically at EVERY wavenumber. Measured
+ * axial (2nd-moment) spread of the shipped sea, per cascade:
+ *     cascade 0: 16.5°   cascade 1: 16.5°   cascade 2: 16.4°
+ * i.e. the 2 m ripples were combed into the same 33°-wide fan as the 100 m
+ * rollers. A spread that narrow at every scale is a comb, and a comb is what
+ * "very obvious sine-wavy feeling" (user) looks like: long parallel ridges,
+ * self-similar, at every zoom level.
+ *
+ * A REAL SEA IS NARROWEST AT ITS PEAK AND BROADENS SHARPLY EITHER SIDE.
+ * Hasselmann/Mitsuyasu, as used by Horvath 2015 ("Empirical Directional Wave
+ * Spectra for Computer Graphics") — the same construction the reference
+ * implementations use:
+ *     D(θ) ∝ cos^{2s}(Δθ/2),   s = s_p·(ω/ω_p)^{+μ_below}   ω ≤ ω_p
+ *                              s = s_p·(ω/ω_p)^{−μ_above}   ω > ω_p
+ * With ω² = g|k| the frequency ratio is √(k/k_p), so the exponents halve in k.
+ * Measured against our cascades, s_p ≈ 9.8 gives axial spread 22.9° at the
+ * peak and ~39° by λ ≤ 8.3 m, against a flat 16.4° before: the short waves are
+ * the ones that were most wrong, by 2.4×, and they are the ones the eye reads
+ * as surface texture.
+ *
+ * cos^{2s}(Δθ/2) rather than cos^n(Δθ) for two reasons that both matter here:
+ * it is the standard form the fitted constants belong to, and it reaches
+ * EXACTLY ZERO at 180° instead of needing `oppositeWaveDamp` to knock out the
+ * upwind lobe with a step at 90°. That param survives as a smooth isotropic
+ * PEDESTAL — a real sea is never perfectly one-sided — which keeps its meaning
+ * ("this fraction of the energy runs against the wind") without the corner.
+ *
+ * NORMALISED, and that is load-bearing. The factor is divided by its own
+ * directional integral, so widening the spread REDISTRIBUTES energy instead of
+ * adding it. Without this, every tweak to the spread silently moves Hs —
+ * §B.12's shape, and the exact trap `swellScale` already exists to avoid on
+ * the other train.
+ *
+ * The integral is then re-scaled by {@link LEGACY_SPREAD_NORM} so that
+ * `amplitude` keeps the numerical meaning it has always had. Any constant
+ * would satisfy the invariant above (Phillips' amplitude has no units), and
+ * picking the OLD convention's value makes this change a pure redistribution
+ * of DIRECTION with bit-identical omnidirectional E(k) — so Hs, `heightRms`,
+ * `jacobianRms` (transfer |k|, direction-free ⟹ a function of E(k) alone),
+ * the foam gate, the anti-fold cap, every weather preset and the CPU buoyancy
+ * mirror's sea state are all exactly where they were. Rescaling three preset
+ * amplitudes instead would have been the same physics and a much wider blast
+ * radius; measured, it broke a weather-lerp test that assumes storm's
+ * amplitude sits above 1.
+ */
+/**
+ * ∫ of the spreading factor this replaces, over the full circle:
+ *   ∫|cos θ|¹⁰ dθ · (1 + oppositeWaveDamp) = I(10)·1.06 = 0.7731·1.06
+ * It was constant in k — that was the defect — so dividing it out is exact at
+ * every wavenumber, not a fit.
+ */
+export const LEGACY_SPREAD_NORM = 0.81949;
+export function windSeaSpread(
+  dotKW: number,
+  k: number,
+  p: OceanParams,
+): number {
+  const kp = windSeaPeakWavenumber(p);
+  const ratio = Math.max(1e-6, k / kp);
+  // ω/ωp = √(k/kp) ⟹ (ω/ωp)^μ = (k/kp)^{μ/2}
+  const s =
+    ratio <= 1
+      ? p.spreadPeak * Math.pow(ratio, p.spreadBelowPeak / 2)
+      : p.spreadPeak * Math.pow(ratio, -p.spreadAbovePeak / 2);
+  // floor: below s≈1 the spread has already saturated at the isotropic limit
+  // (measured axial 39.1° at s=0.5 against 40.5° at s=1), so this costs no
+  // realism and keeps the normalisation away from Γ's small-argument blowup
+  const sEff = Math.max(p.spreadMin, Math.min(64, s));
+  const cosHalf = Math.sqrt(Math.max(0, (1 + Math.min(1, Math.max(-1, dotKW))) / 2));
+  const lobe = Math.pow(cosHalf, 2 * sEff);
+  // ∫cos^{2s}(θ/2) dθ over the full circle = 2·∫cos^{2s}(u) du = 2·I(2s)
+  const norm = Math.max(1e-6, 2 * directionalIntegral(2 * sEff)) / LEGACY_SPREAD_NORM;
+  const damp = Math.min(1, Math.max(0, p.oppositeWaveDamp));
+  // isotropic pedestal, normalised the same way (∫1 dθ = 2π)
+  return ((1 - damp) * lobe) / norm + (damp * LEGACY_SPREAD_NORM) / (2 * Math.PI);
 }
 
 /** Phillips spectrum with directional spreading + small-wave suppression */
@@ -201,8 +338,7 @@ export function phillips(
   const wx = Math.cos(p.windDirection);
   const wz = Math.sin(p.windDirection);
   const dotKW = (kx / k) * wx + (kz / k) * wz;
-  let spread = Math.pow(Math.abs(dotKW), p.directionality);
-  if (dotKW < 0) spread *= p.oppositeWaveDamp;
+  const spread = windSeaSpread(dotKW, k, p);
   const base =
     (p.amplitude * Math.exp(-1 / (k2 * Lw * Lw))) / (k2 * k2) ;
   const smallWave = Math.exp(-k2 * p.smallWaveCutoff * p.smallWaveCutoff);

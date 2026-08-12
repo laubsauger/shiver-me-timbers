@@ -66,6 +66,60 @@ export interface SkyParams {
   sunColorNoon: number;
   /** zenith tint multiplier endpoints for the night→day ramp */
   nightTint: number;
+  /**
+   * MOONLIGHT (see src/sky/moonCycle.ts for the whole argument).
+   *
+   * `moonPhase` 0..1: 0 = new, 0.25 = first quarter, 0.5 = FULL, 0.75 = last
+   * quarter. It is a real hour-angle lag, so it moves WHEN the moon is up as
+   * well as how lit it is — a full moon rises at sunset and is overhead at
+   * midnight, a crescent trails the sun and has set by the small hours.
+   *
+   * `moonColor` and `moonIntensity` are NOT redundant. The ocean copies the
+   * key light's COLOUR (not its intensity) into the water's glint tint, so
+   * the colour sets how bright the moon's road burns on the sea while the
+   * intensity sets how hard the moon keys the ship. See KeyLight's docstring.
+   *
+   * `moonColor` is a deliberate PURKINJE STYLISATION. Real moonlight is
+   * reflected sunlight off a grey body — ~4100 K, if anything WARMER than
+   * daylight. The blue is in the observer's rods, not in the beam. Named here
+   * so it reads as an art choice rather than as a physics error.
+   */
+  moonPhase: number;
+  moonColor: number;
+  moonIntensity: number;
+  /** night tint at FULL moon — crossfades from nightTint by moon weight */
+  moonlitNightTint: number;
+  /** 0..1 ambient lift a full moon adds on top of nightAmbientFloor */
+  moonAmbient: number;
+  /**
+   * 0..1 moonless-night ambient floor. Was a hardcoded 0.15 in lighting.ts;
+   * it keeps silhouettes readable after dark with no moon in the sky, and
+   * every value of it is visible only at night, so leave it where it is
+   * unless you are looking at a new-moon frame.
+   */
+  nightAmbientFloor: number;
+  /**
+   * Analytic moon disc in the sky background. Deliberately much SHARPER than
+   * the sun's: the sun is an overexposed blob whose edge is pure bloom, while
+   * the moon has a hard limb you can see craters against. Hence a small
+   * softness and a low intensity — the moon must NOT clip to white, or the
+   * phase terminator below it is invisible.
+   */
+  moonDiscSize: number;
+  moonDiscSoftness: number;
+  moonDiscIntensity: number;
+  /**
+   * Softness of the phase TERMINATOR, as a fraction of the disc radius.
+   * §V48: this is the sharpest feature on the disc and the disc is a few
+   * pixels across, so the edge is band-limited by an explicit width rather
+   * than left as a step.
+   */
+  moonTerminatorSoftness: number;
+  /** tight glow hugging the moon, and the (much tighter than the sun) halo */
+  moonGlowPower: number;
+  moonGlowStrength: number;
+  moonHaloPower: number;
+  moonHaloStrength: number;
   /** analytic sun disc angular radius (degrees) and its soft edge (degrees) */
   sunDiscSize: number;
   sunDiscSoftness: number;
@@ -243,6 +297,40 @@ export const skyParams: SkyParams = registerParams(
     sunColorLow: 0xff9440,
     sunColorNoon: 0xfff3da,
     nightTint: 0x16263e,
+    // FULL MOON — the state the night look is authored against.
+    moonPhase: 0.5,
+    // Pale cool blue-white. Luminance was chosen against the glint road, not
+    // against the light: in LINEAR terms this carries 0.38 of sunColorNoon's
+    // luminance, so the moon's road on the water burns at ~41% of the noon
+    // sun's — bright enough to be the single brightest thing in a night
+    // frame, which is exactly what a moon road is, without reading as a
+    // second daytime.
+    moonColor: 0x8ea9d6,
+    // Derived, not guessed. Target: the moonlit side of the hull lands near
+    // 0.04 linear so it tonemaps to a clearly-visible dark blue-grey rather
+    // than to black. radiance = albedo(0.20) x intensity x moonColor's linear
+    // luminance(0.38) x N.L(~0.7) = 0.04 at intensity 0.75. The physical
+    // sun:moon ratio of 400,000:1 would give 8.5e-6 and a black frame — see
+    // moonCycle.ts's header for why a fixed exposure forbids using it.
+    moonIntensity: 0.75,
+    // roughly 2x nightTint's luminance and a little less saturated: a moonlit
+    // sky is a deep blue you can read cloud shapes against, not a flat navy
+    moonlitNightTint: 0x304c74,
+    moonAmbient: 0.3,
+    nightAmbientFloor: 0.15,
+    // The real moon is 0.26° in radius. Enlarged like the sun disc is (1.1
+    // against a real 0.27°), and a little more, because the PHASE has to be
+    // legible — a physically-sized crescent is one pixel of one pixel.
+    moonDiscSize: 1.4,
+    moonDiscSoftness: 0.12,
+    // NOT an HDR value like sunDiscIntensity's 14. Above ~3 the disc clips to
+    // flat white and the terminator vanishes with it.
+    moonDiscIntensity: 2.2,
+    moonTerminatorSoftness: 0.06,
+    moonGlowPower: 900,
+    moonGlowStrength: 0.25,
+    moonHaloPower: 24,
+    moonHaloStrength: 0.06,
     sunDiscSize: 1.1,
     sunDiscSoftness: 0.35,
     sunDiscIntensity: 14,
@@ -277,6 +365,18 @@ export const skyParams: SkyParams = registerParams(
     sunsetGradientCurve: { min: 0.2, max: 4, step: 0.01 },
     sunHazeStrength: { min: 0, max: 1, step: 0.01 },
     horizonWarmStrength: { min: 0, max: 1, step: 0.01 },
+    moonPhase: { min: 0, max: 1, step: 0.01 },
+    moonIntensity: { min: 0, max: 4, step: 0.01 },
+    moonAmbient: { min: 0, max: 1, step: 0.01 },
+    nightAmbientFloor: { min: 0, max: 1, step: 0.01 },
+    moonDiscSize: { min: 0.2, max: 6, step: 0.05 },
+    moonDiscSoftness: { min: 0.02, max: 3, step: 0.02 },
+    moonDiscIntensity: { min: 0, max: 8, step: 0.05 },
+    moonTerminatorSoftness: { min: 0.01, max: 0.5, step: 0.01 },
+    moonGlowPower: { min: 1, max: 2000, step: 5 },
+    moonGlowStrength: { min: 0, max: 4, step: 0.01 },
+    moonHaloPower: { min: 1, max: 64, step: 0.5 },
+    moonHaloStrength: { min: 0, max: 1, step: 0.01 },
     sunDiscSize: { min: 0.2, max: 6, step: 0.05 },
     sunDiscSoftness: { min: 0.05, max: 3, step: 0.05 },
     sunDiscIntensity: { min: 1, max: 40, step: 0.5 },

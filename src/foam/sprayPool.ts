@@ -10,7 +10,8 @@
  * Buffers: posAge [xyz = world pos, w = age], velSize [xyz = vel, w = size
  * multiplier 0..1 chosen at spawn — how big a puff this particle is, e.g. a
  * bow slamming a swell throws a full sheet while cruising throws mist].
- * Dead = age ≥ life (init writes DEAD_AGE, far beyond any life slider).
+ * Dead = age ≥ THIS particle's life (`lifeNode`, jittered per slot — init
+ * writes DEAD_AGE, far beyond any life slider × any jitter).
  * (The per-particle hash seed is NOT stored: it is fract((i+1)·φ), pure in
  * instanceIndex, so any pass that needs it recomputes it — sprayMath.goldenSeed.)
  */
@@ -35,8 +36,9 @@ import {
 } from 'three/tsl';
 import { SIM_DT } from '../core/loop';
 import { sprayParams } from '../params/spray';
+import { hash2 } from '../terrain/noise';
 import { foamTintNode } from './foamShading';
-import { DEAD_AGE, sanitizePoolCount } from './sprayMath';
+import { DEAD_AGE, H_LIFE, PHI, T_LIFE, sanitizePoolCount } from './sprayMath';
 
 export interface SprayPoolOptions {
   /** multiplies sizeMin/sizeMax for this pool (bow sheets > crest mist) */
@@ -60,6 +62,7 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   const velSizeRead = storage(velSize.value, 'vec4', count).toReadOnly();
 
   const uLife = uniform(sprayParams.life);
+  const uLifeVar = uniform(sprayParams.lifeVariation);
   const uGravity = uniform(sprayParams.gravity);
   const uDragFactor = uniform(1);
   const uSizeMin = uniform(sprayParams.sizeMin);
@@ -74,6 +77,22 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
     Number.isFinite(options.sizeScale?.() ?? 1) ? Math.max(0, options.sizeScale?.() ?? 1) : 1,
   );
 
+  /**
+   * Per-particle lifetime (CPU mirror: sprayMath.particleLife). EVERY test of
+   * "is this particle dead" must use this node and not `uLife`, or a slot
+   * respawns before it has faded (spawn gate too loose) or never fades out
+   * (integrator too generous). Pure in instanceIndex on purpose: the physics
+   * pass has no spawn time to hash against, and the value has to agree across
+   * three passes that never talk to each other.
+   */
+  const lifeNode = () => {
+    // @band-limited-elsewhere: fract of the particle INDEX, not of a spatial
+    // coordinate — it never varies across a pixel, so it has no footprint
+    const s = float(instanceIndex).add(1).mul(PHI).fract();
+    const r = hash2(vec2(s.mul(H_LIFE), float(T_LIFE)));
+    return uLife.mul(uLifeVar.oneMinus().add(uLifeVar.mul(2).mul(r))).max(1e-3);
+  };
+
   // whole pool starts dead far below the surface
   const initPass = Fn(() => {
     posAge.element(instanceIndex).assign(vec4(0, -1000, 0, DEAD_AGE));
@@ -84,7 +103,7 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   const updatePass = Fn(() => {
     const pa = posAge.element(instanceIndex);
     const vs = velSize.element(instanceIndex);
-    If(pa.w.lessThan(uLife), () => {
+    If(pa.w.lessThan(lifeNode()), () => {
       const vel = vec3(vs.x, vs.y.sub(uGravity.mul(SIM_DT)), vs.z)
         .mul(uDragFactor)
         .toVar();
@@ -101,7 +120,7 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   const vel = velSizeRead.element(instanceIndex).xyz;
   // divisor floor: uLife is CPU-clamped too, but 0/0 here would be a NaN
   // scale → screen-covering quad × pool size = fill-rate wedge. Never risk it.
-  const ageN = el.w.div(uLife.max(1e-6)).clamp(0, 1);
+  const ageN = el.w.div(lifeNode().max(1e-6)).clamp(0, 1);
   material.positionNode = el.xyz;
 
   // distance falloff (user critique: dots stippled out to the horizon).
@@ -189,6 +208,8 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
       // life floor: ageN divides by life; drag floor: negative drag would be
       // exponential velocity GROWTH → positions at Infinity within seconds
       uLife.value = Math.max(fin(options.life?.() ?? sprayParams.life, 1), 1e-3);
+      // clamped < 1 so the shortest-lived slot keeps a positive lifetime
+      uLifeVar.value = Math.min(0.9, Math.max(0, fin(sprayParams.lifeVariation, 0)));
       uGravity.value = fin(sprayParams.gravity, 0);
       uDragFactor.value = Math.exp(
         -Math.max(0, fin(options.drag?.() ?? sprayParams.drag, 0)) * SIM_DT,
@@ -214,7 +235,11 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
 
     /** run an emitter's spawn pass (after step) */
     run,
-    uLife,
+    /**
+     * THIS particle's lifetime, as a node — emitters must gate "is it dead?"
+     * on `lifeNode()`, never on `uLife` (see the definition above).
+     */
+    lifeNode,
 
     dispose(): void {
       material.dispose();

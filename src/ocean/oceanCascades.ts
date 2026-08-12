@@ -126,7 +126,8 @@ export class OceanCascade {
  */
 export const SPECTRUM_SIGNATURE_KEYS = [
   'resolution', 'amplitude', 'windSpeed', 'windDirection',
-  'directionality', 'oppositeWaveDamp', 'smallWaveCutoff',
+  'spreadPeak', 'spreadBelowPeak', 'spreadAbovePeak', 'spreadMin',
+  'oppositeWaveDamp', 'smallWaveCutoff',
   'splitWavelengths', 'cascades',
   'swellPeriod', 'swellAmplitude', 'swellDirection',
   'swellDirectionality', 'swellBandwidth', 'swellGridModes',
@@ -135,7 +136,8 @@ export const SPECTRUM_SIGNATURE_KEYS = [
 export function spectrumSignature(p: OceanParams): string {
   return [
     p.resolution, p.amplitude, p.windSpeed, p.windDirection,
-    p.directionality, p.oppositeWaveDamp, p.smallWaveCutoff,
+    p.spreadPeak, p.spreadBelowPeak, p.spreadAbovePeak, p.spreadMin,
+    p.oppositeWaveDamp, p.smallWaveCutoff,
     p.splitWavelengths, p.cascades.map((c) => c.domain),
     p.swellPeriod, p.swellAmplitude, p.swellDirection,
     p.swellDirectionality, p.swellBandwidth, p.swellGridModes,

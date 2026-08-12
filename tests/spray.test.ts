@@ -24,7 +24,11 @@ import {
   respawnCandidate,
   sanitizePoolCount,
   spawnAccepted,
-  sprayJacobianThreshold,
+  gustFactor,
+  particleLife,
+  seaMinEigenvalue,
+  sizeJitter,
+  sprayEigenGate,
   spriteScale,
   stepParticle,
   type ParticleState,
@@ -33,8 +37,16 @@ import { sprayParams } from '../src/params/spray';
 import { getParamsEntry } from '../src/params/registry';
 
 const DT = 1 / 60; // §V2 fixed sim tick
-const P = { launchSpeed: 4, lateralSpread: 0.4, windCarry: 0.6 };
-const BOW = { bowLaunchSpread: 0.6, bowForwardThrow: 1.3, bowRise: 0.45 };
+// gustiness 0 pins the burst to its base 0.55..1 band so the cone bounds
+// below stay exact; the heavy tail has its own block further down
+const P = { launchSpeed: 4, lateralSpread: 0.4, windCarry: 0.6, gustiness: 0 };
+const BOW = {
+  bowLaunchSpread: 0.6,
+  bowForwardThrow: 1.3,
+  bowRise: 0.45,
+  bowSlamRise: 1.4,
+  bowSlamSpread: 0.9,
+};
 const seeds = Array.from({ length: 256 }, (_, i) => goldenSeed(i));
 
 describe('respawn sampling (§V2 determinism, no Math.random)', () => {
@@ -72,13 +84,32 @@ describe('respawn sampling (§V2 determinism, no Math.random)', () => {
 });
 
 describe('crest launch velocity (§V6 upward burst, §V7 wind carry)', () => {
-  it('always bursts upward: vy ∈ (0.5, 1] × launchSpeed for every seed', () => {
+  it('always bursts upward: vy ∈ (0.55, 1] × launchSpeed for every seed', () => {
     // WHY: spray falling out of a crest (vy ≤ 0) reads as rain, not spray.
     for (const s of seeds) {
       const [, vy] = launchVelocity(s, 7.7, 0, 0, P);
-      expect(vy).toBeGreaterThan(0.5 * P.launchSpeed);
+      expect(vy).toBeGreaterThan(0.55 * P.launchSpeed);
       expect(vy).toBeLessThanOrEqual(P.launchSpeed);
     }
+  });
+
+  it('gustiness gives a FEW droplets real launch speed, not all of them', () => {
+    // WHY (user: "rarely seeing water particles detach and spray up in
+    // interesting ways"): a uniform 0.55..1 draw sends every droplet on the
+    // same arc to the same height — that is foam hopping, not spray leaving
+    // the water. The tail must be rare (the field must not brighten) and it
+    // must be big enough to clear the surface: r^8 does both.
+    const gusty = { ...P, gustiness: 1.8 };
+    const vys = seeds.map((s) => launchVelocity(s, 7.7, 0, 0, gusty)[1]);
+    const flat = seeds.map((s) => launchVelocity(s, 7.7, 0, 0, P)[1]);
+    const mean = (a: number[]) => a.reduce((x, y) => x + y, 0) / a.length;
+    expect(Math.max(...vys)).toBeGreaterThan(2 * Math.max(...flat)); // real flyers
+    expect(mean(vys) / mean(flat)).toBeLessThan(1.35); // but the field is not hotter
+    expect(vys.filter((v) => v > 1.5 * P.launchSpeed).length / vys.length).toBeLessThan(0.1);
+    // monotone and deterministic in the draw (§V2)
+    expect(gustFactor(0.5, 1.8)).toBeGreaterThan(gustFactor(0.4, 1.8));
+    expect(gustFactor(2, 1.8)).toBe(gustFactor(1, 1.8)); // clamped (§V28)
+    expect(gustFactor(0.37, 0)).toBeCloseTo(0.55 + 0.45 * 0.37, 12);
   });
 
   it('horizontal jitter is bounded by lateralSpread × launchSpeed (+ wind)', () => {
@@ -215,6 +246,27 @@ describe('bow launch velocity cone (thrown FORWARD + outboard off the cutwater)'
     expect(launch(0.37, 9)).toEqual(full); // and never amplified (§V28)
   });
 
+  it('the slam LAUNCHES water clear of the surface — the detachment half', () => {
+    // WHY (user: "rarely seeing water particles detach and spray up"): rise
+    // was speed × 0.35 × sheet only, so a full sheet at 8 m/s left the stem at
+    // ~2.1 m/s up — a 22 cm hop against gravity. Particles that hug the water
+    // read as foam. A wedge entering water throws a root jet FASTER than its
+    // entry speed, so the slam term is > 1 × closing speed and owes nothing to
+    // how fast the ship is going.
+    const cruise = bowLaunchVelocity(0.37, 2.2, 6, 1, 0, BOW, 1, 0);
+    const slam = bowLaunchVelocity(0.37, 2.2, 6, 1, 0, BOW, 1, 4);
+    expect(slam[1]).toBeGreaterThan(cruise[1] + 4 * BOW.bowSlamRise * 0.5);
+    // apex against gravity: high enough to be seen leaving the water
+    expect(slam[1] ** 2 / (2 * 9.8)).toBeGreaterThan(0.5);
+    // a dead-in-the-water hull that slams still throws water (speed 0)
+    const still = bowLaunchVelocity(0.37, 2.2, 0, 1, 0, BOW, 1, 4);
+    expect(still[1]).toBeGreaterThan(0);
+    expect(Math.hypot(still[0], still[2])).toBeGreaterThan(0); // sideways too
+    // and nothing at all when neither ship nor sea is moving
+    expect(bowLaunchVelocity(0.37, 2.2, 0, 1, 0, BOW, 1, 0)).toEqual([0, 0, 0]);
+    expect(bowLaunchVelocity(0.37, 2.2, 0, 1, 0, BOW, 1, NaN)).toEqual([0, 0, 0]);
+  });
+
   it('flanks both sides of the bow across seeds', () => {
     // heading +x → outboard is ±z; both signs must occur or the ship
     // would spray from one side only.
@@ -236,6 +288,9 @@ describe('bow emission regimes (constant cutwater mist + impact sheets)', () => 
     bowBurstRate: 600,
     bowCruiseRate: 200,
     bowCruiseSheet: 0.35,
+    bowSlamRateOn: 1.6,
+    bowSlamRateFull: 5,
+    bowSlamRate: 900,
   };
 
   it('mists continuously while making way — as long as the stem is IN the water', () => {
@@ -278,6 +333,26 @@ describe('bow emission regimes (constant cutwater mist + impact sheets)', () => 
     expect(slow.rate).toBeGreaterThan(bowEmission(0, 6, 0, true, E).rate); // depth counts
   });
 
+  it('a SLAM throws water whether or not the ship is making way', () => {
+    // WHY (user: "especially if the boat slams down"): every other bow term is
+    // multiplied by speedN = ramp01(speed, 1, 8)², so a hull coming down hard
+    // at 3 m/s over ground scored 0.08 there and one slamming while hove to
+    // scored zero. A slam is a VERTICAL event — the closing speed between
+    // forefoot and water is the whole of it, and hullContact already measures
+    // it (the slam SOUND has been keyed on it all along).
+    const crawling = bowEmission(0.5, 0.5, 4.5, true, E); // barely moving, hard slam
+    expect(crawling.rate).toBeGreaterThan(0.5 * E.bowSlamRate);
+    expect(crawling.sheet).toBeGreaterThan(0.8); // and it is a FULL sheet
+    // the old path emitted nothing at all here: no speed → no burst, no mist
+    const oldPath = E.bowCruiseRate * 0 + E.bowBurstRate * 0;
+    expect(oldPath).toBe(0);
+    // still monotone in closing speed, and silent below the audio's own onset
+    expect(bowEmission(0.5, 0.5, E.bowSlamRateOn, true, E).slam).toBe(0);
+    expect(bowEmission(0.5, 0.5, 3, true, E).rate).toBeLessThan(crawling.rate);
+    // and a hull with no water under it still throws nothing, slam or not
+    expect(bowEmission(0.5, 0.5, 9, false, E).rate).toBe(0);
+  });
+
   it('rate and sheet stay bounded and finite for absurd inputs (§V28)', () => {
     for (const [imm, spd, rate] of [
       [1e6, 1e6, 1e6],
@@ -287,7 +362,7 @@ describe('bow emission regimes (constant cutwater mist + impact sheets)', () => 
       const e = bowEmission(imm, spd, rate, true, E);
       expect(Number.isFinite(e.rate)).toBe(true);
       expect(e.rate).toBeGreaterThanOrEqual(0);
-      expect(e.rate).toBeLessThanOrEqual(E.bowCruiseRate + E.bowBurstRate);
+      expect(e.rate).toBeLessThanOrEqual(E.bowCruiseRate + E.bowBurstRate + E.bowSlamRate);
       expect(e.sheet).toBeGreaterThanOrEqual(0);
       expect(e.sheet).toBeLessThanOrEqual(1);
     }
@@ -338,16 +413,66 @@ describe('crest spawn gating (§V6 — only genuinely breaking crests spray)', (
     expect(crestBreaking(-0.2, 0.2, -0.1, 1.4)).toBe(false); // fold in a trough
   });
 
-  it('threshold tracks the foam bias (§V7) but is CEILED at physical sense', () => {
-    // WHY: storm lowers the bar for foam on purpose, and spray should follow —
-    // but the storm preset sets jacobianFoamBias to 0.9, i.e. "compressed by
-    // 10%", which is nearly the entire sea. Uncapped that is a blizzard.
-    expect(sprayJacobianThreshold(0.55, -0.65, 0.05)).toBeCloseTo(-0.1, 12);
-    expect(sprayJacobianThreshold(0.9, -0.65, 0.05)).toBeCloseTo(0.05, 12);
-    expect(sprayJacobianThreshold(2.0, 0, 0.05)).toBe(0.05); // never runaway
-    // storms still spray harder than calm, just not unboundedly
-    expect(sprayJacobianThreshold(0.12, -0.65, 0.05)).toBeLessThan(
-      sprayJacobianThreshold(0.55, -0.65, 0.05),
+  it('the fold gate is foam’s own σ-multiple, re-expressed against λ−', () => {
+    // THE BUG THIS REPLACES (§B.12/§V36/§V59, third occurrence in this file's
+    // subject matter): the gate was `min(jacobianFoamBias + offset, ceiling)`
+    // — an ABSOLUTE det-J threshold. Numbers from the shipped presets, the
+    // ocean's own published moments:
+    //
+    //   preset  σ(det J)   foam gate   OLD spray gate      OLD z
+    //   calm      0.125      7.1σ       min(0.12−0.65, .05)  12.3σ
+    //   swell     0.157      2.6σ       min(0.60−0.65, .05)   6.7σ
+    //   storm     0.510      1.5σ       min(0.25−0.65, .05)   2.7σ
+    //
+    // i.e. crest spray asked the default sea for a 6.7σ event and calm for a
+    // 12.3σ one. It was not sparse, it was OFF — and det J ≤ 0 is exactly the
+    // self-intersection `effectiveChoppiness` clamps the sea to prevent, so
+    // the trigger required the one thing the ocean guarantees cannot happen.
+    const sea = { trace: 0.1651, lambda: 0.95 }; // swell, measured
+    const gate = sprayEigenGate(0.6, sea.trace, sea.lambda, 0);
+    // at extraSigma 0 it IS the foam onset: same z, expressed in λ− units
+    const rest = 1 + -0.592 * sea.trace * sea.lambda;
+    const sigma = 0.754 * sea.trace * sea.lambda;
+    const zFoam = (1 - 0.6) / (sea.trace * sea.lambda);
+    expect(gate).toBeCloseTo(rest - zFoam * sigma, 9);
+    expect(zFoam).toBeGreaterThan(2); // and it is a real threshold, not "never"
+    expect(zFoam).toBeLessThan(3);
+    // extraSigma only ever makes spray RARER than foam, never commoner
+    expect(sprayEigenGate(0.6, sea.trace, sea.lambda, 0.5)).toBeLessThan(gate);
+    expect(sprayEigenGate(0.6, sea.trace, sea.lambda, -9)).toBe(gate); // floored
+    // storms spray harder than calm for the same reason they foam harder
+    const zOf = (bias: number, trace: number, lambda: number) =>
+      (1 + -0.592 * trace * lambda - sprayEigenGate(bias, trace, lambda, 0)) /
+      (0.754 * trace * lambda);
+    expect(zOf(0.25, 0.3932, 1.2977)).toBeLessThan(zOf(0.12, 0.1467, 0.85));
+  });
+
+  it('a sea with no spectrum yet shuts the fold gate, it does not open it', () => {
+    // WHY §V28/§V36: σ is 0 until the first spectrum build, and 0/0 in the
+    // z-score would be NaN — which compares false in one direction only, so
+    // half the pool would spawn on float noise on the first frames.
+    for (const bad of [0, NaN, Infinity, -1]) {
+      const gate = sprayEigenGate(0.6, bad, 0.95, 0);
+      expect(Number.isFinite(gate)).toBe(true);
+      // λ− of a flat sea is 1; nothing can reach a gate this far below it
+      expect(gate).toBeLessThan(-5);
+      expect(crestBreaking(seaMinEigenvalue(1, 0, 0.95), 99, gate, 0)).toBe(false);
+    }
+  });
+
+  it('λ− sees a UNIAXIAL fold that det J is blind to (§V58)', () => {
+    // WHY spray moved off det J: breaking is uniaxial — the surface compresses
+    // hard along the propagation axis and stretches across it, and the product
+    // of the two barely moves off 1. Foam injects from λ−; if spray still
+    // gated on det J the two would disagree about where the sea is breaking.
+    // a = −0.3, b = +0.3 at λ = 1: det J = 0.91 (looks calm), λ− = 0.7.
+    const det = (1 - 0.3) * (1 + 0.3);
+    expect(seaMinEigenvalue(det, -0.3 + 0.3, 1)).toBeCloseTo(0.7, 12);
+    expect(det).toBeGreaterThan(0.9); // det J calls the same texel quiet
+    // and it re-applies λ, because the derivatives texture stores ∂D unscaled
+    expect(seaMinEigenvalue(det, -0.6, 0.5)).toBeCloseTo(
+      seaMinEigenvalue(det, -0.3, 1),
+      12,
     );
   });
 
@@ -382,6 +507,42 @@ describe('crest spawn gating (§V6 — only genuinely breaking crests spray)', (
     expect(spawnAccepted(0.37, 3.5, 0.25)).toBe(spawnAccepted(0.37, 3.5, 0.25));
     expect(seeds.filter((s) => spawnAccepted(s, 3.5, 0)).length).toBe(0);
     expect(seeds.filter((s) => spawnAccepted(s, 3.5, 1)).length).toBe(seeds.length);
+  });
+});
+
+describe('per-particle variation (§V2-safe, against uniformity)', () => {
+  it('lifetimes spread around `life` and stay positive at any variation', () => {
+    // WHY (user: "more interesting", "in interesting ways" — this project's
+    // recurring failure): one lifetime for the pool kills every droplet of a
+    // burst on the same frame, so a sheet vanishes as a block. Drawn from the
+    // INDEX, not the spawn time, because the physics pass has no spawn time
+    // and all three passes must agree on the number or particles respawn
+    // early / never fade.
+    const lives = seeds.map((_, i) => particleLife(i, 0.7, 0.35));
+    expect(Math.min(...lives)).toBeGreaterThanOrEqual(0.7 * 0.65 - 1e-9);
+    expect(Math.max(...lives)).toBeLessThanOrEqual(0.7 * 1.35 + 1e-9);
+    expect(new Set(lives.map((v) => v.toFixed(6))).size).toBeGreaterThan(200);
+    const mean = lives.reduce((a, b) => a + b, 0) / lives.length;
+    expect(mean).toBeCloseTo(0.7, 1);
+    // deterministic (§V2) and degenerate settings stay safe (§V28)
+    expect(particleLife(17, 0.7, 0.35)).toBe(particleLife(17, 0.7, 0.35));
+    expect(particleLife(17, 0.7, 0)).toBe(0.7);
+    expect(particleLife(17, 0.7, 5)).toBeGreaterThan(0);
+    expect(particleLife(17, 0, 0.35)).toBeGreaterThan(0);
+  });
+
+  it('size jitter only ever THINS a puff — it can never inflate a quad', () => {
+    // WHY §V28/§B.5: the multiplier rides in velSize.w, which the sprite
+    // clamps to [0, 1]; a jitter that could exceed 1 would be silently
+    // clipped on the GPU and read as "variation does nothing" on the CPU.
+    for (const s of seeds) {
+      const v = sizeJitter(s, 4.5, 0.5);
+      expect(v).toBeGreaterThanOrEqual(0.5);
+      expect(v).toBeLessThanOrEqual(1);
+    }
+    expect(sizeJitter(0.37, 4.5, 0)).toBe(1);
+    expect(sizeJitter(0.37, 4.5, 9)).toBeGreaterThanOrEqual(0); // clamped
+    expect(sizeJitter(0.37, 4.5, 0.5)).toBe(sizeJitter(0.37, 4.5, 0.5));
   });
 });
 

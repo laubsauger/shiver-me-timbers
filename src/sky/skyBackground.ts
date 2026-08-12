@@ -25,6 +25,8 @@ import * as THREE from 'three/webgpu';
 import {
   Fn,
   cameraPosition,
+  float,
+  fwidth,
   mix,
   positionWorld,
   smoothstep,
@@ -32,6 +34,7 @@ import {
   vec3,
 } from 'three/tsl';
 import type { SkyParams } from '../params/sky';
+import { moonBrightness, type KeyLight } from './moonCycle';
 import {
   bandGeometry,
   hexToRgb,
@@ -40,7 +43,6 @@ import {
   sunColor,
   sunDiscCosines,
   type Rgb,
-  type Vec3,
 } from './sunCycle';
 
 /** sRGB triple × a 0..1 tint ramp → a linear-working-space three.Color */
@@ -78,6 +80,28 @@ export function createSkyBackground(p: SkyParams) {
   const uGlowStrength = uniform(p.sunGlowStrength);
   const uHaloPower = uniform(p.sunHaloPower);
   const uHaloStrength = uniform(p.sunHaloStrength);
+  // ── moon: disc + phase terminator + its own (much tighter) glow ────────
+  // Every one of these is used ONLY in `colorNode` below, never inside
+  // `skyDome` — same rule as the sun disc, and for the same two reasons:
+  // a reflection must not re-add an HDR disc the water's own glint road
+  // already owns, and `skyDome` is evaluated per WATER pixel in the ocean's
+  // fragment stage, which is at 16/16 samplers and is the frame's dominant
+  // cost (§V40, §V17). Nothing here may ever migrate into skyDome.
+  const uMoonDir = uniform(new THREE.Vector3(0, -1, 0));
+  const uMoonColor = uniform(new THREE.Color());
+  const uMoonCosOuter = uniform(1);
+  const uMoonCosInner = uniform(1);
+  const uMoonSinRadius = uniform(0.02);
+  const uMoonIntensity = uniform(p.moonDiscIntensity);
+  /** cos of the phase angle: +1 = new (nothing lit), -1 = full (all lit) */
+  const uMoonTermK = uniform(-1);
+  const uMoonTermSoft = uniform(p.moonTerminatorSoftness);
+  const uMoonGlowPower = uniform(p.moonGlowPower);
+  const uMoonGlowStrength = uniform(p.moonGlowStrength);
+  const uMoonHaloPower = uniform(p.moonHaloPower);
+  const uMoonHaloStrength = uniform(p.moonHaloStrength);
+  /** 0..1 phase brightness — scales glow/halo so a new moon has no aura */
+  const uMoonBright = uniform(0);
 
   // ── THE directional sky colour, for ANY direction ────────────────────
   // SINGLE SOURCE OF TRUTH (§T39, same rule as skyPalette for colour and
@@ -135,7 +159,55 @@ export function createSkyBackground(p: SkyParams) {
   const toSun = d.clamp(0, 1); // clamp before pow — negative base = NaN (§V28)
   const glow = toSun.pow(uGlowPower.max(EPS)).mul(uGlowStrength);
   const halo = toSun.pow(uHaloPower.max(EPS)).mul(uHaloStrength);
-  const colorNode = warmed.add(vec3(uSunColor).mul(disc.add(glow).add(halo)));
+  const sunTerm = vec3(uSunColor).mul(disc.add(glow).add(halo));
+
+  // 5. analytic MOON: disc, phase terminator, tight glow, tight halo.
+  //
+  // The terminator is the reason this is not just a second copy of the sun
+  // block. Build a 2D basis on the disc — `right` across it, `up2` up it —
+  // and project the view ray into it, so (x, y) are disc coordinates in units
+  // of the disc radius. A point is lit where x > k·sqrt(1-y²): that ellipse
+  // IS the terminator, and k = cos(phase angle) makes it sweep from the
+  // limb (k=+1, new: nothing lit) through the centre (k=0, quarter: half lit)
+  // to the far limb (k=-1, full: everything lit).
+  //
+  // §V28: `right` is degenerate when the moon sits exactly at the zenith, so
+  // the length is floored rather than trusted — that collapses x to 0 (a
+  // half moon at an arbitrary roll) instead of NaN-ing the entire sky.
+  const md = viewDir.dot(uMoonDir);
+  const rAxis = uMoonDir.cross(vec3(0, 1, 0));
+  const right = rAxis.div(rAxis.length().max(EPS));
+  const up2 = right.cross(uMoonDir);
+  const inv = float(1).div(uMoonSinRadius.max(EPS));
+  const dx = viewDir.dot(right).mul(inv);
+  const dy = viewDir.dot(up2).mul(inv).clamp(-1, 1);
+  const termEdge = float(1).sub(dy.mul(dy)).max(0).sqrt().mul(uMoonTermK);
+  // §V48, both halves. (a) WIDEN: the terminator is the sharpest feature on
+  // the disc and the disc is only ~40 px across at 1440p — narrower still at
+  // a wide FOV — so the authored softness is FLOORED at 2 px of `dx`'s own
+  // fwidth. One pixel is not enough: neighbours still straddle the whole
+  // step. (b) the amplitude half is free here, because the widened edge
+  // converges on the disc's own mean brightness rather than on a step.
+  const soft = uMoonTermSoft.max(EPS).max(fwidth(dx).mul(2));
+  const lit = smoothstep(termEdge.sub(soft), termEdge.add(soft), dx);
+  // Same treatment for the limb: `moonDiscSoftness` is authored in degrees,
+  // but a wide FOV can push that under a pixel, so it too is floored by the
+  // screen footprint of the cosine it is thresholding.
+  const limbSoft = fwidth(md).mul(2);
+  const moonDisc = smoothstep(uMoonCosOuter.sub(limbSoft), uMoonCosInner.add(limbSoft), md)
+    .mul(lit)
+    .mul(uMoonIntensity);
+  const toMoon = md.clamp(0, 1); // clamp before pow — negative base = NaN (§V28)
+  const moonGlow = toMoon.pow(uMoonGlowPower.max(EPS)).mul(uMoonGlowStrength);
+  const moonHalo = toMoon.pow(uMoonHaloPower.max(EPS)).mul(uMoonHaloStrength);
+  // §V44 bounded at source: every factor is a 0..1 smoothstep or a clamped
+  // pow, and the phase weight zeroes the whole term at new moon rather than
+  // relying on a clamp downstream.
+  const moonTerm = vec3(uMoonColor).mul(
+    moonDisc.add(moonGlow.add(moonHalo).mul(uMoonBright)),
+  );
+
+  const colorNode = warmed.add(sunTerm).add(moonTerm);
 
   return {
     colorNode,
@@ -150,10 +222,24 @@ export function createSkyBackground(p: SkyParams) {
      */
     skyDomeColor: (dir: ReturnType<typeof vec3>) => skyDome(dir),
     uniforms: { uSunDir, uSunColor, uZenith, uMid, uHaze, uWarm },
-    /** re-derive all ramp-driven uniforms for a new sun state */
-    update(sunDir: Vec3, elevation: number): void {
+    /**
+     * Re-derive all ramp-driven uniforms for a new KEY state.
+     *
+     * `uSunDir` is fed the KEY direction, not the sun's: it drives the haze
+     * wedge's forward-scattering lift and the warm mask, and at night the
+     * body doing the scattering is the moon. The warm mask costs nothing to
+     * hand over because `lowSunWarmth()` is already 0 that far below the
+     * horizon, so what the moon inherits is exactly the pale lift on its own
+     * quarter of the sky — which is what a moon actually does to a night sky.
+     *
+     * Everything else keys off `key.sunElevation`: the sky's PALETTE is the
+     * sun's business at every hour, and only the KEY changes hands.
+     */
+    update(key: KeyLight): void {
+      const sunDir = key.direction;
+      const elevation = key.sunElevation;
       uSunDir.value.set(sunDir[0], sunDir[1], sunDir[2]);
-      const tint = skyTint(elevation);
+      const tint = skyTint(elevation, key.moonWeight);
       const sun = sunColor(elevation);
       // one palette for sky + fog + ambient, crossfaded to golden hour (§T39)
       const pal = skyPalette(elevation, p);
@@ -178,6 +264,32 @@ export function createSkyBackground(p: SkyParams) {
       const [outer, inner] = sunDiscCosines(p.sunDiscSize, p.sunDiscSoftness);
       uDiscCosOuter.value = outer;
       uDiscCosInner.value = inner;
+
+      // ── moon ────────────────────────────────────────────────────────────
+      // The moon's own direction, NOT the key's: the disc has to be drawn
+      // where the moon is even while the sun still owns the key (a daytime
+      // moon is a real and unremarkable sight), and the key's direction is
+      // mid-swing through the nadir during the twilight handover.
+      const md = key.moonDirection;
+      uMoonDir.value.set(md[0], md[1], md[2]);
+      // The moon is a GREY body: it has no colour of its own beyond the
+      // stylised tint the key carries, and the tint is NOT darkened by the
+      // night ramp here because a disc is a source, not a lit surface.
+      const mc = hexToRgb(p.moonColor);
+      uMoonColor.value.setRGB(mc[0], mc[1], mc[2], THREE.SRGBColorSpace);
+      const [mOuter, mInner] = sunDiscCosines(p.moonDiscSize, p.moonDiscSoftness);
+      uMoonCosOuter.value = mOuter;
+      uMoonCosInner.value = mInner;
+      uMoonSinRadius.value = Math.sin((Math.max(0, p.moonDiscSize) * Math.PI) / 180);
+      uMoonIntensity.value = p.moonDiscIntensity;
+      // k = cos(phase angle): +1 new (nothing lit) → -1 full (all lit)
+      uMoonTermK.value = Math.cos(2 * Math.PI * Math.min(1, Math.max(0, p.moonPhase)));
+      uMoonTermSoft.value = Math.max(1e-3, p.moonTerminatorSoftness);
+      uMoonGlowPower.value = p.moonGlowPower;
+      uMoonGlowStrength.value = p.moonGlowStrength;
+      uMoonHaloPower.value = p.moonHaloPower;
+      uMoonHaloStrength.value = p.moonHaloStrength;
+      uMoonBright.value = moonBrightness(p.moonPhase);
     },
   };
 }

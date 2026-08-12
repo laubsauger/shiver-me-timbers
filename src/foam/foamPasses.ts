@@ -38,6 +38,15 @@ export function createFoamUniforms() {
     /** blur tap offset in texels */
     uRadius: uniform(1),
     /**
+     * per-tick weight of the gaussian against the identity, per band
+     * (foamMath.blurMixPerStep). 1 = the old full-strength kernel. This is
+     * what makes the diffusion a WORLD length rather than a texel count —
+     * without it cascade 0 spent 4.6σ of isotropic blur on a 2.65 m cap and
+     * every whitecap in the frame came out a disc (foamMath, "THE BLUR WAS
+     * THE SHAPE").
+     */
+    uBlurMix: uniform(1),
+    /**
      * effective Tessendorf choppiness λ the GPU is running (the anti-fold cap,
      * not the slider). The derivatives texture stores ∂Dx/∂x and ∂Dz/∂z
      * UNSCALED, so the jacobian trace has to re-apply λ here — reading the
@@ -139,11 +148,16 @@ export function createReducePass(
 }
 
 /**
- * Decay+blur pass: dst = min(1, blur3x3(src) · decay). ISOTROPIC — see
- * foamMath, "REMOVED, ON PURPOSE". Gaussian weights sum to 1
+ * Decay+blur pass: dst = min(1, mix(src, blur3x3(src), uBlurMix) · decay).
+ *
+ * ISOTROPIC — see foamMath, "REMOVED, ON PURPOSE". Gaussian weights sum to 1
  * (foamMath.GAUSSIAN_3X3) so only uDecay removes foam, and an axis-aligned
  * kernel is shift-invariant, so the conservation the old crest frame was
- * built to protect is kept, not traded. CPU mirror: foamMath.blurDecayAt.
+ * built to protect is kept, not traded. Mixing against the IDENTITY keeps both
+ * properties exactly ((1−w)·δ + w·G is still normalised and still axis-aligned)
+ * while making the diffusion RATE a world quantity — see foamMath,
+ * "THE BLUR WAS THE SHAPE, AND IT WAS A GRID QUANTITY".
+ * CPU mirror: foamMath.blurDecayAt.
  */
 export function createBlurDecayPass(
   src: THREE.StorageTexture,
@@ -166,9 +180,12 @@ export function createBlurDecayPass(
         const sx = wrap(x.add(int(ox)));
         const sy = wrap(y.add(int(oy)));
         const w = GAUSSIAN_3X3[(dy + 1) * 3 + (dx + 1)];
-        sum.addAssign(textureLoad(src, ivec2(sx, sy)).r.mul(w));
+        sum.addAssign(textureLoad(src, ivec2(sx, sy)).r.mul(w).mul(u.uBlurMix));
       }
     }
+    // identity half of the mixed kernel — the tap the gaussian is blended
+    // against, so total weight is exactly (1−w) + w·Σg = 1 (mass conserved)
+    sum.addAssign(textureLoad(src, ivec2(x, y)).r.mul(float(1).sub(u.uBlurMix)));
     const foam = sum.mul(u.uDecay).min(1);
     textureStore(dst, ivec2(x, y), vec4(foam, 0, 0, 1)).toWriteOnly();
   })().compute(n * n);

@@ -45,6 +45,8 @@ import {
   vec4,
   vibrance,
 } from 'three/tsl';
+import type { Node, PassNode } from 'three/webgpu';
+import type { ShaderNodeObject } from 'three/tsl';
 import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
@@ -54,6 +56,25 @@ import { sunDirection as solarDirection } from '../sky/sunCycle';
 import { buildGodRays } from './postGodRays';
 
 export interface PostOptions {
+  /**
+   * Underwater camera mode (§V.25). Passed in rather than built here because
+   * it also owns a scene-pass mesh (the meniscus band) and a per-frame CPU
+   * update, so main.ts has to hold the handle anyway.
+   *
+   * It gets the RAW scene colour and sits FIRST in the chain, ahead of bloom
+   * and the god rays: the water absorbs light on its way to the lens, so every
+   * additive stage downstream must see the already-extinguished image or it
+   * blooms radiance the water removed. It is a no-op above the surface (its
+   * submersion blend is 0), which is why it can sit unconditionally in the
+   * graph instead of behind a construction gate.
+   */
+  underwater?: {
+    buildStage(scenePass: ShaderNodeObject<PassNode>): {
+      apply(rgb: ShaderNodeObject<Node>): ShaderNodeObject<Node>;
+      additive: ShaderNodeObject<Node>;
+      updateFromParams(): void;
+    };
+  };
   /**
    * Live sun direction (unit, world → sun) for the god rays. Defaults to the
    * same pure solar function the sky itself integrates, read off the same live
@@ -116,7 +137,15 @@ export function createPostPipeline(
   const scenePass = readsDepth
     ? pass(scene, camera, { samples: 0 })
     : pass(scene, camera);
-  const color = scenePass.getTextureNode('output');
+  const rawColor = scenePass.getTextureNode('output');
+
+  // --- underwater volume + lens (§V.25) ---------------------------------
+  // First in the chain, on the raw scene colour. See PostOptions.underwater.
+  const underwater = options.underwater?.buildStage(scenePass) ?? null;
+  const color =
+    underwater === null
+      ? rawColor
+      : vec4(underwater.apply(rawColor.rgb), rawColor.a);
 
   // --- AO -------------------------------------------------------------
   // No MRT normal target, deliberately. This scene draws its principal
@@ -184,6 +213,11 @@ export function createPostPipeline(
     : null;
   if (godRays !== null) hdr = hdr.add(godRays.node);
 
+  // Underwater shafts are a SEPARATE additive term from the surface god rays:
+  // they are masked by the submersion blend, so exactly one of the two is ever
+  // contributing. Both are bounded at source (§V.44).
+  if (underwater !== null) hdr = hdr.add(underwater.additive);
+
   // --- vignette (pre tone map: an exposure falloff, so a multiply) -------
   const uVigStrength = uniform(0);
   const uVigStart = uniform(pp.vignetteStart);
@@ -224,6 +258,7 @@ export function createPostPipeline(
 
   const updateFromParams = (): void => {
     uAoAmount.value = pp.aoEnabled ? finite(pp.aoStrength, 0) : 0;
+    underwater?.updateFromParams();
 
     // must run before post.render(): it projects the sun for THIS frame and
     // resizes the ray targets. main.ts calls updateFromParams() then render().

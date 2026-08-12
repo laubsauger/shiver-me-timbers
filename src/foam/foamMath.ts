@@ -320,7 +320,14 @@ export function wrapIndex(i: number, n: number): number {
 
 /**
  * One texel of the decay+blur pass on an n×n wrapped grid (GPU mirror:
- * blurDecayPass): blur3x3(src) · decay, taps offset by `radius` texels.
+ * blurDecayPass): mix(src, blur3x3(src), blurMix) · decay, taps offset by
+ * `radius` texels.
+ *
+ * `blurMix` (default 1 = the historical full-strength kernel) is what makes
+ * the diffusion a WORLD quantity instead of a grid one — see blurMixPerStep.
+ * Mixing the identity with the gaussian is still a normalised kernel
+ * ((1−w)·δ + w·G sums to exactly 1) and still axis-aligned, so exact mass
+ * conservation and shift-invariance are untouched; only the RATE changes.
  */
 export function blurDecayAt(
   src: Float32Array,
@@ -329,16 +336,94 @@ export function blurDecayAt(
   y: number,
   radius: number,
   decay: number,
+  blurMix = 1,
 ): number {
+  const w = Math.min(1, Math.max(0, blurMix));
   let sum = 0;
   for (let dy = -1; dy <= 1; dy++) {
     for (let dx = -1; dx <= 1; dx++) {
       const sx = wrapIndex(x + Math.round(dx * radius), n);
       const sy = wrapIndex(y + Math.round(dy * radius), n);
-      sum += src[sy * n + sx] * GAUSSIAN_3X3[(dy + 1) * 3 + (dx + 1)];
+      sum += src[sy * n + sx] * GAUSSIAN_3X3[(dy + 1) * 3 + (dx + 1)] * w;
     }
   }
+  sum += src[y * n + x] * (1 - w);
   return Math.min(1, sum * decay);
+}
+
+/* -------------------------------------------------------------------------
+ * THE BLUR WAS THE SHAPE, AND IT WAS A GRID QUANTITY (§B, user 5×: "the caps
+ * are round dots"; measured from a near-vertical camera, docs/bug-foam-
+ * topdown.jpeg).
+ *
+ * λ− fixed the INJECTION — measured on the real spectrum at full resolution,
+ * one injected cap is aspect 3.0–3.3 with 18–59° of axial spread. What reaches
+ * the screen is not that cap. An ISOTROPIC diffusion adds the SAME variance to
+ * both axes, so aspect(n) = √((σa²+nv)/(σb²+nv)) → 1 MONOTONICALLY, and it is
+ * fast: a 2.09 cap is at 1.43 after ten steps and 1.03 after 270. No injected
+ * anisotropy survives an unbounded diffusion; that is what diffusion IS.
+ *
+ * The reason it went unbounded is that `blurRadius` is in TEXELS, so the world
+ * diffusion rate is a property of the GRID:
+ *
+ *   band  domain   texel     age-weighted blur σ    injected σ_min   ratio
+ *   c0    1010 m   1.973 m       12.27 m               2.65 m        4.63×
+ *   c1      98 m   0.191 m        1.19 m               0.72 m        1.66×
+ *   c2     22.7 m  0.044 m        0.28 m                  —            —
+ *
+ * (swell preset, 256² mirror of the real IFFT field, blur σ over the
+ * decay-weighted mean age r/(1−r) = 77.4 ticks at decayHalfLife 0.9 s.)
+ *
+ * So cascade 0 — the band that covers the whole sea — spent 4.6 σ of isotropic
+ * diffusion on a cap 2.65 m wide and turned it into a 35 m disc: measured
+ * steady-state aspect 1.32, σmaj 17.2 m, against an injected 3.32 / 8.84 m.
+ * THREE cascades × three texel sizes is also literally "circles of a few
+ * discrete sizes": 28.9 m / 2.8 m / 0.6 m FWHM, one per band.
+ *
+ * Foam spreading is one physical process and has ONE world rate. Express the
+ * diffusion as a LENGTH in metres and let each band solve for its own per-tick
+ * kernel weight — §V.36's rule (state a threshold in the units of the thing it
+ * measures, never in the units of the grid that happens to hold it) applied to
+ * a diffusion instead of a threshold.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Decay-weighted mean age of visible foam, in sim ticks: foam of age n carries
+ * weight decay^n, so E[n] = r/(1−r). This is the number of blur steps the foam
+ * you can actually SEE has been through — not the lifetime, which is unbounded.
+ */
+export function meanFoamAgeTicks(decay: number): number {
+  if (!Number.isFinite(decay) || decay <= 0) return 0;
+  if (decay >= 1) return Infinity;
+  return decay / (1 - decay);
+}
+
+/**
+ * Per-tick kernel weight that makes the ACCUMULATED blur reach `spreadMetres`
+ * of σ over the foam's mean visible age, in a band whose texel is
+ * `texelMetres` — the same number in every band, so the sea stops carrying one
+ * disc size per cascade.
+ *
+ * A 1-D (1,2,1)/4 kernel at a tap offset of `radius` texels has variance
+ * 0.5·radius² texels²; mixing it with the identity at weight w gives exactly
+ * w× that (the identity contributes zero second moment). Over `age` ticks the
+ * variances add, so w = spread² / (age · 0.5 · radius² · texel²), clamped to
+ * [0,1] — a band whose texels are already coarser than the target spread
+ * simply cannot reach it and stops at 1 (which is the old behaviour).
+ */
+export function blurMixPerStep(
+  spreadMetres: number,
+  texelMetres: number,
+  radius: number,
+  ageTicks: number,
+): number {
+  const perStep = 0.5 * radius * radius * texelMetres * texelMetres;
+  if (!(perStep > 0) || !(ageTicks > 0) || !Number.isFinite(ageTicks)) return 0;
+  // NaN fails every comparison, so `Math.max(0, NaN)` is NaN — guard the
+  // numerator explicitly or one bad uniform poisons the kernel weight (§V28)
+  if (!Number.isFinite(spreadMetres)) return 0;
+  const w = (Math.max(0, spreadMetres) ** 2) / (ageTicks * perStep);
+  return Math.min(1, Math.max(0, w));
 }
 
 /* -------------------------------------------------------------------------

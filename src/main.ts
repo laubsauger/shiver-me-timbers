@@ -5,6 +5,7 @@ import { createInitialState } from './state/simState';
 import type { SimState } from './state/simState';
 import { createDebugShell } from './debug';
 import { createSky } from './sky';
+import { createLanterns } from './lanterns';
 import { createOceanSim, oceanParams } from './ocean';
 import { OceanSurface } from './ocean/oceanSurface';
 import { createFoamSim, createSpray, createBowSpray } from './foam';
@@ -26,6 +27,7 @@ import { createFollowCam } from './camera';
 import { createWeatherSystem, createWeatherSample } from './weather';
 import { createRain } from './rain';
 import { createPostPipeline } from './core/postPipeline';
+import { createUnderwater } from './underwater';
 import {
   logCompileProfile,
   profileCompile,
@@ -334,7 +336,12 @@ async function boot(): Promise<void> {
 
   // crest + bow spray particles (T5 follow-up)
   const spray = createSpray(
-    ocean.cascades.map((c) => ({ displacement: c.displacement, domain: c.domain })),
+    ocean.cascades.map((c) => ({
+      displacement: c.displacement,
+      // λ− needs the jacobian TRACE too (§V58) — same pair foam injects from
+      derivatives: c.derivatives,
+      domain: c.domain,
+    })),
     oceanParams.resolution,
   );
   const bowSpray = createBowSpray();
@@ -397,6 +404,26 @@ async function boot(): Promise<void> {
 
   const shipAssembly = new ShipAssembly(galleonBlueprint, sharedPieceMaterials);
   app.scene.add(shipAssembly.group);
+
+  // SHIP'S LANTERNS (§T15 night). Two point lights on the taffrail, hanging
+  // from a pendulum so they stay plumb while the deck rolls.
+  //
+  // CREATED HERE, AT BOOT, AND NEVER ADDED OR REMOVED AGAIN. three folds the
+  // scene's light set into every render object's dynamic cache key, so a
+  // runtime scene.add(light) recompiles every material in the scene — see
+  // src/lanterns/index.ts. Creating them before the first compile costs one
+  // point-light block in each lit shader and no recompile at all; "off" is
+  // intensity 0, driven by sky.nightFactor.
+  //
+  // The taffrail cleats are the hang points that exist today. The right final
+  // home is the `lantern-post-port`/`lantern-post-starboard` pieces, which
+  // already carry a lantern-bulb geometry but declare no sockets (ship agent).
+  const LANTERN_SOCKETS: Record<string, string> = {
+    'stern-port': 'anchor-cleat-stern-port',
+    'stern-starboard': 'anchor-cleat-stern-starboard',
+  };
+  const LANTERN_IDS = Object.keys(LANTERN_SOCKETS);
+  const lanterns = createLanterns({ scene: app.scene, ids: LANTERN_IDS });
 
   // ENEMY SHIP (§T.19/§V.15). Placed off the starboard bow at a distance that
   // frames well rather than alongside — she is here to be looked at. Sailing
@@ -616,7 +643,21 @@ async function boot(): Promise<void> {
     ship: audioShip,
   };
 
-  const post = createPostPipeline(app.renderer, app.scene, app.camera);
+  // §V.25 / §T.29. The underwater handle owns two things that live in
+  // different places: a scene-pass mesh (the meniscus band, drawn over
+  // everything at the waterline) and a post STAGE. It is created here so both
+  // ends can be reached, and because its update() needs the same sea sampler
+  // the ship floats on — the split plane must be the wave the camera is in,
+  // not y = 0 (§V.8: one source of truth for where the sea is).
+  const underwater = createUnderwater({
+    camera: app.camera,
+    sunDirProvider: () => sky.sunDirection,
+  });
+  app.scene.add(underwater.waterlineMesh);
+
+  const post = createPostPipeline(app.renderer, app.scene, app.camera, {
+    underwater,
+  });
 
   // §T.40. The post switch has `reload: false`, so it can flip mid-session —
   // and post renders the scene into its OWN target, whose colour format and
@@ -733,6 +774,16 @@ async function boot(): Promise<void> {
         },
         dt,
       );
+      // lantern pendulums: driven by the ship's EXACT sim pose and velocity at
+      // the fixed tick, never by the interpolated render pose (§V.2). Placing
+      // them in the world happens at render rate — see the render path.
+      for (const id of LANTERN_IDS) {
+        lanterns.step(
+          id,
+          { quaternion: playerShip.quaternion, velocity: playerShip.velocity },
+          dt,
+        );
+      }
       prevPos.copy(currPos);
       prevQuat.copy(currQuat);
       currPos.fromArray(playerShip.position);
@@ -772,11 +823,23 @@ async function boot(): Promise<void> {
       );
       const shipSpeed = Math.hypot(playerShip.velocity[0], playerShip.velocity[2]);
       spray.centerUniform.value.set(playerShip.position[0], playerShip.position[2]);
-      windDirTmp.set(Math.cos(state.wind.direction), Math.sin(state.wind.direction));
-      // σ feeds the σ-relative crest gate (§V.36) — omitting it makes the
-      // emitter fall back to a bootstrap sigma and warn, because silently
-      // gating on a constant is the exact bug that invariant exists to stop
-      if (FEATURES.spray) spray.update(app.renderer, windDirTmp, ocean.heightRms);
+      // wind VELOCITY, not a direction: spray is carried by the air it is
+      // thrown into, so a gale has to blow it further than a breeze does
+      windVecTmp.set(
+        Math.cos(state.wind.direction) * state.wind.speed,
+        Math.sin(state.wind.direction) * state.wind.speed,
+      );
+      // the moments feed the σ-relative crest gates (§V.36/§V.59) — omitting
+      // them makes the emitter fall back to bootstrap constants and warn,
+      // because silently gating on a constant is the exact bug those
+      // invariants exist to stop
+      if (FEATURES.spray) {
+        spray.update(app.renderer, windVecTmp, {
+          heightRms: ocean.heightRms,
+          jacobianRms: ocean.jacobianRms,
+          choppiness: ocean.effectiveChoppiness(),
+        });
+      }
       const bowLocal = rotateVec(playerShip.quaternion, [0, 0, bowZ]);
       bowWorldTmp.set(
         playerShip.position[0] + bowLocal[0],
@@ -865,6 +928,21 @@ async function boot(): Promise<void> {
       // internally, so passing the raw scalar every frame is safe.
       updateRig(shipAssembly, frameDt, playerShip.sailTrim);
 
+      // lanterns follow the INTERPOLATED pose, so they do not judder against
+      // the hull they hang from on frames between two ticks.
+      // socketWorldPosition walks its own parent chain, so the group pose set
+      // above is all it needs — no extra updateMatrixWorld.
+      for (const id of LANTERN_IDS) {
+        lanterns.place(
+          id,
+          shipAssembly.socketWorldPosition(LANTERN_SOCKETS[id]),
+          renderShipView.quaternion,
+        );
+      }
+      // ONE clock for every practical light in the world (§V.55's lesson
+      // about second sources) — the sky owns dusk, the lanterns read it.
+      lanterns.sync(sky.nightFactor);
+
       // enemy render pose. No interpolation caches for her: she is a distant
       // subject, not the camera's anchor, so per-tick pose is imperceptible
       // and the §V.2 interpolation only matters for what the camera chases.
@@ -940,6 +1018,14 @@ async function boot(): Promise<void> {
       combat.update(frameDt, state);
 
       surface.update(app.camera, state.time, sky.sunDirection);
+      // AFTER the camera is final for this frame (followCam ran above) and
+      // BEFORE post reads its uniforms: the volume needs THIS frame's camera
+      // matrices, or the meridian lags the lens by a frame under fast motion.
+      underwater.update(
+        frameDt,
+        (x, z) => cpuOcean.heightAt(x, z, state.time),
+        state.time,
+      );
       if (usePost()) {
         post.updateFromParams();
         post.render();
@@ -947,6 +1033,25 @@ async function boot(): Promise<void> {
         app.render();
       }
       debug.hud.setRenderStats(app.renderer.info.render);
+      /**
+       * DRAIN THE TIMESTAMP POOL, or §V.39's own method breaks (third time).
+       *
+       * `trackTimestamp` is on at construction so GPU timings are available
+       * without a rebuild — but three writes a query pair per pass EVERY frame
+       * and only recycles them when someone resolves. Nothing did, so the pool
+       * filled and the console reported "Maximum number of queries exceeded",
+       * after which the numbers are silently wrong rather than absent. That is
+       * the same shape as §B.25: the sanctioned measurement was itself the
+       * broken thing, and it reads as a slow scene rather than as a bug.
+       *
+       * Resolved unawaited on purpose: this is a readback of the PREVIOUS
+       * frame's queries, so awaiting it here would stall the render thread on
+       * the GPU to measure the GPU. Errors are swallowed — a diagnostic must
+       * never be able to take the frame down.
+       */
+      void app.renderer
+        .resolveTimestampsAsync(TimestampQuery.RENDER)
+        .catch(() => undefined);
 
       // audio LAST: the panner listener reads camera.matrixWorld, which is
       // only final after the render — updating earlier lags it one frame.
@@ -1116,6 +1221,11 @@ async function boot(): Promise<void> {
     foam,
     deckWater,
     caustics,
+    // §V.25 verification handle: `__game.underwater.blend` / `.mode` are the
+    // only way to tell "the volume is off" from "the volume is on and wrong"
+    // from a screenshot, and this module spent its whole life dead precisely
+    // because nothing ever asked it whether it was running.
+    underwater,
     reflection,
     archipelago,
     hullContact,
@@ -1141,6 +1251,7 @@ async function boot(): Promise<void> {
 import {
   Color,
   Quaternion,
+  TimestampQuery,
   Vector2,
   Vector3,
   type Material,
@@ -1154,7 +1265,7 @@ const tmpDir = new Vector3();
  * skies. §V31: hex must enter through `new Color(hex)`, never `setRGB`.
  */
 const hazeFallback = new Color(skyParams.horizonColor);
-const windDirTmp = new Vector2();
+const windVecTmp = new Vector2();
 const bowWorldTmp = new Vector3();
 const shipVelTmp = new Vector3();
 const shipFwdTmp = new Vector3();

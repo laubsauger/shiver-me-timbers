@@ -31,11 +31,13 @@ import { createOutputTexture } from '../ocean/oceanTextures';
 import { foamParams } from '../params/foam';
 import { oceanParams } from '../params/ocean';
 import {
+  blurMixPerStep,
   decayFactorPerFrame,
   eigenFoamGate,
   eigenInjectPerStep,
   foamTexelMetres,
   jacobianSigma,
+  meanFoamAgeTicks,
   NEVER_INJECT_BIAS,
 } from './foamMath';
 import {
@@ -264,6 +266,9 @@ export function createFoamSim(
       const lambda = sea.effectiveChoppiness();
       const seaSigma = jacobianSigma(sea.jacobianRms, lambda);
       const decay = decayFactorPerFrame(foamParams.decayHalfLife, SIM_DT);
+      // how many blur steps the foam you can SEE has been through — the blur
+      // budget below is spent over exactly this many ticks (foamMath)
+      const ageTicks = meanFoamAgeTicks(decay);
       const fineOff = foamParams.injectFineCascade < 1;
       for (const lane of lanes) {
         const steep = sea.cascades[lane.index].jacobianRms;
@@ -282,6 +287,18 @@ export function createFoamSim(
           : eigenInjectPerStep(foamParams.injectStrength, SIM_DT, steep, lambda, bandSigma, seaSigma);
         lane.u.uDecay.value = decay;
         lane.u.uRadius.value = foamParams.blurRadius;
+        // ONE world diffusion length for every band (§B: the blur was the
+        // shape, and it was a grid quantity). `blurRadius` alone made the
+        // spread proportional to the band's TEXEL — 12.27 m of isotropic
+        // diffusion on cascade 0's 2.65 m caps against 1.19 m on cascade 1's
+        // 0.72 m ones — so each cascade drew discs of its own size and no
+        // injected anisotropy survived the coarse band at all.
+        lane.u.uBlurMix.value = blurMixPerStep(
+          foamParams.blurSpreadMetres,
+          lane.texelMetres,
+          foamParams.blurRadius,
+          ageTicks,
+        );
         // the derivatives texture stores ∂D unscaled, so the metric needs the
         // EFFECTIVE λ (the anti-fold cap), not the slider
         lane.u.uChoppiness.value = lambda;

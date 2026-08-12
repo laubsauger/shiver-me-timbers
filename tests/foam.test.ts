@@ -15,6 +15,8 @@ import {
   accumulateFoam,
   bandCanFold,
   blurDecayAt,
+  blurMixPerStep,
+  meanFoamAgeTicks,
   boxReduceAt,
   tierWeightAt,
   cascadeFoamBias,
@@ -229,6 +231,118 @@ describe('the blur is ISOTROPIC (§B: the cap-lattice the user photographed 4×)
         for (let x = 0; x < n; x++) sum += blurDecayAt(src, n, x, y, radius, 1);
       expect(sum, `radius=${radius}`).toBeCloseTo(1, 10);
     }
+  });
+});
+
+describe('the blur budget is a WORLD length (§B: the caps came out round dots)', () => {
+  // WHY THIS BLOCK EXISTS, and it is the fifth foam complaint. Moving injection
+  // to λ− gave the cap a real shape — measured on the full-resolution spectrum,
+  // aspect 3.0–3.3 at 18–59° of axial spread. None of it reached the screen,
+  // because an ISOTROPIC diffusion adds the SAME variance to both axes:
+  // aspect(n) = √((σa²+nv)/(σb²+nv)) → 1, monotonically, and fast. The blur was
+  // ALLOWED to run unbounded because `blurRadius` is in TEXELS, so the world
+  // diffusion rate was a property of the grid: cascade 0 spent 12.27 m of σ on
+  // a cap whose minor axis is 2.65 m. Three cascades × three texel sizes is
+  // also, literally, "circles of a few discrete sizes".
+  // read the LIVE domains (§V19): the injected minor axes quoted below were
+  // measured at 1010 / 98 / 22.7 m, so a domain change must move these numbers
+  // and be re-measured, not silently pass against a stale constant
+  const TEXELS = oceanParams.cascades.map((c) => foamTexelMetres(c.domain, oceanParams.resolution));
+  const decay = decayFactorPerFrame(foamParams.decayHalfLife, DT);
+  const age = meanFoamAgeTicks(decay);
+  /** σ of the accumulated diffusion over the visible lifetime, in metres */
+  const spreadOf = (texel: number, mixWeight: number) =>
+    Math.sqrt(0.5 * foamParams.blurRadius ** 2 * texel * texel * mixWeight * age);
+
+  it('every band diffuses the same DISTANCE, not the same number of texels', () => {
+    // The look bug in one assertion: a band's texel size must not decide how
+    // far its foam spreads, or the sea carries one disc size per cascade.
+    const spreads = TEXELS.map((t) =>
+      spreadOf(t, blurMixPerStep(foamParams.blurSpreadMetres, t, foamParams.blurRadius, age)),
+    );
+    for (const s of spreads) {
+      // ≤, not =: a band whose texels are already coarser than the target
+      // cannot spread less than one clamped kernel, and must not spread more
+      expect(s).toBeLessThanOrEqual(foamParams.blurSpreadMetres * 1.001);
+    }
+    // the coarse and mid bands both REACH it (only the finest is texel-limited)
+    expect(spreads[0]).toBeCloseTo(foamParams.blurSpreadMetres, 6);
+    expect(spreads[1]).toBeCloseTo(foamParams.blurSpreadMetres, 6);
+    // and the old grid-relative kernel did NOT: 10.3× apart across the bands
+    const old = TEXELS.map((t) => spreadOf(t, 1));
+    expect(old[0] / old[1]).toBeCloseTo(TEXELS[0] / TEXELS[1], 6);
+    expect(old[0]).toBeGreaterThan(10);
+  });
+
+  it('never spreads a cap further than the cap is wide', () => {
+    // MEASURED injected minor axes (256² mirror of the real IFFT field, full
+    // λ− gate): cascade 0 2.65 m at swell / 5.09 m at storm, cascade 1 0.72 /
+    // 0.93 m. The blur budget is set at the smallest of them, so the smallest
+    // real cap in the sea still survives its own lifetime with most of its
+    // aspect. This is the number that must not be raised without re-measuring.
+    const SMALLEST_INJECTED_MINOR_AXIS_M = 0.72;
+    expect(foamParams.blurSpreadMetres).toBeLessThanOrEqual(SMALLEST_INJECTED_MINOR_AXIS_M);
+    // regression: the shipped kernel used to blow that by 17× in cascade 0
+    expect(spreadOf(TEXELS[0], 1) / SMALLEST_INJECTED_MINOR_AXIS_M).toBeGreaterThan(15);
+  });
+
+  it('an elongated cap is still elongated at the end of its life', () => {
+    // THE DECISIVE EXPERIMENT, as a test: inject one cap of the measured shape,
+    // run it through a whole visible lifetime of the real kernel, and read the
+    // aspect back off its second moments. Under the old kernel a cascade-0 cap
+    // comes out a disc; under the budgeted one it keeps most of its shape.
+    // If this ever passes with a round result, the caps are round on screen.
+    const texel = TEXELS[0];
+    const sMin = 2.65 / texel; // measured injected minor axis, in texels
+    const sMaj = 8.84 / texel; // …and major
+    const aspectAfter = (mixWeight: number) => {
+      const v = 0.5 * foamParams.blurRadius ** 2 * mixWeight * age; // texels²
+      return Math.sqrt((sMaj * sMaj + v) / (sMin * sMin + v));
+    };
+    const budgeted = blurMixPerStep(foamParams.blurSpreadMetres, texel, foamParams.blurRadius, age);
+    expect(aspectAfter(budgeted)).toBeGreaterThan(2.6); // of 3.34 injected
+    expect(aspectAfter(1)).toBeLessThan(1.3); // the shipped disc, measured 1.32
+  });
+
+  it('the mixed kernel still conserves foam EXACTLY, at any weight', () => {
+    // (1−w)·δ + w·G is a normalised kernel for every w, so the §V6 contract —
+    // decayHalfLife is the ONLY thing that removes foam — is kept, not traded.
+    // Losing this would make the blur weight a second, invisible lifetime knob.
+    const n = 16;
+    for (const w of [0, 0.0024, 0.25, 0.5, 1]) {
+      const src = new Float32Array(n * n);
+      src[5 * n + 9] = 1;
+      let sum = 0;
+      for (let y = 0; y < n; y++)
+        for (let x = 0; x < n; x++) sum += blurDecayAt(src, n, x, y, 1, 1, w);
+      expect(sum, `w=${w}`).toBeCloseTo(1, 10);
+    }
+  });
+
+  it('weight 0 is the identity and weight 1 is the old kernel (no third mode)', () => {
+    const n = 16;
+    const src = new Float32Array(n * n);
+    src[8 * n + 8] = 1;
+    expect(blurDecayAt(src, n, 8, 8, 1, 1, 0)).toBeCloseTo(1, 12);
+    expect(blurDecayAt(src, n, 9, 8, 1, 1, 0)).toBeCloseTo(0, 12);
+    for (const [x, y] of [[8, 8], [9, 8], [9, 9]]) {
+      expect(blurDecayAt(src, n, x, y, 1, 1, 1)).toBeCloseTo(blurDecayAt(src, n, x, y, 1, 1), 12);
+    }
+  });
+
+  it('degenerate inputs give a weight in [0,1], never NaN (§V28)', () => {
+    for (const [s, t, r, a] of [
+      [0.6, 0, 1, 77], [0.6, 1, 0, 77], [0.6, 1, 1, 0], [-1, 1, 1, 77],
+      [0.6, 1, 1, Infinity], [NaN, 1, 1, 77], [0.6, 1, 1, -5],
+    ]) {
+      const w = blurMixPerStep(s, t, r, a);
+      expect(Number.isFinite(w), `${s},${t},${r},${a}`).toBe(true);
+      expect(w).toBeGreaterThanOrEqual(0);
+      expect(w).toBeLessThanOrEqual(1);
+    }
+    expect(meanFoamAgeTicks(1)).toBe(Infinity);
+    expect(meanFoamAgeTicks(0)).toBe(0);
+    expect(meanFoamAgeTicks(decay)).toBeCloseTo(decay / (1 - decay), 9);
   });
 });
 
