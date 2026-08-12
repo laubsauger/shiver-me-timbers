@@ -161,10 +161,24 @@ describe('§V45 a block hangs off the SOLVED rope, not off its socket', () => {
     // §V42 the same read picks up the chain's lag and whip for free.
     const A = v3(2, 16, -3);
     const B = v3(9, 11, 4);
-    const level = hang(A, B, 1.03);
-    const heeled = hang(rollZ(A, 0.25), rollZ(B, 0.25), 1.03);
+    const level = hang(A, B, 1.004);
+    const heeled = hang(rollZ(A, 0.25), rollZ(B, 0.25), 1.004);
     expect(dist(level.position, heeled.position)).toBeGreaterThan(0.5);
-    expect(angleDeg(level.frame.axle, heeled.frame.axle)).toBeGreaterThan(5);
+    expect(angleDeg(level.frame.hang, heeled.frame.hang)).toBeGreaterThan(5);
+  });
+
+  it('…but a PLUMB block only translates: gravity is world, not ship', () => {
+    // WHY: the complement, and it is the one a "just parent it to the socket"
+    // fix gets wrong. A block on a limp line hangs straight down no matter how
+    // far the ship heels — rigidly attached geometry rolls with the hull and
+    // reads immediately as glued on.
+    const A = v3(2, 16, -3);
+    const B = v3(9, 11, 4);
+    const level = hang(A, B, 1.2);
+    const heeled = hang(rollZ(A, 0.3), rollZ(B, 0.3), 1.2);
+    expect(dist(level.position, heeled.position)).toBeGreaterThan(0.5);
+    expect(angleDeg(level.frame.hang, heeled.frame.hang)).toBeLessThan(0.001);
+    expect(angleDeg(heeled.frame.hang, DOWN)).toBeLessThan(0.001);
   });
 
   it('§V46: hauling a line taut swings its block up into it, anchors unmoved', () => {
@@ -218,29 +232,37 @@ describe('block tension is read from the rope, and band-limited detail (§V48)',
     expect(blockTension(1 + SPAN, SPAN)).toBe(0);
   });
 
-  it('the sheave and strop contrast is gone before the slot goes sub-pixel', () => {
+  it('the sheave and strop contrast is gone BEFORE the slot goes sub-pixel', () => {
     // WHY: §B.20 — an unfiltered high-contrast feature narrower than the pixel
-    // grid is differenced into speckle, and it is ALWAYS discovered late. The
-    // slot is ~1/6 of the shell, so it goes sub-pixel roughly six times sooner
-    // than the block does; by the distance where the slot is one pixel wide
-    // the contrast must already be gone, leaving one flat wood tone.
+    // grid is differenced into speckle, and it is ALWAYS discovered late (six
+    // recorded occurrences under §V48). The slot is ~1/6 of the shell, so it
+    // goes sub-pixel roughly six times sooner than the block does. §V48's own
+    // refinement is the measurement that matters: band-limit against the
+    // SHARPEST FEATURE's width, not the object's, and one pixel is already too
+    // late because neighbouring samples straddle the whole step. So the fade
+    // must be COMPLETE by the time the slot is 2 px, and may only be at full
+    // strength while it is comfortably wider than that.
     const fov = (60 * Math.PI) / 180;
     const shell = ropeParams.blockSize;
     const slot = shell / 6;
+    const min = ropeParams.blockDetailMinPx;
+    const max = ropeParams.blockDetailMaxPx;
     const px = (feature: number, d: number): number =>
       projectedWidthPx(feature / 2, d, 1080, fov);
-    // the distance at which the SLOT is exactly one pixel across
-    let slotOnePx = 1;
-    while (px(slot, slotOnePx) > 1 && slotOnePx < 5000) slotOnePx += 1;
-    expect(blockDetail(px(shell, slotOnePx), ropeParams.blockDetailMinPx, ropeParams.blockDetailMaxPx))
-      .toBe(0);
-    // …while a block at the follow camera keeps every bit of it
-    expect(blockDetail(px(shell, 12), ropeParams.blockDetailMinPx, ropeParams.blockDetailMaxPx))
-      .toBeGreaterThan(0.9);
-    // and it is monotone in between, so nothing pops on the way out
+    /** distance at which `feature` is exactly `wanted` px across */
+    const rangeFor = (feature: number, wanted: number): number => {
+      let d = 1;
+      while (px(feature, d) > wanted && d < 10000) d += 0.5;
+      return d;
+    };
+    expect(blockDetail(px(shell, rangeFor(slot, 2)), min, max)).toBe(0);
+    // full detail only where the slot is genuinely resolved — several pixels,
+    // which for a 0.25 m block means a close hero shot and nothing further
+    expect(blockDetail(px(shell, rangeFor(slot, 4)), min, max)).toBeGreaterThan(0.9);
+    // and monotone in between, so nothing pops on the way out
     let prev = -1;
-    for (let d = 200; d >= 5; d -= 5) {
-      const detail = blockDetail(px(shell, d), ropeParams.blockDetailMinPx, ropeParams.blockDetailMaxPx);
+    for (let d = 200; d >= 2; d -= 2) {
+      const detail = blockDetail(px(shell, d), min, max);
       expect(detail).toBeGreaterThanOrEqual(prev);
       prev = detail;
     }

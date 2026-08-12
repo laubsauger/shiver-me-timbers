@@ -107,11 +107,9 @@ const SHEAVE_Y = -0.52;
 const EPS = 1e-6;
 
 export interface Blocks {
-  /** how many blocks are drawn; descriptors above this are ignored */
-  setBlockCount(n: number): void;
-  /** re-upload the descriptor buffer after writing descriptors */
-  markDirty(): void;
   mesh: THREE.Object3D;
+  /** dev handle: the packed descriptor buffer, for console verification */
+  descriptors: THREE.StorageInstancedBufferAttribute;
   dispose(): void;
 }
 
@@ -210,6 +208,7 @@ export function createBlocks(
     4,
   );
   packBlocks(descriptors, descAttr.array as Float32Array);
+  descAttr.needsUpdate = true;
   const blockDesc = storage(descAttr, 'vec4', maxBlocks).toReadOnly();
 
   // §V29/§B.8: SEPARATE read-only views over the compute's buffers. Calling
@@ -247,7 +246,9 @@ export function createBlocks(
     tans.element(base.add(1)).xyz,
     frac,
   ).mul(d.w);
-  const T = tanRaw.div(max(tanRaw.length(), float(Z_MIN)));
+  // same guard-then-normalise shape as every other unit vector here, and the
+  // same one blockMath's unit() has: never hand normalize() a zero vector
+  const T = normalize(select(tanRaw.length().lessThan(float(EPS)), vec3(0, -1, 0), tanRaw));
 
   // tension from the rope's own live slack ratio (length ÷ chord)
   const dA = descA.element(rope);
@@ -312,15 +313,7 @@ export function createBlocks(
 
   return {
     mesh,
-    setBlockCount(n: number): void {
-      if (!Number.isInteger(n) || n < 0 || n > maxBlocks) {
-        throw new RangeError(`setBlockCount: ${n} outside [0, ${maxBlocks}]`);
-      }
-      mesh.count = n;
-    },
-    markDirty(): void {
-      descAttr.needsUpdate = true;
-    },
+    descriptors: descAttr,
     dispose(): void {
       geometry.dispose();
       material.dispose();

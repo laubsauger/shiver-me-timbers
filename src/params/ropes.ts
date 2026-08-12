@@ -100,9 +100,14 @@ export interface RopeParams {
    *  all: at 0 slack the block lies along the line, at this much it hangs
    *  plumb. Standing rigging runs ~0.004, running gear ~0.02 (§V46 moves it) */
   blockSlackSpan: number;
-  /** §V48: projected shell width (px) below which the sheave/strop contrast is
+  /** §V48: projected SHELL width (px) below which the sheave/strop contrast is
    *  fully faded into the shell tone, and above which it is drawn in full.
-   *  The slot is ~1/6 of the shell, so it goes sub-pixel that much sooner */
+   *  Measured against the SLOT, not the shell — §V48's own refinement, since
+   *  the slot is ~1/6 of the shell and goes sub-pixel that much sooner. The
+   *  fade is complete while the slot is still 2 px (shell 12) and only reaches
+   *  full strength once it is ~4 px (shell 26), which for a 0.25 m block means
+   *  a close hero shot. Past ~12 m a block is one flat wooden lozenge, which
+   *  is exactly how blocks read in docs/ref-storm-whitecaps.png */
   blockDetailMinPx: number;
   blockDetailMaxPx: number;
 }
@@ -173,8 +178,8 @@ export const ropeParams: RopeParams = registerParams(
     blockSegments: 8,
     blockAnchorT: 0.04,
     blockSlackSpan: 0.03,
-    blockDetailMinPx: 5,
-    blockDetailMaxPx: 22,
+    blockDetailMinPx: 12,
+    blockDetailMaxPx: 26,
   },
   meta,
 );
