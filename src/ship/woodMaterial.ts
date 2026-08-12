@@ -32,7 +32,15 @@ import { waterLighting } from '../caustics';
 import { deckWetness } from '../deckwater';
 import { hash2, triplanarFbm } from '../terrain/noise';
 import { reliefNormal } from './surfaceRelief';
-import { shipMaterialParams, type ShipMaterialParams } from '../params/ship';
+import { shipDetailParams, shipMaterialParams, type ShipMaterialParams } from '../params/ship';
+
+/**
+ * The ship-wide "how hand-made is this" dial (§T.34), shared with the sail,
+ * ratline and hull-rim generators so one slider governs all of them rather
+ * than each system growing its own. Read through a function because Tweakpane
+ * mutates the params object in place and `refresh()` re-reads it (§V16).
+ */
+const irregularity = (): number => Math.max(0, shipDetailParams.irregularity);
 
 /** TSL nodes are structurally different per operation; these locals are
  *  reassigned across mix/add/mul so they need the loose node type */
@@ -163,6 +171,8 @@ export function createWoodMaterial(
   const uBumpScale = uniform(p.bumpScale);
   const uGrainRelief = uniform(p.grainRelief);
   const uPlankRelief = uniform(p.plankRelief);
+  const uPlankTilt = uniform(p.plankTilt * irregularity());
+  const uPlankWander = uniform(p.plankWander * irregularity());
   const uSeamDepth = uniform(p.seamDepth);
   const uWaleRelief = uniform(p.waleRelief);
   const uPlankToneVar = uniform(p.plankToneVar);
@@ -266,17 +276,51 @@ export function createWoodMaterial(
    * plankWidth on a deck, one strake of the loft on a shell — so `seamWidth`
    * stays a fraction of a plank and the limit keeps measuring the seam.
    */
-  const resolved = periodResolved(plankCoord, plankFilter);
+  /**
+   * SEAM WANDER (user: "everything is basically nailed to a millionth of an
+   * inch precision, making stuff look very blocky and unnatural").
+   *
+   * Every seam up to here is a mathematically straight line, and a hull's
+   * worth of exactly parallel straight lines is the same uniformity failure
+   * this project has already had reported on the sea, the foam and the
+   * sails. A board sawn and dubbed by hand does not have a straight edge: it
+   * wanders a centimetre or two over its length, and its neighbour wanders
+   * differently, so the caulk line breathes. Displacing the board coordinate
+   * is enough — the seam, the caulk groove, the per-board tone, the butt
+   * stagger and the wale all ride it, so ONE term makes the whole system
+   * stop being a grid.
+   *
+   * CONTINUOUS BY CONSTRUCTION. It is a `sin` of the two SMOOTH coordinates,
+   * never of `plankCoord.floor()`: a per-board displacement would step at
+   * every seam, and §V38's differentiation turns a step into a one-pixel
+   * spike. The board-coordinate term inside the sine is what decorrelates
+   * neighbouring strakes so they do not all wave in unison.
+   *
+   * BAND LIMIT (§V.48): the seam limit keeps measuring the UNWANDERED
+   * footprint. The wander's own gradient is amplitude × 2π/length ≈ 0.03 per
+   * metre plus 1.7 × amplitude per board — a few percent of the plank
+   * coordinate's own 1/plankWidth — so it moves the seam without meaningfully
+   * changing how wide that seam is on screen, and it is well inside the
+   * two-pixel margin FILTER_PIXELS already carries. It needs no gate of its
+   * own: it only DISPLACES an edge whose energy is already gated, so when the
+   * seam fades out the wander goes with it.
+   */
+  const wander = sin(
+    alongPlank.mul((Math.PI * 2) / Math.max(0.5, p.plankWanderLength)).add(plankCoord.mul(1.7)),
+  ).mul(uPlankWander);
+  const boardCoord = plankCoord.add(wander);
 
-  const f = fract(plankCoord);
+  const resolved = periodResolved(boardCoord, plankFilter);
+
+  const f = fract(boardCoord);
   const edgeDistance = f.min(f.oneMinus()); // 0 at a seam, 0.5 mid-plank
-  const seamMask = bandLimitedEdge(edgeDistance, plankCoord, uSeamWidth, plankFilter); // 0 = seam
+  const seamMask = bandLimitedEdge(edgeDistance, boardCoord, uSeamWidth, plankFilter); // 0 = seam
   const seamGroove = seamMask.oneMinus(); // 1 IN the caulked groove
 
   // every plank is its own board: slightly different tone, and laid a hair
   // proud or shy of its neighbours. This is most of what reads as planking
   // rather than a painted stripe pattern.
-  const plankId = hash2(vec2(plankCoord.floor(), 17.3));
+  const plankId = hash2(vec2(boardCoord.floor(), 17.3));
   // CROWNED, not stepped: the lift rises to the middle of each board and
   // returns to zero at both seams. A per-plank constant would be a step in
   // the height field, and the relief normal differentiates that field in
@@ -285,6 +329,16 @@ export function createWoodMaterial(
   // field, so it is the one that blows the relief normal up when it aliases
   const crown = sin(f.mul(Math.PI)).mul(resolved);
   const plankLift = plankId.sub(0.5).mul(2).mul(crown); // −1..1, continuous
+  /**
+   * …and each board is laid with one edge a shade prouder than the other,
+   * because nothing is bedded perfectly flat. `sin(2πf)` is ANTISYMMETRIC
+   * across the board and zero at BOTH seams, so it tilts the plank without
+   * putting a step in the height field — the same reason `crown` is a sine
+   * and not a per-board constant. This is what turns a row of boards from a
+   * flat panel with lines drawn on it into something the light rakes across.
+   */
+  const tiltId = hash2(vec2(boardCoord.floor(), 29.1));
+  const plankTilt = sin(f.mul(Math.PI * 2)).mul(tiltId.sub(0.5).mul(2)).mul(resolved);
 
   // BUTT JOINTS. Real planking is short boards butted end to end, and the
   // butts of neighbouring courses are deliberately STAGGERED (two butts in
@@ -293,7 +347,7 @@ export function createWoodMaterial(
   // tell on the topsides. Each course gets its own phase AND its own board
   // length from `plankId`, so no two courses butt at the same station and the
   // spacing itself is irregular. Spars have no butts — staves run full length.
-  const buttPhase = hash2(vec2(plankCoord.floor(), 41.9));
+  const buttPhase = hash2(vec2(boardCoord.floor(), 41.9));
   const boardLength = uPlankLength.mul(mix(float(0.7), float(1.35), plankId)).max(0.25);
   const bt = fract(alongPlank.div(boardLength).add(buttPhase));
   const buttDistance = bt.min(bt.oneMinus()).mul(boardLength); // metres to a butt
@@ -317,7 +371,8 @@ export function createWoodMaterial(
     .sub(0.5)
     .mul(uGrainRelief)
     .mul(grainResolved)
-    .add(plankLift.mul(uPlankRelief));
+    .add(plankLift.mul(uPlankRelief))
+    .add(plankTilt.mul(uPlankTilt));
   height = height.sub(seamGroove.mul(uSeamDepth)); // caulking sits recessed
   // the butt groove fades out at the plank seams (× crown). Without that the
   // height field STEPS across a seam — one board grooved, its neighbour not —
@@ -367,7 +422,7 @@ export function createWoodMaterial(
      * seam and takes half of each neighbouring board, and the wale's own
      * edge then cuts across the planking it is supposed to punctuate.
      */
-    const waleCoord = plankCoord.add(0.5).mul(uWaleFrequency);
+    const waleCoord = boardCoord.add(0.5).mul(uWaleFrequency);
     const waleFilter = plankFilter.mul(uWaleFrequency);
     const half = uWaleRatio.mul(0.5);
     const centred = fract(waleCoord.sub(half).add(0.5)).sub(0.5);
@@ -499,6 +554,8 @@ export function createWoodMaterial(
       uBumpScale.value = p.bumpScale;
       uGrainRelief.value = p.grainRelief;
       uPlankRelief.value = p.plankRelief;
+      uPlankTilt.value = p.plankTilt * irregularity();
+      uPlankWander.value = p.plankWander * irregularity();
       uSeamDepth.value = p.seamDepth;
       uWaleRelief.value = p.waleRelief;
       uPlankToneVar.value = p.plankToneVar;

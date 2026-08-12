@@ -4,7 +4,7 @@
  * §V.13: pieces + named sockets only, no meshes. Pure functions of params;
  * both ship classes compose these (§V.18 contract stays identical).
  */
-import type { ShipClassParams } from '../params/ship';
+import { shipDetailParams, type ShipClassParams } from '../params/ship';
 import type { DamageStateDef, PieceDef, SocketDef, Vec3 } from './pieceTypes';
 import { hullHalfWidthAt, hullTopY, type HullShape } from './hullMath';
 
@@ -63,6 +63,13 @@ export function hullShapeHints(
     sheerStern: p.sheerStern,
     tumblehome: p.tumblehome,
     keelPinch: p.keelPinch,
+    // §T.34 arris work. Carried as SHAPE HINTS rather than read from params
+    // inside the geometry builder, because pieceGeometryHull is documented as
+    // a pure function of the piece's serializable hints (§V18 — an AI-generated
+    // shell has to be able to drop in against the same data).
+    bulwarkLip: shipDetailParams.bulwarkLip,
+    railChamfer: shipDetailParams.railChamfer,
+    irregularity: shipDetailParams.irregularity,
   };
 }
 
@@ -164,7 +171,10 @@ export function buildHullSections(
 ): PieceDef[] {
   const segLen = p.hullLength / 3;
   const bh = p.beam / 2;
-  const topY = p.freeboard + Math.max(p.sheerBow, p.sheerStern);
+  // + the proud rim (§T.34): the shell now carries above the sheer line, and
+  // an AABB that stops at the sheer would clip it out of every damage-zone
+  // and breach-sizing calculation that reads the box instead of the mesh
+  const topY = p.freeboard + Math.max(p.sheerBow, p.sheerStern) + shipDetailParams.bulwarkLip;
   const segs = [
     { name: 'bow', zc: segLen, cannons: [0], first: 1 },
     { name: 'mid', zc: 0, cannons: [segLen / 4, -segLen / 4], first: 2 },

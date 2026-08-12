@@ -20,6 +20,17 @@ export interface HullShape {
   sheerStern: number;
   tumblehome: number;
   keelPinch: number;
+  /**
+   * §T.34 arris work — all optional so a hand-built HullShape (tests, the
+   * greybox path, a swapped-in AI mesh's hints) still describes a valid hull.
+   * `hullTopY` is DELIBERATELY unaffected by `bulwarkLip`: the sheer line is
+   * the datum every other piece is placed against (rail, chainplates, castle
+   * slabs, the transom's shared stations), and the lip is planking standing
+   * above that datum, not a change to it.
+   */
+  bulwarkLip?: number;
+  railChamfer?: number;
+  irregularity?: number;
 }
 
 export function asHullShape(shape: Record<string, number> | undefined): HullShape | null {

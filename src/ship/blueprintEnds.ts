@@ -3,7 +3,7 @@
  * Split out of blueprintParts.ts at the file cap (§C). §V.13: pieces +
  * named sockets only, pure functions of params (§V.16).
  */
-import type { ShipClassParams } from '../params/ship';
+import { shipDetailParams, type ShipClassParams } from '../params/ship';
 import type { PieceDef, SocketDef, Vec3 } from './pieceTypes';
 import { figureheadStation, hullShapeHints, mkPiece } from './blueprintParts';
 import { hullEnvelope, hullHalfWidthAt, hullTopY, type HullShape } from './hullMath';
@@ -47,7 +47,7 @@ export function buildBowAndTransom(
     // stem: continues the hull loft from the sections' end to the point
     mkPiece('bow', 'bow', [0, 0, L2], {
       min: [-p.beam * 0.35, -p.draft, 0],
-      max: [p.beam * 0.35, p.freeboard + p.sheerBow, p.bowLength],
+      max: [p.beam * 0.35, p.freeboard + p.sheerBow + shipDetailParams.bulwarkLip, p.bowLength],
     }, {
       sockets: [
         cleat('bow-port', [-bowCleatX, bowDeckY, bowZ - L2]),

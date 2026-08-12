@@ -14,6 +14,7 @@ import {
   sectionHalf,
   type HullShape,
 } from './hullMath';
+import { vjitter, vside } from './variation';
 
 export { asHullShape, hullEnvelope, hullHalfWidthAt, hullSheer, hullTopY } from './hullMath';
 export type { HullShape } from './hullMath';
@@ -74,24 +75,79 @@ function bottomHalf(s: HullShape, side: number): THREE.BufferGeometry {
   return geo;
 }
 
-/** one side shell strip over [z0,z1] in SHIP space (indexed grid) */
+/**
+ * Extra rows carried ABOVE the sheer line when the topsides stand proud of
+ * the deck: one at the foot of the rim's chamfer, one on the chamfered cap.
+ * Two rather than one because a chamfer needs a facet, not a moved edge.
+ */
+const LIP_ROWS = 2;
+
+/**
+ * one side shell strip over [z0,z1] in SHIP space (indexed grid)
+ *
+ * THE PROUD RIM (§T.34, user: "we still see perfect 90 degree edges between
+ * the deck and the sides ... everything is nailed to a millionth of an inch").
+ * The strip used to stop dead on `hullTopY`, which amidships IS the deck
+ * plane, so the planking and the deck met in a flush square corner — the
+ * one join the follow camera looks at all day. It now carries `bulwarkLip`
+ * higher, with the arris bevelled by `railChamfer`, and both of those wander
+ * station to station off the shared `irregularity` dial (§V2 seeded, so the
+ * same ship every run and on every client).
+ *
+ * TWO PROPERTIES THIS MUST NOT BREAK, both of them §B.13 scar tissue:
+ *   • rows 0..H_STEPS are UNTOUCHED. They are the stations the transom cap
+ *     and the bottom patch mate against, and a jittered shared station is
+ *     exactly the "two polylines through one curve" crack §V37 is about.
+ *     Only the rows above the sheer — which mate with nothing — move.
+ *   • the jitter is keyed on SHIP-SPACE z, so the three hull sections per
+ *     side and the bow piece all evaluate the same value at a shared station
+ *     and the rim stays continuous across piece boundaries. Keying it on the
+ *     station INDEX would put a step at every section join.
+ * And `uv.y` stays (y + draft) / (hullTopY + draft) on every row including
+ * the new ones, so the strake coordinate the wood material reads simply
+ * continues up into the lip (uv.y > 1 there).
+ */
 function sideStrip(s: HullShape, side: number): THREE.BufferGeometry {
   const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
+  const lip = Math.max(0, s.bulwarkLip ?? 0);
+  const chamfer = Math.max(0, s.railChamfer ?? 0);
+  const jitter = Math.max(0, s.irregularity ?? 0);
+  const proud = lip > 1e-3;
   for (let i = 0; i <= Z_SLICES; i++) {
     const z = s.z0 + ((s.z1 - s.z0) * i) / Z_SLICES;
     const env = hullEnvelope(z, s);
     const topY = hullTopY(z, s);
+    const span = topY + s.draft;
     for (let j = 0; j <= H_STEPS; j++) {
       const h = j / H_STEPS;
-      positions.push(side * s.beamHalf * sectionHalf(env, h, s), -s.draft + (topY + s.draft) * h, z);
+      positions.push(side * s.beamHalf * sectionHalf(env, h, s), -s.draft + span * h, z);
       uvs.push(i / Z_SLICES, h);
     }
+    if (!proud) continue;
+    // a sheer strake fitted by eye: height wanders along the ship, and the
+    // two sides were planked by different hands (vside), so they differ
+    const rise = lip * (1 + vjitter(0.16 * jitter, z, 3.17)) * vside(side, 0.05 * jitter, 9.7);
+    const bevel = Math.min(
+      Math.max(0, chamfer * (1 + vjitter(0.3 * jitter, z, 5.29))),
+      rise * 0.5,
+    );
+    // the lip is a vertical continuation of the topside: sectionHalf clamps
+    // its height fraction at 1, so the tumblehome stops leaning in here
+    const half = s.beamHalf * sectionHalf(env, 1, s);
+    for (const [y, inset] of [
+      [topY + rise - bevel, 0],
+      [topY + rise, bevel],
+    ] as const) {
+      positions.push(side * Math.max(0.05, half - inset), y, z);
+      uvs.push(i / Z_SLICES, (y + s.draft) / span);
+    }
   }
-  const row = H_STEPS + 1;
+  const row = H_STEPS + 1 + (proud ? LIP_ROWS : 0);
+  const hSteps = row - 1;
   for (let i = 0; i < Z_SLICES; i++) {
-    for (let j = 0; j < H_STEPS; j++) {
+    for (let j = 0; j < hSteps; j++) {
       const a = i * row + j;
       const b = (i + 1) * row + j;
       // wind so the face normal points outboard (±x) for each side

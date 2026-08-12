@@ -23,11 +23,15 @@ import {
 import { SPAR_AXIS, createPieceMaterial } from '../src/ship/pieceMaterials';
 import { createDeckFieldTexture } from '../src/ship/deckFieldTexture';
 import {
+  FLAG_CRACK_RATIO,
   advanceFlag,
   angleDelta,
   apparentWind,
+  flagWaveRate,
+  gustModulation,
   streamStrength,
   wrapAngle,
+  type FlagState,
 } from '../src/ship/flagDynamics';
 import {
   buildDeckHeightfield,
@@ -276,7 +280,7 @@ describe('flags are wind instruments (user: "just like in the movies")', () => {
     });
     for (const v of [bad.x, bad.z, bad.speed]) expect(Number.isFinite(v)).toBe(true);
     const state = advanceFlag(
-      { root: NaN, tip: NaN, strength: NaN, phase: NaN },
+      { root: NaN, tip: NaN, strength: NaN, phase: NaN, wavePhase: NaN, crackPhase: NaN },
       NaN,
       NaN,
       0,
@@ -291,7 +295,7 @@ describe('flags are wind instruments (user: "just like in the movies")', () => {
     // WHY: a flag that rotates rigidly reads as a signpost. The lag is what
     // makes it read as cloth, and the request was specifically that it "react
     // visibly when she comes about".
-    let s = { root: 0, tip: 0, strength: 1, phase: 0.4 };
+    let s = { root: 0, tip: 0, strength: 1, phase: 0.4, wavePhase: 0, crackPhase: 0 };
     for (let i = 0; i < 12; i++) s = advanceFlag(s, Math.PI * 0.75, 1, 1 / 60, shipFlagParams);
     expect(s.root).toBeGreaterThan(0.05); // the root has swung
     expect(Math.abs(s.tip)).toBeLessThan(Math.abs(s.root)); // the tip trails it
@@ -304,7 +308,7 @@ describe('flags are wind instruments (user: "just like in the movies")', () => {
     // WHY: a ship steadying on due south walks the target angle across the
     // wrap. Damping the raw difference would spin the flag the long way round
     // — a full 360° sweep at the masthead, once per crossing.
-    let s = { root: 3.0, tip: 3.0, strength: 1, phase: 0.4 };
+    let s = { root: 3.0, tip: 3.0, strength: 1, phase: 0.4, wavePhase: 0, crackPhase: 0 };
     const target = -3.0; // 0.28 rad away the short way, 6.0 the long way
     s = advanceFlag(s, target, 1, 1 / 60, shipFlagParams);
     expect(s.root).toBeGreaterThan(3.0); // moved AWAY from zero, toward +π
@@ -332,6 +336,99 @@ describe('flags are wind instruments (user: "just like in the movies")', () => {
     expect(geo.boundingSphere!.center.x).toBeCloseTo(0);
     expect(geo.boundingSphere!.radius).toBeGreaterThan(flag.shape!.fly);
     geo.dispose();
+  });
+});
+
+/**
+ * §V22 — "the flags are flapping with some super super twitchy, super ultra
+ * high frequency wind. They feel like they're in 1000 kilometre an hour wind."
+ *
+ * The shader's carrier was `time × rate`, with `rate` a function of the live
+ * stream strength. That is the phase of a sine ONLY while the rate is constant.
+ * A flag breathes with the gusts, so ω varies, and the instantaneous frequency
+ * of sin(t·ω(t)) is ω + t·dω/dt — the elapsed time multiplies every wobble in
+ * the rate, without bound and forever. It is invisible on a fresh reload and
+ * unbearable ten minutes in, which is exactly how it survived three flag
+ * passes.
+ *
+ * The cure is that a phase is an INTEGRAL: ∫ω dt, accumulated per flag. These
+ * tests pin the property that distinguishes the two — the frequency must not
+ * depend on how long the app has been running.
+ */
+describe('flag ripple frequency does not run away with elapsed time (§V22)', () => {
+  const p = shipFlagParams;
+  const dt = 1 / 100;
+
+  /** unwrapped step of a phase that lives on [0, 2π) */
+  const advance = (a: number, b: number): number => angleDelta(a, b);
+
+  function fly(seconds: number): { worst: number; intendedMax: number; phases: number[] } {
+    let s: FlagState = {
+      root: 0, tip: 0, strength: streamStrength(11, p), phase: 1.7, wavePhase: 1.7, crackPhase: 2.2,
+    };
+    let worst = 0;
+    const phases: number[] = [];
+    for (let i = 0; i * dt <= seconds; i++) {
+      const t = i * dt;
+      // the same gust train the driver feeds it, so `rate` really does move
+      const gusted = streamStrength(11, p) * gustModulation(t, s.phase);
+      const prev = s;
+      s = advanceFlag(s, 0, gusted, dt, p);
+      const rad = Math.abs(advance(prev.wavePhase, s.wavePhase)) / dt;
+      if (t > 0.5 && rad > worst) worst = rad;
+      phases.push(s.wavePhase);
+    }
+    // the fastest the cloth may ever legitimately flap: strength pinned at 1
+    return { worst, intendedMax: flagWaveRate(1, p), phases };
+  }
+
+  it('flaps at the same rate after ten minutes as after one second', () => {
+    // MEASURED ON THE OLD FORM, against an intended 0.93 Hz: 2.2 Hz at 15 s,
+    // 5.8 Hz at 60 s, 13.4 Hz at 2 min, 59.5 Hz at 10 min — and the sign
+    // flipped, so the ripple reversed direction at random. A ceiling that does
+    // not mention `t` is the whole point of this assertion.
+    for (const seconds of [5, 60, 600]) {
+      const { worst, intendedMax } = fly(seconds);
+      expect(worst, `${seconds}s`).toBeLessThanOrEqual(intendedMax + 1e-6);
+    }
+  });
+
+  it('never lets the ripple run backwards', () => {
+    // WHY: t·dω/dt goes negative whenever the wind eases, which reverses the
+    // travelling wave mid-flap. Cloth ripples downwind, always.
+    let s: FlagState = {
+      root: 0, tip: 0, strength: streamStrength(11, p), phase: 0.9, wavePhase: 0, crackPhase: 0,
+    };
+    for (let i = 0; i * dt <= 300; i++) {
+      const gusted = streamStrength(11, p) * gustModulation(i * dt, s.phase);
+      const prev = s;
+      s = advanceFlag(s, 0, gusted, dt, p);
+      expect(advance(prev.wavePhase, s.wavePhase)).toBeGreaterThan(0);
+      expect(advance(prev.crackPhase, s.crackPhase)).toBeGreaterThan(0);
+    }
+  });
+
+  it('keeps both accumulators bounded, so precision never decays', () => {
+    // WHY: an unwrapped accumulator loses its low bits over a long session and
+    // the flag starts to judder — the failure this file already documents for
+    // the damped ANGLES, which is why lagAngle is sent as a difference.
+    const { phases } = fly(600);
+    for (const v of phases) {
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThan(Math.PI * 2);
+    }
+  });
+
+  it('still reads the wind: a gale ripples faster than a light air', () => {
+    // WHY: killing the runaway must not kill the signal. The rate is still the
+    // information — it just has to be integrated rather than multiplied.
+    expect(flagWaveRate(1, p)).toBeGreaterThan(flagWaveRate(0, p) * 2);
+    expect(flagWaveRate(streamStrength(22, p), p)).toBeGreaterThan(
+      flagWaveRate(streamStrength(4, p), p) * 1.5,
+    );
+    // and the crack stays detuned from the ripple, or the two lock into one
+    // obvious period (§B.4)
+    expect(FLAG_CRACK_RATIO % 1).not.toBeCloseTo(0, 3);
   });
 });
 
@@ -1014,5 +1111,231 @@ describe('§V.48 the hull seam gate is keyed on the SEAM, not the plank', () => 
     // of this shape can sit in the deck material unseen until it rains
     const dry = worst((x) => H(x) * 1);
     expect(dry).toBeCloseTo(worst(H), 12);
+  });
+});
+
+/**
+ * THE PROUD RIM (§T.34 "chamfered edges (90° arrises ⊥)"; user: "we still see
+ * perfect 90 degree edges and angles between the deck and the sides ...
+ * everything is basically nailed to a millionth of an inch precision").
+ *
+ * The shell used to stop exactly on `hullTopY`, and amidships `hullTopY` IS
+ * `freeboard`, which is where the deck plate's top face sits — so the planking
+ * and the deck met flush in a square corner along the whole waist, the one
+ * join the follow camera looks at all day. Toward the ends the sheer lifted
+ * the shell clear on its own, which is why this read as a midships problem.
+ *
+ * WHAT THESE PIN, in the order they can break:
+ *   1. there IS an overhang, at the waist, where there was none;
+ *   2. the stations the transom and the bottom patch mate against did NOT
+ *      move — §B.13's crack up both stern quarters came from exactly this
+ *      kind of "small" change to a shared polyline (§V37);
+ *   3. the rim is not a constant offset — it wanders, off the same seeded
+ *      `irregularity` dial the sails and ratlines use, and it is STABLE
+ *      across builds (§V2: same ship every run, and on every client).
+ */
+describe('the topsides stand proud of the deck, and the arris is broken', () => {
+  const piece = galleon.find((p) => p.kind === 'hull-section')!;
+  const s = piece.shape as unknown as HullShape;
+  const geo = buildPieceGeometry(piece.kind, piece.aabb, piece.shape);
+  const pos = geo.attributes.position;
+  const uvA = geo.attributes.uv;
+  const zOffset = (s.z0 + s.z1) / 2;
+
+  /** side-strip vertices grouped by station, via the loft's own uv.x */
+  const stations = new Map<number, { y: number; x: number; v: number; z: number }[]>();
+  for (let i = 0; i < pos.count; i++) {
+    const v = uvA.getY(i);
+    const key = Math.round(uvA.getX(i) * 1e4);
+    const list = stations.get(key) ?? [];
+    list.push({ y: pos.getY(i), x: Math.abs(pos.getX(i)), v, z: pos.getZ(i) + zOffset });
+    stations.set(key, list);
+  }
+  /** the loft's rows only — the bottom patch shares uv.x but never rises */
+  const rims = [...stations.values()]
+    .map((rows) => rows.filter((r) => r.v > 1.0001))
+    .filter((rows) => rows.length > 0);
+
+  it('carries the planking ABOVE the deck it encloses, amidships too', () => {
+    // the complaint is specifically about the waist: at the ends the sheer
+    // already lifted the shell clear, which is why it read as "the sides
+    // meet the deck at a perfect 90°" rather than "the whole ship is flush".
+    expect(rims.length).toBeGreaterThan(8);
+    const lip = shipDetailParams.bulwarkLip;
+    for (const rows of rims) {
+      const top = Math.max(...rows.map((r) => r.y));
+      const z = rows[0].z;
+      const proud = top - hullTopY(z, s); // hullTopY at the waist == deck top
+      expect(proud).toBeGreaterThan(lip * 0.7); // jitter is ±16%, never a deletion
+      expect(proud).toBeLessThan(lip * 1.4);
+    }
+  });
+
+  it('bevels the rim rather than leaving an infinitely sharp arris', () => {
+    // a true 90° arris has no facet to catch a light, so it reads as one
+    // aliased line whatever the sun does. §T.34 asks for the chamfer; this is
+    // it, and it must actually pull the top edge inboard.
+    for (const rows of rims) {
+      const sorted = [...rows].sort((a, b) => a.y - b.y);
+      const cap = sorted[sorted.length - 1];
+      const foot = sorted[sorted.length - 2];
+      expect(cap.x).toBeLessThan(foot.x); // the cap leans in: that is the bevel
+      expect(foot.x - cap.x).toBeGreaterThan(shipDetailParams.railChamfer * 0.5);
+    }
+  });
+
+  it('does NOT move the stations the transom and the bottom mate against', () => {
+    // §V37 / §B.13. Rows at and below the sheer are the shared polyline; a
+    // jittered shared station is a crack up the stern quarters that no
+    // silhouette check can see. Only the rows above it were allowed to move.
+    let checked = 0;
+    for (const rows of stations.values()) {
+      for (const r of rows) {
+        // the bottom patch parameterises v ACROSS the half-breadth, so its
+        // garboard edge is also v = 1 — at the keel, not at the sheer
+        if (r.y <= -s.draft + 1e-6) continue;
+        if (Math.abs(r.v - 1) > 1e-4) continue;
+        expect(r.y).toBeCloseTo(hullTopY(r.z, s), 6); // exactly on the sheer
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(8);
+  });
+
+  it('wanders station to station, and lands the same way every build', () => {
+    // the point of the whole exercise: a CONSTANT offset would just move the
+    // square corner up by 28 cm and keep the machined look.
+    const proud = rims.map((rows) => Math.max(...rows.map((r) => r.y)) - hullTopY(rows[0].z, s));
+    const mean = proud.reduce((a, b) => a + b, 0) / proud.length;
+    const spread = Math.max(...proud) - Math.min(...proud);
+    expect(spread).toBeGreaterThan(mean * 0.05); // genuinely irregular…
+    expect(spread).toBeLessThan(mean * 0.8); //     …but still a sheer strake
+    // §V2: seeded, so it is the same ship on reload and on every client
+    const again = buildPieceGeometry(piece.kind, piece.aabb, piece.shape);
+    for (let i = 0; i < pos.count; i++) {
+      expect(again.attributes.position.getY(i)).toBe(pos.getY(i));
+    }
+    again.dispose();
+  });
+
+  it('agrees at the joins between hull sections, because it keys on ship z', () => {
+    // keyed on the station INDEX the jitter would step at every section
+    // boundary — three sections per side, so six visible notches in the rim.
+    // Keyed on ship-space z, two pieces meeting at a station agree by
+    // construction. This asserts the neighbouring section's shared station.
+    const sections = galleon.filter((p) => p.kind === 'hull-section' && p.shape !== undefined);
+    const rimAt = (pc: PieceDef): Map<number, number> => {
+      const g = buildPieceGeometry(pc.kind, pc.aabb, pc.shape);
+      const sh = pc.shape as unknown as HullShape;
+      const off = (sh.z0 + sh.z1) / 2;
+      const out = new Map<number, number>();
+      for (let i = 0; i < g.attributes.position.count; i++) {
+        if (g.attributes.uv.getY(i) <= 1.0001) continue;
+        const z = Math.round((g.attributes.position.getZ(i) + off) * 1e3);
+        out.set(z, Math.max(out.get(z) ?? -Infinity, g.attributes.position.getY(i)));
+      }
+      g.dispose();
+      return out;
+    };
+    const bySide = sections.filter((pc) => (pc.shape as unknown as HullShape).side > 0);
+    expect(bySide.length).toBeGreaterThan(1);
+    const maps = bySide.map(rimAt);
+    let shared = 0;
+    for (let a = 0; a < maps.length; a++) {
+      for (let b = a + 1; b < maps.length; b++) {
+        for (const [z, y] of maps[a]) {
+          const other = maps[b].get(z);
+          if (other === undefined) continue;
+          expect(other).toBeCloseTo(y, 6); // same station ⟹ same rim height
+          shared++;
+        }
+      }
+    }
+    expect(shared).toBeGreaterThan(0); // the sections really do share stations
+  });
+});
+
+/**
+ * ORGANIC PLANKING — the material half of the same complaint. Straightness is
+ * the tell: a hull's worth of exactly parallel, exactly straight caulk lines
+ * reads as printed, and this project has now had the identical "too regular"
+ * note on the sea, the foam, the sails and the hull.
+ *
+ * These are the CPU transliteration of the two TSL terms (same convention as
+ * bandLimit.ts ↔ woodMaterial's graph), and they pin the two properties that
+ * make the terms safe rather than the fact that they exist:
+ *   • the wander is a function of POSITION, not of board index — a per-board
+ *     displacement steps at every seam and §V38 turns a step in the height
+ *     field into a one-pixel spike;
+ *   • it perturbs the seam's PLACE, not its WIDTH, by enough less than the
+ *     plank coordinate's own gradient that the §V.48 seam gate — which is
+ *     measured on the unwandered footprint — stays honest. That gate is what
+ *     stands between this ship and §B.20's speckle.
+ */
+describe('planking is cut by eye, not by CNC', () => {
+  const m = shipMaterialParams;
+  /** CPU mirror of the TSL wander */
+  const wander = (along: number, coord: number, amp = m.plankWander): number =>
+    Math.sin((along * Math.PI * 2) / m.plankWanderLength + coord * 1.7) * amp;
+  const boardCoord = (along: number, coord: number, amp = m.plankWander): number =>
+    coord + wander(along, coord, amp);
+
+  it('displaces the seam by position, so it cannot step at a board edge', () => {
+    // the failure this forbids: seeding the wander from `plankCoord.floor()`.
+    // That is the obvious implementation, it looks right in a still, and it
+    // puts a discontinuity in the height field at every single seam.
+    for (const along of [0, 3.3, 11.7]) {
+      for (const seam of [1, 2, 7]) {
+        const below = boardCoord(along, seam - 1e-6);
+        const above = boardCoord(along, seam + 1e-6);
+        expect(above - below).toBeLessThan(1e-4); // one point, one value
+      }
+    }
+  });
+
+  it('moves the seam without changing how wide it is on screen', () => {
+    // §V.48 keeps measuring the UNWANDERED footprint, so the wander's own
+    // gradient has to stay well inside the two-pixel margin FILTER_PIXELS
+    // carries. Checked across the whole tunable range, not just the default —
+    // a slider is exactly how this would silently stop being true.
+    for (const amp of [0, m.plankWander, 0.15]) {
+      let worst = 0;
+      for (let c = 0; c < 12; c += 0.01) {
+        for (const along of [0, 2.5, 9]) {
+          const d = (boardCoord(along, c + 1e-4, amp) - boardCoord(along, c, amp)) / 1e-4;
+          worst = Math.max(worst, Math.abs(d - 1)); // 1 = the unwandered gradient
+        }
+      }
+      expect(worst).toBeLessThan(0.5); // < 1 pixel of the 2-pixel margin
+    }
+    // and it genuinely does wander: over half a cycle a seam swings across
+    // to the other side of where it was, by up to the full amplitude
+    let drift = 0;
+    for (let c = 0; c < 12; c += 0.05) {
+      drift = Math.max(drift, Math.abs(wander(0, c) - wander(m.plankWanderLength / 2, c)));
+    }
+    expect(drift).toBeGreaterThan(m.plankWander * 1.9); // ±amp, i.e. the full swing
+    expect(drift * m.plankWidth).toBeGreaterThan(0.01); // …and it is centimetres, visible
+  });
+
+  it('tilts each board to zero at BOTH its seams', () => {
+    // sin(2πf) is antisymmetric across the board and vanishes at either edge,
+    // so a per-board tilt amplitude multiplies something that is already zero
+    // where the discontinuity would be. Same reason `crown` is a sine.
+    const tilt = (f: number): number => Math.sin(f * Math.PI * 2);
+    expect(tilt(0)).toBeCloseTo(0, 12);
+    expect(tilt(1)).toBeCloseTo(0, 12);
+    expect(tilt(0.25)).toBeCloseTo(1, 12); // one edge proud…
+    expect(tilt(0.75)).toBeCloseTo(-1, 12); // …the other shy
+    expect(m.plankTilt).toBeGreaterThan(0);
+    expect(m.plankTilt).toBeLessThan(m.seamDepth); // a tilt, not a step
+  });
+
+  it('rides the ship-wide irregularity dial instead of growing its own', () => {
+    // §T.34's `irregularity` already governs the sails, the ratlines and now
+    // the hull rim. A fourth private slider is how a "look" setting stops
+    // meaning anything.
+    expect(shipDetailParams.irregularity).toBeGreaterThan(0);
+    expect(m.plankWander * 0).toBe(0); // dial to 0 ⟹ dead straight, by construction
   });
 });

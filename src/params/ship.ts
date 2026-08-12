@@ -171,6 +171,27 @@ export interface ShipDetailParams {
   sailBuntSag: number;
   /** how much fatter a bay's centre is than its gaskets */
   sailBuntSwell: number;
+  /**
+   * How far the topsides stand PROUD of the deck they enclose (m).
+   *
+   * The shell used to stop exactly on the deck plane — `hullTopY(z)` at
+   * midships IS `freeboard`, and the deck plate is extruded to the same y —
+   * so amidships the planking met the deck in a flush, perfectly square
+   * arris. That is a CAD join, not a shipwright's: on a real hull the deck
+   * lands against the waterway and the frames, and the sheer strake carries
+   * on above it. It is also the one place the follow camera looks at all day.
+   * ≈ half a strake (girth/hullStrakes ≈ 0.55 m), per the user's "at least
+   * like half a plank poking over the deck".
+   */
+  bulwarkLip: number;
+  /**
+   * Bevel taken off the top rim's outboard arris (m). §T.34 lists "chamfered
+   * edges (90° arrises ⊥)" and this is the first of them. A true 90° arris
+   * is infinitely sharp and reads as one aliased line whatever the light
+   * does; a centimetre of bevel gives it a facet that catches a highlight
+   * and is what separates "cut timber" from "extruded polygon".
+   */
+  railChamfer: number;
   /** how much every detail generator jitters its stations, 0..1 (§V2 seeded) */
   irregularity: number;
 }
@@ -189,6 +210,7 @@ export const shipDetailParams: ShipDetailParams = registerParams(
     anchorSize: 2.1,
     mouldingSize: 0.14,
     sailBuntBays: 3, sailBuntSag: 1.15, sailBuntSwell: 2.1,
+    bulwarkLip: 0.28, railChamfer: 0.035,
     irregularity: 1,
   },
   {
@@ -211,6 +233,8 @@ export const shipDetailParams: ShipDetailParams = registerParams(
     sailBuntBays: { min: 1, max: 6, step: 1 },
     sailBuntSag: { min: 0, max: 3, step: 0.05 },
     sailBuntSwell: { min: 1, max: 4, step: 0.05 },
+    bulwarkLip: { min: 0, max: 1.2, step: 0.01 },
+    railChamfer: { min: 0, max: 0.15, step: 0.005 },
     irregularity: { min: 0, max: 2, step: 0.05 },
   },
 );
@@ -404,6 +428,22 @@ export interface ShipMaterialParams {
   bumpScale: number;
   grainRelief: number; // grain ridges
   plankRelief: number; // per-board proud/shy offset — reads as planking
+  /**
+   * Per-board TILT (m): one edge of a board sits prouder than the other,
+   * because nothing was ever bedded perfectly flat. Antisymmetric across the
+   * board and zero at both seams, so it is a tilt and not a step.
+   */
+  plankTilt: number;
+  /**
+   * How far a seam line WANDERS along its board, as a fraction of a board's
+   * width. A sawn-and-dubbed edge is not straight, and a hull's worth of
+   * exactly parallel straight lines is the uniformity tell the user has now
+   * reported on four systems. Displaces the board coordinate, so the caulk
+   * line, the per-board tone, the butt stagger and the wale all follow it.
+   */
+  plankWander: number;
+  /** metres of board along which one wander cycle plays out */
+  plankWanderLength: number;
   seamDepth: number; // caulked groove between boards
   waleRelief: number; // wale strakes stand proud of the planking
   plankToneVar: number; // per-board colour variation, ± fraction
@@ -459,6 +499,9 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailBacklitFocus: 3, sailLeeDarken: 0.7, sailStainStrength: 0.36,
     holeColor: 0x120c07,
     bumpScale: 1, grainRelief: 0.004, plankRelief: 0.006, seamDepth: 0.012,
+    // both scaled by shipDetailParams.irregularity at the uniform, so the one
+    // ship-wide "hand-made" dial governs these as it does the sails/ratlines
+    plankTilt: 0.004, plankWander: 0.035, plankWanderLength: 7,
     waleRelief: 0.02, plankToneVar: 0.05,
     bleachColor: 0xd8c9a8, bleachStrength: 0.22,
     wetDarken: 0, wetSmooth: 0, wetlineFade: 0.5, roughBase: 0.74,
@@ -506,6 +549,9 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     bumpScale: { min: 0, max: 6, step: 0.05 },
     grainRelief: { min: 0, max: 0.03, step: 0.0005 },
     plankRelief: { min: 0, max: 0.04, step: 0.0005 },
+    plankTilt: { min: 0, max: 0.02, step: 0.0005 },
+    plankWander: { min: 0, max: 0.15, step: 0.005 },
+    plankWanderLength: { min: 1, max: 30, step: 0.5 },
     seamDepth: { min: 0, max: 0.06, step: 0.001 },
     waleRelief: { min: 0, max: 0.08, step: 0.002 },
     plankToneVar: { min: 0, max: 0.3, step: 0.005 },
