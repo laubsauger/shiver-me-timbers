@@ -27,6 +27,7 @@ import { shadowTexelSize, snapShadowCenter } from './shadowMath';
 import {
   daylight,
   fogRange,
+  hemisphereColors,
   hexToRgb,
   lowSunWarmth,
   skyTint,
@@ -43,6 +44,16 @@ function mulRgb(hex: number, tint: Rgb): [number, number, number] {
 /** write an sRGB triple into a three.Color (converts to working space) */
 function setSrgb(target: THREE.Color, rgb: Rgb): void {
   target.setRGB(rgb[0], rgb[1], rgb[2], THREE.SRGBColorSpace);
+}
+
+/**
+ * Write an ALREADY-LINEAR triple. The bare setRGB overload writes the
+ * working (linear) space with no transfer function — the very thing that
+ * caused §B9 when it was fed sRGB numbers. Only use this for values that
+ * were computed in light space on purpose, i.e. hemisphereColors().
+ */
+function setLinear(target: THREE.Color, rgb: Rgb): void {
+  target.setRGB(rgb[0], rgb[1], rgb[2]);
 }
 
 export function createLighting(scene: THREE.Scene, p: SkyParams) {
@@ -125,8 +136,25 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
       sunLight.intensity = p.sunIntensity * day;
 
       const tint = skyTint(elevation);
-      setSrgb(hemi.color, mulRgb(p.zenithColor, tint));
-      setSrgb(hemi.groundColor, mulRgb(p.groundBounceColor, tint));
+      // Hemisphere ambient is IRRADIANCE, not the painted sky (see
+      // desaturate()'s header — this is the teal-hull bug). Two corrections:
+      //   1. the sky half uses midColor, not zenithColor. A surface facing
+      //      up integrates the whole dome weighted by sinθcosθ, which peaks
+      //      around 45° elevation — the sky's bulk colour, not its darkest
+      //      point straight overhead.
+      //   2. both halves are desaturated, because a diffuse bounce (and a
+      //      whole-sky integral) is always less saturated than the surface
+      //      it came from. This light is never shadowed, so whatever hue
+      //      bias survives here is applied to every shaded pixel in the
+      //      scene with nothing to counteract it.
+      const ambient = hemisphereColors(
+        p.midColor,
+        p.groundBounceColor,
+        tint,
+        p.ambientDesaturation,
+      );
+      setLinear(hemi.color, ambient.sky);
+      setLinear(hemi.groundColor, ambient.ground);
       // moonless-night floor of 15% keeps silhouettes readable after dark
       hemi.intensity = p.ambientIntensity * (0.15 + 0.85 * day);
 

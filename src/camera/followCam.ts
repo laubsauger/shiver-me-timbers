@@ -12,15 +12,19 @@
  *  - free: fully detached fly camera (see freeCam.ts) — holds whatever
  *    pose the user parks it at, may go far below the surface.
  *
+ * On top of the modes sits the debug vantage (setDebugPose, debugPose.ts):
+ * an exact pose that outranks all of them, for visual verification.
+ *
  * Mouse drag = look/orbit, wheel = zoom radius (follow/orbit) or fly speed
  * (free). Mode switches blend position AND look target so neither cut is a
- * jump. Free-mode fly keys are swallowed in the capture phase so W/A/S/D
- * don't also steer the ship — see the note on the key listener.
+ * jump. Bindings live in camInput.ts.
  */
 import { PerspectiveCamera, Vector3 } from 'three';
 import type { ShipState } from '../state/simState';
 import { cameraParams } from '../params/camera';
 import { FreeCam } from './freeCam';
+import { attachCamInput } from './camInput';
+import { DebugPose, type Vec3Like } from './debugPose';
 import {
   clamp,
   dampFactor,
@@ -32,9 +36,7 @@ import {
 
 export type CamMode = 'follow' | 'orbit' | 'free';
 export type HeightFn = (x: number, z: number) => number;
-
-/** C = toggle free camera (§I input map; W/A/S/D/R/F fly while free) */
-const TOGGLE_FREE_CODE = 'KeyC';
+export type { Vec3Like } from './debugPose';
 
 export class FollowCam {
   private yaw = 0;
@@ -54,78 +56,44 @@ export class FollowCam {
   private blend = 0;
   /** last frame's pivot, so a mode switch can re-anchor on the ship */
   private lastPivot = new Vector3();
+  /** debug vantage: pinned pose that outranks all modes (§V22) */
+  private pin = new DebugPose();
   private detach: () => void;
 
   constructor(
     private camera: PerspectiveCamera,
     domElement: HTMLElement,
   ) {
-    const onPointerDown = (e: PointerEvent): void => {
-      this.dragging = true;
-      domElement.setPointerCapture?.(e.pointerId);
-    };
-    const onPointerUp = (): void => {
-      this.dragging = false;
-    };
-    const onPointerMove = (e: PointerEvent): void => {
-      if (!this.dragging) return;
-      const p = cameraParams;
-      if (this.mode === 'free') {
-        this.free.look(e.movementX, e.movementY);
-        return;
-      }
-      this.yaw = wrapAngle(this.yaw - e.movementX * p.orbitSpeed);
-      this.pitch = clamp(this.pitch + e.movementY * p.orbitSpeed, p.pitchMin, p.pitchMax);
-    };
-    const onWheel = (e: WheelEvent): void => {
-      e.preventDefault();
-      const p = cameraParams;
-      if (this.mode === 'free') {
-        this.free.adjustSpeed(e.deltaY);
-        return;
-      }
-      this.radius = clamp(
-        this.radius * Math.exp(e.deltaY * p.zoomSpeed),
-        p.minRadius,
-        p.maxRadius,
-      );
-    };
-    // Capture phase on window: fly keys must not ALSO reach the sailing
-    // input collector (window, bubble phase) or W/A/S/D would steer the
-    // ship while the user is flying the camera. keyup is never swallowed —
-    // a key held across a mode switch must still release on the sim side.
-    const onKeyDown = (e: KeyboardEvent): void => {
-      if (e.metaKey || e.altKey) return;
-      // never steal keys from a focused field — the Tweakpane panel (Tab)
-      // is full of numeric inputs and C is a perfectly good character
-      const t = e.target as { tagName?: string; isContentEditable?: boolean } | null;
-      if (t?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t?.tagName ?? '')) return;
-      if (e.code === TOGGLE_FREE_CODE && !e.repeat) {
-        this.setMode(this.mode === 'free' ? 'follow' : 'free');
-        return;
-      }
-      if (this.mode !== 'free') return;
-      this.free.keyDown(e.code);
-      if (FreeCam.consumes(e.code)) e.stopPropagation();
-    };
-    const onKeyUp = (e: KeyboardEvent): void => {
-      this.free.keyUp(e.code);
-    };
-    const onBlur = (): void => this.free.clearKeys();
-
-    const bindings: [EventTarget, string, EventListener, AddEventListenerOptions?][] = [
-      [domElement, 'pointerdown', onPointerDown as EventListener],
-      [domElement, 'pointerup', onPointerUp as EventListener],
-      [domElement, 'pointermove', onPointerMove as EventListener],
-      [domElement, 'wheel', onWheel as EventListener, { passive: false }],
-      [window, 'keydown', onKeyDown as EventListener, { capture: true }],
-      [window, 'keyup', onKeyUp as EventListener, { capture: true }],
-      [window, 'blur', onBlur as EventListener],
-    ];
-    for (const [t, type, fn, opts] of bindings) t.addEventListener(type, fn, opts);
-    this.detach = () => {
-      for (const [t, type, fn, opts] of bindings) t.removeEventListener(type, fn, opts);
-    };
+    this.detach = attachCamInput(domElement, {
+      isFree: () => this.mode === 'free',
+      toggleFree: () => this.setMode(this.mode === 'free' ? 'follow' : 'free'),
+      setDragging: (d) => {
+        this.dragging = d;
+      },
+      drag: (dx, dy) => {
+        if (!this.dragging) return;
+        const p = cameraParams;
+        if (this.mode === 'free') {
+          this.free.look(dx, dy);
+          return;
+        }
+        this.yaw = wrapAngle(this.yaw - dx * p.orbitSpeed);
+        this.pitch = clamp(this.pitch + dy * p.orbitSpeed, p.pitchMin, p.pitchMax);
+      },
+      wheel: (deltaY) => {
+        const p = cameraParams;
+        if (this.mode === 'free') {
+          this.free.adjustSpeed(deltaY);
+          return;
+        }
+        this.radius = clamp(this.radius * Math.exp(deltaY * p.zoomSpeed), p.minRadius, p.maxRadius);
+      },
+      flyKey: (code, down) => {
+        if (down) this.free.keyDown(code);
+        else this.free.keyUp(code);
+      },
+      blur: () => this.free.clearKeys(),
+    });
   }
 
   getMode(): CamMode {
@@ -136,18 +104,52 @@ export class FollowCam {
     return this.mode === 'free';
   }
 
+  isDebugPinned(): boolean {
+    return this.pin.pinned;
+  }
+
+  /**
+   * Park the lens at an exact world pose and HOLD it there — the vantage
+   * outranks every mode, and re-asserts itself on every update(), so a
+   * screenshot's forced rAF frames cannot walk it off. This is the §V22
+   * verification instrument: "put the camera somewhere specific and look".
+   *
+   *   __game.followCam.setDebugPose([12, 3, -40], [0, 4, 0])
+   *
+   * `target` omitted keeps the current aim. Released by clearDebugPose()
+   * or by the C key (an explicit "I want to fly" gesture).
+   */
+  setDebugPose(position: Vec3Like, target?: Vec3Like): void {
+    this.pin.set(this.camera, position, target, this.tmp);
+  }
+
+  /** Release the pin. The camera does NOT jump: free mode adopts the
+   *  parked pose as its own, follow mode glides back to the chase. */
+  clearDebugPose(): void {
+    if (!this.pin.pinned) return;
+    this.pin.clear();
+    if (this.mode === 'free') {
+      this.free.seedFrom(this.camera, this.tmp);
+    } else {
+      this.smoothed.copy(this.camera.position);
+      this.lookSmoothed.copy(this.pin.target);
+      this.initialized = true;
+      this.blend = cameraParams.modeSwitchTime;
+    }
+  }
+
   setMode(mode: CamMode): void {
     if (mode === this.mode) return;
     const p = cameraParams;
+    // switching modes is an explicit "give me the camera back" gesture
+    this.clearDebugPose();
     if (mode === 'free') {
       // adopt the live pose: entering free mode is a cut with zero motion
       this.free.seedFrom(this.camera, this.tmp);
     } else if (this.mode === 'free') {
-      // Leaving free mode restores the orbit framing the user had BEFORE
-      // the excursion (yaw offset, pitch, radius are untouched by free
-      // mode) — you get your gameplay camera back exactly as you left it.
-      // Only the start of the chase is moved to the current lens position
-      // so the return is a glide on modeSwitchHalfLife, never a cut.
+      // free mode never touched yaw offset / pitch / radius, so leaving it
+      // restores the framing you had before the excursion; only the START
+      // of the chase moves to the lens, making the return a glide not a cut
       const dist = this.camera.position.distanceTo(this.lastPivot);
       this.smoothed.copy(this.camera.position);
       this.lookSmoothed
@@ -176,15 +178,24 @@ export class FollowCam {
     // cached so a toggle back out of free mode can re-anchor on the ship
     this.lastPivot.set(pivotX, pivotY, pivotZ);
 
+    // the debug vantage outranks every mode and is re-asserted every frame
+    if (this.pin.pinned) {
+      this.pin.apply(this.camera);
+      return;
+    }
+
     if (this.mode === 'free') {
+      // lens moved from outside (console, another system)? adopt, don't
+      // stomp — fighting an external pose breaks free mode's "holds what
+      // you left it at" contract just as surely as drifting does
+      this.free.adoptExternal(this.camera, this.tmp);
       this.free.update(dt);
       this.free.applyTo(this.camera, this.tmp);
       return;
     }
 
-    // follow mode holds the user's angle AS AN OFFSET from the stern
-    // heading: the camera swings with the ship's turns but never crawls
-    // back to a default framing the user deliberately left.
+    // yaw is an OFFSET from the stern heading (see stepFollowYaw): swings
+    // with the ship's turns, never crawls back to a default framing
     if (this.mode === 'follow') {
       [this.yaw, this.yawOffset] = stepFollowYaw(
         this.yaw,
@@ -201,11 +212,9 @@ export class FollowCam {
     const desiredY = pivotY + off[1];
     const desiredZ = pivotZ + off[2];
 
-    // Right after a mode switch the position/look chase on a softer
-    // half-life, so returning from a kilometre out is a glide and not a
-    // snap. The half-life is RAMPED back to the normal one over the blend
-    // rather than switched at the end — a hard handover reads as the
-    // camera suddenly accelerating halfway home.
+    // after a mode switch, chase on a softer half-life so returning from a
+    // kilometre out is a glide; RAMP it back to normal rather than switch
+    // at the end, or the camera visibly accelerates halfway home
     const blending = this.blend > 0;
     let posHalfLife = p.posHalfLife;
     if (blending) {

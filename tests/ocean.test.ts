@@ -523,3 +523,62 @@ describe('optional material inputs stay optional (§V24, §V26)', () => {
     expect(oceanSurfaceParams.foamFarDamp).toBeLessThanOrEqual(1);
   });
 });
+
+
+/**
+ * Storm reference (SoT screenshot, user): turbulent sub-noise on wave faces,
+ * tall waves, and water that stays luminous teal under a DARK overcast sky.
+ * The last one is the trap — §B.12's fix made the ambient crest glow
+ * sun-gated, and a naive reading of that would kill crest translucency
+ * exactly when the reference says it should be strongest.
+ */
+describe('storm sea reads (§B.12 follow-up, user storm reference)', () => {
+  const seaBoost = (rms: number) =>
+    Math.min(
+      Math.max(rms / Math.max(0.05, oceanSurfaceParams.seaRmsReference), 1),
+      oceanSurfaceParams.stormGlowMax,
+    );
+
+  it('crest glow survives with NO sun and grows with sea state', () => {
+    // skylight floor is what is left when backlight = 0. It must be > 0 or
+    // storm water goes grey under overcast, and it must RISE with sea state
+    // or the reference's luminous storm crests are unreachable.
+    expect(oceanSurfaceParams.sssSkylightFloor).toBeGreaterThan(0);
+    const swell = oceanSurfaceParams.sssSkylightFloor * seaBoost(0.7);
+    const storm = oceanSurfaceParams.sssSkylightFloor * seaBoost(2.5);
+    expect(storm).toBeGreaterThan(swell);
+    // ...but never a sun-independent slug again (§B.12): capped well under 1
+    expect(storm).toBeLessThan(0.6);
+  });
+
+  it('the sea-state boost is inert at and below the reference sea', () => {
+    // calm must not inherit storm luminosity
+    expect(seaBoost(0.2)).toBe(1);
+    expect(seaBoost(oceanSurfaceParams.seaRmsReference)).toBe(1);
+  });
+
+  it('micro-detail is slope-driven and finer than any vertex can carry', () => {
+    // it lives in the normal on purpose: at ~1 m spacing near the ship a
+    // 2.4 m wavelet is already only 2 verts wide, so geometry cannot hold it
+    expect(oceanSurfaceParams.microDetailScale).toBeLessThan(
+      oceanParams.cascades[2].domain / 4,
+    );
+    expect(oceanSurfaceParams.microDetailStrength).toBeGreaterThan(0);
+    expect(oceanSurfaceParams.microDetailSlopeGate).toBeGreaterThan(0);
+  });
+
+  it('the fine cascade reaches further than it did before the storm pass', () => {
+    // loosened Nyquist gate: cascade 2 displacement now survives to ~2x the
+    // distance, which is where the churned near-field faces live
+    const k = solveGrowthRate({
+      segments: oceanSurfaceParams.gridSegments,
+      coreSpacing: oceanSurfaceParams.gridCoreSpacing,
+      horizonRadius: oceanSurfaceParams.gridHorizonRadius,
+      rimRound: oceanSurfaceParams.gridRimRound,
+    });
+    const cutSpacing =
+      oceanParams.cascades[2].domain / oceanSurfaceParams.lodSamplesCut;
+    const cutDistance = (cutSpacing - oceanSurfaceParams.gridCoreSpacing) / k;
+    expect(cutDistance).toBeGreaterThan(200);
+  });
+});

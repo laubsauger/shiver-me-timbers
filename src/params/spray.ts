@@ -129,6 +129,22 @@ export interface SprayParams {
   bowStemLength: number;
   /** sprite size multiplier for a FULL bow sheet (cruise mist scales down) */
   bowSizeScale: number;
+  /**
+   * bow-sheet lifetime (s) — SHORTER than crest mist on purpose. Real bow
+   * spray falls away within a few metres of the stem; a long life lets the
+   * ship overtake its own spray, which then streams the length of the hull
+   * and over the deck (user: "the whole side of the boat is covered in it").
+   */
+  bowLife: number;
+  /** bow-sheet air drag (1/s) — heavier than mist, drops sheets out fast */
+  bowDrag: number;
+  /**
+   * exponent on the speed ramp for bow emission. Spray volume rises steeply
+   * with speed — at 2 a gentle 6 kn produces a fraction of what a hard 16 kn
+   * does, instead of the near-linear curtain that made low-speed sailing look
+   * like a permanent blizzard.
+   */
+  bowSpeedExponent: number;
   /** bow submersion (m) below which no burst fires */
   bowImmersionThreshold: number;
   /** bow submersion (m) at which the burst runs at full bowBurstRate */
@@ -167,23 +183,26 @@ export const sprayParams: SprayParams = registerParams(
     fadeFar: 55,
     spawnExtent: 90,
     bowCount: 1024,
-    bowBurstRate: 600,
-    bowCruiseRate: 200,
+    bowBurstRate: 280,
+    bowCruiseRate: 60,
     bowCruiseSheet: 0.35,
     bowImpactRef: 0.6,
     bowContactDepth: 0.12,
-    bowLaunchSpread: 0.85,
+    bowLaunchSpread: 1.1,
     bowForwardThrow: 1.3,
-    bowRise: 0.55,
+    bowRise: 0.35,
     bowSideOffset: 1.6,
-    bowSideFraction: 0.9,
+    bowSideFraction: 1.05,
     bowSpawnLift: 0.35,
     bowStemLength: 3.0,
     bowSizeScale: 2.6,
+    bowLife: 0.45,
+    bowDrag: 2.6,
+    bowSpeedExponent: 2,
     bowImmersionThreshold: 0.02,
     bowImmersionFull: 0.45,
     bowSpeedThreshold: 1.0,
-    bowSpeedFull: 5.0,
+    bowSpeedFull: 8.0,
   },
   sprayParamsMeta(),
 );
@@ -225,6 +244,9 @@ function sprayParamsMeta(): Partial<Record<keyof SprayParams, ParamMeta>> {
     bowSpawnLift: { min: 0, max: 2, step: 0.05 },
     bowStemLength: { min: 0, max: 8, step: 0.1 },
     bowSizeScale: { min: 0.2, max: 4, step: 0.1 },
+    bowLife: { min: 0.05, max: 3, step: 0.05 },
+    bowDrag: { min: 0, max: 8, step: 0.1 },
+    bowSpeedExponent: { min: 1, max: 4, step: 0.1 },
     bowImmersionThreshold: { min: 0, max: 2, step: 0.01 },
     bowImmersionFull: { min: 0.05, max: 4, step: 0.05 },
     bowSpeedThreshold: { min: 0, max: 10, step: 0.1 },

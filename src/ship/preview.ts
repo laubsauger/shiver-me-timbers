@@ -17,6 +17,7 @@
 import * as THREE from 'three/webgpu';
 import { buildGalleonBlueprint } from './shipBlueprint';
 import { ShipAssembly } from './shipAssembly';
+import { updateRig } from './rigTrim';
 import { oceanParams } from '../params/ocean';
 import { skyParams } from '../params/sky';
 import { sunDirection } from '../sky/sunCycle';
@@ -118,7 +119,17 @@ sun.target.position.set(0, 8, 0);
 const hud = document.getElementById('hud') as HTMLDivElement;
 let frames = 0;
 let last = performance.now();
+let prevFrame = performance.now();
 renderer.setAnimationLoop(() => {
+  // the preview must run the same per-frame rig update main.ts does, or it is
+  // not a faithful harness: yards never brace, sails never trim, and — since
+  // updateRig is what publishes the ship's world matrix to the piece materials
+  // — the deck heightfield is sampled in WORLD space, so its planking slides
+  // off the deck the moment ?heading= is non-zero
+  const nowFrame = performance.now();
+  updateRig(assembly, (nowFrame - prevFrame) / 1000, num('trim', 1));
+  prevFrame = nowFrame;
+
   renderer.render(scene, camera);
   frames++;
   const now = performance.now();

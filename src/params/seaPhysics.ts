@@ -101,9 +101,14 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     // stations that touch first carry more — that IS the list.
     groundingSpring: 1e6,
     groundingDamping: 2e5,
-    // μ=0.5: a light touch at 8 kn scrubs speed off over a couple of
-    // seconds, a hard one stops her; higher reads as hitting a wall
-    groundingFriction: 0.5,
+    // μ sets the whole "is she stuck" balance, because sailing subtracts
+    // μ·N/m from thrust (grounding.groundGrip). Hard aground the bed takes
+    // the full 1.5e5 kg, so the hold is μ·9.81 m/s² against a best-case
+    // thrust of thrustScale·wind² = 0.03·wind²: at μ=1 she is held up to
+    // ~18 m/s of wind and only a real storm drives her further on, which is
+    // what a storm should do. μ=0.5 let a fresh breeze grind her over a
+    // mountain — the user's "our sails magically continue to propulse us".
+    groundingFriction: 1,
   },
   {
     updateEveryTicks: { min: 1, max: 10, step: 1 },

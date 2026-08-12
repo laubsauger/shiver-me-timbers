@@ -8,6 +8,10 @@ import type { DamageStateId, PieceDef, PieceKind, SailStateId, Vec3 } from './pi
 import { buildHoledVariant, buildPieceGeometry, buildSailGeometry } from './pieceGeometry';
 import { createHoleMaterial, createPieceMaterial } from './pieceMaterials';
 import { buildDeckHeightfield, type DeckHeightfield } from './deckHeightfield';
+import { sailClothPoint, type SailClothState } from './sailShape';
+import { sailDrive } from './sailDynamics';
+import { oceanParams } from '../params/ocean';
+import { shipMaterialParams } from '../params/ship';
 import { createDeckFieldTexture, type DeckFieldSampler } from './deckFieldTexture';
 
 export type MaterialFactory = (kind: PieceKind, role: 'base' | 'hole') => THREE.Material;
@@ -21,6 +25,27 @@ export type MaterialFactory = (kind: PieceKind, role: 'base' | 'hole') => THREE.
 function makeDefaultMaterialFactory(deckField?: DeckFieldSampler): MaterialFactory {
   return (kind, role) =>
     role === 'hole' ? createHoleMaterial() : createPieceMaterial(kind, deckField);
+}
+
+/** scratch vector — socketWorldPosition is called once per rope per frame */
+const tmpSocket = new THREE.Vector3();
+
+/**
+ * CPU mirror of src/terrain/noise.ts `hash2` (Hoskins hash22 → 1D). The sail
+ * material seeds each sail's ripple phase with it, and the CPU anchor has to
+ * land on the same phase or the clew would ride a different wave than the
+ * cloth it is sewn to.
+ */
+function hash2Scalar(x: number, y: number): number {
+  const f = (v: number): number => v - Math.floor(v);
+  let p3x = f(x * 0.1031);
+  let p3y = f(y * 0.1031);
+  let p3z = f(x * 0.1031);
+  const d = p3x * (p3y + 33.33) + p3y * (p3z + 33.33) + p3z * (p3x + 33.33);
+  p3x += d;
+  p3y += d;
+  p3z += d;
+  return f((p3x + p3y) * p3z);
 }
 
 interface PieceRuntime {
@@ -187,8 +212,58 @@ export class ShipAssembly {
     const socket = rt.def.sockets.find((s) => s.id === socketId);
     if (socket === undefined) throw new Error(`unknown socket: ${socketId}`);
     rt.node.updateWorldMatrix(true, false);
-    const v = new THREE.Vector3().fromArray(socket.position).applyMatrix4(rt.node.matrixWorld);
+    // A CLOTH ANCHOR MOVES. Its `position` is where it sits on the flat panel;
+    // the canvas it is sewn to bellies and flutters, so the live station comes
+    // from the same shape function the vertex stage runs (sailShape.ts). Using
+    // the flat position would leave every sheet and buntline ending in mid-air
+    // beside a bellied sail — §V.45's lesson, applied to canvas instead of rope.
+    const local =
+      socket.cloth === undefined
+        ? tmpSocket.fromArray(socket.position)
+        : tmpSocket.fromArray(
+            sailClothPoint(
+              socket.cloth[0],
+              socket.cloth[1],
+              rt.def.aabb.max[0] - rt.def.aabb.min[0],
+              -rt.def.aabb.min[1],
+              this.clothState(rt),
+              shipMaterialParams,
+            ),
+          );
+    const v = local.applyMatrix4(rt.node.matrixWorld);
     return [v.x, v.y, v.z];
+  }
+
+  /**
+   * The drive state a sail's cloth is currently shaped by. Mirrors what
+   * sailDriver.ts pushes into the per-object uniforms, from the same pure
+   * `sailDrive` the shader's values come from, so the CPU-side anchor and the
+   * GPU-side vertex agree about where the cloth is.
+   */
+  private clothState(rt: PieceRuntime): SailClothState {
+    const m = rt.node.matrixWorld.elements;
+    const now = performance.now() / 1000;
+    const drive = sailDrive(
+      {
+        forwardX: m[8],
+        forwardZ: m[10],
+        windDirection: oceanParams.windDirection,
+        windSpeed: oceanParams.windSpeed,
+        yawRate: 0, // the skew term is a transient; anchors need the steady shape
+        time: now,
+      },
+      shipMaterialParams,
+    );
+    const trimDrop = rt.mesh.userData.sailDropScale;
+    const width = rt.def.aabb.max[0] - rt.def.aabb.min[0];
+    const drop = -rt.def.aabb.min[1];
+    return {
+      ...drive,
+      dropScale: typeof trimDrop === 'number' && Number.isFinite(trimDrop) ? trimDrop : 1,
+      time: now,
+      // the shader seeds its phase from the sail's own dimensions; match it
+      phase: hash2Scalar(width * 3.71, drop * 1.17) * Math.PI * 2,
+    };
   }
 
   /**

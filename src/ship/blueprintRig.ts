@@ -7,6 +7,7 @@
 import type { ShipClassParams } from '../params/ship';
 import type { PieceDef, SailStateDef, SocketDef } from './pieceTypes';
 import { mkPiece } from './blueprintParts';
+import { SAIL_ANCHOR_UV } from './sailShape';
 
 export type MastName = 'fore' | 'main' | 'rear';
 
@@ -59,13 +60,30 @@ export function buildMastRig(
       }, { parent: mastId, sockets: ends }),
     );
     if (opts.sails) {
-      // cloth hangs off the FRONT of its spar, clear of both spar and mast
+      const sailId = `sail-${name}-${level}`;
+      const sailWidth = len * 0.92;
+      const sailDrop = height * dropF;
+      // ANCHORS SEWN TO THE CANVAS. src/ropes previously had to start its
+      // sheet run at the yard END because no clew sockets existed — its own
+      // header said "adapt when the ship system adds clew anchors" — and the
+      // user spotted the result: a sail with nothing at its lower corners
+      // looks unattached. `position` is the flat station, `cloth` is the uv
+      // the live position is evaluated at (sailShape.ts).
+      const clothSockets: SocketDef[] = Object.entries(SAIL_ANCHOR_UV).map(
+        ([suffix, [u, v]]) => ({
+          id: `anchor-${sailId}-${suffix}`,
+          type: 'rope-anchor' as const,
+          position: [(u - 0.5) * sailWidth, -(1 - v) * sailDrop, 0] as [number, number, number],
+          cloth: [u, v] as [number, number],
+        }),
+      );
       pieces.push(
-        mkPiece(`sail-${name}-${level}`, 'sail', [0, -yr, p.sailYardOffset], {
-          min: [-len * 0.46, -height * dropF, -0.5],
+        mkPiece(sailId, 'sail', [0, -yr, p.sailYardOffset], {
+          min: [-len * 0.46, -sailDrop, -0.5],
           max: [len * 0.46, 0.15, 0.5],
         }, {
           parent: yardId,
+          sockets: clothSockets,
           sailStates: SAIL_STATES.map((s) => ({ ...s })),
         }),
       );

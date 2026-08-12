@@ -22,6 +22,7 @@
 import type { Quat, ShipState } from '../state/simState';
 import type { InputState } from './input';
 import { quatFromAxisAngle, quatMul, rotateVec } from '../combat/quatMath';
+import { groundGrip } from '../sea-physics/grounding';
 import { sailingParams, type SailingParams } from '../params/sailing';
 
 export interface Wind {
@@ -103,6 +104,19 @@ export function stepShipSailing(
   const thrust =
     wind.speed * wind.speed * trimEfficiency(theta, params) * ship.sailTrim * params.thrustScale;
 
+  // --- aground: the bank eats the drive before it ever reaches the water.
+  // OWNERSHIP (§B.6, stated because this contract has been broken here
+  // before): sea-physics/grounding owns the seabed reaction and writes only
+  // the vertical channel, pitch/roll and a friction bleed on velocity — it
+  // never touches thrust, yaw or the quaternion. Sailing owns the driving
+  // force, so the force balance closes HERE and nowhere else. Grounding
+  // publishes what the seabed can resist (μ·N/m, a deceleration) and this
+  // subtracts it: a keel carrying the ship's weight simply cannot be pushed
+  // along by canvas, however she is trimmed. It reads one tick behind
+  // (main.ts runs sailing first), which at 60 Hz is invisible.
+  const grip = groundGrip(ship, dt);
+  const drive = thrust > grip ? thrust - grip : 0;
+
   // --- planar velocity in ship frame: forward + lateral (leeway) ---
   const vx = ship.velocity[0];
   const vz = ship.velocity[2];
@@ -112,7 +126,7 @@ export function stepShipSailing(
 
   // semi-implicit Euler: quadratic hull drag opposes each component,
   // brake adds linear decel on forward way only
-  f += (thrust - params.dragCoef * speed * f - (input.brake ? params.brakeDrag * f : 0)) * dt;
+  f += (drive - params.dragCoef * speed * f - (input.brake ? params.brakeDrag * f : 0)) * dt;
   l += -params.dragCoef * speed * l * dt;
   // keel grip: kill a frame-rate-scaled fraction of sideways velocity
   l *= Math.max(0, 1 - params.keelGrip * dt);

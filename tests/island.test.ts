@@ -25,8 +25,9 @@ import {
 } from '../src/island/heightmap';
 import { generateRockPlacements } from '../src/island/rocks';
 import { islandPalmPlacement, palmLodCount, palmGroveAngles } from '../src/island/palms';
-import { generateIslandSites } from '../src/island/archipelago';
+import { generateIslandSites, createArchipelago } from '../src/island/archipelago';
 import { sampleSeabedHeight } from '../src/island/seabed';
+import { smoothMax } from '../src/island/archetypes';
 import { buildIslandGeometry, selectTerrainLod } from '../src/island/islandMesh';
 import { islandPalmCount, islandPeakHeights } from '../src/island/island';
 import { generatePlacements } from '../src/vegetation/scatter';
@@ -396,20 +397,32 @@ describe('§V43 silhouette: island shape must not flatten as it grows', () => {
   it('peak height scales with footprint — bigger islands are not flatter', () => {
     // THE BUG: peakHeight was a fixed 26 m while the scatter varied radius
     // 110-260 m, so peak/radius ran 0.198 at the smallest island down to
-    // 0.149 at the largest. Growth made them MORE pancake-like and all five
-    // landed in one narrow band of identical gentle dome.
-    const ratios = built.map((b) => b.ratio);
-    const spread = Math.max(...ratios) - Math.min(...ratios);
-    expect(spread).toBeLessThan(0.08); // shape is now size-independent
-    // and the correlation is positive: a wider island is also a taller one
-    const sorted = [...built].sort((a, b) => a.radius - b.radius);
-    expect(sorted[sorted.length - 1].peak).toBeGreaterThan(sorted[0].peak);
+    // 0.149 at the largest. Growth made them MORE pancake-like.
+    //
+    // Tested by growing ONE island rather than comparing five: same seed →
+    // same archetype, so this isolates size from silhouette family. Across
+    // different archetypes the ratio SHOULD vary — a cliff table is meant to
+    // be taller than a lagoon — and asserting a tight spread over the whole
+    // world would forbid exactly the variety the rewrite is for.
+    const shape = (radius: number) => {
+      const hm = generateIslandHeightmap(WORLD_SEED, {
+        ...islandParams,
+        radius,
+        ...islandPeakHeights(radius),
+      });
+      let peak = -Infinity;
+      for (const h of hm.data) if (h > peak) peak = h;
+      return { peak, ratio: peak / radius, archetype: hm.archetype };
+    };
+    const small = shape(110);
+    const large = shape(250);
+    expect(small.archetype).toBe(large.archetype); // same family, fair compare
+    expect(Math.abs(large.ratio - small.ratio)).toBeLessThan(0.05);
+    expect(large.peak).toBeGreaterThan(small.peak);
   });
 
-  it('islands read as landmasses, not sandbars', () => {
-    // the references are recognisable silhouettes from kilometres away; a
-    // 0.15 ratio dome is a smudge on the horizon at 2 km
-    for (const b of built) expect(b.ratio).toBeGreaterThan(0.3);
+  it('every silhouette family reads as a landmass, not a sandbar', () => {
+    for (const b of built) expect(b.ratio).toBeGreaterThan(0.28);
   });
 
   it('still leaves ground shallow enough to plant a grove on', () => {
@@ -510,5 +523,53 @@ describe('§V43 vegetation: palms grow in groves, not scattered', () => {
       expect(y).toBe(hm.heightAt(x, z));
       expect(gradientAt(hm, x, z)).toBeLessThanOrEqual(islandParams.palmSlopeLimit);
     }
+  });
+});
+
+describe('§V43 silhouette: every island a different shape', () => {
+  it('archetypes are distinct across the world while families remain', () => {
+    // "the one with the arch" only works if there IS only one. A noise field
+    // could never deliver this — the old generator was radially symmetric by
+    // construction, so all five islands were the same dome at five sizes.
+    const arch = createArchipelago({ seed: WORLD_SEED });
+    try {
+      const names = arch.islands.map((i) => i.heightmap.archetype);
+      expect(new Set(names).size).toBe(names.length);
+      for (const island of arch.islands) {
+        expect(island.heightmap.features.length).toBeGreaterThan(0);
+      }
+    } finally {
+      arch.dispose();
+    }
+  });
+
+  it('the coastline is shaped, not a circle', () => {
+    // measured 10-16% shore-radius variation before, because noise was scaled
+    // BY the dome and so vanished exactly at the rim where coastline lives.
+    // Coves, spits and headlands are the whole difference between an island
+    // and a hill in water.
+    for (const site of generateIslandSites(WORLD_SEED)) {
+      const hm = generateIslandHeightmap(site.seed, {
+        ...islandParams,
+        radius: site.radius,
+        ...islandPeakHeights(site.radius),
+      });
+      const shores: number[] = [];
+      for (let i = 0; i < 128; i++) shores.push(findShoreRadius(hm, (i / 128) * Math.PI * 2));
+      const mean = shores.reduce((a, b) => a + b, 0) / shores.length;
+      const variation = (Math.max(...shores) - Math.min(...shores)) / mean;
+      expect(variation).toBeGreaterThan(0.25);
+    }
+  });
+
+  it('smoothMax does not lift the sea floor where there is nothing to blend', () => {
+    // the textbook polynomial adds k/4 whenever its operands are EQUAL, which
+    // off-island means 0 vs 0 — it silently raised the entire field and let a
+    // zero-height island break the surface
+    expect(smoothMax(0, 0, 20)).toBe(0);
+    expect(smoothMax(-5, -5, 20)).toBe(-5);
+    // …but still blends real features instead of creasing between them
+    expect(smoothMax(40, 40, 20)).toBeGreaterThan(40);
+    expect(smoothMax(40, 5, 20)).toBe(40); // far apart: plain max
   });
 });

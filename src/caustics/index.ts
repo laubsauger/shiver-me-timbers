@@ -75,6 +75,16 @@ export interface CausticsOptions {
 
 export class Caustics {
   readonly sim: OceanSimulation;
+  /**
+   * The live tunables (§V.16), reachable as `__game.caustics.params` in the
+   * console. Writing a UNIFORM directly does not stick — `update()` re-pushes
+   * every param into the uniforms each frame, so a console poke is silently
+   * reverted on the next tick. Write this instead:
+   *   __game.caustics.params.strength = 3
+   * `enabled` is the exception: it is read when receiver materials are BUILT,
+   * so toggling it at runtime does nothing and an A/B needs a reload.
+   */
+  readonly params = causticsParams;
   readonly caustics: CausticsUniforms;
   readonly lighting: WaterLightingUniforms;
   wetline?: HullWetline;

@@ -16,8 +16,12 @@ export interface RopeParams {
   slackFactor: number;
   /** default tube radius (m) when setRope gets no thickness */
   defaultThickness: number;
-  /** §V42 master switch: false → every rope is the static catenary (the old
-   *  look), useful for isolating the solver from the renderer */
+  /** §V42 master switch: false → every rope is the static catenary.
+   *  CURRENTLY OFF: the Verlet chain enforces EQUAL link lengths while the
+   *  catenary it is seeded from is sampled uniformly in horizontal x, whose
+   *  links vary 2.2× end to end — so the chain fights its own rest state and
+   *  never settles. Fix in flight (per-link rest lengths); until it is
+   *  verified in-browser the proven static solve ships. */
   dynamic: boolean;
   /** Verlet constraint passes per substep (startup-only: literal Loop bound) */
   constraintIterations: number;
@@ -38,6 +42,10 @@ export interface RopeParams {
   /** leash: a particle may never stray further than this (m) from where the
    *  catenary says it belongs. Stability net AND first-frame seeding */
   maxStray: number;
+  /** leash also scales with rope length: a long rope carries more sag, and
+   *  reefing can pull several metres of it out at once (§V46). The effective
+   *  leash is max(maxStray, strayFraction × rope length) */
+  strayFraction: number;
   /** if an anchor moves further than this in one frame (m) the rope was
    *  re-anchored, not sailed — a mast breaking (§V14), a respawn. The chain
    *  is re-seeded from the new catenary instead of being snapped across the
@@ -91,6 +99,7 @@ const meta: Partial<Record<keyof RopeParams, ParamMeta>> = {
   gustSpeed: { min: 0, max: 4, step: 0.01 },
   gustDepth: { min: 0, max: 1, step: 0.01 },
   maxStray: { min: 0.05, max: 5, step: 0.05 },
+  strayFraction: { min: 0, max: 1, step: 0.01 },
   teleportDistance: { min: 0.5, max: 20, step: 0.1 },
   simDistance: { min: 10, max: 500, step: 5 },
   simFadeBand: { min: 1, max: 200, step: 1 },
@@ -111,7 +120,7 @@ export const ropeParams: RopeParams = registerParams(
     radialSegments: 6,
     slackFactor: 1.06,
     defaultThickness: 0.035,
-    dynamic: true,
+    dynamic: false,
     constraintIterations: 8,
     substeps: 2,
     gravity: 9.81,
@@ -120,6 +129,7 @@ export const ropeParams: RopeParams = registerParams(
     gustSpeed: 0.7,
     gustDepth: 0.45,
     maxStray: 1.2,
+    strayFraction: 0.25,
     teleportDistance: 2,
     simDistance: 120,
     simFadeBand: 40,

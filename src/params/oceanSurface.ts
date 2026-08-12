@@ -32,8 +32,8 @@ export const oceanSurfaceParams = registerParams(
      * surfaceGeometry) this is a distance fade that RIDES the LOD — geometry
      * dies exactly where the triangles can no longer carry it (§V30).
      */
-    lodSamplesFull: 12,
-    lodSamplesCut: 6,
+    lodSamplesFull: 9,
+    lodSamplesCut: 4.5,
     /**
      * Normals are per-pixel, not per-vertex, so slope detail may outlive the
      * geometry: cascade normal fades use the same Nyquist gate stretched by
@@ -71,12 +71,42 @@ export const oceanSurfaceParams = registerParams(
     sssAmbient: 0.08,
     /** horizontal-displacement mask scale for the SSS side-of-wave isolation (§V.5) */
     sssChoppyScale: 0.9,
+
+    // ── turbulent sub-noise on wave faces (user, SoT storm reference) ────
     /**
-     * 0..1 how much of the ambient crest glow requires real sun backlighting.
-     * The user's rule: on open ocean bright turquoise is only allowed where
-     * sun comes through the water toward the viewer. 1 = fully sun-gated.
+     * Churn perturbation added to the surface SLOPE, not the mesh: this
+     * detail is far below vertex spacing (~1 m at the ship), so geometry
+     * cannot carry it at any LOD — only the normal can. Four non-commensurate
+     * animated wavelets, gated to wave FACES by local slope, because the
+     * reference shows roughened flanks and comparatively calm troughs.
      */
-    sssAmbientSunGate: 0.85,
+    microDetailStrength: 0.35,
+    /** base wavelength (m) of the churn — the coarsest of the four wavelets */
+    microDetailScale: 2.4,
+    /** how fast the churn boils (rad/s on the base wavelet) */
+    microDetailSpeed: 1.1,
+    /** slope magnitude at which the churn reaches full strength */
+    microDetailSlopeGate: 0.35,
+    /**
+     * Floor of the ambient crest glow when NOTHING is backlighting it — i.e.
+     * how much of the crest translucency is skylight rather than sun. 0 =
+     * fully sun-gated (§B.12's fix), 1 = the sun-independent slug that caused
+     * it. Kept low so flat light stays honest, but NOT zero: the SoT storm
+     * reference shows crests lit through under a dark overcast sky.
+     */
+    sssSkylightFloor: 0.15,
+    /**
+     * Cap on the sea-state boost applied to that skylight floor. Taller seas
+     * mean thinner, steeper, more translucent crests, so storm water reads
+     * MORE luminous through the crests, not less (user, from the SoT storm
+     * shot). 1 = no boost.
+     */
+    stormGlowMax: 2.2,
+    /**
+     * Reference RMS surface elevation (m) the boost is measured against —
+     * the shipped swell sea. At or below this, storm terms are inert.
+     */
+    seaRmsReference: 0.7,
     /**
      * Crest band for the ambient glow, in units of RMS surface elevation σ
      * (NOT metres — an absolute gate changes meaning whenever the sea state
@@ -196,7 +226,13 @@ export const oceanSurfaceParams = registerParams(
     grazingSaturation: { min: 0, max: 1, step: 0.01 },
     sssPower: { min: 0.5, max: 8, step: 0.1 },
     sssChoppyScale: { min: 0, max: 3, step: 0.05 },
-    sssAmbientSunGate: { min: 0, max: 1, step: 0.01 },
+    sssSkylightFloor: { min: 0, max: 1, step: 0.01 },
+    stormGlowMax: { min: 1, max: 4, step: 0.05 },
+    seaRmsReference: { min: 0.1, max: 5, step: 0.05 },
+    microDetailStrength: { min: 0, max: 2, step: 0.01 },
+    microDetailScale: { min: 0.3, max: 20, step: 0.1 },
+    microDetailSpeed: { min: 0, max: 5, step: 0.05 },
+    microDetailSlopeGate: { min: 0.02, max: 2, step: 0.01 },
     crestBandLow: { min: 0, max: 4, step: 0.05 },
     crestBandHigh: { min: 0.2, max: 6, step: 0.05 },
     bodyBandLow: { min: -4, max: 0, step: 0.05 },

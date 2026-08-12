@@ -5,7 +5,8 @@
  * ink, aged brass, rope, wax) + final-full-result.png (deep sea teal).
  * System old-style serif stack only — no font fetches, CSP-clean.
  */
-import { HUD_CSS, SETTINGS_CSS } from './stylesHud';
+import { HUD_CSS } from './stylesHud';
+import { SETTINGS_CSS } from './stylesSettings';
 
 const BASE_CSS = /* css */ `
 .smt-ui, .smt-ui * { margin: 0; padding: 0; box-sizing: border-box; }

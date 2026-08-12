@@ -25,12 +25,20 @@ import { createSampleLoader, type SampleLoader } from './assets';
 import { createBed, type AmbienceBed } from './bed';
 import { applyListenerPose, listenerPoseFromMatrix, type HasWorldMatrix } from './emitters';
 import { createShipAudio, type ShipAudio, type ShipAudioInput } from './shipAudio';
-import type { Weather } from './mix';
+import { createEventPlayer, type CombatEvent, type EventPlayer } from './events';
+import { createMusicPlayer, type MusicInfo, type MusicPlayer } from './music';
+import { musicStateFor } from './musicPlaylist';
+import { hullWorking, type Weather } from './mix';
+import { audioParams } from '../params/audio';
 import { createRng, type Rng } from '../state/rng';
 
 export type { AmbienceEnv } from './ambience';
 export type { Volumes } from './engine';
 export type { ShipAudioInput } from './shipAudio';
+export type { ContactInput } from './mix';
+export type { CombatEvent, CombatEventKind } from './events';
+export type { MusicInfo } from './music';
+export type { MusicState, MusicTrackRef } from './musicAssets';
 export type { HasWorldMatrix } from './emitters';
 export { attachAudioSettings } from './settingsBridge';
 
@@ -51,6 +59,11 @@ export interface AudioFrame {
   weather: Weather;
   /** player ship pose/state; null before the ship exists */
   ship?: ShipAudioInput | null;
+  /**
+   * Metres to the nearest land (archipelago seabed sampler). Optional and
+   * unused until music tagging is wired — pass it whenever it is cheap.
+   */
+  landDistance?: number;
 }
 
 export interface AudioSystem {
@@ -61,6 +74,10 @@ export interface AudioSystem {
   /** legacy shape kept alive so existing wiring keeps working */
   update(env: AmbienceEnv, dt: number): void;
   play(name: OneShotName, opts?: PlayOpts): void;
+  /** discrete combat/destruction event, positional when `world` is given */
+  event(e: CombatEvent): void;
+  /** playlist status (debug/HUD): track count, current track, duck level */
+  musicInfo(): MusicInfo;
   setVolumes(v: Partial<Volumes>): void;
   dispose(): void;
 }
@@ -77,6 +94,8 @@ export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
   const fallbackRng = createRng(DEFAULT_RNG_SEED);
   let bed: AmbienceBed | null = null;
   let ship: ShipAudio | null = null;
+  let combat: EventPlayer | null = null;
+  let music: MusicPlayer | null = null;
   let loader: SampleLoader | null = null;
   /** procedural bed — only built if the samples never showed up */
   let synth: Ambience | null = null;
@@ -87,9 +106,13 @@ export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
     if (!ctx || !buses || bed) return;
     bed = createBed(ctx, buses.ambience);
     ship = createShipAudio(ctx, buses);
+    combat = createEventPlayer(ctx, buses.sfx);
+    // streamed, so nothing is fetched here beyond what the first track needs
+    music = createMusicPlayer(ctx, buses.music);
     loader = createSampleLoader(ctx, (name, buffer) => {
       bed?.onSample(name, buffer);
       ship?.onSample(name, buffer);
+      combat?.onSample(name, buffer);
     });
     void loader.loadAll().then(() => {
       // nothing decoded at all (offline build, blocked fetch…) → keep the
@@ -120,15 +143,38 @@ export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
       if (frame.camera) {
         applyListenerPose(ctx.listener, listenerPoseFromMatrix(frame.camera.matrixWorld.elements));
       }
-      bed?.update({ windSpeed: frame.wind.speed, weather: frame.weather, shipSpeed }, dt);
+      // how hard the hull is working drives BOTH the ambience creak layer and
+      // the positional rig creak/groans — one signal, one behaviour
+      const working = frame.ship
+        ? hullWorking(
+            frame.ship.angularVelocity[0],
+            frame.ship.angularVelocity[2],
+            frame.ship.contact,
+            audioParams,
+          )
+        : 0;
+      bed?.update(
+        { windSpeed: frame.wind.speed, weather: frame.weather, shipSpeed, working },
+        dt,
+      );
       if (frame.ship) {
         ship?.update(
           frame.ship,
-          { windSpeed: frame.wind.speed, windDirection: frame.wind.direction },
+          { windSpeed: frame.wind.speed, windDirection: frame.wind.direction, working },
           dt,
         );
       }
       synth?.update({ windSpeed: frame.wind.speed, weather: frame.weather }, dt);
+      // tag seam: the situation is computed here so wiring real inputs later
+      // (storm cells, distance to land) is a change of arguments, not shape
+      music?.update(
+        dt,
+        musicStateFor({
+          weather: frame.weather,
+          landDistance: frame.landDistance,
+          combatHeat: 0,
+        }),
+      );
     },
     play(name, opts) {
       const ctx = engine.getContext();
@@ -149,6 +195,14 @@ export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
           break;
       }
     },
+    event(e) {
+      const ctx = engine.getContext();
+      if (!ctx || ctx.state !== 'running') return;
+      combat?.play(e);
+      music?.duck(); // guns out → music steps back until the smoke clears
+    },
+    musicInfo: () =>
+      music?.info() ?? { tracks: 0, current: null, state: 'calm' as const, duck: 1 },
     setVolumes(v) {
       engine.setVolumes(v);
     },
@@ -156,9 +210,13 @@ export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
       detachGesture();
       bed?.dispose();
       ship?.dispose();
+      combat?.dispose();
+      music?.dispose();
       synth?.dispose();
       bed = null;
       ship = null;
+      combat = null;
+      music = null;
       synth = null;
       loader = null;
       engine.dispose();

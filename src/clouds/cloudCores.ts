@@ -1,43 +1,78 @@
 /**
- * Cloud cores (§V11 stage 1): soft billboard puffs clustered into cumulus
- * shapes, forward-rendered into an offscreen RT with channel packing per
- * docs/clouds-channels.png — R=sunlight, G=skylight, B=alpha/coverage,
- * A=normalized depth. Channels are premultiplied by puff alpha and summed
- * with ONE/ONE blending, so the blur/composite stages recover weighted
- * averages as channel/B.
+ * Cloud cores (§V11 stage 1, §V11b shape contract).
  *
- * Cluster generation is pure + seeded (§V2 determinism extends to seeded
- * visuals): no Math.random, no GPU side effects at import time.
+ * WHAT CHANGED AND WHY. These used to be billboard puffs. A billboard is a
+ * disc with a radial falloff: its outline is a circle no matter where you
+ * stand, so a pile of them can only ever read as a pile of blobs. The talk
+ * slide "Clouds: Iteration" says the cores are POLYGONAL MESHES (ref: Paths
+ * of Hate) with "billboards for 'fluff'" on top, and §V11b makes that an
+ * invariant. So a core is now a LOBE: an icosphere whose radius is pushed
+ * around by two octaves of value noise, instanced a few hundred times. The
+ * silhouette of the union is faceted and notched — sculpted, not soft — and
+ * each lobe has a real surface normal, so one side catches the sun and the
+ * other holds shadow. The billboards survive as one soft FLUFF sprite per
+ * lobe, feathering the polygonal rim.
+ *
+ * WHAT DID NOT CHANGE. The §V11 pipeline and its channel packing: lobes and
+ * fluff both forward-render into the same 4-channel RT as
+ *   R = sunlight, G = skylight, B = alpha, A = normalized depth
+ * all PREMULTIPLIED by alpha and summed with ONE/ONE blending, so the blur
+ * and composite stages recover weighted averages as channel/B. The composite
+ * and the reflection stand-in both depend on that; do not change it here
+ * without changing them.
+ *
+ * SHAPE IS PARAMETRIC (§V7). `silhouetteRadius` is one continuous family:
+ * anvilSpread 0 gives fair-weather cumulus, anvilSpread ~1.2 with a narrow
+ * waist and a tall clusterHeight gives the storm anvil/mushroom monuments
+ * from "Clouds: Concept". Storm is a set of numbers, not a branch.
+ *
+ * Generation is pure + seeded (§V2): no Math.random, no GPU side effects at
+ * import time, same seed → same sky on every client.
  */
 import * as THREE from 'three/webgpu';
 import {
+  cameraPosition,
   float,
   instancedBufferAttribute,
   mix,
+  modelViewMatrix,
+  mx_noise_float,
+  positionGeometry,
+  select,
+  smoothstep,
   uniform,
   uv,
+  varying,
   vec3,
   vec4,
-  vertexStage,
-  modelViewMatrix,
 } from 'three/tsl';
+import type { Node } from 'three/webgpu';
+import type { ShaderNodeObject } from 'three/tsl';
 import { createRng } from '../state/rng';
 import type { CloudParams } from '../params/clouds';
 
-export interface CloudPuff {
+type N = ShaderNodeObject<Node>;
+
+/** A polygonal core. `radius` is the mean radius; rx/ry/rz are the ellipsoid. */
+export interface CloudLobe {
   x: number;
   y: number;
   z: number;
-  /** billboard radius (m) */
+  /** mean radius (m) — the fluff sprite rides on this */
   radius: number;
-  /** per-puff deterministic variation, 0..1 */
+  rx: number;
+  ry: number;
+  rz: number;
+  /** per-lobe deterministic noise offset, 0..1 */
   seed: number;
-  /** normalized height inside the cluster, 0=base sheet 1=dome top */
+  /** normalized height inside the cluster, 0 = base 1 = top */
   heightN: number;
-  /** unit offset direction from cluster centre (sun-side gradient) */
+  /** unit offset direction from cluster centre (cluster sun-side gradient) */
   dirX: number;
   dirY: number;
   dirZ: number;
+  /** 0..1, 1 = buried deep in the mass → gets the least direct sun */
+  interior: number;
 }
 
 export interface CloudCluster {
@@ -45,13 +80,42 @@ export interface CloudCluster {
   y: number;
   z: number;
   radius: number;
-  puffs: CloudPuff[];
+  lobes: CloudLobe[];
 }
 
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
 
+/** clamped smoothstep on a already-normalized t */
+const smooth01 = (t: number): number => {
+  const c = Math.min(1, Math.max(0, t));
+  return c * c * (3 - 2 * c);
+};
+
+/** §V28 companion on the CPU side: never divide by an unbounded-small number */
+const floorDiv = (v: number): number => (Math.abs(v) < 1e-3 ? 1e-3 : v);
+
 /**
- * Deterministic cumulus cluster layout: same seed → identical clusters.
+ * Silhouette radius (0..1) of a cluster at normalized height h (0 base, 1
+ * top). ONE continuous family covering both weather extremes (§V7):
+ *
+ *   dome   — rounds the mass off toward the top. Low `domeExponent` domes it
+ *            early (cumulus); high keeps it near full width until near the
+ *            top, which is what lets a storm cloud read as a column.
+ *   waist  — narrows the trunk to `waistWidth` by `waistHeight`. This is the
+ *            anvil's stalk; at waistWidth 1 there is no waist at all.
+ *   cap    — flares back out above `anvilStart`, then rolls in past
+ *            `capRound`. `anvilSpread` 0 removes the cap entirely.
+ */
+export function silhouetteRadius(h: number, p: CloudParams): number {
+  const dome = Math.sqrt(Math.max(0, 1 - Math.pow(h, p.domeExponent)));
+  const waist = lerp(1, p.waistWidth, smooth01(h / floorDiv(p.waistHeight)));
+  const flare = smooth01((h - p.anvilStart) / floorDiv(1 - p.anvilStart));
+  const roll = 1 - smooth01((h - p.capRound) / floorDiv(1 - p.capRound));
+  return Math.max(0.05, dome * waist + p.anvilSpread * flare * roll);
+}
+
+/**
+ * Deterministic cluster layout: same (seed, params) → identical lobes.
  * Pure data, safe to import in node tests.
  */
 export function generateClusters(seed: number, p: CloudParams): CloudCluster[] {
@@ -64,163 +128,362 @@ export function generateClusters(seed: number, p: CloudParams): CloudCluster[] {
     const cz = Math.sin(angle) * dist;
     const cy = lerp(p.altitudeMin, p.altitudeMax, rng());
     const cr = lerp(p.clusterRadiusMin, p.clusterRadiusMax, rng());
-    const count = p.puffsMin + Math.floor(rng() * (p.puffsMax - p.puffsMin + 1));
-    // cumulus silhouette: wide flat base sheet + smaller domed top puffs,
-    // overall wider than tall (refs: docs/final-full-result.png)
+    const count = p.lobesMin + Math.floor(rng() * (p.lobesMax - p.lobesMin + 1));
     const horiz = cr * p.clusterFlatten;
-    const vert = cr * 0.55;
-    const baseCount = Math.max(1, Math.round(count * 0.55));
-    const puffs: CloudPuff[] = [];
+    const vert = cr * p.clusterHeight;
+    const lobes: CloudLobe[] = [];
     for (let i = 0; i < count; i++) {
       const a = rng() * Math.PI * 2;
-      let r: number;
-      let yN: number;
-      let sizeScale: number;
-      if (i < baseCount) {
-        // base layer: centre-biased disc (rng^0.7 packs puffs into one mass,
-        // not a sparse ring), nearly flat, larger puffs toward centre
-        r = Math.pow(rng(), 0.7);
-        yN = rng() * 0.18;
-        sizeScale = 0.8 + 0.3 * (1 - r);
-      } else {
-        // top layer: hemispherical dome, puffs shrink with height
-        const h = rng();
-        r = Math.pow(rng(), 0.7) * Math.sqrt(Math.max(0, 1 - h * h)) * 0.85;
-        yN = 0.15 + 0.85 * h;
-        sizeScale = 0.55 + 0.35 * (1 - h);
-      }
-      const px = Math.cos(a) * r * horiz;
-      const py = yN * vert;
-      const pz = Math.sin(a) * r * horiz;
+      // heightBias > 1 packs lobes toward the base (cumulus); 1 spreads them
+      // evenly up a storm column
+      const h = Math.pow(rng(), p.heightBias);
+      const profile = silhouetteRadius(h, p);
+      // rng^0.6 is centre-biased: lobes pack into one mass, not a ring
+      const rN = Math.pow(rng(), 0.6);
+      const px = Math.cos(a) * rN * profile * horiz;
+      const py = h * vert;
+      const pz = Math.sin(a) * rN * profile * horiz;
       const len = Math.hypot(px, py, pz);
-      // radius follows cluster size so big clusters read as one cohesive mass
-      const sizeNorm = cr / 220;
-      puffs.push({
+      // lobe size as a FRACTION of the cluster (no metre-scale magic number),
+      // shrinking with height so the mass tapers into cauliflower at the top
+      const size = lerp(p.lobeScaleMin, p.lobeScaleMax, rng()) * cr * (1 - 0.4 * h);
+      lobes.push({
         x: cx + px,
         y: cy + py,
         z: cz + pz,
-        radius: lerp(p.puffScaleMin, p.puffScaleMax, rng()) * sizeScale * sizeNorm,
+        radius: size,
+        // slight per-axis anisotropy so the union never reads as stacked balls
+        rx: size * lerp(0.9, 1.25, rng()),
+        ry: size * p.lobeOblate,
+        rz: size * lerp(0.9, 1.25, rng()),
         seed: rng(),
-        heightN: yN,
+        heightN: h,
         dirX: len > 1e-6 ? px / len : 0,
         dirY: len > 1e-6 ? py / len : 1,
         dirZ: len > 1e-6 ? pz / len : 0,
+        // buried = near the axis AND low down; that underside is the part a
+        // real cumulus keeps in its own shadow
+        interior: Math.min(1, Math.max(0, (1 - rN * 0.6) * (1 - h))),
       });
     }
-    clusters.push({ x: cx, y: cy, z: cz, radius: cr, puffs });
+    clusters.push({ x: cx, y: cy, z: cz, radius: cr, lobes });
   }
   return clusters;
 }
 
+/** Total lobe count a cluster list would draw. */
+export function countLobes(clusters: CloudCluster[]): number {
+  let n = 0;
+  for (const c of clusters) n += c.lobes.length;
+  return n;
+}
+
 /**
- * Instanced sprite batch writing the packed 4-channel core RT.
- * View-space light directions are uniforms updated per frame by index.ts.
+ * Instanced polygonal lobes + their fluff billboards, both writing the packed
+ * 4-channel core RT. Instance buffers are allocated once at `p.maxLobes`
+ * capacity (§V28: buffer sizes are sanitized construction-time ints) and
+ * refilled in place by `rebuild()` when a layout param moves.
  */
 export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
-  const puffs = clusters.flatMap((c) => c.puffs);
-  const n = puffs.length;
-  const offsets = new Float32Array(n * 3);
-  const dirs = new Float32Array(n * 3);
-  const scales = new Float32Array(n);
-  const seeds = new Float32Array(n);
-  const heights = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const puff = puffs[i];
-    offsets[i * 3 + 0] = puff.x;
-    offsets[i * 3 + 1] = puff.y;
-    offsets[i * 3 + 2] = puff.z;
-    dirs[i * 3 + 0] = puff.dirX;
-    dirs[i * 3 + 1] = puff.dirY;
-    dirs[i * 3 + 2] = puff.dirZ;
-    scales[i] = puff.radius * 2; // sprite geometry is a unit quad → diameter
-    seeds[i] = puff.seed;
-    heights[i] = puff.heightN;
-  }
+  const capacity = Math.max(1, Math.floor(p.maxLobes) || 1);
+
+  const offsets = new Float32Array(capacity * 3);
+  const radii = new Float32Array(capacity * 3);
+  const dirs = new Float32Array(capacity * 3);
+  const scales = new Float32Array(capacity);
+  const seeds = new Float32Array(capacity);
+  const heights = new Float32Array(capacity);
+  const interiors = new Float32Array(capacity);
+
   const offsetAttr = new THREE.InstancedBufferAttribute(offsets, 3);
+  const radiusAttr = new THREE.InstancedBufferAttribute(radii, 3);
   const dirAttr = new THREE.InstancedBufferAttribute(dirs, 3);
   const scaleAttr = new THREE.InstancedBufferAttribute(scales, 1);
   const seedAttr = new THREE.InstancedBufferAttribute(seeds, 1);
   const heightAttr = new THREE.InstancedBufferAttribute(heights, 1);
+  const interiorAttr = new THREE.InstancedBufferAttribute(interiors, 1);
+  const allAttrs = [
+    offsetAttr,
+    radiusAttr,
+    dirAttr,
+    scaleAttr,
+    seedAttr,
+    heightAttr,
+    interiorAttr,
+  ];
 
-  const uSunView = uniform(new THREE.Vector3(0, 1, 0));
+  let lobeCount = 0;
+  let overflowed = false;
+
+  function fill(list: CloudCluster[]): void {
+    const flat = list.flatMap((c) => c.lobes);
+    const n = Math.min(flat.length, capacity);
+    if (flat.length > capacity && !overflowed) {
+      // §V8 fail loud: silently dropping cloud lobes would look like a tuning
+      // problem forever. Warn once, then keep rendering what fits.
+      overflowed = true;
+      console.warn(
+        `[clouds] ${flat.length} lobes requested but capacity is ${capacity} ` +
+          `(cloudParams.maxLobes) — extra lobes dropped. Raise maxLobes and reload.`,
+      );
+    }
+    for (let i = 0; i < n; i++) {
+      const l = flat[i];
+      offsets[i * 3 + 0] = l.x;
+      offsets[i * 3 + 1] = l.y;
+      offsets[i * 3 + 2] = l.z;
+      radii[i * 3 + 0] = l.rx;
+      radii[i * 3 + 1] = l.ry;
+      radii[i * 3 + 2] = l.rz;
+      dirs[i * 3 + 0] = l.dirX;
+      dirs[i * 3 + 1] = l.dirY;
+      dirs[i * 3 + 2] = l.dirZ;
+      scales[i] = l.radius * 2; // sprite geometry is a unit quad → diameter
+      seeds[i] = l.seed;
+      heights[i] = l.heightN;
+      interiors[i] = l.interior;
+    }
+    lobeCount = n;
+    for (const a of allAttrs) a.needsUpdate = true;
+  }
+
+  fill(clusters);
+
+  // -- shared uniforms -------------------------------------------------------
   const uSunWorld = uniform(new THREE.Vector3(0, 1, 0));
+  const uSunView = uniform(new THREE.Vector3(0, 1, 0));
   const uUpView = uniform(new THREE.Vector3(0, 1, 0));
   const uCoverage = uniform(p.coverage);
   const uMaxDist = uniform(p.maxCloudDist);
+  const uRelief = uniform(p.lobeRelief);
+  const uReliefScale = uniform(p.lobeReliefScale);
+  const uRimSoft = uniform(p.rimSoftness);
+  const uSunPower = uniform(p.sunPower);
+  const uSunSideGain = uniform(p.sunSideGain);
+  const uSelfShadow = uniform(p.selfShadow);
+  const uSilver = uniform(p.silverLining);
+  const uSkyMin = uniform(p.skyMin);
+  const uSkyMax = uniform(p.skyMax);
+  const uFluffScale = uniform(p.fluffScale);
+  const uFluffAlpha = uniform(p.fluffAlpha);
+  const uFluffPower = uniform(p.fluffPower);
 
-  const material = new THREE.SpriteNodeMaterial();
-  const offsetNode = instancedBufferAttribute(offsetAttr, 'vec3');
-  material.positionNode = offsetNode;
-  material.scaleNode = instancedBufferAttribute(scaleAttr, 'float');
+  // -- shared instance attribute nodes ---------------------------------------
+  const iOffset = instancedBufferAttribute(offsetAttr, 'vec3');
+  const iRadius = instancedBufferAttribute(radiusAttr, 'vec3');
+  const iDir = instancedBufferAttribute(dirAttr, 'vec3');
+  const iSeed = instancedBufferAttribute(seedAttr, 'float');
+  const iHeight = instancedBufferAttribute(heightAttr, 'float');
+  const iInterior = instancedBufferAttribute(interiorAttr, 'float');
 
-  // soft round falloff on the billboard
+  /** normalized view distance of an instance centre (RT alpha channel) */
+  const depthOf = (centre: N): N =>
+    modelViewMatrix.mul(vec4(centre, 1)).xyz.length().div(uMaxDist.max(1)).clamp(0, 1);
+
+  /** cluster-level gradient: lobes on the sun side of their cluster get more */
+  const sunSide = iDir.dot(uSunWorld).mul(0.5).add(0.5);
+
+  const commonBlending = (m: THREE.NodeMaterial): void => {
+    m.transparent = true;
+    m.blending = THREE.CustomBlending;
+    m.blendEquation = THREE.AddEquation;
+    m.blendSrc = THREE.OneFactor;
+    m.blendDst = THREE.OneFactor;
+    m.blendSrcAlpha = THREE.OneFactor;
+    m.blendDstAlpha = THREE.OneFactor;
+    m.depthTest = false;
+    m.depthWrite = false;
+    m.fog = false;
+  };
+
+  // == polygonal lobes =======================================================
+  const detail = Math.max(0, Math.min(3, Math.floor(p.lobeDetail) || 0));
+  const base = new THREE.IcosahedronGeometry(1, detail);
+  const lobeGeo = new THREE.InstancedBufferGeometry();
+  // normal/uv are carried even though the shader derives its own normal:
+  // NodeMaterial still builds the default lighting flow before `outputNode`
+  // replaces it, and a missing attribute there is a silent fallback. WebGPU
+  // only binds attributes the compiled shader actually reads, so unused ones
+  // cost nothing. `base` is intentionally NOT disposed — lobeGeo shares its
+  // BufferAttributes and lobeGeo.dispose() releases them.
+  for (const name of ['position', 'normal', 'uv'] as const) {
+    const attr = base.getAttribute(name);
+    if (attr) lobeGeo.setAttribute(name, attr);
+  }
+  if (base.index) lobeGeo.setIndex(base.index);
+  lobeGeo.instanceCount = lobeCount;
+
+  const lobeMat = new THREE.MeshBasicNodeMaterial();
+
+  // unit sphere direction; on a radius-1 icosphere the position IS the normal
+  const unit = positionGeometry.normalize();
+  // per-lobe noise offset — without it every lobe would be the same rock
+  const nSeed = vec3(iSeed.mul(23.1), iSeed.mul(51.7), iSeed.mul(9.4));
+  /**
+   * Radial displacement factor at a unit direction. Two octaves: the first
+   * carves the big bulges that make the silhouette, the second the smaller
+   * cauliflower bumps. mx_noise_float is roughly [-1,1], so the factor stays
+   * inside [1 - 1.45*relief, 1 + 1.45*relief] — bounded at source (§V44),
+   * and lobeRelief is capped at 0.6 on the panel, so it can never invert.
+   */
+  const reliefAt = (d: N): N =>
+    mx_noise_float(d.mul(uReliefScale).add(nSeed))
+      .add(mx_noise_float(d.mul(uReliefScale.mul(2.7)).add(nSeed).add(11.3)).mul(0.45))
+      .mul(uRelief)
+      .add(1);
+
+  // finite-difference normal needs two directions that are never parallel to
+  // `unit`; cross with Y degenerates at the poles, so fall back to X there
+  const tanA = unit.cross(vec3(0, 1, 0));
+  const tanB = unit.cross(vec3(1, 0, 0));
+  const tangent = select(tanA.dot(tanA).greaterThan(0.01), tanA, tanB).normalize();
+  const bitangent = unit.cross(tangent); // |unit|=|tangent|=1, orthogonal → unit length
+
+  const FD = float(0.12);
+  const dC = unit;
+  const dT = unit.add(tangent.mul(FD)).normalize();
+  const dB = unit.add(bitangent.mul(FD)).normalize();
+  const pC = dC.mul(reliefAt(dC));
+  const pT = dT.mul(reliefAt(dT));
+  const pB = dB.mul(reliefAt(dB));
+  // cross(tangent, bitangent) === unit, so this cross points outward
+  const nLocal = pT.sub(pC).cross(pB.sub(pC)).normalize();
+
+  const lobeWorld = iOffset.add(pC.mul(iRadius));
+  // an ellipsoid's normal transforms by the INVERSE scale (§V28 floored)
+  const nWorld = nLocal.div(iRadius.max(1e-3)).normalize();
+
+  lobeMat.positionNode = lobeWorld;
+
+  const vNormal = varying(nWorld, 'vCloudNormal');
+  const vWorld = varying(lobeWorld, 'vCloudWorld');
+  const vDepth = varying(depthOf(iOffset), 'vCloudDepth');
+  const vHeight = varying(iHeight, 'vCloudHeight');
+  const vInterior = varying(iInterior, 'vCloudInterior');
+  const vSunSide = varying(sunSide, 'vCloudSunSide');
+
+  const N = vNormal.normalize();
+  const V = cameraPosition.sub(vWorld).normalize();
+  // |N·V| → 0 exactly at the silhouette, so this is the SOFT RIM: the mesh
+  // keeps a hard outline in the depth/shape sense while its alpha feathers
+  // out. smoothstep in functional form per §V23.
+  const rim = smoothstep(float(0), uRimSoft.max(1e-3), N.dot(V).abs());
+  const lobeAlpha = rim.mul(uCoverage).clamp(0, 1);
+
+  // every factor below is independently in [0,1] (or [1, 1+silver]) and they
+  // are MULTIPLIED, so the product is bounded at source (§V44)
+  const wrapDiffuse = N.dot(uSunWorld).mul(0.5).add(0.5).clamp(0, 1).pow(uSunPower.max(0.05));
+  // §V44 "bounded AT SOURCE": clamp the gain, not the product it feeds
+  const sideGain = uSunSideGain.clamp(0, 1);
+  const sideTerm = mix(float(1).sub(sideGain), float(1), vSunSide);
+  const selfShadow = mix(float(1), uSelfShadow, vInterior.clamp(0, 1));
+  // silver lining: rim brightening when the sun is BEHIND the cloud. Expressed
+  // as a multiplier ≥1, never as an addend into an already-summed channel.
+  const backLit = uSunWorld.dot(V.negate()).clamp(0, 1).pow(6);
+  const silver = backLit.mul(rim.oneMinus()).mul(uSilver).add(1);
+  const lobeSun = wrapDiffuse.mul(sideTerm).mul(selfShadow).mul(silver).clamp(0, 2);
+
+  const skyFace = N.dot(vec3(0, 1, 0)).mul(0.5).add(0.5).clamp(0, 1);
+  const heightLift = mix(float(0.85), float(1), vHeight.clamp(0, 1));
+  const lobeSky = mix(uSkyMin, uSkyMax, skyFace).mul(heightLift).clamp(0, 2);
+
+  lobeMat.outputNode = vec4(
+    lobeSun.mul(lobeAlpha),
+    lobeSky.mul(lobeAlpha),
+    lobeAlpha,
+    vDepth.mul(lobeAlpha),
+  );
+  commonBlending(lobeMat);
+
+  const lobeMesh = new THREE.Mesh(lobeGeo, lobeMat);
+  lobeMesh.frustumCulled = false;
+
+  // == fluff billboards ======================================================
+  // Deliberately dumb: no normals, no self-shadow. Their whole job is to blur
+  // the polygonal rim, and giving them their own lighting model would fight
+  // the lobes underneath.
+  const fluffMat = new THREE.SpriteNodeMaterial();
+  fluffMat.positionNode = iOffset;
+  // scale via a UNIFORM, not baked into the attribute: a baked fluffScale
+  // would only take effect on the next layout rebuild, i.e. silently never
+  fluffMat.scaleNode = instancedBufferAttribute(scaleAttr, 'float').mul(uFluffScale.max(0));
+
   const q = uv().mul(2).sub(1);
   const r2 = q.dot(q);
   const shape = r2.oneMinus().max(0);
-  const puffSeed = instancedBufferAttribute(seedAttr, 'float');
-  const alpha = shape.pow(1.7).mul(puffSeed.mul(0.4).add(0.6)).mul(uCoverage);
+  const fluffAlpha = shape
+    .pow(uFluffPower.max(0.1))
+    .mul(iSeed.mul(0.4).add(0.6))
+    .mul(uFluffAlpha)
+    .mul(uCoverage)
+    .clamp(0, 1);
 
-  // fake sphere normal in view space → sun/sky lit amounts (wrap lighting)
-  const nrm = vec3(q.x, q.y, shape.sqrt());
-  // cluster-level gradient: puffs on the sun side of their cluster lit more
-  const sunSide = instancedBufferAttribute(dirAttr, 'vec3')
-    .dot(uSunWorld)
-    .mul(0.5)
-    .add(0.5);
-  const sunlight = nrm
+  // fake-sphere normal on the billboard, view space
+  const fluffN = vec3(q.x, q.y, shape.sqrt());
+  const fluffSun = fluffN
     .dot(uSunView)
     .mul(0.5)
     .add(0.5)
-    .pow(2.0)
-    .mul(sunSide.mul(0.8).add(0.5))
-    .clamp(0, 1.2);
-  // bases sit in self-shadow, dome tops face open sky — mix(a,b,t) functional
-  // form per §V23 (receiver-chained mix reads receiver as factor)
-  const puffHeight = instancedBufferAttribute(heightAttr, 'float');
-  const skylight = nrm
-    .dot(uUpView)
-    .mul(0.2)
-    .add(0.8)
-    .mul(mix(float(0.5), float(1.1), puffHeight));
+    .clamp(0, 1)
+    .pow(uSunPower.max(0.05))
+    .mul(mix(float(1).sub(sideGain), float(1), sunSide))
+    .clamp(0, 2);
+  const fluffSky = mix(uSkyMin, uSkyMax, fluffN.dot(uUpView).mul(0.5).add(0.5).clamp(0, 1))
+    .mul(mix(float(0.85), float(1), iHeight.clamp(0, 1)))
+    .clamp(0, 2);
+  const fluffDepth = varying(depthOf(iOffset), 'vFluffDepth');
 
-  // normalized view distance of the puff centre, computed per vertex
-  const depthN = vertexStage(
-    modelViewMatrix.mul(vec4(offsetNode, 1)).xyz.length().div(uMaxDist).clamp(0, 1),
+  fluffMat.outputNode = vec4(
+    fluffSun.mul(fluffAlpha),
+    fluffSky.mul(fluffAlpha),
+    fluffAlpha,
+    fluffDepth.mul(fluffAlpha),
   );
+  commonBlending(fluffMat);
 
-  // premultiplied pack: R=sun, G=sky, B=coverage, A=depth (all × alpha)
-  material.outputNode = vec4(
-    sunlight.mul(alpha),
-    skylight.mul(alpha),
-    alpha,
-    depthN.mul(alpha),
-  );
-  material.transparent = true;
-  material.blending = THREE.CustomBlending;
-  material.blendEquation = THREE.AddEquation;
-  material.blendSrc = THREE.OneFactor;
-  material.blendDst = THREE.OneFactor;
-  material.blendSrcAlpha = THREE.OneFactor;
-  material.blendDstAlpha = THREE.OneFactor;
-  material.depthTest = false;
-  material.depthWrite = false;
-  material.fog = false;
+  const fluff = new THREE.Sprite(fluffMat as unknown as THREE.SpriteMaterial);
+  fluff.count = lobeCount;
+  fluff.frustumCulled = false;
 
-  const object = new THREE.Sprite(material as unknown as THREE.SpriteMaterial);
-  object.count = n;
+  const object = new THREE.Group();
+  object.add(lobeMesh);
+  object.add(fluff);
   object.frustumCulled = false;
 
   return {
     object,
-    material,
-    uSunView,
+    lobeMaterial: lobeMat,
+    fluffMaterial: fluffMat,
     uSunWorld,
+    uSunView,
     uUpView,
     uCoverage,
     uMaxDist,
-    puffCount: n,
+    uRelief,
+    uReliefScale,
+    uRimSoft,
+    uSunPower,
+    uSunSideGain,
+    uSelfShadow,
+    uSilver,
+    uSkyMin,
+    uSkyMax,
+    uFluffScale,
+    uFluffAlpha,
+    uFluffPower,
+    get lobeCount(): number {
+      return lobeCount;
+    },
+    /** refill instance buffers in place after a layout param moved (§V7) */
+    rebuild(list: CloudCluster[]): void {
+      fill(list);
+      lobeGeo.instanceCount = lobeCount;
+      fluff.count = lobeCount;
+    },
     dispose(): void {
-      material.dispose();
+      lobeGeo.dispose();
+      lobeMat.dispose();
+      fluffMat.dispose();
     },
   };
 }

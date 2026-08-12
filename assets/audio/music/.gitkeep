@@ -1,0 +1,7 @@
+# Drop music tracks here (mp3/ogg/m4a/wav/flac).
+#
+# They are discovered automatically at build time and STREAMED, never
+# preloaded, so file size is not a startup cost.
+#
+# Optional situation tag as a filename prefix (untagged is fine):
+#   calm-*, island-*, storm-*, combat-*

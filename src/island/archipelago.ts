@@ -20,6 +20,7 @@ import { createRng } from '../state/rng';
 import { islandParams, type IslandParams } from '../params/island';
 import { createIsland, type Island, type IslandFrame } from './island';
 import { createIslandMaterials, type IslandMaterials } from './islandMaterials';
+import type { ArchetypeName } from './archetypes';
 import { createSeabedField, type SeabedField, type SeabedIsland } from './seabed';
 
 /** placement attempts per island before the layout is declared impossible */
@@ -143,13 +144,17 @@ export function createArchipelago(opts: CreateArchipelagoOptions): Archipelago {
   const materials = createIslandMaterials();
   const islands: Island[] = [];
   const foamTargets: THREE.Object3D[] = [];
+  // hand each island a silhouette nobody else has, until the families run out
+  const usedArchetypes: ArchetypeName[] = [];
   for (const site of sites) {
     const island = createIsland({
       seed: site.seed,
       position: site.position,
       radius: site.radius,
       materials,
+      avoidArchetypes: usedArchetypes,
     });
+    usedArchetypes.push(island.heightmap.archetype);
     islands.push(island);
     foamTargets.push(...island.foamTargets);
     group.add(island.group);

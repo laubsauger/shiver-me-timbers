@@ -48,6 +48,7 @@ import {
   vec4,
   viewport,
 } from 'three/tsl';
+import type { ShaderNodeObject } from 'three/tsl';
 import { Z_MIN } from './catenaryMath';
 import { ropeParams } from '../params/ropes';
 import type { RopeCompute } from './ropeCompute';
@@ -55,12 +56,59 @@ import type { RopeCompute } from './ropeCompute';
 /** |tangent.y| above this → chord ~vertical, swap frame reference to +x */
 const REF_SWAP = 0.99;
 
+/** any TSL node — the regime maths is agnostic to how the point was built */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type TSLNode = ShaderNodeObject<any>;
+
+/** the three §V41 thresholds, shared by every thin-geometry mesh in this dir */
+export interface RegimeUniforms {
+  uMinWidthPx: TSLNode;
+  uFarWidthPx: TSLNode;
+  uNearWidthPx: TSLNode;
+}
+
+/**
+ * §V41 phone-wire response at a world-space point, for geometry of world
+ * `radius`. Exported because RATLINES must get exactly this treatment and not
+ * a second implementation of it: at 0.022 m they go sub-pixel around 55 m and
+ * are the densest thin geometry in the scene, so they are the hardest test
+ * this code has. A divergent copy would alias where the ropes did not.
+ *
+ * Returns the widened radius to draw at, the alpha that pays that widening
+ * back, and how far into the cheap unlit regime the geometry is.
+ */
+export function phoneWireRegime(
+  worldPos: TSLNode,
+  radius: TSLNode,
+  u: RegimeUniforms,
+) {
+  // A view-space offset of `radius` along X pushed through the projection
+  // matrix gives the NDC half-width directly; dividing by the point's own clip
+  // w applies the perspective foreshortening, and NDC spans 2 across the
+  // viewport so the full width covers (ndcHalf · viewportWidth) pixels. No
+  // FOV, aspect or resolution appears explicitly — which is the point: the
+  // same code is correct in the half-res reflection pass (§V36 lesson).
+  const clip = cameraProjectionMatrix.mul(cameraViewMatrix.mul(vec4(worldPos, 1)));
+  const clipW = max(clip.w, float(Z_MIN));
+  const ndcHalf = cameraProjectionMatrix.mul(vec4(radius, 0, 0, 0)).x.abs();
+  const widthPx = ndcHalf.div(clipW).mul(viewport.z);
+
+  const widen = max(float(1), u.uMinWidthPx.div(max(widthPx, float(Z_MIN))));
+  const aaAlpha = min(float(1), widthPx.div(max(u.uMinWidthPx, float(Z_MIN))));
+  // reading: smoothstep(far, near, width) is 0 at the far edge and 1 at the
+  // near edge — FUNCTIONAL 3-arg form, never the chained receiver-is-factor
+  // one (§V23/§B1). Inverted because a THIN rope is a FAR rope.
+  const farness = smoothstep(u.uFarWidthPx, u.uNearWidthPx, widthPx).oneMinus();
+  return { drawnRadius: radius.mul(widen), aaAlpha, farness, widthPx };
+}
+
 export function createRopeMesh(rc: RopeCompute, maxRopes: number, segments: number) {
   const uColor = uniform(new THREE.Color(ropeParams.colorHex));
   const uRoughness = uniform(ropeParams.roughness);
   const uMinWidthPx = uniform(ropeParams.aaMinWidthPx);
   const uFarWidthPx = uniform(ropeParams.farWidthPx);
   const uNearWidthPx = uniform(ropeParams.nearWidthPx);
+  const regime: RegimeUniforms = { uMinWidthPx, uFarWidthPx, uNearWidthPx };
   // the far regime is unlit; this lifts its flat albedo to roughly where the
   // lit near tube sits so the handover is not a tonal step (§V41 "no pop")
   const uFarLightness = uniform(ropeParams.farLightness);
@@ -88,27 +136,7 @@ export function createRopeMesh(rc: RopeCompute, maxRopes: number, segments: numb
     const Bn = cross(T, N);
     const radius = p0.w;
 
-    // --- §V41 projected width, in PIXELS, never in metres -------------------
-    // A view-space offset of `radius` along X pushed through the projection
-    // matrix gives the NDC half-width directly; dividing by the point's own
-    // clip w applies the perspective foreshortening, and NDC spans 2 across
-    // the viewport so the full width covers (ndcHalf · viewportWidth) pixels.
-    // No FOV, aspect or resolution appears explicitly — which is the point:
-    // the same code is correct in the half-res reflection pass (§V36 lesson).
-    const clip = cameraProjectionMatrix.mul(cameraViewMatrix.mul(vec4(p0.xyz, 1)));
-    const clipW = max(clip.w, float(Z_MIN));
-    const ndcHalf = cameraProjectionMatrix.mul(vec4(radius, 0, 0, 0)).x.abs();
-    const widthPx = ndcHalf.div(clipW).mul(viewport.z);
-
-    // phone-wire AA: clamp the drawn width up to ~1px, pay it back in alpha
-    const widen = max(float(1), uMinWidthPx.div(max(widthPx, float(Z_MIN))));
-    const aaAlpha = min(float(1), widthPx.div(max(uMinWidthPx, float(Z_MIN))));
-    const drawnRadius = radius.mul(widen);
-
-    // reading: smoothstep(far, near, width) is 0 at the far edge and 1 at the
-    // near edge — FUNCTIONAL 3-arg form, never the chained receiver-is-factor
-    // one (§V23/§B1). Inverted because a THIN rope is a FAR rope.
-    const farness = smoothstep(uFarWidthPx, uNearWidthPx, widthPx).oneMinus();
+    const { drawnRadius, aaAlpha, farness } = phoneWireRegime(p0.xyz, radius, regime);
 
     return { base, segLen, T, N, Bn, drawnRadius, aaAlpha, farness };
   }
@@ -201,6 +229,8 @@ export function createRopeMesh(rc: RopeCompute, maxRopes: number, segments: numb
     mesh,
     nearMesh,
     farMesh,
+    /** shared with the ratline mesh so both regimes switch on the same edges */
+    regime,
     uColor,
     uRoughness,
     uMinWidthPx,

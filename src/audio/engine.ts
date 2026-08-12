@@ -3,11 +3,11 @@
  * gesture, so the context is created lazily on the first resume() call;
  * attachGestureResume() wires a one-time pointerdown/keydown trigger.
  *
- * Bus graph (§I settings audio keys — master/sfx/ambience volumes):
+ * Bus graph (§I settings audio keys — master/sfx/ambience/music volumes):
  *
  *   [one-shots] → sfxGain ──────┐
- *                               ├→ masterGain → destination
- *   [ambience]  → ambienceGain ─┘
+ *   [ambience]  → ambienceGain ─┼→ masterGain → destination
+ *   [music]     → musicGain ────┘
  *
  * Volumes are clamped to 0..1 and survive being set before the context
  * exists (applied on creation).
@@ -18,6 +18,8 @@ export interface Volumes {
   master: number;
   sfx: number;
   ambience: number;
+  /** independent music bus — ducked under combat, see music.ts */
+  music: number;
 }
 
 export interface EngineBuses {
@@ -25,6 +27,8 @@ export interface EngineBuses {
   sfx: GainNode;
   /** looped beds connect here */
   ambience: GainNode;
+  /** playlist tracks connect here (through the player's own duck gain) */
+  music: GainNode;
 }
 
 export interface AudioEngine {
@@ -44,6 +48,7 @@ export function createEngine(initial?: Partial<Volumes>): AudioEngine {
     master: clamp01(initial?.master ?? 1),
     sfx: clamp01(initial?.sfx ?? 1),
     ambience: clamp01(initial?.ambience ?? 1),
+    music: clamp01(initial?.music ?? 1),
   };
   let ctx: AudioContext | null = null;
   let master: GainNode | null = null;
@@ -54,6 +59,7 @@ export function createEngine(initial?: Partial<Volumes>): AudioEngine {
     master.gain.value = volumes.master;
     buses.sfx.gain.value = volumes.sfx;
     buses.ambience.gain.value = volumes.ambience;
+    buses.music.gain.value = volumes.music;
   };
 
   return {
@@ -64,9 +70,10 @@ export function createEngine(initial?: Partial<Volumes>): AudioEngine {
         ctx = new AudioContext();
         master = ctx.createGain();
         master.connect(ctx.destination);
-        buses = { sfx: ctx.createGain(), ambience: ctx.createGain() };
+        buses = { sfx: ctx.createGain(), ambience: ctx.createGain(), music: ctx.createGain() };
         buses.sfx.connect(master);
         buses.ambience.connect(master);
+        buses.music.connect(master);
         applyVolumes();
       }
       if (ctx.state !== 'running') await ctx.resume();
@@ -75,6 +82,7 @@ export function createEngine(initial?: Partial<Volumes>): AudioEngine {
       if (v.master !== undefined) volumes.master = clamp01(v.master);
       if (v.sfx !== undefined) volumes.sfx = clamp01(v.sfx);
       if (v.ambience !== undefined) volumes.ambience = clamp01(v.ambience);
+      if (v.music !== undefined) volumes.music = clamp01(v.music);
       applyVolumes();
     },
     getVolumes: () => ({ ...volumes }),

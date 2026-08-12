@@ -36,7 +36,9 @@ export type PieceKind =
   // mast must take its ratlines and its pennant.
   | 'pennant' // masthead streamer / ensign — the wind telltale
   | 'figurehead'
-  | 'ratlines' // rung ladder across a shroud fan
+  // NOTE: ratlines are NOT a piece. They are rendered by src/ropes from the
+  // same solved points buffer as the shrouds they are seized to (§V.45); the
+  // ship system emits only the intent — see ratlinePlan.ts.
   | 'gunport' // port frames + lids along a hull section
   | 'channel' // chainplate ironwork + deadeyes + lanyards
   | 'headrail' // beakhead rails, stem → bowsprit
@@ -56,8 +58,16 @@ export type SocketType = 'rope-anchor' | 'cannon-mount' | 'damage-zone' | 'fixtu
 export interface SocketDef {
   id: string;
   type: SocketType;
-  /** piece-local position */
+  /** piece-local position — the FLAT, undisplaced station for cloth anchors */
   position: Vec3;
+  /**
+   * Present only on anchors sewn to a SAIL: the point's (u, v) in the sail's
+   * own cloth parameter space. `position` is where it sits on the flat panel;
+   * the live position is that panel point plus the cloth displacement, which
+   * ShipAssembly resolves through sailShape.ts. A sail anchor that ignored
+   * this would sit on the yard while the canvas bellied away from it.
+   */
+  cloth?: [number, number];
 }
 
 export type DamageStateId = 'intact' | 'holed' | 'destroyed';

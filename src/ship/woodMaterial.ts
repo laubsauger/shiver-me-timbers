@@ -25,8 +25,10 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
+import { bandLimitedEdge, periodResolved } from './bandLimit';
 import type { DeckFieldSampler } from './deckFieldTexture';
 import { waterLighting } from '../caustics';
+import { deckWetness } from '../deckwater';
 import { hash2, triplanarFbm } from '../terrain/noise';
 import { reliefNormal } from './surfaceRelief';
 import { shipMaterialParams, type ShipMaterialParams } from '../params/ship';
@@ -91,6 +93,14 @@ export interface WoodTones {
  */
 const SPAR_STAVES = 8;
 
+/**
+ * Feathering width of a wale strake's edge, as a fraction of the wale repeat.
+ * Named because it is now also the feature width the wale's band limit is
+ * measured against (§V.48) — the two must be the same number or the limit is
+ * gating on something the shader does not actually draw.
+ */
+const WALE_EDGE = 0.06;
+
 export interface ShipMaterialHandle {
   material: THREE.MeshStandardNodeMaterial;
   /** re-read live params (Tweakpane mutates them in place, §V16) */
@@ -138,6 +148,23 @@ export function createWoodMaterial(
     .mul(uGrainScale)
     .mul(vec3(1, 1, uGrainStretch));
   const grain = triplanarFbm(samplePos, normalLocal, uSharpness, p.grainOctaves);
+  /**
+   * §V.48 for the grain RIDGES. fbm is not periodic but its finest octave is
+   * still a fixed spatial frequency, and that octave is the one `reliefNormal`
+   * differentiates hardest. `grainRelief` is only 4 mm, but 4 mm of random
+   * height across a one-pixel footprint is a ~20° normal error, which is
+   * speckle. Fades on the finest octave's own footprint, taking the worst of
+   * the three axes since tri-planar picks a different pair per face.
+   *
+   * The grain's COLOUR is deliberately left alone: tone shimmer is mild where
+   * random normals are not, and losing it would flatten the hull to one
+   * painted colour at exactly the distance the ship is usually seen from.
+   */
+  const finestOctave = samplePos.mul(2 ** Math.max(0, p.grainOctaves - 1));
+  const gw = finestOctave.dFdx().abs().add(finestOctave.dFdy().abs());
+  const grainResolved = float(1).sub(
+    smoothstep(float(0.4), float(1.1), gw.x.max(gw.y).max(gw.z)),
+  );
 
   // plank seams: stacked in y on vertical faces, side-by-side in x on decks,
   // and AROUND a spar (see WoodTones.sparAxis) rather than stacked up it.
@@ -156,9 +183,28 @@ export function createWoodMaterial(
     plankCoord = atan(positionLocal.z, positionLocal.y).mul(SPAR_STAVES / (Math.PI * 2));
     alongPlank = positionLocal.x;
   }
+  /**
+   * BAND LIMIT (§V.48, and the reason masts rendered BLACK at range).
+   *
+   * `resolved` covers the SMOOTH terms below — the crowned per-board lift and
+   * the per-board tone jitter — whose only failure mode is the whole repeat
+   * going sub-pixel. A 0.84 m mast at 50 m is about eight pixels wide, so all
+   * eight staves fall inside those eight pixels; `fract()` aliases, `crown`
+   * oscillates per pixel, `reliefNormal` differentiates that noise in screen
+   * space, and the shading normal comes out random (measured: correct brown
+   * timber at 5 m, pure black at 50 m).
+   *
+   * The EDGES — seams, butts, wale boundaries — are band-limited separately
+   * against their own much narrower widths by bandLimitedEdge(). Gating them
+   * on the period was the bug that left the hull speckling after the mast fix:
+   * a 0.044 m seam inside a 0.55 m plank goes sub-pixel twelve times sooner
+   * than the plank does, and every distance in between is the speckle band.
+   */
+  const resolved = periodResolved(plankCoord);
+
   const f = fract(plankCoord);
   const edgeDistance = f.min(f.oneMinus()); // 0 at a seam, 0.5 mid-plank
-  const seamMask = smoothstep(float(0), uSeamWidth, edgeDistance); // 0 = seam
+  const seamMask = bandLimitedEdge(edgeDistance, plankCoord, uSeamWidth); // 0 = seam
   const seamGroove = seamMask.oneMinus(); // 1 IN the caulked groove
 
   // every plank is its own board: slightly different tone, and laid a hair
@@ -169,7 +215,9 @@ export function createWoodMaterial(
   // returns to zero at both seams. A per-plank constant would be a step in
   // the height field, and the relief normal differentiates that field in
   // screen space — a step differentiates to a one-pixel spike at every seam.
-  const crown = sin(f.mul(Math.PI));
+  // crowned AND band-limited: the lift is the largest term in the height
+  // field, so it is the one that blows the relief normal up when it aliases
+  const crown = sin(f.mul(Math.PI)).mul(resolved);
   const plankLift = plankId.sub(0.5).mul(2).mul(crown); // −1..1, continuous
 
   // BUTT JOINTS. Real planking is short boards butted end to end, and the
@@ -183,11 +231,27 @@ export function createWoodMaterial(
   const boardLength = uPlankLength.mul(mix(float(0.7), float(1.35), plankId)).max(0.25);
   const bt = fract(alongPlank.div(boardLength).add(buttPhase));
   const buttDistance = bt.min(bt.oneMinus()).mul(boardLength); // metres to a butt
-  const buttMask = smoothstep(float(0), uButtWidth, buttDistance); // 0 = butt
+  /**
+   * Band-limited against `alongPlank` — METRES along the board — and not
+   * against `bt`. `bt` folds in `buttPhase` and `boardLength`, both per-plank
+   * constants that STEP at every seam, so its derivative spikes there and
+   * would report a filter width of thousands. `alongPlank` is the smooth
+   * coordinate the butt distance actually varies along.
+   *
+   * This is the term that dots the DECK: butts are 5 cm wide at 4.6 m
+   * spacing, the follow camera sees the deck at a grazing angle, so a pixel
+   * covers far more than 5 cm of fore-and-aft deck long before the ship is
+   * even far away.
+   */
+  const buttMask = bandLimitedEdge(buttDistance, alongPlank, uButtWidth); // 0 = butt
   const buttGroove = buttMask.oneMinus();
 
   // --- one height field, shared by colour, roughness and the relief normal
-  let height: AnyNode = grain.sub(0.5).mul(uGrainRelief).add(plankLift.mul(uPlankRelief));
+  let height: AnyNode = grain
+    .sub(0.5)
+    .mul(uGrainRelief)
+    .mul(grainResolved)
+    .add(plankLift.mul(uPlankRelief));
   height = height.sub(seamGroove.mul(uSeamDepth)); // caulking sits recessed
   // the butt groove fades out at the plank seams (× crown). Without that the
   // height field STEPS across a seam — one board grooved, its neighbour not —
@@ -196,8 +260,12 @@ export function createWoodMaterial(
     height = height.sub(buttGroove.mul(uSeamDepth).mul(0.8).mul(crown));
   }
 
+  // per-board tone jitter is a STEP at each seam — flat across a board, then a
+  // jump. Once a board is sub-pixel that step is per-pixel random albedo, so
+  // the amplitude rides `resolved` exactly as the crowned lift does.
+  const toneVar = uPlankToneVar.mul(resolved);
   const base = mix(uDark, uLight, grain).mul(
-    mix(float(1).sub(uPlankToneVar), float(1).add(uPlankToneVar), plankId),
+    mix(float(1).sub(toneVar), float(1).add(toneVar), plankId),
   );
   let color: AnyNode = mix(base.mul(uSeamDarken), base, seamMask);
   if (tones.sparAxis === undefined) {
@@ -206,13 +274,44 @@ export function createWoodMaterial(
   let rough: AnyNode = uRoughBase.add(grain.mul(0.18)).add(seamGroove.mul(0.12));
 
   if (tones.wale) {
-    // wale strakes: a THICKER belt of planking — darker, and standing proud.
-    // Smoothstepped rather than step()ped for the same reason as the crown:
-    // a hard edge in the height field spikes its screen-space derivative.
-    const waleT = fract(positionLocal.y.mul(uWaleFrequency));
-    const band = smoothstep(uWaleRatio.sub(0.03), uWaleRatio.add(0.03), waleT);
+    /**
+     * Wale strakes: a THICKER belt of planking — darker, and standing proud.
+     *
+     * Written as a SIGNED DISTANCE to the belt rather than as a smoothstep on
+     * `fract` directly. `smoothstep(ratio-h, ratio+h, fract(c))` is smooth at
+     * the top of the belt and a HARD STEP at the fract wrap at its bottom, so
+     * it was smoothing one edge of the wale and leaving the other as a raw
+     * discontinuity in the height field — a one-pixel bright line the whole
+     * length of the ship, exactly the artifact the old comment claimed to have
+     * avoided. Centring the coordinate on the belt makes both edges the same
+     * edge, and then one band limit covers both (§V.48).
+     */
+    const waleCoord = positionLocal.y.mul(uWaleFrequency);
+    const half = uWaleRatio.mul(0.5);
+    const centred = fract(waleCoord.sub(half).add(0.5)).sub(0.5);
+    // <0 inside the belt, >0 outside; +half the edge width centres the
+    // transition on the true boundary, matching the old ±0.03 feathering
+    const waleDistance = centred.abs().sub(half).add(WALE_EDGE * 0.5);
+    const band = bandLimitedEdge(waleDistance, waleCoord, float(WALE_EDGE));
     color = mix(color.mul(uWaleDarken), color, band);
     height = height.add(band.oneMinus().mul(uWaleRelief));
+  }
+
+  // --- deck water (§V9/§T.31). Built-but-unwired until this call exists: the
+  // solver can be running perfectly and reach zero pixels, which is exactly
+  // what happened — `deckWetness()` appeared nowhere outside src/deckwater, so
+  // toggling the panel did nothing and the speckle everyone was chasing turned
+  // out to be the heightfield above, not the water at all. Applied only to the
+  // deck family, and multiplicatively, so it composes with our own relief
+  // instead of replacing it: wet timber's grain flattens under the film, which
+  // is what `reliefScale` expresses.
+  if (tones.deckField !== undefined) {
+    const wet = deckWetness({
+      shipLocalPos: uShipWorldInverse.mul(vec4(positionWorld, 1)).xyz,
+    });
+    color = color.mul(wet.tint);
+    rough = rough.mul(wet.roughnessScale);
+    height = height.mul(wet.reliefScale).add(wet.heightAdd);
   }
 
   // --- the deck heightfield (§T.34 / talk "Surface Water: Setup") -----------

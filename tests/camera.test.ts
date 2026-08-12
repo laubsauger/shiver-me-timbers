@@ -418,6 +418,171 @@ describe('free-dive below the surface', () => {
 });
 
 /**
+ * WHY: reported twice from real verification slots. The caustics agent set
+ * a close-up hull vantage and "the free camera overrode both my position
+ * and my per-frame transform lock, so my closest look was ~25 m out"; the
+ * ship agent had a property stomped until they resorted to
+ * Object.defineProperty(..., {writable: false}). A screenshot forces rAF
+ * frames, so ANY pose an agent sets must survive update() being called
+ * repeatedly — that is the whole §V22 loop, and a browser slot spent
+ * fighting the camera is a slot lost.
+ */
+describe('debug vantage (setDebugPose)', () => {
+  const pos: [number, number, number] = [6, 2.5, -14];
+  const aim: [number, number, number] = [0, 3, 0];
+
+  it('holds an exact pose through hundreds of frames in follow mode', () => {
+    const rig = mountCam();
+    try {
+      for (let i = 0; i < 600; i++) rig.cam.update(rig.ship, 1 / 60);
+      rig.cam.setDebugPose(pos, aim);
+      const pinned = rig.camera.position.clone();
+      const quat = rig.camera.quaternion.clone();
+      expect(pinned.toArray()).toEqual(pos); // exact, not damped toward
+      for (let i = 0; i < 600; i++) rig.cam.update(rig.ship, 1 / 60);
+      expect(rig.camera.position.toArray()).toEqual(pos);
+      expect(rig.camera.quaternion.equals(quat)).toBe(true);
+      expect(rig.cam.isDebugPinned()).toBe(true);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('outranks free mode, including with fly keys held down', () => {
+    const rig = mountCam();
+    try {
+      rig.key('keydown', 'KeyC');
+      rig.cam.setDebugPose(pos, aim);
+      rig.key('keydown', 'KeyW'); // someone leaning on the fly key
+      rig.key('keydown', 'ShiftLeft');
+      for (let i = 0; i < 600; i++) rig.cam.update(rig.ship, 1 / 60);
+      expect(rig.camera.position.toArray()).toEqual(pos);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('holds a vantage right up against the hull — no minRadius floor', () => {
+    const rig = mountCam();
+    try {
+      // the caustics agent needed metres, not the ~25 m follow mode gave
+      const close: [number, number, number] = [1.5, 1.2, 3];
+      rig.cam.setDebugPose(close, [0, 1, 3]);
+      for (let i = 0; i < 300; i++) rig.cam.update(rig.ship, 1 / 60);
+      expect(rig.camera.position.toArray()).toEqual(close);
+      expect(rig.camera.position.length()).toBeLessThan(cameraParams.minRadius);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('pins below the waterline even with follow-mode diving disabled', () => {
+    const rig = mountCam();
+    const wasAllowed = cameraParams.allowUnderwater;
+    cameraParams.allowUnderwater = false;
+    try {
+      const deep: [number, number, number] = [0, -18, 20];
+      rig.cam.setDebugPose(deep, [0, 0, 0]);
+      for (let i = 0; i < 300; i++) rig.cam.update(rig.ship, 1 / 60, () => 3);
+      expect(rig.camera.position.toArray()).toEqual(deep);
+    } finally {
+      cameraParams.allowUnderwater = wasAllowed;
+      rig.done();
+    }
+  });
+
+  it('accepts a Vector3 as well as an array, and keeps the aim if omitted', () => {
+    const rig = mountCam();
+    try {
+      rig.cam.setDebugPose(new Vector3(...pos), aim);
+      const quat = rig.camera.quaternion.clone();
+      rig.cam.setDebugPose([8, 2.5, -14]); // move, same aim direction
+      expect(rig.camera.quaternion.angleTo(quat)).toBeLessThan(1e-6);
+      expect(rig.camera.position.x).toBe(8);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('releases without jumping, and C releases it too', () => {
+    const rig = mountCam();
+    try {
+      rig.key('keydown', 'KeyC'); // free mode
+      rig.cam.setDebugPose(pos, aim);
+      for (let i = 0; i < 120; i++) rig.cam.update(rig.ship, 1 / 60);
+      rig.cam.clearDebugPose();
+      expect(rig.cam.isDebugPinned()).toBe(false);
+      // free mode adopts the parked pose: released ≠ teleported
+      for (let i = 0; i < 600; i++) rig.cam.update(rig.ship, 1 / 60);
+      expect(rig.camera.position.toArray()).toEqual(pos);
+
+      // and the C key is an explicit "give me the camera back"
+      rig.cam.setDebugPose(pos, aim);
+      expect(rig.cam.isDebugPinned()).toBe(true);
+      rig.key('keydown', 'KeyC');
+      expect(rig.cam.isDebugPinned()).toBe(false);
+      expect(rig.cam.getMode()).toBe('follow');
+    } finally {
+      rig.done();
+    }
+  });
+});
+
+/**
+ * WHY: the same report, from the other direction. Free mode's contract is
+ * that it holds the pose it was left at — so overwriting a pose set from
+ * outside is the same bug as drifting, not a missing feature.
+ */
+describe('free mode yields to an externally set pose', () => {
+  it('adopts camera.position written from the console', () => {
+    const rig = mountCam();
+    try {
+      rig.key('keydown', 'KeyC');
+      for (let i = 0; i < 60; i++) rig.cam.update(rig.ship, 1 / 60);
+      rig.camera.position.set(3, 1.8, 9); // what an agent types in devtools
+      for (let i = 0; i < 600; i++) rig.cam.update(rig.ship, 1 / 60);
+      expect(rig.camera.position.toArray()).toEqual([3, 1.8, 9]);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('adopts an external lookAt and then flies along the NEW view axis', () => {
+    const rig = mountCam();
+    try {
+      rig.key('keydown', 'KeyC');
+      for (let i = 0; i < 60; i++) rig.cam.update(rig.ship, 1 / 60);
+      rig.camera.position.set(0, 0, 0);
+      rig.camera.lookAt(new Vector3(100, 0, 0)); // now facing +x
+      rig.cam.update(rig.ship, 1 / 60);
+      rig.key('keydown', 'KeyW');
+      for (let i = 0; i < 60; i++) rig.cam.update(rig.ship, 1 / 60);
+      expect(rig.camera.position.x).toBeGreaterThan(1);
+      expect(Math.abs(rig.camera.position.z)).toBeLessThan(0.05);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('an external teleport carries no leftover momentum', () => {
+    const rig = mountCam();
+    try {
+      rig.key('keydown', 'KeyC');
+      rig.key('keydown', 'KeyW'); // build up speed first
+      for (let i = 0; i < 120; i++) rig.cam.update(rig.ship, 1 / 60);
+      rig.key('keyup', 'KeyW');
+      rig.camera.position.set(50, 20, 50);
+      rig.cam.update(rig.ship, 1 / 60);
+      const landed = rig.camera.position.clone();
+      for (let i = 0; i < 600; i++) rig.cam.update(rig.ship, 1 / 60);
+      expect(rig.camera.position.equals(landed)).toBe(true);
+    } finally {
+      rig.done();
+    }
+  });
+});
+
+/**
  * WHY: §V2 render interpolation. main.ts hands update() an INTERPOLATED
  * copy of the ship pose (lerp of prev→curr sim tick) — if the camera
  * ignored it, or chased the raw tick pose, the ship would look smooth and

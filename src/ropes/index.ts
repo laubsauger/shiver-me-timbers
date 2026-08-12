@@ -11,10 +11,21 @@ import { ropeParams } from '../params/ropes';
 import type { Vec3Like } from './catenaryMath';
 import { createRopeCompute, type RopeCompute } from './ropeCompute';
 import { createRopeMesh } from './ropeMesh';
+import { createRatlineMesh } from './ratlineMesh';
+import { packRungs, type RungDescriptor } from './ratlines';
 
 export interface RopesOptions {
   /** buffer + instance capacity; setRope index must stay below this */
   maxRopes: number;
+  /**
+   * §V45 ratline rungs, built once from the ship's ratline plan:
+   *   buildRungDescriptors(buildRatlinePlan(blueprint), riggingPlan)
+   * They ride the SAME points buffer as the shrouds, so they need no compute
+   * and no per-frame work — pass them here and they are simply drawn. Omitted
+   * or empty means no ladders, which is the correct result for a ship class
+   * whose masts have no chainplate fan.
+   */
+  rungs?: RungDescriptor[];
 }
 
 export interface Ropes {
@@ -40,6 +51,8 @@ export interface Ropes {
   mesh: THREE.Object3D;
   /** dev handle: the GPU-written buffers, for readback verification */
   buffers: Pick<RopeCompute, 'points' | 'tangents' | 'descA' | 'descB' | 'pointsPerRope'>;
+  /** §V45 rung meshes, or null when the ship has no chainplate fans */
+  ratlines: ReturnType<typeof createRatlineMesh> | null;
   dispose(): void;
 }
 
@@ -51,6 +64,33 @@ export function createRopes(opts: RopesOptions): Ropes {
   const segments = ropeParams.segmentsPerRope;
   const rc = createRopeCompute(maxRopes, segments);
   const rm = createRopeMesh(rc, maxRopes, segments);
+
+  // §V45 ratlines: drawn from the shrouds' own solved curve, so they cost one
+  // extra draw pair and nothing else. They join the SAME group main.ts already
+  // adds to the scene, so wiring them needs no scene-graph change.
+  const rungs = opts.rungs ?? [];
+  const ratlines = rungs.length > 0
+    ? createRatlineMesh(rc, rungs.length, segments, rm.regime)
+    : null;
+  if (ratlines !== null) {
+    packRungs(rungs, ratlines.descA.array as Float32Array, ratlines.descB.array as Float32Array);
+    ratlines.markDirty();
+    ratlines.setRungCount(rungs.length);
+    rm.mesh.add(ratlines.nearMesh, ratlines.farMesh);
+  }
+
+  // §V42 LOD needs the camera, but a compute pass has no camera context —
+  // reading a render-stage camera node inside the kernel dereferences null at
+  // build time and kills the boot. Feed it from the render side instead: three
+  // hands onBeforeRender the live camera, one frame ahead of the next compute
+  // dispatch, which is plenty for a distance gate.
+  // Perspective only: the shadow pass calls this too, with the light's
+  // orthographic camera, and the sun's position is not the viewer's.
+  rm.nearMesh.onBeforeRender = (_renderer, _scene, camera): void => {
+    if ((camera as THREE.PerspectiveCamera).isPerspectiveCamera === true) {
+      rc.camPos.setFromMatrixPosition(camera.matrixWorld);
+    }
+  };
 
   const arrA = rc.descA.value.array as Float32Array;
   const arrB = rc.descB.value.array as Float32Array;
@@ -91,8 +131,10 @@ export function createRopes(opts: RopesOptions): Ropes {
     computeNode: rc.computeNode,
     mesh: rm.mesh,
     buffers: rc,
+    ratlines,
     dispose(): void {
       rm.dispose();
+      ratlines?.dispose();
     },
   };
 }

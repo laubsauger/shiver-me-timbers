@@ -23,6 +23,7 @@
 import * as THREE from 'three/webgpu';
 import { islandParams } from '../params/island';
 import { findShoreRadius, generateIslandHeightmap, gradientAt, type IslandHeightmap } from './heightmap';
+import type { ArchetypeName } from './archetypes';
 import { createIslandMesh, selectTerrainLod, type IslandMeshHandle } from './islandMesh';
 import { createRocks, type Rocks } from './rocks';
 import { createIslandPalms, type IslandPalms } from './palms';
@@ -47,6 +48,12 @@ export interface CreateIslandOptions {
    * drives its own materials.
    */
   materials?: IslandMaterials;
+  /**
+   * Silhouette families already used in this world. A world where two of five
+   * islands share a shape fails "identifiable from miles out" as surely as one
+   * where all five do (§V43), so the archipelago hands out distinct ones.
+   */
+  avoidArchetypes?: readonly ArchetypeName[];
 }
 
 /** per-frame inputs an island needs from the sim/render side */
@@ -153,7 +160,7 @@ export function createIsland(opts: CreateIslandOptions): Island {
     opts.radius !== undefined
       ? { ...islandParams, radius: opts.radius, ...islandPeakHeights(opts.radius) }
       : islandParams;
-  const heightmap = generateIslandHeightmap(opts.seed, p);
+  const heightmap = generateIslandHeightmap(opts.seed, p, opts.avoidArchetypes);
 
   const shared = opts.materials;
   const terrain = createIslandMesh(heightmap, p.skirtDepth, shared?.terrain);

@@ -124,6 +124,10 @@ export interface Combat {
    * Breach positions for `shipIndex` in the frame flooding expects:
    * ship-origin-relative and world-rotated, with y measured against the LIVE
    * sea surface. Drop-in for `floodingHoles(...).positions`.
+   *
+   * The array is a per-ship scratch buffer, rewritten on the next call for
+   * the SAME ship. Feeding it straight to stepFlooding + stepShipBuoyancy in
+   * one tick is the intended use; copy it if you need to keep it.
    */
   floodHoles(state: SimState, shipIndex: number, waterHeight: number): Vec3[];
   memoryOf(shipIndex: number): CombatMemory | undefined;

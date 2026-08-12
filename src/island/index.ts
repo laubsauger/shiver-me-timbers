@@ -39,6 +39,16 @@ export {
   type CreateIslandOptions,
 } from './island';
 export {
+  ARCHETYPES,
+  buildArchetype,
+  combineFeatures,
+  featureHeight,
+  smoothMax,
+  pickArchetype,
+  type ArchetypeName,
+  type Feature,
+} from './archetypes';
+export {
   sampleSeabedHeight,
   createSeabedField,
   seabedHeightNode,

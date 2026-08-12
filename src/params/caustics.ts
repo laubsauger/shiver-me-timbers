@@ -151,9 +151,20 @@ export interface CausticsParams {
   bounceStrength: number;
   /**
    * MULTIPLICATIVE tint toward `bounceColor`, 0..1 — the albedo-coupled part
-   * of the bounce and the one that carries most of it. Bounded by
-   * construction, so it can tint timber toward the sea without ever
-   * overwhelming it.
+   * of the bounce. Bounded by construction, so it can tint timber toward the
+   * sea without ever overwhelming it.
+   *
+   * DELIBERATELY SMALL, and not because of headroom (§B.16 second finding).
+   * The sky rig ALREADY models sea bounce: sky/lighting.ts builds a
+   * HemisphereLight whose ground half is `skyParams.groundBounceColor`
+   * (#2e6d78, a saturated teal) at `ambientIntensity`. A HemisphereLight is
+   * never shadowed, so on the shaded side — where the warm sun is blocked —
+   * it is the dominant light, and it lands hardest on exactly the
+   * downward-facing surfaces this term also targets. Two independent models
+   * of one phenomenon is what made the topsides read as a slab of sea
+   * colour. The hemisphere owns the FLAT ambient bounce; this term owns only
+   * what the hemisphere cannot do — the near-water height falloff and the
+   * caustic flicker. Raising it re-creates the double count.
    */
   bounceTint: number;
   /** height (m) over which the bounce fades out going up the rig */
@@ -225,7 +236,7 @@ export interface CausticsParams {
 }
 
 export const causticsParams: CausticsParams = registerParams('caustics', {
-  enabled: false,
+  enabled: true,
   waterIor: 1.33335,
   curvatureEpsilon: 0.32,
   // ≈5× the 6.9 mm/m solar-disc blur — see the field comment above
@@ -253,7 +264,8 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
   // seen from a hull is body pigment lifted by scattered sun, not either end
   bounceColor: '#2a9a9c',
   bounceStrength: 0.06,
-  bounceTint: 0.3,
+  // 0.3 → 0.12: the sky hemisphere already supplies the flat sea bounce
+  bounceTint: 0.12,
   bounceHeightFalloff: 7.0,
   bounceSunFloor: 0.25,
   bounceSunGain: 0.85,
@@ -274,7 +286,10 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
   submergedAbsorptionR: 0.36,
   submergedAbsorptionG: 0.08,
   submergedAbsorptionB: 0.03,
-  submergedPathScale: 1.8,
+  // 1.8 → 1.4: still > 1 (light also travels back to the eye through water)
+  // but 1.8 pushed a hull 2 m down to red = 27% of blue, which reads as the
+  // same teal slab by a different route (§B.16)
+  submergedPathScale: 1.4,
 }, causticsParamsMeta());
 
 function causticsParamsMeta() {

@@ -443,132 +443,176 @@ describe('deck frame (§V9 rotation bias, §T31 grid ↔ ship mapping)', () => {
   });
 });
 
+
+/**
+ * The §V27 sensor. Two things are on trial here: that it is an EVENT and not
+ * a passive emitter, and — the user's actual complaint about the first
+ * version — that the water lands where the hull is impacting rather than
+ * along the whole length in the same variation.
+ */
 describe('bow water sensor (§V27 event-driven, §V36 σ-relative)', () => {
   const frame = FRAME;
   const p = deckWaterParams;
   const SIGMA = 1.0; // σ = 1 m → gates land on their raw multiples
+  const SLICES = 9; // hullContact's default station count
 
-  /** a stem driving hard under: every gate satisfied */
-  const burying = (over: Partial<BowWaterSample['cutwater']> = {}): BowWaterSample => ({
-    cutwater: {
-      inContact: true,
-      depth: p.immersionFullSigma * SIGMA,
-      rate: p.burialRateFull,
-      localZ: frame.maxZ - 1,
-      halfWidth: 2.0,
-      ...over,
-    },
+  interface HullOpts {
+    /** per-slice immersion, bow-most first; scalar = the same everywhere */
+    depth?: number | number[];
+    rate?: number | number[];
+    /** > 0 heels to starboard (starboard stations deeper) */
+    lean?: number;
+    inContact?: boolean;
+  }
+
+  /** a stand-in for hullContact's slice arrays, bow-most slice first */
+  const hull = (o: HullOpts = {}) => {
+    const per = (v: number | number[] | undefined, dflt: number): number[] =>
+      Array.isArray(v)
+        ? v
+        : Array.from({ length: SLICES }, () => (v === undefined ? dflt : v));
+    const depth = per(o.depth, p.immersionFullSigma * SIGMA);
+    const rate = per(o.rate, p.burialRateFull);
+    const lean = o.lean ?? 0;
+    // hullContact's own bow-biased spacing (t^1.6 from the stem): roughly half
+    // the stations sit in the forward third, because that is where the
+    // cutwater lives. Mirrored here so "the forward slices" means in this test
+    // what it means in the game.
+    const sliceZ = Array.from(
+      { length: SLICES },
+      (_, i) => frame.maxZ - Math.pow(i / (SLICES - 1), 1.6) * (frame.maxZ - frame.minZ),
+    );
+    const stationDepth: number[] = [];
+    for (let i = 0; i < SLICES; i++) {
+      stationDepth.push(depth[i] - lean, depth[i] + lean); // port, starboard
+    }
+    return {
+      inContact: o.inContact ?? true,
+      sliceZ,
+      sliceDepth: depth,
+      sliceRate: rate,
+      sliceHalfWidth: Array.from({ length: SLICES }, () => 2.0),
+      depth: stationDepth,
+    };
+  };
+
+  const sample = (o: HullOpts = {}, over: Partial<BowWaterSample> = {}): BowWaterSample => ({
+    hull: hull(o),
     speed: p.speedFull,
     seaSigma: SIGMA,
+    ...over,
   });
 
-  it('fires on a hard burial, laying a row of splats across the bow', () => {
-    const s = createBowWaterSensor();
-    const out = s.update(burying(), 1 / 60, p, frame);
-    expect(out).toHaveLength(p.splashCount);
-    const volume = out.reduce((a, b) => a + b.amount, 0);
-    expect(volume).toBeCloseTo(p.splashVolume, 6); // full strength = full volume
+  /** only the forward third is driving under — the ordinary pitching case */
+  const bowOnly = () =>
+    sample({
+      depth: Array.from({ length: SLICES }, (_, i) => (i < 3 ? p.immersionFullSigma : 0)),
+      rate: Array.from({ length: SLICES }, (_, i) => (i < 3 ? p.burialRateFull : 0)),
+    });
+
+  it('injects ONLY where the hull is actually burying, not along the length', () => {
+    // The user's complaint about v1, made into a test: "it's happening along
+    // the whole length of the ship in the same kind of variation… not really
+    // modulated by where we're actually impacting". With only the forward
+    // stations driving under, nothing may land amidships or aft — the solve
+    // transports it there, the sensor must not paint it there.
+    const out = createBowWaterSensor().update(bowOnly(), 1 / 60, p, frame);
+    expect(out.length).toBeGreaterThan(0);
     for (const q of out) {
-      expect(q.v).toBeGreaterThan(0.5); // forward third — this is green water
-      expect(q.v).toBeLessThanOrEqual(1);
-      expect(q.u).toBeGreaterThanOrEqual(0);
-      expect(q.u).toBeLessThanOrEqual(1);
+      expect(q.v).toBeGreaterThan(0.7); // forward third only
     }
-    // a row, not a bucket: the splats must actually differ across the beam
-    expect(new Set(out.map((q) => q.u)).size).toBe(p.splashCount);
   });
 
-  it('a bow that is merely immersed at speed splashes NOTHING (§V27)', () => {
+  it('weights each splat by how hard THAT station buried', () => {
+    // Uniform amounts would be the same "same kind of variation" bug wearing
+    // a per-slice disguise.
+    const graded = sample({
+      depth: [1.6, 1.6, 1.6, 0, 0, 0, 0, 0, 0],
+      rate: [p.burialRateFull, (p.burialRate + p.burialRateFull) / 2, p.burialRate * 1.01, 0, 0, 0, 0, 0, 0],
+    });
+    const out = createBowWaterSensor().update(graded, 1 / 60, p, frame);
+    expect(out.length).toBe(3);
+    const amounts = out.map((q) => q.amount);
+    expect(new Set(amounts).size).toBe(3); // genuinely graded, not one value
+    expect(Math.max(...amounts)).toBeGreaterThan(Math.min(...amounts) * 2);
+  });
+
+  it('lands the water on the BURIED side, not on the centreline', () => {
+    // She rolls down and ships it over the lee rail; painting it up the
+    // middle is what makes a deck read as a decal rather than a deck.
+    const [uCentre] = deckUv(0, 0, frame);
+    const stbd = createBowWaterSensor().update(sample({ lean: 0.8 }), 1 / 60, p, frame);
+    const port = createBowWaterSensor().update(sample({ lean: -0.8 }), 1 / 60, p, frame);
+    expect(stbd[0].u).toBeGreaterThan(uCentre); // starboard rail down
+    expect(port[0].u).toBeLessThan(uCentre);
+    // and an evenly buried hull leans neither way
+    expect(createBowWaterSensor().update(sample({ lean: 0 }), 1 / 60, p, frame)[0].u)
+      .toBeCloseTo(uCentre, 6);
+  });
+
+  it('splash depth is in metres of standing water, not arbitrary units', () => {
+    // It has to be comparable with the deck field it lands on: the waterway
+    // is 28 mm deep and a hatch coaming 180 mm, and water that ignores both
+    // is not water. A full-strength event is ankle-deep, not waist-deep.
+    const out = createBowWaterSensor().update(sample(), 1 / 60, p, frame);
+    expect(Math.max(...out.map((q) => q.amount))).toBeCloseTo(p.splashVolume, 6);
+    expect(p.splashVolume).toBeGreaterThan(0.02); // deeper than the waterway
+    expect(p.splashVolume).toBeLessThan(0.35); // shallower than the bulwark
+  });
+
+  it('a hull that is merely immersed at speed splashes NOTHING (§V27)', () => {
     // THE invariant this module exists for. hullContact measures the stem wet
     // on ~55% of ticks at cruising speed, so gating on immersion + speed alone
     // would fire almost every tick — a passive emitter wearing an event's
     // clothing, which §V27 forbids outright.
     const s = createBowWaterSensor();
     for (let i = 0; i < 500; i++) {
-      expect(s.update(burying({ rate: 0 }), 1 / 60, p, frame)).toEqual([]);
+      expect(s.update(sample({ rate: 0 }), 1 / 60, p, frame)).toEqual([]);
     }
   });
 
   it('fires once per burial, not once per tick', () => {
     const s = createBowWaterSensor();
-    expect(s.update(burying(), 1 / 60, p, frame).length).toBeGreaterThan(0);
+    expect(s.update(sample(), 1 / 60, p, frame).length).toBeGreaterThan(0);
     for (let i = 0; i < 120; i++) {
-      expect(s.update(burying(), 1 / 60, p, frame)).toEqual([]);
+      expect(s.update(sample(), 1 / 60, p, frame)).toEqual([]);
     }
   });
 
-  it('rearms when the stem lifts clear, then fires on the next wave', () => {
+  it('rearms when the hull lifts clear, then fires on the next sea', () => {
     const s = createBowWaterSensor();
-    s.update(burying(), 1 / 60, p, frame);
-    // ride out the refractory with the bow in the air (rate 0 there anyway)
-    for (let i = 0; i < 60; i++) {
-      s.update({ ...burying(), cutwater: { ...burying().cutwater, inContact: false } }, 1 / 60, p, frame);
-    }
+    s.update(sample(), 1 / 60, p, frame);
+    for (let i = 0; i < 60; i++) s.update(sample({ inContact: false }), 1 / 60, p, frame);
     expect(s.armed).toBe(true);
-    expect(s.update(burying(), 1 / 60, p, frame).length).toBe(p.splashCount);
+    expect(s.update(sample(), 1 / 60, p, frame).length).toBeGreaterThan(0);
   });
 
   it('the immersion gate is σ-relative: the same metres, a different sea (§V36)', () => {
     // An absolute metre gate silently changes meaning when the spectrum moves
     // — §B.12 twice over. Identical hull telemetry must ship water in a calm
     // and not in a gale, because in a gale that is an ordinary wave.
-    const depth = 0.9;
-    const calm = createBowWaterSensor();
-    const gale = createBowWaterSensor();
-    const sample = (sigma: number): BowWaterSample => ({
-      ...burying({ depth }),
-      seaSigma: sigma,
-    });
-    expect(calm.update(sample(0.5), 1 / 60, p, frame).length).toBeGreaterThan(0);
-    expect(gale.update(sample(4.0), 1 / 60, p, frame)).toEqual([]);
+    const tele = (sigma: number) => sample({ depth: 0.9 }, { seaSigma: sigma });
+    expect(createBowWaterSensor().update(tele(0.5), 1 / 60, p, frame).length)
+      .toBeGreaterThan(0);
+    expect(createBowWaterSensor().update(tele(4.0), 1 / 60, p, frame)).toEqual([]);
   });
 
-  it('a stem clear of the water cannot ship any (and rearms)', () => {
+  it('a hull clear of the water cannot ship any (and rearms)', () => {
     const s = createBowWaterSensor();
-    const airborne = burying();
-    airborne.cutwater.inContact = false;
-    expect(s.update(airborne, 1 / 60, p, frame)).toEqual([]);
+    expect(s.update(sample({ inContact: false }), 1 / 60, p, frame)).toEqual([]);
     expect(s.armed).toBe(true);
   });
 
   it('below the speed gate she shoulders water aside instead of scooping it', () => {
     const s = createBowWaterSensor();
-    expect(s.update({ ...burying(), speed: 0 }, 1 / 60, p, frame)).toEqual([]);
+    expect(s.update(sample({}, { speed: 0 }), 1 / 60, p, frame)).toEqual([]);
   });
 
-  it('event volume scales with how hard she buried, not on/off', () => {
-    const hard = createBowWaterSensor().update(burying(), 1 / 60, p, frame);
-    const soft = createBowWaterSensor().update(
-      burying({
-        depth: (p.immersionSigma + p.immersionFullSigma) / 2,
-        rate: (p.burialRate + p.burialRateFull) / 2,
-      }),
-      1 / 60,
-      p,
-      frame,
-    );
-    const sum = (a: { amount: number }[]) => a.reduce((s, q) => s + q.amount, 0);
-    expect(sum(soft)).toBeGreaterThan(0);
-    expect(sum(soft)).toBeLessThan(sum(hard));
-  });
-
-  it('a fine entry throws a narrower sheet than a bluff bow', () => {
-    const narrow = createBowWaterSensor().update(burying({ halfWidth: 0.4 }), 1 / 60, p, frame);
-    const wide = createBowWaterSensor().update(burying({ halfWidth: 4.0 }), 1 / 60, p, frame);
-    const span = (a: { u: number }[]) => Math.max(...a.map((q) => q.u)) - Math.min(...a.map((q) => q.u));
-    expect(span(narrow)).toBeLessThan(span(wide));
-  });
-
-  it('never emits more splats than the shader has slots, or off-grid uv', () => {
-    // MAX_SPLASHES is the uniform-array capacity; a longer row would silently
-    // drop its tail, and off-grid uv would splash into a clamped corner cell.
+  it('never emits more splats than the shader has slots', () => {
+    // MAX_SPLASHES is the uniform-array capacity; a longer list would silently
+    // drop its tail, and it must drop the WEAKEST impacts, not a random tail.
     const s = createBowWaterSensor();
-    const out = s.update(
-      burying({ halfWidth: 100 }),
-      1 / 60,
-      { ...p, splashCount: 40 },
-      { ...frame, minX: -0.5, maxX: 0.5 },
-    );
+    const out = s.update(sample(), 1 / 60, { ...p, splashCount: 40 }, frame);
     expect(out.length).toBeLessThanOrEqual(MAX_SPLASHES);
     for (const q of out) {
       expect(q.u).toBeGreaterThanOrEqual(0);
@@ -580,7 +624,7 @@ describe('bow water sensor (§V27 event-driven, §V36 σ-relative)', () => {
 
   it('non-finite telemetry cannot fire an event (§V28)', () => {
     const s = createBowWaterSensor();
-    expect(s.update(burying({ depth: NaN }), 1 / 60, p, frame)).toEqual([]);
-    expect(s.update({ ...burying(), speed: NaN }, 1 / 60, p, frame)).toEqual([]);
+    expect(s.update(sample({ depth: NaN }), 1 / 60, p, frame)).toEqual([]);
+    expect(s.update(sample({}, { speed: NaN }), 1 / 60, p, frame)).toEqual([]);
   });
 });

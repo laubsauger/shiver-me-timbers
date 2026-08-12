@@ -165,6 +165,12 @@ export interface ShipDetailParams {
   anchorSize: number;
   /** decorative sheer moulding section (m) */
   mouldingSize: number;
+  /** gathering bays along a furled yard — the cloth swags between gaskets */
+  sailBuntBays: number;
+  /** how far a bunt hangs below the yard, as a fraction of its own thickness */
+  sailBuntSag: number;
+  /** how much fatter a bay's centre is than its gaskets */
+  sailBuntSwell: number;
   /** how much every detail generator jitters its stations, 0..1 (§V2 seeded) */
   irregularity: number;
 }
@@ -172,9 +178,9 @@ export interface ShipDetailParams {
 export const shipDetailParams: ShipDetailParams = registerParams(
   'ship-detail',
   {
-    ratlineSpacing: 0.42, ratlineTopFrac: 0.66, ratlineRadius: 0.022,
+    ratlineSpacing: 0.42, ratlineTopFrac: 0.5, ratlineRadius: 0.022,
     deadeyeRadius: 0.15,
-    gunportSize: 0.78, gunportY: 1.55, gunportsPerSection: 2,
+    gunportSize: 0.78, gunportY: 1.55, gunportsPerSection: 3,
     castleRailHeight: 0.95,
     pinCount: 7,
     pennantFly: 4.2, pennantHoist: 0.55,
@@ -182,6 +188,7 @@ export const shipDetailParams: ShipDetailParams = registerParams(
     ensignStaff: 2.4,
     anchorSize: 2.1,
     mouldingSize: 0.14,
+    sailBuntBays: 3, sailBuntSag: 1.15, sailBuntSwell: 2.1,
     irregularity: 1,
   },
   {
@@ -201,6 +208,9 @@ export const shipDetailParams: ShipDetailParams = registerParams(
     ensignStaff: { min: 0.5, max: 6, step: 0.1 },
     anchorSize: { min: 0.5, max: 5, step: 0.1 },
     mouldingSize: { min: 0.03, max: 0.5, step: 0.01 },
+    sailBuntBays: { min: 1, max: 6, step: 1 },
+    sailBuntSag: { min: 0, max: 3, step: 0.05 },
+    sailBuntSwell: { min: 1, max: 4, step: 0.05 },
     irregularity: { min: 0, max: 2, step: 0.05 },
   },
 );
@@ -215,10 +225,14 @@ export const shipDetailParams: ShipDetailParams = registerParams(
  * comes about, and fall slack when she runs downwind at speed.
  */
 export interface ShipFlagParams {
-  /** apparent wind speed (m/s) at which the flag streams dead straight */
+  /**
+   * Apparent wind speed (m/s) at which the flag streams dead straight. MUST
+   * sit above the usual sailing breeze or the telltale saturates and stops
+   * carrying information — it was 7 against a default wind of 11.
+   */
   flagStreamRef: number;
-  /** droop of the fly when becalmed, as a fraction of the fly length */
-  flagSag: number;
+  /** angle (rad) the fly hangs below horizontal when the air is dead still */
+  flagHang: number;
   /** travelling-ripple amplitude, fraction of the hoist */
   flagWaveAmp: number;
   flagWaveFreq: number; // rad/s
@@ -238,8 +252,8 @@ export interface ShipFlagParams {
 export const shipFlagParams: ShipFlagParams = registerParams(
   'ship-flag',
   {
-    flagStreamRef: 7,
-    flagSag: 0.42,
+    flagStreamRef: 16,
+    flagHang: 1.38,
     flagWaveAmp: 0.55, flagWaveFreq: 5.5, flagWaveCount: 1.6,
     flagSnap: 0.5,
     flagResponse: 2.6,
@@ -248,8 +262,8 @@ export const shipFlagParams: ShipFlagParams = registerParams(
     flagLeeDarken: 0.72, flagAmbientLift: 0.08,
   },
   {
-    flagStreamRef: { min: 1, max: 25, step: 0.5 },
-    flagSag: { min: 0, max: 1.2, step: 0.01 },
+    flagStreamRef: { min: 1, max: 40, step: 0.5 },
+    flagHang: { min: 0, max: 1.57, step: 0.01 },
     flagWaveAmp: { min: 0, max: 2, step: 0.01 },
     flagWaveFreq: { min: 0, max: 16, step: 0.1 },
     flagWaveCount: { min: 0.2, max: 6, step: 0.1 },
@@ -372,9 +386,16 @@ export interface ShipMaterialParams {
   wetSmooth: number; // …and smoother (roughness multiplier reduction)
   wetlineFade: number; // metres over which the boot-top fades in
   roughBase: number; // dry timber base roughness
-  /** how strongly the deck heightfield's per-board offsets show as relief */
+  /**
+   * How strongly the deck heightfield's per-board offsets show as relief and
+   * as a tone shift. Both were far too strong (2.4 / 9) and were reading an
+   * UNMIPPED texture, which is what produced the deck speckle — see §V.48 in
+   * deckFieldTexture.ts. The procedural plank terms in woodMaterial already
+   * carry most of the board-to-board variation; the field's job is the
+   * low-frequency structure those cannot know (wear hollows, the hog of the
+   * hull), so it only needs to whisper.
+   */
   deckFieldRelief: number;
-  /** …and as a tone shift, so proud boards read in flat daylight too */
   deckFieldTone: number;
 }
 
@@ -391,19 +412,19 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     trimLight: 0x54381f, trimDark: 0x362412,
     ironLight: 0x4a4640, ironDark: 0x24211d,
     glassColor: 0x3c4a44, glassLit: 0x2a1c0c,
-    sailLight: 0xe9e1cd, sailDark: 0xd2c5aa,
+    sailLight: 0xe6dcc2, sailDark: 0xa8977a,
     sailWeaveScale: 18, sailBacklitColor: 0xfff0d2, sailBacklitStrength: 0.5,
     sailBillow: 0.34, sailWindRef: 11, sailBackBillow: 0.18, sailLuffFlap: 2.6,
     sailGustAmp: 0.3, sailGustFreq: 0.55, sailTurnSkew: 1.6, sailResponse: 2.2,
     sailFlutterAmp: 0.14, sailFlutterFreq: 2.4, sailRippleCount: 2.5,
-    sailPanelCount: 7, sailSeamDarken: 0.82, sailAmbientLift: 0.1,
-    sailBacklitFocus: 3, sailLeeDarken: 0.7, sailStainStrength: 0.24,
+    sailPanelCount: 7, sailSeamDarken: 0.7, sailAmbientLift: 0.1,
+    sailBacklitFocus: 3, sailLeeDarken: 0.7, sailStainStrength: 0.36,
     holeColor: 0x120c07,
     bumpScale: 1, grainRelief: 0.004, plankRelief: 0.006, seamDepth: 0.012,
     waleRelief: 0.02, plankToneVar: 0.05,
     bleachColor: 0xd8c9a8, bleachStrength: 0.22,
     wetDarken: 0, wetSmooth: 0, wetlineFade: 0.5, roughBase: 0.74,
-    deckFieldRelief: 2.4, deckFieldTone: 9,
+    deckFieldRelief: 1.1, deckFieldTone: 3,
   },
   {
     grainScale: { min: 0.1, max: 8, step: 0.05 },

@@ -663,6 +663,36 @@ describe('§B.12 — dry topsides must stay dry', () => {
     expect(w.wetHeight[0]).toBeGreaterThan(w.wetHeight[w.stations - 1]);
   });
 
+  it('cannot COLOUR dry topsides, at any bounce amount', () => {
+    // §B.16 second finding. The sky rig already models sea bounce with an
+    // unshadowed HemisphereLight whose ground half is a saturated teal
+    // (skyParams.groundBounceColor #2e6d78), and it lands hardest on the
+    // shaded, downward-facing surfaces this module also targets. Two models
+    // of one phenomenon is what made the topsides read as a slab of sea
+    // colour, so this module's own above-water contribution is capped at a
+    // near-neutral desaturation: it may dim timber, never repaint it.
+    const s2l = (c: number) => Math.pow((c + 0.055) / 1.055, 2.4);
+    const bounce = [0x2a, 0x9a, 0x9c].map((b) => s2l(b / 255));
+    let worstSpread = 0;
+    for (let amount = 0; amount <= 1; amount += 0.01) {
+      const f = amount * p.bounceTint;
+      const tint = bounce.map((c) => 1 - f + f * c);
+      worstSpread = Math.max(worstSpread, Math.max(...tint) - Math.min(...tint));
+      expect(Math.min(...tint)).toBeGreaterThan(0);
+      expect(Math.max(...tint)).toBeLessThanOrEqual(1);
+    }
+    // a channel spread this small cannot read as a colour cast on wood
+    expect(worstSpread).toBeLessThan(0.05);
+  });
+
+  it('keeps submerged absorption from becoming the same slab by another route', () => {
+    // a hull 2 m under should still read as timber seen through water, not
+    // as a teal silhouette — red must not collapse relative to blue
+    const t = absorptionTint(2, density, p.submergedPathScale);
+    expect(t[0] / t[2]).toBeGreaterThan(0.3);
+    expect(p.submergedPathScale).toBeGreaterThan(1); // view path is still longer
+  });
+
   it('leaves a point 3 m up a dry hull fully un-wet', () => {
     const w = new HullWetline({ bowZ: 10, sternZ: -10, stations: 4 });
     const stations = [{ x: -1, z: -10 }, { x: -1, z: 10 }];

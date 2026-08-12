@@ -25,6 +25,13 @@
  */
 import { createRng } from '../state/rng';
 import { fbm2Cpu } from '../terrain/noiseCpu';
+import {
+  buildArchetype,
+  combineFeatures,
+  pickArchetype,
+  type ArchetypeName,
+  type Feature,
+} from './archetypes';
 
 /** structural subset of params/island.ts `IslandParams` used by generation */
 export interface IslandHeightmapParams {
@@ -32,19 +39,28 @@ export interface IslandHeightmapParams {
   gridSize: number;
   peakHeight: number;
   minPeakHeight: number;
-  falloffPower: number;
   noiseScale: number;
   noiseStrength: number;
   noiseOctaves: number;
-  secondaryPeakHeight: number;
-  secondaryPeakRadius: number;
-  secondaryPeakOffset: number;
+  /** fraction of the footprint the archetype's features may occupy */
+  featureExtent: number;
+  /** metres over which two features fuse instead of creasing */
+  featureBlend: number;
+  /** coastline noise: world frequency (1/m) and amplitude as a fraction of peak */
+  coastNoiseScale: number;
+  coastNoiseStrength: number;
+  /** fraction of the radius inside which the rim envelope does not act */
+  rimStart: number;
   beachBandWidth: number;
   beachFlatness: number;
   rimDepth: number;
 }
 
 export interface IslandHeightmap {
+  /** which silhouette family this island belongs to — "the one with the spine" */
+  archetype: ArchetypeName;
+  /** the features that carry the landmass (silhouette debugging / tests) */
+  features: Feature[];
   /** row-major heights, data[iz * size + ix], meters relative to waterline 0 */
   data: Float32Array;
   /** grid resolution per side */
@@ -66,35 +82,57 @@ function beachApron(h: number, band: number, flatness: number): number {
 export function generateIslandHeightmap(
   seed: number,
   params: IslandHeightmapParams,
+  /** archetypes the caller wants avoided — the archipelago spreads silhouettes */
+  avoidArchetypes: readonly ArchetypeName[] = [],
 ): IslandHeightmap {
   const p = params;
   const size = Math.max(2, Math.floor(p.gridSize));
   const R = p.radius;
   const rng = createRng(seed);
 
-  // seed-derived noise domain offset + secondary peak placement
+  // seed-derived noise domain offsets (two independent fields: the coastline
+  // one must not correlate with the surface-detail one, or headlands would
+  // always coincide with ridges)
   const ox = rng() * 1024;
   const oz = rng() * 1024;
-  const spAngle = rng() * Math.PI * 2;
-  const spX = Math.cos(spAngle) * p.secondaryPeakOffset * R;
-  const spZ = Math.sin(spAngle) * p.secondaryPeakOffset * R;
-  const sigma = Math.max(p.secondaryPeakRadius * R, 1e-3);
+  const cx = rng() * 1024;
+  const cz = rng() * 1024;
+
+  const archetype = pickArchetype(rng, avoidArchetypes);
+  const features = buildArchetype(archetype, rng, R * p.featureExtent, p.peakHeight);
+  const blend = Math.max(p.featureBlend, 1e-3); // §V28 floored divisor
+  // amplitude relative to peak, so a taller island gets a bolder coastline —
+  // and so a zero-peak island stays fully submerged and throws below
+  const coastAmp = p.peakHeight * p.coastNoiseStrength;
+  const detailAmp = p.peakHeight * p.noiseStrength;
+  const rimStart = Math.min(Math.max(p.rimStart, 0.05), 0.99);
+  const rimSpan = Math.max(1 - rimStart, 1e-3); // §V28 floored divisor
 
   const rawHeight = (x: number, z: number): number => {
-    const d = Math.hypot(x, z) / R;
-    const dome = Math.pow(Math.max(1 - d * d, 0), p.falloffPower);
-    let shape = dome;
-    if (p.secondaryPeakHeight > 0 && p.peakHeight > 0) {
-      const dx = x - spX;
-      const dz = z - spZ;
-      const bump = Math.exp(-(dx * dx + dz * dz) / (2 * sigma * sigma));
-      // ×dome gates the bump so the rim stays exactly at -rimDepth
-      shape += (p.secondaryPeakHeight / p.peakHeight) * bump * dome;
-    }
+    const land = combineFeatures(features, x, z, blend);
+
+    // COASTLINE NOISE at absolute amplitude. The old field multiplied noise by
+    // the dome, which zeroed it exactly at the rim — the one place coastline
+    // shape lives — and measured a shore-radius variation of only 10-16%.
+    // Out here the features have already died to ~0, so this term alone
+    // decides where the land meets the water: coves, spits and headlands.
+    const coast = (fbm2Cpu(x * p.coastNoiseScale + cx, z * p.coastNoiseScale + cz, 3) * 2 - 1) * coastAmp;
+
+    // surface detail, weighted up on high ground so summits are broken and
+    // the beach apron stays walkable
     const n = fbm2Cpu(x * p.noiseScale + ox, z * p.noiseScale + oz, p.noiseOctaves) * 2 - 1;
-    // noise scales WITH the shape → 0 at the rim; noiseStrength < 1 keeps the
-    // factor positive, so shape=0 ⇒ height = -rimDepth exactly
-    const h = shape * (1 + n * p.noiseStrength) * (p.peakHeight + p.rimDepth) - p.rimDepth;
+    const relief = Math.min(Math.max(land / Math.max(p.peakHeight, 1e-3), 0), 1);
+    const detail = n * detailAmp * (0.3 + 0.7 * relief);
+
+    // RIM ENVELOPE. The rim guarantee used to be bought by multiplying the
+    // whole field by a dome that vanished at d=1, which is what made every
+    // coastline a circle. This instead leaves everything inside `rimStart`
+    // completely free and only forces the last band under water, so the
+    // guarantee costs nothing where the shore actually is.
+    const d = Math.hypot(x, z) / Math.max(R, 1e-3);
+    const t = Math.min(Math.max((d - rimStart) / rimSpan, 0), 1);
+    const edge = t * t * (3 - 2 * t);
+    const h = (land + coast + detail) * (1 - edge) + -p.rimDepth * edge;
     return beachApron(h, p.beachBandWidth, p.beachFlatness);
   };
 
@@ -140,7 +178,7 @@ export function generateIslandHeightmap(
     return a + (b - a) * fz;
   };
 
-  return { data, size, worldRadius: R, heightAt };
+  return { data, size, worldRadius: R, heightAt, archetype, features };
 }
 
 /**

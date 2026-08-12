@@ -288,6 +288,7 @@ export function bowEmission(
     | 'bowSpeedFull'
     | 'bowImpactRef'
     | 'bowContactDepth'
+    | 'bowSpeedExponent'
     | 'bowBurstRate'
     | 'bowCruiseRate'
     | 'bowCruiseSheet'
@@ -298,7 +299,13 @@ export function bowEmission(
   // water is the detachment the user reported ("it comes out from something
   // that is in the air, where there's nothing touching the water").
   if (!inContact) return { rate: 0, sheet: cruiseSheet };
-  const speedN = ramp01(speed, p.bowSpeedThreshold, p.bowSpeedFull);
+  // spray volume climbs steeply with speed, it does not ramp linearly — a
+  // galleon ghosting along at 6 kn throws the occasional sheet off the stem,
+  // not the continuous curtain a linear ramp produced
+  const speedN = Math.pow(
+    ramp01(speed, p.bowSpeedThreshold, p.bowSpeedFull),
+    Math.max(1, p.bowSpeedExponent),
+  );
   const immN = ramp01(immersionDepth, p.bowImmersionThreshold, p.bowImmersionFull);
   const impactN = ramp01(burialRate, 0, p.bowImpactRef);
   // contact ramp saturates almost immediately: ANY real immersion means the

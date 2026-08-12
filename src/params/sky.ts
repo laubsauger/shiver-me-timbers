@@ -69,8 +69,20 @@ export interface SkyParams {
   shadowMapSize: number;
   /** hemisphere ambient peak intensity */
   ambientIntensity: number;
-  /** hemisphere ground bounce color (warm sea/sand reflection) */
+  /** what the sea/sand LOOKS like — the bounce's hue before washout */
   groundBounceColor: number;
+  /**
+   * 0..1 how far both hemisphere halves are pulled toward neutral before
+   * they light anything. Ambient here is irradiance, not paint: a whole-sky
+   * integral and a diffuse sea bounce are both far less saturated than the
+   * surfaces they came from. At 0 the hull's shaded side renders as a flat
+   * teal slab, because an unshadowed light with red at 10% of blue simply
+   * overrides albedo hue — shaded oak needs the ambient's R/G above ~0.54
+   * and R/B above ~0.27 to still read as timber, and 0.5 clears both with
+   * margin. Mixing toward luminance, so raising this desaturates shade
+   * without brightening it.
+   */
+  ambientDesaturation: number;
   /**
    * Scene fog range (m) — atmospheric distance haze, NOT a view-distance cap
    * (§V30). The OCEAN no longer uses scene fog (its material sets
@@ -132,8 +144,12 @@ export const skyParams: SkyParams = registerParams(
     shadowBias: -0.0004,
     shadowExtent: 80,
     shadowMapSize: 2048,
-    ambientIntensity: 0.85,
+    // 0.85 → 0.70: the sky half moved from zenithColor to the lighter
+    // midColor, which lifted total ambient ~38%; this holds shade at roughly
+    // its previous brightness so only the HUE changes, not the exposure
+    ambientIntensity: 0.7,
     groundBounceColor: 0x2e6d78,
+    ambientDesaturation: 0.5,
     fogNear: 1800,
     fogFar: 4900,
     exposure: 1.1,
@@ -160,6 +176,7 @@ export const skyParams: SkyParams = registerParams(
     shadowExtent: { min: 20, max: 200, step: 5 },
     shadowMapSize: { min: 1024, max: 4096, step: 1024 },
     ambientIntensity: { min: 0, max: 3, step: 0.01 },
+    ambientDesaturation: { min: 0, max: 1, step: 0.01 },
     fogNear: { min: 0, max: 8000, step: 10 },
     fogFar: { min: 200, max: 30000, step: 50 },
     exposure: { min: 0.3, max: 3, step: 0.01 },

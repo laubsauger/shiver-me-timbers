@@ -1,110 +1,239 @@
 /**
- * Settings screen inside the pause panel (§V21: graphics res-scale/quality +
- * audio volumes, written live to the persisted settings store). Sliders are
- * rope tracks with brass knobs; quality is a segmented brass control.
+ * Settings screen inside the pause panel (§I ui/settings/graphics + audio).
+ *
+ * Graphics is a list of INDIVIDUAL switches over the params registry — every
+ * expensive system can be thrown from here, which is the whole point: a player
+ * whose ship is being corrupted by one effect must be able to reach that
+ * effect without opening a debug panel. Quality presets sit on top as named
+ * bundles that write those same switches, so the two can never disagree.
+ *
+ * Audio is master / music / effects / ambience, independently (§I).
  */
 import type { GameSettings, Quality, SettingsStore } from './settingsStore';
+import { GRAPHICS_FEATURES, SHADOW_MAP_SIZES } from './graphicsFeatures';
+import type { GraphicsFeatureId } from './graphicsFeatures';
+import { featureNeedsReload, featureWired, shadowMapSizeNeedsReload, unwiredFeatures } from './graphicsFeatures';
+import { sectionHead, segmentRow, sliderRow, switchRow } from './settingsControls';
+import type { SwitchRow } from './settingsControls';
 import { button, div, el } from './dom';
+
+/** structural mirror of AudioSystem.musicInfo() — no import into src/audio */
+export interface MusicStatus {
+  tracks: number;
+  current: string | null;
+  duck: number;
+}
 
 export interface SettingsScreen {
   root: HTMLElement;
   focusFirst(): void;
+  /** re-read availability — sinks can be registered after the UI is built */
+  refresh(): void;
+  /** main.ts hands over `() => audio.musicInfo()` for the now-playing line */
+  setMusicStatusSource(fn: () => MusicStatus): void;
   dispose(): void;
 }
 
-interface SliderSpec {
-  label: string;
-  min: number;
-  max: number;
-  step: number;
-  read: (s: GameSettings) => number;
-  write: (store: SettingsStore, v: number) => void;
-}
+const QUALITY_LABELS: Record<Quality, string> = { low: 'Low', medium: 'Medium', high: 'High' };
 
-function makeSlider(store: SettingsStore, spec: SliderSpec): { row: HTMLElement; sync: (s: GameSettings) => void } {
-  const value = el('span', 'smt-row-value');
-  const input = el('input', 'smt-range');
-  input.type = 'range';
-  input.min = String(spec.min);
-  input.max = String(spec.max);
-  input.step = String(spec.step);
-  const fmt = (v: number) => `${Math.round(v * 100)}%`;
-  const sync = (s: GameSettings) => {
-    const v = spec.read(s);
-    input.value = String(v);
-    value.textContent = fmt(v);
-  };
-  input.addEventListener('input', () => spec.write(store, Number(input.value)));
-  sync(store.get());
-  const row = div('smt-row', div('smt-row-top', el('span', 'smt-row-label', spec.label), value), input);
-  return { row, sync };
-}
+/** section title → the switches it holds, in reading order */
+const SECTIONS: readonly { title: string; ids: GraphicsFeatureId[] }[] = [
+  { title: 'Effects', ids: ['reflections', 'caustics', 'deckWater', 'spray', 'rain'] },
+  { title: 'Shadows', ids: ['shadows', 'islandShadows'] },
+  { title: 'Post-processing', ids: ['postFx', 'postAo', 'postBloom', 'postVibrance', 'postVignette'] },
+];
+
+const pct = (v: number): string => `${Math.round(v * 100)}%`;
 
 export function createSettingsScreen(store: SettingsStore, onBack: () => void): SettingsScreen {
   const backBtn = button('smt-back-btn', '‹ Back');
   backBtn.addEventListener('click', onBack);
   const head = div('smt-settings-head', el('h2', 'smt-settings-title', 'Settings'), backBtn);
 
-  // — tabs —
   const graphicsTab = button('smt-tab is-active', 'Graphics');
   const audioTab = button('smt-tab', 'Audio');
   const tabs = div('smt-tabs', graphicsTab, audioTab);
-
-  // — graphics rows —
-  const resSlider = makeSlider(store, {
-    label: 'Resolution scale', min: 0.5, max: 1, step: 0.05,
-    read: (s) => s.graphics.resolutionScale,
-    write: (st, v) => st.set({ graphics: { resolutionScale: v } }),
-  });
-  const qualityBtns = new Map<Quality, HTMLButtonElement>();
-  const seg = div('smt-seg');
-  for (const q of ['low', 'medium', 'high'] as const) {
-    const b = button('smt-seg-btn', q.charAt(0).toUpperCase() + q.slice(1));
-    b.addEventListener('click', () => store.set({ graphics: { quality: q } }));
-    qualityBtns.set(q, b);
-    seg.appendChild(b);
+  tabs.setAttribute('role', 'tablist');
+  graphicsTab.id = 'smt-tab-graphics';
+  audioTab.id = 'smt-tab-audio';
+  for (const [tab, panel] of [[graphicsTab, 'smt-panel-graphics'], [audioTab, 'smt-panel-audio']] as const) {
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-controls', panel);
   }
-  const qualityRow = div('smt-row', div('smt-row-top', el('span', 'smt-row-label', 'Quality')), seg);
-  const graphicsRows = div('smt-rows', resSlider.row, qualityRow);
+  graphicsTab.setAttribute('aria-selected', 'true');
+  audioTab.setAttribute('aria-selected', 'false');
 
-  // — audio rows —
-  const audioSliders = (
-    [
-      ['Master', (s: GameSettings) => s.audio.master, 'master'],
-      ['Effects', (s: GameSettings) => s.audio.sfx, 'sfx'],
-      ['Ambience', (s: GameSettings) => s.audio.ambience, 'ambience'],
-    ] as const
-  ).map(([label, read, key]) =>
-    makeSlider(store, {
-      label, min: 0, max: 1, step: 0.01, read,
-      write: (st, v) => st.set({ audio: { [key]: v } }),
-    }),
+  // — preset —
+  const quality = segmentRow<Quality>({
+    label: 'Detail',
+    hint: 'A named set of the switches below. Change any one and this reads Custom.',
+    options: (['low', 'medium', 'high'] as const).map((q) => ({ value: q, label: QUALITY_LABELS[q] })),
+    onSelect: (q) => store.applyQuality(q),
+  });
+  const presetNote = el('p', 'smt-note', '');
+  presetNote.hidden = true;
+  quality.root.appendChild(presetNote);
+
+  // — display —
+  const resolution = sliderRow({
+    label: 'Resolution',
+    hint: 'Renders below native size and scales up. The cheapest frame you can buy.',
+    min: 0.5, max: 1, step: 0.05, format: pct,
+    onInput: (v) => store.set({ graphics: { resolutionScale: v } }),
+  });
+
+  // — feature switches —
+  const switches = new Map<GraphicsFeatureId, SwitchRow>();
+  const sectionByTitle = new Map<string, HTMLElement>();
+  const featureSections = SECTIONS.map(({ title, ids }) => {
+    const rows = ids.map((id) => {
+      const f = GRAPHICS_FEATURES.find((x) => x.id === id)!;
+      const row = switchRow({
+        label: f.label,
+        hint: f.hint,
+        nested: !!f.parent,
+        onToggle: (on) => store.set({ graphics: { features: { [id]: on } } }),
+      });
+      switches.set(id, row);
+      return row.root;
+    });
+    const section = div('smt-section', sectionHead(title), ...rows);
+    sectionByTitle.set(title, section);
+    return section;
+  });
+
+  const shadowMap = segmentRow<number>({
+    label: 'Shadow detail',
+    hint: 'Texels in the sun shadow map. Allocated when the game starts.',
+    options: SHADOW_MAP_SIZES.map((s) => ({ value: s, label: `${s / 1024}K` })),
+    onSelect: (v) => store.set({ graphics: { shadowMapSize: v } }),
+  });
+  // the size control belongs with the switches it sizes, not in its own group
+  sectionByTitle.get('Shadows')!.appendChild(shadowMap.root);
+
+  const foliage = sliderRow({
+    label: 'Foliage',
+    hint: 'How far out palms are still drawn. At nought the islands go bare.',
+    min: 0, max: 1, step: 0.05, format: (v) => (v === 0 ? 'none' : pct(v)),
+    onInput: (v) => store.set({ graphics: { foliageDensity: v } }),
+  });
+
+  const graphicsRows = div(
+    'smt-rows',
+    div('smt-section', sectionHead('Preset'), quality.root),
+    div('smt-section', sectionHead('Display'), resolution.root),
+    ...featureSections,
+    div('smt-section', sectionHead('Scenery'), foliage.root),
   );
-  const audioRows = div('smt-rows', ...audioSliders.map((s) => s.row));
+  graphicsRows.id = 'smt-panel-graphics';
+  graphicsRows.setAttribute('role', 'tabpanel');
+  graphicsRows.setAttribute('aria-labelledby', 'smt-tab-graphics');
+
+  // — audio —
+  const audioSpecs = [
+    { key: 'master' as const, label: 'Master', hint: 'Everything, at once.' },
+    { key: 'music' as const, label: 'Music', hint: 'The score. Steps back on its own when the guns come out.' },
+    { key: 'sfx' as const, label: 'Effects', hint: 'Cannon, hull, canvas, splashes.' },
+    { key: 'ambience' as const, label: 'Ambience', hint: 'Sea, wind and weather.' },
+  ];
+  const audioRowsByKey = audioSpecs.map((spec) => ({
+    key: spec.key,
+    row: sliderRow({
+      label: spec.label, hint: spec.hint, min: 0, max: 1, step: 0.01, format: pct,
+      onInput: (v) => store.set({ audio: { [spec.key]: v } }),
+    }),
+  }));
+  // now playing, under the music fader — the one place a player looks to find
+  // out what the tune is, and the honest answer when there is no music aboard
+  const nowPlaying = el('p', 'smt-note is-quiet', 'No music aboard yet.');
+  audioRowsByKey.find((a) => a.key === 'music')!.row.root.appendChild(nowPlaying);
+  let musicStatus: (() => MusicStatus) | null = null;
+  function syncNowPlaying(): void {
+    const info = musicStatus?.();
+    if (!info || info.tracks === 0) {
+      nowPlaying.textContent = 'No music aboard yet.';
+      return;
+    }
+    if (!info.current) {
+      nowPlaying.textContent = 'Between tracks.';
+      return;
+    }
+    nowPlaying.textContent = `Now playing: ${info.current}${info.duck < 1 ? ' — stepped back' : ''}`;
+  }
+  const audioRows = div('smt-rows', div('smt-section', sectionHead('Volumes'),
+    ...audioRowsByKey.map((a) => a.row.root)));
+  audioRows.id = 'smt-panel-audio';
+  audioRows.setAttribute('role', 'tabpanel');
+  audioRows.setAttribute('aria-labelledby', 'smt-tab-audio');
   audioRows.style.display = 'none';
+  // ticks only while the audio tab is actually on screen
+  const poll = setInterval(() => {
+    if (audioRows.style.display !== 'none' && root.isConnected) syncNowPlaying();
+  }, 1000);
 
   function selectTab(which: 'graphics' | 'audio'): void {
-    graphicsTab.classList.toggle('is-active', which === 'graphics');
-    audioTab.classList.toggle('is-active', which === 'audio');
-    graphicsRows.style.display = which === 'graphics' ? '' : 'none';
-    audioRows.style.display = which === 'audio' ? '' : 'none';
+    const g = which === 'graphics';
+    graphicsTab.classList.toggle('is-active', g);
+    audioTab.classList.toggle('is-active', !g);
+    graphicsTab.setAttribute('aria-selected', String(g));
+    audioTab.setAttribute('aria-selected', String(!g));
+    graphicsRows.style.display = g ? '' : 'none';
+    audioRows.style.display = g ? 'none' : '';
+    if (!g) syncNowPlaying();
   }
   graphicsTab.addEventListener('click', () => selectTab('graphics'));
   audioTab.addEventListener('click', () => selectTab('audio'));
 
-  // reflect store changes (quality highlight + slider positions)
-  const sync = (s: GameSettings): void => {
-    for (const [q, b] of qualityBtns) b.classList.toggle('is-active', q === s.graphics.quality);
-    resSlider.sync(s);
-    for (const sl of audioSliders) sl.sync(s);
-  };
+  function sync(s: GameSettings): void {
+    quality.set(s.graphics.quality);
+    const intact = store.isPresetIntact();
+    presetNote.hidden = intact;
+    presetNote.textContent = intact
+      ? ''
+      : `Custom — altered from ${QUALITY_LABELS[s.graphics.quality]}.`;
+    resolution.set(s.graphics.resolutionScale);
+    shadowMap.set(s.graphics.shadowMapSize);
+    shadowMap.setPendingReload(shadowMapSizeNeedsReload(s.graphics.shadowMapSize));
+    foliage.set(s.graphics.foliageDensity);
+    for (const [id, row] of switches) {
+      const on = s.graphics.features[id];
+      const f = GRAPHICS_FEATURES.find((x) => x.id === id)!;
+      row.set(on);
+      row.setWired(featureWired(id));
+      row.setMuted(!!f.parent && !s.graphics.features[f.parent]);
+      row.setPendingReload(featureNeedsReload(id, on));
+    }
+    for (const a of audioRowsByKey) a.row.set(s.audio[a.key]);
+  }
+
   sync(store.get());
   const unsubscribe = store.subscribe(sync);
+
+  let warned = false;
+  function refresh(): void {
+    sync(store.get());
+    syncNowPlaying();
+    if (warned) return;
+    warned = true;
+    const missing = unwiredFeatures();
+    // fail loud: a switch with nothing behind it is the §B silent-no-op shape
+    if (missing.length) {
+      console.warn(`[ui] graphics switches with no params key or sink: ${missing.join(', ')}`);
+    }
+  }
 
   const root = div('smt-settings', head, tabs, graphicsRows, audioRows);
   return {
     root,
     focusFirst: () => backBtn.focus(),
-    dispose: () => unsubscribe(),
+    refresh,
+    setMusicStatusSource(fn: () => MusicStatus): void {
+      musicStatus = fn;
+      syncNowPlaying();
+    },
+    dispose(): void {
+      clearInterval(poll);
+      unsubscribe();
+    },
   };
 }

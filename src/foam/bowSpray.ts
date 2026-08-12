@@ -106,7 +106,9 @@ export interface BowState {
 export function createBowSpray() {
   // bow sheets are coarser than crest mist — same pool code, bigger sprites
   const pool = createSprayPool(sprayParams.bowCount, {
-    sizeScale: sprayParams.bowSizeScale,
+    sizeScale: () => sprayParams.bowSizeScale,
+    life: () => sprayParams.bowLife,
+    drag: () => sprayParams.bowDrag,
   });
   const count = pool.count; // sanitized — sizes the spawn dispatch too
 

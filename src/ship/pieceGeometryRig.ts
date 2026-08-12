@@ -9,9 +9,9 @@
  */
 import * as THREE from 'three';
 import type { AABB } from './pieceTypes';
-import { aabbSize, barBetween, mergeNonIndexed } from './pieceGeometryShapes';
+import { aabbSize, mergeNonIndexed } from './pieceGeometryShapes';
 import { shipDetailParams } from '../params/ship';
-import { vhash, vjitter } from './variation';
+import { vjitter } from './variation';
 
 /** tag every vertex with (clothWeight, fly, hoist, style) for flagMaterial */
 function withFlagShape(
@@ -102,57 +102,6 @@ export function buildPennantGeometry(shape: Record<string, number>): THREE.Buffe
     fly * 1.3 + hoist,
   );
   return geo;
-}
-
-/**
- * Ratlines: the rung ladder seized across a shroud fan, and the single most
- * distinctive texture in the reference rig (docs/ship-reference-schema.png).
- *
- * Only the RUNGS are built. The shroud lines themselves are ropes (§V12,
- * src/ropes solves them as catenaries from the same chainplate sockets), and
- * drawing them again here would z-fight against the real ones. Standing
- * rigging carries slack 1.004, i.e. it is straight to within a couple of
- * centimetres, so straight-line interpolation between plate and masthead
- * lands the rungs on the ropes.
- *
- * `shape`: plates, p{i}x/p{i}y/p{i}z (mast-local chainplate stations),
- * topX/topY/topZ (the masthead), spacing, radius, topFrac.
- */
-export function buildRatlinesGeometry(shape: Record<string, number>): THREE.BufferGeometry {
-  const plates = Math.max(2, Math.round(shape.plates ?? 3));
-  const top = new THREE.Vector3(shape.topX ?? 0, shape.topY ?? 1, shape.topZ ?? 0);
-  const spacing = Math.max(0.1, shape.spacing ?? 0.42);
-  const radius = Math.max(0.004, shape.radius ?? 0.02);
-  const topFrac = Math.min(0.95, Math.max(0.05, shape.topFrac ?? 0.66));
-  const jitter = Math.max(0, shipDetailParams.irregularity);
-
-  const feet: THREE.Vector3[] = [];
-  for (let i = 0; i < plates; i++) {
-    feet.push(
-      new THREE.Vector3(shape[`p${i}x`] ?? 0, shape[`p${i}y`] ?? 0, shape[`p${i}z`] ?? 0),
-    );
-  }
-  const outer = feet[0];
-  const inner = feet[feet.length - 1];
-  const run = top.distanceTo(outer);
-  const rungs = Math.max(1, Math.floor((run * topFrac) / spacing));
-
-  const parts: THREE.BufferGeometry[] = [];
-  const a = new THREE.Vector3();
-  const b = new THREE.Vector3();
-  const mid = new THREE.Vector3();
-  for (let i = 1; i <= rungs; i++) {
-    // hand-seized rungs are never evenly spaced and never quite level
-    const t = ((i + vjitter(0.16 * jitter, outer.x, i)) / rungs) * topFrac;
-    const tb = t + vjitter(0.006 * jitter, outer.z, i, 3);
-    a.lerpVectors(outer, top, Math.min(0.99, Math.max(0.005, t)));
-    b.lerpVectors(inner, top, Math.min(0.99, Math.max(0.005, tb)));
-    // a rung under its own weight and a man's foot bellies down slightly
-    mid.addVectors(a, b).multiplyScalar(0.5);
-    mid.y -= a.distanceTo(b) * (0.018 + 0.02 * vhash(i, outer.x));
-    parts.push(barBetween(a, mid, radius, 4), barBetween(mid, b, radius, 4));
-  }
-  return mergeNonIndexed(parts);
 }
 
 /**

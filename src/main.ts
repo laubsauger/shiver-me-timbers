@@ -15,10 +15,12 @@ import { skyParams } from './params/sky';
 import { buildGalleonBlueprint } from './ship/shipBlueprint';
 import { ShipAssembly } from './ship/shipAssembly';
 import { updateRig } from './ship/rigTrim';
+import { trimDropScale } from './ship/sailDynamics';
 import { createInputCollector } from './sailing/input';
 import { stepShipSailing } from './sailing/shipKinematics';
 import { createFollowCam } from './camera';
-import { createWeatherSystem } from './weather';
+import { createWeatherSystem, createWeatherSample } from './weather';
+import { createRain } from './rain';
 import { createPostPipeline } from './core/postPipeline';
 import { postParams } from './params/post';
 import { createGameUI } from './ui';
@@ -37,7 +39,7 @@ import {
 } from './sea-physics/hullContact';
 import { stepFlooding } from './sea-physics/flooding';
 import { stepShipGrounding } from './sea-physics/grounding';
-import { galleonParams } from './params/ship';
+import { galleonParams, shipRigParams } from './params/ship';
 import { floodingHoles } from './ship/destruction';
 import { createCaustics, setActiveCaustics } from './caustics';
 import { buildDeckHeightfield } from './ship/deckHeightfield';
@@ -54,6 +56,8 @@ import {
   selectBlockSockets,
 } from './ropes/shipRigging';
 import { ropeParams } from './params/ropes';
+import { buildRatlinePlan } from './ship/ratlinePlan';
+import { buildRungDescriptors } from './ropes/ratlines';
 
 // bisect switches for the renderer-freeze hunt — all true = full game
 const FEATURES = {
@@ -74,14 +78,31 @@ async function boot(): Promise<void> {
     return;
   }
 
+  // boot timing — the splash now holds until a real frame exists, so every ms
+  // here is user-visible waiting. Phase marks land on __game.bootTimings and
+  // in the console so the cost can be attacked with numbers, not guesses.
+  const bootT0 = performance.now();
+  const bootTimings: Array<[string, number]> = [];
+  let bootLast = bootT0;
+  const bootMark = (label: string): void => {
+    const now = performance.now();
+    bootTimings.push([label, +(now - bootLast).toFixed(1)]);
+    bootLast = now;
+    (window as unknown as { __bootProgress?: (s: string) => void }).__bootProgress?.(label);
+  };
+
   const app = await App.create(root);
+  bootMark('renderer');
   const state: SimState = createInitialState(1337);
 
   const weather = createWeatherSystem({
+    seed: state.seed,
     setWeather: (w) => {
       state.weather = w as SimState['weather'];
     },
   });
+  // §T.38: reused per frame — weatherAt fills a caller-owned sample, no alloc
+  const weatherHere = createWeatherSample();
   const debug = createDebugShell({ onWeatherPreset: (p) => weather.apply(p) });
 
   const sky = createSky({ scene: app.scene });
@@ -150,7 +171,8 @@ async function boot(): Promise<void> {
     oceanParams.resolution,
   );
   const bowSpray = createBowSpray();
-  app.scene.add(spray.mesh, bowSpray.mesh);
+  const rain = createRain();
+  app.scene.add(spray.mesh, bowSpray.mesh, rain.mesh);
 
   // player ship (§V.13): galleon assembly rendered from SimState (§V.3)
   state.ships.push({
@@ -188,7 +210,12 @@ async function boot(): Promise<void> {
 
   // §V.12 rigging: catenary compute ropes anchored to blueprint sockets
   const riggingPlan = buildRiggingPlan(galleonBlueprint);
-  const ropes = createRopes({ maxRopes: Math.max(riggingPlan.length, 32) });
+  // §V.45: rungs read the SAME solved points buffer the shrouds render from,
+  // sampled fractionally along both curves — so the ladder rides whatever the
+  // shrouds actually do (sag now, swing when §V42 lands, a mast going over the
+  // side for free). Authored geometry could never track that.
+  const rungs = buildRungDescriptors(buildRatlinePlan(galleonBlueprint), riggingPlan);
+  const ropes = createRopes({ maxRopes: Math.max(riggingPlan.length, 32), rungs });
   app.scene.add(ropes.mesh);
   // wooden blocks (pulleys) at running-rigging terminations
   const blockSockets = selectBlockSockets(riggingPlan, ropeParams.maxBlocks);
@@ -314,6 +341,13 @@ async function boot(): Promise<void> {
       state.wind.speed = oceanParams.windSpeed;
       state.wind.direction = oceanParams.windDirection;
       weather.update(dt);
+      // §V46: storm strength is a FIELD, not a global. Driving the ocean from
+      // the sample at the ship's own position is what makes sailing into a
+      // squall real — and because rain and cell drift both read oceanParams,
+      // sea, rain and cloud stay self-consistent for free.
+      weather.weatherAt(playerShip.position[0], playerShip.position[2], weatherHere);
+      oceanParams.windSpeed = weatherHere.ocean.windSpeed;
+      oceanParams.amplitude = weatherHere.ocean.amplitude;
       const snapshot = input.sample(dt);
       stepShipSailing(playerShip, snapshot, state.wind, dt);
       cpuOcean.update(state.time);
@@ -338,7 +372,10 @@ async function boot(): Promise<void> {
           quaternion: playerShip.quaternion,
           speed: Math.hypot(playerShip.velocity[0], playerShip.velocity[2]),
           seaSigma: ocean.heightRms, // σ, not amplitude (§V36)
-          cutwater: hullContact.cutwater,
+          // the whole per-slice contact set, not just the cutwater: water is
+          // injected at the stations actually burying, which is what stops it
+          // appearing along the entire length at once (user report)
+          hull: hullContact,
         },
         dt,
       );
@@ -359,6 +396,13 @@ async function boot(): Promise<void> {
       debug.hud.setPassTiming('ocean+foam cpu-dispatch', performance.now() - t);
 
       caustics.update(sky.sunDirection);
+      // rain volume follows the camera through cameraPosition, so it only
+      // needs local intensity + σ for the below-waterline cull (§V24/§V36)
+      rain.update({
+        intensity: weatherHere.rain,
+        dt: frameDt,
+        seaSigma: ocean.heightRms,
+      });
       hullWetline.updateFromHullContact(frameDt, hullContact.stations, hullContact.depth);
 
       t = performance.now();
@@ -463,7 +507,21 @@ async function boot(): Promise<void> {
       // rigging follows the moving ship: rewrite anchors, GPU re-solves (§V.12)
       if (FEATURES.ropes) {
         shipAssembly.group.updateMatrixWorld(true);
-        applyRiggingPlan(riggingPlan, ropes, (id) => shipAssembly.socketWorldPosition(id));
+        // furl 0..1 from the SAME cloth scalar the sail geometry and the haul
+        // audio use, so rope, canvas and sound cannot disagree about how far
+        // she is reefed. dropScale runs trimDropMin (fully reefed) → 1 (full
+        // sail), so furl is its normalised complement.
+        const drop = trimDropScale(playerShip.sailTrim, shipRigParams);
+        const furl = Math.min(
+          1,
+          Math.max(0, (1 - drop) / Math.max(1e-3, 1 - shipRigParams.trimDropMin)),
+        );
+        applyRiggingPlan(
+          riggingPlan,
+          ropes,
+          (id) => shipAssembly.socketWorldPosition(id),
+          furl,
+        );
         applyBlocks(blockSockets, blocks, (id) => shipAssembly.socketWorldPosition(id));
         app.renderer.compute(ropes.computeNode);
       }
@@ -495,13 +553,41 @@ async function boot(): Promise<void> {
       audioShip.angularVelocity = playerShip.angularVelocity;
       audioShip.sailTrim = playerShip.sailTrim;
       audioShip.bowImmersion = bowImmersion;
+      // the whole contact set, typed structurally so src/audio imports nothing
+      // from sea-physics. Drives hull working (creak) and the slam trigger —
+      // arrays are reused per tick, audio reads them inside update() only.
+      audioShip.contact = hullContact;
+      // the SAME scalar updateRig uses, so the haul sound and the cloth move
+      // together by construction rather than by coincidence
+      audioShip.sailDrop = trimDropScale(playerShip.sailTrim, shipRigParams);
       audioBowWorld[0] = bowWorldTmp.x;
       audioBowWorld[1] = bowWorldTmp.y;
       audioBowWorld[2] = bowWorldTmp.z;
       audio.update(audioFrame);
     },
   );
+  // Warm up BEFORE showing the world. compileAsync walks the scene and builds
+  // every material's pipeline up front — otherwise the first frames stall for
+  // seconds compiling shaders one material at a time, which is what the boot
+  // splash was hiding badly (it dismissed on the canvas being appended, long
+  // before anything drew, leaving a blank screen).
+  bootMark('scene build');
+  await app.renderer.compileAsync(app.scene, app.camera);
+  bootMark('shader compile');
+  // one real presented frame, so the splash lifts on a picture and not on a
+  // promise: the ocean/foam/rope compute passes also have to run once before
+  // the surface has anything to show.
+  ocean.update(app.renderer, state.time);
+  foam.update(app.renderer);
+  clouds.update(state.time, sky.sunDirection);
+  surface.update(app.camera, state.time, sky.sunDirection);
+  await app.renderer.renderAsync(app.scene, app.camera);
+
+  bootMark('first frame');
   loop.start();
+  bootTimings.push(['TOTAL', +(performance.now() - bootT0).toFixed(1)]);
+  console.info('[boot]', bootTimings.map(([k, v]) => `${k} ${v}ms`).join('  ·  '));
+  (window as unknown as { __bootReady?: () => void }).__bootReady?.();
 
   // dev console handle (not part of any interface contract)
   (window as unknown as Record<string, unknown>).__game = {
@@ -518,6 +604,24 @@ async function boot(): Promise<void> {
     blocks,
     riggingPlan,
     blockSockets,
+    // verification handles: agents need these reachable from the console to
+    // do §V29 readbacks and to isolate subsystems without a rebuild
+    flowFoam,
+    foam,
+    deckWater,
+    caustics,
+    reflection,
+    archipelago,
+    hullContact,
+    cpuOcean,
+    bootTimings,
+    /** debug: put the hull at a speed without waiting on the wind */
+    setSpeed(knots: number): void {
+      const ms = knots / 1.944;
+      const fwd = rotateVec(playerShip.quaternion, [0, 0, 1]);
+      playerShip.velocity[0] = fwd[0] * ms;
+      playerShip.velocity[2] = fwd[2] * ms;
+    },
   };
 }
 

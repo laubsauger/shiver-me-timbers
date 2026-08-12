@@ -12,9 +12,9 @@ import {
   buildBowGeometry,
   buildDeckGeometry,
   buildHullSectionGeometry,
-  buildSailGeometry,
   mergeNonIndexed,
 } from './pieceGeometryShapes';
+import { buildSailGeometry } from './pieceGeometrySail';
 import {
   asHullShape,
   buildEnvelopeDeck,
@@ -54,11 +54,10 @@ import {
   buildBinnacleGeometry,
   buildPennantGeometry,
   buildPinRailGeometry,
-  buildRatlinesGeometry,
   buildWindowGeometry,
 } from './pieceGeometryRig';
 
-export { buildSailGeometry } from './pieceGeometryShapes';
+export { buildSailGeometry } from './pieceGeometrySail';
 export { buildHoledVariant } from './pieceGeometryHoled';
 
 function box(aabb: AABB): THREE.BufferGeometry {
@@ -184,8 +183,6 @@ export function buildPieceGeometry(
       return shape !== undefined ? buildMouldingGeometry(shape) : box(aabb);
     case 'pennant':
       return buildPennantGeometry(shape ?? {});
-    case 'ratlines':
-      return shape !== undefined ? buildRatlinesGeometry(shape) : box(aabb);
     case 'figurehead':
       return buildFigureheadGeometry(aabb);
     case 'cathead':

@@ -6,10 +6,15 @@
  * before any GPU work depends on it.
  */
 import { describe, expect, it } from 'vitest';
+import { skyParams } from '../src/params/sky';
 import {
   daylight,
+  desaturate,
+  hemisphereColors,
   fogRange,
+  hexToRgb,
   lowSunWarmth,
+  luminance,
   skyTint,
   sunColor,
   sunDirection,
@@ -106,6 +111,79 @@ describe('color ramps (multiplied into materials — must stay 0..1)', () => {
     expect(daylight(1.0)).toBe(1);
     expect(lowSunWarmth(0.02)).toBeGreaterThan(lowSunWarmth(1.0));
     expect(lowSunWarmth(0.02)).toBeGreaterThan(lowSunWarmth(-0.3));
+  });
+});
+
+describe('ambient in shade must not repaint materials (teal-hull bug)', () => {
+  // The hemisphere light is never shadowed, so on a shaded surface it is the
+  // ONLY light left. Whatever hue bias it carries is applied to every shaded
+  // pixel with nothing to counteract it — which is how a brown hull came out
+  // sea-coloured. These tests work in LINEAR space because that is where the
+  // multiply against albedo happens.
+  const s2l = (c: number): number =>
+    c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  const lin = (hex: number): [number, number, number] => {
+    const [r, g, b] = hexToRgb(hex);
+    return [s2l(r), s2l(g), s2l(b)];
+  };
+  /** three's HemisphereLight: mix(ground, sky, 0.5*normal.y + 0.5) */
+  const ambientOn = (normalY: number, intensity: number) => {
+    // drive it through the SHIPPED function, so swapping midColor back to
+    // zenithColor in the light rig breaks this, not just a param edit
+    const { sky, ground } = hemisphereColors(
+      skyParams.midColor,
+      skyParams.groundBounceColor,
+      [1, 1, 1],
+      skyParams.ambientDesaturation,
+    );
+    // hemisphereColors already returns LINEAR — no transfer here
+    const t = 0.5 * normalY + 0.5;
+    return [0, 1, 2].map((i) => (ground[i] + (sky[i] - ground[i]) * t) * intensity);
+  };
+  /** shaded oak: warm, and the exact material the user saw go teal */
+  const OAK: [number, number, number] = [0.13, 0.07, 0.035];
+
+  it('leaves shaded timber reading as timber, not as sea', () => {
+    // vertical hull side = the reported case; also check a downward face,
+    // which gets the ground half nearly pure and is the worst case
+    for (const normalY of [0, -0.5, -1]) {
+      const amb = ambientOn(normalY, skyParams.ambientIntensity);
+      const lit = amb.map((v, i) => v * OAK[i]);
+      expect(lit[0]).toBeGreaterThan(lit[1]); // red still leads
+      expect(lit[1]).toBeGreaterThan(lit[2]); // and blue still trails
+    }
+  });
+
+  it('fails for the palette that caused the bug — this test can bite', () => {
+    // zenithColor as the sky half, zero desaturation: the shipped-before
+    // state. If someone reverts either decision, the assertion above breaks.
+    const sky = lin(skyParams.zenithColor);
+    const ground = lin(skyParams.groundBounceColor);
+    const amb = [0, 1, 2].map((i) => (ground[i] + sky[i]) * 0.5 * 0.85);
+    const lit = amb.map((v, i) => v * OAK[i]);
+    expect(lit[0]).toBeLessThan(lit[2]); // blue beats red → the teal slab
+  });
+
+  it('desaturation changes hue spread without changing brightness', () => {
+    // mixing toward luminance is luminance-preserving by construction, so
+    // this knob is safe to turn without re-exposing the whole scene
+    const base = lin(skyParams.midColor);
+    const l0 = luminance(base);
+    for (const d of [0, 0.25, 0.5, 0.75, 1]) {
+      const out = desaturate(base, d);
+      expect(luminance(out)).toBeCloseTo(l0, 12);
+      const spread = Math.max(...out) - Math.min(...out);
+      const baseSpread = Math.max(...base) - Math.min(...base);
+      expect(spread).toBeCloseTo(baseSpread * (1 - d), 12);
+    }
+    expect(desaturate(base, 1).every((c) => Math.abs(c - l0) < 1e-12)).toBe(true);
+  });
+
+  it('clamps a garbage desaturation instead of inverting the colour', () => {
+    const base = lin(skyParams.midColor);
+    expect(desaturate(base, -5)).toEqual(base); // clamped to 0, not negated
+    expect(desaturate(base, 9)[0]).toBeCloseTo(luminance(base), 12);
+    expect(desaturate(base, NaN).every(Number.isFinite)).toBe(true);
   });
 });
 

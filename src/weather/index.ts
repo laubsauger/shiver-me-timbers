@@ -1,31 +1,75 @@
 /**
- * Weather system facade (T6, §V7): preset switching + transition ticking.
+ * Weather system facade (T6 presets §V7, T38 localised field §V46).
  *
- * INTEGRATION (src/main.ts, main thread — replaces the T2 placeholder in
- * the createDebugPanel onWeatherPreset callback):
+ * INTEGRATION (src/main.ts, main thread owns the wiring):
  *
  *   const weather = createWeatherSystem({
+ *     seed: state.seed,                            // §V2 deterministic cells
  *     setWeather: (w) => { state.weather = w; },   // §V3: sim owns the write
  *   });
  *   createDebugPanel({ onWeatherPreset: (p) => weather.apply(p) });
- *   // inside the fixed-tick sim update (§V2):
- *   weather.update(SIM_DT);
+ *
+ *   // inside the fixed-tick sim update (§V2), where wind is already live:
+ *   weather.update(SIM_DT);            // ticks the preset lerp AND cell drift
+ *   state.weatherDrift = weather.drift;// plain {x,z}; see §V2 note below
+ *
+ *   // anywhere, any frame — the §V46 sampler:
+ *   const here = weather.weatherAt(ship.position[0], ship.position[2], sample);
+ *   here.storm     // 0..1 local storm strength (rain, audio, wave sub-noise)
+ *   here.rain      // 0..1 rain density
+ *   here.ocean.amplitude / .windSpeed / .choppiness / .jacobianFoamBias
+ *   here.sky.hazeStrength / .sunIntensity / .ambientIntensity
+ *   here.clouds.coverage / .sunColor / .skyColor
+ *
+ * §V2 STATE: the field is a pure function of (seed, drift, time, params). The
+ * only thing that must survive a save/replay is `drift` — two plain numbers,
+ * JSON-serialisable by construction. It is INTEGRATED per tick rather than
+ * computed as wind·t because wind direction changes, and `wind(t)·t` would
+ * teleport the entire weather map the moment it did.
+ *
+ * §V3: no SimState import here. The integrator passes `setWeather` and mirrors
+ * `drift` into state itself.
  */
+import { oceanParams } from '../params/ocean';
+import { weatherParams } from '../params/weather';
 import { applyWeatherPreset, type WeatherTransition } from './applyPreset';
+import {
+  advanceDrift,
+  stormAt,
+  type StormFieldConfig,
+  type StormFieldDrift,
+} from './field';
+import { blendSample, createWeatherSample, type WeatherSample } from './sampler';
 import type { WeatherPresetName } from './presets';
 
 export interface WeatherSystemOpts {
   /** integrator-supplied SimState.weather writer (§V3 — no state import here) */
   setWeather?: (w: WeatherPresetName) => void;
+  /** sim seed — storm cell placement is a pure function of it (§V2) */
+  seed?: number;
+  /** restore a saved field drift (SimState round-trip) */
+  drift?: StormFieldDrift;
 }
 
 export interface WeatherSystem {
   /** switch preset; throws on unknown name. Replaces any running transition. */
   apply(name: string, opts?: { lerpSeconds?: number }): void;
-  /** advance the active transition by dt seconds (call from the sim tick) */
+  /** advance the preset transition AND the storm-cell drift by dt (sim tick) */
   update(dt: number): void;
-  /** name of the most recently applied preset */
+  /**
+   * §V46 sampler: blended preset values at world XZ. Fills and returns `out`
+   * (allocation-free); omit it and a shared internal sample is reused, which
+   * is only safe if the caller consumes the values before sampling again.
+   */
+  weatherAt(x: number, z: number, out?: WeatherSample): WeatherSample;
+  /** 0..1 local storm strength only — cheaper when the patch is not needed */
+  stormAt(x: number, z: number): number;
+  /** name of the most recently applied preset (the AMBIENT weather) */
   readonly current: WeatherPresetName;
+  /** live field offset — plain {x,z}, mirror straight into SimState (§V2) */
+  readonly drift: StormFieldDrift;
+  /** seconds of sim time elapsed, drives the per-cell lifecycle */
+  readonly time: number;
 }
 
 export function createWeatherSystem(
@@ -33,6 +77,29 @@ export function createWeatherSystem(
 ): WeatherSystem {
   let current: WeatherPresetName = 'swell'; // matches SimState initial weather
   let transition: WeatherTransition | undefined;
+  const seed = Number.isFinite(opts.seed) ? (opts.seed as number) | 0 : 1;
+  const drift: StormFieldDrift = {
+    x: Number.isFinite(opts.drift?.x) ? (opts.drift as StormFieldDrift).x : 0,
+    z: Number.isFinite(opts.drift?.z) ? (opts.drift as StormFieldDrift).z : 0,
+  };
+  let time = 0;
+  const shared = createWeatherSample();
+
+  // rebuilt per sample from the LIVE panel values (§V16) — the field must
+  // respond to a slider drag, and sanitizeFieldConfig re-clamps every time
+  const config = (): StormFieldConfig => ({
+    seed,
+    cellSize: weatherParams.cellSize,
+    cellRadius: weatherParams.cellRadius,
+    radiusVariance: weatherParams.cellRadiusVariance,
+    jitter: weatherParams.cellJitter,
+    edgeSoftness: weatherParams.cellEdgeSoftness,
+    coverage: weatherParams.cellCoverage,
+    intensity: weatherParams.cellIntensity,
+    lifecycleSeconds: weatherParams.cellLifecycleSeconds,
+    lifecycleDepth: weatherParams.cellLifecycleDepth,
+  });
+
   return {
     apply(name, applyOpts = {}): void {
       transition = applyWeatherPreset(name, {
@@ -43,18 +110,61 @@ export function createWeatherSystem(
     },
     update(dt): void {
       transition?.update(dt);
+      time += Number.isFinite(dt) ? Math.max(dt, 0) : 0;
+      // cells drift downwind, reading the SAME wind the sea and the sails do
+      // (§V47) — there is no second wind source anywhere in this system
+      advanceDrift(
+        drift,
+        oceanParams.windDirection,
+        oceanParams.windSpeed,
+        weatherParams.cellDrift,
+        dt,
+      );
+    },
+    weatherAt(x, z, out = shared): WeatherSample {
+      return blendSample(stormAt(x, z, drift, time, config()), current, out);
+    },
+    stormAt(x, z): number {
+      return stormAt(x, z, drift, time, config());
     },
     get current(): WeatherPresetName {
       return current;
     },
+    get drift(): StormFieldDrift {
+      return drift;
+    },
+    get time(): number {
+      return time;
+    },
   };
 }
 
-export { applyWeatherPreset } from './applyPreset';
+export { applyWeatherPreset, resetPresetWarnings } from './applyPreset';
 export type { WeatherTransition, ApplyPresetOpts } from './applyPreset';
 export {
   weatherPresets,
   WEATHER_PRESET_NAMES,
+  PRESET_STORMINESS,
+  LAYOUT_KEYS,
   type WeatherPresetName,
   type PresetPatch,
 } from './presets';
+export {
+  advanceDrift,
+  hashCell,
+  sanitizeFieldConfig,
+  stormAt,
+  type StormFieldConfig,
+  type StormFieldDrift,
+} from './field';
+export {
+  blendSample,
+  createWeatherSample,
+  type WeatherSample,
+} from './sampler';
+export {
+  hazeAnisotropy,
+  hazeDensityScale,
+  type HazeContract,
+  hazeContract,
+} from './haze';

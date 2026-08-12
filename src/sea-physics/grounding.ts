@@ -41,6 +41,57 @@ export interface SeabedField {
   heightAt(x: number, z: number): number;
 }
 
+/**
+ * How hard the bank is holding this hull, as a DECELERATION (m/s²) the
+ * sails must out-push before she can make way again — μ·N/m, i.e. Coulomb
+ * friction against the weight the seabed is carrying.
+ *
+ * WHY this exists (user: "our sails magically continue to propulse us
+ * forward"): grounding writes velocity, and sailing then re-applies full
+ * thrust from that reduced velocity on the very next tick, so a hull hard
+ * aground grinds its way up and over a mountain. Velocity is the wrong
+ * channel to fight in — the fix has to close the FORCE balance, and the
+ * driving force belongs to sailing (§B.6: grounding never writes thrust,
+ * yaw or the quaternion; sailing never writes the vertical channel). So
+ * grounding publishes what the bank can resist and sailing subtracts it
+ * from thrust. Per-ship, keyed by identity, exactly like buoyancy's
+ * seaMemory: derived per tick, nothing sim-hash-relevant accumulates.
+ */
+interface GroundGrip {
+  resist: number;
+}
+const gripMemory = new WeakMap<ShipState, GroundGrip>();
+
+/**
+ * Seconds for the published grip to fade when nobody refreshes it. main.ts
+ * is free to skip the grounding step far from land (it is a per-tick cost
+ * for a ship that is almost never aground); without this fade the last
+ * value before the skip would cripple her sails for the rest of the voyage.
+ * Short enough to be invisible, long enough that it never masks a real hold
+ * — a grounded ship gets a fresh value every tick.
+ */
+const GRIP_FADE = 0.5;
+
+function publishGrip(ship: ShipState, resist: number): void {
+  const g = gripMemory.get(ship);
+  if (g === undefined) gripMemory.set(ship, { resist });
+  else g.resist = resist;
+}
+
+/**
+ * Deceleration (m/s²) the seabed can hold this hull with — read by sailing
+ * to gate thrust. Advances the fade by `dt`, so call it once per tick.
+ * Returns 0 for a ship that has never grounded (and for every ship in a
+ * scene with no islands wired up).
+ */
+export function groundGrip(ship: ShipState, dt: number): number {
+  const g = gripMemory.get(ship);
+  if (g === undefined || g.resist <= 0) return 0;
+  g.resist *= Math.exp(-Math.max(0, dt) / GRIP_FADE);
+  if (g.resist < 1e-3) g.resist = 0;
+  return g.resist;
+}
+
 export interface GroundingResult {
   /** any part of the keel line is in the seabed */
   aground: boolean;
@@ -109,7 +160,10 @@ export function stepShipGrounding(
     torque[2] += rx * f;
     void ry;
   }
-  if (touched === 0) return out;
+  if (touched === 0) {
+    publishGrip(ship, 0); // afloat again: the sails get everything back
+    return out;
+  }
 
   out.aground = true;
   out.extent = touched / n;
@@ -120,10 +174,14 @@ export function stepShipGrounding(
 
   // Coulomb friction on the planar channel: the bank drags on the hull in
   // proportion to the weight it is carrying, so a light touch slows her and
-  // a hard grounding stops her — no special "stuck" state to author.
+  // a hard grounding stops her — no special "stuck" state to author. The
+  // SAME number is published for sailing to subtract from thrust; bleeding
+  // velocity here without gating the driving force there is precisely the
+  // "sails magically continue to propulse us" bug.
+  const decel = (p.groundingFriction * fy) / mass;
+  publishGrip(ship, decel);
   const speed = Math.hypot(vel[0], vel[2]);
   if (speed > 1e-6) {
-    const decel = (p.groundingFriction * fy) / mass;
     const scale = Math.max(0, 1 - (decel * dt) / speed);
     vel[0] *= scale;
     vel[2] *= scale;

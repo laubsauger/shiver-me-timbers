@@ -155,17 +155,43 @@
     </div>
     <script>
       (() => {
-        const root = document.getElementById('app');
         const splash = document.getElementById('boot-splash');
-        if (!root || !splash) throw new Error('missing boot splash roots');
+        if (!splash) throw new Error('missing boot splash root');
 
-        const observer = new MutationObserver(() => {
-          if (root.childElementCount === 0) return;
-          observer.disconnect();
+        let done = false;
+        const dismiss = () => {
+          if (done) return;
+          done = true;
           splash.classList.add('boot-splash--ready');
           splash.addEventListener('transitionend', () => splash.remove(), { once: true });
-        });
-        observer.observe(root, { childList: true });
+          // belt and braces: if the transition never fires (reduced motion,
+          // backgrounded tab) the splash must still go away
+          setTimeout(() => splash.remove(), 2000);
+        };
+
+        // main.ts calls this only after every material has compiled AND a real
+        // frame has been presented. Watching #app for its first child was the
+        // old test and it was wrong: the canvas element is appended long
+        // before anything is drawn, so the splash left the user on a blank
+        // screen through the whole shader-compile stall.
+        window.__bootReady = dismiss;
+
+        // real phase feedback — a splash that names what it is doing reads as
+        // progress; one that sits on a spinner reads as a hang.
+        const status = splash.querySelector('.boot-splash__kicker');
+        const LABELS = {
+          renderer: 'Waking the WebGPU device…',
+          'scene build': 'Raising the sea and the rigging…',
+          'shader compile': 'Compiling shaders — first run is the slow one…',
+          'first frame': 'Making sail…',
+        };
+        window.__bootProgress = (phase) => {
+          if (status && LABELS[phase]) status.textContent = LABELS[phase];
+        };
+
+        // failsafe — never trap the user behind the splash if boot throws,
+        // WebGPU is missing, or compilation hangs.
+        setTimeout(dismiss, 30000);
       })();
     </script>
     <script type="module" src="/src/main.ts"></script>

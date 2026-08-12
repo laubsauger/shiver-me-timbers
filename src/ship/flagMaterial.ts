@@ -62,7 +62,7 @@ export function createFlagClothMaterial(
   const uBadge = uniform(new THREE.Color(p.badgeColor));
   const uPennant = uniform(new THREE.Color(p.pennantColor));
   const uStripe = uniform(new THREE.Color(p.pennantStripe));
-  const uSag = uniform(p.flagSag);
+  const uHang = uniform(p.flagHang);
   const uWaveAmp = uniform(p.flagWaveAmp);
   const uWaveFreq = uniform(p.flagWaveFreq);
   const uWaveCount = uniform(p.flagWaveCount);
@@ -94,19 +94,31 @@ export function createFlagClothMaterial(
     const ang = uRoot.add(uLag.mul(u));
     const dirX = ang.cos();
     const dirZ = ang.sin();
-    // slack cloth hangs: it loses horizontal reach and gains droop together
-    const sag = uSag.mul(uStrength.oneMinus());
-    const reach = along.mul(float(1).sub(sag.mul(0.55)));
-    const droop = along.mul(sag);
+
+    // HANG. The cloth falls away from horizontal as the wind dies, and it does
+    // so as an ANGLE, not as a shortening: the old form kept 77% of the fly
+    // sticking out even in a dead calm, which is most of why the user saw
+    // flags "very much flying hard" while stationary. The angle grows along
+    // the fly, so the cloth curves down from the staff instead of tilting
+    // rigidly like a rod.
+    const droopT = u.mul(0.35).add(u.mul(u).mul(0.65));
+    const theta = uHang.mul(uStrength.oneMinus()).mul(droopT);
+    const reach = along.mul(theta.cos());
+    const droop = along.mul(theta.sin());
 
     // travelling ripple, perpendicular to the streaming direction, growing
-    // toward the free fly and skewed by v so the cloth twists as it waves
+    // toward the free fly and skewed by v so the cloth twists as it waves.
+    // Amplitude and RATE both scale with the wind: a flag in a light air
+    // stirs slowly and shallowly, and that difference is the information.
     const grow = u.mul(0.4).add(u.mul(u).mul(0.6));
-    const carrier = time.mul(uWaveFreq).add(phase).add(u.mul(uWaveCount.mul(TAU)));
+    const rate = uWaveFreq.mul(float(0.35).add(uStrength));
+    const carrier = time.mul(rate).add(phase).add(u.mul(uWaveCount.mul(TAU)));
     const wave = sin(carrier.add(v.mul(1.7)));
-    // the snap: a faster, shorter wave that only appears once it is blowing
-    const crack = sin(carrier.mul(2.3).add(phase.mul(1.3))).mul(uSnap).mul(uStrength);
-    const amp = uWaveAmp.mul(hoist).mul(grow).mul(float(0.3).add(uStrength.mul(0.7)));
+    // the snap: a faster, shorter crack that only appears once it is really
+    // blowing — below half strength there is nothing to crack
+    const cracking = smoothstep(float(0.45), float(0.95), uStrength);
+    const crack = sin(carrier.mul(2.3).add(phase.mul(1.3))).mul(uSnap).mul(cracking);
+    const amp = uWaveAmp.mul(hoist).mul(grow).mul(float(0.06).add(uStrength.mul(0.94)));
     const swing = wave.add(crack.mul(0.4)).mul(amp);
 
     return vec3(
@@ -167,7 +179,7 @@ export function createFlagClothMaterial(
       uBadge.value.set(p.badgeColor);
       uPennant.value.set(p.pennantColor);
       uStripe.value.set(p.pennantStripe);
-      uSag.value = p.flagSag;
+      uHang.value = p.flagHang;
       uWaveAmp.value = p.flagWaveAmp;
       uWaveFreq.value = p.flagWaveFreq;
       uWaveCount.value = p.flagWaveCount;

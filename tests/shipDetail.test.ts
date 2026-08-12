@@ -29,6 +29,13 @@ import {
   sampleDeckHeight,
 } from '../src/ship/deckHeightfield';
 import { vhash, vjitter } from '../src/ship/variation';
+import { MIN_RUNG, buildRatlinePlan, validateRatlinePlan } from '../src/ship/ratlinePlan';
+import { buildSailGeometry } from '../src/ship/pieceGeometrySail';
+import { sailClothPoint } from '../src/ship/sailShape';
+import { ShipAssembly } from '../src/ship/shipAssembly';
+import { shipMaterialParams } from '../src/params/ship';
+
+const stubMaterial = () => ({ dispose(): void {} }) as unknown as THREE.Material;
 
 const galleon = buildGalleonBlueprint();
 const byId = new Map(galleon.map((p) => [p.id, p]));
@@ -123,53 +130,60 @@ describe('detail fittings ride the pieces they belong to (§V13/§V14)', () => {
     }
   });
 
-  it('ratline rungs land ON the shrouds, not beside them', () => {
-    // WHY: src/ropes solves the shrouds as catenaries between the chainplate
-    // sockets and the masthead (slack 1.004 — straight to a couple of cm). The
-    // rungs are built here from the SAME sockets; if either side ever computed
-    // its own endpoints instead, the ladder would hang in mid-air next to the
-    // ropes and nothing would fail loudly.
-    const mast = byId.get('mast-main')!;
-    const head = new THREE.Vector3(0, mast.aabb.max[1], 0);
-    for (const side of ['port', 'starboard']) {
-      const rat = byId.get(`ratlines-${side}-main`)!;
-      const feet = galleon
-        .filter((p) => p.kind === 'hull-section')
-        .flatMap((p) =>
-          p.sockets
-            .filter((s) => s.id.startsWith(`anchor-channel-${side}-main-`))
-            .map((s) =>
-              new THREE.Vector3(
-                s.position[0],
-                s.position[1] - mast.transform.position[1],
-                s.position[2] + p.transform.position[2] - mast.transform.position[2],
-              ),
-            ),
-        );
-      expect(feet.length).toBe(galleonParams.channelPlates);
-      const geo = buildPieceGeometry(rat.kind, rat.aabb, rat.shape);
-      const pos = geo.attributes.position;
-      expect(pos.count).toBeGreaterThan(100); // a real ladder, not two sticks
-      const v = new THREE.Vector3();
-      const line = new THREE.Line3();
-      const closest = new THREE.Vector3();
-      let worst = 0;
-      for (let i = 0; i < pos.count; i++) {
-        v.set(pos.getX(i), pos.getY(i), pos.getZ(i));
-        let best = Infinity;
-        for (const foot of feet) {
-          line.set(foot, head);
-          line.closestPointToPoint(v, true, closest);
-          best = Math.min(best, closest.distanceTo(v));
+  it('emits ratlines as INTENT, not as rung meshes (§V.45)', () => {
+    // WHY THE HANDOFF: rungs authored here from the chainplate sockets and the
+    // masthead are straight lines between two static points. The shrouds they
+    // are seized to are solved catenaries that sag — and will soon move — so
+    // authored rungs drift off their own ropes with nothing erroring. src/ropes
+    // samples both curves from the SAME solved points buffer, so the ship side
+    // must emit which shrouds, where along them, and how thick: no geometry.
+    expect(galleon.some((p) => (p.kind as string) === 'ratlines')).toBe(false);
+    const plan = buildRatlinePlan(galleon);
+    expect(() => validateRatlinePlan(plan, galleon)).not.toThrow();
+    expect(plan.map((l) => l.id).sort()).toEqual([
+      'ratlines-port-fore', 'ratlines-port-main', 'ratlines-port-rear',
+      'ratlines-starboard-fore', 'ratlines-starboard-main', 'ratlines-starboard-rear',
+    ]);
+    for (const ladder of plan) {
+      // spans the fan OUTBOARD → inboard, so a rung crosses every shroud
+      const outer = galleon.flatMap((p) => p.sockets).find((s2) => s2.id === ladder.footA)!;
+      const inner = galleon.flatMap((p) => p.sockets).find((s2) => s2.id === ladder.footB)!;
+      expect(Math.abs(outer.position[0])).toBeGreaterThanOrEqual(Math.abs(inner.position[0]));
+      expect(ladder.rungs.length).toBeGreaterThan(8);
+      for (const rung of ladder.rungs) {
+        for (const t of [rung.tA, rung.tB]) {
+          expect(t).toBeGreaterThan(0);
+          expect(t).toBeLessThan(1);
         }
-        worst = Math.max(worst, best);
+        // hand-seized: never perfectly level, never perfectly evenly spaced
+        expect(rung.sag).toBeGreaterThan(0);
       }
-      geo.dispose();
-      // rungs span BETWEEN shrouds, so only their ends touch one; the belly of
-      // a rung is legitimately off-line by up to the fan's own spread
-      const spread = feet[0].distanceTo(feet[feet.length - 1]);
-      expect(worst, `${side} rungs stray ${worst.toFixed(2)}m`).toBeLessThan(spread * 0.7);
+      const levels = ladder.rungs.map((r) => r.tA - r.tB);
+      expect(new Set(levels.map((v) => v.toFixed(6))).size).toBeGreaterThan(1);
     }
+  });
+
+  it('stops the ladder where the fan has closed to less than a foothold', () => {
+    // WHY: the shrouds converge on the masthead, so a plain "rungs up to
+    // topFrac" rule ends the ladder in a spike of stubs you could not stand on.
+    const plan = buildRatlinePlan(galleon);
+    const ladder = plan.find((l) => l.id === 'ratlines-starboard-main')!;
+    const at = (id: string): THREE.Vector3 => {
+      for (const piece of galleon) {
+        for (const s2 of piece.sockets) {
+          if (s2.id !== id) continue;
+          return new THREE.Vector3().fromArray(s2.position)
+            .add(new THREE.Vector3().fromArray(piece.transform.position));
+        }
+      }
+      throw new Error(id);
+    };
+    const head = at(ladder.masthead);
+    const a = at(ladder.footA);
+    const b = at(ladder.footB);
+    const last = ladder.rungs[ladder.rungs.length - 1];
+    const span = a.clone().lerp(head, last.tA).distanceTo(b.clone().lerp(head, last.tB));
+    expect(span).toBeGreaterThan(MIN_RUNG * 0.9);
   });
 
   it('spars declare the axis their staves run along', () => {
@@ -251,7 +265,7 @@ describe('flags are wind instruments (user: "just like in the movies")', () => {
     });
     for (const v of [bad.x, bad.z, bad.speed]) expect(Number.isFinite(v)).toBe(true);
     const state = advanceFlag(
-      { root: NaN, tip: NaN, strength: NaN },
+      { root: NaN, tip: NaN, strength: NaN, phase: NaN },
       NaN,
       NaN,
       0,
@@ -266,7 +280,7 @@ describe('flags are wind instruments (user: "just like in the movies")', () => {
     // WHY: a flag that rotates rigidly reads as a signpost. The lag is what
     // makes it read as cloth, and the request was specifically that it "react
     // visibly when she comes about".
-    let s = { root: 0, tip: 0, strength: 1 };
+    let s = { root: 0, tip: 0, strength: 1, phase: 0.4 };
     for (let i = 0; i < 12; i++) s = advanceFlag(s, Math.PI * 0.75, 1, 1 / 60, shipFlagParams);
     expect(s.root).toBeGreaterThan(0.05); // the root has swung
     expect(Math.abs(s.tip)).toBeLessThan(Math.abs(s.root)); // the tip trails it
@@ -279,7 +293,7 @@ describe('flags are wind instruments (user: "just like in the movies")', () => {
     // WHY: a ship steadying on due south walks the target angle across the
     // wrap. Damping the raw difference would spin the flag the long way round
     // — a full 360° sweep at the masthead, once per crossing.
-    let s = { root: 3.0, tip: 3.0, strength: 1 };
+    let s = { root: 3.0, tip: 3.0, strength: 1, phase: 0.4 };
     const target = -3.0; // 0.28 rad away the short way, 6.0 the long way
     s = advanceFlag(s, target, 1, 1 / 60, shipFlagParams);
     expect(s.root).toBeGreaterThan(3.0); // moved AWAY from zero, toward +π
@@ -307,6 +321,153 @@ describe('flags are wind instruments (user: "just like in the movies")', () => {
     expect(geo.boundingSphere!.center.x).toBeCloseTo(0);
     expect(geo.boundingSphere!.radius).toBeGreaterThan(flag.shape!.fly);
     geo.dispose();
+  });
+});
+
+describe('furled canvas gathers into swags, not a rolled tube (§T.34)', () => {
+  const sail = galleon.find((p) => p.kind === 'sail')!;
+  const width = sail.aabb.max[0] - sail.aabb.min[0];
+
+  /** lowest built vertex of the bundle at each station across the yard */
+  function bottomProfile(state: 'furled' | 'reefed', bins = 48): number[] {
+    const geo = buildSailGeometry(state, sail.aabb);
+    const pos = geo.attributes.position;
+    const shape = geo.getAttribute('sailShape');
+    const low = new Array<number>(bins).fill(Infinity);
+    for (let i = 0; i < pos.count; i++) {
+      if (shape.getX(i) !== 0) continue; // hardware/bundle only, not the skirt
+      const t = (pos.getX(i) / width + 0.5) * (bins - 1);
+      const k = Math.round(Math.min(bins - 1, Math.max(0, t)));
+      low[k] = Math.min(low[k], pos.getY(i));
+    }
+    geo.dispose();
+    return low.filter((v) => Number.isFinite(v));
+  }
+
+  it('hangs in bays: the bottom edge dips and lifts across the yard', () => {
+    // WHY (user, against a reference of a galleon at anchor): "instead of just
+    // being like a completely straight line rolled up". A cylinder's bottom
+    // edge is a straight line — the ONLY thing that distinguishes gathered
+    // canvas from a rolled tube is that the edge goes down and up again
+    // between gaskets. Count the direction changes: `bays` swags means the
+    // profile must turn at least that many times.
+    const profile = bottomProfile('furled');
+    let turns = 0;
+    let rising = profile[1] > profile[0];
+    for (let i = 2; i < profile.length; i++) {
+      const nowRising = profile[i] > profile[i - 1];
+      if (nowRising !== rising && Math.abs(profile[i] - profile[i - 1]) > 1e-4) {
+        turns++;
+        rising = nowRising;
+      }
+    }
+    expect(turns, 'furled bundle is a straight tube').toBeGreaterThanOrEqual(
+      shipDetailParams.sailBuntBays,
+    );
+    // and the swags are a real depth, not a ripple
+    const depth = Math.max(...profile) - Math.min(...profile);
+    expect(depth).toBeGreaterThan(0.1);
+  });
+
+  it('gathers the two sides differently — no mirrored lumps (§V2)', () => {
+    // WHY: the through-line. Two yards furled into identical lumps, or one
+    // yard symmetric about its own centre, reads as CG immediately.
+    const profile = bottomProfile('furled');
+    const half = Math.floor(profile.length / 2);
+    const left = profile.slice(0, half);
+    const right = profile.slice(profile.length - half).reverse();
+    let same = 0;
+    for (let i = 0; i < half; i++) if (Math.abs(left[i] - right[i]) < 1e-3) same++;
+    expect(same).toBeLessThan(half * 0.8);
+  });
+
+  it('reefed keeps working canvas below the bundle; furled does not', () => {
+    const reefed = buildSailGeometry('reefed', sail.aabb);
+    const furled = buildSailGeometry('furled', sail.aabb);
+    const clothWeight = (g: THREE.BufferGeometry): number => {
+      const shape = g.getAttribute('sailShape');
+      let n = 0;
+      for (let i = 0; i < shape.count; i++) if (shape.getX(i) === 1) n++;
+      return n;
+    };
+    expect(clothWeight(reefed)).toBeGreaterThan(0); // a reefed sail still draws
+    expect(clothWeight(furled)).toBe(0); // a furled one is all hardware
+    reefed.dispose();
+    furled.dispose();
+  });
+
+  it('the full sail carries reef bands, each riding one point of canvas', () => {
+    // WHY the uv matters: a weight-1 part is displaced by the cloth shader at
+    // ITS OWN (u, v). A reef point built with three's default plane uv would be
+    // stretched across the whole sail's billow instead of riding the spot it is
+    // sewn to — it would visibly slide over the canvas as the sail fills.
+    const geo = buildSailGeometry('full', sail.aabb);
+    const shape = geo.getAttribute('sailShape');
+    const uv = geo.getAttribute('uv');
+    let cloth = 0;
+    for (let i = 0; i < shape.count; i++) if (shape.getX(i) === 1) cloth++;
+    expect(cloth).toBeGreaterThan(0);
+    // every uv stays inside the cloth's parameter square
+    for (let i = 0; i < uv.count; i++) {
+      expect(uv.getX(i)).toBeGreaterThanOrEqual(-1e-6);
+      expect(uv.getX(i)).toBeLessThanOrEqual(1 + 1e-6);
+    }
+    geo.dispose();
+  });
+});
+
+describe('sail-attached anchors ride the canvas (§V12 endpoints, §V.45 rule)', () => {
+  it('every sail declares clews and buntline anchors', () => {
+    // WHY: src/ropes had to start its sheet run at the YARD END because no
+    // clew sockets existed — its own header says "adapt when the ship system
+    // adds clew anchors" — and the user spotted the result: "some of them
+    // should actually attach to the sails in the appropriate spots".
+    const sails = galleon.filter((p) => p.kind === 'sail');
+    expect(sails.length).toBe(6);
+    for (const sail of sails) {
+      const ids = sail.sockets.map((s) => s.id);
+      for (const suffix of ['clew-port', 'clew-starboard', 'bunt-port', 'bunt-starboard']) {
+        expect(ids, sail.id).toContain(`anchor-${sail.id}-${suffix}`);
+      }
+      for (const socket of sail.sockets) {
+        expect(socket.type).toBe('rope-anchor');
+        expect(socket.cloth, `${socket.id} must know where it is sewn`).toBeDefined();
+      }
+      // the clews are the two LOWER corners, not points on the spar
+      const clew = sail.sockets.find((s) => s.id.endsWith('clew-port'))!;
+      expect(clew.cloth).toEqual([0, 0]);
+      expect(clew.position[1]).toBeLessThan(0);
+    }
+  });
+
+  it('a clew MOVES when the canvas bellies, and stays finite (§V28)', () => {
+    // WHY: this is the whole point of the handoff. A clew resolved from its
+    // flat panel station would sit still while the sail bellied away from it,
+    // leaving every sheet ending in mid-air — the §V.45 failure, in cloth.
+    const asm = new ShipAssembly(galleon, stubMaterial);
+    const id = 'anchor-sail-main-lower-clew-starboard';
+    const slack = asm.socketWorldPosition(id);
+    asm.setSailDropScale('sail-main-lower', 0.3); // haul the sheets right in
+    const hauled = asm.socketWorldPosition(id);
+    // the foot comes UP as the canvas comes in
+    expect(hauled[1]).toBeGreaterThan(slack[1] + 0.5);
+    for (const v of [...slack, ...hauled]) expect(Number.isFinite(v)).toBe(true);
+    asm.dispose();
+  });
+
+  it('the flat socket station and the live one agree when there is no cloth', () => {
+    // a zero-drive, zero-flutter sail must resolve to exactly its built corner,
+    // or the CPU mirror has drifted from the panel it claims to describe
+    const p = { ...shipMaterialParams, sailBillow: 0, sailFlutterAmp: 0 };
+    const sail = galleon.find((s) => s.id === 'sail-main-lower')!;
+    const width = sail.aabb.max[0] - sail.aabb.min[0];
+    const drop = -sail.aabb.min[1];
+    const state = { drive: 0, luff: 0, skew: 0, dropScale: 1, time: 0, phase: 0 };
+    const pt = sailClothPoint(1, 0, width, drop, state, p);
+    const socket = sail.sockets.find((s) => s.id.endsWith('clew-starboard'))!;
+    expect(pt[0]).toBeCloseTo(socket.position[0], 5);
+    expect(pt[1]).toBeCloseTo(socket.position[1], 5);
+    expect(pt[2]).toBeCloseTo(0, 6);
   });
 });
 

@@ -42,9 +42,7 @@ import {
   Fn,
   If,
   Loop,
-  cameraPosition,
   clamp,
-  deltaTime,
   exp,
   float,
   instanceIndex,
@@ -54,12 +52,12 @@ import {
   min,
   mix,
   normalize,
+  pow,
   select,
   sin,
   smoothstep,
   sqrt,
   storage,
-  time,
   uniform,
   vec3,
   vec4,
@@ -101,6 +99,8 @@ export function createRopeCompute(maxRopes: number, segments: number) {
   const tangents = instancedArray(maxRopes * pointsPerRope, 'vec4');
   const simPos = instancedArray(maxRopes * pointsPerRope, 'vec4');
   const simPrev = instancedArray(maxRopes * pointsPerRope, 'vec4');
+  // per-LINK rest length, refreshed every frame from the rope's own catenary
+  const simRest = instancedArray(maxRopes * pointsPerRope, 'float');
   // Read-only VIEWS for the vertex stage, over the same attributes. Calling
   // points.toReadOnly() would mutate the shared node (setAccess returns
   // `this`, it does not clone) and the compute kernel's writes would compile
@@ -117,7 +117,30 @@ export function createRopeCompute(maxRopes: number, segments: number) {
   const uGustSpeed = uniform(ropeParams.gustSpeed);
   const uGustDepth = uniform(ropeParams.gustDepth);
   const uMaxStray = uniform(ropeParams.maxStray);
+  const uStrayFraction = uniform(ropeParams.strayFraction);
   const uTeleport = uniform(ropeParams.teleportDistance);
+  /**
+   * Camera position, and frame timing, as PLAIN UNIFORMS.
+   *
+   * A compute pass has no camera. Reading the `cameraPosition` /`deltaTime`
+   * render-stage nodes from inside `Fn(...).compute()` makes the node builder
+   * dereference a null camera while building the pass — `setupOutput →
+   * isArrayCamera on null` — which kills the whole boot, not just the ropes.
+   * `uCameraPos` is fed from the render side instead (see index.ts, via the
+   * mesh's onBeforeRender), which is also the more correct shape: ONE distance
+   * decision per rope per frame, not a per-invocation camera lookup. One frame
+   * of staleness is irrelevant to an LOD gate.
+   */
+  const camPos = new Vector3();
+  const uCameraPos = uniform(camPos);
+  const uDeltaTime = uniform(1 / 60).onFrameUpdate((frame) => {
+    const dt = (frame as { deltaTime?: number }).deltaTime;
+    return Number.isFinite(dt) ? (dt as number) : 1 / 60;
+  });
+  const uTime = uniform(0).onFrameUpdate((frame) => {
+    const t = (frame as { time?: number }).time;
+    return Number.isFinite(t) ? (t as number) : 0;
+  });
   const uSimDistance = uniform(ropeParams.simDistance);
   const uSimFadeBand = uniform(ropeParams.simFadeBand);
   // wind pulled straight from the ocean params every frame — the same source
@@ -189,7 +212,7 @@ export function createRopeCompute(maxRopes: number, segments: number) {
       // face an artefact, stays in pixels — §V36.) Camera-at-origin fallback
       // is benign: it simulates rather than freezing.
       const mid = mix(A, B, float(0.5));
-      const camDist = mid.sub(cameraPosition).length();
+      const camDist = mid.sub(uCameraPos).length();
       // reading: smoothstep(d0, d1, x) rises from 0 at d0 to 1 at d1 —
       // FUNCTIONAL 3-arg form (§V23/§B1). Inverted: far means less sim.
       const simWeight = smoothstep(
@@ -233,12 +256,28 @@ export function createRopeCompute(maxRopes: number, segments: number) {
 
         // frame delta clamped so a stall or a background tab cannot hand the
         // integrator a step it explodes on (§V28)
-        const dt = clamp(deltaTime, float(DT_MIN), float(DT_MAX)).div(SUBSTEPS).toVar();
-        const rest = L.div(float(segments)).toVar();
+        const dt = clamp(uDeltaTime, float(DT_MIN), float(DT_MAX)).div(SUBSTEPS).toVar();
+        // REST LENGTHS FROM THE CATENARY, not L/segments. solveCatenary
+        // samples uniformly in horizontal x, so its links vary ~2.2× end to
+        // end; a chain told to hold EQUAL links fights the very curve it was
+        // seeded from and never settles (measured: still moving 0.06 m/frame
+        // after 600 frames — a permanently twitching rig). Taking rest from
+        // the curve makes the chain's equilibrium exactly what the far LOD
+        // draws, so the §V42 crossfade has no shape mismatch either.
+        //
+        // Recomputed EVERY frame, not cached: reefing changes a rope's length
+        // while its anchors stay put (§V46), so the rest state moves under the
+        // chain. That is the mechanism that makes a hauled buntline visibly
+        // snap taut, so it must not be frozen at seed time.
+        Loop({ start: int(0), end: int(segments), condition: '<' }, ({ i }) => {
+          const c0 = catAt(float(i).div(segments));
+          const c1 = catAt(float(i).add(1).div(segments));
+          simRest.element(base.add(i)).assign(c1.sub(c0).length());
+        });
         // gust: one scalar for the whole rope, so a rope breathes as a unit
         const gust = float(1)
           .sub(uGustDepth)
-          .add(sin(time.mul(uGustSpeed).add(float(instanceIndex))).mul(uGustDepth));
+          .add(sin(uTime.mul(uGustSpeed).add(float(instanceIndex))).mul(uGustDepth));
         const accel = vec3(0, uGravity.negate(), 0).add(uWind.mul(uWindForce).mul(gust)).toVar();
 
         Loop(SUBSTEPS, () => {
@@ -246,7 +285,9 @@ export function createRopeCompute(maxRopes: number, segments: number) {
           Loop({ start: int(0), end: int(segments), condition: '<=' }, ({ i }) => {
             const cur = simPos.element(base.add(i)).xyz;
             const prev = simPrev.element(base.add(i)).xyz;
-            const vel = cur.sub(prev).mul(uDamping);
+            // damping quoted per 1/60 s and normalised to the step, so the
+            // substep count cannot silently change the physics
+            const vel = cur.sub(prev).mul(pow(uDamping, dt.mul(60)));
             const next = cur.add(vel).add(accel.mul(dt).mul(dt));
             simPrev.element(base.add(i)).assign(vec4(cur, 1));
             simPos.element(base.add(i)).assign(vec4(next, 1));
@@ -265,7 +306,7 @@ export function createRopeCompute(maxRopes: number, segments: number) {
               const p1 = simPos.element(base.add(i).add(1)).xyz;
               const d = p1.sub(p0);
               const len = max(d.length(), Z_MIN);
-              const corr = d.mul(len.sub(rest).div(len).mul(0.5));
+              const corr = d.mul(len.sub(simRest.element(base.add(i))).div(len).mul(0.5));
               simPos.element(base.add(i)).assign(vec4(p0.add(corr), 1));
               simPos.element(base.add(i).add(1)).assign(vec4(p1.sub(corr), 1));
             });
@@ -289,9 +330,14 @@ export function createRopeCompute(maxRopes: number, segments: number) {
         // second net, and NaN-proof by construction: `stray <= maxStray*BIG` is
         // FALSE for NaN, so a poisoned particle collapses onto its rest
         // position rather than propagating (§V28 — see the reseed note above)
-        const sane = stray.lessThanEqual(uMaxStray.mul(SANITY_SCALE));
+        // The leash is a SANITY net, not a shape constraint — the chain
+        // already tracks the curve because its rest lengths come from it. It
+        // scales with rope length so that a reef hauling several metres of sag
+        // out of a line (§V46) is followed, not clipped into a pop.
+        const leashMax = max(uMaxStray, L.mul(uStrayFraction)).toVar();
+        const sane = stray.lessThanEqual(leashMax.mul(SANITY_SCALE));
         const dist2 = max(stray, Z_MIN);
-        const pulled = restPos.add(offset.mul(min(dist2, uMaxStray).div(dist2)));
+        const pulled = restPos.add(offset.mul(min(dist2, leashMax).div(dist2)));
         const leashed = select(sane, pulled, restPos);
         simPos.element(base.add(i)).assign(vec4(leashed, 1));
         // crossfade the two solvers so a rope crossing the LOD boundary does
@@ -323,6 +369,7 @@ export function createRopeCompute(maxRopes: number, segments: number) {
     tangents,
     simPos,
     simPrev,
+    simRest,
     pointsRead,
     tangentsRead,
     uRopeCount,
@@ -333,10 +380,13 @@ export function createRopeCompute(maxRopes: number, segments: number) {
     uGustSpeed,
     uGustDepth,
     uMaxStray,
+    uStrayFraction,
     uTeleport,
     uSimDistance,
     uSimFadeBand,
     uWind,
+    uCameraPos,
+    camPos,
     computeNode,
     pointsPerRope,
   };

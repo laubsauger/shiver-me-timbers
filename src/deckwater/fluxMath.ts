@@ -23,8 +23,23 @@ export const EDGE_DRAIN_HEAD = 0;
 export interface OutflowParams {
   /** fraction of head difference moved this step (already dt-scaled) */
   fluxRate: number;
-  /** head units added per unit tilt gradient component */
+  /**
+   * DIMENSIONLESS artistic gain on the rotation bias. 1 = the true physical
+   * slope. It is not a head offset: see `cellSize`.
+   */
   tiltBiasStrength: number;
+  /**
+   * Metres per cell in grid x and y. The tilt gradient is a SLOPE (rise over
+   * run, = sin of the tilt), so the head a tilted deck drops between two
+   * neighbouring cells is slope × the distance between them. Leaving the cell
+   * size out treats the slope as though it were a head drop of that many
+   * METRES per cell, which on this grid overdrives heel by ~5× and makes it
+   * ~30× the deck's own camber gradient — the water then ignores the camber,
+   * the waterway and every coaming, and slides across the deck as one
+   * uniform sheet. Defaults to 1 m cells so the pure unit tests read as
+   * plain slope arithmetic.
+   */
+  cellSize?: readonly [number, number];
   /**
    * Hydraulic head presented by everything that is not deck — off the grid,
    * and (on the GPU) every drain cell. MUST sit below the lowest point of the
@@ -64,11 +79,15 @@ export function computeOutflow(
 ): Flux4 {
   const head = deck + volume;
   const flux: Flux4 = [0, 0, 0, 0];
+  const [cellX, cellY] = p.cellSize ?? [1, 1];
   let total = 0;
   for (let i = 0; i < 4; i++) {
     const [dx, dy] = DIRECTIONS[i];
     const nHead = neighborHeads[i] ?? p.drainHead ?? EDGE_DRAIN_HEAD;
-    const bias = p.tiltBiasStrength * (tiltGradient[0] * dx + tiltGradient[1] * dy);
+    // slope × the distance actually travelled — see OutflowParams.cellSize
+    const bias =
+      p.tiltBiasStrength *
+      (tiltGradient[0] * dx * cellX + tiltGradient[1] * dy * cellY);
     const f = Math.max(0, (head - nHead + bias) * p.fluxRate);
     flux[i] = f;
     total += f;

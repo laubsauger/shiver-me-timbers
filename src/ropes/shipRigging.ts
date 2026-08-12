@@ -43,7 +43,17 @@ import type { Vec3Like } from './catenaryMath';
 import type { Blocks } from './blocks';
 import type { Ropes } from './index';
 
-export type RigRole = 'stay' | 'halyard' | 'shroud' | 'lift' | 'brace' | 'sheet';
+export type RigRole =
+  | 'stay'
+  | 'halyard'
+  | 'shroud'
+  | 'lift'
+  | 'brace'
+  | 'sheet'
+  /** §V45/§V46: haul the sail's foot up its front face as it furls. Generated
+   *  once the ship system exposes clew/bunt anchors on the CLOTH */
+  | 'buntline'
+  | 'leechline';
 
 export interface RiggingRope {
   socketA: string;
@@ -74,10 +84,57 @@ const STYLE: Record<RigRole, { slack: number; thickness: number }> = {
   lift: { slack: 1.02, thickness: 0.03 },
   brace: { slack: 1.02, thickness: 0.025 },
   sheet: { slack: 1.02, thickness: 0.022 },
+  buntline: { slack: 1.05, thickness: 0.018 },
+  leechline: { slack: 1.05, thickness: 0.018 },
 };
 
+/**
+ * §V46 — how each role's slack responds to FURL (0 = sail set, 1 = furled).
+ * Added to the role's base slack, so a positive number eases the line and a
+ * negative one hauls it in.
+ *
+ * This is the whole "the rope physically grabs" mechanism, and it is nearly
+ * free: rope length is `chord × slack`, so pulling slack toward 1 removes the
+ * catenary's sag and the line reads TAUT. Easing it back lets the sag return.
+ * No new machinery, no second solver — the §V12 length term already does it.
+ *
+ * Standing rigging does not respond: a shroud that slackened when you furled
+ * would read as the mast coming loose. Running gear does:
+ *   sheet     eases as the clew rises toward the yard — it is being let go
+ *   buntline  hauls the sail's foot up its front face; goes hard taut
+ *   leechline the same along the leech
+ * The bunt/leech entries are inert until the ship system ships clew anchors
+ * (§V45) — the roles are declared here so that contract is explicit rather
+ * than discovered later.
+ */
+const FURL_RESPONSE: Record<RigRole, number> = {
+  stay: 0,
+  halyard: 0,
+  shroud: 0,
+  lift: 0,
+  brace: 0,
+  sheet: 0.06,
+  buntline: -0.11,
+  leechline: -0.1,
+};
+
+/** slack may never reach 1: at chord×1 the solver hits its taut clamp and the
+ *  rope becomes a dead straight line with no catenary at all (§V12) */
+const MIN_SLACK = 1.002;
+
+/**
+ * A role's slack at a given furl amount. Pure, so the reef response is unit
+ * testable without a GPU (tests/shipRigging.test.ts).
+ */
+export function slackForFurl(role: RigRole, baseSlack: number, furl: number): number {
+  const f = Number.isFinite(furl) ? Math.min(1, Math.max(0, furl)) : 0;
+  return Math.max(MIN_SLACK, baseSlack + FURL_RESPONSE[role] * f);
+}
+
 /** running rigging is worked through blocks; standing rigging is seized */
-const BLOCK_ROLES: ReadonlySet<RigRole> = new Set(['halyard', 'lift', 'brace', 'sheet']);
+const BLOCK_ROLES: ReadonlySet<RigRole> = new Set([
+  'halyard', 'lift', 'brace', 'sheet', 'buntline',
+]);
 
 const SIDES = ['port', 'starboard'] as const;
 
@@ -209,17 +266,42 @@ export function buildRiggingPlan(blueprint: PieceDef[]): RiggingRope[] {
     const index = masts.indexOf(m);
     if (index < 0) continue;
     const aftMast = index + 1 < masts.length ? masts[index + 1] : undefined;
-    const foreMast = index > 0 ? masts[index - 1] : undefined;
     for (const side of SIDES) {
       const end = `anchor-${piece.id}-${side}`;
       if (level === 'upper') add(end, masthead(m), 'lift');
       add(end, aftMast === undefined
         ? `anchor-cleat-stern-${side}`
         : belay(side, aftMast), 'brace');
-      if (level !== 'lower') continue;
-      add(end, foreMast === undefined
-        ? `anchor-cleat-bow-${side}`
-        : belay(side, foreMast), 'sheet');
+
+      // SAIL-ATTACHED GEAR (§V45). The clew and bunt anchors are sewn to the
+      // CLOTH, so socketWorldPosition resolves them through the live sail
+      // shape — a sheet stays on its corner as the canvas bellies, and rises
+      // with it as the sail furls. That is what the user was missing: "some of
+      // them should actually attach to the sails in the appropriate spots".
+      // Falls back to the yard end when a class carries no sails, so the
+      // brigantine still rigs (§V18 — no code path forks).
+      const clew = `anchor-sail-${m}-${level}-clew-${side}`;
+      const bunt = `anchor-sail-${m}-${level}-bunt-${side}`;
+      // no cloth, no sail gear. A class without sails (the brigantine) keeps
+      // its standing rigging, lifts and braces and simply has nothing to sheet
+      // — better than sheeting a yard end to the same point its brace already
+      // reaches, which the dedupe would silently swallow anyway.
+      if (!ids.has(clew)) continue;
+      // sheet leads AFT and down from the clew — it is what holds the sail's
+      // lower corner back against the wind
+      add(clew, aftMast === undefined
+        ? `anchor-cleat-stern-${side}`
+        : belay(side, aftMast), 'sheet');
+      // buntline: from the foot of the sail UP its front face to the masthead,
+      // the line that gathers the canvas when it furls. The most recognisable
+      // running-rigging shape on a square rig, and inert until now because
+      // there was nothing sewn to the cloth to hang it from.
+      add(bunt, masthead(m), 'buntline');
+      // NO TACKS. The clew's forward lead is real gear, but it is the least
+      // visible line on the ship and it crosses a bay FORWARD — the direction
+      // that reads as web. The sail's forward restraint is the yard its head
+      // is bent to, so nothing looks unsupported without them. 24 sail-attached
+      // lines (sheets + buntlines) already answer "attach to the sails".
     }
   }
 
@@ -273,6 +355,7 @@ export function applyRiggingPlan(
   plan: RiggingRope[],
   ropes: RopesHandle,
   socketWorldPosition: (id: string) => [number, number, number],
+  furl = 0,
 ): void {
   const cache = new Map<string, [number, number, number]>();
   const at = (id: string): [number, number, number] => {
@@ -289,7 +372,8 @@ export function applyRiggingPlan(
     const a: Vec3Like = { x: ax, y: ay, z: az };
     const b: Vec3Like = { x: bx, y: by, z: bz };
     const chord = Math.hypot(bx - ax, by - ay, bz - az);
-    ropes.setRope(index, a, b, chord * rope.slack, rope.thickness);
+    const slack = slackForFurl(rope.role, rope.slack, furl);
+    ropes.setRope(index, a, b, chord * slack, rope.thickness);
   });
   ropes.setRopeCount(plan.length);
 }

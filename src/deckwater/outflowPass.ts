@@ -62,6 +62,8 @@ export function createOutflowPass(
   w: number,
   h: number,
   u: DeckWaterUniforms,
+  /** metres per cell in grid x/y — see OutflowParams.cellSize for why */
+  cellSize: readonly [number, number],
 ) {
   return Fn(() => {
     If(instanceIndex.lessThan(uint(w * h)), () => {
@@ -84,9 +86,14 @@ export function createOutflowPass(
         return select(inside, nc.r.add(nc.b), u.uDrainHead);
       };
 
-      // flux ∝ max(0, headDiff + tilt bias·direction) — rocking slosh (§V9)
+      // flux ∝ max(0, headDiff + tilt bias·direction) — rocking slosh (§V9).
+      // The cell size is BAKED (construction-time constant): the tilt is a
+      // slope, so it must be multiplied by the distance actually travelled or
+      // heel swamps the deck's own relief — see OutflowParams.cellSize.
       const fluxTo = (dx: number, dy: number) => {
-        const bias = u.uTiltBias.mul(u.uTilt.x.mul(dx).add(u.uTilt.y.mul(dy)));
+        const bias = u.uTiltBias.mul(
+          u.uTilt.x.mul(dx * cellSize[0]).add(u.uTilt.y.mul(dy * cellSize[1])),
+        );
         return head.sub(neighborHead(dx, dy)).add(bias).mul(u.uFluxRate).max(0);
       };
       const fN = fluxTo(0, -1);

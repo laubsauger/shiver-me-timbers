@@ -13,7 +13,9 @@ import { oceanParams } from '../src/params/ocean';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../src/params/seaPhysics';
 import { CpuOcean } from '../src/sea-physics/cpuOcean';
 import { createHullContact, waterlineFromBox } from '../src/sea-physics/hullContact';
-import { stepShipGrounding, type SeabedField } from '../src/sea-physics/grounding';
+import { groundGrip, stepShipGrounding, type SeabedField } from '../src/sea-physics/grounding';
+import { stepShipSailing, type Wind } from '../src/sailing/shipKinematics';
+import { neutralInput } from '../src/sailing/input';
 import { stepShipBuoyancy, PROBE_LAYOUT } from '../src/sea-physics/buoyancy';
 import type { ShipState } from '../src/state/simState';
 
@@ -64,6 +66,17 @@ const SHELF = (slope: number, offset = 0): SeabedField => ({
 });
 /** a flat shoal at a fixed depth */
 const SHOAL = (bedY: number): SeabedField => ({ heightAt: () => bedY });
+
+/**
+ * A shoal that bites `bite` metres into the keel of a ship floating at her
+ * design draft. Note this is NOT `-(draft − bite)`: she floats with her
+ * waterline plane ~0.44 m BELOW the sea surface (that is what the spring/
+ * mass ratio means), so measuring the bank from the waterline understates
+ * the interference by half a metre and turns an intended brush into a hard
+ * grounding. Named so no future test has to rediscover that.
+ */
+const bitesKeelBy = (bite: number, sp: SeaPhysicsParams): SeabedField =>
+  SHOAL(equilibriumY(sp) - DRAFT + bite);
 
 function sail(
   seabed: SeabedField,
@@ -206,6 +219,136 @@ describe('stability (a grounded ship must not explode)', () => {
     expect(aground).toBeGreaterThan(0);
     expect(Number.isFinite(maxAbsVy)).toBe(true);
     expect(maxAbsVy).toBeLessThan(8); // no trampoline
+  });
+});
+
+describe('the sails cannot drive her over the bank (user bug)', () => {
+  // WHY, verbatim: "we're crashing into something and the boat will still
+  // try to continue to accelerate over a mountain — our sails magically
+  // continue to propulse us forward." Grounding bled velocity while sailing
+  // re-applied full thrust from the reduced velocity every tick, so she
+  // ground onward for ever. These tests drive the WHOLE tick — sailing,
+  // buoyancy, contact, grounding — because the bug only exists between two
+  // modules that each looked right on their own.
+  const WIND: Wind = { direction: 0, speed: 11 }; // toward +z, sailing weather
+
+  function voyage(seabed: SeabedField, seconds: number, sp = testSeaParams()) {
+    const ocean = flatSea(0);
+    const contact = createHullContact(HULL, 11);
+    const ship = makeShip();
+    ship.position[1] = equilibriumY(sp);
+    ship.quaternion = quatFromAxisAngle([0, 1, 0], Math.PI / 2); // beam reach
+    ship.sailTrim = 1; // sails full and drawing, the whole way
+    const input = neutralInput();
+    const track: number[] = [];
+    const n = Math.round(seconds / DT);
+    for (let i = 0; i < n; i++) {
+      const t = (i + 1) * DT;
+      stepShipSailing(ship, input, WIND, DT);
+      ocean.update(t);
+      stepShipBuoyancy(ship, ocean, DT, sp);
+      contact.update(ship, ocean, t);
+      stepShipGrounding(ship, contact, seabed, DRAFT, DT, sp);
+      track.push(Math.hypot(ship.position[0], ship.position[2]));
+    }
+    const speed = Math.hypot(ship.velocity[0], ship.velocity[2]);
+    const last3s = track.slice(-Math.round(3 / DT));
+    return { ship, speed, track, crept: last3s[last3s.length - 1] - last3s[0] };
+  }
+
+  it('open water: she sails, so the gate is not just breaking sailing', () => {
+    const r = voyage(OPEN, 20);
+    expect(r.speed).toBeGreaterThan(3);
+    expect(r.crept).toBeGreaterThan(9); // still making way at the end
+  });
+
+  it('hard aground under full sail: she STOPS and stays stopped', () => {
+    const r = voyage(SHOAL(-(DRAFT - 0.8)), 25);
+    expect(r.speed).toBeLessThan(0.3);
+    // the whole point: no crawling onward while the sails are still drawing
+    expect(r.crept).toBeLessThan(0.5);
+  });
+
+  it('she rides up a cliff shelf and holds, instead of climbing it', () => {
+    // the harshest island archetype: seabed rising steeply under her
+    const r = voyage(SHELF(0.6, -(DRAFT + 6)), 30);
+    expect(r.speed).toBeLessThan(0.5);
+    expect(r.crept).toBeLessThan(1);
+    expect(r.ship.position.every(Number.isFinite)).toBe(true);
+  });
+
+  it('a light touch only slows her — grounding is not a binary wall', () => {
+    // WHY: a hard "aground = stopped" switch would make every shoal a
+    // cliff. Brushing a bank should scrub speed and let her sail clear.
+    // Measured gradient at 11 m/s of wind: 0.03 m of bite → 12.6 m/s,
+    // 0.08 → 11.0, 0.15 → 8.3, 0.3 → stopped. One model, no switch.
+    const sp = testSeaParams();
+    const light = voyage(bitesKeelBy(0.08, sp), 20, sp);
+    const free = voyage(OPEN, 20, sp);
+    expect(light.speed).toBeGreaterThan(0.5); // still moving...
+    expect(light.speed).toBeLessThan(free.speed * 0.95); // ...but held back
+  });
+
+  it('and the hold deepens smoothly as she drives further on', () => {
+    const sp = testSeaParams();
+    const speeds = [0.03, 0.08, 0.15, 0.3].map((b) => voyage(bitesKeelBy(b, sp), 20, sp).speed);
+    for (let i = 1; i < speeds.length; i++) expect(speeds[i]).toBeLessThan(speeds[i - 1]);
+    expect(speeds[speeds.length - 1]).toBeLessThan(0.3); // ...and finally holds
+  });
+});
+
+describe('getting off again (grounding must not be a soft game-over)', () => {
+  it('a swell lifts her clear, and the sails bite again', () => {
+    // WHY: if running aground were permanent it would be worse than having
+    // no grounding at all. The escape route is physical, not a special
+    // case: the sea takes her weight back, N falls, the grip falls with it.
+    const sp = testSeaParams();
+    const ocean = new CpuOcean(7, { ...oceanParams, resolution: 128, amplitude: 1.2 }, sp);
+    const contact = createHullContact(HULL, 11);
+    const ship = makeShip();
+    ship.position[1] = equilibriumY(sp);
+    // aground hard enough to be stopped, not so hard she is high and dry
+    const seabed = bitesKeelBy(0.3, sp);
+    let liftedTicks = 0;
+    let heldTicks = 0;
+    for (let i = 0; i < 1800; i++) {
+      const t = (i + 1) * DT;
+      ocean.update(t);
+      stepShipBuoyancy(ship, ocean, DT, sp);
+      contact.update(ship, ocean, t);
+      const g = stepShipGrounding(ship, contact, seabed, DRAFT, DT, sp);
+      if (i < 600) continue;
+      if (g.aground) heldTicks++;
+      else liftedTicks++;
+    }
+    // she spends real time on the bottom...
+    expect(heldTicks).toBeGreaterThan(100);
+    // ...and real time floating free, which is when she can be worked off
+    expect(liftedTicks).toBeGreaterThan(100);
+    expect(groundGrip(ship, 0)).toBeLessThan(20);
+  });
+
+  it('the hold fades if the grounding step stops running at all', () => {
+    // WHY: main.ts may skip grounding far from land as an optimisation. A
+    // grip left behind by the last call would cripple her sails for the
+    // rest of the voyage, and it would look like a sailing bug.
+    const sp = testSeaParams();
+    const ocean = flatSea(0);
+    const contact = createHullContact(HULL, 11);
+    const ship = makeShip();
+    ship.position[1] = equilibriumY(sp);
+    ocean.update(DT);
+    contact.update(ship, ocean, DT);
+    stepShipGrounding(ship, contact, SHOAL(0), DRAFT, DT, sp);
+    expect(groundGrip(ship, 0)).toBeGreaterThan(1); // she is held...
+
+    const wind: Wind = { direction: 0, speed: 11 };
+    ship.quaternion = quatFromAxisAngle([0, 1, 0], Math.PI / 2);
+    ship.sailTrim = 1;
+    for (let i = 0; i < 300; i++) stepShipSailing(ship, neutralInput(), wind, DT);
+    // ...and five seconds later, with no grounding step, she sails again
+    expect(groundGrip(ship, 0)).toBeLessThan(0.1); // negligible vs 3.6 thrust
+    expect(Math.hypot(ship.velocity[0], ship.velocity[2])).toBeGreaterThan(2);
   });
 });
 

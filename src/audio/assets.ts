@@ -86,7 +86,11 @@ export interface SampleLoader {
   loadAll(): Promise<void>;
 }
 
-async function decode(ctx: BaseAudioContext, url: string): Promise<AudioBuffer | null> {
+/** fetch + decode one file; every failure resolves to null, never throws */
+export async function decodeAudio(
+  ctx: BaseAudioContext,
+  url: string,
+): Promise<AudioBuffer | null> {
   try {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -117,7 +121,7 @@ export function createSampleLoader(
       if (running) return running;
       running = (async () => {
         for (const name of LOAD_ORDER) {
-          const buffer = await decode(ctx, SAMPLE_URLS[name]);
+          const buffer = await decodeAudio(ctx, SAMPLE_URLS[name]);
           if (buffer) {
             buffers.set(name, buffer);
             onLoaded?.(name, buffer);

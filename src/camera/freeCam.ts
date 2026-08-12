@@ -23,6 +23,8 @@ export const FLY_KEYS = new Set([
 ]);
 /** modifiers the free cam reads but does NOT swallow */
 const MODIFIER_KEYS = new Set(['ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight']);
+/** below this, a transform delta is our own float noise, not an external write */
+const EXTERNAL_EPS = 1e-9;
 
 export class FreeCam {
   yaw = 0;
@@ -33,6 +35,9 @@ export class FreeCam {
   private vel = [0, 0, 0];
   private held = new Set<string>();
   private target = [0, 0, 0];
+  /** last transform WE wrote: [px,py,pz, qx,qy,qz,qw] — see adoptExternal */
+  private applied = [0, 0, 0, 0, 0, 0, 1];
+  private hasApplied = false;
 
   /** true if the code belongs to the free cam and must not reach the sim */
   static consumes(code: string): boolean {
@@ -91,6 +96,55 @@ export class FreeCam {
     this.yaw = yaw;
     this.pitch = clamp(pitch, -cameraParams.freePitchLimit, cameraParams.freePitchLimit);
     this.clearKeys();
+    this.recordApplied(camera);
+  }
+
+  /**
+   * If the camera transform changed since WE last wrote it, someone else
+   * moved the lens — `camera.position.set(...)` from the console, another
+   * system, a test rig. Adopt it rather than overwrite it on the next
+   * frame: a free camera that fights an external pose is as useless for
+   * §V22 verification as one that drifts. Returns true if it adopted.
+   */
+  adoptExternal(camera: PerspectiveCamera, worldForward: Vector3): boolean {
+    if (!this.hasApplied) return false;
+    const a = this.applied;
+    const moved =
+      Math.abs(camera.position.x - a[0]) > EXTERNAL_EPS ||
+      Math.abs(camera.position.y - a[1]) > EXTERNAL_EPS ||
+      Math.abs(camera.position.z - a[2]) > EXTERNAL_EPS;
+    const turned =
+      Math.abs(camera.quaternion.x - a[3]) > EXTERNAL_EPS ||
+      Math.abs(camera.quaternion.y - a[4]) > EXTERNAL_EPS ||
+      Math.abs(camera.quaternion.z - a[5]) > EXTERNAL_EPS ||
+      Math.abs(camera.quaternion.w - a[6]) > EXTERNAL_EPS;
+    if (!moved && !turned) return false;
+    if (moved) {
+      this.position[0] = camera.position.x;
+      this.position[1] = camera.position.y;
+      this.position[2] = camera.position.z;
+      // an external teleport carries no momentum
+      this.vel[0] = this.vel[1] = this.vel[2] = 0;
+    }
+    if (turned) {
+      camera.getWorldDirection(worldForward);
+      const [yaw, pitch] = yawPitchFromDirection(worldForward.x, worldForward.y, worldForward.z);
+      this.yaw = yaw;
+      this.pitch = clamp(pitch, -cameraParams.freePitchLimit, cameraParams.freePitchLimit);
+    }
+    return true;
+  }
+
+  private recordApplied(camera: PerspectiveCamera): void {
+    const a = this.applied;
+    a[0] = camera.position.x;
+    a[1] = camera.position.y;
+    a[2] = camera.position.z;
+    a[3] = camera.quaternion.x;
+    a[4] = camera.quaternion.y;
+    a[5] = camera.quaternion.z;
+    a[6] = camera.quaternion.w;
+    this.hasApplied = true;
   }
 
   update(dt: number): void {
@@ -135,5 +189,6 @@ export class FreeCam {
       this.position[2] + fwd[2],
     );
     camera.lookAt(lookTmp);
+    this.recordApplied(camera);
   }
 }

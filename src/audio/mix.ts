@@ -45,6 +45,8 @@ export interface BedEnv {
   weather: Weather;
   /** ship horizontal speed m/s (0 when there is no ship yet) */
   shipSpeed: number;
+  /** 0..1 hull working (hullWorking) — drives the wooden creak layer */
+  working?: number;
 }
 
 export interface BedTargets {
@@ -52,6 +54,8 @@ export interface BedTargets {
   ocean: number;
   wind: number;
   sailing: number;
+  /** wooden hull creak, non-positional: the ship is AROUND the listener */
+  creak: number;
   /** playbackRate for the wind layer — the recording's own 12 kn is 1.0 */
   windRate: number;
   /** lowpass cutoff (Hz) on the wind layer: light air is dull, gale is bright */
@@ -74,6 +78,8 @@ export function bedTargets(env: BedEnv, p: AudioParams): BedTargets {
     wind: (p.windBedFloor + (p.windBedGain - p.windBedFloor) * smooth01(w)) * gain,
     // the general sailing bed comes up when the ship is actually moving
     sailing: p.sailBedGain * smooth01(unit(env.shipSpeed, p.sailBedSpeedRef)) * gain,
+    // creak never goes to zero: a wooden ship at sea always works a little
+    creak: p.creakBedGain * (p.creakFloor + (1 - p.creakFloor) * clamp01(env.working ?? 0)),
     windRate: 1 + p.windRateSpread * rateDev,
     windCutoffHz: lerp(p.windBedCutoffMinHz, p.windBedCutoffMaxHz, smooth01(w)),
   };
@@ -92,8 +98,8 @@ export function driftFactor(phase: number, depth: number): number {
 export interface ShipAudioEnv {
   /** horizontal speed m/s */
   speed: number;
-  /** |roll rate| + |pitch rate| in rad/s */
-  motion: number;
+  /** 0..1 hull working (hullWorking) — rotation AND the sea running the planks */
+  working: number;
 }
 
 export interface EmitterTargets {
@@ -111,13 +117,86 @@ export interface EmitterTargets {
 export function emitterTargets(env: ShipAudioEnv, p: AudioParams): EmitterTargets {
   const s = unit(env.speed, p.wakeSpeedRef);
   const g = unit(env.speed, p.gurgleSpeedRef);
-  const m = smooth01(unit(env.motion, p.creakMotionRef));
+  const m = clamp01(env.working);
   return {
     wake: p.wakeGain * s * s,
     bowRush: p.bowRushGain * s * s,
     gurgle: p.gurgleGain * (p.gurgleFloor + (1 - p.gurgleFloor) * g),
     creak: p.creakLoopGain * (p.creakFloor + (1 - p.creakFloor) * m),
   };
+}
+
+/**
+ * Live hull-contact sensor, structurally typed so main.ts can hand over
+ * `hullContact` (sea-physics) unadapted and src/audio takes no dependency on
+ * that module. Arrays are REUSED every tick by the producer — read, never
+ * retain.
+ */
+export interface ContactInput {
+  cutwater: { inContact: boolean; world: Vec3Like; depth: number; rate: number };
+  /** per z slice, bow-most first */
+  sliceDepth: ArrayLike<number>;
+  sliceRate: ArrayLike<number>;
+  wetFraction: number;
+}
+
+export type Vec3Like = ArrayLike<number>;
+
+/**
+ * How hard the hull is WORKING, 0..1 — the thing a wooden ship creaks about.
+ * Two independent sources, whichever is larger: the ship's own angular rates
+ * (roll/pitch) and how fast the sea is running up and down the planking
+ * (mean |slice burial rate|). The second one matters because the hull keeps
+ * working in a seaway even when the buoyancy solver has been damped down to a
+ * calm ride — creak keyed to roll rate alone goes silent on a calm ship.
+ */
+export function hullWorking(
+  rollRate: number,
+  pitchRate: number,
+  contact: ContactInput | null | undefined,
+  p: AudioParams,
+): number {
+  const rot = unit(Math.abs(rollRate) + Math.abs(pitchRate), p.creakMotionRef);
+  let sea = 0;
+  if (contact) {
+    const n = contact.sliceRate.length;
+    let sum = 0;
+    let wet = 0;
+    for (let i = 0; i < n; i++) {
+      if (contact.sliceDepth[i] <= 0) continue;
+      const r = contact.sliceRate[i];
+      if (Number.isFinite(r)) sum += Math.abs(r);
+      wet++;
+    }
+    if (wet > 0) sea = unit(sum / wet, p.creakSeaRateRef);
+  }
+  return clamp01(Math.max(rot, sea));
+}
+
+/**
+ * Slam signal (m/s): the fastest burial rate among the FORWARD slices — the
+ * bow coming down onto the sea after a crest. Aft slices are excluded because
+ * the run aft buries smoothly at speed and would hold the signal permanently
+ * high. Same sensor the bow spray and the deck-water injection read, so the
+ * bang lands in sync with the visuals by construction (§V27).
+ */
+export function slamSignal(contact: ContactInput | null | undefined, p: AudioParams): number {
+  if (!contact) return 0;
+  const n = contact.sliceRate.length;
+  const forward = Math.max(1, Math.ceil(n * clamp01(p.slamStationFrac)));
+  let best = 0;
+  for (let i = 0; i < forward && i < n; i++) {
+    if (contact.sliceDepth[i] <= 0) continue;
+    const r = contact.sliceRate[i];
+    if (Number.isFinite(r) && r > best) best = r;
+  }
+  const cut = contact.cutwater.inContact ? contact.cutwater.rate : 0;
+  return Math.max(best, Number.isFinite(cut) ? cut : 0);
+}
+
+/** impact velocity → 0..1 loudness, with a floor so a light slap still lands */
+export function slamStrength(rate: number, p: AudioParams): number {
+  return clamp01(0.3 + 0.7 * smooth01(unit(rate, p.slamRateFull)));
 }
 
 export interface LuffInput {

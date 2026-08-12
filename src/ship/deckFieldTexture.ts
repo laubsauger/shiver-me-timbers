@@ -52,9 +52,22 @@ export function createDeckFieldTexture(field: DeckHeightfield): DeckFieldSampler
   // never wrap round to the stem
   texture.wrapS = THREE.ClampToEdgeWrapping;
   texture.wrapT = THREE.ClampToEdgeWrapping;
-  texture.minFilter = THREE.LinearFilter;
+  // MIPS ARE NOT OPTIONAL HERE (§V.48). This texture is 192 × 512 over a 35 m
+  // deck and the grazing follow camera compresses that length into a few
+  // hundred pixels, so the along-ship axis is heavily minified. Unmipped, the
+  // per-board channel becomes per-pixel random under minification — and it is
+  // consumed twice, as an albedo multiplier AND as a height that reliefNormal
+  // differentiates in screen space, so it produced albedo speckle and specular
+  // speckle at once, over the entire deck, in calm water at 1.7 knots.
+  //
+  // This is the THIRD time this project has shipped an unmipped texture that
+  // aliased into uniform per-pixel speckle (foam StorageTexture at the
+  // horizon, ocean far field, now this). The tell is always that the noise
+  // covers a whole surface evenly rather than clustering anywhere.
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
   texture.magFilter = THREE.LinearFilter;
-  texture.generateMipmaps = false;
+  texture.generateMipmaps = true;
+  texture.anisotropy = 8; // the grazing deck view is the whole problem
   texture.needsUpdate = true;
   texture.name = 'deck-heightfield';
   return {

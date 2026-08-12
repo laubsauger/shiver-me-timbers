@@ -229,9 +229,10 @@ describe('bow emission regimes (constant cutwater mist + impact sheets)', () => 
     bowImmersionThreshold: 0.02,
     bowImmersionFull: 0.45,
     bowSpeedThreshold: 1.0,
-    bowSpeedFull: 5.0,
+    bowSpeedFull: 8.0,
     bowImpactRef: 0.6,
     bowContactDepth: 0.12,
+    bowSpeedExponent: 2,
     bowBurstRate: 600,
     bowCruiseRate: 200,
     bowCruiseSheet: 0.35,
@@ -270,7 +271,10 @@ describe('bow emission regimes (constant cutwater mist + impact sheets)', () => 
     const slam = bowEmission(0.6, 6, 2.0, true, E);
     expect(slam.rate).toBeGreaterThan(slow.rate);
     expect(slam.sheet).toBeGreaterThan(slow.sheet);
-    expect(slam.sheet).toBe(1); // full sheet at/above bowImpactRef
+    // a FULL sheet needs a hard burial AND real speed — at 6 kn even a solid
+    // slam throws a partial sheet, which is the whole point of the exponent
+    expect(slam.sheet).toBeLessThan(1);
+    expect(bowEmission(0.6, 12, 2.0, true, E).sheet).toBe(1);
     expect(slow.rate).toBeGreaterThan(bowEmission(0, 6, 0, true, E).rate); // depth counts
   });
 

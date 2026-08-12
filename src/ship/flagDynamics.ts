@@ -86,6 +86,25 @@ export interface FlagState {
   tip: number;
   /** 0..1 how hard it is streaming */
   strength: number;
+  /** this flag's own gust phase — see gustModulation */
+  phase: number;
+}
+
+/**
+ * Lull-and-gust breathing, 0.7 … 1.3 ish. Two detuned sines, never a single
+ * period, so the cloth never settles into an obvious loop.
+ *
+ * `phase` MUST differ per flag. §B.4 is the standing lesson here: the ocean's
+ * sparkle shared one time phase across every cell and the whole sea flashed in
+ * unison on a 3 s cycle. Three flags on one ship breathing in step would read
+ * the same way — as one animation playing, rather than as three pieces of
+ * cloth in the same air.
+ */
+export function gustModulation(time: number, phase: number): number {
+  const t = finite(time);
+  const p = finite(phase);
+  const g = 0.5 * Math.sin(t * 0.9 + p) + 0.5 * Math.sin(t * 1.47 + p * 1.7 + 1.3);
+  return 1 + 0.3 * g;
 }
 
 /**
@@ -118,10 +137,21 @@ export function advanceFlag(
       0,
       1,
     ),
+    phase: finite(state.phase),
   };
 }
 
-/** 0..1 stream factor from apparent wind speed — 1 = board stiff */
+/**
+ * 0..1 stream factor from apparent wind speed — 1 = board stiff.
+ *
+ * MEASURED BUG (user: "the flags don't seem to be modulated by the movement
+ * speed, wind speed, or the accumulation of both ... even when we're
+ * stationary, very much flying hard"): `flagStreamRef` was 7 m/s while the
+ * default wind is 11 m/s, so this clamped to 1 in every normal condition and
+ * the telltale carried no information at all. The reference must sit ABOVE the
+ * usual wind, not below it — the same class of mistake §V36 is about, a
+ * threshold whose meaning drifted away from the range it gates.
+ */
 export function streamStrength(speed: number, p: ShipFlagParams): number {
   return clamp(finite(speed) / Math.max(0.5, p.flagStreamRef), 0, 1);
 }

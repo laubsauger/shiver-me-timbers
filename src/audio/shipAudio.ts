@@ -15,9 +15,11 @@
 import { audioParams as p } from '../params/audio';
 import { createLoopLayer, type LoopLayer } from './layer';
 import { createPanner, setPannerPosition } from './emitters';
-import { createGatedTrigger, createDeltaTrigger } from './triggers';
-import { emitterTargets, luffEstimate, splashStrength } from './mix';
-import { playSample, sliceOffset } from './sampleShot';
+import { createDeltaTrigger, createGatedTrigger } from './triggers';
+import { emitterTargets, luffEstimate, slamSignal, type ContactInput } from './mix';
+import { createHullEvents, type HullEvents } from './hullEvents';
+import { createSailHaul, type SailHaul } from './sailHaul';
+import { playSample } from './sampleShot';
 import { createRng, type Rng } from '../state/rng';
 import { rotateVec } from '../combat/quatMath';
 import type { Quat, Vec3 } from '../state/simState';
@@ -34,11 +36,26 @@ export interface ShipAudioInput {
   bowImmersion: number;
   /** exact bow world position if the caller has it; else derived from params */
   bowWorld?: Vec3;
+  /**
+   * Live hull-contact sensor (sea-physics/hullContact), passed straight
+   * through. Drives the slam and puts the water emitter on the real surface
+   * crossing instead of a fixed bow offset. Absent = pre-wiring fallback.
+   */
+  contact?: ContactInput | null;
+  /**
+   * Continuous cloth drop, 1 = full sail … 0 = furled — the SAME scalar the
+   * rig animates with (ship/sailDynamics `trimDropScale`). When present it
+   * drives the haul (reefing/setting sounds like men working, in both
+   * directions); when absent the coarser sailTrim delta path is used.
+   */
+  sailDrop?: number;
 }
 
 export interface ShipAudioEnvIn {
   windSpeed: number;
   windDirection: number;
+  /** 0..1 hull working (mix.hullWorking) — creak level + groan pacing */
+  working: number;
 }
 
 export interface ShipAudio {
@@ -77,20 +94,20 @@ export function createShipAudio(
   const bowShots = mk(buses.sfx);
   const sails = [mk(buses.sfx), mk(buses.sfx), mk(buses.sfx)];
 
-  let wakeBuf: AudioBuffer | null = null;
   const snapBufs: AudioBuffer[] = [];
   let deployBuf: AudioBuffer | null = null;
 
   const rng: Rng = createRng(0x5a1105);
-  const splash = createGatedTrigger(
-    () => ({
-      on: p.bowSplashImmersionOn,
-      off: p.bowSplashImmersionOff,
-      cooldown: p.bowSplashCooldown,
-      repeat: true,
-      jitter: 0.25,
-    }),
-    rng,
+  // splash / slam / creak groans: water events at the cutwater, timber events
+  // up at the rig where the ship's own noise belongs
+  const events: HullEvents = createHullEvents(ctx, {
+    water: bowShots.panner,
+    timber: rigging.panner,
+  });
+  // the haul is spread across the masts — hands are working the whole rig
+  const haul: SailHaul = createSailHaul(
+    ctx,
+    sails.map((s) => s.panner),
   );
   // one trigger per mast, each with its own rng stream → the three sails never
   // snap in unison (§B4 spirit: shared phase reads as a machine)
@@ -128,8 +145,9 @@ export function createShipAudio(
 
   return {
     onSample(name, buffer) {
+      events.onSample(name, buffer);
+      haul.onSample(name, buffer);
       if (name === 'wake') {
-        wakeBuf = buffer;
         bow.layer?.start(buffer);
         stern.layer?.start(buffer);
       } else if (name === 'hullGurgle') hull.layer?.start(buffer);
@@ -140,14 +158,18 @@ export function createShipAudio(
 
     update(ship, env, dt) {
       const speed = Math.hypot(ship.velocity[0], ship.velocity[2]);
-      const motion = Math.abs(ship.angularVelocity[0]) + Math.abs(ship.angularVelocity[2]);
-      const targets = emitterTargets({ speed, motion }, p);
+      const targets = emitterTargets({ speed, working: env.working }, p);
       const tau = Math.max(0.05, p.ambienceTau);
 
       // ── positions (cheap: 6 quat rotations + a few AudioParam writes) ──
       const bowPos = ship.bowWorld ?? offsetWorld(ship, [0, p.waterlineY, p.bowEmitterZ]);
       setPannerPosition(bow.panner, bowPos[0], bowPos[1], bowPos[2]);
-      setPannerPosition(bowShots.panner, bowPos[0], bowPos[1], bowPos[2]);
+      // water EVENTS come from the real surface crossing when the sensor is
+      // wired — a slam heard from the stem while the stem is in the air is
+      // exactly the mismatch the cutwater signal exists to remove
+      const cut = ship.contact?.cutwater;
+      const water = cut?.inContact ? cut.world : bowPos;
+      setPannerPosition(bowShots.panner, water[0], water[1], water[2]);
       const sternPos = offsetWorld(ship, [0, p.waterlineY, p.sternEmitterZ]);
       setPannerPosition(stern.panner, sternPos[0], sternPos[1], sternPos[2]);
       const hullPos = offsetWorld(ship, [0, p.waterlineY, 0]);
@@ -166,18 +188,17 @@ export function createShipAudio(
       hull.layer?.update({ gain: targets.gurgle }, dt, tau);
       rigging.layer?.update({ gain: targets.creak }, dt, tau);
 
-      // ── bow splash: immersion hysteresis AND a speed gate (§V27) ──
-      const wet = splash.step(ship.bowImmersion, dt, speed >= p.bowSplashSpeedGate);
-      if (wet && wakeBuf) {
-        playSample(ctx, bowShots.panner, wakeBuf, {
-          gain: p.bowSplashGain * splashStrength(ship.bowImmersion, speed, p),
-          offset: sliceOffset(rng, wakeBuf.duration, p.bowSplashWindowSec, p.bowSplashSliceSec),
-          duration: p.bowSplashSliceSec,
-          playbackRate: 0.9 + 0.3 * rng(),
-          fadeIn: 0.01,
-          fadeOut: 0.25,
-        });
-      }
+      // ── water impacts + timber groans (hullEvents owns the gating) ──
+      events.update(
+        {
+          bowImmersion: ship.contact?.cutwater.depth ?? ship.bowImmersion,
+          speed,
+          slamRate: slamSignal(ship.contact, p),
+          working: env.working,
+          inContact: ship.contact ? ship.contact.cutwater.inContact : true,
+        },
+        dt,
+      );
 
       // ── canvas: sustained luff snaps + a sharp trim change ──
       const fwd = rotateVec(ship.quaternion, [0, 0, 1]);
@@ -195,16 +216,24 @@ export function createShipAudio(
       for (let i = 0; i < snapTriggers.length; i++) {
         if (snapTriggers[i].step(luff, dt)) snapAt(sails[i], p.sailSnapGain * luff);
       }
-      const set = deploy.step(ship.sailTrim, dt);
-      const nudge = trimSnap.step(ship.sailTrim, dt);
-      if (set > 0 && deployBuf) {
-        playSample(ctx, sails[1].panner, deployBuf, { gain: p.sailDeployGain });
-      } else if (set < 0 || nudge !== 0) {
-        snapAt(sails[1], p.sailSnapGain * (set < 0 ? 1 : 0.6));
+      // ── reefing / setting sail ──
+      if (ship.sailDrop !== undefined) {
+        // preferred: the continuous cloth scalar → a full haul, both ways
+        haul.update(ship.sailDrop, dt);
+      } else {
+        // fallback until main.ts passes sailDrop: coarse trim-delta events
+        const set = deploy.step(ship.sailTrim, dt);
+        const nudge = trimSnap.step(ship.sailTrim, dt);
+        if (set > 0 && deployBuf) {
+          playSample(ctx, sails[1].panner, deployBuf, { gain: p.sailDeployGain });
+        } else if (set < 0 || nudge !== 0) {
+          snapAt(sails[1], p.sailSnapGain * (set < 0 ? 1 : 0.6));
+        }
       }
     },
 
     dispose() {
+      events.dispose();
       for (const e of [bow, stern, hull, rigging, bowShots, ...sails]) {
         e.layer?.dispose();
         e.panner.disconnect();

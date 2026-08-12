@@ -46,6 +46,7 @@ import {
   vec3,
 } from 'three/tsl';
 import { fbm2, hash2 } from '../terrain/noise';
+import { bandLimitedEdge, periodResolved } from './bandLimit';
 import { skyParams } from '../params/sky';
 import { sunDirection } from '../sky/sunCycle';
 import { shipMaterialParams, type ShipMaterialParams } from '../params/ship';
@@ -53,6 +54,10 @@ import { createSailWindUniforms } from './sailDriver';
 import type { ShipMaterialHandle } from './woodMaterial';
 
 const TAU = Math.PI * 2;
+
+/** seam falloff between cloth panels, as a fraction of one panel. Named
+ *  because it is also the feature width its §V.48 band limit measures. */
+const PANEL_SEAM = 0.045;
 
 /** live sun direction (toward the sun), re-derived from the same pure
  *  function + params the sky rig uses — no wiring through main.ts */
@@ -155,13 +160,30 @@ export function createSailClothMaterial(
   const weft = fbm2(positionLocal.xy.mul(uWeaveScale).mul(vec2(6, 1)), 2);
   const weave = warp.add(weft).mul(0.5);
   const stain = fbm2(positionLocal.xy.mul(0.35), 3);
-  const panelTone = hash2(vec2(cloth.x.mul(uPanelCount).floor(), 3.7));
+  /**
+   * §V.48. The panel repeat is the one periodic term on the cloth, and a set
+   * course is ~10 m of sail that the follow camera regularly compresses into a
+   * couple of hundred pixels — at which point a 4.5%-of-a-panel seam and a
+   * per-panel tone STEP are both well under a pixel and shimmer. This material
+   * builds its normal from the billow rather than from a height field, so the
+   * failure here is albedo crawl rather than the hull's white specular
+   * speckle, but the cause and the cure are identical.
+   */
+  const panelCoord = cloth.x.mul(uPanelCount);
+  const panelTone = hash2(vec2(panelCoord.floor(), 3.7));
+  // fades to the jitter's own MEAN, not to 1 — 0.92..1.03 averages 0.975, and
+  // fading to 1 instead would brighten every distant sail by 2.5%
+  const panelToneMul = mix(
+    float(0.975),
+    mix(float(0.92), float(1.03), panelTone),
+    periodResolved(panelCoord),
+  );
   const base = mix(uDark, uLight, weave)
     .mul(mix(float(1).sub(uStain), float(1), stain))
-    .mul(mix(float(0.92), float(1.03), panelTone));
+    .mul(panelToneMul);
 
-  const pf = fract(cloth.x.mul(uPanelCount));
-  const panelMask = smoothstep(float(0), float(0.045), pf.min(pf.oneMinus()));
+  const pf = fract(panelCoord);
+  const panelMask = bandLimitedEdge(pf.min(pf.oneMinus()), panelCoord, float(PANEL_SEAM));
   const hemMask = smoothstep(
     float(0),
     float(0.03),

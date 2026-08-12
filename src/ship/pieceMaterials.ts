@@ -26,7 +26,6 @@ type Family = 'hull' | 'deck' | 'spar' | 'trim' | 'sail' | 'flag' | 'iron' | 'gl
 const FAMILY_OF: Record<PieceKind, Family> = {
   pennant: 'flag',
   figurehead: 'trim',
-  ratlines: 'trim', // tarred hemp — the darkest cordage aboard
   gunport: 'hull',
   channel: 'iron',
   headrail: 'trim',

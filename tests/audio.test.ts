@@ -26,10 +26,27 @@ import {
   bedTargets,
   driftFactor,
   emitterTargets,
+  hullWorking,
   luffEstimate,
+  slamSignal,
+  slamStrength,
   splashStrength,
   unit,
 } from '../src/audio/mix';
+import { createHaulMachine, type HaulEvent } from '../src/audio/sailHaul';
+import { discoverMusicTracks, parseTrackName, type MusicTrackRef } from '../src/audio/musicAssets';
+import {
+  agcStep,
+  createPlaylist,
+  duckHit,
+  gapFor,
+  musicStateFor,
+  stepDuck,
+  tagMatch,
+  trackWeight,
+  windowRms,
+  type DuckState,
+} from '../src/audio/musicPlaylist';
 import { createDeltaTrigger, createGatedTrigger } from '../src/audio/triggers';
 import { listenerPoseFromMatrix } from '../src/audio/emitters';
 import { sliceOffset } from '../src/audio/sampleShot';
@@ -140,9 +157,10 @@ describe('volume clamp 0..1 (past unity = master bus clipping)', () => {
 
   it('engine clamps volumes at construction and via setVolumes, pre-AudioContext', () => {
     const engine = createEngine({ master: 2, sfx: -1 });
-    expect(engine.getVolumes()).toEqual({ master: 1, sfx: 0, ambience: 1 });
+    // music defaults to unity: the settings store does not carry it yet
+    expect(engine.getVolumes()).toEqual({ master: 1, sfx: 0, ambience: 1, music: 1 });
     engine.setVolumes({ ambience: 1.7, master: 0.5 });
-    expect(engine.getVolumes()).toEqual({ master: 0.5, sfx: 0, ambience: 1 });
+    expect(engine.getVolumes()).toEqual({ master: 0.5, sfx: 0, ambience: 1, music: 1 });
   });
 });
 
@@ -273,22 +291,22 @@ describe('crossfade behaviour (a layer that jumps to its target pops audibly)', 
 
 describe('positional emitter gains (what makes the ship localizable)', () => {
   it('wake/bow scale super-linearly with speed and are silent at rest', () => {
-    const still = emitterTargets({ speed: 0, motion: 0 }, p);
+    const still = emitterTargets({ speed: 0, working: 0 }, p);
     expect(still.wake).toBe(0);
     expect(still.bowRush).toBe(0);
-    const half = emitterTargets({ speed: p.wakeSpeedRef / 2, motion: 0 }, p).wake;
-    const full = emitterTargets({ speed: p.wakeSpeedRef, motion: 0 }, p).wake;
+    const half = emitterTargets({ speed: p.wakeSpeedRef / 2, working: 0 }, p).wake;
+    const full = emitterTargets({ speed: p.wakeSpeedRef, working: 0 }, p).wake;
     expect(half).toBeLessThan(full / 2); // quadratic, not linear
     expect(full).toBeCloseTo(p.wakeGain, 10);
     // above the reference speed it saturates instead of running away
-    expect(emitterTargets({ speed: 100, motion: 0 }, p).wake).toBeCloseTo(p.wakeGain, 10);
+    expect(emitterTargets({ speed: 100, working: 0 }, p).wake).toBeCloseTo(p.wakeGain, 10);
   });
 
   it('hull gurgle and rigging creak keep a floor — a drifting hull still lives', () => {
-    const idle = emitterTargets({ speed: 0, motion: 0 }, p);
+    const idle = emitterTargets({ speed: 0, working: 0 }, p);
     expect(idle.gurgle).toBeCloseTo(p.gurgleGain * p.gurgleFloor, 10);
     expect(idle.creak).toBeCloseTo(p.creakLoopGain * p.creakFloor, 10);
-    const rolling = emitterTargets({ speed: 0, motion: p.creakMotionRef }, p);
+    const rolling = emitterTargets({ speed: 0, working: 1 }, p);
     expect(rolling.creak).toBeCloseTo(p.creakLoopGain, 10);
     expect(rolling.creak).toBeGreaterThan(idle.creak);
   });
@@ -487,10 +505,10 @@ describe('volume buses + persistence (§I settings contract)', () => {
   it('applies stored volumes immediately on attach', () => {
     const storage = memoryStorage();
     const store = createSettingsStore(storage);
-    store.set({ audio: { master: 0.4, sfx: 0.3, ambience: 0.2 } });
+    store.set({ audio: { master: 0.4, sfx: 0.3, ambience: 0.2, music: 0.1 } });
     const engine = createEngine();
     attachAudioSettings(engine, store);
-    expect(engine.getVolumes()).toEqual({ master: 0.4, sfx: 0.3, ambience: 0.2 });
+    expect(engine.getVolumes()).toEqual({ master: 0.4, sfx: 0.3, ambience: 0.2, music: 0.1 });
   });
 
   it('follows later changes and stops after unsubscribe', () => {
@@ -507,10 +525,10 @@ describe('volume buses + persistence (§I settings contract)', () => {
   it('volumes survive a reload: a fresh store + engine come back at the saved mix', () => {
     const storage = memoryStorage();
     const first = createSettingsStore(storage);
-    first.set({ audio: { master: 0.25, sfx: 0.6, ambience: 0.15 } });
+    first.set({ audio: { master: 0.25, sfx: 0.6, ambience: 0.15, music: 0.4 } });
     const engine = createEngine();
     attachAudioSettings(engine, createSettingsStore(storage)); // "reload"
-    expect(engine.getVolumes()).toEqual({ master: 0.25, sfx: 0.6, ambience: 0.15 });
+    expect(engine.getVolumes()).toEqual({ master: 0.25, sfx: 0.6, ambience: 0.15, music: 0.4 });
   });
 
   it('a corrupt or out-of-range save cannot push a bus past unity', () => {
@@ -521,5 +539,423 @@ describe('volume buses + persistence (§I settings contract)', () => {
     const v = engine.getVolumes();
     expect(v.master).toBe(1);
     expect(v.sfx).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// "The ship as a working object": creak, slam, and the reefing haul.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** a hullContact-shaped stub; arrays are bow-most first, like the real one */
+const contactOf = (
+  depth: number[],
+  rate: number[],
+  cutwater: { inContact?: boolean; depth?: number; rate?: number } = {},
+) => ({
+  cutwater: {
+    inContact: cutwater.inContact ?? true,
+    world: [0, 0, 0] as [number, number, number],
+    depth: cutwater.depth ?? 0.5,
+    rate: cutwater.rate ?? 0,
+  },
+  sliceDepth: depth,
+  sliceRate: rate,
+  wetFraction: depth.filter((d) => d > 0).length / Math.max(1, depth.length),
+});
+
+describe('hull working (why the creak went silent when the ship got calmer)', () => {
+  it('a CALM hull still works: the sea running the planks keeps creak alive', () => {
+    // post-damping motion: ~0.03 rad/s roll+pitch — under the old 0.35 rad/s
+    // reference that alone was ~9% and inaudible
+    const rotationOnly = hullWorking(0.02, 0.01, null, p);
+    const inASeaway = hullWorking(0.02, 0.01, contactOf([1, 1, 1], [0.8, -0.7, 0.6]), p);
+    expect(inASeaway).toBeGreaterThan(rotationOnly);
+    expect(inASeaway).toBeGreaterThan(0.5);
+    // and whatever the signal, the loop is never inaudible: it has a floor
+    expect(emitterTargets({ speed: 0, working: 0 }, p).creak).toBeCloseTo(
+      p.creakLoopGain * p.creakFloor,
+      10,
+    );
+    expect(p.creakLoopGain * p.creakFloor).toBeGreaterThan(0.2);
+  });
+
+  it('rolling hard maxes it out from rotation alone, and it stays 0..1', () => {
+    expect(hullWorking(p.creakMotionRef, 0, null, p)).toBeCloseTo(1, 10);
+    expect(hullWorking(10, 10, contactOf([1], [50]), p)).toBe(1);
+    expect(hullWorking(Number.NaN, 0, null, p)).toBe(0);
+    expect(hullWorking(0, 0, contactOf([-1, -1], [9, 9]), p)).toBe(0); // dry hull
+  });
+
+  it('drives the ambience creak layer too, with the same floor', () => {
+    const quiet = bedTargets({ windSpeed: 5, weather: 'calm', shipSpeed: 0, working: 0 }, p).creak;
+    const loud = bedTargets({ windSpeed: 5, weather: 'calm', shipSpeed: 0, working: 1 }, p).creak;
+    expect(quiet).toBeCloseTo(p.creakBedGain * p.creakFloor, 10);
+    expect(loud).toBeCloseTo(p.creakBedGain, 10);
+    // weather must NOT scale creak — the hull works the same in a flat calm
+    expect(bedTargets({ windSpeed: 5, weather: 'storm', shipSpeed: 0, working: 0.5 }, p).creak).toBe(
+      bedTargets({ windSpeed: 5, weather: 'calm', shipSpeed: 0, working: 0.5 }, p).creak,
+    );
+  });
+});
+
+describe('slam detection (the bow coming down on the sea)', () => {
+  it('reads the FORWARD slices only — the run aft buries smoothly at speed', () => {
+    const n = 10;
+    const depth = new Array(n).fill(1);
+    const rate = new Array(n).fill(0.2);
+    rate[n - 1] = 9; // a big aft-most burial must NOT read as a slam
+    expect(slamSignal(contactOf(depth, rate), p)).toBeLessThan(p.slamRateOn);
+    rate[0] = 4; // the stem driving under does
+    expect(slamSignal(contactOf(depth, rate), p)).toBeCloseTo(4, 10);
+  });
+
+  it('ignores dry slices and falls back to the cutwater rate', () => {
+    expect(slamSignal(contactOf([-1, -1, -1], [8, 8, 8]), p)).toBe(0);
+    expect(slamSignal(contactOf([-1, -1], [0, 0], { rate: 3 }), p)).toBeCloseTo(3, 10);
+    // airborne hull: the cutwater contributes nothing
+    expect(slamSignal(contactOf([-1, -1], [0, 0], { inContact: false, rate: 3 }), p)).toBe(0);
+    expect(slamSignal(null, p)).toBe(0);
+    expect(slamSignal(contactOf([1], [Number.NaN]), p)).toBe(0);
+  });
+
+  it('intensity scales with impact velocity, with a floor and a ceiling', () => {
+    const soft = slamStrength(p.slamRateOn, p);
+    const hard = slamStrength(p.slamRateFull, p);
+    expect(soft).toBeGreaterThan(0.3); // even a light slap is audible
+    expect(soft).toBeLessThan(hard);
+    expect(slamStrength(1000, p)).toBeLessThanOrEqual(1);
+  });
+
+  it('a seaway does not machine-gun slams: gated at the slam thresholds', () => {
+    const trig = createGatedTrigger(
+      () => ({ on: p.slamRateOn, off: p.slamRateOff, cooldown: p.slamCooldown, repeat: true }),
+      createRng(5),
+    );
+    let fires = 0;
+    // 30 s of a 0.35 Hz pitching cycle that buries the bow hard twice a cycle
+    for (let i = 0; i < 60 * 30; i++) {
+      const t = i / 60;
+      const rateSignal = 3 * Math.max(0, Math.sin(t * 2 * Math.PI * 0.35));
+      if (trig.step(rateSignal, 1 / 60, true)) fires++;
+    }
+    expect(fires).toBeGreaterThan(8); // it must actually fire — this is the ask
+    expect(fires).toBeLessThan(30 / p.slamCooldown);
+  });
+});
+
+describe('reefing haul (a process, not a click — and it works both ways)', () => {
+  const runHaul = (from: number, to: number, seconds: number, seed = 4): HaulEvent[] => {
+    const machine = createHaulMachine();
+    const rng = createRng(seed);
+    const events: HaulEvent[] = [];
+    const emit = (e: HaulEvent): void => void events.push(e);
+    machine.step(from, 1 / 60, rng, emit); // adopt the start value
+    const steps = Math.max(1, Math.round(seconds * 60));
+    for (let i = 1; i <= steps; i++) {
+      machine.step(from + ((to - from) * i) / steps, 1 / 60, rng, emit);
+    }
+    for (let i = 0; i < 120; i++) machine.step(to, 1 / 60, rng, emit); // settle
+    return events;
+  };
+
+  it('reefing IN produces an opening crack, a rhythm of rustles, then a terminal snap', () => {
+    const events = runHaul(1, 0, 2);
+    expect(events[0].kind).toBe('open');
+    expect(events[0].direction).toBe(-1);
+    expect(events.filter((e) => e.kind === 'rustle').length).toBeGreaterThan(3);
+    expect(events[events.length - 1].kind).toBe('terminal');
+    expect(events.filter((e) => e.kind === 'terminal')).toHaveLength(1);
+  });
+
+  it('setting sail OUT sounds too, and opens with the deploy sound instead', () => {
+    const out = runHaul(0, 1, 2);
+    expect(out[0].kind).toBe('open');
+    expect(out[0].direction).toBe(1);
+    expect(out[0].gain).toBeCloseTo(p.sailDeployGain, 10);
+    expect(out.filter((e) => e.kind === 'rustle').length).toBeGreaterThan(3);
+    // direction colours the rustles: hauling in is heavier/slower
+    const inRate = runHaul(1, 0, 2).find((e) => e.kind === 'rustle')!.playbackRate;
+    const outRate = out.find((e) => e.kind === 'rustle')!.playbackRate;
+    expect(inRate).toBeLessThan(outRate);
+  });
+
+  it('rustles are paced by haulTickSec with jitter — not one per frame', () => {
+    const rustles = runHaul(1, 0, 2).filter((e) => e.kind === 'rustle').length;
+    expect(rustles).toBeLessThanOrEqual(2 / p.haulTickSec + 2);
+    expect(new Set(runHaul(1, 0, 2).map((e) => e.playbackRate)).size).toBeGreaterThan(1);
+  });
+
+  it('a one-frame JUMP in drop still runs a full haul, not a lonely click', () => {
+    // the case where the rig has not been animated smoothly yet
+    const events = runHaul(1, 0, 1 / 60);
+    expect(events.filter((e) => e.kind === 'rustle').length).toBeGreaterThan(0);
+    expect(events[events.length - 1].kind).toBe('terminal');
+  });
+
+  it('a motionless rig is silent, and startup never fires', () => {
+    const machine = createHaulMachine();
+    const rng = createRng(1);
+    const events: HaulEvent[] = [];
+    for (let i = 0; i < 600; i++) machine.step(0.8, 1 / 60, rng, (e) => void events.push(e));
+    expect(events).toHaveLength(0);
+    expect(machine.active()).toBe(false);
+    // trim creeping by a hair (autopilot noise) must not trigger a haul either
+    for (let i = 0; i < 600; i++) {
+      machine.step(0.8 + i * 1e-4, 1 / 60, rng, (e) => void events.push(e));
+    }
+    expect(events).toHaveLength(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Music: streamed playlist, its own bus, ducked under combat.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('track discovery (dropping files in is the whole workflow)', () => {
+  it("parses the user's convention: tags after the LAST underscore, split on dashes", () => {
+    const t = parseTrackName('../../assets/audio/music/Knives at Dusk_smooth-vibey.mp3');
+    expect(t.id).toBe('Knives at Dusk_smooth-vibey');
+    expect(t.title).toBe('Knives at Dusk');
+    expect(t.tags).toEqual(['smooth', 'vibey']);
+  });
+
+  it('keeps unknown tags instead of dropping them (the vocabulary is theirs)', () => {
+    // nothing here is in SITUATION_TAGS — it must still survive parsing
+    expect(parseTrackName('X_brine-gloom-fiddle.mp3').tags).toEqual(['brine', 'gloom', 'fiddle']);
+    expect(parseTrackName('Y_combat.ogg').tags).toEqual(['combat']);
+  });
+
+  it('a title with dashes/spaces and no underscore is a valid untagged track', () => {
+    const t = parseTrackName('Dead-Man-Tell No Tales.mp3');
+    expect(t.title).toBe('Dead-Man-Tell No Tales');
+    expect(t.tags).toEqual([]);
+    // degenerate shapes are ordinary inputs, never throws
+    expect(parseTrackName('Trailing_.mp3').tags).toEqual([]);
+    expect(parseTrackName('_leading.mp3').tags).toEqual(['leading']);
+    expect(parseTrackName('a_b_c-d.mp3').title).toBe('a_b'); // only the LAST underscore splits
+  });
+
+  it('discovery never throws, skips non-audio files, and encodes spaces', () => {
+    const tracks = discoverMusicTracks();
+    expect(Array.isArray(tracks)).toBe(true);
+    for (const t of tracks) {
+      expect(t.url).toMatch(/\.(mp3|ogg|m4a|wav|flac)$/i);
+      expect(t.url).not.toContain(' '); // a raw space breaks the <audio> fetch
+      expect(t.url).not.toContain('.gitkeep');
+      expect(Array.isArray(t.tags)).toBe(true);
+    }
+  });
+});
+
+describe('playlist selection (shuffle now, tag bias prepared)', () => {
+  const ref = (id: string, tags: string[] = []): MusicTrackRef => ({
+    id,
+    title: id,
+    tags,
+    url: `${id}.mp3`,
+  });
+
+  it('no tracks = a silent, clean state forever — never an error', () => {
+    const empty = createPlaylist([], createRng(1));
+    expect(empty.size()).toBe(0);
+    for (const s of ['calm', 'island', 'storm', 'combat'] as const) {
+      expect(empty.next(s)).toBeNull();
+      expect(empty.countFor(s)).toBe(0);
+    }
+  });
+
+  it('ships as pure shuffle: at bias 0 an untagged track is as likely as a tagged one', () => {
+    expect(audioParams.musicTagBias).toBe(0); // the shipped default
+    const tagged = ref('battle', ['combat', 'drums']);
+    const plain = ref('plain');
+    expect(trackWeight(tagged, 'combat')).toBe(trackWeight(plain, 'combat'));
+    const list = createPlaylist([tagged, plain], createRng(7));
+    const picks = new Set<string>();
+    for (let i = 0; i < 20; i++) picks.add(list.next('combat')!.id);
+    expect(picks).toEqual(new Set(['battle', 'plain'])); // both get played
+  });
+
+  it('tag bias is a BIAS, not a filter: a mismatched track can still play', () => {
+    const was = audioParams.musicTagBias;
+    audioParams.musicTagBias = 1;
+    try {
+      const stormy = ref('stormy', ['storm', 'dark']);
+      const mellow = ref('mellow', ['smooth', 'vibey']);
+      expect(trackWeight(stormy, 'storm')).toBeGreaterThan(trackWeight(mellow, 'storm'));
+      expect(trackWeight(mellow, 'storm')).toBeGreaterThanOrEqual(1); // never zero
+      // with only mismatched tracks available, music still plays
+      const onlyMellow = createPlaylist([mellow], createRng(4));
+      expect(onlyMellow.next('combat')?.id).toBe('mellow');
+      // over many draws the fitting tracks win the majority (needs a library
+      // bigger than the no-repeat window — see the next assertion)
+      const library = [
+        ref('s1', ['storm']),
+        ref('s2', ['storm', 'dark']),
+        ref('s3', ['ominous']),
+        ref('m1', ['smooth']),
+        ref('m2', ['vibey']),
+        ref('m3', ['mellow']),
+      ];
+      const list = createPlaylist(library, createRng(11));
+      let stormWins = 0;
+      for (let i = 0; i < 300; i++) if (list.next('storm')!.id.startsWith('s')) stormWins++;
+      expect(stormWins).toBeGreaterThan(180); // > 60%, not 100% — still a bias
+      // honest limit: in a 2-track library the no-repeat window outranks the
+      // bias and the two simply alternate. Small libraries are shuffle.
+      const tiny = createPlaylist([stormy, mellow], createRng(11));
+      const seq = [tiny.next('storm')!.id, tiny.next('storm')!.id, tiny.next('storm')!.id];
+      expect(new Set(seq).size).toBe(2);
+    } finally {
+      audioParams.musicTagBias = was;
+    }
+  });
+
+  it('unknown tags never help and never hurt', () => {
+    const was = audioParams.musicTagBias;
+    audioParams.musicTagBias = 1;
+    try {
+      expect(tagMatch(ref('x', ['brine', 'gloom']), 'storm')).toBe(0);
+      expect(trackWeight(ref('x', ['brine']), 'storm')).toBe(1); // same as untagged
+      expect(trackWeight(ref('y'), 'storm')).toBe(1);
+    } finally {
+      audioParams.musicTagBias = was;
+    }
+  });
+
+  it('shuffle avoids immediate repeats, and a 2-track library cannot deadlock', () => {
+    const many = createPlaylist(['a', 'b', 'c', 'd', 'e'].map((id) => ref(id)), createRng(9));
+    let prev = '';
+    for (let i = 0; i < 40; i++) {
+      const t = many.next('calm')!;
+      expect(t.id).not.toBe(prev);
+      prev = t.id;
+    }
+    const two = createPlaylist([ref('a'), ref('b')], createRng(3));
+    for (let i = 0; i < 10; i++) expect(two.next('calm')).not.toBeNull();
+    // a single-track library repeats it rather than going silent
+    const one = createPlaylist([ref('only')], createRng(3));
+    expect(one.next('calm')?.id).toBe('only');
+    expect(one.next('calm')?.id).toBe('only');
+  });
+
+  it('sequential mode walks the files in order', () => {
+    const was = audioParams.musicShuffle;
+    audioParams.musicShuffle = false;
+    try {
+      const list = createPlaylist(['a', 'b', 'c'].map((id) => ref(id)), createRng(1));
+      expect([list.next('calm')?.id, list.next('calm')?.id, list.next('calm')?.id]).toEqual([
+        'a',
+        'b',
+        'c',
+      ]);
+      expect(list.next('calm')?.id).toBe('a'); // wraps
+    } finally {
+      audioParams.musicShuffle = was;
+    }
+  });
+
+  it('gaps encode the design: the sea is the default, music is an event', () => {
+    expect(gapFor('combat')).toBeLessThan(gapFor('island'));
+    expect(gapFor('island')).toBeLessThan(gapFor('storm'));
+    expect(gapFor('storm')).toBeLessThan(gapFor('calm'));
+    expect(gapFor('calm')).toBeGreaterThan(20); // long stretches of ambience
+  });
+
+  it('situation priority: guns beat weather beats landfall', () => {
+    expect(musicStateFor({ weather: 'storm', landDistance: 10, combatHeat: 1 })).toBe('combat');
+    expect(musicStateFor({ weather: 'storm', landDistance: 10, combatHeat: 0 })).toBe('storm');
+    expect(musicStateFor({ weather: 'calm', landDistance: 10, combatHeat: 0 })).toBe('island');
+    expect(musicStateFor({ weather: 'calm', combatHeat: 0 })).toBe('calm');
+    expect(musicStateFor({ weather: 'swell', landDistance: Infinity, combatHeat: 0 })).toBe('calm');
+  });
+});
+
+describe('combat ducking (music steps back under the guns)', () => {
+  it('falls to the duck level fast and recovers slowly, staying in 0..1', () => {
+    let d = duckHit({ level: 1, hold: 0 });
+    for (let i = 0; i < 60; i++) d = stepDuck(d, 1 / 60); // 1 s of duck
+    expect(d.level).toBeLessThan(0.5);
+    expect(d.level).toBeGreaterThanOrEqual(audioParams.musicDuckLevel - 1e-6);
+    const duckedAt1s = d.level;
+    for (let i = 0; i < 60 * 20; i++) d = stepDuck(d, 1 / 60); // long silence after
+    expect(d.hold).toBe(0);
+    expect(d.level).toBeGreaterThan(0.99);
+    // asymmetry is the point: 1 s of recovery must not undo 1 s of duck
+    let r = { level: audioParams.musicDuckLevel, hold: 0 };
+    for (let i = 0; i < 60; i++) r = stepDuck(r, 1 / 60);
+    expect(1 - r.level).toBeGreaterThan(duckedAt1s - audioParams.musicDuckLevel);
+  });
+
+  it('a sustained broadside keeps it ducked instead of pumping between shots', () => {
+    let d: DuckState = { level: 1, hold: 0 };
+    for (let i = 0; i < 60 * 6; i++) {
+      if (i % 45 === 0) d = duckHit(d); // a shot every 0.75 s
+      d = stepDuck(d, 1 / 60);
+      if (i > 60) expect(d.level).toBeLessThan(0.6); // never climbs back mid-fight
+    }
+  });
+});
+
+describe('level matching across tracks (streaming rules out scanning the file)', () => {
+  it('pulls a loud track down and a quiet one up, within clamps', () => {
+    const loud = agcStep(1, 0.5, 100);
+    const quiet = agcStep(1, 0.01, 100);
+    expect(loud).toBeLessThan(1);
+    expect(loud).toBeGreaterThanOrEqual(audioParams.musicGainMin);
+    expect(quiet).toBeGreaterThan(1);
+    expect(quiet).toBeLessThanOrEqual(audioParams.musicGainMax);
+  });
+
+  it('is slow enough never to pump inside a track, and holds through silence', () => {
+    const oneStep = agcStep(1, 0.5, audioParams.musicAgcIntervalSec);
+    expect(1 - oneStep).toBeLessThan(0.1); // a quarter second barely moves it
+    expect(agcStep(0.7, 0, 1)).toBe(0.7); // gap/silence: hold, do not wind up
+    expect(agcStep(0.7, Number.NaN, 1)).toBe(0.7);
+  });
+
+  it('windowRms matches known signals', () => {
+    expect(windowRms(new Float32Array(64).fill(0.5))).toBeCloseTo(0.5, 6);
+    const sine = new Float32Array(1024).map((_, i) => Math.sin((i / 1024) * Math.PI * 2 * 8));
+    expect(windowRms(sine)).toBeCloseTo(Math.SQRT1_2, 2);
+    expect(windowRms(new Float32Array(0))).toBe(0);
+  });
+});
+
+describe('the music bus (§I: a fourth independent volume)', () => {
+  it('is clamped and settable like the others, before any AudioContext', () => {
+    const engine = createEngine({ music: 5 });
+    expect(engine.getVolumes().music).toBe(1);
+    engine.setVolumes({ music: 0.35 });
+    expect(engine.getVolumes()).toEqual({ master: 1, sfx: 1, ambience: 1, music: 0.35 });
+  });
+
+  it('a settings store WITHOUT a music key leaves the bus alone (UI lands separately)', () => {
+    const engine = createEngine({ music: 0.6 });
+    const legacyStore = {
+      get: () => ({ audio: { master: 0.5, sfx: 0.5, ambience: 0.5 } }),
+      subscribe: () => () => undefined,
+    };
+    attachAudioSettings(engine, legacyStore);
+    expect(engine.getVolumes().music).toBe(0.6); // untouched, not reset to 1
+    expect(engine.getVolumes().master).toBe(0.5);
+  });
+
+  it('music survives a reload independently of the other three buses', () => {
+    const raw = new Map<string, string>();
+    const storage: StorageLike = {
+      getItem: (k) => raw.get(k) ?? null,
+      setItem: (k, v) => void raw.set(k, v),
+    };
+    createSettingsStore(storage).set({ audio: { music: 0.2, master: 0.9 } });
+    const engine = createEngine();
+    attachAudioSettings(engine, createSettingsStore(storage));
+    expect(engine.getVolumes().music).toBeCloseTo(0.2, 10);
+    expect(engine.getVolumes().master).toBeCloseTo(0.9, 10);
+    // and a live change to music alone must not disturb the rest
+    const store = createSettingsStore(storage);
+    attachAudioSettings(engine, store);
+    store.set({ audio: { music: 0 } });
+    expect(engine.getVolumes().music).toBe(0);
+    expect(engine.getVolumes().master).toBeCloseTo(0.9, 10);
   });
 });

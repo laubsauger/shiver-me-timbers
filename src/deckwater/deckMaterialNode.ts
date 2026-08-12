@@ -39,6 +39,7 @@ export interface DeckWetnessUniforms {
   poolTint: TslNode;
   wetRoughness: TslNode;
   wetRelief: TslNode;
+  poolRelief: TslNode;
   poolRoughness: TslNode;
   poolDepth: TslNode;
   heightScale: TslNode;
@@ -52,6 +53,7 @@ export function createDeckWetnessUniforms(): DeckWetnessUniforms {
     poolTint: uniform(color(dp.poolTintColor)),
     wetRoughness: uniform(dp.wetRoughness),
     wetRelief: uniform(dp.wetRelief),
+    poolRelief: uniform(dp.poolRelief),
     poolRoughness: uniform(dp.poolRoughness),
     poolDepth: uniform(dp.poolDepthRef),
     heightScale: uniform(dp.waterHeightScale),
@@ -67,6 +69,7 @@ export function refreshDeckWetnessUniforms(u: DeckWetnessUniforms): void {
   (u.poolTint.value as THREE.Color).set(dp.poolTintColor);
   u.wetRoughness.value = dp.wetRoughness;
   u.wetRelief.value = dp.wetRelief;
+  u.poolRelief.value = dp.poolRelief;
   u.poolRoughness.value = dp.poolRoughness;
   u.poolDepth.value = dp.poolDepthRef;
   u.heightScale.value = dp.waterHeightScale;
@@ -162,7 +165,16 @@ export function deckWetnessNode(ctx: DeckWetnessContext, r: DeckReceiver): DeckW
     roughnessScale: mix(float(1), u.wetRoughness, wet).mul(
       mix(float(1), u.poolRoughness, pool),
     ),
-    reliefScale: mix(float(1), u.wetRelief, wet),
+    // Water FLATTENS. A film fills the grain and a pool drowns it entirely,
+    // so standing water keeps flattening after the wetness term has saturated
+    // — this is the whole of the water's contribution to the surface normal.
+    reliefScale: mix(float(1), u.wetRelief, wet).mul(mix(float(1), u.poolRelief, pool)),
+    // ...and it does NOT emboss. `heightScale` defaults to 0 because a puddle
+    // surface is flat: adding depth to a field that reliefNormal differentiates
+    // in SCREEN space turns a 4.5 cm/texel state texture into high-frequency
+    // speckle at any normal viewing distance (user: "way, way too noisy").
+    // Left as a hook because a rim meniscus is a real effect, but it needs a
+    // low-passed source, not this one.
     heightAdd: state.b.mul(mask).mul(u.heightScale),
     wet,
     pool,

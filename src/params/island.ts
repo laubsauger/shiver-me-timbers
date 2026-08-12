@@ -21,8 +21,6 @@ export interface IslandParams {
   peakHeight: number;
   /** guaranteed minimum interior peak (m) — grid rescales if noise undershoots */
   minPeakHeight: number;
-  /** radial falloff exponent (higher = flatter top, steeper flanks) */
-  falloffPower: number;
 
   // -- heightmap fbm (uses terrain/noiseCpu) ---------------------------------
   /** world-space noise frequency (1/m) */
@@ -31,12 +29,18 @@ export interface IslandParams {
   noiseStrength: number;
   noiseOctaves: number;
 
-  // -- optional secondary peak (0 height disables) ---------------------------
-  secondaryPeakHeight: number;
-  /** gaussian sigma as fraction of radius */
-  secondaryPeakRadius: number;
-  /** peak center distance from island center, fraction of radius */
-  secondaryPeakOffset: number;
+  // -- archetype composition (§V43: silhouette is authored, not sampled) -----
+  /** fraction of the footprint the archetype's features may occupy — they must
+   *  die out well inside the rim so the COASTLINE belongs to the noise */
+  featureExtent: number;
+  /** metres over which two features fuse instead of creasing */
+  featureBlend: number;
+  /** coastline noise world frequency (1/m) — sets cove/headland wavelength */
+  coastNoiseScale: number;
+  /** coastline noise amplitude, as a fraction of peak height */
+  coastNoiseStrength: number;
+  /** fraction of the radius inside which the rim envelope does not act */
+  rimStart: number;
 
   // -- beach apron (gentle 0..~band slope where height crosses waterline) ----
   /** height band (m) around waterline that gets flattened */
@@ -149,16 +153,17 @@ export const islandParams: IslandParams = registerParams(
     radius: 90,
     gridSize: 128,
     peakHeight: 32,
-    minPeakHeight: 12,
-    falloffPower: 2.2,
+    minPeakHeight: 27,
     noiseScale: 0.035,
-    noiseStrength: 0.45,
+    noiseStrength: 0.18,
     noiseOctaves: 4,
-    secondaryPeakHeight: 10,
-    secondaryPeakRadius: 0.18,
-    secondaryPeakOffset: 0.42,
-    beachBandWidth: 2.0,
-    beachFlatness: 0.3,
+    featureExtent: 0.62,
+    featureBlend: 14,
+    coastNoiseScale: 0.012,
+    coastNoiseStrength: 0.14,
+    rimStart: 0.84,
+    beachBandWidth: 3.0,
+    beachFlatness: 0.24,
     rimDepth: 6,
     skirtDepth: 8,
     palmCount: 28,
@@ -212,13 +217,14 @@ function islandParamsMeta(): Partial<Record<keyof IslandParams, ParamMeta>> {
     gridSize: { min: 32, max: 512, step: 16 },
     peakHeight: { min: 4, max: 80, step: 1 },
     minPeakHeight: { min: 1, max: 60, step: 1 },
-    falloffPower: { min: 0.5, max: 6, step: 0.1 },
     noiseScale: { min: 0.005, max: 0.2, step: 0.005 },
     noiseStrength: { min: 0, max: 0.8, step: 0.05 },
     noiseOctaves: { min: 1, max: 6, step: 1 },
-    secondaryPeakHeight: { min: 0, max: 40, step: 1 },
-    secondaryPeakRadius: { min: 0.05, max: 0.5, step: 0.01 },
-    secondaryPeakOffset: { min: 0, max: 0.8, step: 0.02 },
+    featureExtent: { min: 0.2, max: 0.95, step: 0.01 },
+    featureBlend: { min: 1, max: 60, step: 1 },
+    coastNoiseScale: { min: 0.002, max: 0.08, step: 0.001 },
+    coastNoiseStrength: { min: 0, max: 0.5, step: 0.01 },
+    rimStart: { min: 0.5, max: 0.98, step: 0.01 },
     beachBandWidth: { min: 0.2, max: 6, step: 0.1 },
     beachFlatness: { min: 0.05, max: 1, step: 0.05 },
     rimDepth: { min: 1, max: 20, step: 0.5 },

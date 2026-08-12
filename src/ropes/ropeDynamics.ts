@@ -43,6 +43,9 @@ export interface RopeDynamicsParams {
   substeps: number;
   /** a particle may never stray further than this (m) from its rest curve */
   maxStray: number;
+  /** …or this fraction of the rope's own length, whichever is larger. Long
+   *  ropes carry more sag, and reefing can haul metres of it out at once */
+  strayFraction: number;
   /** an anchor moving further than this in one frame (m) means the rope was
    *  re-anchored, not sailed — reseed rather than snap it across the gap */
   teleportDistance: number;
@@ -86,14 +89,45 @@ export function verletStep(
 }
 
 /**
+ * Rest length of every link, measured off the rope's own catenary.
+ *
+ * NOT `L / segments`. `solveCatenary` samples uniformly in HORIZONTAL x, so
+ * its links are far from equal — 2.18× end to end on a typical shroud. A chain
+ * told to hold equal links therefore fights the very curve it was seeded from
+ * and never settles (measured: still moving 0.06 m/frame after 600 frames, a
+ * permanently twitching rig). Taking the rest lengths from the catenary makes
+ * the chain's equilibrium EXACTLY the curve the far LOD draws — which also
+ * means the §V42 near/far crossfade has no shape mismatch to hide.
+ */
+export function linkRestLengths(restCurve: Vec3Like[]): number[] {
+  const rests: number[] = [];
+  for (let i = 0; i < restCurve.length - 1; i++) {
+    rests.push(len(sub(restCurve[i + 1], restCurve[i])));
+  }
+  return rests;
+}
+
+/**
+ * Per-substep velocity retention, normalised to a per-second rate.
+ *
+ * `damping` is quoted per 1/60 s. Applying it once per SUBSTEP instead would
+ * make the physics depend on the substep count — bump `substeps` 2→4 and the
+ * rope silently gets twice as draggy, which is exactly the kind of tunable
+ * that means something different after someone else's unrelated edit.
+ */
+export function dampingForStep(damping: number, dt: number): number {
+  return Math.pow(Math.min(1, Math.max(0, damping)), Math.max(dt, 0) * 60);
+}
+
+/**
  * Gauss-Seidel distance constraints along the chain, then re-pin both anchors.
- * Each link is pulled to `rest`, splitting the correction between its two
- * particles; the anchors are restored afterwards, which is what makes the
- * whole rope hang FROM them rather than drift with them.
+ * Each link is pulled to its own rest length, splitting the correction between
+ * its two particles; the anchors are restored afterwards, which is what makes
+ * the whole rope hang FROM them rather than drift with them.
  */
 export function solveConstraints(
   pos: Vec3Like[],
-  rest: number,
+  rests: number[],
   iterations: number,
   anchorA: Vec3Like,
   anchorB: Vec3Like,
@@ -104,7 +138,7 @@ export function solveConstraints(
     for (let i = 0; i < last; i++) {
       const d = sub(pos[i + 1], pos[i]);
       const l = Math.max(len(d), EPS);
-      const corr = scale(d, ((l - rest) / l) * 0.5);
+      const corr = scale(d, ((l - (rests[i] ?? 0)) / l) * 0.5);
       pos[i] = add(pos[i], corr);
       pos[i + 1] = sub(pos[i + 1], corr);
     }
@@ -183,14 +217,14 @@ export function needsReseed(
  * (pinning before constraints is what propagates anchor motion down the chain
  * within the same frame).
  *
- * @param restCurve the catenary the rope hangs from — seeds and leashes it
+ * @param restCurve the catenary the rope hangs from — it seeds the chain,
+ *                  supplies every link's rest length, and leashes it
  * @param wind      world-space wind vector (m/s)
  */
 export function stepRope(
   state: RopeState,
   anchorA: Vec3Like,
   anchorB: Vec3Like,
-  ropeLength: number,
   restCurve: Vec3Like[],
   wind: Vec3Like,
   frameDt: number,
@@ -210,7 +244,8 @@ export function stepRope(
   const dtFrame = Math.min(DT_MAX, Math.max(DT_MIN, Number.isFinite(frameDt) ? frameDt : DT_MIN));
   const substeps = Math.max(1, Math.round(p.substeps));
   const dt = dtFrame / substeps;
-  const rest = ropeLength / Math.max(last, 1);
+  const rests = linkRestLengths(restCurve);
+  const damp = dampingForStep(p.damping, dt);
   const accel: Vec3Like = {
     x: wind.x * p.windForce,
     y: -p.gravity + wind.y * p.windForce,
@@ -219,16 +254,24 @@ export function stepRope(
 
   for (let s = 0; s < substeps; s++) {
     for (let i = 0; i < n; i++) {
-      const next = verletStep(state.pos[i], state.prev[i], accel, dt, p.damping);
+      const next = verletStep(state.pos[i], state.prev[i], accel, dt, damp);
       state.prev[i] = state.pos[i];
       state.pos[i] = next;
     }
     // anchors ride their sockets — the ONLY place ship motion enters
     state.pos[0] = { ...anchorA };
     state.pos[last] = { ...anchorB };
-    solveConstraints(state.pos, rest, Math.max(1, Math.round(p.constraintIterations)), anchorA, anchorB);
+    solveConstraints(
+      state.pos,
+      rests,
+      Math.max(1, Math.round(p.constraintIterations)),
+      anchorA,
+      anchorB,
+    );
   }
+  const ropeLength = rests.reduce((a, b) => a + b, 0);
+  const leashMax = Math.max(p.maxStray, ropeLength * p.strayFraction);
   for (let i = 0; i < n; i++) {
-    state.pos[i] = leash(state.pos[i], restCurve[i], p.maxStray);
+    state.pos[i] = leash(state.pos[i], restCurve[i], leashMax);
   }
 }

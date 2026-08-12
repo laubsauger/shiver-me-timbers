@@ -112,6 +112,70 @@ export function lowSunWarmth(elevation: number): number {
   return smoothstep(-0.12, 0.0, elevation) * (1 - smoothstep(0.08, 0.4, elevation));
 }
 
+/** sRGB transfer function, one channel → linear. */
+export function srgbToLinear(c: number): number {
+  if (!Number.isFinite(c)) return 0;
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+/** 0xRRGGBB → LINEAR [r,g,b], for maths that must happen in light space. */
+export function hexToLinearRgb(hex: number): Rgb {
+  const c = hexToRgb(hex);
+  return [srgbToLinear(c[0]), srgbToLinear(c[1]), srgbToLinear(c[2])];
+}
+
+/** Rec.709 luminance. Only meaningful on LINEAR input. */
+export function luminance(c: Rgb): number {
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+}
+
+/**
+ * Pull a colour toward its own luminance. amount 0 = untouched, 1 = grey.
+ *
+ * WHY THE LIGHT RIG NEEDS THIS: a sky colour chosen to look right when you
+ * PAINT it is not the colour that sky DELIVERS as light. Our zenith is a
+ * deep stylised blue with red at ~7% of blue in linear terms; real skylight
+ * irradiance integrates the pale horizon band and the sun's aureole and
+ * lands far closer to white. Feeding the painted colour straight into an
+ * unshadowed HemisphereLight makes shade so blue-dominant that it overrides
+ * albedo hue entirely — brown timber multiplied by (0.03, 0.13, 0.27) comes
+ * out teal, which is the flat sea-coloured hull the user reported. Mixing
+ * toward luminance (not toward white) kills the hue extremity while leaving
+ * brightness mathematically untouched, so shade desaturates without
+ * getting lighter.
+ */
+export function desaturate(c: Rgb, amount: number): Rgb {
+  const a = clamp01(amount);
+  const l = luminance(c);
+  return [c[0] + (l - c[0]) * a, c[1] + (l - c[1]) * a, c[2] + (l - c[2]) * a];
+}
+
+/**
+ * The two colours the HemisphereLight is driven with, for a given night→day
+ * tint. Sole owner of the "which sky colour lights the scene" decision, so
+ * the answer is one testable function rather than a line buried in the light
+ * rig: the SKY half is the sky's bulk colour (mid), never the zenith, and
+ * both halves are desaturated before they light anything.
+ *
+ * RETURNS LINEAR, not sRGB — the caller must write it with a linear setter.
+ * The desaturation has to happen in linear space because that is where the
+ * multiply against albedo happens; doing it in sRGB looks like the same
+ * operation and silently under-corrects, which is exactly how the teal hull
+ * survived a first attempt at this fix.
+ */
+export function hemisphereColors(
+  midHex: number,
+  groundHex: number,
+  tint: Rgb,
+  desaturation: number,
+): { sky: Rgb; ground: Rgb } {
+  const prep = (hex: number): Rgb => {
+    const c = hexToLinearRgb(hex);
+    return desaturate([c[0] * tint[0], c[1] * tint[1], c[2] * tint[2]], desaturation);
+  };
+  return { sky: prep(midHex), ground: prep(groundHex) };
+}
+
 /** smallest gap we allow between two smoothstep edges (§V28: e0 == e1 → 0/0) */
 const MIN_EDGE_GAP = 1e-5;
 

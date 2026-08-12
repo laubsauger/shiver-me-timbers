@@ -41,13 +41,25 @@ export interface DeckWaterParams {
   substeps: number;
   /** fraction of head difference moved per second (per-dt scaled in update) */
   fluxRate: number;
-  /** head units added per unit tilt gradient — rocking slosh strength (§V9) */
+  /**
+   * DIMENSIONLESS gain on the rotation bias; 1 = the true physical slope.
+   * See fluxMath's OutflowParams.cellSize — this is NOT a head offset, and
+   * treating it as one overdrove heel to ~30× the deck's camber gradient and
+   * slid the whole sheet to leeward as one uniform slab.
+   */
   tiltBiasStrength: number;
   /** volume units evaporated per second (§V9: deck dries) */
   evapVolume: number;
   /** wetness units evaporated per second — slower than volume so wet planks linger */
   evapWetness: number;
-  /** volume → wetness transfer gain (wetness = max(wetness, volume*gain)) */
+  /**
+   * Depth → wetness gain (wetness = max(wetness, depth × gain), capped at 1).
+   * The reciprocal is the depth that reads as FULLY wet: at 30 that was 33 mm,
+   * so every splash saturated G to 1 across everything it touched and the
+   * whole deck sat at maximum wetness for the ~80 s it took to evaporate —
+   * "too consistent across the whole deck at the same time". Keep 1/gain in
+   * the range of a real film so wetness stays proportional to what is there.
+   */
   wetnessGain: number;
   /** splash splat gaussian radius in cells */
   splashRadius: number;
@@ -80,15 +92,20 @@ export interface DeckWaterParams {
   burialRateFull: number;
   /** seconds the sensor stays deaf after firing (one event per wave, not per tick) */
   refractory: number;
-  /** volume injected by a full-strength event, split across splashCount splats */
+  /**
+   * PEAK added water depth at a splat centre for a full-strength burial, in
+   * METRES — the same units as the deck heightfield, so it can be read
+   * against the 0.028 m waterway and the 0.18 m hatch coamings it has to fill
+   * before it spills. Green water on a deck is ankle-to-knee: ~0.05–0.25 m.
+   */
   splashVolume: number;
-  /** splats laid across the beam per event (≤ MAX_SPLASHES) */
+  /** max burying slices injected per event (hard-capped at MAX_SPLASHES) */
   splashCount: number;
-  /** how far aft of the stem crossing the sheet lands, as a fraction of deck length */
+  /** how far aft of a burying station its water lands, as a fraction of deck length */
   splashSetback: number;
   /** keep splats this far (uv) off the grid border so they land inboard of the rails */
   splashMargin: number;
-  /** beam fraction the sheet spreads over, relative to the hull half-breadth there */
+  /** how far toward the BURIED rail a splat leans, relative to the hull half-breadth there */
   splashBeamSpread: number;
 
   // ── §V9 deck material hook (roughness↓ / darker where wet) ──────────────
@@ -96,15 +113,22 @@ export interface DeckWaterParams {
   wetTintColor: string;
   /** roughness multiplier at full wetness (§V9: roughness↓ where wet) */
   wetRoughness: number;
-  /** plank-grain relief multiplier at full wetness — a water film flattens grain */
+  /** plank-grain relief multiplier at full wetness — a water film fills the grain */
   wetRelief: number;
-  /** standing-water volume that reads as a full puddle (drives the pool terms) */
+  /** grain relief multiplier under standing water — a pool drowns it entirely */
+  poolRelief: number;
+  /** standing-water depth (m) that reads as a full puddle (drives the pool terms) */
   poolDepthRef: number;
   /** albedo multiplier inside standing water, on top of wetTint */
   poolTintColor: string;
   /** roughness multiplier inside standing water — mirror-smooth */
   poolRoughness: number;
-  /** water-layer thickness → relief height gain (puddle rims catch the light) */
+  /**
+   * Water depth → ADDED bump height. Defaults to 0: a puddle surface is flat,
+   * and feeding a 4.5 cm/texel field into a screen-space-differentiated
+   * height turns it into speckle. Kept as a hook for a future low-passed rim
+   * meniscus; raising it reintroduces the noise.
+   */
   waterHeightScale: number;
   /** ship-local |y − deckPlaneY| where the wet hook is still at full strength (m) */
   deckBandInner: number;
@@ -122,10 +146,10 @@ export const deckWaterParams: DeckWaterParams = registerParams(
     drainDrop: 0.05,
     substeps: 2,
     fluxRate: 18,
-    tiltBiasStrength: 0.25,
+    tiltBiasStrength: 1,
     evapVolume: 0.05,
-    evapWetness: 0.012,
-    wetnessGain: 30,
+    evapWetness: 0.05,
+    wetnessGain: 7,
     splashRadius: 6,
 
     immersionSigma: 0.55,
@@ -137,19 +161,20 @@ export const deckWaterParams: DeckWaterParams = registerParams(
     burialRate: 0.9,
     burialRateFull: 3.5,
     refractory: 0.45,
-    splashVolume: 2.4,
+    splashVolume: 0.11,
     splashCount: 5,
     splashSetback: 0.06,
     splashMargin: 0.04,
     splashBeamSpread: 0.8,
 
-    wetTintColor: '#7a6b58',
-    wetRoughness: 0.28,
-    wetRelief: 0.3,
+    wetTintColor: '#9b8b76',
+    wetRoughness: 0.42,
+    wetRelief: 0.45,
+    poolRelief: 0.15,
     poolDepthRef: 0.05,
     poolTintColor: '#5d6a68',
     poolRoughness: 0.12,
-    waterHeightScale: 0.6,
+    waterHeightScale: 0,
     deckBandInner: 0.3,
     deckBandOuter: 0.8,
   },
@@ -162,10 +187,10 @@ function deckWaterParamsMeta(): Partial<Record<keyof DeckWaterParams, ParamMeta>
     maskDrainBelow: { min: 0.05, max: 0.95, step: 0.05 },
     drainDrop: { min: 0.005, max: 0.5, step: 0.005 },
     fluxRate: { min: 0, max: 60, step: 0.5 },
-    tiltBiasStrength: { min: 0, max: 2, step: 0.01 },
+    tiltBiasStrength: { min: 0, max: 4, step: 0.05 },
     evapVolume: { min: 0, max: 0.5, step: 0.001 },
     evapWetness: { min: 0, max: 0.2, step: 0.001 },
-    wetnessGain: { min: 0, max: 100, step: 0.5 },
+    wetnessGain: { min: 0, max: 40, step: 0.5 },
     splashRadius: { min: 1, max: 32, step: 1 },
 
     immersionSigma: { min: 0, max: 3, step: 0.05 },
@@ -177,7 +202,7 @@ function deckWaterParamsMeta(): Partial<Record<keyof DeckWaterParams, ParamMeta>
     burialRate: { min: 0, max: 8, step: 0.05 },
     burialRateFull: { min: 0.1, max: 12, step: 0.05 },
     refractory: { min: 0, max: 3, step: 0.05 },
-    splashVolume: { min: 0, max: 20, step: 0.1 },
+    splashVolume: { min: 0, max: 1, step: 0.005 },
     splashCount: { min: 1, max: 8, step: 1 },
     splashSetback: { min: 0, max: 0.5, step: 0.005 },
     splashMargin: { min: 0, max: 0.3, step: 0.005 },
@@ -185,6 +210,7 @@ function deckWaterParamsMeta(): Partial<Record<keyof DeckWaterParams, ParamMeta>
 
     wetRoughness: { min: 0.02, max: 1, step: 0.01 },
     wetRelief: { min: 0, max: 1, step: 0.01 },
+    poolRelief: { min: 0, max: 1, step: 0.01 },
     poolDepthRef: { min: 0.005, max: 0.5, step: 0.005 },
     poolRoughness: { min: 0.02, max: 1, step: 0.01 },
     waterHeightScale: { min: 0, max: 4, step: 0.05 },

@@ -26,6 +26,7 @@ import {
   buildRiggingPlan,
   collectRopeAnchorIds,
   selectBlockSockets,
+  slackForFurl,
   validateRiggingPlan,
   type RiggingRope,
 } from '../src/ropes/shipRigging';
@@ -256,18 +257,42 @@ describe('rig LOCALITY (anti spider-web — docs/ship-reference-schema.png)', ()
     expect(backstays).toHaveLength(2);
   });
 
-  it('braces lead AFT and sheets lead FORWARD, each one mast bay at most', () => {
-    // WHY: braces used to run from every yard end to the transom and sheets
-    // from every yard end to the stem. Direction is what makes them read as
-    // rigging; bay length is what stops them webbing.
+  it('braces and sheets both lead AFT and DOWN, one mast bay at most', () => {
+    // WHY: braces used to run from every yard end to the transom. Direction is
+    // what makes them read as rigging; bay length is what stops them webbing.
+    // Sheets changed sides here: they used to be a stand-in leading FORWARD
+    // from the yard end, because no clew socket existed to start them at. Now
+    // that the sail carries clews, a sheet is what holds the sail's lower
+    // corner back against the wind, so it leads aft — the stand-in inverted
+    // the real thing, and this test inverted with it.
     const resolved = resolvePlan(buildGalleonBlueprint());
     const braces = resolved.filter((r) => r.rope.role === 'brace');
     const sheets = resolved.filter((r) => r.rope.role === 'sheet');
     expect(braces.length).toBeGreaterThanOrEqual(8);
-    expect(sheets.length).toBeGreaterThanOrEqual(4);
-    for (const { a, b } of braces) expect(b[2]).toBeLessThan(a[2]); // aft = -z
-    for (const { a, b } of sheets) expect(b[2]).toBeGreaterThan(a[2]); // fwd = +z
-    for (const { a, b } of [...braces, ...sheets]) expect(b[1]).toBeLessThan(a[1]);
+    expect(sheets.length).toBeGreaterThanOrEqual(8);
+    for (const { a, b } of [...braces, ...sheets]) {
+      expect(b[2]).toBeLessThan(a[2]); // aft = -z
+      expect(b[1]).toBeLessThan(a[1]); // and down to where it is belayed
+    }
+    // sheets start on the CLOTH, not on the spar
+    for (const { rope } of sheets) expect(rope.socketA).toMatch(/^anchor-sail-.*-clew-/);
+  });
+
+  it('buntlines rise from the sail foot to the masthead, up its front', () => {
+    // WHY: the user's note — "not all the lines should just go up to the mast,
+    // some should attach to the sails". Buntlines are the most recognisable
+    // running-rigging shape on a square rig and were the roles left declared
+    // but inert while no anchor was sewn to the cloth. They must start on the
+    // sail and RISE; a buntline that dropped would be a sheet.
+    const bunts = resolvePlan(buildGalleonBlueprint()).filter(
+      (r) => r.rope.role === 'buntline',
+    );
+    expect(bunts.length).toBeGreaterThanOrEqual(8);
+    for (const { rope, a, b } of bunts) {
+      expect(rope.socketA).toMatch(/^anchor-sail-.*-bunt-/);
+      expect(rope.socketB).toMatch(/^anchor-masthead-/);
+      expect(b[1]).toBeGreaterThan(a[1]); // rises
+    }
   });
 
   it('lifts stay on their own mast: upper yard end → that mast head', () => {
@@ -282,19 +307,23 @@ describe('rig LOCALITY (anti spider-web — docs/ship-reference-schema.png)', ()
     }
   });
 
-  it('the rig crosses the ship fore-and-aft less than half as much as it did', () => {
-    // WHY: rope COUNT is the wrong budget — a shroud fan adds lines but reads
-    // as rigging, while one stem-to-transom brace reads as web. What makes the
-    // web is line spent travelling ALONG the ship, so measure exactly that:
-    // Σ|Δz| over every rope. Same blueprint, old plan vs new: 584 m → 249 m,
-    // while total length barely moved (974 m → 950 m). This ceiling fails if
-    // a future category starts reaching down the hull again.
+  it('the AVERAGE line barely travels along the ship, however many there are', () => {
+    // WHY: rope COUNT is the wrong budget, and total length is too — the user
+    // asked for MORE lines ("some should attach to the sails"), and sheets,
+    // buntlines and a three-plate shroud fan all add rope while making the rig
+    // read better, not worse. What makes a web is line spent travelling ALONG
+    // the ship. So measure that PER ROPE, which is immune to the rig growing:
+    //
+    //   original spider-web layout   48 ropes, Σ|Δz| 584 m → 12.2 m per rope
+    //   after the locality rework    36 ropes, Σ|Δz| 249 m →  6.9 m per rope
+    //   with sail gear + fans        68 ropes, Σ|Δz| 336 m →  4.9 m per rope
+    //
+    // The rig nearly doubled and got MORE local. This fails if a new category
+    // starts reaching down the hull again, no matter how few lines it adds.
     const resolved = resolvePlan(buildGalleonBlueprint());
     const crossing = resolved.reduce((sum, r) => sum + r.zSpan, 0);
-    const total = resolved.reduce((sum, r) => sum + r.length, 0);
-    expect(crossing, 'fore-aft travel — the spider-web metric').toBeLessThan(350);
-    // and a plain sanity ceiling so nothing doubles the rig outright
-    expect(total).toBeLessThan(1100);
+    expect(crossing / resolved.length, 'mean fore-aft travel per rope').toBeLessThan(7);
+    expect(crossing, 'total fore-aft travel').toBeLessThan(450);
   });
 });
 
@@ -472,6 +501,82 @@ describe('rig completeness (every declared anchor is used)', () => {
   });
 });
 
+describe('§V46 reefing: running gear takes in and eases with the sail', () => {
+  it('hauls buntlines TAUT and eases sheets as the sail furls', () => {
+    // WHY: the user's note — "these shorten and lengthen and then the rope
+    // physically grabs". Taut/slack is carried entirely by rope LENGTH:
+    // length = chord × slack, and slack → 1 removes the catenary's sag, so a
+    // hauled line visibly straightens. A buntline whose job is to drag the
+    // sail's foot up must go taut as it furls; a sheet is being let go, so it
+    // must do the opposite. Getting these two backwards would read as the
+    // rigging fighting the sail.
+    const furled = slackForFurl('buntline', 1.05, 1);
+    const set = slackForFurl('buntline', 1.05, 0);
+    expect(furled).toBeLessThan(set);
+    expect(furled).toBeLessThan(1.01); // genuinely taut, not merely tauter
+    expect(slackForFurl('sheet', 1.02, 1)).toBeGreaterThan(slackForFurl('sheet', 1.02, 0));
+  });
+
+  it('leaves STANDING rigging alone whatever the sails do', () => {
+    // WHY: a shroud or stay that slackened when you furled would read as the
+    // mast coming loose — the rig holds the mast up regardless of sail state.
+    for (const role of ['stay', 'shroud', 'lift', 'brace', 'halyard'] as const) {
+      expect(slackForFurl(role, 1.03, 1)).toBeCloseTo(1.03, 12);
+      expect(slackForFurl(role, 1.03, 0.5)).toBeCloseTo(1.03, 12);
+    }
+  });
+
+  it('never lets slack reach 1 — that is the solver\'s dead straight line', () => {
+    // WHY: §V12 treats length ≤ chord as taut and emits a straight segment
+    // with no curve at all. A buntline hauled to exactly 1.0 would snap from
+    // rope to wire; keeping a hair of slack keeps it a rope under tension.
+    for (const furl of [0, 0.5, 1, 2, -1, Number.NaN]) {
+      for (const role of ['buntline', 'leechline', 'sheet'] as const) {
+        const slack = slackForFurl(role, 1.02, furl);
+        expect(slack, `${role} at furl ${furl}`).toBeGreaterThan(1);
+        expect(Number.isFinite(slack)).toBe(true);
+      }
+    }
+  });
+
+  it('is monotone in furl, so the haul never reverses mid-reef', () => {
+    // WHY: a non-monotone response would show as the line taking in, then
+    // paying out, then taking in again while a single continuous furl plays —
+    // the sort of thing that reads as a glitch rather than as gear.
+    let prev = Infinity;
+    for (let f = 0; f <= 1.0001; f += 0.02) {
+      const slack = slackForFurl('buntline', 1.05, f);
+      expect(slack).toBeLessThanOrEqual(prev + 1e-12);
+      prev = slack;
+    }
+  });
+
+  it('drives real rope LENGTHS through applyRiggingPlan', () => {
+    // WHY: the pure function above could be perfect and still not be wired.
+    // This is the end-to-end claim: the same plan, at two furl amounts, hands
+    // the GPU different lengths for the SAME geometry.
+    const plan = buildRiggingPlan(buildGalleonBlueprint());
+    const lengthsAt = (furl: number): number[] => {
+      const out: number[] = [];
+      applyRiggingPlan(plan, {
+        setRope(_i, _a, _b, length): void {
+          out.push(length ?? 0);
+        },
+        setRopeCount(): void {},
+      }, (id) => [id.length, id.charCodeAt(0), id.charCodeAt(1)], furl);
+      return out;
+    };
+    const set = lengthsAt(0);
+    const furled = lengthsAt(1);
+    const sheets = plan.flatMap((r, i) => (r.role === 'sheet' ? [i] : []));
+    expect(sheets.length).toBeGreaterThan(0);
+    for (const i of sheets) expect(furled[i]).toBeGreaterThan(set[i]);
+    // …and standing rigging is byte-identical
+    const stays = plan.flatMap((r, i) => (r.role === 'stay' ? [i] : []));
+    for (const i of stays) expect(furled[i]).toBe(set[i]);
+  });
+});
+
 describe('selectBlockSockets (§V12 blocks at running-rigging ends)', () => {
   it('is deterministic, unique, capped, and references real sockets', () => {
     // WHY: block instances are placed by plan order — nondeterminism or
@@ -485,8 +590,11 @@ describe('selectBlockSockets (§V12 blocks at running-rigging ends)', () => {
     expect(sockets.length).toBeGreaterThan(0);
     const ids = collectRopeAnchorIds(buildGalleonBlueprint());
     for (const id of sockets) expect(ids.has(id), id).toBe(true);
-    // yard ends dominate: that's where lifts/braces/sheets terminate
-    expect(sockets.filter((id) => id.includes('yard')).length).toBeGreaterThanOrEqual(8);
+    // blocks sit where running rigging is worked: yard ends and, now that the
+    // sail carries anchors, the clews and bunts themselves
+    expect(
+      sockets.filter((id) => id.includes('yard') || id.startsWith('anchor-sail-')).length,
+    ).toBeGreaterThanOrEqual(8);
     // a tighter cap truncates deterministically
     expect(selectBlockSockets(plan, 5)).toEqual(sockets.slice(0, 5));
   });

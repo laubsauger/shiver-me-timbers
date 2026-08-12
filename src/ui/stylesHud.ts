@@ -1,93 +1,10 @@
 /**
- * UI stylesheet, part 2 of 2 (§V21) — settings screen + in-game HUD.
- * Sliders are rope tracks with brass knobs; the status plate is an
- * elongated brass-edged plaque; the compass is a masked engraved tape.
+ * In-game HUD stylesheet (§V21). Compass is a masked engraved tape; the
+ * bottom edge is a triptych of brass-edged plaques — wind to port, knots and
+ * heading amidships, canvas to starboard — sharing one clipped-corner shape so
+ * they read as three fittings on the same binnacle rather than three widgets.
  * Imported and injected by styles.ts (single <style> tag).
  */
-
-export const SETTINGS_CSS = /* css */ `
-.smt-settings-head {
-  margin-top: 26px; display: flex; align-items: baseline; justify-content: space-between;
-}
-.smt-settings-title {
-  font-weight: 400; font-variant-caps: small-caps;
-  font-size: 22px; letter-spacing: 0.12em;
-  text-shadow: 0 1px 0 rgba(255, 249, 226, 0.7);
-}
-.smt-back-btn {
-  appearance: none; background: none; border: 0; cursor: pointer;
-  font-family: inherit; font-variant-caps: small-caps;
-  font-size: 15px; letter-spacing: 0.12em; color: var(--ink-soft);
-  transition: color 0.15s ease;
-}
-.smt-back-btn:hover, .smt-back-btn:focus-visible { color: #5f4514; }
-.smt-back-btn:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
-.smt-tabs { display: flex; margin-top: 14px; border: 1px solid var(--line); }
-.smt-tab {
-  appearance: none; background: none; border: 0; flex: 1; cursor: pointer;
-  font-family: inherit; font-variant-caps: small-caps;
-  font-size: 16px; letter-spacing: 0.18em; color: var(--ink-soft);
-  padding: 9px 0; transition: color 0.15s, background 0.15s, box-shadow 0.15s;
-}
-.smt-tab + .smt-tab { border-left: 1px solid var(--line); }
-.smt-tab.is-active {
-  color: var(--ink);
-  background: linear-gradient(180deg, rgba(157, 127, 54, 0.24), rgba(157, 127, 54, 0.1));
-  box-shadow: inset 0 0 0 1px rgba(157, 127, 54, 0.55);
-}
-.smt-tab:focus-visible { outline: 2px solid var(--brass); outline-offset: -3px; }
-.smt-rows { margin-top: 8px; min-height: 208px; }
-.smt-row { padding: 13px 2px 4px; border-bottom: 1px solid rgba(44, 33, 20, 0.12); }
-.smt-row:last-child { border-bottom: 0; }
-.smt-row-top { display: flex; justify-content: space-between; align-items: baseline; }
-.smt-row-label {
-  font-variant-caps: small-caps; font-size: 16px; letter-spacing: 0.1em;
-}
-.smt-row-value {
-  font-family: var(--figures); font-size: 15px; color: var(--ink-soft);
-  font-variant-numeric: tabular-nums;
-}
-.smt-range {
-  -webkit-appearance: none; appearance: none; width: 100%; height: 24px;
-  background: transparent; cursor: pointer; margin-top: 2px;
-}
-.smt-range::-webkit-slider-runnable-track {
-  height: 6px;
-  background: repeating-linear-gradient(115deg, var(--rope) 0 5px, var(--rope-dark) 5px 10px);
-  box-shadow: inset 0 1px 2px rgba(20, 12, 4, 0.55), 0 1px 0 rgba(255, 248, 224, 0.5);
-}
-.smt-range::-webkit-slider-thumb {
-  -webkit-appearance: none; width: 17px; height: 17px; margin-top: -5.5px;
-  border-radius: 50%; border: 1px solid #59431a;
-  background: radial-gradient(circle at 34% 30%, #efdb98, var(--brass) 58%, #6a5120 100%);
-  box-shadow: 0 1px 3px rgba(20, 12, 4, 0.5);
-}
-.smt-range::-moz-range-track {
-  height: 6px;
-  background: repeating-linear-gradient(115deg, var(--rope) 0 5px, var(--rope-dark) 5px 10px);
-  box-shadow: inset 0 1px 2px rgba(20, 12, 4, 0.55), 0 1px 0 rgba(255, 248, 224, 0.5);
-}
-.smt-range::-moz-range-thumb {
-  width: 15px; height: 15px; border-radius: 50%; border: 1px solid #59431a;
-  background: radial-gradient(circle at 34% 30%, #efdb98, var(--brass) 58%, #6a5120 100%);
-  box-shadow: 0 1px 3px rgba(20, 12, 4, 0.5);
-}
-.smt-range:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
-.smt-seg { display: flex; margin-top: 6px; border: 1px solid var(--line); }
-.smt-seg-btn {
-  appearance: none; background: none; border: 0; flex: 1; cursor: pointer;
-  font-family: inherit; font-variant-caps: small-caps;
-  font-size: 14px; letter-spacing: 0.14em; color: var(--ink-soft);
-  padding: 7px 0; transition: color 0.15s, background 0.15s, box-shadow 0.15s;
-}
-.smt-seg-btn + .smt-seg-btn { border-left: 1px solid var(--line); }
-.smt-seg-btn.is-active {
-  color: var(--ink);
-  background: linear-gradient(180deg, rgba(157, 127, 54, 0.26), rgba(157, 127, 54, 0.12));
-  box-shadow: inset 0 0 0 1px rgba(157, 127, 54, 0.55);
-}
-.smt-seg-btn:focus-visible { outline: 2px solid var(--brass); outline-offset: -3px; }
-`;
 
 export const HUD_CSS = /* css */ `
 .smt-hud { position: absolute; inset: 0; opacity: var(--smt-hud-opacity, 0.92); }
@@ -121,14 +38,21 @@ export const HUD_CSS = /* css */ `
   content: ""; position: absolute; top: 9px; bottom: 0; left: 50%; width: 1px;
   background: linear-gradient(180deg, var(--brass-hi), rgba(223, 192, 109, 0));
 }
-.smt-plate {
+
+.smt-bottom {
   position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px;
+}
+.smt-plate {
   display: flex; align-items: center; gap: 16px; padding: 9px 30px;
   background: linear-gradient(180deg, rgba(26, 18, 10, 0.82), rgba(13, 9, 5, 0.88));
   clip-path: polygon(14px 0, calc(100% - 14px) 0, 100% 50%, calc(100% - 14px) 100%, 14px 100%, 0 50%);
   box-shadow: inset 0 0 0 1px rgba(223, 192, 109, 0.38), inset 0 0 22px rgba(0, 0, 0, 0.6);
   color: var(--parch);
 }
+.smt-plate-side { padding: 7px 20px; gap: 10px; }
+.smt-plate-side .smt-plate-value { font-size: 19px; }
+.smt-plate-side .smt-plate-cell { min-width: 62px; }
 .smt-plate-cell { text-align: center; min-width: 78px; }
 .smt-plate-value {
   font-family: var(--figures); font-size: 24px; line-height: 1.1;
@@ -138,11 +62,40 @@ export const HUD_CSS = /* css */ `
 .smt-plate-label {
   margin-top: 1px; font-size: 9px; letter-spacing: 0.32em; text-indent: 0.32em;
   text-transform: uppercase; color: rgba(231, 216, 174, 0.55);
+  white-space: nowrap;
 }
 .smt-plate-sep {
   width: 1px; height: 30px;
   background: linear-gradient(180deg, transparent, rgba(223, 192, 109, 0.5), transparent);
 }
+
+.smt-wind-dial { width: 44px; height: 44px; flex: none; }
+.smt-wind-ring { fill: none; stroke: rgba(223, 192, 109, 0.42); stroke-width: 1; }
+.smt-wind-nogo { fill: rgba(142, 43, 37, 0.28); stroke: rgba(216, 87, 76, 0.3); stroke-width: 0.6; }
+.smt-wind-tick { stroke: rgba(231, 216, 174, 0.45); stroke-width: 1; }
+.smt-wind-tick.is-major { stroke: rgba(223, 192, 109, 0.85); stroke-width: 1.4; }
+.smt-wind-hull {
+  fill: rgba(231, 216, 174, 0.22); stroke: rgba(231, 216, 174, 0.5); stroke-width: 0.9;
+}
+.smt-wind-vane { transition: transform 0.08s linear; }
+.smt-wind-flag {
+  fill: var(--brass-hi);
+  opacity: calc(0.32 + 0.68 * var(--smt-vane, 0));
+}
+.smt-wind-staff { stroke: rgba(223, 192, 109, 0.7); stroke-width: 1; }
+
+.smt-plate.is-canvas { flex-direction: column; gap: 4px; align-items: stretch; }
+.smt-canvas-bar {
+  height: 3px; width: 62px; margin: 0 auto;
+  background: rgba(231, 216, 174, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(223, 192, 109, 0.22);
+}
+.smt-canvas-fill {
+  height: 100%; width: 100%;
+  background: linear-gradient(90deg, rgba(223, 192, 109, 0.55), var(--brass-hi));
+  transition: width 0.2s ease;
+}
+
 .smt-damage {
   position: absolute; bottom: 78px; left: 50%; transform: translateX(-50%);
   display: flex; gap: 9px;

@@ -8,15 +8,19 @@
  * the audio system itself never imports the UI at runtime (type-only import).
  */
 import type { Volumes } from './engine';
-import type { AudioSettings } from '../ui/settingsStore';
 
 export interface VolumeSink {
   setVolumes(v: Partial<Volumes>): void;
 }
 
+/**
+ * Structural, and Partial on purpose: the settings screens gain a `music`
+ * control independently of this file, and a store that does not carry a key
+ * yet must simply leave that bus at its default rather than fail to compile.
+ */
 export interface SettingsSource {
-  get(): { audio: AudioSettings };
-  subscribe(cb: (s: { audio: AudioSettings }) => void): () => void;
+  get(): { audio: Partial<Volumes> };
+  subscribe(cb: (s: { audio: Partial<Volumes> }) => void): () => void;
 }
 
 /** applies current volumes immediately; returns an unsubscribe */

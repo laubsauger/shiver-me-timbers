@@ -119,7 +119,17 @@ export function buildOceanSurfaceMaterial(
   const uRefractDepthFull = uniform(sp.refractionDepthFull);
   const uFoamFarDamp = uniform(sp.foamFarDamp);
   const uSssChoppy = uniform(sp.sssChoppyScale);
-  const uSssAmbientSunGate = uniform(sp.sssAmbientSunGate);
+  const uSkylightFloor = uniform(sp.sssSkylightFloor);
+  const uStormGlowMax = uniform(sp.stormGlowMax);
+  const uSeaRmsRef = uniform(sp.seaRmsReference);
+  const uMicro = uniform(
+    new THREE.Vector4(
+      sp.microDetailStrength,
+      sp.microDetailScale,
+      sp.microDetailSpeed,
+      sp.microDetailSlopeGate,
+    ),
+  );
   const uCrestBand = uniform(new THREE.Vector2(sp.crestBandLow, sp.crestBandHigh));
   const uBodyBand = uniform(new THREE.Vector2(sp.bodyBandLow, sp.bodyBandHigh));
   // sea-state scale (RMS surface elevation, m) — every "is this a crest"
@@ -182,7 +192,7 @@ export function buildOceanSurfaceMaterial(
    * it spans ≤ lodSamplesCut. smoothstep(e0,e1,x) with e0 > e1 reads as
    * "1 below e1, 0 above e0" (§V23 — functional form, receiver-free).
    */
-  const lodWeight = (domain: number, stretch: TslNode) => {
+  const lodWeight = (domain: number | TslNode, stretch: TslNode) => {
     const cut = float(domain).mul(stretch).div(uLodSamples.y.max(0.5));
     const full = float(domain).mul(stretch).div(uLodSamples.x.max(0.5));
     return smoothstep(cut, full, spacing);
@@ -224,8 +234,44 @@ export function buildOceanSurfaceMaterial(
   const lambda = uChoppiness;
   const denomX = float(1).add(der.z.mul(lambda)).max(0.05);
   const denomZ = float(1).add(der.w.mul(lambda)).max(0.05);
-  const slopeX = der.x.div(denomX);
-  const slopeZ = der.y.div(denomZ);
+  const slopeX = der.x.div(denomX).toVar();
+  const slopeZ = der.y.div(denomZ).toVar();
+
+  // ── turbulent sub-noise (user, SoT storm reference) ──────────────────
+  // Wave faces in the reference are visibly churned, not smooth flanks with
+  // foam on top. That detail sits far below vertex spacing (~1 m at the ship)
+  // so NO cascade LOD can carry it — it has to live in the slope. Four
+  // wavelets at non-commensurate frequencies and golden-angle directions,
+  // differentiated analytically (cos of a plane wave), so there are no finite
+  // differences and no extra texture fetches. It rides the same Nyquist gate
+  // as everything else (§V30): once a wavelet is finer than the pixel
+  // footprint it fades instead of sizzling.
+  const microScale = uMicro.y.max(0.05);
+  const microFade = lodWeight(microScale, uNormalStretch);
+  const microPhase = timeUniform.mul(uMicro.z);
+  const wavelet = (dirX: number, dirZ: number, freqMul: number, phaseMul: number) => {
+    const k = float((Math.PI * 2 * freqMul)).div(microScale);
+    const arg = worldXZ.x
+      .mul(dirX)
+      .add(worldXZ.y.mul(dirZ))
+      .mul(k)
+      .add(microPhase.mul(phaseMul));
+    const d = arg.cos().mul(k);
+    return { x: d.mul(dirX), z: d.mul(dirZ) };
+  };
+  // golden-angle directions, irrational-ish frequency ratios: no visible grid
+  const w0 = wavelet(0.966, 0.259, 1.0, 1.0);
+  const w1 = wavelet(-0.259, 0.966, 1.618, -0.83);
+  const w2 = wavelet(0.707, -0.707, 2.414, 1.31);
+  const w3 = wavelet(-0.809, -0.588, 3.732, -1.07);
+  const microAmp = uMicro.x.mul(microScale).mul(0.02).mul(microFade);
+  // gate to wave FACES: troughs stay comparatively calm, flanks churn
+  const slopeMag = slopeX.mul(slopeX).add(slopeZ.mul(slopeZ)).sqrt();
+  const faceGate = smoothstep(float(0), uMicro.w.max(0.02), slopeMag);
+  const microGain = microAmp.mul(faceGate);
+  slopeX.addAssign(w0.x.add(w1.x).add(w2.x).add(w3.x).mul(microGain));
+  slopeZ.addAssign(w0.z.add(w1.z).add(w2.z).add(w3.z).mul(microGain));
+
   const normalWorld = normalize(vec3(slopeX.negate(), 1, slopeZ.negate()));
 
   // §V20 water shadows: MeshBasicNodeMaterial gets no lighting from the
@@ -357,9 +403,20 @@ export function buildOceanSurfaceMaterial(
       sigma.mul(uCrestBand.y),
       totalDisp.y,
     );
-    // mix(floor,1,backlight): keeps a whisper of translucency on crests facing
-    // away from the sun, but the glow only really lights up looking into it
-    const ambientSunGate = mix(float(1).sub(uSssAmbientSunGate), float(1), backlight);
+    // LOCALISED WEATHER SWAP POINT (§T.38/§V.46): stormFactor is the only
+    // inherently positional input here. Today it reads the GLOBAL sea state;
+    // when weatherAt(x, z) lands, replace this one line with the sampled
+    // field and every term below becomes position-dependent for free.
+    const stormFactor = uSeaRms.div(uSeaRmsRef.max(0.05)).clamp(1, uStormGlowMax);
+    // mix(floor,1,backlight): the floor is SKYLIGHT through the crest, which
+    // does not need the sun — under the reference's dark overcast, storm
+    // crests are MORE luminous, not less, because taller seas mean thinner,
+    // steeper crest tops. Sun backlighting still takes it to full.
+    const ambientSunGate = mix(
+      uSkylightFloor.mul(stormFactor).clamp(0, 1),
+      float(1),
+      backlight,
+    );
     const sss = pow(backlight, uSssPower)
       .mul(heightMask)
       .add(uSssAmbient.mul(crestMask).mul(ambientSunGate))
@@ -547,7 +604,15 @@ export function buildOceanSurfaceMaterial(
     uRefractDepthFull.value = sp.refractionDepthFull;
     uFoamFarDamp.value = sp.foamFarDamp;
     uSssChoppy.value = sp.sssChoppyScale;
-    uSssAmbientSunGate.value = sp.sssAmbientSunGate;
+    uSkylightFloor.value = sp.sssSkylightFloor;
+    uStormGlowMax.value = sp.stormGlowMax;
+    uSeaRmsRef.value = sp.seaRmsReference;
+    (uMicro.value as THREE.Vector4).set(
+      sp.microDetailStrength,
+      sp.microDetailScale,
+      sp.microDetailSpeed,
+      sp.microDetailSlopeGate,
+    );
     (uCrestBand.value as THREE.Vector2).set(sp.crestBandLow, sp.crestBandHigh);
     (uBodyBand.value as THREE.Vector2).set(sp.bodyBandLow, sp.bodyBandHigh);
     uLightFloor.value = sp.lightFloor;

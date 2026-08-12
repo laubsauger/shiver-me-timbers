@@ -15,20 +15,11 @@
  * its pennant go with that.
  */
 import { galleonParams, shipDetailParams, type ShipClassParams } from '../params/ship';
-import type { PieceDef, SocketDef, Vec3 } from './pieceTypes';
+import type { PieceDef, SocketDef } from './pieceTypes';
 import { figureheadStation, hullShapeHints, mkPiece } from './blueprintParts';
 import { hullHalfWidthAt, hullTopY, type HullShape } from './hullMath';
 import { FLAG_STYLE_JOLLY, FLAG_STYLE_PENNANT } from './flagMaterial';
 import { vjitter } from './variation';
-
-/** ship-space position of a socket on an un-rotated, directly-parented piece */
-function socketShipPos(piece: PieceDef, socket: SocketDef): Vec3 {
-  return [
-    piece.transform.position[0] + socket.position[0],
-    piece.transform.position[1] + socket.position[1],
-    piece.transform.position[2] + socket.position[2],
-  ];
-}
 
 /**
  * Gunports, channels and the sheer moulding for the hull sections that were
@@ -115,8 +106,9 @@ export function buildHullFittings(
 }
 
 /**
- * Ratlines, masthead pennants and belaying pin racks, derived from the masts
- * and from the chainplate sockets the hull already declares.
+ * Masthead pennants and belaying pin racks, derived from the masts the hull
+ * already declares. Ratlines are NOT here: they are rope geometry now, and
+ * ratlinePlan.ts emits the intent for src/ropes to solve (§V.45).
  */
 export function buildRigDetail(p: ShipClassParams, built: PieceDef[]): PieceDef[] {
   const d = shipDetailParams;
@@ -127,42 +119,8 @@ export function buildRigDetail(p: ShipClassParams, built: PieceDef[]): PieceDef[
     const name = mast.id.replace(/^mast-/, '');
     const head = mast.aabb.max[1];
     const [, baseY, mastZ] = mast.transform.position;
-
-    for (const [sideName, sign] of [['port', -1], ['starboard', 1]] as const) {
-      // the SAME sockets the shrouds are solved from (§V12) — the rungs land
-      // on the ropes because they are interpolated between the same endpoints
-      const plates: Vec3[] = [];
-      for (const section of built) {
-        if (section.kind !== 'hull-section') continue;
-        for (const socket of section.sockets) {
-          if (!socket.id.startsWith(`anchor-channel-${sideName}-${name}-`)) continue;
-          const ship = socketShipPos(section, socket);
-          plates.push([ship[0], ship[1] - baseY, ship[2] - mastZ]); // mast-local
-        }
-      }
-      if (plates.length < 2) continue;
-      const shape: Record<string, number> = {
-        plates: plates.length,
-        topX: 0,
-        topY: head,
-        topZ: 0,
-        spacing: d.ratlineSpacing,
-        radius: d.ratlineRadius,
-        topFrac: d.ratlineTopFrac,
-      };
-      plates.forEach(([x, y, z], i) => {
-        shape[`p${i}x`] = x;
-        shape[`p${i}y`] = y;
-        shape[`p${i}z`] = z;
-      });
-      const spread = Math.abs(plates[0][0]);
-      pieces.push(
-        mkPiece(`ratlines-${sideName}-${name}`, 'ratlines', [0, 0, 0], {
-          min: [sign < 0 ? -spread : 0, plates[0][1], -2],
-          max: [sign < 0 ? 0 : spread, head, 2],
-        }, { parent: mast.id, shape }),
-      );
-    }
+    // (ratlines used to be generated here as static rung meshes; they are now
+    // src/ropes' to draw off the solved shrouds — see ratlinePlan.ts, §V.45)
 
     // masthead flag. The main truck flies the colours; fore and mizzen fly
     // long coachwhip pennants, which are the finer wind telltale of the two.

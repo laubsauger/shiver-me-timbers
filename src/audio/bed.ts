@@ -29,16 +29,19 @@ export interface AmbienceBed {
 }
 
 /** drift rate multipliers — deliberately non-commensurate (§B4 spirit) */
-const DRIFT_RATES = [0.83, 1.0, 1.31];
+const DRIFT_RATES = [0.83, 1.0, 1.31, 1.57];
 
 export function createBed(ctx: BaseAudioContext, out: AudioNode): AmbienceBed {
   const ocean = createLoopLayer(ctx, out, { seed: 0x0cea11 });
   const wind = createLoopLayer(ctx, out, { seed: 0x5eabee2, lowpass: true });
   const sailing = createLoopLayer(ctx, out, { seed: 0x5a11a1 });
-  const layers: Record<string, LoopLayer> = { ocean, wind, sailing };
+  // wooden creak, non-positional: below decks the ship is around you, not at a
+  // point. The positional rig loop + groans in shipAudio sit on top of this.
+  const creak = createLoopLayer(ctx, out, { seed: 0xc2eaced });
+  const layers: Record<string, LoopLayer> = { ocean, wind, sailing, creak };
 
-  // staggered initial phases: the three layers never peak together
-  const drift = [0.0, 0.37, 0.71];
+  // staggered initial phases: the layers never peak together
+  const drift = [0.0, 0.37, 0.71, 0.19];
   let swellPhase = 0;
 
   return {
@@ -46,6 +49,7 @@ export function createBed(ctx: BaseAudioContext, out: AudioNode): AmbienceBed {
       if (name === 'oceanWaves') ocean.start(buffer);
       else if (name === 'windCockpit') wind.start(buffer);
       else if (name === 'sailingBed') sailing.start(buffer);
+      else if (name === 'shipCreak') creak.start(buffer);
     },
     update(env, dt) {
       const t = bedTargets(env, p);
@@ -68,8 +72,9 @@ export function createBed(ctx: BaseAudioContext, out: AudioNode): AmbienceBed {
         tau,
       );
       sailing.update({ gain: t.sailing * driftFactor(drift[2], p.bedDriftDepth) }, dt, tau);
+      creak.update({ gain: t.creak * driftFactor(drift[3], p.bedDriftDepth * 0.5) }, dt, tau);
     },
-    active: () => ocean.started() || wind.started() || sailing.started(),
+    active: () => ocean.started() || wind.started() || sailing.started() || creak.started(),
     dispose() {
       for (const layer of Object.values(layers)) layer.dispose();
     },

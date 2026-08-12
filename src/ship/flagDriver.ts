@@ -19,6 +19,7 @@ import {
   advanceFlag,
   angleDelta,
   apparentWind,
+  gustModulation,
   streamStrength,
   wrapAngle,
   type FlagState,
@@ -110,12 +111,23 @@ export function createFlagWindUniforms(p: ShipFlagParams): FlagWindUniforms {
     const alongZ = (wind.x * m[8] + wind.z * m[10]) / zLen;
     const target = Math.atan2(alongZ, alongX);
 
-    const prev = states.get(object) ?? {
-      root: target,
-      tip: target,
-      strength: streamStrength(wind.speed, p),
-    };
-    const next = advanceFlag(prev, target, streamStrength(wind.speed, p), motion.dt, p);
+    let prev = states.get(object);
+    if (prev === undefined) {
+      // each flag gets its OWN gust phase, from its own position: three
+      // pennants breathing in step would read as one animation playing rather
+      // than as three pieces of cloth in the same air (§B.4)
+      const m0 = object.matrixWorld.elements;
+      prev = {
+        root: target,
+        tip: target,
+        strength: streamStrength(wind.speed, p),
+        phase: (Math.abs(m0[13]) * 2.393 + Math.abs(m0[14]) * 1.117) % (Math.PI * 2),
+      };
+    }
+    // lull and gust: the cloth breathes instead of holding one fixed pose,
+    // which was half of "they are just very much flying hard"
+    const gusted = streamStrength(wind.speed, p) * gustModulation(frame.time, prev.phase);
+    const next = advanceFlag(prev, target, gusted, motion.dt, p);
     states.set(object, next);
     rootAngle.value = wrapAngle(next.root);
     lagAngle.value = angleDelta(next.root, next.tip);

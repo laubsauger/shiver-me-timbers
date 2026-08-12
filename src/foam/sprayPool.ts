@@ -40,7 +40,12 @@ import { DEAD_AGE, sanitizePoolCount } from './sprayMath';
 
 export interface SprayPoolOptions {
   /** multiplies sizeMin/sizeMax for this pool (bow sheets > crest mist) */
-  sizeScale?: number;
+  sizeScale?: () => number;
+  /** per-pool lifetime override — bow sheets must fall away far sooner than
+   *  crest mist, or they stream the length of the hull and over the deck */
+  life?: () => number;
+  /** per-pool drag override — heavier drag drops sheets out of the air fast */
+  drag?: () => number;
 }
 
 export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}) {
@@ -65,9 +70,9 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   const uStreakRef = uniform(sprayParams.streakRefSpeed);
   const uFadeNear = uniform(sprayParams.fadeNear);
   const uFadeFar = uniform(sprayParams.fadeFar);
-  const sizeScale = Number.isFinite(options.sizeScale ?? 1)
-    ? Math.max(0, options.sizeScale ?? 1)
-    : 1;
+  const uSizeScale = uniform(
+    Number.isFinite(options.sizeScale?.() ?? 1) ? Math.max(0, options.sizeScale?.() ?? 1) : 1,
+  );
 
   // whole pool starts dead far below the surface
   const initPass = Fn(() => {
@@ -112,7 +117,7 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   // per-particle size multiplier chosen at spawn (bow sheet vs cruise mist),
   // clamped so a garbage buffer value can never inflate a quad (§V28)
   const sizeMul = velSizeRead.element(instanceIndex).w.clamp(0, 1);
-  const size = mix(uSizeMin, uSizeMax, ageN).mul(sizeScale).mul(sizeMul);
+  const size = mix(uSizeMin, uSizeMax, ageN).mul(uSizeScale).mul(sizeMul);
   const hidden = ageN.greaterThanEqual(1).or(distFade.lessThan(0.01));
   material.scaleNode = select(hidden, float(0), size);
 
@@ -152,6 +157,11 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   material.transparent = true;
   material.blending = THREE.AdditiveBlending;
   material.depthWrite = false;
+  // explicit, not defaulted: spray must be depth-TESTED against the hull or
+  // particles behind the ship would draw over it and read as the deck being
+  // covered in speckle rather than spray passing in front of it. depthWrite
+  // stays off so particles don't occlude each other.
+  material.depthTest = true;
   material.fog = false;
 
   const mesh = new THREE.Sprite(material as unknown as THREE.SpriteMaterial);
@@ -178,9 +188,12 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
     step(renderer: THREE.WebGPURenderer): void {
       // life floor: ageN divides by life; drag floor: negative drag would be
       // exponential velocity GROWTH → positions at Infinity within seconds
-      uLife.value = Math.max(fin(sprayParams.life, 1), 1e-3);
+      uLife.value = Math.max(fin(options.life?.() ?? sprayParams.life, 1), 1e-3);
       uGravity.value = fin(sprayParams.gravity, 0);
-      uDragFactor.value = Math.exp(-Math.max(0, fin(sprayParams.drag, 0)) * SIM_DT);
+      uDragFactor.value = Math.exp(
+        -Math.max(0, fin(options.drag?.() ?? sprayParams.drag, 0)) * SIM_DT,
+      );
+      uSizeScale.value = Math.max(0, fin(options.sizeScale?.() ?? 1, 1));
       uSizeMin.value = fin(sprayParams.sizeMin, 0);
       uSizeMax.value = fin(sprayParams.sizeMax, 0);
       uOpacity.value = fin(sprayParams.opacity, 0);
