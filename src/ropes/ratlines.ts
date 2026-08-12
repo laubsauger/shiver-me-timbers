@@ -18,7 +18,9 @@
  * across every shroud, not a separate ladder per adjacent pair. That is why
  * the galleon needs 162 rungs and not the ~440 a pairwise reading implies.
  */
-import type { RatlineLadder } from '../ship/ratlinePlan';
+import { MIN_RUNG, type RatlineLadder } from '../ship/ratlinePlan';
+import type { Vec3Like } from './catenaryMath';
+import { ropeParams } from '../params/ropes';
 import type { RiggingRope } from './shipRigging';
 
 /**
@@ -68,22 +70,114 @@ export function buildRungDescriptors(
     const ropeA = findShroud(plan, ladder.masthead, ladder.footA);
     const ropeB = findShroud(plan, ladder.masthead, ladder.footB);
     if (ropeA < 0 || ropeB < 0 || ropeA === ropeB) continue;
-    for (const rung of ladder.rungs) {
+    ladder.rungs.forEach((rung, index) => {
       rungs.push({
         ropeA,
         ropeB,
         tA: clamp01(rung.tA),
-        tB: clamp01(rung.tB),
+        tB: clamp01(boundTiltOffset(ladder.rungs, index)),
         sag: Math.max(0, rung.sag),
         radius: Math.max(1e-4, ladder.radius),
       });
-    }
+    });
   }
   return rungs;
 }
 
 function clamp01(t: number): number {
   return Number.isFinite(t) ? Math.min(1, Math.max(0, t)) : 0;
+}
+
+/**
+ * CPU mirror of the rung mesh's arc-length sampler (ratlineMesh.sampleRope).
+ * `t` is 0 at the CHAINPLATE and 1 at the masthead, while a shroud's samples
+ * run masthead → chainplate — hence the flip, exactly as in the shader.
+ *
+ * The GPU side cannot be unit-tested, so this is the tested ground truth for
+ * "where is a rung's end", the same arrangement catenaryMath.ts has for the
+ * §V12 solve. See the shader for WHY this is arc length and not sample index.
+ */
+export function sampleRopeByArcLength(points: Vec3Like[], t: number): Vec3Like {
+  const last = points.length - 1;
+  if (last < 1) return points[0] ?? { x: 0, y: 0, z: 0 };
+  const links: number[] = [];
+  let total = 0;
+  for (let i = 0; i < last; i++) {
+    const l = Math.max(
+      Math.hypot(
+        points[i + 1].x - points[i].x,
+        points[i + 1].y - points[i].y,
+        points[i + 1].z - points[i].z,
+      ),
+      1e-9,
+    );
+    links.push(l);
+    total += l;
+  }
+  const want = Math.min(total, Math.max(0, (1 - clamp01(t)) * total));
+  let acc = 0;
+  let idx = last - 1;
+  let frac = 1;
+  for (let i = 0; i < last; i++) {
+    if (want >= acc && want <= acc + links[i]) {
+      idx = i;
+      frac = (want - acc) / links[i];
+      break;
+    }
+    acc += links[i];
+  }
+  const a = points[idx];
+  const b = points[idx + 1];
+  return {
+    x: a.x + (b.x - a.x) * frac,
+    y: a.y + (b.y - a.y) * frac,
+    z: a.z + (b.z - a.z) * frac,
+  };
+}
+
+/**
+ * §V45 MIN_RUNG as the rung mesh applies it: 1 = draw, 0 = collapse to
+ * nothing. CPU mirror of the `smoothstep(MIN_RUNG × fade, MIN_RUNG, span)` in
+ * ratlineMesh.segmentNodes.
+ *
+ * The ship plan applies the same cutoff to STRAIGHT LINES between sockets in
+ * ship space; the drawn rung is a chord between two solved curves resolved
+ * through the piece graph, and the two disagree. Once rungs are placed by arc
+ * length they actually reach the top of the fan, where the shrouds close, and
+ * 40 of the galleon's 162 come out under the cutoff. "A rung you cannot put a
+ * foot on is not a rung, and a ladder that tapers to a point reads as a spike"
+ * — so the span has to be judged where the span is known, which is the shader.
+ * Faded rather than switched so nothing pops as §V42 works the fan.
+ */
+export function rungVisibility(span: number, minRung = MIN_RUNG, fade = 0.8): number {
+  if (!Number.isFinite(span)) return 0;
+  const e0 = minRung * fade;
+  const t = Math.min(1, Math.max(0, (span - e0) / Math.max(minRung - e0, 1e-9)));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * Bound how far a rung's two ends may sit apart ALONG their shrouds.
+ *
+ * The ship plan deliberately offsets tB from tA so the ladder is not machine
+ * level (§V2 hand-seizing look), but it expresses that offset as a fraction of
+ * a WHOLE SHROUD — and a shroud is 26 m, so the shipped 0.006 is a 16 cm
+ * height difference across a rung that may only be 0.4 m wide. That is a 22°
+ * cocked rung, which is the tail of the user's report that survives the
+ * arc-length fix. The physical quantity is "a rung is seized a centimetre or
+ * two off level", whose natural unit here is the ladder's OWN rung spacing —
+ * which is knowable from the plan without any world positions.
+ *
+ * The offset keeps its sign and its relative variation, so the ladder still
+ * reads as hand-seized; only the tail is bounded.
+ */
+function boundTiltOffset(rungs: RatlineLadder['rungs'], index: number): number {
+  const here = rungs[index];
+  const neighbour = index > 0 ? rungs[index - 1] : rungs[Math.min(1, rungs.length - 1)];
+  const spacing = Math.abs(here.tA - neighbour.tA);
+  const limit = Math.max(0, ropeParams.rungTiltFraction) * spacing;
+  const offset = here.tB - here.tA;
+  return here.tA + Math.min(limit, Math.max(-limit, Number.isFinite(offset) ? offset : 0));
 }
 
 /**

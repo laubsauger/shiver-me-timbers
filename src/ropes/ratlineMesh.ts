@@ -15,6 +15,8 @@
  */
 import * as THREE from 'three/webgpu';
 import {
+  If,
+  Loop,
   cross,
   float,
   instanceIndex,
@@ -24,12 +26,14 @@ import {
   normalize,
   positionGeometry,
   select,
+  smoothstep,
   uint,
   storage,
   uniform,
   vec3,
 } from 'three/tsl';
 import { Z_MIN } from './catenaryMath';
+import { MIN_RUNG } from '../ship/ratlinePlan';
 import { ropeParams } from '../params/ropes';
 import type { RopeCompute } from './ropeCompute';
 import { phoneWireRegime, type RegimeUniforms } from './ropeMesh';
@@ -44,6 +48,9 @@ const REF_SWAP = 0.99;
  * the curve and keeps the instance count at 3× the rung count.
  */
 const SEGMENTS_PER_RUNG = 3;
+
+/** a rung fades out between MIN_RUNG × this and MIN_RUNG, rather than popping */
+const MIN_RUNG_FADE = 0.8; // ratlines.rungVisibility is the tested CPU mirror
 
 export function createRatlineMesh(
   rc: RopeCompute,
@@ -60,16 +67,68 @@ export function createRatlineMesh(
   const uColor = uniform(new THREE.Color(ropeParams.colorHex));
   const uRoughness = uniform(ropeParams.roughness);
   const uFarLightness = uniform(ropeParams.farLightness);
+  const uMinRung = uniform(MIN_RUNG);
   const pts = rc.pointsRead;
 
-  /** world point at parameter t along rope `rope`, t measured from the
-   *  CHAINPLATE. Shroud samples run masthead → chainplate, hence the flip. */
+  /**
+   * World point at parameter t along rope `rope`, t measured from the
+   * CHAINPLATE. Shroud samples run masthead → chainplate, hence the flip.
+   *
+   * BY ARC LENGTH, NOT BY SAMPLE INDEX — user report: "the horizontal climbing
+   * bars seem to rotate and tilt in a strange way… almost completely vertical".
+   *
+   * `solveCatenary` samples uniformly in HORIZONTAL SPAN. A shroud is steep
+   * (measured on the galleon: v/h ≈ 6.8 : 1), so uniform steps in x are
+   * violently non-uniform in height — the first step of the main-mast shroud
+   * covers 3.5 m of drop and the last covers 0.5 m. Sample index is therefore
+   * not a physical station on the rope, and worse, HOW non-uniform it is
+   * depends on the rope's own h: the two shrouds of one fan run h = 3.85 m and
+   * h = 3.21 m, so index 8 lands at y = 9.52 on one and y = 8.71 on the other.
+   * A rung seized between those two points stands 45° off level — measured, at
+   * the shipped slack, with the tA/tB jitter disabled.
+   *
+   * Arc length is the station a rung is actually seized at (rope does not
+   * stretch), it is identical on both shrouds because they share a masthead
+   * and their plates are level, and it is the parameter §V42 preserves — the
+   * chain's rest lengths are per-link arc lengths, so a station stays put on
+   * the rope as it swings. Same measurement with this: 45.3° → 2.7° max.
+   *
+   * Cost is two fixed 16-step loops per end (§V28: literal bounds, no early
+   * exit). That is the price of the rope's parameterisation not being uniform;
+   * see the report for the cheaper fix at the source.
+   */
   function sampleRope(rope: ReturnType<typeof float>, t: ReturnType<typeof float>) {
-    const s = float(1).sub(t).mul(segments);
-    const i0 = s.floor().clamp(0, segments - 1);
-    const frac = s.sub(i0);
-    const base = int(rope).mul(pointsPerRope).add(int(i0));
-    return mix(pts.element(base).xyz, pts.element(base.add(1)).xyz, frac);
+    const base0 = int(rope).mul(pointsPerRope);
+    // three types a Loop's index as `number` though it is a node at runtime —
+    // the same looseness ropeMesh.ts documents with its own TSLNode alias
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    type Idx = any;
+    const pointAt = (i: Idx) => pts.element(base0.add(int(i))).xyz;
+    const linkLength = (i: Idx) =>
+      max(pointAt(int(i).add(1)).sub(pointAt(i)).length(), float(Z_MIN));
+
+    const total = float(0).toVar();
+    Loop({ start: int(0), end: int(segments), condition: '<' }, ({ i }) => {
+      total.addAssign(linkLength(i));
+    });
+
+    // distance to walk from the MASTHEAD end (sample 0), clamped so a t that
+    // has drifted outside [0,1] lands on an endpoint instead of wrapping to
+    // sample 0 and drawing a rung across open air
+    const want = float(1).sub(t).mul(total).clamp(0, total).toVar();
+    const acc = float(0).toVar();
+    // defaults put an unmatched walk at the far end, never at index 0
+    const idx = int(segments - 1).toVar();
+    const frac = float(1).toVar();
+    Loop({ start: int(0), end: int(segments), condition: '<' }, ({ i }) => {
+      const segLen = linkLength(i);
+      If(want.greaterThanEqual(acc).and(want.lessThanEqual(acc.add(segLen))), () => {
+        idx.assign(i);
+        frac.assign(want.sub(acc).div(segLen));
+      });
+      acc.addAssign(segLen);
+    });
+    return mix(pointAt(idx), pointAt(idx.add(1)), frac);
   }
 
   function segmentNodes() {
@@ -82,6 +141,17 @@ export function createRatlineMesh(
     const pB = sampleRope(dA.y, dA.w);
     const span = pB.sub(pA).length();
     const belly = dB.x.mul(span);
+
+    // §V45 MIN_RUNG, enforced HERE because here is where the span is known.
+    // The ship plan applies the same cutoff to straight lines between sockets
+    // in ship space; the drawn rung is a chord of two solved curves resolved
+    // through the piece graph, and the two disagree — 40 of the galleon's 162
+    // rungs come out under the cutoff once they are placed by arc length and
+    // therefore actually reach the top of the fan, where the shrouds close.
+    // "A rung you cannot put a foot on is not a rung, and a ladder that tapers
+    // to a point reads as a spike" — so those collapse to nothing rather than
+    // draw. Smoothed over a band so a rung cannot pop as §V42 works the fan.
+    const wide = smoothstep(uMinRung.mul(MIN_RUNG_FADE), uMinRung, span);
 
     /** the rung's own curve: a parabolic belly, pinned at both shrouds */
     const at = (u: ReturnType<typeof float>) =>
@@ -99,7 +169,7 @@ export function createRatlineMesh(
     const N = normalize(cross(ref, T));
     const Bn = cross(T, N);
     const { drawnRadius, aaAlpha, farness } = phoneWireRegime(q0, dB.y, regime);
-    return { q0, T, N, Bn, segLen, drawnRadius, aaAlpha, farness };
+    return { q0, T, N, Bn, segLen, drawnRadius, aaAlpha, farness, wide };
   }
 
   function tube(faces: number): THREE.CylinderGeometry {
@@ -128,7 +198,7 @@ export function createRatlineMesh(
     // collapse to nothing once the far regime owns it — an alpha-0 tube still
     // rasterises, and with 162 rungs that is real wasted fill (§V28)
     const live = select(n.farness.greaterThanEqual(float(1)), float(0), float(1));
-    nearMaterial.positionNode = place(n, n.drawnRadius.mul(live));
+    nearMaterial.positionNode = place(n, n.drawnRadius.mul(live).mul(n.wide));
     nearMaterial.opacityNode = n.farness.oneMinus().mul(n.aaAlpha);
     const g = positionGeometry;
     nearMaterial.normalNode = normalize(n.N.mul(g.x).add(n.Bn.mul(g.z)));
@@ -143,7 +213,7 @@ export function createRatlineMesh(
   {
     const n = segmentNodes();
     const live = select(n.farness.lessThanEqual(float(0)), float(0), float(1));
-    farMaterial.positionNode = place(n, n.drawnRadius.mul(live));
+    farMaterial.positionNode = place(n, n.drawnRadius.mul(live).mul(n.wide));
     farMaterial.opacityNode = n.farness.mul(n.aaAlpha);
   }
 

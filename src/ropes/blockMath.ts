@@ -36,6 +36,26 @@ export const DOWN: Vec3Like = { x: 0, y: -1, z: 0 };
 const EPS = 1e-6;
 
 /**
+ * How much of the deterministic fallback axle is always mixed in, in units of
+ * |cross(tangent, DOWN)| = the sine of the line's angle off plumb.
+ *
+ * WHY A BLEND AND NOT A BRANCH. The sheave's axle is square to the vertical
+ * plane the line runs in, and that plane is UNDEFINED for a plumb line. The
+ * first version switched to a seeded fallback below an epsilon, which is a
+ * discontinuity sitting exactly where a lift or a halyard passes as the ship
+ * rolls: measured, the block's frame snapped 127.6° in one frame — a pulley
+ * spinning on the spot. Blending instead means the axle sweeps CONTINUOUSLY
+ * through the degeneracy. At 0.02 the fallback only matters within ~1° of
+ * plumb, where no orientation is more correct than any other anyway, and half
+ * of the resulting sweep is invisible because a block is symmetric about its
+ * own sheave plane.
+ *
+ * Same defect class the ratline rungs had (§V45, ratlineMesh.sampleRope): a
+ * frame built on a cross product that goes degenerate, with a hard fallback.
+ */
+export const AXLE_SOFTNESS = 0.02;
+
+/**
  * One block, addressed into the rope system's own index space — exactly like
  * §V45's RungDescriptor, and for the same reason.
  */
@@ -123,14 +143,18 @@ export function blockHang(tangentAway: Vec3Like, tension: number): Vec3Like {
 /**
  * The block's frame. The sheave's axle is horizontal and square to the line, so
  * the slot the rope reeves through lies in the VERTICAL plane the line runs in
- * — which is what a stropped block does, and is well defined for every case
- * that matters. `hang` always lies in that same plane (it is a blend of DOWN
- * and the tangent), so the frame is orthonormal by construction rather than by
- * a re-orthogonalisation step.
+ * — which is what a stropped block does.
  *
- * A dead-vertical line leaves the plane undefined; `seed` (the rope index)
- * then picks a deterministic axle, so two blocks on two vertical lines do not
- * face identically and neither of them flickers frame to frame.
+ * A plumb line leaves that plane undefined. `seed` (the rope index) supplies a
+ * deterministic axle for that case, BLENDED rather than switched to (see
+ * AXLE_SOFTNESS) so the frame sweeps through the degeneracy instead of
+ * snapping across it as the ship rolls the line through vertical.
+ *
+ * The last two axes are then Gram-Schmidt'd against `hang`, so the frame is
+ * orthonormal even where the blend has pulled the axle off the line's plane —
+ * and, once §V42 is on, even where the chain has swung out of that plane
+ * entirely. A non-orthonormal frame here is a sheared block, and a degenerate
+ * one is a NaN vertex position (§B5).
  */
 export function blockFrame(
   hang: Vec3Like,
@@ -139,10 +163,17 @@ export function blockFrame(
 ): BlockFrame {
   const angle = seed * 2.399; // golden angle: deterministic, well spread
   const ref: Vec3Like = { x: Math.cos(angle), y: 0, z: Math.sin(angle) };
+  // both terms are horizontal (each is a cross product with DOWN), so the
+  // blended axle is too — which is what keeps a block's slot upright
+  const soft = unit(cross(ref, DOWN), { x: 1, y: 0, z: 0 });
   const raw = cross(tangentAway, DOWN);
-  const axle = len(raw) > EPS ? unit(raw, ref) : unit(cross(ref, DOWN), { x: 1, y: 0, z: 0 });
-  const side = cross(axle, hang);
-  return { hang, axle, side: unit(side, { x: 1, y: 0, z: 0 }) };
+  const axle0: Vec3Like = {
+    x: raw.x + soft.x * AXLE_SOFTNESS,
+    y: raw.y + soft.y * AXLE_SOFTNESS,
+    z: raw.z + soft.z * AXLE_SOFTNESS,
+  };
+  const side = unit(cross(axle0, hang), { x: 1, y: 0, z: 0 });
+  return { hang, axle: cross(hang, side), side };
 }
 
 /**

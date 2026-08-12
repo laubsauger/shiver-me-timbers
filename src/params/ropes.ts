@@ -78,6 +78,14 @@ export interface RopeParams {
   farLightness: number;
   /** cross-section faces for the FAR tube — the cheap regime (startup-only) */
   farRadialSegments: number;
+  /** §V45: how far a ratline rung's two ends may sit apart along their
+   *  shrouds, as a fraction of the ladder's own rung SPACING. The ship plan
+   *  offsets them on purpose (a machine-level ladder is the "ultra regular"
+   *  tell), but it quotes that offset as a fraction of a whole 26 m shroud, so
+   *  unbounded it cocks a narrow rung by tens of degrees — the tail of the
+   *  "climbing bars point almost vertical" report. Sign and relative variation
+   *  survive the bound; only the tail is clipped */
+  rungTiltFraction: number;
   /** rigging block (pulley) mesh cap per ship — keep modest */
   maxBlocks: number;
   /** block height (m); width/depth scale from this (startup-only) */
@@ -135,6 +143,7 @@ const meta: Partial<Record<keyof RopeParams, ParamMeta>> = {
   nearWidthPx: { min: 1, max: 16, step: 0.1 },
   farLightness: { min: 0.5, max: 2.5, step: 0.05 },
   farRadialSegments: { min: 3, max: 8, step: 1 },
+  rungTiltFraction: { min: 0, max: 1, step: 0.01 },
   maxBlocks: { min: 0, max: 64, step: 1 },
   blockSize: { min: 0.1, max: 0.6, step: 0.01 },
   blockSegments: { min: 5, max: 16, step: 1 },
@@ -171,6 +180,7 @@ export const ropeParams: RopeParams = registerParams(
     nearWidthPx: 2,
     farLightness: 1.15,
     farRadialSegments: 3,
+    rungTiltFraction: 0.12,
     maxBlocks: 20,
     blockSize: 0.25,
     blockColorHex: 0x5a4632,

@@ -63,7 +63,7 @@ import { ropeParams } from '../params/ropes';
 import type { RopeCompute } from './ropeCompute';
 import { projectedWidthPx } from './ropeMesh';
 import type { BlockDescriptor } from './blockMath';
-import { packBlocks } from './blockMath';
+import { AXLE_SOFTNESS, packBlocks } from './blockMath';
 
 /** part ids baked into the merged geometry; the material tints on them */
 const PART_SHELL = 0;
@@ -266,17 +266,19 @@ export function createBlocks(
   const H = normalize(select(hangRaw.length().lessThan(float(EPS)), down, hangRaw));
 
   // the sheave's axle is horizontal and square to the line, so the slot lies in
-  // the vertical plane the line runs in. H is a blend of DOWN and T, so it is
-  // already perpendicular to that axle — the frame is orthonormal by
-  // construction. A dead-vertical line leaves the plane undefined; the rope
-  // index then picks a deterministic axle (stable frame to frame, and two
-  // vertical lines do not end up identical).
+  // the vertical plane the line runs in. That plane is undefined for a PLUMB
+  // line, and a hard fallback there snapped the block's frame 127.6° in one
+  // frame as the ship rolled a lift through vertical — so the deterministic
+  // fallback is BLENDED in, not switched to (blockMath.AXLE_SOFTNESS), and the
+  // last two axes are Gram-Schmidt'd so the frame stays orthonormal wherever
+  // the blend — or a §V42 chain swinging out of plane — has pulled the axle off
+  // the line's own plane.
   const angle = float(rope).mul(2.399);
   const ref = vec3(angle.cos(), 0, angle.sin());
-  const rawAxle = cross(T, down);
-  const axleSrc = select(rawAxle.length().lessThan(float(EPS)), cross(ref, down), rawAxle);
-  const Z = normalize(axleSrc);
-  const X = normalize(cross(Z, H));
+  const soft = normalize(cross(ref, down)).mul(float(AXLE_SOFTNESS));
+  const axle0 = cross(T, down).add(soft);
+  const X = normalize(cross(axle0, H));
+  const Z = cross(H, X);
 
   // local frame → world: local +X is `X`, local +Y is UP the shell (−H), local
   // +Z is the axle. Geometry spans y ∈ [−1, 0], so the crown lands exactly on

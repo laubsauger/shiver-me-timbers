@@ -7,8 +7,17 @@
  */
 import { describe, expect, it } from 'vitest';
 import { buildRatlinePlan, validateRatlinePlan, MIN_RUNG } from '../src/ship/ratlinePlan';
-import { buildRungDescriptors, packRungs } from '../src/ropes/ratlines';
-import { buildRiggingPlan } from '../src/ropes/shipRigging';
+import {
+  buildRungDescriptors,
+  packRungs,
+  rungVisibility,
+  sampleRopeByArcLength,
+} from '../src/ropes/ratlines';
+import { applyRiggingPlan, buildRiggingPlan } from '../src/ropes/shipRigging';
+import { ShipAssembly } from '../src/ship/shipAssembly';
+import { solveCatenary, type Vec3Like } from '../src/ropes/catenaryMath';
+import type { PieceDef } from '../src/ship/pieceTypes';
+import type { Material } from 'three';
 import {
   buildBrigantineBlueprint,
   buildGalleonBlueprint,
@@ -165,5 +174,130 @@ describe('§V45 × §V41: ratlines are the hardest case the AA has', () => {
       const highest = Math.max(...ladder.rungs.map((r) => Math.max(r.tA, r.tB)));
       expect(highest, ladder.id).toBeLessThan(0.95);
     }
+  });
+});
+
+/**
+ * User report: "the horizontal climbing bars — they seem to rotate and tilt in
+ * a strange way when the rope is sagging in a very extreme way… pointing almost
+ * completely vertical".
+ *
+ * Measured cause, which is NOT sag: `solveCatenary` samples uniformly in
+ * HORIZONTAL SPAN, and a shroud is steep (galleon: v/h ≈ 6.8 : 1), so sample
+ * index is violently non-uniform in height. Worse, HOW non-uniform depends on
+ * each rope's own h — the two shrouds of one fan run h = 3.85 m and h = 3.21 m
+ * — so the same t landed at y = 9.52 on one and y = 8.71 on the other and the
+ * rung between them stood 45° off level. Adding slack made it BETTER, not
+ * worse, and furl changed nothing at all (shrouds have zero furl response).
+ */
+describe('§V45 rungs are level: the ladder is a ladder, not a spike', () => {
+  const stubMat = (): Material => ({ dispose(): void {} }) as unknown as Material;
+
+  /** every rung of a ship, placed exactly as the vertex stage places it */
+  function placedRungs(build: () => PieceDef[], furl: number) {
+    const blueprint = build();
+    const plan = buildRiggingPlan(blueprint);
+    const assembly = new ShipAssembly(blueprint, stubMat);
+    assembly.group.updateWorldMatrix(true, true);
+    const solved: Vec3Like[][] = [];
+    applyRiggingPlan(plan, {
+      setRope(i, a, b, length): void {
+        solved[i] = solveCatenary(a, b, length ?? 0, ropeParams.segmentsPerRope);
+      },
+      setRopeCount(): void {},
+    }, (id) => assembly.socketWorldPosition(id), furl);
+    return buildRungDescriptors(buildRatlinePlan(blueprint), plan).map((r) => {
+      const pA = sampleRopeByArcLength(solved[r.ropeA], r.tA);
+      const pB = sampleRopeByArcLength(solved[r.ropeB], r.tB);
+      const span = Math.hypot(pB.x - pA.x, pB.y - pA.y, pB.z - pA.z);
+      return {
+        span,
+        drawn: rungVisibility(span) > 0.5,
+        tiltDeg: (Math.asin(Math.min(1, Math.abs(pB.y - pA.y) / Math.max(span, 1e-9))) * 180) / Math.PI,
+      };
+    });
+  }
+
+  it.each(ships)('%s: no rung stands on end, at any trim', (_n, build) => {
+    // WHY: this is the user report, and it is the assertion the shipped
+    // sample-index sampler fails at 45.3°. A ladder whose bars are cocked
+    // tens of degrees does not read as something you could climb.
+    for (const furl of [0, 1]) {
+      const drawn = placedRungs(build, furl).filter((r) => r.drawn);
+      expect(drawn.length).toBeGreaterThan(50);
+      const worst = Math.max(...drawn.map((r) => r.tiltDeg));
+      const mean = drawn.reduce((s, r) => s + r.tiltDeg, 0) / drawn.length;
+      expect(worst, `furl=${furl} worst rung tilt`).toBeLessThan(12);
+      expect(mean, `furl=${furl} mean rung tilt`).toBeLessThan(6);
+    }
+  });
+
+  it('…but they are still not machined level (§V2 hand-seized)', () => {
+    // WHY: the complement. The bound must clip the tail, never flatten the
+    // ladder into the "ultra regular" tell the ship's jitter exists to remove
+    // — a fix that made every rung exactly level would pass the test above and
+    // still be wrong.
+    const drawn = placedRungs(buildGalleonBlueprint, 0).filter((r) => r.drawn);
+    expect(drawn.filter((r) => r.tiltDeg > 0.5).length).toBeGreaterThan(drawn.length / 4);
+  });
+
+  it('furl does not move the shrouds, so it cannot move the ladder', () => {
+    // WHY: the report blamed furling. It provably is not: shrouds carry zero
+    // furl response, so every rung is identical at both extremes. Pinned so a
+    // future furl response on standing rigging cannot silently reintroduce
+    // this — it would have to come past this test first.
+    const set = placedRungs(buildGalleonBlueprint, 0);
+    const furled = placedRungs(buildGalleonBlueprint, 1);
+    expect(furled.map((r) => r.tiltDeg.toFixed(6))).toEqual(set.map((r) => r.tiltDeg.toFixed(6)));
+  });
+
+  it('places a station by ARC LENGTH, not by sample index', () => {
+    // WHY: the root cause, pinned at the level of the sampler itself. On a
+    // steep rope the two disagree wildly, and that disagreement is what tilted
+    // the rungs. t = 0.5 must be the point equidistant ALONG THE ROPE from
+    // both ends — the station a rung is physically seized at.
+    const A = { x: 0, y: 28.6, z: 10 };
+    const B = { x: -3.5, y: 2.57, z: 8.4 };
+    const chord = Math.hypot(B.x - A.x, B.y - A.y, B.z - A.z);
+    const pts = solveCatenary(A, B, chord * 1.004, ropeParams.segmentsPerRope);
+    const mid = sampleRopeByArcLength(pts, 0.5);
+    const arcTo = (p: Vec3Like, from: number, to: number): number => {
+      let s = 0;
+      for (let i = from; i < to; i++) {
+        s += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y, pts[i + 1].z - pts[i].z);
+      }
+      return s + 0 * p.x;
+    };
+    const total = arcTo(mid, 0, pts.length - 1);
+    // walk from the masthead end to the sampled point and confirm it is half
+    let acc = 0;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const l = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y, pts[i + 1].z - pts[i].z);
+      const d = Math.hypot(mid.x - pts[i].x, mid.y - pts[i].y, mid.z - pts[i].z);
+      if (d <= l + 1e-9) { acc += d; break; }
+      acc += l;
+    }
+    expect(acc / total).toBeCloseTo(0.5, 3);
+    // and it is emphatically NOT where the sample index says — that is the bug
+    const byIndex = pts[Math.round(0.5 * (pts.length - 1))];
+    expect(Math.abs(mid.y - byIndex.y)).toBeGreaterThan(3);
+  });
+
+  it('collapses rungs the fan has closed on, where the span is known', () => {
+    // WHY: MIN_RUNG is applied by the ship to straight lines in ship space,
+    // but the drawn rung is a chord of two solved curves. Now that rungs
+    // actually reach the top of the fan, 40 of the galleon's 162 come out
+    // under the cutoff — and a ladder tapering to a point reads as a spike.
+    const all = placedRungs(buildGalleonBlueprint, 0);
+    const stubs = all.filter((r) => r.span < MIN_RUNG);
+    expect(stubs.length).toBeGreaterThan(0);
+    for (const stub of stubs) expect(rungVisibility(stub.span)).toBeLessThan(1);
+    for (const r of all) {
+      if (r.span >= MIN_RUNG) expect(rungVisibility(r.span)).toBe(1);
+    }
+    // the cull is a fade, not a step: nothing can pop as §V42 works the fan
+    expect(rungVisibility(MIN_RUNG * 0.9)).toBeGreaterThan(0);
+    expect(rungVisibility(MIN_RUNG * 0.9)).toBeLessThan(1);
+    expect(rungVisibility(MIN_RUNG * 0.5)).toBe(0);
   });
 });

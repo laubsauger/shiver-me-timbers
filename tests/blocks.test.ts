@@ -114,6 +114,31 @@ describe('§V12 block orientation follows its line', () => {
     expect(angleDeg(straight.frame.axle, swung.frame.axle)).toBeGreaterThan(30);
   });
 
+  it('does not SNAP as its line swings through plumb (ship rolling)', () => {
+    // WHY: the sheave's axle is square to the vertical plane its line runs in,
+    // and that plane is undefined for a plumb line. The first version switched
+    // to a seeded fallback below an epsilon — a discontinuity sitting exactly
+    // where a lift or halyard passes as the ship rolls, measured at a 127.6°
+    // frame snap in one frame: a pulley spinning on the spot. Same defect
+    // class as the ratline rungs (§V45). No orientation is more correct than
+    // another at plumb; what matters is that it does not JUMP.
+    let previous: ReturnType<typeof hang> | null = null;
+    let worstJump = 0;
+    for (let i = 0; i <= 400; i++) {
+      const offset = -0.5 + i / 400; // lower anchor sweeps through directly-below
+      const pose = hang(v3(0, 20, 0), v3(offset, 8, 0), 1.02);
+      if (previous !== null) {
+        worstJump = Math.max(
+          worstJump,
+          angleDeg(previous.frame.axle, pose.frame.axle),
+          angleDeg(previous.frame.side, pose.frame.side),
+        );
+      }
+      previous = pose;
+    }
+    expect(worstJump, 'worst frame jump per step through plumb').toBeLessThan(15);
+  });
+
   it('the frame is orthonormal for every line attitude, including vertical', () => {
     // WHY: the frame is fed straight into a vertex position. A degenerate or
     // non-unit basis is a squashed block at best and a NaN vertex at worst,
