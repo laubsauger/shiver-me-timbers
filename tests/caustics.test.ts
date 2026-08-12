@@ -716,11 +716,18 @@ describe('§B.17 — dry ground must not be treated as submerged', () => {
 
   it('the submersion mask really is 0 above the waterline', () => {
     const submerged = (d: number) => smoothstep(-p.waterlineBlend, p.waterlineBlend, d);
-    expect(submerged(-0.5)).toBe(0);
+    // DRY is the claim, and dry means clear of the crossfade band — not some
+    // literal height. A hardcoded -0.5 was outside the band at waterlineBlend
+    // 0.3 and inside it at 0.8, so it silently stopped testing §B.17 and
+    // started testing "the wet band is narrow", which is a different (and
+    // wrong) assertion: a hull just above the waterline SHOULD be part-wet,
+    // and widening that band is exactly what removed the seam along the hull.
+    const dry = -p.waterlineBlend * 1.01;
+    expect(submerged(dry)).toBe(0);
     expect(submerged(-5)).toBe(0);
-    expect(submerged(-35)).toBe(0); // a hilltop
+    expect(submerged(-35)).toBe(0); // a hilltop — §B.17's actual subject
     expect(submerged(0)).toBeCloseTo(0.5, 6);
-    expect(submerged(1)).toBe(1);
+    expect(submerged(p.waterlineBlend * 1.01)).toBe(1);
   });
 
   it('the maxDepth ramp CANNOT serve as the above-water gate', () => {

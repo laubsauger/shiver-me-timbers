@@ -38,6 +38,8 @@ export interface IslandMaterials {
     waterLevel: number;
     swell: number;
     sunDirection: THREE.Vector3;
+    /** atmosphere colour the terrain melts into (§V30) — `scene.fog.color` */
+    hazeColor: THREE.Color;
   }): void;
   dispose(): void;
 }
@@ -66,6 +68,7 @@ export function createIslandMaterials(): IslandMaterials {
       // or the panel value would win every frame
       terrain.updateFromParams();
       terrain.setSunDirection(frame.sunDirection);
+      terrain.setHazeColor(frame.hazeColor);
       terrain.setTime(frame.time);
       terrain.setSwell(frame.swell);
       terrain.setWaterline(frame.waterLevel);

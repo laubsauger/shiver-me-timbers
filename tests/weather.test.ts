@@ -14,7 +14,12 @@ import { weatherParams } from '../src/params/weather';
 import { oceanParams } from '../src/params/ocean';
 import { skyParams } from '../src/params/sky';
 import { cloudParams } from '../src/params/clouds';
-import { cascadeBand, effectiveChoppiness, spectralSteepness } from '../src/ocean/oceanMath';
+import {
+  cascadeBand,
+  effectiveChoppiness,
+  spectralHeightVariance,
+  spectralJacobianRms,
+} from '../src/ocean/oceanMath';
 import { jacobianSigma } from '../src/foam/foamMath';
 import {
   advanceDrift,
@@ -31,6 +36,7 @@ import {
   stormAt,
   weatherPresets,
 } from '../src/weather';
+import type { PresetPatch } from '../src/weather/presets';
 
 beforeEach(() => {
   clearParamsRegistry();
@@ -86,6 +92,8 @@ function registerFakes() {
   return { ocean, sky, clouds, ropes };
 }
 
+type PresetOcean = PresetPatch['ocean'];
+
 describe('presets are pure data (§V7: only param values, no code)', () => {
   it('survives JSON round-trip unchanged — serializable, no functions', () => {
     const roundTripped = JSON.parse(JSON.stringify(weatherPresets));
@@ -140,11 +148,15 @@ describe('storm vs swell (§V7: amp up + foam bias up → big foam patches)', ()
    * happily through the entire period when the foam sim produced no swell
    * whitecaps at all, because it never looked at a sea.
    */
-  const foamRarity = (patch: { amplitude: number; windSpeed: number; choppiness: number; jacobianFoamBias: number }) => {
+  const foamRarity = (patch: PresetOcean) => {
     const p = { ...oceanParams, ...patch };
     let steepnessVariance = 0;
     for (let i = 0; i < 3; i++) {
-      const s = spectralSteepness(
+      // §V.59: the σ of det J is built on the DIRECTION-FREE Jacobian trace,
+      // not on `spectralSteepness`'s x-projection. With two wave trains at an
+      // angle the two differ by up to 2.6×, and this mirror has to match the
+      // moment the ocean publishes or it grades the presets on a fiction.
+      const s = spectralJacobianRms(
         p.resolution,
         p.cascades[i].domain,
         p,
@@ -157,9 +169,33 @@ describe('storm vs swell (§V7: amp up + foam bias up → big foam patches)', ()
     return (1 - patch.jacobianFoamBias) / jacobianSigma(steepnessRms, lambda);
   };
 
+  /**
+   * Significant wave height Hs = 4√m₀ from the LIVE spectrum — the sea state as
+   * a mariner reads it, and the only honest way to order the presets now.
+   * `amplitude` alone stopped being a proxy for "how big is this sea" the
+   * moment the swell train landed: it scales the WIND SEA only, so calm (0.30
+   * at 4 m/s of wind, plus a 13 s ground swell) carries a bigger number than
+   * swell (0.24 at 11 m/s) while being a far smaller sea. Comparing knobs
+   * instead of outcomes is how §V.7's promise gets asserted without being
+   * tested — the same mistake `foamRarity` above exists to avoid.
+   */
+  const hsOf = (patch: PresetOcean) => {
+    const p = { ...oceanParams, ...patch };
+    let variance = 0;
+    for (let i = 0; i < 3; i++) {
+      variance += spectralHeightVariance(
+        p.resolution,
+        p.cascades[i].domain,
+        p,
+        cascadeBand(i, p.splitWavelengths),
+      );
+    }
+    return 4 * Math.sqrt(variance);
+  };
+
   it('storm foams far more than swell: bigger seas AND a lower σ-bar', () => {
     const { swell, storm } = weatherPresets;
-    expect(storm.ocean.amplitude).toBeGreaterThan(swell.ocean.amplitude);
+    expect(hsOf(storm.ocean)).toBeGreaterThan(hsOf(swell.ocean));
     // storm ≈1.3σ (broad patches), swell ≈2.5σ (sparse caps)
     expect(foamRarity(storm.ocean)).toBeLessThan(foamRarity(swell.ocean));
     expect(foamRarity(storm.ocean)).toBeLessThan(1.6);
@@ -175,7 +211,7 @@ describe('storm vs swell (§V7: amp up + foam bias up → big foam patches)', ()
 
   it('calm sits below swell on both — the same dial, turned the other way', () => {
     const { calm, swell } = weatherPresets;
-    expect(calm.ocean.amplitude).toBeLessThan(swell.ocean.amplitude);
+    expect(hsOf(calm.ocean)).toBeLessThan(hsOf(swell.ocean));
     // rarer than swell: a glassy sea foams only where it truly folds
     expect(foamRarity(calm.ocean)).toBeGreaterThan(foamRarity(swell.ocean));
   });

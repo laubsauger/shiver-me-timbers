@@ -41,25 +41,40 @@ export const oceanSurfaceParams = registerParams(
      */
     normalDetailStretch: 3.0,
     /**
-     * §V.48 filtered tier for the cascade NORMALS, measured in "how many of
-     * this cascade's texels does one pixel cover". The derivative textures are
+     * §V.48 filtered tier for the cascade NORMALS. The derivative textures are
      * compute-written StorageTextures and cannot carry a mip chain, so a
      * minified fetch is a point sample of a zero-mean slope field — per-pixel
      * noise, which the pow(N·H,180) glint then amplifies into the fibrous
      * golden hair covering the whole sea when zoomed out (user).
-     * Full strength while a pixel covers ≤ `Full` texels, gone by `Cut`. The
-     * next coarser cascade, still resolved, carries the large-scale shading —
-     * the cascade pyramid IS the mip chain here.
      *
-     * Tuned in-browser at the §T.39 sunset framing: 0.65/2.2 killed the noise
-     * completely but took the mid-field with it — the sea went to smooth mush
-     * and the glint road washed out, because a pixel covers ~2 texels of even
-     * the 420 m cascade by 200 m out. 1.0/3.5 keeps the wave texture and
-     * leaves the residual highlight chatter to `specularAaStrength`, which is
-     * the term that is actually supposed to handle it.
+     * These are FRACTIONS OF A CASCADE'S OWN SLOPE VARIANCE, not texel counts:
+     * a cascade is at full strength while at least `Full` of its slope variance
+     * is still resolvable at the pixel's footprint, and gone once less than
+     * `Cut` is. The two footprints in metres are measured from the live
+     * spectrum (oceanMath.slopeResolutionFootprint) and refreshed on every h0
+     * rebuild, so weather presets and spectrum sliders move them for free.
+     *
+     * THEY REPLACE A TEXEL-COUNT PAIR (1.0 / 3.5 texels) THAT WAS RETIRING
+     * RESOLVED DETAIL. Measured on the shipped swell sea: cascade 2's slope
+     * lives at λ ≈ 2.4 m = 53 texels, so at the 3.5-texel footprint where it
+     * was deleted it still carried 89% of its slope variance; the composite
+     * shading slope RMS was 59% of near-field by 53 m, 31% by 130 m and zero
+     * past 365 m against 40% still resolvable. That is the "too plasticky too
+     * close by" report and half of the "greys out under sky reflection" one —
+     * a flat sea has nothing to break up the mirror. A texel ratio also cannot
+     * be shared: the same 0.95/0.20 pair lands at 2.5/50 texels on cascade 2
+     * and 23/71 on cascade 1, which is why the footprints are measured per
+     * cascade rather than converted by a constant (§V.59's tell).
+     *
+     * 0.95 / 0.20 puts the fade at ≈44 m → ≈207 m for cascade 2 and ≈480 m →
+     * ≈960 m for cascade 0 at a follow-camera framing (14 m eye, 55° fov,
+     * 1440p). Raising `Cut` retires earlier and flattens the mid-field again;
+     * lowering it hands more sub-pixel slope to `specularAaStrength`.
+     * NOT YET CONFIRMED IN-BROWSER (§V.22) — the numbers below are measured on
+     * the spectrum, the look is not signed off.
      */
-    normalTexelFull: 1.0,
-    normalTexelCut: 3.5,
+    normalKeepFull: 0.95,
+    normalKeepCut: 0.2,
 
     // ── colour ──────────────────────────────────────────────────────────
     deepColor: '#093642',
@@ -205,13 +220,24 @@ export const oceanSurfaceParams = registerParams(
      *    greys out (user: "the water at distance still has a very high
      *    tendency to get grey and washed out"). 0.55 hands the pigment back
      *    exactly where there is no other source of it.
-     * The ramp reaches `Far` at `FullDist` metres. Beyond ~900 m the distance
-     * haze takes over anyway (hazeStart), so the window this actually governs
-     * is roughly 150–900 m — the mid-field the user is describing.
+     * It is a HUMP, not a rising ramp: past `hazeStart` the term is scaled by
+     * (1 − hazeT), because a pixel that has melted into the distance haze is
+     * ATMOSPHERE and re-tinting it toward the sea's body colour is what made
+     * the horizon "completely drown in solid turquoise" (user, 3rd report on
+     * this axis). So the window this governs is roughly 150–900 m — the
+     * mid-field — and it hands over to the sky beyond that.
+     *
+     * `Far` was 0.55 for one round and that was too much: at 0.55 the whole
+     * distance band converged on ONE hue, because re-saturation this strong
+     * pins the reflected sky's colour instead of nudging it, and everything
+     * that varies out there (normals, sparkle, foam, the mirror) has already
+     * been faded out by §V.48 — so the result is a flat fill, not water.
+     * 0.28 leaves the sky's own azimuthal variation legible and lets the
+     * floor below be the guarantee, which is what §V.56 actually says.
      * CPU transliteration: src/ocean/seaChroma.ts `grazingSaturationAt`.
      */
     grazingSaturation: 0.15,
-    grazingSaturationFar: 0.55,
+    grazingSaturationFar: 0.28,
     grazingSaturationFullDist: 500,
     /**
      * §V.56 lever 2 — THE FLOOR ITSELF, and the material's one named
@@ -221,11 +247,16 @@ export const oceanSurfaceParams = registerParams(
      * (1 − foam), because breaking foam is allowed to read white — it is the
      * disturbed water between the caps that must not go grey.
      * 0 disables it entirely and hands the frame back to raw physics.
+     * Also scaled by (1 − hazeT): a floor that fires on the horizon haze
+     * repaints the whole band in the water's hue, which is half of the
+     * "solid turquoise" report — warm low-chroma haze is a legitimately lit
+     * ATMOSPHERE, not a grey wash. 0.22 was that mistake; at 0.14 it catches
+     * only genuinely neutral pixels, which is all it was ever for.
      * Do not raise past ~0.35 or genuinely pale water (fog banks, thin
      * shallows over sand) starts reading as tinted. CPU pair:
      * seaChroma.pigmentFloor, swept in tests/ocean.test.ts "§V.56".
      */
-    pigmentFloorChroma: 0.22,
+    pigmentFloorChroma: 0.14,
     pigmentFloorStrength: 1.0,
     /**
      * Sun-elevation gate (sunDir.y) for every sun-driven water term. Below
@@ -322,8 +353,27 @@ export const oceanSurfaceParams = registerParams(
      * Cap on that variance (§V.44 bounded at source). Also the floor on lobe
      * width: p' ≥ p/(1 + p·max), so the horizon band cannot collapse to a
      * uniform sheen.
+     *
+     * 0.35 → 1.0. MEASURED: the cap, not the strength, is what limits the
+     * correction, and it starts binding at a ~0.13 m footprint (≈50 m out at a
+     * follow-camera framing) — so the AA gets WEAKER the further out you look,
+     * which is backwards. Half-width of the `glintRoadPower` 180 lobe, in
+     * pixels, against the sea's measured curvature RMS of 1.66/m:
+     *     footprint  raw    with cap 0.35   needed
+     *       0.05 m   0.05   0.30 px         1 px  (σ² 0.12, cap not binding)
+     *       0.15 m   0.02   0.71 px         1 px  (σ² 0.41, cap binding)
+     *       0.50 m   0.00   0.26 px         1 px  (σ² 2.56, cap hard-binding)
+     * i.e. every specular lobe on this surface is between 1/50 and 1/4 of a
+     * pixel wide and the filter is capped before it can fix it. That is the
+     * user's jagged crest highlights, and MSAA cannot see it — there is no
+     * geometric edge, only a shading one.
+     * 1.0 is a compromise, not the answer the maths gives (2.6 at 0.5 m): the
+     * lobe is energy-conserving, so a bigger cap spreads the glint road into
+     * the broad sheen it physically becomes at that footprint, and the road is
+     * a hero feature (§T.39). NEEDS THE BROWSER to pick the final number —
+     * this is one uniform and it moves live in the panel.
      */
-    specularAaMax: 0.35,
+    specularAaMax: 1.0,
     /** specular tightness of an individual glint */
     sparklePower: 40,
     /** tightness of the glint-train footprint (the sun path on the water) */
@@ -458,8 +508,8 @@ export const oceanSurfaceParams = registerParams(
     lodSamplesFull: { min: 4, max: 32, step: 0.5 },
     lodSamplesCut: { min: 2, max: 24, step: 0.5 },
     normalDetailStretch: { min: 1, max: 8, step: 0.1 },
-    normalTexelFull: { min: 0.1, max: 4, step: 0.05 },
-    normalTexelCut: { min: 0.2, max: 8, step: 0.05 },
+    normalKeepFull: { min: 0.5, max: 1, step: 0.01 },
+    normalKeepCut: { min: 0, max: 0.9, step: 0.01 },
     sssStrength: { min: 0, max: 5, step: 0.05 },
     sssAmbient: { min: 0, max: 1, step: 0.01 },
     shallowTintStrength: { min: 0, max: 1, step: 0.01 },

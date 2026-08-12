@@ -573,3 +573,114 @@ describe('§V43 silhouette: every island a different shape', () => {
     expect(smoothMax(40, 5, 20)).toBe(40); // far apart: plain max
   });
 });
+
+describe('§V43 coastline: a cliff somewhere on every island, not sand all round', () => {
+  // THE COMPLAINT: "the coastline is uniform — a single skirt of sand all the
+  // way round". It was structurally true and measurable. Between
+  // `featureExtent` and the rim the height field was nothing but low-amplitude
+  // coast noise, and every OTHER feature kind reaches its own rim
+  // TANGENTIALLY (`pow(1 − d/r, power)` has zero slope at d = r), so no cone
+  // and no ridge could ever put a wall at the waterline. Measured on the
+  // shipping params: median coastal slope 4.8-7.6° on all five islands, and
+  // the fraction of shoreline steeper than 45° was 0.0% on three of them.
+  //
+  // A sweep proved the obvious knobs cannot fix it — featureExtent 0.62→0.94
+  // moved cliff coast 6%→6% and made the shore ROUNDER (CV 0.256→0.188). Only
+  // a profile with a wall in it can, which is what `sheer` headlands are. This
+  // test fails the moment headlands are disabled or detuned back to tangency.
+  const sites = generateIslandSites(WORLD_SEED);
+  const built = sites.map((s) =>
+    generateIslandHeightmap(s.seed, {
+      ...islandParams,
+      radius: s.radius,
+      ...islandPeakHeights(s.radius),
+    }),
+  );
+
+  /** fraction of bearings where the land rises >45° in the first 25 m inland */
+  const cliffFraction = (map: (typeof built)[number]): number => {
+    const N = 128;
+    let steep = 0;
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * Math.PI * 2;
+      const rs = findShoreRadius(map, a);
+      const inland = map.heightAt(Math.cos(a) * (rs - 25), Math.sin(a) * (rs - 25));
+      if (Math.atan2(Math.max(inland, 0), 25) > (45 * Math.PI) / 180) steep++;
+    }
+    return steep / N;
+  };
+
+  it('no island shelves gently into the water on every single bearing', () => {
+    for (const map of built) expect(cliffFraction(map)).toBeGreaterThan(0.05);
+  });
+
+  it('and none of them is cliff the whole way round either', () => {
+    // the point is VARIATION. A coast that is all cliff has no beach for the
+    // §T33 swash to run up and no grove sites, and reads as uniform in the
+    // other direction — which is the same failure wearing different clothes.
+    for (const map of built) expect(cliffFraction(map)).toBeLessThan(0.75);
+  });
+
+  it('how much cliff differs by silhouette family, so islands stay distinct', () => {
+    const fractions = built.map(cliffFraction);
+    const spread = Math.max(...fractions) - Math.min(...fractions);
+    expect(spread).toBeGreaterThan(0.1);
+  });
+});
+
+describe('§V43 sea stacks: silhouette that survives to the horizon', () => {
+  // Rocks (rocks.ts) cannot do this job however big they get: `lodRockCull`
+  // hides the whole batch past 1800 m, so at the 2-4 km range where the
+  // silhouette is the ONLY thing left there are no rocks at all. Stacks are
+  // height-field features instead — part of the terrain mesh that is already
+  // drawn, so no draw call, no pipeline (three appends object.uuid to the
+  // material cache key for every InstancedMesh) and no cull distance.
+  const sites = generateIslandSites(WORLD_SEED);
+  const built = sites.map((s) =>
+    generateIslandHeightmap(s.seed, {
+      ...islandParams,
+      radius: s.radius,
+      ...islandPeakHeights(s.radius),
+    }),
+  );
+
+  it('every island stands at least one sheer feature clear of the water', () => {
+    for (const map of built) {
+      const sheer = map.features.filter((f) => f.kind === 'sheer');
+      expect(sheer.length).toBeGreaterThan(0);
+      const standing = sheer.filter((f) => map.heightAt(f.x, f.z) > 2);
+      expect(standing.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('stacks are wide enough to survive the DECIMATED terrain grid', () => {
+    // the far LOD takes every `lodTerrainStride`-th vertex, so a stack
+    // narrower than a few decimated cells is simply never sampled and
+    // disappears at exactly the distance it exists for. Its vertical wall is
+    // the inner 55% of the footprint (archetypes.ts `sheer`).
+    for (const map of built) {
+      const cell = ((2 * map.worldRadius) / (map.size - 1)) * islandParams.lodTerrainStride;
+      const offshore = map.features.filter(
+        (f) => f.kind === 'sheer' && f.radius < map.worldRadius * 0.25,
+      );
+      for (const f of offshore) {
+        expect(f.radius * 2 * 0.55).toBeGreaterThan(cell * 2);
+      }
+    }
+  });
+
+  it('a stack is a WALL, not a small hill (that is the whole point)', () => {
+    // a cone of any exponent still reads as a pointed hill at 3 km; only a
+    // vertical edge reads as a stack. Sample across one stack's own wall.
+    const map = built.find((m) =>
+      m.features.some((f) => f.kind === 'sheer' && f.radius < m.worldRadius * 0.25),
+    )!;
+    const f = map.features.find(
+      (g) => g.kind === 'sheer' && g.radius < map.worldRadius * 0.25,
+    )!;
+    const top = map.heightAt(f.x, f.z);
+    const outside = map.heightAt(f.x + f.radius * 1.05, f.z);
+    // rises the bulk of its height inside its own footprint radius
+    expect(top - outside).toBeGreaterThan(f.height * 0.4);
+  });
+});

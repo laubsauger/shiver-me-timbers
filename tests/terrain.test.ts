@@ -10,6 +10,16 @@
  * Documented ranges: hash / valueNoise / fbm all return values in [0, 1].
  */
 import { describe, expect, it } from 'vitest';
+import { bandLimitEnergy, periodResolvedValue } from '../src/ship/bandLimit';
+import { getParamsEntry } from '../src/params/registry';
+import { Color } from 'three/webgpu';
+import { oceanSurfaceParams } from '../src/params/oceanSurface';
+import {
+  aerialHazeFactorCpu,
+  createAerialUniforms,
+  updateAerialUniforms,
+} from '../src/terrain/aerialPerspective';
+import { terrainBlendMaterial } from '../src/terrain/sandMaterial';
 import {
   fadeCpu,
   fbm2Cpu,
@@ -314,5 +324,199 @@ describe('material construction (node graph builds without a renderer)', () => {
     } finally {
       terrainParams.runupEnabled = prev;
     }
+  });
+});
+
+describe('§V.48 band limits on the terrain material (the §B.20 shape, again)', () => {
+  // src/terrain, src/island and src/vegetation contained ZERO band limiting —
+  // no fwidth, no dFdx, no reference to src/ship/bandLimit — while carrying
+  // three procedural terms measurably finer than a pixel at island range.
+  // A TSL graph cannot be evaluated headless, so this drives the CPU mirrors
+  // in bandLimit.ts (the same transliteration-pair convention as
+  // tests/shipDetail.test.ts) at the feature widths the material actually has.
+  //
+  // Pixel footprint: 1440p, 75° horizontal ⇒ 1955 px/rad, so one pixel spans
+  // dist/1955 metres head-on and ~10× that on a beach seen from a deck.
+  const PX_PER_RAD = 2560 / ((75 * Math.PI) / 180);
+  const metresPerPixel = (dist: number, grazing = 1): number => (dist / PX_PER_RAD) * grazing;
+
+  it('the sand SPARKLE fades before its cells go sub-pixel', () => {
+    // Worst offender in the stack: a binary step() gate and a per-cell RANDOM
+    // facet normal driving pow(dot,26) × sparkleStrength into an ADDITIVE
+    // slot (§V44). Sub-pixel = per-pixel random white over the whole beach.
+    const cellSize = 1 / terrainParams.sparkleDensity;
+    // filter width in CELL units is metres-per-pixel / cell size
+    const resolvedAt = (dist: number, grazing: number): number =>
+      periodResolvedValue(metresPerPixel(dist, grazing) / cellSize);
+
+    // close up, on the beach you are standing on: fully present
+    expect(resolvedAt(30, 1)).toBeGreaterThan(0.9);
+    // the case that actually speckles — a beach 300 m off, seen at 10× grazing
+    // from a deck. Must be GONE, not merely dimmed.
+    expect(resolvedAt(300, 10)).toBe(0);
+    // and gone head-on well before the island itself stops being drawn
+    expect(resolvedAt(1200, 1)).toBe(0);
+  });
+
+  it('the sand GRAIN fades before its period goes sub-pixel', () => {
+    const feature = 1 / terrainParams.sandGrainScale;
+    expect(periodResolvedValue(metresPerPixel(20, 1) / feature)).toBeGreaterThan(0.9);
+    expect(periodResolvedValue(metresPerPixel(200, 10) / feature)).toBe(0);
+  });
+
+  it('the ROCK posterize edge keeps ≥2 px of transition, then loses amplitude', () => {
+    // §B.20's lesson verbatim: measure the SHARPEST FEATURE, not the repeat.
+    // The rock fbm's finest octave is ~1.56 m but the band edge inside it is
+    // ~0.09 m — it goes sub-pixel about seventeen times sooner, and the whole
+    // distance band between the two is where the speckle lives.
+    const edge = 0.09;
+    const repeat = 1.56;
+    // near: full contrast survives
+    expect(bandLimitEnergy(edge, metresPerPixel(40, 1))).toBeGreaterThan(0.9);
+    // a cliff face 400 m off: the edge is long gone…
+    expect(bandLimitEnergy(edge, metresPerPixel(400, 1))).toBeLessThan(0.5);
+    // …while a limit measured against the REPEAT would still read as fine,
+    // which is exactly the mistake that left the hull speckling
+    expect(bandLimitEnergy(repeat, metresPerPixel(400, 1))).toBeGreaterThan(0.9);
+  });
+
+  it('every band limit reaches exactly zero contribution, never a floor', () => {
+    // a limit that asymptotes to a small non-zero value still speckles; it
+    // just takes a bigger screen to notice
+    expect(periodResolvedValue(50)).toBe(0);
+    expect(bandLimitEnergy(0.09, 100)).toBeLessThan(0.001);
+  });
+});
+
+describe('§V43 ground cover (an island is not a sand dune)', () => {
+  it('registers every cover tunable with the params registry (§V16)', () => {
+    const entry = getParamsEntry('terrain');
+    expect(entry).toBeDefined();
+    for (const key of [
+      'shoreBandHeight',
+      'shoreBandFade',
+      'vegBaseColor',
+      'vegShadeColor',
+      'vegDryColor',
+      'vegScale',
+      'vegDryStrength',
+      'vegSlopeThreshold',
+      'vegRoughness',
+    ]) {
+      expect(entry!.params).toHaveProperty(key);
+    }
+  });
+
+  it('cover holds a stricter slope than sand, so walls stay bare rock', () => {
+    // this is what makes a headland wall and a sea stack read as ROCK rather
+    // than a grassy ramp — the whole reason those walls went into the height
+    // field. If someone ever loosens it below sand's threshold the silhouette
+    // work goes green and mushy without anything failing.
+    expect(terrainParams.vegSlopeThreshold).toBeGreaterThan(terrainParams.slopeThreshold);
+  });
+
+  it('sand is a SHORE BAND, not the default surface', () => {
+    // THE DEFECT: split on slope alone at 0.72 (44°) against a measured mean
+    // terrain slope of 19-23°, sand took 82-98% of every island — one tan
+    // albedo from the waterline to the summit, and no green on an island at
+    // all. The band has to stay a skirt: tens of metres of elevation here
+    // would hand the whole island back to sand.
+    expect(terrainParams.shoreBandHeight).toBeLessThan(8);
+    expect(terrainParams.shoreBandFade).toBeGreaterThan(0.5); // never a contour line
+  });
+
+  it('the cover clump noise is band-limited too, not merely coarse (§V.48)', () => {
+    // "coarse" is not "exempt", and it was the first answer here — measured,
+    // the finest clump octave is ~9 m, which at 4 km and 10× grazing is
+    // comfortably UNDER one 20 m pixel. Coarseness is also just a params
+    // value anyone can raise. So the limit exists, and this pins the two ends
+    // of it through the CPU mirror of the same gate the shader uses.
+    const finest = 1 / (terrainParams.vegScale * terrainParams.noiseLacunarity);
+    const mpp = (dist: number, grazing: number): number =>
+      (dist / (2560 / ((75 * Math.PI) / 180)))* grazing;
+    // a hillside 200 m off: the clumps are the read, keep them
+    expect(periodResolvedValue(mpp(200, 1) / finest)).toBeGreaterThan(0.9);
+    // the same hillside at 4 km seen edge-on: gone, so it cannot shimmer
+    expect(periodResolvedValue(mpp(4000, 10) / finest)).toBe(0);
+  });
+
+  it('the blend material builds with the cover layer wired in', async () => {
+    const { terrainBlendMaterial } = await import('../src/terrain/sandMaterial');
+    const handle = terrainBlendMaterial();
+    expect(handle.uniforms.cover).toBeDefined();
+    expect(handle.material.colorNode).toBeTruthy();
+    // live Tweakpane edits reach the GPU uniforms
+    const before = handle.uniforms.cover.scale.value;
+    terrainParams.vegScale = before + 0.01;
+    handle.updateFromParams();
+    expect(handle.uniforms.cover.scale.value).toBeCloseTo(before + 0.01);
+    terrainParams.vegScale = before;
+    handle.updateFromParams();
+    handle.dispose();
+  });
+});
+
+describe('§V30/§V43 aerial perspective: land and sea melt into ONE atmosphere', () => {
+  // The islands were on `scene.fog` (linear 1800→4900) while the water had
+  // already left it — `surfaceMaterial` sets `material.fog = false` and runs
+  // pow(smoothstep(900, 4600, d), 1.7). Measured at 4 km that is 71% haze on
+  // the land against 88% on the water it stands in: a 17-point step along
+  // every coastline, in the exact horizon band the wide shots are taken in.
+  const ocean = oceanSurfaceParams;
+  const haze = (d: number): number =>
+    aerialHazeFactorCpu(d, ocean.hazeStart, ocean.hazeEnd, ocean.hazeCurve, ocean.hazeStrength);
+
+  it('reads the OCEAN\'s curve rather than a second copy of the numbers', () => {
+    // The single-owner point, and the whole reason this is a test: two
+    // hand-matched copies of a curve agree on the day they are written and
+    // drift the first time either is tuned (§V33/§V51, and `waterline` inside
+    // this same material). Retuning the sea must move the land with it.
+    const u = createAerialUniforms();
+    expect(u.range.value.x).toBe(ocean.hazeStart);
+    expect(u.range.value.y).toBe(ocean.hazeEnd);
+    expect(u.curve.value).toBe(ocean.hazeCurve);
+
+    const before = ocean.hazeStart;
+    ocean.hazeStart = before + 250;
+    updateAerialUniforms(u);
+    expect(u.range.value.x).toBe(before + 250);
+    ocean.hazeStart = before;
+    updateAerialUniforms(u);
+  });
+
+  it('is the SAME function the water uses, not merely a similar shape', () => {
+    // transliteration of the shader ramp; if either side is edited alone the
+    // numbers below stop matching the water and the seam comes back
+    expect(haze(ocean.hazeStart)).toBe(0);
+    expect(haze(ocean.hazeEnd)).toBeCloseTo(ocean.hazeStrength, 5);
+    // hermite, then the exponent — a LINEAR model of this is ~3x off midfield
+    const mid = (ocean.hazeStart + ocean.hazeEnd) / 2;
+    const linear = 0.5;
+    expect(haze(mid)).toBeLessThan(linear * 0.7);
+  });
+
+  it('never exceeds full haze or goes negative (§V44 bounded at source)', () => {
+    for (const d of [-100, 0, 500, 2000, 9000, 1e9]) {
+      const v = haze(d);
+      expect(Number.isFinite(v)).toBe(true);
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('degenerate ranges do not divide by zero (§V28)', () => {
+    expect(Number.isFinite(aerialHazeFactorCpu(1000, 2000, 2000, 1.7, 1))).toBe(true);
+  });
+
+  it('the blend material owns its haze and disables scene fog — both, or it doubles', () => {
+    const handle = terrainBlendMaterial();
+    expect(handle.material.fog).toBe(false);
+    expect(handle.material.outputNode).toBeTruthy();
+    expect(handle.uniforms.aerial).toBeDefined();
+    // the colour is pushed, not baked: the sky rig retints the atmosphere
+    // every frame and the land must follow the same source the sea copies
+    handle.setHazeColor(new Color(0x123456));
+    expect(handle.uniforms.aerial.color.value.getHex()).toBe(0x123456);
+    handle.dispose();
   });
 });

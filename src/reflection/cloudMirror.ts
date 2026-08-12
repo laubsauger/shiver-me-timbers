@@ -38,13 +38,12 @@ import {
   positionWorld,
   smoothstep,
   texture,
-  texture3D,
   uniform,
   vec2,
   vec3,
   vec4,
 } from 'three/tsl';
-import { createNoiseTexture } from '../clouds/cloudComposite';
+import { createCloudEdge, createNoiseTexture } from '../clouds/cloudComposite';
 import type { CloudParams } from '../params/clouds';
 import { REFLECTION_ONLY_LAYER } from './mirrorMath';
 
@@ -79,6 +78,9 @@ export interface CloudMirrorSource {
    */
   sunColorLive: THREE.Color;
   skyColorLive: THREE.Color;
+  /** `CloudsHandle.sunDirLive`, by reference — drives the edge transmission
+   *  term so a reflected cloud's thin margin lights like the real one's */
+  sunDirLive: THREE.Vector3;
   /** live cloud params (shared object, read every frame) */
   params: CloudParams;
 }
@@ -102,14 +104,9 @@ export function createCloudMirror(src: CloudMirrorSource): CloudMirror {
   const p = src.params;
   const noiseTex = createNoiseTexture(src.seed);
 
-  const uTime = uniform(0);
   // seeded from the LIVE pair, not the params hexes — see CloudMirrorSource
   const uSunColor = uniform(new THREE.Color().copy(src.sunColorLive));
   const uSkyColor = uniform(new THREE.Color().copy(src.skyColorLive));
-  const uDistortScale = uniform(p.distortScale);
-  const uDistortStrength = uniform(p.distortStrength);
-  const uEdgeErode = uniform(p.edgeErode);
-  const uAlphaGain = uniform(p.alphaGain);
   /** projection × view of the MAIN camera — the cloud RT's own frame */
   const uMainViewProj = uniform(new THREE.Matrix4());
 
@@ -131,23 +128,17 @@ export function createCloudMirror(src: CloudMirrorSource): CloudMirror {
   // (WGSLNodeBuilder.isFlipY() === false), so v flips while u does not.
   const cloudUV = vec2(ndc.x.mul(0.5).add(0.5), ndc.y.mul(-0.5).add(0.5));
 
-  // same scrolled 3D value noise as the main composite, driven by the SAME
-  // view direction, so a cloud and its reflection erode identically
-  const scroll = vec3(uTime.mul(0.7), uTime.mul(0.43), uTime);
-  const noise = texture3D(
-    noiseTex,
-    viewDir.mul(uDistortScale).mul(0.5).add(0.5).add(scroll),
-    null,
-  ).rgb;
+  // the SAME edge graph as the main composite (createCloudEdge), driven by the
+  // same view direction, so a cloud and its reflection fray identically — this
+  // was a hand-copy of the alpha construction and drifted the moment either
+  // side was tuned
+  const edge = createCloudEdge(noiseTex, viewDir, p, src.sunDirLive);
 
-  const packed = texture(
-    src.blurred,
-    cloudUV.add(noise.xy.sub(0.5).mul(uDistortStrength)).clamp(0, 1),
-  );
+  const packed = texture(src.blurred, cloudUV.add(edge.uvOffset).clamp(0, 1));
   const coverage = packed.b;
   const denom = coverage.max(1e-4);
   material.colorNode = uSunColor
-    .mul(packed.r.div(denom))
+    .mul(packed.r.div(denom).add(edge.transmission(packed)))
     .add(uSkyColor.mul(packed.g.div(denom)));
 
   // alpha: identical body/rim construction to cloudComposite, times a soft
@@ -160,11 +151,8 @@ export function createCloudMirror(src: CloudMirrorSource): CloudMirror {
     .mul(smoothstep(float(0), border, cloudUV.y))
     .mul(smoothstep(float(1), float(1).sub(border), cloudUV.y));
 
-  const cov = coverage.mul(uAlphaGain);
-  const body = cov.mul(-1.6).exp().oneMinus();
-  const rimT = noise.z.mul(uEdgeErode);
-  material.opacityNode = body
-    .mul(smoothstep(rimT, rimT.add(0.55), cov))
+  material.opacityNode = edge
+    .alpha(packed)
     .mul(edgeMask)
     .mul(inFront.select(float(1), float(0)))
     .clamp(0, 1);
@@ -182,15 +170,12 @@ export function createCloudMirror(src: CloudMirrorSource): CloudMirror {
   return {
     quad,
     update(mainCamera, mirrorPosition, mirrorQuaternion, time): void {
-      uTime.value = time * p.distortSpeed;
+      edge.uTime.value = time * p.distortSpeed;
       // track the day cycle: the clouds system rewrote these in place this
       // frame, before this call (main.ts runs clouds.update() first)
       uSunColor.value.copy(src.sunColorLive);
       uSkyColor.value.copy(src.skyColorLive);
-      uDistortScale.value = p.distortScale;
-      uDistortStrength.value = p.distortStrength;
-      uEdgeErode.value = p.edgeErode;
-      uAlphaGain.value = p.alphaGain;
+      edge.push(p);
 
       mainCamera.updateMatrixWorld();
       uMainViewProj.value.multiplyMatrices(

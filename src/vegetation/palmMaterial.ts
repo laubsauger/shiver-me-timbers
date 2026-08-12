@@ -10,6 +10,16 @@
 import * as THREE from 'three/webgpu';
 import { attribute, float, fract, mix, normalWorld, step, uniform, uv } from 'three/tsl';
 import { vegetationParams, type VegetationParams } from '../params/vegetation';
+// §V.48 — one band-limit implementation project-wide (src/ship for historical
+// reasons, §B.20 was found on the hull; the maths carries nothing ship-specific)
+import { coordFilter, periodResolved } from '../ship/bandLimit';
+
+/**
+ * Nyquist floor for the bark ring edge, in pixels. Two, not one, for the same
+ * reason as `FILTER_PIXELS` in bandLimit.ts: at one pixel per transition two
+ * neighbouring samples still straddle the whole step.
+ */
+const RING_FILTER_PIXELS = 2;
 
 export function createPalmMaterial(p: VegetationParams = vegetationParams) {
   const material = new THREE.MeshStandardNodeMaterial();
@@ -36,9 +46,42 @@ export function createPalmMaterial(p: VegetationParams = vegetationParams) {
 
   const coords = uv();
 
-  // trunk: procedural ring stripes along height (uv.y = 0..1 up the trunk)
-  const ring = step(uStripeRatio, fract(coords.y.mul(uRingFrequency)));
-  const barkColor = mix(uStripeColor, uTrunkColor, ring);
+  // Trunk: procedural ring stripes along height (uv.y = 0..1 up the trunk).
+  //
+  // §V.48, NINTH occurrence, and the worst-formed one in the project so far:
+  // this was `step(ratio, fract(y·freq))` — a ZERO-WIDTH edge. Every other
+  // occurrence had at least some transition to widen; a raw step has none, so
+  // no pixel ever samples partway up the wall and it aliases at EVERY
+  // distance, not merely past some onset. It also carried §B.20's second
+  // failure verbatim: even had the `ratio` edge been softened, `fract` wraps
+  // from 1 to 0 once per ring, and that wrap was a hard discontinuity too —
+  // the same 1-px hairline the wale strake had.
+  //
+  // Numbers: `barkRingFrequency` 14 over a 4.4-11.3 m trunk is a ~0.5 m ring,
+  // sub-pixel from ~980 m, which is INSIDE `lodPalmCull` (1400 m) — but the
+  // zero-width edge is what makes it shimmer at the 50-200 m range where a
+  // palm on a beach is the thing you are actually looking at.
+  //
+  // Cure, both halves of §V.48 as always:
+  //  (a) measure distance to the nearest ring CENTRE as a triangle wave, so
+  //      the wrap lands inside the stripe instead of on its edge and the
+  //      function is continuous everywhere; then widen the edge to at least
+  //      RING_FILTER_PIXELS of the ring coordinate's own footprint. That
+  //      footprint is `fwidth(ringCoord)`, NOT of the triangle wave, which
+  //      kinks once per ring and would report a huge width on every band.
+  //  (b) fade to the ring pattern's own MEAN — the stripe covers `ratio` of
+  //      each period, so the mean of `ring` is 1 − ratio — which is the colour
+  //      a pixel spanning many rings should average to.
+  const ringCoord = coords.y.mul(uRingFrequency);
+  const ringFilter = coordFilter(ringCoord);
+  // triangle wave: distance from the nearest ring centre, 0..0.5, continuous
+  const ringDistance = fract(ringCoord.add(0.5)).sub(0.5).abs();
+  const halfWidth = uStripeRatio.mul(0.5);
+  const halfEff = halfWidth.max(ringFilter.mul(RING_FILTER_PIXELS * 0.5)).max(1e-4);
+  // 0 inside the dark stripe, 1 out on the trunk
+  const ring = ringDistance.smoothstep(halfWidth.sub(halfEff), halfWidth.add(halfEff));
+  const ringLimited = mix(uStripeRatio.oneMinus(), ring, periodResolved(ringCoord));
+  const barkColor = mix(uStripeColor, uTrunkColor, ringLimited);
 
   // fronds: two-tone green, darker at the stem, brighter toward the tip
   const frondColor = mix(uFrondDark, uFrondLight, coords.y);

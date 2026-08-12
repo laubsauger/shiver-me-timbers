@@ -3,9 +3,17 @@
  * (tests/island.test.ts) and sim code (buoyancy/grounding later) import this
  * without touching GPU/material modules.
  *
- * Shape = radial falloff dome × fbm (terrain/noiseCpu, same math as the T27
- * shader noise) + optional secondary gaussian peak. Deterministic per seed
- * (§V2-adjacent: createRng only — same seed → byte-identical Float32Array).
+ * Shape is COMPOSED, not sampled (§V43 — see archetypes.ts for why a radial
+ * dome × fbm could never produce a silhouette). Three sources, in this order:
+ *   1. the ARCHETYPE's features — the landmass and its skyline family
+ *   2. HEADLANDS — `sheer` masses pushed out toward the rim so a wall crosses
+ *      the waterline: the half of the coastline that is a cliff. Nothing else
+ *      here can make one (every other kind reaches its rim tangentially).
+ *   3. SEA STACKS — `sheer` columns standing off in open water, in the height
+ *      field rather than as rock meshes so they survive to the horizon.
+ * then coast noise, surface detail, the rim envelope and the beach apron.
+ * Deterministic per seed (§V2-adjacent: createRng only — same seed →
+ * byte-identical Float32Array).
  *
  * Guarantees (pinned by tests):
  * - rim submerged: the dome shape is 0 at d ≥ radius, and noise is scaled by
@@ -27,6 +35,8 @@ import { createRng } from '../state/rng';
 import { fbm2Cpu } from '../terrain/noiseCpu';
 import {
   buildArchetype,
+  buildHeadlands,
+  buildSeaStacks,
   combineFeatures,
   pickArchetype,
   type ArchetypeName,
@@ -54,6 +64,21 @@ export interface IslandHeightmapParams {
   beachBandWidth: number;
   beachFlatness: number;
   rimDepth: number;
+  /** sea stacks (see archetypes.buildSeaStacks) — fractions, resolved below */
+  seaStackCount: number;
+  seaStackRing: number;
+  seaStackRadiusMin: number;
+  seaStackRadiusMax: number;
+  seaStackHeightMin: number;
+  seaStackHeightMax: number;
+  /** headlands (see archetypes.buildHeadlands) — fractions, resolved below */
+  headlandCount: number;
+  headlandOffset: number;
+  headlandRadiusMin: number;
+  headlandRadiusMax: number;
+  headlandHeightMin: number;
+  headlandHeightMax: number;
+  headlandEdge: number;
 }
 
 export interface IslandHeightmap {
@@ -99,7 +124,29 @@ export function generateIslandHeightmap(
   const cz = rng() * 1024;
 
   const archetype = pickArchetype(rng, avoidArchetypes);
-  const features = buildArchetype(archetype, rng, R * p.featureExtent, p.peakHeight);
+  // Landmass first, then the stacks standing off it. Both go through the same
+  // smooth-max, so a stack that happens to land against a headland fuses with
+  // it instead of creasing, and one in open water stays an isolated column.
+  const features = [
+    ...buildArchetype(archetype, rng, R * p.featureExtent, p.peakHeight),
+    ...buildHeadlands(archetype, rng, {
+      count: p.headlandCount,
+      offset: R * p.headlandOffset,
+      radiusMin: R * p.headlandRadiusMin,
+      radiusMax: R * p.headlandRadiusMax,
+      heightMin: p.peakHeight * p.headlandHeightMin,
+      heightMax: p.peakHeight * p.headlandHeightMax,
+      edgeFraction: p.headlandEdge,
+    }),
+    ...buildSeaStacks(archetype, rng, {
+      maxCount: p.seaStackCount,
+      ring: R * p.seaStackRing,
+      radiusMin: R * p.seaStackRadiusMin,
+      radiusMax: R * p.seaStackRadiusMax,
+      heightMin: p.peakHeight * p.seaStackHeightMin,
+      heightMax: p.peakHeight * p.seaStackHeightMax,
+    }),
+  ];
   const blend = Math.max(p.featureBlend, 1e-3); // §V28 floored divisor
   // amplitude relative to peak, so a taller island gets a bolder coastline —
   // and so a zero-peak island stays fully submerged and throws below

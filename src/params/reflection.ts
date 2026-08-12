@@ -68,6 +68,20 @@ export interface ReflectionParams {
    * absence of it. `blurChop` is a per-wave proxy; this is the per-pixel one.
    */
   blurSlope: number;
+  /**
+   * World metres per pixel below which the sub-pixel roughness floor is
+   * inactive — i.e. "this pixel is finer than the sharpest wave detail the
+   * cascades carry, so nothing is hidden inside it". The finest cascade's
+   * texel is 22.7/512 = 0.044 m, so a pixel a couple of texels wide already
+   * contains unresolved slope.
+   */
+  blurFootprintRef: number;
+  /**
+   * Mip levels of blur per DOUBLING of that footprint. 1.0 is the physically
+   * natural rate — one more octave of wave slope buried per doubling is one
+   * more mip — and is the value to move only with a reason.
+   */
+  blurFootprintGain: number;
   /** ceiling on the mip level so the reflection never turns into a flat block */
   blurMax: number;
   /** build the mip chain for the blur, 0|1 (reload). 0 pins blur* to 0. */
@@ -133,6 +147,8 @@ export const reflectionParams: ReflectionParams = registerParams(
     // tilt runs ~0..0.5 on the shipped swell, so this reaches ~1.5 mips on the
     // steepest faces and 0 in a glassy trough.
     blurSlope: 3.0,
+    blurFootprintRef: 0.12,
+    blurFootprintGain: 1.0,
     blurMax: 4.0,
     generateMipmaps: 1,
     cloudsInReflection: 1,
@@ -155,6 +171,8 @@ export const reflectionParams: ReflectionParams = registerParams(
     blurFar: { min: 0, max: 8, step: 0.05 },
     blurChop: { min: 0, max: 4, step: 0.05 },
     blurSlope: { min: 0, max: 8, step: 0.05 },
+    blurFootprintRef: { min: 0.01, max: 2, step: 0.01 },
+    blurFootprintGain: { min: 0, max: 4, step: 0.05 },
     blurMax: { min: 0, max: 8, step: 0.1 },
     generateMipmaps: { min: 0, max: 1, step: 1 },
     cloudsInReflection: { min: 0, max: 1, step: 1 },

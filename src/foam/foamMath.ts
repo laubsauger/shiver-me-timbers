@@ -46,19 +46,24 @@ export function injectAmount(
  * ---------------------------------------------------------------------- */
 
 /**
- * σ(det J of one cascade) ÷ (λ · RMS(∂Dx/∂x) of that cascade).
+ * σ(det J of one cascade) ÷ (λ · RMS Jacobian TRACE of that cascade) — and it
+ * is exactly 1, which is why it is documented rather than fitted.
  *
- * det J = (1+λa)(1+λb) − (λc)² with (a,b,c) = (∂Dx/∂x, ∂Dz/∂z, ∂Dx/∂z), so
- * its spread is driven by a+b, whose spectral transfer is |k| — NOT the
- * kx²/|k| that `spectralSteepness` measures. The two differ only by a factor
- * fixed by the spectrum's DIRECTIONAL SHAPE, so one constant converts
- * between them: measured 1.79 for every cascade of every shipped preset
- * (calm/swell/storm, all three bands, spread from the live `directionality` /
- * `oppositeWaveDamp`). tests/foam.test.ts recomputes it from the real
- * spectrum and fails if a spread retune moves it — which is the whole point:
- * the alternative is a foam gate whose σ silently drifts (§V36).
+ * det J = (1+λa)(1+λb) − (λc)² with (a,b,c) = (∂Dx/∂x, ∂Dz/∂z, ∂Dx/∂z), so to
+ * first order its spread is λ·σ(a+b): the trace, spectral transfer |k|. The
+ * ocean now PUBLISHES that moment (`OceanCascade.jacobianRms`), so no
+ * conversion is needed.
+ *
+ * IT USED TO BE 1.79 AGAINST `steepnessRms`, and that was a latent §B.12.
+ * `spectralSteepness` measures kx²/|k| — the x-gradient only — so the ratio
+ * between it and the trace depends on the spectrum's DIRECTIONAL SHAPE. For a
+ * broad wind sea that is 1.79 to within 1% in every band of every preset, and
+ * it held for months. The swell train broke it in one step: swell is a narrow
+ * one-sided cos²⁴ beam, so the ratio becomes ~1/cos²θ of its heading, and
+ * `calm` — whose long band is ~100% swell — measured 4.75. The foam gate in
+ * that band was sitting at 2.65× the σ-multiple it claimed.
  */
-export const JACOBIAN_SIGMA_PER_STEEPNESS = 1.79;
+export const JACOBIAN_SIGMA_PER_TRACE = 1;
 
 /** absolute floor: a sea with no spectrum at all has no bands to gate (§V28) */
 export const MIN_BAND_JACOBIAN_SIGMA = 1e-9;
@@ -93,13 +98,13 @@ export function bandCanFold(bandSigma: number, seaSigma: number): boolean {
 
 /**
  * σ of one band's det J, from the moments the ocean already publishes:
- * `OceanCascade.steepnessRms` (at λ=1) × the effective choppiness λ actually
- * sent to the GPU × the shape constant above. Pass the sea-wide
- * `OceanSimulation.steepnessRms` to get σ of the summed jacobian.
+ * `OceanCascade.jacobianRms` (at λ=1) × the effective choppiness λ actually
+ * sent to the GPU. Pass the sea-wide `OceanSimulation.jacobianRms` to get σ of
+ * the summed jacobian.
  */
-export function jacobianSigma(steepnessRms: number, choppiness: number): number {
-  if (!Number.isFinite(steepnessRms) || !Number.isFinite(choppiness)) return 0;
-  return JACOBIAN_SIGMA_PER_STEEPNESS * Math.max(0, steepnessRms) * Math.max(0, choppiness);
+export function jacobianSigma(jacobianRms: number, choppiness: number): number {
+  if (!Number.isFinite(jacobianRms) || !Number.isFinite(choppiness)) return 0;
+  return JACOBIAN_SIGMA_PER_TRACE * Math.max(0, jacobianRms) * Math.max(0, choppiness);
 }
 
 /**
@@ -198,12 +203,12 @@ export function minEigenvalue(trace: number, det: number): number {
  * min of two eigenvalues, so its mean sits BELOW the rest value 1 even on a
  * flat sea, and no amount of "threshold below 1" reasoning survives that.
  *
- * Both constants are measured against the band's own `steepnessRms × λ`, the
+ * Both constants are measured against the band's own `jacobianRms × λ` (the
  * same normaliser JACOBIAN_SIGMA_PER_STEEPNESS uses, because a Gaussian
  * surface scales its whole displacement-gradient distribution with that one
  * number. Measured over every band of every shipped preset:
  *
- *   preset band   E[μ]/s    σ(μ)/s        (μ = (λ− − 1)/λ, s = steepnessRms)
+ *   preset band   E[μ]/s    σ(μ)/s     (μ = (λ− − 1)/λ, s = jacobianRms)
  *   calm    0     −1.134     1.357
  *   calm    1     −1.056     1.366
  *   calm    2     −1.034     1.319
@@ -219,24 +224,24 @@ export function minEigenvalue(trace: number, det: number): number {
  * carries, and for the same reason (§V36: a gate whose σ silently drifts).
  * ---------------------------------------------------------------------- */
 
-/** E[λ−] − 1, per unit of λ·steepnessRms. Negative: λ− ≤ ½·tr always. */
-export const EIGEN_MEAN_PER_STEEPNESS = -1.06;
-/** σ(λ−) per unit of λ·steepnessRms. */
-export const EIGEN_SIGMA_PER_STEEPNESS = 1.35;
+/** E[λ−] − 1, per unit of λ·jacobianRms. Negative: λ− ≤ ½·tr always. */
+export const EIGEN_MEAN_PER_TRACE = -0.592;
+/** σ(λ−) per unit of λ·jacobianRms. */
+export const EIGEN_SIGMA_PER_TRACE = 0.754;
 
 /** where λ− sits on an undisturbed sea of this band — NOT 1 (see above) */
-export function eigenRestValue(steepnessRms: number, choppiness: number): number {
-  return 1 + EIGEN_MEAN_PER_STEEPNESS * scaleOf(steepnessRms, choppiness);
+export function eigenRestValue(traceRms: number, choppiness: number): number {
+  return 1 + EIGEN_MEAN_PER_TRACE * scaleOf(traceRms, choppiness);
 }
 
 /** σ of this band's λ− */
-export function eigenSigma(steepnessRms: number, choppiness: number): number {
-  return EIGEN_SIGMA_PER_STEEPNESS * scaleOf(steepnessRms, choppiness);
+export function eigenSigma(traceRms: number, choppiness: number): number {
+  return EIGEN_SIGMA_PER_TRACE * scaleOf(traceRms, choppiness);
 }
 
-function scaleOf(steepnessRms: number, choppiness: number): number {
-  if (!Number.isFinite(steepnessRms) || !Number.isFinite(choppiness)) return 0;
-  return Math.max(0, steepnessRms) * Math.max(0, choppiness);
+function scaleOf(traceRms: number, choppiness: number): number {
+  if (!Number.isFinite(traceRms) || !Number.isFinite(choppiness)) return 0;
+  return Math.max(0, traceRms) * Math.max(0, choppiness);
 }
 
 /**
@@ -258,7 +263,7 @@ export function foamGateZ(bias: number, seaSigma: number): number {
  */
 export function eigenFoamGate(
   bias: number,
-  steepnessRms: number,
+  traceRms: number,
   choppiness: number,
   bandSigmaJ: number,
   seaSigmaJ: number,
@@ -266,7 +271,7 @@ export function eigenFoamGate(
   if (!bandCanFold(bandSigmaJ, seaSigmaJ)) return NEVER_INJECT_BIAS;
   const z = foamGateZ(bias, seaSigmaJ);
   if (!Number.isFinite(z)) return NEVER_INJECT_BIAS;
-  return eigenRestValue(steepnessRms, choppiness) - z * eigenSigma(steepnessRms, choppiness);
+  return eigenRestValue(traceRms, choppiness) - z * eigenSigma(traceRms, choppiness);
 }
 
 /**
@@ -279,13 +284,13 @@ export function eigenFoamGate(
 export function eigenInjectPerStep(
   strengthPerSecond: number,
   dt: number,
-  steepnessRms: number,
+  traceRms: number,
   choppiness: number,
   bandSigmaJ: number,
   seaSigmaJ: number,
 ): number {
   if (!bandCanFold(bandSigmaJ, seaSigmaJ) || !(dt > 0)) return 0;
-  const sigma = eigenSigma(steepnessRms, choppiness);
+  const sigma = eigenSigma(traceRms, choppiness);
   // 0 × Infinity is NaN, and the gate above is already NEVER_INJECT there
   if (!(sigma > MIN_BAND_JACOBIAN_SIGMA)) return 0;
   return (Math.max(0, strengthPerSecond) * dt) / sigma;
@@ -397,34 +402,31 @@ export function foamTexelMetres(domain: number, resolution: number): number {
 }
 
 /**
- * Distance at which a cascade's foam texels drop below the screen sampling
- * rate and start aliasing — the Nyquist point for THIS band.
+ * Weight for a foam tier at a measured sampling rate: 1 while one texel still
+ * covers `keepPixels` pixels, ramping to 0 as it goes sub-pixel.
+ * GPU mirror: the `tierWeight` closure in index.shadingNode.
  *
- * A pixel's world footprint grows roughly linearly with distance, so a texel
- * of size t becomes sub-pixel at d ≈ t · fadeTexels, where fadeTexels folds
- * the camera's angular pixel size and the 2× Nyquist margin into one
- * dimensionless tunable. Grazing angles stretch the along-view footprint far
- * beyond this, which is why the fade must START here rather than end here.
+ * WHY THE ARGUMENT IS A PIXEL FOOTPRINT AND NOT A CAMERA DISTANCE. It used to
+ * be a distance, with the camera's angular pixel size and the Nyquist margin
+ * folded into one dimensionless `fadeTexels`. That constant is only valid for
+ * one viewing geometry: a pixel's world footprint grows with distance AND with
+ * the grazing angle, and from a high camera the grazing term dominates.
+ * Measured in-browser at 300 m altitude: one pixel covered 0.234 m of sea
+ * against a 0.191 m cascade-1 texel — already past Nyquist — while the
+ * distance ramp (2300 texel widths) did not begin retiring that band until
+ * 440 m. `fwidth` of the sample coordinate measures the real thing directly
+ * and needs no per-shot tuning. §V.48, applied to a texture tier instead of a
+ * procedural octave; the two now use the same rule and the same constant.
  */
-export function cascadeFadeDistance(texelMetres: number, fadeTexels: number): number {
-  return Math.max(0, texelMetres) * Math.max(0, fadeTexels);
-}
-
-/**
- * Weight for a cascade's FULL-RESOLUTION contribution at a camera distance:
- * 1 while its texels resolve, ramping to 0 once they are sub-pixel noise.
- * Smoothstep so bands retire gradually — a hard cut-off would draw a visible
- * ring on the sea where a whole cascade switched off.
- */
-export function cascadeDetailWeight(
-  camDist: number,
+export function tierWeightAt(
+  pixelMetres: number,
   texelMetres: number,
-  fadeTexels: number,
+  keepPixels: number,
   fadeSpan: number,
 ): number {
-  const start = cascadeFadeDistance(texelMetres, fadeTexels);
-  const end = start * Math.max(1.05, fadeSpan);
-  if (!(end > start)) return camDist <= start ? 1 : 0;
-  const t = Math.min(1, Math.max(0, (camDist - start) / (end - start)));
+  const keep = Math.max(0, texelMetres) / Math.max(1, keepPixels);
+  const end = keep * Math.max(1.05, fadeSpan);
+  if (!(end > keep)) return pixelMetres <= keep ? 1 : 0;
+  const t = Math.min(1, Math.max(0, (pixelMetres - keep) / (end - keep)));
   return 1 - t * t * (3 - 2 * t);
 }

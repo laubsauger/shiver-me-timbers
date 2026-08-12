@@ -16,7 +16,7 @@
  * in a comment at the use site (§B.1/§B.2 both cost a session).
  */
 import * as THREE from 'three/webgpu';
-import { color, mix, screenUV, smoothstep, uniform, vec2 } from 'three/tsl';
+import { color, log2, mix, screenUV, smoothstep, uniform, vec2 } from 'three/tsl';
 import { reflectionParams as rp } from '../params/reflection';
 
 /**
@@ -40,6 +40,13 @@ export interface ReflectionShadeInput {
   chop: TslNode;
   /** distance from the eye to the shaded point, metres */
   camDist: TslNode;
+  /**
+   * World metres covered by ONE PIXEL of this surface — the caller's own
+   * `fwidth(worldXZ)`. Not derivable from `camDist`: at a grazing view the
+   * footprint stretches by 1/sin(grazing) and runs to tens of metres, which is
+   * exactly the framing where the mirror reads wrong.
+   */
+  footprint: TslNode;
 }
 
 export interface ReflectionShading {
@@ -77,9 +84,13 @@ export function createReflectionShading(
   const uBlurMax = uniform(rp.blurMax);
   /** extra mip level per unit of surface tilt — the microfacet blur */
   const uBlurSlope = uniform(rp.blurSlope);
+  /** (footprint ref metres, mips per octave) — the sub-pixel roughness floor */
+  const uFootprint = uniform(
+    new THREE.Vector2(rp.blurFootprintRef, rp.blurFootprintGain),
+  );
 
   const shade = (input: ReflectionShadeInput): TslNode => {
-    const { skyColor, normalWorld, chop, camDist } = input;
+    const { skyColor, normalWorld, chop, camDist, footprint } = input;
 
     // Break-up: push the lookup around by the wave's own slope plus its
     // horizontal (choppy) displacement, so the mirrored scene shears on chop
@@ -115,9 +126,36 @@ export function createReflectionShading(
       // the "reflections are too perfect, too clean" report: a planar mirror
       // on a visibly choppy sea. `tilt` is the per-pixel facet slope, so a
       // steep wave face smears its reflection while a glassy trough keeps it.
+      // ── SUB-PIXEL ROUGHNESS FLOOR (§V.26, user: "stuff in the distance
+      // shouldn't get perfectly mirror-like reflected… without simulating the
+      // foam and crusty stuff to infinite length") ─────────────────────────
+      // The three terms above all read RESOLVED surface state, and distance is
+      // precisely where that state has been averaged away: the ocean's own
+      // §V.48 gates fade each cascade's normal to zero once a pixel spans more
+      // than one of its texels, so `tilt` — the term that is supposed to smear
+      // a rough sea's reflection — goes to ZERO exactly where the sea is
+      // roughest per pixel. The reflection then sharpens with distance, which
+      // is backwards, and reads as a mirror.
+      //
+      // The statistical stand-in is the standard one: sub-pixel geometry is
+      // ROUGHNESS, not geometry. A pixel covering W metres of water contains
+      // every wave component shorter than ~2W, and each DOUBLING of W buries
+      // one more octave of wave slope — which is one more mip of blur, exactly
+      // the quantity a mip level already measures. Hence log2, not a linear
+      // ramp: the law is dimensionally the mip chain's own.
+      //
+      // It is a FLOOR (`max`), never an addend: a near-field steep face may
+      // legitimately blur MORE than its footprint demands, but nothing may
+      // blur less. Below `blurFootprintRef` — a pixel finer than the sharpest
+      // wave detail the cascades carry — it is exactly 0 and the near field is
+      // untouched.
+      const lodFloor = log2(footprint.div(uFootprint.x.max(1e-3)).max(1)).mul(
+        uFootprint.y,
+      );
       const lod = mix(uBlur.x, uBlur.y, distT)
         .add(chop.mul(uBlur.z))
         .add(tilt.mul(uBlurSlope))
+        .max(lodFloor)
         .clamp(0, uBlurMax);
       sample = sample.level(lod);
     }
@@ -178,6 +216,10 @@ export function createReflectionShading(
       );
       uBlurMax.value = Math.max(0, finite(rp.blurMax, 4));
       uBlurSlope.value = Math.max(0, finite(rp.blurSlope, 0));
+      (uFootprint.value as THREE.Vector2).set(
+        Math.max(1e-3, finite(rp.blurFootprintRef, 0.12)),
+        Math.max(0, finite(rp.blurFootprintGain, 1)),
+      );
     },
     setActive(active: boolean): void {
       uActive.value = active ? 1 : 0;

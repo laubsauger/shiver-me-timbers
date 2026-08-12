@@ -42,6 +42,44 @@ export interface IslandParams {
   /** fraction of the radius inside which the rim envelope does not act */
   rimStart: number;
 
+  // -- sea stacks (§V43 silhouette; see archetypes.buildSeaStacks) ----------
+  /**
+   * Upper bound on stacks standing off the shore, before the per-archetype
+   * affinity scales it. These are HEIGHT-FIELD features, not rock meshes, so
+   * they cost no draw call and no cull distance — see buildSeaStacks for why
+   * that is the whole point.
+   */
+  seaStackCount: number;
+  /** ring they stand on, fraction of the footprint radius */
+  seaStackRing: number;
+  /** footprint radius range, fraction of the island radius. The floor must
+   *  stay well above one DECIMATED terrain cell (radius/gridSize ×
+   *  lodTerrainStride) or the stacks vanish at exactly the range they exist
+   *  for. */
+  seaStackRadiusMin: number;
+  seaStackRadiusMax: number;
+  /** height range, fraction of the island peak height */
+  seaStackHeightMin: number;
+  seaStackHeightMax: number;
+
+  // -- headlands (§V43 coastline; see archetypes.buildHeadlands) ------------
+  /**
+   * Cliff masses per island. Zero gives back the shipping look: a shelving
+   * beach on every bearing (measured median coastal slope 5-8°, and 0% of the
+   * shoreline steeper than 45° on three of five islands).
+   */
+  headlandCount: number;
+  /** how far out the mass sits, fraction of the footprint radius */
+  headlandOffset: number;
+  /** footprint radius range, fraction of the island radius */
+  headlandRadiusMin: number;
+  headlandRadiusMax: number;
+  /** height range, fraction of the island peak height */
+  headlandHeightMin: number;
+  headlandHeightMax: number;
+  /** wall width as a fraction of the headland radius — small = sheerer cliff */
+  headlandEdge: number;
+
   // -- beach apron (gentle 0..~band slope where height crosses waterline) ----
   /** height band (m) around waterline that gets flattened */
   beachBandWidth: number;
@@ -127,7 +165,17 @@ export interface IslandParams {
   // -- LOD + shadows (§V17 — the budget is spent, scenery must be cheap) -----
   /** beyond this camera distance the terrain swaps to the decimated grid (m) */
   lodTerrainDistance: number;
-  /** vertex stride of the far terrain grid (1 = no decimation) */
+  /**
+   * Vertex stride of the far terrain grid (1 = no decimation).
+   *
+   * This is a SILHOUETTE tunable, not only a cost one, and it was set against
+   * the wrong thing. At stride 4 a default island decimates to 13 m cells,
+   * which is wider than a sea stack and comparable to a headland wall — so
+   * exactly the features that exist to be read at 2-4 km were the ones the
+   * far LOD threw away, while palms and rocks are already culled by then.
+   * At stride 2 the far grid is 64² ≈ 4k vertices per island (20k across the
+   * world), which is nothing next to what it protects.
+   */
   lodTerrainStride: number;
   /** palm instance count ramps from full to zero between these distances (m) */
   lodPalmFull: number;
@@ -152,8 +200,8 @@ export const islandParams: IslandParams = registerParams(
   {
     radius: 90,
     gridSize: 128,
-    peakHeight: 32,
-    minPeakHeight: 27,
+    peakHeight: 40,
+    minPeakHeight: 34,
     noiseScale: 0.035,
     noiseStrength: 0.18,
     noiseOctaves: 4,
@@ -162,6 +210,19 @@ export const islandParams: IslandParams = registerParams(
     coastNoiseScale: 0.012,
     coastNoiseStrength: 0.14,
     rimStart: 0.84,
+    seaStackCount: 3,
+    seaStackRing: 0.72,
+    seaStackRadiusMin: 0.15,
+    seaStackRadiusMax: 0.21,
+    seaStackHeightMin: 0.3,
+    seaStackHeightMax: 0.62,
+    headlandCount: 3,
+    headlandOffset: 0.68,
+    headlandRadiusMin: 0.3,
+    headlandRadiusMax: 0.42,
+    headlandHeightMin: 0.45,
+    headlandHeightMax: 0.8,
+    headlandEdge: 0.1,
     beachBandWidth: 3.0,
     beachFlatness: 0.24,
     rimDepth: 6,
@@ -201,7 +262,7 @@ export const islandParams: IslandParams = registerParams(
     seabedTextureSize: 1024,
     seabedTextureMargin: 400,
     lodTerrainDistance: 900,
-    lodTerrainStride: 4,
+    lodTerrainStride: 2,
     lodPalmFull: 500,
     lodPalmCull: 1400,
     lodRockCull: 1800,
@@ -225,6 +286,19 @@ function islandParamsMeta(): Partial<Record<keyof IslandParams, ParamMeta>> {
     coastNoiseScale: { min: 0.002, max: 0.08, step: 0.001 },
     coastNoiseStrength: { min: 0, max: 0.5, step: 0.01 },
     rimStart: { min: 0.5, max: 0.98, step: 0.01 },
+    seaStackCount: { min: 0, max: 8, step: 1 },
+    seaStackRing: { min: 0.3, max: 0.95, step: 0.01 },
+    seaStackRadiusMin: { min: 0.03, max: 0.3, step: 0.01 },
+    seaStackRadiusMax: { min: 0.03, max: 0.4, step: 0.01 },
+    seaStackHeightMin: { min: 0, max: 1.2, step: 0.02 },
+    seaStackHeightMax: { min: 0, max: 1.5, step: 0.02 },
+    headlandCount: { min: 0, max: 5, step: 1 },
+    headlandOffset: { min: 0, max: 0.9, step: 0.01 },
+    headlandRadiusMin: { min: 0.05, max: 0.7, step: 0.01 },
+    headlandRadiusMax: { min: 0.05, max: 0.8, step: 0.01 },
+    headlandHeightMin: { min: 0, max: 1.2, step: 0.02 },
+    headlandHeightMax: { min: 0, max: 1.5, step: 0.02 },
+    headlandEdge: { min: 0.04, max: 0.6, step: 0.01 },
     beachBandWidth: { min: 0.2, max: 6, step: 0.1 },
     beachFlatness: { min: 0.05, max: 1, step: 0.05 },
     rimDepth: { min: 1, max: 20, step: 0.5 },

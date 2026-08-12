@@ -10,18 +10,17 @@
 import { describe, expect, it } from 'vitest';
 import {
   GAUSSIAN_3X3,
-  JACOBIAN_SIGMA_PER_STEEPNESS,
+  JACOBIAN_SIGMA_PER_TRACE,
   NEVER_INJECT_BIAS,
   accumulateFoam,
   bandCanFold,
   blurDecayAt,
   boxReduceAt,
-  cascadeDetailWeight,
-  cascadeFadeDistance,
+  tierWeightAt,
   cascadeFoamBias,
   cascadeInjectPerStep,
-  EIGEN_MEAN_PER_STEEPNESS,
-  EIGEN_SIGMA_PER_STEEPNESS,
+  EIGEN_MEAN_PER_TRACE,
+  EIGEN_SIGMA_PER_TRACE,
   eigenFoamGate,
   eigenInjectPerStep,
   eigenRestValue,
@@ -41,7 +40,8 @@ import {
   effectiveChoppiness,
   generateButterfly,
   generateH0,
-  phillips,
+  waveSpectrum,
+  spectralJacobianRms,
   spectralSteepness,
 } from '../src/ocean/oceanMath';
 import { cpuIFFT2D, extractCentralBlock } from '../src/sea-physics/cpuOcean';
@@ -272,41 +272,42 @@ describe('far-field filtering (§V6 sampling: StorageTextures carry no mips)', (
         expect(boxReduceAt(checker, srcN, x, y, 4)).toBeCloseTo(0.5, 6);
   });
 
-  it('texel size and fade distance derive from the cascade, not a constant', () => {
-    // §V36's lesson applied to a distance gate: retuning a domain or the sim
-    // resolution must re-derive the fade, not silently invalidate it.
+  it('texel size derives from the cascade, not a constant', () => {
+    // §V36's lesson applied to a sampling gate: retuning a domain or the sim
+    // resolution must re-derive the handover, not silently invalidate it.
     expect(foamTexelMetres(253, 512)).toBeCloseTo(0.494, 3);
     expect(foamTexelMetres(13.7, 512)).toBeCloseTo(0.0268, 4);
-    // the fine cascade's texels go sub-pixel ~18× closer than the coarse one
-    const coarse = cascadeFadeDistance(foamTexelMetres(253, 512), 2300);
-    const fine = cascadeFadeDistance(foamTexelMetres(13.7, 512), 2300);
-    expect(coarse / fine).toBeCloseTo(253 / 13.7, 6);
+    // the fine cascade goes sub-pixel at a footprint 18× smaller — i.e. far
+    // closer to the camera — which is the whole reason bands retire in order
+    const px = (domain: number) =>
+      foamTexelMetres(domain, 512) / foamParams.tierKeepPixels;
+    expect(px(253) / px(13.7)).toBeCloseTo(253 / 13.7, 6);
   });
 
   it('bands retire in order: fine first, coarse last, none abruptly', () => {
     // WHY smoothstep and not a cut: a hard switch-off draws a visible ring on
     // the sea where a whole cascade vanished.
-    const w = (domain: number, d: number) =>
-      cascadeDetailWeight(d, foamTexelMetres(domain, 512), 2300, 3);
-    expect(w(13.7, 10)).toBe(1); // near: fine band fully resolved
-    expect(w(13.7, 400)).toBe(0); // far: fine band is sub-pixel noise
-    expect(w(253, 400)).toBe(1); // coarse band still resolves there
-    expect(w(253, 1e5)).toBe(0);
+    const w = (domain: number, px: number) =>
+      tierWeightAt(px, foamTexelMetres(domain, 512), 2, 2);
+    expect(w(13.7, 0.002)).toBe(1); // near: fine band fully resolved
+    expect(w(13.7, 0.1)).toBe(0); // far: fine band is sub-pixel noise
+    expect(w(253, 0.1)).toBe(1); // coarse band still resolves there
+    expect(w(253, 10)).toBe(0);
     // monotone, and strictly between 0 and 1 across the transition
-    const mid = w(13.7, 120);
+    const mid = w(13.7, 0.02);
     expect(mid).toBeGreaterThan(0);
     expect(mid).toBeLessThan(1);
-    expect(w(13.7, 100)).toBeGreaterThan(w(13.7, 140));
+    expect(w(13.7, 0.018)).toBeGreaterThan(w(13.7, 0.024));
   });
 
   it('degenerate fade settings never produce NaN weights (§V28)', () => {
-    for (const [d, t, span] of [
-      [100, 0, 3],
-      [100, 2300, 1],
-      [100, 0, 0],
+    for (const [px, keep, span] of [
+      [1, 2, 3],
+      [1, 0, 1],
+      [1, 2, 0],
       [0, 0, 0],
     ]) {
-      const v = cascadeDetailWeight(d, foamTexelMetres(253, 512), t, span);
+      const v = tierWeightAt(px, foamTexelMetres(253, 512), keep, span);
       expect(Number.isFinite(v)).toBe(true);
       expect(v).toBeGreaterThanOrEqual(0);
       expect(v).toBeLessThanOrEqual(1);
@@ -336,21 +337,31 @@ function measuredJacobianSigma(p: OceanParams, index: number, lambda: number): n
       const kz = (2 * Math.PI * (m - N / 2)) / domain;
       const k = Math.hypot(kx, kz);
       if (!(k > band.kMin && k <= band.kMax) || k < 1e-9) continue;
-      const amp = Math.sqrt(phillips(kx, kz, p) / 2) / domain;
+      // waveSpectrum, NOT phillips: the sea carries TWO trains now (wind sea
+      // + swell) and this mirror has to measure the same field the ocean
+      // generates, or it silently drifts (§V.8 — it read 438× off the moment
+      // the swell landed, because `calm` is mostly swell).
+      const amp = Math.sqrt(waveSpectrum(kx, kz, p) / 2) / domain;
       variance += 2 * (k * amp) ** 2;
     }
   }
   return lambda * Math.sqrt(variance);
 }
 
-function seaFor(name: keyof typeof weatherPresets) {
-  const p: OceanParams = { ...oceanParams, ...weatherPresets[name].ocean };
+function seaFor(name: keyof typeof weatherPresets, over: Partial<OceanParams> = {}) {
+  const p: OceanParams = { ...oceanParams, ...weatherPresets[name].ocean, ...over };
+  // §V.59: every σ below is measured with the DIRECTION-FREE trace moment.
+  // `steep` (the x-projection) is kept only where a test is explicitly about
+  // the difference between the two.
   const steep = [0, 1, 2].map((i) =>
+    spectralJacobianRms(p.resolution, p.cascades[i].domain, p, cascadeBand(i, p.splitWavelengths)),
+  );
+  const xProjection = [0, 1, 2].map((i) =>
     spectralSteepness(p.resolution, p.cascades[i].domain, p, cascadeBand(i, p.splitWavelengths)),
   );
   const steepnessRms = Math.sqrt(steep.reduce((s, v) => s + v * v, 0));
   const lambda = effectiveChoppiness(p.choppiness, steepnessRms, p.choppinessFoldLimit);
-  return { p, steep, steepnessRms, lambda, bias: p.jacobianFoamBias };
+  return { p, steep, xProjection, steepnessRms, lambda, bias: p.jacobianFoamBias };
 }
 
 describe('§V36 jacobian gate: per-cascade bias tracks each band\'s own σ', () => {
@@ -367,10 +378,20 @@ describe('§V36 jacobian gate: per-cascade bias tracks each band\'s own σ', () 
         if (sea.steep[i] < 1e-6) continue; // band carries no energy (calm's swell band)
         const measured = measuredJacobianSigma(sea.p, i, sea.lambda);
         const predicted = jacobianSigma(sea.steep[i], sea.lambda);
-        expect(predicted / measured, `${name} cascade ${i}`).toBeCloseTo(1, 1);
+        expect(
+          predicted / measured,
+          `${name} cascade ${i}: jacobianSigma is ${(predicted / measured).toFixed(2)}× the ` +
+            'realised σ. If this band is swell-dominated, see "FIRING RIGHT NOW" below — ' +
+            'spectralSteepness projects onto x and cannot see a cross-wind swell.',
+        ).toBeCloseTo(1, 1);
       }
     }
-    expect(JACOBIAN_SIGMA_PER_STEEPNESS).toBeGreaterThan(1);
+    // Exactly 1, and that is the point of §V.59: the ocean now publishes the
+    // moment this σ is built on (the direction-free Jacobian trace), so there
+    // is no conversion constant left to drift. It used to be 1.79 against the
+    // x-projection — a number that fitted every band of every preset, which
+    // read as reassuring and was in fact the tell.
+    expect(JACOBIAN_SIGMA_PER_TRACE).toBe(1);
   });
 
   it('every band fires at the SAME σ-multiple, which is what the bias means', () => {
@@ -409,10 +430,16 @@ describe('§V36 jacobian gate: per-cascade bias tracks each band\'s own σ', () 
   });
 
   it('a band with no energy in it is gated OFF, never divided into', () => {
-    // calm has nothing in the 420 m band: its det J is identically 1, so it
-    // can never fold. Handing it a σ of zero must switch it off, not produce
-    // an infinite bias or an infinite injection (§V28).
-    const sea = seaFor('calm');
+    // A calm with NO GROUND SWELL has nothing in the long band: its det J is
+    // identically 1, so it can never fold. Handing it a σ of zero must switch
+    // it off, not produce an infinite bias or an infinite injection (§V28).
+    //
+    // `swellAmplitude: 0` is now load-bearing here and is not a fudge: the
+    // shipped `calm` preset deliberately carries a 13 s ground swell (a calm
+    // day is not a flat sea — the local wind dropped, the swell from a distant
+    // storm did not), so calm's long band is no longer empty. The guard being
+    // tested is "a band with no energy", which still needs a sea that has none.
+    const sea = seaFor('calm', { swellAmplitude: 0 });
     const seaSigma = jacobianSigma(sea.steepnessRms, sea.lambda);
     const dead = jacobianSigma(sea.steep[0], sea.lambda);
     // it is not exactly zero — it is float dust, 5 orders below the sea's σ,
@@ -494,7 +521,7 @@ describe('§V36 jacobian gate: per-cascade bias tracks each band\'s own σ', () 
  * (covariance of ∂Dx/∂x, ∂Dz/∂z, ∂Dx/∂z from the spectrum, μ− of the sampled
  * 2×2) comes out a FLAT 1.36× smaller than the realised field, identically in
  * every band of every preset — and the same 1.36 shows up between the shipped
- * JACOBIAN_SIGMA_PER_STEEPNESS and σ(det J) measured on the realised field
+ * JACOBIAN_SIGMA_PER_TRACE and σ(det J) measured on the realised field
  * (1.79 vs 2.42). Both constants are self-consistent, since the z-score
  * divides one by the other, but neither is the field's true σ. Flagged, not
  * silently corrected: it belongs to `spectralSteepness`, which is the ocean's.
@@ -563,6 +590,40 @@ function realisedEigenMoments(p: OceanParams, index: number, N: number, time: nu
   return { mean, sd: Math.sqrt(Math.max(0, sum2 / size - mean * mean)) };
 }
 
+/* ---------------------------------------------------------------------------
+ * FIRING RIGHT NOW, ON PURPOSE (§Rule 8). The two `calm cascade 0` assertions
+ * below fail against the in-flight second wave train (`swellSpectrum`), and
+ * they are correct to.
+ *
+ * `spectralSteepness` measures RMS ∂Dx/∂x, whose spectral transfer is kx²/|k|
+ * — a PROJECTION ONTO THE X AXIS. What actually sets the spread of det J and
+ * of λ− is the jacobian TRACE, ∂Dx/∂x + ∂Dz/∂z, whose transfer is
+ * (kx²+kz²)/|k| = |k|, which is direction-FREE. The projection is a valid
+ * proxy for |k| only while the directional distribution is fixed, which is
+ * exactly why one constant (JACOBIAN_SIGMA_PER_TRACE = 1.79, and the λ−
+ * pair here) could serve every band of every preset: there was ONE train and
+ * it ran with the wind.
+ *
+ * There are two trains now, and `swellDirection` is decoupled from
+ * `windDirection` by design (π·1.68 against π·0.25) with `swellDirectionality`
+ * 24 — a narrow beam at ~57° to the x axis, so cos²θ ≈ 0.29 and the proxy sees
+ * under a third of the swell's gradient. Measured: `jacobianSigma` under-
+ * predicts the realised σ(det J) by 2.65× in calm's cascade 0, and the λ−
+ * mean/steepnessRms reads −2.99 against the −1.06 constant — the same factor,
+ * because it is the same missing energy. Only calm cascade 0 is exposed today
+ * because only there is the band PURE swell; swell and storm still have wind
+ * sea dominating that band, which is what makes this the kind of defect that
+ * ships.
+ *
+ * THE FIX IS ONE MOMENT, AND IT IS NOT OURS: the ocean should publish the
+ * direction-free |k| moment (RMS of ∂Dx/∂x + ∂Dz/∂z) alongside
+ * `steepnessRms`, and FoamSeaMoments should take that instead. It would also
+ * dissolve the flat 1.36× gap between the closed-form σ and the realised field
+ * recorded above, which is the same projection error measured on one train.
+ * Not patched here, and NOT loosened, because a threshold whose σ is wrong is
+ * §V36's entire subject and hiding it in a tolerance is how it comes back.
+ * ------------------------------------------------------------------------ */
+
 describe('fold metric: minimum eigenvalue, not det J', () => {
   it('det J cannot tell a breaking crest from water piling up flat', () => {
     // THE REASON THE CAPS WERE ROUND AND ALL ONE SIZE. A breaking crest is a
@@ -607,7 +668,7 @@ describe('fold metric: minimum eigenvalue, not det J', () => {
   });
 
   it('the λ− constants match the real spectrum in every band of every preset', () => {
-    // Same tripwire role as JACOBIAN_SIGMA_PER_STEEPNESS: both the MEAN and
+    // Same tripwire role as JACOBIAN_SIGMA_PER_TRACE: both the MEAN and
     // the SPREAD of λ− scale with the band's own λ·steepnessRms, fixed by the
     // spectrum's directional shape. Retune `directionality`/`oppositeWaveDamp`
     // and the gate's meaning moves under it (§V36) — that must fail here, not
@@ -628,11 +689,11 @@ describe('fold metric: minimum eigenvalue, not det J', () => {
         // of every preset, so the contract is "right to within 15 % everywhere",
         // not "exact somewhere". Outside that the gate's σ has drifted.
         expect(
-          Math.abs(m.mean / sea.steep[i] / EIGEN_MEAN_PER_STEEPNESS - 1),
+          Math.abs(m.mean / sea.steep[i] / EIGEN_MEAN_PER_TRACE - 1),
           `${name} cascade ${i} mean/s = ${(m.mean / sea.steep[i]).toFixed(3)}`,
         ).toBeLessThan(0.15);
         expect(
-          Math.abs(m.sd / sea.steep[i] / EIGEN_SIGMA_PER_STEEPNESS - 1),
+          Math.abs(m.sd / sea.steep[i] / EIGEN_SIGMA_PER_TRACE - 1),
           `${name} cascade ${i} sd/s = ${(m.sd / sea.steep[i]).toFixed(3)}`,
         ).toBeLessThan(0.15);
       }
@@ -640,7 +701,7 @@ describe('fold metric: minimum eigenvalue, not det J', () => {
     // λ− is the MIN of two eigenvalues, so it sits below the rest value even
     // on an undisturbed sea — a gate reasoned as "below 1" would be wrong by
     // more than a σ, which is a decade of coverage.
-    expect(EIGEN_MEAN_PER_STEEPNESS).toBeLessThan(0);
+    expect(EIGEN_MEAN_PER_TRACE).toBeLessThan(0);
   });
 
   it('rest value is BELOW 1, and the gate is below the rest value', () => {
@@ -692,7 +753,9 @@ describe('fold metric: minimum eigenvalue, not det J', () => {
   });
 
   it('a band with no energy is gated OFF, never divided into (§V28)', () => {
-    const sea = seaFor('calm');
+    // swellAmplitude 0 — see the §V36 twin above: shipped `calm` now carries a
+    // ground swell in exactly this band, so an empty band has to be asked for.
+    const sea = seaFor('calm', { swellAmplitude: 0 });
     const seaSigma = jacobianSigma(sea.steepnessRms, sea.lambda);
     const dead = jacobianSigma(sea.steep[0], sea.lambda);
     expect(eigenFoamGate(sea.bias, sea.steep[0], sea.lambda, dead, seaSigma)).toBe(
@@ -706,43 +769,70 @@ describe('fold metric: minimum eigenvalue, not det J', () => {
   });
 });
 
-describe('far tier handover (§V48: no step bigger than the reduction itself)', () => {
-  // The chain is 512² → 128², and shadingNode hands the coarsest cascade over
-  // from its full-res tier to that 128² tier at the full-res tier's own
-  // Nyquist distance. It used to reduce twice more, to 32², and cross-fade
-  // fine STRAIGHT into 32² — a 16× jump in texel AREA where 4× was warranted,
-  // leaving the whole distance band past it served by a 32×32 texture.
-  // Bilinear on 32×32 stretched over kilometres is a lattice of 13 m quads,
-  // and because the surface material divides its specular by the foam mask it
-  // showed as hard quantised squares in the sun glint road.
+describe('far tier handover (§V48: measured against the SAMPLING RATE)', () => {
+  // The chain is 512² → 128², and each tier is retired when ITS OWN texel goes
+  // sub-pixel — measured from `fwidth` of the sample coordinate, so the
+  // grazing stretch is included. The two things this replaces both failed from
+  // the high camera the user photographed: reducing twice more to 32² and
+  // cross-fading fine STRAIGHT into it (a 16× jump in texel area where 4× was
+  // warranted, i.e. 13 m quads in the glint road), and gating on camera
+  // DISTANCE (which left cascade 1 fully weighted at 300 m altitude where one
+  // pixel already covered more sea than one texel — a frame full of specks).
   const DOMAIN = 420;
   const N = 512;
   const fineT = foamTexelMetres(DOMAIN, N);
   const coarseT = foamTexelMetres(DOMAIN, N / 4);
-  const FADE = foamParams.cascadeFadeTexels;
-  const SPAN = foamParams.cascadeFadeSpan;
+  const KEEP = foamParams.tierKeepPixels;
+  const SPAN = foamParams.tierFadeSpan;
+  const w = (t: number, px: number) => tierWeightAt(px, t, KEEP, SPAN);
 
   it('the handover step is 4× in texel area, not 16×', () => {
     expect(coarseT / fineT).toBeCloseTo(4, 6);
   });
 
+  it('a tier is gone by the time one pixel covers one of its texels', () => {
+    // the Nyquist statement itself: at 1 px per texel the sample is pure
+    // aliasing, so the weight must already be zero there, not starting to fall
+    expect(w(fineT, fineT)).toBeCloseTo(0, 6);
+    expect(w(coarseT, coarseT)).toBeCloseTo(0, 6);
+    // and fully present while it still spans the keep width
+    expect(w(fineT, fineT / KEEP)).toBeCloseTo(1, 6);
+  });
+
   it('the tier taken over TO is still resolved where the fine tier retires', () => {
-    // the test that the old chain failed: at the distance where the full-res
-    // tier is fully gone, whatever replaces it must not itself be past its
-    // own Nyquist point, or the handover just swaps one aliasing source for a
-    // blockier one.
-    const w = (t: number, d: number) => cascadeDetailWeight(d, t, FADE, SPAN);
-    const fineGone = cascadeFadeDistance(fineT, FADE) * SPAN * 1.01;
+    // what the old chain failed: whatever replaces a retiring tier must not
+    // itself be past its own Nyquist point, or the handover swaps one
+    // aliasing source for a blockier one.
+    const fineGone = (fineT / KEEP) * SPAN * 1.01;
     expect(w(fineT, fineGone)).toBeCloseTo(0, 6);
     expect(w(coarseT, fineGone)).toBeCloseTo(1, 6);
   });
 
-  it('the 32² tier the chain used to build was only ever needed past 7 km', () => {
-    // WHY it was dropped rather than wired in as a third tier: a third
-    // sampled texture is exactly what §V40 has no room for (the ocean
-    // fragment stage is at 16/16 samplers), and the readable sea ends at
-    // ~4 km (§V30) — so the tier below this one can never be reached.
-    expect(cascadeFadeDistance(coarseT, FADE)).toBeGreaterThan(7000);
+  it('§B the high-camera regression: 0.191 m texels at 0.234 m per pixel', () => {
+    // the exact frame that was measured in the browser. Cascade 1 (98 m domain)
+    // seen from 300 m up: the band MUST be retired here, and the old distance
+    // ramp had it at full weight because 300 m is well inside 2300 texel
+    // widths (440 m). This is the number the fix exists for.
+    const cascade1 = foamTexelMetres(98, 512);
+    expect(cascade1).toBeCloseTo(0.191, 3);
+    expect(w(cascade1, 0.234)).toBeCloseTo(0, 6);
+    // …while the same band close in, where a texel spans several pixels, is
+    // untouched — the fix must not simply delete near-field foam detail
+    expect(w(cascade1, 0.02)).toBeCloseTo(1, 6);
+  });
+
+  it('degenerate settings never produce NaN weights (§V28)', () => {
+    for (const [px, t, keep, span] of [
+      [1, 0, 2, 2],
+      [1, 0.2, 0, 2],
+      [1, 0.2, 2, 0],
+      [0, 0, 0, 0],
+    ]) {
+      const v = tierWeightAt(px, t, keep, span);
+      expect(Number.isFinite(v)).toBe(true);
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThanOrEqual(1);
+    }
   });
 });
 

@@ -144,6 +144,42 @@ export interface TerrainParams {
    */
   causticsWaterlineBand: number;
 
+  // -- ground cover (§V43: an island is not a sand dune) --------------------
+  /**
+   * WHY THIS LAYER EXISTS. The blend material had exactly two materials, sand
+   * and rock, split on SLOPE alone at `slopeThreshold` 0.72 (= 44°). Measured
+   * against the shipping heightmaps, mean terrain slope is 19-23°, so sand won
+   * 82-98% of every island's surface: one pale tan albedo from the waterline
+   * to the summit, which is the "brown lump" the whole island pass started
+   * from. Nothing in the material varied with HEIGHT, and there was no green
+   * anywhere on an island except the palm fronds.
+   *
+   * Every SoT island reference (docs/final-full-result-2.webp especially) is
+   * banded by elevation, not by slope: a narrow bright sand skirt at the
+   * water, a green vegetated mass above it, bare rock where it is too steep to
+   * hold anything. Slope still decides rock-vs-cover; this decides sand-vs-
+   * cover, and it costs no texture binding (§V40) because the axis is
+   * `positionWorld.y` against the waterline uniform that is already bound.
+   */
+  /** metres above the live water level that sand gives way to ground cover */
+  shoreBandHeight: number;
+  /** metres over which that handover happens (0 = a painted contour line) */
+  shoreBandFade: number;
+  /** lush green — the mass of the island */
+  vegBaseColor: number;
+  /** darker green in the hollows of the canopy noise */
+  vegShadeColor: number;
+  /** sun-bleached scrub mixed in on the brightest clumps */
+  vegDryColor: number;
+  /** canopy clump noise scale (1/m) — sets how big a stand of green reads */
+  vegScale: number;
+  /** how much of the dry tint the brightest clumps take (0..1) */
+  vegDryStrength: number;
+  /** normal.y at which cover gives way to bare rock — stricter than sand's,
+   *  because scree holds on a slope that a canopy does not */
+  vegSlopeThreshold: number;
+  vegRoughness: number;
+
   // -- slope blend (sand on flat, rock on steep) — terrainBlendMaterial -----
   /** normal.y at the sand↔rock midpoint (1 = flat up, 0 = vertical) */
   slopeThreshold: number;
@@ -210,6 +246,16 @@ export const terrainParams: TerrainParams = registerParams(
     receiveCaustics: true,
     causticsWaterlineBand: 0.6,
 
+    shoreBandHeight: 3.2,
+    shoreBandFade: 4.5,
+    vegBaseColor: 0x5f8f3e,
+    vegShadeColor: 0x2f5c30,
+    vegDryColor: 0x9aa855,
+    vegScale: 0.055,
+    vegDryStrength: 0.45,
+    vegSlopeThreshold: 0.82,
+    vegRoughness: 0.88,
+
     slopeThreshold: 0.72,
     slopeBlendWidth: 0.1,
     slopeNoiseAmount: 0.12,
@@ -259,6 +305,12 @@ function terrainParamsMeta(): Partial<Record<keyof TerrainParams, ParamMeta>> {
     swashFoamNoiseScale: { min: 0.05, max: 4, step: 0.05 },
     swashFoamNoiseStrength: { min: 0, max: 1, step: 0.01 },
     dryTime: { min: 0.5, max: 60, step: 0.5 },
+    shoreBandHeight: { min: 0, max: 40, step: 0.1 },
+    shoreBandFade: { min: 0.1, max: 40, step: 0.1 },
+    vegScale: { min: 0.005, max: 0.4, step: 0.005 },
+    vegDryStrength: { min: 0, max: 1, step: 0.01 },
+    vegSlopeThreshold: { min: 0.2, max: 0.99, step: 0.01 },
+    vegRoughness: { min: 0, max: 1, step: 0.01 },
     slopeThreshold: { min: 0.2, max: 0.95, step: 0.01 },
     slopeBlendWidth: { min: 0.01, max: 0.4, step: 0.01 },
     slopeNoiseAmount: { min: 0, max: 0.5, step: 0.01 },

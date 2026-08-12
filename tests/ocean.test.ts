@@ -17,7 +17,11 @@ import {
   naiveIDFT,
   phillips,
   spectralHeightVariance,
-  spectralSteepness,
+  swellSpectrum,
+  swellWavelengthFor,
+  spectralJacobianRms,
+  slopeWavelengthHistogram,
+  slopeResolutionFootprint,
 } from '../src/ocean/oceanMath';
 import { oceanParams } from '../src/params/ocean';
 import { oceanSurfaceParams } from '../src/params/oceanSurface';
@@ -34,6 +38,13 @@ import {
 } from '../src/ocean/seaChroma';
 // source read (not fs): this repo has no @types/node, vite hands it over raw
 import surfaceMaterialSource from '../src/ocean/surfaceMaterial.ts?raw';
+import cpuOceanSource from '../src/sea-physics/cpuOcean.ts?raw';
+import { weatherPresets } from '../src/weather/presets';
+import type { OceanParams } from '../src/params/ocean';
+import {
+  SPECTRUM_SIGNATURE_KEYS,
+  spectrumSignature,
+} from '../src/ocean/oceanCascades';
 import { seaPhysicsParams } from '../src/params/seaPhysics';
 import {
   buildOceanGrid,
@@ -361,14 +372,180 @@ describe('ocean cascades vs the CPU buoyancy mirror (§V8)', () => {
  * weather preset can drive the sea into a folded state (§V7 keeps presets as
  * pure params, so the guarantee has to live in the cascade math).
  */
+
+/**
+ * §B.7 tripwire. `spectrumSignature` is what decides whether h0 is rebuilt when
+ * a param moves; a spectrum-shaping param missing from it is a SILENT no-op —
+ * the GPU keeps the launch-time sea while the panel says otherwise, and the
+ * CPU buoyancy mirror then floats ships on a different ocean than the one on
+ * screen (§V.8). The swell train shipped with all six of its keys missing from
+ * both signatures, and the weather presets lerp three of them.
+ *
+ * This pins the list against `OceanParams` itself, so the NEXT spectrum param
+ * fails here instead of in a user report six weeks later.
+ */
+
+/**
+ * §V.19 for the SWELL TRAIN. Swell is narrow-band by nature, and a 1010 m tile
+ * resolves k in steps of 2π/1010 — so a bandwidth authored the way a
+ * oceanographer would write it collapses onto one or two modes and tiles the
+ * world as a single clean sinusoid. That is the exact failure §V.19 names, and
+ * it is invisible to any test of the spectrum's ENERGY: the height is right,
+ * the sea state is right, and the water looks like corrugated iron.
+ *
+ * These pin the SHAPE of what the grid actually got, per preset. `swellGridModes`
+ * is the knob that buys it (see swellSpectrum's grid floor).
+ */
+describe('§V.19 the swell is a wave TRAIN, not one sinusoid', () => {
+  const modesOf = (p: OceanParams) => {
+    const N = 256;
+    const L = Math.max(...p.cascades.map((c) => c.domain));
+    const vals: number[] = [];
+    for (let m = 0; m < N; m++) {
+      for (let n = 0; n < N; n++) {
+        const kx = (2 * Math.PI * (n - N / 2)) / L;
+        const kz = (2 * Math.PI * (m - N / 2)) / L;
+        const v = swellSpectrum(kx, kz, p);
+        if (v > 0) vals.push(v);
+      }
+    }
+    vals.sort((a, b) => b - a);
+    const total = vals.reduce((a, b) => a + b, 0);
+    let acc = 0;
+    let half = 0;
+    for (const v of vals) {
+      acc += v;
+      half++;
+      if (acc >= total * 0.5) break;
+    }
+    return { top: vals[0] / total, half, wavesPerTile: L / swellWavelengthFor(p.swellPeriod) };
+  };
+
+  for (const name of ['calm', 'swell', 'storm'] as const) {
+    it(`${name}: enough modes and enough waves per tile to read as a sea`, () => {
+      const p: OceanParams = { ...oceanParams, ...weatherPresets[name].ocean };
+      const m = modesOf(p);
+      // no single mode may dominate — that IS the sinusoid failure
+      expect(m.top, `${name}: one mode carries ${(m.top * 100).toFixed(0)}% of the swell`)
+        .toBeLessThan(0.2);
+      // half the energy must be spread over several modes, so the train beats
+      // and evolves instead of marching in lockstep
+      expect(m.half, `${name}: only ${m.half} modes carry half the swell`).toBeGreaterThanOrEqual(5);
+      // and the tile has to hold enough crests that the repeat is not the
+      // dominant feature (the same standard that took cascade 0 to 1010 m)
+      expect(m.wavesPerTile, `${name}: ${m.wavesPerTile.toFixed(1)} swell waves per tile`)
+        .toBeGreaterThan(3.5);
+    });
+  }
+
+  it('the swell lives in the LONG band only — it must not become chop', () => {
+    // The grid floor is measured against the COARSEST cascade, not the caller's
+    // domain. Floored per-cascade instead, the 22.7 m tile widened the swell's
+    // band 44× and smeared it straight into the chop: σ of the finest cascade
+    // went 0.080 → 0.114 m from a 189 m wave, i.e. the swell would have made
+    // the sea MORE nervous, the exact opposite of its purpose.
+    const withSwell = { ...oceanParams };
+    const without: OceanParams = { ...oceanParams, swellAmplitude: 0 };
+    const sigmaOf = (p: OceanParams, i: number) =>
+      Math.sqrt(
+        spectralHeightVariance(128, p.cascades[i].domain, p, cascadeBand(i, p.splitWavelengths)),
+      );
+    // long band gains it all…
+    expect(sigmaOf(withSwell, 0)).toBeGreaterThan(sigmaOf(without, 0) * 1.05);
+    // …and the two short bands are untouched, to 4 decimals
+    expect(sigmaOf(withSwell, 1)).toBeCloseTo(sigmaOf(without, 1), 4);
+    expect(sigmaOf(withSwell, 2)).toBeCloseTo(sigmaOf(without, 2), 4);
+  });
+
+  it('its height is what the parameter says, whatever the shape knobs do', () => {
+    // swellAmplitude is METRES of RMS swell elevation (swellScale normalises
+    // for it). If it were not, every period/bandwidth/spread tweak would move
+    // the sea state too — §B.12's failure, designed out rather than tested for.
+    const base: OceanParams = { ...oceanParams, amplitude: 0 };
+    const sig = (p: OceanParams) =>
+      Math.sqrt(
+        [0, 1, 2].reduce(
+          (a, i) =>
+            a + spectralHeightVariance(256, p.cascades[i].domain, p, cascadeBand(i, p.splitWavelengths)),
+          0,
+        ),
+      );
+    expect(sig(base)).toBeCloseTo(oceanParams.swellAmplitude, 1);
+    for (const over of [
+      { swellPeriod: 8 },
+      { swellPeriod: 15 },
+      { swellDirectionality: 8 },
+      { swellDirection: 0.4 },
+      { swellBandwidth: 0.3 },
+    ]) {
+      expect(sig({ ...base, ...over }), JSON.stringify(over)).toBeCloseTo(
+        oceanParams.swellAmplitude,
+        1,
+      );
+    }
+  });
+});
+
+describe('§B.7 every spectrum-shaping param forces a rebuild', () => {
+  /** params that do NOT shape h0 — everything else must be in the signature */
+  const NOT_SPECTRAL = new Set(['choppiness', 'choppinessFoldLimit', 'jacobianFoamBias']);
+
+  it('the signature key list covers every spectral param in OceanParams', () => {
+    const covered = new Set<string>(SPECTRUM_SIGNATURE_KEYS);
+    for (const key of Object.keys(oceanParams)) {
+      if (NOT_SPECTRAL.has(key)) continue;
+      expect(covered.has(key), `${key} is missing from SPECTRUM_SIGNATURE_KEYS`).toBe(true);
+    }
+  });
+
+  it('moving any one of them actually changes the signature', () => {
+    const base = spectrumSignature(oceanParams);
+    const bumps: Partial<Record<string, unknown>> = {
+      amplitude: oceanParams.amplitude + 0.1,
+      windSpeed: oceanParams.windSpeed + 1,
+      windDirection: oceanParams.windDirection + 0.1,
+      directionality: oceanParams.directionality + 1,
+      oppositeWaveDamp: oceanParams.oppositeWaveDamp + 0.1,
+      smallWaveCutoff: oceanParams.smallWaveCutoff + 0.01,
+      swellPeriod: oceanParams.swellPeriod + 1,
+      swellAmplitude: oceanParams.swellAmplitude + 0.1,
+      swellDirection: oceanParams.swellDirection + 0.1,
+      swellDirectionality: oceanParams.swellDirectionality + 1,
+      swellBandwidth: oceanParams.swellBandwidth + 0.05,
+      swellGridModes: oceanParams.swellGridModes + 1,
+    };
+    for (const [key, value] of Object.entries(bumps)) {
+      expect(
+        spectrumSignature({ ...oceanParams, [key]: value }),
+        `${key} does not move the signature — its changes would never rebuild h0`,
+      ).not.toBe(base);
+    }
+  });
+
+  it('the CPU buoyancy mirror rebuilds on the same set (§V.8)', () => {
+    // the two signatures are separate strings by design (the mirror adds its
+    // own resolution) but they must never disagree about WHEN to rebuild
+    const mirrorSrc = cpuOceanSource;
+    for (const key of SPECTRUM_SIGNATURE_KEYS) {
+      if (key === 'resolution' || key === 'cascades') continue;
+      expect(mirrorSrc, `mirrorSignature is missing ${key} (§B.7)`).toContain(`p.${key}`);
+    }
+  });
+});
+
 describe('anti-fold choppiness cap (§B storm, §V6, §V7)', () => {
-  // combined RMS ∂Dx/∂x at λ=1, exactly what OceanSimulation.refreshSeaState
-  // computes: cascades are independent so their variances add
+  // §V.59: combined RMS of the Jacobian TRACE (∂Dx/∂x + ∂Dz/∂z, transfer |k|)
+  // at λ=1 — exactly what OceanSimulation.refreshSeaState computes, and the
+  // moment `effectiveChoppiness` divides by. It used to mirror
+  // `spectralSteepness` (transfer kx²/|k|), which is the x-PROJECTION: valid
+  // only while one wave train ran with the wind, and 2.6× low on the
+  // swell-dominated band the swell train introduced. Cascades are independent
+  // so their variances add.
   const sigmaTotal = (patch: Partial<typeof oceanParams>) => {
     const p = { ...oceanParams, ...patch };
     let variance = 0;
     for (let i = 0; i < 3; i++) {
-      const s = spectralSteepness(
+      const s = spectralJacobianRms(
         128,
         p.cascades[i].domain,
         p,
@@ -597,6 +774,129 @@ describe('storm sea reads (§B.12 follow-up, user storm reference)', () => {
   });
 });
 
+/**
+ * §V.48, the NORMAL tier — "the sea goes plasticky too close by" (user).
+ *
+ * The defect these encode is not a number that was too small, it is a gate
+ * measured against the WRONG QUANTITY. The old tier compared a pixel's
+ * footprint to a cascade's TEXEL SIZE and retired the whole band at 3.5
+ * texels, justified by "the cascade pyramid is the mip chain". §V.19
+ * band-splits the cascades so that no wavelength appears in two of them, so
+ * there is no pyramid to fall back to: when cascade 2 goes, every wavelength
+ * under 8.3 m leaves the sea. And a texel is the finest thing the grid can
+ * HOLD, not what the band is MADE OF, so the criterion fired an order of
+ * magnitude before the band ran out.
+ *
+ * These are written against the SPECTRUM rather than against the constants, so
+ * they keep meaning when the sea state moves (§V.36's discipline): every one of
+ * them asks "is resolvable detail being thrown away", never "is the number
+ * still 3.5".
+ */
+describe('§V.48 the normal LOD retires a band when the BAND runs out', () => {
+  const N = 128; // coarse grid: these assertions are about ratios, not σ
+  const bins = (i: number, p = oceanParams) =>
+    slopeWavelengthHistogram(
+      N,
+      p.cascades[i].domain,
+      p,
+      cascadeBand(i, p.splitWavelengths),
+    );
+  /** fraction of a band's slope variance carried by λ ≥ 2·footprint */
+  const resolvable = (b: Float64Array, footprint: number) => {
+    let total = 0;
+    let keep = 0;
+    for (let i = 0; i < b.length; i++) {
+      const lam = Math.pow(2, -8 + i / 8);
+      total += b[i];
+      if (lam >= 2 * footprint) keep += b[i];
+    }
+    return total > 0 ? keep / total : 0;
+  };
+
+  it('the footprint it reports really is where that much variance survives', () => {
+    for (let i = 0; i < 3; i++) {
+      const b = bins(i);
+      for (const keep of [0.95, 0.5, 0.2]) {
+        const f = slopeResolutionFootprint(b, keep);
+        // one bin of slack: the histogram is 1/8-octave quantised
+        expect(resolvable(b, f)).toBeGreaterThanOrEqual(keep - 0.06);
+        expect(resolvable(b, f * 1.2)).toBeLessThan(keep + 0.12);
+      }
+    }
+  });
+
+  it('is monotone — asking to keep more detail can only cut sooner', () => {
+    for (let i = 0; i < 3; i++) {
+      const b = bins(i);
+      expect(slopeResolutionFootprint(b, 0.95)).toBeLessThanOrEqual(
+        slopeResolutionFootprint(b, 0.5),
+      );
+      expect(slopeResolutionFootprint(b, 0.5)).toBeLessThanOrEqual(
+        slopeResolutionFootprint(b, 0.2),
+      );
+    }
+  });
+
+  it('THE BUG: a texel-count gate deletes detail that is still resolvable', () => {
+    // this is the regression, stated as the measurement that found it — the
+    // old cut (3.5 texels) landed while cascade 2 still carried most of its
+    // slope, i.e. it was retiring signal, not noise
+    const oldCutFootprint = (3.5 * oceanParams.cascades[2].domain) / oceanParams.resolution;
+    expect(resolvable(bins(2), oldCutFootprint)).toBeGreaterThan(0.8);
+    // and the shipped keep fractions do NOT cut there
+    expect(slopeResolutionFootprint(bins(2), oceanSurfaceParams.normalKeepCut))
+      .toBeGreaterThan(oldCutFootprint * 4);
+  });
+
+  it('a texel ratio cannot be shared between cascades — hence metres', () => {
+    // §V.59's tell: one constant that looks like it should serve every band.
+    // If these ever converge the measurement is broken, not the design.
+    const texelRatio = (i: number) =>
+      slopeResolutionFootprint(bins(i), oceanSurfaceParams.normalKeepCut) /
+      (oceanParams.cascades[i].domain / oceanParams.resolution);
+    expect(Math.abs(texelRatio(2) / texelRatio(1) - 1)).toBeGreaterThan(0.25);
+  });
+
+  it('no cascade is retired while the NEXT one could not carry its band', () => {
+    // the pyramid argument only ever holds where bands overlap, and §V.19 says
+    // they never do — so the fine cascade must outlive the footprint at which
+    // its own content dies, not the footprint at which its grid does
+    for (let i = 0; i < 3; i++) {
+      const cut = slopeResolutionFootprint(bins(i), oceanSurfaceParams.normalKeepCut);
+      const bandShortest =
+        i === 2 ? oceanParams.splitWavelengths[1] : oceanParams.splitWavelengths[i];
+      // cut must be past Nyquist of the band's LONGEST wave — the last thing
+      // in it to go sub-pixel
+      expect(cut).toBeGreaterThan(bandShortest / 40);
+    }
+  });
+
+  it('holds on every weather preset, not just the shipped one', () => {
+    for (const name of ['calm', 'swell', 'storm'] as const) {
+      const p: OceanParams = {
+        ...oceanParams,
+        ...(weatherPresets[name].ocean as Partial<OceanParams>),
+      };
+      for (let i = 0; i < 3; i++) {
+        const b = bins(i, p);
+        const full = slopeResolutionFootprint(b, oceanSurfaceParams.normalKeepFull);
+        const cut = slopeResolutionFootprint(b, oceanSurfaceParams.normalKeepCut);
+        expect(Number.isFinite(full)).toBe(true);
+        expect(cut).toBeGreaterThan(full);
+      }
+    }
+  });
+
+  it('the material reads the measured footprints, not a texel count', () => {
+    // §B.31/§B.7 shape: the value is spectrum-derived, so it MUST be refreshed
+    // where the spectrum can move, or a weather preset silently keeps the
+    // launch-time LOD.
+    expect(surfaceMaterialSource).toContain('slopeFootprint(sp.normalKeepFull)');
+    expect(surfaceMaterialSource).toContain('refreshNormFoot()');
+    expect(surfaceMaterialSource).not.toContain('normalTexel');
+  });
+});
+
 
 /**
  * "Rotating the camera should not switch the light off" (user). A glint road
@@ -725,21 +1025,73 @@ describe('§V.56 the sea holds its colour on both axes', () => {
     }
   });
 
+  /** the material's own haze ramp, so the sweep melts where the frame does */
+  const hazeAt = (d: number): number => {
+    const u = Math.min(
+      1,
+      Math.max(0, (d - oceanSurfaceParams.hazeStart) /
+        (oceanSurfaceParams.hazeEnd - oceanSurfaceParams.hazeStart)),
+    );
+    return Math.pow(u * u * (3 - 2 * u), oceanSurfaceParams.hazeCurve) *
+      oceanSurfaceParams.hazeStrength;
+  };
+
+  it('HORIZON: the far field hands over to atmosphere, it does not go turquoise', () => {
+    // The third report on this axis, and the opposite failure to the grey
+    // wash: at grazingSaturationFar 0.55 with an ungated pigment floor, every
+    // pixel past ~900 m converged on ONE hue and the horizon read as a solid
+    // turquoise band. §V.30 wants the sea to melt into haze there — that melt
+    // is what makes the water look like it goes somewhere.
+    const near = chroma(sample(SUNSET, 0, 600, { hazeT: hazeAt(600) }));
+    const horizon = chroma(sample(SUNSET, 0, 3800, { hazeT: hazeAt(3800) }));
+    // the horizon must be MUCH closer to the sky than the mid-field is
+    expect(horizon).toBeLessThan(near * 0.4);
+    // and it must actually approach the haze colour, not merely dim
+    const px = sample(SUNSET, 0, 4400, { hazeT: hazeAt(4400) });
+    for (let c = 0; c < 3; c++) {
+      expect(Math.abs(px[c] - SUNSET.haze[c])).toBeLessThan(0.06);
+    }
+  });
+
+  it('the horizon CONVERGES on the atmosphere — no coloured wall at any radius', () => {
+    // Not "chroma falls monotonically": the haze has a chroma of its own and
+    // the water may legitimately pass through it. The invariant is that the
+    // pixel gets steadily CLOSER to the air in front of it — a band that
+    // diverges from the haze as it recedes is the coloured wall §V.30 forbids.
+    // measured as COLOUR distance, not chroma distance: the water's chroma
+    // legitimately passes THROUGH the haze's own on its way down, so a
+    // chroma-gap test reads that crossing as a divergence.
+    const dist = (a: Rgb, b: Rgb): number =>
+      Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+    let prev = Infinity;
+    for (let d = 1200; d <= oceanSurfaceParams.hazeEnd; d += 200) {
+      const gap = dist(sample(SUNSET, 0, d, { hazeT: hazeAt(d) }), SUNSET.haze);
+      expect(gap, `the water pulled AWAY from the haze at ${d} m`)
+        .toBeLessThanOrEqual(prev + 1e-6);
+      prev = gap;
+    }
+  });
+
   it('REPRODUCES the bug: the shipped-before values collapse the same sweep', () => {
     // A test that cannot fail is not a test (§Rule 6). These are exactly the
     // values in the tree before this change — one flat grazingSaturation of
     // 0.15 and no floor — against the neutral sky. It is the reported defect,
     // measured: a grey sea with the RIGHT luminance, which is why nothing
     // caught it.
+    // cosTheta 0.01 is the genuine worst case and the one the user shot: water
+    // near the horizon, Schlick ≈ 0.98, essentially PURE reflected sky with no
+    // body term left to carry the colour.
+    const grazing = { cosTheta: 0.01, camDist: 800 } as const;
     const before = chroma(
       sample(NEUTRAL, 0, 800, {
+        ...grazing,
         grazingSaturationFar: oceanSurfaceParams.grazingSaturation,
         pigmentFloorStrength: 0,
       }),
     );
     expect(before).toBeLessThan(FLOOR);
-    // and the two levers together clear it by a wide margin
-    expect(chroma(sample(NEUTRAL, 0, 800))).toBeGreaterThan(before * 2);
+    // and the shipped values clear it by a wide margin
+    expect(chroma(sample(NEUTRAL, 0, 800, grazing))).toBeGreaterThan(before * 1.8);
   });
 
   it('the distance ramp does the work; the floor is the guarantee', () => {
@@ -769,22 +1121,26 @@ describe('§V.56 the sea holds its colour on both axes', () => {
     ]);
   });
 
-  it('re-saturation rises with distance, because only distance needs it', () => {
-    const near = grazingSaturationAt(
-      5,
-      oceanSurfaceParams.grazingSaturation,
-      oceanSurfaceParams.grazingSaturationFar,
-      oceanSurfaceParams.grazingSaturationFullDist,
-    );
-    const far = grazingSaturationAt(
-      2000,
-      oceanSurfaceParams.grazingSaturation,
-      oceanSurfaceParams.grazingSaturationFar,
-      oceanSurfaceParams.grazingSaturationFullDist,
-    );
-    // near stays where the over-saturated-teal fix put it
+  it('re-saturation is a HUMP: low near, high mid-field, low at the horizon', () => {
+    const at = (d: number, waterness: number) =>
+      grazingSaturationAt(
+        d,
+        oceanSurfaceParams.grazingSaturation,
+        oceanSurfaceParams.grazingSaturationFar,
+        oceanSurfaceParams.grazingSaturationFullDist,
+        waterness,
+      );
+    const near = at(5, 1);
+    const mid = at(700, 1 - hazeAt(700));
+    const horizon = at(4200, 1 - hazeAt(4200));
+    // NEAR stays where the over-saturated-teal fix put it: close water shows
+    // its body through the surface (§V.24) and needs no help
     expect(near).toBeCloseTo(oceanSurfaceParams.grazingSaturation, 2);
-    expect(far).toBeGreaterThan(near * 2);
+    // MID-FIELD is the only place that does — entirely grazing, no transmission
+    expect(mid).toBeGreaterThan(near * 1.6);
+    // HORIZON hands back to the atmosphere. Both ends low is the whole point:
+    // a rising ramp is what painted the turquoise band.
+    expect(horizon).toBeLessThan(mid * 0.35);
   });
 
   it('the shader runs the same two levers (CPU pair kept in step)', () => {

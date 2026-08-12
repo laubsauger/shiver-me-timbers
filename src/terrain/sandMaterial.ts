@@ -38,6 +38,9 @@ import { terrainParams } from '../params/terrain';
 // without caustics and only a rebuild can give them any.
 import { activeCaustics, waterLighting } from '../caustics';
 import { fbm2, hash2, valueNoise2 } from './noise';
+// §V.48 — one band-limit implementation project-wide (src/ship for historical
+// reasons, §B.20 was found on the hull; the maths carries nothing ship-specific)
+import { periodResolved } from '../ship/bandLimit';
 import {
   buildShoreNodes,
   createShoreUniforms,
@@ -50,6 +53,17 @@ import {
   updateRockUniforms,
   type RockMaterialOptions,
 } from './rockMaterial';
+import {
+  buildCoverNodes,
+  coverSlopeWeight,
+  createCoverUniforms,
+  updateCoverUniforms,
+} from './groundCover';
+import {
+  aerialOutputNode,
+  createAerialUniforms,
+  updateAerialUniforms,
+} from './aerialPerspective';
 
 export interface SandMaterialOptions {
   /** initial world-space sun direction (unit, pointing AT the sun) */
@@ -183,9 +197,17 @@ export function buildSandNodes(
   );
   let albedo: any = mix(u.shadeColor, u.baseColor, shade);
 
-  // fine grain: ±grainStrength/2 brightness modulation
-  const grain = valueNoise2(ground.mul(u.grainScale));
-  albedo = albedo.mul(grain.sub(0.5).mul(u.grainStrength).add(1));
+  // fine grain: ±grainStrength/2 brightness modulation.
+  // §V.48: 0.071 m at `sandGrainScale` 14 — sub-pixel from 140 m head-on and
+  // from 14 m at 10× grazing, and a beach seen from a ship IS grazing. No
+  // edge here, just a smooth term whose whole period goes sub-pixel, so this
+  // is the `periodResolved` branch: fade the amplitude to the mean (which is
+  // 1, i.e. no modulation) rather than widening anything.
+  const grainCoord = ground.mul(u.grainScale);
+  const grain = valueNoise2(grainCoord);
+  albedo = albedo.mul(
+    grain.sub(0.5).mul(u.grainStrength).mul(periodResolved(grainCoord)).add(1),
+  );
 
   // elevation above the live sea surface (m) — the axis everything shore-side
   // is expressed on. Negated depth so the two can never disagree about where
@@ -210,8 +232,24 @@ export function buildSandNodes(
     albedo = mix(albedo, shore.foamColor, swash.foam);
   }
 
-  // sparkle glints: hashed cells, random facet normal, sun/view half-vector
-  const cell = ground.mul(u.sparkleDensity).floor();
+  // sparkle glints: hashed cells, random facet normal, sun/view half-vector.
+  //
+  // §V.48, and this was the worst offender in the terrain stack because it
+  // ends up in an ADDITIVE slot (§V44): `sparkleDensity` 6 gives a 0.167 m
+  // cell, the gate is a BINARY step() and the facet normal is per-cell RANDOM,
+  // so once a cell is under a pixel the pow(dot,26) term is per-pixel random
+  // white — the exact §B.20 signature ("uniform speckle over a whole surface")
+  // multiplied by `sparkleStrength` 1.4 straight into emissive. It goes
+  // sub-pixel at 326 m head-on and at 33 m at 10× grazing.
+  //
+  // The correct filtered value of a random per-cell glint over a footprint
+  // spanning many cells is its MEAN, and the mean of a pow(·,26) lobe gated at
+  // 6% coverage is ≈0 — so fading the amplitude is not an approximation here,
+  // it IS the answer. `periodResolved` on the cell coordinate (1 unit = 1
+  // cell) is exactly that gate.
+  const cellCoord = ground.mul(u.sparkleDensity);
+  const sparkleResolved = periodResolved(cellCoord);
+  const cell = cellCoord.floor();
   const gate = step(u.sparkleCoverage.oneMinus(), hash2(cell));
   const jitter = vec3(
     hash2(cell.add(vec2(7.7, 3.1))).sub(0.5),
@@ -229,7 +267,8 @@ export function buildSandNodes(
     .pow(u.sparklePower)
     .mul(gate)
     .mul(u.sparkleStrength)
-    .mul(wet.oneMinus());
+    .mul(wet.oneMinus())
+    .mul(sparkleResolved); // §V.48 — see the note above the cell coordinate
 
   // wet sand is glossy, foam is not — foam pulls roughness back up
   const gloss = swash ? wet.max(swash.sheet).mul(swash.foam.oneMinus()) : wet;
@@ -305,9 +344,23 @@ function shoreControls(sand: SandUniforms, shore: ShoreUniforms | null) {
 export type SandMaterialHandle = ReturnType<typeof createSandMaterial>;
 
 /**
- * Combined island terrain material for T20: sand on flat, rock on steep.
- * Blend weight = smoothstep over normal.y around slopeThreshold, edge
- * jittered by fbm so the border reads hand-painted, not computed.
+ * Combined island terrain material for T20: a THREE-layer stack — sand in the
+ * shore band, green cover on the ground above it, rock wherever it is too
+ * steep to hold either.
+ *
+ * WHY THREE AND NOT TWO. Two layers split on SLOPE alone gave sand 82-98% of
+ * every island's surface (mean terrain slope 19-23° against a 44° threshold),
+ * i.e. one tan albedo from the water to the summit and no green on an island
+ * at all — see groundCover.ts for the full measurement. The references band by
+ * ELEVATION, so elevation is now the second axis. It costs no binding: the
+ * axis is `positionWorld.y` against the `waterline` uniform already bound for
+ * the swash, and the extra layer reuses the same analytic fbm.
+ *
+ * The two slope thresholds are deliberately different. Sand keeps the
+ * permissive one (blown sand and shingle hold on a steep beach); cover uses a
+ * stricter one, which is what makes a headland wall and a sea stack read as
+ * BARE ROCK instead of a grassy ramp — the whole point of putting walls in the
+ * height field in the first place (island/archetypes.ts `sheer`).
  */
 export function terrainBlendMaterial(
   rockOpts: RockMaterialOptions = {},
@@ -316,6 +369,7 @@ export function terrainBlendMaterial(
   const p = terrainParams;
   const rock = createRockUniforms(rockOpts);
   const sand = createSandUniforms(sandOpts);
+  const cover = createCoverUniforms();
   const blend = {
     slopeThreshold: uniform(p.slopeThreshold),
     slopeBlendWidth: uniform(p.slopeBlendWidth),
@@ -325,6 +379,15 @@ export function terrainBlendMaterial(
   const shore = p.runupEnabled ? createShoreUniforms() : null;
   const rockNodes = buildRockNodes(rock, p.noiseOctaves);
   const sandNodes = buildSandNodes(sand, p.noiseOctaves, shore);
+  // elevation above the LIVE sea surface — handed over from the sand layer
+  // rather than recomputed, so the shore band and the swash can never disagree
+  // about where the water is (same rule as `waterline` itself)
+  const coverNodes = buildCoverNodes(
+    cover,
+    sandNodes.depthBelow.negate(),
+    sand.sunDirection,
+    p.noiseOctaves,
+  );
 
   const edgeNoise = fbm2(
     positionWorld.xz.mul(rock.scale),
@@ -337,14 +400,22 @@ export function terrainBlendMaterial(
     blend.slopeThreshold.sub(blend.slopeBlendWidth.max(1e-3)),
     blend.slopeThreshold.add(blend.slopeBlendWidth.max(1e-3)),
   );
+  const coverW = coverSlopeWeight(cover, up, blend.slopeBlendWidth);
+  // 1 in the sand skirt at the water, 0 on the vegetated ground above it
+  const shoreW = coverNodes.shoreWeight;
 
   const material = new THREE.MeshStandardNodeMaterial();
   // §V10 composition note: the swash foam is painted on the SAND only. Where
   // rock pierces the waterline the foam ring comes from the intersection-foam
   // machinery (flowfoam depth-compare), which is why this is a plain blend and
   // not a second foam source competing with it.
-  const albedo = mix(rockNodes.color, sandNodes.color, sandW);
-  const roughness = mix(rockNodes.roughness, sandNodes.roughness, sandW);
+  const groundColor = mix(coverNodes.color, sandNodes.color, shoreW);
+  const groundRough = mix(coverNodes.roughness, sandNodes.roughness, shoreW);
+  // which slope rule applies is itself blended by the shore band, so the two
+  // thresholds hand over exactly where the two materials do
+  const groundW = mix(coverW, sandW, shoreW);
+  const albedo = mix(rockNodes.color, groundColor, groundW);
+  const roughness = mix(rockNodes.roughness, groundRough, groundW);
 
   // §V34: sun caustics over the shallows, sea bounce-fill, depth absorption.
   // The seabed and beach are the receivers the invariant names, and this is
@@ -357,7 +428,13 @@ export function terrainBlendMaterial(
   // permanently-damp strip. Same physical phenomenon from two models — if it
   // reads too dark in the browser, `terrainParams.wetDarken` is the live knob.
   const lit = applyWaterLighting(
-    { color: albedo, roughness, emissive: sandNodes.emissive.mul(sandW) },
+    {
+      color: albedo,
+      roughness,
+      // the sparkle is a SAND phenomenon: gate it on the shore band as well as
+      // the slope, or dry glitter appears on a hillside and reads as fireflies
+      emissive: sandNodes.emissive.mul(groundW).mul(shoreW),
+    },
     sandNodes.depthBelow,
     sand.causticsBand,
   );
@@ -366,6 +443,17 @@ export function terrainBlendMaterial(
   material.emissiveNode = lit.emissive;
   material.metalness = 0;
 
+  // §V30/§V43 aerial perspective. The island melts into the atmosphere on the
+  // SAME ramp the water does — the ocean owns the curve, this reads it — so
+  // the two agree at the waterline instead of the land reading as a saturated
+  // cut-out on hazed sea. `fog = false` and `outputNode` are a PAIR: the first
+  // stops scene fog compositing a second time, the second is the only
+  // post-lighting hook (haze must not be multiplied into albedo, or a shadowed
+  // cliff would darken the air in front of it). See aerialPerspective.ts.
+  const aerial = createAerialUniforms();
+  material.fog = false;
+  material.outputNode = aerialOutputNode(aerial);
+
   const sunDirection = (v: THREE.Vector3): void => {
     (rock.sunDirection.value as THREE.Vector3).copy(v).normalize();
     (sand.sunDirection.value as THREE.Vector3).copy(v).normalize();
@@ -373,14 +461,25 @@ export function terrainBlendMaterial(
 
   return {
     material,
-    uniforms: { rock, sand, blend, shore },
+    uniforms: { rock, sand, cover, aerial, blend, shore },
     shore,
     /** set both sub-materials' sun direction (world, pointing at the sun) */
     setSunDirection: sunDirection,
+    /**
+     * Haze target colour (§V30) — drive it from `scene.fog.color`, the same
+     * value the ocean copies into its own haze. The sky rig retints that every
+     * frame, so passing anything else makes the land melt into a different
+     * atmosphere from the sea at sunset.
+     */
+    setHazeColor(c: THREE.Color): void {
+      (aerial.color.value as THREE.Color).copy(c);
+    },
     ...shoreControls(sand, shore),
     updateFromParams(): void {
       updateRockUniforms(rock);
       updateSandUniforms(sand);
+      updateCoverUniforms(cover);
+      updateAerialUniforms(aerial);
       if (shore) updateShoreUniforms(shore);
       blend.slopeThreshold.value = terrainParams.slopeThreshold;
       blend.slopeBlendWidth.value = terrainParams.slopeBlendWidth;

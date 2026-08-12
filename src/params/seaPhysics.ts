@@ -135,12 +135,15 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     // genuinely feeling the ripple, and the fore-aft footprint below is the
     // thing that answers it.
     probeSlices: 18,
-    // fore-aft: the hull's own length integral does most of this now
-    // (§B.22), but not all — 1.5 m of panel/Smith averaging cuts what an
-    // 8 m ripple can pitch the hull by almost in half (0.29° → 0.17°) and
-    // costs the swell nothing measurable (heave RAO at λ 40/90/150 moves
-    // 0.312→0.305, 0.962→0.958, 1.081→1.079, i.e. under half a percent)
-    hullFootprintLength: 1.5,
+    // fore-aft: 0, because the hull's own length integral already does it
+    // (§B.22). A 1.5 m kernel here does cut what an 8 m ripple can pitch
+    // the hull by (0.29° → 0.17°), but it is a 5×5 quadrature instead of
+    // 1×5 — measured 0.72 ms/tick/ship against 0.18 — and it buys that in a
+    // band the mirror does not even carry (cascade 2, λ ≤ 8.3 m, is not
+    // mirrored). 0.55 ms of frame budget for 0.12° of a wave the sim never
+    // generates is the wrong trade; the beam kernel below is the one doing
+    // real work (the Smith effect, which no amount of hull length replaces)
+    hullFootprintLength: 0,
     // athwartships: the Smith effect, e^(−k·2 m draft) ≈ exp(−k²·3.5²/2)
     // over λ 10–25 m — response λ10→0.09, λ17→0.48, λ25→0.75, λ60→0.95
     hullFootprintBeam: 3.5,

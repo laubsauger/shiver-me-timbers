@@ -68,24 +68,34 @@ export class App {
       const supported = adapter?.limits?.[key];
       if (typeof supported === 'number') requiredLimits[key] = supported;
     }
-    const renderer = new THREE.WebGPURenderer({ antialias: true, requiredLimits });
     /**
-     * §V.39 REQUIRES GPU timestamp queries, and they are IMPOSSIBLE unless this
-     * is set BEFORE `init()`: three only requests the `timestamp-query` device
-     * feature at device creation, so flipping it later leaves
-     * `renderer.info.render.timestamp` permanently 0 — measured, 0 valid
-     * samples over 4 resolves. That is a silent failure of the one measurement
-     * method the invariant allows, and it left an agent unable to cost its own
-     * change at all: wall clock is void in a hidden tab (§B.25) and the
-     * timestamp path returned nothing.
+     * §V.39 REQUIRES GPU timestamp queries, and `trackTimestamp` is a
+     * CONSTRUCTOR PARAMETER — it must go in this object literal. `Backend`
+     * copies it once, in its own constructor
+     * (`this.trackTimestamp = parameters.trackTimestamp === true`, three
+     * common/Backend.js:77), and nothing ever re-reads it. Assigning
+     * `renderer.trackTimestamp = true` afterwards — even before `init()` —
+     * sets a field on the Renderer that the Backend does not consult:
+     * `backend.trackTimestamp` stays false, no query is ever written, and
+     * `resolveTimestampsAsync()` takes its `if (!this.trackTimestamp) return`
+     * path and resolves to `undefined` WITHOUT WARNING. Measured: device and
+     * adapter both report the `timestamp-query` feature, both query pools
+     * exist, `renderer.trackTimestamp === true` — and 0 valid samples over 40
+     * resolves, which is exactly what the previous fix here was written to
+     * cure and did not. Wall clock is void in a hidden tab (§B.25), so this
+     * being silently dead leaves no way at all to cost a change.
      *
-     * Cheap when unused — the queries are only resolved by an explicit
+     * Cheap when unused — queries are only resolved by an explicit
      * `resolveTimestampsAsync()` call — so it stays on rather than behind a
      * flag nobody remembers to set before the measurement they need it for.
      */
-    // untyped-narrow (T2): the field is real on WebGPURenderer at runtime and
-    // read by `Renderer.init()`, but three's .d.ts does not declare it
-    (renderer as unknown as { trackTimestamp: boolean }).trackTimestamp = true;
+    const renderer = new THREE.WebGPURenderer({
+      antialias: true,
+      requiredLimits,
+      // untyped-narrow (T2): real on WebGPURenderer's parameters at runtime,
+      // not declared in three's .d.ts
+      ...({ trackTimestamp: true } as object),
+    });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(container.clientWidth, container.clientHeight);
     // NOTE: shadow-map variant compilation of the huge ocean/ship TSL

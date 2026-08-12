@@ -70,6 +70,14 @@ export interface IslandFrame {
   swell: number;
   /** world sun direction (unit, pointing AT the sun) */
   sunDirection: THREE.Vector3;
+  /**
+   * Atmosphere colour the island melts into at range (§V30/§V43) — pass
+   * `scene.fog.color`, which the sky rig retints per frame and which the ocean
+   * already copies for its own distance haze. Land and sea must melt into the
+   * SAME atmosphere or every coastline shows a seam; see
+   * terrain/aerialPerspective.ts.
+   */
+  hazeColor: THREE.Color;
   /** camera world position — drives the LOD (§V17) */
   cameraPosition: THREE.Vector3;
 }
@@ -204,6 +212,7 @@ export function createIsland(opts: CreateIslandOptions): Island {
         // or the panel value would win every frame
         terrain.updateFromParams();
         terrain.material.setSunDirection(frame.sunDirection);
+        terrain.material.setHazeColor(frame.hazeColor);
         terrain.material.setTime(frame.time);
         terrain.material.setSwell(frame.swell);
         terrain.setWaterline(frame.waterLevel);

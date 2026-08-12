@@ -33,7 +33,7 @@ import {
   generateButterfly,
   generateH0,
   GRAVITY,
-  spectralSteepness,
+  spectralJacobianRms,
 } from '../ocean/oceanMath';
 import { oceanParams, type OceanParams } from '../params/ocean';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../params/seaPhysics';
@@ -75,6 +75,15 @@ export function extractCentralBlock(
   fullN: number,
   redN: number,
 ): Float32Array {
+  // fail loud: redN > fullN makes `off` negative and the reads run off the
+  // front of the buffer, which returns zeros/garbage rather than throwing —
+  // a mirror that silently carries no spectrum at all (§V.28: sanitize the
+  // construction-time ints, do not discover it as "the ship stopped floating")
+  if (!Number.isInteger(redN) || redN < 2 || redN > fullN || (fullN - redN) % 2 !== 0) {
+    throw new Error(
+      `extractCentralBlock: redN ${redN} must be an even-offset integer in [2, ${fullN}]`,
+    );
+  }
   const off = (fullN - redN) / 2;
   const out = new Float32Array(redN * redN * 4);
   for (let m = 0; m < redN; m++) {
@@ -92,6 +101,35 @@ class MirrorCascade {
   readonly dx: Float32Array;
   readonly dz: Float32Array;
   private readonly n: number;
+  /**
+   * The GPU's half-texel, expressed in THIS grid's index units (§B.34).
+   *
+   * `texture(displacement, worldXZ/domain)` is a hardware bilinear fetch, so
+   * texel i's centre sits at (i+0.5)/R in UV while the IFFT wrote texel i
+   * with the field at i·domain/R. The surface the GPU DRAWS is therefore the
+   * field shifted by half a GPU texel, domain/(2·R) — and §V.8 says we float
+   * the ship on the sea that is drawn, so the mirror has to reproduce that
+   * same shift.
+   *
+   * It has to reproduce it in METRES. The old code wrote a literal −0.5,
+   * which is half a MIRROR texel, and the mirror is 64² where the GPU is
+   * 512² — so the sea the ship floated on was displaced from the sea on
+   * screen by domain·(1/128 − 1/1024). At the old 420 m cascade that was
+   * 2.9 m and nobody caught it; when the domain went to 1010 m to carry the
+   * swell it became 6.90 m, a fifth of the hull's length, and the ship was
+   * feeling a wave that visibly belonged a third of a beam away.
+   */
+  private readonly halfTexel: number;
+  /**
+   * Cubic reconstruction only where the grid is MARGINAL. Bilinear is what
+   * the GPU does and it is fine when a wave gets plenty of samples; it falls
+   * apart near Nyquist, which is exactly where cascade 0 now lives (its 40 m
+   * band edge gets 2.53 samples per cycle at 1010 m / 64). Cascade 1 gets
+   * 5.42 and does not need it. Decided from the numbers rather than hardwired
+   * per cascade, so the next domain change re-decides it instead of silently
+   * inheriting a choice made for a domain that no longer exists.
+   */
+  private readonly cubic: boolean;
   private readonly h0: Float32Array;
   private readonly omega: Float32Array;
   private readonly kxN: Float32Array; // kx/|k|, 0 at DC
@@ -102,7 +140,10 @@ class MirrorCascade {
   constructor(index: number, seed: number, p: OceanParams, redN: number) {
     this.n = redN;
     this.domain = p.cascades[index].domain;
+    this.halfTexel = redN / (2 * p.resolution);
     const band = cascadeBand(index, p.splitWavelengths);
+    const shortest = (2 * Math.PI) / band.kMax;
+    this.cubic = shortest / (this.domain / redN) < 6;
     const kEdge = (Math.PI * redN) / this.domain;
     if (band.kMax >= kEdge) {
       throw new Error(
@@ -170,27 +211,87 @@ class MirrorCascade {
     }
   }
 
-  /** bilinear sample with wrap; half-texel offset matches GPU texture() */
+  /**
+   * CATMULL-ROM sample with wrap; half-texel offset matches GPU texture().
+   *
+   * WHY NOT BILINEAR (§B.34). The grid VALUES are exact — the IFFT output is
+   * the true field at the nodes, and the ctor guarantees every mode in the
+   * band is represented. All the error is in what happens BETWEEN the nodes,
+   * and that error is a function of how many samples the shortest wave in
+   * the band gets. Cascade 0's domain went 420 m → 1010 m to carry a 189 m
+   * swell, its mirror stayed at 64², and its grid step went 6.6 m → 15.8 m:
+   * the 40 m wave at the top of its band fell to 2.53 samples per cycle,
+   * where a straight line between samples is nothing like a sine.
+   *
+   * Measured against a 512² mirror of the SAME modes, so the comparison is
+   * purely reconstruction: bilinear was wrong by 0.582 m RMS on a σ = 1.0 m
+   * sea — 58% of sigma, peaks of 2.7 m. That is the ship floating on a
+   * different ocean from the one drawn, which is exactly what §V.8 forbids,
+   * and it was invisible because nothing compares the two.
+   *
+   * Raising N is the obvious fix and it is unaffordable: the mirror's own
+   * FFT is O(N² log N), measured 1.40 ms/tick at 64², 6.06 at 128², 23.99 at
+   * 256² — the whole sim tick budget, for a grid nobody looks at. Cubic
+   * reconstruction costs 16 taps instead of 4 on a step that is not the
+   * bottleneck, and buys more than the 4× grid does.
+   */
   sample(grid: Float32Array, x: number, z: number): number {
     const n = this.n;
-    const u = (x / this.domain) * n - 0.5;
-    const v = (z / this.domain) * n - 0.5;
+    const u = (x / this.domain) * n - this.halfTexel;
+    const v = (z / this.domain) * n - this.halfTexel;
     const iu = Math.floor(u);
     const iv = Math.floor(v);
     const fu = u - iu;
     const fv = v - iv;
-    const x0 = ((iu % n) + n) % n;
-    const x1 = (x0 + 1) % n;
-    const z0 = ((iv % n) + n) % n;
-    const z1 = (z0 + 1) % n;
-    const g00 = grid[z0 * n + x0];
-    const g10 = grid[z0 * n + x1];
-    const g01 = grid[z1 * n + x0];
-    const g11 = grid[z1 * n + x1];
-    return (
-      (g00 * (1 - fu) + g10 * fu) * (1 - fv) + (g01 * (1 - fu) + g11 * fu) * fv
-    );
+    if (!this.cubic) {
+      const x0 = ((iu % n) + n) % n;
+      const x1 = (x0 + 1) % n;
+      const z0 = ((iv % n) + n) % n;
+      const z1 = (z0 + 1) % n;
+      const g00 = grid[z0 * n + x0];
+      const g10 = grid[z0 * n + x1];
+      const g01 = grid[z1 * n + x0];
+      const g11 = grid[z1 * n + x1];
+      return (
+        (g00 * (1 - fu) + g10 * fu) * (1 - fv) + (g01 * (1 - fu) + g11 * fu) * fv
+      );
+    }
+    // Catmull-Rom basis at fu / fv (tangents from the neighbouring nodes).
+    // Two buffers, not one shared scratch: the second fill would otherwise
+    // clobber the first and both axes would use the v weights.
+    const wu = cubicWeights(fu, CUBIC_U);
+    const wv = cubicWeights(fv, CUBIC_V);
+    let acc = 0;
+    for (let j = 0; j < 4; j++) {
+      const zz = (((iv + j - 1) % n) + n) % n;
+      const row = zz * n;
+      let rowAcc = 0;
+      for (let i = 0; i < 4; i++) {
+        const xx = (((iu + i - 1) % n) + n) % n;
+        rowAcc += wu[i] * grid[row + xx];
+      }
+      acc += wv[j] * rowAcc;
+    }
+    return acc;
   }
+}
+
+/**
+ * Catmull-Rom weights for the four nodes at t−1, t, t+1, t+2. Interpolating
+ * (passes through every node, so the grid's exact values survive) and C1, so
+ * the surface slope the hull integrates has no per-cell kinks — bilinear's
+ * slope is piecewise constant, which is its own small source of chatter.
+ */
+const CUBIC_U = [0, 0, 0, 0];
+const CUBIC_V = [0, 0, 0, 0];
+function cubicWeights(t: number, out: number[]): number[] {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  out[0] = 0.5 * (-t3 + 2 * t2 - t);
+  out[1] = 0.5 * (3 * t3 - 5 * t2 + 2);
+  out[2] = 0.5 * (-3 * t3 + 4 * t2 + t);
+  out[3] = 0.5 * (t3 - t2);
+  return out;
 }
 
 export interface SurfaceSample {
@@ -226,6 +327,10 @@ function mirrorSignature(p: OceanParams, seaP: SeaPhysicsParams): string {
     p.resolution, p.amplitude, p.windSpeed, p.windDirection,
     p.directionality, p.oppositeWaveDamp, p.smallWaveCutoff,
     p.splitWavelengths, p.cascades.map((c) => c.domain),
+    // the SWELL train too — the presets lerp all three of these, and a mirror
+    // that misses them is §B.7 in its original form (§V.8)
+    p.swellPeriod, p.swellAmplitude, p.swellDirection,
+    p.swellDirectionality, p.swellBandwidth, p.swellGridModes,
     seaP.mirrorResolution,
   ].join('|');
 }
@@ -237,10 +342,10 @@ function mirrorSignature(p: OceanParams, seaP: SeaPhysicsParams): string {
  * is one number for the whole sea) then square-rooted. Cached with the
  * spectrum: it only moves when a spectrum-shaping param moves.
  */
-function totalSteepnessRms(p: OceanParams): number {
+function totalJacobianRms(p: OceanParams): number {
   let variance = 0;
   for (let i = 0; i < p.cascades.length; i++) {
-    const s = spectralSteepness(
+    const s = spectralJacobianRms(
       p.resolution,
       p.cascades[i].domain,
       p,
@@ -258,7 +363,8 @@ export class CpuOcean {
   private readonly oceanP: OceanParams;
   private readonly seaP: SeaPhysicsParams;
   private signature: string;
-  private steepnessRms: number;
+  /** §V.59 direction-free trace moment — what the fold cap must divide by */
+  private jacobianRms: number;
   private rebuildCountdown = -1;
   private time = NaN;
   private gridTime = NaN;
@@ -272,7 +378,7 @@ export class CpuOcean {
     this.oceanP = oceanP;
     this.seaP = seaP;
     this.signature = mirrorSignature(oceanP, seaP);
-    this.steepnessRms = totalSteepnessRms(oceanP);
+    this.jacobianRms = totalJacobianRms(oceanP);
     const n = seaP.mirrorResolution;
     this.butterfly = generateButterfly(n);
     this.cascades = [];
@@ -299,7 +405,7 @@ export class CpuOcean {
   effectiveChoppiness(): number {
     return effectiveChoppiness(
       this.oceanP.choppiness,
-      this.steepnessRms,
+      this.jacobianRms,
       this.oceanP.choppinessFoldLimit,
     );
   }
@@ -322,7 +428,7 @@ export class CpuOcean {
         this.cascades.push(new MirrorCascade(i, this.seed, this.oceanP, n));
       }
       // the fold cap is measured on the spectrum, so it moves with it
-      this.steepnessRms = totalSteepnessRms(this.oceanP);
+      this.jacobianRms = totalJacobianRms(this.oceanP);
       this.gridTime = NaN; // force recompute below
     }
     const staleFor = Math.abs(time - this.gridTime);

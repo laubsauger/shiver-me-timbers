@@ -3,9 +3,12 @@
  *
  * INTEGRATION (T20 heightmap terrain):
  * - `terrainBlendMaterial(rockOpts, sandOpts)` → one MeshStandardNodeMaterial
- *   for the island mesh: sand on flat ground, rock on steep slopes, shore
- *   wetness band around `terrainParams.waterline`. No UVs required anywhere
- *   (rock is tri-planar, sand samples world XZ).
+ *   for the island mesh, THREE layers on two axes: a sand skirt in the shore
+ *   band at the water, green ground cover above it, rock wherever it is too
+ *   steep to hold either, plus the shore wetness band around
+ *   `terrainParams.waterline`. No UVs required anywhere (rock is tri-planar,
+ *   sand and cover sample world XZ). See groundCover.ts for why elevation had
+ *   to become a second axis — on slope alone, sand won 82-98% of an island.
  * - `createRockMaterial(opts)` / `createSandMaterial(opts)` → stand-alone
  *   materials for scattered rock meshes / pure beach patches.
  * - opts take `{ sunDirection?: THREE.Vector3 }`; per frame the sky system
@@ -46,6 +49,22 @@ export {
   type RockMaterialHandle,
   type RockUniforms,
 } from './rockMaterial';
+export {
+  createAerialUniforms,
+  updateAerialUniforms,
+  aerialHazeFactor,
+  aerialOutputNode,
+  aerialHazeFactorCpu,
+  type AerialUniforms,
+} from './aerialPerspective';
+export {
+  createCoverUniforms,
+  updateCoverUniforms,
+  buildCoverNodes,
+  coverSlopeWeight,
+  type CoverUniforms,
+  type CoverNodes,
+} from './groundCover';
 export {
   createShoreUniforms,
   updateShoreUniforms,

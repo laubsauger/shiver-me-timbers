@@ -24,7 +24,7 @@
 
 /** one height contribution in island-local metres */
 export interface Feature {
-  kind: 'cone' | 'mesa' | 'ridge';
+  kind: 'cone' | 'mesa' | 'ridge' | 'sheer';
   /** centre (cone/mesa) or segment start (ridge), island-local metres */
   x: number;
   z: number;
@@ -69,6 +69,30 @@ export function featureHeight(f: Feature, x: number, z: number): number {
     // flat top, then a steep band down to nothing — the cliff-island profile
     const edge = Math.max(f.edge ?? r * 0.35, 1e-3);
     return f.height * smoothstep01((r - d) / edge);
+  }
+  if (f.kind === 'sheer') {
+    // THE VERTICAL-WALLED MASS — the profile behind both a sea stack and a
+    // headland, which is why it is one kind at two scales rather than two.
+    //
+    // WHY IT HAS TO BE ITS OWN KIND, measured. Every other kind here reaches
+    // its own rim TANGENTIALLY: `pow(1 − d/r, power)` has zero slope at d = r
+    // for any power > 1, and a ridge likewise. So no cone, no ridge and no
+    // amount of `featureExtent` can ever put a cliff at the waterline — a
+    // sweep over featureExtent 0.62→0.94 moved the fraction of shoreline
+    // steeper than 45° by nothing at all (6%→6%) and made the coastline
+    // ROUNDER (shore-radius CV 0.256→0.188). Only a profile with a wall in it
+    // can produce a coast that drops into the water, which is half of what
+    // §V43's reference coastline actually is.
+    //
+    //   core  — vertical-walled over the inner 55% of the footprint: the hard
+    //           edge that reads on the horizon, and the cliff at the water
+    //   skirt — a low broken apron out to the full radius, so the waterline
+    //           gets rubble to break on instead of a clean circle
+    // max() rather than sum: the wall must not be lifted by its own base.
+    const edge = Math.max(f.edge ?? r * 0.18, 1e-3); // §V28 floored divisor
+    const core = smoothstep01((r * 0.55 - d) / edge);
+    const skirt = Math.pow(Math.max(1 - d / r, 0), 3) * 0.35;
+    return f.height * Math.max(core, skirt);
   }
   return f.height * Math.pow(Math.max(1 - d / r, 0), f.power);
 }
@@ -211,6 +235,158 @@ export function buildArchetype(
       ];
     }
   }
+}
+
+/**
+ * How readily each silhouette family stands stacks off its shore. This is
+ * art direction, not physics: a spine of fortress rock is the shape that wants
+ * outliers around it, a broad hill is the shape that does not. Zero would make
+ * the family look impoverished next to the others, so the floor is one.
+ */
+const STACK_AFFINITY: Record<ArchetypeName, number> = {
+  spine: 1,
+  mesaCliff: 0.85,
+  lagoon: 0.7,
+  twinPeaks: 0.55,
+  crestedDome: 0.35,
+};
+
+/** everything sea-stack placement needs, in island-local metres */
+export interface SeaStackSpec {
+  /** upper bound on stacks for the most stack-happy archetype */
+  maxCount: number;
+  /** distance from the island centre the stacks stand at (m) */
+  ring: number;
+  /** footprint radius range (m) */
+  radiusMin: number;
+  radiusMax: number;
+  /** height above the waterline range (m) */
+  heightMin: number;
+  heightMax: number;
+}
+
+/**
+ * Stacks standing OFF the shore, in open water (T20/§V43).
+ *
+ * WHY THESE ARE TERRAIN FEATURES AND NOT ROCK MESHES. `rocks.ts` already
+ * scatters deformed icosahedra on the beach ring — but they are 3-8 m, half
+ * embedded, and `lodRockCull` hides the whole batch past 1800 m, so they can
+ * contribute nothing whatever to a silhouette at the 2-4 km range where the
+ * silhouette is the ONLY thing left. Put into the height field instead, a
+ * stack is part of the terrain mesh that is already being drawn: no extra
+ * draw call, no extra pipeline (`getMaterialCacheKey` appends `object.uuid`
+ * per InstancedMesh, so every new rock batch is a new pipeline), no cull
+ * distance, and the intersection foam (§V10) breaks on it for free because
+ * the terrain mesh is already a foam target.
+ *
+ * The size floor matters and is not cosmetic: the far terrain LOD decimates
+ * the grid by `lodTerrainStride`, so a stack narrower than a few decimated
+ * cells is simply not sampled and vanishes at exactly the distance it exists
+ * for. `radiusMin` has to stay comfortably above that cell size.
+ */
+export function buildSeaStacks(
+  name: ArchetypeName,
+  rng: Rng,
+  spec: SeaStackSpec,
+): Feature[] {
+  const budget = Math.floor(spec.maxCount * STACK_AFFINITY[name]);
+  if (budget <= 0) return [];
+  const n = 1 + Math.floor(rng() * budget);
+  const stacks: Feature[] = [];
+  // one seeded rotation, then a jittered sector each: two stacks landing on
+  // top of each other read as one lump, and evenly spaced ones read as a fence
+  const phase = rng();
+  for (let i = 0; i < n; i++) {
+    const a = ((i + lerp(0.15, 0.85, rng())) / n + phase) * Math.PI * 2;
+    const ring = spec.ring * lerp(0.88, 1.12, rng());
+    stacks.push({
+      kind: 'sheer',
+      x: Math.cos(a) * ring,
+      z: Math.sin(a) * ring,
+      radius: lerp(spec.radiusMin, spec.radiusMax, rng()),
+      height: lerp(spec.heightMin, spec.heightMax, rng()),
+      power: 1,
+    });
+  }
+  return stacks;
+}
+
+/**
+ * How much cliff coast each family carries. Not uniform, for the same reason
+ * as STACK_AFFINITY — but the FLOOR is 1 headland, deliberately: an island
+ * with no cliff anywhere on it is the shipping look this work exists to
+ * replace, so no family is allowed back to a beach on every bearing.
+ */
+const HEADLAND_AFFINITY: Record<ArchetypeName, number> = {
+  mesaCliff: 1,
+  spine: 1,
+  twinPeaks: 0.7,
+  lagoon: 0.7,
+  crestedDome: 0.4,
+};
+
+/** everything headland placement needs, in island-local metres */
+export interface HeadlandSpec {
+  /** headlands per island (0 disables) */
+  count: number;
+  /** how far from the island centre the mass sits (m) */
+  offset: number;
+  /** footprint radius range (m) */
+  radiusMin: number;
+  radiusMax: number;
+  /** height range (m above the waterline) */
+  heightMin: number;
+  heightMax: number;
+  /** wall width as a fraction of the footprint radius (small = sheerer) */
+  edgeFraction: number;
+}
+
+/**
+ * HEADLANDS — the half of the coastline that is a cliff (§V43, T33).
+ *
+ * The complaint this answers is "a single skirt of sand all the way round".
+ * It was structurally true: between `featureExtent` and the rim the height
+ * field is nothing but low-amplitude coast noise, so every island shelved
+ * into the water at a measured median 5-8° on every bearing, and only the one
+ * archetype that owns a `mesa` had any steep coast at all.
+ *
+ * A headland is a `sheer` mass pushed out toward the rim so its wall crosses
+ * the waterline on the seaward side while its skirt merges into the landmass
+ * on the inland side. That gives ONE island both coasts — cliff on one
+ * bearing, beach on the next — which is the variation the shoreline foam
+ * (§V10, §T33) also needs, because a swash model has nothing to say on a
+ * vertical face and everything to say on the beach beside it.
+ *
+ * `offset` is deliberately a fraction of the FOOTPRINT radius and not of
+ * `featureExtent`: the whole point is to reach past where the landmass
+ * features stop.
+ */
+export function buildHeadlands(
+  name: ArchetypeName,
+  rng: Rng,
+  spec: HeadlandSpec,
+): Feature[] {
+  // Per-family, for the same reason as STACK_AFFINITY: three tables on the
+  // broad-hill archetype erased the one family whose job is to be a broad
+  // hill, and §V43 asks for five silhouettes, not five copies of the best one.
+  const n = Math.max(0, Math.round(spec.count * HEADLAND_AFFINITY[name]));
+  if (n === 0) return [];
+  const out: Feature[] = [];
+  const phase = rng();
+  for (let i = 0; i < n; i++) {
+    const a = ((i + lerp(0.2, 0.8, rng())) / n + phase) * Math.PI * 2;
+    const radius = lerp(spec.radiusMin, spec.radiusMax, rng());
+    out.push({
+      kind: 'sheer',
+      x: Math.cos(a) * spec.offset,
+      z: Math.sin(a) * spec.offset,
+      radius,
+      height: lerp(spec.heightMin, spec.heightMax, rng()),
+      power: 1,
+      edge: Math.max(radius * spec.edgeFraction, 1e-3), // §V28 floored divisor
+    });
+  }
+  return out;
 }
 
 /**

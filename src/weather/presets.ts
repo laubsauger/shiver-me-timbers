@@ -24,9 +24,23 @@ import {
  * reversibility guarantee described above.
  */
 export interface PresetPatch {
+  /**
+   * Two INDEPENDENT wave systems, so a preset has to name both (§V.7 — presets
+   * are the vocabulary, and a vocabulary missing half the sea cannot say
+   * "long rolling swell under light chop", which is the most common state
+   * there is and the one the user found unreachable). `swellPeriod` and
+   * `swellDirection` are what make the presets feel like different OCEANS
+   * rather than one ocean at different volumes.
+   */
   ocean: Pick<
     OceanParams,
-    'amplitude' | 'windSpeed' | 'choppiness' | 'jacobianFoamBias'
+    | 'amplitude'
+    | 'windSpeed'
+    | 'choppiness'
+    | 'jacobianFoamBias'
+    | 'swellPeriod'
+    | 'swellAmplitude'
+    | 'swellDirection'
   >;
   sky: Pick<SkyParams, 'hazeStrength' | 'sunIntensity' | 'ambientIntensity'>;
   /**
@@ -92,6 +106,14 @@ export const weatherPresets: Readonly<
       windSpeed: 4, // light breeze (m/s) → short, soft spectrum
       choppiness: 0.85, // rounded crests — little horizontal pinching
       jacobianFoamBias: 0.12, // well below swell: foam only on rare true folds
+      // A calm day is NOT a flat sea: the local wind has dropped but the swell
+      // from a distant storm has not, and a long low ground swell under a
+      // glassy surface is the most characteristic calm-ocean look there is.
+      // This is the preset that most needed a second train — before it, calm
+      // could only mean "small and short", i.e. a pond.
+      swellPeriod: 13,
+      swellAmplitude: 0.3,
+      swellDirection: Math.PI * 0.62,
     },
     sky: {
       hazeStrength: 0.45, // clear day, slight milky horizon
@@ -141,6 +163,9 @@ export const weatherPresets: Readonly<
       windSpeed: oceanParams.windSpeed,
       choppiness: oceanParams.choppiness,
       jacobianFoamBias: oceanParams.jacobianFoamBias,
+      swellPeriod: oceanParams.swellPeriod,
+      swellAmplitude: oceanParams.swellAmplitude,
+      swellDirection: oceanParams.swellDirection,
     },
     sky: {
       hazeStrength: skyParams.hazeStrength,
@@ -233,6 +258,15 @@ export const weatherPresets: Readonly<
       // the source now (effective λ 1.9 → 1.30), which is what makes this
       // retune a tuning change and not a cover-up.
       jacobianFoamBias: 0.25,
+      // A gale's swell is the SHORTEST of the three presets, and that is not a
+      // mistake: a storm sea is dominated by locally-generated wind sea, which
+      // is steep and confused. The long ground swell is still there underneath
+      // and running from a different quarter, which is what produces the
+      // genuinely confused cross-sea a gale looks like — two trains at 100°
+      // to each other rather than one train made bigger.
+      swellPeriod: 9,
+      swellAmplitude: 0.75,
+      swellDirection: Math.PI * 1.18,
     },
     sky: {
       hazeStrength: 1.0, // horizon fully washed out in spray/mist

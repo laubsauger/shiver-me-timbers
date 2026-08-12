@@ -75,8 +75,16 @@ export function grazingSaturationAt(
   near: number,
   far: number,
   fullDist: number,
+  /**
+   * 1 − hazeT. THE HANDOVER: past the haze ramp the pixel is atmosphere, not a
+   * water surface, and re-tinting it toward the sea's body colour is what
+   * painted the horizon as a solid turquoise band (user, 3rd report). A hump,
+   * therefore, not a rising ramp — low near, high mid-field, low far.
+   */
+  waterness = 1,
 ): number {
-  return near + (far - near) * smoothstep(0, Math.max(1, fullDist), camDist);
+  const hump = near + (far - near) * smoothstep(0, Math.max(1, fullDist), camDist);
+  return hump * Math.min(1, Math.max(0, waterness));
 }
 
 /** shader: mix(sky, sky·bodyTint, sat) — keeps the sky's VALUE, not its whiteness */
@@ -109,6 +117,12 @@ export function pigmentFloor(
   col: Rgb,
   tint: Rgb,
   floor: number,
+  /**
+   * The shader passes `pigmentFloorStrength × (1 − foam) × (1 − hazeT)`. Foam
+   * is allowed to read white; HAZE is allowed to read as haze. Without the
+   * second gate this term fires on the warm, low-chroma horizon band — a
+   * legitimately lit atmosphere, not a grey wash — and repaints it turquoise.
+   */
   strength = 1,
 ): Rgb {
   // 1 when the pixel is fully grey, 0 once it reaches the floor
@@ -207,11 +221,13 @@ export interface SeaSample {
 export function seaColorCpu(s: SeaSample): Rgb {
   const tint = bodyTint(s.body);
   const sky = skyDomeCpu(s.refl, s.sky);
+  const waterness = 1 - Math.min(1, Math.max(0, s.hazeT));
   const sat = grazingSaturationAt(
     s.camDist,
     s.grazingSaturation,
     s.grazingSaturationFar,
     s.grazingSaturationFullDist,
+    waterness,
   );
   const skyRefl = resaturate(sky, tint, sat);
   const w = Math.min(1, fresnel(s.cosTheta, s.fresnelR0) * s.reflectionStrength);
@@ -220,7 +236,12 @@ export function seaColorCpu(s: SeaSample): Rgb {
     s.body[1] + (skyRefl[1] - s.body[1]) * w,
     s.body[2] + (skyRefl[2] - s.body[2]) * w,
   ];
-  col = pigmentFloor(col, tint, s.pigmentFloorChroma, s.pigmentFloorStrength);
+  col = pigmentFloor(
+    col,
+    tint,
+    s.pigmentFloorChroma,
+    s.pigmentFloorStrength * waterness,
+  );
   const h = Math.min(1, Math.max(0, s.hazeT));
   return [
     col[0] + (s.hazeColor[0] - col[0]) * h,

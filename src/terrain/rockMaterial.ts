@@ -18,6 +18,18 @@ import * as THREE from 'three/webgpu';
 import { float, mix, normalWorld, positionWorld, uniform } from 'three/tsl';
 import { terrainParams } from '../params/terrain';
 import { triplanarFbm } from './noise';
+// §V.48 — the project has ONE band-limit implementation and this is it. It
+// lives under src/ship for historical reasons (§B.20 was found on the hull);
+// the maths is pure and carries nothing ship-specific.
+import { coordFilter } from '../ship/bandLimit';
+
+/**
+ * Nyquist floor for the posterize edge, in pixels — same constant and same
+ * reason as `FILTER_PIXELS` in src/ship/bandLimit.ts. It must be 2, not 1: at
+ * exactly one pixel per transition two neighbouring samples still land on
+ * opposite ends of the step and the difference is still the full contrast.
+ */
+const BAND_FILTER_PIXELS = 2;
 
 export interface RockMaterialOptions {
   /** initial world-space sun direction (unit, pointing AT the sun) */
@@ -89,8 +101,29 @@ export function buildRockNodes(u: RockUniforms, octaves: number) {
   // half-width clamped ≥ 1e-3 so smoothstep edges never coincide (NaN guard).
   const b = n.mul(u.bands);
   const half = u.bandSoftness.mul(0.5).max(1e-3);
-  const edgeMix = b.fract().smoothstep(float(0.5).sub(half), float(0.5).add(half));
-  const stepped = b.floor().add(edgeMix).div(u.bands);
+
+  // §V.48 SEVENTH OCCURRENCE, and the same shape as §B.20's caulk seams: a
+  // posterize edge is a procedural EDGE with a finite width, and there was no
+  // filter on it anywhere in src/terrain. Measured: `rockScale` 0.16 with 3
+  // octaves puts the finest detail at 1.56 m, but the BAND EDGE inside it is
+  // ~0.09 m wide — sub-pixel from 176 m head-on and from 18 m at 10× grazing,
+  // which is every cliff face on every island in every wide shot. Band-limit
+  // against the SHARPEST FEATURE (the edge), never against the repeat.
+  //
+  // Both halves of the §V.48 cure, both required:
+  //  (a) WIDEN — the edge is never allowed narrower than its own coordinate's
+  //      pixel footprint, so the function stops varying faster than the sample
+  //      grid. `b`'s footprint, NOT `b.fract()`'s: fract spikes at every wrap
+  //      and would report a huge filter width along every band line.
+  //  (b) FADE — crossfade back to the UNPOSTERIZED noise by featureWidth /
+  //      effectiveWidth. `n` is exactly the average of the posterized field
+  //      over a period, so this converges on the right colour rather than on
+  //      an arbitrary one, and rock resolves to smooth stone at range.
+  const filter = coordFilter(b);
+  const halfEff = half.max(filter.mul(BAND_FILTER_PIXELS * 0.5));
+  const bandEnergy = half.div(halfEff.max(1e-6)); // §V28 floored divisor
+  const edgeMix = b.fract().smoothstep(float(0.5).sub(halfEff), float(0.5).add(halfEff));
+  const stepped = mix(n, b.floor().add(edgeMix).div(u.bands), bandEnergy);
 
   // layered tint: crevice → base by band value
   let albedo: any = mix(u.creviceColor, u.baseColor, stepped);

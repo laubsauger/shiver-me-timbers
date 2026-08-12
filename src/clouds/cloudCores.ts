@@ -379,6 +379,11 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const uFluffScale = uniform(p.fluffScale);
   const uFluffAlpha = uniform(p.fluffAlpha);
   const uFluffPower = uniform(p.fluffPower);
+  const uFluffHollow = uniform(p.fluffHollow);
+  const uFluffRing = uniform(p.fluffRing);
+  const uFluffTopSharp = uniform(p.fluffTopSharp);
+  const uFluffSunSharp = uniform(p.fluffSunSharp);
+  const uFluffVary = uniform(p.fluffScaleVary);
 
   // -- shared instance attribute nodes ---------------------------------------
   const iOffset = instancedBufferAttribute(offsetAttr, 'vec3');
@@ -480,10 +485,14 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const lobeWorld = iOffset.add(pC.mul(iRadius));
   // an ellipsoid's normal transforms by the INVERSE scale (§V28 floored)
   const nWorld = nLocal.div(iRadius.max(1e-3)).normalize();
+  // The SMOOTH normal of the undisplaced ellipsoid — the lobe's gross form
+  // with the cauliflower taken off. Only the rim feather uses it; see below.
+  const nSmoothWorld = unit.div(iRadius.max(1e-3)).normalize();
 
   lobeMat.positionNode = lobeWorld;
 
   const vNormal = varying(nWorld, 'vCloudNormal');
+  const vSmoothNormal = varying(nSmoothWorld, 'vCloudSmoothNormal');
   const vWorld = varying(lobeWorld, 'vCloudWorld');
   const vDepth = varying(depthOf(iOffset), 'vCloudDepth');
   const vHeight = varying(iHeight, 'vCloudHeight');
@@ -496,7 +505,23 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   // |N·V| → 0 exactly at the silhouette, so this is the SOFT RIM: the mesh
   // keeps a hard outline in the depth/shape sense while its alpha feathers
   // out. smoothstep in functional form per §V23.
-  const rim = smoothstep(float(0), uRimSoft.max(1e-3), N.dot(V).abs());
+  //
+  // THE SMOOTH NORMAL, NOT THE BUMPY ONE — this was "strange holes and
+  // ripped-off segments that don't really look right" (user 2026-08-12).
+  // `vNormal` is a finite-difference normal of the RELIEF-DISPLACED surface,
+  // and at lobeRelief 0.26 / reliefScale 2.3 its slopes swing far enough that
+  // |N·V| passes through 0 in the MIDDLE of a lobe's projected disc, not just
+  // at its outline. The rim term then punches alpha to 0 there, and because
+  // the noise is smooth the resulting dip reads as a clean concave bite out of
+  // the cloud. Confirmed by A/B: lobeRelief 0 removes every hole. A silhouette
+  // feather is a property of the GROSS FORM — it must not follow bumps. The
+  // displaced normal keeps doing all the LIGHTING below, which is what the
+  // cauliflower is for.
+  const rim = smoothstep(
+    float(0),
+    uRimSoft.max(1e-3),
+    vSmoothNormal.normalize().dot(V).abs(),
+  );
   const lobeAlpha = rim.mul(uCoverage).clamp(0, 1);
 
   // every factor below is independently in [0,1] (or [1, 1+silver]) and they
@@ -539,17 +564,55 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   // Deliberately dumb: no normals, no self-shadow. Their whole job is to blur
   // the polygonal rim, and giving them their own lighting model would fight
   // the lobes underneath.
+  //
+  // THE SPRITE MUST OVERHANG THE LOBE OR IT DOES NOTHING. A sprite of radius
+  // `fluffScale` mean-radii against a lobe whose projected radius reaches
+  // rx*(1+1.45*relief) mean radii is entirely interior below fluffScale~1.7,
+  // and its own falloff has already decayed to ~5% by then. That is exactly
+  // where this sat, so the "soft edge" layer was drawing full fill cost and
+  // feathering nothing. See the §V11b overhang test in tests/clouds.test.ts.
   const fluffMat = new THREE.SpriteNodeMaterial();
   fluffMat.positionNode = iOffset;
+  // per-lobe radius jitter, decorrelated from the alpha use of iSeed below, so
+  // the feather is PATCHY along a silhouette rather than a uniform halo
+  const fluffJitter = iSeed.mul(7.31).add(0.137).fract();
   // scale via a UNIFORM, not baked into the attribute: a baked fluffScale
   // would only take effect on the next layout rebuild, i.e. silently never
-  fluffMat.scaleNode = instancedBufferAttribute(scaleAttr, 'float').mul(uFluffScale.max(0));
+  fluffMat.scaleNode = instancedBufferAttribute(scaleAttr, 'float')
+    .mul(uFluffScale.max(0))
+    .mul(
+      mix(
+        float(1).sub(uFluffVary.clamp(0, 0.9)),
+        float(1).add(uFluffVary.clamp(0, 0.9)),
+        fluffJitter,
+      ),
+    );
 
   const q = uv().mul(2).sub(1);
   const r2 = q.dot(q);
   const shape = r2.oneMinus().max(0);
+  // hollow the centre: the fluff belongs at the RIM. A solid disc at the alpha
+  // needed to feather a silhouette would also lay its flat fake-sphere shading
+  // over the lobe's sculpted lighting and flatten the mass (§V11b).
+  const hollow = mix(
+    float(1).sub(uFluffHollow.clamp(0, 1)),
+    float(1),
+    smoothstep(float(0), uFluffRing.clamp(0.02, 1), r2),
+  );
+  // A cloud is not uniformly soft any more than it is uniformly sharp (user,
+  // 2026-08-12). Convecting cauliflower tops and sunward shoulders keep their
+  // crisp polygonal edge; the dissipating base and the shadow side get the
+  // feather. Both factors are in [1-sharp, 1] and MULTIPLIED (§V44 bounded at
+  // source — the cut is clamped, not the product).
+  const fluffSharpen = mix(
+    float(1),
+    float(1).sub(uFluffTopSharp.clamp(0, 1)),
+    iHeight.clamp(0, 1),
+  ).mul(mix(float(1), float(1).sub(uFluffSunSharp.clamp(0, 1)), sunSide));
   const fluffAlpha = shape
     .pow(uFluffPower.max(0.1))
+    .mul(hollow)
+    .mul(fluffSharpen)
     .mul(iSeed.mul(0.4).add(0.6))
     .mul(uFluffAlpha)
     .mul(uCoverage)
@@ -612,6 +675,11 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     uFluffScale,
     uFluffAlpha,
     uFluffPower,
+    uFluffHollow,
+    uFluffRing,
+    uFluffTopSharp,
+    uFluffSunSharp,
+    uFluffVary,
     get lobeCount(): number {
       return lobeCount;
     },

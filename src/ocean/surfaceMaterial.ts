@@ -254,9 +254,19 @@ export function buildOceanSurfaceMaterial(
   );
   const uLodSamples = uniform(new THREE.Vector2(sp.lodSamplesFull, sp.lodSamplesCut));
   const uNormalStretch = uniform(sp.normalDetailStretch);
-  const uNormPix = uniform(
-    new THREE.Vector2(sp.normalTexelFull, sp.normalTexelCut),
-  );
+  // (full, cut) footprint in METRES per cascade — measured from the live
+  // spectrum, not derived from a texel count. See `normLod` and
+  // oceanMath.slopeResolutionFootprint.
+  const uNormFoot = sim.cascades.map(() => uniform(new THREE.Vector2(1, 1)));
+  const refreshNormFoot = () => {
+    for (const [i, c] of sim.cascades.entries()) {
+      (uNormFoot[i].value as THREE.Vector2).set(
+        Math.max(1e-4, c.slopeFootprint(sp.normalKeepFull)),
+        Math.max(2e-4, c.slopeFootprint(sp.normalKeepCut)),
+      );
+    }
+  };
+  refreshNormFoot();
 
   const worldXZ = positionLocal.xz.add(originUniform);
   const camDist = worldXZ.sub(cameraPosition.xz).length();
@@ -296,25 +306,41 @@ export function buildOceanSurfaceMaterial(
    * minified `texture()` fetch is a point sample of a zero-mean slope field,
    * i.e. per-pixel noise, and the specular lobes downstream amplify it into
    * the fibrous golden "hair" that covers the whole sea when zoomed out
-   * (user). The gate below is the missing filtered tier: each cascade's
-   * NORMAL contribution is measured against ITS OWN texel size (domain/N —
-   * the sharpest feature it can carry, per §V.48's "measure against the
-   * feature, not the repeat") and faded out once a pixel spans more than one
-   * of them. Fading to ZERO is the correct average here, because the mean of
-   * a zero-mean slope field over a large footprint is zero — and the coarser
-   * cascade, whose texels are still resolved, keeps carrying the large-scale
-   * wave shading. That is the cascade pyramid acting as the mip chain the
-   * textures cannot have.
+   * (user). The gate below is the missing filtered tier.
+   *
+   * WHAT IT IS MEASURED AGAINST, and this is the whole correction. It used to
+   * compare the footprint to the cascade's TEXEL SIZE (domain/N) and delete the
+   * cascade once a pixel spanned 3.5 texels, with the justification that "the
+   * cascade pyramid IS the mip chain". Both halves were wrong, measured:
+   *   - a texel is the finest thing the grid can HOLD, not what the band is
+   *     MADE OF. Cascade 2's slope-carrying wavelength is 2.4 m = 53 texels, so
+   *     at the 0.155 m footprint where it was being retired outright it still
+   *     had 89% of its slope variance resolvable — the criterion was 15× finer
+   *     than the feature. §V.48's own rule ("measure against the feature, not
+   *     the grid"), with the sign flipped;
+   *   - the pyramid CANNOT carry it. §V.19 band-splits the cascades so no
+   *     wavelength appears twice; a mip chain is the same wavelengths at
+   *     several resolutions. When cascade 2 goes, λ ≤ 8.3 m is gone from the
+   *     sea entirely. Measured composite: shading slope RMS fell to 59% of its
+   *     near-field value by 53 m, 31% by 130 m, and EXACTLY ZERO past 365 m —
+   *     half a kilometre of perfect mirror before the haze starts at 900 m,
+   *     against 40% still resolvable there. A mirror takes the sky uniformly,
+   *     which is the "greys out under sky reflection" report arriving as a
+   *     geometry defect (§V.56 — a colour lever was compensating for this).
+   * The gate now fades between the footprints at which `normalKeepFull` and
+   * `normalKeepCut` of THAT cascade's own slope variance are still resolvable,
+   * both measured from the live spectrum on every rebuild. Fading to ZERO is
+   * still the correct endpoint — the mean of a zero-mean slope field over a
+   * large footprint is zero — it just has to happen where the band actually
+   * runs out, not where its grid does. The residual between the two is what
+   * `specularAaStrength` exists to swallow.
    *
    * The vertex gate above deliberately stays on VERTEX SPACING: that is the
    * mesh's Nyquist limit, a different quantity from the screen's.
    */
-  const texelWorld = (c: { domain: number }) =>
-    c.domain / Math.max(1, oceanParams.resolution);
-  const normLod = sim.cascades.map((c) => {
+  const normLod = sim.cascades.map((c, i) => {
     // smoothstep(e0,e1,x), e0 > e1: 1 below `full`, 0 above `cut` (§V23)
-    const pxPerTexel = pixWorld.div(Math.max(1e-4, texelWorld(c)));
-    const filtered = smoothstep(uNormPix.y, uNormPix.x, pxPerTexel);
+    const filtered = smoothstep(uNormFoot[i].y, uNormFoot[i].x, pixWorld);
     return lodWeight(c.domain, uNormalStretch).mul(filtered);
   });
 
@@ -460,6 +486,23 @@ export function buildOceanSurfaceMaterial(
   const colorNode = Fn(() => {
     // FIRST, and inside the Fn on purpose — see buildSurfaceSlope's header.
     const { slopeMag, wakeSmooth, normalWorld } = buildSurfaceSlope();
+
+    // ── how much ATMOSPHERE is in the way (§V30) ────────────────────────
+    // Hoisted: three terms want this exact ramp — the far-field foam damp, the
+    // final haze mix, and the §V.56 handover below — and it costs a `pow`.
+    // It used to be computed twice with the same arguments.
+    const hazeRamp = pow(smoothstep(uHaze.x, uHaze.y, camDist), uHazeCurve).clamp(0, 1);
+    const hazeT = hazeRamp.mul(uHazeStrength).clamp(0, 1).toVar();
+    /**
+     * §V.56 HANDOVER: the pigment floor protects WATER, never ATMOSPHERE.
+     * Both §V.56 levers are scaled by this. Where a pixel has melted into the
+     * distance haze it is no longer a water surface — it is the air in front of
+     * one — and re-tinting it toward the sea's body colour is what painted the
+     * horizon as a solid turquoise band (user, 3rd report). The far field is
+     * supposed to read as HAZE: that is what makes the sea look like it goes
+     * somewhere (§V.30) instead of ending in a coloured wall.
+     */
+    const waterness = float(1).sub(hazeT);
     const surfacePos = vec3(worldXZ.x, totalDisp.y, worldXZ.y);
     const viewDir = normalize(cameraPosition.sub(surfacePos)); // surface → eye
 
@@ -745,11 +788,17 @@ export function buildOceanSurfaceMaterial(
     // pigment handed back it greys out (user: "the water at distance still has
     // a very high tendency to get grey and washed out"). Transliterated by
     // seaChroma.grazingSaturationAt — keep the two in step.
+    // A HUMP, not a rising ramp. Pigment influence must be LOW near (§V.24
+    // shows the body through the surface, so it needs no help and forcing it
+    // read as over-saturated teal), HIGH in the mid-field (entirely grazing,
+    // nothing transmits, the pixel is pure reflected sky and greys out), and
+    // LOW again far away (atmosphere owns it — see `waterness`). Shipping the
+    // rising half alone is what turned the horizon turquoise.
     const grazSat = mix(
       uGrazingSat.x,
       uGrazingSat.y,
       smoothstep(float(0), uGrazingSat.z.max(1), camDist),
-    );
+    ).mul(waterness);
     const skyReflCol = mix(skyCol, skyCol.mul(bodyTint), grazSat);
     // §V26 planar reflections: the module replaces the CONTENT of the
     // reflected colour, never its WEIGHT — fresnel × reflectionStrength stays
@@ -761,6 +810,10 @@ export function buildOceanSurfaceMaterial(
           normalWorld,
           chop: totalDisp.xz.length(),
           camDist,
+          // §V.26 sub-pixel roughness: the mirror needs to know what one water
+          // pixel actually COVERS. Same footprint every band-limit in this
+          // file is measured against, so both owners agree by construction.
+          footprint: pixWorld,
         })
       : skyReflCol;
 
@@ -802,8 +855,7 @@ export function buildOceanSurfaceMaterial(
     // far-field foam damping rides the same distance ramp as the haze (both
     // are "how much atmosphere is in the way"), computed early because the
     // foam composite happens before the haze mix
-    const foamFar = pow(smoothstep(uHaze.x, uHaze.y, camDist), uHazeCurve).clamp(0, 1);
-    const foamGain = mix(float(1), uFoamFarDamp, foamFar);
+    const foamGain = mix(float(1), uFoamFarDamp, hazeRamp);
     const foamAmount = float(0).toVar();
     if (foam || flowFoam) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
@@ -932,6 +984,10 @@ export function buildOceanSurfaceMaterial(
     // smoothstep(e0,e1,x) with e0 > e1: 1 at chroma 0, 0 at the floor (§V23)
     const pigNeed = smoothstep(uPigFloor.x, float(0), colChroma)
       .mul(uPigFloor.y.clamp(0, 1))
+      // §V.56 handover — see `waterness`. Without this the floor fires on the
+      // warm, low-chroma horizon haze (a legitimately lit atmosphere, not a
+      // grey wash) and repaints the whole band in the water's hue.
+      .mul(waterness)
       .mul(float(1).sub(foamAmount.clamp(0, 1)));
     const tintLum = bodyTint.dot(vec3(0.2126, 0.7152, 0.0722)).max(1e-4);
     col.assign(mix(col, col.mul(bodyTint).div(tintLum), pigNeed));
@@ -1010,9 +1066,6 @@ export function buildOceanSurfaceMaterial(
     // painted dome. Curve > 1 keeps the mid-field readable and pushes the
     // melt into the last stretch, ending exactly on the sky's haze colour so
     // the disc rim is invisible.
-    const hazeT = pow(smoothstep(uHaze.x, uHaze.y, camDist), uHazeCurve)
-      .mul(uHazeStrength)
-      .clamp(0, 1);
     col.assign(mix(col, uHazeColor, hazeT));
     // glints punch partway through the haze — a sun path fading to nothing
     // at 2 km looks like fog, not distance
@@ -1164,7 +1217,10 @@ export function buildOceanSurfaceMaterial(
     );
     (uLodSamples.value as THREE.Vector2).set(sp.lodSamplesFull, sp.lodSamplesCut);
     uNormalStretch.value = sp.normalDetailStretch;
-    (uNormPix.value as THREE.Vector2).set(sp.normalTexelFull, sp.normalTexelCut);
+    // cheap (a 256-bin walk ×3) and it MUST run here: the footprints are
+    // spectrum-derived, so a weather preset or a slider that rebuilds h0 moves
+    // them — a value cached at construction is §B.7's shape one level up.
+    refreshNormFoot();
   };
 
   return {

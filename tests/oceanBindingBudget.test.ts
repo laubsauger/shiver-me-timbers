@@ -179,14 +179,23 @@ const LEDGER: readonly LedgerEntry[] = [
     file: 'src/foam/index.ts',
     source: foamSource,
     sites: 2,
-    // shadingNode: lane.front for all 3 cascades + lane.coarse on cascade 0.
-    // The 128² lane.coarseMid is COMPUTED EVERY FRAME AND NEVER SAMPLED — see
-    // the DIAGNOSED, NOT YET FIXED block. Sampling it is +1 texture +1 sampler.
-    fragmentTextures: 4,
-    fragmentSamplers: 4,
+    // shadingNode: lane.front for all 3 cascades + lane.coarse on cascades 0
+    // AND 1. The second filtered tier is the ONE sampler reclaimed by
+    // src/sky/uncoloredShadowNode.ts, spent deliberately and measured first:
+    // from a 300 m camera one pixel covers ~0.25–0.5 m of sea against
+    // cascade 1's 0.191 m texel, so that band aliases — but its 1–3 m caps are
+    // five to fifteen texels across and fully resolvable, so it needs a
+    // filtered tier rather than retirement. Retiring it instead (tried, and
+    // looked at) removes the grit and the sea's whole mid-scale with it.
+    // Cascade 2 still has no tier: its features are ≤ 1 m, sub-pixel past
+    // ~50 m, so even a reduced tier would be sub-pixel.
+    // This puts the ocean fragment stage at exactly 16/16 samplers again —
+    // reclaim before adding (§V40).
+    fragmentTextures: 5,
+    fragmentSamplers: 5,
     vertexTextures: 0,
     vertexSamplers: 0,
-    why: 'texture(lane.front) × 3 lanes + texture(lane.coarse) × 1 lane',
+    why: 'texture(lane.front) × 3 lanes + texture(lane.coarse) × 2 lanes',
   },
   {
     file: 'src/foam/foamShading.ts',
@@ -297,27 +306,31 @@ describe('§V.40 ocean material binding budget', () => {
     }
   });
 
-  it('fits the FRAGMENT sampler ceiling with exactly one sampler spare', () => {
+  it('sits exactly ON the FRAGMENT sampler ceiling — nothing spare', () => {
     const samplers = sum((e) => e.fragmentSamplers);
-    // 15 of 16. The one free sampler was bought by dropping three's
-    // coloured-shadow colour texture (uncoloredShadowNode.ts) and it is
-    // SPOKEN FOR: it is what affords the foam mid-tier fix (§foam/index.ts
-    // DIAGNOSED block, +1 filterable texture), which is the reason that fix
-    // blanked the page. Spend it there, not somewhere else — and when it is
-    // spent, this number becomes 16 again and nothing further may be added
-    // without reclaiming first.
+    // 16 of 16. The one sampler that was spare was bought by dropping three's
+    // coloured-shadow colour texture (uncoloredShadowNode.ts) and it has now
+    // been SPENT, deliberately and after measuring: it buys the second foam
+    // filtered tier (cascade 1), without which that band either aliases into a
+    // field of hard specks from a high camera or has to be retired entirely,
+    // taking the sea's whole 1–3 m cap scale with it. See src/foam/index.ts
+    // `wantsTier`.
+    //
+    // THERE IS NOW NO HEADROOM. Nothing may be added to this stage without
+    // reclaiming a sampler first — the next candidate on the list is moving
+    // `totalDisp` to a varying (−3/−3, but crest bands go vertex-interpolated).
     //
     // Still far too tight for a 3-cascade CSMShadowNode: three builds one full
     // ShadowNode per cascade, so even with this subclass that is +1 texture
     // and +1 sampler PER EXTRA CASCADE on top of the 15 here.
-    expect(samplers).toBe(15);
+    expect(samplers).toBe(16);
     expect(samplers).toBeLessThanOrEqual(SAMPLER_CEILING);
     expect(sum((e) => e.vertexSamplers)).toBeLessThanOrEqual(SAMPLER_CEILING);
   });
 
   it('exceeds the DEFAULT sampled-texture limit, so app.ts must raise it', () => {
     const textures = sum((e) => e.fragmentTextures);
-    expect(textures).toBe(17);
+    expect(textures).toBe(18);
     // The whole point of §V.40: this material cannot be drawn by a device
     // created with the WebGPU defaults.
     expect(textures).toBeGreaterThan(WEBGPU_DEFAULT_SAMPLED_TEXTURES_PER_STAGE);

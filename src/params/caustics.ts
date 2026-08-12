@@ -264,8 +264,20 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
   curvatureEpsilonPerMeter: 0.035,
   foldSoftness: 0.16,
   foldSoftnessPerMeter: 0.045,
-  strength: 0.6,
-  maxGain: 1.15,
+  /**
+   * strength 0.6 -> 0.32 and maxGain 1.15 -> 3.0, TOGETHER (user: "opacity and
+   * brightness including variations of both, so it's less uniform").
+   *
+   * maxGain's own doc above says it: "this cap - not the physics - is what sets
+   * the highlight". At 1.15 the Reinhard roll-off was compressing nearly every
+   * filament onto the same value, so the caustic arrived as one flat white
+   * intensity. The VARIATION the user wants already exists in |det J| - the
+   * cap was clipping it off. Raising the ceiling lets the physics set the
+   * highlight again and `strength` drops to keep peak brightness where it was,
+   * so this trades uniform-and-bright for varied-at-the-same-peak.
+   */
+  strength: 0.32,
+  maxGain: 3.0,
   darkStrength: 0.45,
   maxDrift: 2.5,
   maxAddLight: 1.5,
@@ -273,9 +285,24 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
   maxDepth: 22,
   fadeStart: 180,
   fadeEnd: 340,
-  causticColor: '#ffffff',
+  /**
+   * Was pure #ffffff, which is what made the caustics read as bleached decals
+   * rather than as focused sunlight. A caustic IS the sun, concentrated - so it
+   * carries the sun's own colour, and at golden hour that is emphatically not
+   * white. Warm off-white here; the per-channel Beer-Lambert extinction above
+   * still shifts it blue-green with depth, so the two ends stay physical.
+   */
+  causticColor: '#ffe9d2',
   backprojectIterations: 1,
-  waterlineBlend: 0.3,
+  /**
+   * 0.3 -> 0.8 (user: "blending of the caustics above and below"). This is the
+   * half-width of the crossfade between the reflected (above-water) and
+   * refracted (below-water) branches, and at 0.3 m the two met in a visible
+   * seam along the hull - two different-looking effects butted together rather
+   * than one effect crossing a waterline. A real waterline is not a line: the
+   * hull is wet above it and the surface is broken below it.
+   */
+  waterlineBlend: 0.8,
   faceGateSoftness: 0.06,
 
   /**

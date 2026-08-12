@@ -15,6 +15,8 @@ import { buildPalmGeometry } from '../src/vegetation/palmGeometry';
 import { generatePlacements, scatterPalms } from '../src/vegetation/scatter';
 import { vegetationParams } from '../src/params/vegetation';
 import { getParamsEntry } from '../src/params/registry';
+import { islandParams } from '../src/params/island';
+import { periodResolvedValue } from '../src/ship/bandLimit';
 
 const attrArray = (geo: ReturnType<typeof buildPalmGeometry>, name: string): Float32Array =>
   geo.getAttribute(name).array as Float32Array;
@@ -158,5 +160,54 @@ describe('frustum culling bounds (§V17)', () => {
     const tight = mesh.boundingSphere!.radius - swayMargin;
     expect(swayMargin).toBeGreaterThan(0);
     expect(tight).toBeGreaterThan(0);
+  });
+});
+
+describe('§V.48 bark rings: a raw step() is a zero-width edge', () => {
+  // The bark stripe was `step(ratio, fract(y·freq))`. Every other §V.48
+  // occurrence in this project had SOME transition to widen; this one had
+  // none, which means no pixel ever samples partway up the wall and it
+  // aliases at every distance rather than past an onset. The `fract` wrap was
+  // a second, independent hard edge — §B.20's wale hairline verbatim.
+  const PX_PER_RAD = 2560 / ((75 * Math.PI) / 180);
+  /** metres of trunk one pixel covers at `dist`, times a grazing factor */
+  const mpp = (dist: number, grazing = 1): number => (dist / PX_PER_RAD) * grazing;
+  /** one bark ring, in metres, on a mid-size trunk */
+  const trunkHeight = (vegetationParams.heightMin + vegetationParams.heightMax) / 2;
+  const ringMetres = trunkHeight / vegetationParams.barkRingFrequency;
+
+  it('the ring pattern is gone before its period goes sub-pixel', () => {
+    // filter width in RING units = metres per pixel / metres per ring
+    const resolved = (d: number, g = 1): number => periodResolvedValue(mpp(d, g) / ringMetres);
+    // a palm you are moored next to: rings fully present, they are the detail
+    expect(resolved(40)).toBeGreaterThan(0.9);
+    // palms are culled at lodPalmCull; the limit must reach zero INSIDE that
+    // range or the cull is what is hiding the aliasing, which is luck
+    expect(resolved(islandParams.lodPalmCull)).toBe(0);
+  });
+
+  it('fades to the pattern MEAN, so a distant trunk keeps its right colour', () => {
+    // the stripe covers `ratio` of each period, so `ring` averages 1 − ratio.
+    // Fading to 0 or 1 instead would make every distant palm trunk uniformly
+    // too dark or too light — the §V.48 (b) half, which is easy to skip.
+    const mean = 1 - vegetationParams.barkStripeRatio;
+    expect(mean).toBeGreaterThan(0);
+    expect(mean).toBeLessThan(1);
+  });
+
+  it('the widened edge is at least 2 px, never 1 (Nyquist, the hard-won bit)', () => {
+    // at exactly 1 px per transition, neighbouring samples still land on
+    // opposite ends of the step and the difference is still full contrast
+    const filterWidth = 0.3; // ring units per pixel
+    const halfAuthored = vegetationParams.barkStripeRatio / 2;
+    const halfEff = Math.max(halfAuthored, filterWidth * 2 * 0.5);
+    expect(halfEff * 2).toBeGreaterThanOrEqual(filterWidth * 2);
+  });
+
+  it('the material still builds with the band limit wired in', async () => {
+    const { createPalmMaterial } = await import('../src/vegetation/palmMaterial');
+    const handle = createPalmMaterial();
+    expect(handle.material.colorNode).toBeTruthy();
+    handle.refresh();
   });
 });

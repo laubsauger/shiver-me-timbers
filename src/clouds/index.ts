@@ -58,6 +58,10 @@ export interface CloudsHandle {
    *  stay cold while the real ones warm. */
   readonly sunColorLive: THREE.Color;
   readonly skyColorLive: THREE.Color;
+  /** this frame's world sun direction, mutated in place — the edge
+   *  transmission term needs it and the reflection must read the SAME object
+   *  so a cloud and its mirror light their thin margins identically */
+  readonly sunDirLive: THREE.Vector3;
   dispose(): void;
 }
 
@@ -86,7 +90,8 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
   coresRT.texture.name = 'clouds/cores';
 
   const blur = createCloudBlur(coresRT.texture, p);
-  const composite = createCloudComposite(blur.output, p, seed);
+  const sunDirLive = new THREE.Vector3(0, 1, 0);
+  const composite = createCloudComposite(blur.output, p, seed, sunDirLive);
 
   // Cluster SHAPE is CPU-side, so it only takes effect through regeneration.
   // Two things move it and both would otherwise silently do nothing: a panel
@@ -130,6 +135,11 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
       cores.uFluffScale.value = p.fluffScale;
       cores.uFluffAlpha.value = p.fluffAlpha;
       cores.uFluffPower.value = p.fluffPower;
+      cores.uFluffHollow.value = p.fluffHollow;
+      cores.uFluffRing.value = p.fluffRing;
+      cores.uFluffTopSharp.value = p.fluffTopSharp;
+      cores.uFluffSunSharp.value = p.fluffSunSharp;
+      cores.uFluffVary.value = p.fluffScaleVary;
       cores.uStormSunCut.value = p.stormSunCut;
       cores.uStormSkyCut.value = p.stormSkyCut;
       blur.uRadiusNear.value = p.blurRadiusNear;
@@ -143,15 +153,13 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
         composite.uSunColor.value,
         composite.uSkyColor.value,
       );
-      composite.uDistortScale.value = p.distortScale;
-      composite.uDistortStrength.value = p.distortStrength;
-      composite.uEdgeErode.value = p.edgeErode;
-      composite.uAlphaGain.value = p.alphaGain;
+      composite.edge.push(p);
 
       // view-space light directions for the fake-sphere puff shading
       camera.updateMatrixWorld();
       invView.copy(camera.matrixWorld).invert();
       cores.uSunWorld.value.copy(sunDir).normalize();
+      sunDirLive.copy(cores.uSunWorld.value);
       cores.uSunView.value.copy(sunDir).normalize().transformDirection(invView);
       cores.uUpView.value.set(0, 1, 0).transformDirection(invView);
 
@@ -187,6 +195,7 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
     compositeQuad: composite.quad,
     sunColorLive: composite.uSunColor.value,
     skyColorLive: composite.uSkyColor.value,
+    sunDirLive,
 
     dispose(): void {
       attachedScene?.remove(composite.quad);

@@ -25,7 +25,7 @@
  *   blurDecay: blur3x3(B) · decay    → A     ← A is always the output
  */
 import type * as THREE from 'three/webgpu';
-import { cameraPosition, clamp, float, mix, smoothstep, texture, uniform } from 'three/tsl';
+import { clamp, float, mix, smoothstep, texture, uniform } from 'three/tsl';
 import { advanceAccumulator, SIM_DT } from '../core/loop';
 import { createOutputTexture } from '../ocean/oceanTextures';
 import { foamParams } from '../params/foam';
@@ -46,6 +46,7 @@ import {
 } from './foamPasses';
 import {
   capVariationNode,
+  coordFootprint,
   foamDetailMask,
   foamWarpVec,
   updateFoamShadingUniforms,
@@ -80,10 +81,15 @@ export interface FoamCascadeInput {
  * would do it silently — the whole §B "silent no-op" family.
  */
 export interface FoamSeaMoments {
-  /** per-cascade RMS ∂Dx/∂x at λ=1, index-aligned with the cascades */
-  readonly cascades: readonly { readonly steepnessRms: number }[];
+  /**
+   * Per-cascade RMS of the Jacobian TRACE (∂Dx/∂x + ∂Dz/∂z) at λ=1,
+   * index-aligned with the cascades. NOT `steepnessRms` (the x-gradient only):
+   * that moment is direction-dependent and the sea now carries two trains with
+   * very different headings and spreads — see foamMath's JACOBIAN_SIGMA_PER_TRACE.
+   */
+  readonly cascades: readonly { readonly jacobianRms: number }[];
   /** the same moment summed in quadrature over all cascades */
-  readonly steepnessRms: number;
+  readonly jacobianRms: number;
   /** choppiness λ actually sent to the GPU (the anti-fold cap, not the slider) */
   effectiveChoppiness(): number;
 }
@@ -107,9 +113,32 @@ export interface FoamSeaMoments {
  */
 const REDUCE_FACTOR = 4;
 
-/** distance fades for the cascade bands, in texel widths (foamMath) */
-const uCascadeFadeTexels = uniform(2300);
-const uCascadeFadeSpan = uniform(3);
+/**
+ * Tier handover, in PIXELS PER TEXEL — not in camera distance.
+ *
+ * MEASURED IN THE BROWSER, from the high camera the user shot all four
+ * `docs/bug-foam-lattice-*.png` from. The old gate was a camera-DISTANCE ramp
+ * (`cascadeFadeTexels` = 2300 texel widths), which folds the angular pixel
+ * size and the Nyquist margin into one constant and therefore cannot know the
+ * GRAZING STRETCH — and from a high camera the grazing stretch is the whole
+ * story. At 300 m altitude one pixel covers 0.234 m of sea while a cascade-1
+ * foam texel is 0.191 m, i.e. the band was already past Nyquist, and the
+ * distance ramp did not even START retiring it until 440 m. The result was a
+ * dense field of hard 1–3 m specks over the entire frame: the "very
+ * grittiness" of the report, still there after the procedural detail layers
+ * were band-limited, because this is the SAME §V.48 error one level up — a
+ * band limit measured against a proxy instead of against the sampling rate.
+ * Forcing the old constant down to 700 removed the specks completely and
+ * confirmed the mechanism (it also removed all real detail, so it is not the
+ * fix — it is the same guess, guessed lower).
+ *
+ * `fwidth` of the sample coordinate IS the sampling rate, at every camera
+ * angle and altitude, with nothing to tune per shot. Keep a tier while its
+ * texel still spans `uTierKeepPixels`, fade it out by one pixel — the same
+ * rule `bandLimitedFbm2` applies to a noise octave, applied to a texture tier.
+ */
+const uTierKeepPixels = uniform(2);
+const uTierFadeSpan = uniform(2);
 
 export function createFoamSim(
   cascades: FoamCascadeInput[],
@@ -126,7 +155,7 @@ export function createFoamSim(
   if (!Number.isInteger(resolution) || resolution < 1) {
     throw new Error(`foam: invalid resolution ${resolution}`);
   }
-  // index-aligned by contract: lane i reads sea.cascades[i].steepnessRms, so a
+  // index-aligned by contract: lane i reads sea.cascades[i].jacobianRms, so a
   // length mismatch would gate a band against another band's σ — the same
   // wrong-statistic bug one level down. Loud at construction, not per texel.
   if (!sea || sea.cascades.length !== cascades.length) {
@@ -169,8 +198,24 @@ export function createFoamSim(
     const lu = createFoamUniforms();
     const front = createOutputTexture(resolution); // A — stable output
     const back = createOutputTexture(resolution); // B — inject scratch
-    const coarsest = i === 0;
-    const coarse = coarsest ? createOutputTexture(coarseN) : null;
+    /**
+     * Which bands get a filtered tier — MEASURED IN THE BROWSER, not assumed.
+     *
+     * Only the coarsest band had one, and from the high camera that was wrong:
+     * at 300 m altitude one pixel covers ~0.25–0.5 m of sea while cascade 1's
+     * texel is 0.191 m, so that band is genuinely past Nyquist there — but its
+     * FEATURES are 1–3 m caps, five to fifteen texels across, which are
+     * perfectly resolvable and are most of what the sea's mid-scale reads as.
+     * Retiring the band (the first fix) removed the aliasing AND the caps, and
+     * left sparse cotton-wool on bare water. A band whose features still
+     * resolve but whose texels do not needs FILTERING, not retirement.
+     *
+     * Cascade 2 (22.7 m domain, 0.044 m texels) is different and genuinely
+     * retires: its features are ≤ 1 m, sub-pixel past ~50 m, so even its
+     * reduced tier would be sub-pixel and fading to the mean IS the answer.
+     */
+    const wantsTier = i < cascades.length - 1;
+    const coarse = wantsTier ? createOutputTexture(coarseN) : null;
     return {
       index: i,
       u: lu,
@@ -217,11 +262,11 @@ export function createFoamSim(
       // band's own λ− mean AND spread — both differ, and λ−'s mean is not 1
       // even on a flat sea. See foamMath, "THE FOLD METRIC" and §V36 for λ−.
       const lambda = sea.effectiveChoppiness();
-      const seaSigma = jacobianSigma(sea.steepnessRms, lambda);
+      const seaSigma = jacobianSigma(sea.jacobianRms, lambda);
       const decay = decayFactorPerFrame(foamParams.decayHalfLife, SIM_DT);
       const fineOff = foamParams.injectFineCascade < 1;
       for (const lane of lanes) {
-        const steep = sea.cascades[lane.index].steepnessRms;
+        const steep = sea.cascades[lane.index].jacobianRms;
         const bandSigma = jacobianSigma(steep, lambda);
         // finest band keeps its opt-out switch (see params/foam.ts) — decay
         // still drains whatever it holds, only injection stops
@@ -241,8 +286,8 @@ export function createFoamSim(
         // EFFECTIVE λ (the anti-fold cap), not the slider
         lane.u.uChoppiness.value = lambda;
       }
-      uCascadeFadeTexels.value = Math.max(1, foamParams.cascadeFadeTexels);
-      uCascadeFadeSpan.value = Math.max(1.05, foamParams.cascadeFadeSpan);
+      uTierKeepPixels.value = Math.max(1, foamParams.tierKeepPixels);
+      uTierFadeSpan.value = Math.max(1.05, foamParams.tierFadeSpan);
       // shading uniforms are display-side: refresh them every frame, even on
       // frames that owe no sim step
       updateFoamShadingUniforms(foamParams, time, oceanParams.windDirection);
@@ -267,15 +312,19 @@ export function createFoamSim(
       // fbm domain-warp on the LOOKUP (world meters) — the low-res sim RT's
       // texel grid otherwise reads as boxy patches (§V20 critique)
       const warped = worldXZ.add(foamWarpVec(worldXZ));
-      // Distance-driven band retirement + filtered far tier. Each cascade's
-      // full-res sample is worth reading only while its texels resolve on
-      // screen; past that it is noise and must hand over to the pre-filtered
-      // coarse tier (the coarsest band) or simply retire (the finer ones).
-      const camDist = worldXZ.sub(cameraPosition.xz).length();
+      // Sampling-rate-driven band retirement + filtered far tier. Each
+      // cascade's full-res sample is worth reading only while its texels
+      // still resolve on screen; past that it is aliasing and must hand over
+      // to the pre-filtered tier (the coarsest band) or retire (the finer
+      // ones — fading to nothing IS the average of a field whose features are
+      // far below one pixel).
+      /** world metres one pixel covers here — grazing stretch included */
+      const pixelMetres = coordFootprint(worldXZ);
       /** 1 while texels this size resolve on screen, 0 once they are sub-pixel */
       const tierWeight = (texelMetres: number) => {
-        const start = float(texelMetres).mul(uCascadeFadeTexels);
-        return smoothstep(start, start.mul(uCascadeFadeSpan.max(1.05)), camDist).oneMinus();
+        // e0 > e1: 1 below the keep width, 0 above one pixel per texel
+        const keep = float(texelMetres).div(uTierKeepPixels.max(1));
+        return smoothstep(keep.mul(uTierFadeSpan.max(1.05)), keep, pixelMetres);
       };
       let raw: any = float(0);
       for (const lane of lanes) {
@@ -283,15 +332,13 @@ export function createFoamSim(
         const fine = texture(lane.front, uv).r;
         const wFine = tierWeight(lane.texelMetres);
         if (lane.coarse) {
-          // Hand over at the FINE tier's own Nyquist distance to the tier
-          // whose texels are 4× the area — not 16× (see REDUCE_FACTOR). The
-          // 4× tier stays resolvable well past where the readable sea ends,
-          // so one handover is the whole chain.
-          const coarse = texture(lane.coarse, uv).r;
+          // Hand over at the FINE tier's own Nyquist point to the tier whose
+          // texels are 4× the area — not 16× (see REDUCE_FACTOR) — and retire
+          // that one at ITS Nyquist point too, rather than letting a 3.3 m
+          // texel alias its way to the horizon.
+          const coarse = texture(lane.coarse, uv).r.mul(tierWeight(lane.coarseTexelMetres));
           raw = raw.add(mix(coarse, fine, wFine));
         } else {
-          // finer bands have no tier: they fade to nothing, which IS the
-          // average of a field whose features are far below one pixel
           raw = raw.add(fine.mul(wFine));
         }
       }

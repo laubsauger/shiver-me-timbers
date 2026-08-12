@@ -122,12 +122,47 @@ export interface CloudParams {
   skyMax: number;
 
   // -- fluff billboards ----------------------------------------------------
+  // The fluff is the ONLY thing that can feather the polygonal rim (§V11b
+  // forbids softening the cores themselves). For it to do that at all its
+  // sprite must reach PAST the lobe silhouette — see the §V11b test in
+  // tests/clouds.test.ts, which pins fluffScale against the lobe's own
+  // worst-case projected radius.
   /** fluff sprite radius as a multiple of its lobe's mean radius */
   fluffScale: number;
   /** fluff sprite peak alpha */
   fluffAlpha: number;
   /** fluff sprite falloff exponent (higher = tighter core, softer skirt) */
   fluffPower: number;
+  /** 0..1 how far the sprite CENTRE is suppressed. The fluff's job is the
+   *  rim; a solid disc would only dilute the lobe's sculpted shading with its
+   *  own flat fake-sphere lighting. */
+  fluffHollow: number;
+  /** r² (0..1 of the sprite) by which that suppression has released — puts
+   *  the feather ring at the lobe's own silhouette */
+  fluffRing: number;
+  /** 0..1 fluff removed toward the TOP of a cluster. Convecting cauliflower
+   *  tops are crisp; the dissipating base is not. A cloud that is uniformly
+   *  soft reads as fake exactly like one that is uniformly sharp. */
+  fluffTopSharp: number;
+  /** 0..1 fluff removed on the SUNWARD side, for the same reason */
+  fluffSunSharp: number;
+  /** 0..1 per-lobe jitter of the fluff sprite radius, so softness is patchy
+   *  along a silhouette instead of a uniform halo */
+  fluffScaleVary: number;
+
+  // -- edge transmission (user 2026-08-12: "the transmission on the edges of
+  // clouds by the sun"). A THIRD light path, neither the sunlit-face term nor
+  // ambient skylight: light that goes THROUGH a thin margin and forward-
+  // scatters toward the eye. Driven by optical depth (the coverage we already
+  // have) and sun alignment, NOT by the silhouette — a screen-space rim would
+  // glow the same on a wisp and on an anvil, which is the tell for an outline
+  // shader. Costs one vec3 uniform; no new sampler, so no §V40 budget.
+  /** peak brightness of the transmitted term, in sunColor units */
+  transGain: number;
+  /** forward-scattering lobe tightness — high = only near the sun */
+  transPower: number;
+  /** Beer-Lambert rate against coverage: how fast thickness kills it */
+  transDepth: number;
 
   /** distance (m) mapped to depth=1 in the RT alpha channel */
   maxCloudDist: number;
@@ -140,10 +175,29 @@ export interface CloudParams {
   distortScale: number;
   distortSpeed: number;
   distortStrength: number;
-  /** how strongly noise erodes/feathers cloud edges (0..1) */
+  /** how strongly the LOW-frequency noise moves the edge threshold (0..1).
+   *  Its period is roughly half a cloud, so this wobbles a silhouette as a
+   *  whole — it is not what makes an edge fray. */
   edgeErode: number;
+  /** the talk's SECOND noise pair (low freq in RG, high freq in BA, blended
+   *  by depth). Multiplier on distortScale for the high-frequency octave... */
+  edgeHiScale: number;
+  /** ...and how far it jitters the edge threshold. This is the fray. Faded
+   *  out with distance (far clouds are crisper, talk 00:20:57) and against
+   *  its own screen-space footprint (§V48). */
+  edgeHiErode: number;
   /** composite alpha gain applied to accumulated coverage */
   alphaGain: number;
+  /** exponential opacity rate: alpha = 1 - exp(-alphaDensity * coverage) */
+  alphaDensity: number;
+  /** WIDTH (in coverage units) of the alpha ramp at depth 0 and depth 1.
+   *  This, not the blur radius, is what decides how soft a silhouette reads:
+   *  coverage is an additive SUM, so a dense cluster's ramp saturates within
+   *  ~1.2 coverage of the edge no matter how wide the blur kernel is. Near
+   *  wide / far narrow reproduces "clouds overhead remain soft and fuzzy,
+   *  clouds in the distance appear sharper" (talk 00:20:57). */
+  alphaSoftNear: number;
+  alphaSoftFar: number;
   /** camera-pinned composite quad distance (m) */
   quadDistance: number;
   /** lighting reconstruction colors: color = sunColor*R + skyColor*G */
@@ -203,9 +257,14 @@ const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   silverLining: { min: 0, max: 2, step: 0.01 },
   skyMin: { min: 0, max: 1.5, step: 0.01 },
   skyMax: { min: 0, max: 1.5, step: 0.01 },
-  fluffScale: { min: 0.5, max: 3, step: 0.05 },
+  fluffScale: { min: 0.5, max: 4, step: 0.05 },
   fluffAlpha: { min: 0, max: 1, step: 0.01 },
   fluffPower: { min: 0.5, max: 4, step: 0.05 },
+  fluffHollow: { min: 0, max: 1, step: 0.01 },
+  fluffRing: { min: 0.02, max: 1, step: 0.01 },
+  fluffTopSharp: { min: 0, max: 1, step: 0.01 },
+  fluffSunSharp: { min: 0, max: 1, step: 0.01 },
+  fluffScaleVary: { min: 0, max: 0.8, step: 0.01 },
   coverage: { min: 0, max: 1, step: 0.01 },
   blurRadiusNear: { min: 0, max: 16, step: 0.5 },
   blurRadiusFar: { min: 0, max: 16, step: 0.5 },
@@ -213,7 +272,15 @@ const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   distortSpeed: { min: 0, max: 0.1, step: 0.001 },
   distortStrength: { min: 0, max: 0.15, step: 0.001 },
   edgeErode: { min: 0, max: 1, step: 0.01 },
+  edgeHiScale: { min: 1, max: 16, step: 0.1 },
+  edgeHiErode: { min: 0, max: 1.5, step: 0.01 },
   alphaGain: { min: 0, max: 4, step: 0.05 },
+  alphaDensity: { min: 0.2, max: 6, step: 0.05 },
+  alphaSoftNear: { min: 0.05, max: 4, step: 0.05 },
+  transGain: { min: 0, max: 3, step: 0.01 },
+  transPower: { min: 1, max: 64, step: 0.5 },
+  transDepth: { min: 0.1, max: 8, step: 0.05 },
+  alphaSoftFar: { min: 0.05, max: 4, step: 0.05 },
   skyTint: { min: 0, max: 1, step: 0.01 },
   sunTint: { min: 0, max: 1, step: 0.01 },
   paletteWarmthGain: { min: 0, max: 4, step: 0.05 },
@@ -272,23 +339,53 @@ export const cloudParams: CloudParams = registerParams(
     // 32 clusters x 64 lobes = the panel maxima, so the panel can never
     // ask for more instances than the buffers hold (§V28)
     maxLobes: 2048,
-    lobeDetail: 1,
+    // detail 1 = a subdivided icosahedron of 80 faces, whose silhouette is a
+    // ~10-gon of STRAIGHT CHORDS. That is what "the edges seem a little bit
+    // sharp / quite sharp" actually was: not a steep alpha gradient (measured
+    // at 5 screenshot px 10-90, already soft) but dead-straight segments
+    // metres long across a cloud's outline. No amount of blur or feathering
+    // fixes a straight line; only more tessellation does. 2 = 320 faces.
+    lobeDetail: 2,
 
     lobeRelief: 0.26,
     lobeReliefScale: 2.3,
     rimSoftness: 0.42,
-    sunPower: 1.7,
-    sunSideGain: 0.55,
-    selfShadow: 0.32,
+    sunPower: 1.9,
+    sunSideGain: 0.8,
+    selfShadow: 0.18,
     silverLining: 0.8,
-    // undersides keep real ambient — a cloud base is blue-grey, never black,
-    // and skyMin is the only thing holding it up once the sun term dies
-    skyMin: 0.35,
+    // A FLOOR THAT IS ALSO A CEILING IS JUST A FILL (§V56). 0.35..0.75 is a
+    // 2.1x range across the entire normal sphere, so every face got roughly
+    // the same skylight and the mass read as one flat tone — most of why the
+    // clouds looked like cut-outs rather than solids, and visible in
+    // docs/clouds.png as the reference RT having SEPARATED red and green
+    // regions where ours is yellow almost everywhere. 6.8x now. The base is
+    // still blue-grey rather than black: skyMin rides skyColor, not zero.
+    // The range is opened DOWNWARD only. Raising skyMax to 0.95 pushes
+    // sun*0.95 + sky*skyMax to 1.458 and the §B.19 clipping guard in
+    // tests/clouds.test.ts catches it — which is the whole point of that
+    // guard, and is why the lit end stays where the palette work put it.
+    skyMin: 0.14,
     skyMax: 0.75,
 
-    fluffScale: 1.25,
-    fluffAlpha: 0.3,
-    fluffPower: 1.9,
+    // fluffScale 1.25 was SMALLER than the lobe's own worst-case projected
+    // radius (rx 1.25 x relief 1.377 = 1.72 mean radii), so the entire sprite
+    // sat under the polygon it was supposed to feather: measured alpha at the
+    // rim was ~0.03 against a lobe alpha of 0.85. The layer drew, cost fill,
+    // and contributed nothing to the silhouette.
+    fluffScale: 2.1,
+    fluffAlpha: 0.45,
+    fluffPower: 1.55,
+    fluffHollow: 0.65,
+    fluffRing: 0.34,
+    fluffTopSharp: 0.55,
+    fluffSunSharp: 0.3,
+    fluffScaleVary: 0.35,
+
+    // tuned at the shipped 17.3 sunset, the framing the note came from
+    transGain: 0.9,
+    transPower: 8,
+    transDepth: 1.5,
 
     maxCloudDist: 4000,
     coverage: 0.85, // per-lobe density; sky openness comes from clusterCount
@@ -299,8 +396,24 @@ export const cloudParams: CloudParams = registerParams(
     distortScale: 3.0,
     distortSpeed: 0.018,
     distortStrength: 0.016,
-    edgeErode: 0.5,
+    // dropped from 0.5: at this frequency erosion only shifts the whole
+    // silhouette, and at 0.5 it cut the fluff skirt (coverage ~0.2-0.5) away
+    // entirely, which is most of why the edge came back hard after the blur
+    edgeErode: 0.28,
+    edgeHiScale: 6.0,
+    edgeHiErode: 0.42,
     alphaGain: 1.1,
+    alphaDensity: 1.6,
+    // MEASURED (§V22), and the measurement changed the SHAPE of the gate, not
+    // just these numbers — see cloudComposite: the ramp is now CENTRED on the
+    // erosion threshold instead of starting at it. Widening a gate that starts
+    // at rimT also drags its 50% point to rimT+soft/2, i.e. the visible
+    // silhouette moves inward to cov~0.9 and the fluff skirt (cov 0.3-0.5)
+    // that is supposed to be the soft part is crushed to ~0.04 alpha. Centred,
+    // the same width lifts that skirt to ~0.37 and softens without moving the
+    // edge. Width still clears ln(10)/alphaDensity at the near end (§V60).
+    alphaSoftNear: 1.5,
+    alphaSoftFar: 0.5,
     quadDistance: 500,
     // Retuned against the REPALETTED sky (skyParams zenith 0x336cb1 / mid
     // 0x558fbe). The old pair (0xfff1d4 / 0xe9eff5) was two near-whites that

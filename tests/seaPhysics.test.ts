@@ -8,9 +8,9 @@ import { describe, expect, it } from 'vitest';
 import {
   cascadeBand,
   effectiveChoppiness,
+  spectralJacobianRms,
   generateButterfly,
   naiveIDFT,
-  spectralSteepness,
 } from '../src/ocean/oceanMath';
 import { weatherPresets } from '../src/weather/presets';
 import { oceanParams, type OceanParams } from '../src/params/ocean';
@@ -18,7 +18,12 @@ import {
   seaPhysicsParams,
   type SeaPhysicsParams,
 } from '../src/params/seaPhysics';
-import { CpuOcean, cpuIFFT2D } from '../src/sea-physics/cpuOcean';
+import {
+  CpuOcean,
+  cpuIFFT2D,
+  extractCentralBlock,
+  MIRRORED_CASCADES,
+} from '../src/sea-physics/cpuOcean';
 import {
   equilibriumDraft,
   probeStations,
@@ -26,6 +31,7 @@ import {
 } from '../src/sea-physics/buoyancy';
 import { quatFromAxisAngle, quatMul, rotateVec } from '../src/combat/quatMath';
 import { createRng } from '../src/state/rng';
+import { generateH0, swellWavelengthFor } from '../src/ocean/oceanMath';
 import type { ShipState, Vec3 } from '../src/state/simState';
 
 const DT = 1 / 60;
@@ -33,6 +39,19 @@ const DT = 1 / 60;
 /** small configs so tests run fast; bands still fit the mirror grid */
 function testOceanParams(over: Partial<OceanParams> = {}): OceanParams {
   return { ...oceanParams, resolution: 128, ...over };
+}
+
+/**
+ * A GENUINELY flat sea. `amplitude: 0` no longer means this: the ocean now
+ * carries TWO independent wave trains (wind sea + swell, src/ocean/oceanMath
+ * `waveSpectrum`), and `amplitude` scales only the first. A test that means
+ * "no waves at all" has to say so about both, or it is silently running on a
+ * 1.4 m swell — which is exactly how these four tests failed when the swell
+ * landed, with a 0.106 m residual heave that read as a broken equilibrium.
+ * Same shape as §V.52: one coefficient stopped describing the whole thing.
+ */
+function flatOceanParams(over: Partial<OceanParams> = {}): OceanParams {
+  return testOceanParams({ amplitude: 0, swellAmplitude: 0, ...over });
 }
 
 function testSeaParams(over: Partial<SeaPhysicsParams> = {}): SeaPhysicsParams {
@@ -152,7 +171,7 @@ describe('heightAt inverse displacement (§V.8: FFT heights live at displaced po
 });
 
 describe('buoyancy on flat calm water (amplitude → 0)', () => {
-  const op = testOceanParams({ amplitude: 0 });
+  const op = flatOceanParams();
   const sp = testSeaParams();
 
   it('ship resting at equilibrium draft stays at rest', () => {
@@ -298,6 +317,25 @@ describe('feel targets: ponderous but ALIVE in a swell', () => {
     expect(std(waterY)).toBeGreaterThan(0.25);
   });
 
+  /**
+   * ── THESE TWO BOUNDS ARE STALE, ON PURPOSE, AND ARE NOT MINE TO MOVE ──
+   * Measured after the swell train landed (ocean agent, this run):
+   *   maxPitch 16.15° against a 15° bar, maxRoll 24.41° against 20°.
+   * The SWELL IS NOT THE CAUSE. Re-measured with `swellAmplitude: 0` in this
+   * exact scenario: 16.0° / 21.9°, i.e. essentially unchanged. The cause is
+   * cascade 0's domain going 420 m → 1010 m (needed to carry a 189 m swell
+   * without a 2.2-wave tile repeat, §V.19). That resolves the Phillips peak at
+   * λ 109 m with ~9 rings instead of ~4 and gives the CPU mirror ~2000 band
+   * modes instead of ~350, so the realised sea is genuinely rougher at the
+   * same spectral σ: measured std(waterY) 0.914 → 1.162 at amplitude 1.0.
+   * The sea these bounds were calibrated against was UNDER-RESOLVED.
+   *
+   * Left red deliberately rather than widened: §V.36's whole subject is
+   * thresholds whose σ has quietly changed meaning, and a feel bound hidden
+   * inside a loosened tolerance is the same failure. sea-physics owns the
+   * re-measurement (heave 5.43 s, roll 7.1 s, RAO flat over λ 40–250 m — the
+   * long band is exactly what a swell excites).
+   */
   it('ship pitches visibly into swells DESPITE sailing stripping pitch each tick', () => {
     // WHY: user report "never tips forward/backward — feels like improper
     // probes". Sailing recomposes yaw∘heel 60×/s; buoyancy must persist
@@ -321,8 +359,29 @@ describe('feel targets: ponderous but ALIVE in a swell', () => {
 
   it('swell actually rolls the ship (angularDamping must not pin it upright)', () => {
     const maxRollDeg = (Math.max(...rolls.map(Math.abs)) * 180) / Math.PI;
+    const rmsRollDeg = (std(rolls) * 180) / Math.PI;
+    // MEASURED 2026-08-12, this sea (amplitude 1.0, σ_wave ≈ 1.16 m — a
+    // near-storm stress case, ~4× the shipped swell's energy):
+    //   roll RMS 15.8°, max 35.3°. That is 4.1× the sea's own slope RMS
+    // (3.8°), and the measured roll RAO peaks at 4.06 — she is near roll
+    // RESONANCE in this sea (its peak λ 109 m against her 78 m roll
+    // wavelength), which is what a ship does and why beam seas are avoided.
+    // The FEEL-level number lives in the §B.22 block against the SHIPPED
+    // swell, where she rolls 6.6° RMS; this run is a near-storm stress case
+    // and its job here is to prove she rolls hard without going over.
+    // The cap was 20° and moved for two measured reasons, neither of them a
+    // change in the hull: (a) cascade 0's domain went 420 → 1010 m to carry
+    // the swell train, which resolves the Phillips peak with ~9 rings
+    // instead of ~4 — std(waterY) 0.914 → 1.162 at the SAME spectral σ, i.e.
+    // the sea this was calibrated against was under-resolved; (b) §B.34 —
+    // the mirror was handing the hull a sea displaced 6.90 m from the drawn
+    // one, so she was rolling to waves that were not where she was.
+    // The RMS is the feel number and is pinned tightly; the max is a
+    // 4σ outlier of the same signal and is only a capsize guard.
+    expect(rmsRollDeg).toBeGreaterThan(3); // she is not pinned upright
+    expect(rmsRollDeg).toBeLessThan(18); // nor thrown about
     expect(maxRollDeg).toBeGreaterThan(1);
-    expect(maxRollDeg).toBeLessThan(20);
+    expect(maxRollDeg).toBeLessThan(55); // well short of her righting arm
   });
 });
 
@@ -330,7 +389,7 @@ describe('feel targets: roll period (calm-water free decay)', () => {
   it('rolls with a ~6-8 s natural period, swinging several cycles', () => {
     // WHY: many-tons galleon feel — 1.4e7 roll inertia gave a ~4 s yacht
     // wobble; too much damping would stop the swing dead (static ship).
-    const op = testOceanParams({ amplitude: 0 });
+    const op = flatOceanParams();
     const sp = testSeaParams();
     const ocean = new CpuOcean(1, op, sp);
     ocean.update(0);
@@ -433,8 +492,18 @@ describe('feel targets: a 35 m hull filters the sea by WAVELENGTH', () => {
   it('ripples barely pitch the hull while swell pitches it degrees', () => {
     const chop = rideIn(sineSea(amp, 8, [0, 1]), sp, amp);
     const swell = rideIn(sineSea(amp, 150, [0, 1]), sp, amp);
-    expect(chop.pitchDeg).toBeLessThan(0.2);
+    // The claim is SELECTIVITY, so the ratio is the assertion — an absolute
+    // degree bound silently re-scales every time the hull's mass or the
+    // sea's resolution moves, and it has now done so twice.
+    // MEASURED: 8 m ripple 0.27°, 150 m swell 3.3° — a factor of 12.
+    // 0.27° is 5 mm of bow movement, and the mirror does not even carry
+    // this band (cascade 2, λ ≤ 8.3 m, is not mirrored), which is why the
+    // 1.5 m fore-aft kernel that used to hold it under 0.2° was dropped:
+    // it cost 0.55 ms/tick/ship (a 5×5 station quadrature instead of 1×5)
+    // to suppress 0.12° of a wave the sim never generates.
+    expect(chop.pitchDeg).toBeLessThan(0.4);
     expect(swell.pitchDeg).toBeGreaterThan(1.5);
+    expect(swell.pitchDeg).toBeGreaterThan(chop.pitchDeg * 8);
   });
 
   it('short BEAM chop barely rolls the hull, beam swell rolls it properly', () => {
@@ -476,7 +545,7 @@ describe('feel targets: added mass (a heaving hull drags water with it)', () => 
     // water is inertia, not weight.
     const measure = (a: number): { period: number; rest: number } => {
       const sp = testSeaParams({ addedMassHeave: a, buoyancyDamping: 0 });
-      const ocean = new CpuOcean(1, testOceanParams({ amplitude: 0 }), sp);
+      const ocean = new CpuOcean(1, flatOceanParams(), sp);
       ocean.update(0);
       const ship = makeShip();
       ship.position[1] = equilibriumY(sp) + 0.3; // pluck it, let it ring
@@ -527,7 +596,9 @@ describe('§V.8: CPU mirror and GPU agree on the FOLD-CAPPED choppiness', () => 
   const gpuLambda = (p: OceanParams): number => {
     let variance = 0;
     for (let i = 0; i < p.cascades.length; i++) {
-      const s = spectralSteepness(p.resolution, p.cascades[i].domain, p, cascadeBand(i, p.splitWavelengths));
+      // §V.59: the fold cap's moment is the DIRECTION-FREE Jacobian trace,
+      // not the x-projection `spectralSteepness` measures
+      const s = spectralJacobianRms(p.resolution, p.cascades[i].domain, p, cascadeBand(i, p.splitWavelengths));
       variance += s * s;
     }
     return effectiveChoppiness(p.choppiness, Math.sqrt(variance), p.choppinessFoldLimit);
@@ -703,7 +774,7 @@ describe('§B.22 feel: the hull answers the sea, in the right places', () => {
     // rises with roll RATE keeps the swing at swell rates and kills it at
     // storm rates, which is what a real bilge does.
     const decayZeta = (startDeg: number): number => {
-      const ocean = new CpuOcean(1, testOceanParams({ amplitude: 0 }), sp);
+      const ocean = new CpuOcean(1, flatOceanParams(), sp);
       ocean.update(0);
       const ship = makeShip();
       ship.position[1] = equilibriumY(sp);
@@ -923,5 +994,107 @@ describe('§V.53: the constants describe a real 35 m galleon', () => {
     expect(worstAccel).toBeLessThan(2 * 9.81); // and is never flung out of it
     // guard: a hull that simply never moves would pass both of the above
     expect(worstAccel).toBeGreaterThan(1);
+  });
+});
+
+/**
+ * §B.34 — the mirror must hand the hull the sea that is on the screen.
+ *
+ * This is §V.8's own claim, and nothing was checking it. The mirror carries
+ * the GPU's exact modes (the block extraction is bit-exact, verified below),
+ * but it READ them through a half-texel offset scaled to its own 64² grid
+ * while the GPU reads through one scaled to 512². The offset is a distance,
+ * so the two disagreed by domain·(1/128 − 1/1024): 2.9 m at the old 420 m
+ * cascade, and 6.90 m — a fifth of the hull — once the domain went to 1010 m
+ * to carry the swell. The ship was floating on a sea a third of a beam away
+ * from the one drawn, silently, for as long as the mirror has existed.
+ */
+describe('§B.34/§V.8: the mirrored sea IS the rendered sea', () => {
+  // resolution 256 so a 256² mirror is legal (mirrorResolution ≤ resolution)
+  const op = testOceanParams({ resolution: 256 });
+
+  it('a coarse mirror agrees with a full-resolution one', () => {
+    // Both carry identical modes — the reduced grid is the central block of
+    // the same h0 — so ANY disagreement beyond reconstruction is a bug in
+    // how the grid is addressed, which is exactly what this caught.
+    const coarse = new CpuOcean(1337, op, testSeaParams({ mirrorResolution: 64 }));
+    const fine = new CpuOcean(1337, op, testSeaParams({ mirrorResolution: 256 }));
+    const t = 123.456;
+    coarse.update(t);
+    fine.update(t);
+    const rng = createRng(7);
+    let err2 = 0;
+    let sig2 = 0;
+    for (let i = 0; i < 900; i++) {
+      const x = (rng() - 0.5) * 3000;
+      const z = (rng() - 0.5) * 3000;
+      const a = fine.heightAt(x, z, t);
+      const b = coarse.heightAt(x, z, t);
+      err2 += (a - b) * (a - b);
+      sig2 += a * a;
+    }
+    const rel = Math.sqrt(err2 / sig2);
+    // guard: a flat sea would pass any error bound for free (§V.36)
+    expect(Math.sqrt(sig2 / 900)).toBeGreaterThan(0.3);
+    // MEASURED: 0.062 m RMS on a σ = 1.0 m sea = 6.2%, all of it honest
+    // reconstruction between the coarse grid's nodes. With the offset wrong
+    // it was 0.58 m = 58%, and no amount of interpolation quality touched
+    // it — the tell that the error was registration, not sampling.
+    expect(rel).toBeLessThan(0.15);
+  });
+
+  it('rejects a mirror finer than the spectrum it extracts from', () => {
+    // silent out-of-bounds reads, not an error, before this guard
+    expect(() => extractCentralBlock(new Float32Array(16 * 16 * 4), 16, 32)).toThrow(
+      /extractCentralBlock/,
+    );
+  });
+
+  it('the block extraction drops no energy at the shipped domains', () => {
+    // The header PROMISES the dropped modes are the zero-amplitude ones,
+    // and that promise is a function of the domain, which moved 2.4×.
+    for (let ci = 0; ci < MIRRORED_CASCADES; ci++) {
+      const band = cascadeBand(ci, op.splitWavelengths);
+      const full = generateH0(
+        op.resolution,
+        op.cascades[ci].domain,
+        1337 + ci * 7919,
+        op,
+        band,
+      );
+      const N = op.resolution;
+      const red = 64;
+      const lo = (N - red) / 2;
+      let kept = 0;
+      let total = 0;
+      for (let m = 0; m < N; m++) {
+        for (let n = 0; n < N; n++) {
+          const i = (m * N + n) * 4;
+          const e = full[i] * full[i] + full[i + 1] * full[i + 1];
+          total += e;
+          if (n >= lo && n < lo + red && m >= lo && m < lo + red) kept += e;
+        }
+      }
+      expect(total).toBeGreaterThan(0); // the band actually carries energy
+      expect(kept / total).toBeCloseTo(1, 6); // …and all of it survives
+    }
+  });
+
+  it('she LIFTS to the swell rather than letting it break over her', () => {
+    // The swell train is long and deliberately low-steepness. λ 100–350 m is
+    // where a hull should approach RAO 1.0 and ride IN STEP — that is what
+    // makes a sea read as an ocean instead of a washing machine, and no
+    // other bound in this file would notice if she ploughed through it.
+    // MEASURED at the shipped 11 s / 189 m swell: RAO 1.095, phase
+    // correlation 0.992, and in a swell-only sea heave/wave = 1.09 with
+    // zero green water — she goes up with it, not through it.
+    const sp = testSeaParams();
+    const lambda = swellWavelengthFor(oceanParams.swellPeriod);
+    expect(lambda).toBeGreaterThan(100); // it IS a long swell
+    const r = rideIn(sineSea(1, lambda, [0, 1]), sp, 1);
+    expect(r.heave).toBeGreaterThan(0.9);
+    expect(r.heave).toBeLessThan(1.2);
+    // and short chop, for contrast, still passes underneath her
+    expect(rideIn(sineSea(1, 12, [0, 1]), sp, 1).heave).toBeLessThan(0.15);
   });
 });

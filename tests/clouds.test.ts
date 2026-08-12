@@ -378,3 +378,91 @@ describe('live cloud palette (§T.39 day cycle, §B.19 guard)', () => {
     expect(stormy).toBeLessThan(fair * 0.6);
   });
 });
+
+/**
+ * The fluff is the ONLY layer allowed to soften a cloud edge — §V11b forbids
+ * softening the cores themselves, because a sculpted silhouette is the whole
+ * point of making them meshes. So "the fluff exists" is not the property that
+ * matters; "the fluff puts alpha OUTSIDE the polygon" is. It did not: the
+ * sprite was smaller than the lobe it was meant to feather, so the layer drew
+ * ~400 instances of fill every frame and contributed 1.6% alpha at the rim.
+ *
+ * CPU transliteration of the sprite falloff in cloudCores.ts (`shape^power`
+ * times the hollow-centre ring). If the two drift the numbers below stop
+ * meaning anything, so keep them together.
+ */
+const fluffAlphaAt = (rNorm: number, p: CloudParams): number => {
+  const r2 = Math.min(1, rNorm * rNorm);
+  const shape = Math.max(0, 1 - r2);
+  const t = Math.min(1, Math.max(0, r2 / Math.max(0.02, p.fluffRing)));
+  const hollow = 1 - p.fluffHollow + p.fluffHollow * (t * t * (3 - 2 * t));
+  return Math.pow(shape, p.fluffPower) * hollow;
+};
+
+/** mean projected radius of a lobe, in units of its own mean radius: the
+ *  horizontal semi-axis is `size * lerp(0.9, 1.25, rng)` and relief averages
+ *  to 1 (mx_noise is zero-mean), so the silhouette a fluff sprite has to
+ *  reach past sits at ~1.075 mean radii. */
+const MEAN_LOBE_RIM = (0.9 + 1.25) / 2;
+
+describe('fluff actually feathers the rim (§V11b: cores stay sculpted)', () => {
+  it('the sprite must OVERHANG the lobe, or it softens nothing', () => {
+    // a sprite of radius `fluffScale` mean-radii is pure interior below
+    // MEAN_LOBE_RIM, and its own falloff has decayed to nothing well before
+    // that. 1.25 (the shipped value until 2026-08-12) failed this.
+    expect(cloudParams.fluffScale).toBeGreaterThan(MEAN_LOBE_RIM * 1.6);
+  });
+
+  it('and carry real alpha AT the rim, not a rounding error', () => {
+    // the lobe underneath is at `coverage` alpha; anything below a few percent
+    // of that is invisible against it no matter how wide the sprite is
+    const seedMean = 0.8; // iSeed*0.4 + 0.6 over a uniform seed
+    const atRim =
+      fluffAlphaAt(MEAN_LOBE_RIM / cloudParams.fluffScale, cloudParams) *
+      seedMean *
+      cloudParams.fluffAlpha *
+      cloudParams.coverage;
+    expect(atRim).toBeGreaterThan(0.1);
+    // ...but the sprite must still be a skirt, not a second opaque disc, or
+    // the flat billboard shading buries the lobe's sculpted lighting
+    expect(atRim).toBeLessThan(cloudParams.coverage * 0.5);
+  });
+
+  it('softness is not uniform: tops and sunward shoulders stay crisp', () => {
+    // the user's actual note — "not everywhere, of course; sometimes clouds do
+    // have quite sharp edges". A cloud feathered evenly all round reads as
+    // fake in exactly the same way as one that is sharp all round.
+    expect(cloudParams.fluffTopSharp).toBeGreaterThan(0);
+    expect(cloudParams.fluffSunSharp).toBeGreaterThan(0);
+    // and both must leave SOME feather at the top, or the crisp/soft contrast
+    // becomes a hard-edged cap sitting on a fuzzy base
+    expect(cloudParams.fluffTopSharp).toBeLessThan(1);
+    expect(cloudParams.fluffSunSharp).toBeLessThan(1);
+  });
+});
+
+describe('composite alpha ramp is the softness knob (§V11 stage 3)', () => {
+  it('the erosion gate is never narrower than the body curve it multiplies', () => {
+    // coverage is an additive SUM of premultiplied lobe alphas, so the visible
+    // edge lives entirely in the low-coverage ramp. body = 1-exp(-density*cov)
+    // reaches 0.9 at cov = ln(10)/density; if the gate's own width sits below
+    // that, the GATE is the hard edge and no amount of blur can help. The
+    // shipped 0.55 against density 1.6 was 2.6x too narrow.
+    const bodyRamp = Math.log(10) / cloudParams.alphaDensity;
+    expect(cloudParams.alphaSoftNear).toBeGreaterThanOrEqual(bodyRamp);
+  });
+
+  it('near soft, far sharp — the talk\'s own depth threshold (00:20:57)', () => {
+    // "clouds in the distance appear sharper and look like they're further
+    // away whereas clouds overhead remain soft and fuzzy"
+    expect(cloudParams.alphaSoftNear).toBeGreaterThan(cloudParams.alphaSoftFar);
+  });
+
+  it('the high-frequency fray exists and is finer than the wobble', () => {
+    // the low-frequency lookup has a period of roughly half a cloud: it slides
+    // a silhouette around as one piece, it cannot fray it. The talk packs a
+    // second, higher-frequency noise for exactly this.
+    expect(cloudParams.edgeHiErode).toBeGreaterThan(0);
+    expect(cloudParams.edgeHiScale).toBeGreaterThan(1);
+  });
+});

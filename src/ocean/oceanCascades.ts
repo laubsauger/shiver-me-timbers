@@ -11,6 +11,10 @@ import {
   generateButterfly,
   generateH0,
   spectralHeightVariance,
+  slopeResolutionFootprint,
+  slopeWavelengthHistogram,
+  SLOPE_BIN_COUNT,
+  spectralJacobianRms,
   spectralSteepness,
 } from './oceanMath';
 import { createDataTexture, createOutputTexture, createSpectrumTexture } from './oceanTextures';
@@ -25,8 +29,21 @@ export class OceanCascade {
 
   /** RMS ∂Dx/∂x of this cascade's band — feeds the anti-fold choppiness cap */
   steepnessRms = 0;
+  /**
+   * RMS of the Jacobian TRACE (∂Dx/∂x + ∂Dz/∂z, transfer |k|) — the moment the
+   * foam gate and the §V.58 λ− fold metric are actually built on. Published
+   * rather than converted from `steepnessRms` by a constant: the ratio between
+   * the two is fixed by the spectrum's DIRECTIONAL SHAPE, and with the swell
+   * train the sea now carries two very different shapes at once. Measured, the
+   * baked 1.79 held to 1% for every wind-sea band and was 2.65× off in a
+   * swell-dominated one (§B, and §B.12's lesson again: publish the moment, do
+   * not fit a constant to it).
+   */
+  jacobianRms = 0;
   /** elevation variance of this cascade's band (m²) — sea-state scale */
   heightVariance = 0;
+  /** slope variance binned by wavelength — see `slopeFootprint` */
+  private slopeBins: Float64Array<ArrayBufferLike> = new Float64Array(SLOPE_BIN_COUNT);
   private h0Texture: THREE.DataTexture;
   private passes: unknown[] = [];
   private timeUniform!: { value: number };
@@ -63,9 +80,22 @@ export class OceanCascade {
     // measured on the same grid the spectrum uses, so the cap tracks every
     // spectrum-shaping param (amplitude, wind, band split) automatically
     this.steepnessRms = spectralSteepness(p.resolution, this.domain, p, band);
+    this.jacobianRms = spectralJacobianRms(p.resolution, this.domain, p, band);
     this.heightVariance = spectralHeightVariance(p.resolution, this.domain, p, band);
+    this.slopeBins = slopeWavelengthHistogram(p.resolution, this.domain, p, band);
     // seed offset per cascade → uncorrelated gaussians across cascades
     return generateH0(p.resolution, this.domain, this.seed + this.index * 7919, p, band);
+  }
+
+  /**
+   * Pixel footprint (m) at which `keep` of this band's SLOPE variance is still
+   * resolvable — the quantity the fragment normal LOD fades against (§V.48).
+   * Published as a method rather than two fields so the SHADING owns the keep
+   * fractions it wants and the SIM owns only the measurement: the sim must not
+   * import shading params to decide where a look ends.
+   */
+  slopeFootprint(keep: number): number {
+    return slopeResolutionFootprint(this.slopeBins, keep);
   }
 
   /** re-generate h0 after spectrum-shaping params change (live tweak) */
@@ -85,11 +115,30 @@ export class OceanCascade {
 }
 
 /** params whose change requires h0 regeneration (vs live uniforms) */
-function spectrumSignature(p: OceanParams): string {
+/**
+ * EVERY param `waveSpectrum` reads. Omitting one is §B.7 verbatim — the GPU
+ * keeps the launch-time h0 while the panel and the weather presets move the
+ * number, silently, and the CPU buoyancy mirror then floats ships on a
+ * different ocean than the one drawn (§V.8). The swell block was missing here
+ * for exactly as long as it took to write this comment, and the presets lerp
+ * all three of its keys. tests/ocean.test.ts pins the list against
+ * `OceanParams` so the NEXT spectrum param cannot be forgotten either.
+ */
+export const SPECTRUM_SIGNATURE_KEYS = [
+  'resolution', 'amplitude', 'windSpeed', 'windDirection',
+  'directionality', 'oppositeWaveDamp', 'smallWaveCutoff',
+  'splitWavelengths', 'cascades',
+  'swellPeriod', 'swellAmplitude', 'swellDirection',
+  'swellDirectionality', 'swellBandwidth', 'swellGridModes',
+] as const;
+
+export function spectrumSignature(p: OceanParams): string {
   return [
     p.resolution, p.amplitude, p.windSpeed, p.windDirection,
     p.directionality, p.oppositeWaveDamp, p.smallWaveCutoff,
     p.splitWavelengths, p.cascades.map((c) => c.domain),
+    p.swellPeriod, p.swellAmplitude, p.swellDirection,
+    p.swellDirectionality, p.swellBandwidth, p.swellGridModes,
   ].join('|');
 }
 
@@ -108,6 +157,9 @@ export class OceanSimulation {
    * variances add — which is why the cap is global and not per-cascade.
    */
   steepnessRms = 0;
+  /** RMS Jacobian trace summed over cascades, at choppiness 1 — see the
+   *  per-cascade field. Bands are independent, so variances add. */
+  jacobianRms = 0;
   private signature: string;
   private rebuildCountdown = -1;
 
@@ -126,12 +178,15 @@ export class OceanSimulation {
   private refreshSeaState(): void {
     let heightVariance = 0;
     let steepnessVariance = 0;
+    let jacobianVariance = 0;
     for (const c of this.cascades) {
       heightVariance += c.heightVariance;
       steepnessVariance += c.steepnessRms * c.steepnessRms;
+      jacobianVariance += c.jacobianRms * c.jacobianRms;
     }
     this.heightRms = Math.sqrt(Math.max(1e-6, heightVariance));
     this.steepnessRms = Math.sqrt(Math.max(0, steepnessVariance));
+    this.jacobianRms = Math.sqrt(Math.max(0, jacobianVariance));
   }
 
   /**
@@ -155,7 +210,8 @@ export class OceanSimulation {
    * it only engages on seas that would genuinely self-intersect.
    */
   effectiveChoppiness(p: OceanParams = oceanParams): number {
-    return effectiveChoppiness(p.choppiness, this.steepnessRms, p.choppinessFoldLimit);
+    // §V.59: the fold cap reads the DIRECTION-FREE trace moment
+    return effectiveChoppiness(p.choppiness, this.jacobianRms, p.choppinessFoldLimit);
   }
 
   /** call once per rendered frame with sim time (§V.2: time from SimState) */

@@ -213,6 +213,7 @@ export function createPlanarReflection(
       seed: opts.clouds.seed,
       sunColorLive: opts.clouds.sunColorLive,
       skyColorLive: opts.clouds.skyColorLive,
+      sunDirLive: opts.clouds.sunDirLive,
       params: opts.clouds.params ?? cloudParams,
     });
   }

@@ -312,6 +312,7 @@ async function boot(): Promise<void> {
       // warms with the real clouds instead of staying at the midday hexes.
       sunColorLive: clouds.sunColorLive,
       skyColorLive: clouds.skyColorLive,
+      sunDirLive: clouds.sunDirLive,
     },
   });
 
@@ -813,6 +814,11 @@ async function boot(): Promise<void> {
           windStrength: palmWindStrength(state.wind.speed),
           swell: ocean.heightRms * 2, // Hs/2; heightRms is σ
           sunDirection: sky.sunDirection,
+          // §V30/§V43: the islands melt into the SAME atmosphere the water
+          // does. The sky rig retints scene.fog.color every frame and the
+          // ocean copies it for its own haze, so handing the identical object
+          // over is what keeps land and sea agreeing at every coastline.
+          hazeColor: app.scene.fog?.color ?? hazeFallback,
           cameraPosition: app.camera.position,
         },
         (x, z) => cpuOcean.heightAt(x, z, state.time),
@@ -1133,6 +1139,7 @@ async function boot(): Promise<void> {
 }
 
 import {
+  Color,
   Quaternion,
   Vector2,
   Vector3,
@@ -1141,6 +1148,12 @@ import {
   type Object3D,
 } from 'three/webgpu';
 const tmpDir = new Vector3();
+/**
+ * Fallback atmosphere colour if the scene ever has no fog. Same fallback the
+ * ocean uses (oceanSurface.ts) so land and sea cannot melt into two different
+ * skies. §V31: hex must enter through `new Color(hex)`, never `setRGB`.
+ */
+const hazeFallback = new Color(skyParams.horizonColor);
 const windDirTmp = new Vector2();
 const bowWorldTmp = new Vector3();
 const shipVelTmp = new Vector3();

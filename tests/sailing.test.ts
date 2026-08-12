@@ -420,8 +420,19 @@ describe('§B.23: she crabs and she hunts — a ship, not a rail vehicle', () =>
     // from the roll ANGLE picked up the few degrees by which sailing's heel
     // offset and buoyancy's righting moment disagree, and turned her 58° in
     // 120 s of dead calm.)
-    const wander = (amplitude: number): number => {
-      const ocean = new CpuOcean(5, { ...oceanParams, resolution: 128, amplitude });
+    // `amplitude` scales the WIND SEA only — the ocean carries a second,
+    // independent swell train now (src/ocean/oceanMath `waveSpectrum`), so
+    // "flat water" has to say so about both or the control case is running on
+    // a 1.4 m ground swell and the test measures nothing. Measured wander in
+    // the "calm" leg was 0.52° against a 0.05° bar the moment the swell
+    // landed — §V.52's shape: one knob stopped describing the whole thing.
+    const wander = (amplitude: number, swellAmplitude = amplitude > 0 ? oceanParams.swellAmplitude : 0): number => {
+      const ocean = new CpuOcean(5, {
+        ...oceanParams,
+        resolution: 128,
+        amplitude,
+        swellAmplitude,
+      });
       const ship = makeShip(Math.PI / 2);
       const yaws: number[] = [];
       for (let i = 0; i < 7200; i++) {
