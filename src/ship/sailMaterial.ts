@@ -47,6 +47,15 @@ import {
 } from 'three/tsl';
 import { fbm2, hash2 } from '../terrain/noise';
 import { bandLimitedEdge, periodResolved } from './bandLimit';
+import {
+  SAIL_BELLY_FOOT,
+  SAIL_BELLY_HEAD,
+  SAIL_FLUTTER_BASE,
+  SAIL_FLUTTER_EDGE,
+  SAIL_FLUTTER_V,
+  SAIL_FOOT_FILL,
+  SAIL_SKEW_LEAD,
+} from './sailShape';
 import { skyParams } from '../params/sky';
 import { sunDirection } from '../sky/sunCycle';
 import { shipMaterialParams, type ShipMaterialParams } from '../params/ship';
@@ -115,22 +124,37 @@ export function createSailClothMaterial(
 
   /** billow + flutter offset (m, along local +z = forward of the yard) */
   const clothZ = Fn(([u, v]: [ReturnType<typeof float>, ReturnType<typeof float>]) => {
-    // belly: sin² across, pinned at the head, shifted to leeward while turning
-    const us = clamp(u.add(uSkew.mul(0.22).mul(v.oneMinus())), float(0), float(1));
+    // belly: sin² across, pinned at both leeches, shifted to leeward while
+    // turning. Transliteration of sailShape.sailClothOffset — same constants
+    // (imported, not copied), same expression order.
+    const us = clamp(u.add(uSkew.mul(SAIL_SKEW_LEAD).mul(v.oneMinus())), float(0), float(1));
     // squared by multiplication, NOT pow(): WGSL pow() with a base that
     // rounds a hair below zero is undefined → NaN vertices (§V28, §B.5)
     const arch = sin(us.mul(Math.PI));
     const across = arch.mul(arch);
-    const down = smoothstep(float(0), float(0.9), v.oneMinus());
+    // deepest around mid-height, tapering to the yard at the head and easing
+    // back at the free foot — see sailShape.sailBellyProfile for why a single
+    // monotone ramp reads as a tilted plane rather than as a belly
+    const headTaper = smoothstep(float(0), float(SAIL_BELLY_HEAD), v.oneMinus());
+    const footEase = mix(
+      float(SAIL_FOOT_FILL),
+      float(1),
+      smoothstep(float(0), float(SAIL_BELLY_FOOT), v),
+    );
+    const down = headTaper.mul(footEase);
     const belly = across.mul(down).mul(uDrive).mul(uBillow).mul(drop);
     // flutter: travelling ripples, biggest at the free foot and the leeches,
     // faster and deeper the harder the sail is shaking
-    const shake = float(0.3).add(uLuff.mul(uLuffFlap));
+    const shake = float(SAIL_FLUTTER_BASE).add(uLuff.mul(uLuffFlap));
     const rippleFreq = uFlutterFreq.mul(float(1).add(uLuff));
     const wave = sin(
-      time.mul(rippleFreq).add(phase).add(u.mul(uRippleCount.mul(TAU))).add(v.mul(2.1)),
+      time
+        .mul(rippleFreq)
+        .add(phase)
+        .add(u.mul(uRippleCount.mul(TAU)))
+        .add(v.mul(SAIL_FLUTTER_V)),
     );
-    const edge = float(0.35).add(u.sub(0.5).abs().mul(1.3));
+    const edge = float(0.35).add(u.sub(0.5).abs().mul(SAIL_FLUTTER_EDGE));
     const flutter = wave.mul(uFlutterAmp).mul(shake).mul(v.oneMinus()).mul(edge);
     return belly.add(flutter);
   });
@@ -210,7 +234,28 @@ export function createSailClothMaterial(
   const viewDir = cameraPosition.sub(positionWorld).normalize();
   const sunward = clamp(uShipSunDirection.dot(viewDir.negate()), float(0), float(1));
   const through = max(sunDot.negate(), float(0)).mul(sunward.pow(uBacklitFocus));
-  material.emissiveNode = uBacklitColor.mul(through.mul(uBacklitStrength).add(uAmbientLift));
+  /**
+   * §V44 / §B.16 CLASS, and half of "they have no billow to them".
+   *
+   * The ambient floor used to be `uBacklitColor × uAmbientLift` added straight
+   * into emissive: a near-WHITE constant, identical on every fragment,
+   * responding to no normal and no light. Emissive does not scale with albedo
+   * or with geometry, so it is a flat pedestal under the entire sail — and a
+   * pedestal is exactly what destroys the contrast between the bright shoulder
+   * of a belly and the shaded side of it. The cloth can be curved as deeply as
+   * you like and still read as a flat white sheet, which is what the user has
+   * now reported three times.
+   *
+   * The floor is still wanted (canvas in shadow must not go dead black), so it
+   * stays — but tinted by the cloth's OWN colour, so it reads as dim canvas
+   * rather than as glow, and it carries the panel and stain variation instead
+   * of washing them out. The backlit transmission lobe is unchanged: that one
+   * genuinely is light coming through the cloth and it is already gated on
+   * both the sun being behind and the viewer looking toward it.
+   */
+  material.emissiveNode = uBacklitColor
+    .mul(through.mul(uBacklitStrength))
+    .add(cloth3.mul(uAmbientLift));
 
   return {
     material,

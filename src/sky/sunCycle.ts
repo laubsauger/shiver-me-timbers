@@ -9,7 +9,7 @@
  * vector, so it is normalized by construction and continuous across the
  * midnight wrap. Axes: +x east, +y up, +z south (matches three.js Y-up).
  */
-import { skyParams } from '../params/sky';
+import { skyParams, type SkyParams } from '../params/sky';
 
 export type Vec3 = [number, number, number];
 export type Rgb = [number, number, number];
@@ -93,7 +93,12 @@ export function sunColor(elevation: number): Rgb {
  */
 export function skyTint(elevation: number): Rgb {
   const night = hexToRgb(skyParams.nightTint);
-  return mixRgb(night, [1, 1, 1], smoothstep(-0.12, 0.28, elevation));
+  // Edges are BELOW the horizon on purpose. They used to run to +0.28 rad,
+  // which meant everything under ~16° elevation was being multiplied by a
+  // navy tint — i.e. golden hour was quietly cooled and dimmed by ~40% more
+  // in red than in blue, fighting the very grade §T39 wants. Full daylight
+  // brightness now holds down to the horizon and only twilight darkens.
+  return mixRgb(night, [1, 1, 1], smoothstep(-0.25, 0.02, elevation));
 }
 
 /**
@@ -151,11 +156,45 @@ export function desaturate(c: Rgb, amount: number): Rgb {
 }
 
 /**
+ * The scene's colour state for a sun elevation: the day palette crossfaded
+ * to the golden-hour palette by lowSunWarmth().
+ *
+ * ONE source of truth on purpose (§T39). The sky background, the fog colour
+ * and the hemisphere ambient all read this, so at sunset the sky, the haze
+ * the islands melt into, and the light filling the ship's shaded side all
+ * warm by the same weight at the same moment. Give each system its own
+ * sunset handling and they drift apart — which is exactly what "warm sky
+ * over a cold scene" looks like.
+ */
+export interface SkyPalette {
+  zenith: Rgb;
+  mid: Rgb;
+  horizon: Rgb;
+  ground: Rgb;
+  /** 0..1 golden-hour weight, also the warm-tint amount */
+  warm: number;
+}
+
+export function skyPalette(elevation: number, p: SkyParams): SkyPalette {
+  const warm = clamp01(lowSunWarmth(elevation) * p.sunsetStrength);
+  const blend = (dayHex: number, duskHex: number): Rgb =>
+    mixRgb(hexToRgb(dayHex), hexToRgb(duskHex), warm);
+  return {
+    zenith: blend(p.zenithColor, p.sunsetZenithColor),
+    mid: blend(p.midColor, p.sunsetMidColor),
+    horizon: blend(p.horizonColor, p.sunsetHorizonColor),
+    ground: blend(p.groundBounceColor, p.sunsetGroundColor),
+    warm,
+  };
+}
+
+/**
  * The two colours the HemisphereLight is driven with, for a given night→day
  * tint. Sole owner of the "which sky colour lights the scene" decision, so
  * the answer is one testable function rather than a line buried in the light
  * rig: the SKY half is the sky's bulk colour (mid), never the zenith, and
- * both halves are desaturated before they light anything.
+ * both halves are desaturated before they light anything. Inputs are sRGB
+ * triples from skyPalette(), so the ambient inherits the sunset crossfade.
  *
  * RETURNS LINEAR, not sRGB — the caller must write it with a linear setter.
  * The desaturation has to happen in linear space because that is where the
@@ -164,16 +203,16 @@ export function desaturate(c: Rgb, amount: number): Rgb {
  * survived a first attempt at this fix.
  */
 export function hemisphereColors(
-  midHex: number,
-  groundHex: number,
+  midRgb: Rgb,
+  groundRgb: Rgb,
   tint: Rgb,
   desaturation: number,
 ): { sky: Rgb; ground: Rgb } {
-  const prep = (hex: number): Rgb => {
-    const c = hexToLinearRgb(hex);
-    return desaturate([c[0] * tint[0], c[1] * tint[1], c[2] * tint[2]], desaturation);
+  const prep = (c: Rgb): Rgb => {
+    const l: Rgb = [srgbToLinear(c[0]), srgbToLinear(c[1]), srgbToLinear(c[2])];
+    return desaturate([l[0] * tint[0], l[1] * tint[1], l[2] * tint[2]], desaturation);
   };
-  return { sky: prep(midHex), ground: prep(groundHex) };
+  return { sky: prep(midRgb), ground: prep(groundRgb) };
 }
 
 /** smallest gap we allow between two smoothstep edges (§V28: e0 == e1 → 0/0) */

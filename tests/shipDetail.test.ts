@@ -29,6 +29,11 @@ import {
   sampleDeckHeight,
 } from '../src/ship/deckHeightfield';
 import { vhash, vjitter } from '../src/ship/variation';
+import {
+  bandLimitEnergy,
+  bandLimitedEdgeValue,
+  periodResolvedValue,
+} from '../src/ship/bandLimit';
 import { MIN_RUNG, buildRatlinePlan, validateRatlinePlan } from '../src/ship/ratlinePlan';
 import { buildSailGeometry } from '../src/ship/pieceGeometrySail';
 import { sailClothPoint } from '../src/ship/sailShape';
@@ -609,5 +614,184 @@ describe('procedural deck heightfield (talk: "Surface Water: Setup")', () => {
       expect(Number.isFinite(v) || Number.isNaN(x)).toBe(true);
     }
     expect(sampleDeckHeight(field, -1e6, 0)).toBe(sampleDeckHeight(field, field.minX - 5, 0));
+  });
+});
+
+/**
+ * §V.48 — the speckle. Five occurrences in this project, so it gets a test
+ * that fails on the mechanism rather than on any one surface.
+ *
+ * MECHANISM. `reliefNormal` builds the shading normal from the SCREEN-SPACE
+ * derivative of a procedural height field. That derivative is honest only
+ * while the height varies slowly across the pixel grid. A caulking groove is
+ * 4.4 cm wide; once a pixel covers more than that, two neighbouring pixels
+ * land on opposite ends of the groove wall and their difference is the FULL
+ * step regardless of where the groove actually is — per-pixel random normals,
+ * i.e. white specular speckle over the whole surface (on the masts the same
+ * noise drove diffuse to black).
+ *
+ * WHAT THESE PIN. That the shipped feature widths stay resolvable up close and
+ * that their per-pixel contribution genuinely decays to nothing as the
+ * footprint grows — the property the first, period-based fix did NOT have,
+ * which is why the hull kept speckling after the masts were fixed.
+ */
+describe('§V.48 band limiting of procedural periodic terms', () => {
+  /** the unfiltered edge — what the material used to draw */
+  const sharp = (distance: number, feature: number): number => {
+    const t = Math.min(1, Math.max(0, distance / feature));
+    return t * t * (3 - 2 * t);
+  };
+
+  /** the drawn mask at position `x`, for a repeat of `period` */
+  const maskAt = (
+    x: number,
+    filter: number,
+    feature: number,
+    limited: boolean,
+    period: number,
+  ): number => {
+    const t = x / period;
+    const f = t - Math.floor(t);
+    const d = Math.min(f, 1 - f) * period;
+    return limited ? bandLimitedEdgeValue(d, feature, filter) : sharp(d, feature);
+  };
+
+  /**
+   * Supremum of the difference between NEIGHBOURING pixels — the exact
+   * quantity reliefNormal differentiates, and so the one that has to fall.
+   * The mask's average is not the point: it can look perfectly reasonable
+   * while the surface boils.
+   *
+   * Taken over a dense sweep of x rather than over one pixel grid. Aliasing IS
+   * sub-pixel phase dependence, and a grid whose spacing happens to divide the
+   * repeat reads out a CONSTANT — the fully-folded case, which looks like a
+   * pass and is in fact the worst possible aliasing.
+   */
+  const maxPixelStep = (filter: number, feature: number, limited: boolean, period = 1): number => {
+    let worst = 0;
+    const step = period / 4000;
+    for (let x = 0; x < period; x += step) {
+      const a = maskAt(x, filter, feature, limited, period);
+      const b = maskAt(x + filter, filter, feature, limited, period);
+      worst = Math.max(worst, Math.abs(b - a));
+    }
+    return worst;
+  };
+
+  /** how much of the feature is still THERE: full darkening = 1, gone = 0 */
+  const contrast = (filter: number, feature: number, limited: boolean, period = 1): number => {
+    let lo = 1;
+    const step = period / 4000;
+    for (let x = 0; x < period; x += step) {
+      lo = Math.min(lo, maskAt(x, filter, feature, limited, period));
+    }
+    return 1 - lo;
+  };
+
+  const SEAM = shipMaterialParams.seamWidth; // fraction of a plank
+  const BUTT = shipMaterialParams.buttWidth; // metres
+  const PLANK = shipMaterialParams.plankLength; // metres between butts
+
+  it('leaves plank detail untouched while the seam still spans several pixels', () => {
+    // close range: a 0.55 m plank across ~90 px. The user asked for this
+    // detail explicitly — band limiting must not be a quiet deletion of it.
+    for (const filter of [0.002, 0.005, 0.01]) {
+      for (const d of [0, 0.01, 0.03, 0.08, 0.2, 0.5]) {
+        expect(bandLimitedEdgeValue(d, SEAM, filter)).toBeCloseTo(sharp(d, SEAM), 3);
+      }
+    }
+    expect(bandLimitEnergy(SEAM, 0.01)).toBe(1);
+  });
+
+  it('drives the seam contribution to zero as the pixel footprint grows', () => {
+    // past the feature width, where the widening has fully engaged
+    const steps = [0.11, 0.23, 0.47, 0.93].map((f) => maxPixelStep(f, SEAM, true));
+    for (let i = 1; i < steps.length; i++) {
+      expect(steps[i]).toBeLessThanOrEqual(steps[i - 1] + 1e-6); // monotone decay
+    }
+    expect(steps[steps.length - 1]).toBeLessThan(0.05); // and it reaches nothing
+
+    // the groove's DEPTH decays over the whole range, not just its slope —
+    // widening alone would smear a 4 cm seam across a whole plank at range
+    const depths = [0.02, 0.05, 0.11, 0.23, 0.47, 0.93].map((f) => contrast(f, SEAM, true));
+    for (let i = 1; i < depths.length; i++) {
+      expect(depths[i]).toBeLessThanOrEqual(depths[i - 1] + 1e-6);
+    }
+    expect(depths[depths.length - 1]).toBeLessThan(0.1);
+  });
+
+  it('never lets the edge become a full per-pixel step at ANY footprint', () => {
+    // the property that actually distinguishes "an antialiased edge" from
+    // "speckle": the drawn transition is never narrower than two pixels, so
+    // the largest neighbour difference is bounded by smoothstep's own peak
+    // slope over that width. Unlimited, the same edge steps the whole way
+    // between two adjacent pixels — which is the noise.
+    let worst = 0;
+    for (let f = 0.001; f < 2; f += 0.003) worst = Math.max(worst, maxPixelStep(f, SEAM, true));
+    expect(worst).toBeLessThan(0.8);
+    expect(maxPixelStep(SEAM, SEAM, false)).toBeGreaterThan(0.99);
+  });
+
+  it('fails the same way the shipped material used to, without the limit', () => {
+    // the regression pin. If this ever stops holding, the "before" case is no
+    // longer the bug and the test above is proving nothing.
+    for (const filter of [0.11, 0.47, 0.93]) {
+      expect(maxPixelStep(filter, SEAM, false)).toBeGreaterThan(0.9); // full step, per pixel
+      expect(contrast(filter, SEAM, false)).toBeGreaterThan(0.99); // at full depth, forever
+    }
+  });
+
+  it('kills the butt-joint dots on a grazing deck', () => {
+    // the follow camera sees the deck edge-on: a pixel covers tens of
+    // centimetres of fore-and-aft deck while covering millimetres across it,
+    // so the 5 cm butts alias long before the 0.55 m plank seams do.
+    expect(contrast(0.004, BUTT, true, PLANK)).toBeGreaterThan(0.95); // near deck: full butts
+    expect(maxPixelStep(0.37, BUTT, true, PLANK)).toBeLessThan(0.05); // far deck: no dots
+    expect(contrast(0.37, BUTT, true, PLANK)).toBeLessThan(0.15); //   …because they faded
+    expect(maxPixelStep(0.37, BUTT, false, PLANK)).toBeGreaterThan(0.9); // unlimited: dots
+  });
+
+  it('measures the FEATURE, not the repeat — the distinction the first fix missed', () => {
+    // a 0.08-of-a-plank seam inside a 1.0 plank repeat: at a fifth of a plank
+    // per pixel the repeat is still perfectly resolved (periodResolved == 1)
+    // and yet the seam is 2.5 pixels of footprint wide and already aliasing.
+    // Everything between these two distances was the speckle the user saw.
+    const filter = 0.2;
+    expect(periodResolvedValue(filter)).toBe(1); // repeat says "all fine"
+    expect(bandLimitEnergy(SEAM, filter)).toBeLessThan(0.25); // feature says otherwise
+  });
+
+  it('keeps the smooth per-board terms gated on the repeat instead', () => {
+    // the crowned lift and the per-board tone jitter have no edge — a whole
+    // period IS their feature — so they stay on periodResolved.
+    expect(periodResolvedValue(0.05)).toBe(1);
+    expect(periodResolvedValue(2)).toBe(0);
+    expect(periodResolvedValue(0.75)).toBeGreaterThan(0);
+    expect(periodResolvedValue(0.75)).toBeLessThan(1);
+  });
+
+  it('feathers BOTH edges of a wale strake, not just the top one', () => {
+    // the old form was smoothstep(ratio ± 0.03, fract(y·freq)): smooth at the
+    // top of the belt, a raw STEP at the fract wrap at its bottom. A step in
+    // the height field differentiates to a one-pixel spike, so the wale drew a
+    // bright hairline the whole length of the ship.
+    const ratio = shipMaterialParams.waleRatio;
+    const EDGE = 0.06;
+    // the signed-distance form the material now uses
+    const dist = (c: number): number => {
+      const s = c - ratio / 2 + 0.5;
+      const centred = s - Math.floor(s) - 0.5;
+      return Math.abs(centred) - ratio / 2 + EDGE / 2;
+    };
+    const band = (c: number): number => bandLimitedEdgeValue(dist(c), EDGE, 1e-4);
+    let worst = 0;
+    for (let i = 0; i < 4000; i++) {
+      const c = i / 1000; // four full repeats
+      worst = Math.max(worst, Math.abs(band(c) - band(c - 0.001)));
+    }
+    expect(worst).toBeLessThan(0.1); // continuous everywhere, incl. across the wrap
+    // and it is still a belt: dark inside, clear outside
+    expect(band(ratio / 2)).toBeLessThan(0.05);
+    expect(band(ratio + 0.5 * (1 - ratio))).toBeGreaterThan(0.95);
   });
 });

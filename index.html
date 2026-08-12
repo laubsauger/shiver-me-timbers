@@ -51,6 +51,19 @@
         transform: scale(1.025) translate3d(-0.3%, 0.4%, 0);
         animation: boot-seascape-drift 14s cubic-bezier(0.37, 0, 0.63, 1) infinite alternate;
       }
+      .boot-splash__seascape::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: inherit;
+        opacity: 0.2;
+        mix-blend-mode: soft-light;
+        -webkit-mask-image: linear-gradient(to bottom, transparent 48%, rgba(0, 0, 0, 0.38) 67%, #000 88%);
+        mask-image: linear-gradient(to bottom, transparent 48%, rgba(0, 0, 0, 0.38) 67%, #000 88%);
+        transform: scale(1.045) translate3d(1.1%, 0.65%, 0);
+        transform-origin: 50% 78%;
+        animation: boot-foreground-swell 9s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate;
+      }
       #boot-splash.boot-splash--ready {
         opacity: 0;
         visibility: hidden;
@@ -72,6 +85,8 @@
         animation: boot-float 3.5s ease-in-out infinite;
       }
       .boot-splash__title {
+        position: relative;
+        z-index: 1;
         margin: -0.25rem 0 0;
         color: #f6e7b9;
         font-family: Georgia, 'Times New Roman', serif;
@@ -79,7 +94,28 @@
         font-weight: 700;
         line-height: 0.92;
         letter-spacing: -0.045em;
+        perspective: 20rem;
+        white-space: nowrap;
         text-shadow: 0 0.18rem 0 #6e4b1f, 0 0.45rem 1rem rgba(0, 0, 0, 0.8);
+      }
+      .boot-splash__letter {
+        display: inline-block;
+        opacity: 0;
+        filter: blur(0.22rem);
+        transform: translate3d(0, 0.72em, -1.5rem) rotate(var(--tilt));
+        transform-origin: 50% 78%;
+        animation: boot-letter-rise 820ms cubic-bezier(0.16, 0.8, 0.24, 1.18) forwards;
+        animation-delay: calc(120ms + var(--i) * 48ms);
+        will-change: transform, opacity, filter;
+      }
+      .boot-splash__glyph {
+        display: inline-block;
+        transform-origin: 50% 80%;
+        animation: boot-letter-bob 4.8s ease-in-out infinite;
+        animation-delay: calc(1.15s + var(--i) * -170ms);
+      }
+      .boot-splash__space {
+        width: 0.25em;
       }
       .boot-splash__kicker {
         margin: 1rem 0 0;
@@ -89,21 +125,68 @@
         text-transform: uppercase;
       }
       .boot-splash__loader {
-        width: min(13rem, 55vw);
-        height: 0.18rem;
-        margin-top: 2rem;
-        overflow: hidden;
-        border-radius: 999px;
-        background: rgba(243, 223, 170, 0.14);
+        --boot-progress: 0.06;
+        position: relative;
+        width: min(14rem, 58vw);
+        height: 0.9rem;
+        margin-top: 1.55rem;
       }
+      .boot-splash__loader::before,
       .boot-splash__loader::after {
         content: '';
-        display: block;
-        width: 42%;
-        height: 100%;
-        border-radius: inherit;
-        background: linear-gradient(90deg, transparent, #2ab3b4, #e3ba61, transparent);
-        animation: boot-load 1.4s ease-in-out infinite;
+        position: absolute;
+        top: 50%;
+        z-index: 2;
+        width: 0.42rem;
+        height: 0.42rem;
+        border: 1px solid rgba(230, 189, 100, 0.72);
+        background: #172b2e;
+        box-shadow: inset 0 0 0 1px rgba(6, 17, 21, 0.8), 0 0.16rem 0.3rem rgba(0, 0, 0, 0.5);
+        transform: translateY(-50%) rotate(45deg);
+      }
+      .boot-splash__loader::before {
+        left: 0.12rem;
+      }
+      .boot-splash__loader::after {
+        right: 0.12rem;
+      }
+      .boot-splash__loader-rail {
+        position: absolute;
+        top: 50%;
+        right: 0.58rem;
+        left: 0.58rem;
+        height: 0.28rem;
+        overflow: visible;
+        border: 1px solid rgba(181, 132, 53, 0.6);
+        background: rgba(3, 17, 22, 0.76);
+        box-shadow:
+          inset 0 1px 0 rgba(246, 220, 154, 0.1),
+          inset 0 -1px 0 rgba(0, 0, 0, 0.8),
+          0 0.2rem 0.5rem rgba(0, 0, 0, 0.38);
+        transform: translateY(-50%);
+      }
+      .boot-splash__loader-rail::before {
+        content: '';
+        position: absolute;
+        inset: 1px;
+        background: linear-gradient(180deg, #56b9ae 0%, #247d7a 48%, #123f47 100%);
+        box-shadow: 0 0 0.45rem rgba(48, 153, 147, 0.38);
+        transform: scaleX(var(--boot-progress));
+        transform-origin: left center;
+        transition: transform 700ms cubic-bezier(0.22, 0.7, 0.2, 1);
+      }
+      .boot-splash__loader-rail::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: calc(var(--boot-progress) * 100%);
+        width: 0.34rem;
+        height: 0.34rem;
+        border: 1px solid #efd38f;
+        background: linear-gradient(135deg, #f0d18b, #8d6225 72%);
+        box-shadow: 0 0 0 2px rgba(5, 24, 29, 0.86), 0 0 0.5rem rgba(230, 189, 100, 0.28);
+        transform: translate(-50%, -50%) rotate(45deg);
+        transition: left 700ms cubic-bezier(0.22, 0.7, 0.2, 1);
       }
       .boot-splash__status {
         position: absolute;
@@ -117,20 +200,53 @@
         0%, 100% { transform: translateY(0) rotate(-0.4deg); }
         50% { transform: translateY(-0.55rem) rotate(0.4deg); }
       }
+      @keyframes boot-letter-rise {
+        0% {
+          opacity: 0;
+          filter: blur(0.22rem);
+          transform: translate3d(0, 0.72em, -1.5rem) rotate(var(--tilt));
+        }
+        68% {
+          opacity: 1;
+          filter: blur(0);
+          transform: translate3d(0, -0.09em, 0) rotate(calc(var(--tilt) * -0.18));
+        }
+        100% {
+          opacity: 1;
+          filter: blur(0);
+          transform: translate3d(0, 0, 0) rotate(0);
+        }
+      }
+      @keyframes boot-letter-bob {
+        0%, 100% { transform: translateY(0) rotate(0); }
+        24% { transform: translateY(-0.025em) rotate(-0.2deg); }
+        52% { transform: translateY(0.018em) rotate(0.12deg); }
+        76% { transform: translateY(-0.012em) rotate(0.18deg); }
+      }
       @keyframes boot-seascape-drift {
         0% { transform: scale(1.025) translate3d(-0.3%, 0.4%, 0); }
         43% { transform: scale(1.035) translate3d(0.15%, -0.2%, 0); }
         100% { transform: scale(1.045) translate3d(0.4%, -0.55%, 0); }
       }
-      @keyframes boot-load {
-        from { transform: translateX(-110%); }
-        to { transform: translateX(340%); }
+      @keyframes boot-foreground-swell {
+        0% { transform: scale(1.045) translate3d(1.1%, 0.65%, 0); }
+        48% { transform: scale(1.055) translate3d(0.15%, 0.15%, 0); }
+        100% { transform: scale(1.065) translate3d(-0.9%, -0.25%, 0); }
       }
       @media (prefers-reduced-motion: reduce) {
         .boot-splash__mark,
-        .boot-splash__loader::after,
+        .boot-splash__letter,
+        .boot-splash__glyph,
+        .boot-splash__seascape::after,
         .boot-splash__seascape {
           animation: none;
+        }
+        .boot-splash__loader-rail::before,
+        .boot-splash__loader-rail::after { transition: none; }
+        .boot-splash__letter {
+          opacity: 1;
+          filter: none;
+          transform: none;
         }
       }
     </style>
@@ -147,9 +263,13 @@
           width="640"
           height="640"
         />
-        <h1 class="boot-splash__title">Shiver Me Timbers</h1>
+        <h1 class="boot-splash__title" aria-label="Shiver Me Timbers">
+          <span class="boot-splash__letter" style="--i: 0; --tilt: -5deg"><span class="boot-splash__glyph">S</span></span><span class="boot-splash__letter" style="--i: 1; --tilt: 3deg"><span class="boot-splash__glyph">h</span></span><span class="boot-splash__letter" style="--i: 2; --tilt: -4deg"><span class="boot-splash__glyph">i</span></span><span class="boot-splash__letter" style="--i: 3; --tilt: 4deg"><span class="boot-splash__glyph">v</span></span><span class="boot-splash__letter" style="--i: 4; --tilt: -3deg"><span class="boot-splash__glyph">e</span></span><span class="boot-splash__letter" style="--i: 5; --tilt: 5deg"><span class="boot-splash__glyph">r</span></span><span class="boot-splash__letter boot-splash__space" style="--i: 6; --tilt: 0deg"></span><span class="boot-splash__letter" style="--i: 7; --tilt: -4deg"><span class="boot-splash__glyph">M</span></span><span class="boot-splash__letter" style="--i: 8; --tilt: 3deg"><span class="boot-splash__glyph">e</span></span><span class="boot-splash__letter boot-splash__space" style="--i: 9; --tilt: 0deg"></span><span class="boot-splash__letter" style="--i: 10; --tilt: -5deg"><span class="boot-splash__glyph">T</span></span><span class="boot-splash__letter" style="--i: 11; --tilt: 4deg"><span class="boot-splash__glyph">i</span></span><span class="boot-splash__letter" style="--i: 12; --tilt: -3deg"><span class="boot-splash__glyph">m</span></span><span class="boot-splash__letter" style="--i: 13; --tilt: 5deg"><span class="boot-splash__glyph">b</span></span><span class="boot-splash__letter" style="--i: 14; --tilt: -4deg"><span class="boot-splash__glyph">e</span></span><span class="boot-splash__letter" style="--i: 15; --tilt: 3deg"><span class="boot-splash__glyph">r</span></span><span class="boot-splash__letter" style="--i: 16; --tilt: -5deg"><span class="boot-splash__glyph">s</span></span>
+        </h1>
         <p class="boot-splash__kicker">All hands on deck</p>
-        <div class="boot-splash__loader" aria-hidden="true"></div>
+        <div class="boot-splash__loader" role="progressbar" aria-label="Loading game" aria-valuemin="0" aria-valuemax="100" aria-valuenow="6">
+          <span class="boot-splash__loader-rail" aria-hidden="true"></span>
+        </div>
         <span class="boot-splash__status">Preparing the ship</span>
       </div>
     </div>
@@ -157,11 +277,16 @@
       (() => {
         const splash = document.getElementById('boot-splash');
         if (!splash) throw new Error('missing boot splash root');
+        const loader = splash.querySelector('.boot-splash__loader');
 
         let done = false;
         const dismiss = () => {
           if (done) return;
           done = true;
+          if (loader) {
+            loader.style.setProperty('--boot-progress', '1');
+            loader.setAttribute('aria-valuenow', '100');
+          }
           splash.classList.add('boot-splash--ready');
           splash.addEventListener('transitionend', () => splash.remove(), { once: true });
           // belt and braces: if the transition never fires (reduced motion,
@@ -178,15 +303,33 @@
 
         // real phase feedback — a splash that names what it is doing reads as
         // progress; one that sits on a spinner reads as a hang.
-        const status = splash.querySelector('.boot-splash__kicker');
+        // Short, so they sit correctly in the kicker's uppercase wide-tracked
+        // style; the longer form goes to the aria-live status for screen
+        // readers. A splash that names its phase reads as progress — one that
+        // sits on a spinner reads as a hang, and the shader compile is long.
+        const kicker = splash.querySelector('.boot-splash__kicker');
+        const status = splash.querySelector('.boot-splash__status');
         const LABELS = {
-          renderer: 'Waking the WebGPU device…',
-          'scene build': 'Raising the sea and the rigging…',
-          'shader compile': 'Compiling shaders — first run is the slow one…',
-          'first frame': 'Making sail…',
+          renderer: ['Waking the device', 'Starting the WebGPU device'],
+          'scene build': ['Raising the sea', 'Building the sea, ship and rigging'],
+          'shader compile': ['Compiling shaders', 'Compiling shaders — the first run is the slow one'],
+          'first frame': ['Making sail', 'Drawing the first frame'],
+        };
+        const PROGRESS = {
+          renderer: 0.16,
+          'scene build': 0.38,
+          'shader compile': 0.68,
+          'first frame': 0.9,
         };
         window.__bootProgress = (phase) => {
-          if (status && LABELS[phase]) status.textContent = LABELS[phase];
+          const label = LABELS[phase];
+          if (!label) return;
+          if (kicker) kicker.textContent = label[0];
+          if (status) status.textContent = label[1];
+          if (loader) {
+            loader.style.setProperty('--boot-progress', String(PROGRESS[phase]));
+            loader.setAttribute('aria-valuenow', String(Math.round(PROGRESS[phase] * 100)));
+          }
         };
 
         // failsafe — never trap the user behind the splash if boot throws,

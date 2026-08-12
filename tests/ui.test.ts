@@ -28,6 +28,19 @@ import {
   unwiredFeatures,
 } from '../src/ui/graphicsFeatures';
 import { pointOfSail } from '../src/ui/windDial';
+import {
+  INITIAL_VIEW_STATE,
+  devLayerFor,
+  reduceView,
+} from '../src/ui/viewModes';
+import type { ViewAction, ViewState } from '../src/ui/viewModes';
+import {
+  applyDevLayer,
+  devLayerAttached,
+  devLayerVisible,
+  resetDevLayer,
+  setDevLayerSink,
+} from '../src/ui/devLayer';
 import { clearParamsRegistry, getParamsEntry, registerParams } from '../src/params/registry';
 
 function fakeStorage(initial: Record<string, string> = {}): StorageLike & { data: Record<string, string> } {
@@ -416,5 +429,126 @@ describe('restart prompts must reflect what the engine actually built with', () 
     expect(featureNeedsReload('caustics', true)).toBe(true); // turning it back on is not
     expect(shadowMapSizeNeedsReload(1024)).toBe(false);
     expect(shadowMapSizeNeedsReload(2048)).toBe(true);
+  });
+});
+
+/**
+ * View modes (§I ui/cinematic). The user wants to hit full screen and record
+ * immediately, so full screen must arrive clean; and when the whole interface
+ * vanishes, exactly one press must bring back exactly one layer. The ladder is
+ * pinned here rather than left to fall out of DOM handler ordering.
+ */
+function run(actions: ViewAction[], from: ViewState = INITIAL_VIEW_STATE): ViewState {
+  return actions.reduce((s, a) => reduceView(s, a).state, from);
+}
+
+describe('cinematic: full screen arrives clean, and gives the dev layer back', () => {
+  it('hides the dev layer on entry and restores it exactly on exit', () => {
+    const inFullscreen = run([{ type: 'enterFullscreen' }]);
+    expect(devLayerFor(inFullscreen)).toBe(false); // nothing over the frame
+
+    const after = run([{ type: 'exitFullscreen' }], inFullscreen);
+    expect(devLayerFor(after)).toBe(true); // the desk comes back as it was
+    expect(after.devBeforeFullscreen).toBeNull();
+  });
+
+  it('restores HIDDEN too — full screen must not switch the panel on for you', () => {
+    const hidden = run([{ type: 'toggleDev' }]); // player had it off already
+    expect(devLayerFor(hidden)).toBe(false);
+    const round = run([{ type: 'enterFullscreen' }, { type: 'exitFullscreen' }], hidden);
+    expect(devLayerFor(round)).toBe(false);
+  });
+
+  it('F1 inside full screen is a look, not a new preference for the window', () => {
+    const peeking = run([{ type: 'enterFullscreen' }, { type: 'toggleDev' }]);
+    expect(devLayerFor(peeking)).toBe(true); // visible while recording
+    const back = run([{ type: 'exitFullscreen' }], peeking);
+    expect(devLayerFor(back)).toBe(true); // windowed state was ON, so ON
+    expect(back.devBeforeFullscreen).toBeNull();
+  });
+
+  it('a repeated enter does not overwrite the parked windowed state', () => {
+    const s = run([{ type: 'enterFullscreen' }, { type: 'enterFullscreen' }]);
+    expect(s.devBeforeFullscreen).toBe(true);
+  });
+
+  it('an exit with nothing parked changes nothing', () => {
+    expect(run([{ type: 'exitFullscreen' }])).toEqual(INITIAL_VIEW_STATE);
+  });
+});
+
+describe('photo mode hides everything, and says how to get back', () => {
+  it('outranks the F1 intent — no HUD and no dev tools', () => {
+    const s = run([{ type: 'togglePhoto' }]);
+    expect(s.dev).toBe(true); // the standing intent survives
+    expect(devLayerFor(s)).toBe(false); // …but nothing is drawn
+    expect(s.photo).toBe(true);
+  });
+
+  it('leaving photo mode restores the dev layer the player had', () => {
+    const off = run([{ type: 'toggleDev' }, { type: 'togglePhoto' }, { type: 'togglePhoto' }]);
+    expect(devLayerFor(off)).toBe(false); // was off before photo mode
+    const on = run([{ type: 'togglePhoto' }, { type: 'togglePhoto' }]);
+    expect(devLayerFor(on)).toBe(true);
+  });
+
+  it('F1 in photo mode ends photo mode — otherwise it reads as a dead key', () => {
+    const s = run([{ type: 'togglePhoto' }, { type: 'toggleDev' }]);
+    expect(s.photo).toBe(false);
+    expect(devLayerFor(s)).toBe(true);
+  });
+
+  it('captions the moment the interface disappears, and only then', () => {
+    expect(reduceView(INITIAL_VIEW_STATE, { type: 'togglePhoto' }).caption)
+      .toMatch(/Esc/); // must name the way out
+    const inPhoto = run([{ type: 'togglePhoto' }]);
+    expect(reduceView(inPhoto, { type: 'togglePhoto' }).caption).toBeUndefined();
+    expect(reduceView(INITIAL_VIEW_STATE, { type: 'enterFullscreen' }).caption)
+      .toMatch(/F1/);
+  });
+});
+
+describe('Escape peels one layer per press', () => {
+  it('spends the key on photo mode and does not also reach the pause menu', () => {
+    const inPhoto = run([{ type: 'togglePhoto' }]);
+    const t = reduceView(inPhoto, { type: 'escape' });
+    expect(t.consumedEscape).toBe(true);
+    expect(t.state.photo).toBe(false);
+  });
+
+  it('passes the key through when there is no mode to peel', () => {
+    const t = reduceView(INITIAL_VIEW_STATE, { type: 'escape' });
+    expect(t.consumedEscape).toBe(false); // the pause menu gets it
+    expect(t.state).toEqual(INITIAL_VIEW_STATE);
+  });
+
+  it('a second press is needed for the next layer down', () => {
+    const inPhoto = run([{ type: 'togglePhoto' }]);
+    const first = reduceView(inPhoto, { type: 'escape' });
+    expect(first.consumedEscape).toBe(true);
+    expect(reduceView(first.state, { type: 'escape' }).consumedEscape).toBe(false);
+  });
+});
+
+describe('dev-layer channel (debug shell and UI never import each other)', () => {
+  afterEach(resetDevLayer);
+
+  it('a sink attached after the state changed catches up immediately', () => {
+    applyDevLayer(false); // cinematic engaged before the panel existed
+    const seen: boolean[] = [];
+    setDevLayerSink((v) => seen.push(v));
+    expect(seen).toEqual([false]);
+  });
+
+  it('detaching stops delivery and reports nothing is listening', () => {
+    const seen: boolean[] = [];
+    const detach = setDevLayerSink((v) => seen.push(v));
+    expect(devLayerAttached()).toBe(true);
+    applyDevLayer(false);
+    detach();
+    applyDevLayer(true);
+    expect(seen).toEqual([true, false]); // initial catch-up, then the change
+    expect(devLayerAttached()).toBe(false);
+    expect(devLayerVisible()).toBe(true); // state still tracked for the next sink
   });
 });

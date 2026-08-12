@@ -24,6 +24,7 @@ import { oceanSurfaceParams as sp } from '../params/oceanSurface';
 import { skyParams } from '../params/sky';
 import type { SeabedField } from '../island/seabed';
 import type { PlanarReflection } from '../reflection';
+import { postParams } from '../params/post';
 
 export interface OceanSurfaceOptions {
   /** the scene's sun — enables the in-material shadow sample (§V20) */
@@ -38,6 +39,14 @@ export interface OceanSurfaceOptions {
    * is a no-op the main thread can wire whenever the perf picture allows.
    */
   reflection?: PlanarReflection | null;
+  /**
+   * True when the scene is rendered into a HALF-FLOAT pass target rather than
+   * straight to the canvas — i.e. when post-processing is on. The §V24
+   * scene-colour copy has to be allocated in that format or WebGPU rejects
+   * the copy every frame and the refraction silently reads nothing.
+   * Defaults to `postParams.enabled` at construction time.
+   */
+  hdrSceneTarget?: boolean;
   /** grid override; defaults to the params values (reload to apply) */
   grid?: SurfaceGridOptions;
 }
@@ -56,6 +65,8 @@ export class OceanSurface {
   readonly group: THREE.Group;
   readonly mesh: THREE.Mesh;
   private sim: OceanSimulation;
+  /** guards the one-shot warning below */
+  private warnedHdrMismatch = false;
   private surface: OceanSurfaceMaterial;
   private grid: SurfaceGridOptions;
 
@@ -75,6 +86,7 @@ export class OceanSurface {
       sp.shadowsEnabled ? opts.sunLight : undefined,
       opts.seabed,
       opts.reflection,
+      opts.hdrSceneTarget ?? postParams.enabled,
     );
     this.group = new THREE.Group();
     this.mesh = new THREE.Mesh(buildOceanGrid(this.grid), this.surface.material);
@@ -112,6 +124,20 @@ export class OceanSurface {
     const fog = scene?.fog as THREE.Fog | THREE.FogExp2 | null | undefined;
     if (fog) this.surface.hazeColorUniform.value.copy(fog.color);
     else this.surface.hazeColorUniform.value.set(skyParams.horizonColor);
+    // FAIL LOUD (user rule): the scene-colour copy format is baked into a GPU
+    // texture at construction. If the render path flips between canvas and
+    // post-processing afterwards, WebGPU silently refuses the copy every frame
+    // and §V24 refraction reads an uninitialised texture — exactly the class
+    // of bug that has cost this project seven silent no-ops. Say so, once.
+    if (!this.warnedHdrMismatch && postParams.enabled !== this.surface.hdrSceneTarget) {
+      this.warnedHdrMismatch = true;
+      console.warn(
+        '[ocean] scene-colour copy target was built for ' +
+          (this.surface.hdrSceneTarget ? 'a half-float post pass' : 'the canvas') +
+          ` but postParams.enabled is now ${postParams.enabled}. ` +
+          'Water refraction (§V24) is reading a stale texture — reload to rebuild.',
+      );
+    }
     this.surface.updateFromParams();
   }
 }

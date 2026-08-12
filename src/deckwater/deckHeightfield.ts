@@ -67,6 +67,15 @@ export interface DeckField {
   /** metres above the deck plane, row-major (index = y * width + x) */
   heights: Float32Array;
   /**
+   * 1 = this cell is the WAIST — the main deck's walking plane, the surface
+   * the deck material actually shades. The field spans the whole ship, so the
+   * forecastle and quarterdeck soles are in it too, standing ~1.6 m proud.
+   * Water injected onto those is invisible (the material gates to the deck
+   * plane) and runs off their edges instead of onto the waist, so injection
+   * snaps into this mask. Derived, not authored: |height| ≤ waistBand.
+   */
+  waist: Uint8Array;
+  /**
    * Where water LEAVES the ship: 1 = drain, 0 = deck. Derived from the
    * source's coverage mask — the grid is a rectangle and the deck is not, so
    * the corners abreast of the stem are thin air. A drain cell holds no
@@ -88,6 +97,9 @@ export function validateDeckField(f: DeckField): void {
   }
   if (f.drain.length !== n) {
     throw new Error(`deckwater: DeckField drain ${f.drain.length} ≠ ${f.width}×${f.height}`);
+  }
+  if (f.waist.length !== n) {
+    throw new Error(`deckwater: DeckField waist ${f.waist.length} ≠ ${f.width}×${f.height}`);
   }
   for (let i = 0; i < n; i++) {
     if (!Number.isFinite(f.heights[i])) {
@@ -121,17 +133,22 @@ export function deckFieldFromSource(src: DeckHeightfieldSource): DeckField {
     );
   }
   const drain = new Uint8Array(n);
+  const waist = new Uint8Array(n);
   const cut = deckWaterParams.maskDrainBelow;
+  const band = deckWaterParams.waistBand;
   for (let i = 0; i < n; i++) {
     // NaN coverage counts as off-deck: a hole in the mask must drain, never
     // become a cell that hoards water no head difference can reach
     if (!(src.mask[i] >= cut)) drain[i] = 1;
+    else if (Math.abs(src.data[i]) <= band) waist[i] = 1;
   }
+  cutFreeingPorts(src, drain, waist);
   const field: DeckField = {
     width: src.width,
     height: src.height,
     heights: src.data,
     drain,
+    waist,
   };
   validateDeckField(field);
   return field;
@@ -209,4 +226,68 @@ export function syntheticDeckField(o: SyntheticDeckOptions): DeckHeightfieldSour
     data,
     mask,
   };
+}
+
+/**
+ * Cut freeing ports through the bulwark, port and starboard, at intervals
+ * along the length — a BOUNDARY CONDITION for the solve, not a change to the
+ * ship's geometry (nothing here writes `heights`).
+ *
+ * WHY THIS IS NEEDED: the generated field rings the waist with a ~0.8 m
+ * bulwark, and the outline drain sits OUTSIDE it. Measured on the galleon,
+ * exactly 2 cells in 98,304 were both at waist level and touching a drain, so
+ * the deck was a sealed tub: a boarding sea had no way off it and standing
+ * water climbed past 1.5 m, held only by evaporation. Real ships solve this
+ * with freeing ports — openings cut through the bulwark at deck level, which
+ * is precisely what this marks.
+ *
+ * A port is a run of `scupperWidth` rows in which the bulwark cells on that
+ * side become drains, so water in the waterway runs out through them in
+ * channels (the look the talk shows) rather than seeping off everywhere.
+ */
+function cutFreeingPorts(
+  src: DeckHeightfieldSource,
+  drain: Uint8Array,
+  waist: Uint8Array,
+): void {
+  const w = src.width;
+  const h = src.height;
+  const spacing = Math.max(2, Math.round(deckWaterParams.scupperSpacing));
+  const width = Math.max(1, Math.round(deckWaterParams.scupperWidth));
+  const band = deckWaterParams.waistBand;
+  // §V28: literal-bounded walk — a port never eats more than a quarter beam,
+  // so a malformed row cannot chew a hole clean across the deck
+  const maxDepth = Math.max(1, Math.floor(w / 4));
+
+  for (let y = 0; y < h; y++) {
+    if (y % spacing >= width) continue;
+    // The port has to reach the GUTTER, not merely deck level. The waterway
+    // runs ~0.10 m below the deck plane with a ~0.27 m lip inboard of the
+    // bulwark; a cut that stopped at the first waist-band cell left that lip
+    // standing, and water needed 0.37 m of depth before it could climb out.
+    let rowMin = Infinity;
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (drain[i] === 0 && Math.abs(src.data[i]) <= band) {
+        rowMin = Math.min(rowMin, src.data[i]);
+      }
+    }
+    if (!Number.isFinite(rowMin)) continue; // no deck on this row at all
+    const sill = rowMin + deckWaterParams.scupperSill;
+    for (const dir of [1, -1] as const) {
+      let x = dir === 1 ? 0 : w - 1;
+      // find the outboard-most cell that is actually deck on this row
+      while (x >= 0 && x < w && drain[y * w + x] === 1) x += dir;
+      // ...then cut inward until the channel is down at gutter level
+      for (let step = 0; step < maxDepth; step++) {
+        const i = y * w + x;
+        if (x < 0 || x >= w) break;
+        if (drain[i] === 1) break;
+        if (src.data[i] <= sill) break; // reached the gutter: the port is open
+        drain[i] = 1;
+        waist[i] = 0;
+        x += dir;
+      }
+    }
+  }
 }

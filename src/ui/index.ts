@@ -16,6 +16,8 @@ import { createPauseMenu } from './pauseMenu';
 import { createHud } from './hud';
 import type { WindReadout } from './hud';
 import type { MusicStatus } from './settingsScreen';
+import { createFullscreen } from './fullscreen';
+import { createViewModes } from './viewModes';
 import { ensureUiStyles } from './styles';
 import { div } from './dom';
 
@@ -48,6 +50,9 @@ export interface GameUi {
   pause: () => void;
   resume: () => void;
   isPaused: () => boolean;
+  /** §I ui/cinematic — photo mode hides every overlay, HUD included */
+  isPhotoMode: () => boolean;
+  isDevLayerVisible: () => boolean;
   dispose(): void;
 }
 
@@ -71,10 +76,16 @@ export function createGameUI(callbacks: GameUiCallbacks): GameUi {
   document.body.appendChild(root);
 
   const hud = createHud(root);
+  // one fullscreen control, shared: the menu entry throws it, the view modes
+  // listen to it (full screen = cinematic), and both read the same truth
+  const fullscreen = createFullscreen();
+  const viewModes = createViewModes(root, fullscreen);
   const menu = createPauseMenu(root, {
     onPause: callbacks.onPause,
     onResume: callbacks.onResume,
     settings,
+    fullscreen,
+    peelEscape: viewModes.peelEscape,
   });
 
   return {
@@ -88,8 +99,12 @@ export function createGameUI(callbacks: GameUiCallbacks): GameUi {
     pause: menu.open,
     resume: menu.close,
     isPaused: menu.isOpen,
+    isPhotoMode: viewModes.isPhoto,
+    isDevLayerVisible: viewModes.isDevVisible,
     dispose(): void {
       menu.dispose();
+      viewModes.dispose();
+      fullscreen.dispose();
       hud.dispose();
       root.remove();
     },

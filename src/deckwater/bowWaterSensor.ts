@@ -106,6 +106,7 @@ type SensorParams = Pick<
   | 'burialRate'
   | 'burialRateFull'
   | 'refractory'
+  | 'gateFloor'
   | 'splashVolume'
   | 'splashCount'
   | 'splashSetback'
@@ -129,6 +130,10 @@ export function createBowWaterSensor(): BowWaterSensor {
   let armed = true;
   let cooldown = 0;
   let lastStrength = 0;
+  /** the hardest sample of the burial currently developing (peak detector) */
+  let peakStrength = 0;
+  let peakHits: { slice: number; strength: number }[] | null = null;
+  let peakFrame: { hull: HullContactSlices; sigma: number } | null = null;
 
   return {
     get armed() {
@@ -146,6 +151,11 @@ export function createBowWaterSensor(): BowWaterSensor {
       // clear is the cleanest possible rearm: one event per burial.
       if (!hull.inContact) {
         armed = true;
+        // drop any half-built burial: the sea it belonged to is behind us, and
+        // firing it on the next contact would land the wrong wave's water
+        peakStrength = 0;
+        peakHits = null;
+        peakFrame = null;
         return [];
       }
 
@@ -169,25 +179,62 @@ export function createBowWaterSensor(): BowWaterSensor {
         if (Number.isFinite(depth)) deepest = Math.max(deepest, depth);
         const immN = ramp01(depth, p.immersionSigma * sigma, p.immersionFullSigma * sigma);
         const rateN = ramp01(hull.sliceRate[i], p.burialRate, p.burialRateFull);
-        // an AND of gates: a fast ship in a calm and a wallowing one in a gale
-        // both stay dry, and only a station DRIVING under contributes
-        const strength = immN * rateN * speedN;
+        // An AND of GATES — a fast ship in a calm and a wallowing one in a
+        // gale both stay dry — but once they are open the AMOUNT is carried
+        // by how deep she buried, which is the sea standing above the rail.
+        // Multiplying three 0..1 ramps instead collapsed a real burial to 0.4%
+        // of a sheet (measured: 0.2 mm of water), so the gates lift off a
+        // floor rather than scaling the event to nothing.
+        const open = immN > 0 && rateN > 0 && speedN > 0;
+        const lift = (n: number) => p.gateFloor + (1 - p.gateFloor) * n;
+        const strength = open ? immN * lift(rateN) * lift(speedN) : 0;
         if (strength > 0) hits.push({ slice: i, strength });
       }
 
       // hysteresis on the whole hull, not per slice: she has to come back up
       // before the next sea can count as a new event
       if (deepest < p.rearmSigma * sigma) armed = true;
-      if (!armed || cooldown > 0 || hits.length === 0) return [];
 
+      hits.sort((a, b) => b.strength - a.strength);
+      const now = hits.length > 0 ? hits[0].strength : 0;
+
+      // PEAK DETECT, not edge trigger. Firing on the first tick the gates open
+      // samples the burial at its weakest instant — immersion and rate are
+      // both barely over their thresholds there, and a genuine sea was landing
+      // 8 mm of water instead of 30. So the burial is tracked while it builds
+      // and the event is emitted on the tick it starts easing off, carrying
+      // the deepest sample seen. That is also when the sheet physically
+      // arrives: just after she stops going down.
+      if (armed && cooldown <= 0 && now > 0 && now > peakStrength) {
+        peakStrength = now;
+        peakHits = hits;
+        peakFrame = { hull, sigma };
+        return []; // still going down — wait for the top
+      }
+      // strictly `>` above, so a burial held at CONSTANT strength still fires on
+      // the next tick rather than waiting forever for a fall that never comes
+      if (peakHits === null || peakFrame === null || !armed || cooldown > 0) {
+        if (now <= 0) {
+          peakStrength = 0;
+          peakHits = null;
+          peakFrame = null;
+        }
+        return [];
+      }
+
+      // past the top: fire the peak sample
+      const fired = peakHits;
+      const frame = peakFrame;
+      lastStrength = peakStrength;
+      peakStrength = 0;
+      peakHits = null;
+      peakFrame = null;
       armed = false;
       cooldown = Math.max(0, p.refractory);
       // strongest first, then truncate: with more burying slices than shader
       // slots, the hardest impacts are the ones that must survive
-      hits.sort((a, b) => b.strength - a.strength);
-      const kept = hits.slice(0, Math.max(1, Math.min(MAX_SPLASH_SLOTS, Math.round(p.splashCount))));
-      lastStrength = kept[0].strength;
-      return kept.flatMap((hit) => layOut(hull, hit.slice, hit.strength, p, f));
+      const kept = fired.slice(0, Math.max(1, Math.min(MAX_SPLASH_SLOTS, Math.round(p.splashCount))));
+      return kept.flatMap((hit) => layOut(frame.hull, hit.slice, hit.strength, p, f));
     },
   };
 }

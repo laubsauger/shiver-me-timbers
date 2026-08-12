@@ -32,6 +32,7 @@ import {
   type SurfaceGridOptions,
 } from '../src/ocean/surfaceGeometry';
 import { createRng } from '../src/state/rng';
+import { Color, SRGBColorSpace } from 'three';
 
 describe('dispersion (§V.4 wave speed realism)', () => {
   it('ω² = g·k — deep water relation', () => {
@@ -580,5 +581,136 @@ describe('storm sea reads (§B.12 follow-up, user storm reference)', () => {
       oceanParams.cascades[2].domain / oceanSurfaceParams.lodSamplesCut;
     const cutDistance = (cutSpacing - oceanSurfaceParams.gridCoreSpacing) / k;
     expect(cutDistance).toBeGreaterThan(200);
+  });
+});
+
+
+/**
+ * "Rotating the camera should not switch the light off" (user). A glint road
+ * IS a specular and SHOULD vanish when you look away — that part is correct
+ * and must stay. What must not vanish is the sea reading as sunlit, so the
+ * contract is: there is always a view-INDEPENDENT sun response, and the
+ * off-axis softening is a broad sky halo, never a faked wide specular.
+ */
+describe('the sea stays lit from every camera angle (user)', () => {
+  it('has a view-independent sun response at all', () => {
+    // N·L body scatter + N·L wrap gain: both are functions of the surface
+    // normal and the sun only. If either goes to zero the sea goes flat the
+    // moment the camera turns away from the sun.
+    expect(oceanSurfaceParams.sunScatterStrength).toBeGreaterThan(0);
+    expect(oceanSurfaceParams.lightGain).toBeGreaterThan(0);
+  });
+
+  it('the off-axis term is a BROAD halo, not a disguised specular', () => {
+    // the glint road is pow(N·H, glintRoadPower) — a true specular. The sky
+    // sun halo must be far broader, or we have simply faked a view-
+    // independent glint, which the user explicitly did not ask for and which
+    // would look worse.
+    expect(oceanSurfaceParams.skySunGlowPower).toBeLessThan(
+      oceanSurfaceParams.glintRoadPower / 4,
+    );
+    expect(oceanSurfaceParams.skySunGlowStrength).toBeGreaterThan(0);
+  });
+
+  it('skylight is used as light, not as paint', () => {
+    // desaturating the sky colour before using it as illumination; 0 would
+    // mean painting the water with the literal sky swatch
+    expect(oceanSurfaceParams.skylightDesaturation).toBeGreaterThan(0);
+    expect(oceanSurfaceParams.skylightDesaturation).toBeLessThanOrEqual(1);
+  });
+
+  it('the sun gain carries real N·L contrast', () => {
+    // gain/floor is the lit-vs-unlit ratio of the wrap term before any
+    // additive path. Too small and every wave face reads the same brightness,
+    // which is what made the sea look flat and unlit off-axis.
+    expect(oceanSurfaceParams.lightGain / oceanSurfaceParams.lightFloor)
+      .toBeGreaterThan(0.75);
+  });
+});
+
+
+/**
+ * §T.39 golden hour. The sea held hardcoded sky colours while sky, fog and
+ * ambient all warmed off the shared live palette — a mint turquoise ocean
+ * under a fully amber sunset. The fix ties the reflected sky to the live haze
+ * colour the water ALREADY copies for its distance haze, so the two can never
+ * drift apart again. These tests pin both ends of that: midday must be
+ * untouched, sunset must actually warm.
+ */
+describe('reflected sky follows the live day cycle (§T.39)', () => {
+  const linear = (hex: string) => {
+    const c = new Color();
+    c.setStyle(hex, SRGBColorSpace);
+    return [c.r, c.g, c.b];
+  };
+  const tint = (hazeHex: string) => {
+    const live = linear(hazeHex);
+    const ref = linear(oceanSurfaceParams.skyReferenceHaze);
+    return live.map((v, i) =>
+      Math.min(oceanSurfaceParams.skyTintMax, v / Math.max(0.02, ref[i])),
+    );
+  };
+
+  it('is a NO-OP at the reference haze — midday keeps its authored look', () => {
+    // if someone retunes skyReferenceHaze without retuning the authored
+    // gradient, the whole day cycle shifts. This is that tripwire.
+    for (const channel of tint(oceanSurfaceParams.skyReferenceHaze)) {
+      expect(channel).toBeCloseTo(1, 5);
+    }
+  });
+
+  it('warms the sea at the measured sunset haze', () => {
+    // sky agent's live sunset fog colour at timeOfDay 17.75
+    const [r, g, b] = tint('#fdb669');
+    expect(r).toBeGreaterThan(g);
+    expect(g).toBeGreaterThan(b);
+    expect(r).toBeGreaterThan(1.5); // unmistakably warm, not a nudge
+  });
+
+  it('the tint ceiling does not clip the sunset it exists to carry', () => {
+    // at 2.5 the cap was binding on red (needs 3.11) and quietly
+    // under-warming the water
+    const ref = linear(oceanSurfaceParams.skyReferenceHaze);
+    const live = linear('#fdb669');
+    const uncapped = Math.max(...live.map((v, i) => v / ref[i]));
+    expect(oceanSurfaceParams.skyTintMax).toBeGreaterThanOrEqual(uncapped);
+  });
+
+  it('follows the live sky by default — constants alone are the bug', () => {
+    expect(oceanSurfaceParams.skyFollowStrength).toBeGreaterThan(0.9);
+  });
+});
+
+describe('sun-elevation gate clears a horizon-kissing sunset (§T.39)', () => {
+  const smooth = (e0: number, e1: number, x: number) => {
+    const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  };
+  const gate = (y: number) =>
+    smooth(
+      oceanSurfaceParams.sunHorizonFadeLow,
+      oceanSurfaceParams.sunHorizonFadeHigh,
+      y,
+    );
+
+  it('is at FULL strength for the showcase sun, with real margin', () => {
+    // the shot sits at sunDir.y = 0.0631 (3.62°). The old 0.02→0.06 ramp
+    // cleared it by 5%, which is not margin — golden hour wants to go lower.
+    expect(gate(0.0631)).toBe(1);
+    expect(oceanSurfaceParams.sunHorizonFadeHigh).toBeLessThanOrEqual(0.0631 / 3);
+  });
+
+  it('still carries the sun at 1 degree of elevation', () => {
+    expect(gate(0.0175)).toBeGreaterThan(0.5);
+  });
+
+  it('goes dark once the sun is actually down', () => {
+    // below the horizon there is no direct sun; §B — the water reading "dead"
+    // at 18.5h was the sun having SET, not a shader bug
+    expect(gate(0)).toBe(0);
+    expect(gate(-0.05)).toBe(0);
+    expect(oceanSurfaceParams.sunHorizonFadeLow).toBeLessThan(
+      oceanSurfaceParams.sunHorizonFadeHigh,
+    );
   });
 });

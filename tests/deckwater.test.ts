@@ -503,6 +503,22 @@ describe('bow water sensor (§V27 event-driven, §V36 σ-relative)', () => {
     ...over,
   });
 
+  /**
+   * The sensor is a PEAK DETECTOR: one tick to watch the burial build, the
+   * next to emit it once it stops going down. Firing on the opening edge
+   * instead sampled the weakest instant of the burial and deposited 8 mm of
+   * water where a real sea lands 150 mm, so tests that want the event drive
+   * both ticks.
+   */
+  const fire = (
+    s: ReturnType<typeof createBowWaterSensor>,
+    smp: BowWaterSample,
+    pp: typeof p = p,
+  ) => {
+    s.update(smp, 1 / 60, pp, frame); // building
+    return s.update(smp, 1 / 60, pp, frame); // past the top → emit
+  };
+
   /** only the forward third is driving under — the ordinary pitching case */
   const bowOnly = () =>
     sample({
@@ -516,7 +532,7 @@ describe('bow water sensor (§V27 event-driven, §V36 σ-relative)', () => {
     // modulated by where we're actually impacting". With only the forward
     // stations driving under, nothing may land amidships or aft — the solve
     // transports it there, the sensor must not paint it there.
-    const out = createBowWaterSensor().update(bowOnly(), 1 / 60, p, frame);
+    const out = fire(createBowWaterSensor(), bowOnly());
     expect(out.length).toBeGreaterThan(0);
     for (const q of out) {
       expect(q.v).toBeGreaterThan(0.7); // forward third only
@@ -530,7 +546,7 @@ describe('bow water sensor (§V27 event-driven, §V36 σ-relative)', () => {
       depth: [1.6, 1.6, 1.6, 0, 0, 0, 0, 0, 0],
       rate: [p.burialRateFull, (p.burialRate + p.burialRateFull) / 2, p.burialRate * 1.01, 0, 0, 0, 0, 0, 0],
     });
-    const out = createBowWaterSensor().update(graded, 1 / 60, p, frame);
+    const out = fire(createBowWaterSensor(), graded);
     expect(out.length).toBe(3);
     const amounts = out.map((q) => q.amount);
     expect(new Set(amounts).size).toBe(3); // genuinely graded, not one value
@@ -541,12 +557,12 @@ describe('bow water sensor (§V27 event-driven, §V36 σ-relative)', () => {
     // She rolls down and ships it over the lee rail; painting it up the
     // middle is what makes a deck read as a decal rather than a deck.
     const [uCentre] = deckUv(0, 0, frame);
-    const stbd = createBowWaterSensor().update(sample({ lean: 0.8 }), 1 / 60, p, frame);
-    const port = createBowWaterSensor().update(sample({ lean: -0.8 }), 1 / 60, p, frame);
+    const stbd = fire(createBowWaterSensor(), sample({ lean: 0.8 }));
+    const port = fire(createBowWaterSensor(), sample({ lean: -0.8 }));
     expect(stbd[0].u).toBeGreaterThan(uCentre); // starboard rail down
     expect(port[0].u).toBeLessThan(uCentre);
     // and an evenly buried hull leans neither way
-    expect(createBowWaterSensor().update(sample({ lean: 0 }), 1 / 60, p, frame)[0].u)
+    expect(fire(createBowWaterSensor(), sample({ lean: 0 }))[0].u)
       .toBeCloseTo(uCentre, 6);
   });
 
@@ -554,10 +570,35 @@ describe('bow water sensor (§V27 event-driven, §V36 σ-relative)', () => {
     // It has to be comparable with the deck field it lands on: the waterway
     // is 28 mm deep and a hatch coaming 180 mm, and water that ignores both
     // is not water. A full-strength event is ankle-deep, not waist-deep.
-    const out = createBowWaterSensor().update(sample(), 1 / 60, p, frame);
+    const out = fire(createBowWaterSensor(), sample());
     expect(Math.max(...out.map((q) => q.amount))).toBeCloseTo(p.splashVolume, 6);
     expect(p.splashVolume).toBeGreaterThan(0.02); // deeper than the waterway
     expect(p.splashVolume).toBeLessThan(0.35); // shallower than the bulwark
+  });
+
+  it('samples the burial at its PEAK, not at the instant the gates opened', () => {
+    // Measured bug: firing on the opening edge caught immersion and rate both
+    // barely over threshold, so a genuine sea landed 8 mm of water where the
+    // top of the same burial was worth 150 mm. An event has to be worth what
+    // the sea was actually doing, or the whole effect is invisible.
+    const s = createBowWaterSensor();
+    const at = (mul: number) =>
+      sample({
+        depth: Array.from({ length: SLICES }, (_, i) =>
+          i < 3 ? p.immersionFullSigma * SIGMA * mul : 0),
+        rate: Array.from({ length: SLICES }, (_, i) =>
+          i < 3 ? p.burialRate + (p.burialRateFull - p.burialRate) * mul : 0),
+      });
+    // she goes down: weak → hard. Nothing fires while it is still building.
+    expect(s.update(at(0.05), 1 / 60, p, frame)).toEqual([]);
+    expect(s.update(at(0.5), 1 / 60, p, frame)).toEqual([]);
+    expect(s.update(at(1), 1 / 60, p, frame)).toEqual([]);
+    // ...then eases off, and the event carries the TOP of the burial
+    const out = s.update(at(0.6), 1 / 60, p, frame);
+    expect(out.length).toBeGreaterThan(0);
+    const onset = fire(createBowWaterSensor(), at(0.05));
+    expect(Math.max(...out.map((q) => q.amount)))
+      .toBeGreaterThan(Math.max(...onset.map((q) => q.amount)) * 3);
   });
 
   it('a hull that is merely immersed at speed splashes NOTHING (§V27)', () => {
@@ -573,7 +614,7 @@ describe('bow water sensor (§V27 event-driven, §V36 σ-relative)', () => {
 
   it('fires once per burial, not once per tick', () => {
     const s = createBowWaterSensor();
-    expect(s.update(sample(), 1 / 60, p, frame).length).toBeGreaterThan(0);
+    expect(fire(s, sample()).length).toBeGreaterThan(0);
     for (let i = 0; i < 120; i++) {
       expect(s.update(sample(), 1 / 60, p, frame)).toEqual([]);
     }
@@ -581,10 +622,10 @@ describe('bow water sensor (§V27 event-driven, §V36 σ-relative)', () => {
 
   it('rearms when the hull lifts clear, then fires on the next sea', () => {
     const s = createBowWaterSensor();
-    s.update(sample(), 1 / 60, p, frame);
+    fire(s, sample());
     for (let i = 0; i < 60; i++) s.update(sample({ inContact: false }), 1 / 60, p, frame);
     expect(s.armed).toBe(true);
-    expect(s.update(sample(), 1 / 60, p, frame).length).toBeGreaterThan(0);
+    expect(fire(s, sample()).length).toBeGreaterThan(0);
   });
 
   it('the immersion gate is σ-relative: the same metres, a different sea (§V36)', () => {
@@ -592,9 +633,8 @@ describe('bow water sensor (§V27 event-driven, §V36 σ-relative)', () => {
     // — §B.12 twice over. Identical hull telemetry must ship water in a calm
     // and not in a gale, because in a gale that is an ordinary wave.
     const tele = (sigma: number) => sample({ depth: 0.9 }, { seaSigma: sigma });
-    expect(createBowWaterSensor().update(tele(0.5), 1 / 60, p, frame).length)
-      .toBeGreaterThan(0);
-    expect(createBowWaterSensor().update(tele(4.0), 1 / 60, p, frame)).toEqual([]);
+    expect(fire(createBowWaterSensor(), tele(0.5)).length).toBeGreaterThan(0);
+    expect(fire(createBowWaterSensor(), tele(4.0))).toEqual([]);
   });
 
   it('a hull clear of the water cannot ship any (and rearms)', () => {
@@ -612,7 +652,7 @@ describe('bow water sensor (§V27 event-driven, §V36 σ-relative)', () => {
     // MAX_SPLASHES is the uniform-array capacity; a longer list would silently
     // drop its tail, and it must drop the WEAKEST impacts, not a random tail.
     const s = createBowWaterSensor();
-    const out = s.update(sample(), 1 / 60, { ...p, splashCount: 40 }, frame);
+    const out = fire(s, sample(), { ...p, splashCount: 40 });
     expect(out.length).toBeLessThanOrEqual(MAX_SPLASHES);
     for (const q of out) {
       expect(q.u).toBeGreaterThanOrEqual(0);

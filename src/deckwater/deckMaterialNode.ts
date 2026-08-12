@@ -154,11 +154,15 @@ export function deckWetnessNode(ctx: DeckWetnessContext, r: DeckReceiver): DeckW
   const mask = plane.mul(inRange(uu)).mul(inRange(vv));
 
   const state = texture(ctx.state, uv);
-  const wet = state.g.mul(mask);
+  // §V28 belt-and-braces: clamped, so no value the solve could ever put in
+  // this texture — a NaN, a negative, a runaway pool — can drive the deck
+  // material past "fully wet". An unclamped mix() factor is how a shading
+  // hook turns a numerical problem into a white deck.
+  const wet = state.g.mul(mask).clamp(0, 1);
   // "is there standing water here", separate from "are the planks wet" —
   // wetness outlives the puddle by design (§V9), and a wet plank and a puddle
   // do not look alike
-  const pool = smoothstep(float(0), u.poolDepth.max(1e-4), state.b).mul(mask);
+  const pool = smoothstep(float(0), u.poolDepth.max(1e-4), state.b).mul(mask).clamp(0, 1);
 
   return {
     tint: mix(vec3(1, 1, 1), u.wetTint, wet).mul(mix(vec3(1, 1, 1), u.poolTint, pool)),

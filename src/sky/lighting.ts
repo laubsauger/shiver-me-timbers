@@ -28,16 +28,15 @@ import {
   daylight,
   fogRange,
   hemisphereColors,
-  hexToRgb,
   lowSunWarmth,
+  skyPalette,
   skyTint,
   sunColor,
   type Rgb,
   type Vec3,
 } from './sunCycle';
 
-function mulRgb(hex: number, tint: Rgb): [number, number, number] {
-  const c = hexToRgb(hex);
+function mulRgb(c: Rgb, tint: Rgb): Rgb {
   return [c[0] * tint[0], c[1] * tint[1], c[2] * tint[2]];
 }
 
@@ -136,6 +135,7 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
       sunLight.intensity = p.sunIntensity * day;
 
       const tint = skyTint(elevation);
+      const pal = skyPalette(elevation, p);
       // Hemisphere ambient is IRRADIANCE, not the painted sky (see
       // desaturate()'s header — this is the teal-hull bug). Two corrections:
       //   1. the sky half uses midColor, not zenithColor. A surface facing
@@ -147,12 +147,7 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
       //      it came from. This light is never shadowed, so whatever hue
       //      bias survives here is applied to every shaded pixel in the
       //      scene with nothing to counteract it.
-      const ambient = hemisphereColors(
-        p.midColor,
-        p.groundBounceColor,
-        tint,
-        p.ambientDesaturation,
-      );
+      const ambient = hemisphereColors(pal.mid, pal.ground, tint, p.ambientDesaturation);
       setLinear(hemi.color, ambient.sky);
       setLinear(hemi.groundColor, ambient.ground);
       // moonless-night floor of 15% keeps silhouettes readable after dark
@@ -162,8 +157,8 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
       // water meets the horizon on a visible seam. The background node
       // renders mix(midColor, horizonColor, hazeStrength) at viewDir.y = 0,
       // so reproduce that exact blend here, then warm it at golden hour.
-      const mid = mulRgb(p.midColor, tint);
-      const band = mulRgb(p.horizonColor, tint);
+      const mid = mulRgb(pal.mid, tint);
+      const band = mulRgb(pal.horizon, tint);
       const h = Math.min(1, Math.max(0, p.hazeStrength));
       const w = 0.35 * lowSunWarmth(elevation);
       const haze: Rgb = [

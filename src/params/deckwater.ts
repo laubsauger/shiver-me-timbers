@@ -32,6 +32,24 @@ export interface DeckWaterParams {
    */
   drainDrop: number;
   /**
+   * Height (m, either side of the deck plane) within which a field cell counts
+   * as the WAIST — the walking surface the material shades. The castle soles
+   * stand ~1.6 m proud of it, and water injected onto those is invisible and
+   * runs off their edges rather than onto the deck.
+   */
+  waistBand: number;
+  /**
+   * Cells along the length between freeing ports. The generated field rings
+   * the waist with a solid bulwark and puts the drain outside it, so without
+   * these the deck is a sealed tub and a boarding sea never leaves (measured:
+   * standing water past 1.5 m, held only by evaporation).
+   */
+  scupperSpacing: number;
+  /** rows per freeing port — how wide each opening is */
+  scupperWidth: number;
+  /** how far above the row's gutter the port's sill sits (m); 0 = flush */
+  scupperSill: number;
+  /**
    * Solver substeps per update. MUST be even: the ping-pong lands back on the
    * front texture, so the material's sampler never changes binding mid-flight
    * (flowfoam does the same by keeping texA permanently front). Also halves
@@ -48,7 +66,12 @@ export interface DeckWaterParams {
    * slid the whole sheet to leeward as one uniform slab.
    */
   tiltBiasStrength: number;
-  /** volume units evaporated per second (§V9: deck dries) */
+  /**
+   * Metres of standing water evaporated per second (§V9: the deck dries).
+   * A FINISHER, not the main sink — water leaves a real deck through the
+   * scuppers, which the solve already models as drain cells. At 0.05 it
+   * erased a full sheet in 2.2 s and the drainage never got to run.
+   */
   evapVolume: number;
   /** wetness units evaporated per second — slower than volume so wet planks linger */
   evapWetness: number;
@@ -61,7 +84,11 @@ export interface DeckWaterParams {
    * the range of a real film so wetness stays proportional to what is there.
    */
   wetnessGain: number;
-  /** splash splat gaussian radius in cells */
+  /**
+   * Splat gaussian radius in CELLS. Green water comes aboard as a sheet
+   * metres wide, not a bucket: at 4.5 × 6.8 cm per cell, 6 cells was a 27 × 41
+   * cm puddle that could never read as the sea coming over the rail.
+   */
   splashRadius: number;
 
   // ── §V27 bow-immersion sensor: EVENT gates, not a passive emitter ───────
@@ -92,6 +119,13 @@ export interface DeckWaterParams {
   burialRateFull: number;
   /** seconds the sensor stays deaf after firing (one event per wave, not per tick) */
   refractory: number;
+  /**
+   * How much of an event survives when the speed and burial-rate gates are
+   * only just open. They are GATES, not volume scalers: at 0 the two ramps
+   * multiply a genuine burial down to a few percent of a sheet, which is how
+   * a "working" sensor deposited 0.2 mm of water.
+   */
+  gateFloor: number;
   /**
    * PEAK added water depth at a splat centre for a full-strength burial, in
    * METRES — the same units as the deck heightfield, so it can be read
@@ -144,24 +178,29 @@ export const deckWaterParams: DeckWaterParams = registerParams(
     gridHeight: 512, // along the length
     maskDrainBelow: 0.5,
     drainDrop: 0.05,
+    waistBand: 0.35,
+    scupperSpacing: 26,
+    scupperWidth: 5,
+    scupperSill: 0.02,
     substeps: 2,
     fluxRate: 18,
     tiltBiasStrength: 1,
-    evapVolume: 0.05,
+    evapVolume: 0.003,
     evapWetness: 0.05,
     wetnessGain: 7,
-    splashRadius: 6,
+    splashRadius: 13,
 
     immersionSigma: 0.55,
     immersionFullSigma: 1.6,
     rearmSigma: 0.3,
     sigmaFloor: 0.05,
     speedThreshold: 2.5,
-    speedFull: 7,
+    speedFull: 5.5,
     burialRate: 0.9,
     burialRateFull: 3.5,
     refractory: 0.45,
-    splashVolume: 0.11,
+    gateFloor: 0.4,
+    splashVolume: 0.07,
     splashCount: 5,
     splashSetback: 0.06,
     splashMargin: 0.04,
@@ -186,12 +225,16 @@ function deckWaterParamsMeta(): Partial<Record<keyof DeckWaterParams, ParamMeta>
     substeps: { min: 2, max: 8, step: 2 }, // even only — see DeckWaterParams
     maskDrainBelow: { min: 0.05, max: 0.95, step: 0.05 },
     drainDrop: { min: 0.005, max: 0.5, step: 0.005 },
+    waistBand: { min: 0.05, max: 2, step: 0.05 },
+    scupperSpacing: { min: 4, max: 128, step: 1 },
+    scupperWidth: { min: 1, max: 32, step: 1 },
+    scupperSill: { min: 0, max: 0.3, step: 0.005 },
     fluxRate: { min: 0, max: 60, step: 0.5 },
     tiltBiasStrength: { min: 0, max: 4, step: 0.05 },
-    evapVolume: { min: 0, max: 0.5, step: 0.001 },
+    evapVolume: { min: 0, max: 0.1, step: 0.0005 },
     evapWetness: { min: 0, max: 0.2, step: 0.001 },
     wetnessGain: { min: 0, max: 40, step: 0.5 },
-    splashRadius: { min: 1, max: 32, step: 1 },
+    splashRadius: { min: 1, max: 64, step: 1 },
 
     immersionSigma: { min: 0, max: 3, step: 0.05 },
     immersionFullSigma: { min: 0.1, max: 4, step: 0.05 },
@@ -202,6 +245,7 @@ function deckWaterParamsMeta(): Partial<Record<keyof DeckWaterParams, ParamMeta>
     burialRate: { min: 0, max: 8, step: 0.05 },
     burialRateFull: { min: 0.1, max: 12, step: 0.05 },
     refractory: { min: 0, max: 3, step: 0.05 },
+    gateFloor: { min: 0, max: 1, step: 0.05 },
     splashVolume: { min: 0, max: 1, step: 0.005 },
     splashCount: { min: 1, max: 8, step: 1 },
     splashSetback: { min: 0, max: 0.5, step: 0.005 },

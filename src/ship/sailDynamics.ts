@@ -61,10 +61,26 @@ export function sailDrive(input: SailWindInput, p: ShipMaterialParams): SailDriv
   // +1 = wind dead astern (running), -1 = in irons
   const along = clamp((fx * wx + fz * wz) / len, -1, 1);
 
+  /**
+   * DYNAMIC RANGE (the §B "flagStreamRef 7 against a wind of 11" bug again).
+   *
+   * `sailWindRef` is the wind that fills the sail COMPLETELY, so it has to sit
+   * ABOVE the wind the game normally runs at or `press` is pinned at its top
+   * whenever anyone is actually sailing, and a breeze and a gale produce
+   * identical canvas. At the old ref of 11 against a default wind of 11 that
+   * is precisely what happened: press = 1.0, fill ≈ 0.9, so drive ≈ 0.9 of a
+   * usable 1.0 in ordinary conditions and essentially all of the range sat
+   * above where the game lives.
+   *
+   * With the ref above the working wind, ordinary sailing lands near two
+   * thirds and there is real room left above it. The ceiling comes down to
+   * 1.25 at the same time: the belly is now deep enough per unit of drive that
+   * 1.5 would blow the cloth clean through the rigging in a squall.
+   */
   const press = clamp(
     finite(input.windSpeed) / Math.max(0.5, p.sailWindRef),
     0,
-    1.5,
+    1.25,
   );
   const gust = gustFactor(finite(input.time), p);
 

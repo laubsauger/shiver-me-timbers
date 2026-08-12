@@ -7,7 +7,32 @@
  */
 
 export const HUD_CSS = /* css */ `
-.smt-hud { position: absolute; inset: 0; opacity: var(--smt-hud-opacity, 0.92); }
+.smt-hud {
+  position: absolute; inset: 0; opacity: var(--smt-hud-opacity, 0.92);
+  transition: opacity 0.4s ease, visibility 0s linear 0s;
+}
+/* photo mode (§I ui/cinematic): nothing over the render. Fades rather than
+   cutting, so entering it mid-recording is not a one-frame pop. */
+.smt-ui.is-photo .smt-hud {
+  opacity: 0; visibility: hidden; transition-delay: 0s, 0.4s;
+}
+/* the one thing photo mode keeps: the line telling you how to get back out.
+   It sits outside .smt-hud on purpose and fades itself after a few seconds. */
+.smt-caption {
+  position: absolute; bottom: 26px; left: 50%; transform: translateX(-50%) translateY(6px);
+  padding: 7px 18px 8px; max-width: min(520px, 82vw); text-align: center;
+  font-size: 13px; letter-spacing: 0.09em; font-variant-caps: small-caps;
+  color: var(--parch-hi); background: rgba(10, 7, 4, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(223, 192, 109, 0.3);
+  clip-path: polygon(10px 0, calc(100% - 10px) 0, 100% 50%, calc(100% - 10px) 100%,
+    10px 100%, 0 50%);
+  opacity: 0; visibility: hidden;
+  transition: opacity 0.45s ease, transform 0.45s ease, visibility 0s linear 0.45s;
+}
+.smt-caption.is-on {
+  opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0);
+  transition-delay: 0s;
+}
 .smt-compass {
   position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
   width: min(460px, 62vw); height: 46px; overflow: hidden;

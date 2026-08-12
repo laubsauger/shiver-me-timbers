@@ -33,7 +33,7 @@ import {
 import type { SkyParams } from '../params/sky';
 import {
   hexToRgb,
-  lowSunWarmth,
+  skyPalette,
   skyTint,
   sunColor,
   sunDiscCosines,
@@ -41,9 +41,8 @@ import {
   type Vec3,
 } from './sunCycle';
 
-/** sRGB params × a 0..1 tint ramp → a linear-working-space three.Color */
-function tinted(hex: number, tint: Rgb): THREE.Color {
-  const c = hexToRgb(hex);
+/** sRGB triple × a 0..1 tint ramp → a linear-working-space three.Color */
+function tinted(c: Rgb, tint: Rgb): THREE.Color {
   // setRGB with SRGBColorSpace does the transfer function; passing raw sRGB
   // numbers into the default (linear) working space is §B9, the white wash.
   return new THREE.Color().setRGB(
@@ -120,12 +119,14 @@ export function createSkyBackground(p: SkyParams) {
       uSunDir.value.set(sunDir[0], sunDir[1], sunDir[2]);
       const tint = skyTint(elevation);
       const sun = sunColor(elevation);
-      uZenith.value.copy(tinted(p.zenithColor, tint));
-      uMid.value.copy(tinted(p.midColor, tint));
-      uHaze.value.copy(tinted(p.horizonColor, tint));
-      uWarm.value.copy(tinted(p.horizonWarmColor, tint));
+      // one palette for sky + fog + ambient, crossfaded to golden hour (§T39)
+      const pal = skyPalette(elevation, p);
+      uZenith.value.copy(tinted(pal.zenith, tint));
+      uMid.value.copy(tinted(pal.mid, tint));
+      uHaze.value.copy(tinted(pal.horizon, tint));
+      uWarm.value.copy(tinted(hexToRgb(p.horizonWarmColor), tint));
       uSunColor.value.setRGB(sun[0], sun[1], sun[2], THREE.SRGBColorSpace);
-      uWarmAmount.value = p.horizonWarmStrength * lowSunWarmth(elevation);
+      uWarmAmount.value = p.horizonWarmStrength * pal.warm;
       uHazeStrength.value = p.hazeStrength;
       uHazeFalloff.value = p.hazeFalloff;
       uSunHaze.value = p.sunHazeStrength;

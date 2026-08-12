@@ -25,12 +25,48 @@
  */
 import type { ShipMaterialParams } from '../params/ship';
 
-/** the shape constants the TSL graph must use verbatim (see sailMaterial.ts) */
+/**
+ * The shape constants. sailMaterial.ts IMPORTS these rather than repeating the
+ * literals — it used to carry its own copies of 0.22/0.9/0.3/1.3/2.1, which is
+ * the drift this file's header warns about sitting one typo away from
+ * happening. There is no cost to sharing them: they are plain numbers, and
+ * only the expressions around them have to be transliterated.
+ */
 export const SAIL_SKEW_LEAD = 0.22; // how far the belly shifts to leeward
-export const SAIL_BELLY_FALLOFF = 0.9; // smoothstep top edge, head → foot
+/**
+ * VERTICAL BELLY PROFILE (user: "they have no billow to them").
+ *
+ * This used to be one monotone ramp — `smoothstep(0, 0.9, 1−v)` — which is
+ * zero at the head and DEEPEST AT THE FOOT. That is the shape of a flag
+ * blowing off a pole, not of a sail under load: the vertical section has no
+ * inflection, so the whole lower sail moves forward together and the surface
+ * reads as a tilted plane no matter how deep the number says it is. It shaded
+ * flat because it genuinely was flat in one direction.
+ *
+ * A square sail is bent to its yard at the head and hauled down at the clews,
+ * so the canvas is deepest around the middle and comes back at BOTH ends. The
+ * foot never returns fully — it is a free edge — hence FOOT_FILL rather than
+ * a second taper to zero.
+ */
+export const SAIL_BELLY_HEAD = 0.55; // taper span below the head, in v
+export const SAIL_BELLY_FOOT = 0.45; // ease span above the foot, in v
+export const SAIL_FOOT_FILL = 0.55; // belly remaining at the free foot
 export const SAIL_FLUTTER_BASE = 0.3; // shake floor before luff adds to it
 export const SAIL_FLUTTER_EDGE = 1.3; // extra ripple toward the leeches
 export const SAIL_FLUTTER_V = 2.1; // ripple phase advance down the cloth
+
+/**
+ * Belly depth as a fraction of its peak, from the sail's own v (0 = foot,
+ * 1 = head). Peaks at exactly v = 1 − SAIL_BELLY_HEAD = SAIL_BELLY_FOOT.
+ * Exported so the shape can be asserted directly rather than inferred from a
+ * displacement that also carries flutter.
+ */
+export function sailBellyProfile(v: number): number {
+  const vv = clamp01(finite(v));
+  const headTaper = smoothstep(0, SAIL_BELLY_HEAD, 1 - vv);
+  const footEase = SAIL_FOOT_FILL + (1 - SAIL_FOOT_FILL) * smoothstep(0, SAIL_BELLY_FOOT, vv);
+  return headTaper * footEase;
+}
 
 function finite(x: number, fallback = 0): number {
   return Number.isFinite(x) ? x : fallback;
@@ -82,7 +118,7 @@ export function sailClothOffset(
   const us = clamp01(uu + finite(s.skew) * SAIL_SKEW_LEAD * (1 - vv));
   const arch = Math.sin(us * Math.PI);
   const across = arch * arch;
-  const down = smoothstep(0, SAIL_BELLY_FALLOFF, 1 - vv);
+  const down = sailBellyProfile(vv);
   const belly = across * down * finite(s.drive) * p.sailBillow * drop;
 
   // flutter: travelling ripples, biggest at the free foot and the leeches

@@ -23,7 +23,7 @@ import { createWeatherSystem, createWeatherSample } from './weather';
 import { createRain } from './rain';
 import { createPostPipeline } from './core/postPipeline';
 import { postParams } from './params/post';
-import { createGameUI } from './ui';
+import { createGameUI, initGraphicsSettings, setFeatureSink } from './ui';
 import {
   createAudio,
   attachAudioSettings,
@@ -58,6 +58,10 @@ import {
 import { ropeParams } from './params/ropes';
 import { buildRatlinePlan } from './ship/ratlinePlan';
 import { buildRungDescriptors } from './ropes/ratlines';
+import { createAiShip, stepAiShip } from './ai/aiShip';
+
+/** enemy spawn, world XZ — far enough to frame, close enough to watch */
+const ENEMY_SPAWN: [number, number] = [190, -150];
 
 // bisect switches for the renderer-freeze hunt — all true = full game
 const FEATURES = {
@@ -81,6 +85,12 @@ async function boot(): Promise<void> {
   // boot timing — the splash now holds until a real frame exists, so every ms
   // here is user-visible waiting. Phase marks land on __game.bootTimings and
   // in the console so the cost can be attacked with numbers, not guesses.
+  // FIRST — before the renderer and before ANY system is built. caustics,
+  // deckwater and post bake their TSL graphs once and sky allocates its shadow
+  // map once, so these values have to be right the first time rather than
+  // applied after the fact.
+  const settings = initGraphicsSettings();
+
   const bootT0 = performance.now();
   const bootTimings: Array<[string, number]> = [];
   let bootLast = bootT0;
@@ -208,6 +218,29 @@ async function boot(): Promise<void> {
   const shipAssembly = new ShipAssembly(galleonBlueprint);
   app.scene.add(shipAssembly.group);
 
+  // ENEMY SHIP (§T.19/§V.15). Placed off the starboard bow at a distance that
+  // frames well rather than alongside — she is here to be looked at. Sailing
+  // and buoyancy key per-ship state off a WeakMap, so they need no second
+  // instance; the rig does, because applyRiggingPlan writes indices 0..n-1
+  // with no offset and would otherwise overwrite the player's ropes.
+  state.ships.push({
+    id: 'enemy-1',
+    kind: 'enemy',
+    position: [ENEMY_SPAWN[0], 0, ENEMY_SPAWN[1]],
+    quaternion: [0, 0, 0, 1],
+    velocity: [0, 0, 0],
+    angularVelocity: [0, 0, 0],
+    rudder: 0,
+    sailTrim: 0.7,
+    flood: 0,
+    damage: {},
+  });
+  const enemyShip = state.ships[1];
+  const enemyBlueprint = buildGalleonBlueprint();
+  const enemyAssembly = new ShipAssembly(enemyBlueprint);
+  app.scene.add(enemyAssembly.group);
+  const enemyAi = createAiShip(1, ENEMY_SPAWN);
+
   // §V.12 rigging: catenary compute ropes anchored to blueprint sockets
   const riggingPlan = buildRiggingPlan(galleonBlueprint);
   // §V.45: rungs read the SAME solved points buffer the shrouds render from,
@@ -221,6 +254,18 @@ async function boot(): Promise<void> {
   const blockSockets = selectBlockSockets(riggingPlan, ropeParams.maxBlocks);
   const blocks = createBlocks(blockSockets.length);
   app.scene.add(blocks.mesh);
+
+  // second rope instance for the enemy — see the note at her spawn
+  const enemyRiggingPlan = buildRiggingPlan(enemyBlueprint);
+  const enemyRungs = buildRungDescriptors(
+    buildRatlinePlan(enemyBlueprint),
+    enemyRiggingPlan,
+  );
+  const enemyRopes = createRopes({
+    maxRopes: Math.max(enemyRiggingPlan.length, 32),
+    rungs: enemyRungs,
+  });
+  app.scene.add(enemyRopes.mesh);
 
   // Islands stay IN the mirror pass — §V26 names them and they are the payoff.
   // The cloud quad exclusion is NOT an optimisation: it is camera-pinned and
@@ -282,7 +327,22 @@ async function boot(): Promise<void> {
   app.controls.enabled = false; // follow cam owns the pointer now
 
   let paused = false;
+  // two switches have no params key yet — the sinks drive them until their
+  // owning agents ship one, at which point the switch goes live unchanged
+  setFeatureSink('shadows', (on) => {
+    sky.sunLight.castShadow = on;
+  });
+  setFeatureSink('spray', (on) => {
+    FEATURES.spray = on;
+    FEATURES.bowSpray = on;
+    // also hide the meshes: gating only the update would freeze live
+    // particles mid-flight rather than clearing them
+    spray.mesh.visible = on;
+    bowSpray.mesh.visible = on;
+  });
+
   const ui = createGameUI({
+    settings, // REUSE the store — omitting it makes the UI build a second one
     onPause: () => {
       paused = true; // sim halts, render continues (§V.21)
     },
@@ -290,6 +350,15 @@ async function boot(): Promise<void> {
       paused = false;
     },
   });
+
+  // resolution scale: the UI owns the setting, the renderer is ours
+  const applyResolution = (s = settings.get()): void => {
+    app.renderer.setPixelRatio(
+      Math.min(window.devicePixelRatio, 2) * s.graphics.resolutionScale,
+    );
+  };
+  applyResolution();
+  settings.subscribe(applyResolution);
 
   // volumes come from the persisted settings store, and stay bound to it so
   // pause-menu changes apply live and survive reload (§I, §V21)
@@ -350,11 +419,15 @@ async function boot(): Promise<void> {
       oceanParams.amplitude = weatherHere.ocean.amplitude;
       const snapshot = input.sample(dt);
       stepShipSailing(playerShip, snapshot, state.wind, dt);
+      // §V.15: the AI emits the SAME InputState a keyboard produces, so she
+      // sails the player's exact code path rather than a parallel model
+      stepShipSailing(enemyShip, stepAiShip(enemyAi, state, 0).input, state.wind, dt);
       cpuOcean.update(state.time);
       // §V.14 flooding: holes from damaged zones (inert while undamaged)
       const holes = floodingHoles(galleonBlueprint, playerZoneStates, playerShip.quaternion, 0);
       stepFlooding(playerShip, holes.positions, dt);
       stepShipBuoyancy(playerShip, cpuOcean, dt, undefined, holes.positions);
+      stepShipBuoyancy(enemyShip, cpuOcean, dt);
       // AFTER buoyancy, so the pose is final for this tick. Throws if the
       // ocean mirror was never advanced to this time (§B.7 fail-loud).
       // Measured: the stem is dry 40–47% of ticks at cruising speed — that is
@@ -504,6 +577,22 @@ async function boot(): Promise<void> {
       // internally, so passing the raw scalar every frame is safe.
       updateRig(shipAssembly, frameDt, playerShip.sailTrim);
 
+      // enemy render pose. No interpolation caches for her: she is a distant
+      // subject, not the camera's anchor, so per-tick pose is imperceptible
+      // and the §V.2 interpolation only matters for what the camera chases.
+      enemyAssembly.group.position.set(
+        enemyShip.position[0],
+        enemyShip.position[1],
+        enemyShip.position[2],
+      );
+      enemyAssembly.group.quaternion.set(
+        enemyShip.quaternion[0],
+        enemyShip.quaternion[1],
+        enemyShip.quaternion[2],
+        enemyShip.quaternion[3],
+      );
+      updateRig(enemyAssembly, frameDt, enemyShip.sailTrim);
+
       // rigging follows the moving ship: rewrite anchors, GPU re-solves (§V.12)
       if (FEATURES.ropes) {
         shipAssembly.group.updateMatrixWorld(true);
@@ -524,6 +613,15 @@ async function boot(): Promise<void> {
         );
         applyBlocks(blockSockets, blocks, (id) => shipAssembly.socketWorldPosition(id));
         app.renderer.compute(ropes.computeNode);
+
+        enemyAssembly.group.updateMatrixWorld(true);
+        applyRiggingPlan(
+          enemyRiggingPlan,
+          enemyRopes,
+          (id) => enemyAssembly.socketWorldPosition(id),
+          furl,
+        );
+        app.renderer.compute(enemyRopes.computeNode);
       }
 
       const speed = Math.hypot(playerShip.velocity[0], playerShip.velocity[2]);

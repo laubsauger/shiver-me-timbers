@@ -118,18 +118,84 @@ export const oceanSurfaceParams = registerParams(
     /** body value lift band, also in σ — troughs darker, crests lighter */
     bodyBandLow: -1.7,
     bodyBandHigh: 2.3,
+    /**
+     * Authored reflected-sky gradient. These stay as the SHAPE of the sky the
+     * water reflects (horizon lighter, zenith deeper); their day-cycle colour
+     * comes from the live haze below, so there is never a second set of
+     * sunset constants to keep in sync.
+     */
     skyHorizonColor: '#a8d4e8',
     skyZenithColor: '#4694cc',
+    /**
+     * 0..1 how strongly the reflected sky follows the LIVE sky. The ocean used
+     * to reflect these constants while sky, fog and ambient all warmed off the
+     * shared palette — a cold mint sea under a fully amber sunset sky. 1 =
+     * fully unified through the whole day cycle.
+     */
+    skyFollowStrength: 1.0,
+    /**
+     * The haze colour the authored gradient above was picked against (the sky
+     * rig's midday horizon blend). The live haze is divided by this to get a
+     * day-cycle tint, so at midday the tint is 1 and the authored look is
+     * untouched; at sunset it carries the same warm shift the sky took.
+     */
+    skyReferenceHaze: '#99def9',
+    /**
+     * Ceiling on that tint so a blown-out sky cannot blow out the water. 3.2
+     * clears the measured sunset shift (#fdb669 / #99def9 needs 3.11 on red)
+     * — at 2.5 the cap was binding and quietly under-warming the sea.
+     */
+    skyTintMax: 3.2,
     /** fresnel sky-reflection blend cap — high = mirror sheen, low = body color */
     reflectionStrength: 0.13,
     /** re-saturation of the body colour under a white sky at grazing angles;
      *  0 = raw fresnel wash (reads gray/desaturated), 1 = full pigment */
     grazingSaturation: 0.55,
-    /** stylized wrap lighting (material owns light — §V20 pigment look):
-     *  brightness = floor + gain·max(0, N·L), tinted by sunTint */
+    /**
+     * Sun-elevation gate (sunDir.y) for every sun-driven water term. Below
+     * `low` there is no direct sun at all; above `high` the terms are at full
+     * strength. Keep `high` LOW — a horizon-kissing sunset is the money shot
+     * (§T.39) and the old 0.02→0.06 ramp started fading the water's sun at
+     * 3.4°, i.e. right where golden hour lives. 0.005→0.02 is 0.3°→1.1°.
+     */
+    sunHorizonFadeLow: 0.005,
+    sunHorizonFadeHigh: 0.02,
+    /**
+     * Stylized lighting (§V20 — the material owns light, PBR washed the
+     * pigment gray). TWO sources, deliberately separate:
+     *   floor = SKYLIGHT: whole-dome, sky-coloured, shadow-independent
+     *   gain  = SUNLIGHT: directional N·L, cut by the shadow map, sun-tinted
+     * Both were sun-tinted before, which made water facing away from the sun
+     * read as dim sunlight instead of sky-lit water.
+     */
     lightFloor: 0.62,
-    lightGain: 0.45,
+    /** raised from 0.45: N·L contrast is what makes a sea look 3D and lit
+     *  from ANY camera angle (user: rotating away looked like lights-out) */
+    lightGain: 0.62,
     sunTint: '#fff2dc',
+    /**
+     * How far the skylight colour is pulled toward its own luminance before
+     * being used as LIGHT. A sky colour picked to look right when painted is
+     * not the colour that sky delivers (sky agent's ambient rework).
+     */
+    skylightDesaturation: 0.5,
+    /**
+     * Sunlight that entered the water, scattered, and left again — carried in
+     * the water's own pigment (sssColor) and keyed to N·L ONLY, so it is
+     * fully view-independent. This is the term that keeps the sea looking
+     * sunlit when the camera turns away from the sun; the glint road stays
+     * view-dependent and still vanishes, which is correct.
+     */
+    sunScatterStrength: 0.22,
+    /** >1 tightens the scatter toward faces squarely facing the sun */
+    sunScatterPower: 1.5,
+    /**
+     * Brightness of the sky's halo AROUND the sun, as seen in the water's
+     * reflection. Broad and smooth — the honest form of "some scattering even
+     * when not looking at the sun", as opposed to faking an off-axis glint.
+     */
+    skySunGlowStrength: 0.35,
+    skySunGlowPower: 8,
     /** how much the sun shadow map darkens the water (0 = ignore shadows) */
     shadowStrength: 0.85,
     /** build the in-material sun-shadow sample at all (reload to apply) —
@@ -239,6 +305,15 @@ export const oceanSurfaceParams = registerParams(
     bodyBandHigh: { min: 0.2, max: 6, step: 0.05 },
     lightFloor: { min: 0, max: 1.5, step: 0.01 },
     lightGain: { min: 0, max: 2, step: 0.01 },
+    skyFollowStrength: { min: 0, max: 1, step: 0.01 },
+    skyTintMax: { min: 1, max: 6, step: 0.05 },
+    sunHorizonFadeLow: { min: -0.05, max: 0.2, step: 0.001 },
+    sunHorizonFadeHigh: { min: 0, max: 0.3, step: 0.001 },
+    skylightDesaturation: { min: 0, max: 1, step: 0.01 },
+    sunScatterStrength: { min: 0, max: 1.5, step: 0.01 },
+    sunScatterPower: { min: 0.2, max: 8, step: 0.1 },
+    skySunGlowStrength: { min: 0, max: 2, step: 0.01 },
+    skySunGlowPower: { min: 1, max: 64, step: 0.5 },
     shadowStrength: { min: 0, max: 1, step: 0.01 },
     sparkleStrength: { min: 0, max: 4, step: 0.05 },
     sparkleScale: { min: 2, max: 120, step: 1 },

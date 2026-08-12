@@ -8,13 +8,16 @@ import { uiParams } from '../params/ui';
 import type { SettingsStore } from './settingsStore';
 import { createSettingsScreen } from './settingsScreen';
 import type { MusicStatus } from './settingsScreen';
-import { createFullscreen } from './fullscreen';
+import type { FullscreenControl } from './fullscreen';
 import { button, div, el, fleuronDivider, sealEmblem } from './dom';
 
 export interface PauseMenuOptions {
   onPause: () => void;
   onResume: () => void;
   settings: SettingsStore;
+  fullscreen: FullscreenControl;
+  /** view modes get the Escape first; true = it was spent peeling photo mode */
+  peelEscape?: () => boolean;
 }
 
 export interface PauseMenu {
@@ -37,7 +40,7 @@ export function createPauseMenu(root: HTMLElement, opts: PauseMenuOptions): Paus
   const resumeBtn = button('smt-menu-btn', 'Resume');
   // full screen is an ACTION, not a stored setting: the browser only grants it
   // inside a gesture, so it lives with the other verbs and mirrors real state
-  const fullscreen = createFullscreen();
+  const fullscreen = opts.fullscreen;
   const fullscreenBtn = button('smt-menu-btn', 'Full Screen');
   const fullscreenTag = el('span', 'smt-menu-tag', 'off');
   fullscreenBtn.appendChild(fullscreenTag);
@@ -116,11 +119,15 @@ export function createPauseMenu(root: HTMLElement, opts: PauseMenuOptions): Paus
 
   function onKeyDown(e: KeyboardEvent): void {
     if (e.key !== 'Escape') return;
-    // Esc peels ONE layer at a time: full screen, then settings, then pause.
-    // The browser owns the first of those and exits full screen on this very
-    // keypress — pausing as well would make one press do two things, and the
-    // player would come back to a menu they never asked for.
+    // Esc peels ONE layer per press: full screen → photo mode → settings view
+    // → pause menu. The browser owns the first rung and exits full screen on
+    // this very keypress, so anything more here would make one press do two
+    // things and drop the player into a menu they never asked for.
     if (document.fullscreenElement) return;
+    if (opts.peelEscape?.()) {
+      e.preventDefault();
+      return;
+    }
     e.preventDefault();
     if (!open) doOpen();
     else if (view === 'settings') showView('menu'); // Esc backs out of settings first
@@ -141,7 +148,6 @@ export function createPauseMenu(root: HTMLElement, opts: PauseMenuOptions): Paus
     dispose(): void {
       window.removeEventListener('keydown', onKeyDown);
       unsubscribeFullscreen();
-      fullscreen.dispose();
       settingsView.dispose();
       backdrop.remove();
       wrap.remove();

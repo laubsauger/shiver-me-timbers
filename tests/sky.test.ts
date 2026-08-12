@@ -15,6 +15,7 @@ import {
   hexToRgb,
   lowSunWarmth,
   luminance,
+  skyPalette,
   skyTint,
   sunColor,
   sunDirection,
@@ -127,12 +128,14 @@ describe('ambient in shade must not repaint materials (teal-hull bug)', () => {
     return [s2l(r), s2l(g), s2l(b)];
   };
   /** three's HemisphereLight: mix(ground, sky, 0.5*normal.y + 0.5) */
-  const ambientOn = (normalY: number, intensity: number) => {
+  const ambientOn = (normalY: number, intensity: number, elev = 1.0) => {
     // drive it through the SHIPPED function, so swapping midColor back to
     // zenithColor in the light rig breaks this, not just a param edit
+    // full path: palette (day↔sunset crossfade) → hemisphere colours
+    const pal = skyPalette(elev, skyParams);
     const { sky, ground } = hemisphereColors(
-      skyParams.midColor,
-      skyParams.groundBounceColor,
+      pal.mid,
+      pal.ground,
       [1, 1, 1],
       skyParams.ambientDesaturation,
     );
@@ -147,10 +150,13 @@ describe('ambient in shade must not repaint materials (teal-hull bug)', () => {
     // vertical hull side = the reported case; also check a downward face,
     // which gets the ground half nearly pure and is the worst case
     for (const normalY of [0, -0.5, -1]) {
-      const amb = ambientOn(normalY, skyParams.ambientIntensity);
-      const lit = amb.map((v, i) => v * OAK[i]);
-      expect(lit[0]).toBeGreaterThan(lit[1]); // red still leads
-      expect(lit[1]).toBeGreaterThan(lit[2]); // and blue still trails
+      // high sun AND golden hour — the sunset crossfade must not undo this
+      for (const elev of [1.0, 0.05]) {
+        const amb = ambientOn(normalY, skyParams.ambientIntensity, elev);
+        const lit = amb.map((v, i) => v * OAK[i]);
+        expect(lit[0]).toBeGreaterThan(lit[1]); // red still leads
+        expect(lit[1]).toBeGreaterThan(lit[2]); // and blue still trails
+      }
     }
   });
 
@@ -184,6 +190,56 @@ describe('ambient in shade must not repaint materials (teal-hull bug)', () => {
     expect(desaturate(base, -5)).toEqual(base); // clamped to 0, not negated
     expect(desaturate(base, 9)[0]).toBeCloseTo(luminance(base), 12);
     expect(desaturate(base, NaN).every(Number.isFinite)).toBe(true);
+  });
+});
+
+describe('golden-hour palette (§T39 — one warm key, not a warm sky)', () => {
+  const warmth = (c: [number, number, number]): number => c[0] - c[2];
+
+  it('is the day palette untouched while the sun is high', () => {
+    const day = skyPalette(1.2, skyParams);
+    expect(day.warm).toBe(0);
+    expect(day.mid).toEqual(hexToRgb(skyParams.midColor));
+    expect(day.ground).toEqual(hexToRgb(skyParams.groundBounceColor));
+  });
+
+  it('warms EVERY channel of the scene together as the sun drops', () => {
+    // the whole point: sky, the haze islands melt into, and the light on the
+    // ship's shaded side must warm by the same weight at the same moment,
+    // or the shot reads as a warm sky pasted over a cold scene
+    const day = skyPalette(1.2, skyParams);
+    const dusk = skyPalette(0.03, skyParams);
+    expect(dusk.warm).toBeGreaterThan(0.9);
+    for (const k of ['zenith', 'mid', 'horizon', 'ground'] as const) {
+      expect(warmth(dusk[k])).toBeGreaterThan(warmth(day[k]));
+    }
+    // and the ambient that fills shade must go warm too, not stay blue
+    expect(dusk.ground[0]).toBeGreaterThan(dusk.ground[2]);
+    expect(dusk.mid[0]).toBeGreaterThan(dusk.mid[2]);
+  });
+
+  it('crossfades monotonically — no hue snap as the sun sets', () => {
+    let prev = -Infinity;
+    for (let e = 0.5; e >= 0.0; e -= 0.01) {
+      const w = skyPalette(e, skyParams).warm;
+      expect(w).toBeGreaterThanOrEqual(prev - 1e-12);
+      prev = w;
+    }
+  });
+
+  it('sunsetStrength 0 disables the grade entirely', () => {
+    const off = skyPalette(0.03, { ...skyParams, sunsetStrength: 0 });
+    expect(off.warm).toBe(0);
+    expect(off.mid).toEqual(hexToRgb(skyParams.midColor));
+  });
+
+  it('keeps full daylight brightness down to the horizon', () => {
+    // skyTint used to darken everything below ~16°, cooling golden hour by
+    // more in red than blue — the grade cannot fight its own tint
+    const atHorizon = skyTint(0.0);
+    for (const c of atHorizon) expect(c).toBeGreaterThan(0.95);
+    const twilight = skyTint(-0.2);
+    expect(twilight[0]).toBeLessThan(0.5); // still dims once actually set
   });
 });
 

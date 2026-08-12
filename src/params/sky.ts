@@ -28,6 +28,19 @@ export interface SkyParams {
   hazeFalloff: number;
   /** extra haze lift on the sun's side of the sky (forward scattering) */
   sunHazeStrength: number;
+  /**
+   * GOLDEN HOUR palette (§T39). The day hexes above are crossfaded to these
+   * by lowSunWarmth(), so one weight moves the sky, the fog and the ambient
+   * together — that shared weight is what gives the reference shot its
+   * single warm key instead of a warm sky over a cold scene.
+   */
+  sunsetZenithColor: number;
+  sunsetMidColor: number;
+  sunsetHorizonColor: number;
+  /** sea bounce at golden hour — the water throws back the orange sky */
+  sunsetGroundColor: number;
+  /** 0..1 master on the whole crossfade; 0 = no sunset grade at all */
+  sunsetStrength: number;
   /** warm tint blended into the haze around the sun's side */
   horizonWarmColor: number;
   /** 0..1 peak warm-tint amount (scaled up as the sun drops) */
@@ -125,7 +138,15 @@ export const skyParams: SkyParams = registerParams(
     hazeStrength: 0.9,
     hazeFalloff: 0.18,
     sunHazeStrength: 0.3,
-    horizonWarmColor: 0xffbe83,
+    // golden hour, same ACES pre-compensation as the day set:
+    // → screen (122,86,128) deep rose-indigo overhead, (232,138,102)
+    // orange-rose through the body, (231,214,168) pale cream at the horizon
+    sunsetZenithColor: 0x6f5473,
+    sunsetMidColor: 0xe37156,
+    sunsetHorizonColor: 0xffd183,
+    sunsetGroundColor: 0x6d5b53,
+    sunsetStrength: 1,
+    horizonWarmColor: 0xffaf57,
     horizonWarmStrength: 0.45,
     sunColorLow: 0xff9440,
     sunColorNoon: 0xfff3da,
@@ -157,6 +178,7 @@ export const skyParams: SkyParams = registerParams(
   {
     timeOfDay: { min: 0, max: 24, step: 0.05 },
     latitude: { min: -60, max: 60, step: 1 },
+    sunsetStrength: { min: 0, max: 1, step: 0.01 },
     hazeStrength: { min: 0, max: 1, step: 0.01 },
     hazeFalloff: { min: 0.02, max: 1, step: 0.01 },
     sunHazeStrength: { min: 0, max: 1, step: 0.01 },

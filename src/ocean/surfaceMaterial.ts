@@ -37,7 +37,7 @@ import {
   vec3,
   viewportDepthTexture,
   viewportLinearDepth,
-  viewportSharedTexture,
+  viewportTexture,
 } from 'three/tsl';
 import type { OceanSimulation } from './oceanCascades';
 import type { FoamSim } from '../foam';
@@ -63,6 +63,8 @@ export interface OceanSurfaceMaterial {
   seaRmsUniform: { value: number };
   /** fold-capped choppiness λ — must match what the displacement was built with */
   choppinessUniform: { value: number };
+  /** true when the scene-colour copy target was built for a half-float pass */
+  readonly hdrSceneTarget: boolean;
   /** push live param values into uniforms (call per frame) */
   updateFromParams(): void;
 }
@@ -98,7 +100,28 @@ export function buildOceanSurfaceMaterial(
   sunLight?: THREE.DirectionalLight,
   seabed?: SeabedField | null,
   reflection?: PlanarReflection | null,
+  hdrSceneTarget = false,
 ): OceanSurfaceMaterial {
+  /**
+   * §V24 scene-colour copy target — and a §V28-class silent failure if it is
+   * wrong. three's `viewportSharedTexture` allocates ONE module-level
+   * FramebufferTexture, and FramebufferTexture forces its own format: the
+   * render target's when it can see one, otherwise the CANVAS format
+   * (bgra8unorm). With post-processing on, the scene is rendered into a
+   * half-float pass target, so every frame
+   *   copyFramebufferToTexture: source rgba16float, destination bgra8unorm
+   * fails the format check. A copy that fails is a copy that DID NOT HAPPEN —
+   * the read side then samples an uninitialised texture, silently, forever.
+   * `internalFormat` is the only field that outranks that forced format, so
+   * this is the one place it can be fixed from. It MUST track whatever the
+   * scene is actually rendered into; see OceanSurface for the live check.
+   */
+  const sceneColorTexture = new THREE.FramebufferTexture(1, 1);
+  sceneColorTexture.name = 'ocean-scene-color';
+  if (hdrSceneTarget) {
+    (sceneColorTexture as unknown as { internalFormat: string }).internalFormat =
+      'rgba16float';
+  }
   const originUniform = uniform(new THREE.Vector2());
   const sunDirectionUniform = uniform(new THREE.Vector3(0.5, 0.6, 0.2).normalize());
   const timeUniform = uniform(0);
@@ -110,6 +133,12 @@ export function buildOceanSurfaceMaterial(
   const uSss = uniform(color(sp.sssColor));
   const uHorizon = uniform(color(sp.skyHorizonColor));
   const uZenith = uniform(color(sp.skyZenithColor));
+  const uSkyRefHaze = uniform(color(sp.skyReferenceHaze));
+  const uSkyFollow = uniform(sp.skyFollowStrength);
+  const uSkyTintMax = uniform(sp.skyTintMax);
+  const uSunHorizonFade = uniform(
+    new THREE.Vector2(sp.sunHorizonFadeLow, sp.sunHorizonFadeHigh),
+  );
   const uFoam = uniform(color(sp.foamColor));
   const uSssStrength = uniform(sp.sssStrength);
   const uSssPower = uniform(sp.sssPower);
@@ -140,6 +169,9 @@ export function buildOceanSurfaceMaterial(
   const uReflStrength = uniform(sp.reflectionStrength);
   const uGrazingSat = uniform(sp.grazingSaturation);
   const uLightFloor = uniform(sp.lightFloor);
+  const uSkylightDesat = uniform(sp.skylightDesaturation);
+  const uScatter = uniform(new THREE.Vector2(sp.sunScatterStrength, sp.sunScatterPower));
+  const uSkySunGlow = uniform(new THREE.Vector2(sp.skySunGlowStrength, sp.skySunGlowPower));
   const uLightGain = uniform(sp.lightGain);
   const uSunTint = uniform(color(sp.sunTint));
   const uShadowStrength = uniform(sp.shadowStrength);
@@ -372,20 +404,44 @@ export function buildOceanSurfaceMaterial(
       .negate()
       .exp()
       .mul(validRefraction.select(float(1), float(0)));
-    const sceneCol = viewportSharedTexture(
+    const sceneCol = viewportTexture(
       validRefraction.select(refractedUV, screenUV),
+      null,
+      sceneColorTexture,
     ).rgb;
     waterCol.assign(
       mix(waterCol, sceneCol.mul(uRefractTint), seeThrough.mul(0.9)),
     );
 
-    // stylized wrap lighting (§V20): the material owns light — PBR white
-    // sun+hemi washed the pigment to gray (user critique). Troughs keep
-    // saturated body color via the floor; crest faces pick up warm sun,
-    // and the sun term (only the sun term) is cut by the shadow map.
+    // ── light (§V20): the material owns lighting, but it owns it as TWO
+    // physically distinct sources, which the single sun-tinted wrap term did
+    // not. The floor is SKYLIGHT — it arrives from the whole dome, so it is
+    // sky-coloured and shadow-independent; the gain is SUNLIGHT — directional,
+    // N·L, and cut by the shadow map. Tinting the floor with sunTint made
+    // water facing away from the sun read as dim sunlight rather than as
+    // sky-lit water, which is half of why rotating the camera looked like
+    // switching the light off (user).
+    // Skylight is desaturated toward its own luminance first: a sky colour
+    // chosen to look right when PAINTED is not the colour that sky delivers
+    // as LIGHT (sky agent's ambient rework, same principle).
     const ndl = normalWorld.dot(sunDirectionUniform).max(0);
-    const lightWrap = uSunTint.mul(ndl.mul(uLightGain).mul(shade).add(uLightFloor));
+    const skyLum = uHazeColor.dot(vec3(0.2126, 0.7152, 0.0722));
+    const skylightCol = mix(uHazeColor, vec3(skyLum), uSkylightDesat.clamp(0, 1));
+    const lightWrap = skylightCol
+      .mul(uLightFloor)
+      .add(uSunTint.mul(ndl.mul(uLightGain).mul(shade)));
     waterCol.assign(waterCol.mul(lightWrap));
+
+    // Sunlight that entered the water, scattered, and came back out — the
+    // body's own glow, carried in the water's pigment. Keyed to N·L ONLY, so
+    // it is completely view-independent: faces tilted toward the sun stay
+    // brighter no matter where the camera points, which is what makes a sea
+    // read as three-dimensional and lit rather than flat.
+    // This is deliberately NOT a specular: the glint road stays view-dependent
+    // and still vanishes when you look away, because that is correct. What
+    // must not vanish is the sea looking sunlit (user).
+    const bodyScatter = pow(ndl, uScatter.y.max(0.05)).mul(uScatter.x).mul(shade);
+    waterCol.assign(waterCol.add(uSss.mul(bodyScatter)));
 
     // §V.5 SSS fake: choppy horizontal offset isolates wave sides;
     // boost where the camera looks toward the sun through the crest.
@@ -425,13 +481,52 @@ export function buildOceanSurfaceMaterial(
       .mul(shade);
     waterCol.assign(waterCol.add(uSss.mul(sss)));
 
+    // Sun-elevation gate: below the low edge there is no direct sun at all
+    // (§B: at 18.5h the sun has SET, which is why the water went dead — not a
+    // shader gate). The high edge must stay LOW or a horizon-kissing sunset
+    // loses the water's sun terms exactly where the money shot lives (§T.39).
+    const sunUpFactor = smoothstep(
+      uSunHorizonFade.x,
+      uSunHorizonFade.y.max(uSunHorizonFade.x.add(1e-4)),
+      sunDirectionUniform.y,
+    );
+
+    // ── reflected sky, unified with the live day cycle ──────────────────
+    // The authored pair above is the SHAPE of the sky (horizon lighter than
+    // zenith); its colour comes from the live haze, which the sky rig retints
+    // every frame and which the water already copies for its distance haze.
+    // Dividing the live haze by the reference it was authored against gives a
+    // day-cycle tint that is 1 at midday and warm amber at sunset, so the sea
+    // warms in lockstep with sky, fog and ambient off ONE source instead of
+    // holding cold constants under a warm sky (§T.39 — the sea stayed mint
+    // turquoise while everything else warmed). §V28: floored divisor, capped.
+    const skyDayTint = uHazeColor
+      .div(uSkyRefHaze.max(vec3(0.02, 0.02, 0.02)))
+      .clamp(0, uSkyTintMax);
+    const follow = uSkyFollow.clamp(0, 1);
+    const horizonLive = mix(uHorizon, uHorizon.mul(skyDayTint), follow);
+    const zenithLive = mix(uZenith, uZenith.mul(skyDayTint), follow);
+
     // analytic sky reflection — capped so body color dominates (§V.20
     // watercolor look: references show pigment, not mirror). At grazing
     // angles a white sky used to bleach the sea gray (user critique), so the
     // reflected sky is pulled toward the water's own hue by grazingSaturation
     // — it keeps the sky's VALUE but not its whiteness.
     const refl = reflect(viewDir.negate(), normalWorld);
-    const skyCol = mix(uHorizon, uZenith, refl.y.clamp(0, 1).pow(0.6));
+    const skyCol = mix(horizonLive, zenithLive, refl.y.clamp(0, 1).pow(0.6)).toVar();
+    // The sky is far brighter AROUND the sun than elsewhere, so water reflects
+    // a brighter sky on the sun's side of the view. This is the honest version
+    // of "some scattering even when not looking at the sun" (user): a broad
+    // halo that falls off smoothly across a turn, unlike the glint road's
+    // pow(N·H, 180) which is a true specular and should snap off. Azimuth
+    // matters here — the previous reflected-sky term used elevation only, so
+    // the sun's side of the sky was no brighter than the opposite side.
+    const reflSunAlign = refl.dot(sunDirectionUniform).max(0);
+    skyCol.assign(
+      skyCol.add(
+        uSunTint.mul(pow(reflSunAlign, uSkySunGlow.y.max(1))).mul(uSkySunGlow.x).mul(sunUpFactor),
+      ),
+    );
     const bodyPeak = waterCol.r.max(waterCol.g).max(waterCol.b).max(0.001);
     const bodyTint = waterCol.div(bodyPeak); // hue with its brightest channel at 1
     const skyReflCol = mix(skyCol, skyCol.mul(bodyTint), uGrazingSat);
@@ -494,9 +589,7 @@ export function buildOceanSurfaceMaterial(
     // a broad continuous road and thresholded per-cell sparkles inside it.
     const halfVec = normalize(viewDir.add(sunDirectionUniform));
     const ndoth = normalWorld.dot(halfVec).max(0);
-    // sun below the horizon → no glints at all (evening check: at 18.5h the
-    // sun has SET, which is why the water went dead — not a shader gate)
-    const sunUp = smoothstep(-0.02, 0.06, sunDirectionUniform.y);
+    const sunUp = sunUpFactor;
     const glintTrain = pow(ndoth, uGlintTrainPower);
     // per-cell phase offset (2nd hash) so cells twinkle independently — one
     // shared time offset pulses the whole ocean in sync (§B.4)
@@ -556,7 +649,7 @@ export function buildOceanSurfaceMaterial(
     const upDot = viewDir.negate().dot(normalWorld).max(0); // eye→surface vs up
     const soft = uUnderWindow.y.max(0.01);
     const snellWindow = smoothstep(float(0.661).sub(soft), float(0.661).add(soft), upDot);
-    const windowCol = mix(uHorizon, uZenith, upDot).mul(uUnderWindow.x);
+    const windowCol = mix(horizonLive, zenithLive, upDot).mul(uUnderWindow.x);
     const ceiling = uUnderCeiling.mul(uLightFloor.add(ndl.mul(uLightGain).mul(0.5)));
     const under = mix(ceiling, windowCol, snellWindow).toVar();
     // whitecaps and wake still read as bright patches from below
@@ -595,6 +688,13 @@ export function buildOceanSurfaceMaterial(
     (uSss.value as THREE.Color).set(sp.sssColor);
     (uHorizon.value as THREE.Color).set(sp.skyHorizonColor);
     (uZenith.value as THREE.Color).set(sp.skyZenithColor);
+    (uSkyRefHaze.value as THREE.Color).set(sp.skyReferenceHaze);
+    uSkyFollow.value = sp.skyFollowStrength;
+    uSkyTintMax.value = sp.skyTintMax;
+    (uSunHorizonFade.value as THREE.Vector2).set(
+      sp.sunHorizonFadeLow,
+      sp.sunHorizonFadeHigh,
+    );
     (uFoam.value as THREE.Color).set(sp.foamColor);
     uSssStrength.value = sp.sssStrength;
     uSssPower.value = sp.sssPower;
@@ -616,6 +716,9 @@ export function buildOceanSurfaceMaterial(
     (uCrestBand.value as THREE.Vector2).set(sp.crestBandLow, sp.crestBandHigh);
     (uBodyBand.value as THREE.Vector2).set(sp.bodyBandLow, sp.bodyBandHigh);
     uLightFloor.value = sp.lightFloor;
+    uSkylightDesat.value = sp.skylightDesaturation;
+    (uScatter.value as THREE.Vector2).set(sp.sunScatterStrength, sp.sunScatterPower);
+    (uSkySunGlow.value as THREE.Vector2).set(sp.skySunGlowStrength, sp.skySunGlowPower);
     uLightGain.value = sp.lightGain;
     (uSunTint.value as THREE.Color).set(sp.sunTint);
     uShadowStrength.value = sp.shadowStrength;
@@ -658,6 +761,7 @@ export function buildOceanSurfaceMaterial(
     hazeColorUniform: uHazeColor as unknown as { value: THREE.Color },
     seaRmsUniform: uSeaRms as unknown as { value: number },
     choppinessUniform: uChoppiness as unknown as { value: number },
+    hdrSceneTarget,
     updateFromParams,
   };
 }

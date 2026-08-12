@@ -66,6 +66,37 @@ export interface CloudParams {
   /** how far the anvil cap overhangs (0 = plain cumulus, 1+ = mushroom) */
   anvilSpread: number;
 
+  // -- the STORM END of the same family (§V46) -----------------------------
+  // A cluster blends from the values above toward these by its own local
+  // storm strength, sampled at its own world XZ. Fair weather and a squall
+  // therefore coexist in ONE sky with ONE code path (§V7).
+  /** vertical extent multiplier at storm 1 — the tower */
+  stormClusterHeight: number;
+  /** lobe height distribution at storm 1 (1 = spread evenly up the column) */
+  stormHeightBias: number;
+  /** dome exponent at storm 1 (high = stays full width, reads as a column) */
+  stormDomeExponent: number;
+  /** trunk width at storm 1 — the anvil's stalk */
+  stormWaistWidth: number;
+  /** cap overhang at storm 1 — what makes it a monument, not a big cumulus */
+  stormAnvilSpread: number;
+  /** cluster footprint multiplier at storm 1 */
+  stormRadiusScale: number;
+  /** how far the base drops (fraction of its fair-weather altitude) — a
+   *  monument sits ON the horizon, it does not float above it */
+  stormBaseDrop: number;
+  /** lobe radius multiplier at storm 1, relative to the (bigger) cluster */
+  stormLobeScale: number;
+  /** 0..1 how much of the SUN term a storm cluster loses (multiplicative) */
+  stormSunCut: number;
+  /** 0..1 how much of the SKY term it loses — keep well under stormSunCut or
+   *  the cloud goes black instead of cool grey */
+  stormSkyCut: number;
+  /** field sampling quantisation: how many discrete storm levels a cluster
+   *  can take. The field drifts continuously; this is what stops it
+   *  regenerating the lobe set on every single frame. */
+  stormQuantSteps: number;
+
   /** instance capacity — read once at construction, reload to change (§V28) */
   maxLobes: number;
   /** icosphere subdivision per lobe — read once at construction (0..3) */
@@ -122,6 +153,17 @@ export interface CloudParams {
 
 const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   clusterCount: { min: 1, max: 32, step: 1 },
+  stormClusterHeight: { min: 0.2, max: 6, step: 0.05 },
+  stormHeightBias: { min: 0.4, max: 4, step: 0.05 },
+  stormDomeExponent: { min: 1, max: 16, step: 0.1 },
+  stormWaistWidth: { min: 0.1, max: 1, step: 0.01 },
+  stormAnvilSpread: { min: 0, max: 2, step: 0.01 },
+  stormRadiusScale: { min: 0.5, max: 4, step: 0.05 },
+  stormBaseDrop: { min: 0, max: 0.9, step: 0.01 },
+  stormLobeScale: { min: 0.2, max: 2, step: 0.01 },
+  stormSunCut: { min: 0, max: 1, step: 0.01 },
+  stormSkyCut: { min: 0, max: 1, step: 0.01 },
+  stormQuantSteps: { min: 2, max: 64, step: 1 },
   lobesMin: { min: 1, max: 64, step: 1 },
   lobesMax: { min: 1, max: 64, step: 1 },
   clusterFlatten: { min: 0.4, max: 3, step: 0.05 },
@@ -181,13 +223,31 @@ export const cloudParams: CloudParams = registerParams(
     lobeOblate: 0.74,
     heightBias: 1.6,
 
-    // fair-weather cumulus: wide flat base, rounded cauliflower top, no anvil
+    // fair-weather cumulus: wide flat base, rounded cauliflower top, no anvil.
+    // waistHeight/anvilStart/capRound are shared with the storm end and are
+    // INERT here — waistWidth 0.9 barely narrows and anvilSpread 0 removes
+    // the cap entirely, so calm never sees them.
     domeExponent: 2.2,
     waistWidth: 0.9,
-    waistHeight: 0.7,
-    anvilStart: 0.75,
-    capRound: 0.9,
+    waistHeight: 0.55,
+    anvilStart: 0.55,
+    capRound: 0.95,
     anvilSpread: 0,
+
+    // the storm end. Measured profile at these values: r(0.5)=0.43 waist,
+    // r(0.9)=1.37 cap — the cap is WIDER than the base, which is what
+    // separates an anvil from a large cumulus.
+    stormClusterHeight: 2.6,
+    stormHeightBias: 1.0,
+    stormDomeExponent: 8,
+    stormWaistWidth: 0.42,
+    stormAnvilSpread: 1.2,
+    stormRadiusScale: 2.0,
+    stormBaseDrop: 0.6,
+    stormLobeScale: 0.62,
+    stormSunCut: 0.72,
+    stormSkyCut: 0.28,
+    stormQuantSteps: 24,
 
     // 32 clusters x 64 lobes = the panel maxima, so the panel can never
     // ask for more instances than the buffers hold (§V28)
@@ -268,6 +328,14 @@ export const CLOUD_LAYOUT_KEYS: readonly (keyof CloudParams)[] = [
   'anvilStart',
   'capRound',
   'anvilSpread',
+  'stormClusterHeight',
+  'stormHeightBias',
+  'stormDomeExponent',
+  'stormWaistWidth',
+  'stormAnvilSpread',
+  'stormRadiusScale',
+  'stormBaseDrop',
+  'stormLobeScale',
 ];
 
 export function cloudLayoutKey(p: CloudParams): string {

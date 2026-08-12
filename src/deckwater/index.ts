@@ -254,13 +254,33 @@ export function createDeckWater(opts: DeckWaterOptions = {}) {
   let lastEventVolume = 0;
   let lastEventAge = Infinity;
 
+  /**
+   * Snap an injection onto the WAIST. The sensor places water at the z of the
+   * station that shipped it, but forward of the fo'c's'le break that z is
+   * under the forecastle — whose sole stands 1.6 m proud in the field. Water
+   * put there is invisible (the material gates to the deck plane) and runs
+   * off the castle's edges instead of onto the deck, which is exactly the
+   * "it isn't where she's taking it" failure. Walk aft along the column to
+   * the first waist cell; if this column has no deck at all (outboard of the
+   * outline), drop the injection rather than dumping it in the sea.
+   */
+  const snapToWaist = (u: number, v: number): { u: number; v: number } | null => {
+    const x = Math.min(w - 1, Math.max(0, Math.round(u * (w - 1))));
+    const y0 = Math.min(h - 1, Math.max(0, Math.round(v * (h - 1))));
+    if (field.waist[y0 * w + x]) return { u, v };
+    for (let step = 1; step < h; step++) {
+      const y = y0 - step; // aft: the sea comes over the head and runs aft
+      if (y < 0) break;
+      if (field.waist[y * w + x]) return { u, v: y / (h - 1) };
+    }
+    return null;
+  };
+
   const queue = (s: DeckSplash): void => {
     if (!(s.amount > 0) || !Number.isFinite(s.u) || !Number.isFinite(s.v)) return;
-    splashQueue.push({
-      u: Math.min(1, Math.max(0, s.u)),
-      v: Math.min(1, Math.max(0, s.v)),
-      amount: s.amount,
-    });
+    const at = snapToWaist(Math.min(1, Math.max(0, s.u)), Math.min(1, Math.max(0, s.v)));
+    if (!at) return;
+    splashQueue.push({ u: at.u, v: at.v, amount: s.amount });
   };
 
   const water = {

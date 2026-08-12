@@ -26,6 +26,19 @@
  * waist and a tall clusterHeight gives the storm anvil/mushroom monuments
  * from "Clouds: Concept". Storm is a set of numbers, not a branch.
  *
+ * AND THE NUMBERS ARE LOCAL (§V46). Each cluster samples the storm field at
+ * its OWN world XZ and blends between the two ends of that family, so a blue
+ * sunny sky with one anvil on the horizon is the DEFAULT case, not a preset.
+ * The cluster sits over the same cell the rain and the sea read, so sailing
+ * toward the cloud sails you into the squall.
+ *
+ * WHY THE RNG STREAM MUST NOT DEPEND ON THE FIELD: the field drifts, so a
+ * cluster is regenerated whenever its quantised storm level moves. Every
+ * regeneration walks the same seeded rng in the same order and draws the same
+ * number of values, so lobe `i` keeps its identity and only shifts position
+ * as the shape blends. Make the lobe COUNT (or any rng call) storm-dependent
+ * and every step of the field would reshuffle the entire sky instead.
+ *
  * Generation is pure + seeded (§V2): no Math.random, no GPU side effects at
  * import time, same seed → same sky on every client.
  */
@@ -73,6 +86,8 @@ export interface CloudLobe {
   dirZ: number;
   /** 0..1, 1 = buried deep in the mass → gets the least direct sun */
   interior: number;
+  /** 0..1 local storm strength of the owning cluster (§V46) */
+  storm: number;
 }
 
 export interface CloudCluster {
@@ -80,10 +95,61 @@ export interface CloudCluster {
   y: number;
   z: number;
   radius: number;
+  /** 0..1 storm field sample at this cluster's own world XZ (§V46) */
+  storm: number;
   lobes: CloudLobe[];
 }
 
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+
+/** §V28: a caller-supplied sampler is untrusted input — NaN must not reach a buffer */
+const clamp01 = (v: number): number =>
+  Number.isNaN(v) ? 0 : Math.min(1, Math.max(0, v));
+
+/** 0..1 local storm strength at a world XZ — `weather.stormAt` (§V46) */
+export type StormSampler = (x: number, z: number) => number;
+
+/** the subset of CloudParams that `silhouetteRadius` reads */
+export interface ShapeProfile {
+  domeExponent: number;
+  waistWidth: number;
+  waistHeight: number;
+  anvilStart: number;
+  capRound: number;
+  anvilSpread: number;
+}
+
+/** ShapeProfile plus the two lobe-distribution knobs a cluster also blends */
+export interface ClusterShape extends ShapeProfile {
+  clusterHeight: number;
+  heightBias: number;
+  radiusScale: number;
+  baseDrop: number;
+  lobeScale: number;
+}
+
+/**
+ * The silhouette family blended toward its storm end by `storm` 0..1 (§V46).
+ * Note waistHeight/anvilStart/capRound are NOT blended: they are positions
+ * along h, and at anvilSpread 0 the cap terms they control vanish anyway, so
+ * one shared value serves both ends.
+ */
+export function clusterShapeAt(p: CloudParams, storm: number): ClusterShape {
+  const t = clamp01(storm);
+  return {
+    domeExponent: lerp(p.domeExponent, p.stormDomeExponent, t),
+    waistWidth: lerp(p.waistWidth, p.stormWaistWidth, t),
+    waistHeight: p.waistHeight,
+    anvilStart: p.anvilStart,
+    capRound: p.capRound,
+    anvilSpread: lerp(p.anvilSpread, p.stormAnvilSpread, t),
+    clusterHeight: lerp(p.clusterHeight, p.stormClusterHeight, t),
+    heightBias: lerp(p.heightBias, p.stormHeightBias, t),
+    radiusScale: lerp(1, p.stormRadiusScale, t),
+    baseDrop: p.stormBaseDrop * t,
+    lobeScale: lerp(1, p.stormLobeScale, t),
+  };
+}
 
 /** clamped smoothstep on a already-normalized t */
 const smooth01 = (t: number): number => {
@@ -106,38 +172,59 @@ const floorDiv = (v: number): number => (Math.abs(v) < 1e-3 ? 1e-3 : v);
  *   cap    — flares back out above `anvilStart`, then rolls in past
  *            `capRound`. `anvilSpread` 0 removes the cap entirely.
  */
-export function silhouetteRadius(h: number, p: CloudParams): number {
-  const dome = Math.sqrt(Math.max(0, 1 - Math.pow(h, p.domeExponent)));
-  const waist = lerp(1, p.waistWidth, smooth01(h / floorDiv(p.waistHeight)));
-  const flare = smooth01((h - p.anvilStart) / floorDiv(1 - p.anvilStart));
-  const roll = 1 - smooth01((h - p.capRound) / floorDiv(1 - p.capRound));
-  return Math.max(0.05, dome * waist + p.anvilSpread * flare * roll);
+export function silhouetteRadius(h: number, s: ShapeProfile): number {
+  const dome = Math.sqrt(Math.max(0, 1 - Math.pow(h, s.domeExponent)));
+  const waist = lerp(1, s.waistWidth, smooth01(h / floorDiv(s.waistHeight)));
+  const flare = smooth01((h - s.anvilStart) / floorDiv(1 - s.anvilStart));
+  const roll = 1 - smooth01((h - s.capRound) / floorDiv(1 - s.capRound));
+  return Math.max(0.05, dome * waist + s.anvilSpread * flare * roll);
 }
 
 /**
- * Deterministic cluster layout: same (seed, params) → identical lobes.
+ * Deterministic cluster layout: same (seed, params, field) → identical lobes.
  * Pure data, safe to import in node tests.
+ *
+ * `sampleStorm` is `weather.stormAt` (§V46), sampled ONCE per cluster at the
+ * cluster's own world XZ — ~117 ns a call, so 11 calls is free. Sampling per
+ * LOBE would be both wasteful and wrong: a cloud is one weather system, not a
+ * few hundred independent ones.
  */
-export function generateClusters(seed: number, p: CloudParams): CloudCluster[] {
+export function generateClusters(
+  seed: number,
+  p: CloudParams,
+  sampleStorm: StormSampler = () => 0,
+): CloudCluster[] {
   const rng = createRng(seed);
   const clusters: CloudCluster[] = [];
   for (let c = 0; c < p.clusterCount; c++) {
+    // -- rng block A: the SITE. Storm-independent by construction, so a cell
+    // drifting over a cluster never moves it (and never moves it out of the
+    // cell, which would be a feedback loop).
     const angle = rng() * Math.PI * 2;
     const dist = lerp(p.ringInner, p.ringOuter, rng());
     const cx = Math.cos(angle) * dist;
     const cz = Math.sin(angle) * dist;
-    const cy = lerp(p.altitudeMin, p.altitudeMax, rng());
-    const cr = lerp(p.clusterRadiusMin, p.clusterRadiusMax, rng());
+    const cy0 = lerp(p.altitudeMin, p.altitudeMax, rng());
+    const cr0 = lerp(p.clusterRadiusMin, p.clusterRadiusMax, rng());
     const count = p.lobesMin + Math.floor(rng() * (p.lobesMax - p.lobesMin + 1));
+
+    // -- the field decides what KIND of cloud stands on that site
+    const storm = clamp01(sampleStorm(cx, cz));
+    const shape = clusterShapeAt(p, storm);
+    const cr = cr0 * shape.radiusScale;
+    const cy = cy0 * (1 - shape.baseDrop);
+
     const horiz = cr * p.clusterFlatten;
-    const vert = cr * p.clusterHeight;
+    const vert = cr * shape.clusterHeight;
     const lobes: CloudLobe[] = [];
+    // -- rng block B: the LOBES. Same call count and same order at every storm
+    // level (see the header note) — lobe i keeps its identity as cells drift.
     for (let i = 0; i < count; i++) {
       const a = rng() * Math.PI * 2;
       // heightBias > 1 packs lobes toward the base (cumulus); 1 spreads them
       // evenly up a storm column
-      const h = Math.pow(rng(), p.heightBias);
-      const profile = silhouetteRadius(h, p);
+      const h = Math.pow(rng(), shape.heightBias);
+      const profile = silhouetteRadius(h, shape);
       // rng^0.6 is centre-biased: lobes pack into one mass, not a ring
       const rN = Math.pow(rng(), 0.6);
       const px = Math.cos(a) * rN * profile * horiz;
@@ -146,7 +233,8 @@ export function generateClusters(seed: number, p: CloudParams): CloudCluster[] {
       const len = Math.hypot(px, py, pz);
       // lobe size as a FRACTION of the cluster (no metre-scale magic number),
       // shrinking with height so the mass tapers into cauliflower at the top
-      const size = lerp(p.lobeScaleMin, p.lobeScaleMax, rng()) * cr * (1 - 0.4 * h);
+      const size =
+        lerp(p.lobeScaleMin, p.lobeScaleMax, rng()) * cr * shape.lobeScale * (1 - 0.4 * h);
       lobes.push({
         x: cx + px,
         y: cy + py,
@@ -164,11 +252,29 @@ export function generateClusters(seed: number, p: CloudParams): CloudCluster[] {
         // buried = near the axis AND low down; that underside is the part a
         // real cumulus keeps in its own shadow
         interior: Math.min(1, Math.max(0, (1 - rN * 0.6) * (1 - h))),
+        storm,
       });
     }
-    clusters.push({ x: cx, y: cy, z: cz, radius: cr, lobes });
+    clusters.push({ x: cx, y: cy, z: cz, radius: cr, storm, lobes });
   }
   return clusters;
+}
+
+/**
+ * Quantised fingerprint of the field under a set of cluster SITES. The field
+ * drifts continuously; without this the lobe set would be regenerated every
+ * frame forever. Cluster sites are storm-independent, so sampling the cached
+ * cluster list is exact, not an approximation.
+ */
+export function stormFieldKey(
+  clusters: CloudCluster[],
+  sampleStorm: StormSampler,
+  steps: number,
+): string {
+  const n = Math.max(1, Math.floor(steps) || 1);
+  let key = '';
+  for (const c of clusters) key += `${Math.round(clamp01(sampleStorm(c.x, c.z)) * n)}|`;
+  return key;
 }
 
 /** Total lobe count a cluster list would draw. */
@@ -194,6 +300,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const seeds = new Float32Array(capacity);
   const heights = new Float32Array(capacity);
   const interiors = new Float32Array(capacity);
+  const storms = new Float32Array(capacity);
 
   const offsetAttr = new THREE.InstancedBufferAttribute(offsets, 3);
   const radiusAttr = new THREE.InstancedBufferAttribute(radii, 3);
@@ -202,6 +309,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const seedAttr = new THREE.InstancedBufferAttribute(seeds, 1);
   const heightAttr = new THREE.InstancedBufferAttribute(heights, 1);
   const interiorAttr = new THREE.InstancedBufferAttribute(interiors, 1);
+  const stormAttr = new THREE.InstancedBufferAttribute(storms, 1);
   const allAttrs = [
     offsetAttr,
     radiusAttr,
@@ -210,6 +318,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     seedAttr,
     heightAttr,
     interiorAttr,
+    stormAttr,
   ];
 
   let lobeCount = 0;
@@ -242,6 +351,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
       seeds[i] = l.seed;
       heights[i] = l.heightN;
       interiors[i] = l.interior;
+      storms[i] = l.storm;
     }
     lobeCount = n;
     for (const a of allAttrs) a.needsUpdate = true;
@@ -264,6 +374,8 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const uSilver = uniform(p.silverLining);
   const uSkyMin = uniform(p.skyMin);
   const uSkyMax = uniform(p.skyMax);
+  const uStormSunCut = uniform(p.stormSunCut);
+  const uStormSkyCut = uniform(p.stormSkyCut);
   const uFluffScale = uniform(p.fluffScale);
   const uFluffAlpha = uniform(p.fluffAlpha);
   const uFluffPower = uniform(p.fluffPower);
@@ -275,6 +387,22 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const iSeed = instancedBufferAttribute(seedAttr, 'float');
   const iHeight = instancedBufferAttribute(heightAttr, 'float');
   const iInterior = instancedBufferAttribute(interiorAttr, 'float');
+  const iStorm = instancedBufferAttribute(stormAttr, 'float');
+
+  /**
+   * A storm cluster is DARKER and FLATTER-LIT than its fair-weather
+   * neighbours in the same sky. Both are multiplicative attenuations of light
+   * arriving, never negative addends (§V44), and each is bounded at source by
+   * clamping the CUT, not the product. Cutting the sun much harder than the
+   * sky is what makes the storm mass go cool grey rather than black — and it
+   * shifts the composite's `sunColor*R + skyColor*G` mix toward skyColor for
+   * that cluster, so per-cluster colour falls out of the existing 4-channel
+   * pack with no extra uniform and no pipeline change.
+   */
+  const stormSunFactor = (st: N): N =>
+    float(1).sub(uStormSunCut.clamp(0, 1).mul(st.clamp(0, 1)));
+  const stormSkyFactor = (st: N): N =>
+    float(1).sub(uStormSkyCut.clamp(0, 1).mul(st.clamp(0, 1)));
 
   /** normalized view distance of an instance centre (RT alpha channel) */
   const depthOf = (centre: N): N =>
@@ -361,6 +489,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const vHeight = varying(iHeight, 'vCloudHeight');
   const vInterior = varying(iInterior, 'vCloudInterior');
   const vSunSide = varying(sunSide, 'vCloudSunSide');
+  const vStorm = varying(iStorm, 'vCloudStorm');
 
   const N = vNormal.normalize();
   const V = cameraPosition.sub(vWorld).normalize();
@@ -381,11 +510,19 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   // as a multiplier ≥1, never as an addend into an already-summed channel.
   const backLit = uSunWorld.dot(V.negate()).clamp(0, 1).pow(6);
   const silver = backLit.mul(rim.oneMinus()).mul(uSilver).add(1);
-  const lobeSun = wrapDiffuse.mul(sideTerm).mul(selfShadow).mul(silver).clamp(0, 2);
+  const lobeSun = wrapDiffuse
+    .mul(sideTerm)
+    .mul(selfShadow)
+    .mul(silver)
+    .mul(stormSunFactor(vStorm))
+    .clamp(0, 2);
 
   const skyFace = N.dot(vec3(0, 1, 0)).mul(0.5).add(0.5).clamp(0, 1);
   const heightLift = mix(float(0.85), float(1), vHeight.clamp(0, 1));
-  const lobeSky = mix(uSkyMin, uSkyMax, skyFace).mul(heightLift).clamp(0, 2);
+  const lobeSky = mix(uSkyMin, uSkyMax, skyFace)
+    .mul(heightLift)
+    .mul(stormSkyFactor(vStorm))
+    .clamp(0, 2);
 
   lobeMat.outputNode = vec4(
     lobeSun.mul(lobeAlpha),
@@ -427,9 +564,11 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     .clamp(0, 1)
     .pow(uSunPower.max(0.05))
     .mul(mix(float(1).sub(sideGain), float(1), sunSide))
+    .mul(stormSunFactor(iStorm))
     .clamp(0, 2);
   const fluffSky = mix(uSkyMin, uSkyMax, fluffN.dot(uUpView).mul(0.5).add(0.5).clamp(0, 1))
     .mul(mix(float(0.85), float(1), iHeight.clamp(0, 1)))
+    .mul(stormSkyFactor(iStorm))
     .clamp(0, 2);
   const fluffDepth = varying(depthOf(iOffset), 'vFluffDepth');
 
@@ -468,6 +607,8 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     uSilver,
     uSkyMin,
     uSkyMax,
+    uStormSunCut,
+    uStormSkyCut,
     uFluffScale,
     uFluffAlpha,
     uFluffPower,

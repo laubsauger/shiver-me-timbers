@@ -1,123 +1,244 @@
 /**
- * Post pipeline (§V.16, §V.22): GTAO + bloom + vibrance grade + vignette.
- * AO grounds the ship geometry (user report: flat/gamey without occlusion),
- * bloom lifts sun glints + foam, vignette + vibrance push the painterly
- * reference look (docs/final-full-result.png).
+ * Post pipeline (§V.16, §V.22): AO + DoF + bloom + vignette + grade + dither.
  *
- * Two levels of control, on purpose (§V.16):
- *  - `*Enabled` are CONSTRUCTION-time gates. They add or omit whole nodes.
- *    A pass that renders wrong cannot be neutralised by scaling its output
- *    (multiplying a broken texture by 0 still costs the pass and can still
- *    poison the frame), so bisecting a black/garbage frame needs the node
- *    gone, not damped. Changing these takes effect on reload.
- *  - the numeric knobs (aoStrength, bloom*, vibrance, vignette*) are LIVE
- *    uniforms: 0 is an exact identity for each, so the panel can fade any
- *    stage out mid-frame without a rebuild.
+ * ORDER MATTERS, and the chain is split around the tone map on purpose:
+ *
+ *   scene (linear, HDR, pre-exposure)
+ *     → ×AO            multiplicative occlusion, safe on unbounded values
+ *     → DoF            lens focus, before any glare
+ *     → +bloom         additive glare, bounded at source (§V.44)
+ *     → +god rays      additive shafts, likewise bounded (src/core/postGodRays)
+ *     → ×vignette      lens exposure falloff — a multiply, so the tone curve
+ *                      still rolls the darkened highlights off gracefully
+ *     → renderOutput   ACES + working→sRGB  (PostProcessing.outputColorTransform
+ *                      is false so this happens HERE, not implicitly last)
+ *     → vibrance       EXTRAPOLATING op — must see bounded 0..1 input
+ *     → +dither        immediately before 8-bit quantisation
+ *
+ * The vibrance placement is a bug fix, not taste. `vibrance()` is
+ * `mix(color, maxChannel, -3·adjustment·(max−avg))` — a mix with a NEGATIVE
+ * factor, i.e. extrapolation away from the max channel, and its magnitude
+ * scales with the input's dynamic range. Fed raw HDR it drives channels
+ * negative (a linear (2.0, 0.3, 0.05) golden-hour pixel at adjustment 0.25
+ * comes out green −1.25, blue −1.73), and both the ACES rational and the sRGB
+ * transfer turn a negative into Inf/NaN. Post-tone-map the input is 0..1 and
+ * the same operation is bounded by construction (§V.44).
+ *
+ * Two levels of control (§V.16): `*Enabled` are CONSTRUCTION gates that add or
+ * omit whole nodes — a pass that renders wrong cannot be neutralised by
+ * scaling its output, so bisecting a bad frame needs the node GONE, not
+ * damped, and a disabled stage then also costs nothing at boot. The numeric
+ * knobs are live uniforms with an exact identity value.
  */
 import * as THREE from 'three/webgpu';
 import {
   float,
   mix,
   pass,
+  renderOutput,
+  screenCoordinate,
   screenUV,
   smoothstep,
   uniform,
+  vec2,
   vec3,
+  vec4,
   vibrance,
 } from 'three/tsl';
 import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
 import { postParams as pp } from '../params/post';
+import { skyParams } from '../params/sky';
+import { sunDirection as solarDirection } from '../sky/sunCycle';
+import { buildGodRays } from './postGodRays';
+
+export interface PostOptions {
+  /**
+   * Live sun direction (unit, world → sun) for the god rays. Defaults to the
+   * same pure solar function the sky itself integrates, read off the same live
+   * `skyParams` — so post needs no wiring and cannot drift from the sky by
+   * being handed a stale vector. Pass `() => sky.sunDirection` to bind the
+   * sky handle's own vector instead.
+   */
+  sunDirection?: () => THREE.Vector3;
+}
 
 export interface PostPipeline {
   /** call instead of renderer.render() */
   render(): void;
   /** push live params (call per frame) */
   updateFromParams(): void;
+  /** build every post pipeline before the splash lifts (§boot cost) */
+  warmup(): Promise<void>;
+}
+
+/** §V.28: no caller-fed uniform reaches a shader unguarded. */
+function finite(v: number, fallback: number): number {
+  return Number.isFinite(v) ? v : fallback;
 }
 
 export function createPostPipeline(
   renderer: THREE.WebGPURenderer,
   scene: THREE.Scene,
   camera: THREE.PerspectiveCamera,
+  options: PostOptions = {},
 ): PostPipeline {
   const post = new THREE.PostProcessing(renderer);
+  // we place the output transform ourselves (see header). PostProcessing then
+  // publishes the renderer's toneMapping/outputColorSpace on the node context,
+  // and the bare renderOutput() below picks them up from there.
+  post.outputColorTransform = false;
 
-  // samples: 0 — the scene pass must NOT be multisampled. Its depthTexture is
-  // what GTAO reads, and a multisampled colour target leaves that depth
-  // attachment unresolved, so the AO shader marches an unwritten buffer
-  // (§V.28: no garbage-fed shader paths). The renderer is built with
-  // antialias:true for the direct path; through post the scene composites via
-  // a fullscreen quad instead, so the pass RT carries no MSAA of its own.
-  const scenePass = pass(scene, camera, { samples: 0 });
+  // MSAA: `PassNode.setup` copies `renderer.samples` (antialias:true → 4) onto
+  // the pass render target unless told otherwise. Keep it — through post the
+  // scene still rasterises into a real MSAA target and resolves, so ropes and
+  // yards keep their edges — EXCEPT when a stage reads the pass DEPTH. WebGPU
+  // cannot resolve a multisampled depth attachment, so AO/DoF would be
+  // marching an unresolved buffer (§V.28). Those stages force samples: 0 and
+  // pay for it in aliasing; that trade is documented at the param.
+  const readsDepth = pp.aoEnabled || pp.dofEnabled;
+  const scenePass = readsDepth
+    ? pass(scene, camera, { samples: 0 })
+    : pass(scene, camera);
   const color = scenePass.getTextureNode('output');
-  const depth = scenePass.getTextureNode('depth');
 
   // --- AO -------------------------------------------------------------
-  // No MRT normal target here, deliberately. This scene draws its principal
+  // No MRT normal target, deliberately. This scene draws its principal
   // surfaces with MeshBasicNodeMaterial — the ocean (§V.20: PBR washed the
   // pigment grey), the sky dome and the cloud composite quad — so `normalView`
   // is the raw grid/dome vertex normal, not the shading normal the surface
-  // actually displays. Feeding that to GTAO describes geometry nobody can see.
-  // Passing null makes GTAO reconstruct normals from depth, which at least
-  // agrees with what is in the depth buffer.
-  //
-  // Caveat kept honest: the ocean is transparent + depthWrite=false, so the
-  // water is absent from that depth buffer. AO therefore grounds the ship
-  // against itself (deck under the castles, hull under the rails, rigging),
-  // never against the sea. Hull-to-water contact shadow needs T30 planar
-  // reflections or a dedicated contact pass, not GTAO.
+  // displays. Passing null makes GTAO reconstruct normals from depth, which at
+  // least agrees with what is actually in the depth buffer.
   const uAoAmount = uniform(0);
-  let lit = color.rgb;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let lit: any = color;
   if (pp.aoEnabled) {
     // @types/three declares normalNode non-nullable, but GTAONode documents
     // and implements the null case ("normals can be automatically
     // reconstructed from depth"). Upstream typing gap, not a semantic one.
     const noNormals = null as unknown as Parameters<typeof ao>[1];
-    const aoPass = ao(depth, noNormals, camera);
+    const aoPass = ao(scenePass.getTextureNode('depth'), noNormals, camera);
     aoPass.resolutionScale = 0.5; // half-res AO, §V.17 render budget
     // clamp before use: an AO sample that ever reads garbage must not be able
     // to multiply the whole frame to black (§V.28).
     const aoRgb = aoPass.getTextureNode().rgb.clamp(0, 1);
-    lit = color.rgb.mul(mix(vec3(1), aoRgb, uAoAmount));
+    lit = vec4(color.rgb.mul(mix(vec3(1), aoRgb, uAoAmount)), color.a);
   }
 
-  // --- bloom ----------------------------------------------------------
-  // strength 0 = zero additive contribution = identity.
-  const bloomPass = pp.bloomEnabled ? bloom(lit) : null;
+  // --- depth of field --------------------------------------------------
+  // Opt-in only (see params). Focus is a plain distance in metres along the
+  // view axis; there is no autofocus because nothing in this module knows what
+  // the camera is looking at — wire one from the follow cam if photo mode
+  // wants it.
+  const uDofFocus = uniform(pp.dofFocus);
+  const uDofRange = uniform(pp.dofRange);
+  const uDofBokeh = uniform(pp.dofBokeh);
+  if (pp.dofEnabled) {
+    lit = dof(lit, scenePass.getViewZNode(), uDofFocus, uDofRange, uDofBokeh);
+  }
 
-  // --- grade ----------------------------------------------------------
-  const uVibrance = uniform(0);
-  const uVigStrength = uniform(0);
-  const uVigStart = uniform(pp.vignetteStart);
+  // --- bloom ------------------------------------------------------------
+  // §V.44: the additive term is bounded AT SOURCE. The beauty path keeps its
+  // full range; only what feeds the blur chain is clamped, so a sun disc at
+  // four digits still blooms hard without smearing four digits over a fifth of
+  // the screen. threshold/knee are display-referred and converted against live
+  // exposure in updateFromParams().
+  const uBloomClamp = uniform(pp.bloomClamp);
+  const bloomPass = pp.bloomEnabled
+    ? bloom(vec4(lit.rgb.clamp(float(0), uBloomClamp), lit.a))
+    : null;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let graded: any = bloomPass === null ? lit : lit.add(bloomPass.rgb);
+  let hdr: any = bloomPass === null ? lit.rgb : lit.rgb.add(bloomPass.rgb);
+
+  // --- god rays ---------------------------------------------------------
+  // Fed the RAW scene colour, not `lit`: shafts are built from the sharp,
+  // un-bloomed, un-defocused image, so DoF cannot soften the occluders that
+  // cut them and bloom cannot be counted twice. That also keeps the stage
+  // independently bisectable.
+  const sunTmp = new THREE.Vector3();
+  const sunDir =
+    options.sunDirection ??
+    ((): THREE.Vector3 => {
+      const d = solarDirection(skyParams.timeOfDay, skyParams.latitude);
+      return sunTmp.set(d[0], d[1], d[2]);
+    });
+  const godRays = pp.godRaysEnabled
+    ? buildGodRays({ renderer, camera, scenePass, sunDirection: sunDir })
+    : null;
+  if (godRays !== null) hdr = hdr.add(godRays.node);
+
+  // --- vignette (pre tone map: an exposure falloff, so a multiply) -------
+  const uVigStrength = uniform(0);
+  const uVigStart = uniform(pp.vignetteStart);
+  const uVigEnd = uniform(pp.vignetteEnd);
+  if (pp.vignetteEnabled) {
+    // functional smoothstep(e0, e1, x) — §V.23, receiver-as-factor trap.
+    // screenUV is 0..1 per axis regardless of aspect, so this is an ellipse
+    // matching the frame, and the corner sits at exactly length(0.5,0.5).
+    const dist = screenUV.sub(0.5).length();
+    const vig = float(1).sub(smoothstep(uVigStart, uVigEnd, dist).mul(uVigStrength));
+    hdr = hdr.mul(vig.clamp(0, 1));
+  }
+
+  // --- output transform: linear HDR → ACES → sRGB ------------------------
+  // nulls = "take toneMapping and outputColorSpace from the PostProcessing
+  // context", which is what outputColorTransform=false publishes.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let graded: any = renderOutput(vec4(hdr, 1)).rgb;
+
+  // --- grade (display space, bounded input) ------------------------------
+  const uVibrance = uniform(0);
   if (pp.vibranceEnabled) graded = vibrance(graded, uVibrance);
 
-  if (pp.vignetteEnabled) {
-    // soft corner falloff, starts outside uVigStart radius.
-    // functional smoothstep(e0, e1, x) — §V.23, receiver-as-factor trap.
-    const dist = screenUV.sub(0.5).length();
-    const vig = float(1).sub(
-      smoothstep(uVigStart, 1.15, dist).mul(uVigStrength),
-    );
-    graded = graded.mul(vig.clamp(0, 1));
+  // --- dither ------------------------------------------------------------
+  // Interleaved-gradient noise [Jimenez 2014]: better distributed than a
+  // white-noise hash at the same cost, and screen-locked rather than animated
+  // so a capture keeps its bitrate. The constants are the published IGN
+  // magic numbers, not tunables.
+  const uGrain = uniform(0);
+  if (pp.grainEnabled) {
+    const ign = float(52.9829189)
+      .mul(screenCoordinate.dot(vec2(0.06711056, 0.00583715)).fract())
+      .fract();
+    graded = graded.add(ign.sub(0.5).mul(uGrain));
   }
-  post.outputNode = graded;
 
-  const updateFromParams = () => {
-    // a disabled-at-runtime stage feeds its neutral value; the node graph is
-    // fixed, so the toggle costs one uniform write.
-    uAoAmount.value = pp.aoEnabled ? pp.aoStrength : 0;
+  post.outputNode = vec4(graded.clamp(0, 1), 1);
+
+  const updateFromParams = (): void => {
+    uAoAmount.value = pp.aoEnabled ? finite(pp.aoStrength, 0) : 0;
+
+    // must run before post.render(): it projects the sun for THIS frame and
+    // resizes the ray targets. main.ts calls updateFromParams() then render().
+    godRays?.update();
+
     if (bloomPass !== null) {
-      bloomPass.threshold.value = pp.bloomThreshold;
-      bloomPass.strength.value = pp.bloomEnabled ? pp.bloomStrength : 0;
-      bloomPass.radius.value = pp.bloomRadius;
+      // display-referred → scene-linear pre-exposure (§V.31b: the same maths
+      // in the wrong space under-corrects silently). 1.0 means "the luminance
+      // that tone-maps to white", which is what a bloom threshold should mean
+      // and what keeps the knob honest when `sky.exposure` moves.
+      const exposure = Math.max(finite(renderer.toneMappingExposure, 1), 1e-3);
+      bloomPass.threshold.value = finite(pp.bloomThreshold, 1) / exposure;
+      bloomPass.smoothWidth.value =
+        Math.max(finite(pp.bloomKnee, 0.5), 0.01) / exposure;
+      bloomPass.strength.value = pp.bloomEnabled ? finite(pp.bloomStrength, 0) : 0;
+      bloomPass.radius.value = finite(pp.bloomRadius, 0);
+      uBloomClamp.value = Math.max(finite(pp.bloomClamp, 12), 1e-3);
     }
-    uVibrance.value = pp.vibranceEnabled ? pp.vibrance : 0;
-    uVigStrength.value = pp.vignetteEnabled ? pp.vignetteStrength : 0;
-    uVigStart.value = pp.vignetteStart;
+
+    uDofFocus.value = Math.max(finite(pp.dofFocus, 28), 0.01);
+    uDofRange.value = Math.max(finite(pp.dofRange, 45), 0.01);
+    uDofBokeh.value = Math.max(finite(pp.dofBokeh, 2), 0);
+
+    uVibrance.value = pp.vibranceEnabled ? finite(pp.vibrance, 0) : 0;
+    uVigStrength.value = pp.vignetteEnabled ? finite(pp.vignetteStrength, 0) : 0;
+    uVigStart.value = finite(pp.vignetteStart, 0.45);
+    // keep the falloff monotonic: an end edge at or below the start edge makes
+    // smoothstep a step function at the frame centre.
+    uVigEnd.value = Math.max(finite(pp.vignetteEnd, 0.72), uVigStart.value + 1e-3);
+    uGrain.value = pp.grainEnabled ? finite(pp.grainAmount, 0) : 0;
   };
   updateFromParams();
 
@@ -126,5 +247,12 @@ export function createPostPipeline(
       post.render();
     },
     updateFromParams,
+    async warmup(): Promise<void> {
+      // main.ts's compileAsync(scene, camera) warms the SCENE materials but
+      // knows nothing about the post quads (bloom alone adds ~12 pipelines).
+      // Without this the first post frame stalls right after the splash lifts.
+      await scenePass.compileAsync(renderer);
+      await post.renderAsync();
+    },
   };
 }
