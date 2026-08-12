@@ -77,7 +77,11 @@ export const MIN_BAND_JACOBIAN_SIGMA = 1e-9;
  */
 export const DEAD_BAND_SIGMA_FRACTION = 1e-3;
 
-/** bias value that provably never injects (det J ≥ 0 in any sane sea) */
+/**
+ * Gate value that provably never injects, for EITHER fold metric: det J ≥ 0
+ * in any sane sea, and λ− = 1 + λ·μ− sits ~38σ above this even in storm's
+ * widest band (σ(λ−) = 0.287 there). Used to switch a band off outright.
+ */
 export const NEVER_INJECT_BIAS = -10;
 
 /** can this band produce a real fold, or is it float noise? (see above) */
@@ -145,6 +149,148 @@ export function cascadeInjectPerStep(
   return (Math.max(0, strengthPerSecond) * dt) / bandSigma;
 }
 
+/* -------------------------------------------------------------------------
+ * THE FOLD METRIC: det J is the WRONG ONE (§B, user "the regularity of them").
+ *
+ * The choppy displacement is a gradient field, so ∇D is SYMMETRIC and
+ * J = I + λ∇D has two real eigenvalues. Tessendorf (coursenotes 2004, eq. 45–49)
+ * is explicit about which one carries the signal:
+ *   "The criterion for folding that J < 0 means that J− < 0 and J+ > 0. So the
+ *    minimum eigenvalue is the actual signal of the onset of folding."
+ *
+ * det J = J−·J+ measures AREA compression. Area is direction-free, so its
+ * super-level sets are ROUND — every cap the same blob, and the only thing
+ * that could then give a cap a direction was the blur kernel, which had one
+ * direction for the whole ocean. That is the lattice the user photographed
+ * four times. λ− measures compression along ONE axis, so it fires as a RIDGE
+ * that already points along the local crest, and the crest curves.
+ *
+ * MEASURED on the shipped spectra (CPU mirror of the real IFFT field, all
+ * three bands × calm/swell/storm, gate held at the same σ-multiple):
+ *                             det J          λ−
+ *   coverage (cascade 1)      0.5 %          9.2 %
+ *   cap length spread CV      0.08           0.68
+ *   cap orientation spread    2.1°           21.4°
+ * i.e. det J at the same threshold produced almost no foam AND what it did
+ * produce was one size at one angle. Both user complaints, one cause.
+ *
+ * λ± = ½(tr ± √(tr² − 4·det)) needs only the TRACE and the DETERMINANT, and
+ * the ocean already publishes both — det J in `displacement.w`, ∂Dx/∂x and
+ * ∂Dz/∂z in `derivatives.zw`. No new ocean output, and the off-diagonal term
+ * never has to be reconstructed (it only ever appears squared).
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Minimum eigenvalue of the symmetric 2×2 displacement jacobian, from its
+ * trace and determinant alone. GPU mirror: injectPass.
+ *
+ * The discriminant is ≥ 0 for a real symmetric matrix, so the `max(0, …)` is
+ * a float-error floor, not a branch — without it a texel one ulp under zero
+ * returns NaN and poisons the whole accumulator (§V28).
+ */
+export function minEigenvalue(trace: number, det: number): number {
+  return 0.5 * (trace - Math.sqrt(Math.max(0, trace * trace - 4 * det)));
+}
+
+/* -------------------------------------------------------------------------
+ * §V36 for λ−. The gate has to stay a multiple of the LIVE sea's own spread,
+ * and λ− has a different mean AND a different spread from det J: it is the
+ * min of two eigenvalues, so its mean sits BELOW the rest value 1 even on a
+ * flat sea, and no amount of "threshold below 1" reasoning survives that.
+ *
+ * Both constants are measured against the band's own `steepnessRms × λ`, the
+ * same normaliser JACOBIAN_SIGMA_PER_STEEPNESS uses, because a Gaussian
+ * surface scales its whole displacement-gradient distribution with that one
+ * number. Measured over every band of every shipped preset:
+ *
+ *   preset band   E[μ]/s    σ(μ)/s        (μ = (λ− − 1)/λ, s = steepnessRms)
+ *   calm    0     −1.134     1.357
+ *   calm    1     −1.056     1.366
+ *   calm    2     −1.034     1.319
+ *   swell   0     −1.068     1.339
+ *   swell   1     −1.155     1.463
+ *   swell   2     −1.029     1.312
+ *   storm   0     −1.002     1.271
+ *   storm   1     −1.161     1.467
+ *   storm   2     −1.029     1.312
+ *
+ * tests/foam.test.ts re-derives both from the real spectrum and fails if a
+ * spread/directionality retune moves them — the same guard the det-J constant
+ * carries, and for the same reason (§V36: a gate whose σ silently drifts).
+ * ---------------------------------------------------------------------- */
+
+/** E[λ−] − 1, per unit of λ·steepnessRms. Negative: λ− ≤ ½·tr always. */
+export const EIGEN_MEAN_PER_STEEPNESS = -1.06;
+/** σ(λ−) per unit of λ·steepnessRms. */
+export const EIGEN_SIGMA_PER_STEEPNESS = 1.35;
+
+/** where λ− sits on an undisturbed sea of this band — NOT 1 (see above) */
+export function eigenRestValue(steepnessRms: number, choppiness: number): number {
+  return 1 + EIGEN_MEAN_PER_STEEPNESS * scaleOf(steepnessRms, choppiness);
+}
+
+/** σ of this band's λ− */
+export function eigenSigma(steepnessRms: number, choppiness: number): number {
+  return EIGEN_SIGMA_PER_STEEPNESS * scaleOf(steepnessRms, choppiness);
+}
+
+function scaleOf(steepnessRms: number, choppiness: number): number {
+  if (!Number.isFinite(steepnessRms) || !Number.isFinite(choppiness)) return 0;
+  return Math.max(0, steepnessRms) * Math.max(0, choppiness);
+}
+
+/**
+ * The σ-multiple the artist's `oceanParams.jacobianFoamBias` means (§V36).
+ * It is calibrated on the SUMMED det J, which rests at 1 — so the number is
+ * read as "fire where the sea is folding this many σ below rest", and that
+ * z is what every band then reproduces against ITS OWN metric.
+ */
+export function foamGateZ(bias: number, seaSigma: number): number {
+  if (!Number.isFinite(bias) || !(seaSigma > MIN_BAND_JACOBIAN_SIGMA)) return Infinity;
+  return (1 - bias) / seaSigma;
+}
+
+/**
+ * Per-cascade λ− threshold carrying that same z (§V36), in λ− units so the
+ * GPU keeps the cheap `max(0, gate − metric)` form it already had.
+ * A band with no energy is gated OFF rather than normalised into relevance —
+ * see bandCanFold; without it calm's empty 420 m band would foam on float noise.
+ */
+export function eigenFoamGate(
+  bias: number,
+  steepnessRms: number,
+  choppiness: number,
+  bandSigmaJ: number,
+  seaSigmaJ: number,
+): number {
+  if (!bandCanFold(bandSigmaJ, seaSigmaJ)) return NEVER_INJECT_BIAS;
+  const z = foamGateZ(bias, seaSigmaJ);
+  if (!Number.isFinite(z)) return NEVER_INJECT_BIAS;
+  return eigenRestValue(steepnessRms, choppiness) - z * eigenSigma(steepnessRms, choppiness);
+}
+
+/**
+ * Per-cascade injection scale for the λ− gate: foam per second per σ of fold
+ * depth, identical across bands and weather (§V36 — the AMOUNT has to be
+ * σ-relative for the same reason the THRESHOLD does). The GPU multiplies the
+ * raw λ− deficit by this, and dividing by the band's own σ is what turns that
+ * raw deficit back into σ.
+ */
+export function eigenInjectPerStep(
+  strengthPerSecond: number,
+  dt: number,
+  steepnessRms: number,
+  choppiness: number,
+  bandSigmaJ: number,
+  seaSigmaJ: number,
+): number {
+  if (!bandCanFold(bandSigmaJ, seaSigmaJ) || !(dt > 0)) return 0;
+  const sigma = eigenSigma(steepnessRms, choppiness);
+  // 0 × Infinity is NaN, and the gate above is already NEVER_INJECT there
+  if (!(sigma > MIN_BAND_JACOBIAN_SIGMA)) return 0;
+  return (Math.max(0, strengthPerSecond) * dt) / sigma;
+}
+
 /** accumulate with existing foam, clamped ≤ 1 (§V6: mask feeds a mix factor) */
 export function accumulateFoam(previous: number, injected: number): number {
   return Math.min(1, previous + injected);
@@ -190,8 +336,32 @@ export function blurDecayAt(
   return Math.min(1, sum * decay);
 }
 
-/** below this direction magnitude the crest frame is undefined */
-export const CREST_GRAD_EPS = 1e-4;
+/* -------------------------------------------------------------------------
+ * REMOVED, ON PURPOSE: the crest-aligned (anisotropic) blur frame.
+ *
+ * `crestTapOffset` / `blurDecayAnisoAt` rotated the 3×3 taps into a crest
+ * frame and stretched them 2.6 along the ridge / 0.5 across it. The frame was
+ * ONE GLOBAL VECTOR (wave propagation ≈ wind) for the entire ocean, chosen so
+ * the kernel stayed shift-invariant and provably conserved foam. The
+ * conservation argument was correct. The picture it produced was not:
+ * repeated ~270× over a cap's life, a diffusion tensor with a 5.2:1 axis
+ * ratio in ONE world direction is not a shape hint, it is the shape — every
+ * cap in the frame became the same ellipse at the same angle.
+ *
+ * MEASURED (CPU mirror, real swell spectrum, cascade 0, 300 frames):
+ *   with the aniso frame:  cap axial-angle spread 3.9°, aspect 3.18
+ *   isotropic:             cap axial-angle spread 9.7°, aspect 1.78
+ *   isotropic + λ− inject: cap axial-angle spread 21.4°, aspect 2.09
+ * — i.e. once the INJECTION carries the shape (λ−, above), the blur has
+ * nothing left to add and everything to flatten. Its elongation is now the
+ * sea's own, so it varies across the frame, which is the whole point.
+ *
+ * The isotropic kernel is shift-invariant too, so nothing was traded away:
+ * `blurDecayAt` conserves mass exactly and `decayHalfLife` remains the only
+ * thing that removes foam (§V6). Do not reintroduce a global direction here —
+ * a per-texel one is worse (∇h vanishes and flips sign ON the crest line) and
+ * a global one is the bug. Anisotropy belongs to the injection.
+ * ---------------------------------------------------------------------- */
 
 /**
  * One texel of the box-reduction pass (GPU mirror: createReducePass): the
@@ -257,84 +427,4 @@ export function cascadeDetailWeight(
   if (!(end > start)) return camDist <= start ? 1 : 0;
   const t = Math.min(1, Math.max(0, (camDist - start) / (end - start)));
   return 1 - t * t * (3 - 2 * t);
-}
-
-/**
- * Crest-aligned blur tap offset in texels (GPU mirror: blurDecayPass).
- *
- * WHY (user critique "foam caps are too circular, not following the cap of
- * the wave"): an axis-aligned isotropic 3×3 blur run every frame turns each
- * injected fold into a round blob. Whitecaps are ridges — they must spread
- * ALONG the crest line and barely across it. `acrossX/acrossZ` is the
- * across-crest direction (wave propagation); the frame is therefore
- * (tangent = perp(across) along the ridge, normal = across), stretched
- * `along` on the tangent and squashed `acrossScale` on the normal.
- *
- * The direction is UNIFORM over the field, not derived per texel from ∇h,
- * and that is load-bearing rather than a simplification:
- *  - ∇h VANISHES exactly at a crest line (the height turns over there) and
- *    flips sign across it, so a per-texel frame is at its most unstable
- *    precisely where foam is injected;
- *  - a frame that rotates between neighbouring texels makes this gather-form
- *    blur non-conservative — it sheds foam every frame, which quietly ate
- *    whitecaps (user: "I think we're missing some foam caps");
- *  - a constant frame is shift-invariant, so the kernel provably conserves
- *    mass and decayHalfLife remains the only thing that removes foam (§V6);
- *  - it is also cheaper: no neighbour texture loads at all (§V17).
- * Crest lines are statistically perpendicular to wave propagation, which is
- * also what §V7 asks storm foam to look like — streaks running with the swell.
- *
- * Degenerate direction → axis frame, which for the symmetric gaussian kernel
- * reproduces the isotropic blur exactly.
- */
-export function crestTapOffset(
-  acrossX: number,
-  acrossZ: number,
-  dx: number,
-  dy: number,
-  along: number,
-  acrossScale: number,
-): [number, number] {
-  const len = Math.hypot(acrossX, acrossZ);
-  const nx = len > CREST_GRAD_EPS ? acrossX / len : 0;
-  const ny = len > CREST_GRAD_EPS ? acrossZ / len : 1;
-  // tangent = perp(normal): runs along the crest ridge
-  const tx = -ny;
-  const ty = nx;
-  return [
-    tx * dx * along + nx * dy * acrossScale,
-    ty * dx * along + ny * dy * acrossScale,
-  ];
-}
-
-/**
- * One texel of the crest-aligned decay+blur pass (GPU mirror: blurDecayPass).
- * `acrossX/acrossZ` = across-crest (wave propagation) direction, uniform over
- * the field — see crestTapOffset for why it is not derived per texel.
- * along = acrossScale = 1 collapses to blurDecayAt (same weights, mirrored
- * taps). The frame is a rotation and the weights sum to 1, so this conserves
- * foam EXACTLY: decayHalfLife stays the only thing that removes it (§V6).
- */
-export function blurDecayAnisoAt(
-  src: Float32Array,
-  acrossX: number,
-  acrossZ: number,
-  n: number,
-  x: number,
-  y: number,
-  radius: number,
-  along: number,
-  acrossScale: number,
-  decay: number,
-): number {
-  let sum = 0;
-  for (let dy = -1; dy <= 1; dy++) {
-    for (let dx = -1; dx <= 1; dx++) {
-      const [ox, oy] = crestTapOffset(acrossX, acrossZ, dx, dy, along, acrossScale);
-      const sx = wrapIndex(x + Math.round(ox * radius), n);
-      const sy = wrapIndex(y + Math.round(oy * radius), n);
-      sum += src[sy * n + sx] * GAUSSIAN_3X3[(dy + 1) * 3 + (dx + 1)];
-    }
-  }
-  return Math.min(1, sum * decay);
 }

@@ -874,10 +874,20 @@ describe('combat ducking (music steps back under the guns)', () => {
   it('falls to the duck level fast and recovers slowly, staying in 0..1', () => {
     let d = duckHit({ level: 1, hold: 0 });
     for (let i = 0; i < 60; i++) d = stepDuck(d, 1 / 60); // 1 s of duck
-    expect(d.level).toBeLessThan(0.5);
+    // Derived from the param, not a literal. The floor IS musicDuckLevel, so a
+    // hardcoded 0.5 stopped meaning "has it fallen?" the moment the duck was
+    // made shallower to stop it pumping — it became unreachable instead.
+    // What we actually care about: within a second it has covered most of the
+    // distance from 1 down to the floor.
+    const gap = 1 - audioParams.musicDuckLevel;
+    expect(d.level).toBeLessThan(audioParams.musicDuckLevel + gap * 0.35);
     expect(d.level).toBeGreaterThanOrEqual(audioParams.musicDuckLevel - 1e-6);
     const duckedAt1s = d.level;
-    for (let i = 0; i < 60 * 20; i++) d = stepDuck(d, 1 / 60); // long silence after
+    // silence long enough for the SHIPPED envelope: the hold has to expire
+    // before release even begins, then several time constants on top. A fixed
+    // 20 s silently stopped being "long" when the hold went 4 s -> 9 s.
+    const quietSec = audioParams.musicDuckHoldSec + audioParams.musicDuckRelease * 6;
+    for (let i = 0; i < 60 * quietSec; i++) d = stepDuck(d, 1 / 60);
     expect(d.hold).toBe(0);
     expect(d.level).toBeGreaterThan(0.99);
     // asymmetry is the point: 1 s of recovery must not undo 1 s of duck
@@ -891,7 +901,10 @@ describe('combat ducking (music steps back under the guns)', () => {
     for (let i = 0; i < 60 * 6; i++) {
       if (i % 45 === 0) d = duckHit(d); // a shot every 0.75 s
       d = stepDuck(d, 1 / 60);
-      if (i > 60) expect(d.level).toBeLessThan(0.6); // never climbs back mid-fight
+      // relative to the floor, for the same reason as above: the assertion is
+      // "it never climbs appreciably back between shots", not "it is under 0.6"
+      const gap = 1 - audioParams.musicDuckLevel;
+      if (i > 60) expect(d.level).toBeLessThan(audioParams.musicDuckLevel + gap * 0.25);
     }
   });
 });

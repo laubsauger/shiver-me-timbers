@@ -39,8 +39,9 @@ import { fireCannon } from './cannons';
 import { buildHitTargetSet, poseTargets } from './hitTargets';
 import { testHits, type HitEvent, type HitTarget } from './hitTest';
 import { resolvePieceFrames, socketLocalPosition } from './pieceFrame';
-import { invRotateVec, rotateVec, sub } from './quatMath';
+import { add, invRotateVec, lerp, rotateVec, sub } from './quatMath';
 import { isSunk } from './sinking';
+import { createRng } from '../state/rng';
 
 export interface CombatShipConfig {
   /** index into SimState.ships */
@@ -68,6 +69,13 @@ export interface MuzzleEvent {
   position: Vec3;
   /** world unit firing direction */
   direction: Vec3;
+  /**
+   * Deterministic per-shot seed (§V.2). fx varies smoke and sparks off this
+   * so no two guns throw the identical puff — "identical across all cannons"
+   * was the first thing the user saw, and it is this project's recurring
+   * visual failure (sail teardrops, foam lattice, machined hull).
+   */
+  seed: number;
 }
 
 export interface CombatFrame {
@@ -131,6 +139,17 @@ export interface Combat {
    */
   floodHoles(state: SimState, shipIndex: number, waterHeight: number): Vec3[];
   memoryOf(shipIndex: number): CombatMemory | undefined;
+  /**
+   * DEV/TEST (§V.22): land `count` hits on a named piece at its own centre,
+   * through the exact same damage path a real ball takes — hp, holed swap,
+   * splinters, breach recording, mast detach. The downstream half of §V.14
+   * is otherwise only observable after a lucky shot, which is precisely why
+   * nobody had ever seen it.
+   *
+   * Throws on an unknown piece rather than no-op'ing (§Rule 8): a silent
+   * miss here would read exactly like "destruction does not work".
+   */
+  forceHit(state: SimState, shipIndex: number, pieceId: string, count?: number): CombatFrame;
 }
 
 export function createCombat(
@@ -174,12 +193,38 @@ export function createCombat(
   };
   const targetScratch: HitTarget[] = [];
 
-  const step: Combat['step'] = (state, dt, orders, waterHeightAt) => {
+  const clearFrame = (): void => {
     frame.muzzles.length = 0;
     frame.hits.length = 0;
     frame.projectiles.length = 0;
     frame.destruction.length = 0;
     frame.detached.length = 0;
+  };
+
+  /**
+   * One hit → piece ops → events. Extracted so `forceHit` walks the SAME
+   * path a ball does; a second implementation for the dev harness would let
+   * the harness and the game disagree about what damage means.
+   */
+  const applyHit = (state: SimState, hit: HitEvent): void => {
+    const rig = rigs.get(hit.shipIndex);
+    const ship = state.ships[hit.shipIndex];
+    if (rig === undefined || ship === undefined) return;
+    frame.hits.push(hit);
+    const result = applyHitDamage(rig.config.assembly, rig.config.blueprint, hit, ship.damage);
+    frame.destruction.push(...result.events);
+    if (result.detachedSubtree !== undefined) frame.detached.push(result.detachedSubtree);
+    // applyHitDamage emits splinters exactly once, at the moment a piece
+    // crosses into 'holed' — so a splinter burst IS the breach signal, and
+    // reading it here keeps the hole list in step with destruction's own
+    // threshold instead of re-deriving (and drifting from) it.
+    if (result.events.some((e) => e.type === 'splinters')) {
+      recordBreach(rig, ship, hit);
+    }
+  };
+
+  const step: Combat['step'] = (state, dt, orders, waterHeightAt) => {
+    clearFrame();
 
     const elevationOf = (order: FireOrder | undefined): number =>
       clamp(order?.elevation ?? params.defaultElevation, params.minElevation, params.maxElevation);
@@ -198,7 +243,15 @@ export function createCombat(
           (order.aimBearing === undefined
             ? 'starboard'
             : sideForBearing(yawOfShip(ship), order.aimBearing));
-        enqueueBroadside(mem, side, elevationOf(order), params);
+        // §V.2: the ripple's jitter stream is keyed off state + tick + ship,
+        // never Math.random, so a replay fires the same rolling broadside
+        enqueueBroadside(
+          mem,
+          side,
+          elevationOf(order),
+          params,
+          (state.seed + state.tick * 2654435761 + shipIndex * 7919) >>> 0,
+        );
       }
 
       // drained in queue order (bow → stern), so the ripple stays a ripple
@@ -222,22 +275,8 @@ export function createCombat(
       for (let i = 0; i < n; i++) targetScratch.push(rig.targets.buffer[i]);
     }
 
-    const hits = testHits(state, targetScratch, dt, params.ballRadius);
-    for (const hit of hits) {
-      const rig = rigs.get(hit.shipIndex);
-      const ship = state.ships[hit.shipIndex];
-      if (rig === undefined || ship === undefined) continue;
-      frame.hits.push(hit);
-      const result = applyHitDamage(rig.config.assembly, rig.config.blueprint, hit, ship.damage);
-      frame.destruction.push(...result.events);
-      if (result.detachedSubtree !== undefined) frame.detached.push(result.detachedSubtree);
-      // applyHitDamage emits splinters exactly once, at the moment a piece
-      // crosses into 'holed' — so a splinter burst IS the breach signal, and
-      // reading it here keeps the hole list in step with destruction's own
-      // threshold instead of re-deriving (and drifting from) it.
-      if (result.events.some((e) => e.type === 'splinters')) {
-        recordBreach(rig, ship, hit);
-      }
+    for (const hit of testHits(state, targetScratch, dt, params.ballRadius)) {
+      applyHit(state, hit);
     }
 
     frame.projectiles.push(...resolveWaterEntry(state, dt, waterHeightAt));
@@ -246,6 +285,28 @@ export function createCombat(
 
   return {
     step,
+
+    forceHit(state, shipIndex, pieceId, count = 1) {
+      clearFrame();
+      const rig = rigs.get(shipIndex);
+      const ship = state.ships[shipIndex];
+      if (rig === undefined || ship === undefined) {
+        throw new Error(`forceHit: no combat ship at index ${shipIndex}`);
+      }
+      const piece = rig.targets.pieces.find((p) => p.pieceId === pieceId);
+      if (piece === undefined) throw new Error(`forceHit: unknown piece ${pieceId}`);
+      // the piece's own centre, through its frame — the same station a ball
+      // arriving from anywhere would end up scoring against
+      const local = add(
+        piece.frame.position,
+        rotateVec(piece.frame.quaternion, lerp(piece.min, piece.max, 0.5)),
+      );
+      const point = add(ship.position, rotateVec(ship.quaternion, local));
+      for (let i = 0; i < Math.max(1, Math.floor(count)); i++) {
+        applyHit(state, { shipIndex, pieceId, point, projectileId: -1 });
+      }
+      return frame;
+    },
     floodHoles(state, shipIndex, waterHeight) {
       const rig = rigs.get(shipIndex);
       const ship = state.ships[shipIndex];
@@ -288,20 +349,36 @@ function yawOfShip(ship: ShipState): number {
  * broadside rolls fore → aft instead of firing as one slab of sound. Guns
  * already queued are skipped, so holding the fire key simply re-fires each
  * gun as its own reload comes up.
+ *
+ * On top of the regular ripple each gun draws its OWN delay out of
+ * `rippleJitter`. A metronomic 80 ms ripple is still a machine — the user's
+ * report was "they shoot at the perfect identical same time" — while a real
+ * broadside is fired by gun captains each judging their own roll, so the
+ * spacing has to be uneven. Jitter smaller than the ripple keeps the roll
+ * reading fore → aft while letting neighbours occasionally swap, which is
+ * exactly what a gun deck sounds like.
+ *
+ * Every gun draws whether it fires or not: the stream must not depend on
+ * which guns happened to be reloaded, or two replays of the same input log
+ * would diverge the moment one shot came due a tick earlier (§V.2).
  */
 function enqueueBroadside(
   mem: CombatMemory,
   side: BroadsideSide,
   elevation: number,
   params: CombatParams,
+  seed: number,
 ): void {
   const timers = side === 'port' ? mem.reloadPort : mem.reloadStarboard;
   const ripple = Math.max(0, params.rippleDelay);
+  const jitter = Math.max(0, params.rippleJitter);
+  const rng = createRng(seed);
   let queued = 0;
   for (let gunIndex = 0; gunIndex < timers.length; gunIndex++) {
+    const roll = rng();
     if (timers[gunIndex] > 0) continue;
     if (mem.pending.some((s) => s.side === side && s.gunIndex === gunIndex)) continue;
-    mem.pending.push({ side, gunIndex, delay: queued * ripple, elevation });
+    mem.pending.push({ side, gunIndex, delay: queued * ripple + roll * jitter, elevation });
     queued++;
   }
 }
@@ -329,6 +406,9 @@ function fire(
     socketId: ids[shot.gunIndex] ?? `gun-${shot.gunIndex}`,
     position: [projectile.position[0], projectile.position[1], projectile.position[2]],
     direction: [v[0] / speed, v[1] / speed, v[2] / speed],
+    // the projectile id is already a per-shot serial from SimState, so it is
+    // the cheapest seed that is unique per gun AND per volley (§V.2)
+    seed: (projectile.id * 2654435761 + shipIndex * 40503) >>> 0,
   });
 }
 

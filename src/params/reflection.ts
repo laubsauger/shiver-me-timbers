@@ -61,6 +61,13 @@ export interface ReflectionParams {
   blurFar: number;
   /** extra mip level per metre of horizontal displacement (chop → mush) */
   blurChop: number;
+  /**
+   * Extra mip level per unit of surface TILT (sin of the facet angle). This is
+   * the microfacet term: a rough surface blurs its reflection, a mirror does
+   * not, and "the reflections are too perfect, too clean" is exactly the
+   * absence of it. `blurChop` is a per-wave proxy; this is the per-pixel one.
+   */
+  blurSlope: number;
   /** ceiling on the mip level so the reflection never turns into a flat block */
   blurMax: number;
   /** build the mip chain for the blur, 0|1 (reload). 0 pins blur* to 0. */
@@ -123,6 +130,9 @@ export const reflectionParams: ReflectionParams = registerParams(
     blurNear: 0.35,
     blurFar: 2.5,
     blurChop: 0.6,
+    // tilt runs ~0..0.5 on the shipped swell, so this reaches ~1.5 mips on the
+    // steepest faces and 0 in a glassy trough.
+    blurSlope: 3.0,
     blurMax: 4.0,
     generateMipmaps: 1,
     cloudsInReflection: 1,
@@ -144,6 +154,7 @@ export const reflectionParams: ReflectionParams = registerParams(
     blurNear: { min: 0, max: 4, step: 0.05 },
     blurFar: { min: 0, max: 8, step: 0.05 },
     blurChop: { min: 0, max: 4, step: 0.05 },
+    blurSlope: { min: 0, max: 8, step: 0.05 },
     blurMax: { min: 0, max: 8, step: 0.1 },
     generateMipmaps: { min: 0, max: 1, step: 1 },
     cloudsInReflection: { min: 0, max: 1, step: 1 },

@@ -24,3 +24,5 @@ export { createCombatFx } from './combatFx';
 export type { CombatFx } from './combatFx';
 export { createCombatRuntime, viewBearing } from './combatRuntime';
 export type { CombatAudioSink, CombatRuntime, CombatRuntimeConfig } from './combatRuntime';
+export { arenaTargets, combatSceneRequested, createCombatArena } from './combatArena';
+export type { ArenaCamera, CombatArena } from './combatArena';

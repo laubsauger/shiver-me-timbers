@@ -168,8 +168,11 @@ export function createSailClothMaterial(
     const belly = across.mul(down).mul(uDrive).mul(uBillow).mul(drop);
     // flutter: travelling ripples, biggest at the free foot and the leeches,
     // faster and deeper the harder the sail is shaking
+    // the rate is CONSTANT — `time × ω(luff)` is not a phase unless ω is fixed,
+    // and the resulting ω + t·dω/dt ran the ripple away with elapsed time (the
+    // flags' bug, same expression, same file family). Luff drives amplitude.
     const shake = float(SAIL_FLUTTER_BASE).add(uLuff.mul(uLuffFlap));
-    const rippleFreq = uFlutterFreq.mul(float(1).add(uLuff));
+    const rippleFreq = max(uFlutterFreq, float(0));
     const wave = sin(
       time
         .mul(rippleFreq)

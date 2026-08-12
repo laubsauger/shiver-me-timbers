@@ -16,7 +16,14 @@
  *   - and none of the render-side sinks can perturb the sim (§V.2/§V.3).
  */
 import { describe, expect, it } from 'vitest';
-import { Matrix4, Object3D, PerspectiveCamera, Vector3, type Material } from 'three';
+import {
+  Matrix4,
+  Object3D,
+  PerspectiveCamera,
+  Quaternion,
+  Vector3,
+  type Material,
+} from 'three';
 import { SIM_DT } from '../src/core/loop';
 import {
   createInitialState,
@@ -34,7 +41,15 @@ import type { CombatEvent } from '../src/audio/events';
 import { stepFlooding } from '../src/sea-physics/flooding';
 import { createAiShip, stepAiShip } from '../src/ai/aiShip';
 import { stepShipSailing } from '../src/sailing/shipKinematics';
-import { combatParams, combatFxParams } from '../src/params/combat';
+import {
+  arenaTargets,
+  combatSceneRequested,
+  createCombatArena,
+  type ArenaCamera,
+  type CombatArena,
+} from '../src/combat/combatArena';
+import { jitterScale } from '../src/combat/fxMath';
+import { combatArenaParams, combatParams, combatFxParams } from '../src/params/combat';
 import { aiParams } from '../src/params/ai';
 import { elevationForRange, shotRange } from '../src/combat/ballistics';
 import { isSunk } from '../src/combat/sinking';
@@ -352,11 +367,16 @@ describe('what is drawn follows what the sim holds (§V.3)', () => {
     expect(sizes).not.toBeNull();
     expect(maxOf(sizes!)).toBe(0); // §V.28: the whole pool starts at ZERO size
 
-    state.tick++;
-    const frame = runtime.tick(state, SIM_DT, [
-      { shipIndex: 0, fire: true, aimBearing: Math.PI / 2 },
-    ]);
-    expect(frame.muzzles.length).toBeGreaterThan(0);
+    // every gun including the first draws its own jittered delay, so the
+    // trigger tick is not necessarily the tick a gun speaks on
+    let muzzles = 0;
+    for (let i = 0; i < 30 && muzzles === 0; i++) {
+      state.tick++;
+      muzzles = runtime.tick(state, SIM_DT, [
+        { shipIndex: 0, fire: i === 0, aimBearing: Math.PI / 2 },
+      ]).muzzles.length;
+    }
+    expect(muzzles).toBeGreaterThan(0);
     runtime.update(1 / 60, state);
     expect(maxOf(sizes!)).toBeGreaterThan(0);
   });
@@ -414,6 +434,385 @@ describe('§V.14 mast break leaves something to look at', () => {
   });
 });
 
+describe('a broadside is a ROLL, not a chord (user: "the perfect identical same time")', () => {
+  /** seconds from the trigger at which each gun of one broadside speaks */
+  const volleyTimes = (seed: number): number[] => {
+    const { state, runtime } = rig([0, 0], [55, 0], false);
+    state.seed = seed;
+    const times: number[] = [];
+    for (let i = 0; i < 90; i++) {
+      state.tick++;
+      for (const _ of runtime.tick(state, SIM_DT, [
+        { shipIndex: 0, fire: i === 0, aimBearing: Math.PI / 2 },
+      ]).muzzles) {
+        times.push(i * SIM_DT);
+      }
+    }
+    return times;
+  };
+
+  it('the guns of one broadside do not speak at the same instant', () => {
+    const times = volleyTimes(1337);
+    expect(times.length).toBeGreaterThan(2);
+    expect(new Set(times).size).toBeGreaterThan(1);
+  });
+
+  it('the spacing is UNEVEN — an even ripple is still a machine', () => {
+    // this is the actual complaint: a metronome at 80 ms reads as one
+    // mechanism firing, not as gun captains each judging their own roll
+    const times = volleyTimes(1337);
+    const gaps: number[] = [];
+    for (let i = 1; i < times.length; i++) gaps.push(times[i] - times[i - 1]);
+    expect(gaps.length).toBeGreaterThan(1);
+    expect(Math.max(...gaps) - Math.min(...gaps)).toBeGreaterThan(SIM_DT);
+  });
+
+  it('...but still replays identically from the same seed (§V.2)', () => {
+    expect(volleyTimes(1337)).toEqual(volleyTimes(1337));
+    expect(volleyTimes(1337)).not.toEqual(volleyTimes(99));
+  });
+
+  it('the whole broadside still lands inside a musical window', () => {
+    // uneven is the goal; strung out over seconds would stop being a
+    // broadside at all, so the jitter has to stay bounded by the ripple
+    const times = volleyTimes(1337);
+    const span = times[times.length - 1] - times[0];
+    expect(span).toBeGreaterThan(combatParams.rippleDelay);
+    expect(span).toBeLessThan(
+      (times.length + 1) * (combatParams.rippleDelay + combatParams.rippleJitter),
+    );
+  });
+});
+
+describe('no two guns throw the identical puff (user: "identical across all cannons")', () => {
+  it('per-shot seeds differ, and zero variation is what made them the same', () => {
+    const { state, runtime } = rig([0, 0], [55, 0], false);
+    const seeds = new Set<number>();
+    for (let i = 0; i < 90; i++) {
+      state.tick++;
+      for (const m of runtime.tick(state, SIM_DT, [
+        { shipIndex: 0, fire: i === 0, aimBearing: Math.PI / 2 },
+      ]).muzzles) {
+        seeds.add(m.seed);
+      }
+    }
+    expect(seeds.size).toBeGreaterThan(2); // one distinct seed per gun
+  });
+
+  it('the same seed gives the same jitter and a different seed does not', () => {
+    // §V.2: the variation is a hash, not an rng stream — a replay throws the
+    // same smoke, but two guns in one volley do not
+    expect(jitterScale(7, 3, 0.5)).toBe(jitterScale(7, 3, 0.5));
+    expect(jitterScale(7, 3, 0.5)).not.toBe(jitterScale(8, 3, 0.5));
+    expect(jitterScale(7, 3, 0)).toBe(1); // the knob really is a no-op at 0
+  });
+
+  it('stays inside its band and never returns a degenerate scale', () => {
+    for (let a = 0; a < 200; a++) {
+      const v = jitterScale(a * 7919, a, 0.45);
+      expect(v).toBeGreaterThan(0.5);
+      expect(v).toBeLessThan(1.5);
+    }
+  });
+
+  it('particles of one burst come out at visibly different sizes', () => {
+    const { state, runtime } = rig([0, 0], [4000, 4000], false);
+    const sizes = findSpriteSizes(runtime.group);
+    for (let i = 0; i < 30; i++) {
+      state.tick++;
+      runtime.tick(state, SIM_DT, [{ shipIndex: 0, fire: i === 0, aimBearing: Math.PI / 2 }]);
+    }
+    runtime.update(1 / 60, state);
+    const live = [...sizes!].filter((s) => s > 0);
+    expect(live.length).toBeGreaterThan(8);
+    // uniformity is this project's recurring visual failure; assert spread
+    expect(Math.max(...live) / Math.min(...live)).toBeGreaterThan(1.2);
+  });
+});
+
+describe('the combat TEST SCENE (?scene=combat)', () => {
+  const arenaOf = (r: Rig): CombatArena => {
+    const arena = createCombatArena(r.state, r.runtime, noCamera(), buildGalleonBlueprint(), {
+      enabled: true,
+      target: new EventTarget(),
+    });
+    expect(arena).not.toBeNull();
+    return arena!;
+  };
+
+  it('is OFF unless the URL asks for it — it may never leak into normal play', () => {
+    expect(combatSceneRequested('')).toBe(false);
+    expect(combatSceneRequested('?boot=baseline')).toBe(false);
+    expect(combatSceneRequested('?scene=combat')).toBe(true);
+    const r = rig([0, 0], [190, -150], false);
+    expect(
+      createCombatArena(r.state, r.runtime, noCamera(), buildGalleonBlueprint(), {
+        enabled: false,
+      }),
+    ).toBeNull();
+  });
+
+  it('places both hulls hove to at the preset range and holds them there', () => {
+    const r = rig([0, 0], [190, -150], false);
+    const arena = arenaOf(r);
+    const separation = (): number =>
+      Math.hypot(
+        r.state.ships[1].position[0] - r.state.ships[0].position[0],
+        r.state.ships[1].position[2] - r.state.ships[0].position[2],
+      );
+    expect(separation()).toBeCloseTo(combatArenaParams.range, 3);
+
+    // shove them hard and step: the harness must put them back, or every
+    // A/B comparison it exists to enable is measuring a different scene
+    r.state.ships[0].velocity = [12, 0, -9];
+    r.state.ships[1].position[0] += 40;
+    for (let i = 0; i < 120; i++) {
+      r.state.tick++;
+      arena.hold(r.state);
+      r.runtime.tick(r.state, SIM_DT, [arena.playerOrder(false), arena.enemyOrder()]);
+    }
+    expect(separation()).toBeCloseTo(combatArenaParams.range, 3);
+    expect(r.state.ships[0].sailTrim).toBe(0);
+  });
+
+  it('hands the lens back when you press C, and re-parks on P', () => {
+    // the vantage is a DEBUG POSE, which outranks every camera mode — so
+    // without this the free-fly key would toggle and the camera would not
+    // move, in the one scene built for looking at things
+    let parks = 0;
+    let releases = 0;
+    const camera: ArenaCamera = {
+      setDebugPose: () => {
+        parks++;
+      },
+      clearDebugPose: () => {
+        releases++;
+      },
+    };
+    const target = new EventTarget();
+    const r = rig([0, 0], [190, -150], false);
+    createCombatArena(r.state, r.runtime, camera, buildGalleonBlueprint(), {
+      enabled: true,
+      target,
+    });
+    expect(parks).toBe(1);
+
+    const key = (code: string): KeyboardEvent =>
+      new KeyboardEvent('keydown', { code, cancelable: true });
+    const c = key('KeyC');
+    target.dispatchEvent(c);
+    expect(releases).toBe(1);
+    // the camera module needs this same keystroke to toggle free-fly
+    expect(c.defaultPrevented).toBe(false);
+
+    target.dispatchEvent(key('KeyP'));
+    expect(parks).toBe(2);
+  });
+
+  it('parks the lens across the line of fire, not down it', () => {
+    // a vantage on the firing line sees a ball as a dot that never moves;
+    // the arc is only readable from the side
+    let parked: readonly [number, number, number] | null = null;
+    let aim: readonly [number, number, number] | null = null;
+    const camera: ArenaCamera = {
+      setDebugPose: (position, target) => {
+        parked = position;
+        aim = target ?? null;
+      },
+      clearDebugPose: () => undefined,
+    };
+    const r = rig([0, 0], [190, -150], false);
+    createCombatArena(r.state, r.runtime, camera, buildGalleonBlueprint(), {
+      enabled: true,
+      target: new EventTarget(),
+    });
+    expect(parked).not.toBeNull();
+    expect(aim).not.toBeNull();
+    const p = parked as unknown as readonly [number, number, number];
+    const a = aim as unknown as readonly [number, number, number];
+    // above the sea, standing off, and looking back at the midpoint
+    expect(p[1]).toBeGreaterThan(2);
+    expect(Math.hypot(p[0] - a[0], p[2] - a[2])).toBeGreaterThan(
+      combatArenaParams.range * 0.4,
+    );
+  });
+
+  it('B fires the enemy at the player — the side that bears, not a guess', () => {
+    const r = rig([0, 0], [190, -150], false);
+    const arena = arenaOf(r);
+    arena.enemyFire();
+    let muzzles = 0;
+    for (let i = 0; i < 60; i++) {
+      r.state.tick++;
+      arena.hold(r.state);
+      const frame = r.runtime.tick(r.state, SIM_DT, [
+        arena.playerOrder(false),
+        arena.enemyOrder(),
+      ]);
+      muzzles += frame.muzzles.length;
+      // the enemy lies at +x of the player, so her guns must fire to PORT
+      for (const m of frame.muzzles) {
+        expect(m.shipIndex).toBe(1);
+        expect(m.position[0]).toBeLessThan(r.state.ships[1].position[0]);
+      }
+    }
+    expect(muzzles).toBeGreaterThan(0);
+  });
+
+  it('N fires both, so two smoke banks can be judged in one frame', () => {
+    const r = rig([0, 0], [190, -150], false);
+    const arena = arenaOf(r);
+    arena.bothFire();
+    const shooters = new Set<number>();
+    for (let i = 0; i < 60; i++) {
+      r.state.tick++;
+      arena.hold(r.state);
+      for (const m of r.runtime.tick(r.state, SIM_DT, [
+        arena.playerOrder(false),
+        arena.enemyOrder(),
+      ]).muzzles) {
+        shooters.add(m.shipIndex);
+      }
+    }
+    expect(shooters).toEqual(new Set([0, 1]));
+  });
+
+  it('V opens a breach that actually floods, without waiting for a lucky hit', () => {
+    const r = rig([0, 0], [190, -150], false);
+    const arena = arenaOf(r);
+    arena.breachEnemy();
+    r.state.tick++;
+    arena.hold(r.state);
+    const holes = r.runtime.floodHoles(r.state, 1);
+    expect(holes.length).toBeGreaterThan(0);
+    expect(holes.some((h) => h[1] < 0)).toBe(true); // below the waterline
+    const before = r.state.ships[1].flood;
+    for (let i = 0; i < 600; i++) {
+      stepFlooding(r.state.ships[1], r.runtime.floodHoles(r.state, 1), SIM_DT);
+    }
+    expect(r.state.ships[1].flood).toBeGreaterThan(before);
+  });
+
+  it('M puts the mast over the side, with splinters and a spar in the world', () => {
+    const r = rig([0, 0], [190, -150], false);
+    const arena = arenaOf(r);
+    const { mastId } = arenaTargets(buildGalleonBlueprint());
+    arena.dropEnemyMast();
+    r.state.tick++;
+    arena.hold(r.state);
+    expect(r.state.ships[1].damage[mastId]).toBe(0);
+    const wreckage = r.runtime.group.getObjectByName('combat-wreckage');
+    expect(wreckage!.children.length).toBeGreaterThan(0);
+  });
+
+  it('J resets: damage, flooding and the balls in the air all go away', () => {
+    const r = rig([0, 0], [190, -150], false);
+    const arena = arenaOf(r);
+    arena.breachEnemy();
+    r.state.tick++;
+    arena.hold(r.state);
+    r.state.ships[1].flood = 0.4;
+    expect(Object.keys(r.state.ships[1].damage).length).toBeGreaterThan(0);
+
+    arena.reset();
+    r.state.tick++;
+    arena.hold(r.state);
+    expect(r.state.ships[1].damage).toEqual({});
+    expect(r.state.ships[1].flood).toBe(0);
+    expect(r.state.projectiles).toHaveLength(0);
+  });
+
+  it('picks its demo pieces off the piece graph, never by a typed-in id', () => {
+    // §V.18: a hand-written id rots the first time the blueprint changes,
+    // and rots SILENTLY — the harness would just demonstrate nothing
+    const blueprint = buildGalleonBlueprint();
+    const t = arenaTargets(blueprint);
+    expect(t.hullIds.length).toBeGreaterThanOrEqual(combatArenaParams.breachSections);
+    for (const id of t.hullIds) {
+      const hull = blueprint.find((p) => p.id === id);
+      expect(hull?.kind).toBe('hull-section');
+      expect(hull?.damageStates.some((s) => s.id === 'holed')).toBe(true);
+    }
+    expect(blueprint.find((p) => p.id === t.mastId)?.kind).toBe('mast');
+    expect(() => arenaTargets([])).toThrow(); // fails loud, §Rule 8
+  });
+});
+
+describe('the shot has to be followable (a 0.3 m dark sphere at 60 m/s)', () => {
+  it('balls stretch along their own velocity, and the stretch is bounded', () => {
+    const { state, runtime } = rig([0, 0], [4000, 4000], false);
+    const balls = findInstanced(runtime.group) as unknown as {
+      count: number;
+      getMatrixAt(i: number, m: Matrix4): void;
+    };
+    for (let i = 0; i < 20; i++) {
+      state.tick++;
+      runtime.tick(state, SIM_DT, [{ shipIndex: 0, fire: i === 0, aimBearing: Math.PI / 2 }]);
+    }
+    runtime.update(1 / 60, state);
+    expect(balls.count).toBeGreaterThan(0);
+
+    const m = new Matrix4();
+    balls.getMatrixAt(0, m);
+    // decompose, NOT setFromRotationMatrix: the matrix carries a non-uniform
+    // scale, and setFromRotationMatrix assumes it does not
+    const scale = new Vector3();
+    const rot = new Quaternion();
+    m.decompose(new Vector3(), rot, scale);
+    // long axis is the ball's own +Y, so y must exceed the cross-section
+    expect(scale.y).toBeGreaterThan(scale.x * 1.5);
+    expect(scale.y / scale.x).toBeLessThanOrEqual(combatFxParams.ballStretchMax + 1e-6);
+
+    // ...and the long axis really does point along the velocity
+    const dir = new Vector3(0, 1, 0).applyQuaternion(rot);
+    const v = state.projectiles[0].velocity;
+    const vel = new Vector3(v[0], v[1], v[2]).normalize();
+    expect(dir.dot(vel)).toBeGreaterThan(0.99);
+  });
+
+  it('a ball at rest is drawn round, not degenerate', () => {
+    const { state, runtime } = rig([0, 0], [4000, 4000], false);
+    state.projectiles.push({
+      id: 0,
+      position: [0, 5, 0],
+      velocity: [0, 0, 0],
+      age: 0,
+      owner: 0,
+    });
+    runtime.update(1 / 60, state);
+    const balls = findInstanced(runtime.group) as unknown as {
+      count: number;
+      getMatrixAt(i: number, m: Matrix4): void;
+    };
+    const m = new Matrix4();
+    balls.getMatrixAt(0, m);
+    const scale = new Vector3().setFromMatrixScale(m);
+    expect(scale.x).toBeCloseTo(scale.y, 6);
+    expect(scale.x).toBeGreaterThan(0);
+  });
+
+  it('a ball in flight lays a ribbon behind it — with no gun having fired', () => {
+    // isolated on purpose: a lone projectile and NO muzzle event, so any
+    // live sprite can only be the ball's own trail
+    const { state, runtime } = rig([0, 0], [4000, 4000], false);
+    const sizes = findSpriteSizes(runtime.group)!;
+    state.projectiles.push({
+      id: 5,
+      position: [0, 40, 0],
+      velocity: [45, 12, 0],
+      age: 0,
+      owner: 0,
+    });
+    expect([...sizes].filter((s) => s > 0)).toHaveLength(0);
+    for (let i = 0; i < 12; i++) {
+      state.tick++;
+      runtime.tick(state, SIM_DT, []);
+    }
+    runtime.update(1 / 60, state);
+    expect([...sizes].filter((s) => s > 0).length).toBeGreaterThan(0);
+  });
+});
+
 describe('render sinks can never move the sim (§V.2 determinism)', () => {
   it('the same seed and the same orders replay identically with fx and audio attached', () => {
     const run = (audio: boolean): number => {
@@ -436,6 +835,11 @@ describe('render sinks can never move the sim (§V.2 determinism)', () => {
     expect(run(true)).toBe(run(false));
   });
 });
+
+/** a camera stand-in for the arena tests that records nothing */
+function noCamera(): ArenaCamera {
+  return { setDebugPose: () => undefined, clearDebugPose: () => undefined };
+}
 
 /** first InstancedMesh under `root` — the cannonballs */
 function findInstanced(root: Object3D): (Object3D & { count: number }) | null {

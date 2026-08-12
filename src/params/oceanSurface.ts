@@ -150,10 +150,13 @@ export const oceanSurfaceParams = registerParams(
     bodyBandLow: -1.7,
     bodyBandHigh: 2.3,
     /**
-     * Authored reflected-sky gradient. These stay as the SHAPE of the sky the
-     * water reflects (horizon lighter, zenith deeper); their day-cycle colour
-     * comes from the live haze below, so there is never a second set of
-     * sunset constants to keep in sync.
+     * Authored sky gradient, horizon → zenith. NO LONGER the reflected sky:
+     * that is `skyDomeColor(reflectionRay)` now, straight from the sky system
+     * (see the skySunGlow note below). What is left for this pair is the
+     * SNELL'S-WINDOW disc seen from UNDER the surface (§V.25) and the
+     * fallback for a build with no sky wired. Their day-cycle colour comes
+     * from the live haze below, so there is still no second set of sunset
+     * constants to keep in sync.
      */
     skyHorizonColor: '#a8d4e8',
     skyZenithColor: '#4694cc',
@@ -189,9 +192,41 @@ export const oceanSurfaceParams = registerParams(
      * frame is entirely grazing. 1.0 = physically correct.
      */
     reflectionStrength: 1.0,
-    /** re-saturation of the body colour under a white sky at grazing angles;
-     *  0 = raw fresnel wash (reads gray/desaturated), 1 = full pigment */
+    /**
+     * §V.56 lever 1 — re-saturation of the reflected sky toward the water's own
+     * hue, RAMPED WITH DISTANCE (0 = raw Fresnel wash, reads grey; 1 = full
+     * pigment). One constant could not serve both ends of the frame:
+     *  - NEAR: 0.15. Close water shows its body through the surface (§V.24), so
+     *    the pigment is there whatever the reflection does. This was cut from
+     *    0.55 because the near sea read as over-saturated teal, and that
+     *    complaint has not returned — so it stays low.
+     *  - FAR: distant water is ENTIRELY grazing. Schlick → 1, nothing
+     *    transmits, the pixel is nothing but reflected sky, and at 0.15 it
+     *    greys out (user: "the water at distance still has a very high
+     *    tendency to get grey and washed out"). 0.55 hands the pigment back
+     *    exactly where there is no other source of it.
+     * The ramp reaches `Far` at `FullDist` metres. Beyond ~900 m the distance
+     * haze takes over anyway (hazeStart), so the window this actually governs
+     * is roughly 150–900 m — the mid-field the user is describing.
+     * CPU transliteration: src/ocean/seaChroma.ts `grazingSaturationAt`.
+     */
     grazingSaturation: 0.15,
+    grazingSaturationFar: 0.55,
+    grazingSaturationFullDist: 500,
+    /**
+     * §V.56 lever 2 — THE FLOOR ITSELF, and the material's one named
+     * stylisation. Minimum HSV chroma ((max−min)/max) the composited water may
+     * have; below it the pixel is pulled back toward the body hue, above it
+     * nothing happens at all. Applied to the SUM of every term and gated by
+     * (1 − foam), because breaking foam is allowed to read white — it is the
+     * disturbed water between the caps that must not go grey.
+     * 0 disables it entirely and hands the frame back to raw physics.
+     * Do not raise past ~0.35 or genuinely pale water (fog banks, thin
+     * shallows over sand) starts reading as tinted. CPU pair:
+     * seaChroma.pigmentFloor, swept in tests/ocean.test.ts "§V.56".
+     */
+    pigmentFloorChroma: 0.22,
+    pigmentFloorStrength: 1.0,
     /**
      * Sun-elevation gate (sunDir.y) for every sun-driven water term. Below
      * `low` there is no direct sun at all; above `high` the terms are at full
@@ -231,12 +266,17 @@ export const oceanSurfaceParams = registerParams(
     /** >1 tightens the scatter toward faces squarely facing the sun */
     sunScatterPower: 1.5,
     /**
-     * Brightness of the sky's halo AROUND the sun, as seen in the water's
-     * reflection. Broad and smooth — the honest form of "some scattering even
-     * when not looking at the sun", as opposed to faking an off-axis glint.
+     * REMOVED, deliberately — do not re-add here. The sky's halo AROUND the
+     * sun used to be a second, ocean-owned lobe added on top of an
+     * elevation-only reflected-sky ramp: it could only ever ADD warmth toward
+     * the sun and never cool the anti-solar side, which is the user's "the
+     * ocean takes on too much of the sunlight colour all around". The
+     * reflected sky is now `skyDomeColor(reflectionRay)` from
+     * src/sky/skyBackground.ts — the SAME function `scene.backgroundNode`
+     * uses — so the halo, the horizon haze wedge and the golden-hour warmth
+     * all arrive with their real azimuth, from one implementation. Its knobs
+     * are `sunHazeStrength` / `horizonWarm*` in params/sky.ts.
      */
-    skySunGlowStrength: 0.35,
-    skySunGlowPower: 8,
     /** how much the sun shadow map darkens the water (0 = ignore shadows) */
     shadowStrength: 0.85,
     /** build the in-material sun-shadow sample at all (reload to apply) —
@@ -430,6 +470,10 @@ export const oceanSurfaceParams = registerParams(
     variationStrength: { min: 0, max: 0.25, step: 0.005 },
     reflectionStrength: { min: 0, max: 1, step: 0.01 },
     grazingSaturation: { min: 0, max: 1, step: 0.01 },
+    grazingSaturationFar: { min: 0, max: 1, step: 0.01 },
+    grazingSaturationFullDist: { min: 20, max: 4000, step: 10 },
+    pigmentFloorChroma: { min: 0, max: 0.6, step: 0.01 },
+    pigmentFloorStrength: { min: 0, max: 1, step: 0.01 },
     sssPower: { min: 0.5, max: 8, step: 0.1 },
     sssChoppyScale: { min: 0, max: 3, step: 0.05 },
     sssSkylightFloor: { min: 0, max: 1, step: 0.01 },
@@ -452,8 +496,6 @@ export const oceanSurfaceParams = registerParams(
     skylightDesaturation: { min: 0, max: 1, step: 0.01 },
     sunScatterStrength: { min: 0, max: 1.5, step: 0.01 },
     sunScatterPower: { min: 0.2, max: 8, step: 0.1 },
-    skySunGlowStrength: { min: 0, max: 2, step: 0.01 },
-    skySunGlowPower: { min: 1, max: 64, step: 0.5 },
     shadowStrength: { min: 0, max: 1, step: 0.01 },
     sparkleStrength: { min: 0, max: 4, step: 0.05 },
     sparkleScale: { min: 2, max: 120, step: 1 },

@@ -69,6 +69,23 @@ export class App {
       if (typeof supported === 'number') requiredLimits[key] = supported;
     }
     const renderer = new THREE.WebGPURenderer({ antialias: true, requiredLimits });
+    /**
+     * §V.39 REQUIRES GPU timestamp queries, and they are IMPOSSIBLE unless this
+     * is set BEFORE `init()`: three only requests the `timestamp-query` device
+     * feature at device creation, so flipping it later leaves
+     * `renderer.info.render.timestamp` permanently 0 — measured, 0 valid
+     * samples over 4 resolves. That is a silent failure of the one measurement
+     * method the invariant allows, and it left an agent unable to cost its own
+     * change at all: wall clock is void in a hidden tab (§B.25) and the
+     * timestamp path returned nothing.
+     *
+     * Cheap when unused — the queries are only resolved by an explicit
+     * `resolveTimestampsAsync()` call — so it stays on rather than behind a
+     * flag nobody remembers to set before the measurement they need it for.
+     */
+    // untyped-narrow (T2): the field is real on WebGPURenderer at runtime and
+    // read by `Renderer.init()`, but three's .d.ts does not declare it
+    (renderer as unknown as { trackTimestamp: boolean }).trackTimestamp = true;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(container.clientWidth, container.clientHeight);
     // NOTE: shadow-map variant compilation of the huge ocean/ship TSL

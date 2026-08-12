@@ -351,10 +351,19 @@ export const audioParams: AudioParams = registerParams(
     musicGapStormSec: 20,
     musicGapCombatSec: 4,
     musicLandRadius: 400,
-    musicDuckLevel: 0.3,
-    musicDuckAttack: 0.25,
-    musicDuckRelease: 2.5,
-    musicDuckHoldSec: 4,
+    // RETUNED (user: "we're manipulating the music volume too intensely, too
+    // fast, back and forth, up and down"). The old set pumped: a broadside
+    // ducked to 30% in a quarter second, began recovering over 2.5s, and the
+    // next volley slammed it down again — the RECOVERY is what you hear, not
+    // the duck. Four changes, all in the same direction: duck about half as
+    // deep, take longer to get there so it reads as the mix breathing rather
+    // than a gate, and above all HOLD through the gaps between volleys so it
+    // does not climb back up between shots. Depth and speed are what make a
+    // duck audible AS a duck; a slow shallow one is felt and not noticed.
+    musicDuckLevel: 0.55,
+    musicDuckAttack: 0.6,
+    musicDuckRelease: 5,
+    musicDuckHoldSec: 9,
     musicTargetRms: 0.12,
     musicGainMin: 0.35,
     musicGainMax: 2.2,

@@ -30,7 +30,6 @@ import {
   positionLocal,
   sin,
   smoothstep,
-  time,
   transformNormalToView,
   uniform,
   uv,
@@ -40,6 +39,7 @@ import {
 import { fbm2, hash2 } from '../terrain/noise';
 import { shipFlagParams, type ShipFlagParams } from '../params/ship';
 import { createFlagWindUniforms } from './flagDriver';
+import { FLAG_CRACK_RATIO } from './flagDynamics';
 import { jollyRoger } from './flagBadge';
 import { uShipSunDirection } from './sailMaterial';
 import type { ShipMaterialHandle } from './woodMaterial';
@@ -64,7 +64,6 @@ export function createFlagClothMaterial(
   const uStripe = uniform(new THREE.Color(p.pennantStripe));
   const uHang = uniform(p.flagHang);
   const uWaveAmp = uniform(p.flagWaveAmp);
-  const uWaveFreq = uniform(p.flagWaveFreq);
   const uWaveCount = uniform(p.flagWaveCount);
   const uSnap = uniform(p.flagSnap);
   const uLeeDarken = uniform(p.flagLeeDarken);
@@ -74,6 +73,8 @@ export function createFlagClothMaterial(
   const uRoot = wind.rootAngle;
   const uLag = wind.lagAngle;
   const uStrength = wind.strength;
+  const uWavePhase = wind.wavePhase;
+  const uCrackPhase = wind.crackPhase;
 
   // (clothWeight, fly, hoist, style): the staff carries weight 0 so it never
   // moves, and one shared material serves every flag size and pattern
@@ -108,16 +109,33 @@ export function createFlagClothMaterial(
 
     // travelling ripple, perpendicular to the streaming direction, growing
     // toward the free fly and skewed by v so the cloth twists as it waves.
-    // Amplitude and RATE both scale with the wind: a flag in a light air
-    // stirs slowly and shallowly, and that difference is the information.
+    // Amplitude and rate both scale with the wind: a flag in a light air stirs
+    // slowly and shallowly, and that difference is the information.
+    //
+    // THE TIME TERM IS AN INTEGRAL, NOT A PRODUCT. This used to read
+    // `time.mul(rate)` with `rate` a function of the live stream strength,
+    // which is the phase of a sine only while the rate is constant. It is not:
+    // the flag breathes with the gusts, and sin(t·ω(t)) has instantaneous
+    // frequency ω + t·dω/dt, so the elapsed time multiplied every wobble and
+    // the flap ramped 0.93 Hz → 13 Hz by two minutes and 60 Hz by ten, sign
+    // flips included. `uWavePhase` is ∫ω dt, accumulated per flag in
+    // flagDriver.ts and wrapped there (§B "FLAG BUG AGAIN" — third time a flag
+    // has had a rate/reference defect, and the first that was not a saturated
+    // reference).
     const grow = u.mul(0.4).add(u.mul(u).mul(0.6));
-    const rate = uWaveFreq.mul(float(0.35).add(uStrength));
-    const carrier = time.mul(rate).add(phase).add(u.mul(uWaveCount.mul(TAU)));
+    const spatial = u.mul(uWaveCount.mul(TAU));
+    const carrier = uWavePhase.add(phase).add(spatial);
     const wave = sin(carrier.add(v.mul(1.7)));
     // the snap: a faster, shorter crack that only appears once it is really
-    // blowing — below half strength there is nothing to crack
+    // blowing — below half strength there is nothing to crack. Its own
+    // integrated phase (the ratio is shared, not copied); the SPATIAL term is
+    // still scaled by the same ratio, exactly as the old `carrier.mul(2.3)` did
     const cracking = smoothstep(float(0.45), float(0.95), uStrength);
-    const crack = sin(carrier.mul(2.3).add(phase.mul(1.3))).mul(uSnap).mul(cracking);
+    const crack = sin(
+      uCrackPhase.add(phase.mul(1.3)).add(spatial.mul(FLAG_CRACK_RATIO)),
+    )
+      .mul(uSnap)
+      .mul(cracking);
     const amp = uWaveAmp.mul(hoist).mul(grow).mul(float(0.06).add(uStrength.mul(0.94)));
     const swing = wave.add(crack.mul(0.4)).mul(amp);
 
@@ -181,7 +199,6 @@ export function createFlagClothMaterial(
       uStripe.value.set(p.pennantStripe);
       uHang.value = p.flagHang;
       uWaveAmp.value = p.flagWaveAmp;
-      uWaveFreq.value = p.flagWaveFreq;
       uWaveCount.value = p.flagWaveCount;
       uSnap.value = p.flagSnap;
       uLeeDarken.value = p.flagLeeDarken;

@@ -21,6 +21,19 @@ import {
 } from '../src/ocean/oceanMath';
 import { oceanParams } from '../src/params/ocean';
 import { oceanSurfaceParams } from '../src/params/oceanSurface';
+import { skyParams } from '../src/params/sky';
+import {
+  bodyTint,
+  chroma,
+  grazingSaturationAt,
+  luminance,
+  pigmentFloor,
+  seaColorCpu,
+  type Rgb,
+  type SkyDomeCpu,
+} from '../src/ocean/seaChroma';
+// source read (not fs): this repo has no @types/node, vite hands it over raw
+import surfaceMaterialSource from '../src/ocean/surfaceMaterial.ts?raw';
 import { seaPhysicsParams } from '../src/params/seaPhysics';
 import {
   buildOceanGrid,
@@ -592,6 +605,221 @@ describe('storm sea reads (§B.12 follow-up, user storm reference)', () => {
  * contract is: there is always a view-INDEPENDENT sun response, and the
  * off-axis softening is a broad sky halo, never a faked wide specular.
  */
+/**
+ * §B: TSL `assign`/`addAssign` OUTSIDE an `Fn()` body is a SILENT NO-OP.
+ * `Node.prototype.assign` (three/src/nodes/tsl/TSLCore.js) needs the module's
+ * `currentStack`, which only exists while an Fn body is executing; with no
+ * stack it console.errors once and returns `this` UNCHANGED. The ocean's
+ * shading normal was built at module scope, so the §V.5 turbulent sub-noise on
+ * wave faces — every `microDetail*` param — was written, tuned, and never
+ * reached a pixel. It reads as "the water is too clean", never as a failure.
+ *
+ * The whole slope build therefore lives in `buildSurfaceSlope`, which is
+ * CALLED from inside `colorNode`'s Fn. Anything added to it later (the wake
+ * slope is the second such term) dies the moment that moves back out.
+ */
+
+/**
+ * §V.56 — the sea's own pigment is a FLOOR, not a base layer.
+ *
+ * These sweep the two axes the defect actually lives on, VIEW AZIMUTH and
+ * DISTANCE, and floor the CHROMA. They deliberately do NOT test luminance: a
+ * grey wash has exactly the luminance it should, which is why five successive
+ * versions of this bug (the cow pattern, the teal hull, the rotation blowout,
+ * the grazing grey wash, the wake's white curtain) each passed every check we
+ * had and still arrived on screen.
+ *
+ * They also test the SUM, not the terms. Fresnel at grazing, a pale sky, the
+ * distance haze and the foam are each defensible alone; the failure is their
+ * product (§V.49, applied to one material rather than two owners).
+ */
+describe('§V.56 the sea holds its colour on both axes', () => {
+  // TWO skies, because the defect is a PRODUCT and only one of them shows it.
+  // A warm sunset sky is chromatic enough to survive a bad re-saturation on
+  // its own; a neutral overcast/fog sky is the worst case the invariant has to
+  // hold under, and it is the one the user shot ("takes on the grey sky
+  // reflection quite intensely").
+  const SUNSET: SkyDomeCpu = {
+    mid: [0.42, 0.5, 0.62],
+    zenith: [0.2, 0.32, 0.55],
+    haze: [0.86, 0.78, 0.7],
+    warm: [1.0, 0.72, 0.42],
+    sunDir: [-0.983, 0.176, 0.047],
+    hazeStrength: 0.55,
+    hazeFalloff: 0.14,
+    sunHaze: 0.5,
+    warmAmount: 0.8,
+    gradientCurve: 0.75,
+  };
+  const NEUTRAL: SkyDomeCpu = {
+    mid: [0.62, 0.62, 0.62],
+    zenith: [0.48, 0.48, 0.48],
+    haze: [0.85, 0.85, 0.85],
+    warm: [0.85, 0.85, 0.85],
+    sunDir: [-0.983, 0.176, 0.047],
+    hazeStrength: 0.7,
+    hazeFalloff: 0.14,
+    sunHaze: 0.3,
+    warmAmount: 0.2,
+    gradientCurve: 0.75,
+  };
+  /** deepColor #093642 after the wrap light — the pigment we must not lose */
+  const BODY: Rgb = [0.02, 0.11, 0.14];
+  const FLOOR = oceanSurfaceParams.pigmentFloorChroma;
+
+  const sample = (
+    sky: SkyDomeCpu,
+    azimuth: number,
+    camDist: number,
+    overrides: Partial<Parameters<typeof seaColorCpu>[0]> = {},
+  ): Rgb => {
+    // a grazing view — the reflection ray leaves at a shallow elevation, and
+    // its AZIMUTH is the axis the old elevation-only ramp could not see at all
+    const elev = 0.12;
+    const h = Math.sqrt(1 - elev * elev);
+    return seaColorCpu({
+      refl: [Math.cos(azimuth) * h, elev, Math.sin(azimuth) * h],
+      // distance IS grazing: cos(view, normal) → 0 as the water recedes, so
+      // Schlick → 1 and the pixel becomes pure reflected sky
+      cosTheta: Math.max(0.02, 1 / (1 + camDist * 0.02)),
+      camDist,
+      body: BODY,
+      sky,
+      fresnelR0: oceanSurfaceParams.fresnelR0,
+      reflectionStrength: oceanSurfaceParams.reflectionStrength,
+      grazingSaturation: oceanSurfaceParams.grazingSaturation,
+      grazingSaturationFar: oceanSurfaceParams.grazingSaturationFar,
+      grazingSaturationFullDist: oceanSurfaceParams.grazingSaturationFullDist,
+      pigmentFloorChroma: FLOOR,
+      pigmentFloorStrength: oceanSurfaceParams.pigmentFloorStrength,
+      hazeT: 0,
+      hazeColor: sky.haze,
+      ...overrides,
+    });
+  };
+
+  it('DISTANCE: the mid-field never washes out, under either sky', () => {
+    // out to hazeStart, past which atmospheric extinction legitimately owns
+    // the pixel. This is the sweep a single grazingSaturation constant fails.
+    for (const [name, sky] of [['sunset', SUNSET], ['neutral', NEUTRAL]] as const) {
+      for (let d = 10; d <= oceanSurfaceParams.hazeStart; d += 30) {
+        expect(
+          chroma(sample(sky, 0, d)),
+          `${name} sky: chroma collapsed at ${d} m`,
+        ).toBeGreaterThanOrEqual(FLOOR);
+      }
+    }
+  });
+
+  it('AZIMUTH: no direction of view loses the water (the rotation axis)', () => {
+    for (const [name, sky] of [['sunset', SUNSET], ['neutral', NEUTRAL]] as const) {
+      for (let i = 0; i < 16; i++) {
+        const az = (i / 16) * Math.PI * 2;
+        for (const d of [40, 200, 600]) {
+          expect(
+            chroma(sample(sky, az, d)),
+            `${name}: chroma collapsed at azimuth ${((az * 180) / Math.PI) | 0}°, ${d} m`,
+          ).toBeGreaterThanOrEqual(FLOOR);
+        }
+      }
+    }
+  });
+
+  it('REPRODUCES the bug: the shipped-before values collapse the same sweep', () => {
+    // A test that cannot fail is not a test (§Rule 6). These are exactly the
+    // values in the tree before this change — one flat grazingSaturation of
+    // 0.15 and no floor — against the neutral sky. It is the reported defect,
+    // measured: a grey sea with the RIGHT luminance, which is why nothing
+    // caught it.
+    const before = chroma(
+      sample(NEUTRAL, 0, 800, {
+        grazingSaturationFar: oceanSurfaceParams.grazingSaturation,
+        pigmentFloorStrength: 0,
+      }),
+    );
+    expect(before).toBeLessThan(FLOOR);
+    // and the two levers together clear it by a wide margin
+    expect(chroma(sample(NEUTRAL, 0, 800))).toBeGreaterThan(before * 2);
+  });
+
+  it('the distance ramp does the work; the floor is the guarantee', () => {
+    // honest attribution: at shipped params the RAMP is what lifts the
+    // mid-field, and the floor never engages there. The floor exists for the
+    // cases the ramp cannot reach — and it must actually bite when it does.
+    const rampOnly = chroma(sample(NEUTRAL, 0, 800, { pigmentFloorStrength: 0 }));
+    expect(rampOnly).toBeGreaterThanOrEqual(FLOOR);
+    // force the collapse and check the floor catches it
+    const grey: Rgb = [0.5, 0.51, 0.52];
+    const lifted = pigmentFloor(grey, bodyTint(BODY), FLOOR);
+    expect(chroma(grey)).toBeLessThan(FLOOR);
+    expect(chroma(lifted)).toBeGreaterThanOrEqual(FLOOR * 0.95);
+    // …without darkening the frame: it is a hue restore, not a shade (§V.44)
+    expect(luminance(lifted)).toBeGreaterThan(luminance(grey) * 0.8);
+  });
+
+  it('and it is INERT wherever the sea already has its colour', () => {
+    // above the floor the composite must be bit-identical — a floor that
+    // quietly tints healthy water is a global hue shift with extra steps
+    const coloured: Rgb = [0.02, 0.16, 0.2];
+    expect(chroma(coloured)).toBeGreaterThan(FLOOR);
+    expect(pigmentFloor(coloured, bodyTint(coloured), FLOOR)).toEqual([
+      coloured[0],
+      coloured[1],
+      coloured[2],
+    ]);
+  });
+
+  it('re-saturation rises with distance, because only distance needs it', () => {
+    const near = grazingSaturationAt(
+      5,
+      oceanSurfaceParams.grazingSaturation,
+      oceanSurfaceParams.grazingSaturationFar,
+      oceanSurfaceParams.grazingSaturationFullDist,
+    );
+    const far = grazingSaturationAt(
+      2000,
+      oceanSurfaceParams.grazingSaturation,
+      oceanSurfaceParams.grazingSaturationFar,
+      oceanSurfaceParams.grazingSaturationFullDist,
+    );
+    // near stays where the over-saturated-teal fix put it
+    expect(near).toBeCloseTo(oceanSurfaceParams.grazingSaturation, 2);
+    expect(far).toBeGreaterThan(near * 2);
+  });
+
+  it('the shader runs the same two levers (CPU pair kept in step)', () => {
+    // seaChroma.ts is a TRANSLITERATION, not a second implementation — if the
+    // shader stops calling these, every sweep above is measuring nothing.
+    expect(surfaceMaterialSource).toMatch(/uGrazingSat\.x[\s\S]{0,160}uGrazingSat\.y/);
+    expect(surfaceMaterialSource).toMatch(/uPigFloor/);
+    expect(surfaceMaterialSource).toMatch(/colChroma/);
+  });
+});
+
+describe('§B the shading normal is built inside the fragment Fn', () => {
+  const builderDecl = surfaceMaterialSource.indexOf('const buildSurfaceSlope = ()');
+  const fnDecl = surfaceMaterialSource.indexOf('const colorNode = Fn(');
+
+  it('the slope builder exists and is invoked from inside the Fn', () => {
+    expect(builderDecl).toBeGreaterThan(-1);
+    const call = surfaceMaterialSource.indexOf('buildSurfaceSlope()');
+    expect(call).toBeGreaterThan(fnDecl);
+  });
+
+  it('no addAssign sits at module scope, where it would silently vanish', () => {
+    const firstAssign = surfaceMaterialSource.indexOf('.addAssign(');
+    // every assign must come after the builder opens; module scope is
+    // everything before it
+    expect(firstAssign).toBeGreaterThan(builderDecl);
+  });
+
+  it('the churn the user is missing is actually in that builder', () => {
+    const builderBody = surfaceMaterialSource.slice(builderDecl, fnDecl);
+    expect(builderBody).toMatch(/uMicro/);
+    expect(builderBody).toMatch(/addAssign/);
+  });
+});
+
 describe('the sea stays lit from every camera angle (user)', () => {
   it('has a view-independent sun response at all', () => {
     // N·L body scatter + N·L wrap gain: both are functions of the surface
@@ -601,15 +829,28 @@ describe('the sea stays lit from every camera angle (user)', () => {
     expect(oceanSurfaceParams.lightGain).toBeGreaterThan(0);
   });
 
-  it('the off-axis term is a BROAD halo, not a disguised specular', () => {
-    // the glint road is pow(N·H, glintRoadPower) — a true specular. The sky
-    // sun halo must be far broader, or we have simply faked a view-
-    // independent glint, which the user explicitly did not ask for and which
-    // would look worse.
-    expect(oceanSurfaceParams.skySunGlowPower).toBeLessThan(
-      oceanSurfaceParams.glintRoadPower / 4,
-    );
-    expect(oceanSurfaceParams.skySunGlowStrength).toBeGreaterThan(0);
+  it('the off-axis sky term is the SKY\'s, and is a BROAD halo', () => {
+    // The glint road is pow(N·H, glintRoadPower) — a true specular, and it is
+    // the ONLY thing in the water allowed to be that tight. The off-axis
+    // brightening around the sun must be far broader or we have simply faked
+    // a view-independent glint, which the user did not ask for.
+    //
+    // It is also no longer the OCEAN's: `skySunGlowStrength/Power` are gone on
+    // purpose. They were an ocean-owned lobe stacked on an elevation-only
+    // reflected-sky ramp, so the sea took the sun's warmth on the sun's side
+    // and never lost it on the other ("too much of the sunlight colour all
+    // around"). The reflected sky is now skyDomeColor(refl) from the sky
+    // system, whose azimuthal terms ride `sunSide = dot(dir,sun)*0.5+0.5`
+    // to a power of at most 2 — broad by construction, and it COOLS the
+    // anti-solar side because it is a mix, not an add.
+    expect(oceanSurfaceParams).not.toHaveProperty('skySunGlowPower');
+    expect(oceanSurfaceParams).not.toHaveProperty('skySunGlowStrength');
+    expect(surfaceMaterialSource).not.toMatch(/skySunGlow/);
+    // the ocean asks the sky for it rather than modelling a second one
+    expect(surfaceMaterialSource).toMatch(/skyDomeColor\(refl\)/);
+    // and the sun's azimuthal spread there is nowhere near the road's power
+    expect(skyParams.sunHazeStrength).toBeGreaterThan(0);
+    expect(oceanSurfaceParams.glintRoadPower).toBeGreaterThan(4 * 2);
   });
 
   it('skylight is used as light, not as paint', () => {

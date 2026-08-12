@@ -58,13 +58,83 @@ export const GRAVITY = 9.80665;
 export const KELVIN_HALF_ANGLE_DEG = (Math.asin(1 / 3) * 180) / Math.PI;
 
 /**
- * Transverse Kelvin wavelength (m): λ = 2πv²/g. The waves that keep station
- * with the hull are those whose phase speed equals the ship's, and c = √(gλ/2π)
- * inverts to this. Speed-DEPENDENT, unlike the wedge angle.
+ * Transverse Kelvin wavelength (m) on the centreline: λ = 2πv²/g. The waves
+ * that keep station with the hull are those whose phase speed equals the
+ * ship's, and c = √(gλ/2π) inverts to this. Speed-DEPENDENT, unlike the wedge
+ * angle. Off the centreline use `kelvinWavelengthCpu`, of which this is the
+ * t → 0 limit.
  */
 export function transverseWavelengthCpu(speed: number): number {
   const v = Math.max(Math.abs(speed), 1e-6);
   return (2 * Math.PI * v * v) / GRAVITY;
+}
+
+/**
+ * Hard ceiling on tan θ for the DIVERGENT branch. Structural, not a look knob:
+ * the branch runs to infinity on the centreline (where its wavelength runs to
+ * zero), and an unbounded tan θ is an unbounded phase — §V44's "flooring a
+ * divisor bounds the DIVISION, not the QUOTIENT" in its purest form. The
+ * wavelength gate has already faded the amplitude to zero long before this
+ * clamp engages (measured: it bites inside r/rMax ≈ 0.2 at every speed), so the
+ * clamp only exists to keep the number finite where the amplitude is 0 —
+ * because 0 × NaN is NaN, not 0.
+ */
+export const KELVIN_TAN_MAX = 12;
+
+/** r = |lateral| / dist at the cusp line = tan(19.4712°) = 1/(2√2) */
+export const KELVIN_R_MAX = 1 / (2 * Math.SQRT2);
+
+/** the two stationary-phase branches at a point, both as tan θ */
+export interface KelvinBranches {
+  /** √(1 − 8r²) — zero exactly ON the cusp, clamped to 0 outside the wedge */
+  disc: number;
+  /** TRANSVERSE branch: long crests across the track, 0 on the centreline */
+  tT: number;
+  /** DIVERGENT branch: the feathered crests fanning off the stem */
+  tD: number;
+}
+
+/**
+ * SOLVE the Kelvin stationary-phase condition in closed form — the second phase
+ * field the bow wave needs, and the reason one field could never fake both.
+ *
+ * A wave travelling at angle θ to the track keeps station with the hull when
+ * its phase speed is v·cos θ, so k = g/(v² cos²θ). Stationary phase
+ * (∂φ/∂θ = 0) puts that wave at r = |y|/d = t/(1 + 2t²), t = tan θ. Inverting:
+ *
+ *      2r·t² − t + r = 0   ⟹   t = [1 ± √(1 − 8r²)] / (4r)
+ *
+ * TWO roots, which ARE the two wave systems: the minus root is the transverse
+ * train (t → 0 on the centreline, crests across the track), the plus root is
+ * the divergent train (t → ∞ on the centreline, crests at 54.74° to it — the
+ * classic feathered V). They are real only for r ≤ 1/(2√2), i.e. inside
+ * 19.4712° — the Kelvin envelope falls out of the algebra rather than being
+ * imposed, and both roots meet at t = 0.7071 exactly on the cusp, so the field
+ * is continuous across it.
+ *
+ * The transverse root is written as 2r/(1 + disc) rather than (1 − disc)/(4r):
+ * algebraically identical, but the latter is 0/0 on the centreline.
+ */
+export function kelvinBranchesCpu(r: number): KelvinBranches {
+  const rr = Math.max(Math.abs(r), 1e-6); // §V28 floored divisor
+  const disc = Math.sqrt(Math.max(1 - 8 * rr * rr, 0));
+  return {
+    disc,
+    tT: (2 * rr) / (1 + disc),
+    tD: Math.min((1 + disc) / (4 * rr), KELVIN_TAN_MAX),
+  };
+}
+
+/** local wavelength (m) of either branch: λ = 2πv²/(g(1+t²)) */
+export function kelvinWavelengthCpu(speed: number, t: number): number {
+  const v = Math.max(Math.abs(speed), 1e-6);
+  return (2 * Math.PI * v * v) / (GRAVITY * (1 + t * t));
+}
+
+/** stationary phase (rad) of either branch: φ = (g/v²)(d + |y|t)√(1+t²) */
+export function kelvinPhaseCpu(d: number, ay: number, t: number, speed: number): number {
+  const v = Math.max(Math.abs(speed), 1e-6);
+  return ((GRAVITY / (v * v)) * (d + ay * t) * Math.sqrt(1 + t * t));
 }
 
 /** slick/transverse tunables — a structural subset of FlowFoamParams */
@@ -82,6 +152,17 @@ export interface SlickParams {
   transDecay: number;
   transSpread: number;
   transInner: number;
+  divSlope: number;
+  divDecay: number;
+  divSpread: number;
+  divOuterFade: number;
+  waveBandLow: number;
+  waveBandHigh: number;
+  moundSlope: number;
+  moundLead: number;
+  moundSweep: number;
+  moundSpan: number;
+  moundThick: number;
   kelvinAngle: number;
   speedThreshold: number;
   fullWakeSpeed: number;
@@ -127,6 +208,13 @@ export function slickFieldCpu(
   p: SlickParams,
   /** LIVE hull speed: a hove-to ship stops GENERATING, deposits then decay */
   liveSpeed = points[0]?.speed ?? 0,
+  /**
+   * World size (m) of one texel of the tier this is being written into. The
+   * wave trains are band-limited against it AT THE SOURCE (§V48). 0 = "no
+   * carrier grid", which disables the gate — only for analysis, never for a
+   * real write, since the GPU always knows its own texel.
+   */
+  texel = 0,
 ): SlickField {
   const n = projectOnTrack(points, wx, wz);
   if (!n.found) return ZERO;
@@ -190,21 +278,136 @@ export function slickFieldCpu(
   const slick =
     p.slickIntensity * common * plateau(laneW, p.slickEdge, ay) * Math.exp(-a / Math.max(p.slickDecay, 1e-6));
 
-  // --- 2. transverse Kelvin crests -----------------------------------------
-  // Inside the wedge only, strongest on the centreline. Energy spreads over a
-  // widening front, so the amplitude falls like 1/√(1 + d/transSpread).
-  const inner = 1 - smoothstepCpu(kelvin * p.transInner, Math.max(kelvin, kelvin * p.transInner + 1e-6), ay);
-  const lam = transverseWavelengthCpu(Math.max(s, p.speedThreshold));
-  const phase = (2 * Math.PI * d) / lam;
-  const amp =
+  // --- 2. the two Kelvin wave systems --------------------------------------
+  // ONE solve of the stationary-phase condition yields both branches, so the
+  // divergent (bow) train costs a sqrt and two divides on top of the transverse
+  // one that was already here. See kelvinBranchesCpu for the algebra.
+  const v = Math.max(s, p.speedThreshold);
+  const br = kelvinBranchesCpu(ay / Math.max(d, 1e-6));
+  const spread = (L: number) => 1 / Math.sqrt(1 + d / Math.max(L, 1e-6));
+  // §V48: a wave train whose wavelength has gone sub-texel must fade to its own
+  // MEAN, which for a zero-mean crest field is zero. Doing this at the SOURCE
+  // (rather than only at sample time) is what makes the divergent branch's
+  // centreline singularity harmless — λ→0 there, so the gate is already 0.
+  const bandGate = (t: number): number => {
+    if (!(texel > 0)) return 1; // no carrier grid ⟹ nothing to alias against
+    const px = kelvinWavelengthCpu(v, t) / texel;
+    return smoothstepCpu(p.waveBandLow, Math.max(p.waveBandHigh, p.waveBandLow + 1e-6), px);
+  };
+  // right = (fz, −fx): the track frame's lateral axis, signed to this point
+  const sgn = n.lateral < 0 ? -1 : 1;
+  const rx = n.fz * sgn;
+  const rz = -n.fx * sgn;
+
+  // 2a. TRANSVERSE — long crests across the track, strongest on the centreline.
+  // Solved on its own branch rather than the old d-only approximation, so the
+  // crests correctly bow backward toward the cusp instead of running straight.
+  const innerFade =
+    1 - smoothstepCpu(kelvin * p.transInner, Math.max(kelvin, kelvin * p.transInner + 1e-6), ay);
+  const ampT =
     p.transSlope *
     common *
-    inner *
-    Math.exp(-a / Math.max(p.transDecay, 1e-6)) /
-    Math.sqrt(1 + d / Math.max(p.transSpread, 1e-6));
-  // crests run ACROSS the track ⟹ the slope points ALONG it (n.fx, n.fz)
-  const mag = amp * Math.sin(phase);
-  return { slick, slopeX: mag * n.fx, slopeZ: mag * n.fz };
+    innerFade *
+    Math.exp(-a / Math.max(p.transDecay, 1e-6)) *
+    spread(p.transSpread) *
+    bandGate(br.tT);
+  const magT = ampT * Math.sin(kelvinPhaseCpu(d, ay, br.tT, v));
+  // slope points along the propagation direction: aft·cosθ + lateral·sinθ
+  const cT = 1 / Math.sqrt(1 + br.tT * br.tT);
+  const sT = br.tT * cT;
+
+  // 2b. DIVERGENT — THE BOW WAVE. Short steep crests fanning off the stem,
+  // strongest at the cusp line and dying inward. sf SQUARED, the same shaping
+  // the foam's Kelvin arms use: the user asks for this "at higher speeds", and
+  // a hull barely making way throws no bow wave at all.
+  const rMaxLocal = KELVIN_R_MAX;
+  const r = ay / Math.max(d, 1e-6);
+  // the wedge boundary is a real edge, but a hard step in a field that gets
+  // differentiated is a 1-px line (§V38) — feather it just outside the cusp
+  const outer =
+    1 -
+    smoothstepCpu(
+      rMaxLocal,
+      rMaxLocal * (1 + Math.max(p.divOuterFade, 1e-6)),
+      r,
+    );
+  const ampD =
+    p.divSlope *
+    common *
+    sf * // ← squared overall: `common` already carries one sf
+    outer *
+    Math.exp(-a / Math.max(p.divDecay, 1e-6)) *
+    spread(p.divSpread) *
+    bandGate(br.tD);
+  const magD = ampD * Math.sin(kelvinPhaseCpu(d, ay, br.tD, v));
+  const cD = 1 / Math.sqrt(1 + br.tD * br.tD);
+  const sD = br.tD * cD;
+
+  // aft unit vector = −forward; both trains propagate away from the hull
+  const slopeX = magT * (-n.fx * cT + rx * sT) + magD * (-n.fx * cD + rx * sD);
+  const slopeZ = magT * (-n.fz * cT + rz * sT) + magD * (-n.fz * cD + rz * sD);
+  return { slick, slopeX, slopeZ };
+}
+
+/**
+ * THE BOW MOUND AS A SURFACE (user: "we actually show the water pushed
+ * forward"). `wakeMath.bowMoundCpu` paints FOAM on this shape; until now there
+ * was no shape under the paint, so the water ahead of the stem read completely
+ * undisturbed however much foam was on it.
+ *
+ * A ridge of water peaking `moundLead` metres ahead of the cutwater on the
+ * centreline and sweeping aft as it goes outboard, where it runs into the
+ * divergent crests. Its SLOPE is the derivative of that ridge across its own
+ * crest line: g(u) = −2u·e^(−u²), normalised by its own extremum (√2·e^(−½) =
+ * 0.8578) so the peak slope is exactly `moundSlope` — §V44 bounded at source,
+ * by construction rather than by a clamp.
+ *
+ * Evaluated in the LIVE stem frame because it has to lead the ship, and written
+ * (not accumulated) into the slope channels, so it travels with her.
+ * `moundSpeed` is the LAGGED speed (wakeTrack.approachExp) — the same drive the
+ * foam mound rides, so the two build and subside together instead of
+ * disagreeing about when the bow is working.
+ */
+export function bowSlopeCpu(
+  head: TrackSample,
+  wx: number,
+  wz: number,
+  moundSpeed: number,
+  p: SlickParams,
+  texel = 0,
+): { slopeX: number; slopeZ: number } {
+  const gate = smoothstepCpu(
+    p.speedThreshold,
+    Math.max(p.speedThreshold * 2, p.speedThreshold + 1e-6),
+    moundSpeed,
+  );
+  if (gate <= 0) return { slopeX: 0, slopeZ: 0 };
+  const sf = smoothstepCpu(
+    p.speedThreshold,
+    Math.max(p.fullWakeSpeed, p.speedThreshold + 1e-6),
+    moundSpeed,
+  );
+  const dx = wx - head.x;
+  const dz = wz - head.z;
+  const ahead = dx * head.fx + dz * head.fz;
+  const side = dx * head.fz - dz * head.fx; // right = (fz, −fx)
+  const aside = Math.abs(side);
+  const sgn = side < 0 ? -1 : 1;
+  // signed distance from the swept crest line — the same shape the foam uses
+  const thick = Math.max(p.moundThick, 1e-6);
+  const u = (ahead - (p.moundLead - p.moundSweep * aside)) / thick;
+  // §V48: the ridge is ~2·moundThick wide; if that goes sub-texel it must fade
+  const band = texel > 0
+    ? smoothstepCpu(p.waveBandLow, Math.max(p.waveBandHigh, p.waveBandLow + 1e-6), (2 * thick) / texel)
+    : 1;
+  const lat = 1 - smoothstepCpu(0, Math.max(p.moundSpan, 1e-6), aside);
+  const mag =
+    (p.moundSlope * gate * sf * lat * band * (-2 * u * Math.exp(-u * u))) / 0.857763884960707;
+  // ∇(crest distance) = forward + moundSweep·(lateral, signed), normalised
+  const gx = head.fx + p.moundSweep * head.fz * sgn;
+  const gz = head.fz - p.moundSweep * head.fx * sgn;
+  const len = Math.max(Math.hypot(gx, gz), 1e-6);
+  return { slopeX: (mag * gx) / len, slopeZ: (mag * gz) / len };
 }
 
 /**

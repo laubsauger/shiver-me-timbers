@@ -52,16 +52,36 @@ export interface FoamParams {
    * switch because it is the first thing to try if lattice ever returns.
    */
   injectFineCascade: number;
-  /** world-space frequency of the non-tiling cap-strength variation (§B.4) */
+  /**
+   * world-space frequency of the non-tiling cap-strength variation (§B.4).
+   *
+   * LOWER than it looks like it should be, on purpose. The field is a value-
+   * noise fbm, and a value-noise field puts its maxima near its own lattice
+   * cell centres — at 0.03 (33 m) the maxima came out at a measured nearest-
+   * neighbour spacing CV of 0.292 where a random point process reads 0.523,
+   * i.e. the thing that exists to break the FFT lattice was drawing a ~25 m
+   * lattice of its own. The cure is broadband: a low base frequency plus more
+   * octaves (foamShading.CAP_VAR_OCTAVES) so the finest octaves move each
+   * maximum off its cell.
+   */
   capVariationScale: number;
   /** 0 = uniform caps, 1 = strong per-site strength/lifecycle variation */
   capVariationStrength: number;
-  /** blur tap stretch ALONG the wave crest ridge (1 = isotropic/round caps) */
-  crestBlurAlong: number;
-  /** blur tap stretch ACROSS the ridge — keep < along or caps go circular */
-  crestBlurAcross: number;
   /** detail-noise stretch along the crest line (1 = isotropic blobs) */
   crestElongation: number;
+  /**
+   * world-space frequency of the field that TURNS the detail elongation.
+   * 1/this is roughly how far you travel before the streaks point somewhere
+   * else. Keep it well below every cascade domain (420/98/22.7 m) so it adds
+   * no repeat of its own — its whole job is to destroy one.
+   */
+  crestDirectionScale: number;
+  /**
+   * total swing of that turn, in radians (the field spans ±swing/2). 0
+   * restores the old single global tilt, which is the defect the user
+   * photographed four times — every ellipse in the frame at one angle.
+   */
+  crestDirectionSwing: number;
   /**
    * foam value above which coverage counts as SATURATED (storm seas). Past
    * it the detail noise broadens and flattens into wind-driven sheets —
@@ -125,11 +145,13 @@ export const foamParams: FoamParams = registerParams(
     uvWarpMeters: 1.4,
     detailScrollSpeed: 0.05,
     injectFineCascade: 1,
-    capVariationScale: 0.03,
-    capVariationStrength: 0.8,
-    crestBlurAlong: 2.6,
-    crestBlurAcross: 0.5,
-    crestElongation: 3.0,
+    capVariationScale: 0.008,
+    capVariationStrength: 0.55,
+    crestElongation: 2.0,
+    // ~170 m per swing, ±57°: measured cap orientation spread goes from 3.9°
+    // (one global axis) to >20° once the injection carries the shape too
+    crestDirectionScale: 0.006,
+    crestDirectionSwing: 2.0,
     sheetKnee: 0.7,
     sheetBroaden: 0.35,
     sheetFlatten: 0.5,
@@ -160,11 +182,11 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
     uvWarpMeters: { min: 0, max: 6, step: 0.1 },
     detailScrollSpeed: { min: 0, max: 0.5, step: 0.005 },
     injectFineCascade: { min: 0, max: 1, step: 1 },
-    capVariationScale: { min: 0.002, max: 0.2, step: 0.002 },
+    capVariationScale: { min: 0.001, max: 0.2, step: 0.001 },
     capVariationStrength: { min: 0, max: 1, step: 0.05 },
-    crestBlurAlong: { min: 0.25, max: 5, step: 0.05 },
-    crestBlurAcross: { min: 0.1, max: 3, step: 0.05 },
     crestElongation: { min: 1, max: 8, step: 0.1 },
+    crestDirectionScale: { min: 0.0005, max: 0.05, step: 0.0005 },
+    crestDirectionSwing: { min: 0, max: 6.28, step: 0.05 },
     sheetKnee: { min: 0.1, max: 1, step: 0.01 },
     sheetBroaden: { min: 0.05, max: 1, step: 0.01 },
     sheetFlatten: { min: 0, max: 1, step: 0.01 },

@@ -78,6 +78,15 @@ export interface FlagWindUniforms {
   lagAngle: ReturnType<typeof uniform>;
   /** 0..1 stream strength: 1 = board stiff, 0 = hanging dead */
   strength: ReturnType<typeof uniform>;
+  /**
+   * Ripple phase, ∫rate dt, wrapped to [0, 2π). NOT `time × rate` in the
+   * shader: with a rate that answers the wind, that expression's instantaneous
+   * frequency is ω + t·dω/dt and it ramps away without bound as the app runs
+   * (measured 0.93 Hz intended → 59.5 Hz after ten minutes). See advanceFlag.
+   */
+  wavePhase: ReturnType<typeof uniform>;
+  /** the crack's own phase, integrated at FLAG_CRACK_RATIO × the ripple rate */
+  crackPhase: ReturnType<typeof uniform>;
 }
 
 export function createFlagWindUniforms(p: ShipFlagParams): FlagWindUniforms {
@@ -87,6 +96,8 @@ export function createFlagWindUniforms(p: ShipFlagParams): FlagWindUniforms {
   const rootAngle = uniform(0).setGroup(objectGroup);
   const lagAngle = uniform(0).setGroup(objectGroup);
   const strength = uniform(0.75).setGroup(objectGroup);
+  const wavePhase = uniform(0).setGroup(objectGroup);
+  const crackPhase = uniform(0).setGroup(objectGroup);
   const states = new WeakMap<THREE.Object3D, FlagState>();
 
   rootAngle.onObjectUpdate((frame: { object: THREE.Object3D | null; time: number }): void => {
@@ -117,11 +128,16 @@ export function createFlagWindUniforms(p: ShipFlagParams): FlagWindUniforms {
       // pennants breathing in step would read as one animation playing rather
       // than as three pieces of cloth in the same air (§B.4)
       const m0 = object.matrixWorld.elements;
+      const own = (Math.abs(m0[13]) * 2.393 + Math.abs(m0[14]) * 1.117) % (Math.PI * 2);
       prev = {
         root: target,
         tip: target,
         strength: streamStrength(wind.speed, p),
-        phase: (Math.abs(m0[13]) * 2.393 + Math.abs(m0[14]) * 1.117) % (Math.PI * 2),
+        phase: own,
+        // seeded from the same per-flag offset, so two pennants do not start
+        // their ripple in step either (§B.4)
+        wavePhase: own,
+        crackPhase: own * 1.3,
       };
     }
     // lull and gust: the cloth breathes instead of holding one fixed pose,
@@ -132,7 +148,9 @@ export function createFlagWindUniforms(p: ShipFlagParams): FlagWindUniforms {
     rootAngle.value = wrapAngle(next.root);
     lagAngle.value = angleDelta(next.root, next.tip);
     strength.value = next.strength;
+    wavePhase.value = next.wavePhase;
+    crackPhase.value = next.crackPhase;
   });
 
-  return { rootAngle, lagAngle, strength };
+  return { rootAngle, lagAngle, strength, wavePhase, crackPhase };
 }

@@ -10,7 +10,8 @@ import { OceanSurface } from './ocean/oceanSurface';
 import { createFoamSim, createSpray, createBowSpray } from './foam';
 import { createFlowFoam } from './flowfoam';
 import { rotateVec } from './combat/quatMath';
-import { createCombatRuntime, viewBearing } from './combat';
+import { createCombatArena, createCombatRuntime, viewBearing } from './combat';
+import type { FireOrder } from './combat';
 import { createClouds } from './clouds';
 import { skyParams } from './params/sky';
 import { buildGalleonBlueprint } from './ship/shipBlueprint';
@@ -248,7 +249,13 @@ async function boot(): Promise<void> {
 
   const ocean = createOceanSim(state.seed);
   const foam = createFoamSim(
-    ocean.cascades.map((c) => ({ displacement: c.displacement, domain: c.domain })),
+    ocean.cascades.map((c) => ({
+      displacement: c.displacement,
+      // trace of the displacement jacobian lives in .zw — the foam gate is on
+      // the MIN EIGENVALUE now, which needs trace + det (src/foam/foamMath)
+      derivatives: c.derivatives,
+      domain: c.domain,
+    })),
     oceanParams.resolution,
     // LIVE moments, held by reference: the foam gate is a multiple of each
     // band's own σ (§V36), so it has to see spectrum rebuilds, not a snapshot
@@ -318,6 +325,9 @@ async function boot(): Promise<void> {
     sunLight: sky.sunLight,
     seabed: archipelago.seabed,
     reflection,
+    // §V.26 the reflected sky is the SKY's own dome function (sun disc
+    // excluded), not a second ramp inside the water material.
+    skyDomeColor: sky.skyDomeColor,
   });
   app.scene.add(surface.group);
 
@@ -578,6 +588,11 @@ async function boot(): Promise<void> {
     audio,
   });
   addOrDefer('combat fx', combat.group);
+  // §T.17 dev harness, `?scene=combat`: both hulls hove to at a fixed range,
+  // the lens parked across the line of fire, keys to fire either side and to
+  // force a breach or a mast. null (and free) in ordinary play. Combat was
+  // unobservable without it — see the header of combatArena.ts.
+  const arena = createCombatArena(state, combat, followCam, galleonBlueprint);
   // hoisted + mutated per frame: the render callback runs every frame and a
   // fresh object graph here would be pure GC churn
   // held as its own non-optional binding so the per-frame writes below don't
@@ -669,14 +684,20 @@ async function boot(): Promise<void> {
       // looking). The enemy's order comes out of the SAME state machine that
       // steers her — §V.15's broadside state, finally connected to a gun.
       // Runs before flooding: a breach opened this tick ships water this tick.
-      combat.tick(state, dt, [
-        {
-          shipIndex: 0,
-          fire: snapshot.fire,
-          aimBearing: viewBearing(app.camera.matrixWorld.elements),
-        },
-        enemyCommands.order,
-      ]);
+      // hold() first: it pins the test scene's hulls and drains its forced
+      // damage, so the orders below are built against this tick's real poses
+      arena?.hold(state);
+      const orders: FireOrder[] = arena
+        ? [arena.playerOrder(snapshot.fire), arena.enemyOrder()]
+        : [
+            {
+              shipIndex: 0,
+              fire: snapshot.fire,
+              aimBearing: viewBearing(app.camera.matrixWorld.elements),
+            },
+            enemyCommands.order,
+          ];
+      combat.tick(state, dt, orders);
       // §V.14 flooding: breaches recorded by combat, measured against the sea
       const playerHoles = combat.floodHoles(state, 0);
       stepFlooding(playerShip, playerHoles, dt);
@@ -1094,6 +1115,7 @@ async function boot(): Promise<void> {
     hullContact,
     cpuOcean,
     combat,
+    arena,
     enemyAi,
     bootTimings,
     // §T.40 verification handles: the per-material compile ranking, and a

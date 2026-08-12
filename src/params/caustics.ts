@@ -264,8 +264,8 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
   curvatureEpsilonPerMeter: 0.035,
   foldSoftness: 0.16,
   foldSoftnessPerMeter: 0.045,
-  strength: 0.9,
-  maxGain: 1.6,
+  strength: 0.6,
+  maxGain: 1.15,
   darkStrength: 0.45,
   maxDrift: 2.5,
   maxAddLight: 1.5,
@@ -278,11 +278,21 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
   waterlineBlend: 0.3,
   faceGateSoftness: 0.06,
 
-  reflectedStrength: 0.35,
+  /**
+   * 0.35 → 0.12, A/B'd on screen (user: "the caustics are like too crazy").
+   * The height ceiling and the receiver-facing gate below both did their job —
+   * nothing reaches the deck or climbs past the rail — but a VERTICAL hull side
+   * has n.y ≈ 0, so it passes the facing gate at FULL strength, which is
+   * correct physics and was simply too much of it. At 0.35 the topsides carried
+   * blazing turquoise-white streaks; at 0.12 they read as wet timber with light
+   * moving on it. Zeroing this branch entirely leaves the hull clean and the
+   * waterline caustics intact, which is how the A/B was attributed.
+   */
+  reflectedStrength: 0.12,
   reflectedHeightFalloff: 4.5,
   // just above the galleon's waist rail: high enough to keep the wet topside
   // sparkle the branch is for, low enough that nothing reaches the sterncastle
-  reflectedMaxHeight: 5.5,
+  reflectedMaxHeight: 2.4,
   reflectedFaceLimit: 0.35,
 
   // between the ocean's deepColor (#093642) and sssColor (#32d0c0): the sea

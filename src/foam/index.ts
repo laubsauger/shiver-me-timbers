@@ -31,9 +31,9 @@ import { createOutputTexture } from '../ocean/oceanTextures';
 import { foamParams } from '../params/foam';
 import { oceanParams } from '../params/ocean';
 import {
-  cascadeFoamBias,
-  cascadeInjectPerStep,
   decayFactorPerFrame,
+  eigenFoamGate,
+  eigenInjectPerStep,
   foamTexelMetres,
   jacobianSigma,
   NEVER_INJECT_BIAS,
@@ -55,8 +55,16 @@ export { foamDetailMask, foamShadingNode, foamTintNode } from './foamShading';
 export { createSpray, createBowSpray } from './spray'; // crest + bow spray (see spray.ts/bowSpray.ts headers)
 
 export interface FoamCascadeInput {
-  /** ocean unpack output: (λDx, h, λDz, J) — w = jacobian (§V6) */
+  /** ocean unpack output: (λDx, h, λDz, det J) — w = jacobian (§V6) */
   displacement: THREE.StorageTexture;
+  /**
+   * ocean unpack output: (∂h/∂x, ∂h/∂z, ∂Dx/∂x, ∂Dz/∂z). The zw pair is the
+   * TRACE of the displacement jacobian, and trace + determinant is exactly
+   * what the minimum eigenvalue needs (foamMath, "THE FOLD METRIC") — which
+   * is why the fix for the round, same-sized, same-angle caps costs the ocean
+   * nothing: both textures were already being written every frame.
+   */
+  derivatives: THREE.StorageTexture;
   /** world-space meters this cascade tiles over (§V19) */
   domain: number;
 }
@@ -80,7 +88,23 @@ export interface FoamSeaMoments {
   effectiveChoppiness(): number;
 }
 
-/** box-reduction step per pass; two of these build the far tier (16× total) */
+/**
+ * Box-reduction factor for the filtered far tier.
+ *
+ * ONE reduction, not two. The chain used to build 512² → 128² → 32² and then
+ * cross-fade the full-res tier STRAIGHT into the 32² one, never sampling the
+ * 128² tier it computed every frame: the sample jumped 0.82 m texels → 13.1 m
+ * texels in a single step, 16× the texel AREA at a distance that justified 4×,
+ * and past that the whole coarsest cascade was read from a 32×32 texture —
+ * bilinear on 32×32 stretched over kilometres, i.e. a lattice of 13 m quads,
+ * worst exactly in the glint road (the surface material divides its specular
+ * by this mask). The three-tier handover that would fix it needs a third
+ * sampled texture and the ocean fragment stage is at 16/16 samplers (§V40).
+ * Sampling the 128² tier INSTEAD of the 32² one fixes the same jump for free:
+ * 4× the texel area, at its own Nyquist distance, no new binding, one fewer
+ * compute dispatch. The 32² tier only ever earned its keep past ~7.5 km, and
+ * the readable sea ends at ~4 km (§V30).
+ */
 const REDUCE_FACTOR = 4;
 
 /** distance fades for the cascade bands, in texel widths (foamMath) */
@@ -127,17 +151,15 @@ export function createFoamSim(
   // fail loud rather than build a tier that reads outside its source: the
   // reductions assume exact division, and an out-of-range textureLoad returns
   // zero in WGSL — which would silently DIM distant foam instead of erroring
-  const tierDivisor = REDUCE_FACTOR * REDUCE_FACTOR;
-  const canTier = resolution % tierDivisor === 0 && resolution >= tierDivisor;
+  const canTier = resolution % REDUCE_FACTOR === 0 && resolution >= REDUCE_FACTOR;
   if (!canTier) {
     throw new Error(
-      `foam: resolution ${resolution} must be a multiple of ${tierDivisor} to ` +
+      `foam: resolution ${resolution} must be a multiple of ${REDUCE_FACTOR} to ` +
         'build the filtered far tier (StorageTextures carry no mips, so the ' +
         'tier is what keeps distant foam from aliasing)',
     );
   }
-  const coarseMidN = resolution / REDUCE_FACTOR;
-  const coarseN = coarseMidN / REDUCE_FACTOR;
+  const coarseN = resolution / REDUCE_FACTOR;
 
   const lanes = cascades.map((c, i) => {
     // ONE uniform set PER LANE. The bias and the injection scale are now
@@ -148,31 +170,23 @@ export function createFoamSim(
     const front = createOutputTexture(resolution); // A — stable output
     const back = createOutputTexture(resolution); // B — inject scratch
     const coarsest = i === 0;
-    const coarseMid = coarsest ? createOutputTexture(coarseMidN) : null;
     const coarse = coarsest ? createOutputTexture(coarseN) : null;
     return {
       index: i,
       u: lu,
       domain: c.domain,
       texelMetres: foamTexelMetres(c.domain, resolution),
-      // each tier's OWN texel size — the distance at which IT goes sub-pixel,
-      // which is the only honest place to hand over to the next one
-      midTexelMetres: foamTexelMetres(c.domain, coarseMidN),
+      // the tier's OWN texel size — the distance at which IT goes sub-pixel,
+      // which is the only honest place to hand over
+      coarseTexelMetres: foamTexelMetres(c.domain, coarseN),
       front,
       back,
       coarse,
-      inject: createInjectPass(c.displacement, front, back, resolution, lu),
+      inject: createInjectPass(c.displacement, c.derivatives, front, back, resolution, lu),
       blurDecay: createBlurDecayPass(back, front, resolution, lu),
-      // reductions run off `front`, i.e. AFTER the blur+decay of this tick,
+      // the reduction runs off `front`, i.e. AFTER the blur+decay of this tick,
       // so the tier is always a filtered view of what is actually on screen
-      reduce:
-        coarseMid && coarse
-          ? [
-              createReducePass(front, coarseMid, coarseMidN, REDUCE_FACTOR),
-              createReducePass(coarseMid, coarse, coarseN, REDUCE_FACTOR),
-            ]
-          : [],
-      coarseMid,
+      reduce: coarse ? [createReducePass(front, coarse, coarseN, REDUCE_FACTOR)] : [],
     };
   });
 
@@ -196,41 +210,36 @@ export function createFoamSim(
       time += step.steps * SIM_DT; // fixed-tick clock for the detail churn
 
       // ---- §V36: per-band gate from the LIVE spectral moments -------------
-      // The artist's `jacobianFoamBias` is a threshold on the SUMMED jacobian
-      // (surfaceMaterial: d0.w+d1.w+d2.w−2). Each lane injects from ONE band,
-      // whose σ is 2–3× smaller, so the same number has to be re-expressed at
-      // the band's own σ or it silently becomes a far rarer event — see
-      // foamMath.cascadeFoamBias.
+      // The artist's `jacobianFoamBias` is a threshold on the SUMMED det J
+      // (surfaceMaterial: d0.w+d1.w+d2.w−2), read as a σ-multiple below its
+      // rest value of 1. Each lane injects from ONE band, and from λ− rather
+      // than det J, so that σ-multiple has to be re-expressed against the
+      // band's own λ− mean AND spread — both differ, and λ−'s mean is not 1
+      // even on a flat sea. See foamMath, "THE FOLD METRIC" and §V36 for λ−.
       const lambda = sea.effectiveChoppiness();
       const seaSigma = jacobianSigma(sea.steepnessRms, lambda);
       const decay = decayFactorPerFrame(foamParams.decayHalfLife, SIM_DT);
-      // crest lines run ACROSS the wave propagation (≈ wind) direction
-      const acrossX = Math.cos(oceanParams.windDirection);
-      const acrossZ = Math.sin(oceanParams.windDirection);
       const fineOff = foamParams.injectFineCascade < 1;
       for (const lane of lanes) {
-        const bandSigma = jacobianSigma(sea.cascades[lane.index].steepnessRms, lambda);
+        const steep = sea.cascades[lane.index].steepnessRms;
+        const bandSigma = jacobianSigma(steep, lambda);
         // finest band keeps its opt-out switch (see params/foam.ts) — decay
         // still drains whatever it holds, only injection stops
         const off = fineOff && lane.index === lanes.length - 1;
         lane.u.uBias.value = off
           ? NEVER_INJECT_BIAS
-          : cascadeFoamBias(oceanParams.jacobianFoamBias, bandSigma, seaSigma);
-        // σ-relative amount too: `injectStrength` = foam/s per σ of fold depth
-        // (a raw deficit is 2.5× bigger in the fine band than the coarse one).
+          : eigenFoamGate(oceanParams.jacobianFoamBias, steep, lambda, bandSigma, seaSigma);
+        // σ-relative amount too: `injectStrength` = foam/s per σ of fold depth.
         // Floored ≥ 0 — negative strength would pump NEGATIVE foam into the
         // accumulator, whose min-1 clamp has no floor.
         lane.u.uInjectPerFrame.value = off
           ? 0
-          : cascadeInjectPerStep(foamParams.injectStrength, SIM_DT, bandSigma, seaSigma);
+          : eigenInjectPerStep(foamParams.injectStrength, SIM_DT, steep, lambda, bandSigma, seaSigma);
         lane.u.uDecay.value = decay;
         lane.u.uRadius.value = foamParams.blurRadius;
-        // crest-frame tap stretch (§V6 cap shape): floored ≥ 0 so a negative
-        // slider can't mirror the kernel into itself
-        lane.u.uAlong.value = Math.max(0, foamParams.crestBlurAlong);
-        lane.u.uAcross.value = Math.max(0, foamParams.crestBlurAcross);
-        lane.u.uAcrossX.value = acrossX;
-        lane.u.uAcrossZ.value = acrossZ;
+        // the derivatives texture stores ∂D unscaled, so the metric needs the
+        // EFFECTIVE λ (the anti-fold cap), not the slider
+        lane.u.uChoppiness.value = lambda;
       }
       uCascadeFadeTexels.value = Math.max(1, foamParams.cascadeFadeTexels);
       uCascadeFadeSpan.value = Math.max(1.05, foamParams.cascadeFadeSpan);
@@ -274,36 +283,10 @@ export function createFoamSim(
         const fine = texture(lane.front, uv).r;
         const wFine = tierWeight(lane.texelMetres);
         if (lane.coarse) {
-          /**
-           * DIAGNOSED, NOT YET FIXED (§Rule 8) — candidate cause of the "hard
-           * blocky quantised squares in the sun glint road" the user reported.
-           *
-           * The reduce chain builds 512² → 128² → 32², but this cross-fades
-           * `fine` STRAIGHT into `coarse` and never samples the 128² middle
-           * tier — which the sim computes every frame and then discards. So at
-           * the fine tier's own fade distance the sample jumps 0.82 m texels →
-           * 13.1 m texels in ONE step: 16× the texel AREA at a distance that
-           * only justified 4×. Past that distance the whole coarsest cascade is
-           * read from a 32×32 texture, and bilinear on 32×32 stretched over
-           * kilometres of sea is a lattice of 13 m quads. It would show worst
-           * in the GLINT ROAD, because the surface material divides its
-           * specular by this mask (`spec · (1 − foamAmount·0.7)`) — a blocky
-           * mask carves blocky holes exactly where the water is brightest.
-           *
-           * The fix is a three-tier handover, each at its own Nyquist distance
-           * (`lane.midTexelMetres` is already computed for it):
-           *     mix(mix(coarse, mid, tierWeight(midTexelMetres)), fine, wFine)
-           * It is NOT shipped because it adds a sampled texture to the ocean
-           * material, and §V40 says that is precisely how this material dies:
-           * overrun the per-stage limit and pipeline creation fails, the
-           * material never draws, and the console names the DESCRIPTOR rather
-           * than the feature that added the 17th texture. A blank render and
-           * `GPUPipelineError: [Invalid PipelineLayout] is invalid due to a
-           * previous error` were observed with it in, but the tree had other
-           * agents' in-flight edits to this same material at the time and the
-           * page would not stay up long enough to bisect. Land it only with a
-           * clean tree and a sampler recount.
-           */
+          // Hand over at the FINE tier's own Nyquist distance to the tier
+          // whose texels are 4× the area — not 16× (see REDUCE_FACTOR). The
+          // 4× tier stays resolvable well past where the readable sea ends,
+          // so one handover is the whole chain.
           const coarse = texture(lane.coarse, uv).r;
           raw = raw.add(mix(coarse, fine, wFine));
         } else {
@@ -324,7 +307,6 @@ export function createFoamSim(
       for (const lane of lanes) {
         lane.front.dispose();
         lane.back.dispose();
-        lane.coarseMid?.dispose();
         lane.coarse?.dispose();
       }
     },

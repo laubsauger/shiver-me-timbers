@@ -107,7 +107,7 @@ export function createAccumulation(
    * zero — slickMath's header explains why the Kelvin phase must not be
    * accumulated).
    */
-  wakeFieldNode?: (worldXZ: any, detail: boolean) => any,
+  wakeFieldNode?: (worldXZ: any, detail: boolean, texel: any) => any,
   profile: AccumProfile = {
     res: p.resolution,
     size: () => p.regionSize,
@@ -235,8 +235,10 @@ export function createAccumulation(
         ? textureLoad(injectionRT.texture, ivec2(x, y)).r
         : float(0);
       // analytic ship wake composes ADDITIVELY with the ortho capture
+      // every periodic term is band-limited against THIS tier's texel, inside
+      // the injector, before it is ever written (§V48 at the source)
       const wake = wakeFieldNode
-        ? wakeFieldNode(vec2(wx, wz), profile.useDetail)
+        ? wakeFieldNode(vec2(wx, wz), profile.useDetail, uSize.div(res))
         : vec4(0, 0, 0, 0);
       const rate = wake.mul(uDt).mul(uWakeScale);
       const foam = prev.x.mul(uDecay).add(inject.mul(uInjectPerFrame)).add(rate.x).min(1);

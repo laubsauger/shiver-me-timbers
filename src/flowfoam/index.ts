@@ -49,8 +49,19 @@
  *    Optionally also `sparkle.mul(smooth)`: the sparkle field is a world-cell
  *    hash independent of the normal, so a flattened lane would otherwise still
  *    be stippled with glints and lose the mirror read.
- * 2. `wakeSlopeNode` — transverse Kelvin crests, λ = 2πv²/g, added to the
- *    slope: `slopeX.addAssign(wSlope.x); slopeZ.addAssign(wSlope.y);`
+ * 2. `wakeSlopeNode` — the wake's actual SURFACE, added to the slope:
+ *        slopeX.addAssign(wSlope.x); slopeZ.addAssign(wSlope.y);
+ *    Three mechanisms sum into this one vector field, so wiring it once gets
+ *    all three and adding a fourth later needs no ocean-side change:
+ *      • the BOW MOUND — water heaped ahead of the stem. The foam mound has
+ *        always painted white here; this is the shape under the paint;
+ *      • DIVERGENT (cusp) crests — short steep waves fanning off the stem at
+ *        54.74° to the track. This is the bow wave a viewer actually reads;
+ *      • TRANSVERSE crests — the long train across the track astern.
+ *    Both wave systems come from one solve of the Kelvin stationary-phase
+ *    condition (slickMath.kelvinBranchesCpu), so the 19.47° envelope, the
+ *    speed-independence of that angle and the v² wavelength scaling are all
+ *    consequences of the algebra rather than separate tunings.
  *
  * `pixWorld` is optional; pass the material's own `fwidth(worldXZ)` footprint
  * so both owners band-limit against the same number (§V48/§V49 — see the node
@@ -198,6 +209,15 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
     /** debug/tests: the live world-space cutwater history (index 0 = newest) */
     get wakeTrack() {
       return wake.trackSamples;
+    },
+
+    /**
+     * Lagged stem speed (m/s) driving the bow mound — foam AND slope. Bow spray
+     * should gate on this so the three read the bow as working at the same
+     * moment (wakeInjection.moundDrive explains the alternative).
+     */
+    get bowDrive(): number {
+      return wake.moundDrive;
     },
 
     /** advance the sim one fixed tick (§V2): pushes live params, runs computes */

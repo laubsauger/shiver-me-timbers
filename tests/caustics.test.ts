@@ -899,8 +899,10 @@ describe('reflected caustics stay on surfaces that can see the water', () => {
 
   it('the two gates are independent: deck height alone would not have fixed it', () => {
     // a waist deck LOW enough to pass the height gate must still be dark,
-    // because it is the facing gate that owns "this is a deck"
-    const lowDeck = 2.0;
+    // because it is the facing gate that owns "this is a deck".
+    // Derived from the ceiling, not a literal: a hardcoded 2.0 m sat inside
+    // the old 5.5 m ceiling and stopped meaning anything when it moved to 2.4.
+    const lowDeck = P.reflectedMaxHeight * 0.25;
     expect(reflectedReach(lowDeck, P.reflectedHeightFalloff, P.reflectedMaxHeight))
       .toBeGreaterThan(0.3);
     expect(receiverFacing(1, P.reflectedFaceLimit)).toBe(0);

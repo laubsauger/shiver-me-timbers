@@ -30,6 +30,13 @@ export interface CombatParams {
   maxElevation: number;
   /** s between neighbouring guns of one broadside — the rolling ripple */
   rippleDelay: number;
+  /**
+   * s — extra per-gun delay drawn deterministically per shot. The ripple
+   * alone is metronomic and reads as a machine ("they shoot at the perfect
+   * identical same time"); real gun captains each fire on their own judgement
+   * of the roll. Keep below rippleDelay or the roll stops reading fore → aft.
+   */
+  rippleJitter: number;
 }
 
 export const combatParams: CombatParams = registerParams(
@@ -46,7 +53,8 @@ export const combatParams: CombatParams = registerParams(
     defaultElevation: 0.06,
     minElevation: -0.12,
     maxElevation: 0.6,
-    rippleDelay: 0.08,
+    rippleDelay: 0.13,
+    rippleJitter: 0.07,
   },
   {
     muzzleVelocity: { min: 10, max: 150, step: 1 },
@@ -61,6 +69,55 @@ export const combatParams: CombatParams = registerParams(
     minElevation: { min: -0.5, max: 0, step: 0.01 },
     maxElevation: { min: 0.1, max: 1.2, step: 0.01 },
     rippleDelay: { min: 0, max: 0.5, step: 0.01 },
+    rippleJitter: { min: 0, max: 0.5, step: 0.01 },
+  },
+);
+
+/**
+ * Combat TEST SCENE (`?scene=combat`) — the dev harness placement. Its own
+ * group so the arena can be re-framed live while it is on screen, which is
+ * the entire point of having a harness (user: "it's hard for me to see").
+ */
+export interface CombatArenaParams {
+  /** m — how far apart the two hulls are placed, beam to beam */
+  range: number;
+  /** rad — bearing of the enemy from the player, 0 = dead ahead */
+  bearing: number;
+  /** rad — heading both hulls hold (they lie parallel, broadside on) */
+  heading: number;
+  /** m — camera height above the sea at the parked vantage */
+  cameraHeight: number;
+  /** m — camera stand-off perpendicular to the line of fire */
+  cameraOffset: number;
+  /** m — height the parked camera aims at (deck/gunport level) */
+  cameraAimHeight: number;
+  /**
+   * hull sections the breach key holes at once. One hole is out-pumped by
+   * design (§T.18), so a single-section breach demonstrates a hole that
+   * never floods — which reads as flooding being broken.
+   */
+  breachSections: number;
+}
+
+export const combatArenaParams: CombatArenaParams = registerParams(
+  'combatArena',
+  {
+    range: 55,
+    bearing: Math.PI / 2,
+    heading: 0,
+    cameraHeight: 16,
+    cameraOffset: 52,
+    cameraAimHeight: 5,
+    breachSections: 3,
+  },
+  {
+    range: { min: 15, max: 300, step: 1 },
+    bearing: { min: -Math.PI, max: Math.PI, step: 0.01 },
+    heading: { min: -Math.PI, max: Math.PI, step: 0.01 },
+    cameraHeight: { min: 1, max: 120, step: 1 },
+    cameraOffset: { min: 5, max: 300, step: 1 },
+    cameraAimHeight: { min: 0, max: 40, step: 0.5 },
+    breachSections: { min: 1, max: 8, step: 1 },
   },
 );
 
@@ -86,6 +143,28 @@ export interface CombatFxParams {
   smokeSize: number;
   smokeGrowth: number; // × sizeStart at death
   smokeSpeed: number;
+  /** upward bias on the smoke bank's axis — powder smoke rolls up, not flat */
+  smokeRise: number;
+  /** burning powder grains thrown out with the muzzle gases */
+  sparkLife: number;
+  sparkSize: number;
+  sparkSpeed: number;
+  sparksPerShot: number;
+  /** the ball's vapour ribbon — what makes a small dark sphere followable */
+  trailLife: number;
+  trailSize: number;
+  trailGrowth: number;
+  /** sim ticks between trail puffs per ball (1 = every tick) */
+  trailEvery: number;
+  /** extra length per m/s of ball speed, and the cap on it (§V.28) */
+  ballStretch: number;
+  ballStretchMax: number;
+  /**
+   * 0..1 — per-particle spread of size, speed and lifetime, drawn
+   * deterministically per shot. 0 restores the old identical-puff-per-gun
+   * behaviour, which is exactly what the user reported seeing.
+   */
+  variation: number;
   splinterLife: number;
   splinterSize: number;
   splinterSpeed: number;
@@ -109,7 +188,10 @@ export interface CombatFxParams {
 export const combatFxParams: CombatFxParams = registerParams(
   'combatFx',
   {
-    particleCount: 768,
+    // raised with sparks + ball trails: a 4-gun broadside now costs
+    // 4×(1 flash + 14 smoke + 12 sparks) = 108, and eight balls in the air
+    // lay ~14 ribbon puffs each. One instanced sprite draw either way.
+    particleCount: 1536,
     ballCount: 64,
     ballDrawRadius: 0.16,
     flashLife: 0.09,
@@ -118,6 +200,18 @@ export const combatFxParams: CombatFxParams = registerParams(
     smokeSize: 1.1,
     smokeGrowth: 4.5,
     smokeSpeed: 7,
+    smokeRise: 0.35,
+    sparkLife: 0.4,
+    sparkSize: 0.14,
+    sparkSpeed: 24,
+    sparksPerShot: 12,
+    trailLife: 0.5,
+    trailSize: 0.22,
+    trailGrowth: 3.2,
+    trailEvery: 2,
+    ballStretch: 0.05,
+    ballStretchMax: 9,
+    variation: 0.45,
     splinterLife: 1.1,
     splinterSize: 0.28,
     splinterSpeed: 9,
@@ -142,6 +236,18 @@ export const combatFxParams: CombatFxParams = registerParams(
     smokeSize: { min: 0.1, max: 4, step: 0.05 },
     smokeGrowth: { min: 1, max: 12, step: 0.1 },
     smokeSpeed: { min: 0, max: 30, step: 0.5 },
+    smokeRise: { min: 0, max: 2, step: 0.05 },
+    sparkLife: { min: 0.05, max: 2, step: 0.01 },
+    sparkSize: { min: 0.02, max: 1, step: 0.01 },
+    sparkSpeed: { min: 0, max: 60, step: 0.5 },
+    sparksPerShot: { min: 0, max: 64, step: 1 },
+    trailLife: { min: 0, max: 3, step: 0.05 },
+    trailSize: { min: 0.02, max: 2, step: 0.01 },
+    trailGrowth: { min: 1, max: 10, step: 0.1 },
+    trailEvery: { min: 1, max: 12, step: 1 },
+    ballStretch: { min: 0, max: 0.4, step: 0.005 },
+    ballStretchMax: { min: 1, max: 30, step: 0.5 },
+    variation: { min: 0, max: 1, step: 0.01 },
     splinterLife: { min: 0.1, max: 4, step: 0.05 },
     splinterSize: { min: 0.05, max: 1, step: 0.01 },
     splinterSpeed: { min: 0, max: 30, step: 0.5 },

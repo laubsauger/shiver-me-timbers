@@ -9,7 +9,28 @@
  * every spawn is finite-guarded at the boundary, where it can be tested.
  */
 
-export type FxKind = 'flash' | 'smoke' | 'splinter' | 'splash';
+export type FxKind = 'flash' | 'smoke' | 'spark' | 'splinter' | 'splash' | 'trail';
+
+/**
+ * Deterministic 0..1 hash of two integers (§V.2 — no Math.random reaches
+ * the frame). This is what breaks the uniformity: every puff of powder
+ * smoke draws its own size, speed and lifetime from (shot seed, particle
+ * index), so two guns firing in the same volley throw visibly different
+ * clouds and the same shot replays identically.
+ */
+export function hash01(a: number, b: number): number {
+  let h = (Math.imul(a | 0, 0x27d4eb2d) ^ Math.imul(b | 0, 0x85ebca6b)) >>> 0;
+  h ^= h >>> 15;
+  h = Math.imul(h, 0x2545f491) >>> 0;
+  h ^= h >>> 13;
+  return (h >>> 0) / 4294967296;
+}
+
+/** hash01 remapped to [1-spread, 1+spread] — a multiplicative jitter */
+export function jitterScale(a: number, b: number, spread: number): number {
+  const s = Number.isFinite(spread) ? Math.max(0, Math.min(1, spread)) : 0;
+  return 1 + (hash01(a, b) * 2 - 1) * s;
+}
 
 export interface FxProfile {
   /** seconds a particle of this kind lives (> 0) */

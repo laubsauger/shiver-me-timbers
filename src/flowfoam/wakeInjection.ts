@@ -161,9 +161,11 @@ export function createWakeInjector(p: FlowFoamParams) {
      *   zw = transverse-wave world slope        — same mirror
      *
      * ONE polyline walk feeds all four. `detail = false` (the far tier) drops
-     * the transverse crests, which are below Nyquist at 2.5 m per texel.
+     * both wave trains and the bow mound's slope, all of which are below
+     * Nyquist at 2.5 m per texel. `texel` is the tier's own world texel size —
+     * every periodic term is band-limited against it AT THE SOURCE (§V48).
      */
-    wakeFieldNode(worldXZ: any, detail = true): any {
+    wakeFieldNode(worldXZ: any, detail = true, texel: any = float(0.25)): any {
       const rate = vec4(0, 0, 0, 0).toVar();
       // AABB early-out: most of a 512² region is open water far from the track
       const inRange = worldXZ.x
@@ -391,11 +393,38 @@ export function createWakeInjector(p: FlowFoamParams) {
             kelvin,
             halfBeam: uBeam.mul(0.5),
             fwd: bestFwd,
+            latSign: select(bestLat.lessThan(0), float(-1), float(1)),
             envelope: liveGate.mul(tail).mul(clip),
+            texel,
           },
           detail,
         );
-        rate.assign(vec4(foam, sk.x, sk.y, sk.z));
+        // THE BOW MOUND AS A SURFACE (user: "we actually show the water pushed
+        // forward"). Same live stem frame and same lagged drive as the foam
+        // mound above, so paint and shape build and subside together — the
+        // foam was being applied to a surface that was not actually deformed.
+        // Summed into the SAME slope channels: the wake's effect on the water
+        // is one vector field however many mechanisms contribute to it, so no
+        // new channel and no new sampler (§V40 — the fragment stage is at
+        // 16/16 and `wakeSlopeNode` already reads these two textures).
+        const bowSlope = detail
+          ? slick.bowSlopeNode({
+              dc,
+              thick: uMoundThick,
+              aside: mAside,
+              span: uMoundSpan,
+              sweep: uMoundSweep,
+              sgn: select(
+                hd.x.mul(uHead.w).sub(hd.y.mul(uHead.z)).lessThan(0),
+                float(-1),
+                float(1),
+              ),
+              fwd: vec2(uHead.z, uHead.w),
+              drive: mGate.mul(mSf),
+              texel,
+            })
+          : vec2(0, 0);
+        rate.assign(vec4(foam, sk.x, sk.y.add(bowSlope.x), sk.z.add(bowSlope.y)));
       });
       return rate;
     },
@@ -428,6 +457,19 @@ export function createWakeInjector(p: FlowFoamParams) {
     /** exposed for tests/debug: the live world-space history (index 0 = newest) */
     get trackSamples() {
       return track.samples;
+    },
+
+    /**
+     * The LAGGED stem speed (m/s) the bow mound rides — both its foam and its
+     * slope. Published so bow SPRAY can key off the same number instead of
+     * deriving its own: the user wants spray "whenever we actually hit it", and
+     * spray that fires on raw throttle while the mound builds on a lag
+     * disagrees about when the bow is working. A strictly better shared signal
+     * would be the hull-contact system's stem entry rate (immersion × closing
+     * speed); this module would take it as an extra `setShip` argument.
+     */
+    get moundDrive(): number {
+      return moundSpeed;
     },
 
     /**

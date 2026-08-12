@@ -39,7 +39,15 @@ import { SIM_DT } from '../core/loop';
 import { hash2 } from '../terrain/noise';
 import { sprayParams } from '../params/spray';
 import { oceanParams } from '../params/ocean';
-import type { FoamCascadeInput } from './index';
+/**
+ * Spray reads the displacement texture only (height + det J), so it declares
+ * its own input rather than borrowing FoamCascadeInput — that one also
+ * carries `derivatives`, which the λ− foam gate needs and spray does not.
+ */
+export interface SprayCascadeInput {
+  displacement: THREE.StorageTexture;
+  domain: number;
+}
 import { createSprayPool } from './sprayPool';
 import {
   H_CAND_X,
@@ -60,7 +68,7 @@ import {
 
 export { createBowSpray } from './bowSpray';
 
-export function createSpray(cascades: FoamCascadeInput[], resolution: number) {
+export function createSpray(cascades: SprayCascadeInput[], resolution: number) {
   // fail loud at construction: a zero/NaN domain would put Inf/NaN into the
   // texel math; a bad resolution would bake a garbage dispatch count
   for (const c of cascades) {

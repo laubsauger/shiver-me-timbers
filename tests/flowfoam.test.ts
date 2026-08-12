@@ -40,7 +40,13 @@ import {
 } from '../src/flowfoam/wakeMath';
 import {
   KELVIN_HALF_ANGLE_DEG,
+  KELVIN_R_MAX,
+  KELVIN_TAN_MAX,
   bandKeepCpu,
+  bowSlopeCpu,
+  kelvinBranchesCpu,
+  kelvinPhaseCpu,
+  kelvinWavelengthCpu,
   slickDampCpu,
   slickFieldCpu,
   transverseWavelengthCpu,
@@ -1350,13 +1356,220 @@ describe('transverse Kelvin waves (λ = 2πv²/g, the speed-dependent half)', ()
   it('crests stay INSIDE the wedge and point across the track', () => {
     const s = sail([{ fx: 0, fz: 1, seconds: 20 }], 6);
     const d = 50;
-    // outside the V there is no transverse wave at all
-    expect(slickFieldCpu(s.points, d * TAN + 2, s.z - d, HULL, SP).slopeZ).toBe(0);
-    // sailing due north (fwd = +z), so the slope must be purely along z —
-    // crests run ACROSS the track, which is what makes them read as a ladder
-    const on = slickFieldCpu(s.points, 2, s.z - d, HULL, SP);
-    expect(Math.abs(on.slopeX)).toBeLessThan(1e-9);
+    // Outside the V there is no wave at all — measured past the divergent
+    // train's outer FEATHER. The wedge boundary is a real physical edge, but a
+    // hard step in a field the material differentiates is a 1-px line (§V38),
+    // so the divergent amplitude is eased to zero over `divOuterFade` of the
+    // half-width just outside the cusp. Past that, exactly nothing.
+    const clear = d * TAN * (1 + flowFoamParams.divOuterFade) + 0.5;
+    const out = slickFieldCpu(s.points, clear, s.z - d, HULL, SP, 6, TEXEL);
+    expect(out.slopeX).toBe(0);
+    expect(out.slopeZ).toBe(0);
+    // Sailing due north (fwd = +z), so the transverse slope is very nearly
+    // along z — crests run ACROSS the track, which is what makes them read as
+    // a ladder. NOT exactly along z: solving the true stationary-phase branch
+    // (rather than the old d-only approximation) gives θ = atan(tT) > 0 off
+    // the centreline, so the crests correctly bow backward toward the cusp.
+    // That small lateral component IS the curvature, and pinning it to zero
+    // would pin the approximation instead of the physics.
+    const on = slickFieldCpu(s.points, 2, s.z - d, HULL, SP, 6, TEXEL);
+    const tT = kelvinBranchesCpu(2 / d).tT;
     expect(Math.abs(on.slopeZ)).toBeGreaterThan(0);
+    expect(Math.abs(on.slopeX) / Math.abs(on.slopeZ)).toBeCloseTo(tT, 6);
+    expect(tT).toBeLessThan(0.06); // …and it really is a small bow, not a fan
+    // on the centreline it collapses to purely along the track (tT → 0)
+    const axis = slickFieldCpu(s.points, 0, s.z - d, HULL, SP, 6, TEXEL);
+    expect(Math.abs(axis.slopeX)).toBeLessThan(Math.abs(axis.slopeZ) * 1e-4);
+  });
+});
+
+// The near tier's real texel — every periodic term is band-limited against it
+// at the source, so the tests must pass it or they exercise a disabled gate.
+const TEXEL = flowFoamParams.regionSize / flowFoamParams.resolution;
+
+describe('divergent (cusp) crests — THE BOW WAVE (user, 3rd report)', () => {
+  // User, repeatedly: "no bow wake pushing water forward", "bow wake not far
+  // enough forward", "a separate effect for the bow wake, where we actually
+  // show the water pushed forward, is still missing". The transverse train runs
+  // ACROSS the track behind her; the divergent train is the pair of short steep
+  // crests fanning off the stem, and it is what reads as "pushing water".
+
+  it('the stationary-phase solve has TWO roots, and they ARE the two systems', () => {
+    // The whole reason one phase field cannot fake both. 2r·t² − t + r = 0.
+    for (const r of [0.02, 0.1, 0.2, 0.3, KELVIN_R_MAX]) {
+      const b = kelvinBranchesCpu(r);
+      // both roots satisfy the condition they were solved from — except where
+      // the divergent one has been deliberately clamped (see the singularity
+      // test: it runs to infinity on the centreline and must stay finite)
+      expect(b.tT / (1 + 2 * b.tT * b.tT)).toBeCloseTo(r, 8);
+      if (b.tD < KELVIN_TAN_MAX) {
+        expect(b.tD / (1 + 2 * b.tD * b.tD)).toBeCloseTo(r, 8);
+      }
+      // …and they are genuinely DIFFERENT waves except exactly on the cusp
+      if (r < KELVIN_R_MAX - 1e-4) expect(b.tD).toBeGreaterThan(b.tT * 2);
+    }
+    // they meet at the cusp: t = tan(35.264°) = 1/√2, i.e. crests at 54.74°
+    const cusp = kelvinBranchesCpu(KELVIN_R_MAX);
+    expect(cusp.tT).toBeCloseTo(cusp.tD, 6);
+    expect(cusp.tT).toBeCloseTo(Math.SQRT1_2, 6);
+    expect((Math.atan(cusp.tT) * 180) / Math.PI).toBeCloseTo(35.2644, 3);
+    // THE ENVELOPE FALLS OUT OF THE ALGEBRA rather than being imposed: the
+    // discriminant is negative past 19.4712°, so there are no waves there.
+    expect((Math.atan(KELVIN_R_MAX) * 180) / Math.PI).toBeCloseTo(KELVIN_HALF_ANGLE_DEG, 9);
+    expect(kelvinBranchesCpu(KELVIN_R_MAX * 1.05).disc).toBe(0);
+  });
+
+  it('the divergent crests live AT THE BOW, not strung out astern', () => {
+    // The physical claim that answers the complaint. Measure both trains' share
+    // of the slope near the stem and far astern: the divergent system dominates
+    // where the user says the water is empty, and dies off well before the
+    // transverse train does (short waves dissipate faster).
+    const s = sail([{ fx: 0, fz: 1, seconds: 30 }], 7);
+    // just abaft and outboard of the stem, on the cusp line
+    const nearMag = (d: number): number => {
+      const f = slickFieldCpu(s.points, d * KELVIN_R_MAX, s.z - d, HULL, SP, 7, TEXEL);
+      return Math.hypot(f.slopeX, f.slopeZ);
+    };
+    expect(nearMag(8)).toBeGreaterThan(0);
+    expect(nearMag(8)).toBeGreaterThan(nearMag(120)); // near-field feature
+    expect(flowFoamParams.divDecay).toBeLessThan(flowFoamParams.transDecay);
+  });
+
+  it('crests sit at 54.74° to the track — a DIFFERENT signature from transverse', () => {
+    // Slope points along the propagation direction, which is θ from the track;
+    // the crest line is perpendicular to it. On the cusp line θ = 35.26°, so
+    // the crests run at 54.74° — the classic feathered V. The transverse train
+    // on the centreline propagates dead astern (θ = 0). If these two ever came
+    // out parallel, one field would be faking both and the look would collapse.
+    const s = sail([{ fx: 0, fz: 1, seconds: 30 }], 7);
+    // centreline: transverse only (the divergent branch is band-gated out
+    // there — its wavelength goes to zero, which is the singularity the gate
+    // exists to make harmless)
+    const onAxis = slickFieldCpu(s.points, 0, s.z - 60, HULL, SP, 7, TEXEL);
+    expect(Math.abs(onAxis.slopeX)).toBeLessThan(Math.abs(onAxis.slopeZ) * 0.05);
+    // on the cusp line the propagation has a large lateral component
+    const d = 60;
+    const div = kelvinBranchesCpu(KELVIN_R_MAX);
+    expect(Math.atan(div.tD)).toBeGreaterThan((30 * Math.PI) / 180);
+    // and there IS field out there, which is the user's "empty water" filled
+    const cusp = slickFieldCpu(s.points, d * KELVIN_R_MAX * 0.97, s.z - d, HULL, SP, 7, TEXEL);
+    expect(Math.hypot(cusp.slopeX, cusp.slopeZ)).toBeGreaterThan(0);
+  });
+
+  it('SPEED: nothing at a crawl, strong under way (user: "at higher speeds")', () => {
+    // sf SQUARED on the divergent train, the same shaping the foam's Kelvin
+    // arms already use — reused rather than a second invented curve.
+    const mag = (speed: number): number => {
+      const s = sail([{ fx: 0, fz: 1, seconds: 30 }], speed);
+      let peak = 0;
+      for (let d = 6; d <= 60; d += 0.5) {
+        const f = slickFieldCpu(s.points, d * KELVIN_R_MAX * 0.95, s.z - d, HULL, SP, speed, TEXEL);
+        peak = Math.max(peak, Math.hypot(f.slopeX, f.slopeZ));
+      }
+      return peak;
+    };
+    const crawl = mag(1.2);
+    const cruise = mag(5);
+    const fast = mag(9);
+    expect(crawl).toBeLessThan(fast * 0.1); // barely making way ⟹ no bow wave
+    expect(cruise).toBeGreaterThan(crawl);
+    expect(fast).toBeGreaterThan(cruise);
+  });
+
+  it('the WEDGE is speed-independent while the crest SPACING is not', () => {
+    // Same invariant as the transverse train's, now on the branch that
+    // actually draws the V. The envelope is a constant of the dispersion
+    // relation; the wavelength is 2πv²/(g(1+t²)).
+    for (const v of [3, 9]) {
+      const s = sail([{ fx: 0, fz: 1, seconds: 30 }], v);
+      const d = 50;
+      // inside the wedge there is field, outside there is none, at ANY speed
+      const inside = slickFieldCpu(s.points, d * KELVIN_R_MAX * 0.9, s.z - d, HULL, SP, v, TEXEL);
+      const outside = slickFieldCpu(s.points, d * KELVIN_R_MAX * 1.4, s.z - d, HULL, SP, v, TEXEL);
+      expect(Math.hypot(inside.slopeX, inside.slopeZ)).toBeGreaterThan(0);
+      expect(Math.hypot(outside.slopeX, outside.slopeZ)).toBe(0);
+    }
+    // λ on the cusp is a third of the centreline transverse λ (1 + t² = 1.5),
+    // and both scale as v² — so a fast ship's whole pattern is coarser
+    const t = kelvinBranchesCpu(KELVIN_R_MAX).tD;
+    expect(kelvinWavelengthCpu(6, t)).toBeCloseTo(transverseWavelengthCpu(6) / 1.5, 6);
+    expect(kelvinWavelengthCpu(8, t)).toBeCloseTo(kelvinWavelengthCpu(4, t) * 4, 6);
+  });
+
+  it('the centreline SINGULARITY is bounded, not merely small (§V44)', () => {
+    // The divergent root runs to infinity on the centreline. §V44's lesson is
+    // that flooring the divisor bounds the DIVISION, not the QUOTIENT — so the
+    // root is clamped AND the wavelength gate has already zeroed the amplitude.
+    // Both are needed: 0 × NaN is NaN, not 0.
+    for (const r of [1e-9, 1e-6, 1e-3, 0.01]) {
+      const b = kelvinBranchesCpu(r);
+      expect(Number.isFinite(b.tD)).toBe(true);
+      expect(b.tD).toBeLessThanOrEqual(KELVIN_TAN_MAX);
+      expect(Number.isFinite(kelvinPhaseCpu(100, r * 100, b.tD, 6))).toBe(true);
+      // and its wavelength there is far below one texel ⟹ gated to zero
+      expect(kelvinWavelengthCpu(6, b.tD)).toBeLessThan(TEXEL * flowFoamParams.waveBandLow);
+    }
+  });
+});
+
+describe('the bow mound as a SURFACE (user: "water pushed forward")', () => {
+  it('there is now a shape under the foam — the ridge LEADS the stem', () => {
+    // wakeMath.bowMoundCpu has always painted foam ahead of the cutwater, but
+    // the water it painted was flat, so the bow read undisturbed however much
+    // white was on it. The slope is the derivative of the ridge across its own
+    // crest, so it is ZERO on the crest and peaks on either side of it.
+    const head: TrackSample = { x: 0, z: 0, fx: 0, fz: 1, speed: 7, age: 0, dist: 0 };
+    const at = (ahead: number) => {
+      const g = bowSlopeCpu(head, 0, ahead, 7, SP, TEXEL);
+      return Math.hypot(g.slopeX, g.slopeZ) * Math.sign(g.slopeZ);
+    };
+    // crest sits moundLead ahead on the centreline: slope changes SIGN across
+    // it, which is what makes it a mound rather than a step
+    expect(at(flowFoamParams.moundLead)).toBeCloseTo(0, 6);
+    expect(at(flowFoamParams.moundLead - flowFoamParams.moundThick)).not.toBe(0);
+    expect(
+      Math.sign(at(flowFoamParams.moundLead + flowFoamParams.moundThick)) *
+        Math.sign(at(flowFoamParams.moundLead - flowFoamParams.moundThick)),
+    ).toBe(-1);
+    // and it really is AHEAD of the stem, which is the whole complaint
+    expect(flowFoamParams.moundLead).toBeGreaterThan(0);
+    expect(Math.abs(at(flowFoamParams.moundLead * 0.5))).toBeGreaterThan(0);
+  });
+
+  it('BOUNDED BY CONSTRUCTION at exactly moundSlope, never by a clamp (§V44)', () => {
+    // −2u·e^(−u²) normalised by its own extremum. A clamp would flatten the
+    // crest into a plateau; the normalisation keeps the shape and the bound.
+    const head: TrackSample = { x: 0, z: 0, fx: 0, fz: 1, speed: 9, age: 0, dist: 0 };
+    let peak = 0;
+    for (let x = -12; x <= 12; x += 0.05) {
+      for (let z = -12; z <= 12; z += 0.05) {
+        const g = bowSlopeCpu(head, x, z, 9, SP, TEXEL);
+        expect(Number.isFinite(g.slopeX) && Number.isFinite(g.slopeZ)).toBe(true);
+        peak = Math.max(peak, Math.hypot(g.slopeX, g.slopeZ));
+      }
+    }
+    expect(peak).toBeLessThanOrEqual(flowFoamParams.moundSlope + 1e-9);
+    expect(peak).toBeGreaterThan(flowFoamParams.moundSlope * 0.9); // reaches it
+  });
+
+  it('rides the SAME lagged drive as the foam mound, so they agree', () => {
+    // The foam mound and the shape under it must build and subside together —
+    // and bow SPRAY should key off the same number (index.bowDrive), or the
+    // three disagree about when the bow is working. User wants spray "whenever
+    // we actually hit it", not on a throttle value.
+    const head: TrackSample = { x: 0, z: 0, fx: 0, fz: 1, speed: 8, age: 0, dist: 0 };
+    const probe = flowFoamParams.moundLead - flowFoamParams.moundThick;
+    const slope = (drive: number) =>
+      Math.hypot(...(Object.values(bowSlopeCpu(head, 0, probe, drive, SP, TEXEL)) as number[]));
+    const foam = (drive: number) => bowMoundCpu(head, 0, probe, drive, WP);
+    // both dead below the threshold, both rising with the same lagged speed
+    expect(slope(0)).toBe(0);
+    expect(foam(0)).toBe(0);
+    expect(slope(3)).toBeGreaterThan(0);
+    expect(slope(8)).toBeGreaterThan(slope(3));
+    expect(foam(8)).toBeGreaterThan(foam(3));
+    // and the lag itself is the shared signal (wakeTrack.approachExp)
+    expect(approachExp(0, 8, 0.5, flowFoamParams.moundLag)).toBeLessThan(8);
   });
 });
 

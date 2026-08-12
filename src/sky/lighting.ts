@@ -24,6 +24,7 @@
 import * as THREE from 'three/webgpu';
 import type { SkyParams } from '../params/sky';
 import { shadowTexelSize, snapShadowCenter } from './shadowMath';
+import { installUncoloredShadow } from './uncoloredShadowNode';
 import {
   daylight,
   fogRange,
@@ -83,6 +84,13 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
   sc.near = 50;
   sc.far = 2600;
   let appliedExtent = 0;
+  // §V.40 SAMPLER BUDGET. Publish the shadow node HERE, before any material is
+  // built, so every receiver (ocean surface, ship, ropes) shares one node — and
+  // make it the variant that does not bind three's coloured-shadow colour
+  // texture. That is one sampled texture and one SAMPLER back in the fragment
+  // stage of every shadow receiver, and the ocean material was at exactly 16 of
+  // 16 samplers. See uncoloredShadowNode.ts for why it is visually a no-op.
+  installUncoloredShadow(sunLight);
 
   const followTarget = new THREE.Vector3();
   const hazeColor = new THREE.Color();

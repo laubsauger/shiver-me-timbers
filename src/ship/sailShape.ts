@@ -186,10 +186,24 @@ export function sailClothOffset(
   const down = sailBellyProfile(vv);
   const belly = across * down * finite(s.drive) * p.sailBillow * drop;
 
-  // flutter: travelling ripples, biggest at the free foot and the leeches
+  // flutter: travelling ripples, biggest at the free foot and the leeches.
+  //
+  // The RATE IS CONSTANT and must stay constant. It used to be
+  // `sailFlutterFreq · (1 + luff)`, multiplied by `time` — but t·ω(t) is the
+  // phase of a sine only while ω is fixed, and luff breathes with every gust
+  // and every turn of the helm. Its instantaneous frequency is ω + t·dω/dt, so
+  // the ripple ran away with elapsed time exactly as the flags' did (measured
+  // there: 0.93 Hz intended, 59.5 Hz after ten minutes, with sign flips). The
+  // same defect, in two files, from the same expression.
+  //
+  // A luffing sail does shake faster, but buying that cue back needs an
+  // integrated phase, and this function has TWO evaluators reading two
+  // different clocks (see the note in shipAssembly.clothState) — an
+  // accumulator would have to be a single owner across both. Luff drives the
+  // AMPLITUDE instead, which it already did, over a 10× range.
   const luff = finite(s.luff);
   const shake = SAIL_FLUTTER_BASE + luff * p.sailLuffFlap;
-  const rippleFreq = p.sailFlutterFreq * (1 + luff);
+  const rippleFreq = Math.max(0, finite(p.sailFlutterFreq));
   const wave = Math.sin(
     finite(s.time) * rippleFreq
       + finite(s.phase)

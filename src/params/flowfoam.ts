@@ -231,6 +231,42 @@ export interface FlowFoamParams {
   /** fraction of the Kelvin half-width inside which the crests are at full
    * amplitude; they fade to 0 at the wedge boundary */
   transInner: number;
+
+  // --- divergent (cusp) crests: THE BOW WAVE ------------------------------
+  // The second Kelvin wave system — short, steep crests fanning off the stem at
+  // 54.74° to the track, filling the water ahead of and beside the bow. This is
+  // what a viewer reads as "the ship is pushing water"; the transverse train
+  // above runs across the track BEHIND her and cannot stand in for it.
+  /** peak world surface SLOPE of the divergent crests. Steeper than the
+   * transverse train because the waves themselves are (shorter for the same
+   * energy) — this is the feature the eye reads as a bow wave */
+  divSlope: number;
+  /** e-folding time (s) of the divergent crests. SHORTER than transDecay:
+   * short waves dissipate faster, which is why the feathered V is a near-field
+   * feature while the transverse train runs on astern */
+  divDecay: number;
+  /** track distance (m) over which divergent amplitude falls like 1/sqrt */
+  divSpread: number;
+  /** extra fade band OUTSIDE the cusp line, as a fraction of the Kelvin
+   * half-width — the wedge boundary is a real physical edge, but a hard step
+   * in a field that ends up differentiated is a 1-px line (§V38) */
+  divOuterFade: number;
+
+  // --- band-limit for BOTH periodic wave systems (§V48) ---------------------
+  /** texels per wavelength below which a wave train's amplitude is 0. The
+   * divergent branch's wavelength runs to ZERO on the centreline, so this gate
+   * is what makes that singularity harmless — it fades the amplitude to its own
+   * mean (zero) exactly where the field stops being representable */
+  waveBandLow: number;
+  /** texels per wavelength at which it is at full amplitude */
+  waveBandHigh: number;
+
+  // --- bow mound as SURFACE, not foam ---------------------------------------
+  /** peak world SLOPE of the displacement bow wave — the water heaped ahead of
+   * the stem. `moundIntensity` paints the foam on it; this is the mound
+   * itself, and without it there is nothing to paint on. Rides the same lagged
+   * `moundLag` speed, so it builds and subsides with the hull */
+  moundSlope: number;
 }
 
 export const flowFoamParams: FlowFoamParams = registerParams(
@@ -323,6 +359,13 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     transDecay: 26,
     transSpread: 40,
     transInner: 0.75,
+    divSlope: 0.11,
+    divDecay: 11,
+    divSpread: 22,
+    divOuterFade: 0.12,
+    waveBandLow: 2.5,
+    waveBandHigh: 6,
+    moundSlope: 0.17,
   },
   flowFoamParamsMeta(),
 );
@@ -414,5 +457,12 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     transDecay: { min: 1, max: 240, step: 1 },
     transSpread: { min: 1, max: 400, step: 1 },
     transInner: { min: 0.05, max: 1, step: 0.05 },
+    divSlope: { min: 0, max: 0.8, step: 0.005 },
+    divDecay: { min: 0.5, max: 120, step: 0.5 },
+    divSpread: { min: 1, max: 400, step: 1 },
+    divOuterFade: { min: 0.01, max: 0.5, step: 0.01 },
+    waveBandLow: { min: 1, max: 8, step: 0.1 },
+    waveBandHigh: { min: 2, max: 20, step: 0.1 },
+    moundSlope: { min: 0, max: 0.8, step: 0.005 },
   };
 }

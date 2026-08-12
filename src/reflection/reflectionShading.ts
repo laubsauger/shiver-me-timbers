@@ -75,6 +75,8 @@ export function createReflectionShading(
     new THREE.Vector3(rp.blurNear, rp.blurFar, rp.blurChop),
   );
   const uBlurMax = uniform(rp.blurMax);
+  /** extra mip level per unit of surface tilt — the microfacet blur */
+  const uBlurSlope = uniform(rp.blurSlope);
 
   const shade = (input: ReflectionShadeInput): TslNode => {
     const { skyColor, normalWorld, chop, camDist } = input;
@@ -85,6 +87,11 @@ export function createReflectionShading(
     // The tap stays inside `distortMax` of its origin — an unbounded offset
     // is a fill-rate/cache trap and can pull in unrelated screen regions.
     const slope = vec2(normalWorld.x, normalWorld.z);
+    // how far this facet is tilted off vertical: sin(tilt) for a unit normal.
+    // THE roughness signal — a UV warp is a smooth map, so on its own it can
+    // only wobble a reflected shape, never break it up; the blur below is what
+    // actually models the microfacet spread (see the lod block).
+    const tilt = slope.length();
     const offset = slope
       .mul(uDistort.x)
       .add(slope.mul(chop.mul(uDistort.y)))
@@ -101,12 +108,41 @@ export function createReflectionShading(
     const distT = smoothstep(uFade.x, uFade.y, camDist);
     let sample = reflectionNode.sample(uv);
     if (useMipmaps) {
+      // ROUGHNESS, not just distance. Real water blurs a reflection in
+      // proportion to the spread of its microfacet normals AND to how far the
+      // reflected thing is, because the reflected-ray cone widens along its
+      // length. A mirror tap with a small UV offset models neither, which is
+      // the "reflections are too perfect, too clean" report: a planar mirror
+      // on a visibly choppy sea. `tilt` is the per-pixel facet slope, so a
+      // steep wave face smears its reflection while a glassy trough keeps it.
       const lod = mix(uBlur.x, uBlur.y, distT)
         .add(chop.mul(uBlur.z))
+        .add(tilt.mul(uBlurSlope))
         .clamp(0, uBlurMax);
       sample = sample.level(lod);
     }
-    const reflected = sample.rgb.mul(uTint);
+    // COVERAGE (§V26 + §T.39). The mirror pass renders the SCENE ONLY — the
+    // sky background is removed for the duration of the pass (see
+    // planarReflection.ts) and the target is cleared to alpha 0. So alpha is
+    // "did the mirror actually see geometry here", and everywhere it did not,
+    // the reflected colour stays the analytic sky the ocean handed us — which
+    // is `skyDomeColor(reflectionRay)`, the sky's own dome function with the
+    // sun disc EXCLUDED.
+    //
+    // WHY: with the sky in the mirror, the water showed a geometrically
+    // correct mirror image of the sky's HDR sun disc — a clean circular blob
+    // on a choppy sea (user screenshot). A real sun on waves is not a disc at
+    // all, it is the broken glitter path that the ocean's own specular and
+    // glint road already produce; the mirror was competing with it. Dropping
+    // the sky from the pass also makes the pass cheaper, and loses nothing:
+    // the analytic dome is the same sky, evaluated per pixel, for free.
+    //
+    // The RT holds PREMULTIPLIED colour (geometry blended over a transparent
+    // clear), so un-premultiply before use or every partially covered texel —
+    // and every texel of every blurred mip near a silhouette — reads as a
+    // dark fringe. Floored divisor per §V28.
+    const coverage = sample.a.clamp(0, 1);
+    const reflected = sample.rgb.div(coverage.max(EPS)).mul(uTint);
 
     // Dissolve back into the analytic sky with distance: past `fadeEnd` the
     // half-res RT carries no readable detail anyway, and the ocean's own haze
@@ -114,7 +150,7 @@ export function createReflectionShading(
     // smoothstep(e0,e1,x) with e0 > e1 reads "1 below fadeStart, 0 above
     // fadeEnd" (§V23 — functional form, receiver-free).
     const nearFade = smoothstep(uFade.y, uFade.x, camDist);
-    const weight = uActive.mul(uStrength).mul(nearFade).clamp(0, 1);
+    const weight = uActive.mul(uStrength).mul(nearFade).mul(coverage).clamp(0, 1);
     return mix(skyColor, reflected, weight);
   };
 
@@ -141,6 +177,7 @@ export function createReflectionShading(
         Math.max(0, finite(rp.blurChop, 0)),
       );
       uBlurMax.value = Math.max(0, finite(rp.blurMax, 4));
+      uBlurSlope.value = Math.max(0, finite(rp.blurSlope, 0));
     },
     setActive(active: boolean): void {
       uActive.value = active ? 1 : 0;

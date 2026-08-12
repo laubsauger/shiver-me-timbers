@@ -13,14 +13,21 @@ import {
   JACOBIAN_SIGMA_PER_STEEPNESS,
   NEVER_INJECT_BIAS,
   accumulateFoam,
-  blurDecayAnisoAt,
+  bandCanFold,
   blurDecayAt,
   boxReduceAt,
   cascadeDetailWeight,
   cascadeFadeDistance,
   cascadeFoamBias,
   cascadeInjectPerStep,
-  crestTapOffset,
+  EIGEN_MEAN_PER_STEEPNESS,
+  EIGEN_SIGMA_PER_STEEPNESS,
+  eigenFoamGate,
+  eigenInjectPerStep,
+  eigenRestValue,
+  eigenSigma,
+  foamGateZ,
+  minEigenvalue,
   foamTexelMetres,
   decayFactorPerFrame,
   injectAmount,
@@ -32,9 +39,12 @@ import { oceanParams, type OceanParams } from '../src/params/ocean';
 import {
   cascadeBand,
   effectiveChoppiness,
+  generateButterfly,
+  generateH0,
   phillips,
   spectralSteepness,
 } from '../src/ocean/oceanMath';
+import { cpuIFFT2D, extractCentralBlock } from '../src/sea-physics/cpuOcean';
 import { weatherPresets } from '../src/weather/presets';
 import { advanceAccumulator, SIM_DT } from '../src/core/loop';
 import { getParamsEntry } from '../src/params/registry';
@@ -181,100 +191,43 @@ describe('progressive blur (§V6: sharp at birth, then spreads and dissipates)',
   });
 });
 
-describe('crest-aligned blur (§V6 cap SHAPE: ridges, not round blobs)', () => {
+describe('the blur is ISOTROPIC (§B: the cap-lattice the user photographed 4×)', () => {
   const n = 16;
-  // waves rolling along +x → crest lines run along y, so foam must smear in y
-  const AX = 1;
-  const AZ = 0;
   const impulse = (x: number, y: number): Float32Array => {
     const g = new Float32Array(n * n);
     g[y * n + x] = 1;
     return g;
   };
 
-  it('tap frame is orthonormal-rotated: along the ridge, across the propagation', () => {
-    // propagation = (0, 1) → crest runs along x → dx taps move in x, dy in y
-    const [ax, ay] = crestTapOffset(0, 1, 1, 0, 3, 0.5);
-    expect(Math.abs(ax)).toBeCloseTo(3, 12);
-    expect(ay).toBeCloseTo(0, 12);
-    const [bx, by] = crestTapOffset(0, 1, 0, 1, 3, 0.5);
-    expect(bx).toBeCloseTo(0, 12);
-    expect(by).toBeCloseTo(0.5, 12);
-  });
-
-  it('degenerate direction falls back to the axis frame (never NaN offsets)', () => {
-    // WHY §V28: a zero direction must never divide-by-zero into NaN texel
-    // offsets — it simply blurs isotropically like before.
-    const [ox, oy] = crestTapOffset(0, 0, 1, 1, 1, 1);
-    expect(Number.isFinite(ox)).toBe(true);
-    expect(Number.isFinite(oy)).toBe(true);
-  });
-
-  it('along = across = 1 reproduces the isotropic blur exactly', () => {
-    // WHY: the crest frame is a ROTATION — it must not change how much foam
-    // spreads, only its direction. This pins that the knob is shape-only.
+  it('one injected fold spreads the SAME distance in every direction', () => {
+    // WHY this is the fix and not a regression (user, four frames: "every cap
+    // has the same orientation — all the ellipses tilt the same way across the
+    // entire frame"). The old kernel stretched its taps 2.6 along a SINGLE
+    // GLOBAL crest axis and 0.5 across it; applied ~270× over a cap's life that
+    // is a diffusion tensor with a 5.2:1 axis ratio in one world direction, so
+    // it did not hint at a shape, it WAS the shape — measured cap axial-angle
+    // spread 3.9° over a whole 420 m tile. Cap shape is now the injection's
+    // job (λ−), and the injection's shape varies because the sea does.
     const src = impulse(8, 8);
-    for (let y = 0; y < n; y++) {
-      for (let x = 0; x < n; x++) {
-        expect(blurDecayAnisoAt(src, AX, AZ, n, x, y, 1, 1, 1, 0.9)).toBeCloseTo(
-          blurDecayAt(src, n, x, y, 1, 0.9),
-          12,
-        );
-      }
-    }
+    const at = (x: number, y: number) => blurDecayAt(src, n, x, y, 1, 1);
+    expect(at(9, 8)).toBeCloseTo(at(7, 8), 12);
+    expect(at(8, 9)).toBeCloseTo(at(8, 7), 12);
+    expect(at(9, 8)).toBeCloseTo(at(8, 9), 12);
+    // …and the corners match each other too — no preferred diagonal either
+    expect(at(9, 9)).toBeCloseTo(at(7, 7), 12);
+    expect(at(9, 7)).toBeCloseTo(at(7, 9), 12);
   });
 
-  it('spreads ALONG the crest and barely across it (the user-visible fix)', () => {
-    // WHY (user: "the foam caps are too circular, not really following the
-    // cap of the wave"): with along ≫ across the same injected fold becomes
-    // a ridge-following streak instead of a disc.
-    const src = impulse(4, 8);
-    const at = (x: number, y: number) =>
-      blurDecayAnisoAt(src, AX, AZ, n, x, y, 1, 3, 0.34, 1);
-    // crest tangent is ±y here: foam reaches 3 texels along y…
-    expect(at(4, 11)).toBeGreaterThan(0);
-    expect(at(4, 5)).toBeGreaterThan(0);
-    // …and does NOT reach the same distance across the crest (x)
-    expect(at(7, 8)).toBe(0);
-    expect(at(1, 8)).toBe(0);
-  });
-
-  it('conserves foam mass EXACTLY at any stretch — decay owns lifetime alone', () => {
-    // WHY this is not a nicety (user: "I think we're missing some foam caps"):
-    // a per-texel crest frame derived from ∇h rotates fastest exactly where
-    // foam lives (∇h vanishes and flips sign ON the crest line), and a
-    // rotating gather kernel is NOT conservative — it sheds foam every frame,
-    // so caps quietly died faster than decayHalfLife promised. A uniform
-    // frame is shift-invariant, which is what makes this exact.
-    for (const [along, across] of [
-      [1, 1],
-      [3, 0.34],
-      [2.6, 0.5],
-      [4, 0.25],
-    ]) {
+  it('conserves foam EXACTLY — decay owns lifetime alone (§V6)', () => {
+    // The property the old global crest frame existed to protect. It is NOT
+    // traded away by dropping the frame: an axis-aligned kernel is
+    // shift-invariant too, so this still holds exactly, at every radius.
+    for (const radius of [1, 2, 3]) {
       const src = impulse(4, 8);
       let sum = 0;
       for (let y = 0; y < n; y++)
-        for (let x = 0; x < n; x++)
-          sum += blurDecayAnisoAt(src, AX, AZ, n, x, y, 1, along, across, 1);
-      expect(sum, `along=${along} across=${across}`).toBeCloseTo(1, 10);
-    }
-  });
-
-  it('conserves foam for ANY propagation direction, not just the axes', () => {
-    // a diagonal swell must not lose foam either — the gradient-derived frame
-    // failed precisely on fields whose direction was not axis-aligned
-    const src = impulse(8, 8);
-    for (const [dx, dz] of [
-      [1, 1],
-      [-2, 1],
-      [0.3, -0.9],
-    ]) {
-      let sum = 0;
-      for (let y = 0; y < n; y++)
-        for (let x = 0; x < n; x++)
-          sum += blurDecayAnisoAt(src, dx, dz, n, x, y, 1, 3, 0.34, 1);
-      expect(sum, `dir=${dx},${dz}`).toBeCloseTo(1, 10);
+        for (let x = 0; x < n; x++) sum += blurDecayAt(src, n, x, y, radius, 1);
+      expect(sum, `radius=${radius}`).toBeCloseTo(1, 10);
     }
   });
 });
@@ -523,40 +476,273 @@ describe('§V36 jacobian gate: per-cascade bias tracks each band\'s own σ', () 
   });
 });
 
+/* ---------------------------------------------------------------------------
+ * THE FOLD METRIC (§B, user four times: "the regularity of them"). det J
+ * measures AREA compression, which is direction-free — so its super-level sets
+ * are round and every cap comes out the same blob, leaving the blur kernel as
+ * the only thing that could give a cap a direction, and that kernel had ONE
+ * direction for the whole ocean. λ− is Tessendorf's actual folding signal and
+ * it fires along the axis the water is folding on, so the shape is the sea's.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Statistics of μ = (λ− − 1)/λ on a REALISED cascade — the actual field the
+ * inject pass reads, built with the project's own CPU IFFT mirror.
+ *
+ * A realised field and not a spectral variance, deliberately, and this cost a
+ * measurement to learn: the closed-form gaussian model of the same statistic
+ * (covariance of ∂Dx/∂x, ∂Dz/∂z, ∂Dx/∂z from the spectrum, μ− of the sampled
+ * 2×2) comes out a FLAT 1.36× smaller than the realised field, identically in
+ * every band of every preset — and the same 1.36 shows up between the shipped
+ * JACOBIAN_SIGMA_PER_STEEPNESS and σ(det J) measured on the realised field
+ * (1.79 vs 2.42). Both constants are self-consistent, since the z-score
+ * divides one by the other, but neither is the field's true σ. Flagged, not
+ * silently corrected: it belongs to `spectralSteepness`, which is the ocean's.
+ * What matters here is that these constants are calibrated on the same thing
+ * the GPU actually gates.
+ */
+function realisedEigenMoments(p: OceanParams, index: number, N: number, time: number) {
+  const domain = p.cascades[index].domain;
+  const band = cascadeBand(index, p.splitWavelengths);
+  const lambda = 1; // μ is defined at λ = 1; the gate re-applies the live λ
+  const h0 = extractCentralBlock(
+    generateH0(p.resolution, domain, 1337 + index * 7919, p, band),
+    p.resolution,
+    N,
+  );
+  const size = N * N;
+  const a = { re: new Float32Array(size), im: new Float32Array(size) };
+  const b = { re: new Float32Array(size), im: new Float32Array(size) };
+  for (let m = 0; m < N; m++) {
+    for (let n = 0; n < N; n++) {
+      const kx = (2 * Math.PI * (n - N / 2)) / domain;
+      const kz = (2 * Math.PI * (m - N / 2)) / domain;
+      const k = Math.hypot(kx, kz);
+      const i = m * N + n;
+      const safeK = Math.max(k, 1e-6);
+      const phase = Math.sqrt(9.81 * k) * time;
+      const c = Math.cos(phase);
+      const sn = Math.sin(phase);
+      const r0 = h0[i * 4], i0 = h0[i * 4 + 1], r1 = h0[i * 4 + 2], i1 = h0[i * 4 + 3];
+      const hRe = (r0 + r1) * c - (i0 + i1) * sn;
+      const hIm = (r0 - r1) * sn + (i0 - i1) * c;
+      a.re[i] = hRe * (1 - kx / safeK);
+      a.im[i] = hIm * (1 - kx / safeK);
+      b.re[i] = -hIm * (kz / safeK);
+      b.im[i] = hRe * (kz / safeK);
+    }
+  }
+  cpuIFFT2D(a, generateButterfly(N), N);
+  cpuIFFT2D(b, generateButterfly(N), N);
+  const dx = new Float32Array(size);
+  const dz = new Float32Array(size);
+  for (let m = 0; m < N; m++) {
+    for (let n = 0; n < N; n++) {
+      const i = m * N + n;
+      const sign = (n + m) & 1 ? -1 : 1;
+      dx[i] = sign * a.im[i] * lambda;
+      dz[i] = sign * b.re[i] * lambda;
+    }
+  }
+  // central differences, exactly as unpackPass builds the jacobian
+  const h = domain / N;
+  let sum = 0;
+  let sum2 = 0;
+  for (let m = 0; m < N; m++) {
+    for (let n = 0; n < N; n++) {
+      const dDxdx = (dx[m * N + wrapIndex(n + 1, N)] - dx[m * N + wrapIndex(n - 1, N)]) / (2 * h);
+      const dDzdz = (dz[wrapIndex(m + 1, N) * N + n] - dz[wrapIndex(m - 1, N) * N + n]) / (2 * h);
+      const dDxdz = (dx[wrapIndex(m + 1, N) * N + n] - dx[wrapIndex(m - 1, N) * N + n]) / (2 * h);
+      const det = (1 + dDxdx) * (1 + dDzdz) - dDxdz * dDxdz;
+      const mu = minEigenvalue(2 + dDxdx + dDzdz, det) - 1;
+      sum += mu;
+      sum2 += mu * mu;
+    }
+  }
+  const mean = sum / size;
+  return { mean, sd: Math.sqrt(Math.max(0, sum2 / size - mean * mean)) };
+}
+
+describe('fold metric: minimum eigenvalue, not det J', () => {
+  it('det J cannot tell a breaking crest from water piling up flat', () => {
+    // THE REASON THE CAPS WERE ROUND AND ALL ONE SIZE. A breaking crest is a
+    // UNIAXIAL fold: the surface compresses hard along the propagation axis
+    // and stretches across it. Take a = −0.3, b = +0.3, c = 0 —
+    //   det J = (1−0.3)(1+0.3) = 0.91, i.e. it has barely moved off 1, because
+    //   the compression and the stretch cancel in the product;
+    //   λ− = 0.70, first order in the fold, and it points at it.
+    const uniaxialDet = 0.7 * 1.3;
+    expect(uniaxialDet).toBeCloseTo(0.91, 12);
+    expect(minEigenvalue(2, uniaxialDet)).toBeCloseTo(0.7, 12);
+
+    // Now an ISOTROPIC compression that loses the SAME AREA — water gathering
+    // with no preferred direction, which is not a breaking crest at all.
+    // det J reads it identically (that is the whole problem: area is
+    // direction-free), λ− reads it as much weaker.
+    const iso = Math.sqrt(uniaxialDet); // a = b = iso − 1, c = 0
+    // 6 digits, not 12: near the degenerate point a = b the tr² − 4·det form
+    // loses precision to cancellation. Harmless (the answer is ½tr there and
+    // the floor keeps it real), but worth knowing it is not exact.
+    expect(minEigenvalue(2 * iso, uniaxialDet)).toBeCloseTo(iso, 6);
+    expect(minEigenvalue(2 * iso, uniaxialDet)).toBeGreaterThan(
+      minEigenvalue(2, uniaxialDet) + 0.25,
+    );
+    // MEASURED consequence on the real swell spectrum, cascade 1, 300 frames
+    // of the real sim: at one and the same σ-multiple det J covered 0.5 % of
+    // the tile with caps whose length spread was CV 0.08 and whose axial
+    // angles spread 2.1°; λ− covered 9.2 % with CV 0.68 and 21.4°.
+  });
+
+  it('is NaN-free on a discriminant that floats one ulp negative (§V28)', () => {
+    // tr² − 4·det is ≥ 0 for a real symmetric matrix but not in float32 at
+    // the degenerate point a = b, c = 0 — and one NaN in an ACCUMULATOR is
+    // permanent, there is no frame that clears it.
+    expect(minEigenvalue(2, 1 + 1e-12)).toBeCloseTo(1, 6);
+    expect(Number.isNaN(minEigenvalue(2, 1 + 1e-12))).toBe(false);
+    expect(Number.isNaN(minEigenvalue(0, 0))).toBe(false);
+    // and it really is the MINIMUM: λ− ≤ ½tr always
+    for (const [tr, det] of [[2, 0.9], [1.4, 0.2], [3, 2], [0.5, -1]]) {
+      expect(minEigenvalue(tr, det)).toBeLessThanOrEqual(tr / 2 + 1e-12);
+    }
+  });
+
+  it('the λ− constants match the real spectrum in every band of every preset', () => {
+    // Same tripwire role as JACOBIAN_SIGMA_PER_STEEPNESS: both the MEAN and
+    // the SPREAD of λ− scale with the band's own λ·steepnessRms, fixed by the
+    // spectrum's directional shape. Retune `directionality`/`oppositeWaveDamp`
+    // and the gate's meaning moves under it (§V36) — that must fail here, not
+    // show up months later as "storm has no foam".
+    for (const name of ['calm', 'swell', 'storm'] as const) {
+      const sea = seaFor(name);
+      // cascades 0 and 1 only: cascade 2's band runs to the grid Nyquist, so a
+      // reduced mirror would silently drop the modes that dominate its σ
+      for (let i = 0; i < 2; i++) {
+        const seaSigma = jacobianSigma(sea.steepnessRms, sea.lambda);
+        const bandSigma = jacobianSigma(sea.steep[i], sea.lambda);
+        // a band that cannot fold is switched off by the same predicate the
+        // sim uses, not normalised into relevance — calm's empty 420 m band is
+        // float dust and its shape statistics mean nothing
+        if (!bandCanFold(bandSigma, seaSigma)) continue;
+        const m = realisedEigenMoments(sea.p, i, 128, 7.3);
+        // ±15 %: the shape constant is what makes ONE number serve every band
+        // of every preset, so the contract is "right to within 15 % everywhere",
+        // not "exact somewhere". Outside that the gate's σ has drifted.
+        expect(
+          Math.abs(m.mean / sea.steep[i] / EIGEN_MEAN_PER_STEEPNESS - 1),
+          `${name} cascade ${i} mean/s = ${(m.mean / sea.steep[i]).toFixed(3)}`,
+        ).toBeLessThan(0.15);
+        expect(
+          Math.abs(m.sd / sea.steep[i] / EIGEN_SIGMA_PER_STEEPNESS - 1),
+          `${name} cascade ${i} sd/s = ${(m.sd / sea.steep[i]).toFixed(3)}`,
+        ).toBeLessThan(0.15);
+      }
+    }
+    // λ− is the MIN of two eigenvalues, so it sits below the rest value even
+    // on an undisturbed sea — a gate reasoned as "below 1" would be wrong by
+    // more than a σ, which is a decade of coverage.
+    expect(EIGEN_MEAN_PER_STEEPNESS).toBeLessThan(0);
+  });
+
+  it('rest value is BELOW 1, and the gate is below the rest value', () => {
+    const sea = seaFor('swell');
+    for (let i = 0; i < 3; i++) {
+      const rest = eigenRestValue(sea.steep[i], sea.lambda);
+      expect(rest, `cascade ${i}`).toBeLessThan(1);
+      const seaSigma = jacobianSigma(sea.steepnessRms, sea.lambda);
+      const bandSigma = jacobianSigma(sea.steep[i], sea.lambda);
+      const gate = eigenFoamGate(sea.bias, sea.steep[i], sea.lambda, bandSigma, seaSigma);
+      expect(gate, `cascade ${i}`).toBeLessThan(rest);
+    }
+  });
+
+  it('every band fires at the SAME σ-multiple — the bias keeps its meaning', () => {
+    // §V36 unchanged by the metric swap: `jacobianFoamBias` is still read as
+    // "the sea is folding this many σ below rest" on the SUMMED det J, and
+    // every band still has to reproduce that z against its own statistic.
+    const sea = seaFor('swell');
+    const seaSigma = jacobianSigma(sea.steepnessRms, sea.lambda);
+    const z = foamGateZ(sea.bias, seaSigma);
+    expect(z).toBeGreaterThan(2.2);
+    expect(z).toBeLessThan(2.6);
+    for (let i = 0; i < 3; i++) {
+      const bandSigma = jacobianSigma(sea.steep[i], sea.lambda);
+      const gate = eigenFoamGate(sea.bias, sea.steep[i], sea.lambda, bandSigma, seaSigma);
+      const rest = eigenRestValue(sea.steep[i], sea.lambda);
+      const sigma = eigenSigma(sea.steep[i], sea.lambda);
+      expect((rest - gate) / sigma, `cascade ${i}`).toBeCloseTo(z, 6);
+    }
+  });
+
+  it('injection is σ-relative: equal folds inject equal foam in any band or sea', () => {
+    const sea = seaFor('swell');
+    const seaSigma = jacobianSigma(sea.steepnessRms, sea.lambda);
+    const inj = (s: ReturnType<typeof seaFor>, i: number) => {
+      const bandSigma = jacobianSigma(s.steep[i], s.lambda);
+      const ss = jacobianSigma(s.steepnessRms, s.lambda);
+      const deficit = 0.4 * eigenSigma(s.steep[i], s.lambda); // same fold, in σ
+      return (
+        deficit *
+        eigenInjectPerStep(foamParams.injectStrength, DT, s.steep[i], s.lambda, bandSigma, ss)
+      );
+    };
+    expect(inj(sea, 1)).toBeCloseTo(inj(sea, 0), 9);
+    expect(inj(sea, 2)).toBeCloseTo(inj(sea, 0), 9);
+    expect(inj(seaFor('storm'), 0)).toBeCloseTo(inj(sea, 0), 9);
+    void seaSigma;
+  });
+
+  it('a band with no energy is gated OFF, never divided into (§V28)', () => {
+    const sea = seaFor('calm');
+    const seaSigma = jacobianSigma(sea.steepnessRms, sea.lambda);
+    const dead = jacobianSigma(sea.steep[0], sea.lambda);
+    expect(eigenFoamGate(sea.bias, sea.steep[0], sea.lambda, dead, seaSigma)).toBe(
+      NEVER_INJECT_BIAS,
+    );
+    expect(eigenInjectPerStep(4, DT, sea.steep[0], sea.lambda, dead, seaSigma)).toBe(0);
+    // a sea with no spectrum at all: every band off, no NaN, no Infinity
+    expect(eigenFoamGate(0.55, 0, 0, 0, 0)).toBe(NEVER_INJECT_BIAS);
+    expect(eigenInjectPerStep(4, DT, 0, 0, 0, 0)).toBe(0);
+    expect(Number.isFinite(eigenInjectPerStep(4, DT, 1e-30, 1, 1, 1))).toBe(true);
+  });
+});
+
 describe('far tier handover (§V48: no step bigger than the reduction itself)', () => {
-  // The reduce chain is 512² → 128² → 32². shadingNode must hand over
-  // fine→mid→coarse, each at ITS OWN texel size. Cross-fading fine straight
-  // into coarse (what it used to do, leaving the 128² tier computed and
-  // unread) jumps 16× in texel AREA at a distance that justifies 4×, so the
-  // whole coarsest cascade gets read from a 32×32 texture — and bilinear on
-  // 32×32 stretched over kilometres is a lattice of 13 m quads. Because the
-  // surface material divides its specular by the foam mask, that lattice
-  // shows up as hard quantised squares in the sun glint road.
+  // The chain is 512² → 128², and shadingNode hands the coarsest cascade over
+  // from its full-res tier to that 128² tier at the full-res tier's own
+  // Nyquist distance. It used to reduce twice more, to 32², and cross-fade
+  // fine STRAIGHT into 32² — a 16× jump in texel AREA where 4× was warranted,
+  // leaving the whole distance band past it served by a 32×32 texture.
+  // Bilinear on 32×32 stretched over kilometres is a lattice of 13 m quads,
+  // and because the surface material divides its specular by the foam mask it
+  // showed as hard quantised squares in the sun glint road.
   const DOMAIN = 420;
   const N = 512;
   const fineT = foamTexelMetres(DOMAIN, N);
-  const midT = foamTexelMetres(DOMAIN, N / 4);
-  const coarseT = foamTexelMetres(DOMAIN, N / 16);
+  const coarseT = foamTexelMetres(DOMAIN, N / 4);
   const FADE = foamParams.cascadeFadeTexels;
   const SPAN = foamParams.cascadeFadeSpan;
 
-  it('the chain builds 4× steps — so a 4× handover is available, if it is used', () => {
-    expect(midT / fineT).toBeCloseTo(4, 6);
-    expect(coarseT / midT).toBeCloseTo(4, 6);
+  it('the handover step is 4× in texel area, not 16×', () => {
+    expect(coarseT / fineT).toBeCloseTo(4, 6);
   });
 
-  it('records the SIZE of the jump shadingNode currently takes (the defect)', () => {
-    // shadingNode cross-fades fine → coarse and never samples the mid tier, so
-    // the step it actually takes is 16× in texel area, at the distance where
-    // only 4× was warranted. This pins the number so the fix can be measured
-    // against it; see the DIAGNOSED, NOT YET FIXED block in src/foam/index.ts.
-    expect(coarseT / fineT).toBeCloseTo(16, 6);
+  it('the tier taken over TO is still resolved where the fine tier retires', () => {
+    // the test that the old chain failed: at the distance where the full-res
+    // tier is fully gone, whatever replaces it must not itself be past its
+    // own Nyquist point, or the handover just swaps one aliasing source for a
+    // blockier one.
     const w = (t: number, d: number) => cascadeDetailWeight(d, t, FADE, SPAN);
     const fineGone = cascadeFadeDistance(fineT, FADE) * SPAN * 1.01;
     expect(w(fineT, fineGone)).toBeCloseTo(0, 6);
-    // the mid tier is still fully resolved at that distance — i.e. there is a
-    // whole distance band being served by 32² when 128² was available
-    expect(w(midT, fineGone)).toBeCloseTo(1, 6);
+    expect(w(coarseT, fineGone)).toBeCloseTo(1, 6);
+  });
+
+  it('the 32² tier the chain used to build was only ever needed past 7 km', () => {
+    // WHY it was dropped rather than wired in as a third tier: a third
+    // sampled texture is exactly what §V40 has no room for (the ocean
+    // fragment stage is at 16/16 samplers), and the readable sea ends at
+    // ~4 km (§V30) — so the tier below this one can never be reached.
+    expect(cascadeFadeDistance(coarseT, FADE)).toBeGreaterThan(7000);
   });
 });
 

@@ -206,22 +206,33 @@ export const weatherPresets: Readonly<
       // genuinely folding more (amplitude + choppiness), not from lowering the
       // detection bar (§V7).
       //
+      // RETUNED 2026-08-12 (the parked note below is now DISCHARGED — the
+      // choppiness clamp landed, the verdict came back "storm is NOT folding",
+      // and storm's amplitude was cut from Hs≈20 m to ≈8–10 m). Measured
+      // instantaneous fold fraction on the realised storm spectrum, with the
+      // λ− gate the foam sim now uses (src/foam/foamMath, "THE FOLD METRIC"):
       //
-      // PARKED, DO NOT TUNE (2026-08-12). Once src/foam's §V36 gate was fixed
-      // this value puts 22.7% of EACH band into foam (~54% of the sea in
-      // union) and the obvious move was to drop it to ~0.35. That move is
-      // WRONG while the user is also reporting storm crests that "cross over
-      // and twist": a surface whose choppy displacement has gone
-      // non-monotonic has det J ≤ 0 over large areas BY DEFINITION, and det J
-      // is exactly what foam injects from. Heavy storm foam would then be the
-      // foam sim faithfully reporting a folded surface, and lowering this
-      // number would hide an ocean-side defect inside a foam threshold —
-      // §V44's "bound it at the source" applied to the fold: a fold cannot be
-      // un-folded downstream. It would also have to be un-hidden the moment
-      // the choppiness clamp lands, at which point storm foam vanishes again
-      // and reads as a fresh regression. Retune only AFTER the clamp, and
-      // measure the fold fraction first.
-      jacobianFoamBias: 0.62,
+      //   bias   z      per band              union of the three
+      //   0.62   0.74   20.0 / 23.9 / 19.1 %  50.8 %   ← was shipping this
+      //   0.40   1.17   11.9 / 16.5 / 12.6 %  35.7 %
+      //   0.25   1.47    7.8 / 12.4 /  9.4 %  26.8 %   ← now
+      //   0.00   1.96    3.7 /  7.3 /  5.4 %  15.5 %
+      //
+      // Swell's union at its own 0.55 is 8.7 %, so 0.25 puts storm at ≈3× the
+      // coverage of swell. That is the read in docs/ref-storm-whitecaps.png —
+      // breaking faces and streaks with dark water still visible BETWEEN them.
+      // 0.62 put half the sea over the gate every frame, and foam accumulates,
+      // so it saturated to an unbroken white sheet ("blobby noise", "milk").
+      //
+      // PARKED NOTE, kept for the reasoning it records: the obvious move used
+      // to be blocked because a surface whose choppy displacement has gone
+      // non-monotonic has a folded jacobian over large areas BY DEFINITION,
+      // and lowering this number would have hidden an ocean-side defect inside
+      // a foam threshold — §V44's "bound it at the source" applied to the
+      // fold: a fold cannot be un-folded downstream. That defect is fixed at
+      // the source now (effective λ 1.9 → 1.30), which is what makes this
+      // retune a tuning change and not a cover-up.
+      jacobianFoamBias: 0.25,
     },
     sky: {
       hazeStrength: 1.0, // horizon fully washed out in spray/mist

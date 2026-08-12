@@ -59,6 +59,12 @@ export interface CombatRuntime {
   floodHoles(state: SimState, shipIndex: number): Vec3[];
   settle(state: SimState, dt: number): void;
   update(frameDt: number, state: SimState): void;
+  /**
+   * DEV/TEST (§V.22): land `count` hits on a named piece, with the fx and
+   * audio that a real ball would have produced. Drives the combat test
+   * scene's breach and mast-fall keys. Call from INSIDE the sim tick.
+   */
+  forceHit(state: SimState, shipIndex: number, pieceId: string, count?: number): CombatFrame;
   /** the underlying sim system, for tests and the dev console */
   combat: Combat;
   dispose(): void;
@@ -212,6 +218,12 @@ export function createCombatRuntime(config: CombatRuntimeConfig): CombatRuntime 
     }
   };
 
+  /** the two things every frame has to do besides fx: sound it, keep the spars */
+  const consume = (frame: CombatFrame, state: SimState): void => {
+    sound(frame, state);
+    for (const object of frame.detached) adoptWreck(object);
+  };
+
   return {
     group,
     combat,
@@ -223,10 +235,18 @@ export function createCombatRuntime(config: CombatRuntimeConfig): CombatRuntime 
         : orders;
       const frame = combat.step(state, dt, laid, config.waterHeightAt);
       // one emit per SIM tick, not per rendered frame: a burst queued twice
-      // would double every broadside at high refresh rates
+      // would double every broadside at high refresh rates. The live
+      // projectiles ride along so each ball can lay its vapour ribbon on the
+      // FIXED clock — a render-rate trail would be denser at 144 Hz.
+      fx.emit(frame, state.projectiles, state.tick);
+      consume(frame, state);
+      return frame;
+    },
+
+    forceHit(state, shipIndex, pieceId, count) {
+      const frame = combat.forceHit(state, shipIndex, pieceId, count);
       fx.emit(frame);
-      sound(frame, state);
-      for (const object of frame.detached) adoptWreck(object);
+      consume(frame, state);
       return frame;
     },
 

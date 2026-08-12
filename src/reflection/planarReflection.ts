@@ -146,15 +146,53 @@ export function createPlanarReflection(
     return virtual;
   };
 
-  // Runtime kill switch. Early-returning here skips the whole second scene
-  // render; the shading node falls back to the analytic sky via setActive(0).
-  // (Scaling the output to zero instead would keep paying for the pass —
-  // same reasoning as the construction gates in core/postPipeline.)
+  // Runtime kill switch + THE SKY EXCLUSION. Early-returning here skips the
+  // whole second scene render; the shading node falls back to the analytic sky
+  // via setActive(0). (Scaling the output to zero instead would keep paying
+  // for the pass — same reasoning as the construction gates in
+  // core/postPipeline.)
+  //
+  // WHY THE SKY COMES OUT OF THE MIRROR (user, §T.39 sunset frame): three
+  // renders `scene.backgroundNode` into the mirror target like any other
+  // draw, so the water was showing a geometrically perfect mirror image of the
+  // sky's HDR SUN DISC — a clean circular blob sitting on a visibly choppy
+  // sea. A real sun on waves is not a disc: it is a broken glitter path,
+  // because only the facets whose normal bisects view and sun light up. The
+  // ocean material already owns that (its specular + glint road), and the sky
+  // system already publishes a `skyDomeColor(dir)` with the disc, glow and
+  // halo deliberately EXCLUDED for exactly this reason. So the mirror pass
+  // renders the SCENE only — ship, islands, clouds, §V26's actual list — onto
+  // a transparent clear, and the ocean composites it over the analytic dome by
+  // the target's ALPHA (see reflectionShading). Strictly cheaper: one full
+  // background sphere fewer per frame, and the sky it removes was redundant.
+  //
+  // Restoring in `finally`: an exception inside the mirror render must not
+  // leave the MAIN pass with no sky and a transparent clear colour.
   const inheritedUpdateBefore = base.updateBefore.bind(base);
   let passEnabled = true;
   base.updateBefore = (frame: unknown): unknown => {
     if (!passEnabled) return undefined;
-    return inheritedUpdateBefore(frame);
+    const { scene, renderer } = (frame ?? {}) as {
+      scene?: THREE.Scene;
+      renderer?: THREE.WebGPURenderer;
+    };
+    const prevBackgroundNode = scene ? scene.backgroundNode : null;
+    const prevBackground = scene ? scene.background : null;
+    const prevClearAlpha = renderer ? renderer.getClearAlpha() : 1;
+    if (scene) {
+      scene.backgroundNode = null;
+      scene.background = null;
+    }
+    renderer?.setClearAlpha(0);
+    try {
+      return inheritedUpdateBefore(frame);
+    } finally {
+      if (scene) {
+        scene.backgroundNode = prevBackgroundNode;
+        scene.background = prevBackground;
+      }
+      renderer?.setClearAlpha(prevClearAlpha);
+    }
   };
 
   // three copies the RENDERING camera's layer mask onto the shadow camera

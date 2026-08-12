@@ -8,6 +8,7 @@
  *     sunLight: sky.sunLight,          // §V20 water receives sun shadows
  *     seabed: archipelago.seabed,      // §V24 shallows tint (optional)
  *     reflection,                      // §V26 planar reflections (optional)
+ *     skyDomeColor: sky.skyDomeColor,  // §V26 THE reflected sky (optional)
  *   })
  *   surface.update(camera, time, sky.sunDirection)   // per frame
  * `sunLight` is optional but without it the water receives no sun shadows
@@ -39,6 +40,15 @@ export interface OceanSurfaceOptions {
    * is a no-op the main thread can wire whenever the perf picture allows.
    */
   reflection?: PlanarReflection | null;
+  /**
+   * The sky's radiance toward an arbitrary world direction, sun disc
+   * EXCLUDED — `SkyHandle.skyDomeColor`. This IS the water's reflected sky
+   * (§V.26): one implementation, shared with `scene.backgroundNode`, so the
+   * sea reflects the real sky's azimuth instead of an elevation-only ramp.
+   * Absent → the authored horizon→zenith fallback, no sun term.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+  skyDomeColor?: (dir: any) => any;
   /**
    * True when the scene is rendered into a HALF-FLOAT pass target rather than
    * straight to the canvas — i.e. when post-processing is on. The §V24
@@ -89,6 +99,7 @@ export class OceanSurface {
       opts.seabed,
       opts.reflection,
       opts.hdrSceneTarget ?? postParams.enabled,
+      opts.skyDomeColor,
     );
     this.group = new THREE.Group();
     this.mesh = new THREE.Mesh(buildOceanGrid(this.grid), this.surface.material);

@@ -88,6 +88,29 @@ export interface FlagState {
   strength: number;
   /** this flag's own gust phase — see gustModulation */
   phase: number;
+  /** ∫ waveRate dt, wrapped — see the note on advanceFlag */
+  wavePhase: number;
+  /** ∫ waveRate·CRACK_RATIO dt, wrapped independently */
+  crackPhase: number;
+}
+
+/**
+ * The crack rides at a deliberately IRRATIONAL-ish multiple of the main
+ * ripple so the two never lock into one obvious period (§B.4). Exported
+ * because flagMaterial.ts needs the same number for the crack's SPATIAL
+ * frequency — the constant is shared, never copied.
+ */
+export const FLAG_CRACK_RATIO = 2.3;
+
+/** ripple rate (rad/s) at a given stream strength — bounded by construction */
+export function flagWaveRate(strength: number, p: ShipFlagParams): number {
+  return Math.max(0, finite(p.flagWaveFreq)) * (0.35 + clamp(finite(strength), 0, 1));
+}
+
+/** fold into [0, 2π) — keeps an accumulator's float precision constant forever */
+function wrapTau(x: number): number {
+  const v = finite(x) % TAU;
+  return v < 0 ? v + TAU : v;
 }
 
 /**
@@ -113,6 +136,29 @@ export function gustModulation(time: number, phase: number): number {
  * along the cloth as a visible crack rather than rotating the whole flag at
  * once. Wrap-safe: stepping through the ±π branch by shortest angle is what
  * stops a flag spinning the long way round when the ship crosses due south.
+ *
+ * IT ALSO INTEGRATES THE RIPPLE PHASE, and that is the whole of the user's
+ * "super super twitchy, super ultra high frequency… like they're in 1000
+ * kilometre an hour wind".
+ *
+ * The shader used to compute its carrier as `time × rate`, with `rate` a
+ * function of the live stream strength. That is only the phase of a sine if
+ * the rate is CONSTANT. When it varies, the instantaneous frequency of
+ * sin(t·ω(t)) is ω + t·dω/dt — and the second term grows without bound as the
+ * app runs, because the elapsed time multiplies every wobble in ω. Measured on
+ * the default 11 m/s wind, against an intended 0.93 Hz flap:
+ *
+ *     t = 15 s → 2.2 Hz    t = 60 s → 5.8 Hz
+ *     t = 120 s → 13.4 Hz  t = 600 s → 59.5 Hz  (crack term: 137 Hz)
+ *
+ * It also goes NEGATIVE, so the ripple reverses direction at random. Nothing
+ * about it is bounded, and it gets worse the longer you play — which is why a
+ * quick look after a reload would never show it.
+ *
+ * The frequency was never the problem; the missing integral was. A phase is
+ * ∫ω dt, so it is accumulated here, per flag, and wrapped so the accumulator
+ * keeps full float precision forever (the same reasoning that already wraps
+ * `root` — see FlagWindUniforms.lagAngle).
  */
 export function advanceFlag(
   state: FlagState,
@@ -127,17 +173,26 @@ export function advanceFlag(
   const kTip = 1 - Math.exp(-rate * 0.34 * step);
   const kStrength = 1 - Math.exp(-rate * 0.6 * step);
   const root = finite(state.root) + angleDelta(state.root, targetAngle) * kRoot;
+  const strength = clamp(
+    finite(state.strength) + (clamp(finite(targetStrength), 0, 1) - finite(state.strength)) * kStrength,
+    0,
+    1,
+  );
+  // integrated at the rate the cloth is ACTUALLY flapping this instant, so a
+  // flag that stiffens ripples faster from here on rather than retroactively
+  const wave = flagWaveRate(strength, p);
   return {
     root,
     // the tip chases the ROOT, not the wind: that is what makes the lag
     // travel outward along the cloth instead of both ends turning together
     tip: finite(state.tip) + angleDelta(state.tip, root) * kTip,
-    strength: clamp(
-      finite(state.strength) + (clamp(finite(targetStrength), 0, 1) - finite(state.strength)) * kStrength,
-      0,
-      1,
-    ),
+    strength,
     phase: finite(state.phase),
+    wavePhase: wrapTau(finite(state.wavePhase) + wave * step),
+    // its own accumulator rather than 2.3 × the other one: multiplying a value
+    // that has been wrapped at 2π by a non-integer breaks continuity at every
+    // wrap, and the detune is the point (§B.4)
+    crackPhase: wrapTau(finite(state.crackPhase) + wave * FLAG_CRACK_RATIO * step),
   };
 }
 

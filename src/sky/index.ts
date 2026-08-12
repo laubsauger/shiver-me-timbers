@@ -27,6 +27,15 @@ export interface SkyHandle {
   /** live normalized world-space direction toward the sun */
   sunDirection: THREE.Vector3;
   sunLight: THREE.DirectionalLight;
+  /**
+   * The sky's radiance toward an arbitrary world direction, sun disc/glow/halo
+   * EXCLUDED — the single source of truth for anything that REFLECTS the sky
+   * (see skyBackground.ts). The ocean calls it with its reflection ray; the
+   * disc is deliberately absent because the water's specular and glint road
+   * already own the sun (§V.26, §T.39).
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+  skyDomeColor: (dir: any) => any;
   /** keep the sun-shadow frustum centered on the player ship */
   setShadowFocus(x: number, y: number, z: number): void;
   configureRenderer(renderer: THREE.WebGPURenderer): void;
@@ -44,6 +53,7 @@ export function createSky(opts: { scene: THREE.Scene }): SkyHandle {
   const handle: SkyHandle = {
     sunDirection,
     sunLight: rig.sunLight,
+    skyDomeColor: background.skyDomeColor,
     setShadowFocus: (x, y, z) => rig.setShadowFocus(x, y, z),
     update(timeOfDay: number): void {
       const dir = computeSunDirection(timeOfDay, skyParams.latitude);
