@@ -597,8 +597,13 @@ describe('the combat TEST SCENE (?scene=combat)', () => {
     });
     expect(parks).toBe(1);
 
-    const key = (code: string): KeyboardEvent =>
-      new KeyboardEvent('keydown', { code, cancelable: true });
+    // node has no KeyboardEvent; the arena only reads code/repeat and calls
+    // preventDefault, so a tagged Event is the whole contract
+    const key = (code: string): Event => {
+      const e = new Event('keydown', { cancelable: true });
+      Object.assign(e, { code, repeat: false });
+      return e;
+    };
     const c = key('KeyC');
     target.dispatchEvent(c);
     expect(releases).toBe(1);
