@@ -48,20 +48,71 @@ const irregularity = (): number => Math.max(0, shipDetailParams.irregularity);
 type AnyNode = any;
 
 /**
- * Ship world matrix INVERSE, so a shared piece material can turn a world
- * position into a ship-local one — the coordinate the hull wetline's drying
- * memory is indexed by. Module-level and set from the main loop, mirroring
- * `uShipSunDirection` in sailMaterial.ts (same pattern, same reason: piece
- * materials are built per assembly but this is per frame).
+ * The frame a material resolves world positions into — the coordinate the
+ * hull wetline's drying memory, the deck-water solver and the deck heightfield
+ * are all indexed by.
  *
- * UNTIL main.ts calls setShipWorldMatrix() each frame this stays identity,
- * which means the wetline reads ship-local == world and the drying band
- * lands in the wrong place. Caustics and bounce do NOT depend on it.
+ * WHY THIS IS A PARAMETER AND NOT A MODULE-LEVEL UNIFORM. It used to be one
+ * (`uShipWorldInverse`), which is fine right up until a SECOND object wants
+ * the same material. The islands agent found it by reading: a pier sharing
+ * this material would have had its wet band slide around as the ship sailed,
+ * because the pier's world→local transform would have been the ship's. That
+ * is the third instance of this shape in this project — `setShipWorldMatrix`
+ * is still written once per assembly per frame, so the enemy galleon's matrix
+ * wins and the PLAYER's wetline is indexed in the wrong frame, and three's own
+ * `_defaultRT`/`_sharedDepthbuffer` are resized by whichever consumer touched
+ * them last. A module-scope uniform holding a per-object transform fails
+ * silently and reads as a shader bug.
+ *
+ * OMITTING IT IS MEANINGFUL, not a degraded path. `waterLighting` treats
+ * `shipLocalPos` as optional and falls back to plain depth-below-surface
+ * wetness, which is exactly right for something that does not move: a pier's
+ * wet band belongs where the water is, not where a hull's drying memory says.
+ * Only the deck families (deck water, deck heightfield) genuinely require a
+ * frame, and they are ship-only by construction.
  */
-export const uShipWorldInverse = uniform(new THREE.Matrix4());
+export interface LocalFrame {
+  /** world → frame-local matrix, as a live TSL uniform */
+  readonly worldInverse: AnyNode;
+  /** this fragment's position in the frame (vec3 node), built once and shared */
+  readonly localPos: AnyNode;
+  setFromMatrix(m: THREE.Matrix4): void;
+}
+
+export function createLocalFrame(): LocalFrame {
+  const worldInverse = uniform(new THREE.Matrix4());
+  return {
+    worldInverse,
+    // ONE node, not one per consumer: this used to be rebuilt at each of the
+    // four call sites, so the shader did four identical matrix multiplies
+    localPos: worldInverse.mul(vec4(positionWorld, 1)).xyz,
+    setFromMatrix(m: THREE.Matrix4): void {
+      worldInverse.value.copy(m).invert();
+    },
+  };
+}
+
+/**
+ * The frame the SHIP's piece materials use by default.
+ *
+ * Still one shared instance, because main.ts caches piece materials by KIND
+ * and shares them between the player and the enemy on purpose — three r180's
+ * `getMaterialCacheKey` appends `object.uuid` for `InstancedMesh` but not for
+ * plain `Mesh` (their own TODO, PR #29066), so pipelines are scarcer here than
+ * they look and a second full set of ~30 wood shaders is not free. The
+ * two-ships ambiguity therefore still exists — but it is now visible at ONE
+ * call site instead of being wired into the material, and anything that is
+ * not a ship no longer has to inherit it.
+ */
+const shipFrame = createLocalFrame();
 
 export function setShipWorldMatrix(m: THREE.Matrix4): void {
-  uShipWorldInverse.value.copy(m).invert();
+  shipFrame.setFromMatrix(m);
+}
+
+/** the default frame for ship pieces; structures pass their own, or none */
+export function shipLocalFrame(): LocalFrame {
+  return shipFrame;
 }
 
 export interface WoodTones {
@@ -146,8 +197,15 @@ export interface ShipMaterialHandle {
   refresh(): void;
 }
 
+/**
+ * @param frame the local frame world positions resolve into (wetline / deck
+ *              water / deck field indexing). Omit for anything that is not a
+ *              ship: the wet band then comes straight off the sea surface,
+ *              which is what a pier or a hut wants. See {@link LocalFrame}.
+ */
 export function createWoodMaterial(
   tones: WoodTones,
+  frame?: LocalFrame,
   p: ShipMaterialParams = shipMaterialParams,
 ): ShipMaterialHandle {
   const material = new THREE.MeshStandardNodeMaterial();
@@ -442,10 +500,8 @@ export function createWoodMaterial(
   // deck family, and multiplicatively, so it composes with our own relief
   // instead of replacing it: wet timber's grain flattens under the film, which
   // is what `reliefScale` expresses.
-  if (tones.deckField !== undefined) {
-    const wet = deckWetness({
-      shipLocalPos: uShipWorldInverse.mul(vec4(positionWorld, 1)).xyz,
-    });
+  if (tones.deckField !== undefined && frame !== undefined) {
+    const wet = deckWetness({ shipLocalPos: frame.localPos });
     color = color.mul(wet.tint);
     rough = rough.mul(wet.roughnessScale);
     height = height.mul(wet.reliefScale).add(wet.heightAdd);
@@ -458,11 +514,11 @@ export function createWoodMaterial(
   // (per-board offsets) is read here: the structural channel is real geometry
   // already — coamings, castle steps and the bulwark are pieces, and adding
   // them again as shading relief would double-count them.
-  if (tones.deckField !== undefined) {
+  if (tones.deckField !== undefined && frame !== undefined) {
     const fld = tones.deckField;
     // ship-local, not piece-local: the four deck-family kinds sit at four
     // different origins, and one projection has to serve all of them
-    const local = uShipWorldInverse.mul(vec4(positionWorld, 1)).xyz;
+    const local = frame.localPos;
     const fu = local.x.sub(fld.minX).div(Math.max(1e-3, fld.maxX - fld.minX));
     const fv = local.z.sub(fld.minZ).div(Math.max(1e-3, fld.maxZ - fld.minZ));
     const sample = textureNode(fld.texture, vec2(fu, fv));
@@ -504,7 +560,12 @@ export function createWoodMaterial(
   const water = waterLighting({
     worldPos: positionWorld,
     normal: normalWorldGeometry,
-    shipLocalPos: uShipWorldInverse.mul(vec4(positionWorld, 1)).xyz,
+    // no frame ⟹ no shipLocalPos ⟹ waterLighting falls back to plain
+    // depth-below-surface wetness, which is the correct answer for a fixed
+    // structure and a silently wrong one for a hull (§V.49 note below is
+    // unaffected either way: reliefScale is applied AFTER dFdx, not to the
+    // height field)
+    ...(frame === undefined ? {} : { shipLocalPos: frame.localPos }),
     mode: 'both',
   });
   color = color.mul(water.tint);

@@ -20,7 +20,13 @@ import {
   sectionHalf,
   type HullShape,
 } from '../src/ship/hullMath';
-import { SPAR_AXIS, createPieceMaterial } from '../src/ship/pieceMaterials';
+import {
+  SPAR_AXIS,
+  createLocalFrame,
+  createPieceMaterial,
+  setShipWorldMatrix,
+  shipLocalFrame,
+} from '../src/ship/pieceMaterials';
 import { createDeckFieldTexture } from '../src/ship/deckFieldTexture';
 import {
   FLAG_CRACK_RATIO,
@@ -1337,5 +1343,63 @@ describe('planking is cut by eye, not by CNC', () => {
     // meaning anything.
     expect(shipDetailParams.irregularity).toBeGreaterThan(0);
     expect(m.plankWander * 0).toBe(0); // dial to 0 ⟹ dead straight, by construction
+  });
+});
+
+/**
+ * THE LOCAL FRAME (islands agent, found by reading rather than by shipping).
+ *
+ * `createWoodMaterial` used to resolve world positions through a MODULE-LEVEL
+ * `uShipWorldInverse`. That is fine until a second object wants the material:
+ * a pier reusing it would have had its wet band slide around as the ship
+ * sailed, because the pier's world→local transform would have been the ship's.
+ *
+ * This is the third instance of the shape in this project — `setShipWorldMatrix`
+ * is still written once per assembly per frame, so the enemy's matrix wins and
+ * the player's wetline is indexed in the wrong frame; and three's own
+ * `_defaultRT`/`_sharedDepthbuffer` are resized by whichever consumer touched
+ * them last. It always fails SILENTLY and always reads as a shader bug, which
+ * is why it is worth a test that fails on the mechanism: two frames must be
+ * two frames.
+ */
+describe('a material resolves world space through a frame it was GIVEN', () => {
+  it('keeps two frames independent — the whole point of the parameter', () => {
+    const ship = createLocalFrame();
+    const pier = createLocalFrame();
+    const a = new THREE.Matrix4().makeTranslation(10, 2, -30);
+    const b = new THREE.Matrix4().makeTranslation(-4, 0, 7);
+    ship.setFromMatrix(a);
+    pier.setFromMatrix(b);
+    // each holds its OWN inverse; writing one must not touch the other
+    expect(ship.worldInverse.value.elements).toEqual(a.clone().invert().elements);
+    expect(pier.worldInverse.value.elements).toEqual(b.clone().invert().elements);
+    ship.setFromMatrix(b);
+    expect(pier.worldInverse.value.elements).toEqual(b.clone().invert().elements);
+    expect(ship.worldInverse.value.elements).toEqual(b.clone().invert().elements);
+    // …and the module-level ship frame is one of them, not a fourth thing
+    setShipWorldMatrix(a);
+    expect(shipLocalFrame().worldInverse.value.elements).toEqual(a.clone().invert().elements);
+    expect(pier.worldInverse.value.elements).toEqual(b.clone().invert().elements);
+  });
+
+  it('builds every piece kind with NO frame — the shore-structure path', () => {
+    // omitting the frame is a supported answer, not a degraded one:
+    // waterLighting treats shipLocalPos as optional and falls back to plain
+    // depth-below-surface wetness, which is where a pier's wet band belongs.
+    // The deck families need a frame and must SKIP their branches, not throw.
+    const field = createDeckFieldTexture(buildDeckHeightfield(galleon)!);
+    for (const kind of new Set(galleon.map((p) => p.kind))) {
+      const mat = createPieceMaterial(kind, field, null);
+      expect(mat).toBeTruthy();
+      mat.dispose();
+    }
+  });
+
+  it('still gives ship pieces the ship frame by default', () => {
+    // every caller in this project relies on the default; the refactor must
+    // not have quietly made the hull wetline stop tracking the hull.
+    const mat = createPieceMaterial('hull-section');
+    expect(mat).toBeTruthy();
+    mat.dispose();
   });
 });

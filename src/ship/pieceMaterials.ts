@@ -10,6 +10,8 @@ import type { PieceKind } from './pieceTypes';
 import { shipMaterialParams } from '../params/ship';
 import {
   createWoodMaterial,
+  shipLocalFrame,
+  type LocalFrame,
   type ShipMaterialHandle,
   type WoodTones,
 } from './woodMaterial';
@@ -19,7 +21,8 @@ import { createGlassMaterial, createIronMaterial } from './fittingMaterials';
 import type { DeckFieldSampler } from './deckFieldTexture';
 
 export { uShipSunDirection } from './sailMaterial';
-export { setShipWorldMatrix } from './woodMaterial';
+export { createLocalFrame, setShipWorldMatrix, shipLocalFrame } from './woodMaterial';
+export type { LocalFrame } from './woodMaterial';
 
 type Family = 'hull' | 'deck' | 'spar' | 'trim' | 'sail' | 'flag' | 'iron' | 'glass';
 
@@ -159,9 +162,18 @@ const OPEN_SHELL_KINDS = new Set<PieceKind>([
   'crow-nest',
 ]);
 
+/**
+ * @param frame the local frame this piece's wetline / deck water / deck field
+ *              resolve into. Defaults to the ship's, which is what every
+ *              caller in this project wants; a shore structure reusing the
+ *              wood material passes its own, or `null` for none (see
+ *              {@link LocalFrame} — a fixed structure genuinely wants the
+ *              plain sea-surface wet band, not a hull's drying memory).
+ */
 export function createPieceMaterial(
   kind: PieceKind,
   deckField?: DeckFieldSampler,
+  frame: LocalFrame | null = shipLocalFrame(),
 ): THREE.MeshStandardNodeMaterial {
   const family = FAMILY_OF[kind];
   let handle: ShipMaterialHandle;
@@ -173,7 +185,7 @@ export function createPieceMaterial(
       handle = createFlagClothMaterial();
       break;
     case 'iron':
-      handle = createIronMaterial();
+      handle = createIronMaterial(frame ?? undefined);
       break;
     case 'glass':
       handle = createGlassMaterial();
@@ -181,6 +193,7 @@ export function createPieceMaterial(
     default:
       handle = createWoodMaterial(
         woodTones(family, kind, WATERLINE_KINDS.has(kind), deckField),
+        frame ?? undefined,
       );
   }
   if (OPEN_SHELL_KINDS.has(kind)) handle.material.side = THREE.DoubleSide;

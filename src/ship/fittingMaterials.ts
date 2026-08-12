@@ -21,15 +21,15 @@ import {
   smoothstep,
   uniform,
   vec3,
-  vec4,
 } from 'three/tsl';
 import { waterLighting } from '../caustics';
 import { triplanarFbm } from '../terrain/noise';
 import { shipMaterialParams, type ShipMaterialParams } from '../params/ship';
-import { uShipWorldInverse, type ShipMaterialHandle } from './woodMaterial';
+import type { LocalFrame, ShipMaterialHandle } from './woodMaterial';
 
 /** wrought iron: anchors, chainplate straps, deadeye bands */
 export function createIronMaterial(
+  frame?: LocalFrame,
   p: ShipMaterialParams = shipMaterialParams,
 ): ShipMaterialHandle {
   const material = new THREE.MeshStandardNodeMaterial();
@@ -44,7 +44,7 @@ export function createIronMaterial(
   const water = waterLighting({
     worldPos: positionWorld,
     normal: normalWorldGeometry,
-    shipLocalPos: uShipWorldInverse.mul(vec4(positionWorld, 1)).xyz,
+    ...(frame === undefined ? {} : { shipLocalPos: frame.localPos }),
     mode: 'both',
   });
   material.colorNode = color.mul(water.tint);
