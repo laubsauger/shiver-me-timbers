@@ -239,7 +239,21 @@ export const foamParams: FoamParams = registerParams(
     injectFineCascade: 1,
     capVariationScale: 0.008,
     capVariationStrength: 0.55,
-    crestElongation: 2.0,
+    // 1 = ISOTROPIC, and it has to stay there now. `crestAnisoCoord` maps
+    // detail into a rotate-then-stretch space whose ANGLE FIELD VARIES IN
+    // SPACE, so above 1 it is not a 2:1 stretch, it is a shear whose local
+    // anisotropy is far larger than the nominal ratio. The old value-noise
+    // fbm was low-contrast and round, so that shear read as mild texture.
+    // The art texture's crest channel is a worley WALL NETWORK — thin,
+    // high-contrast lines — and dragging those through a varying angle field
+    // combs them into long curving flow-lines across the whole sea (user
+    // report + docs/bug-foam-streaks-topdown.jpeg). The dissolve threshold is
+    // sampled through the same space, so it combed the SILHOUETTE too,
+    // undoing the torn contour the art texture exists to provide.
+    // Measured: 2 → 1 removes the combing completely and the cellular
+    // structure underneath lands much closer to ref-video-foam-1/2.jpg;
+    // 1.4 still combs. Raise this only if the detail is round again.
+    crestElongation: 1.0,
     // ~170 m per swing, ±57°: measured cap orientation spread goes from 3.9°
     // (one global axis) to >20° once the injection carries the shape too
     crestDirectionScale: 0.006,
