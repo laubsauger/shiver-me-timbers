@@ -235,15 +235,24 @@ const LEDGER: readonly LedgerEntry[] = [
   {
     file: 'src/foam/foamShading.ts',
     source: foamShadingSource,
-    sites: 1,
-    // foamDetailMask / foamTintNode / foamWarpVec / capVariationNode are all
-    // procedural (terrain/noise). The one texture() lives in foamShadingNode,
-    // which the ocean material does not call. Listed so an addition trips (1).
-    fragmentTextures: 0,
-    fragmentSamplers: 0,
+    sites: 3,
+    // THE FOAM ART TEXTURE (§T.5 stage 3, talk 07:49) — the spare sampler
+    // §V.40 reserved, spent. `foamDetailMask` reads it TWICE, at the crest
+    // world scale and at the soft one, which is the talk's "high frequency
+    // texture at the crest … blend to a lower frequency texture as it blends
+    // out". Two reads, ONE binding and ONE sampler: `foamTexture.ts` returns a
+    // singleton `DataTexture` and bindings dedupe on `value.uuid` per stage.
+    // The singleton is not tidiness — two texture OBJECTS would have cost both
+    // spares for one feature, and the second spare is the whole margin.
+    //
+    // The third site is `foamShadingNode`, which the ocean material does not
+    // call (foam/index.ts owns the per-cascade lookups). It contributes
+    // nothing here and is counted only so an addition trips.
+    fragmentTextures: 1,
+    fragmentSamplers: 1,
     vertexTextures: 0,
     vertexSamplers: 0,
-    why: 'foamShadingNode is not on the ocean path — tripwire only',
+    why: 'texture(foamArtTexture())×2 = 1 binding (same UUID) + foamShadingNode (off-path)',
   },
   {
     file: 'src/flowfoam/index.ts',
@@ -341,9 +350,9 @@ describe('§V.40 ocean material binding budget', () => {
     }
   });
 
-  it('leaves the FRAGMENT stage two samplers of headroom', () => {
+  it('leaves the FRAGMENT stage ONE sampler of headroom', () => {
     const samplers = sum((e) => e.fragmentSamplers);
-    // 14 of 16, reclaimed in two moves and spent once:
+    // 15 of 16, reclaimed in two moves and spent twice:
     //   −1  three's coloured-shadow colour texture (uncoloredShadowNode.ts)
     //   +1  SPENT on the second foam filtered tier (cascade 1), deliberately
     //       and after measuring — without it that band either aliases into a
@@ -351,41 +360,39 @@ describe('§V.40 ocean material binding budget', () => {
     //       entirely, taking the sea's whole 1–3 m cap scale with it
     //   −2  the three `derivatives` textures folded into ONE array texture
     //       (src/ocean/oceanTextures.ts) — see the header
+    //   +1  SPENT on the foam ART TEXTURE (§T.5 stage 3), which is what the
+    //       reclamation was for. ONE texture, four packed channels, read at
+    //       two world scales — the crest/soft pair the talk interpolates
+    //       between, which this project substituted value noise for since the
+    //       beginning. Value noise has ROUND level sets, so thresholding it
+    //       gives discs; that substitution is the standing "blotchy" report.
     //
-    // The two spare are for the foam art textures (§I/§T.5/§T.22: the
-    // crest/soft pair the talk's stage 3 interpolates between, which this
-    // project has been substituting procedural noise for since the beginning).
-    // The foam plan needs ONE — two samples of the same texture at different UV
-    // scales dedupe by UUID to a single binding. The second spare covers the
-    // soft tier if crest and soft end up as two distinct textures.
+    // ONE spare left, and it is the whole margin. Spending it needs a
+    // reclamation first (§V.40), not a good argument.
     //
     // Still far too tight for a 3-cascade CSMShadowNode: three builds one full
     // ShadowNode per cascade, so even with the uncoloured subclass that is
-    // +1 texture and +1 sampler PER EXTRA CASCADE on top of the 14 here.
-    expect(samplers).toBe(14);
+    // +1 texture and +1 sampler PER EXTRA CASCADE on top of the 15 here.
+    expect(samplers).toBe(15);
     expect(samplers).toBeLessThanOrEqual(SAMPLER_CEILING);
     expect(sum((e) => e.vertexSamplers)).toBeLessThanOrEqual(SAMPLER_CEILING);
   });
 
-  it('has come back INSIDE the default sampled-texture limit, exactly', () => {
+  it('is back OVER the default sampled-texture limit, so the raise is live', () => {
     const textures = sum((e) => e.fragmentTextures);
-    expect(textures).toBe(16);
-    // This assertion used to read "exceeds the DEFAULT limit, so app.ts must
-    // raise it" and it was true at 18. It is not true any more: the array
-    // texture took two off and the uncoloured shadow node a third, so for the
-    // first time the material fits a device created with the WebGPU defaults —
-    // exactly, with nothing to spare.
-    //
-    // Do NOT read that as "the raise in app.ts is dead code". It is one texture
-    // of margin, and the foam art textures are about to spend it; the moment
-    // this goes to 17 the raise is load-bearing again and its absence is a
-    // material that never draws. The test below still pins it.
-    //
-    // The real point is that TEXTURES ARE NO LONGER THE AXIS THAT BINDS. On
-    // Apple silicon the adapter grants far more than 16 textures once asked,
-    // while `maxSamplersPerShaderStage` IS 16 and asking changes nothing. Count
+    expect(textures).toBe(17);
+    // It briefly fit the WebGPU DEFAULT exactly, at 16, between the array-
+    // texture reclamation and the foam art texture. The art texture spent that
+    // last one, as the note there predicted it would, so `requiredLimits` in
+    // app.ts is LOAD-BEARING again: on a device created with the defaults this
+    // material's bind group layout fails, the pipeline is invalid, and the
+    // ocean never draws — with the console naming the descriptor rather than
+    // the texture that did it. The test below pins the request.
+    expect(textures).toBeGreaterThan(WEBGPU_DEFAULT_SAMPLED_TEXTURES_PER_STAGE);
+    // The real point is that TEXTURES ARE NOT THE AXIS THAT BINDS. On Apple
+    // silicon the adapter grants far more than 16 textures once asked, while
+    // `maxSamplersPerShaderStage` IS 16 and asking changes nothing. Count
     // samplers; the texture number is a leading indicator, not a limit.
-    expect(textures).toBeLessThanOrEqual(WEBGPU_DEFAULT_SAMPLED_TEXTURES_PER_STAGE);
     // 3/3 and under no pressure — the vertex stage samples only the three
     // displacement textures. If the FRAGMENT side ever needs them, see "THE
     // VERTEX ESCAPE HATCH" in this file's header: an array displacement with a

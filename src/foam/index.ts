@@ -341,6 +341,9 @@ export function createFoamSim(
       const tierWeight = (texelMetres: number) => {
         // e0 > e1: 1 below the keep width, 0 above one pixel per texel
         const keep = float(texelMetres).div(uTierKeepPixels.max(1));
+        // @band-limited-elsewhere: this IS the band limit. `pixelMetres` is
+        // coordFootprint(worldXZ) = dFdx+dFdy, measured against the TIER's own
+        // texel size — the sampling rate itself, not a proxy for it.
         return smoothstep(keep.mul(uTierFadeSpan.max(1.05)), keep, pixelMetres);
       };
       let raw: any = float(0);

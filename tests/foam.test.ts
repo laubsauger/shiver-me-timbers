@@ -31,6 +31,7 @@ import {
   minEigenvalue,
   foamTexelMetres,
   decayFactorPerFrame,
+  dissolveKnee,
   injectAmount,
   jacobianSigma,
   wrapIndex,
@@ -1009,5 +1010,139 @@ describe('foam params (§V16: tunables registered, bounded, defaults sane)', () 
 
   it('decayHalfLife slider cannot reach 0 (instant-kill is code-guarded, not a preset)', () => {
     expect(getParamsEntry('foam')!.meta.decayHalfLife.min).toBeGreaterThan(0);
+  });
+});
+
+/* ==========================================================================
+ * §T.5 stage 3 — THE DISSOLVE. The art texture carves the SILHOUETTE.
+ *
+ * Every foam pass before this one modulated the INTERIOR of a patch. The
+ * outline is what the eye reads, and the outline was a super-level set of an
+ * isotropic gaussian blur, which is a circle by construction — so a textured
+ * patch was still a disc, which is the standing "blotchy, reads as discs"
+ * report. These tests pin the two properties that make swapping the threshold
+ * for a per-texel one safe rather than a rewrite.
+ * ======================================================================= */
+
+describe('the dissolve gate (§T.5 stage 3, foamShading mirror)', () => {
+  const KNEE_LOW = 0.03;
+  const KNEE_HIGH = 0.12;
+
+  /** the gate this replaces: a constant threshold on the blurred mask */
+  function oldKnee(mask: number): number {
+    const t = Math.min(1, Math.max(0, (mask - KNEE_LOW) / (KNEE_HIGH - KNEE_LOW)));
+    return t * t * (3 - 2 * t);
+  }
+
+  it('erodeDepth 0 reproduces the old gate EXACTLY, at any threshold sample', () => {
+    // this is what makes the art texture an A/B rather than a rewrite: with
+    // the knob at zero the shader is bit-for-bit the code that shipped, so a
+    // difference in the frame is the dissolve and nothing else
+    for (let i = 0; i <= 40; i++) {
+      const mask = i / 40;
+      for (const u of [0, 0.25, 0.5, 0.75, 1]) {
+        expect(dissolveKnee(mask, u, KNEE_LOW, KNEE_HIGH, 0, 1)).toBeCloseTo(
+          oldKnee(mask),
+          12,
+        );
+      }
+    }
+  });
+
+  it('tears the SKIRT and leaves the CORE solid — the asymmetry is the point', () => {
+    // real foam is dense in the middle and ragged at the edge. An erosion that
+    // ate the core would just be a thinner disc, which is the bug, not the fix.
+    const d = 0.45;
+    const core = 0.9;
+    const skirt = 0.2;
+    const atCore = [0, 0.5, 1].map((u) => dissolveKnee(core, u, KNEE_LOW, KNEE_HIGH, d, 1));
+    // above the deepest threshold the mask survives whatever the texture says
+    expect(Math.min(...atCore)).toBeGreaterThan(0.999);
+    // in the skirt the SAME mask value is present or absent depending on the
+    // texture — that is a torn boundary rather than a soft ring
+    const atSkirt = [0, 0.5, 1].map((u) => dissolveKnee(skirt, u, KNEE_LOW, KNEE_HIGH, d, 1));
+    expect(atSkirt[0]).toBeGreaterThan(0.99);
+    expect(atSkirt[2]).toBeLessThan(0.01);
+  });
+
+  it('never removes foam the old gate kept, at the same mask value', () => {
+    // a dissolve may only CUT INTO the skirt; if it could brighten, coverage
+    // would rise with erodeDepth and the knob would be doing two things
+    for (let i = 0; i <= 40; i++) {
+      const mask = i / 40;
+      for (const u of [0, 0.3, 0.7, 1]) {
+        expect(dissolveKnee(mask, u, KNEE_LOW, KNEE_HIGH, 0.45, 1)).toBeLessThanOrEqual(
+          oldKnee(mask) + 1e-12,
+        );
+      }
+    }
+  });
+
+  it('§V.48b: the sub-pixel limit is the average of the GATE, not of the field', () => {
+    // A uniform threshold on [0,d] passes a texel of mask m with probability
+    // m/d, so a pixel that no longer resolves the field should see a RAMP OF
+    // WIDTH d. Fading the FIELD to its own mean (0.5, exactly, by
+    // construction) instead leaves the same narrow step at a shifted
+    // threshold — a fade to a hard edge, which is the mistake §V.48(b) names.
+    const d = 0.45;
+    const samples = 400;
+    /** the true pixel average at full resolution */
+    const truth = (m: number) => {
+      let sum = 0;
+      for (let k = 0; k < samples; k++) {
+        sum += dissolveKnee(m, (k + 0.5) / samples, KNEE_LOW, KNEE_HIGH, d, 1);
+      }
+      return sum / samples;
+    };
+    /** what this code does once the field is sub-pixel */
+    const ours = (m: number) => dissolveKnee(m, 0.5, KNEE_LOW, KNEE_HIGH, d, 0);
+    /** the naive alternative: fade the FIELD to its mean, keep the narrow step */
+    const naive = (m: number) => dissolveKnee(m, 0.5, KNEE_LOW, KNEE_HIGH, d, 1);
+
+    let ourWorst = 0;
+    let naiveWorst = 0;
+    for (let i = 0; i <= 200; i++) {
+      const m = i / 200;
+      ourWorst = Math.max(ourWorst, Math.abs(ours(m) - truth(m)));
+      naiveWorst = Math.max(naiveWorst, Math.abs(naive(m) - truth(m)));
+    }
+    // exact at both ends and over the whole support; the residual is the
+    // cubic ease against a box-convolved ramp — measured 0.045 of alpha
+    expect(ourWorst).toBeLessThan(0.06);
+    // and the alternative is out by 0.403, in the middle of the ramp where
+    // all of the coverage is
+    expect(naiveWorst).toBeGreaterThan(0.35);
+    expect(naiveWorst).toBeGreaterThan(ourWorst * 5);
+  });
+
+  it('§V.60: the gate is never narrower than the body it multiplies', () => {
+    // the authored knee width is a FLOOR on the transition, so no combination
+    // of erosion, retirement or footprint can re-impose a hard edge after
+    // every softening stage upstream — that is §B/§V.60's exact shape
+    for (const resolved of [0, 0.5, 1]) {
+      for (const fw of [0, 0.01, 0.2]) {
+        const lo = 0.03;
+        const hi = 0.12;
+        const below = dissolveKnee(lo, 0.5, lo, hi, 0.45, resolved, fw);
+        const above = dissolveKnee(hi, 0.5, lo, hi, 0.45, resolved, fw);
+        // a transition at least as wide as (hi − lo) cannot be saturated at
+        // both ends of that interval
+        expect(above - below).toBeLessThan(1 - 1e-9);
+      }
+    }
+  });
+
+  it('is finite and in [0,1] for degenerate inputs (§V28)', () => {
+    const bad = [
+      dissolveKnee(0.5, 5, 0.03, 0.12, 9, 9),
+      dissolveKnee(0.5, -3, 0.03, 0.12, -1, -1),
+      dissolveKnee(0.5, 0.5, 0.12, 0.12, 0, 1),
+      dissolveKnee(0, 0, 0, 0, 0, 0, 0),
+    ];
+    for (const v of bad) {
+      expect(Number.isFinite(v)).toBe(true);
+      expect(v).toBeGreaterThanOrEqual(0);
+      expect(v).toBeLessThanOrEqual(1);
+    }
   });
 });

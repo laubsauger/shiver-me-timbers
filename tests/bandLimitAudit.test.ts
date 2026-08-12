@@ -102,7 +102,12 @@ describe('§V.48 tripwire: unfiltered edges in shader code', () => {
    *      to a hard edge);
    *   2. or mark it `@band-limited-elsewhere` WITH a reason.
    */
-  const BASELINE = 188; // measured 2026-08-12; ratchet only downward
+  // 188 → 184 when the foam art texture landed (§T.5 stage 3): the four gates
+  // in src/foam that ARE the band limit — `smoothstep` on
+  // `coordFootprint(coord)`, i.e. on dFdx+dFdy directly — now say so with the
+  // marker instead of reading as unfiltered. The lexical rule cannot see a
+  // footprint that arrives through a helper.
+  const BASELINE = 184; // measured 2026-08-12; ratchet only downward
 
   it('does not grow the population of unfiltered edges', () => {
     const findings = Object.entries(SOURCES)

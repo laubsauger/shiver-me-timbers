@@ -47,10 +47,50 @@ export interface FoamParams {
    * is the thing that hides it).
    */
   blurSpreadMetres: number;
-  /** world-space frequency of the high-freq crackle layer on fresh foam */
-  crackleScale: number;
-  /** world-space frequency of the soft mottling on dissipated foam */
-  mottleScale: number;
+  /**
+   * WORLD METRES the foam art texture repeats over for the CREST lookup — the
+   * talk's "high frequency foam texture at the crest of the wave" (§T.5 stage
+   * 3). A metre length, not a frequency: every other band-limit quantity in
+   * this file is a length or a pixel count, and the §V.48 feature width the
+   * dissolve is gated against is `this / FOAM_BREAKUP_CELLS`.
+   *
+   * At 6 m the texture's 26-cell bubble raft draws ≈23 cm bubble clusters and
+   * its 52-cell one ≈12 cm, which is the scale of the lace on a breaking lip
+   * in docs/ref-video-foam-2.jpg. Raise it and the crest reads as a coarse
+   * curdle; lower it and the repeat becomes visible on a big patch.
+   */
+  artCrestMetres: number;
+  /**
+   * WORLD METRES for the SOFT lookup — "a lower frequency texture as it blends
+   * out". Deliberately NOT a small multiple of `artCrestMetres`: the two are
+   * reads of the SAME texture, so a 2× or 4× ratio would line their features
+   * up and draw a visible nested grid. 28/6 ≈ 4.67 keeps them incommensurate.
+   */
+  artSoftMetres: number;
+  /**
+   * How deeply the art texture's breakup channel EATS INTO the sim mask before
+   * the coverage gate, in raw mask units. This is the knob that decides
+   * whether foam has a torn outline or a blurred one.
+   *
+   * 0 reproduces the pre-art-texture gate exactly (`smoothstep(kneeLow,
+   * kneeHigh, mask)`), which is what makes it a safe A/B. Above 0 the gate's
+   * threshold varies per texel over [kneeLow, kneeLow + erodeDepth]: a texel
+   * whose mask value is m survives with probability m/erodeDepth, so the
+   * SKIRT of every patch is torn into filaments while the core — where the
+   * mask is already above erodeDepth — stays solid. That asymmetry is the
+   * point; real foam is dense in the middle and ragged at the edge, and an
+   * erosion that ate the core would just be a thinner disc.
+   *
+   * IT COSTS COVERAGE, and the number is measured rather than hoped: on a
+   * gaussian-disc fixture (which is exactly the shape the isotropic blur
+   * produces) mean alpha falls 0.478 → 0.337 at 0.22, i.e. −29%, because the
+   * threshold's mean rises from the knee midpoint to kneeLow + depth/2. That
+   * is a real trade — the coverage it removes is the soft skirt, which is the
+   * "painted-on" ring — but it must not be silent, so `residueKneeLow/High`
+   * were lowered in the same change to bring the fixture back to 0.91× (see
+   * them). Anything left over is deliberate.
+   */
+  erodeDepth: number;
   /** 0 = pure white foam, 1 = fully warm-tinted (§V20 warm-tinted foam) */
   tintWarmth: number;
   /** world-space frequency of the fbm domain-warp on the sim-texture lookup */
@@ -189,8 +229,9 @@ export const foamParams: FoamParams = registerParams(
     // = the smallest injected minor axis measured across bands and presets
     // (cascade 1 at swell, 0.72 m), so no band's caps are re-rounded
     blurSpreadMetres: 0.6,
-    crackleScale: 2.4,
-    mottleScale: 0.35,
+    artCrestMetres: 6.0,
+    artSoftMetres: 28.0,
+    erodeDepth: 0.22,
     tintWarmth: 0.12,
     uvWarpScale: 0.12,
     uvWarpMeters: 1.4,
@@ -211,12 +252,17 @@ export const foamParams: FoamParams = registerParams(
     detailKeepPixels: 2,
     detailFadeSpan: 3.5,
     farFoamFade: 0,
-    // deliberately the SAME numbers the shader literal held: this change makes
-    // the knee reachable, it does not move it. Loosening it at the same time as
-    // fixing the injection gate would have put two unmeasured changes into one
-    // coverage report — and coverage is exactly what is under dispute.
-    residueKneeLow: 0.03,
-    residueKneeHigh: 0.12,
+    // MOVED, once, with the number measured (was 0.03 / 0.12 — "deliberately
+    // the same numbers the shader literal held"). The dissolve (`erodeDepth`)
+    // sits in series with this knee and raises the MEAN threshold from the
+    // knee midpoint to kneeLow + depth/2, so leaving the knee where it was
+    // would have shipped a −29% coverage change wearing a shape change's
+    // clothes. At 0.005 / 0.03 the same fixture reads 0.91× the old coverage,
+    // and the gate is now mostly the dissolve — which is the point: thin foam
+    // survives in PATCHES where the art texture allows it instead of as a
+    // uniform ring of residue.
+    residueKneeLow: 0.005,
+    residueKneeHigh: 0.03,
   },
   foamParamsMeta(),
 );
@@ -227,8 +273,9 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
     decayHalfLife: { min: 0.05, max: 10, step: 0.05 },
     blurRadius: { min: 0, max: 4, step: 0.25 },
     blurSpreadMetres: { min: 0, max: 8, step: 0.05 },
-    crackleScale: { min: 0.1, max: 20, step: 0.1 },
-    mottleScale: { min: 0.01, max: 5, step: 0.01 },
+    artCrestMetres: { min: 0.5, max: 40, step: 0.25 },
+    artSoftMetres: { min: 2, max: 200, step: 0.5 },
+    erodeDepth: { min: 0, max: 1, step: 0.01 },
     tintWarmth: { min: 0, max: 1, step: 0.01 },
     uvWarpScale: { min: 0.01, max: 1, step: 0.01 },
     uvWarpMeters: { min: 0, max: 6, step: 0.1 },

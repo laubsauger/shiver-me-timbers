@@ -453,6 +453,79 @@ export function blurMixPerStep(
  * a global one is the bug. Anisotropy belongs to the injection.
  * ---------------------------------------------------------------------- */
 
+/* -------------------------------------------------------------------------
+ * THE DISSOLVE (§T.5 stage 3). CPU mirror of foamShading's coverage gate.
+ *
+ * Every foam pass before this one modulated the INTERIOR of a patch and left
+ * its OUTLINE alone, and the outline is what the eye reads. That outline was a
+ * super-level set of an isotropic gaussian blur — a circle by construction,
+ * see "THE BLUR WAS THE SHAPE" above — so a textured patch was still a disc,
+ * which is the standing "blotchy, reads as discs" report.
+ *
+ * Here the gate's THRESHOLD is a per-texel sample of the art texture instead
+ * of a constant, so the outline is that texture's torn contour. The threshold
+ * field is uniform on [0,1] by construction (foamPattern.rankNormalise), which
+ * is what makes the two properties below true rather than fitted.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * One pixel of the dissolve gate.
+ *
+ * `threshold01` is the art texture's breakup sample, `resolved` is 1 while its
+ * cells still span ≥ 2 px and 0 once they are sub-pixel, `maskFwidth` is
+ * `fwidth(mask)`.
+ *
+ * TWO invariants this exists to pin, both asserted in tests/foam.test.ts:
+ *
+ *   1. `erodeDepth = 0` reproduces the pre-art-texture gate BIT FOR BIT
+ *      (`smoothstep(kneeLow, kneeHigh, mask)`), so turning the art texture on
+ *      is a clean A/B rather than a rewrite.
+ *
+ *   2. `resolved = 0` is the SUB-PIXEL LIMIT OF THE GATE, not of the field.
+ *      A uniform threshold on [0, d] passes a texel of mask m with probability
+ *      m/d, so what a pixel that no longer resolves the field should see is a
+ *      RAMP OF WIDTH d — and that is what widening `softness` to d gives.
+ *      Fading the threshold field to its OWN mean (0.5, exactly) instead would
+ *      leave the same narrow step sitting at a shifted threshold: a fade to a
+ *      hard edge, which is precisely the mistake §V.48(b) exists to name.
+ *
+ *      It is a LIMIT, not an identity, and the residual is stated rather than
+ *      hidden: this gate eases cubically where the true average is a box
+ *      convolved with a ramp, so it differs from the exact pixel average by at
+ *      most 0.045 of alpha (measured over the whole mask range at the shipped
+ *      knee and erodeDepth 0.45). Support and both endpoints are exact. The
+ *      naive alternative is out by 0.403 — nine times worse and in the middle
+ *      of the ramp, where all the coverage is. The test asserts BOTH numbers
+ *      so the choice cannot be quietly reversed.
+ */
+export function dissolveKnee(
+  mask: number,
+  threshold01: number,
+  kneeLow: number,
+  kneeHigh: number,
+  erodeDepth: number,
+  resolved: number,
+  maskFwidth = 0,
+): number {
+  const d = Math.min(1, Math.max(0, erodeDepth));
+  const r = Math.min(1, Math.max(0, resolved));
+  const t = kneeLow + Math.min(1, Math.max(0, threshold01)) * d * r;
+  // ADDED to the authored width, not maxed against it: the full-resolution
+  // gate is itself a ramp of width (kneeHigh − kneeLow), so the average of it
+  // over a uniform threshold spanning d has support d + that — a box
+  // convolved with a ramp. Taking the max instead leaves the sub-pixel gate
+  // NARROWER than the thing it is meant to be the average of, and the error
+  // goes from 0.045 of alpha to 0.196.
+  const softness = Math.max(
+    Math.max(0, kneeHigh - kneeLow) + d * (1 - r),
+    Math.max(0, maskFwidth) * 2,
+    1e-4,
+  );
+  const x = (mask - t) / softness;
+  const c = x < 0 ? 0 : x > 1 ? 1 : x;
+  return c * c * (3 - 2 * c);
+}
+
 /**
  * One texel of the box-reduction pass (GPU mirror: createReducePass): the
  * plain MEAN of the factor×factor source block. Mean, not sum and not a

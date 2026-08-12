@@ -1,26 +1,41 @@
 /**
- * Foam shading TSL nodes (§V6 texture blending, procedural per §I assets):
- * the blurred sim mask blends two detail layers — high-frequency crackle on
- * fresh (high-value) foam, soft low-frequency mottling on dissipated
- * (low-value) foam. The foam value itself is the age proxy: injection writes
- * ~1 at crests and decay+blur only ever lowers it, so value ≈ freshness.
+ * Foam shading TSL nodes — §V6's third stage, and the one this project had
+ * never actually built (talk 07:49: "we blend this with artist authored foam
+ * textures; we have a high frequency foam texture at the crest of the wave,
+ * and then we blend to a lower frequency texture as it blends out").
+ *
+ * The sim mask (foamPasses) is a gaussian-blurred accumulator. This module
+ * turns it into foam, and it does TWO things with the art texture, not one:
+ *
+ *  - the BODY: crest lace on fresh foam → soft mottle as it dissipates, a
+ *    multiply on the mask's interior. This is what the old crackle/mottle fbm
+ *    layers did, done with a texture that has foam's structure in it.
+ *  - the SILHOUETTE: the art texture's breakup channel is a DISSOLVE
+ *    THRESHOLD, subtracted from the mask before the coverage gate. This half
+ *    is new, and it is the answer to "blotchy, reads as discs". Modulating the
+ *    interior of a disc leaves a disc — the eye reads the OUTLINE, and the
+ *    outline was a level set of an isotropic gaussian blur, which is a circle
+ *    by construction. Now it is the art texture's own torn contour.
+ *
+ * The foam value is the age proxy: injection writes ~1 at crests and
+ * decay+blur only ever lowers it, so value ≈ freshness.
  *
  * Anti-boxiness (§V20 user critique "patchy squares, frozen"):
  * - foamWarpVec: fbm domain-warp offset (world meters) applied to the sim
  *   texture LOOKUP so texel edges never read as straight grid lines.
- * - detail noise layers scroll/evolve over time with slight counter-motion,
- *   so standing foam churns instead of reading as a frozen decal.
+ * - the art lookups scroll with slight counter-motion, so standing foam churns
+ *   instead of reading as a frozen decal.
  *
- * §V48 EVERY procedural periodic term here is band-limited by `fwidth`, not
- * by distance — see bandLimitedFbm2 and the `uKneeWiden` comment. This module
- * is the "gritty/stippled interiors" half of the four-image foam report; the
- * lattice half lives in foamMath/foamPasses.
+ * §V48 the art texture carries a mip chain, which supplies the FADE-TO-MEAN
+ * half for free; the WIDEN half is explicit at every gate below, measured
+ * against the FEATURE's own width (§B.20 — never against the repeat).
  *
  * §V23: functional mix(a,b,t)/smoothstep(e0,e1,x) only for 3-arg math.
  * §V20: warm-tinted foam via foamTintNode.
  */
 import {
   float,
+  fwidth,
   mix,
   smoothstep,
   texture,
@@ -31,9 +46,12 @@ import {
 import type * as THREE from 'three/webgpu';
 import { fbm2, valueNoise2 } from '../terrain/noise';
 import type { FoamParams } from '../params/foam';
+import { FOAM_BREAKUP_CELLS, FOAM_SOFT_CELLS } from './foamPattern';
+import { foamArtTexture } from './foamTexture';
 
-const uCrackleScale = uniform(3.0);
-const uMottleScale = uniform(0.35);
+const uArtCrestMetres = uniform(6.0);
+const uArtSoftMetres = uniform(28.0);
+const uErodeDepth = uniform(0.22);
 const uTintWarmth = uniform(0.12);
 const uWarpScale = uniform(0.12);
 const uWarpMeters = uniform(1.4);
@@ -48,8 +66,8 @@ const uSheetFlatten = uniform(0.5);
 const uDetailKeepPixels = uniform(2);
 const uDetailFadeSpan = uniform(3.5);
 const uFarFoamFade = uniform(0);
-const uKneeLow = uniform(0.03);
-const uKneeHigh = uniform(0.12);
+const uKneeLow = uniform(0.005);
+const uKneeHigh = uniform(0.03);
 const uCrestDirScale = uniform(0.006);
 const uCrestDirSwing = uniform(2.0);
 // unit wave-propagation direction (world XZ) — crest lines run ACROSS it.
@@ -59,9 +77,6 @@ const uCrestDirSwing = uniform(2.0);
 const uPropX = uniform(1);
 const uPropZ = uniform(0);
 
-/** octave counts are BUILD constants (they unroll the graph), per terrain/noise */
-const CRACKLE_OCTAVES = 3;
-const MOTTLE_OCTAVES = 2;
 /**
  * Octaves of the world-space cap-strength field.
  *
@@ -81,8 +96,9 @@ export function updateFoamShadingUniforms(
   time?: number,
   windDirRadians?: number,
 ): void {
-  uCrackleScale.value = p.crackleScale;
-  uMottleScale.value = p.mottleScale;
+  uArtCrestMetres.value = Math.max(0.25, p.artCrestMetres);
+  uArtSoftMetres.value = Math.max(1, p.artSoftMetres);
+  uErodeDepth.value = Math.min(1, Math.max(0, p.erodeDepth));
   uTintWarmth.value = p.tintWarmth;
   uWarpScale.value = p.uvWarpScale;
   uWarpMeters.value = p.uvWarpMeters;
@@ -130,10 +146,10 @@ export function coordFootprint(coord: AnyNode): AnyNode {
  * cell is narrower than {@link FILTER_CELLS} pixels — §V48(b), done per
  * octave rather than per field.
  *
- * WHY PER OCTAVE, and why this is the grit (§V48's SIXTH-occurrence lesson
+ * WHY PER OCTAVE, and why this was the grit (§V48's SIXTH-occurrence lesson
  * applied here): the field's fade must be measured against its SHARPEST
- * feature, not its repeat. The crackle layer's base cell is 1/2.4 = 0.42 m but
- * its third octave's cell is 0.104 m, four times finer, and the old guard was
+ * feature, not its repeat. The crackle layer this replaced had a base cell of
+ * 1/2.4 = 0.42 m but a third octave of 0.104 m, four times finer, and its guard was
  * a camera-DISTANCE fade computed from the base cell — it began at 108 m while
  * the third octave went sub-pixel at 60 m head-on and at ~20 m from a high
  * camera. Everything between was guaranteed per-pixel dither, over the whole
@@ -158,6 +174,9 @@ export function bandLimitedFbm2(
     // footprint in cells is footprint·freq. Keep it while a cell still spans
     // FILTER_CELLS pixels; fade out over the next octave (e0 > e1 → 1 below).
     const cells = footprint.mul(freq);
+    // @band-limited-elsewhere: this IS the band limit. `footprint` is a screen
+    // footprint (coordFootprint = dFdx+dFdy), so the gate's argument is
+    // already measured in pixels per lattice cell — the §V.48 quantity itself.
     const keep = smoothstep(float(1), float(0.5), cells);
     const octave = mix(float(0.5), valueNoise2(coord.mul(freq)), keep);
     sum = sum.add(octave.mul(amp));
@@ -231,13 +250,17 @@ export function foamWarpVec(coord: AnyNode): AnyNode {
  * Output scalar mask in [0, 1] for the surface material's crest mix.
  */
 export function foamDetailMask(rawFoam: AnyNode, coord: AnyNode): AnyNode {
+  const art = foamArtTexture();
   // per-position phase (§B.4: NO shared global timeline) — coarse value
   // noise gives nearby points a common offset but distant caps their own
   const phase = valueNoise2(coord.mul(0.021)).mul(37.0);
   const t = uTime.add(phase).mul(uScroll);
-  // shared low-freq churn warps both detail layers (internal motion)
+  // shared low-freq churn warps both lookups (internal motion)
   const churn = foamWarpVec(coord).mul(0.6);
-  // crest-aligned detail space: streaks along the ridge, not round cells
+  // crest-aligned sample space: the art texture is STRETCHED along the ridge,
+  // which is what turns its cells into the streaks the reference shows running
+  // down a wave face. The stretch axis is a FIELD, not one global vector
+  // (§B.33 (c) — a single tilt on every streak in the world is the lattice).
   const aniso = crestAnisoCoord(coord.add(churn));
 
   // COVERAGE-ADAPTIVE SCALE (user, storm preset: "blobby noise in parts").
@@ -249,41 +272,31 @@ export function foamDetailMask(rawFoam: AnyNode, coord: AnyNode): AnyNode {
   const sheetN = smoothstep(uSheetKnee, float(1.0), rawFoam);
   const broaden = mix(float(1), uSheetBroaden.max(0.05), sheetN);
 
-  // fresh foam: broken high-freq crackle cells (thresholded fbm), drifting
-  const crackleCoord = aniso.mul(uCrackleScale).mul(broaden).add(vec2(t, t.mul(-0.7)));
-  const crackleFw = coordFootprint(crackleCoord);
-  const crackleNoise = bandLimitedFbm2(crackleCoord, CRACKLE_OCTAVES, crackleFw);
-  // §V48(a) WIDEN — the half that the per-octave fade does NOT cover. The
-  // threshold is a step on a smooth field, so it has a width of its own: the
-  // authored 0.35 of the fbm's range, which goes sub-pixel long before the
-  // coarsest octave does. Widen it until the transition spans ~2 px of its own
-  // coordinate (ship/bandLimit's FILTER_PIXELS = 2, expressed in this field's
-  // units — value noise moves ~1 unit of value per lattice cell, so a
-  // footprint of f cells is ≈ f of value). One pixel is not enough: at exactly
-  // one, neighbouring samples still land on opposite ends of the step.
-  const half = crackleFw.max(0.175);
-  const crackle = smoothstep(float(0.525).sub(half), float(0.525).add(half), crackleNoise);
-  const crackleLayer = mix(float(0.2), float(1.0), crackle);
+  // ONE TEXTURE, TWO WORLD SCALES — the talk's crest/soft pair. Both reads hit
+  // the SAME texture object, so they dedupe to one binding and ONE SAMPLER
+  // (§V.40 hashes on `value.uuid`); two texture objects would have cost both
+  // of the ocean's spare samplers for one feature. Broadening DIVIDES the
+  // repeat, so a saturated storm sea draws the same texture bigger rather than
+  // a different one (§V7: presets touch params, never code paths).
+  const crestMetres = uArtCrestMetres.max(0.25).div(broaden.max(0.05));
+  const softMetres = uArtSoftMetres.max(1).div(broaden.max(0.05));
+  const crestTex = texture(art, aniso.div(crestMetres).add(vec2(t, t.mul(-0.7))));
+  const softTex = texture(art, aniso.div(softMetres).sub(vec2(t.mul(0.4), t.mul(-0.3))));
 
-  // dissipated foam: gentle low-freq mottling, counter-drifts vs crackle,
-  // never cuts foam fully out
-  const mottleCoord = aniso.mul(uMottleScale).mul(broaden).sub(vec2(t.mul(0.4), t.mul(-0.3)));
-  const mottleNoise = bandLimitedFbm2(mottleCoord, MOTTLE_OCTAVES, coordFootprint(mottleCoord));
-  const mottleLayer = mix(float(0.55), float(1.0), mottleNoise);
-
-  // age proxy = foam value (§V6): high → crest crackle, low → soft mottle
+  // age proxy = foam value (§V6): high → crest lace, low → soft mottle
   const freshness = smoothstep(float(0.25), float(0.8), rawFoam);
-  const textured = mix(mottleLayer, crackleLayer, freshness);
+  // BODY — the interior of the patch (R = crest lace, G = soft mottle)
+  const textured = mix(softTex.g, crestTex.r, freshness);
   // saturated foam settles toward an unbroken sheet
   const sheeted = mix(textured, float(1), sheetN.mul(uSheetFlatten).clamp(0, 1));
 
   // FAR-FIELD DETAIL FADE — a BACKSTOP, not the band limit, and now keyed on
   // the PIXEL FOOTPRINT rather than on camera distance.
   //
-  // It is kept because it is cheap and because it retires the mottle layer's
+  // It is kept because it is cheap and because it retires the SOFT channel's
   // very low frequencies, which never alias but stop meaning anything once a
-  // whole cap is a pixel wide. The actual anti-aliasing is the per-octave
-  // fwidth limit above (§V48).
+  // whole cap is a pixel wide. The actual anti-aliasing is the art texture's
+  // mip chain (§V48, foamTexture.ts).
   //
   // IT USED TO BE `length(coord − cameraPosition.xz)` against 108→379 m, and
   // that is the "very much view-angle dependent" report in one line: distance
@@ -296,25 +309,93 @@ export function foamDetailMask(rawFoam: AnyNode, coord: AnyNode): AnyNode {
   // footprint from that camera is well under a metre, i.e. the detail resolved
   // perfectly and was deleted anyway. Fourth occurrence of distance-for-
   // footprint in this project (`cascadeFadeTexels`, ocean sparkle, sand
-  // sparkle). Measured against the COARSEST layer in the composite (the mottle
-  // cell), because this gate retires the WHOLE composite — the sharp end is
-  // already handled per octave.
-  const featureMetres = float(1).div(uMottleScale.max(0.01)); // floored §V28
+  // sparkle). Measured against the COARSEST layer in the composite (the soft
+  // channel's own base cell), because this gate retires the WHOLE composite —
+  // the sharp end is handled by the texture's mip chain.
+  const pixelMetres = coordFootprint(coord);
+  const featureMetres = softMetres.div(FOAM_SOFT_CELLS);
   const keepMetres = featureMetres.div(uDetailKeepPixels.max(0.5));
   // e0 > e1 → 1 while a cell still spans the keep width, 0 once it is smaller
   // than one pixel by `detailFadeSpan` (§V23: functional smoothstep)
+  // @band-limited-elsewhere: this IS the band limit. `pixelMetres` is
+  // coordFootprint(coord) = dFdx+dFdy, i.e. the measured screen footprint, and
+  // the thresholds are the FEATURE's own world size (§B.20: never the repeat).
   const detailFade = smoothstep(
     keepMetres.mul(uDetailFadeSpan.max(1.05)),
     keepMetres,
-    coordFootprint(coord),
+    pixelMetres,
   );
   const detail = mix(float(1), sheeted, detailFade);
-  // Low-residue knee: a few percent of foam mixed over deep teal reads as a
-  // dirty beige smudge, not as thin foam (§V20 critique) — cut it, keep the
-  // soft skirt above. TUNABLE (§V16): this sits in SERIES with the jacobian
-  // injection gate, so the two must be retuned together. As a shader literal
-  // at (0.03, 0.12) it silently swallowed the whole injection fix.
-  const knee = smoothstep(uKneeLow, uKneeHigh, rawFoam);
+
+  // ── THE DISSOLVE: the art texture carves the SILHOUETTE ─────────────────
+  //
+  // This is §T.5's missing mechanism, and it is the answer to "blotchy, reads
+  // as discs". Every previous foam pass modulated the INTERIOR of the patch
+  // and left its outline alone — but the outline is a level set of an
+  // ISOTROPIC GAUSSIAN BLUR, which is a circle by construction (foamMath,
+  // "THE BLUR WAS THE SHAPE"), and a textured disc still reads as a disc.
+  // Here the coverage gate's THRESHOLD is a per-texel value from the art
+  // texture's breakup channel instead of a constant, so the boundary is that
+  // channel's own domain-warped, worley-torn contour. Fresh foam dissolves
+  // against the fine crest lookup (fine filaments at a breaking lip); old foam
+  // against the soft one (broad ragged patches in the trail) — the same
+  // crest→soft interpolation the body uses, applied to the shape.
+  //
+  // The threshold FLOOR is the low-residue knee, unchanged in meaning: a few
+  // percent of foam mixed over deep teal reads as a dirty beige smudge, not as
+  // thin foam (§V20 critique). TUNABLE (§V16) because it sits in SERIES with
+  // the jacobian injection gate and the two must be retuned together — as a
+  // shader literal at (0.03, 0.12) it once silently swallowed a whole
+  // injection fix. `erodeDepth = 0` reproduces the old gate exactly.
+  const breakup = mix(softTex.b, crestTex.b, freshness);
+  /**
+   * 1 while the dissolve's own cells still resolve on screen, 0 once they are
+   * sub-pixel. Measured against the FEATURE (one breakup cell), never against
+   * the repeat — that mistake is §B.20, and it was 12× too late.
+   */
+  const cellMetres = mix(softMetres, crestMetres, freshness).div(FOAM_BREAKUP_CELLS);
+  // @band-limited-elsewhere: this IS the band limit — `pixelMetres` is the
+  // measured screen footprint (dFdx+dFdy) against ONE breakup cell's world
+  // size, and the amplitude half is the widening of `softness` below.
+  const resolved = smoothstep(cellMetres, cellMetres.mul(0.5), pixelMetres);
+  const erode = uErodeDepth.clamp(0, 1);
+  // ONE-SIDED — [kneeLow, kneeLow + erode] — and it was tried the other way.
+  // A SIGNED, mean-zero shift is the tempting version: it grows tendrils
+  // outward as well as tearing holes inward and it is coverage-neutral by
+  // construction (measured 0.478 → 0.486 → 0.473 over the depth range). It
+  // has to floor the threshold at 0 or it paints foam onto bare water, and
+  // that floor puts an ATOM of probability mass at threshold 0 — 43% of texels
+  // at the shipped depth — so the sub-pixel average is no longer a ramp but a
+  // steep rise to 0.43 followed by a ramp, which no single `smoothstep` is.
+  // §V.48(b) went from a 0.045 residual to 0.478, i.e. distant foam coverage
+  // would differ from near foam coverage by half. Coverage is instead paid for
+  // where it is visible and testable, at `residueKneeLow/High` (params/foam).
+  const threshold = uKneeLow.add(breakup.mul(erode).mul(resolved));
+  // §V.48(b) — AND THE MEAN THAT MATTERS IS NOT THE FIELD'S. Fading `breakup`
+  // to its own mean (0.5, exactly, by construction) would leave a step at a
+  // shifted threshold, which is a fade to a hard edge. The average a pixel
+  // should see is the average of the GATE: a uniform threshold on [0, d]
+  // passes a texel of mask m with probability m/d, so the sub-pixel limit of
+  // this dissolve is a RAMP OF WIDTH d. So the widening below carries `d` as
+  // the field retires. The two halves meet to 0.045 of alpha — a limit, not an
+  // identity; the residual is the cubic ease against a box-convolved ramp and
+  // is stated in foamMath.dissolveKnee rather than rounded away.
+  // §V.48(a) — plus ≥ 2 px of the mask's own fwidth, so the gate never varies
+  // faster than the sample grid. §V.60 — and never narrower than the authored
+  // knee, which is the body it multiplies.
+  // The retirement term is ADDED to the authored width, not maxed against it:
+  // the full-resolution gate is already a ramp of width (kneeHigh − kneeLow),
+  // so the average of it over a uniform threshold spanning `erode` has support
+  // `erode + that` — a box convolved with a ramp. Maxing leaves the sub-pixel
+  // gate NARROWER than the thing it is the average of, and the error goes from
+  // 0.045 of alpha to 0.196 (foamMath.dissolveKnee — measured, and tested).
+  const softness = uKneeHigh
+    .sub(uKneeLow)
+    .max(0)
+    .add(erode.mul(float(1).sub(resolved)))
+    .max(fwidth(rawFoam).mul(2))
+    .max(1e-4);
+  const knee = smoothstep(threshold, threshold.add(softness), rawFoam);
   // optional far-field COVERAGE softening on top of the detail fade, off by
   // default: reach for this only if the horizon still reads too white once
   // the detail shimmer is gone — it removes real foam, the detail fade does not
