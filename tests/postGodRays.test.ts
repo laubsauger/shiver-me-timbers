@@ -20,6 +20,7 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 import { updateSunScreen, type SunScreenState } from '../src/core/postGodRays';
+import godRaysSource from '../src/core/postGodRays.ts?raw';
 import { postParams } from '../src/params/post';
 import { getParamsEntry } from '../src/params/registry';
 
@@ -113,6 +114,69 @@ describe('god-ray sun projection (§T.39)', () => {
     expect(Number.isFinite(s.vis)).toBe(true);
     expect(s.vis).toBeGreaterThanOrEqual(0);
     expect(s.vis).toBeLessThanOrEqual(1);
+  });
+
+  /**
+   * THE OFF-SCREEN STREAK (user: "projected in a very weird direction… changes
+   * very dramatically depending on the angle of the camera").
+   *
+   * Two correct decisions combined into a defect. `updateSunScreen` deliberately
+   * HOLDS the sun's screen position outside 0..1 while `vis` is still positive,
+   * because real shafts keep coming when the source is just off-screen and
+   * cutting at the border is what makes this technique snap (the test above
+   * pins that behaviour and it must stay). Meanwhile `rtt()` targets are
+   * ClampToEdge. So every march tap that walked out of the frame returned the
+   * EDGE TEXEL and smeared one row or column of the image along the whole ray:
+   * a bright streak with no source, swinging and vanishing as the sun crossed
+   * the border.
+   *
+   * This asserts the state that makes the bug REACHABLE, so the shader-side
+   * guard can never be removed while the condition still occurs. It cannot
+   * execute the WGSL, so the guard's presence is checked lexically alongside.
+   */
+  it('holds the sun off-screen while still visible — so taps MUST be gated', () => {
+    // just past the frame corner: vis is deliberately still high here, so the
+    // effect is at nearly full strength while every tap marches off the frame
+    const s = updateSunScreen(fresh(), camera(0.9), SUN, FADE_DEG);
+    expect(s.vis).toBeGreaterThan(0.5);
+    const outside = s.x < 0 || s.x > 1 || s.y < 0 || s.y > 1;
+    expect(outside).toBe(true);
+    // and not marginally outside — far enough that a large share of every
+    // ray's taps land beyond the border
+    expect(s.x).toBeGreaterThan(1.1);
+  });
+
+  it('the march drops out-of-frame taps instead of smearing the edge texel', () => {
+    // lexical, because the Loop body is WGSL by the time it could be run
+    expect(godRaysSource).toContain('const inFrame = walk.x');
+    expect(godRaysSource).toContain('inFrame.select(float(1), float(0))');
+  });
+
+  /**
+   * `screenUV` is 0..1 per axis whatever the viewport shape, so a raw UV length
+   * is an ELLIPSE on screen — the falloff reached further sideways than
+   * vertically and changed shape with the window.
+   *
+   * The half that is NOT a bug, recorded so it is not "fixed" later: the march
+   * DIRECTION was never skewed. Marching along the segment from a pixel to the
+   * sun is affine-invariant, so `stepUv` needs no aspect correction and adding
+   * one would bend every ray away from the sun.
+   */
+  it('measures the radial falloff in a round metric, not in raw UV', () => {
+    expect(godRaysSource).toContain('toSun.mul(uAspect).length()');
+    // the march itself stays in plain UV — a straight line is affine-invariant
+    expect(godRaysSource).toContain('const stepUv = toSun.mul(uLength.div(TAPS))');
+  });
+
+  it('the falloff radius is small enough to actually bite', () => {
+    // At the old 0.9 this term read ≈1 everywhere the march has any energy —
+    // the smear only reaches 1/(1−length) times the bright region's radius —
+    // so it was inert and the comment claiming it "hugs the sun" was describing
+    // an intention. It must stay comparable to the march's own reach.
+    const reach = 1 / (1 - postParams.godRayLength);
+    expect(postParams.godRayLength).toBeLessThan(0.4);
+    expect(reach).toBeLessThan(1.8);
+    expect(postParams.godRayFalloff).toBeLessThan(0.5);
   });
 
   it('registers every post tunable with the panel (§V.16)', () => {

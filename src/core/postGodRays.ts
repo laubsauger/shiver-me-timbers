@@ -168,6 +168,21 @@ export function buildGodRays(opts: {
   const uNorm = uniform(1 / TAPS);
   /** one texel of the reduced target, in UV */
   const uTexel = uniform(new THREE.Vector2(1 / 640, 1 / 360));
+  /**
+   * (aspect, 1) — converts a UV delta into one with a ROUND metric.
+   *
+   * `screenUV` is 0..1 per axis whatever the viewport shape, so a UV length is
+   * an ellipse on screen, stretched horizontally by the aspect ratio. The
+   * radial falloff below measured `toSun.length()` in raw UV and was therefore
+   * reaching further sideways than vertically, changing shape with the window.
+   *
+   * NOTE what this does NOT fix, because it is the tempting wrong fix: the
+   * MARCH direction was never skewed. Marching along the segment from `p` to
+   * the sun is affine-invariant — a straight line in UV is the same straight
+   * line in pixels — so `stepUv` was, and remains, correct. Only the metric
+   * needed the aspect.
+   */
+  const uAspect = uniform(new THREE.Vector2(16 / 9, 1));
 
   // --- bright pass, reduced ---------------------------------------------
   // §V.44: the clamp happens HERE, before anything is masked or accumulated,
@@ -204,14 +219,49 @@ export function buildGodRays(opts: {
     Loop(TAPS, () => {
       walk.addAssign(stepUv);
       weight.mulAssign(uDecay);
-      acc.addAssign(brightTex.sample(walk).rgb.mul(weight));
+      /**
+       * OFF-SCREEN TAPS CONTRIBUTE NOTHING.
+       *
+       * `rtt()` targets are ClampToEdge, and `updateSunScreen` deliberately
+       * HOLDS the sun position outside 0..1 while `vis` is still positive —
+       * the edge fade runs `godRayEdgeFade` (25°) PAST the frame corner by
+       * design, so shafts keep coming from a just-off-screen sun. The two
+       * combined meant every tap that walked out of the frame returned the
+       * EDGE TEXEL and smeared that one row or column along the whole ray: a
+       * bright streak with no source in the image, appearing, swinging and
+       * vanishing as the sun crossed the border. That is the "projected in a
+       * very weird direction… changes very dramatically depending on the angle
+       * of the camera" report, and it is a real defect rather than a
+       * consequence of the technique.
+       *
+       * A multiply, never a branch — §V.44 wants attenuation expressed
+       * multiplicatively, and a divergent `If` inside a 32-iteration Loop costs
+       * more than the four comparisons it saves.
+       */
+      const inFrame = walk.x
+        .greaterThanEqual(0)
+        .and(walk.x.lessThanEqual(1))
+        .and(walk.y.greaterThanEqual(0))
+        .and(walk.y.lessThanEqual(1));
+      acc.addAssign(
+        brightTex.sample(walk).rgb.mul(weight).mul(inFrame.select(float(1), float(0))),
+      );
     });
 
     // Radial falloff so the shafts hug the sun instead of streaking the whole
     // frame (the ocean glint road is bright too, and would otherwise smear).
     // functional smoothstep(e0, e1, x), then inverted — ascending edges only,
     // a descending pair reads as a bug at the call site (§V.23).
-    const falloff = float(1).sub(smoothstep(float(0), uFalloff, toSun.length()));
+    //
+    // MEASURED IN A ROUND METRIC (see uAspect), and against a radius that
+    // actually bites. At the old default of 0.9 this term was ≈1 everywhere
+    // the march has any energy at all — the smear only reaches ~1/(1−length)
+    // times the bright region's radius, so at |toSun| = 0.145 the falloff read
+    // 0.93. It was not hugging the sun; it was inert, and the comment above it
+    // described an intent the number did not carry out.
+    const falloff = float(1).sub(
+      smoothstep(float(0), uFalloff, toSun.mul(uAspect).length()),
+    );
 
     // acc ≤ clamp·Σdecay^i, and uNorm is exactly 1/Σdecay^i, so the product is
     // bounded by clamp·intensity — provably, not by hoping (§V.44).
@@ -241,6 +291,9 @@ export function buildGodRays(opts: {
       brightTex.setSize(w, h);
       raysTex.setSize(w, h);
       uTexel.value.set(1 / w, 1 / h);
+      // round metric for the radial falloff — from the drawing buffer, so it
+      // tracks a window resize rather than the camera's own aspect bookkeeping
+      uAspect.value.set(Math.max(w, 1) / Math.max(h, 1), 1);
     }
 
     // --- sun screen position + visibility (see updateSunScreen) ---

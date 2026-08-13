@@ -12,6 +12,7 @@ import {
   generateH0,
   spectralHeightVariance,
   slopeResolutionFootprint,
+  slopeVarianceTotal,
   slopeWavelengthHistogram,
   SLOPE_BIN_COUNT,
   spectralJacobianRms,
@@ -121,6 +122,17 @@ export class OceanCascade {
    */
   slopeFootprint(keep: number): number {
     return slopeResolutionFootprint(this.slopeBins, keep);
+  }
+
+  /**
+   * Total slope variance of this band (σ², dimensionless) — what the fragment
+   * normal LOD is scaling when it fades this cascade out, so the shading can
+   * turn the part it deletes into roughness instead of dropping it (§V.48b).
+   * Same measurement discipline as `slopeFootprint`: the sim publishes the
+   * moment, the shading decides what to do with it.
+   */
+  slopeVariance(): number {
+    return slopeVarianceTotal(this.slopeBins);
   }
 
   /** re-generate h0 after spectrum-shaping params change (live tweak) */

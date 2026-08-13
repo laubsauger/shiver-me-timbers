@@ -134,6 +134,43 @@ export const oceanSurfaceParams = registerParams(
     /** slope magnitude at which the churn reaches full strength */
     microDetailSlopeGate: 0.35,
     /**
+     * PIXELS PER WAVELENGTH at which a churn wavelet is still at full
+     * strength. It fades from here down to 2 (Nyquist, a math constant, not a
+     * knob) measured against `fwidth(worldXZ)`.
+     *
+     * §V.48, tenth and eleventh occurrences, both in the one expression this
+     * replaces (`microFade = lodWeight(microDetailScale, …)`):
+     *
+     *  - WRONG QUANTITY. `lodWeight` measures VERTEX spacing, `coreSpacing +
+     *    k·camDist` — camera distance only. This is a fragment-stage
+     *    procedural term and `pixWorld`'s own docstring, twelve lines above
+     *    it, already warns that distance is not a substitute because a grazing
+     *    view stretches the footprint by 1/sin(θ). The §T.39 sunset framing is
+     *    grazing almost everywhere, which is where the user sees it.
+     *  - WRONG FEATURE. It gated the whole four-wavelet stack against
+     *    `microDetailScale` = 2.4 m. The wavelets run at frequency multipliers
+     *    1.0 / 1.618 / 2.414 / 3.732, so the sharpest is λ = 0.643 m — and
+     *    because slope goes as k, that wavelet carries 3.73× MORE SLOPE than
+     *    the base it was being gated by. §V.48's own rule (measure against the
+     *    sharpest FEATURE, never the REPEAT), and §B.20's caulk seam and
+     *    §B.33's crackle octave for the third and fourth time.
+     *
+     * Measured on the shipped grid (coreSpacing 0.5, segments 512,
+     * lodSamplesFull/Cut 9/4.5, normalDetailStretch 3.0 ⟹ spacing ≈ 0.5 +
+     * 0.02·r): the old gate held full strength to ~15 m and reached zero at
+     * ~55 m of CAMERA DISTANCE, while at a grazing framing the 0.643 m wavelet
+     * is already sub-pixel around 40 m. Combined churn slope RMS at full gate
+     * is ~0.21, about 12° of normal wobble — the fibrous foreground noise on
+     * the wave flanks.
+     *
+     * 4 = two samples per half-wavelength. Below 3 the finest wavelet visibly
+     * crawls; above ~6 the churn is thrown away while it is still resolvable
+     * and the near sea reads flat, which is the failure the churn exists to
+     * fix. What each wavelet loses is not discarded — it is handed to
+     * `slopeVarianceAa` as roughness (§V.48b).
+     */
+    microDetailSamplesFull: 4,
+    /**
      * Floor of the ambient crest glow when NOTHING is backlighting it — i.e.
      * how much of the crest translucency is skylight rather than sun. 0 =
      * fully sun-gated (§B.12's fix), 1 = the sun-independent slug that caused
@@ -363,6 +400,51 @@ export const oceanSurfaceParams = registerParams(
     /** floor on cell size (m) — §V28, keeps the hash divisor away from zero */
     sparkleMinCell: 0.004,
     /**
+     * Drawn radius of ONE glint, in pixels.
+     *
+     * §V.48b, and the user's "sparkles are little squares" report. The old
+     * term lit the WHOLE HASH CELL — `smoothstep(thr, thr + 0.012, hash)` on
+     * one hash per cell, a 0.012-wide transition on a uniform hash, i.e. a
+     * binary on/off over a world-locked axis-aligned square. At the
+     * `sparkleCellPixels` 2.6 target the octave quantisation puts the cell
+     * anywhere in 1.3–2.6 px, so the artifact is a ~2 px axis-aligned white
+     * block (the screenshot) at the coarse end and a PER-PIXEL RANDOM BINARY
+     * FIELD at the fine end — carried by `normFade` all the way to 4.2 km,
+     * which is a large share of the distance noise as well as the squares.
+     * The two user reports are substantially one defect.
+     *
+     * A glint is a point, so it is now drawn as a point: hashed to a position
+     * INSIDE its cell and given a radial falloff of this radius. Sized in
+     * pixels against `pixWorld`, so it satisfies §V.48 by construction rather
+     * than by a distance fade.
+     *
+     * ~0.8 keeps it round and just resolvable. Below ~0.5 it is a single pixel
+     * again and aliases exactly as before; above ~1.5 the glints read as soft
+     * blobs and the sun path loses its glitter.
+     */
+    sparkleRadiusPixels: 0.8,
+    /**
+     * Cell/radius ratio at which individual glints become DISTINGUISHABLE.
+     * Below it the field fades to its own MEAN and above 2× it the glints are
+     * drawn discretely; between, the two are crossfaded.
+     *
+     * This is §V.48b's second half and the half that is easy to omit. Placing
+     * a round point instead of filling a square fixes the SHAPE, but a cell
+     * that has shrunk to the size of its own glint is still a per-cell binary
+     * lottery — the same coin flip in a different outline. So as the cell
+     * stops being able to hold a distinguishable point, BOTH binary terms fade
+     * to their expectations: the disc to its coverage (≈ ½πr²/c², the mean a
+     * pixel should have seen) and the on/off hash to its probability (1 − thr).
+     * Energy is preserved across the whole transition, so the sun path keeps
+     * its brightness and simply stops being made of dots — detail is converted,
+     * never removed.
+     *
+     * 2.0 with the shipped 1.3–2.6 px cells and 0.8 px radius puts the
+     * crossfade right where the octave quantisation lands, which is what it is
+     * for.
+     */
+    sparkleResolveCells: 2.0,
+    /**
      * §V.48 specular antialiasing (Kaplanyan, "filtering distributions of
      * normals"). Scales the screen-space normal variance σ² that widens every
      * specular lobe. A pow(N·H, 180) lobe point-sampled on a normal field that
@@ -403,6 +485,46 @@ export const oceanSurfaceParams = registerParams(
      * this is one uniform and it moves live in the panel.
      */
     specularAaMax: 1.0,
+    /**
+     * Gain on the ANALYTIC sub-pixel slope variance — the §V.48b half that was
+     * missing, and the reason the screen-space σ² above could never finish the
+     * job however hard it was tuned.
+     *
+     * `normLod` fades each cascade's normals out where the spectrum says that
+     * band has stopped being resolvable. Fading to zero is the correct MEAN (a
+     * zero-mean slope field averages to flat) but the VARIANCE it removes was
+     * simply discarded, so the far sea became a MIRROR rather than a rough
+     * surface: the normLod docstring's own measurement is shading slope RMS
+     * 59% at 53 m, 31% at 130 m and EXACTLY ZERO past 365 m — half a kilometre
+     * of perfect mirror before the haze starts at 900 m. A mirror at grazing
+     * incidence is maximally sensitive to whatever residual normal survives,
+     * which is the "really really noisy in the distance" report arriving as an
+     * absence of detail rather than an excess of it.
+     *
+     * `specularAaStrength` cannot see any of this. It estimates σ² from
+     * `dFdx(normalWorld)`, i.e. from the normal that SURVIVED the LOD, so the
+     * band the LOD already deleted is invisible to it BY CONSTRUCTION. The two
+     * estimators are disjoint and are added, not blended.
+     *
+     * Reconstructed as Σ (1 − lod_i·normFade)·σ²_i from the cascades' own
+     * binned slope spectrum (`OceanCascade.slopeVariance`), plus the churn
+     * wavelets' own faded-out variance. Costs ZERO textures and ZERO samplers
+     * (§V.40) — it is three scalar uniforms and a dot product — and it is an
+     * exact spectral quantity rather than a one-sample screen estimate, so
+     * unlike the dFdx term the widening it produces does not itself flicker.
+     *
+     * The user's constraint is the point of this parameter: the distant
+     * structure they worked for is not blurred away, it is converted into lobe
+     * WIDTH. Where slope goes sub-pixel the specular broadens instead of the
+     * surface flattening, so the sea keeps reading as textured and stops
+     * reading as a coin flip.
+     *
+     * 1.0 = take the spectrum at face value. NEEDS THE BROWSER for the final
+     * number; the units match the dFdx term only to first order (for small
+     * slopes δn ≈ δs), so this is the calibration knob between them. It shares
+     * `specularAaMax` as its cap, so §V.44 boundedness is unchanged.
+     */
+    slopeVarianceAa: 1.0,
     /** specular tightness of an individual glint */
     sparklePower: 40,
     /** tightness of the glint-train footprint (the sun path on the water) */
@@ -562,6 +684,7 @@ export const oceanSurfaceParams = registerParams(
     microDetailScale: { min: 0.3, max: 20, step: 0.1 },
     microDetailSpeed: { min: 0, max: 5, step: 0.05 },
     microDetailSlopeGate: { min: 0.02, max: 2, step: 0.01 },
+    microDetailSamplesFull: { min: 2.5, max: 12, step: 0.1 },
     crestBandLow: { min: 0, max: 4, step: 0.05 },
     crestBandHigh: { min: 0.2, max: 6, step: 0.05 },
     bodyBandLow: { min: -4, max: 0, step: 0.05 },
@@ -580,8 +703,11 @@ export const oceanSurfaceParams = registerParams(
     sparkleScale: { min: 2, max: 120, step: 1 },
     sparkleCellPixels: { min: 1, max: 8, step: 0.1 },
     sparkleMinCell: { min: 0.001, max: 0.5, step: 0.001 },
+    sparkleRadiusPixels: { min: 0.3, max: 2.5, step: 0.05 },
+    sparkleResolveCells: { min: 1, max: 6, step: 0.1 },
     specularAaStrength: { min: 0, max: 3, step: 0.01 },
     specularAaMax: { min: 0.01, max: 2, step: 0.01 },
+    slopeVarianceAa: { min: 0, max: 4, step: 0.01 },
     sssMaxMix: { min: 0, max: 1, step: 0.01 },
     sssBrightness: { min: 0, max: 2, step: 0.01 },
     fresnelR0: { min: 0, max: 0.2, step: 0.005 },

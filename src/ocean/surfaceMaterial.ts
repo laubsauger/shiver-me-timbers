@@ -206,6 +206,12 @@ export function buildOceanSurfaceMaterial(
     new THREE.Vector2(sp.sparkleCellPixels, sp.sparkleMinCell),
   );
   const uSpecAA = uniform(new THREE.Vector2(sp.specularAaStrength, sp.specularAaMax));
+  /** gain on the ANALYTIC (spectral) sub-pixel slope variance — see `unresolvedVar` */
+  const uSlopeVarAa = uniform(sp.slopeVarianceAa);
+  const uSparkleShape = uniform(
+    new THREE.Vector2(sp.sparkleRadiusPixels, sp.sparkleResolveCells),
+  );
+  const uMicroSamples = uniform(sp.microDetailSamplesFull);
   const uCrestFoam = uniform(
     new THREE.Vector3(sp.crestFoamBandLow, sp.crestFoamBandHigh, sp.crestFoamStrength),
   );
@@ -259,12 +265,21 @@ export function buildOceanSurfaceMaterial(
   // spectrum, not derived from a texel count. See `normLod` and
   // oceanMath.slopeResolutionFootprint.
   const uNormFoot = sim.cascades.map(() => uniform(new THREE.Vector2(1, 1)));
+  /**
+   * TOTAL slope variance (σ²) of each cascade's band, from the same binned
+   * spectrum the footprints above are inverted out of. `normLod` scales this;
+   * the part it scales AWAY is what `unresolvedVar` hands to the specular lobe
+   * as roughness (§V.48b). Refreshed on the same rebuild, from the same
+   * measurement, so the two can never disagree about what a cascade contains.
+   */
+  const uSlopeVar = sim.cascades.map(() => uniform(0));
   const refreshNormFoot = () => {
     for (const [i, c] of sim.cascades.entries()) {
       (uNormFoot[i].value as THREE.Vector2).set(
         Math.max(1e-4, c.slopeFootprint(sp.normalKeepFull)),
         Math.max(2e-4, c.slopeFootprint(sp.normalKeepCut)),
       );
+      uSlopeVar[i].value = Math.max(0, c.slopeVariance());
     }
   };
   refreshNormFoot();
@@ -372,6 +387,41 @@ export function buildOceanSurfaceMaterial(
     );
   // smoothstep(e0,e1,x), e0 > e1: 1 inside normalFadeStart, 0 past End
   const normFade = smoothstep(uNormFade.y, uNormFade.x, camDist);
+
+  /**
+   * THE SLOPE VARIANCE THIS PIXEL CANNOT SEE — §V.48b's missing half, and the
+   * quantity that makes the far sea a rough surface instead of a mirror.
+   *
+   * `normLod[i]` is the fraction of cascade i's normals this pixel keeps, and
+   * `normFade` is the global far cut. So `1 − normLod[i]·normFade` is the
+   * fraction that was DELETED, and multiplying it by that cascade's own total
+   * slope variance recovers exactly the σ² the fade threw away. Summed across
+   * the band-split cascades (§V.19 guarantees no wavelength appears twice, so
+   * these add without double-counting) this is the sub-pixel slope variance —
+   * analytically, from the Tessendorf spectrum, per cascade.
+   *
+   * WHY THIS IS NOT A DUPLICATE OF `specularAaStrength`. That term estimates
+   * σ² from `dFdx(normalWorld)`: the normal that SURVIVED the fades. It is
+   * structurally blind to the band the fades removed, which is the band that
+   * matters — the removal is precisely why the surface goes mirror-flat. The
+   * two measure disjoint things and are ADDED downstream, not blended.
+   *
+   * WHY NOT A MIP CHAIN, since §V.48's usual cure is one. Three reasons, all
+   * decisive here: the derivative textures are compute-written storage
+   * textures and cannot carry mips; §V.19 band-splits the cascades so a mip
+   * chain would hold wavelengths no other cascade has, which is the same
+   * "cascade pyramid IS the mip chain" fallacy `slopeResolutionFootprint`
+   * already documents; and in three r180 `generateTextureGrad` DROPS the array
+   * layer index (§V.40), so explicit-gradient sampling of `derivatives` — the
+   * usual way to drive a mip level — emits invalid WGSL. The spectrum gives
+   * the answer exactly, for three scalar uniforms and no fetch at all.
+   *
+   * §V.40: ZERO textures, ZERO samplers. §V.44: a sum of non-negative terms,
+   * and the consumer clamps it to `specularAaMax`.
+   */
+  const cascadeUnresolvedVar = sim.cascades
+    .map((_, i) => float(1).sub(normLod[i].mul(normFade)).max(0).mul(uSlopeVar[i]))
+    .reduce((a: TslNode, b: TslNode) => a.add(b));
   /**
    * THE SHADING NORMAL — and it MUST be built inside the fragment `Fn()`.
    *
@@ -423,17 +473,50 @@ export function buildOceanSurfaceMaterial(
     // are no finite differences and no extra texture fetches. It rides the
     // same Nyquist gate as everything else (§V30): once a wavelet is finer
     // than the pixel footprint it fades instead of sizzling.
+    //
+    // §V.48 TENTH AND ELEVENTH OCCURRENCES, both in the single expression that
+    // used to stand here: one `microFade` = lodWeight(microScale, stretch).
+    //  - WRONG QUANTITY. `lodWeight` measures VERTEX spacing (coreSpacing +
+    //    k·camDist), the MESH's Nyquist limit and a function of camera distance
+    //    alone. These wavelets are a fragment-stage procedural term, and
+    //    `pixWorld`'s docstring already warns — twelve lines above the old call
+    //    — that distance is not a substitute because a grazing view stretches
+    //    the footprint by 1/sin(θ). The §T.39 sunset framing is grazing nearly
+    //    everywhere, so the gate was wrong exactly where the user was looking.
+    //  - WRONG FEATURE. One gate for the whole stack, measured against
+    //    `microScale` = the COARSEST wavelet. Slope goes as k, so the 3.732×
+    //    wavelet carries 3.73× more slope than the base it was gated by and
+    //    goes sub-pixel 3.73× sooner. §V.48's own rule with the sign flipped,
+    //    and §B.20's caulk seam / §B.33's crackle octave for the third time.
+    // Each wavelet now fades on ITS OWN wavelength against the PIXEL footprint,
+    // and what it loses becomes roughness rather than nothing (§V.48b, below).
     const microScale = uMicro.y.max(0.05);
-    const microFade = lodWeight(microScale, uNormalStretch);
     const microPhase = timeUniform.mul(uMicro.z);
+    /** unresolved slope variance shed by the wavelets, in (microGain)² units */
+    const microUnresolvedRaw = float(0).toVar();
     const wavelet = (dirX: number, dirZ: number, freqMul: number, phaseMul: number) => {
       const k = float(Math.PI * 2 * freqMul).div(microScale);
+      // this wavelet's own wavelength — NOT microScale (§V.48: the sharpest
+      // feature, never the repeat)
+      const lambda = microScale.div(freqMul);
+      // smoothstep(e0,e1,x), e0 > e1: 1 while a wavelength spans
+      // microDetailSamplesFull pixels, 0 at 2 (Nyquist — a math constant, not
+      // a tunable). Measured against fwidth(worldXZ), so grazing is included.
+      const fade = smoothstep(
+        lambda.mul(0.5),
+        lambda.div(uMicroSamples.max(2.001)),
+        pixWorld,
+      );
       const arg = worldXZ.x
         .mul(dirX)
         .add(worldXZ.y.mul(dirZ))
         .mul(k)
         .add(microPhase.mul(phaseMul));
-      const d = arg.cos().mul(k);
+      const d = arg.cos().mul(k).mul(fade);
+      // §V.48b: a sinusoid of slope amplitude k has slope variance k²/2, and
+      // the share this pixel can no longer resolve is (1 − fade) of it. Handed
+      // to the specular lobe instead of being dropped on the floor.
+      microUnresolvedRaw.addAssign(float(1).sub(fade).mul(k).mul(k).mul(0.5));
       return { x: d.mul(dirX), z: d.mul(dirZ) };
     };
     // golden-angle directions, irrational-ish frequency ratios: no visible grid
@@ -441,7 +524,7 @@ export function buildOceanSurfaceMaterial(
     const w1 = wavelet(-0.259, 0.966, 1.618, -0.83);
     const w2 = wavelet(0.707, -0.707, 2.414, 1.31);
     const w3 = wavelet(-0.809, -0.588, 3.732, -1.07);
-    const microAmp = uMicro.x.mul(microScale).mul(0.02).mul(microFade);
+    const microAmp = uMicro.x.mul(microScale).mul(0.02);
     // gate to wave FACES: troughs stay comparatively calm, flanks churn.
     // Captured BEFORE the churn is added — this is the swell's own steepness,
     // and the foam gates downstream want that, not the churn's contribution.
@@ -450,6 +533,8 @@ export function buildOceanSurfaceMaterial(
     const microGain = microAmp.mul(faceGate).mul(wakeSmooth);
     slopeX.addAssign(w0.x.add(w1.x).add(w2.x).add(w3.x).mul(microGain));
     slopeZ.addAssign(w0.z.add(w1.z).add(w2.z).add(w3.z).mul(microGain));
+    // amplitude scales the wavelets, so it scales their variance SQUARED
+    const microUnresolvedVar = microUnresolvedRaw.mul(microGain).mul(microGain);
 
     // §V.10 THE WAKE'S OWN SURFACE (flowfoam) — the shape under the white
     // paint. Bow mound + divergent cusp crests + transverse train are summed
@@ -467,6 +552,7 @@ export function buildOceanSurfaceMaterial(
     return {
       slopeMag,
       wakeSmooth,
+      microUnresolvedVar,
       normalWorld: normalize(vec3(slopeX.negate(), 1, slopeZ.negate())),
     };
   };
@@ -492,7 +578,7 @@ export function buildOceanSurfaceMaterial(
 
   const colorNode = Fn(() => {
     // FIRST, and inside the Fn on purpose — see buildSurfaceSlope's header.
-    const { slopeMag, wakeSmooth, normalWorld } = buildSurfaceSlope();
+    const { slopeMag, wakeSmooth, microUnresolvedVar, normalWorld } = buildSurfaceSlope();
 
     // ── how much ATMOSPHERE is in the way (§V30) ────────────────────────
     // Hoisted: three terms want this exact ramp — the far-field foam damp, the
@@ -521,20 +607,38 @@ export function buildOceanSurfaceMaterial(
     // zoomed out. The cure is NOT less specular (that flattens the sea): it is
     // to carry the sub-pixel normal VARIANCE into the lobe width, so the lobe
     // broadens exactly where the normals are noisy and stays tight where they
-    // are coherent. σ² from screen-space derivatives, because the normals here
-    // are procedural/FFT — there is no authored normal map to mip (Toksvig).
+    // are coherent.
     // Blinn-Phong form of α'² = α² + 2σ²  ⟹  p' = p / (1 + p·σ²), and the
     // peak scales by p'/p so the lobe's ENERGY is conserved: the glint road
     // (low variance, coherent) survives at full brightness while isolated
     // pixel-sized sparkles are spread back into the average they should have
     // been. §V.44: σ² is a sum of squares (≥0) and is capped, so `gain` ∈ (0,1]
     // and no term can grow.
+    //
+    // TWO DISJOINT ESTIMATORS OF σ², ADDED. Getting this wrong is why the
+    // screen-space term alone never finished the job however hard it was tuned:
+    //  (a) SCREEN-SPACE, `dFdx(normalWorld)`. Sees the noise still present in
+    //      the sampled normal. This is the Kaplanyan/Tokuyoshi form, chosen
+    //      over Toksvig because there is no authored normal map to mip — which
+    //      was and remains correct about the MECHANISM.
+    //  (b) SPECTRAL, `unresolvedVar`. Sees the variance the LOD fades ALREADY
+    //      DELETED — which (a) cannot see by construction, because (a) only
+    //      ever measures the normal that survived. That deleted band is
+    //      exactly why the far sea flattens into a mirror (normLod's own
+    //      measurement: slope RMS exactly zero past 365 m), and a grazing
+    //      mirror is maximally sensitive to whatever residual normal is left.
+    // Toksvig's INPUT (a mipped normal map) is absent here; Toksvig's IDEA —
+    // variance becomes roughness — is what (b) restores, with the Tessendorf
+    // spectrum standing in for the mip chain and beating it, since it is exact
+    // rather than a one-sample estimate and costs no fetch at all (§V.40).
     const nDx = dFdx(normalWorld);
     const nDy = dFdy(normalWorld);
+    const unresolvedVar = cascadeUnresolvedVar.add(microUnresolvedVar).max(0);
     const normalVar = nDx
       .dot(nDx)
       .add(nDy.dot(nDy))
       .mul(uSpecAA.x)
+      .add(unresolvedVar.mul(uSlopeVarAa))
       .clamp(0, uSpecAA.y.max(1e-5));
     // Schlick with the real R0 for water (0.02). The old form dropped R0 and
     // then multiplied by a 0.13 CAP, so the sea could never show more than 13%
@@ -1027,13 +1131,88 @@ export function buildOceanSurfaceMaterial(
     // exactly the sunset framing — still stippled everything past mid-field.)
     const cellTarget = pixWorld.mul(uSparkleCell.x).max(uSparkleCell.y);
     const cellSize = exp2(log2(cellTarget).floor()).max(uSparkleCell.y);
-    const cell = worldXZ.div(cellSize).floor();
+    const cellUv = worldXZ.div(cellSize);
+    const cell = cellUv.floor();
+    // These `.fract()`s are a HASH of an INTEGER cell index, not an edge on a
+    // spatially-varying coordinate: within a cell they are constant, so they
+    // have no gradient to alias. What CAN alias is the cell LATTICE, and that is
+    // band-limited where it is built (`cellSize` from `pixWorld`, above) and
+    // dissolved into its own mean by `resolvable` below.
+    // @band-limited-elsewhere — hash of an integer lattice index, no gradient
     const sparkleHash = cell.dot(vec2(127.1, 311.7)).sin().mul(43758.5453).fract();
     const phase = cell.dot(vec2(269.5, 183.3)).sin().mul(19741.77).fract();
     const wobble = phase.mul(6.28).add(timeUniform.mul(0.9)).sin().mul(0.05);
     // density threshold: sparse outside the sun path, dense inside it
     const thr = mix(uSparkleDensity.x, uSparkleDensity.y, glintTrain);
     const twinkle = smoothstep(thr, thr.add(0.012), sparkleHash.add(wobble));
+
+    /**
+     * A GLINT IS A POINT, NOT A CELL (user: "sparkles are little squares").
+     *
+     * `twinkle` above is a per-cell binary: one hash, a 0.012-wide transition
+     * on a uniform variate, i.e. on or off over a world-locked axis-aligned
+     * SQUARE. That is the white blocks in the screenshot at the coarse end of
+     * the octave quantisation (~2.6 px) and a per-pixel random binary field at
+     * the fine end (~1.3 px) — and since it rides `normFade` out to 4.2 km it
+     * is also a large part of the "noisy in the distance" report. One defect,
+     * two symptoms.
+     *
+     * §V.48's cure, both halves, exactly as §B.20 and §B.33 had to learn it:
+     *
+     * (a) SHAPE. Hash the glint to a POSITION inside its cell and give it a
+     *     radial falloff whose radius is expressed in PIXELS against the
+     *     footprint. Round, sub-pixel-placeable, and band-limited by
+     *     construction instead of by a distance fade. The point is inset by its
+     *     own radius so the disc can never be clipped by its cell border, which
+     *     would put the lattice straight back; when the cell is too small to
+     *     hold it the inset saturates and the point sits at the centre — which
+     *     is precisely when (b) has already dissolved it.
+     *
+     * (b) MEAN. (a) alone still leaves a per-cell coin flip, just with a round
+     *     outline instead of a square one. So as the cell stops being able to
+     *     hold a distinguishable point, BOTH binary terms fade to their own
+     *     expectations: the disc to its coverage (½πr²/c², the average the
+     *     pixel should have seen) and the on/off hash to its probability
+     *     (1 − thr). The two branches have EQUAL MEAN by construction, so
+     *     energy is continuous across the whole crossfade — the sun path keeps
+     *     its brightness and simply stops being made of dots. This is what lets
+     *     the fix preserve the detail instead of blurring it away.
+     */
+    const cellPix = cellSize.div(pixWorld).max(0.25);
+    const radPix = uSparkleShape.x.max(0.25);
+    // Same class as `sparkleHash`: a hash of an integer cell index, constant
+    // within the cell. It picks WHERE the glint sits; the glint's own extent is
+    // `radPix`, sized in pixels against the footprint.
+    // @band-limited-elsewhere — hash of an integer lattice index, no gradient
+    const jx = cell.add(vec2(0.37, 0.11)).dot(vec2(419.2, 371.9)).sin().mul(29831.3).fract();
+    const jz = cell.add(vec2(0.71, 0.53)).dot(vec2(213.7, 157.3)).sin().mul(17635.9).fract();
+    const inset = radPix.div(cellPix).min(0.5);
+    const jitter = vec2(jx, jz).mul(float(1).sub(inset.mul(2))).add(inset);
+    const distPix = cellUv.sub(cell).sub(jitter).mul(cellPix).length();
+    // smoothstep(e0,e1,x) with e0 > e1: 1 at the point, 0 at the radius (§V23).
+    // Both operands are in PIXELS: `distPix` comes through `cellPix`, which is
+    // cellSize / pixWorld, and pixWorld is `fwidth(worldXZ)` (module scope, the
+    // same footprint every band limit in this file is measured against). This
+    // is the band limit itself, not an edge that still needs one.
+    const disc = smoothstep(radPix, float(0), distPix);
+    // the disc's own mean over its cell (½ for the smoothstep profile), and the
+    // hash's own mean — the two values (b) fades to
+    const coverage = radPix
+      .mul(radPix)
+      .mul(Math.PI * 0.5)
+      .div(cellPix.mul(cellPix).max(1e-4))
+      .clamp(0, 1);
+    const onProb = float(1).sub(thr).clamp(0, 1);
+    // smoothstep(e0,e1,x) ascending: 0 while the cell is under `resolveCells`
+    // radii across (no room for a distinguishable point), 1 past twice that.
+    // Also the band limit rather than a thing needing one — `cellPix` is
+    // cellSize / pixWorld, and pixWorld is `fwidth(worldXZ)` at module scope.
+    const resolvable = smoothstep(
+      uSparkleShape.y,
+      uSparkleShape.y.mul(2),
+      cellPix.div(radPix),
+    );
+    const sparkleField = mix(onProb.mul(coverage), twinkle.mul(disc), resolvable);
     // straight-down views turn the whole field into starfield noise — fade
     // sparkles out as the view leaves grazing angles.
     // smoothstep(e0,e1,x), e0 > e1: 1 below grazeStart, 0 above grazeEnd
@@ -1045,7 +1224,7 @@ export function buildOceanSurfaceMaterial(
       .div(roadWiden)
       .mul(uGlintRoad.x);
     const sparkWiden = widen(uSparklePower);
-    const sparkle = twinkle
+    const sparkle = sparkleField
       .mul(pow(ndoth, uSparklePower.div(sparkWiden)).div(sparkWiden))
       .mul(uSparkleStrength)
       .mul(grazeFade)
@@ -1185,6 +1364,12 @@ export function buildOceanSurfaceMaterial(
     uFresnelR0.value = sp.fresnelR0;
     (uSparkleCell.value as THREE.Vector2).set(sp.sparkleCellPixels, sp.sparkleMinCell);
     (uSpecAA.value as THREE.Vector2).set(sp.specularAaStrength, sp.specularAaMax);
+    uSlopeVarAa.value = sp.slopeVarianceAa;
+    (uSparkleShape.value as THREE.Vector2).set(
+      sp.sparkleRadiusPixels,
+      sp.sparkleResolveCells,
+    );
+    uMicroSamples.value = sp.microDetailSamplesFull;
     (uCrestFoam.value as THREE.Vector3).set(
       sp.crestFoamBandLow,
       sp.crestFoamBandHigh,

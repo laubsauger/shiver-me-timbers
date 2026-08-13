@@ -22,6 +22,7 @@ import {
   spectralJacobianRms,
   slopeWavelengthHistogram,
   slopeResolutionFootprint,
+  slopeVarianceTotal,
   swellEffectiveDirectionality,
   swellPeakWavenumber,
   swellReferenceDomain,
@@ -1049,6 +1050,228 @@ describe('§V.48 the normal LOD retires a band when the BAND runs out', () => {
     expect(surfaceMaterialSource).toContain('slopeFootprint(sp.normalKeepFull)');
     expect(surfaceMaterialSource).toContain('refreshNormFoot()');
     expect(surfaceMaterialSource).not.toContain('normalTexel');
+  });
+});
+
+/**
+ * §V.48b — THE VARIANCE A FADE REMOVES HAS TO GO SOMEWHERE.
+ *
+ * The block above proves the normal LOD retires a band at the right FOOTPRINT.
+ * This one proves the other half, which was missing entirely: fading to zero is
+ * the correct MEAN of a zero-mean slope field, but it also deletes that field's
+ * VARIANCE, and a surface that has lost its sub-pixel slope is not a smooth
+ * surface — it is a ROUGH one whose roughness the shading no longer knows
+ * about. Dropping it turns the far sea into a mirror (measured in
+ * surfaceMaterial's own normLod docstring: shading slope RMS exactly zero past
+ * 365 m), and a grazing mirror is maximally sensitive to whatever residual
+ * normal survives. That is the user's "really really noisy in the distance",
+ * arriving as an ABSENCE of detail rather than an excess of it.
+ *
+ * So these assertions are about CONSERVATION, not about thresholds: whatever
+ * the LOD takes out of the normal must appear in the roughness, at every
+ * footprint and on every weather preset. They are written against the spectrum
+ * for the same reason the block above is — they must keep meaning when the sea
+ * state moves.
+ *
+ * Why the screen-space σ² already in the material cannot do this job, and the
+ * reason the two terms are ADDED rather than swapped: `dFdx(normalWorld)`
+ * measures the normal that SURVIVED the fade, so it is blind by construction to
+ * the band the fade removed. A test cannot see that directly (it is a GPU
+ * derivative), but it is exactly why the reconstruction below has to exist.
+ */
+describe('§V.48b the normal LOD converts what it removes into roughness', () => {
+  const N = 128;
+  const bins = (i: number, p = oceanParams) =>
+    slopeWavelengthHistogram(N, p.cascades[i].domain, p, cascadeBand(i, p.splitWavelengths));
+  /** fraction of a band's slope variance carried by λ ≥ 2·footprint */
+  const resolvable = (b: Float64Array, footprint: number) => {
+    let total = 0;
+    let keep = 0;
+    for (let i = 0; i < b.length; i++) {
+      const lam = Math.pow(2, -8 + i / 8);
+      total += b[i];
+      if (lam >= 2 * footprint) keep += b[i];
+    }
+    return total > 0 ? keep / total : 0;
+  };
+
+  /**
+   * The shader's `normLod` ramp, transliterated: smoothstep(cut, full, x) with
+   * cut > full, i.e. 1 below `full` and 0 above `cut`. Keep this in step with
+   * surfaceMaterial's `filtered` — the pair is the point.
+   */
+  const smoothstep = (e0: number, e1: number, x: number) => {
+    const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  };
+  const lodAt = (i: number, footprint: number, p = oceanParams) => {
+    const b = bins(i, p);
+    const full = slopeResolutionFootprint(b, oceanSurfaceParams.normalKeepFull);
+    const cut = slopeResolutionFootprint(b, oceanSurfaceParams.normalKeepCut);
+    return smoothstep(cut, full, footprint);
+  };
+  /** what the shader reconstructs: Σ (1 − lod_i)·σ²_i */
+  const unresolvedAt = (footprint: number, p = oceanParams) => {
+    let acc = 0;
+    for (let i = 0; i < 3; i++) {
+      acc += (1 - lodAt(i, footprint, p)) * slopeVarianceTotal(bins(i, p));
+    }
+    return acc;
+  };
+
+  it('publishes the same total the footprint function partitions', () => {
+    // if these two ever disagree the roughness is reconstructed against a
+    // different sea than the LOD faded, and nothing downstream can tell
+    for (let i = 0; i < 3; i++) {
+      const b = bins(i);
+      const total = slopeVarianceTotal(b);
+      expect(total).toBeGreaterThan(0);
+      const foot = slopeResolutionFootprint(b, 0.5);
+      // resolvable() is a FRACTION of the same total, so the split is exact
+      expect(resolvable(b, foot) * total).toBeLessThanOrEqual(total + 1e-12);
+    }
+  });
+
+  it('is non-negative and bounded by the band it came from (§V.44)', () => {
+    // the shader clamps to specularAaMax, but the term must be well-behaved
+    // BEFORE the clamp or the clamp is hiding a sign error
+    let bandTotal = 0;
+    for (let i = 0; i < 3; i++) bandTotal += slopeVarianceTotal(bins(i));
+    for (const foot of [0.001, 0.01, 0.1, 1, 10, 1000]) {
+      const u = unresolvedAt(foot);
+      expect(u).toBeGreaterThanOrEqual(0);
+      expect(u).toBeLessThanOrEqual(bandTotal * (1 + 1e-9));
+    }
+  });
+
+  it('rises monotonically as the pixel grows — roughness replaces detail', () => {
+    // THE CONTRACT. Every metre of footprint the LOD takes out of the normal
+    // has to arrive in the roughness, so this can never dip: a dip is a band
+    // that was deleted from the geometry AND from the shading.
+    let prev = -1;
+    for (const foot of [0.005, 0.02, 0.05, 0.12, 0.3, 0.8, 2, 6, 20]) {
+      const u = unresolvedAt(foot);
+      expect(u).toBeGreaterThanOrEqual(prev - 1e-9);
+      prev = u;
+    }
+  });
+
+  /**
+   * The FINE cascades' share. Cascade 0 is the long swell — at any footprint a
+   * camera will ever see it is still fully resolved, and it SHOULD be: a 100 m
+   * wave is not sub-pixel at 8 m per pixel. The mirror the user sees is the
+   * loss of cascades 1 and 2, so that is what these assert on. Asserting on all
+   * three would have been the §V.48 mistake in a test: measuring against the
+   * whole population instead of against the band that actually runs out.
+   */
+  const fineTotal = (p = oceanParams) =>
+    slopeVarianceTotal(bins(1, p)) + slopeVarianceTotal(bins(2, p));
+
+  it('THE BUG: past the mirror distance the sea is rough, not flat', () => {
+    // 365 m is where the material measured composite shading slope RMS hitting
+    // EXACTLY ZERO. At the footprint that corresponds to, the fine cascades are
+    // fully retired — so the OLD code had a mirror there, and the new one must
+    // have their whole slope variance standing in for it as roughness.
+    // derived from the spectrum, never hardcoded: "past the footprint at which
+    // this sea's fine bands have run out", so it keeps meaning if they move
+    const cutOf = (i: number) =>
+      slopeResolutionFootprint(bins(i), oceanSurfaceParams.normalKeepCut);
+    const farFootprint = Math.max(cutOf(1), cutOf(2)) * 1.5;
+    expect(lodAt(1, farFootprint)).toBeLessThan(0.01);
+    expect(lodAt(2, farFootprint)).toBeLessThan(0.01);
+    // the mirror is gone: everything the fade removed is now driving lobe
+    // width instead of being discarded
+    expect(unresolvedAt(farFootprint)).toBeGreaterThan(fineTotal() * 0.99);
+  });
+
+  it('holds on every weather preset, not just the shipped one', () => {
+    for (const name of ['calm', 'swell', 'storm'] as const) {
+      const p: OceanParams = {
+        ...oceanParams,
+        ...(weatherPresets[name].ocean as Partial<OceanParams>),
+      };
+      expect(fineTotal(p)).toBeGreaterThan(0);
+      // near field: the detail is resolved, so almost nothing is converted
+      expect(unresolvedAt(1e-4, p)).toBeLessThan(fineTotal(p) * 0.5);
+      // far field: all of it is
+      expect(unresolvedAt(50, p)).toBeGreaterThan(fineTotal(p) * 0.99);
+    }
+  });
+
+  it('the material actually consumes it, and adds it to the screen-space σ²', () => {
+    // §B.8/§B.14/§B.18 shape: a term that is computed and never read is the
+    // failure mode this project produces most often, and it is silent.
+    expect(surfaceMaterialSource).toContain('cascadeUnresolvedVar');
+    expect(surfaceMaterialSource).toContain('c.slopeVariance()');
+    // ADDED to the dFdx estimate, never replacing it — the two see disjoint
+    // bands, so a swap would silently drop the residual the fade left behind
+    expect(surfaceMaterialSource).toContain('.add(unresolvedVar.mul(uSlopeVarAa))');
+  });
+});
+
+/**
+ * §V.48 TENTH AND ELEVENTH OCCURRENCES — the churn wavelets (§B, this session).
+ *
+ * `buildSurfaceSlope`'s four turbulent wavelets were gated by a single
+ * `lodWeight(microDetailScale, …)`, which is wrong twice over, and both are
+ * mistakes §V.48 already names:
+ *
+ *  - WRONG QUANTITY: `lodWeight` measures VERTEX spacing (coreSpacing +
+ *    k·camDist) — the MESH's Nyquist limit, and a function of camera distance
+ *    alone. These wavelets live in the FRAGMENT stage, where the right measure
+ *    is `fwidth(worldXZ)`; the difference is the grazing stretch 1/sin(θ),
+ *    which is unbounded and is the entire §T.39 sunset framing.
+ *  - WRONG FEATURE: one gate for the whole stack, measured against the
+ *    COARSEST wavelet, while slope goes as k — so the finest wavelet carries
+ *    the most slope and goes sub-pixel soonest, and it was the one being
+ *    guarded least. §B.20's caulk seam and §B.33's crackle octave, again.
+ *
+ * These assertions are about the RATIO between the sharpest feature and the
+ * thing the old gate measured, so they keep meaning if the wavelet stack is
+ * retuned.
+ */
+describe('§V.48 the churn wavelets are gated on their OWN wavelength', () => {
+  /** the frequency multipliers in buildSurfaceSlope's wavelet stack */
+  const FREQ = [1.0, 1.618, 2.414, 3.732];
+
+  it('the sharpest wavelet carries the MOST slope, so it needs the most guard', () => {
+    // slope amplitude ∝ k ∝ freqMul, and slope VARIANCE ∝ k². This is why
+    // gating the stack on the base wavelength is not a small error.
+    const base = FREQ[0];
+    const finest = FREQ[FREQ.length - 1];
+    expect(finest / base).toBeGreaterThan(3.5);
+    // it also goes sub-pixel that many times SOONER — the two compound
+    const scale = oceanSurfaceParams.microDetailScale;
+    expect(scale / finest).toBeLessThan(scale / base / 3.5);
+  });
+
+  it('THE BUG: the old single gate ran 3.7x too late for the finest wavelet', () => {
+    // transliteration of the old expression's intent: one Nyquist gate at the
+    // BASE wavelength. Everything between the two footprints below was
+    // aliasing with no guard at all — the fibrous foreground noise on the
+    // wave flanks.
+    const scale = oceanSurfaceParams.microDetailScale;
+    const oldCut = scale / 2; // Nyquist of the base wavelet
+    const trueCut = scale / FREQ[FREQ.length - 1] / 2; // Nyquist of the finest
+    expect(oldCut / trueCut).toBeGreaterThan(3.5);
+  });
+
+  it('the full-strength gate leaves at least two samples per wavelength', () => {
+    // below 2 the wavelet is past Nyquist while still at full amplitude, which
+    // is the aliasing this parameter exists to prevent
+    expect(oceanSurfaceParams.microDetailSamplesFull).toBeGreaterThan(2);
+  });
+
+  it('the material gates per wavelet, on the PIXEL footprint, not on spacing', () => {
+    // the mechanical tell for both halves of the bug, so a revert is loud.
+    // (`microFade` was the single stack-wide gate; the prose above still names
+    // `lodWeight(microScale` as the bug, so match on the binding, not the call)
+    expect(surfaceMaterialSource).not.toContain('const microFade =');
+    // each wavelet computes its own lambda and fades against pixWorld
+    expect(surfaceMaterialSource).toContain('const lambda = microScale.div(freqMul)');
+    expect(surfaceMaterialSource).toContain('uMicroSamples');
+    // §V.48b: what it fades out becomes roughness rather than nothing
+    expect(surfaceMaterialSource).toContain('microUnresolvedVar');
   });
 });
 

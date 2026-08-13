@@ -69,10 +69,42 @@ export const postParams = registerParams(
     /** display-referred, like bloomThreshold: 1.0 = "tone-maps to white" */
     godRayThreshold: 1.0,
     godRayKnee: 0.6,
-    /** fraction of the distance to the sun covered by the march */
-    godRayLength: 0.65,
-    /** screenUV radius around the sun over which shafts fade to nothing */
-    godRayFalloff: 0.9,
+    /**
+     * Fraction of the distance to the sun covered by the march.
+     *
+     * THIS IS THE KNOB THAT SET THE CONE. A pixel at radial distance d samples
+     * radial distances [(1−length)·d, d], so it can only reach a bright region
+     * of radius R when (1−length)·d ≤ R: the smear extends to 1/(1−length)
+     * times the radius of whatever is above threshold. At 0.65 that is 2.86×,
+     * and at sunset the aureole above `godRayThreshold` is already a large soft
+     * blob, so it was magnified into the smooth plume the user reported —
+     * "projected in a very weird direction, like either very much up into the
+     * sky". The up/down asymmetry is the sea: below the sun the frame is ocean,
+     * mostly under threshold, so only the upward half of the smear had anything
+     * to carry. The ocean was the only occluder in the shot and it occluded
+     * exactly one side.
+     *
+     * 0.28 caps the magnification at 1.39×, which reads as a tight glow hugging
+     * the disc. That is the honest shape for this technique on open water:
+     * shafts are made by OCCLUDERS, and with nothing between the camera and the
+     * sun there is no shaft structure to reveal, only a smear. The masts, yards,
+     * 48 ropes and 162 ratline rungs earn the shafts back the moment they are
+     * between the camera and the sun, which is what the module was built for.
+     */
+    godRayLength: 0.28,
+    /**
+     * Radius around the sun over which shafts fade to nothing, in the ROUND
+     * screen metric (postGodRays applies the aspect ratio — screenUV is 0..1
+     * per axis, so a raw UV radius is an ellipse and changed shape with the
+     * window).
+     *
+     * 0.9 → 0.32. At 0.9 this term was ≈1 everywhere the march has any energy,
+     * i.e. inert: it never hugged anything, and the comment claiming it did was
+     * describing an intention rather than the number. 0.32 sits just outside
+     * the reach of the shortened march above, so it now does the job it is
+     * named for without clipping the effect it is bounding.
+     */
+    godRayFalloff: 0.32,
     /** §V.44 — bounds every tap the march can read, in linear scene units */
     godRayClamp: 12,
     /** DEGREES past the frame corner over which the sun fades out. Not a hard

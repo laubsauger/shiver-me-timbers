@@ -509,6 +509,40 @@ export function slopeResolutionFootprint(
 }
 
 /**
+ * TOTAL slope variance of one cascade's band (dimensionless, σ² of ∂h/∂x plus
+ * ∂h/∂z) — the same histogram {@link slopeResolutionFootprint} reads, summed
+ * instead of inverted.
+ *
+ * WHY THIS EXISTS, and it is the missing half of §V.48b. `slopeResolutionFootprint`
+ * answers "where does this band stop being resolvable", and the fragment normal
+ * LOD uses it to fade the cascade OUT. Fading to zero is the right MEAN — a
+ * zero-mean slope field averages to flat — but the VARIANCE it removes has to
+ * go somewhere, and today it is simply discarded. The consequence was measured
+ * in `surfaceMaterial`'s own normLod docstring: shading slope RMS reaches
+ * EXACTLY ZERO past 365 m, i.e. half a kilometre of perfect mirror, and a
+ * mirror at grazing incidence is maximally sensitive to whatever residual
+ * normal survives. That is the sparkle the user reports, arriving as an
+ * absence rather than as an excess.
+ *
+ * The cure is to hand the deleted variance to the specular lobe as ROUGHNESS
+ * (Toksvig / Kaplanyan, with the spectrum standing in for the mip chain). This
+ * function publishes the σ² that the LOD ramp is scaling, so the shader can
+ * reconstruct the UNRESOLVED part as Σ (1 − lod_i)·σ²_i with no extra texture,
+ * no extra sampler and no extra fetch (§V.40 — the one spare sampler is not
+ * spent here).
+ *
+ * WHY NOT `dFdx(normalWorld)`, which the material already computes: that
+ * estimator is structurally blind to exactly this variance. It measures the
+ * normal that SURVIVED the LOD, so the band the LOD already deleted cannot
+ * appear in it at all. The two are disjoint and the shader adds them.
+ */
+export function slopeVarianceTotal(bins: Float64Array): number {
+  let total = 0;
+  for (const v of bins) total += v;
+  return total > 0 ? total : 0;
+}
+
+/**
  * RMS surface elevation contributed by one cascade's band (σ_h). Summed in
  * quadrature across cascades this is the sea state's scale: significant wave
  * height Hs = 4σ. Shading thresholds that mean "a crest" must be expressed in
