@@ -556,6 +556,7 @@ describe('sail wind response (§V22 "the sails appear too static")', () => {
   });
 
   it('scales with wind speed — becalmed cloth does not billow', () => {
+    // no wind and no way on ⇒ no apparent wind ⇒ genuinely slack canvas
     const calm = sailDrive({ ...base, windDirection: 0, windSpeed: 0 }, p);
     const stiff = sailDrive({ ...base, windDirection: 0, windSpeed: p.sailWindRef * 1.5 }, p);
     expect(calm.drive).toBeCloseTo(0, 5);
@@ -1154,10 +1155,17 @@ describe('sail belly reads as a curved surface (§V22 "no billow")', () => {
     // pinned the telltale at maximum, so it carried no information). If drive
     // is already at its ceiling in ordinary conditions, a breeze and a gale
     // produce identical canvas and the sail stops reporting anything.
+    // RE-CUT. This used to assert `sailWindRef > windSpeed`, which was the
+    // right guard for a LINEAR ramp into a clamp: put the ref above the working
+    // wind or the sail pins at maximum and a breeze and a gale look identical.
+    // The load curve saturates now, so the headroom comes from its SHAPE and
+    // the ref is a scale, not a ceiling — asserting its position would be
+    // asserting the old curve. The intent is unchanged: ordinary conditions
+    // must not be pinned at the top, or the sail stops reporting anything.
     const ordinary = sailDrive({ ...base, windDirection: 0, windSpeed: oceanParams.windSpeed }, p);
-    expect(p.sailWindRef).toBeGreaterThan(oceanParams.windSpeed); // ref above the working wind
+    const gale = sailDrive({ ...base, windDirection: 0, windSpeed: oceanParams.windSpeed * 2 }, p);
     expect(ordinary.drive).toBeGreaterThan(0.4); // she is drawing…
-    expect(ordinary.drive).toBeLessThan(0.8); // …with room left above her
+    expect(gale.drive).toBeGreaterThan(ordinary.drive * 1.02); // …with room above her
   });
 
   it('deepens visibly from light air to a gale, and never past a real sail', () => {
@@ -1180,8 +1188,20 @@ describe('sail belly reads as a curved surface (§V22 "no billow")', () => {
     const gale = camberAt(22);
     expect(light).toBeLessThan(ordinary);
     expect(ordinary).toBeLessThan(gale);
-    // THE INTENT: the range must be READABLE, not a few percent
-    expect(gale / Math.max(light, 1e-6)).toBeGreaterThan(2.5);
+    // RE-CUT: this demanded gale/light > 2.5, i.e. a curve that keeps climbing.
+    // The user asked for the opposite at the top — "up to a certain max, from
+    // which more speed is not gonna necessarily do more bending" — so the
+    // assertion now encodes EARLY ONSET plus SATURATION, which is the shape,
+    // rather than a raw ratio, which was the old linear slope in disguise.
+    const gain = (a: number, b: number): number => (b - a) / Math.max(a, 1e-6);
+    // measured 0.24 at the shipped curve: 5 → 11 m/s deepens the belly by a
+    // quarter, which reads. The bar is below it because the curve is
+    // deliberately concave — most of the camber has already arrived by 5 m/s.
+    expect(gain(light, ordinary)).toBeGreaterThan(0.15); // it rises where she sails…
+    expect(gain(ordinary, gale)).toBeLessThan(gain(light, ordinary)); // …then flattens
+    // becalmed is genuinely slack — the curve passes through zero, and an
+    // additive floor (which this briefly had) would have held camber in a calm
+    expect(camberAt(0)).toBeCloseTo(0, 6);
     // …and the whole of it must live where a square sail's camber lives. The
     // ceiling is the half that was missing: a gale used to reach 45% of chord.
     expect(ordinary).toBeGreaterThan(0.05);
@@ -1588,7 +1608,11 @@ describe('the sails feel the wind the SHIP feels (apparent, braced)', () => {
     const anchored = sailDrive({ ...ahead, ...trueWind }, p).drive;
     const running = sailDrive({ ...ahead, ...trueWind, shipVelZ: 8 }, p).drive;
     const punching = sailDrive({ ...ahead, ...trueWind, shipVelZ: -4 }, p).drive;
-    expect(running).toBeLessThan(anchored * 0.6);
+    // The FACTOR is deliberately gone: it encoded the old linear map. The load
+    // curve is concave now (early onset), so easing the apparent wind eases the
+    // cloth by less than proportionally — which is the point, and is what stops
+    // a ship running at near wind speed from showing a flat sheet.
+    expect(running).toBeLessThan(anchored);
     expect(punching).toBeGreaterThan(anchored);
   });
 
@@ -1756,7 +1780,11 @@ describe('the sails feel the wind the SHIP feels (apparent, braced)', () => {
     const anchored = sailDrive({ ...ahead, ...trueWind }, p).drive;
     const running = sailDrive({ ...ahead, ...trueWind, shipVelZ: 8 }, p).drive;
     const punching = sailDrive({ ...ahead, ...trueWind, shipVelZ: -4 }, p).drive;
-    expect(running).toBeLessThan(anchored * 0.6);
+    // The FACTOR is deliberately gone: it encoded the old linear map. The load
+    // curve is concave now (early onset), so easing the apparent wind eases the
+    // cloth by less than proportionally — which is the point, and is what stops
+    // a ship running at near wind speed from showing a flat sheet.
+    expect(running).toBeLessThan(anchored);
     expect(punching).toBeGreaterThan(anchored);
   });
 

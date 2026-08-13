@@ -17,7 +17,8 @@
  * Conventions: ship forward = local +z; yaw about +y, yaw 0 → world +z,
  * heading = [sin yaw, 0, cos yaw]; starboard = [cos yaw, 0, -sin yaw].
  * wind.direction is the direction the wind blows TOWARD (same convention
- * as yaw). Positive rudder (D) turns to starboard (yaw increases).
+ * as yaw). Positive rudder turns to starboard (yaw increases); keyboard keys
+ * are mapped separately at the input boundary.
  */
 import type { Quat, ShipState } from '../state/simState';
 import type { InputState } from './input';

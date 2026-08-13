@@ -459,7 +459,23 @@ export interface ShipMaterialParams {
   sailDraftFullness: number; // section exponent: 1 = membrane parabola, >1 narrows it
   sailFurlSwag: number; // foot gather depth as a fraction of drop, at full furl
   sailFurlBays: number; // gathering bays across the foot (buntline stations)
-  sailWindRef: number; // m/s of following wind that fills the sail completely
+  /** APPARENT wind (m/s) at which the cloth is ~63% loaded. Was 16 and authored
+   *  against the TRUE wind; the apparent-wind work then fed it a quantity that
+   *  runs 1-21 m/s in ordinary sailing, so the useful part of the curve sat
+   *  outside the game. Halved, and the curve saturates rather than clamping */
+  sailWindRef: number;
+  /**
+   * Shape of the load curve, as an exponent on the saturating pressure. Below
+   * 1 = EARLY ONSET: most of the camber arrives in the first few knots and the
+   * rest of the range is plateau, which is what makes a sail read as drawing
+   * long before it is perfectly trimmed. It still passes through zero, so a
+   * becalmed sail hangs slack — an additive floor would not.
+   *
+   * It is also what keeps a ship running dead downwind at near wind speed
+   * showing a rounded sail: her apparent wind really is ~1 m/s there, and a
+   * linear map rendered that as a flat sheet.
+   */
+  sailLoadCurve: number;
   sailBackBillow: number; // max belly INVERSION when the wind heads the sail
   sailLuffFlap: number; // extra ripple amplitude when the sail is not drawing
   sailGustAmp: number; // gust modulation depth 0..1
@@ -529,6 +545,31 @@ export interface ShipMaterialParams {
   grainRelief: number; // grain ridges
   plankRelief: number; // per-board proud/shy offset — reads as planking
   /**
+   * PER-BOARD PLATEAU STEP (m): how far a board's whole face sits proud of or
+   * shy of its neighbour's, measured AT THE SEAM THEY SHARE. ± this value.
+   *
+   * The one number §B.48 was missing. `plankRelief` above is a CROWN —
+   * `sin(πf)`, which is zero at both seams — so it lifts the middle of a board
+   * and leaves its edges at exactly its neighbour's height. Every per-board
+   * term in the material was built that way, deliberately, because a crown
+   * carries no step and is therefore trivially band-limit-safe (§B.20). The
+   * cost was that the deck was PERFECTLY FLUSH by construction and read as
+   * "flat surfaces with painted-on wood lines", twice.
+   *
+   * A board reads as a solid object because its top face is at a different
+   * height from the next board's and there is an edge between them. That is a
+   * step, and §V.70 is how a step is band-limited without becoming a spike.
+   */
+  plankStep: number;
+  /**
+   * Chamfer the plateau step transitions over, as a fraction of a board's
+   * width. Knocking the arris off a board is also §T.34's "chamfered edges
+   * (90° arrises ⊥)" — a true 90° edge is infinitely sharp and reads as one
+   * aliased line, and it is the authored width the step's band limit is
+   * measured against (§V.70), so it must be a real dimension, not a fudge.
+   */
+  plankChamfer: number;
+  /**
    * Per-board TILT (m): one edge of a board sits prouder than the other,
    * because nothing was ever bedded perfectly flat. Antisymmetric across the
    * board and zero at both seams, so it is a tilt and not a step.
@@ -564,6 +605,24 @@ export interface ShipMaterialParams {
    */
   deckFieldRelief: number;
   deckFieldTone: number;
+  /**
+   * How much INDIRECT light a fully-occluded seam loses, 0..1 (§B.48b).
+   *
+   * The other half of "it doesn't look 3-dimensional", and the half no normal
+   * can supply. There is no environment map in this project and the only
+   * ambient is a HemisphereLight, whose irradiance on an up-facing surface is
+   * a function of N.y ALONE — a 2° normal tilt moves N.y by 0.0006. So the
+   * ambient term is CONSTANT across the whole deck: ~24% of a sunlit deck's
+   * light and 100% of a SHADOWED one's, and a galleon's deck is mostly under
+   * sail shadow. Relief buys nothing there; occlusion is the only thing that
+   * can, and in the reference the darkness BETWEEN the boards is doing most of
+   * the 3D work.
+   *
+   * Feeds `material.aoNode`, which three multiplies into indirect diffuse
+   * only, so direct sun still rakes across the boards untouched. NOT the post
+   * AO pass — that pipeline has never run.
+   */
+  aoStrength: number;
 }
 
 export const shipMaterialParams: ShipMaterialParams = registerParams(
@@ -594,13 +653,13 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     // 3.1% of chord in a calm, 8.5% at the default sea, 13.9% in a storm and
     // 15.0% (capped) in a gale — a readable 5x range topping out inside a
     // real sail's 10-15%. Was 0.68 OF THE DROP, i.e. 24.8% / 40.7% of chord.
-    sailCamber: 0.115, sailCamberMax: 0.15,
+    sailCamber: 0.15, sailCamberMax: 0.15, sailLoadCurve: 0.45,
     sailLeechOpen: 0.3, sailFootRoach: 0.035, sailTwist: 0.12,
     sailSheetPull: 0.16, sailSheetSpread: 0.45,
     sailFlutterLuffRate: 1.8,
     sailDraftPos: 0.4, sailDraftFullness: 1,
     sailFurlSwag: 0.16, sailFurlBays: 3,
-    sailWindRef: 16, sailBackBillow: 0.18, sailLuffFlap: 2.6,
+    sailWindRef: 8, sailBackBillow: 0.18, sailLuffFlap: 2.6,
     sailGustAmp: 0.3, sailGustFreq: 0.55, sailTurnSkew: 1.6, sailResponse: 2.2,
     sailFlutterAmp: 0.14, sailFlutterFreq: 2.4, sailRippleCount: 2.5,
     sailLacingPoints: 7, sailSeamDarken: 0.7, sailAmbientLift: 0.09,
@@ -608,6 +667,12 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailBacklitFocus: 3, sailLeeDarken: 0.7, sailStainStrength: 0.36,
     holeColor: 0x120c07,
     bumpScale: 1, grainRelief: 0.004, plankRelief: 0.006, seamDepth: 0.012,
+    // ±6 mm of plateau across a 25 mm chamfer (0.045 of a 0.55 m board) is a
+    // 26° bevel at every seam. For scale: the crowned terms it sits on top of
+    // max out at 2.0° (plankRelief) and 2.6° (plankTilt), and the only feature
+    // on the old deck steeper than 3° was the caulk groove — a SYMMETRIC V,
+    // i.e. a line, which is what "painted-on wood lines" was describing.
+    plankStep: 0.006, plankChamfer: 0.045,
     // both scaled by shipDetailParams.irregularity at the uniform, so the one
     // ship-wide "hand-made" dial governs these as it does the sails/ratlines
     plankTilt: 0.004, plankWander: 0.035, plankWanderLength: 7,
@@ -615,6 +680,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     bleachColor: 0xd8c9a8, bleachStrength: 0.22,
     wetDarken: 0, wetSmooth: 0, wetlineFade: 0.5, roughBase: 0.74,
     deckFieldRelief: 1.1, deckFieldTone: 3,
+    aoStrength: 0.55,
   },
   {
     grainScale: { min: 0.1, max: 8, step: 0.05 },
@@ -648,6 +714,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     // are the cloth those lines gather
     sailFurlBays: { min: 1, max: 6, step: 1 },
     sailWindRef: { min: 1, max: 30, step: 0.5 },
+    sailLoadCurve: { min: 0.1, max: 2, step: 0.05 },
     sailBackBillow: { min: 0, max: 0.8, step: 0.01 },
     sailLuffFlap: { min: 0, max: 6, step: 0.05 },
     sailGustAmp: { min: 0, max: 1, step: 0.01 },
@@ -668,6 +735,10 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     bumpScale: { min: 0, max: 6, step: 0.05 },
     grainRelief: { min: 0, max: 0.03, step: 0.0005 },
     plankRelief: { min: 0, max: 0.04, step: 0.0005 },
+    plankStep: { min: 0, max: 0.02, step: 0.0005 },
+    // floor well above 0: a chamfer narrower than a few mm is a 90° arris
+    // again, and it is also the width its own band limit is measured against
+    plankChamfer: { min: 0.005, max: 0.25, step: 0.005 },
     plankTilt: { min: 0, max: 0.02, step: 0.0005 },
     plankWander: { min: 0, max: 0.15, step: 0.005 },
     plankWanderLength: { min: 1, max: 30, step: 0.5 },
@@ -681,6 +752,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     roughBase: { min: 0.1, max: 1, step: 0.01 },
     deckFieldRelief: { min: 0, max: 8, step: 0.1 },
     deckFieldTone: { min: 0, max: 30, step: 0.5 },
+    aoStrength: { min: 0, max: 1, step: 0.01 },
   },
 );
 
