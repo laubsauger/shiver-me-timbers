@@ -137,6 +137,40 @@ export function createPostPipeline(
   const scenePass = readsDepth
     ? pass(scene, camera, { samples: 0 })
     : pass(scene, camera);
+
+  /**
+   * §V.62 fail-loud. Every `*Enabled` below is read ONCE, here, into a baked
+   * TSL graph — the single most repeated defect in this project (eleven
+   * occurrences), and every one of them was found by a user reporting that a
+   * fix "did not work". The gate is documented as needing a reload, but
+   * nothing enforced it: whoever writes the param later (the settings bridge
+   * writes ALL of them on every change) got no signal at all, and in the
+   * `aoEnabled` case the divergence also changes the scene pass's SAMPLE
+   * COUNT, i.e. it can invalidate the render pass rather than just look
+   * wrong. So: name the gates, snapshot them, and say so once if they drift.
+   */
+  const gates: ReadonlyArray<[string, boolean, () => boolean]> = [
+    ['aoEnabled', pp.aoEnabled, () => pp.aoEnabled],
+    ['dofEnabled', pp.dofEnabled, () => pp.dofEnabled],
+    ['bloomEnabled', pp.bloomEnabled, () => pp.bloomEnabled],
+    ['godRaysEnabled', pp.godRaysEnabled, () => pp.godRaysEnabled],
+    ['vignetteEnabled', pp.vignetteEnabled, () => pp.vignetteEnabled],
+    ['vibranceEnabled', pp.vibranceEnabled, () => pp.vibranceEnabled],
+    ['grainEnabled', pp.grainEnabled, () => pp.grainEnabled],
+  ];
+  const drifted = new Set<string>();
+  const checkGateDrift = (): void => {
+    for (const [name, built, read] of gates) {
+      if (read() === built || drifted.has(name)) continue;
+      drifted.add(name);
+      console.warn(
+        `[post] postParams.${name} changed to ${read()} AFTER the pipeline was built ` +
+          `(built with ${built}). It is a CONSTRUCTION gate — the graph does not ` +
+          `change until reload, and aoEnabled/dofEnabled additionally set the scene ` +
+          `pass sample count. Reload to apply (§V.62).`,
+      );
+    }
+  };
   const rawColor = scenePass.getTextureNode('output');
 
   // --- underwater volume + lens (§V.25) ---------------------------------
@@ -257,6 +291,7 @@ export function createPostPipeline(
   post.outputNode = vec4(graded.clamp(0, 1), 1);
 
   const updateFromParams = (): void => {
+    checkGateDrift();
     uAoAmount.value = pp.aoEnabled ? finite(pp.aoStrength, 0) : 0;
     underwater?.updateFromParams();
 

@@ -93,20 +93,37 @@ function features(on: GraphicsFeatureId[]): GraphicsFeatureState {
 /**
  * Post stages stay ON inside every bundle: they only cost anything when
  * `postFx` itself is on, and a player who switches the grade on expects to see
- * the grade rather than four more switches. `postFx` is off in all three
- * because the pipeline currently renders black (§T22 in flight) — a preset
- * must never be the thing that blanks the screen.
+ * the grade rather than four more switches.
  *
  * MEDIUM is the shipped default. It is NOT automatically the same thing as the
- * engine's param defaults, and assuming it was cost real time: `reflections`
- * was absent here while `params/reflection.ts` said `live: 1`, and since this
- * bundle is applied over the params on every boot, the param file lost. A
- * feature switched on in `params/*` is OFF unless this list also names it.
+ * engine's param defaults, and assuming it was cost real time — TWICE, in both
+ * directions, which is why this list is now checked against `params/*` by a
+ * test rather than by reading:
+ *  - `reflections` was absent here while `params/reflection.ts` said `live: 1`,
+ *    so the param file lost and reflections were dead at the default quality;
+ *  - `postFx` was absent here while `params/post.ts` said `enabled: true`, so
+ *    the ENTIRE post chain — bloom, god rays, vignette, vibrance, dither —
+ *    had never once run for anybody, and the store then persisted that false
+ *    so a fix here alone could not have reached a player (hence the
+ *    STORAGE_KEY bump below);
+ *  - `postAo` was named here while `params/post.ts` says `aoEnabled: false`
+ *    with a documented reason — GTAO reads the scene-pass DEPTH, WebGPU
+ *    cannot resolve a multisampled depth attachment, so building AO forces
+ *    the scene pass to `samples: 0` and costs the WHOLE FRAME its MSAA. This
+ *    list was silently buying that trade on every boot, at every tier.
+ * A feature switched on in `params/*` is OFF unless this list also names it,
+ * and a feature switched OFF in `params/*` is ON if this list names it. Both
+ * directions are silent. Diff the two before touching either.
+ *
+ * `postFx` stays out of LOW on purpose, and that is a choice rather than an
+ * omission: low exists to buy frames back, post is a chain of full-screen
+ * passes, and the switch is `reload: false` so a low-tier player can turn the
+ * grade on mid-session (main.ts warms the post path in the background first).
  */
 export const QUALITY_BUNDLES: Record<Quality, QualityBundle> = {
   low: {
     resolutionScale: 0.75,
-    features: features(['postAo', 'postBloom', 'postVibrance', 'postVignette']),
+    features: features(['postBloom', 'postVibrance', 'postVignette']),
     shadowMapSize: 1024,
     foliageDensity: 0.35,
   },
@@ -122,7 +139,7 @@ export const QUALITY_BUNDLES: Record<Quality, QualityBundle> = {
       // bundle is written over the params on every boot.
       'reflections',
       'caustics', 'deckWater', 'spray', 'rain', 'shadows', 'islandShadows',
-      'postAo', 'postBloom', 'postVibrance', 'postVignette',
+      'postFx', 'postBloom', 'postVibrance', 'postVignette',
     ]),
     shadowMapSize: 2048,
     foliageDensity: 0.75,
@@ -131,7 +148,7 @@ export const QUALITY_BUNDLES: Record<Quality, QualityBundle> = {
     resolutionScale: 1,
     features: features([
       'reflections', 'caustics', 'deckWater', 'spray', 'rain', 'shadows',
-      'islandShadows', 'postAo', 'postBloom', 'postVibrance', 'postVignette',
+      'islandShadows', 'postFx', 'postBloom', 'postVibrance', 'postVignette',
     ]),
     shadowMapSize: 4096,
     foliageDensity: 1,
@@ -145,7 +162,20 @@ export const DEFAULT_SETTINGS: GameSettings = {
   world: { timeOfDay: skyParams.timeOfDay },
 };
 
-const STORAGE_KEY = 'smt.settings.v1';
+/**
+ * BUMP THIS whenever a QUALITY_BUNDLE changes a switch a player could already
+ * have persisted. The store writes the whole graphics block on the first run
+ * and reads it back verbatim on every later one, so the persisted copy BEATS
+ * any bundle edit — forever, silently, for exactly the players who ran the
+ * broken build. v1 → v2: `postFx` was persisted false (post never ran) and
+ * `postAo` persisted true (whole-frame MSAA silently traded away); neither
+ * could be reached by fixing the bundle alone.
+ *
+ * The cost is that audio levels and time of day reset with it. That is the
+ * right trade while the alternative is a per-key migration table nobody will
+ * keep current — but a bump is a user-visible reset, not a free action.
+ */
+export const STORAGE_KEY = 'smt.settings.v2';
 const QUALITIES: readonly Quality[] = ['low', 'medium', 'high'];
 
 /** minimal persistence surface so tests can inject a fake */

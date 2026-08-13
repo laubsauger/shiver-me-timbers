@@ -52,7 +52,7 @@ import { listenerPoseFromMatrix } from '../src/audio/emitters';
 import { sliceOffset } from '../src/audio/sampleShot';
 import { attachAudioSettings } from '../src/audio/settingsBridge';
 import { LOAD_ORDER, SAMPLE_URLS } from '../src/audio/assets';
-import { createSettingsStore, type StorageLike } from '../src/ui/settingsStore';
+import { STORAGE_KEY, createSettingsStore, type StorageLike } from '../src/ui/settingsStore';
 import { audioParams } from '../src/params/audio';
 import { createRng } from '../src/state/rng';
 
@@ -533,7 +533,7 @@ describe('volume buses + persistence (§I settings contract)', () => {
 
   it('a corrupt or out-of-range save cannot push a bus past unity', () => {
     const storage = memoryStorage();
-    storage.raw.set('smt.settings.v1', JSON.stringify({ audio: { master: 9, sfx: -3 } }));
+    storage.raw.set(STORAGE_KEY, JSON.stringify({ audio: { master: 9, sfx: -3 } }));
     const engine = createEngine();
     attachAudioSettings(engine, createSettingsStore(storage));
     const v = engine.getVolumes();

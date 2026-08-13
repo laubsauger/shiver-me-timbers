@@ -11,12 +11,21 @@ import {
   DEFAULT_SETTINGS,
   QUALITY_BUNDLES,
   QUALITY_PRESETS,
+  STORAGE_KEY,
   createSettingsStore,
   presetIntact,
   sanitizeSettings,
 } from '../src/ui/settingsStore';
 import type { Quality, QualityHints, StorageLike } from '../src/ui/settingsStore';
 import { skyParams } from '../src/params/sky';
+// the REAL param files, imported for the bundle-vs-params check below. The
+// registry inside these tests holds deliberate fakes, which is precisely why
+// three bundle/param divergences shipped unnoticed (§V.62).
+import { reflectionParams } from '../src/params/reflection';
+import { causticsParams } from '../src/params/caustics';
+import { deckWaterParams } from '../src/params/deckwater';
+import { islandParams } from '../src/params/island';
+import { postParams } from '../src/params/post';
 import {
   GRAPHICS_FEATURES,
   GRAPHICS_FEATURE_IDS,
@@ -43,6 +52,11 @@ import {
   setDevLayerSink,
 } from '../src/ui/devLayer';
 import { clearParamsRegistry, getParamsEntry, registerParams } from '../src/params/registry';
+import {
+  CONTROL_CODES,
+  CONTROL_GROUPS,
+  isFullscreenShortcut,
+} from '../src/input/controlMap';
 
 function fakeStorage(initial: Record<string, string> = {}): StorageLike & { data: Record<string, string> } {
   const data = { ...initial };
@@ -55,7 +69,37 @@ function fakeStorage(initial: Record<string, string> = {}): StorageLike & { data
   };
 }
 
-const KEY = 'smt.settings.v1';
+// imported, never re-typed: a STORAGE_KEY bump (which is how a bad persisted
+// bundle is retired) used to break three unrelated tests with a wrong-looking
+// clamping failure instead of saying "the key moved".
+const KEY = STORAGE_KEY;
+
+describe('controls reference uses the live binding map', () => {
+  it('advertises the helm toggle and full-screen shortcut', () => {
+    const bindings = CONTROL_GROUPS.flatMap((group) => group.bindings);
+    expect(CONTROL_CODES.toggleHelm).toBe('KeyH');
+    expect(bindings.find((binding) => binding.action === 'Helm view')?.keys).toEqual(['H']);
+    expect(bindings.find((binding) => binding.action === 'Toggle full screen')?.keys)
+      .toEqual(['Alt', 'Enter']);
+  });
+
+  it('claims only Alt+Enter, including the numpad Enter key', () => {
+    const event = (code: string, overrides: Partial<KeyboardEvent> = {}) => ({
+      code,
+      altKey: true,
+      ctrlKey: false,
+      metaKey: false,
+      shiftKey: false,
+      ...overrides,
+    }) as KeyboardEvent;
+
+    expect(isFullscreenShortcut(event('Enter'))).toBe(true);
+    expect(isFullscreenShortcut(event('NumpadEnter'))).toBe(true);
+    expect(isFullscreenShortcut(event('Enter', { altKey: false }))).toBe(false);
+    expect(isFullscreenShortcut(event('Enter', { ctrlKey: true }))).toBe(false);
+    expect(isFullscreenShortcut(event('KeyF'))).toBe(false);
+  });
+});
 
 describe('persistence roundtrip (settings must survive reload — §V21)', () => {
   it('a second store over the same storage sees what the first one saved', () => {
@@ -351,6 +395,49 @@ describe('quality presets are bundles of the switches, not a parallel mechanism'
     // low stays off: it is the tier that exists to buy frames back, and
     // `enabled: 0` (construction gate) is the genuinely free setting there
     expect(QUALITY_BUNDLES.low.features.reflections).toBe(false);
+  });
+
+  it('EVERY switch the shipped default writes agrees with the params file it overwrites', () => {
+    // §V.62, and it has now bitten in BOTH directions. This bundle is written
+    // over params/* on every boot, so at the default quality the bundle IS the
+    // truth and the param file is decoration:
+    //   - `reflections` absent here while reflection.ts said `live: 1`
+    //     => reflections dead at the default quality for every player;
+    //   - `postFx` absent here while post.ts said `enabled: true`
+    //     => bloom, god rays, vignette, vibrance and dither NEVER RAN, at all,
+    //     for anybody, and the store then persisted the false so fixing the
+    //     bundle alone could not have reached a player who had booted once;
+    //   - `postAo` NAMED here while post.ts says `aoEnabled: false`
+    //     => the scene pass was silently built with `samples: 0`, i.e. the
+    //     whole frame gave up MSAA — the exact trade post.ts documents as not
+    //     worth taking by default.
+    // The previous version of this test hand-checked ONE feature, which is how
+    // the other two survived it. Check the whole table instead.
+    const real: Record<string, Record<string, unknown> | undefined> = {
+      reflection: reflectionParams as unknown as Record<string, unknown>,
+      caustics: causticsParams as unknown as Record<string, unknown>,
+      deckwater: deckWaterParams as unknown as Record<string, unknown>,
+      island: islandParams as unknown as Record<string, unknown>,
+      post: postParams as unknown as Record<string, unknown>,
+    };
+    const bundle = QUALITY_BUNDLES[DEFAULT_SETTINGS.graphics.quality];
+    const checked: string[] = [];
+    for (const f of GRAPHICS_FEATURES) {
+      const params = real[f.system];
+      // spray/rain/sky expose no such key — reported by unwiredFeatures(), not here
+      if (!params || !(f.key in params)) continue;
+      checked.push(f.id);
+      const bundled = bundle.features[f.id] ? f.on : f.off;
+      expect(
+        bundled,
+        `${f.system}.${f.key}: default bundle writes ${String(bundled)}, ` +
+          `params file authors ${String(params[f.key])} — one of the two is a lie`,
+      ).toBe(params[f.key]);
+    }
+    // guard the guard: a renamed system key would silently empty the loop
+    expect(checked).toEqual(
+      expect.arrayContaining(['reflections', 'postFx', 'postAo', 'postBloom']),
+    );
   });
 
   it('feature switches survive a reload', () => {
