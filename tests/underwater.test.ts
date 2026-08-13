@@ -12,7 +12,7 @@ import {
   submersionState,
   type SubmersionState,
 } from '../src/underwater/submersion';
-import { submergedFraction, transmittance } from '../src/underwater/waterVolume';
+import { submergedPathLength, transmittance } from '../src/underwater/waterVolume';
 import { underwaterParams } from '../src/params/underwater';
 import { causticsParams } from '../src/params/caustics';
 import { getParamsEntry } from '../src/params/registry';
@@ -110,44 +110,75 @@ describe('blend continuity (V25: no pop — fullscreen effect must fade)', () =>
  * same frame contains rays that are entirely in air and rays that are entirely
  * in water. A single submersion scalar cannot say that; this can.
  */
-describe('submerged path fraction (the meridian, mirrors waterVolume.ts)', () => {
-  it('both ends under → the whole ray is in water, in either order', () => {
-    // order-independence is the property the branchless form BUYS us: the
-    // fraction of a segment under a plane cannot depend on which end you
-    // walk from, and the min/max form encodes exactly that.
-    expect(submergedFraction(-5, -1)).toBe(1);
-    expect(submergedFraction(-1, -5)).toBe(1);
-  });
+describe('submerged path length (the meridian, mirrors waterVolume.ts)', () => {
+  const RAY = 3000; // a distant clipmap fragment, well inside horizonRadius
 
-  it('both ends above → no water on the path at all (above-water frames are untouched)', () => {
-    expect(submergedFraction(1, 5)).toBe(0);
-    expect(submergedFraction(5, 1)).toBe(0);
-  });
-
-  it('a crossing ray splits at the plane, symmetrically', () => {
-    // camera under / fragment above, and the mirror case: both are half water
-    expect(submergedFraction(-1, 1)).toBeCloseTo(0.5, 12);
-    expect(submergedFraction(1, -1)).toBeCloseTo(0.5, 12);
-    // a shallow camera looking at something deep is mostly water
-    expect(submergedFraction(-3, 1)).toBeCloseTo(0.75, 12);
-  });
-
-  it('the HORIZONTAL ray resolves through the floored divisor, not in spite of it', () => {
-    // a == b makes the denominator zero. §V.28 floors it, and the sign of
-    // -min then carries the answer to the correct saturated end. This is the
-    // case that fires across the whole horizon band while swimming level, so
-    // getting it wrong is a full-screen artifact, not an edge case.
-    expect(submergedFraction(-2, -2)).toBe(1);
-    expect(submergedFraction(2, 2)).toBe(0);
-    expect(submergedFraction(0, 0)).toBe(0);
-  });
-
-  it('is bounded [0,1] for absurd inputs (a bad heightFn must not blow the frame)', () => {
-    for (const [a, b] of [[-1e9, 1e9], [1e9, -1e9], [-1e-9, 1e-9], [0, -1e9]]) {
-      const f = submergedFraction(a, b);
-      expect(f).toBeGreaterThanOrEqual(0);
-      expect(f).toBeLessThanOrEqual(1);
+  it('ABOVE the surface there is no water on ANY ray, at any elevation', () => {
+    // THE REGRESSION. The old two-ended fraction read the FAR endpoint's
+    // height against a plane sampled at the camera's XZ, so a distant sea
+    // fragment sitting in a trough reported ~88% of a 3 km ray as submerged
+    // while the camera was in open air. That is the user's "it shouldn't be
+    // blue while we're already back out of the ocean", and it is why this
+    // mirror takes the camera's depth and the ray direction ONLY.
+    for (const rayUp of [-1, -0.5, -0.01, 0, 0.01, 0.5, 1]) {
+      expect(submergedPathLength(-0.2, rayUp, RAY)).toBe(0);
+      expect(submergedPathLength(0, rayUp, RAY)).toBe(0);
     }
+  });
+
+  it('above water, the far end CANNOT put water on the ray however deep it is', () => {
+    // the same statement as a contract rather than a sweep: depth is the only
+    // input that can switch the volume on. No wave, trough, seabed or hull at
+    // the far end has a vote, because none of them is on this plane.
+    expect(submergedPathLength(-0.2, -1, 1e6)).toBe(0);
+    expect(submergedPathLength(-1e-9, -1, 1e6)).toBe(0);
+  });
+
+  it('DOWNWARD and LEVEL rays never break the surface — the whole ray is water', () => {
+    // resolves THROUGH the §V.28 floor, not in spite of it: the floored
+    // divisor sends the quotient past any reachable rayLen so min() takes the
+    // ray. This fires across the whole lower half of a submerged frame, so
+    // getting it wrong is a full-screen artifact, not an edge case.
+    expect(submergedPathLength(1, -1, RAY)).toBe(RAY);
+    expect(submergedPathLength(1, -0.5, RAY)).toBe(RAY);
+    expect(submergedPathLength(1, 0, RAY)).toBe(RAY);
+    expect(submergedPathLength(0.001, -1, RAY)).toBe(RAY);
+  });
+
+  it("Snell's window falls out of the geometry: path grows as 1/sin(elevation)", () => {
+    // nothing draws the window. Straight up from 1 m down is 1 m of water;
+    // the same eye looking 30° above horizontal swims through 2 m; at 5.7° it
+    // is 10 m and closing. This IS the window, and it is one division.
+    expect(submergedPathLength(1, 1, RAY)).toBeCloseTo(1, 12);
+    expect(submergedPathLength(1, 0.5, RAY)).toBeCloseTo(2, 12);
+    expect(submergedPathLength(1, 0.1, RAY)).toBeCloseTo(10, 12);
+    // twice as deep is twice the path at every elevation
+    expect(submergedPathLength(2, 0.5, RAY)).toBeCloseTo(4, 12);
+  });
+
+  it('never exceeds the ray it is measured along (§V.44: bounded at source)', () => {
+    // an upward exit further away than the fragment must clamp to the
+    // fragment, or the water would extinguish light that never reached it.
+    expect(submergedPathLength(100, 0.001, 50)).toBe(50);
+    for (const [d, up, len] of [
+      [1e9, 1e-9, 10],
+      [1e9, -1, 10],
+      [1, 1, 0],
+      [1, 1, -5],
+    ]) {
+      const l = submergedPathLength(d, up, len);
+      expect(l).toBeGreaterThanOrEqual(0);
+      expect(l).toBeLessThanOrEqual(Math.max(0, len));
+    }
+  });
+
+  it('is continuous across the surface for an UPWARD ray — no pop at the meridian', () => {
+    // §V.25. Approaching the surface from below, an upward ray's water path
+    // must go to zero smoothly rather than stepping, because this is the half
+    // of the frame the eye is moving into.
+    const near = submergedPathLength(1e-6, 0.5, RAY);
+    expect(near).toBeCloseTo(0, 5);
+    expect(submergedPathLength(0, 0.5, RAY)).toBe(0);
   });
 });
 
