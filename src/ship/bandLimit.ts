@@ -151,6 +151,89 @@ export function bandLimitedEdge(
 }
 
 /**
+ * Widest a step's chamfer may be widened to, in units where ONE PERIOD IS 1.
+ *
+ * Past half a period the chamfers growing out of the two seams either side of a
+ * board meet in the middle, and the `neighbour` a caller selects by which half
+ * of the board it is in stops being weightless where that selection flips. The
+ * clamp costs nothing real: it bites at a filter width of 0.25, and
+ * {@link periodResolved} has taken the amplitude to zero by 1.1 anyway.
+ */
+const STEP_HALF_PERIOD = 0.5;
+
+/**
+ * Band-limited STEP — the sibling of {@link bandLimitedEdge}, and the whole of
+ * §V.70. Blends between two PLATEAU levels across a chamfer, rather than
+ * notching a groove into one level.
+ *
+ * WHY THIS CANNOT BE `bandLimitedEdge` WITH A DIFFERENT AMPLITUDE. That
+ * function does both halves of §V.48b: it widens the transition AND fades the
+ * feature's amplitude to zero as it goes sub-pixel. Fading to zero is exactly
+ * right for a GROOVE, whose band-limited mean IS the surrounding level. It is
+ * exactly WRONG for a step, whose mean is the AVERAGE OF THE TWO LEVELS — so
+ * fading a step's amplitude to zero converges to a FLAT surface. That deletes
+ * the feature instead of filtering it, which is not the same failure.
+ *
+ * §B.48 is what that costs. Every per-board term in woodMaterial.ts was
+ * multiplied by `sin(πf)`, which is zero at BOTH seams, so every board met
+ * every neighbour at exactly the same height and the deck was perfectly flush
+ * by construction — reported twice as "flat surfaces with painted-on wood
+ * lines". The crown was reached for precisely BECAUSE it is the one per-board
+ * profile that carries no step and is therefore trivially band-limit-safe.
+ *
+ * So: WIDEN ONLY. The amplitude gate for a step is the PERIOD gate
+ * ({@link periodResolved}), applied by the caller — §V.48 already blesses that
+ * for "smooth per-period terms (crowns, per-board tone steps)", and it is the
+ * honest limit here: once a whole board is sub-pixel there is no board left to
+ * stand prouder than its neighbour.
+ *
+ * CONTINUITY IS THE TRICK. At `distance = 0` this returns `(here + neighbour)/2`
+ * whichever side of the seam the fragment is on, because the two boards see
+ * each other symmetrically. The field is therefore continuous ACROSS the seam
+ * and `reliefNormal` differentiates a RAMP, never the one-pixel spike §B.20 was
+ * about — the safety the crown was bought for, kept, without the flatness.
+ *
+ * @param distance  distance to the nearest seam, in `coord` units, 0 AT the seam
+ * @param here      this cell's plateau level
+ * @param neighbour the plateau level across that nearest seam
+ * @param feature   authored chamfer width, in `coord` units (one period = 1)
+ * @param filter    the coordinate's screen-space footprint ({@link coordFilter})
+ */
+export function bandLimitedStep(
+  distance: AnyNode,
+  here: AnyNode,
+  neighbour: AnyNode,
+  feature: AnyNode,
+  filter: AnyNode,
+): AnyNode {
+  const eff = feature.max(filter.mul(FILTER_PIXELS)).max(EPS).min(STEP_HALF_PERIOD);
+  // this line IS the band limit: `eff` is the widened chamfer (§V.48b half a),
+  // and half b is deliberately ABSENT per §V.70 — a step fades to the mean of
+  // its two levels, which is what `mix` returns at distance 0, not to zero.
+  // @band-limited-elsewhere
+  return mix(here.add(neighbour).mul(0.5), here, smoothstep(float(0), eff, distance));
+}
+
+/**
+ * CPU mirror of {@link bandLimitedStep}, for the transliteration-pair tests.
+ *
+ * @returns the mean of the two levels at the seam, `here` a chamfer away, and
+ *          — the §V.70 property — NEVER a value that has forgotten there was a
+ *          step at all, however far the surface is minified.
+ */
+export function bandLimitedStepValue(
+  distance: number,
+  here: number,
+  neighbour: number,
+  featureWidth: number,
+  filterWidth: number,
+): number {
+  const eff = Math.min(STEP_HALF_PERIOD, effectiveWidth(featureWidth, filterWidth));
+  const mean = (here + neighbour) / 2;
+  return mean + (here - mean) * smoothstep01(0, eff, distance);
+}
+
+/**
  * TSL mirror of {@link bandLimitEnergy} — the fraction of a feature that
  * survives filtering, for callers that scale an AMPLITUDE rather than blend an
  * edge. Pair it with the same widened `eff` you draw the feature at, or you

@@ -53,6 +53,7 @@ import { vhash, vjitter } from '../src/ship/variation';
 import {
   bandLimitEnergy,
   bandLimitedEdgeValue,
+  bandLimitedStepValue,
   periodResolvedValue,
 } from '../src/ship/bandLimit';
 import { MIN_RUNG, buildRatlinePlan, validateRatlinePlan } from '../src/ship/ratlinePlan';
@@ -907,6 +908,186 @@ describe('§V.48 band limiting of procedural periodic terms', () => {
     // and it is still a belt: dark inside, clear outside
     expect(band(ratio / 2)).toBeLessThan(0.05);
     expect(band(ratio + 0.5 * (1 - ratio))).toBeGreaterThan(0.95);
+  });
+});
+
+/**
+ * §V.70 — A PLANK STEP IS BAND-LIMITED BY WIDENING, NEVER BY FADING TO FLAT.
+ *
+ * WHY THIS BLOCK EXISTS (§B.48). The user reported the deck as "flat surfaces
+ * with painted-on wood lines" TWICE, against a material that already had a
+ * per-board height channel reaching a correct shading normal. The cause was
+ * that every per-board term was multiplied by `sin(πf)`, which is zero at both
+ * seams — so however different two boards' random heights were, they met at
+ * exactly the same height, and the deck was perfectly flush by construction.
+ *
+ * The crown was not an accident: it is the one per-board profile that carries
+ * no step, and a step differentiates to a one-pixel spike (§B.20). So the
+ * requirement these tests pin is BOTH halves at once, and neither alone is a
+ * pass: the boards must genuinely meet at different heights, AND the field
+ * must stay continuous across every seam at every distance.
+ *
+ * The distinction from §V.48 is the point of §V.70. A GROOVE fades to the
+ * surrounding level, so driving its amplitude to zero is correct. A STEP's
+ * band-limited mean is the RAMP between its two levels — fading it to zero
+ * converges to a flat surface, which deletes the feature rather than filtering
+ * it. That is the mistake that produced §B.48 in the first place.
+ */
+describe('§V.70 plank plateau step — depth that survives its own band limit', () => {
+  const STEP = shipMaterialParams.plankStep;
+  const CHAMFER = shipMaterialParams.plankChamfer; // fraction of a board
+  const WIDTH = shipMaterialParams.plankWidth; // metres per board
+
+  /** a board's hash id (0..1) as a signed level, −1..1 — mirrors the material */
+  const level = (id: number): number => (id - 0.5) * 2;
+
+  /**
+   * The shipped plateau profile across ONE board, in metres. `f` is the
+   * fractional position across the board; `prev`/`next` are the neighbouring
+   * boards' ids, selected by which half of the board we are in exactly as the
+   * material's `sign(f − 0.5)` does.
+   */
+  const plateau = (
+    f: number,
+    id: number,
+    prev: number,
+    next: number,
+    filter: number,
+  ): number =>
+    bandLimitedStepValue(
+      Math.min(f, 1 - f),
+      level(id),
+      level(f < 0.5 ? prev : next),
+      CHAMFER,
+      filter,
+    ) * STEP;
+
+  /** what the CROWNED construction gives — the shape §B.48 was made of */
+  const crown = (f: number, id: number): number =>
+    level(id) * Math.sin(Math.PI * f) * shipMaterialParams.plankRelief;
+
+  // two boards that differ a lot, so "they meet at the same height" cannot
+  // pass by the two ids happening to be close
+  const A = 0.92;
+  const B = 0.11;
+  const NEAR = 0.004; // ~a board across 250 px: the deck-walking case
+
+  it('lets two boards meet at DIFFERENT heights, which the crown made impossible', () => {
+    // the seam between A and B: A runs up to f→1, B starts at f→0
+    const fromA = plateau(1 - 1e-7, A, B, B, NEAR);
+    const fromB = plateau(1e-7, B, A, A, NEAR);
+    // CONTINUITY — both boards agree at the seam they share, so the height
+    // field has no discontinuity for reliefNormal to turn into a spike (§B.20)
+    expect(fromA).toBeCloseTo(fromB, 9);
+
+    // …and yet the two board FACES are genuinely at different heights. This is
+    // the whole complaint: the only place the eye can compare two boards is
+    // the seam, and the crown zeroed exactly there.
+    const faceA = plateau(0.5, A, B, B, NEAR);
+    const faceB = plateau(0.5, B, A, A, NEAR);
+    expect(Math.abs(faceA - faceB)).toBeGreaterThan(0.008); // ≥ 8 mm apart
+
+    // the crown cannot express this at ANY amplitude — not a tuning miss, a
+    // property of sin(πf). Every board, every id, both seams, exactly zero.
+    for (const id of [A, B, 0.5, 0.0, 1.0]) {
+      expect(Math.abs(crown(0, id))).toBeLessThan(1e-12);
+      expect(Math.abs(crown(1, id))).toBeLessThan(1e-12);
+    }
+  });
+
+  it('presents a bevel steep enough for light to find, where the crown gave 2°', () => {
+    // WHY THIS IS THE METRIC: reliefNormal turns dH/dx into a normal tilt, so
+    // what decides whether a plank edge reads is the SLOPE at the edge, not
+    // the amplitude. The old field's steepest per-board term was 2.6°.
+    const deg = (slope: number): number => (Math.atan(slope) * 180) / Math.PI;
+    const sample = (f: number): number => plateau(f, A, B, B, NEAR);
+    const h = 1e-4;
+    let steepest = 0;
+    for (let f = 1e-4; f < 0.5; f += 1e-4) {
+      // metres of height per metre of deck: board units convert by plankWidth
+      steepest = Math.max(steepest, Math.abs(sample(f + h) - sample(f)) / (h * WIDTH));
+    }
+    expect(deg(steepest)).toBeGreaterThan(15);
+
+    // the same measurement on the crowned term it replaces, for the contrast
+    // that makes this test mean something
+    let crownSteepest = 0;
+    for (let f = 0; f < 1; f += 1e-4) {
+      crownSteepest = Math.max(
+        crownSteepest,
+        Math.abs(crown(f + h, A) - crown(f, A)) / (h * WIDTH),
+      );
+    }
+    expect(deg(crownSteepest)).toBeLessThan(4);
+  });
+
+  it('fades toward the MEAN of its two levels, never toward flat (§V.70)', () => {
+    // The §V.70 property. As the footprint grows the chamfer widens, but the
+    // two boards must still be at their own heights in their own middles —
+    // an infinitely-distant pixel sees the AVERAGE of the two levels, not the
+    // absence of a step.
+    for (const filter of [0.01, 0.05, 0.12, 0.24]) {
+      // at the seam: exactly the mean, at every distance
+      expect(plateau(0, A, B, B, filter)).toBeCloseTo(
+        ((level(A) + level(B)) / 2) * STEP,
+        9,
+      );
+      // mid-board: still this board's own level, still apart from its neighbour
+      const faceA = plateau(0.5, A, B, B, filter);
+      const faceB = plateau(0.5, B, A, A, filter);
+      expect(Math.abs(faceA - faceB)).toBeGreaterThan(0.008);
+    }
+
+    // CONTRAST WITH A GROOVE, which is what §V.48's fade is for and why
+    // reusing it here would have been wrong: a groove at a large footprint
+    // resolves to the surrounding level — it goes away, correctly.
+    expect(bandLimitedEdgeValue(0, shipMaterialParams.seamWidth, 2)).toBeGreaterThan(0.9);
+
+    // …and what the same fade would have done to the STEP: deleted it, which
+    // is a flat deck. This is the regression pin for §B.48 itself.
+    const wronglyFaded = (f: number, id: number, other: number, filter: number): number => {
+      const eff = Math.max(CHAMFER, filter * 2);
+      const energy = CHAMFER / eff; // §V.48b half (b), applied where it must not be
+      return plateau(f, id, other, other, filter) * energy;
+    };
+    const fadedA = wronglyFaded(0.5, A, B, 0.24);
+    const fadedB = wronglyFaded(0.5, B, A, 0.24);
+    expect(Math.abs(fadedA - fadedB)).toBeLessThan(0.002); // flush again = the bug
+  });
+
+  it('never becomes a per-pixel step at any footprint (§B.20 safety, kept)', () => {
+    // The reason the crown existed. Whatever the distance, two neighbouring
+    // pixels must never straddle the whole transition — that is the difference
+    // between an antialiased edge and the speckle that started all of this.
+    let worst = 0;
+    for (let filter = 0.001; filter < 1.5; filter += 0.004) {
+      for (let f = 0; f < 1; f += 0.002) {
+        const a = plateau(f, A, B, B, filter);
+        const b = plateau(Math.min(0.999999, f + filter), A, B, B, filter);
+        worst = Math.max(worst, Math.abs(b - a));
+      }
+    }
+    // bounded by the full plateau range; never the instantaneous jump an
+    // unfiltered per-board constant would give
+    expect(worst).toBeLessThan(STEP * 1.6);
+  });
+
+  it('carries an occlusion term, because relief alone is invisible in ambient light', () => {
+    // §B.48b: there is no environment map in this project and the only ambient
+    // is a HemisphereLight, whose irradiance on an up-facing surface is a
+    // function of N.y alone. A 2° normal tilt moves N.y by 0.0006, so the
+    // ambient term is constant across a whole deck — 100% of a SHADOWED deck's
+    // light, and a galleon's deck is mostly under sail shadow. Without an AO
+    // term the grooves between boards cannot darken there at all, whatever the
+    // height field does. This asserts the channel exists, which is the
+    // §V.62 class of defect: a detail that reaches no output.
+    // every wood family, not just the deck: a caulk groove occludes wherever
+    // it is, and the hull sides carry the same planking
+    for (const kind of ['deck', 'forecastle-deck', 'hull-section', 'stairs'] as const) {
+      const mat = createPieceMaterial(kind);
+      expect(mat.aoNode, `${kind} has no occlusion term`).toBeTruthy();
+      mat.dispose();
+    }
   });
 });
 

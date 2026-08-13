@@ -26,7 +26,7 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
-import { bandLimitedEdge, coordFilter, periodResolved } from './bandLimit';
+import { bandLimitedEdge, bandLimitedStep, coordFilter, periodResolved } from './bandLimit';
 import type { DeckFieldSampler } from './deckFieldTexture';
 import { waterLighting } from '../caustics';
 import { deckWetness } from '../deckwater';
@@ -229,6 +229,9 @@ export function createWoodMaterial(
   const uBumpScale = uniform(p.bumpScale);
   const uGrainRelief = uniform(p.grainRelief);
   const uPlankRelief = uniform(p.plankRelief);
+  const uPlankStep = uniform(p.plankStep);
+  const uPlankChamfer = uniform(p.plankChamfer);
+  const uAoStrength = uniform(p.aoStrength);
   const uPlankTilt = uniform(p.plankTilt * irregularity());
   const uPlankWander = uniform(p.plankWander * irregularity());
   const uSeamDepth = uniform(p.seamDepth);
@@ -379,6 +382,41 @@ export function createWoodMaterial(
   // proud or shy of its neighbours. This is most of what reads as planking
   // rather than a painted stripe pattern.
   const plankId = hash2(vec2(boardCoord.floor(), 17.3));
+  /**
+   * THE PLATEAU STEP (§V.70, §B.48) — the term whose absence made this deck
+   * read as painted-on flat wood twice.
+   *
+   * Everything below this line is CROWNED: `sin(πf)` and `sin(2πf)` are both
+   * zero at f=0 and f=1, so every board met every neighbour at exactly the same
+   * height and the whole surface was perfectly flush by construction. That was
+   * deliberate — a crown carries no step, and a step differentiates to a
+   * one-pixel spike (§B.20). But a board reads as a solid object precisely
+   * because its face sits at a different height from the next board's, and the
+   * only place the eye can compare two boards is the seam the crown zeroes.
+   *
+   * `bandLimitedStep` keeps the §B.20 safety without the flatness: the two
+   * boards blend to their shared MEAN at the seam, so the field is continuous
+   * and `reliefNormal` differentiates a ramp. The chamfer is widened to the
+   * pixel footprint (§V.48b half a) and the amplitude rides `resolved`, the
+   * PERIOD gate — §V.48's own prescription for per-board terms. It is
+   * deliberately NOT faded to zero on the chamfer's own width: a step's
+   * band-limited mean is the ramp, not "no step" (§V.70).
+   *
+   * The neighbour is picked by `sign(f − 0.5)`, whose flip at mid-board is
+   * harmless BY CONSTRUCTION: at f = 0.5 the distance to either seam is at its
+   * maximum, so the neighbour's weight there is already zero.
+   */
+  const boardIndex = boardCoord.floor();
+  const neighbourId = hash2(vec2(boardIndex.add(f.sub(0.5).sign()), 17.3));
+  /** a board id as a signed level, −1..1 */
+  const level = (id: AnyNode): AnyNode => id.sub(0.5).mul(2);
+  const plankPlateau = bandLimitedStep(
+    edgeDistance,
+    level(plankId),
+    level(neighbourId),
+    uPlankChamfer,
+    plankFilter,
+  ).mul(resolved);
   // CROWNED, not stepped: the lift rises to the middle of each board and
   // returns to zero at both seams. A per-plank constant would be a step in
   // the height field, and the relief normal differentiates that field in
@@ -429,6 +467,7 @@ export function createWoodMaterial(
     .sub(0.5)
     .mul(uGrainRelief)
     .mul(grainResolved)
+    .add(plankPlateau.mul(uPlankStep))
     .add(plankLift.mul(uPlankRelief))
     .add(plankTilt.mul(uPlankTilt));
   height = height.sub(seamGroove.mul(uSeamDepth)); // caulking sits recessed
@@ -438,6 +477,47 @@ export function createWoodMaterial(
   if (tones.sparAxis === undefined) {
     height = height.sub(buttGroove.mul(uSeamDepth).mul(0.8).mul(crown));
   }
+
+  /**
+   * CAVITY OCCLUSION (§B.48b) — the half of "3-dimensional" that no normal can
+   * supply, and the thing the reference is actually doing.
+   *
+   * There is no environment map in this project; the only ambient is a
+   * HemisphereLight, and its irradiance on an up-facing surface is a function
+   * of N.y ALONE. A 2° normal tilt moves N.y by 0.0006, so the ambient term is
+   * effectively CONSTANT over an entire deck — ~24% of a sunlit deck's light
+   * and 100% of a shadowed one's, and a galleon's deck spends most of its area
+   * under sail shadow. In that shadow the relief normal changes NOTHING, and
+   * what is left is albedo: a dark line between two identically-lit boards,
+   * which is the definition of the complaint.
+   *
+   * Occlusion is the only channel that can put contrast there. `aoNode` costs
+   * no texture and no sampler — three multiplies it into indirect diffuse only
+   * (`PhysicalLightingModel`), so direct sun still rakes across the boards
+   * untouched and nothing here depends on the post pipeline, which has never
+   * run.
+   *
+   * Every input is a mask that is ALREADY band-limited: the seam and butt
+   * grooves come from `bandLimitedEdge`, and the plateau difference rides
+   * `resolved`. So the occlusion fades out exactly when the geometry it stands
+   * for stops being resolvable, with no gate of its own (§V.48).
+   */
+  let cavity: AnyNode = seamGroove;
+  if (tones.sparAxis === undefined) {
+    // a butt joint is as open as a seam, and crowned for the same reason its
+    // own depth is: no step across a plank edge
+    cavity = cavity.max(buttGroove.mul(crown));
+  }
+  /**
+   * …and the LOW side of a plateau step is shaded by the board standing over
+   * it. This is what makes the step read in flat ambient light rather than
+   * only when the sun happens to rake it — a one-sided darkening that tells
+   * you WHICH board is proud, which a symmetric caulk line never could.
+   * Weighted by `seamGroove` so it is confined to the edge region.
+   */
+  const stepShade = level(neighbourId).sub(level(plankId)).max(0).mul(0.5).mul(resolved);
+  cavity = cavity.max(stepShade.mul(seamGroove));
+  material.aoNode = float(1).sub(cavity.clamp(0, 1).mul(uAoStrength));
 
   // per-board tone jitter is a STEP at each seam — flat across a board, then a
   // jump. Once a board is sub-pixel that step is per-pixel random albedo, so
@@ -615,6 +695,9 @@ export function createWoodMaterial(
       uBumpScale.value = p.bumpScale;
       uGrainRelief.value = p.grainRelief;
       uPlankRelief.value = p.plankRelief;
+      uPlankStep.value = p.plankStep;
+      uPlankChamfer.value = p.plankChamfer;
+      uAoStrength.value = p.aoStrength;
       uPlankTilt.value = p.plankTilt * irregularity();
       uPlankWander.value = p.plankWander * irregularity();
       uSeamDepth.value = p.seamDepth;
