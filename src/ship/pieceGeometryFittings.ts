@@ -6,6 +6,13 @@
 import * as THREE from 'three';
 import type { AABB } from './pieceTypes';
 import { aabbCenter, aabbSize, mergeNonIndexed } from './pieceGeometryShapes';
+import {
+  buildRailRun,
+  railProfile,
+  railSeed,
+  readRailGaps,
+  type RailPoint,
+} from './pieceGeometryRail';
 import { COAMING_HEIGHT, COAMING_WIDTH, GRATING_HEIGHT } from './deckHeightfield';
 
 /**
@@ -138,43 +145,43 @@ export function buildStairsGeometry(aabb: AABB): THREE.BufferGeometry {
 }
 
 /**
- * Rail run: top rail + evenly spaced posts along the longest horizontal
- * axis, so decks read as railed, not walled. Deterministic post count.
+ * STRAIGHT rail run — the athwartships ones: the break of each castle deck and
+ * the stern balustrade. Same joinery as the curved side runs (turned balusters
+ * at a fixed SPACING, two-board chamfered cap, sill, newels at every span end);
+ * the only difference is that the path is two points instead of a sampled hull
+ * curve, so it shares `buildRailRun` rather than reimplementing a rail.
+ *
+ * THIS IS THE RUN THE STAIRCASES CUT (§T.45). The user asked for railings "all
+ * the way around except for 2 staircases left and right around the steering
+ * wheel", and the quarterdeck break is where those companionways land — so
+ * this builder is the one that has to be able to express a hole. It reads the
+ * gaps off the piece's `shape`, in metres from the run's PORT end.
  */
-export function buildRailGeometry(aabb: AABB): THREE.BufferGeometry {
+export function buildRailGeometry(
+  aabb: AABB,
+  shape?: Record<string, number>,
+): THREE.BufferGeometry {
   const s = aabbSize(aabb);
   const c = aabbCenter(aabb);
   const alongZ = s.z >= s.x;
   const runLength = alongZ ? s.z : s.x;
   const thickness = alongZ ? s.x : s.z;
-  const capH = Math.min(0.12, s.y * 0.2);
-
-  const parts: THREE.BufferGeometry[] = [];
-  const cap = alongZ
-    ? new THREE.BoxGeometry(thickness, capH, runLength)
-    : new THREE.BoxGeometry(runLength, capH, thickness);
-  cap.translate(c.x, aabb.max[1] - capH / 2, c.z);
-  parts.push(cap);
-
-  const postCount = Math.max(2, Math.round(runLength / 1.1) + 1);
-  const postW = thickness * 0.7;
-  const postH = s.y - capH;
-  for (let i = 0; i < postCount; i++) {
-    const along = -runLength / 2 + (runLength * i) / (postCount - 1);
-    const post = new THREE.BoxGeometry(postW, postH, postW);
-    post.translate(
-      c.x + (alongZ ? 0 : along),
-      aabb.min[1] + postH / 2,
-      c.z + (alongZ ? along : 0),
-    );
-    parts.push(post);
-  }
-  // mid rail ties the posts together visually
-  const mid = alongZ
-    ? new THREE.BoxGeometry(postW * 0.8, capH * 0.7, runLength)
-    : new THREE.BoxGeometry(runLength, capH * 0.7, postW * 0.8);
-  mid.translate(c.x, aabb.min[1] + s.y * 0.45, c.z);
-  parts.push(mid);
-
-  return mergeNonIndexed(parts);
+  const half = runLength / 2;
+  const path: RailPoint[] = alongZ
+    ? [
+        [c.x, aabb.min[1], c.z - half],
+        [c.x, aabb.min[1], c.z + half],
+      ]
+    : [
+        [c.x - half, aabb.min[1], c.z],
+        [c.x + half, aabb.min[1], c.z],
+      ];
+  return buildRailRun(
+    path,
+    railProfile(s.y, thickness, {
+      panelHeight: shape?.panelHeight ?? 0,
+      seed: railSeed(c.x, c.z, runLength),
+    }),
+    readRailGaps(shape),
+  );
 }

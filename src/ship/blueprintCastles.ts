@@ -4,9 +4,9 @@
  * taper with the plan (§V22 — no overhang), furniture pieces sit at the
  * fixture sockets (wheel, capstan) plus grating and companionway stairs.
  */
-import type { ShipClassParams } from '../params/ship';
-import { LANTERN_ARM_REACH, type PieceDef } from './pieceTypes';
-import { hullShapeHints, mkPiece } from './blueprintParts';
+import { shipDetailParams, type ShipClassParams } from '../params/ship';
+import { LANTERN_ARM_REACH, type PieceDef, type Vec3 } from './pieceTypes';
+import { companionwayStations, hullShapeHints, mkPiece } from './blueprintParts';
 import { hullHalfWidthAt, type HullShape } from './hullMath';
 
 /** Raised bow/stern works: forecastle, quarterdeck + cabin (stepped stern
@@ -114,7 +114,6 @@ export function buildCastles(p: ShipClassParams): PieceDef[] {
 /** deck furniture: wheel + capstan at their fixture sockets, hatch
  *  grating, companionway stairs to both castles (§V22 review) */
 export function buildFurniture(p: ShipClassParams): PieceDef[] {
-  const L2 = p.hullLength / 2;
   const sl2 = p.sterncastleLength / 2;
   return [
     mkPiece('wheel', 'wheel', [0, 0.05, sl2 - 0.7],
@@ -126,12 +125,42 @@ export function buildFurniture(p: ShipClassParams): PieceDef[] {
     mkPiece('grating-main', 'grating', [0, 0.02, -2],
       { min: [-0.85, 0, -1.0], max: [0.85, 0.24, 1.0] },
       { parent: 'deck' }),
-    // stairs climb +z; the aft pair is turned 180° to climb the sterncastle
-    mkPiece('stairs-fore', 'stairs', [1.7, 0, L2 - p.forecastleLength - 0.9],
-      { min: [-0.6, 0, -0.9], max: [0.6, p.forecastleRise, 0.9] },
-      { parent: 'deck' }),
-    mkPiece('stairs-aft', 'stairs', [1.7, 0, -(L2 - p.sterncastleLength) - 0.9],
-      { min: [-0.6, 0, -1.1], max: [0.6, p.sterncastleRise, 1.1] },
-      { parent: 'deck', rotation: [0, Math.PI, 0] }),
+    ...buildCompanionways(p),
   ];
+}
+
+/**
+ * COMPANIONWAYS — the two flanking the wheel, plus the one to the forecastle.
+ *
+ * §T.45, user: "railings that are all the way around except for 2 staircases
+ * left and right around the steering wheel". Three things were wrong and all
+ * three came from the same place — nothing related the stairs to the deck they
+ * land on:
+ *
+ *  1. BOTH stairs were on STARBOARD (x = +1.7). There was no port ladder at
+ *     all, so the pair the user is describing did not exist.
+ *  2. NEITHER flanked the wheel.
+ *  3. The aft one climbed the WRONG WAY. It sat at z −9.4 turned 180°, so it
+ *     ran from z −8.3 up to z −10.5 — and the sterncastle block starts at
+ *     z −8.5, which means it climbed INTO solid geometry and through the
+ *     bulkhead wall on the way.
+ *
+ * The fix is to derive them from the break they serve rather than from a hand
+ * -placed station: a companionway's head is ON the break plane, its foot is
+ * one run forward of it on the main deck, and its width and offset are the
+ * same two params the rail gaps are cut from (§V.37 — one source, two
+ * consumers, or the stair opens into a railing).
+ */
+function buildCompanionways(p: ShipClassParams): PieceDef[] {
+  const hw = shipDetailParams.stairWidth / 2;
+  return companionwayStations(p).map((st) => {
+    // the head sits ON the break plane and the flight runs away from it, onto
+    // the main deck. `buildStairsGeometry` rises along its own +z, so the
+    // quarterdeck pair takes a 180° yaw to climb toward −z — which is what
+    // stops them ending two metres inside the sterncastle block.
+    const z = st.aft ? st.headZ + st.run / 2 : st.headZ - st.run / 2;
+    return mkPiece(st.id, 'stairs', [st.x, 0, z],
+      { min: [-hw, 0, -st.run / 2], max: [hw, st.rise, st.run / 2] },
+      { parent: 'deck', ...(st.aft ? { rotation: [0, Math.PI, 0] as Vec3 } : {}) });
+  });
 }

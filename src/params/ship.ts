@@ -50,7 +50,14 @@ export interface ShipClassParams {
   railHeight: number;
   railThickness: number;
   railInset: number; // rail offset inboard from hull side
-  railLengthFactor: number; // fraction of hull length
+  /**
+   * How far a waist rail may run toward the ends, as a fraction of hull
+   * length — an END CAP, not the run itself. On a ship WITH castles the castle
+   * breaks stop the waist run first and this never applies; on a castle-less
+   * brigantine it is the only thing keeping the run out of the stem and the
+   * transom (§T.45).
+   */
+  railLengthFactor: number;
   rudderHeight: number;
   rudderChord: number;
   rudderThickness: number;
@@ -151,6 +158,42 @@ export interface ShipDetailParams {
   gunportsPerSection: number;
   /** railing height on the raised decks (m) */
   castleRailHeight: number;
+  /**
+   * Metres between balusters — a DIMENSION, not a count (§V.66).
+   *
+   * Both rail builders used a fixed 13 stations whatever the run length, which
+   * on the 28 m main run is a post every 2.154 m against the reference's
+   * 0.2-0.3 m: seven to ten times too coarse, and square. A count cannot be
+   * right for a 5 m castle run and a 20 m waist at the same time; a spacing is
+   * right for both by construction.
+   */
+  balusterSpacing: number;
+  /** a baluster's widest radius — the belly of the turning (m) */
+  balusterRadius: number;
+  /**
+   * Height of the SOLID bulwark boarding carried by the waist rail (m).
+   *
+   * The waist previously had a 0.28 m sheer-strake kerb and then a cap rail
+   * 1.0 m up and 0.22 m inboard of it — a 0.72 m band of open air crossed by
+   * one thin mid rail, which is why it read as a fence standing next to the
+   * hull rather than as bulwark you shelter behind. Note `deckHeightfield.ts`
+   * has always modelled BULWARK_HEIGHT 0.95 as the wall its water cannot
+   * cross, so the shading geometry and the water solver disagreed by 3x
+   * (§V.37: mating systems share their dimensions).
+   */
+  waistPanelHeight: number;
+  /**
+   * Companionway width (m), and how far off the centreline the pair sits.
+   *
+   * ONE SOURCE FOR TWO CONSUMERS (§V.37). The stairs are built in
+   * blueprintCastles and the GAPS they land in are cut by blueprintDetail; if
+   * those two ever disagree the ship gets a staircase that opens into a
+   * railing, which is the class of defect that produced §T.45 in the first
+   * place (nothing cut a gap at all, so both stairs simply intersected the
+   * rails and the bulkheads behind them).
+   */
+  stairWidth: number;
+  stairOffset: number;
   /** belaying pins per rack */
   pinCount: number;
   /** masthead pennant: fly length and hoist depth (m) */
@@ -165,6 +208,19 @@ export interface ShipDetailParams {
   anchorSize: number;
   /** decorative sheer moulding section (m) */
   mouldingSize: number;
+  /**
+   * Metres between the iron hoops that bind a made mast (§T.34 "mast
+   * taper/hoops rework", untouched until now — every spar on the ship was a
+   * bare cylinder with no fitting anywhere along it).
+   *
+   * A SPACING, not a count, for the same reason the balusters are: a 21 m
+   * mizzen and a 31.5 m mainmast want the same look, and hoops at constant
+   * spacing on a tapering spar are also what lets the eye read the taper.
+   */
+  mastHoopSpacing: number;
+  mastHoopThickness: number;
+  /** turns in the woolding group — rope, so several close together */
+  mastWooldingTurns: number;
   /** gathering bays along a furled yard — the cloth swags between gaskets */
   sailBuntBays: number;
   /** how far a bunt hangs below the yard, as a fraction of its own thickness */
@@ -203,12 +259,17 @@ export const shipDetailParams: ShipDetailParams = registerParams(
     deadeyeRadius: 0.15,
     gunportSize: 0.78, gunportY: 1.55, gunportsPerSection: 3,
     castleRailHeight: 0.95,
+    balusterSpacing: 0.28, balusterRadius: 0.045, waistPanelHeight: 0.52,
+    // 2.2 m off the centreline puts the pair either side of the wheel (which
+    // sits on the centreline 0.7 m aft of the break) with room to walk between
+    stairWidth: 1.1, stairOffset: 2.2,
     pinCount: 7,
     pennantFly: 4.2, pennantHoist: 0.55,
     flagFly: 2.2, flagHoist: 1.35,
     ensignStaff: 2.4,
     anchorSize: 2.1,
     mouldingSize: 0.14,
+    mastHoopSpacing: 2.2, mastHoopThickness: 0.07, mastWooldingTurns: 4,
     sailBuntBays: 3, sailBuntSag: 1.15, sailBuntSwell: 2.1,
     bulwarkLip: 0.28, railChamfer: 0.035,
     irregularity: 1,
@@ -222,6 +283,13 @@ export const shipDetailParams: ShipDetailParams = registerParams(
     gunportY: { min: 0.4, max: 3, step: 0.05 },
     gunportsPerSection: { min: 0, max: 5, step: 1 },
     castleRailHeight: { min: 0.4, max: 1.8, step: 0.05 },
+    // floor at 0.12: below that a 20 m run is 170 balusters and the merged
+    // geometry stops being worth what it costs
+    balusterSpacing: { min: 0.12, max: 1.5, step: 0.01 },
+    balusterRadius: { min: 0.015, max: 0.12, step: 0.005 },
+    waistPanelHeight: { min: 0, max: 1.2, step: 0.02 },
+    stairWidth: { min: 0.6, max: 2, step: 0.05 },
+    stairOffset: { min: 0.8, max: 4, step: 0.05 },
     pinCount: { min: 0, max: 14, step: 1 },
     pennantFly: { min: 0.5, max: 10, step: 0.1 },
     pennantHoist: { min: 0.1, max: 2, step: 0.05 },
@@ -230,6 +298,9 @@ export const shipDetailParams: ShipDetailParams = registerParams(
     ensignStaff: { min: 0.5, max: 6, step: 0.1 },
     anchorSize: { min: 0.5, max: 5, step: 0.1 },
     mouldingSize: { min: 0.03, max: 0.5, step: 0.01 },
+    mastHoopSpacing: { min: 0.5, max: 8, step: 0.1 },
+    mastHoopThickness: { min: 0.02, max: 0.2, step: 0.005 },
+    mastWooldingTurns: { min: 0, max: 8, step: 1 },
     sailBuntBays: { min: 1, max: 6, step: 1 },
     sailBuntSag: { min: 0, max: 3, step: 0.05 },
     sailBuntSwell: { min: 1, max: 4, step: 0.05 },

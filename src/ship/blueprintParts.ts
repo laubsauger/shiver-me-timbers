@@ -44,6 +44,84 @@ export function mkPiece(
 }
 
 /** hull-loft shape hints shared by hull sections / bow / deck (§V18 data) */
+/**
+ * A companionway station: where a ladder stands, and therefore where the rail
+ * above it must open.
+ *
+ * ONE SOURCE, TWO CONSUMERS (§V.37). `blueprintCastles` builds the stairs and
+ * `blueprintDetail` cuts the gaps, and if those two ever disagree the ship
+ * gets a staircase opening into a railing — which is exactly the class of
+ * defect §T.45 exists to fix (nothing cut a gap at all, so both ladders simply
+ * intersected the rails and the bulkheads behind them). Deriving both from
+ * this function makes the agreement structural rather than a convention two
+ * files are each trying to remember.
+ */
+export interface Companionway {
+  id: string;
+  /** ship-space x of the ladder's centreline */
+  x: number;
+  /** ship-space z of the BREAK PLANE the ladder's head lands on */
+  headZ: number;
+  /** fore-and-aft length of the flight */
+  run: number;
+  rise: number;
+  /** true when the flight climbs toward −z (the quarterdeck pair) */
+  aft: boolean;
+}
+
+/** a comfortable ladder is a little longer in run than it is in rise */
+const companionwayRun = (rise: number): number => Math.max(0.8, rise * 1.05);
+
+/**
+ * The ladders a hull carries: one to the forecastle, and the PAIR flanking the
+ * wheel up to the quarterdeck (user: "railings all the way around except for 2
+ * staircases left and right around the steering wheel").
+ *
+ * The offset is CLAMPED to the deck the ladder lands on. A fixed 2.2 m is
+ * right at the quarterdeck break, where the ship is 3.4 m to the rail, and
+ * wrong at the forecastle break, which is only 2.5 m — there the ladder would
+ * hang over the side. Scaling to the available half-width is the same lesson
+ * as §V.66: size a thing by the dimension it actually sits in.
+ */
+export function companionwayStations(p: ShipClassParams): Companionway[] {
+  const d = shipDetailParams;
+  const L2 = p.hullLength / 2;
+  const stations: Companionway[] = [];
+  /** rail half-width at a break plane — the same figure buildDeckRails uses */
+  const halfAt = (z: number): number =>
+    hullHalfWidthAt(z, p.freeboard, hullShapeHints(p, 0, z, z) as unknown as HullShape) * 0.9;
+  /** keep the whole flight, plus a hand's clearance, inboard of the rail */
+  const offsetAt = (z: number): number =>
+    Math.max(0.3, Math.min(d.stairOffset, halfAt(z) - d.stairWidth / 2 - 0.15));
+
+  if (p.forecastleLength > 0 && p.forecastleRise > 0) {
+    const headZ = L2 - p.forecastleLength;
+    stations.push({
+      id: 'stairs-fore',
+      x: offsetAt(headZ),
+      headZ,
+      run: companionwayRun(p.forecastleRise),
+      rise: p.forecastleRise,
+      aft: false,
+    });
+  }
+  if (p.sterncastleLength > 0 && p.sterncastleRise > 0) {
+    const headZ = -(L2 - p.sterncastleLength);
+    const x = offsetAt(headZ);
+    for (const [side, sign] of [['port', -1], ['starboard', 1]] as const) {
+      stations.push({
+        id: `stairs-${side}-aft`,
+        x: sign * x,
+        headZ,
+        run: companionwayRun(p.sterncastleRise),
+        rise: p.sterncastleRise,
+        aft: true,
+      });
+    }
+  }
+  return stations;
+}
+
 export function hullShapeHints(
   p: ShipClassParams,
   side: number,

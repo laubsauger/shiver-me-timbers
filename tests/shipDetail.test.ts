@@ -256,11 +256,85 @@ describe('railings — asked for three times (§T.34, §V22)', () => {
     // WHY: a castle deck is FLAT. Feeding it the hull's sheer curve rakes
     // every stanchion up toward the ends and the rail visibly climbs off its
     // own deck.
+    //
+    // MEASURED AS RAKE, NOT AS TOTAL HEIGHT. This used to assert the run's
+    // whole vertical extent was under `castleRailHeight + 0.2`, which was a
+    // PROXY for "level" and stopped meaning that once §T.45 gave every span
+    // end a newel post that legitimately stands proud of the cap rail. The
+    // sentence above is a claim about the run being LEVEL ALONG ITS LENGTH,
+    // so measure that: bucket the vertices by station and compare the FOOT of
+    // the run, which is where the sheer would enter (`buildCurvedRail` builds
+    // its path from `hullSheer(z)` and the castle hints zero it out).
     const rail = byId.get('rail-quarterdeck-starboard')!;
-    const ys = shipVertices(rail).map((v) => v.y);
-    expect(Math.max(...ys) - Math.min(...ys)).toBeLessThan(
-      shipDetailParams.castleRailHeight + 0.2,
-    );
+    const vs = shipVertices(rail);
+    const feetByBand = new Map<number, number>();
+    for (const v of vs) {
+      const band = Math.round(v.z * 2); // half-metre stations
+      feetByBand.set(band, Math.min(feetByBand.get(band) ?? Infinity, v.y));
+    }
+    const feet = [...feetByBand.values()];
+    expect(feet.length).toBeGreaterThan(4); // the run really is sampled
+    expect(Math.max(...feet) - Math.min(...feet)).toBeLessThan(0.02);
+  });
+
+  it('rails the waist where a man can actually fall off, not inside the castles', () => {
+    // §T.45. The main run used to be `hullLength × railLengthFactor` centred
+    // on the ship — 28 m of which 7.5 m per side was drawn INSIDE the solid
+    // forecastle and sterncastle blocks, and which drove through both castle
+    // bulkheads on the way. A rail belongs on the open waist between the two
+    // breaks; the castle decks carry their own runs above it.
+    const p = galleonParams;
+    const foreBreak = p.hullLength / 2 - p.forecastleLength;
+    const aftBreak = -(p.hullLength / 2 - p.sterncastleLength);
+    for (const side of ['port', 'starboard'] as const) {
+      const zs = shipVertices(byId.get(`rail-${side}`)!).map((v) => v.z);
+      // a little slack for the newel/cap overhang at each end
+      expect(Math.min(...zs)).toBeGreaterThan(aftBreak - 0.4);
+      expect(Math.max(...zs)).toBeLessThan(foreBreak + 0.4);
+    }
+  });
+
+  it('opens the railing exactly where a companionway lands, and nowhere else', () => {
+    // The user asked for railings "all the way around except for 2 staircases
+    // left and right around the steering wheel". Nothing used to cut a gap at
+    // all, so both ladders simply intersected the rail and the bulkhead behind
+    // it. The gap and the stair are driven from ONE pair of params (§V.37), so
+    // this checks they actually agree in ship space rather than in intent.
+    const d = shipDetailParams;
+    const brk = byId.get('rail-quarterdeck-break')!;
+    const xs = shipVertices(brk).map((v) => v.x);
+    const occupied = (x: number): boolean => xs.some((v) => Math.abs(v - x) < 0.18);
+    // solid on the centreline (where the helmsman stands) and at both ends
+    expect(occupied(0)).toBe(true);
+    // …and open at both companionway centres
+    expect(occupied(-d.stairOffset)).toBe(false);
+    expect(occupied(d.stairOffset)).toBe(false);
+  });
+
+  it('puts a companionway on each side of the wheel, climbing the way the deck rises', () => {
+    // Three defects in one piece of data before §T.45: BOTH ladders were on
+    // starboard (so the pair the user describes did not exist), neither
+    // flanked the wheel, and the aft one was turned so that it climbed AFT
+    // from z −8.3 to z −10.5 — into the sterncastle block, which starts at
+    // z −8.5. A ladder that ends inside a solid is not a ladder.
+    const p = galleonParams;
+    const aftBreak = -(p.hullLength / 2 - p.sterncastleLength);
+    const wheel = byId.get('wheel')!;
+    const pair = galleon.filter((q) => q.kind === 'stairs' && q.id.endsWith('-aft'));
+    expect(pair).toHaveLength(2);
+    const sides = pair.map((q) => Math.sign(q.transform.position[0]));
+    expect(sides.slice().sort()).toEqual([-1, 1]); // one each side, not two starboard
+    for (const st of pair) {
+      const z = st.transform.position[2] + byId.get('deck')!.transform.position[2];
+      const hz = (st.aabb.max[2] - st.aabb.min[2]) / 2;
+      // the HEAD is on the break plane, and the whole run is forward of it —
+      // i.e. on the main deck, not inside the castle
+      expect(z - hz).toBeGreaterThan(aftBreak - 0.05);
+      // and it flanks the wheel rather than sitting on top of it
+      expect(Math.abs(st.transform.position[0])).toBeGreaterThan(
+        Math.abs(wheel.aabb.max[0]) * 0.9,
+      );
+    }
   });
 });
 
@@ -689,8 +763,35 @@ describe('procedural deck heightfield (talk: "Surface Water: Setup")', () => {
     const capstan = galleon.find((p) => p.kind === 'capstan')!;
     const deck = byId.get('deck')!;
     const cz = capstan.transform.position[2] + deck.transform.position[2];
-    // just outboard of the drum, inside the worn ring, vs. clear of it
-    expect(sampleDeckHeight(field, 1.4, cz)).toBeLessThan(sampleDeckHeight(field, 1.4, cz + 4));
+    /**
+     * COMPARED AGAINST THE CROWN OF THE DECK, NOT AGAINST ONE FIXED STATION.
+     *
+     * This used to be `h(1.4, cz) < h(1.4, cz + 4)`, and `cz + 4` was
+     * described as "clear of it" but was not: it landed on the bottom tread of
+     * the forecastle ladder, which `structureAt` ramps up by 0.089 m there. So
+     * the assertion was really "a hollow is lower than a staircase", and it
+     * broke the moment §T.45 moved that ladder outboard — at which point the
+     * reference point fell into the ladder's own FOOT WEAR hollow, which is
+     * deeper than the capstan's, and the test inverted.
+     *
+     * The intent is that the working area is DISHED relative to the deck
+     * around it, so compare it against the highest point on the same line —
+     * which is immune to any fitting moving.
+     */
+    let crown = -Infinity;
+    for (let z = cz + 1.0; z <= cz + 3.0; z += 0.1) {
+      crown = Math.max(crown, sampleDeckHeight(field, 1.4, z));
+    }
+    expect(sampleDeckHeight(field, 1.4, cz)).toBeLessThan(crown);
+
+    // …and the foot of a companionway is worn too — the other half of what
+    // `readLayout` pushes wear discs for, and what the old assertion was
+    // accidentally leaning on rather than checking.
+    const ladder = galleon.find((q) => q.id === 'stairs-fore')!;
+    const lz = ladder.transform.position[2] + deck.transform.position[2];
+    const lhz = (ladder.aabb.max[2] - ladder.aabb.min[2]) / 2;
+    const lx = ladder.transform.position[0];
+    expect(sampleDeckHeight(field, lx, lz - lhz)).toBeLessThan(crown);
   });
 
   it('gives every board its own height, without stepping at the seams', () => {

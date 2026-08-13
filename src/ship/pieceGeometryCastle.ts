@@ -9,6 +9,13 @@ import * as THREE from 'three';
 import type { AABB } from './pieceTypes';
 import { hullHalfWidthAt, hullSheer, hullTopY, type HullShape } from './pieceGeometryHull';
 import { mergeNonIndexed } from './pieceGeometryShapes';
+import {
+  buildRailRun,
+  railProfile,
+  railSeed,
+  readRailGaps,
+  type RailPoint,
+} from './pieceGeometryRail';
 
 /**
  * Deck half-width at ship-space z, inset from the shell AT THE RAIL LINE.
@@ -95,7 +102,13 @@ export function buildCurvedRail(
   railInset: number,
   shape?: Record<string, number>,
 ): THREE.BufferGeometry {
-  const stations = 13;
+  /**
+   * Stations sample the CURVE, and are no longer the balusters — those come
+   * from `balusterSpacing` inside buildRailRun. 24 is enough to resolve the
+   * hull's taper over any run on either ship class; the old 13 was doing both
+   * jobs and could not be right for either (§T.45).
+   */
+  const stations = 24;
   // POST HEIGHT ABOVE THE DECK, not the piece's total extent. The aabb top is
   // railHeight + the sheer at the ENDS OF THE HULL, but each post already
   // starts at its own station's sheer — so subtracting only the sheer over the
@@ -104,9 +117,8 @@ export function buildCurvedRail(
   // report: a bug in what the number meant, not a tuning miss.
   const sheerEnd = Math.max(hullSheer(s.z0, s), hullSheer(s.z1, s));
   const height = Math.max(0.5, shape?.railHeight ?? aabb.max[1] - sheerEnd);
-  const capH = Math.min(0.12, height * 0.2);
   const t = 0.09;
-  const pts: Array<[number, number, number]> = [];
+  const pts: RailPoint[] = [];
   for (let i = 0; i <= stations; i++) {
     const z = s.z0 + ((s.z1 - s.z0) * i) / stations;
     // rail stands inboard of the SHELL at the rail line (tumblehome-aware),
@@ -114,28 +126,20 @@ export function buildCurvedRail(
     const x = s.side * Math.max(0.1, hullHalfWidthAt(z, hullTopY(z, s), s) - railInset);
     pts.push([x, hullSheer(z, s), z]);
   }
-  const parts: THREE.BufferGeometry[] = [];
-  for (const [x, y, z] of pts) {
-    const post = new THREE.BoxGeometry(t, height + y, t);
-    post.translate(x, (height + y) / 2, z);
-    parts.push(post);
-  }
-  for (let i = 0; i < stations; i++) {
-    const [x0, y0, z0] = pts[i];
-    const [x1, y1, z1] = pts[i + 1];
-    const dx = x1 - x0;
-    const dz = z1 - z0;
-    const len = Math.hypot(dx, dz) + t;
-    const angle = Math.atan2(dx, dz);
-    for (const [ry, h] of [
-      [(y0 + y1) / 2 + height - capH / 2, capH],
-      [(y0 + y1) / 2 + height * 0.55, capH * 0.7],
-    ] as const) {
-      const seg = new THREE.BoxGeometry(t * 1.3, h, len);
-      seg.rotateY(angle);
-      seg.translate((x0 + x1) / 2, ry, (z0 + z1) / 2);
-      parts.push(seg);
-    }
-  }
-  return mergeNonIndexed(parts);
+  /**
+   * The WAIST carries solid bulwark boarding; a castle rail does not.
+   *
+   * A castle deck is something you look over and shoot past, and the reference
+   * has open turned balusters there. The waist is the other case entirely: it
+   * is the top of the ship's SIDE, and leaving it open is what made the ship
+   * read as a raft with a fence. The blueprint says which this is rather than
+   * the geometry guessing, because only the blueprint knows whether there is
+   * hull below this run or a castle deck.
+   */
+  const panelHeight = shape?.panelHeight ?? 0;
+  return buildRailRun(
+    pts,
+    railProfile(height, t, { panelHeight, seed: railSeed(s.side, s.z0, s.z1) }),
+    readRailGaps(shape),
+  );
 }

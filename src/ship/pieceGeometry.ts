@@ -15,6 +15,7 @@ import {
   mergeNonIndexed,
 } from './pieceGeometryShapes';
 import { buildSailGeometry } from './pieceGeometrySail';
+import { buildMastGeometry, buildYardGeometry } from './pieceGeometrySpar';
 import {
   asHullShape,
   buildEnvelopeDeck,
@@ -64,24 +65,6 @@ function box(aabb: AABB): THREE.BufferGeometry {
   const s = aabbSize(aabb);
   const c = aabbCenter(aabb);
   return new THREE.BoxGeometry(s.x, s.y, s.z).translate(c.x, c.y, c.z);
-}
-
-/** vertical spar tapering toward the top, base at aabb min-y */
-function taperedSpar(aabb: AABB, topScale: number): THREE.BufferGeometry {
-  const s = aabbSize(aabb);
-  const c = aabbCenter(aabb);
-  const r = s.x / 2;
-  const geo = new THREE.CylinderGeometry(r * topScale, r, s.y, 12);
-  return geo.translate(c.x, aabb.min[1] + s.y / 2, c.z);
-}
-
-/** horizontal spar along x (yards) */
-function crossSpar(aabb: AABB): THREE.BufferGeometry {
-  const s = aabbSize(aabb);
-  const c = aabbCenter(aabb);
-  const geo = new THREE.CylinderGeometry(s.y / 2, s.y / 2, s.x, 8);
-  geo.rotateZ(Math.PI / 2);
-  return geo.translate(c.x, c.y, c.z);
 }
 
 /** open lookout basket: tapered open cylinder + floor disc */
@@ -174,11 +157,13 @@ export function buildPieceGeometry(
     case 'cabin':
       return hull !== null ? buildCabinGeometry(hull, aabbSize(aabb).y) : box(aabb);
     case 'mast':
-      return taperedSpar(aabb, 0.45);
+      // hoops, woolding and a partner collar at the deck (§T.34)
+      return buildMastGeometry(aabb, 0.45, { partners: true });
     case 'bowsprit':
-      return taperedSpar(aabb, 0.4);
+      // banded like a mast, but it passes through no deck, so no collar
+      return buildMastGeometry(aabb, 0.4);
     case 'yard':
-      return crossSpar(aabb);
+      return buildYardGeometry(aabb);
     case 'sail':
       return buildSailGeometry('full', aabb);
     case 'crow-nest':
@@ -190,7 +175,7 @@ export function buildPieceGeometry(
       // straight runs (stern balustrade) keep the post-run builder
       return hull !== null
         ? buildCurvedRail(hull, aabb, shape?.railInset ?? 0.2, shape)
-        : buildRailGeometry(aabb);
+        : buildRailGeometry(aabb, shape);
     case 'transom':
       // lofted cap matching the shell's aft section (closes the stern);
       // box fallback only for piece data without hull hints

@@ -16,7 +16,7 @@
  */
 import { galleonParams, shipDetailParams, type ShipClassParams } from '../params/ship';
 import type { PieceDef, SocketDef } from './pieceTypes';
-import { figureheadStation, hullShapeHints, mkPiece } from './blueprintParts';
+import { companionwayStations, figureheadStation, hullShapeHints, mkPiece } from './blueprintParts';
 import { hullHalfWidthAt, hullTopY, type HullShape } from './hullMath';
 import { FLAG_STYLE_JOLLY, FLAG_STYLE_PENNANT } from './flagMaterial';
 import { vjitter } from './variation';
@@ -230,7 +230,18 @@ export function buildDeckRails(p: ShipClassParams = galleonParams): PieceDef[] {
   const L2 = p.hullLength / 2;
   const t = p.railThickness;
   const pieces: PieceDef[] = [];
+  const ladders = companionwayStations(p);
 
+  /**
+   * The CABIN swallows the after end of the quarterdeck run.
+   *
+   * `buildCastles` puts a solid tapered cabin block on the quarterdeck from
+   * the transom forward over `sterncastleLength × 0.5`, rising cabinHeight —
+   * so 4.4 m of each 8.8 m quarterdeck rail was drawn inside it. The rail
+   * stops at the cabin's forward face instead, which is also the honest
+   * answer: you cannot fall off there, there is a deckhouse in the way.
+   */
+  const cabinFront = -(L2 - p.sterncastleLength * 0.5);
   const runs = [
     {
       id: 'forecastle',
@@ -242,7 +253,7 @@ export function buildDeckRails(p: ShipClassParams = galleonParams): PieceDef[] {
     {
       id: 'quarterdeck',
       parent: 'sterncastle-deck',
-      z0: -(L2 - 0.2),
+      z0: cabinFront,
       z1: -(L2 - p.sterncastleLength),
       zc: -(L2 - p.sterncastleLength / 2),
     },
@@ -278,11 +289,39 @@ export function buildDeckRails(p: ShipClassParams = galleonParams): PieceDef[] {
       p.freeboard,
       hullShapeHints(p, 0, breakZ, breakZ) as unknown as HullShape,
     ) * 0.9;
+    /**
+     * THE TWO STAIRCASE GAPS (§T.45, user: "railings that are all the way
+     * around except for 2 staircases left and right around the steering
+     * wheel").
+     *
+     * The quarterdeck break is where both companionways land, so this is the
+     * run that has to carry holes. Nothing anywhere used to cut one — the
+     * stairs simply intersected the rail and the bulkhead behind it.
+     *
+     * Gaps are declared in ARC LENGTH FROM THE PORT END, because that is the
+     * one parameter `buildRailRun` works in and it is the same whether the run
+     * is straight or curved. The stair centres are mirrored about the
+     * centreline, so `x + half` converts each to its arc position.
+     */
+    /**
+     * Gaps come from `companionwayStations` — the SAME call blueprintCastles
+     * places the ladders from (§V.37). Declared in ARC LENGTH FROM THE PORT
+     * END, because that is the one parameter `buildRailRun` works in and it
+     * reads the same whether a run is straight or curved.
+     */
+    const clear = d.stairWidth / 2 + 0.12; // stair half-width plus a hand's clearance
+    const gaps: Record<string, number> = {};
+    const here = ladders.filter((st) => Math.abs(st.headZ - breakZ) < 0.05);
+    gaps.gapCount = here.length;
+    here.forEach((st, i) => {
+      gaps[`gap${i}Center`] = st.x + half;
+      gaps[`gap${i}Half`] = clear;
+    });
     pieces.push(
       mkPiece(`rail-${run.id}-break`, 'rail', [0, 0, breakZ - run.zc], {
         min: [-half, 0, -t / 2],
         max: [half, d.castleRailHeight, t / 2],
-      }, { parent: run.parent }),
+      }, { parent: run.parent, shape: gaps }),
     );
   }
   return pieces;

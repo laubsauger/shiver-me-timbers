@@ -85,26 +85,58 @@ export function buildRails(
   p: ShipClassParams,
   opts: { sternBalustrade: boolean },
 ): PieceDef[] {
-  const len = p.hullLength * p.railLengthFactor;
   const t = p.railThickness;
   const maxSheer = Math.max(p.sheerBow, p.sheerStern);
   const pieces: PieceDef[] = [];
+  /**
+   * THE WAIST, and only the waist (§T.45).
+   *
+   * This used to run `hullLength × railLengthFactor` = 28 m centred on the
+   * ship, which sounds like most of a 35 m hull and is in fact largely
+   * invisible: the castle decks are SOLID BLOCKS extruded down to the main
+   * deck, so 2.0 m of each run was buried inside the forecastle and 5.5 m
+   * inside the sterncastle — 7.5 m of the 28 per side — and both runs drove
+   * straight through the castle bulkhead walls on the way in. A rail is wanted
+   * where a person can fall off, which is exactly the OPEN WAIST between the
+   * two castle breaks. The castle decks carry their own runs above (see
+   * buildDeckRails), so the perimeter is continuous without anything being
+   * drawn inside a solid.
+   */
+  /**
+   * `railLengthFactor` survives as the END CAP, which is what it now means: a
+   * BRIGANTINE has no castles at all (forecastleLength = sterncastleLength =
+   * 0), so "the waist" would be the entire hull and the run would drive out
+   * through the pointed stem and the transom. The cap stops it short of both.
+   * On the galleon the castle breaks bite first and the cap never applies.
+   */
+  const cap = (p.hullLength * p.railLengthFactor) / 2;
+  const waistAft = Math.max(-cap, -(p.hullLength / 2 - p.sterncastleLength));
+  const waistFore = Math.min(cap, p.hullLength / 2 - p.forecastleLength);
   for (const [side, sign] of [['port', -1], ['starboard', 1]] as const) {
     // origin on the centreline: the run curves with taper + sheer (hints)
     pieces.push(
       mkPiece(`rail-${side}`, 'rail',
         [0, p.freeboard, 0],
         {
-          min: [sign < 0 ? -p.beam / 2 : t, 0, -len / 2],
-          max: [sign < 0 ? -t : p.beam / 2, p.railHeight + maxSheer, len / 2],
+          min: [sign < 0 ? -p.beam / 2 : t, 0, waistAft],
+          max: [sign < 0 ? -t : p.beam / 2, p.railHeight + maxSheer, waistFore],
         },
         {
           shape: {
-            ...hullShapeHints(p, sign, -len / 2, len / 2),
+            ...hullShapeHints(p, sign, waistAft, waistFore),
             railInset: p.railInset,
             // the stanchion height ABOVE THE DECK; the sheer is added per
             // station on top of it (see buildCurvedRail)
             railHeight: p.railHeight,
+            /**
+             * SOLID BULWARK BOARDING. This is the ship's SIDE, not a balcony:
+             * leaving it as open balusters over a 0.28 m kerb is what made the
+             * waist read as a fence standing next to the hull. Note
+             * `deckHeightfield.ts` has always modelled a 0.95 m wall here for
+             * the water solver, so this closes a 3x disagreement between what
+             * the water believes and what is drawn (§V.37).
+             */
+            panelHeight: shipDetailParams.waistPanelHeight,
           },
         }),
     );
