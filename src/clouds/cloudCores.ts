@@ -66,6 +66,27 @@ import type { CloudParams } from '../params/clouds';
 
 type N = ShaderNodeObject<Node>;
 
+/**
+ * THE PACK'S BLENDING CONTRACT, in one place because THREE materials now write
+ * it: the lobes, the fluff, and the banded stratus sheet (cloudBands.ts).
+ * R/G/A are PREMULTIPLIED by alpha and everything is summed ONE/ONE, which is
+ * what lets the blur and the composite recover weighted averages as channel/B.
+ * A fourth writer that got one of these flags wrong would not error — it would
+ * quietly take the whole RT off its own contract, so there is one definition.
+ */
+export function applyPackedBlending(m: THREE.NodeMaterial): void {
+  m.transparent = true;
+  m.blending = THREE.CustomBlending;
+  m.blendEquation = THREE.AddEquation;
+  m.blendSrc = THREE.OneFactor;
+  m.blendDst = THREE.OneFactor;
+  m.blendSrcAlpha = THREE.OneFactor;
+  m.blendDstAlpha = THREE.OneFactor;
+  m.depthTest = false;
+  m.depthWrite = false;
+  m.fog = false;
+}
+
 /** A polygonal core. `radius` is the mean radius; rx/ry/rz are the ellipsoid. */
 export interface CloudLobe {
   x: number;
@@ -416,19 +437,6 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   /** cluster-level gradient: lobes on the sun side of their cluster get more */
   const sunSide = iDir.dot(uSunWorld).mul(0.5).add(0.5);
 
-  const commonBlending = (m: THREE.NodeMaterial): void => {
-    m.transparent = true;
-    m.blending = THREE.CustomBlending;
-    m.blendEquation = THREE.AddEquation;
-    m.blendSrc = THREE.OneFactor;
-    m.blendDst = THREE.OneFactor;
-    m.blendSrcAlpha = THREE.OneFactor;
-    m.blendDstAlpha = THREE.OneFactor;
-    m.depthTest = false;
-    m.depthWrite = false;
-    m.fog = false;
-  };
-
   // == polygonal lobes =======================================================
   const detail = Math.max(0, Math.min(3, Math.floor(p.lobeDetail) || 0));
   const base = new THREE.IcosahedronGeometry(1, detail);
@@ -555,7 +563,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     lobeAlpha,
     vDepth.mul(lobeAlpha),
   );
-  commonBlending(lobeMat);
+  applyPackedBlending(lobeMat);
 
   const lobeMesh = new THREE.Mesh(lobeGeo, lobeMat);
   lobeMesh.frustumCulled = false;
@@ -641,7 +649,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     fluffAlpha,
     fluffDepth.mul(fluffAlpha),
   );
-  commonBlending(fluffMat);
+  applyPackedBlending(fluffMat);
 
   const fluff = new THREE.Sprite(fluffMat as unknown as THREE.SpriteMaterial);
   fluff.count = lobeCount;

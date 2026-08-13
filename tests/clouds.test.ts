@@ -19,6 +19,13 @@ import {
 } from '../src/clouds/cloudCores';
 import { resolveCloudPalette, srgbLightness } from '../src/clouds/cloudPalette';
 import {
+  advanceBandDrift,
+  bandCoverageAt,
+  bandShapeAt,
+  bandSkyAt,
+  bandSunAt,
+} from '../src/clouds/cloudBands';
+import {
   cloudParams,
   clampCoverage,
   cloudLayoutKey,
@@ -464,5 +471,168 @@ describe('composite alpha ramp is the softness knob (§V11 stage 3)', () => {
     // second, higher-frequency noise for exactly this.
     expect(cloudParams.edgeHiErode).toBeGreaterThan(0);
     expect(cloudParams.edgeHiScale).toBeGreaterThan(1);
+  });
+});
+
+/**
+ * THE BANDED STRATUS LAYER — the second cloud form (user 2026-08-13: "more
+ * bandy, stretched out, diffused clouds… to break up our existing clouds").
+ *
+ * These pin the contracts that separate a band layer from FOG and from a
+ * second competitor to the cumulus, because neither failure would show up as
+ * an error: a layer with no gaps is a grey wash that still renders, and a
+ * layer that out-weighs the cores still renders too. The TSL graph cannot be
+ * evaluated headless, so the numeric halves are CPU mirrors transliterated
+ * into it (same convention as bandLimit.ts's own pair).
+ */
+describe('banded stratus layer (§V11 second form, §V43 SoT parity)', () => {
+  const p = cloudParams;
+  const sun = new THREE.Color();
+  const sky = new THREE.Color();
+
+  it('is a KNOB, not a code path — bandCoverage 0 writes nothing (§V16)', () => {
+    const off = { ...p, bandCoverage: 0 };
+    for (const field of [-1, -0.2, 0, 0.5, 1]) {
+      expect(bandCoverageAt(field, off)).toBe(0);
+    }
+  });
+
+  it('coverage stays bounded for any field value a noise sum can produce', () => {
+    // §V28/§V44: what reaches the premultiplied pack must be provably in range
+    for (const field of [-1e6, -3, -1, 0, 1, 3, 1e6, NaN, Infinity]) {
+      const c = bandCoverageAt(field, p);
+      expect(Number.isFinite(c)).toBe(true);
+      expect(c).toBeGreaterThanOrEqual(0);
+      expect(c).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('LEAVES OPEN SKY — the one thing that separates bands from fog', () => {
+    // mask = field*contrast + bias, clamped. Open sky exists only while the
+    // zero crossing (-bias/contrast) sits INSIDE the field's realised range.
+    // Push bias up past that and the layer covers the whole hemisphere: still
+    // renders, still soft, and reads as a grey wash over everything. The
+    // references are roughly half open sky.
+    const zeroCrossing = -p.bandBias / p.bandContrast;
+    expect(zeroCrossing).toBeGreaterThan(-0.6);
+    expect(bandCoverageAt(zeroCrossing - 0.05, p)).toBe(0);
+    // ...and it must still be able to reach a real coverage somewhere
+    expect(bandCoverageAt(0.65, p)).toBeGreaterThan(0.15);
+  });
+
+  it('fades to its own MEAN at grazing angles, not to nothing (§V70)', () => {
+    // the octave fades take the FIELD to its mean correctly — the noise is
+    // zero-mean — but shape() is a clamp and a pow on top, and E[f(x)] ≠
+    // f(E[x]). Without the second step the layer converges to bias^gamma and
+    // the bands evaporate a few degrees above the skyline, which is §V70's
+    // "converges to a FLAT surface, i.e. DELETES the feature".
+    const naive = Math.pow(p.bandBias, p.bandGamma);
+    expect(p.bandFarMean).toBeGreaterThan(naive * 5);
+    for (const field of [-1, 0, 1]) {
+      expect(bandCoverageAt(field, p, 0)).toBeCloseTo(p.bandFarMean * p.bandCoverage, 6);
+    }
+    // ...and the mean has to be a mean: between the empty and the full shape
+    expect(p.bandFarMean).toBeLessThan(bandShapeAt(1, 1, p));
+  });
+
+  it('is ANISOTROPIC — a direction-free field cannot make bands (§V58)', () => {
+    const ratio = p.bandLength / p.bandWidth;
+    // below ~4:1 the field reads as weather-map blotches, not bands; above
+    // ~15:1 it reads as combing, which is §B.40 one system over
+    expect(ratio).toBeGreaterThan(4);
+    expect(ratio).toBeLessThan(15);
+    expect(p.bandWarp).toBeGreaterThan(0); // ruled straight lines = §B.33
+  });
+
+  it('sits ABOVE the cumulus, which is where the references put it', () => {
+    // the compositional job is to sit behind and over the cluster tops, not
+    // to interleave with them
+    const cumulusTop = p.altitudeMax + p.clusterRadiusMax * p.clusterHeight;
+    expect(p.bandAltitude).toBeGreaterThan(cumulusTop);
+  });
+
+  it('cannot out-weigh the cumulus it is meant to break up', () => {
+    // the pack is ADDITIVE, so a band crossing a cluster adds its coverage to
+    // the cluster's. Cluster interiors run 3-6 (§V60); a peak band an order of
+    // magnitude under that is a veil. Raise this past ~1 and the "second cloud
+    // form" becomes a haze layer over the whole sky.
+    expect(bandCoverageAt(1, p)).toBeLessThan(0.5);
+  });
+
+  it('has INTERNAL TONE: thin margins glow, dense cores sit under the sky', () => {
+    // a wash has one value. Beer-Lambert on the sheet's own thickness is what
+    // makes it read as cloud, and it is also what keeps it off the "dark and
+    // gloomy" complaint the cores are still carrying — the floor is a floor.
+    const thin = bandSunAt(0, 0, p);
+    const dense = bandSunAt(0, 1, p);
+    expect(thin).toBeGreaterThan(dense * 1.3);
+    expect(dense).toBeGreaterThan(thin * 0.35);
+  });
+
+  it('brightens toward the sun — forward scatter, not a rim light', () => {
+    // a thin sheet is lit by what comes THROUGH it. If this were flat the
+    // layer would read as painted-on grey whatever the sun is doing.
+    expect(bandSunAt(1, 0.3, p)).toBeGreaterThan(bandSunAt(0, 0.3, p) * 1.4);
+  });
+
+  it('and toward the horizon in SKYLIGHT, where the path is longest', () => {
+    expect(bandSkyAt(0, p)).toBeGreaterThan(bandSkyAt(1, p));
+  });
+
+  it('never re-approaches the §B.19 summed clipping point, for any haze', () => {
+    // the layer inherits the live sun/sky pair, so its own peak has to clear
+    // the same ceiling the cores were retuned to. Peak = looking at the sun
+    // through the thinnest margin, at the horizon where skylight is lifted.
+    const sunPeak = bandSunAt(1, 0, p);
+    const skyPeak = bandSkyAt(0, p);
+    for (const hex of [0x99def9, 0xfdb669, 0xffffff, 0x000000, 0xff0000, 0x00ff88]) {
+      resolveCloudPalette(cloudParams, new THREE.Color().setHex(hex), sun, sky);
+      for (const ch of ['r', 'g', 'b'] as const) {
+        expect(sun[ch] * sunPeak + sky[ch] * skyPeak, `haze #${hex.toString(16)}`)
+          .toBeLessThan(1.45);
+      }
+    }
+  });
+
+  it('keeps a real tonal range across that same palette', () => {
+    // the §B.19 shape restated for this layer: peak and core must not land on
+    // the same value, or the bands are one flat tone and read as a wash
+    const peak = bandSunAt(1, 0, p);
+    const core = bandSunAt(0, 1, p);
+    resolveCloudPalette(cloudParams, new THREE.Color().setHex(0xfdb669), sun, sky);
+    const lit = sun.r * peak + sky.r * bandSkyAt(0, p);
+    const shade = sun.r * core + sky.r * bandSkyAt(0.6, p);
+    // 2.0, not the cores' 2.86 (their guard is `shadow/lit < 0.35`), and the
+    // difference is physical rather than slack: a cumulus has a lit face and a
+    // shadow face, a horizontal sheet has ONE orientation, so all of its range
+    // comes from thickness and view/sun angle. Pushing it higher means either
+    // dropping `bandThickFloor` — which is the knob standing between this
+    // layer and the "dark and gloomy" complaint the cores already carry — or
+    // clipping the peak. Measured 2.21 at these values.
+    expect(lit / shade).toBeGreaterThan(2.0);
+  });
+
+  it('drift is an ACCUMULATED PHASE, never time × rate (§V.55)', () => {
+    // §B.30 on the flags: a product is a valid offset only while the rate is
+    // constant, and elapsed time multiplies every wobble in it. bandDriftSpeed
+    // is a live knob, so the product would drift the whole sky backwards the
+    // moment a preset lerped it.
+    const acc = { x: 0, z: 0 };
+    // 10 s at 4 m/s, then the knob halves for 10 s → 60 m along the axis
+    for (let i = 0; i < 100; i++) advanceBandDrift(acc, 0, 4, 0.1);
+    for (let i = 0; i < 100; i++) advanceBandDrift(acc, 0, 2, 0.1);
+    expect(acc.x).toBeCloseTo(60, 6);
+    // what `time × rate` would have given at t=20 with the CURRENT rate
+    expect(acc.x).not.toBeCloseTo(20 * 2, 1);
+  });
+
+  it('drift travels along its own heading and rejects hostile dt (§V28)', () => {
+    const acc = { x: 0, z: 0 };
+    advanceBandDrift(acc, Math.PI / 2, 10, 1);
+    expect(acc.x).toBeCloseTo(0, 6);
+    expect(acc.z).toBeCloseTo(10, 6);
+    const before = { ...acc };
+    for (const dt of [0, -1, NaN, Infinity, 1e6]) advanceBandDrift(acc, 0, 10, dt);
+    expect(acc).toEqual(before);
   });
 });

@@ -164,6 +164,93 @@ export interface CloudParams {
   /** Beer-Lambert rate against coverage: how fast thickness kills it */
   transDepth: number;
 
+  // -- THE BANDED STRATUS LAYER (src/clouds/cloudBands.ts) ------------------
+  // The SECOND cloud form (user 2026-08-13: "more bandy, stretched out,
+  // diffused clouds… to break up our existing clouds"). A horizontal sheet at
+  // `bandAltitude`, ray-intersected per fragment, written into the SAME packed
+  // RT as the cores — so it blurs, composites, colours and reflects through
+  // the machinery that already exists. `bandCoverage: 0` switches it off
+  // entirely (§V16: a knob, not a code path).
+  //
+  // THE WHOLE LAYER IS LOW-CONTRAST ON PURPOSE. In the SoT references it
+  // covers a third to a half of the frame and carries almost none of the
+  // visual weight; the cumulus keeps every bit of it.
+  /** 0..1 peak coverage the sheet writes. This is the layer's whole volume
+   *  knob — it also bounds how far the sheet can thicken a cumulus SKIRT it
+   *  crosses, since the pack is additive. */
+  bandCoverage: number;
+  /** deck altitude (m). Above the cumulus tops (~900 m at defaults): the
+   *  banded layer sits behind and over them, as in the references. */
+  bandAltitude: number;
+  /** max ray/deck distance (m). Bounds the grazing divide — flooring the
+   *  divisor bounds the division, not the quotient (§V44), and an unbounded
+   *  coordinate near the horizon is also unbounded aliasing. */
+  bandRange: number;
+  /** metres below the deck over which the layer fades out as a camera climbs
+   *  into it — a freecam above the deck sees nothing, not an inverted sheet */
+  bandAboveFade: number;
+  /** horizon fade scale, in sin(elevation): `1-exp(-sinElev/this)`. The layer
+   *  reaches zero AT the skyline and lets the sky rig's own haze wedge carry
+   *  the last couple of degrees; letting the grazing path go opaque instead
+   *  would build a grey wall along the horizon (§V30). */
+  bandHorizonFade: number;
+  /** feature length ALONG the drift axis (m) */
+  bandLength: number;
+  /** ...and ACROSS it (m). The RATIO is what makes the layer read as bands
+   *  rather than as haze — a direction-free field cannot make oriented
+   *  features (§V58), so the direction is put in here explicitly. */
+  bandWidth: number;
+  /** domain warp, in cross-axis feature widths: bends the bands off straight.
+   *  Ruled lines are what every "too regular / lattice" complaint in this
+   *  project has been (§B.33). */
+  bandWarp: number;
+  /** gain on the field before it is clamped into a mask — how hard-edged the
+   *  bands are against open sky */
+  bandContrast: number;
+  /** mask offset: how much of the sky is covered AT ALL. This is also the mean
+   *  the band-limited field decays toward at grazing angles (§V70), so a
+   *  distant pixel sees a smooth uniform sheet rather than nothing. Around
+   *  0.05 leaves roughly half the sky open, which is what the references show. */
+  bandBias: number;
+  /** ≥1 exponent on the mask. Asymmetric falloff — firm shoulder, long
+   *  diffuse tail — with no edge function to alias (§V.48). */
+  bandGamma: number;
+  /** 0..1 the layer's own AREA-MEAN shape — what an infinitely distant pixel
+   *  sees once its structure is sub-pixel (§V70). The octave fades take the
+   *  FIELD to its mean correctly, but the shape is a clamp and a pow on top of
+   *  it and the mean of a nonlinear function is not that function of the mean:
+   *  without this the layer converges to bias^gamma ≈ 0.005 and the bands
+   *  evaporate a few degrees above the skyline. NOT MEASURED IN-BROWSER YET —
+   *  this is the analytic estimate for the shipped contrast/bias/gamma. */
+  bandFarMean: number;
+  /** sunlight channel level. A thin sheet is lit by light coming THROUGH it,
+   *  so this is a transmission level, not a lit-face brightness. */
+  bandSunLevel: number;
+  /** 0..1 share of that level present away from the sun. Too low and the
+   *  layer reads dark and gloomy, which is a standing complaint about the
+   *  cores and must not be inherited here. */
+  bandAmbientFrac: number;
+  /** extra sunlight in the forward-scattering lobe (looking toward the sun) */
+  bandForwardGain: number;
+  /** tightness of that lobe (higher = only near the sun) */
+  bandForwardPower: number;
+  /** Beer-Lambert rate on the sheet's OWN thickness: thin margins glow, dense
+   *  cores sit a shade under the sky. This is the layer's internal tonal
+   *  range, i.e. the difference between a cloud and a wash. */
+  bandOptical: number;
+  /** 0..1 floor of that attenuation — how dark the thickest core may go */
+  bandThickFloor: number;
+  /** skylight channel level (nearly flat: a sheet has one orientation) */
+  bandSkyLevel: number;
+  /** extra skylight toward the horizon, where the line of sight runs the long
+   *  way through the sheet */
+  bandHorizonLift: number;
+  /** drift speed (m/s) of the pattern over the world. ACCUMULATED as a phase,
+   *  never `time × rate` (§V.55 — §B.30 is that bug on the flags). */
+  bandDriftSpeed: number;
+  /** drift heading (degrees, world XZ) — also the band axis */
+  bandDriftDirDeg: number;
+
   /** distance (m) mapped to depth=1 in the RT alpha channel */
   maxCloudDist: number;
   /** 0..1 global cloud density (multiplies every lobe/fluff alpha) */
@@ -266,6 +353,28 @@ const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   fluffSunSharp: { min: 0, max: 1, step: 0.01 },
   fluffScaleVary: { min: 0, max: 0.8, step: 0.01 },
   coverage: { min: 0, max: 1, step: 0.01 },
+  bandCoverage: { min: 0, max: 1, step: 0.01 },
+  bandAltitude: { min: 400, max: 6000, step: 10 },
+  bandRange: { min: 4000, max: 80000, step: 500 },
+  bandAboveFade: { min: 50, max: 2000, step: 10 },
+  bandHorizonFade: { min: 0.005, max: 0.3, step: 0.005 },
+  bandLength: { min: 500, max: 20000, step: 50 },
+  bandWidth: { min: 100, max: 4000, step: 10 },
+  bandWarp: { min: 0, max: 3, step: 0.05 },
+  bandContrast: { min: 0.2, max: 4, step: 0.05 },
+  bandBias: { min: -0.5, max: 0.8, step: 0.01 },
+  bandGamma: { min: 1, max: 4, step: 0.05 },
+  bandFarMean: { min: 0, max: 1, step: 0.01 },
+  bandSunLevel: { min: 0, max: 1.5, step: 0.01 },
+  bandAmbientFrac: { min: 0, max: 1, step: 0.01 },
+  bandForwardGain: { min: 0, max: 2, step: 0.01 },
+  bandForwardPower: { min: 1, max: 32, step: 0.5 },
+  bandOptical: { min: 0, max: 6, step: 0.05 },
+  bandThickFloor: { min: 0, max: 1, step: 0.01 },
+  bandSkyLevel: { min: 0, max: 1.5, step: 0.01 },
+  bandHorizonLift: { min: 0, max: 1.5, step: 0.01 },
+  bandDriftSpeed: { min: 0, max: 20, step: 0.1 },
+  bandDriftDirDeg: { min: 0, max: 360, step: 1 },
   blurRadiusNear: { min: 0, max: 16, step: 0.5 },
   blurRadiusFar: { min: 0, max: 16, step: 0.5 },
   distortScale: { min: 0.2, max: 8, step: 0.1 },
@@ -386,6 +495,49 @@ export const cloudParams: CloudParams = registerParams(
     transGain: 0.9,
     transPower: 8,
     transDepth: 1.5,
+
+    // THE BANDED LAYER. Numbers picked against docs/inspo/night/ —
+    // sea_thieves_sunset_ship-scaled.jpg (a thin dark streak high up, a soft
+    // bank low) and this-game-is-so-beautiful-*.webp (a broad teal veil under
+    // a starfield with ONE pale cumulus doing all the work). At these values
+    // peak coverage is ~0.31 against a cluster interior's 3-6, i.e. the sheet
+    // is a veil over the cumulus and never a competitor.
+    bandCoverage: 0.42,
+    // above the cumulus (base 340-620, tops ~900) and well below the range
+    // clamp, so the deck reads as a separate stratum
+    bandAltitude: 1500,
+    bandRange: 34000,
+    bandAboveFade: 400,
+    // 0.045 in sin(elev) ≈ 2.6°, where the fade is 63% — the layer is gone by
+    // the skyline and the sky's haze takes over
+    bandHorizonFade: 0.045,
+    // 8.1:1. Below about 4:1 the field stops reading as bands and starts
+    // reading as weather-map blotches; above about 15:1 it reads as combing
+    // (§B.40, the crestElongation lesson one system over)
+    bandLength: 5200,
+    bandWidth: 640,
+    bandWarp: 0.85,
+    bandContrast: 1.45,
+    bandBias: 0.05,
+    bandGamma: 1.8,
+    bandFarMean: 0.19,
+    // Measured against the live palette (see the §B.19 band guard in
+    // tests/clouds.test.ts): the sunward peak lands at sun 0.805 / sky 0.567
+    // and a dense core at sun 0.267, a 3.9x tonal range on the composited
+    // colour — a cloud, not a wash — with the peak still under the summed
+    // ceiling the cores were retuned to.
+    bandSunLevel: 0.66,
+    bandAmbientFrac: 0.6,
+    bandForwardGain: 0.62,
+    bandForwardPower: 6,
+    bandOptical: 1.8,
+    bandThickFloor: 0.55,
+    bandSkyLevel: 0.42,
+    bandHorizonLift: 0.35,
+    // ~3 m/s: a band crosses its own width in ~3.5 minutes. Faster reads as a
+    // timelapse, and this layer must never be the thing the eye follows.
+    bandDriftSpeed: 3.2,
+    bandDriftDirDeg: 42,
 
     maxCloudDist: 4000,
     coverage: 0.85, // per-lobe density; sky openness comes from clusterCount

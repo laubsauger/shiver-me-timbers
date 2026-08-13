@@ -38,6 +38,7 @@ import {
   stormFieldKey,
   type StormSampler,
 } from './cloudCores';
+import { createCloudBands, advanceBandDrift } from './cloudBands';
 import { createCloudBlur } from './cloudBlur';
 import { createCloudComposite } from './cloudComposite';
 import { resolveCloudPalette } from './cloudPalette';
@@ -80,8 +81,15 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
 
   let clusters = generateClusters(seed, p, sampleStorm);
   const cores = createCloudCores(clusters, p);
+  // §V11 second cloud form: the banded stratus sheet writes the SAME packed RT
+  // as the cores, so it inherits the blur, the composite, the day-cycle
+  // palette and its own water reflection with no second pipeline stage and no
+  // new sampler (§V40). See cloudBands.ts for why it is a ray/plane sheet
+  // rather than geometry.
+  const bands = createCloudBands(p, seed);
   const coreScene = new THREE.Scene();
   coreScene.add(cores.object);
+  coreScene.add(bands.quad);
 
   const coresRT = new THREE.RenderTarget(p.rtWidth, p.rtHeight, {
     depthBuffer: false,
@@ -101,6 +109,13 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
   // ~400 lobes of scalar math refilled into the existing instance buffers.
   let layoutKey = cloudLayoutKey(p);
   let stormKey = stormFieldKey(clusters, sampleStorm, p.stormQuantSteps);
+
+  // §V.55: the banded layer's drift is a PHASE, accumulated from dt, because
+  // `bandDriftSpeed` is a live knob (and is meant to answer the wind later).
+  // `time × rate` is only an offset while the rate is constant — §B.30 is
+  // exactly that bug on the flags, and it looks fine on a fresh reload.
+  const bandDrift = { x: 0, z: 0 };
+  let lastTime: number | null = null;
 
   const invView = new THREE.Matrix4();
   // runtime getClearColor just target.copy()s, so a plain Color works;
@@ -144,6 +159,15 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
       cores.uStormSkyCut.value = p.stormSkyCut;
       blur.uRadiusNear.value = p.blurRadiusNear;
       blur.uRadiusFar.value = p.blurRadiusFar;
+
+      // -- banded stratus layer -------------------------------------------
+      const dt = lastTime === null ? 0 : time - lastTime;
+      lastTime = time;
+      const bandDirRad = THREE.MathUtils.degToRad(p.bandDriftDirDeg);
+      advanceBandDrift(bandDrift, bandDirRad, p.bandDriftSpeed, dt);
+      bands.uDrift.value.set(bandDrift.x, bandDrift.z);
+      bands.uAxis.value.set(Math.cos(bandDirRad), Math.sin(bandDirRad));
+      bands.push(p);
       composite.uTime.value = time * p.distortSpeed;
       // §T.39: swing the pair through the day cycle off the sky rig's live
       // horizon haze. Hue only — see cloudPalette.ts for the §B.19 guard.
@@ -160,10 +184,17 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
       invView.copy(camera.matrixWorld).invert();
       cores.uSunWorld.value.copy(sunDir).normalize();
       sunDirLive.copy(cores.uSunWorld.value);
+      // one source for the key direction: the sheet's forward-scattering lobe
+      // must point at the same sun the lobes are lit by
+      bands.uSunWorld.value.copy(cores.uSunWorld.value);
       cores.uSunView.value.copy(sunDir).normalize().transformDirection(invView);
       cores.uUpView.value.set(0, 1, 0).transformDirection(invView);
 
       composite.fitToCamera(camera);
+      // the sheet only needs the DIRECTION through each fragment (the deck is
+      // intersected analytically), so its quad rides the frustum at the same
+      // distance the composite uses — well inside camera.far, §V32/§B.10
+      bands.fitToCamera(camera, p.quadDistance);
 
       // offscreen cores pass — save/restore renderer state
       const prevRT = renderer.getRenderTarget();
@@ -200,6 +231,8 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
     dispose(): void {
       attachedScene?.remove(composite.quad);
       coreScene.remove(cores.object);
+      coreScene.remove(bands.quad);
+      bands.dispose();
       composite.dispose();
       blur.dispose();
       coresRT.dispose();
