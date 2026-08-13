@@ -415,12 +415,13 @@ async function boot(): Promise<void> {
   // point-light block in each lit shader and no recompile at all; "off" is
   // intensity 0, driven by sky.nightFactor.
   //
-  // The taffrail cleats are the hang points that exist today. The right final
-  // home is the `lantern-post-port`/`lantern-post-starboard` pieces, which
-  // already carry a lantern-bulb geometry but declare no sockets (ship agent).
+  // They hang from the lantern posts on the poop — the pieces that already
+  // carry the lantern-bulb geometry, which now declare the pivot socket for it
+  // (src/ship/blueprintCastles.ts). They used to hang off the taffrail cleats,
+  // which put two lit spheres beside two unlit decorative bulbs.
   const LANTERN_SOCKETS: Record<string, string> = {
-    'stern-port': 'anchor-cleat-stern-port',
-    'stern-starboard': 'anchor-cleat-stern-starboard',
+    'stern-port': 'socket-lantern-port',
+    'stern-starboard': 'socket-lantern-starboard',
   };
   const LANTERN_IDS = Object.keys(LANTERN_SOCKETS);
   const lanterns = createLanterns({ scene: app.scene, ids: LANTERN_IDS });
@@ -657,6 +658,15 @@ async function boot(): Promise<void> {
 
   const post = createPostPipeline(app.renderer, app.scene, app.camera, {
     underwater,
+    // God rays follow THE KEY, not the sun. The pipeline's default is the pure
+    // solar function, which is correct only while the sun owns the key: after
+    // dusk it aims the shafts at a body that is below the horizon, so the
+    // effect quietly extinguishes itself for the entire night. `sunDirection`
+    // on the sky handle IS the key (src/sky/moonCycle.ts re-aims that one pair
+    // rather than adding a second light), so binding it here buys moon shafts
+    // through the rigging for nothing — the same trade every other consumer of
+    // that handle already takes.
+    sunDirection: () => sky.sunDirection,
   });
 
   // §T.40. The post switch has `reload: false`, so it can flip mid-session —

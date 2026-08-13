@@ -70,12 +70,39 @@ export function buildCastles(p: ShipClassParams): PieceDef[] {
         min: [-galleryHalf, -p.galleryHeight / 2, -0.18],
         max: [galleryHalf, p.galleryHeight / 2, 0],
       }),
+    // The hang points for the ship's practical lanterns (src/lanterns). The
+    // posts already carried the bulb geometry but declared no socket, so the
+    // lights had nowhere here to mount and hung off `anchor-cleat-stern-*`
+    // instead — two lit spheres floating beside two unlit decorative ones.
+    //
+    // The socket is the PENDULUM PIVOT, not the flame: `lanterns.place()` hangs
+    // the light `cordLength` (0.35 m) below it along the solved hang vector. So
+    // it sits at the TOP of the post (the cap the iron would be seized to), and
+    // it is carried aft — the post shaft is only 0.05 m in radius and the flame
+    // bulb is 0.09, so a pivot on the axis would hang a glowing sphere around
+    // the post and let the post poke through it on every swing. 0.26 m clears
+    // that for any swing short of the 28.6° hard stop, and aft rather than
+    // outboard keeps the lantern over the transom instead of over the sea.
     mkPiece('lantern-post-port', 'lantern-post',
       [-cabinAftHalf * 0.82, roofY, -(L2 - 0.5)],
-      { min: [-0.1, 0, -0.1], max: [0.1, p.lanternPostHeight, 0.1] }),
+      { min: [-0.1, 0, -0.1], max: [0.1, p.lanternPostHeight, 0.1] },
+      {
+        sockets: [{
+          id: 'socket-lantern-port',
+          type: 'fixture',
+          position: [0, p.lanternPostHeight, -0.26],
+        }],
+      }),
     mkPiece('lantern-post-starboard', 'lantern-post',
       [cabinAftHalf * 0.82, roofY, -(L2 - 0.5)],
-      { min: [-0.1, 0, -0.1], max: [0.1, p.lanternPostHeight, 0.1] }),
+      { min: [-0.1, 0, -0.1], max: [0.1, p.lanternPostHeight, 0.1] },
+      {
+        sockets: [{
+          id: 'socket-lantern-starboard',
+          type: 'fixture',
+          position: [0, p.lanternPostHeight, -0.26],
+        }],
+      }),
   ];
 }
 

@@ -1076,8 +1076,23 @@ export function buildOceanSurfaceMaterial(
     col.assign(mix(col, uHazeColor, hazeT));
     // glints punch partway through the haze — a sun path fading to nothing
     // at 2 km looks like fog, not distance
+    //
+    // TINTED BY THE KEY, NOT BY A LITERAL. This multiply is the ONLY colour
+    // the road and the sparkles ever carry, so a baked warm cream here was
+    // the one key-driven term in the material that escaped `uSunLightColor` —
+    // and the moon owns the key after dark (src/sky/moonCycle.ts). With the
+    // literal in place the moon painted a NOON-BRIGHT DAYLIGHT-CREAM road on
+    // black water, which is exactly the failure `KeyLight`'s header warns
+    // about: the colour alone sets how bright the moon's road burns, so the
+    // colour has to actually arrive. It now does, and the road is amber at
+    // sunset and cool at 0x8ea9d6 · moonBrightness under the moon for free.
+    //
+    // §B.9 colour space: `uSunLightColor` is a three Color, written from the
+    // key by `setSrgb()` (sRGB → working space) and read here as LINEAR
+    // radiance — the same space the literal it replaces was in. No sRGB
+    // triple reaches this multiply.
     col.assign(
-      col.add(vec3(1.0, 0.95, 0.82).mul(glint).mul(mix(float(1), uGlintHaze, hazeT))),
+      col.add(uSunLightColor.mul(glint).mul(mix(float(1), uGlintHaze, hazeT))),
     );
 
     // ── underside (§V.24/§V.25): the camera can dive under the surface ──

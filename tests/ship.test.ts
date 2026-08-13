@@ -159,7 +159,7 @@ describe('galleon specifics (docs/ship-reference-schema.png)', () => {
     }
   });
 
-  it('declares the fixture sockets: wheel, capstan, lookout, figurehead, catheads', () => {
+  it('declares the fixture sockets: wheel, capstan, lookout, figurehead, catheads, lanterns', () => {
     const fixtures = pieces
       .flatMap((p) => p.sockets)
       .filter((s) => s.type === 'fixture')
@@ -170,9 +170,27 @@ describe('galleon specifics (docs/ship-reference-schema.png)', () => {
       'socket-cathead-port',
       'socket-cathead-starboard',
       'socket-figurehead',
+      // the ship's practical lanterns hang from these (src/lanterns). Without
+      // them the lights mounted on `anchor-cleat-stern-*` instead, which put
+      // two lit spheres beside the two unlit bulbs the posts already carry.
+      'socket-lantern-port',
+      'socket-lantern-starboard',
       'socket-lookout',
       'socket-wheel',
     ]);
+  });
+
+  it('hangs the lantern sockets off the lantern POSTS, at their cap', () => {
+    // WHY: the pieces that carry the lantern-bulb geometry are the only
+    // correct mount, and the socket is the pendulum PIVOT — the light hangs
+    // cordLength below it — so it belongs at the top of the post, not at the
+    // bulb and not on the deck.
+    for (const side of ['port', 'starboard'] as const) {
+      const post = byId.get(`lantern-post-${side}`)!;
+      const socket = post.sockets.find((s) => s.id === `socket-lantern-${side}`)!;
+      expect(socket.type).toBe('fixture');
+      expect(socket.position[1]).toBeCloseTo(post.aabb.max[1]);
+    }
   });
 
   it('mounts a piece on socket-figurehead, at the station it declares', () => {

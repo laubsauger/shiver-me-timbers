@@ -41,6 +41,22 @@ const QUALITY_LABELS: Record<Quality, string> = { low: 'Low', medium: 'Medium', 
  * sits at 4.35°, which is where the golden-hour palette is fully saturated AND
  * the key is still at 93% — the only window where both hold (see sunCycle).
  * `Golden` is the brighter alternative one notch earlier.
+ *
+ * `Night` is 19:15, and it is NOT the darkest hour on purpose. A full moon is
+ * by definition ANTIPODAL to the sun (src/sky/moonCycle.ts `moonDirection`),
+ * so it is highest exactly when the night is deepest — 43° at 21:00, 75° at
+ * midnight — and a body at 75° casts no glint ROAD, only a small pool of
+ * sparkle straight below it. The road needs a LOW body, and the moon is only
+ * low while the sun has just gone: measured, the road exists over 19:00–19:30
+ * and again over 04:30–05:00, and nowhere in between.
+ *
+ * Do NOT try to buy a low moon with `moonPhase` instead. Phase moves the moon
+ * along its own track, not down: at 0.35 it still sits at 72° at 21:00, and
+ * `MOON_SURGE` has already dropped the key to 0.42 of full by then — a dimmer
+ * moon in the same wrong place.
+ *
+ * The sun is at -17° here, so a band of dusk survives in the west. That is
+ * wanted: it is what the moonlit water is read against.
  */
 const TIME_PRESETS: readonly { value: number; label: string }[] = [
   { value: 6.3, label: 'Dawn' },
@@ -48,7 +64,7 @@ const TIME_PRESETS: readonly { value: number; label: string }[] = [
   { value: 12, label: 'Noon' },
   { value: 17.3, label: 'Golden' },
   { value: 17.7, label: 'Sunset' },
-  { value: 21, label: 'Night' },
+  { value: 19.25, label: 'Night' },
 ];
 
 /** 17.7 → "17:42" — hours are not decimal and reading them as such is a trap */
