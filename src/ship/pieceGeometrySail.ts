@@ -23,7 +23,8 @@
 import * as THREE from 'three';
 import type { AABB, SailStateId } from './pieceTypes';
 import { aabbSize, mergeNonIndexed } from './pieceGeometryShapes';
-import { shipDetailParams } from '../params/ship';
+import { shipDetailParams, shipMaterialParams } from '../params/ship';
+import { sailClothSegments, sailLaceStation } from './sailShapeProfiles';
 import { vhash, vjitter } from './variation';
 
 /** tag a part with (clothWeight, width, drop) for the cloth shader */
@@ -44,12 +45,25 @@ export function withSailShape(
   return geo;
 }
 
-/** robands: short tie loops lashing the cloth to its yard (y≈0) */
+/**
+ * Robands: the short tie loops lashing the cloth to its yard (y≈0) — the
+ * "lines on the beam" the sail's panel seams have to agree with.
+ *
+ * THE COUNT IS THE PANEL COUNT, from one owner (§V33/§V51). It used to be a
+ * hard 7 sitting beside a panel grid derived from the bolt width, which is two
+ * independent literals describing one physical thing and free to drift apart —
+ * the same shape as the lantern socket and the lantern post, where the lamp
+ * ended up hanging beside a post that reached nowhere near it. A roband is
+ * passed through the head at each seam because the seam is the doubled, strong
+ * part of the cloth, so on real canvas they genuinely are the same stations.
+ */
 function sailTies(width: number, drop: number): THREE.BufferGeometry[] {
   const ties: THREE.BufferGeometry[] = [];
-  const count = 7;
+  const count = Math.max(2, Math.round(shipMaterialParams.sailLacingPoints));
   for (let i = 0; i < count; i++) {
-    const x = -width * 0.44 + (width * 0.88 * i) / (count - 1);
+    // the ONE definition of these stations — the cloth's seams read the same
+    // function, so a roband can never end up between two seams
+    const x = (sailLaceStation(i, count) - 0.5) * width;
     const tie = new THREE.CylinderGeometry(0.035, 0.035, 0.36, 5);
     tie.translate(x, 0.08, 0);
     ties.push(withSailShape(tie, 0, width, drop));
@@ -203,9 +217,20 @@ export function buildSailGeometry(state: SailStateId, aabb: AABB): THREE.BufferG
   const seed = vhash(width * 100, drop * 100) * 1000;
 
   if (state === 'full') {
-    // flat panel; the material owns the shape. Segmented enough (16×12) that
-    // the shader billow and the luff ripple read smooth.
-    const geo = new THREE.PlaneGeometry(width, drop, 16, 12);
+    /**
+     * Flat panel; the material owns the shape.
+     *
+     * THE SEGMENT COUNT IS DERIVED, NOT CHOSEN. The cloth's quilting is a
+     * periodic term evaluated in the VERTEX stage, so its band limit is this
+     * mesh — `fwidth` cannot reach it, because no fragment is involved. At the
+     * old fixed 16 segments the shipped 9 panels would get 1.8 samples each,
+     * far under Nyquist, and the quilting would alias into a corrugation
+     * nobody authored. Deriving it from the same `sailPanelsFor` the panels
+     * come from means the geometry can never silently fall behind the shape it
+     * has to carry (§V33/§V51 single owner).
+     */
+    const segsU = sailClothSegments(shipMaterialParams.sailLacingPoints);
+    const geo = new THREE.PlaneGeometry(width, drop, segsU, 16);
     geo.translate(0, -drop / 2, 0);
     return mergeNonIndexed([
       withSailShape(geo, 1, width, drop),

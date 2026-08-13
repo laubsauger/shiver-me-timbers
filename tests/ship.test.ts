@@ -51,7 +51,12 @@ import {
   sailDraftProfile,
   sailFlutterRate,
   sailFurlLift,
-  sailPanelsFor,
+  sailLaceStation,
+  sailPanelCoord,
+  seamQuiltProfile,
+  sailClothSegments,
+  SAIL_LACE_SPAN,
+  SAIL_SAMPLES_PER_PANEL,
   leechStandoff,
 } from '../src/ship/sailShape';
 
@@ -1128,10 +1133,16 @@ describe('sail belly reads as a curved surface (§V22 "no billow")', () => {
     // Asserted as a RATIO so it survives any retune of the sail's size, and
     // so that a future change that reintroduces the drop-scaling fails here
     // rather than on screen. Two sails of very different aspect must agree.
+    // QUILT OFF, on purpose: this asserts the PRIMARY camber law. The
+    // inter-seam quilting is a physical repeat, so mid-width lands at a
+    // different point in its cycle on a 6 m sail than on an 18 m one — that is
+    // correct and is asserted separately below. Leaving it on here would test
+    // two laws at once and fail for the right reason on the wrong assertion.
+    const smooth = { ...p, sailFlutterAmp: 0, sailSeamQuilt: 0 };
     const narrow = { width: 6, drop: 6 };
     const wide = { width: 18, drop: 6 };
     const camberOf = (w: number): number =>
-      sailClothOffset(0.5, SAIL_BELLY_FOOT, w, state(1), { ...p, sailFlutterAmp: 0 }) / w;
+      sailClothOffset(0.5, SAIL_BELLY_FOOT, w, state(1), smooth) / w;
     expect(camberOf(narrow.width)).toBeCloseTo(camberOf(wide.width), 6);
     // and it sits where a real sail sits
     expect(camberOf(wide.width)).toBeGreaterThan(0.05);
@@ -1157,12 +1168,12 @@ describe('sail belly reads as a curved surface (§V22 "no billow")', () => {
     // has now complained about twice). Restated as a camber RATIO, so it
     // fails if wind stops driving the belly and passes at any sane camber.
     const CHORD = 12.17; // the galleon's main course
+    // quilt off: the ceiling is a bound on the sail's OVERALL depth, and the
+    // quilting is a ±ripple about it, bounded separately just below
+    const smooth = { ...p, sailFlutterAmp: 0, sailSeamQuilt: 0 };
     const camberAt = (windSpeed: number): number => {
       const d = sailDrive({ ...base, windDirection: 0, windSpeed }, p).drive;
-      return (
-        sailClothOffset(0.5, SAIL_BELLY_FOOT, CHORD, state(d), { ...p, sailFlutterAmp: 0 })
-        / CHORD
-      );
+      return sailClothOffset(0.5, SAIL_BELLY_FOOT, CHORD, state(d), smooth) / CHORD;
     };
     const light = camberAt(5);
     const ordinary = camberAt(oceanParams.windSpeed);
@@ -1175,6 +1186,28 @@ describe('sail belly reads as a curved surface (§V22 "no billow")', () => {
     // ceiling is the half that was missing: a gale used to reach 45% of chord.
     expect(ordinary).toBeGreaterThan(0.05);
     expect(gale).toBeLessThanOrEqual(p.sailCamberMax + 1e-9);
+
+    // §V44: BOUNDED FACTORS DO NOT IMPLY A BOUNDED PRODUCT, so the quilted
+    // total gets its own bound rather than being assumed to inherit the cap.
+    // The quilt peaks at +0.5 of its amplitude, so the deepest cloth on the
+    // sail is the ceiling times (1 + 0.5·quilt) and no more — stated here so
+    // that raising `sailSeamQuilt` can never quietly blow the camber ceiling.
+    const quiltedGale = (): number => {
+      let worst = 0;
+      for (let i = 0; i <= 2000; i++) {
+        const d = sailDrive({ ...base, windDirection: 0, windSpeed: 22 }, p).drive;
+        worst = Math.max(
+          worst,
+          sailClothOffset(i / 2000, SAIL_BELLY_FOOT, CHORD, state(d), {
+            ...p,
+            sailFlutterAmp: 0,
+            sailLeechOpen: 0,
+          }) / CHORD,
+        );
+      }
+      return worst;
+    };
+    expect(quiltedGale()).toBeLessThanOrEqual(p.sailCamberMax * (1 + 0.5 * p.sailSeamQuilt) + 1e-9);
   });
 
   it('goes slack in irons and inverts when the wind backs the sail', () => {
@@ -1282,12 +1315,18 @@ describe('the sail is CLOTH, not an inflating bag (§V43 SoT parity)', () => {
     // answering the wind rather than being posed in it. Measured as the
     // deepest point of the section MOVING between foot and head — a sail whose
     // every section is identical is a extruded shape, not canvas.
+    // QUILT OFF: the draft migration is a property of the SMOOTH section, and
+    // the quilting puts ±0.15 of local ripple on top whose crests sit at fixed
+    // u for every v. An argmax search over the quilted surface therefore snaps
+    // to the nearest crest and reports the SEAM grid instead of the draft —
+    // a measurement artefact, not a lost cue.
+    const smooth = { ...p, sailSeamQuilt: 0 };
     const draftOf = (v: number): number => {
       let best = -Infinity;
       let arg = 0;
       for (let i = 0; i <= 400; i++) {
         const u = i / 400;
-        const z = sailClothOffset(u, v, WIDTH, state(1), p);
+        const z = sailClothOffset(u, v, WIDTH, state(1), smooth);
         if (z > best) {
           best = z;
           arg = u;
@@ -1297,10 +1336,10 @@ describe('the sail is CLOTH, not an inflating bag (§V43 SoT parity)', () => {
     };
     expect(Math.abs(draftOf(0.9) - draftOf(0.1))).toBeGreaterThan(0.03);
     // …and it is DRIVEN, not baked: no wind, no twist
-    const flat = { ...p, sailTwist: 0 };
+    const flat = { ...smooth, sailTwist: 0 };
     const at = (v: number, pp: typeof p): number =>
       sailClothOffset(0.3, v, WIDTH, state(1), pp);
-    expect(at(0.9, p)).not.toBeCloseTo(at(0.9, flat), 4);
+    expect(at(0.9, smooth)).not.toBeCloseTo(at(0.9, flat), 4);
   });
 
   it('a reefed sail is FLATTER, and the outline agrees with the surface', () => {
@@ -1580,35 +1619,173 @@ describe('the sails feel the wind the SHIP feels (apparent, braced)', () => {
 });
 
 /**
- * §V43 / §V.48 — the sewn panel seams (user, against
- * docs/inspo/ship/ref-broadside-sails-spray-foam.png).
+ * §V43 / §V33 / §V51 — THE SEAMS AND THE ROBANDS ARE ONE NUMBER.
+ *
+ * User, having counted: "too many segments, easy as that. It was just too many
+ * vertical stripes on the sails basically. It didn't align with the number of
+ * mounting points we do have on the cross beams."
+ *
+ * They are the same physical thing seen twice — the canvas is bent to the yard
+ * AT its seams, because a seam is the doubled, stiffer part of the cloth and
+ * that is what you pass a lashing through. They were two independent numbers:
+ * a hard `count = 7` in `sailTies()` and a seam grid derived from a bolt width
+ * in metres, which put 20 cloths against 7 robands. The bolt derivation was
+ * the better physics and the wrong answer; §V43 makes the reference the bar.
+ *
+ * Same failure as the lantern socket and the lantern post (999071d).
  */
-describe('a sail is sewn from cloths of a FIXED width', () => {
+describe('the seams land on the robands (§V33/§V51 single owner)', () => {
   const p = shipMaterialParams;
 
-  it('a wider sail gets MORE cloths, not wider ones', () => {
-    // WHY: a bolt of canvas is a fixed width. The old `sailPanelCount = 7`
-    // was flat across the ship, so the 12.17 m main course got 1.74 m
-    // "cloths" and the 8.69 m topsail 1.24 m — not a bolt of anything, and
-    // different on two sails of the same ship, which is exactly the "ultra
-    // regular / generated" tell §V43 is about.
-    const course = sailPanelsFor(12.17, p.sailClothWidth);
-    const topsail = sailPanelsFor(8.69, p.sailClothWidth);
-    expect(course).toBeGreaterThan(topsail);
-    // every sail on the ship agrees about how wide a cloth is
-    expect(12.17 / course).toBeCloseTo(8.69 / topsail, 1);
-    // and that width is a real bolt of canvas, not a metre and a half of it
-    expect(12.17 / course).toBeLessThan(1);
+  it('puts an integer seam coordinate on EVERY lashing station', () => {
+    // THE WHOLE SPEC, asserted directly. `fract(panelCoord)` is what the
+    // shader draws its seam from, so an integer at a station means the seam
+    // line and the roband are the same line. If these two ever drift apart
+    // again, this is what catches it.
+    for (const count of [3, 5, 7, 9, 12]) {
+      for (let i = 0; i < count; i++) {
+        const u = sailLaceStation(i, count);
+        const pc = sailPanelCoord(u, count);
+        expect(pc).toBeCloseTo(i, 9);
+        expect(Math.abs(pc - Math.round(pc))).toBeLessThan(1e-9);
+      }
+    }
   });
 
-  it('never divides by nothing and never draws a one-cloth sail (§V28)', () => {
-    for (const [w, c] of [[12, 0], [12, -1], [0, 0.6], [NaN, 0.6], [12, NaN]]) {
-      const n = sailPanelsFor(w, c);
-      expect(Number.isFinite(n)).toBe(true);
-      expect(n).toBeGreaterThanOrEqual(2);
+  it('holds the cloth at each seam and bellies it between — quilting', () => {
+    // the quilt must be pinned exactly where the lashings are, or the sail
+    // reads as corrugated independently of its own mounting points
+    const count = p.sailLacingPoints;
+    for (let i = 0; i < count; i++) {
+      expect(seamQuiltProfile(sailPanelCoord(sailLaceStation(i, count), count)))
+        .toBeCloseTo(-0.5, 9); // held at the seam
+    }
+    // and standing proud halfway between two of them
+    const mid = (sailLaceStation(2, count) + sailLaceStation(3, count)) / 2;
+    expect(seamQuiltProfile(sailPanelCoord(mid, count))).toBeCloseTo(0.5, 9);
+    // ZERO MEAN over a cloth: quilting redistributes camber, it does not add
+    // any, so the sail's overall depth is still the one the wind asked for
+    let sum = 0;
+    const N = 2000;
+    for (let k = 0; k <= N; k++) sum += seamQuiltProfile(k / N);
+    expect(sum / (N + 1)).toBeCloseTo(0, 3);
+  });
+
+  it('gives the mesh enough segments to resolve its own quilting', () => {
+    // The quilt is a periodic term in the VERTEX stage, so its band limit is
+    // the MESH — `fwidth` cannot reach it, there is no fragment. Derived from
+    // the same count, so raising the lacing can never outrun the geometry.
+    for (const count of [3, 7, 9, 16]) {
+      const segs = sailClothSegments(count);
+      const cloths = (count - 1) / SAIL_LACE_SPAN;
+      expect(segs / cloths).toBeGreaterThanOrEqual(SAIL_SAMPLES_PER_PANEL - 1e-9);
+    }
+  });
+
+  it('is the count the yard actually carries, and stays sane at any of it', () => {
+    // 7 is what the yards carry today, so nothing on the beam had to move.
+    // Measuring the reference gives ~9.3 seam lines on a course
+    // (docs/inspo/ship/ref-rig-proportions.png: a 30 px period on a 278 px
+    // chord; correlation + at 30 and 60 px, − at 15 and 45, which only a true
+    // 30 px repeat produces), so 9 is one Tweakpane step away.
+    expect(p.sailLacingPoints).toBeGreaterThanOrEqual(5);
+    expect(p.sailLacingPoints).toBeLessThanOrEqual(10);
+    // §V28: these size geometry and feed a shader coordinate
+    for (const bad of [0, -1, 1, NaN, Infinity]) {
+      expect(Number.isFinite(sailLaceStation(0, bad))).toBe(true);
+      expect(Number.isFinite(sailPanelCoord(0.5, bad))).toBe(true);
+      expect(sailClothSegments(bad)).toBeGreaterThanOrEqual(16);
     }
   });
 });
+
+/**
+ * §V.55 / §B.30 — the flutter phase, and the two-clock defect it closes.
+ */
+describe('flutter rides an INTEGRATED phase with one owner (§V.55, §B.30)', () => {
+  const p = shipMaterialParams;
+
+  it('shakes faster the harder she luffs — which needs the integral', () => {
+    // The old shape held the rate CONSTANT and let luff drive amplitude only,
+    // because `time × ω(luff)` is not a phase when ω moves: its instantaneous
+    // frequency is ω + t·dω/dt and elapsed time multiplies every wobble in the
+    // rate (measured on the flags: 0.93 Hz intended, 59.5 Hz at ten minutes,
+    // with sign flips). An accumulator needs ONE owner, and the shape had two
+    // evaluators on two clocks. It has one owner now, so this cue is legal.
+    expect(sailFlutterRate(1, p)).toBeGreaterThan(sailFlutterRate(0, p) * 1.5);
+    expect(sailFlutterRate(0, p)).toBeCloseTo(p.sailFlutterFreq, 9);
+  });
+
+  it('the rate is BOUNDED, so the accumulator can never run away (§V44)', () => {
+    for (const luff of [-5, 0, 0.5, 1, 99, NaN]) {
+      const r = sailFlutterRate(luff, p);
+      expect(Number.isFinite(r)).toBe(true);
+      expect(r).toBeGreaterThanOrEqual(0);
+      expect(r).toBeLessThanOrEqual(p.sailFlutterFreq * (1 + 1.4 * p.sailFlutterLuffRate) + 1e-9);
+    }
+  });
+
+  it('the shape reads a phase and owns no clock at all', () => {
+    // THE ACTUAL FIX for §B.30's "~0.28 m of rope anchor" divergence: the CPU
+    // evaluator and the shader cannot disagree about time if neither has a
+    // clock. Same phase in ⟹ same cloth out, and the phase is handed to both.
+    const width = 12.17;
+    const at = (flutterPhase: number): number =>
+      sailClothOffset(0.2, 0.3, width, { drive: 0.7, luff: 0.5, skew: 0, dropScale: 1, flutterPhase, ...FLAT_SHEETS }, p);
+    expect(at(1.234)).toBeCloseTo(at(1.234), 12);
+    expect(at(0)).not.toBeCloseTo(at(Math.PI / 2), 4);
+    // and it is periodic in 2π, which is what makes wrapping the accumulator
+    // safe — a wrap must not show as a jump in the cloth
+    expect(at(0.7)).toBeCloseTo(at(0.7 + Math.PI * 2), 6);
+  });
+});
+
+/**
+ * §V22 — "not wind speed and wind capture dependent enough" (Stage 2a/2c).
+ */
+describe('the sails feel the wind the SHIP feels (apparent, braced)', () => {
+  const p = shipMaterialParams;
+  const ahead = { forwardX: 0, forwardZ: 1, yawRate: 0 };
+
+  it('eases as she runs away from the wind, loads as she hardens up', () => {
+    // A ship running dead downwind at 8 m/s in an 11 m/s breeze feels 3 m/s
+    // and her canvas should go soft — the cue her own masthead pennant has
+    // always shown (flagDynamics.apparentWind), which the sails never read.
+    // Same TRUE wind in all three cases: only her way through it changes.
+    const trueWind = { windDirection: 0, windSpeed: 11 };
+    const anchored = sailDrive({ ...ahead, ...trueWind }, p).drive;
+    const running = sailDrive({ ...ahead, ...trueWind, shipVelZ: 8 }, p).drive;
+    const punching = sailDrive({ ...ahead, ...trueWind, shipVelZ: -4 }, p).drive;
+    expect(running).toBeLessThan(anchored * 0.6);
+    expect(punching).toBeGreaterThan(anchored);
+  });
+
+  it('defaults to the true wind when nobody says how fast she is going', () => {
+    // a headless probe or a sail rendered before its first updateRig must get
+    // the old, valid answer rather than a silently zeroed one
+    const withVel = sailDrive({ ...ahead, windDirection: 0, windSpeed: 11, shipVelX: 0, shipVelZ: 0 }, p);
+    const without = sailDrive({ ...ahead, windDirection: 0, windSpeed: 11 }, p);
+    expect(without.drive).toBeCloseTo(withVel.drive, 12);
+  });
+
+  it('does not double-count the brace: the point of sail is the HULL\'s', () => {
+    // `trimEfficiency` is a POINT-OF-SAIL curve carrying the sim's dead zone,
+    // so it must be measured on the hull. Fed the SAIL's braced angle instead,
+    // a yard braced 35° reported 80° off the wind where the hull had 45° — a
+    // far better point of sail than the ship actually had, so the canvas
+    // stayed full while she made almost no way.
+    const wind = { windDirection: Math.PI * 0.75, windSpeed: 11 }; // close-hauled
+    const braced = Math.PI * 0.19; // ~35° of brace
+    const sail = { forwardX: Math.sin(braced), forwardZ: Math.cos(braced) };
+    // the hull's heading is what decides how well she is drawing…
+    const honest = sailDrive({ ...sail, shipForwardX: 0, shipForwardZ: 1, yawRate: 0, ...wind }, p);
+    // …and reading it off the braced yard instead flatters her
+    const flattered = sailDrive({ ...sail, yawRate: 0, ...wind }, p);
+    expect(honest.drive).toBeLessThan(flattered.drive);
+    expect(honest.luff).toBeGreaterThan(flattered.luff);
+  });
+});
+
 
 /**
  * §V22 / §V43 — "the sail blow is like a way too steep bulge in the middle and

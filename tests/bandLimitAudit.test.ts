@@ -107,7 +107,19 @@ describe('§V.48 tripwire: unfiltered edges in shader code', () => {
   // `coordFootprint(coord)`, i.e. on dFdx+dFdy directly — now say so with the
   // marker instead of reading as unfiltered. The lexical rule cannot see a
   // footprint that arrives through a helper.
-  const BASELINE = 184; // measured 2026-08-12; ratchet only downward
+  //
+  // 184 → 176 with the sail cloth work: six findings in src/ship were the same
+  // false-positive class and now say so with a reason each — a pure-CPU mirror
+  // (no fragment exists), the definition of a helper rather than a use of it, a
+  // VERTEX-stage profile (band-limited by the mesh, which sailClothSegments()
+  // now sizes so it cannot fall behind), a smoothstep on a DOT PRODUCT (no
+  // period, so no sub-pixel regime), and `bandLimitedEdge` itself, which IS the
+  // band limit. The remaining two came off with the seam rework.
+  //
+  // HEADROOM IS ZERO ON PURPOSE. The number is the measured population, not a
+  // number with room left in it — that is what makes the next unfiltered edge
+  // fail on the commit that adds it rather than three commits later.
+  const BASELINE = 176; // re-cut 2026-08-13; ratchet only downward
 
   it('does not grow the population of unfiltered edges', () => {
     const findings = Object.entries(SOURCES)

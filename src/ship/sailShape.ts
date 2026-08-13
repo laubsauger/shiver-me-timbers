@@ -65,7 +65,7 @@ import {
   sailDraftAt,
   sailDraftLead,
   sailDraftProfile,
-  sailPanelsFor,
+  sailPanelCoord,
   seamQuiltProfile,
   leechStandoff,
 } from './sailShapeProfiles';
@@ -192,9 +192,11 @@ export function sailClothOffset(
   // rides the belly envelope, so it vanishes at the pinned leeches and at the
   // head and scales with the wind exactly as the main camber does — a
   // second-order camber on the primary one, never a fixed corrugation.
-  const panels = sailPanelsFor(chord, p.sailClothWidth);
   const quilt =
-    Math.max(0, finite(p.sailSeamQuilt)) * seamQuiltProfile(uu, panels) * across * down;
+    Math.max(0, finite(p.sailSeamQuilt))
+    * seamQuiltProfile(sailPanelCoord(uu, p.sailLacingPoints))
+    * across
+    * down;
   const belly = depth * (across * down + quilt + p.sailLeechOpen * leechStandoff(uu, vv));
 
   // flutter: travelling ripples, biggest at the free foot and the leeches.

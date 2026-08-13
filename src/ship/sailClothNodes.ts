@@ -41,6 +41,8 @@ import {
   SAIL_FLUTTER_EDGE,
   SAIL_FLUTTER_V,
   SAIL_FOOT_FILL,
+  SAIL_LACE_MARGIN,
+  SAIL_LACE_SPAN,
   SAIL_LEAD_MAX,
   SAIL_SKEW_LEAD,
 } from './sailShape';
@@ -59,6 +61,8 @@ export interface SailShapeUniforms {
   footRoach: UniformNode;
   twist: UniformNode;
   sheetPull: UniformNode;
+  lacingPoints: UniformNode;
+  seamQuilt: UniformNode;
   draftPos: UniformNode;
   draftFullness: UniformNode;
   furlSwag: UniformNode;
@@ -69,6 +73,10 @@ export interface SailShapeUniforms {
 }
 
 export interface SailClothNodes {
+  /** the panel grid, `u × panels` — ONE owner for the quilted GEOMETRY here
+   *  and the seam shading in sailMaterial.ts, so a seam's ridge cannot land
+   *  beside the fold it is supposed to be sitting in */
+  panelCoord: Node;
   /** material.positionNode */
   position: Node;
   /** the billowed surface normal, in LOCAL space (pre-view-transform) */
@@ -135,6 +143,15 @@ export function createSailClothNodes(
    * leads together swing the whole foot, and the two leads DIFFERING rotates
    * the foot's chord against the head's — geometric twist.
    */
+  // Transliteration of sailShapeProfiles.sailPanelCoord. INTEGER on every
+  // lashing station, so each seam the shader draws sits on a roband the yard
+  // actually carries — one number owns both (§V33/§V51).
+  const laces = max(u.lacingPoints, float(2));
+  const panelCoord = uv()
+    .x.sub(SAIL_LACE_MARGIN)
+    .div(SAIL_LACE_SPAN)
+    .mul(laces.sub(1));
+
   const haul = camber.abs().mul(u.sheetPull).mul(width);
   const cornerPull = Fn(([uu, v]: [Node, Node]) => {
     const span = v.oneMinus().mul(haul);
@@ -169,11 +186,20 @@ export function createSailClothNodes(
   });
 
   /** deepest around mid-height, tapering to the yard, easing at the free foot */
-  const downAt = Fn(([v]: [Node]) =>
-    smoothstep(float(0), float(SAIL_BELLY_HEAD), v.oneMinus()).mul(
-      mix(float(SAIL_FOOT_FILL), float(1), smoothstep(float(0), float(SAIL_BELLY_FOOT), v)),
-    ),
-  );
+  // VERTEX STAGE. A vertex displacement is band-limited
+  // by the MESH, not the pixel grid — `fwidth` is not even defined here, and the
+  // panel can carry no feature finer than its own quads. The limit is
+  // samples-per-feature on the mesh, and it is ENFORCED: buildSailGeometry sizes
+  // its segments through sailClothSegments() from the same lacing count the
+  // shape uses, at SAIL_SAMPLES_PER_PANEL each. This profile is one smooth hump
+  // over the whole drop — far coarser than the quilting that sets that bound.
+  // @band-limited-elsewhere
+  const downAt = Fn(([v]: [Node]) => {
+    const headTaper = smoothstep(float(0), float(SAIL_BELLY_HEAD), v.oneMinus());
+    // @band-limited-elsewhere — see above
+    const footEase = mix(float(SAIL_FOOT_FILL), float(1), smoothstep(float(0), float(SAIL_BELLY_FOOT), v));
+    return headTaper.mul(footEase);
+  });
 
   /**
    * The free LEECH: zero at the yardarm (v = 1) and at the clew (v = 0),
@@ -187,8 +213,15 @@ export function createSailClothNodes(
 
   /** billow + flutter offset (m, along local +z = forward of the yard) */
   const clothZ = Fn(([uu, v]: [Node, Node]) => {
+    // QUILTING (sailShapeProfiles.seamQuiltProfile): each cloth panel bellies
+    // between its two seams, which hold. Zero-mean, so it redistributes camber
+    // rather than adding any, and it rides the belly envelope so it dies at the
+    // pinned leeches and at the head. IN THE SHAPE, not the shading — a line
+    // painted on a smooth interior does not change how the surface reads.
+    const q = sin(uu.sub(SAIL_LACE_MARGIN).div(SAIL_LACE_SPAN).mul(laces.sub(1)).mul(Math.PI));
+    const quilt = u.seamQuilt.mul(q.mul(q).sub(0.5)).mul(acrossAt(uu, v)).mul(downAt(v));
     const belly = depth.mul(
-      acrossAt(uu, v).mul(downAt(v)).add(u.leechOpen.mul(leechAt(uu, v))),
+      acrossAt(uu, v).mul(downAt(v)).add(quilt).add(u.leechOpen.mul(leechAt(uu, v))),
     );
     // THE CARRIER IS AN ACCUMULATED PHASE (§V.55, §B.30). `time × ω(luff)` is
     // a phase only while ω is constant, and luff breathes with every gust —
@@ -276,6 +309,7 @@ export function createSailClothNodes(
   );
 
   return {
+    panelCoord,
     position,
     localNormal: cross(du, dv).normalize(),
     uTangent: du.normalize(),
@@ -293,6 +327,8 @@ export function createSailShapeUniforms(p: ShipMaterialParams): SailShapeUniform
     footRoach: uniform(p.sailFootRoach),
     twist: uniform(p.sailTwist),
     sheetPull: uniform(p.sailSheetPull),
+    lacingPoints: uniform(p.sailLacingPoints),
+    seamQuilt: uniform(p.sailSeamQuilt),
     draftPos: uniform(p.sailDraftPos),
     draftFullness: uniform(p.sailDraftFullness),
     furlSwag: uniform(p.sailFurlSwag),
@@ -311,6 +347,8 @@ export function refreshSailShapeUniforms(u: SailShapeUniforms, p: ShipMaterialPa
   u.footRoach.value = p.sailFootRoach;
   u.twist.value = p.sailTwist;
   u.sheetPull.value = p.sailSheetPull;
+  u.lacingPoints.value = p.sailLacingPoints;
+  u.seamQuilt.value = p.sailSeamQuilt;
   u.draftPos.value = p.sailDraftPos;
   u.draftFullness.value = p.sailDraftFullness;
   u.furlSwag.value = p.sailFurlSwag;

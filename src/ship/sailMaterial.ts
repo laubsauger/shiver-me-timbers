@@ -87,7 +87,6 @@ export function createSailClothMaterial(
   const uBacklitStrength = uniform(p.sailBacklitStrength);
   const uBacklitFocus = uniform(p.sailBacklitFocus);
   const uLeeDarken = uniform(p.sailLeeDarken);
-  const uClothWidth = uniform(p.sailClothWidth);
   const uSeamDarken = uniform(p.sailSeamDarken);
   const uSeamRidge = uniform(p.sailSeamRidge);
   const uAmbientLift = uniform(p.sailAmbientLift);
@@ -141,9 +140,10 @@ export function createSailClothMaterial(
    * reads as fabric; one painted straight across a curved surface reads as a
    * decal.
    */
-  // transliteration of sailShapeProfiles.sailPanelsFor — same flooring, same min
-  const panels = max(cloth3d.width.div(max(uClothWidth, float(0.05))).round(), float(2));
-  const panelCoord = cloth.x.mul(panels);
+  // ONE panel grid, built with the geometry (sailClothNodes) and read here, so
+  // the seam's shading sits exactly in the fold the shape put there. Two
+  // independent literals is how the lantern ended up beside its own post.
+  const panelCoord = cloth3d.panelCoord;
   const panelFilter = coordFilter(panelCoord);
   const panelTone = hash2(vec2(panelCoord.floor(), 3.7));
   // fades to the jitter's own MEAN, not to 1 — 0.92..1.03 averages 0.975, and
@@ -217,6 +217,11 @@ export function createSailClothMaterial(
   // identically dark grey, and switching the sun's shadows off changed
   // nothing, which is what proved it was this term and not self-shadowing.
   // Grazing light must now read as fully lit; only a real back-face darkens.
+  // the argument is a DOT PRODUCT, not a spatial
+  // coordinate. It has no repeat, no feature width and no sub-pixel regime — it
+  // varies over the surface at the rate the surface curves. §V.48 is about
+  // periodic detail outrunning the sample grid; there is no period here.
+  // @band-limited-elsewhere
   const lit = smoothstep(float(-0.45), float(-0.02), sunDot);
   material.colorNode = cloth3.mul(mix(uLeeDarken, float(1), lit));
 
@@ -258,7 +263,6 @@ export function createSailClothMaterial(
       uBacklitStrength.value = p.sailBacklitStrength;
       uBacklitFocus.value = p.sailBacklitFocus;
       uLeeDarken.value = p.sailLeeDarken;
-      uClothWidth.value = p.sailClothWidth;
       uSeamDarken.value = p.sailSeamDarken;
       uSeamRidge.value = p.sailSeamRidge;
       uAmbientLift.value = p.sailAmbientLift;

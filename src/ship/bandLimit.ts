@@ -142,6 +142,11 @@ export function bandLimitedEdge(
   const filter = filterOverride ?? coordFilter(coord);
   const eff = feature.max(filter.mul(FILTER_PIXELS)).max(EPS);
   const energy = feature.div(eff);
+  // this line IS the band limit. `eff` is the widened
+  // width (§V.48b half a) and `energy` the fade to the feature's mean (half b),
+  // both derived from `filter` two lines up. The lexical rule cannot see a
+  // footprint that arrives through a parameter.
+  // @band-limited-elsewhere
   return mix(float(1), smoothstep(float(0), eff, distance), energy);
 }
 

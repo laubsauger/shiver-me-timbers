@@ -111,41 +111,6 @@ export function midArch(u: number): number {
  * §V28: floored divisor, and never fewer than two cloths.
  */
 /**
- * MESH SAMPLES PER CLOTH PANEL. The quilting below is a periodic term carried
- * in the VERTEX stage, so its band limit is the MESH, not the pixel grid — a
- * panel the mesh cannot resolve aliases into a shape nobody authored, and no
- * amount of `fwidth` reaches it because there is no fragment involved.
- *
- * Four is the working minimum: two samples is exactly Nyquist and puts every
- * sample on a node or an antinode depending on phase, which is how a real
- * repeat turns into a beat. The panel grid and the mesh resolution therefore
- * have ONE owner (`sailPanelsFor` → `buildSailGeometry`), so raising the bolt
- * width can never silently outrun the geometry that has to carry it.
- */
-export const SAIL_SAMPLES_PER_PANEL = 4;
-
-/**
- * Where a point of cloth sits between its two seams, −0.5 … +0.5, ZERO MEAN.
- *
- * A seam is doubled, stitched, stiffer canvas: it holds while the cloth either
- * side blows out, so the panel bellies between its seams and the sail reads as
- * quilted rather than smooth. −0.5 exactly on a seam, +0.5 at a panel's
- * centre. Zero mean because this REDISTRIBUTES camber, it does not add any —
- * the seams pull in by as much as the panels push out, so the sail's overall
- * depth is still the camber the wind asked for.
- */
-export function seamQuiltProfile(u: number, panels: number): number {
-  const s = Math.sin(Math.PI * clamp01(finite(u)) * Math.max(1, finite(panels, 1)));
-  return s * s - 0.5;
-}
-
-export function sailPanelsFor(width: number, clothWidth: number): number {
-  const w = Math.max(0, finite(width));
-  const bolt = Math.max(0.05, finite(clothWidth, 0.6)); // §V28 floored
-  return Math.max(2, Math.round(w / bolt));
-}
-
-/**
  * Peak camber as a fraction of the CHORD, from the wind drive. Signed: a
  * backed sail bows the other way. Bounded at source (§V44).
  */
@@ -218,13 +183,85 @@ export function sailDraftAt(
 }
 
 /**
- * Belly depth as a fraction of its peak, from the sail's own v (0 = foot,
- * 1 = head). Peaks at exactly v = 1 − SAIL_BELLY_HEAD = SAIL_BELLY_FOOT.
- * Exported so the shape can be asserted directly rather than inferred from a
- * displacement that also carries flutter.
+ * MESH SAMPLES PER CLOTH PANEL. The quilting below is a periodic term carried
+ * in the VERTEX stage, so its band limit is the MESH, not the pixel grid — a
+ * panel the mesh cannot resolve aliases into a shape nobody authored, and no
+ * amount of `fwidth` reaches it because there is no fragment involved.
+ *
+ * Four is the working minimum: two is exactly Nyquist and puts every sample on
+ * a node or an antinode depending on phase, which is how a real repeat turns
+ * into a beat. `buildSailGeometry` derives its segment count from this and the
+ * lacing count, so the geometry can never silently fall behind the shape it
+ * has to carry.
  */
+export const SAIL_SAMPLES_PER_PANEL = 4;
+
+/**
+ * WHERE THE SAIL'S HEAD IS LASHED TO ITS YARD, in the sail's own u.
+ *
+ * ONE SOURCE FOR TWO THINGS THAT ARE THE SAME THING. `sailTies()` builds the
+ * robands you can see on the cross beam from these stations, and the cloth's
+ * vertical seams land on exactly the same u — because a seam IS where a
+ * roband goes. A seam is doubled, stiffer canvas; that is what you pass a
+ * lashing through.
+ *
+ * They used to be two independent numbers — a hard `count = 7` in `sailTies()`
+ * beside a seam grid derived from a bolt width in metres — and the user
+ * counted the mismatch: "It didn't align with the number of mounting points we
+ * do have on the cross beams." Same shape as the lantern socket and the
+ * lantern post (999071d), two literals for one joint.
+ *
+ * The span is inset from the leeches because the outermost roband is passed
+ * inboard of the yardarm, not off the end of it.
+ */
+export const SAIL_LACE_MARGIN = 0.06; // u of the first station
+export const SAIL_LACE_SPAN = 0.88; // u covered by the lashings
+
+/** the u of lashing `i` of `count` — the ONLY definition of these stations */
+export function sailLaceStation(i: number, count: number): number {
+  const n = Math.max(2, Math.round(finite(count, 2)));
+  const k = clamp(finite(i), 0, n - 1);
+  return SAIL_LACE_MARGIN + (SAIL_LACE_SPAN * k) / (n - 1);
+}
+
+/**
+ * The cloth's seam coordinate: INTEGER exactly on each lashing station, so
+ * `fract()` of it is the distance across one cloth and every seam line the
+ * shader draws sits on a roband the yard actually carries.
+ */
+export function sailPanelCoord(u: number, count: number): number {
+  const n = Math.max(2, Math.round(finite(count, 2)));
+  return ((clamp01(finite(u)) - SAIL_LACE_MARGIN) / SAIL_LACE_SPAN) * (n - 1);
+}
+
+/** segments across the cloth needed to resolve the quilting between lashings */
+export function sailClothSegments(count: number): number {
+  const n = Math.max(2, Math.round(finite(count, 2)));
+  const cloths = Math.ceil((n - 1) / SAIL_LACE_SPAN);
+  return Math.max(16, cloths * SAIL_SAMPLES_PER_PANEL);
+}
+
+/**
+ * Where a point of cloth sits between its two seams, −0.5 … +0.5, ZERO MEAN.
+ *
+ * A seam is doubled, stitched, stiffer canvas: it holds while the cloth either
+ * side blows out, so the panel bellies between its seams and the sail reads as
+ * quilted rather than smooth. −0.5 exactly on a seam (an integer panel
+ * coordinate, i.e. a lashing station), +0.5 at a cloth's centre. Zero mean
+ * because this REDISTRIBUTES camber, it does not add any.
+ */
+export function seamQuiltProfile(panelCoord: number): number {
+  const s = Math.sin(Math.PI * finite(panelCoord));
+  return s * s - 0.5;
+}
+
 export function sailBellyProfile(v: number): number {
   const vv = clamp01(finite(v));
+  // THIS FILE IS PLAIN CPU ARITHMETIC — the mirror the
+  // rope anchors resolve through. There is no fragment and no pixel here, so
+  // there is no footprint to measure against. Its shader twin lives in
+  // sailClothNodes.ts and is band-limited by the MESH; see the marker there.
+  // @band-limited-elsewhere
   const headTaper = smoothstep(0, SAIL_BELLY_HEAD, 1 - vv);
   const footEase = SAIL_FOOT_FILL + (1 - SAIL_FOOT_FILL) * smoothstep(0, SAIL_BELLY_FOOT, vv);
   return headTaper * footEase;
@@ -271,6 +308,7 @@ export function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x;
 }
 
+// @band-limited-elsewhere: the DEFINITION of the CPU helper, not a use of it.
 export function smoothstep(e0: number, e1: number, x: number): number {
   const t = clamp01((x - e0) / Math.max(1e-6, e1 - e0));
   return t * t * (3 - 2 * t);

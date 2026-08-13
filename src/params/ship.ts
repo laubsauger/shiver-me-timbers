@@ -470,25 +470,32 @@ export interface ShipMaterialParams {
   sailFlutterFreq: number; // ripple speed (rad/s)
   sailRippleCount: number; // ripple wavelengths across the cloth
   /**
-   * CLOTH WIDTH IN METRES — the width of one bolt of canvas. The number of
-   * vertical panels FALLS OUT of the sail's own chord (`sailPanelsFor`), so a
-   * wider sail is sewn from more cloths rather than wider ones, and the
-   * topsails automatically carry fewer than the courses.
+   * LACING POINTS: how many places the sail's head is lashed to its yard.
    *
-   * MEASURED FROM THE REFERENCE, not chosen. Autocorrelating the detrended
-   * luminance across the lower course of the left-hand galleon in
-   * docs/inspo/ship/ref-rig-proportions.png gives a period of 30 px on a
-   * 278 px chord — 9.3 panels. The period is unambiguous: correlation is
-   * POSITIVE at 30 and 60 px and NEGATIVE at 15 and 45, which only a true
-   * 30 px repeat produces. 12.17 m ÷ 9.3 ⟹ 1.31 m, rounded to 1.35 so the
-   * main course lands on exactly 9.
+   * ONE NUMBER, TWO THINGS. These are the robands you can see on the cross
+   * beam AND the vertical seams down the cloth, because they are the same
+   * physical thing seen twice — the canvas is bent to the spar AT its seams,
+   * since a seam is the doubled, strong part of the cloth and that is where
+   * you put a fastening.
    *
-   * The first pass shipped 0.6 m (a real-world bolt), which put 20 panels on
-   * the course — the user's "at least 2 times too many", and they were right
-   * to the panel: 20 vs 9. Reality loses to the reference here on purpose;
-   * §V43 makes SoT the bar, and SoT's sails are stylised well above bolt scale.
+   * They used to be two independent numbers: a hard `count = 7` in
+   * `sailTies()` and a seam grid derived from a bolt width in metres. The bolt
+   * derivation was physically the better model — cloth is a woven good of
+   * fixed width, so the count should fall out of the chord — but it put 20
+   * cloths on the course against 7 robands, and the user counted the mismatch:
+   * "It didn't align with the number of mounting points we do have on the
+   * cross beams." Physical correctness loses to the reference here; SoT is
+   * stylised and does not render 20 cloths.
+   *
+   * Same failure as the lantern socket and the lantern post (999071d), where
+   * two literals for one joint left the lamp hanging in mid-air. §V33/§V51.
+   *
+   * 7 is what the yards carry today, so nothing on the beam has to move.
+   * Measuring the reference gives ~9.3 seam lines on a course
+   * (docs/inspo/ship/ref-rig-proportions.png, 30 px period on a 278 px
+   * chord), so 9 is one Tweakpane step away if the user wants it denser.
    */
-  sailClothWidth: number;
+  sailLacingPoints: number;
   sailSeamDarken: number; // 0..1 multiplier on panel seams / hem edges
   /** how far a seam's sewn RIDGE tilts the shading normal. The seams in
    *  docs/inspo/ship/ref-broadside-sails-spray-foam.png read because they
@@ -596,7 +603,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailWindRef: 16, sailBackBillow: 0.18, sailLuffFlap: 2.6,
     sailGustAmp: 0.3, sailGustFreq: 0.55, sailTurnSkew: 1.6, sailResponse: 2.2,
     sailFlutterAmp: 0.14, sailFlutterFreq: 2.4, sailRippleCount: 2.5,
-    sailClothWidth: 1.35, sailSeamDarken: 0.7, sailAmbientLift: 0.09,
+    sailLacingPoints: 7, sailSeamDarken: 0.7, sailAmbientLift: 0.09,
     sailSeamRidge: 0.35, sailSeamQuilt: 0.3,
     sailBacklitFocus: 3, sailLeeDarken: 0.7, sailStainStrength: 0.36,
     holeColor: 0x120c07,
@@ -652,7 +659,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailFlutterAmp: { min: 0, max: 0.6, step: 0.01 },
     sailFlutterFreq: { min: 0, max: 10, step: 0.1 },
     sailRippleCount: { min: 0.5, max: 8, step: 0.1 },
-    sailClothWidth: { min: 0.2, max: 4, step: 0.05 },
+    sailLacingPoints: { min: 3, max: 16, step: 1 },
     sailSeamQuilt: { min: 0, max: 1, step: 0.01 },
     sailSeamRidge: { min: 0, max: 1.5, step: 0.01 },
     sailSeamDarken: { min: 0.4, max: 1, step: 0.01 },
