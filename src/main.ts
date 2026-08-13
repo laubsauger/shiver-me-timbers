@@ -640,6 +640,13 @@ async function boot(): Promise<void> {
     audio,
   });
   addOrDefer('combat fx', combat.group);
+  // The gun/impact flash light goes in DIRECTLY, never through addOrDefer,
+  // and is never removed. three folds the scene's light set into every
+  // material's cache key, so adding a light during the deferred warm-up
+  // would recompile every shader in the scene — the ocean included — after
+  // the first frame. Same rule, same reason as the lanterns above. "No
+  // flash" is intensity 0.
+  app.scene.add(combat.flashLight);
   // §T.17 dev harness, `?scene=combat`: both hulls hove to at a fixed range,
   // the lens parked across the line of fire, keys to fire either side and to
   // force a breach or a mast. null (and free) in ordinary play. Combat was

@@ -9,7 +9,19 @@
  * every spawn is finite-guarded at the boundary, where it can be tested.
  */
 
-export type FxKind = 'flash' | 'smoke' | 'spark' | 'splinter' | 'splash' | 'trail';
+export type FxKind =
+  | 'flash'
+  | 'smoke'
+  | 'spark'
+  | 'splinter'
+  | 'splash'
+  | 'trail'
+  /** the strike itself — brief and bright, the half a hit never had */
+  | 'impactFlash'
+  /** what a ball knocks out of oak: slow, brown, and it lingers for seconds */
+  | 'impactSmoke'
+  /** the vertical pillar a ball throws up out of the sea */
+  | 'column';
 
 /**
  * Deterministic 0..1 hash of two integers (§V.2 — no Math.random reaches
@@ -48,6 +60,26 @@ export interface FxProfile {
   speed: number;
   /** how much the burst spreads off its axis, 0 = a beam, 1 = a ball */
   spread: number;
+  /**
+   * Multiplier on the additive brightness. §V.44 wants additive terms bounded
+   * AT SOURCE, and this is where that bound lives: `brightnessAt` returns
+   * [0,1] and `color` is [0,1] per channel, so peak output per channel is
+   * exactly this number. Sanitized into [0, BOOST_MAX] when a profile is
+   * built, so no params edit can push it past the bloom clamp.
+   */
+  boost: number;
+}
+
+/**
+ * Ceiling on {@link FxProfile.boost}. Sits below `postParams.bloomClamp` (12)
+ * on purpose: a particle may glare, it may not define the exposure.
+ */
+export const BOOST_MAX = 8;
+
+/** §V.44: the additive bound, applied where the profile is built */
+export function sanitizeBoost(v: number): number {
+  if (!Number.isFinite(v) || v <= 0) return 1;
+  return Math.min(v, BOOST_MAX);
 }
 
 /** age → 0..1 normalized, with a floored divisor (§V.28) */

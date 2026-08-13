@@ -54,6 +54,16 @@ export interface CombatRuntimeConfig {
 export interface CombatRuntime {
   /** add to the scene once — sprites, cannonballs and fallen spars */
   group: Object3D;
+  /**
+   * The gun/impact flash light. ADD IT TO THE SCENE AT BOOT, on its own, and
+   * NEVER remove it: three folds the light set into every material's cache
+   * key, so a runtime `scene.add(light)` recompiles every shader in the scene
+   * including the ocean (see flashLight.ts, and src/lanterns/index.ts which
+   * established the rule). It is deliberately NOT inside `group`, because
+   * `group` goes through §T.40's deferred warm-up and would add the light
+   * after the first frame — the exact recompile being avoided.
+   */
+  flashLight: Object3D;
   tick(state: SimState, dt: number, orders: readonly FireOrder[]): CombatFrame;
   /** breach list for `shipIndex`, in the frame flooding + buoyancy expect */
   floodHoles(state: SimState, shipIndex: number): Vec3[];
@@ -226,6 +236,7 @@ export function createCombatRuntime(config: CombatRuntimeConfig): CombatRuntime 
 
   return {
     group,
+    flashLight: fx.light,
     combat,
 
     tick(state, dt, orders) {
@@ -238,14 +249,16 @@ export function createCombatRuntime(config: CombatRuntimeConfig): CombatRuntime 
       // would double every broadside at high refresh rates. The live
       // projectiles ride along so each ball can lay its vapour ribbon on the
       // FIXED clock — a render-rate trail would be denser at 144 Hz.
-      fx.emit(frame, state.projectiles, state.tick);
+      // `state.ships` rides along so an impact can spray its debris back
+      // along the hull's outward normal rather than straight up (§V.14)
+      fx.emit(frame, state.projectiles, state.tick, state.ships);
       consume(frame, state);
       return frame;
     },
 
     forceHit(state, shipIndex, pieceId, count) {
       const frame = combat.forceHit(state, shipIndex, pieceId, count);
-      fx.emit(frame);
+      fx.emit(frame, undefined, state.tick, state.ships);
       consume(frame, state);
       return frame;
     },
@@ -265,7 +278,11 @@ export function createCombatRuntime(config: CombatRuntimeConfig): CombatRuntime 
     },
 
     update(frameDt, state) {
-      fx.update(frameDt, state.projectiles);
+      // the surface rings re-seat on the LIVE sea every frame: a ring pinned
+      // to its birth height sinks into the next crest, and the sea moves
+      // metres under it inside its own 1.4 s life (§V.8 — the same field the
+      // hulls float on, not a flat plane)
+      fx.update(frameDt, state.projectiles, sea);
       // §V.28 shape: a non-finite or restored-tab dt would teleport the whole
       // wreck field, so it is clamped exactly as combatFx clamps its own
       const dt = Number.isFinite(frameDt) ? Math.max(0, Math.min(frameDt, 0.25)) : 0;

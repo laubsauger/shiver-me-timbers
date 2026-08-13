@@ -295,11 +295,31 @@ export function createCombat(
       }
       const piece = rig.targets.pieces.find((p) => p.pieceId === pieceId);
       if (piece === undefined) throw new Error(`forceHit: unknown piece ${pieceId}`);
-      // the piece's own centre, through its frame — the same station a ball
-      // arriving from anywhere would end up scoring against
+      // The piece's outboard FACE, not its centre.
+      //
+      // This used to be `lerp(min, max, 0.5)` — the centre of the AABB, i.e.
+      // a point INSIDE the solid — and every fx spawned from the resulting
+      // HitEvent was born inside opaque geometry and depth-rejected. The dev
+      // harness's breach key is the one path built to make §V.14 observable,
+      // and it was the path that buried its own burst; if the user tested
+      // damage through `?scene=combat` they saw nothing for that reason ON
+      // TOP of hits never being drawn at all.
+      //
+      // THIRD instance of this shape in one day (bow wake 3.5 m inside the
+      // stem, bow spray at the same wrong bowZ, now this): an effect emitted
+      // at a correct-looking position that happens to be inside a solid.
+      //
+      // A real ball arrives from abeam, so the outboard face across the beam
+      // is where it would score. `lerp(min, max, 0.5)` on y/z keeps the
+      // station amidships and at mid-height; x goes to whichever face is
+      // further from the hull centreline.
+      const mid = lerp(piece.min, piece.max, 0.5);
+      const outboard = Math.abs(piece.max[0]) >= Math.abs(piece.min[0])
+        ? piece.max[0]
+        : piece.min[0];
       const local = add(
         piece.frame.position,
-        rotateVec(piece.frame.quaternion, lerp(piece.min, piece.max, 0.5)),
+        rotateVec(piece.frame.quaternion, [outboard, mid[1], mid[2]]),
       );
       const point = add(ship.position, rotateVec(ship.quaternion, local));
       for (let i = 0; i < Math.max(1, Math.floor(count)); i++) {

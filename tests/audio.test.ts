@@ -21,7 +21,7 @@ import {
   type Adsr,
 } from '../src/audio/envelope';
 import { createEngine } from '../src/audio/engine';
-import { planCreak } from '../src/audio/oneshots';
+import { planCreak, planHullHit } from '../src/audio/oneshots';
 import {
   bedTargets,
   driftFactor,
@@ -185,6 +185,55 @@ describe('creak randomization (seeded rng → deterministic, §V2 spirit)', () =
       seen.add(plan.startHz);
     }
     expect(seen.size).toBeGreaterThan(1);
+  });
+});
+
+describe('hull hit — an impact is a TRANSIENT (user: "very weak impact sound")', () => {
+  /**
+   * WHY: this one-shot was a single 80 Hz sine ramping to 40 Hz, and the user
+   * reported the impact as weak. Volume was never the fix. A sine has energy
+   * ONLY at its fundamental, so it presents the ear no onset to latch onto —
+   * it reads as a soft thump however hot you drive it, and a cannonball
+   * striking oak is almost entirely onset. These assert the SHAPE that makes
+   * it an impact, not the specific numbers, so a retune stays free.
+   */
+  it('carries a broadband layer — a pitched-only hit cannot crack', () => {
+    const layers = planHullHit();
+    const broadband = layers.filter((l) => l.broadband);
+    expect(broadband.length).toBeGreaterThan(0);
+    // and the pitched body is still there: the crack alone is a snare hit
+    expect(layers.some((l) => !l.broadband)).toBe(true);
+  });
+
+  it('the transient attacks fast enough to BE a transient', () => {
+    // an onset that takes 20 ms is a swell, not a strike
+    const crack = planHullHit().find((l) => l.kind === 'crack');
+    expect(crack).toBeDefined();
+    expect(crack!.broadband).toBe(true);
+    expect(crack!.attack).toBeLessThanOrEqual(0.002);
+  });
+
+  it('the layers SPAN timescales rather than collapsing into one event', () => {
+    // same principle as the visual flash-vs-smoke contrast: an impact is a
+    // spread of decay times. Assert the RATIO (§V.66), not the seconds.
+    const layers = planHullHit();
+    const shortest = Math.min(...layers.map((l) => l.duration));
+    const longest = Math.max(...layers.map((l) => l.duration));
+    expect(longest / shortest).toBeGreaterThan(4);
+  });
+
+  it('the crack decays faster than the body it announces', () => {
+    const byKind = Object.fromEntries(planHullHit().map((l) => [l.kind, l]));
+    expect(byKind.crack.duration).toBeLessThan(byKind.body.duration);
+    expect(byKind.rattle.duration).toBeGreaterThanOrEqual(byKind.body.duration);
+  });
+
+  it('every layer has a finite, non-negative gain', () => {
+    for (const l of planHullHit()) {
+      expect(Number.isFinite(l.gain)).toBe(true);
+      expect(l.gain).toBeGreaterThanOrEqual(0);
+      expect(l.duration).toBeGreaterThan(0);
+    }
   });
 });
 

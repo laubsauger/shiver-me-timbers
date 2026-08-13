@@ -246,10 +246,23 @@ export interface AudioParams {
   creakQ: number;
   creakGain: number;
 
-  // ── one-shot: hull hit (thud) ──
+  // ── one-shot: hull hit (iron shot into oak) ──
+  // Three layers on purpose — see oneshots.hullHit. The BODY alone (a sine)
+  // was the whole sound and the user called it "a very weak impact sound";
+  // an impact is almost entirely transient and a sine has none.
+  /** BODY: the mass behind the strike */
   hullHitHz: number;
   hullHitDuration: number;
   hullHitGain: number;
+  /** CRACK: the broadband transient. Centre, bandwidth, level, decay (s) */
+  hullHitCrackHz: number;
+  hullHitCrackQ: number;
+  hullHitCrackGain: number;
+  hullHitCrackDecay: number;
+  /** RATTLE: splintering timber — highpass corner, level, decay (s) */
+  hullHitRattleHz: number;
+  hullHitRattleGain: number;
+  hullHitRattleDecay: number;
 }
 
 export const audioParams: AudioParams = registerParams(
@@ -406,6 +419,15 @@ export const audioParams: AudioParams = registerParams(
     hullHitHz: 80,
     hullHitDuration: 0.28,
     hullHitGain: 0.8,
+    // Q below 1 keeps the crack BROADBAND. A resonant peak here would read
+    // as a pitched knock — a woodblock, not a 12 lb ball through a hull.
+    hullHitCrackHz: 1700,
+    hullHitCrackQ: 0.7,
+    hullHitCrackGain: 0.75,
+    hullHitCrackDecay: 0.055,
+    hullHitRattleHz: 2400,
+    hullHitRattleGain: 0.32,
+    hullHitRattleDecay: 0.28,
   },
   {
     bedFadeTau: { min: 0.1, max: 8, step: 0.1 },
@@ -546,5 +568,12 @@ export const audioParams: AudioParams = registerParams(
     hullHitHz: { min: 30, max: 300, step: 5 },
     hullHitDuration: { min: 0.05, max: 1, step: 0.01 },
     hullHitGain: { min: 0, max: 1, step: 0.01 },
+    hullHitCrackHz: { min: 200, max: 6000, step: 50 },
+    hullHitCrackQ: { min: 0.1, max: 8, step: 0.1 },
+    hullHitCrackGain: { min: 0, max: 1, step: 0.01 },
+    hullHitCrackDecay: { min: 0.005, max: 0.4, step: 0.005 },
+    hullHitRattleHz: { min: 400, max: 8000, step: 50 },
+    hullHitRattleGain: { min: 0, max: 1, step: 0.01 },
+    hullHitRattleDecay: { min: 0.02, max: 1.5, step: 0.01 },
   },
 );

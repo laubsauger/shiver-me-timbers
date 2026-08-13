@@ -1,16 +1,42 @@
 /**
- * Combat fx (§T.16 muzzle fx, §V.14 splinter burst) — the visible half of
- * the chain: gun flash and powder smoke, splinters off a breach, the pillar
- * where a ball pitches into the sea, and the shot itself in flight.
+ * Combat fx (§T.16 muzzle fx, §V.14 impact + splinter burst) — the visible
+ * half of the chain: gun flash and powder smoke, the strike where a ball
+ * finds oak, the pillar where one pitches into the sea, and the shot itself
+ * in flight.
  *
- * CPU-driven on purpose. §C sends HEAVY sims to compute passes; this is a
- * few hundred short-lived sprites driven by discrete events, so a compute
- * pass would buy nothing and would drag in the whole compute→render storage
- * buffer hazard that cost this project §B.8 (a `.toReadOnly()` on the write
- * side silently downgrading the binding, no error, buffers stuck at zero).
- * There is no compute pass here and no storage buffer, so §V.29 cannot
- * apply. Instanced attributes + SpriteNodeMaterial is the same pattern the
- * cloud cores already use.
+ * ── WHAT WAS ACTUALLY WRONG, AND IT WAS NOT SUBTLE ─────────────────────
+ * `emit` read `frame.muzzles`, `frame.destruction` and `frame.projectiles`
+ * and NEVER READ `frame.hits`. The hit list — every cannonball that struck a
+ * hull — reached exactly one consumer repo-wide, `audio.event('ballHit')`.
+ * So a hit made a SOUND AND NO PICTURE, which is verbatim what the user
+ * reported ("I just see a very weak impact sound and that's it" / "there's
+ * like no visual effect of an impact whatsoever").
+ *
+ * The one visual that did exist was the splinter burst, and it hung off
+ * `destruction`'s `splinters` event, which `ship/destruction.ts` fires
+ * EXACTLY ONCE per piece, on the frame its hp crosses `holedThreshold`. At
+ * hitDamage 0.25 / threshold 0.5 that is hit 2 of 4, and after hit 4 the
+ * piece is at 0 hp and never emits again. ONE HIT IN FOUR drew anything, and
+ * then nothing ever again — which is why it read as random rather than as
+ * absent.
+ *
+ * The cure is to draw off `hits` (every hit, always) and let the breach
+ * ESCALATE that with extra splinters, rather than gate it. destruction.ts's
+ * exactly-once contract is deliberate and unit-tested (tests/destruction.ts)
+ * and is left exactly as it was.
+ *
+ * ── WHY THESE ARE CPU SPRITES AND MUST STAY THAT WAY ───────────────────
+ * §C sends HEAVY sims to compute passes; this is a few hundred short-lived
+ * sprites driven by DISCRETE EVENTS. A compute pass buys nothing and drags in
+ * the whole compute→render storage-buffer hazard that cost this project §B.8
+ * (a `.toReadOnly()` on the write side silently downgrading the binding, no
+ * error, no NaN, buffers stuck at zero — it froze the entire spray pool for
+ * multiple sessions and made the rigging invisible on top of it).
+ *
+ * DO NOT "unify" this with src/foam/spray.ts. That pool is GPU compute with a
+ * crest-LOTTERY spawn and no event-injection API at all; adding one is how
+ * you walk back into §B.8. Two systems, on purpose: spray answers a field,
+ * this answers events.
  *
  * §V.28 throughout: pool sizes are sanitized ints fixed at construction,
  * every caller-fed value is finite-guarded at the spawn boundary, every
@@ -18,14 +44,18 @@
  * zero size rather than zero opacity — §B.5 was NaN-sized additive quads
  * that read as a browser hang, and invisible-but-rasterized quads are the
  * same fill-rate bill for nothing.
- *
+ * §V.44: the additive brightness bound lives in `FxProfile.boost`, applied at
+ * the source rather than clamped downstream.
  * §V.3: reads a CombatFrame and SimState.projectiles, writes neither.
  */
 import * as THREE from 'three/webgpu';
 import { instancedBufferAttribute, uv } from 'three/tsl';
-import type { ProjectileState } from '../state/simState';
+import type { ProjectileState, ShipState } from '../state/simState';
 import { combatFxParams, type CombatFxParams } from '../params/combat';
 import type { CombatFrame } from './combatSystem';
+import { createFlashLight, type FlashLight } from './flashLight';
+import { createImpactRings, type ImpactRings } from './impactRing';
+import { createProfiles, fillProfiles } from './fxProfiles';
 import {
   ageFraction,
   brightnessAt,
@@ -38,74 +68,41 @@ import {
   type FxProfile,
 } from './fxMath';
 
-/** §V.31: sRGB-authored tints enter through THREE.Color, never bare setRGB */
-const TINTS: Record<FxKind, THREE.Color> = {
-  flash: new THREE.Color(0xffd08a),
-  smoke: new THREE.Color(0x9a958c),
-  // burning powder grains: hotter and far more saturated than the smoke they
-  // fly through, which is the only reason they read at all against it
-  spark: new THREE.Color(0xffa53a),
-  splinter: new THREE.Color(0xa97c4e),
-  splash: new THREE.Color(0xcfe6e2),
-  // the ball's own wake: thin, cool, and DIM on purpose — a bright trail
-  // turns a wooden-ship demo into science fiction
-  trail: new THREE.Color(0x6f7a80),
-};
-
-function profiles(p: CombatFxParams): Record<FxKind, FxProfile> {
-  const rgb = (c: THREE.Color): [number, number, number] => [c.r, c.g, c.b];
-  return {
-    flash: {
-      life: pos(p.flashLife, 0.09), sizeStart: pos(p.flashSize, 2.2),
-      sizeEnd: pos(p.flashSize, 2.2) * 0.4, gravity: 0, drag: 6,
-      color: rgb(TINTS.flash), speed: 2, spread: 0.35,
-    },
-    smoke: {
-      life: pos(p.smokeLife, 2.4), sizeStart: pos(p.smokeSize, 1.1),
-      sizeEnd: pos(p.smokeSize, 1.1) * pos(p.smokeGrowth, 4.5),
-      gravity: -0.6, drag: 1.6, color: rgb(TINTS.smoke),
-      speed: nn(p.smokeSpeed, 7), spread: 0.4,
-    },
-    spark: {
-      life: pos(p.sparkLife, 0.4), sizeStart: pos(p.sparkSize, 0.14),
-      sizeEnd: pos(p.sparkSize, 0.14) * 0.3, gravity: 9.81, drag: 1.1,
-      color: rgb(TINTS.spark), speed: nn(p.sparkSpeed, 24), spread: 0.45,
-    },
-    trail: {
-      life: pos(p.trailLife, 0.5), sizeStart: pos(p.trailSize, 0.22),
-      sizeEnd: pos(p.trailSize, 0.22) * pos(p.trailGrowth, 3.2),
-      gravity: -0.2, drag: 2.5, color: rgb(TINTS.trail), speed: 0.6, spread: 1,
-    },
-    splinter: {
-      life: pos(p.splinterLife, 1.1), sizeStart: pos(p.splinterSize, 0.28),
-      sizeEnd: pos(p.splinterSize, 0.28) * 0.5, gravity: 9.81, drag: 0.4,
-      color: rgb(TINTS.splinter), speed: nn(p.splinterSpeed, 9), spread: 0.85,
-    },
-    splash: {
-      life: pos(p.splashLife, 1), sizeStart: pos(p.splashSize, 1.4),
-      sizeEnd: pos(p.splashSize, 1.4) * 2.2, gravity: 9.81, drag: 0.9,
-      color: rgb(TINTS.splash), speed: nn(p.splashSpeed, 6), spread: 0.5,
-    },
-  };
-}
-
 export interface CombatFx {
-  /** add to the scene once */
+  /** add to the scene once — sprites, cannonballs and surface rings */
   group: THREE.Object3D;
+  /**
+   * The flash PointLight. ADD IT AT BOOT, SEPARATELY FROM `group`, and never
+   * remove it — see flashLight.ts. It is not in `group` precisely because
+   * `group` is deferred by §T.40's warm-up, and adding a light after the
+   * first frame recompiles every material in the scene including the ocean.
+   */
+  light: THREE.PointLight;
   /**
    * Queue this sim tick's events (call once per tick). `projectiles` are the
    * balls still in the air: each lays a short vapour ribbon, because a
    * 0.3 m dark sphere at 60 m/s is genuinely hard to follow and real footage
-   * reads the trail, not the shot.
+   * reads the trail, not the shot. `ships` lets an impact spray its debris
+   * back along the hull's outward normal instead of straight up.
    */
-  emit(frame: CombatFrame, projectiles?: readonly ProjectileState[], tick?: number): void;
+  emit(
+    frame: CombatFrame,
+    projectiles?: readonly ProjectileState[],
+    tick?: number,
+    ships?: readonly ShipState[],
+  ): void;
   /** advance particles and refresh buffers (call once per rendered frame) */
-  update(frameDt: number, projectiles: readonly ProjectileState[]): void;
+  update(
+    frameDt: number,
+    projectiles: readonly ProjectileState[],
+    seaHeightAt?: (x: number, z: number) => number,
+  ): void;
   dispose(): void;
 }
 
 /** the sphere's own long axis — what the stretch aligns with the velocity */
 const BALL_UP = /*@__PURE__*/ new THREE.Vector3(0, 1, 0);
+const FLAT_SEA = (): number => 0;
 
 export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
   const count = sanitizeCount(p.particleCount, 768, 4096);
@@ -148,6 +145,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
   material.fog = false;
 
   const sprites = new THREE.Sprite(material as unknown as THREE.SpriteMaterial);
+  sprites.name = 'combat-sprites';
   sprites.count = count;
   sprites.frustumCulled = false; // positions are written per frame, no bounds
 
@@ -159,6 +157,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
     metalness: 0.6,
   });
   const balls = new THREE.InstancedMesh(ballGeo, ballMat, ballMax);
+  balls.name = 'combat-cannonballs';
   balls.count = 0;
   balls.frustumCulled = false;
   balls.castShadow = true;
@@ -168,10 +167,18 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
   const ballScale = new THREE.Vector3();
   const ballAxis = new THREE.Vector3();
 
+  const rings: ImpactRings = createImpactRings(p);
+  const flash: FlashLight = createFlashLight(p);
+
   const group = new THREE.Group();
   group.name = 'combat-fx';
-  group.add(sprites, balls);
+  // ORDER MATTERS to tests/combatWiring's instanced-mesh lookup: the balls
+  // must be reachable by their own name, which they now are (both this and
+  // the rings are InstancedMeshes).
+  group.add(sprites, balls, rings.mesh);
 
+  /** refilled in place each frame so a Tweakpane edit is live, without churn */
+  const prof = createProfiles();
   let cursor = 0;
 
   /**
@@ -186,20 +193,21 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
     origin: readonly number[],
     axis: readonly [number, number, number],
     index: number,
-    prof: FxProfile,
+    profile: FxProfile,
     seed = 0,
     vary = 0,
   ): void => {
+    if (count === 0) return;
     const ox = finite(origin[0]);
     const oy = finite(origin[1]);
     const oz = finite(origin[2]);
     const i = cursor;
     cursor = (cursor + 1) % count; // rotating pool: newest burst wins
-    const d = burstDirection(axis, index, prof.spread);
+    const d = burstDirection(axis, index, profile.spread);
     // three independent draws off the same (seed, index) pair: a puff that
     // is bigger must not also be slower and longer-lived in lockstep, or the
     // variation reads as one scale knob rather than as different puffs
-    const speed = nn(prof.speed, 0) * jitterScale(seed, index * 3 + 1, vary);
+    const speed = nn(profile.speed, 0) * jitterScale(seed, index * 3 + 1, vary);
     posArr[i * 3] = ox;
     posArr[i * 3 + 1] = oy;
     posArr[i * 3 + 2] = oz;
@@ -208,20 +216,24 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
     velArr[i * 3 + 2] = d[2] * speed;
     age[i] = 0;
     // floored below zero-length: a life of 0 divides to a NaN age (§B.5)
-    life[i] = Math.max(0.02, prof.life * jitterScale(seed, index * 3 + 2, vary));
+    life[i] = Math.max(0.02, profile.life * jitterScale(seed, index * 3 + 2, vary));
     sizeScale[i] = Math.max(0.05, jitterScale(seed, index * 3 + 3, vary));
     kinds[i] = kind;
   };
 
   return {
     group,
+    light: flash.light,
 
-    emit(frame, projectiles, tick = 0): void {
-      const prof = profiles(p);
+    emit(frame, projectiles, tick = 0, ships): void {
+      fillProfiles(prof, p);
       const smokeN = sanitizeCount(p.smokePerShot, 14, 64);
       const sparkN = sanitizeCount(p.sparksPerShot, 12, 64);
       const splinterN = sanitizeCount(p.splintersPerBreach, 18, 64);
       const splashN = sanitizeCount(p.splashPerHit, 10, 64);
+      const impactSmokeN = sanitizeCount(p.impactSmokePerHit, 10, 64);
+      const debrisN = sanitizeCount(p.debrisPerHit, 12, 64);
+      const columnN = sanitizeCount(p.columnPerHit, 12, 64);
       const vary = nn(p.variation, 0.45);
 
       for (const m of frame.muzzles) {
@@ -230,6 +242,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         ];
         const seed = Number.isFinite(m.seed) ? m.seed : 0;
         spawn('flash', m.position, axis, 0, prof.flash, seed, vary * 0.4);
+        flash.strike(m.position[0], m.position[1], m.position[2], 1);
         // the smoke bank gets its OWN axis: a per-shot tilt plus a standing
         // upward bias, because powder smoke rolls up off the muzzle rather
         // than jetting flat, and because four guns on one hull otherwise
@@ -250,6 +263,31 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
           spawn('spark', m.position, axis, k, prof.spark, seed ^ 0x5bf03635, vary);
         }
       }
+
+      // THE HIT ITSELF — every hit, not one in four. Flash, debris and a
+      // lingering puff, in that order of lifetime: ~70 ms, ~1 s, ~3.4 s. The
+      // SPREAD of those three timescales is most of what makes a strike read
+      // as a strike; matching them would read as one puff.
+      for (let h = 0; h < frame.hits.length; h++) {
+        const hit = frame.hits[h];
+        // ships' own outward normal, approximated as the ray from her centre
+        // through the impact point: debris off a hull sprays back the way the
+        // ball came, and a hard-coded [0,1,0] fountains it out of the deck.
+        const axis = outwardAxis(ships?.[hit.shipIndex], hit.point);
+        const seed = (Math.imul(hit.projectileId, 2654435761) + h * 40503) >>> 0;
+        spawn('impactFlash', hit.point, axis, 0, prof.impactFlash, seed, vary * 0.4);
+        flash.strike(hit.point[0], hit.point[1], hit.point[2], 0.85);
+        for (let k = 0; k < debrisN; k++) {
+          spawn('splinter', hit.point, axis, k, prof.splinter, seed, vary);
+        }
+        for (let k = 0; k < impactSmokeN; k++) {
+          spawn('impactSmoke', hit.point, axis, k, prof.impactSmoke, seed, vary);
+        }
+      }
+
+      // a BREACH escalates the hit above — it does not gate it. This is the
+      // extra timber let go when a section finally stoves in, on top of the
+      // debris that hit already threw.
       for (const e of frame.destruction) {
         if (e.type !== 'splinters') continue;
         const n = Math.min(splinterN, sanitizeCount(e.count, splinterN, 64));
@@ -258,11 +296,19 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
           spawn('splinter', e.position, [0, 1, 0], k, prof.splinter, seed, vary);
         }
       }
+
+      // WATER ENTRY: a pillar going up, droplets off it, and a ring left on
+      // the surface. The column's spread is 0.12 against the droplets' 0.5 —
+      // that difference is what makes one a COLUMN and the other a splash.
       for (const e of frame.projectiles) {
         if (e.type !== 'splash') continue;
+        for (let k = 0; k < columnN; k++) {
+          spawn('column', e.position, [0, 1, 0], k, prof.column, e.projectileId, vary);
+        }
         for (let k = 0; k < splashN; k++) {
           spawn('splash', e.position, [0, 1, 0], k, prof.splash, e.projectileId, vary);
         }
+        rings.spawn(e.position[0], e.position[1], e.position[2]);
       }
 
       // vapour ribbon behind each ball. Every `trailEvery` sim ticks rather
@@ -277,11 +323,11 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
       }
     },
 
-    update(frameDt, projectiles): void {
+    update(frameDt, projectiles, seaHeightAt = FLAT_SEA): void {
       // a non-finite dt would drive every position to NaN in one frame; a
       // huge one (tab restored) would teleport the whole pool
       const dt = Number.isFinite(frameDt) ? Math.max(0, Math.min(frameDt, 0.25)) : 0;
-      const prof = profiles(p);
+      fillProfiles(prof, p);
       const gain = nn(p.intensity, 1);
 
       for (let i = 0; i < count; i++) {
@@ -303,7 +349,9 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         posArr[i * 3 + 2] += v[2] * dt;
 
         const next = ageFraction(age[i], life[i]);
-        const b = brightnessAt(next) * gain;
+        // §V.44: every factor is bounded at source — brightnessAt ∈ [0,1],
+        // boost ≤ BOOST_MAX, colour ∈ [0,1] — so the product is too
+        const b = brightnessAt(next) * gain * pr.boost;
         sizeArr[i] = sizeAt(pr, next) * sizeScale[i];
         colArr[i * 3] = pr.color[0] * b;
         colArr[i * 3 + 1] = pr.color[1] * b;
@@ -312,6 +360,9 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
       posAttr.needsUpdate = true;
       colAttr.needsUpdate = true;
       sizeAttr.needsUpdate = true;
+
+      rings.update(dt, seaHeightAt);
+      flash.update(dt);
 
       const r = Math.max(1e-3, nn(p.ballDrawRadius, 0.16));
       // motion stretch. A 0.32 m dark sphere at 60 m/s covers 1 m per frame
@@ -350,18 +401,36 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
       material.dispose();
       ballMat.dispose();
       ballGeo.dispose();
+      rings.dispose();
+      flash.dispose();
     },
   };
+}
+
+/**
+ * Outward direction at an impact point: from the ship's centre through the
+ * point. A hull hit therefore throws its debris back OUT of the side rather
+ * than up out of the deck, which is what a fixed [0,1,0] axis did. Falls back
+ * to straight up when the ship is unknown or the point is degenerate.
+ */
+function outwardAxis(
+  ship: ShipState | undefined,
+  point: readonly number[],
+): [number, number, number] {
+  if (ship === undefined) return [0, 1, 0];
+  return normalized(
+    finite(point[0]) - finite(ship.position[0]),
+    // the vertical share is damped: a hull's normal is mostly lateral, and
+    // an undamped one at deck level would fountain debris straight up again
+    (finite(point[1]) - finite(ship.position[1])) * 0.35 + 0.25,
+    finite(point[2]) - finite(ship.position[2]),
+  );
 }
 
 /** dispatch/buffer sizes come from sanitized construction-time ints (§V.28) */
 function sanitizeCount(v: number, fallback: number, max: number): number {
   const n = Number.isFinite(v) ? Math.floor(v) : fallback;
   return Math.max(0, Math.min(n, max));
-}
-
-function pos(v: number, fallback: number): number {
-  return Number.isFinite(v) && v > 0 ? v : fallback;
 }
 
 function nn(v: number, fallback: number): number {

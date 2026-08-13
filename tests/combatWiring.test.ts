@@ -847,14 +847,16 @@ function noCamera(): ArenaCamera {
 }
 
 /** first InstancedMesh under `root` — the cannonballs */
+/**
+ * The CANNONBALL instance mesh, BY NAME. It used to be "the first
+ * InstancedMesh found", which silently became ambiguous the moment the
+ * impact rings (also an InstancedMesh) joined the same group — a helper that
+ * quietly starts asserting against a different object is worse than one that
+ * fails, so it is pinned to the name the renderer sets.
+ */
 function findInstanced(root: Object3D): (Object3D & { count: number }) | null {
-  let found: (Object3D & { count: number }) | null = null;
-  root.traverse((o) => {
-    if (found === null && (o as unknown as { isInstancedMesh?: boolean }).isInstancedMesh === true) {
-      found = o as Object3D & { count: number };
-    }
-  });
-  return found;
+  const found = root.getObjectByName('combat-cannonballs');
+  return (found as (Object3D & { count: number }) | undefined) ?? null;
 }
 
 /** the sprite pool's per-instance size attribute (0 = dead, §V.28) */

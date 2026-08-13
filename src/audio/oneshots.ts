@@ -137,18 +137,114 @@ export function creak(ctx: BaseAudioContext, out: AudioNode, rng: Rng): void {
   osc.stop(end);
 }
 
+export interface HullHitLayer {
+  kind: 'crack' | 'body' | 'rattle';
+  /**
+   * true = broadband noise, false = a pitched oscillator. THE load-bearing
+   * field: a sine has energy only at its fundamental, so a hit built from
+   * pitched layers alone cannot produce an onset however loud it is driven.
+   */
+  broadband: boolean;
+  /** s to peak. A transient IS a fast attack; there is no other way to make one */
+  attack: number;
+  /** s from onset to silence */
+  duration: number;
+  gain: number;
+}
+
 /**
- * hullHit (thud):
- *   [sine, hullHitHz→½ drop] → env (fast attack, short decay) → out
+ * Pure plan for a hull hit — deterministic, and testable with no
+ * AudioContext, the same way `planCreak` is. The shape of this list IS the
+ * fix: three layers whose durations SPAN, rather than one sine.
+ */
+export function planHullHit(): HullHitLayer[] {
+  return [
+    {
+      kind: 'crack',
+      broadband: true,
+      attack: 0.001,
+      duration: Math.max(0.005, p.hullHitCrackDecay),
+      gain: p.hullHitCrackGain,
+    },
+    {
+      kind: 'body',
+      broadband: false,
+      attack: 0.005,
+      duration: p.hullHitDuration,
+      gain: p.hullHitGain,
+    },
+    {
+      kind: 'rattle',
+      broadband: true,
+      attack: 0.004,
+      duration: Math.max(0.01, p.hullHitRattleDecay),
+      gain: p.hullHitRattleGain,
+    },
+  ];
+}
+
+/**
+ * hullHit — iron shot into oak.
+ *
+ *   [noise] → bandpass(crackHz, Q)  → env (1 ms attack, ~55 ms)  ─┐  CRACK
+ *   [sine, hullHitHz→½ drop]        → env (5 ms attack)          ─┼→ out  BODY
+ *   [noise] → highpass(rattleHz)    → env (4 ms attack, ~280 ms) ─┘  SPLINTER
+ *
+ * WHY THREE LAYERS. This was ONE sine at 80 Hz ramping to 40, and the user's
+ * report was "a very weak impact sound". Louder was never going to fix it: an
+ * impact is almost entirely TRANSIENT, and a sine has none — it has no energy
+ * anywhere but its fundamental, so there is nothing for the ear's onset
+ * detector to latch onto and it reads as a soft thump however hot you drive
+ * it. The crack is the broadband click that says "something struck"; the body
+ * is the mass behind it (and is the old sine, kept); the rattle is the timber
+ * letting go afterwards, which is what makes it WOOD rather than a drum.
+ *
+ * The three decay at deliberately different rates — ~55 ms, ~280 ms, ~280 ms —
+ * for the same reason the visual flash and smoke do: an impact is a spread of
+ * timescales, and collapsing them into one reads as a single blunt event.
  */
 export function hullHit(ctx: BaseAudioContext, out: AudioNode): void {
   const t0 = ctx.currentTime;
-  const end = t0 + p.hullHitDuration;
+  const [crackPlan, bodyPlan, rattlePlan] = planHullHit();
+
+  // CRACK — the transient. Short, broadband, and the layer that was missing.
+  const crackEnd = t0 + crackPlan.duration;
+  const crack = ctx.createBufferSource();
+  crack.buffer = noiseBuffer(ctx);
+  const crackBand = ctx.createBiquadFilter();
+  crackBand.type = 'bandpass';
+  crackBand.frequency.value = p.hullHitCrackHz;
+  crackBand.Q.value = p.hullHitCrackQ;
+  playChain(
+    crack,
+    [crackBand, envGain(ctx, t0, crackPlan.gain, crackPlan.attack, crackEnd)],
+    out,
+  );
+  crack.start(t0);
+  crack.stop(crackEnd);
+
+  // BODY — the mass. Unchanged from the original one-shot.
+  const end = t0 + bodyPlan.duration;
   const osc = ctx.createOscillator();
   osc.type = 'sine';
   osc.frequency.setValueAtTime(p.hullHitHz, t0);
   osc.frequency.exponentialRampToValueAtTime(safeExpTarget(p.hullHitHz * 0.5), end);
-  playChain(osc, [envGain(ctx, t0, p.hullHitGain, 0.005, end)], out);
+  playChain(osc, [envGain(ctx, t0, bodyPlan.gain, bodyPlan.attack, end)], out);
   osc.start(t0);
   osc.stop(end);
+
+  // RATTLE — splintering timber, the tail that makes it oak and not a drum.
+  const rattleEnd = t0 + rattlePlan.duration;
+  const rattle = ctx.createBufferSource();
+  rattle.buffer = noiseBuffer(ctx);
+  const rattleHigh = ctx.createBiquadFilter();
+  rattleHigh.type = 'highpass';
+  rattleHigh.frequency.value = p.hullHitRattleHz;
+  playChain(
+    rattle,
+    [rattleHigh, envGain(ctx, t0, rattlePlan.gain, rattlePlan.attack, rattleEnd)],
+    out,
+  );
+  rattle.start(t0);
+  rattle.stop(rattleEnd);
 }

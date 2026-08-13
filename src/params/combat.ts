@@ -150,6 +150,15 @@ export interface CombatFxParams {
   sparkSize: number;
   sparkSpeed: number;
   sparksPerShot: number;
+  /**
+   * Additive brightness multiplier on the FLASH kinds only. Bloom rendered
+   * for the first time on 2945b3b, and a flash is the one thing bloom sells;
+   * `bloomThreshold` 1.0 is display-referred and divided by exposure 1.1, so
+   * a flash has to clear ~0.91 scene-linear to glare at all. Peak additive
+   * output is `brightnessAt ∈ [0,1] × boost × tint ∈ [0,1]`, i.e. bounded by
+   * this number AT SOURCE (§V.44) rather than clamped downstream.
+   */
+  flashBoost: number;
   /** the ball's vapour ribbon — what makes a small dark sphere followable */
   trailLife: number;
   trailSize: number;
@@ -171,6 +180,53 @@ export interface CombatFxParams {
   splashLife: number;
   splashSize: number;
   splashSpeed: number;
+
+  // ── HULL IMPACT (§V.14's visible half — see combatFx's header) ──────────
+  // The flash is short and the smoke is long ON PURPOSE: the contrast
+  // between those two timescales is most of what makes an impact read as an
+  // impact rather than as a puff. Tune them as a PAIR.
+  /** s — the strike itself. Keep under ~0.12 or it reads as a fireball */
+  impactFlashLife: number;
+  impactFlashSize: number;
+  /** the dust and smoke a ball knocks out of oak: slow, and it lingers */
+  impactSmokeLife: number;
+  impactSmokeSize: number;
+  impactSmokeGrowth: number;
+  impactSmokeSpeed: number;
+  /** particles per HIT (every hit, not only the one that breaches) */
+  impactSmokePerHit: number;
+  debrisPerHit: number;
+
+  // ── WATER COLUMN (a ball pitching into the sea) ─────────────────────────
+  /** the pillar: narrow, fast, straight up — droplets detach off its top */
+  columnLife: number;
+  columnSize: number;
+  columnGrowth: number;
+  columnSpeed: number;
+  columnPerHit: number;
+  /** the expanding ring left on the surface (its own flat mesh, not sprites) */
+  ringLife: number;
+  ringRadius: number;
+  /**
+   * The annulus' thickness as a FRACTION of its own radius (§V.66: scale a
+   * feature by its own dimension). So the ring broadens as it spreads, which
+   * is what a real ripple does — and an absolute metre value would silently
+   * change meaning the moment `ringRadius` moved.
+   */
+  ringWidth: number;
+  /** m above the sampled surface, so the ring does not z-fight the sea */
+  ringLift: number;
+  ringCount: number;
+  ringOpacity: number;
+
+  // ── FLASH LIGHT (ONE PointLight, created at boot, NEVER added/removed) ──
+  /** candela at full flash; 0 disables the light without removing it */
+  flashLightIntensity: number;
+  /** m — PointLight.distance, the range the falloff reaches zero at */
+  flashLightRange: number;
+  /** s — time from full to dark. A gun flash is ~a frame and a half */
+  flashLightDecay: number;
+
   /** particles per muzzle / breach / water-entry event */
   smokePerShot: number;
   splintersPerBreach: number;
@@ -205,6 +261,7 @@ export const combatFxParams: CombatFxParams = registerParams(
     sparkSize: 0.14,
     sparkSpeed: 24,
     sparksPerShot: 12,
+    flashBoost: 2.6,
     trailLife: 0.5,
     trailSize: 0.22,
     trailGrowth: 3.2,
@@ -218,6 +275,31 @@ export const combatFxParams: CombatFxParams = registerParams(
     splashLife: 1.0,
     splashSize: 1.4,
     splashSpeed: 6,
+    impactFlashLife: 0.07,
+    impactFlashSize: 1.5,
+    impactSmokeLife: 3.4,
+    impactSmokeSize: 0.65,
+    impactSmokeGrowth: 6,
+    impactSmokeSpeed: 3.5,
+    impactSmokePerHit: 10,
+    debrisPerHit: 12,
+    columnLife: 0.95,
+    columnSize: 0.5,
+    columnGrowth: 2.4,
+    columnSpeed: 15,
+    columnPerHit: 12,
+    ringLife: 1.4,
+    ringRadius: 5.5,
+    ringWidth: 0.32,
+    ringLift: 0.12,
+    ringCount: 24,
+    ringOpacity: 0.5,
+    // one gun flash lighting a 35 m hull from ~2 m out. PointLight intensity
+    // in three r155+ is candela and falls as 1/d²; 900 puts a readable key on
+    // the bulwark at 3 m without washing the deck at 15 m.
+    flashLightIntensity: 900,
+    flashLightRange: 55,
+    flashLightDecay: 0.075,
     smokePerShot: 14,
     splintersPerBreach: 18,
     splashPerHit: 10,
@@ -241,6 +323,10 @@ export const combatFxParams: CombatFxParams = registerParams(
     sparkSize: { min: 0.02, max: 1, step: 0.01 },
     sparkSpeed: { min: 0, max: 60, step: 0.5 },
     sparksPerShot: { min: 0, max: 64, step: 1 },
+    // capped at 8: this is the §V.44 bound on the additive flash term, and a
+    // slider that can reach the bloom clamp (12) is a slider that can blow
+    // the frame out to white
+    flashBoost: { min: 0, max: 8, step: 0.1 },
     trailLife: { min: 0, max: 3, step: 0.05 },
     trailSize: { min: 0.02, max: 2, step: 0.01 },
     trailGrowth: { min: 1, max: 10, step: 0.1 },
@@ -254,6 +340,28 @@ export const combatFxParams: CombatFxParams = registerParams(
     splashLife: { min: 0.1, max: 4, step: 0.05 },
     splashSize: { min: 0.1, max: 5, step: 0.1 },
     splashSpeed: { min: 0, max: 30, step: 0.5 },
+    impactFlashLife: { min: 0.02, max: 0.4, step: 0.01 },
+    impactFlashSize: { min: 0.2, max: 6, step: 0.1 },
+    impactSmokeLife: { min: 0.2, max: 8, step: 0.1 },
+    impactSmokeSize: { min: 0.05, max: 4, step: 0.05 },
+    impactSmokeGrowth: { min: 1, max: 12, step: 0.1 },
+    impactSmokeSpeed: { min: 0, max: 30, step: 0.5 },
+    impactSmokePerHit: { min: 0, max: 64, step: 1 },
+    debrisPerHit: { min: 0, max: 64, step: 1 },
+    columnLife: { min: 0.1, max: 4, step: 0.05 },
+    columnSize: { min: 0.05, max: 3, step: 0.05 },
+    columnGrowth: { min: 1, max: 10, step: 0.1 },
+    columnSpeed: { min: 0, max: 40, step: 0.5 },
+    columnPerHit: { min: 0, max: 64, step: 1 },
+    ringLife: { min: 0.1, max: 6, step: 0.05 },
+    ringRadius: { min: 0.5, max: 30, step: 0.1 },
+    ringWidth: { min: 0.02, max: 0.95, step: 0.01 },
+    ringLift: { min: 0, max: 1, step: 0.01 },
+    ringCount: { min: 0, max: 64, step: 1 },
+    ringOpacity: { min: 0, max: 2, step: 0.01 },
+    flashLightIntensity: { min: 0, max: 4000, step: 10 },
+    flashLightRange: { min: 1, max: 300, step: 1 },
+    flashLightDecay: { min: 0.01, max: 1, step: 0.005 },
     smokePerShot: { min: 0, max: 64, step: 1 },
     splintersPerBreach: { min: 0, max: 64, step: 1 },
     splashPerHit: { min: 0, max: 64, step: 1 },
