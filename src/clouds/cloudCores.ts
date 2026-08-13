@@ -172,6 +172,46 @@ export function clusterShapeAt(p: CloudParams, storm: number): ClusterShape {
   };
 }
 
+/**
+ * CPU MIRRORS of the two light-path terms added to the sunlight channel, so
+ * their contracts can be driven headless (a TSL graph cannot be). Documented
+ * transliteration pair, same convention as bandLimit.ts and cloudBands.ts —
+ * if you change one of these, change the graph in `createCloudCores` with it.
+ */
+
+/** floor on the PRODUCT of the direct attenuations — see multiScattered() */
+export function multiScatteredValue(
+  direct: number,
+  p: Pick<CloudParams, 'multiScatterFloor'>,
+): number {
+  const f = clamp01(p.multiScatterFloor);
+  return f + (1 - f) * clamp01(direct);
+}
+
+/**
+ * Warm uplight on downward-facing faces at low key elevation.
+ * `keyY` is the key direction's y component, i.e. sin(elevation).
+ */
+export function baseGlowValue(
+  downFace: number,
+  keyY: number,
+  p: Pick<CloudParams, 'baseGlow' | 'baseGlowLowSun'>,
+): number {
+  const span = Math.max(1e-3, p.baseGlowLowSun);
+  const lowKey = clamp01(1 - Math.abs(keyY) / span);
+  return Math.max(0, Math.min(2, p.baseGlow)) * lowKey * clamp01(downFace);
+}
+
+/** the whole sunlight channel for a lobe face, before the storm cut */
+export function lobeSunValue(
+  direct: number,
+  downFace: number,
+  keyY: number,
+  p: Pick<CloudParams, 'multiScatterFloor' | 'baseGlow' | 'baseGlowLowSun'>,
+): number {
+  return Math.min(2, multiScatteredValue(direct, p) + baseGlowValue(downFace, keyY, p));
+}
+
 /** clamped smoothstep on a already-normalized t */
 const smooth01 = (t: number): number => {
   const c = Math.min(1, Math.max(0, t));
@@ -222,7 +262,16 @@ export function generateClusters(
     // drifting over a cluster never moves it (and never moves it out of the
     // cell, which would be a feedback loop).
     const angle = rng() * Math.PI * 2;
-    const dist = lerp(p.ringInner, p.ringOuter, rng());
+    // SQRT, not a straight lerp: a straight lerp is uniform in RADIUS, and the
+    // area of an annulus grows with radius, so it piles clusters into the near
+    // ring — measured on the shipped layout, all 11 sat inside 2.6 km with a
+    // mean angular width of 27.7° and the largest at 50.2°, i.e. a field of
+    // boulders directly over the player's head. sqrt(u) is uniform per unit
+    // AREA, which is how cloud is actually distributed over a sea, and it is
+    // what puts small banks near the horizon where the references keep them.
+    // Still exactly one rng() call, so lobe identity across storm-field drift
+    // is unaffected (see the header note on the rng stream).
+    const dist = lerp(p.ringInner, p.ringOuter, Math.sqrt(rng()));
     const cx = Math.cos(angle) * dist;
     const cz = Math.sin(angle) * dist;
     const cy0 = lerp(p.altitudeMin, p.altitudeMax, rng());
@@ -246,8 +295,14 @@ export function generateClusters(
       // evenly up a storm column
       const h = Math.pow(rng(), shape.heightBias);
       const profile = silhouetteRadius(h, shape);
-      // rng^0.6 is centre-biased: lobes pack into one mass, not a ring
-      const rN = Math.pow(rng(), 0.6);
+      // THE COMMENT HERE USED TO SAY "rng^0.6 is centre-biased" AND IT WAS
+      // BACKWARDS. An exponent BELOW 1 pushes a uniform sample UP — pow(0.5,
+      // 0.6) = 0.66 — so 0.6 is very nearly sqrt(u), i.e. uniform over the
+      // disc's AREA, which spreads lobes evenly to the rim. That is why a
+      // cluster read as a handful of separate potatoes rather than one mass:
+      // the lobes were laid out to cover the footprint, not to overlap in it.
+      // Above 1 biases toward the centre, which is what packs a cumulus.
+      const rN = Math.pow(rng(), p.lobePacking);
       const px = Math.cos(a) * rN * profile * horiz;
       const py = h * vert;
       const pz = Math.sin(a) * rN * profile * horiz;
@@ -395,6 +450,9 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const uSilver = uniform(p.silverLining);
   const uSkyMin = uniform(p.skyMin);
   const uSkyMax = uniform(p.skyMax);
+  const uMultiScatter = uniform(p.multiScatterFloor);
+  const uBaseGlow = uniform(p.baseGlow);
+  const uBaseGlowSpan = uniform(p.baseGlowLowSun);
   const uStormSunCut = uniform(p.stormSunCut);
   const uStormSkyCut = uniform(p.stormSkyCut);
   const uFluffScale = uniform(p.fluffScale);
@@ -436,6 +494,57 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
 
   /** cluster-level gradient: lobes on the sun side of their cluster get more */
   const sunSide = iDir.dot(uSunWorld).mul(0.5).add(0.5);
+
+  /**
+   * MULTIPLE SCATTERING, as a floor on the PRODUCT of the direct-light
+   * attenuations — and it has to be the product, not the terms.
+   *
+   * Measured against the shipped params at the §T.39 sunset, a lobe buried in
+   * a cluster and facing away and down took `wrapDiffuse 0.23 × sideTerm 0.2 ×
+   * selfShadow 0.18` and arrived at 1.8% OF THE KEY. Every one of those three
+   * is defensible alone — that is §V.56's shape — and lowering any one of them
+   * flattens the clouds in a different direction: `skyMin` kills the
+   * top-to-bottom ambient ramp, `selfShadow` kills the sense of a cluster
+   * having an inside, `sunSideGain` kills the whole-mass gradient that makes a
+   * cluster read as one object. So the cure is a floor on what they multiply
+   * OUT to, which touches nothing at the lit end: at direct 0.95 this returns
+   * 0.966, and at direct 0.018 it returns 0.28.
+   *
+   * IT IS NOT A FUDGE, it is the term the model is missing. A cumulus is
+   * optically thick and highly forward-scattering, so photons entering the
+   * sunlit face random-walk through it and leave in every direction; measured
+   * cloud-base reflectance runs 30-60% of the top, which is why a real cumulus
+   * base is grey-white and not black. Every other light path in this system is
+   * single-scattering: the wrapped diffuse is direct light on a surface, and
+   * the composite's transmission term is gated on `pow(dot(view,sun),8)` (half
+   * power at 19°) TIMES `exp(-transDepth·coverage)` (dead by coverage 3-6, i.e.
+   * everywhere inside a cluster), so beyond ~20° from the sun there is
+   * currently no transmitted path AT ALL. This floor is that path's isotropic
+   * component, which is the part that does not depend on where you stand.
+   */
+  const multiScattered = (direct: N): N =>
+    mix(uMultiScatter.clamp(0, 1), float(1), direct.clamp(0, 1));
+
+  /**
+   * WARM UPLIGHT ON THE BASES at low sun. When the sun is near the horizon its
+   * light passes UNDER the cloud deck and lights the bases, which is why a
+   * sunset cumulus has a glowing underside and is the single most recognisable
+   * thing about the reference frames. It rides the SUNLIGHT channel rather
+   * than needing a third colour slot, and that is physically the right slot,
+   * not a saving: this light IS the low sun's own reddened light, and
+   * `sunColor` is already the haze-warmed key (cloudPalette.ts keeps the haze
+   * for exactly these two jobs).
+   *
+   * §V44: an ADDITIVE term into a light channel, so bounded at source — the
+   * gain is clamped, the low-key weight and the down-facing weight are both
+   * clamped to [0,1], and it is applied only where the direct terms are small by
+   * construction (a face pointing down at a low sun cannot also be facing it).
+   */
+  const lowKey = float(1)
+    .sub(uSunWorld.y.abs().div(uBaseGlowSpan.max(1e-3)))
+    .clamp(0, 1);
+  const baseGlowAt = (downFace: N): N =>
+    uBaseGlow.clamp(0, 2).mul(lowKey).mul(downFace.clamp(0, 1));
 
   // == polygonal lobes =======================================================
   const detail = Math.max(0, Math.min(3, Math.floor(p.lobeDetail) || 0));
@@ -543,11 +652,14 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   // as a multiplier ≥1, never as an addend into an already-summed channel.
   const backLit = uSunWorld.dot(V.negate()).clamp(0, 1).pow(6);
   const silver = backLit.mul(rim.oneMinus()).mul(uSilver).add(1);
-  const lobeSun = wrapDiffuse
-    .mul(sideTerm)
-    .mul(selfShadow)
+  // the three DIRECT attenuations, floored as a product — see multiScattered().
+  // The storm cut stays OUTSIDE the floor on purpose: a squall must still be
+  // able to go dark, and it is a property of the cloud, not of the light path.
+  const direct = wrapDiffuse.mul(sideTerm).mul(selfShadow);
+  const lobeSun = multiScattered(direct)
     .mul(silver)
     .mul(stormSunFactor(vStorm))
+    .add(baseGlowAt(N.dot(vec3(0, 1, 0)).negate()))
     .clamp(0, 2);
 
   const skyFace = N.dot(vec3(0, 1, 0)).mul(0.5).add(0.5).clamp(0, 1);
@@ -628,14 +740,19 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
 
   // fake-sphere normal on the billboard, view space
   const fluffN = vec3(q.x, q.y, shape.sqrt());
-  const fluffSun = fluffN
+  // same floor and same uplight as the lobes: the fluff sits ON the rim of the
+  // mass it feathers, so a fluff sprite that stayed dark would redraw the black
+  // margin the floor just removed
+  const fluffDirect = fluffN
     .dot(uSunView)
     .mul(0.5)
     .add(0.5)
     .clamp(0, 1)
     .pow(uSunPower.max(0.05))
-    .mul(mix(float(1).sub(sideGain), float(1), sunSide))
+    .mul(mix(float(1).sub(sideGain), float(1), sunSide));
+  const fluffSun = multiScattered(fluffDirect)
     .mul(stormSunFactor(iStorm))
+    .add(baseGlowAt(fluffN.dot(uUpView).negate()))
     .clamp(0, 2);
   const fluffSky = mix(uSkyMin, uSkyMax, fluffN.dot(uUpView).mul(0.5).add(0.5).clamp(0, 1))
     .mul(mix(float(0.85), float(1), iHeight.clamp(0, 1)))
@@ -678,6 +795,9 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     uSilver,
     uSkyMin,
     uSkyMax,
+    uMultiScatter,
+    uBaseGlow,
+    uBaseGlowSpan,
     uStormSunCut,
     uStormSkyCut,
     uFluffScale,

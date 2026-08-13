@@ -16,8 +16,16 @@ import {
   clusterShapeAt,
   stormFieldKey,
   countLobes,
+  multiScatteredValue,
+  baseGlowValue,
+  lobeSunValue,
 } from '../src/clouds/cloudCores';
-import { resolveCloudPalette, srgbLightness } from '../src/clouds/cloudPalette';
+import { skyParams } from '../src/params/sky';
+import {
+  resolveCloudPalette,
+  resolveDomeAmbient,
+  srgbLightness,
+} from '../src/clouds/cloudPalette';
 import {
   advanceBandDrift,
   bandCoverageAt,
@@ -299,10 +307,11 @@ describe('live cloud palette (§T.39 day cycle, §B.19 guard)', () => {
   const sun = new THREE.Color();
   const sky = new THREE.Color();
   const fog = new THREE.Color();
+  const dome = new THREE.Color();
   const lum = (c: THREE.Color): number => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
 
   it('no fog → the authored colours come back untouched', () => {
-    resolveCloudPalette(cloudParams, null, sun, sky);
+    resolveCloudPalette(cloudParams, null, null, sun, sky);
     expect(sun.getHex()).toBe(cloudParams.sunColor);
     expect(sky.getHex()).toBe(cloudParams.skyColor);
   });
@@ -312,14 +321,14 @@ describe('live cloud palette (§T.39 day cycle, §B.19 guard)', () => {
     // sky". Warming the hue is only half of it — a sunset sun is also dimmer,
     // and a cloud that only changes hue reads as a midday cloud in a hat.
     const before = new THREE.Color().setHex(cloudParams.sunColor);
-    resolveCloudPalette(cloudParams, fog.setHex(SUNSET), sun, sky);
+    resolveCloudPalette(cloudParams, fog.setHex(SUNSET), dome.setHex(SUNSET), sun, sky);
     expect(sun.r).toBeGreaterThan(sun.b);
     expect(sky.r).toBeGreaterThan(sky.b);
     expect(srgbLightness(sun)).toBeLessThan(srgbLightness(before) - 0.05);
   });
 
   it('does NOT turn sunlit faces blue at midday, when the haze is cyan', () => {
-    resolveCloudPalette(cloudParams, fog.setHex(MIDDAY), sun, sky);
+    resolveCloudPalette(cloudParams, fog.setHex(MIDDAY), dome.setHex(MIDDAY), sun, sky);
     // the sun term is gated on WARMTH, so a cyan haze leaves it alone
     expect(sun.getHex()).toBe(cloudParams.sunColor);
     // the skylight does follow it — that IS the ambient bouncing into the cloud
@@ -333,7 +342,7 @@ describe('live cloud palette (§T.39 day cycle, §B.19 guard)', () => {
     // range at all. State that directly: a shadow face must stay far darker
     // than a lit one, whatever the atmosphere does.
     for (const hex of HAZES) {
-      resolveCloudPalette(cloudParams, fog.setHex(hex), sun, sky);
+      resolveCloudPalette(cloudParams, fog.setHex(hex), dome.setHex(hex), sun, sky);
       const lit = lum(sun) * 0.95 + lum(sky) * cloudParams.skyMax;
       const shadow = lum(sky) * cloudParams.skyMin * 0.85;
       expect(shadow / lit, `haze #${hex.toString(16)}`).toBeLessThan(0.35);
@@ -343,7 +352,7 @@ describe('live cloud palette (§T.39 day cycle, §B.19 guard)', () => {
   it('and never re-approaches the summed clipping point', () => {
     // the old near-white pair summed to ~1.8 linear on every channel
     for (const hex of HAZES) {
-      resolveCloudPalette(cloudParams, fog.setHex(hex), sun, sky);
+      resolveCloudPalette(cloudParams, fog.setHex(hex), dome.setHex(hex), sun, sky);
       for (const ch of ['r', 'g', 'b'] as const) {
         expect(sun[ch] * 0.95 + sky[ch] * cloudParams.skyMax).toBeLessThan(1.45);
       }
@@ -356,7 +365,7 @@ describe('live cloud palette (§T.39 day cycle, §B.19 guard)', () => {
     // precisely the move that caused §B.19.
     const base = srgbLightness(new THREE.Color().setHex(cloudParams.skyColor));
     for (const hex of HAZES) {
-      resolveCloudPalette(cloudParams, fog.setHex(hex), sun, sky);
+      resolveCloudPalette(cloudParams, fog.setHex(hex), dome.setHex(hex), sun, sky);
       expect(Math.abs(srgbLightness(sky) - base), `haze #${hex.toString(16)}`).toBeLessThan(0.08);
     }
   });
@@ -366,7 +375,7 @@ describe('live cloud palette (§T.39 day cycle, §B.19 guard)', () => {
     // brightening is the direction §B.19 failed in
     const base = srgbLightness(new THREE.Color().setHex(cloudParams.sunColor));
     for (const hex of HAZES) {
-      resolveCloudPalette(cloudParams, fog.setHex(hex), sun, sky);
+      resolveCloudPalette(cloudParams, fog.setHex(hex), dome.setHex(hex), sun, sky);
       expect(srgbLightness(sun), `haze #${hex.toString(16)}`).toBeLessThan(base + 0.02);
     }
   });
@@ -377,7 +386,7 @@ describe('live cloud palette (§T.39 day cycle, §B.19 guard)', () => {
     // storm mass shifts toward skyColor. If these ever invert, storm clouds
     // would read as the BRIGHT ones.
     expect(cloudParams.stormSunCut).toBeGreaterThan(cloudParams.stormSkyCut);
-    resolveCloudPalette(cloudParams, fog.setHex(MIDDAY), sun, sky);
+    resolveCloudPalette(cloudParams, fog.setHex(MIDDAY), dome.setHex(MIDDAY), sun, sky);
     const fair = lum(sun) * 0.95 + lum(sky) * 0.63;
     const stormy =
       lum(sun) * 0.95 * (1 - cloudParams.stormSunCut) +
@@ -471,6 +480,211 @@ describe('composite alpha ramp is the softness knob (§V11 stage 3)', () => {
     // second, higher-frequency noise for exactly this.
     expect(cloudParams.edgeHiErode).toBeGreaterThan(0);
     expect(cloudParams.edgeHiScale).toBeGreaterThan(1);
+  });
+});
+
+/**
+ * THE FOUR FIXES for "dark, gloomy, brown lumps" (user 2026-08-13, screenshot
+ * docs/bugs/bug-clouds-dark-blobs.png). Each of these encodes a MEASURED
+ * quantity, because every one of the four defects was invisible as a number
+ * until someone measured it and obvious afterwards.
+ */
+describe('cloud lighting: key/fill separation (§B.19 lineage, §T.39)', () => {
+  const sun = new THREE.Color();
+  const sky = new THREE.Color();
+  const dome = new THREE.Color();
+  const haze = new THREE.Color();
+
+  /** hue distance on the wheel, 0..180 */
+  const hueGap = (a: THREE.Color, b: THREE.Color): number => {
+    const x = { h: 0, s: 0, l: 0 };
+    const y = { h: 0, s: 0, l: 0 };
+    a.getHSL(x, THREE.SRGBColorSpace);
+    b.getHSL(y, THREE.SRGBColorSpace);
+    const d = Math.abs(x.h - y.h) * 360;
+    return d > 180 ? 360 - d : d;
+  };
+
+  it('THE FILL IS NOT THE KEY — the whole "brown lump" defect in one number', () => {
+    // Measured before the fix, at timeOfDay 17.3: key hue 35°, fill hue 29°,
+    // SIX DEGREES apart, because both were driven from scene.fog.color (the
+    // horizon haze). A cumulus then differs between its lit and shadow faces
+    // only in brightness, and a mass with no hue change across its form reads
+    // as a flat lump — which is exactly what the user photographed. Driving
+    // the fill from the sky DOME instead gives 149.8°.
+    resolveDomeAmbient(dome);
+    resolveCloudPalette(cloudParams, haze.setHex(0xfdb669), dome, sun, sky);
+    expect(hueGap(sun, sky)).toBeGreaterThan(90);
+  });
+
+  it('and stays separated across the whole day, not just at the sunset', () => {
+    const restore = skyParams.timeOfDay;
+    try {
+      for (const t of [6.5, 9, 12, 15, 17.3, 18.5, 20]) {
+        skyParams.timeOfDay = t;
+        resolveDomeAmbient(dome);
+        // the haze as it actually is at that hour would be better, but the
+        // guard has to hold for ANY haze the sky could publish (§B.19's own
+        // test makes the same argument)
+        for (const hex of [0xfdb669, 0x99def9, 0xff9542]) {
+          resolveCloudPalette(cloudParams, haze.setHex(hex), dome, sun, sky);
+          expect(hueGap(sun, sky), `t=${t} haze #${hex.toString(16)}`).toBeGreaterThan(60);
+        }
+      }
+    } finally {
+      skyParams.timeOfDay = restore;
+    }
+  });
+
+  it('a warm haze cannot warm the FILL — the two inputs stay two', () => {
+    // the collapse this guards is not "the numbers were wrong", it is one
+    // input doing two jobs. Cool dome + hot haze must give a cool fill.
+    resolveCloudPalette(
+      cloudParams,
+      haze.setHex(0xff6a00),
+      dome.setHex(0x3a4a90),
+      sun,
+      sky,
+    );
+    expect(sky.b).toBeGreaterThan(sky.r * 1.5);
+    // ...while the KEY still takes the haze's warmth, or the sunset is gone
+    expect(sun.r).toBeGreaterThan(sun.b);
+  });
+
+  it('the dome is read from the sky, not re-derived (§T.39 single owner)', () => {
+    const restore = skyParams.timeOfDay;
+    try {
+      skyParams.timeOfDay = 12;
+      resolveDomeAmbient(dome);
+      const noon = dome.clone();
+      skyParams.timeOfDay = 17.3;
+      resolveDomeAmbient(dome);
+      // it moves with the sky's own clock; a constant here would mean the
+      // clouds had stopped tracking the day
+      expect(noon.equals(dome)).toBe(false);
+    } finally {
+      skyParams.timeOfDay = restore;
+    }
+  });
+});
+
+describe('cloud lighting: multiple scattering + base uplight (§V.56)', () => {
+  const p = cloudParams;
+  /** the worst face measured in the diagnosis: buried, facing away and down */
+  const WORST_DIRECT = 0.229 * 0.44 * 0.18;
+  /** a fully lit outer top */
+  const BEST_DIRECT = 0.953;
+  const SUNSET_KEY_Y = Math.sin((10.14 * Math.PI) / 180);
+
+  it('the darkest face is no longer 1.8% of the key', () => {
+    // that number is what "dark and gloomy" was: px 87,60,37 against a sky at
+    // 213,149,135. A cumulus base is 30-60% of its top in reality, because
+    // multiple scattering carries light through the cloud — and NOTHING in
+    // this system modelled that, since the transmission term dies both at
+    // coverage 3-6 and beyond ~20° from the sun.
+    expect(WORST_DIRECT).toBeLessThan(0.02); // the measurement, pinned
+    expect(multiScatteredValue(WORST_DIRECT, p)).toBeGreaterThan(0.15);
+  });
+
+  it('...and the lit end is untouched, which is why it is a FLOOR', () => {
+    // a floor that also moved the top would just be a brightness knob
+    expect(multiScatteredValue(BEST_DIRECT, p)).toBeGreaterThan(0.94);
+  });
+
+  it('KEEPS THE FORM: the range within one cloud stays wide', () => {
+    // the first tuning of this pass overshot — floor 0.28 + glow 0.55 put a
+    // lit top and its own underside six percent apart in pixels, which is
+    // §B.19's flatness again wearing a bright hat. Range is the contract.
+    const top = lobeSunValue(BEST_DIRECT, -1, SUNSET_KEY_Y, p);
+    const far = lobeSunValue(0, 0, SUNSET_KEY_Y, p);
+    expect(top / far).toBeGreaterThan(3);
+  });
+
+  it('the base uplight fires at a low key and is gone at a high one', () => {
+    // at sunset the sun passes UNDER the deck and lights the bases; at midday
+    // it cannot, and a glowing base at noon would read as broken
+    expect(baseGlowValue(1, SUNSET_KEY_Y, p)).toBeGreaterThan(0.1);
+    expect(baseGlowValue(1, Math.sin(Math.PI / 3), p)).toBe(0);
+  });
+
+  it('and only on downward faces, so it cannot double the lit top', () => {
+    expect(baseGlowValue(0, SUNSET_KEY_Y, p)).toBe(0);
+    expect(lobeSunValue(BEST_DIRECT, -1, SUNSET_KEY_Y, p)).toBeLessThan(1);
+  });
+
+  it('every face stays bounded — §V44 on an additive light slot', () => {
+    for (const d of [-5, 0, 0.5, 1, 9, NaN]) {
+      for (const down of [-2, 0, 1, 7, NaN]) {
+        for (const y of [-1, 0, 0.3, 1]) {
+          const v = lobeSunValue(d, down, y, p);
+          expect(Number.isFinite(v)).toBe(true);
+          expect(v).toBeGreaterThanOrEqual(0);
+          expect(v).toBeLessThanOrEqual(2);
+        }
+      }
+    }
+  });
+});
+
+describe('cloud composition: distant sky, merged masses (§V43)', () => {
+  const p = cloudParams;
+  const clusters = generateClusters(1, p);
+  const widthDeg = (c: (typeof clusters)[number]): number =>
+    2 * Math.atan((c.radius * p.clusterFlatten) / Math.hypot(c.x, c.y, c.z)) * (180 / Math.PI);
+
+  it('is not a ceiling of boulders over the player', () => {
+    // measured on the shipped layout: mean angular width 27.7°, largest 50.2°
+    // at 1028 m, every cluster inside 2.6 km. The references are mostly
+    // DISTANT cloud over open sky.
+    const w = clusters.map(widthDeg);
+    const mean = w.reduce((s, v) => s + v, 0) / w.length;
+    expect(mean).toBeLessThan(16);
+    expect(Math.max(...w)).toBeLessThan(40);
+  });
+
+  it('spreads over depth instead of piling into the near ring', () => {
+    // sqrt(u) is uniform per unit AREA; a straight lerp is uniform in RADIUS
+    // and an annulus's area grows with radius, so the straight lerp crowds the
+    // near ring. Median distance therefore sits well past the ring's midpoint.
+    const d = clusters.map((c) => Math.hypot(c.x, c.z)).sort((a, b) => a - b);
+    const midpoint = (p.ringInner + p.ringOuter) / 2;
+    expect(d[Math.floor(d.length / 2)]).toBeGreaterThan(midpoint);
+    expect(d[d.length - 1] / d[0]).toBeGreaterThan(2);
+  });
+
+  it('a cluster is ONE mass, not a pile of separated potatoes', () => {
+    // the old `pow(rng(), 0.6)` was documented as centre-biased and is the
+    // opposite — an exponent below 1 pushes samples toward the RIM, so lobes
+    // were laid out to cover the footprint rather than to overlap inside it.
+    let intersecting = 0;
+    let total = 0;
+    for (const c of clusters) {
+      for (const a of c.lobes) {
+        let best = Infinity;
+        for (const b of c.lobes) {
+          if (a === b) continue;
+          const gap =
+            Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) / (a.radius + b.radius);
+          if (gap < best) best = gap;
+        }
+        if (Number.isFinite(best)) {
+          total++;
+          if (best < 1) intersecting++;
+        }
+      }
+    }
+    expect(intersecting / total).toBeGreaterThan(0.9);
+  });
+
+  it('still fits the instance capacity at the panel maxima (§V28)', () => {
+    expect(countLobes(clusters)).toBeLessThanOrEqual(p.maxLobes);
+  });
+
+  it('the depth range covers the ring it now places clusters on', () => {
+    // maxCloudDist maps distance to the packed depth channel, which drives the
+    // blur radius AND the near-soft/far-sharp alpha ramp. Leave it at 4 km
+    // with a 9.5 km ring and every distant cluster saturates at depth 1.
+    expect(p.maxCloudDist).toBeGreaterThan(p.ringOuter);
   });
 });
 
@@ -586,7 +800,7 @@ describe('banded stratus layer (§V11 second form, §V43 SoT parity)', () => {
     const sunPeak = bandSunAt(1, 0, p);
     const skyPeak = bandSkyAt(0, p);
     for (const hex of [0x99def9, 0xfdb669, 0xffffff, 0x000000, 0xff0000, 0x00ff88]) {
-      resolveCloudPalette(cloudParams, new THREE.Color().setHex(hex), sun, sky);
+      resolveCloudPalette(cloudParams, new THREE.Color().setHex(hex), new THREE.Color().setHex(hex), sun, sky);
       for (const ch of ['r', 'g', 'b'] as const) {
         expect(sun[ch] * sunPeak + sky[ch] * skyPeak, `haze #${hex.toString(16)}`)
           .toBeLessThan(1.45);
@@ -599,7 +813,7 @@ describe('banded stratus layer (§V11 second form, §V43 SoT parity)', () => {
     // the same value, or the bands are one flat tone and read as a wash
     const peak = bandSunAt(1, 0, p);
     const core = bandSunAt(0, 1, p);
-    resolveCloudPalette(cloudParams, new THREE.Color().setHex(0xfdb669), sun, sky);
+    resolveCloudPalette(cloudParams, new THREE.Color().setHex(0xfdb669), new THREE.Color().setHex(0xfdb669), sun, sky);
     const lit = sun.r * peak + sky.r * bandSkyAt(0, p);
     const shade = sun.r * core + sky.r * bandSkyAt(0.6, p);
     // 2.0, not the cores' 2.86 (their guard is `shadow/lit < 0.35`), and the

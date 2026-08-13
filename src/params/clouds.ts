@@ -51,6 +51,11 @@ export interface CloudParams {
   lobeOblate: number;
   /** lobe height distribution exponent: >1 packs lobes near the base */
   heightBias: number;
+  /** radial packing exponent for lobes inside a cluster. BELOW 1 spreads them
+   *  to the rim (0.6 ≈ uniform over the disc's area — that is what made a
+   *  cluster read as separated potatoes); ABOVE 1 packs them toward the centre
+   *  so the union merges into one mass. */
+  lobePacking: number;
 
   // -- silhouette profile: r(h), 0..1 radius at normalized height h --------
   /** how fast the mass rounds off toward the top (low = domed, high = flat) */
@@ -120,6 +125,28 @@ export interface CloudParams {
   /** skylight (ambient) range from fully downward-facing to fully upward */
   skyMin: number;
   skyMax: number;
+  /**
+   * 0..1 FLOOR ON THE PRODUCT of the three direct-light attenuations
+   * (wrapped diffuse × cluster sun-side × self-shadow), i.e. the isotropic
+   * multiple-scattering component a single-scattering model has no way to
+   * produce. Measured before it existed: a buried, down-facing, far-side lobe
+   * received 1.8% of the key and rendered at px 87,60,37 against a sky at
+   * 213,149,135 — the "dark and gloomy" report, and the mechanical reason the
+   * clouds read as brown lumps from underneath.
+   *
+   * A FLOOR ON THE PRODUCT, not on any one term (§V.56): each of the three is
+   * individually defensible and each one, lowered alone, flattens the clouds a
+   * different way. Real cloud-base reflectance is 30-60% of the top.
+   */
+  multiScatterFloor: number;
+  /** warm uplight added to the SUNLIGHT channel on downward-facing faces when
+   *  the key is near the horizon — the glowing underside of a sunset cumulus.
+   *  Rides sunColor, which is already the haze-warmed key, so it needs no
+   *  third colour slot (§V40 untouched). */
+  baseGlow: number;
+  /** sin(elevation) span over which that uplight fades out as the key climbs.
+   *  0.38 ≈ 22°: above that the sun no longer reaches under the deck. */
+  baseGlowLowSun: number;
 
   // -- fluff billboards ----------------------------------------------------
   // The fluff is the ONLY thing that can feather the polygonal rim (§V11b
@@ -328,6 +355,7 @@ const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   lobeScaleMax: { min: 0.05, max: 0.6, step: 0.01 },
   lobeOblate: { min: 0.3, max: 1.5, step: 0.01 },
   heightBias: { min: 0.4, max: 4, step: 0.05 },
+  lobePacking: { min: 0.4, max: 3, step: 0.05 },
   domeExponent: { min: 1, max: 12, step: 0.1 },
   waistWidth: { min: 0.1, max: 1, step: 0.01 },
   waistHeight: { min: 0.05, max: 1, step: 0.01 },
@@ -344,6 +372,9 @@ const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   silverLining: { min: 0, max: 2, step: 0.01 },
   skyMin: { min: 0, max: 1.5, step: 0.01 },
   skyMax: { min: 0, max: 1.5, step: 0.01 },
+  multiScatterFloor: { min: 0, max: 0.8, step: 0.01 },
+  baseGlow: { min: 0, max: 2, step: 0.01 },
+  baseGlowLowSun: { min: 0.05, max: 1, step: 0.01 },
   fluffScale: { min: 0.5, max: 4, step: 0.05 },
   fluffAlpha: { min: 0, max: 1, step: 0.01 },
   fluffPower: { min: 0.5, max: 4, step: 0.05 },
@@ -403,21 +434,34 @@ export const cloudParams: CloudParams = registerParams(
     rtWidth: 768,
     rtHeight: 432,
 
-    clusterCount: 11,
+    // COMPOSITION, re-cut after the measurement that started this pass: the
+    // shipped ring put all 11 clusters inside 2.6 km at a mean angular width
+    // of 27.7° (largest 50.2° at 1028 m). That is a ceiling of boulders, seen
+    // from underneath — which is also why the undersides being unlit mattered
+    // so much. The references are mostly DISTANT cloud over a lot of open sky,
+    // with one or two near banks carrying the frame.
+    clusterCount: 14,
     lobesMin: 30,
     lobesMax: 46,
-    ringInner: 900,
-    ringOuter: 2600,
-    altitudeMin: 340,
-    altitudeMax: 620,
-    clusterRadiusMin: 180,
-    clusterRadiusMax: 360,
+    ringInner: 2400,
+    ringOuter: 9500,
+    // bases a little higher, so a distant bank still clears the horizon
+    altitudeMin: 520,
+    altitudeMax: 980,
+    // bigger in METRES but much smaller on screen, because they are further
+    // out — and a bigger cluster at the same lobe count has more internal
+    // structure to read
+    clusterRadiusMin: 260,
+    clusterRadiusMax: 620,
     clusterFlatten: 1.35,
     clusterHeight: 0.95,
-    lobeScaleMin: 0.17,
-    lobeScaleMax: 0.31,
+    // raised with lobePacking so neighbours actually intersect: a cluster has
+    // to read as ONE mass with a notched outline, not as a pile of balls
+    lobeScaleMin: 0.24,
+    lobeScaleMax: 0.40,
     lobeOblate: 0.74,
     heightBias: 1.6,
+    lobePacking: 1.35,
 
     // fair-weather cumulus: wide flat base, rounded cauliflower top, no anvil.
     // waistHeight/anvilStart/capRound are shared with the storm end and are
@@ -476,6 +520,17 @@ export const cloudParams: CloudParams = registerParams(
     // guard, and is why the lit end stays where the palette work put it.
     skyMin: 0.14,
     skyMax: 0.75,
+    // MEASURED, and the first pair (0.28 / 0.55) was retuned DOWN because it
+    // overshot into the same failure wearing the other hat: it put a lit top at
+    // px 234,228,228 and its own underside at 221,212,200 — six percent apart,
+    // i.e. §B.19's flatness again, bright instead of dark. These give a within-
+    // cloud sunlight range of 0.20 (far side) → 0.96 (lit top), 4.8x, with the
+    // worst buried underside at 0.375 against the 0.018 that started this pass.
+    multiScatterFloor: 0.20,
+    // 0.30 puts a sunset base at ~0.47 of the key, i.e. just under half a lit
+    // top: glowing, which is the reference read, but never competing with it
+    baseGlow: 0.30,
+    baseGlowLowSun: 0.38,
 
     // fluffScale 1.25 was SMALLER than the lobe's own worst-case projected
     // radius (rx 1.25 x relief 1.377 = 1.72 mean radii), so the entire sprite
@@ -503,9 +558,11 @@ export const cloudParams: CloudParams = registerParams(
     // peak coverage is ~0.31 against a cluster interior's 3-6, i.e. the sheet
     // is a veil over the cumulus and never a competitor.
     bandCoverage: 0.42,
-    // above the cumulus (base 340-620, tops ~900) and well below the range
-    // clamp, so the deck reads as a separate stratum
-    bandAltitude: 1500,
+    // above the cumulus and well below the range clamp, so the deck reads as a
+    // separate stratum. Raised 1500 -> 2100 when the composition pass moved
+    // the cluster tops to ~1570 m; the test that caught that is the point of
+    // pinning it against the cumulus rather than as a bare number.
+    bandAltitude: 2100,
     bandRange: 34000,
     bandAboveFade: 400,
     // 0.045 in sin(elev) ≈ 2.6°, where the fade is 63% — the layer is gone by
@@ -539,7 +596,9 @@ export const cloudParams: CloudParams = registerParams(
     bandDriftSpeed: 3.2,
     bandDriftDirDeg: 42,
 
-    maxCloudDist: 4000,
+    // must cover the new ring or every cluster past 4 km saturates depth 1 and
+    // the depth-scaled blur and the near-soft/far-sharp alpha ramp both go flat
+    maxCloudDist: 12000,
     coverage: 0.85, // per-lobe density; sky openness comes from clusterCount
     // the silhouette is now the point (§V11b) — heavy blur was there to hide
     // billboard circles and would sand the sculpting straight back off
@@ -610,6 +669,7 @@ export const CLOUD_LAYOUT_KEYS: readonly (keyof CloudParams)[] = [
   'clusterRadiusMax',
   'clusterFlatten',
   'clusterHeight',
+  'lobePacking',
   'lobeScaleMin',
   'lobeScaleMax',
   'lobeOblate',

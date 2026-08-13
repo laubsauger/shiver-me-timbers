@@ -41,7 +41,7 @@ import {
 import { createCloudBands, advanceBandDrift } from './cloudBands';
 import { createCloudBlur } from './cloudBlur';
 import { createCloudComposite } from './cloudComposite';
-import { resolveCloudPalette } from './cloudPalette';
+import { resolveCloudPalette, resolveDomeAmbient } from './cloudPalette';
 
 export interface CloudsHandle {
   update(time: number, sunDir: THREE.Vector3): void;
@@ -121,6 +121,8 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
   // runtime getClearColor just target.copy()s, so a plain Color works;
   // @types wants the non-exported Color4, hence the narrow cast below
   const prevClearColor = new THREE.Color();
+  /** scratch: this frame's sky-dome colour, the fill's input (see below) */
+  const domeAmbient = new THREE.Color();
   let attachedScene: THREE.Scene | null = null;
 
   return {
@@ -147,6 +149,9 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
       cores.uSilver.value = p.silverLining;
       cores.uSkyMin.value = p.skyMin;
       cores.uSkyMax.value = p.skyMax;
+      cores.uMultiScatter.value = p.multiScatterFloor;
+      cores.uBaseGlow.value = p.baseGlow;
+      cores.uBaseGlowSpan.value = p.baseGlowLowSun;
       cores.uFluffScale.value = p.fluffScale;
       cores.uFluffAlpha.value = p.fluffAlpha;
       cores.uFluffPower.value = p.fluffPower;
@@ -171,9 +176,15 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
       composite.uTime.value = time * p.distortSpeed;
       // §T.39: swing the pair through the day cycle off the sky rig's live
       // horizon haze. Hue only — see cloudPalette.ts for the §B.19 guard.
+      // TWO INPUTS, and they must stay two (§B.49): the HAZE warms the key,
+      // the DOME colours the fill. Driving both from the haze resolved them to
+      // 5.9° of hue separation at the §T.39 sunset, which is a cloud with no
+      // colour difference between its lit and shadow faces — one brown lump.
+      resolveDomeAmbient(domeAmbient);
       resolveCloudPalette(
         p,
         attachedScene?.fog?.color ?? null,
+        domeAmbient,
         composite.uSunColor.value,
         composite.uSkyColor.value,
       );
