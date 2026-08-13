@@ -3,6 +3,7 @@
  * tests/foam.test.ts runs in node without a GPU. Change one side → change
  * the other (same mirror contract as deckwater/fluxMath.ts).
  */
+import { fbm2Cpu } from '../terrain/noiseCpu';
 
 /**
  * Half-life → per-frame decay factor: factor = 2^(−dt/halfLife), so after
@@ -267,11 +268,19 @@ export function eigenFoamGate(
   choppiness: number,
   bandSigmaJ: number,
   seaSigmaJ: number,
+  /**
+   * How much wider the METRIC is than λ− alone (metricSigmaScale). The gate is
+   * a z-score, so it has to be taken against the spread of the thing actually
+   * compared to it — the zero-mean bias and breakup terms widen that spread
+   * without moving its mean, and ignoring them fires the gate 2.8× too often.
+   */
+  sigmaScale = 1,
 ): number {
   if (!bandCanFold(bandSigmaJ, seaSigmaJ)) return NEVER_INJECT_BIAS;
   const z = foamGateZ(bias, seaSigmaJ);
   if (!Number.isFinite(z)) return NEVER_INJECT_BIAS;
-  return eigenRestValue(traceRms, choppiness) - z * eigenSigma(traceRms, choppiness);
+  const scale = Number.isFinite(sigmaScale) ? Math.max(1e-6, sigmaScale) : 1;
+  return eigenRestValue(traceRms, choppiness) - z * eigenSigma(traceRms, choppiness) * scale;
 }
 
 /**
@@ -288,9 +297,12 @@ export function eigenInjectPerStep(
   choppiness: number,
   bandSigmaJ: number,
   seaSigmaJ: number,
+  /** the same widening the gate takes — the AMOUNT is σ-relative too (§V36) */
+  sigmaScale = 1,
 ): number {
   if (!bandCanFold(bandSigmaJ, seaSigmaJ) || !(dt > 0)) return 0;
-  const sigma = eigenSigma(traceRms, choppiness);
+  const scale = Number.isFinite(sigmaScale) ? Math.max(1e-6, sigmaScale) : 1;
+  const sigma = eigenSigma(traceRms, choppiness) * scale;
   // 0 × Infinity is NaN, and the gate above is already NEVER_INJECT there
   if (!(sigma > MIN_BAND_JACOBIAN_SIGMA)) return 0;
   return (Math.max(0, strengthPerSecond) * dt) / sigma;
@@ -448,6 +460,212 @@ export function crestBiasPerMetre(
   const sigma = eigenSigma(traceRms, choppiness);
   if (!(sigma > 0)) return 0;
   return (crestBiasSigma * sigma) / heightRms;
+}
+
+/* -------------------------------------------------------------------------
+ * A CAP IS THE SIZE OF THE BAND THAT MADE IT, AND THAT IS THE BUG (§B, user:
+ * "we are still very patchy on the foam cresting, we are still huge blobs",
+ * docs/bugs/bug-foam-caps-huge-topdown.png — patches 1.5–2× the 35 m hull).
+ *
+ * MEASURED, one instant, no accumulation, no blur, no shading: the connected
+ * components of {λ− < gate} in each band's own grid, extents in world metres.
+ *
+ *   band        wavelengths    major median    p90     max    area in >35 m
+ *   cascade 0   40–1010 m         21.7 m      42.4    70.5       48.3%
+ *   cascade 1   8.3–40 m           2.8 m        —      2.8        0%
+ *   cascade 2   ≤8.3 m             0.2 m       0.5     1.2        0%
+ *
+ * NOTHING DOWNSTREAM GROWS THEM. The accumulator, the blur, `capVariation`
+ * and the dissolve were each ruled out by probe (turning `capVariation` off
+ * moved the shaded >35 m area share from 69.0% to 68.6%). Cascade 0 is BORN at
+ * 20–70 m, because a super-level set of a band-limited field has that band's
+ * own scale: a field whose shortest wavelength is 40 m cannot have a 3 m
+ * feature. And at the zoomed-out framing where the user sees this, the two
+ * bands that DO make metre-scale caps are band-limited away — cascade 2 has no
+ * filtered tier at all and retires outright, cascade 1 falls to its 0.76 m
+ * tier. What survives to a wide shot is the one band that cannot make a small
+ * cap.
+ *
+ * THE CURE IS A PER-TEXEL GATE JITTER AT METRE SCALE — §B.39's dissolve, one
+ * stage upstream. Instead of breaking the SILHOUETTE of a finished mask, break
+ * the REGION THAT IS ALLOWED TO FIRE, so a 40 m breaking zone deposits foam in
+ * metre-scale islands inside itself. It is zero-mean in σ(λ−), so a
+ * hard-breaking core outruns it and only the marginal SKIRT — which is what
+ * makes the patches huge — is carved up. Measured on the shaded mask at the
+ * screenshot's own 0.6 m/px:
+ *
+ *                          caps   major median   p90     max    area >35 m
+ *   before                  25       1.8 m      22.3    41.3      69.0%
+ *   breakup 2.5σ / 12 m     33       7.6 m      12.4    30.5       0.0%
+ *
+ * at 96% of the foam (mean alpha 0.0072 against 0.0075) — the user asked for
+ * smaller caps, not less foam.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * One texel of the breakup field (GPU mirror: the `octaves > 0` block in
+ * createInjectPass). Returns a roughly zero-mean value in [−1, 1]; the caller
+ * scales it by `breakupSigma × σ(λ−)` and ADDS it to the metric, so a positive
+ * value makes this texel harder to break.
+ *
+ * The domain warp is the anti-lattice half and is not optional — value noise
+ * has round level sets (§B.39), so without it this bites round holes and
+ * leaves round islands, which is the disc defect one stage downstream.
+ */
+export function breakupJitter(
+  worldX: number,
+  worldZ: number,
+  freq: number,
+  warp: number,
+  octaves: number,
+  drift = 0,
+): number {
+  if (!(octaves > 0) || !Number.isFinite(freq) || !Number.isFinite(worldX)) return 0;
+  if (!Number.isFinite(worldZ) || !Number.isFinite(warp)) return 0;
+  const bx = worldX * freq;
+  const bz = worldZ * freq;
+  const wu = (fbm2Cpu(bx * 0.35 + 11.3, bz * 0.35 - 4.1, 2) - 0.5) * warp;
+  const wv = (fbm2Cpu(bx * 0.35 - 7.7, bz * 0.35 + 19.4, 2) - 0.5) * warp;
+  return (fbm2Cpu(bx + wu + drift, bz + wv - drift * 0.6, octaves) - 0.5) * 2;
+}
+
+/**
+ * σ of `breakupJitter`'s output, by octave count — MEASURED on the field
+ * itself (400² samples), not assumed.
+ *
+ * It is nowhere near the ±1 the range suggests: an fbm of value noise is
+ * strongly peaked at its mean, and each added octave narrows it further. This
+ * matters because the jitter's variance ADDS to the metric's, and the gate is
+ * a multiple of that metric's σ (§V36) — see `metricSigmaScale`.
+ */
+export const BREAKUP_JITTER_SD: readonly number[] = [0, 0.451, 0.338, 0.297, 0.279];
+
+/**
+ * How much WIDER the injection metric's distribution is than λ−'s own, once
+ * the zero-mean cross-band bias and breakup terms are added to it.
+ *
+ * THIS IS §V.36 CATCHING ITSELF. Both terms are zero-mean, so they leave the
+ * metric's MEAN alone and quietly widen its SPREAD — and every gate here is
+ * expressed as a multiple of that spread. Without this correction the shipped
+ * 2.5σ breakup measured 2.8× the firing area on a gaussian fixture: not
+ * "more foam because the sea is breaking more", but a threshold that changed
+ * meaning because the thing underneath it got wider. Exactly the failure the
+ * per-cascade gate was built to end, reintroduced one term later.
+ *
+ * Variances add because the three fields are independent by construction (λ−
+ * is this band's gradients, the bias is the OTHER bands' elevation, the jitter
+ * is a procedural field keyed on world position).
+ *
+ * `crestBiasSigma` is stated per σ of SEA elevation while the term actually
+ * carries the other bands' elevation, so this is an UPPER BOUND for cascade 0
+ * — whose "other bands" are the small ones — and near-exact for the finer
+ * cascades, whose other bands are dominated by the swell. Erring wide makes a
+ * band fire slightly LESS than asked, which is the safe direction for a
+ * threshold that used to fire 2.8× too often.
+ */
+export function metricSigmaScale(
+  crestBiasSigma: number,
+  breakupSigma: number,
+  octaves: number,
+): number {
+  const c = Number.isFinite(crestBiasSigma) ? Math.max(0, crestBiasSigma) : 0;
+  const b = Number.isFinite(breakupSigma) ? Math.max(0, breakupSigma) : 0;
+  const sd = BREAKUP_JITTER_SD[Math.min(BREAKUP_JITTER_SD.length - 1, Math.max(0, octaves | 0))];
+  return Math.sqrt(1 + c * c + (b * sd) ** 2);
+}
+
+/**
+ * How many octaves of the breakup field a cascade can actually HOLD.
+ *
+ * §V.48 AGAINST THE SIM GRID INSTEAD OF THE SCREEN, and it is the same rule
+ * for the same reason. A StorageTexture carries no mip chain and the inject
+ * pass writes it at texel centres, so an octave whose cell is narrower than
+ * two texels is written as pure aliasing — and unlike a fragment-stage octave
+ * there is no `fwidth` to measure it against and no filtered tier downstream
+ * to catch it. The limit is the cascade's OWN sampling rate.
+ *
+ * This is also why the field is expressed as a world LENGTH: each band then
+ * takes as much of it as its texels can carry (2 octaves in cascade 0's 1.97 m
+ * grid, 4 in cascade 1's 0.19 m one) instead of every band being handed the
+ * same octave count and the coarse one aliasing (§V.36's rule, applied to a
+ * noise field rather than a threshold).
+ */
+export function breakupOctaves(
+  breakupMetres: number,
+  texelMetres: number,
+  maxOctaves = 4,
+): number {
+  if (!Number.isFinite(breakupMetres) || !Number.isFinite(texelMetres)) return 0;
+  if (!(breakupMetres > 0) || !(texelMetres > 0)) return 0;
+  let n = 0;
+  while (n < maxOctaves && breakupMetres / 2 ** n >= 2 * texelMetres) n++;
+  return n;
+}
+
+/**
+ * Standard normal CDF, via the Abramowitz & Stegun 7.1.26 erf approximation
+ * (|ε| < 1.5e-7) — enough for a band's mean coverage, which is a fade target
+ * and not a threshold.
+ */
+export function normalCdf(z: number): number {
+  if (!Number.isFinite(z)) return Number.isNaN(z) ? 0.5 : z > 0 ? 1 : 0;
+  const x = Math.abs(z) / Math.SQRT2;
+  const t = 1 / (1 + 0.3275911 * x);
+  const y =
+    1 -
+    ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t +
+      0.254829592) *
+      t *
+      Math.exp(-x * x);
+  const erf = z >= 0 ? y : -y;
+  return 0.5 * (1 + erf);
+}
+
+/**
+ * E[max(0, gate − X)] for X ~ N(mean, sd) — the mean per-tick injection a band
+ * produces, in closed form rather than by reading the texture back.
+ *
+ * σ·(φ(z) + z·Φ(z)) with z = (gate − mean)/σ: the standard partial expectation.
+ * Exact for a gaussian λ−, which is what the EIGEN_* constants describe.
+ */
+export function expectedDeficit(gate: number, mean: number, sd: number): number {
+  if (!Number.isFinite(gate) || !Number.isFinite(mean)) return 0;
+  if (!Number.isFinite(sd) || sd <= 0) return Math.max(0, gate - mean);
+  const z = (gate - mean) / sd;
+  const phi = Math.exp(-0.5 * z * z) / Math.sqrt(2 * Math.PI);
+  return sd * (phi + z * normalCdf(z));
+}
+
+/**
+ * The MEAN foam a band settles at — what an infinitely-distant pixel of that
+ * band should see (§V.70), derived rather than sampled.
+ *
+ * WHY IT HAS TO EXIST AT ALL. `tierWeight` retires a band as its texels go
+ * sub-pixel and the comment said "fading to nothing IS the average of a field
+ * whose features are far below one pixel". That is true of a SLOPE field, whose
+ * mean is zero, and false of a COVERAGE field, whose mean is its coverage —
+ * §V.70's own diagnostic (ask what ONE infinitely-distant pixel sees) answers
+ * "the average of the two levels", not "the lower one". Cascade 2 has no
+ * filtered tier at all, so it was faded to zero outright: half a sea's worth of
+ * real foam deleted rather than filtered, which is exactly the variance §V.64
+ * forbids throwing away.
+ *
+ * Steady state is inject-then-decay, so a channel settles at I·decay/(1−decay)
+ * with I the mean per-tick injection (breakingGain carries the same ordering).
+ */
+export function expectedBandFoam(
+  gate: number,
+  injectPerStep: number,
+  traceRms: number,
+  choppiness: number,
+  decay: number,
+): number {
+  if (!Number.isFinite(injectPerStep) || injectPerStep <= 0) return 0;
+  if (!Number.isFinite(decay) || decay <= 0 || decay >= 1) return 0;
+  const sd = eigenSigma(traceRms, choppiness);
+  const mean = eigenRestValue(traceRms, choppiness);
+  const perTick = injectPerStep * expectedDeficit(gate, mean, sd);
+  return Math.min(1, (perTick * decay) / (1 - decay));
 }
 
 /* -------------------------------------------------------------------------

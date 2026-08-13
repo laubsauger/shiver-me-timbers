@@ -38,7 +38,11 @@ import { oceanParams } from '../params/ocean';
 import {
   blurMixPerStep,
   breakingGain,
+  breakupOctaves,
+  metricSigmaScale,
   crestBiasPerMetre,
+  eigenSigma,
+  expectedBandFoam,
   decayFactorPerFrame,
   eigenFoamGate,
   eigenInjectPerStep,
@@ -239,6 +243,9 @@ export function createFoamSim(
      * retires: its features are ≤ 1 m, sub-pixel past ~50 m, so even its
      * reduced tier would be sub-pixel and fading to the mean IS the answer.
      */
+    const octaves = breakupOctaves(
+      foamParams.breakupMetres, foamTexelMetres(c.domain, resolution),
+    );
     const wantsTier = i < cascades.length - 1;
     const coarse = wantsTier ? createOutputTexture(coarseN) : null;
     return {
@@ -254,8 +261,12 @@ export function createFoamSim(
       coarse,
       // the WHOLE cascade list, not just this one: the gate now carries the
       // long-wave straining term, which needs the other bands' elevation here
-      // (compute-only textureLoads — no sampler, §V.40 untouched)
-      inject: createInjectPass(cascades, i, front, back, resolution, lu),
+      // (compute-only textureLoads — no sampler, §V.40 untouched).
+      // The octave count is what this band's OWN texels can hold — §V.48
+      // measured against the sim grid, since a StorageTexture has no mip chain
+      // and nothing downstream can filter an octave written sub-texel.
+      octaves,
+      inject: createInjectPass(cascades, i, front, back, resolution, lu, octaves),
       blurDecay: createBlurDecayPass(back, front, resolution, lu),
       // the reduction runs off `front`, i.e. AFTER the blur+decay of this tick,
       // so the tier is always a filtered view of what is actually on screen
@@ -321,21 +332,54 @@ export function createFoamSim(
         // finest band keeps its opt-out switch (see params/foam.ts) — decay
         // still drains whatever it holds, only injection stops
         const off = fineOff && lane.index === lanes.length - 1;
+        // §V36: the gate is a multiple of the METRIC's spread, and the
+        // zero-mean crest-bias and breakup terms widen that spread without
+        // moving its mean. Ignoring them measured 2.8× the firing area on a
+        // gaussian fixture — a threshold that changed meaning, not a sea that
+        // started breaking more (foamMath.metricSigmaScale).
+        const sigmaScale = off
+          ? 1
+          : metricSigmaScale(foamParams.crestBiasSigma, foamParams.breakupSigma, lane.octaves);
         lane.u.uBias.value = off
           ? NEVER_INJECT_BIAS
-          : eigenFoamGate(oceanParams.jacobianFoamBias, steep, lambda, bandSigma, seaSigma);
+          : eigenFoamGate(
+              oceanParams.jacobianFoamBias, steep, lambda, bandSigma, seaSigma, sigmaScale,
+            );
         // σ-relative amount too: `injectStrength` = foam/s per σ of fold depth.
         // Floored ≥ 0 — negative strength would pump NEGATIVE foam into the
         // accumulator, whose min-1 clamp has no floor.
         lane.u.uInjectPerFrame.value = off
           ? 0
-          : eigenInjectPerStep(foamParams.injectStrength, SIM_DT, steep, lambda, bandSigma, seaSigma);
+          : eigenInjectPerStep(
+              foamParams.injectStrength, SIM_DT, steep, lambda, bandSigma, seaSigma, sigmaScale,
+            );
         lane.u.uDecay.value = decay;
         lane.u.uDecayBreaking.value = breakingDecay;
         // a switched-off band injects nothing, so its straining term is dead
         // weight; zeroing it keeps `NEVER_INJECT_BIAS` unreachable rather than
         // letting a big swell crest bias the metric back down toward it
         lane.u.uCrestBias.value = off ? 0 : crestBias;
+        // BREAKUP, σ-relative like every other gate term (§V36): the amplitude
+        // is stated in σ(λ−) and multiplied by THIS band's own σ here, so it
+        // means the same thing in calm and storm and in every band.
+        lane.u.uBreakupAmp.value = off
+          ? 0
+          : Math.max(0, foamParams.breakupSigma) * eigenSigma(steep, lambda);
+        lane.u.uBreakupFreq.value = 1 / Math.max(0.5, foamParams.breakupMetres);
+        lane.u.uBreakupWarp.value = Math.max(0, foamParams.breakupWarp);
+        // slow enough that a cap never sees it move (0.21 m/s at the shipped
+        // 16 m cell) but fast enough that the same texels are not permanently
+        // the foamy ones — the §B.4 lifecycle argument, at the breakup's scale
+        lane.u.uBreakupTime.value = time * 0.013;
+        // what an infinitely-distant pixel of this band should see (§V.70) —
+        // derived, not sampled, because reading a StorageTexture back per
+        // frame is not on the table
+        lane.u.uMeanResidue.value = expectedBandFoam(
+          lane.u.uBias.value, lane.u.uInjectPerFrame.value, steep, lambda, decay,
+        );
+        lane.u.uMeanBreaking.value = expectedBandFoam(
+          lane.u.uBias.value, lane.u.uInjectPerFrame.value, steep, lambda, breakingDecay,
+        );
         lane.u.uRadius.value = foamParams.blurRadius;
         // ONE world diffusion length for every band (§B: the blur was the
         // shape, and it was a grid quantity). `blurRadius` alone made the
@@ -409,18 +453,31 @@ export function createFoamSim(
         const uv = warped.div(lane.domain);
         const fine = texture(lane.front, uv);
         const wFine = tierWeight(lane.texelMetres);
+        // §V.70: A BAND RETIRES TO ITS MEAN, NOT TO ZERO. The old form
+        // multiplied by the tier weight, i.e. faded to nothing, on the
+        // reasoning that "fading to nothing IS the average of a field whose
+        // features are far below one pixel". That is true of a SLOPE field,
+        // whose mean is zero, and FALSE of a COVERAGE field, whose mean is its
+        // coverage — §V.70's own diagnostic (what does ONE infinitely-distant
+        // pixel see?) answers "the average", not "the lower level". Cascade 2
+        // has no filtered tier at all, so it was deleted outright past ~50 m:
+        // real foam thrown away rather than filtered, which is the variance
+        // §V.64 exists to forbid losing.
+        const meanR = lane.u.uMeanResidue;
+        const meanB = lane.u.uMeanBreaking;
         if (lane.coarse) {
           // Hand over at the FINE tier's own Nyquist point to the tier whose
           // texels are 4× the area — not 16× (see REDUCE_FACTOR) — and retire
           // that one at ITS Nyquist point too, rather than letting a 3.3 m
-          // texel alias its way to the horizon.
+          // texel alias its way to the horizon. The coarse tier retires to the
+          // same mean, so the chain ends at the band's average rather than at 0.
           const wCoarse = tierWeight(lane.coarseTexelMetres);
           const coarse = texture(lane.coarse, uv);
-          raw = raw.add(mix(coarse.r.mul(wCoarse), fine.r, wFine));
-          breaking = breaking.add(mix(coarse.g.mul(wCoarse), fine.g, wFine));
+          raw = raw.add(mix(mix(meanR, coarse.r, wCoarse), fine.r, wFine));
+          breaking = breaking.add(mix(mix(meanB, coarse.g, wCoarse), fine.g, wFine));
         } else {
-          raw = raw.add(fine.r.mul(wFine));
-          breaking = breaking.add(fine.g.mul(wFine));
+          raw = raw.add(mix(meanR, fine.r, wFine));
+          breaking = breaking.add(mix(meanB, fine.g, wFine));
         }
       }
       // foamMath.foamMaskFrom. `uBreakingGain` puts the short clock on the

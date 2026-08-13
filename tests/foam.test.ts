@@ -17,6 +17,12 @@ import {
   blurDecayAt,
   blurMixPerStep,
   breakingGain,
+  breakupJitter,
+  metricSigmaScale,
+  breakupOctaves,
+  expectedBandFoam,
+  expectedDeficit,
+  normalCdf,
   crestBiasPerMetre,
   foamMaskFrom,
   meanFoamAgeTicks,
@@ -1396,5 +1402,315 @@ describe('§B the two-channel mix keeps its meaning when the clocks move', () =>
     expect(crestBiasPerMetre(0.5, 0.05, 0.95, Number.NaN)).toBe(0);
     expect(crestBiasPerMetre(0.5, 0, 0.95, 1)).toBe(0);
     expect(crestBiasPerMetre(0, 0.05, 0.95, 1)).toBe(0);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * A CAP IS THE SIZE OF THE BAND THAT MADE IT (§B, user: "we are still very
+ * patchy on the foam cresting, we are still huge blobs", with a top-down frame
+ * showing patches 1.5–2× the 35 m hull).
+ *
+ * MEASURED on the realised field: the connected components of {λ− < gate} run
+ * 21.7 m median and 70.5 m max in cascade 0, against 2.8 m in cascade 1 and
+ * 0.2 m in cascade 2. Nothing downstream grows them — the accumulator, the
+ * blur, `capVariation` and the dissolve were each ruled out by probe. A
+ * super-level set of a band-limited field HAS that band's scale, and cascade 0
+ * holds 40 m waves and longer.
+ *
+ * The fixture below is that geometry and nothing else: a smooth field built
+ * only from 40–160 m components (cascade 0's band), thresholded to give the
+ * same kind of tens-of-metres regions. No IFFT, no accumulator — if the
+ * breakup fragments THIS, it fragments the real thing, and the test runs in
+ * milliseconds rather than the ~40 s the full field costs.
+ *
+ * THE STATISTIC. The >35 m AREA SHARE is what the complaint is about, but it
+ * is carried by a handful of giant components and was measured swinging
+ * 23–43% between time samples of the SAME build — so the assertions below lead
+ * with the MAX and p90 extent, which are stable, and check the area share with
+ * the tolerance its variance deserves. Pinning a noisy statistic tightly is how
+ * a test becomes a thing people delete.
+ * ------------------------------------------------------------------------ */
+
+/** 4-connected components of a boolean grid; extents in world metres */
+function capExtents(on: Uint8Array, n: number, cellM: number) {
+  const seen = new Uint8Array(n * n);
+  const out: { area: number; major: number }[] = [];
+  const stack: number[] = [];
+  for (let s = 0; s < n * n; s++) {
+    if (!on[s] || seen[s]) continue;
+    stack.length = 0;
+    stack.push(s);
+    seen[s] = 1;
+    const xs: number[] = [];
+    const ys: number[] = [];
+    while (stack.length) {
+      const i = stack.pop()!;
+      const x = i % n;
+      const y = (i / n) | 0;
+      xs.push(x);
+      ys.push(y);
+      const nb = [
+        x > 0 ? i - 1 : -1, x < n - 1 ? i + 1 : -1,
+        y > 0 ? i - n : -1, y < n - 1 ? i + n : -1,
+      ];
+      for (const j of nb) if (j >= 0 && on[j] && !seen[j]) { seen[j] = 1; stack.push(j); }
+    }
+    let mx = 0;
+    let my = 0;
+    for (let i = 0; i < xs.length; i++) { mx += xs[i]; my += ys[i]; }
+    mx /= xs.length;
+    my /= ys.length;
+    let sxx = 0;
+    let syy = 0;
+    let sxy = 0;
+    for (let i = 0; i < xs.length; i++) {
+      const dx = xs[i] - mx;
+      const dy = ys[i] - my;
+      sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+    }
+    sxx /= xs.length; syy /= xs.length; sxy /= xs.length;
+    const tr = sxx + syy;
+    const root = Math.sqrt(Math.max(0, (tr * tr) / 4 - (sxx * syy - sxy * sxy)));
+    // 4σ of the principal axis ≈ the length the eye reads
+    out.push({ area: xs.length * cellM * cellM, major: 4 * Math.sqrt(tr / 2 + root) * cellM });
+  }
+  return out;
+}
+
+/**
+ * Cascade 0's geometry, running THE REAL METRIC.
+ *
+ * Not a smooth proxy field: λ− is built from the same displacement gradients
+ * the inject pass reads, over a synthetic 32-mode spectrum spanning cascade 0's
+ * band. That matters — a smooth sum of cosines has smooth, ellipse-like
+ * super-level sets that resist fragmentation, while λ− carries the anisotropy
+ * magnitude ½√((a−b)²+4c²), which is rough. Testing the breakup against the
+ * smooth proxy understated it by more than half.
+ *
+ * Equal SLOPE per mode (amplitude ∝ 1/k), which is what the ocean's own
+ * anti-lattice work settled on for the same reason: it stops the finest
+ * component also being the loudest.
+ */
+const regionCache = new Map<number, ReturnType<typeof computeRegions>>();
+function breakingRegions(breakupSigma: number) {
+  const hit = regionCache.get(breakupSigma);
+  if (hit) return hit;
+  const v = computeRegions(breakupSigma);
+  regionCache.set(breakupSigma, v);
+  return v;
+}
+
+function computeRegions(breakupSigma: number) {
+  const N = 384;
+  const WIN = 900; // m — several of the longest components across
+  const cell = WIN / N;
+  const texel = 1.97; // cascade 0's shipped texel
+  const octaves = breakupOctaves(foamParams.breakupMetres, texel);
+  const freq = 1 / foamParams.breakupMetres;
+  const CHOP = 0.95;
+  const MODES = 32;
+  const SLOPE = 0.03;
+  const waves = Array.from({ length: MODES }, (_, i) => {
+    // 40 m to 400 m: cascade 0's band starts at 40 m by the split and runs to
+    // the domain, and it is the LONG end that makes the regions big
+    const lambda = 40 * 10 ** (i / (MODES - 1));
+    const k = (2 * Math.PI) / lambda;
+    const th = i * Math.PI * (3 - Math.sqrt(5));
+    return { k, cx: Math.cos(th), cz: Math.sin(th), ph: i * 1.7, amp: SLOPE / k };
+  });
+
+  const metric = new Float32Array(N * N);
+  let mean = 0;
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const wx = x * cell;
+      const wz = y * cell;
+      let dxx = 0;
+      let dzz = 0;
+      let dxz = 0;
+      for (const w of waves) {
+        // ∂Dx/∂x = −a·k·cx²·cos, ∂Dz/∂z = −a·k·cz²·cos, ∂Dx/∂z = −a·k·cx·cz·cos
+        const c = Math.cos(w.k * (wx * w.cx + wz * w.cz) + w.ph) * w.amp * w.k;
+        dxx -= c * w.cx * w.cx;
+        dzz -= c * w.cz * w.cz;
+        dxz -= c * w.cx * w.cz;
+      }
+      const a = CHOP * dxx;
+      const b = CHOP * dzz;
+      const cc = CHOP * dxz;
+      const v = minEigenvalue(2 + a + b, (1 + a) * (1 + b) - cc * cc);
+      metric[y * N + x] = v;
+      mean += v;
+    }
+  }
+  mean /= N * N;
+  let varr = 0;
+  for (let i = 0; i < N * N; i++) varr += (metric[i] - mean) ** 2;
+  const sd = Math.sqrt(varr / (N * N));
+  // fire BELOW the gate, as the inject pass does — against the METRIC's own
+  // spread, which the zero-mean jitter widens (foamMath.metricSigmaScale).
+  // Without that correction the same gate fired 2.8× the area and the "fix"
+  // would have read as "more foam", not "smaller caps".
+  const gate = mean - 2.4 * sd * metricSigmaScale(0, breakupSigma, octaves);
+  const on = new Uint8Array(N * N);
+  let fired = 0;
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const i = y * N + x;
+      const jitter = breakupSigma
+        ? breakupJitter(x * cell, y * cell, freq, foamParams.breakupWarp, octaves) * breakupSigma * sd
+        : 0;
+      on[i] = metric[i] + jitter < gate ? 1 : 0;
+      fired += on[i];
+    }
+  }
+  const comps = capExtents(on, N, cell).filter((c) => c.area > 2 * cell * cell);
+  const majors = comps.map((c) => c.major).sort((a, b) => a - b);
+  let areaAll = 0;
+  let areaBig = 0;
+  for (const c of comps) { areaAll += c.area; if (c.major > 35) areaBig += c.area; }
+  return {
+    coverage: fired / (N * N),
+    count: comps.length,
+    max: majors.length ? majors[majors.length - 1] : 0,
+    p90: majors.length ? majors[Math.floor(0.9 * majors.length)] : 0,
+    bigShare: areaAll > 0 ? areaBig / areaAll : 0,
+  };
+}
+
+describe('§B the breakup: metre-scale caps inside a band-scale region', () => {
+  it('a 40 m-and-longer band breaks in patches longer than the ship', () => {
+    // WHY THIS IS THE BASELINE AND NOT A STRAW MAN: this is cascade 0's actual
+    // geometry. Its shortest component is 40 m by the band split, so its
+    // super-level sets are tens of metres and no downstream stage can make them
+    // smaller. If this ever stops producing ship-length patches the fixture has
+    // drifted off the thing it stands for.
+    const plain = breakingRegions(0);
+    expect(plain.max).toBeGreaterThan(35); // measured 67 m
+    expect(plain.p90).toBeGreaterThan(35); // measured 54 m — MOST of them
+    expect(plain.bigShare).toBeGreaterThan(0.5);
+  });
+
+  it('the breakup carves it into caps smaller than the hull', () => {
+    // THE COMPLAINT, AS A NUMBER: "caps are 1.5–2× ship length" against a 35 m
+    // ship. Leading with max and p90 because the area share is carried by a few
+    // giant components and is noisy (23–43% between time samples of one build).
+    const plain = breakingRegions(0);
+    const broken = breakingRegions(foamParams.breakupSigma);
+    // p90 UNDER the hull: nine caps in ten are now smaller than the ship,
+    // where before nine in ten were larger (54 m → 29 m measured)
+    expect(broken.p90).toBeLessThan(35);
+    expect(broken.p90).toBeLessThan(plain.p90 * 0.65);
+    // the area share is the complaint's own statistic but it is carried by a
+    // few giant components and is noisy, so it is checked as a RATIO with the
+    // tolerance that deserves: 0.76 → 0.32 measured here, 0.54 → 0.11 on the
+    // real field. NOT eliminated — stated as a ratio so it cannot be read as
+    // a claim that ship-length caps are gone.
+    expect(broken.bigShare).toBeLessThan(plain.bigShare * 0.55);
+    // and it is a FRAGMENTATION, not a deletion: many more, smaller caps
+    expect(broken.count).toBeGreaterThan(plain.count * 2);
+  });
+
+  it('it fragments without removing the foam (§V.64)', () => {
+    // WHY: the user asked for smaller caps, not less foam. The jitter is
+    // zero-mean in σ, so to first order the firing AREA survives — if a future
+    // retune makes the breakup one-sided this fails, which is the point.
+    const plain = breakingRegions(0);
+    const broken = breakingRegions(foamParams.breakupSigma);
+    expect(broken.coverage).toBeGreaterThan(plain.coverage * 0.6);
+    expect(broken.coverage).toBeLessThan(plain.coverage * 1.6);
+  });
+
+  it('breakupSigma 0 is the un-broken gate, exactly', () => {
+    // the same A/B contract every other foam change ships behind
+    expect(breakupJitter(12.3, -45.6, 1 / 16, 0.35, 0)).toBe(0);
+  });
+});
+
+describe('§V.48 against the SIM GRID: no octave written sub-texel', () => {
+  it('a band only takes the octaves its own texels can hold', () => {
+    // WHY: a StorageTexture has NO mip chain and the inject pass writes it at
+    // texel centres, so an octave finer than 2 texels is aliasing with nothing
+    // downstream able to filter it — there is no `fwidth` in a compute pass and
+    // no filtered tier below the sim resolution. Same rule as the screen-space
+    // band limit, measured against the grid instead of the pixel.
+    for (const texel of [1.97, 0.191, 0.0443]) {
+      const n = breakupOctaves(foamParams.breakupMetres, texel);
+      expect(n).toBeGreaterThan(0);
+      // the finest octave taken is still at least 2 texels wide
+      expect(foamParams.breakupMetres / 2 ** (n - 1)).toBeGreaterThanOrEqual(2 * texel);
+      // and the next one would not have been
+      if (n < 4) expect(foamParams.breakupMetres / 2 ** n).toBeLessThan(2 * texel);
+    }
+  });
+
+  it('a band whose texels are coarser than the field takes NO octaves', () => {
+    // rather than writing one aliased octave and calling it detail
+    expect(breakupOctaves(16, 20)).toBe(0);
+    expect(breakupOctaves(16, 8)).toBe(1);
+    expect(breakupOctaves(0, 1)).toBe(0);
+    expect(breakupOctaves(16, 0)).toBe(0);
+    expect(breakupOctaves(Number.NaN, 1)).toBe(0);
+  });
+});
+
+describe('§V.70 a retiring band fades to its MEAN, not to zero', () => {
+  it('the analytic band mean matches a simulated field', () => {
+    // WHY IT IS DERIVED AND NOT SAMPLED: reading a StorageTexture back every
+    // frame is not on the table, and the fade target has to track weather. The
+    // closed form is exact for a gaussian λ−, which is what the EIGEN_*
+    // constants describe — so this test is the tripwire on that assumption.
+    const traceRms = 0.0837;
+    const choppiness = 0.95;
+    const decay = decayFactorPerFrame(0.9, DT);
+    const sd = eigenSigma(traceRms, choppiness);
+    const mean = eigenRestValue(traceRms, choppiness);
+    const gate = mean - 2.2 * sd;
+    const injectPerStep = 4 * DT / sd;
+
+    // simulate: a gaussian λ− field driven to steady state by the real
+    // accumulate/decay ordering
+    let acc = 0;
+    let rng = 12345;
+    const nextGauss = () => {
+      // Box-Muller on a cheap LCG — deterministic, no Math.random (§V2)
+      rng = (rng * 1664525 + 1013904223) >>> 0;
+      const u1 = Math.max(1e-12, rng / 4294967296);
+      rng = (rng * 1664525 + 1013904223) >>> 0;
+      const u2 = rng / 4294967296;
+      return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    };
+    const SAMPLES = 200000;
+    for (let i = 0; i < SAMPLES; i++) {
+      acc += Math.max(0, gate - (mean + sd * nextGauss())) * injectPerStep;
+    }
+    const simulatedPerTick = acc / SAMPLES;
+    const analyticPerTick = injectPerStep * expectedDeficit(gate, mean, sd);
+    expect(analyticPerTick).toBeCloseTo(simulatedPerTick, 3);
+    // and the steady state carries the inject-THEN-decay ordering
+    expect(expectedBandFoam(gate, injectPerStep, traceRms, choppiness, decay)).toBeCloseTo(
+      (analyticPerTick * decay) / (1 - decay),
+      6,
+    );
+  });
+
+  it('the mean a distant pixel sees is POSITIVE, which is the whole point', () => {
+    // §V.70's diagnostic: what does ONE infinitely-distant pixel see? For a
+    // COVERAGE field the answer is its coverage, not zero — cascade 2 has no
+    // filtered tier and was faded to nothing outright past ~50 m, deleting real
+    // foam rather than filtering it (§V.64). A mean of zero here would mean the
+    // old behaviour had silently come back.
+    const m = expectedBandFoam(0.62, 1.1, 0.1327, 0.95, decayFactorPerFrame(0.9, DT));
+    expect(m).toBeGreaterThan(0);
+    expect(m).toBeLessThanOrEqual(1);
+  });
+
+  it('a band that cannot fire fades to nothing, and never to NaN', () => {
+    expect(expectedBandFoam(NEVER_INJECT_BIAS, 0, 0.05, 0.95, 0.99)).toBe(0);
+    expect(expectedBandFoam(0.6, 1, 0.05, 0.95, 1)).toBe(0); // decay 1 = never dies
+    expect(expectedBandFoam(0.6, 1, 0.05, 0.95, 0)).toBe(0);
+    expect(normalCdf(Number.NaN)).toBe(0.5);
+    expect(normalCdf(-40)).toBeGreaterThanOrEqual(0);
+    expect(expectedDeficit(0.5, 0.5, 0)).toBe(0);
   });
 });

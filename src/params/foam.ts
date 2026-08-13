@@ -82,6 +82,55 @@ export interface FoamParams {
    * 0.5 is the knee of the top-30 curve and the cheapest in foam removed.
    */
   crestBiasSigma: number;
+  /**
+   * WORLD METRES of the coarsest cell of the per-texel BREAKUP field — the
+   * thing that decides how big a whitecap is (§B, user: "we are still very
+   * patchy on the foam cresting, we are still huge blobs").
+   *
+   * A CAP USED TO BE THE SIZE OF THE BAND THAT MADE IT. Measured on the
+   * realised field, the connected components of {λ− < gate} ran 21.7 m median
+   * and 70.5 m max in cascade 0 against 2.8 m in cascade 1 and 0.2 m in
+   * cascade 2 — because a super-level set of a band-limited field has that
+   * band's own scale, and cascade 0 holds 40 m waves and longer. Nothing
+   * downstream was growing them; they were born that size. This field raises
+   * the gate per texel so a 40 m breaking zone deposits foam in metre-scale
+   * islands inside itself.
+   *
+   * A LENGTH, not a frequency, so each band takes as many octaves as its own
+   * texels can carry (foamMath.breakupOctaves — §V.48 measured against the sim
+   * grid, since a StorageTexture has no mip chain). The octave COUNT is baked
+   * at construction like every other octave count here; moving this live
+   * rescales the field without rebuilding the node graph.
+   */
+  breakupMetres: number;
+  /**
+   * Amplitude of that jitter in σ(λ−) — σ-relative on both sides (§V36) so it
+   * means the same in calm and storm. 0 restores the un-broken gate exactly.
+   *
+   * MEASURED on the shipped 512² grid at the screenshot's own 0.6 m/px, cap
+   * extents in world metres (median / p90 / max):
+   *   0            6.2 / 34.0 / 44.2
+   *   1.5σ @ 12 m  4.3 / 10.8 / 38.7
+   *   2.0σ @ 16 m  7.2 / 17.7 / 28.7
+   *   2.5σ @ 16 m  8.0 / 14.9 / 27.6      ← shipped
+   * The >35 m AREA SHARE is the statistic the complaint is about but it is
+   * carried by a handful of giant components and swings 23–43% between time
+   * samples on the same build, so the SHIPPED value is chosen on p90 and max,
+   * which are stable. At 2.5σ/16 m no cap reaches the 35 m hull length.
+   * Costs 14% of the foam (mean alpha 0.0095 against 0.0110) — raise
+   * `injectStrength` if the sea wants it back.
+   */
+  breakupSigma: number;
+  /**
+   * Domain-warp amplitude of the breakup field, in units of one cell.
+   *
+   * NOT optional decoration: value noise has ROUND LEVEL SETS (§B.39), so
+   * without the warp this bites round holes and leaves round islands — the
+   * exact defect that made foam read as discs one stage downstream. Bending
+   * the sample coordinate by a field with no period of its own is the same
+   * cure the ocean's wavelet lattice took (`9bf32d7`), at a different scale.
+   */
+  breakupWarp: number;
   /** 3×3 blur tap offset in texels — spread speed of the progressive blur */
   blurRadius: number;
   /**
@@ -290,6 +339,9 @@ export const foamParams: FoamParams = registerParams(
     residueWeight: 0.3,
     breakingWeight: 1.0,
     crestBiasSigma: 0.5,
+    breakupMetres: 16,
+    breakupSigma: 2.5,
+    breakupWarp: 0.35,
     blurRadius: 1.0,
     // = the smallest injected minor axis measured across bands and presets
     // (cascade 1 at swell, 0.72 m), so no band's caps are re-rounded
@@ -354,6 +406,9 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
     residueWeight: { min: 0, max: 1, step: 0.01 },
     breakingWeight: { min: 0, max: 4, step: 0.05 },
     crestBiasSigma: { min: 0, max: 4, step: 0.05 },
+    breakupMetres: { min: 2, max: 60, step: 0.5 },
+    breakupSigma: { min: 0, max: 6, step: 0.05 },
+    breakupWarp: { min: 0, max: 1.5, step: 0.05 },
     blurRadius: { min: 0, max: 4, step: 0.25 },
     blurSpreadMetres: { min: 0, max: 8, step: 0.05 },
     artCrestMetres: { min: 0.5, max: 40, step: 0.25 },

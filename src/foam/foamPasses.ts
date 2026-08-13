@@ -28,6 +28,7 @@ import {
 } from 'three/tsl';
 import type * as THREE from 'three/webgpu';
 import { loadCascadeLayer, type CascadeLayer } from '../ocean/oceanTextures';
+import { fbm2 } from '../terrain/noise';
 import { GAUSSIAN_3X3 } from './foamMath';
 
 /** live-tweaked uniforms shared by every cascade's passes */
@@ -51,6 +52,27 @@ export function createFoamUniforms() {
      * restores the pre-cross-band gate exactly.
      */
     uCrestBias: uniform(0),
+    /**
+     * Amplitude of the per-texel breakup jitter, ALREADY in λ− units
+     * (breakupSigma × this band's σ(λ−), precomputed per tick). 0 restores the
+     * un-broken gate exactly. See foamMath, "A CAP IS THE SIZE OF THE BAND
+     * THAT MADE IT".
+     */
+    uBreakupAmp: uniform(0),
+    /** 1 / breakupMetres — the breakup field's base frequency in world units */
+    uBreakupFreq: uniform(1),
+    /** domain-warp amplitude, in units of one breakup cell (§B.39 anti-lattice) */
+    uBreakupWarp: uniform(0),
+    /** slow drift of the breakup field, so the same texels do not always foam */
+    uBreakupTime: uniform(0),
+    /**
+     * The MEAN foam this band settles at — what an infinitely-distant pixel of
+     * it should see (§V.70, foamMath.expectedBandFoam). Read by the SHADING
+     * node, not by any compute pass: it lives here because it is per-lane and
+     * this is the per-lane uniform block.
+     */
+    uMeanResidue: uniform(0),
+    uMeanBreaking: uniform(0),
     /** blur tap offset in texels */
     uRadius: uniform(1),
     /**
@@ -125,6 +147,14 @@ export function createInjectPass(
   dst: THREE.StorageTexture,
   n: number,
   u: FoamUniforms,
+  /**
+   * Octaves of the breakup field this band's texels can hold
+   * (foamMath.breakupOctaves). A BUILD-TIME count, like `CAP_VAR_OCTAVES` and
+   * every other octave count in this project: it unrolls the loop, and moving
+   * `breakupMetres` live rescales the field without rebuilding the graph.
+   * 0 disables the breakup entirely.
+   */
+  octaves = 0,
 ) {
   const own = cascades[index];
   if (!own) throw new Error(`foam: inject pass for missing cascade ${index}`);
@@ -174,7 +204,33 @@ export function createInjectPass(
     }
     // a POSITIVE elevation lowers λ−, i.e. pushes this texel toward breaking:
     // riding high on a long wave is what steepens a short one
-    const metric = minEigen.sub(u.uCrestBias.mul(hOther));
+    const metric = minEigen.sub(u.uCrestBias.mul(hOther)).toVar();
+
+    // ── THE BREAKUP: metre-scale islands inside a band-scale region ────────
+    // A super-level set of a band-limited field has that band's own scale, so
+    // cascade 0 (40–1010 m waves) injects patches 20–70 m across and no amount
+    // of downstream work makes them smaller — measured, foamMath. This raises
+    // the gate per texel by a zero-mean field at METRE scale, so a hard-
+    // breaking core still fires whole while the marginal skirt is carved into
+    // islands. §B.39's dissolve, one stage upstream: break the region ALLOWED
+    // to fire rather than the silhouette of a mask that already exists.
+    if (octaves > 0) {
+      const bp = vec2(worldX, worldZ).mul(u.uBreakupFreq).toVar();
+      const drift = u.uBreakupTime;
+      // DOMAIN WARP, and it is the anti-lattice half. Value noise has round
+      // level sets (§B.39), so on its own this would bite round holes and
+      // leave round islands; bending the coordinate by a field with no period
+      // of its own is what makes the tears irregular. Same cure the ocean's
+      // wavelet lattice took, at a different scale.
+      const wu = fbm2(bp.mul(0.35).add(vec2(11.3, -4.1)), 2).sub(0.5);
+      const wv = fbm2(bp.mul(0.35).add(vec2(-7.7, 19.4)), 2).sub(0.5);
+      const warped = bp
+        .add(vec2(wu, wv).mul(u.uBreakupWarp))
+        .add(vec2(drift, drift.mul(-0.6)));
+      // fbm2 is [0,1]; centre it so the jitter is zero-mean and the band's
+      // total injection is preserved to first order (§V.64 — nothing deleted)
+      metric.addAssign(u.uBreakupAmp.mul(fbm2(warped, octaves).sub(0.5).mul(2)));
+    }
 
     const previous = textureLoad(src, coord);
     // deficit below the gate → foam, never negative: calm water must not
