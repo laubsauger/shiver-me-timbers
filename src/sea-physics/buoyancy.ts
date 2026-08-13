@@ -39,6 +39,17 @@ function halfBreadth(z: number): number {
 export interface ProbeStation {
   local: Vec3;
   weight: number;
+  /**
+   * Share of the hull's ENTRAINED WATER this station carries (Σ = 1) — a
+   * different distribution from `weight` and that is the whole point (§V.69).
+   * Buoyancy is a waterplane integral, so its share goes as the local
+   * half-breadth b; added mass is the water a section drags with it, and a
+   * section's heave added mass goes as ρ(π/2)b², so its share goes as b².
+   * The added water is therefore concentrated amidships relative to the
+   * buoyancy, which is why the added moment of inertia has a SHORTER gyradius
+   * than the hull's own (0.23·L against 0.25·L here) rather than the same one.
+   */
+  added: number;
 }
 
 /**
@@ -63,17 +74,44 @@ export interface ProbeStation {
  * kernel used to fake: a 35 m hull in an 8 m wave sums to 5% because the
  * crests and troughs under it genuinely cancel, not because we smeared them.
  *
- * The pair's lever ±b/√3 is the radius of gyration of a rectangular strip
- * of half-width b (∫x²dx = ⅔b³ over an area 2b): two point loads at the
- * hull's full half-beam would overstate the waterplane's second moment —
- * i.e. the roll stiffness — by 3×, which is what pinned the old roll period.
+ * ACROSS the beam the same argument applies one order lower, and it took the
+ * Smith correction (§V.68) to expose it. The old port/starboard pair at
+ * ±b/√3 is 2-point Gauss–Legendre: exact through cubic, and its equivalent
+ * lever is the radius of gyration of a rectangular strip of half-width b
+ * (∫x²dx = ⅔b³ over an area 2b), so two point loads at the FULL half-beam
+ * would overstate the roll stiffness by 3×. But two points cannot integrate a
+ * wave shorter than the beam either: at λ 8 m across an 8.5 m beam the pair
+ * returns 1.95× the true roll moment. That aliasing was invisible while a
+ * σ 3.5 m Gaussian sat on top of every station suppressing everything short —
+ * remove the Gaussian (its job is now done exactly, and in the spectrum) and
+ * it surfaces, §V.50's own lesson arriving on the other axis. Three-point
+ * Gauss–Legendre (0, ±b√(3/5), weights 4/9, 5/18, 5/18) is exact through
+ * quintic and returns 0.82× at λ 8, and it changes NOTHING else: Σw, Σw·x²
+ * and Σw·z² are identical to the pair's, so every stiffness, period and
+ * inertia derived from them is untouched.
  */
 export interface StationSet {
   readonly stations: readonly ProbeStation[];
   /** Σ w·z² and Σ w·x² — the waterplane's second moments, for slope fits */
   readonly z2: number;
   readonly x2: number;
+  /**
+   * Σ a·z² and Σ a·x² over the ENTRAINED-WATER shares (m²): multiply by the
+   * total added mass and you have the added moments of inertia in pitch and
+   * roll. §V.69 — the hull's added mass is one field of water, so its heave,
+   * pitch and roll contributions are ONE coefficient plus this geometry, not
+   * three independent numbers to tune apart.
+   */
+  readonly az2: number;
+  readonly ax2: number;
 }
+
+/**
+ * 3-point Gauss–Legendre across the beam: nodes as a fraction of the local
+ * half-breadth, weights as a share of the slice (Σ = 1).
+ */
+const BEAM_NODE: readonly number[] = [-Math.sqrt(3 / 5), 0, Math.sqrt(3 / 5)];
+const BEAM_WEIGHT: readonly number[] = [5 / 18, 4 / 9, 5 / 18];
 
 function buildStations(slices: number): StationSet {
   const n = Math.max(1, Math.round(slices));
@@ -93,24 +131,42 @@ function buildStations(slices: number): StationSet {
     zBar += b * z;
   }
   if (wSum <= 0) {
-    return { stations: [{ local: [0, 0, 0], weight: 1 }], z2: 1, x2: 1 };
+    return {
+      stations: [{ local: [0, 0, 0], weight: 1, added: 1 }],
+      z2: 1,
+      x2: 1,
+      az2: 0,
+      ax2: 0,
+    };
   }
   zBar /= wSum;
+  // added mass rides on b², buoyancy on b — see ProbeStation.added
+  let bSq = 0;
+  for (let i = 0; i < n; i++) bSq += bs[i] * bs[i];
   let z2 = 0;
   let x2 = 0;
+  let az2 = 0;
+  let ax2 = 0;
   for (let i = 0; i < n; i++) {
     // shift so the centre of the waterplane sits at the origin: the ship is
     // ballasted to float on her lines, and Σ w·z = 0 is what makes flat
     // water produce exactly zero pitch torque (no phantom static trim)
     const z = zs[i] - zBar;
-    const x = (bs[i] * HULL_HALF_BEAM) / Math.sqrt(3);
-    const w = bs[i] / wSum / 2;
-    stations.push({ local: [-x, 0, z], weight: w });
-    stations.push({ local: [x, 0, z], weight: w });
-    z2 += 2 * w * z * z;
-    x2 += 2 * w * x * x;
+    const half = bs[i] * HULL_HALF_BEAM;
+    const share = bs[i] / wSum;
+    const addedShare = (bs[i] * bs[i]) / bSq;
+    for (let j = 0; j < BEAM_NODE.length; j++) {
+      const x = half * BEAM_NODE[j];
+      const w = share * BEAM_WEIGHT[j];
+      const a = addedShare * BEAM_WEIGHT[j];
+      stations.push({ local: [x, 0, z], weight: w, added: a });
+      z2 += w * z * z;
+      x2 += w * x * x;
+      az2 += a * z * z;
+      ax2 += a * x * x;
+    }
   }
-  return { stations, z2: Math.max(1e-6, z2), x2: Math.max(1e-6, x2) };
+  return { stations, z2: Math.max(1e-6, z2), x2: Math.max(1e-6, x2), az2, ax2 };
 }
 
 /** stations are pure geometry — build once per distinct slice count */
@@ -219,17 +275,18 @@ const MAX_SURFACE_VY = 8;
  * defaults to 0 and exists only as an anti-alias pre-filter if anyone runs
  * a very coarse `probeSlices`.
  *
- * ACROSS the beam there is no length to integrate over — 8.5 m of hull
- * cannot cancel a 17 m beam wave — so the one physical effect that keeps
- * short beam chop from rolling the ship is the Smith effect: wave pressure
- * decays as e^(−k·draft) under the surface. `hullFootprintBeam` is that
- * decay expressed as a Gaussian patch, response ≈ exp(−k²σ²/2). σ = 3.5 m
- * matches e^(−k·2 m) closely over the beam-chop band (λ 10–25 m).
+ * The DEPTH filtering — the one no amount of hull length or beam replaces,
+ * and the one that answers "she gets thrown around by waves too easily" —
+ * is the Smith effect, and it is now applied exactly, per mode, in the
+ * mirror's spectrum (§V.68, cpuOcean `head`). `hullFootprintBeam` used to be
+ * a Gaussian standing in for it and is 0 for the same reason: a spatial
+ * kernel can only approximate a per-wavelength factor, it does so in ONE
+ * direction (this one was flat along the hull, so head seas got nothing),
+ * and it costs 5 samples per station where the spectral form costs none.
  *
- * Quadrature: 5 offsets per axis at ±0.75σ/±1.5σ with Gaussian weights.
- * 3 offsets leave a sidelobe (λ≈2σ returns at ~0.5 — chop would leak back
- * in); 5 hold the response below ~0.11 for every wavelength the mirror
- * carries (λ ≥ 5 m, cascade 2 is not mirrored).
+ * Both kernels therefore default to 0 and this quadrature is dormant. It
+ * survives as an anti-alias pre-filter: 5 offsets per axis at ±0.75σ/±1.5σ
+ * with Gaussian weights (3 leave a sidelobe at λ≈2σ).
  */
 const KERNEL_T: readonly number[] = [-1.5, -0.75, 0, 0.75, 1.5];
 const KERNEL_W: readonly number[] = KERNEL_T.map((t) => Math.exp(-0.5 * t * t));
@@ -367,9 +424,16 @@ export function stepShipBuoyancy(
     const px = pos[0] + r[0];
     const py = pos[1] + r[1];
     const pz = pos[2] + r[2];
+    // THE PRESSURE HEAD, NOT THE SURFACE (§V.68). A hull does not ride the
+    // free surface, it integrates the pressure under it, and the wave part of
+    // that pressure decays as e^(−k·draft) — so a 189 m swell reaches this
+    // keel at 94% and an 8 m ripple at 21%, and the ship is heavy in short
+    // waves for free, by being deep rather than by being damped. The field is
+    // built per mode in the mirror's own k-space, which is the only place
+    // "per wavelength" means anything; here it is just another grid.
     let h: number;
     if (!spread) {
-      h = ocean.heightAt(px, pz, time);
+      h = ocean.pressureHeadAt(px, pz, time);
     } else {
       let hSum = 0;
       let wSum = 0;
@@ -380,7 +444,7 @@ export function stepShipBuoyancy(
           const w = wL[a] * wB[b];
           hSum +=
             w *
-            ocean.heightAt(
+            ocean.pressureHeadAt(
               px + axL[0] * dL + axB[0] * dB,
               pz + axL[2] * dL + axB[2] * dB,
               time,
@@ -390,7 +454,13 @@ export function stepShipBuoyancy(
       }
       h = hSum / wSum;
     }
-    // water surface vertical velocity under this probe (0 on first tick)
+    // Vertical velocity of the water this station is actually damping
+    // against — the rate of the PRESSURE HEAD, not of the surface, and that
+    // matters more here than anywhere else: orbital velocity is ω·A and
+    // ω = √(gk), so a relative-velocity damper reading the raw surface would
+    // hand SHORT waves the largest forcing of all (λ8 has 5× the vertical
+    // speed of λ189 at equal amplitude) — the exact opposite of what a deep
+    // hull feels. e^(−k·d) is already in `h`, so it is already in this.
     let waterVy = 0;
     if (dtWater > 0 && Number.isFinite(mem.prevHeights[i])) {
       const raw = (h - mem.prevHeights[i]) / dtWater;
@@ -439,6 +509,10 @@ export function stepShipBuoyancy(
   // swell) and she tracks like a vehicle on rails, whatever the water does.
   // Slope comes free from the station depths already sampled: Σw·depth·z
   // over Σw·z² is the least-squares gradient about the (centred) waterplane.
+  // It is the gradient of the PRESSURE HEAD (§V.68): the horizontal pressure
+  // gradient decays with depth exactly as the vertical one does, so a keel
+  // 2 m down is pushed along a λ90 face by 87% of what its surface slope
+  // suggests, and by almost nothing at all down a ripple.
   if (p.waveSurgeGain > 0) {
     // fit is against the SCALED station coordinate ζ = z·scale, so
     // Σw·h·ζ / Σw·ζ² = (Σw·h·z) / (scale · Σw·z²)
@@ -492,10 +566,38 @@ export function stepShipBuoyancy(
   // into it while heeled. It leaves w[1] strictly alone — sailing carries
   // its yaw momentum THERE across ticks, and a silent nibble here would
   // read as a ship that refuses to hold a turn.
+  // ADDED MOMENT OF INERTIA (§V.69) — the rotational half of the slab of
+  // water the heave term already carries, and the answer to "if the ship
+  // gained momentum by getting pushed up by a wave it can flip forwards and
+  // change its momentum basically instantly… it has more inertia than that".
+  //
+  // A hull that pitches must accelerate the water around its ends, and that
+  // water's resistance is INERTIA, not damping: it opposes ANGULAR
+  // ACCELERATION, where a damper opposes angular VELOCITY. The two are not
+  // interchangeable and swapping one for the other is exactly what §B.37
+  // recorded — ζ_pitch held at 0.62 against a physical 0.2–0.4, justified as
+  // "a lumped model has no pitch added-inertia". A model that damps instead
+  // of weighing is slow to START moving and still snaps direction the moment
+  // the forcing reverses, which is the motion being complained about.
+  //
+  // DERIVED, NOT CHOSEN (§V.53): it is the SAME entrained water as
+  // `addedMassHeave`, redistributed over the SAME stations — Σa·z² and Σa·x²
+  // of a b²-weighted field. One coefficient, three DOFs, and the ratios
+  // between them are geometry. Scaled by wetted fraction like the heave term:
+  // a hull clear of the sea drags nothing.
+  //
+  // STABILITY: this can only ever ADD to a positive inertia, so the explicit
+  // step's `torque·dt/I` gets strictly smaller. There is no implicit term to
+  // get wrong and no way for it to make her sink — it moves no force, only
+  // the mass the force is divided by.
+  const addedInertia = mass * p.addedMassHeave * p.addedInertiaScale * submerged;
+  const layout2 = p.probeLayoutScale * p.probeLayoutScale;
+  const iPitch = p.inertiaPitch + addedInertia * stationSet.az2 * layout2;
+  const iRoll = p.inertiaRoll + addedInertia * stationSet.ax2 * layout2;
   const tBody = invRotateVec(q, torque);
   const wBody = invRotateVec(q, [w[0], 0, w[2]]);
-  wBody[0] += (tBody[0] / p.inertiaPitch) * dt;
-  wBody[2] += (tBody[2] / p.inertiaRoll) * dt;
+  wBody[0] += (tBody[0] / iPitch) * dt;
+  wBody[2] += (tBody[2] / iRoll) * dt;
   const wWorld = rotateVec(q, wBody);
   const decay = Math.max(0, 1 - p.angularDamping * dt);
   w[0] = wWorld[0] * decay;

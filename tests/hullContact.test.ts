@@ -88,6 +88,11 @@ function flatSea(level: number) {
     heightAt(): number {
       return level;
     },
+    // flat water is one mode at k = 0, so e^(−k·d) = 1 and the pressure head
+    // IS the surface — the Smith correction (§V.68) is identically inert here
+    pressureHeadAt(): number {
+      return level;
+    },
   };
 }
 

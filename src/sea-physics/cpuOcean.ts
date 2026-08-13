@@ -98,6 +98,34 @@ export function extractCentralBlock(
 class MirrorCascade {
   readonly domain: number;
   readonly height: Float32Array;
+  /**
+   * THE SMITH-CORRECTED HEIGHT — the field a hull actually feels (§V.68).
+   *
+   * A floating body does not respond to the free SURFACE, it responds to the
+   * PRESSURE integrated over its wetted volume, and in linear deep-water wave
+   * theory the dynamic pressure of a mode k decays with depth as e^(−k·d).
+   * For the wall-sided prism sections this model already uses (`immersedDepth`
+   * runs a slice from keel to deck at constant breadth) the vertical
+   * Froude–Krylov force is the pressure at the KEEL times the waterplane, so
+   * the wave part of the force is ρg·A·ζ·e^(−k·T) — the surface elevation
+   * with every mode scaled by its own depth decay. That is the Smith effect,
+   * and it is why a long swell lifts a ship bodily while short chop passes
+   * under her: at T = 2 m a 189 m swell arrives at 94% while an 8 m ripple
+   * arrives at 21%. The hull low-passes the sea BY ITS OWN DRAFT, as a
+   * consequence of where it sits rather than as a filter anyone tuned.
+   *
+   * This is a per-MODE factor, so it belongs in k-space, not at the sampler:
+   * applying it here costs one multiply-add per mode and NO extra IFFT (see
+   * `compute` — it rides in the free imaginary half of the Dz transform),
+   * where a per-station spatial kernel cost five heightAt calls per station
+   * and could only ever approximate one direction of it.
+   *
+   * `height` stays the TRUE surface: §V.8 (ships float on the sea that is
+   * drawn) is a claim about geometry — waterline, spray, green water, camera
+   * — and every geometric consumer keeps reading it. Only the FORCE reads
+   * this field, because only the force is an integral of pressure.
+   */
+  readonly head: Float32Array;
   readonly dx: Float32Array;
   readonly dz: Float32Array;
   private readonly n: number;
@@ -134,6 +162,10 @@ class MirrorCascade {
   private readonly omega: Float32Array;
   private readonly kxN: Float32Array; // kx/|k|, 0 at DC
   private readonly kzN: Float32Array;
+  private readonly kMag: Float32Array;
+  /** e^(−k·depth) per mode; rebuilt only when the depth moves */
+  private readonly atten: Float32Array;
+  private attenDepth = Number.NaN;
   private readonly a: { re: Float32Array; im: Float32Array };
   private readonly b: { re: Float32Array; im: Float32Array };
 
@@ -158,6 +190,8 @@ class MirrorCascade {
     this.omega = new Float32Array(size);
     this.kxN = new Float32Array(size);
     this.kzN = new Float32Array(size);
+    this.kMag = new Float32Array(size);
+    this.atten = new Float32Array(size);
     for (let m = 0; m < redN; m++) {
       for (let x = 0; x < redN; x++) {
         const kx = (2 * Math.PI * (x - redN / 2)) / this.domain;
@@ -165,21 +199,45 @@ class MirrorCascade {
         const k = Math.hypot(kx, kz);
         const i = m * redN + x;
         this.omega[i] = Math.sqrt(GRAVITY * k);
+        this.kMag[i] = k;
         const safeK = Math.max(k, 1e-6);
         this.kxN[i] = kx / safeK;
         this.kzN[i] = kz / safeK;
       }
     }
     this.height = new Float32Array(size);
+    this.head = new Float32Array(size);
     this.dx = new Float32Array(size);
     this.dz = new Float32Array(size);
     this.a = { re: new Float32Array(size), im: new Float32Array(size) };
     this.b = { re: new Float32Array(size), im: new Float32Array(size) };
   }
 
-  /** evolve spectrum to `time`, IFFT, unpack → height/dx/dz grids */
-  compute(time: number, butterfly: Float32Array, choppiness: number): void {
+  /**
+   * Evolve spectrum to `time`, IFFT, unpack → height/head/dx/dz grids.
+   *
+   * THE SMITH FIELD IS FREE. Two complex IFFTs already run here, and each
+   * carries two real fields: A = h + i·Dx uses both halves, but B = i·(kz/|k|)h
+   * is Hermitian, so its IFFT is purely REAL and the whole imaginary half was
+   * being discarded. Adding i·e^(−k·d)·h to B fills it: that term is
+   * ANTI-Hermitian (e^(−k·d) is even and real, h is Hermitian), so it
+   * transforms to a purely IMAGINARY field and the two separate exactly —
+   * IFFT(B').re is still Dz, IFFT(B').im is the attenuated height. Cost of
+   * the correction is therefore one multiply-add per mode and one grid, not
+   * a third transform (the IFFT is 71% of a sim tick, §B.42).
+   */
+  compute(
+    time: number,
+    butterfly: Float32Array,
+    choppiness: number,
+    smithDepth: number,
+  ): void {
     const n = this.n;
+    if (this.attenDepth !== smithDepth) {
+      const d = Math.max(0, smithDepth);
+      for (let i = 0; i < n * n; i++) this.atten[i] = Math.exp(-this.kMag[i] * d);
+      this.attenDepth = smithDepth;
+    }
     for (let i = 0; i < n * n; i++) {
       const phase = this.omega[i] * time;
       const c = Math.cos(phase);
@@ -194,9 +252,11 @@ class MirrorCascade {
       // Dx = i·(kx/|k|)·h ; packing A = h + i·Dx collapses to h·(1 − kx/|k|)
       this.a.re[i] = hRe * (1 - this.kxN[i]);
       this.a.im[i] = hIm * (1 - this.kxN[i]);
-      // B = Dz spectrum = i·(kz/|k|)·h (Hermitian → real field after IFFT)
-      this.b.re[i] = -hIm * this.kzN[i];
-      this.b.im[i] = hRe * this.kzN[i];
+      // B = Dz spectrum + i·(Smith-attenuated height spectrum): both are
+      // i·(real, even-or-odd)·h, so they collapse to one complex multiply
+      const g = this.kzN[i] + this.atten[i];
+      this.b.re[i] = -hIm * g;
+      this.b.im[i] = hRe * g;
     }
     cpuIFFT2D(this.a, butterfly, n);
     cpuIFFT2D(this.b, butterfly, n);
@@ -207,6 +267,9 @@ class MirrorCascade {
         this.height[i] = sign * this.a.re[i];
         this.dx[i] = sign * this.a.im[i] * choppiness;
         this.dz[i] = sign * this.b.re[i] * choppiness;
+        // a HEIGHT, so no choppiness: λ displaces crests sideways, it does
+        // not change how hard the water pushes up under the keel
+        this.head[i] = sign * this.b.im[i];
       }
     }
   }
@@ -311,7 +374,24 @@ export interface SurfaceSample {
 export interface OceanHeightField {
   /** sim time of the last update() (NaN before the first) */
   readonly currentTime: number;
+  /**
+   * The TRUE free surface at (x,z) — the sea that is drawn (§V.8). Every
+   * GEOMETRIC question reads this: waterline, cutwater, green water, spray,
+   * camera, shore runup.
+   */
   heightAt(x: number, z: number, time: number): number;
+  /**
+   * The surface elevation whose HYDROSTATIC head equals the wave's real
+   * dynamic pressure at the hull's reference depth — every mode scaled by
+   * e^(−k·d) (§V.68, the Smith effect; see MirrorCascade.head). Buoyancy
+   * integrates pressure, so buoyancy reads THIS, and it is the whole reason
+   * a deep hull cannot be shoved about by chop it is sitting underneath.
+   *
+   * Required, not optional: a default that quietly fell back to `heightAt`
+   * would restore the defect silently in any sea that forgot to implement it
+   * (§V.62), and every analytic test sea can state its own e^(−k·d) exactly.
+   */
+  pressureHeadAt(x: number, z: number, time: number): number;
 }
 
 /**
@@ -435,10 +515,28 @@ export class CpuOcean {
     const staleFor = Math.abs(time - this.gridTime);
     if (staleFor < this.seaP.updateEveryTicks * SIM_DT - 1e-9) return;
     const lambda = this.effectiveChoppiness();
+    const depth = this.smithDepth();
     for (const c of this.cascades) {
-      c.compute(time, this.butterfly, lambda);
+      c.compute(time, this.butterfly, lambda, depth);
     }
     this.gridTime = time;
+  }
+
+  /**
+   * Depth the Smith attenuation is evaluated at: the hull's own draft (§V.66
+   * — a feature scaled by its own dimension), times a coefficient for the
+   * section shape. It is read per update rather than baked at construction so
+   * a live draft tweak drives something (§V.62); the exponentials only
+   * recompute when it actually moves.
+   *
+   * ONE depth for the whole mirror, which is what keeps `update(t)` a pure
+   * function of time (§B.42): it depends on a PARAM, not on any ship, so
+   * every hull afloat still shares one sea and one IFFT. A second ship class
+   * with a materially different draft would need its own field, and that is
+   * a spectrum-level decision, not a per-station one.
+   */
+  private smithDepth(): number {
+    return Math.max(0, this.seaP.hullDraft * this.seaP.smithDepthScale);
   }
 
   /** summed cascade fields at UNDISPLACED grid coords (x,z) — no inversion */
@@ -455,12 +553,14 @@ export class CpuOcean {
   }
 
   /**
-   * Water height at world (x,z). The IFFT gives height at DISPLACED
-   * positions (x+Dx, z+Dz), so fixed-point iterate x_q = x − Dx(x_q) to
-   * find the grid coord whose displaced position lands on the query.
+   * The IFFT gives its fields at DISPLACED positions (x+Dx, z+Dz), so
+   * fixed-point iterate x_q = x − Dx(x_q) to find the grid coord whose
+   * displaced position lands on the query. Both `heightAt` and
+   * `pressureHeadAt` need the same coord, and it is by far the expensive
+   * half of a lookup (`inverseDisplacementIterations` × 2 cascades × 2
+   * grids), so it lives in one place.
    */
-  heightAt(x: number, z: number, time: number): number {
-    if (time !== this.time || Number.isNaN(this.gridTime)) this.update(time);
+  private gridCoord(x: number, z: number, out: [number, number]): void {
     let qx = x;
     let qz = z;
     for (let it = 0; it < this.seaP.inverseDisplacementIterations; it++) {
@@ -473,8 +573,27 @@ export class CpuOcean {
       qx = x - dx;
       qz = z - dz;
     }
+    out[0] = qx;
+    out[1] = qz;
+  }
+
+  private readonly q: [number, number] = [0, 0];
+
+  /** Water height at world (x,z) — the surface as drawn (§V.8). */
+  heightAt(x: number, z: number, time: number): number {
+    if (time !== this.time || Number.isNaN(this.gridTime)) this.update(time);
+    this.gridCoord(x, z, this.q);
     let height = 0;
-    for (const c of this.cascades) height += c.sample(c.height, qx, qz);
+    for (const c of this.cascades) height += c.sample(c.height, this.q[0], this.q[1]);
     return height;
+  }
+
+  /** Smith-attenuated equivalent elevation at world (x,z) — see the field. */
+  pressureHeadAt(x: number, z: number, time: number): number {
+    if (time !== this.time || Number.isNaN(this.gridTime)) this.update(time);
+    this.gridCoord(x, z, this.q);
+    let head = 0;
+    for (const c of this.cascades) head += c.sample(c.head, this.q[0], this.q[1]);
+    return head;
   }
 }

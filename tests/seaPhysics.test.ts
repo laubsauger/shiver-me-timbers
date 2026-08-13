@@ -475,12 +475,22 @@ describe('feel targets: roll period (calm-water free decay)', () => {
  * xz plane: [0,1] = head/following sea (crests athwartships), [1,0] = beam
  * sea (crests along the hull). Satisfies OceanHeightField structurally.
  */
-function sineSea(amp: number, lambda: number, dir: [number, number]) {
+function sineSea(
+  amp: number,
+  lambda: number,
+  dir: [number, number],
+  sp: SeaPhysicsParams = seaPhysicsParams,
+) {
   const k = (2 * Math.PI) / lambda;
   const omega = Math.sqrt(9.81 * k);
+  // §V.68 in closed form: ONE mode, so the Smith factor is one number, and
+  // this sea is an ORACLE for the mirror's per-mode version rather than a
+  // restatement of it — nothing here is copied from cpuOcean.
+  const smith = Math.exp(-k * sp.hullDraft * sp.smithDepthScale);
   let t = 0;
   return {
     period: (2 * Math.PI) / omega,
+    smith,
     get currentTime(): number {
       return t;
     },
@@ -489,6 +499,9 @@ function sineSea(amp: number, lambda: number, dir: [number, number]) {
     },
     heightAt(x: number, z: number, time: number): number {
       return amp * Math.sin(k * (dir[0] * x + dir[1] * z) - omega * time);
+    },
+    pressureHeadAt(x: number, z: number, time: number): number {
+      return smith * amp * Math.sin(k * (dir[0] * x + dir[1] * z) - omega * time);
     },
   };
 }
@@ -563,33 +576,346 @@ describe('feel targets: a 35 m hull filters the sea by WAVELENGTH', () => {
   });
 
   it('short BEAM chop barely rolls the hull, beam swell rolls it properly', () => {
-    // the fore-aft footprint can do nothing about crests running parallel
-    // to the hull — that is what hullFootprintBeam is for
-    const chop = rideIn(sineSea(amp, 8, [1, 0]), sp, amp);
-    const swell = rideIn(sineSea(amp, 60, [1, 0]), sp, amp);
-    expect(chop.rollDeg).toBeLessThan(0.5);
-    expect(swell.rollDeg).toBeGreaterThan(4);
+    // Beam seas are the case the hull's LENGTH cannot help with: crests
+    // running parallel to the hull are the same all down her, so the ∫ along
+    // 35 m of waterplane cancels nothing. What answers them is DEPTH — the
+    // Smith attenuation (§V.68) — plus the athwartships quadrature.
+    //
+    // Asserted as a RATIO of roll per unit WAVE SLOPE (§V.66), because roll
+    // is driven by slope and an absolute degree bound at one wavelength is a
+    // statement about the sea, not about the ship. It also has to be: this
+    // block previously demanded < 0.5° at λ 8, a number that only held
+    // because a σ 3.5 m Gaussian was suppressing λ 8 to 2% where the real
+    // pressure at the keel is 21%. The bound was measuring the workaround.
+    //
+    // MEASURED: roll per degree of slope 0.031 at λ 8, 0.136 at λ 12, 1.73 at
+    // λ 60 — a 56× rejection of chop against beam swell, and monotone.
+    const perSlope = (L: number): number =>
+      rideIn(sineSea(amp, L, [1, 0], sp), sp, amp).rollDeg / ((360 * amp) / L);
+    const chop = perSlope(8);
+    const swell = perSlope(60);
+    expect(chop).toBeLessThan(swell / 20);
+    expect(perSlope(12)).toBeLessThan(swell / 5);
+    expect(perSlope(12)).toBeGreaterThan(chop); // monotone, no notch
+    // ...and she does roll to a beam swell, in degrees, or the ratio above
+    // could be bought by a hull that does not roll at all
+    expect(rideIn(sineSea(amp, 60, [1, 0], sp), sp, amp).rollDeg).toBeGreaterThan(4);
   });
 
-  it('a ONE-STATION hull would be a cork (the guard is real)', () => {
-    // fail loud: if this ever stops holding, the sea got so long-period
-    // that the tests above pass for free and no longer defend anything.
-    // The guard now collapses the hull to a single waterplane station,
-    // because that is where the fore-aft selectivity actually comes from
-    // (§B.22): the ∫ along 35 m of hull. Killing the footprint kernel no
-    // longer makes a cork, and a test that only proved the kernel was
-    // alive would defend a mechanism the ship no longer relies on.
-    const cork = testSeaParams({
-      probeSlices: 1,
-      hullFootprintLength: 0,
-      hullFootprintBeam: 0,
-    });
-    const chop = rideIn(sineSea(amp, 8, [0, 1]), cork, amp);
-    expect(chop.heave).toBeGreaterThan(0.3);
-    // and the shipped hull rejects the same ripple by ~an order of magnitude
-    expect(rideIn(sineSea(amp, 8, [0, 1]), sp, amp).heave).toBeLessThan(
-      chop.heave * 0.2,
-    );
+  it('LENGTH and DEPTH reject chop independently — both are live', () => {
+    // The guard for this whole block, and it now names both mechanisms
+    // instead of one. Killing either alone must leave a hull that still
+    // rejects chop; killing BOTH must give a cork, or these tests are
+    // passing on a sea that is simply too long-period to challenge them.
+    //
+    // MEASURED, λ 8 m head-sea heave RAO on a 35.5 m hull:
+    //   1 slice, no Smith   0.703  ← a cork on a stick: neither mechanism
+    //   1 slice, Smith on   0.146  ← depth alone rejects 79%
+    //   18 slices, no Smith 0.024  ← length alone rejects 97%
+    //   18 slices, Smith on 0.005  ← the shipped hull
+    // and at λ 150 all four ride it (1.16 / 1.07 / 1.08 / 0.99), so neither
+    // mechanism is simply deadening the ship.
+    const one = { probeSlices: 1, hullFootprintLength: 0, hullFootprintBeam: 0 };
+    const raoAt = (L: number, over: Partial<SeaPhysicsParams>): number => {
+      const p = testSeaParams(over);
+      return rideIn(sineSea(amp, L, [0, 1], p), p, amp).heave;
+    };
+    const cork = raoAt(8, { ...one, smithDepthScale: 0 });
+    const depthOnly = raoAt(8, one);
+    const lengthOnly = raoAt(8, { smithDepthScale: 0 });
+    const both = raoAt(8, {});
+    expect(cork).toBeGreaterThan(0.3); // fail loud: the ripple IS a ripple
+    expect(depthOnly).toBeLessThan(cork * 0.35); // draft alone does most of it
+    expect(lengthOnly).toBeLessThan(cork * 0.1); // and the hull's length more
+    expect(both).toBeLessThan(lengthOnly); // together, strictly better
+    // none of them may buy that by killing the swell
+    for (const over of [{ ...one, smithDepthScale: 0 }, one, { smithDepthScale: 0 }, {}]) {
+      expect(raoAt(150, over)).toBeGreaterThan(0.9);
+    }
+  });
+});
+
+/**
+ * §V.68 — the hull answers the PRESSURE FIELD, not the surface.
+ *
+ * WHY (user, sailing live): "the boat feels like it gets thrown around by
+ * waves too easily, as if it's still not heavy enough… are we respecting the
+ * boat sitting IN the water — it's influenced by the surface, but it's also
+ * feeling the forces a bit deeper, so that it's not tracking the absolute
+ * outer curve of the wave shape at all times."
+ *
+ * That is the Smith effect and it was entirely absent: buoyancy sampled
+ * `heightAt` and every wavelength had full authority over the hull whatever
+ * her draft. The stand-in was a Gaussian patch across the beam, which cannot
+ * express a per-wavelength factor, did nothing at all in a head sea, and cost
+ * five ocean samples per station.
+ */
+describe('§V.68: wave pressure decays with depth, so the hull low-passes the sea', () => {
+  const sp = testSeaParams();
+  const amp1 = 1;
+
+  it('the mirror attenuates each mode by e^(−k·d), not by a fitted curve', () => {
+    // The claim is per-MODE, so check it against the closed form at three
+    // depths on a real spectrum. The ratio of head RMS to surface RMS is the
+    // energy-weighted mean of e^(−k·d) over the sea's own modes, so it must
+    // fall monotonically with depth, sit strictly inside (0,1), and be
+    // exactly 1 when the correction is switched off — which is also the
+    // proof that the field rides in the Dz transform's spare imaginary half
+    // without disturbing it (MEASURED worst |head − height| = 2.9e-7 m).
+    const rms = (scale: number): number => {
+      const p = testSeaParams({ smithDepthScale: scale });
+      const o = new CpuOcean(3, testOceanParams(), p);
+      const t = 40.5;
+      o.update(t);
+      let hh = 0;
+      let pp = 0;
+      for (let i = 0; i < 400; i++) {
+        const x = (i * 37.7) % 1500;
+        const z = (i * 91.3) % 1500;
+        hh += o.heightAt(x, z, t) ** 2;
+        pp += o.pressureHeadAt(x, z, t) ** 2;
+      }
+      expect(hh).toBeGreaterThan(0); // fail loud: a flat sea proves nothing
+      return Math.sqrt(pp / hh);
+    };
+    expect(rms(0)).toBeCloseTo(1, 6); // off = the surface, bit for bit
+    const shallow = rms(0.5);
+    const shipped = rms(1);
+    const deep = rms(2);
+    expect(shallow).toBeGreaterThan(shipped);
+    expect(shipped).toBeGreaterThan(deep);
+    expect(deep).toBeGreaterThan(0.4); // it is an attenuation, not a mute
+    expect(shallow).toBeLessThan(1);
+  });
+
+  it('long swell is preserved while short chop is not — the RATIO is the claim', () => {
+    // THE measurement this whole change exists for, and it is a ratio (§V.66)
+    // because "the ship is heavy" and "the ship is damped" look identical in
+    // any single number. Damping everything would move both ends together;
+    // the Smith effect moves ONLY the short end.
+    //
+    // MEASURED heave RAO: λ 8 → 0.005, λ 20 → 0.056, λ 150 → 0.99, λ 300 →
+    // 1.05. Before the correction: 0.024 / 0.105 / 1.08 / 1.09 — the long end
+    // barely moved (−8%, and toward the physical asymptote of 1.0, which it
+    // used to overshoot) while the short end fell by 4–5×.
+    const rao = (L: number): number => rideIn(sineSea(amp1, L, [0, 1], sp), sp, amp1).heave;
+    const long = rao(150);
+    expect(long).toBeGreaterThan(0.9); // she still rides the swell
+    expect(long).toBeLessThan(1.15); // and does not amplify it
+    expect(rao(20) / long).toBeLessThan(0.1);
+    expect(rao(8) / long).toBeLessThan(0.02);
+  });
+
+  it('the correction is the DRAFT, so a shallower hull feels more of the sea', () => {
+    // The mechanism has to be the ship's own dimension (§V.66) or it is just
+    // another filter constant. A hull with half the draft must respond MORE
+    // to the same chop, at the same wavelength, with nothing else changed —
+    // and a hull with none at all must respond like the free surface.
+    const at = (scale: number): number => {
+      const p = testSeaParams({ smithDepthScale: scale });
+      return rideIn(sineSea(amp1, 25, [0, 1], p), p, amp1).heave;
+    };
+    const none = at(0);
+    const half = at(0.5);
+    const full = at(1);
+    expect(half).toBeGreaterThan(full);
+    expect(none).toBeGreaterThan(half);
+    expect(full / none).toBeLessThan(0.75); // λ25 at 2 m draft: e^−0.50 = 0.61
+  });
+
+  it('geometry still reads the TRUE surface — §V.8 is untouched', () => {
+    // The pressure head is a FORCE quantity. Waterline, spray, green water
+    // and the camera must keep seeing the sea that is drawn, or the ship
+    // floats on one ocean and splashes in another (§B.7's shape). The two
+    // fields must therefore DIFFER, and heightAt must be the bigger one.
+    const o = new CpuOcean(9, testOceanParams(), sp);
+    const t = 21.5;
+    o.update(t);
+    let differed = 0;
+    for (let i = 0; i < 200; i++) {
+      const x = (i * 53.1) % 900;
+      const z = (i * 17.9) % 900;
+      const h = o.heightAt(x, z, t);
+      const p = o.pressureHeadAt(x, z, t);
+      if (Math.abs(h - p) > 1e-3) differed++;
+      expect(Math.abs(p)).toBeLessThan(Math.abs(h) + 1.0);
+    }
+    expect(differed).toBeGreaterThan(180); // they are genuinely two fields
+  });
+});
+
+/**
+ * §V.69 — the water a hull drags with it resists ANGULAR acceleration too.
+ *
+ * WHY (user, sailing live): "if the ship gained momentum by getting pushed up
+ * by a wave, then it can flip forwards and change its momentum basically
+ * instantly — a little bit too fast — so it gets really kicked around, bum
+ * bum bum. That's not how it would be. It has more inertia than that."
+ *
+ * The heave channel had `addedMassHeave` and the rotational channels had
+ * nothing, so the only thing resisting a pitch reversal was the hull's own
+ * rigid inertia — and §B.37 records that being papered over with damping
+ * instead ("a lumped model has no pitch added-inertia"). Damping and inertia
+ * are not interchangeable: one bleeds energy and reads SLUGGISH, the other
+ * resists acceleration and reads HEAVY. The complaint is the second one.
+ */
+describe('§V.69: added moment of inertia — she cannot reverse her pitch in a tick', () => {
+  const sp = testSeaParams();
+  /** the model as it was: rigid inertias carrying the entrained water inside */
+  const lumped = testSeaParams({
+    addedInertiaScale: 0,
+    inertiaPitch: 8.55e7,
+    inertiaRoll: 1.39e7,
+  });
+
+  it('is DERIVED from the heave coefficient and the hull, not chosen', () => {
+    // §V.53: a hand-tuned constant needs a dimensionless check. This one is
+    // not hand-tuned at all — it is the same entrained water as
+    // `addedMassHeave`, distributed over the same stations by b² and taken
+    // about the hull's own axes. So the check is that the two moments come
+    // out as LENGTHS that belong to this ship.
+    const set = probeStations(sp.probeSlices);
+    const LWL = 35.5;
+    const BEAM = 8.5;
+    // the added water's own gyradius: shorter than the hull's, because a
+    // section's added mass goes as b² and b is fattest amidships
+    const kAdded = Math.sqrt(set.az2);
+    expect(kAdded / LWL).toBeGreaterThan(0.15);
+    expect(kAdded / LWL).toBeLessThan(0.25);
+    expect(kAdded).toBeLessThan(Math.sqrt(sp.inertiaPitch / sp.mass)); // < hull's
+    // and the RIGID gyradii are now a real ship's, because the water is no
+    // longer hiding inside them (they were 0.34·L and 0.56·B)
+    expect(Math.sqrt(sp.inertiaPitch / sp.mass) / LWL).toBeCloseTo(0.25, 2);
+    expect(Math.sqrt(sp.inertiaRoll / sp.mass) / BEAM).toBeCloseTo(0.45, 2);
+    // athwartships the added water sits inside the beam, as it must
+    expect(Math.sqrt(set.ax2)).toBeLessThan(4.25);
+    expect(Math.sqrt(set.ax2)).toBeGreaterThan(1);
+  });
+
+  it('lengthens the pitch period to the heave period, which is where it belongs', () => {
+    // A hull that pitches half again as fast as it heaves is the "flips
+    // forward instantly" complaint in one number: measured T_pitch 4.48 s
+    // against T_heave 5.43 s. Real hulls pitch and heave at about the same
+    // period. MEASURED after: T_pitch 5.32 s.
+    const period = (p: SeaPhysicsParams): number => {
+      const ocean = new CpuOcean(1, flatOceanParams(), p);
+      ocean.update(0);
+      const ship = makeShip();
+      ship.position[1] = equilibriumY(p);
+      ship.quaternion = quatFromAxisAngle([1, 0, 0], 0.1);
+      const crossings: number[] = [];
+      let prev = pitchOf(ship);
+      for (let i = 0; i < 3600; i++) {
+        stepShipBuoyancy(ship, ocean, DT, p);
+        const r = pitchOf(ship);
+        if (prev > 0 !== r > 0) crossings.push(i * DT);
+        prev = r;
+      }
+      return 2 * ((crossings[2] - crossings[0]) / 2);
+    };
+    const heave =
+      2 * Math.PI * Math.sqrt((sp.mass * (1 + sp.addedMassHeave)) / sp.buoyancySpring);
+    const withAdded = period(sp);
+    const without = period(lumped);
+    expect(withAdded).toBeGreaterThan(without); // the water is doing something
+    expect(withAdded / heave).toBeGreaterThan(0.85);
+    expect(withAdded / heave).toBeLessThan(1.15);
+  });
+
+  it('halves the worst pitch KICK in the sea she is sailed in', () => {
+    // The time-domain half of the complaint, and the one a frequency plot
+    // cannot show: "changes its momentum basically instantly". The statistic
+    // is peak pitch ANGULAR ACCELERATION — inertia is exactly the thing that
+    // bounds it, where damping bounds velocity instead.
+    // MEASURED over 4 headings in the shipped swell: peak 60 → 34 °/s², RMS
+    // 10.8 → 8.0, and peak pitch angle 16.4° → 8.1°.
+    const kick = (p: SeaPhysicsParams) => {
+      const runs = rideHeadings(
+        [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2],
+        11,
+        testOceanParams({ amplitude: oceanParams.amplitude }),
+        p,
+        2400,
+        600,
+      );
+      let worstAcc = 0;
+      let worstAngle = 0;
+      for (const r of runs) {
+        for (let i = 2; i < r.pitches.length; i++) {
+          const a = (r.pitches[i] - 2 * r.pitches[i - 1] + r.pitches[i - 2]) / (DT * DT);
+          worstAcc = Math.max(worstAcc, (Math.abs(a) * 180) / Math.PI);
+        }
+        worstAngle = Math.max(worstAngle, ...r.pitches.map((v) => Math.abs((v * 180) / Math.PI)));
+      }
+      return { worstAcc, worstAngle };
+    };
+    const before = kick(lumped);
+    const after = kick(sp);
+    expect(after.worstAcc).toBeLessThan(before.worstAcc * 0.7);
+    expect(after.worstAngle).toBeLessThan(before.worstAngle * 0.7);
+    // ...and she has NOT been deadened into it: she still pitches degrees
+    expect(after.worstAngle).toBeGreaterThan(3);
+  });
+
+  it('closes §B.37: ζ_pitch is physical because the inertia is, not by taste', () => {
+    // §B.37 held ζ_pitch at 0.62 against a real hull's 0.2–0.4 for two rounds
+    // as a "lumped model has no pitch added-inertia" concession, then measured
+    // it down to 0.41 — still at the very top of the range. Adding the
+    // inertia that was missing takes it the rest of the way with the DAMPING
+    // COEFFICIENT UNTOUCHED: ζ = B/(2√(C·I)) and I grew 50%.
+    // MEASURED: 0.412 → 0.342 at the same pitchDampingScale.
+    const zeta = (p: SeaPhysicsParams): number => {
+      const ocean = new CpuOcean(1, flatOceanParams(), p);
+      ocean.update(0);
+      const ship = makeShip();
+      ship.position[1] = equilibriumY(p);
+      ship.quaternion = quatFromAxisAngle([1, 0, 0], 0.1);
+      const peaks: number[] = [];
+      let prev = 0;
+      let prev2 = 0;
+      for (let i = 0; i < 3600; i++) {
+        stepShipBuoyancy(ship, ocean, DT, p);
+        const r = pitchOf(ship);
+        if (i > 1 && Math.abs(prev) > Math.abs(prev2) && Math.abs(prev) >= Math.abs(r)) {
+          peaks.push(Math.abs(prev));
+        }
+        prev2 = prev;
+        prev = r;
+      }
+      const d = Math.log(peaks[0] / peaks[2]);
+      return d / Math.sqrt(4 * Math.PI * Math.PI + d * d);
+    };
+    expect(sp.pitchDampingScale).toBe(lumped.pitchDampingScale); // same damper
+    const z = zeta(sp);
+    expect(z).toBeGreaterThan(0.2); // a real hull's range, both ends asserted
+    expect(z).toBeLessThan(0.4);
+    expect(z).toBeLessThan(zeta(lumped)); // and it got there by gaining mass
+  });
+
+  it('cannot destabilise the step: it only ever divides by MORE', () => {
+    // The user's own caveat — "while also making sure we're actually staying
+    // above water". Added inertia enters as torque/(I + A·wet) with A ≥ 0, so
+    // the explicit step's increment is strictly smaller than it was: there is
+    // no implicit term that can go wrong and no path by which it moves a
+    // force. Asserted as the thing that would actually break — she must float
+    // at exactly the same draft and stay bounded at 3× the shipped sea.
+    const ocean = new CpuOcean(4, testOceanParams({ amplitude: 1.0 }), sp);
+    const ship = makeShip();
+    ship.position[1] = equilibriumY(sp);
+    for (let i = 0; i < 3600; i++) {
+      const t = (i + 1) * DT;
+      ocean.update(t);
+      stepShipBuoyancy(ship, ocean, DT, sp);
+      expect(Number.isFinite(ship.position[1])).toBe(true);
+    }
+    expect(Math.abs(ship.position[1])).toBeLessThan(6);
+    // and the resting draft is inertia-independent, as a matter of physics
+    const flat = new CpuOcean(1, flatOceanParams(), sp);
+    flat.update(0);
+    const still = makeShip();
+    still.position[1] = equilibriumY(sp);
+    for (let i = 0; i < 600; i++) stepShipBuoyancy(still, flat, DT, sp);
+    expect(still.position[1]).toBeCloseTo(equilibriumY(sp), 6);
   });
 });
 
@@ -765,10 +1091,19 @@ describe('§B.22 feel: the hull answers the sea, in the right places', () => {
     for (let i = 1; i < rao.length; i++) {
       expect(rao[i]).toBeGreaterThan(rao[i - 1]);
     }
-    // she RIDES long swell (λ ≥ 2·L) and does not amplify it
+    // She RIDES long swell (λ ≥ 2·L) — measured against WHAT SHE IS OFFERED,
+    // not against the surface (§V.66). The pressure that reaches a 2 m draft
+    // is e^(−k·T) of the surface elevation (§V.68), so a hull that tracked
+    // the free surface one-for-one at λ 90 would be responding to 15% more
+    // than the sea is pushing with. This bound used to read `> 0.85` against
+    // the surface and it went red on the correction while the ship was
+    // riding 96% of the actual forcing — an absolute against the wrong
+    // dimension, exactly §V.66. MEASURED: 0.96 / 1.05 / 1.08 / 1.10 / 1.09 of
+    // the Smith ceiling at λ 90 / 120 / 150 / 200 / 300.
     for (let i = 0; i < band.length; i++) {
-      if (band[i] >= 90) expect(rao[i]).toBeGreaterThan(0.85);
-      expect(rao[i]).toBeLessThan(1.25);
+      const smith = Math.exp((-2 * Math.PI * sp.hullDraft * sp.smithDepthScale) / band[i]);
+      if (band[i] >= 90) expect(rao[i] / smith).toBeGreaterThan(0.9);
+      expect(rao[i] / smith).toBeLessThan(1.25);
     }
     // ...and she does it IN PHASE. Peak-to-peak cannot see a sign flip, and
     // a sign flip is exactly what the old layout did at λ40: it summed to
@@ -882,11 +1217,26 @@ describe('§B.22 feel: the hull answers the sea, in the right places', () => {
     // it is the SEA doing this: at gain 0 the horizontal channel is silent
     expect(run(0)).toBeLessThan(1e-9);
     const swing = run(seaPhysicsParams.waveSurgeGain);
-    expect(swing).toBeGreaterThan(0.6); // felt, not a rounding error
+    // MEASURED 0.56 m/s ≈ 1.1 knots of speed swing on a 1.5 m / λ90 swell.
+    // It fell from 0.63 when the surge started reading the pressure head
+    // instead of the surface (§V.68) — the horizontal pressure gradient
+    // decays with depth exactly as the vertical one does, so a keel 2 m down
+    // is pushed along a λ 90 face by 87% of what the surface slope suggests.
+    expect(swing).toBeGreaterThan(0.4); // felt, not a rounding error
     expect(swing).toBeLessThan(8); // and not a surfboard
   });
 
   it('she takes the water "too heavily and too easily" no longer', () => {
+    // NOTE ON WHAT THIS TEST IS FOR. It measures GREEN WATER — how deep and
+    // how often the sea comes over a rail 2.6 m up — so its bounds are
+    // absolutes on purpose: they are scaled by the ship's own freeboard,
+    // which is the dimension the complaint is about (§V.66). It is NOT the
+    // test for "she gets thrown around too easily", and it passed all the
+    // way through that complaint. The selectivity claim — long swell kept,
+    // short chop rejected — is a RATIO and lives in the §V.68 block; the
+    // "she reverses too fast" claim is a time-domain statistic and lives in
+    // §V.69. Three complaints, three different quantities.
+    //
     // The user's second complaint, in the words they used. Freeboard is
     // 2.6 m above the ship-space waterline plane and she floats 0.44 m
     // below it, so immersion past 2.6 m IS green water over the rail.
@@ -1072,7 +1422,14 @@ describe('§V.53: the constants describe a real 35 m galleon', () => {
       let support = 0;
       for (const st of stations) {
         const r = rotateVec(ship.quaternion, st.local as Vec3);
-        const h = ocean.heightAt(ship.position[0] + r[0], ship.position[2] + r[2], t);
+        // the field the FORCE is built from (§V.68), not the surface: an
+        // independent estimate of support has to be an estimate of the same
+        // support, or it drifts from the model it is auditing
+        const h = ocean.pressureHeadAt(
+          ship.position[0] + r[0],
+          ship.position[2] + r[2],
+          t,
+        );
         const d = h - (ship.position[1] + r[1]);
         const imm = Math.min(p.hullDraft + p.hullFreeboard, Math.max(0, d + p.hullDraft));
         support += st.weight * p.buoyancySpring * imm;

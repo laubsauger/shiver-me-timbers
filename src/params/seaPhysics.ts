@@ -32,12 +32,25 @@ export interface SeaPhysicsParams {
    */
   hullFootprintLength: number;
   /**
-   * σ (m) of the athwartships footprint kernel — the Smith effect
-   * (e^(−k·draft) pressure decay) as a Gaussian patch. This is the ONLY
-   * thing keeping short beam chop from rolling the ship: 8.5 m of beam has
-   * no length to integrate a 17 m wave away with.
+   * σ (m) of the athwartships footprint kernel. Defaults to 0: it used to
+   * stand in for the Smith effect, which is now applied EXACTLY and per mode
+   * in the spectrum (§V.68, cpuOcean `head`), so leaving it up would attenuate
+   * the sea twice — and it never covered head seas at all, a Gaussian along
+   * the beam axis being flat in the direction a head sea varies. Kept only as
+   * an anti-alias pre-filter, same status as `hullFootprintLength`.
    */
   hullFootprintBeam: number;
+  /**
+   * Depth the wave-pressure decay e^(−k·d) is evaluated at, as a multiple of
+   * `hullDraft` (§V.66: a feature scaled by its own dimension, not by a metre
+   * constant that silently stops meaning "the keel" when the hull changes).
+   * 1 is exact for the wall-sided prism sections `immersedDepth` models — the
+   * vertical Froude–Krylov force on a prism is the pressure at its BOTTOM
+   * times its waterplane. Below 1 a finer section shape carries more of its
+   * volume nearer the surface; 0 disables the correction and gives back a
+   * hull that tracks the outer curve of every wave regardless of draft.
+   */
+  smithDepthScale: number;
   /**
    * Depth (m) of the keel below the ship-space waterline plane, and height
    * of the deck above it — the hull's own body, which is what decides when
@@ -96,9 +109,25 @@ export interface SeaPhysicsParams {
    * the heave period stretches by √(1+a). 0 = weightless cork response.
    */
   addedMassHeave: number;
-  /** inertia tensor diagonal, body frame — pitch about x (beam axis) */
+  /**
+   * The same entrained water, as ROTATIONAL inertia (§V.69): the added
+   * moments in pitch and roll are `addedMassHeave·mass` distributed over the
+   * stations by b² and taken about the hull's own axes (Σa·z², Σa·x²). 1 =
+   * the physical consequence of the heave coefficient already chosen — this
+   * is a section-shape allowance, not a feel knob. 0 recovers the model that
+   * had NO pitch added-inertia and paid for it with damping instead (§B.37):
+   * a hull that can reverse its pitch momentum in a tick or two.
+   */
+  addedInertiaScale: number;
+  /**
+   * RIGID-BODY inertia tensor diagonal, body frame — pitch about x (beam
+   * axis), roll about z (forward axis). The hull's own mass distribution and
+   * NOTHING else: the water it drags is `addedInertiaScale` above. Keeping
+   * them apart is what lets the gyradius be checked against a real ship
+   * (§V.53) — they were previously one number, so the entrained water had to
+   * be smuggled in as a 0.34·L pitch gyradius against a real 0.24–0.27·L.
+   */
   inertiaPitch: number;
-  /** roll about z (forward axis) */
   inertiaRoll: number;
   /** global angular velocity decay 1/s (covers yaw, which probes can't damp) */
   angularDamping: number;
@@ -144,9 +173,20 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     // generates is the wrong trade; the beam kernel below is the one doing
     // real work (the Smith effect, which no amount of hull length replaces)
     hullFootprintLength: 0,
-    // athwartships: the Smith effect, e^(−k·2 m draft) ≈ exp(−k²·3.5²/2)
-    // over λ 10–25 m — response λ10→0.09, λ17→0.48, λ25→0.75, λ60→0.95
-    hullFootprintBeam: 3.5,
+    // athwartships: 0, because the Smith effect is now the real thing rather
+    // than a Gaussian shaped like it (§V.68). The kernel was wrong in three
+    // ways at once and each of them cost: it was flat along the hull, so a
+    // HEAD sea — where the pitch forcing lives — got no depth attenuation at
+    // all; its σ 3.5 m spread each station over 10.5 m of sea, wider than the
+    // 8.5 m beam it was meant to average across, so it over-suppressed beam
+    // chop (λ8 → 0.02 against a true 0.21); and it cost 5 heightAt calls per
+    // station, 180/tick, where the spectral form costs one multiply per mode
+    // and no extra transform.
+    hullFootprintBeam: 0,
+    // the hull's own draft — see the interface. Full pressure at the keel is
+    // what a wall-sided prism section feels, and that is the section this
+    // model integrates.
+    smithDepthScale: 1,
     // the galleon's own loft (params/ship): keel 2.0 m below the design
     // waterline, deck 2.6 m above it
     hullDraft: 2.0,
@@ -217,19 +257,29 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     // spring/mass-locked, so this is the ONLY knob that slows heave
     // without floating the ship higher or drowning the deck.
     addedMassHeave: 2,
-    // Rotational feel. The station weights sum to 1, so the waterplane's
-    // second moments are Σw·z² = 82.97 m² and Σw·x² = 4.48 m² — both an
-    // order of magnitude below the old 8-probe layout's, because that
-    // layout hung every probe at the FULL half-beam and both ends of the
-    // hull (a rectangular strip's equivalent lever is b/√3, not b).
-    // Inertias are re-derived to hold the same periods:
-    // pitch ω=√(2.43e6·82.66/I)=1.53 rad/s → T 4.1 s, gyradius 0.34·L
-    // roll  ω=√(2.43e6·4.49/I)=0.89 rad/s → T 7.1 s, gyradius 0.56·B
-    // Both gyradii are now within reach of a real rigged ship (0.24–0.27·L,
-    // 0.35–0.45·B, and a galleon carries a lot of weight aloft). At the old
-    // 150 t mass the SAME periods demanded 0.73·L and 1.32·B.
-    inertiaPitch: 8.55e7,
-    inertiaRoll: 1.39e7,
+    // 1 = the geometry's own answer, and it is not a small correction: the
+    // station field gives Σa·z² = 66.79 m² and Σa·x² = 4.77 m², so the
+    // 1208 t of entrained water adds A55 = 8.07e7 and A44 = 5.77e6 — 1.7×
+    // the hull's own pitch inertia and 0.65× its roll inertia.
+    addedInertiaScale: 1,
+    // RIGID BODY ONLY, at a real ship's gyradii — 0.25·L in pitch (real
+    // 0.24–0.27) and 0.45·B in roll (0.35–0.45 for a merchant hull; a
+    // square-rigger carries a lot of weight aloft, so the top of it).
+    //
+    // These used to be 8.55e7 / 1.39e7, i.e. 0.34·L and 0.56·B, and the
+    // excess WAS the entrained water — §B.27 derived them by holding the
+    // periods fixed, so whatever the model was missing ended up inside the
+    // gyradius where §V.53's dimensionless check could only widen its bounds
+    // to accommodate it. Split out, the periods come back on their own and
+    // slightly longer, which is the point:
+    //   pitch  I 4.76e7 + A 8.07e7 = 1.28e8 over C55 2.01e8 → T 5.02 s
+    //   roll   I 8.84e6 + A 5.77e6 = 1.46e7 over C44 1.09e7 → T 7.27 s
+    // Pitch was 4.10 s against a heave period of 5.43 s — a hull that pitches
+    // half again as fast as it heaves, which is what "it can flip forwards
+    // and change its momentum basically instantly" is. Real hulls pitch and
+    // heave at about the same period, and now this one does.
+    inertiaPitch: 4.76e7,
+    inertiaRoll: 8.84e6,
     // Roll/pitch bleed only — buoyancy has not touched yaw since §V.33, so
     // the old "yaw cover" note is stale. Kept small: it is a flat rate
     // decay with no physical partner, and at 0.2 it alone contributed
@@ -263,6 +313,7 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     probeSlices: { min: 1, max: 32, step: 1 },
     hullFootprintLength: { min: 0, max: 15, step: 0.25 },
     hullFootprintBeam: { min: 0, max: 8, step: 0.25 },
+    smithDepthScale: { min: 0, max: 2, step: 0.05 },
     buoyancySpring: { min: 1e5, max: 1.6e7, step: 1e5 },
     buoyancyDamping: { min: 0, max: 1e7, step: 1e4 },
     rollDampingScale: { min: 0, max: 2, step: 0.01 },
@@ -271,6 +322,7 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     waveSurgeGain: { min: 0, max: 1.5, step: 0.01 },
     mass: { min: 1e4, max: 2e6, step: 1e4 },
     addedMassHeave: { min: 0, max: 6, step: 0.1 },
+    addedInertiaScale: { min: 0, max: 3, step: 0.05 },
     inertiaPitch: { min: 1e5, max: 5e8, step: 1e5 },
     inertiaRoll: { min: 1e5, max: 5e8, step: 1e5 },
     angularDamping: { min: 0, max: 5, step: 0.01 },
