@@ -1812,9 +1812,19 @@ describe('bow wake visibility: the emitter must be in the water', () => {
     expect(d4).toBeGreaterThan(floor);
     expect(d6).toBeGreaterThan(floor);
     expect(d8).toBeGreaterThan(floor);
-    // …and not a white slab: the standing complaint is that this sea's foam is
-    // too bright and too blobby, so buy the dose in EXTENT, not in peak
-    expect(d8).toBeLessThan(0.45);
+    // …and it must not SATURATE the gate, which is a tighter bar than "not too
+    // bright" and is the one this test was missing. The threshold is uniform on
+    // [residueKneeLow, +erodeDepth], so the dose does not merely have to clear
+    // it — the dose decides what FRACTION of texels survive. Past the top of
+    // that band the fraction pins at 1 and the mound renders as an unbroken
+    // slab. The first retune did exactly that (dose 0.257 against a 0.225
+    // ceiling) and came back as "the water is still getting too white all
+    // around the ship". The mound has no other source of texture — it
+    // deliberately skips `wakeBreakup` so the stem reaction cannot flicker —
+    // so this gate staying unsaturated IS what makes it read as aerated water.
+    const ceiling = foamParams.residueKneeLow + foamParams.erodeDepth;
+    expect(d6).toBeLessThan(ceiling);
+    expect(d8).toBeLessThan(ceiling);
     // doubling the speed must NOT double the dose — it only moves `sf`
     expect(d8 / d4).toBeLessThan(1.4);
     // the closed form the params doc quotes, so the doc cannot rot silently

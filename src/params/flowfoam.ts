@@ -98,11 +98,21 @@ export interface FlowFoamParams {
    * second half of "the bow wake is still disappearing", after the emitter was
    * moved out of the hull (main.ts `stemZ`).
    *
-   * Retuned against that arithmetic, not by eye: intensity × thickness must
-   * clear ~0.5 for the crest dose to clear the knee reliably. Paid mostly in
-   * THICKNESS — a broader leading face buys dose without a hotter peak, and
-   * the standing complaint about this sea's foam is that it is too bright and
-   * too blobby, never too dim.
+   * Retuned against that arithmetic, not by eye. Paid mostly in THICKNESS — a
+   * broader leading face buys dose without a hotter peak, and the standing
+   * complaint about this sea's foam is that it is too bright and too blobby,
+   * never too dim.
+   *
+   * AIM FOR THE MIDDLE OF THE GATE, NOT THE TOP. The dissolve threshold is
+   * UNIFORM on [0.005, 0.225], so the dose does not just have to clear it — it
+   * decides what FRACTION of texels survive, which is the difference between
+   * aerated water and a painted slab. A dose past 0.225 saturates that
+   * fraction at 1 and the mound goes solid; the first retune did exactly that
+   * (0.257) and drew "the water is still getting too white all around the
+   * ship". A dose near the MIDDLE leaves the mound broken up, which is both
+   * what it should look like and what the noise-free mound cannot get any
+   * other way — it deliberately skips `wakeBreakup`, so this gate is its only
+   * source of texture.
    */
   moundIntensity: number;
   /** metres AHEAD of the stem where the mound crest peaks (must be > 0: it leads) */
@@ -339,15 +349,28 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     trackLife: 200,
     tailFade: 0.35,
     bowClip: 0.8,
-    // dose = intensity · thickness / 2 (see moundIntensity): 0.15 · 3.2 / 2 =
-    // 0.24 at the crest, against a 0.005 + U[0, 0.22] dissolve gate — up from
-    // 0.042, which cleared it 7% of the time
-    moundIntensity: 0.15,
+    // dose = intensity · thickness / 2 (see moundIntensity): 0.10 · 3.2 / 2 =
+    // 0.16 at the crest, against a 0.005 + U[0, 0.22] dissolve gate.
+    // 0.06 → 0.15 → 0.10. The first move fixed an invisible mound (dose 0.042,
+    // 7% of texels surviving) and overshot: 0.15 put the dose at 0.257, which
+    // is past the TOP of the gate, so every texel survived and the mound
+    // rendered as an unbroken slab (user: "the water is still getting too white
+    // all around the ship"). 0.10 lands at 0.171 — comfortably visible, but
+    // 30% of texels still torn out, so it reads as aerated water rather than
+    // paint. It also drops BELOW the floor at 3 m/s, which is correct: a
+    // drifting hull should not throw a bow wave.
+    moundIntensity: 0.1,
     moundLead: 1.6,
     moundSweep: 0.9,
     moundSpan: 5.0,
     moundThick: 3.2,
-    moundFill: 1.8,
+    // 1.8 → 1.4: the aft face is the half of the mound that overlaps the hull,
+    // so it is pure "white around the ship" and none of the forward read. It
+    // only has to reach the 1.6 m back to the stem; 1.4 × 3.2 = 4.5 m is still
+    // ample, and it halves the strong-white area alongside the forebody
+    // (measured 24 → 12 m² at 6 m/s). The crest dose is untouched — the
+    // integral up to the crest comes only from the LEADING face.
+    moundFill: 1.4,
     moundLag: 1.1,
     kelvinAngle: 19.47,
     bowIntensity: 0.14,
