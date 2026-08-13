@@ -5,7 +5,7 @@
  * Holed variants live in pieceGeometryHoled.ts, sails in pieceGeometryShapes.ts.
  */
 import * as THREE from 'three';
-import type { AABB, PieceKind } from './pieceTypes';
+import { LANTERN_ARM_REACH, type AABB, type PieceKind } from './pieceTypes';
 import {
   aabbCenter,
   aabbSize,
@@ -96,15 +96,43 @@ function crowNest(aabb: AABB): THREE.BufferGeometry {
   return mergeNonIndexed([wall, floor]);
 }
 
-/** slender post with a lantern bulb at the top */
+/**
+ * Slender post with an iron bracket at the top. The LAMP IS NOT PART OF IT —
+ * it hangs from `socket-lantern-*` at the bracket's tip and swings (src/lanterns).
+ *
+ * This piece used to carry a bulb of its own: a sphere of radius `r` centred at
+ * `height - r`, while the shaft stopped at 0.85 of the height. Two defects fell
+ * out of that, both in the user's report (docs/bugs/bug-lantern-spheres.png):
+ *
+ *   - the sphere FLOATED. Shaft top 0.85·h, bulb bottom h - 2r = 0.90·h at the
+ *     galleon's numbers — a 0.10 m gap of open air between the post and the
+ *     thing it was meant to be capping.
+ *   - it was a SECOND BULB. The practical light hangs `cordLength` (0.35 m)
+ *     below the cap, so every post carried two globes 0.36 m apart: one dark
+ *     sphere lit from underneath by the other, which is exactly what "large
+ *     dark balls floating above the rail" was.
+ *
+ * So the post is now only a post: full-height shaft, a cap ferrule, and the
+ * bracket the lamp actually hangs off, reaching aft by `LANTERN_ARM_REACH` to
+ * the socket's own z with a short hook drop at the tip. One lamp per post, and
+ * it is attached to something.
+ */
 function lanternPost(aabb: AABB): THREE.BufferGeometry {
   const s = aabbSize(aabb);
   const r = s.x / 2;
-  const post = new THREE.CylinderGeometry(r * 0.5, r * 0.6, s.y * 0.85, 8);
-  post.translate(0, aabb.min[1] + s.y * 0.425, 0);
-  const bulb = new THREE.SphereGeometry(r, 8, 6);
-  bulb.translate(0, aabb.min[1] + s.y - r, 0);
-  return mergeNonIndexed([post, bulb]);
+  const top = aabb.min[1] + s.y;
+  const shaft = new THREE.CylinderGeometry(r * 0.5, r * 0.6, s.y, 8);
+  shaft.translate(0, aabb.min[1] + s.y / 2, 0);
+  const cap = new THREE.CylinderGeometry(r * 0.7, r * 0.52, r * 0.4, 8);
+  cap.translate(0, top - r * 0.2, 0);
+  // the bracket: a horizontal iron reaching aft (−z) to the socket station
+  const arm = new THREE.CylinderGeometry(r * 0.2, r * 0.2, LANTERN_ARM_REACH, 6);
+  arm.rotateX(Math.PI / 2); // cylinder axis +y → +z
+  arm.translate(0, top - r * 0.3, -LANTERN_ARM_REACH / 2);
+  // and a short drop at its tip, so the cord reads as seized to iron
+  const hook = new THREE.CylinderGeometry(r * 0.16, r * 0.16, r * 0.9, 6);
+  hook.translate(0, top - r * 0.3 - r * 0.45, -LANTERN_ARM_REACH);
+  return mergeNonIndexed([shaft, cap, arm, hook]);
 }
 
 export function buildPieceGeometry(

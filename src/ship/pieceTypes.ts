@@ -7,6 +7,20 @@
 
 export type Vec3 = [number, number, number];
 
+/**
+ * Metres a lantern post's bracket reaches AFT, and therefore the z of
+ * `socket-lantern-*`. ONE constant because the two must agree: the socket is
+ * the pendulum pivot (src/lanterns hangs the flame `cordLength` below it) and
+ * the arm is the thing the eye reads it as hanging from. They were written as
+ * two independent literals once and the lamp hung in mid-air beside a post
+ * that reached nowhere near it.
+ *
+ * The reach is not styling either: the post shaft is 0.05 m in radius and the
+ * flame bulb 0.09, so a pivot ON the axis hangs a glowing sphere around the
+ * post and lets the post poke through it on every swing.
+ */
+export const LANTERN_ARM_REACH = 0.26;
+
 export type PieceKind =
   | 'hull-section'
   | 'keel'

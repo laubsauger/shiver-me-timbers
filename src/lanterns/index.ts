@@ -53,7 +53,7 @@
  * uniforms, not a texture — but it is not this module's to write.
  */
 import * as THREE from 'three/webgpu';
-import { uniform, vec3 } from 'three/tsl';
+import { float, mix, normalView, positionViewDirection, uniform, vec3 } from 'three/tsl';
 // side-effect import: registering the params module is what puts it in the
 // Tweakpane panel at all (§B.18 — clouds shipped unregistered and every
 // cloud value in every weather preset silently never applied)
@@ -131,7 +131,28 @@ export function createLanterns(opts: LanternOptions) {
     // look by, so its own pixels must not be shaded by the scene. colorNode
     // owns them outright. §V44: `uLevel` is bounded in flickerLevel() and by
     // the params' own range, so nothing unbounded reaches the frame.
-    material.colorNode = vec3(uColorNode).mul(uLevelNode);
+    //
+    // ── WHY THE FACING TERM, AND WHY IT IS NOT DECORATION ────────────────
+    // A flat `color × level` over a sphere is CONSTANT across the whole disc,
+    // and at `emissive` 2.4 every channel of 0xffaa7c clears 1.0 in the linear
+    // working space — (2.4, 0.90, 0.49) — so the tonemapper lands the entire
+    // silhouette on one cream value with a hard edge. That is not a lamp, it
+    // is a cut-out circle, and it is what the user photographed
+    // (docs/bugs/bug-lantern-spheres.png): "large flat cream-white DISCS".
+    //
+    // Falling the limb off restores BOTH things a flame has: a small hot core
+    // that does clip to white, and a limb that stays amber because 0.22 × 2.4
+    // = 0.53 is under the knee. The silhouette softens as a side effect —
+    // nothing is being drawn at the edge but the sky's own value.
+    //
+    // §V23: functional `mix(a, b, t)`. `facing.pow()` is chained and the
+    // receiver IS the base, which is the reading that form has.
+    // §V44: the factor is bounded [0.22, 1] by construction, so the product
+    // with an already-bounded level cannot grow.
+    const facing = positionViewDirection.dot(normalView).clamp(0, 1);
+    material.colorNode = vec3(uColorNode)
+      .mul(uLevelNode)
+      .mul(mix(float(0.22), float(1), facing.pow(0.5)));
     material.toneMapped = true;
     material.fog = false;
 

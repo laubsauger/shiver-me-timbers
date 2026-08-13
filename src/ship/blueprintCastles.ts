@@ -5,7 +5,7 @@
  * fixture sockets (wheel, capstan) plus grating and companionway stairs.
  */
 import type { ShipClassParams } from '../params/ship';
-import type { PieceDef } from './pieceTypes';
+import { LANTERN_ARM_REACH, type PieceDef } from './pieceTypes';
 import { hullShapeHints, mkPiece } from './blueprintParts';
 import { hullHalfWidthAt, type HullShape } from './hullMath';
 
@@ -77,30 +77,35 @@ export function buildCastles(p: ShipClassParams): PieceDef[] {
     //
     // The socket is the PENDULUM PIVOT, not the flame: `lanterns.place()` hangs
     // the light `cordLength` (0.35 m) below it along the solved hang vector. So
-    // it sits at the TOP of the post (the cap the iron would be seized to), and
-    // it is carried aft — the post shaft is only 0.05 m in radius and the flame
-    // bulb is 0.09, so a pivot on the axis would hang a glowing sphere around
-    // the post and let the post poke through it on every swing. 0.26 m clears
-    // that for any swing short of the 28.6° hard stop, and aft rather than
-    // outboard keeps the lantern over the transom instead of over the sea.
+    // it sits at the TOP of the post (the cap the iron is seized to), and it is
+    // carried aft by `LANTERN_ARM_REACH` — the post shaft is only 0.05 m in
+    // radius and the flame bulb is 0.09, so a pivot on the axis would hang a
+    // glowing sphere around the post and let the post poke through it on every
+    // swing. Aft rather than outboard keeps her over the transom, not the sea.
+    //
+    // The reach is SHARED with the geometry (pieceGeometry.ts `lanternPost`),
+    // which builds the bracket out to exactly this station. Two literals is how
+    // the lamp ended up hanging in mid-air beside a post that stopped 0.26 m
+    // short of it. The AABB carries the bracket, so the piece's bounds are the
+    // piece's real extent (§V.54's lesson in the geometry domain).
     mkPiece('lantern-post-port', 'lantern-post',
       [-cabinAftHalf * 0.82, roofY, -(L2 - 0.5)],
-      { min: [-0.1, 0, -0.1], max: [0.1, p.lanternPostHeight, 0.1] },
+      { min: [-0.1, 0, -(LANTERN_ARM_REACH + 0.1)], max: [0.1, p.lanternPostHeight, 0.1] },
       {
         sockets: [{
           id: 'socket-lantern-port',
           type: 'fixture',
-          position: [0, p.lanternPostHeight, -0.26],
+          position: [0, p.lanternPostHeight, -LANTERN_ARM_REACH],
         }],
       }),
     mkPiece('lantern-post-starboard', 'lantern-post',
       [cabinAftHalf * 0.82, roofY, -(L2 - 0.5)],
-      { min: [-0.1, 0, -0.1], max: [0.1, p.lanternPostHeight, 0.1] },
+      { min: [-0.1, 0, -(LANTERN_ARM_REACH + 0.1)], max: [0.1, p.lanternPostHeight, 0.1] },
       {
         sockets: [{
           id: 'socket-lantern-starboard',
           type: 'fixture',
-          position: [0, p.lanternPostHeight, -0.26],
+          position: [0, p.lanternPostHeight, -LANTERN_ARM_REACH],
         }],
       }),
   ];
