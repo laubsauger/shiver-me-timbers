@@ -490,7 +490,27 @@ export function buildOceanSurfaceMaterial(
     //    and §B.20's caulk seam / §B.33's crackle octave for the third time.
     // Each wavelet now fades on ITS OWN wavelength against the PIXEL footprint,
     // and what it loses becomes roughness rather than nothing (§V.48b, below).
+    //
+    // BUT THE BAND LIMIT IS NOT THE WHOLE JOB, and removing the old gate
+    // outright was a REGRESSION (user: "a very very regular grid, no bueno").
+    // These are FOUR cosine plane waves at four fixed directions — that is an
+    // interference LATTICE by construction, and no per-wavelet Nyquist gate can
+    // make a lattice stop being regular. The old `lodWeight` gate was wrong as a
+    // band limit (it measured vertex spacing against the coarsest wavelet) but
+    // it was also doing a second, unstated job: keeping the lattice confined to
+    // the near field, where it reads as churn on a wave face rather than as a
+    // weave over the whole sea. Measured, head-on at fov 55: the old gate held
+    // the churn to 15 m and killed it by 55 m; the per-wavelet gate alone runs
+    // the finest wavelet to 136 m and the base to 507 m — a 9-18× extension of
+    // a regular pattern. §V.48b's lesson has a mirror image: a fade can be
+    // measured against the wrong thing AND still be load-bearing for the look.
+    //
+    // So BOTH, with distinct jobs: `microReach` owns HOW FAR the churn goes (an
+    // art decision — this is near-field detail by design), each wavelet's own
+    // `fade` owns whether it ALIASES inside that reach (§V.48). Neither
+    // subsumes the other, and what either one removes still becomes roughness.
     const microScale = uMicro.y.max(0.05);
+    const microReach = lodWeight(microScale, uNormalStretch);
     const microPhase = timeUniform.mul(uMicro.z);
     /** unresolved slope variance shed by the wavelets, in (microGain)² units */
     const microUnresolvedRaw = float(0).toVar();
@@ -502,11 +522,18 @@ export function buildOceanSurfaceMaterial(
       // smoothstep(e0,e1,x), e0 > e1: 1 while a wavelength spans
       // microDetailSamplesFull pixels, 0 at 2 (Nyquist — a math constant, not
       // a tunable). Measured against fwidth(worldXZ), so grazing is included.
+      // ×microReach: the envelope is folded in HERE, not applied to the sum, so
+      // `microUnresolvedRaw` below sees the total fade and hands the roughness
+      // everything removed — by the reach as well as by Nyquist. Applying the
+      // envelope outside would silently reintroduce the mirror this fix removes.
+      //
+      // Nyquist half: 1 while a wavelength spans microDetailSamplesFull pixels,
+      // 0 at 2. Measured against pixWorld = fwidth(worldXZ), so grazing counts.
       const fade = smoothstep(
         lambda.mul(0.5),
         lambda.div(uMicroSamples.max(2.001)),
         pixWorld,
-      );
+      ).mul(microReach);
       const arg = worldXZ.x
         .mul(dirX)
         .add(worldXZ.y.mul(dirZ))

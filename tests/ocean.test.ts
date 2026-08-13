@@ -1262,11 +1262,48 @@ describe('§V.48 the churn wavelets are gated on their OWN wavelength', () => {
     expect(oceanSurfaceParams.microDetailSamplesFull).toBeGreaterThan(2);
   });
 
-  it('the material gates per wavelet, on the PIXEL footprint, not on spacing', () => {
-    // the mechanical tell for both halves of the bug, so a revert is loud.
-    // (`microFade` was the single stack-wide gate; the prose above still names
-    // `lodWeight(microScale` as the bug, so match on the binding, not the call)
+  /**
+   * THE REGRESSION THIS CAUSED, and the reason the band limit is not the whole
+   * job (user: "a very very regular grid visible now that is no bueno").
+   *
+   * These are FOUR cosine plane waves at four fixed directions. That is an
+   * interference LATTICE by construction, and no per-wavelet Nyquist gate can
+   * make a lattice stop being regular — it only stops it aliasing. The old
+   * `lodWeight` gate was wrong as a band limit AND load-bearing for the look:
+   * it kept the lattice inside the near field, where it reads as churn on a
+   * wave face instead of as a weave over the whole sea. Replacing it with the
+   * per-wavelet gate alone extended the pattern 9-18× and made it legible.
+   *
+   * So the contract is TWO fades with distinct jobs, and this asserts that the
+   * ENVELOPE is the binding one at a head-on view — if a refactor ever lets the
+   * Nyquist gate decide reach, the grid comes straight back.
+   */
+  it('THE REGRESSION: the envelope, not Nyquist, decides how FAR the churn goes', () => {
+    const scale = oceanSurfaceParams.microDetailScale;
+    const stretch = oceanSurfaceParams.normalDetailStretch;
+    // envelope: lodWeight(microScale) reaches 0 at this VERTEX SPACING
+    const envelopeCutSpacing = (scale * stretch) / oceanSurfaceParams.lodSamplesCut;
+    const k = 0.02005; // clipmap growth for the shipped grid (solveGrowthRate)
+    const envelopeCutDist = (envelopeCutSpacing - oceanSurfaceParams.gridCoreSpacing) / k;
+    // Nyquist: the COARSEST wavelet survives longest, so it sets the reach if
+    // the envelope is ever removed. rad/px at fov 55, 879 px tall.
+    const radPerPx = (2 * Math.tan((55 * Math.PI) / 180 / 2)) / 879;
+    const nyquistCutDist = scale / 2 / radPerPx;
+    // the envelope must cut FIRST, and by a wide margin — this is the number
+    // that regressed: 55 m vs 1013 m
+    expect(envelopeCutDist).toBeLessThan(nyquistCutDist / 5);
+    expect(envelopeCutDist).toBeLessThan(120);
+  });
+
+  it('the material gates per wavelet AND keeps a reach envelope — both', () => {
+    // the mechanical tell for every half of this, so a revert is loud.
+    // (`microFade` was the single stack-wide gate that did BOTH jobs badly)
     expect(surfaceMaterialSource).not.toContain('const microFade =');
+    // the envelope is back, named for the job it actually does
+    expect(surfaceMaterialSource).toContain('const microReach = lodWeight(microScale');
+    // and it is folded into each wavelet's own fade, so §V.48b still sees
+    // everything that was removed — by the reach as well as by Nyquist
+    expect(surfaceMaterialSource).toContain('.mul(microReach)');
     // each wavelet computes its own lambda and fades against pixWorld
     expect(surfaceMaterialSource).toContain('const lambda = microScale.div(freqMul)');
     expect(surfaceMaterialSource).toContain('uMicroSamples');
