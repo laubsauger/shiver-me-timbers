@@ -291,11 +291,10 @@ export function createSailClothNodes(
   // the point of cloth it is sewn to.
   const flat = vec3(u0.sub(0.5).mul(width), v0.oneMinus().negate().mul(builtDrop), float(0));
   const shaped = vec3(clothX(u0, v0), clothY(u0, v0), clothZ(u0, v0));
-  const position = positionLocal.add(shaped.sub(flat).mul(clothWeight));
 
-  // normals rebuilt from the live surface (finite differences in cloth space)
-  // — without this the billow is invisible to the lighting. All three
-  // components move now, so both tangents carry all three.
+  // The surface's own frame at this (u, v), from the same finite differences
+  // the normal is built from. `e` is a fixed step in cloth space, so these are
+  // proportional to the true tangents and only need normalising.
   const e = float(0.03);
   const du = vec3(
     clothX(u0.add(e), v0).sub(shaped.x),
@@ -307,12 +306,40 @@ export function createSailClothNodes(
     clothY(u0, v0.add(e)).sub(shaped.y),
     clothZ(u0, v0.add(e)).sub(shaped.z),
   );
+  const nrm = cross(du, dv).normalize();
+  const tanU = du.normalize();
+  const tanV = cross(nrm, tanU); // orthogonalised +v, so the basis is rigid
+
+  /**
+   * ANYTHING SEWN TO THIS SAIL RIDES ITS FRAME, NOT JUST ITS POSITION.
+   *
+   * A reef point is a small quad carrying ONE (u, v) for all four of its
+   * vertices, so the cloth moves it as a rigid piece rather than shearing it.
+   * That is the right instinct and it was only half-built: the quad was
+   * TRANSLATED to its point of canvas while keeping the flat panel's
+   * orientation. On a nearly-flat sail that is invisible. Once the camber fix
+   * took the main course to 14% of chord the cloth curved out from under
+   * quads still lying in the original plane, and their corners punched through
+   * — the user circled every one of them, on both courses and both sides.
+   *
+   * So each vertex's offset FROM its station is re-expressed in the surface's
+   * own basis at that station. The main panel is unaffected by construction:
+   * its vertices sit exactly at their own flat station, so the offset is zero
+   * and this reduces to `shaped`.
+   */
+  const rigid = positionLocal.sub(flat);
+  const onCloth = shaped
+    .add(tanU.mul(rigid.x))
+    .add(tanV.mul(rigid.y))
+    .add(nrm.mul(rigid.z));
+  // weight 0 (robands, gaskets, the furled bundle) keeps its authored place
+  const position = mix(positionLocal, onCloth, clothWeight);
 
   return {
     panelCoord,
     position,
-    localNormal: cross(du, dv).normalize(),
-    uTangent: du.normalize(),
+    localNormal: nrm,
+    uTangent: tanU,
     clothWeight,
     width,
   };

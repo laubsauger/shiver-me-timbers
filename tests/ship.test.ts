@@ -46,6 +46,8 @@ import {
   sailCamberRatio,
   sailClothOffset,
   sailClothPoint,
+  sailClothFrame,
+  sailSewnPoint,
   sailCornerPull,
   sailDraftLead,
   sailDraftProfile,
@@ -1552,6 +1554,106 @@ describe('the clews are hauled OUT of the yard plane (§V45 one truth)', () => {
 });
 
 /**
+ * §V22 / §V45 — WHAT IS SEWN TO THE CLOTH RIDES THE CLOTH.
+ *
+ * User, with every instance circled on both courses and both sides: "all of
+ * the larger bottom sails have this little thing poking through them… It's not
+ * the seams, it's not the normal ropes, it's something else."
+ *
+ * It was `reefPoints()`. Each reef point is a small quad carrying ONE (u, v)
+ * for all four vertices so the cloth moves it RIGIDLY rather than shearing it
+ * — the right instinct, half-built: the quad was translated to its station and
+ * kept the flat panel's orientation. Invisible on a nearly-flat sail; once the
+ * camber fix took the course from 8% of chord to 14%, the canvas curved out
+ * from under quads still lying in the original plane and their corners came
+ * through.
+ *
+ * The second latent bug that fix exposed, after the buntline. Both were fine
+ * only because the sail barely moved.
+ */
+describe('parts sewn to the canvas ride its frame, not its plane', () => {
+  const p = { ...shipMaterialParams, sailFlutterAmp: 0 };
+  const WIDTH = 12.17;
+  const DROP = 6.3;
+  const st = (drive: number) => ({
+    drive, luff: 0, skew: 0, dropScale: 1, flutterPhase: 0,
+    sheetLeadPort: [0, 0, 0] as [number, number, number],
+    sheetLeadStarboard: [0, 0, 0] as [number, number, number],
+  });
+  // a reef point's four corners, as offsets from its own flat station
+  const CORNERS: [number, number, number][] = [
+    [-0.0175, 0.15, 0.02], [0.0175, 0.15, 0.02],
+    [-0.0175, -0.15, 0.02], [0.0175, -0.15, 0.02],
+  ];
+
+  it('keeps every corner CLEAR of the canvas, at any camber', () => {
+    // THE BUG, asserted directly. The corner must stay on the outside of the
+    // surface — measured as its height above the cloth's own tangent plane at
+    // the station it is sewn to. Flat placement fails this the moment the
+    // sail curves; the frame placement holds it at the standoff exactly.
+    for (const drive of [0, 0.4, 0.8, 1.0]) {
+      const s = st(drive);
+      for (const [u, v] of [[0.2, 0.66], [0.5, 0.38], [0.8, 0.66]] as const) {
+        const base = sailClothPoint(u, v, WIDTH, DROP, s, p);
+        const n = sailClothFrame(u, v, WIDTH, DROP, s, p).normal;
+        for (const c of CORNERS) {
+          const q = sailSewnPoint(u, v, c, WIDTH, DROP, s, p);
+          const height = (q[0] - base[0]) * n[0] + (q[1] - base[1]) * n[1] + (q[2] - base[2]) * n[2];
+          expect(height).toBeCloseTo(c[2], 6); // exactly its standoff, still
+          expect(height).toBeGreaterThan(0); // …and on the outside
+        }
+      }
+    }
+  });
+
+  it('moves the quad RIGIDLY — it must not shear with the curvature', () => {
+    // the single shared (u, v) is what buys this; if a future change gives the
+    // quad per-vertex uv it will start shearing and this catches it
+    const s = st(1);
+    const [u, v] = [0.35, 0.5];
+    for (let i = 0; i < CORNERS.length; i++) {
+      for (let j = i + 1; j < CORNERS.length; j++) {
+        const a = sailSewnPoint(u, v, CORNERS[i], WIDTH, DROP, s, p);
+        const b = sailSewnPoint(u, v, CORNERS[j], WIDTH, DROP, s, p);
+        const want = Math.hypot(
+          CORNERS[i][0] - CORNERS[j][0],
+          CORNERS[i][1] - CORNERS[j][1],
+          CORNERS[i][2] - CORNERS[j][2],
+        );
+        expect(Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])).toBeCloseTo(want, 6);
+      }
+    }
+  });
+
+  it('reduces to the flat placement on a becalmed sail', () => {
+    // no camber ⇒ the frame is the panel's own axes ⇒ nothing moves. If this
+    // fails the basis is built wrong-handed or the tangents are swapped.
+    const s = st(0);
+    const flatP = { ...p, sailFootRoach: 0 };
+    const q = sailSewnPoint(0.5, 0.5, [0.1, 0.2, 0.02], WIDTH, DROP, s, flatP);
+    expect(q[0]).toBeCloseTo(0.1, 6);
+    expect(q[1]).toBeCloseTo(-DROP * 0.5 + 0.2, 6);
+    expect(q[2]).toBeCloseTo(0.02, 6);
+  });
+
+  it('leaves the HEAD still, which is why the robands need no frame', () => {
+    // `sailTies()` builds the robands at weight 0 — they are seized to the
+    // YARD, which does not deform. That is only safe because every term of the
+    // shape carries a (1 − v) or a down(v) that vanishes at the head. Asserted
+    // rather than assumed: if a future term moves the head, the robands start
+    // floating off it and this fires first.
+    for (const drive of [0, 1]) {
+      for (const u of [0, 0.3, 0.5, 0.7, 1]) {
+        const q = sailClothPoint(u, 1, WIDTH, DROP, st(drive), p);
+        expect(q[0]).toBeCloseTo((u - 0.5) * WIDTH, 6);
+        expect(q[1]).toBeCloseTo(0, 6);
+        expect(q[2]).toBeCloseTo(0, 6);
+      }
+    }
+  });
+});
+
+/**
  * §V.55 / §B.30 — the flutter phase, and the two-clock defect it closes.
  */
 describe('flutter rides an INTEGRATED phase with one owner (§V.55, §B.30)', () => {
@@ -1719,6 +1821,106 @@ describe('the seams land on the robands (§V33/§V51 single owner)', () => {
       expect(Number.isFinite(sailLaceStation(0, bad))).toBe(true);
       expect(Number.isFinite(sailPanelCoord(0.5, bad))).toBe(true);
       expect(sailClothSegments(bad)).toBeGreaterThanOrEqual(16);
+    }
+  });
+});
+
+/**
+ * §V22 / §V45 — WHAT IS SEWN TO THE CLOTH RIDES THE CLOTH.
+ *
+ * User, with every instance circled on both courses and both sides: "all of
+ * the larger bottom sails have this little thing poking through them… It's not
+ * the seams, it's not the normal ropes, it's something else."
+ *
+ * It was `reefPoints()`. Each reef point is a small quad carrying ONE (u, v)
+ * for all four vertices so the cloth moves it RIGIDLY rather than shearing it
+ * — the right instinct, half-built: the quad was translated to its station and
+ * kept the flat panel's orientation. Invisible on a nearly-flat sail; once the
+ * camber fix took the course from 8% of chord to 14%, the canvas curved out
+ * from under quads still lying in the original plane and their corners came
+ * through.
+ *
+ * The second latent bug that fix exposed, after the buntline. Both were fine
+ * only because the sail barely moved.
+ */
+describe('parts sewn to the canvas ride its frame, not its plane', () => {
+  const p = { ...shipMaterialParams, sailFlutterAmp: 0 };
+  const WIDTH = 12.17;
+  const DROP = 6.3;
+  const st = (drive: number) => ({
+    drive, luff: 0, skew: 0, dropScale: 1, flutterPhase: 0,
+    sheetLeadPort: [0, 0, 0] as [number, number, number],
+    sheetLeadStarboard: [0, 0, 0] as [number, number, number],
+  });
+  // a reef point's four corners, as offsets from its own flat station
+  const CORNERS: [number, number, number][] = [
+    [-0.0175, 0.15, 0.02], [0.0175, 0.15, 0.02],
+    [-0.0175, -0.15, 0.02], [0.0175, -0.15, 0.02],
+  ];
+
+  it('keeps every corner CLEAR of the canvas, at any camber', () => {
+    // THE BUG, asserted directly. The corner must stay on the outside of the
+    // surface — measured as its height above the cloth's own tangent plane at
+    // the station it is sewn to. Flat placement fails this the moment the
+    // sail curves; the frame placement holds it at the standoff exactly.
+    for (const drive of [0, 0.4, 0.8, 1.0]) {
+      const s = st(drive);
+      for (const [u, v] of [[0.2, 0.66], [0.5, 0.38], [0.8, 0.66]] as const) {
+        const base = sailClothPoint(u, v, WIDTH, DROP, s, p);
+        const n = sailClothFrame(u, v, WIDTH, DROP, s, p).normal;
+        for (const c of CORNERS) {
+          const q = sailSewnPoint(u, v, c, WIDTH, DROP, s, p);
+          const height = (q[0] - base[0]) * n[0] + (q[1] - base[1]) * n[1] + (q[2] - base[2]) * n[2];
+          expect(height).toBeCloseTo(c[2], 6); // exactly its standoff, still
+          expect(height).toBeGreaterThan(0); // …and on the outside
+        }
+      }
+    }
+  });
+
+  it('moves the quad RIGIDLY — it must not shear with the curvature', () => {
+    // the single shared (u, v) is what buys this; if a future change gives the
+    // quad per-vertex uv it will start shearing and this catches it
+    const s = st(1);
+    const [u, v] = [0.35, 0.5];
+    for (let i = 0; i < CORNERS.length; i++) {
+      for (let j = i + 1; j < CORNERS.length; j++) {
+        const a = sailSewnPoint(u, v, CORNERS[i], WIDTH, DROP, s, p);
+        const b = sailSewnPoint(u, v, CORNERS[j], WIDTH, DROP, s, p);
+        const want = Math.hypot(
+          CORNERS[i][0] - CORNERS[j][0],
+          CORNERS[i][1] - CORNERS[j][1],
+          CORNERS[i][2] - CORNERS[j][2],
+        );
+        expect(Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])).toBeCloseTo(want, 6);
+      }
+    }
+  });
+
+  it('reduces to the flat placement on a becalmed sail', () => {
+    // no camber ⇒ the frame is the panel's own axes ⇒ nothing moves. If this
+    // fails the basis is built wrong-handed or the tangents are swapped.
+    const s = st(0);
+    const flatP = { ...p, sailFootRoach: 0 };
+    const q = sailSewnPoint(0.5, 0.5, [0.1, 0.2, 0.02], WIDTH, DROP, s, flatP);
+    expect(q[0]).toBeCloseTo(0.1, 6);
+    expect(q[1]).toBeCloseTo(-DROP * 0.5 + 0.2, 6);
+    expect(q[2]).toBeCloseTo(0.02, 6);
+  });
+
+  it('leaves the HEAD still, which is why the robands need no frame', () => {
+    // `sailTies()` builds the robands at weight 0 — they are seized to the
+    // YARD, which does not deform. That is only safe because every term of the
+    // shape carries a (1 − v) or a down(v) that vanishes at the head. Asserted
+    // rather than assumed: if a future term moves the head, the robands start
+    // floating off it and this fires first.
+    for (const drive of [0, 1]) {
+      for (const u of [0, 0.3, 0.5, 0.7, 1]) {
+        const q = sailClothPoint(u, 1, WIDTH, DROP, st(drive), p);
+        expect(q[0]).toBeCloseTo((u - 0.5) * WIDTH, 6);
+        expect(q[1]).toBeCloseTo(0, 6);
+        expect(q[2]).toBeCloseTo(0, 6);
+      }
     }
   });
 });

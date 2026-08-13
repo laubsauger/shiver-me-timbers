@@ -2,6 +2,15 @@
  * Sail geometry per §V13 trim state. Split out of pieceGeometryShapes.ts when
  * the furled shape grew real gathering (file cap, §C).
  *
+ * ANYTHING SEWN TO THIS SAIL MUST BE BUILT IN THE CLOTH'S OWN FRAME AT ITS
+ * OWN (u, v) — position AND orientation. The cloth's shape is genuinely
+ * wind-dependent now and keeps moving: a part that is merely translated to its
+ * station keeps the flat panel's orientation and its corners come through the
+ * canvas as soon as the sail carries any real camber. That is exactly how the
+ * reef points broke when the belly went from 8% of chord to 14%. Author each
+ * part as an offset from its station's FLAT position; sailClothNodes
+ * re-expresses that offset in the surface's tangent/bitangent/normal basis.
+ *
  * THE FULL SAIL IS FLAT ON PURPOSE. The belly, luff shake and gust ripple are
  * computed per frame in sailMaterial.ts from the live wind; a baked billow
  * cannot react to anything (§V22 "the sails appear too static"). Every part
@@ -66,10 +75,20 @@ function sailTies(width: number, drop: number): THREE.BufferGeometry[] {
     const x = (sailLaceStation(i, count) - 0.5) * width;
     const tie = new THREE.CylinderGeometry(0.035, 0.035, 0.36, 5);
     tie.translate(x, 0.08, 0);
+    // WEIGHT 0, and that is correct rather than an oversight: a roband is
+    // seized to the YARD, which does not deform, and the head of the cloth is
+    // laced to that same spar. Every term of the shape carries a (1 − v) or a
+    // `down(v)` that is zero at v = 1, so the canvas does not move here for the
+    // shader to follow — checked, not assumed (tests/ship.test.ts).
     ties.push(withSailShape(tie, 0, width, drop));
   }
   return ties;
 }
+
+/** reef points are inset this far from each leech, in u */
+const REEF_INSET = 0.04;
+/** how far a sewn-on part stands off the cloth (m), along the surface normal */
+const REEF_STANDOFF = 0.02;
 
 const RING = 9; // cross-section segments round the bundle
 const PER_BAY = 9; // stations along each gathering bay
@@ -182,9 +201,18 @@ function gaskets(width: number, drop: number, baseRadius: number, seed: number):
 /**
  * Reef points: the short lines sewn in a band across the sail, used to tie a
  * reef down. Each is a small quad carrying ONE (u, v) for all four vertices,
- * so the cloth shader moves it rigidly with the point of canvas it is sewn to
- * — a weight-1 part needs a valid uv or it would be displaced by whatever
- * happened to be in the attribute.
+ * so the cloth shader moves it as a RIGID piece rather than shearing it with
+ * the local curvature — a weight-1 part needs a valid uv or it would be
+ * displaced by whatever happened to be in the attribute.
+ *
+ * Its vertices are authored as an offset from their OWN station's flat
+ * position, because sailClothNodes re-expresses that offset in the surface's
+ * tangent basis (see the header). Two things follow, and both were wrong here:
+ * the station's x must be exactly `(u − 0.5)·width` for the uv it carries —
+ * the old `·0.92` made the authored point disagree with its own uv by up to
+ * 8% of the width, which the shader then read as a real offset and sheared the
+ * quad outward toward the leeches — and the standoff must be big enough to
+ * clear the cloth rather than lie in it.
  */
 function reefPoints(width: number, drop: number): THREE.BufferGeometry[] {
   const out: THREE.BufferGeometry[] = [];
@@ -192,13 +220,16 @@ function reefPoints(width: number, drop: number): THREE.BufferGeometry[] {
   const jitter = Math.max(0, shipDetailParams.irregularity);
   for (const band of [0.34, 0.62]) {
     for (let i = 0; i < count; i++) {
-      const u = (i + 0.5) / count;
-      const x = (u - 0.5) * width * 0.92;
+      // inset from the leeches through u itself, so the station and its uv
+      // describe the same point of canvas
+      const u = REEF_INSET + (1 - 2 * REEF_INSET) * ((i + 0.5) / count);
+      const x = (u - 0.5) * width;
       const y = -drop * band;
       const len = 0.3 + vjitter(0.09 * jitter, i, band);
       const line = new THREE.PlaneGeometry(0.035, len);
       line.rotateZ(vjitter(0.25 * jitter, i, band, 2));
-      line.translate(x, y - len / 2, 0.012);
+      // proud of the cloth along its own normal — coplanar z-fights
+      line.translate(x, y - len / 2, REEF_STANDOFF);
       // one uv for the whole quad: it rides the cloth at exactly this point
       const uvAttr = line.getAttribute('uv');
       for (let k = 0; k < uvAttr.count; k++) uvAttr.setXY(k, u, 1 - band);

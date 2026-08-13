@@ -322,6 +322,72 @@ export function sailClothPoint(
   return [x, y, sailClothOffset(uu, vv, width, s, p) + pull[2]];
 }
 
+/**
+ * The cloth's own orthonormal frame at (u, v): +u tangent, +v tangent, normal.
+ *
+ * CPU mirror of the basis sailClothNodes builds from the same finite
+ * differences and the same step. It exists so the RIGID-PART placement below
+ * is testable off the GPU — the shader is the only thing that draws it, but a
+ * fix nobody can assert is a fix that comes back.
+ */
+export function sailClothFrame(
+  u: number,
+  v: number,
+  width: number,
+  builtDrop: number,
+  s: SailClothState,
+  p: ShipMaterialParams,
+): { tanU: Vec3; tanV: Vec3; normal: Vec3 } {
+  const e = 0.03; // the same step the shader uses
+  const at = (uu: number, vv: number): Vec3 =>
+    sailClothPoint(uu, vv, width, builtDrop, s, p);
+  const o = at(u, v);
+  const du = sub(at(u + e, v), o);
+  const dv = sub(at(u, v + e), o);
+  const normal = unit(cross(du, dv));
+  const tanU = unit(du);
+  return { tanU, tanV: cross(normal, tanU), normal };
+}
+
+/**
+ * Where a part SEWN to the canvas puts one of its vertices.
+ *
+ * `offset` is that vertex's position relative to its station's FLAT panel
+ * position. It is re-expressed in the cloth's own frame, so the part rides the
+ * belly as a rigid body instead of staying in the flat panel's plane — which
+ * is what put the reef points' corners through the cloth once the sail
+ * carried real camber.
+ */
+export function sailSewnPoint(
+  u: number,
+  v: number,
+  offset: Vec3,
+  width: number,
+  builtDrop: number,
+  s: SailClothState,
+  p: ShipMaterialParams,
+): Vec3 {
+  const o = sailClothPoint(u, v, width, builtDrop, s, p);
+  const f = sailClothFrame(u, v, width, builtDrop, s, p);
+  return [
+    o[0] + f.tanU[0] * offset[0] + f.tanV[0] * offset[1] + f.normal[0] * offset[2],
+    o[1] + f.tanU[1] * offset[0] + f.tanV[1] * offset[1] + f.normal[1] * offset[2],
+    o[2] + f.tanU[2] * offset[0] + f.tanV[2] * offset[1] + f.normal[2] * offset[2],
+  ];
+}
+
+type Vec3 = [number, number, number];
+const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const cross = (a: Vec3, b: Vec3): Vec3 => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0],
+];
+function unit(a: Vec3): Vec3 {
+  const l = Math.hypot(a[0], a[1], a[2]);
+  return l < 1e-9 ? [0, 0, 1] : [a[0] / l, a[1] / l, a[2] / l]; // §V28
+}
+
 /** where each sail-attached anchor is sewn, in the sail's own uv */
 export const SAIL_ANCHOR_UV: Record<string, [number, number]> = {
   // the two lower corners: sheets lead aft from here, tacks forward. This is
