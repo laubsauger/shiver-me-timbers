@@ -16,6 +16,9 @@ import {
   bandCanFold,
   blurDecayAt,
   blurMixPerStep,
+  breakingGain,
+  crestBiasPerMetre,
+  foamMaskFrom,
   meanFoamAgeTicks,
   boxReduceAt,
   tierWeightAt,
@@ -1144,5 +1147,254 @@ describe('the dissolve gate (§T.5 stage 3, foamShading mirror)', () => {
       expect(v).toBeGreaterThanOrEqual(0);
       expect(v).toBeLessThanOrEqual(1);
     }
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * WHERE THE FOAM IS, NOT HOW MUCH OF IT (§B, user: "we don't see a bias
+ * towards the higher and steeper cresting having the foam and the splash,
+ * while the troughs have less of it").
+ *
+ * THE STATISTIC IS MASS SHARE, AND THAT IS THE POINT OF THIS BLOCK. The
+ * obvious measure — Pearson r between the foam field and elevation — CANNOT
+ * express this complaint: foam is sparse and spiky, elevation is smooth and
+ * gaussian, and r between them has a CEILING of 0.18 on the shipped sea. That
+ * ceiling is what hid the defect for so long: the shipped build measured 0.127,
+ * i.e. 71% of the achievable maximum, which reads as fine. The share of foam
+ * MASS sitting in the top 30% of the sea by elevation was 45.4% against an
+ * injection that put 82.2% there, and that gap is the whole bug.
+ *
+ * The sea below is ONE travelling deep-water wave rather than the full three
+ * cascade IFFT, deliberately: with a single mode the crest position is known
+ * in closed form at every tick, so a share below the floor can only mean the
+ * foam is not on the crest. It also runs in milliseconds instead of the ~40 s
+ * the full field costs. For that field, λ− collapses exactly —
+ *   ∂Dx/∂x = −k·h, ∂Dz/∂z = ∂Dx/∂z = 0
+ *   ⟹ tr J = 2 − λkh, det J = 1 − λkh, λ− = 1 − max(0, λkh)
+ * — so the gate is a pure crest gate and the ONLY thing that can put foam in a
+ * trough is the accumulator carrying it there while the wave moves on.
+ * ------------------------------------------------------------------------ */
+
+/** share of `field` mass sitting in the top `frac` of the sea ranked by `by` */
+function topMassShare(by: Float32Array, field: Float32Array, frac: number): number {
+  const idx = Array.from({ length: by.length }, (_, i) => i);
+  idx.sort((a, b) => by[a] - by[b]);
+  const cut = Math.floor(idx.length * (1 - frac));
+  let all = 0;
+  let top = 0;
+  for (let i = 0; i < idx.length; i++) {
+    all += field[idx[i]];
+    if (i >= cut) top += field[idx[i]];
+  }
+  return all > 0 ? top / all : NaN;
+}
+
+/**
+ * One travelling wave through the REAL foam accumulator (foamMath mirrors of
+ * the inject + blurDecay passes), returning where the resulting mask sits.
+ */
+function travellingWaveFoam(opts: {
+  residueHalfLife: number;
+  breakingHalfLife: number;
+  residueWeight: number;
+  breakingWeight: number;
+}) {
+  const n = 64;
+  const domain = 100; // exactly one wavelength across the tile
+  const k = (2 * Math.PI) / domain;
+  const omega = Math.sqrt(9.81 * k); // deep-water dispersion → c = 12.5 m/s
+  const amp = 1.5;
+  const lambda = 0.95; // the shipped effective choppiness
+  const ticks = 240; // 4 s — several residue half-lives, so this is steady state
+
+  const decay = decayFactorPerFrame(opts.residueHalfLife, DT);
+  // the sim floors it at the residue's own decay; mirror that here
+  const bDecay = Math.min(decay, decayFactorPerFrame(opts.breakingHalfLife, DT));
+  const blurMix = blurMixPerStep(
+    foamParams.blurSpreadMetres,
+    domain / n,
+    foamParams.blurRadius,
+    meanFoamAgeTicks(decay),
+  );
+
+  const size = n * n;
+  const residue = new Float32Array(size);
+  const breaking = new Float32Array(size);
+  const rs = new Float32Array(size);
+  const bs = new Float32Array(size);
+  const h = new Float32Array(size);
+  // fires on the upper half of the crest; injection scaled so a fully broken
+  // texel gains ~injectStrength·dt per tick, as the σ-relative sim scale does
+  const peak = lambda * k * amp;
+  const gate = 1 - 0.5 * peak;
+  const perStep = (foamParams.injectStrength * DT) / peak;
+
+  for (let t = 0; t < ticks; t++) {
+    const time = t * DT;
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        const i = y * n + x;
+        h[i] = amp * Math.cos(k * ((x / n) * domain) - omega * time);
+        const u = lambda * k * h[i];
+        const inj = Math.max(0, gate - minEigenvalue(2 - u, 1 - u)) * perStep;
+        rs[i] = accumulateFoam(residue[i], inj);
+        bs[i] = accumulateFoam(breaking[i], inj);
+      }
+    }
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        residue[y * n + x] = blurDecayAt(rs, n, x, y, foamParams.blurRadius, decay, blurMix);
+        breaking[y * n + x] = blurDecayAt(bs, n, x, y, foamParams.blurRadius, bDecay, blurMix);
+      }
+    }
+  }
+
+  const gain = breakingGain(decay, bDecay);
+  const mask = new Float32Array(size);
+  let mass = 0;
+  for (let i = 0; i < size; i++) {
+    mask[i] = foamMaskFrom(
+      residue[i], breaking[i], gain, opts.residueWeight, opts.breakingWeight,
+    );
+    mass += mask[i];
+  }
+  return { share: topMassShare(h, mask, 0.3), mass: mass / size, mask, residue, breaking };
+}
+
+describe('§B two clocks: foam belongs to the crest that made it', () => {
+  it('the single-clock mask loses the crest it was injected on', () => {
+    // WHY THIS MUST FAIL LOUD IF IT EVER GETS "FIXED" BACK: the injection here
+    // is a PURE crest gate — λ− = 1 − max(0, λkh) fires only where h > 0 — so
+    // 100% of everything injected lands in the top half of the wave, and by
+    // construction well inside the top 30%. Anything the mask holds below that
+    // arrived because the accumulator kept it while the wave travelled on
+    // (12.5 m/s here, 16 m over the 1.29 s mean visible age at the shipped
+    // half-life, a sixth of a wavelength). This is the defect, measured.
+    const single = travellingWaveFoam({
+      residueHalfLife: 0.9,
+      breakingHalfLife: 0.15,
+      residueWeight: 1,
+      breakingWeight: 0, // = the pre-split mask, exactly
+    });
+    // measured 0.609 — a pure crest gate would put ~1.0 here
+    expect(single.share).toBeLessThan(0.65);
+  });
+
+  it('the breaking channel puts it back on the crest, at the same foam cost', () => {
+    // WHY: the breaking channel is the SAME injection on a ~6x shorter clock,
+    // so it cannot integrate long enough to drift off the crest that made it.
+    // The residue is not deleted — real seas do leave foam behind a breaker,
+    // and deleting it is the variance §V.64 forbids throwing away — it is
+    // weighted down to what it is: older, thinner foam.
+    const single = travellingWaveFoam({
+      residueHalfLife: 0.9, breakingHalfLife: 0.15, residueWeight: 1, breakingWeight: 0,
+    });
+    const split = travellingWaveFoam({
+      residueHalfLife: foamParams.decayHalfLife,
+      breakingHalfLife: foamParams.breakingHalfLife,
+      residueWeight: foamParams.residueWeight,
+      breakingWeight: foamParams.breakingWeight,
+    });
+    // the whole complaint, as a number
+    expect(split.share).toBeGreaterThan(0.75); // measured 0.791
+    expect(split.share).toBeGreaterThan(single.share + 0.15); // measured +0.182
+    // AND IT IS A REDISTRIBUTION, NOT A DELETION. If the shipped weights
+    // simply removed most of the foam, the share would rise for a reason that
+    // has nothing to do with placement and the sea would go bald — so the mask
+    // has to keep most of its mass. (Measured on the full three-cascade field:
+    // 81% of the shipped total, with `injectStrength` the knob that buys it
+    // back; the tolerance here is looser because one mode is not that sea.)
+    expect(split.mass).toBeGreaterThan(single.mass * 0.5); // measured 0.94x
+  });
+
+  it('breakingWeight 0 + residueWeight 1 is the old mask BIT FOR BIT', () => {
+    // WHY: every foam change in this project ships behind an exact A/B
+    // (`erodeDepth = 0` for the dissolve, `injectFineCascade` for the fine
+    // band). Without it "the fix did nothing" and "the fix is off" are
+    // indistinguishable from a screenshot, which is how §V16's knee once
+    // silently cancelled a whole injection rework.
+    const split = travellingWaveFoam({
+      residueHalfLife: 0.9, breakingHalfLife: 0.15, residueWeight: 1, breakingWeight: 0,
+    });
+    for (let i = 0; i < split.mask.length; i++) {
+      expect(split.mask[i]).toBe(Math.min(1, split.residue[i]));
+    }
+  });
+
+  it('a longer residue clock makes placement WORSE, not better (§T.41 is backwards)', () => {
+    // WHY THIS TEST EXISTS AT ALL: "raise decayHalfLife so foam can trail down
+    // the wave face" was carried as a GOAL, and it is the wrong sign for this
+    // complaint. Long-lived foam and crest-correlated foam are incompatible
+    // for a field that does not move, and the field must not move — it is
+    // indexed by the undisplaced grid coordinate, which is a Lagrangian
+    // material label, so it is already advected with the water exactly
+    // (foamMath, "WHY THERE IS NO ADVECTION PASS"). Anyone reaching for the
+    // half-life to buy trailing has to fail here first.
+    const short = travellingWaveFoam({
+      residueHalfLife: 0.3, breakingHalfLife: 0.15, residueWeight: 1, breakingWeight: 0,
+    });
+    const long = travellingWaveFoam({
+      residueHalfLife: 2.0, breakingHalfLife: 0.15, residueWeight: 1, breakingWeight: 0,
+    });
+    expect(long.share).toBeLessThan(short.share);
+  });
+});
+
+describe('§B the two-channel mix keeps its meaning when the clocks move', () => {
+  it('breakingGain equalises the two channels under a constant injection', () => {
+    // WHY: `breakingWeight` has to be a MIX FACTOR, not a multiplier that
+    // silently means something different at every half-life — the §B.12 /
+    // §V36 failure (a constant calibrated against one statistic, applied to
+    // another) applied to a channel mix. Under constant injection I the
+    // residue settles at I/(1−decay) and the breaking channel at
+    // I/(1−breakingDecay); the gain is exactly what makes those equal.
+    for (const [rHalf, bHalf] of [[0.9, 0.15], [0.4, 0.1], [2.0, 0.05]]) {
+      const d = decayFactorPerFrame(rHalf, DT);
+      const b = decayFactorPerFrame(bHalf, DT);
+      let residue = 0;
+      let breaking = 0;
+      const I = 0.001;
+      for (let t = 0; t < 4000; t++) {
+        residue = (residue + I) * d;
+        breaking = (breaking + I) * b;
+      }
+      expect(breaking * breakingGain(d, b)).toBeCloseTo(residue, 6);
+    }
+  });
+
+  it('foam that never decays cannot define a gain, and says so instead of Infinity', () => {
+    // decay = 1 is an unbounded accumulator: the ratio is meaningless and the
+    // naive form divides by zero, which would put Infinity into a mask that
+    // feeds a mix factor (§V28 — one Infinity there is permanent).
+    expect(breakingGain(1, 0.9)).toBe(0);
+    expect(Number.isFinite(breakingGain(0.99, 0.5))).toBe(true);
+    expect(breakingGain(Number.NaN, 0.5)).toBe(0);
+    // and a breaking channel that holds nothing is the DIVISOR here
+    expect(breakingGain(0.99, 0)).toBe(0);
+  });
+
+  it('the crest bias is a multiple of σ on BOTH sides, so weather cannot move it', () => {
+    // WHY (§V36, and §B.12 four times over): an absolute "bias per metre"
+    // would mean something different in calm and storm — the same crest bias
+    // that nudges a swell sea would obliterate a calm one, because σ(λ−) and
+    // σ(h) both scale with the sea. Stated as σ(λ−) per σ(h), a crest at 1σ of
+    // elevation always shifts λ− by exactly `crestBiasSigma` of its own σ.
+    for (const [trace, choppiness, heightRms] of [
+      [0.0513, 0.95, 0.87], [0.165, 0.95, 2.4], [0.02, 0.7, 0.3],
+    ]) {
+      const perMetre = crestBiasPerMetre(0.5, trace, choppiness, heightRms);
+      // the shift a 1σ crest produces, in units of this band's own σ(λ−)
+      const shiftInSigma = (perMetre * heightRms) / eigenSigma(trace, choppiness);
+      expect(shiftInSigma).toBeCloseTo(0.5, 10);
+    }
+  });
+
+  it('a sea with no height statistic yet biases nothing rather than dividing by zero', () => {
+    // before the first spectrum build heightRms is 0 — §V28: the gate must go
+    // quiet, not produce Infinity and foam the entire flat sea
+    expect(crestBiasPerMetre(0.5, 0.05, 0.95, 0)).toBe(0);
+    expect(crestBiasPerMetre(0.5, 0.05, 0.95, Number.NaN)).toBe(0);
+    expect(crestBiasPerMetre(0.5, 0, 0.95, 1)).toBe(0);
+    expect(crestBiasPerMetre(0, 0.05, 0.95, 1)).toBe(0);
   });
 });
