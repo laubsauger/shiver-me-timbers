@@ -122,12 +122,14 @@ export const oceanSurfaceParams = registerParams(
     /**
      * Churn perturbation added to the surface SLOPE, not the mesh: this
      * detail is far below vertex spacing (~1 m at the ship), so geometry
-     * cannot carry it at any LOD — only the normal can. Four non-commensurate
+     * cannot carry it at any LOD — only the normal can. Six non-commensurate
      * animated wavelets, gated to wave FACES by local slope, because the
-     * reference shows roughened flanks and comparatively calm troughs.
+     * reference shows roughened flanks and comparatively calm troughs, and
+     * phase-warped by the swell's own slope so they never read as a lattice
+     * (see `microDetailWarp`).
      */
     microDetailStrength: 0.35,
-    /** base wavelength (m) of the churn — the coarsest of the four wavelets */
+    /** base wavelength (m) of the churn — the coarsest of the six wavelets */
     microDetailScale: 2.4,
     /** how fast the churn boils (rad/s on the base wavelet) */
     microDetailSpeed: 1.1,
@@ -170,6 +172,63 @@ export const oceanSurfaceParams = registerParams(
      * `slopeVarianceAa` as roughness (§V.48b).
      */
     microDetailSamplesFull: 4,
+    /**
+     * METRES of phase warp per unit of swell slope. THE ANTI-LATTICE TERM, and
+     * the only thing in this block that is structural rather than a fade.
+     *
+     * The churn is a sum of cosine PLANE WAVES, and one plane wave is an
+     * infinite family of straight parallel stripes wherever it is evaluated.
+     * Measured on the shipped build (top-down, calm, sim frozen, churn isolated
+     * by differencing a churn-on and a churn-off render of the same tick): the
+     * churn's own contribution carried spectral spikes 1220× and 308× above its
+     * local background at λ 0.623 m / heading (−0.799,−0.602) and λ 0.978 m /
+     * (0.707,−0.707) — the 3.732× and 2.414× wavelets exactly, 0.0° of
+     * direction error. That is the "very regular grid" the user reported twice,
+     * and neither the per-wavelet Nyquist gate nor `microReach` could touch it:
+     * a fade shrinks the AREA a lattice covers, it does not stop it being one
+     * (§B.33, where four foam lattices needed the same lesson).
+     *
+     * So the wavelets are evaluated at `worldXZ + warp·(noise + swellSlope)`
+     * instead of at `worldXZ`. The coordinate their stripes are straight in is
+     * itself bent by a field with no period, so the stripes wander instead of
+     * running to infinity. See `microDetailWarpScale` for why the field's own
+     * scale is the load-bearing part.
+     *
+     * WHAT SETS THE VALUE: phase excursion, not appearance. A warp of A metres
+     * along a wavelet's own direction shifts its phase by 2π·A/λ, and ≳ 2 rad
+     * on the SHARPEST wavelet is what turns a spike into a band. 1.0 m gives
+     * 9.8 rad on the 0.643 m wavelet and 2.6 rad on the 2.4 m one — the fine
+     * wavelets, which are the ones that were visible, get the most smear, which
+     * is the right way round. 0 restores the lattice exactly, which is the A/B.
+     *
+     * IT IS ALSO A BAND-LIMIT INPUT, not free: the warped coordinate has
+     * Jacobian I + ∇W, so it can locally COMPRESS a wavelength. The material
+     * divides every wavelet's λ by (1 + |∇W|) before gating it, with |∇W|
+     * computed from this value and `microDetailWarpScale` rather than baked —
+     * raising either without that term would walk the churn straight back into
+     * §V.48.
+     */
+    microDetailWarp: 1.0,
+    /**
+     * WORLD SCALE (m) of the anti-lattice warp field's coarsest octave.
+     *
+     * THE SCALE IS THE DESIGN, not a refinement of it. Measured: warping by the
+     * swell slope alone — which lives at λ ≥ 8.3 m (§V.19) — moved the churn's
+     * lattice spike from 344× to 287× above background, i.e. did nothing,
+     * because over the 12 m patch being judged that field is a near-constant
+     * TRANSLATION and translating a lattice leaves a lattice. A warp only smears
+     * a spectral spike if it varies over a few wavelengths of what it bends, so
+     * this must stay within roughly 3-10× the churn's own `microDetailScale`.
+     * Much smaller and the warp becomes a second high-frequency term with its
+     * own aliasing; much larger and it stops working at all.
+     *
+     * It is also the cheaper half of the band-limit trade. |∇W| goes as
+     * warp/scale, so widening the field buys the same phase excursion for less
+     * frequency compression: measured at equal warp = 1.0, scale 5 → residual
+     * lattice 117 and a 0.363 squeeze on every wavelet's gate, scale 8 → 85 and
+     * 0.446. 8 is that measurement, not a guess.
+     */
+    microDetailWarpScale: 8.0,
     /**
      * Floor of the ambient crest glow when NOTHING is backlighting it — i.e.
      * how much of the crest translucency is skylight rather than sun. 0 =
@@ -685,6 +744,8 @@ export const oceanSurfaceParams = registerParams(
     microDetailSpeed: { min: 0, max: 5, step: 0.05 },
     microDetailSlopeGate: { min: 0.02, max: 2, step: 0.01 },
     microDetailSamplesFull: { min: 2.5, max: 12, step: 0.1 },
+    microDetailWarp: { min: 0, max: 3, step: 0.05 },
+    microDetailWarpScale: { min: 1, max: 30, step: 0.5 },
     crestBandLow: { min: 0, max: 4, step: 0.05 },
     crestBandHigh: { min: 0.2, max: 6, step: 0.05 },
     bodyBandLow: { min: -4, max: 0, step: 0.05 },

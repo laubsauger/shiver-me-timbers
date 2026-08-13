@@ -99,6 +99,44 @@ function valueNoise(p: TslNode): TslNode {
   return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
+/**
+ * THE CHURN WAVELETS: [dirX, dirZ, frequency multiplier, phase-speed multiplier].
+ *
+ * Six, not four, and the extra two sit INSIDE the existing frequency band
+ * (1.0 … 3.732 ⟹ λ 2.4 … 0.643 m at the default scale) rather than beyond it.
+ * That is deliberate: adding a finer wavelet would move the sharpest feature,
+ * and the sharpest feature is the one that aliases first and the one that has
+ * already caused this file two §V.48 findings. More DIRECTIONS at the same
+ * sharpness costs nothing at the band limit and buys isotropy.
+ *
+ * Headings are spread by the golden angle taken mod 180° (a stripe family and
+ * its reverse are the same pattern, so 360° spreading wastes half the budget on
+ * duplicates — which is how the old four ended up with two of them 99° apart
+ * and reading as a weave). Multipliers are mutually irrational (1, √2, φ, √5,
+ * 1+√2, 2+√3) — necessary but nowhere near sufficient on its own, see the note
+ * at the call site.
+ */
+const MICRO_WAVELETS: ReadonlyArray<readonly [number, number, number, number]> = [
+  [0.966, 0.259, 1.0, 1.0], //   15.0°
+  [-0.591, 0.807, 1.41421, -0.83], // 126.2°
+  [0.537, 0.843, 1.61803, 1.31], //  57.5°
+  [-0.981, 0.195, 2.23607, -1.07], // 168.8°
+  [-0.174, 0.985, 2.41421, 0.79], // 100.0°
+  [0.855, 0.519, 3.73205, -1.29], //  31.2°
+];
+
+/**
+ * Per-wavelet slope amplitude is EQUAL (`amp` ∝ 1/freqMul at the call site), so
+ * this constant sets what that common level is. It is chosen to hold the
+ * stack's TOTAL slope variance at what the previous four equal-HEIGHT wavelets
+ * produced, so `microDetailStrength` keeps its calibration and the near sea does
+ * not change loudness: with amp = A/f every wavelet contributes (2π·A/scale)²/2,
+ * so N·A² must equal the old Σf², over the old frequency list.
+ */
+const MICRO_AMP_SCALE = Math.sqrt(
+  [1, 1.618, 2.414, 3.732].reduce((s, f) => s + f * f, 0) / MICRO_WAVELETS.length,
+);
+
 export function buildOceanSurfaceMaterial(
   sim: OceanSimulation,
   foam?: FoamSim,
@@ -167,6 +205,8 @@ export function buildOceanSurfaceMaterial(
       sp.microDetailSlopeGate,
     ),
   );
+  const uMicroWarp = uniform(sp.microDetailWarp);
+  const uMicroWarpScale = uniform(sp.microDetailWarpScale);
   const uCrestBand = uniform(new THREE.Vector2(sp.crestBandLow, sp.crestBandHigh));
   const uBodyBand = uniform(new THREE.Vector2(sp.bodyBandLow, sp.bodyBandHigh));
   // sea-state scale (RMS surface elevation, m) — every "is this a crest"
@@ -449,11 +489,18 @@ export function buildOceanSurfaceMaterial(
     const wakeSmooth = flowFoam
       ? flowFoam.wakeSmoothNode(worldXZ, pixWorld)
       : float(1);
-    const der = sampleDeriv(0)
+    // The two LONG cascades on their own, kept as a var: the churn below warps
+    // its phase coordinate by exactly this field, so the warp costs no extra
+    // fetch and — because §V.19 band-splits at 8.3 m — carries no wavelength
+    // short enough for the churn to alias against.
+    const derLong = sampleDeriv(0)
       .mul(normLod[0])
       .add(sampleDeriv(1).mul(normLod[1]))
-      .add(sampleDeriv(2).mul(normLod[2]).mul(wakeSmooth))
-      .mul(normFade);
+      .mul(normFade)
+      .toVar();
+    const der = derLong.add(
+      sampleDeriv(2).mul(normLod[2]).mul(wakeSmooth).mul(normFade),
+    );
     // the SAME λ the vertex displacement was built with (anti-fold cap
     // applied), pushed per frame — a baked oceanParams.choppiness read here
     // meant the normals solved a different surface than the geometry drew
@@ -509,16 +556,110 @@ export function buildOceanSurfaceMaterial(
     // art decision — this is near-field detail by design), each wavelet's own
     // `fade` owns whether it ALIASES inside that reach (§V.48). Neither
     // subsumes the other, and what either one removes still becomes roughness.
+    //
+    // AND NEITHER OF THEM IS THE LATTICE FIX. The line that used to stand at
+    // the wavelet list read "golden-angle directions, irrational-ish frequency
+    // ratios: no visible grid" — asserted, never measured, and false. MEASURED
+    // (top-down over calm water, sim frozen, the churn isolated by rendering
+    // the same tick with `microDetailStrength` 0.35 and 0 and differencing the
+    // two): the churn's own contribution carries two spectral spikes 1220× and
+    // 308× above the local background of its own radial ring, at
+    //   λ 0.623 m, heading (−0.799, −0.602)  →  w3: λ 0.643 m, (−0.809, −0.588)
+    //   λ 0.978 m, heading ( 0.707, −0.707)  →  w2: λ 0.994 m, ( 0.707, −0.707)
+    // i.e. 0.0° of direction error and 3%/2% of wavelength error against two
+    // named wavelets. Not a beat, not a cascade tile (those are 1010/98/22.7 m):
+    // the individual plane waves themselves, showing as straight parallel
+    // stripes 99° apart, which is the weave the user drew a line along.
+    //
+    // WHY THE IRRATIONAL RATIOS COULD NEVER HAVE WORKED. They control where the
+    // SUM repeats. A single cosine plane wave is already an infinite family of
+    // straight parallel lines on its own, at every point of the plane, with no
+    // repeat length involved — so no choice of ratios makes any one of them
+    // stop being striped. And slope goes as k, so the two SHARPEST wavelets
+    // carry 2.41× and 3.73× the slope of the base and dominate what the
+    // specular lobe reads, which is why the user sees it in the sun reflections.
+    // §B.33's lesson for the second time: a regular field is cured
+    // structurally, never by fading it (a fade shrinks the area, and the user
+    // reported the same defect after the reach was restored).
+    //
+    // THE CURE, and it is structural: the wavelets are no longer evaluated at
+    // `worldXZ` but at a coordinate WARPED BY THE SWELL'S OWN SLOPE. Straight
+    // stripes become wandering ones, because the coordinate they are straight
+    // in is itself bent by a field with no period.
+    //
+    // THE WARP FIELD'S OWN SCALE IS THE WHOLE DESIGN, and getting it wrong is a
+    // measured dead end, not a hypothesis. The first version warped by the SWELL
+    // slope (`derLong`) alone — free, and physically the right story, since short
+    // waves really are strained by the long waves they ride on. It moved the
+    // lattice score 344 → 287, i.e. almost nothing, for one reason: §V.19 splits
+    // those cascades at λ ≥ 8.3 m, so across a 12 m patch the warp is very nearly
+    // a CONSTANT TRANSLATION, and translating a lattice leaves a lattice. A warp
+    // only smears a spike if it VARIES over a few wavelengths of the thing it is
+    // bending. So the field has to live at metres, not tens of metres.
+    //
+    // Two terms, and both are wanted:
+    //   - value noise at `microDetailWarpScale` (two octaves, the second at an
+    //     irrational ratio and rotated, so the noise's own square lattice does
+    //     not print through — §B.33's warning, and the reason this is not a
+    //     single octave);
+    //   - the swell slope, kept because it is free and because it makes the
+    //     ripple trains follow the water they sit on rather than ignore it.
+    // Phase excursion is what does the work: a warp of A metres along a
+    // wavelet's own direction moves its phase by 2π·A/λ, so A = 0.35 m shifts
+    // the 0.643 m wavelet by 3.4 rad. Because the warp is a VECTOR and each
+    // wavelet projects it onto its own direction, all six decorrelate from one
+    // field — no per-wavelet noise evaluation needed.
     const microScale = uMicro.y.max(0.05);
     const microReach = lodWeight(microScale, uNormalStretch);
     const microPhase = timeUniform.mul(uMicro.z);
+    // §V.48: this noise never aliases where it can be seen. Its finest octave is
+    // microDetailWarpScale/2.19 ≈ 2.3 m, sub-pixel only past a ~1.1 m footprint,
+    // while `microReach` has already taken the churn it warps to zero by 55 m
+    // (footprint ≈ 0.1 m there). It is also an input to a PHASE, not to an edge:
+    // there is no step or threshold anywhere in this path to sharpen it.
+    const warpUv = worldXZ.div(uMicroWarpScale.max(0.5));
+    // second octave rotated ~31° and at an irrational frequency ratio, so the
+    // two octaves' lattices never line up into one visible grid
+    const warpUv2 = vec2(
+      warpUv.x.mul(0.857).sub(warpUv.y.mul(0.515)),
+      warpUv.x.mul(0.515).add(warpUv.y.mul(0.857)),
+    ).mul(2.19);
+    const warpNoise = vec2(
+      valueNoise(warpUv).sub(0.5).add(valueNoise(warpUv2).sub(0.5).mul(0.5)),
+      valueNoise(warpUv.add(vec2(37.3, 11.7)))
+        .sub(0.5)
+        .add(valueNoise(warpUv2.add(vec2(19.1, 43.9))).sub(0.5).mul(0.5)),
+    ).mul(1.333); // ×1.333 so the two octaves span ±0.5 again, i.e. ±1 peak-to-peak
+    const microXZ = worldXZ
+      .add(warpNoise.mul(uMicroWarp))
+      .add(derLong.xy.mul(uMicroWarp))
+      .toVar();
+    /**
+     * Worst-case local frequency gain from that warp. The warped coordinate has
+     * Jacobian I + ∇W, so a wavelength is locally COMPRESSED by up to |∇W|, and
+     * the band limit below must be measured against the shortest wavelength that
+     * can produce — §V.48's own rule ("the sharpest feature, never the repeat")
+     * applied to a feature whose width is now a field rather than a constant.
+     * Bound, per unit of `microDetailWarp`: the noise term contributes at most
+     * 2π/(2.3 m) · 0.5 ≈ 1.37/m from its finest octave, the swell term at most
+     * 0.5·2π/8.3 ≈ 0.38/m (§V.19 splits cascades 0-1 at λ ≥ 8.3 m and their
+     * slope RMS stays ≲ 0.5 even at storm). The noise bound scales with
+     * 1/warpScale, so it is computed rather than baked.
+     */
+    const warpGrad = uMicroWarp.mul(
+      float(2 * Math.PI * 2.19 * 0.5)
+        .div(uMicroWarpScale.max(0.5))
+        .add(0.38),
+    );
+    const warpSqueeze = float(1).div(float(1).add(warpGrad));
     /** unresolved slope variance shed by the wavelets, in (microGain)² units */
     const microUnresolvedRaw = float(0).toVar();
     const wavelet = (dirX: number, dirZ: number, freqMul: number, phaseMul: number) => {
       const k = float(Math.PI * 2 * freqMul).div(microScale);
       // this wavelet's own wavelength — NOT microScale (§V.48: the sharpest
-      // feature, never the repeat)
-      const lambda = microScale.div(freqMul);
+      // feature, never the repeat) — and shortened by whatever the warp can do
+      // to it, so the gate still leads the aliasing rather than trailing it
+      const lambda = microScale.div(freqMul).mul(warpSqueeze);
       // smoothstep(e0,e1,x), e0 > e1: 1 while a wavelength spans
       // microDetailSamplesFull pixels, 0 at 2 (Nyquist — a math constant, not
       // a tunable). Measured against fwidth(worldXZ), so grazing is included.
@@ -534,23 +675,32 @@ export function buildOceanSurfaceMaterial(
         lambda.div(uMicroSamples.max(2.001)),
         pixWorld,
       ).mul(microReach);
-      const arg = worldXZ.x
+      // EQUAL SLOPE PER WAVELET, not equal height. `amp` ∝ 1/freqMul, so every
+      // wavelet contributes the same slope amplitude k·amp and none of them can
+      // dominate the sum the way w3 did (3.73× the base, and the loudest term
+      // was also the finest and therefore the first to alias — §V.48 with the
+      // sign flipped once more). It is also the physical shape: a wind-wave
+      // spectrum carries roughly constant slope variance per octave, not
+      // constant height.
+      const amp = float(MICRO_AMP_SCALE / freqMul);
+      const kAmp = k.mul(amp);
+      const arg = microXZ.x
         .mul(dirX)
-        .add(worldXZ.y.mul(dirZ))
+        .add(microXZ.y.mul(dirZ))
         .mul(k)
         .add(microPhase.mul(phaseMul));
-      const d = arg.cos().mul(k).mul(fade);
-      // §V.48b: a sinusoid of slope amplitude k has slope variance k²/2, and
-      // the share this pixel can no longer resolve is (1 − fade) of it. Handed
-      // to the specular lobe instead of being dropped on the floor.
-      microUnresolvedRaw.addAssign(float(1).sub(fade).mul(k).mul(k).mul(0.5));
+      const d = arg.cos().mul(kAmp).mul(fade);
+      // §V.48b: a sinusoid of slope amplitude k·amp has slope variance
+      // (k·amp)²/2, and the share this pixel can no longer resolve is (1 − fade)
+      // of it. Handed to the specular lobe instead of being dropped on the
+      // floor — this is the §V.64 path, and it must see the new amplitudes or
+      // the roughness handover silently under-reports.
+      microUnresolvedRaw.addAssign(float(1).sub(fade).mul(kAmp).mul(kAmp).mul(0.5));
       return { x: d.mul(dirX), z: d.mul(dirZ) };
     };
-    // golden-angle directions, irrational-ish frequency ratios: no visible grid
-    const w0 = wavelet(0.966, 0.259, 1.0, 1.0);
-    const w1 = wavelet(-0.259, 0.966, 1.618, -0.83);
-    const w2 = wavelet(0.707, -0.707, 2.414, 1.31);
-    const w3 = wavelet(-0.809, -0.588, 3.732, -1.07);
+    const w = MICRO_WAVELETS.map((q) => wavelet(q[0], q[1], q[2], q[3]));
+    const microSumX = w.map((q) => q.x).reduce((a: TslNode, b: TslNode) => a.add(b));
+    const microSumZ = w.map((q) => q.z).reduce((a: TslNode, b: TslNode) => a.add(b));
     const microAmp = uMicro.x.mul(microScale).mul(0.02);
     // gate to wave FACES: troughs stay comparatively calm, flanks churn.
     // Captured BEFORE the churn is added — this is the swell's own steepness,
@@ -558,8 +708,8 @@ export function buildOceanSurfaceMaterial(
     const slopeMag = slopeX.mul(slopeX).add(slopeZ.mul(slopeZ)).sqrt().toVar();
     const faceGate = smoothstep(float(0), uMicro.w.max(0.02), slopeMag);
     const microGain = microAmp.mul(faceGate).mul(wakeSmooth);
-    slopeX.addAssign(w0.x.add(w1.x).add(w2.x).add(w3.x).mul(microGain));
-    slopeZ.addAssign(w0.z.add(w1.z).add(w2.z).add(w3.z).mul(microGain));
+    slopeX.addAssign(microSumX.mul(microGain));
+    slopeZ.addAssign(microSumZ.mul(microGain));
     // amplitude scales the wavelets, so it scales their variance SQUARED
     const microUnresolvedVar = microUnresolvedRaw.mul(microGain).mul(microGain);
 
@@ -1397,6 +1547,8 @@ export function buildOceanSurfaceMaterial(
       sp.sparkleResolveCells,
     );
     uMicroSamples.value = sp.microDetailSamplesFull;
+    uMicroWarp.value = Math.max(0, sp.microDetailWarp);
+    uMicroWarpScale.value = Math.max(0.5, sp.microDetailWarpScale);
     (uCrestFoam.value as THREE.Vector3).set(
       sp.crestFoamBandLow,
       sp.crestFoamBandHigh,
