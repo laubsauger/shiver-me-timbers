@@ -261,10 +261,12 @@ export function createSlickInjector(p: FlowFoamParams) {
  *
  * `pixWorld` must be the caller's OWN `fwidth(worldXZ)` footprint — the
  * material is the only place that knows it, which is why this is a node factory
- * rather than a uniform.
+ * rather than a uniform. `featureWorld` is the FINEST FEATURE the texture
+ * holds (`texel × waveBandLow`), never one texel — see slickMath.bandKeepCpu
+ * for what keying it to the storage grid cost.
  */
-export function bandKeepNode(pixWorld: any, texelWorld: any, full: any, cut: any): any {
-  const px = pixWorld.max(0).div(texelWorld.max(EPS));
+export function bandKeepNode(pixWorld: any, featureWorld: any, full: any, cut: any): any {
+  const px = pixWorld.max(0).div(featureWorld.max(EPS));
   const f = full.max(EPS);
   // smoothstep(e0, e1, x) with e0 > e1 reads "1 below e1, 0 above e0" (§V23)
   return smoothstep(cut.max(f.add(EPS)), f, px);

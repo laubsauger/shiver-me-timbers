@@ -413,20 +413,31 @@ export function bowSlopeCpu(
 /**
  * §V48 band-limit factor for anything read out of the accumulation texture and
  * multiplied into a differentiated normal. The StorageTexture carries no mip
- * chain (compute-written), so once one screen pixel spans more than one texel a
- * `texture()` fetch is a point sample — and §V49 says the product rule then
- * hands the normal that aliasing amplified by the slope's own magnitude.
+ * chain (compute-written), so once one screen pixel can no longer resolve the
+ * finest thing the texture holds, a `texture()` fetch is a point sample — and
+ * §V49 says the product rule then hands the normal that aliasing amplified by
+ * the slope's own magnitude.
  *
- * Fades 1 → 0 between `slickBandFull` and `slickBandCut` pixels-per-texel. Zero
- * is the CORRECT mean for both consumers: the transverse slope is zero-mean by
- * construction, and the damping's far-field average is "no damping" because a
- * lane a few metres wide occupies a vanishing fraction of a footprint that
- * large. It is also belt-and-braces: the ocean's own normLod has already faded
- * the fine cascade to nothing well before this fires (measured in the report).
+ * `featureWorld` IS THE FINEST WRITTEN FEATURE, NOT THE TEXEL. It used to be
+ * one texel (0.234 m near) and that is §B.20 again: nothing in this field is a
+ * texel wide — the mound ridge is 2·moundThick, the transverse train is 5.8 m
+ * at 3 m/s, the damping lane is metres of smooth shoulder — and every periodic
+ * term is already floored at the SOURCE (`waveBandLow` texels per wavelength,
+ * slickInjection), so `texel · waveBandLow` is exactly the finest thing that
+ * can ever be written. Measured on the texel yardstick, the wake's whole
+ * SURFACE was deleted at 80 m astern and from any camera under ~6 m of height,
+ * while its albedo went on being drawn — the paint outliving its shape.
+ *
+ * Fades 1 → 0 between `slickBandFull` and `slickBandCut` pixels per feature.
+ * Zero is the CORRECT mean for both consumers: the transverse slope is
+ * zero-mean by construction, and the damping's far-field average is "no
+ * damping" because a lane a few metres wide occupies a vanishing fraction of a
+ * footprint that large. It is also belt-and-braces: the ocean's own normLod has
+ * already faded the fine cascade to nothing well before this fires.
  */
-export function bandKeepCpu(pixWorld: number, texelWorld: number, p: SlickParams): number {
-  if (!Number.isFinite(pixWorld) || !Number.isFinite(texelWorld)) return 0;
-  const px = Math.max(pixWorld, 0) / Math.max(texelWorld, 1e-6);
+export function bandKeepCpu(pixWorld: number, featureWorld: number, p: SlickParams): number {
+  if (!Number.isFinite(pixWorld) || !Number.isFinite(featureWorld)) return 0;
+  const px = Math.max(pixWorld, 0) / Math.max(featureWorld, 1e-6);
   const full = Math.max(p.slickBandFull, 1e-6);
   // smoothstepCpu(e0, e1, x) with e0 > e1 reads "1 below e1, 0 above e0"
   return smoothstepCpu(Math.max(p.slickBandCut, full + 1e-6), full, px);

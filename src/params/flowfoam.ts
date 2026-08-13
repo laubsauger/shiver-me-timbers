@@ -83,7 +83,27 @@ export interface FlowFoamParams {
   bowClip: number;
 
   // --- bow mound: the displacement bow wave, FORWARD of the stem ---
-  /** bow mound foam per second per m/s — the water shoved ahead of the stem */
+  /**
+   * Bow mound foam per second per m/s — the water shoved ahead of the stem.
+   *
+   * THIS IS A RATE AND THE EYE SEES A DOSE. Accumulated coverage at the crest
+   * is the time integral of the rate as the mound sweeps over a texel, and it
+   * works out to exactly `moundIntensity · sf(v) · moundThick / 2` — the ship's
+   * SPEED CANCELS (a faster hull deposits proportionally more per second over
+   * proportionally less time). Measured at the shipped 0.06/1.4: 0.042 at the
+   * crest and 0.045-0.046 at every speed from 4 to 8 m/s, against an ocean
+   * dissolve threshold of `residueKneeLow + U[0, erodeDepth]` = 0.005 + U[0,
+   * 0.22] (foam/foamShading.foamDetailMask). ~7% of texels survived, so the
+   * water ahead of the bow was blank however hard the ship was driven — the
+   * second half of "the bow wake is still disappearing", after the emitter was
+   * moved out of the hull (main.ts `stemZ`).
+   *
+   * Retuned against that arithmetic, not by eye: intensity × thickness must
+   * clear ~0.5 for the crest dose to clear the knee reliably. Paid mostly in
+   * THICKNESS — a broader leading face buys dose without a hotter peak, and
+   * the standing complaint about this sea's foam is that it is too bright and
+   * too blobby, never too dim.
+   */
   moundIntensity: number;
   /** metres AHEAD of the stem where the mound crest peaks (must be > 0: it leads) */
   moundLead: number;
@@ -91,9 +111,21 @@ export interface FlowFoamParams {
   moundSweep: number;
   /** outboard half-extent (m) of the mound before it hands over to the arms */
   moundSpan: number;
-  /** fore-aft thickness (m) of the mound's leading face */
+  /**
+   * Fore-aft thickness (m) of the mound's leading face. Carries the dose (see
+   * `moundIntensity`) AND the ridge's own width — slickInjection.bowSlopeNode
+   * shapes the surface as −2u·e^(−u²) with u = dc/moundThick, so at a fixed
+   * `moundSlope` a thicker face is a physically TALLER mound, which is what a
+   * 38 m hull at Froude 0.3 actually pushes.
+   */
   moundThick: number;
-  /** aft thickness as a multiple of moundThick — fills the gap back to the hull */
+  /**
+   * Aft thickness as a multiple of moundThick. It exists to fill the gap back
+   * to the hull so nothing forward of the stem reads undisturbed — with the
+   * emitter finally AT the waterline stem (main.ts `stemZ`) that gap is a
+   * couple of metres, not the 3.5 m of hull the mound used to be buried in, so
+   * this no longer has to reach as far aft.
+   */
   moundFill: number;
   /** seconds for the mound to build/subside toward the hull's speed (inertia) */
   moundLag: number;
@@ -212,11 +244,15 @@ export interface FlowFoamParams {
   /** max suppression of the fine ripple inside a fully slicked lane (0..1).
    * 1 would make the lane a perfect mirror; real tracks keep some texture */
   slickDamp: number;
-  /** pixels-per-texel below which the slick reads at full strength (§V48) */
+  /** pixels per SMALLEST WRITTEN FEATURE below which the wake's slick and
+   * slope read at full strength (§V48). Not pixels per texel: the yardstick is
+   * `texel × waveBandLow`, the finest thing the injector is allowed to write
+   * (src/flowfoam/index.ts) — keying it to the storage grid instead retired the
+   * whole field ~2.5× too early, which is §B.20 */
   slickBandFull: number;
-  /** pixels-per-texel at which it has faded to nothing — past this the
-   * unmipped StorageTexture is being point-sampled and would alias INTO the
-   * surface normal (§V49) */
+  /** pixels per smallest written feature at which it has faded to nothing —
+   * past this the unmipped StorageTexture is being point-sampled and would
+   * alias INTO the surface normal (§V49) */
   slickBandCut: number;
 
   // --- transverse Kelvin waves (inside the V, crests across the track) ------
@@ -303,12 +339,15 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     trackLife: 200,
     tailFade: 0.35,
     bowClip: 0.8,
-    moundIntensity: 0.06,
+    // dose = intensity · thickness / 2 (see moundIntensity): 0.15 · 3.2 / 2 =
+    // 0.24 at the crest, against a 0.005 + U[0, 0.22] dissolve gate — up from
+    // 0.042, which cleared it 7% of the time
+    moundIntensity: 0.15,
     moundLead: 1.6,
     moundSweep: 0.9,
     moundSpan: 5.0,
-    moundThick: 1.4,
-    moundFill: 3.0,
+    moundThick: 3.2,
+    moundFill: 1.8,
     moundLag: 1.1,
     kelvinAngle: 19.47,
     bowIntensity: 0.14,

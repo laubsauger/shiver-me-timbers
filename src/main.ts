@@ -499,14 +499,20 @@ async function boot(): Promise<void> {
   // the blocks live INSIDE ropes.mesh now, so this one exclusion covers them
   reflection?.excludeFromReflection(ropes.mesh);
 
-  // hull dims for wake + bow spray, from blueprint hull AABBs
-  let bowZ = 0;
-  let sternZ = 0;
+  // Hull PLAN dims from the blueprint hull AABBs. These are the box bounds of
+  // the `hull-section` pieces ONLY, which is the parallel body — the 3.5 m stem
+  // is a separate `kind: 'bow'` piece and is NOT in this scan, so `aabbBowZ`
+  // stops 3.5 m SHORT of the drawn cutwater, inside the hull. Named `aabb*` so
+  // nothing downstream can mistake them for the stem: the waterline loft below
+  // is the single authority on where the bow is (§V.33), and every consumer
+  // takes `stemZ`/`transomZ` from it.
+  let aabbBowZ = 0;
+  let aabbSternZ = 0;
   let beamHalf = 2;
   for (const piece of galleonBlueprint) {
     if (piece.kind !== 'hull-section') continue;
-    bowZ = Math.max(bowZ, piece.transform.position[2] + piece.aabb.max[2]);
-    sternZ = Math.min(sternZ, piece.transform.position[2] + piece.aabb.min[2]);
+    aabbBowZ = Math.max(aabbBowZ, piece.transform.position[2] + piece.aabb.max[2]);
+    aabbSternZ = Math.min(aabbSternZ, piece.transform.position[2] + piece.aabb.min[2]);
     beamHalf = Math.max(beamHalf, Math.abs(piece.transform.position[0]) + piece.aabb.max[0]);
   }
   // tag hull meshes as intersection-foam targets (§V.10); everything on the
@@ -535,12 +541,29 @@ async function boot(): Promise<void> {
   // wake (shoulder displaced water along the actually-wetted side).
   const hullWaterline =
     waterlineFromBlueprint(galleonBlueprint) ??
-    waterlineFromBox(bowZ, sternZ, beamHalf);
+    waterlineFromBox(aabbBowZ, aabbSternZ, beamHalf);
   const hullContact = createHullContact(hullWaterline);
+  /**
+   * THE STEM AND THE TRANSOM — one value each, for every consumer (§V.33).
+   *
+   * The hull-section AABB scan above reports z 17.5, but the loft's waterline
+   * stem is at 21.0 (`hullMath`: hullLength/2 + bowLength) and the `kind:'bow'`
+   * piece that carries those 3.5 m descends 2 m BELOW the water. Feeding 17.5
+   * to anything that emits at the bow puts the emitter inside the hull mesh.
+   *
+   * Measured, for the wake: cutwater at 17.5, bow-mound crest at 19.1, and the
+   * mound's whole forward reach ending at 20.5 — half a metre short of the
+   * stem. Every square metre of bow wake was being injected under the hull and
+   * then depth-rejected by it, which is precisely the user's "swallowed by the
+   * actual hull mesh". The same 17.5 was feeding the bow-spray emitter and the
+   * caustics wetline, so all three were emitting from inside the ship.
+   */
+  const stemZ = hullWaterline.bowZ;
+  const transomZ = hullWaterline.sternZ;
   // hull wetness with MEMORY: keeps the highest recent contact per station and
   // decays it, so timber stays wet where the sea just was rather than tracking
   // the instantaneous waterline (user: "wetness where the water LAPPED")
-  const hullWetline = caustics.attachHullWetline({ bowZ, sternZ });
+  const hullWetline = caustics.attachHullWetline({ bowZ: stemZ, sternZ: transomZ });
 
   const input = createInputCollector(window);
   const followCam = createFollowCam(app.camera, app.renderer.domElement);
@@ -850,7 +873,7 @@ async function boot(): Promise<void> {
           choppiness: ocean.effectiveChoppiness(),
         });
       }
-      const bowLocal = rotateVec(playerShip.quaternion, [0, 0, bowZ]);
+      const bowLocal = rotateVec(playerShip.quaternion, [0, 0, stemZ]);
       bowWorldTmp.set(
         playerShip.position[0] + bowLocal[0],
         playerShip.position[1] + bowLocal[1],
@@ -904,8 +927,8 @@ async function boot(): Promise<void> {
           [playerShip.position[0], playerShip.position[2]],
           shipYaw,
           shipSpeed,
-          bowZ,
-          sternZ,
+          stemZ,
+          transomZ,
           beamHalf * 2,
         );
         flowFoam.renderInjection(app.renderer, app.scene);
@@ -1181,6 +1204,7 @@ async function boot(): Promise<void> {
   bootTimings.push(['TOTAL', +(performance.now() - bootT0).toFixed(1)]);
   console.info('[boot]', bootTimings.map(([k, v]) => `${k} ${v}ms`).join('  ·  '));
   (window as unknown as { __bootReady?: () => void }).__bootReady?.();
+  ui.showQuickControls();
 
   // --- part two: warm the deferred subsystems, one per turn of the event
   // loop, and add each only once its pipelines exist (§T.40).

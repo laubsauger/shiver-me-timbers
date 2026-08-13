@@ -67,6 +67,9 @@ import {
 } from '../src/flowfoam/wakeTrack';
 import { decayFactorPerFrame } from '../src/foam/foamMath';
 import { flowFoamParams } from '../src/params/flowfoam';
+import { foamParams } from '../src/params/foam';
+import { waterlineFromBlueprint } from '../src/sea-physics/hullContact';
+import { buildGalleonBlueprint } from '../src/ship/shipBlueprint';
 import { getParamsEntry } from '../src/params/registry';
 
 const P: FlowFieldParams = {
@@ -1714,5 +1717,132 @@ describe('flowfoam params (§V16 registry contract)', () => {
     expect(reach).toBeGreaterThanOrEqual(flowFoamParams.farRegionSize / 2);
     // and the far decay must outlast the time it takes to sail that far
     expect(flowFoamParams.farDecayHalfLife).toBeGreaterThan(flowFoamParams.decayHalfLife);
+  });
+});
+
+/**
+ * §B — "the bow wake is still disappearing quite often… maybe we're emitting it
+ * in a way where it gets swallowed by the actual hull mesh". The user's own
+ * hypothesis, and it was right twice over. Both halves are pinned here because
+ * fixing either alone leaves the water ahead of the bow blank.
+ */
+describe('bow wake visibility: the emitter must be in the water', () => {
+  it('the stem is FORWARD of every hull-section AABB — so the AABB is not it', () => {
+    // main.ts derives the wake / bow-spray / wetline emitters from the hull.
+    // Scanning `kind: 'hull-section'` gives the PARALLEL BODY only: the stem is
+    // a separate `kind: 'bow'` piece and is not in that scan, so an AABB-derived
+    // bow lands 3.5 m aft of the drawn cutwater, INSIDE a hull that descends 2 m
+    // below the waterline. Every square metre of bow wake was injected under the
+    // hull and then depth-rejected by it. The loft's waterline is the authority
+    // (main.ts `stemZ`); this test is what explains that to the next reader who
+    // reaches for the AABB because it is right there.
+    const bp = buildGalleonBlueprint();
+    let aabbBowZ = 0;
+    for (const piece of bp) {
+      if (piece.kind !== 'hull-section') continue;
+      aabbBowZ = Math.max(aabbBowZ, piece.transform.position[2] + piece.aabb.max[2]);
+    }
+    const wl = waterlineFromBlueprint(bp);
+    expect(wl).not.toBeNull();
+    // the two genuinely differ, and by enough to bury a bow wave
+    expect(wl!.bowZ).toBeGreaterThan(aabbBowZ + 1);
+    // at the AABB bow the hull is already BROAD — an emitter there is inside it
+    expect(wl!.halfWidthAt(aabbBowZ)).toBeGreaterThan(0.5);
+    // at the true stem the hull has no width at all: that is what a stem IS
+    expect(wl!.halfWidthAt(wl!.bowZ)).toBeLessThan(0.05);
+  });
+
+  it('the mound reaches far enough ahead to survive the sea sliding under it', () => {
+    // The ocean material indexes this foam by the UNDISPLACED grid label
+    // (surfaceMaterial `worldXZ = positionLocal.xz + origin`) while the wake is
+    // injected at the ship's TRUE world XZ, which the physics gets by inverting
+    // the displacement (cpuOcean.gridCoord). The wake therefore swims against
+    // the hull by the full Tessendorf displacement: measured rms |D| 0.88 m,
+    // max 2.35 m, ±1.2 m of it fore-and-aft, at the wave period. Until that
+    // asymmetry is fixed the mound's forward reach has to exceed the swim, or a
+    // wave phase alone puts it back under the bow.
+    const FORE_AFT_SWIM_M = 1.2;
+    const reach = flowFoamParams.moundLead + flowFoamParams.moundThick;
+    expect(reach).toBeGreaterThan(FORE_AFT_SWIM_M * 2);
+    // and the crest itself must lead the stem, or there is no mound in front
+    expect(flowFoamParams.moundLead).toBeGreaterThan(0);
+  });
+
+  it('the crest DOSE clears the ocean dissolve floor, and speed does not enter', () => {
+    // THE SECOND HALF. Coverage is a time integral of the injection rate, and
+    // the water ahead of the stem is only under the mound for a fraction of a
+    // second — so the mound's rate can peak handsomely while its dose stays
+    // invisible. src/foam/foamShading.foamDetailMask then thresholds that dose
+    // per texel at `residueKneeLow + U[0, erodeDepth]` and DELETES what is
+    // under it. At the shipped 0.06/1.4 the crest dose was 0.042 against a
+    // floor of 0.115: ~7% of texels survived.
+    //
+    // The dose is `moundIntensity · sf(v) · moundThick / 2` — the ship's SPEED
+    // CANCELS, because a faster hull deposits proportionally more per second
+    // over proportionally less time. Pinning that is the point of this test:
+    // every previous attempt assumed driving harder would rescue a quantity
+    // that speed does not enter, which is exactly why it failed "even when
+    // we're cutting through waves quite fast".
+    const floor = foamParams.residueKneeLow + foamParams.erodeDepth / 2;
+    const decay = decayFactorPerFrame(flowFoamParams.decayHalfLife, DT);
+
+    /** accumulated coverage at the instant the probe is at the mound crest */
+    const crestDose = (speed: number): number => {
+      const t = createWakeTrack();
+      const pose = { x: 0, z: -60, fx: 0, fz: 1, speed };
+      let ms = 0;
+      let cov = 0;
+      while (pose.z < 20) {
+        pose.z += speed * DT;
+        advanceTrack(t, pose, DT, CFG);
+        ms = approachExp(ms, speed, DT, flowFoamParams.moundLag);
+        const pts = trackPoints(t, pose);
+        if (pts.length < 2) continue;
+        cov = Math.min(1, cov * decay + wakeRateCpu(pts, 0, 0, HULL, WP, ms) * DT);
+        // probe sits at z = 0; report the moment the crest arrives over it
+        if (-pose.z <= flowFoamParams.moundLead) return cov;
+      }
+      return cov;
+    };
+
+    const d4 = crestDose(4);
+    const d6 = crestDose(6);
+    const d8 = crestDose(8);
+    // visible at every speed the user would call "making way"
+    expect(d4).toBeGreaterThan(floor);
+    expect(d6).toBeGreaterThan(floor);
+    expect(d8).toBeGreaterThan(floor);
+    // …and not a white slab: the standing complaint is that this sea's foam is
+    // too bright and too blobby, so buy the dose in EXTENT, not in peak
+    expect(d8).toBeLessThan(0.45);
+    // doubling the speed must NOT double the dose — it only moves `sf`
+    expect(d8 / d4).toBeLessThan(1.4);
+    // the closed form the params doc quotes, so the doc cannot rot silently
+    const closed = (flowFoamParams.moundIntensity * flowFoamParams.moundThick) / 2;
+    expect(d8).toBeGreaterThan(closed * 0.7);
+    expect(d8).toBeLessThan(closed * 1.6);
+  });
+
+  it('the wake SURFACE survives the footprints a real camera produces (§B.20)', () => {
+    // The band gate is what decides whether the wake has a SHAPE or is only
+    // paint. Keyed to one texel (0.234 m) it zeroed the mound ridge, the
+    // divergent crests and the damping lane at any footprint over 0.70 m —
+    // measured from the shipped follow cam (fov 55, radius 28, pivot 6) at a
+    // 900 px viewport, that is 80 m astern, or 45 m from any camera under ~6 m
+    // of height. The albedo has no such gate, so the paint outlived its shape:
+    // a second, independent cause of "the wake looks painted on".
+    const texel = flowFoamParams.regionSize / flowFoamParams.resolution;
+    const feature = texel * flowFoamParams.waveBandLow;
+    const keep = (px: number) => bandKeepCpu(px, feature, flowFoamParams);
+    // measured footprints, follow cam at 900 px: 12.9 m up / 80 m out, and the
+    // low framing (3 m up / 45 m out) a player uses precisely to SEE the bow
+    expect(keep(0.589)).toBeGreaterThan(0.8);
+    expect(keep(0.784)).toBeGreaterThan(0.5);
+    // …but it must still retire before it aliases. `feature` is the finest
+    // thing the injector can write, so a pixel spanning several of them is
+    // point-sampling an unmipped StorageTexture into the surface normal (§V49).
+    expect(keep(feature * (flowFoamParams.slickBandCut + 0.5))).toBe(0);
+    // and the yardstick must never collapse back onto the storage grid
+    expect(feature).toBeGreaterThan(texel);
   });
 });

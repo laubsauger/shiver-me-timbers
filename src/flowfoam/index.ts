@@ -114,9 +114,29 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
   const uSlickDamp = uniform(p.slickDamp);
   const uSlickBandFull = uniform(p.slickBandFull);
   const uSlickBandCut = uniform(p.slickBandCut);
-  /** world size of one texel per tier — the §V48 yardstick for each */
-  const uNearTexel = uniform(p.regionSize / p.resolution);
-  const uFarTexel = uniform(p.farRegionSize / p.farResolution);
+  /**
+   * SMALLEST FEATURE (m) each tier is allowed to carry — the §V48 yardstick,
+   * and the correction is WHAT IT IS MEASURED AGAINST. These used to be one
+   * TEXEL (0.234 m near), so `wakeSlopeNode`/`wakeSmoothNode` faded out once a
+   * pixel spanned 0.234 m of water and were ZERO past 0.70 m. §B.20 again: the
+   * gate belongs on the FEATURE, never on the storage grid. Nothing this field
+   * carries is a texel wide — the mound ridge is 2·moundThick (6.4 m), the
+   * transverse train is 5.8 m at 3 m/s and 23 m at 6 m/s, and the glassy lane
+   * is metres of smooth shoulder. The floor on all of it is set at the SOURCE:
+   * slickInjection fades every train to zero below `waveBandLow` texels per
+   * wavelength, so `texel · waveBandLow` is exactly the finest thing that can
+   * ever be written, and therefore exactly the right thing to resolve against.
+   *
+   * Measured against the shipped follow cam (fov 55, radius 28, pivot 6) at a
+   * 900 px viewport, the old gate deleted the wake's whole SURFACE — mound
+   * ridge, divergent crests, damping lane — at 80 m astern (keep 0.15) and
+   * from any camera under ~6 m of height even at 45 m (keep 0.00), while the
+   * albedo went on being drawn. That is a second, independent cause of the
+   * user's "the wake looks painted on", alongside the known albedo-mix-only
+   * defect: the paint was outliving the shape it was painted on.
+   */
+  const uNearFeature = uniform((p.regionSize / p.resolution) * p.waveBandLow);
+  const uFarFeature = uniform((p.farRegionSize / p.farResolution) * p.waveBandLow);
   let time = 0;
 
   /**
@@ -237,8 +257,8 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       uSlickBandFull.value = p.slickBandFull;
       uSlickBandCut.value = p.slickBandCut;
       // regionSize is live-tweakable, resolution is a startup constant
-      uNearTexel.value = p.regionSize / p.resolution;
-      uFarTexel.value = p.farRegionSize / p.farResolution;
+      uNearFeature.value = (p.regionSize / p.resolution) * p.waveBandLow;
+      uFarFeature.value = (p.farRegionSize / p.farResolution) * p.waveBandLow;
       // age + extend the world-space cutwater track BEFORE the computes read it
       wake.advance(dt);
       wake.pushParams();
@@ -295,13 +315,13 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
      */
     wakeSmoothNode(worldXZ: any, pixWorld?: any): any {
       const px = footprint(worldXZ, pixWorld);
-      const tier = (a: typeof acc, fade: any, texel: any) =>
+      const tier = (a: typeof acc, fade: any, feature: any) =>
         texture(a.foamTexture, regionUv(a, worldXZ))
           .g.mul(regionEdge(a, fade, worldXZ))
-          .mul(bandKeepNode(px, texel, uSlickBandFull, uSlickBandCut));
+          .mul(bandKeepNode(px, feature, uSlickBandFull, uSlickBandCut));
       const slick = mix(
-        tier(acc, uEdgeFade, uNearTexel),
-        tier(far, uFarEdgeFade, uFarTexel).mul(uFarStrength),
+        tier(acc, uEdgeFade, uNearFeature),
+        tier(far, uFarEdgeFade, uFarFeature).mul(uFarStrength),
         farWeight(worldXZ),
       );
       // §V44 bounded at SOURCE: clamp the coverage, not the result
@@ -323,7 +343,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       const px = footprint(worldXZ, pixWorld);
       return texture(acc.foamTexture, regionUv(acc, worldXZ))
         .ba.mul(regionEdge(acc, uEdgeFade, worldXZ))
-        .mul(bandKeepNode(px, uNearTexel, uSlickBandFull, uSlickBandCut));
+        .mul(bandKeepNode(px, uNearFeature, uSlickBandFull, uSlickBandCut));
     },
 
     dispose(): void {
