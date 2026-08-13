@@ -35,7 +35,7 @@ import {
 } from '../src/camera/camMath';
 import { FreeCam } from '../src/camera/freeCam';
 import { FollowCam } from '../src/camera/followCam';
-import { PerspectiveCamera, Vector3 } from 'three';
+import { PerspectiveCamera, Quaternion, Vector3 } from 'three';
 import type { ShipState } from '../src/state/simState';
 import { cameraParams } from '../src/params/camera';
 
@@ -628,6 +628,95 @@ describe('camera vs the interpolated render view', () => {
     } finally {
       rig.done();
     }
+  });
+
+  /**
+   * WHY: the aim is `pivot + velocity * lookAhead` and — outside the
+   * post-mode-switch blend — it is NOT smoothed, it goes straight to
+   * camera.lookAt. So the look-ahead velocity is part of the POSE, and it has
+   * to arrive interpolated on the same alpha as position and quaternion. Hand
+   * over the raw sim value instead and the aim staircases at the sim tick rate
+   * while the hull glides — which moves the WHOLE view, not the ship in it.
+   * Invisible at exactly 60 fps (one tick per frame); it appears the moment
+   * the display runs faster, which is why this drives 120 fps.
+   */
+  it('aims smoothly only when the look-ahead velocity is interpolated too', () => {
+    const SIM = 1 / 60;
+    const FRAME = 1 / 120;
+    const SPEED = 7.3; // m/s, a galleon with the helm hard over
+    const OMEGA = 0.5; // rad/s turn — |Δv| ≈ 0.06 m/s per tick, measured value
+    const TICKS = 900;
+    const MEASURE_FROM = 600; // yawFollowHalfLife is 1.2 s; let the lag settle
+
+    // one deterministic steady turn, sampled at the sim tick
+    const ticks: { pos: Vector3; vel: Vector3; quat: Quaternion }[] = [];
+    const p = new Vector3();
+    for (let k = 0; k < TICKS; k++) {
+      const yaw = OMEGA * k * SIM;
+      const vel = new Vector3(Math.sin(yaw) * SPEED, 0, Math.cos(yaw) * SPEED);
+      p.addScaledVector(vel, SIM);
+      ticks.push({ pos: p.clone(), vel, quat: new Quaternion(0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)) });
+    }
+
+    /** mean per-frame wobble of the aim's angular RATE, in degrees */
+    const aimJitter = (interpolateVelocity: boolean): number => {
+      const rig = mountCam();
+      try {
+        const { cam, camera, ship } = rig;
+        const dir = new Vector3();
+        let last: Vector3 | null = null;
+        let lastRate = 0;
+        let sum = 0;
+        let n = 0;
+        for (let k = 1; k < TICKS; k++) {
+          // 120 fps over a 60 Hz sim is exactly two samples per tick
+          for (const alpha of [0, 0.5]) {
+            const a = ticks[k - 1];
+            const b = ticks[k];
+            const pos = a.pos.clone().lerp(b.pos, alpha);
+            const quat = a.quat.clone().slerp(b.quat, alpha);
+            const vel = interpolateVelocity ? a.vel.clone().lerp(b.vel, alpha) : b.vel;
+            ship.position[0] = pos.x;
+            ship.position[1] = pos.y;
+            ship.position[2] = pos.z;
+            ship.quaternion[0] = quat.x;
+            ship.quaternion[1] = quat.y;
+            ship.quaternion[2] = quat.z;
+            ship.quaternion[3] = quat.w;
+            ship.velocity[0] = vel.x;
+            ship.velocity[1] = vel.y;
+            ship.velocity[2] = vel.z;
+            cam.update(ship, FRAME);
+            camera.getWorldDirection(dir);
+            if (last) {
+              // rate, not raw step: a correct pan advances by a smooth number
+              // of deg/s, so measuring the CHANGE in rate isolates the
+              // staircase from the pan itself
+              const step = last.angleTo(dir);
+              const rate = step / FRAME;
+              if (k >= MEASURE_FROM) {
+                sum += Math.abs(rate - lastRate) * FRAME * (180 / Math.PI);
+                n++;
+              }
+              lastRate = rate;
+            }
+            last = dir.clone();
+          }
+        }
+        return sum / n;
+      } finally {
+        rig.done();
+      }
+    };
+
+    const interpolated = aimJitter(true);
+    const raw = aimJitter(false);
+    // the shipped path: sub-hundredth-of-a-degree wobble, i.e. sub-pixel
+    expect(interpolated).toBeLessThan(0.005);
+    // and the threshold above is not vacuous — feeding the raw tick velocity
+    // is an order of magnitude worse. This is the regression this test exists
+    // for: main.ts must lerp velocity on alpha, exactly as it lerps the pose.
+    expect(raw).toBeGreaterThan(interpolated * 10);
   });
 
   it('mode switches never pop the lens — every frame step stays small', () => {

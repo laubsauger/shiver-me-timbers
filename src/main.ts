@@ -731,10 +731,17 @@ async function boot(): Promise<void> {
   const currPos = new Vector3();
   const prevQuat = new Quaternion();
   const currQuat = new Quaternion();
+  // velocity too: the follow camera's look-ahead is part of the POSE it aims
+  // with, so handing it the raw sim velocity while position and quaternion
+  // are lerped makes the aim step at 60 Hz while the hull glides (§V.2)
+  const prevVel = new Vector3();
+  const currVel = new Vector3();
   currPos.fromArray(playerShip.position);
   currQuat.fromArray(playerShip.quaternion);
+  currVel.fromArray(playerShip.velocity);
   prevPos.copy(currPos);
   prevQuat.copy(currQuat);
+  prevVel.copy(currVel);
   // interpolated view of the player ship handed to render-side consumers
   const renderShipView = structuredClone(playerShip);
 
@@ -826,8 +833,10 @@ async function boot(): Promise<void> {
       }
       prevPos.copy(currPos);
       prevQuat.copy(currQuat);
+      prevVel.copy(currVel);
       currPos.fromArray(playerShip.position);
       currQuat.fromArray(playerShip.quaternion);
+      currVel.fromArray(playerShip.velocity);
     },
     (alpha, frameDt) => {
       debug.hud.frame(frameDt * 1000);
@@ -953,7 +962,17 @@ async function boot(): Promise<void> {
       renderShipView.quaternion[1] = shipAssembly.group.quaternion.y;
       renderShipView.quaternion[2] = shipAssembly.group.quaternion.z;
       renderShipView.quaternion[3] = shipAssembly.group.quaternion.w;
-      renderShipView.velocity = playerShip.velocity;
+      // velocity on the SAME alpha, not the raw sim value: it feeds the
+      // camera's look-ahead, and an un-interpolated one steps at the tick rate
+      // while everything else glides — measured 0.05°/frame of aim jitter in a
+      // hard turn at 120 fps, ~150x the interpolated figure. Interpolating (as
+      // opposed to damping the aim) costs no lag, so the anticipation
+      // `lookAhead` exists for is untouched. NOT a reference assignment: this
+      // array must stay distinct from playerShip.velocity or the render path
+      // would write back into the sim (§V.3).
+      renderShipView.velocity[0] = prevVel.x + (currVel.x - prevVel.x) * alpha;
+      renderShipView.velocity[1] = prevVel.y + (currVel.y - prevVel.y) * alpha;
+      renderShipView.velocity[2] = prevVel.z + (currVel.z - prevVel.z) * alpha;
       followCam.update(renderShipView, frameDt, (x, z) => cpuOcean.heightAt(x, z, state.time));
 
       // after the camera pose is final, before surface.update/render. This
