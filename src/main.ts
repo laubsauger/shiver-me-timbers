@@ -744,6 +744,11 @@ async function boot(): Promise<void> {
   prevVel.copy(currVel);
   // interpolated view of the player ship handed to render-side consumers
   const renderShipView = structuredClone(playerShip);
+  /**
+   * Sim time of the last ocean FFT dispatch — see the guard in the render path.
+   * NaN so the first frame always dispatches (NaN !== NaN).
+   */
+  let lastOceanTime = Number.NaN;
 
   const loop = new GameLoop(
     (dt) => {
@@ -845,7 +850,37 @@ async function boot(): Promise<void> {
       sky.update(skyParams.timeOfDay);
 
       let t = performance.now();
-      ocean.update(app.renderer, state.time);
+      /**
+       * THE OCEAN FFT IS A PURE FUNCTION OF `state.time`, AND `state.time`
+       * ONLY MOVES ON A TICK — so dispatching it on a frame where no tick
+       * fired recomputes bit-identical texels and throws them away.
+       *
+       * `OceanSimulation.update` reads exactly two things: `time` and the
+       * `oceanParams` singleton. No camera, no scene, no renderer state. It
+       * sets `timeUniform`/`choppinessUniform` and dispatches the spectrum →
+       * butterfly → unpack passes, which sample only h0 (static between
+       * rebuilds), those two uniforms and the butterfly table. Same inputs,
+       * same output textures — the skip cannot change a pixel by construction,
+       * which is why this is a guard and not a heuristic.
+       *
+       * Measured: on a 120 Hz display half of all frames run no tick, so half
+       * of the 3-cascade FFT dispatches were redundant. Watch it on the HUD's
+       * `ocean+foam cpu-dispatch` line.
+       *
+       * `paused` is the exception, not an optimisation: the sim clock is
+       * frozen there, so without it a live ocean-param tweak from the debug
+       * panel would reach nothing until unpause — a silent no-op of exactly
+       * the §B.7 shape. Paused frames are not the ones under budget pressure.
+       *
+       * NOT extended to `clouds.update` below: that one is camera-dependent
+       * (fitToCamera + view-space sun basis + an offscreen pass rendered FROM
+       * the camera), so it is not a function of time alone and must run every
+       * frame — see its call site.
+       */
+      if (paused || state.time !== lastOceanTime) {
+        lastOceanTime = state.time;
+        ocean.update(app.renderer, state.time);
+      }
       // frameDt, not nothing: foam accumulates/decays per dispatch, so it
       // steps itself on the fixed clock instead of at display rate (§V2)
       foam.update(app.renderer, frameDt);
@@ -862,6 +897,15 @@ async function boot(): Promise<void> {
       hullWetline.updateFromHullContact(frameDt, hullContact.stations, hullContact.depth);
 
       t = performance.now();
+      // NOT guardable on `state.time` the way the ocean above is, and the
+      // resemblance is a trap. `clouds.update` refits the camera-pinned
+      // composite + band quads (`fitToCamera`), rebuilds the view-space sun/up
+      // basis from `camera.matrixWorld`, and renders the cores pass FROM the
+      // camera into an offscreen RT. The camera moves every render frame
+      // (followCam runs at display rate), so skipping a no-tick frame would
+      // leave the cloud quads fitted to the previous frame's view and the
+      // puffs lit in a stale basis — clouds visibly swimming against the
+      // camera. Its output is a function of the CAMERA, not of time alone.
       clouds.update(state.time, sky.sunDirection);
       debug.hud.setPassTiming('clouds cpu-dispatch', performance.now() - t);
 
