@@ -9,6 +9,13 @@ import { buildHoledVariant, buildPieceGeometry, buildSailGeometry } from './piec
 import { createHoleMaterial, createPieceMaterial } from './pieceMaterials';
 import { buildDeckHeightfield, type DeckHeightfield } from './deckHeightfield';
 import { sailClothPoint, type SailClothState } from './sailShape';
+import {
+  NEUTRAL_SAIL_WIND_FRAME,
+  readSailWindFrame,
+  sailPhaseSeed,
+  sheetLeadDirections,
+  type SailWindFrame,
+} from './sailFrame';
 import { sailDrive } from './sailDynamics';
 import { oceanParams } from '../params/ocean';
 import { shipMaterialParams } from '../params/ship';
@@ -29,24 +36,6 @@ function makeDefaultMaterialFactory(deckField?: DeckFieldSampler): MaterialFacto
 
 /** scratch vector — socketWorldPosition is called once per rope per frame */
 const tmpSocket = new THREE.Vector3();
-
-/**
- * CPU mirror of src/terrain/noise.ts `hash2` (Hoskins hash22 → 1D). The sail
- * material seeds each sail's ripple phase with it, and the CPU anchor has to
- * land on the same phase or the clew would ride a different wave than the
- * cloth it is sewn to.
- */
-function hash2Scalar(x: number, y: number): number {
-  const f = (v: number): number => v - Math.floor(v);
-  let p3x = f(x * 0.1031);
-  let p3y = f(y * 0.1031);
-  let p3z = f(x * 0.1031);
-  const d = p3x * (p3y + 33.33) + p3y * (p3z + 33.33) + p3z * (p3x + 33.33);
-  p3x += d;
-  p3y += d;
-  p3z += d;
-  return f((p3x + p3y) * p3z);
-}
 
 interface PieceRuntime {
   def: PieceDef;
@@ -74,6 +63,7 @@ export class ShipAssembly {
   private readonly materialFactory: MaterialFactory;
   /** live yard brace angle (rad), applied to every yard node */
   private rigTrim = 0;
+  private windFrame: SailWindFrame = NEUTRAL_SAIL_WIND_FRAME;
 
   constructor(blueprint: PieceDef[], materialFactory?: MaterialFactory) {
     if (materialFactory === undefined) {
@@ -239,31 +229,70 @@ export class ShipAssembly {
    * sailDriver.ts pushes into the per-object uniforms, from the same pure
    * `sailDrive` the shader's values come from, so the CPU-side anchor and the
    * GPU-side vertex agree about where the cloth is.
+   *
+   * THERE IS NO CLOCK LEFT IN HERE, and that is the point. This used to read
+   * `performance.now()` while the shader read three's `time` node, so the two
+   * evaluators of one shape ran on two clocks and their flutter phase
+   * disagreed by up to ~0.28 m of rope anchor — recorded in §B.30 as
+   * §V.45-class and knowingly unfixed. Both phases are now integrated by a
+   * single owner and published on the mesh (sailFrame.ts); this side READS
+   * them. Same for the wind: hull heading, way through the water and the gust
+   * train all arrive in the frame rather than being re-derived here.
    */
   private clothState(rt: PieceRuntime): SailClothState {
     const m = rt.node.matrixWorld.elements;
-    const now = performance.now() / 1000;
+    const wf = readSailWindFrame(rt.mesh);
     const drive = sailDrive(
       {
         forwardX: m[8],
         forwardZ: m[10],
+        shipForwardX: wf.shipForwardX,
+        shipForwardZ: wf.shipForwardZ,
         windDirection: oceanParams.windDirection,
         windSpeed: oceanParams.windSpeed,
+        shipVelX: wf.shipVelX,
+        shipVelZ: wf.shipVelZ,
         yawRate: 0, // the skew term is a transient; anchors need the steady shape
-        time: now,
+        gustPhase: wf.gustPhase,
+        gustPhaseB: wf.gustPhaseB,
       },
       shipMaterialParams,
     );
     const trimDrop = rt.mesh.userData.sailDropScale;
     const width = rt.def.aabb.max[0] - rt.def.aabb.min[0];
     const drop = -rt.def.aabb.min[1];
+    const phase = rt.mesh.userData.sailFlutterPhase;
+    // the SAME pure helper the driver pushes into the uniforms, from the same
+    // matrix and the same published heading — so the clew the sheet is tied to
+    // and the clew the shader draws are one point (§V.45)
+    const leads = sheetLeadDirections(m, wf.shipForwardX, wf.shipForwardZ, shipMaterialParams.sailSheetSpread);
     return {
+      sheetLeadPort: leads.port,
+      sheetLeadStarboard: leads.starboard,
       ...drive,
       dropScale: typeof trimDrop === 'number' && Number.isFinite(trimDrop) ? trimDrop : 1,
-      time: now,
-      // the shader seeds its phase from the sail's own dimensions; match it
-      phase: hash2Scalar(width * 3.71, drop * 1.17) * Math.PI * 2,
+      // the driver owns this; the seed is only what a sail that has not been
+      // rendered yet correctly reads, and it is the same seed the driver uses
+      flutterPhase:
+        typeof phase === 'number' && Number.isFinite(phase)
+          ? phase
+          : sailPhaseSeed(width, drop),
     };
+  }
+
+  /** the mesh a sail piece draws through — rigTrim publishes the wind frame
+   *  onto it, sailDriver reads it back per object (sailFrame.ts) */
+  sailMesh(pieceId: string): THREE.Mesh {
+    return this.piece(pieceId).mesh;
+  }
+
+  /** the last wind frame published to this ship's sails, for tests and tools */
+  setSailWindFrame(frame: SailWindFrame): void {
+    this.windFrame = frame;
+  }
+
+  get sailWindFrame(): SailWindFrame {
+    return this.windFrame;
   }
 
   /**

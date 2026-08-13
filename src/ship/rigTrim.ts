@@ -17,16 +17,89 @@
  * state actually changes.
  */
 import type * as THREE from 'three';
-import { shipRigParams } from '../params/ship';
+import { shipMaterialParams, shipRigParams } from '../params/ship';
 import { setShipWorldMatrix } from './woodMaterial';
 import { oceanParams } from '../params/ocean';
 import type { ShipAssembly } from './shipAssembly';
-import { braceAngle, sailGeometryState, trimDropScale } from './sailDynamics';
+import {
+  SAIL_GUST_DETUNE,
+  braceAngle,
+  sailGeometryState,
+  sailGustRate,
+  trimDropScale,
+} from './sailDynamics';
+import { writeSailWindFrame, type SailWindFrame } from './sailFrame';
+
+const TAU = Math.PI * 2;
 
 /** ship forward (world XZ) from the assembly's own matrix — 3rd basis column */
 function shipForward(group: THREE.Object3D): { x: number; z: number } {
   const m = group.matrixWorld.elements;
   return { x: m[8], z: m[10] };
+}
+
+/** fold into [0, 2π) — an accumulator's float precision then never decays */
+function wrapTau(x: number): number {
+  const v = (Number.isFinite(x) ? x : 0) % TAU;
+  return v < 0 ? v + TAU : v;
+}
+
+/**
+ * Per-ship wind bookkeeping: her damped world velocity, and the gust train's
+ * two phases. Keyed by assembly, so a second ship gets her own for free.
+ *
+ * VELOCITY IS MEASURED, NOT HANDED IN. `updateRig` deliberately takes no sim
+ * state (§V3 — it reads the render transform and the wind params the sim also
+ * reads, and writes nothing back), and the group's own world position is the
+ * ship's position. Low-passed for the same reason flagDriver low-passes its
+ * own: an unfiltered per-frame derivative reads pitch and heave as gusts.
+ */
+interface RigMemory {
+  x: number;
+  z: number;
+  velX: number;
+  velZ: number;
+  gustPhase: number;
+  gustPhaseB: number;
+  seeded: boolean;
+}
+
+const rigMemory = new WeakMap<ShipAssembly, RigMemory>();
+
+/** velocity smoothing time constant (s) — long enough to reject wave motion */
+const VELOCITY_TAU = 0.6;
+
+function advanceFrame(assembly: ShipAssembly, group: THREE.Object3D, dt: number): SailWindFrame {
+  const m = group.matrixWorld.elements;
+  const x = m[12];
+  const z = m[14];
+  let mem = rigMemory.get(assembly);
+  if (mem === undefined) {
+    mem = { x, z, velX: 0, velZ: 0, gustPhase: 0, gustPhaseB: 0, seeded: true };
+    rigMemory.set(assembly, mem);
+  } else if (dt > 1e-4) {
+    const k = 1 - Math.exp(-dt / VELOCITY_TAU);
+    mem.velX += ((x - mem.x) / dt - mem.velX) * k;
+    mem.velZ += ((z - mem.z) / dt - mem.velZ) * k;
+    mem.x = x;
+    mem.z = z;
+  }
+  // §V.55: `sailGustFreq` is a live Tweakpane value, so `time × rate` is not a
+  // phase. Two accumulators rather than one scaled by SAIL_GUST_DETUNE —
+  // multiplying a wrapped phase by a non-integer ratio breaks continuity at
+  // every wrap, which is §V.55's own corollary from the flags' crack harmonic.
+  const rate = sailGustRate(shipMaterialParams);
+  mem.gustPhase = wrapTau(mem.gustPhase + rate * dt);
+  mem.gustPhaseB = wrapTau(mem.gustPhaseB + rate * SAIL_GUST_DETUNE * dt);
+  const fwd = shipForward(group);
+  return {
+    shipForwardX: fwd.x,
+    shipForwardZ: fwd.z,
+    shipVelX: mem.velX,
+    shipVelZ: mem.velZ,
+    gustPhase: mem.gustPhase,
+    gustPhaseB: mem.gustPhaseB,
+  };
 }
 
 /**
@@ -47,10 +120,19 @@ export function updateRig(assembly: ShipAssembly, dt: number, trim = 1): void {
   assembly.group.updateMatrix();
   setShipWorldMatrix(assembly.group.matrix);
 
+  // --- the ship-level wind frame, published to every sail (sailFrame.ts) ---
+  // ONE writer, two readers (sailDriver's uniforms, ShipAssembly.clothState),
+  // so the canvas the shader draws and the canvas the sheets are tied to
+  // cannot drift apart the way §B.30 measured them drifting.
+  const frame = advanceFrame(assembly, assembly.group, step);
+
   // --- brace: yards swing toward the wind-derived target, never snap ------
-  const fwd = shipForward(assembly.group);
   const target = braceAngle(
-    { forwardX: fwd.x, forwardZ: fwd.z, windDirection: oceanParams.windDirection },
+    {
+      forwardX: frame.shipForwardX,
+      forwardZ: frame.shipForwardZ,
+      windDirection: oceanParams.windDirection,
+    },
     p,
   );
   const current = assembly.braceAngle;
@@ -67,11 +149,13 @@ export function updateRig(assembly: ShipAssembly, dt: number, trim = 1): void {
   // out, with a 39%-wide dead band between. The reef is the continuous scale;
   // the mesh only changes once, where the two silhouettes already match.
   const sails = assembly.sailPieceIds();
+  assembly.setSailWindFrame(frame);
   if (sails.length === 0) return;
   const state = sailGeometryState(trim, assembly.sailState(sails[0]), p);
   const drop = trimDropScale(trim, p);
   for (const id of sails) {
     assembly.setSailState(id, state); // no-op unless the state changed
     assembly.setSailDropScale(id, drop);
+    writeSailWindFrame(assembly.sailMesh(id), frame);
   }
 }

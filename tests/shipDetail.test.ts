@@ -8,6 +8,11 @@
  * these tests are how it stays learned.
  */
 import { describe, expect, it } from 'vitest';
+/** corners in the yard's plane — the shape BEFORE the sheets haul them */
+const FLAT_SHEETS = {
+  sheetLeadPort: [0, 0, 0] as [number, number, number],
+  sheetLeadStarboard: [0, 0, 0] as [number, number, number],
+};
 import * as THREE from 'three';
 import { buildBrigantineBlueprint, buildGalleonBlueprint } from '../src/ship/shipBlueprint';
 import { buildPieceGeometry } from '../src/ship/pieceGeometry';
@@ -572,11 +577,11 @@ describe('sail-attached anchors ride the canvas (§V12 endpoints, §V.45 rule)',
   it('the flat socket station and the live one agree when there is no cloth', () => {
     // a zero-drive, zero-flutter sail must resolve to exactly its built corner,
     // or the CPU mirror has drifted from the panel it claims to describe
-    const p = { ...shipMaterialParams, sailBillow: 0, sailFlutterAmp: 0 };
+    const p = { ...shipMaterialParams, sailCamber: 0, sailFootRoach: 0, sailFlutterAmp: 0 };
     const sail = galleon.find((s) => s.id === 'sail-main-lower')!;
     const width = sail.aabb.max[0] - sail.aabb.min[0];
     const drop = -sail.aabb.min[1];
-    const state = { drive: 0, luff: 0, skew: 0, dropScale: 1, time: 0, phase: 0 };
+    const state = { drive: 0, luff: 0, skew: 0, dropScale: 1, flutterPhase: 0, ...FLAT_SHEETS };
     const pt = sailClothPoint(1, 0, width, drop, state, p);
     const socket = sail.sockets.find((s) => s.id.endsWith('clew-starboard'))!;
     expect(pt[0]).toBeCloseTo(socket.position[0], 5);

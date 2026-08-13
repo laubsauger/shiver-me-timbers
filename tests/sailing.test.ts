@@ -338,8 +338,8 @@ describe('input snapshots (replay contract, V3)', () => {
     let snap: InputState = neutralInput();
     for (let i = 0; i < 10; i++) snap = kb.sample(SIM_DT);
     expect(JSON.parse(JSON.stringify(snap))).toEqual(snap);
-    expect(snap.rudder).toBeGreaterThan(0);
-    expect(snap.rudder).toBeLessThanOrEqual(1);
+    expect(snap.rudder).toBeLessThan(0);
+    expect(snap.rudder).toBeGreaterThanOrEqual(-1);
     expect(snap.brake).toBe(true); // S brakes...
     expect(snap.sailTrimDelta).toBe(-1); // ...and trims down
     expect(snap.fire).toBe(true);
@@ -349,7 +349,7 @@ describe('input snapshots (replay contract, V3)', () => {
     const kb = new KeyboardInput();
     kb.keyDown('KeyA');
     for (let i = 0; i < 120; i++) kb.sample(SIM_DT);
-    expect(kb.sample(SIM_DT).rudder).toBe(-1); // saturates at full port
+    expect(kb.sample(SIM_DT).rudder).toBe(1); // A reaches the screen-left turn command
     kb.keyUp('KeyA');
     let last = -1;
     for (let i = 0; i < 120; i++) last = kb.sample(SIM_DT).rudder;

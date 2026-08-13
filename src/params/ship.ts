@@ -400,7 +400,61 @@ export interface ShipMaterialParams {
   sailWeaveScale: number; // warp/weft noise frequency
   sailBacklitColor: number;
   sailBacklitStrength: number;
-  sailBillow: number; // full belly depth, fraction of sail drop, at windRef
+  /**
+   * PEAK CAMBER PER UNIT DRIVE, AS A FRACTION OF THE CHORD.
+   *
+   * Was `sailBillow`, "fraction of sail DROP" — and that was the whole of the
+   * user's standing "still looks very very bulgy". The belly is a section
+   * bowing across the sail's WIDTH, so its depth is camber and camber is
+   * measured against the chord it bows over. Scaling it by the drop measured
+   * it against the wrong dimension, and the number could not be read as
+   * camber at all: at the shipped 0.68 the main course carried 24.8% of chord
+   * at the default sea and 40.7% in a storm, against a real square sail's
+   * 10-15%. RENAMED rather than retuned on purpose — a silent meaning change
+   * is §B.12's trap, and a stale 0.68 in a saved preset must fail loudly.
+   */
+  sailCamber: number;
+  /** hard ceiling on peak camber (fraction of chord). The sheets are hauled
+   *  taut: past full load more pressure buys tension, not depth. Bites only
+   *  above ~18 m/s, which is what a ceiling is for */
+  sailCamberMax: number;
+  /**
+   * How far the free LEECH stands off the bellied surface, as a fraction of
+   * the peak camber depth. A square sail's leech is bent to the ship at
+   * exactly two points — the yardarm and the clew — and flies between them.
+   * 0 pins it at every height, which is what made the silhouette a perfect
+   * rectangle in every wind (user: "the top and bottom corners they don't
+   * have to be perfectly straight aligned").
+   */
+  sailLeechOpen: number;
+  /** ROACH: the foot is CUT with an arch, shortest at mid-width. Static, so
+   *  the bottom edge is never a straight line even becalmed. Fraction of drop */
+  sailFootRoach: number;
+  /** TWIST: how far the draft moves aft between the foot and the head, per
+   *  unit drive. The upper sail presents at a different angle from the lower
+   *  one — after the belly itself, the most recognisable cue that a sail is
+   *  answering the wind rather than being posed in it */
+  sailTwist: number;
+  /**
+   * SHEET PULL — how far each clew is hauled OUT OF THE SAIL'S PLANE toward
+   * where its sheet leads, as a fraction of the chord at full camber.
+   *
+   * User: "the actual pin points stop being flat in space and can actually be
+   * ANGLED… an extension to the piece of rope or block that it's attached to,
+   * instead of just being always perfectly flat against the mast." The head is
+   * laced to its yard and genuinely is a straight line; the CLEWS are hauled
+   * by sheets to points that are nowhere near the sail's plane, so the foot
+   * comes out of that plane and the lower half of the sail twists with it.
+   * 0 puts the corners back in the yard's plane, which is the rectangle.
+   */
+  sailSheetPull: number;
+  /** how far the two sheets spread outboard as they lead aft. It is the
+   *  DIFFERENCE between the two leads that rotates the foot's chord line
+   *  against the head's — i.e. this is where geometric twist comes from */
+  sailSheetSpread: number;
+  /** extra flutter RATE at full luff, as a multiple of the base. Legal only
+   *  because the phase is now integrated by a single owner (§V.55) */
+  sailFlutterLuffRate: number;
   sailDraftPos: number; // deepest point of the section, fraction aft of the luff
   sailDraftFullness: number; // section exponent: 1 = membrane parabola, >1 narrows it
   sailFurlSwag: number; // foot gather depth as a fraction of drop, at full furl
@@ -415,8 +469,47 @@ export interface ShipMaterialParams {
   sailFlutterAmp: number; // wind ripple amplitude (m) at the free foot
   sailFlutterFreq: number; // ripple speed (rad/s)
   sailRippleCount: number; // ripple wavelengths across the cloth
-  sailPanelCount: number; // vertical cloth panels (seam stripes)
+  /**
+   * CLOTH WIDTH IN METRES — the width of one bolt of canvas. The number of
+   * vertical panels FALLS OUT of the sail's own chord (`sailPanelsFor`), so a
+   * wider sail is sewn from more cloths rather than wider ones, and the
+   * topsails automatically carry fewer than the courses.
+   *
+   * MEASURED FROM THE REFERENCE, not chosen. Autocorrelating the detrended
+   * luminance across the lower course of the left-hand galleon in
+   * docs/inspo/ship/ref-rig-proportions.png gives a period of 30 px on a
+   * 278 px chord — 9.3 panels. The period is unambiguous: correlation is
+   * POSITIVE at 30 and 60 px and NEGATIVE at 15 and 45, which only a true
+   * 30 px repeat produces. 12.17 m ÷ 9.3 ⟹ 1.31 m, rounded to 1.35 so the
+   * main course lands on exactly 9.
+   *
+   * The first pass shipped 0.6 m (a real-world bolt), which put 20 panels on
+   * the course — the user's "at least 2 times too many", and they were right
+   * to the panel: 20 vs 9. Reality loses to the reference here on purpose;
+   * §V43 makes SoT the bar, and SoT's sails are stylised well above bolt scale.
+   */
+  sailClothWidth: number;
   sailSeamDarken: number; // 0..1 multiplier on panel seams / hem edges
+  /** how far a seam's sewn RIDGE tilts the shading normal. The seams in
+   *  docs/inspo/ship/ref-broadside-sails-spray-foam.png read because they
+   *  catch light, not because they are darker — a pure albedo line is flat */
+  sailSeamRidge: number;
+  /**
+   * QUILTING — how deeply each cloth panel bellies BETWEEN its two seams, as a
+   * fraction of the sail's own camber depth.
+   *
+   * User: "we don't get the blowing up in between these so that we actually
+   * see the sail bulge and these little seams just limiting it a little bit."
+   * A seam is doubled, stitched, stiffer canvas, so it holds while the cloth
+   * either side of it blows out — the sail reads as quilted, not smooth.
+   *
+   * THIS LIVES IN THE SHAPE, NOT THE SHADING, and that is the whole point. A
+   * line painted on a smooth interior does not change how the surface reads;
+   * the geometry has to move. Zero-mean about the smooth belly, so it
+   * redistributes camber rather than adding any: the seams pull IN by as much
+   * as the panels push OUT.
+   */
+  sailSeamQuilt: number;
   sailAmbientLift: number; // emissive floor so cloth never reads dead black
   sailBacklitFocus: number; // transmission lobe tightness (looking sunward)
   sailLeeDarken: number; // 0..1 tint multiplier on the shaded (lee) face
@@ -490,12 +583,21 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     glassColor: 0x3c4a44, glassLit: 0x2a1c0c,
     sailLight: 0xe6dcc2, sailDark: 0xa8977a,
     sailWeaveScale: 18, sailBacklitColor: 0xfff0d2, sailBacklitStrength: 0.5,
-    sailBillow: 0.68, sailDraftPos: 0.4, sailDraftFullness: 1,
+    // 0.115 per unit drive against a 0.15 ceiling puts the main course at
+    // 3.1% of chord in a calm, 8.5% at the default sea, 13.9% in a storm and
+    // 15.0% (capped) in a gale — a readable 5x range topping out inside a
+    // real sail's 10-15%. Was 0.68 OF THE DROP, i.e. 24.8% / 40.7% of chord.
+    sailCamber: 0.115, sailCamberMax: 0.15,
+    sailLeechOpen: 0.3, sailFootRoach: 0.035, sailTwist: 0.12,
+    sailSheetPull: 0.16, sailSheetSpread: 0.45,
+    sailFlutterLuffRate: 1.8,
+    sailDraftPos: 0.4, sailDraftFullness: 1,
     sailFurlSwag: 0.16, sailFurlBays: 3,
     sailWindRef: 16, sailBackBillow: 0.18, sailLuffFlap: 2.6,
     sailGustAmp: 0.3, sailGustFreq: 0.55, sailTurnSkew: 1.6, sailResponse: 2.2,
     sailFlutterAmp: 0.14, sailFlutterFreq: 2.4, sailRippleCount: 2.5,
-    sailPanelCount: 7, sailSeamDarken: 0.7, sailAmbientLift: 0.09,
+    sailClothWidth: 1.35, sailSeamDarken: 0.7, sailAmbientLift: 0.09,
+    sailSeamRidge: 0.35, sailSeamQuilt: 0.3,
     sailBacklitFocus: 3, sailLeeDarken: 0.7, sailStainStrength: 0.36,
     holeColor: 0x120c07,
     bumpScale: 1, grainRelief: 0.004, plankRelief: 0.006, seamDepth: 0.012,
@@ -522,7 +624,15 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     waleDarken: { min: 0, max: 1, step: 0.01 },
     sailWeaveScale: { min: 2, max: 60, step: 0.5 },
     sailBacklitStrength: { min: 0, max: 2, step: 0.01 },
-    sailBillow: { min: 0, max: 0.8, step: 0.01 },
+    // both in fractions of CHORD, so the slider reads as camber directly
+    sailCamber: { min: 0, max: 0.4, step: 0.005 },
+    sailCamberMax: { min: 0.02, max: 0.5, step: 0.005 },
+    sailLeechOpen: { min: 0, max: 1, step: 0.01 },
+    sailFootRoach: { min: 0, max: 0.25, step: 0.005 },
+    sailTwist: { min: 0, max: 0.4, step: 0.005 },
+    sailSheetPull: { min: 0, max: 0.6, step: 0.005 },
+    sailSheetSpread: { min: 0, max: 1.5, step: 0.01 },
+    sailFlutterLuffRate: { min: 0, max: 6, step: 0.1 },
     // bounds = the band where the draft warp stays monotone (SAIL_DRAFT_MIN/MAX)
     sailDraftPos: { min: 0.28, max: 0.72, step: 0.01 },
     sailDraftFullness: { min: 0.5, max: 2.5, step: 0.05 },
@@ -542,7 +652,9 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailFlutterAmp: { min: 0, max: 0.6, step: 0.01 },
     sailFlutterFreq: { min: 0, max: 10, step: 0.1 },
     sailRippleCount: { min: 0.5, max: 8, step: 0.1 },
-    sailPanelCount: { min: 2, max: 16, step: 1 },
+    sailClothWidth: { min: 0.2, max: 4, step: 0.05 },
+    sailSeamQuilt: { min: 0, max: 1, step: 0.01 },
+    sailSeamRidge: { min: 0, max: 1.5, step: 0.01 },
     sailSeamDarken: { min: 0.4, max: 1, step: 0.01 },
     sailAmbientLift: { min: 0, max: 0.6, step: 0.01 },
     sailStainStrength: { min: 0, max: 0.8, step: 0.01 },

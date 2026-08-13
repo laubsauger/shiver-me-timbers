@@ -146,6 +146,31 @@ export function bandLimitedEdge(
 }
 
 /**
+ * TSL mirror of {@link bandLimitEnergy} — the fraction of a feature that
+ * survives filtering, for callers that scale an AMPLITUDE rather than blend an
+ * edge. Pair it with the same widened `eff` you draw the feature at, or you
+ * have done half of §V.48b (fade without widen still steps; widen without fade
+ * still smears).
+ *
+ * The sail's seam ridge is the case this was added for: an ANTISYMMETRIC
+ * feature, whose mean over a pixel is exactly zero, so fading its amplitude to
+ * zero IS fading it to its own mean — no separate mean term is needed. That is
+ * only true for antisymmetric features; a one-sided bump needs its mean.
+ */
+export function bandLimitAmplitude(feature: AnyNode, coord: AnyNode, filterOverride?: AnyNode): AnyNode {
+  const filter = filterOverride ?? coordFilter(coord);
+  return feature.div(feature.max(filter.mul(FILTER_PIXELS)).max(EPS));
+}
+
+/** the width a feature is actually DRAWN at once widened to the sample grid —
+ *  §V.48b half (a): ≥ 2 px of its own coordinate, so it stops varying faster
+ *  than the grid can carry. Pair with {@link bandLimitAmplitude}. */
+export function bandLimitWidth(feature: AnyNode, coord: AnyNode, filterOverride?: AnyNode): AnyNode {
+  const filter = filterOverride ?? coordFilter(coord);
+  return feature.max(filter.mul(FILTER_PIXELS)).max(EPS);
+}
+
+/**
  * Screen-space footprint of a coordinate, for callers that band-limit an
  * amplitude directly rather than an edge (the crowned per-board lift, the
  * per-board tone jitter, the grain ridges — smooth terms with no edge, whose

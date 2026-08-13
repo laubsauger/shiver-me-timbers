@@ -5,6 +5,11 @@
  * solver attaches to (V12), and determinism keeps multiplayer possible (V2).
  */
 import { describe, expect, it } from 'vitest';
+/** corners in the yard's plane — the shape BEFORE the sheets haul them */
+const FLAT_SHEETS = {
+  sheetLeadPort: [0, 0, 0] as [number, number, number],
+  sheetLeadStarboard: [0, 0, 0] as [number, number, number],
+};
 import type { Material, Mesh } from 'three';
 import { buildBrigantineBlueprint, buildGalleonBlueprint } from '../src/ship/shipBlueprint';
 import { buildHoledVariant, buildPieceGeometry, buildSailGeometry } from '../src/ship/pieceGeometry';
@@ -19,6 +24,7 @@ import {
   type HullShape,
 } from '../src/ship/hullMath';
 import {
+  SAIL_GUST_DETUNE,
   braceAngle,
   sailDrive,
   sailGeometryState,
@@ -26,17 +32,27 @@ import {
   trimDropScale,
 } from '../src/ship/sailDynamics';
 import { updateRig } from '../src/ship/rigTrim';
+import { sheetLeadDirections } from '../src/ship/sailFrame';
+/** a sail sitting square in its ship's frame */
+const IDENTITY_MATRIX = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
 import { oceanParams } from '../src/params/ocean';
 import {
   SAIL_BELLY_FOOT,
   SAIL_DRAFT_MAX,
   SAIL_DRAFT_MIN,
   SAIL_FOOT_FILL,
+  arcShorten,
   sailBellyProfile,
+  sailCamberRatio,
   sailClothOffset,
+  sailClothPoint,
+  sailCornerPull,
   sailDraftLead,
   sailDraftProfile,
+  sailFlutterRate,
   sailFurlLift,
+  sailPanelsFor,
+  leechStandoff,
 } from '../src/ship/sailShape';
 
 const stubFactory = () => ({ dispose(): void {} }) as unknown as Material;
@@ -509,7 +525,7 @@ describe('sail wind response (§V22 "the sails appear too static")', () => {
   // the rig contradicts the physics the player feels. Convention (shared
   // with src/sailing): forward = +z, windDirection = blowing TOWARD.
   const p = shipMaterialParams;
-  const base = { forwardX: 0, forwardZ: 1, windSpeed: p.sailWindRef, yawRate: 0, time: 0 };
+  const base = { forwardX: 0, forwardZ: 1, windSpeed: p.sailWindRef, yawRate: 0 };
 
   it('fills on a run and backs when the wind heads the ship', () => {
     const running = sailDrive({ ...base, windDirection: 0 }, p); // wind astern
@@ -550,8 +566,19 @@ describe('sail wind response (§V22 "the sails appear too static")', () => {
     expect(turning.luff).toBeGreaterThan(straight.luff);
   });
 
-  it('gusts breathe over time without a global sync pulse (§B.4)', () => {
-    const at = (t: number): number => sailDrive({ ...base, windDirection: 0, time: t }, p).drive;
+  it('gusts breathe over PHASE without a global sync pulse (§B.4, §V.55)', () => {
+    // WHY PHASE AND NOT TIME: `sailGustFreq` is live in Tweakpane, so
+    // `time × rate` is not a phase at all — its instantaneous frequency is
+    // ω + t·dω/dt and elapsed time multiplies every wobble in the rate
+    // (measured on the flags: 0.93 Hz intended, 59.5 Hz at ten minutes). The
+    // two accumulators are integrated by rigTrim.updateRig; this asserts the
+    // breathing survived the move, and that the pair is genuinely DETUNED —
+    // one period would read as a single animation looping.
+    const at = (a: number): number =>
+      sailDrive(
+        { ...base, windDirection: 0, gustPhase: a, gustPhaseB: a * SAIL_GUST_DETUNE },
+        p,
+      ).drive;
     const samples = [0, 1.7, 3.4, 5.1, 6.8, 8.5].map(at);
     expect(new Set(samples.map((v) => v.toFixed(4))).size).toBeGreaterThan(3);
     expect(Math.max(...samples) - Math.min(...samples)).toBeGreaterThan(0.02);
@@ -559,7 +586,19 @@ describe('sail wind response (§V22 "the sails appear too static")', () => {
 
   it('never emits a non-finite value into a shader uniform (§V28)', () => {
     const bad = sailDrive(
-      { forwardX: NaN, forwardZ: 0, windDirection: NaN, windSpeed: NaN, yawRate: NaN, time: NaN },
+      {
+        forwardX: NaN,
+        forwardZ: 0,
+        shipForwardX: NaN,
+        shipForwardZ: NaN,
+        windDirection: NaN,
+        windSpeed: NaN,
+        shipVelX: NaN,
+        shipVelZ: NaN,
+        yawRate: NaN,
+        gustPhase: NaN,
+        gustPhaseB: NaN,
+      },
       p,
     );
     for (const v of [bad.drive, bad.luff, bad.skew]) expect(Number.isFinite(v)).toBe(true);
@@ -795,7 +834,7 @@ describe('hauling the canvas up and down is SMOOTH end to end (§V22)', () => {
     const pos = geo.getAttribute('position');
     const shape = geo.getAttribute('sailShape');
     const uvs = geo.getAttribute('uv');
-    const s = { drive: 0, luff: 0, skew: 0, dropScale: scale, time: 0, phase: 0 };
+    const s = { drive: 0, luff: 0, skew: 0, dropScale: scale, flutterPhase: 0, ...FLAT_SHEETS };
     let lo = 0;
     for (let i = 0; i < pos.count; i++) {
       const w = shape.getX(i);
@@ -859,7 +898,7 @@ describe('hauling the canvas up and down is SMOOTH end to end (§V22)', () => {
     // thirds, instead of just a completely straight line rolled up".
     const drop = 6.3;
     const at = (trim: number, u: number): number =>
-      sailFurlLift(u, 0, drop, { drive: 0, luff: 0, skew: 0, dropScale: trimDropScale(trim, p), time: 0, phase: 0 }, mp);
+      sailFurlLift(u, 0, drop, { drive: 0, luff: 0, skew: 0, dropScale: trimDropScale(trim, p), flutterPhase: 0, ...FLAT_SHEETS }, mp);
 
     // a set sail is NOT gathered — this must not disturb the belly (§B.21)
     for (let u = 0; u <= 1; u += 0.1) expect(at(1, u)).toBeCloseTo(0, 9);
@@ -1018,7 +1057,7 @@ describe('ShipAssembly piece ops (§V.13: destruction only via piece graph)', ()
 describe('sail belly reads as a curved surface (§V22 "no billow")', () => {
   const p = shipMaterialParams;
   const base = { forwardX: 0, forwardZ: 1, yawRate: 0, time: 0 };
-  const state = (drive: number) => ({ drive, luff: 0, skew: 0, dropScale: 1, time: 0, phase: 0 });
+  const state = (drive: number) => ({ drive, luff: 0, skew: 0, dropScale: 1, flutterPhase: 0, ...FLAT_SHEETS });
 
   it('is deepest around mid-height and comes back at BOTH ends', () => {
     // the old profile was smoothstep(0, 0.9, 1−v): monotone, deepest at the
@@ -1043,15 +1082,60 @@ describe('sail belly reads as a curved surface (§V22 "no billow")', () => {
     for (let i = argmax + 1; i < ys.length; i++) expect(ys[i]).toBeLessThanOrEqual(ys[i - 1] + 1e-9);
   });
 
-  it('still pins the cloth at both leeches and at the head', () => {
-    // the bolt ropes hold the sides; a belly that did not go to zero here
-    // would tear the cloth off its own edges
-    const drop = 7;
-    for (const v of [0, 0.45, 0.9]) {
-      expect(Math.abs(sailClothOffset(0, v, drop, state(1), p))).toBeLessThan(0.02);
-      expect(Math.abs(sailClothOffset(1, v, drop, state(1), p))).toBeLessThan(0.02);
+  it('holds the leech at the YARDARM and the CLEW, and lets it fly between', () => {
+    // RE-CUT, and the old assertion was the bug. It required the leech to sit
+    // at z ≈ 0 for EVERY v, on the reasoning that the edges are "bolt-roped
+    // and sheeted, so a belly that did not close there would tear the cloth
+    // off its own edges". A bolt rope is sewn ALONG an edge — it stiffens the
+    // edge, it does not attach it to anything. A square sail's leech is bent
+    // to the ship at exactly TWO points, the yardarm and the clew, and flies
+    // between them.
+    //
+    // Pinning it everywhere is what made the sail's projected outline a
+    // PERFECT RECTANGLE in every wind, at every angle, at every trim — the
+    // user's twice-made "the top and bottom corners don't have to be
+    // perfectly straight aligned". So the intent this now encodes is: held
+    // where it is actually made fast, free where it is not, and bounded.
+    const width = 12.17;
+    for (const u of [0, 1]) {
+      // made fast at both ends
+      expect(Math.abs(sailClothOffset(u, 0, width, state(1), p))).toBeLessThan(0.02);
+      expect(Math.abs(sailClothOffset(u, 1, width, state(1), p))).toBeLessThan(0.02);
+      // and genuinely flying in between — this is the assertion that would
+      // have failed on the old shape, which is the point of re-cutting it
+      expect(sailClothOffset(u, 0.5, width, state(1), p)).toBeGreaterThan(0.05);
     }
-    expect(Math.abs(sailClothOffset(0.5, 1, drop, state(1), p))).toBeLessThan(0.02);
+    // the head is bent to its yard along its whole length
+    for (const u of [0.2, 0.5, 0.8]) {
+      expect(Math.abs(sailClothOffset(u, 1, width, state(1), p))).toBeLessThan(0.02);
+    }
+    // bounded: the leech may fly, it may not blow through the rigging
+    const peak = sailCamberRatio(1, p) * width;
+    for (const u of [0, 1]) {
+      expect(sailClothOffset(u, 0.5, width, state(1), p)).toBeLessThan(peak);
+    }
+  });
+
+  it('is CAMBER against the chord, not a fraction of the drop (the bulge bug)', () => {
+    // WHY THIS IS THE TEST: the belly is a section bowing across the sail's
+    // WIDTH, so its depth is camber and camber is measured against the chord
+    // it bows over. `sailBillow` scaled it by the DROP instead, which is not
+    // a wrong number so much as a wrong DIMENSION — and it is the whole of
+    // "still looks very very bulgy": measured on the shipped params the main
+    // course carried 24.8% of chord at the default sea and 40.7% in a storm,
+    // against a real square sail's 10-15%.
+    //
+    // Asserted as a RATIO so it survives any retune of the sail's size, and
+    // so that a future change that reintroduces the drop-scaling fails here
+    // rather than on screen. Two sails of very different aspect must agree.
+    const narrow = { width: 6, drop: 6 };
+    const wide = { width: 18, drop: 6 };
+    const camberOf = (w: number): number =>
+      sailClothOffset(0.5, SAIL_BELLY_FOOT, w, state(1), { ...p, sailFlutterAmp: 0 }) / w;
+    expect(camberOf(narrow.width)).toBeCloseTo(camberOf(wide.width), 6);
+    // and it sits where a real sail sits
+    expect(camberOf(wide.width)).toBeGreaterThan(0.05);
+    expect(camberOf(wide.width)).toBeLessThanOrEqual(p.sailCamberMax);
   });
 
   it('leaves real headroom above the wind the game actually sails in', () => {
@@ -1065,27 +1149,464 @@ describe('sail belly reads as a curved surface (§V22 "no billow")', () => {
     expect(ordinary.drive).toBeLessThan(0.8); // …with room left above her
   });
 
-  it('deepens visibly from light air to a gale', () => {
-    const depthAt = (windSpeed: number): number => {
+  it('deepens visibly from light air to a gale, and never past a real sail', () => {
+    // RE-CUT. This used to assert `ordinary > 1.8` METRES on a 7 m course —
+    // an absolute depth against the DROP, with no chord anywhere in it. That
+    // encodes two things, only one of which is the intent: "wind drives
+    // belly" (yes) and "and it is this deep" (no — that is the bulge the user
+    // has now complained about twice). Restated as a camber RATIO, so it
+    // fails if wind stops driving the belly and passes at any sane camber.
+    const CHORD = 12.17; // the galleon's main course
+    const camberAt = (windSpeed: number): number => {
       const d = sailDrive({ ...base, windDirection: 0, windSpeed }, p).drive;
-      // peak of the belly: mid-width, at the draft, on a 7 m course
-      return sailClothOffset(0.5, SAIL_BELLY_FOOT, 7, state(d), p);
+      return (
+        sailClothOffset(0.5, SAIL_BELLY_FOOT, CHORD, state(d), { ...p, sailFlutterAmp: 0 })
+        / CHORD
+      );
     };
-    const light = depthAt(5);
-    const ordinary = depthAt(oceanParams.windSpeed);
-    const gale = depthAt(22);
+    const light = camberAt(5);
+    const ordinary = camberAt(oceanParams.windSpeed);
+    const gale = camberAt(22);
     expect(light).toBeLessThan(ordinary);
     expect(ordinary).toBeLessThan(gale);
-    // the whole point: the range has to be READABLE, not a few percent
+    // THE INTENT: the range must be READABLE, not a few percent
     expect(gale / Math.max(light, 1e-6)).toBeGreaterThan(2.5);
-    // and ordinary conditions must give a belly worth looking at on a 7 m sail
-    expect(ordinary).toBeGreaterThan(1.8);
+    // …and the whole of it must live where a square sail's camber lives. The
+    // ceiling is the half that was missing: a gale used to reach 45% of chord.
+    expect(ordinary).toBeGreaterThan(0.05);
+    expect(gale).toBeLessThanOrEqual(p.sailCamberMax + 1e-9);
   });
 
   it('goes slack in irons and inverts when the wind backs the sail', () => {
     const irons = sailDrive({ ...base, windDirection: Math.PI, windSpeed: 12 }, p);
     const backed = sailClothOffset(0.5, SAIL_BELLY_FOOT, 7, state(irons.drive), p);
     expect(backed).toBeLessThan(0); // pressed back against the rig, not filled
+  });
+});
+
+/**
+ * §V22 / §V43 / §T.34 — the SILHOUETTE, which is what the user has now
+ * complained about twice: "the top and bottom corners they don't have to be
+ * perfectly straight aligned", and "it still looks very very bulgy".
+ *
+ * Both complaints have the same structural cause and no amount of tuning
+ * reaches it. The old shape displaced the cloth along ONE axis (local +z) and
+ * left x and y as pure functions of (u, v), so the sail's projected outline
+ * was EXACTLY the flat rectangle for every wind, every angle and every trim.
+ * A z-only field pinned at its edges cannot round a corner or curve an edge.
+ *
+ * It also meant the canvas GAINED SURFACE AREA as the wind rose — it inflated
+ * like a balloon rather than bowing like a fixed piece of cloth, which is a
+ * cause of "bulgy" that is independent of how deep the belly is.
+ *
+ * These tests are about the OUTLINE. Every one of them passes on a sail of any
+ * depth and fails the moment the shape goes back to being a rectangle.
+ */
+describe('the sail is CLOTH, not an inflating bag (§V43 SoT parity)', () => {
+  const p = { ...shipMaterialParams, sailFlutterAmp: 0 };
+  const WIDTH = 12.17; // the galleon's main course
+  const DROP = 6.3;
+  const state = (drive: number) => ({ drive, luff: 0, skew: 0, dropScale: 1, flutterPhase: 0, ...FLAT_SHEETS });
+  const pt = (u: number, v: number, drive: number) =>
+    sailClothPoint(u, v, WIDTH, DROP, state(drive), p);
+
+  it('draws the clews IN and UP as she fills — arc length is conserved', () => {
+    // THE CUE THAT SEPARATES CLOTH FROM A BALLOON. A strip that bows by d over
+    // a chord c is c·(1 + 8/3·(d/c)²) long, so it must give up span to pay for
+    // its own bow. Without this the sail simply gets bigger as it fills, and
+    // the sheets and blocks have nothing to follow.
+    const slack = pt(1, 0, 0); // becalmed clew
+    const full = pt(1, 0, 1); // hard full
+    expect(full[0]).toBeLessThan(slack[0]); // drawn inboard…
+    expect(full[1]).toBeGreaterThan(slack[1]); // …and lifted
+
+    // and it is MONOTONE in the wind, not a one-off offset
+    let prevX = Infinity;
+    let prevY = -Infinity;
+    for (const drive of [0, 0.25, 0.5, 0.75, 1]) {
+      const [x, y] = pt(1, 0, drive);
+      expect(x).toBeLessThanOrEqual(prevX + 1e-9);
+      expect(y).toBeGreaterThanOrEqual(prevY - 1e-9);
+      prevX = x;
+      prevY = y;
+    }
+  });
+
+  it('becalmed, the cloth returns to the panel it was cut from', () => {
+    // the compensation must VANISH with the wind, or a ship at anchor shows a
+    // permanently shrunken sail. Only the static roach survives, by design.
+    const flat = { ...p, sailFootRoach: 0 };
+    const [x, y, z] = sailClothPoint(1, 0, WIDTH, DROP, state(0), flat);
+    expect(x).toBeCloseTo(WIDTH / 2, 9);
+    expect(y).toBeCloseTo(-DROP, 9);
+    expect(z).toBeCloseTo(0, 9);
+  });
+
+  it('bows the LEECH inboard, deepest at the draft and not at all at the head', () => {
+    // the side edge is no longer a straight vertical line: each horizontal
+    // strip gives up span in proportion to its OWN bow, and the bow follows
+    // the vertical belly profile — zero at the yard, deepest around mid-height
+    const headX = pt(1, 1, 1)[0];
+    const draftX = pt(1, SAIL_BELLY_FOOT, 1)[0];
+    const footX = pt(1, 0, 1)[0];
+    expect(headX).toBeCloseTo(WIDTH / 2, 9); // bent to the yard: full width
+    expect(draftX).toBeLessThan(headX - 0.05); // pulled in where she is deepest
+    expect(draftX).toBeLessThan(footX); // the foot is a free edge, less bow
+  });
+
+  it('scallops the FOOT, highest at mid-width and not at all at the clews', () => {
+    // the vertical strips bow too, most where the section is deepest, so the
+    // bottom edge curves up between the two clews instead of running straight
+    const clewY = pt(1, 0, 1)[1];
+    const midY = pt(0.5, 0, 1)[1];
+    expect(midY).toBeGreaterThan(clewY + 0.05);
+    // and the curve is smooth, not a kink: sampled across the foot it rises
+    // to a single interior maximum
+    const ys = Array.from({ length: 21 }, (_, i) => pt(i / 20, 0, 1)[1]);
+    const argmax = ys.indexOf(Math.max(...ys));
+    expect(argmax).toBeGreaterThan(3);
+    expect(argmax).toBeLessThan(17);
+  });
+
+  it('never leaves the foot a straight line, even with no wind in her', () => {
+    // the roach is CUT into the sail, so the silhouette is honest at anchor
+    // too — the complaint was about the outline, not about the breeze
+    expect(p.sailFootRoach).toBeGreaterThan(0);
+    const clewY = sailClothPoint(0, 0, WIDTH, DROP, state(0), p)[1];
+    const midY = sailClothPoint(0.5, 0, WIDTH, DROP, state(0), p)[1];
+    expect(midY).toBeGreaterThan(clewY + 0.05);
+  });
+
+  it('TWISTS: the upper sail presents at a different angle from the lower', () => {
+    // after the belly itself, the most recognisable cue that a sail is
+    // answering the wind rather than being posed in it. Measured as the
+    // deepest point of the section MOVING between foot and head — a sail whose
+    // every section is identical is a extruded shape, not canvas.
+    const draftOf = (v: number): number => {
+      let best = -Infinity;
+      let arg = 0;
+      for (let i = 0; i <= 400; i++) {
+        const u = i / 400;
+        const z = sailClothOffset(u, v, WIDTH, state(1), p);
+        if (z > best) {
+          best = z;
+          arg = u;
+        }
+      }
+      return arg;
+    };
+    expect(Math.abs(draftOf(0.9) - draftOf(0.1))).toBeGreaterThan(0.03);
+    // …and it is DRIVEN, not baked: no wind, no twist
+    const flat = { ...p, sailTwist: 0 };
+    const at = (v: number, pp: typeof p): number =>
+      sailClothOffset(0.3, v, WIDTH, state(1), pp);
+    expect(at(0.9, p)).not.toBeCloseTo(at(0.9, flat), 4);
+  });
+
+  it('a reefed sail is FLATTER, and the outline agrees with the surface', () => {
+    // the cloth that is left is stretched between its yard and the reef band.
+    // The outline shrink and the belly must read the SAME camber or the edge
+    // and the surface inside it disagree — a visible crease at the leech.
+    const reefed = { drive: 1, luff: 0, skew: 0, dropScale: 0.3, flutterPhase: 0, ...FLAT_SHEETS };
+    const set = state(1);
+    expect(Math.abs(sailClothOffset(0.5, SAIL_BELLY_FOOT, WIDTH, reefed, p))).toBeLessThan(
+      Math.abs(sailClothOffset(0.5, SAIL_BELLY_FOOT, WIDTH, set, p)),
+    );
+    // the clew of the reefed sail is drawn in LESS, because she is bowing less
+    const inboardSet = WIDTH / 2 - sailClothPoint(1, 0, WIDTH, DROP, set, p)[0];
+    const inboardReefed = WIDTH / 2 - sailClothPoint(1, 0, WIDTH, DROP, reefed, p)[0];
+    expect(inboardReefed).toBeLessThan(inboardSet);
+  });
+
+  it('arc-length compensation is the textbook parabola, and only shortens', () => {
+    // the coefficient is not a taste knob — it is the 8/3 of a parabolic arc,
+    // and it must never LENGTHEN the cloth whatever it is handed (§V28/§V44)
+    expect(arcShorten(0)).toBeCloseTo(1, 12);
+    expect(arcShorten(0.15)).toBeCloseTo(1 / (1 + (8 / 3) * 0.15 * 0.15), 12);
+    for (const k of [-2, -0.3, 0, 0.3, 2, NaN]) {
+      const f = arcShorten(k);
+      expect(Number.isFinite(f)).toBe(true);
+      expect(f).toBeGreaterThan(0);
+      expect(f).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('the leech standoff is held at BOTH its made-fast ends, for every u', () => {
+    // the shape term itself, asserted directly: whatever the edge does in
+    // between, it is zero where the sail is actually bent to the ship
+    for (let i = 0; i <= 10; i++) {
+      const u = i / 10;
+      expect(leechStandoff(u, 0)).toBeCloseTo(0, 9); // the clew
+      expect(leechStandoff(u, 1)).toBeCloseTo(0, 9); // the yardarm
+    }
+    expect(leechStandoff(0, 0.5)).toBeCloseTo(1, 9); // full at the leech
+    expect(leechStandoff(0.5, 0.5)).toBeCloseTo(0, 9); // nothing at mid-width
+  });
+});
+
+/**
+ * §V22 / §V43 — THE CORNER CONSTRAINT.
+ *
+ * User: "it's like arc length, but ALSO that the actual pin points stop being
+ * flat in space and can actually be ANGLED. That's also part of the secret
+ * here. So they can be angled, an extension to the piece of rope or block that
+ * it's attached to, instead of just being always perfectly flat against the
+ * mast."
+ *
+ * The head is laced to its yard along its whole length, so it genuinely is a
+ * straight line and must stay one. The CLEWS are hauled by sheets to points on
+ * the ship that are nowhere near the sail's plane, so the foot leaves that
+ * plane. Before this, `x = (u − 0.5)·width` with no wind term at all: the
+ * corners lived in the yard's plane and could never leave it.
+ */
+describe('the clews are hauled OUT of the yard plane (§V45 one truth)', () => {
+  const p = { ...shipMaterialParams, sailFlutterAmp: 0 };
+  const WIDTH = 12.17;
+  const DROP = 6.3;
+  // a ship heading +z with her yards square: the sheets lead aft and out
+  const leads = sheetLeadDirections(IDENTITY_MATRIX, 0, 1, p.sailSheetSpread);
+  const st = (drive: number) => ({
+    drive,
+    luff: 0,
+    skew: 0,
+    dropScale: 1,
+    flutterPhase: 0,
+    sheetLeadPort: leads.port,
+    sheetLeadStarboard: leads.starboard,
+  });
+
+  it('hauls the sheets AFT and DOWN, not somewhere in the sail plane', () => {
+    // the direction is the thing under test: aft is −z in a ship-aligned
+    // frame, and a sheet that led anywhere else would not be a sheet
+    for (const lead of [leads.port, leads.starboard]) {
+      expect(lead[2]).toBeLessThan(-0.2); // aft
+      expect(lead[1]).toBeLessThan(-0.2); // and down
+    }
+    // …and they SPREAD, port to port and starboard to starboard. This is the
+    // difference that rotates the foot's chord against the head's.
+    expect(leads.port[0]).toBeLessThan(leads.starboard[0]);
+  });
+
+  it('moves the clew in ALL THREE axes — the corner is no longer flat', () => {
+    const flat = sailClothPoint(1, 0, WIDTH, DROP, { ...st(1), ...FLAT_SHEETS }, p);
+    const hauled = sailClothPoint(1, 0, WIDTH, DROP, st(1), p);
+    // the old shape could only ever move z. All three must move now, or the
+    // corner is still pinned in the yard's plane.
+    expect(Math.abs(hauled[0] - flat[0])).toBeGreaterThan(0.01);
+    expect(Math.abs(hauled[1] - flat[1])).toBeGreaterThan(0.01);
+    expect(Math.abs(hauled[2] - flat[2])).toBeGreaterThan(0.01);
+  });
+
+  it('leaves the HEAD laced to its yard — a straight line, still', () => {
+    // the one corner constraint that was already right, and the sheets must
+    // not disturb it: the head is bent to the spar along its whole length
+    for (const u of [0, 0.25, 0.5, 0.75, 1]) {
+      const pull = sailCornerPull(u, 1, WIDTH, st(1), p);
+      for (const c of pull) expect(Math.abs(c)).toBeLessThan(1e-9);
+    }
+    // and the head's own line stays straight in x: equal spacing, no bow
+    const xs = [0, 0.25, 0.5, 0.75, 1].map(
+      (u) => sailClothPoint(u, 1, WIDTH, DROP, st(1), p)[0],
+    );
+    for (let i = 2; i < xs.length; i++) {
+      expect(xs[i] - xs[i - 1]).toBeCloseTo(xs[1] - xs[0], 6);
+    }
+  });
+
+  it('comes taut with the load — a slack sheet hauls nothing', () => {
+    const slack = sailCornerPull(1, 0, WIDTH, st(0), p);
+    const taut = sailCornerPull(1, 0, WIDTH, st(1), p);
+    for (const c of slack) expect(Math.abs(c)).toBeCloseTo(0, 9);
+    expect(Math.hypot(...taut)).toBeGreaterThan(0.05);
+  });
+
+  it('TWISTS the foot against the head once the yard is BRACED', () => {
+    // THE ANSWER TO "does twist fall out of the corner solve?": YES, but only
+    // where it physically should, and the null case is worth stating because
+    // it is what proves the mechanism is real rather than a fudge.
+    //
+    // With the yard SQUARE the two sheets are mirror images of each other, so
+    // they haul both clews equally aft and the foot swings back as a rigid
+    // line — no twist, correctly. BRACE the yard and that mirror symmetry is
+    // broken: the leads' purely-lateral difference rotates into the sail's own
+    // frame and acquires a fore-and-aft component, so the two clews are hauled
+    // by different amounts and the foot's chord rotates against the head's.
+    //
+    // Measured with the aerodynamic draft-migration term (`sailTwist`) OFF, so
+    // this is the corner geometry and nothing else. The two are complementary:
+    // this moves where the sail's CORNERS are, that moves where it is DEEPEST.
+    const noDraftTwist = { ...p, sailTwist: 0 };
+    const braced = Math.PI / 5;
+    const c = Math.cos(braced);
+    const sn = Math.sin(braced);
+    const m = [c, 0, -sn, 0, 0, 1, 0, 0, sn, 0, c, 0, 0, 0, 0, 1];
+    const bl = sheetLeadDirections(m, 0, 1, p.sailSheetSpread);
+    const bracedState = {
+      ...st(1),
+      sheetLeadPort: bl.port,
+      sheetLeadStarboard: bl.starboard,
+    };
+    const at = (u: number, v: number): number[] =>
+      sailClothPoint(u, v, WIDTH, DROP, bracedState, noDraftTwist);
+    // the head's chord runs straight across its yard: both ends at the same z
+    expect(Math.abs(at(1, 1)[2] - at(0, 1)[2])).toBeLessThan(1e-6);
+    // the foot's does not — its two sheets pull it round
+    expect(Math.abs(at(1, 0)[2] - at(0, 0)[2])).toBeGreaterThan(0.01);
+
+    // and SQUARE is the null case: symmetric sheets, no geometric twist
+    const sq = (u: number): number => sailClothPoint(u, 0, WIDTH, DROP, st(1), noDraftTwist)[2];
+    expect(Math.abs(sq(1) - sq(0))).toBeLessThan(1e-9);
+  });
+
+  it('never moves a vertex when there is no sheet, and never emits a NaN', () => {
+    // §V28: this reaches vertices. A sail with no sheet (the plan skips some)
+    // must render exactly as the un-hauled shape, not as a hole in the world.
+    const none = sailCornerPull(0.3, 0.2, WIDTH, { ...st(1), ...FLAT_SHEETS }, p);
+    for (const c of none) expect(c).toBe(0);
+    const poison = {
+      ...st(NaN),
+      sheetLeadPort: [NaN, NaN, NaN] as [number, number, number],
+      sheetLeadStarboard: [Infinity, 0, 0] as [number, number, number],
+    };
+    for (const c of sailCornerPull(NaN, NaN, NaN, poison, p)) {
+      expect(Number.isFinite(c)).toBe(true);
+    }
+    // and a heading that has not been published yet fails to FLAT, not to a
+    // direction someone made up
+    const dead = sheetLeadDirections(IDENTITY_MATRIX, 0, 0, p.sailSheetSpread);
+    expect(dead.port).toEqual([0, 0, 0]);
+  });
+
+  it('swings with the BRACE — the same anchors arrive from a new quarter', () => {
+    // the whole reason the lead is resolved in SAIL-LOCAL space. Brace the
+    // yard round and the fixed sheet anchors pull the foot a different way,
+    // which is what stops the rig reading as one rigid assembly.
+    const braced = Math.PI / 5;
+    const c = Math.cos(braced);
+    const sn = Math.sin(braced);
+    // column-major, rotation about +y
+    const m = [c, 0, -sn, 0, 0, 1, 0, 0, sn, 0, c, 0, 0, 0, 0, 1];
+    const square = sheetLeadDirections(IDENTITY_MATRIX, 0, 1, p.sailSheetSpread);
+    const swung = sheetLeadDirections(m, 0, 1, p.sailSheetSpread);
+    expect(Math.abs(swung.port[0] - square.port[0])).toBeGreaterThan(0.05);
+  });
+});
+
+/**
+ * §V.55 / §B.30 — the flutter phase, and the two-clock defect it closes.
+ */
+describe('flutter rides an INTEGRATED phase with one owner (§V.55, §B.30)', () => {
+  const p = shipMaterialParams;
+
+  it('shakes faster the harder she luffs — which needs the integral', () => {
+    // The old shape held the rate CONSTANT and let luff drive amplitude only,
+    // because `time × ω(luff)` is not a phase when ω moves: its instantaneous
+    // frequency is ω + t·dω/dt and elapsed time multiplies every wobble in the
+    // rate (measured on the flags: 0.93 Hz intended, 59.5 Hz at ten minutes,
+    // with sign flips). An accumulator needs ONE owner, and the shape had two
+    // evaluators on two clocks. It has one owner now, so this cue is legal.
+    expect(sailFlutterRate(1, p)).toBeGreaterThan(sailFlutterRate(0, p) * 1.5);
+    expect(sailFlutterRate(0, p)).toBeCloseTo(p.sailFlutterFreq, 9);
+  });
+
+  it('the rate is BOUNDED, so the accumulator can never run away (§V44)', () => {
+    for (const luff of [-5, 0, 0.5, 1, 99, NaN]) {
+      const r = sailFlutterRate(luff, p);
+      expect(Number.isFinite(r)).toBe(true);
+      expect(r).toBeGreaterThanOrEqual(0);
+      expect(r).toBeLessThanOrEqual(p.sailFlutterFreq * (1 + 1.4 * p.sailFlutterLuffRate) + 1e-9);
+    }
+  });
+
+  it('the shape reads a phase and owns no clock at all', () => {
+    // THE ACTUAL FIX for §B.30's "~0.28 m of rope anchor" divergence: the CPU
+    // evaluator and the shader cannot disagree about time if neither has a
+    // clock. Same phase in ⟹ same cloth out, and the phase is handed to both.
+    const width = 12.17;
+    const at = (flutterPhase: number): number =>
+      sailClothOffset(0.2, 0.3, width, { drive: 0.7, luff: 0.5, skew: 0, dropScale: 1, flutterPhase, ...FLAT_SHEETS }, p);
+    expect(at(1.234)).toBeCloseTo(at(1.234), 12);
+    expect(at(0)).not.toBeCloseTo(at(Math.PI / 2), 4);
+    // and it is periodic in 2π, which is what makes wrapping the accumulator
+    // safe — a wrap must not show as a jump in the cloth
+    expect(at(0.7)).toBeCloseTo(at(0.7 + Math.PI * 2), 6);
+  });
+});
+
+/**
+ * §V22 — "not wind speed and wind capture dependent enough" (Stage 2a/2c).
+ */
+describe('the sails feel the wind the SHIP feels (apparent, braced)', () => {
+  const p = shipMaterialParams;
+  const ahead = { forwardX: 0, forwardZ: 1, yawRate: 0 };
+
+  it('eases as she runs away from the wind, loads as she hardens up', () => {
+    // A ship running dead downwind at 8 m/s in an 11 m/s breeze feels 3 m/s
+    // and her canvas should go soft — the cue her own masthead pennant has
+    // always shown (flagDynamics.apparentWind), which the sails never read.
+    // Same TRUE wind in all three cases: only her way through it changes.
+    const trueWind = { windDirection: 0, windSpeed: 11 };
+    const anchored = sailDrive({ ...ahead, ...trueWind }, p).drive;
+    const running = sailDrive({ ...ahead, ...trueWind, shipVelZ: 8 }, p).drive;
+    const punching = sailDrive({ ...ahead, ...trueWind, shipVelZ: -4 }, p).drive;
+    expect(running).toBeLessThan(anchored * 0.6);
+    expect(punching).toBeGreaterThan(anchored);
+  });
+
+  it('defaults to the true wind when nobody says how fast she is going', () => {
+    // a headless probe or a sail rendered before its first updateRig must get
+    // the old, valid answer rather than a silently zeroed one
+    const withVel = sailDrive({ ...ahead, windDirection: 0, windSpeed: 11, shipVelX: 0, shipVelZ: 0 }, p);
+    const without = sailDrive({ ...ahead, windDirection: 0, windSpeed: 11 }, p);
+    expect(without.drive).toBeCloseTo(withVel.drive, 12);
+  });
+
+  it('does not double-count the brace: the point of sail is the HULL\'s', () => {
+    // `trimEfficiency` is a POINT-OF-SAIL curve carrying the sim's dead zone,
+    // so it must be measured on the hull. Fed the SAIL's braced angle instead,
+    // a yard braced 35° reported 80° off the wind where the hull had 45° — a
+    // far better point of sail than the ship actually had, so the canvas
+    // stayed full while she made almost no way.
+    const wind = { windDirection: Math.PI * 0.75, windSpeed: 11 }; // close-hauled
+    const braced = Math.PI * 0.19; // ~35° of brace
+    const sail = { forwardX: Math.sin(braced), forwardZ: Math.cos(braced) };
+    // the hull's heading is what decides how well she is drawing…
+    const honest = sailDrive({ ...sail, shipForwardX: 0, shipForwardZ: 1, yawRate: 0, ...wind }, p);
+    // …and reading it off the braced yard instead flatters her
+    const flattered = sailDrive({ ...sail, yawRate: 0, ...wind }, p);
+    expect(honest.drive).toBeLessThan(flattered.drive);
+    expect(honest.luff).toBeGreaterThan(flattered.luff);
+  });
+});
+
+/**
+ * §V43 / §V.48 — the sewn panel seams (user, against
+ * docs/inspo/ship/ref-broadside-sails-spray-foam.png).
+ */
+describe('a sail is sewn from cloths of a FIXED width', () => {
+  const p = shipMaterialParams;
+
+  it('a wider sail gets MORE cloths, not wider ones', () => {
+    // WHY: a bolt of canvas is a fixed width. The old `sailPanelCount = 7`
+    // was flat across the ship, so the 12.17 m main course got 1.74 m
+    // "cloths" and the 8.69 m topsail 1.24 m — not a bolt of anything, and
+    // different on two sails of the same ship, which is exactly the "ultra
+    // regular / generated" tell §V43 is about.
+    const course = sailPanelsFor(12.17, p.sailClothWidth);
+    const topsail = sailPanelsFor(8.69, p.sailClothWidth);
+    expect(course).toBeGreaterThan(topsail);
+    // every sail on the ship agrees about how wide a cloth is
+    expect(12.17 / course).toBeCloseTo(8.69 / topsail, 1);
+    // and that width is a real bolt of canvas, not a metre and a half of it
+    expect(12.17 / course).toBeLessThan(1);
+  });
+
+  it('never divides by nothing and never draws a one-cloth sail (§V28)', () => {
+    for (const [w, c] of [[12, 0], [12, -1], [0, 0.6], [NaN, 0.6], [12, NaN]]) {
+      const n = sailPanelsFor(w, c);
+      expect(Number.isFinite(n)).toBe(true);
+      expect(n).toBeGreaterThanOrEqual(2);
+    }
   });
 });
 
@@ -1174,14 +1695,21 @@ describe('the draft is DISTRIBUTED across the cloth (§V43 SoT parity)', () => {
     // full skew left 41% of the peak standing at the port bolt rope — the cloth
     // torn off its own edge. Moving the draft position instead keeps both
     // leeches at zero at every skew.
-    const drop = 7;
+    const width = 12.17;
     const at = (skew: number, u: number, v: number): number =>
-      sailClothOffset(u, v, drop, { drive: 1, luff: 0, skew, dropScale: 1, time: 0, phase: 0 },
+      sailClothOffset(u, v, width, { drive: 1, luff: 0, skew, dropScale: 1, flutterPhase: 0, ...FLAT_SHEETS },
         { ...p, sailFlutterAmp: 0 });
-    for (const skew of [-1, -0.5, 0, 0.5, 1]) {
-      for (const v of [0, 0.45, 0.9]) {
-        expect(Math.abs(at(skew, 0, v))).toBeLessThan(1e-6);
-        expect(Math.abs(at(skew, 1, v))).toBeLessThan(1e-6);
+    // RE-CUT: this used to assert the leech sits at zero for every v, which
+    // the free leech deliberately no longer does. The invariant it was really
+    // protecting is that the SKEW term must not move the leech — the original
+    // bug translated the whole section sideways and left 41% of the peak
+    // standing at the port bolt rope. So: leech value INDEPENDENT of skew.
+    for (const v of [0, 0.45, 0.9]) {
+      const ref0 = at(0, 0, v);
+      const ref1 = at(0, 1, v);
+      for (const skew of [-1, -0.5, 0.5, 1]) {
+        expect(at(skew, 0, v)).toBeCloseTo(ref0, 9);
+        expect(at(skew, 1, v)).toBeCloseTo(ref1, 9);
       }
     }
     // it still MOVES, or the skew term has silently become a no-op: at the free

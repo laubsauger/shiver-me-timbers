@@ -10,11 +10,20 @@
  */
 import * as THREE from 'three/webgpu';
 import { objectGroup, uniform } from 'three/tsl';
+import { shipMaterialParams } from '../params/ship';
 import { oceanParams } from '../params/ocean';
 import type { ShipMaterialParams } from '../params/ship';
 import { sailDrive, type SailDriveState } from './sailDynamics';
+import { sailFlutterRate } from './sailShape';
+import { readSailWindFrame, sailPhaseSeed, sheetLeadDirections } from './sailFrame';
 
 const TAU = Math.PI * 2;
+
+/** fold into [0, 2π) — an accumulator's float precision then never decays */
+function wrapTau(x: number): number {
+  const v = (Number.isFinite(x) ? x : 0) % TAU;
+  return v < 0 ? v + TAU : v;
+}
 
 /**
  * Per-object yaw history → yaw rate + frame dt. Returns BOTH because the
@@ -50,6 +59,29 @@ export interface SailWindUniforms {
   skew: ReturnType<typeof uniform>;
   /** 0..1 cloth drop scale from sim sail trim (set via setSailDropScale) */
   dropScale: ReturnType<typeof uniform>;
+  /**
+   * ∫ flutterRate dt, wrapped to [0, 2π). REPLACES the shader's old
+   * `time × uFlutterFreq` carrier, and with it the last clock in the cloth
+   * shape (§V.55, §B.30 — see sailFrame.ts).
+   */
+  flutterPhase: ReturnType<typeof uniform>;
+  /** unit direction, in the sail's own frame, each sheet hauls its clew
+   *  toward — see sailFrame.sheetLeadDirections and sailShape.sailCornerPull */
+  sheetLeadPort: ReturnType<typeof uniform>;
+  sheetLeadStarboard: ReturnType<typeof uniform>;
+}
+
+/** per-sail flutter phase, owned here and mirrored onto the mesh */
+interface FlutterMemory {
+  phase: number;
+}
+
+/** the sail's built (width, drop), read once off its own `sailShape` attribute */
+function sailDimensions(object: THREE.Object3D): { width: number; drop: number } {
+  const geo = (object as THREE.Mesh).geometry;
+  const attr = geo?.getAttribute?.('sailShape');
+  if (attr === undefined || attr === null || attr.count === 0) return { width: 1, drop: 1 };
+  return { width: attr.getY(0), drop: attr.getZ(0) };
 }
 
 /** object-group uniforms that track the live wind for whichever sail is drawn */
@@ -63,7 +95,11 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
   // 1 = full canvas; ShipAssembly.setSailDropScale writes the sim's trim onto
   // each sail mesh, so one shared material still serves per-ship trim
   const dropScale = uniform(1).setGroup(objectGroup);
+  const flutterPhase = uniform(0).setGroup(objectGroup);
+  const sheetLeadPort = uniform(new THREE.Vector3()).setGroup(objectGroup);
+  const sheetLeadStarboard = uniform(new THREE.Vector3()).setGroup(objectGroup);
   const smoothed = new WeakMap<THREE.Object3D, SailDriveState>();
+  const flutter = new WeakMap<THREE.Object3D, FlutterMemory>();
 
   drive.onObjectUpdate((frame: { object: THREE.Object3D | null; time: number }): void => {
     const object = frame.object;
@@ -76,14 +112,22 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
     const fz = m[10];
     const now = frame.time;
     const motion = sampleMotion(object, Math.atan2(fx, fz), now);
+    // the ship-level half of the wind state, published once per frame by
+    // rigTrim.updateRig — hull heading, way through the water, gust phases
+    const wf = readSailWindFrame(object);
     const target = sailDrive(
       {
         forwardX: fx,
         forwardZ: fz,
+        shipForwardX: wf.shipForwardX,
+        shipForwardZ: wf.shipForwardZ,
         windDirection: oceanParams.windDirection,
         windSpeed: oceanParams.windSpeed,
+        shipVelX: wf.shipVelX,
+        shipVelZ: wf.shipVelZ,
         yawRate: motion.yawRate,
-        time: now,
+        gustPhase: wf.gustPhase,
+        gustPhaseB: wf.gustPhaseB,
       },
       p,
     );
@@ -103,7 +147,43 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
     skew.value = s.skew;
     const trimDrop = object.userData.sailDropScale;
     dropScale.value = typeof trimDrop === 'number' && Number.isFinite(trimDrop) ? trimDrop : 1;
+
+    /**
+     * THE FLUTTER PHASE, AND WHY IT IS INTEGRATED HERE (§V.55, §B.30).
+     *
+     * A phase is ∫ω dt. The shader used to build one as `time × ω(luff)`,
+     * which is a phase only while ω is constant — and luff breathes with
+     * every gust and every turn of the helm, so elapsed time multiplied every
+     * wobble in the rate. Measured on the flags, whose carrier was the same
+     * expression: 0.93 Hz intended, 59.5 Hz after ten minutes, with sign
+     * flips. The sail's own `sailFlutterFreq·(1+luff)` was found in the same
+     * pass and was capped at a CONSTANT rate as a holding fix, because an
+     * accumulator needs ONE owner and the shape had two evaluators on two
+     * clocks (node `time` here, `performance.now()` in shipAssembly).
+     *
+     * This is that owner. The phase is advanced with the driver's own dt,
+     * wrapped so its float precision never decays, seeded per sail so no two
+     * ripple in step (§B.4), and mirrored onto the mesh so the CPU evaluator
+     * feeding the rope anchors reads the SAME number rather than
+     * re-deriving it from a different clock. With that in place a luffing
+     * sail is finally allowed to shake FASTER, not just harder.
+     */
+    let f = flutter.get(object);
+    if (f === undefined) {
+      const dim = sailDimensions(object);
+      f = { phase: sailPhaseSeed(dim.width, dim.drop) };
+      flutter.set(object, f);
+    }
+    f.phase = wrapTau(f.phase + sailFlutterRate(s.luff, p) * motion.dt);
+    flutterPhase.value = f.phase;
+    object.userData.sailFlutterPhase = f.phase;
+
+    // where each sheet hauls its clew, in this sail's own frame — recomputed
+    // per frame because a bracing yard swings the sail under fixed anchors
+    const leads = sheetLeadDirections(m, wf.shipForwardX, wf.shipForwardZ, shipMaterialParams.sailSheetSpread);
+    sheetLeadPort.value.set(leads.port[0], leads.port[1], leads.port[2]);
+    sheetLeadStarboard.value.set(leads.starboard[0], leads.starboard[1], leads.starboard[2]);
   });
 
-  return { drive, luff, skew, dropScale };
+  return { drive, luff, skew, dropScale, flutterPhase, sheetLeadPort, sheetLeadStarboard };
 }

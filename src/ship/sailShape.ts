@@ -22,126 +22,56 @@
  *
  * §V28: every divisor floored; the CPU side is the one feeding rope endpoints,
  * and a NaN here becomes a NaN rope.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * THE CONSTRAINT THAT GOVERNS ANY FUTURE CLOTH WORK IN THIS FILE. READ THIS
+ * BEFORE REACHING FOR A SOLVER.
+ *
+ * Everything here must stay CPU-EVALUABLE and PURE. 24 of the ship's 68 ropes
+ * — every sheet, tack and buntline — resolve their endpoints through
+ * `sailClothPoint`, via `ShipAssembly.socketWorldPosition`. That is the whole
+ * reason this file exists (see the note above about the ratlines).
+ *
+ * ⟹ A GPU-SIDE PBD / VERLET CLOTH SOLVER IS RULED OUT. It has no CPU mirror,
+ * so every sheet and buntline would end in mid-air beside the canvas it is
+ * supposed to be hauling — §V.45's exact failure, the one this file was
+ * written to prevent, reintroduced through the back door.
+ *
+ * If cloth ever needs real STATE (it does not today — everything below is a
+ * stateless analytic field of (u, v, drive, luff, skew)), the architecture is:
+ * own the state CPU-SIDE, integrate it at the FIXED SIM DT (§V2 — rigging
+ * already integrates per RENDERED frame and is framerate-dependent because of
+ * it), and publish it to the shader as a SMALL SET OF SCALARS, not a particle
+ * grid. A dozen uniforms, mirrored by the same transliteration discipline the
+ * rest of this file uses.
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * The dimensionless curves themselves live in sailShapeProfiles.ts (split at
+ * the §C file cap); this file composes them into metres. They are re-exported
+ * below so importers — sailMaterial.ts, the tests — keep one import site.
  */
 import type { ShipMaterialParams } from '../params/ship';
+import {
+  SAIL_FLUTTER_BASE,
+  SAIL_FLUTTER_EDGE,
+  SAIL_FLUTTER_V,
+  arcShorten,
+  clamp,
+  clamp01,
+  finite,
+  midArch,
+  sailBellyProfile,
+  sailCamberRatio,
+  sailDraftAt,
+  sailDraftLead,
+  sailDraftProfile,
+  sailPanelsFor,
+  seamQuiltProfile,
+  leechStandoff,
+} from './sailShapeProfiles';
 
-/**
- * The shape constants. sailMaterial.ts IMPORTS these rather than repeating the
- * literals — it used to carry its own copies of 0.22/0.9/0.3/1.3/2.1, which is
- * the drift this file's header warns about sitting one typo away from
- * happening. There is no cost to sharing them: they are plain numbers, and
- * only the expressions around them have to be transliterated.
- */
-export const SAIL_SKEW_LEAD = 0.22; // how far the DRAFT shifts to leeward
-/**
- * HORIZONTAL DRAFT PROFILE (user: "way too steep a bulge in the middle and
- * then nothing towards the sides… it has to be more distributed").
- *
- * This used to be `sin²(πu)`, and the vertical profile below was MULTIPLIED
- * into it. Two centred bumps in a product is the worst possible arrangement:
- * measured over a whole course, the mean depth came to 0.31 of the peak, and
- * one tenth of the way in from a leech the cloth was at 9.5% of full — i.e.
- * the outer fifth of the sail on each side was flat panel, with all the shape
- * crammed into a lens in the middle. sin² also leaves BOTH edges with zero
- * slope, so the canvas lies down tangent to the flat plane at the leeches
- * rather than pulling away from them.
- *
- * The replacement is the actual small-deflection solution for a membrane
- * under uniform pressure with both edges held: a PARABOLA. It carries 0.66 of
- * its peak as a mean (+29% of average depth at the same peak) and leaves each
- * leech at a real angle. `sailDraftFullness` is the exponent on it — 1 is the
- * membrane, higher narrows back toward the old lens — and `sailDraftPos`
- * moves the deepest point, which on real canvas sits about 40% aft of the
- * luff rather than at the midpoint.
- *
- * Both leeches still go to exactly zero. They are bolt-roped and sheeted, so
- * a belly that did not close there would tear the cloth off its own edges —
- * "distributed" means the falloff is a boundary layer at the edge, not the
- * whole half-width.
- */
-export const SAIL_DRAFT_MIN = 0.28; // draft cannot crowd the luff…
-export const SAIL_DRAFT_MAX = 0.72; // …nor the leech
-export const SAIL_LEAD_MAX = 0.3; // |lead|·π < 1 keeps the warp monotone
-/**
- * VERTICAL BELLY PROFILE (user: "they have no billow to them").
- *
- * This used to be one monotone ramp — `smoothstep(0, 0.9, 1−v)` — which is
- * zero at the head and DEEPEST AT THE FOOT. That is the shape of a flag
- * blowing off a pole, not of a sail under load: the vertical section has no
- * inflection, so the whole lower sail moves forward together and the surface
- * reads as a tilted plane no matter how deep the number says it is. It shaded
- * flat because it genuinely was flat in one direction.
- *
- * A square sail is bent to its yard at the head and hauled down at the clews,
- * so the canvas is deepest around the middle and comes back at BOTH ends. The
- * foot never returns fully — it is a free edge — hence FOOT_FILL rather than
- * a second taper to zero.
- */
-export const SAIL_BELLY_HEAD = 0.55; // taper span below the head, in v
-export const SAIL_BELLY_FOOT = 0.45; // ease span above the foot, in v
-export const SAIL_FOOT_FILL = 0.55; // belly remaining at the free foot
-export const SAIL_FLUTTER_BASE = 0.3; // shake floor before luff adds to it
-export const SAIL_FLUTTER_EDGE = 1.3; // extra ripple toward the leeches
-export const SAIL_FLUTTER_V = 2.1; // ripple phase advance down the cloth
+export * from './sailShapeProfiles';
 
-/**
- * Belly depth as a fraction of its peak, from the sail's own v (0 = foot,
- * 1 = head). Peaks at exactly v = 1 − SAIL_BELLY_HEAD = SAIL_BELLY_FOOT.
- * Exported so the shape can be asserted directly rather than inferred from a
- * displacement that also carries flutter.
- */
-export function sailBellyProfile(v: number): number {
-  const vv = clamp01(finite(v));
-  const headTaper = smoothstep(0, SAIL_BELLY_HEAD, 1 - vv);
-  const footEase = SAIL_FOOT_FILL + (1 - SAIL_FOOT_FILL) * smoothstep(0, SAIL_BELLY_FOOT, vv);
-  return headTaper * footEase;
-}
-
-/**
- * Warp lead that puts the section's deepest point at `draftPos`.
- *
- * The section itself is symmetric, so the draft is moved by warping u through
- * `u + lead·sin(πu)` — endpoints fixed (the leeches stay pinned), smooth, and
- * monotone as long as |lead|·π < 1. That last part is not cosmetic: a warp
- * that folds maps two points of cloth onto one, which is a self-intersecting
- * sail. Hence SAIL_LEAD_MAX, and the draft band it corresponds to.
- */
-export function sailDraftLead(draftPos: number): number {
-  const d = clamp(finite(draftPos, 0.4), SAIL_DRAFT_MIN, SAIL_DRAFT_MAX);
-  const lead = (0.5 - d) / Math.max(1e-3, Math.sin(Math.PI * d)); // §V28 floored
-  return clamp(lead, -SAIL_LEAD_MAX, SAIL_LEAD_MAX);
-}
-
-/**
- * Section depth as a fraction of the draft, across the cloth from the port
- * leech (u = 0) to the starboard one (u = 1). Exported so the DISTRIBUTION can
- * be asserted directly — a re-centred or re-narrowed bulge is a shape bug that
- * no displacement-magnitude test can see.
- */
-export function sailDraftProfile(u: number, lead: number, fullness: number): number {
-  const uu = clamp01(finite(u));
-  const w = clamp01(uu + finite(lead) * Math.sin(Math.PI * uu));
-  // membrane under uniform pressure, both edges held
-  const arc = Math.max(0, 4 * w * (1 - w));
-  return Math.pow(arc, Math.max(0.5, finite(fullness, 1)));
-}
-
-function finite(x: number, fallback = 0): number {
-  return Number.isFinite(x) ? x : fallback;
-}
-
-function clamp(x: number, lo: number, hi: number): number {
-  return x < lo ? lo : x > hi ? hi : x;
-}
-
-function clamp01(x: number): number {
-  return x < 0 ? 0 : x > 1 ? 1 : x;
-}
-
-function smoothstep(e0: number, e1: number, x: number): number {
-  const t = clamp01((x - e0) / Math.max(1e-6, e1 - e0));
-  return t * t * (3 - 2 * t);
-}
 
 /** the live drive state the shader is running on, as the driver computed it */
 export interface SailClothState {
@@ -153,10 +83,77 @@ export interface SailClothState {
   skew: number;
   /** continuous trim scale, 0..1 — how much canvas is actually set */
   dropScale: number;
-  /** seconds; the same clock the shader's `time` node is on */
-  time: number;
-  /** per-sail ripple phase — hash2(width·3.71, drop·1.17)·2π in the shader */
-  phase: number;
+  /**
+   * ∫ flutterRate dt, wrapped to [0, 2π), seeded per sail so no two ripple in
+   * step (§B.4). ONE OWNER: `sailDriver.ts` accumulates it and publishes it on
+   * the mesh; this evaluator and the shader both READ it.
+   *
+   * It replaces the old (`time`, `phase`) pair, and that is §B.30's recorded
+   * "sailShape has TWO evaluators on TWO clocks (node `time` vs
+   * `performance.now()`), so CPU/GPU flutter phase already disagrees by up to
+   * ~0.28 m of rope anchor — §V.45-class, unfixed". There is now no clock in
+   * this file at all, so there is nothing left to disagree.
+   */
+  flutterPhase: number;
+  /**
+   * Where each sheet hauls its clew, as a unit direction in the sail's own
+   * frame (sailFrame.sheetLeadDirections). [0,0,0] = no sheet, corners flat.
+   */
+  sheetLeadPort: [number, number, number];
+  sheetLeadStarboard: [number, number, number];
+}
+
+/**
+ * How far each corner is hauled OUT OF THE SAIL'S PLANE, and how that
+ * displacement spreads into the cloth.
+ *
+ * THE HEAD IS NOT A CORNER IN THIS SENSE. It is laced to its yard along its
+ * whole length, so it genuinely is a straight line and must stay one — hence
+ * the (1 − v), which is zero there. The CLEWS are a different thing entirely:
+ * each is hauled by a sheet to a point on the ship that is nowhere near the
+ * sail's plane, so the foot leaves that plane and the lower half of the sail
+ * goes with it.
+ *
+ * User: "the actual pin points stop being flat in space and can actually be
+ * ANGLED… instead of just being always perfectly flat against the mast."
+ *
+ * The two clews get their OWN leads, and the weights are linear in u so they
+ * sum to exactly (1 − v). Two consequences, both wanted:
+ *   · both sheets leading aft swings the whole foot aft — the sail stops
+ *     being a plane bent in z and becomes a surface set at an angle to its
+ *     yard;
+ *   · the two leads DIFFERING rotates the foot's chord line against the
+ *     head's, which is geometric TWIST. It is the same phenomenon as the
+ *     aerodynamic draft migration in `sailDraftAt`, arriving from the other
+ *     end — that one moves where the sail is deepest, this one moves where
+ *     its corners are.
+ */
+export function sailCornerPull(
+  u: number,
+  v: number,
+  width: number,
+  s: SailClothState,
+  p: ShipMaterialParams,
+): [number, number, number] {
+  const uu = clamp01(finite(u));
+  const vv = clamp01(finite(v));
+  const chord = Math.max(0.01, finite(width));
+  // taut with the load: a slack sheet hauls nothing, a full sail brings it
+  // bar-taut. Bounded at source because it moves vertices (§V44, §V28).
+  const haul =
+    Math.abs(sailCamberRatio(finite(s.drive), p) * clamp01(finite(s.dropScale, 1)))
+    * Math.max(0, finite(p.sailSheetPull))
+    * chord;
+  const port = s.sheetLeadPort ?? [0, 0, 0];
+  const stbd = s.sheetLeadStarboard ?? [0, 0, 0];
+  const span = 1 - vv;
+  const wp = (1 - uu) * span * haul;
+  const ws = uu * span * haul;
+  return [
+    finite(port[0]) * wp + finite(stbd[0]) * ws,
+    finite(port[1]) * wp + finite(stbd[1]) * ws,
+    finite(port[2]) * wp + finite(stbd[2]) * ws,
+  ];
 }
 
 /**
@@ -168,45 +165,53 @@ export interface SailClothState {
 export function sailClothOffset(
   u: number,
   v: number,
-  builtDrop: number,
+  width: number,
   s: SailClothState,
   p: ShipMaterialParams,
 ): number {
   const uu = clamp01(finite(u));
   const vv = clamp01(finite(v));
-  const drop = Math.max(0.01, finite(builtDrop) * clamp01(finite(s.dropScale, 1)));
+  const chord = Math.max(0.01, finite(width)); // §V28 floored
+  // a deeply reefed sail is FLATTER: the cloth that is left is stretched
+  // between its yard and the reef band, so the belly eases with the trim
+  const set = clamp01(finite(s.dropScale, 1));
 
   // belly: a membrane section across the cloth × the vertical profile. The
   // ship's swing lags the DRAFT to leeward rather than translating the whole
   // curve — translating it walked the belly off the leech (at full skew the
-  // old form left 44% of the peak standing at the bolt rope), and the leeches
-  // are held. The head cannot lag at all, hence (1 − v).
-  const lead = sailDraftLead(p.sailDraftPos - finite(s.skew) * SAIL_SKEW_LEAD * (1 - vv));
+  // old form left 44% of the peak standing at the bolt rope). The head cannot
+  // lag at all, hence the (1 − v) inside sailDraftAt.
+  //
+  // DEPTH IS CAMBER × CHORD, not a fraction of the drop: the section bows
+  // across the WIDTH, so that is the length it must be measured against.
+  const lead = sailDraftLead(sailDraftAt(vv, s.drive, s.skew, p));
   const across = sailDraftProfile(uu, lead, p.sailDraftFullness);
   const down = sailBellyProfile(vv);
-  const belly = across * down * finite(s.drive) * p.sailBillow * drop;
+  const depth = sailCamberRatio(finite(s.drive), p) * chord * set;
+  // QUILTING: each cloth panel bellies between its two seams, which hold. It
+  // rides the belly envelope, so it vanishes at the pinned leeches and at the
+  // head and scales with the wind exactly as the main camber does — a
+  // second-order camber on the primary one, never a fixed corrugation.
+  const panels = sailPanelsFor(chord, p.sailClothWidth);
+  const quilt =
+    Math.max(0, finite(p.sailSeamQuilt)) * seamQuiltProfile(uu, panels) * across * down;
+  const belly = depth * (across * down + quilt + p.sailLeechOpen * leechStandoff(uu, vv));
 
   // flutter: travelling ripples, biggest at the free foot and the leeches.
   //
-  // The RATE IS CONSTANT and must stay constant. It used to be
-  // `sailFlutterFreq · (1 + luff)`, multiplied by `time` — but t·ω(t) is the
-  // phase of a sine only while ω is fixed, and luff breathes with every gust
-  // and every turn of the helm. Its instantaneous frequency is ω + t·dω/dt, so
-  // the ripple ran away with elapsed time exactly as the flags' did (measured
-  // there: 0.93 Hz intended, 59.5 Hz after ten minutes, with sign flips). The
-  // same defect, in two files, from the same expression.
-  //
-  // A luffing sail does shake faster, but buying that cue back needs an
-  // integrated phase, and this function has TWO evaluators reading two
-  // different clocks (see the note in shipAssembly.clothState) — an
-  // accumulator would have to be a single owner across both. Luff drives the
-  // AMPLITUDE instead, which it already did, over a 10× range.
+  // THE CARRIER IS AN ACCUMULATED PHASE, NOT `time × rate`. `t·ω(t)` is the
+  // phase of a sine only while ω is fixed; when it varies the instantaneous
+  // frequency is ω + t·dω/dt, so elapsed time multiplies every wobble in the
+  // rate — measured on the flags at 0.93 Hz intended, 59.5 Hz after ten
+  // minutes, with sign flips (§V.55, §B.30). The old cure here was to hold
+  // the rate CONSTANT and let luff drive amplitude only, because an
+  // accumulator needs a single owner and this shape had two evaluators on two
+  // clocks. It has one owner now (`sailDriver.ts`), so a luffing sail is
+  // finally allowed to shake FASTER as well as harder.
   const luff = finite(s.luff);
   const shake = SAIL_FLUTTER_BASE + luff * p.sailLuffFlap;
-  const rippleFreq = Math.max(0, finite(p.sailFlutterFreq));
   const wave = Math.sin(
-    finite(s.time) * rippleFreq
-      + finite(s.phase)
+    finite(s.flutterPhase)
       + uu * (p.sailRippleCount * Math.PI * 2)
       + vv * SAIL_FLUTTER_V,
   );
@@ -214,6 +219,15 @@ export function sailClothOffset(
   const flutter = wave * p.sailFlutterAmp * shake * (1 - vv) * edge;
 
   return finite(belly + flutter);
+}
+
+/**
+ * Rate (rad/s) the cloth is shaking at right now. Bounded by construction so
+ * the phase accumulator can never run away (§V44, §V.55).
+ */
+export function sailFlutterRate(luff: number, p: ShipMaterialParams): number {
+  const shake = clamp(finite(luff), 0, 1.4) * Math.max(0, finite(p.sailFlutterLuffRate));
+  return Math.max(0, finite(p.sailFlutterFreq)) * (1 + shake);
 }
 
 /**
@@ -266,12 +280,44 @@ export function sailClothPoint(
   const uu = clamp01(finite(u));
   const vv = clamp01(finite(v));
   const scale = clamp01(finite(s.dropScale, 1));
-  // the panel spans x ∈ [−width/2, width/2] and hangs from y = 0 down to
-  // y = −drop; the shader scales y about the head, so the foot comes UP
-  const x = (uu - 0.5) * width;
+  const chord = Math.max(0.01, finite(width)); // §V28 floored
+  const drop = Math.max(0.01, finite(builtDrop));
+  // the SAME camber the surface is built from, trim scale included, or
+  // the outline and the cloth inside it would disagree
+  const camber = sailCamberRatio(finite(s.drive), p) * scale;
+
+  // ── the outline. This is what stopped being a rectangle. ────────────────
+  // Each strip of cloth gives up span to pay for its own bow, so the shrink
+  // is LOCAL: the horizontal strip at height v bows by camber·down(v), and
+  // the vertical strip at width u bows by camber·across(u)·chord. Neither
+  // factor is constant over the panel, which is the whole point —
+  //   · the leeches draw in most at the DRAFT HEIGHT and not at all at the
+  //     head, so the side edges bow inward instead of running straight down;
+  //   · the foot rises most at MID-WIDTH and not at all at the clews, so the
+  //     bottom edge scallops instead of running straight across.
+  // Both fall out of arc length alone. Neither is a shaping hack, and both
+  // vanish correctly when the sail is becalmed.
+  const lead = sailDraftLead(sailDraftAt(vv, s.drive, s.skew, p));
+  const across = sailDraftProfile(uu, lead, p.sailDraftFullness);
+  const chordShrink = arcShorten(camber * sailBellyProfile(vv));
+  // the vertical strip at width u bows by BOTH terms of the section — the
+  // membrane belly, which is zero at the leech, and the leech's own standoff,
+  // which is zero at mid-width. Counting only the first left the clews the one
+  // part of the outline that did not move, and the leech is precisely the edge
+  // that now flies.
+  const stripBow = across + Math.max(0, finite(p.sailLeechOpen)) * (1 - midArch(uu));
+  const spanShrink = arcShorten((camber * stripBow * chord) / drop);
+  // ROACH: the foot is CUT with an arch — a static shortening at mid-width,
+  // so the bottom edge is not a straight line even with no wind in her.
+  const roach = 1 - Math.max(0, finite(p.sailFootRoach)) * midArch(uu);
+
+  const pull = sailCornerPull(uu, vv, width, s, p);
+  const x = (uu - 0.5) * chord * chordShrink + pull[0];
   const y =
-    -(1 - vv) * Math.max(0.01, finite(builtDrop)) * scale + sailFurlLift(uu, vv, builtDrop, s, p);
-  return [x, y, sailClothOffset(uu, vv, builtDrop, s, p)];
+    -(1 - vv) * drop * scale * spanShrink * roach
+    + sailFurlLift(uu, vv, builtDrop, s, p)
+    + pull[1];
+  return [x, y, sailClothOffset(uu, vv, width, s, p) + pull[2]];
 }
 
 /** where each sail-attached anchor is sewn, in the sail's own uv */

@@ -22,11 +22,8 @@
  */
 import * as THREE from 'three/webgpu';
 import {
-  Fn,
-  attribute,
   cameraPosition,
   clamp,
-  cross,
   directionToFaceDirection,
   float,
   fract,
@@ -36,36 +33,30 @@ import {
   normalWorld,
   positionLocal,
   positionWorld,
-  sin,
   smoothstep,
-  time,
   transformNormalToView,
   uniform,
   uv,
   vec2,
-  vec3,
 } from 'three/tsl';
 import { fbm2, hash2 } from '../terrain/noise';
-import { bandLimitedEdge, periodResolved } from './bandLimit';
 import {
-  SAIL_BELLY_FOOT,
-  SAIL_BELLY_HEAD,
-  SAIL_DRAFT_MAX,
-  SAIL_DRAFT_MIN,
-  SAIL_FLUTTER_BASE,
-  SAIL_FLUTTER_EDGE,
-  SAIL_FLUTTER_V,
-  SAIL_FOOT_FILL,
-  SAIL_LEAD_MAX,
-  SAIL_SKEW_LEAD,
-} from './sailShape';
+  bandLimitAmplitude,
+  bandLimitWidth,
+  bandLimitedEdge,
+  coordFilter,
+  periodResolved,
+} from './bandLimit';
+import {
+  createSailClothNodes,
+  createSailShapeUniforms,
+  refreshSailShapeUniforms,
+} from './sailClothNodes';
 import { skyParams } from '../params/sky';
 import { sunDirection } from '../sky/sunCycle';
 import { shipMaterialParams, type ShipMaterialParams } from '../params/ship';
 import { createSailWindUniforms } from './sailDriver';
 import type { ShipMaterialHandle } from './woodMaterial';
-
-const TAU = Math.PI * 2;
 
 /** seam falloff between cloth panels, as a fraction of one panel. Named
  *  because it is also the feature width its §V.48 band limit measures. */
@@ -96,174 +87,124 @@ export function createSailClothMaterial(
   const uBacklitStrength = uniform(p.sailBacklitStrength);
   const uBacklitFocus = uniform(p.sailBacklitFocus);
   const uLeeDarken = uniform(p.sailLeeDarken);
-  const uBillow = uniform(p.sailBillow);
-  const uDraftPos = uniform(p.sailDraftPos);
-  const uDraftFullness = uniform(p.sailDraftFullness);
-  const uFurlSwag = uniform(p.sailFurlSwag);
-  const uFurlBays = uniform(p.sailFurlBays);
-  const uFlutterAmp = uniform(p.sailFlutterAmp);
-  const uFlutterFreq = uniform(p.sailFlutterFreq);
-  const uLuffFlap = uniform(p.sailLuffFlap);
-  const uRippleCount = uniform(p.sailRippleCount);
-  const uPanelCount = uniform(p.sailPanelCount);
+  const uClothWidth = uniform(p.sailClothWidth);
   const uSeamDarken = uniform(p.sailSeamDarken);
+  const uSeamRidge = uniform(p.sailSeamRidge);
   const uAmbientLift = uniform(p.sailAmbientLift);
   const uStain = uniform(p.sailStainStrength);
+  // the shape's own uniforms live with the shape (sailClothNodes.ts)
+  const shape = createSailShapeUniforms(p);
 
   // per-sail wind state (object uniform buffer, driven in sailDriver.ts)
   const wind = createSailWindUniforms(p);
-  const uDrive = wind.drive;
-  const uLuff = wind.luff;
-  const uSkew = wind.skew;
 
   // --- shape ---------------------------------------------------------------
-  // (clothWeight, width, drop): robands and the furled roll carry weight 0 so
-  // only cloth moves; width/drop let one shared material serve every sail size
-  const shapeAttr = attribute('sailShape', 'vec3');
-  const clothWeight = shapeAttr.x;
-  const width = max(shapeAttr.y, float(0.01)); // §V28 floored divisor
-  // live drop = built drop × the sim's trim scale, so easing the sheets
-  // shortens the canvas continuously instead of popping between trim states
-  const clothScale = mix(float(1), wind.dropScale, clothWeight);
-  const builtDrop = max(shapeAttr.z, float(0.01)); // BEFORE the trim scale
-  const drop = max(shapeAttr.z.mul(clothScale), float(0.01));
-  // per-sail phase from its own dimensions — no two sails ripple in step (§B.4)
-  const phase = hash2(vec2(width.mul(3.71), drop.mul(1.17))).mul(TAU);
+  // The whole cloth surface — outline, belly, leech, twist, flutter — lives in
+  // sailClothNodes.ts, a line-for-line transliteration of sailShape.ts. This
+  // file owns colour and light.
+  const cloth3d = createSailClothNodes(wind, shape);
+  material.positionNode = cloth3d.position;
 
-  /** billow + flutter offset (m, along local +z = forward of the yard) */
-  const clothZ = Fn(([u, v]: [ReturnType<typeof float>, ReturnType<typeof float>]) => {
-    // belly across the cloth, pinned at both leeches. Transliteration of
-    // sailShape.sailClothOffset / sailDraftLead / sailDraftProfile — same
-    // constants (imported, not copied), same expression order.
-    //
-    // The deepest point sits `sailDraftPos` aft of the luff and lags to
-    // leeward while the ship swings. Clamped to the band where the warp below
-    // stays monotone: a folded warp maps two points of cloth onto one.
-    const draft = clamp(
-      uDraftPos.sub(uSkew.mul(SAIL_SKEW_LEAD).mul(v.oneMinus())),
-      float(SAIL_DRAFT_MIN),
-      float(SAIL_DRAFT_MAX),
-    );
-    const lead = clamp(
-      float(0.5).sub(draft).div(max(sin(draft.mul(Math.PI)), float(1e-3))), // §V28 floored
-      float(-SAIL_LEAD_MAX),
-      float(SAIL_LEAD_MAX),
-    );
-    const w = clamp(u.add(lead.mul(sin(u.mul(Math.PI)))), float(0), float(1));
-    // membrane under uniform pressure with both edges held = a parabola.
-    // max() BEFORE pow(): WGSL pow() with a base that rounds a hair below zero
-    // is undefined → NaN vertices (§V28, §B.5). Chained .pow() reads
-    // receiver^arg, i.e. arc^fullness (§V23: 2-arg chained form, receiver=base)
-    const across = max(w.mul(w.oneMinus()).mul(4), float(0)).pow(uDraftFullness);
-    // deepest around mid-height, tapering to the yard at the head and easing
-    // back at the free foot — see sailShape.sailBellyProfile for why a single
-    // monotone ramp reads as a tilted plane rather than as a belly
-    const headTaper = smoothstep(float(0), float(SAIL_BELLY_HEAD), v.oneMinus());
-    const footEase = mix(
-      float(SAIL_FOOT_FILL),
-      float(1),
-      smoothstep(float(0), float(SAIL_BELLY_FOOT), v),
-    );
-    const down = headTaper.mul(footEase);
-    const belly = across.mul(down).mul(uDrive).mul(uBillow).mul(drop);
-    // flutter: travelling ripples, biggest at the free foot and the leeches,
-    // faster and deeper the harder the sail is shaking
-    // the rate is CONSTANT — `time × ω(luff)` is not a phase unless ω is fixed,
-    // and the resulting ω + t·dω/dt ran the ripple away with elapsed time (the
-    // flags' bug, same expression, same file family). Luff drives amplitude.
-    const shake = float(SAIL_FLUTTER_BASE).add(uLuff.mul(uLuffFlap));
-    const rippleFreq = max(uFlutterFreq, float(0));
-    const wave = sin(
-      time
-        .mul(rippleFreq)
-        .add(phase)
-        .add(u.mul(uRippleCount.mul(TAU)))
-        .add(v.mul(SAIL_FLUTTER_V)),
-    );
-    const edge = float(0.35).add(u.sub(0.5).abs().mul(SAIL_FLUTTER_EDGE));
-    const flutter = wave.mul(uFlutterAmp).mul(shake).mul(v.oneMinus()).mul(edge);
-    return belly.add(flutter);
-  });
-
-  /**
-   * How far a point of canvas is hauled UP as the sail gathers (m).
-   * Transliteration of sailShape.sailFurlLift — same params, same order.
-   *
-   * The reef itself is the continuous `clothScale` below; this is what stops
-   * that reading as a flat rectangle sliding up a slot. The foot rises at each
-   * buntline station and swags between them, so the canvas gathers into bays.
-   */
-  const clothY = Fn(([u, v]: [ReturnType<typeof float>, ReturnType<typeof float>]) => {
-    const furl = clamp(wind.dropScale, float(0), float(1)).oneMinus();
-    // 0 at each station (a line made fast), 1 in the middle of a bay
-    const station = sin(u.mul(max(uFurlBays, float(1))).mul(Math.PI)).abs();
-    return furl.mul(uFurlSwag).mul(builtDrop).mul(v.oneMinus()).mul(station.oneMinus());
-  });
-
-  const cloth = uv();
-  const u0 = cloth.x;
-  const v0 = cloth.y;
-  const z0 = clothZ(u0, v0);
-  const y0 = clothY(u0, v0);
-  // cloth hangs from the head (local y = 0), so scaling y shortens it from
-  // the foot up and leaves it bent to its yard
-  const hung = positionLocal.mul(vec3(1, clothScale, 1));
-  material.positionNode = hung.add(vec3(0, y0.mul(clothWeight), z0.mul(clothWeight)));
-
-  // normals rebuilt from the live surface (finite differences in cloth
-  // space) — without this the billow is invisible to the lighting.
-  // The y components used to be (0, drop·e), i.e. the tangents pretended the
-  // panel was a plain rectangle. That was harmless while nothing moved a
-  // vertex vertically; the gather does, so both tangents now carry it or the
-  // swags would show in silhouette and not shade at all.
-  const e = float(0.03);
-  const du = vec3(width.mul(e), clothY(u0.add(e), v0).sub(y0), clothZ(u0.add(e), v0).sub(z0));
-  const dv = vec3(
-    0,
-    drop.mul(e).add(clothY(u0, v0.add(e)).sub(y0)),
-    clothZ(u0, v0.add(e)).sub(z0),
-  );
-  const billowNormal = cross(du, dv).normalize();
-  const localNormal = mix(normalLocal, billowNormal, clothWeight).normalize();
-  material.normalNode = directionToFaceDirection(
-    transformNormalToView(localNormal).toVarying('vSailNormalView').normalize(),
-  );
+  // normals rebuilt from the live surface, so the billow shades. Blended
+  // against the authored normal by clothWeight: robands and the furled bundle
+  // are not cloth and must keep theirs.
+  const localNormal = mix(normalLocal, cloth3d.localNormal, cloth3d.clothWeight).normalize();
+  const viewNormal = transformNormalToView(localNormal).toVarying('vSailNormalView').normalize();
+  // the cloth's u direction, carried into view space alongside it — the seam
+  // ridge below tilts the normal along this and nothing else. The normal
+  // matrix is the inverse-transpose, which differs from the modelView upper
+  // 3x3 only under non-uniform scale; ship transforms are rigid, so it is the
+  // same rotation and one less matrix to plumb through.
+  const viewTangentU = transformNormalToView(cloth3d.uTangent).normalize();
 
   // --- colour --------------------------------------------------------------
+  const cloth = uv();
   const warp = fbm2(positionLocal.xy.mul(uWeaveScale).mul(vec2(1, 6)), 2);
   const weft = fbm2(positionLocal.xy.mul(uWeaveScale).mul(vec2(6, 1)), 2);
   const weave = warp.add(weft).mul(0.5);
   const stain = fbm2(positionLocal.xy.mul(0.35), 3);
   /**
-   * §V.48. The panel repeat is the one periodic term on the cloth, and a set
-   * course is ~10 m of sail that the follow camera regularly compresses into a
-   * couple of hundred pixels — at which point a 4.5%-of-a-panel seam and a
-   * per-panel tone STEP are both well under a pixel and shimmer. This material
-   * builds its normal from the billow rather than from a height field, so the
-   * failure here is albedo crawl rather than the hull's white specular
-   * speckle, but the cause and the cure are identical.
+   * VERTICAL PANEL SEAMS (user, against
+   * docs/inspo/ship/ref-broadside-sails-spray-foam.png: "the full view of the
+   * sails with their sewing striping vertically to segment them").
+   *
+   * A sail is sewn from vertical bolts of canvas, so the COUNT follows the
+   * sail's own width — `sailClothWidth` is a bolt in metres, and a wider sail
+   * gets more cloths rather than wider ones. It used to be a flat 7 panels on
+   * every sail, which made the main course's "cloths" 1.74 m and the
+   * topsail's 1.24 m: not a bolt of anything, and different on two sails of
+   * the same ship. §V28: floored divisor, and at least two panels.
+   *
+   * The coordinate is the cloth's own `u`, so the seams ride the DEFORMED
+   * surface for nothing: as the arc-length compensation above draws the
+   * chord in, the seams compress with it. A seam that curves with the cloth
+   * reads as fabric; one painted straight across a curved surface reads as a
+   * decal.
    */
-  const panelCoord = cloth.x.mul(uPanelCount);
+  // transliteration of sailShapeProfiles.sailPanelsFor — same flooring, same min
+  const panels = max(cloth3d.width.div(max(uClothWidth, float(0.05))).round(), float(2));
+  const panelCoord = cloth.x.mul(panels);
+  const panelFilter = coordFilter(panelCoord);
   const panelTone = hash2(vec2(panelCoord.floor(), 3.7));
   // fades to the jitter's own MEAN, not to 1 — 0.92..1.03 averages 0.975, and
   // fading to 1 instead would brighten every distant sail by 2.5%
   const panelToneMul = mix(
     float(0.975),
     mix(float(0.92), float(1.03), panelTone),
-    periodResolved(panelCoord),
+    periodResolved(panelCoord, panelFilter),
   );
   const base = mix(uDark, uLight, weave)
     .mul(mix(float(1).sub(uStain), float(1), stain))
     .mul(panelToneMul);
 
   const pf = fract(panelCoord);
-  const panelMask = bandLimitedEdge(pf.min(pf.oneMinus()), panelCoord, float(PANEL_SEAM));
+  const panelMask = bandLimitedEdge(pf.min(pf.oneMinus()), panelCoord, float(PANEL_SEAM), panelFilter);
   const hemMask = smoothstep(
     float(0),
     float(0.03),
     cloth.x.min(cloth.x.oneMinus()).min(cloth.y),
   );
   const cloth3 = mix(base.mul(uSeamDarken), base, panelMask.min(hemMask));
+
+  /**
+   * THE SEAM'S RIDGE — why the seams read at all.
+   *
+   * In the reference the seams catch light; they are not merely darker. A
+   * sewn seam is a double thickness of canvas standing a few millimetres
+   * proud, so it tilts the shading normal. An albedo line alone is flat and
+   * reads as a printed stripe.
+   *
+   * §V.38 SAYS DO NOT DIFFERENTIATE A HEIGHT FIELD HERE, and this is exactly
+   * the case that would burn: a ~2.7 cm feature differentiated in screen space
+   * on a sail seen at 20-60 m is §B.20's hull speckle verbatim. So the SLOPE
+   * is written in closed form instead — the seam's cross-section is a known
+   * bump, so its derivative is known too, and nothing is differentiated at
+   * all.
+   *
+   * §V.48, both halves, measured against the SEAM's own width and not the
+   * panel's PERIOD — §B.20's whole lesson, and the seam is ~4.5% of a panel,
+   * i.e. it goes sub-pixel ~22x sooner than the repeat does:
+   *   (a) WIDEN: the bump is drawn at `bandLimitWidth` ≥ 2 px of panelCoord,
+   *       so it never varies faster than the sample grid;
+   *   (b) FADE: amplitude scaled by `bandLimitAmplitude`. The profile is
+   *       ANTISYMMETRIC about the seam, so its mean over a pixel is exactly
+   *       zero — fading to zero IS fading to its own mean, and no separate
+   *       mean term is needed (see bandLimit.bandLimitAmplitude).
+   */
+  const seamEff = bandLimitWidth(float(PANEL_SEAM), panelCoord, panelFilter);
+  // signed distance to the NEAREST seam, in panels: fract() folded to ±0.5
+  const seamDist = pf.sub(pf.add(0.5).floor());
+  const t = clamp(seamDist.div(seamEff), float(-1), float(1));
+  // d/dt of the bump (1 − t²)² — zero at the crown and at both skirts, so the
+  // ridge blends into flat cloth instead of ending on a crease
+  const seamSlope = t
+    .mul(t.mul(t).oneMinus())
+    .mul(-4)
+    .mul(uSeamRidge)
+    .mul(bandLimitAmplitude(float(PANEL_SEAM), panelCoord, panelFilter));
+  material.normalNode = directionToFaceDirection(
+    viewNormal.add(viewTangentU.mul(seamSlope)).normalize(),
+  );
 
   // shading normal in world space — normalWorld resolves to the material's
   // own normalNode (set above), so this is the billowed, face-flipped normal
@@ -317,19 +258,12 @@ export function createSailClothMaterial(
       uBacklitStrength.value = p.sailBacklitStrength;
       uBacklitFocus.value = p.sailBacklitFocus;
       uLeeDarken.value = p.sailLeeDarken;
-      uBillow.value = p.sailBillow;
-      uDraftPos.value = p.sailDraftPos;
-      uDraftFullness.value = p.sailDraftFullness;
-      uFurlSwag.value = p.sailFurlSwag;
-      uFurlBays.value = p.sailFurlBays;
-      uFlutterAmp.value = p.sailFlutterAmp;
-      uFlutterFreq.value = p.sailFlutterFreq;
-      uLuffFlap.value = p.sailLuffFlap;
-      uRippleCount.value = p.sailRippleCount;
-      uPanelCount.value = p.sailPanelCount;
+      uClothWidth.value = p.sailClothWidth;
       uSeamDarken.value = p.sailSeamDarken;
+      uSeamRidge.value = p.sailSeamRidge;
       uAmbientLift.value = p.sailAmbientLift;
       uStain.value = p.sailStainStrength;
+      refreshSailShapeUniforms(shape, p);
     },
   };
 }

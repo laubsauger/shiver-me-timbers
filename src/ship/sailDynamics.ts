@@ -14,18 +14,48 @@
 import type { ShipMaterialParams, ShipRigParams } from '../params/ship';
 import type { SailStateId } from './pieceTypes';
 import { trimEfficiency } from '../sailing/shipKinematics';
+import { apparentWind } from './flagDynamics';
 
 export interface SailWindInput {
-  /** world-space forward of the sail's ship (unit-ish) */
+  /** world-space forward of the SAIL — i.e. already braced (unit-ish) */
   forwardX: number;
   forwardZ: number;
-  /** direction the wind blows toward, radians */
+  /**
+   * world-space forward of the HULL. Defaults to the sail's own, i.e. an
+   * unbraced yard — see the note on `eff` in sailDrive for why the two must
+   * not be conflated.
+   */
+  shipForwardX?: number;
+  shipForwardZ?: number;
+  /** direction the TRUE wind blows toward, radians, and its speed */
   windDirection: number;
   windSpeed: number;
+  /**
+   * The ship's own world velocity (m/s). Defaults to 0 = true wind.
+   *
+   * WITHOUT THIS THE SAILS READ THE TRUE WIND AND NOTHING ELSE, which is half
+   * of "not wind speed and wind capture dependent enough". A ship running
+   * dead downwind at 8 m/s in an 11 m/s breeze feels 3 m/s and her canvas
+   * should go soft — the same cue the masthead pennant has always shown
+   * (flagDynamics.apparentWind, which this now shares). Bearing away should
+   * visibly ease her; hardening up should visibly load her.
+   */
+  shipVelX?: number;
+  shipVelZ?: number;
   /** ship yaw rate, rad/s (positive = turning to starboard) */
   yawRate: number;
-  /** seconds, for the gust cycle */
-  time: number;
+  /**
+   * The gust train's two accumulated phases (rad). §V.55: `sailGustFreq` is a
+   * live Tweakpane value, so `time × rate` is not a phase — and the two
+   * evaluators of this function used to read two different clocks anyway
+   * (§B.30). `rigTrim.updateRig` integrates both and publishes them.
+   *
+   * TWO accumulators, not one scaled by 1.63: multiplying a wrapped phase by a
+   * non-integer ratio breaks continuity at every wrap (§V.55's own corollary,
+   * learned on the flags' crack harmonic).
+   */
+  gustPhase?: number;
+  gustPhaseB?: number;
 }
 
 export interface SailDriveState {
@@ -37,18 +67,32 @@ export interface SailDriveState {
   skew: number;
 }
 
-function finite(x: number, fallback = 0): number {
-  return Number.isFinite(x) ? x : fallback;
+function finite(x: number | undefined, fallback = 0): number {
+  return typeof x === 'number' && Number.isFinite(x) ? x : fallback;
 }
 
 function clamp(x: number, lo: number, hi: number): number {
   return x < lo ? lo : x > hi ? hi : x;
 }
 
-/** two detuned sines ≈ a slow gust train; never resonates into a pulse (§B.4) */
-export function gustFactor(time: number, p: ShipMaterialParams): number {
-  const f = Math.max(0.01, p.sailGustFreq);
-  const g = 0.5 * Math.sin(time * f) + 0.5 * Math.sin(time * f * 1.63 + 1.7);
+/** the detune between the gust train's two accumulators — see SailWindInput */
+export const SAIL_GUST_DETUNE = 1.63;
+
+/** rate (rad/s) the gust train's primary accumulator advances at */
+export function sailGustRate(p: ShipMaterialParams): number {
+  return Math.max(0.01, finite(p.sailGustFreq, 0.55));
+}
+
+/**
+ * Two detuned sines ≈ a slow gust train; never resonates into a pulse (§B.4).
+ * Takes PHASES, not a time — see SailWindInput.gustPhase.
+ */
+export function gustFactor(
+  phaseA: number,
+  phaseB: number,
+  p: ShipMaterialParams,
+): number {
+  const g = 0.5 * Math.sin(finite(phaseA)) + 0.5 * Math.sin(finite(phaseB) + 1.7);
   return 1 + p.sailGustAmp * g * 0.5;
 }
 
@@ -56,8 +100,17 @@ export function sailDrive(input: SailWindInput, p: ShipMaterialParams): SailDriv
   const fx = finite(input.forwardX);
   const fz = finite(input.forwardZ, 1);
   const len = Math.max(1e-4, Math.hypot(fx, fz)); // §V28 floored divisor
-  const wx = Math.sin(finite(input.windDirection));
-  const wz = Math.cos(finite(input.windDirection));
+  // APPARENT, not true: the cloth feels what the ship feels (see the note on
+  // SailWindInput.shipVelX). Defaults to the true wind when no velocity is
+  // supplied, so a headless caller still gets the old, valid answer.
+  const app = apparentWind({
+    windDirection: finite(input.windDirection),
+    windSpeed: finite(input.windSpeed),
+    shipVelX: finite(input.shipVelX),
+    shipVelZ: finite(input.shipVelZ),
+  });
+  const wx = app.x;
+  const wz = app.z;
   // +1 = wind dead astern (running), -1 = in irons
   const along = clamp((fx * wx + fz * wz) / len, -1, 1);
 
@@ -77,19 +130,32 @@ export function sailDrive(input: SailWindInput, p: ShipMaterialParams): SailDriv
    * 1.25 at the same time: the belly is now deep enough per unit of drive that
    * 1.5 would blow the cloth clean through the rigging in a squall.
    */
-  const press = clamp(
-    finite(input.windSpeed) / Math.max(0.5, p.sailWindRef),
-    0,
-    1.25,
-  );
-  const gust = gustFactor(finite(input.time), p);
+  const press = clamp(app.speed / Math.max(0.5, p.sailWindRef), 0, 1.25);
+  const gust = gustFactor(finite(input.gustPhase), finite(input.gustPhaseB), p);
 
-  // How full the sail is = how well it DRAWS, using the sim's own efficiency
-  // curve so the cloth never contradicts the thrust the player feels: it is
-  // flat in irons and full on a reach. Dead downwind the curve dips (arcade
-  // penalty) but a square sail is at its fullest there, hence max(eff, along).
-  const theta = Math.acos(clamp(-along, -1, 1)); // 0 = head to wind, π = running
+  /**
+   * How full the sail is = how well it DRAWS. Two terms, and they must be
+   * measured against two DIFFERENT headings:
+   *
+   *   `along` is the wind on the SAIL's own normal, so it must use the sail's
+   *   braced forward — that is the point of bracing.
+   *
+   *   `eff` is `trimEfficiency`, a POINT-OF-SAIL curve. It is defined on the
+   *   HULL's angle to the wind (it carries the sim's dead zone in irons), and
+   *   it is the term that keeps the cloth from contradicting the thrust the
+   *   player feels. Feeding it the SAIL's angle double-counts the brace: at a
+   *   35° brace close-hauled the sail reported 80° off the wind where the hull
+   *   had 45°, i.e. a far better point of sail than the ship actually had, and
+   *   the canvas stayed full while she made almost no way.
+   */
+  const sfx = finite(input.shipForwardX, fx);
+  const sfz = finite(input.shipForwardZ, fz);
+  const slen = Math.max(1e-4, Math.hypot(sfx, sfz)); // §V28 floored divisor
+  const alongShip = clamp((sfx * wx + sfz * wz) / slen, -1, 1);
+  const theta = Math.acos(clamp(-alongShip, -1, 1)); // 0 = head to wind, π = running
   const eff = trimEfficiency(theta);
+  // Dead downwind the arcade curve dips but a square sail is at its fullest
+  // there, hence max(eff, along).
   const fill = clamp(Math.max(eff, along), 0, 1);
   // headed sail: the wind presses it back against the rig instead of filling
   const backed = Math.max(0, -along) * p.sailBackBillow * (1 - fill);
