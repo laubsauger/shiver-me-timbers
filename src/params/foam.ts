@@ -20,8 +20,68 @@ export interface FoamParams {
   /**
    * seconds for undisturbed foam to fade to half its value — converted to a
    * per-frame decay factor at the fixed sim tick (§V2)
+   *
+   * THIS IS THE RESIDUE CLOCK ONLY. It used to be the only clock, and that is
+   * what made the mask read as dwell time rather than breaking intensity —
+   * see foamMath, "THE MASK WAS DWELL TIME". Raising it to buy the trailing
+   * look (§T.41) measurably makes crest placement WORSE (foam mass in the top
+   * 30% of the sea by elevation: 45.4% at 0.9 s, 36.9% at 2.0 s); the
+   * trailing look has to come from somewhere else.
    */
   decayHalfLife: number;
+  /**
+   * Seconds for the BREAKING channel to halve — the second clock (§B, user:
+   * "we don't see a bias towards the higher and steeper cresting having the
+   * foam"). Same injection, ~6× shorter memory, so this channel is a RATE:
+   * it cannot integrate long enough to drift off the crest that made it.
+   *
+   * MEASURED, not tasted. Shaded foam mass in the top 30% of the sea by
+   * elevation, at `residueWeight` 0.30 (shipped 0.9 s single-clock = 58.8%):
+   *   0.08 s → 84.4%   0.15 s → 81.1%   0.25 s → 74.0%   0.40 s → 66.3%
+   * against total shaded foam mass of 0.0136 / 0.0150 / 0.0172 / 0.0195
+   * (shipped 0.0160). 0.15 s is the knee: it buys 22 points of crest bias for
+   * 6% of the foam, where 0.08 s buys 3 more points for another 9%.
+   */
+  breakingHalfLife: number;
+  /**
+   * How much of the long-lived residue channel reaches the visible mask.
+   *
+   * 1 = the pre-split behaviour EXACTLY (with `breakingWeight` 0), which is
+   * what makes this a clean A/B. Below 1 the residue reads as what it is —
+   * older, thinner foam left behind a breaker — instead of carrying the same
+   * weight as water that is breaking right now.
+   *
+   * IT IS THE LEVER, and the measurement says so: adding the breaking channel
+   * ADDITIVELY (residueWeight 1) moved the shaded crest share only 58.8% →
+   * 63.2%, because the trough residue it was competing with stayed. Sweeping
+   * the residue down instead: 0.50 → 74.5%, 0.30 → 81.1%, 0.15 → 86.0%,
+   * 0.00 → 89.7%. 0.30 keeps 94% of the shipped foam mass; below that the sea
+   * starts losing the real trailing residue along with the defect.
+   */
+  residueWeight: number;
+  /**
+   * Weight of the BREAKING channel in the mask, on the residue's own scale
+   * (foamMath.breakingGain does the normalisation, so this stays a mix factor
+   * at any half-life). 0 = pre-split behaviour exactly.
+   */
+  breakingWeight: number;
+  /**
+   * How hard the elevation of the OTHER cascades biases this band's fold gate,
+   * in σ(λ−) per σ(sea height) — the long-wave straining term (§V36: σ-relative
+   * on both sides, never an absolute metre constant).
+   *
+   * WHY: each lane injects from its own band's jacobian only, so measured
+   * r(foam of the 98 m band, elevation of the 1010 m band) = 0.04–0.12 — the
+   * 8–40 m caps are blind to the swell they ride on, and real whitecapping is
+   * not band-separable. sprayMath.crestHeightThreshold is the same quantity as
+   * a hard gate; foam takes it as a soft bias because it is a continuous field.
+   *
+   * Shaded crest share (top 30% / top 10%), on top of the breaking channel:
+   *   0 → 81.1% / 61.6%   0.5σ → 92.4% / 76.1%   1.0σ → 92.9% / 79.1%
+   *   2.0σ → 93.3% / 80.6%
+   * 0.5 is the knee of the top-30 curve and the cheapest in foam removed.
+   */
+  crestBiasSigma: number;
   /** 3×3 blur tap offset in texels — spread speed of the progressive blur */
   blurRadius: number;
   /**
@@ -225,6 +285,11 @@ export const foamParams: FoamParams = registerParams(
   {
     injectStrength: 4.0,
     decayHalfLife: 0.9,
+    // the second clock + its mix — see the fields for the measured sweeps
+    breakingHalfLife: 0.15,
+    residueWeight: 0.3,
+    breakingWeight: 1.0,
+    crestBiasSigma: 0.5,
     blurRadius: 1.0,
     // = the smallest injected minor axis measured across bands and presets
     // (cascade 1 at swell, 0.72 m), so no band's caps are re-rounded
@@ -285,6 +350,10 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
   return {
     injectStrength: { min: 0, max: 20, step: 0.1 },
     decayHalfLife: { min: 0.05, max: 10, step: 0.05 },
+    breakingHalfLife: { min: 0.02, max: 2, step: 0.01 },
+    residueWeight: { min: 0, max: 1, step: 0.01 },
+    breakingWeight: { min: 0, max: 4, step: 0.05 },
+    crestBiasSigma: { min: 0, max: 4, step: 0.05 },
     blurRadius: { min: 0, max: 4, step: 0.25 },
     blurSpreadMetres: { min: 0, max: 8, step: 0.05 },
     artCrestMetres: { min: 0.5, max: 40, step: 0.25 },

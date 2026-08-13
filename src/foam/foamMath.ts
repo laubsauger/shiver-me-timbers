@@ -301,6 +301,186 @@ export function accumulateFoam(previous: number, injected: number): number {
   return Math.min(1, previous + injected);
 }
 
+/* -------------------------------------------------------------------------
+ * THE MASK WAS DWELL TIME, NOT BREAKING INTENSITY (§B, user: "we don't see a
+ * bias towards the higher and steeper cresting having the foam and the splash,
+ * while the troughs have less of it... it kinda just gets emitted there but
+ * then it doesn't really respect it").
+ *
+ * MEASURED headless on the realised three-cascade field — swell preset, 256²
+ * CPU mirror of the real IFFT, 300 ticks, composited onto a 1010 m world grid
+ * with every finer band BOX-AVERAGED to the cell footprint (point-sampling
+ * cascade 2's 0.089 m texels onto a 2 m grid is pure aliasing and would
+ * decorrelate everything by construction):
+ *
+ *   by TOTAL-ELEVATION decile        bottom      top      ratio
+ *   injection this tick             0.00010   0.00329    33 : 1
+ *   foam on screen                  0.0348    0.0810    2.3 : 1
+ *
+ * and foam COVERAGE by that same decile ran
+ *   21.4  12.5  11.0  10.2  9.5  9.5  9.8  10.4  11.4  21.9
+ * i.e. THE DEEPEST TROUGHS WERE AS FOAMY AS THE HIGHEST CRESTS.
+ *
+ * THE INJECTION IS NOT THE DEFECT, and that is the whole point. λ−'s trace
+ * half is −½λ|k|ĥ — an implicit elevation term — and it measures r = −0.90
+ * against its own band's elevation. 82.2% of everything injected lands in the
+ * top 30% of the sea by elevation and 67.9% in the top 10%. By the time it is
+ * on screen those are 45.4% and 27.7%. Four alternative CRITERIA were tried
+ * (trace only, cross-band total trace, convergence-gated anisotropy, both
+ * together) and every one scored the same or worse, because they all inherit
+ * the same fate downstream.
+ *
+ * What loses it is the ACCUMULATOR. `injectStrength` 4.0 adds ~0.0033 per tick
+ * at a hard-breaking texel, so reaching a mask of 0.3 takes ~100 ticks while
+ * the decay-weighted mean visible age is 77. The value a texel carries is
+ * therefore ≈ how LONG it has been firing, not how HARD it is firing now: a
+ * weak 100-tick fire and a violent 20-tick fire arrive identical. Half-life
+ * sweep, share of foam mass in the top 30% of the sea by elevation, with the
+ * injection pinned at 82.2% throughout and the blur held at a constant 0.6 m
+ * world spread so this isolates TIME alone:
+ *
+ *   halfLife    0.05 s   0.15 s   0.30 s   0.90 s (was)   2.00 s
+ *   share        82.3%    77.8%    66.8%     45.4%         36.9%
+ *
+ * It is NOT clipping — measured saturation at the shipped settings is 0.00%.
+ * And it means §T.41 is BACKWARDS for this complaint: raising `decayHalfLife`
+ * to buy trailing takes the crest bias from 45% to 37%.
+ *
+ * ⟹ TWO CHANNELS, TWO CLOCKS, ONE TEXTURE. R keeps the long residue (real seas
+ * do leave foam behind a breaker, and deleting it outright is exactly the
+ * variance §V.64 forbids throwing away). G is the same injection on a short
+ * clock, so it is a RATE and cannot integrate long enough to drift off its
+ * crest. The texture was already RGBA and both G and B were being written as
+ * zero, and the shading already takes ONE sample of it — so this costs no
+ * binding, no sampler and no dispatch (§V.40 untouched).
+ *
+ * Measured on the SHADED mask (raw → foamMath.dissolveKnee, which is what
+ * decides whether foam exists at a texel at all), swell:
+ *
+ *                                     mass in top 30%   top 10%
+ *   shipped                                58.8%         42.2%
+ *   + breaking channel                     81.1%         61.6%
+ *   + cross-band crest bias (below)        92.4%         76.1%
+ *
+ * at 83% of the shipped total foam mass — a real reduction, declared rather
+ * than hidden (§V.64): `injectStrength` is the knob that buys it back, and the
+ * foam that was removed is the trough residue the complaint was about.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Scale that puts the short-clock BREAKING channel onto the long-clock
+ * residue's own scale, so `breakingWeight` is a mix factor and not a magic
+ * multiplier that silently means something different at every half-life.
+ *
+ * DERIVED, not fitted — and the ORDER OF THE PASSES IS PART OF THE DERIVATION.
+ * A tick is inject THEN blurDecay, i.e. x ← (x + I)·decay, so under a constant
+ * injection rate I a channel settles at I·decay/(1 − decay), NOT at
+ * I/(1 − decay). The naive form is 6.6% low at the shipped clocks, which is
+ * small enough to read as tuning and wrong for a reason that would come back
+ * the moment either half-life moved. tests/foam.test.ts runs both accumulators
+ * to steady state and compares, so the ordering cannot silently change either.
+ */
+export function breakingGain(decay: number, breakingDecay: number): number {
+  if (!Number.isFinite(decay) || !Number.isFinite(breakingDecay)) return 0;
+  const d = Math.min(1, Math.max(0, decay));
+  const b = Math.min(1, Math.max(0, breakingDecay));
+  // decay = 1 is foam that never dies: the steady state is unbounded and the
+  // ratio meaningless. decay = 0 is a channel that holds nothing, so there is
+  // nothing to put on the residue's scale — and it is the divisor (§V28).
+  if (!(d < 1) || !(b > 0)) return 0;
+  return (d * (1 - b)) / (b * (1 - d));
+}
+
+/**
+ * The visible mask from the two channels (GPU mirror: index.shadingNode).
+ *
+ * `residueWeight = 1, breakingWeight = 0` reproduces the pre-split mask BIT
+ * FOR BIT, which is what makes the whole change a clean A/B rather than a
+ * rewrite — the same contract `erodeDepth = 0` carries for the dissolve.
+ */
+export function foamMaskFrom(
+  residue: number,
+  breaking: number,
+  gain: number,
+  residueWeight: number,
+  breakingWeight: number,
+): number {
+  const r = Math.max(0, residue) * Math.max(0, residueWeight);
+  const b = Math.max(0, breaking) * Math.max(0, gain) * Math.max(0, breakingWeight);
+  return Math.min(1, r + b);
+}
+
+/**
+ * λ− bias per METRE of the elevation the OTHER cascades contribute here — the
+ * long-wave straining term, precomputed CPU-side so the inject pass is one
+ * multiply-subtract (§V.2: per-tick constants never live in the kernel).
+ *
+ * WHY IT IS NEEDED AT ALL. Each lane injects from its OWN band's jacobian, so
+ * each band's implicit elevation term only knows its own band: measured
+ * r(foam of the 98 m cascade, elevation of the 1010 m cascade) = 0.04–0.12,
+ * i.e. THE 8–40 m CAPS ARE BLIND TO THE SWELL THEY RIDE ON. Real whitecapping
+ * is not band-separable — a short wave breaks because it is riding the crest
+ * of a long one, which steepens it — and the band split threw exactly that
+ * coupling away. Adding it moved the shaded crest share 81.1% → 92.4% (top
+ * 30%) and 61.6% → 76.1% (top 10%).
+ *
+ * WHY IT IS ELEVATION AND NOT THE CROSS-BAND TRACE: both were measured, and
+ * the trace form did WORSE. The trace is |k|-weighted (transfer −|k|·ĥ), so
+ * summing it across bands lets the finest band's gradients dominate a term
+ * whose entire job is to say "you are high up on a long wave".
+ *
+ * σ-RELATIVE ON BOTH SIDES (§V.36): `crestBiasSigma` is in σ(λ−) per σ(h), so
+ * it means the same thing in calm and storm and cannot become an absolute
+ * metre constant that silently changes meaning when the sea state moves — the
+ * §B.12 failure this project has now paid for four times. `crestHeightThreshold`
+ * in sprayMath is the same quantity as a HARD gate; foam needs a soft bias
+ * because it is a continuous field, but both are multiples of `heightRms` and
+ * both move together when the sea does.
+ */
+export function crestBiasPerMetre(
+  crestBiasSigma: number,
+  traceRms: number,
+  choppiness: number,
+  heightRms: number,
+): number {
+  if (!Number.isFinite(crestBiasSigma) || crestBiasSigma <= 0) return 0;
+  if (!Number.isFinite(heightRms) || heightRms <= 0) return 0;
+  const sigma = eigenSigma(traceRms, choppiness);
+  if (!(sigma > 0)) return 0;
+  return (crestBiasSigma * sigma) / heightRms;
+}
+
+/* -------------------------------------------------------------------------
+ * WHY THERE IS NO ADVECTION PASS, AND WHY THE OBVIOUS ARGUMENT FOR ONE IS
+ * BACKWARDS. Written down because it has now been reasoned about twice, from
+ * opposite ends, and both times the conclusion was reached without this step.
+ *
+ * The tempting reading of the half-life sweep above is: "foam is smeared
+ * because it sits still while the wave FORM travels through it at 8–17 m/s, so
+ * transport it". The wave form does travel through it — that observation is
+ * correct and it IS what the sweep measures. The conclusion does not follow.
+ *
+ * The foam textures are indexed by the UNDISPLACED grid coordinate q, and the
+ * surface point drawn for q is q + D(q,t). For a linear deep-water mode the
+ * excursion of a water PARTICLE about its mean position is exactly
+ * (−a·sin θ, a·cos θ) with θ = k·x − ωt, and Tessendorf's choppy displacement
+ * evaluates to precisely that: h = a·cos θ and Dx = −a·sin θ. This model IS
+ * the Gerstner/Lagrangian description of the surface, so q is a MATERIAL
+ * LABEL: the water particle labelled q stays q for all time, and foam pinned
+ * to q is ALREADY advected with the water, exactly and for free.
+ *
+ * A semi-Lagrangian advection pass would therefore move foam ACROSS the water
+ * it is floating on. A whitecap being left behind by its own crest is what
+ * real foam does. The sea read wrong not because the residue ends up in the
+ * trough but because the residue and the ACTIVE breaker were drawn with the
+ * same value — which is what the two channels above fix, without transporting
+ * anything.
+ *
+ * Stokes drift is the one genuine transport this leaves out and it is second
+ * order: ~1–2% of the phase speed, ≈1 m over a 3 s life against caps metres
+ * across. Not the mechanism, and not worth a pass.
+ * ---------------------------------------------------------------------- */
+
 /**
  * 3×3 gaussian weights (1 2 1 / 2 4 2 / 1 2 1)/16, row-major. Sum is exactly
  * 1 so the blur redistributes foam without creating or destroying any —

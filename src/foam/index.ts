@@ -12,17 +12,22 @@
  *   ) => {
  *     update(renderer, frameDt): void;  // call per RENDERED frame; it steps
  *                                       //   itself at the fixed SIM_DT (§V2)
- *     foamTextures: StorageTexture[];   // per-cascade foam (R channel),
- *                                       //   stable refs, RepeatWrapping —
- *                                       //   sample at worldXZ / domain[i]
+ *     foamTextures: StorageTexture[];   // per-cascade foam, stable refs,
+ *                                       //   RepeatWrapping — sample at
+ *                                       //   worldXZ / domain[i].
+ *                                       //   R = long-lived RESIDUE,
+ *                                       //   G = short-clock BREAKING rate
+ *                                       //   (foamMath, "THE MASK WAS DWELL
+ *                                       //   TIME"). One sample carries both.
  *     shadingNode(worldXZ): node;       // final detail-blended foam mask
  *                                       //   [0,1] for the surface material
  *   }
  *   Plus foamShadingNode(foamTex, uv) / foamTintNode() from ./foamShading.
  *
  * Pass order per cascade and frame (never read+write one texture in a pass):
- *   inject:    A + f(displacement.w) → B
- *   blurDecay: blur3x3(B) · decay    → A     ← A is always the output
+ *   inject:    A + f(λ−, h_other)     → B    (both channels, one deficit)
+ *   blurDecay: blur3x3(B) · decay     → A    ← A is always the output
+ *                                            (one kernel, TWO decay rates)
  */
 import type * as THREE from 'three/webgpu';
 import { clamp, float, mix, smoothstep, texture, uniform } from 'three/tsl';
@@ -32,6 +37,8 @@ import { foamParams } from '../params/foam';
 import { oceanParams } from '../params/ocean';
 import {
   blurMixPerStep,
+  breakingGain,
+  crestBiasPerMetre,
   decayFactorPerFrame,
   eigenFoamGate,
   eigenInjectPerStep,
@@ -92,6 +99,13 @@ export interface FoamSeaMoments {
   readonly cascades: readonly { readonly jacobianRms: number }[];
   /** the same moment summed in quadrature over all cascades */
   readonly jacobianRms: number;
+  /**
+   * σ of the sea's ELEVATION (OceanSimulation.heightRms) — what the
+   * cross-band crest bias is expressed as a multiple of, exactly as
+   * sprayMath.crestHeightThreshold does (§V36: never an absolute metre gate,
+   * or the term silently changes meaning the moment the sea state moves).
+   */
+  readonly heightRms: number;
   /** choppiness λ actually sent to the GPU (the anti-fold cap, not the slider) */
   effectiveChoppiness(): number;
 }
@@ -141,6 +155,15 @@ const REDUCE_FACTOR = 4;
  */
 const uTierKeepPixels = uniform(2);
 const uTierFadeSpan = uniform(2);
+/**
+ * The two-channel mix (foamMath.foamMaskFrom). `uBreakingGain` is DERIVED from
+ * the two decay factors every tick, never authored — it is what keeps
+ * `breakingWeight` a mix factor rather than a number that silently changes
+ * meaning whenever either half-life moves.
+ */
+const uResidueWeight = uniform(1);
+const uBreakingWeight = uniform(0);
+const uBreakingGain = uniform(1);
 
 export function createFoamSim(
   cascades: FoamCascadeInput[],
@@ -229,7 +252,10 @@ export function createFoamSim(
       front,
       back,
       coarse,
-      inject: createInjectPass(c.displacement, c.derivatives, front, back, resolution, lu),
+      // the WHOLE cascade list, not just this one: the gate now carries the
+      // long-wave straining term, which needs the other bands' elevation here
+      // (compute-only textureLoads — no sampler, §V.40 untouched)
+      inject: createInjectPass(cascades, i, front, back, resolution, lu),
       blurDecay: createBlurDecayPass(back, front, resolution, lu),
       // the reduction runs off `front`, i.e. AFTER the blur+decay of this tick,
       // so the tier is always a filtered view of what is actually on screen
@@ -266,9 +292,28 @@ export function createFoamSim(
       const lambda = sea.effectiveChoppiness();
       const seaSigma = jacobianSigma(sea.jacobianRms, lambda);
       const decay = decayFactorPerFrame(foamParams.decayHalfLife, SIM_DT);
+      // THE SECOND CLOCK. Same injection, ~6× shorter memory, so this channel
+      // is a RATE and cannot integrate long enough to drift off the crest that
+      // made it (foamMath, "THE MASK WAS DWELL TIME"). Floored at the residue's
+      // own decay: a breaking channel that outlived the residue would invert
+      // the two roles silently rather than fail.
+      const breakingDecay = Math.min(
+        decay,
+        decayFactorPerFrame(foamParams.breakingHalfLife, SIM_DT),
+      );
       // how many blur steps the foam you can SEE has been through — the blur
-      // budget below is spent over exactly this many ticks (foamMath)
+      // budget below is spent over exactly this many ticks (foamMath).
+      // The RESIDUE's age, deliberately: one world diffusion rate for both
+      // channels, so the breaking channel is crisper because it is younger
+      // rather than because it was given its own kernel.
       const ageTicks = meanFoamAgeTicks(decay);
+      // long-wave straining: λ− bias per metre of the other bands' elevation
+      const crestBias = crestBiasPerMetre(
+        foamParams.crestBiasSigma,
+        sea.jacobianRms,
+        lambda,
+        sea.heightRms,
+      );
       const fineOff = foamParams.injectFineCascade < 1;
       for (const lane of lanes) {
         const steep = sea.cascades[lane.index].jacobianRms;
@@ -286,6 +331,11 @@ export function createFoamSim(
           ? 0
           : eigenInjectPerStep(foamParams.injectStrength, SIM_DT, steep, lambda, bandSigma, seaSigma);
         lane.u.uDecay.value = decay;
+        lane.u.uDecayBreaking.value = breakingDecay;
+        // a switched-off band injects nothing, so its straining term is dead
+        // weight; zeroing it keeps `NEVER_INJECT_BIAS` unreachable rather than
+        // letting a big swell crest bias the metric back down toward it
+        lane.u.uCrestBias.value = off ? 0 : crestBias;
         lane.u.uRadius.value = foamParams.blurRadius;
         // ONE world diffusion length for every band (§B: the blur was the
         // shape, and it was a grid quantity). `blurRadius` alone made the
@@ -305,6 +355,9 @@ export function createFoamSim(
       }
       uTierKeepPixels.value = Math.max(1, foamParams.tierKeepPixels);
       uTierFadeSpan.value = Math.max(1.05, foamParams.tierFadeSpan);
+      uResidueWeight.value = Math.max(0, foamParams.residueWeight);
+      uBreakingWeight.value = Math.max(0, foamParams.breakingWeight);
+      uBreakingGain.value = breakingGain(decay, breakingDecay);
       // shading uniforms are display-side: refresh them every frame, even on
       // frames that owe no sim step
       updateFoamShadingUniforms(foamParams, time, oceanParams.windDirection);
@@ -346,28 +399,52 @@ export function createFoamSim(
         // texel size — the sampling rate itself, not a proxy for it.
         return smoothstep(keep.mul(uTierFadeSpan.max(1.05)), keep, pixelMetres);
       };
+      // TWO CHANNELS, accumulated separately: R is the long residue, G the
+      // short-clock BREAKING rate (foamMath, "THE MASK WAS DWELL TIME"). They
+      // ride in ONE sample of ONE texture — `.rg` is a swizzle, not a second
+      // read — so this costs no binding and no sampler (§V.40).
       let raw: any = float(0);
+      let breaking: any = float(0);
       for (const lane of lanes) {
         const uv = warped.div(lane.domain);
-        const fine = texture(lane.front, uv).r;
+        const fine = texture(lane.front, uv);
         const wFine = tierWeight(lane.texelMetres);
         if (lane.coarse) {
           // Hand over at the FINE tier's own Nyquist point to the tier whose
           // texels are 4× the area — not 16× (see REDUCE_FACTOR) — and retire
           // that one at ITS Nyquist point too, rather than letting a 3.3 m
           // texel alias its way to the horizon.
-          const coarse = texture(lane.coarse, uv).r.mul(tierWeight(lane.coarseTexelMetres));
-          raw = raw.add(mix(coarse, fine, wFine));
+          const wCoarse = tierWeight(lane.coarseTexelMetres);
+          const coarse = texture(lane.coarse, uv);
+          raw = raw.add(mix(coarse.r.mul(wCoarse), fine.r, wFine));
+          breaking = breaking.add(mix(coarse.g.mul(wCoarse), fine.g, wFine));
         } else {
-          raw = raw.add(fine.mul(wFine));
+          raw = raw.add(fine.r.mul(wFine));
+          breaking = breaking.add(fine.g.mul(wFine));
         }
       }
+      // foamMath.foamMaskFrom. `uBreakingGain` puts the short clock on the
+      // residue's own scale, so `breakingWeight` stays a mix factor at any
+      // half-life instead of a multiplier that means something different every
+      // time either clock moves. residueWeight 1 + breakingWeight 0 reproduces
+      // the pre-split mask exactly — the A/B this shipped behind.
+      breaking = breaking.mul(uBreakingGain).mul(uBreakingWeight);
+      raw = raw.mul(uResidueWeight).add(breaking);
       // world-space cap variation (NON-tiling, drifts slowly): the FFT field
       // repeats per domain, so identical caps pulse in sync on a lattice —
       // this mask gives every world position its own strength/lifecycle,
       // and the detail knee then culls the weakened ones (§B.4 class fix)
+      // AGE, MEASURED RATHER THAN GUESSED. `foamDetailMask`'s freshness has
+      // always been the mask VALUE standing in for an age it had no way to
+      // measure — and that proxy was simply false: the accumulator needed ~100
+      // ticks to reach 0.3 against a 77-tick mean visible age, so the value it
+      // read was dwell time, not freshness. The breaking channel IS the age
+      // signal. Taken as a SHARE of the mask so it is scale-free, which also
+      // means `capVariationNode` cancels out of it exactly — hence the ratio is
+      // formed HERE, before that multiply, and the fbm is evaluated once (§V17).
+      const share = clamp(breaking.div(raw.max(1e-4)), 0, 1);
       raw = raw.mul(capVariationNode(worldXZ));
-      return foamDetailMask(clamp(raw, 0, 1), worldXZ);
+      return foamDetailMask(clamp(raw, 0, 1), worldXZ, share);
     },
 
     dispose(): void {

@@ -17,8 +17,13 @@
  *    outline was a level set of an isotropic gaussian blur, which is a circle
  *    by construction. Now it is the art texture's own torn contour.
  *
- * The foam value is the age proxy: injection writes ~1 at crests and
- * decay+blur only ever lowers it, so value ≈ freshness.
+ * AGE IS MEASURED, NOT PROXIED. This module used to read the foam VALUE as
+ * freshness ("injection writes ~1 at crests and decay only lowers it"), and
+ * that claim was simply untrue — the accumulator needs ~100 ticks to reach 0.3
+ * against a 77-tick mean visible age, so the value was DWELL TIME. The sim now
+ * carries a second, short-clock BREAKING channel (foamPasses, and foamMath
+ * "THE MASK WAS DWELL TIME"); `foamDetailMask` takes its share of the mask as
+ * the freshness and falls back to the old proxy only for callers without one.
  *
  * Anti-boxiness (§V20 user critique "patchy squares, frozen"):
  * - foamWarpVec: fbm domain-warp offset (world meters) applied to the sim
@@ -249,7 +254,18 @@ export function foamWarpVec(coord: AnyNode): AnyNode {
  * (world XZ preferred — continuous across cascade tile seams).
  * Output scalar mask in [0, 1] for the surface material's crest mix.
  */
-export function foamDetailMask(rawFoam: AnyNode, coord: AnyNode): AnyNode {
+export function foamDetailMask(
+  rawFoam: AnyNode,
+  coord: AnyNode,
+  /**
+   * MEASURED freshness in [0,1] — the breaking channel's share of this mask
+   * (foam/index.shadingNode). Optional because the wake foam (§V.10) has no
+   * such channel and the surface material passes two arguments; when it is
+   * absent the old VALUE proxy is used, which is also what makes
+   * `breakingWeight = 0` reproduce the pre-split look bit for bit.
+   */
+  breakingShare?: AnyNode,
+): AnyNode {
   const art = foamArtTexture();
   // per-position phase (§B.4: NO shared global timeline) — coarse value
   // noise gives nearby points a common offset but distant caps their own
@@ -283,8 +299,23 @@ export function foamDetailMask(rawFoam: AnyNode, coord: AnyNode): AnyNode {
   const crestTex = texture(art, aniso.div(crestMetres).add(vec2(t, t.mul(-0.7))));
   const softTex = texture(art, aniso.div(softMetres).sub(vec2(t.mul(0.4), t.mul(-0.3))));
 
-  // age proxy = foam value (§V6): high → crest lace, low → soft mottle
-  const freshness = smoothstep(float(0.25), float(0.8), rawFoam);
+  // AGE. It used to be the foam VALUE standing in for an age nothing measured
+  // ("injection writes ~1 at crests and decay only lowers it") — and that was
+  // false: the accumulator needs ~100 ticks to reach 0.3 against a 77-tick
+  // mean visible age, so the value was DWELL TIME, not freshness, and a weak
+  // long fire read identical to a violent short one (foamMath, "THE MASK WAS
+  // DWELL TIME"). The breaking channel measures it directly; the proxy remains
+  // for callers that have no such channel.
+  const freshness =
+    breakingShare !== undefined
+      ? // @band-limited-elsewhere: `breakingShare` is a RATIO of two channels of
+        // the same texture sample — dimensionless, with no period and no
+        // spatial frequency of its own. Both channels are filtered texture
+        // reads already retired against their measured footprint by
+        // `tierWeight` (index.shadingNode), and the mask's residual footprint
+        // is carried into `softness` below via `fwidth(rawFoam)`.
+        smoothstep(float(0.25), float(0.8), breakingShare)
+      : smoothstep(float(0.25), float(0.8), rawFoam);
   // BODY — the interior of the patch (R = crest lace, G = soft mottle)
   const textured = mix(softTex.g, crestTex.r, freshness);
   // saturated foam settles toward an unbroken sheet
