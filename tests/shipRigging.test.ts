@@ -277,20 +277,40 @@ describe('rig LOCALITY (anti spider-web — docs/ship-reference-schema.png)', ()
     for (const { rope } of sheets) expect(rope.socketA).toMatch(/^anchor-sail-.*-clew-/);
   });
 
-  it('buntlines rise from the sail foot to the masthead, up its front', () => {
+  it('buntlines are LED UP THE CLOTH, not run straight to the masthead', () => {
     // WHY: the user's note — "not all the lines should just go up to the mast,
-    // some should attach to the sails". Buntlines are the most recognisable
-    // running-rigging shape on a square rig and were the roles left declared
-    // but inert while no anchor was sewn to the cloth. They must start on the
-    // sail and RISE; a buntline that dropped would be a sheet.
+    // some should attach to the sails". They must start on the sail and RISE;
+    // a buntline that dropped would be a sheet.
+    //
+    // RE-CUT. This used to require every buntline to END at the masthead,
+    // which is the single long span it was built as — and that span crosses
+    // the canvas TWICE, behind the belly at mid-height and in front of it near
+    // the head, because the belly IS the deviation from that chord. Measured
+    // 0.88 m behind the surface at mid-height, and the user saw it as a rope
+    // glitching in and out of the sail. Latent only while the sail was flat.
+    //
+    // The intent is unchanged — start on the cloth, rise, finish at the
+    // masthead — but it is now a RUN of short legs through cringles on the
+    // reef bands, which is how the gear is actually led. Asserting the end of
+    // the run rather than the end of every rope.
     const bunts = resolvePlan(buildGalleonBlueprint()).filter(
       (r) => r.rope.role === 'buntline',
     );
     expect(bunts.length).toBeGreaterThanOrEqual(8);
     for (const { rope, a, b } of bunts) {
-      expect(rope.socketA).toMatch(/^anchor-sail-.*-bunt-/);
-      expect(rope.socketB).toMatch(/^anchor-masthead-/);
-      expect(b[1]).toBeGreaterThan(a[1]); // rises
+      // every leg starts on the cloth or on a lead that itself rides the cloth
+      expect(rope.socketA).toMatch(/^anchor-sail-.*-bunt/);
+      expect(rope.socketB).toMatch(/^anchor-sail-.*-bunt-lead|^anchor-masthead-/);
+      expect(b[1]).toBeGreaterThan(a[1]); // every leg rises
+    }
+    // the run is continuous foot → lead1 → lead2 → masthead, and it is the
+    // INTERMEDIATE legs that keep it off the canvas. If a future change drops
+    // them the run collapses back to one span and this fires.
+    const toMasthead = bunts.filter((r) => /^anchor-masthead-/.test(String(r.rope.socketB)));
+    const onCloth = bunts.filter((r) => /bunt-lead/.test(String(r.rope.socketB)));
+    expect(onCloth.length).toBe(toMasthead.length * 2); // two legs per run
+    for (const { rope } of toMasthead) {
+      expect(rope.socketA).toMatch(/bunt-lead2-/); // the run ENDS at the mast
     }
   });
 

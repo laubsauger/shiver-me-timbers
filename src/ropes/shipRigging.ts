@@ -84,7 +84,10 @@ const STYLE: Record<RigRole, { slack: number; thickness: number }> = {
   lift: { slack: 1.02, thickness: 0.03 },
   brace: { slack: 1.02, thickness: 0.025 },
   sheet: { slack: 1.02, thickness: 0.022 },
-  buntline: { slack: 1.05, thickness: 0.018 },
+  // near-taut: a buntline is now three short legs led up the sail's face, and
+  // slack in a chord between two points ON a convex surface sags AWAY from it
+  // — straight back through the cloth it is supposed to be lying against
+  buntline: { slack: 1.012, thickness: 0.018 },
   leechline: { slack: 1.05, thickness: 0.018 },
 };
 
@@ -292,11 +295,32 @@ export function buildRiggingPlan(blueprint: PieceDef[]): RiggingRope[] {
       add(clew, aftMast === undefined
         ? `anchor-cleat-stern-${side}`
         : belay(side, aftMast), 'sheet');
-      // buntline: from the foot of the sail UP its front face to the masthead,
-      // the line that gathers the canvas when it furls. The most recognisable
-      // running-rigging shape on a square rig, and inert until now because
-      // there was nothing sewn to the cloth to hang it from.
-      add(bunt, masthead(m), 'buntline');
+      /**
+       * BUNTLINE: from the foot of the sail UP its front face to the masthead,
+       * the line that gathers the canvas when it furls.
+       *
+       * LED THROUGH CRINGLES ON THE CLOTH, not run straight to the masthead.
+       * The straight version crossed the canvas twice — behind the belly at
+       * mid-height, in front of it near the head, because the belly IS the
+       * deviation from that chord — and the user saw it as a rope glitching in
+       * and out of the sail. Measured 0.88 m behind the surface at mid-height
+       * at the shipped camber; it was latent only while the sail was flat.
+       *
+       * The leads ride the cloth (§V45 — socketWorldPosition resolves them
+       * through the live shape), so each leg is a short chord across a gently
+       * curving surface and the run hugs the face. Guarded so a blueprint
+       * without the lead sockets still rigs the old single span rather than
+       * throwing (§V18 — no code path forks on ship class).
+       */
+      const lead1 = `anchor-sail-${m}-${level}-bunt-lead1-${side}`;
+      const lead2 = `anchor-sail-${m}-${level}-bunt-lead2-${side}`;
+      if (ids.has(lead1) && ids.has(lead2)) {
+        add(bunt, lead1, 'buntline');
+        add(lead1, lead2, 'buntline');
+        add(lead2, masthead(m), 'buntline');
+      } else {
+        add(bunt, masthead(m), 'buntline');
+      }
       // NO TACKS. The clew's forward lead is real gear, but it is the least
       // visible line on the ship and it crosses a bay FORWARD — the direction
       // that reads as web. The sail's forward restraint is the yard its head

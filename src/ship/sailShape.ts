@@ -400,4 +400,28 @@ export const SAIL_ANCHOR_UV: Record<string, [number, number]> = {
   // running-rigging shape on a square rig
   'bunt-port': [0.3, 0],
   'bunt-starboard': [0.7, 0],
+  /**
+   * BUNTLINE LEADS, and they are why the line stops cutting through the sail.
+   *
+   * A buntline used to be one rope from the foot straight to the masthead.
+   * Any straight chord between a point on the foot and a point above the head
+   * passes BEHIND the belly at mid-height and in FRONT of it near the head —
+   * the belly IS the deviation from that chord — so it crossed the canvas
+   * twice and read as a line glitching in and out of the cloth. Measured at
+   * the shipped camber: 0.88 m behind the surface at mid-height.
+   *
+   * A real buntline is led up the sail's FRONT face through cringles at the
+   * reef bands, which is exactly what fixes it: split the run at points that
+   * ride the cloth, and each segment is then a SHORT chord across a gently
+   * curving surface. Deviation falls with the square of the segment, so three
+   * short legs hug where one long one could not.
+   *
+   * They sit on the reef bands (0.34 / 0.62, pieceGeometrySail.reefPoints) —
+   * the same stations the reef points are sewn at, because that is where the
+   * cloth is reinforced and where the gear is actually led.
+   */
+  'bunt-lead1-port': [0.3, 0.34],
+  'bunt-lead2-port': [0.3, 0.62],
+  'bunt-lead1-starboard': [0.7, 0.34],
+  'bunt-lead2-starboard': [0.7, 0.62],
 };

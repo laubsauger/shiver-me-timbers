@@ -42,7 +42,37 @@ export interface ShipClassParams {
   yardMastClearance: number;
   /** sail cloth offset forward of its yard axis (m) */
   sailYardOffset: number;
-  sailDropLowerFactor: number; // sail drop as fraction of mast height
+  /**
+   * SAIL DROP as a fraction of mast height (user, twice: "the bottom stages
+   * are just not long enough… they might be a little bit on the mast-heavy
+   * side").
+   *
+   * MEASURED on our own rig, which is what makes this defensible: at the old
+   * 0.20/0.15 the galleon carried canvas over 0.350 of her mast and left
+   * 0.300 of BARE POLE — 9.4 m — below the lowest yard, with 0.240 above the
+   * top sail. 65% bare mast. The reference (docs/inspo/ship/
+   * ref-rig-proportions.png) is canvas over most of the spar.
+   *
+   * Fixed by lengthening the SAILS rather than lowering the yards: the
+   * complaint is that the cloth is short, not that the spars are high, and
+   * yard placement is spar geometry. 0.30/0.19 puts the course's foot at
+   * 0.20 of the mast (bare pole 9.4 → 6.3 m), total canvas 0.350 → 0.490,
+   * and the course's aspect at 1.29 wide-to-tall, which is the band the
+   * reference courses read in.
+   *
+   * INFERRED, NOT MEASURED, and the distinction matters: the per-tier SPLIT
+   * is a proportional scaling of what we had. The references cannot certify
+   * per-tier fractions — the fore and main masts overlap in x at every usable
+   * threshold, so no clean single-mast profile exists in any shot we have.
+   * What IS measured is the total canvas fraction, the bare run below the
+   * lowest yard, and the tier count.
+   *
+   * STILL WRONG, and it needs blueprintRig.ts (deck agent): the reference
+   * carries THREE near-contiguous tiers and we carry two. No two-tier rig
+   * reaches the reference's canvas fraction without sails of an aspect no
+   * square rig has ever had.
+   */
+  sailDropLowerFactor: number;
   sailDropUpperFactor: number;
   bowspritLength: number;
   bowspritRadius: number;
@@ -94,7 +124,7 @@ export const brigantineParams: ShipClassParams = registerParams(
     yardLowerFrac: 0.52, yardUpperFrac: 0.78,
     yardLowerLenFactor: 0.5, yardUpperLenFactor: 0.36, yardRadius: 0.12,
     yardMastClearance: 0.1, sailYardOffset: 0.16,
-    sailDropLowerFactor: 0.22, sailDropUpperFactor: 0.16,
+    sailDropLowerFactor: 0.26, sailDropUpperFactor: 0.17,
     bowspritLength: 7, bowspritRadius: 0.18, bowspritPitch: 0.28,
     railHeight: 0.9, railThickness: 0.12, railInset: 0.2, railLengthFactor: 0.85,
     rudderHeight: 2.2, rudderChord: 1.2, rudderThickness: 0.15,
@@ -122,7 +152,7 @@ export const galleonParams: ShipClassParams = registerParams(
     yardLowerFrac: 0.5, yardUpperFrac: 0.76,
     yardLowerLenFactor: 0.42, yardUpperLenFactor: 0.3, yardRadius: 0.15,
     yardMastClearance: 0.12, sailYardOffset: 0.2,
-    sailDropLowerFactor: 0.2, sailDropUpperFactor: 0.15,
+    sailDropLowerFactor: 0.26, sailDropUpperFactor: 0.16,
     bowspritLength: 9, bowspritRadius: 0.22, bowspritPitch: 0.35, // ~20°
     railHeight: 1.0, railThickness: 0.13, railInset: 0.22, railLengthFactor: 0.8,
     rudderHeight: 2.6, rudderChord: 1.4, rudderThickness: 0.18,
