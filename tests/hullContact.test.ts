@@ -330,45 +330,70 @@ describe('feel target: the hull keeps CONTACT with the sea', () => {
     // RMS elevation makes "sailing weather" mean the same thing next week.
     const op = seaOfSpectralRms(0.6, { windSpeed: 11 });
 
-    const fly = (sp: SeaPhysicsParams): { stemDry: number; keelClear: number; rms: number } => {
-      const ocean = new CpuOcean(7, op, sp);
-      const contact = createHullContact(HULL, 11);
-      const ship = makeShip();
-      ship.position[1] = -0.4;
-      let keelClear = 0;
-      let samples = 0;
-      let stemDry = 0;
-      const water: number[] = [];
+    // BOTH hulls fly through ONE sea. This is a damping comparison, so the
+    // two runs are only meaningful against the SAME water — and they always
+    // were, because CpuOcean.update(t) is a pure function of t and reads no
+    // ship state, while buoyancy and hullContact only ever READ heightAt.
+    // buoyancyDamping is not in the mirror's rebuild signature either
+    // (cpuOcean `mirrorSignature`), so the two CpuOcean(7, op, sp) the old
+    // code built were bit-identical objects computing bit-identical IFFTs —
+    // twice, and the IFFT is 71% of a tick. Interleaving is not an
+    // approximation: each ship sees the same field at the same t.
+    const fly = (
+      sps: SeaPhysicsParams[],
+    ): { stemDry: number; keelClear: number; rms: number }[] => {
+      const ocean = new CpuOcean(7, op, sps[0]);
+      const rigs = sps.map((sp) => {
+        const ship = makeShip();
+        ship.position[1] = -0.4;
+        return {
+          sp,
+          ship,
+          contact: createHullContact(HULL, 11),
+          water: [] as number[],
+          keelClear: 0,
+          stemDry: 0,
+          samples: 0,
+        };
+      });
       for (let i = 0; i < 3000; i++) {
         const t = (i + 1) * DT;
         ocean.update(t);
-        ship.position[0] += 8 * DT; // beam sea at 8 m/s — the worst case
-        stepShipBuoyancy(ship, ocean, DT, sp);
-        contact.update(ship, ocean, t);
-        if (i < 900) continue;
-        samples++;
-        const sx = (contact.worldX[0] + contact.worldX[1]) / 2;
-        const sy = (contact.worldY[0] + contact.worldY[1]) / 2;
-        const sz = (contact.worldZ[0] + contact.worldZ[1]) / 2;
-        const surface = ocean.heightAt(sx, sz, t);
-        water.push(surface);
-        const gap = sy - surface;
-        if (gap > 0) stemDry++;
-        if (gap > 2) keelClear++; // 2 m = galleon draft: the keel is in air
+        for (const r of rigs) {
+          r.ship.position[0] += 8 * DT; // beam sea at 8 m/s — the worst case
+          stepShipBuoyancy(r.ship, ocean, DT, r.sp);
+          r.contact.update(r.ship, ocean, t);
+          if (i < 900) continue;
+          r.samples++;
+          const sx = (r.contact.worldX[0] + r.contact.worldX[1]) / 2;
+          const sy = (r.contact.worldY[0] + r.contact.worldY[1]) / 2;
+          const sz = (r.contact.worldZ[0] + r.contact.worldZ[1]) / 2;
+          const surface = ocean.heightAt(sx, sz, t);
+          r.water.push(surface);
+          const gap = sy - surface;
+          if (gap > 0) r.stemDry++;
+          if (gap > 2) r.keelClear++; // 2 m = galleon draft: the keel is in air
+        }
       }
-      const m = water.reduce((s, v) => s + v, 0) / water.length;
-      const rms = Math.sqrt(water.reduce((s, v) => s + (v - m) ** 2, 0) / water.length);
-      return { stemDry: stemDry / samples, keelClear: keelClear / samples, rms };
+      return rigs.map((r) => {
+        const m = r.water.reduce((s, v) => s + v, 0) / r.water.length;
+        const rms = Math.sqrt(
+          r.water.reduce((s, v) => s + (v - m) ** 2, 0) / r.water.length,
+        );
+        return { stemDry: r.stemDry / r.samples, keelClear: r.keelClear / r.samples, rms };
+      });
     };
 
-    const shipped = fly(testSeaParams());
+    // the measured cause: at the old damping she rides out of the sea far
+    // more (0.70 of the flying at this sea state, measured).
+    const [shipped, bouncy] = fly([
+      testSeaParams(),
+      testSeaParams({ buoyancyDamping: 1.6e5 }),
+    ]);
     // fail loud if the normalisation stopped working: every threshold below
     // is calibrated for roughly this much sea and means nothing without it
     expect(shipped.rms).toBeGreaterThan(0.6);
     expect(shipped.rms).toBeLessThan(1.4);
-    // the measured cause: at the old damping she rides out of the sea far
-    // more (0.70 of the flying at this sea state, measured).
-    const bouncy = fly(testSeaParams({ buoyancyDamping: 1.6e5 }));
     expect(shipped.keelClear).toBeLessThan(bouncy.keelClear * 0.85);
     // she still lifts her forefoot sometimes — a ship that never did would
     // be glued to the water, which is the other half of the same complaint

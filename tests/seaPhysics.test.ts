@@ -282,6 +282,70 @@ function stripPitchLikeSailing(ship: ShipState): void {
   );
 }
 
+/** one heading's time series through the sea — shipY/waterY are paired by tick */
+type HeadingRun = {
+  shipY: number[];
+  waterY: number[];
+  pitches: number[];
+  rolls: number[];
+};
+
+/**
+ * Ride every heading through ONE sea and return each one's time series.
+ *
+ * WHY ONE OCEAN FOR ALL OF THEM. `CpuOcean.update(t)` is a pure function of
+ * `time`: it reads no ship state, and buoyancy only ever READS the mirror
+ * (stepShipBuoyancy takes `ocean.currentTime` and samples `heightAt`, it
+ * never writes). So a mirror built per heading recomputed a bit-identical
+ * IFFT sequence once per heading — and that IFFT is 71% of a tick, measured
+ * 1.31 ms of 1.86 ms at 64². Sweeping headings is the point (§V.50);
+ * rebuilding the sea underneath each one never was.
+ *
+ * Interleaving the ships over a single mirror is BIT-IDENTICAL, not an
+ * approximation: each ship still sees the same field at the same t, stepped
+ * in the same order, from the same seed. The ships never see each other —
+ * there is no ship-ship coupling in buoyancy — so their interleaving is
+ * unobservable. Cost falls by the number of headings.
+ */
+function rideHeadings(
+  headings: number[],
+  seed: number,
+  op: OceanParams,
+  sp: SeaPhysicsParams,
+  ticks: number,
+  warmup: number,
+): HeadingRun[] {
+  const ocean = new CpuOcean(seed, op, sp);
+  const ships = headings.map((yaw) => {
+    const ship = makeShip();
+    ship.position[1] = equilibriumY(sp);
+    ship.quaternion = quatFromAxisAngle([0, 1, 0], yaw);
+    return ship;
+  });
+  const out: HeadingRun[] = headings.map(() => ({
+    shipY: [],
+    waterY: [],
+    pitches: [],
+    rolls: [],
+  }));
+  for (let i = 0; i < ticks; i++) {
+    const t = (i + 1) * DT;
+    ocean.update(t);
+    for (let h = 0; h < ships.length; h++) {
+      const ship = ships[h];
+      stripPitchLikeSailing(ship); // real main.ts tick order (sailing first)
+      stepShipBuoyancy(ship, ocean, DT, sp);
+      if (i < warmup) continue; // discard transient
+      const r = out[h];
+      r.shipY.push(ship.position[1]);
+      r.waterY.push(ocean.heightAt(ship.position[0], ship.position[2], t));
+      r.pitches.push(pitchOf(ship));
+      r.rolls.push(rollOf(ship));
+    }
+  }
+  return out;
+}
+
 describe('feel targets: ponderous but ALIVE in a swell', () => {
   /**
    * A HEADING ENSEMBLE, not one run (§V.50, which this block violated).
@@ -309,28 +373,7 @@ describe('feel targets: ponderous but ALIVE in a swell', () => {
   const op = testOceanParams({ amplitude: 1.0 });
   const sp = testSeaParams();
   const HEADINGS = [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2];
-  const runs = HEADINGS.map((yaw) => {
-    const ocean = new CpuOcean(7, op, sp);
-    const ship = makeShip();
-    ship.position[1] = equilibriumY(sp);
-    ship.quaternion = quatFromAxisAngle([0, 1, 0], yaw);
-    const shipY: number[] = [];
-    const waterY: number[] = [];
-    const pitches: number[] = [];
-    const rolls: number[] = [];
-    for (let i = 0; i < 2400; i++) {
-      const t = (i + 1) * DT;
-      ocean.update(t);
-      stripPitchLikeSailing(ship); // real main.ts tick order (sailing first)
-      stepShipBuoyancy(ship, ocean, DT, sp);
-      if (i < 600) continue; // discard 10 s transient
-      shipY.push(ship.position[1]);
-      waterY.push(ocean.heightAt(ship.position[0], ship.position[2], t));
-      pitches.push(pitchOf(ship));
-      rolls.push(rollOf(ship));
-    }
-    return { shipY, waterY, pitches, rolls };
-  });
+  const runs = rideHeadings(HEADINGS, 7, op, sp, 2400, 600);
 
   const std = (a: number[]): number => {
     const m = a.reduce((s, v) => s + v, 0) / a.length;
@@ -856,31 +899,35 @@ describe('§B.22 feel: the hull answers the sea, in the right places', () => {
     // Swept over headings (§V.50): green water is a tail statistic and one
     // heading cannot pin it — measured spread across 8 headings × 4 seeds in
     // this sea is 0.00%–1.39%, so a single sample can land anywhere in it.
+    // Same four headings on ONE mirror (see rideHeadings): the sea is a
+    // function of t alone, so the old per-heading CpuOcean was recomputing
+    // the identical 5400-tick IFFT sequence four times for numbers that
+    // cannot differ. Immersion is (water − ship) tick by tick, which is
+    // exactly the pair rideHeadings records, so nothing about WHAT is
+    // measured or over how long it is measured changes here.
     const measure = (amplitude: number) => {
+      const runs = rideHeadings(
+        [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2],
+        11,
+        testOceanParams({ amplitude }),
+        sp,
+        5400,
+        600,
+      );
       const worsts: number[] = [];
       const unders: number[] = [];
       const sigmas: number[] = [];
-      for (const yaw of [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2]) {
-        const ocean = new CpuOcean(11, testOceanParams({ amplitude }), sp);
-        const ship = makeShip();
-        ship.position[1] = equilibriumY(sp);
-        ship.quaternion = quatFromAxisAngle([0, 1, 0], yaw);
+      for (const r of runs) {
+        const n = r.shipY.length;
         let worst = 0;
         let under = 0;
-        let n = 0;
         let sum2 = 0;
-        for (let i = 0; i < 5400; i++) {
-          const t = (i + 1) * DT;
-          ocean.update(t);
-          stripPitchLikeSailing(ship); // real tick order (sailing runs first)
-          stepShipBuoyancy(ship, ocean, DT, sp);
-          if (i < 600) continue;
-          const h = ocean.heightAt(ship.position[0], ship.position[2], t);
-          const immersion = h - ship.position[1];
+        for (let i = 0; i < n; i++) {
+          const h = r.waterY[i];
+          const immersion = h - r.shipY[i];
           worst = Math.max(worst, immersion);
           if (immersion > 2.6) under++;
           sum2 += h * h;
-          n++;
         }
         worsts.push(worst);
         unders.push(under / n);

@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:changed": "node scripts/test-changed.mjs",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "three": "^0.180.0",
