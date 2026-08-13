@@ -32,6 +32,8 @@ import { uniform } from 'three/tsl';
 import type { Node, PassNode } from 'three/webgpu';
 import type { ShaderNodeObject } from 'three/tsl';
 import { underwaterParams as p } from '../params/underwater';
+import { skyParams } from '../params/sky';
+import { sunDirection as solarDirection } from '../sky/sunCycle';
 import {
   submersionState,
   type SubmersionMode,
@@ -164,8 +166,33 @@ export function createUnderwater(opts: {
       }
 
       // day-cycle tint: sun below horizon → dark, noon → full color (V25:
-      // weather/day-cycle drive the underwater tint too)
-      const dayT = Math.min(1, Math.max(0, sunDir.y * 2));
+      // weather/day-cycle drive the underwater tint too).
+      //
+      // THE SUN, NOT THE KEY. This used to read `sunDir.y`, i.e. the vector
+      // `sunDirProvider` returns, which is `sky.sunDirection` — the shared KEY
+      // direction that src/sky/moonCycle.ts RE-AIMS AT THE MOON after dusk
+      // rather than adding a second light. So `nightFloor` was unreachable:
+      // with the moon 30° up, `dayT` saturated to 1 and the water was exactly
+      // as bright at midnight as at noon, which is the opposite of what the
+      // param documents ("brightness floor when the sun is DOWN"). The
+      // question this term asks is how much SUNLIGHT is entering the water, so
+      // it reads the pure solar function off the same live skyParams that
+      // drive the sky — the same source core/postPipeline.ts uses for its own
+      // default, so the two cannot drift.
+      //
+      // `sunVis` above deliberately still reads the key: shafts through the
+      // rigging SHOULD follow the moon at night, and that is a question about
+      // the key light, not about the sun. One vector, two different questions.
+      //
+      // Third variant of this defect family found today. §B.41 was the glint
+      // road multiplied by a hardcoded cream literal, so the moon road
+      // rendered at noon brightness; f247977 was the caustics never reading
+      // the key at all, so they burned at full strength at midnight. This one
+      // is the inverse of that second: reading the key where it owed the sun.
+      const solarY = solarDirection(skyParams.timeOfDay, skyParams.latitude)[1];
+      // §V.28: fall back BRIGHT. A NaN in the sky params must not be able to
+      // black out the whole submerged frame.
+      const dayT = Math.min(1, Math.max(0, finite(solarY, 1) * 2));
       const level = p.nightFloor + (1 - p.nightFloor) * dayT;
       uniforms.dayTint.value.setScalar(level);
 
