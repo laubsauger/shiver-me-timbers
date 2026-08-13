@@ -181,7 +181,13 @@ export const galleonParams: ShipClassParams = registerParams(
     yardLowerLenFactor: 0.42, yardUpperLenFactor: 0.3,
     yardTopgallantLenFactor: 0.21, yardRadius: 0.15,
     yardMastClearance: 0.12, sailYardOffset: 0.2,
-    sailDropLowerFactor: 0.26, sailDropUpperFactor: 0.16,
+    // RE-FITTED for the third tier (3627908). 0.26 was bisected against a
+    // TWO-tier rig; adding the topgallant moved the rear course's clew and its
+    // sheet to the stern cleat now passes 0.74 m THROUGH the hull at full
+    // brace — not the 0.012 m graze the suite reports first, but a gross
+    // penetration the fail-fast assert never reaches. 0.24 clears it outright
+    // (0.26 fails, 0.24 passes, and it is flat from there down).
+    sailDropLowerFactor: 0.24, sailDropUpperFactor: 0.16,
     sailDropTopgallantFactor: 0.14,
     bowspritLength: 9, bowspritRadius: 0.22, bowspritPitch: 0.35, // ~20°
     railHeight: 1.0, railThickness: 0.13, railInset: 0.22, railLengthFactor: 0.8,
@@ -780,21 +786,47 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     glassColor: 0x3c4a44, glassLit: 0x2a1c0c,
     sailLight: 0xe6dcc2, sailDark: 0xa8977a,
     sailWeaveScale: 18, sailBacklitColor: 0xfff0d2, sailBacklitStrength: 0.5,
-    // 0.115 per unit drive against a 0.15 ceiling puts the main course at
-    // 3.1% of chord in a calm, 8.5% at the default sea, 13.9% in a storm and
-    // 15.0% (capped) in a gale — a readable 5x range topping out inside a
-    // real sail's 10-15%. Was 0.68 OF THE DROP, i.e. 24.8% / 40.7% of chord.
-    sailCamber: 0.15, sailCamberMax: 0.15, sailLoadCurve: 0.45,
+    /**
+     * MEASURED IN THE BROWSER, main course, default sea: drive 0.74 and the
+     * old 0.15/0.15 gave 11% of chord and a 1.33 m belly. The amplitude was
+     * never why the user called the sails "very flat" three times running —
+     * see `sailSeamQuilt` below, which was drowning that belly in its own
+     * corrugation. With the seams demoted, 0.20 reads as the reference's full
+     * canvas (docs/inspo/ship/ref-broadside-sails-spray-foam.png) at 15% of
+     * chord under way, a touch over a real sail's 10-15% because a stylised
+     * rig has to read at 40 m. Ceiling raised with it, and it still never
+     * binds below a gale — the clamp was inert at 0.15 too, which is why
+     * A/B-ing `sailCamberMax` alone moved nothing.
+     */
+    sailCamber: 0.20, sailCamberMax: 0.20, sailLoadCurve: 0.45,
     sailLeechOpen: 0.3, sailFootRoach: 0.035, sailTwist: 0.12,
-    sailSheetPull: 0.16, sailSheetSpread: 0.45,
+    sailSheetPull: 1.0, sailSheetSpread: 0.45,
     sailFlutterLuffRate: 1.8,
     sailDraftPos: 0.4, sailDraftFullness: 1,
     sailFurlSwag: 0.16, sailFurlBays: 3,
     sailWindRef: 8, sailBackBillow: 0.18, sailLuffFlap: 2.6,
     sailGustAmp: 0.3, sailGustFreq: 0.55, sailTurnSkew: 1.6, sailResponse: 2.2,
     sailFlutterAmp: 0.14, sailFlutterFreq: 2.4, sailRippleCount: 2.5,
-    sailLacingPoints: 7, sailSeamDarken: 0.7, sailAmbientLift: 0.09,
-    sailSeamRidge: 0.35, sailSeamQuilt: 0.3,
+    /**
+     * THE SEAMS ARE A TEXTURE ON THE BELLY, NOT A RIVAL TO IT — this is the
+     * whole of "the sails are still very flat" (§B, browser-measured).
+     *
+     * `sailSeamQuilt` 0.3 put a ±0.17 m, six-cycle corrugation on a 1.15 m
+     * arch: the quilt's surface SLOPE (~10°) was a peer of the belly's own
+     * (~11°) at six times the frequency, so the finite-difference normal — and
+     * every shading cue riding it — reported corrugated cloth instead of one
+     * curve. `sailSeamRidge` 0.35 then tilted the shading normal again at each
+     * of those seams, and `sailSeamDarken` 0.7 painted a 30% dark band down
+     * each one. Three vertical-banding terms stacked on a 12 m sail.
+     *
+     * Switching all three off in the browser turned flat rectangles into
+     * visibly full sails at IDENTICAL camber, which is what proved it was the
+     * seams and not the shape. These are the values that keep a legible sewn
+     * seam without it competing: quilt at 4% of belly depth (was 15%), a hint
+     * of ridge, and a seam that reads as a line rather than a stripe.
+     */
+    sailLacingPoints: 7, sailSeamDarken: 0.88, sailAmbientLift: 0.09,
+    sailSeamRidge: 0.1, sailSeamQuilt: 0.08,
     sailBacklitFocus: 3, sailLeeDarken: 0.7, sailStainStrength: 0.36,
     holeColor: 0x120c07,
     bumpScale: 1, grainRelief: 0.004, plankRelief: 0.006, seamDepth: 0.012,

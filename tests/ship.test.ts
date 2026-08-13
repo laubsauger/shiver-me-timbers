@@ -2040,6 +2040,107 @@ describe('the sails feel the wind the SHIP feels (apparent, braced)', () => {
  * displacement-magnitude assertion can see: every one of them passes on a sail
  * of any depth and fails the moment the bulge is re-centred or re-narrowed.
  */
+/**
+ * THE SAIL MUST *READ* AS A FULL SAIL, NOT MERELY CONTAIN THE NUMBERS.
+ *
+ * User, after three rounds of camber work: "fully blown sails are still very
+ * flat and parallel to the mast, and not really corner-pinned, stretched out
+ * further, with more blow visible." MEASURED IN THE BROWSER at the shipped
+ * params, on the main course at the default sea, this is what was actually
+ * there:
+ *
+ *   · drive 0.74, camber 11% of chord, peak belly 1.33 m — the AMPLITUDE was
+ *     never the problem, and every existing test that checks it passed;
+ *   · the mid-height section was not an ARCH but a WASHBOARD. `sailSeamQuilt`
+ *     0.3 put a ±0.17 m, six-cycle corrugation on top of a 1.15 m arch, so the
+ *     surface slope oscillated ~±10° six times across the cloth against the
+ *     belly's own ~11° gradient. The quilt's slope was a PEER of the shape's
+ *     at six times the frequency, so the finite-difference normal — and every
+ *     shading cue riding it — read corrugated cloth rather than one curve.
+ *     Turning the seams off in the browser turned flat rectangles into
+ *     visibly full sails at IDENTICAL camber. That is the whole defect;
+ *   · the clews were hauled 0.182 m on a 12.17 m chord — 1.5%, invisible.
+ *
+ * WHY THE SUITE MISSED BOTH. Every shape test asserted that a signed quantity
+ * was non-zero, or bounded, or turned over. None asserted that the belly is
+ * the DOMINANT feature of its own section, and the clew test's threshold is
+ * 0.01 m — 0.08% of chord — so it passes on a haul nobody can see. A test that
+ * cannot fail while the user is looking at the bug is not testing the intent.
+ *
+ * WHAT THESE DO NOT PROVE, stated plainly (§V.45): they run on the CPU mirror
+ * in sailShape.ts, so they cannot catch the TSL graph in sailClothNodes.ts
+ * drifting from that mirror, or being unwired from `material.positionNode`
+ * altogether. Closing THAT seam needs a GPU readback of the vertex stage,
+ * which this suite has no device for. The browser A/B that produced the
+ * numbers above is the only thing currently covering it.
+ */
+describe('the belly must DOMINATE its own section, not compete with the seams', () => {
+  const WIDTH = 12.17;
+  // flutter off and phase fixed: this is about the STANDING shape, and a
+  // travelling ripple would make the metric depend on when it was sampled
+  const p = { ...shipMaterialParams, sailFlutterAmp: 0 };
+  const st = { drive: 1, luff: 0, skew: 0, dropScale: 1, flutterPhase: 0, ...FLAT_SHEETS };
+  const section = (over: Partial<typeof p>): number[] =>
+    Array.from({ length: 41 }, (_, i) =>
+      sailClothOffset(i / 40, SAIL_BELLY_FOOT, WIDTH, st, { ...p, ...over }),
+    );
+  const quiltShare = (over: Partial<typeof p>): number => {
+    const arch = section({ sailSeamQuilt: 0 });
+    const peak = Math.max(...arch);
+    const got = section(over);
+    return Math.max(...got.map((z, i) => Math.abs(z - arch[i]))) / peak;
+  };
+
+  it('keeps the seam quilt a texture ON the belly, not a rival TO it', () => {
+    const arch = section({ sailSeamQuilt: 0 });
+    expect(Math.max(...arch)).toBeGreaterThan(0.5); // there is an arch to ride
+    // 8% of the belly's own depth. At the shipped 0.3 this was 15% and the
+    // sails read as flat corrugated sheets in the browser; at 0.08 it is 4%.
+    const share = quiltShare({});
+    expect(share, `seam quilt displaces ${(100 * share).toFixed(1)}% of belly depth`).toBeLessThan(
+      0.08,
+    );
+  });
+
+  it('would have FIRED at the quilt that shipped the flat sails', () => {
+    // a guard is only worth having if it fails on the bug it was written for
+    // (§Rule 6); otherwise it is one more test that cannot fail
+    expect(quiltShare({ sailSeamQuilt: 0.3 })).toBeGreaterThan(0.08);
+  });
+});
+
+describe('the clews are hauled VISIBLY, not merely non-zero (§V44)', () => {
+  const WIDTH = 12.17;
+  const p = { ...shipMaterialParams, sailFlutterAmp: 0 };
+  const leads = sheetLeadDirections(IDENTITY_MATRIX, 0, 1, p.sailSheetSpread);
+  const st = {
+    drive: 1,
+    luff: 0,
+    skew: 0,
+    dropScale: 1,
+    flutterPhase: 0,
+    sheetLeadPort: leads.port,
+    sheetLeadStarboard: leads.starboard,
+  };
+  /** how far the clew leaves the yard's plane, as a fraction of the chord */
+  const clewFraction = (over: Partial<typeof p>): number => {
+    const pull = sailCornerPull(1, 0, WIDTH, st, { ...p, ...over });
+    return Math.hypot(pull[0], pull[1], pull[2]) / WIDTH;
+  };
+
+  it('moves the corner by a fraction of the CHORD, not by a centimetre', () => {
+    // "not really corner-pinned, stretched out further". The neighbouring
+    // block asserts only > 0.01 m — 0.08% of this chord — which is how the
+    // sails could read as perfect rectangles with that test green.
+    const f = clewFraction({});
+    expect(f, `clew hauled only ${(100 * f).toFixed(2)}% of chord`).toBeGreaterThan(0.05);
+  });
+
+  it('would have FIRED at the sheetPull that shipped the square corners', () => {
+    expect(clewFraction({ sailSheetPull: 0.16 })).toBeLessThan(0.05);
+  });
+});
+
 describe('the draft is DISTRIBUTED across the cloth (§V43 SoT parity)', () => {
   const p = shipMaterialParams;
   const lead = sailDraftLead(p.sailDraftPos);
