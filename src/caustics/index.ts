@@ -136,7 +136,12 @@ export class Caustics {
   update(sunDirection: THREE.Vector3): void {
     (this.caustics.sunDirection.value as THREE.Vector3).copy(sunDirection);
     refreshCausticsUniforms(this.caustics);
-    refreshWaterLightingUniforms(this.lighting);
+    // THE KEY, not just its shadow. `sunLight` was already held here and read
+    // for exactly one thing (`sharedShadow()`), so the caustic — refracted
+    // sunlight — burned at its authored noon colour and brightness at midnight
+    // (§B.41's shape, second file). moonCycle re-aims this same light after
+    // dark, so passing it hands the caustic the moon for free.
+    refreshWaterLightingUniforms(this.lighting, this.sunLight);
   }
 }
 

@@ -41,8 +41,22 @@ import {
 } from './causticsNode';
 import type { HullWetline } from './hullWetline';
 
+/**
+ * Just enough of THE KEY LIGHT to drive the caustic. `sky.sunLight` satisfies
+ * it structurally, and that is deliberately the only thing this module will
+ * accept — see setCausticColor() for why it may not re-derive the key itself.
+ */
+export interface CausticKeyLight {
+  /** the key's colour. A three.Color is ALWAYS in the linear working space. */
+  color: THREE.Color;
+  /** DirectionalLight intensity, ≥ 0 */
+  intensity: number;
+}
+
 export interface WaterLightingUniforms {
   causticColor: TslNode;
+  /** 0..1 the key's level vs its own authored daytime peak — see setCausticKey */
+  causticKey: TslNode;
   bounceColor: TslNode;
   bounce: TslNode; // (liftStrength, heightFalloff, sunFloor, sunGain)
   bounceTint: TslNode;
@@ -60,6 +74,7 @@ export interface WaterLightingUniforms {
 export function createWaterLightingUniforms(): WaterLightingUniforms {
   return {
     causticColor: uniform(color(cp.causticColor)),
+    causticKey: uniform(1),
     bounceColor: uniform(color(cp.bounceColor)),
     bounce: uniform(
       new THREE.Vector4(
@@ -126,8 +141,95 @@ function setBounceColor(target: THREE.Color): void {
   );
 }
 
-export function refreshWaterLightingUniforms(u: WaterLightingUniforms): void {
-  (u.causticColor.value as THREE.Color).set(cp.causticColor);
+/**
+ * THE COLOUR AND THE LEVEL OF THE LIGHT THE CAUSTIC IS MADE OF.
+ *
+ * §B.41's TWIN, in a second file. `causticColor` was an authored cream
+ * (#ffe9d2) refreshed each frame from the param and from nothing else, so a
+ * caustic — which IS sunlight, refracted and concentrated — burned at full noon
+ * brightness, in noon's colour, at midnight, on the ship's sides. The key was
+ * already in this module's hands (caustics/index.ts passes `sunLight`) and was
+ * being used for exactly one thing: its shadow node.
+ *
+ * THE KEY IS READ, NOT RE-DERIVED. `skyPalette()`/`sunElevation()` are imported
+ * a dozen lines up and would answer "how bright is the sun, and what colour"
+ * too — and that is precisely the §V.33/§V.51 single-owner failure that
+ * setBounceColor's header above already records happening once in this file.
+ * src/sky/lighting.ts is the single owner of the key's colour and level; this
+ * reads the THREE.DirectionalLight that file writes. moonCycle.ts re-aims that
+ * same light after dark, so the moon arrives free: a full moon keys at
+ * moonIntensity/sunIntensity = 0.75/3.4 = 0.22 in a 0.39-luminance blue, i.e.
+ * 9.5% of noon's caustic radiance where today it is 100%.
+ *
+ * §V.31 / §B.9, AND IT IS THE OPPOSITE HAZARD TO setBounceColor'S — which is
+ * why it is spelled out here instead of copied from twelve lines up. BOTH
+ * operands are already in the LINEAR working space: `Color.set(hex)` applies
+ * the sRGB transfer on the way in, and `sunLight.color` was written by
+ * sky/lighting.ts's `setSrgb()`, which applies it too. So the plain
+ * component-wise lerp IS the correct operation and it happens in linear, which
+ * is also what §V.31b requires of anything composed with a light multiply.
+ * setBounceColor needs its getRGB/setRGB round trip ONLY because `skyPalette()`
+ * hands it sRGB TRIPLES; there is no such mismatch here, and adding the round
+ * trip would be §B.9 inverted — a double transfer instead of a missing one.
+ *
+ * `causticFollowKey` at 0 restores the authored constant exactly, here and in
+ * setCausticKey(), so the A/B is one slider.
+ */
+function setCausticColor(target: THREE.Color, key: CausticKeyLight | undefined): void {
+  target.set(cp.causticColor); // hex → LINEAR working space
+  const follow = keyFollow(key);
+  if (follow > 0) target.lerp(key!.color, follow); // linear ⊗ linear, no transfer
+}
+
+/**
+ * The key's level as a fraction of its own authored daytime peak.
+ *
+ * NOT a second computation of `daylight()`: it is the light's REAL intensity
+ * over the one param moonCycle multiplies by, so it is exactly 1 at noon by
+ * construction and the signed-off noon look is preserved.
+ *
+ * Clamped to [0,1] at source (§V.44): this term may only ever DIM the caustic
+ * relative to its authored value, never brighten it, whatever is done to
+ * sunIntensity / moonIntensity in the panel. §V.28 floored divisor.
+ */
+function setCausticKey(u: WaterLightingUniforms, key: CausticKeyLight | undefined): void {
+  const follow = keyFollow(key);
+  if (follow <= 0) {
+    u.causticKey.value = 1;
+    return;
+  }
+  const peak = Math.max(skyParams.sunIntensity, 1e-3);
+  const level = Math.min(Math.max(key!.intensity / peak, 0), 1);
+  u.causticKey.value = 1 + (level - 1) * follow;
+}
+
+let warnedNoKey = false;
+
+/** 0 when there is no key to follow — and §Rule 8, that is not silent (§V.62) */
+function keyFollow(key: CausticKeyLight | undefined): number {
+  const follow = Math.min(Math.max(cp.causticFollowKey, 0), 1);
+  if (follow <= 0) return 0;
+  if (!key) {
+    if (!warnedNoKey) {
+      warnedNoKey = true;
+      console.warn(
+        '[caustics] causticFollowKey > 0 but no key light is bound — caustics ' +
+        'keep their authored noon colour and burn at full strength at midnight. ' +
+        'Pass `sunLight` to createCaustics().',
+      );
+    }
+    return 0;
+  }
+  return follow;
+}
+
+export function refreshWaterLightingUniforms(
+  u: WaterLightingUniforms,
+  /** THE KEY (sun by day, moon by night). Omitted → authored behaviour. */
+  key?: CausticKeyLight,
+): void {
+  setCausticColor(u.causticColor.value as THREE.Color, key);
+  setCausticKey(u, key);
   setBounceColor(u.bounceColor.value as THREE.Color);
   (u.bounce.value as THREE.Vector4).set(
     cp.bounceStrength, cp.bounceHeightFalloff, cp.bounceSunFloor, cp.bounceSunGain,
@@ -281,12 +383,29 @@ export function waterLightingNode(
     bounceAmount.mul(L.bounceTint).clamp(0, 1),
   );
 
+  // ── how much key light actually reaches this point ───────────────────
   // caustics are direct sun and must obey the sun shadow; the bounce is
   // ambient sky/sea light and legitimately survives in shade.
   // The caustic already carries its own per-channel Jerlov attenuation, so
-  // `causticColor` is the SURFACE colour of the sunlight only.
+  // `causticColor` is the SURFACE colour of the key light only.
+  //
+  // `causticKey` is the second half of the same statement: shadow says whether
+  // the key reaches HERE, causticKey says how much key there is AT ALL. A
+  // caustic at midnight is the same class of nonsense as a caustic in a
+  // shadow, and both are now the same product.
+  const causticLit = shadow.mul(L.causticKey);
+  // §B.11 / causticsNode's own rule — "every global gate must scale the
+  // DARKENING toward 1 as well, or a sunset or a distant hull would keep a
+  // shadow the sun is no longer casting". causticsNode applies that to the
+  // gates IT owns; the two gates that live out here (the sun shadow, and now
+  // the key level) were applied to the bright lobe alone, so a hull in shade
+  // still had up to `darkStrength` of its albedo withheld by inter-filament
+  // gaps between filaments that were not being drawn. That asymmetry is a
+  // large part of why the caustic reads as an opaque decal rather than light.
+  const causticDarken = mix(float(1), caustics.darken, causticLit);
+
   const addLight = bounceLift
-    .add(L.causticColor.mul(caustics.bright).mul(shadow))
+    .add(L.causticColor.mul(caustics.bright).mul(causticLit))
     // §V.28 backstop: this lands on emissiveNode where nothing downstream
     // will save a bad value, so clamping is the last thing that happens.
     .clamp(0, L.maxAddLight);
@@ -297,14 +416,14 @@ export function waterLightingNode(
     // coloured, never driven negative or above its own value.
     tint: mix(vec3(1, 1, 1), L.wetTint, wet)
       .mul(absorb)
-      .mul(caustics.darken)
+      .mul(causticDarken)
       .mul(bounceTint)
       .clamp(0, 1),
     addLight,
     roughnessScale: mix(float(1), L.wetRoughness, wet),
     reliefScale: mix(float(1), L.wetRelief, wet),
-    caustics: caustics.bright,
-    causticDarken: caustics.darken,
+    caustics: caustics.bright.mul(causticLit),
+    causticDarken,
     wet,
     submerged,
     depth,

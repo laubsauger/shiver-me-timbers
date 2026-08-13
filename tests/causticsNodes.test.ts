@@ -194,3 +194,118 @@ describe('water bounce fill follows the live sky', () => {
     }
   });
 });
+
+/**
+ * §B.41'S TWIN — the caustic is made of THE KEY, not of a hex.
+ *
+ * The user: "the intensity of caustics should definitely be moderated by the
+ * amount of light actually hitting things or illuminating stuff. Having like a
+ * late night super bright and intense caustics visible on the ship sides
+ * doesn't really make sense."
+ *
+ * `causticColor` was an authored cream refreshed from the param and from
+ * nothing else, so a caustic — refracted SUNLIGHT — carried noon's colour and
+ * noon's brightness at midnight. That is exactly §B.41 (the glint road times a
+ * hardcoded `vec3(1.0, 0.95, 0.82)`) in a second file, and these tests pin the
+ * coupling rather than the numbers: what matters is that the caustic CANNOT be
+ * brighter than the light it is made of.
+ */
+describe('caustics are made of the key light (§B.41 twin)', () => {
+  /** what sky/lighting.ts writes at noon: full sun intensity, sun-coloured */
+  const noonKey = () => ({
+    color: new THREE.Color(skyParams.sunColorNoon),
+    intensity: skyParams.sunIntensity,
+  });
+  /** what moonCycle.ts hands the same light after dark */
+  const moonKey = () => ({
+    color: new THREE.Color(skyParams.moonColor),
+    intensity: skyParams.moonIntensity,
+  });
+
+  const read = (key?: { color: THREE.Color; intensity: number }) => {
+    const u = createWaterLightingUniforms();
+    refreshWaterLightingUniforms(u, key);
+    return {
+      color: (u.causticColor.value as THREE.Color).clone(),
+      level: u.causticKey.value as number,
+    };
+  };
+  /** Rec.709 luminance — only meaningful because three.Color stores LINEAR */
+  const lum = (c: THREE.Color): number => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+  /** what the shader actually multiplies the bright lobe by */
+  const radiance = (r: { color: THREE.Color; level: number }) => lum(r.color) * r.level;
+
+  it('burns an order of magnitude dimmer under a moon than under the noon sun', () => {
+    // THE COMPLAINT. Before the fix these two were bit-identical, because
+    // neither the key's colour nor its intensity was read at all.
+    const day = radiance(read(noonKey()));
+    const night = radiance(read(moonKey()));
+    expect(night).toBeLessThan(day * 0.15);
+  });
+
+  it('goes out entirely when the key does — a new moon lights no caustics', () => {
+    // intensity 0 is the moonless night AND the swing window moonCycle puts the
+    // whole 180° key handover inside. Nothing may be lit by a key of zero.
+    expect(read({ color: new THREE.Color(skyParams.moonColor), intensity: 0 }).level).toBe(0);
+  });
+
+  it('is unchanged at the signed-off noon level — the peak is the anchor', () => {
+    // the level is the key's intensity over its own authored peak, so noon is
+    // exactly 1 by construction and the amplitude tuning keeps its meaning
+    expect(read(noonKey()).level).toBeCloseTo(1, 12);
+  });
+
+  it('takes the key COLOUR, not just its level — sunset caustics are orange', () => {
+    const sunset = read({
+      color: new THREE.Color(skyParams.sunColorLow),
+      intensity: skyParams.sunIntensity,
+    }).color;
+    const noon = read(noonKey()).color;
+    // red/blue ratio is the honest measure of warm; absolute level moves for
+    // other reasons and is asserted separately above
+    const warmth = (c: THREE.Color) => c.r / Math.max(c.b, 1e-6);
+    expect(warmth(sunset)).toBeGreaterThan(warmth(noon) * 3);
+  });
+
+  it('stays in the LINEAR working space — no double sRGB transfer (§V.31/§B.9)', () => {
+    // Both operands are already linear: color(hex) applies the transfer on the
+    // way in and sky/lighting.ts's setSrgb() does the same to the key. So at
+    // full follow the result must be the key colour BIT FOR BIT. Anyone who
+    // "fixes" this by copying setBounceColor's getRGB/setRGB round trip — which
+    // that function needs only because skyPalette() returns sRGB TRIPLES — puts
+    // a second transfer on it and fails here.
+    const key = moonKey();
+    expect(read(key).color.getHexString()).toBe(key.color.getHexString());
+  });
+
+  it('can only ever DIM, whatever the panel does to the intensities (§V.44)', () => {
+    // bounded at source, not clamped downstream: a user cranking moonIntensity
+    // past sunIntensity must not make the caustic brighter than its authored value
+    expect(read({ color: new THREE.Color(0xffffff), intensity: 1e6 }).level).toBe(1);
+    expect(read({ color: new THREE.Color(0xffffff), intensity: -5 }).level).toBe(0);
+  });
+
+  it('causticFollowKey = 0 restores the authored constant exactly', () => {
+    // the A/B is one slider — same guarantee bounceFollowSky gives
+    const prev = causticsParams.causticFollowKey;
+    causticsParams.causticFollowKey = 0;
+    try {
+      const night = read(moonKey());
+      expect(night.level).toBe(1);
+      expect(night.color.getHexString()).toBe(
+        new THREE.Color(causticsParams.causticColor).getHexString(),
+      );
+    } finally {
+      causticsParams.causticFollowKey = prev;
+    }
+  });
+
+  it('degrades to the authored constant when no key is bound', () => {
+    // §Rule 8: it also warns, because a knob that drives nothing is §V.62
+    const r = read(undefined);
+    expect(r.level).toBe(1);
+    expect(r.color.getHexString()).toBe(
+      new THREE.Color(causticsParams.causticColor).getHexString(),
+    );
+  });
+});

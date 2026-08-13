@@ -112,6 +112,29 @@ export interface CausticsParams {
    * not visible in the real world.
    */
   causticColor: string;
+  /**
+   * 0..1 how far the caustic's colour AND brightness are handed over to THE KEY
+   * LIGHT the sky rig actually publishes (`sunLight.color` / `.intensity`).
+   *
+   * A caustic is refracted SUNLIGHT, so its colour and its level are properties
+   * of the key, not authored constants — but `causticColor` above was the whole
+   * story, which meant the ship's sides carried noon-bright cream caustics at
+   * midnight (user: "having like a late night super bright and intense caustics
+   * visible on the ship sides doesn't really make sense"). That is §B.41 exactly
+   * — the glint road multiplied by a hardcoded cream — in a second file.
+   *
+   * 1 = the caustic is the key's own colour, scaled by the key's own level
+   * relative to `skyParams.sunIntensity`, so it is unchanged at noon, deep
+   * orange and half as bright at sunset, ~9.5% as bright and blue under a full
+   * moon, and gone under a new one. 0 = the authored hex at full strength
+   * forever, which is what it used to be. The level can only ever DIM (§V.44).
+   *
+   * The key is READ, never re-derived: sky/lighting.ts owns it and moonCycle.ts
+   * re-aims it, so the moon is free. Deriving it a second time from
+   * skyPalette()/sunElevation() is the §V.33/§V.51 single-owner failure that
+   * `bounceFollowSky` below exists because of.
+   */
+  causticFollowKey: number;
   /** back-project the receiver onto its true surface entry point (reload) */
   backprojectIterations: number;
   /**
@@ -275,8 +298,24 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
    * cap was clipping it off. Raising the ceiling lets the physics set the
    * highlight again and `strength` drops to keep peak brightness where it was,
    * so this trades uniform-and-bright for varied-at-the-same-peak.
+   *
+   * 0.32 -> 0.22, BECAUSE THE PARAGRAPH ABOVE DID NOT DO WHAT IT SAYS. The peak
+   * additive term is `strength x maxGain`: it was 0.6 x 1.15 = 0.69 and became
+   * 0.32 x 3.0 = 0.96, so "strength drops to keep peak brightness where it was"
+   * raised the peak 39% instead of holding it. The user asked for VARIATION and
+   * was also given brightness, then reported the brightness back ("in general
+   * they're still a little bit too bright and too opaque of some sorts").
+   * 0.22 x 3.0 = 0.66 restores the stated intent and keeps every bit of the
+   * variation, since maxGain is untouched.
+   *
+   * SCALE: this lands as additive emissive on timber whose lit albedo is ~0.3
+   * linear (see maxGain's own note), so even at 0.66 a fold peak is ~2x the
+   * surface's own value - which is what "opaque" means here. The blend mode is
+   * not the problem: `waterLighting.ts` adds it to emissiveNode, which is
+   * correct for a light pattern. The amplitude is. If it still reads hot with
+   * the key modulation in, this is the slider - not the compositing.
    */
-  strength: 0.32,
+  strength: 0.22,
   maxGain: 3.0,
   darkStrength: 0.45,
   maxDrift: 2.5,
@@ -293,6 +332,7 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
    * still shifts it blue-green with depth, so the two ends stay physical.
    */
   causticColor: '#ffe9d2',
+  causticFollowKey: 1,
   backprojectIterations: 1,
   /**
    * 0.3 -> 0.8 (user: "blending of the caustics above and below"). This is the
@@ -371,6 +411,7 @@ function causticsParamsMeta() {
     maxDepth: { min: 1, max: 60, step: 0.5 },
     fadeStart: { min: 10, max: 2000, step: 10 },
     fadeEnd: { min: 20, max: 4000, step: 10 },
+    causticFollowKey: { min: 0, max: 1, step: 0.01 },
     backprojectIterations: { min: 0, max: 1, step: 1 },
     waterlineBlend: { min: 0.02, max: 2, step: 0.01 },
     faceGateSoftness: { min: 0.005, max: 0.5, step: 0.005 },
