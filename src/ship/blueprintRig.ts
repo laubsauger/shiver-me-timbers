@@ -37,9 +37,39 @@ export function buildMastRig(
     }),
   ];
 
+  /**
+   * TIERS, bottom-up: course, topsail, topgallant.
+   *
+   * The third tier is here because two could not answer the user's standing
+   * note that the rig is "on the mast-heavy side" and "the bottom stages are
+   * just not long enough". That is a MEASURED ceiling, not a preference: the
+   * sails owner took `sailDropLowerFactor` to 0.26 and found the wall at ~0.27,
+   * where the rear course's clew drops far enough that its sheet to the stern
+   * cleat passes through the hull at full brace (bisected: 0.26 passes, 0.28
+   * fails). Lengthening the topsail instead fails sooner, at 0.19, via the
+   * main topsail's sheet to the chainplates. The sheets foul the hull before
+   * the canvas can reach the reference, so more tiers is the only route left.
+   *
+   * EVERYTHING DOWNSTREAM GENERATES FROM THIS ARRAY — yards, sails, clew and
+   * bunt sockets, sail states, and (through the piece ids) the rigging's
+   * lifts, braces and sheets. Adding a tier is one entry plus its three
+   * params; nothing else in the ship knows how many tiers there are. Keeping
+   * that true is the point, so resist special-casing a level ANYWHERE by name.
+   *
+   * Names stay positional rather than becoming course/topsail/topgallant
+   * throughout: `lower` and `upper` are baked into piece ids that rope anchors
+   * and several tests address by string, and renaming them would be churn for
+   * no behaviour. `topgallant` joins them as the real term for the third.
+   */
   const levels = [
     { level: 'lower', frac: p.yardLowerFrac, lenF: p.yardLowerLenFactor, dropF: p.sailDropLowerFactor },
     { level: 'upper', frac: p.yardUpperFrac, lenF: p.yardUpperLenFactor, dropF: p.sailDropUpperFactor },
+    {
+      level: 'topgallant',
+      frac: p.yardTopgallantFrac,
+      lenF: p.yardTopgallantLenFactor,
+      dropF: p.sailDropTopgallantFactor,
+    },
   ] as const;
   // yards ride FORWARD of their mast (real square rig, and §V22 critique:
   // "the yard shouldn't go through the mast, the sail shouldn't cut into

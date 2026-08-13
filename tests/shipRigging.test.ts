@@ -342,7 +342,15 @@ describe('rig LOCALITY (anti spider-web — docs/ship-reference-schema.png)', ()
     const resolved = resolvePlan(buildGalleonBlueprint());
     const crossing = resolved.reduce((sum, r) => sum + r.zSpan, 0);
     expect(crossing / resolved.length, 'mean fore-aft travel per rope').toBeLessThan(7);
-    expect(crossing, 'total fore-aft travel').toBeLessThan(450);
+    // The ABSOLUTE total was asserted here too (< 450 m) and it contradicted
+    // this test's own first sentence: total is mean x count, so it fails
+    // whenever the rig legitimately grows. It duly did, when the third sail
+    // tier landed (§T.34 rig proportions): 68 ropes -> 122, total 336 -> 465,
+    // and the MEAN fell 4.9 -> 3.81 m. The rig grew 79% and got more local
+    // still, which is this test passing, not failing. Locality is the
+    // invariant; the count gets its own budget rather than riding inside the
+    // locality one, where growth and sprawl are indistinguishable.
+    expect(resolved.length, 'rope count has not exploded').toBeLessThan(200);
   });
 });
 

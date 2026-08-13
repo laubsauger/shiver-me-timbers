@@ -617,7 +617,13 @@ describe('sail-attached anchors ride the canvas (§V12 endpoints, §V.45 rule)',
     // adds clew anchors" — and the user spotted the result: "some of them
     // should actually attach to the sails in the appropriate spots".
     const sails = galleon.filter((p) => p.kind === 'sail');
-    expect(sails.length).toBe(6);
+    // ONE SAIL PER YARD, derived rather than hardcoded. This asserted `6`,
+    // which was the tier count (2) times the mast count (3) written as a
+    // constant inside a test about SOCKETS — so adding the third tier failed
+    // it here, in a test that has no opinion about how many tiers a ship
+    // carries. What it actually means is "no yard is missing its canvas".
+    expect(sails.length).toBe(galleon.filter((p) => p.kind === 'yard').length);
+    expect(sails.length).toBeGreaterThan(0);
     for (const sail of sails) {
       const ids = sail.sockets.map((s) => s.id);
       for (const suffix of ['clew-port', 'clew-starboard', 'bunt-port', 'bunt-starboard']) {
@@ -1034,6 +1040,102 @@ describe('§V.48 band limiting of procedural periodic terms', () => {
  * converges to a flat surface, which deletes the feature rather than filtering
  * it. That is the mistake that produced §B.48 in the first place.
  */
+/**
+ * THREE TIERS OF SQUARE SAIL PER MAST.
+ *
+ * WHY THE TIER EXISTS, since it is the only defensible reason: the user has
+ * twice called the rig "mast-heavy" with "the bottom stages just not long
+ * enough", and two tiers cannot answer it. The sails owner established the
+ * ceiling by bisection — past `sailDropLowerFactor` ≈ 0.27 the rear course's
+ * clew drops far enough that its sheet to the stern cleat passes through the
+ * hull at full brace (0.26 passes, 0.28 fails), and lengthening the topsail
+ * fails sooner at 0.19 via the main topsail's sheet to the chainplates. The
+ * sheets foul the hull before the canvas reaches the reference, so the gap
+ * cannot be closed by longer sails.
+ *
+ * WHAT THESE PIN, AND WHAT THEY DELIBERATELY DO NOT. They pin STRUCTURE: that
+ * a tier is one entry in `blueprintRig`'s `levels` array and everything
+ * downstream generates from it symmetrically. They do NOT pin the tier's
+ * FRACTIONS — those are the sails owner's to set, and a test asserting the
+ * placeholder numbers would fight them the moment they tune it (§Rule 6: a
+ * test should encode why the behaviour matters, and what matters here is that
+ * the rig is generic in its tier count, not that a topgallant sits at 0.93).
+ */
+describe('rig tiers are generic, so a third one is data (§T.34 rig proportions)', () => {
+  const MASTS = ['fore', 'main', 'rear'] as const;
+  const TIERS = ['lower', 'upper', 'topgallant'] as const;
+
+  it('carries three tiers of square sail on every mast', () => {
+    for (const m of MASTS) {
+      for (const tier of TIERS) {
+        expect(galleon.find((q) => q.id === `yard-${m}-${tier}`), `yard-${m}-${tier}`)
+          .toBeDefined();
+        expect(galleon.find((q) => q.id === `sail-${m}-${tier}`), `sail-${m}-${tier}`)
+          .toBeDefined();
+      }
+    }
+  });
+
+  it('generates every tier symmetrically — no level special-cased by name', () => {
+    // The failure this catches: a tier added to the array but skipped by
+    // something that switched on 'lower'/'upper'. Each yard must carry its two
+    // rope anchors and each sail its full set of cloth anchors, whatever the
+    // tier is called.
+    const anchorsOf = (id: string): number =>
+      (galleon.find((q) => q.id === id)?.sockets ?? []).length;
+    for (const m of MASTS) {
+      const perYard = TIERS.map((t) => anchorsOf(`yard-${m}-${t}`));
+      expect(new Set(perYard).size, `yard anchors differ by tier on ${m}`).toBe(1);
+      expect(perYard[0]).toBeGreaterThan(0);
+      const perSail = TIERS.map((t) => anchorsOf(`sail-${m}-${t}`));
+      expect(new Set(perSail).size, `sail anchors differ by tier on ${m}`).toBe(1);
+      expect(perSail[0]).toBeGreaterThan(0);
+    }
+  });
+
+  it('stacks the tiers up the mast, each shorter than the one below', () => {
+    // Ordering, not absolute values — this survives any retune by the sails
+    // owner while still catching a tier inserted at the wrong height or a
+    // topgallant yard wider than its course, both of which are silent in the
+    // blueprint and obvious in the water.
+    for (const m of MASTS) {
+      const ys = TIERS.map((t) => galleon.find((q) => q.id === `yard-${m}-${t}`)!
+        .transform.position[1]);
+      const widths = TIERS.map((t) => {
+        const y = galleon.find((q) => q.id === `yard-${m}-${t}`)!;
+        return y.aabb.max[0] - y.aabb.min[0];
+      });
+      for (let i = 1; i < TIERS.length; i++) {
+        expect(ys[i], `${m} ${TIERS[i]} sits above ${TIERS[i - 1]}`).toBeGreaterThan(ys[i - 1]);
+        expect(widths[i], `${m} ${TIERS[i]} narrower than ${TIERS[i - 1]}`)
+          .toBeLessThan(widths[i - 1]);
+      }
+      // and the topmost yard is still on the mast, not above its head
+      const mast = galleon.find((q) => q.id === `mast-${m}`)!;
+      expect(ys[ys.length - 1]).toBeLessThan(mast.aabb.max[1]);
+    }
+  });
+
+  it('bands a short high yard without running the ironwork off its end', () => {
+    // The spar fittings from §T.34 assume nothing about how long a yard is;
+    // a topgallant is roughly a third of its course and must simply carry
+    // fewer bands, not bands hanging in mid-air past the yardarm.
+    for (const m of MASTS) {
+      const yard = galleon.find((q) => q.id === `yard-${m}-topgallant`)!;
+      const geo = buildPieceGeometry(yard.kind, yard.aabb, yard.shape);
+      const pos = geo.attributes.position;
+      const halfLen = (yard.aabb.max[0] - yard.aabb.min[0]) / 2;
+      let maxX = 0;
+      for (let i = 0; i < pos.count; i++) {
+        expect(Number.isFinite(pos.getX(i))).toBe(true);
+        maxX = Math.max(maxX, Math.abs(pos.getX(i)));
+      }
+      expect(maxX).toBeLessThanOrEqual(halfLen + 0.01);
+      geo.dispose();
+    }
+  });
+});
+
 describe('§V.70 plank plateau step — depth that survives its own band limit', () => {
   const STEP = shipMaterialParams.plankStep;
   const CHAMFER = shipMaterialParams.plankChamfer; // fraction of a board

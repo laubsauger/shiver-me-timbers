@@ -174,7 +174,13 @@ describe('galleon specifics (docs/ship-reference-schema.png)', () => {
 
   it('each yard carries a sail with furled|reefed|full states', () => {
     const yards = pieces.filter((p) => p.kind === 'yard');
-    expect(yards).toHaveLength(6);
+    // three masts x however many TIERS the rig carries. This was a bare 6,
+    // i.e. the tier count baked into a test about sail STATES, so adding the
+    // third tier failed it here rather than anywhere that has an opinion
+    // about tiers (§T.34 rig proportions).
+    const masts = pieces.filter((p) => p.kind === 'mast').length;
+    expect(yards.length).toBeGreaterThan(0);
+    expect(yards.length % masts, 'every mast carries the same tiers').toBe(0);
     for (const yard of yards) {
       const sail = pieces.find((p) => p.kind === 'sail' && p.parent === yard.id);
       expect(sail, `sail for ${yard.id}`).toBeDefined();
@@ -813,7 +819,10 @@ describe('sail trim → §V13 sail states (docs/side-sails-fully-reefed.png)', (
     expect(asm.sailState('sail-main-lower')).toBe('reefed');
     asm.setSailState('sail-main-lower', 'full');
     expect(mesh.geometry).not.toBe(reefed);
-    expect(asm.sailPieceIds()).toHaveLength(6);
+    // one sail per yard — derived, not the old hardcoded tier count of 6
+    expect(asm.sailPieceIds()).toHaveLength(
+      buildGalleonBlueprint().filter((q) => q.kind === 'yard').length,
+    );
     asm.dispose();
   });
 });

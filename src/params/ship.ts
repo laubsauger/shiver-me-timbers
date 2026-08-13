@@ -34,8 +34,32 @@ export interface ShipClassParams {
   crowNestFrac: number; // fraction of mainmast height
   yardLowerFrac: number; // yard height as fraction of mast height
   yardUpperFrac: number;
+  /**
+   * THE THIRD TIER — course, topsail, TOPGALLANT.
+   *
+   * WHY A TIER AND NOT A LONGER SAIL. The user has raised the rig twice ("the
+   * sails are on the mast-heavy side", "the bottom stages are just not long
+   * enough") and two tiers cannot answer it: the galleon carried 0.350 of mast
+   * height in canvas over 0.300 (9.4 m) of bare pole below the lowest yard,
+   * i.e. 65% bare mast, against references showing three near-contiguous
+   * tiers. Growing the existing sails is CAPPED BY THE RIGGING, not by taste —
+   * past `sailDropLowerFactor` ≈ 0.27 the rear course's clew drops far enough
+   * that its sheet to the stern cleat passes through the hull at full brace
+   * (bisected: 0.26 passes, 0.28 fails), and lengthening the topsail instead
+   * fails sooner still, at 0.19, via the main topsail's sheet to the
+   * chainplates. The sheets foul the hull before the canvas ever reaches the
+   * reference, so a third tier is the only route left.
+   *
+   * VALUES ARE PLACEHOLDERS AND BELONG TO THE SAILS OWNER. These three keys
+   * are STRUCTURE — everything downstream (sails, clew/bunt sockets, rigging,
+   * sheets, braces) generates off the `levels` array in blueprintRig.ts, so
+   * the tier exists and can be tuned. The numbers here are a plausible taper,
+   * not a measured rig.
+   */
+  yardTopgallantFrac: number;
   yardLowerLenFactor: number; // yard length as fraction of mast height
   yardUpperLenFactor: number;
+  yardTopgallantLenFactor: number;
   yardRadius: number;
   /** gap between mast surface and yard surface (m) — yards ride forward of
    *  the mast so the sail never cuts into it */
@@ -74,6 +98,8 @@ export interface ShipClassParams {
    */
   sailDropLowerFactor: number;
   sailDropUpperFactor: number;
+  /** third-tier canvas drop — placeholder, see `yardTopgallantFrac` */
+  sailDropTopgallantFactor: number;
   bowspritLength: number;
   bowspritRadius: number;
   bowspritPitch: number; // radians above horizontal
@@ -121,10 +147,12 @@ export const brigantineParams: ShipClassParams = registerParams(
     rearMastZ: 0, rearMastHeight: 0,
     mastRadius: 0.32,
     crowNestRadius: 0, crowNestHeight: 0, crowNestFrac: 0,
-    yardLowerFrac: 0.52, yardUpperFrac: 0.78,
-    yardLowerLenFactor: 0.5, yardUpperLenFactor: 0.36, yardRadius: 0.12,
+    yardLowerFrac: 0.52, yardUpperFrac: 0.78, yardTopgallantFrac: 0.94,
+    yardLowerLenFactor: 0.5, yardUpperLenFactor: 0.36,
+    yardTopgallantLenFactor: 0.25, yardRadius: 0.12,
     yardMastClearance: 0.1, sailYardOffset: 0.16,
     sailDropLowerFactor: 0.26, sailDropUpperFactor: 0.17,
+    sailDropTopgallantFactor: 0.15,
     bowspritLength: 7, bowspritRadius: 0.18, bowspritPitch: 0.28,
     railHeight: 0.9, railThickness: 0.12, railInset: 0.2, railLengthFactor: 0.85,
     rudderHeight: 2.2, rudderChord: 1.2, rudderThickness: 0.15,
@@ -149,10 +177,12 @@ export const galleonParams: ShipClassParams = registerParams(
     rearMastZ: -10.5, rearMastHeight: 21,
     mastRadius: 0.42,
     crowNestRadius: 0.85, crowNestHeight: 0.9, crowNestFrac: 0.86,
-    yardLowerFrac: 0.5, yardUpperFrac: 0.76,
-    yardLowerLenFactor: 0.42, yardUpperLenFactor: 0.3, yardRadius: 0.15,
+    yardLowerFrac: 0.5, yardUpperFrac: 0.76, yardTopgallantFrac: 0.93,
+    yardLowerLenFactor: 0.42, yardUpperLenFactor: 0.3,
+    yardTopgallantLenFactor: 0.21, yardRadius: 0.15,
     yardMastClearance: 0.12, sailYardOffset: 0.2,
     sailDropLowerFactor: 0.26, sailDropUpperFactor: 0.16,
+    sailDropTopgallantFactor: 0.14,
     bowspritLength: 9, bowspritRadius: 0.22, bowspritPitch: 0.35, // ~20°
     railHeight: 1.0, railThickness: 0.13, railInset: 0.22, railLengthFactor: 0.8,
     rudderHeight: 2.6, rudderChord: 1.4, rudderThickness: 0.18,
