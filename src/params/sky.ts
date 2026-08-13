@@ -85,6 +85,34 @@ export interface SkyParams {
    * so it reads as an art choice rather than as a physics error.
    */
   moonPhase: number;
+  /**
+   * THE DISC'S APPEARANCE ONLY — a deliberate, named cheat. Read this before
+   * "unifying" it with `moonPhase`; it was one knob and the single knob could
+   * not satisfy the references.
+   *
+   * `moonPhase` is an HOUR-ANGLE LAG, so it drives three things at once:
+   * WHERE the moon is, HOW MUCH light it delivers (via MOON_SURGE), and what
+   * the disc looks like. Every one of the twelve night references in
+   * docs/inspo/night/ pairs a CRESCENT with a LOW moon over a dense starfield
+   * — and those two are mutually exclusive under one knob:
+   *   - a low moon at the Night preset needs the full-moon lag (0.5): a full
+   *     moon is antipodal to the sun, so it rises AS the sun sets and is the
+   *     only phase that is low at 19:15. At 0.35 the moon still sits at 72°
+   *     at 21:00 (measured), which lays no glint road at all.
+   *   - MOON_SURGE is brutally non-linear: at phase 0.35 the key is already
+   *     down to 0.42 of full, and a reference-accurate 0.18 would leave 0.044
+   *     — a night too dark to read, with the ship a black cut-out.
+   * So the ORBIT and the LIGHT keep the full-moon phase and only the drawn
+   * disc is given a crescent. Cost of the cheat, stated plainly: the moon's
+   * lit limb no longer agrees with where the sun is. At a 3.6° disc, over
+   * water, nobody but an astronomer can see that; a dark night and a road-less
+   * moon are visible to everyone. The references are the authority on the look.
+   *
+   * Same 0..1 convention as `moonPhase` (0 new, 0.25 first quarter, 0.5 full)
+   * and it drives the terminator AND the glow/halo weight, so the aura always
+   * matches the disc that is actually drawn.
+   */
+  moonDiscPhase: number;
   moonColor: number;
   moonIntensity: number;
   /** night tint at FULL moon — crossfades from nightTint by moon weight */
@@ -120,6 +148,32 @@ export interface SkyParams {
   moonGlowStrength: number;
   moonHaloPower: number;
   moonHaloStrength: number;
+  /**
+   * STARFIELD (§T.46 — src/sky/starfield.ts holds the whole argument).
+   *
+   * `starDensity` is cells per cube-face edge, so the sky holds 6·N² candidate
+   * cells; the count is uniform per steradian, not per cell, because the
+   * gnomonic Jacobian gates it. `starSize` is the TRUE angular radius in
+   * degrees — the drawn radius is floored at 2 px of the view ray's own
+   * footprint (§V.48) and the amplitude is scaled by (true/drawn)², so what
+   * this knob really sets is a star's FLUX, and the drawn peak at 1080p / 55°
+   * fov is about 0.15 of `starBrightness`.
+   *
+   * `starMagnitudePower` shapes the brightness distribution (3 → the median
+   * star is at 1/8 of peak: a few bright, very many faint, as the references
+   * are). `starTwinkleRate` is rad/s and is an ART CONSTANT — see the §V.55
+   * note in starfield.ts before making anything in the sim drive it.
+   */
+  starDensity: number;
+  starSize: number;
+  starBrightness: number;
+  starMagnitudePower: number;
+  starTwinkleAmount: number;
+  starTwinkleRate: number;
+  starColorCool: number;
+  starColorWarm: number;
+  /** viewDir.y at which the field has fully faded into the haze band */
+  starHorizonFade: number;
   /** analytic sun disc angular radius (degrees) and its soft edge (degrees) */
   sunDiscSize: number;
   sunDiscSoftness: number;
@@ -297,8 +351,15 @@ export const skyParams: SkyParams = registerParams(
     sunColorLow: 0xff9440,
     sunColorNoon: 0xfff3da,
     nightTint: 0x16263e,
-    // FULL MOON — the state the night look is authored against.
+    // FULL MOON — and it stays full, because this knob is the ORBIT and the
+    // LIGHT, not the picture. See moonDiscPhase for the whole argument.
     moonPhase: 0.5,
+    // Waxing crescent, 28.7% lit. Measured off the references: the moon spans
+    // 3.1-4.7° in docs/inspo/night/ (cgi7573…, sovereigns, images 1-4) and is
+    // a crescent in every one, from a thin sliver (~12% lit) to a fat one
+    // (~40%). 0.18 sits in the middle of that band and is wide enough that the
+    // terminator survives its own §V.48 floor at 1080p.
+    moonDiscPhase: 0.18,
     // Pale cool blue-white. Luminance was chosen against the glint road, not
     // against the light: in LINEAR terms this carries 0.38 of sunColorNoon's
     // luminance, so the moon's road on the water burns at ~41% of the noon
@@ -319,18 +380,64 @@ export const skyParams: SkyParams = registerParams(
     moonAmbient: 0.3,
     nightAmbientFloor: 0.15,
     // The real moon is 0.26° in radius. Enlarged like the sun disc is (1.1
-    // against a real 0.27°), and a little more, because the PHASE has to be
+    // against a real 0.27°), and a good deal more, because the PHASE has to be
     // legible — a physically-sized crescent is one pixel of one pixel.
-    moonDiscSize: 1.4,
+    // 1.4 → 1.8 measured against the references: at 55° fov / 16:9 our
+    // horizontal fov is 85.6°, and the SoT shots put the disc at 47-58 px on a
+    // 1024-1600 px frame, i.e. 3.1-4.7° across. 1.8 is a 3.6° disc, mid-band.
+    moonDiscSize: 1.8,
     moonDiscSoftness: 0.12,
     // NOT an HDR value like sunDiscIntensity's 14. Above ~3 the disc clips to
     // flat white and the terminator vanishes with it.
     moonDiscIntensity: 2.2,
-    moonTerminatorSoftness: 0.06,
-    moonGlowPower: 900,
-    moonGlowStrength: 0.25,
+    // 0.06 → 0.09 of the disc radius. At the shipped 1.8° disc, 0.06 is 0.108°
+    // — BELOW the 2-px §V.48 floor at 1080p (0.110°), so the floor, not the
+    // author, was deciding how soft the terminator is, and the authored value
+    // was dead. 0.09 is 0.162°, comfortably above it, and a crescent wants the
+    // softer edge anyway: it is the disc's defining feature now, and a hard
+    // one reads as a bitten biscuit rather than as a moon.
+    moonTerminatorSoftness: 0.09,
+    // GLOW/HALO ARE WEIGHTED BY THE DISC'S ILLUMINATED FRACTION, not by
+    // MOON_SURGE. The surge is a REFLECTANCE law about light leaving the
+    // moon's regolith; an aura is bloom off the disc you can see, so it scales
+    // with lit AREA. At the shipped moonDiscPhase 0.18 that weight is 0.287,
+    // and these two strengths are authored so the product lands where the old
+    // full-moon values did (0.9 × 0.287 = 0.258 vs 0.25; 0.20 × 0.287 = 0.057
+    // vs 0.06) — i.e. the crescent is a change of SHAPE, not of exposure.
+    // 900 → 400 widens the glow from ~2 disc radii to ~4, which is what the
+    // references show around a crescent (docs/inspo/night/images (1).jpeg).
+    moonGlowPower: 400,
+    moonGlowStrength: 0.9,
     moonHaloPower: 24,
-    moonHaloStrength: 0.06,
+    moonHaloStrength: 0.2,
+    // ── STARFIELD ─────────────────────────────────────────────────────────
+    // 72 cells per cube-face edge = 31,104 candidate cells over the sphere,
+    // 1.59° apart at a face centre, 1296 per steradian. At 55° fov / 16:9 the
+    // frame is 1.28 sr, so ~1660 candidates are in frame and ~830 of those
+    // above the horizon — the density measured off
+    // docs/inspo/night/this-game-is-so-beautiful…webp. Do NOT raise it without
+    // looking at JITTER: a denser grid is a smaller cell, and the clearance a
+    // star needs to avoid being clipped by its own cell wall is in DEGREES.
+    starDensity: 72,
+    // TRUE radius. The drawn radius is floored at 2 px (§V.48), so at 1080p
+    // this is 0.04/0.110 = 0.36 of what is drawn and the energy factor is
+    // 0.131 — the star is ~4 px across with a ~2 px core, and gets no bigger
+    // as the window shrinks, only fainter.
+    starSize: 0.04,
+    // Peak for a magnitude-1 star BEFORE the §V.48b energy factor. 12 × 0.131
+    // = 1.57 linear at 1080p, which ACES at exposure 1.1 puts at ~221 on
+    // screen against a night zenith of ~(0,1,17): the brightest stars read
+    // near-white, the median (mag 0.125) lands at ~72 — dim but present.
+    starBrightness: 12,
+    starMagnitudePower: 3,
+    starTwinkleAmount: 0.35,
+    starTwinkleRate: 1.6,
+    // Blue-white and a pale amber; the mix is squared toward the cool end, so
+    // amber is the minority the references show it to be.
+    starColorCool: 0xcfe0ff,
+    starColorWarm: 0xffd7a8,
+    // ~5.7°: the references keep stars out of the horizon haze entirely
+    starHorizonFade: 0.1,
     sunDiscSize: 1.1,
     sunDiscSoftness: 0.35,
     sunDiscIntensity: 14,
@@ -366,6 +473,7 @@ export const skyParams: SkyParams = registerParams(
     sunHazeStrength: { min: 0, max: 1, step: 0.01 },
     horizonWarmStrength: { min: 0, max: 1, step: 0.01 },
     moonPhase: { min: 0, max: 1, step: 0.01 },
+    moonDiscPhase: { min: 0, max: 1, step: 0.01 },
     moonIntensity: { min: 0, max: 4, step: 0.01 },
     moonAmbient: { min: 0, max: 1, step: 0.01 },
     nightAmbientFloor: { min: 0, max: 1, step: 0.01 },
@@ -377,6 +485,13 @@ export const skyParams: SkyParams = registerParams(
     moonGlowStrength: { min: 0, max: 4, step: 0.01 },
     moonHaloPower: { min: 1, max: 64, step: 0.5 },
     moonHaloStrength: { min: 0, max: 1, step: 0.01 },
+    starDensity: { min: 8, max: 160, step: 1 },
+    starSize: { min: 0.005, max: 0.3, step: 0.005 },
+    starBrightness: { min: 0, max: 60, step: 0.5 },
+    starMagnitudePower: { min: 0.5, max: 8, step: 0.1 },
+    starTwinkleAmount: { min: 0, max: 1, step: 0.01 },
+    starTwinkleRate: { min: 0, max: 8, step: 0.05 },
+    starHorizonFade: { min: 0.01, max: 0.6, step: 0.01 },
     sunDiscSize: { min: 0.2, max: 6, step: 0.05 },
     sunDiscSoftness: { min: 0.05, max: 3, step: 0.05 },
     sunDiscIntensity: { min: 1, max: 40, step: 0.5 },

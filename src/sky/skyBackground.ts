@@ -34,7 +34,8 @@ import {
   vec3,
 } from 'three/tsl';
 import type { SkyParams } from '../params/sky';
-import { moonBrightness, type KeyLight } from './moonCycle';
+import { moonIllumination, type KeyLight } from './moonCycle';
+import { createStarfield } from './starfield';
 import {
   bandGeometry,
   hexToRgb,
@@ -100,8 +101,18 @@ export function createSkyBackground(p: SkyParams) {
   const uMoonGlowStrength = uniform(p.moonGlowStrength);
   const uMoonHaloPower = uniform(p.moonHaloPower);
   const uMoonHaloStrength = uniform(p.moonHaloStrength);
-  /** 0..1 phase brightness — scales glow/halo so a new moon has no aura */
+  /** 0..1 lit FRACTION of the drawn disc — scales glow/halo so a new moon
+   *  has no aura. Driven by `moonDiscPhase`, not `moonPhase`, so the aura
+   *  always matches the disc actually on screen, and by the lit AREA rather
+   *  than by MOON_SURGE: the surge is a reflectance law about light leaving
+   *  the regolith, while an aura is bloom off the disc you can see. */
   const uMoonBright = uniform(0);
+
+  // ── stars (§T.46) ──────────────────────────────────────────────────────
+  // Same rule as the discs, and this one is the whole reason the field is
+  // affordable: it is built INTO `colorNode` and is invisible to `skyDome`,
+  // which the ocean evaluates per water pixel. Nothing here may migrate.
+  const starfield = createStarfield(p);
 
   // ── THE directional sky colour, for ANY direction ────────────────────
   // SINGLE SOURCE OF TRUTH (§T39, same rule as skyPalette for colour and
@@ -207,7 +218,8 @@ export function createSkyBackground(p: SkyParams) {
     moonDisc.add(moonGlow.add(moonHalo).mul(uMoonBright)),
   );
 
-  const colorNode = warmed.add(sunTerm).add(moonTerm);
+  // 6. stars. Added LAST and only here — see the note by `createStarfield`.
+  const colorNode = warmed.add(sunTerm).add(moonTerm).add(starfield.node(viewDir));
 
   return {
     colorNode,
@@ -282,14 +294,22 @@ export function createSkyBackground(p: SkyParams) {
       uMoonCosInner.value = mInner;
       uMoonSinRadius.value = Math.sin((Math.max(0, p.moonDiscSize) * Math.PI) / 180);
       uMoonIntensity.value = p.moonDiscIntensity;
-      // k = cos(phase angle): +1 new (nothing lit) → -1 full (all lit)
-      uMoonTermK.value = Math.cos(2 * Math.PI * Math.min(1, Math.max(0, p.moonPhase)));
+      // k = cos(phase angle): +1 new (nothing lit) → -1 full (all lit).
+      // `moonDiscPhase`, NOT `moonPhase` — see the param's docstring. The
+      // orbital phase has to stay full (it is what puts the moon low enough at
+      // the Night preset to lay a glint road, and what keeps MOON_SURGE from
+      // dropping the key to 0.044), while every reference shows a crescent.
+      // The disc is the only thing given the crescent.
+      const discPhase = Math.min(1, Math.max(0, p.moonDiscPhase));
+      uMoonTermK.value = Math.cos(2 * Math.PI * discPhase);
       uMoonTermSoft.value = Math.max(1e-3, p.moonTerminatorSoftness);
       uMoonGlowPower.value = p.moonGlowPower;
       uMoonGlowStrength.value = p.moonGlowStrength;
       uMoonHaloPower.value = p.moonHaloPower;
       uMoonHaloStrength.value = p.moonHaloStrength;
-      uMoonBright.value = moonBrightness(p.moonPhase);
+      uMoonBright.value = moonIllumination(discPhase);
+
+      starfield.update(key);
     },
   };
 }
