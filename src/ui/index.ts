@@ -20,6 +20,7 @@ import { createFullscreen } from './fullscreen';
 import { createViewModes } from './viewModes';
 import { ensureUiStyles } from './styles';
 import { div } from './dom';
+import { createQuickControls } from './quickControls';
 
 export type { GameSettings, QualityHints, Quality, SettingsStore } from './settingsStore';
 export { QUALITY_PRESETS, QUALITY_BUNDLES, DEFAULT_SETTINGS } from './settingsStore';
@@ -53,6 +54,8 @@ export interface GameUi {
   /** §I ui/cinematic — photo mode hides every overlay, HUD included */
   isPhotoMode: () => boolean;
   isDevLayerVisible: () => boolean;
+  /** short-lived getting-started card; call when the first game frame exists */
+  showQuickControls(): void;
   dispose(): void;
 }
 
@@ -76,6 +79,7 @@ export function createGameUI(callbacks: GameUiCallbacks): GameUi {
   document.body.appendChild(root);
 
   const hud = createHud(root);
+  const quickControls = createQuickControls(root);
   // one fullscreen control, shared: the menu entry throws it, the view modes
   // listen to it (full screen = cinematic), and both read the same truth
   const fullscreen = createFullscreen();
@@ -101,7 +105,9 @@ export function createGameUI(callbacks: GameUiCallbacks): GameUi {
     isPaused: menu.isOpen,
     isPhotoMode: viewModes.isPhoto,
     isDevLayerVisible: viewModes.isDevVisible,
+    showQuickControls: quickControls.show,
     dispose(): void {
+      quickControls.dispose();
       menu.dispose();
       viewModes.dispose();
       fullscreen.dispose();

@@ -119,6 +119,44 @@ export const SETTINGS_CSS = /* css */ `
   font-family: var(--figures); font-size: 12.5px;
 }
 
+/* controls manifest — compact ship's log, with physical-looking key caps */
+.smt-controls { padding-left: 2px; }
+.smt-control-row {
+  display: grid; grid-template-columns: minmax(126px, 0.78fr) 1.5fr;
+  align-items: center; gap: 18px;
+  min-height: 48px; padding: 6px 2px;
+  border-bottom: 1px solid rgba(44, 33, 20, 0.12);
+}
+.smt-control-row:last-child { border-bottom: 0; }
+.smt-control-keys { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+.smt-key {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 27px; min-height: 25px; padding: 1px 7px 2px;
+  border: 1px solid rgba(77, 55, 20, 0.72); border-radius: 3px;
+  background:
+    linear-gradient(180deg, rgba(255, 248, 218, 0.76), rgba(180, 144, 72, 0.25)),
+    rgba(222, 199, 144, 0.44);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 253, 232, 0.9),
+    0 2px 0 rgba(77, 55, 20, 0.42),
+    0 3px 4px rgba(34, 22, 8, 0.16);
+  color: #3d2c13; font-family: var(--figures); font-size: 11px;
+  font-weight: 700; line-height: 1; white-space: nowrap;
+}
+.smt-control-copy { display: flex; flex-direction: column; min-width: 0; }
+.smt-control-action {
+  font-variant-caps: small-caps; font-size: 16px; letter-spacing: 0.075em;
+  line-height: 1.2;
+}
+.smt-control-hint {
+  margin-top: 2px; color: rgba(44, 33, 20, 0.58);
+  font-size: 12px; line-height: 1.3;
+}
+
+@media (max-width: 540px) {
+  .smt-control-row { grid-template-columns: 1fr; gap: 6px; padding: 10px 2px; }
+}
+
 .smt-range {
   -webkit-appearance: none; appearance: none; width: 100%; height: 24px;
   background: transparent; cursor: pointer; margin-top: 6px;

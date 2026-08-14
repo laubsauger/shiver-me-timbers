@@ -24,6 +24,7 @@
 import { applyDevLayer } from './devLayer';
 import type { FullscreenControl } from './fullscreen';
 import { div } from './dom';
+import { isFullscreenShortcut } from '../input/controlMap';
 
 export interface ViewState {
   /** the player's standing intent for the dev layer */
@@ -150,7 +151,13 @@ export function createViewModes(root: HTMLElement, fullscreen: FullscreenControl
   apply();
 
   function onKeyDown(e: KeyboardEvent): void {
-    if (e.metaKey || e.ctrlKey || e.altKey || e.repeat || typingInto(e.target)) return;
+    if (e.repeat || typingInto(e.target)) return;
+    if (isFullscreenShortcut(e)) {
+      e.preventDefault();
+      if (fullscreen.supported()) fullscreen.toggle();
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     // P as well as F2: on the reference machine the F-row is media keys unless
     // the player has changed a system setting, and a capture binding that
     // needs Fn held is not a capture binding

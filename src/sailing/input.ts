@@ -9,9 +9,10 @@
  * W/E trim sail up, Q/S trim sail down, S also brakes, Space fires (§I).
  */
 import { sailingParams } from '../params/sailing';
+import { CONTROL_CODES } from '../input/controlMap';
 
 export interface InputState {
-  /** -1 (full port, A) .. 1 (full starboard, D) */
+  /** -1 .. 1 rudder intent; keyboard direction is mapped at collection time */
   rudder: number;
   /** -1 | 0 | 1 — sail trim intent this tick; sim integrates via trimSpeed */
   sailTrimDelta: number;
@@ -48,7 +49,12 @@ export class KeyboardInput {
 
   sample(dt: number): InputState {
     const p = sailingParams;
-    const dir = (this.held.has('KeyD') ? 1 : 0) - (this.held.has('KeyA') ? 1 : 0);
+    // The rendered chase view reads A as left and D as right. The ship model's
+    // internal yaw/rudder sign is the opposite, so map the keys here rather
+    // than inverting the physics convention used by AI and replay inputs.
+    const dir =
+      (this.held.has(CONTROL_CODES.steerLeft) ? 1 : 0) -
+      (this.held.has(CONTROL_CODES.steerRight) ? 1 : 0);
     if (dir !== 0) {
       // ramp toward the held direction
       const next = this.rudderValue + dir * p.rudderRampRate * dt;
@@ -61,13 +67,21 @@ export class KeyboardInput {
           ? 0
           : this.rudderValue - Math.sign(this.rudderValue) * step;
     }
-    const up = this.held.has('KeyW') || this.held.has('KeyE') ? 1 : 0;
-    const down = this.held.has('KeyS') || this.held.has('KeyQ') ? 1 : 0;
+    const up =
+      this.held.has(CONTROL_CODES.trimInPrimary) ||
+      this.held.has(CONTROL_CODES.trimInAlternate)
+        ? 1
+        : 0;
+    const down =
+      this.held.has(CONTROL_CODES.trimOutAlternate) ||
+      this.held.has(CONTROL_CODES.trimOutPrimary)
+        ? 1
+        : 0;
     return {
       rudder: this.rudderValue,
       sailTrimDelta: up - down,
-      brake: this.held.has('KeyS'),
-      fire: this.held.has('Space'),
+      brake: this.held.has(CONTROL_CODES.trimOutAlternate),
+      fire: this.held.has(CONTROL_CODES.fire),
     };
   }
 }

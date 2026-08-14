@@ -16,6 +16,7 @@ import { featureNeedsReload, featureWired, shadowMapSizeNeedsReload, unwiredFeat
 import { sectionHead, segmentRow, sliderRow, switchRow } from './settingsControls';
 import type { SwitchRow } from './settingsControls';
 import { button, div, el } from './dom';
+import { CONTROL_GROUPS } from '../input/controlMap';
 
 /** structural mirror of AudioSystem.musicInfo() — no import into src/audio */
 export interface MusicStatus {
@@ -92,16 +93,23 @@ export function createSettingsScreen(store: SettingsStore, onBack: () => void): 
 
   const graphicsTab = button('smt-tab is-active', 'Graphics');
   const audioTab = button('smt-tab', 'Audio');
-  const tabs = div('smt-tabs', graphicsTab, audioTab);
+  const controlsTab = button('smt-tab', 'Controls');
+  const tabs = div('smt-tabs', graphicsTab, audioTab, controlsTab);
   tabs.setAttribute('role', 'tablist');
   graphicsTab.id = 'smt-tab-graphics';
   audioTab.id = 'smt-tab-audio';
-  for (const [tab, panel] of [[graphicsTab, 'smt-panel-graphics'], [audioTab, 'smt-panel-audio']] as const) {
+  controlsTab.id = 'smt-tab-controls';
+  for (const [tab, panel] of [
+    [graphicsTab, 'smt-panel-graphics'],
+    [audioTab, 'smt-panel-audio'],
+    [controlsTab, 'smt-panel-controls'],
+  ] as const) {
     tab.setAttribute('role', 'tab');
     tab.setAttribute('aria-controls', panel);
   }
   graphicsTab.setAttribute('aria-selected', 'true');
   audioTab.setAttribute('aria-selected', 'false');
+  controlsTab.setAttribute('aria-selected', 'false');
 
   // — preset —
   const quality = segmentRow<Quality>({
@@ -224,23 +232,59 @@ export function createSettingsScreen(store: SettingsStore, onBack: () => void): 
   audioRows.setAttribute('role', 'tabpanel');
   audioRows.setAttribute('aria-labelledby', 'smt-tab-audio');
   audioRows.style.display = 'none';
+
+  // — controls —
+  // This is rendered from the same control map imported by the live keyboard
+  // handlers. It is a reference page, not a rebinding UI: every listed key is
+  // therefore guaranteed to describe a binding that exists now.
+  const controlsRows = div(
+    'smt-rows smt-controls',
+    ...CONTROL_GROUPS.map((group) =>
+      div(
+        'smt-section',
+        sectionHead(group.title),
+        ...group.bindings.map((binding) => {
+          const keys = div(
+            'smt-control-keys',
+            ...binding.keys.map((key) => el('kbd', 'smt-key', key)),
+          );
+          const copy = div(
+            'smt-control-copy',
+            el('span', 'smt-control-action', binding.action),
+            ...(binding.hint ? [el('span', 'smt-control-hint', binding.hint)] : []),
+          );
+          return div('smt-control-row', keys, copy);
+        }),
+      ),
+    ),
+  );
+  controlsRows.id = 'smt-panel-controls';
+  controlsRows.setAttribute('role', 'tabpanel');
+  controlsRows.setAttribute('aria-labelledby', 'smt-tab-controls');
+  controlsRows.style.display = 'none';
   // ticks only while the audio tab is actually on screen
   const poll = setInterval(() => {
     if (audioRows.style.display !== 'none' && root.isConnected) syncNowPlaying();
   }, 1000);
 
-  function selectTab(which: 'graphics' | 'audio'): void {
+  function selectTab(which: 'graphics' | 'audio' | 'controls'): void {
     const g = which === 'graphics';
+    const a = which === 'audio';
+    const c = which === 'controls';
     graphicsTab.classList.toggle('is-active', g);
-    audioTab.classList.toggle('is-active', !g);
+    audioTab.classList.toggle('is-active', a);
+    controlsTab.classList.toggle('is-active', c);
     graphicsTab.setAttribute('aria-selected', String(g));
-    audioTab.setAttribute('aria-selected', String(!g));
+    audioTab.setAttribute('aria-selected', String(a));
+    controlsTab.setAttribute('aria-selected', String(c));
     graphicsRows.style.display = g ? '' : 'none';
-    audioRows.style.display = g ? 'none' : '';
-    if (!g) syncNowPlaying();
+    audioRows.style.display = a ? '' : 'none';
+    controlsRows.style.display = c ? '' : 'none';
+    if (a) syncNowPlaying();
   }
   graphicsTab.addEventListener('click', () => selectTab('graphics'));
   audioTab.addEventListener('click', () => selectTab('audio'));
+  controlsTab.addEventListener('click', () => selectTab('controls'));
 
   function sync(s: GameSettings): void {
     quality.set(s.graphics.quality);
@@ -284,7 +328,7 @@ export function createSettingsScreen(store: SettingsStore, onBack: () => void): 
     }
   }
 
-  const root = div('smt-settings', head, tabs, graphicsRows, audioRows);
+  const root = div('smt-settings', head, tabs, graphicsRows, audioRows, controlsRows);
   return {
     root,
     focusFirst: () => backBtn.focus(),

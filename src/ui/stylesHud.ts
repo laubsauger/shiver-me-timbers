@@ -33,6 +33,73 @@ export const HUD_CSS = /* css */ `
   opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0);
   transition-delay: 0s;
 }
+
+/* voyage-start essentials: a torn chart slip, not a generic tutorial toast */
+.smt-quick-controls {
+  position: absolute; top: 50%; left: 28px; width: 268px;
+  padding: 22px 22px 17px; pointer-events: none;
+  color: var(--ink);
+  background:
+    radial-gradient(115% 80% at 15% 0%, rgba(255, 251, 230, 0.62), transparent 54%),
+    repeating-linear-gradient(93deg, rgba(118, 88, 38, 0.045) 0 2px,
+      rgba(255, 246, 220, 0.04) 2px 4px),
+    linear-gradient(158deg, rgba(243, 233, 205, 0.96), rgba(205, 178, 127, 0.95));
+  clip-path: polygon(2% 4%, 12% 1%, 25% 3%, 39% 0, 53% 3%, 68% 1%, 82% 3%,
+    97% 1%, 100% 12%, 98% 26%, 100% 42%, 98% 58%, 100% 74%, 97% 97%,
+    84% 99%, 70% 97%, 55% 100%, 41% 97%, 27% 99%, 12% 97%, 1% 99%, 3% 82%,
+    1% 66%, 3% 50%, 1% 34%);
+  filter: drop-shadow(0 13px 22px rgba(2, 14, 18, 0.52));
+  opacity: 0; visibility: hidden;
+  transform: translate(-18px, -50%);
+  transition: opacity 0.65s ease, transform 0.75s cubic-bezier(0.2, 0.85, 0.3, 1),
+    visibility 0s linear 0.75s;
+}
+.smt-quick-controls::before {
+  content: ""; position: absolute; inset: 9px;
+  border: 1px solid rgba(44, 33, 20, 0.24); pointer-events: none;
+}
+.smt-quick-controls.is-visible {
+  opacity: 1; visibility: visible; transform: translate(0, -50%);
+  transition-delay: 0s;
+}
+.smt-quick-controls.is-leaving { transform: translate(-10px, -50%); }
+.smt-ui.is-paused .smt-quick-controls,
+.smt-ui.is-photo .smt-quick-controls { opacity: 0; visibility: hidden; }
+.smt-quick-eyebrow {
+  position: relative; font-size: 9px; letter-spacing: 0.3em; text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.smt-quick-title {
+  position: relative; margin-top: 3px; padding-bottom: 11px;
+  border-bottom: 1px solid rgba(44, 33, 20, 0.25);
+  font-size: 23px; font-weight: 400; font-variant-caps: small-caps;
+  letter-spacing: 0.09em;
+}
+.smt-quick-row {
+  position: relative; display: grid; grid-template-columns: 76px 1fr;
+  align-items: center; gap: 10px; min-height: 48px;
+  border-bottom: 1px solid rgba(44, 33, 20, 0.12);
+}
+.smt-quick-keys { display: flex; gap: 5px; }
+.smt-quick-controls .smt-key { min-width: 28px; }
+.smt-quick-copy { display: flex; flex-direction: column; }
+.smt-quick-action {
+  font-size: 15px; font-variant-caps: small-caps; letter-spacing: 0.08em;
+}
+.smt-quick-hint { margin-top: 1px; font-size: 10.5px; color: var(--ink-soft); }
+.smt-quick-foot {
+  position: relative; margin-top: 11px; text-align: center;
+  font-size: 9.5px; color: var(--ink-soft); letter-spacing: 0.035em;
+}
+
+@media (max-width: 760px) {
+  .smt-quick-controls {
+    top: auto; bottom: 88px; left: 50%; width: min(320px, calc(100vw - 36px));
+    transform: translate(-50%, 12px);
+  }
+  .smt-quick-controls.is-visible { transform: translate(-50%, 0); }
+  .smt-quick-controls.is-leaving { transform: translate(-50%, 8px); }
+}
 .smt-compass {
   position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
   width: min(460px, 62vw); height: 46px; overflow: hidden;

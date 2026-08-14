@@ -13,11 +13,12 @@
  * mode switch must still release on the sim side, or it sticks held.
  */
 import { FreeCam } from './freeCam';
+import { CONTROL_CODES } from '../input/controlMap';
 
 /** C = toggle free camera (§I; W/A/S/D/R/F fly while free) */
-export const TOGGLE_FREE_CODE = 'KeyC';
+export const TOGGLE_FREE_CODE = CONTROL_CODES.toggleFreeCamera;
 /** H = snap to the captain's eye at the helm, and back out again */
-export const TOGGLE_HELM_CODE = 'KeyH';
+export const TOGGLE_HELM_CODE = CONTROL_CODES.toggleHelm;
 
 export interface CamInputHost {
   /** true while the detached fly camera owns the lens */
