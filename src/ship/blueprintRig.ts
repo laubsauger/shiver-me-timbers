@@ -71,14 +71,19 @@ export function buildMastRig(
       dropF: p.sailDropTopgallantFactor,
     },
   ] as const;
-  // yards ride FORWARD of their mast (real square rig, and §V22 critique:
-  // "the yard shouldn't go through the mast, the sail shouldn't cut into
-  // it"). Socket ids are unchanged — only their world station moves.
-  const yardZ = r + p.yardRadius + p.yardMastClearance;
   for (const { level, frac, lenF, dropF } of levels) {
     const yardId = `yard-${name}-${level}`;
     const len = height * lenF;
-    const yr = p.yardRadius;
+    // EVERY YARD IS SIZED BY ITS OWN LENGTH (§V.66, `yardSlenderness`). One
+    // shared metre value made a 4.41 m topgallant yard as thick as a 13.23 m
+    // course, which is the tell the user picked up on.
+    const yr = len / (2 * Math.max(1, p.yardSlenderness));
+    // yards ride FORWARD of their mast (real square rig, and §V22 critique:
+    // "the yard shouldn't go through the mast, the sail shouldn't cut into
+    // it"). Socket ids are unchanged — only their world station moves. Inside
+    // the loop, because the stand-off is the YARD's own radius: a thin
+    // topgallant yard sits closer to its mast than a course does.
+    const yardZ = r + yr + p.yardMastClearance;
     const ends: SocketDef[] = [
       { id: `anchor-${yardId}-port`, type: 'rope-anchor', position: [-len / 2, 0, 0] },
       { id: `anchor-${yardId}-starboard`, type: 'rope-anchor', position: [len / 2, 0, 0] },

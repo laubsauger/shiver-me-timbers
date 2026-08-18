@@ -60,7 +60,30 @@ export interface ShipClassParams {
   yardLowerLenFactor: number; // yard length as fraction of mast height
   yardUpperLenFactor: number;
   yardTopgallantLenFactor: number;
-  yardRadius: number;
+  /**
+   * YARD SLENDERNESS — length ÷ diameter, so every yard is sized by ITS OWN
+   * length (§V.66) instead of by one metre value shared across the rig.
+   *
+   * It was `yardRadius: 0.15 m` on all nine yards, which the user's eye caught
+   * from the other end: a 4.41 m topgallant yard was exactly as thick as a
+   * 13.23 m course. Measured against the spars themselves that is 44:1 on the
+   * course and 15:1 at the topgallant, where a real yard runs about 58:1 the
+   * whole way up.
+   *
+   * 44 rather than 58 KEEPS THE MAIN COURSE WHERE IT IS: at the galleon's
+   * 13.23 m main yard this is 0.1503 m against the 0.15 m it has always been,
+   * i.e. the spar everybody is actually looking at does not move, while the
+   * rear topgallant comes back from 0.15 m to 0.050 m. Going to a true 58:1
+   * would thin the course by a quarter as well, which is a look change nobody
+   * asked for; the spread was the complaint, not the thickness.
+   *
+   * IT MOVES THE SAILS TOO, and that is correct rather than a side effect:
+   * a yard rides `mastRadius + itsRadius + yardMastClearance` forward of its
+   * mast and its sail hangs at `y = −itsRadius`, so a thinner topgallant yard
+   * sits ~0.10 m closer to its mast and its canvas ~0.10 m higher. Both are the
+   * spar's own dimension propagating, which is the point of the change.
+   */
+  yardSlenderness: number;
   /** gap between mast surface and yard surface (m) — yards ride forward of
    *  the mast so the sail never cuts into it */
   yardMastClearance: number;
@@ -149,7 +172,7 @@ export const brigantineParams: ShipClassParams = registerParams(
     crowNestRadius: 0, crowNestHeight: 0, crowNestFrac: 0,
     yardLowerFrac: 0.52, yardUpperFrac: 0.78, yardTopgallantFrac: 0.94,
     yardLowerLenFactor: 0.5, yardUpperLenFactor: 0.36,
-    yardTopgallantLenFactor: 0.25, yardRadius: 0.12,
+    yardTopgallantLenFactor: 0.25, yardSlenderness: 44,
     yardMastClearance: 0.1, sailYardOffset: 0.16,
     sailDropLowerFactor: 0.26, sailDropUpperFactor: 0.17,
     sailDropTopgallantFactor: 0.15,
@@ -179,7 +202,7 @@ export const galleonParams: ShipClassParams = registerParams(
     crowNestRadius: 0.85, crowNestHeight: 0.9, crowNestFrac: 0.86,
     yardLowerFrac: 0.5, yardUpperFrac: 0.76, yardTopgallantFrac: 0.93,
     yardLowerLenFactor: 0.42, yardUpperLenFactor: 0.3,
-    yardTopgallantLenFactor: 0.21, yardRadius: 0.15,
+    yardTopgallantLenFactor: 0.21, yardSlenderness: 44,
     yardMastClearance: 0.12, sailYardOffset: 0.2,
     // RE-FITTED for the third tier (3627908). 0.26 was bisected against a
     // TWO-tier rig; adding the topgallant moved the rear course's clew and its
@@ -703,6 +726,18 @@ export interface ShipMaterialParams {
   sailSeamQuilt: number;
   sailAmbientLift: number; // emissive floor so cloth never reads dead black
   sailBacklitFocus: number; // transmission lobe tightness (looking sunward)
+  /**
+   * How much light still crosses the cloth at the WEAVE'S THICKEST, 0..1 — so
+   * this is the backlit side's own contrast, and 1 disables it.
+   *
+   * Transmission through a woven sheet varies steeply with local thickness:
+   * the gaps between threads glow and the threads themselves block, which is
+   * why a backlit sail shows MORE structure than a front-lit one, not less.
+   * The old lobe had no thickness term at all (nor any other texture), and
+   * measured 80% of the lee side's luminance with a weave contrast of 0.032
+   * against the lit side's 0.192.
+   */
+  sailBacklitWeave: number;
   sailLeeDarken: number; // 0..1 tint multiplier on the shaded (lee) face
   sailStainStrength: number; // weathering mottle darkening 0..1
   /**
@@ -891,7 +926,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailLacingPoints: 7, sailSeamDarken: 0.88, sailAmbientLift: 0.09,
     sailSeamRidge: 0.1, sailSeamQuilt: 0.08,
     sailBacklitFocus: 3, sailLeeDarken: 0.7, sailStainStrength: 0.36,
-    sailBuntShade: 0.55,
+    sailBuntShade: 0.55, sailBacklitWeave: 0.3,
     holeColor: 0x120c07,
     bumpScale: 20, grainRelief: 0.004, plankRelief: 0.006, seamDepth: 0.012,
     // ±6 mm of plateau across a 25 mm chamfer (0.045 of a 0.55 m board) is a
@@ -949,6 +984,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailTurnSkew: { min: 0, max: 6, step: 0.05 },
     sailResponse: { min: 0.2, max: 12, step: 0.1 },
     sailBacklitFocus: { min: 1, max: 12, step: 0.1 },
+    sailBacklitWeave: { min: 0, max: 1, step: 0.01 },
     sailLeeDarken: { min: 0.1, max: 1, step: 0.01 },
     sailFlutterAmp: { min: 0, max: 0.6, step: 0.01 },
     sailFlutterFreq: { min: 0, max: 10, step: 0.1 },
@@ -996,6 +1032,7 @@ function shipParamsMeta(): Partial<Record<keyof ShipClassParams, ParamMeta>> {
     bowspritLength: { min: 0, max: 15, step: 0.25 },
     bowspritPitch: { min: 0, max: 0.8, step: 0.01 },
     railHeight: { min: 0.2, max: 2, step: 0.05 },
+    yardSlenderness: { min: 20, max: 90, step: 1 },
     yardMastClearance: { min: 0, max: 1, step: 0.01 },
     sailYardOffset: { min: 0, max: 1.5, step: 0.01 },
     transomCrown: { min: 0, max: 1.5, step: 0.01 },

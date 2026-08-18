@@ -1,5 +1,5 @@
 /**
- * Rig driver: braces the yards to the live wind and swaps sail trim states.
+ * Rig driver: braces the yards to the live wind and publishes the sail trim.
  * §V3 one-way — reads the ship's render transform, the wind params the sim
  * reads, and the sim's `sailTrim` scalar; writes only three.js transforms and
  * piece states.
@@ -11,10 +11,10 @@
  *
  *     updateRig(shipAssembly, frameDt, playerShip.sailTrim);
  *
- * Both halves are internally edge-triggered/rate-limited, so calling it every
- * frame is correct and cheap: the brace damps toward its target, and a sail
- * state swap (which disposes and rebuilds geometry) only happens when the
- * state actually changes.
+ * Calling it every frame is correct and cheap: the brace damps toward its
+ * target, and the trim is a scalar written onto each sail mesh. NO GEOMETRY IS
+ * BUILT OR DISPOSED HERE — the reef used to swap meshes and that is exactly
+ * what the user felt as a skip; see the block above the trim section.
  */
 import type * as THREE from 'three';
 import { shipMaterialParams, shipRigParams } from '../params/ship';
@@ -24,7 +24,6 @@ import type { ShipAssembly } from './shipAssembly';
 import {
   SAIL_GUST_DETUNE,
   braceAngle,
-  sailGeometryState,
   sailGustRate,
   trimDropScale,
 } from './sailDynamics';
@@ -142,19 +141,20 @@ export function updateRig(assembly: ShipAssembly, dt: number, trim = 1): void {
     Math.abs(delta) <= maxStep ? target : current + Math.sign(delta) * maxStep;
   assembly.setRigTrim(next);
 
-  // --- trim: continuous cloth drop, and ONE geometry swap at the bottom ----
-  // The §V13 label (sailStateForTrim) deliberately does NOT appear here. It is
-  // hysteretic and three-valued, so keying geometry off it made the cloth jump
-  // 34% of its drop at mid-travel going in and 41% at a different trim coming
-  // out, with a 39%-wide dead band between. The reef is the continuous scale;
-  // the mesh only changes once, where the two silhouettes already match.
+  // --- trim: one continuous cloth drop, and NO geometry swap at all --------
+  // NOTHING here selects a mesh, and nothing may start doing so again. The
+  // §V13 label (sailStateForTrim) is hysteretic and three-valued, so keying
+  // geometry off it jumped the cloth 34% of its drop at mid-travel going in
+  // and 41% coming out; moving that swap to the bottom of the travel only made
+  // it smaller (the top of the sail still moved 0.04-0.09 of the drop and the
+  // silhouette still tripled in thickness). The reef is the scale, and the
+  // gathered roll rides the SAME scale in the same mesh — see
+  // sailDynamics.trimDropScale and sailShape.furlBundleScale.
   const sails = assembly.sailPieceIds();
   assembly.setSailWindFrame(frame);
   if (sails.length === 0) return;
-  const state = sailGeometryState(trim, assembly.sailState(sails[0]), p);
   const drop = trimDropScale(trim, p);
   for (const id of sails) {
-    assembly.setSailState(id, state); // no-op unless the state changed
     assembly.setSailDropScale(id, drop);
     writeSailWindFrame(assembly.sailMesh(id), frame);
   }

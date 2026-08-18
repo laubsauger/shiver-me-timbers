@@ -58,7 +58,9 @@ import {
 } from '../src/ship/bandLimit';
 import { MIN_RUNG, buildRatlinePlan, validateRatlinePlan } from '../src/ship/ratlinePlan';
 import { buildSailGeometry } from '../src/ship/pieceGeometrySail';
-import { sailClothPoint } from '../src/ship/sailShape';
+import { furlBundleScale, sailClothPoint } from '../src/ship/sailShape';
+import { trimDropScale } from '../src/ship/sailDynamics';
+import { shipRigParams } from '../src/params/ship';
 import { ShipAssembly } from '../src/ship/shipAssembly';
 import { shipMaterialParams } from '../src/params/ship';
 
@@ -575,19 +577,63 @@ describe('furled canvas gathers into swags, not a rolled tube (§T.34)', () => {
     expect(same).toBeLessThan(half * 0.8);
   });
 
-  it('reefed keeps working canvas below the bundle; furled does not', () => {
-    const reefed = buildSailGeometry('reefed', sail.aabb);
-    const furled = buildSailGeometry('furled', sail.aabb);
-    const clothWeight = (g: THREE.BufferGeometry): number => {
-      const shape = g.getAttribute('sailShape');
-      let n = 0;
-      for (let i = 0; i < shape.count; i++) if (shape.getX(i) === 1) n++;
-      return n;
-    };
-    expect(clothWeight(reefed)).toBeGreaterThan(0); // a reefed sail still draws
-    expect(clothWeight(furled)).toBe(0); // a furled one is all hardware
-    reefed.dispose();
-    furled.dispose();
+  it('the canvas hides INSIDE the roll when she is fully in, and hangs when she is not', () => {
+    /**
+     * WHY THIS REPLACED A VERTEX COUNT. It used to build the 'furled' mesh and
+     * assert it contained no cloth vertices at all, which was true only
+     * because furling was a MESH SWAP — and that swap is what the user kept
+     * reporting as "a super abrupt transition… it goes to fully packed up".
+     * There is one mesh now and the trim decides what you see, so the honest
+     * form of the same claim is geometric: at full furl no canvas may hang
+     * below the roll ANYWHERE along the yard (she is packed up), and at a reef
+     * plenty of it must (she is still drawing).
+     *
+     * It is also the guard on `trimDropMin`. That value is no longer fitted to
+     * make a swap continuous — it is just the last scrap of hanging cloth, and
+     * the only thing that constrains it is that it must still be swallowed by
+     * the thinnest part of the roll, the nipped waist at a gasket.
+     */
+    const drop = -sail.aabb.min[1];
+    const geo = buildSailGeometry('full', sail.aabb);
+    const pos = geo.getAttribute('position');
+    const shape = geo.getAttribute('sailShape');
+    const bunt = geo.getAttribute('sailBunt');
+    const uvs = geo.getAttribute('uv');
+
+    /** how many sampled stations show canvas below the roll's own bottom edge */
+    function hanging(trim: number): number {
+      const scale = trimDropScale(trim, shipRigParams);
+      const roll = furlBundleScale(scale);
+      const st = { drive: 0, luff: 0, skew: 0, dropScale: scale, flutterPhase: 0,
+        sheetLeadPort: [0, 0, 0] as [number, number, number],
+        sheetLeadStarboard: [0, 0, 0] as [number, number, number] };
+      const BINS = 24;
+      const rollLow = new Array<number>(BINS).fill(Infinity);
+      const clothLow = new Array<number>(BINS).fill(Infinity);
+      for (let i = 0; i < pos.count; i++) {
+        const bin = Math.round(Math.min(1, Math.max(0, pos.getX(i) / width + 0.5)) * (BINS - 1));
+        if (bunt.getX(i) === 1) {
+          rollLow[bin] = Math.min(rollLow[bin], pos.getY(i) * roll);
+        } else if (shape.getX(i) === 1) {
+          const y = sailClothPoint(uvs.getX(i), uvs.getY(i), shape.getY(i), shape.getZ(i), st, shipMaterialParams)[1];
+          clothLow[bin] = Math.min(clothLow[bin], y);
+        }
+      }
+      let showing = 0;
+      for (let b = 0; b < BINS; b++) {
+        // only where the roll actually reaches: it is gathered to ±0.48 of the
+        // width, so the outermost sliver of canvas by each yardarm is never
+        // covered by it and is not evidence of anything
+        if (!Number.isFinite(rollLow[b]) || !Number.isFinite(clothLow[b])) continue;
+        if (clothLow[b] < rollLow[b] - drop * 1e-3) showing++;
+      }
+      return showing;
+    }
+
+    expect(hanging(0), 'fully in: no canvas below the roll').toBe(0);
+    expect(hanging(0.5), 'half set: she is still drawing').toBeGreaterThan(12);
+    expect(hanging(1), 'full sail').toBeGreaterThan(12);
+    geo.dispose();
   });
 
   it('the full sail carries reef bands, each riding one point of canvas', () => {

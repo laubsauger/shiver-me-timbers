@@ -281,44 +281,33 @@ export function sailStateForTrim(
 }
 
 /**
- * WHICH GEOMETRY the cloth is built from (user: "pulling up and down the sails
- * still skips… it suddenly jumps when it's like half unfurled, and then it
- * suddenly snaps and they're in — on the way out it does the same").
+ * THERE IS NO `sailGeometryState` ANY MORE, and its deletion is the fix for
+ * the last of "pulling up and down the sails still skips… it suddenly snaps
+ * and they're in".
  *
- * `sailStateForTrim` used to drive this, and a hysteretic three-way switch
- * CANNOT produce a smooth transition — the cloth has to jump at every flip, by
- * construction. Measured on the main course before this changed:
+ * It went in three steps, and the first two were both real improvements that
+ * did not finish the job:
  *
- *   hauling down: at trim 0.55 the canvas foot moved 2.11 m in one frame
- *                 (34% of the sail's drop), then trim 0.15..0.54 was a DEAD
- *                 ZONE — 39% of the range in which nothing moved at all
- *   hauling up:   the same jump happened at trim 0.62, and measured 2.55 m
- *                 (41%), because the hysteresis puts it somewhere else
+ *   1. `sailStateForTrim` drove the mesh. A hysteretic three-way switch CANNOT
+ *      produce a smooth transition — measured on the main course, the canvas
+ *      foot moved 2.11 m in one frame at trim 0.55 (34% of the drop) hauling
+ *      down and 2.55 m at trim 0.62 hauling up, with a 39%-wide dead band
+ *      between where nothing moved at all.
+ *   2. One swap, at the very bottom, where `trimDropMin` was fitted to make
+ *      the collapsed panel and the bundle the same HEIGHT. Its own comment
+ *      said "an intermediate mesh swap is a jump wherever you put it", which
+ *      is true of the bottom of the travel too: the foot matched to 3% of the
+ *      drop and the TOP still jumped 0.04-0.09 of it, the THICKNESS tripled
+ *      (0.56 → 1.70 m on the main course), and the foot's own scallop
+ *      disagreed by 0.09 of the drop at the buntline stations — all inside the
+ *      bottom 2% of the player's travel.
+ *   3. No swap. The roll is in the same mesh as the canvas and grows as the
+ *      canvas shortens (`furlBundleScale`), so nothing is ever rebuilt and
+ *      there is no trim at which anything is discontinuous.
  *
- * Both halves of the user's report, and both readings of the earlier "reefing
- * skips 30–40%": the jump is 34–41% of the drop AND the dead band is 39–40% of
- * the range.
- *
- * So the reef is now carried ENTIRELY by the continuous `trimDropScale`, and
- * geometry only swaps once, at the very bottom, where the collapsed panel and
- * the gathered bundle are the same height (that is what `trimDropMin` is tuned
- * to). There is no 'reefed' geometry on the trim path any more: an intermediate
- * mesh swap is a jump wherever you put it.
+ * `sailStateForTrim` survives above as the §V13 LABEL, which is all it was
+ * ever good for.
  */
-export function sailGeometryState(
-  trim: number,
-  current: SailStateId,
-  p: ShipRigParams,
-): SailStateId {
-  const t = clamp(finite(trim, 1), 0, 1);
-  const below = Math.max(0, finite(p.furlGeometryBelow, 0.02));
-  // still edge-triggered — a swap disposes and rebuilds six geometries — but
-  // the band is bounded BY the threshold, so shaking the canvas back out can
-  // never cost more than twice the trim it took to furl (at these values, 4%
-  // of the range, against the 6% band that used to sit at mid-travel)
-  const h = Math.min(Math.max(0, p.reefHysteresis), below);
-  return t < (current === 'furled' ? below + h : below) ? 'furled' : 'full';
-}
 
 /**
  * Continuous cloth-drop scale — the ONE thing that animates a reef, now over

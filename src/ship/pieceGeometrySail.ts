@@ -36,21 +36,38 @@ import { shipDetailParams, shipMaterialParams } from '../params/ship';
 import { sailClothSegments, sailLaceStation } from './sailShapeProfiles';
 import { vhash, vjitter } from './variation';
 
-/** tag a part with (clothWeight, width, drop) for the cloth shader */
+/**
+ * Tag a part with (clothWeight, width, drop) for the cloth shader, plus its
+ * (buntWeight, occlusion) pair.
+ *
+ * THREE CLASSES OF VERTEX, and the two attributes name them together:
+ *   cloth  (1, …) (0, 1)  — the shader may move it; rides the live surface
+ *   hard   (0, …) (0, 1)  — robands, reef points' stations: stays put
+ *   bunt   (0, …) (1, ao) — the gathered roll: stays off the cloth surface,
+ *                           but its SECTION is scaled by the live trim
+ *
+ * `ao` is per-vertex on the bunt and 1 everywhere else — see {@link gatheredBunt}.
+ */
 export function withSailShape(
   geo: THREE.BufferGeometry,
   weight: number,
   width: number,
   drop: number,
+  bunt = 0,
+  ao?: number[],
 ): THREE.BufferGeometry {
   const count = geo.attributes.position.count;
   const data = new Float32Array(count * 3);
+  const roll = new Float32Array(count * 2);
   for (let i = 0; i < count; i++) {
     data[i * 3] = weight;
     data[i * 3 + 1] = width;
     data[i * 3 + 2] = drop;
+    roll[i * 2] = bunt;
+    roll[i * 2 + 1] = ao === undefined ? 1 : (ao[i] ?? 1);
   }
   geo.setAttribute('sailShape', new THREE.BufferAttribute(data, 3));
+  geo.setAttribute('sailBunt', new THREE.BufferAttribute(roll, 2));
   return geo;
 }
 
@@ -90,8 +107,52 @@ const REEF_INSET = 0.04;
 /** how far a sewn-on part stands off the cloth (m), along the surface normal */
 const REEF_STANDOFF = 0.02;
 
-const RING = 9; // cross-section segments round the bundle
+/**
+ * Cross-section segments round the bundle. 9 → 12 to carry the CREASES below:
+ * the sharpest of them is the 3rd harmonic of the section angle, so 12 samples
+ * is 4 per crease — the same "four samples per feature" bound
+ * SAIL_SAMPLES_PER_PANEL sets for the quilting, and for the same reason (this
+ * is baked geometry, so the mesh IS the band limit).
+ */
+const RING = 12;
 const PER_BAY = 9; // stations along each gathering bay
+
+/**
+ * THE BUNDLE IS NOT A SMOOTH TUBE, and that is a SHADING fix as much as a
+ * shape one (user: "the texture of it changes dramatically when it's packed
+ * up, to a much brighter white").
+ *
+ * MEASURED, headless, through three's lambert + hemisphere + this project's
+ * ACES/exposure: the furled bundle sits at p90 luminance 0.50-0.53 and max
+ * 0.57-0.60 AT EVERY HEADING AND EVERY TIME OF DAY, while the flying canvas
+ * beside it swings 0.11 → 0.58 with heading and sits at 0.087-0.27 at the
+ * shipped default. A plane has ONE normal, so a square sail's N·L is a single
+ * number over the whole surface and it is usually small (square sails face
+ * fore-and-aft; the sun is up). A tube has ALL of them, so a smooth roll
+ * ALWAYS contains a band at N·L ≈ 1 and never responds to anything. A thing
+ * that never changes, beside a thing that changes constantly, reads as wrong
+ * whatever colour it is — which is why "make it darker" was the wrong fix.
+ *
+ * Two terms answer it, both here rather than in the material, because the
+ * material was doing the right thing to the wrong shape:
+ *   · CREASES — harmonics of the section angle, so real folds run the length
+ *     of each bay. They break that one continuous highlight into facets that
+ *     turn over as the ship moves, which is what canvas does and a cylinder
+ *     cannot.
+ *   · OCCLUSION — baked per vertex. §B.48 recorded that there is NO ao
+ *     anywhere on this ship and no environment map, so a crevice between two
+ *     swags currently receives the FULL hemisphere. Gathered canvas is mostly
+ *     crevice.
+ */
+const CREASE_LOBE = 0.62; // split between the 2nd and 3rd section harmonics
+/** occlusion at the bottom of the roll, where it faces its own shadow */
+const AO_UNDERSIDE = 0.34;
+/** occlusion in the nipped waist at a gasket, closed in by both neighbours */
+const AO_WAIST = 0.55;
+/** extra occlusion in a crease valley against its ridge */
+const AO_CREASE = 0.3;
+/** the gaskets themselves sit IN the cinch they close */
+const AO_GASKET = 0.5;
 
 /**
  * Gasket stations along the yard, in local x. `bays` bays means bays+1
@@ -131,8 +192,11 @@ function gatheredBunt(
   const sagMax = Math.max(0, d.sailBuntSag) * baseRadius;
   const jitter = Math.max(0, shipDetailParams.irregularity);
 
+  const crease = Math.max(0, shipDetailParams.sailBuntCrease);
+
   const positions: number[] = [];
   const uvs: number[] = [];
+  const ao: number[] = [];
   const indices: number[] = [];
   const columns: number[] = [];
 
@@ -141,6 +205,11 @@ function gatheredBunt(
     const x1 = gaskets[bay + 1];
     // no two bays hold the same amount of canvas
     const bulk = 1 + vjitter(0.22 * jitter, seed, bay, 11);
+    // …and no two bays fold the same way: the creases are phased per bay, so
+    // the folds break at each gasket the way real canvas does when it is
+    // cinched, instead of running the whole yard as one corrugation
+    const ph2 = vjitter(Math.PI, seed, bay, 23);
+    const ph3 = vjitter(Math.PI, seed, bay, 29);
     const first = bay === 0 ? 0 : 1; // share the gasket column between bays
     for (let i = first; i <= PER_BAY; i++) {
       const t = i / PER_BAY;
@@ -157,11 +226,29 @@ function gatheredBunt(
       columns.push(positions.length / 3);
       for (let k = 0; k <= RING; k++) {
         const a = (k / RING) * Math.PI * 2;
+        // LONGITUDINAL FOLDS. Integer harmonics of the section angle, so the
+        // ring closes on itself exactly at k = 0 = RING (a fractional harmonic
+        // leaves a seam down the bundle) and each lobe runs the LENGTH of the
+        // bay rather than rippling along it — a fold in gathered canvas is a
+        // line down the roll, not a lump on it.
+        const fold =
+          Math.sin(2 * a + ph2) * CREASE_LOBE + Math.sin(3 * a + ph3) * (1 - CREASE_LOBE);
+        const swellK = 1 + crease * fold;
         // the section is deeper than it is thick: the weight of the canvas
         // pulls the swag down into a hanging fold, it does not stay round
-        const ry = r * (1 + 0.55 * gather);
-        positions.push(x, -sag + Math.cos(a) * ry, Math.sin(a) * r);
+        const ry = r * (1 + 0.55 * gather) * swellK;
+        positions.push(x, -sag + Math.cos(a) * ry, Math.sin(a) * r * swellK);
         uvs.push((x / Math.max(0.01, width)) + 0.5, k / RING);
+        // BAKED OCCLUSION (see the header block on CREASE_LOBE). Three
+        // independent closings, multiplied because they occlude independently:
+        // the underside of the roll faces its own shadow, the waist at a
+        // gasket is closed in by the two swags either side of it, and a crease
+        // valley is closed in by its own two ridges.
+        const up = 0.5 + 0.5 * Math.cos(a);
+        const aoAngle = AO_UNDERSIDE + (1 - AO_UNDERSIDE) * Math.pow(up, 0.8);
+        const aoWaist = AO_WAIST + (1 - AO_WAIST) * gather;
+        const aoFold = 1 - AO_CREASE * 0.5 * (1 - fold);
+        ao.push(Math.min(1, Math.max(0, aoAngle * aoWaist * aoFold)));
       }
     }
   }
@@ -177,7 +264,7 @@ function gatheredBunt(
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geo.setIndex(indices);
   geo.computeVertexNormals();
-  return withSailShape(geo, 0, width, drop);
+  return withSailShape(geo, 0, width, drop, 1, ao);
 }
 
 /** the gaskets themselves: rope bands cinching the bundle at each station */
@@ -193,7 +280,9 @@ function gaskets(width: number, drop: number, baseRadius: number, seed: number):
     band.rotateY(Math.PI / 2); // ring lies across the yard
     band.rotateX(vjitter(0.12 * jitter, seed, x)); // hand-passed, never square
     band.translate(x, 0, 0);
-    out.push(withSailShape(band, 0, width, drop));
+    // BUNT-CLASS, so a gasket shrinks with the roll it cinches — a band left
+    // at full size round a collapsing bundle is a hoop standing in mid-air.
+    out.push(withSailShape(band, 0, width, drop, 1, new Array(band.attributes.position.count).fill(AO_GASKET)));
   }
   return out;
 }
@@ -239,7 +328,39 @@ function reefPoints(width: number, drop: number): THREE.BufferGeometry[] {
   return out;
 }
 
+/**
+ * ONE MESH FOR EVERY TRIM — there is no geometry swap left anywhere on the
+ * sail, and `state` no longer selects a shape.
+ *
+ * WHY, and it is the doctrine `sailGeometryState` already stated turned on
+ * itself. That function's own comment said "an intermediate mesh swap is a
+ * jump wherever you put it", and then put one at the bottom of the travel. It
+ * still jumped, because `trimDropMin` could only null ONE quantity — where the
+ * foot of the canvas is — and the foot was not what popped. Measured across
+ * the nine sails at the swap, with that constant at its own optimum:
+ *   · the TOP jumped UP by 0.04-0.09 of the sail's drop (+0.61 m on the main
+ *     course) — the bundle stands proud of the yard, the collapsed panel does
+ *     not;
+ *   · the THICKNESS jumped by 0.15-0.26 of the drop — 0.56 m → 1.70 m on the
+ *     main course at working camber, a factor of THREE in one frame;
+ *   · the foot's own scallop disagreed by 0.09 of the drop AT THE BUNTLINE
+ *     STATIONS while matching mid-bay, which is the one point the fit measured;
+ *   · and all of it landed inside the bottom 2% of the trim travel.
+ * That is the user's "super abrupt transition… it goes to fully packed up".
+ *
+ * So the bundle is built into the SAME mesh as the canvas and its SECTION is
+ * scaled by the live trim in the vertex stage (`furlBundleScale`, one owner in
+ * sailShape.ts): a line tucked along the head at full sail, its full authored
+ * size when she is in. The canvas shortens on the same ramp it always did, so
+ * the two exchange continuously — cloth leaves the hanging part and arrives in
+ * the roll, which is what furling IS.
+ *
+ * `state` is kept because `ShipAssembly.setSailState` types on it and the §V13
+ * label still has three values for the HUD and the haul audio. It does not
+ * change the mesh: a statically furled ship is `setSailDropScale(id, 0)`.
+ */
 export function buildSailGeometry(state: SailStateId, aabb: AABB): THREE.BufferGeometry {
+  void state;
   const s = aabbSize(aabb);
   const width = s.x;
   const drop = -aabb.min[1];
@@ -247,44 +368,29 @@ export function buildSailGeometry(state: SailStateId, aabb: AABB): THREE.BufferG
   // gather into the same lumps (§V2 seeded, never Math.random)
   const seed = vhash(width * 100, drop * 100) * 1000;
 
-  if (state === 'full') {
-    /**
-     * Flat panel; the material owns the shape.
-     *
-     * THE SEGMENT COUNT IS DERIVED, NOT CHOSEN. The cloth's quilting is a
-     * periodic term evaluated in the VERTEX stage, so its band limit is this
-     * mesh — `fwidth` cannot reach it, because no fragment is involved. At the
-     * old fixed 16 segments the shipped 9 panels would get 1.8 samples each,
-     * far under Nyquist, and the quilting would alias into a corrugation
-     * nobody authored. Deriving it from the same `sailPanelsFor` the panels
-     * come from means the geometry can never silently fall behind the shape it
-     * has to carry (§V33/§V51 single owner).
-     */
-    const segsU = sailClothSegments(shipMaterialParams.sailLacingPoints);
-    const geo = new THREE.PlaneGeometry(width, drop, segsU, 16);
-    geo.translate(0, -drop / 2, 0);
-    return mergeNonIndexed([
-      withSailShape(geo, 1, width, drop),
-      ...reefPoints(width, drop),
-      ...sailTies(width, drop),
-    ]);
-  }
-
-  // furled: everything gathered to the yard. reefed: a smaller bundle, with
-  // the working part of the sail still hanging below it.
-  const baseRadius = Math.max(0.15, drop * 0.05) * (state === 'furled' ? 1.15 : 0.95);
-  const parts = [
+  /**
+   * Flat panel; the material owns the shape.
+   *
+   * THE SEGMENT COUNT IS DERIVED, NOT CHOSEN. The cloth's quilting is a
+   * periodic term evaluated in the VERTEX stage, so its band limit is this
+   * mesh — `fwidth` cannot reach it, because no fragment is involved. At the
+   * old fixed 16 segments the shipped 9 panels would get 1.8 samples each,
+   * far under Nyquist, and the quilting would alias into a corrugation
+   * nobody authored. Deriving it from the same `sailPanelsFor` the panels
+   * come from means the geometry can never silently fall behind the shape it
+   * has to carry (§V33/§V51 single owner).
+   */
+  const segsU = sailClothSegments(shipMaterialParams.sailLacingPoints);
+  const geo = new THREE.PlaneGeometry(width, drop, segsU, 16);
+  geo.translate(0, -drop / 2, 0);
+  // the bundle is authored at the size it reaches when she is fully in; the
+  // shader scales its section down from there, about the head line
+  const baseRadius = Math.max(0.15, drop * 0.05) * 1.15;
+  return mergeNonIndexed([
+    withSailShape(geo, 1, width, drop),
+    ...reefPoints(width, drop),
+    ...sailTies(width, drop),
     gatheredBunt(width, drop, baseRadius, seed),
     ...gaskets(width, drop, baseRadius, seed),
-    ...sailTies(width, drop),
-  ];
-  if (state === 'furled') return mergeNonIndexed(parts);
-
-  // the skirt still draws, so it stays cloth (weight 1) and keeps flying; its
-  // own drop keeps the shader's ripple in scale with how little is set
-  const skirtDrop = drop * 0.22;
-  const skirt = new THREE.PlaneGeometry(width * 0.9, skirtDrop, 8, 3);
-  skirt.translate(0, -skirtDrop / 2 - baseRadius * 1.1, 0);
-  parts.push(withSailShape(skirt, 1, width * 0.9, skirtDrop));
-  return mergeNonIndexed(parts);
+  ]);
 }

@@ -218,7 +218,37 @@ export function sailClothOffset(
       + vv * SAIL_FLUTTER_V,
   );
   const edge = 0.35 + Math.abs(uu - 0.5) * SAIL_FLUTTER_EDGE;
-  const flutter = wave * p.sailFlutterAmp * shake * (1 - vv) * edge;
+  /**
+   * THE RIPPLE IS SCALED BY THE TRIM, AND THIS IS THE FLAPPY TABS (§V.66).
+   *
+   * User, on the finished furl: "the fully packed up, rolled up sails now have
+   * a flappy end on all sides of the packages, on all sections of it, flapping
+   * in the wind a bit."
+   *
+   * `sailFlutterAmp` is an amplitude in METRES and had no trim factor at all,
+   * so a sail with 0.227 m of canvas left down was being waved ±0.406 m at
+   * luff 1.0 and ±0.552 m at the cap — TWO AND A HALF TIMES the whole of the
+   * remaining sail. Its two envelopes decide the shape of the result and both
+   * point at what the user photographed: `(1 − v)` pins it at the head and
+   * frees it at the foot, and `edge` peaks at BOTH leeches, so the cloth that
+   * is left ends up as a triangular tab standing off each end of the roll,
+   * lobed across the width by `sailRippleCount` — "on all sections of it".
+   * Measured z span at luff 1.0: 0.810 m against the roll's own 0.843 m
+   * diameter, which is the user's "roughly the size of the package" to 4%.
+   *
+   * It was invisible until the furl rework because `trimDropMin` pinned `set`
+   * at 0.23: a 0.4 m ripple inside 1.74 m of hanging canvas is just a sail
+   * shaking. This is the THIRD term found relying on that pin, after
+   * `sailFurlLift` (which could lift the foot above its own head) and the
+   * sewn-part offsets below. All three are one error: a length that is a
+   * fraction of the sail AS CUT, applied to the sail AS SET.
+   *
+   * A furled sail cannot shake because there is no free canvas to shake —
+   * that is the physical statement, and `× set` is it. The metres-vs-chord
+   * scaling of `sailFlutterAmp` itself is left alone (§Rule 3); it is honest
+   * for a sail that is actually set, which is every case but this one.
+   */
+  const flutter = wave * p.sailFlutterAmp * shake * (1 - vv) * edge * set;
 
   return finite(belly + flutter);
 }
@@ -230,6 +260,30 @@ export function sailClothOffset(
 export function sailFlutterRate(luff: number, p: ShipMaterialParams): number {
   const shake = clamp(finite(luff), 0, 1.4) * Math.max(0, finite(p.sailFlutterLuffRate));
   return Math.max(0, finite(p.sailFlutterFreq)) * (1 + shake);
+}
+
+/**
+ * How much of its authored section the gathered bundle is showing, 0..1.
+ *
+ * THE ONE OWNER of the furl roll's size: sailClothNodes transliterates it into
+ * the vertex stage, and the tests measure the silhouette through it. There is
+ * no geometry swap on a sail any more (see pieceGeometrySail.buildSailGeometry
+ * for the measurements that killed it) — the roll is in the same mesh as the
+ * canvas and simply grows as the canvas shortens.
+ *
+ * LINEAR IN THE FURL, deliberately. Canvas conserves area, so a roll holding
+ * (1 − set) of the sail would grow as its SQUARE ROOT — which is 71% of full
+ * size at half trim, i.e. most of the bundle arrives in the first half of the
+ * travel and it is fat while she is still drawing. The complaint being fixed
+ * is a transition that is too sudden, so the shape that keeps the change
+ * SLOWEST for longest is the right one, and a roll of gathered cloth is loose
+ * enough that neither curve is wrong. It reaches (1 − trimDropMin), not 1, at
+ * trim 0; at the shipped 0.03 that is 97% of the authored size, and nothing
+ * downstream needs it to be exactly 1 — which is the whole point of no longer
+ * having a swap to line up.
+ */
+export function furlBundleScale(dropScale: number): number {
+  return clamp01(1 - clamp01(finite(dropScale, 1)));
 }
 
 /**
@@ -245,6 +299,16 @@ export function sailFlutterRate(luff: number, p: ShipMaterialParams): number {
  *
  * Zero at full canvas, so a flying sail is untouched — this must not disturb
  * the belly (§B.21, and the draft work above it).
+ *
+ * THE SWAG IS A FRACTION OF WHAT IS STILL HANGING, NOT OF THE BUILT DROP
+ * (§V.66: scale a feature by ITS OWN dimension). It used to be `swag · drop`
+ * against a hanging length of `set · drop`, which is a ratio of `swag/set` —
+ * unbounded as she comes in. That was harmless only because `trimDropMin` held
+ * `set` at 0.23; the moment the roll took over and the canvas was allowed to
+ * shorten properly, the gather at the stations exceeded the whole remaining
+ * drop and lifted the foot ABOVE its own head. Written this way the lift can
+ * never exceed `sailFurlSwag` of the hanging cloth, by construction, at any
+ * value of any parameter.
  */
 export function sailFurlLift(
   u: number,
@@ -255,13 +319,14 @@ export function sailFurlLift(
 ): number {
   const uu = clamp01(finite(u));
   const vv = clamp01(finite(v));
-  const furl = 1 - clamp01(finite(s.dropScale, 1));
+  const set = clamp01(finite(s.dropScale, 1));
+  const furl = 1 - set;
   const bays = Math.max(1, finite(p.sailFurlBays, 3));
   // 0 at each station (where a line is made fast), 1 in the middle of a bay
   const station = Math.abs(Math.sin(Math.PI * bays * uu));
   const drop = Math.max(0.01, finite(builtDrop));
   // the head is bent to its yard and cannot rise, hence (1 − v)
-  return furl * finite(p.sailFurlSwag) * drop * (1 - vv) * (1 - station);
+  return furl * finite(p.sailFurlSwag) * drop * set * (1 - vv) * (1 - station);
 }
 
 /**
@@ -357,6 +422,11 @@ export function sailClothFrame(
  * belly as a rigid body instead of staying in the flat panel's plane — which
  * is what put the reef points' corners through the cloth once the sail
  * carried real camber.
+ *
+ * AND IT GATHERS WITH THE CANVAS: the offset is scaled by the trim, so a reef
+ * point rolls up into the bundle instead of standing off it at full size once
+ * the cloth around it has gone. Transliteration pair with `rigid` in
+ * sailClothNodes; see the note there for what it measured.
  */
 export function sailSewnPoint(
   u: number,
@@ -369,10 +439,12 @@ export function sailSewnPoint(
 ): Vec3 {
   const o = sailClothPoint(u, v, width, builtDrop, s, p);
   const f = sailClothFrame(u, v, width, builtDrop, s, p);
+  const k = clamp01(finite(s.dropScale, 1));
+  const d: Vec3 = [offset[0] * k, offset[1] * k, offset[2] * k];
   return [
-    o[0] + f.tanU[0] * offset[0] + f.tanV[0] * offset[1] + f.normal[0] * offset[2],
-    o[1] + f.tanU[1] * offset[0] + f.tanV[1] * offset[1] + f.normal[1] * offset[2],
-    o[2] + f.tanU[2] * offset[0] + f.tanV[2] * offset[1] + f.normal[2] * offset[2],
+    o[0] + f.tanU[0] * d[0] + f.tanV[0] * d[1] + f.normal[0] * d[2],
+    o[1] + f.tanU[1] * d[0] + f.tanV[1] * d[1] + f.normal[1] * d[2],
+    o[2] + f.tanU[2] * d[0] + f.tanV[2] * d[1] + f.normal[2] * d[2],
   ];
 }
 

@@ -85,6 +85,8 @@ export interface SailClothNodes {
   uTangent: Node;
   /** 1 on cloth the shader may move, 0 on robands and the furled bundle */
   clothWeight: Node;
+  /** baked fold occlusion — 1 on cloth, < 1 in the bundle's creases and waists */
+  occlusion: Node;
   /** the sail's BUILT width (m), floored */
   width: Node;
 }
@@ -112,6 +114,10 @@ export function createSailClothNodes(
   const clothWeight = shapeAttr.x;
   const width = max(shapeAttr.y, float(0.01)); // §V28 floored divisor
   const builtDrop = max(shapeAttr.z, float(0.01)); // BEFORE the trim scale
+  // (buntWeight, bakedOcclusion) — the third vertex class, see withSailShape
+  const buntAttr = attribute('sailBunt', 'vec2');
+  const buntWeight = buntAttr.x;
+  const occlusion = buntAttr.y;
   // live trim: easing the sheets shortens the canvas continuously instead of
   // popping between trim states
   const set = clamp(wind.dropScale, float(0), float(1));
@@ -233,8 +239,12 @@ export function createSailClothNodes(
       wind.flutterPhase.add(uu.mul(u.rippleCount.mul(TAU))).add(v.mul(SAIL_FLUTTER_V)),
     );
     const edge = float(0.35).add(uu.sub(0.5).abs().mul(SAIL_FLUTTER_EDGE));
+    // `.mul(set)` — a furled sail has no free canvas to shake. See
+    // sailShape.sailClothOffset for the measurement: without it, 0.227 m of
+    // remaining canvas was being waved ±0.406 m, which is the flapping tab the
+    // user photographed on the packed bundles.
     return belly
-      .add(wave.mul(u.flutterAmp).mul(shake).mul(v.oneMinus()).mul(edge))
+      .add(wave.mul(u.flutterAmp).mul(shake).mul(v.oneMinus()).mul(edge).mul(set))
       .add(cornerPull(uu, v).z);
   });
 
@@ -327,13 +337,50 @@ export function createSailClothNodes(
    * its vertices sit exactly at their own flat station, so the offset is zero
    * and this reduces to `shaped`.
    */
-  const rigid = positionLocal.sub(flat);
+  /**
+   * A PART SEWN TO THE CANVAS GATHERS WITH THE CANVAS (§V.66, and the second
+   * half of the flapping tabs).
+   *
+   * `rigid` is a vertex's offset from its own flat station, in metres, and it
+   * is exactly zero on the main panel by construction — so this scales one
+   * thing and one thing only: the reef points. Measured on the main course,
+   * 108 vertices carrying offsets up to 0.390 m, against 0.227 m of hanging
+   * canvas at full furl: every reef point was 1.7x the size of the entire
+   * sail it was sewn to, standing off a bundle it should be rolled up inside.
+   * Like the ripple above, it only ever looked right because `trimDropMin`
+   * held the sail at 0.23 of its drop.
+   */
+  const rigid = positionLocal.sub(flat).mul(set);
   const onCloth = shaped
     .add(tanU.mul(rigid.x))
     .add(tanV.mul(rigid.y))
     .add(nrm.mul(rigid.z));
-  // weight 0 (robands, gaskets, the furled bundle) keeps its authored place
-  const position = mix(positionLocal, onCloth, clothWeight);
+
+  /**
+   * THE GATHERED ROLL, and the reason there is no mesh swap left.
+   * Transliteration of sailShape.furlBundleScale — same expression, same
+   * clamp; see buildSailGeometry for the measurements that killed the swap.
+   *
+   * The bundle is authored at the size it reaches when she is fully in, and
+   * its SECTION is scaled about the head line (y = z = 0, where the canvas is
+   * laced to its yard) by how far she is furled. At full sail the scale is
+   * exactly zero, so the roll collapses to a degenerate line along the head
+   * and rasterises nothing at all — no z-fight with the cloth it is lying on,
+   * because a zero-area triangle produces no fragments. Its x is untouched:
+   * canvas gathers ACROSS the yard, it does not slide along it.
+   *
+   * The authored normals ride along unchanged. A uniform scale of the section
+   * leaves the normal's in-section direction exact and only mis-tilts its x
+   * component by the same factor the radius changed — a fraction of a degree
+   * at the scales this runs at, against recomputing a second finite-difference
+   * basis for a part that is only fully visible at one end of the travel.
+   */
+  const furl = clamp(float(1).sub(set), float(0), float(1));
+  const buntLocal = vec3(positionLocal.x, positionLocal.y.mul(furl), positionLocal.z.mul(furl));
+  // three vertex classes, two mixes, and they are mutually exclusive by
+  // construction: cloth is (1, 0), the roll is (0, 1), hardware is (0, 0).
+  const hardware = mix(positionLocal, buntLocal, buntWeight);
+  const position = mix(hardware, onCloth, clothWeight);
 
   return {
     panelCoord,
@@ -341,6 +388,7 @@ export function createSailClothNodes(
     localNormal: nrm,
     uTangent: tanU,
     clothWeight,
+    occlusion,
     width,
   };
 }

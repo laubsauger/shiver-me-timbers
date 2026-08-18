@@ -124,6 +124,8 @@ export function createSailClothMaterial(
   const uSeamRidge = uniform(p.sailSeamRidge);
   const uAmbientLift = uniform(p.sailAmbientLift);
   const uStain = uniform(p.sailStainStrength);
+  const uBuntShade = uniform(p.sailBuntShade);
+  const uBacklitWeave = uniform(p.sailBacklitWeave);
   // the shape's own uniforms live with the shape (sailClothNodes.ts)
   const shape = createSailShapeUniforms(p);
 
@@ -197,7 +199,34 @@ export function createSailClothMaterial(
     float(0.03),
     cloth.x.min(cloth.x.oneMinus()).min(cloth.y),
   );
-  const cloth3 = mix(base.mul(uSeamDarken), base, panelMask.min(hemMask));
+  const cloth3raw = mix(base.mul(uSeamDarken), base, panelMask.min(hemMask));
+
+  /**
+   * FOLD OCCLUSION ON THE GATHERED ROLL — half of "the texture of it changes
+   * dramatically when it's packed up, to a much brighter white".
+   *
+   * The bundle was never missing the CLOTH terms: its uv.x drives the same
+   * `panelCoord`, so it already carries the panel seams, the per-panel tone
+   * jitter, the weave and the stain, and its normals are the real (now
+   * creased) surface. What it was missing is that gathered canvas is mostly
+   * CREVICE, and §B.48 recorded that there is no ao anywhere on this ship and
+   * no environment map — so the inside of every fold was receiving the full
+   * hemisphere. `occlusion` is baked per vertex in pieceGeometrySail.ts and is
+   * exactly 1 on the flying cloth, so this term cannot touch it.
+   *
+   * IT IS APPLIED TWICE, ON PURPOSE, and the two halves are different things:
+   *   · `aoNode` is three's own hook and reaches the INDIRECT term only — the
+   *     HemisphereLight, which is what a crevice is actually shielded from;
+   *   · the albedo multiply stands in for the DIRECT light a 20 cm fold
+   *     shadows and the shadow map cannot resolve. The sun is 3.4 against the
+   *     hemisphere's 0.7, so `aoNode` alone would move about a fifth of what
+   *     the eye is complaining about. `sailBuntShade` is how much of the baked
+   *     occlusion is allowed into the albedo, so 0 leaves this to the ambient
+   *     term alone.
+   */
+  const fold = mix(float(1), cloth3d.occlusion, uBuntShade);
+  const cloth3 = cloth3raw.mul(fold);
+  material.aoNode = cloth3d.occlusion;
 
   /**
    * THE SEAM'S RIDGE — why the seams read at all.
@@ -278,11 +307,58 @@ export function createSailClothMaterial(
    * The floor is still wanted (canvas in shadow must not go dead black), so it
    * stays — but tinted by the cloth's OWN colour, so it reads as dim canvas
    * rather than as glow, and it carries the panel and stain variation instead
-   * of washing them out. The backlit transmission lobe is unchanged: that one
-   * genuinely is light coming through the cloth and it is already gated on
-   * both the sun being behind and the viewer looking toward it.
+   * of washing them out.
+   *
+   * ─────────────────────────────────────────────────────────────────────────
+   * THE TRANSMISSION LOBE WAS THE SAME BUG, LEFT STANDING. Its old comment
+   * said so out loud — "the backlit transmission lobe is unchanged: that one
+   * genuinely IS light coming through the cloth" — which is true about the
+   * PHENOMENON and false about the expression, because `uBacklitColor ×
+   * through × strength` is a flat near-white constant in exactly the way the
+   * floor beside it was.
+   *
+   * User, with two screenshots of the same sails from opposite sides: "when
+   * they're facing away from the sun they are very bright white and their
+   * structure isn't becoming apparent whatsoever… image 2 objectively looks
+   * much brighter than the sun-facing side."
+   *
+   * MEASURED through this whole chain (sun 43° up at the shipped timeOfDay,
+   * ACES at exposure 1.1, luminance 0..1, weave swept 0.15..0.85):
+   *              lit side    lee side
+   *   luminance  0.300-0.492  0.354-0.386
+   *   weave contrast   0.192       0.032   ← 6x less legible
+   *   untextured share     0%         80%  ← this is the whole defect
+   * Four fifths of the lee side is a constant that carries no weave, no stain,
+   * no panel tone, no seam and no fold occlusion, so the structure does not
+   * DIM as the light falls — it is swamped, which is why it vanishes rather
+   * than fading. And the lee side's floor (0.354) already sits ABOVE the lit
+   * side's floor (0.300) before any shadow is involved.
+   *
+   * IT INVERTS because EMISSIVE IS NOT SHADOWED. Put the sun-facing side in
+   * the shadow of the canvas in front of it — which, on a nine-sail three-tier
+   * rig, is most of it — and it falls to 0.037-0.086 while the lee side does
+   * not move at all: 4-10x brighter on the shaded side, exactly the user's
+   * "objectively looks much brighter".
+   *
+   * THE FIX IS TO FILTER THE LIGHT THROUGH THE CLOTH INSTEAD OF PAINTING IT
+   * ON. Transmitted light is (a) dimmer, having crossed the sheet, (b) more
+   * saturated, because the fibres filter it, and (c) HIGHER contrast in weave
+   * than the reflected side, because transmission varies steeply with local
+   * thickness — thin spots glow, threads block. All three fall out of one
+   * change: multiply by `cloth3`, which is the cloth's own colour with every
+   * texture already in it. Two tints multiplied are more saturated than
+   * either, so (b) is free, and `uBacklitColor` becomes what it should always
+   * have been — the LIGHT's colour, not the sail's.
+   *
+   * `sailBacklitWeave` is the transmission left at the weave's thickest, so
+   * the lobe's own contrast is authored rather than inherited: at 0.3 a thin
+   * spot passes ~3x what a thread does, which is what makes a backlit sail
+   * read as cloth instead of as a lamp.
    */
+  const transmitted = mix(uBacklitWeave, float(1), weave);
   material.emissiveNode = uBacklitColor
+    .mul(cloth3)
+    .mul(transmitted)
     .mul(through.mul(uBacklitStrength))
     .add(cloth3.mul(uAmbientLift));
 
@@ -300,6 +376,8 @@ export function createSailClothMaterial(
       uSeamRidge.value = p.sailSeamRidge;
       uAmbientLift.value = p.sailAmbientLift;
       uStain.value = p.sailStainStrength;
+      uBuntShade.value = p.sailBuntShade;
+      uBacklitWeave.value = p.sailBacklitWeave;
       refreshSailShapeUniforms(shape, p);
     },
   };

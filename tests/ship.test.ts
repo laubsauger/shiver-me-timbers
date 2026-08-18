@@ -16,7 +16,7 @@ import { buildHoledVariant, buildPieceGeometry, buildSailGeometry } from '../src
 import { ShipAssembly } from '../src/ship/shipAssembly';
 import { createWoodMaterial } from '../src/ship/woodMaterial';
 import { galleonParams, shipMaterialParams, shipRigParams } from '../src/params/ship';
-import type { PieceDef, SailStateId } from '../src/ship/pieceTypes';
+import type { PieceDef } from '../src/ship/pieceTypes';
 import {
   hullEnvelope,
   hullHalfWidthAt,
@@ -27,7 +27,6 @@ import {
   SAIL_GUST_DETUNE,
   braceAngle,
   sailDrive,
-  sailGeometryState,
   sailStateForTrim,
   trimDropScale,
 } from '../src/ship/sailDynamics';
@@ -52,6 +51,8 @@ import {
   sailDraftLead,
   sailDraftProfile,
   sailFlutterRate,
+  SAIL_ANCHOR_UV,
+  furlBundleScale,
   sailFurlLift,
   sailLaceStation,
   sailPanelCoord,
@@ -259,12 +260,35 @@ describe('damage/sail geometry variants (§V.14)', () => {
     holed.dispose();
   });
 
-  it('sail states produce distinct silhouettes (reefed look, ref PNG)', () => {
+  it('every §V13 state builds the SAME mesh — the silhouette is the trim', () => {
+    // WHY THIS ASSERTS THE OPPOSITE OF WHAT IT USED TO. It used to demand three
+    // distinct vertex counts, i.e. three meshes, which is exactly the thing the
+    // user felt as "a super abrupt transition… it goes to fully packed up":
+    // swapping between two silhouettes is a jump wherever the swap is put, and
+    // at the bottom of the travel it was still a 3x thickness step and a
+    // +0.61 m jump in the top of the canvas. One mesh carries the canvas AND
+    // the gathered roll, and the trim moves between them continuously.
     const sail = buildGalleonBlueprint().find((p) => p.kind === 'sail')!;
     const counts = (['furled', 'reefed', 'full'] as const).map(
       (s) => buildSailGeometry(s, sail.aabb).attributes.position.count,
     );
-    expect(new Set(counts).size).toBe(3);
+    expect(new Set(counts).size).toBe(1);
+    // and that one mesh carries all three vertex classes
+    const geo = buildSailGeometry('full', sail.aabb);
+    const shape = geo.getAttribute('sailShape');
+    const bunt = geo.getAttribute('sailBunt');
+    let cloth = 0;
+    let hard = 0;
+    let roll = 0;
+    for (let i = 0; i < shape.count; i++) {
+      if (shape.getX(i) === 1) cloth++;
+      else if (bunt.getX(i) === 1) roll++;
+      else hard++;
+    }
+    expect(cloth, 'cloth').toBeGreaterThan(0);
+    expect(hard, 'robands').toBeGreaterThan(0);
+    expect(roll, 'gathered roll').toBeGreaterThan(0);
+    geo.dispose();
   });
 });
 
@@ -495,10 +519,21 @@ describe('rig clears the mast, cloth is shader-driven (§V22)', () => {
   it('every yard rides forward of its mast, spar surfaces clear', () => {
     // WHY: a yard on the mast axis puts the sail INSIDE the spar; the cloth
     // then visibly cuts through the mast from every angle.
-    const clearance = p.mastRadius + p.yardRadius;
+    //
+    // MEASURED AGAINST EACH YARD'S OWN RADIUS (§V.66). It used to read one
+    // shared `p.yardRadius`, which was only correct while every yard on the
+    // ship was the same thickness — the very thing that made a 4.41 m
+    // topgallant yard as fat as a 13.23 m course. The yard's radius is its own
+    // aabb, so the invariant now follows the spar rather than a constant.
     for (const yard of pieces.filter((x) => x.kind === 'yard')) {
-      expect(yard.transform.position[2], yard.id).toBeGreaterThanOrEqual(clearance);
+      const yr = yard.aabb.max[1];
+      expect(yr, yard.id).toBeGreaterThan(0);
+      expect(yard.transform.position[2], yard.id).toBeGreaterThanOrEqual(p.mastRadius + yr);
     }
+    // and they are NOT all the same: a yard is sized by its own length
+    const radii = pieces.filter((x) => x.kind === 'yard').map((y) => y.aabb.max[1]);
+    expect(new Set(radii.map((r) => r.toFixed(4))).size).toBeGreaterThan(1);
+    expect(Math.max(...radii) / Math.min(...radii)).toBeGreaterThan(2);
   });
 
   it('sail cloth hangs forward of its yard axis and below it', () => {
@@ -521,7 +556,10 @@ describe('rig clears the mast, cloth is shader-driven (§V22)', () => {
     let maxZ = 0;
     const weights = new Set<number>();
     for (let i = 0; i < pos.count; i++) {
-      maxZ = Math.max(maxZ, Math.abs(pos.getZ(i)));
+      // CLOTH ONLY. The gathered roll lives in this same mesh now and is a
+      // tube ~0.9 m thick — measuring it here would assert that the FURL is
+      // flat, which is not what "the belly lives in the shader" means.
+      if (shape.getX(i) === 1) maxZ = Math.max(maxZ, Math.abs(pos.getZ(i)));
       weights.add(shape.getX(i));
     }
     expect(maxZ).toBeLessThan(0.2); // flat: no baked billow
@@ -720,8 +758,13 @@ describe('updateRig — the one call main.ts makes per frame', () => {
       updateRig(asm, 1 / 60, t);
       for (const id of asm.sailPieceIds()) expect(asm.sailState(id), `${id} @ ${t}`).toBe('full');
     }
+    // …INCLUDING AT THE BOTTOM. This used to expect 'furled' here, i.e. one
+    // last rebuild in the last 2% of the travel — which is precisely the
+    // moment the user was still complaining about ("it goes to fully packed up
+    // on the top"). The roll is in the same mesh and grows with the trim, so
+    // there is no trim at which anything is rebuilt.
     updateRig(asm, 1 / 60, 0);
-    for (const id of asm.sailPieceIds()) expect(asm.sailState(id), id).toBe('furled');
+    for (const id of asm.sailPieceIds()) expect(asm.sailState(id), id).toBe('full');
     asm.dispose();
   });
 });
@@ -764,42 +807,29 @@ describe('sail trim → §V13 sail states (docs/side-sails-fully-reefed.png)', (
     }
   });
 
-  it('swaps the mesh ONCE, at the bottom, not at mid-travel', () => {
+  it('NEVER swaps the mesh — the geometry is trim-independent', () => {
     // WHY: hysteresis is right for a label and fatal for a shape. The old path
     // keyed geometry off `sailStateForTrim`, so the cloth jumped 34% of its
     // drop at trim 0.55 going in and 41% at trim 0.62 coming out — "it does
-    // the same on the way out" is the hysteresis band, seen.
-    let state = sailGeometryState(1, 'full', p);
-    const swaps: number[] = [];
-    for (let i = 200; i >= 0; i--) {
-      const t = i / 200;
-      const next = sailGeometryState(t, state, p);
-      if (next !== state) swaps.push(t);
-      state = next;
+    // the same on the way out" is the hysteresis band, seen. Moving that swap
+    // to the bottom of the travel shrank it but could not remove it, because
+    // one fitted constant can only null ONE of the several quantities that
+    // step. So the mesh does not depend on the trim at all any more, and the
+    // cheapest way to keep that true is to assert it on the BUILDER: the same
+    // vertex buffer, byte for byte, whatever state anyone asks for.
+    const sail = buildGalleonBlueprint().find((q) => q.kind === 'sail')!;
+    const ref = buildSailGeometry('full', sail.aabb);
+    const refPos = ref.getAttribute('position').array as Float32Array;
+    for (const state of ['furled', 'reefed', 'full'] as const) {
+      const geo = buildSailGeometry(state, sail.aabb);
+      const pos = geo.getAttribute('position').array as Float32Array;
+      expect(pos.length, state).toBe(refPos.length);
+      let worst = 0;
+      for (let i = 0; i < pos.length; i++) worst = Math.max(worst, Math.abs(pos[i] - refPos[i]));
+      expect(worst, state).toBe(0);
+      geo.dispose();
     }
-    expect(swaps).toHaveLength(1);
-    expect(swaps[0]).toBeLessThan(0.05); // …and at the very bottom of travel
-    // coming back out it must not cost much more trim than it took to furl,
-    // or the control feels like it has backlash
-    const outSwaps: number[] = [];
-    for (let i = 0; i <= 200; i++) {
-      const t = i / 200;
-      const next = sailGeometryState(t, state, p);
-      if (next !== state) outSwaps.push(t);
-      state = next;
-    }
-    expect(outSwaps).toHaveLength(1);
-    // the hysteresis band is bounded BY the threshold, so shaking the canvas
-    // back out can never cost more than twice the trim it took to furl — the
-    // old label band was a flat 0.06 sitting at mid-travel, which is why the
-    // jump landed at 0.55 going in and 0.62 coming out
-    expect(outSwaps[0]).toBeLessThanOrEqual(2 * p.furlGeometryBelow + 1e-9);
-    expect(outSwaps[0]).toBeGreaterThanOrEqual(swaps[0] - 1e-9);
-    // never 'reefed': an intermediate mesh is a jump wherever you put it
-    for (let i = 0; i <= 200; i++) {
-      expect(sailGeometryState(i / 200, 'full', p)).not.toBe('reefed');
-      expect(sailGeometryState(i / 200, 'furled', p)).not.toBe('reefed');
-    }
+    ref.dispose();
   });
 
   it('the label keeps its three states and its hysteresis (HUD, audio)', () => {
@@ -833,35 +863,75 @@ describe('sail trim → §V13 sail states (docs/side-sails-fully-reefed.png)', (
  * unfurled, and then it suddenly snaps and they're in — and on the way out it
  * does the same."
  *
- * A REPEAT complaint (earlier: "sail reefing skips 30–40%"), and everything
- * upstream of this file already looked fine: the drop scale was monotone and
- * stepless, and its own unit test said so. The jump was never in the scale, it
- * was in the GEOMETRY the scale was applied to, so it could only be caught by
- * measuring the thing the player actually watches — where the foot of the
- * canvas is — through the whole real path, at every trim, in both directions.
- * That is what this does.
+ * A REPEAT complaint (earlier: "sail reefing skips 30-40%", then "we still
+ * have a basically super abrupt transition from sails being minimally
+ * unfurled to being fully packed up"), and everything upstream already looked
+ * fine every time: the drop scale was monotone and stepless and its own unit
+ * test said so. The jump was never in the scale, it was in the GEOMETRY the
+ * scale was applied to.
+ *
+ * THIS MEASURES THE SILHOUETTE, NOT ONE POINT OF IT — and that is the lesson
+ * from the round that did not finish the job. The old version tracked the
+ * LOWEST vertex of the canvas, `trimDropMin` was fitted to make that one
+ * number continuous across the mesh swap, and it succeeded: the foot matched
+ * to 3% of the drop. Meanwhile the TOP of the sail jumped 0.04-0.09 of the
+ * drop, the silhouette TRIPLED in thickness, and the foot's own scallop
+ * disagreed by 0.09 of the drop at the buntline stations — none of which the
+ * metric could see, because it sampled mid-bay where the two shapes agreed.
+ * A fit against one scalar will always find a value that makes that scalar
+ * continuous, whether or not anything else is.
  */
 describe('hauling the canvas up and down is SMOOTH end to end (§V22)', () => {
   const p = shipRigParams;
   const mp = shipMaterialParams;
 
-  /** exactly what the vertex stage builds: the hung y plus the gather lift */
-  function canvasFoot(aabb: PieceDef['aabb'], state: ReturnType<typeof sailGeometryState>, scale: number): number {
-    const geo = buildSailGeometry(state, aabb);
+  /**
+   * The sail's silhouette at a given trim, exactly as the vertex stage builds
+   * it: cloth rides `sailClothPoint`, the gathered roll's section is scaled by
+   * `furlBundleScale`, and hardware stays where it was authored.
+   *
+   * Returns the four numbers that MOVED at the old mesh swap, so a future
+   * change cannot make one of them continuous at another's expense:
+   * the top, the bottom, the fore-and-aft thickness, and the depth of the
+   * canvas at the buntline stations (where the two shapes disagreed most).
+   */
+  function silhouette(aabb: PieceDef['aabb'], scale: number): number[] {
+    const geo = buildSailGeometry('full', aabb);
     const pos = geo.getAttribute('position');
     const shape = geo.getAttribute('sailShape');
+    const bunt = geo.getAttribute('sailBunt');
     const uvs = geo.getAttribute('uv');
+    const width = aabb.max[0] - aabb.min[0];
     const s = { drive: 0, luff: 0, skew: 0, dropScale: scale, flutterPhase: 0, ...FLAT_SHEETS };
+    const roll = furlBundleScale(scale);
+    const bays = Math.max(1, Math.round(mp.sailFurlBays));
     let lo = 0;
+    let hi = 0;
+    let zLo = 0;
+    let zHi = 0;
+    let station = 0; // lowest cloth within a tenth of a bay of a buntline
     for (let i = 0; i < pos.count; i++) {
-      const w = shape.getX(i);
-      const y =
-        pos.getY(i) * (1 + (scale - 1) * w) +
-        sailFurlLift(uvs.getX(i), uvs.getY(i), shape.getZ(i), s, mp) * w;
+      let y = pos.getY(i);
+      let z = pos.getZ(i);
+      if (shape.getX(i) === 1) {
+        const c = sailClothPoint(uvs.getX(i), uvs.getY(i), shape.getY(i), shape.getZ(i), s, mp);
+        y = c[1];
+        z = c[2];
+        const u = uvs.getX(i);
+        const near = Math.abs(u * bays - Math.round(u * bays));
+        if (near < 0.1 && y < station) station = y;
+      } else if (bunt.getX(i) === 1) {
+        y *= roll;
+        z *= roll;
+      }
       if (y < lo) lo = y;
+      if (y > hi) hi = y;
+      if (z < zLo) zLo = z;
+      if (z > zHi) zHi = z;
     }
     geo.dispose();
-    return lo;
+    void width;
+    return [hi, lo, zHi - zLo, station];
   }
 
   const sails = buildGalleonBlueprint().filter((s) => s.id.startsWith('sail-'));
@@ -869,42 +939,144 @@ describe('hauling the canvas up and down is SMOOTH end to end (§V22)', () => {
   it.each(['down', 'up'] as const)('shows no jump hauling %s', (dir) => {
     for (const sail of sails) {
       const drop = -sail.aabb.min[1];
-      let state: SailStateId = dir === 'down' ? 'full' : 'furled';
-      let prev: number | null = null;
+      let prev: number[] | null = null;
       let worst = 0;
       let worstAt = 0;
+      let worstWhich = 0;
       for (let i = 0; i <= 200; i++) {
         const t = dir === 'down' ? 1 - i / 200 : i / 200;
-        state = sailGeometryState(t, state, p);
-        const y = canvasFoot(sail.aabb, state, trimDropScale(t, p));
-        if (prev !== null && Math.abs(y - prev) / drop > worst) {
-          worst = Math.abs(y - prev) / drop;
-          worstAt = t;
+        const now = silhouette(sail.aabb, trimDropScale(t, p));
+        if (prev !== null) {
+          for (let k = 0; k < now.length; k++) {
+            const step = Math.abs(now[k] - prev[k]) / drop;
+            if (step > worst) {
+              worst = step;
+              worstAt = t;
+              worstWhich = k;
+            }
+          }
         }
-        prev = y;
+        prev = now;
       }
-      // MEASURED BEFORE THE FIX: 0.34 hauling down (at trim 0.55) and 0.41
+      // MEASURED BEFORE ANY OF THIS: 0.34 hauling down (at trim 0.55) and 0.41
       // hauling up (at trim 0.62 — a different place, which is the hysteresis
-      // band showing through). Half a percent of trim may not move the foot of
-      // the sail by a twentieth of its own drop.
-      expect(worst, `${sail.id} ${dir} @ trim ${worstAt.toFixed(3)}`).toBeLessThan(0.05);
+      // band showing through). AFTER the swap moved to the bottom: 0.044 on
+      // the foot but 0.081 on the TOP and 0.216 on the thickness, which is
+      // what this now catches. Half a percent of trim may not move ANY part of
+      // the sail's outline by a twentieth of its own drop.
+      const names = ['top', 'foot', 'thickness', 'station'];
+      expect(
+        worst,
+        `${sail.id} ${dir} ${names[worstWhich]} @ trim ${worstAt.toFixed(3)}`,
+      ).toBeLessThan(0.05);
+    }
+  });
+
+  it('the rope anchors ride the same ramp — 24 of 68 ropes end on this cloth', () => {
+    /**
+     * §V.71 / §V.45. Every sheet, tack and buntline resolves its endpoint
+     * through `sailClothPoint` at a fixed (u, v), so whatever the furl does to
+     * the surface it does to 24 of the ship's 68 ropes. A MESH SWAP moved that
+     * surface discontinuously and the ropes had to teleport with it; a
+     * continuous roll cannot, and this is the assertion that says so rather
+     * than assuming it.
+     *
+     * The bound is deliberately far tighter than the silhouette's: an anchor
+     * is a single point on a surface that is now smooth in the trim, so its
+     * step should be about one 200th of its own travel, not a twentieth of the
+     * sail's drop.
+     */
+    for (const sail of sails) {
+      const width = sail.aabb.max[0] - sail.aabb.min[0];
+      const drop = -sail.aabb.min[1];
+      for (const [name, [u, v]] of Object.entries(SAIL_ANCHOR_UV)) {
+        let prev: number[] | null = null;
+        let worst = 0;
+        let worstAt = 0;
+        let travel = 0;
+        for (let i = 0; i <= 200; i++) {
+          const t = 1 - i / 200;
+          const st = {
+            drive: 0.6, luff: 0, skew: 0,
+            dropScale: trimDropScale(t, p), flutterPhase: 0, ...FLAT_SHEETS,
+          };
+          const q = sailClothPoint(u, v, width, drop, st, mp);
+          if (prev !== null) {
+            const d = Math.hypot(q[0] - prev[0], q[1] - prev[1], q[2] - prev[2]);
+            travel += d;
+            if (d > worst) {
+              worst = d;
+              worstAt = t;
+            }
+          }
+          prev = q;
+        }
+        expect(
+          worst / drop,
+          `${sail.id} ${name} @ trim ${worstAt.toFixed(3)}`,
+        ).toBeLessThan(0.01);
+        // and it genuinely MOVES — an anchor that never left its station would
+        // pass the step bound trivially while hanging off the cloth
+        expect(travel / drop, `${sail.id} ${name}`).toBeGreaterThan(0.1);
+      }
     }
   });
 
   it('has no dead zone: every part of the travel does something', () => {
     // WHY: the other half of the complaint. Trim 0.15..0.54 used to be 39% of
     // the player's control in which the canvas did not move at all, which is
-    // where "skips 30–40%" came from. Below `furlGeometryBelow` she is furled
-    // and is SUPPOSED to be inert, so the sweep starts above it.
+    // where "skips 30-40%" came from. The travel now runs to the very bottom:
+    // there is no furled state in which the sail is inert, so the sweep starts
+    // at 0 rather than above a geometry threshold.
+    //
+    // MEASURED OVER THE WHOLE OUTLINE, for the same reason the jump test is:
+    // near the bottom of the travel the LOWEST point of the sail stops being
+    // the canvas and becomes the roll, which grows more slowly per unit trim
+    // than the canvas shrinks (0.0048 of the drop per 2% of trim against
+    // 0.0165 on the cloth itself). Reading one number would call that a dead
+    // zone while the sail is visibly still gathering.
     const sail = sails.find((s) => s.id === 'sail-main-lower')!;
     const drop = -sail.aabb.min[1];
-    const from = p.furlGeometryBelow + p.reefHysteresis;
-    let prev: number | null = null;
-    for (let t = from; t <= 1.0001; t += 0.02) {
-      const y = canvasFoot(sail.aabb, sailGeometryState(t, 'full', p), trimDropScale(t, p));
-      if (prev !== null) expect(Math.abs(y - prev) / drop, `trim ${t.toFixed(2)}`).toBeGreaterThan(0.005);
-      prev = y;
+    let prev: number[] | null = null;
+    for (let t = 0; t <= 1.0001; t += 0.02) {
+      const now = silhouette(sail.aabb, trimDropScale(t, p));
+      if (prev !== null) {
+        let moved = 0;
+        for (let k = 0; k < now.length; k++) moved = Math.max(moved, Math.abs(now[k] - prev[k]) / drop);
+        expect(moved, `trim ${t.toFixed(2)}`).toBeGreaterThan(0.005);
+      }
+      prev = now;
     }
+  });
+
+  it('the gathered roll grows as the canvas shrinks, and only then', () => {
+    // WHY: this is the exchange that replaced the swap. The roll must be
+    // INVISIBLE at full sail (or it is a sausage lying on a drawing sail) and
+    // must reach its authored size when she is in — and in between it may only
+    // ever grow, because a roll that thins anywhere is a second discontinuity
+    // wearing a smooth face.
+    expect(furlBundleScale(1)).toBe(0);
+    expect(furlBundleScale(trimDropScale(0, p))).toBeGreaterThan(0.9);
+    let prev = -1;
+    for (let t = 1; t >= -1e-9; t -= 0.01) {
+      const v = furlBundleScale(trimDropScale(t, p));
+      expect(v).toBeGreaterThanOrEqual(prev);
+      prev = v;
+    }
+    // and at full sail it is not merely small, it is degenerate: every bunt
+    // vertex collapses onto the head line, so it rasterises nothing
+    const sail = sails.find((s) => s.id === 'sail-main-lower')!;
+    const geo = buildSailGeometry('full', sail.aabb);
+    const pos = geo.getAttribute('position');
+    const bunt = geo.getAttribute('sailBunt');
+    let worst = 0;
+    for (let i = 0; i < pos.count; i++) {
+      if (bunt.getX(i) !== 1) continue;
+      worst = Math.max(worst, Math.abs(pos.getY(i)) + Math.abs(pos.getZ(i)));
+    }
+    expect(worst).toBeGreaterThan(0); // it IS a real bundle when built…
+    expect(worst * furlBundleScale(1)).toBe(0); // …and exactly nothing at full sail
+    geo.dispose();
   });
 
   it('gathers the foot into bays as it comes in, and lets it hang when set', () => {
@@ -920,20 +1092,50 @@ describe('hauling the canvas up and down is SMOOTH end to end (§V22)', () => {
     // a set sail is NOT gathered — this must not disturb the belly (§B.21)
     for (let u = 0; u <= 1; u += 0.1) expect(at(1, u)).toBeCloseTo(0, 9);
 
-    // hauled almost in, the foot is scalloped: stations up, mid-bays hanging
+    // Hauled almost in, the foot is scalloped: stations up, mid-bays hanging.
+    //
+    // AGAINST THE HANGING DROP, NOT THE BUILT ONE (§V.66 — assert the RATIO).
+    // The gather is a fraction of the canvas that is STILL DOWN, which is what
+    // stops it lifting the foot above its own head once the canvas is allowed
+    // to shorten properly; measuring it against the drop the sail was CUT with
+    // is measuring it against a length that is no longer there, and the old
+    // absolute bound of 0.05·builtDrop only held because `trimDropMin` pinned
+    // the hanging length at 0.23 of it.
     const bays = mp.sailFurlBays;
+    const hanging = drop * trimDropScale(0.05, p);
     for (let b = 0; b < bays; b++) {
       const station = b / bays;
       const midBay = (b + 0.5) / bays;
-      expect(at(0.05, station)).toBeGreaterThan(at(0.05, midBay) + drop * 0.05);
+      expect(at(0.05, station) - at(0.05, midBay)).toBeGreaterThan(hanging * 0.1);
     }
-    // and the gather grows monotonically as she comes in — no step of its own
-    let prev = at(1, 0);
-    for (let t = 0.98; t >= 0; t -= 0.02) {
-      const v = at(t, 0);
-      expect(v).toBeGreaterThan(prev - 1e-9);
+    /**
+     * THE GATHER GROWS MONOTONICALLY AS SHE COMES IN — AS A FRACTION OF THE
+     * CANVAS IT IS GATHERING, which is the only form of that statement that
+     * survives the swag being scaled by the hanging drop (§V.66).
+     *
+     * In METRES it is a parabola: `swag · furl · set`, zero at full sail and
+     * zero again when there is no canvas left down, peaking mid-travel. That
+     * is correct rather than a regression — a sail with nothing hanging has
+     * nothing to swag, and by then the gathered ROLL carries the lumpiness.
+     * Asserting the metres monotone would forbid the sail ever finishing its
+     * furl. What must never reverse is how hard the buntlines are hauling on
+     * what is left, and that is the ratio.
+     */
+    const ratio = (trim: number): number => {
+      const hang = drop * trimDropScale(trim, p);
+      return at(trim, 0) / hang;
+    };
+    let prev = ratio(1);
+    let worstStep = 0;
+    for (let t = 0.99; t >= 0; t -= 0.01) {
+      const v = ratio(t);
+      expect(v, `trim ${t.toFixed(2)}`).toBeGreaterThan(prev - 1e-9);
+      worstStep = Math.max(worstStep, Math.abs(at(t, 0) - at(t + 0.01, 0)));
       prev = v;
     }
+    // …and in metres it is still STEPLESS, which is the property the user
+    // feels: no 1% of the travel may move the gathered foot by 2% of the drop
+    expect(worstStep).toBeLessThan(drop * 0.02);
   });
 });
 
