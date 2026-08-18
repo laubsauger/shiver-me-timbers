@@ -326,7 +326,7 @@ export const skyParams: SkyParams = registerParams(
     // grade does move if this number moves. Keep nudges under ~0.1 h.
     // Alternatives: 17.6 (5.79°, warm 0.987) for a more saturated grade at
     // half the shadow visibility. Do not go past ~17.9 — sunset is 18.0.
-    timeOfDay: 17.3,
+    timeOfDay: 15.0,
     latitude: 15,
     // Sampled from docs/final-full-result.png: horizon band (219,236,240),
     // sky body at ~20° (105,165,201), extrapolated zenith (47,127,196).
