@@ -58,10 +58,22 @@ export class FreeCam {
     this.vel[0] = this.vel[1] = this.vel[2] = 0;
   }
 
-  /** mouse-look: drag right = look right, drag down = look down */
+  /**
+   * mouse-look: drag right = look right, drag down = look down.
+   *
+   * YAW SUBTRACTS dx, and the sign is forced by the rest of the file rather
+   * than being a taste call. With `sphericalOffset`'s yaw-0-is-+z
+   * convention, forward is (sin yaw, ·, cos yaw) — so INCREASING yaw swings
+   * forward from +z toward +x. But right is cross(forward, up), which at
+   * yaw 0 is −x. Increasing yaw therefore turns LEFT, and `yaw += dx` made
+   * drag-right look left while D-strafe (which reads the same cross
+   * product, correctly) still moved right. The two halves of the same
+   * camera disagreed, which is why it read as "borged" rather than simply
+   * inverted. Helm mode already had this right (`helmYaw - dx`).
+   */
   look(dx: number, dy: number): void {
     const p = cameraParams;
-    this.yaw += dx * p.freeLookSpeed;
+    this.yaw -= dx * p.freeLookSpeed;
     this.pitch = clamp(this.pitch - dy * p.freeLookSpeed, -p.freePitchLimit, p.freePitchLimit);
   }
 

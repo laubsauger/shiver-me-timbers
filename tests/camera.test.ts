@@ -868,3 +868,51 @@ describe('helm POV rides the deck', () => {
     }
   });
 });
+
+describe('free cam: look and strafe must agree about which way is right', () => {
+  // THE BUG (user: "the free flying camera is weirdly borged, like the left
+  // and right is inverted and whatnot"): FreeCam.look did `yaw += dx` while
+  // its own strafe read right = cross(forward, up). Under sphericalOffset's
+  // yaw-0-is-+z convention those two disagree in SIGN, so dragging right
+  // turned the view left while pressing D still slid the camera right. Not
+  // one inverted axis — two halves of the same camera pulling opposite ways,
+  // which is why it read as broken rather than as backwards.
+  //
+  // Asserted as a RELATIONSHIP, not a sign: whichever way the project later
+  // decides drag-right should go, look and strafe must go the same way, and
+  // that is the property the user actually experienced the loss of.
+  const rightOf = (yaw: number): [number, number] => [-Math.cos(yaw), Math.sin(yaw)];
+
+  it('dragging right turns the view toward the same side D strafes toward', () => {
+    const cam = new FreeCam();
+    cam.look(10, 0); // drag right
+    const fwd = sphericalOffset(cam.yaw, 0, 1);
+    const [rx, rz] = rightOf(0); // the right axis we started from
+    // the view must have rotated TOWARD the starting right axis
+    expect(fwd[0] * rx + fwd[2] * rz).toBeGreaterThan(0);
+  });
+
+  it('dragging left turns the view away from that side', () => {
+    const cam = new FreeCam();
+    cam.look(-10, 0);
+    const fwd = sphericalOffset(cam.yaw, 0, 1);
+    const [rx, rz] = rightOf(0);
+    expect(fwd[0] * rx + fwd[2] * rz).toBeLessThan(0);
+  });
+
+  it('drag down looks down', () => {
+    const cam = new FreeCam();
+    cam.look(0, 10);
+    expect(cam.pitch).toBeLessThan(0);
+  });
+
+  it('the strafe axis really is perpendicular to forward and level', () => {
+    // guards the cross-product identity the test above leans on, at a yaw
+    // where a sign slip would otherwise cancel out
+    const yaw = 0.7;
+    const fwd = sphericalOffset(yaw, 0, 1);
+    const [rx, rz] = rightOf(yaw);
+    expect(fwd[0] * rx + fwd[2] * rz).toBeCloseTo(0, 12);
+    expect(Math.hypot(rx, rz)).toBeCloseTo(1, 12);
+  });
+});
