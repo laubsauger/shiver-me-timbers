@@ -308,6 +308,106 @@ export function eigenInjectPerStep(
   return (Math.max(0, strengthPerSecond) * dt) / sigma;
 }
 
+/* -------------------------------------------------------------------------
+ * THE JACOBIAN DECIDES *WHERE*; THE WIND DECIDES *HOW MUCH*
+ * (docs/research-whitecap-coverage.md §4.1 and §7 — user: "you can have a
+ * massive swell on a non-windy day".)
+ *
+ * Every gate above is σ-relative (§V36), which is the right idiom and is why
+ * they hold across weather presets — but σ-relative means SCALE-FREE. Raise a
+ * tall swell with the local wind at nothing and its folds still clear their
+ * own band's σ, so foam still injects. The literature says that must not
+ * happen: whitecapping is wind-driven breaking, and swell is BY DEFINITION
+ * wave energy that has left the wind that raised it. Callaghan et al. 2008
+ * measured coverage about one third lower in swell-dominated seas than in
+ * mixed ones; Brumer et al. 2017 found that expressing coverage in wavefield
+ * statistics decoupled from wind is a WORSE predictor, not a better one.
+ *
+ * The fix the research names is NOT to change the gate. A fold criterion is
+ * the only thing that can say which crest is breaking, and no wind-speed
+ * formula can. What the wind owns is the AMOUNT.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Wind speed (m/s) below which published fits give literally zero whitecap
+ * coverage. THE load-bearing number of the whole curve, and the reason it can
+ * be trusted is a coincidence worth keeping in the file: Beaufort Force 3 —
+ * the first mention of whitecaps anywhere in the scale — begins at 7 kt =
+ * 3.60 m/s, and Callaghan's independent 2008 least-squares fit to video
+ * imagery landed at 3.70. A 19th-century descriptive scale and a modern
+ * regression agree to 0.1 m/s.
+ */
+export const WHITECAP_ONSET_MS = 3.7;
+
+/**
+ * Callaghan et al. (2008) whitecap coverage as an AREA FRACTION — the
+ * threshold-cubic quoted in docs/research-whitecap-coverage.md §1.1 from
+ * Albert et al. 2016 Eq. (2) (open access), converted from percent:
+ *
+ *   W = 0                           U10 < 3.70
+ *   W = 3.18e-5 · (U10 − 3.70)³     3.70 ≤ U10 ≤ 11.25
+ *   W = 4.82e-6 · (U10 + 1.98)³     9.25 ≤ U10 ≤ 23.09
+ *
+ * The two branches OVERLAP on 9.25–11.25 in the paper's own domain statement
+ * and disagree by 26% at 9.25, so crossfading across that window is what the
+ * published structure invites rather than something invented here.
+ *
+ * CLAMPED AT 0.10, and the clamp is load-bearing rather than defensive:
+ * Brumer et al. 2017 measured out to sustained 25 m/s and state that coverage
+ * levels off, "not exceeding 10% when averaged over 20 min", while our
+ * `windSpeed` slider goes to 30 — past the fit's own 23.09 validity edge.
+ *
+ * NEVER READ AS AN ABSOLUTE TARGET — see `whitecapWindScale`. Observed
+ * coverage scatters by one to two orders of magnitude at a fixed wind speed
+ * (research §5, three independent sources in those words), so the SHAPE of
+ * this curve is trustworthy and its LEVEL is not.
+ */
+export function whitecapCoverage(windSpeed: number): number {
+  const u = Number.isFinite(windSpeed) ? windSpeed : 0;
+  if (!(u > WHITECAP_ONSET_MS)) return 0;
+  const below = u - WHITECAP_ONSET_MS;
+  const above = u + 1.98;
+  const low = 3.18e-5 * below * below * below;
+  const high = 4.82e-6 * above * above * above;
+  // smoothstep across the published overlap window, so the 26% step at its
+  // lower edge never shows up as a discontinuity in foam as the wind crosses
+  const x = Math.min(1, Math.max(0, (u - 9.25) / 2));
+  return Math.min(0.1, low + (high - low) * x * x * (3 - 2 * x));
+}
+
+/**
+ * Multiplier on the foam sim's INJECTION RATE for the live wind, as a ratio to
+ * the wind the coverage was calibrated at.
+ *
+ * A RATIO, never an absolute (§V36, the same argument as every σ-multiple
+ * above): at the reference wind this returns exactly 1, so the calibrated sea
+ * is a bit-identical no-op and every other wind moves relative to it. Feeding
+ * `whitecapCoverage` in directly would instead import the literature's LEVEL,
+ * which §5 of the research says is the one thing it cannot supply.
+ *
+ * ONE-SIDED ON PURPOSE — clamped at 1, so the wind can only take foam AWAY
+ * below the reference, never add it. Two reasons, both worth stating:
+ *   - the defect is foam on a windless swell, which lies entirely below the
+ *     reference. Nothing above it was reported broken.
+ *   - the UNCLAMPED ratio at storm's 18 m/s is 3.6×, and that is a coverage
+ *     CALIBRATION, not a gating fix. Storm cannot be calibrated against while
+ *     its Hs reads 18.6 m against the 8–10 m the preset was cut to. Whoever
+ *     fixes storm's height can delete the `Math.min(1, …)` in one edit and
+ *     get the physical curve on both sides.
+ *
+ * Measured against the shipped 11 m/s reference:
+ *   4 m/s → 8.1e-5 (calm: off, which is the published law AND the user's own
+ *   "if it's rather calm it's fine that there's no foam")   6 m/s → 0.036
+ *   8 m/s → 0.238    11 m/s → exactly 1    ≥ 11.25 m/s → 1 by the clamp.
+ */
+export function whitecapWindScale(windSpeed: number, referenceSpeed: number): number {
+  const reference = whitecapCoverage(referenceSpeed);
+  // a reference at or below onset has no ratio to give — leave foam alone
+  // rather than divide by zero and scrub the sea (§V28)
+  if (!(reference > 0)) return 1;
+  return Math.min(1, whitecapCoverage(windSpeed) / reference);
+}
+
 /** accumulate with existing foam, clamped ≤ 1 (§V6: mask feeds a mix factor) */
 export function accumulateFoam(previous: number, injected: number): number {
   return Math.min(1, previous + injected);

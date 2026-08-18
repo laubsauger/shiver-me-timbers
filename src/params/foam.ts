@@ -18,6 +18,22 @@ export interface FoamParams {
    */
   injectStrength: number;
   /**
+   * The wind speed (m/s) `injectStrength` was calibrated at — the DENOMINATOR
+   * of `foamMath.whitecapWindScale`, not a threshold.
+   *
+   * Whitecapping is wind-driven breaking, so a tall swell in still air must
+   * carry no foam (docs/research-whitecap-coverage.md §4.1; user: "you can
+   * have a massive swell on a non-windy day"). Every gate in src/foam is
+   * σ-relative and therefore SCALE-FREE, so before this it did.
+   *
+   * MUST TRACK `oceanParams.windSpeed`'s default. The scale is a ratio to the
+   * coverage at THIS wind, so setting it to the wind the foam was actually
+   * tuned under is what makes the shipped sea a bit-identical no-op; moving it
+   * off that silently rescales every preset's foam. Raise it and the whole sea
+   * foams less; lower it and the clamp at 1 swallows more of the range.
+   */
+  whitecapWindRef: number;
+  /**
    * seconds for undisturbed foam to fade to half its value — converted to a
    * per-frame decay factor at the fixed sim tick (§V2)
    *
@@ -381,6 +397,10 @@ export const foamParams: FoamParams = registerParams(
   'foam',
   {
     injectStrength: 4.0,
+    // = oceanParams.windSpeed's default, deliberately (see the field): the
+    // shipped swell sea is the one this was tuned on, so it must come out at
+    // scale exactly 1 and change by nothing.
+    whitecapWindRef: 11,
     decayHalfLife: 0.9,
     // the second clock + its mix — see the fields for the measured sweeps
     breakingHalfLife: 0.15,
@@ -452,6 +472,9 @@ export const foamParams: FoamParams = registerParams(
 function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
   return {
     injectStrength: { min: 0, max: 20, step: 0.1 },
+    // same range as oceanParams.windSpeed — it is a wind speed, and pinning it
+    // below the 3.7 m/s onset would make the ratio undefined (guarded anyway)
+    whitecapWindRef: { min: 0.5, max: 30, step: 0.1 },
     decayHalfLife: { min: 0.05, max: 10, step: 0.05 },
     breakingHalfLife: { min: 0.02, max: 2, step: 0.01 },
     residueWeight: { min: 0, max: 1, step: 0.01 },

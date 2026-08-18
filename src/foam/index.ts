@@ -51,6 +51,7 @@ import {
   foamTexelMetres,
   jacobianSigma,
   meanFoamAgeTicks,
+  whitecapWindScale,
   NEVER_INJECT_BIAS,
 } from './foamMath';
 import {
@@ -343,6 +344,15 @@ export function createFoamSim(
         sea.heightRms,
       );
       const fineOff = foamParams.injectFineCascade < 1;
+      // THE JACOBIAN DECIDES WHERE, THE WIND DECIDES HOW MUCH (foamMath,
+      // docs/research-whitecap-coverage.md §4.1/§7). The gates below are all
+      // σ-relative and therefore scale-free, so a tall swell in still air
+      // clears its own band's σ and foams — which the literature says must not
+      // happen. This scales the AMOUNT only; not one gate moves, so foam still
+      // lands on exactly the crests that are actually folding.
+      // ~8 scalar ops, once per frame, CPU-side: no texture, no sampler, no
+      // pass, no per-fragment work.
+      const windScale = whitecapWindScale(oceanParams.windSpeed, foamParams.whitecapWindRef);
       for (const lane of lanes) {
         const steep = sea.cascades[lane.index].jacobianRms;
         const bandSigma = jacobianSigma(steep, lambda);
@@ -368,7 +378,8 @@ export function createFoamSim(
         lane.u.uInjectPerFrame.value = off
           ? 0
           : eigenInjectPerStep(
-              foamParams.injectStrength, SIM_DT, steep, lambda, bandSigma, seaSigma, sigmaScale,
+              foamParams.injectStrength * windScale,
+              SIM_DT, steep, lambda, bandSigma, seaSigma, sigmaScale,
             );
         lane.u.uDecay.value = decay;
         lane.u.uDecayBreaking.value = breakingDecay;

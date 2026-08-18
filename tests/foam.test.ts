@@ -46,6 +46,9 @@ import {
   dissolveKnee,
   injectAmount,
   jacobianSigma,
+  whitecapCoverage,
+  whitecapWindScale,
+  WHITECAP_ONSET_MS,
   wrapIndex,
 } from '../src/foam/foamMath';
 import { foamParams } from '../src/params/foam';
@@ -1976,5 +1979,115 @@ describe('§B the crest frame: caps shaped like the water, not like the noise', 
     // and it is still a redistribution, not a deletion (§V.64)
     expect(aligned.coverage).toBeGreaterThan(plain.coverage * 0.6);
     expect(aligned.coverage).toBeLessThan(plain.coverage * 1.6);
+  });
+});
+
+/**
+ * Wind–wave coupling for whitecaps (docs/research-whitecap-coverage.md).
+ *
+ * The invariant these encode is a PHYSICAL one, not a curve fit: whitecapping
+ * is wind-driven wave BREAKING, so foam is the local wind's signature on the
+ * sea. Swell is by definition energy that has outrun the wind that raised it,
+ * so a big old swell on a still day must carry none — and every gate in
+ * src/foam is σ-relative and therefore scale-free, which is exactly the
+ * mechanism by which it used to carry some.
+ */
+describe('whitecaps follow the WIND, not just the fold (§V36, research §4.1)', () => {
+  it('a massive swell on a windless day carries no whitecaps', () => {
+    // THE user-reported case, and the one the research answers cleanly. The
+    // sea can be as tall and as folded as it likes: with no wind forcing the
+    // crests, nothing is breaking, so nothing may be injected.
+    expect(whitecapWindScale(0, 11)).toBe(0);
+    expect(whitecapWindScale(2, 11)).toBe(0);
+    // and the cutoff is the PUBLISHED onset, not a taste: Beaufort Force 3 —
+    // the first mention of whitecaps in the entire scale — starts at 3.60 m/s
+    // and Callaghan's independent 2008 fit landed at 3.70.
+    expect(whitecapWindScale(WHITECAP_ONSET_MS, 11)).toBe(0);
+    expect(whitecapWindScale(WHITECAP_ONSET_MS + 0.5, 11)).toBeGreaterThan(0);
+  });
+
+  it('the sea this project was calibrated on does not move at all', () => {
+    // §V36's whole point, and the reason this is a RATIO and not the
+    // literature's absolute coverage: at the calibration wind the multiplier
+    // must be EXACTLY 1, so every measured number in src/foam and every
+    // shipped preset's look survives this change bit-identically. If this
+    // fails, the change stopped being a gate and became a recalibration.
+    expect(whitecapWindScale(foamParams.whitecapWindRef, foamParams.whitecapWindRef)).toBe(1);
+    // and the reference IS the sea we ship, so the default ocean is untouched
+    expect(foamParams.whitecapWindRef).toBe(oceanParams.windSpeed);
+  });
+
+  it('wind can only take foam away, never add it — storm keeps its calibration', () => {
+    // Deliberately one-sided. The defect is foam appearing where there should
+    // be none, which lies entirely BELOW the reference; raising coverage above
+    // it would be a coverage calibration, and storm cannot be calibrated
+    // against while its Hs reads 18.6 m against the 8-10 m it was cut to.
+    // The unclamped physical ratio at storm is ~3.6x — this pins that it is
+    // NOT being applied, so whoever fixes storm's height inherits a clean
+    // decision rather than a silently retuned sea.
+    expect(whitecapCoverage(18) / whitecapCoverage(11)).toBeGreaterThan(3);
+    expect(whitecapWindScale(18, 11)).toBe(1);
+    expect(whitecapWindScale(30, 11)).toBe(1);
+  });
+
+  it('a dying breeze thins the foam out smoothly, in the published order', () => {
+    // The look this buys: as the wind drops the sea keeps its shape (the
+    // Jacobian gate is untouched, so foam stays on the crests that fold) and
+    // simply stops being white. Monotone and continuous, or the transition
+    // reads as foam switching off rather than dying down.
+    const winds = [4, 5, 6, 7, 8, 9, 10, 11];
+    const scales = winds.map((u) => whitecapWindScale(u, 11));
+    for (let i = 1; i < scales.length; i++) {
+      expect(scales[i]).toBeGreaterThan(scales[i - 1]);
+    }
+    // calm's own 4 m/s is barely above onset: effectively no whitecaps, which
+    // is the published law AND the user's "if it's rather calm it's fine that
+    // there's no foam" — not an artistic liberty.
+    expect(whitecapWindScale(4, 11)).toBeLessThan(0.001);
+    // no step anywhere, including across the 9.25-11.25 window where the two
+    // published branches overlap and disagree by 26% at the seam
+    for (let u = 3.7; u < 24; u += 0.05) {
+      const jump = Math.abs(whitecapWindScale(u + 0.05, 11) - whitecapWindScale(u, 11));
+      expect(jump).toBeLessThan(0.02);
+    }
+  });
+
+  it('never asks for more foam than the sea can physically carry', () => {
+    // Brumer et al. 2017 measured to sustained 25 m/s and state coverage
+    // levels off "not exceeding 10%". Our windSpeed slider reaches 30, past
+    // the fit's own 23.09 m/s validity edge, so an unclamped cubic would run
+    // away off the end of the panel rather than off the end of the data.
+    expect(whitecapCoverage(30)).toBeLessThanOrEqual(0.1);
+    expect(whitecapCoverage(1000)).toBeLessThanOrEqual(0.1);
+    // and it never returns garbage for garbage (§V28)
+    expect(whitecapCoverage(Number.NaN)).toBe(0);
+    expect(whitecapCoverage(-5)).toBe(0);
+    // a reference at or below onset has no ratio to give: leave foam alone
+    // rather than divide by zero and scrub the sea bare
+    expect(whitecapWindScale(11, 0)).toBe(1);
+    expect(whitecapWindScale(11, Number.NaN)).toBe(1);
+  });
+
+  it('the gate still decides WHERE — only the amount is wind-scaled', () => {
+    // The architectural split the research names, pinned so nobody "fixes"
+    // this by moving the threshold instead. A wind-scaled THRESHOLD would
+    // move foam onto different crests as the weather changed; a wind-scaled
+    // AMOUNT leaves it on exactly the folding ones and only changes how white
+    // they get. eigenFoamGate takes no wind and must keep taking none.
+    const sea = seaFor('swell');
+    const bandSigma = jacobianSigma(sea.steep[0], sea.lambda);
+    const seaSigma = jacobianSigma(sea.steepnessRms, sea.lambda);
+    const gate = eigenFoamGate(
+      oceanParams.jacobianFoamBias, sea.steep[0], sea.lambda, bandSigma, seaSigma, 1,
+    );
+    // same fold depth, two winds → same gate, proportionally less foam
+    const at = (wind: number) =>
+      eigenInjectPerStep(
+        foamParams.injectStrength * whitecapWindScale(wind, 11),
+        DT, sea.steep[0], sea.lambda, bandSigma, seaSigma, 1,
+      );
+    expect(Number.isFinite(gate)).toBe(true);
+    expect(at(8) / at(11)).toBeCloseTo(whitecapWindScale(8, 11), 9);
+    expect(at(2)).toBe(0); // below onset: the gate is unchanged, nothing injects
   });
 });
