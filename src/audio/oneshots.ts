@@ -48,12 +48,19 @@ function envGain(ctx: BaseAudioContext, t0: number, peak: number, attack: number
 }
 
 /**
- * cannonBoom (~1.2s):
+ * cannonBoom (~1.2s) — the FALLBACK now that generated cannon samples exist
+ * (events.ts prefers the sample pool). Still reached whenever those files are
+ * missing or undecodable, so it must keep working.
+ *
  *   [noise burst] → lowpass (6kHz→120Hz exp sweep) → env ─┐
  *   [sub sine 48Hz→½] ────────────────────────────→ env ─┴→ out
+ *
+ * @param delay seconds to wait before firing — a broadside staggers its guns
+ *              (see sampleShot.nextStagger), and the fallback has to stagger
+ *              too or it collapses back into one loud gun exactly as before.
  */
-export function cannonBoom(ctx: BaseAudioContext, out: AudioNode): void {
-  const t0 = ctx.currentTime;
+export function cannonBoom(ctx: BaseAudioContext, out: AudioNode, delay = 0): void {
+  const t0 = ctx.currentTime + Math.max(0, delay);
   const end = t0 + p.cannonDuration;
 
   const noise = ctx.createBufferSource();

@@ -30,7 +30,8 @@
  */
 import { Group, Quaternion, Vector3, type Object3D } from 'three/webgpu';
 import type { SimState, Vec3 } from '../state/simState';
-import type { CombatEvent } from '../audio/events';
+import { planWhooshes, type CombatEvent } from '../audio/events';
+import { audioParams } from '../params/audio';
 import { combatFxParams, combatParams, type CombatFxParams } from '../params/combat';
 import { createCombat, type Combat, type CombatFrame, type CombatShipConfig, type FireOrder } from './combatSystem';
 import { createCombatFx, type CombatFx } from './combatFx';
@@ -128,6 +129,8 @@ export function createCombatRuntime(config: CombatRuntimeConfig): CombatRuntime 
   const wrecks: Wreck[] = [];
   /** flood at the end of the previous tick, per ship — for edge triggers */
   const lastFlood = new Map<number, number>();
+  /** balls that have already sounded a pass-by; planWhooshes prunes it */
+  const whooshed = new Set<number>();
   const tmpPos = new Vector3();
   const tmpQuat = new Quaternion();
   const tmpScale = new Vector3();
@@ -216,6 +219,21 @@ export function createCombatRuntime(config: CombatRuntimeConfig): CombatRuntime 
     }
     for (const p of frame.projectiles) {
       if (p.type === 'splash') audio.event({ kind: 'ballSplash', world: p.position });
+    }
+    // A shot passing close aboard — the one part of a ball's life that was
+    // silent, muzzle to impact. planWhooshes owns the gating (once per ball,
+    // never your own guns) and prunes its own set, so this stays a read.
+    const listener = state.ships[0];
+    if (listener !== undefined) {
+      for (const ball of planWhooshes(
+        state.projectiles,
+        listener.position,
+        whooshed,
+        audioParams.ballWhooshRadius,
+        0,
+      )) {
+        audio.event({ kind: 'ballWhoosh', world: ball.position });
+      }
     }
     for (const cfg of config.ships) {
       const ship = state.ships[cfg.shipIndex];

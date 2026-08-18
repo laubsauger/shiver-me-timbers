@@ -7,7 +7,9 @@
  *  - the SAMPLE bed / emitter / trigger block drives the real recordings in
  *    assets/audio/sfx (primary path),
  *  - the synth block below it drives the procedural fallback that runs when a
- *    sample fails to load, plus cannon/hull-hit which have no sample yet.
+ *    sample fails to load. The cannon now has generated takes and falls back to
+ *    the synth only when they do not decode; the HULL HIT is still synthesized
+ *    by choice — three layers that a fixed sample could not modulate.
  */
 import { registerParams } from './registry';
 
@@ -102,6 +104,40 @@ export interface AudioParams {
   splinterRateUp: number;
   mastBreakGain: number;
   sinkGroanGain: number;
+
+  // ── generated one-shot samples (see assets/audio/CREDITS.md) ──
+  /** the sampled cannon report; 0 falls the event back to procedural cannonBoom */
+  cannonSampleGain: number;
+  /**
+   * ± pitch spread between cannon takes. Deliberately SMALL: pitch is how the
+   * ear reads the size of a gun, so a wide spread turns one battery into an
+   * assortment of different-calibre guns.
+   */
+  cannonVariationCents: number;
+  /**
+   * ± pitch spread for every other sampled one-shot. Wider than the cannon's:
+   * splinters, splashes and canvas have no "correct" pitch to betray.
+   */
+  sampleVariationCents: number;
+  /**
+   * Stagger for shots that land on the SAME audio timestamp: seconds added per
+   * shot, the ceiling on that, and the window inside which two count as one
+   * volley. Normally dormant — combatSystem's ripple already spaces guns
+   * ~130 ms apart, wider than cannonBurstSec. See sampleShot.nextStagger.
+   */
+  cannonStaggerSec: number;
+  cannonStaggerMaxSec: number;
+  cannonBurstSec: number;
+  /** the sampled mast-break crack (the timber slice still runs underneath) */
+  mastBreakSampleGain: number;
+  /** a shot passing close overhead */
+  ballWhooshGain: number;
+  /**
+   * How close (m) an enemy ball must pass before it is heard going by. Wide
+   * enough that near misses register, tight enough that a fleet action is not
+   * a continuous rush of shot.
+   */
+  ballWhooshRadius: number;
 
   // ── event one-shots from samples ──
   /** bow splash slice: gain, slice length (s) and the window it is cut from */
@@ -325,6 +361,17 @@ export const audioParams: AudioParams = registerParams(
     splinterRateUp: 1.7,
     mastBreakGain: 0.95,
     sinkGroanGain: 0.85,
+    cannonSampleGain: 0.95,
+    cannonVariationCents: 90,
+    sampleVariationCents: 220,
+    // ~35 ms per gun, capped at a quarter second: enough that eight guns read
+    // as eight, short enough that they still read as one volley
+    cannonStaggerSec: 0.035,
+    cannonStaggerMaxSec: 0.25,
+    cannonBurstSec: 0.12,
+    mastBreakSampleGain: 1,
+    ballWhooshGain: 0.7,
+    ballWhooshRadius: 45,
     bowSplashGain: 0.85,
     bowSplashSliceSec: 1.1,
     bowSplashWindowSec: 40,
@@ -485,6 +532,15 @@ export const audioParams: AudioParams = registerParams(
     splinterRateUp: { min: 1, max: 4, step: 0.05 },
     mastBreakGain: { min: 0, max: 2, step: 0.01 },
     sinkGroanGain: { min: 0, max: 2, step: 0.01 },
+    cannonSampleGain: { min: 0, max: 2, step: 0.01 },
+    cannonVariationCents: { min: 0, max: 600, step: 5 },
+    sampleVariationCents: { min: 0, max: 1200, step: 10 },
+    cannonStaggerSec: { min: 0, max: 0.2, step: 0.005 },
+    cannonStaggerMaxSec: { min: 0, max: 1, step: 0.01 },
+    cannonBurstSec: { min: 0.01, max: 1, step: 0.01 },
+    mastBreakSampleGain: { min: 0, max: 2, step: 0.01 },
+    ballWhooshGain: { min: 0, max: 2, step: 0.01 },
+    ballWhooshRadius: { min: 5, max: 200, step: 1 },
     bowSplashGain: { min: 0, max: 2, step: 0.01 },
     bowSplashSliceSec: { min: 0.2, max: 4, step: 0.05 },
     bowSplashWindowSec: { min: 1, max: 60, step: 1 },

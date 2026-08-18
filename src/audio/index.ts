@@ -6,7 +6,8 @@
  *                                                      ▼
  *   bed.ts      layered ambience (ocean/wind/sailing) → ambience bus ┐
  *   shipAudio   panners: bow, stern, hull, rigging, 3 masts ─────────┼→ master
- *   oneshots    procedural cannon/hull-hit/creak ──────→ sfx bus ────┘
+ *   events      sampled cannon/splinter/splash pools ─→ sfx bus ────┤
+ *   oneshots    procedural hull-hit + cannon fallback ─→ sfx bus ────┘
  *
  * §V3: every value read here comes from SimState or the render transforms
  * derived from it; audio writes nothing back and cannot affect determinism.

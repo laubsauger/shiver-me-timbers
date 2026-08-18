@@ -21,11 +21,33 @@ export type SampleName =
   | 'shipCreak'
   | 'canvasSnapA'
   | 'canvasSnapB'
-  | 'sailDeploy';
+  | 'sailDeploy'
+  // generated one-shots (scripts/generate-sfx.mjs, see assets/audio/CREDITS.md)
+  | 'cannonFireA'
+  | 'cannonFireB'
+  | 'cannonFireC'
+  | 'woodSplinterA'
+  | 'woodSplinterB'
+  | 'mastBreakCrack'
+  | 'ballSplashA'
+  | 'ballSplashB'
+  | 'canvasCrackA'
+  | 'canvasCrackB'
+  | 'ballWhooshA'
+  | 'ballWhooshB'
+  | 'ropeBlock';
 
 /**
- * Load order = audibility order. The bed layers land first (they are what you
- * hear when the game starts), the tiny one-shots ride along at the end.
+ * Load order = audibility order, and it is NOT simply "big things first".
+ *
+ * The bed layers you hear at the start come first, but the tiny one-shots are
+ * deliberately slotted AHEAD of the two multi-MB tails (the 5.8 MB wooden-ship
+ * loop and the 1.4 MB sailing bed): together they are a few hundred KB, so
+ * putting them early makes combat and canvas audible roughly 7 MB sooner and
+ * delays the two loops by a fraction of what they already cost. Loading is
+ * still strictly one file at a time so none of this competes with texture
+ * uploads at first paint.
+ *
  * The byte-identical `... (1).mp3` duplicate of the gurgle is ignored.
  */
 export const SAMPLE_URLS: Record<SampleName, string> = {
@@ -60,6 +82,31 @@ export const SAMPLE_URLS: Record<SampleName, string> = {
     import.meta.url,
   ).href,
   sailingBed: new URL('../../assets/audio/sfx/dammafra-sailing-435998.mp3', import.meta.url).href,
+  cannonFireA: new URL('../../assets/audio/sfx/elevenlabs-cannon-fire-a.mp3', import.meta.url).href,
+  cannonFireB: new URL('../../assets/audio/sfx/elevenlabs-cannon-fire-b.mp3', import.meta.url).href,
+  cannonFireC: new URL('../../assets/audio/sfx/elevenlabs-cannon-fire-c.mp3', import.meta.url).href,
+  woodSplinterA: new URL(
+    '../../assets/audio/sfx/elevenlabs-wood-splinter-a.mp3',
+    import.meta.url,
+  ).href,
+  woodSplinterB: new URL(
+    '../../assets/audio/sfx/elevenlabs-wood-splinter-b.mp3',
+    import.meta.url,
+  ).href,
+  mastBreakCrack: new URL('../../assets/audio/sfx/elevenlabs-mast-break.mp3', import.meta.url).href,
+  ballSplashA: new URL('../../assets/audio/sfx/elevenlabs-ball-splash-a.mp3', import.meta.url).href,
+  ballSplashB: new URL('../../assets/audio/sfx/elevenlabs-ball-splash-b.mp3', import.meta.url).href,
+  canvasCrackA: new URL(
+    '../../assets/audio/sfx/elevenlabs-canvas-crack-a.mp3',
+    import.meta.url,
+  ).href,
+  canvasCrackB: new URL(
+    '../../assets/audio/sfx/elevenlabs-canvas-crack-b.mp3',
+    import.meta.url,
+  ).href,
+  ballWhooshA: new URL('../../assets/audio/sfx/elevenlabs-ball-whoosh-a.mp3', import.meta.url).href,
+  ballWhooshB: new URL('../../assets/audio/sfx/elevenlabs-ball-whoosh-b.mp3', import.meta.url).href,
+  ropeBlock: new URL('../../assets/audio/sfx/elevenlabs-rope-block.mp3', import.meta.url).href,
 };
 
 /** fetch/decode order — see note above */
@@ -71,6 +118,23 @@ export const LOAD_ORDER: readonly SampleName[] = [
   'canvasSnapA',
   'canvasSnapB',
   'sailDeploy',
+  // the generated one-shots: ~420 KB for the lot, so they sit here rather than
+  // behind the 7 MB of loops below. Cannon first — it is the one the player
+  // notices missing, because a broadside that only makes the procedural
+  // fallback sound is the defect this set exists to fix.
+  'cannonFireA',
+  'cannonFireB',
+  'cannonFireC',
+  'woodSplinterA',
+  'woodSplinterB',
+  'ballSplashA',
+  'ballSplashB',
+  'canvasCrackA',
+  'canvasCrackB',
+  'ballWhooshA',
+  'ballWhooshB',
+  'mastBreakCrack',
+  'ropeBlock',
   'shipCreak',
   'sailingBed',
 ];

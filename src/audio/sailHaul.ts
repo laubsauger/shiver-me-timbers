@@ -116,6 +116,16 @@ export function createSailHaul(
   const machine = createHaulMachine();
   let deploy: AudioBuffer | null = null;
   const snaps: AudioBuffer[] = [];
+  /**
+   * Sources the rustle ticks are cut from.
+   *
+   * This used to be the saildeploy recording alone, and a haul fires a rustle
+   * every ~300 ms: random offsets into ONE ~2 s file is not variation, it is
+   * the same file at a different phase, and it reads as such within a couple
+   * of hauls. The generated canvas and rope-block takes give the slicer three
+   * different recordings to draw from, which is what actually breaks it up.
+   */
+  const rustleBufs: AudioBuffer[] = [];
 
   const out = (): AudioNode => outs[Math.floor(rng() * outs.length) % outs.length];
 
@@ -133,11 +143,13 @@ export function createSailHaul(
       playSample(ctx, out(), deploy, { gain: e.gain, fadeOut: 0.15 });
       return;
     }
-    if (e.kind === 'rustle' && deploy) {
-      // cloth running through the blocks: a short window of the same file
-      playSample(ctx, out(), deploy, {
+    if (e.kind === 'rustle' && rustleBufs.length > 0) {
+      // cloth running through the blocks: a short window of one of the rustle
+      // sources, chosen per tick so consecutive ticks are rarely the same take
+      const buf = rustleBufs[Math.floor(rng() * rustleBufs.length) % rustleBufs.length];
+      playSample(ctx, out(), buf, {
         gain: e.gain,
-        offset: sliceOffset(rng, deploy.duration, deploy.duration, p.haulRustleSec),
+        offset: sliceOffset(rng, buf.duration, buf.duration, p.haulRustleSec),
         duration: p.haulRustleSec,
         playbackRate: e.playbackRate,
         fadeIn: 0.02,
@@ -150,8 +162,17 @@ export function createSailHaul(
 
   return {
     onSample(name, buffer) {
-      if (name === 'sailDeploy') deploy = buffer;
-      else if (name === 'canvasSnapA' || name === 'canvasSnapB') snaps.push(buffer);
+      if (name === 'sailDeploy') {
+        deploy = buffer;
+        rustleBufs.push(buffer);
+      } else if (name === 'canvasCrackA' || name === 'ropeBlock') {
+        // sustained textures — canvasCrackA came back as continuous luffing
+        // rather than a single crack, and rope through a block is continuous
+        // by nature, so both belong here and not in the snap rotation
+        rustleBufs.push(buffer);
+      } else if (name === 'canvasSnapA' || name === 'canvasSnapB' || name === 'canvasCrackB') {
+        snaps.push(buffer);
+      }
     },
     update(drop, dt) {
       machine.step(drop, dt, rng, play);

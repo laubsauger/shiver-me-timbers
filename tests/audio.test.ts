@@ -49,7 +49,13 @@ import {
 } from '../src/audio/musicPlaylist';
 import { createDeltaTrigger, createGatedTrigger } from '../src/audio/triggers';
 import { listenerPoseFromMatrix } from '../src/audio/emitters';
-import { sliceOffset } from '../src/audio/sampleShot';
+import {
+  createVariationPicker,
+  nextStagger,
+  sliceOffset,
+  NO_STAGGER,
+} from '../src/audio/sampleShot';
+import { planWhooshes, POOLS, type WhooshCandidate } from '../src/audio/events';
 import { attachAudioSettings } from '../src/audio/settingsBridge';
 import { LOAD_ORDER, SAMPLE_URLS } from '../src/audio/assets';
 import { STORAGE_KEY, createSettingsStore, type StorageLike } from '../src/ui/settingsStore';
@@ -234,6 +240,222 @@ describe('hull hit — an impact is a TRANSIENT (user: "very weak impact sound")
       expect(l.gain).toBeGreaterThanOrEqual(0);
       expect(l.duration).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('a broadside is not one gun repeated (round-robin over cannon takes)', () => {
+  /**
+   * WHY THIS EXISTS. `cannonBoom()` has no randomization of any kind, so every
+   * gun of every broadside played the byte-identical waveform. combatSystem
+   * already spaces the guns in TIME (rippleDelay 0.13 s ± jitter, after the
+   * user reported "they shoot at the perfect identical same time"), so the
+   * volley was never one slab of sound — it was the same recording eight times
+   * in a row, which the ear identifies as a loop just as quickly.
+   *
+   * These assert the property that fixes it: the rotation must never hand back
+   * the take it just played. A single audible repeat inside one volley undoes
+   * the variation for the whole volley, which is why "random pick" is not good
+   * enough — with three takes it repeats about one time in three.
+   */
+  const CENTS = 120;
+
+  it('never plays the same take twice in a row — one repeat undoes the volley', () => {
+    // THE defect, stated directly. Random selection would fail this ~1/3 of
+    // the time with three takes, which is why the picker steps instead.
+    const pick = createVariationPicker(() => 3, createRng(0xb20ad), CENTS);
+    let prev = -1;
+    for (let i = 0; i < 200; i++) {
+      const v = pick();
+      expect(v.index).not.toBe(prev);
+      expect(v.index).toBeGreaterThanOrEqual(0);
+      expect(v.index).toBeLessThan(3);
+      prev = v.index;
+    }
+  });
+
+  it('uses the whole pool — a rotation that favours one take wastes the others', () => {
+    const pick = createVariationPicker(() => 3, createRng(99), CENTS);
+    const seen = new Set<number>();
+    for (let i = 0; i < 60; i++) seen.add(pick().index);
+    expect(seen).toEqual(new Set([0, 1, 2]));
+  });
+
+  it('is deterministic per seed (§V2 spirit — audio must not add nondeterminism)', () => {
+    const run = (): number[] => {
+      const pick = createVariationPicker(() => 3, createRng(1234), CENTS);
+      return Array.from({ length: 20 }, () => pick().index);
+    };
+    expect(run()).toEqual(run());
+  });
+
+  it('pitch jitter stays inside the declared spread — a gun must stay one gun', () => {
+    // pitch is how the ear reads the SIZE of a gun; an unbounded spread turns
+    // one battery into an assortment of different-calibre pieces
+    const pick = createVariationPicker(() => 3, createRng(5), CENTS);
+    const lo = centsToRatio(-CENTS);
+    const hi = centsToRatio(CENTS);
+    for (let i = 0; i < 200; i++) {
+      const { playbackRate } = pick();
+      expect(playbackRate).toBeGreaterThanOrEqual(lo - 1e-9);
+      expect(playbackRate).toBeLessThanOrEqual(hi + 1e-9);
+    }
+  });
+
+  it('follows a pool that GROWS — samples decode one at a time, mid-session', () => {
+    // the loader fetches sequentially, so a pool is size 1 then 2 then 3 while
+    // the game is already running. A size captured at construction would
+    // either index past the end or never reach the takes that arrived late.
+    let size = 1;
+    const pick = createVariationPicker(() => size, createRng(3), CENTS);
+    expect(pick().index).toBe(0); // only one take loaded: it is the only option
+    size = 3;
+    const seen = new Set<number>();
+    for (let i = 0; i < 40; i++) seen.add(pick().index);
+    expect(seen).toEqual(new Set([0, 1, 2]));
+  });
+
+  it('an empty pool reports -1 so the caller can fall back rather than play take 0', () => {
+    // this is what keeps the failure-swallowing contract: no files decoded
+    // means the procedural cannonBoom still fires, it does not go silent
+    const pick = createVariationPicker(() => 0, createRng(1), CENTS);
+    expect(pick().index).toBe(-1);
+  });
+
+  it('a single-take pool never hangs or produces a bogus index', () => {
+    const pick = createVariationPicker(() => 1, createRng(1), CENTS);
+    for (let i = 0; i < 10; i++) expect(pick().index).toBe(0);
+  });
+});
+
+describe('stagger for shots that genuinely coincide (safety net, not the ripple)', () => {
+  /**
+   * combatSystem's ripple already spaces a normal broadside further apart than
+   * `cannonBurstSec`, so in ordinary play every one of these returns 0. This
+   * covers the case its drain loop names — "several guns come due inside one
+   * tick" — plus rippleDelay tuned to 0 and two ships firing together, where
+   * shots really do land on the same audio timestamp and sum in phase.
+   */
+  const STEP = 0.035;
+  const MAX = 0.25;
+  const BURST = 0.12;
+
+  it('spreads shots that share a timestamp across increasing delays', () => {
+    // the input that actually needs handling: several shots at the SAME
+    // ctx.currentTime, which is what a coincident drain produces
+    let s = NO_STAGGER;
+    const delays: number[] = [];
+    for (let gun = 0; gun < 6; gun++) {
+      s = nextStagger(s, 10, STEP, MAX, BURST);
+      delays.push(s.delay);
+    }
+    expect(delays[0]).toBe(0); // the first gun is not late
+    for (let i = 1; i < delays.length; i++) {
+      expect(delays[i]).toBeGreaterThan(delays[i - 1]);
+    }
+    expect(new Set(delays).size).toBe(delays.length);
+  });
+
+  it('caps the spread — past a point a volley stops being a volley', () => {
+    let s = NO_STAGGER;
+    for (let gun = 0; gun < 100; gun++) s = nextStagger(s, 10, STEP, MAX, BURST);
+    expect(s.delay).toBeLessThanOrEqual(MAX);
+  });
+
+  it('a normally-rippled shot is left alone at zero delay', () => {
+    // THE property that keeps this from fighting combatSystem's ripple: guns
+    // ~130 ms apart are outside the burst window, so they are never delayed
+    // and never drift behind the muzzle flash they belong to
+    let s = nextStagger(NO_STAGGER, 10, STEP, MAX, BURST);
+    s = nextStagger(s, 10, STEP, MAX, BURST);
+    expect(s.delay).toBeGreaterThan(0);
+    const later = nextStagger(s, 10 + BURST + 0.01, STEP, MAX, BURST);
+    expect(later.delay).toBe(0);
+  });
+
+  it('a zero step disables the stagger without breaking the burst bookkeeping', () => {
+    let s = NO_STAGGER;
+    for (let i = 0; i < 5; i++) s = nextStagger(s, 10, 0, MAX, BURST);
+    expect(s.delay).toBe(0);
+  });
+});
+
+describe('shot passing overhead (planWhooshes)', () => {
+  const ball = (id: number, x: number, owner = 1): WhooshCandidate => ({
+    id,
+    position: [x, 0, 0],
+    owner,
+  });
+  const HERE: number[] = [0, 0, 0];
+  const R = 45;
+
+  it('fires ONCE per ball, not once per frame it is close', () => {
+    // THE risk. A ball crosses the radius over many frames at any sane speed,
+    // so a naive distance check machine-guns the same shot for its whole
+    // approach — the exact class of defect hullEvents added cooldowns for.
+    const fired = new Set<number>();
+    let count = 0;
+    for (let frame = 0; frame < 30; frame++) {
+      count += planWhooshes([ball(7, 10)], HERE, fired, R, 0).length;
+    }
+    expect(count).toBe(1);
+  });
+
+  it('never whooshes your own broadside at you', () => {
+    // your guns are metres away and always inside any sane radius: without
+    // this every shot you fire also sounds like a shot passing your head
+    const fired = new Set<number>();
+    expect(planWhooshes([ball(1, 1, 0)], HERE, fired, R, 0)).toEqual([]);
+    expect(fired.size).toBe(0);
+  });
+
+  it('ignores shot that never comes close', () => {
+    const fired = new Set<number>();
+    expect(planWhooshes([ball(2, R + 1)], HERE, fired, R, 0)).toEqual([]);
+    // ...and still fires when the same ball later gets inside
+    expect(planWhooshes([ball(2, R - 1)], HERE, fired, R, 0)).toHaveLength(1);
+  });
+
+  it('forgets balls that are gone — the set tracks flight, not history', () => {
+    // a long battle fires thousands of rounds; a set that only ever grew
+    // would be a slow leak keyed on a monotonic projectile id
+    const fired = new Set<number>();
+    planWhooshes([ball(1, 0), ball(2, 0)], HERE, fired, R, 0);
+    expect(fired.size).toBe(2);
+    planWhooshes([ball(2, 0)], HERE, fired, R, 0); // ball 1 splashed
+    expect(fired.has(1)).toBe(false);
+    expect(fired.has(2)).toBe(true);
+  });
+
+  it('a re-used id after the ball is gone can whoosh again', () => {
+    const fired = new Set<number>();
+    expect(planWhooshes([ball(5, 0)], HERE, fired, R, 0)).toHaveLength(1);
+    planWhooshes([], HERE, fired, R, 0); // gone
+    expect(planWhooshes([ball(5, 0)], HERE, fired, R, 0)).toHaveLength(1);
+  });
+
+  it('a non-finite position cannot fire (a NaN would pass a naive < test)', () => {
+    const fired = new Set<number>();
+    const bad: WhooshCandidate = { id: 9, position: [Number.NaN, 0, 0], owner: 1 };
+    expect(planWhooshes([bad], HERE, fired, R, 0)).toEqual([]);
+  });
+});
+
+describe('sample pools reference samples that actually load', () => {
+  it('every pooled sample is in the load order — a name that never loads is a silent empty pool', () => {
+    // TypeScript stops a misspelled SampleName, but NOT a valid name that was
+    // left out of LOAD_ORDER: that pool would stay empty forever and the event
+    // would fall back permanently, with no error anywhere.
+    for (const names of Object.values(POOLS)) {
+      for (const name of names) {
+        expect(LOAD_ORDER).toContain(name);
+        expect(SAMPLE_URLS[name]).toBeTruthy();
+      }
+    }
+  });
+
+  it('the cannon pool carries more than one take', () => {
+    // a "pool" of one is the original defect with extra steps
+    expect(POOLS.cannon.length).toBeGreaterThan(1);
   });
 });
 

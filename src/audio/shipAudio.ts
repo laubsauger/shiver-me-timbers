@@ -152,8 +152,12 @@ export function createShipAudio(
         stern.layer?.start(buffer);
       } else if (name === 'hullGurgle') hull.layer?.start(buffer);
       else if (name === 'shipCreak') rigging.layer?.start(buffer);
-      else if (name === 'canvasSnapA' || name === 'canvasSnapB') snapBufs.push(buffer);
-      else if (name === 'sailDeploy') deployBuf = buffer;
+      // three takes in the snap rotation, not two: canvasCrackB is a generated
+      // full-size sail crack, where the two freesound takes are a dropcloth —
+      // right shape, wrong scale for a galleon's mainsail
+      else if (name === 'canvasSnapA' || name === 'canvasSnapB' || name === 'canvasCrackB') {
+        snapBufs.push(buffer);
+      } else if (name === 'sailDeploy') deployBuf = buffer;
     },
 
     update(ship, env, dt) {
