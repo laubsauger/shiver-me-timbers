@@ -539,7 +539,7 @@ export const oceanSurfaceParams = registerParams(
      * 0.35 → 1.0. MEASURED: the cap, not the strength, is what limits the
      * correction, and it starts binding at a ~0.13 m footprint (≈50 m out at a
      * follow-camera framing) — so the AA gets WEAKER the further out you look,
-     * which is backwards. Half-width of the `glintRoadPower` 180 lobe, in
+     * which is backwards. Half-width of the old `pow(N·H, 180)` glint lobe, in
      * pixels, against the sea's measured curvature RMS of 1.66/m:
      *     footprint  raw    with cap 0.35   needed
      *       0.05 m   0.05   0.30 px         1 px  (σ² 0.12, cap not binding)
@@ -603,9 +603,32 @@ export const oceanSurfaceParams = registerParams(
     /** hash-density thresholds outside / inside the sun path (1 = none) */
     sparkleDensityBase: 0.985,
     sparkleDensityTrain: 0.82,
-    /** broad specular sheen along the sun path — the readable "sun road" */
-    glintRoadStrength: 0.55,
-    glintRoadPower: 180,
+    /**
+     * §V.75 THE SUN'S REFLECTED RADIANCE, as a multiple of the energy-correct
+     * value. 1.0 = physical: the glint lobe integrates to the sun's own
+     * irradiance as this material already states it in its diffuse term
+     * (`sunTint · lightGain`), spread by the Beckmann/Cox-Munk slope
+     * distribution the sim measures. See the sun-glint block in
+     * `surfaceMaterial.ts` for the derivation and for the measurement that
+     * forced it.
+     *
+     * It was 0.55 against a lobe whose peak was ALSO divided by its own
+     * widening factor (~180 at the sunset framing), so the sun's brightest
+     * possible contribution to this water was 0.003 against a sky reflection of
+     * ~0.1 — the sun was 4% of the sea's light and the sky 70%, measured, and
+     * the sea came out 22% brighter facing AWAY from the sun. There is no
+     * setting of a number like that which produces a golden cone; the lobe had
+     * to become an energy, which is what this now scales.
+     *
+     * Turn it DOWN, never up, and only for look: above 1 the road is brighter
+     * than the sun physically puts there.
+     *
+     * `glintRoadPower` was deleted with the same change. Lobe width is σ²'s
+     * job — an independent exponent is how the road's shape and the sea's
+     * actual roughness came to disagree in the first place, and re-adding one
+     * re-opens exactly that.
+     */
+    glintRoadStrength: 1.0,
     /** sparkles fade out as the view leaves grazing angles (starfield guard):
      *  full below grazeFadeStart, gone above grazeFadeEnd (viewDir.y) */
     sparkleGrazeStart: 0.72,
@@ -622,6 +645,29 @@ export const oceanSurfaceParams = registerParams(
     /** temporary direct-jacobian crest foam until T5 progressive blur lands */
     foamThreshold: 0.55,
     foamColor: '#eef6f2',
+    /**
+     * The WAKE's own foam colour — aerated water alongside a wooden hull, not a
+     * breaking whitecap. Sharing `foamColor` was wrong twice over: a ship's
+     * churned track is greener and much darker than sea-spray white, and at
+     * luminance 0.905 the wake sat within a few percent of the bloom threshold
+     * at every sky colour (measured: exposure 1.1 puts the scene-linear
+     * crossing at 0.909 while the wake spans 0.63–1.18 depending on how the sky
+     * rig has tinted the haze that frame). That is the mechanism behind
+     * "depending on the sun angle it's too much" — which side of the bloom knee
+     * the wake lands on was being decided by the sky.
+     */
+    wakeFoamColor: '#b9ccc4',
+    /**
+     * Optical depth of the wake's aerated layer. The wake mask was compositing
+     * through a hard alpha, so every texel above the dissolve gate reached full
+     * opacity and the whole track rendered as one flat sheet with holes punched
+     * in it (docs/bugs/bug-wake-solid-white.png). Same defect the sim foam had
+     * and the same cure: alpha = 1 − e^(−density·coverage) never saturates, so
+     * coverage keeps modulating brightness all the way up instead of clipping.
+     * ~1.6 puts full coverage at 0.80 alpha and half coverage at 0.55, i.e. a
+     * real gradient across the range the wake actually occupies.
+     */
+    wakeFoamDepth: 1.6,
     /** how far foam takes the sky's colour — the reference's foam is warm
      *  cream, ours is authored cool near-white and reads wrong at sunset */
     foamSkyTint: 0.35,
@@ -750,12 +796,12 @@ export const oceanSurfaceParams = registerParams(
     sssBrightness: { min: 0, max: 2, step: 0.01 },
     fresnelR0: { min: 0, max: 0.2, step: 0.005 },
     foamSkyTint: { min: 0, max: 1, step: 0.01 },
+    wakeFoamDepth: { min: 0.2, max: 6, step: 0.05 },
     sparklePower: { min: 4, max: 256, step: 1 },
     glintTrainPower: { min: 1, max: 128, step: 1 },
     sparkleDensityBase: { min: 0.5, max: 1, step: 0.001 },
     sparkleDensityTrain: { min: 0.5, max: 1, step: 0.001 },
     glintRoadStrength: { min: 0, max: 3, step: 0.01 },
-    glintRoadPower: { min: 8, max: 2048, step: 4 },
     sparkleGrazeStart: { min: 0, max: 1, step: 0.01 },
     sparkleGrazeEnd: { min: 0, max: 1.5, step: 0.01 },
     foamThreshold: { min: -1, max: 1.5, step: 0.01 },

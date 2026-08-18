@@ -150,6 +150,46 @@ const MICRO_AMP_SCALE = Math.sqrt(
   [1, 1.618, 2.414, 3.732].reduce((s, f) => s + f * f, 0) / MICRO_WAVELETS.length,
 );
 
+/**
+ * §V.75 COX & MUNK (1954), "Measurement of the roughness of the sea surface
+ * from photographs of the sun's glitter", J. Opt. Soc. Am. 44(11):838 — the
+ * ZERO-WIND INTERCEPT of their clean-surface regression
+ *
+ *     σ²_total = 0.003 + 0.00512·U      (U in m/s at 12.5 m)
+ *
+ * σ² here is the TOTAL mean square slope, up-wind plus cross-wind, which is
+ * exactly what `OceanCascade.slopeVariance()` sums (`slopeWavelengthHistogram`
+ * bins 2|h|²k² = |∇h|²), so the two quantities are directly comparable.
+ *
+ * MEASURED LIVE at the shipped swell preset, U = 11 m/s: 0.00263 / 0.00700 /
+ * 0.01762 per cascade, total 0.0273, against Cox & Munk's 0.0593 for that
+ * wind. The sim carries 46% of the real sea's mean square slope, so the glint
+ * road this drives is ~1.5x NARROWER than a photographed one at the same
+ * wind. That is a spectrum question, not a shading one — the lobe reads
+ * whatever the sim publishes and widens for free if the spectrum is retuned —
+ * but it is recorded here because this is the term that makes it visible.
+ *
+ * It is used as the FLOOR on the glint lobe's roughness. The floor is not a
+ * numerical guard dressed up as physics: it is the statement that a sea
+ * surface is never a mirror. Even at dead calm there is capillary structure
+ * below anything the three cascades carry, and without a floor the Beckmann
+ * peak 1/(πσ²) runs away as the shading normal resolves — which is both an
+ * unbounded term (§V.44) and the §V.26 mirror disc coming back in through the
+ * specular door.
+ */
+const COX_MUNK_CALM_SLOPE_VAR = 0.003;
+
+/**
+ * §V.44 ceiling on the sun lobe's radiance, in scene-linear units BEFORE
+ * exposure. Not a look knob — a saturation guard. The renderer tone maps with
+ * ACES filmic (`src/sky/lighting.ts`), whose curve reaches 0.97 of white at a
+ * scene-linear 4 and 0.995 at 8, so every value past ~8 is the same pixel.
+ * 32 is two more stops of headroom on top of that, i.e. it cannot change a
+ * shipped frame; what it does stop is the `D · V` product going unbounded on a
+ * degenerate normal at the exact grazing limit and handing bloom an Inf.
+ */
+const GLINT_RADIANCE_MAX = 32;
+
 export function buildOceanSurfaceMaterial(
   sim: OceanSimulation,
   foam?: FoamSim,
@@ -276,7 +316,9 @@ export function buildOceanSurfaceMaterial(
   const uSparkleDensity = uniform(
     new THREE.Vector2(sp.sparkleDensityBase, sp.sparkleDensityTrain),
   );
-  const uGlintRoad = uniform(new THREE.Vector2(sp.glintRoadStrength, sp.glintRoadPower));
+  // §V.75: scalar. The lobe's WIDTH is the sea's own σ², so there is no second
+  // exponent to author — see the sun-glint block in colorNode.
+  const uGlintRoad = uniform(sp.glintRoadStrength);
   const uGraze = uniform(new THREE.Vector2(sp.sparkleGrazeStart, sp.sparkleGrazeEnd));
   const uFoamThreshold = uniform(sp.foamThreshold);
   const uNormFade = uniform(new THREE.Vector2(sp.normalFadeStart, sp.normalFadeEnd));
@@ -1643,12 +1685,129 @@ export function buildOceanSurfaceMaterial(
     // sparkles out as the view leaves grazing angles.
     // smoothstep(e0,e1,x), e0 > e1: 1 below grazeStart, 0 above grazeEnd
     const grazeFade = smoothstep(uGraze.y, uGraze.x, viewDir.y);
-    // the road survives everywhere the sparkles do not: it is what makes the
-    // sun's reflection READ as a path on the water rather than dots
-    const roadWiden = widen(uGlintRoad.y);
-    const road = pow(ndoth, uGlintRoad.y.div(roadWiden))
-      .div(roadWiden)
-      .mul(uGlintRoad.x);
+    /**
+     * ── §V.75 THE SUN'S REFLECTION, AS ENERGY ──────────────────────────
+     *
+     * What stood here was `pow(N·H, 180)/widen · 0.55`. Its PEAK radiance is
+     * `glintRoadStrength / widen`, and `widen` = 1 + 180·σ² reaches ~180 at the
+     * §T.39 sunset framing, so the brightest pixel the sun could put on this
+     * water was 0.003 — while the reflected sky, three hundred lines up, is
+     * delivering ~0.1 over the whole frame. MEASURED at the lagoon, tod 17.6,
+     * sun 5.8°, camera 7 m, mean water luminance over a mid-field band:
+     *
+     *     baseline                                     93
+     *     sparkleStrength 0 AND glintRoadStrength 0    90   (−4%)
+     *     + reflectionStrength 0                       28   (−70%)
+     *
+     * i.e. with BOTH glint terms switched off the frame was visually identical.
+     * The sun contributed 4% of the sea's light and the sky mirror 70%, and the
+     * sea measured 22% BRIGHTER looking away from the sun than toward it. Every
+     * symptom the user reported is that one fact: no golden cone (there was no
+     * sun term to make one), the sun "reflecting all over" (that is the SKY,
+     * reflecting all over, because nothing else was competing), and the whole
+     * surface reading as plastic — an angularly unselective sheen with no sun
+     * structure is the definition of plastic.
+     *
+     * §V.26 IS NOT REOPENED. This does not put the sun disc back into the
+     * reflected sky, analytically or through the mirror; `skyDomeColor` is
+     * still asked for a sun-free sky and still answers with one. What is
+     * restored is the sun's ENERGY, spread by the SURFACE'S OWN STATISTICS —
+     * which is the thing a glint road physically is, and which cannot paint a
+     * clean circular blob because its shape is the sea's slope distribution,
+     * not the sun's outline.
+     *
+     * THE MODEL. Standard microfacet reflection, every factor from a stated
+     * source and none of them dialled:
+     *
+     *   L = f_r · E_⊥ · (N·L),   f_r = F·D·G / (4 (N·L)(N·V))
+     *
+     *  · D — BECKMANN, which IS the Gaussian slope law Cox & Munk fitted to the
+     *    sea (see COX_MUNK_CALM_SLOPE_VAR): D = exp(−tan²θ_h/σ²)/(π σ² cos⁴θ_h),
+     *    normalised so ∫D(h)(N·h)dω = 1. Its peak is 1/(πσ²) — the energy
+     *    normalisation is INSIDE the NDF, which is why the old `widen()` peak
+     *    rescale must not also be applied here (that was the double count that
+     *    made this term invisible).
+     *  · σ² — `glintVar` below. NOT a roughness constant: the pixel's own
+     *    unresolved slope variance, which is what §V.48b already computes.
+     *  · G/V — Smith height-correlated, α = σ, folded with the 1/(4 N·L N·V)
+     *    denominator into `vis`. GGX-Smith masking against a Beckmann D is the
+     *    usual production pairing; the alternative (Walter's rational fit to
+     *    Beckmann's own Λ) is a branch and agrees to within a few percent over
+     *    the range σ ≤ 0.25 this surface ever reaches. It is what bounds the
+     *    grazing 1/(N·V), and a sunset frame is nothing but grazing.
+     *  · F — Schlick at the MICROFACET's incidence (V·H), not the surface's.
+     *    This is where the golden cone gets its intensity: at a 5.8° sun and a
+     *    grazing view, V·H ≈ 0.09, i.e. 85° incidence, and Fresnel there is
+     *    0.62 rather than the 0.02 of a face-on look. Physics, not a boost.
+     *
+     * THE UNIT BRIDGE, which is the whole calibration and the reason this is
+     * derived rather than tuned. E_⊥ is the sun's irradiance in whatever units
+     * this renderer's radiance is in, and the material already states it: the
+     * diffuse term ~500 lines up is `waterCol · uSunLightColor · uLightGain ·
+     * (N·L)`, i.e. an unnormalised Lambert, so `uSunLightColor · uLightGain` is
+     * E_⊥/π by definition of that convention. Hence the `π · uLightGain` here,
+     * and hence `uSunLightColor` staying where it always was on the composite
+     * line below. Read off the sun's own diffuse term, so the two cannot drift:
+     * dim the sun and its road dims with it.
+     *
+     * `glintRoadStrength` survives as the one artistic trim, and 1.0 now MEANS
+     * something — energy-correct against the material's own key light. Its old
+     * companion `glintRoadPower` is deleted: lobe width is σ²'s job now, and a
+     * second, independent width knob is exactly how the two terms drifted two
+     * orders of magnitude apart in the first place.
+     */
+    // ── σ² for the lobe ──────────────────────────────────────────────
+    // THE PHYSICAL CEILING, and it is the half that makes this safe. σ² must be
+    // the slope variance inside this pixel that the shading normal does NOT
+    // already carry — §V.48b's `normalVar`, which is the spectral estimator
+    // plus `specularAaStrength`×dFdx(N). The spectral half is exact. The dFdx
+    // half is a one-sample screen estimate and it OVERSHOOTS: `specularAaMax`'s
+    // own docstring measures it at σ² = 0.41 over a 0.15 m footprint and 2.56
+    // over 0.5 m, against a sea whose ENTIRE mean square slope measures 0.0273
+    // (read live off the three cascades at the shipped swell preset). A
+    // patch of water cannot be rougher than the sea it is part of, so the
+    // cascades' own summed variance (shoaled — slope scales with amplitude, so
+    // variance scales with its square, and calmed water over a shelf really is
+    // smoother) is the ceiling, plus whatever churn this pixel cannot resolve.
+    // Uncapped, the lobe went to σ² = 1 (RMS slope 45°) across the mid-field
+    // and the road dissolved into the same flat sheen this fix removes.
+    const seaSlopeVar = uSlopeVar
+      .map((v, i) => v.mul(shoal[i]).mul(shoal[i]))
+      .reduce((a: TslNode, b: TslNode) => a.add(b))
+      .add(microUnresolvedVar)
+      .max(COX_MUNK_CALM_SLOPE_VAR);
+    const glintVar = normalVar.max(COX_MUNK_CALM_SLOPE_VAR).min(seaSlopeVar).toVar();
+    // ── Beckmann D(h) ────────────────────────────────────────────────
+    const cosH2 = ndoth.mul(ndoth).max(1e-4);
+    const tanH2 = float(1).sub(cosH2).div(cosH2);
+    const ndf = tanH2
+      .div(glintVar)
+      .negate()
+      .exp()
+      .div(glintVar.mul(Math.PI).mul(cosH2).mul(cosH2));
+    // ── Smith height-correlated visibility (includes 1/(4 N·L N·V)) ──
+    const nol = ndl.max(1e-3);
+    const nov = cosTheta.max(1e-3);
+    const oneMinusA2 = float(1).sub(glintVar).max(0);
+    const vis = float(0.5).div(
+      nol
+        .mul(nov.mul(nov).mul(oneMinusA2).add(glintVar).sqrt())
+        .add(nov.mul(nol.mul(nol).mul(oneMinusA2).add(glintVar).sqrt()))
+        .max(1e-5),
+    );
+    // ── Schlick at the microfacet's own incidence ────────────────────
+    const voh = viewDir.dot(halfVec).clamp(0, 1);
+    const fSun = uFresnelR0.add(
+      float(1).sub(uFresnelR0).mul(pow(float(1).sub(voh), 5)),
+    );
+    const road = ndf
+      .mul(vis)
+      .mul(fSun)
+      .mul(nol)
+      .mul(Math.PI)
+      .mul(uLightGain)
+      .mul(uGlintRoad)
+      .clamp(0, GLINT_RADIANCE_MAX);
     const sparkWiden = widen(uSparklePower);
     const sparkle = sparkleField
       .mul(pow(ndoth, uSparklePower.div(sparkWiden)).div(sparkWiden))
@@ -1820,7 +1979,7 @@ export function buildOceanSurfaceMaterial(
       sp.sparkleDensityBase,
       sp.sparkleDensityTrain,
     );
-    (uGlintRoad.value as THREE.Vector2).set(sp.glintRoadStrength, sp.glintRoadPower);
+    uGlintRoad.value = sp.glintRoadStrength;
     (uGraze.value as THREE.Vector2).set(sp.sparkleGrazeStart, sp.sparkleGrazeEnd);
     uFoamThreshold.value = sp.foamThreshold;
     (uNormFade.value as THREE.Vector2).set(sp.normalFadeStart, sp.normalFadeEnd);

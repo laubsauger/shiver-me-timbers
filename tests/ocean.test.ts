@@ -1747,10 +1747,11 @@ describe('the sea stays lit from every camera angle (user)', () => {
   });
 
   it('the off-axis sky term is the SKY\'s, and is a BROAD halo', () => {
-    // The glint road is pow(N·H, glintRoadPower) — a true specular, and it is
-    // the ONLY thing in the water allowed to be that tight. The off-axis
-    // brightening around the sun must be far broader or we have simply faked
-    // a view-independent glint, which the user did not ask for.
+    // The glint road is a Beckmann lobe on the sea's own σ² (§V.75) — a true
+    // specular, and it is the ONLY thing in the water allowed to be that
+    // tight. The off-axis brightening around the sun must be far broader or we
+    // have simply faked a view-independent glint, which the user did not ask
+    // for.
     //
     // It is also no longer the OCEAN's: `skySunGlowStrength/Power` are gone on
     // purpose. They were an ocean-owned lobe stacked on an elevation-only
@@ -1765,9 +1766,10 @@ describe('the sea stays lit from every camera angle (user)', () => {
     expect(surfaceMaterialSource).not.toMatch(/skySunGlow/);
     // the ocean asks the sky for it rather than modelling a second one
     expect(surfaceMaterialSource).toMatch(/skyDomeColor\(refl\)/);
-    // and the sun's azimuthal spread there is nowhere near the road's power
+    // and the sun's azimuthal spread there is nowhere near the road's width:
+    // the road's half-width is the sea's RMS slope, ~14° at the shipped swell,
+    // against a sky whose sunSide term is squared at most, i.e. tens of degrees
     expect(skyParams.sunHazeStrength).toBeGreaterThan(0);
-    expect(oceanSurfaceParams.glintRoadPower).toBeGreaterThan(4 * 2);
   });
 
   it('skylight is used as light, not as paint', () => {
@@ -1993,22 +1995,28 @@ describe('specular lobes are filtered by normal variance (§V.48)', () => {
     return Math.pow(ndoth, p / k) / k;
   };
 
-  it('is the identity where the normals are coherent — the glint road stays', () => {
+  // §V.75 SCOPE: this `widen` form now covers the SPARKLE and the glint TRAIN
+  // only. The road left it — its width is the sea's measured σ² and its peak
+  // is the Beckmann normalisation, see the §V.75 block below. The two must not
+  // be merged back: `widen` divides the peak by the widening factor, and
+  // applying that on top of an NDF that already carries 1/(πσ²) is precisely
+  // the double count that made the sun 4% of this water's light.
+  it('is the identity where the normals are coherent — the sparkle stays', () => {
     for (const nh of [0.9, 0.99, 0.999]) {
-      expect(lobe(nh, sp.glintRoadPower, 0)).toBeCloseTo(
-        Math.pow(nh, sp.glintRoadPower),
+      expect(lobe(nh, sp.sparklePower, 0)).toBeCloseTo(
+        Math.pow(nh, sp.sparklePower),
         10,
       );
     }
   });
 
   it('collapses the pixel-to-pixel swing where they are not', () => {
-    const p = sp.glintRoadPower; // 180: the tightest lobe in the material
+    const p = sp.sparklePower; // 40: the tightest surviving pow(N·H) lobe
     const a = 0.999;
-    const b = 0.985; // one neighbouring pixel, a slightly different wave face
+    const b = 0.94; // one neighbouring pixel, a slightly different wave face
     const raw = lobe(a, p, 0) / lobe(b, p, 0);
-    expect(raw).toBeGreaterThan(8); // unfiltered: neighbours differ ~13x
-    const filtered = lobe(a, p, 0.05) / lobe(b, p, 0.05);
+    expect(raw).toBeGreaterThan(8); // unfiltered: neighbours differ ~11x
+    const filtered = lobe(a, p, 0.15) / lobe(b, p, 0.15);
     expect(filtered).toBeLessThan(2); // filtered: they now agree
   });
 
@@ -2017,11 +2025,178 @@ describe('specular lobes are filtered by normal variance (§V.48)', () => {
     // WITHOUT a clamp after the fact
     expect(sp.specularAaStrength).toBeGreaterThanOrEqual(0);
     expect(sp.specularAaMax).toBeGreaterThan(0);
-    for (const p of [sp.sparklePower, sp.glintRoadPower, sp.glintTrainPower]) {
+    for (const p of [sp.sparklePower, sp.glintTrainPower]) {
       const gain = 1 / (1 + p * sp.specularAaMax);
       expect(gain).toBeGreaterThan(0);
       expect(gain).toBeLessThanOrEqual(1);
     }
+  });
+});
+
+/**
+ * §V.75 THE SUN IS THE BRIGHTEST THING ON THE WATER.
+ *
+ * The defect these tests exist to catch, measured at the lagoon, tod 17.6, sun
+ * 5.8°, camera 7 m, mean water luminance over a mid-field band of 12 bins:
+ *
+ *     baseline                                     93
+ *     sparkleStrength 0 AND glintRoadStrength 0    90   (−4%)
+ *     + reflectionStrength 0                       28   (−70%)
+ *
+ * With BOTH glint terms off the frame was visually indistinguishable from
+ * baseline: the sun was 4% of the sea's light and the reflected sky 70%, and
+ * the sea measured 22% BRIGHTER facing away from the sun than toward it. The
+ * cause was arithmetic, not art — the road's peak was
+ * `glintRoadStrength / (1 + glintRoadPower·σ²)`, which at the sunset framing's
+ * σ² is 0.55/181 = 0.003 against a sky reflection of ~0.11. Two orders of
+ * magnitude, and no value of `glintRoadStrength` inside its slider range could
+ * have closed it.
+ *
+ * The lobe is now energy-correct: Beckmann D on the sea's OWN slope variance,
+ * Smith masking, Schlick at the microfacet, scaled by the sun irradiance this
+ * material already states in its diffuse term. These tests are written against
+ * the RATIO, because the ratio is what was wrong.
+ */
+describe('§V.75 the sun glint is an energy, not a sheen', () => {
+  const sp = oceanSurfaceParams;
+  /** Beckmann NDF — the Gaussian slope law Cox & Munk fitted to the sea */
+  const beckmann = (cosH: number, a2: number) => {
+    const c2 = Math.max(cosH * cosH, 1e-4);
+    return Math.exp(-((1 - c2) / c2) / a2) / (Math.PI * a2 * c2 * c2);
+  };
+  /** Smith height-correlated visibility, 1/(4 N·L N·V) folded in */
+  const smithV = (nol: number, nov: number, a2: number) =>
+    0.5 /
+    Math.max(
+      nol * Math.sqrt(nov * nov * (1 - a2) + a2) +
+        nov * Math.sqrt(nol * nol * (1 - a2) + a2),
+      1e-5,
+    );
+  const schlick = (voh: number) =>
+    sp.fresnelR0 + (1 - sp.fresnelR0) * Math.pow(1 - voh, 5);
+  /**
+   * The shader's own expression. `π · lightGain` is the unit bridge: the
+   * material's diffuse term is an unnormalised Lambert
+   * (`waterCol · sunTint · lightGain · N·L`), so `sunTint · lightGain` IS
+   * E_⊥/π in this renderer's radiance units. Keep this in step with
+   * surfaceMaterial's sun-glint block — the pair is the point.
+   */
+  const sunSpec = (cosH: number, nol: number, nov: number, voh: number, a2: number) =>
+    Math.PI *
+    sp.lightGain *
+    sp.glintRoadStrength *
+    beckmann(cosH, a2) *
+    smithV(nol, nov, a2) *
+    schlick(voh) *
+    nol;
+
+  /**
+   * THE MEASURED FRAMING. Sun 5.8° elevation, eye 7 m looking down ~5° at the
+   * mid-field, so the half vector stands almost straight up (cos ≈ 1) and the
+   * microfacet's own incidence is ~85° — which is where the golden cone gets
+   * its intensity, and it is Fresnel, not a boost.
+   */
+  const SUNSET = { cosH: 0.9995, nol: Math.sin((5.8 * Math.PI) / 180), nov: 0.087 };
+  /** total mean square slope of the shipped swell sea (both components) */
+  const SEA_VAR = 0.0607;
+  /** measured scene-linear radiance of the reflected sky in that frame */
+  const SKY_REFL = 0.11;
+
+  it('outshines the sky it competes with — the ratio that was the bug', () => {
+    const peak = sunSpec(SUNSET.cosH, SUNSET.nol, SUNSET.nov, 0.095, SEA_VAR);
+    // the OLD road, for the record: peak = strength/(1 + power·σ²) with the
+    // σ² the AA filter actually reaches at this framing
+    const oldPeak = 0.55 / (1 + 180 * 1.0);
+    expect(oldPeak).toBeLessThan(0.005);
+    expect(peak / oldPeak).toBeGreaterThan(100);
+    // and the bar that matters: the sun's own reflection has to dominate the
+    // mirrored sky at the core of the road, or there is no cone, only a sheen
+    expect(peak).toBeGreaterThan(10 * SKY_REFL);
+  });
+
+  it('is LONGER and WIDER as the sea roughens — σ² is the only width knob', () => {
+    // "much longer and a little wider" (user). A Beckmann lobe's half-power
+    // half-angle is atan(sqrt(σ²·ln2)); on a grazing view the road's REACH
+    // toward the eye is that angle divided by the view's own grazing angle, so
+    // a rougher sea extends the road for free. This is the acceptance check:
+    // it must be monotonic in σ², with no distance term anywhere in it.
+    const halfAngle = (a2: number) => {
+      const peak = beckmann(1, a2);
+      let lo = 0;
+      let hi = Math.PI / 2;
+      for (let i = 0; i < 60; i++) {
+        const m = (lo + hi) / 2;
+        if (beckmann(Math.cos(m), a2) > peak / 2) lo = m;
+        else hi = m;
+      }
+      return lo;
+    };
+    let prev = 0;
+    for (const a2 of [0.003, 0.01, 0.03, 0.0607, 0.12, 0.25]) {
+      const w = halfAngle(a2);
+      expect(w).toBeGreaterThan(prev);
+      prev = w;
+    }
+    // calm → shipped swell is a ~4.5x wider lobe, i.e. the road grows with the
+    // sea state rather than with a hand-placed falloff
+    expect(halfAngle(SEA_VAR) / halfAngle(0.003)).toBeGreaterThan(3);
+  });
+
+  it('the sim\'s own σ² is the one Cox & Munk measured', () => {
+    // The lobe is only physical if the surface driving it is. σ² here is the
+    // TOTAL mean square slope, up- plus cross-wind, which is what
+    // slopeVarianceTotal sums and what Cox & Munk (1954) regress as
+    // 0.003 + 0.00512·U. If the spectrum ever drifts off this the road's width
+    // silently stops meaning anything.
+    const N = 128;
+    let total = 0;
+    for (let i = 0; i < 3; i++) {
+      total += slopeVarianceTotal(
+        slopeWavelengthHistogram(
+          N,
+          oceanParams.cascades[i].domain,
+          oceanParams,
+          cascadeBand(i, oceanParams.splitWavelengths),
+        ),
+      );
+    }
+    const coxMunk = 0.003 + 0.00512 * oceanParams.windSpeed;
+    expect(total).toBeGreaterThan(0.4 * coxMunk);
+    expect(total).toBeLessThan(2.5 * coxMunk);
+  });
+
+  it('is bounded at source, for every degenerate input (§V.44)', () => {
+    // 1/(πσ²) runs away as σ² → 0 and 1/(4 N·V) runs away at exact grazing.
+    // The shader floors σ² at Cox & Munk's zero-wind intercept and clamps the
+    // product; both halves have to hold or a single pixel hands bloom an Inf.
+    const FLOOR = 0.003;
+    const MAX = 32;
+    for (const cosH of [0, 0.5, 0.9, 1]) {
+      for (const nol of [0, 1e-3, 0.1, 1]) {
+        for (const nov of [0, 1e-3, 0.1, 1]) {
+          for (const a2 of [FLOOR, SEA_VAR, 1]) {
+            const v = sunSpec(cosH, Math.max(nol, 1e-3), Math.max(nov, 1e-3), 0.1, a2);
+            expect(Number.isFinite(v)).toBe(true);
+            expect(v).toBeGreaterThanOrEqual(0);
+            expect(Math.min(v, MAX)).toBeLessThanOrEqual(MAX);
+          }
+        }
+      }
+    }
+  });
+
+  it('keeps ONE owner for the lobe\'s width, and it is σ²', () => {
+    // `glintRoadPower` was an independent exponent on the same lobe. It is how
+    // the road's shape and the sea's actual roughness came to disagree by two
+    // orders of magnitude, because nothing tied them together. Re-adding it
+    // re-opens exactly that, silently.
+    expect(oceanSurfaceParams).not.toHaveProperty('glintRoadPower');
+    // the identifier survives only in the prose that records why it went
+    expect(surfaceMaterialSource).not.toMatch(/sp\.glintRoadPower|uGlintRoad\.y/);
+    // and §V.26 stays shut: no sun disc through the reflection, analytic or
+    // otherwise. The lobe carries the sun's ENERGY, never its outline.
+    expect(surfaceMaterialSource).toMatch(/skyDomeColor\(refl\)/);
+    expect(surfaceMaterialSource).not.toMatch(/sunDisc/);
   });
 });
 
