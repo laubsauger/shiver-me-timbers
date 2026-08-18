@@ -13,6 +13,7 @@ const FLAT_SHEETS = {
 import type { Material, Mesh } from 'three';
 import { buildBrigantineBlueprint, buildGalleonBlueprint } from '../src/ship/shipBlueprint';
 import { buildHoledVariant, buildPieceGeometry, buildSailGeometry } from '../src/ship/pieceGeometry';
+import { buildWheelDiscGeometry } from '../src/ship/pieceGeometryFittings';
 import { ShipAssembly } from '../src/ship/shipAssembly';
 import { createWoodMaterial } from '../src/ship/woodMaterial';
 import { galleonParams, shipMaterialParams, shipRigParams } from '../src/params/ship';
@@ -30,7 +31,7 @@ import {
   sailStateForTrim,
   trimDropScale,
 } from '../src/ship/sailDynamics';
-import { updateRig } from '../src/ship/rigTrim';
+import { helmWheelAngle, updateRig } from '../src/ship/rigTrim';
 import { sheetLeadDirections } from '../src/ship/sailFrame';
 /** a sail sitting square in its ship's frame */
 const IDENTITY_MATRIX = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
@@ -882,6 +883,7 @@ describe('sail trim → §V13 sail states (docs/side-sails-fully-reefed.png)', (
  * continuous, whether or not anything else is.
  */
 describe('hauling the canvas up and down is SMOOTH end to end (§V22)', () => {
+  const TAU = Math.PI * 2;
   const p = shipRigParams;
   const mp = shipMaterialParams;
 
@@ -1020,6 +1022,65 @@ describe('hauling the canvas up and down is SMOOTH end to end (§V22)', () => {
         expect(travel / drop, `${sail.id} ${name}`).toBeGreaterThan(0.1);
       }
     }
+  });
+
+  it('nothing cloth-class stands outside the roll when she is fully in', () => {
+    /**
+     * THE GUARD THE FURL REWORK NEEDED AND DID NOT HAVE. User, on the finished
+     * bundles: "the fully packed up, rolled up sails now have a flappy end on
+     * all sides of the packages, on all sections of it, flapping in the wind."
+     *
+     * Freeing `trimDropMin` (0.23 → 0.03) was right, but it exposed every
+     * length in the furl path that was a fraction of the sail AS CUT rather
+     * than AS SET. Three were: `sailFurlLift` (could lift the foot above its
+     * own head), the flutter amplitude (±0.406 m of ripple on 0.227 m of
+     * remaining canvas — 2.4x the whole sail, peaking at both leeches and at
+     * the foot, i.e. a triangular tab off each end of the roll), and the sewn
+     * reef points (0.390 m rigid offsets, 1.7x the remaining sail).
+     *
+     * So the invariant is not about any one of those terms. It is the thing
+     * the user can see: when she is fully furled, the canvas is INSIDE the
+     * bundle. Anything that stands outside it is a flapping tab, whichever
+     * term put it there.
+     */
+    const worstLuff = 1.4; // the cap in sailDrive
+    for (const sail of sails) {
+      const width = sail.aabb.max[0] - sail.aabb.min[0];
+      const drop = -sail.aabb.min[1];
+      const set = trimDropScale(0, p);
+      const roll = furlBundleScale(set);
+      // the roll's THINNEST section — the nipped waist at a gasket, which is
+      // what the cloth actually has to hide behind (buildSailGeometry)
+      const waist = Math.max(0.15, drop * 0.05) * 1.15 * roll * 0.62;
+      let worstZ = 0;
+      for (let ph = 0; ph < TAU; ph += 0.4) {
+        const st = { drive: 1, luff: worstLuff, skew: 0, dropScale: set, flutterPhase: ph, ...FLAT_SHEETS };
+        for (let i = 0; i <= 28; i++) {
+          for (let j = 0; j <= 16; j++) {
+            const q = sailClothPoint(i / 28, j / 16, width, drop, st, mp);
+            worstZ = Math.max(worstZ, Math.abs(q[2]));
+          }
+        }
+      }
+      expect(worstZ, `${sail.id} cloth stands ${worstZ.toFixed(3)} m off the yard`).toBeLessThan(waist);
+    }
+  });
+
+  it('…but a SET sail still shakes — the furl fix must not flatten the flutter', () => {
+    // WHY: `× set` on the ripple is only correct if it is invisible at full
+    // sail. A fix for the furl that quietly took the life out of a drawing
+    // sail would be a worse regression than the tabs (§V22 "the sails appear
+    // too static", three times).
+    const sail = sails.find((s) => s.id === 'sail-main-lower')!;
+    const width = sail.aabb.max[0] - sail.aabb.min[0];
+    const drop = -sail.aabb.min[1];
+    let span = 0;
+    for (let ph = 0; ph < TAU; ph += 0.4) {
+      const st = { drive: 0.2, luff: 1, skew: 0, dropScale: 1, flutterPhase: ph, ...FLAT_SHEETS };
+      const z = sailClothPoint(0, 0, width, drop, st, mp)[2];
+      span = Math.max(span, Math.abs(z));
+    }
+    expect(span).toBeGreaterThan(0.3); // full sail: the leech still flies
   });
 
   it('has no dead zone: every part of the travel does something', () => {
@@ -2436,5 +2497,67 @@ describe('the draft is DISTRIBUTED across the cloth (§V43 SoT parity)', () => {
     expect(at(1, 0.5, 0)).not.toBeCloseTo(at(-1, 0.5, 0), 3);
     // …and the head cannot lag at all — it is bent to its yard
     expect(at(1, 0.4, 1)).toBeCloseTo(at(-1, 0.4, 1), 6);
+  });
+});
+
+describe("the ship's wheel turns with the helm (§V22)", () => {
+  const p = shipRigParams;
+
+  it('is geared like a barrel, not like a tiller', () => {
+    // WHY: user asked for the wheel to turn "to make the first-person view a
+    // little bit more interesting". A 1:1 map to the rudder would sweep a
+    // quarter turn and read as a car; a ship's wheel hauls its tiller through
+    // several turns of a barrel, and the multiple revolutions ARE the thing
+    // that makes it interesting from the captain's eye.
+    expect(helmWheelAngle(0, p)).toBe(0);
+    const hardOver = helmWheelAngle(1, p);
+    const turns = Math.abs(hardOver) / (Math.PI * 2);
+    expect(turns).toBeGreaterThan(1); // more than one revolution each way…
+    expect(turns * 2).toBeCloseTo(p.helmTurnsLockToLock, 6); // …and lock to lock is the param
+    expect(helmWheelAngle(-1, p)).toBeCloseTo(-hardOver, 9); // symmetric
+    // §V28: a NaN rudder must not poison a transform
+    expect(helmWheelAngle(NaN, p)).toBe(0);
+    expect(helmWheelAngle(5, p)).toBeCloseTo(hardOver, 9); // clamped at the stops
+  });
+
+  it('actually reaches the mesh, and only the turning half (§V.62)', () => {
+    // WHY: this repo has thirteen-plus recorded silent no-ops — a value that is
+    // computed, plumbed, and never applied. The wheel used to be ONE merged
+    // mesh including its pedestal, so "rotate the wheel" was not expressible
+    // at all. Assert the piece graph, not the arithmetic.
+    const asm = new ShipAssembly(buildGalleonBlueprint(), stubFactory);
+    const disc = asm.group.getObjectByName('wheel-disc');
+    const pedestal = asm.group.getObjectByName('wheel');
+    expect(disc, 'wheel-disc piece exists').toBeDefined();
+    expect(disc!.parent!.name).toBe('wheel'); // parented at the axle
+    asm.setHelmAngle(helmWheelAngle(1, p));
+    expect(disc!.rotation.z).toBeCloseTo(helmWheelAngle(1, p), 9);
+    expect(pedestal!.rotation.z).toBe(0); // the pedestal does NOT turn
+    asm.dispose();
+  });
+
+  it('the disc is centred on its own axle, or multiple turns wobble', () => {
+    // WHY: at 3.5 turns lock to lock any offset between the mesh's centre and
+    // the axis it spins about stops reading as an offset and starts reading as
+    // a wobble, which is a worse artifact than a wheel that never moved.
+    const sail = buildGalleonBlueprint().find((q) => q.id === 'wheel')!;
+    const geo = buildWheelDiscGeometry(sail.aabb);
+    const pos = geo.getAttribute('position');
+    let cx = 0;
+    let cy = 0;
+    let rMin = Infinity;
+    let rMax = 0;
+    for (let i = 0; i < pos.count; i++) {
+      cx += pos.getX(i);
+      cy += pos.getY(i);
+      const r = Math.hypot(pos.getX(i), pos.getY(i));
+      rMin = Math.min(rMin, r);
+      rMax = Math.max(rMax, r);
+    }
+    cx /= pos.count;
+    cy /= pos.count;
+    expect(Math.hypot(cx, cy)).toBeLessThan(rMax * 0.01);
+    expect(rMax).toBeGreaterThan(0.2); // it is a real wheel, not a nub
+    geo.dispose();
   });
 });

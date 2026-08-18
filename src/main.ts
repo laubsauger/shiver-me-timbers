@@ -1151,7 +1151,7 @@ async function boot(): Promise<void> {
       // updateMatrixWorld(true) picks it up → rope anchors resolve braced.
       // updateRig owns the trim→state predicate and is edge-triggered
       // internally, so passing the raw scalar every frame is safe.
-      updateRig(shipAssembly, frameDt, playerShip.sailTrim);
+      updateRig(shipAssembly, frameDt, playerShip.sailTrim, playerShip.rudder);
 
       // lanterns follow the INTERPOLATED pose, so they do not judder against
       // the hull they hang from on frames between two ticks.
@@ -1182,7 +1182,7 @@ async function boot(): Promise<void> {
         enemyShip.quaternion[2],
         enemyShip.quaternion[3],
       );
-      updateRig(enemyAssembly, frameDt, enemyShip.sailTrim);
+      updateRig(enemyAssembly, frameDt, enemyShip.sailTrim, enemyShip.rudder);
 
       // rigging follows the moving ship: rewrite anchors, GPU re-solves (§V.12)
       if (FEATURES.ropes) {

@@ -63,6 +63,7 @@ export class ShipAssembly {
   private readonly materialFactory: MaterialFactory;
   /** live yard brace angle (rad), applied to every yard node */
   private rigTrim = 0;
+  private helmAngle = 0;
   private windFrame: SailWindFrame = NEUTRAL_SAIL_WIND_FRAME;
 
   constructor(blueprint: PieceDef[], materialFactory?: MaterialFactory) {
@@ -193,6 +194,29 @@ export class ShipAssembly {
   /** current yard brace angle (rad) */
   get braceAngle(): number {
     return this.rigTrim;
+  }
+
+  /**
+   * Spin the ship's wheel. Same shape as `setRigTrim`: one moving piece kind,
+   * one transform, edge-triggered so calling it every frame is free.
+   *
+   * ABOUT LOCAL +Z, which is the axle — `buildWheelDiscGeometry` lays the rim
+   * in XY and centres it on the origin, and the piece is parented to the
+   * pedestal at the hub, so this is a pure spin with no lever arm.
+   */
+  setHelmAngle(angle: number): void {
+    if (!Number.isFinite(angle)) return; // §V28: never poison a transform
+    if (angle === this.helmAngle) return;
+    this.helmAngle = angle;
+    for (const rt of this.pieces.values()) {
+      if (rt.def.kind !== 'wheel-disc') continue;
+      rt.node.rotation.z = rt.def.transform.rotation[2] + angle;
+    }
+  }
+
+  /** current wheel angle (rad); multiple turns, so NOT wrapped */
+  get wheelAngle(): number {
+    return this.helmAngle;
   }
 
   socketWorldPosition(socketId: string): Vec3 {

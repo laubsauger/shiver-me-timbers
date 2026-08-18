@@ -17,7 +17,7 @@
  * what the user felt as a skip; see the block above the trim section.
  */
 import type * as THREE from 'three';
-import { shipMaterialParams, shipRigParams } from '../params/ship';
+import { shipMaterialParams, shipRigParams, type ShipRigParams } from '../params/ship';
 import { setShipWorldMatrix } from './woodMaterial';
 import { oceanParams } from '../params/ocean';
 import type { ShipAssembly } from './shipAssembly';
@@ -102,10 +102,27 @@ function advanceFrame(assembly: ShipAssembly, group: THREE.Object3D, dt: number)
 }
 
 /**
- * @param dt   render frame delta (s) — rate-limits the swing
- * @param trim sim `sailTrim` 0..1; omit to leave the canvas at full
+ * THE HELM'S GEARING — rudder → wheel angle, in radians.
+ *
+ * `rudder` is the sim's own −1..1, i.e. the SAME number the hydrodynamics
+ * steer on (`stepShipSailing` reads `ship.rudder` for its yaw target), and
+ * deliberately not the raw key state: the input already ramps and springs, and
+ * a wheel driven from the intent would LEAD the ship it is supposedly turning.
+ *
+ * The factor of 0.5 is the rudder's own range: −1..1 is two units of travel,
+ * and `helmTurnsLockToLock` counts turns across all of it.
  */
-export function updateRig(assembly: ShipAssembly, dt: number, trim = 1): void {
+export function helmWheelAngle(rudder: number, p: ShipRigParams): number {
+  const r = Math.max(-1, Math.min(1, Number.isFinite(rudder) ? rudder : 0));
+  return r * Math.max(0, p.helmTurnsLockToLock) * Math.PI; // turns·2π·(r/2)
+}
+
+/**
+ * @param dt     render frame delta (s) — rate-limits the swing
+ * @param trim   sim `sailTrim` 0..1; omit to leave the canvas at full
+ * @param rudder sim `ship.rudder` −1..1; omit to leave the wheel amidships
+ */
+export function updateRig(assembly: ShipAssembly, dt: number, trim = 1, rudder = 0): void {
   const p = shipRigParams;
   const step = Math.min(0.25, Math.max(0, Number.isFinite(dt) ? dt : 0));
 
@@ -150,6 +167,12 @@ export function updateRig(assembly: ShipAssembly, dt: number, trim = 1): void {
   // silhouette still tripled in thickness). The reef is the scale, and the
   // gathered roll rides the SAME scale in the same mesh — see
   // sailDynamics.trimDropScale and sailShape.furlBundleScale.
+  // the helm follows the RUDDER, geared through the barrel — see
+  // helmWheelAngle. No rate limit of its own: the rudder already has one
+  // (rudderRampRate / rudderSpringRate), and adding a second would put the
+  // wheel behind the blade it is supposed to be turning.
+  assembly.setHelmAngle(helmWheelAngle(rudder, p));
+
   const sails = assembly.sailPieceIds();
   assembly.setSailWindFrame(frame);
   if (sails.length === 0) return;

@@ -41,27 +41,61 @@ export function buildCannonGeometry(aabb: AABB): THREE.BufferGeometry {
 }
 
 /** ship's wheel: spoked rim on a pedestal, athwartships plane (faces ±z) */
+/**
+ * THE WHEEL IS TWO PIECES BECAUSE ONE OF THEM TURNS.
+ *
+ * User: "the steering wheel should rotate as we steer… to make the
+ * first-person view a little bit more interesting."
+ *
+ * It used to be ONE merged mesh — pedestal, rim, spokes and hub — with its
+ * origin on the deck at the pedestal's foot. Nothing could animate that: the
+ * piece's own transform is the only handle, and turning it would have swung
+ * the pedestal round with the rim, about a point 0.93 m below the axle. So the
+ * turning half is split off as its own piece, parented to the pedestal at the
+ * hub, exactly as a yard is parented to its mast — one piece, one moving part,
+ * one transform (§V.13), and `ShipAssembly.setHelmAngle` drives it the way
+ * `setRigTrim` drives the yards.
+ *
+ * `buildWheelGeometry` keeps the STANDING half: the pedestal alone.
+ */
 export function buildWheelGeometry(aabb: AABB): THREE.BufferGeometry {
   const s = aabbSize(aabb);
-  const rimR = s.x * 0.36;
-  const hubY = aabb.min[1] + s.y * 0.62;
-  const parts: THREE.BufferGeometry[] = [];
   const pedestal = new THREE.BoxGeometry(s.x * 0.22, s.y * 0.62, s.z * 0.5);
   pedestal.translate(0, aabb.min[1] + s.y * 0.31, 0);
-  parts.push(pedestal);
-  const rim = new THREE.TorusGeometry(rimR, rimR * 0.12, 8, 20);
-  rim.translate(0, hubY, 0); // torus lies in XY → wheel faces fore-aft
-  parts.push(rim);
+  return mergeNonIndexed([pedestal]);
+}
+
+/** where the axle sits, in the WHEEL PIECE's own local frame */
+export function wheelHubHeight(aabb: AABB): number {
+  return aabb.min[1] + aabbSize(aabb).y * 0.62;
+}
+
+/**
+ * The turning half: rim, spokes and hub, CENTRED ON THE ORIGIN and lying in
+ * XY so the axle is local +z (the wheel faces fore-and-aft).
+ *
+ * CENTRED IS THE WHOLE REQUIREMENT. This spins through three and a half full
+ * turns lock to lock, so any offset between the mesh's centre and the axis it
+ * rotates about would not read as an offset — it would read as a WOBBLE, and a
+ * wobbling wheel is a worse artifact than a static one. Everything below is
+ * built at the origin and never translated.
+ *
+ * The spoke count is also load-bearing at multiple turns: 4 crossed spokes is
+ * 8 handles at 45°, so the geometry maps onto itself every 45° of rotation and
+ * there is no orientation at which the wheel reads as "wrong way up". That was
+ * already true and is worth not breaking.
+ */
+export function buildWheelDiscGeometry(aabb: AABB): THREE.BufferGeometry {
+  const rimR = aabbSize(aabb).x * 0.36;
+  const parts: THREE.BufferGeometry[] = [];
+  parts.push(new THREE.TorusGeometry(rimR, rimR * 0.12, 8, 20));
   for (let i = 0; i < 4; i++) {
     // 4 crossed spokes = 8 handles poking past the rim
     const spoke = new THREE.CylinderGeometry(rimR * 0.07, rimR * 0.07, rimR * 2.55, 6);
     spoke.rotateZ((i * Math.PI) / 4);
-    spoke.translate(0, hubY, 0);
     parts.push(spoke);
   }
-  const hub = new THREE.SphereGeometry(rimR * 0.2, 8, 6);
-  hub.translate(0, hubY, 0);
-  parts.push(hub);
+  parts.push(new THREE.SphereGeometry(rimR * 0.2, 8, 6));
   return mergeNonIndexed(parts);
 }
 

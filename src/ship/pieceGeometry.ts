@@ -29,6 +29,7 @@ import {
   buildRailGeometry,
   buildStairsGeometry,
   buildWheelGeometry,
+  buildWheelDiscGeometry,
 } from './pieceGeometryFittings';
 import {
   buildCabinGeometry,
@@ -137,6 +138,8 @@ export function buildPieceGeometry(
       return buildCannonGeometry(aabb);
     case 'wheel':
       return buildWheelGeometry(aabb);
+    case 'wheel-disc':
+      return buildWheelDiscGeometry(aabb);
     case 'capstan':
       return buildCapstanGeometry(aabb);
     case 'grating':

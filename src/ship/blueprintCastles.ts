@@ -8,6 +8,7 @@ import { shipDetailParams, type ShipClassParams } from '../params/ship';
 import { LANTERN_ARM_REACH, type PieceDef, type Vec3 } from './pieceTypes';
 import { companionwayStations, hullShapeHints, mkPiece } from './blueprintParts';
 import { hullHalfWidthAt, type HullShape } from './hullMath';
+import { wheelHubHeight } from './pieceGeometryFittings';
 
 /** Raised bow/stern works: forecastle, quarterdeck + cabin (stepped stern
  *  ~2 levels above main deck), gallery band, lantern posts. Galleon only. */
@@ -115,10 +116,18 @@ export function buildCastles(p: ShipClassParams): PieceDef[] {
  *  grating, companionway stairs to both castles (§V22 review) */
 export function buildFurniture(p: ShipClassParams): PieceDef[] {
   const sl2 = p.sterncastleLength / 2;
+  const WHEEL_HUB_Y = wheelHubHeight({ min: [-0.75, 0, -0.3], max: [0.75, 1.5, 0.3] });
   return [
     mkPiece('wheel', 'wheel', [0, 0.05, sl2 - 0.7],
       { min: [-0.75, 0, -0.3], max: [0.75, 1.5, 0.3] },
       { parent: 'sterncastle-deck' }),
+    // THE TURNING HALF, parented to the pedestal at the axle. Same shape as a
+    // yard on its mast: the moving part is its own piece so it has its own
+    // transform, and ShipAssembly.setHelmAngle spins it. Its aabb is the
+    // pedestal's, because the disc's radius is derived from it.
+    mkPiece('wheel-disc', 'wheel-disc', [0, WHEEL_HUB_Y, 0],
+      { min: [-0.75, 0, -0.3], max: [0.75, 1.5, 0.3] },
+      { parent: 'wheel' }),
     mkPiece('capstan', 'capstan', [0, 0.05, p.hullLength * 0.18],
       { min: [-0.85, 0, -0.85], max: [0.85, 1.15, 0.85] },
       { parent: 'deck' }),

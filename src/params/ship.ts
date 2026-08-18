@@ -202,7 +202,7 @@ export const galleonParams: ShipClassParams = registerParams(
     crowNestRadius: 0.85, crowNestHeight: 0.9, crowNestFrac: 0.86,
     yardLowerFrac: 0.5, yardUpperFrac: 0.76, yardTopgallantFrac: 0.93,
     yardLowerLenFactor: 0.42, yardUpperLenFactor: 0.3,
-    yardTopgallantLenFactor: 0.21, yardSlenderness: 44,
+    yardTopgallantLenFactor: 0.245, yardSlenderness: 44,
     yardMastClearance: 0.12, sailYardOffset: 0.2,
     // RE-FITTED for the third tier (3627908). 0.26 was bisected against a
     // TWO-tier rig; adding the topgallant moved the rear course's clew and its
@@ -211,7 +211,17 @@ export const galleonParams: ShipClassParams = registerParams(
     // penetration the fail-fast assert never reaches. 0.24 clears it outright
     // (0.26 fails, 0.24 passes, and it is flat from there down).
     sailDropLowerFactor: 0.24, sailDropUpperFactor: 0.16,
-    sailDropTopgallantFactor: 0.14,
+    // ASPECT, not area (§V.66 measured on all three masts): width/drop ran
+    // 1.61 course, 1.72 topsail, 1.38 topgallant — the topgallant was the one
+    // tier getting TALLER relative to its width going up, where a real rig
+    // gets squatter. Fixed by lengthening the yard AND easing the drop
+    // together (0.21→0.245, 0.14→0.1225): aspect 1.38→1.84, canvas +2%, so
+    // the third tier's whole reason for existing — the rig reading
+    // mast-heavy — is not handed back. Lengthening the yard ALONE would have
+    // reached the same aspect at +33% canvas but left the topgallant yard at
+    // 93% of the topsail yard below it, which is the same error inverted.
+    // Yard taper against the course lands at 0.583, the historical band.
+    sailDropTopgallantFactor: 0.1225,
     bowspritLength: 9, bowspritRadius: 0.22, bowspritPitch: 0.35, // ~20°
     railHeight: 1.0, railThickness: 0.13, railInset: 0.22, railLengthFactor: 0.8,
     rudderHeight: 2.6, rudderChord: 1.4, rudderThickness: 0.18,
@@ -479,6 +489,22 @@ export interface ShipRigParams {
   braceMax: number;
   /** how fast yards swing toward their brace target (rad/s) */
   braceRate: number;
+  /**
+   * TURNS OF THE WHEEL FROM HARD OVER TO HARD OVER — the barrel's gearing, and
+   * the whole reason a ship's wheel reads as a ship's wheel.
+   *
+   * A wheel is not a tiller with a rim on it: it hauls the tiller through
+   * several turns of a barrel and its rope, so on a vessel this size the helm
+   * goes three to four full REVOLUTIONS lock to lock, not the quarter turn a
+   * 1:1 mapping to the rudder would give. 3.5 is the middle of that band, and
+   * at 8 handles (4 crossed spokes) it means a handle passes the eye 28 times
+   * across the full travel — which is what makes the helm interesting to look
+   * at from the captain's eye, the thing actually asked for.
+   *
+   * `rudder` is a −1..1 intent, so the sweep is 2 units: wheelAngle =
+   * rudder · turns · 2π / 2.
+   */
+  helmTurnsLockToLock: number;
   /** how much of the "bisect the apparent wind" angle the crew actually uses */
   braceBisect: number;
   /** blend width of the tack flip, in units of the lateral wind component */
@@ -521,6 +547,7 @@ export const shipRigParams: ShipRigParams = registerParams(
   {
     braceMax: 0.61, // ~35°
     braceRate: 0.35,
+    helmTurnsLockToLock: 3.5,
     braceBisect: 0.9,
     braceTackWidth: 0.18,
     reefFurledBelow: 0.15,
@@ -535,6 +562,7 @@ export const shipRigParams: ShipRigParams = registerParams(
   {
     braceMax: { min: 0, max: 1.2, step: 0.01 },
     braceRate: { min: 0.02, max: 3, step: 0.01 },
+    helmTurnsLockToLock: { min: 0.25, max: 8, step: 0.25 },
     braceBisect: { min: 0, max: 1.5, step: 0.01 },
     braceTackWidth: { min: 0.02, max: 1, step: 0.01 },
     reefFurledBelow: { min: 0, max: 0.5, step: 0.01 },

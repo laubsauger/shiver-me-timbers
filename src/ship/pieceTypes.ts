@@ -40,6 +40,7 @@ export type PieceKind =
   | 'rail'
   | 'cannon'
   | 'wheel'
+  | 'wheel-disc' // the turning half of the ship's wheel (see setHelmAngle)
   | 'capstan'
   | 'grating'
   | 'stairs'

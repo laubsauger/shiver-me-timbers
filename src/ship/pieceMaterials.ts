@@ -40,6 +40,7 @@ const FAMILY_OF: Record<PieceKind, Family> = {
   moulding: 'trim',
   cannon: 'trim',
   wheel: 'trim',
+  'wheel-disc': 'trim',
   capstan: 'trim',
   grating: 'trim',
   stairs: 'deck',
