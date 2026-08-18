@@ -30,6 +30,9 @@ const TINTS: Record<FxKind, THREE.Color> = {
   spark: new THREE.Color(0xffa53a),
   splinter: new THREE.Color(0xa97c4e),
   splash: new THREE.Color(0xcfe6e2),
+  // the vent puff: the same powder as the muzzle bank, and it must read as
+  // the same substance, so it shares the tint and differs only in scale
+  breech: new THREE.Color(0x9a958c),
   // the ball's own wake: thin, cool, and DIM on purpose — a bright trail
   // turns a wooden-ship demo into science fiction
   trail: new THREE.Color(0x6f7a80),
@@ -61,6 +64,9 @@ export function createProfiles(): Record<FxKind, FxProfile> {
     speed: 0,
     spread: 0,
     boost: 1,
+    riseSpeed: 0,
+    windCoupling: 0,
+    growthExp: 1,
   });
   return {
     flash: blank('flash'),
@@ -69,6 +75,7 @@ export function createProfiles(): Record<FxKind, FxProfile> {
     splinter: blank('splinter'),
     splash: blank('splash'),
     trail: blank('trail'),
+    breech: blank('breech'),
     impactFlash: blank('impactFlash'),
     impactSmoke: blank('impactSmoke'),
     column: blank('column'),
@@ -87,10 +94,34 @@ export function fillProfiles(
     sizeEnd: pos(p.flashSize, 2.2) * 0.4, gravity: 0, drag: 6,
     speed: 2, spread: 0.35, boost,
   });
+  // POWDER SMOKE, in the three phases the user described ("smoke balls
+  // bellow out and then that kinda moves towards the top"). They are not
+  // three mechanisms — they are one set of numbers whose timescales separate:
+  //
+  //   JET     0 → ~0.25 s   speed 14 m/s along the barrel against drag 4.5
+  //                         (tau = 0.22 s), so it throws ~2 m and stalls.
+  //   BILLOW  ~0.25 → ~1 s  horizontal motion spent; size is still climbing
+  //                         fastest here because growth is sqrt(t).
+  //   RISE    ~1 s → end    all that is left is riseSpeed, and the parcel is
+  //                         now moving with the air, so it lifts and drifts.
+  //
+  // The phases OVERLAP in time and still read in sequence, because early on
+  // the jet (14 m/s) is 7x the rise (2 m/s) and drowns it; once the jet is
+  // spent the rise is the only motion left. That is why no ramp, no timer and
+  // no second emitter is needed to get "and then".
+  //
+  // gravity 0 rather than the old -0.6: buoyancy is now `riseSpeed`, which
+  // states the steady climb directly instead of hiding it in a ratio against
+  // drag. The old pair gave a terminal rise of 0.6/1.6 = 0.37 m/s, and at the
+  // drag needed to stall a jet it would have been 0.13 m/s — the smoke could
+  // not have risen at any setting of the knobs that existed.
   set(dst.smoke, {
-    life: pos(p.smokeLife, 2.4), sizeStart: pos(p.smokeSize, 1.1),
-    sizeEnd: pos(p.smokeSize, 1.1) * pos(p.smokeGrowth, 4.5),
-    gravity: -0.6, drag: 1.6, speed: nn(p.smokeSpeed, 7), spread: 0.4, boost: 1,
+    life: pos(p.smokeLife, 3.2), sizeStart: pos(p.smokeSize, 0.8),
+    sizeEnd: pos(p.smokeSize, 0.8) * pos(p.smokeGrowth, 7),
+    gravity: 0, drag: nn(p.smokeDrag, 4.5), speed: nn(p.smokeSpeed, 14),
+    spread: 0.3, boost: 1,
+    riseSpeed: nn(p.smokeRiseSpeed, 2), windCoupling: nn(p.smokeWind, 0.7),
+    growthExp: pos(p.smokeGrowthExp, 0.5),
   });
   set(dst.spark, {
     life: pos(p.sparkLife, 0.4), sizeStart: pos(p.sparkSize, 0.14),
@@ -122,13 +153,26 @@ export function fillProfiles(
     sizeEnd: pos(p.impactFlashSize, 1.5) * 0.35, gravity: 0, drag: 7,
     speed: 3, spread: 0.5, boost,
   });
+  // the same three phases as powder smoke, but knocked OUT of oak rather than
+  // jetted out of a barrel: a slower, wider spray and a gentler climb
   set(dst.impactSmoke, {
     life: pos(p.impactSmokeLife, 3.4), sizeStart: pos(p.impactSmokeSize, 0.65),
     sizeEnd: pos(p.impactSmokeSize, 0.65) * pos(p.impactSmokeGrowth, 6),
-    // buoyant, so the puff drifts UP off the strike and stays readable
-    // against the hull instead of sliding down it
-    gravity: -0.5, drag: 1.2, speed: nn(p.impactSmokeSpeed, 3.5),
+    gravity: 0, drag: 3, speed: nn(p.impactSmokeSpeed, 5),
     spread: 0.55, boost: 1,
+    riseSpeed: nn(p.impactSmokeRise, 1.2), windCoupling: nn(p.smokeWind, 0.7) * 0.8,
+    growthExp: pos(p.smokeGrowthExp, 0.5),
+  });
+
+  // BREECH VENT. A muzzle-loader fires through the vent as well as the
+  // muzzle, and the vent puff is the tell that separates a cannon from a
+  // firework: smaller, sharper, straight up off the breech, gone quickly.
+  set(dst.breech, {
+    life: pos(p.breechLife, 1.4), sizeStart: pos(p.breechSize, 0.3),
+    sizeEnd: pos(p.breechSize, 0.3) * pos(p.breechGrowth, 5),
+    gravity: 0, drag: 5, speed: nn(p.breechSpeed, 6), spread: 0.28, boost: 1,
+    riseSpeed: nn(p.breechRise, 2.6), windCoupling: nn(p.smokeWind, 0.7),
+    growthExp: pos(p.smokeGrowthExp, 0.5),
   });
 
   // --- the water column --------------------------------------------------
@@ -144,8 +188,19 @@ export function fillProfiles(
   return dst;
 }
 
-/** in-place field copy; `color` is deliberately untouched (shared constant) */
-function set(dst: FxProfile, src: Omit<FxProfile, 'color'>): void {
+/**
+ * In-place field copy; `color` is deliberately untouched (shared constant).
+ *
+ * The three air fields default to NEUTRAL — `riseSpeed` 0, `windCoupling` 0,
+ * `growthExp` 1 — so a kind that does not name them behaves exactly as it did
+ * before they existed, and `stepVelocity`/`sizeAt` take their original code
+ * paths rather than merely equivalent ones. Only the smoke kinds opt in, and
+ * you can see which by reading this file.
+ */
+type ProfileFields = Omit<FxProfile, 'color' | 'riseSpeed' | 'windCoupling' | 'growthExp'>
+  & Partial<Pick<FxProfile, 'riseSpeed' | 'windCoupling' | 'growthExp'>>;
+
+function set(dst: FxProfile, src: ProfileFields): void {
   dst.life = src.life;
   dst.sizeStart = src.sizeStart;
   dst.sizeEnd = src.sizeEnd;
@@ -154,6 +209,9 @@ function set(dst: FxProfile, src: Omit<FxProfile, 'color'>): void {
   dst.speed = src.speed;
   dst.spread = src.spread;
   dst.boost = src.boost;
+  dst.riseSpeed = src.riseSpeed ?? 0;
+  dst.windCoupling = src.windCoupling ?? 0;
+  dst.growthExp = src.growthExp ?? 1;
 }
 
 function pos(v: number, fallback: number): number {

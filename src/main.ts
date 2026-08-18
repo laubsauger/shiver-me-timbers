@@ -535,6 +535,11 @@ async function boot(): Promise<void> {
 
   // §V.8: CPU mirror of the same seeded spectrum the GPU renders
   const cpuOcean = new CpuOcean(state.seed);
+  // §V.72: ...and the same SEABED the ocean material shoals over. The material
+  // was handed `archipelago.seabed` above; handing the mirror anything else —
+  // including nothing — would put the hull on the open-ocean sea while the
+  // drawn water calmed over the shallows, which is §V.8's whole subject.
+  cpuOcean.setSeabed(archipelago.seabed, -archipelago.seabed.openHeight);
 
   // hull waterline contact (§T.33 support): coarse stations round the hull
   // outline, sampled against the SAME sea every tick. Consumers: bow spray
@@ -1052,7 +1057,15 @@ async function boot(): Promise<void> {
       renderShipView.velocity[0] = prevVel.x + (currVel.x - prevVel.x) * alpha;
       renderShipView.velocity[1] = prevVel.y + (currVel.y - prevVel.y) * alpha;
       renderShipView.velocity[2] = prevVel.z + (currVel.z - prevVel.z) * alpha;
+      // COMBAT SHAKE, in a fixed three-part order around the follow camera.
+      // `restore` MUST come first: FollowCam.update() adopts any external
+      // camera rotation as the free camera's own pose, so a shake left on the
+      // lens would be folded in and accumulate permanently — a silent,
+      // cumulative drift that would surface as a free-cam bug in another file.
+      combat.shake.restore(app.camera);
       followCam.update(renderShipView, frameDt, (x, z) => cpuOcean.heightAt(x, z, state.time));
+      combat.shake.update(frameDt, app.camera);
+      combat.shake.apply(app.camera);
 
       // after the camera pose is final, before surface.update/render. This
       // only publishes pose, layer masks and live params — the mirror pass

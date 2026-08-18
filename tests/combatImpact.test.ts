@@ -95,13 +95,27 @@ function ringTransform(mesh: Object3D, i: number): Matrix4 {
   return m;
 }
 
+interface FxPool {
+  position: Float32Array;
+  color: Float32Array;
+  size: Float32Array;
+  aspect: Float32Array;
+  seed: Float32Array;
+  tear: Float32Array;
+  kinds: string[];
+}
+
+/** the pool's PUBLISHED buffers — never reach through the node graph */
+function pool(root: Object3D): FxPool {
+  const sprites = root.getObjectByName('combat-sprites');
+  const p = (sprites as unknown as { userData?: { fxPool?: FxPool } })?.userData?.fxPool;
+  if (p === undefined) throw new Error('combat-sprites has no published fxPool');
+  return p;
+}
+
 /** the sprite pool's live per-instance sizes (0 = dead, §V.28) */
 function liveSprites(root: Object3D): number[] {
-  const sprites = root.getObjectByName('combat-sprites');
-  const array = (
-    sprites as unknown as { material?: { scaleNode?: { value?: { array?: Float32Array } } } }
-  )?.material?.scaleNode?.value?.array;
-  return array === undefined ? [] : [...array].filter((s) => s > 0);
+  return [...pool(root).size].filter((s) => s > 0);
 }
 
 describe('a cannonball hit is DRAWN, not only heard (the whole defect)', () => {
@@ -213,16 +227,7 @@ describe('debris comes OUT of the hull, not up out of the deck', () => {
     );
     fx.update(1 / 60, []);
 
-    const positions = (
-      fx.group.getObjectByName('combat-sprites') as unknown as {
-        material: { positionNode: { value: { array: Float32Array } } };
-      }
-    ).material.positionNode.value.array;
-    const sizes = (
-      fx.group.getObjectByName('combat-sprites') as unknown as {
-        material: { scaleNode: { value: { array: Float32Array } } };
-      }
-    ).material.scaleNode.value.array;
+    const { position: positions, size: sizes } = pool(fx.group);
 
     // of the live particles, the clear majority must have moved to PORT
     let toPort = 0;

@@ -122,6 +122,74 @@ export const combatArenaParams: CombatArenaParams = registerParams(
 );
 
 /**
+ * CAMERA SHAKE (§V.16). Its own group because it is the one effect here most
+ * likely to become annoying, and it must be turnable-down in one place
+ * without hunting through the fx knobs.
+ *
+ * `gain` 0 disables the whole system — no shake, no cost, no code change.
+ * That is the knob to reach for first if it is too much.
+ */
+export interface CombatShakeParams {
+  /** master multiplier on every source. 0 = off. */
+  gain: number;
+  /** m at which a source is at half strength (inverse-square about this) */
+  refDistance: number;
+  /** m past which a source contributes EXACTLY nothing */
+  maxDistance: number;
+  /** ceiling on the summed 0..1 energy — a broadside must not fling the lens */
+  maxLevel: number;
+  /** s — exponential decay time constant of the envelope */
+  decay: number;
+  /** Hz — base wobble rate; the three axes detune off this */
+  frequency: number;
+  /** rad at full energy, per axis. Roll leads: it reads as a shock. */
+  yawAmplitude: number;
+  pitchAmplitude: number;
+  rollAmplitude: number;
+  /** 0..1 event strengths BEFORE distance falloff */
+  firingStrength: number;
+  /** a ball into our own hull — the one that should be felt hardest */
+  ownHitStrength: number;
+  /** a ball into anyone else: a tremor at range, not silence */
+  otherHitStrength: number;
+}
+
+export const combatShakeParams: CombatShakeParams = registerParams(
+  'combatShake',
+  {
+    gain: 1,
+    refDistance: 25,
+    maxDistance: 400,
+    maxLevel: 1,
+    decay: 0.32,
+    frequency: 11,
+    // radians. 0.02 rad ≈ 1.1°, which at the shipped 55° fov is ~2% of the
+    // frame — present without being nauseating. Roll is largest because a
+    // rolled horizon reads as impact where a yawed one reads as a look-around.
+    yawAmplitude: 0.012,
+    pitchAmplitude: 0.014,
+    rollAmplitude: 0.02,
+    firingStrength: 0.7,
+    ownHitStrength: 1,
+    otherHitStrength: 0.55,
+  },
+  {
+    gain: { min: 0, max: 3, step: 0.05 },
+    refDistance: { min: 1, max: 200, step: 1 },
+    maxDistance: { min: 10, max: 2000, step: 10 },
+    maxLevel: { min: 0, max: 3, step: 0.05 },
+    decay: { min: 0.02, max: 3, step: 0.01 },
+    frequency: { min: 1, max: 40, step: 0.5 },
+    yawAmplitude: { min: 0, max: 0.15, step: 0.001 },
+    pitchAmplitude: { min: 0, max: 0.15, step: 0.001 },
+    rollAmplitude: { min: 0, max: 0.15, step: 0.001 },
+    firingStrength: { min: 0, max: 1, step: 0.01 },
+    ownHitStrength: { min: 0, max: 1, step: 0.01 },
+    otherHitStrength: { min: 0, max: 1, step: 0.01 },
+  },
+);
+
+/**
  * Combat fx tunables (§V.16) — the visible half of §T.16/§V.14: muzzle
  * flash and smoke, splinter bursts at a breach, the pillar where a ball
  * pitches into the sea, and the balls themselves.
@@ -142,7 +210,31 @@ export interface CombatFxParams {
   smokeLife: number;
   smokeSize: number;
   smokeGrowth: number; // × sizeStart at death
+  /** m/s the bank leaves the muzzle at — the JET phase */
   smokeSpeed: number;
+  /**
+   * 1/s velocity bleed. High on purpose: it is what STALLS the jet (tau =
+   * 1/drag), and the stall is what separates "bellows out" from "rises".
+   */
+  smokeDrag: number;
+  /**
+   * m/s the parcel settles to CLIMBING at — a terminal speed, not an
+   * acceleration, so it keeps its meaning when `smokeDrag` moves (§V.66).
+   * This is the "and then that kinda moves towards the top" half.
+   */
+  smokeRiseSpeed: number;
+  /**
+   * 0..1 how completely the bank is carried by the LIVE wind (`state.wind`,
+   * the same air the sails and flags answer to). This is what blows a
+   * broadside's smoke across the deck instead of leaving it hanging.
+   */
+  smokeWind: number;
+  /**
+   * Exponent on age driving size. 0.5 = the turbulent-puff law: expands fast
+   * while the eddies are energetic, then tapers. 1 = linear, which is what
+   * reads as a balloon inflating at a constant rate.
+   */
+  smokeGrowthExp: number;
   /** upward bias on the smoke bank's axis — powder smoke rolls up, not flat */
   smokeRise: number;
   /** burning powder grains thrown out with the muzzle gases */
@@ -193,9 +285,26 @@ export interface CombatFxParams {
   impactSmokeSize: number;
   impactSmokeGrowth: number;
   impactSmokeSpeed: number;
+  /** m/s the dust knocked out of oak settles to climbing at */
+  impactSmokeRise: number;
   /** particles per HIT (every hit, not only the one that breaches) */
   impactSmokePerHit: number;
   debrisPerHit: number;
+
+  // ── BREECH VENT (a muzzle-loader fires from BOTH ends) ─────────────────
+  // Position is DERIVED, never authored: the breech is
+  // `muzzle - direction x combatParams.muzzleForward`, i.e. the gun's own
+  // mount socket. One owner for the barrel's length; move the gun and the
+  // vent follows it. Two independent literals for the two ends of one gun is
+  // the bug that put a lantern beside a post it did not reach.
+  breechLife: number;
+  breechSize: number;
+  breechGrowth: number;
+  breechSpeed: number;
+  breechRise: number;
+  breechPerShot: number;
+  /** 0..1 up-bias of the vent jet: 1 = straight up off the breech */
+  breechUp: number;
 
   // ── WATER COLUMN (a ball pitching into the sea) ─────────────────────────
   /** the pillar: narrow, fast, straight up — droplets detach off its top */
@@ -231,6 +340,29 @@ export interface CombatFxParams {
   smokePerShot: number;
   splintersPerBreach: number;
   splashPerHit: number;
+  // ── SILHOUETTE (§V.65: the eye reads the OUTLINE, not the interior) ────
+  /**
+   * 0..1 per-particle stretch. A uniformly-scaled sprite is a disc by
+   * construction, so a burst of them is a cluster of discs — "not just
+   * circular puffs". Each particle takes its own aspect and its own roll, and
+   * the union of ellipses at differing angles is not a disc at any radius.
+   * Costs nothing in the fragment shader: it is all in the vertex scale.
+   */
+  smokeAspect: number;
+  /**
+   * Torn contour on the smoke sprites: a noise DISSOLVE threshold, which is
+   * the same cure §B.39 landed on for foam (round level sets cannot be fixed
+   * by filling them differently). Band-limited per §V.48/§V.70 — see
+   * smokeShape.ts for what it fades TOWARD and why that is not zero.
+   *
+   * FIRST THING TO CUT if the frame is over budget: it is the only
+   * per-fragment cost in this whole system, and `smokeAspect` above already
+   * carries much of the silhouette win for free.
+   */
+  smokeDissolve: number;
+  /** noise cells across a sprite — the tear's own scale */
+  smokeDissolveScale: number;
+
   /** overall additive brightness */
   intensity: number;
   /** rad/s — tumble of a detached mast on the way down (§V.14) */
@@ -252,10 +384,14 @@ export const combatFxParams: CombatFxParams = registerParams(
     ballDrawRadius: 0.16,
     flashLife: 0.09,
     flashSize: 2.2,
-    smokeLife: 2.4,
-    smokeSize: 1.1,
-    smokeGrowth: 4.5,
-    smokeSpeed: 7,
+    smokeLife: 3.2,
+    smokeSize: 0.8,
+    smokeGrowth: 7,
+    smokeSpeed: 14,
+    smokeDrag: 4.5,
+    smokeRiseSpeed: 2,
+    smokeWind: 0.7,
+    smokeGrowthExp: 0.5,
     smokeRise: 0.35,
     sparkLife: 0.4,
     sparkSize: 0.14,
@@ -280,9 +416,17 @@ export const combatFxParams: CombatFxParams = registerParams(
     impactSmokeLife: 3.4,
     impactSmokeSize: 0.65,
     impactSmokeGrowth: 6,
-    impactSmokeSpeed: 3.5,
+    impactSmokeSpeed: 5,
+    impactSmokeRise: 1.2,
     impactSmokePerHit: 10,
     debrisPerHit: 12,
+    breechLife: 1.4,
+    breechSize: 0.3,
+    breechGrowth: 5,
+    breechSpeed: 6,
+    breechRise: 2.6,
+    breechPerShot: 6,
+    breechUp: 0.8,
     columnLife: 0.95,
     columnSize: 0.5,
     columnGrowth: 2.4,
@@ -303,6 +447,9 @@ export const combatFxParams: CombatFxParams = registerParams(
     smokePerShot: 14,
     splintersPerBreach: 18,
     splashPerHit: 10,
+    smokeAspect: 0.75,
+    smokeDissolve: 0.55,
+    smokeDissolveScale: 2.6,
     intensity: 1,
     wreckTumble: 0.7,
     wreckSinkSpeed: 1.2,
@@ -317,7 +464,11 @@ export const combatFxParams: CombatFxParams = registerParams(
     smokeLife: { min: 0.2, max: 8, step: 0.1 },
     smokeSize: { min: 0.1, max: 4, step: 0.05 },
     smokeGrowth: { min: 1, max: 12, step: 0.1 },
-    smokeSpeed: { min: 0, max: 30, step: 0.5 },
+    smokeSpeed: { min: 0, max: 40, step: 0.5 },
+    smokeDrag: { min: 0.1, max: 15, step: 0.1 },
+    smokeRiseSpeed: { min: 0, max: 8, step: 0.05 },
+    smokeWind: { min: 0, max: 1, step: 0.01 },
+    smokeGrowthExp: { min: 0.2, max: 2, step: 0.05 },
     smokeRise: { min: 0, max: 2, step: 0.05 },
     sparkLife: { min: 0.05, max: 2, step: 0.01 },
     sparkSize: { min: 0.02, max: 1, step: 0.01 },
@@ -346,6 +497,14 @@ export const combatFxParams: CombatFxParams = registerParams(
     impactSmokeSize: { min: 0.05, max: 4, step: 0.05 },
     impactSmokeGrowth: { min: 1, max: 12, step: 0.1 },
     impactSmokeSpeed: { min: 0, max: 30, step: 0.5 },
+    impactSmokeRise: { min: 0, max: 8, step: 0.05 },
+    breechLife: { min: 0.1, max: 5, step: 0.05 },
+    breechSize: { min: 0.05, max: 2, step: 0.01 },
+    breechGrowth: { min: 1, max: 12, step: 0.1 },
+    breechSpeed: { min: 0, max: 30, step: 0.5 },
+    breechRise: { min: 0, max: 8, step: 0.05 },
+    breechPerShot: { min: 0, max: 64, step: 1 },
+    breechUp: { min: 0, max: 1, step: 0.01 },
     impactSmokePerHit: { min: 0, max: 64, step: 1 },
     debrisPerHit: { min: 0, max: 64, step: 1 },
     columnLife: { min: 0.1, max: 4, step: 0.05 },
@@ -365,6 +524,9 @@ export const combatFxParams: CombatFxParams = registerParams(
     smokePerShot: { min: 0, max: 64, step: 1 },
     splintersPerBreach: { min: 0, max: 64, step: 1 },
     splashPerHit: { min: 0, max: 64, step: 1 },
+    smokeAspect: { min: 0, max: 1, step: 0.01 },
+    smokeDissolve: { min: 0, max: 1, step: 0.01 },
+    smokeDissolveScale: { min: 0.5, max: 12, step: 0.1 },
     intensity: { min: 0, max: 3, step: 0.05 },
     wreckTumble: { min: 0, max: 4, step: 0.05 },
     wreckSinkSpeed: { min: 0.1, max: 10, step: 0.1 },

@@ -49,24 +49,34 @@
  * §V.3: reads a CombatFrame and SimState.projectiles, writes neither.
  */
 import * as THREE from 'three/webgpu';
-import { instancedBufferAttribute, uv } from 'three/tsl';
+import { instancedBufferAttribute, uniform, uv, vec2 } from 'three/tsl';
 import type { ProjectileState, ShipState } from '../state/simState';
 import { combatFxParams, type CombatFxParams } from '../params/combat';
 import type { CombatFrame } from './combatSystem';
 import { createFlashLight, type FlashLight } from './flashLight';
 import { createImpactRings, type ImpactRings } from './impactRing';
 import { createProfiles, fillProfiles } from './fxProfiles';
+import { tornAlpha } from './smokeShape';
+import { createCameraShake, type CameraShake } from './cameraShake';
+import { combatParams, combatShakeParams } from '../params/combat';
 import {
   ageFraction,
   brightnessAt,
   burstDirection,
   jitterScale,
   hash01,
+  particleAspect,
+  particleSpin,
   sizeAt,
   stepVelocity,
   type FxKind,
   type FxProfile,
 } from './fxMath';
+
+/** kinds that take the torn contour and the aspect stretch (§V.65) */
+const SMOKE_KINDS: ReadonlySet<FxKind> = new Set<FxKind>([
+  'smoke', 'impactSmoke', 'breech',
+]);
 
 export interface CombatFx {
   /** add to the scene once — sprites, cannonballs and surface rings */
@@ -96,7 +106,18 @@ export interface CombatFx {
     frameDt: number,
     projectiles: readonly ProjectileState[],
     seaHeightAt?: (x: number, z: number) => number,
+    /**
+     * LIVE wind velocity (m/s) in world XZ — `state.wind`, the same air the
+     * sails, flags, AI and spray answer to, NOT `oceanParams.windDirection`.
+     * Weather transitions write `state.wind` every tick while the ocean param
+     * is the spectrum's own default, so reading the param would drift the
+     * smoke against the flags the player is looking at.
+     */
+    windX?: number,
+    windZ?: number,
   ): void;
+  /** the camera shake driven by this frame's guns and hits */
+  shake: CameraShake;
   dispose(): void;
 }
 
@@ -122,23 +143,60 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
   sizeScale.fill(1);
   age.fill(2); // whole pool starts dead
 
+  /**
+   * SILHOUETTE attributes (§V.65). `aspect` stretches the sprite and `seed`
+   * both rolls it and decorrelates its tear. Deliberately SEPARATE from
+   * `sizeArr` rather than widening it to a vec2: the size buffer's "0 = dead"
+   * contract is read by tests and by §V.28, and it stays exactly one float
+   * per particle meaning exactly what it did.
+   */
+  const aspectArr = new Float32Array(count).fill(1);
+  const seedArr = new Float32Array(count);
+  /** per-particle tear strength — 0 for every kind that is not smoke */
+  const tearArr = new Float32Array(count);
+
   const posAttr = new THREE.InstancedBufferAttribute(posArr, 3);
   const colAttr = new THREE.InstancedBufferAttribute(colArr, 3);
   const sizeAttr = new THREE.InstancedBufferAttribute(sizeArr, 1);
+  const aspectAttr = new THREE.InstancedBufferAttribute(aspectArr, 1);
+  const seedAttr = new THREE.InstancedBufferAttribute(seedArr, 1);
+  const tearAttr = new THREE.InstancedBufferAttribute(tearArr, 1);
   posAttr.setUsage(THREE.DynamicDrawUsage);
   colAttr.setUsage(THREE.DynamicDrawUsage);
   sizeAttr.setUsage(THREE.DynamicDrawUsage);
+  aspectAttr.setUsage(THREE.DynamicDrawUsage);
+  seedAttr.setUsage(THREE.DynamicDrawUsage);
+  tearAttr.setUsage(THREE.DynamicDrawUsage);
+
+  /** live look knobs that must reach the shader without a rebuild (§V.62) */
+  const uDissolveScale = uniform(nn(p.smokeDissolveScale, 2.6));
 
   const material = new THREE.SpriteNodeMaterial();
   material.positionNode = instancedBufferAttribute(posAttr, 'vec3');
-  material.scaleNode = instancedBufferAttribute(sizeAttr, 'float');
+
+  const sizeNode = instancedBufferAttribute(sizeAttr, 'float');
+  const aspectNode = instancedBufferAttribute(aspectAttr, 'float');
+  const seedNode = instancedBufferAttribute(seedAttr, 'float');
+  const tearNode = instancedBufferAttribute(tearAttr, 'float');
+
+  // NON-UNIFORM SCALE + ROLL — the free half of the silhouette fix. A
+  // uniformly-scaled sprite is a disc by construction; a cluster of ellipses
+  // at differing angles is not, at any radius, and the cost is nil because it
+  // is all in the vertex stage. AREA-PRESERVING: (s·a)·(s/a) = s², so a
+  // stretched puff carries the same mass as a round one. `aspect` is bounded
+  // to [0.5, 2] at spawn, which floors the `s/a` divisor AT SOURCE (§V.28).
+  material.scaleNode = vec2(sizeNode.mul(aspectNode), sizeNode.div(aspectNode));
+  material.rotationNode = seedNode.mul(Math.PI * 2);
+
   const tint = instancedBufferAttribute(colAttr, 'vec3');
   // soft round falloff; additive, so brightness IS the fade and a dead
   // particle is already zero-size before it can contribute anything
   const q = uv().mul(2).sub(1);
   const shape = q.dot(q).oneMinus().max(0).pow(1.5);
   material.colorNode = tint;
-  material.opacityNode = shape;
+  // the torn contour rides on top of that disc; `tearNode` is 0 for every
+  // non-smoke kind, which leaves `shape` mathematically untouched for them
+  material.opacityNode = tornAlpha(shape, uv(), tearNode, seedNode, uDissolveScale);
   material.transparent = true;
   material.blending = THREE.AdditiveBlending;
   material.depthWrite = false;
@@ -146,6 +204,25 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
 
   const sprites = new THREE.Sprite(material as unknown as THREE.SpriteMaterial);
   sprites.name = 'combat-sprites';
+  /**
+   * The pool's raw buffers, published for tests and the dev console.
+   *
+   * Tests used to read `material.scaleNode.value.array`, which only worked
+   * while `scaleNode` happened to BE the size attribute; it now composes size
+   * with the aspect stretch, and that lookup silently stopped resolving. A
+   * test reaching through a node graph is a test that breaks on any shading
+   * change and tells you nothing about the thing it meant to assert, so the
+   * contract is stated here instead.
+   */
+  sprites.userData.fxPool = {
+    position: posArr,
+    color: colArr,
+    size: sizeArr,
+    aspect: aspectArr,
+    seed: seedArr,
+    tear: tearArr,
+    kinds,
+  };
   sprites.count = count;
   sprites.frustumCulled = false; // positions are written per frame, no bounds
 
@@ -169,6 +246,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
 
   const rings: ImpactRings = createImpactRings(p);
   const flash: FlashLight = createFlashLight(p);
+  const shake: CameraShake = createCameraShake();
 
   const group = new THREE.Group();
   group.name = 'combat-fx';
@@ -219,11 +297,20 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
     life[i] = Math.max(0.02, profile.life * jitterScale(seed, index * 3 + 2, vary));
     sizeScale[i] = Math.max(0.05, jitterScale(seed, index * 3 + 3, vary));
     kinds[i] = kind;
+
+    // §V.65 silhouette: only the smoke family is stretched and torn. Sparks
+    // and splinters are meant to read as points and streaks, and an elliptical
+    // spark is just a wrong-shaped spark.
+    const smoky = SMOKE_KINDS.has(kind);
+    aspectArr[i] = smoky ? particleAspect(seed, index, nn(p.smokeAspect, 0.75)) : 1;
+    seedArr[i] = smoky ? particleSpin(seed, index) / (Math.PI * 2) : 0;
+    tearArr[i] = smoky ? clamp01(nn(p.smokeDissolve, 0.55)) : 0;
   };
 
   return {
     group,
     light: flash.light,
+    shake,
 
     emit(frame, projectiles, tick = 0, ships): void {
       fillProfiles(prof, p);
@@ -234,6 +321,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
       const impactSmokeN = sanitizeCount(p.impactSmokePerHit, 10, 64);
       const debrisN = sanitizeCount(p.debrisPerHit, 12, 64);
       const columnN = sanitizeCount(p.columnPerHit, 12, 64);
+      const breechN = sanitizeCount(p.breechPerShot, 6, 64);
       const vary = nn(p.variation, 0.45);
 
       for (const m of frame.muzzles) {
@@ -243,6 +331,10 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         const seed = Number.isFinite(m.seed) ? m.seed : 0;
         spawn('flash', m.position, axis, 0, prof.flash, seed, vary * 0.4);
         flash.strike(m.position[0], m.position[1], m.position[2], 1);
+        shake.impulse(
+          m.position[0], m.position[1], m.position[2],
+          nn(combatShakeParams.firingStrength, 0.7),
+        );
         // the smoke bank gets its OWN axis: a per-shot tilt plus a standing
         // upward bias, because powder smoke rolls up off the muzzle rather
         // than jetting flat, and because four guns on one hull otherwise
@@ -256,6 +348,33 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         );
         for (let k = 0; k < smokeN; k++) {
           spawn('smoke', m.position, smokeAxis, k, prof.smoke, seed, vary);
+        }
+        // THE BREECH VENT. A muzzle-loader fires from both ends, and the vent
+        // puff is the tell that separates a cannon from a firework.
+        //
+        // Its position is DERIVED, never authored: `muzzleForward` is the one
+        // owner of mount → muzzle along the barrel, so walking back along the
+        // firing direction by exactly that distance lands on the gun's own
+        // mount socket. Two independent literals for the two ends of one gun
+        // is the bug that put a lantern beside a post it did not reach and
+        // the sail seams out of step with their robands — move the gun and
+        // this follows it, with nothing to keep in sync.
+        const back = Math.max(0, nn(combatParams.muzzleForward, 1.4));
+        const breechPos: [number, number, number] = [
+          m.position[0] - axis[0] * back,
+          m.position[1] - axis[1] * back,
+          m.position[2] - axis[2] * back,
+        ];
+        // the vent jets UP off the breech, not outboard: `breechUp` 1 is
+        // straight up, 0 is back along the barrel
+        const up = clamp01(nn(p.breechUp, 0.8));
+        const breechAxis = normalized(
+          -axis[0] * (1 - up),
+          (1 - up) * -axis[1] + up,
+          -axis[2] * (1 - up),
+        );
+        for (let k = 0; k < breechN; k++) {
+          spawn('breech', breechPos, breechAxis, k, prof.breech, seed ^ 0x2f9a1b73, vary);
         }
         // sparks last: they are the brightest thing here, and the rotating
         // pool means the newest burst survives if the pool is under pressure
@@ -277,6 +396,15 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         const seed = (Math.imul(hit.projectileId, 2654435761) + h * 40503) >>> 0;
         spawn('impactFlash', hit.point, axis, 0, prof.impactFlash, seed, vary * 0.4);
         flash.strike(hit.point[0], hit.point[1], hit.point[2], 0.85);
+        // a hit on OUR hull is the one that should be felt hardest; a hit on
+        // anyone else still carries, scaled down and then by distance, so a
+        // strike on the enemy at 200 m is a tremor rather than silence
+        shake.impulse(
+          hit.point[0], hit.point[1], hit.point[2],
+          nn(hit.shipIndex === 0
+            ? combatShakeParams.ownHitStrength
+            : combatShakeParams.otherHitStrength, 0.55),
+        );
         for (let k = 0; k < debrisN; k++) {
           spawn('splinter', hit.point, axis, k, prof.splinter, seed, vary);
         }
@@ -323,7 +451,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
       }
     },
 
-    update(frameDt, projectiles, seaHeightAt = FLAT_SEA): void {
+    update(frameDt, projectiles, seaHeightAt = FLAT_SEA, windX = 0, windZ = 0): void {
       // a non-finite dt would drive every position to NaN in one frame; a
       // huge one (tab restored) would teleport the whole pool
       const dt = Number.isFinite(frameDt) ? Math.max(0, Math.min(frameDt, 0.25)) : 0;
@@ -339,7 +467,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         age[i] += dt;
         const pr = prof[kinds[i]];
         const v = stepVelocity(
-          velArr[i * 3], velArr[i * 3 + 1], velArr[i * 3 + 2], pr, dt,
+          velArr[i * 3], velArr[i * 3 + 1], velArr[i * 3 + 2], pr, dt, windX, windZ,
         );
         velArr[i * 3] = v[0];
         velArr[i * 3 + 1] = v[1];
@@ -360,6 +488,10 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
       posAttr.needsUpdate = true;
       colAttr.needsUpdate = true;
       sizeAttr.needsUpdate = true;
+      aspectAttr.needsUpdate = true;
+      seedAttr.needsUpdate = true;
+      tearAttr.needsUpdate = true;
+      uDissolveScale.value = Math.max(0.01, nn(p.smokeDissolveScale, 2.6));
 
       rings.update(dt, seaHeightAt);
       flash.update(dt);
@@ -403,6 +535,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
       ballGeo.dispose();
       rings.dispose();
       flash.dispose();
+      shake.dispose();
     },
   };
 }
@@ -435,6 +568,11 @@ function sanitizeCount(v: number, fallback: number, max: number): number {
 
 function nn(v: number, fallback: number): number {
   return Number.isFinite(v) ? v : fallback;
+}
+
+function clamp01(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
 function finite(v: number): number {

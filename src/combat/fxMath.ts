@@ -21,7 +21,9 @@ export type FxKind =
   /** what a ball knocks out of oak: slow, brown, and it lingers for seconds */
   | 'impactSmoke'
   /** the vertical pillar a ball throws up out of the sea */
-  | 'column';
+  | 'column'
+  /** the vent puff off the BREECH — a muzzle-loader fires from both ends */
+  | 'breech';
 
 /**
  * Deterministic 0..1 hash of two integers (§V.2 — no Math.random reaches
@@ -61,6 +63,30 @@ export interface FxProfile {
   /** how much the burst spreads off its axis, 0 = a beam, 1 = a ball */
   spread: number;
   /**
+   * TERMINAL RISE, m/s — what the parcel settles to climbing at, NOT a raw
+   * buoyant acceleration. Parameterised this way on purpose: under linear
+   * drag the steady rise is `buoyancy / drag`, so an acceleration knob
+   * silently changes meaning every time `drag` moves, and the drag here is
+   * doing real work (it is what stalls the muzzle jet). Quoting the speed
+   * makes the knob mean what it says at any drag — §V.66, scale a feature by
+   * its own dimension. Only meaningful with `drag > 0`.
+   */
+  riseSpeed: number;
+  /**
+   * 0..1 — how completely the parcel is carried by the moving air. Drag acts
+   * on velocity RELATIVE TO THE WIND, so this is what makes a smoke bank blow
+   * downwind across the deck instead of hanging where it was made. 0 for
+   * anything with mass of its own: a splinter does not blow away.
+   */
+  windCoupling: number;
+  /**
+   * Exponent on the age fraction driving size. 1 = linear (every kind's
+   * original behaviour, kept byte-identical). 0.5 = √t, the turbulent-puff
+   * growth law: fast expansion while the eddies are energetic, tapering
+   * after. Linear growth is what reads as a balloon inflating.
+   */
+  growthExp: number;
+  /**
    * Multiplier on the additive brightness. §V.44 wants additive terms bounded
    * AT SOURCE, and this is where that bound lives: `brightnessAt` returns
    * [0,1] and `color` is [0,1] per channel, so peak output per channel is
@@ -96,8 +122,44 @@ export function ageFraction(age: number, life: number): number {
  */
 export function sizeAt(profile: FxProfile, t: number): number {
   if (t >= 1) return 0;
-  const s = profile.sizeStart + (profile.sizeEnd - profile.sizeStart) * t;
+  // growthExp 1 skips the pow entirely, so every kind that has not opted in
+  // is not merely equivalent but takes the identical code path
+  const g = profile.growthExp;
+  const u = Number.isFinite(g) && g > 0 && g !== 1 ? Math.pow(Math.max(0, t), g) : t;
+  const s = profile.sizeStart + (profile.sizeEnd - profile.sizeStart) * u;
   return Number.isFinite(s) && s > 0 ? s : 0;
+}
+
+/**
+ * Per-particle aspect ratio, bounded to [1/ASPECT_MAX, ASPECT_MAX].
+ *
+ * WHY THIS EXISTS. A sprite is scaled uniformly, so its alpha falloff is a
+ * disc and a burst of them is a cluster of discs — "not just circular puffs"
+ * (user), and §V.65's shape: detail multiplied into a mask's INTERIOR leaves
+ * the OUTLINE untouched and the eye reads the outline. Giving each particle
+ * its own aspect and its own roll makes the cluster a union of ellipses at
+ * differing angles, which is not a disc at any radius. It costs nothing in
+ * the fragment shader — the whole change is in the vertex scale.
+ *
+ * Area-preserving by construction: the sprite is scaled `(s·a, s/a)`, so the
+ * product is `s²` whatever `a` is, and the puff does not gain or lose mass
+ * as it is stretched. `a` is bounded away from zero here so that the `s/a`
+ * divisor is floored AT SOURCE (§V.28) rather than guarded at the use site.
+ */
+export const ASPECT_MAX = 2;
+
+export function particleAspect(seed: number, index: number, spread: number): number {
+  const s = Number.isFinite(spread) ? Math.min(1, Math.max(0, spread)) : 0;
+  // exponential about 1 so stretch and squash are symmetric: a 2:1 wide puff
+  // and a 2:1 tall one are equally far from round
+  const e = (hash01(seed, index * 7 + 5) * 2 - 1) * s * Math.log(ASPECT_MAX);
+  const a = Math.exp(e);
+  return Math.min(ASPECT_MAX, Math.max(1 / ASPECT_MAX, a));
+}
+
+/** per-particle roll, radians — the other half of breaking the disc */
+export function particleSpin(seed: number, index: number): number {
+  return hash01(seed, index * 7 + 6) * Math.PI * 2;
 }
 
 /** additive brightness over life: quick bloom, then a fade to nothing */
@@ -116,9 +178,38 @@ export function stepVelocity(
   vx: number, vy: number, vz: number,
   profile: FxProfile,
   dt: number,
+  windX = 0,
+  windZ = 0,
 ): [number, number, number] {
-  const keep = Math.exp(-Math.max(0, profile.drag) * dt);
-  return [vx * keep, (vy - profile.gravity * dt) * keep, vz * keep];
+  const drag = Math.max(0, profile.drag);
+  const keep = Math.exp(-drag * dt);
+
+  // DRAG ACTS ON VELOCITY RELATIVE TO THE AIR, not to the world. With
+  // windCoupling 0 the air is still and this is exactly the old expression;
+  // above 0 the parcel's horizontal velocity decays toward the WIND rather
+  // than toward zero, which is what carries a broadside's smoke bank
+  // downwind across the deck instead of leaving it hanging where it was made.
+  const c = Number.isFinite(profile.windCoupling)
+    ? Math.min(1, Math.max(0, profile.windCoupling))
+    : 0;
+  const wx = (Number.isFinite(windX) ? windX : 0) * c;
+  const wz = (Number.isFinite(windZ) ? windZ : 0) * c;
+
+  // `riseSpeed` is a terminal SPEED; the acceleration that produces it under
+  // linear drag is speed x drag, which is why the two are multiplied here and
+  // not stored apart. Steady state is then `riseSpeed - gravity/drag`, i.e.
+  // exactly `riseSpeed` for a kind with no gravity of its own.
+  const buoyancy = Math.max(0, nnz(profile.riseSpeed)) * drag;
+
+  return [
+    (vx - wx) * keep + wx,
+    (vy - profile.gravity * dt + buoyancy * dt) * keep,
+    (vz - wz) * keep + wz,
+  ];
+}
+
+function nnz(v: number): number {
+  return Number.isFinite(v) ? v : 0;
 }
 
 /**

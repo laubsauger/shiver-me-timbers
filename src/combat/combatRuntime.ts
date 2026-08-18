@@ -35,6 +35,7 @@ import { audioParams } from '../params/audio';
 import { combatFxParams, combatParams, type CombatFxParams } from '../params/combat';
 import { createCombat, type Combat, type CombatFrame, type CombatShipConfig, type FireOrder } from './combatSystem';
 import { createCombatFx, type CombatFx } from './combatFx';
+import type { CameraShake } from './cameraShake';
 import { elevationForRange, type WaterHeightFn } from './ballistics';
 import { buildBattery } from './battery';
 import { isSunk, stepSinkSettle } from './sinking';
@@ -65,6 +66,13 @@ export interface CombatRuntime {
    * after the first frame — the exact recompile being avoided.
    */
   flashLight: Object3D;
+  /**
+   * Gun/impact camera shake. main.ts drives it around `followCam.update` in
+   * a FIXED order — `restore` BEFORE, `update`+`apply` after — because
+   * FollowCam adopts any external camera rotation as the free camera's own.
+   * See cameraShake.ts.
+   */
+  shake: CameraShake;
   tick(state: SimState, dt: number, orders: readonly FireOrder[]): CombatFrame;
   /** breach list for `shipIndex`, in the frame flooding + buoyancy expect */
   floodHoles(state: SimState, shipIndex: number): Vec3[];
@@ -255,6 +263,7 @@ export function createCombatRuntime(config: CombatRuntimeConfig): CombatRuntime 
   return {
     group,
     flashLight: fx.light,
+    shake: fx.shake,
     combat,
 
     tick(state, dt, orders) {
@@ -300,7 +309,18 @@ export function createCombatRuntime(config: CombatRuntimeConfig): CombatRuntime 
       // to its birth height sinks into the next crest, and the sea moves
       // metres under it inside its own 1.4 s life (§V.8 — the same field the
       // hulls float on, not a flat plane)
-      fx.update(frameDt, state.projectiles, sea);
+      // §V.55-adjacent: the wind is a VELOCITY, not a direction — smoke is
+      // carried by the air it is thrown into, exactly as spray is. `state.wind`
+      // is the LIVE wind (weather transitions write it every tick); the ocean
+      // params hold the spectrum's own default and would drift the smoke
+      // against the flags the player is looking at.
+      fx.update(
+        frameDt,
+        state.projectiles,
+        sea,
+        Math.cos(state.wind.direction) * state.wind.speed,
+        Math.sin(state.wind.direction) * state.wind.speed,
+      );
       // §V.28 shape: a non-finite or restored-tab dt would teleport the whole
       // wreck field, so it is clamped exactly as combatFx clamps its own
       const dt = Number.isFinite(frameDt) ? Math.max(0, Math.min(frameDt, 0.25)) : 0;
