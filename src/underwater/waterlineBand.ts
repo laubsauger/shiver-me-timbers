@@ -68,8 +68,12 @@ export function createWaterlineBand(): WaterlineBand {
   const i1 = i0.add(int(1)).min(int(samples - 1));
   const waterY = mix(heights.element(i0), heights.element(i1), xIdx.fract());
 
-  // signed screen distance above (+) / below (−) the waterline
-  const d = screenUV.y.sub(waterY);
+  // Signed screen distance above (+) / below (−) the waterline. `waterY` and
+  // `screenUV.y` are BOTH measured downward from the top of the frame (see the
+  // projection in update()), so "above" is the SMALLER v and the subtraction
+  // runs waterY − screenUV.y. Reversed, the droplet streaks below hang under
+  // the waterline instead of over it.
+  const d = waterY.sub(screenUV.y);
 
   // meniscus strip: bright core fading over ±thickness
   const strip = float(1).sub(smoothstep(float(0), uThickness, abs(d)));
@@ -125,12 +129,21 @@ export function createWaterlineBand(): WaterlineBand {
         const behind =
           waterPoint.clone().sub(camera.position).dot(forward) <= 0;
         if (behind) {
-          heights.array[i] = camera.position.y < h ? 2 : -1; // off-screen
+          // off-screen, in the SAME y-down convention as the projection below:
+          // submerged camera ⟹ the line is off the TOP (v < 0) and the whole
+          // frame is under it; dry camera ⟹ off the BOTTOM (v > 1).
+          heights.array[i] = camera.position.y < h ? -1 : 2;
           continue;
         }
         waterPoint.project(camera);
+        // NDC y is +1 at the TOP; `screenUV.y` — what the shader above compares
+        // this against — is 0 there. So the conversion INVERTS y, exactly as
+        // three's own getScreenPosition() does (ndc*0.5+0.5 then y.oneMinus()).
+        // Written as ndc*0.5+0.5 the band drew at the waterline's mirror image
+        // about the horizontal midline. Same defect as the god rays' mirrored
+        // sun — see core/postGodRays.ts for the full note.
         // clamp softly outside [0,1] so interpolation stays sane
-        heights.array[i] = Math.min(2, Math.max(-1, waterPoint.y * 0.5 + 0.5));
+        heights.array[i] = Math.min(2, Math.max(-1, 0.5 - waterPoint.y * 0.5));
       }
     },
     updateFromParams(): void {

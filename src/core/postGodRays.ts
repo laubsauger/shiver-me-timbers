@@ -122,7 +122,31 @@ export function updateSunScreen(
     _sunWorld.copy(camera.position).addScaledVector(sunDir, 100);
     _sunWorld.project(camera);
     state.x = _sunWorld.x * 0.5 + 0.5;
-    state.y = _sunWorld.y * 0.5 + 0.5;
+    /**
+     * Y IS INVERTED, AND THAT IS NOT A TASTE CALL.
+     *
+     * NDC y is +1 at the TOP of the frame. Screen UV — both `uv()` on a
+     * fullscreen quad and `screenUV` — is 0 at the top on every backend:
+     * `QuadGeometry` gives the NDC-top vertex v = 0, and `ScreenNode` reads
+     * WGSL's `fragCoord` (already top-left) directly while the GLSL path flips
+     * `gl_FragCoord` to match. So the conversion is (1 − ndc.y)/2, NOT
+     * ndc.y/2 + 0.5. Three's own `getScreenPosition()` writes it as
+     * `ndc*0.5 + 0.5` followed by `y.oneMinus()` (PostProcessingUtils.js) —
+     * this is that same expression, folded.
+     *
+     * The missing flip put the march's convergence point at the sun's MIRROR
+     * IMAGE about the horizontal midline. With the sun above the horizon that
+     * phantom sits below it — in the water, directly under the real sun, which
+     * is exactly where a reflection would be. `godRayFalloff` then confined the
+     * whole effect to a disc around the phantom, so the only thing the march
+     * had to smear was SEA: teal shafts converging on a point under the
+     * waterline, appearing whenever the real sun came into view (`vis` is
+     * computed from the real direction, not the mirrored one). That is the
+     * user report "at just the right angle to the sun it suddenly reflects in
+     * with god rays in blue from below water" — a mirrored sun, not a
+     * transmission effect. See tests/postGodRays.test.ts.
+     */
+    state.y = 0.5 - _sunWorld.y * 0.5;
   }
 
   // cos of the half-angle to the frame CORNER — full strength anywhere inside
@@ -155,7 +179,9 @@ export function buildGodRays(opts: {
   const TAPS = Math.max(4, Math.min(128, Math.round(finite(pp.godRayTaps, 32))));
   const scale = Math.min(1, Math.max(0.1, finite(pp.godRayScale, 0.5)));
 
-  const uSunScreen = uniform(new THREE.Vector2(0.5, 0.9));
+  // 0.1, not 0.9: screen UV has y = 0 at the TOP (see updateSunScreen), so
+  // "up in the sky" is a SMALL v. Pre-first-update only — vis is 0 until then.
+  const uSunScreen = uniform(new THREE.Vector2(0.5, 0.1));
   const uSunVis = uniform(0);
   const uThreshold = uniform(1);
   const uKnee = uniform(0.5);
@@ -274,7 +300,7 @@ export function buildGodRays(opts: {
   const raysTex = rtt(raysFn(), 2, 2);
 
   // --- CPU per-frame -----------------------------------------------------
-  const sunState: SunScreenState = { x: 0.5, y: 0.9, vis: 0 };
+  const sunState: SunScreenState = { x: 0.5, y: 0.1, vis: 0 };
   const size = new THREE.Vector2();
   let rtW = 0;
   let rtH = 0;

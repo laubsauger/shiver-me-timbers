@@ -13,6 +13,9 @@ import {
   type SubmersionState,
 } from '../src/underwater/submersion';
 import { submergedPathLength, transmittance } from '../src/underwater/waterVolume';
+import underwaterIndexSource from '../src/underwater/index.ts?raw';
+import waterlineBandSource from '../src/underwater/waterlineBand.ts?raw';
+import waterVolumeSource from '../src/underwater/waterVolume.ts?raw';
 import { underwaterParams } from '../src/params/underwater';
 import { causticsParams } from '../src/params/caustics';
 import { getParamsEntry } from '../src/params/registry';
@@ -256,5 +259,49 @@ describe('underwater params (V16: registered, clamped, sane)', () => {
     expect(Number.isInteger(underwaterParams.rayTaps)).toBe(true);
     expect(Number.isInteger(underwaterParams.waterlineSamples)).toBe(true);
     expect(underwaterParams.waterlineSamples).toBeGreaterThanOrEqual(2);
+  });
+
+  /**
+   * THE Y-FLIP, ONCE, FOR EVERY MODULE THAT CROSSES NDC ↔ SCREEN UV.
+   *
+   * NDC y is +1 at the TOP of the frame. Screen UV — `screenUV` and `uv()`
+   * alike — is 0 at the top on both backends: `QuadGeometry` gives the NDC-top
+   * vertex v = 0, and `ScreenNode` reads WGSL's already-top-left `fragCoord`
+   * while the GLSL path flips `gl_FragCoord` to match. So every conversion in
+   * either direction must INVERT y. Three states this explicitly in
+   * `getViewPosition()` / `getScreenPosition()` (PostProcessingUtils.js); the
+   * plain `ndc*0.5 + 0.5` everyone writes from memory is the WebGL-era form and
+   * is silently mirrored here.
+   *
+   * Three sites in this directory got it wrong the same way, and the fourth —
+   * the above-water god rays in core/postGodRays.ts — is what the user actually
+   * shot: the march converged on the sun's mirror image below the horizon, so
+   * the effect smeared SEA into "blue god rays from below water". The failure
+   * is invisible in any test of the surrounding maths (all of it is correct)
+   * and invisible on screen whenever the frame happens to be near-symmetric,
+   * which is why it is pinned lexically and in one place.
+   *
+   * These are source assertions because the expressions live inside TSL graphs
+   * or a per-frame update that needs a live camera; the arithmetic itself is
+   * pinned in tests/postGodRays.test.ts, which fails on the un-flipped form.
+   */
+  it('inverts y on every NDC ↔ screen-UV conversion (§V.23-adjacent)', () => {
+    // sun projection for the submerged shafts
+    expect(underwaterIndexSource).toContain('0.5 - sunWorld.y * 0.5');
+    // waterline column projection for the meniscus band
+    expect(waterlineBandSource).toContain('0.5 - waterPoint.y * 0.5');
+    // ...and the band's shader compares it y-DOWN, so "above" is the smaller v
+    expect(waterlineBandSource).toContain('const d = waterY.sub(screenUV.y)');
+    // depth→world reconstruction for the volume: an unflipped ndc.y sign-flips
+    // rayUp, which opens Snell's window downward
+    expect(waterVolumeSource).toContain(
+      'vec2(screenUV.x, screenUV.y.oneMinus()).mul(2).sub(1)',
+    );
+
+    // and the WebGL-era form must not come back anywhere in the directory
+    for (const src of [underwaterIndexSource, waterlineBandSource, waterVolumeSource]) {
+      expect(src).not.toMatch(/\.y\s*\*\s*0\.5\s*\+\s*0\.5/);
+      expect(src).not.toMatch(/screenUV\.mul\(2\)\.sub\(1\)/);
+    }
   });
 });

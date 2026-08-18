@@ -91,7 +91,8 @@ export function createUnderwater(opts: {
     blend: uniform(0),
     camDepth: uniform(0),
     time: uniform(0),
-    sunScreen: uniform(new THREE.Vector2(0.5, 0.9)),
+    // y = 0 is the TOP of the frame in screenUV, so "up" is a SMALL v (0.1).
+    sunScreen: uniform(new THREE.Vector2(0.5, 0.1)),
     sunVis: uniform(0),
     dayTint: uniform(new THREE.Color(1, 1, 1)),
   };
@@ -159,9 +160,15 @@ export function createUnderwater(opts: {
       if (facing > 0) {
         sunWorld.copy(camera.position).addScaledVector(sunDir, 100);
         sunWorld.project(camera);
+        // Y INVERTED — `godRays.ts` marches in `screenUV`, whose v is 0 at the
+        // TOP of the frame, while NDC y is +1 there. Same expression as three's
+        // getScreenPosition() (ndc*0.5+0.5 then y.oneMinus()), folded. Written
+        // without the flip the shafts converged on the sun's mirror image about
+        // the horizontal midline; core/postGodRays.ts carries the full note and
+        // the above-water version of this defect was the reported artifact.
         uniforms.sunScreen.value.set(
           sunWorld.x * 0.5 + 0.5,
-          sunWorld.y * 0.5 + 0.5,
+          0.5 - sunWorld.y * 0.5,
         );
       }
 

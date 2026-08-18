@@ -38,16 +38,55 @@ function camera(yaw: number): THREE.PerspectiveCamera {
 /** a low sun to the −Z side, roughly the §T.39 golden-hour setup */
 const SUN = new THREE.Vector3(0, 0.35, -1).normalize();
 
-const fresh = (): SunScreenState => ({ x: 0.5, y: 0.9, vis: 0 });
+const fresh = (): SunScreenState => ({ x: 0.5, y: 0.1, vis: 0 });
+
+/**
+ * Screen UV from NDC the way the SHADER measures it — three's own
+ * `getScreenPosition()` (PostProcessingUtils.js): `ndc*0.5 + 0.5`, then
+ * `y.oneMinus()`. Written out longhand here rather than importing the folded
+ * form from the module under test, so this is an independent statement of the
+ * convention instead of a restatement of the implementation.
+ */
+const uvFromNdc = (ndcX: number, ndcY: number): { x: number; y: number } => ({
+  x: ndcX * 0.5 + 0.5,
+  y: 1 - (ndcY * 0.5 + 0.5),
+});
 
 describe('god-ray sun projection (§T.39)', () => {
   it('puts the sun where the camera is looking, at full strength', () => {
     const s = updateSunScreen(fresh(), camera(0), SUN, FADE_DEG);
     expect(s.vis).toBeCloseTo(1, 5);
-    // dead ahead horizontally, above centre because the sun is above the
-    // view axis — screen UV, so y grows upward
     expect(s.x).toBeCloseTo(0.5, 5);
-    expect(s.y).toBeGreaterThan(0.5);
+    /**
+     * ABOVE THE VIEW AXIS MEANS y < 0.5, AND THE SIGN IS THE WHOLE TEST.
+     *
+     * `raysFn` marches in screen UV, where v = 0 is the TOP of the frame:
+     * `QuadGeometry` assigns v = 0 to the NDC-top vertex, and `screenUV` reads
+     * WGSL's already-top-left `fragCoord` (the GLSL path flips
+     * `gl_FragCoord` to match). NDC y is +1 at the top, so the conversion
+     * INVERTS y.
+     *
+     * The previous version of this assertion said `> 0.5` and justified it
+     * with "screen UV, so y grows upward". It does not, and the implementation
+     * it was guarding aimed the march at the sun's MIRROR IMAGE about the
+     * horizontal midline — a phantom sun below the horizon, in the water,
+     * directly beneath the real one. `godRayFalloff` then bounded the effect to
+     * a disc around that phantom, so the only thing left for the march to smear
+     * was sea: blue-teal shafts rising out of the water whenever the real sun
+     * came into view. The user shot it as "at just the right angle to the sun
+     * it suddenly reflects in with god rays in blue from below water".
+     *
+     * A test that only checks "the sun is somewhere off centre" cannot fail
+     * when the convention flips, which is why it is asserted against an
+     * independently-derived UV rather than against a bare inequality.
+     */
+    const sunNdc = new THREE.Vector3()
+      .copy(camera(0).position)
+      .addScaledVector(SUN, 100)
+      .project(camera(0));
+    expect(sunNdc.y).toBeGreaterThan(0); // the sun really is above the axis
+    expect(s.y).toBeCloseTo(uvFromNdc(sunNdc.x, sunNdc.y).y, 5);
+    expect(s.y).toBeLessThan(0.5);
   });
 
   it('contributes nothing when the sun is behind the camera', () => {

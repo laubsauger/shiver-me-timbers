@@ -78,7 +78,7 @@
  * §V.23: 3-arg maths uses the functional `mix`/`smoothstep` forms only.
  */
 import * as THREE from 'three/webgpu';
-import { exp, float, min, mix, screenUV, select, vec3, vec4, uniform } from 'three/tsl';
+import { exp, float, min, mix, screenUV, select, vec2, vec3, vec4, uniform } from 'three/tsl';
 import type { Node, PassNode, UniformNode } from 'three/webgpu';
 import type { ShaderNodeObject } from 'three/tsl';
 import { underwaterParams as p } from '../params/underwater';
@@ -177,7 +177,18 @@ export function buildWaterVolume(
   // z = 0.5 is any point on the ray; dividing by w and then rescaling so the
   // view-space z is exactly -1 turns it into a direction with unit forward
   // component, which `viewDist` then scales to the real fragment.
-  const ndc = screenUV.mul(2).sub(1);
+  // Y IS INVERTED ON THE WAY TO NDC. `screenUV` is 0 at the TOP of the frame on
+  // both backends (WGSL reads `fragCoord` directly, the GLSL path flips
+  // `gl_FragCoord` to match), while NDC y is +1 at the top — so the conversion
+  // is (1 − v)·2 − 1, not v·2 − 1. Three writes the same flip explicitly in
+  // `getViewPosition()` (`screenPosition.y.oneMinus()`, PostProcessingUtils.js).
+  // Without it every reconstructed ray is mirrored about the horizontal
+  // midline, which SIGN-FLIPS `rayUp` below: Snell's window opens downward, the
+  // downward darkening lands on the upward half of the frame, and the submerged
+  // path length is measured for the wrong hemisphere (an upward ray gets the
+  // never-exits arm and reads the whole ray as water). Same defect as the god
+  // rays' mirrored sun — see core/postGodRays.ts.
+  const ndc = vec2(screenUV.x, screenUV.y.oneMinus()).mul(2).sub(1);
   const clip = vec4(ndc.x, ndc.y, 0.5, 1);
   const vh = v.invProj.mul(clip);
   const vpos = vh.xyz.div(vh.w);
