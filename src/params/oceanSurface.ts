@@ -433,8 +433,20 @@ export const oceanSurfaceParams = registerParams(
      * all arrive with their real azimuth, from one implementation. Its knobs
      * are `sunHazeStrength` / `horizonWarm*` in params/sky.ts.
      */
-    /** how much the sun shadow map darkens the water (0 = ignore shadows) */
-    shadowStrength: 0.85,
+    /**
+     * WATER-ONLY TRIM on the scene-wide shadow darkness, multiplied on top of
+     * `skyParams.shadowIntensity` (§V.33 — that is the single owner now, and
+     * the shared shadow node has already applied it by the time this sees it).
+     * 1 = take the scene's shadow exactly as every other surface does.
+     *
+     * It was 0.85 while the rest of the scene ran at three's default 1.0, so a
+     * ship shadow crossing the waterline stepped 15% lighter as it left the
+     * beach — the seam this feature exists to make beautiful. The 0.85 moved to
+     * skyParams and the water is unchanged; this stays as a trim because the
+     * water is the one surface with a standing §V.20 look bar, but drive it
+     * from 1 and only reach for it if the water specifically needs to differ.
+     */
+    shadowStrength: 1.0,
     /** build the in-material sun-shadow sample at all (reload to apply) —
      *  kill switch for the shadow node, separate from shadowStrength which
      *  only scales an already-compiled sample */
@@ -628,8 +640,16 @@ export const oceanSurfaceParams = registerParams(
     normalFadeStart: 2200,
     normalFadeEnd: 4200,
 
-    /** §V.24 transparency: view-space absorption density per meter */
-    absorptionDensity: 0.35,
+    // ── §V.24 transparency ──────────────────────────────────────────────
+    // §V.33 TRIPWIRE: `absorptionDensity` and `refractionTint` USED TO LIVE
+    // HERE and are deliberately gone. §V.24's see-through path now reads the
+    // per-channel Jerlov K_d from `causticsParams.submergedAbsorption{R,G,B}`,
+    // which was already the single owner for the caustic, the submerged hull
+    // and the underwater volume. The scalar density applied RED's coefficient
+    // to blue and left the sea floor 12× too dark to see through its own
+    // shallows; the flat teal tint was the depth-independent stand-in for the
+    // curve that now does the job properly. There is one water — tune its
+    // clarity in the CAUSTICS panel.
     /** refraction offset strength (screen-space) at full water thickness */
     refractionStrength: 0.06,
     /**
@@ -640,8 +660,6 @@ export const oceanSurfaceParams = registerParams(
      * equally hard, which read as a shimmering halo.
      */
     refractionDepthFull: 6,
-    /** water body tint applied to refracted scene */
-    refractionTint: '#7fd4c9',
     /**
      * §V.24 TRANSMISSION FLOOR. Fresnel splits energy between reflection and
      * transmission; it never deletes transmission. But a physical Schlick
@@ -748,7 +766,6 @@ export const oceanSurfaceParams = registerParams(
     glintHazePenetration: { min: 0, max: 1, step: 0.01 },
     normalFadeStart: { min: 50, max: 8000, step: 10 },
     normalFadeEnd: { min: 100, max: 20000, step: 50 },
-    absorptionDensity: { min: 0.02, max: 2, step: 0.01 },
     refractionStrength: { min: 0, max: 0.3, step: 0.005 },
     transmissionFloor: { min: 0, max: 0.9, step: 0.01 },
     underWindowBrightness: { min: 0, max: 3, step: 0.01 },

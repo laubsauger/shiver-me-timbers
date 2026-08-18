@@ -126,6 +126,14 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
       // ortho extent needs the projection rebuilt — only when it moves
       sunLight.shadow.bias = p.shadowBias;
       sunLight.shadow.normalBias = p.shadowNormalBias;
+      // §V.33 scene-wide shadow darkness. `uncoloredShadowNode` reads this as a
+      // live `reference('intensity', 'float', shadow)` inside the ONE shared
+      // shadow node, so setting it here reaches the water, the ship, the
+      // terrain and the sea floor through a single binding — and reaches them
+      // with the SAME value, which is the point (see skyParams.shadowIntensity:
+      // the ocean used to run 0.85 against everyone else's 1.0 and a shadow
+      // crossing the waterline stepped).
+      sunLight.shadow.intensity = p.shadowIntensity;
       if (p.shadowExtent !== appliedExtent) {
         appliedExtent = Math.max(1, p.shadowExtent);
         sc.left = -appliedExtent;

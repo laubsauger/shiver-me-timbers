@@ -235,6 +235,27 @@ export interface SkyParams {
   shadowBias: number;
   shadowExtent: number;
   shadowMapSize: number;
+  /**
+   * How dark a full sun shadow gets, scene-wide: 1 = the raw PCF result, 0 =
+   * no shadow at all. Applied on `sunLight.shadow.intensity`, which
+   * `uncoloredShadowNode` already folds in as `mix(1, pcf, intensity)` — so
+   * this is ONE value reaching every receiver through the one shared shadow
+   * node, at no extra binding (§V.40).
+   *
+   * §V.33 SINGLE OWNER, and it was not one until now. The ocean carried its own
+   * `oceanSurfaceParams.shadowStrength` at 0.85 while every lit material took
+   * three's default 1.0, so a single ship shadow crossing the waterline STEPPED
+   * in darkness — 15% lighter on the water than on the beach or the sea floor
+   * it continued onto. That seam runs right through the shallow-water shot this
+   * whole feature exists to make good, so the scene-wide value lives here and
+   * the ocean's knob is now a trim on top of it (default 1 = no trim).
+   *
+   * Below 1 on purpose: a shadow on water is never fully dark. Skylight arrives
+   * from the whole dome and the ship blocks a small solid angle of it, so the
+   * shadowed sea should go bluer and dimmer, not black — the same reason the
+   * shadowed sea floor keeps its hemisphere ambient.
+   */
+  shadowIntensity: number;
   /** hemisphere ambient peak intensity */
   ambientIntensity: number;
   /** what the sea/sand LOOKS like — the bounce's hue before washout */
@@ -452,6 +473,10 @@ export const skyParams: SkyParams = registerParams(
     shadowBias: -0.0004,
     shadowExtent: 80,
     shadowMapSize: 2048,
+    // 0.85 is the ocean's long-standing shadowStrength, promoted to the whole
+    // scene rather than retuned — the water is bit-identical after the move and
+    // the terrain/ship stop being 15% darker than the water beside them.
+    shadowIntensity: 0.85,
     // 0.85 → 0.70: the sky half moved from zenithColor to the lighter
     // midColor, which lifted total ambient ~38%; this holds shade at roughly
     // its previous brightness so only the HUE changes, not the exposure
@@ -506,6 +531,7 @@ export const skyParams: SkyParams = registerParams(
     shadowBias: { min: -0.005, max: 0, step: 0.0001 },
     shadowExtent: { min: 20, max: 200, step: 5 },
     shadowMapSize: { min: 1024, max: 4096, step: 1024 },
+    shadowIntensity: { min: 0, max: 1, step: 0.01 },
     ambientIntensity: { min: 0, max: 3, step: 0.01 },
     ambientDesaturation: { min: 0, max: 1, step: 0.01 },
     fogNear: { min: 0, max: 8000, step: 10 },

@@ -32,6 +32,10 @@ import {
 import { oceanParams } from '../src/params/ocean';
 import { oceanSurfaceParams } from '../src/params/oceanSurface';
 import { skyParams } from '../src/params/sky';
+// §V.33: the water's extinction and the geometry it has to reveal both live
+// outside this module — that is the point of the block that reads them.
+import { causticsParams } from '../src/params/caustics';
+import { islandParams } from '../src/params/island';
 import {
   bodyTint,
   chroma,
@@ -868,6 +872,129 @@ describe('optional material inputs stay optional (§V24, §V26)', () => {
   it('far-field foam damping is a cap, never a boost', () => {
     expect(oceanSurfaceParams.foamFarDamp).toBeGreaterThanOrEqual(0);
     expect(oceanSurfaceParams.foamFarDamp).toBeLessThanOrEqual(1);
+  });
+});
+
+
+/**
+ * §V.33 THE WATER HAS ONE EXTINCTION MODEL — and you can see the sea floor.
+ *
+ * The user's report was "I want to see the ship's shadow hit the sea floor,
+ * not just the surface". Everything needed for that already existed: the
+ * island terrain is real geometry with `receiveShadow`, the caustics are
+ * already gated by the same shared shadow node, and §V.24's see-through path
+ * already sampled the scene behind the surface. What killed it was arithmetic.
+ *
+ * `oceanSurfaceParams.absorptionDensity` was a SCALAR 0.35/m applied to all
+ * three channels — numerically the RED Jerlov coefficient, applied to blue —
+ * while `causticsParams.submergedAbsorption{R,G,B}` already held the real
+ * per-channel K_d for three other consumers (the caustic's own attenuation,
+ * the submerged hull tint, and the underwater volume). Two owners, and the one
+ * that governed looking DOWN through the water was ~12× too opaque in blue. At
+ * the island's rim depth that left 12% of the floor reaching the eye, so a
+ * shadow on it — a ~40% modulation — moved under 5% of the pixel. Invisible,
+ * exactly as reported.
+ *
+ * These tests fail if anyone re-adds a second owner, flattens the vector back
+ * to a scalar, or tunes the sea so opaque that its own shelf stops showing.
+ */
+describe('§V.33 one water: per-channel extinction, and a visible sea floor', () => {
+  const K = [
+    causticsParams.submergedAbsorptionR,
+    causticsParams.submergedAbsorptionG,
+    causticsParams.submergedAbsorptionB,
+  ] as const;
+  /** Beer–Lambert transmission down a path of `metres`, per channel */
+  const transmit = (metres: number): number[] => K.map((k) => Math.exp(-k * metres));
+
+  it('the ocean surface owns no absorption of its own (single owner)', () => {
+    // Both keys were deleted from params/oceanSurface.ts. Re-adding either
+    // re-opens the split: the see-through path would disagree with the caustic,
+    // the submerged hull and the underwater volume about what water this is,
+    // and the disagreement is silent — it just looks wrong from one side.
+    const surface = oceanSurfaceParams as Record<string, unknown>;
+    expect(surface.absorptionDensity).toBeUndefined();
+    // `refractionTint` was a fixed teal multiplied onto the refracted scene: a
+    // depth-INDEPENDENT stand-in for the curve below. Keeping both double-tints
+    // and gives sand at 0.5 m the same cast as sand at 8 m.
+    expect(surface.refractionTint).toBeUndefined();
+  });
+
+  it('extinction is per channel — a scalar is the defect, not a simplification', () => {
+    // Jerlov I–IB: red dies roughly an order of magnitude faster than blue.
+    // If these three ever collapse toward each other the water stops being
+    // water and becomes a grey veil that merely gets thicker with depth.
+    expect(K[0]).toBeGreaterThan(K[1]);
+    expect(K[1]).toBeGreaterThan(K[2]);
+    expect(K[0] / K[2]).toBeGreaterThan(5);
+  });
+
+  it('the island shelf is visible through its own water', () => {
+    // THE NUMBER THAT MATTERS. Floor geometry exists from the shoreline down to
+    // the heightmap rim, so this is the deepest water with anything under it to
+    // look at — and it is where the ship's shadow has to land for the user's
+    // request to be satisfied at all. Tied to islandParams so that deepening
+    // the islands without re-checking the water trips here rather than in a
+    // screenshot.
+    const [, g, b] = transmit(islandParams.rimDepth);
+    // the old scalar gave 0.12 flat at this depth: a shadow on the floor was
+    // under 5% of the pixel, which is the bug
+    expect(g).toBeGreaterThan(0.4);
+    expect(b).toBeGreaterThan(0.6);
+  });
+
+  it('the floor arrives turquoise, not grey — that is the whole cue', () => {
+    // Across the band you can actually sail (galleon draft ~2 m up to the rim),
+    // blue must clearly outlive red or the floor reads as a dimmed photograph
+    // rather than as something seen through water.
+    for (const depth of [2, 4, islandParams.rimDepth]) {
+      const [r, , b] = transmit(depth);
+      expect(b / r).toBeGreaterThan(1.5);
+    }
+  });
+
+  it('the sea is still optically thick — this is water, not clear glass', () => {
+    // NOT the guard that keeps the see-through path off open water: that is
+    // `validRefraction`, which zeroes transmission where there is no geometry
+    // behind the surface at all. Open ocean is protected by having nothing to
+    // show, not by absorbing it.
+    // What this guards is the shared coefficient being dialled toward zero to
+    // "see more" — which would also turn the submerged hull and the underwater
+    // volume into air. Red is the channel that decides whether a medium reads
+    // as water, and it must be gone by the open-ocean depth. Blue legitimately
+    // survives at 26% there; that asymmetry IS the model working.
+    const [r] = transmit(islandParams.seabedOpenDepth);
+    expect(r).toBeLessThan(0.01);
+  });
+});
+
+
+/**
+ * §V.33 the sun shadow has ONE darkness. The ocean ran its own 0.85 while
+ * every lit material took three's default 1.0, so a single ship shadow
+ * crossing the waterline stepped 15% lighter as it left the beach — precisely
+ * the seam the see-through work above exists to make beautiful.
+ */
+describe('§V.33 a shadow does not step at the waterline', () => {
+  it("the scene-wide shadow darkness is the sky rig's, and the water only trims it", () => {
+    // skyParams.shadowIntensity lands on sunLight.shadow.intensity, which the
+    // ONE shared shadow node folds in as mix(1, pcf, intensity) — so it reaches
+    // the water, the ship, the terrain and the sea floor through one binding.
+    expect(skyParams.shadowIntensity).toBeGreaterThan(0);
+    expect(skyParams.shadowIntensity).toBeLessThanOrEqual(1);
+    // The water multiplies its own trim on top. At 1 it takes the scene's
+    // shadow exactly as the sea floor does, which is what keeps the shadow
+    // continuous across the waterline. Anything else re-opens the step.
+    expect(oceanSurfaceParams.shadowStrength).toBe(1);
+    const onWater = skyParams.shadowIntensity * oceanSurfaceParams.shadowStrength;
+    expect(onWater).toBeCloseTo(skyParams.shadowIntensity, 10);
+  });
+
+  it('a shadow on water is never fully black — skylight is not blocked', () => {
+    // The ship occludes the sun, not the dome. A shadowed sea should go bluer
+    // and dimmer; at intensity 1 it goes to the raw PCF result and reads as a
+    // hole cut in the water.
+    expect(skyParams.shadowIntensity).toBeLessThan(1);
   });
 });
 

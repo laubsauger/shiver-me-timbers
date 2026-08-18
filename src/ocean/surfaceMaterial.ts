@@ -49,6 +49,10 @@ import type { FoamSim } from '../foam';
 import { foamDetailMask, foamTintNode } from '../foam';
 import type { FlowFoam } from '../flowfoam';
 import { oceanSurfaceParams as sp } from '../params/oceanSurface';
+// §V.33: the water's per-channel extinction K_d has ONE owner and it is not
+// this file — see `uAbsorption` below. Params module only, so no import cycle
+// with the caustics runtime (which itself imports the ocean sim).
+import { causticsParams as cp } from '../params/caustics';
 import { oceanParams } from '../params/ocean';
 import { solveGrowthRate, type SurfaceGridOptions } from './surfaceGeometry';
 import { seabedShallowFactorNode, type SeabedField } from '../island/seabed';
@@ -265,9 +269,45 @@ export function buildOceanSurfaceMaterial(
   const uGraze = uniform(new THREE.Vector2(sp.sparkleGrazeStart, sp.sparkleGrazeEnd));
   const uFoamThreshold = uniform(sp.foamThreshold);
   const uNormFade = uniform(new THREE.Vector2(sp.normalFadeStart, sp.normalFadeEnd));
-  const uAbsorption = uniform(sp.absorptionDensity);
+  /**
+   * §V.33 SINGLE OWNER — the water's extinction coefficient K_d (1/m), PER
+   * CHANNEL, and it lives in `causticsParams`, not here.
+   *
+   * WHAT THIS REPLACED, and why it was the whole "I can't see the sea floor"
+   * report. This used to be `sp.absorptionDensity`, a SCALAR 0.35 applied to
+   * all three channels — i.e. the RED Jerlov coefficient applied to blue.
+   * Meanwhile `causticsParams.submergedAbsorption{R,G,B}` = (0.36, 0.08, 0.03)
+   * (Jerlov I–IB, Solonenko & Mobley) was already the single owner for three
+   * other consumers: the caustic's own depth attenuation (causticsNode), the
+   * submerged-hull tint (waterLighting), and the underwater volume
+   * (underwater/waterVolume.ts — whose header explicitly cedes the ABOVE-water
+   * case to this line). So the sea attenuated one way when you looked down
+   * through it and another way once your eye went under, and the way you
+   * looked down through it was 12× too opaque in blue:
+   *
+   *   4 m of water    scalar 0.35 → 0.25 flat    Jerlov → R .24  G .73  B .89
+   *   6 m             0.12 flat                          R .12  G .62  B .84
+   *  10 m             0.03 flat                          R .03  G .45  B .74
+   *
+   * 2–6 m is the band you can actually sail in over the island shelf (galleon
+   * draft 2.0 m, rim depth 6 m), so this is ~3× more transmitted light exactly
+   * where the floor is, and it now arrives TURQUOISE instead of uniformly grey
+   * — red dies, blue survives, which is what "clear shallow water" looks like.
+   *
+   * NO `refractionTint` ANY MORE. It was a fixed teal (#7fd4c9) multiplied onto
+   * the refracted scene — a hand-authored, DEPTH-INDEPENDENT stand-in for the
+   * per-channel curve that is now actually here. Keeping both double-tints, and
+   * worse, the flat one gives sand at 0.5 m the same cast as sand at 8 m, which
+   * is the one thing depth-dependent absorption exists to distinguish.
+   */
+  const uAbsorption = uniform(
+    new THREE.Vector3(
+      cp.submergedAbsorptionR,
+      cp.submergedAbsorptionG,
+      cp.submergedAbsorptionB,
+    ),
+  );
   const uRefractStrength = uniform(sp.refractionStrength);
-  const uRefractTint = uniform(color(sp.refractionTint));
   const uTransmitFloor = uniform(sp.transmissionFloor);
   const uCameraFar = uniform(5000); // synced from the live camera in update()
   // haze target colour: driven per frame from the scene fog / sky horizon
@@ -907,8 +947,14 @@ export function buildOceanSurfaceMaterial(
     // nothing meaningfully close behind → fully water-colored (also guards
     // refraction pulling foreground pixels: fall back to straight UV)
     const validRefraction = sceneDepthBehind.greaterThan(ownDepth.add(1e-5));
-    const seeThrough = thicknessMeters
-      .mul(uAbsorption)
+    // vec3, not a scalar: Beer–Lambert PER CHANNEL (see `uAbsorption`). Red is
+    // gone by ~4 m while blue is still 90% alive, and that DIFFERENCE is what
+    // reads as water rather than as a grey veil over a photograph.
+    // vec3 on the left, matching causticsNode/waterLighting's
+    // `absorption.mul(path)` — same expression, same units, so the above-water
+    // and below-water halves of the sea visibly agree.
+    const seeThrough = uAbsorption
+      .mul(thicknessMeters)
       .negate()
       .exp()
       .mul(validRefraction.select(float(1), float(0)));
@@ -920,6 +966,23 @@ export function buildOceanSurfaceMaterial(
     // NOTE: `sceneCol`/`seeThrough` are deliberately NOT composited into
     // `waterCol` here — see the transmission channel at the fresnel split
     // below. `waterCol` from this point on is the water's BODY radiance only.
+    //
+    // AND DO NOT MULTIPLY `sceneCol` BY `shadowMask`. It looks like the obvious
+    // way to "put the ship's shadow on the sea floor" and it is wrong twice
+    // over. The floor is real geometry with `receiveShadow` (island terrain,
+    // MeshStandardNodeMaterial), so the shadow is ALREADY in the scene colour
+    // this samples — sampled at the FLOOR's own world position, which is where
+    // it belongs. `shadowMask` here is the shadow at the WATER SURFACE, a
+    // different point entirely; the two are separated by refraction and by the
+    // depth of the column, and that separation is a large part of what sells
+    // the water as a volume. Multiplying them would double-darken the floor AND
+    // stamp the surface's shadow onto it in the wrong place.
+    // The asymmetry three lines below is therefore DELIBERATE and load-bearing:
+    //   `waterCol` is shadowed (it is the body's own scattered sunlight),
+    //   `sceneCol` is NOT   (it carries its own shadow already),
+    //   `reflCol`  is NEVER (the sky dome is not blocked by the ship).
+    // It will read as an inconsistency to the next person through here. It is
+    // not one.
 
     // ── light (§V20): the material owns lighting, but it owns it as TWO
     // physically distinct sources, which the single sun-tinted wrap term did
@@ -1113,16 +1176,33 @@ export function buildOceanSurfaceMaterial(
     // applies within water, not to the interface itself"), and the interface
     // splits that transmitted radiance against the reflection exactly once:
     //   L = F·L_refl + (1−F)·[ T·L_behind + (1−T)·L_body ]
-    const transmitted = mix(waterCol, sceneCol.mul(uRefractTint), seeThrough.mul(0.9));
+    // per-channel mix: `seeThrough` is a vec3, so the floor comes through the
+    // column already reddened-out and blue-shifted. No separate tint — the
+    // curve IS the tint (see `uAbsorption`).
+    const transmitted = mix(waterCol, sceneCol, seeThrough.mul(0.9));
     // §V.24 forbids "opaque-wall water @ grazing/shallow view", and Schlick
     // alone produces exactly that: F→1 deletes the submerged geometry. Cap the
     // mirror in proportion to `seeThrough`, so the floor exists ONLY where
     // there is something submerged to see. Open water has nothing behind it
     // (thickness → ∞ ⟹ seeThrough → 0), so the grazing sunset sea keeps its
     // full physical Fresnel mirror and §T.39 is untouched.
+    //
+    // `.g` AND NOT A PER-CHANNEL CAP. The tempting "consistent" refactor once
+    // `seeThrough` went vec3 is to let this weight go vec3 too. Don't: Fresnel
+    // is an INTERFACE property — the fraction of energy the air/water boundary
+    // reflects — and at n = 1.333 it is flat across the visible band. Only the
+    // VOLUME behind the interface is dispersive. A per-channel cap would let
+    // blue (which survives 10 m of water) hold the mirror open while red (dead
+    // at 4 m) let it close, so the reflected sky would be split into coloured
+    // fringes that no physical water surface produces — chromatic aberration
+    // invented at the wrong boundary.
+    // Green, not max(): max is blue in all but zero-depth water, and blue is
+    // the near-transparent channel, so it would peg the cap wide open and
+    // effectively delete the mirror in any shallows. Green is the middle
+    // coefficient and it is the channel the turquoise read actually rides.
     const reflWeight = fresnel
       .mul(uReflStrength)
-      .min(float(1).sub(uTransmitFloor.clamp(0, 0.9).mul(seeThrough)))
+      .min(float(1).sub(uTransmitFloor.clamp(0, 0.9).mul(seeThrough.g)))
       .clamp(0, 1);
     const col = mix(transmitted, reflCol, reflWeight).toVar();
 
@@ -1525,9 +1605,16 @@ export function buildOceanSurfaceMaterial(
     (uGraze.value as THREE.Vector2).set(sp.sparkleGrazeStart, sp.sparkleGrazeEnd);
     uFoamThreshold.value = sp.foamThreshold;
     (uNormFade.value as THREE.Vector2).set(sp.normalFadeStart, sp.normalFadeEnd);
-    uAbsorption.value = sp.absorptionDensity;
+    // §V.33: read from causticsParams, the single owner — a Tweakpane drag on
+    // the Jerlov coefficients has to move the see-through path, the caustic,
+    // the submerged hull and the underwater volume together, or they disagree
+    // about what water this is.
+    (uAbsorption.value as THREE.Vector3).set(
+      cp.submergedAbsorptionR,
+      cp.submergedAbsorptionG,
+      cp.submergedAbsorptionB,
+    );
     uRefractStrength.value = sp.refractionStrength;
-    (uRefractTint.value as THREE.Color).set(sp.refractionTint);
     uTransmitFloor.value = sp.transmissionFloor;
     (uHaze.value as THREE.Vector2).set(sp.hazeStart, sp.hazeEnd);
     uHazeCurve.value = sp.hazeCurve;
