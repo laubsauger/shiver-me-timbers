@@ -23,6 +23,7 @@ import {
   float,
   mix,
   normalWorld,
+  normalWorldGeometry,
   positionWorld,
   smoothstep,
   step,
@@ -40,7 +41,10 @@ import { activeCaustics, waterLighting } from '../caustics';
 import { fbm2, hash2, valueNoise2 } from './noise';
 // §V.48 — one band-limit implementation project-wide (src/ship for historical
 // reasons, §B.20 was found on the hull; the maths carries nothing ship-specific)
-import { periodResolved } from '../ship/bandLimit';
+import { coordFilter, periodResolved } from '../ship/bandLimit';
+// same story: the Mikkelsen surface gradient lives in src/ship because the hull
+// needed it first, and carries nothing ship-specific
+import { reliefNormalFromScreenGradient } from '../ship/surfaceRelief';
 import {
   buildShoreNodes,
   createShoreUniforms,
@@ -68,6 +72,99 @@ import {
 export interface SandMaterialOptions {
   /** initial world-space sun direction (unit, pointing AT the sun) */
   sunDirection?: THREE.Vector3;
+}
+
+/**
+ * PEAK SURFACE SLOPE of the bedform, dimensionless (rise over run).
+ *
+ * `h = (H/2)·sin(2π·c)` and one unit of `c` is one wavelength, so the steepest
+ * point of the wave has slope `2π·(H/2)/λ = π·H/λ`. Everything else in this
+ * file that has to know "how much normal does this term actually produce"
+ * derives from this one number, so there is no second place to keep in step.
+ *
+ * The CPU/TSL pair convention (noise.ts ↔ noiseCpu.ts, bandLimit.ts's mirrors):
+ * a TSL graph cannot be evaluated headless, so the shape lives here as plain
+ * arithmetic, the uniforms are filled from it, and tests/terrain.test.ts drives
+ * it directly.
+ */
+export function rippleSlope(height: number, wavelength: number): number {
+  return (Math.PI * height) / Math.max(wavelength, 1e-3);
+}
+
+/**
+ * ── THE §V.48 GATE FOR THE RELIEF SIDE, AND WHY IT IS NOT THE COLOUR'S ────
+ *
+ * `ba4eae5` is the whole of this function's justification and it was found on
+ * the deck, one surface over: **§V.48 band-limits the HEIGHT field; it says
+ * nothing about the NORMAL, whose per-pixel excursion is far larger.**
+ * `periodResolved` only begins fading at `fwidth(coord) = 0.4`, i.e. 2.5
+ * samples per period, and a large normal swing reconstructed from 2.5 samples
+ * per period is a moiré generator by construction. FILTER_PIXELS = 2 is a
+ * Nyquist margin calibrated for UNIT GAIN — a height field whose slopes are
+ * order 1 pixel of shading, not order 1 radian.
+ *
+ * So the relief consumer gets its filter width INFLATED by the slope it
+ * produces, which retires the normal earlier in DISTANCE rather than making it
+ * weaker everywhere. The colour consumer keeps the uninflated gate: an albedo
+ * modulation of ±0.11 that goes sub-pixel just averages to the sand, which is
+ * exactly what `periodResolved` fades it to.
+ *
+ * `1 + S` IS THE FORM `ba4eae5` WANTED AND COULD NOT TAKE. That commit records
+ * a ruled deviation: `1 + bumpScale·slope` and "exactly 1 at bumpScale 1"
+ * conflict by 3%, and it chose the identity because the deck had a shipped
+ * `bumpScale` of 1 to stay compatible with. This term is NEW — there is no
+ * prior gain to be identical to — and `1 + S` is the honest statement of the
+ * quantity: one extra filter pixel per unit of surface slope, reducing to the
+ * unmodified §V.48 margin exactly when the surface is flat (`rippleHeight` 0).
+ *
+ * At the shipped 0.14 m over 1.4 m this is 1.314.
+ */
+export function rippleReliefFilterGain(height: number, wavelength: number): number {
+  return 1 + rippleSlope(height, wavelength);
+}
+
+/**
+ * MEAN SQUARE SLOPE of the bedform — the variance §V.64 requires be CONVERTED
+ * rather than deleted when the normal retires.
+ *
+ * A sine of peak slope S has RMS slope S/√2, hence variance S²/2. This is the
+ * σ² that {@link roughnessWithSlopeVariance} folds into the microfacet
+ * distribution.
+ */
+export function rippleSlopeVariance(height: number, wavelength: number): number {
+  const s = rippleSlope(height, wavelength);
+  return (s * s) / 2;
+}
+
+/**
+ * §V.64: sub-pixel slope comes back as ROUGHNESS. CPU mirror of the TSL below.
+ *
+ * The standard normal-variance-to-roughness fold (Kaplanyan/Tokuyoshi, and what
+ * a mip chain does to a normal map for free): GGX α adds in QUADRATURE with
+ * twice the slope variance, `α'² = α² + 2σ²`, with `α = roughness²`.
+ *
+ * TWO PROPERTIES THIS IS WRITTEN FOR:
+ *  - σ² = 0 returns `roughness` EXACTLY, so a fully-resolved bedform and a
+ *    `rippleRoughnessCarry` of 0 are both bit-identical no-ops rather than
+ *    something that has to be tuned back to neutral.
+ *  - it can only ever ROUGHEN. `bb5b3cb` is the reason that matters: the
+ *    submerged seabed is a huge near-planar surface at roughness 0.3, and the
+ *    one thing that must not happen as a new normal term fades out at range is
+ *    for the residual specular to stay sharp.
+ */
+export function roughnessWithSlopeVariance(roughness: number, variance: number): number {
+  const alpha = roughness * roughness;
+  return Math.sqrt(Math.sqrt(alpha * alpha + 2 * Math.max(variance, 0)));
+}
+
+/**
+ * The two smoothstep edges of the bed-flatness gate, on `normalWorldGeometry.y`:
+ * gone at `rippleBedSlopeMax`, full by half that angle. One authored number
+ * drives both so they cannot be set to cross.
+ */
+export function rippleBedGateEdges(slopeMaxDeg: number): [number, number] {
+  const a = (Math.min(Math.max(slopeMaxDeg, 1), 89) * Math.PI) / 180;
+  return [Math.cos(a), Math.cos(a * 0.5)];
 }
 
 /**
@@ -133,6 +230,11 @@ function applyWaterLighting(
   band: any,
   /** `terrainParams.underwaterRoughnessFloor` — see the roughness note below */
   roughFloor: any,
+  /**
+   * §V.64 slope variance the ripple normal has RETIRED into flat (0 where it
+   * is fully resolved). Applied after the floor on purpose — see below.
+   */
+  slopeVariance: any,
 ) {
   const w = waterLighting({
     worldPos: positionWorld,
@@ -142,6 +244,23 @@ function applyWaterLighting(
   });
   // increasing ramp: 0 a band above the waterline, 1 a band below it
   const inWater = smoothstep(band.negate(), band, depthBelow);
+  /**
+   * §V.64 — THE CARRY GOES AFTER THE FLOOR, AND THAT ORDERING IS THE WHOLE
+   * POINT. Folded into `base.roughness` instead, it would be multiplied by
+   * `w.roughnessScale` (0.22) and then thrown away by `.max(roughFloor)`:
+   * 0.57 × 0.22 = 0.125, floored back to 0.3, a silent no-op. The retired
+   * slope is a property of the SHADED SURFACE, not of the sand's own wetness
+   * model, so it composes with the finished roughness.
+   *
+   * `slopeVariance` already carries the submerged gate, so this is exactly 0
+   * above the waterline by construction — the same discipline `roughFloor`
+   * gets from `.mul(inWater)`, and for the same reason: dry sand must not
+   * move.
+   */
+  const roughened = (r: any) => {
+    const alpha = r.mul(r);
+    return alpha.mul(alpha).add(slopeVariance.max(0).mul(2)).max(1e-8).sqrt().sqrt();
+  };
   return {
     color: base.color.mul(mix(vec3(1, 1, 1), w.tint, inWater)),
     /**
@@ -156,9 +275,9 @@ function applyWaterLighting(
      * the floor is exactly 0 above the waterline and cannot touch dry sand,
      * dry rock or ground cover.
      */
-    roughness: base.roughness
-      .mul(mix(float(1), w.roughnessScale, inWater))
-      .max(roughFloor.mul(inWater)),
+    roughness: roughened(
+      base.roughness.mul(mix(float(1), w.roughnessScale, inWater)).max(roughFloor.mul(inWater)),
+    ),
     emissive: base.emissive.add(w.addLight.mul(inWater)),
   };
 }
@@ -183,6 +302,19 @@ export function createSandUniforms(opts: SandMaterialOptions = {}) {
     roughnessWet: uniform(p.sandRoughnessWet),
     underwaterRoughFloor: uniform(p.underwaterRoughnessFloor),
     rippleStrength: uniform(p.rippleStrength),
+    rippleHeight: uniform(p.rippleHeight),
+    /** derived, never authored — {@link rippleReliefFilterGain} */
+    rippleReliefGain: uniform(rippleReliefFilterGain(p.rippleHeight, p.rippleWavelength)),
+    /** derived — σ² the §V.64 carry converts ({@link rippleSlopeVariance}) */
+    rippleSlopeVar: uniform(rippleSlopeVariance(p.rippleHeight, p.rippleWavelength)),
+    rippleRoughCarry: uniform(p.rippleRoughnessCarry),
+    /**
+     * (cos of the bed-slope limit, cos of half it) — the smoothstep edges of
+     * the flatness gate. Precomputed because a `cos` of a param is not a
+     * shader's job, and kept as one vec2 so the two edges cannot be set to
+     * crossing values from two places.
+     */
+    rippleBedGate: uniform(new THREE.Vector2(...rippleBedGateEdges(p.rippleBedSlopeMax))),
     rippleWavelength: uniform(p.rippleWavelength),
     rippleDepthFade: uniform(p.rippleDepthFade),
     /** unit vector ACROSS the crests — the direction the pattern repeats in */
@@ -225,6 +357,11 @@ export function updateSandUniforms(u: SandUniforms): void {
   u.roughnessWet.value = p.sandRoughnessWet;
   u.underwaterRoughFloor.value = p.underwaterRoughnessFloor;
   u.rippleStrength.value = p.rippleStrength;
+  u.rippleHeight.value = p.rippleHeight;
+  u.rippleReliefGain.value = rippleReliefFilterGain(p.rippleHeight, p.rippleWavelength);
+  u.rippleSlopeVar.value = rippleSlopeVariance(p.rippleHeight, p.rippleWavelength);
+  u.rippleRoughCarry.value = p.rippleRoughnessCarry;
+  (u.rippleBedGate.value as THREE.Vector2).set(...rippleBedGateEdges(p.rippleBedSlopeMax));
   u.rippleWavelength.value = p.rippleWavelength;
   u.rippleDepthFade.value = p.rippleDepthFade;
   u.rippleWarp.value = p.rippleWarp;
@@ -392,8 +529,12 @@ export function buildSandNodes(
   const rippleWander = warpCoarse.add(warpFine).mul(u.rippleWarp);
   const rippleCoord = rippleCarrier.add(rippleWander);
   // §V.48: measured on the FINISHED coordinate, so the warp's own contribution
-  // to the screen footprint is included rather than assumed away
-  const rippleResolved = periodResolved(rippleCoord);
+  // to the screen footprint is included rather than assumed away. Hoisted out
+  // of `periodResolved` because the RELIEF consumer below needs the same
+  // footprint at a different gain — one `dpdx(rippleCoord)` in the generated
+  // WGSL, two gates measured from it, ZERO new screen-space derivatives.
+  const rippleFilter = coordFilter(rippleCoord);
+  const rippleResolved = periodResolved(rippleCoord, rippleFilter);
   // (3) patchiness: a low-frequency mask that removes the bedform entirely
   // over part of the floor. Smooth, no edge, mean-fading — the §V.48b branch,
   // and `periodResolved` on its own coordinate is that fade.
@@ -408,7 +549,8 @@ export function buildSandNodes(
   // (`rippleWander` is already inside `rippleCoord` — it used to be added a
   // SECOND time here, which double-counted the phase offset against the
   // footprint `rippleResolved` was measured on.)
-  const rippleWave = rippleCoord.mul(Math.PI * 2).sin();
+  const ripplePhase = rippleCoord.mul(Math.PI * 2);
+  const rippleWave = ripplePhase.sin();
   // Depth gates, both required. Below: ripples are cut by wave orbital motion
   // at the bed, which dies with depth, so a deep shelf is smooth. Above: they
   // are a SEABED feature and must not crawl up the dry beach.
@@ -420,13 +562,105 @@ export function buildSandNodes(
   // §V.48 argument actually lives.
   const rippleDepth = sea.depthBelow.smoothstep(u.rippleDepthFade.max(1e-3), float(0));
   const rippleSubmerged = sea.depthBelow.smoothstep(float(0), float(0.35));
-  const ripple = rippleWave
-    .mul(u.rippleStrength)
-    .mul(rippleResolved)
-    .mul(ripplePatch)
-    .mul(rippleDepth)
-    .mul(rippleSubmerged);
+  /**
+   * BED FLATNESS. Orbital motion sweeps a near-horizontal bed; nothing holds a
+   * bedform on a wall — and, more importantly here, this is what keeps the new
+   * shading normal off the rock. `material.normalNode` is set for the whole
+   * blend material, so `normalWorld` inside rockMaterial's top-catch and
+   * groundCover's `up` reads the PERTURBED normal too. Zeroing the bedform
+   * everywhere rock can win (n.y < `slopeThreshold` + `slopeBlendWidth` = 0.82,
+   * against a gate that is already 0 by 0.866) closes that by geometry instead
+   * of by a weight the normal would then have to depend on.
+   *
+   * `normalWorldGeometry`, NOT `normalWorld` — the latter resolves to
+   * `material.normalNode`, which this expression feeds. Reading it here would
+   * be a cycle, and the geometry normal is the honest answer to "how steep is
+   * this ground" anyway.
+   */
+  // A smoothstep on an interpolated normal's Y: a vertex-interpolated
+  // direction, no period, so no sub-pixel regime to alias in — the same
+  // argument the sail's dot-product gate carries.  @band-limited-elsewhere
+  const rippleBed = normalWorldGeometry.y.smoothstep(u.rippleBedGate.x, u.rippleBedGate.y);
+  /**
+   * The gates that decide whether a bedform EXISTS here, shared by both
+   * consumers (§V.72: one expression, two consumers). Deliberately excludes
+   * every §V.48 term — those are per-consumer, because the colour and the
+   * normal go sub-pixel at different distances, which is the whole of
+   * `ba4eae5`.
+   */
+  const rippleGates = ripplePatch.mul(rippleDepth).mul(rippleSubmerged).mul(rippleBed);
+  const ripple = rippleWave.mul(u.rippleStrength).mul(rippleResolved).mul(rippleGates);
   albedo = albedo.mul(ripple.add(1));
+
+  /**
+   * ── THE BEDFORM'S SHADING NORMAL ──────────────────────────────────────
+   *
+   * User: "we probably want to have normals then, right? That's gonna make a
+   * big difference." The immediate cause is `aa8a9cb`: once the caustics went
+   * from a uniform lacework to sparse structural cells, the seabed's flatness
+   * got MORE exposed, not less — a bright filament grazing across a plane has
+   * nothing to reveal and nothing to self-shadow against.
+   *
+   * ANALYTIC IN THE OSCILLATION, DIFFERENCED ONLY IN THE SMOOTH PART. The
+   * height is `h = (H/2)·sin(2π·c)`, so
+   *
+   *     dh/dscreen = 2π·(H/2)·cos(2π·c) · dc/dscreen
+   *
+   * and the two factors could not be more different. `cos(2π·c)` is the fast
+   * one and is evaluated EXACTLY at the fragment. `c` is linear in world
+   * position plus a bounded phase warp (see the lever-arm note above), so its
+   * screen derivative is smooth at every distance and differencing it is safe.
+   * Differencing `h` itself — the obvious implementation — would sample two
+   * arbitrary points of the same wave once the period nears a pixel and report
+   * a slope belonging to neither: the moiré generator `ba4eae5` measured,
+   * built in at the source rather than filtered out afterwards.
+   *
+   * WHY THE ENVELOPE'S OWN GRADIENT IS DROPPED. The exact product rule adds
+   * `sin(2π·c)·dA/dscreen`. `A` varies over the patch mask (28 m) and the depth
+   * fade (16 m), contributing ≤ 0.0025 of slope against the carrier's 0.314 —
+   * two orders down. And the factors inside `A` that DO vary fast are the band
+   * limits, which are built from screen derivatives and are therefore
+   * quad-constant: differencing them yields identically zero, not a small
+   * correction. So this is the exact gradient of the carrier, not an
+   * approximation of something else.
+   *
+   * SELF-CONSISTENCY, which is worth naming because it is what makes the
+   * contour term safe. `dc/dscreen` is not bounded a priori — the contour half
+   * of the carrier keys on `depthBelow`, whose gradient includes the live FFT
+   * surface. But `rippleFilter` is built from that same derivative, so wherever
+   * `dc/dscreen` grows the relief gate below drives the amplitude to zero. The
+   * term cannot produce a slope its own band limit has not licensed.
+   *
+   * §V.48b: the gate fades the amplitude to the feature's OWN MEAN, and for an
+   * antisymmetric slope field that mean is a FLAT normal — `reliefAmp` → 0
+   * gives a zero gradient, which `reliefNormalFromScreenGradient` returns as
+   * the unmodified geometric normal, exactly. Not approximately: no relief
+   * anywhere the gates are zero, so dry sand, rock, deep shelf and bare patches
+   * are bit-identical to before this existed.
+   */
+  const reliefResolved = periodResolved(rippleCoord, rippleFilter.mul(u.rippleReliefGain));
+  const reliefAmp = u.rippleHeight.mul(0.5).mul(reliefResolved).mul(rippleGates);
+  const dHdc = ripplePhase.cos().mul(Math.PI * 2).mul(reliefAmp);
+  const rippleNormal = reliefNormalFromScreenGradient(
+    dHdc.mul(rippleCoord.dFdx()),
+    dHdc.mul(rippleCoord.dFdy()),
+  );
+  /**
+   * §V.64 — the variance the band limit just removed, on its way to roughness.
+   *
+   * `1 − reliefResolved` is the FULL retirement, not just the extra band the
+   * gain inflation opened. `ba4eae5` carried only the difference because its
+   * relief still existed at unit gain and it was compensating its own change;
+   * here the honest statement is that a sub-pixel bedform's slopes are ALL
+   * missing from the normal and all of them belong in the microfacet
+   * distribution. That is also what makes this the anti-glint half of the
+   * change (`bb5b3cb`): the further the seabed, the rougher it gets, so a
+   * per-facet sun glint cannot survive into the distance as fireflies.
+   */
+  const rippleSlopeLost = u.rippleSlopeVar
+    .mul(u.rippleRoughCarry)
+    .mul(reliefResolved.oneMinus().clamp(0, 1))
+    .mul(rippleGates);
 
   // Static shore wetness: the permanently-damp band right at the water; the
   // swash model below adds the part that MOVES.
@@ -571,6 +805,23 @@ export function buildSandNodes(
     emissive: vec3(glint),
     wet,
     swash,
+    /**
+     * View-space shading normal carrying the sand bedform. Identity — the
+     * unmodified geometric normal, bit-exact — wherever the bedform's gates
+     * are zero, which is everywhere above the waterline, everywhere steeper
+     * than `rippleBedSlopeMax`, and everywhere the pattern is sub-pixel. Goes
+     * on `material.normalNode`.
+     *
+     * NOTE it is deliberately NOT scaled by `waterLighting`'s `reliefScale`.
+     * That multiplier flattens relief under a water FILM — grain smoothed by a
+     * wet sheen on a dry receiver — and `wet` is 1 everywhere below the
+     * waterline, so applying it would flatten the ripples precisely where they
+     * exist. That is `bb5b3cb`'s double-wetness error one channel over, and it
+     * is written down because the two lines look identical.
+     */
+    reliefNormal: rippleNormal,
+    /** §V.64 slope variance the ripple normal has retired into flat */
+    slopeVariance: rippleSlopeLost,
     /** metres below the live sea surface, positive submerged (§V34 receiver) */
     depthBelow: sea.depthBelow,
     /** true when the sea height is the live FFT surface, not the flat uniform */
@@ -590,10 +841,12 @@ export function createSandMaterial(opts: SandMaterialOptions = {}) {
     nodes.depthBelow,
     uniforms.causticsBand,
     uniforms.underwaterRoughFloor,
+    nodes.slopeVariance,
   );
   material.colorNode = lit.color;
   material.roughnessNode = lit.roughness;
   material.emissiveNode = lit.emissive;
+  material.normalNode = nodes.reliefNormal;
   material.metalness = 0;
   return {
     material,
@@ -692,7 +945,13 @@ export function terrainBlendMaterial(
     p.noiseLacunarity,
     p.noiseGain,
   );
-  const up = normalWorld.y.add(edgeNoise.sub(0.5).mul(blend.slopeNoiseAmount));
+  // `normalWorldGeometry`, not `normalWorld`. This is a GEOMETRIC question —
+  // "is this ground too steep to hold sand" — and `normalWorld` now resolves to
+  // `material.normalNode`, i.e. to the sand bedform's own shading normal. A
+  // slope blend keyed on it would let a ripple crest decide it was rock. Today
+  // the bedform is gated flatter than this threshold so the two agree, but the
+  // gate is a param and this is a correctness boundary, not a coincidence.
+  const up = normalWorldGeometry.y.add(edgeNoise.sub(0.5).mul(blend.slopeNoiseAmount));
   const sandW = up.smoothstep(
     blend.slopeThreshold.sub(blend.slopeBlendWidth.max(1e-3)),
     blend.slopeThreshold.add(blend.slopeBlendWidth.max(1e-3)),
@@ -735,10 +994,17 @@ export function terrainBlendMaterial(
     sandNodes.depthBelow,
     sand.causticsBand,
     sand.underwaterRoughFloor,
+    sandNodes.slopeVariance,
   );
   material.colorNode = lit.color;
   material.roughnessNode = lit.roughness;
   material.emissiveNode = lit.emissive;
+  // The bedform is a SAND phenomenon and gates itself onto flat, submerged
+  // ground, so it is exactly identity on rock, on cover and above the
+  // waterline — no `groundW`/`shoreW` weighting is applied (and could not be:
+  // those depend on the slope blend, which would make the shading normal
+  // depend on itself).
+  material.normalNode = sandNodes.reliefNormal;
   material.metalness = 0;
 
   // §V30/§V43 aerial perspective. The island melts into the atmosphere on the

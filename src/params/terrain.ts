@@ -140,7 +140,77 @@ export interface TerrainParams {
    * the note in `buildSandNodes`. One bearing for the world is honest as a
    * first cut and is a live panel value, not a baked constant.
    */
+  /**
+   * ALBEDO modulation depth of the bedform (±strength/2 on the sand colour).
+   * The grain-sorting half of a ripple: crests are winnowed coarse and pale,
+   * troughs collect the fines. Kept as its own dimensionless number rather
+   * than derived from `rippleHeight`, because the two are genuinely different
+   * physics — a bedform can be tall and monochrome, or flat and strongly
+   * sorted — and because it is the shipped, signed-off look.
+   */
   rippleStrength: number;
+  /**
+   * CREST-TO-TROUGH HEIGHT (m) — the RELIEF half of the bedform, and the only
+   * input to the shading normal.
+   *
+   * WHY A HEIGHT AND NOT A "NORMAL STRENGTH". The normal is
+   * `normalize(N − ∇h)`, so any dimensionless dial on it is a lie about a
+   * quantity that has units and a known physical range. Wave-formed bedforms
+   * run a height-to-wavelength ratio of about 1:7 (steep, freshly formed) to
+   * 1:10 (relict, smoothed). At the shipped `rippleWavelength` 1.4 m that is
+   * 0.14–0.20 m, and this is authored at the FLAT end of that band:
+   *
+   *   peak surface slope  S = π·H/λ = π·0.14/1.4 = 0.314  →  17.4°
+   *
+   * WHAT 17° BUYS, which is the number that decides whether this was worth
+   * doing at all. The sun refracts to ~32° from vertical underwater at
+   * `timeOfDay` 15.0 (Snell, 45° in air), so N·L across one flank runs
+   * cos(14.6°) = 0.968 on the sun-facing side against cos(49.4°) = 0.651 on
+   * the far side: a 1.49× swing, per crest, for a caustic filament to graze
+   * across. That is the whole point — the caustics went sparse and structural
+   * in `aa8a9cb`, and a bright filament crossing a flat plane has nothing to
+   * reveal.
+   *
+   * WHY NOT THE STEEP END. Two shipped defects sit on the other side of this
+   * dial. `ba4eae5` (a 34–42° normal swing on the deck was a moiré generator
+   * at 2.5 samples per period) and `bb5b3cb` (the submerged seabed shading at
+   * roughness 0.066 put a 363-radiance sun disc on the sea floor). Both scale
+   * with S, and the relief band limit's own inflation is `1 + S`, so the
+   * steep end costs distance-legibility as well. 1:10 is the ratio that
+   * carries the shading read at the lowest S that does.
+   */
+  rippleHeight: number;
+  /**
+   * Bed slope (DEGREES) past which no bedform survives at all.
+   *
+   * Wave ripples form where orbital motion sweeps a near-horizontal bed;
+   * nothing holds them on a wall. This is here for a second reason too, and
+   * it is the load-bearing one: `material.normalNode` is set for the WHOLE
+   * blend material, so `normalWorld` in the rock and ground-cover branches
+   * reads the perturbed normal as well. Gating the bedform to gentle ground
+   * makes it exactly zero everywhere rock can win (`slopeThreshold` 0.72 +
+   * `slopeBlendWidth`, i.e. n.y < 0.82), so the leak is closed by geometry
+   * rather than by a weight the shading normal would have to depend on.
+   *
+   * The gate ramps from cos(this) to cos(this/2) on `normalWorldGeometry.y`
+   * — the GEOMETRY normal, never the shaded one, or it would depend on
+   * itself.
+   */
+  rippleBedSlopeMax: number;
+  /**
+   * §V.64 carry, 0..1. When the bedform's normal retires into flat with
+   * distance, its slope variance is added to the surface ROUGHNESS instead of
+   * being deleted. 0 disables the carry (the A/B leg), 1 converts all of it.
+   *
+   * Roughness is the honest destination HERE, unlike §V.72's shoaling
+   * refusal: a sub-pixel ripple is still physically present and still spreads
+   * the specular lobe, whereas shoaled water is genuinely calmer and routing
+   * that to roughness would frost a glassy lagoon. It is also load-bearing
+   * against `bb5b3cb`: the far seabed gets ROUGHER exactly as its normal goes
+   * sub-pixel, which is where a per-facet sun glint would otherwise become a
+   * field of fireflies.
+   */
+  rippleRoughnessCarry: number;
   /** crest-to-crest distance (m) — real wave ripples run 0.1-1 m */
   rippleWavelength: number;
   /** water depth (m) by which ripples have died out — orbital motion at the
@@ -438,6 +508,12 @@ export const terrainParams: TerrainParams = registerParams(
     underwaterRoughnessFloor: 0.3,
 
     rippleStrength: 0.22,
+    // λ/10 — the flat end of the 1:7–1:10 wave-ripple band. See the interface
+    // note: this is 17.4° of peak surface slope, a 1.49× N·L swing across a
+    // flank at tod 15.0, and a band-limit inflation of 1 + 0.314.
+    rippleHeight: 0.14,
+    rippleBedSlopeMax: 30,
+    rippleRoughnessCarry: 1,
     /**
      * DUNE SCALE, NOT RIPPLE SCALE, and the choice is deliberate.
      *
@@ -679,6 +755,9 @@ function terrainParamsMeta(): Partial<Record<keyof TerrainParams, ParamMeta>> {
     sandRoughnessWet: { min: 0, max: 1, step: 0.01 },
     underwaterRoughnessFloor: { min: 0, max: 1, step: 0.01 },
     rippleStrength: { min: 0, max: 0.6, step: 0.01 },
+    rippleHeight: { min: 0, max: 0.4, step: 0.005 },
+    rippleBedSlopeMax: { min: 5, max: 60, step: 1 },
+    rippleRoughnessCarry: { min: 0, max: 1, step: 0.05 },
     rippleWavelength: { min: 0.1, max: 4, step: 0.05 },
     rippleDepthFade: { min: 1, max: 45, step: 0.5 },
     rippleAngle: { min: 0, max: 180, step: 1 },

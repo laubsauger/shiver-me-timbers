@@ -30,9 +30,28 @@ type Node = any;
  * @returns a view-space normal, ready for `material.normalNode`
  */
 export function reliefNormal(height: Node, scale: Node): Node {
-  const dHdx = height.dFdx().mul(scale);
-  const dHdy = height.dFdy().mul(scale);
+  return reliefNormalFromScreenGradient(height.dFdx().mul(scale), height.dFdy().mul(scale));
+}
 
+/**
+ * The same Mikkelsen surface gradient, but taking dH/dx and dH/dy DIRECTLY
+ * instead of finite-differencing a height node. {@link reliefNormal} is now a
+ * one-line wrapper over this, so the ship's behaviour is unchanged by
+ * construction.
+ *
+ * WHY A CALLER WOULD WANT THIS. Finite-differencing the height is exact while
+ * the feature spans several pixels and GARBAGE once it does not: at 2.5 samples
+ * per period the difference lands on two arbitrary points of the same wave and
+ * reports a slope that has nothing to do with either. For a feature whose
+ * height is a KNOWN oscillation — `A·sin(2π·c)` — the chain rule splits that
+ * apart: `dH/dscreen = 2π·A·cos(2π·c)·dc/dscreen`. The fast factor (the cosine)
+ * is then evaluated ANALYTICALLY at the fragment, and the only thing left being
+ * differenced is `c`, which is linear-plus-bounded in world position and
+ * therefore smooth at every distance. The seabed ripples (terrain/sandMaterial)
+ * are built this way; the deck is not, because its height field is a sum of
+ * masks with no closed form.
+ */
+export function reliefNormalFromScreenGradient(dHdx: Node, dHdy: Node): Node {
   const sigmaX = positionView.dFdx();
   const sigmaY = positionView.dFdy();
   const vN = normalView;

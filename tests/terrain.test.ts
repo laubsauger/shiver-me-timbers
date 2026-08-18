@@ -19,7 +19,14 @@ import {
   createAerialUniforms,
   updateAerialUniforms,
 } from '../src/terrain/aerialPerspective';
-import { terrainBlendMaterial } from '../src/terrain/sandMaterial';
+import {
+  rippleBedGateEdges,
+  rippleReliefFilterGain,
+  rippleSlope,
+  rippleSlopeVariance,
+  roughnessWithSlopeVariance,
+  terrainBlendMaterial,
+} from '../src/terrain/sandMaterial';
 import {
   fadeCpu,
   fbm2Cpu,
@@ -428,6 +435,124 @@ describe('§V.48 band limits on the terrain material (the §B.20 shape, again)',
     // just takes a bigger screen to notice
     expect(periodResolvedValue(50)).toBe(0);
     expect(bandLimitEnergy(0.09, 100)).toBeLessThan(0.001);
+  });
+});
+
+describe('the sand bedform gives the seabed a NORMAL (§V.48/§V.64, ba4eae5\'s lesson)', () => {
+  // Same pixel model as the band-limit block above.
+  const PX_PER_RAD = 2560 / ((75 * Math.PI) / 180);
+  const metresPerPixel = (dist: number, grazing = 1): number => (dist / PX_PER_RAD) * grazing;
+  /** the ripple coordinate counts CRESTS, so its footprint is pixels/λ */
+  const rippleFilterAt = (dist: number, grazing = 1): number =>
+    metresPerPixel(dist, grazing) / terrainParams.rippleWavelength;
+
+  it('is authored inside the physical wave-ripple height:wavelength band', () => {
+    // Real wave-formed bedforms run 1:7 (steep, fresh) to 1:10 (relict). This
+    // is not decoration: the height is the ONLY input to the shading normal,
+    // so a number picked for looks is a lie about a quantity with units. If
+    // someone later dials `rippleHeight` for taste, this is what tells them
+    // they have left the physics — and the two traps on either side of the
+    // dial (`ba4eae5` moiré above, `bb5b3cb` glare above) are why that matters.
+    const ratio = terrainParams.rippleWavelength / terrainParams.rippleHeight;
+    expect(ratio).toBeGreaterThanOrEqual(7);
+    expect(ratio).toBeLessThanOrEqual(10);
+  });
+
+  it('a flank swings N·L enough for a caustic filament to graze across it', () => {
+    // The REASON this work was done: `aa8a9cb` made the caustics sparse and
+    // structural, which exposed the seabed's flatness rather than hiding it.
+    // A normal that does not move the diffuse term buys nothing.
+    const s = rippleSlope(terrainParams.rippleHeight, terrainParams.rippleWavelength);
+    const tilt = Math.atan(s);
+    // sun 45° from vertical in air refracts to ~32° underwater (Snell, n=1.33)
+    const sunUnderwater = Math.asin(Math.sin(Math.PI / 4) / 1.33);
+    const near = Math.cos(sunUnderwater - tilt);
+    const far = Math.cos(sunUnderwater + tilt);
+    // a flank-to-flank contrast of at least 1.35× — below that the relief is
+    // present in the buffer and absent to the eye
+    expect(near / far).toBeGreaterThan(1.35);
+  });
+
+  it('the NORMAL retires earlier in distance than the COLOUR — the whole of ba4eae5', () => {
+    // §V.48 band-limits the HEIGHT field and says NOTHING about the normal,
+    // whose per-pixel excursion is far larger. `periodResolved` starts fading
+    // at 2.5 samples per period, which is fine for a ±0.11 albedo modulation
+    // and is a moiré generator for a 17° normal swing. So the relief consumer
+    // measures the same footprint at an inflated gain, and the colour consumer
+    // keeps the uninflated gate.
+    const gain = rippleReliefFilterGain(
+      terrainParams.rippleHeight,
+      terrainParams.rippleWavelength,
+    );
+    expect(gain).toBeGreaterThan(1);
+    // both reach exactly zero at filter 1.1, so the ratio of the distances at
+    // which they die IS the gain: the normal goes 1.31× nearer than the tint
+    const dies = (g: number): number => {
+      let d = 1;
+      while (periodResolvedValue(rippleFilterAt(d, 10) * g) > 0 && d < 1e5) d += 1;
+      return d;
+    };
+    expect(dies(1) / dies(gain)).toBeCloseTo(gain, 1);
+    // and in the band between them the colour is still fully present while the
+    // normal has already begun to go — which is the point, not a side effect
+    const mid = (dies(gain) + dies(1)) / 2;
+    expect(periodResolvedValue(rippleFilterAt(mid, 10))).toBeGreaterThan(0);
+    expect(periodResolvedValue(rippleFilterAt(mid, 10) * gain)).toBe(0);
+  });
+
+  it('a flat bedform inflates nothing — the gate reduces to plain §V.48', () => {
+    // COMPATIBILITY, and the reason the form is `1 + S` rather than a tuned
+    // multiplier: with no relief authored there is no normal to protect and
+    // the colour term must land exactly where it always did.
+    expect(rippleReliefFilterGain(0, terrainParams.rippleWavelength)).toBe(1);
+    expect(rippleSlopeVariance(0, terrainParams.rippleWavelength)).toBe(0);
+  });
+
+  it('§V.64: the retired slope becomes ROUGHNESS, and cannot be swallowed', () => {
+    // `bb5b3cb` measured what a too-smooth submerged seabed costs: at
+    // roughness 0.066 the sun's disc landed on the sea floor whole, 363
+    // scene-linear. The floor at 0.3 is what stopped it, and a normal map on a
+    // 0.3 surface is a glint generator — so as the bedform's normal retires
+    // with distance its variance has to arrive somewhere that SPREADS the
+    // lobe, not vanish.
+    const floor = terrainParams.underwaterRoughnessFloor;
+    const variance = rippleSlopeVariance(
+      terrainParams.rippleHeight,
+      terrainParams.rippleWavelength,
+    );
+    // identity when nothing has been lost — no tuning back to neutral
+    expect(roughnessWithSlopeVariance(floor, 0)).toBeCloseTo(floor, 12);
+    // monotone, and it can only ever roughen
+    const full = roughnessWithSlopeVariance(floor, variance);
+    expect(full).toBeGreaterThan(floor);
+    expect(roughnessWithSlopeVariance(floor, variance * 0.5)).toBeLessThan(full);
+    // the carry has to CLEAR the floor to mean anything. Folded in before the
+    // floor it would be multiplied by the caustics module's 0.22 wet gloss and
+    // then thrown straight back to 0.3 — a silent no-op, which is why the
+    // material applies it last.
+    expect(full).toBeGreaterThan(floor * 1.5);
+    expect(full).toBeLessThan(1);
+  });
+
+  it('the bedform is exactly zero everywhere rock can win — the normal leak', () => {
+    // `material.normalNode` is set for the WHOLE blend material, so
+    // `normalWorld` in the rock and ground-cover branches reads the perturbed
+    // normal too. Nothing weights it down per-layer, and nothing can: the
+    // layer weights key on the slope, so a weighted normal would depend on
+    // itself. The bed-flatness gate is what closes it, and it closes it by
+    // geometry — this asserts the two thresholds cannot drift into overlap.
+    const p = terrainParams;
+    const [lo, hi] = rippleBedGateEdges(p.rippleBedSlopeMax);
+    expect(lo).toBeLessThan(hi);
+    const gate = (ny: number): number => {
+      const t = Math.min(1, Math.max(0, (ny - lo) / (hi - lo)));
+      return t * t * (3 - 2 * t);
+    };
+    // rock exists below slopeThreshold + slopeBlendWidth; the bedform is gone
+    // well above that, so no fragment gets both
+    expect(gate(p.slopeThreshold + p.slopeBlendWidth)).toBe(0);
+    // and it is still fully present on the gentle shelf the ripples live on
+    expect(gate(Math.cos((5 * Math.PI) / 180))).toBeCloseTo(1, 6);
   });
 });
 
