@@ -320,9 +320,22 @@ export function createSettingsScreen(store: SettingsStore, onBack: () => void): 
     },
   });
   // the NOAA description of whatever sea is actually set — this is what makes
-  // eight numbered cells legible, and it is quoted rather than written
+  // nine numbered cells legible, and it is quoted rather than written
   const seaNote = el('p', 'smt-note', '');
   seaState.root.appendChild(seaNote);
+
+  /**
+   * THE WAY BACK OUT. The world block persists, so a player who once tried the
+   * bottom of the wind slider was becalmed on that save forever and reported
+   * it as the game starting with no wind — when the shipped default is 11 m/s,
+   * Force 6. Graphics has had `applyQuality` to fall back on all along; this is
+   * the same affordance for the half of the store that could actually strand
+   * you, and it is deliberately IN the Sea section rather than at the foot of
+   * the screen, because that is where the setting that stranded you lives.
+   */
+  const worldReset = button('smt-reset-btn', 'Reset sea & sky to defaults');
+  worldReset.addEventListener('click', () => store.resetWorld());
+  const worldResetRow = div('smt-row smt-row--action', worldReset);
 
   const windSea = sliderRow({
     label: 'Wind sea',
@@ -374,6 +387,7 @@ export function createSettingsScreen(store: SettingsStore, onBack: () => void): 
       seaState.root,
       windPreset.root, windSlider.root, windSpeed.root, windSea.root,
       swellHeight.root, swellPeriod.root, swellBearing.root,
+      worldResetRow,
     ),
     ...featureSections,
     div('smt-section', sectionHead('Scenery'), foliage.root),
@@ -502,8 +516,16 @@ export function createSettingsScreen(store: SettingsStore, onBack: () => void): 
     // and the note says what the sea is anyway, which is the useful half
     const rung = seaStateFor(s.world);
     seaState.set(rung?.id ?? '');
+    // GLASS carries no Beaufort force and that is deliberate — see the rung's
+    // note in settingsStore: Beaufort describes WIND and glass is a claim about
+    // the WATER. Printing "Force Glass" would be nonsense, so the force is part
+    // of the head only when the rung actually names one.
+    // Two decimals below 0.1 m: a glassy calm reads "About 0.01 m", and
+    // `toFixed(1)` would have printed it as "About 0.0 m" — a rung that says
+    // its own height is zero looks like a bug rather than like glass.
     seaNote.textContent = rung
-      ? `Force ${rung.label} — ${rung.name}. ${rung.sea} About ${rung.hs.toFixed(1)} m.`
+      ? `${rung.force === undefined ? rung.name : `Force ${rung.label} — ${rung.name}`}. `
+        + `${rung.sea} About ${rung.hs.toFixed(rung.hs < 0.1 ? 2 : 1)} m.`
       : 'Between forces — set by hand from the sliders below.';
     for (const [id, row] of switches) {
       const on = s.graphics.features[id];

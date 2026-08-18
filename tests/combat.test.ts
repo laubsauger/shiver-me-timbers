@@ -328,7 +328,7 @@ describe('combat fx math (§V.28 — the §B.5 class of failure)', () => {
   const profile: FxProfile = {
     life: 1, sizeStart: 2, sizeEnd: 4, gravity: 9.81, drag: 0.5,
     color: [1, 1, 1], speed: 8, spread: 0.6, boost: 1,
-    riseSpeed: 0, windCoupling: 0, growthExp: 1,
+    riseSpeed: 0, windCoupling: 0, growthExp: 1, alpha: 0,
   };
 
   it('a zero or non-finite life can never yield a NaN age fraction', () => {

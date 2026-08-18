@@ -282,9 +282,18 @@ export interface CombatFxParams {
   splinterLife: number;
   splinterSize: number;
   splinterSpeed: number;
+  // ── WATER ENTRY: the mist ─────────────────────────────────────────────
+  // The aerated haze left hanging round the base of the column. It used to be
+  // the whole splash — a 3 m additive disc over the entry point, which is what
+  // read as "latched on top". See fxProfiles for the shape it is now.
   splashLife: number;
   splashSize: number;
   splashSpeed: number;
+  splashGrowth: number;
+  /** 0..1 how completely the mist is carried by the wind (droplets blow away) */
+  splashWind: number;
+  /** 0..1 opacity: 0 = additive light, 1 = opaque water. See FxProfile.alpha */
+  splashAlpha: number;
 
   // ── HULL IMPACT (§V.14's visible half — see combatFx's header) ──────────
   // The flash is short and the smoke is long ON PURPOSE: the contrast
@@ -326,6 +335,37 @@ export interface CombatFxParams {
   columnGrowth: number;
   columnSpeed: number;
   columnPerHit: number;
+  /** 0..1 opacity: 0 = additive light, 1 = opaque water. See FxProfile.alpha */
+  columnAlpha: number;
+
+  // ── THE CROWN (the sheet off the RIM of the cavity) ────────────────────
+  // Thrown on a SHEET at `crownTilt` off vertical rather than filling a cone
+  // (fxMath.crownDirection): a cone is just the column again, wider, and the
+  // open wall with a hole up the middle is the whole silhouette of a real
+  // water entry. It opens and collapses while the column is still climbing.
+  crownLife: number;
+  crownSize: number;
+  crownGrowth: number;
+  crownSpeed: number;
+  crownPerHit: number;
+  /** rad off vertical: 0 straight up, π/2 flat outward. ~55° is a real crown */
+  crownTilt: number;
+  /** 0..1 raggedness of the rim — 0 gives a perfect cone of revolution */
+  crownJitter: number;
+  /** 0..1 opacity: bulk sea, the most opaque of the three water kinds */
+  crownAlpha: number;
+
+  // ── IMPACT SPEED SCALING (§V.66: scale the feature by its own dimension) ─
+  /**
+   * m/s of impact speed that produces a splash of the AUTHORED size. Every
+   * number above is quoted at this speed and scales from it, so a ball
+   * dropping out of a lob and one arriving flat and fast no longer throw the
+   * identical burst. The muzzle velocity is 60 m/s and drag bleeds it, so a
+   * typical entry lands near this figure.
+   */
+  impactSpeedRef: number;
+  /** clamp on the speed ratio, so a freak shot cannot throw a 40 m column */
+  impactSpeedMax: number;
   /** the expanding ring left on the surface (its own flat mesh, not sprites) */
   ringLife: number;
   ringRadius: number;
@@ -340,6 +380,22 @@ export interface CombatFxParams {
   ringLift: number;
   ringCount: number;
   ringOpacity: number;
+
+  // ── THE FOAM SCAR (the same disc, the other radial profile) ────────────
+  // What outlives the ring. Foam residue is the cheapest strong cue that the
+  // water was disturbed rather than decorated, because it persists on the
+  // surface for seconds after every sprite has died — and it drifts, because
+  // foam floats IN the water and the surface layer moves.
+  /** s — several times `ringLife`: it disperses, it does not ripple away */
+  foamLife: number;
+  /** m at impact scale 1, before spreading */
+  foamRadius: number;
+  /** multiple of `foamRadius` it spreads to by the end of its life */
+  foamGrowth: number;
+  foamOpacity: number;
+  foamCount: number;
+  /** fraction of the wind speed the surface layer drifts at (~3% is real) */
+  foamDrift: number;
 
   // ── FLASH LIGHT (ONE PointLight, created at boot, NEVER added/removed) ──
   /** candela at full flash; 0 disables the light without removing it */
@@ -421,9 +477,12 @@ export const combatFxParams: CombatFxParams = registerParams(
     splinterLife: 1.1,
     splinterSize: 0.28,
     splinterSpeed: 9,
-    splashLife: 1.0,
-    splashSize: 1.4,
-    splashSpeed: 6,
+    splashLife: 1.5,
+    splashSize: 0.55,
+    splashSpeed: 3.2,
+    splashGrowth: 3.4,
+    splashWind: 0.55,
+    splashAlpha: 0.45,
     impactFlashLife: 0.07,
     impactFlashSize: 1.5,
     impactSmokeLife: 3.4,
@@ -445,12 +504,32 @@ export const combatFxParams: CombatFxParams = registerParams(
     columnGrowth: 2.4,
     columnSpeed: 15,
     columnPerHit: 12,
+    columnAlpha: 0.8,
+    crownLife: 0.62,
+    crownSize: 0.42,
+    crownGrowth: 2.1,
+    crownSpeed: 7.5,
+    crownPerHit: 14,
+    // 55° off vertical — the measured rim angle of a low-Froude cavity crown,
+    // and near enough to the 54.74° Kelvin cusp that the bow wave uses that
+    // the two families of white water in this game agree with each other
+    crownTilt: 0.96,
+    crownJitter: 0.55,
+    crownAlpha: 0.9,
+    impactSpeedRef: 45,
+    impactSpeedMax: 2.2,
     ringLife: 1.4,
     ringRadius: 5.5,
     ringWidth: 0.32,
     ringLift: 0.12,
     ringCount: 24,
     ringOpacity: 0.5,
+    foamLife: 5,
+    foamRadius: 2.2,
+    foamGrowth: 2.1,
+    foamOpacity: 0.42,
+    foamCount: 20,
+    foamDrift: 0.03,
     // one gun flash lighting a 35 m hull from ~2 m out. PointLight intensity
     // in three r155+ is candela and falls as 1/d²; 900 puts a readable key on
     // the bulwark at 3 m without washing the deck at 15 m.

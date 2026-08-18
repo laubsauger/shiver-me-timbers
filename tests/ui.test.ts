@@ -390,6 +390,33 @@ describe('quality presets are bundles of the switches, not a parallel mechanism'
     expect(store.get().graphics.features.caustics).toBe(true); // others untouched
   });
 
+  it('resetWorld un-strands a player who saved themselves into a flat calm', () => {
+    // THE ACTUAL DEFECT. The world block persists and had no way home, so a
+    // player who once tried the bottom of the wind slider came back to that
+    // sea on every load — forever — and reported it as the game starting with
+    // basically no wind, when the shipped default is 11 m/s, Force 6. The save
+    // was the problem, and until now the only cure was bumping STORAGE_KEY,
+    // which is a one-off migration and also throws away audio and time of day.
+    const storage = fakeStorage();
+    const store = createSettingsStore(storage);
+    store.set({ world: { windSpeed: 0.5, amplitude: 0, swellAmplitude: 0, timeOfDay: 3 } });
+    store.set({ graphics: { foliageDensity: 0.25 }, audio: { master: 0.1 } });
+
+    // it really did persist — this is what a reload would have read back
+    expect(createSettingsStore(storage).get().world.windSpeed).toBe(0.5);
+
+    store.resetWorld();
+    const s = store.get();
+    expect(s.world).toEqual(DEFAULT_SETTINGS.world);
+    expect(s.world.windSpeed).toBe(oceanParams.windSpeed); // the shipped sea
+    // …and it is a WORLD reset, not a settings wipe: the other two blocks are
+    // carried through exactly as applyQuality carries `world` through
+    expect(s.graphics.foliageDensity).toBe(0.25);
+    expect(s.audio.master).toBe(0.1);
+    // and the reset itself survives the reload it exists to fix
+    expect(createSettingsStore(storage).get().world).toEqual(DEFAULT_SETTINGS.world);
+  });
+
   it('re-picking the preset restores every switch it names', () => {
     const store = createSettingsStore(fakeStorage());
     store.applyQuality('high');
@@ -1019,14 +1046,48 @@ describe('the sea state ladder is evenly spaced and measured, not guessed', () =
   it('climbs without a gap you could fall through — THE actual complaint', () => {
     // three presets measured 1.23 / 2.78 / 14.70 m: the top step was 5.3× and
     // there was nothing at all between a working sea and an unsurvivable one
-    const hs = SEA_STATES.map((r) => r.hs);
+    //
+    // The no-cliff claim is about the SAILING ladder — the rungs that name a
+    // Beaufort force. GLASS is deliberately not a step down from Force 1: it
+    // is 22× flatter, it holds the same wind, and it gets there by taking the
+    // ground swell out rather than the wind. Including it here would either
+    // fail this test or force a fake rung between a mirror and a ripple that
+    // nobody could tell apart. It gets its own assertions below instead.
+    const ladder = SEA_STATES.filter((r) => r.force !== undefined);
+    expect(ladder.length).toBe(SEA_STATES.length - 1);
+    const hs = ladder.map((r) => r.hs);
     for (let i = 1; i < hs.length; i++) {
       expect(hs[i], 'the ladder must be monotonic').toBeGreaterThan(hs[i - 1]);
       // no rung may more than double the sea under it
-      expect(hs[i] / hs[i - 1], `step ${SEA_STATES[i].id} is a cliff`).toBeLessThan(2.2);
+      expect(hs[i] / hs[i - 1], `step ${ladder[i].id} is a cliff`).toBeLessThan(2.2);
     }
     expect(hs[0]).toBeLessThan(0.25); // "almost perfect flatness"
     expect(hs[hs.length - 1]).toBeGreaterThan(9); // still a real gale at the top
+    // and the whole list is still monotonic, glass included — it is the bottom
+    expect(SEA_STATES.map((r) => r.hs)).toEqual([...SEA_STATES.map((r) => r.hs)].sort((a, b) => a - b));
+  });
+
+  it('the glass rung is flat because of the WATER, not because of the wind', () => {
+    // The user asked for "a perfect, almost perfect flatness". The trap is
+    // reading that as "turn the wind down": `f1` is already at 1 m/s and still
+    // measures 0.19 m, because essentially all of that is ground swell and the
+    // swell is decoupled from the wind on purpose (params/ocean.ts:92). A calm
+    // preset that drops the wind and leaves the swell and amplitude alone is
+    // still a heaving sea, which is exactly the mistake this rung avoids.
+    const glass = SEA_STATES[0];
+    const f1 = SEA_STATES.find((r) => r.id === 'f1')!;
+    expect(glass.windSpeed).toBe(f1.windSpeed); // SAME AIR
+    expect(glass.swellAmplitude).toBe(0); // and no ground swell at all
+    expect(glass.amplitude).toBeLessThan(f1.amplitude);
+    const flat = measureHs(world(seaStatePatch(glass)));
+    expect(flat).toBeLessThan(0.02); // a mirror, not a calm
+    expect(measureHs(world(seaStatePatch(f1))) / flat).toBeGreaterThan(10);
+
+    // and it must NOT strand the player: a rung the ship cannot sail off is
+    // the same trap `resetWorld` exists to undo, so glass keeps steerage way
+    expect(glass.windSpeed).toBeGreaterThan(0.5);
+    // it names no Beaufort force, and that absence is load-bearing
+    expect(glass.force).toBeUndefined();
   });
 
   it('the top rung is survivable, unlike the storm preset it replaces', () => {
@@ -1073,7 +1134,7 @@ describe('the sea state ladder is evenly spaced and measured, not guessed', () =
     const store = createSettingsStore(fakeStorage());
     const glass = SEA_STATES[0];
     store.set({ world: seaStatePatch(glass) });
-    expect(seaStateFor(store.get().world)?.id).toBe('f1');
+    expect(seaStateFor(store.get().world)?.id).toBe(glass.id);
     // a heavy ground swell under a glassy calm: the single sea that proves it
     store.set({ world: { swellAmplitude: 1.2, swellPeriod: 16 } });
     const s = store.get().world;
@@ -1095,12 +1156,12 @@ describe('the sea state ladder is evenly spaced and measured, not guessed', () =
 
   it('drives the SEA and the SAILS on every rung, not just the store (§V.62)', () => {
     const seen = new Set<string>();
-    let lastDrive = Infinity;
+    let lastDrive = -1;
+    let lastWind = -1;
     for (const rung of SEA_STATES) {
       applyWorldSettings(world(seaStatePatch(rung)));
       // the sea: a distinct spectrum per rung, so each one really rebuilds
       seen.add(spectrumSignature(oceanParams));
-      // the sails: more wind must mean more drive, all the way up the ladder
       const d = sailDrive(
         {
           forwardX: 0, forwardZ: 1, shipVelX: 0, shipVelZ: 0, yawRate: 0,
@@ -1108,11 +1169,21 @@ describe('the sea state ladder is evenly spaced and measured, not guessed', () =
         },
         shipMaterialParams,
       ).drive;
-      expect(d, `${rung.id} does not draw more than the rung below`).toBeGreaterThan(
-        lastDrive === Infinity ? -1 : lastDrive,
-      );
+      // The sails answer the WIND, and glass deliberately shares Force 1's
+      // wind while differing entirely in the water (see the glass rung's own
+      // test above). So the claim is: drive never goes DOWN as the ladder
+      // climbs, and goes strictly UP wherever the wind actually does. Asserting
+      // strict growth across a rung that holds the wind constant would be
+      // asserting that the sails respond to the swell, which they must not.
+      expect(d, `${rung.id} draws LESS than the rung below`).toBeGreaterThanOrEqual(lastDrive);
+      if (rung.windSpeed > lastWind && lastWind >= 0) {
+        expect(d, `${rung.id} has more wind but no more drive`).toBeGreaterThan(lastDrive);
+      }
       lastDrive = d;
+      lastWind = rung.windSpeed;
     }
+    // every rung is still a DISTINCT sea, glass included — that is what stops
+    // this from passing on a ladder whose bottom two rungs are the same water
     expect(seen.size).toBe(SEA_STATES.length);
   });
 });
@@ -1268,8 +1339,20 @@ describe('the settings slider and the HUD name the same wind', () => {
   });
 
   it('the ladder’s own rungs land on the force their label promises', () => {
-    // SEA_STATES is authored in m/s and named in Beaufort; the two must agree
-    expect(beaufort(SEA_STATES[2].windSpeed).force).toBe(3); // the whitecap rung
-    expect(beaufort(SEA_STATES[7].windSpeed).force).toBe(8); // the gale
+    // SEA_STATES is authored in m/s and named in Beaufort; the two must agree.
+    // Checked for EVERY rung that names a force rather than for two by index —
+    // adding a rung used to silently shift the indices this asserted on, which
+    // is how a positional test stops testing what it was written for.
+    let checked = 0;
+    for (const rung of SEA_STATES) {
+      if (rung.force === undefined) continue;
+      expect(beaufort(rung.windSpeed).force, `${rung.id} is labelled F${rung.force}`)
+        .toBe(rung.force);
+      expect(rung.label).toBe(String(rung.force));
+      checked++;
+    }
+    expect(checked).toBe(8); // F1 through F8
+    // and the one rung that names no force must not be silently omitted
+    expect(SEA_STATES.filter((r) => r.force === undefined).map((r) => r.id)).toEqual(['glass']);
   });
 });

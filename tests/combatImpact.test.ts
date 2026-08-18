@@ -404,17 +404,83 @@ describe('the surface ring (§V.28, §V.62)', () => {
     // TEN occurrences of dead knobs in this project. The ring's profile
     // lives in vertex data, so a slider move has to RE-LAY it — if it only
     // read the param at construction the control would silently do nothing.
+    // The disc's POSITIONS are now width-independent — the mesh is a full unit
+    // disc so that one geometry can carry both the rim ring and the foam scar
+    // (see impactRing's header). Thickness therefore lives entirely in the
+    // `band` profile, which is the attribute this has to watch: asserting on
+    // `position` would pass for the wrong reason before and silently stop
+    // testing the knob at all after.
     const p = { ...combatFxParams, ringWidth: 0.2 };
     const rings = createImpactRings(p);
-    const geo = (rings.mesh as unknown as { geometry: { attributes: { position: { array: Float32Array } } } }).geometry;
-    const before = [...geo.attributes.position.array];
+    const geo = (rings.mesh as unknown as {
+      geometry: { attributes: Record<string, { array: Float32Array }> };
+    }).geometry;
+    const before = [...geo.attributes.band.array];
 
     p.ringWidth = 0.8;
     rings.update(1 / 60, () => 0);
-    const after = [...geo.attributes.position.array];
+    const after = [...geo.attributes.band.array];
 
     expect(after).not.toEqual(before);
+    // and the FOAM profile is width-independent, so widening the ring must
+    // not quietly reshape the scar as well
     rings.dispose();
+  });
+
+  it('the foam scar outlives the ring and drifts with the surface (§V.71)', () => {
+    // WHY: the user's complaint was that impacts do not read as INTERACTING
+    // with the water. The scar is the part that says they did — it is still
+    // there seconds after every sprite has died, and it moves with the water
+    // rather than staying pinned to a world coordinate the sea has left.
+    const p = { ...combatFxParams, ringLife: 1, foamLife: 5, foamDrift: 0.1 };
+    const rings = createImpactRings(p);
+    rings.spawn(0, 0, 0);
+    const ringSlot = 0;
+    const foamSlot = combatFxParams.ringCount; // scars start after the rings
+
+    // 2 s in: the ring is long dead, the scar is not
+    for (let i = 0; i < 120; i++) rings.update(1 / 60, () => 0, 10, 0);
+    const rs = new Vector3();
+    ringTransform(rings.mesh, ringSlot).decompose(new Vector3(), new Quaternion(), rs);
+    expect(rs.x).toBe(0); // §V.28 dead is zero SCALE
+
+    const fp = new Vector3();
+    const fs = new Vector3();
+    ringTransform(rings.mesh, foamSlot).decompose(fp, new Quaternion(), fs);
+    expect(fs.x).toBeGreaterThan(0);
+    // drifted downwind: 10 m/s x 0.1 x 2 s = 2 m, and it must be downwind
+    expect(fp.x).toBeGreaterThan(1);
+    expect(fp.x).toBeLessThan(3);
+    rings.dispose();
+  });
+
+  it('a disc on a sloping sea is TILTED onto it, not laid flat (§V.71)', () => {
+    // WHY: a flat disc seated at the height under its own centre misses the
+    // water at its rim by a mean of 0.376 m and a max of 1.784 m on the
+    // shipped sea — three to fifteen times the lift meant to hold it clear —
+    // so half of it is buried and half is in the air. That is the "latched on
+    // top" read, and it is the ratlines/buntlines/reef-points defect again:
+    // a part resolved against a surface's rest pose while the surface moves.
+    const rings = createImpactRings(combatFxParams);
+    rings.spawn(0, 0, 0);
+    // a constant 1:4 ramp in +x
+    rings.update(1 / 60, (x) => x * 0.25);
+    const q = new Quaternion();
+    ringTransform(rings.mesh, 0).decompose(new Vector3(), q, new Vector3());
+    const up = new Vector3(0, 1, 0).applyQuaternion(q);
+    // the disc's own up must lean AGAINST the slope, i.e. toward -x
+    expect(up.x).toBeLessThan(-0.2);
+    expect(up.y).toBeGreaterThan(0.9);
+    // and on flat water it must be exactly upright, not merely nearly so
+    const flat = createImpactRings(combatFxParams);
+    flat.spawn(0, 0, 0);
+    flat.update(1 / 60, () => 0);
+    const fq = new Quaternion();
+    ringTransform(flat.mesh, 0).decompose(new Vector3(), fq, new Vector3());
+    const fup = new Vector3(0, 1, 0).applyQuaternion(fq);
+    expect(fup.y).toBeCloseTo(1, 10);
+    rings.dispose();
+    flat.dispose();
   });
 
   it('survives a hostile params set without producing a NaN transform', () => {

@@ -199,6 +199,22 @@ export const SETTINGS_CSS = /* css */ `
 }
 .smt-seg-btn:focus-visible { outline: 2px solid var(--brass); outline-offset: -3px; }
 
+/* an action row holds a control that DOES something rather than one that
+   holds a value — no label column, so the button carries its own width */
+.smt-row--action { display: flex; justify-content: flex-end; }
+.smt-reset-btn {
+  appearance: none; cursor: pointer; font-family: inherit;
+  font-variant-caps: small-caps; font-size: 14px; letter-spacing: 0.14em;
+  color: var(--ink-soft); background: none;
+  border: 1px solid var(--line); padding: 6px 14px;
+  transition: color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.smt-reset-btn:hover {
+  color: var(--ink);
+  background: linear-gradient(180deg, rgba(157, 127, 54, 0.2), rgba(157, 127, 54, 0.08));
+}
+.smt-reset-btn:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+
 /* brass lever in a slot cut through the chart */
 .smt-switch {
   appearance: none; background: none; border: 0; padding: 0; flex: none;

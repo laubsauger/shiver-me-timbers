@@ -63,6 +63,7 @@ import {
   ageFraction,
   brightnessAt,
   burstDirection,
+  crownDirection,
   jitterScale,
   hash01,
   particleAspect,
@@ -154,6 +155,12 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
   const seedArr = new Float32Array(count);
   /** per-particle tear strength — 0 for every kind that is not smoke */
   const tearArr = new Float32Array(count);
+  /**
+   * Per-particle OPACITY WEIGHT (§V.44-adjacent, and see the blend note on the
+   * material below). 0 = pure additive light, 1 = opaque. Powder smoke, flash
+   * and sparks stay at 0; the three water kinds do not.
+   */
+  const alphaArr = new Float32Array(count);
 
   const posAttr = new THREE.InstancedBufferAttribute(posArr, 3);
   const colAttr = new THREE.InstancedBufferAttribute(colArr, 3);
@@ -161,6 +168,8 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
   const aspectAttr = new THREE.InstancedBufferAttribute(aspectArr, 1);
   const seedAttr = new THREE.InstancedBufferAttribute(seedArr, 1);
   const tearAttr = new THREE.InstancedBufferAttribute(tearArr, 1);
+  const alphaAttr = new THREE.InstancedBufferAttribute(alphaArr, 1);
+  alphaAttr.setUsage(THREE.DynamicDrawUsage);
   posAttr.setUsage(THREE.DynamicDrawUsage);
   colAttr.setUsage(THREE.DynamicDrawUsage);
   sizeAttr.setUsage(THREE.DynamicDrawUsage);
@@ -178,6 +187,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
   const aspectNode = instancedBufferAttribute(aspectAttr, 'float');
   const seedNode = instancedBufferAttribute(seedAttr, 'float');
   const tearNode = instancedBufferAttribute(tearAttr, 'float');
+  const alphaNode = instancedBufferAttribute(alphaAttr, 'float');
 
   // NON-UNIFORM SCALE + ROLL — the free half of the silhouette fix. A
   // uniformly-scaled sprite is a disc by construction; a cluster of ellipses
@@ -189,16 +199,52 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
   material.rotationNode = seedNode.mul(Math.PI * 2);
 
   const tint = instancedBufferAttribute(colAttr, 'vec3');
-  // soft round falloff; additive, so brightness IS the fade and a dead
-  // particle is already zero-size before it can contribute anything
+  // soft round falloff; brightness IS the fade and a dead particle is already
+  // zero-size before it can contribute anything
   const q = uv().mul(2).sub(1);
   const shape = q.dot(q).oneMinus().max(0).pow(1.5);
-  material.colorNode = tint;
   // the torn contour rides on top of that disc; `tearNode` is 0 for every
   // non-smoke kind, which leaves `shape` mathematically untouched for them
-  material.opacityNode = tornAlpha(shape, uv(), tearNode, seedNode, uDissolveScale);
+  const cover = tornAlpha(shape, uv(), tearNode, seedNode, uDissolveScale);
+
+  /**
+   * ── ONE POOL, TWO BLEND MODELS, ONE DRAW CALL ─────────────────────────
+   *
+   * Powder smoke, muzzle flash and sparks are LIGHT: additive is the correct
+   * model and it is what they had. Aerated water is a SUBSTANCE: additive can
+   * only ever brighten what is behind it, so an additive column reads as a
+   * glow latched onto the sea and vanishes outright against a bright sky —
+   * which is exactly the angle a splash is seen from on a deck, and verbatim
+   * what the user reported ("latched on top… don't look like they interact").
+   *
+   * The frame is CPU-BOUND at ~595 draws, so a second sprite pool with its own
+   * material to hold the water kinds is the wrong currency to spend. Instead
+   * both models are expressed in ONE blend function by writing the source
+   * colour ALREADY MULTIPLIED by its own coverage and letting `alphaNode`
+   * choose how much of the destination survives:
+   *
+   *     out = tint·cover + dst·(1 − cover·alpha)
+   *
+   *   alpha = 0  →  out = tint·cover + dst          — EXACTLY three's
+   *                 AdditiveBlending (SrcAlpha, One) with colorNode = tint and
+   *                 opacityNode = cover. Every pre-existing kind is unchanged,
+   *                 not merely equivalent.
+   *   alpha = 1  →  out = tint·cover + dst·(1−cover) — a correct source-over
+   *                 composite of opaque water on the sea behind it.
+   *
+   * `premultipliedAlpha` stays FALSE and the premultiply is done here in the
+   * node graph on purpose: three's flag multiplies rgb by alpha unconditionally,
+   * which would zero every additive kind (alpha 0) and delete the smoke.
+   */
+  material.colorNode = tint.mul(cover);
+  material.opacityNode = cover.mul(alphaNode);
   material.transparent = true;
-  material.blending = THREE.AdditiveBlending;
+  material.blending = THREE.CustomBlending;
+  material.blendSrc = THREE.OneFactor;
+  material.blendDst = THREE.OneMinusSrcAlphaFactor;
+  material.blendSrcAlpha = THREE.OneFactor;
+  material.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
+  material.premultipliedAlpha = false;
   material.depthWrite = false;
   material.fog = false;
 
@@ -221,6 +267,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
     aspect: aspectArr,
     seed: seedArr,
     tear: tearArr,
+    alpha: alphaArr,
     kinds,
   };
   sprites.count = count;
@@ -274,6 +321,15 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
     profile: FxProfile,
     seed = 0,
     vary = 0,
+    /**
+     * ENERGY of the event, 1 = the authored burst (§V.66). Multiplies launch
+     * speed and sprite size together, because a bigger splash is a faster one:
+     * splitting them into two knobs is how you get a slow balloon. `dir`
+     * overrides the cone entirely — the crown is a sheet, not a cone, and its
+     * directions come from `crownDirection`.
+     */
+    scale = 1,
+    dir?: readonly [number, number, number],
   ): void => {
     if (count === 0) return;
     const ox = finite(origin[0]);
@@ -281,11 +337,12 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
     const oz = finite(origin[2]);
     const i = cursor;
     cursor = (cursor + 1) % count; // rotating pool: newest burst wins
-    const d = burstDirection(axis, index, profile.spread);
+    const d = dir ?? burstDirection(axis, index, profile.spread);
+    const s = Number.isFinite(scale) && scale > 0 ? scale : 1;
     // three independent draws off the same (seed, index) pair: a puff that
     // is bigger must not also be slower and longer-lived in lockstep, or the
     // variation reads as one scale knob rather than as different puffs
-    const speed = nn(profile.speed, 0) * jitterScale(seed, index * 3 + 1, vary);
+    const speed = nn(profile.speed, 0) * jitterScale(seed, index * 3 + 1, vary) * s;
     posArr[i * 3] = ox;
     posArr[i * 3 + 1] = oy;
     posArr[i * 3 + 2] = oz;
@@ -295,8 +352,10 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
     age[i] = 0;
     // floored below zero-length: a life of 0 divides to a NaN age (§B.5)
     life[i] = Math.max(0.02, profile.life * jitterScale(seed, index * 3 + 2, vary));
-    sizeScale[i] = Math.max(0.05, jitterScale(seed, index * 3 + 3, vary));
+    sizeScale[i] = Math.max(0.05, jitterScale(seed, index * 3 + 3, vary) * s);
     kinds[i] = kind;
+    // §V.28: bounded at the spawn boundary, where it can be tested
+    alphaArr[i] = clamp01(nn(profile.alpha, 0));
 
     // §V.65 silhouette: only the smoke family is stretched and torn. Sparks
     // and splinters are meant to read as points and streaks, and an elliptical
@@ -425,18 +484,37 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         }
       }
 
-      // WATER ENTRY: a pillar going up, droplets off it, and a ring left on
-      // the surface. The column's spread is 0.12 against the droplets' 0.5 —
-      // that difference is what makes one a COLUMN and the other a splash.
+      // ── WATER ENTRY ──────────────────────────────────────────────────
+      // Three parts on three clocks, which is the whole difference between a
+      // displacement and a puff:
+      //   CROWN   0 → 0.62 s   the rim sheet opens outward and falls back
+      //   COLUMN  0 → 0.95 s   the pillar up the middle, still climbing when
+      //                        the crown has already collapsed
+      //   MIST    0 → 1.5 s    what is left hanging, and the only part the
+      //                        wind carries away
+      // plus the surface itself — the ring and the foam it leaves — which is
+      // the one cue that says the water was INTERACTED WITH rather than
+      // decorated. All of it scales with the speed the ball actually arrived
+      // at; before this every water entry in the game was the same burst.
+      const crownN = sanitizeCount(p.crownPerHit, 14, 64);
+      const tilt = nn(p.crownTilt, 0.96);
+      const jit = clamp01(nn(p.crownJitter, 0.55));
       for (const e of frame.projectiles) {
         if (e.type !== 'splash') continue;
+        const energy = impactScale(e.speed, p);
         for (let k = 0; k < columnN; k++) {
-          spawn('column', e.position, [0, 1, 0], k, prof.column, e.projectileId, vary);
+          spawn('column', e.position, [0, 1, 0], k, prof.column, e.projectileId, vary, energy);
+        }
+        for (let k = 0; k < crownN; k++) {
+          spawn(
+            'crown', e.position, [0, 1, 0], k, prof.crown, e.projectileId, vary, energy,
+            crownDirection(k, crownN, tilt, e.projectileId, jit),
+          );
         }
         for (let k = 0; k < splashN; k++) {
-          spawn('splash', e.position, [0, 1, 0], k, prof.splash, e.projectileId, vary);
+          spawn('splash', e.position, [0, 1, 0], k, prof.splash, e.projectileId, vary, energy);
         }
-        rings.spawn(e.position[0], e.position[1], e.position[2]);
+        rings.spawn(e.position[0], e.position[1], e.position[2], energy);
       }
 
       // vapour ribbon behind each ball. Every `trailEvery` sim ticks rather
@@ -479,11 +557,32 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         const next = ageFraction(age[i], life[i]);
         // §V.44: every factor is bounded at source — brightnessAt ∈ [0,1],
         // boost ≤ BOOST_MAX, colour ∈ [0,1] — so the product is too
-        const b = brightnessAt(next) * gain * pr.boost;
+        const fade = brightnessAt(next);
+        const b = fade * gain * pr.boost;
         sizeArr[i] = sizeAt(pr, next) * sizeScale[i];
         colArr[i * 3] = pr.color[0] * b;
         colArr[i * 3 + 1] = pr.color[1] * b;
         colArr[i * 3 + 2] = pr.color[2] * b;
+        /**
+         * THE FADE HAS TO BE IN THE ALPHA TOO, and this is not symmetry for
+         * its own sake — it is what makes the composite a composite.
+         *
+         * `colArr` carries colour ALREADY MULTIPLIED by the age fade, because
+         * for an additive particle the fade IS the brightness. Leaving the
+         * alpha at a flat per-kind constant then hands the blender a fully
+         * OPAQUE fragment whose colour has been faded toward black, so a
+         * water particle paints DARK at both ends of its life — hardest in the
+         * first 80 ms, where `brightnessAt` is still ramping in from zero and
+         * the particle is at its largest. Caught on screen: the new column
+         * rendered as a navy bruise on the sea rather than as white water.
+         *
+         * Multiplying the same fade into the alpha makes both channels agree
+         * on one coverage f = cover·fade, so the fragment is exactly
+         * `colour·f` over `dst·(1−f)` — a correct source-over of water that
+         * thins as it dies instead of darkening. Additive kinds are at
+         * `alpha` 0 and are untouched by this line.
+         */
+        alphaArr[i] = clamp01(pr.alpha) * fade;
       }
       posAttr.needsUpdate = true;
       colAttr.needsUpdate = true;
@@ -491,9 +590,12 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
       aspectAttr.needsUpdate = true;
       seedAttr.needsUpdate = true;
       tearAttr.needsUpdate = true;
+      alphaAttr.needsUpdate = true;
       uDissolveScale.value = Math.max(0.01, nn(p.smokeDissolveScale, 2.6));
 
-      rings.update(dt, seaHeightAt);
+      // the wind reaches the rings for the foam scars alone: they float IN the
+      // surface layer, which is wind-driven, so they drift with it
+      rings.update(dt, seaHeightAt, windX, windZ);
       flash.update(dt);
 
       const r = Math.max(1e-3, nn(p.ballDrawRadius, 0.16));
@@ -561,6 +663,27 @@ function outwardAxis(
 }
 
 /** dispatch/buffer sizes come from sanitized construction-time ints (§V.28) */
+/**
+ * Impact ENERGY as a multiple of the authored burst (§V.66: a feature scales
+ * by its own dimension, never by an absolute metre value).
+ *
+ * The ball's own arrival speed against `impactSpeedRef`, square-rooted: the
+ * cavity a projectile opens goes as its momentum, and the visible column
+ * height goes as the square root of that, so a shot arriving twice as fast
+ * throws a column ~1.4× taller rather than 2× — which is what stops a
+ * long-range plunging shot from looking like a depth charge.
+ *
+ * A missing speed (an `expired` event, an old fixture, a forced hit) returns
+ * exactly 1, so every caller that does not know the speed gets precisely the
+ * authored burst rather than a silently scaled one.
+ */
+function impactScale(speed: number | undefined, p: CombatFxParams): number {
+  const ref = Math.max(1e-3, nn(p.impactSpeedRef, 45)); // floored divisor (§V.28)
+  const cap = Math.max(1, nn(p.impactSpeedMax, 2.2));
+  if (!Number.isFinite(speed) || speed === undefined || speed <= 0) return 1;
+  return Math.min(cap, Math.max(1 / cap, Math.sqrt(speed / ref)));
+}
+
 function sanitizeCount(v: number, fallback: number, max: number): number {
   const n = Number.isFinite(v) ? Math.floor(v) : fallback;
   return Math.max(0, Math.min(n, max));

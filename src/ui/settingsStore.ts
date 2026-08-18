@@ -101,7 +101,7 @@ export interface WorldSettings {
  *    own comment records as unreachable.
  */
 /**
- * THE BEAUFORT LADDER — eight rungs from glass to gale, replacing a three-step
+ * THE BEAUFORT LADDER — nine rungs from glass to gale, replacing a three-step
  * jump nobody could sail between.
  *
  * User: "we probably want more presets so that we can be a little bit more
@@ -133,6 +133,22 @@ export interface WorldSettings {
  * → 2.35 → 3.67 → 6.49 → 9.58 m. Roughly 1.6× a rung, no gap you could fall
  * through, which is the entire complaint answered.
  *
+ * GLASS SITS OFF THE BOTTOM OF THAT LADDER RATHER THAN ON IT, at Hs 0.0085 m.
+ * The 1.6×-per-rung spacing is a claim about SAILABLE seas, and glass is not a
+ * step down from Force 1 — it is a different destination, 22× flatter, reached
+ * by taking the ground swell out rather than by taking the wind out. See the
+ * rung's own note for the measurement; it is the clearest demonstration in the
+ * codebase that swell and wind are independent knobs.
+ *
+ * A NOTE ON THE SHIPPED DEFAULT, which matches NO rung. `DEFAULT_SETTINGS.world`
+ * is seeded from `oceanParams` (wind 11, amplitude 0.24, swell 0.34/11 s,
+ * Hs 2.78 m), and that sits BETWEEN `f5` (9.8 m/s, 2.35 m) and `f6` (12.6 m/s,
+ * 3.67 m) — both of which are legitimate Beaufort representatives of their own
+ * forces. So a fresh boot correctly reads "Between forces". Do not "fix" that by
+ * dragging a rung onto the default: it would put two rungs inside one force and
+ * break the ladder's spacing. `resetWorld()` below is the right answer to
+ * "get me back to the sea the game shipped with".
+ *
  * THE TOP RUNG IS THE RECALIBRATED STORM. The shipped `storm` weather preset
  * measures Hs 14.70 m — worse than the worst recorded North Atlantic sea, and
  * far past the 8–10 m its own comment says it was cut to. That is what "too
@@ -151,10 +167,25 @@ export interface WorldSettings {
 export interface SeaStateRung {
   /** stable key; also what the segment plate highlights on */
   id: string;
-  /** the plate's own text — narrow, because there are eight of them */
+  /** the plate's own text — narrow, because there are nine of them */
   label: string;
   /** Beaufort's name for the force */
   name: string;
+  /**
+   * The Beaufort force this rung NAMES, when it names one — checked against
+   * `beaufort(windSpeed)` by tests/ui.test.ts, so a rung whose wind drifts off
+   * the force on its own plate fails loudly instead of quietly mislabelling.
+   *
+   * Absent on GLASS, and that absence is the point rather than an omission.
+   * Beaufort describes WIND; glass is a statement about the WATER, and the two
+   * are decoupled here on purpose (params/ocean.ts:92). Force 0 proper means
+   * under 0.5 m/s, which is below `SEA_RANGES.windSpeed.min` and below the
+   * HUD's own becalmed threshold — a rung that hard-locks the ship in irons is
+   * the very trap this pass is fixing, not one to add. So glass takes the
+   * lowest air a ship can still ghost on and takes the flatness out of the
+   * water instead, which is exactly what the decoupling is for.
+   */
+  force?: number;
   /** verbatim NOAA sea description (docs/research-whitecap-coverage.md §3) */
   sea: string;
   /** MEASURED significant wave height at this rung, m — see the note above */
@@ -167,20 +198,54 @@ export interface SeaStateRung {
 
 export const SEA_STATES: readonly SeaStateRung[] = [
   {
-    id: 'f1', label: '0–1', name: 'Calm / light air', hs: 0.19,
-    sea: 'Sea surface smooth and mirror-like; scaly ripples, no foam crests.',
-    // the user's "almost perfect flatness": the wind sea is 0.02 m, so what
-    // little is left is the ground swell, and dropping THAT to nought below
-    // gives literal glass
+    // labelled '0' rather than 'Glass': nine plates share one row at ~53 px
+    // each and a five-letter cell overflows it at narrow widths, while the
+    // digit keeps the row regular. The plate is the gesture; the note under it
+    // is where the meaning is, and for this rung the note carries no force
+    // number at all — see `force` on the interface.
+    id: 'glass', label: '0', name: 'Glassy calm', hs: 0.0085,
+    sea: 'Sea like a mirror. Not a ripple, and the ground swell has died away entirely.',
+    /**
+     * THE GLASS RUNG — "a perfect, almost perfect flatness" (user), and the
+     * one this ladder described and then never built: the note under `f1` has
+     * always said that dropping the ground swell "to nought below gives
+     * literal glass", pointing at a rung below it that did not exist.
+     *
+     * IT IS NOT A LOW-WIND SETTING, and that is the whole lesson. Measured on
+     * the shipped spectrum, the wind holds the SAME 1.0 m/s as `f1` and the
+     * sea still falls from Hs 0.191 m to 0.0085 m — a factor of 22 — because
+     * `f1`'s height is essentially ALL ground swell (its wind sea alone is
+     * 0.017 m) and swell is decoupled from wind by design. Lowering the wind
+     * on its own would have changed almost nothing; the flatness comes from
+     * `swellAmplitude` 0.05 → 0 and `amplitude` 0.24 → 0.06.
+     *
+     * That is also why `amplitude` is set at all rather than left at the
+     * shipped 0.24. It is decoupled from `windSpeed` too: at a fixed wind of
+     * 8 m/s, amplitude alone moves Hs 1.28 → 2.02 m (0.24 → 0.60) and moves
+     * whitecap coverage by 5×. A "calm" preset that drops the wind and leaves
+     * the amplitude where it was still leaves a heaving sea, so every rung on
+     * this ladder must set BOTH deliberately.
+     *
+     * The long 16 s period is what the residual mirror-flex reads as: nothing
+     * you can see as a wave, everything you can see as a slow breathing tilt
+     * in the sun glitter.
+     */
+    windSpeed: 1.0, amplitude: 0.06, swellAmplitude: 0, swellPeriod: 16,
+  },
+  {
+    id: 'f1', label: '1', force: 1, name: 'Light air', hs: 0.19,
+    sea: 'Ripples with the appearance of scales; no foam crests.',
+    // the ground swell alone: the wind sea at 1 m/s is 0.017 m, so 0.19 of the
+    // 0.191 is the long train — which is exactly what `glass` above removes
     windSpeed: 1.0, amplitude: 0.24, swellAmplitude: 0.05, swellPeriod: 14,
   },
   {
-    id: 'f2', label: '2', name: 'Light breeze', hs: 0.41,
+    id: 'f2', label: '2', force: 2, name: 'Light breeze', hs: 0.41,
     sea: 'Small wavelets, crests glassy, do not break.',
     windSpeed: 2.6, amplitude: 0.24, swellAmplitude: 0.1, swellPeriod: 13,
   },
   {
-    id: 'f3', label: '3', name: 'Gentle breeze', hs: 0.81,
+    id: 'f3', label: '3', force: 3, name: 'Gentle breeze', hs: 0.81,
     sea: 'Large wavelets, crests begin to break. Perhaps scattered white horses.',
     // THE WHITECAP RUNG. 4.4 m/s sits just above Callaghan's 3.70 m/s onset,
     // so this is the first rung on which foam exists at all — by the published
@@ -188,29 +253,29 @@ export const SEA_STATES: readonly SeaStateRung[] = [
     windSpeed: 4.4, amplitude: 0.24, swellAmplitude: 0.18, swellPeriod: 12.5,
   },
   {
-    id: 'f4', label: '4', name: 'Moderate breeze', hs: 1.42,
+    id: 'f4', label: '4', force: 4, name: 'Moderate breeze', hs: 1.42,
     sea: 'Small waves, becoming longer. Fairly frequent white horses.',
     windSpeed: 7.0, amplitude: 0.24, swellAmplitude: 0.26, swellPeriod: 12,
   },
   {
-    id: 'f5', label: '5', name: 'Fresh breeze', hs: 2.35,
+    id: 'f5', label: '5', force: 5, name: 'Fresh breeze', hs: 2.35,
     sea: 'Moderate waves, taking more pronounced long form. Many white horses are formed.',
     windSpeed: 9.8, amplitude: 0.24, swellAmplitude: 0.34, swellPeriod: 11,
   },
   {
-    id: 'f6', label: '6', name: 'Strong breeze', hs: 3.67,
+    id: 'f6', label: '6', force: 6, name: 'Strong breeze', hs: 3.67,
     sea: 'Large waves begin to form. White foam crests are more extensive everywhere.',
     windSpeed: 12.6, amplitude: 0.24, swellAmplitude: 0.45, swellPeriod: 10.5,
   },
   {
-    id: 'f7', label: '7', name: 'Near gale', hs: 6.49,
+    id: 'f7', label: '7', force: 7, name: 'Near gale', hs: 6.49,
     sea: 'Sea heaps up and white foam from breaking waves begins to be blown in streaks.',
     // amplitude starts to climb only here: below this the wind alone carries
     // the ladder, which is what Phillips says it should (peak ∝ V²/g)
     windSpeed: 15.7, amplitude: 0.35, swellAmplitude: 0.6, swellPeriod: 9.5,
   },
   {
-    id: 'f8', label: '8', name: 'Gale', hs: 9.58,
+    id: 'f8', label: '8', force: 8, name: 'Gale', hs: 9.58,
     sea: 'Edges of crests begin to break into spindrift. The foam is blown in well-marked streaks.',
     // a gale's swell is the SHORTEST on the ladder and that is not a slip —
     // it is raised by the gale itself, close by, so it is steep and confused
@@ -410,6 +475,24 @@ export interface SettingsStore {
   set(patch: SettingsPatch): void;
   /** write a whole named bundle: quality preset + every switch it implies */
   applyQuality(q: Quality): void;
+  /**
+   * Put the WORLD block back to what the game shipped with, leaving graphics
+   * and audio alone.
+   *
+   * WHY THIS HAD TO EXIST. The world block persists and there was no way back
+   * out of it, so a player who once tried the bottom of the wind slider was
+   * becalmed on that save forever — every load, on a sea nobody chose that
+   * session. It is what produced the report "we shouldn't start with basically
+   * 0 wind" when the shipped default is in fact 11 m/s, Beaufort 6: the game
+   * was not starting there, the SAVE was. Bumping `STORAGE_KEY` clears it, but
+   * that is a one-off migration that also throws away the player's audio
+   * levels and time of day — it is not a control anyone can reach twice.
+   *
+   * Graphics already had its way home (`applyQuality`, which explicitly
+   * carries `world` through untouched); this is the same affordance for the
+   * half of the store that could actually strand you.
+   */
+  resetWorld(): void;
   /** false once any switch has drifted from the named bundle */
   isPresetIntact(): boolean;
   /** hints for the currently selected quality tier */
@@ -642,6 +725,17 @@ export function createSettingsStore(storage: StorageLike | undefined = defaultSt
       // `world` is carried through untouched: a quality preset is a performance
       // decision and must never restage the scene's lighting behind the player
       commit({ graphics: { quality: q, ...bundle }, audio: state.audio, world: state.world });
+    },
+    resetWorld(): void {
+      // the mirror image of applyQuality: graphics and audio are carried
+      // through untouched, and the whole world block is rewritten from the
+      // shipped defaults rather than patched key by key — a partial reset that
+      // left `windSpeed` behind would strand exactly the player this is for
+      commit({
+        graphics: state.graphics,
+        audio: state.audio,
+        world: { ...DEFAULT_SETTINGS.world },
+      });
     },
     isPresetIntact: () => presetIntact(state.graphics),
     hints: () => ({ ...QUALITY_PRESETS[state.graphics.quality] }),

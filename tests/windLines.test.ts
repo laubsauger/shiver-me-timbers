@@ -283,12 +283,27 @@ describe('the field answers the wind, and a calm sky is bare', () => {
     }
   });
 
-  it('the two lowest sea-state rungs draw nothing, the rest do', () => {
+  it('every sea-state rung below Beaufort 3 draws nothing, and every rung above does', () => {
     // the ladder is the authority on what a calm IS (src/ui/settingsStore.ts)
-    const rungs = SEA_STATES.map((r) => ({ id: r.id, g: gate(r.windSpeed) }));
-    expect(rungs.filter((r) => r.g === 0).map((r) => r.id)).toEqual(['f1', 'f2']);
+    //
+    // THE CLAIM IS THE THRESHOLD, NOT THE ROSTER. This used to assert the
+    // literal list `['f1','f2']`, which pinned the MEMBERSHIP of the ladder
+    // rather than the property this gate exists for — so adding the `glass`
+    // rung (1.0 m/s, below onset, correctly drawing nothing) failed it while
+    // nothing was wrong. Stated as the threshold it is unbreakable by any new
+    // rung and still catches the thing that would matter: a rung landing on
+    // the wrong side of Beaufort 3, where the sea starts showing whitecaps and
+    // the sky has to start showing streaks in the same breath.
+    for (const r of SEA_STATES) {
+      const bare = r.windSpeed < P.windLineOnset;
+      expect(gate(r.windSpeed) === 0, `${r.id} at ${r.windSpeed} m/s`).toBe(bare);
+    }
+    // and the ladder must actually STRADDLE the onset — a ladder entirely on
+    // one side of it would satisfy the loop above and prove nothing
+    expect(SEA_STATES.some((r) => r.windSpeed < P.windLineOnset)).toBe(true);
     // F3 — the first rung with whitecaps — is where the sky answers too
-    expect(rungs.find((r) => r.id === 'f3')!.g).toBeGreaterThan(0);
+    expect(gate(SEA_STATES.find((r) => r.id === 'f3')!.windSpeed)).toBeGreaterThan(0);
+    expect(gate(SEA_STATES.find((r) => r.id === 'f2')!.windSpeed)).toBe(0);
   });
 
   it('fills in monotonically, and a gale is far more than the default', () => {

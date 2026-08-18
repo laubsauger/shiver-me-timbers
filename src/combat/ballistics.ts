@@ -26,6 +26,15 @@ export interface ProjectileEvent {
   /** world position: water-entry point for splash, last position for expired */
   position: Vec3;
   projectileId: number;
+  /**
+   * m/s the ball was travelling when it crossed the surface. A splash is an
+   * ENERGY event — a ball dropping out of a high lob at 30 m/s throws a
+   * different column from one skimming in flat at 70 — and without this every
+   * water entry in the game produced the identical burst regardless of the
+   * shot that made it, which is most of why they read as a stamped decal.
+   * Optional so `expired` events (and old fixtures) need not carry it.
+   */
+  speed?: number;
 }
 
 /** sea surface height at a world XZ. Flat sea (y = 0) is the default. */
@@ -110,7 +119,14 @@ export function resolveWaterEntry(
     // (spawned submerged): cross at t = 0 rather than dividing by ~0.
     const denom = dPrev - dCurr;
     const t = dPrev <= 0 || denom <= 0 ? 0 : dPrev / denom;
-    events.push({ type: 'splash', position: lerp(prev, curr, t), projectileId: p.id });
+    events.push({
+      type: 'splash',
+      position: lerp(prev, curr, t),
+      projectileId: p.id,
+      // the velocity this tick, which under semi-implicit Euler is exactly the
+      // velocity the ball carried across the segment prev → curr
+      speed: Math.hypot(p.velocity[0], p.velocity[1], p.velocity[2]),
+    });
   }
 
   state.projectiles = alive;

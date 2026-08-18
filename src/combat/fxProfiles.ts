@@ -45,6 +45,10 @@ const TINTS: Record<FxKind, THREE.Color> = {
   // the pillar is aerated water: brighter and greener than the droplets that
   // detach off its top, which are already thinning toward spray
   column: new THREE.Color(0xdaeeea),
+  // the crown's sheet is the DENSEST water in the whole event — it is bulk
+  // sea lifted off the rim, not yet aerated, so it is the least bright of the
+  // three and the most opaque
+  crown: new THREE.Color(0xc6ddda),
 };
 
 /** shared by reference — profiles read `color`, nothing writes it */
@@ -67,6 +71,7 @@ export function createProfiles(): Record<FxKind, FxProfile> {
     riseSpeed: 0,
     windCoupling: 0,
     growthExp: 1,
+    alpha: 0,
   });
   return {
     flash: blank('flash'),
@@ -79,6 +84,7 @@ export function createProfiles(): Record<FxKind, FxProfile> {
     impactFlash: blank('impactFlash'),
     impactSmoke: blank('impactSmoke'),
     column: blank('column'),
+    crown: blank('crown'),
   };
 }
 
@@ -138,10 +144,24 @@ export function fillProfiles(
     sizeEnd: pos(p.splinterSize, 0.28) * 0.5, gravity: 9.81, drag: 0.4,
     speed: nn(p.splinterSpeed, 9), spread: 0.85, boost: 1,
   });
+  // THE MIST, and it used to be the whole splash. As a 1.4 → 3.1 m additive
+  // disc thrown at 6 m/s it was one big soft glow hanging over the entry
+  // point, which is verbatim the "latched on top / splashing mid-air" the user
+  // reported: it is the only part of a water entry that has no hard edge, so
+  // making it the LARGEST and BRIGHTEST part inverted the whole silhouette.
+  //
+  // It is now the residue it should always have been — the aerated haze left
+  // hanging around the base of the column once the crown has collapsed. Small,
+  // slow, long-lived, and only half-opaque (`alpha` 0.45) because that IS what
+  // separates mist from bulk water. It is also the one water kind that couples
+  // to the wind, since droplets that fine genuinely do blow away.
   set(dst.splash, {
-    life: pos(p.splashLife, 1), sizeStart: pos(p.splashSize, 1.4),
-    sizeEnd: pos(p.splashSize, 1.4) * 2.2, gravity: 9.81, drag: 0.9,
-    speed: nn(p.splashSpeed, 6), spread: 0.5, boost: 1,
+    life: pos(p.splashLife, 1.5), sizeStart: pos(p.splashSize, 0.55),
+    sizeEnd: pos(p.splashSize, 0.55) * pos(p.splashGrowth, 3.4),
+    gravity: 2.2, drag: 1.6,
+    speed: nn(p.splashSpeed, 3.2), spread: 0.75, boost: 1,
+    windCoupling: nn(p.splashWind, 0.55), growthExp: pos(p.smokeGrowthExp, 0.5),
+    alpha: clamp01(nn(p.splashAlpha, 0.45)),
   });
 
   // --- the hull impact ---------------------------------------------------
@@ -178,11 +198,33 @@ export function fillProfiles(
   // --- the water column --------------------------------------------------
   // spread 0.12 is what makes it a PILLAR and not another round puff: the
   // burst stays on its axis, and gravity brings it back down as a plume.
+  //
+  // `alpha` 0.8: aerated white water is nearly opaque and it is the thing the
+  // eye tracks. Additive it could only brighten the sea behind it and it
+  // disappeared completely against the sky, which is exactly where a column is
+  // seen from a deck.
   set(dst.column, {
     life: pos(p.columnLife, 0.95), sizeStart: pos(p.columnSize, 0.5),
     sizeEnd: pos(p.columnSize, 0.5) * pos(p.columnGrowth, 2.4),
     gravity: 9.81, drag: 0.35, speed: nn(p.columnSpeed, 15),
     spread: 0.12, boost: 1,
+    alpha: clamp01(nn(p.columnAlpha, 0.8)),
+  });
+
+  // --- the crown ----------------------------------------------------------
+  // Bulk sea lifted off the RIM of the cavity, thrown outward and up on a
+  // sheet (see fxMath.crownDirection — a cone would just be the column again,
+  // wider). Shorter-lived than the column on purpose: the crown opens and
+  // falls back while the pillar is still climbing, and that ORDER is most of
+  // what makes the event read as water being displaced rather than as a burst
+  // being played. Drag 0.5 against the column's 0.35 — heavier, less aerated
+  // water carries further before the air takes it.
+  set(dst.crown, {
+    life: pos(p.crownLife, 0.62), sizeStart: pos(p.crownSize, 0.42),
+    sizeEnd: pos(p.crownSize, 0.42) * pos(p.crownGrowth, 2.1),
+    gravity: 9.81, drag: 0.5, speed: nn(p.crownSpeed, 7.5),
+    spread: 0, boost: 1,
+    alpha: clamp01(nn(p.crownAlpha, 0.9)),
   });
 
   return dst;
@@ -197,8 +239,8 @@ export function fillProfiles(
  * paths rather than merely equivalent ones. Only the smoke kinds opt in, and
  * you can see which by reading this file.
  */
-type ProfileFields = Omit<FxProfile, 'color' | 'riseSpeed' | 'windCoupling' | 'growthExp'>
-  & Partial<Pick<FxProfile, 'riseSpeed' | 'windCoupling' | 'growthExp'>>;
+type ProfileFields = Omit<FxProfile, 'color' | 'riseSpeed' | 'windCoupling' | 'growthExp' | 'alpha'>
+  & Partial<Pick<FxProfile, 'riseSpeed' | 'windCoupling' | 'growthExp' | 'alpha'>>;
 
 function set(dst: FxProfile, src: ProfileFields): void {
   dst.life = src.life;
@@ -212,10 +254,15 @@ function set(dst: FxProfile, src: ProfileFields): void {
   dst.riseSpeed = src.riseSpeed ?? 0;
   dst.windCoupling = src.windCoupling ?? 0;
   dst.growthExp = src.growthExp ?? 1;
+  dst.alpha = src.alpha ?? 0;
 }
 
 function pos(v: number, fallback: number): number {
   return Number.isFinite(v) && v > 0 ? v : fallback;
+}
+
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
 function nn(v: number, fallback: number): number {

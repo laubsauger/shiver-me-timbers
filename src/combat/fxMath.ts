@@ -22,6 +22,13 @@ export type FxKind =
   | 'impactSmoke'
   /** the vertical pillar a ball throws up out of the sea */
   | 'column'
+  /**
+   * The CROWN — the wall of water that lifts off the rim of the cavity and
+   * falls back outward. It is what separates a real water entry from a puff
+   * hung in the air: the column goes up the middle, the crown opens around it,
+   * and the two collapse on different clocks.
+   */
+  | 'crown'
   /** the vent puff off the BREECH — a muzzle-loader fires from both ends */
   | 'breech';
 
@@ -94,6 +101,21 @@ export interface FxProfile {
    * built, so no params edit can push it past the bloom clamp.
    */
   boost: number;
+  /**
+   * 0..1 — HOW OPAQUE the particle is, i.e. how much it hides what is behind
+   * it. 0 is pure additive light and is the default, so every kind that does
+   * not name it is bit-identical to what it was before this field existed
+   * (see combatFx's blend note: at alpha 0 the custom blend function reduces
+   * exactly to three's AdditiveBlending).
+   *
+   * WHY WATER NEEDS IT. Additive is a light model: it can only ever brighten
+   * what is behind it, so an additive sprite over the sea reads as a glow
+   * LATCHED ON TOP of the water rather than as water in front of it — and it
+   * vanishes entirely against a bright sky, which is precisely where a splash
+   * column is silhouetted. Powder smoke and muzzle flash genuinely are light
+   * and stay at 0; aerated water is a substance and does not.
+   */
+  alpha: number;
 }
 
 /**
@@ -261,6 +283,42 @@ export function burstDirection(
     ny * cone + uy * cx + vy * cy,
     nz * cone + uz * cx + vz * cy,
   ];
+}
+
+/**
+ * Direction for one droplet of the CROWN — the sheet that lifts off the rim of
+ * the cavity a ball punches in the sea.
+ *
+ * Deliberately NOT `burstDirection`: that fills a cone, so its particles are
+ * densest ON the axis, which is how you get another round puff. A crown is a
+ * SHEET — every droplet is at the same tilt off vertical and they differ only
+ * in azimuth — so the silhouette is an open wall with a hole up the middle,
+ * and the column is what fills that hole. §V.65: the eye reads the outline,
+ * and the outline is the whole difference between a crown and a puff.
+ *
+ * `tilt` is radians off vertical (0 = straight up, π/2 = flat outward).
+ * Azimuth is index/count plus a golden-angle stagger, so a low droplet count
+ * still spreads instead of banding, and `jitter` breaks the perfect circle a
+ * regular polygon would otherwise read as.
+ */
+export function crownDirection(
+  index: number,
+  count: number,
+  tilt: number,
+  seed = 0,
+  jitter = 0,
+): [number, number, number] {
+  const n = Number.isFinite(count) && count > 0 ? Math.floor(count) : 1;
+  const t = Number.isFinite(tilt) ? Math.min(Math.PI * 0.5, Math.max(0, tilt)) : 0.9;
+  const j = clamp01(jitter);
+  // even azimuth first (the sheet), then a bounded per-droplet wobble
+  const phi = ((index % n) / n) * Math.PI * 2
+    + (hash01(seed, index * 5 + 21) * 2 - 1) * j * (Math.PI / n);
+  // per-droplet tilt spread: a real crown's rim is ragged, and a rim of
+  // identical tilt reads as a cone of revolution — a shape, not water
+  const tj = t * (1 + (hash01(seed, index * 5 + 22) * 2 - 1) * j * 0.45);
+  const st = Math.sin(tj);
+  return [Math.cos(phi) * st, Math.cos(tj), Math.sin(phi) * st];
 }
 
 function clamp01(x: number): number {
