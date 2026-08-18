@@ -38,6 +38,10 @@ import {
   stormAt,
   weatherPresets,
 } from '../src/weather';
+import { SPECTRUM_KEYS } from '../src/weather/presets';
+import { beaufort } from '../src/ui/windDial';
+import { fullyDevelopedFetch } from '../src/ocean/fetch';
+import { SPECTRUM_SIGNATURE_KEYS } from '../src/ocean/oceanCascades';
 import type { PresetPatch } from '../src/weather/presets';
 
 beforeEach(() => {
@@ -119,8 +123,12 @@ describe('presets are pure data (§V7: only param values, no code)', () => {
         .sort()
         .join('|');
     const swellShape = shape(weatherPresets.swell);
-    expect(shape(weatherPresets.calm)).toBe(swellShape);
-    expect(shape(weatherPresets.storm)).toBe(swellShape);
+    // EVERY rung, not the three that used to exist: a new preset missing a key
+    // leaves that key at the previous preset's value forever, which is the
+    // irreversibility this shape check exists to forbid
+    for (const [name, preset] of Object.entries(weatherPresets)) {
+      expect(shape(preset), `${name} patches a different key set`).toBe(swellShape);
+    }
   });
 
   it('swell mirrors the params-module defaults — applying it restores factory state', () => {
@@ -217,6 +225,250 @@ describe('storm vs swell (§V7: amp up + foam bias up → big foam patches)', ()
     // rarer than swell: a glassy sea foams only where it truly folds
     expect(foamRarity(calm.ocean)).toBeGreaterThan(foamRarity(swell.ocean));
   });
+
+  /**
+   * THE LADDER (user: "we still only have swell and storm as presets… we
+   * probably can extend this"). The complaint is about REACH and SPACING, so
+   * these are measured against the live spectrum rather than asserted from the
+   * authored knobs — a retuned ocean cannot silently pull the ladder out from
+   * under the comments, which is exactly how `storm` came to author a 14.70 m
+   * sea while its own comment said 8–10 m.
+   */
+  describe('the weather ladder is measured, spaced and Beaufort-anchored', () => {
+    /** the rungs in ladder order — `glass` sits OFF the bottom, see below */
+    const ORDER = [
+      'glass', 'calm', 'breeze', 'swell', 'squall', 'gale', 'storm',
+    ] as const;
+
+    it('names every preset exactly once, in ladder order', () => {
+      // a rung added to the data and forgotten here would never be measured
+      expect([...ORDER].sort()).toEqual(Object.keys(weatherPresets).sort());
+    });
+
+    it('climbs monotonically with no cliff — THE complaint', () => {
+      // the three presets measured 1.22 / 2.78 / 14.70 m: a 5.3× step at the
+      // top with nothing at all between a working sea and an unsurvivable one
+      const hs = ORDER.map((n) => hsOf(weatherPresets[n].ocean));
+      for (let i = 1; i < hs.length; i++) {
+        expect(hs[i], `${ORDER[i]} must be a bigger sea than ${ORDER[i - 1]}`)
+          .toBeGreaterThan(hs[i - 1]);
+      }
+      // no rung may more than double the sea under it — GLASS EXCLUDED, and
+      // that exclusion is the same one SEA_STATES makes: glass is not a step
+      // down from calm, it is a different destination reached by removing the
+      // WATER (swellAmplitude 0) rather than the wind
+      for (let i = 2; i < hs.length; i++) {
+        expect(hs[i] / hs[i - 1], `step ${ORDER[i]} is a cliff`).toBeLessThan(2);
+      }
+      expect(hs[0]).toBeLessThan(0.02); // "almost perfect flatness"
+      expect(hs[hs.length - 1]).toBeGreaterThan(9); // still a real storm on top
+    });
+
+    it('the top rung is survivable — the 14.70 m storm is gone', () => {
+      // "our storm is a little bit too intense… too crazy to be in" (user).
+      // 14.70 m is worse than the worst sea recorded in the North Atlantic and
+      // it put a 35 m hull with 2.6 m of freeboard fully clear of the water on
+      // 8–14% of ticks. The sea-state ladder recalibrated its own top rung to
+      // 9.58 m and recorded that this file still authored the old number.
+      const storm = weatherPresets.storm.ocean;
+      const asShipped = hsOf({ ...storm, amplitude: 1.15, windSpeed: 18 });
+      expect(asShipped).toBeGreaterThan(14); // what it used to be
+      const now = hsOf(storm);
+      expect(now).toBeLessThan(10.5);
+      expect(now).toBeGreaterThan(9); // and still unmistakably a storm
+      // it lands on the SAME sea as SEA_STATES' recalibrated top rung (9.58 m),
+      // which is what makes the two ladders readable against each other
+      expect(Math.abs(now - 9.58) / 9.58).toBeLessThan(0.05);
+    });
+
+    it('glass is flat because of the WATER, not because of the wind', () => {
+      const { glass, calm } = weatherPresets;
+      expect(glass.ocean.swellAmplitude).toBe(0); // no ground swell at all
+      expect(glass.ocean.amplitude).toBeLessThan(calm.ocean.amplitude);
+      // and it does NOT strand the ship: a preset the player cannot sail off
+      // is the trap this pass is fixing, not one to add
+      expect(glass.ocean.windSpeed).toBeGreaterThan(0.5);
+      // dropping the WIND alone would have changed almost nothing — the proof
+      const windOnly = hsOf({ ...calm.ocean, windSpeed: glass.ocean.windSpeed });
+      expect(hsOf(glass.ocean)).toBeLessThan(windOnly / 20);
+    });
+
+    it('every rung names a Beaufort force, and its wind really is that force', () => {
+      // the same published scale the sea-state ladder and the HUD read from,
+      // so a preset cannot claim a force its wind does not sit in
+      const forces = ORDER.map((n) => beaufort(weatherPresets[n].ocean.windSpeed).force);
+      expect(forces).toEqual([1, 3, 5, 6, 7, 7, 8]);
+      // `squall` and `gale` SHARE Force 7 — the band is 13.9–17.1 m/s, wide
+      // enough for two seas that are half again apart. Where a force repeats,
+      // the two rungs must still be plainly different WATER, or the ladder has
+      // a dead step in it.
+      for (let i = 1; i < ORDER.length; i++) {
+        if (forces[i] !== forces[i - 1]) continue;
+        const ratio = hsOf(weatherPresets[ORDER[i]].ocean) /
+          hsOf(weatherPresets[ORDER[i - 1]].ocean);
+        expect(ratio, `${ORDER[i]} shares a force with ${ORDER[i - 1]} AND a sea`)
+          .toBeGreaterThan(1.4);
+      }
+    });
+
+    it('no rung outruns the fetch field margin (§V.73)', () => {
+      // `fetchFieldMargin` must exceed fullyDevelopedFetch(wind) or the lee
+      // shadow is truncated at the field border and draws a ring on the water.
+      // It is what caps this ladder below Beaufort 9, so it is asserted here
+      // as well as in tests/fetch.test.ts — a future rung that raises the wind
+      // must find this before a player finds the ring.
+      for (const name of ORDER) {
+        const p = { ...oceanParams, ...weatherPresets[name].ocean };
+        expect(
+          fullyDevelopedFetch(p.windSpeed, p),
+          `${name} at ${p.windSpeed} m/s outruns fetchFieldMargin`,
+        ).toBeLessThan(oceanParams.fetchFieldMargin);
+      }
+    });
+
+    it('choppiness is DELIVERED, not just authored (§V.62)', () => {
+      // `effectiveChoppiness` caps λ·σ(det J) at choppinessFoldLimit and never
+      // raises the artist's value, so a preset can author a number the sea
+      // never sees — the old storm authored 1.9 and the GPU got 1.31. Every
+      // rung here must be inside its own cap, or the ladder's crest sharpness
+      // is a fiction and the number in the file means nothing.
+      let prev = 0;
+      for (const name of ORDER) {
+        const p = { ...oceanParams, ...weatherPresets[name].ocean };
+        let variance = 0;
+        for (let i = 0; i < 3; i++) {
+          const s = spectralJacobianRms(
+            p.resolution, p.cascades[i].domain, p, cascadeBand(i, p.splitWavelengths),
+          );
+          variance += s * s;
+        }
+        const delivered = effectiveChoppiness(
+          p.choppiness, Math.sqrt(variance), p.choppinessFoldLimit,
+        );
+        expect(delivered, `${name} authors a choppiness the sea never sees`)
+          .toBeCloseTo(p.choppiness, 6);
+        expect(delivered, `${name} is not sharper than the rung below`)
+          .toBeGreaterThan(prev);
+        prev = delivered;
+      }
+    });
+
+    it('foam gets steadily more common up the ladder, in σ of each own sea', () => {
+      // z is the only honest ordering: `jacobianFoamBias` is σ-relative, so its
+      // raw value moves in the OPPOSITE direction to coverage across a retune
+      const z = ORDER.map((n) => foamRarity(weatherPresets[n].ocean));
+      for (let i = 1; i < z.length; i++) {
+        expect(z[i], `${ORDER[i]} must foam more than ${ORDER[i - 1]}`)
+          .toBeLessThan(z[i - 1]);
+      }
+      // the pinned default is untouched — the whitecap coverage calibration
+      // (mean foamAmount 0.62% at 11 m/s) is measured AT SWELL
+      expect(weatherPresets.swell.ocean.jacobianFoamBias)
+        .toBe(oceanParams.jacobianFoamBias);
+    });
+
+    it('storminess straddles the rain threshold on purpose', () => {
+      const s = PRESET_STORMINESS;
+      // monotone with the ladder
+      const values = ORDER.map((n) => s[n]);
+      for (let i = 1; i < values.length; i++) {
+        expect(values[i]).toBeGreaterThanOrEqual(values[i - 1]);
+      }
+      // THE DEFAULT DAY IS DRY. This is a pinned invariant, not a preference.
+      expect(s.swell).toBe(0.12);
+      expect(s.swell).toBeLessThan(weatherParams.rainThreshold);
+      expect(s.breeze).toBeLessThan(weatherParams.rainThreshold);
+      // and the wet half of the range is now reachable, which it was not when
+      // the list jumped 0 → 0.12 → 1
+      expect(s.squall).toBeGreaterThan(weatherParams.rainThreshold);
+      expect(s.gale).toBeGreaterThan(weatherParams.rainThreshold);
+      // `squall` is only just over it: the AMBIENT sea is dry and everything
+      // wet comes from the localised cells — that is what "squally" means
+      const out = createWeatherSample();
+      registerFakes();
+      blendSample(0, 'squall', out);
+      expect(out.rain).toBeLessThan(0.05);
+      blendSample(1, 'squall', out); // inside a cell
+      expect(out.rain).toBe(1);
+      // where a gale is simply wet everywhere
+      blendSample(0, 'gale', out);
+      expect(out.rain).toBeGreaterThan(0.5);
+    });
+
+    it('the sky and the clouds move WITH the sea on every rung', () => {
+      // a "weather" preset that only changed the water would be a sea-state
+      // slider with extra steps — this is the difference between the two
+      // ladders, so it is asserted rather than assumed
+      let prevSun = Infinity;
+      let prevHaze = -Infinity;
+      let prevAmbient = Infinity;
+      for (const name of ORDER) {
+        const { sky } = weatherPresets[name];
+        expect(sky.sunIntensity, `${name} sun must not brighten up the ladder`)
+          .toBeLessThanOrEqual(prevSun);
+        expect(sky.hazeStrength, `${name} haze must not thin up the ladder`)
+          .toBeGreaterThanOrEqual(prevHaze);
+        expect(sky.ambientIntensity, `${name} sky bounce must not rise`)
+          .toBeLessThanOrEqual(prevAmbient);
+        prevSun = sky.sunIntensity;
+        prevHaze = sky.hazeStrength;
+        prevAmbient = sky.ambientIntensity;
+      }
+      // and the ends are genuinely far apart, not a ladder of rounding
+      expect(weatherPresets.glass.sky.sunIntensity)
+        .toBeGreaterThan(weatherPresets.storm.sky.sunIntensity * 2);
+      // §V11b: an OPEN sky is few clusters, never low coverage. Both ends of
+      // the ladder are sparse for opposite reasons — glass because there is
+      // almost nothing up there, storm because each mass is a monument — so
+      // clusterCount peaks in the middle and coverage never drops.
+      const counts = ORDER.map((n) => weatherPresets[n].clouds.clusterCount);
+      expect(Math.min(...counts)).toBe(weatherPresets.glass.clouds.clusterCount);
+      expect(Math.max(...counts)).toBe(weatherPresets.swell.clouds.clusterCount);
+      for (const name of ORDER) {
+        expect(weatherPresets[name].clouds.coverage, `${name} ghosts its lobes`)
+          .toBeGreaterThan(0.6);
+      }
+      // the anvil only appears once the weather does
+      expect(weatherPresets.breeze.clouds.anvilSpread).toBe(0);
+      expect(weatherPresets.squall.clouds.anvilSpread).toBeGreaterThan(0);
+      expect(weatherPresets.storm.clouds.anvilSpread)
+        .toBeGreaterThan(weatherPresets.gale.clouds.anvilSpread);
+    });
+
+    it('EVERY rung reaches the sim — no preset is a silent no-op (§V.62)', () => {
+      // §V.62 has fifteen-plus recorded instances of a value that changed and
+      // drove nothing. A preset is applied by WRITING INTO THE LIVE PARAMS
+      // OBJECTS, so the check is: after applying each rung, every key it names
+      // holds that rung's value in the object the systems actually read.
+      for (const name of ORDER) {
+        const fakes = registerFakes();
+        applyWeatherPreset(name, { lerpSeconds: 0 });
+        for (const [system, patch] of Object.entries(weatherPresets[name])) {
+          const live = (fakes as unknown as Record<string, Record<string, number>>)[system];
+          for (const [key, value] of Object.entries(patch as Record<string, number>)) {
+            expect(live[key], `${name}.${system}.${key} never reached the sim`)
+              .toBe(value);
+          }
+        }
+        clearParamsRegistry();
+      }
+    });
+
+    it('every rung is a DIFFERENT day — no two are perceptually the same', () => {
+      // two rungs that write nearly the same numbers would be a ladder with a
+      // dead step: the player clicks and nothing happens, which reads exactly
+      // like the §V.62 defect above
+      for (let i = 1; i < ORDER.length; i++) {
+        const a = weatherPresets[ORDER[i - 1]].ocean;
+        const b = weatherPresets[ORDER[i]].ocean;
+        expect(Math.abs(b.windSpeed - a.windSpeed), `${ORDER[i]} barely moves the wind`)
+          .toBeGreaterThan(1);
+        const dHs = Math.abs(hsOf(b) - hsOf(a));
+        expect(dHs, `${ORDER[i]} is the same sea as ${ORDER[i - 1]}`)
+          .toBeGreaterThan(0.5);
+      }
+    });
+  });
 });
 
 describe('apply writes ONLY patched keys (§V7: no other code path)', () => {
@@ -246,24 +498,31 @@ describe('apply writes ONLY patched keys (§V7: no other code path)', () => {
 
 describe('transition lerp (storms roll in, they do not snap)', () => {
   it('numeric params move monotonically and land exactly on target', () => {
+    // `windSpeed`, not `amplitude`: the fake ambient is 9 m/s and storm is 21,
+    // so the lane genuinely travels. Amplitude no longer does — the storm
+    // retune took it to 0.25 against a shipped 0.24, because a storm sea is
+    // built out of WIND now rather than out of the Phillips scale.
     const { ocean } = registerFakes();
     const t = applyWeatherPreset('storm', { lerpSeconds: 2 });
-    const seen: number[] = [ocean.amplitude];
+    const seen: number[] = [ocean.windSpeed];
     for (let i = 0; i < 20; i++) {
       t.update(0.1);
-      seen.push(ocean.amplitude);
+      seen.push(ocean.windSpeed);
     }
     for (let i = 1; i < seen.length; i++) {
       expect(seen[i]).toBeGreaterThanOrEqual(seen[i - 1]); // monotonic rise
     }
-    // partway it is strictly between the endpoints (actually lerping)
-    expect(seen[10]).toBeGreaterThan(weatherPresets.swell.ocean.amplitude);
-    expect(seen[10]).toBeLessThan(weatherPresets.storm.ocean.amplitude);
+    // partway it is strictly between the endpoints (actually lerping). This is
+    // a SPECTRUM lane, so its progress is quantised — it is still a true lerp
+    // between the same endpoints, it just arrives in `spectrumLerpSteps` steps.
+    expect(seen[10]).toBeGreaterThan(9);
+    expect(seen[10]).toBeLessThan(weatherPresets.storm.ocean.windSpeed);
     // completes: exact target after lerpSeconds, and flagged done
+    expect(ocean.windSpeed).toBe(weatherPresets.storm.ocean.windSpeed);
     expect(ocean.amplitude).toBe(weatherPresets.storm.ocean.amplitude);
     expect(t.done).toBe(true);
     t.update(0.1); // post-completion update is a safe no-op
-    expect(ocean.amplitude).toBe(weatherPresets.storm.ocean.amplitude);
+    expect(ocean.windSpeed).toBe(weatherPresets.storm.ocean.windSpeed);
   });
 
   it('hex colors never blend — they snap start→target at the midpoint', () => {
@@ -841,7 +1100,7 @@ describe('layout lanes are quantised so the sky is not rebuilt every frame', () 
     for (let i = 0; i < 240; i++) {
       t.update(1 / 60);
       layoutSeen.add(fakes.clouds.clusterHeight); // regenerates ~400 lobes
-      plainSeen.add(fakes.ocean.amplitude); // just a uniform
+      plainSeen.add(fakes.sky.hazeStrength); // just a uniform
     }
     // the layout lane visits at most layoutLerpSteps distinct values (+ the
     // exact endpoint), so src/clouds rebuilds that many times, not 240
@@ -850,6 +1109,150 @@ describe('layout lanes are quantised so the sky is not rebuilt every frame', () 
     // and it still LANDS exactly on target — quantising progress, not value
     expect(fakes.clouds.clusterHeight).toBe(weatherPresets.storm.clouds.clusterHeight);
     expect(fakes.clouds.anvilSpread).toBe(weatherPresets.storm.clouds.anvilSpread);
+  });
+});
+
+/**
+ * SPECTRUM LANES — the reported performance defect, in a headless test.
+ *
+ * User: "we're having reproducible performance problems" on preset changes.
+ * Mechanism (ddd2d77): a preset lerp moves five SPECTRUM_SIGNATURE_KEYS
+ * smoothly, so `spectrumSignature` changes on nearly every tick of the
+ * transition; `OceanSimulation.update` arms a 15-tick countdown on the first
+ * change and re-arms as soon as it fires, giving one h0 rebuild per 16 ticks
+ * for as long as the input keeps moving. Measured: 16 rebuilds and 8140 ms of
+ * main-thread stall over a 4 s transition, 2221 ms after the fused spectrum
+ * pass, worst tick 599 → 222 ms.
+ *
+ * These tests re-run the ocean's own arming rule against the values the lerp
+ * actually writes, so the rebuild count is DERIVED rather than asserted — the
+ * rate limit could be retuned and this would still measure the truth.
+ */
+describe('spectrum lanes are quantised — the preset-transition stall', () => {
+  /** the ocean's arm-once rate limit, replayed over a tick series */
+  function rebuildsFor(signatures: readonly string[]): number {
+    let sig = signatures[0];
+    let countdown = -1;
+    let rebuilds = 0;
+    for (const s of signatures) {
+      if (s !== sig) {
+        sig = s;
+        if (countdown < 0) countdown = 15;
+      }
+      if (countdown >= 0 && countdown-- === 0) rebuilds++;
+    }
+    return rebuilds;
+  }
+
+  /** run a 4 s transition at 60 Hz and collect the spectrum signature per tick */
+  function transitionSignatures(steps: number): string[] {
+    const before = weatherParams.spectrumLerpSteps;
+    weatherParams.spectrumLerpSteps = steps;
+    const fakes = registerFakes();
+    const original = console.warn;
+    console.warn = () => {};
+    let t;
+    try {
+      t = applyWeatherPreset('storm', { lerpSeconds: 4 });
+    } finally {
+      console.warn = original;
+    }
+    const out: string[] = [];
+    for (let i = 0; i < 300; i++) {
+      t.update(1 / 60);
+      // the same five keys spectrumSignature joins, from the live params
+      out.push(
+        SPECTRUM_KEYS.map((k) => (fakes.ocean as Record<string, unknown>)[k]).join('|'),
+      );
+    }
+    weatherParams.spectrumLerpSteps = before;
+    return out;
+  }
+
+  it('SPECTRUM_KEYS is exactly the ocean spectrum keys a preset patches', () => {
+    // §V.62: the list is duplicated in src/weather/presets.ts to keep three.js
+    // out of the weather module, so it is PINNED here against the real one.
+    // Adding a spectrum-shaping param, or adding an ocean key to PresetPatch,
+    // must fail here rather than silently reintroduce an unquantised lane.
+    const patched = Object.keys(weatherPresets.swell.ocean);
+    const expected = (SPECTRUM_SIGNATURE_KEYS as readonly string[]).filter((k) =>
+      patched.includes(k),
+    );
+    expect([...SPECTRUM_KEYS].sort()).toEqual([...expected].sort());
+    // and it is not empty — an empty list would pass the equality above while
+    // quantising nothing at all
+    expect(SPECTRUM_KEYS.length).toBeGreaterThan(0);
+  });
+
+  it('REPRODUCTION: an unquantised lerp re-cuts the spectrum ~16 times', () => {
+    // steps = 300 over 300 ticks is the old behaviour: a new value every tick
+    const smooth = transitionSignatures(300);
+    const distinct = new Set(smooth).size;
+    expect(distinct).toBeGreaterThan(200); // moves on nearly every tick
+    expect(rebuildsFor(smooth)).toBeGreaterThanOrEqual(15);
+  });
+
+  it('quantised, the rebuild count is the step count — not the tick count', () => {
+    for (const steps of [1, 3, 6]) {
+      const sigs = transitionSignatures(steps);
+      // the signature is genuinely CONSTANT between steps, which is what lets
+      // the countdown run out instead of being re-armed forever
+      expect(new Set(sigs).size).toBeLessThanOrEqual(steps + 1);
+      // one rebuild per step crossed, at most (+1 for the exact landing)
+      expect(rebuildsFor(sigs)).toBeLessThanOrEqual(steps + 1);
+    }
+    // at the shipped setting it is a 4× cut against the reproduction above
+    const shipped = rebuildsFor(transitionSignatures(weatherParams.spectrumLerpSteps));
+    expect(shipped).toBeLessThanOrEqual(4);
+  });
+
+  it('ALL five spectrum keys step together — five lanes would be five rebuilds', () => {
+    const sigs = transitionSignatures(3);
+    // per-key distinct counts must not exceed the joint count: if any key were
+    // stepping on its own schedule the join would have more values than 3+1
+    expect(new Set(sigs).size).toBeLessThanOrEqual(4);
+  });
+
+  it('still lands exactly on target — progress is stepped, values are not', () => {
+    const fakes = registerFakes();
+    const original = console.warn;
+    console.warn = () => {};
+    let t;
+    try {
+      t = applyWeatherPreset('storm', { lerpSeconds: 4 });
+    } finally {
+      console.warn = original;
+    }
+    for (let i = 0; i < 240; i++) t.update(1 / 60);
+    for (const key of SPECTRUM_KEYS) {
+      expect(
+        (fakes.ocean as Record<string, number>)[key],
+        `${key} must land on the preset's authored value`,
+      ).toBe((weatherPresets.storm.ocean as Record<string, number>)[key]);
+    }
+  });
+
+  it('a spectrum lane is monotone between the two endpoints', () => {
+    const fakes = registerFakes();
+    const original = console.warn;
+    console.warn = () => {};
+    let t;
+    try {
+      t = applyWeatherPreset('storm', { lerpSeconds: 4 });
+    } finally {
+      console.warn = original;
+    }
+    const from = fakes.ocean.windSpeed;
+    const to = weatherPresets.storm.ocean.windSpeed;
+    let prev = from;
+    for (let i = 0; i < 240; i++) {
+      t.update(1 / 60);
+      const v = fakes.ocean.windSpeed;
+      expect(v).toBeGreaterThanOrEqual(prev - 1e-9); // never goes backwards
+      expect(v).toBeGreaterThanOrEqual(Math.min(from, to) - 1e-9);
+      expect(v).toBeLessThanOrEqual(Math.max(from, to) + 1e-9);
+      prev = v;
+    }
   });
 });
 
@@ -899,7 +1302,6 @@ describe('§V.46 storm-field write-back (the ratchet)', () => {
   it('REPRODUCTION: writing the sample back makes a third of a storm a whole one', () => {
     const out = createWeatherSample();
     const ambientWind = oceanParams.windSpeed;
-    const ambientAmp = oceanParams.amplitude;
     // the old main.ts sim tick, verbatim
     const tick = (cell: number): void => {
       blendSample(cell, 'swell', out);
@@ -915,7 +1317,13 @@ describe('§V.46 storm-field write-back (the ratchet)', () => {
     for (let i = 0; i < 60; i++) tick(0); // a full second of clear air
     expect(oceanParams.windSpeed).toBeCloseTo(weatherPresets.storm.ocean.windSpeed, 2);
     expect(oceanParams.windSpeed).not.toBeCloseTo(ambientWind, 1);
-    expect(oceanParams.amplitude).not.toBeCloseTo(ambientAmp, 1);
+    // AMPLITUDE IS NO LONGER A USABLE WITNESS and that is a fact about the
+    // storm retune, not a weakening of this test: storm now reaches Hs 9.6 m
+    // through the WIND (21 m/s) with amplitude 0.25 against the shipped 0.24,
+    // so the ratchet moves it by 0.01 and no tolerance can tell "ratcheted"
+    // from "unchanged". The ratchet is still proved — on the key that travels.
+    expect(oceanParams.amplitude).toBeCloseTo(weatherPresets.storm.ocean.amplitude, 4);
+    expect(ambientWind).not.toBeCloseTo(weatherPresets.storm.ocean.windSpeed, 1);
   });
 
   it('the hold keeps a constant cell at a constant sea, and clear air undoes it', () => {
@@ -932,11 +1340,16 @@ describe('§V.46 storm-field write-back (the ratchet)', () => {
     tick(0.3);
     const oneBlendWind = oceanParams.windSpeed;
     const oneBlendAmp = oceanParams.amplitude;
-    // a single blend of 11 → 18 at t=0.3 is 13.1, published on the 0.5 grid
-    // anchored at ambient 11 → 13.0. Within half a step of the true blend.
+    // a single blend of ambient → storm at t = 0.3, published on the 0.5 m/s
+    // grid ANCHORED AT AMBIENT. Derived, not written down: the storm preset's
+    // wind is a tuning number and hard-coding the arithmetic here made this
+    // test fail on a retune for a reason that had nothing to do with the hold.
     const trueBlend =
       ambientWind + (weatherPresets.storm.ocean.windSpeed - ambientWind) * 0.3;
-    expect(oneBlendWind).toBeCloseTo(13.0, 9);
+    const onGrid =
+      ambientWind +
+      Math.round((trueBlend - ambientWind) / STEPS.windSpeed) * STEPS.windSpeed;
+    expect(oneBlendWind).toBeCloseTo(onGrid, 9);
     expect(Math.abs(oneBlendWind - trueBlend)).toBeLessThanOrEqual(STEPS.windSpeed / 2);
     // 200 more ticks of the identical cell must not move it one metre/second
     for (let i = 0; i < 200; i++) tick(0.3);
@@ -982,10 +1395,19 @@ describe('§V.46 storm-field write-back (the ratchet)', () => {
       blendSample(0.5, 'calm', out);
       hold.publish(out.ocean);
     }
-    // the cell is still on, so the live sea is half way to storm...
+    // the cell is still on, so the live sea is half way to storm — on the
+    // hold's own publish grid, anchored at the ambient the transition landed
+    // on. Derived rather than written down: the previous literal only held
+    // because calm 4 and storm 18 happened to straddle a grid point exactly,
+    // so a storm retune broke it for a reason unrelated to the ambient hold.
     const calm = weatherPresets.calm.ocean;
     const storm = weatherPresets.storm.ocean;
-    expect(oceanParams.windSpeed).toBeCloseTo(calm.windSpeed + (storm.windSpeed - calm.windSpeed) * 0.5, 9);
+    const trueHalf = calm.windSpeed + (storm.windSpeed - calm.windSpeed) * 0.5;
+    const onGrid =
+      calm.windSpeed +
+      Math.round((trueHalf - calm.windSpeed) / STEPS.windSpeed) * STEPS.windSpeed;
+    expect(oceanParams.windSpeed).toBeCloseTo(onGrid, 9);
+    expect(Math.abs(oceanParams.windSpeed - trueHalf)).toBeLessThanOrEqual(STEPS.windSpeed / 2);
     // ...and leaving it lands on CALM, not on the swell we started from
     for (let i = 0; i < 5; i++) {
       hold.restore();

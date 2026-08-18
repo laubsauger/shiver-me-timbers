@@ -32,6 +32,13 @@ import { sailDrive } from '../src/ship/sailDynamics';
 import { apparentWind } from '../src/ship/flagDynamics';
 import { shipMaterialParams } from '../src/params/ship';
 import {
+  WEATHER_PRESET_INFO,
+  WEATHER_PRESET_NAMES,
+  weatherPresetFor,
+  weatherPresets,
+  weatherWorldPatch,
+} from '../src/weather/presets';
+import {
   WIND_PRESETS,
   swellHeightLabel,
   swellPeriodLabel,
@@ -1354,5 +1361,127 @@ describe('the settings slider and the HUD name the same wind', () => {
     expect(checked).toBe(8); // F1 through F8
     // and the one rung that names no force must not be silently omitted
     expect(SEA_STATES.filter((r) => r.force === undefined).map((r) => r.id)).toEqual(['glass']);
+  });
+});
+
+/**
+ * THE WEATHER PRESET ROW — user: "not really seeing where I can actually
+ * change the weather preset. That should be on the top, just like the
+ * sea-state preset."
+ *
+ * It was not there. `grep -rn "weatherPreset" src/ui/` returned nothing at
+ * all: the seven-rung weather ladder was reachable ONLY from the Tweakpane
+ * debug panel, which a player never opens. The row now sits at the head of the
+ * Sea section, above the sea-state ladder.
+ *
+ * The screen itself cannot be constructed here — these tests are node, no DOM
+ * (see the file header) — so what is pinned is the part that can silently
+ * break: the DATA the row is built from, and the path from a click to the sim.
+ */
+describe('the weather preset row reaches the sea (§V.62)', () => {
+  const shipped = {
+    timeOfDay: skyParams.timeOfDay,
+    windDirection: oceanParams.windDirection,
+    windSpeed: oceanParams.windSpeed,
+    amplitude: oceanParams.amplitude,
+    swellAmplitude: oceanParams.swellAmplitude,
+    swellPeriod: oceanParams.swellPeriod,
+    swellDirection: oceanParams.swellDirection,
+  };
+  afterEach(() => {
+    skyParams.timeOfDay = shipped.timeOfDay;
+    Object.assign(oceanParams, shipped);
+  });
+
+  it('offers every rung of the ladder — a preset the row omits is unreachable', () => {
+    expect(WEATHER_PRESET_NAMES.length).toBe(7);
+    for (const name of WEATHER_PRESET_NAMES) {
+      const info = WEATHER_PRESET_INFO[name];
+      expect(info, `${name} has no player-facing label`).toBeDefined();
+      expect(info.label.length).toBeGreaterThan(0);
+      expect(info.sea.length).toBeGreaterThan(20); // a real description
+    }
+    // and nothing in the info table names a preset that does not exist
+    expect(Object.keys(WEATHER_PRESET_INFO).sort())
+      .toEqual([...WEATHER_PRESET_NAMES].sort());
+  });
+
+  it('the sea-state row still offers all NINE rungs, not three', () => {
+    // the user reported "only 3 options in the dropdown". That is the DEBUG
+    // panel's weather dropdown (three presets until this pass), not this
+    // ladder — but a truncated sea-state list would explain the wording
+    // exactly, so it is checked rather than assumed.
+    expect(SEA_STATES.length).toBe(9);
+  });
+
+  it('a click writes the store AND the store reaches oceanParams', () => {
+    // the row does `store.set({ world: weatherWorldPatch(name) })`, and
+    // main.ts pushes every settings change through `applyWorldSettings`. This
+    // is that whole path, run for real — the §V.62 question is not "was the
+    // value stored" but "does the sea change".
+    for (const name of WEATHER_PRESET_NAMES) {
+      const store = createSettingsStore(fakeStorage());
+      store.set({ world: weatherWorldPatch(name) });
+      applyWorldSettings(store.get().world);
+      const o = weatherPresets[name].ocean;
+      expect(oceanParams.windSpeed, `${name} wind never reached the sea`).toBe(o.windSpeed);
+      expect(oceanParams.amplitude, `${name} amplitude never reached the sea`).toBe(o.amplitude);
+      expect(oceanParams.swellAmplitude).toBe(o.swellAmplitude);
+      expect(oceanParams.swellPeriod).toBe(o.swellPeriod);
+      expect(oceanParams.swellDirection).toBe(o.swellDirection);
+    }
+  });
+
+  it('SURVIVES a later unrelated settings change — the clobber this avoids', () => {
+    // `applyWorldSettings` runs on EVERY settings change, so a weather preset
+    // that only called `weather.apply` would hold until the player touched the
+    // volume slider and then silently snap back to whatever the store still
+    // believed. Writing the store first is what makes it stick, and this is
+    // the test that would have caught the other order.
+    const store = createSettingsStore(fakeStorage());
+    store.subscribe((s) => applyWorldSettings(s.world));
+    store.set({ world: weatherWorldPatch('storm') });
+    expect(oceanParams.windSpeed).toBe(weatherPresets.storm.ocean.windSpeed);
+    store.set({ audio: { master: 0.3 } }); // something entirely unrelated
+    expect(oceanParams.windSpeed, 'the sea snapped back on an audio change')
+      .toBe(weatherPresets.storm.ocean.windSpeed);
+    expect(oceanParams.amplitude).toBe(weatherPresets.storm.ocean.amplitude);
+  });
+
+  it('the plate lights on its own preset and goes dark once trimmed', () => {
+    // same contract as `seaStateFor`: null is the honest answer for a sea that
+    // is between presets, not a missing highlight
+    for (const name of WEATHER_PRESET_NAMES) {
+      expect(weatherPresetFor(world(weatherWorldPatch(name)))).toBe(name);
+    }
+    const trimmed = { ...weatherWorldPatch('gale'), swellPeriod: 7.5 };
+    expect(weatherPresetFor(world(trimmed))).toBeNull();
+    // …but turning the WIND must not: no preset writes a bearing, so a bearing
+    // cannot make the weather read Custom (the trap seaStateFor documents)
+    const turned = { ...weatherWorldPatch('gale') };
+    expect(weatherPresetFor(world({ ...turned, windDirection: 1.234 }))).toBe('gale');
+  });
+
+  it('the two ladders do not silently overwrite each other', () => {
+    // THE INTERACTION, stated as a test because leaving it implicit is how a
+    // pair of controls becomes confusing. A weather preset moves the water too,
+    // so the sea-state plate below re-reads itself and goes dark — that is the
+    // truth (the water it just set is between Beaufort rungs), not a bug.
+    for (const name of WEATHER_PRESET_NAMES) {
+      const w = world(weatherWorldPatch(name));
+      const rung = seaStateFor(w);
+      // if a preset ever DOES land on a rung, both plates light and that is
+      // also honest — what must never happen is a plate lighting for a sea it
+      // does not describe
+      if (rung) {
+        expect(rung.windSpeed).toBe(w.windSpeed);
+        expect(rung.amplitude).toBe(w.amplitude);
+      }
+    }
+    // and the other way: a sea-state rung leaves the weather plate dark,
+    // because it never touched the sky the weather preset set
+    for (const rung of SEA_STATES) {
+      expect(weatherPresetFor(world(seaStatePatch(rung)))).toBeNull();
+    }
   });
 });

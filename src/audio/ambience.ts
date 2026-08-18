@@ -15,10 +15,11 @@
 import { advanceLfo, clamp01, expApproach, lerp, lfoUnipolar } from './envelope';
 import { audioParams as p } from '../params/audio';
 import { createRng } from '../state/rng';
+import { weatherMult, weatherRateMult, type Weather } from './mix';
 
 export interface AmbienceEnv {
   windSpeed: number;
-  weather: 'calm' | 'swell' | 'storm';
+  weather: Weather;
 }
 
 export interface Ambience {
@@ -99,16 +100,11 @@ export function createAmbience(ctx: BaseAudioContext, out: AudioNode): Ambience 
 
   return {
     update(env, dt) {
-      const gainMult = {
-        calm: p.calmGainMult,
-        swell: p.swellGainMult,
-        storm: p.stormGainMult,
-      }[env.weather];
-      const rateMult = {
-        calm: p.calmSwellRateMult,
-        swell: p.swellSwellRateMult,
-        storm: p.stormSwellRateMult,
-      }[env.weather];
+      // the SAME two functions mix.ts exposes, not a second copy of the table:
+      // the copy here silently covered only three of the ladder's seven rungs
+      // and `{...}[env.weather]` would have returned undefined for the rest
+      const gainMult = weatherMult(env.weather, p);
+      const rateMult = weatherRateMult(env.weather, p);
 
       // ocean bed: amplitude swell at the wave rhythm
       swellPhase = advanceLfo(swellPhase, p.swellRateHz * rateMult, dt);

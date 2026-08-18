@@ -349,17 +349,32 @@ describe('§V.72 the two channels stay separate', () => {
   it('storm breaks on the shelf where swell does not', () => {
     // "bigger waves crashing onto the shore in a storm", as a property of the
     // model rather than of a dial: the same depth saturates at storm and not
-    // at swell, and it does so further out
-    const shelf = 4.5;
-    const sat = (name: (typeof PRESETS)[number]) => {
+    // at swell, and it does so further out.
+    //
+    // SHELF 4.5 → 3.5 m with the storm retune. The preset used to author an
+    // Hs 14.70 m sea — worse than the worst recorded North Atlantic sea, and
+    // the user's "too crazy to be in" — and now authors 9.60 m, so it starts
+    // breaking closer in: measured saturation by depth on the new preset is
+    // 0.948 / 0.852 / 0.676 / 0.532 / 0.343 / 0.113 / 0.000 at 1 / 2 / 3 /
+    // 3.5 / 4 / 4.5 / 5 m. The CLAIM is unchanged and so are the assertions;
+    // only the depth at which a 9.6 m sea trips them has moved, which is what
+    // a shoaling model is supposed to do when the sea gets smaller.
+    const sat = (name: (typeof PRESETS)[number], shelf: number) => {
       const p = preset(name);
       const ks = shoalKs(p);
       const s = sigmas(p);
       const crest = 3 * Math.hypot(...s.map((v, i) => v * shoalFactor(ks[i], shelf)));
       return breakerSaturation(crest, shelf, p);
     };
-    expect(sat('storm')).toBeGreaterThan(0.5);
-    expect(sat('swell')).toBe(0);
-    expect(sat('calm')).toBe(0);
+    const shelf = 3.5;
+    expect(sat('storm', shelf)).toBeGreaterThan(0.5);
+    expect(sat('swell', shelf)).toBe(0);
+    expect(sat('calm', shelf)).toBe(0);
+    // "further out" stated as a sweep rather than at one depth, so this cannot
+    // pass again by the shelf happening to sit on the right side of one number
+    for (const d of [1, 2, 3, 4, 4.5]) {
+      expect(sat('storm', d), `storm must break at ${d} m`).toBeGreaterThan(0);
+      expect(sat('swell', d), `swell must not break at ${d} m`).toBe(0);
+    }
   });
 });

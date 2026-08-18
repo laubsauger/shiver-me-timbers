@@ -8,6 +8,7 @@ import { uiParams } from '../params/ui';
 import type { SettingsStore } from './settingsStore';
 import { createSettingsScreen } from './settingsScreen';
 import type { MusicStatus } from './settingsScreen';
+import type { WeatherPresetName } from '../weather/presets';
 import type { FullscreenControl } from './fullscreen';
 import { button, div, el, fleuronDivider, sealEmblem } from './dom';
 
@@ -18,6 +19,8 @@ export interface PauseMenuOptions {
   fullscreen: FullscreenControl;
   /** view modes get the Escape first; true = it was spent peeling photo mode */
   peelEscape?: () => boolean;
+  /** §V7 weather preset sink — forwarded straight to the settings screen */
+  onWeatherPreset?: (name: WeatherPresetName) => void;
 }
 
 export interface PauseMenu {
@@ -70,7 +73,9 @@ export function createPauseMenu(root: HTMLElement, opts: PauseMenuOptions): Paus
   fullscreenBtn.addEventListener('click', () => fullscreen.toggle());
 
   // — panel: settings view (hidden until opened) —
-  const settingsView = createSettingsScreen(opts.settings, () => showView('menu'));
+  const settingsView = createSettingsScreen(opts.settings, () => showView('menu'), {
+    onWeatherPreset: opts.onWeatherPreset,
+  });
   settingsView.root.style.display = 'none';
 
   const seal = div('smt-seal');

@@ -21,6 +21,10 @@ import {
   listParamsEntries,
   type ParamsEntry,
 } from '../params/registry';
+import {
+  WEATHER_PRESET_NAMES,
+  type WeatherPresetName,
+} from '../weather/presets';
 
 /**
  * Narrow structural view of the Pane API. Tweakpane's full types live in
@@ -51,8 +55,16 @@ interface FolderExtra extends FolderLike {
   title: string;
 }
 
-export const WEATHER_PRESETS = ['calm', 'swell', 'storm'] as const;
-export type WeatherPreset = (typeof WEATHER_PRESETS)[number];
+/**
+ * §V.62. This list was hand-written as `['calm', 'swell', 'storm']` and the
+ * weather presets are reachable ONLY from this dropdown, so a preset added to
+ * src/weather/presets.ts and not added here would be a rung nobody could ever
+ * select — a change to the game that is indistinguishable from no change at
+ * all, which is the exact defect shape §V.62 collects. Derived from the preset
+ * data instead, so it cannot drift.
+ */
+export const WEATHER_PRESETS = WEATHER_PRESET_NAMES;
+export type WeatherPreset = WeatherPresetName;
 
 export interface DebugPanelOpts {
   /** invoked when the weather preset dropdown changes (wiring = T6) */

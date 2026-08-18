@@ -17,7 +17,7 @@
 import { clamp01, expApproach } from './envelope';
 import { audioParams as p } from '../params/audio';
 import { SITUATION_TAGS, type MusicState, type MusicTrackRef } from './musicAssets';
-import type { Weather } from './mix';
+import { WEATHER_BAND, type Weather } from './mix';
 import type { Rng } from '../state/rng';
 
 export interface MusicEnv {
@@ -35,7 +35,9 @@ export interface MusicEnv {
  */
 export function musicStateFor(env: MusicEnv): MusicState {
   if (env.combatHeat > 0) return 'combat';
-  if (env.weather === 'storm') return 'storm';
+  // the whole stormy END of the ladder, not the top rung alone: `gale` and
+  // `squall` are storm music too (WEATHER_BAND is the single classification)
+  if (WEATHER_BAND[env.weather] === 'storm') return 'storm';
   const d = env.landDistance;
   if (d !== undefined && Number.isFinite(d) && d <= p.musicLandRadius) return 'island';
   return 'calm';

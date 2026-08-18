@@ -196,6 +196,10 @@ export {
   WEATHER_PRESET_NAMES,
   PRESET_STORMINESS,
   LAYOUT_KEYS,
+  SPECTRUM_KEYS,
+  WEATHER_PRESET_INFO,
+  weatherWorldPatch,
+  weatherPresetFor,
   type WeatherPresetName,
   type PresetPatch,
 } from './presets';

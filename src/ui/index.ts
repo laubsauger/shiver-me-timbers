@@ -13,6 +13,7 @@ import { createSettingsStore } from './settingsStore';
 import type { GameSettings, SettingsStore } from './settingsStore';
 import { applyGraphicsSettings } from './graphicsFeatures';
 import { createPauseMenu } from './pauseMenu';
+import type { WeatherPresetName } from '../weather/presets';
 import { createHud } from './hud';
 import type { WindReadout } from './hud';
 import type { MusicStatus } from './settingsScreen';
@@ -44,6 +45,14 @@ export interface GameUiCallbacks {
    * disagree about whether she is anchored.
    */
   onAnchorToggle?: () => void;
+  /**
+   * The settings screen's Weather row was clicked. main.ts feeds it into the
+   * SAME `weather.apply` the debug panel's dropdown calls — one path, one
+   * owner (§V.62). Without it the row still writes the ocean half into the
+   * settings store (the water answers), but the sky and clouds do not move,
+   * so an unwired host is degraded rather than silently dead.
+   */
+  onWeatherPreset?: (name: WeatherPresetName) => void;
 }
 
 export interface GameUi {
@@ -99,6 +108,7 @@ export function createGameUI(callbacks: GameUiCallbacks): GameUi {
     settings,
     fullscreen,
     peelEscape: viewModes.peelEscape,
+    onWeatherPreset: callbacks.onWeatherPreset,
   });
 
   return {

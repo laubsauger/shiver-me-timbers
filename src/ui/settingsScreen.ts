@@ -18,6 +18,13 @@ import type { SwitchRow } from './settingsControls';
 import { button, div, el } from './dom';
 import { CARDINALS, beaufort, cardinal } from './windDial';
 import { DEFAULT_SETTINGS, SEA_RANGES, SEA_STATES, seaStateFor, seaStatePatch } from './settingsStore';
+import {
+  WEATHER_PRESET_INFO,
+  WEATHER_PRESET_NAMES,
+  weatherPresetFor,
+  weatherWorldPatch,
+  type WeatherPresetName,
+} from '../weather/presets';
 import { CONTROL_GROUPS } from '../input/controlMap';
 
 /** structural mirror of AudioSystem.musicInfo() — no import into src/audio */
@@ -176,7 +183,26 @@ const SECTIONS: readonly { title: string; ids: GraphicsFeatureId[] }[] = [
 
 const pct = (v: number): string => `${Math.round(v * 100)}%`;
 
-export function createSettingsScreen(store: SettingsStore, onBack: () => void): SettingsScreen {
+export interface SettingsScreenOpts {
+  /**
+   * Apply a weather preset (§V7) — main.ts passes `weather.apply`, the SAME
+   * seam the debug panel's dropdown uses (`createDebugShell`). It is a
+   * callback rather than a direct import because the transition is owned by
+   * the weather system instance, which owns the lerp and the §V.46 field, and
+   * because §V.3 keeps the UI out of the sim's write path.
+   *
+   * Absent (tests, and any host that has not wired the weather system) the
+   * row still writes the ocean half into the store, so the WATER answers even
+   * where the sky cannot — a degraded control, never a dead one.
+   */
+  onWeatherPreset?: (name: WeatherPresetName) => void;
+}
+
+export function createSettingsScreen(
+  store: SettingsStore,
+  onBack: () => void,
+  opts: SettingsScreenOpts = {},
+): SettingsScreen {
   const backBtn = button('smt-back-btn', '‹ Back');
   backBtn.addEventListener('click', onBack);
   const head = div('smt-settings-head', el('h2', 'smt-settings-title', 'Settings'), backBtn);
@@ -306,6 +332,47 @@ export function createSettingsScreen(store: SettingsStore, onBack: () => void): 
     onInput: (v) => store.set({ world: { windSpeed: v } }),
   });
 
+  // — weather —
+  // User: "not really seeing where I can actually change the weather preset —
+  // that should be on the top, just like the sea-state preset". It was reachable
+  // ONLY from the Tweakpane debug panel, which players do not open. So it sits
+  // here, first in the Sea section, above the ladder it subsumes.
+  //
+  // HOW THE TWO ROWS RELATE, because leaving it implicit is how a control
+  // becomes confusing:
+  //   · WEATHER is the whole day — ocean AND sky AND cloud AND the §V.46
+  //     storminess that decides whether it rains. Seven rungs.
+  //   · SEA STATE is the water only, and finer — nine Beaufort rungs, with the
+  //     sliders under it finer still.
+  // Picking a weather preset therefore also moves the sea, and the sea-state
+  // plate below re-reads itself and usually goes dark: the water it just set is
+  // between Beaufort rungs, which is the truth. Picking a sea-state rung after
+  // it changes the water and LEAVES THE SKY WHERE THE WEATHER PUT IT, so this
+  // plate goes dark instead. Neither silently undoes the other; both report
+  // honestly that you have drifted off them. Same contract as every other plate
+  // on this screen.
+  const weatherRow = segmentRow<string>({
+    label: 'Weather',
+    hint: 'The whole day at once — sea, sky, cloud and rain. The sea state below is the finer trim on the water alone.',
+    options: WEATHER_PRESET_NAMES.map((n) => ({
+      value: n,
+      label: WEATHER_PRESET_INFO[n].label,
+    })),
+    onSelect: (id) => {
+      const name = WEATHER_PRESET_NAMES.find((n) => n === id);
+      if (!name) return;
+      // ORDER IS LOAD-BEARING (§V.62). The store write first, so
+      // `applyWorldSettings` cannot clobber the sea back on the next unrelated
+      // settings change; the preset apply second, which then finds the ocean
+      // lanes already at target and lerps only the sky and the clouds. See
+      // `weatherWorldPatch` for the failure this avoids.
+      store.set({ world: weatherWorldPatch(name) });
+      opts.onWeatherPreset?.(name);
+    },
+  });
+  const weatherNote = el('p', 'smt-note', '');
+  weatherRow.root.appendChild(weatherNote);
+
   // — sea state ladder —
   // Eight rungs where there used to be three presets an ocean apart. The plate
   // is the coarse gesture ("give me a gale"); the sliders under it are the fine
@@ -384,6 +451,7 @@ export function createSettingsScreen(store: SettingsStore, onBack: () => void): 
     div(
       'smt-section',
       sectionHead('Sea'),
+      weatherRow.root,
       seaState.root,
       windPreset.root, windSlider.root, windSpeed.root, windSea.root,
       swellHeight.root, swellPeriod.root, swellBearing.root,
@@ -514,6 +582,14 @@ export function createSettingsScreen(store: SettingsStore, onBack: () => void): 
     swellBearing.set(windFromDeg(s.world.swellDirection));
     // the ladder highlights only on an exact rung; between rungs it goes dark
     // and the note says what the sea is anyway, which is the useful half
+    // the weather plate lights only on an exact preset; anything else — a
+    // slider drag, a sea-state rung — leaves it dark, and the note then says
+    // what the sky is set to anyway rather than pretending nothing is set
+    const wx = weatherPresetFor(s.world);
+    weatherRow.set(wx ?? '');
+    weatherNote.textContent = wx
+      ? `${WEATHER_PRESET_INFO[wx].name}. ${WEATHER_PRESET_INFO[wx].sea}`
+      : 'Between weathers — the sea has been trimmed by hand since.';
     const rung = seaStateFor(s.world);
     seaState.set(rung?.id ?? '');
     // GLASS carries no Beaufort force and that is deliberate — see the rung's

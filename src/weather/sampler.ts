@@ -106,11 +106,19 @@ export function blendSample(
       // a non-numeric live value (system not registered / key missing) has no
       // meaningful blend — take the preset value rather than emit NaN
       const from = typeof cur === 'number' && Number.isFinite(cur) ? cur : to;
+      // t >= 1 snaps to `to` EXACTLY: `from + (to - from) * 1` is not `to` in
+      // binary (1.0 + (0.41 − 1.0) = 0.4099999999999999), and the contract
+      // "inside a full-strength cell the sea IS the storm preset" has to be
+      // exact — the ambient hold publishes this value into the live params and
+      // an ULP of drift there is an extra spectrum signature, i.e. an extra
+      // rebuild, for a sea nobody can tell apart.
       slot[key] = COLOR_KEYS.includes(key)
         ? t >= 0.5
           ? to
           : from
-        : from + (to - from) * t;
+        : t >= 1
+          ? to
+          : from + (to - from) * t;
     }
   }
 

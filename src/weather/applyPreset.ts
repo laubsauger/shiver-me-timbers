@@ -15,6 +15,7 @@ import { weatherParams } from '../params/weather';
 import {
   COLOR_KEYS,
   LAYOUT_KEYS,
+  SPECTRUM_KEYS,
   weatherPresets,
   type WeatherPresetName,
 } from './presets';
@@ -57,6 +58,8 @@ interface Lane {
   color: boolean;
   /** feeds a CPU layout rebuild → quantise the lerp instead of running it smooth */
   layout: boolean;
+  /** feeds an h0 spectrum rebuild (GPU + §V.8 mirror) → quantise it too */
+  spectrum: boolean;
 }
 
 export function applyWeatherPreset(
@@ -120,6 +123,10 @@ export function applyWeatherPreset(
         to,
         color: COLOR_KEYS.includes(key),
         layout: LAYOUT_KEYS.includes(key),
+        // only the ocean's copy of these names re-cuts a spectrum — no other
+        // system happens to share one today, and scoping it here means none
+        // ever can by accident
+        spectrum: system === 'ocean' && SPECTRUM_KEYS.includes(key),
       });
     }
   }
@@ -152,13 +159,39 @@ export function applyWeatherPreset(
       // still a true lerp — only its PROGRESS is stepped.
       const steps = Math.max(1, Math.floor(weatherParams.layoutLerpSteps) || 1);
       const pLayout = Math.round(p * steps) / steps;
+      // SPECTRUM lanes are the same trick against a far more expensive rebuild
+      // — h0 on the GPU *and* on the §V.8 CPU mirror, ~490 ms of main-thread
+      // work (~139 ms with ddd2d77's fused pass). Smooth, the signature moves
+      // on 241 of a 4 s transition's 300 ticks and the ocean's arm-once rate
+      // limit fires 16 rebuilds, discarding 15 of them: 8140 ms of stall,
+      // worst tick 599 ms. Stepped, the signature is genuinely CONSTANT between
+      // steps, so the rebuild count is the step count and not a function of the
+      // transition length. See weatherParams.spectrumLerpSteps for why 3.
+      //
+      // ONE quantised progress for the whole lane class, deliberately: the
+      // signature is a join of all five keys, so five independently-stepped
+      // lanes would change it five times per step and buy nothing.
+      const specSteps = Math.max(
+        1,
+        Math.floor(weatherParams.spectrumLerpSteps) || 1,
+      );
+      const pSpectrum = Math.round(p * specSteps) / specSteps;
+      // `from + (to - from) * 1` IS NOT `to` IN BINARY — 1.0 + (0.41 − 1.0)
+      // comes out 0.4099999999999999. Harmless on a smooth lane, which reaches
+      // full progress only on the frame `finish()` also runs; on a QUANTISED
+      // lane it is a real cost, because the lane sits at the float-tail value
+      // for every remaining tick and then `finish()` writes the exact one —
+      // a second signature change, i.e. an extra spectrum rebuild, at the end
+      // of every single transition. Snapping at t >= 1 removes it.
       for (const lane of lanes) {
-        const t = lane.layout ? pLayout : p;
+        const t = lane.layout ? pLayout : lane.spectrum ? pSpectrum : p;
         lane.params[lane.key] = lane.color
           ? p >= 0.5
             ? lane.to
             : lane.from // colors snap at midpoint (never garbage blends)
-          : lane.from + (lane.to - lane.from) * t; // linear → monotonic
+          : t >= 1
+            ? lane.to // EXACT at full progress — see below
+            : lane.from + (lane.to - lane.from) * t; // linear → monotonic
       }
     },
   };

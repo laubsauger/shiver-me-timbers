@@ -9,8 +9,41 @@
  */
 import { clamp01, lerp, lfoUnipolar } from './envelope';
 import type { AudioParams } from '../params/audio';
+import type { WeatherPresetName } from '../weather/presets';
 
-export type Weather = 'calm' | 'swell' | 'storm';
+/**
+ * Type-only, so this file keeps its "no deps but envelope + params" promise
+ * and stays runnable under plain node. It is the weather preset ladder itself
+ * (src/weather/presets.ts) rather than a copy of three of its names — a copy
+ * would let a new rung arrive with no audio at all and nothing would say so.
+ */
+export type Weather = WeatherPresetName;
+
+/**
+ * The ladder collapsed onto the three multiplier SETS the audio params carry
+ * (`calm*`, `swell*`, `storm*`). Audio's weather response is genuinely
+ * three-valued today; the ladder is seven-valued, so something has to map, and
+ * an exhaustive `Record<Weather, …>` is the mapping that CANNOT silently miss
+ * a rung — add one to the presets and this fails to compile instead of quietly
+ * falling through to the swell bed (§V.62).
+ *
+ * The bands are by sea state, not by name: `glass` sits with `calm`, `breeze`
+ * with the default `swell`, and everything from `squall` (Beaufort 7) up gets
+ * the storm bed. The finer-grained answer is to drive the beds off the §V.46
+ * `storm` scalar, which is already continuous and already sampled at the ship
+ * — that is an audio change, not a preset one, and it is not attempted here.
+ */
+export const WEATHER_BAND: Readonly<
+  Record<Weather, 'calm' | 'swell' | 'storm'>
+> = {
+  glass: 'calm',
+  calm: 'calm',
+  breeze: 'swell',
+  swell: 'swell',
+  squall: 'storm',
+  gale: 'storm',
+  storm: 'storm',
+};
 
 const MS_PER_KNOT = 0.514444;
 
@@ -28,13 +61,15 @@ export function smooth01(x: number): number {
 
 /** §V7: the preset only picks a multiplier, never a different code path */
 export function weatherMult(weather: Weather, p: AudioParams): number {
-  return weather === 'calm' ? p.calmGainMult : weather === 'storm' ? p.stormGainMult : p.swellGainMult;
+  const band = WEATHER_BAND[weather] ?? 'swell';
+  return band === 'calm' ? p.calmGainMult : band === 'storm' ? p.stormGainMult : p.swellGainMult;
 }
 
 export function weatherRateMult(weather: Weather, p: AudioParams): number {
-  return weather === 'calm'
+  const band = WEATHER_BAND[weather] ?? 'swell';
+  return band === 'calm'
     ? p.calmSwellRateMult
-    : weather === 'storm'
+    : band === 'storm'
       ? p.stormSwellRateMult
       : p.swellSwellRateMult;
 }

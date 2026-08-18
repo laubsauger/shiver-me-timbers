@@ -31,6 +31,60 @@ export interface WeatherParams {
    */
   layoutLerpSteps: number;
   /**
+   * Number of discrete steps a preset transition moves SPECTRUM params in
+   * (`SPECTRUM_KEYS` — amplitude, windSpeed and the three swell keys). Exactly
+   * the same mechanism as `layoutLerpSteps` above, one system over, and it is
+   * the more expensive of the two by an order of magnitude.
+   *
+   * Moving any of those five changes `spectrumSignature`, which re-cuts h0 on
+   * the GPU **and** on the §V.8 CPU mirror — ~490 ms of main-thread work at
+   * 512², or ~139 ms with the fused spectrum pass (ddd2d77). Lerped smoothly,
+   * a 4 s transition moves all five on 241 of 300 ticks, and the ocean's
+   * arm-once rate limit (`OceanSimulation.update`, one rebuild per 16 ticks on
+   * a continuously-moving input) then fires **16 rebuilds and discards 15 of
+   * them**: measured 8140 ms of stall before the fused pass and 2221 ms after,
+   * worst tick 599 → 222 ms. That is two thirds of the transition spent frozen,
+   * and it is the reported performance problem.
+   *
+   * Quantised, the signature genuinely goes quiet BETWEEN steps, so the rate
+   * limit fires once per step crossed, independent of `transitionSeconds`.
+   *
+   * MEASURED HEADLESS on this machine — a real `applyWeatherPreset('storm')`
+   * over 4 s at 60 Hz, with the ocean's own arm-once rate limit replayed over
+   * the per-tick signature, and the per-rebuild cost timed directly
+   * (`generateSpectrumData` × 3 cascades = 96.6 ms, `new CpuOcean` = 98.3 ms,
+   * so 195 ms of main-thread work per rebuild):
+   *
+   *   steps    ticks the spectrum moves    rebuilds    total stall
+   *   smooth              239 / 299             15        2924 ms
+   *     12                 12                   12        2339 ms
+   *      6                  6                    6        1170 ms
+   *      4                  4                    4         780 ms
+   *      3                  3                    3         585 ms   ← shipped
+   *      2                  2                    2         390 ms
+   *      1                  1                    1         195 ms
+   *
+   * WHY 3, and the trade stated so it can be re-taken. It is a 5× cut and it
+   * keeps "storms roll in" legible: three visible steps over four seconds,
+   * about one every 1.3 s, each roughly half a metre of Hs between adjacent
+   * ladder rungs, under a sky and a haze that go on lerping smoothly around
+   * them and hold the eye. 1 is the cheapest honest setting and snaps the sea
+   * once at the midpoint. 12 — the layout value — puts the stall straight back.
+   *
+   * WHAT THIS DOES NOT FIX, said plainly: the WORST TICK is 195 ms at every
+   * row of that table, because one rebuild still lands inside one frame. This
+   * knob reduces how OFTEN the cost is paid, not how much it costs at once.
+   * The other half is amortising a rebuild across ticks (row slices), which is
+   * a different change in different files (src/ocean, src/sea-physics).
+   *
+   * THE SETTINGS SCREEN'S WEATHER ROW PAYS NONE OF THIS. It writes the ocean
+   * half of the preset into the settings store first, so the transition finds
+   * every spectrum lane already at target and moves none of them: one rebuild
+   * for the store write, zero for the lerp. The debug panel's dropdown is the
+   * path that still lerps the sea, and it is the one this number is for.
+   */
+  spectrumLerpSteps: number;
+  /**
    * master strength of the localised storm field, 0..1 (§V46).
    * 0 = field disabled: `weatherAt` returns the live (globally applied)
    * params at every position, i.e. exactly the pre-§V46 behaviour.
@@ -108,6 +162,7 @@ export const weatherParams: WeatherParams = registerParams(
   {
     transitionSeconds: 4,
     layoutLerpSteps: 12,
+    spectrumLerpSteps: 3,
     cellIntensity: 1,
     // ≈2.6 km between cells, ≈1.0 km squalls: at 6 m/s the ship spends
     // roughly 3 minutes crossing one and a few minutes in the clear between,
@@ -136,6 +191,7 @@ function weatherParamsMeta(): Partial<Record<keyof WeatherParams, ParamMeta>> {
   return {
     transitionSeconds: { min: 0, max: 20, step: 0.1 },
     layoutLerpSteps: { min: 1, max: 60, step: 1 },
+    spectrumLerpSteps: { min: 1, max: 60, step: 1 },
     cellIntensity: { min: 0, max: 1, step: 0.01 },
     cellSize: { min: 400, max: 12000, step: 50 },
     cellRadius: { min: 100, max: 6000, step: 25 },

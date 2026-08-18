@@ -3,6 +3,14 @@
  * §V.2: plain JSON-serializable data, deterministic under fixed tick.
  * §V.3: sim writes, render only reads.
  */
+// TYPE-ONLY, and that matters: it is erased at compile time, so this adds no
+// runtime edge from the sim to the weather module and §V.3's "weather never
+// imports SimState" still holds in the only direction it constrains. Spelling
+// the seven preset names out again here instead would be a §V.62 silent drop
+// waiting to happen — a rung added to the ladder but not to this union stops
+// type-checking at the one call site that writes it (src/main.ts), while a
+// rung REMOVED from the ladder would leave a name here nothing can produce.
+import type { WeatherPresetName } from '../weather/presets';
 
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
@@ -54,7 +62,7 @@ export interface SimState {
   /** seconds elapsed = tick * SIM_DT */
   time: number;
   wind: { direction: number; speed: number }; // direction radians, speed m/s
-  weather: 'calm' | 'swell' | 'storm';
+  weather: WeatherPresetName;
   ships: ShipState[];
   projectiles: ProjectileState[];
   nextProjectileId: number;

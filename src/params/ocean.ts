@@ -317,6 +317,87 @@ export const oceanParams: OceanParams = registerParams('ocean', {
   // band edges scale with the domains so no cascade is asked for wavelengths
   // its grid can't hold (also keeps the CPU buoyancy mirror's kMax inside its
   // reduced grid — see sea-physics/cpuOcean ctor guard)
+  //
+  // 8.3 → 5 WAS EVALUATED IN FULL AND NOT LANDED. Blocked by ONE number and it
+  // is not the one anybody expected — see the end. Written down because every
+  // physics cost came out at zero, so the next reader will otherwise re-run a
+  // day of measurement to rediscover the same wall. Harnesses left on disk:
+  // `CASCADE_WIDEN=1` (+`CW_HOLDZ=1`), `SPLIT_PITCH=1`, `FOAM_SYNC=1`,
+  // `FOAM_RESEARCH=1 FOAM_N=256`.
+  //
+  // THE VARIABLE IS W = domain/λ_long — how many of the band's own longest
+  // wave fit in its tile, hence how many modes its energetic end carries
+  // (2πW on the edge ring). At W ≈ 2.5 a tile holds ~15 modes there and its
+  // breaking rate BEATS coherently: docs/research-cascade-tiling.md, and the
+  // user's "too synchronous across the whole screen; it comes into view and
+  // goes out and comes back". That doc could only raise W by widening the
+  // DOMAIN and rejected it. docs/research-abyssal-ocean.md §3.1 found the
+  // other lever — lower λ_long, which moves NOTHING about the grid (same
+  // domains, texels, Nyquist, shader literals, bindings) and takes cascade 2's
+  // W 2.735 → 4.540.
+  //
+  // IT WORKS, AND NOT FOR THE REASON THE IMPORTED SCALING LAW SAYS. That law
+  // (coverage CV ∝ W^−0.47, peak/trough ∝ W^−1.24, injection CV ∝ W^−0.97) was
+  // fitted on the DOMAIN axis. Transposed to the split axis it holds for
+  // exactly one metric: peak/trough predicted ×0.533, measured ×0.533 (34.3 →
+  // 18.3, 100 s composite at held §V.36 z). It fails for both CV metrics —
+  // coverage CV predicted −21%, measured −4.9%; lane-2 injection CV predicted
+  // −39%, measured −8.6%. And lane 1's injection CV falls 19% while cascade
+  // 1's own W never moves at all, which the law cannot express. The real
+  // variable is the lattice ring index of the ENERGETIC modes, not of the band
+  // edge: the 5–8.3 m octave lived on rings 2.7–4.5 of cascade 2's 22.7 m tile
+  // and lands on rings 11.8–19.6 of cascade 1's 98 m tile — 4.32× finer, the
+  // domain ratio. W only ever described the edge.
+  //
+  // EVERY PHYSICS COST MEASURED AT ~ZERO:
+  //  · Hs 2.7832 → 2.7819 m (−0.05%). The +7–10% quadrature gain a DOMAIN
+  //    change pays does not arise, because no Δk moves.
+  //  · §V.69 re-measured ON CURVATURE (18 stations bow-to-stern, then twice in
+  //    time), 3 seeds × 4 headings through the real integrator: peak pitch
+  //    angular acceleration 16.035 → 16.054 °/s², +0.12%. The octave does
+  //    reach the hull and the hull rejects it twice — e^(−k·2 m) Smith
+  //    attenuation passes 8–22% (§V.68) and a 35.5 m waterline averages out
+  //    the rest (§B.47). The whole 8.3 → 4 sweep spans 0.5%, against
+  //    12.06–19.53 °/s² for the domain route, because a split change re-draws
+  //    ONLY the crossing octave (`generateH0` draws its gaussian for EVERY
+  //    texel and masks by band afterwards, so every mode that keeps its
+  //    cascade keeps its exact amplitude and phase).
+  //  · §V.8, restated L < 32·λ_short: cascade 1's cap 265.6 → 160 m against a
+  //    98 m domain, 61% of budget (was 37%). Cascade 2 is not mirrored
+  //    (MIRRORED_CASCADES = 2) so the guard has nothing to say about it.
+  //    cpuOcean's cubic gate 64·λ_short/L reads 5.42 → 3.27, same side of its
+  //    threshold of 6, so nothing flips.
+  //  · §V.59's texel-ratio guard GAINS margin, 0.300 → 0.546 against its 0.25
+  //    floor. (Worth knowing on its own: the SHIPPED sea sits at 0.300, i.e.
+  //    20% above a floor that fails outright at `splitWavelengths[0]` = 33.)
+  //  · caustics `foldDepth` re-derived from this spectrum 2.4108 → 2.4110 m —
+  //    its σ_∇²h is a k⁴ moment living at cascade 2's Nyquist, untouched.
+  //  · every domain untouched, so §V.19's 1010/98 = 10.31 and 98/22.7 = 4.32
+  //    stand; §V.48's population and the §V.40 sampler budget cannot move.
+  //
+  // WHAT BLOCKS IT IS THE PINNED WHITECAP COVERAGE. The summed σ barely moves
+  // (0.15684 → 0.15567) but it REDISTRIBUTES — cascade 1's own σJ +16.5%,
+  // cascade 2's −8.6% — and the §V.36 gate is re-expressed against each band's
+  // own σ. Measured through the real shading chain at the N=256 mirror that
+  // reproduces the pinned figure to three digits: 0.6192% → 0.4146%, A THIRD
+  // OF THE WHITECAPS GONE. Restoring it needs `jacobianFoamBias` 0.60 → 0.632
+  // (measured 0.6221%, +0.47%) — and that number is 0.015 ABOVE its own
+  // ceiling: `tests/foam.test.ts` §V.36 requires storm's gate a full σ looser
+  // than swell's, and the gap reads 1.1003 at 0.600, 0.9919 at 0.617, 0.8963
+  // at 0.632. The split is NOT what eats the margin (at the shipped 8.3 the
+  // gap is 1.1003 and at 5 it is 1.1110 — the split slightly IMPROVES it); the
+  // bias raise is. Landing at the legal ceiling 0.617 leaves coverage ≈0.513%,
+  // −17% on a pinned invariant, with 0.002σ of headroom on a test another
+  // agent's storm retune moves. That is fitting to a wall, which is what
+  // research-cascade-tiling.md §4 rejected the domain route for.
+  //
+  // TO REVIVE IT, one owner decision, both outside this file: raise
+  // `foamParams.injectStrength` (linear on the amount, does not touch z, so
+  // §V.36's cross-preset contract never sees it — but it scales calm and storm
+  // too, which is unmeasured), or re-derive storm's own `jacobianFoamBias`
+  // (0.53) down to restore the gap. Either way NOT fixed by this: the SPATIAL
+  // half of the complaint — W does not change the tile, so 133 distinct caps
+  // are still shown 311× across a 400 m view.
   splitWavelengths: [40, 8.3],
   // wave SCALE is windSpeed (Phillips peak ∝ V²/g), not domain: 8 → 11 m/s
   // moves the mean wavelength 37 m → 69 m. Amplitude drops 0.75 → 0.32 to
@@ -354,6 +435,18 @@ export const oceanParams: OceanParams = registerParams('ocean', {
   // the same. 0.60 puts it back at 2.54σ, inside the calibrated 2.2–2.6 band
   // and still a full σ looser than storm's gate. (calm/storm set their own
   // amplitude, so their biases are untouched.)
+  // THE CEILING ON THIS NUMBER IS 0.6172 AND IT IS NOT SELF-EVIDENT — measured
+  // while evaluating `splitWavelengths[1]` 8.3 → 5 (see there), which needed
+  // 0.632 to hold the pinned whitecap coverage and could not have it.
+  // `tests/foam.test.ts` §V.36 requires storm's gate to sit a FULL σ looser
+  // than swell's (the promise this file's own comment above makes), and
+  // storm's z is pinned at 1.450–1.459 by its own preset bias. So the gap
+  // swell−storm is 1.1003 at 0.600, 0.9919 at 0.617 and 0.8963 at 0.632: this
+  // knob has ~0.017 of headroom, ≈35% of the move it took to restore a −33%
+  // coverage loss. IF THE PINNED COVERAGE EVER HAS TO BE RESTORED BY MORE THAN
+  // THAT, the knob is `foamParams.injectStrength` (linear on the amount, does
+  // not touch z, so §V.36's cross-preset contract does not see it) or a
+  // matching re-derivation of storm's own bias — both in other files.
   jacobianFoamBias: 0.6,
   // 11 s ⟹ λ 189 m, 5.3 waves across the 1010 m tile. Long enough that the
   // ship lifts to it over several seconds instead of bobbing.
