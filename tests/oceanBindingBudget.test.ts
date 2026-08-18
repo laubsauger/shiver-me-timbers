@@ -236,7 +236,18 @@ const LEDGER: readonly LedgerEntry[] = [
   {
     file: 'src/foam/foamShading.ts',
     source: foamShadingSource,
-    sites: 3,
+    sites: 5,
+    // §T.42 THE FOAM RELIEF ADDED TWO SITES AND ZERO BINDINGS, and the recount
+    // is the point of this ledger rather than a formality. `foamDetailMask`
+    // finite-differences the foam alpha it has already built by re-reading the
+    // CREST tap at two offsets — `texture(art, crestUv + (du,0))` and
+    // `+ (0,du)`. Same `art` object, therefore the same UUID, therefore the
+    // same one binding and one sampler these two lines below already account
+    // for. Fragment cost is +2 FETCHES of a resident texture, which is §V.17's
+    // budget and not §V.40's, and they exist only on the whitecap path: the
+    // relief is an out-param, so the wake's `foamDetailMask` call builds
+    // neither tap.
+    //
     // THE FOAM ART TEXTURE (§T.5 stage 3, talk 07:49) — the spare sampler
     // §V.40 reserved, spent. `foamDetailMask` reads it TWICE, at the crest
     // world scale and at the soft one, which is the talk's "high frequency
@@ -253,7 +264,8 @@ const LEDGER: readonly LedgerEntry[] = [
     fragmentSamplers: 1,
     vertexTextures: 0,
     vertexSamplers: 0,
-    why: 'texture(foamArtTexture())×2 = 1 binding (same UUID) + foamShadingNode (off-path)',
+    why: 'texture(art)×4 (crest, soft, §T.42 relief ×2) = 1 binding (same UUID)'
+      + ' + foamShadingNode (off-path)',
   },
   {
     file: 'src/flowfoam/index.ts',
