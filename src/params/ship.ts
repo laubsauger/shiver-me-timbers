@@ -289,6 +289,16 @@ export interface ShipDetailParams {
   mastWooldingTurns: number;
   /** gathering bays along a furled yard — the cloth swags between gaskets */
   sailBuntBays: number;
+  /**
+   * Depth of the longitudinal folds in the gathered roll, as a fraction of its
+   * own section radius. A smooth tube always presents SOME normal straight at
+   * the sun, at every heading and every hour, so it carries one continuous
+   * highlight that never changes — measured at p90 luminance 0.50-0.53 against
+   * flying canvas swinging 0.11-0.58, which is the whole of "the packed sail is
+   * far too white". Creases break that band into facets that turn over as the
+   * ship moves. Baked, so RING carries its band limit (4 samples per crease).
+   */
+  sailBuntCrease: number;
   /** how far a bunt hangs below the yard, as a fraction of its own thickness */
   sailBuntSag: number;
   /** how much fatter a bay's centre is than its gaskets */
@@ -336,7 +346,7 @@ export const shipDetailParams: ShipDetailParams = registerParams(
     anchorSize: 2.1,
     mouldingSize: 0.14,
     mastHoopSpacing: 2.2, mastHoopThickness: 0.07, mastWooldingTurns: 4,
-    sailBuntBays: 3, sailBuntSag: 1.15, sailBuntSwell: 2.1,
+    sailBuntBays: 3, sailBuntCrease: 0.13, sailBuntSag: 1.15, sailBuntSwell: 2.1,
     bulwarkLip: 0.28, railChamfer: 0.035,
     irregularity: 1,
   },
@@ -368,6 +378,7 @@ export const shipDetailParams: ShipDetailParams = registerParams(
     mastHoopThickness: { min: 0.02, max: 0.2, step: 0.005 },
     mastWooldingTurns: { min: 0, max: 8, step: 1 },
     sailBuntBays: { min: 1, max: 6, step: 1 },
+    sailBuntCrease: { min: 0, max: 0.4, step: 0.01 },
     sailBuntSag: { min: 0, max: 3, step: 0.05 },
     sailBuntSwell: { min: 1, max: 4, step: 0.05 },
     bulwarkLip: { min: 0, max: 1.2, step: 0.01 },
@@ -457,21 +468,28 @@ export interface ShipRigParams {
   reefHysteresis: number;
   /**
    * Cloth drop scale at trim 0 — the bottom of the ONE continuous ramp that
-   * animates a reef. Tuned to the gathered bundle's own height so the single
-   * geometry swap at `furlGeometryBelow` moves the foot of the canvas as
-   * little as possible.
+   * animates a reef.
    *
-   * IT CANNOT REACH ZERO, and that bounds what this knob is worth. The bundle
-   * hangs 0.227-0.280 of its sail's drop below the yard (nine sails, measured;
-   * the spread is the `max(0.15, drop·0.05)` floor in `buildSailGeometry` plus
-   * per-sail gather jitter), so ONE scale cannot match all nine and the best
-   * available is the minimax. The two directions also swap at DIFFERENT trims,
-   * because `sailGeometryState` adds `min(reefHysteresis, furlGeometryBelow)`
-   * on the way out — hauling down flips at trim 0.015, hauling up at 0.040 —
-   * so the same value is asked to null two different drop scales.
+   * IT IS NO LONGER A FITTED CONSTANT. It used to be tuned to the gathered
+   * bundle's own height so that the geometry swap at `furlGeometryBelow`
+   * changed as little as possible, which meant it could only ever null ONE
+   * quantity (where the foot of the canvas was) out of the several that jumped,
+   * and it had to be re-fitted every time a sail was added or resized. There is
+   * no swap left (pieceGeometrySail.buildSailGeometry), so this is now just the
+   * bottom of the ramp and wants to be as near zero as the SHAPE allows:
+   * whatever canvas is still hanging at trim 0 has to hide inside the roll,
+   * which is 0.044 of the drop deep at its thinnest (the nipped waist at a
+   * gasket) on the slimmest of the nine sails.
+   *
+   * NOT zero, and this is the only reason: the cloth's normal is a cross
+   * product of two finite differences of the surface, and a panel of exactly
+   * zero drop makes both of them degenerate (§V28 — `normalize` of a zero
+   * vector is a NaN normal, i.e. black or worse). A hair of hanging cloth keeps
+   * that basis well-conditioned at the one trim nobody looks closely at.
    */
   trimDropMin: number;
-  /** trim below which the cloth panel is swapped for the gathered bundle */
+  /** UNUSED by geometry — see `trimDropMin`. Kept as the trim below which the
+   *  §V13 furled LABEL is certain, for the HUD plaque and the haul audio. */
   furlGeometryBelow: number;
 }
 
@@ -485,15 +503,10 @@ export const shipRigParams: ShipRigParams = registerParams(
     reefFurledBelow: 0.15,
     reefReefedBelow: 0.55,
     reefHysteresis: 0.06,
-    // MINIMAX over the NINE sails AND both haul directions (the old 0.24 was
-    // fitted to ten sails and to the DOWN direction alone, where it is still
-    // the optimum). Worst swap step, as a fraction of the sail's own drop:
-    //   0.24 → down 0.0286 (main course), up 0.0438 (main course)
-    //   0.23 → down 0.0348 (rear topsail), up 0.0342 (main course)
-    // i.e. 4.4% → 3.5% of drop worst case, and the two directions balance.
-    // The response is CONVEX in this value, not resonant: |f − scale(min)| per
-    // sail, so there is one optimum and no second basin to hunt for.
-    trimDropMin: 0.23,
+    // 0.24 → 0.23 (the minimax fit, when there was still a swap to fit) →
+    // 0.03, which is not a fit at all: the roll grows into the canvas's place
+    // continuously now, so the last of the canvas simply goes away.
+    trimDropMin: 0.03,
     furlGeometryBelow: 0.02,
   },
   {
@@ -692,10 +705,42 @@ export interface ShipMaterialParams {
   sailBacklitFocus: number; // transmission lobe tightness (looking sunward)
   sailLeeDarken: number; // 0..1 tint multiplier on the shaded (lee) face
   sailStainStrength: number; // weathering mottle darkening 0..1
+  /**
+   * How much of the gathered roll's BAKED fold occlusion is allowed into the
+   * albedo, 0..1. The occlusion also drives `material.aoNode`, which is three's
+   * own hook and reaches the indirect (HemisphereLight) term only; at
+   * sunIntensity 3.4 against ambientIntensity 0.7 that is about a fifth of the
+   * light in a crevice, and the rest is direct sun a 20 cm fold shadows and the
+   * shadow map cannot resolve. Exactly 1 on the flying cloth, so this can only
+   * ever darken the roll.
+   */
+  sailBuntShade: number;
   holeColor: number;
   // --- surface relief (§V22 "they look like solid covered materials all
   // over"). One procedural height field drives the shading normal, so all of
   // these are in METRES of apparent relief; bumpScale is the master dial.
+  /**
+   * MASTER RELIEF GAIN — and it is NOT in physical units, which is the whole
+   * of why the wood read flat three times running.
+   *
+   * It shipped at 1 on the assumption that `reliefNormal`'s scale is
+   * dimensionless, i.e. that scale 1 reproduces the height field's true
+   * surface slope. Measured in-browser, it does not: at 1 the deck is flat
+   * even with `plankStep` cranked TEN-FOLD, and at 20 the SHIPPED 6 mm step
+   * and 0.55 AO read exactly as intended. So every relief term underneath —
+   * grain, plank crown, plank step, caulk depth, wale — was authored
+   * correctly and then multiplied to invisibility by the one dial in front of
+   * them.
+   *
+   * BISECTED, not guessed: bypassing the scale entirely (a hard 40) produced
+   * violent ridging; `uBumpScale` alone at 1 produced none; therefore the
+   * height field, `material.normalNode` and both `reliefScale` modulators are
+   * all innocent and the gain was the only defect (§B.48's second half).
+   *
+   * The old slider range was 0..6, so this value was UNREACHABLE from the
+   * debug panel — nobody could have found it by dragging, which is why three
+   * rounds of tuning the terms below never moved it.
+   */
   bumpScale: number;
   grainRelief: number; // grain ridges
   plankRelief: number; // per-board proud/shy offset — reads as planking
@@ -846,8 +891,9 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailLacingPoints: 7, sailSeamDarken: 0.88, sailAmbientLift: 0.09,
     sailSeamRidge: 0.1, sailSeamQuilt: 0.08,
     sailBacklitFocus: 3, sailLeeDarken: 0.7, sailStainStrength: 0.36,
+    sailBuntShade: 0.55,
     holeColor: 0x120c07,
-    bumpScale: 1, grainRelief: 0.004, plankRelief: 0.006, seamDepth: 0.012,
+    bumpScale: 20, grainRelief: 0.004, plankRelief: 0.006, seamDepth: 0.012,
     // ±6 mm of plateau across a 25 mm chamfer (0.045 of a 0.55 m board) is a
     // 26° bevel at every seam. For scale: the crowned terms it sits on top of
     // max out at 2.0° (plankRelief) and 2.6° (plankTilt), and the only feature
@@ -913,7 +959,8 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailSeamDarken: { min: 0.4, max: 1, step: 0.01 },
     sailAmbientLift: { min: 0, max: 0.6, step: 0.01 },
     sailStainStrength: { min: 0, max: 0.8, step: 0.01 },
-    bumpScale: { min: 0, max: 6, step: 0.05 },
+    sailBuntShade: { min: 0, max: 1, step: 0.01 },
+    bumpScale: { min: 0, max: 60, step: 0.5 },
     grainRelief: { min: 0, max: 0.03, step: 0.0005 },
     plankRelief: { min: 0, max: 0.04, step: 0.0005 },
     plankStep: { min: 0, max: 0.02, step: 0.0005 },

@@ -41,6 +41,20 @@ import { vhash, vjitter } from './variation';
 
 export type RailPoint = [x: number, y: number, z: number];
 
+/**
+ * How far a stacked rail member sinks into the one below it, in metres.
+ *
+ * Z-FIGHTING (user: "parts of the railing really suffer from Z-fighting").
+ * Members that ABUT share a plane, and two coplanar faces at equal depth are
+ * decided by floating-point noise — which is the flicker. Interpenetration
+ * costs nothing and removes the ambiguity: one surface is simply in front.
+ *
+ * 4 mm is chosen to be larger than depth precision at any range this ship is
+ * viewed from, and smaller than the smallest member it hides inside (the
+ * upper cap board at ~40 mm), so nothing visibly shrinks.
+ */
+const RAIL_BITE = 0.004;
+
 /** an opening in a run, as an interval of ARC LENGTH from the run's start */
 export interface RailGap {
   center: number;
@@ -190,28 +204,54 @@ export function buildRailRun(
 
   for (const [s0, s1] of spansOf(total, gaps)) {
     const spanLen = s1 - s0;
-    // resample this span finely enough that the cap follows the hull curve
-    // rather than chording across it
-    const segs = Math.max(1, Math.round(spanLen / 0.6));
-    const pts: RailPoint[] = [];
-    for (let i = 0; i <= segs; i++) pts.push(pointAt(path, cum, s0 + (spanLen * i) / segs));
+    /**
+     * ONE BOX PER PATH SEGMENT — never a resampling (Z-FIGHTING, user: "parts
+     * of the railing really suffer from Z-fighting").
+     *
+     * This used to resample every span at a fixed 0.6 m and then overstate
+     * each box by half a cap width to close the mitres. On a CURVED run that
+     * is harmless: consecutive boxes carry different yaws, so the overlap
+     * interpenetrates and the depth order is unambiguous. On a STRAIGHT run it
+     * is a guaranteed defect — every box has the SAME yaw and the SAME height,
+     * so the overlapping region has exactly coplanar top and side faces, and a
+     * 6.9 m break rail was drawn as twelve of them. Coplanar faces at equal
+     * depth are the textbook Z-fight.
+     *
+     * Following the path's OWN vertices fixes it at the source rather than by
+     * nudging: a straight run has two vertices and becomes ONE box with no
+     * joint to fight, and a curved run gets one box per station, where the
+     * yaw change is what keeps the overlap honest.
+     */
+    const pts: RailPoint[] = [pointAt(path, cum, s0)];
+    for (let i = 0; i < cum.length; i++) {
+      if (cum[i] > s0 + 1e-4 && cum[i] < s1 - 1e-4) pts.push(path[i]);
+    }
+    pts.push(pointAt(path, cum, s1));
 
-    for (let i = 0; i < segs; i++) {
+    for (let i = 0; i < pts.length - 1; i++) {
       const a = pts[i];
       const b = pts[i + 1];
       // CAP RAIL, in two stacked boards: the upper one narrower, which is a
       // chamfered arris for the price of a box (§T.34 "90° arrises ⊥" — a true
-      // sharp edge reads as one aliased line whatever the light does)
+      // sharp edge reads as one aliased line whatever the light does).
+      //
+      // The upper board SINKS INTO the lower one by RAIL_BITE instead of
+      // sitting exactly on it. Two boards that abut share a plane, and a
+      // shared plane is the same Z-fight as above by a different route;
+      // interpenetration gives the depth test something to order.
       parts.push(segmentBox(a, b, capWidth, capBottom + capHeight * 0.35, capHeight * 0.7));
+      const upperH = capHeight * 0.3 + RAIL_BITE;
       parts.push(
-        segmentBox(a, b, capWidth * 0.78, capBottom + capHeight * 0.85, capHeight * 0.3),
+        segmentBox(a, b, capWidth * 0.78, capBottom + capHeight - upperH / 2, upperH),
       );
       // SILL the balusters stand on
       parts.push(segmentBox(a, b, capWidth * 0.8, sillH / 2, sillH));
-      // SOLID BULWARK BOARDING, where this run carries it
+      // SOLID BULWARK BOARDING, where this run carries it — biting into the
+      // sill for the same reason the cap boards bite into each other
       if (panelHeight > 0.01) {
+        const panelH = panelHeight + RAIL_BITE;
         parts.push(
-          segmentBox(a, b, capWidth * 0.62, sillH + panelHeight / 2, panelHeight),
+          segmentBox(a, b, capWidth * 0.62, sillH + panelHeight / 2 - RAIL_BITE / 2, panelH),
         );
       }
     }
@@ -220,8 +260,11 @@ export function buildRailRun(
     const inset = Math.min(spanLen * 0.5, capWidth * 0.9);
     const usable = Math.max(0, spanLen - inset * 2);
     const count = Math.max(1, Math.round(usable / spacing));
-    const footY = sillH + panelHeight;
-    const balusterH = Math.max(0.1, capBottom - footY);
+    // …and the balusters stand INTO whatever they rise from, so their foot
+    // disc is not coplanar with the sill or the panel top (RAIL_BITE). They
+    // also grow up into the cap by the same bite at the head.
+    const footY = sillH + panelHeight - RAIL_BITE;
+    const balusterH = Math.max(0.1, capBottom - footY + RAIL_BITE);
     for (let i = 0; i <= count; i++) {
       const s = s0 + inset + (count === 0 ? usable / 2 : (usable * i) / count);
       const [x, y, z] = pointAt(path, cum, s);

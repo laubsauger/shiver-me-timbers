@@ -36,6 +36,25 @@ export interface JumpTarget {
 export const SPAWN_TARGET: JumpTarget = { name: 'spawn', x: 0, z: 0, heading: 0 };
 
 /**
+ * Where she boots when the URL says nothing (user: "I want it to be basically
+ * anchored in this lagoon, with the ship being static there, sitting with
+ * fully packed up sails, on anchor").
+ *
+ * §T.52 originally kept the ORIGIN as the default and put the lagoon behind
+ * `?at=lagoon`, reasoning that every screenshot comparison boots at the origin
+ * and §V.63 already makes cross-session A/B fragile. The user has overridden
+ * that, and the open-water venue is not lost — it is `?at=spawn`, which is the
+ * name {@link SPAWN_TARGET} has always carried, so the ocean-parity shot needs
+ * no new vocabulary.
+ *
+ * NOT folded into `bootJumpTarget`, deliberately: that function answers "what
+ * did the URL ask for", and the difference between "asked for nothing" and
+ * "asked for something that does not exist" is what decides whether a missing
+ * destination deserves a console warning. Policy belongs at the call site.
+ */
+export const DEFAULT_BOOT_TARGET = 'lagoon';
+
+/**
  * Teleport, and leave her in a state she could plausibly have sailed into.
  *
  * A hard position write alone puts her at war with three things at once:
