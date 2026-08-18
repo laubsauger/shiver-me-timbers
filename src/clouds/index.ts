@@ -56,6 +56,14 @@ export interface CloudsHandle {
   /** the camera-pinned composite quad — must be layer-excluded from the
    *  mirror pass, since it is fitted to the MAIN camera */
   readonly compositeQuad: THREE.Mesh;
+  /**
+   * This frame's §V.63 rain-shaft slots, refilled IN PLACE every update — the
+   * reflection's cloud stand-in builds its own copy of the shaft graph and
+   * must be handed the SAME slots, or a squall visibly rains on the sky and
+   * not on the water. Held by reference for the same reason `sunDirLive` is:
+   * the mirror is constructed once, before any of these have values.
+   */
+  readonly shaftSlotsLive: readonly ShaftSlot[];
   /** this frame's resolved sun/sky pair (§T.39 day cycle). The reflection's
    *  cloud stand-in reconstructs colour with the same two values and must
    *  read them from HERE, not from the raw params hexes, or reflected clouds
@@ -181,7 +189,8 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
       cores.uMaxDist.value = p.maxCloudDist;
       cores.uRelief.value = p.lobeRelief;
       cores.uReliefScale.value = p.lobeReliefScale;
-      cores.uRimSoft.value = p.rimSoftness;
+      cores.uChordPower.value = p.lobeChordPower;
+      cores.uLobeDensity.value = p.lobeDensity;
       cores.uSunPower.value = p.sunPower;
       cores.uSunSideGain.value = p.sunSideGain;
       cores.uSelfShadow.value = p.selfShadow;
@@ -275,6 +284,7 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
 
     blurredTexture: blur.output,
     compositeQuad: composite.quad,
+    shaftSlotsLive: shaftPool,
     sunColorLive: composite.uSunColor.value,
     skyColorLive: composite.uSkyColor.value,
     sunDirLive,

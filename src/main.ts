@@ -356,6 +356,10 @@ async function boot(): Promise<void> {
       sunColorLive: clouds.sunColorLive,
       skyColorLive: clouds.skyColorLive,
       sunDirLive: clouds.sunDirLive,
+      // §V.63: the same shaft slots the main composite draws, by reference —
+      // a squall that rains on the sky but not on the water reads as two
+      // different weathers in one frame.
+      shaftSlots: clouds.shaftSlotsLive,
     },
   });
 

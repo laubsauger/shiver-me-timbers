@@ -629,7 +629,8 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const uMaxDist = uniform(p.maxCloudDist);
   const uRelief = uniform(p.lobeRelief);
   const uReliefScale = uniform(p.lobeReliefScale);
-  const uRimSoft = uniform(p.rimSoftness);
+  const uChordPower = uniform(p.lobeChordPower);
+  const uLobeDensity = uniform(p.lobeDensity);
   const uSunPower = uniform(p.sunPower);
   const uSunSideGain = uniform(p.sunSideGain);
   const uSelfShadow = uniform(p.selfShadow);
@@ -831,27 +832,66 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
 
   const N = vNormal.normalize();
   const V = cameraPosition.sub(vWorld).normalize();
-  // |N·V| → 0 exactly at the silhouette, so this is the SOFT RIM: the mesh
-  // keeps a hard outline in the depth/shape sense while its alpha feathers
-  // out. smoothstep in functional form per §V23.
-  //
-  // THE SMOOTH NORMAL, NOT THE BUMPY ONE — this was "strange holes and
-  // ripped-off segments that don't really look right" (user 2026-08-12).
-  // `vNormal` is a finite-difference normal of the RELIEF-DISPLACED surface,
-  // and at lobeRelief 0.26 / reliefScale 2.3 its slopes swing far enough that
-  // |N·V| passes through 0 in the MIDDLE of a lobe's projected disc, not just
-  // at its outline. The rim term then punches alpha to 0 there, and because
-  // the noise is smooth the resulting dip reads as a clean concave bite out of
-  // the cloud. Confirmed by A/B: lobeRelief 0 removes every hole. A silhouette
-  // feather is a property of the GROSS FORM — it must not follow bumps. The
-  // displaced normal keeps doing all the LIGHTING below, which is what the
-  // cauliflower is for.
-  const rim = smoothstep(
-    float(0),
-    uRimSoft.max(1e-3),
-    vSmoothNormal.normalize().dot(V).abs(),
-  );
-  const lobeAlpha = rim.mul(uCoverage).clamp(0, 1);
+  /**
+   * THE OPTICAL CHORD (§V11b). `|N·V|` at the smooth ellipsoid is exactly
+   * `sqrt(1 - u²)` at projected radius fraction `u`, i.e. HALF THE CHORD a
+   * view ray cuts through a sphere of uniform density. So `density ∝ |N·V|`
+   * is not a softness knob — it is the optical depth of the volume the lobe
+   * stands for, and `lobeChordPower` 1 is the physical answer.
+   *
+   * WHAT THIS REPLACES AND WHY, MEASURED. It used to be
+   * `smoothstep(0, rimSoftness=0.42, |N·V|)`, which SATURATES at |N·V| ≥ 0.42,
+   * i.e. at u ≤ 0.907. That made a lobe a TOP-HAT, not a falloff:
+   *   - 92% of the projected disc area sat at ≥90% of peak alpha;
+   *   - the 90%→10% feather was 0.041 lobe radii = 0.42 RT PIXELS, against a
+   *     blurRadiusFar of 1.0 px.
+   * A sphere drawn as a hard disc is a disc, and that single fact produced
+   * every symptom in the "small clouds look like small explosions" report
+   * (user 2026-08-18): too circular, too sharp, and — via the coverage-
+   * weighted colour average, which swings wherever a lobe's α falls off a
+   * cliff — "you can count the spheres". MEASURED at the interior rims of a
+   * large cluster: 22.8% of them carried a visible tonal step (>0.02), p90
+   * 0.033, p99 0.071. The chord profile takes that to 15.6%.
+   *
+   * TWO THINGS THIS IS *NOT*, both checked before landing:
+   *  - it is NOT §V.63's "lobes barely overlap" defect (`27a0795`, islands).
+   *    Median nearest-neighbour penetration here is 1.43× the SMALLER lobe
+   *    radius and only 6.1% of lobes have no overlapping neighbour — they
+   *    overlap almost concentrically. There was nothing wrong with the union;
+   *    there was nothing for it to union, because each input was binary.
+   *  - the composite operator is NOT additive-in-colour. Opacity is evaluated
+   *    ONCE on accumulated density (`alpha = f(Σα)`), which is correct, and an
+   *    unordered coverage-weighted colour average measures only 1.09× rougher
+   *    than true front-to-back occlusion (mean difference 0.0315). The
+   *    "additive" read was this cliff, not the blend.
+   *
+   * THE SMOOTH NORMAL, NOT THE BUMPY ONE — this was "strange holes and
+   * ripped-off segments that don't really look right" (user 2026-08-12).
+   * `vNormal` is a finite-difference normal of the RELIEF-DISPLACED surface,
+   * and at lobeRelief 0.26 / reliefScale 2.3 its slopes swing far enough that
+   * |N·V| passes through 0 in the MIDDLE of a lobe's projected disc, not just
+   * at its outline. Confirmed by A/B: lobeRelief 0 removes every hole. An
+   * optical depth is a property of the GROSS FORM — it must not follow bumps.
+   * The displaced normal keeps doing all the LIGHTING below, which is what the
+   * cauliflower is for.
+   */
+  const chord = vSmoothNormal.normalize().dot(V).abs();
+  const rim = chord.pow(uChordPower.max(0.05));
+  /**
+   * ...and the lobe is a VOLUME ELEMENT, not a near-opaque disc. `lobeDensity`
+   * is what lets optical depth ACCUMULATE ACROSS lobes instead of saturating
+   * inside one: at the old density a single lobe already reached alpha 0.80,
+   * so a union of 35 of them could only ever TILE — the second lobe along a
+   * ray had nothing left to contribute. Total optical depth is conserved by
+   * the exponential below (a cluster interior still runs 0.9+), while ONE lobe
+   * now lands near 0.3 and two overlapping ones near 0.6.
+   *
+   * WHY NOT `coverage`: the weather presets drive `clouds.coverage` (0.8 clear,
+   * 1.0 storm), so folding this into it would be overwritten on the next preset
+   * apply. `coverage` keeps its meaning as the preset's relative density knob
+   * and this is the absolute scale underneath it.
+   */
+  const lobeAlpha = rim.mul(uCoverage).mul(uLobeDensity.max(0)).clamp(0, 1);
 
   // every factor below is independently in [0,1] (or [1, 1+silver]) and they
   // are MULTIPLIED, so the product is bounded at source (§V44)
@@ -950,6 +990,9 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     .mul(iSeed.mul(0.4).add(0.6))
     .mul(uFluffAlpha)
     .mul(uCoverage)
+    // the skirt rides the same absolute density scale as the lobe it feathers,
+    // or the fluff would become the opaque part of a translucent cloud
+    .mul(uLobeDensity.max(0))
     .clamp(0, 1);
 
   // fake-sphere normal on the billboard, view space
@@ -1004,7 +1047,8 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     uMaxDist,
     uRelief,
     uReliefScale,
-    uRimSoft,
+    uChordPower,
+    uLobeDensity,
     uSunPower,
     uSunSideGain,
     uSelfShadow,

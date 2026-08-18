@@ -285,6 +285,15 @@ export interface ShaftSlot {
  * fragment work is the only currency we have. It is a closed-form ray/cylinder
  * chord, not a march: ~25 ALU per slot, unrolled over `shaftCount` slots.
  *
+ * EXPORTED because the planar reflection builds its OWN instance of this graph
+ * (src/reflection/cloudMirror.ts). A shaft is analytic world-space geometry —
+ * a ray/cylinder chord — so unlike the cloud RT it has data for every
+ * direction, and the mirror's straight ray from the mirrored eye IS the
+ * unfolded reflected path. Sharing the FUNCTION rather than the composite is
+ * the same lesson `createCloudEdge` already learned here: the reflection had a
+ * hand-copy of the alpha construction and it drifted the moment either side
+ * was tuned.
+ *
  * WHY A CHORD AND NOT A BILLBOARD. The opacity of a real shaft is the depth of
  * water you are looking THROUGH, so it is thickest through the middle and
  * vanishes at the rim — which is exactly the chord of a vertical cylinder.
@@ -292,7 +301,7 @@ export interface ShaftSlot {
  * silhouette rather than a drawn outline: no `step`, no `smoothstep`, nothing
  * on a spatial coordinate for §V.48 to catch.
  */
-function createShafts(count: number, viewDir: N, p: CloudParams) {
+export function createShafts(count: number, viewDir: N, p: CloudParams) {
   const n = Math.min(Math.max(Math.floor(count) || 0, 0), 6);
   const uOpacity = uniform(p.shaftOpacity);
   const uDensityLen = uniform(p.shaftDensityLength);

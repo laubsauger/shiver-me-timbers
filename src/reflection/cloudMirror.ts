@@ -43,7 +43,12 @@ import {
   vec3,
   vec4,
 } from 'three/tsl';
-import { createCloudEdge, createNoiseTexture } from '../clouds/cloudComposite';
+import {
+  createCloudEdge,
+  createNoiseTexture,
+  createShafts,
+  type ShaftSlot,
+} from '../clouds/cloudComposite';
 import type { CloudParams } from '../params/clouds';
 import { REFLECTION_ONLY_LAYER } from './mirrorMath';
 
@@ -58,6 +63,13 @@ export interface CloudMirrorSource {
   blurred: THREE.Texture;
   /** cloud seed — the erosion noise must match the main composite's */
   seed: number;
+  /**
+   * §V.63 rain-shaft slots, held BY REFERENCE and refilled in place each frame
+   * by the clouds system (`CloudsHandle.shaftSlotsLive`). A shaft is the one
+   * part of a squall that hangs BETWEEN the cloud and the water, so leaving it
+   * out of the reflection is visible as rain that falls on the sky only.
+   */
+  shaftSlots: readonly ShaftSlot[];
   /**
    * This frame's resolved sun/sky pair (`CloudsHandle.sunColorLive` /
    * `skyColorLive`). These are the composite's own uniform values: Color
@@ -137,7 +149,7 @@ export function createCloudMirror(src: CloudMirrorSource): CloudMirror {
   const packed = texture(src.blurred, cloudUV.add(edge.uvOffset).clamp(0, 1));
   const coverage = packed.b;
   const denom = coverage.max(1e-4);
-  material.colorNode = uSunColor
+  const cloudColor = uSunColor
     .mul(packed.r.div(denom).add(edge.transmission(packed)))
     .add(uSkyColor.mul(packed.g.div(denom)));
 
@@ -151,11 +163,35 @@ export function createCloudMirror(src: CloudMirrorSource): CloudMirror {
     .mul(smoothstep(float(0), border, cloudUV.y))
     .mul(smoothstep(float(1), float(1).sub(border), cloudUV.y));
 
-  material.opacityNode = edge
+  const cloudAlpha = edge
     .alpha(packed)
     .mul(edgeMask)
     .mul(inFront.select(float(1), float(0)))
     .clamp(0, 1);
+
+  /**
+   * §V.63 RAIN SHAFTS IN THE WATER. Same graph as the main composite, driven
+   * by `rayMirror` — the STRAIGHT ray from the mirrored eye, which is the
+   * reflected path unfolded: it crosses y=0 at the water hit and continues up
+   * through the shaft's [0, base] slab, so the ray/cylinder chord is already
+   * the right one and nothing here needs mirroring by hand.
+   *
+   * DELIBERATELY NOT MASKED by `edgeMask`/`inFront`, unlike the cloud above.
+   * Those masks exist because the cloud RT only holds what the MAIN camera
+   * rasterized; a shaft is analytic world geometry with data in every
+   * direction, so it reflects correctly even where the cloud that produced it
+   * is off-screen — which is exactly the grazing, near-horizon band where a
+   * squall's reflection is most of what you see.
+   */
+  const shafts = createShafts(p.shaftCount, rayMirror, p);
+  const behind = shafts.alpha.mul(cloudAlpha.oneMinus());
+  const totalAlpha = cloudAlpha.add(behind).clamp(0, 1);
+
+  material.colorNode = cloudColor
+    .mul(cloudAlpha)
+    .add(uSkyColor.mul(shafts.tint).mul(behind))
+    .div(totalAlpha.max(1e-4));
+  material.opacityNode = totalAlpha;
   material.transparent = true;
   material.depthWrite = false;
   material.fog = false;
@@ -176,6 +212,10 @@ export function createCloudMirror(src: CloudMirrorSource): CloudMirror {
       uSunColor.value.copy(src.sunColorLive);
       uSkyColor.value.copy(src.skyColorLive);
       edge.push(p);
+      // the slot ASSIGNMENT is by distance to the main camera and moves every
+      // frame, so this is pushed every frame, not only on a rebuild — same
+      // contract as the main composite's own push
+      shafts.push(p, src.shaftSlots);
 
       mainCamera.updateMatrixWorld();
       uMainViewProj.value.multiplyMatrices(

@@ -163,8 +163,29 @@ export interface CloudParams {
   lobeRelief: number;
   /** spatial frequency of that relief on the unit lobe */
   lobeReliefScale: number;
-  /** silhouette softness: |N·V| below this fades the rim out */
-  rimSoftness: number;
+  /**
+   * Exponent on the OPTICAL CHORD. `|N·V|` at the smooth ellipsoid is exactly
+   * `sqrt(1-u²)` at projected radius `u`, i.e. half the chord a ray cuts
+   * through a uniform-density sphere — so **1 is the physical answer** and
+   * gives a lobe the density profile of the volume it stands for. Above 1
+   * concentrates density toward the core (a fuzzier, more diffuse lobe).
+   *
+   * REPLACED `rimSoftness`, which was `smoothstep(0, 0.42, |N·V|)` and
+   * therefore SATURATED at u ≤ 0.907: 92% of a lobe's projected disc area sat
+   * at ≥90% of peak alpha and the 90→10 feather was 0.42 RT px. See the note
+   * in cloudCores.ts — a sphere drawn as a hard disc is a disc, and that is
+   * the whole of the "small clouds look like small explosions" report.
+   */
+  lobeChordPower: number;
+  /**
+   * ABSOLUTE density scale of a lobe, under the preset-driven `coverage`.
+   * This is what lets optical depth accumulate ACROSS overlapping lobes rather
+   * than saturating inside one — at the old scale a single lobe already hit
+   * alpha 0.80, so 35 of them could only tile, never merge. Kept separate from
+   * `coverage` because the weather presets write that one (0.8 clear, 1.0
+   * storm) and would overwrite this on every apply.
+   */
+  lobeDensity: number;
   /** wrapped-diffuse exponent for the sun term (higher = harder terminator) */
   sunPower: number;
   /** 0..1 how much the cluster-level sun-side gradient darkens the far side */
@@ -429,7 +450,8 @@ const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   lobeDetail: { min: 0, max: 3, step: 1 },
   lobeRelief: { min: 0, max: 0.6, step: 0.01 },
   lobeReliefScale: { min: 0.5, max: 8, step: 0.1 },
-  rimSoftness: { min: 0.02, max: 1, step: 0.01 },
+  lobeChordPower: { min: 0.3, max: 3, step: 0.05 },
+  lobeDensity: { min: 0.05, max: 1.5, step: 0.01 },
   sunPower: { min: 0.5, max: 6, step: 0.05 },
   sunSideGain: { min: 0, max: 1, step: 0.01 },
   selfShadow: { min: 0, max: 1, step: 0.01 },
@@ -610,7 +632,14 @@ export const cloudParams: CloudParams = registerParams(
 
     lobeRelief: 0.26,
     lobeReliefScale: 2.3,
-    rimSoftness: 0.42,
+    // 1.0 = the physical chord through a uniform sphere (see the interface
+    // note). Not a look knob: this is the density profile of the volume.
+    lobeChordPower: 1.0,
+    // MEASURED against the accumulation curve, not chosen: at 0.31 a SINGLE
+    // lobe lands at alpha ~0.31, two overlapping ~0.6, three ~0.79 and a
+    // cluster interior (coverage 3-6 before scaling) still 0.9+. The old
+    // behaviour was a single lobe at 0.80, i.e. saturated on the first one.
+    lobeDensity: 0.31,
     sunPower: 1.9,
     sunSideGain: 0.8,
     selfShadow: 0.18,
