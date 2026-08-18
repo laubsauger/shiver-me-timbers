@@ -635,11 +635,18 @@ export const cloudParams: CloudParams = registerParams(
     // 1.0 = the physical chord through a uniform sphere (see the interface
     // note). Not a look knob: this is the density profile of the volume.
     lobeChordPower: 1.0,
-    // MEASURED against the accumulation curve, not chosen: at 0.31 a SINGLE
-    // lobe lands at alpha ~0.31, two overlapping ~0.6, three ~0.79 and a
-    // cluster interior (coverage 3-6 before scaling) still 0.9+. The old
-    // behaviour was a single lobe at 0.80, i.e. saturated on the first one.
-    lobeDensity: 0.31,
+    // 0.31 came off the accumulation curve alone (one lobe → alpha 0.31, two
+    // → 0.6, three → 0.79, interior still 0.9+) and IT WAS TOO LOW ON SCREEN.
+    // Seen at the lagoon under the shipped swell preset, deck level looking up
+    // 22°: at 0.31 the scattered small cumulus lost the hard disc AND all their
+    // substance — flat, defocused grey-blue smudges with almost no lit/shadow
+    // separation. Swept live against that framing (0.31 / 0.45 / 0.60 / 0.80):
+    // 0.80 restores the body but the individual lobes start reading as
+    // countable ovals again; 0.60 keeps the soft chord silhouette while giving
+    // the mass back its tone. THE ACCUMULATION CURVE WAS NECESSARY BUT NOT
+    // SUFFICIENT — it says when lobes stop tiling, not when a cloud looks like
+    // one, and only pixels separate those two.
+    lobeDensity: 0.60,
     sunPower: 1.9,
     sunSideGain: 0.8,
     selfShadow: 0.18,
