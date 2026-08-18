@@ -171,8 +171,13 @@ describe('rock placement (shore-hugging, deterministic, T13 foam tags §V10)', (
     );
   });
 
-  it('rocks cluster on the beach/waterline ring, not mid-ocean or on the peak', () => {
-    for (const rock of rocks) {
+  it('boulders cluster on the beach/waterline ring, not mid-ocean or on the peak', () => {
+    // SCOPED TO THE BOULDER CLASS. This contract was written about the shore
+    // scatter and it still holds for it exactly as before. The CLIFF masses
+    // added alongside it are a different thing with a different job — they
+    // carry the island's silhouette, which means running from inland down
+    // into the water — and they get their own bound in the next test.
+    for (const rock of rocks.filter((r) => !r.cliff)) {
       const [x, , z] = rock.position;
       const r = Math.hypot(x, z);
       const shore = findShoreRadius(hm, Math.atan2(z, x));
@@ -180,6 +185,29 @@ describe('rock placement (shore-hugging, deterministic, T13 foam tags §V10)', (
       // the placement angle vs re-derived angle can differ by ~a march step
       expect(Math.abs(r - shore)).toBeLessThanOrEqual(islandParams.rockSpread + 3);
     }
+  });
+
+  it('cliff masses stay on the island, and reach both inland and into the sea', () => {
+    // The user's ask was "huge big cliffs made out of rock … or it is very
+    // contrived as a texture little bits", and the references (ref-island-146,
+    // -150) carry the relief in placed granite that runs from the high ground
+    // down past the waterline. So the contract is a RANGE, not a ring: masses
+    // must exist on both sides of the shoreline, and none may wander off the
+    // footprint into open water where they would read as a floating boulder.
+    const cliffs = rocks.filter((r) => r.cliff);
+    expect(cliffs.length).toBeGreaterThan(0);
+    let inland = 0;
+    let seaward = 0;
+    for (const rock of cliffs) {
+      const [x, , z] = rock.position;
+      const r = Math.hypot(x, z);
+      expect(r).toBeLessThanOrEqual(hm.worldRadius);
+      const shore = findShoreRadius(hm, Math.atan2(z, x));
+      if (r < shore) inland++;
+      else seaward++;
+    }
+    expect(inland).toBeGreaterThan(0);
+    expect(seaward).toBeGreaterThan(0);
   });
 
   it('flags waterline-straddling rocks as foam targets for T13', () => {

@@ -340,22 +340,65 @@ describe('§V.48 band limits on the terrain material (the §B.20 shape, again)',
   const PX_PER_RAD = 2560 / ((75 * Math.PI) / 180);
   const metresPerPixel = (dist: number, grazing = 1): number => (dist / PX_PER_RAD) * grazing;
 
-  it('the sand SPARKLE fades before its cells go sub-pixel', () => {
-    // Worst offender in the stack: a binary step() gate and a per-cell RANDOM
-    // facet normal driving pow(dot,26) × sparkleStrength into an ADDITIVE
-    // slot (§V44). Sub-pixel = per-pixel random white over the whole beach.
-    const cellSize = 1 / terrainParams.sparkleDensity;
-    // filter width in CELL units is metres-per-pixel / cell size
-    const resolvedAt = (dist: number, grazing: number): number =>
-      periodResolvedValue(metresPerPixel(dist, grazing) / cellSize);
+  /**
+   * §B.43 — CPU mirror of the sparkle cell sizing in `buildSandNodes`.
+   * `cellTarget = max(pixWorld · cellPixels, minCell)`, quantised down to an
+   * octave. Change one side, change the other (the noise.ts/noiseCpu.ts and
+   * shoreRunup.ts conventions).
+   */
+  const sparkleCellSize = (pixWorld: number): number => {
+    const p = terrainParams;
+    const target = Math.max(pixWorld * p.sparkleCellPixels, p.sparkleMinCell);
+    return Math.max(2 ** Math.floor(Math.log2(target)), p.sparkleMinCell);
+  };
 
-    // close up, on the beach you are standing on: fully present
-    expect(resolvedAt(30, 1)).toBeGreaterThan(0.9);
-    // the case that actually speckles — a beach 300 m off, seen at 10× grazing
-    // from a deck. Must be GONE, not merely dimmed.
-    expect(resolvedAt(300, 10)).toBe(0);
-    // and gone head-on well before the island itself stops being drawn
-    expect(resolvedAt(1200, 1)).toBe(0);
+  it('the sand SPARKLE holds a fixed PIXEL size at every distance (§B.43)', () => {
+    // THE DEFECT: cells used to be world-locked at 1/sparkleDensity = 0.167 m,
+    // which is ~11 px from the deck (fat bright dots — the user's "dense
+    // speckle of small bright dots") and a quarter of a pixel at 300 m (a
+    // per-pixel coin flip on a binary step — stipple). ONE world size cannot
+    // be right at both ends. Sizing the cell from the pixel's own footprint
+    // is what makes it right at all of them, so this is no longer a "fades
+    // before it aliases" test — the cells CANNOT go sub-pixel by construction.
+    const p = terrainParams;
+    // every viewing case in the reports, from standing on the sand to a beach
+    // a kilometre off seen at grazing incidence from a deck
+    const cases: [number, number][] = [
+      [3, 1], [30, 1], [30, 10], [120, 4], [300, 10], [1200, 1], [1200, 10],
+    ];
+    for (const [dist, grazing] of cases) {
+      const pixWorld = metresPerPixel(dist, grazing);
+      const cellPix = sparkleCellSize(pixWorld) / pixWorld;
+      // the octave quantisation makes this a sawtooth between cellPixels and
+      // half of it — i.e. 1.3-2.6 px at the shipped 2.6. Never a fat blob,
+      // never sub-pixel. The 0.167 m world cell was 11.3 px at [30,1].
+      expect(cellPix).toBeGreaterThanOrEqual(p.sparkleCellPixels * 0.5 - 1e-6);
+      expect(cellPix).toBeLessThanOrEqual(p.sparkleCellPixels + 1e-6);
+    }
+  });
+
+  it('the sand SPARKLE keeps its MEAN across an octave boundary (§V.48b)', () => {
+    // The ocean measured a hard 2.52× step in this term's own mean at every
+    // octave doubling, because a CONSTANT pixel radius against an
+    // octave-quantised cell makes `coverage` = ½π(rad/cell)² discontinuous.
+    // Sizing the glint as a FRACTION of its cell removes it: `coverage`
+    // becomes a function of `radiusPixels / cellPixels` alone, which does not
+    // move with the octave at all. This pins that the sand carries the same
+    // cure, since it is the reason the fix preserves brightness instead of
+    // making the beach flash at visibility rings.
+    const p = terrainParams;
+    const coverageAt = (pixWorld: number): number => {
+      const cellPix = sparkleCellSize(pixWorld) / pixWorld;
+      const radPix = Math.max(cellPix * (p.sparkleRadiusPixels / p.sparkleCellPixels), 0.02);
+      return Math.min(1, (radPix * radPix * Math.PI * 0.5) / Math.max(cellPix * cellPix, 1e-4));
+    };
+    // sweep a full octave of footprint and straddle the boundary
+    const samples: number[] = [];
+    for (let i = 0; i <= 24; i++) samples.push(coverageAt(0.004 * 2 ** (i / 12)));
+    const lo = Math.min(...samples);
+    const hi = Math.max(...samples);
+    // constant to within float noise — no step, and therefore no visible ring
+    expect(hi - lo).toBeLessThan(1e-6);
   });
 
   it('the sand GRAIN fades before its period goes sub-pixel', () => {

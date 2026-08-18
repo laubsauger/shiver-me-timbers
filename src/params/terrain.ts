@@ -488,22 +488,70 @@ export const terrainParams: TerrainParams = registerParams(
     // costs nothing against a blue fill; chroma is what was buying the lurid.
     // base  S 0.566 → 0.394, H 96° → 86°, and darker (V 0.56 → 0.52): a mass
     //       reads by being darker than the beach, not by being greener
-    vegBaseColor: 0x6d8450,
+    /**
+     * ── THE PURPLE PATCHES, AND WHY RECOLOURING ALONE WAS NEVER THE FIX ────
+     *
+     * The user reported "weird purple, sometimes red patches" marching over
+     * the land. It was attributed to a cloud-shadow packing bug, then to the
+     * ocean drawing over sand, then to these three colours being wrong. The
+     * third is closest but still not right, and the difference matters:
+     *
+     * MEASURED IN THE BROWSER, on this branch, at the showcase lagoon. With
+     * the three veg colours forced to BLACK the patches render SATURATED
+     * BLUE; forced to red they render magenta; forced to a bright saturated
+     * yellow-green they render blue-grey. A colour that cannot be removed by
+     * setting the albedo to zero is not the albedo. Also eliminated, each by
+     * disabling it and re-looking: the ocean surface mesh, the clouds, the
+     * caustics bounce fill (`maxAddLight` and `bounceStrength` both zeroed),
+     * the caustics waterline band, the terrain material's `emissiveNode`, its
+     * `outputNode` (aerial haze), and every unnamed mesh in the scene.
+     *
+     * WHAT IT ACTUALLY IS: a GRAZING-ANGLE SPECULAR reflection of the sky.
+     * The tell is view dependence — from directly overhead the patches nearly
+     * vanish, and from the deck at grazing incidence they cover whole
+     * hillsides. Fresnel rises to 1 at grazing, so a dark, not-quite-rough
+     * surface reflects the sky almost perfectly; the sand next to it has the
+     * same specular but an albedo bright enough to swamp it, which is exactly
+     * why forcing `shoreBandHeight = 400` (everything into the sand branch)
+     * made them "vanish" and sent the diagnosis to the colours.
+     *
+     * So the cure is VALUE and ROUGHNESS, not hue and not chroma:
+     * the diffuse term has to out-compete the grazing specular, and the
+     * specular lobe has to be spread. Raised in value from V 0.52 → 0.66 and
+     * given back some chroma, with `vegRoughness` taken to 1.0 below.
+     * Verified on screen at the lagoon: the patches are gone.
+     *
+     * This does NOT contradict ffeb839's lesson that saturation is not a free
+     * axis — it adds the other half. Chroma has a floor set by the sky fill;
+     * VALUE has one set by the grazing specular. `ffeb839` desaturated sand
+     * to S 0.06 and rock to S 0.10 safely because both are bright.
+     */
+    vegBaseColor: 0x89a94e,
     // shade S 0.489 → 0.354, and bluer-green at 104° — the hollows between
     //       canopy clumps are where the sky fill dominates, so this is the one
     //       that must not be allowed to neutralise
-    vegShadeColor: 0x47603e,
+    vegShadeColor: 0x647f3a,
     // dry   S 0.494 → 0.325 and H 65° → 57°: sun-bleached grass is KHAKI. This
     //       is the single most yellow thing on the island and it is the "yellow"
     //       in the report.
-    vegDryColor: 0xa3a06e,
+    vegDryColor: 0xc4b76a,
     vegScale: 0.055,
     // 0.45 of a lurid yellow was the top note of the whole island; at the new
     // khaki it can stay generous without shouting, but the clumps read better
     // when the dry tint is a highlight rather than half the surface
     vegDryStrength: 0.35,
     vegSlopeThreshold: 0.82,
-    vegRoughness: 0.88,
+    /**
+     * 1.0, AND IT IS HALF OF THE PURPLE-PATCH FIX (see the colours above).
+     *
+     * At 0.88 the ground-cover branch still has a tight enough specular lobe
+     * that at GRAZING incidence — which is every view from a deck — Fresnel
+     * lifts the sky's reflection over a dark albedo and the ground turns
+     * blue. Measured in the browser: dropping this to 1.0 alone visibly
+     * desaturates the patches; 1.0 plus the brighter albedo removes them.
+     * Vegetation is the roughest thing on an island anyway.
+     */
+    vegRoughness: 1.0,
 
     grassBlades: 7,
     grassSegments: 3,
