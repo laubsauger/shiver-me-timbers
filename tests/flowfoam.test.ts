@@ -68,6 +68,7 @@ import {
 import { decayFactorPerFrame } from '../src/foam/foamMath';
 import { flowFoamParams } from '../src/params/flowfoam';
 import { foamParams } from '../src/params/foam';
+import { oceanSurfaceParams } from '../src/params/oceanSurface';
 import { waterlineFromBlueprint } from '../src/sea-physics/hullContact';
 import { buildGalleonBlueprint } from '../src/ship/shipBlueprint';
 import { getParamsEntry } from '../src/params/registry';
@@ -1078,7 +1079,10 @@ describe('wake field in the track frame (bow vs aft, §V10 follow-up)', () => {
     // The rate is trail x breakup, but breakup COARSENS with age: fresh water
     // carries the raw gappy noise, old water is blended toward the noise's mean
     // so it reads as a soft wash instead of high-frequency stipple.
-    const fresh: [number, number] = [1.2, STRAIGHT.z - 3];
+    // strictly INSIDE the mound: with `moundFill` at 1.0 the ridge is symmetric,
+    // so its aft edge sits exactly at moundLead − moundThick and a probe on that
+    // boundary reads zero for reasons that have nothing to do with breakup
+    const fresh: [number, number] = [1.2, STRAIGHT.z - 1.5];
     const freshAge = projectOnTrack(STRAIGHT.points, fresh[0], fresh[1]).age;
     const ct = smooth(0, WP.breakupSmoothAge, freshAge);
     const coarsened =
@@ -1137,6 +1141,16 @@ describe('wake field in the track frame (bow vs aft, §V10 follow-up)', () => {
 // FOAM — white on top of an otherwise undisturbed sea, i.e. a decal. These
 // tests pin the two mechanisms that make it a wake (src/flowfoam/slickMath.ts).
 const SP: SlickParams = { ...flowFoamParams };
+/**
+ * The Kelvin trains ALONE. The shed-eddy street is a second, independent
+ * mechanism in the same slope channel, and it is asymmetric about the
+ * centreline by construction (port and starboard shed half a period apart —
+ * that alternation IS the von Kármán signature), so it legitimately breaks the
+ * "propagates dead astern on the axis" property the wave trains must have.
+ * Isolating it is how these tests keep pinning the stationary-phase solve
+ * rather than the sum — the same idiom as `noStreet` and `flat` above.
+ */
+const SP_WAVES: SlickParams = { ...SP, eddySlope: 0 };
 
 describe('capillary-damping lane (the glassy track, §V10 follow-up)', () => {
   it('THE CLAIM: the lane follows the TRACK, not the live heading', () => {
@@ -1366,6 +1380,7 @@ describe('transverse Kelvin waves (λ = 2πv²/g, the speed-dependent half)', ()
     // half-width just outside the cusp. Past that, exactly nothing.
     const clear = d * TAN * (1 + flowFoamParams.divOuterFade) + 0.5;
     const out = slickFieldCpu(s.points, clear, s.z - d, HULL, SP, 6, TEXEL);
+    // …and that stays true of the STREET too: it obeys the same Kelvin envelope
     expect(out.slopeX).toBe(0);
     expect(out.slopeZ).toBe(0);
     // Sailing due north (fwd = +z), so the transverse slope is very nearly
@@ -1375,13 +1390,13 @@ describe('transverse Kelvin waves (λ = 2πv²/g, the speed-dependent half)', ()
     // the centreline, so the crests correctly bow backward toward the cusp.
     // That small lateral component IS the curvature, and pinning it to zero
     // would pin the approximation instead of the physics.
-    const on = slickFieldCpu(s.points, 2, s.z - d, HULL, SP, 6, TEXEL);
+    const on = slickFieldCpu(s.points, 2, s.z - d, HULL, SP_WAVES, 6, TEXEL);
     const tT = kelvinBranchesCpu(2 / d).tT;
     expect(Math.abs(on.slopeZ)).toBeGreaterThan(0);
     expect(Math.abs(on.slopeX) / Math.abs(on.slopeZ)).toBeCloseTo(tT, 6);
     expect(tT).toBeLessThan(0.06); // …and it really is a small bow, not a fan
     // on the centreline it collapses to purely along the track (tT → 0)
-    const axis = slickFieldCpu(s.points, 0, s.z - d, HULL, SP, 6, TEXEL);
+    const axis = slickFieldCpu(s.points, 0, s.z - d, HULL, SP_WAVES, 6, TEXEL);
     expect(Math.abs(axis.slopeX)).toBeLessThan(Math.abs(axis.slopeZ) * 1e-4);
   });
 });
@@ -1448,7 +1463,7 @@ describe('divergent (cusp) crests — THE BOW WAVE (user, 3rd report)', () => {
     // centreline: transverse only (the divergent branch is band-gated out
     // there — its wavelength goes to zero, which is the singularity the gate
     // exists to make harmless)
-    const onAxis = slickFieldCpu(s.points, 0, s.z - 60, HULL, SP, 7, TEXEL);
+    const onAxis = slickFieldCpu(s.points, 0, s.z - 60, HULL, SP_WAVES, 7, TEXEL);
     expect(Math.abs(onAxis.slopeX)).toBeLessThan(Math.abs(onAxis.slopeZ) * 0.05);
     // on the cusp line the propagation has a large lateral component
     const d = 60;
@@ -1561,7 +1576,10 @@ describe('the bow mound as a SURFACE (user: "water pushed forward")', () => {
     // three disagree about when the bow is working. User wants spray "whenever
     // we actually hit it", not on a throttle value.
     const head: TrackSample = { x: 0, z: 0, fx: 0, fz: 1, speed: 8, age: 0, dist: 0 };
-    const probe = flowFoamParams.moundLead - flowFoamParams.moundThick;
+    // half a thickness aft of the crest — inside the ridge on BOTH sides of it.
+    // The full `moundThick` is now the exact aft edge (`moundFill` = 1.0, a
+    // symmetric ridge), and a boundary probe tests the boundary, not the drive.
+    const probe = flowFoamParams.moundLead - flowFoamParams.moundThick * 0.5;
     const slope = (drive: number) =>
       Math.hypot(...(Object.values(bowSlopeCpu(head, 0, probe, drive, SP, TEXEL)) as number[]));
     const foam = (drive: number) => bowMoundCpu(head, 0, probe, drive, WP);
@@ -1854,5 +1872,211 @@ describe('bow wake visibility: the emitter must be in the water', () => {
     expect(keep(feature * (flowFoamParams.slickBandCut + 0.5))).toBe(0);
     // and the yardstick must never collapse back onto the storage grid
     expect(feature).toBeGreaterThan(texel);
+  });
+});
+
+/**
+ * §B — "the wake still needs another level of influence on our water shader so
+ * that it actually DISTURBS the surface… eddy currents and swirls, but not in a
+ * super high-frequency noise way, bigger swirls… an actual disturbance that
+ * correlates to the shape of our boat."
+ *
+ * Measured before this landed: the `.ba` slope channel carried the bow-mound
+ * ridge and the two Kelvin trains and nothing else — three regular,
+ * parallel-crested wave trains — while every TURBULENT feature in the model
+ * (stern churn, the shed vortex street) wrote to the albedo only. The water the
+ * hull actually stirred was paint on an undisturbed surface, which is why no
+ * amount of tuning ever made it read as disturbance.
+ */
+describe('the shed eddies: the vortex street as a surface', () => {
+  const EDDY_HULL: WakeHull = { length: 38.5, beam: 8.5 };
+  const eddySail = (speed: number, seconds: number) => {
+    const t = createWakeTrack();
+    const pose = { x: 0, z: 0, fx: 0, fz: 1, speed };
+    for (let i = 0; i < seconds / DT; i++) {
+      pose.z += speed * DT;
+      advanceTrack(t, pose, DT, CFG);
+    }
+    return { t, pose, points: trackPoints(t, pose) };
+  };
+
+  it('STAYS WHERE IT WAS SHED — the whole reason the phase is odometer-anchored', () => {
+    // A rate integrates; a STATE does not. `dist` is measured to the live
+    // cutwater, so it grows every frame at a fixed patch of water: anything
+    // phased by it marches astern at the ship's own speed. For foam that smears
+    // harmlessly. For a slope it would slide a regular pattern across the sea —
+    // which is the lattice artefact the ocean spent a whole round removing, and
+    // it would read as WORSE than no eddies at all.
+    //
+    // `odo − dist` is the odometer reading when that water was passed: both
+    // terms grow by the same `moved`, so it is CONSTANT at a fixed world point.
+    const speed = 6;
+    const a = eddySail(speed, 40);
+    const probe = { x: 4, z: a.pose.z - 40 };
+    const before = slickFieldCpu(a.points, probe.x, probe.z, EDDY_HULL, SP, speed, TEXEL, a.t.odo);
+    // sail on for three more seconds and look at the SAME patch of water
+    for (let i = 0; i < 3 / DT; i++) {
+      a.pose.z += speed * DT;
+      advanceTrack(a.t, a.pose, DT, CFG);
+    }
+    const after = slickFieldCpu(
+      trackPoints(a.t, a.pose),
+      probe.x,
+      probe.z,
+      EDDY_HULL,
+      SP,
+      speed,
+      TEXEL,
+      a.t.odo,
+    );
+    const dirOf = (f: { slopeX: number; slopeZ: number }) => {
+      const m = Math.hypot(f.slopeX, f.slopeZ);
+      return [f.slopeX / m, f.slopeZ / m];
+    };
+    const [bx, bz] = dirOf(before);
+    const [ax, az] = dirOf(after);
+    // it decays IN PLACE: same direction, smaller. A marching street would
+    // swing the direction right through a sign change in a couple of seconds.
+    expect(bx * ax + bz * az).toBeGreaterThan(0.9);
+    const mBefore = Math.hypot(before.slopeX, before.slopeZ);
+    const mAfter = Math.hypot(after.slopeX, after.slopeZ);
+    expect(mAfter).toBeLessThan(mBefore);
+    // and the amount it decayed is the street's own e-folding time, not drift
+    expect(mAfter / mBefore).toBeCloseTo(Math.exp(-3 / flowFoamParams.vortexDecay), 1);
+  });
+
+  it('is CONTINUOUS across the centreline — both cores, or it is a 1-px line', () => {
+    // Taking only the core on the query point's own side leaves a step exactly
+    // where `latSign` flips. The ocean differentiates this field in screen
+    // space, so a step is a bright line down the middle of the wake (§V38) —
+    // the same defect the divergent train's outer feather exists to prevent.
+    const speed = 6;
+    const s = eddySail(speed, 40);
+    const at = (lat: number) =>
+      slickFieldCpu(s.points, lat, s.pose.z - 55, EDDY_HULL, SP, speed, TEXEL, s.t.odo);
+    const eps = 1e-3;
+    const port = at(-eps);
+    const stbd = at(+eps);
+    // the two sides must agree in the limit, to the width of the step we took
+    expect(Math.abs(port.slopeX - stbd.slopeX)).toBeLessThan(1e-4);
+    expect(Math.abs(port.slopeZ - stbd.slopeZ)).toBeLessThan(1e-4);
+  });
+
+  it('is ASYMMETRIC port/starboard — that alternation IS the von Kármán street', () => {
+    // A symmetric pair would be two parallel furrows, not a shed street. The
+    // port line lags the starboard one by half a period, so a point abeam of a
+    // starboard core sits BETWEEN two port ones. This is the property that
+    // makes the wake read as shed turbulence rather than as more wave train.
+    const speed = 6;
+    const s = eddySail(speed, 40);
+    const off = (EDDY_HULL.beam / 2) * flowFoamParams.vortexOffset;
+    const at = (lat: number) =>
+      Math.hypot(
+        ...(Object.values(
+          slickFieldCpu(s.points, lat, s.pose.z - 55, EDDY_HULL, SP, speed, TEXEL, s.t.odo),
+        ) as number[]).slice(1),
+      );
+    expect(Math.abs(at(off) - at(-off))).toBeGreaterThan(1e-4);
+  });
+
+  it('SCALE COMES FROM THE HULL, not from a noise field (user: "bigger swirls")', () => {
+    // The user ruled out the cheap answer explicitly — "not in a super
+    // high-frequency noise way". There is deliberately no fbm in this field:
+    // the spacing and the offset are the street's own, both keyed to the beam,
+    // so a different hull gets proportionate eddies without a second tuning.
+    const beam = EDDY_HULL.beam;
+    const coreDiameter = beam * 0.5 * flowFoamParams.eddyRadius * 2;
+    // metres, not centimetres: a core is a good fraction of the beam…
+    expect(coreDiameter).toBeGreaterThan(beam * 0.5);
+    // …and comfortably larger than a texel, so §V.48 never has to engage
+    expect(coreDiameter).toBeGreaterThan(TEXEL * flowFoamParams.waveBandHigh);
+    // spacing is the street's, and it is the same order as the beam
+    expect(flowFoamParams.vortexSpacing).toBeGreaterThan(beam * 0.5);
+    expect(flowFoamParams.vortexSpacing).toBeLessThan(beam * 4);
+  });
+
+  it('BOUNDED AT SOURCE: two cores, so 2 × eddySlope and never a clamp', () => {
+    // §V44 by construction. 2u·e^(−u²) over its own extremum peaks at exactly
+    // 1, so one core is eddySlope and the street cannot exceed twice that
+    // wherever the two happen to reinforce.
+    const speed = 7;
+    const s = eddySail(speed, 40);
+    const waves: SlickParams = { ...SP, transSlope: 0, divSlope: 0 };
+    let peak = 0;
+    for (let lat = -25; lat <= 25; lat += 0.25) {
+      for (let d = 5; d < 140; d += 0.5) {
+        const f = slickFieldCpu(s.points, lat, s.pose.z - d, EDDY_HULL, waves, speed, TEXEL, s.t.odo);
+        peak = Math.max(peak, Math.hypot(f.slopeX, f.slopeZ));
+      }
+    }
+    expect(peak).toBeGreaterThan(0); // it is actually there
+    expect(peak).toBeLessThanOrEqual(2 * flowFoamParams.eddySlope + 1e-9);
+  });
+});
+
+/**
+ * §B — "too solid white… it should only do that on the leading edges of this
+ * wake, and not just stay constantly solid" (docs/bugs/bug-wake-solid-white.png).
+ */
+describe('the wake must not composite as a solid sheet', () => {
+  it('the trail coverage profile STRADDLES the dissolve gate', () => {
+    // The ocean's dissolve gate is the only thing giving the wake interior any
+    // spatial structure: it thresholds coverage per texel at residueKneeLow +
+    // U[0, erodeDepth], so coverage above the TOP of that band survives
+    // everywhere and renders flat. The trail used to sit entirely above it —
+    // measured 0.79 at 5 m astern, 0.56 at 20 m, 0.34 at 80 m, all saturated —
+    // so the wake was one sheet with breakup HOLES punched in it rather than
+    // water thinning behind a hull.
+    const ceiling = foamParams.residueKneeLow + foamParams.erodeDepth;
+    const floor = foamParams.residueKneeLow + foamParams.erodeDepth / 2;
+    const speed = 6;
+    const t = createWakeTrack();
+    const pose = { x: 0, z: -20, fx: 0, fz: 1, speed };
+    const decay = decayFactorPerFrame(flowFoamParams.decayHalfLife, DT);
+    let cov = 0;
+    let ms = 0;
+    const marks = [5, 20, 80];
+    const got: Record<number, number> = {};
+    while (pose.z < 120) {
+      pose.z += speed * DT;
+      advanceTrack(t, pose, DT, CFG);
+      ms = approachExp(ms, speed, DT, flowFoamParams.moundLag);
+      const pts = trackPoints(t, pose);
+      if (pts.length < 2) continue;
+      cov = Math.min(1, cov * decay + wakeRateCpu(pts, 0, 0, HULL, WP, ms) * DT);
+      for (const m of marks) if (got[m] === undefined && pose.z >= m) got[m] = cov;
+    }
+    // the LEADING edge is allowed to read solid — that is what the user asked
+    // to keep ("only do that on the leading edges")
+    expect(got[5]).toBeGreaterThan(ceiling);
+    // …and the interior must fall THROUGH the gate, or there is no gradient
+    expect(got[20]).toBeLessThan(got[5]);
+    expect(got[80]).toBeLessThan(ceiling);
+    expect(got[80]).toBeGreaterThan(floor * 0.5); // still present, just thin
+  });
+
+  it('the wake has its own albedo, clear of the bloom threshold', () => {
+    // Sharing the whitecap colour was wrong twice: a ship's churned track is
+    // aerated green water, not sea-spray white, and at linear luminance 0.905
+    // it sat within a few percent of the bloom crossing (threshold 1.0
+    // display-referred ÷ exposure 1.1 = 0.909) at every sky colour. Which side
+    // of the knee the wake landed on was being decided by the sky — which is
+    // the mechanism behind "depending on the sun angle it's too much".
+    const lum = (hex: string) => {
+      const n = parseInt(hex.slice(1), 16);
+      const c = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => {
+        const u = v / 255;
+        return u <= 0.04045 ? u / 12.92 : Math.pow((u + 0.055) / 1.055, 2.4);
+      });
+      return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    };
+    const wake = lum(oceanSurfaceParams.wakeFoamColor);
+    expect(wake).toBeLessThan(lum(oceanSurfaceParams.foamColor) * 0.75);
+    // the ceiling of the foam light response is (lightFloor + 0.1) + 0.6·lightGain
+    const peakLight =
+      oceanSurfaceParams.lightFloor + 0.1 + oceanSurfaceParams.lightGain * 0.6;
+    expect(wake * peakLight).toBeLessThan(0.909);
+    // …and it is still water, not mud: it must read lighter than the sea it sits on
+    expect(wake).toBeGreaterThan(lum(oceanSurfaceParams.deepColor));
   });
 });

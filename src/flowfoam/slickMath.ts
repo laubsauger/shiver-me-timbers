@@ -84,6 +84,15 @@ export const KELVIN_TAN_MAX = 12;
 /** r = |lateral| / dist at the cusp line = tan(19.4712°) = 1/(2√2) */
 export const KELVIN_R_MAX = 1 / (2 * Math.SQRT2);
 
+/**
+ * Extremum of |2u·e^(−u²)| = √2·e^(−½). Dividing by it normalises that profile
+ * to a peak of exactly 1, which is how both surface features here are bounded
+ * AT SOURCE (§V44) rather than by a clamp: the bow-mound ridge across its crest
+ * line, and the shed eddies' radial dimple. Shared so the two cannot drift, and
+ * so slickInjection's TSL twin divides by the same number (§V.33).
+ */
+export const RIDGE_PEAK = Math.SQRT2 * Math.exp(-0.5);
+
 /** the two stationary-phase branches at a point, both as tan θ */
 export interface KelvinBranches {
   /** √(1 − 8r²) — zero exactly ON the cusp, clamped to 0 outside the wedge */
@@ -159,6 +168,12 @@ export interface SlickParams {
   waveBandLow: number;
   waveBandHigh: number;
   moundSlope: number;
+  eddySlope: number;
+  eddyRadius: number;
+  vortexOffset: number;
+  vortexSpacing: number;
+  vortexDecay: number;
+  sternOnset: number;
   moundLead: number;
   moundSweep: number;
   moundSpan: number;
@@ -215,6 +230,14 @@ export function slickFieldCpu(
    * real write, since the GPU always knows its own texel.
    */
   texel = 0,
+  /**
+   * Cutwater odometer (m) — `track.odo`. `odo − dist` is the odometer reading
+   * when this water was passed and is CONSTANT at a fixed world point, which is
+   * what anchors the shed eddies. 0 only shifts the street's phase origin, so
+   * analysis may omit it; a real write must pass the live value or the CPU and
+   * GPU streets sit at different phases.
+   */
+  odoHead = 0,
 ): SlickField {
   const n = projectOnTrack(points, wx, wz);
   if (!n.found) return ZERO;
@@ -343,9 +366,55 @@ export function slickFieldCpu(
   const cD = 1 / Math.sqrt(1 + br.tD * br.tD);
   const sD = br.tD * cD;
 
+  // --- 3. SHED EDDIES: the vortex street as a SURFACE, not as paint --------
+  // GPU twin: the eddy block in slickInjection.slickFieldNode. The street was
+  // already modelled for the FOAM (wakeMath: a von Kármán pair, port and
+  // starboard π out of phase, shed at the transom corners `vortexSpacing`
+  // apart) and none of it reached the normal. Nothing here is invented: the
+  // spacing, the offset and the decay are the street's own, so the scale comes
+  // from the hull rather than from a noise field.
+  //
+  // BOTH cores are summed. Taking only the near-side one leaves a step across
+  // the centreline where the lateral sign flips, and a step in a field the
+  // ocean differentiates is a 1-px line (§V38).
+  const onset = smoothstepCpu(0, Math.max(p.sternOnset, 1e-6), d - hull.length);
+  const coreR = Math.max(halfBeam * p.eddyRadius, 1e-6);
+  const vOff = halfBeam * p.vortexOffset;
+  const odo = odoHead - d;
+  const latS = ay * sgn; // SIGNED lateral, in the track's own frame
+  const rax = n.fz; // unsigned right = (fz, −fx)
+  const raz = -n.fx;
+  const core = (off: number, phase: number): [number, number] => {
+    const qE = (odo - phase) / Math.max(p.vortexSpacing, 1e-6);
+    const dAlong = (qE - Math.floor(qE + 0.5)) * p.vortexSpacing;
+    const dAcross = latS - off;
+    const rE = Math.hypot(dAlong, dAcross);
+    const uE = rE / coreR;
+    // 2u·e^(−u²) over its own extremum: one core peaks at exactly eddySlope
+    const prof = (2 * uE * Math.exp(-uE * uE)) / RIDGE_PEAK;
+    const inv = prof / Math.max(rE, 1e-6);
+    return [(n.fx * dAlong + rax * dAcross) * inv, (n.fz * dAlong + raz * dAcross) * inv];
+  };
+  const cS = core(vOff, 0);
+  const cP = core(-vOff, p.vortexSpacing * 0.5);
+  // §V48 against the FEATURE (a whole core), never the texel. §V48(b): the mean
+  // is ZERO and here the naive answer is the correct one — a radial dimple's
+  // slope integrates to zero by symmetry, so fading to zero IS fading to mean.
+  const bandE =
+    texel > 0
+      ? smoothstepCpu(p.waveBandLow, Math.max(p.waveBandHigh, p.waveBandLow + 1e-6), (2 * coreR) / texel)
+      : 1;
+  const magE =
+    p.eddySlope *
+    common *
+    onset *
+    innerFade * // nothing aft may pan out past the Kelvin wedge
+    Math.exp(-a / Math.max(p.vortexDecay, 1e-6)) *
+    bandE;
+
   // aft unit vector = −forward; both trains propagate away from the hull
-  const slopeX = magT * (-n.fx * cT + rx * sT) + magD * (-n.fx * cD + rx * sD);
-  const slopeZ = magT * (-n.fz * cT + rz * sT) + magD * (-n.fz * cD + rz * sD);
+  const slopeX = magT * (-n.fx * cT + rx * sT) + magD * (-n.fx * cD + rx * sD) + magE * (cS[0] + cP[0]);
+  const slopeZ = magT * (-n.fz * cT + rz * sT) + magD * (-n.fz * cD + rz * sD) + magE * (cS[1] + cP[1]);
   return { slick, slopeX, slopeZ };
 }
 
@@ -402,7 +471,7 @@ export function bowSlopeCpu(
     : 1;
   const lat = 1 - smoothstepCpu(0, Math.max(p.moundSpan, 1e-6), aside);
   const mag =
-    (p.moundSlope * gate * sf * lat * band * (-2 * u * Math.exp(-u * u))) / 0.857763884960707;
+    (p.moundSlope * gate * sf * lat * band * (-2 * u * Math.exp(-u * u))) / RIDGE_PEAK;
   // ∇(crest distance) = forward + moundSweep·(lateral, signed), normalised
   const gx = head.fx + p.moundSweep * head.fz * sgn;
   const gz = head.fz - p.moundSweep * head.fx * sgn;

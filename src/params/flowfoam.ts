@@ -81,6 +81,31 @@ export interface FlowFoamParams {
   tailFade: number;
   /** feather distance (m) ahead of the cutwater over which wake is clipped to 0 */
   bowClip: number;
+  /**
+   * ONE scale on every TRAILING foam feature (cutwater core, Kelvin arms, hull
+   * shoulder, stern churn, shed vortices) — deliberately not on the bow mound,
+   * which is dosed on its own arithmetic (see `moundIntensity`).
+   *
+   * WHY IT EXISTS. The ocean's dissolve gate thresholds coverage per texel at
+   * `residueKneeLow + U[0, erodeDepth]` = 0.005 + U[0, 0.22], so coverage ABOVE
+   * ~0.23 survives everywhere and coverage below it survives in proportion.
+   * That gate is the only thing giving the wake interior any spatial structure,
+   * and the trail was sitting entirely above it: measured on the centreline at
+   * 6 m/s, coverage ran 0.79 at 5 m astern, 0.56 at 20 m, 0.34 at 80 m — every
+   * one of them past the top of the gate, so all of them rendered at full
+   * survival and the wake read as one flat sheet with breakup HOLES punched in
+   * it rather than as water thinning behind the hull (docs/bugs/
+   * bug-wake-solid-white.png; user: "too solid white… should only do that on
+   * the leading edges, not just stay constantly solid").
+   *
+   * Scaling the trail so the profile STRADDLES the gate is what turns that
+   * single sheet into a gradient: the leading edges stay above it and read
+   * bright, the interior falls through it and thins. Same lesson as
+   * `moundIntensity` ("aim for the middle of the gate, not the top"), and the
+   * same lesson the sim foam learned in its two-clock split — the lever was
+   * attenuating the residue, not brightening the breaker.
+   */
+  trailInject: number;
 
   // --- bow mound: the displacement bow wave, FORWARD of the stem ---
   /**
@@ -307,6 +332,34 @@ export interface FlowFoamParams {
   /** texels per wavelength at which it is at full amplitude */
   waveBandHigh: number;
 
+  // --- shed eddies as SURFACE: the vortex street, deforming instead of painting
+  /**
+   * Peak world SLOPE of one shed eddy. User: the wake "needs another level of
+   * influence on our water shader so that it actually disturbs the surface…
+   * eddy currents and swirls, but not in a super high-frequency noise way,
+   * something rather more realistic, bigger swirls".
+   *
+   * THIS CONNECTS AN EXISTING FEATURE RATHER THAN ADDING ONE. The shed vortex
+   * street was already modelled — a von Kármán pair alternating port/starboard
+   * π out of phase, shed at the transom corners, `vortexSpacing` metres apart —
+   * and it was thrown at the ALBEDO only. Measured before this landed: the
+   * `.ba` slope channel carried the bow-mound ridge and the two Kelvin trains
+   * and nothing else, i.e. three regular parallel-crested wave trains, while
+   * every turbulent feature in the model was paint on an undisturbed surface.
+   * That is why no amount of tuning made the wake "disturb" anything.
+   *
+   * The scale therefore comes from the hull, not from a texture: `vortexSpacing`
+   * is 11 m against an 8.5 m beam. There is deliberately no fbm here — swirls
+   * this size ARE the answer to "not high-frequency noise".
+   */
+  eddySlope: number;
+  /**
+   * Eddy core radius, × the hull's half-beam (§V.66 — a feature scaled by its
+   * own dimension, so a different hull gets proportionate eddies for free).
+   * The core is a Gaussian surface dimple; its slope peaks at 0.707 radii out.
+   */
+  eddyRadius: number;
+
   // --- bow mound as SURFACE, not foam ---------------------------------------
   /** peak world SLOPE of the displacement bow wave — the water heaped ahead of
    * the stem. `moundIntensity` paints the foam on it; this is the mound
@@ -349,6 +402,10 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     trackLife: 200,
     tailFade: 0.35,
     bowClip: 0.8,
+    // 0.45: takes the centreline profile from 0.79/0.56/0.34 (all saturated) to
+    // 0.36/0.25/0.15 — the leading edge still clears the gate outright, the
+    // interior lands inside it and varies
+    trailInject: 0.45,
     // dose = intensity · thickness / 2 (see moundIntensity): 0.10 · 3.2 / 2 =
     // 0.16 at the crest, against a 0.005 + U[0, 0.22] dissolve gate.
     // 0.06 → 0.15 → 0.10. The first move fixed an invisible mound (dose 0.042,
@@ -364,13 +421,14 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     moundSweep: 0.9,
     moundSpan: 5.0,
     moundThick: 3.2,
-    // 1.8 → 1.4: the aft face is the half of the mound that overlaps the hull,
-    // so it is pure "white around the ship" and none of the forward read. It
-    // only has to reach the 1.6 m back to the stem; 1.4 × 3.2 = 4.5 m is still
-    // ample, and it halves the strong-white area alongside the forebody
-    // (measured 24 → 12 m² at 6 m/s). The crest dose is untouched — the
-    // integral up to the crest comes only from the LEADING face.
-    moundFill: 1.4,
+    // 3.0 → 1.8 → 1.4 → 1.0, i.e. a SYMMETRIC ridge. The asymmetric aft face
+    // existed to paper over the gap between the crest and a hull the emitter
+    // was buried 3.5 m inside; with the emitter at the true stem that gap is
+    // 1.6 m and the crest's own leading face already covers it. Everything the
+    // fill still added landed alongside the forebody, which is the region the
+    // user photographed as solid white. The crest dose is untouched either way
+    // — the integral up to the crest comes only from the LEADING face.
+    moundFill: 1.0,
     moundLag: 1.1,
     kelvinAngle: 19.47,
     bowIntensity: 0.14,
@@ -428,6 +486,12 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     waveBandLow: 2.5,
     waveBandHigh: 6,
     moundSlope: 0.17,
+    // 0.09 = 66% of the sea's own rms slope (measured 0.1373): clearly present
+    // in the specular without out-shouting the swell the eddies ride on
+    eddySlope: 0.09,
+    // 0.9 x half-beam = 3.8 m cores on the galleon — metres, as asked, and an
+    // order of magnitude above the 0.234 m texel, so §V.48 never engages
+    eddyRadius: 0.9,
   },
   flowFoamParamsMeta(),
 );
@@ -463,6 +527,7 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     trackLife: { min: 1, max: 600, step: 1 },
     tailFade: { min: 0.05, max: 0.9, step: 0.05 },
     bowClip: { min: 0.1, max: 8, step: 0.1 },
+    trailInject: { min: 0, max: 2, step: 0.05 },
     moundIntensity: { min: 0, max: 5, step: 0.05 },
     moundLead: { min: 0.1, max: 10, step: 0.1 },
     moundSweep: { min: 0, max: 4, step: 0.05 },
@@ -526,5 +591,7 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     waveBandLow: { min: 1, max: 8, step: 0.1 },
     waveBandHigh: { min: 2, max: 20, step: 0.1 },
     moundSlope: { min: 0, max: 0.8, step: 0.005 },
+    eddySlope: { min: 0, max: 0.5, step: 0.005 },
+    eddyRadius: { min: 0.2, max: 4, step: 0.05 },
   };
 }

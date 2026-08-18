@@ -134,10 +134,27 @@ export interface WakeTrack {
   lastZ: number;
   /** false until the first advance seeds lastX/lastZ */
   primed: boolean;
+  /**
+   * ODOMETER — total arclength (m) the cutwater has ever travelled.
+   *
+   * THE ANCHOR FOR ANYTHING THAT MUST STAY WHERE IT WAS SHED. A sample's `dist`
+   * is measured to the LIVE cutwater, so at a fixed patch of water it grows
+   * every frame; anything phased by it marches astern at the ship's own speed.
+   * That is correct for a RATE, which gets integrated over time, and wrong for
+   * a STATE. `odo − dist` is the odometer reading when that water was passed,
+   * and it is CONSTANT at a fixed world point — both terms grow by the same
+   * `moved` each frame — so a shed eddy phased by it stays put and decays in
+   * place instead of sliding.
+   *
+   * This is the `dist`-vs-`age` distinction in the header taken one step
+   * further: `dist` is geometry measured from the ship, `age` is elapsed time,
+   * and this is position measured from a fixed origin.
+   */
+  odo: number;
 }
 
 export function createWakeTrack(): WakeTrack {
-  return { samples: [], lastX: 0, lastZ: 0, primed: false };
+  return { samples: [], lastX: 0, lastZ: 0, primed: false, odo: 0 };
 }
 
 /**
@@ -258,6 +275,9 @@ export function advanceTrack(t: WakeTrack, pose: TrackPose, dt: number, cfg: Tra
   if (moved > cfg.spacing * cfg.capacity) {
     t.samples.length = 0;
   }
+  // the odometer advances with the hull whether or not a sample is laid — it is
+  // a property of the ship's path, not of the history's resolution
+  t.odo += moved;
 
   for (const s of t.samples) {
     s.age += dt;

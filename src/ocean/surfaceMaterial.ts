@@ -199,6 +199,8 @@ export function buildOceanSurfaceMaterial(
     new THREE.Vector2(sp.sunHorizonFadeLow, sp.sunHorizonFadeHigh),
   );
   const uFoam = uniform(color(sp.foamColor));
+  const uWakeFoam = uniform(color(sp.wakeFoamColor));
+  const uWakeFoamDepth = uniform(sp.wakeFoamDepth);
   const uSssStrength = uniform(sp.sssStrength);
   const uSssPower = uniform(sp.sssPower);
   const uSssAmbient = uniform(sp.sssAmbient);
@@ -1374,6 +1376,17 @@ export function buildOceanSurfaceMaterial(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
       let foamMask: any = float(0);
       if (foam) foamMask = foam.shadingNode(worldXZ);
+      // §V.10 THE WAKE IS NOT A WHITECAP, and it is kept on its own mask all
+      // the way to the composite for that reason. It used to be `max`ed into
+      // the whitecap mask on the line it was built, which forced two different
+      // materials through one colour: sea-spray white (#eef6f2, linear
+      // luminance 0.905) for water that is actually aerated green churn beside
+      // a wooden hull. Two user reports came out of that single merge — "too
+      // white… depending on the sun angle it's too much" (that luminance sits
+      // within a few percent of the bloom threshold at every sky colour) and
+      // "too solid white… should only do that on the leading edges".
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+      let wakeAlpha: any = float(0);
       if (flowFoam) {
         // wake foam runs through the same crackle/mottle detail blend but
         // slightly damped — bow/stern trails read softer than whitecaps
@@ -1381,7 +1394,20 @@ export function buildOceanSurfaceMaterial(
           flowFoam.foamSampleNode(worldXZ).clamp(0, 1),
           worldXZ,
         );
-        foamMask = foamMask.max(wakeMask.mul(0.85));
+        // OPTICAL DEPTH, not a hard alpha (§B, the sim-foam lesson): a straight
+        // mask saturates, so every texel the wake covers reached full opacity
+        // and the track rendered as one flat sheet with breakup holes punched
+        // through it instead of water thinning astern. 1 − e^(−density·cov)
+        // approaches 1 without ever reaching it, so coverage goes on modulating
+        // brightness across its whole range and the leading edges — where
+        // coverage genuinely is highest — are the only places that read solid.
+        wakeAlpha = wakeMask
+          .mul(0.85)
+          .mul(uWakeFoamDepth)
+          .negate()
+          .exp()
+          .oneMinus()
+          .clamp(0, 1);
       }
       // foam sits in the same light as the water (wrap floor+gain). Scalar
       // light only — sunTint here would double the warm tint (foamTintNode
@@ -1440,8 +1466,18 @@ export function buildOceanSurfaceMaterial(
       const foamCol = foamBase
         .mul(foamTintNode())
         .mul(ndl.mul(uLightGain.mul(0.6)).mul(shade).add(uLightFloor.add(0.1)));
-      foamAmount.assign(foamMask.clamp(0, 1).mul(0.9).mul(foamGain));
-      col.assign(mix(col, foamCol, foamAmount));
+      // whitecaps first, then the wake over them in ITS own colour. Two
+      // composites rather than one over a `max`, which is what lets the two
+      // carry different materials; `foamAmount` still reports the union so the
+      // pigment floor and the underwater tint below see all the foam there is.
+      const whitecapAmount = foamMask.clamp(0, 1).mul(0.9).mul(foamGain);
+      col.assign(mix(col, foamCol, whitecapAmount));
+      const wakeCol = uWakeFoam
+        .mul(foamTintNode())
+        .mul(ndl.mul(uLightGain.mul(0.6)).mul(shade).add(uLightFloor.add(0.1)));
+      const wakeAmount = wakeAlpha.mul(foamGain);
+      col.assign(mix(col, wakeCol, wakeAmount));
+      foamAmount.assign(whitecapAmount.max(wakeAmount).clamp(0, 1));
     } else {
       const foamMask = smoothstep(uFoamThreshold, uFoamThreshold.sub(0.35), jacobian);
       foamAmount.assign(foamMask.mul(0.85).mul(foamGain));
@@ -1716,6 +1752,8 @@ export function buildOceanSurfaceMaterial(
       sp.sunHorizonFadeHigh,
     );
     (uFoam.value as THREE.Color).set(sp.foamColor);
+    (uWakeFoam.value as THREE.Color).set(sp.wakeFoamColor);
+    uWakeFoamDepth.value = sp.wakeFoamDepth;
     uSssStrength.value = sp.sssStrength;
     uSssPower.value = sp.sssPower;
     uSssAmbient.value = sp.sssAmbient;

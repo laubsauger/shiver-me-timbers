@@ -16,14 +16,11 @@
  * term. §V44: |slope| ≤ transSlope and slick ≥ 0 by construction, at SOURCE.
  */
 import { float, smoothstep, uniform, vec2, vec3 } from 'three/tsl';
-import { GRAVITY, KELVIN_R_MAX, KELVIN_TAN_MAX } from './slickMath';
+import { GRAVITY, KELVIN_R_MAX, KELVIN_TAN_MAX, RIDGE_PEAK } from './slickMath';
 import type { FlowFoamParams } from '../params/flowfoam';
 
 /** floor for divisors and smoothstep spans (§V28) */
 const EPS = 1e-6;
-
-/** extremum of −2u·e^(−u²) — normalises the mound slope to exactly ±moundSlope */
-const RIDGE_PEAK = Math.SQRT2 * Math.exp(-0.5);
 
 /**
  * Track-frame inputs, all already computed by the foam pass. Every field is a
@@ -52,6 +49,15 @@ export interface SlickFrame {
   envelope: any;
   /** world size (m) of one texel of the tier being written — the §V48 yardstick */
   texel: any;
+  /**
+   * WORLD-ANCHORED along-track coordinate (m) of this water: the odometer
+   * reading when the cutwater passed it (`track.odo − dist`). Constant at a
+   * fixed world point, which is what lets a shed eddy stay where it was shed —
+   * see wakeTrack.WakeTrack.odo for why `dist` cannot do this job.
+   */
+  odo: any;
+  /** smoothstep(0, sternOnset, dist − hullLength): 0 until the transom passes */
+  onset: any;
 }
 
 /**
@@ -98,6 +104,11 @@ export function createSlickInjector(p: FlowFoamParams) {
   const uWaveBandLow = uniform(p.waveBandLow);
   const uWaveBandHigh = uniform(p.waveBandHigh);
   const uMoundSlope = uniform(p.moundSlope);
+  const uEddySlope = uniform(p.eddySlope);
+  const uEddyRadius = uniform(p.eddyRadius);
+  const uVortexOffset = uniform(p.vortexOffset);
+  const uVortexSpacing = uniform(p.vortexSpacing);
+  const uVortexDecay = uniform(p.vortexDecay);
   const uSpeedThreshold = uniform(p.speedThreshold);
 
   return {
@@ -199,7 +210,70 @@ export function createSlickInjector(p: FlowFoamParams) {
         .mul(bandOf(tD))
         .mul(phaseOf(tD).sin());
 
-      const slope = dirOf(tT).mul(magT).add(dirOf(tD).mul(magD));
+      // --- 3. SHED EDDIES: the vortex street as a SURFACE, not as paint ----
+      // The street was already here and already right — a von Kármán pair
+      // alternating port/starboard π out of phase, shed at the transom corners
+      // `vortexSpacing` apart — and every bit of it went to the ALBEDO. Nothing
+      // rotational ever reached the normal, so the water the hull actually
+      // stirred read as white paint on an undisturbed surface (user: the wake
+      // "really doesn't" disturb the specular). This connects that feature; it
+      // does not invent one, which is also why there is no fbm here and no
+      // scale that did not come from the hull: 11 m spacing, 8.5 m beam.
+      //
+      // Each eddy is a Gaussian surface DIMPLE whose slope is radial, using the
+      // same normalised derivative the bow mound does — so one core peaks at
+      // exactly `eddySlope` and the street at 2× that, by construction rather
+      // than by a clamp (§V44 at source; accumulation's ±1 is only a backstop).
+      //
+      // BOTH CORES ARE SUMMED, and that is not an optimisation left on the
+      // table. Evaluating only the core on the query point's own side makes the
+      // field discontinuous across the centreline, where `latSign` flips — and
+      // a step in a field the ocean differentiates in screen space is a 1-px
+      // line (§V38), the same defect the divergent train's outer feather exists
+      // to avoid. Summed, the two counter-rotating cores meet continuously.
+      const coreR = f.halfBeam.mul(uEddyRadius).max(EPS);
+      const vOff = f.halfBeam.mul(uVortexOffset);
+      // SIGNED lateral, and the UNSIGNED right axis to go with it: the street
+      // lives in the track's own frame, not in a per-point mirrored one
+      const latS = f.ay.mul(f.latSign);
+      const rightAbs = vec2(f.fwd.y, f.fwd.x.negate());
+      const core = (off: any, phase: any): any => {
+        const qE = f.odo.sub(phase).div(uVortexSpacing.max(EPS));
+        // q − round(q) ∈ [−½, ½] → signed distance to the NEAREST core
+        const dAlong = qE.sub(qE.add(0.5).floor()).mul(uVortexSpacing);
+        const dAcross = latS.sub(off);
+        const rE = vec2(dAlong, dAcross).length();
+        const uE = rE.div(coreR);
+        // 2u·e^(−u²) over its own extremum: peak exactly 1 at u = 1/√2
+        const prof = uE.mul(2).mul(uE.mul(uE).negate().exp()).div(RIDGE_PEAK);
+        return f.fwd.mul(dAlong).add(rightAbs.mul(dAcross)).div(rE.max(EPS)).mul(prof);
+      };
+      // port lags starboard by half a period — the alternation IS the street
+      const street = core(vOff, float(0)).add(
+        core(vOff.negate(), uVortexSpacing.mul(0.5)),
+      );
+      // §V48 — measured against the FEATURE (a whole core, 2·coreR ≈ 7.6 m at
+      // the shipped radius), never the texel. §V48(b): the mean this fades to
+      // is ZERO, and for once the naive thing is the correct thing — a radial
+      // dimple's slope field integrates to zero by symmetry, so the field's own
+      // mean IS zero. Worth stating because it looks exactly like the mistake
+      // of fading a non-zero-mean field to zero, and it is not one.
+      const bandE = smoothstep(
+        uWaveBandLow,
+        uWaveBandHigh.max(uWaveBandLow.add(EPS)),
+        coreR.mul(2).div(f.texel.max(EPS)),
+      );
+      const magE = uEddySlope
+        .mul(f.sf)
+        .mul(f.envelope)
+        .mul(f.onset)
+        // nothing aft may pan out past the Kelvin wedge — the same envelope
+        // every aft feature obeys, and it is what keeps "outside the V there is
+        // exactly nothing" true of the SURFACE and not just of the foam
+        .mul(innerFade)
+        .mul(f.age.div(uVortexDecay.max(EPS)).negate().exp())
+        .mul(bandE);
+      const slope = dirOf(tT).mul(magT).add(dirOf(tD).mul(magD)).add(street.mul(magE));
       return vec3(slick, slope.x, slope.y);
     },
 
@@ -250,6 +324,11 @@ export function createSlickInjector(p: FlowFoamParams) {
       uWaveBandLow.value = p.waveBandLow;
       uWaveBandHigh.value = p.waveBandHigh;
       uMoundSlope.value = p.moundSlope;
+      uEddySlope.value = p.eddySlope;
+      uEddyRadius.value = p.eddyRadius;
+      uVortexOffset.value = p.vortexOffset;
+      uVortexSpacing.value = p.vortexSpacing;
+      uVortexDecay.value = p.vortexDecay;
       uSpeedThreshold.value = p.speedThreshold;
     },
   };

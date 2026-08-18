@@ -124,8 +124,23 @@ export function createWakeInjector(p: FlowFoamParams) {
   const uTrackLife = uniform(p.trackLife);
   /** capacity-limited track length (m) — the OTHER eviction edge to fade over */
   const uTrackCapDist = uniform(0);
+  /**
+   * Cutwater odometer (m), WRAPPED to one vortex period. `odo − dist` is the
+   * odometer reading when a patch of water was passed, and it is constant at a
+   * fixed world point (both grow by the same `moved` each frame) — that is what
+   * anchors the shed eddies so they stay where they were shed instead of
+   * marching astern with the ship (wakeTrack.WakeTrack.odo).
+   *
+   * Wrapped because the phase is 2π·odo/vortexSpacing: subtracting a whole
+   * number of periods leaves it bit-identical while keeping the uniform small,
+   * so an hour under sail cannot erode float precision. A live `vortexSpacing`
+   * tweak shifts the phase once, on the frame it changes — a debug-slider
+   * discontinuity, not a running error.
+   */
+  const uOdo = uniform(0);
   const uTailFade = uniform(p.tailFade);
   const uBowClip = uniform(p.bowClip);
+  const uTrailInject = uniform(p.trailInject);
   const uMoundIntensity = uniform(p.moundIntensity);
   const uMoundLead = uniform(p.moundLead);
   const uMoundSweep = uniform(p.moundSweep);
@@ -376,6 +391,11 @@ export function createWakeInjector(p: FlowFoamParams) {
           .mul(tail)
           .mul(clip)
           .mul(breakup)
+          // ONE scale on the whole trail so its coverage profile straddles the
+          // ocean's dissolve gate instead of sitting above it — see
+          // params/flowfoam.trailInject. The mound is added AFTER, on its own
+          // dose arithmetic.
+          .mul(uTrailInject)
           .add(mound);
 
         // the water's own response, off the SAME projection. It deliberately
@@ -396,6 +416,9 @@ export function createWakeInjector(p: FlowFoamParams) {
             latSign: select(bestLat.lessThan(0), float(-1), float(1)),
             envelope: liveGate.mul(tail).mul(clip),
             texel,
+            // world-anchored along-track coordinate of THIS water
+            odo: uOdo.sub(d),
+            onset,
           },
           detail,
         );
@@ -505,6 +528,10 @@ export function createWakeInjector(p: FlowFoamParams) {
       }
       uTrackCount.value = count;
       uHead.value.set(pose.x, pose.z, pose.fx, pose.fz);
+      // wrap to one period — see uOdo. Same `p.vortexSpacing` the shader gets
+      // from pushParams() in this very tick, so the two cannot disagree.
+      const period = Math.max(p.vortexSpacing, EPS);
+      uOdo.value = track.odo - Math.floor(track.odo / period) * period;
 
       const maxDist = count >= 2 ? pts[count - 1].dist : 0;
       const bounds = trackBounds(pts.slice(0, count), wakeReachCpu(maxDist, hull, p));
@@ -566,6 +593,7 @@ export function createWakeInjector(p: FlowFoamParams) {
       });
       uTailFade.value = p.tailFade;
       uBowClip.value = p.bowClip;
+      uTrailInject.value = p.trailInject;
       uMoundIntensity.value = p.moundIntensity;
       uMoundLead.value = p.moundLead;
       uMoundSweep.value = p.moundSweep;

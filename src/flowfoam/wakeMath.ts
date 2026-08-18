@@ -118,6 +118,7 @@ export interface WakeParams {
   trackLife: number;
   tailFade: number;
   bowClip: number;
+  trailInject: number;
   wakeNoiseScale: number;
   wakeNoiseContrast: number;
   wakeBreakup: number;
@@ -414,7 +415,10 @@ export function wakeTrailCpu(
   const ahead = (wx - h.x) * h.fx + (wz - h.z) * h.fz;
   const clip = fadeTo(p.bowClip, ahead);
 
-  return (cut + bow + shoulder + stern + vortex) * gate * liveGate * tail * clip;
+  // ONE scale on the whole trail (params/flowfoam.trailInject): the ocean's
+  // dissolve gate is the only thing that gives the wake interior structure, and
+  // the trail was sitting entirely above it, so it rendered as a flat sheet.
+  return (cut + bow + shoulder + stern + vortex) * gate * liveGate * tail * clip * p.trailInject;
 }
 
 /**
