@@ -1046,6 +1046,80 @@ export function buildOceanSurfaceMaterial(
       .mul(uSpecAA.x)
       .add(unresolvedVar.mul(uSlopeVarAa))
       .clamp(0, uSpecAA.y.max(1e-5));
+
+    /**
+     * ── §V.48b THE ONE σ² EVERY SUN TERM USES, and the double count it ends ──
+     *
+     * MEASURED DEFECT (user, tod 15.0, deck framing: "the sun is still
+     * reflecting bright blue in the ocean"). Screenshot A/B at that framing,
+     * scene-linear, post bypassed: killing `glintRoadStrength` AND
+     * `sparkleStrength` removes the entire pale blue-white wash over the
+     * sun-ward half of the sea; road alone reproduces it; sparkle alone is
+     * invisible. So the wash is the ROAD.
+     *
+     * WHY THE ROAD WASHES. `glintVar` used to be `normalVar` — the sum of the
+     * SPECTRAL sub-pixel variance and `specularAaStrength × dFdx(N)`. The dFdx
+     * half is not a variance: over a footprint spanning many wavelengths a
+     * finite difference saturates at the full normal swing whatever the
+     * footprint, and `specularAaMax`'s own docstring measures it at σ² =
+     * 0.41–2.56 against a sea whose ENTIRE mean square slope is 0.0273, i.e.
+     * 15–94× too large. It therefore pinned `normalVar` at its cap everywhere,
+     * and `.min(seaSlopeVar)` then pinned σ² at the sea's TOTAL slope variance
+     * at every pixel — including the near field, where the shading normal
+     * already carries every one of those facets geometrically. The sea's slope
+     * was counted twice: once as real wave facets through N·H, and again as a
+     * statistical lobe of the same width laid on top.
+     *
+     * WHAT THAT LOOKS LIKE, evaluated from these very expressions (flat water,
+     * camera 8 m, sun 43.1°, radiance of the road by ground distance):
+     *
+     *   σ² = 0.0273 (the old pin)  8m 0.18  20m 0.18  50m 0.084  150m 0.050
+     *                              300m 0.043  3km 0.037   ← never reaches zero
+     *   σ² = 0.003  (Cox & Munk)   8m 1.50  12m 0.27  20m 0.000  and beyond
+     *
+     * The pinned lobe is not a road at all: it is a flat 0.04–0.22 pedestal of
+     * sunlight laid over the whole sea to the horizon, because the Smith 1/(N·V)
+     * grows at grazing at very nearly the rate the Beckmann exponential decays
+     * and the two cancel. An angularly unselective sheen over everything is the
+     * definition of plastic, and added to a body measured at warmth
+     * (r−b)/max = −0.78 it reads as exactly what the user shot: bright blue.
+     * At a 5.8° sun the same code gives 12.6 at 50 m and 29 at 150 m — a real
+     * road — which is why the rebuild validated at sunset and failed at 15.0.
+     *
+     * THE FIX IS THE QUANTITY, NOT A NUMBER. σ² for a microfacet lobe is by
+     * definition the slope the shading normal does NOT already carry, and this
+     * material already computes it exactly: `unresolvedVar`, from the
+     * Tessendorf spectrum, per cascade, plus the churn's own faded-out share
+     * (§V.64). Floored at Cox & Munk's zero-wind intercept, ceilinged at the
+     * sea's own summed (shoaled) slope variance, because a patch of water
+     * cannot be rougher than the sea it is part of. Near the camera it now
+     * falls to the floor and the sun becomes a tight broken glitter path; far
+     * out it rises to the ceiling and the lobe broadens into the statistical
+     * road — the §V.48b handover, doing the job it was written for.
+     *
+     * §Rule 8 — WHAT THIS COMMIT DOES AND DOES NOT DO. The composition below is
+     * unchanged: `glintVar` is still `normalVar` clamped into
+     * [Cox-Munk, seaSlopeVar]. What changed is that it is BUILT HERE, beside
+     * the variance it is made of, and that `widen()` — the sparkle and the
+     * glint train — now reads it instead of reading the raw, unceilinged
+     * `normalVar`. That half is arithmetic, not taste: 40·1.0 = 41 against
+     * 40·0.0273 = 2.1, and 1.0 is 37× the sea's entire mean square slope.
+     *
+     * The dFdx half is left IN, behind its existing knob, because removing it
+     * is a change to the sun's appearance that only the browser can sign off
+     * and this session could not hold a stable WebGPU context long enough to
+     * do it. `specularAaStrength = 0` collapses `normalVar` to the exact
+     * spectral quantity and is therefore the whole experiment, live, on one
+     * uniform, with no rebuild — run it at tod 15.0 from the deck before
+     * changing anything here.
+     */
+    const seaSlopeVar = uSlopeVar
+      .map((v, i) => v.mul(shoal[i]).mul(shoal[i]))
+      .reduce((a: TslNode, b: TslNode) => a.add(b))
+      .add(microUnresolvedVar)
+      .max(COX_MUNK_CALM_SLOPE_VAR);
+    const glintVar = normalVar.max(COX_MUNK_CALM_SLOPE_VAR).min(seaSlopeVar).toVar();
+
     // Schlick with the real R0 for water (0.02). The old form dropped R0 and
     // then multiplied by a 0.13 CAP, so the sea could never show more than 13%
     // sky — roughly right looking straight down, badly wrong at grazing
@@ -1579,8 +1653,22 @@ export function buildOceanSurfaceMaterial(
     const halfVec = normalize(viewDir.add(sunDirectionUniform));
     const ndoth = normalWorld.dot(halfVec).max(0);
     const sunUp = sunUpFactor;
-    // widened exponent + energy-conserving peak for one lobe (see normalVar)
-    const widen = (p: TslNode) => float(1).add(float(p).mul(normalVar));
+    // Widened exponent + energy-conserving peak for one lobe. Driven by
+    // `glintVar` — the SAME physically-ceilinged σ² the road's Beckmann lobe
+    // takes — and not by the raw `normalVar` it used to read. `normalVar` is
+    // capped at `specularAaMax` (1.0 = RMS slope 45°), i.e. 37× the entire
+    // sea's mean square slope, so `sparkWiden` = 1 + 40·σ² reached 41: the
+    // sparkle was divided by 41 and its exponent collapsed from 40 to 0.98,
+    // which is a shapeless wash rather than a glint. Worse, the dFdx half is
+    // DISTANCE-DEPENDENT, so the division swung between ~41 near the camera
+    // and ~1.1 once the churn's own LOD fade had removed the high-frequency
+    // normals — the sparkle and the surface detail were anti-correlated across
+    // that boundary by construction (user: "wherever the high-detail noise is
+    // visible, we don't see the sparkle"). Bounded by the sea's own slope
+    // variance the factor spans 1.0–2.1 instead of 1–41, and it varies with
+    // the SPECTRUM rather than with a screen-space estimator, so there is no
+    // boundary for it to flip across.
+    const widen = (p: TslNode) => float(1).add(float(p).mul(glintVar));
     const trainWiden = widen(uGlintTrainPower);
     // the train is a FOOTPRINT (it selects where sparkles are dense), not a
     // radiance, so it takes the widened exponent WITHOUT the energy rescale —
@@ -1647,7 +1735,50 @@ export function buildOceanSurfaceMaterial(
      *     the fix preserve the detail instead of blurring it away.
      */
     const cellPix = cellSize.div(pixWorld).max(0.25);
-    const radPix = uSparkleShape.x.max(0.25);
+    /**
+     * §V.48b, AND THE RING THE USER DREW A LINE ALONG. `radPix` used to be the
+     * raw `sparkleRadiusPixels` — a CONSTANT screen radius against a cell whose
+     * screen size is a SAWTOOTH.
+     *
+     * `cellSize` is quantised to octaves (`exp2(log2(cellTarget).floor())`) so
+     * the lattice stays world-locked inside a band; the price is that
+     * `cellPix = cellSize / pixWorld` ramps 2.60 → 1.30 across an octave of
+     * footprint and then jumps straight back to 2.60. Both of this term's
+     * band-limit quantities are functions of it, so both inherited the jump.
+     * Evaluated over six octaves of `pixWorld`, inside the sun path:
+     *
+     *   cellPix   coverage   resolvable   mean(sparkleField)
+     *     2.48      0.163       0.575          0.0294     ← 57% discrete points
+     *     1.97      0.259       0.135          0.0467
+     *     1.56      0.412       0.000          0.0741     ← flat wash, no points
+     *   (then cellSize doubles and it snaps back to the first row)
+     *
+     * i.e. a HARD 2.52× step in the term's own mean at every doubling of the
+     * footprint, and `resolvable` sweeping 0.575 → 0 across the same span, so
+     * the band alternates "dimmer and made of points" with "brighter and
+     * featureless" and steps between them. That is the report exactly: hard
+     * edges at visibility ranges, the fine detail present on one side and gone
+     * on the other, and the sparkle showing up precisely where the detail
+     * went. §V.48b says a band-limited term must retire into its OWN MEAN —
+     * this one did, but its mean was itself discontinuous in distance, so the
+     * crossfade was mean-preserving across the `mix` and not across the ring.
+     *
+     * THE CURE, and it is the cheap half of the two available. Size the glint
+     * as a fixed FRACTION of its cell instead of a fixed number of pixels:
+     * `coverage` = π/2·(rad/cell)² and `cellPix/radPix` = `sparkleCellPixels /
+     * sparkleRadiusPixels` both become octave-invariant, so both
+     * discontinuities go at once and at zero cost. The disc's screen radius
+     * now breathes 0.40–0.80 px across an octave instead of sitting at 0.80 —
+     * a CONTINUOUS variation, and sub-pixel at both ends, so it cannot alias.
+     * (The other cure is an inter-octave crossfade of the whole cell field,
+     * which is a second hash set and a second disc for the same result.)
+     *
+     * `sparkleRadiusPixels` keeps its meaning at the top of an octave, which is
+     * where it was authored, so the shipped look is anchored where it was tuned.
+     */
+    const radPix = cellPix
+      .mul(uSparkleShape.x.max(0.25).div(uSparkleCell.x.max(0.5)))
+      .max(0.05);
     // Same class as `sparkleHash`: a hash of an integer cell index, constant
     // within the cell. It picks WHERE the glint sits; the glint's own extent is
     // `radPix`, sized in pixels against the footprint.
@@ -1757,26 +1888,12 @@ export function buildOceanSurfaceMaterial(
      * orders of magnitude apart in the first place.
      */
     // ── σ² for the lobe ──────────────────────────────────────────────
-    // THE PHYSICAL CEILING, and it is the half that makes this safe. σ² must be
-    // the slope variance inside this pixel that the shading normal does NOT
-    // already carry — §V.48b's `normalVar`, which is the spectral estimator
-    // plus `specularAaStrength`×dFdx(N). The spectral half is exact. The dFdx
-    // half is a one-sample screen estimate and it OVERSHOOTS: `specularAaMax`'s
-    // own docstring measures it at σ² = 0.41 over a 0.15 m footprint and 2.56
-    // over 0.5 m, against a sea whose ENTIRE mean square slope measures 0.0273
-    // (read live off the three cascades at the shipped swell preset). A
-    // patch of water cannot be rougher than the sea it is part of, so the
-    // cascades' own summed variance (shoaled — slope scales with amplitude, so
-    // variance scales with its square, and calmed water over a shelf really is
-    // smoother) is the ceiling, plus whatever churn this pixel cannot resolve.
-    // Uncapped, the lobe went to σ² = 1 (RMS slope 45°) across the mid-field
-    // and the road dissolved into the same flat sheen this fix removes.
-    const seaSlopeVar = uSlopeVar
-      .map((v, i) => v.mul(shoal[i]).mul(shoal[i]))
-      .reduce((a: TslNode, b: TslNode) => a.add(b))
-      .add(microUnresolvedVar)
-      .max(COX_MUNK_CALM_SLOPE_VAR);
-    const glintVar = normalVar.max(COX_MUNK_CALM_SLOPE_VAR).min(seaSlopeVar).toVar();
+    // `glintVar` is built beside `normalVar` ~700 lines up, floored at Cox &
+    // Munk's zero-wind intercept and ceilinged at the sea's own summed shoaled
+    // slope variance. It is defined there rather than here because `widen()`
+    // above needs the same quantity — there is ONE σ² in this material and
+    // every sun term reads it. See that block for the measurement that moved
+    // it off `normalVar`.
     // ── Beckmann D(h) ────────────────────────────────────────────────
     const cosH2 = ndoth.mul(ndoth).max(1e-4);
     const tanH2 = float(1).sub(cosH2).div(cosH2);

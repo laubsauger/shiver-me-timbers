@@ -524,13 +524,51 @@ export const oceanSurfaceParams = registerParams(
      * Widening the lobe by σ² and rescaling its peak by p'/p conserves energy,
      * so the glint road survives at full brightness while the isolated
      * pixel-sized sparkles are spread back into the average they should have
-     * been. Turning specular DOWN instead would flatten the whole sea. 0 = off.
-     * 2.2 measured in-browser at the §T.39 sunset framing: below ~1 the
-     * near-field still reads as fibrous golden hair, and the sea is grazing
-     * almost everywhere in that shot, so the variance it has to swallow is
-     * large.
+     * been. Turning specular DOWN instead would flatten the whole sea.
+     *
+     * 2.2 → 0, AND THE REASON IS THAT IT IS NOT A VARIANCE. It was measured at
+     * the §T.39 SUNSET framing only, where the sea is grazing almost
+     * everywhere; at the user's tod 15.0 deck framing it is what turned the sun
+     * into a sheet.
+     *
+     * `dFdx(N)` over a footprint spanning many wavelengths is a finite
+     * difference that saturates at the full normal swing whatever the
+     * footprint. `specularAaMax`'s own table below measures it at σ² =
+     * 0.41–2.56, against a sea whose ENTIRE mean square slope is 0.0273 — 15
+     * to 94× too large. Since §V.75 it feeds the sun's Beckmann lobe as σ², so
+     * it pinned the lobe at the sea's total slope variance at every pixel,
+     * INCLUDING the near field where the shading normal already carries every
+     * one of those facets geometrically. The sea's slope was counted twice.
+     *
+     * MEASURED (lagoon, tod 15.0, camera 8 m looking down-sun, one frame,
+     * this uniform the only thing moved) — road radiance by ground distance,
+     * evaluated from the shipped expressions:
+     *
+     *   σ² pinned at 0.0273    8m 0.18  20m 0.18  50m 0.084  150m 0.050
+     *                          300m 0.043  3km 0.037     ← never reaches zero
+     *   σ² = Cox-Munk 0.003    8m 1.50  12m 0.27  20m 0.000  and beyond
+     *
+     * The pinned lobe is not a road: it is a flat 0.04–0.22 pedestal of
+     * sunlight over the whole sea to the horizon, because Smith's 1/(N·V) grows
+     * at grazing at nearly the rate Beckmann's exponential decays. An
+     * angularly unselective sheen over everything IS "plastic", and laid over a
+     * body measured at warmth (r−b)/max = −0.78 it reads as the bright blue
+     * glare the user photographed. In the browser the same toggle turns the
+     * pale wash into a compact bright glitter patch on a deep-teal sea.
+     *
+     * At 0 the lobe's σ² is exactly `slopeVarianceAa` × the spectral
+     * `unresolvedVar` — the slope this pixel genuinely cannot resolve, which is
+     * what a microfacet σ² is defined to be, and which §V.48b already computes
+     * exactly from the Tessendorf spectrum at zero fetches.
+     *
+     * §Rule 8 — WHAT IS NOT VERIFIED. This estimator's original job was to stop
+     * the lobe boiling under motion, and every capture behind this number is a
+     * STILL. If the near-field glitter sizzles in motion, the answer is NOT to
+     * put this back (it re-opens the sheet) but to widen `slopeVarianceAa` or
+     * to give the churn its own analytic variance floor. The knob is left in
+     * place, not deleted, so the old behaviour is one number away.
      */
-    specularAaStrength: 2.2,
+    specularAaStrength: 0,
     /**
      * Cap on that variance (§V.44 bounded at source). Also the floor on lobe
      * width: p' ≥ p/(1 + p·max), so the horizon band cannot collapse to a
