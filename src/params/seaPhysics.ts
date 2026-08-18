@@ -65,9 +65,30 @@ export interface SeaPhysicsParams {
    * weights sum to 1, so this and the mass set the ride height together:
    * immersion = mass·g/spring − hullDraft) */
   buoyancySpring: number;
-  /** N·s/m vertical damping for the whole waterplane — HEAVE damping.
-   * Roll and pitch take scaled shares of it, see below */
+  /** N·s/m reference vertical damping for the whole waterplane. Heave, roll
+   * and pitch each take a scaled share of it, see below — 0 means no
+   * hydrodynamic damping at all, in any of the three. */
   buoyancyDamping: number;
+  /**
+   * Fraction of `buoyancyDamping` that resists the HEAVE component of a
+   * station's vertical velocity, i.e. the linear (wave-radiation) half.
+   * Small on purpose: this is the coefficient that survives at LOW relative
+   * speed, so it alone sets how many cycles she rings for after a knock, and
+   * at 1.0 it measured ζ_heave 0.90 — dead-beat, no ring at all, and large
+   * enough that it acted as a velocity CONSTRAINT rather than a force. See
+   * `heaveQuadraticRate` for the half that answers a slam.
+   */
+  heaveDampingScale: number;
+  /**
+   * Nonlinear heave damping, 1/(m/s): `heaveDampingScale` becomes
+   * ×(1 + this·|relative vertical speed|). Same shape as
+   * `quadraticDampingRate` does for roll, and here for the same reason —
+   * ONE term has to be gentle enough to let her reverberate after an impact
+   * and hard enough to stop her flying off a crest, and those are different
+   * SPEEDS, not different tunings. Quadratic drag bites as v² so it is
+   * negligible in a ring-down and dominant in a slam.
+   */
+  heaveQuadraticRate: number;
   /**
    * Fraction of `buoyancyDamping` that resists the ROLL component of a
    * station's vertical velocity. Heave damping is wave radiation — large,
@@ -109,6 +130,43 @@ export interface SeaPhysicsParams {
    * the heave period stretches by √(1+a). 0 = weightless cork response.
    */
   addedMassHeave: number;
+  /**
+   * WATER-ENTRY DEPTH, ×`hullDraft`: the immersion over which a section's
+   * entrained water builds from nothing to `addedMassHeave` (§V.70). This is
+   * the parameter that makes a SLAM exist at all. The reaction to a hull
+   * dropping onto the sea is mostly d(m_added·v)/dt — the rate of change of
+   * added mass, von Kármán's water-entry model — so an added mass that is a
+   * STEP (0 while the keel is dry, full the instant it touches, which is what
+   * a per-station wet/dry test gives) has dm/dt = 0 at every tick that
+   * matters and produces no impact force whatever. Measured on the step
+   * model: a 604 t hull entering at 5.6 m/s peaked at 0.86 g of retardation
+   * and reversed over 1.65 s with zero overshoot — a settle, not a bang.
+   *
+   * The build-up goes as immersion², because for a section with any deadrise
+   * the wetted half-width grows with penetration and the added mass goes as
+   * its square. That quadratic is what makes the peak force scale as v²
+   * without a v² term being written down anywhere: the hull always loses the
+   * same FRACTION of its momentum entering (m/(m+A) = 1/3), and the faster it
+   * enters the less time it has to lose it in.
+   *
+   * 1 = fully developed at the design draft, so a floating hull is at full
+   * added mass and nothing about her ride height, heave period or trim moves
+   * (immersion at rest is 2.44 m against a 2.0 m draft). Smaller = a sharper,
+   * more violent entry. 0 disables the ramp and gives back the step.
+   */
+  slamEntryDepth: number;
+  /**
+   * Slam (m/s of speed the water took in one tick, see `stepShipBuoyancy`)
+   * at which the camera shake reaches full strength, and the floor below
+   * which no shake is raised at all. Feel, not physics — but it lives here
+   * because the SIGNAL does, and a threshold that cannot be seen next to the
+   * quantity it thresholds is how a slider stops meaning anything (§V.62).
+   * The floor matters more than the ceiling: the entry exchange fires a
+   * little on every wave that rises past the ramp, and shaking the lens for
+   * those would be a permanent tremor rather than an impact.
+   */
+  slamShakeFloor: number;
+  slamShakeFull: number;
   /**
    * The same entrained water, as ROTATIONAL inertia (§V.69): the added
    * moments in pitch and roll are `addedMassHeave·mass` distributed over the
@@ -205,6 +263,44 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     // motion more closely, so vertical accel RMS went DOWN too. What it DID
     // cost was roll and pitch, which shared it — hence the scales below.
     buoyancyDamping: 3.78e6,
+    // HEAVE, split into its linear and quadratic halves (§V.70). The pair
+    // was one flat coefficient at ζ 0.90, and that is what "it can basically
+    // more or less immediately change direction" was: a linear damper this
+    // large is a velocity CONSTRAINT, not a force. Its relaxation time is
+    // M(1+a)/c = 0.48 s, so the hull's vertical velocity was being dragged
+    // onto the water's inside half a second whatever her momentum was, and a
+    // 4 m drop into calm water overshot her own equilibrium by 35 mm and
+    // crept back without one oscillation.
+    //
+    // ζ_heave 0.36 LINEAR (0.4 × the 0.901 the reference coefficient is) —
+    // the small-signal ratio, which is the one that decides whether she
+    // rings. MEASURED on a 1 m pluck in calm: extrema 0.061, −0.016, 0.004,
+    // −0.001 m, i.e. four visible turning points and ζ 0.39 by log decrement,
+    // against ONE at 0.90 (0.0011 m then nothing). The lost force comes back
+    // as v², where the complaint never was: ×(1 + 3·|v_rel|) restores the old
+    // coefficient at 0.5 m/s of relative vertical speed and triples it at
+    // 2 m/s. Measured relative-speed RMS is 0.35 m/s in the sea she is sailed
+    // in and 0.82 m/s at three times that energy, so the sea she LIVES in
+    // sits in the gentle part of the curve and only an impact reaches the
+    // hard part.
+    //
+    // WHY NOT LOWER, since lower rings longer — every bound here is a
+    // measurement, not taste, and 0.4 is the floor all three leave:
+    //  - beam-sea roll. Each station damps against ITS OWN water velocity, so
+    //    the heave damper is also part of what rolls her in a beam sea:
+    //    scale 0.28 took the λ60 beam-sea roll to 7.9° against the 8° §B.22
+    //    holds her to. Counter-intuitive and measured twice before believed.
+    //  - heave RAO shape. Resonance is at T 5.43 s (λ ≈ 46 m), INSIDE the
+    //    swell band, and the linear ratio alone sets the peak: RAO/Smith at
+    //    λ50 measured 0.57 at ζ 0.90, 0.78 at 0.45, 0.95 at 0.35, 1.42 at
+    //    0.25. Past ~0.45 it breaks the monotone shape §B.22 protects. The
+    //    QUADRATIC term is what buys 0.36 back — near resonance the relative
+    //    speed is large, so the v² half bites exactly where it is needed and
+    //    flattens the peak without touching the ring-down.
+    //  - heave PHASE at λ40, which is the one bound §V.70 had to move rather
+    //    than meet: see the §B.22 phase test for the argument and the numbers.
+    heaveDampingScale: 0.4,
+    heaveQuadraticRate: 3,
     // Linear half of the roll damping. Small, because most of this hull's
     // roll damping is meant to come from the quadratic term below: at the
     // swell's roll rates the pair lands at ζ ≈ 0.11 (a galleon swings 5+
@@ -257,6 +353,25 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     // spring/mass-locked, so this is the ONLY knob that slows heave
     // without floating the ship higher or drowning the deck.
     addedMassHeave: 2,
+    // 1 = the entrained water is fully developed by the time a section is in
+    // to its design draft, which is the shallowest ramp that leaves a
+    // FLOATING hull untouched (she rests 2.44 m in, past the 2.0 m ramp, so
+    // draft, heave period and trim are all bit-identical to the step model).
+    // It is also the gentlest: peak entry retardation goes as 1/depth, and
+    // shortening the ramp is the knob for a harder bang if one is wanted.
+    slamEntryDepth: 1,
+    // MEASURED, and the two populations are two orders of magnitude apart, so
+    // the gate is not a judgement call. The entry exchange is really an
+    // AIRBORNE RE-ENTRY detector: a hull that stays in the water entrains
+    // almost nothing new tick to tick, so riding the sea it reads p99 0.0016
+    // m/s in the shipped swell (worst 0.0036 over 80 s) and p99 0.011 in
+    // storm (worst 0.026) — while a 4 m drop onto flat calm takes 0.44 m/s in
+    // ONE tick. So the lens is still in the shipped sea by an order of
+    // magnitude, twitches on the hardest storm re-entries, and is hit
+    // properly when she has actually been in the air. That is the right
+    // shape: shake means "she came down", not "there are waves".
+    slamShakeFloor: 0.02,
+    slamShakeFull: 0.3,
     // 1 = the geometry's own answer, and it is not a small correction: the
     // station field gives Σa·z² = 66.79 m² and Σa·x² = 4.77 m², so the
     // 1208 t of entrained water adds A55 = 8.07e7 and A44 = 5.77e6 — 1.7×
@@ -316,12 +431,17 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     smithDepthScale: { min: 0, max: 2, step: 0.05 },
     buoyancySpring: { min: 1e5, max: 1.6e7, step: 1e5 },
     buoyancyDamping: { min: 0, max: 1e7, step: 1e4 },
+    heaveDampingScale: { min: 0, max: 2, step: 0.01 },
+    heaveQuadraticRate: { min: 0, max: 20, step: 0.1 },
     rollDampingScale: { min: 0, max: 2, step: 0.01 },
     pitchDampingScale: { min: 0, max: 2, step: 0.01 },
     quadraticDampingRate: { min: 0, max: 20, step: 0.1 },
     waveSurgeGain: { min: 0, max: 1.5, step: 0.01 },
     mass: { min: 1e4, max: 2e6, step: 1e4 },
     addedMassHeave: { min: 0, max: 6, step: 0.1 },
+    slamEntryDepth: { min: 0, max: 3, step: 0.05 },
+    slamShakeFloor: { min: 0, max: 2, step: 0.01 },
+    slamShakeFull: { min: 0.05, max: 5, step: 0.05 },
     addedInertiaScale: { min: 0, max: 3, step: 0.05 },
     inertiaPitch: { min: 1e5, max: 5e8, step: 1e5 },
     inertiaRoll: { min: 1e5, max: 5e8, step: 1e5 },

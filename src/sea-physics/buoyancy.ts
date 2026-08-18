@@ -256,6 +256,14 @@ interface ShipSeaMemory {
   pitch: number;
   prevHeights: Float64Array;
   prevTime: number;
+  /**
+   * Last tick's ENTRAINED-WATER FRACTION (0..1 of `addedMassHeave`), for the
+   * water-entry momentum exchange (§V.70). NaN = no previous sample, exactly
+   * as `prevHeights` uses it: a ship that has just been created or teleported
+   * has no entry in progress, and differencing against an assumed 0 would
+   * hand her a slam she never took.
+   */
+  prevAdded: number;
 }
 
 const seaMemory = new WeakMap<ShipState, ShipSeaMemory>();
@@ -277,7 +285,11 @@ const seaMemory = new WeakMap<ShipState, ShipSeaMemory>();
  * KEEP THIS IN STEP WITH THE SOLVER. `093a7a5` added Smith-effect attenuation
  * and added mass, so this state is richer than it looks; anything else that
  * accumulates PER LOCATION (as opposed to per body) has to be reset here too,
- * or a teleport will silently carry one place's sea into another.
+ * or a teleport will silently carry one place's sea into another. §V.70 added
+ * `prevAdded` — a hull dropped into a new sea would otherwise difference this
+ * place's entrained water against the last place's and take a slam on arrival,
+ * the same shape of bug `prevHeights` already had. Dropping the whole entry
+ * covers both, which is why this is a `delete` and not a field-by-field reset.
  */
 export function resetSeaMemory(ship: ShipState): void {
   seaMemory.delete(ship);
@@ -342,6 +354,18 @@ function integrateQuat(q: Quat, w: Vec3, dt: number): Quat {
  * One fixed-dt buoyancy step, mutating ship position/quaternion/velocity/
  * angularVelocity in place. Caller must have advanced `ocean.update(time)`
  * for this tick first (heights are read at ocean.currentTime).
+ *
+ * RETURNS THE SLAM: how much downward speed (m/s) the water took off her this
+ * tick through the entry exchange (§V.70), 0 on any tick that is not an
+ * impact. It is returned rather than published on ShipState because it is not
+ * state — it is an EVENT, true of one tick and meaningless the next, and
+ * §V.3 keeps SimState to things a sim hash should cover.
+ *
+ * This is the number a slam should be FELT by. Spray and the slam sample are
+ * already fed from `hullContact`'s burial rates and need nothing here, but
+ * the camera has no other way to know an impact happened: shake is driven
+ * from combat events only, so without this a hull could land hard enough to
+ * bury the rail and the lens would not flinch.
  */
 export function stepShipBuoyancy(
   ship: ShipState,
@@ -350,7 +374,7 @@ export function stepShipBuoyancy(
   p: SeaPhysicsParams = seaPhysicsParams,
   /** world-frame hole offsets for flood listing (§V.14); empty = intact */
   floodHoles: readonly Vec3[] = [],
-): void {
+): number {
   const pos = ship.position;
   const vel = ship.velocity;
   const w = ship.angularVelocity;
@@ -374,6 +398,7 @@ export function stepShipBuoyancy(
       pitch: mem?.pitch ?? 0,
       prevHeights: new Float64Array(stations.length).fill(Number.NaN),
       prevTime: Number.NaN,
+      prevAdded: Number.NaN,
     };
     seaMemory.set(ship, mem);
   }
@@ -404,6 +429,34 @@ export function stepShipBuoyancy(
   const axL = rotateVec(q, [0, 0, 1]);
   const axB = rotateVec(q, [1, 0, 0]);
   let submerged = 0;
+  /** m/s of downward speed the entry exchange took this tick — see the header */
+  let slam = 0;
+  /**
+   * The hull's ENTRAINED WATER this tick, as a fraction of the fully wetted
+   * amount (§V.70). Not the same quantity as `submerged`: that is a waterplane
+   * share and it is a STEP — a station is dry, then the keel touches and it is
+   * instantly carrying its whole slab of water. Real entrained water builds up
+   * as the section penetrates, and the reaction to a hull landing on the sea
+   * is overwhelmingly d(m_added·v)/dt, so a step has no impact force in it at
+   * all. This ramps over `slamEntryDepth`·draft of immersion, squared because
+   * the wetted width of a section with deadrise grows with penetration and the
+   * added mass goes as its square.
+   */
+  let addedWet = 0;
+  /**
+   * `addedWet`-weighted mean vertical velocity of the water — the FRAME the
+   * entry momentum exchange is conserved in. Newly entrained water arrives
+   * moving with the sea, not at rest, so it is the hull's velocity RELATIVE to
+   * the water that gets shared with it; against the world frame a hull sitting
+   * still while a wave rose over it would be dragged DOWNWARD by its own added
+   * mass, which is neither physical nor survivable.
+   */
+  let addedWaterVy = 0;
+  /** the same ramp over the WATERPLANE share, and its mean water velocity —
+   * the whole-body quadratic heave drag's fraction and frame (see below) */
+  let wetPlane = 0;
+  let wetWaterVy = 0;
+  const entryDepth = p.hullDraft * p.slamEntryDepth;
   // body-frame angular rates, so the damper can tell roll from pitch: the
   // vertical speed of a station is wBody.z·x (roll) − wBody.x·z (pitch),
   // and those two need DIFFERENT coefficients — see `rollDampingScale`
@@ -500,6 +553,14 @@ export function stepShipBuoyancy(
     const immersion = immersedDepth(depth, p);
     if (immersion <= 0) continue;
     submerged += st.weight;
+    // entrained water builds as the section penetrates — see `addedWet`
+    const u = entryDepth > 0 ? Math.min(1, immersion / entryDepth) : 1;
+    const wet = u * u;
+    const aw = st.added * wet;
+    addedWet += aw;
+    addedWaterVy += aw * waterVy;
+    wetPlane += st.weight * wet;
+    wetWaterVy += st.weight * wet * waterVy;
     // Damp probe velocity RELATIVE to the surface so the hull rides a
     // passing swell instead of being braked against it (calm water,
     // waterVy 0, is the plain absolute damper).
@@ -513,7 +574,34 @@ export function stepShipBuoyancy(
     // upright — the user's "she doesn't feel dynamic".
     const vRoll = wBody0[2] * local[0] * p.probeLayoutScale;
     const vPitch = -wBody0[0] * local[2] * p.probeLayoutScale;
-    const vRel = vel[1] - waterVy + rollDamp * vRoll + pitchDamp * vPitch;
+    // NONLINEAR HEAVE damping, the same Ikeda split the roll channel already
+    // uses above and for the same reason — one coefficient could not serve
+    // two speeds. Heave radiation damping is what stops her flying off a
+    // crest, and setting it high enough to do that (ζ 0.90) turned the
+    // vertical channel into a velocity constraint with a 0.48 s relaxation
+    // time: whatever momentum she carried, her vertical speed was dragged
+    // onto the water's inside half a second, which IS "it can more or less
+    // immediately change direction". Splitting it puts the linear part at
+    // ζ 0.36 — light enough that a knock still rings four turning points —
+    // and returns the missing force as v², where impacts live and ring-downs
+    // do not.
+    const vHeave = vel[1] - waterVy;
+    // THE HEAVE DAMPER RIDES THE SAME RAMP AS THE ADDED MASS, and it has to.
+    // Both are radiation from the same wetted section, so both build as it
+    // penetrates — but the reason this is not a nicety is numerical: the
+    // heave damper is the largest force in the model and the added mass is
+    // 2/3 of the inertia it is divided by. Ramp one and not the other and a
+    // hull touching down at 5.6 m/s meets a full-strength damper with only
+    // her BARE mass to resist it — measured 162 m/s², 16.6 g, in the single
+    // tick of first contact, and 610 g in a storm. Force and inertia have to
+    // arrive together.
+    //
+    // HEAVE ONLY. The same argument is true of roll and pitch radiation, but
+    // their coefficients are a tenth of this one and cause no such spike,
+    // while their damping ratios are measured and tuned (§B.22, §B.37) —
+    // ramping them too took roll RMS to 90° in a beam swell. Out of scope.
+    const vRel =
+      p.heaveDampingScale * vHeave * wet + rollDamp * vRoll + pitchDamp * vPitch;
     const f =
       (p.buoyancySpring * immersion - p.buoyancyDamping * vRel) * support * st.weight;
     force[1] += f;
@@ -523,6 +611,37 @@ export function stepShipBuoyancy(
     torque[2] += t[2];
   }
   mem.prevTime = time;
+
+  // QUADRATIC HEAVE DRAG — a WHOLE-BODY term, and that is not a shortcut.
+  //
+  // It is the other half of the split above: the linear damper is now light
+  // enough to let her ring (ζ 0.36 linear), and this is what still stops her
+  // off a crest, because it grows as v² and a hull leaving the water is doing
+  // so fast. One term, both behaviours, which is the point.
+  //
+  // WHY NOT PER STATION, the obvious place for it. Tried, and it destroyed the
+  // rotational channel: each station's relative velocity carries that point's
+  // WAVE ORBITAL velocity, which differs bow to stern and is clamped at ±8 m/s
+  // (MAX_SURFACE_VY), so a v² gain multiplies the DIFFERENCE between stations
+  // by up to 25× and dumps it straight into pitch torque — which sweeps the
+  // stations through the wave field faster, which raises the difference again.
+  // Measured at three times the shipped swell: pitch rate 38 rad/s, 2100 deg/s,
+  // and vertical spikes of 1241 m/s² (127 g) as a symptom. The physics is
+  // whole-body anyway — ½ρC_d A|V|V is written about a BODY's velocity, not
+  // about the water's structure under it — so the honest form is also the
+  // stable one. Distributed by the same waterplane shares as everything else,
+  // which sum about the centred origin, so it makes exactly zero torque.
+  if (wetPlane > 0 && p.heaveQuadraticRate > 0) {
+    const vHull = vel[1] - wetWaterVy / wetPlane;
+    force[1] -=
+      p.buoyancyDamping *
+      p.heaveDampingScale *
+      p.heaveQuadraticRate *
+      vHull *
+      Math.abs(vHull) *
+      wetPlane *
+      support;
+  }
 
   // WAVE SURGE (§B.22): the hull sits on a tilted water surface, and the
   // component of its own buoyant support along that tilt drives it — this
@@ -564,10 +683,78 @@ export function stepShipBuoyancy(
   // stretches by √(1+a) and every vertical acceleration is blunted. This
   // is the "weight" in the ship's response: without it the spring/mass
   // pair alone fixes the period at √(g/draft) ≈ 1.3 s, which reads as a
-  // cork no matter how the spring is tuned. Scaled by wetted fraction so
-  // a ship clear of the water free-falls at g, not g/(1+a).
-  // `submerged` is already a waterplane FRACTION (station weights sum to 1)
-  const heaveMass = mass * (1 + p.addedMassHeave * submerged);
+  // cork no matter how the spring is tuned. Scaled by `addedWet` — the
+  // GRADED wetted fraction, not the waterplane step — so a ship clear of the
+  // water free-falls at g, and one arriving on it gains her slab of water
+  // over a finite penetration rather than in a single tick (§V.70).
+  // `addedWet` is already a FRACTION (the added shares sum to 1)
+  const addedNow = mass * p.addedMassHeave * addedWet;
+  const heaveMass = mass + addedNow;
+
+  // WATER ENTRY (§V.70) — the BANG, and the reason a slam is not just a
+  // stiffer version of a settle.
+  //
+  // The user: "when the boat is slapping down it can more or less immediately
+  // change direction… it should smash into the water and go BOOM and then
+  // reverberate a bit. It has to LOSE its momentum."
+  //
+  // Losing momentum is the literal, mechanical description of what happens,
+  // and it does not happen by itself. Above, the added mass only ever appears
+  // as a DIVISOR — `force/heaveMass` — so growing it from m to 3m blunts the
+  // hull's future accelerations and does absolutely nothing to the velocity
+  // she already has. But entraining water IS a momentum transfer: the hull
+  // has to drag a slab of stationary sea up to its own speed, and that slab
+  // takes its share. Skipping it means the impact force
+  // d(m_added·v)/dt = v·dm/dt — the dominant term in every water-entry model
+  // since von Kármán — was simply absent, which is why a 604 t hull landing
+  // at 5.6 m/s decelerated at 0.86 g and took 1.65 s to turn round.
+  //
+  // Written as a perfectly inelastic mixing in the WATER's frame, which is
+  // exact rather than integrated: momentum (m + A)·v_rel is conserved as A
+  // grows, so v_rel simply scales by (m + A_old)/(m + A_new). Three things
+  // follow, all of them wanted:
+  //  - it is UNCONDITIONALLY STABLE and cannot overshoot. The factor is in
+  //    (0, 1], so the relative velocity can only shrink and can never change
+  //    sign, at any dt, for any sea. There is no CFL condition here to get
+  //    wrong, which the explicit force form −v·dA/dt would have had.
+  //  - it is DISSIPATIVE, never elastic. Kinetic energy drops by exactly the
+  //    same factor; the sea keeps it (that is the splash). A spring would
+  //    have handed it back and she would pogo, the failure mode on the other
+  //    side of this complaint.
+  //  - the peak force goes as v² for free. She always loses the same
+  //    FRACTION of her momentum entering — m/(m+A) = 1/3 with a = 2 — and a
+  //    faster entry has less time to lose it in, so twice the entry speed is
+  //    four times the retardation. No v² term is written anywhere.
+  //
+  // ENTRY ONLY (A growing). On the way back OUT the water is left behind in
+  // the sea, taking its momentum with it; it does not push the hull along as
+  // it goes. Momentum is lost, not returned — the asymmetry is the whole
+  // point, and it is also what keeps this from being a spring in disguise.
+  //
+  // `slamEntryDepth` 0 switches the whole water-entry model off, ramp AND
+  // exchange together, and they have to go together: with no ramp the added
+  // mass is a step again, so the exchange becomes a delta — the hull's speed
+  // divided by 3 inside one tick, measured 37 g at an 8.8 m/s entry. That is
+  // not unstable (the factor is still in (0,1], she cannot bounce) but it is
+  // the one-tick reversal this whole change exists to remove, and leaving it
+  // reachable from a slider labelled "off" is how §V.62 controls happen.
+  if (
+    p.slamEntryDepth > 0 &&
+    Number.isFinite(mem.prevAdded) &&
+    addedWet > mem.prevAdded
+  ) {
+    const addedPrev = mass * p.addedMassHeave * mem.prevAdded;
+    const waterVy = addedWet > 0 ? addedWaterVy / addedWet : 0;
+    const before = vel[1];
+    vel[1] = waterVy + (vel[1] - waterVy) * ((mass + addedPrev) / heaveMass);
+    // magnitude: the exchange always moves her TOWARD the water's own motion,
+    // so this is the speed difference the sea absorbed either way — a hull
+    // dropping onto a flat sea and a sea rising onto a stationary hull are
+    // the same impact seen from two frames, and both deserve the flinch
+    slam = Math.abs(before - vel[1]);
+  }
+  mem.prevAdded = addedWet;
+
   vel[0] += (force[0] / mass) * dt;
   vel[1] += (force[1] / heaveMass) * dt;
   vel[2] += (force[2] / mass) * dt;
@@ -613,6 +800,12 @@ export function stepShipBuoyancy(
   // step's `torque·dt/I` gets strictly smaller. There is no implicit term to
   // get wrong and no way for it to make her sink — it moves no force, only
   // the mass the force is divided by.
+  // ON `submerged` RATHER THAN `addedWet`. The entry ramp is a HEAVE model:
+  // it exists so the vertical channel has a dm/dt to slam with. The added
+  // MOMENTS are §V.69's, derived and measured against the waterplane fraction,
+  // and grading them too cuts the roll inertia exactly when the hull is
+  // half-out of a crest — measured roll RMS 90° in a beam swell, i.e. on her
+  // beam ends. Rotational entry is a real effect and this is not it.
   const addedInertia = mass * p.addedMassHeave * p.addedInertiaScale * submerged;
   const layout2 = p.probeLayoutScale * p.probeLayoutScale;
   const iPitch = p.inertiaPitch + addedInertia * stationSet.az2 * layout2;
@@ -631,4 +824,5 @@ export function stepShipBuoyancy(
   const fwd = rotateVec(ship.quaternion, [0, 0, 1]);
   const fy = fwd[1] < -1 ? -1 : fwd[1] > 1 ? 1 : fwd[1];
   mem.pitch = Math.asin(fy);
+  return slam;
 }

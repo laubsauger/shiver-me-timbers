@@ -851,8 +851,26 @@ describe('§V.69: added moment of inertia — she cannot reverse her pitch in a 
     };
     const before = kick(lumped);
     const after = kick(sp);
-    expect(after.worstAcc).toBeLessThan(before.worstAcc * 0.7);
-    expect(after.worstAngle).toBeLessThan(before.worstAngle * 0.7);
+    // THE ABSOLUTE NUMBER IS NOW THE CLAIM, and it has to be, because §V.70
+    // took over most of this statistic. Water entry and the split heave
+    // damper attack the same defect from the force side — the per-station
+    // linear heave damper was itself the largest single source of pitch
+    // kick, since each station damps against its OWN wave orbital velocity
+    // and the difference bow-to-stern is a torque — so cutting it 2.5×
+    // halved the kick again on top of what added inertia had already done.
+    // MEASURED in the shipped swell over 4 headings, worst pitch angular
+    // acceleration: 37.6 °/s² lumped and pre-§V.70 → 32.6 with added inertia
+    // → 14.4 with §V.70. Peak pitch ANGLE 11.3° → 7.7° → 6.8°, so the sharp
+    // accelerations went and the motion did not.
+    expect(after.worstAcc).toBeLessThan(20);
+    expect(after.worstAngle).toBeLessThan(before.worstAngle * 0.9);
+    // The MARGINAL share left to added inertia is small now — 14.35 against
+    // 14.61 with it removed — so a ratio bound here can no longer catch its
+    // removal and pretending otherwise would be a test that cannot fail
+    // (§Rule 6). What still can, and does, is the PERIOD test above: added
+    // inertia is what puts T_pitch on T_heave, and nothing in §V.70 touches
+    // that. This assertion is kept as the direction check it can still make.
+    expect(after.worstAcc).toBeLessThan(before.worstAcc);
     // ...and she has NOT been deadened into it: she still pitches degrees
     expect(after.worstAngle).toBeGreaterThan(3);
   });
@@ -916,6 +934,214 @@ describe('§V.69: added moment of inertia — she cannot reverse her pitch in a 
     still.position[1] = equilibriumY(sp);
     for (let i = 0; i < 600; i++) stepShipBuoyancy(still, flat, DT, sp);
     expect(still.position[1]).toBeCloseTo(equilibriumY(sp), 6);
+  });
+});
+
+/**
+ * §V.70 — SHE SLAMS, AND SHE LOSES HER MOMENTUM DOING IT.
+ *
+ * The user, on a hull coming down on the sea: "right now it can basically
+ * MORE OR LESS IMMEDIATELY CHANGE DIRECTION, where it should — it's HEAVY,
+ * right? It should have some momentum… it really smashes into the water and
+ * it's like BOOM and then reverberates for a little bit before it gets pushed
+ * back up. IT HAS TO LOSE ITS MOMENTUM."
+ *
+ * These assert the REPORT, not the mechanism (§Rule 6). Every one of them is
+ * a statement about what the hull does that a player could have made, and
+ * each fails on the model as it was — a hull that landed at 6.2 m/s with 0.99
+ * g of retardation, i.e. a firm settle, and then returned without one
+ * oscillation. Nothing here mentions added mass, dm/dt or damping ratios, so
+ * they stay true if the mechanism is ever replaced by a better one.
+ *
+ * The reference throughout is `noEntry`: the same hull with the water-entry
+ * model off and the heave damper back in one linear lump. It is here so these
+ * bounds are anchored to a measured alternative rather than to absolutes
+ * pulled out of the current tuning (§V.36).
+ */
+describe('§V.70: water entry — she smashes in, and the sea keeps the energy', () => {
+  const sp = testSeaParams();
+  /** the model before §V.70: step added mass, one linear heave damper */
+  const noEntry = testSeaParams({
+    slamEntryDepth: 0,
+    heaveDampingScale: 1,
+    heaveQuadraticRate: 0,
+  });
+
+  /**
+   * Drop her onto flat calm from `fall` metres of keel clearance and watch
+   * the whole event. Flat water on purpose: a slam is a statement about the
+   * HULL, and a seaway would let the wave's own motion supply half the answer.
+   */
+  function slam(p: SeaPhysicsParams, fall: number) {
+    const ocean = new CpuOcean(1, flatOceanParams(), p);
+    let t = 0;
+    ocean.update(t);
+    const eq = equilibriumY(p);
+    const ship = makeShip();
+    ship.position[1] = ocean.heightAt(0, 0, t) + p.hullDraft + fall;
+    let entry = -1;
+    let entryV = 0;
+    let peakDecel = 0;
+    let reversed = -1;
+    let deepest = Infinity;
+    let rebound = -Infinity;
+    /** worst single-tick velocity change while she still had way on */
+    let flippedInOneTick = false;
+    for (let i = 0; i < 900; i++) {
+      t += DT;
+      ocean.update(t);
+      const v0 = ship.velocity[1];
+      const wet = ship.position[1] <= ocean.heightAt(0, 0, t) + p.hullDraft;
+      stepShipBuoyancy(ship, ocean, DT, p);
+      const v1 = ship.velocity[1];
+      if (entry < 0 && wet) {
+        entry = i;
+        entryV = v0;
+      }
+      if (entry < 0) continue;
+      peakDecel = Math.max(peakDecel, (v1 - v0) / DT);
+      // THE LITERAL CLAIM: a hull carrying real momentum downward cannot come
+      // out of one 16 ms tick going upward. Anything that sets position or
+      // velocity instead of integrating a force does exactly this.
+      if (v0 < -1 && v1 > 0) flippedInOneTick = true;
+      if (reversed < 0 && v1 >= 0) reversed = i;
+      deepest = Math.min(deepest, ship.position[1]);
+      if (reversed >= 0) rebound = Math.max(rebound, ship.position[1]);
+    }
+    return {
+      entryV,
+      peakG: peakDecel / 9.81,
+      ticksToReverse: reversed - entry,
+      flippedInOneTick,
+      belowRest: eq - deepest,
+      reboundAboveRest: rebound - eq,
+    };
+  }
+
+  it('cannot reverse in a tick: the sea takes her momentum over ~4 seconds', () => {
+    // The complaint in its own words. The bound is on TIME, and it is a wide
+    // one on purpose — the claim is "not instantaneous", not "exactly this
+    // long" — plus the hard structural check that no single tick ever turns
+    // downward motion into upward motion.
+    const hard = slam(sp, 2.0);
+    expect(hard.entryV).toBeLessThan(-5); // she really is coming down
+    expect(hard.flippedInOneTick).toBe(false);
+    expect(hard.ticksToReverse).toBeGreaterThan(60); // > 1 s, measured 236
+    // and she has not simply been frozen: she does turn round, in this run
+    expect(hard.ticksToReverse).toBeLessThan(600);
+    // MEASURED against the model without the entry term: 92 ticks. Taking
+    // three times as long to give up her downward momentum is the whole of
+    // "it should have some momentum".
+    expect(hard.ticksToReverse).toBeGreaterThan(slam(noEntry, 2.0).ticksToReverse * 2);
+  });
+
+  it('the impact is IMPULSIVE: gentle landings settle, hard ones bang', () => {
+    // "It really smashes into the water and it's like BOOM." The signature of
+    // a slam is that it is not a scaled-up settle — the retardation grows far
+    // faster than the speed, because the reaction comes from the RATE at which
+    // the hull entrains water and a faster entry does the same entrainment in
+    // less time. One term has to produce both ends or it is two special cases.
+    const gentle = slam(sp, 0.15);
+    const hard = slam(sp, 4.0);
+    expect(gentle.entryV).toBeGreaterThan(-2); // a touch-down
+    expect(hard.entryV).toBeLessThan(-8); // a fall
+    expect(gentle.peakG).toBeLessThan(1); // …she settles onto it (MEASURED 0.58)
+    expect(hard.peakG).toBeGreaterThan(4); // …and she hits it. MEASURED 5.67
+    // The old model could not tell these apart by much, because a linear
+    // damper cannot: 0.33 g against 1.55 g for the same pair, so its hardest
+    // landing was gentler than this hull's SOFTEST is now.
+    expect(hard.peakG).toBeGreaterThan(slam(noEntry, 4.0).peakG * 2.5);
+  });
+
+  it('momentum is LOST, not returned: she does not pogo', () => {
+    // The failure mode on the other side of this complaint, and the reason
+    // the entry term is written as an inelastic mixing rather than a spring.
+    // A hull that gave the energy back would leap out of the water after a
+    // hard landing; this one comes up 16 mm past her marks after a 4 m drop.
+    const hard = slam(sp, 4.0);
+    expect(hard.reboundAboveRest).toBeLessThan(0.1);
+    expect(hard.reboundAboveRest).toBeGreaterThan(0); // she DOES come back up
+  });
+
+  it('…and then she reverberates: a knock rings down over several cycles', () => {
+    // "…and then reverberates for a little bit." Held under a metre and let
+    // go, she must cross her own waterline repeatedly with a decaying swing.
+    // This is the assertion that the single linear heave damper could not
+    // meet at any setting that also stopped her flying off crests: at
+    // ζ_heave 0.90 the second extremum is 0.00003 m — gone inside one cycle.
+    const ring = (p: SeaPhysicsParams): number[] => {
+      const ocean = new CpuOcean(1, flatOceanParams(), p);
+      ocean.update(0);
+      const eq = equilibriumY(p);
+      const ship = makeShip();
+      ship.position[1] = eq - 1.0; // pushed under, released
+      const ex: number[] = [];
+      let dir = 0;
+      let prevY = ship.position[1];
+      for (let i = 0; i < 1500; i++) {
+        ocean.update((i + 1) * DT);
+        stepShipBuoyancy(ship, ocean, DT, p);
+        const d = Math.sign(ship.position[1] - prevY);
+        if (d !== 0 && dir !== 0 && d !== dir) ex.push(prevY - eq);
+        if (d !== 0) dir = d;
+        prevY = ship.position[1];
+      }
+      return ex;
+    };
+    const ex = ring(sp);
+    // at least four turning points still large enough to SEE on a 35 m hull
+    const visible = ex.filter((v) => Math.abs(v) > 0.001);
+    expect(visible.length).toBeGreaterThanOrEqual(4);
+    // …alternating, and decaying — a ring, not a wobble and not a growth
+    for (let i = 1; i < 4; i++) {
+      expect(Math.sign(ex[i])).toBe(-Math.sign(ex[i - 1]));
+      expect(Math.abs(ex[i])).toBeLessThan(Math.abs(ex[i - 1]));
+    }
+    // ζ from the log decrement over one full period. Bounded BOTH ends: below
+    // ~0.2 she would swing for ten cycles like a cork, above ~0.6 the ring is
+    // over before it is seen. MEASURED 0.39 on this pluck, tending to the
+    // 0.36 linear ratio as the swing decays and the v² half falls away.
+    const delta = Math.log(Math.abs(ex[0]) / Math.abs(ex[2]));
+    const zeta = delta / Math.sqrt(4 * Math.PI * Math.PI + delta * delta);
+    expect(zeta).toBeGreaterThan(0.2);
+    expect(zeta).toBeLessThan(0.6);
+    // and the guard that this test means anything: the OLD damper fails it
+    const old = ring(noEntry).filter((v) => Math.abs(v) > 0.001);
+    expect(old.length).toBeLessThan(visible.length);
+  });
+
+  it('she still floats level in a calm, at exactly the same draft', () => {
+    // THE load-bearing invariant, and the one this change was most likely to
+    // break: flotation is what everything else in the game reads. The entry
+    // ramp is fully developed at 2.0 m of immersion and she rests 2.44 m in,
+    // so a floating hull is past it and NOTHING about her rest state may move
+    // — not the draft, not the trim, not by a millimetre.
+    const rest = (p: SeaPhysicsParams, start: number): ShipState => {
+      const ocean = new CpuOcean(1, flatOceanParams(), p);
+      ocean.update(0);
+      const ship = makeShip();
+      ship.position[1] = start;
+      for (let i = 0; i < 1800; i++) {
+        ocean.update((i + 1) * DT);
+        stepShipBuoyancy(ship, ocean, DT, p);
+      }
+      return ship;
+    };
+    // …from her marks, from below, and from a drop: one attractor, no memory
+    for (const start of [equilibriumY(sp), equilibriumY(sp) - 1.5, sp.hullDraft + 2]) {
+      const ship = rest(sp, start);
+      expect(ship.position[1]).toBeCloseTo(equilibriumY(sp), 3);
+      expect(Math.abs(ship.velocity[1])).toBeLessThan(1e-3);
+      expect(Math.abs(pitchOf(ship))).toBeLessThan(1e-6); // level fore-and-aft
+      expect(Math.abs(rollOf(ship))).toBeLessThan(1e-6); // and upright
+    }
+    // and it is the SAME draft as before §V.70, to the metre-per-thousand —
+    // the entry model is inertia and dissipation, it moves no static force
+    expect(rest(sp, equilibriumY(sp)).position[1]).toBeCloseTo(
+      rest(noEntry, equilibriumY(noEntry)).position[1],
+      9,
+    );
+    expect(equilibriumDraft(sp)).toBe(equilibriumDraft(noEntry));
   });
 });
 
@@ -1135,7 +1361,25 @@ describe('§B.22 feel: the hull answers the sea, in the right places', () => {
         dy += (ys[i] - my) ** 2;
         dh += (hs[i] - mh) ** 2;
       }
-      expect(num / Math.sqrt(dy * dh)).toBeGreaterThan(0.8);
+      // BOUND BY BAND, because heave RESONANCE sits inside this sweep and a
+      // lag there is the physics, not the defect (§V.70). T_heave is 5.43 s,
+      // i.e. λ ≈ 46 m, so λ40 is 7% off the hull's own natural period and any
+      // hull with a real damping ratio lags the wave there. This assertion is
+      // aimed at SIGN INVERSION — the old layout summed to −0.28 where the
+      // integral is +0.10 and she rose INTO crests, a correlation near −1 —
+      // and a resonance lag is a different animal at the other end of the
+      // scale. MEASURED at ζ_heave,linear 0.90 → 0.36: λ40 0.856 → 0.680,
+      // λ50 0.899 → 0.801, λ60 0.923 → 0.868, λ90 0.961 → 0.949, λ189 0.992 →
+      // 0.994. Only the resonant end moves, and it stays firmly positive.
+      //
+      // Holding λ40 at 0.8 would have pinned ζ_heave,linear above ~0.54, and
+      // that ratio is dead-beat: it is the difference between a hull that
+      // reverberates after a slam and one that does not, which is the whole
+      // of §V.70. It also costs almost nothing to give up — the RAO at λ40 is
+      // 0.40, so this is a phase bound on a response the hull barely makes,
+      // in a band that carries little of this sea's energy (mean λ ≈ 69 m,
+      // swell 189 m).
+      expect(num / Math.sqrt(dy * dh)).toBeGreaterThan(L <= 40 ? 0.5 : 0.8);
     }
     // and the selectivity survives: chop under half the hull's length is
     // still averaged away, or we bought the swell back by becoming a cork
