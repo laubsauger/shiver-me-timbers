@@ -238,12 +238,29 @@ export function createBowSpray() {
           fin(bow.bowWorldPos.z),
         );
       }
-      // sheet width follows the HULL's actual breadth where it enters the
+      // Sheet width follows the HULL's actual breadth where it enters the
       // water — a fine entry throws a narrow sheet, the full beam a wide one.
       // Hull-relative, so it survives a different ship (§V18) without retuning.
-      uSideOffset.value = cut
-        ? Math.max(0, fin(cut.halfWidth)) * sprayParams.bowSideFraction
-        : sprayParams.bowSideOffset;
+      //
+      // FLOORED, and that floor is the whole point. `cutwater.halfWidth` is the
+      // half-breadth AT THE CROSSING, and the crossing is normally the stem
+      // itself — where a hull comes to a point and the half-breadth is EXACTLY
+      // ZERO by construction. Measured at 20 kt in open water: halfWidth was 0
+      // on 53% of ticks (75% in the earlier run), so `bowSideFraction` was being
+      // multiplied by nothing and the entire sheet collapsed onto the
+      // centreline. The young cohort read a 0.03 m spread across the beam
+      // against 2.8 m along the hull — a line of particles, not a sheet, which
+      // is exactly the "we lost the spray forward" the user reported.
+      //
+      // A knife-edged stem still throws water outboard: the width of a bow
+      // sheet is set by the wave the hull makes, not by the plating at the one
+      // point where the outline pierces the surface. So `bowSideOffset` is a
+      // MINIMUM, not a fallback — the hull's real half-breadth takes over as
+      // soon as the crossing walks aft into the shoulder, where it is wider.
+      uSideOffset.value = Math.max(
+        Math.max(0, sprayParams.bowSideOffset),
+        cut ? Math.max(0, fin(cut.halfWidth)) * sprayParams.bowSideFraction : 0,
+      );
       uTime.value += SIM_DT;
       pool.step(renderer); // physics always runs — airborne spray keeps falling
 

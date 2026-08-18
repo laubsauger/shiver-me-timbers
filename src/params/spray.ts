@@ -159,14 +159,23 @@ export interface SprayParams {
   /** upward launch as a fraction of ship speed */
   bowRise: number;
   /**
-   * half-width (m) of the cutwater emission line — FALLBACK only, used until
-   * the hull-contact sampler supplies the real half-breadth at the crossing.
+   * MINIMUM half-width (m) of the cutwater emission line. Not a fallback: the
+   * hull-contact sampler reports the half-breadth AT THE CROSSING, and the
+   * crossing is normally the stem — where the hull comes to a point and that
+   * half-breadth is exactly zero. Measured at 20 kt, it was zero on over half
+   * the ticks, which multiplied `bowSideFraction` by nothing and collapsed the
+   * whole sheet onto the centreline. A fine entry still throws water outboard,
+   * because the width of a bow sheet is set by the wave the hull makes, not by
+   * the plating at one point on the outline. bowSpray.ts takes the MAX of this
+   * and the hull-relative width.
    */
   bowSideOffset: number;
   /**
    * fraction of the hull's half-breadth AT THE CUTWATER that the sheet spans.
    * Hull-relative on purpose: a fine entry throws a narrow sheet and the full
-   * beam a wide one, with no metre constant to retune per ship (§V18).
+   * beam a wide one, with no metre constant to retune per ship (§V18). Only
+   * bites once the crossing has walked aft into the shoulder — at the stem
+   * itself it has nothing to scale (see bowSideOffset).
    */
   bowSideFraction: number;
   /** metres above the bow waterline that sheets are born at (see spawnLift) */
@@ -230,14 +239,25 @@ export const sprayParams: SprayParams = registerParams(
     fadeNear: 25,
     fadeFar: 55,
     spawnExtent: 90,
+    // DENSITY IS THE CONTRAST LEVER, and it is free. The pool is ONE instanced
+    // draw whose every slot is dispatched and rasterized each frame whatever
+    // the occupancy (dead slots collapse to a degenerate quad, §V28), so
+    // filling it costs no draw call and no dispatch on a frame that is
+    // CPU-bound at 595 draws. Measured at 20 kt before this change: mean 243
+    // particles/s => ~146 live of 1024, i.e. 14% occupancy, rendering as
+    // 3.4 px sprites at 0.053 peak additive alpha from a 37 m camera — below
+    // the visible threshold against sunlit whitecaps. A bow sheet is dense
+    // water, not a scatter of droplets; under additive blending overlapping
+    // sprites accumulate, so density buys the contrast that per-sprite alpha
+    // cannot without also brightening the crest mist that shares `opacity`.
     bowCount: 1024,
-    bowBurstRate: 280,
-    bowCruiseRate: 60,
+    bowBurstRate: 1000,
+    bowCruiseRate: 220,
     bowCruiseSheet: 0.35,
     bowImpactRef: 0.6,
     bowSlamRateOn: 1.6, // = audioParams.slamRateOn
     bowSlamRateFull: 5, // = audioParams.slamRateFull
-    bowSlamRate: 900,
+    bowSlamRate: 2400,
     bowSlamRise: 1.4,
     bowSlamSpread: 0.9,
     bowContactDepth: 0.12,
@@ -248,7 +268,7 @@ export const sprayParams: SprayParams = registerParams(
     bowSideFraction: 1.05,
     bowSpawnLift: 0.35,
     bowStemLength: 3.0,
-    bowSizeScale: 2.6,
+    bowSizeScale: 3.4,
     bowLife: 0.6, // long enough for a slam arc to peak and come back down
     bowDrag: 2.6,
     bowSpeedExponent: 2,
