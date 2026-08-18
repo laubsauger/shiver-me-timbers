@@ -17,6 +17,37 @@ export const postParams = registerParams(
   {
     enabled: true,
 
+    // --- antialiasing ---------------------------------------------------
+    // MSAA already runs and already works: the scene pass keeps
+    // `renderer.samples` (4) unless AO/DoF force it off, and rigging measured
+    // against a 2×SSAA reference comes out at RMSE 7.42 — ropes and yards are
+    // clean. What MSAA structurally CANNOT touch is aliasing inside a
+    // triangle, because it shades once per pixel and only supersamples
+    // COVERAGE. That is the entire residual the user has been reporting: the
+    // same frame, split by region against the 2×SSAA truth, is 7.42 on
+    // rigging-against-sky but 16.28 on hull PLANK SHADING. Staircases on the
+    // planking, and a moiré beat when the hull shrinks on zoom-out.
+    //
+    // SMAA is the post filter that attacks exactly that: it finds edges in the
+    // final image, whatever drew them, and reconstructs the sub-pixel coverage
+    // from a pattern lookup instead of blurring. Measured against 2×SSAA as
+    // truth, as excess high-frequency energy over that reference:
+    //   helm framing  +6.8% → −9.3%   (RMSE 11.08 → 11.25, flat)
+    //   hull framing  +17.5% → +6.8%  (RMSE 10.65 → 10.50, improves)
+    // FXAA was measured on the same frames and REJECTED: it lands 34% BELOW
+    // the supersampled truth's high-frequency energy — i.e. it does not fix
+    // the edges, it deletes the ocean detail and the deck grain — and its
+    // RMSE got worse (11.08 → 13.18). It is not a cheaper SMAA here.
+    //
+    // TAA is the real answer for the shading term and is deliberately not
+    // taken yet: three ships TRAANode, but every material must emit correct
+    // MRT velocity, and the ocean is vertex-displaced by a compute FFT while
+    // the rigging is compute-driven — neither can derive velocity from a
+    // previous-frame model matrix.
+    //
+    // CONSTRUCTION gate (reload to change), like the rest of this block.
+    smaaEnabled: true,
+
     // --- AO ------------------------------------------------------------
     // OFF by default, and it is a real trade rather than a hedge:
     //  * GTAO reads the scene pass DEPTH, and a multisampled depth attachment

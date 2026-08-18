@@ -297,7 +297,34 @@ function features(on: GraphicsFeatureId[]): GraphicsFeatureState {
  */
 export const QUALITY_BUNDLES: Record<Quality, QualityBundle> = {
   low: {
-    resolutionScale: 0.75,
+    /**
+     * 0.75 → 1. Not a quality-bar decision, a MEASUREMENT: 0.75 was the only
+     * real downscale left in the codebase and it was paying full price for
+     * nothing.
+     *
+     * What it bought: near zero. This frame is CPU-BOUND — 595 draw calls
+     * across 18 passes, 19-24 ms of CPU encode against 6-10 ms of GPU work
+     * (d5bd07a) — and `low` has already switched off reflections, caustics,
+     * deck water, spray, rain, both shadow paths and the whole post chain,
+     * i.e. every stage that was fill-limited. Shrinking the framebuffer under
+     * a draw-call bottleneck moves the frame time hardly at all.
+     *
+     * What it cost: the entire image. At a 1920-wide window the backing store
+     * lands at 1440×642 and is bilinearly stretched 1.33× to the canvas, with
+     * no sharpening anywhere in the composite. Against a 2×SSAA reference that
+     * is RMSE 15.83 vs 10.76 at native — 47% worse, uniformly, over every
+     * pixel rather than at edges. It is the "everything is blocky" signature
+     * the user photographed. It also silently caps what this tier can ever get
+     * back: `postFx` is a `reload: false` switch, so a low-tier player can
+     * turn post on mid-session, and the SMAA at the end of that chain
+     * reconstructs edges in the BACKING STORE — a 1.33× bilinear upscale
+     * afterwards smears the sub-pixel detail it just rebuilt.
+     *
+     * The remaining frame-buying levers at this tier are `foliageDensity` and
+     * the feature list, not the whole frame. `shadowMapSize` is inert here —
+     * `shadows` is not in the feature list below, so nothing reads it.
+     */
+    resolutionScale: 1,
     features: features(['postBloom', 'postVibrance', 'postVignette']),
     shadowMapSize: 1024,
     foliageDensity: 0.35,

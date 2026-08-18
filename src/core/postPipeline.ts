@@ -14,6 +14,17 @@
  *                      is false so this happens HERE, not implicitly last)
  *     → vibrance       EXTRAPOLATING op — must see bounded 0..1 input
  *     → +dither        immediately before 8-bit quantisation
+ *     → SMAA           LAST, on the finished display-referred image
+ *
+ * SMAA sits at the very end on purpose. Its edge detector is a fixed absolute
+ * threshold (0.1) on colour deltas, which is a value tuned for gamma-encoded
+ * 0..1 — run it on the pre-tone-map HDR and the same threshold means a
+ * different thing in every part of the frame, over-detecting in the sky and
+ * missing the mid-tone plank shading that is the whole reason it is here. It
+ * is downstream of the dither, and that is harmless rather than sloppy: the
+ * dither is 1.5/255, far below the edge threshold, so it never creates an
+ * edge, and SMAA blends only where a weight is non-zero — the flat sky
+ * gradient the dither exists to break up is passed through untouched.
  *
  * The vibrance placement is a bug fix, not taste. `vibrance()` is
  * `mix(color, maxChannel, -3·adjustment·(max−avg))` — a mix with a NEGATIVE
@@ -50,6 +61,7 @@ import type { ShaderNodeObject } from 'three/tsl';
 import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
+import { smaa } from 'three/addons/tsl/display/SMAANode.js';
 import { postParams as pp } from '../params/post';
 import { skyParams } from '../params/sky';
 import { sunDirection as solarDirection } from '../sky/sunCycle';
@@ -157,6 +169,7 @@ export function createPostPipeline(
     ['vignetteEnabled', pp.vignetteEnabled, () => pp.vignetteEnabled],
     ['vibranceEnabled', pp.vibranceEnabled, () => pp.vibranceEnabled],
     ['grainEnabled', pp.grainEnabled, () => pp.grainEnabled],
+    ['smaaEnabled', pp.smaaEnabled, () => pp.smaaEnabled],
   ];
   const drifted = new Set<string>();
   const checkGateDrift = (): void => {
@@ -288,7 +301,15 @@ export function createPostPipeline(
     graded = graded.add(ign.sub(0.5).mul(uGrain));
   }
 
-  post.outputNode = vec4(graded.clamp(0, 1), 1);
+  // --- SMAA ---------------------------------------------------------------
+  // See the header for why this is last. MSAA supersamples COVERAGE only, so
+  // it cannot touch shading aliasing inside a triangle — which is the entire
+  // measured residual (rigging-vs-SSAA RMSE 7.42, hull plank shading 16.28).
+  // Construction gate: it owns three render targets and two lookup textures,
+  // so a disabled build must not allocate them (§V.16). See params/post.ts for
+  // the SMAA-vs-FXAA measurement and why FXAA lost.
+  const ldr = vec4(graded.clamp(0, 1), 1);
+  post.outputNode = pp.smaaEnabled ? smaa(ldr) : ldr;
 
   const updateFromParams = (): void => {
     checkGateDrift();
