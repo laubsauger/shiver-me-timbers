@@ -102,10 +102,17 @@ export const vegetationParams: VegetationParams = registerParams(
     ringInner: 22,
     ringOuter: 48,
     clusterSpread: 6,
-    scaleMin: 0.8,
-    scaleMax: 1.25,
-    heightJitter: 0.15,
-    leanMax: 0.14,
+    // §V43 "they read as placed props": the shipped ranges were 0.8-1.25 in
+    // scale (1.6:1) with 8 of lean, so every palm on an island was the same
+    // palm at the same angle — and the geometry is ONE mesh per island, so
+    // instance variation is the only variation there can be without paying a
+    // draw call per shape. Widened to 2.2:1 in scale and 26 of lean, which
+    // is what the references show on a beach: trunks leaning out over the
+    // water at a real angle, and saplings next to mature trees.
+    scaleMin: 0.62,
+    scaleMax: 1.38,
+    heightJitter: 0.28,
+    leanMax: 0.46,
     trunkColor: 0x9a744e,
     barkStripeColor: 0x74553a,
     barkRingFrequency: 14,

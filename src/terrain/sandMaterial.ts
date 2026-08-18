@@ -87,7 +87,32 @@ export interface SandMaterialOptions {
  */
 function seaDepthNode(u: SandUniforms, worldXZ: any) {
   const active = terrainParams.receiveCaustics ? activeCaustics() : undefined;
-  const seaY: any = active ? active.waterHeight(worldXZ) : u.waterline;
+  /**
+   * §V.72 — THE DEPTH THIS SURFACE ITSELF DEFINES.
+   *
+   * This material IS the seabed, so the still-water column over the fragment
+   * being shaded is exactly `-positionWorld.y`: not a resample of the baked
+   * seabed field, not a second height function, the rendered position. That
+   * makes it impossible for the sea level we derive from it to drift from the
+   * ground we are painting it on — the failure mode `27a0795` fixed twice and
+   * this is the third instance of.
+   *
+   * Handing it to `waterHeight` is what makes `seaY` the sea AS DRAWN rather
+   * than the raw open-ocean spectrum. Without it the swell marched across dry
+   * land at full amplitude (measured: up to 1.9 m of sea level over sand the
+   * ocean was drawing flat), which painted the §V.34 absorption tint and the
+   * caustics onto the beach and, half a cycle later, took the darkening off
+   * genuinely submerged sand. Everything downstream of `seaY` inherits the
+   * fix: the swash level and wet-sand memory (shoreRunup) stop walking inland,
+   * and the shelf apron out to -45 m finally attenuates.
+   *
+   * On dry sand (y > 0) the depth clamps to 0, so every cascade's shoaling
+   * factor is tanh(0) = 0 and `seaY` is exactly 0 — a beach above the
+   * waterline can no longer be told it is underwater, by construction rather
+   * than by a threshold.
+   */
+  const shoalDepth: any = positionWorld.y.negate().max(0);
+  const seaY: any = active ? active.waterHeight(worldXZ, shoalDepth) : u.waterline;
   return { seaY, depthBelow: seaY.sub(positionWorld.y), live: Boolean(active) };
 }
 
@@ -131,7 +156,10 @@ export function createSandUniforms(opts: SandMaterialOptions = {}) {
     shadeScale: uniform(p.sandShadeScale),
     grainScale: uniform(p.sandGrainScale),
     grainStrength: uniform(p.sandGrainStrength),
-    sparkleDensity: uniform(p.sparkleDensity),
+    sparkleCellPixels: uniform(p.sparkleCellPixels),
+    sparkleMinCell: uniform(p.sparkleMinCell),
+    sparkleRadiusPixels: uniform(p.sparkleRadiusPixels),
+    sparkleResolveCells: uniform(p.sparkleResolveCells),
     sparkleCoverage: uniform(p.sparkleCoverage),
     sparklePower: uniform(p.sparklePower),
     sparkleStrength: uniform(p.sparkleStrength),
@@ -142,8 +170,12 @@ export function createSandUniforms(opts: SandMaterialOptions = {}) {
     rippleDepthFade: uniform(p.rippleDepthFade),
     /** unit vector ACROSS the crests — the direction the pattern repeats in */
     rippleDir: uniform(new THREE.Vector2(1, 0)),
-    rippleBend: uniform(p.rippleBend),
-    rippleBendScale: uniform(p.rippleBendScale),
+    rippleWarp: uniform(p.rippleWarp),
+    rippleWarpScale: uniform(p.rippleWarpScale),
+    rippleContourWeight: uniform(p.rippleContourWeight),
+    rippleContourSpacing: uniform(p.rippleContourSpacing),
+    ripplePatchScale: uniform(p.ripplePatchScale),
+    ripplePatchThreshold: uniform(p.ripplePatchThreshold),
     waterline: uniform(p.waterline),
     causticsBand: uniform(p.causticsWaterlineBand),
     wetBand: uniform(p.wetBand),
@@ -165,7 +197,10 @@ export function updateSandUniforms(u: SandUniforms): void {
   u.shadeScale.value = p.sandShadeScale;
   u.grainScale.value = p.sandGrainScale;
   u.grainStrength.value = p.sandGrainStrength;
-  u.sparkleDensity.value = p.sparkleDensity;
+  u.sparkleCellPixels.value = p.sparkleCellPixels;
+  u.sparkleMinCell.value = p.sparkleMinCell;
+  u.sparkleRadiusPixels.value = p.sparkleRadiusPixels;
+  u.sparkleResolveCells.value = p.sparkleResolveCells;
   u.sparkleCoverage.value = p.sparkleCoverage;
   u.sparklePower.value = p.sparklePower;
   u.sparkleStrength.value = p.sparkleStrength;
@@ -174,8 +209,12 @@ export function updateSandUniforms(u: SandUniforms): void {
   u.rippleStrength.value = p.rippleStrength;
   u.rippleWavelength.value = p.rippleWavelength;
   u.rippleDepthFade.value = p.rippleDepthFade;
-  u.rippleBend.value = p.rippleBend;
-  u.rippleBendScale.value = p.rippleBendScale;
+  u.rippleWarp.value = p.rippleWarp;
+  u.rippleWarpScale.value = p.rippleWarpScale;
+  u.rippleContourWeight.value = p.rippleContourWeight;
+  u.rippleContourSpacing.value = p.rippleContourSpacing;
+  u.ripplePatchScale.value = p.ripplePatchScale;
+  u.ripplePatchThreshold.value = p.ripplePatchThreshold;
   // crests run ALONG `rippleAngle`, so the repeat direction is its normal
   {
     const a = (p.rippleAngle * Math.PI) / 180;
@@ -259,18 +298,99 @@ export function buildSandNodes(
   // NOT §B.43's mistake: the amplitude is faded on the ripple's OWN coordinate,
   // in the ripple's own units, rather than left world-locked with the gate
   // measured against something else.
-  const rippleCoord = ground
+  // ── §B.xx REGRESSION FIX: "perfectly regular shape and grid" ─────────────
+  //
+  // WHAT SHIPPED AND WHY IT WAS A GRID BY CONSTRUCTION. The field was ONE
+  // sine, on ONE bearing, at ONE wavelength, over every island in the world,
+  // with a single small bounded phase wobble on top. There is no parameter
+  // setting of that expression that is not corduroy — the user's "perfectly
+  // regular shape and grid … basically it just looks like a bug" is the exact
+  // and inevitable output of a single grating.
+  //
+  // A SECOND DETUNED SINE IS NOT THE FIX (§B.4: two gratings still read as a
+  // grid, just a moiré one). Three changes, and the first is the one that
+  // matters:
+  //
+  //  (1) DOMAIN WARP THE PHASE. Real wave ripples have SINUOUS crests that
+  //      BIFURCATE — a crest wanders, splits in two and rejoins — and that
+  //      branching is the single most recognisable thing about a rippled bed.
+  //      Branching is a phase DISLOCATION, and a dislocation appears exactly
+  //      when the warp's own gradient can locally overcome the carrier's. The
+  //      old `rippleBend` could not do it: at 0.18 wavelengths of offset over
+  //      an 8 m noise it only ever nudged a straight line. Warping by ~0.9
+  //      wavelengths over a noise a few wavelengths across does, and it costs
+  //      one extra noise tap.
+  //
+  //  (2) THE CONTOUR TERM. Wave orbital motion refracts over bathymetry, so
+  //      real ripple crests follow the depth contours near a shore instead of
+  //      marching on one global bearing. The level sets of DEPTH are the
+  //      contours, so adding depth (in its own vertical spacing) to the
+  //      coordinate makes crests bend round the bay for free.
+  //
+  //  (3) PATCHINESS. Ripples die over coarse patches, rock and strong
+  //      currents. A low-frequency mask takes the field out entirely in
+  //      places, which is what stops any surviving regularity reading as a
+  //      manufactured pattern.
+  //
+  // ── THE LEVER ARM, WHICH IS EXACTLY WHERE THIS WOULD GO WRONG ────────────
+  // `50c3a76` put a sampling rate 856× out at this very lagoon by letting a
+  // spatially varying quantity multiply an ABSOLUTE world coordinate. Every
+  // term above is written to avoid that, and the discipline is worth stating
+  // because "make the ripples follow the terrain" is a one-line change that
+  // reintroduces it:
+  //
+  //   * THE OBVIOUS VERSION OF (2) IS THE TRAP. Rotating the repeat direction
+  //     to follow the slope — `dot(ground, dirFromNormal(p))` — is literally
+  //     `worldPos · f(worldPos)`. At the showcase island |ground| ≈ 912 m, so
+  //     a 0.01 rad wobble in that direction is ~9 m of phase, i.e. six whole
+  //     crests per metre of ground: the field would alias into noise, and it
+  //     would do it ONLY away from the origin, where no unit test looks. So
+  //     the contour term is ADDED as its own scalar (`depthBelow`, whose
+  //     gradient is the bounded local slope) instead of being folded into the
+  //     direction of an absolute coordinate.
+  //   * The blend weight between the two is a UNIFORM, never a spatial field.
+  //     A spatial blend would put `ground`'s 912 m magnitude back behind a
+  //     varying multiplier and undo the whole argument.
+  //   * The warp is added AFTER the division, in WAVELENGTHS, and is bounded.
+  //     It moves the PHASE. It never touches the SCALE.
+  //
+  // Both contributions are therefore strictly linear-plus-bounded in the world
+  // coordinate, and `periodResolved` below measures the finished coordinate's
+  // real screen footprint (warp included), so the §V.48 gate stays exact.
+  const rippleLinear = ground
     .dot(u.rippleDir)
     .div(u.rippleWavelength.max(1e-3));
-  const rippleResolved = periodResolved(rippleCoord);
-  // crest lines wander so they never read as ruled lines; a bounded phase
-  // offset in WAVELENGTHS, so it means the same thing at any wavelength
-  const rippleWander = valueNoise2(ground.mul(u.rippleBendScale))
+  // depth in "crests per metre of depth" — level sets of this ARE the contours
+  const rippleContour = sea.depthBelow.div(u.rippleContourSpacing.max(1e-3));
+  const rippleCarrier = mix(rippleLinear, rippleContour, u.rippleContourWeight);
+  // Domain warp, in wavelengths. Two octaves at different scales: the coarse
+  // one bends the crest lines, the fine one is what actually pinches and
+  // splits them. `rippleWarpScale` and `rippleWarpScale × lacunarity` are
+  // plain uniforms on the absolute coordinate — linear, not a lever arm.
+  const warpCoarse = valueNoise2(ground.mul(u.rippleWarpScale)).sub(0.5);
+  const warpFine = valueNoise2(ground.mul(u.rippleWarpScale.mul(2.7)).add(vec2(19.3, 7.1)))
     .sub(0.5)
-    .mul(u.rippleBend);
+    .mul(0.55);
+  const rippleWander = warpCoarse.add(warpFine).mul(u.rippleWarp);
+  const rippleCoord = rippleCarrier.add(rippleWander);
+  // §V.48: measured on the FINISHED coordinate, so the warp's own contribution
+  // to the screen footprint is included rather than assumed away
+  const rippleResolved = periodResolved(rippleCoord);
+  // (3) patchiness: a low-frequency mask that removes the bedform entirely
+  // over part of the floor. Smooth, no edge, mean-fading — the §V.48b branch,
+  // and `periodResolved` on its own coordinate is that fade.
+  const patchCoord = ground.mul(u.ripplePatchScale);
+  const ripplePatch = mix(
+    float(1),
+    valueNoise2(patchCoord).smoothstep(u.ripplePatchThreshold, u.ripplePatchThreshold.add(0.22)),
+    periodResolved(patchCoord),
+  );
   // sharpened toward the crests: real ripples are round-crested and flat-
-  // troughed, and the asymmetry is most of what makes them read as sand
-  const rippleWave = rippleCoord.add(rippleWander).mul(Math.PI * 2).sin();
+  // troughed, and the asymmetry is most of what makes them read as sand.
+  // (`rippleWander` is already inside `rippleCoord` — it used to be added a
+  // SECOND time here, which double-counted the phase offset against the
+  // footprint `rippleResolved` was measured on.)
+  const rippleWave = rippleCoord.mul(Math.PI * 2).sin();
   // Depth gates, both required. Below: ripples are cut by wave orbital motion
   // at the bed, which dies with depth, so a deep shelf is smooth. Above: they
   // are a SEABED feature and must not crawl up the dry beach.
@@ -285,6 +405,7 @@ export function buildSandNodes(
   const ripple = rippleWave
     .mul(u.rippleStrength)
     .mul(rippleResolved)
+    .mul(ripplePatch)
     .mul(rippleDepth)
     .mul(rippleSubmerged);
   albedo = albedo.mul(ripple.add(1));
@@ -306,29 +427,109 @@ export function buildSandNodes(
     albedo = mix(albedo, shore.foamColor, swash.foam);
   }
 
-  // sparkle glints: hashed cells, random facet normal, sun/view half-vector.
-  //
-  // §V.48, and this was the worst offender in the terrain stack because it
-  // ends up in an ADDITIVE slot (§V44): `sparkleDensity` 6 gives a 0.167 m
-  // cell, the gate is a BINARY step() and the facet normal is per-cell RANDOM,
-  // so once a cell is under a pixel the pow(dot,26) term is per-pixel random
-  // white — the exact §B.20 signature ("uniform speckle over a whole surface")
-  // multiplied by `sparkleStrength` 1.4 straight into emissive. It goes
-  // sub-pixel at 326 m head-on and at 33 m at 10× grazing.
-  //
-  // The correct filtered value of a random per-cell glint over a footprint
-  // spanning many cells is its MEAN, and the mean of a pow(·,26) lobe gated at
-  // 6% coverage is ≈0 — so fading the amplitude is not an approximation here,
-  // it IS the answer. `periodResolved` on the cell coordinate (1 unit = 1
-  // cell) is exactly that gate.
-  const cellCoord = ground.mul(u.sparkleDensity);
-  const sparkleResolved = periodResolved(cellCoord);
-  const cell = cellCoord.floor();
-  const gate = step(u.sparkleCoverage.oneMinus(), hash2(cell));
+  /**
+   * ── §B.43: THE SAND SPECKLE ────────────────────────────────────────────
+   *
+   * WHAT THE USER SEES: "a dense speckle of small bright dots" across the
+   * whole beach. WHAT IT IS: `sparkleDensity` 6 is a WORLD-LOCKED 0.167 m
+   * cell. From the deck at 30 m that is about ELEVEN PIXELS across — so every
+   * glint is a fat blob, not a glint — and at 300 m it is a quarter of a pixel,
+   * where the binary `step()` gate becomes a per-pixel coin flip and the whole
+   * beach stipples. One world-locked cell size cannot be right at both ends,
+   * and it was never right at either.
+   *
+   * The previous pass added `periodResolved` on the cell coordinate, which
+   * correctly killed the FAR stipple by fading the amplitude to its own mean.
+   * It could not touch the near end, because a 0.167 m cell being eleven
+   * pixels wide is not an aliasing problem — the pattern is fully resolved and
+   * simply authored at the wrong size. §B.43 is that remaining half, and the
+   * fix is the model the ocean's sun glitter already runs (surfaceMaterial.ts,
+   * `cellTarget`/`cellSize`/`disc`/`resolvable`), transliterated onto sand:
+   *
+   *  (a) SIZE THE CELL FROM THE PIXEL, NOT FROM THE WORLD. `cellTarget` is the
+   *      pixel's own world footprint times the number of pixels a cell should
+   *      span, so cells stay a fixed size ON SCREEN at every distance and
+   *      every view angle. Quantising to octaves (`exp2(log2(·).floor())`)
+   *      keeps the lattice world-locked inside a band, so the pattern does not
+   *      boil as the camera moves.
+   *
+   *  (b) A GLINT IS A POINT, NOT A CELL. The old `step()` gate is on/off over
+   *      a world-locked axis-aligned SQUARE — which is what "small bright
+   *      dots" of a uniform size actually are. Hash the glint to a POSITION
+   *      inside its cell and give it a radial falloff whose radius is a fixed
+   *      FRACTION of the cell (§V.48b: a fixed PIXEL radius against an
+   *      octave-quantised cell makes both `coverage` and `resolvable`
+   *      discontinuous at every octave, which the ocean measured as a hard
+   *      2.52× step in the term's own mean and a visible ring).
+   *
+   *  (c) RETIRE INTO ITS OWN MEAN. As the cell stops being able to hold a
+   *      distinguishable point, both binary terms crossfade to their
+   *      expectations — the disc to its coverage ½π(r/c)², the on/off hash to
+   *      its probability (1 − thr). The two branches have EQUAL MEAN by
+   *      construction, so the beach keeps its brightness and simply stops
+   *      being made of dots instead of dimming.
+   *
+   * `sparkleDensity` therefore no longer means "cells per metre" — it is
+   * replaced by `sparkleCellPixels` / `sparkleMinCell`, the same two numbers
+   * the ocean carries, and the same defaults: cells target ~2.6 px at the top
+   * of an octave falling to ~1.3 px at the bottom, which is the 1.3-2.6 the
+   * model wants and roughly a fifth of what the beach was drawing.
+   */
+  // world size of one pixel, measured on the ground coordinate itself — the
+  // same footprint every §V.48 gate in this file is measured against
+  const pixWorld = ground.dFdx().abs().add(ground.dFdy().abs()).length().max(1e-5);
+  const cellTarget = pixWorld.mul(u.sparkleCellPixels).max(u.sparkleMinCell);
+  const cellSize = cellTarget.log2().floor().exp2().max(u.sparkleMinCell);
+  const cellUv = ground.div(cellSize);
+  const cell = cellUv.floor();
+  // @band-limited-elsewhere — hash of an INTEGER cell index: constant within
+  // a cell, so it has no gradient to alias. What can alias is the cell
+  // LATTICE, and that is band-limited where it is built (`cellSize` from
+  // `pixWorld`, above) and dissolved into its own mean by `resolvable` below.
+  const sparkleHash = hash2(cell);
+  const gate = step(u.sparkleCoverage.oneMinus(), sparkleHash);
+  // cell size in pixels, and the glint radius as a FRACTION of it (§V.48b —
+  // see the ocean's note: a constant pixel radius against an octave-quantised
+  // cell reintroduces a discontinuity at every octave boundary)
+  const cellPix = cellSize.div(pixWorld).max(0.25);
+  const radPix = cellPix
+    .mul(u.sparkleRadiusPixels.max(0.05).div(u.sparkleCellPixels.max(0.5)))
+    .max(0.02);
+  // @band-limited-elsewhere — hash of an integer lattice index, picks WHERE
+  // the glint sits; its extent is `radPix`, sized in pixels against `pixWorld`
+  const jx = hash2(cell.add(vec2(7.7, 3.1)));
+  const jz = hash2(cell.add(vec2(1.3, 9.7)));
+  // inset by its own radius so the disc can never be clipped by the cell
+  // border, which would put the square lattice straight back
+  const inset = radPix.div(cellPix).min(0.5);
+  const jitter2 = vec2(jx, jz).mul(inset.mul(2).oneMinus()).add(inset);
+  const distPix = cellUv.sub(cell).sub(jitter2).mul(cellPix).length();
+  // smoothstep(e0,e1,x) with e0 > e1: 1 at the point, 0 at the radius (§V23).
+  // Both operands are in PIXELS — this IS the band limit, not an edge needing
+  // one.
+  const disc = smoothstep(radPix, float(0), distPix);
+  // the two means (c) crossfades to
+  const coverage = radPix
+    .mul(radPix)
+    .mul(Math.PI * 0.5)
+    .div(cellPix.mul(cellPix).max(1e-4))
+    .clamp(0, 1);
+  const onProb = u.sparkleCoverage.clamp(0, 1);
+  // 0 while the cell is too small to hold a distinguishable point, 1 past
+  // twice that. `cellPix` is cellSize/pixWorld, so this too is the limit
+  // itself rather than something needing one.
+  const resolvable = smoothstep(
+    u.sparkleResolveCells,
+    u.sparkleResolveCells.mul(2),
+    cellPix.div(radPix.max(1e-4)),
+  );
+  const sparkleField = mix(onProb.mul(coverage), gate.mul(disc), resolvable);
+  // the facet normal stays per-cell random, but it now modulates a POINT
+  // rather than a whole square, and the whole term retires into its mean
   const jitter = vec3(
-    hash2(cell.add(vec2(7.7, 3.1))).sub(0.5),
-    hash2(cell.add(vec2(1.3, 9.7))).sub(0.5),
     hash2(cell.add(vec2(4.9, 6.3))).sub(0.5),
+    hash2(cell.add(vec2(2.1, 8.4))).sub(0.5),
+    hash2(cell.add(vec2(5.6, 0.9))).sub(0.5),
   );
   const facet = normalWorld.add(jitter).normalize();
   const viewDir = cameraPosition.sub(positionWorld).normalize();
@@ -339,10 +540,9 @@ export function buildSandNodes(
     .dot(halfDir)
     .clamp(0, 1)
     .pow(u.sparklePower)
-    .mul(gate)
+    .mul(sparkleField)
     .mul(u.sparkleStrength)
-    .mul(wet.oneMinus())
-    .mul(sparkleResolved); // §V.48 — see the note above the cell coordinate
+    .mul(wet.oneMinus());
 
   // wet sand is glossy, foam is not — foam pulls roughness back up
   const gloss = swash ? wet.max(swash.sheet).mul(swash.foam.oneMinus()) : wet;

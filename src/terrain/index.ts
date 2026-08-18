@@ -66,6 +66,20 @@ export {
   type CoverNodes,
 } from './groundCover';
 export {
+  buildGrassGeometry,
+  buildShrubGeometry,
+  generateCoverPlacements,
+  createCoverMeshMaterial,
+  createCoverMeshUniforms,
+  updateCoverMeshUniforms,
+  createGroundCover,
+  type CoverPlacement,
+  type CoverTerrain,
+  type CoverMeshMaterial,
+  type CoverMeshUniforms,
+  type GroundCoverMeshes,
+} from './groundCoverMesh';
+export {
   createShoreUniforms,
   updateShoreUniforms,
   buildShoreNodes,

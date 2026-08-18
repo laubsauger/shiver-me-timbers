@@ -27,6 +27,7 @@ import type { ArchetypeName } from './archetypes';
 import { createIslandMesh, selectTerrainLod, type IslandMeshHandle } from './islandMesh';
 import { createRocks, type Rocks } from './rocks';
 import { createIslandPalms, type IslandPalms } from './palms';
+import { createGroundCover, type GroundCoverMeshes } from '../terrain';
 import type { IslandMaterials } from './islandMaterials';
 
 /**
@@ -39,6 +40,7 @@ export type ResolvedIslandParams = IslandParams & { archetype?: ArchetypeName };
 /** decorrelate the sub-system rng streams derived from the island seed */
 const ROCK_SEED_OFFSET = 1013;
 const PALM_SEED_OFFSET = 2027;
+const COVER_SEED_OFFSET = 3041;
 /** shoreline angles scanned when picking the waterfall socket location */
 const SOCKET_SCAN_ANGLES = 64;
 
@@ -115,6 +117,8 @@ export interface Island {
   terrain: IslandMeshHandle;
   rocks: Rocks;
   palms: IslandPalms;
+  /** instanced grass + shrubs (§V43) — two draws, gated to near range */
+  cover: GroundCoverMeshes;
   dispose(): void;
 }
 
@@ -223,16 +227,34 @@ export function createIsland(opts: CreateIslandOptions): Island {
     count: islandPalmCount(p.radius, islandParams),
     shared: shared ? { palm: shared.palm, sway: shared.palmSway } : undefined,
   });
+  const cover = createGroundCover({
+    seed: opts.seed + COVER_SEED_OFFSET,
+    heightmap,
+    material: shared?.cover,
+  });
   const waterfallSocket = buildWaterfallSocket(heightmap);
 
   const group = new THREE.Group();
   group.name = 'island';
-  group.add(terrain.mesh, rocks.group, palms.mesh, waterfallSocket);
+  group.add(terrain.mesh, rocks.group, palms.mesh, cover.group, waterfallSocket);
   const [px, pz] = opts.position;
   group.position.set(px, 0, pz);
 
   const camDelta = new THREE.Vector3();
   const foamTargets: THREE.Object3D[] = [terrain.mesh, ...rocks.foamTargets];
+  /**
+   * THE PER-FRAME `castShadow` TRAVERSAL, HOISTED (already named as a CPU cost
+   * worth attacking, and this frame is CPU-bound at 19-24 ms of encode).
+   *
+   * It re-walked `rocks.group` every frame, for every island, to write a value
+   * that changes only when someone moves the Tweakpane toggle. The casters are
+   * a fixed, tiny list — the terrain mesh, the palm batch and one InstancedMesh
+   * per rock variant — so collect it ONCE at build time and write the flag only
+   * on the frames where the toggle actually moved. Steady state is now a single
+   * boolean compare per island per frame instead of a scene walk.
+   */
+  const shadowCasters: THREE.Object3D[] = [terrain.mesh, palms.mesh, ...rocks.group.children];
+  let appliedCastShadows: boolean | null = null;
 
   return {
     group,
@@ -263,16 +285,16 @@ export function createIsland(opts: CreateIslandOptions): Island {
       // number per island, and a 200 m footprint never straddles a threshold
       camDelta.set(frame.cameraPosition.x - px, 0, frame.cameraPosition.z - pz);
       const dist = camDelta.length();
-      // re-applied per frame so the Tweakpane toggle is live
-      terrain.mesh.castShadow = p.castShadows;
-      palms.mesh.castShadow = p.castShadows;
-      rocks.group.traverse((o) => {
-        o.castShadow = p.castShadows;
-      });
+      // still live to the Tweakpane toggle — but only written when it moves
+      if (appliedCastShadows !== p.castShadows) {
+        appliedCastShadows = p.castShadows;
+        for (const caster of shadowCasters) caster.castShadow = p.castShadows;
+      }
 
       terrain.setLod(selectTerrainLod(dist, p));
       palms.setLodDistance(dist);
       rocks.setVisible(dist <= p.lodRockCull);
+      cover.setLodDistance(dist);
       // §V10/§V17: flowfoam re-tags every foamTarget in the scene each frame
       // and its capture region is ~120 m wide, so an island across the map is
       // pure wasted draws in that pass. Untag it until the ship is near.
@@ -284,7 +306,9 @@ export function createIsland(opts: CreateIslandOptions): Island {
     terrain,
     rocks,
     palms,
+    cover,
     dispose(): void {
+      cover.dispose();
       palms.dispose();
       rocks.dispose();
       terrain.dispose();

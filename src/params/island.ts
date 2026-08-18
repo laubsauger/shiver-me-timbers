@@ -312,6 +312,51 @@ export interface IslandParams {
   rockGeoVariants: number;
   /** how deep a rock sinks into the ground, fraction of its half-height */
   rockEmbed: number;
+  /**
+   * Deepest a rock standing OFF the shore may seat below still water, as a
+   * fraction of its own half-height. The seabed keeps falling away past the
+   * shoreline, so without this floor a mass placed out in the shallows is
+   * seated on -12 m and vanishes; the references stand them proud.
+   */
+  rockSeaSeat: number;
+  /** per-variant xz stretch (±fraction) — loaves and whale-backs, not spheres */
+  rockStretch: number;
+  /** z/x footprint ratio drawn per instance */
+  rockAspectMin: number;
+  rockAspectMax: number;
+  /** max instance tilt off vertical (rad) — bedding planes are not level */
+  rockTiltMax: number;
+  /** seeded half-space cuts per variant: the broad granite fracture faces */
+  rockFacetCount: number;
+  /** nearest a cut may pass to the centre (fraction of radius) */
+  rockFacetDepth: number;
+  /** how softly a cut rolls off — 0 would put a crease back in the shading */
+  rockFacetSoftness: number;
+  /** height (fraction of radius) below which the base flattens for bedding */
+  rockBedLevel: number;
+  /** 0 = no bedding flat, 1 = the base is a plane at -rockBedLevel */
+  rockBedFlatten: number;
+
+  // -- cliff masses (the island's silhouette, §V43) ---------------------------
+  /**
+   * Big granite masses, at `radius`; scaled linearly with footprint like
+   * `palmCount`. They share the boulders' instanced batches, so raising this
+   * costs instances and triangles but NOT draw calls.
+   */
+  cliffCount: number;
+  /** rocky flanks the masses cluster onto — see cliffGroupAngles */
+  cliffGroups: number;
+  /** angular half-spread (rad) of one flank */
+  cliffGroupSpread: number;
+  cliffMinScale: number;
+  cliffMaxScale: number;
+  cliffSquashMin: number;
+  cliffSquashMax: number;
+  /** radial band as a fraction of the local shore radius (>1 = out to sea) */
+  cliffRadialInner: number;
+  cliffRadialOuter: number;
+  /** how deep a cliff mass sinks, fraction of its half-height */
+  cliffEmbed: number;
 
   // -- archipelago scatter (T33; §V2: same seed ⇒ same world) ----------------
   /** islands scattered around the play area */
@@ -440,18 +485,47 @@ export const islandParams: IslandParams = registerParams(
     palmGroveCount: 4,
     palmGroveSpread: 26,
     palmGroveInlandFlare: 2.4,
-    rockCount: 18,
-    rockSpread: 14,
-    rockMinScale: 3.0,
-    rockMaxScale: 8.0,
-    rockSquashMin: 0.55,
-    rockSquashMax: 0.9,
-    rockNoiseAmp: 0.35,
-    rockNoiseFreq: 1.4,
+    rockCount: 22,
+    rockSpread: 16,
+    // wide range on purpose: with the cubed draw in generateRockPlacements
+    // most boulders land near the bottom of it and a few reach the top, which
+    // is what a real scatter looks like. A narrow range is what made every
+    // rock the same size.
+    rockMinScale: 2.1,
+    rockMaxScale: 9.0,
+    rockSquashMin: 0.5,
+    rockSquashMax: 0.95,
+    rockNoiseAmp: 0.22,
+    rockNoiseFreq: 1.7,
     rockNoiseOctaves: 3,
-    rockDetail: 2,
+    // 3, not 2: the welded normals are smooth now, so subdivision buys a
+    // rounder SILHOUETTE (it always did — it was the flat shading, not the
+    // triangle count, that read as facets). 720 tris on a mass that can be
+    // 35 m across, in a frame where draw calls are the scarce resource and
+    // triangles are not.
+    rockDetail: 3,
     rockGeoVariants: 4,
-    rockEmbed: 0.5,
+    rockEmbed: 0.42,
+    rockSeaSeat: 0.55,
+    rockStretch: 0.3,
+    rockAspectMin: 0.68,
+    rockAspectMax: 1.45,
+    rockTiltMax: 0.2,
+    rockFacetCount: 4,
+    rockFacetDepth: 0.62,
+    rockFacetSoftness: 0.22,
+    rockBedLevel: 0.45,
+    rockBedFlatten: 0.55,
+    cliffCount: 4,
+    cliffGroups: 3,
+    cliffGroupSpread: 0.42,
+    cliffMinScale: 7,
+    cliffMaxScale: 17,
+    cliffSquashMin: 0.6,
+    cliffSquashMax: 1.0,
+    cliffRadialInner: 0.44,
+    cliffRadialOuter: 1.14,
+    cliffEmbed: 0.6,
     islandCount: 5,
     // the sky agent's haze test case wants objects at 2-4 km; the near end
     // keeps one island reachable within a couple of minutes of sailing
@@ -470,7 +544,7 @@ export const islandParams: IslandParams = registerParams(
     lodTerrainStride: 2,
     lodPalmFull: 500,
     lodPalmCull: 1400,
-    lodRockCull: 1800,
+    lodRockCull: 4000,
     foamTargetMargin: 220,
     castShadows: true,
   },
@@ -542,6 +616,26 @@ function islandParamsMeta(): Partial<Record<keyof IslandParams, ParamMeta>> {
     rockDetail: { min: 1, max: 4, step: 1 },
     rockGeoVariants: { min: 1, max: 8, step: 1 },
     rockEmbed: { min: 0, max: 1, step: 0.05 },
+    rockSeaSeat: { min: 0, max: 1, step: 0.05 },
+    rockStretch: { min: 0, max: 0.7, step: 0.02 },
+    rockAspectMin: { min: 0.3, max: 1.5, step: 0.02 },
+    rockAspectMax: { min: 0.3, max: 2.5, step: 0.02 },
+    rockTiltMax: { min: 0, max: 0.6, step: 0.02 },
+    rockFacetCount: { min: 0, max: 10, step: 1 },
+    rockFacetDepth: { min: 0.3, max: 0.95, step: 0.01 },
+    rockFacetSoftness: { min: 0.02, max: 1, step: 0.02 },
+    rockBedLevel: { min: 0.1, max: 1, step: 0.05 },
+    rockBedFlatten: { min: 0, max: 1, step: 0.05 },
+    cliffCount: { min: 0, max: 24, step: 1 },
+    cliffGroups: { min: 1, max: 8, step: 1 },
+    cliffGroupSpread: { min: 0.05, max: 1.5, step: 0.02 },
+    cliffMinScale: { min: 2, max: 30, step: 0.5 },
+    cliffMaxScale: { min: 2, max: 45, step: 0.5 },
+    cliffSquashMin: { min: 0.2, max: 1.6, step: 0.05 },
+    cliffSquashMax: { min: 0.2, max: 1.6, step: 0.05 },
+    cliffRadialInner: { min: 0, max: 1.4, step: 0.02 },
+    cliffRadialOuter: { min: 0, max: 1.6, step: 0.02 },
+    cliffEmbed: { min: 0, max: 1, step: 0.05 },
     islandCount: { min: 0, max: 12, step: 1 },
     scatterMinDistance: { min: 200, max: 4000, step: 50 },
     scatterMaxDistance: { min: 400, max: 4500, step: 50 },

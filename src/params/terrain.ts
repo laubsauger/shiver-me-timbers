@@ -56,8 +56,22 @@ export interface TerrainParams {
   sandGrainScale: number;
   /** grain brightness modulation amount (0..1) */
   sandGrainStrength: number;
-  /** sparkle cells per meter */
-  sparkleDensity: number;
+  /**
+   * §B.43. Sparkle cells are sized from the PIXEL, not from the world: this
+   * is how many pixels a cell targets, so glints stay a fixed size on screen
+   * at every distance and every view angle. The old `sparkleDensity` (cells
+   * per metre) could only ever be right at one distance — at 6/m its 0.167 m
+   * cell was ~11 px from the deck and a quarter of a pixel at 300 m. Same
+   * name, same meaning and same default as the ocean's sun glitter, which is
+   * the model this was transliterated from.
+   */
+  sparkleCellPixels: number;
+  /** floor on the cell size (m), so cells cannot collapse up close */
+  sparkleMinCell: number;
+  /** glint radius in pixels, AT THE TOP OF AN OCTAVE (see §V.48b note) */
+  sparkleRadiusPixels: number;
+  /** cell radii across below which a glint stops being a distinguishable point */
+  sparkleResolveCells: number;
   /** fraction of cells that can glint (0..1) */
   sparkleCoverage: number;
   /** specular exponent of a glint (higher = tighter) */
@@ -96,10 +110,28 @@ export interface TerrainParams {
   rippleDepthFade: number;
   /** bearing (deg) the crests run along */
   rippleAngle: number;
-  /** how far crest lines wander (in wavelengths) so they are not ruled lines */
-  rippleBend: number;
-  /** world frequency (1/m) of that wander */
-  rippleBendScale: number;
+  /**
+   * DOMAIN WARP of the ripple phase, in WAVELENGTHS. This is the parameter
+   * that decides whether crests are sinuous and BIFURCATE or whether the bed
+   * is corduroy — under ~0.5 the field is a wobbled grating, and a grating is
+   * what the user called "a perfectly regular shape and grid".
+   */
+  rippleWarp: number;
+  /** world frequency (1/m) of the warp; a second octave rides at 2.7× this */
+  rippleWarpScale: number;
+  /**
+   * How much of the carrier is the DEPTH CONTOUR rather than the fixed
+   * bearing (0 = one global direction, 1 = crests follow the contours).
+   * A UNIFORM, deliberately: making this spatial would put the 912 m world
+   * coordinate back behind a varying multiplier — the `50c3a76` lever arm.
+   */
+  rippleContourWeight: number;
+  /** metres of DEPTH per crest for the contour term (sets contour spacing) */
+  rippleContourSpacing: number;
+  /** world frequency (1/m) of the patchiness that removes ripples entirely */
+  ripplePatchScale: number;
+  /** noise value a patch must beat to carry ripples at all */
+  ripplePatchThreshold: number;
 
   // -- shore wetness band ----------------------------------------------------
   /** world Y of the water surface the wet band hugs (m) */
@@ -234,6 +266,65 @@ export interface TerrainParams {
   vegSlopeThreshold: number;
   vegRoughness: number;
 
+  // -- ground cover GEOMETRY (terrain/groundCoverMesh.ts, §V43) --------------
+  // Instanced grass tufts and shrubs: the silhouette layer between the sand
+  // and the palms. Two draw calls per island, LOD-gated to nothing past
+  // `coverCullDistance` — see the cost note at the top of that file.
+  /** blades in one grass tuft */
+  grassBlades: number;
+  /** length segments per blade (silhouette smoothness of the bend) */
+  grassSegments: number;
+  grassHeight: number;
+  grassWidth: number;
+  /** how far a blade tip leans out from its root (m at scale 1) */
+  grassBend: number;
+  /** jittered-grid cell size (m) for grass candidates */
+  grassSpacing: number;
+  /** fraction of candidate cells that even try — thins without regularising */
+  grassDensity: number;
+  /** clump-noise value a cell must beat (0.5 = half the island) */
+  grassClumpThreshold: number;
+  /** leaf domes in one shrub */
+  shrubLobes: number;
+  shrubRings: number;
+  shrubSegments: number;
+  shrubRadius: number;
+  /** vertical squash of a leaf dome (1 = hemisphere) */
+  shrubSquash: number;
+  /** blades round the base of a shrub, so its edge is not a clean dome */
+  shrubSkirtBlades: number;
+  shrubSpacing: number;
+  shrubDensity: number;
+  shrubClumpThreshold: number;
+  /**
+   * Lowest ground cover grows on, as a fraction of `shoreBandHeight`. Keyed to
+   * the sand skirt rather than given its own metre value so the fringe starts
+   * exactly where the painted sand hands over to green — two independent
+   * numbers would drift and leave tufts standing in sand.
+   */
+  coverMinHeightFraction: number;
+  /** highest ground cover grows on (m above the waterline) */
+  coverMaxHeight: number;
+  /** max terrain gradient |∇h| (m/m) cover accepts */
+  coverSlopeLimit: number;
+  /** clump-noise world frequency (1/m) — sets how big a stand of grass reads */
+  coverClumpScale: number;
+  coverScaleMin: number;
+  coverScaleMax: number;
+  /** camera distance (m) past which the whole cover set stops drawing */
+  coverCullDistance: number;
+  /** tip displacement (m) at full wind and weight 1 */
+  coverSwayAmplitude: number;
+  coverSwaySpeed: number;
+  /** how strongly the per-plant phase decorrelates the gust */
+  coverSwayGust: number;
+  coverBaseColor: number;
+  coverTipColor: number;
+  coverDryColor: number;
+  /** albedo multiplier at the root — the contact-shadow cue */
+  coverRootDarken: number;
+  coverRoughness: number;
+
   // -- slope blend (sand on flat, rock on steep) — terrainBlendMaterial -----
   /** normal.y at the sand↔rock midpoint (1 = flat up, 0 = vertical) */
   slopeThreshold: number;
@@ -281,19 +372,65 @@ export const terrainParams: TerrainParams = registerParams(
     sandShadeScale: 0.045,
     sandGrainScale: 14,
     sandGrainStrength: 0.1,
-    sparkleDensity: 6,
+    sparkleCellPixels: 2.6,
+    /**
+     * THE FLOOR IS NOT A TASTE VALUE — IT IS THE CLOSEST VIEW YOU SUPPORT.
+     *
+     * Below it the cell stops tracking the pixel and goes world-locked again,
+     * which is the ORIGINAL §B.43 defect at short range. A first pass here
+     * used 2 cm on the reasoning that "sand is not water and the camera gets
+     * closer to a beach"; `tests/terrain.test.ts` caught it immediately — at
+     * 3 m that floor puts the cell back at 13 px, i.e. exactly the fat bright
+     * dots the user reported, just nearer.
+     *
+     * The reasoning was backwards. A coarser floor does not buy nearness, it
+     * SPENDS it: the floor must sit BELOW `pixWorld · cellPixels` at the
+     * closest view, and closer views need a SMALLER floor. At 1.5 m (standing
+     * on the sand) that is 2 mm. Which is also, conveniently, about the size
+     * of a grain of sand.
+     */
+    sparkleMinCell: 0.002,
+    sparkleRadiusPixels: 0.8,
+    sparkleResolveCells: 2.0,
     sparkleCoverage: 0.06,
     sparklePower: 26,
     sparkleStrength: 1.4,
     sandRoughnessDry: 0.95,
     sandRoughnessWet: 0.3,
 
-    rippleStrength: 0.18,
-    rippleWavelength: 0.55,
+    rippleStrength: 0.22,
+    /**
+     * DUNE SCALE, NOT RIPPLE SCALE, and the choice is deliberate.
+     *
+     * Real wave-formed ripples in fine sand at these depths run 0.05-0.2 m.
+     * The shipped 0.55 m was already a compromise between that and legibility
+     * and it still read as "super tiny dunes … in a perfectly regular grid":
+     * from the deck at 40 m one pixel spans ~0.02 m head-on and ~0.2 m at the
+     * grazing angles a seabed is actually seen at, so 0.55 m is 3-25 px — the
+     * exact band where a regular pattern turns into moiré rather than into
+     * texture.
+     *
+     * 1.4 m is chosen from what is LEGIBLE at the distances in the user's
+     * screenshots: 7-70 px over the same range, i.e. always a resolved
+     * bedform. That makes these dune-scale features rather than ripples,
+     * which is the right call for a seabed seen through water from a deck —
+     * the true fine ripples would have to live in a normal map that
+     * band-limits away, and there is no sampler budget for one (§V40).
+     */
+    rippleWavelength: 1.4,
     rippleDepthFade: 16,
     rippleAngle: 24,
-    rippleBend: 0.7,
-    rippleBendScale: 0.035,
+    // 0.9 wavelengths of warp is above the threshold where the phase field
+    // develops dislocations, which is what makes a crest split in two
+    rippleWarp: 0.9,
+    // 0.09 → an 11 m warp wavelength, ~8 ripple wavelengths: long enough that
+    // a crest wanders for a while before it branches, short enough that it
+    // branches at all
+    rippleWarpScale: 0.09,
+    rippleContourWeight: 0.45,
+    rippleContourSpacing: 0.35,
+    ripplePatchScale: 0.035,
+    ripplePatchThreshold: 0.38,
 
     waterline: 0.0,
     wetBand: 1.4,
@@ -368,6 +505,57 @@ export const terrainParams: TerrainParams = registerParams(
     vegSlopeThreshold: 0.82,
     vegRoughness: 0.88,
 
+    grassBlades: 7,
+    grassSegments: 3,
+    grassHeight: 0.55,
+    grassWidth: 0.085,
+    grassBend: 0.3,
+    // 3 m cells over a 520 m box is ~30k candidates on the showcase island;
+    // the gates take it to ~2-3k tufts. Cheap on CPU (a bilinear heightAt per
+    // candidate) and irrelevant on GPU — 42 triangles each, one draw call.
+    grassSpacing: 3.0,
+    grassDensity: 0.55,
+    // 0.52 against a mean-0.5 fbm: a little under half the ground, in stands.
+    // The references have genuinely bare sand between the green, not a lawn.
+    grassClumpThreshold: 0.52,
+    shrubLobes: 3,
+    shrubRings: 3,
+    shrubSegments: 7,
+    shrubRadius: 0.75,
+    shrubSquash: 0.8,
+    shrubSkirtBlades: 5,
+    shrubSpacing: 9.0,
+    shrubDensity: 0.5,
+    // stricter than grass: shrubs sit in the HEART of a stand, so the two
+    // species read as one graded mass rather than as two scattered layers
+    shrubClumpThreshold: 0.6,
+    coverMinHeightFraction: 0.85,
+    coverMaxHeight: 40,
+    coverSlopeLimit: 0.7,
+    // 0.02 → a 50 m base wavelength: stands the size of a clearing, which is
+    // what the references show. Coarser than `vegScale` (18 m) on purpose —
+    // the albedo clumps are the texture inside these stands.
+    coverClumpScale: 0.02,
+    coverScaleMin: 0.7,
+    coverScaleMax: 1.55,
+    // measured to the island CENTRE (same convention as every other island
+    // LOD), and the showcase anchorage is ~330 m out from a 260 m island, so
+    // this has to clear both to be visible from the deck at anchor.
+    coverCullDistance: 550,
+    coverSwayAmplitude: 0.1,
+    coverSwaySpeed: 1.6,
+    coverSwayGust: 1.0,
+    // §ffeb839: the variation between these three moves HUE and VALUE, not
+    // chroma. A low-saturation yellow-olive renders grey-purple under this
+    // sky's blue fill — the fill sets a floor on how little chroma an albedo
+    // can carry and keep its hue, and grass is the thing most tempting to
+    // desaturate "for realism".
+    coverBaseColor: 0x6f8f47,
+    coverTipColor: 0xa2c05d,
+    coverDryColor: 0xc0ae68,
+    coverRootDarken: 0.52,
+    coverRoughness: 0.9,
+
     slopeThreshold: 0.72,
     slopeBlendWidth: 0.1,
     slopeNoiseAmount: 0.12,
@@ -393,7 +581,10 @@ function terrainParamsMeta(): Partial<Record<keyof TerrainParams, ParamMeta>> {
     sandShadeScale: { min: 0.005, max: 0.5, step: 0.005 },
     sandGrainScale: { min: 1, max: 60, step: 1 },
     sandGrainStrength: { min: 0, max: 0.5, step: 0.01 },
-    sparkleDensity: { min: 0.5, max: 30, step: 0.5 },
+    sparkleCellPixels: { min: 1, max: 8, step: 0.1 },
+    sparkleMinCell: { min: 0.002, max: 0.5, step: 0.002 },
+    sparkleRadiusPixels: { min: 0.3, max: 2.5, step: 0.05 },
+    sparkleResolveCells: { min: 1, max: 6, step: 0.1 },
     sparkleCoverage: { min: 0, max: 0.5, step: 0.01 },
     sparklePower: { min: 2, max: 128, step: 1 },
     sparkleStrength: { min: 0, max: 4, step: 0.05 },
@@ -403,8 +594,12 @@ function terrainParamsMeta(): Partial<Record<keyof TerrainParams, ParamMeta>> {
     rippleWavelength: { min: 0.1, max: 4, step: 0.05 },
     rippleDepthFade: { min: 1, max: 45, step: 0.5 },
     rippleAngle: { min: 0, max: 180, step: 1 },
-    rippleBend: { min: 0, max: 3, step: 0.05 },
-    rippleBendScale: { min: 0.005, max: 0.3, step: 0.005 },
+    rippleWarp: { min: 0, max: 3, step: 0.05 },
+    rippleWarpScale: { min: 0.005, max: 0.4, step: 0.005 },
+    rippleContourWeight: { min: 0, max: 1, step: 0.05 },
+    rippleContourSpacing: { min: 0.05, max: 3, step: 0.05 },
+    ripplePatchScale: { min: 0.005, max: 0.3, step: 0.005 },
+    ripplePatchThreshold: { min: 0, max: 0.9, step: 0.02 },
     waterline: { min: -5, max: 5, step: 0.05 },
     wetBand: { min: 0, max: 5, step: 0.05 },
     wetDarken: { min: 0, max: 1, step: 0.05 },
@@ -431,6 +626,35 @@ function terrainParamsMeta(): Partial<Record<keyof TerrainParams, ParamMeta>> {
     vegDryStrength: { min: 0, max: 1, step: 0.01 },
     vegSlopeThreshold: { min: 0.2, max: 0.99, step: 0.01 },
     vegRoughness: { min: 0, max: 1, step: 0.01 },
+    grassBlades: { min: 1, max: 16, step: 1 },
+    grassSegments: { min: 1, max: 6, step: 1 },
+    grassHeight: { min: 0.1, max: 2, step: 0.05 },
+    grassWidth: { min: 0.02, max: 0.3, step: 0.005 },
+    grassBend: { min: 0, max: 1, step: 0.02 },
+    grassSpacing: { min: 1, max: 12, step: 0.25 },
+    grassDensity: { min: 0, max: 1, step: 0.05 },
+    grassClumpThreshold: { min: 0, max: 1, step: 0.01 },
+    shrubLobes: { min: 1, max: 6, step: 1 },
+    shrubRings: { min: 1, max: 6, step: 1 },
+    shrubSegments: { min: 3, max: 12, step: 1 },
+    shrubRadius: { min: 0.2, max: 3, step: 0.05 },
+    shrubSquash: { min: 0.3, max: 1.5, step: 0.05 },
+    shrubSkirtBlades: { min: 0, max: 12, step: 1 },
+    shrubSpacing: { min: 2, max: 30, step: 0.5 },
+    shrubDensity: { min: 0, max: 1, step: 0.05 },
+    shrubClumpThreshold: { min: 0, max: 1, step: 0.01 },
+    coverMinHeightFraction: { min: 0, max: 2, step: 0.05 },
+    coverMaxHeight: { min: 1, max: 120, step: 1 },
+    coverSlopeLimit: { min: 0.1, max: 2, step: 0.05 },
+    coverClumpScale: { min: 0.002, max: 0.2, step: 0.002 },
+    coverScaleMin: { min: 0.2, max: 3, step: 0.05 },
+    coverScaleMax: { min: 0.2, max: 4, step: 0.05 },
+    coverCullDistance: { min: 50, max: 2000, step: 25 },
+    coverSwayAmplitude: { min: 0, max: 0.6, step: 0.01 },
+    coverSwaySpeed: { min: 0, max: 6, step: 0.1 },
+    coverSwayGust: { min: 0, max: 4, step: 0.1 },
+    coverRootDarken: { min: 0, max: 1, step: 0.02 },
+    coverRoughness: { min: 0, max: 1, step: 0.01 },
     slopeThreshold: { min: 0.2, max: 0.95, step: 0.01 },
     slopeBlendWidth: { min: 0.01, max: 0.4, step: 0.01 },
     slopeNoiseAmount: { min: 0, max: 0.5, step: 0.01 },

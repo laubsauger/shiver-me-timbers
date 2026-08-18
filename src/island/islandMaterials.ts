@@ -17,7 +17,13 @@
  */
 import * as THREE from 'three/webgpu';
 import { attribute } from 'three/tsl';
-import { createRockMaterial, terrainBlendMaterial, type TerrainBlendMaterialHandle } from '../terrain';
+import {
+  createCoverMeshMaterial,
+  createRockMaterial,
+  terrainBlendMaterial,
+  type CoverMeshMaterial,
+  type TerrainBlendMaterialHandle,
+} from '../terrain';
 import { applyWindSway, createPalmMaterial } from '../vegetation';
 import type { WindSway } from '../vegetation/windSway';
 
@@ -26,6 +32,8 @@ export interface IslandMaterials {
   rock: ReturnType<typeof createRockMaterial>;
   palm: ReturnType<typeof createPalmMaterial>;
   palmSway: WindSway;
+  /** grass + shrub instances — one shader for every tuft in the world (§V17) */
+  cover: CoverMeshMaterial;
   /**
    * Per-frame push for every shared shader. `waterLevel` is the live sea
    * height at the shore being looked at (§V8: same CpuOcean mirror buoyancy
@@ -52,13 +60,19 @@ export function createIslandMaterials(): IslandMaterials {
     instancePhase: attribute('instancePhase', 'float'),
     amplitudeScale: attribute('instanceSway', 'float'),
   });
+  const cover = createCoverMeshMaterial();
 
   return {
     terrain,
     rock,
     palm,
     palmSway,
+    cover,
     update(frame): void {
+      // the grass reads the SAME wind the palms and the sea do, so a gust
+      // crosses the whole scene at once instead of each system having its own
+      cover.setWind(frame.time, frame.windDir, frame.windStrength);
+      cover.updateFromParams();
       palmSway.setWind(frame.time, frame.windDir, frame.windStrength);
       palmSway.syncParams();
       palm.refresh();
@@ -81,6 +95,7 @@ export function createIslandMaterials(): IslandMaterials {
       terrain.dispose();
       rock.dispose();
       palm.material.dispose();
+      cover.dispose();
     },
   };
 }
