@@ -58,9 +58,42 @@ import { shipMaterialParams, type ShipMaterialParams } from '../params/ship';
 import { createSailWindUniforms } from './sailDriver';
 import type { ShipMaterialHandle } from './woodMaterial';
 
-/** seam falloff between cloth panels, as a fraction of one panel. Named
- *  because it is also the feature width its §V.48 band limit measures. */
-const PANEL_SEAM = 0.045;
+/**
+ * Seam falloff between cloth panels, as a fraction of one panel. Named because
+ * it is also the feature width its §V.48 band limit measures.
+ *
+ * 0.045 → 0.028 (0.62x) on the user's report that "the segmenting seam that
+ * subdivides them vertically is a little bit too thick… it looks a little bit
+ * cheap", asking for a half to two thirds.
+ *
+ * WHAT THIS IS IN METRES, AND WHY IT IS NOT ONE NUMBER. A panel is
+ * `width·SAIL_LACE_SPAN/(sailLacingPoints − 1)`, and `sailLacingPoints` is a
+ * flat 7 on every sail, so the panel is as wide as the SAIL is: 1.79 m on the
+ * main course, 0.60 m on the rear topgallant. A seam authored as a FRACTION of
+ * that therefore lands at 8.0 cm on one sail and 2.7 cm on another — a 3x
+ * spread on a thing that is one physical row of stitching (§V.66: scale a
+ * feature by ITS OWN dimension, which for a seam is metres of doubled canvas).
+ * At 0.028 the same spread runs 5.0 cm → 1.7 cm. Left as a fraction rather
+ * than converted here because making it physical THICKENS the small sails —
+ * the opposite of what was asked — so it is a judgement for the user, not a
+ * silent change: see the report.
+ *
+ * WHERE THE 2-PIXEL FLOOR TAKES OVER (`bandLimitWidth`, ≥ 2 px of
+ * `panelCoord`), measured at fov 55°, head-on, main course / smallest sail:
+ *   0.045 — 42 m / 14 m at a 1080-line buffer, 83 m / 28 m at 2160
+ *   0.028 — 26 m / 9 m                       , 52 m / 17 m
+ * The default follow camera sits ~29 m off the main course, so on a 1080-line
+ * buffer this change moves that sail from author-decided to floor-decided, and
+ * every sail above the courses was ALREADY floor-decided there before it.
+ * That is not the `moonTerminatorSoftness` failure, and the difference is
+ * worth stating: past the floor `bandLimitedEdge`/`bandLimitAmplitude` keep
+ * `energy = feature/eff`, so the authored number still scales the seam's
+ * AMPLITUDE. Past the floor a thinner seam reads FAINTER at a pixel-locked
+ * width instead of NARROWER — which is the same perceptual direction the user
+ * asked for, but it is a fade, not a thinning, and no value here changes that.
+ * Halve the viewing distance (or double the buffer) and it thins again.
+ */
+const PANEL_SEAM = 0.028;
 
 /** live sun direction (toward the sun), re-derived from the same pure
  *  function + params the sky rig uses — no wiring through main.ts */
@@ -175,15 +208,15 @@ export function createSailClothMaterial(
    * reads as a printed stripe.
    *
    * §V.38 SAYS DO NOT DIFFERENTIATE A HEIGHT FIELD HERE, and this is exactly
-   * the case that would burn: a ~2.7 cm feature differentiated in screen space
-   * on a sail seen at 20-60 m is §B.20's hull speckle verbatim. So the SLOPE
+   * the case that would burn: a 1.7-5.0 cm feature differentiated in screen
+   * space on a sail seen at 20-60 m is §B.20's hull speckle verbatim. So the SLOPE
    * is written in closed form instead — the seam's cross-section is a known
    * bump, so its derivative is known too, and nothing is differentiated at
    * all.
    *
    * §V.48, both halves, measured against the SEAM's own width and not the
-   * panel's PERIOD — §B.20's whole lesson, and the seam is ~4.5% of a panel,
-   * i.e. it goes sub-pixel ~22x sooner than the repeat does:
+   * panel's PERIOD — §B.20's whole lesson, and the seam is 2.8% of a panel,
+   * i.e. it goes sub-pixel ~36x sooner than the repeat does:
    *   (a) WIDEN: the bump is drawn at `bandLimitWidth` ≥ 2 px of panelCoord,
    *       so it never varies faster than the sample grid;
    *   (b) FADE: amplitude scaled by `bandLimitAmplitude`. The profile is

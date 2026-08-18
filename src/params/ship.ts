@@ -457,8 +457,18 @@ export interface ShipRigParams {
   reefHysteresis: number;
   /**
    * Cloth drop scale at trim 0 — the bottom of the ONE continuous ramp that
-   * animates a reef. Tuned to the gathered bundle's own height (~0.26 of drop)
-   * so the single geometry swap at `furlGeometryBelow` changes nothing visible.
+   * animates a reef. Tuned to the gathered bundle's own height so the single
+   * geometry swap at `furlGeometryBelow` moves the foot of the canvas as
+   * little as possible.
+   *
+   * IT CANNOT REACH ZERO, and that bounds what this knob is worth. The bundle
+   * hangs 0.227-0.280 of its sail's drop below the yard (nine sails, measured;
+   * the spread is the `max(0.15, drop·0.05)` floor in `buildSailGeometry` plus
+   * per-sail gather jitter), so ONE scale cannot match all nine and the best
+   * available is the minimax. The two directions also swap at DIFFERENT trims,
+   * because `sailGeometryState` adds `min(reefHysteresis, furlGeometryBelow)`
+   * on the way out — hauling down flips at trim 0.015, hauling up at 0.040 —
+   * so the same value is asked to null two different drop scales.
    */
   trimDropMin: number;
   /** trim below which the cloth panel is swapped for the gathered bundle */
@@ -475,7 +485,15 @@ export const shipRigParams: ShipRigParams = registerParams(
     reefFurledBelow: 0.15,
     reefReefedBelow: 0.55,
     reefHysteresis: 0.06,
-    trimDropMin: 0.24, // measured: minimises the swap step over all 10 sails
+    // MINIMAX over the NINE sails AND both haul directions (the old 0.24 was
+    // fitted to ten sails and to the DOWN direction alone, where it is still
+    // the optimum). Worst swap step, as a fraction of the sail's own drop:
+    //   0.24 → down 0.0286 (main course), up 0.0438 (main course)
+    //   0.23 → down 0.0348 (rear topsail), up 0.0342 (main course)
+    // i.e. 4.4% → 3.5% of drop worst case, and the two directions balance.
+    // The response is CONVEX in this value, not resonant: |f − scale(min)| per
+    // sail, so there is one optimum and no second basin to hunt for.
+    trimDropMin: 0.23,
     furlGeometryBelow: 0.02,
   },
   {
