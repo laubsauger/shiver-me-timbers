@@ -610,47 +610,6 @@ export const oceanSurfaceParams = registerParams(
     /** temporary direct-jacobian crest foam until T5 progressive blur lands */
     foamThreshold: 0.55,
     foamColor: '#eef6f2',
-    /**
-     * INTERIM crest foam (NOT §T.5 — no temporal decay, no trailing streaks).
-     * σ-relative band (§V.36) so the numbers keep meaning "crest tops" when
-     * the spectrum moves. 1.9σ..2.7σ is the top ~2.9%..0.35% of the surface.
-     * Narrowed and raised from 1.5..2.4 after the user called the result "too
-     * thick, too big, too chunky" at the default swell preset.
-     */
-    crestFoamBandLow: 1.9,
-    crestFoamBandHigh: 2.7,
-    /**
-     * Opacity of the PATCH BODY, not of foam in general. Foam that is not
-     * actively breaking is thin and translucent — it takes the water and sky
-     * under it. At 0.55 the body composited to ~0.5 alpha of a near-white and
-     * read as "a milk cut" (user). Only `crestFoamEdgeStrength` is allowed
-     * near opaque.
-     */
-    crestFoamStrength: 0.34,
-    /** only the steep faces foam — flat crest tops do not break */
-    crestFoamSlopeGate: 0.3,
-    /**
-     * Break-up field (§V.48 band-limited). Coverage is multiplied by a
-     * world-locked 2-octave noise gate, because a smooth threshold on the
-     * smooth σ/slope fields produces a connected CONTOUR — one unbroken ribbon
-     * per crest line, which is the "too long / too regular" complaint. Scale
-     * is the coarse octave's wavelength in metres; the fine octave is 0.34× it.
-     */
-    crestFoamPatchScale: 13,
-    /**
-     * Gate on that field. The window is deliberately narrow and high: it is
-     * what turns "most crests foam a bit" into "a few crests foam", which is
-     * the user's low end — "in some little spots here and there".
-     */
-    crestFoamPatchLow: 0.46,
-    crestFoamPatchHigh: 0.72,
-    /**
-     * Breaking edge (docs/ref-storm-whitecaps.png: a bright lip at the break).
-     * Width in σ ABOVE crestFoamBandHigh over which the edge reaches full
-     * strength, and its opacity — the one place foam may read white.
-     */
-    crestFoamEdgeWidth: 0.35,
-    crestFoamEdgeStrength: 0.85,
     /** how far foam takes the sky's colour — the reference's foam is warm
      *  cream, ours is authored cool near-white and reads wrong at sunset */
     foamSkyTint: 0.35,
@@ -772,15 +731,6 @@ export const oceanSurfaceParams = registerParams(
     sssMaxMix: { min: 0, max: 1, step: 0.01 },
     sssBrightness: { min: 0, max: 2, step: 0.01 },
     fresnelR0: { min: 0, max: 0.2, step: 0.005 },
-    crestFoamBandLow: { min: 0, max: 4, step: 0.05 },
-    crestFoamBandHigh: { min: 0.2, max: 6, step: 0.05 },
-    crestFoamStrength: { min: 0, max: 1, step: 0.01 },
-    crestFoamSlopeGate: { min: 0.02, max: 1.5, step: 0.01 },
-    crestFoamPatchScale: { min: 1, max: 80, step: 0.5 },
-    crestFoamPatchLow: { min: 0, max: 1, step: 0.01 },
-    crestFoamPatchHigh: { min: 0, max: 1, step: 0.01 },
-    crestFoamEdgeWidth: { min: 0.05, max: 2, step: 0.05 },
-    crestFoamEdgeStrength: { min: 0, max: 1, step: 0.01 },
     foamSkyTint: { min: 0, max: 1, step: 0.01 },
     sparklePower: { min: 4, max: 256, step: 1 },
     glintTrainPower: { min: 1, max: 128, step: 1 },

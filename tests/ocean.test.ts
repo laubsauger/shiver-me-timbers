@@ -1880,91 +1880,24 @@ describe('specular lobes are filtered by normal variance (§V.48)', () => {
 });
 
 /**
- * §V.36 crest foam. The user: whitecaps missing entirely, sea reads
- * "synthetic, like a weird liquid", and they want sparse foam even in normal
- * swell. A σ-relative gate gives sparse-in-swell and heavy-in-storm from one
- * number, and cannot rot when the spectrum moves (§B.12 was the same bug).
+ * THE INTERIM CREST-FOAM GATE WAS DELETED (§B). It was a SECOND, INDEPENDENT
+ * foam source in surfaceMaterial, combined with the sim's by `max`, and it
+ * existed only because "the foam sim ... at normal swell currently produces
+ * nothing". Measured on the real spectrum, the sim now covers 1.70% of the sea
+ * at the swell preset against Monahan & O'Muircheartaigh 1980's ~4% for that
+ * wind, and the gate carried 12.0% of the visible foam mass there. At CALM the
+ * sim correctly produces 0.00% and the gate was the only foam on the water —
+ * 0.57% coverage of whitecaps the user has since said should not exist ("if
+ * it's rather calm then I think it's fine that there's no foam").
+ *
+ * Its params went with it. What survives is the one assertion that was never
+ * about that gate:
  */
-describe('crest foam gate is sea-state relative (§V.36)', () => {
+describe('foam colour (§V.20)', () => {
   const sp = oceanSurfaceParams;
-
-  it('is expressed in sigma, never in metres', () => {
-    // a metre constant means "top 7%" on the sea it was written for and
-    // something else entirely after any spectrum change
-    expect(sp.crestFoamBandHigh).toBeGreaterThan(sp.crestFoamBandLow);
-    expect(sp.crestFoamBandLow).toBeGreaterThan(0);
-    expect(sp.crestFoamBandLow).toBeLessThan(4);
-  });
-
-  it('selects a sparse minority of crests, not a band across the sea', () => {
-    const erfc = (x: number) => {
-      const t = 1 / (1 + 0.3275911 * Math.abs(x));
-      const y =
-        1 -
-        ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t +
-          0.254829592) *
-          t *
-          Math.exp(-x * x);
-      return x >= 0 ? 1 - y : 1 + y;
-    };
-    const above = (n: number) => 0.5 * erfc(n / Math.SQRT2);
-    expect(above(sp.crestFoamBandLow)).toBeLessThan(0.12); // sparse in swell
-    expect(above(sp.crestFoamBandLow)).toBeGreaterThan(0.01); // but not zero
-  });
 
   it('foam takes some of the sky colour — reference foam is warm cream', () => {
     expect(sp.foamSkyTint).toBeGreaterThan(0);
     expect(sp.foamSkyTint).toBeLessThan(1);
-  });
-
-  /**
-   * User at the default swell preset: "too long, too white, too thick, too
-   * regular, too big — just too chunky, like a milk cut." The shape cause is
-   * that a smooth gate on a smooth field yields a connected CONTOUR, i.e. one
-   * unbroken ribbon per crest line.
-   */
-  it('is broken up by a noise gate, or it draws ribbons along every crest', () => {
-    // the gate has to exist and be a real window, not a pass-through
-    expect(sp.crestFoamPatchHigh).toBeGreaterThan(sp.crestFoamPatchLow);
-    expect(sp.crestFoamPatchLow).toBeGreaterThan(0);
-    expect(sp.crestFoamPatchHigh).toBeLessThanOrEqual(1);
-    // and it has to select the UPPER part of the break-up field (mean 0.5),
-    // so it removes coverage rather than merely modulating it — a window
-    // centred at or below the mean would leave the ribbon essentially intact
-    expect((sp.crestFoamPatchLow + sp.crestFoamPatchHigh) / 2).toBeGreaterThan(0.5);
-    // and its features must be big enough to read as patches on a wave, not
-    // as a texture: a metre-scale field would just look like grain
-    expect(sp.crestFoamPatchScale).toBeGreaterThan(5);
-  });
-
-  it('keeps the patch BODY translucent and only the breaking edge white', () => {
-    // thin foam takes the water and sky under it; "milk cut" is what a
-    // near-opaque body reads as
-    expect(sp.crestFoamStrength).toBeLessThan(0.45);
-    expect(sp.crestFoamEdgeStrength).toBeGreaterThan(sp.crestFoamStrength * 2);
-    expect(sp.crestFoamEdgeStrength).toBeLessThanOrEqual(1);
-    // the edge sits ABOVE the crest band, so it is a lip and not a second
-    // coat over the whole patch
-    expect(sp.crestFoamEdgeWidth).toBeGreaterThan(0);
-  });
-
-  /**
-   * §V.36's promise is that ONE pair of numbers serves calm/swell/storm. That
-   * only holds if something in the gate is NOT σ-relative: a σ-relative pair
-   * on both axes gives literally constant coverage at every sea state, and
-   * the user wants sparse in swell and heavy in storm.
-   */
-  it('scales with sea state through the SLOPE gate, not the height band', () => {
-    // the height band is in σ (keeps meaning "crest tops" when the spectrum
-    // moves — §B.12), the slope gate is absolute (a storm sea is genuinely
-    // steeper, so coverage rises without any per-preset number)
-    expect(sp.crestFoamSlopeGate).toBeGreaterThan(0);
-    expect(sp.crestFoamSlopeGate).toBeLessThan(1.5);
-    // sanity: an absolute slope gate must sit inside the range real sea
-    // slopes span, or it is either always on or always off
-    const coverage = (slopeRms: number) =>
-      Math.min(1, slopeRms / sp.crestFoamSlopeGate);
-    expect(coverage(0.12)).toBeLessThan(0.6); // swell: sparse
-    expect(coverage(0.34)).toBeGreaterThan(0.9); // storm: heavy
   });
 });

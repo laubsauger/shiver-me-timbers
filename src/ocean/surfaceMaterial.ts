@@ -252,16 +252,6 @@ export function buildOceanSurfaceMaterial(
     new THREE.Vector2(sp.sparkleRadiusPixels, sp.sparkleResolveCells),
   );
   const uMicroSamples = uniform(sp.microDetailSamplesFull);
-  const uCrestFoam = uniform(
-    new THREE.Vector3(sp.crestFoamBandLow, sp.crestFoamBandHigh, sp.crestFoamStrength),
-  );
-  const uCrestFoamSlope = uniform(sp.crestFoamSlopeGate);
-  const uFoamPatch = uniform(
-    new THREE.Vector3(sp.crestFoamPatchScale, sp.crestFoamPatchLow, sp.crestFoamPatchHigh),
-  );
-  const uFoamEdge = uniform(
-    new THREE.Vector2(sp.crestFoamEdgeWidth, sp.crestFoamEdgeStrength),
-  );
   const uFoamSkyTint = uniform(sp.foamSkyTint);
   const uShadowStrength = uniform(sp.shadowStrength);
   const uSparkleStrength = uniform(sp.sparkleStrength);
@@ -755,7 +745,7 @@ export function buildOceanSurfaceMaterial(
 
   const colorNode = Fn(() => {
     // FIRST, and inside the Fn on purpose — see buildSurfaceSlope's header.
-    const { slopeMag, wakeSmooth, microUnresolvedVar, normalWorld } = buildSurfaceSlope();
+    const { wakeSmooth, microUnresolvedVar, normalWorld } = buildSurfaceSlope();
 
     // ── how much ATMOSPHERE is in the way (§V30) ────────────────────────
     // Hoisted: three terms want this exact ramp — the far-field foam damp, the
@@ -1161,75 +1151,37 @@ export function buildOceanSurfaceMaterial(
       // foam sits in the same light as the water (wrap floor+gain). Scalar
       // light only — sunTint here would double the warm tint (foamTintNode
       // already warms it) and low-alpha foam went beige-brown on deep teal.
-      // INTERIM (§Rule 8 — this is NOT §T.5). The foam sim owns real whitecap
-      // injection; at normal swell it currently produces nothing, so the sea
-      // reads "synthetic, like a weird liquid" (user). This adds sparse foam on
-      // the steepest crest tops so swell is not bare, and it is σ-RELATIVE
-      // (§V.36): the same multiple of heightRms gives sparse patches in swell
-      // and heavy coverage in storm with no per-preset tuning. It combines by
-      // max, so it never fights the sim where the sim is producing foam.
+      // THE INTERIM PER-PIXEL CREST GATE WAS DELETED HERE (§B).
       //
-      // v2 (user, at the default swell preset): "too long, too white, too
-      // thick, too regular, too big — just too chunky, like a milk cut."
-      // ROOT SHAPE PROBLEM: a smooth gate on a smooth field. Both σ-height and
-      // slope are band-limited continuous fields, so their super-level set is
-      // a smooth connected CONTOUR — one unbroken ribbon following every crest
-      // line. That is what reads as painted-on rather than as water. Real
-      // whitecaps are patchy because breaking is a threshold on an
-      // intermittent quantity. Three changes, none of which drop the mechanism:
-      //   (a) BREAK UP — multiply coverage by a world-locked noise field, so
-      //       the ribbon becomes patches. Band-limited per §V.48 (each octave
-      //       fades to its own mean once a pixel spans a lattice cell) or this
-      //       trades chunky foam for the stipple the user already reported;
-      //   (b) TRANSLUCENT BODY — the patch body no longer reaches full
-      //       opacity. Thin foam takes the water and sky beneath it; only the
-      //       breaking edge is allowed to read white;
-      //   (c) BREAKING EDGE — a separate, much narrower gate on the extreme
-      //       crest tops AND the steepest faces, which is the bright lip in
-      //       docs/ref-storm-whitecaps.png.
-      // STILL MISSING, say so (§Rule 8): temporal decay and the trailing
-      // streaks down the wave face. Both need foam to PERSIST after the crest
-      // that made it has moved on, i.e. state — that is the foam sim's job
-      // (§T.5), not a per-pixel gate's, and it is the single biggest remaining
-      // gap between this and the reference.
-      const bandNoise = (scale: TslNode) => {
-        const s = scale.max(0.05);
-        // §V.48(b): fade the octave toward its own MEAN once one pixel spans a
-        // lattice cell — that mean IS the average the pixel should have seen.
-        // smoothstep(e0,e1,x), e0 > e1: 1 below 0.3, 0 above 1.
-        const keep = smoothstep(float(1), float(0.3), pixWorld.div(s));
-        return mix(float(0.5), valueNoise(worldXZ.div(s)), keep);
-      };
-      const patchScale = uFoamPatch.x.max(0.5);
-      const patch = bandNoise(patchScale)
-        .mul(0.62)
-        .add(bandNoise(patchScale.mul(0.34)).mul(0.38));
-      const patchGate = smoothstep(uFoamPatch.y, uFoamPatch.z, patch).clamp(0, 1);
-      const slopeGate = uCrestFoamSlope.max(0.02);
-      // σ-relative HEIGHT band (§V.36 — keeps meaning "crest tops" at any sea
-      // state) × ABSOLUTE slope gate. The slope gate is deliberately NOT
-      // σ-relative: a σ-relative pair on both axes would give literally
-      // constant coverage at every sea state, and the user wants sparse in
-      // swell, heavy in storm. Steepness is the physically honest carrier of
-      // that difference — a storm sea really is steeper, not just taller — so
-      // one pair of numbers serves calm/swell/storm without preset tuning.
-      const crestFoam = smoothstep(
-        sigma.mul(uCrestFoam.x),
-        sigma.mul(uCrestFoam.y),
-        totalDisp.y,
-      )
-        .mul(smoothstep(float(0), slopeGate, slopeMag))
-        .mul(patchGate)
-        .mul(uCrestFoam.z);
-      const breakEdge = smoothstep(
-        sigma.mul(uCrestFoam.y),
-        sigma.mul(uCrestFoam.y.add(uFoamEdge.x.max(0.05))),
-        totalDisp.y,
-      )
-        .mul(smoothstep(slopeGate, slopeGate.mul(1.9), slopeMag))
-        .mul(patchGate)
-        .mul(uFoamEdge.y);
-      foamMask = foamMask.max(crestFoam.max(breakEdge));
+      // It existed for one stated reason — "the foam sim owns real whitecap
+      // injection; at normal swell it currently produces nothing, so the sea
+      // reads synthetic" — and it combined by `max`, so it was a SECOND,
+      // INDEPENDENT foam source layered over the sim's. Both halves of its
+      // premise are now gone:
+      //
+      //  · THE SIM PRODUCES FOAM. Measured on the real spectrum at the default
+      //    swell preset, the sim covers 1.70% of the sea against Monahan &
+      //    O'Muircheartaigh 1980's ~4% for that wind — the right order, not
+      //    nothing. This gate carried 12.0% of the visible foam mass there and
+      //    1.9% at storm, and won the `max` on 1.3% of the sea.
+      //  · A BARE CALM SEA IS CORRECT (user: "if it's rather calm then I think
+      //    it's fine that there's no foam"). At calm the sim correctly produces
+      //    0.00% and this gate was the ONLY foam on the water — 0.57% coverage
+      //    of exactly the whitecaps the user says should not be there.
+      //
+      // And its own comment recorded the user rejecting its output twice ("too
+      // long, too white, too thick, too regular, too big — like a milk cut"),
+      // diagnosing the cause correctly as a smooth gate on a smooth field
+      // whose super-level set is one unbroken ribbon per crest line. That is
+      // not tunable: it is what a threshold on a band-limited field IS. The
+      // sim reaches the same place with an accumulator, a fold metric that
+      // knows the crest axis, and a breakup field — see src/foam/foamMath.
+      //
+      // DO NOT REINTRODUCE A SECOND FOAM SOURCE HERE. If the sea looks bare,
+      // the knob is the sim's gate (`oceanParams.jacobianFoamBias`) or its
+      // strength (`foamParams.injectStrength`), both of which keep the shape,
+      // the placement and the two-clock intensity the sim spent four commits
+      // earning. `max`-ing a smooth ribbon over that can only degrade it.
       // foam takes the sky's colour — the reference's foam is warm cream, not
       // the cool near-white it is authored as, and against a warm sunset sky a
       // cool white foam reads wrong even once coverage is right
@@ -1549,21 +1501,6 @@ export function buildOceanSurfaceMaterial(
     uMicroSamples.value = sp.microDetailSamplesFull;
     uMicroWarp.value = Math.max(0, sp.microDetailWarp);
     uMicroWarpScale.value = Math.max(0.5, sp.microDetailWarpScale);
-    (uCrestFoam.value as THREE.Vector3).set(
-      sp.crestFoamBandLow,
-      sp.crestFoamBandHigh,
-      sp.crestFoamStrength,
-    );
-    uCrestFoamSlope.value = sp.crestFoamSlopeGate;
-    (uFoamPatch.value as THREE.Vector3).set(
-      sp.crestFoamPatchScale,
-      sp.crestFoamPatchLow,
-      sp.crestFoamPatchHigh,
-    );
-    (uFoamEdge.value as THREE.Vector2).set(
-      sp.crestFoamEdgeWidth,
-      sp.crestFoamEdgeStrength,
-    );
     uFoamSkyTint.value = sp.foamSkyTint;
     uShadowStrength.value = sp.shadowStrength;
     uReflStrength.value = sp.reflectionStrength;
