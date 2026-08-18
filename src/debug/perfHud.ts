@@ -7,9 +7,22 @@
 
 export const FPS_WINDOW = 30;
 
-/** shape of `renderer.info.render` we display */
+/**
+ * Shape of `renderer.info.render` we display.
+ *
+ * `drawCalls` and `triangles` ARE per-frame: `Renderer.init()` starts three's
+ * own rAF loop (`Animation.start()`, Renderer.js:803) which calls
+ * `info.reset()` every frame whether or not `setAnimationLoop` is used, so
+ * §V.2's separate loop does not have to.
+ *
+ * `calls` is NOT. `Info.reset()` deliberately leaves it alone — it is a
+ * LIFETIME counter, measured at 206 262 on a session that was drawing 486
+ * objects per frame. That is §B.25's "4238 → 38978 within one build": the
+ * counter was never wrong, it was the wrong counter. Read `drawCalls`.
+ */
 export interface RenderStats {
   calls: number;
+  drawCalls: number;
   triangles: number;
 }
 
@@ -19,6 +32,8 @@ export interface PerfHud {
   frame(frameMs: number): void;
   setPassTiming(label: string, ms: number): void;
   setRenderStats(stats: RenderStats): void;
+  /** GPU timestamp block, pre-formatted; null hides it (§V.39) */
+  setGpu(lines: readonly string[] | null): void;
   dispose(): void;
 }
 
@@ -45,6 +60,7 @@ export function createPerfHud(parent: HTMLElement = document.body): PerfHud {
   let lastFrameMs = 0;
   const passes = new Map<string, number>();
   let stats: RenderStats | null = null;
+  let gpu: readonly string[] | null = null;
 
   const redraw = (): void => {
     let sum = 0;
@@ -61,9 +77,13 @@ export function createPerfHud(parent: HTMLElement = document.body): PerfHud {
         lines.push(`${label.padEnd(14)} ${ms.toFixed(2)} ms`);
       }
     }
+    if (gpu !== null && gpu.length > 0) {
+      lines.push('--- gpu (min-of-N) ---');
+      for (const l of gpu) lines.push(l);
+    }
     if (stats) {
       lines.push('--- render ---');
-      lines.push(`calls ${stats.calls}  tris ${stats.triangles}`);
+      lines.push(`draws ${stats.drawCalls}  tris ${stats.triangles}`);
     }
     el.textContent = lines.join('\n');
   };
@@ -82,6 +102,9 @@ export function createPerfHud(parent: HTMLElement = document.body): PerfHud {
     },
     setRenderStats(s: RenderStats): void {
       stats = s;
+    },
+    setGpu(lines: readonly string[] | null): void {
+      gpu = lines;
     },
     dispose(): void {
       el.remove();
