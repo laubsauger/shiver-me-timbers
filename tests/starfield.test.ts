@@ -394,7 +394,10 @@ describe('integration surface — the node graph builds (§V.22: not "it works")
     const bg = createSkyBackground(P);
     expect(bg.colorNode).toBeTruthy();
     expect(bg.skyDomeColor).toBeTruthy();
-    // update() must survive every hour of the day without throwing
-    for (let t = 0; t < 24; t += 0.25) bg.update(keyLight(t, P));
+    // update() must survive every hour of the day without throwing. The wind
+    // frame is required now that the background also draws wind lines (§T.47);
+    // a real one rather than a zero, so this covers the drift path too.
+    const wind = { direction: Math.PI / 4, speed: 11, dt: 1 / 60 };
+    for (let t = 0; t < 24; t += 0.25) bg.update(keyLight(t, P), wind);
   });
 });

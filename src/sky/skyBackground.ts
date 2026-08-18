@@ -36,6 +36,7 @@ import {
 import type { SkyParams } from '../params/sky';
 import { moonIllumination, type KeyLight } from './moonCycle';
 import { createStarfield } from './starfield';
+import { createWindLines, type WindFrame } from './windLines';
 import {
   bandGeometry,
   hexToRgb,
@@ -113,6 +114,10 @@ export function createSkyBackground(p: SkyParams) {
   // affordable: it is built INTO `colorNode` and is invisible to `skyDome`,
   // which the ocean evaluates per water pixel. Nothing here may migrate.
   const starfield = createStarfield(p);
+
+  // ── wind lines (§T.47) ─────────────────────────────────────────────────
+  // Same rule again, same reason: `colorNode` only, never `skyDome`.
+  const windLines = createWindLines(p);
 
   // ── THE directional sky colour, for ANY direction ────────────────────
   // SINGLE SOURCE OF TRUTH (§T39, same rule as skyPalette for colour and
@@ -218,8 +223,31 @@ export function createSkyBackground(p: SkyParams) {
     moonDisc.add(moonGlow.add(moonHalo).mul(uMoonBright)),
   );
 
-  // 6. stars. Added LAST and only here — see the note by `createStarfield`.
-  const colorNode = warmed.add(sunTerm).add(moonTerm).add(starfield.node(viewDir));
+  // 6. stars and wind lines. Added LAST and only here — see the note by
+  //    `createStarfield`.
+  //
+  //    THE WIND LINES COMPOSITE BEHIND THE CLOUDS, AND THAT IS A DECISION, NOT
+  //    AN ACCIDENT. `scene.backgroundNode` is drawn first, so the cloud
+  //    composite quad (src/clouds/cloudComposite.ts) lands on top of
+  //    everything here. The SoT reference shows the streaks crossing IN FRONT
+  //    of cloud masses, which is what makes them read as near-field air rather
+  //    than as sky texture, and there is a functional argument too: heavy
+  //    storm coverage hides the lines exactly when they are meant to be
+  //    intensifying, which is the one condition the feature most needs to
+  //    survive. It is behind anyway because that costs no new pass, no new
+  //    draw call and no contention with the cloud pipeline.
+  //
+  //    MOVING IT IS ONE LINE. `windLines.node` is a pure function of the view
+  //    RAY — no camera position, no plane, no world anchor — so a caller
+  //    inside the cloud composite can reconstruct the same ray and add the
+  //    same node, and nothing in this file has to change but the deletion of
+  //    the `.add()` below. If the streaks read as sky texture instead of as
+  //    air, or if a storm sky swallows them, that is the move to make.
+  const colorNode = warmed
+    .add(sunTerm)
+    .add(moonTerm)
+    .add(starfield.node(viewDir))
+    .add(windLines.node(viewDir));
 
   return {
     colorNode,
@@ -246,8 +274,12 @@ export function createSkyBackground(p: SkyParams) {
      *
      * Everything else keys off `key.sunElevation`: the sky's PALETTE is the
      * sun's business at every hour, and only the KEY changes hands.
+     *
+     * `wind` is the LIVE wind plus this frame's dt — see `windLines.update`
+     * for why it must be `state.wind` and not the `oceanParams` default, and
+     * why a dt (rather than a clock) is what a §V.55 accumulator needs.
      */
-    update(key: KeyLight): void {
+    update(key: KeyLight, wind: WindFrame): void {
       const sunDir = key.direction;
       const elevation = key.sunElevation;
       uSunDir.value.set(sunDir[0], sunDir[1], sunDir[2]);
@@ -310,6 +342,10 @@ export function createSkyBackground(p: SkyParams) {
       uMoonBright.value = moonIllumination(discPhase);
 
       starfield.update(key);
+      // uHaze, not a second palette lookup: the streaks must warm on exactly
+      // the weight the sky warms on, and a duplicate resolve drifts the moment
+      // either side is tuned (§T39).
+      windLines.update(key, wind, uHaze.value);
     },
   };
 }

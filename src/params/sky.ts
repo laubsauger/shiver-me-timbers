@@ -174,6 +174,42 @@ export interface SkyParams {
   starColorWarm: number;
   /** viewDir.y at which the field has fully faded into the haze band */
   starHorizonFade: number;
+  /**
+   * WIND LINES (§T.47 — src/sky/windLines.ts holds the whole argument).
+   *
+   * Streaks running across the sky and converging on the point the wind blows
+   * TOWARD, so the bearing can be read without looking down at the HUD dial.
+   * They are a PENCIL OF GREAT CIRCLES about the wind axis, so the convergence
+   * is genuine perspective and the vanishing points sit on the horizon.
+   *
+   * `windLineCount` is streaks around that axis and is FORCED ODD, which puts
+   * the atan2 seam on a cell wall instead of through a streak; at 49 they are
+   * 7.3° apart overhead. `windLineWidth` is a DUTY CYCLE — a fraction of the
+   * spacing, not an angle — which is what makes the pattern go sub-pixel
+   * together and dissolve cleanly at the pinch (§V.48b) instead of knotting.
+   *
+   * `windLineOnset` is Beaufort 3, where the sea itself first shows the wind,
+   * and below it the sky is bare. `windLineFull` is the sea-state ladder's top
+   * rung, so the shipped F6 default sits near half and a storm has room to
+   * fill the sky in. `windLineDriftRate` is radians of travel per second per
+   * m/s of wind, and it is why the phases are ACCUMULATED (§V.55): the rate is
+   * live, so `time × rate` would be unbounded.
+   */
+  windLineCount: number;
+  windLineWidth: number;
+  windLineBrightness: number;
+  windLineWaveAmount: number;
+  windLineWaveFreq: number;
+  windLineGustFreq: number;
+  windLineGustDepth: number;
+  windLineDriftRate: number;
+  windLineOnset: number;
+  windLineFull: number;
+  windLineDensityPower: number;
+  windLineWhiteness: number;
+  windLineNightDim: number;
+  /** viewDir.y over which the streaks fade in above the horizon */
+  windLineHorizonFade: number;
   /** analytic sun disc angular radius (degrees) and its soft edge (degrees) */
   sunDiscSize: number;
   sunDiscSoftness: number;
@@ -459,6 +495,58 @@ export const skyParams: SkyParams = registerParams(
     starColorWarm: 0xffd7a8,
     // ~5.7°: the references keep stars out of the horizon haze entirely
     starHorizonFade: 0.1,
+    // ── WIND LINES ────────────────────────────────────────────────────────
+    // 49 streaks about the wind axis: 7.3° apart at the axis's own equator
+    // (the great circle through the zenith and the two crosswind horizon
+    // points), so a 55° vertical fov holds about seven of them stacked. Odd on
+    // purpose — see the param docstring and windLines.ts.
+    windLineCount: 49,
+    // Duty cycle, so 0.09 is 0.66° of drawn width at the equator: ~12 px at
+    // 1080p and ~8 px at 720p, comfortably above §V.48's 2 px floor, which
+    // means the AUTHOR owns the width rather than the floor. (That is the
+    // mistake `moonTerminatorSoftness` records: 0.06 was BELOW the floor, so
+    // the authored value had never once rendered.)
+    windLineWidth: 0.09,
+    // Peak additive LINEAR radiance for a full-weight streak before the §V.48b
+    // energy factor. Deliberately tiny: the day sky body is ~0.14/0.37/0.60
+    // linear, so this is a ~10% lift on the blue channel at the very peak of a
+    // streak and less than that everywhere else — the "gentle,
+    // semi-transparent" the request asks for. UNSEEN AS SHIPPED: nothing here
+    // has been rendered yet, and this is the first number to look at.
+    windLineBrightness: 0.06,
+    // Lateral swing, in spacings: 0.12 + its 0.06 second harmonic is ±1.3° of
+    // wander against a 0.66° wide streak — a gentle wave, not a zigzag. The
+    // sum plus the half-width must stay under WIND_LINE_CLEARANCE (0.4) or a
+    // streak starts being clipped by its own cell wall; a test pins it.
+    windLineWaveAmount: 0.12,
+    // Cycles per radian along the streak: 0.75 is one undulation every 76°, so
+    // a streak running the full 180° from vanishing point to vanishing point
+    // carries about two and a half of them.
+    windLineWaveFreq: 0.75,
+    // The gust envelope is much longer than the wave — one lull every ~164° —
+    // so a streak brightens and fades ALONG its length rather than flickering.
+    windLineGustFreq: 0.35,
+    windLineGustDepth: 0.7,
+    // rad/s of travel toward the vanishing point per m/s of wind. At the F6
+    // default (11 m/s) a crest covers one undulation in ~8 s: air moving, not
+    // a conveyor belt.
+    windLineDriftRate: 0.015,
+    // Beaufort 3 / Beaufort 8 — the first rung with whitecaps and the ladder's
+    // top rung. At the shipped 11 m/s the gate is 0.53.
+    windLineOnset: 3.4,
+    windLineFull: 18,
+    // Lower than the starfield's 3: stars want "a few bright, very many faint",
+    // while a wind line that is too faint to see is just a missing wind line.
+    windLineDensityPower: 1.5,
+    // Mostly white, but carrying a third of the live horizon haze, so the
+    // streaks warm with the sky at golden hour instead of staying chalk (§T39)
+    windLineWhiteness: 0.65,
+    // lit air, and there is almost nothing lighting it after dark
+    windLineNightDim: 0.15,
+    // ~1.7°: shallow on purpose. The vanishing point sits ON the horizon and
+    // is the most legible part of the bearing read, so unlike the starfield
+    // this must NOT fade the bottom of the sky away.
+    windLineHorizonFade: 0.03,
     sunDiscSize: 1.1,
     sunDiscSoftness: 0.35,
     sunDiscIntensity: 14,
@@ -517,6 +605,20 @@ export const skyParams: SkyParams = registerParams(
     starTwinkleAmount: { min: 0, max: 1, step: 0.01 },
     starTwinkleRate: { min: 0, max: 8, step: 0.05 },
     starHorizonFade: { min: 0.01, max: 0.6, step: 0.01 },
+    windLineCount: { min: 7, max: 151, step: 2 },
+    windLineWidth: { min: 0.01, max: 0.4, step: 0.005 },
+    windLineBrightness: { min: 0, max: 0.5, step: 0.005 },
+    windLineWaveAmount: { min: 0, max: 0.3, step: 0.005 },
+    windLineWaveFreq: { min: 0.05, max: 3, step: 0.05 },
+    windLineGustFreq: { min: 0.05, max: 2, step: 0.05 },
+    windLineGustDepth: { min: 0, max: 1, step: 0.01 },
+    windLineDriftRate: { min: 0, max: 0.1, step: 0.001 },
+    windLineOnset: { min: 0, max: 20, step: 0.1 },
+    windLineFull: { min: 1, max: 30, step: 0.5 },
+    windLineDensityPower: { min: 0.2, max: 6, step: 0.1 },
+    windLineWhiteness: { min: 0, max: 1, step: 0.01 },
+    windLineNightDim: { min: 0, max: 1, step: 0.01 },
+    windLineHorizonFade: { min: 0.005, max: 0.3, step: 0.005 },
     sunDiscSize: { min: 0.2, max: 6, step: 0.05 },
     sunDiscSoftness: { min: 0.05, max: 3, step: 0.05 },
     sunDiscIntensity: { min: 1, max: 40, step: 0.5 },

@@ -21,9 +21,29 @@ import { skyParams } from '../params/sky';
 import { createLighting } from './lighting';
 import { keyLight } from './moonCycle';
 import { createSkyBackground } from './skyBackground';
+import type { WindFrame } from './windLines';
+
+/** the wind the sky is asked to draw — see src/sky/windLines.ts */
+export type { WindFrame };
+
+/**
+ * Wind the sky falls back to when a caller does not hand it one: none at all.
+ *
+ * DEAD CALM, NOT THE PARAMS DEFAULT, and that is deliberate. A caller that has
+ * no wind to give (the preview page, a test) should get a sky with no wind
+ * lines in it rather than a sky quietly drawing the ambient bearing — a
+ * fabricated cue is worse than a missing one for a feature whose entire job is
+ * to be trusted as an instrument. `speed` 0 is below every onset, so the field
+ * is bare; `dt` 0 leaves the drift phases exactly where they were.
+ */
+const NO_WIND = { direction: 0, speed: 0, dt: 0 } as const;
 
 export interface SkyHandle {
-  update(timeOfDay: number): void;
+  /**
+   * @param wind the LIVE wind (`state.wind`) plus this frame's dt. Optional —
+   *             omitting it draws no wind lines at all (see NO_WIND).
+   */
+  update(timeOfDay: number, wind?: WindFrame): void;
   /**
    * Live normalized world-space direction toward THE KEY — the sun by day,
    * the MOON at night. The name is kept because every consumer in the project
@@ -78,7 +98,7 @@ export function createSky(opts: { scene: THREE.Scene }): SkyHandle {
     sunLight: rig.sunLight,
     skyDomeColor: background.skyDomeColor,
     setShadowFocus: (x, y, z) => rig.setShadowFocus(x, y, z),
-    update(timeOfDay: number): void {
+    update(timeOfDay: number, wind: WindFrame = NO_WIND): void {
       // ONE call resolves who owns the key — sun, moon, or mid-handover — and
       // both the background and the light rig are driven from that single
       // answer. Deriving it twice is how the sky and the light that lights
@@ -86,7 +106,7 @@ export function createSky(opts: { scene: THREE.Scene }): SkyHandle {
       const key = keyLight(timeOfDay, skyParams);
       sunDirection.set(key.direction[0], key.direction[1], key.direction[2]);
       handle.nightFactor = key.nightFactor;
-      background.update(key);
+      background.update(key, wind);
       rig.update(key);
       rig.syncExposure();
     },

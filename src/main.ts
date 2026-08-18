@@ -951,7 +951,17 @@ async function boot(): Promise<void> {
     (alpha, frameDt) => {
       debug.hud.frame(frameDt * 1000);
       sky.setShadowFocus(playerShip.position[0], playerShip.position[1], playerShip.position[2]);
-      sky.update(skyParams.timeOfDay);
+      // §T.47: the sky draws the wind now, so it needs the LIVE wind — the one
+      // weather transitions write every tick, which the sails, flags, AI, palms
+      // and spray all read — plus this frame's dt, because the streaks' drift
+      // is a §V.55 phase accumulator and the rate is wind-speed-driven.
+      // `frameDt`, not the sim dt: this is a purely visual drift, the same
+      // clock the cloud band layer accumulates on.
+      sky.update(skyParams.timeOfDay, {
+        direction: state.wind.direction,
+        speed: state.wind.speed,
+        dt: frameDt,
+      });
 
       let t = performance.now();
       /**
