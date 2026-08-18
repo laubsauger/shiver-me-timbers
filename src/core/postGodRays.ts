@@ -17,6 +17,23 @@
  * `scene.backgroundNode` at infinity (§V.32) and has no depth of its own
  * anyway, so a depth-based mask would have had to special-case it.
  *
+ * THAT PREMISE IS STALE AS OF three r180 — READ IT AS A TRADE, NOT A LAW. The
+ * paragraph above was true when it was written and is no longer the constraint
+ * it claims to be, and it cost a whole investigation: an agent chasing hull
+ * aliasing read "the frame loses MSAA" here, concluded MSAA must already be off,
+ * and went looking for the wrong bug. r180 CAN express a multisampled depth
+ * read — `WGSLNodeBuilder` emits `texture_depth_multisampled_2d` when
+ * `primarySamples > 1`, `WebGPUUtils.getTextureSampleData` deliberately leaves
+ * depth OUT of the MSAA/resolve split so it is read unresolved, and
+ * `PassNode.js` has no downgrade path that would force `samples: 0`. Probed on
+ * the live render context: `renderTarget.samples 4`, colour as a 1-sample
+ * resolve target beside a 4-sample `msaaTexture`, depth at `sampleCount 4`.
+ * MSAA IS ON in the shipped frame with this pass running.
+ *
+ * So the luminance bright-pass is now a CHOICE — cheaper, needs no per-sample
+ * resolve of a depth attachment, and it handles the background sun for free —
+ * rather than the only option. Nothing here changes; the reason does.
+ *
  * RESOLUTION (§V.48). Shafts are inherently low-frequency, so the march runs at
  * a fraction of the frame. But a single tap of the full-res scene at half rate
  * is minified sampling of an image full of one-pixel ropes — per-pixel speckle,

@@ -50,6 +50,7 @@ import {
   sampleDeckHeight,
 } from '../src/ship/deckHeightfield';
 import { vhash, vjitter } from '../src/ship/variation';
+import { reliefFilterGain } from '../src/ship/woodMaterial';
 import {
   bandLimitEnergy,
   bandLimitedEdgeValue,
@@ -1552,6 +1553,110 @@ describe('§V.48 the hull seam gate is keyed on the SEAM, not the plank', () => 
     // of this shape can sit in the deck material unseen until it rains
     const dry = worst((x) => H(x) * 1);
     expect(dry).toBeCloseTo(worst(H), 12);
+  });
+});
+
+/**
+ * §V.48 MEASURED ON THE NORMAL, NOT ON THE HEIGHT (user: "extreme jagged
+ * edges… it causes a moiré effect when we zoom out further").
+ *
+ * `FILTER_PIXELS = 2` is a Nyquist margin cut for UNIT GAIN — two samples per
+ * transition of the field a term varies over. The field these terms vary is the
+ * HEIGHT; what gets shaded is `reliefNormal`'s output, and Mikkelsen's
+ * `normalize(N − ∇H/det)` means `bumpScale` multiplies true surface slope. At
+ * the shipped gain of 20 the crown's honest 2.0° is drawn as 34.4° and the
+ * tilt's 2.6° as 42.4°, while `periodResolved` still waits for 2.5 samples per
+ * board before it begins fading. §B.20's shape one level up, and §V.66's rule:
+ * the gate was measured against the wrong dimension.
+ *
+ * These assert the RATIO, not an absolute footprint (§V.66's own corollary, and
+ * §Rule 6): the property that has to hold is "the per-pixel normal excursion
+ * the gate permits does not grow with the gain", which is scale-free. An
+ * absolute "the relief must be gone by X metres" would lock in today's camera.
+ */
+describe('§V.48 the relief gate is measured on the NORMAL the term produces', () => {
+  const P = shipMaterialParams;
+  const tilt = P.plankTilt * shipDetailParams.irregularity;
+  /** peak dH/d(board) of the two crowns, over a board's width: slope at gain 1 */
+  const UNIT_SLOPE = (Math.PI * P.plankRelief + 2 * Math.PI * tilt) / P.plankWidth;
+  const gain = (bump: number): number =>
+    reliefFilterGain(bump, P.plankRelief, tilt, P.plankWidth);
+
+  it('is EXACTLY 1 at bumpScale 1 — the compatibility guarantee', () => {
+    // unit gain is the calibration point FILTER_PIXELS was chosen at, so a
+    // caller who never touched the master dial must not move by one pixel.
+    // Not `toBeCloseTo`: an approximate identity here would mean the old
+    // shipped material silently changed, which is the whole thing this rules
+    // out. Same below 1, where the normal is SHALLOWER than the height.
+    expect(gain(1)).toBe(1);
+    expect(gain(0)).toBe(1);
+    expect(gain(0.5)).toBe(1);
+    for (const f of [0.05, 0.2, 0.4, 0.8, 1.5]) {
+      expect(periodResolvedValue(f * gain(1))).toBe(periodResolvedValue(f));
+    }
+  });
+
+  it('inflates in proportion to the EXCESS gain, and only that', () => {
+    expect(gain(20)).toBeCloseTo(1 + 19 * UNIT_SLOPE, 12);
+    expect(gain(20)).toBeCloseTo(2.52, 2); // the shipped factor
+    // strictly monotone above 1: a bigger dial is a tighter gate, always
+    let prev = 0;
+    for (const b of [1, 2, 4, 8, 12, 20, 30, 60]) {
+      const g = gain(b);
+      expect(g).toBeGreaterThan(prev);
+      prev = g;
+    }
+    // and it is built from the CROWNS, which is what the measurement found —
+    // plankRelief +12.09 and plankTilt −4.67 leave-one-out, against seamDepth
+    // +6.34 and plankStep +3.50. Zero the two crowns and there is nothing left
+    // for the gain to amplify, so the gate goes back to the height's own.
+    expect(reliefFilterGain(20, 0, 0, P.plankWidth)).toBe(1);
+  });
+
+  it('bounds the per-pixel normal swing by the gain, which is what moirés', () => {
+    /**
+     * Worst-case change in SHADING SLOPE between two neighbouring pixels, as a
+     * function of the board footprint: what survives the gate (`periodResolved`
+     * of the filter it is measured at) times the slope the gain draws times how
+     * much of a board a pixel spans. This is the quantity `reliefNormal`
+     * differentiates, and the quantity a checker in the frame IS.
+     */
+    const worstSwing = (bump: number, inflate: boolean): number => {
+      let worst = 0;
+      for (let filter = 0.001; filter < 3; filter += 0.001) {
+        const g = inflate ? gain(bump) : 1;
+        worst = Math.max(worst, periodResolvedValue(filter * g) * bump * UNIT_SLOPE * filter);
+      }
+      return worst;
+    };
+    // the fix is worth exactly its own factor — no more, and it does not
+    // pretend to restore the unit-gain bound, which would need a 20x gate and
+    // would delete the relief the user asked for
+    // 3 places, not more: the supremum is found on a 0.001 sweep of the
+    // footprint, so the residual is the grid's, not the property's
+    expect(worstSwing(20, false) / worstSwing(20, true)).toBeCloseTo(gain(20), 3);
+    // …and it costs nothing at the gain it is calibrated against
+    expect(worstSwing(1, true)).toBeCloseTo(worstSwing(1, false), 12);
+    // the shipped material used to permit twenty times the unit-gain swing;
+    // it now permits eight, at the same authored height. The regression pin:
+    // if this ratio stops being > 1 the inflation has been disconnected.
+    expect(worstSwing(20, false) / worstSwing(1, false)).toBeCloseTo(20, 6);
+    expect(worstSwing(20, true) / worstSwing(1, false)).toBeLessThan(9);
+  });
+
+  it('keeps the full height where the user asked for it, and retires it early', () => {
+    // §V.70's lesson inverted: a gate that is tightened until the complaint
+    // stops has usually deleted the feature. A board is ~20 px wide on the
+    // follow camera's deck and ~90 px at the rail the player stands at — the
+    // relief must be untouched at BOTH, or this traded the fix for §B.48.
+    for (const pxPerBoard of [90, 40, 20, 10]) {
+      expect(periodResolvedValue(gain(20) / pxPerBoard)).toBe(1);
+    }
+    // …and gone by the range the moiré was reported at, where a board is a
+    // couple of pixels — 2.3 px at the shipped gain, against 0.9 px before
+    expect(periodResolvedValue(gain(20) / 2)).toBe(0);
+    expect(periodResolvedValue(gain(20) / 6)).toBeLessThan(1); // fading by 6 px
+    expect(periodResolvedValue(1 / 2)).toBeGreaterThan(0.5); // uninflated: still there
   });
 });
 

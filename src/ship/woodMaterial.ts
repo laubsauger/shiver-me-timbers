@@ -42,6 +42,61 @@ import { shipDetailParams, shipMaterialParams, type ShipMaterialParams } from '.
  */
 const irregularity = (): number => Math.max(0, shipDetailParams.irregularity);
 
+/**
+ * GAIN-AWARE FILTER INFLATION for the RELIEF terms — dimensionless, ≥ 1.
+ * (§V.48 measured on the right dimension, §V.66.)
+ *
+ * §V.48 GUARANTEES THE HEIGHT FIELD. THE HEIGHT FIELD IS NOT WHAT IS SHADED.
+ * `FILTER_PIXELS = 2` is a Nyquist margin on the field a term varies over —
+ * two samples per transition. What `reliefNormal` hands the rasteriser is the
+ * SHADING NORMAL, and Mikkelsen's construction is `normalize(N − ∇H/det)`, so
+ * `bumpScale` multiplies TRUE SURFACE SLOPE. Measured at the shipped gain of
+ * 20: the crowned lift's honest 2.0° becomes 34.4°, the per-board tilt's 2.6°
+ * becomes 42.4°. `periodResolved` only begins fading at 0.4 boards per pixel —
+ * 2.5 samples per board — and a 34–42° normal swing reconstructed from 2.5
+ * samples per period is a moiré generator by construction. That is what the
+ * user was looking at ("extreme jagged edges… a moiré effect when we zoom out
+ * further"), and it is §B.20's shape one level up: a band limit measured
+ * against the wrong dimension. The gate must be measured on the NORMAL a term
+ * produces, not on its height.
+ *
+ * MEASURED, so the term list is not a guess. Mean Nyquist (checker) energy
+ * `|2L(i) − L(i−1) − L(i+1)|` over a hull-only crop at ~70 m, everything else
+ * zeroed, against a no-relief floor of 47.16: plankRelief +12.09, seamDepth
+ * +6.34, plankStep +3.50, grainRelief +0.41, deck field and wale ~0. Removing
+ * `plankTilt` from the full material drops it 63.77 → 59.10. So the dominant
+ * aliasers are the SMOOTH per-board terms — the crown and the tilt — and not
+ * the caulk seam (§B.20's instinct) nor the §V.70 plateau step. The two crowns
+ * are therefore what this factor is built from.
+ *
+ * `π·plankRelief` and `2π·plankTilt` are those two crowns' peak dH/d(board);
+ * over `plankWidth` they are slopes; times the EXCESS gain they are how many
+ * times more normal excursion one pixel sees than the margin was cut for.
+ *
+ * `bumpScale − 1`, NOT `bumpScale`, IS THE COMPATIBILITY GUARANTEE: unit gain
+ * is the calibration point FILTER_PIXELS was chosen at, so at the old shipped
+ * `bumpScale` of 1 this returns EXACTLY 1 and no honest caller moves a pixel.
+ * At the shipped 20 it is 2.52.
+ *
+ * WHAT IT DELIBERATELY IS NOT: a smaller `bumpScale`. The aliasing metric is
+ * LINEAR in gain (47.2 at 0, 50.6 at 4, 54.8 at 8, 58.4 at 12, 63.8 at 20), so
+ * there is no safe value below 20 — lowering the dial is a one-for-one trade of
+ * the height §B.48 was raised to get against the aliasing being reported. This
+ * buys the same quiet at range by retiring the relief EARLIER IN DISTANCE
+ * rather than weaker everywhere.
+ *
+ * @param plankTilt already multiplied by {@link irregularity}, as the uniform is
+ */
+export function reliefFilterGain(
+  bumpScale: number,
+  plankRelief: number,
+  plankTilt: number,
+  plankWidth: number,
+): number {
+  const slope = (Math.PI * plankRelief + 2 * Math.PI * plankTilt) / Math.max(1e-6, plankWidth);
+  return 1 + Math.max(0, bumpScale - 1) * slope;
+}
+
 /** TSL nodes are structurally different per operation; these locals are
  *  reassigned across mix/add/mul so they need the loose node type */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -191,6 +246,46 @@ const SPAR_STAVES = 8;
  */
 const WALE_EDGE = 0.06;
 
+/**
+ * §V.64 CONVERSION FACTOR: how much of the per-board tone jitter comes BACK as
+ * the relief retires, as a fraction of `plankToneVar`.
+ *
+ * §V.64 says sub-pixel detail must have its VARIANCE converted, not deleted —
+ * fading to the feature's mean is necessary and not sufficient. The usual
+ * destination is roughness. THAT IS THE WRONG ANSWER HERE, and the measurement
+ * says so rather than taste: `roughBase` is 0.74 and the deck runs 0.82 after
+ * the bleach lift, so the specular lobe is already almost Lambertian and
+ * widening it further moves nothing anyone can see. What the crown and the
+ * tilt were actually drawing at range is DIFFUSE `N·L` — the per-board
+ * brightness difference between a board tilted toward the sun and its
+ * neighbour tilted away — and that is a per-board quantity whose honest
+ * carrier, once the normal is gone, is per-board TONE. Which is what a mip of
+ * a photographed deck gives you: boards that are still individually lighter
+ * and darker long after their crowns stopped being resolvable.
+ *
+ * §V.64's COROLLARY — check EVERY normal-sensitive channel, not just the
+ * specular lobe. Audited, all four in this material:
+ *   • diffuse `N·L` — the one that loses something. Carried here.
+ *   • HemisphereLight ambient — a function of N.y ALONE, and a 2° tilt moves
+ *     N.y by 0.0006 (§B.48b). Constant across a deck already; loses nothing.
+ *   • specular / Fresnel — roughness 0.74–0.82, see above. Nothing to widen.
+ *   • `waterLighting` and `deckWetness` — both read `normalWorldGeometry`, the
+ *     GEOMETRIC normal, deliberately (a cycle otherwise, see the note at
+ *     `material.normalNode`). Unaffected by anything here.
+ *
+ * SECOND-ORDER ON PURPOSE, and this number is a bounded artistic carrier, not
+ * a derived one. Both crowns are ZERO-MEAN across a board, so the first-order
+ * per-board brightness shift genuinely is nothing — the residual is the
+ * asymmetry of `max(N·L, 0)` over a ±34–42° swing, which is real but not
+ * something this file can honestly claim a coefficient for. Half the existing
+ * jitter (0.05 → 0.075 at full retirement) keeps the boards legible at the
+ * range the relief leaves without letting albedo become the new checker: the
+ * jitter is a per-board STEP and rides `resolved`, so anything approaching a
+ * doubling would be handing back in colour the aliasing just removed from the
+ * normal.
+ */
+const RELIEF_TONE_CARRY = 0.5;
+
 export interface ShipMaterialHandle {
   material: THREE.MeshStandardNodeMaterial;
   /** re-read live params (Tweakpane mutates them in place, §V16) */
@@ -227,6 +322,10 @@ export function createWoodMaterial(
   const uWaleDarken = uniform(p.waleDarken);
 
   const uBumpScale = uniform(p.bumpScale);
+  /** see {@link reliefFilterGain} — the relief band limit's own multiplier */
+  const uReliefGain = uniform(
+    reliefFilterGain(p.bumpScale, p.plankRelief, p.plankTilt * irregularity(), p.plankWidth),
+  );
   const uGrainRelief = uniform(p.grainRelief);
   const uPlankRelief = uniform(p.plankRelief);
   const uPlankStep = uniform(p.plankStep);
@@ -372,11 +471,45 @@ export function createWoodMaterial(
   const boardCoord = plankCoord.add(wander);
 
   const resolved = periodResolved(boardCoord, plankFilter);
+  /**
+   * …and the SAME limit measured on the shading normal instead of on the
+   * height (see {@link reliefFilterGain}). `plankFilter` is the honest pixel
+   * footprint of a board; `reliefFilter` is that footprint expressed in units
+   * of the normal excursion `bumpScale` builds out of it, which is the thing
+   * the sampling grid actually has to carry.
+   *
+   * THE WHOLE HEIGHT FIELD FEEDS EXACTLY ONE CONSUMER — `material.normalNode`
+   * at the bottom of this function. Colour comes from `seamMask`/`buttMask`
+   * and occlusion from `cavity`, both of which keep the UNINFLATED gate. So
+   * every use of `reliefFilter` below is provably relief-only: it cannot
+   * touch a pixel's albedo, and the extra fade cannot read as the surface
+   * going pale at range.
+   */
+  const reliefFilter = plankFilter.mul(uReliefGain);
+  const reliefResolved = periodResolved(boardCoord, reliefFilter);
 
   const f = fract(boardCoord);
   const edgeDistance = f.min(f.oneMinus()); // 0 at a seam, 0.5 mid-plank
   const seamMask = bandLimitedEdge(edgeDistance, boardCoord, uSeamWidth, plankFilter); // 0 = seam
   const seamGroove = seamMask.oneMinus(); // 1 IN the caulked groove
+  /**
+   * The caulk groove's DEPTH, gated one tier earlier than its darkening.
+   *
+   * Same seam, same authored width, two different consumers with two
+   * different Nyquist limits: what the groove does to the COLOUR is a 0.55×
+   * multiply and aliases at unit amplitude, while what it does to the NORMAL
+   * is a 79.6° wall at the shipped gain. Measured at +6.34 over the no-relief
+   * floor, second only to the crown. Splitting them keeps the caulk line
+   * visible as a line — which is what a mip of a photographed deck gives you —
+   * for the whole distance band in which its relief has already stopped being
+   * reconstructable.
+   */
+  const seamGrooveRelief = bandLimitedEdge(
+    edgeDistance,
+    boardCoord,
+    uSeamWidth,
+    reliefFilter,
+  ).oneMinus();
 
   // every plank is its own board: slightly different tone, and laid a hair
   // proud or shy of its neighbours. This is most of what reads as planking
@@ -410,21 +543,31 @@ export function createWoodMaterial(
   const neighbourId = hash2(vec2(boardIndex.add(f.sub(0.5).sign()), 17.3));
   /** a board id as a signed level, −1..1 */
   const level = (id: AnyNode): AnyNode => id.sub(0.5).mul(2);
+  // relief-only (it reaches `height` and nothing else), so BOTH halves of its
+  // limit — the widened chamfer and the period gate — are measured on the
+  // inflated filter. The AO side of the plateau (`stepShade`) rebuilds its own
+  // from the plank levels and keeps the uninflated gate.
   const plankPlateau = bandLimitedStep(
     edgeDistance,
     level(plankId),
     level(neighbourId),
     uPlankChamfer,
-    plankFilter,
-  ).mul(resolved);
+    reliefFilter,
+  ).mul(reliefResolved);
   // CROWNED, not stepped: the lift rises to the middle of each board and
   // returns to zero at both seams. A per-plank constant would be a step in
   // the height field, and the relief normal differentiates that field in
   // screen space — a step differentiates to a one-pixel spike at every seam.
   // crowned AND band-limited: the lift is the largest term in the height
   // field, so it is the one that blows the relief normal up when it aliases
-  const crown = sin(f.mul(Math.PI)).mul(resolved);
-  const plankLift = plankId.sub(0.5).mul(2).mul(crown); // −1..1, continuous
+  // ONE shape, TWO gates: `crownRelief` rides the inflated filter because it
+  // ends up in the shading normal, `crown` keeps the honest period gate
+  // because it also weights the butt joint's OCCLUSION, which is an albedo-
+  // side channel and must not retire early with the relief.
+  const crownShape = sin(f.mul(Math.PI));
+  const crown = crownShape.mul(resolved);
+  const crownRelief = crownShape.mul(reliefResolved);
+  const plankLift = plankId.sub(0.5).mul(2).mul(crownRelief); // −1..1, continuous
   /**
    * …and each board is laid with one edge a shade prouder than the other,
    * because nothing is bedded perfectly flat. `sin(2πf)` is ANTISYMMETRIC
@@ -434,7 +577,7 @@ export function createWoodMaterial(
    * flat panel with lines drawn on it into something the light rakes across.
    */
   const tiltId = hash2(vec2(boardCoord.floor(), 29.1));
-  const plankTilt = sin(f.mul(Math.PI * 2)).mul(tiltId.sub(0.5).mul(2)).mul(resolved);
+  const plankTilt = sin(f.mul(Math.PI * 2)).mul(tiltId.sub(0.5).mul(2)).mul(reliefResolved);
 
   // BUTT JOINTS. Real planking is short boards butted end to end, and the
   // butts of neighbouring courses are deliberately STAGGERED (two butts in
@@ -461,6 +604,19 @@ export function createWoodMaterial(
    */
   const buttMask = bandLimitedEdge(buttDistance, alongPlank, uButtWidth, alongFilter); // 0 = butt
   const buttGroove = buttMask.oneMinus();
+  /**
+   * …and its relief depth on the inflated filter, for the seam's reason
+   * exactly: a butt is cut to the same `seamDepth` as a caulk line, so its
+   * wall is the same 79.6° at the shipped gain, and the per-term measurement
+   * that put "seamDepth" at +6.34 had this term live alongside the seam. The
+   * darkening keeps `buttMask`.
+   */
+  const buttGrooveRelief = bandLimitedEdge(
+    buttDistance,
+    alongPlank,
+    uButtWidth,
+    alongFilter.mul(uReliefGain),
+  ).oneMinus();
 
   // --- one height field, shared by colour, roughness and the relief normal
   let height: AnyNode = grain
@@ -470,12 +626,12 @@ export function createWoodMaterial(
     .add(plankPlateau.mul(uPlankStep))
     .add(plankLift.mul(uPlankRelief))
     .add(plankTilt.mul(uPlankTilt));
-  height = height.sub(seamGroove.mul(uSeamDepth)); // caulking sits recessed
+  height = height.sub(seamGrooveRelief.mul(uSeamDepth)); // caulking sits recessed
   // the butt groove fades out at the plank seams (× crown). Without that the
   // height field STEPS across a seam — one board grooved, its neighbour not —
   // and §V38's differentiation turns that step into a one-pixel spike.
   if (tones.sparAxis === undefined) {
-    height = height.sub(buttGroove.mul(uSeamDepth).mul(0.8).mul(crown));
+    height = height.sub(buttGrooveRelief.mul(uSeamDepth).mul(0.8).mul(crownRelief));
   }
 
   /**
@@ -521,8 +677,18 @@ export function createWoodMaterial(
 
   // per-board tone jitter is a STEP at each seam — flat across a board, then a
   // jump. Once a board is sub-pixel that step is per-pixel random albedo, so
-  // the amplitude rides `resolved` exactly as the crowned lift does.
-  const toneVar = uPlankToneVar.mul(resolved);
+  // the amplitude rides `resolved` exactly as the crowned lift used to.
+  //
+  // …and it is now also where the retired relief GOES (§V.64, see
+  // RELIEF_TONE_CARRY). `reliefLost` is exactly the band this change opened up:
+  // 0 while both gates agree, rising to 1 over the distances where the board is
+  // still resolvable as a board but its 34–42° normal swing is not. Zero at
+  // `bumpScale` 1 by construction, because there the two gates are the same
+  // gate.
+  const reliefLost = resolved.sub(reliefResolved).clamp(0, 1);
+  const toneVar = uPlankToneVar
+    .mul(resolved)
+    .mul(float(1).add(reliefLost.mul(RELIEF_TONE_CARRY)));
   const base = mix(uDark, uLight, grain).mul(
     mix(float(1).sub(toneVar), float(1).add(toneVar), plankId),
   );
@@ -693,6 +859,12 @@ export function createWoodMaterial(
       uWaleRatio.value = p.waleRatio;
       uWaleDarken.value = p.waleDarken;
       uBumpScale.value = p.bumpScale;
+      uReliefGain.value = reliefFilterGain(
+        p.bumpScale,
+        p.plankRelief,
+        p.plankTilt * irregularity(),
+        p.plankWidth,
+      );
       uGrainRelief.value = p.grainRelief;
       uPlankRelief.value = p.plankRelief;
       uPlankStep.value = p.plankStep;
