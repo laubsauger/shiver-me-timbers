@@ -28,6 +28,15 @@ export interface CombatParams {
   /** rad — aim pitch clamp (guns cannot depress below/elevate above these) */
   minElevation: number;
   maxElevation: number;
+  /**
+   * rad of gun elevation per pixel of mouse travel while the aim button is
+   * held. The clamp spans 0.72 rad, so the default is a ~290 px sweep from
+   * full depression to full elevation — a gun crew's handspike, not a
+   * flick-stick.
+   */
+  aimMouseSpeed: number;
+  /** rad/s of gun elevation while an elevate/depress key is held */
+  aimKeyRate: number;
   /** s between neighbouring guns of one broadside — the rolling ripple */
   rippleDelay: number;
   /**
@@ -53,6 +62,8 @@ export const combatParams: CombatParams = registerParams(
     defaultElevation: 0.06,
     minElevation: -0.12,
     maxElevation: 0.6,
+    aimMouseSpeed: 0.0025,
+    aimKeyRate: 0.25,
     rippleDelay: 0.13,
     rippleJitter: 0.07,
   },
@@ -68,6 +79,8 @@ export const combatParams: CombatParams = registerParams(
     defaultElevation: { min: -0.2, max: 0.8, step: 0.01 },
     minElevation: { min: -0.5, max: 0, step: 0.01 },
     maxElevation: { min: 0.1, max: 1.2, step: 0.01 },
+    aimMouseSpeed: { min: 0.0002, max: 0.02, step: 0.0002 },
+    aimKeyRate: { min: 0.02, max: 1.5, step: 0.01 },
     rippleDelay: { min: 0, max: 0.5, step: 0.01 },
     rippleJitter: { min: 0, max: 0.5, step: 0.01 },
   },

@@ -19,6 +19,8 @@ import { CONTROL_CODES } from '../input/controlMap';
 export const TOGGLE_FREE_CODE = CONTROL_CODES.toggleFreeCamera;
 /** H = snap to the captain's eye at the helm, and back out again */
 export const TOGGLE_HELM_CODE = CONTROL_CODES.toggleHelm;
+/** the DOM's number for the right mouse button — gunnery's, not the camera's */
+const AIM_BUTTON = 2;
 
 export interface CamInputHost {
   /** true while the detached fly camera owns the lens */
@@ -44,12 +46,30 @@ function inTextField(e: KeyboardEvent): boolean {
 
 /** Attach every camera binding. Returns a detach function. */
 export function attachCamInput(domElement: HTMLElement, host: CamInputHost): () => void {
+  // The RIGHT button lays the guns (src/combat/gunnery.ts) and must never also
+  // orbit the lens: one gesture, one owner. Without this, aiming swings the
+  // camera as the guns move — the two halves of one system disagreeing, which
+  // is the shape of bug this project keeps shipping.
+  let aimPointer: number | null = null;
   const onPointerDown = (e: PointerEvent): void => {
+    if (e.button === AIM_BUTTON) {
+      aimPointer = e.pointerId;
+      return;
+    }
     host.setDragging(true);
     domElement.setPointerCapture?.(e.pointerId);
   };
-  const onPointerUp = (): void => host.setDragging(false);
-  const onPointerMove = (e: PointerEvent): void => host.drag(e.movementX, e.movementY);
+  const onPointerUp = (e: PointerEvent): void => {
+    if (e.pointerId === aimPointer) {
+      aimPointer = null;
+      return;
+    }
+    host.setDragging(false);
+  };
+  const onPointerMove = (e: PointerEvent): void => {
+    if (e.pointerId === aimPointer) return;
+    host.drag(e.movementX, e.movementY);
+  };
   const onWheel = (e: WheelEvent): void => {
     e.preventDefault();
     host.wheel(e.deltaY);

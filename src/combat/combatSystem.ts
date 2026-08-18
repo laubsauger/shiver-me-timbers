@@ -358,8 +358,13 @@ function clamp(x: number, lo: number, hi: number): number {
   return x < lo ? lo : x > hi ? hi : x;
 }
 
-/** heading of the hull's bow, same convention as ai/steering.yawOf */
-function yawOfShip(ship: ShipState): number {
+/**
+ * Heading of the hull's bow, same convention as ai/steering.yawOf.
+ * Exported because the aim reticle has to pick the SAME battery `step` will
+ * pick from the same bearing — two copies of this would let the crosshair
+ * describe the other broadside on the tie.
+ */
+export function yawOfShip(ship: ShipState): number {
   const f = rotateVec(ship.quaternion, [0, 0, 1]);
   return Math.atan2(f[0], f[2]);
 }

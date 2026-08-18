@@ -12,7 +12,7 @@ import { OceanSurface } from './ocean/oceanSurface';
 import { createFoamSim, createSpray, createBowSpray } from './foam';
 import { createFlowFoam } from './flowfoam';
 import { rotateVec } from './combat/quatMath';
-import { createCombatArena, createCombatRuntime, viewBearing } from './combat';
+import { createCombatArena, createCombatRuntime, createGunnery, viewBearing } from './combat';
 import type { FireOrder } from './combat';
 import { createClouds } from './clouds';
 import { skyParams } from './params/sky';
@@ -57,6 +57,7 @@ import {
 } from './sea-physics/hullContact';
 import { stepFlooding } from './sea-physics/flooding';
 import { stepShipGrounding } from './sea-physics/grounding';
+import { seaPhysicsParams } from './params/seaPhysics';
 import { galleonParams, shipRigParams } from './params/ship';
 import { createCaustics, setActiveCaustics } from './caustics';
 import { buildDeckHeightfield } from './ship/deckHeightfield';
@@ -312,6 +313,12 @@ async function boot(): Promise<void> {
     // the horizon builds as a monument while the sky overhead stays fair.
     // Omitting this leaves every cluster fair-weather — silently.
     stormAt: weather.stormAt,
+    // §V.63: and this is what puts the storm cloud OVER THE RAIN. `stormAt`
+    // alone only shapes clusters that are already sited — and they are sited
+    // on a ring around the world ORIGIN, which the ship sails away from, so
+    // rain and cloud measured r = 0.00 along a sail track before this line.
+    // The cell list is the only thing that says where a squall actually IS.
+    stormCellsNear: weather.stormCellsNear,
   });
   clouds.attachTo(app.scene);
 
@@ -713,6 +720,16 @@ async function boot(): Promise<void> {
   // the lens parked across the line of fire, keys to fire either side and to
   // force a breach or a mast. null (and free) in ordinary play. Combat was
   // unobservable without it — see the header of combatArena.ts.
+  // §T.16 aim: the player's gun lay and the crosshair that reports it. It has
+  // to exist for the guns to be usable at all — without an explicit elevation
+  // on her order, `layGuns` lays the player's battery for the ENEMY's range
+  // (1014 m at spawn, against a 133.6 m maximum), which pins every shot at the
+  // maxElevation clamp: measured 34.8° above horizontal, apex 36.1 m. That is
+  // the user's "shooting just like super high in the sky".
+  const gunnery = createGunnery({
+    blueprint: galleonBlueprint,
+    domElement: app.renderer.domElement,
+  });
   const arena = createCombatArena(state, combat, followCam, galleonBlueprint);
   // hoisted + mutated per frame: the render callback runs every frame and a
   // fresh object graph here would be pure GC churn
@@ -921,6 +938,12 @@ async function boot(): Promise<void> {
               shipIndex: 0,
               fire: snapshot.fire,
               aimBearing: viewBearing(app.camera.matrixWorld.elements),
+              // ALWAYS carries an elevation, and that is the fix: an order
+              // without one is auto-laid by `layGuns` for the nearest other
+              // hull, which for the player means the enemy she is not aiming
+              // at, at a range no ball can reach — the maxElevation clamp on
+              // every shot. Auto-lay stays where it belongs, on the AI below.
+              elevation: gunnery.elevation(),
             },
             enemyCommands.order,
           ];
@@ -928,7 +951,24 @@ async function boot(): Promise<void> {
       // §V.14 flooding: breaches recorded by combat, measured against the sea
       const playerHoles = combat.floodHoles(state, 0);
       stepFlooding(playerShip, playerHoles, dt);
-      stepShipBuoyancy(playerShip, cpuOcean, dt, undefined, playerHoles);
+      const playerSlam = stepShipBuoyancy(playerShip, cpuOcean, dt, undefined, playerHoles);
+      // §V.70: SHAKE THE LENS WHEN SHE LANDS. Spray and the slam sample are
+      // already fed from hullContact's burial rates, but shake had exactly one
+      // source — gunfire — so a hull could come down hard enough to bury the
+      // rail and the camera would not flinch, which reads as weightless
+      // however right the numbers are. The signal is the speed the sea took
+      // off her in one tick, and riding waves it stays two orders of magnitude
+      // under the floor (storm worst 0.026 against a 0.05 gate), so this fires
+      // on impacts and not on the swell.
+      if (playerSlam > seaPhysicsParams.slamShakeFloor) {
+        const span = Math.max(1e-3, seaPhysicsParams.slamShakeFull - seaPhysicsParams.slamShakeFloor);
+        combat.shake.impulse(
+          playerShip.position[0],
+          playerShip.position[1],
+          playerShip.position[2],
+          Math.min(1, (playerSlam - seaPhysicsParams.slamShakeFloor) / span),
+        );
+      }
       const enemyHoles = combat.floodHoles(state, 1);
       stepFlooding(enemyShip, enemyHoles, dt);
       stepShipBuoyancy(enemyShip, cpuOcean, dt, undefined, enemyHoles);
@@ -942,7 +982,11 @@ async function boot(): Promise<void> {
       hullContact.update(playerShip, cpuOcean, state.time);
       // grounding reuses this tick's station world positions — no second pose
       // pass, no extra ocean sampling. Touches, slows, lists, holds.
-      stepShipGrounding(playerShip, hullContact, archipelago.seabed, galleonParams.draft, dt);
+      // §B.49: kept so the HUD can say "aground" rather than leaving the
+      // player to guess which of five reasons a motionless ship has
+      playerAground = stepShipGrounding(
+        playerShip, hullContact, archipelago.seabed, galleonParams.draft, dt,
+      ).aground;
       // §V27 event-driven: the bow-immersion sensor reads the SAME cutwater
       // signal as the bow spray, so splash, spray and wake agree about when
       // she buries. Passive always-on splashing is explicitly forbidden.
@@ -1271,21 +1315,43 @@ async function boot(): Promise<void> {
       // and sails use — so what the player reads and what the canvas answers to
       // cannot drift apart. `state.wind` is the LIVE wind (weather transitions
       // write it every tick), not the params default.
+      // canvas plaque: raw trim 0..1. The HUD re-runs sailStateForTrim() with
+      // the SAME hysteresis the rig uses, so the plaque flips on the exact
+      // frame the canvas does rather than a frame either side of it (§I hud).
+      // BEFORE setWind, not after: setWind's §B.49 stall readout has to know
+      // whether there is canvas on her, and reading last frame's trim showed
+      // "SAILS FURLED" for one frame after they were set — measured in-browser.
+      ui.setTrim(playerShip.sailTrim);
       ui.setWind({
         windDirection: state.wind.direction,
         windSpeed: state.wind.speed,
         shipVelX: playerShip.velocity[0],
         shipVelZ: playerShip.velocity[2],
         headingRad,
+        // §B.49: the HUD names WHY she is not making way. Both of these are
+        // read from the sim rather than mirrored in the UI, so the plaque
+        // cannot claim she is at anchor while the force model disagrees.
+        anchored: playerShip.anchored === true,
+        aground: playerAground,
       });
-      // canvas plaque: raw trim 0..1. The HUD re-runs sailStateForTrim() with
-      // the SAME hysteresis the rig uses, so the plaque flips on the exact
-      // frame the canvas does rather than a frame either side of it (§I hud).
-      ui.setTrim(playerShip.sailTrim);
 
       // smoke, splinters, splashes, balls in flight and fallen spars —
       // render-clock particles reading sim-owned projectiles (§V.3)
       combat.update(frameDt, state);
+
+      // §T.16 aim: AFTER followCam.update, so the crosshair is projected
+      // through THIS frame's lens rather than last frame's, and against the
+      // hull's live attitude — her heel is part of where the shot goes.
+      gunnery.update(
+        {
+          camera: app.camera,
+          ship: playerShip,
+          aimBearing: viewBearing(app.camera.matrixWorld.elements),
+          seaHeight: (x, z) => cpuOcean.heightAt(x, z, state.time),
+          visible: !ui.isPhotoMode() && !ui.isPaused(),
+        },
+        frameDt,
+      );
 
       surface.update(app.camera, state.time, sky.sunDirection);
       // AFTER the camera is final for this frame (followCam ran above) and
@@ -1532,6 +1598,10 @@ async function boot(): Promise<void> {
     hullContact,
     cpuOcean,
     combat,
+    // §T.16 verification handle: `__game.gunnery.aim.elevation()` is the only
+    // way to tell "the guns are laid where I put them" from "something is
+    // laying them for me" without firing a shot
+    gunnery,
     arena,
     enemyAi,
     bootTimings,
