@@ -15,7 +15,7 @@ import { shipRigParams } from '../params/ship';
 import { apparentWind, wrapAngle } from '../ship/flagDynamics';
 import { sailStateForTrim, trimDropScale } from '../ship/sailDynamics';
 import type { SailStateId } from '../ship/pieceTypes';
-import { CARDINALS, cardinal, createWindDial, pointOfSail } from './windDial';
+import { CARDINALS, beaufort, cardinal, createWindDial, pointOfSail } from './windDial';
 import { div, el } from './dom';
 
 export interface WindReadout {
@@ -27,6 +27,20 @@ export interface WindReadout {
   shipVelZ: number;
   /** ship heading (rad), same convention as setHeading */
   headingRad: number;
+  /** riding to her anchor (ShipState.anchored) */
+  anchored?: boolean;
+  /** the seabed is holding her (grounding published a non-zero grip) */
+  aground?: boolean;
+}
+
+export interface HudOptions {
+  /**
+   * The anchor button was pressed. The HUD does NOT own the anchor — it asks,
+   * and re-reads the answer through `setWind`. §V.62: a button that flipped a
+   * local boolean and lit its own lamp would look like it worked and drive
+   * nothing, which is the shape this project has shipped thirteen times.
+   */
+  onAnchorToggle?(): void;
 }
 
 export interface Hud {
@@ -41,6 +55,40 @@ export interface Hud {
   setDamage(zoneId: string, level: number): void;
   dispose(): void;
 }
+
+/**
+ * WHY SHE IS NOT MAKING WAY — the readout this whole HUD was missing.
+ *
+ * "At anchor", "becalmed", "in irons", "sails furled" and "aground" all
+ * present identically from the deck: a ship sitting still. The user could not
+ * tell them apart and neither could anyone reading the bug report, which is
+ * what turned §B.49 into a multi-message investigation. Named states, in
+ * precedence order, because more than one can be true at once and the player
+ * needs the one they must fix FIRST.
+ *
+ * Pure, and exported, so the test can assert every branch without a DOM.
+ */
+export function stalledReason(w: {
+  anchored?: boolean;
+  aground?: boolean;
+  sailTrim: number;
+  windSpeed: number;
+  /** angle off the eye of the TRUE wind, rad (0 = head to wind) */
+  theta: number;
+  noGoDegrees: number;
+}): string | null {
+  if (w.anchored) return 'at anchor';
+  if (w.aground) return 'aground';
+  // below Beaufort 1 there is nothing to sail on, and that is not the ship's
+  // fault — say so before blaming the canvas
+  if (w.windSpeed < BECALMED_MS) return 'becalmed';
+  if (w.sailTrim <= 0) return 'sails furled';
+  if ((w.theta * RAD_TO_DEG) <= w.noGoDegrees) return 'in irons';
+  return null;
+}
+
+/** m/s below which there is no sailing to be had — the foot of Beaufort 1 */
+const BECALMED_MS = 0.5;
 
 const RAD_TO_DEG = 180 / Math.PI;
 const MS_TO_KNOTS = 1.944;
@@ -76,9 +124,22 @@ function plaqueCell(value: string, label: string): { root: HTMLElement; value: H
   return { root: div('smt-plate-cell', v, l), value: v, label: l };
 }
 
-export function createHud(root: HTMLElement): Hud {
+export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
   const tape = div('smt-compass-tape');
   const compass = div('smt-compass', tape, div('smt-lubber'));
+
+  // TRUE wind, under the compass. Deliberately not a second copy of the dial:
+  // the sky already draws the BEARING (§T.47's wind lines vanish toward it),
+  // so what a deck cannot tell you is the STRENGTH — hence knots and a force,
+  // and no direction. The two readouts complement rather than duplicate.
+  const trueWindValue = el('span', 'smt-truewind-value', '0.0 kt');
+  const trueWindName = el('span', 'smt-truewind-name', 'calm');
+  const trueWind = div(
+    'smt-truewind',
+    el('span', 'smt-truewind-key', 'true wind'),
+    trueWindValue,
+    trueWindName,
+  );
 
   const speedValue = el('div', 'smt-plate-value', '0.0');
   const speedCell = div('smt-plate-cell', speedValue, el('div', 'smt-plate-label', 'knots'));
@@ -98,11 +159,30 @@ export function createHud(root: HTMLElement): Hud {
     div('smt-canvas-bar', dropFill),
   );
 
+  // A REAL BUTTON, and the only one on the HUD. The user's complaint was that
+  // "anchored" could not be told from "stuck", so the control that resolves it
+  // has to be visible from the deck rather than only on a key nobody has been
+  // told about. It still routes through the same input path the key does —
+  // see HudOptions.onAnchorToggle.
+  const anchorLabel = el('div', 'smt-plate-label', 'under way');
+  const anchorBtn = el('button', 'smt-plate smt-plate-side smt-anchor') as HTMLButtonElement;
+  anchorBtn.type = 'button';
+  anchorBtn.append(el('div', 'smt-anchor-glyph', '⚓'), anchorLabel);
+  anchorBtn.title = 'Drop or weigh the anchor (X)';
+  anchorBtn.setAttribute('aria-pressed', 'false');
+  anchorBtn.addEventListener('click', () => opts.onAnchorToggle?.());
+  // the HUD sits over a canvas that wants the keyboard: a focused button would
+  // eat the next Space as a re-click instead of firing a broadside
+  anchorBtn.addEventListener('pointerup', () => anchorBtn.blur());
+
+  // why she is not making way — see stalledReason
+  const stalled = div('smt-stalled');
+
   const damageRow = div('smt-damage');
   const damageSlots = new Map<string, HTMLElement>();
 
-  const bottom = div('smt-bottom', windCard, plate, canvasCard);
-  const hud = div('smt-hud', compass, damageRow, bottom);
+  const bottom = div('smt-bottom', anchorBtn, windCard, plate, canvasCard);
+  const hud = div('smt-hud', compass, trueWind, stalled, damageRow, bottom);
   root.appendChild(hud);
 
   let tapePx = uiParams.compassPixelsPerDegree;
@@ -131,6 +211,8 @@ export function createHud(root: HTMLElement): Hud {
   // every wave the hull yaws over, and a twitching needle is unreadable
   let vaneBearing = 0;
   let sailState: SailStateId = 'full';
+  /** last trim seen, so the stall readout can name "sails furled" */
+  let lastTrim = 0;
 
   return {
     setHeading(rad: number): void {
@@ -160,11 +242,45 @@ export function createHud(root: HTMLElement): Hud {
       dial.setStrength(Math.min(1, knots / 20));
       windCell.value.textContent = knots.toFixed(1);
       windCell.label.textContent = aw.speed < 0.2 ? 'no wind' : pointOfSail(vaneBearing, noGo);
+
+      // TRUE wind, which is the one the settings screen sets and the one that
+      // decides whether she can sail at all — the apparent-wind plaque beside
+      // the dial reads a different number for the same air and always has.
+      const trueKnots = Math.max(0, w.windSpeed) * MS_TO_KNOTS;
+      const force = beaufort(w.windSpeed);
+      trueWindValue.textContent = `${trueKnots.toFixed(1)} kt`;
+      trueWindName.textContent = `F${force.force} ${force.name}`;
+
+      // angle off the eye of the TRUE wind, with the SAME (sin, cos) heading
+      // basis stepShipSailing builds its own theta from — the readout has to
+      // agree with the force model or it is worse than nothing
+      const fx = Math.sin(w.headingRad);
+      const fz = Math.cos(w.headingRad);
+      const wx = Math.sin(w.windDirection);
+      const wz = Math.cos(w.windDirection);
+      const dot = fx * wx + fz * wz;
+      const theta = Math.acos(dot < -1 ? 1 : dot > 1 ? -1 : -dot);
+      const reason = stalledReason({
+        anchored: w.anchored,
+        aground: w.aground,
+        sailTrim: lastTrim,
+        windSpeed: w.windSpeed,
+        theta,
+        noGoDegrees: noGo,
+      });
+      stalled.textContent = reason ?? '';
+      stalled.classList.toggle('is-on', reason !== null);
+
+      const anchored = w.anchored === true;
+      anchorBtn.classList.toggle('is-down', anchored);
+      anchorBtn.setAttribute('aria-pressed', String(anchored));
+      anchorLabel.textContent = anchored ? 'at anchor' : 'under way';
     },
     setTrim(trim: number): void {
       // same hysteresis path the rig itself runs, so the plaque flips on the
       // exact frame the canvas does
       sailState = sailStateForTrim(trim, sailState, shipRigParams);
+      lastTrim = trim;
       const t = Math.min(1, Math.max(0, trim));
       canvasCell.value.textContent = `${Math.round(t * 100)}%`;
       canvasCell.label.textContent = SAIL_LABEL[sailState];

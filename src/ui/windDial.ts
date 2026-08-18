@@ -109,3 +109,38 @@ export function pointOfSail(relBearing: number, noGoDegrees: number): string {
   if (a < 160) return 'broad reach';
   return 'running';
 }
+
+/**
+ * The Beaufort scale, by the m/s bands the WMO defines it on — a real scale,
+ * not a made-up one. It lives HERE, beside the other wind vocabulary, because
+ * two readouts now name the same wind: the settings slider ("4.4 m/s · F3
+ * gentle breeze") and the HUD's true-wind plaque ("8.6 kt · F3"). Two tables
+ * would drift, and a player reading two different forces off one wind on two
+ * screens has no way to tell which one is lying.
+ *
+ * Force 3 at 3.4 m/s is where WHITECAPS start — the first rung on which the
+ * sea itself visibly answers the wind, and the same threshold the sky's wind
+ * lines switch on at.
+ */
+const BEAUFORT: readonly { from: number; force: number; name: string }[] = [
+  { from: 32.7, force: 12, name: 'hurricane' },
+  { from: 28.5, force: 11, name: 'violent storm' },
+  { from: 24.5, force: 10, name: 'storm' },
+  { from: 20.8, force: 9, name: 'strong gale' },
+  { from: 17.2, force: 8, name: 'gale' },
+  { from: 13.9, force: 7, name: 'near gale' },
+  { from: 10.8, force: 6, name: 'strong breeze' },
+  { from: 8.0, force: 5, name: 'fresh breeze' },
+  { from: 5.5, force: 4, name: 'moderate breeze' },
+  { from: 3.4, force: 3, name: 'gentle breeze' },
+  { from: 1.6, force: 2, name: 'light breeze' },
+  { from: 0.5, force: 1, name: 'light air' },
+  { from: 0, force: 0, name: 'calm' },
+];
+
+/** Beaufort force and its name for a wind speed in m/s */
+export function beaufort(mps: number): { force: number; name: string } {
+  const v = Number.isFinite(mps) ? mps : 0;
+  const b = BEAUFORT.find((band) => v >= band.from) ?? BEAUFORT[BEAUFORT.length - 1];
+  return { force: b.force, name: b.name };
+}

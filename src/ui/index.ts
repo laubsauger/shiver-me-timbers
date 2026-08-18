@@ -37,6 +37,13 @@ export interface GameUiCallbacks {
   onResume: () => void;
   /** the store from initGraphicsSettings(); one is created if omitted */
   settings?: SettingsStore;
+  /**
+   * The HUD's anchor button was pressed. main.ts feeds it into the SAME
+   * `InputState.anchorToggle` the X key produces, so the button and the key
+   * are one path with one owner (§V.62) rather than two things that can
+   * disagree about whether she is anchored.
+   */
+  onAnchorToggle?: () => void;
 }
 
 export interface GameUi {
@@ -80,7 +87,7 @@ export function createGameUI(callbacks: GameUiCallbacks): GameUi {
   const root = div('smt-ui');
   document.body.appendChild(root);
 
-  const hud = createHud(root);
+  const hud = createHud(root, { onAnchorToggle: callbacks.onAnchorToggle });
   const quickControls = createQuickControls(root);
   // one fullscreen control, shared: the menu entry throws it, the view modes
   // listen to it (full screen = cinematic), and both read the same truth

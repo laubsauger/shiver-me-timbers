@@ -59,7 +59,8 @@ export function stepAiShip(
   const ship = state.ships[ai.shipIndex];
   const player = state.ships[playerIndex];
   const idle: AiCommands = {
-    input: { rudder: 0, sailTrimDelta: 0, brake: false, fire: false },
+    // the AI never anchors — she is here to fight, not to lie to a cable
+    input: { rudder: 0, sailTrimDelta: 0, brake: false, fire: false, anchorToggle: false },
     order: { shipIndex: ai.shipIndex, fire: false },
   };
   if (ship === undefined || player === undefined) return idle;
@@ -81,6 +82,7 @@ export function stepAiShip(
       sailTrimDelta: Math.abs(trimError) < TRIM_DEADBAND ? 0 : Math.sign(trimError),
       brake: false,
       fire: intent.fire !== undefined,
+      anchorToggle: false,
     },
     order: { shipIndex: ai.shipIndex, fire: false },
   };

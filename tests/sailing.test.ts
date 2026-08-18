@@ -21,9 +21,20 @@ import { quatFromAxisAngle, quatMul, rotateVec } from '../src/combat/quatMath';
 import { stepShipSailing, type Wind } from '../src/sailing/shipKinematics';
 import { CpuOcean } from '../src/sea-physics/cpuOcean';
 import { stepShipBuoyancy } from '../src/sea-physics/buoyancy';
-import { KeyboardInput, neutralInput, type InputState } from '../src/sailing/input';
+import {
+  KeyboardInput,
+  attachKeyboard,
+  neutralInput,
+  type InputState,
+} from '../src/sailing/input';
 import { sailingParams } from '../src/params/sailing';
 import { oceanParams } from '../src/params/ocean';
+import { spectrumSignature } from '../src/ocean/oceanCascades';
+import {
+  DEFAULT_SETTINGS,
+  applyWorldSettings,
+  createSettingsStore,
+} from '../src/ui/settingsStore';
 
 const WIND: Wind = { direction: 0, speed: 8 }; // blowing toward +z
 
@@ -73,6 +84,14 @@ function rollOf(q: Quat): number {
   return Math.asin(y < -1 ? -1 : y > 1 ? 1 : y);
 }
 
+/** KeyboardEvent is not in the node test env; the collector reads code+repeat */
+function keyEvent(type: string, code: string, repeat = false): Event {
+  const e = new Event(type) as Event & Record<string, unknown>;
+  e.code = code;
+  e.repeat = repeat;
+  return e;
+}
+
 function wrapPi(a: number): number {
   let x = a % (Math.PI * 2);
   if (x <= -Math.PI) x += Math.PI * 2;
@@ -87,6 +106,9 @@ describe('sailing determinism (V2)', () => {
       sailTrimDelta: i < 120 ? 1 : 0,
       brake: i >= 800,
       fire: false,
+      // two anchor edges in the log: the replay has to reproduce both, or the
+      // anchor is not really part of the deterministic input contract
+      anchorToggle: i === 400 || i === 700,
     });
     const run = (): number => {
       const state = createInitialState(42);
@@ -102,11 +124,57 @@ describe('sailing determinism (V2)', () => {
 });
 
 describe('force model', () => {
-  it('head-to-wind dead zone produces zero thrust — tacking is mandatory', () => {
+  it('head-to-wind dead zone drives her ASTERN, never ahead — tacking is mandatory', () => {
+    // WAS: "produces zero thrust", asserting she does not move at all. That
+    // assertion was the §B.49 deadlock written down as an invariant. The
+    // intent it meant to protect is that you cannot SAIL TO WINDWARD, and
+    // that survives; being frozen head to wind for ever does not, because the
+    // rudder is also dead below steerageSpeed, so nothing could ever get her
+    // out. She is now blown backwards, exactly as a real square-rigger with
+    // her canvas set flat to the wind is.
     const ship = makeShip(Math.PI); // bow straight into the wind eye
     for (let i = 0; i < 600; i++) stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
-    expect(planarSpeed(ship.velocity)).toBeLessThan(1e-12);
-    expect(Math.hypot(ship.position[0], ship.position[2])).toBeLessThan(1e-12);
+    const fwd = rotateVec(ship.quaternion, [0, 0, 1]);
+    const madeGood = ship.velocity[0] * fwd[0] + ship.velocity[2] * fwd[2];
+    expect(madeGood).toBeLessThan(0); // going backwards, not forwards
+    // and she is going TO LEEWARD — she has not gained a metre to windward
+    const toWindward =
+      -(ship.position[0] * Math.sin(WIND.direction) + ship.position[2] * Math.cos(WIND.direction));
+    expect(toWindward).toBeLessThan(0);
+  });
+
+  it('she can get OUT of irons — the deadlock the user reported (§B.49)', () => {
+    // THE REGRESSION. Verbatim: "It seems like I can't move at all… the boat
+    // is not able to catch anything." She boots at the lagoon anchorage on a
+    // heading 23.6° off the eye of the shipped wind — inside the ±30° no-go —
+    // so trimEfficiency was exactly 0, so she never gathered way, so the
+    // rudder (dead below steerageSpeed) could never turn her out of it.
+    // Measured before the fix: 120 s of full canvas and full helm produced
+    // 0.000 kt and 0.6° of heading change.
+    //
+    // This test asserts the OUTCOME the player cares about — that a ship
+    // pointed at the wind with her canvas set and her helm over is sailing a
+    // minute later — not the mechanism that gets her there.
+    const ship = makeShip(Math.PI, 1); // dead head to wind, full canvas
+    const helm: InputState = { ...neutralInput(), rudder: 1 };
+    let sailing = -1;
+    for (let i = 0; i < 60 / SIM_DT; i++) {
+      stepShipSailing(ship, helm, WIND, SIM_DT);
+      const fwd = rotateVec(ship.quaternion, [0, 0, 1]);
+      const madeGood = ship.velocity[0] * fwd[0] + ship.velocity[2] * fwd[2];
+      if (sailing < 0 && madeGood > 1) sailing = i * SIM_DT;
+    }
+    expect(sailing).toBeGreaterThan(0); // she did make way forward…
+    expect(sailing).toBeLessThan(30); // …and inside half a minute
+    expect(planarSpeed(ship.velocity)).toBeGreaterThan(3);
+  });
+
+  it('a furled ship head to wind stays put — the aback push is CANVAS, not hull', () => {
+    // the escape must not become a free engine: bare poles, no canvas, so
+    // there is nothing for the wind to push against and she lies where she is
+    const ship = makeShip(Math.PI, 0);
+    for (let i = 0; i < 600; i++) stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
+    expect(planarSpeed(ship.velocity)).toBe(0);
   });
 
   it('beam reach outruns close-hauled — points of sail matter', () => {
@@ -513,5 +581,168 @@ describe('§B.22: the planar channel has ONE owner', () => {
     stepShipBuoyancy(ship, ocean, SIM_DT);
     expect(ship.position[0]).toBeCloseTo(expectX, 12);
     expect(ship.position[2]).toBeCloseTo(expectZ, 12);
+  });
+});
+
+/**
+ * §B.49 — THE USER'S REPORT, AS A TEST.
+ *
+ * Verbatim: "Even with now like 8 knots of wind set, seems like the boat is
+ * not able to catch anything… maybe it never updates the forces it can
+ * receive, so when we change the wind speed after the game loaded it will
+ * never know about it."
+ *
+ * The hypothesis turned out to be wrong — the wind is live and always was —
+ * but the OBSERVATION was right, and this is what it is worth pinning. These
+ * tests assert the behaviour a player can see: turn the wind knob, the ship
+ * answers. They can fail for a captured wind value, a dropped subscription, a
+ * dead force term, or a cause nobody has thought of yet, which is the point
+ * (§Rule 6). The ocean's own answer to the same knob is the CONTROL: if the
+ * sea moves and the ship does not, the pair names the defect exactly.
+ */
+describe('wind at runtime reaches the ship (§B.49 regression)', () => {
+  /** settle at a wind and report knots through the water */
+  function steadyKnots(wind: Wind, yaw = Math.PI / 2): number {
+    const ship = makeShip(yaw);
+    for (let i = 0; i < 12000; i++) stepShipSailing(ship, neutralInput(), wind, SIM_DT, HELM_STEADY);
+    return planarSpeed(ship.velocity) * 1.944;
+  }
+
+  it('CHANGING the wind mid-voyage changes her steady speed — she is not holding a stale copy', () => {
+    // one wind OBJECT, mutated the way main.ts mutates state.wind every tick
+    const wind: Wind = { direction: 0, speed: 4 };
+    const ship = makeShip(Math.PI / 2);
+    const settle = (n: number): void => {
+      for (let i = 0; i < n; i++) stepShipSailing(ship, neutralInput(), wind, SIM_DT, HELM_STEADY);
+    };
+    settle(12000);
+    const slow = planarSpeed(ship.velocity);
+    wind.speed = 12; // …the settings slider, mid-session
+    settle(12000);
+    const fast = planarSpeed(ship.velocity);
+    expect(slow).toBeGreaterThan(0);
+    // thrust goes as wind², so tripling the wind must do far more than nudge
+    expect(fast).toBeGreaterThan(slow * 2);
+    wind.speed = 4; // …and back down again, so it is not a one-way ratchet
+    settle(12000);
+    expect(planarSpeed(ship.velocity)).toBeLessThan(fast * 0.6);
+  });
+
+  it('every wind on the Beaufort ladder gives a different, monotonically greater speed', () => {
+    // the "maxes out at 0.1 knots whatever I set" report, generalised: a ship
+    // whose speed does not track the wind is broken however it got that way
+    const knots = [1, 3.4, 5.5, 8, 11, 15].map((speed) => steadyKnots({ direction: 0, speed }));
+    for (let i = 1; i < knots.length; i++) {
+      expect(knots[i]).toBeGreaterThan(knots[i - 1] * 1.2);
+    }
+    expect(knots[0]).toBeGreaterThan(1); // even Force 1 is not "stuck"
+  });
+
+  it('THE CONTROL: the same knob moves the wave spectrum, through the same params object', () => {
+    // applyWorldSettings is the ONE mapping from the settings screen to the
+    // engine (§V.62). If this passes and the ship test above fails, the wind
+    // reaches the sea and not the ship; if both fail, it reaches neither.
+    const world = { ...DEFAULT_SETTINGS.world };
+    applyWorldSettings({ ...world, windSpeed: 4 });
+    expect(oceanParams.windSpeed).toBe(4);
+    const calm = spectrumSignature(oceanParams);
+    applyWorldSettings({ ...world, windSpeed: 12 });
+    expect(oceanParams.windSpeed).toBe(12);
+    expect(spectrumSignature(oceanParams)).not.toBe(calm);
+    // and the sim tick's copy is a plain read of the same field — this is the
+    // line main.ts runs every tick, and it is the whole of the wind's journey
+    const state = createInitialState(1);
+    state.wind.speed = oceanParams.windSpeed;
+    expect(state.wind.speed).toBe(12);
+    applyWorldSettings(world); // leave the singleton as we found it
+  });
+
+  it('THE WHOLE CHAIN: the slider writes the store, the store moves the ship', () => {
+    // The user's own words: "maybe it never updates the forces it can receive,
+    // so when we change the wind speed after the game loaded it will never
+    // know about it." This is that sentence, executed. It wires the store to
+    // the params EXACTLY as main.ts does — one subscribe, one mapping — and
+    // then sails a ship on the result. Nothing here reaches past a public
+    // seam, so it fails if ANY link is cut, including a link nobody has
+    // written yet.
+    const world = { ...DEFAULT_SETTINGS.world };
+    const store = createSettingsStore(undefined); // memory-only, no localStorage
+    store.subscribe((s) => applyWorldSettings(s.world));
+    const wind: Wind = { direction: 0, speed: 0 };
+    const ship = makeShip(Math.PI / 2);
+    const sailFor = (ticks: number): number => {
+      for (let i = 0; i < ticks; i++) {
+        // the sim tick's two lines, verbatim (main.ts)
+        wind.speed = oceanParams.windSpeed;
+        wind.direction = oceanParams.windDirection;
+        stepShipSailing(ship, neutralInput(), wind, SIM_DT, HELM_STEADY);
+      }
+      return planarSpeed(ship.velocity);
+    };
+
+    store.set({ world: { windSpeed: 4 } });
+    const light = sailFor(12000);
+    store.set({ world: { windSpeed: 12 } });
+    const fresh = sailFor(12000);
+
+    expect(oceanParams.windSpeed).toBe(12); // the knob reached the engine…
+    expect(wind.speed).toBe(12); //            …and the tick copied it…
+    expect(fresh).toBeGreaterThan(light * 2); // …and she felt it
+    applyWorldSettings(world);
+  });
+});
+
+/**
+ * §B.49 — THE ANCHOR. The user asked for it by name, and for the reason that
+ * matters: "we don't have to have this ambiguity between what is anchored and
+ * where it can't move".
+ */
+describe('the anchor', () => {
+  it('holds her against full canvas and a fresh breeze', () => {
+    const ship = makeShip(Math.PI / 2, 1);
+    ship.anchored = true;
+    for (let i = 0; i < 12000; i++) {
+      stepShipSailing(ship, neutralInput(), { direction: 0, speed: 12 }, SIM_DT);
+    }
+    expect(planarSpeed(ship.velocity)).toBeLessThan(0.01);
+    expect(Math.hypot(ship.position[0], ship.position[2])).toBeLessThan(0.5);
+  });
+
+  it('weighing it lets the same ship sail — the state is a gate, not a stall', () => {
+    const ship = makeShip(Math.PI / 2, 1);
+    ship.anchored = true;
+    const wind: Wind = { direction: 0, speed: 12 };
+    for (let i = 0; i < 600; i++) stepShipSailing(ship, neutralInput(), wind, SIM_DT);
+    expect(planarSpeed(ship.velocity)).toBeLessThan(0.01);
+    // one toggle, through the SAME field the key and the HUD button produce
+    stepShipSailing(ship, { ...neutralInput(), anchorToggle: true }, wind, SIM_DT);
+    expect(ship.anchored).toBe(false);
+    for (let i = 0; i < 6000; i++) stepShipSailing(ship, neutralInput(), wind, SIM_DT);
+    expect(planarSpeed(ship.velocity)).toBeGreaterThan(3);
+  });
+
+  it('the X key reaches it — a real keydown, not a call to the handler (§V.62)', () => {
+    // the shape this project has shipped thirteen no-ops in: a control that
+    // writes something nothing reads. So the assertion is on the SHIP.
+    const target = new EventTarget();
+    const kb = new KeyboardInput();
+    const detach = attachKeyboard(kb, target);
+    const ship = makeShip(Math.PI / 2, 1);
+    const wind: Wind = { direction: 0, speed: 12 };
+
+    target.dispatchEvent(keyEvent('keydown', 'KeyX'));
+    stepShipSailing(ship, kb.sample(SIM_DT), wind, SIM_DT);
+    expect(ship.anchored).toBe(true);
+
+    // and it is a TOGGLE, not a latch: holding it down must not chatter
+    target.dispatchEvent(keyEvent('keydown', 'KeyX', true));
+    for (let i = 0; i < 60; i++) stepShipSailing(ship, kb.sample(SIM_DT), wind, SIM_DT);
+    expect(ship.anchored).toBe(true);
+
+    target.dispatchEvent(keyEvent('keyup', 'KeyX'));
+    target.dispatchEvent(keyEvent('keydown', 'KeyX'));
+    stepShipSailing(ship, kb.sample(SIM_DT), wind, SIM_DT);
+    expect(ship.anchored).toBe(false);
+    detach();
   });
 });

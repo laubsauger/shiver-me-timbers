@@ -188,6 +188,61 @@ export const HUD_CSS = /* css */ `
   transition: width 0.2s ease;
 }
 
+/* TRUE wind, engraved under the compass. The sky's wind lines already point
+   at the bearing, so this carries only what the sky cannot say: strength. */
+.smt-truewind {
+  position: absolute; top: 46px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: baseline; gap: 9px; white-space: nowrap;
+  font-size: 11px; letter-spacing: 0.18em; text-transform: lowercase;
+  color: rgba(231, 216, 174, 0.62);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+}
+.smt-truewind-key { font-size: 9px; letter-spacing: 0.3em; opacity: 0.62; }
+.smt-truewind-value {
+  font-family: var(--figures); font-size: 15px; letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums; color: var(--parch-hi);
+}
+
+/* WHY she is not making way (§B.49). A wax-red seal above the binnacle: it is
+   the one thing on the HUD that means "you cannot sail until you fix this",
+   so it must not read as another brass gauge. Absent when she IS sailing. */
+.smt-stalled {
+  position: absolute; bottom: 100px; left: 50%;
+  transform: translateX(-50%) translateY(4px);
+  padding: 4px 15px 5px; white-space: nowrap;
+  font-size: 11px; letter-spacing: 0.26em; text-indent: 0.26em;
+  text-transform: uppercase; font-variant-caps: small-caps;
+  color: #f0d9a6; background: rgba(112, 32, 27, 0.82);
+  box-shadow: inset 0 0 0 1px rgba(216, 87, 76, 0.55);
+  clip-path: polygon(8px 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%,
+    8px 100%, 0 50%);
+  opacity: 0; visibility: hidden;
+  transition: opacity 0.25s ease, transform 0.25s ease, visibility 0s linear 0.25s;
+}
+.smt-stalled.is-on {
+  opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0);
+  transition-delay: 0s;
+}
+
+/* the anchor: the HUD's only button, so it has to LOOK pressable without
+   becoming a web widget sitting on a ship's binnacle */
+.smt-anchor {
+  flex-direction: column; gap: 2px; padding: 7px 16px;
+  font: inherit; color: var(--parch); cursor: pointer;
+  border: 0; pointer-events: auto;
+  transition: box-shadow 0.18s ease, background 0.18s ease;
+}
+.smt-anchor:hover { box-shadow: inset 0 0 0 1px rgba(223, 192, 109, 0.72), inset 0 0 22px rgba(0, 0, 0, 0.5); }
+.smt-anchor:focus-visible { outline: 1px solid var(--brass-hi); outline-offset: 2px; }
+.smt-anchor-glyph {
+  font-size: 19px; line-height: 1.1; color: rgba(231, 216, 174, 0.45);
+  transition: color 0.18s ease, text-shadow 0.18s ease;
+}
+.smt-anchor.is-down .smt-anchor-glyph {
+  color: var(--brass-hi); text-shadow: 0 0 9px rgba(223, 192, 109, 0.55);
+}
+.smt-anchor.is-down { background: linear-gradient(180deg, rgba(46, 32, 14, 0.9), rgba(20, 14, 7, 0.92)); }
+
 .smt-damage {
   position: absolute; bottom: 78px; left: 50%; transform: translateX(-50%);
   display: flex; gap: 9px;

@@ -14,6 +14,10 @@
  * through untouched. Buoyancy's pitch-memory workaround detects surviving
  * pitch (forward.y ≠ 0) and self-deactivates — no double-pitch.
  *
+ * Also the single owner of `ship.anchored` (§V.62): the X key, the HUD's
+ * anchor button and a replayed input log all arrive as `input.anchorToggle`
+ * and are consumed here, so there is one place where the anchor can change.
+ *
  * Conventions: ship forward = local +z; yaw about +y, yaw 0 → world +z,
  * heading = [sin yaw, 0, cos yaw]; starboard = [cos yaw, 0, -sin yaw].
  * wind.direction is the direction the wind blows TOWARD (same convention
@@ -63,9 +67,18 @@ function wrapPi(a: number): number {
  * beam/broad reach (sin peak), decent floor dead downwind.
  */
 export function trimEfficiency(theta: number, params: SailingParams = sailingParams): number {
-  const gate = smoothstep01((theta - params.deadZone) / params.deadZoneRamp);
   const shape = params.downwindEff + (1 - params.downwindEff) * Math.sin(theta);
-  return gate * shape;
+  return noGoGate(theta, params) * shape;
+}
+
+/**
+ * 0 inside the no-go zone, ramping to 1 where the sails begin to draw. Split
+ * out of `trimEfficiency` because the ABACK term needs its COMPLEMENT, and
+ * `1 − trimEfficiency` is not it: efficiency is also below 1 dead downwind,
+ * where she is sailing perfectly well and nothing is aback (§B.49).
+ */
+export function noGoGate(theta: number, params: SailingParams = sailingParams): number {
+  return smoothstep01((theta - params.deadZone) / params.deadZoneRamp);
 }
 
 export function stepShipSailing(
@@ -97,13 +110,26 @@ export function stepShipSailing(
   // --- controls ---
   ship.rudder = clamp(input.rudder, -1, 1);
   ship.sailTrim = clamp(ship.sailTrim + input.sailTrimDelta * params.trimSpeed * dt, 0, 1);
+  // the anchor is SIM state and this is its single owner (§V.62: the key, the
+  // HUD button and a replayed input log all arrive here and nowhere else)
+  if (input.anchorToggle) ship.anchored = !ship.anchored;
 
   // --- sail thrust: windSpeed² · trimEfficiency(angle off wind) · trim ---
   const wx = Math.sin(wind.direction);
   const wz = Math.cos(wind.direction);
   const theta = Math.acos(clamp(-(fx * wx + fz * wz), -1, 1));
+  const windForce = wind.speed * wind.speed * ship.sailTrim * params.thrustScale;
+  // ABACK (§B.49). `trimEfficiency` is exactly 0 inside the dead zone, and the
+  // rudder is exactly 0 below steerageSpeed, so head to wind used to be a
+  // closed loop with no exit: no thrust ⇒ no way ⇒ no helm ⇒ no thrust. What
+  // was missing is that set canvas held flat to the wind BLOWS HER ASTERN.
+  // Sternway is what gives the rudder something to bite on, and falling off
+  // is what opens the gate again — the same escape a real ship makes.
+  // Complement of the GATE, so the two never overlap: full aback dead head to
+  // wind, gone by the time the sails draw, and nothing aback dead downwind.
+  const gate = noGoGate(theta, params);
   const thrust =
-    wind.speed * wind.speed * trimEfficiency(theta, params) * ship.sailTrim * params.thrustScale;
+    windForce * trimEfficiency(theta, params) - windForce * params.abackRatio * (1 - gate);
 
   // --- aground: the bank eats the drive before it ever reaches the water.
   // OWNERSHIP (§B.6, stated because this contract has been broken here
@@ -115,8 +141,20 @@ export function stepShipSailing(
   // subtracts it: a keel carrying the ship's weight simply cannot be pushed
   // along by canvas, however she is trimmed. It reads one tick behind
   // (main.ts runs sailing first), which at 60 Hz is invisible.
+  // The bank resists motion whichever way the canvas is pushing, so the gate
+  // is on the MAGNITUDE. Signing it was not optional once thrust could go
+  // negative: `thrust > grip` is false for every negative thrust, so a plain
+  // subtraction would have silently swallowed the whole aback term and put
+  // §B.49's deadlock straight back for any ship that had ever touched sand.
   const grip = groundGrip(ship, dt);
-  const drive = thrust > grip ? thrust - grip : 0;
+  const thrustMag = Math.abs(thrust);
+  let drive = thrustMag > grip ? Math.sign(thrust) * (thrustMag - grip) : 0;
+
+  // --- riding to her anchor: the cable holds her, whatever the sails do.
+  // Gated HERE, on drive, for the same reason grounding is (§B.6): the force
+  // balance closes in one place. The bleed below is the cable snubbing her up.
+  const anchored = ship.anchored === true;
+  if (anchored) drive = 0;
 
   // --- planar velocity in ship frame: forward + lateral (leeway) ---
   const vx = ship.velocity[0];
@@ -147,7 +185,11 @@ export function stepShipSailing(
   // lateral one ungated is the §B.6 "sails magically continue to propulse
   // us" bug in the other axis — measured, she crabbed off a bank at 0.35 m/s
   // with her drive fully gated.
-  const sideForce = drive * sideOverDrive * params.leewayRatio * Math.sign(leeSign);
+  // Positive part only. Aback canvas drives her ASTERN but still shoves her
+  // to leeward, so a signed `drive` here would swing the leeway to WINDWARD —
+  // a ship in irons crabbing up into the wind she cannot sail into.
+  const sideForce =
+    Math.max(0, drive) * sideOverDrive * params.leewayRatio * Math.sign(leeSign);
 
   // semi-implicit Euler: quadratic hull drag opposes each component,
   // brake adds linear decel on forward way only
@@ -155,6 +197,13 @@ export function stepShipSailing(
   l += (sideForce - params.dragCoef * speed * l) * dt;
   // keel grip: kill a frame-rate-scaled fraction of sideways velocity
   l *= Math.max(0, 1 - params.keelGrip * dt);
+  // the cable: an exponential snub on BOTH channels, so she rounds up to her
+  // anchor and stays there instead of sailing off at a knot nobody asked for
+  if (anchored) {
+    const hold = Math.max(0, 1 - params.anchorHold * dt);
+    f *= hold;
+    l *= hold;
+  }
 
   ship.velocity[0] = f * fx + l * rx;
   ship.velocity[2] = f * fz + l * rz;
@@ -182,6 +231,13 @@ export function stepShipSailing(
   // lives in ship.angularVelocity[1] — sailing is its sole owner (§B.6,
   // buoyancy never writes it), so it is real sim state: centre the helm
   // mid-turn and the ship keeps swinging round before it settles.
+  // |f|, so STERNWAY steers too — that is what makes §B.49's aback term an
+  // exit from irons rather than just a slow slide backwards. The sign is NOT
+  // reversed the way a real rudder reverses going astern: she is backing out
+  // of a corner the player did not choose to be in, and a helm that answers
+  // backwards for those few seconds reads as the controls breaking. Called
+  // out because it is a deliberate departure from the physics, not an
+  // oversight.
   const way = Math.abs(f);
   const steer =
     way < params.steerageSpeed

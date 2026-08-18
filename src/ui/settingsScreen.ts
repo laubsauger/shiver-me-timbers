@@ -16,7 +16,7 @@ import { featureNeedsReload, featureWired, shadowMapSizeNeedsReload, unwiredFeat
 import { sectionHead, segmentRow, sliderRow, switchRow } from './settingsControls';
 import type { SwitchRow } from './settingsControls';
 import { button, div, el } from './dom';
-import { CARDINALS, cardinal } from './windDial';
+import { CARDINALS, beaufort, cardinal } from './windDial';
 import { DEFAULT_SETTINGS, SEA_RANGES, SEA_STATES, seaStateFor, seaStatePatch } from './settingsStore';
 import { CONTROL_GROUPS } from '../input/controlMap';
 
@@ -116,28 +116,15 @@ function windLabel(fromDeg: number): string {
 }
 
 /**
- * Beaufort force and its name for a true wind speed in m/s — the real bands,
- * not a made-up scale. This is what makes the slider readable instead of a
- * bare number: Force 3 at 3.4 m/s is where WHITECAPS start, i.e. the first
- * place the sea itself visibly answers this control, and Force 6 is where the
- * shipped default sits. A player who wants "a bit more sea" is looking for a
- * force, not for a metre per second.
+ * What makes the slider readable instead of a bare number: Force 3 at 3.4 m/s
+ * is where WHITECAPS start, i.e. the first place the sea itself visibly
+ * answers this control, and Force 6 is where the shipped default sits. A
+ * player who wants "a bit more sea" is looking for a force, not for a metre
+ * per second. The BANDS come from windDial.ts — the HUD's true-wind plaque
+ * names the same wind, and two tables would eventually disagree about it.
  */
-const BEAUFORT: readonly { from: number; force: number; name: string }[] = [
-  { from: 20.8, force: 9, name: 'strong gale' },
-  { from: 17.2, force: 8, name: 'gale' },
-  { from: 13.9, force: 7, name: 'near gale' },
-  { from: 10.8, force: 6, name: 'strong breeze' },
-  { from: 8.0, force: 5, name: 'fresh breeze' },
-  { from: 5.5, force: 4, name: 'moderate breeze' },
-  { from: 3.4, force: 3, name: 'gentle breeze' },
-  { from: 1.6, force: 2, name: 'light breeze' },
-  { from: 0.5, force: 1, name: 'light air' },
-  { from: 0, force: 0, name: 'calm' },
-];
-
 export function windSpeedLabel(v: number): string {
-  const b = BEAUFORT.find((band) => v >= band.from) ?? BEAUFORT[BEAUFORT.length - 1];
+  const b = beaufort(v);
   return `${v.toFixed(1)} m/s · F${b.force} ${b.name}`;
 }
 

@@ -16,6 +16,17 @@ export interface ShipState {
   angularVelocity: Vec3;
   rudder: number; // -1..1
   sailTrim: number; // 0..1 (0 = furled)
+  /**
+   * Riding to her anchor: the cable holds her, the sails drive nothing
+   * (§B.49). SIM state, not a UI flag — it gates a force, so it has to
+   * serialize with the ship and replay with the input log (§V.2/§V.3).
+   *
+   * OPTIONAL so the fifteen existing ShipState literals (and any saved
+   * state) stay valid, and so a ship that never anchors serializes — and
+   * therefore hashes — exactly as it did before this field existed.
+   * `undefined` and `false` both mean "under way".
+   */
+  anchored?: boolean;
   flood: number; // 0..1, 1 = sunk
   /** damage zone id → remaining hp 0..1 */
   damage: Record<string, number>;

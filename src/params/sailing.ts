@@ -34,6 +34,33 @@ export interface SailingParams {
   deadZoneRamp: number;
   /** efficiency floor when running dead downwind (0..1) */
   downwindEff: number;
+  /**
+   * §B.49 — THE WAY OUT OF IRONS, and the reason this param exists at all.
+   *
+   * Inside the dead zone `trimEfficiency` is exactly 0, so thrust is 0, so
+   * she never gathers way; and the rudder does nothing below `steerageSpeed`,
+   * so she can never turn out of it either. Head to wind was therefore a
+   * PERMANENT DEADLOCK — measured at the shipped boot: 120 s of full canvas
+   * and full helm produced 0.000 kt and 0.6° of heading.
+   *
+   * The missing force is the one a real square-rigger cannot avoid: canvas
+   * set and presented flat to the wind is a barn door, and it blows her
+   * bodily ASTERN. Sternway gives the rudder something to bite on, she falls
+   * off onto a tack, the gate opens and she sails. So this is not a rescue
+   * hack bolted onto the model — it is the term whose absence made the model
+   * one-way.
+   *
+   * Fraction of the head-on wind force that pushes her astern, scaled by
+   * trim (bare poles barely blow astern at all). Small: it must be enough to
+   * beat `steerageSpeed`, never enough to feel like reverse gear.
+   */
+  abackRatio: number;
+  /**
+   * Fraction of planar velocity the cable kills per second while she rides to
+   * her anchor. High — an anchor that let her sail away slowly would be
+   * exactly the ambiguity the anchor exists to remove.
+   */
+  anchorHold: number;
   /** sailTrim units per second from trim keys */
   trimSpeed: number;
   /**
@@ -93,6 +120,12 @@ export const sailingParams: SailingParams = registerParams(
     deadZone: Math.PI / 6,
     deadZoneRamp: 0.35,
     downwindEff: 0.55,
+    // measured: from dead head-to-wind under full canvas with the helm over,
+    // she gathers sternway in ~4 s and has fallen off far enough for the
+    // sails to fill at ~13 s. Below ~0.03 she never beats steerageSpeed and
+    // the deadlock comes back; above ~0.15 she backs out like a car.
+    abackRatio: 0.07,
+    anchorHold: 3,
     trimSpeed: 0.5,
     // measured leeway at the shipped wind: ~1° running, ~3° on a beam
     // reach, ~7° close-hauled — the classic square-rigger shape, and enough
@@ -126,6 +159,8 @@ export const sailingParams: SailingParams = registerParams(
     deadZone: { min: 0, max: 1.2, step: 0.01 },
     deadZoneRamp: { min: 0.01, max: 1, step: 0.01 },
     downwindEff: { min: 0, max: 1, step: 0.01 },
+    abackRatio: { min: 0, max: 0.5, step: 0.005 },
+    anchorHold: { min: 0.1, max: 10, step: 0.1 },
     trimSpeed: { min: 0.1, max: 3, step: 0.05 },
     leewayRatio: { min: 0, max: 2, step: 0.01 },
     maxSideForceRatio: { min: 1, max: 10, step: 0.1 },

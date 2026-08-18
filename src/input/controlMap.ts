@@ -12,8 +12,24 @@ export const CONTROL_CODES = {
   trimOutPrimary: 'KeyQ',
   trimOutAlternate: 'KeyS',
   fire: 'Space',
+  /**
+   * Drop / weigh the anchor. `KeyX` is free everywhere else — freeCam only
+   * swallows W/A/S/D/R/F, combatArena takes B/V, the jump takes J, and the
+   * panel's search box stops propagation on keydown.
+   */
+  toggleAnchor: 'KeyX',
   toggleFreeCamera: 'KeyC',
   toggleHelm: 'KeyH',
+  /**
+   * Gun elevation, the one lever naval gunnery is about (the hull fixes the
+   * bearing). Arrows are what a player tries first and are free everywhere:
+   * freeCam swallows only W/A/S/D/R/F, the sailing collector reads letter
+   * codes, and nothing else listens for them. `src/combat/gunnery.ts` also
+   * takes the RIGHT MOUSE BUTTON as a held aim — camInput ignores that button
+   * so the lens does not orbit while the guns move.
+   */
+  elevateGuns: 'ArrowUp',
+  depressGuns: 'ArrowDown',
 } as const;
 
 export interface ControlBinding {
@@ -35,7 +51,23 @@ export const CONTROL_GROUPS: readonly ControlGroup[] = [
       { keys: ['W', 'E'], action: 'Trim sails in' },
       { keys: ['Q', 'S'], action: 'Ease sails out' },
       { keys: ['S'], action: 'Brake the ship', hint: 'Also eases the sails' },
-      { keys: ['Space'], action: 'Fire broadside', hint: 'Fires toward the camera side' },
+      { keys: ['X'], action: 'Drop / weigh anchor', hint: 'At anchor she holds station whatever the canvas is doing' },
+    ],
+  },
+  {
+    title: 'Gunnery',
+    bindings: [
+      { keys: ['Space'], action: 'Fire broadside', hint: 'Fires the battery the camera bears on' },
+      {
+        keys: ['Right mouse'],
+        action: 'Lay the guns',
+        hint: 'Hold and move the mouse up or down to raise or lower them',
+      },
+      {
+        keys: ['↑', '↓'],
+        action: 'Raise / lower the guns',
+        hint: 'Fine lay; the crosshair sits where the shot falls',
+      },
     ],
   },
   {

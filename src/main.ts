@@ -395,6 +395,7 @@ async function boot(): Promise<void> {
     angularVelocity: [0, 0, 0],
     rudder: 0,
     sailTrim: 0.8,
+    anchored: false,
     flood: 0,
     damage: {},
   });
@@ -474,6 +475,7 @@ async function boot(): Promise<void> {
     angularVelocity: [0, 0, 0],
     rudder: 0,
     sailTrim: 0.7,
+    anchored: false,
     flood: 0,
     damage: {},
   });
@@ -631,8 +633,23 @@ async function boot(): Promise<void> {
     bowSpray.mesh.visible = on;
   });
 
+  /**
+   * The HUD's anchor button fires on a DOM event, which is not a sim tick, so
+   * it cannot write `ship.anchored` itself (§V.3: the sim owns its own state).
+   * It latches here and is XOR-folded into the next tick's InputState — the
+   * same field the X key produces, consumed by the same line in
+   * stepShipSailing. One owner, and a replayed input log reproduces a button
+   * press exactly as it reproduces a keystroke.
+   */
+  let pendingAnchorToggle = false;
+  /** last tick's grounding answer, for the HUD's "why she is not moving" */
+  let playerAground = false;
+
   const ui = createGameUI({
     settings, // REUSE the store — omitting it makes the UI build a second one
+    onAnchorToggle: () => {
+      pendingAnchorToggle = !pendingAnchorToggle;
+    },
     onPause: () => {
       paused = true; // sim halts, render continues (§V.21)
     },
@@ -825,12 +842,16 @@ async function boot(): Promise<void> {
    * back to the origin (a blueprint with no islands) is correct behaviour, not
    * a misconfiguration. `?at=spawn` is the open-water venue for ocean parity.
    *
-   * FURLED, and that is what holds her: `teleportShip` already zeroes velocity
-   * and spin, and trim 0 is the same "canvas off her, so she holds station"
-   * idiom combatArena uses when it heaves a ship to. Measured in-browser at
-   * the anchorage: 0.78 m of drift over 20 s, against 17-24 knots under the
-   * 0.8 trim she used to boot with. No anchor mechanic is needed for her to
-   * still be there when the user has finished looking at the beach.
+   * FURLED **AND ON HER ANCHOR** (§B.49). Trim 0 alone used to be what held
+   * her, and it held her far too well: the player who then set canvas got
+   * nothing, because the anchorage heading is 23.6° off the eye of the
+   * shipped wind — inside the ±30° no-go — so thrust was exactly 0 and the
+   * rudder, which needs way, could not turn her out of it either. That was a
+   * PERMANENT deadlock at the default boot, and it is what "I can't move at
+   * all" was. Two things fix it and both are needed: the aback term in
+   * shipKinematics gives her a way out of irons, and saying ANCHORED out loud
+   * means the state she boots in is one the HUD can name and a button can
+   * clear, instead of a ship that is silently, invisibly furled.
    */
   const requestedAt = bootJumpTarget(window.location.search);
   const bootAt = requestedAt ?? DEFAULT_BOOT_TARGET;
@@ -843,6 +864,7 @@ async function boot(): Promise<void> {
     }
   } else if (bootAt !== SPAWN_TARGET.name) {
     playerShip.sailTrim = 0;
+    playerShip.anchored = true;
   }
   /**
    * Sim time of the last ocean FFT dispatch — see the guard in the render path.
@@ -872,6 +894,12 @@ async function boot(): Promise<void> {
       weather.weatherAt(playerShip.position[0], playerShip.position[2], weatherHere);
       oceanAmbient.publish(weatherHere.ocean);
       const snapshot = input.sample(dt);
+      // XOR, not assignment: key and button in the same tick are two toggles,
+      // i.e. none — the same arithmetic the collector's own edge counter uses
+      if (pendingAnchorToggle) {
+        snapshot.anchorToggle = !snapshot.anchorToggle;
+        pendingAnchorToggle = false;
+      }
       stepShipSailing(playerShip, snapshot, state.wind, dt);
       // §V.15: the AI emits the SAME InputState a keyboard produces, so she
       // sails the player's exact code path rather than a parallel model

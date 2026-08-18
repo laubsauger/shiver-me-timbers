@@ -38,6 +38,8 @@ import {
   windFromDeg,
   windSpeedLabel,
 } from '../src/ui/settingsScreen';
+import { beaufort } from '../src/ui/windDial';
+import { stalledReason } from '../src/ui/hud';
 import { cascadeBand, spectralHeightVariance } from '../src/ocean/oceanMath';
 // the REAL param files, imported for the bundle-vs-params check below. The
 // registry inside these tests holds deliberate fakes, which is precisely why
@@ -1195,5 +1197,79 @@ describe('swell is continuous, independent, and actually reaches the water', () 
     // 0.02, so a finer step would offer the player precision the sim discards
     expect(SEA_RANGES.windSpeed.step).toBeGreaterThanOrEqual(0.5);
     expect(SEA_RANGES.amplitude.step).toBeGreaterThanOrEqual(0.02);
+  });
+});
+
+/**
+ * §B.49 — WHY SHE IS NOT MAKING WAY.
+ *
+ * The user's report took several messages to land because "at anchor",
+ * "becalmed", "in irons", "sails furled" and "aground" all look identical
+ * from the deck: a ship sitting still. Verbatim: "we probably want an anchor
+ * button that actually anchors the ship, so we don't have to have this
+ * ambiguity between what is anchored and where it can't move."
+ *
+ * So the HUD names the state, and these tests pin the PRECEDENCE — more than
+ * one is routinely true at once (she boots anchored AND furled AND in irons),
+ * and the player needs the one they must clear first.
+ */
+describe('the HUD says why she is not moving (§B.49)', () => {
+  const sailing = {
+    anchored: false, aground: false, sailTrim: 1,
+    windSpeed: 11, theta: Math.PI / 2, noGoDegrees: 30,
+  };
+
+  it('says nothing at all when she IS sailing — the badge is not decoration', () => {
+    expect(stalledReason(sailing)).toBeNull();
+  });
+
+  it('names each state on its own', () => {
+    expect(stalledReason({ ...sailing, anchored: true })).toBe('at anchor');
+    expect(stalledReason({ ...sailing, aground: true })).toBe('aground');
+    expect(stalledReason({ ...sailing, windSpeed: 0.2 })).toBe('becalmed');
+    expect(stalledReason({ ...sailing, sailTrim: 0 })).toBe('sails furled');
+    expect(stalledReason({ ...sailing, theta: 0.3 })).toBe('in irons');
+  });
+
+  it('the anchor outranks everything — weighing it is the first thing to do', () => {
+    // exactly the state she boots in: anchored, furled AND head to wind
+    const boot = { ...sailing, anchored: true, sailTrim: 0, theta: 0.41 };
+    expect(stalledReason(boot)).toBe('at anchor');
+    expect(stalledReason({ ...boot, anchored: false })).toBe('sails furled');
+    expect(stalledReason({ ...boot, anchored: false, sailTrim: 1 })).toBe('in irons');
+  });
+
+  it('blames the WIND before the canvas — a furled ship in a flat calm is becalmed', () => {
+    // otherwise the readout tells a player to set canvas that cannot help
+    expect(stalledReason({ ...sailing, windSpeed: 0, sailTrim: 0 })).toBe('becalmed');
+  });
+
+  it('the no-go boundary is the dial’s, so the badge and the rose agree', () => {
+    const at = (deg: number): string | null =>
+      stalledReason({ ...sailing, theta: (deg * Math.PI) / 180 });
+    expect(at(29)).toBe('in irons');
+    expect(at(31)).toBeNull();
+  });
+});
+
+/**
+ * §B.49 — one Beaufort table, two readouts. The settings slider says
+ * "11.0 m/s · F6 strong breeze" and the HUD's true-wind plaque says
+ * "21.4 kt · F6". A second table would drift, and a player reading two
+ * different forces for one wind has no way to know which screen is lying.
+ */
+describe('the settings slider and the HUD name the same wind', () => {
+  it('windSpeedLabel is built from the shared beaufort() bands', () => {
+    for (const [mps, force] of [[0.2, 0], [1.0, 1], [3.4, 3], [8.0, 5], [11, 6], [18, 8]] as const) {
+      expect(beaufort(mps).force).toBe(force);
+      expect(windSpeedLabel(mps)).toContain(`F${force}`);
+      expect(windSpeedLabel(mps)).toContain(beaufort(mps).name);
+    }
+  });
+
+  it('the ladder’s own rungs land on the force their label promises', () => {
+    // SEA_STATES is authored in m/s and named in Beaufort; the two must agree
+    expect(beaufort(SEA_STATES[2].windSpeed).force).toBe(3); // the whitecap rung
+    expect(beaufort(SEA_STATES[7].windSpeed).force).toBe(8); // the gale
   });
 });

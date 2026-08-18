@@ -6,7 +6,8 @@
  * the sim with no DOM involved. Sim code imports only the InputState type.
  *
  * Mapping: A/D rudder (analog ramp while held, springs back to 0),
- * W/E trim sail up, Q/S trim sail down, S also brakes, Space fires (§I).
+ * W/E trim sail up, Q/S trim sail down, S also brakes, Space fires,
+ * X drops or weighs the anchor (§I).
  */
 import { sailingParams } from '../params/sailing';
 import { CONTROL_CODES } from '../input/controlMap';
@@ -20,10 +21,19 @@ export interface InputState {
   brake: boolean;
   /** Space held (§I: fire cannon; consumed by combat, not sailing) */
   fire: boolean;
+  /**
+   * EDGE, not a held key: true on the single tick the anchor key went down.
+   * A toggle cannot be a level — holding X for half a second would flip the
+   * anchor thirty times — and it cannot be latched in the collector either,
+   * because then the snapshot would no longer be the whole truth of that
+   * tick and a replay would drift (§V.3: the log IS the format). So the
+   * edge is detected at collection and consumed by `sample()`.
+   */
+  anchorToggle: boolean;
 }
 
 export function neutralInput(): InputState {
-  return { rudder: 0, sailTrimDelta: 0, brake: false, fire: false };
+  return { rudder: 0, sailTrimDelta: 0, brake: false, fire: false, anchorToggle: false };
 }
 
 /**
@@ -34,8 +44,11 @@ export function neutralInput(): InputState {
 export class KeyboardInput {
   private held = new Set<string>();
   private rudderValue = 0;
+  /** anchor key edges seen since the last sample() — see InputState.anchorToggle */
+  private anchorEdges = 0;
 
   keyDown(code: string): void {
+    if (code === CONTROL_CODES.toggleAnchor && !this.held.has(code)) this.anchorEdges++;
     this.held.add(code);
   }
 
@@ -77,11 +90,17 @@ export class KeyboardInput {
       this.held.has(CONTROL_CODES.trimOutPrimary)
         ? 1
         : 0;
+    // an odd number of presses since the last tick is one net toggle; an even
+    // number is none. Counting rather than flagging means a double-tap inside
+    // a single tick cannot silently become one flip.
+    const anchorToggle = this.anchorEdges % 2 === 1;
+    this.anchorEdges = 0;
     return {
       rudder: this.rudderValue,
       sailTrimDelta: up - down,
       brake: this.held.has(CONTROL_CODES.trimOutAlternate),
       fire: this.held.has(CONTROL_CODES.fire),
+      anchorToggle,
     };
   }
 }
