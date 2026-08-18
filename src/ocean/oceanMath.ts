@@ -703,6 +703,115 @@ export function generateH0(
   return out;
 }
 
+/**
+ * Everything `OceanCascade` needs from a spectrum, in ONE N² pass.
+ *
+ * WHY THIS EXISTS — it is a pure speed fix for the one confirmed stall in the
+ * project, and it changes no number anywhere. `generateH0` and the five
+ * spectral moments above are SIX separate N² loops that each evaluate the SAME
+ * `waveSpectrum(kx, kz, p)` at the SAME texel. Measured at the shipped 512² ×
+ * 3 cascades, one full rebuild is 378–667 ms of main-thread JS, of which
+ * `waveSpectrum` is ~92% of every pass (65.9 ms of a 71.6 ms pass on cascade 2,
+ * itself 86% of the total because its band k ≥ 0.757 rejects almost no texel).
+ * Inside `waveSpectrum` the dominant term is `windSeaSpread`'s normalisation,
+ * i.e. two `lgamma` calls per texel through {@link directionalIntegral}.
+ * Evaluating that once instead of six times measures **378 → 103 ms (3.67×)**.
+ *
+ * BIT-IDENTICAL, and that is the whole reason this is safe to do (§V.8). Each
+ * accumulator receives exactly the addends the separate loop gave it, in
+ * exactly the m-outer/n-inner order, so the doubles land on the same bits — not
+ * "within tolerance", equal. `gaussianPair` is still drawn for EVERY texel
+ * before the band test, so the RNG sequence and therefore h0's phases are
+ * unchanged. The `k < 1e-9` guard is kept separate from the band test because
+ * the moments skip that texel and `generateH0` does not.
+ *
+ * The six functions above stay exported and stay the definition of each
+ * moment: they are what the tests measure against, and this is checked to be
+ * bit-identical to them rather than trusted to be (tests/ocean.test.ts).
+ */
+export interface SpectrumData {
+  /** h0 texel data, exactly as {@link generateH0} returns it */
+  h0: Float32Array;
+  steepnessRms: number;
+  jacobianRms: number;
+  heightVariance: number;
+  meanWavenumber: number;
+  slopeBins: Float64Array;
+}
+
+export function generateSpectrumData(
+  N: number,
+  domain: number,
+  seed: number,
+  p: OceanParams,
+  band: SpectrumBand,
+): SpectrumData {
+  const rng: Rng = createRng(seed);
+  const re = new Float32Array(N * N);
+  const im = new Float32Array(N * N);
+  const bins = new Float64Array(SLOPE_BIN_COUNT);
+  let steepVar = 0;
+  let jacVar = 0;
+  let heightVar = 0;
+  let energy = 0;
+  let weighted = 0;
+  for (let m = 0; m < N; m++) {
+    for (let n = 0; n < N; n++) {
+      const kx = (2 * Math.PI * (n - N / 2)) / domain;
+      const kz = (2 * Math.PI * (m - N / 2)) / domain;
+      const k = Math.hypot(kx, kz);
+      // drawn unconditionally, as generateH0 does — the RNG sequence is part
+      // of the spectrum's identity, so a band-gated draw would reseed h0
+      const [g1, g2] = gaussianPair(rng);
+      const inBand = k > band.kMin && k <= band.kMax;
+      const amp = inBand ? Math.sqrt(waveSpectrum(kx, kz, p) / 2) / domain : 0;
+      const i = m * N + n;
+      re[i] = g1 * amp;
+      im[i] = g2 * amp;
+      if (!inBand || k < 1e-9) continue;
+      // spectralSteepness — transfer kx²/|k|
+      const transfer = (kx * kx) / k;
+      steepVar += 2 * (transfer * amp) ** 2;
+      // spectralJacobianRms — transfer |k|
+      jacVar += 2 * (k * amp) ** 2;
+      // spectralHeightVariance / spectralMeanWavenumber — transfer 1
+      const variance = 2 * amp * amp;
+      heightVar += variance;
+      energy += variance;
+      weighted += variance * k;
+      // slopeWavelengthHistogram — slope transfer |k| on the elevation
+      const sv = variance * k * k;
+      if (!(sv > 0)) continue;
+      const lam = (2 * Math.PI) / k;
+      const b = Math.round(
+        (Math.log2(lam) - SLOPE_BIN_MIN_LOG2) * SLOPE_BINS_PER_OCTAVE,
+      );
+      bins[Math.min(SLOPE_BIN_COUNT - 1, Math.max(0, b))] += sv;
+    }
+  }
+  const out = new Float32Array(N * N * 4);
+  for (let m = 0; m < N; m++) {
+    for (let n = 0; n < N; n++) {
+      const i = m * N + n;
+      const nm = (N - n) % N;
+      const mm = (N - m) % N;
+      const j = mm * N + nm;
+      out[i * 4 + 0] = re[i];
+      out[i * 4 + 1] = im[i];
+      out[i * 4 + 2] = re[j];
+      out[i * 4 + 3] = im[j];
+    }
+  }
+  return {
+    h0: out,
+    steepnessRms: Math.sqrt(Math.max(0, steepVar)),
+    jacobianRms: Math.sqrt(Math.max(0, jacVar)),
+    heightVariance: Math.max(0, heightVar),
+    meanWavenumber: energy > 0 ? weighted / energy : 0,
+    slopeBins: bins,
+  };
+}
+
 /** Box-Muller from seeded rng */
 export function gaussianPair(rng: Rng): [number, number] {
   let u1 = rng();

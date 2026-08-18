@@ -14,6 +14,9 @@ import {
   gaussianPair,
   generateButterfly,
   generateH0,
+  generateSpectrumData,
+  spectralMeanWavenumber,
+  spectralSteepness,
   naiveIDFT,
   phillips,
   spectralHeightVariance,
@@ -659,6 +662,16 @@ describe('§B.7 every spectrum-shaping param forces a rebuild', () => {
    * the signature, BOTH sides re-read them every frame rather than caching
    * them on the rebuild path (surfaceMaterial's `refreshShoal`,
    * CpuOcean.update). Adding one here without doing that is §V.62.
+   *
+   * The six `fetch*` params are the same shape one law over (§V.73): a
+   * per-cascade gain applied to the finished spectrum at the sampler, plus the
+   * shape of the field it is sampled from. They are OUTSIDE the signature for
+   * the same reason and carry the same obligation — `surfaceMaterial`'s
+   * `refreshFetch`, `CpuOcean.refreshFetch` and `refreshShoalingUniforms` all
+   * re-read them every frame. Note that `windSpeed` IS in the signature and
+   * does move the fetch coefficients, which is exactly why those refreshes
+   * cannot live on the rebuild path: the rebuild is rate-limited to 15 ticks
+   * and the wind is published continuously by the §V.46 weather field.
    */
   const NOT_SPECTRAL = new Set([
     'choppiness',
@@ -667,6 +680,13 @@ describe('§B.7 every spectrum-shaping param forces a rebuild', () => {
     'shoalDeepFraction',
     'shoalBreakerIndex',
     'shoalColumnCeiling',
+    'fetchWorldScale',
+    'fetchMaxGain',
+    'fetchLongBandLimit',
+    'fetchFieldSize',
+    'fetchFieldMargin',
+    'fetchBlurTexels',
+    'fetchRebuildRadians',
   ]);
 
   it('the signature key list covers every spectral param in OceanParams', () => {
@@ -2316,5 +2336,94 @@ describe('spectrum rebuild rate limit (§V.8)', () => {
     // ten changed ticks, ONE rebuild — and it carries the value the drag
     // ended on, because the signature tracks every change
     expect(rebuilds).toBe(1);
+  });
+});
+
+/**
+ * `generateSpectrumData` is a pure SPEED fix for the project's one confirmed
+ * stall: h0 plus the five spectral moments fused into one N² pass instead of
+ * six, each of which re-evaluated the same `waveSpectrum` at the same texel
+ * (378 → 103 ms for a full 3-cascade rebuild, measured warm at the shipped
+ * 512²). It is allowed to be faster. It is NOT allowed to be different.
+ *
+ * These assertions are `toBe` on doubles ON PURPOSE — not `toBeCloseTo`. The
+ * fusion is only safe because each accumulator receives the same addends in
+ * the same order, so the result is bit-identical rather than merely close, and
+ * a tolerance here would let a real numerical drift through. What that drift
+ * would cost is §V.8: `steepnessRms`/`jacobianRms` set the anti-fold choppiness
+ * cap, `heightVariance` sets Hs and therefore every σ-relative foam and spray
+ * gate, `meanWavenumber` sets the per-cascade shoaling attenuation, and the CPU
+ * buoyancy mirror measures the SAME moments from the SAME six functions — so a
+ * fused path that quietly disagreed would float ships on a different sea from
+ * the one drawn, silently, which is exactly the failure §V.8 exists to forbid.
+ *
+ * The six originals therefore stay exported and stay the DEFINITION of each
+ * moment. This test is what makes the fused path a derivation of them rather
+ * than a second opinion.
+ */
+describe('fused spectrum build (generateSpectrumData)', () => {
+  const p = oceanParams;
+
+  it('is bit-identical to the six separate passes, on every shipped cascade', () => {
+    for (let i = 0; i < p.cascades.length; i++) {
+      const band = cascadeBand(i, p.splitWavelengths);
+      const domain = p.cascades[i].domain;
+      // the seed offset OceanCascade itself applies — h0's phases depend on
+      // the RNG draw order, so this pins that too
+      const seed = 1337 + i * 7919;
+      const fused = generateSpectrumData(p.resolution, domain, seed, p, band);
+
+      const h0 = generateH0(p.resolution, domain, seed, p, band);
+      expect(fused.h0.length).toBe(h0.length);
+      let mismatched = 0;
+      for (let t = 0; t < h0.length; t++) {
+        if (fused.h0[t] !== h0[t]) mismatched++;
+      }
+      expect(mismatched, `cascade ${i}: h0 texels differ from generateH0`).toBe(0);
+
+      expect(fused.steepnessRms).toBe(spectralSteepness(p.resolution, domain, p, band));
+      expect(fused.jacobianRms).toBe(spectralJacobianRms(p.resolution, domain, p, band));
+      expect(fused.heightVariance).toBe(
+        spectralHeightVariance(p.resolution, domain, p, band),
+      );
+      expect(fused.meanWavenumber).toBe(
+        spectralMeanWavenumber(p.resolution, domain, p, band),
+      );
+
+      const bins = slopeWavelengthHistogram(p.resolution, domain, p, band);
+      expect(fused.slopeBins.length).toBe(bins.length);
+      for (let b = 0; b < bins.length; b++) {
+        expect(fused.slopeBins[b], `cascade ${i}: slope bin ${b}`).toBe(bins[b]);
+      }
+    }
+  });
+
+  /**
+   * The fusion holds under a DIFFERENT spectrum too, not just the shipped one.
+   * A storm moves the band occupancy (cascade 2 rejects almost nothing at
+   * either sea state, cascade 0 rejects most of the grid), and it is the
+   * band-rejected texels that the fused loop handles differently — it still
+   * draws their gaussians but skips their moments, which is the one place the
+   * six originals disagree with each other about what to skip.
+   */
+  it('stays bit-identical on a storm spectrum', () => {
+    const storm: OceanParams = { ...p, windSpeed: 18, amplitude: 1.2 };
+    for (let i = 0; i < storm.cascades.length; i++) {
+      const band = cascadeBand(i, storm.splitWavelengths);
+      const domain = storm.cascades[i].domain;
+      const fused = generateSpectrumData(storm.resolution, domain, 99 + i, storm, band);
+      const h0 = generateH0(storm.resolution, domain, 99 + i, storm, band);
+      let mismatched = 0;
+      for (let t = 0; t < h0.length; t++) {
+        if (fused.h0[t] !== h0[t]) mismatched++;
+      }
+      expect(mismatched, `storm cascade ${i}: h0 texels differ`).toBe(0);
+      expect(fused.jacobianRms).toBe(
+        spectralJacobianRms(storm.resolution, domain, storm, band),
+      );
+      expect(fused.heightVariance).toBe(
+        spectralHeightVariance(storm.resolution, domain, storm, band),
+      );
+    }
   });
 });
