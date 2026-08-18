@@ -50,6 +50,8 @@ export function createCoverUniforms() {
     roughness: uniform(p.vegRoughness),
     shoreHeight: uniform(p.shoreBandHeight),
     shoreFade: uniform(p.shoreBandFade),
+    shoreNoise: uniform(p.shoreBandNoise),
+    shoreNoiseScale: uniform(p.shoreBandNoiseScale),
   };
 }
 
@@ -67,6 +69,8 @@ export function updateCoverUniforms(u: CoverUniforms): void {
   u.roughness.value = p.vegRoughness;
   u.shoreHeight.value = p.shoreBandHeight;
   u.shoreFade.value = p.shoreBandFade;
+  u.shoreNoise.value = p.shoreBandNoise;
+  u.shoreNoiseScale.value = p.shoreBandNoiseScale;
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -137,10 +141,35 @@ export function buildCoverNodes(
   const sunCatch = normalWorld.dot(sunDir).clamp(0, 1).mul(0.5).add(0.5);
   albedo = albedo.mul(mix(float(0.72), float(1.06), up.mul(sunCatch)));
 
+  // THE TREELINE WANDERS. Keyed on `heightAbove` against a bare uniform this
+  // is an exact LEVEL SET of the height field — one contour, at one elevation,
+  // all the way round every island in the world, which is the ring the user
+  // spotted. Offsetting the THRESHOLD (not the receiver) keeps the band's
+  // width and its §V23 monotonicity in `heightAbove` untouched: it is still a
+  // single increasing smoothstep, just one whose centre moves alongshore.
+  //
+  // §V.48: `fbm2` is mean-0.5, so `sub(0.5)` makes this a zero-mean offset and
+  // the correct filtered value once a pixel spans several wavelengths is
+  // exactly zero — the un-wobbled threshold. `periodResolved` fades to that
+  // mean, which is the §V.48b branch for a smooth term with no edge, not a
+  // widening. At `shoreBandNoiseScale` 0.012 the base wavelength is 83 m, so
+  // this only ever engages at extreme range where the band is sub-pixel anyway.
+  //
+  // NOT the §50c3a76 lever-arm shape: the scale is a plain uniform multiplying
+  // an absolute world coordinate, never `worldPos * f(worldPos)`.
+  const bandCoord = positionWorld.xz.mul(u.shoreNoiseScale);
+  const bandWobble = fbm2(bandCoord, Math.min(octaves, 2), p.noiseLacunarity, p.noiseGain)
+    .sub(0.5)
+    .mul(u.shoreNoise)
+    .mul(periodResolved(bandCoord));
+  // §V.28: the band must not invert if someone drives the wobble past the
+  // height — a negative threshold would put cover below the waterline
+  const bandLo = u.shoreHeight.add(bandWobble).max(0);
+
   // §V23 chained form, receiver is heightAbove: 0 at the waterline, 1 a fade
   // above the shore band. oneMinus() → 1 in the sand skirt, 0 on the cover.
   const shoreWeight = heightAbove
-    .smoothstep(u.shoreHeight, u.shoreHeight.add(u.shoreFade.max(1e-3)))
+    .smoothstep(bandLo, bandLo.add(u.shoreFade.max(1e-3)))
     .oneMinus();
 
   return { color: albedo, roughness: u.roughness, shoreWeight };

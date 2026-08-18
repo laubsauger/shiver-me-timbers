@@ -137,6 +137,13 @@ export function createSandUniforms(opts: SandMaterialOptions = {}) {
     sparkleStrength: uniform(p.sparkleStrength),
     roughnessDry: uniform(p.sandRoughnessDry),
     roughnessWet: uniform(p.sandRoughnessWet),
+    rippleStrength: uniform(p.rippleStrength),
+    rippleWavelength: uniform(p.rippleWavelength),
+    rippleDepthFade: uniform(p.rippleDepthFade),
+    /** unit vector ACROSS the crests — the direction the pattern repeats in */
+    rippleDir: uniform(new THREE.Vector2(1, 0)),
+    rippleBend: uniform(p.rippleBend),
+    rippleBendScale: uniform(p.rippleBendScale),
     waterline: uniform(p.waterline),
     causticsBand: uniform(p.causticsWaterlineBand),
     wetBand: uniform(p.wetBand),
@@ -164,6 +171,16 @@ export function updateSandUniforms(u: SandUniforms): void {
   u.sparkleStrength.value = p.sparkleStrength;
   u.roughnessDry.value = p.sandRoughnessDry;
   u.roughnessWet.value = p.sandRoughnessWet;
+  u.rippleStrength.value = p.rippleStrength;
+  u.rippleWavelength.value = p.rippleWavelength;
+  u.rippleDepthFade.value = p.rippleDepthFade;
+  u.rippleBend.value = p.rippleBend;
+  u.rippleBendScale.value = p.rippleBendScale;
+  // crests run ALONG `rippleAngle`, so the repeat direction is its normal
+  {
+    const a = (p.rippleAngle * Math.PI) / 180;
+    (u.rippleDir.value as THREE.Vector2).set(-Math.sin(a), Math.cos(a));
+  }
   u.waterline.value = p.waterline;
   u.causticsBand.value = p.causticsWaterlineBand;
   u.wetBand.value = p.wetBand;
@@ -214,6 +231,63 @@ export function buildSandNodes(
   // the water is.
   const sea = seaDepthNode(u, ground);
   const heightAbove = sea.depthBelow.negate();
+
+  // WAVE-FORMED SAND RIPPLES — the submerged shelf's only structure, and the
+  // answer to "the seafloor is so boring that we're not even noticing that
+  // we're seeing down at it". A flat bottom under clear water looks exactly
+  // like an opaque surface, so this is a TRANSPARENCY fix, not a detail pass.
+  //
+  // A 1-D wave: `dot(ground, rippleDir)` is distance ACROSS the crests, and
+  // dividing by the wavelength makes `rippleCoord` count crests, so 1 unit = 1
+  // period and `periodResolved` can be handed it directly. Keeping it a SCALAR
+  // is deliberate — the pattern has one direction, so its filter width has one
+  // component and the §V.48 gate is exact rather than a two-axis approximation.
+  //
+  // NOT the §50c3a76 lever arm. `rippleDir` and `rippleWavelength` are plain
+  // uniforms, so this is strictly LINEAR in the world coordinate; the crest
+  // wander is added AFTER the division as a bounded phase offset, never folded
+  // into the scale. `worldPos * f(worldPos)` is the shape that put the foam's
+  // sampling rate 856x out at this very lagoon, and a ripple field is exactly
+  // where it would be written again.
+  //
+  // §V.48/§V.48b: a sine has no edge, so this is the fade-to-own-mean branch —
+  // the mean of sin over a pixel spanning many crests is 0, i.e. the unmodulated
+  // sand, which is what `periodResolved` fades to. At `rippleWavelength` 0.55 m
+  // that engages around 25-30 m at grazing incidence, which is where a 0.55 m
+  // feature genuinely stops being resolvable.
+  //
+  // NOT §B.43's mistake: the amplitude is faded on the ripple's OWN coordinate,
+  // in the ripple's own units, rather than left world-locked with the gate
+  // measured against something else.
+  const rippleCoord = ground
+    .dot(u.rippleDir)
+    .div(u.rippleWavelength.max(1e-3));
+  const rippleResolved = periodResolved(rippleCoord);
+  // crest lines wander so they never read as ruled lines; a bounded phase
+  // offset in WAVELENGTHS, so it means the same thing at any wavelength
+  const rippleWander = valueNoise2(ground.mul(u.rippleBendScale))
+    .sub(0.5)
+    .mul(u.rippleBend);
+  // sharpened toward the crests: real ripples are round-crested and flat-
+  // troughed, and the asymmetry is most of what makes them read as sand
+  const rippleWave = rippleCoord.add(rippleWander).mul(Math.PI * 2).sin();
+  // Depth gates, both required. Below: ripples are cut by wave orbital motion
+  // at the bed, which dies with depth, so a deep shelf is smooth. Above: they
+  // are a SEABED feature and must not crawl up the dry beach.
+  // §V23 decreasing ramp (e0 > e1): 1 at/below the shallow end, 0 by the fade.
+  // @band-limited-elsewhere — these two gate on DEPTH, a monotone vertical
+  // distance with no period, over 16 m and 0.35 m respectively. There is no
+  // sub-pixel regime for them to alias in; the periodic term they multiply is
+  // gated on its own coordinate by `rippleResolved` above, which is where the
+  // §V.48 argument actually lives.
+  const rippleDepth = sea.depthBelow.smoothstep(u.rippleDepthFade.max(1e-3), float(0));
+  const rippleSubmerged = sea.depthBelow.smoothstep(float(0), float(0.35));
+  const ripple = rippleWave
+    .mul(u.rippleStrength)
+    .mul(rippleResolved)
+    .mul(rippleDepth)
+    .mul(rippleSubmerged);
+  albedo = albedo.mul(ripple.add(1));
 
   // Static shore wetness: the permanently-damp band right at the water; the
   // swash model below adds the part that MOVES.

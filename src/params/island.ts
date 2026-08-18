@@ -333,6 +333,21 @@ export interface IslandParams {
   /** submerged shelf width (m) blending the island rim out to open depth —
    *  this is what paints the turquoise halo, so it is a LOOK tunable */
   seabedShelfWidth: number;
+  /**
+   * Concentric rings of terrain geometry drawn ACROSS that shelf (build time).
+   *
+   * The shelf used to be shaded but never drawn: the terrain mesh stopped on
+   * the square footprint and the water went on reading shallow over nothing,
+   * which is the hard border round every island. `buildIslandGeometry` now
+   * continues the mesh out to `seabedShelfWidth` on this many rings, riding
+   * `shelfRamp` so the drawn floor and this field are one surface.
+   *
+   * It is a tessellation number, not a look knob: the ramp is a smoothstep
+   * over `seabedShelfWidth`, so the piecewise-linear error falls as 1/rings².
+   * 8 rings over the shipped 260 m shelf keeps that under ~0.3 m — well inside
+   * what 10 m of water hides — for 508 vertices a ring and no extra draw call.
+   */
+  seabedApronRings: number;
   /** GPU seabed height texture resolution (texels per side, build time) */
   seabedTextureSize: number;
   /** margin (m) added around the island bounds when fitting the texture */
@@ -448,6 +463,7 @@ export const islandParams: IslandParams = registerParams(
     scatterRadiusMax: 260,
     seabedOpenDepth: 45,
     seabedShelfWidth: 260,
+    seabedApronRings: 8,
     seabedTextureSize: 1024,
     seabedTextureMargin: 400,
     lodTerrainDistance: 900,
@@ -535,6 +551,7 @@ function islandParamsMeta(): Partial<Record<keyof IslandParams, ParamMeta>> {
     scatterRadiusMax: { min: 40, max: 600, step: 10 },
     seabedOpenDepth: { min: 10, max: 200, step: 1 },
     seabedShelfWidth: { min: 20, max: 800, step: 10 },
+    seabedApronRings: { min: 1, max: 32, step: 1 },
     seabedTextureSize: { min: 128, max: 2048, step: 128 },
     seabedTextureMargin: { min: 0, max: 2000, step: 50 },
     lodTerrainDistance: { min: 100, max: 4000, step: 50 },

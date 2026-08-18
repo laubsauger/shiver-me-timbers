@@ -338,6 +338,101 @@ describe('seabed depth field (T33 keystone — ocean tint + §V8 grounding)', ()
   });
 });
 
+/**
+ * THE USER-REPORTED DEFECT THIS PINS: "a crazy hard edge border around it —
+ * no blending whatsoever with the rest of the ocean."
+ *
+ * The height FIELD was already continuous across the footprint boundary
+ * (27a0795 took a 4.25 m step down to 0.0074 m, and the shelf ramp from a
+ * 12.3 m corner disagreement to zero). What was not continuous was the DRAWN
+ * SURFACE: the terrain mesh stopped on the square grid and nothing at all was
+ * rendered outside it, while the depth field kept ramping to -45 m and the
+ * ocean kept shading its shallows against that field. Bright shallow water
+ * over nothing, ending on a straight line — showcase.ts describes exactly this
+ * and calls the general fix somebody else's job.
+ *
+ * So the invariant is NOT "the field is smooth" — that one already passed
+ * while the border was plainly visible, which is the §Rule 6 failure mode. It
+ * is that the floor the player LOOKS AT and the floor the sim SAMPLES are the
+ * same floor, everywhere the mesh exists.
+ */
+describe('§V43 the drawn seabed is the sampled seabed (no hard border)', () => {
+  const site: IslandSite = { seed: SEED, position: [0, 0], radius: islandParams.radius };
+  const island = { heightmap: hm, center: [0, 0] as [number, number] };
+
+  it('terrain geometry reaches open water, not the footprint edge', () => {
+    const g = buildIslandGeometry(hm, islandParams.skirtDepth, 1);
+    const pos = g.getAttribute('position');
+    let extent = 0;
+    for (let i = 0; i < pos.count; i++) {
+      extent = Math.max(extent, Math.abs(pos.getX(i)), Math.abs(pos.getZ(i)));
+    }
+    // the apron has to span the whole shelf the depth field ramps over, or the
+    // water goes on reading shallow past where anything is drawn
+    expect(extent).toBeCloseTo(R + islandParams.seabedShelfWidth, 3);
+  });
+
+  it('every apron vertex sits at the depth the seabed field reports there', () => {
+    const g = buildIslandGeometry(hm, islandParams.skirtDepth, 1);
+    const pos = g.getAttribute('position');
+    const skirtY = -islandParams.seabedOpenDepth - islandParams.skirtDepth;
+    let worst = 0;
+    let checked = 0;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+      // interior grid is the heightmap's own business; the closing skirt is a
+      // deliberate vertical drop BELOW open depth, where nothing can see it
+      if (Math.max(Math.abs(x), Math.abs(z)) <= R) continue;
+      if (Math.abs(y - skirtY) < 1e-6) continue;
+      checked++;
+      worst = Math.max(worst, Math.abs(y - sampleSeabedHeight([island], x, z, islandParams)));
+    }
+    expect(checked).toBeGreaterThan(0);
+    // one implementation of the ramp, shared — so this is exact, not merely close
+    expect(worst).toBeLessThan(1e-3);
+  });
+
+  it('the apron descends monotonically — no wall for the eye to catch on', () => {
+    // the old geometry ended in a vertical skirt at the rim, which IS the hard
+    // border; the apron must never step down faster than it runs outward
+    const g = buildIslandGeometry(hm, islandParams.skirtDepth, 1);
+    const pos = g.getAttribute('position');
+    const skirtY = -islandParams.seabedOpenDepth - islandParams.skirtDepth;
+    const byCheb = new Map<number, number>();
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+      const cheb = Math.max(Math.abs(x), Math.abs(z));
+      if (cheb <= R || Math.abs(y - skirtY) < 1e-6) continue;
+      byCheb.set(Math.round(cheb * 100) / 100, y);
+    }
+    const rings = [...byCheb.entries()].sort((a, b) => a[0] - b[0]);
+    expect(rings.length).toBeGreaterThan(1);
+    let maxSlope = 0;
+    for (let i = 1; i < rings.length; i++) {
+      const run = rings[i][0] - rings[i - 1][0];
+      const drop = rings[i - 1][1] - rings[i][1];
+      expect(drop).toBeGreaterThanOrEqual(-1e-6); // never rises going seaward
+      maxSlope = Math.max(maxSlope, drop / Math.max(run, 1e-6));
+    }
+    // a shelf, not a cliff: the ramp's steepest point is 1.5·Δdepth/width
+    expect(maxSlope).toBeLessThan(0.5);
+  });
+
+  it('the ship grounds on the floor it can see (§V8 shares the apron)', () => {
+    // buoyancy samples sampleSeabedHeight; the mesh is now the same surface, so
+    // "she ran aground on nothing" and "she sailed through a visible bank" are
+    // both excluded by the vertex check above. This pins the shared owner.
+    const onShelf = sampleSeabedHeight([island], R + islandParams.seabedShelfWidth / 2, 0, islandParams);
+    expect(onShelf).toBeLessThan(hm.heightAt(R, 0));
+    expect(onShelf).toBeGreaterThan(-islandParams.seabedOpenDepth);
+    expect(site.radius).toBe(islandParams.radius);
+  });
+});
+
 describe('LOD selection (§V17 — scenery has to be cheap)', () => {
   it('terrain drops to the decimated grid past the switch distance', () => {
     expect(selectTerrainLod(0)).toBe(0);

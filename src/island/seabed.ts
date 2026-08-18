@@ -35,8 +35,17 @@ export interface SeabedIsland {
   center: [number, number];
 }
 
-/** smoothstep(0, w, x) — CPU mirror of the shader-side shelf ramp */
-function shelfRamp(x: number, w: number): number {
+/**
+ * smoothstep(0, w, x) — the shelf ramp, and the ONE owner of it.
+ *
+ * Exported because `islandMesh.buildIslandGeometry` now builds its outer apron
+ * from this same curve. The drawn seabed and the sampled depth field have to
+ * be the same surface — the whole reason this module exists is that three
+ * consumers must not disagree about how deep the water is, and the geometry
+ * the player looks at is a fourth. A second copy of the ramp in the mesh
+ * builder would be exactly the drift this file's docstring forbids.
+ */
+export function shelfRamp(x: number, w: number): number {
   const t = Math.min(Math.max(x / Math.max(w, 1e-3), 0), 1);
   return t * t * (3 - 2 * t);
 }
