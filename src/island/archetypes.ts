@@ -144,17 +144,91 @@ const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
  * `extent` is the radius the features are allowed to occupy (metres) — they
  * must die out well inside the grid so the coastline belongs to the noise.
  */
+/**
+ * How much of the peak the shared BASE PLATFORM carries, and how far it
+ * reaches. Every archetype gets one, and this is the fix for the single most
+ * damning thing in the top-down reference shot: the island was FIVE SEPARATE
+ * CONES joined by necks of ground at zero elevation.
+ *
+ * THE ARITHMETIC THAT MADE IT SO. Take `lagoon` with 4 lobes: they sit on a
+ * ring at 0.50-0.62·extent with radii 0.34-0.46·extent, spread over
+ * 2π − 2·gap ≈ 4.5 rad, so adjacent centres are ~1.5 rad apart — a chord of
+ * 2·0.56·sin(0.75) ≈ 0.76·extent against a radius sum of ~0.80·extent. That is
+ * 5% of one radius of overlap, and it happens at the very rim of both cones
+ * where each contributes ~0 m. `smoothMax` then has nothing to blend: its
+ * `active` gate is `smoothstep(top/k)`, which is zero when the tallest
+ * operand is zero, so the necks got no lift at all. The result was a cluster
+ * of rocks, not an island — and no amount of `featureBlend` could fix it,
+ * because blend width cannot manufacture height that neither feature has.
+ *
+ * A broad low platform under everything makes the lobes one landmass by
+ * construction, and at the reference's near-flat relief it IS most of the
+ * island: the refs (docs/inspo/island/) are sand platforms a couple of metres
+ * proud with boulders on top, not cones.
+ */
+const BASE_HEIGHT = 0.34;
+const BASE_EXTENT = 1.05;
+const BASE_POWER = 1.1;
+
+/**
+ * RELIEF PER FAMILY — how tall this silhouette is allowed to be, as a multiple
+ * of the island's own `peakHeight`.
+ *
+ * WHY THIS EXISTS RATHER THAN ONE GLOBAL HEIGHT. Cutting `peakHeight` far
+ * enough to make the anchorage island read as the reference's sand platform
+ * (docs/inspo/island/ref-island-146/150.png — broad, a couple of metres proud,
+ * relief carried by boulders rather than terrain) also flattened the two
+ * families whose whole job is to be tall: the fraction of shoreline steeper
+ * than 45° went to EXACTLY ZERO on every island in the world, which is the
+ * §V43 "a cliff somewhere on every island" contract deleted by a params
+ * change. Both readings are correct and they are about DIFFERENT ISLANDS —
+ * the references contain sandbars AND fortress rocks, and §V43's actual demand
+ * is that they be distinguishable from kilometres out.
+ *
+ * So relief becomes part of the silhouette family, like STACK_AFFINITY and
+ * HEADLAND_AFFINITY already are. `lagoon` is deliberately the flattest: it is
+ * the family the showcase island forces, i.e. the one the player anchors at
+ * and walks on, and it is the one the user was looking at when they said the
+ * scale made no sense.
+ */
+const ARCHETYPE_RELIEF: Record<ArchetypeName, number> = {
+  mesaCliff: 2.4,
+  spine: 2.1,
+  twinPeaks: 1.5,
+  crestedDome: 0.9,
+  lagoon: 0.7,
+};
+
+/** the peak an archetype actually builds to, before any feature fractions */
+export function archetypePeak(name: ArchetypeName, peak: number): number {
+  return peak * ARCHETYPE_RELIEF[name];
+}
+
 export function buildArchetype(
   name: ArchetypeName,
   rng: Rng,
   extent: number,
-  peak: number,
+  rawPeak: number,
 ): Feature[] {
   const spin = rng() * Math.PI * 2;
   const at = (angle: number, dist: number): [number, number] => [
     Math.cos(angle + spin) * dist,
     Math.sin(angle + spin) * dist,
   ];
+  // every `peak` below is the FAMILY's relief, not the island's raw param
+  const peak = archetypePeak(name, rawPeak);
+  // FIRST in the list, so every other feature smooth-maxes against ground that
+  // is already well above water and the joins happen at height instead of at
+  // the waterline. Its own draw is taken from the same rng stream position for
+  // every archetype, so adding it did not reshuffle anyone's silhouette.
+  const base: Feature = {
+    kind: 'cone',
+    x: 0,
+    z: 0,
+    radius: extent * BASE_EXTENT,
+    height: peak * BASE_HEIGHT,
+    power: BASE_POWER,
+  };
 
   switch (name) {
     case 'twinPeaks': {
@@ -164,6 +238,7 @@ export function buildArchetype(
       const [ax, az] = at(0, sep);
       const [bx, bz] = at(Math.PI, sep * lerp(0.7, 1, rng()));
       return [
+        base,
         { kind: 'cone', x: ax, z: az, radius: extent * 0.66, height: peak, power: 1.5 },
         { kind: 'cone', x: bx, z: bz, radius: extent * 0.58, height: peak * lerp(0.55, 0.78, rng()), power: 1.6 },
         { kind: 'ridge', x: ax, z: az, x2: bx, z2: bz, radius: extent * 0.3, height: peak * 0.42, power: 1.4 },
@@ -175,6 +250,7 @@ export function buildArchetype(
       const [mx, mz] = at(0, extent * lerp(0.18, 0.32, rng()));
       const [sx, sz] = at(Math.PI * lerp(0.6, 1.4, rng()), extent * 0.5);
       return [
+        base,
         {
           kind: 'mesa', x: mx, z: mz, radius: extent * lerp(0.5, 0.62, rng()),
           height: peak, power: 1, edge: extent * lerp(0.1, 0.18, rng()),
@@ -201,6 +277,7 @@ export function buildArchetype(
         });
       }
       return [
+        base,
         { kind: 'ridge', x: ax, z: az, x2: bx, z2: bz, radius: extent * 0.34, height: peak * 0.55, power: 1.3 },
         ...spires,
       ];
@@ -222,7 +299,7 @@ export function buildArchetype(
           power: 1.7,
         });
       }
-      return lobes;
+      return [base, ...lobes];
     }
     case 'crestedDome':
     default: {
@@ -230,6 +307,7 @@ export function buildArchetype(
       // is a legitimate island, it just cannot be the ONLY island
       const [px, pz] = at(0, extent * lerp(0.15, 0.35, rng()));
       return [
+        base,
         { kind: 'cone', x: 0, z: 0, radius: extent * 0.92, height: peak * 0.62, power: 1.2 },
         { kind: 'cone', x: px, z: pz, radius: extent * lerp(0.26, 0.38, rng()), height: peak, power: 2.4 },
       ];

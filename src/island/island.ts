@@ -127,19 +127,32 @@ export interface Island {
 /**
  * Peak height and its floor for a given footprint radius.
  *
- * §V43 — this was a straight bug. `peakHeight` was a fixed 26 m while the
- * scatter varied radius 110-260 m, so peak/radius measured 0.149 at the
- * biggest island and 0.198 at the smallest: growth made them MORE pancake-
- * like, and all five landed within one narrow band of gentle dome. Scaling
- * with radius (same pattern as islandPalmCount) makes the params authored for
- * the default radius mean the same SHAPE at every size.
+ * TWO CORRECTIONS IN A ROW LIVE HERE, and the second undoes half of the first.
+ *
+ * WAS: a fixed 26 m against a 110-260 m scatter, so peak/radius ran 0.198 down
+ * to 0.149 — growth made islands MORE pancake-like. Fixed by scaling linearly
+ * with radius.
+ *
+ * BUT LINEAR IS ALSO WRONG, and it is the other half of why every island read
+ * as the same cone. `k = radius/base` makes peak/radius a CONSTANT — 0.444 by
+ * construction — so a big island is a SCALED COPY of a small one and can never
+ * be a broader landmass. Measured across all five archetypes at every radius,
+ * peak/radius came out 0.38-0.52 with the medians inside one narrow band, and
+ * the showcase island at R = 260 was a 115.6 m mountain with a 98.2 m floor
+ * under it. That mountain is what the user was looking at.
+ *
+ * `peakHeightGrowth` < 1 sends growth sideways instead of up: at 0.5 a 260 m
+ * island is 1.7× the height of a 90 m one rather than 2.9×. The art-direction
+ * references (docs/inspo/island/) are sand platforms a couple of metres proud
+ * with boulders on them — relief there is nearly all PROP, not terrain — so
+ * the exponent and the base height are both deliberately low.
  */
 export function islandPeakHeights(
   radius: number,
   ref = islandParams,
 ): { peakHeight: number; minPeakHeight: number } {
   const base = Math.max(ref.radius, 1e-3); // §V28 floored divisor
-  const k = radius / base;
+  const k = Math.pow(Math.max(radius, 0) / base, ref.peakHeightGrowth);
   return { peakHeight: ref.peakHeight * k, minPeakHeight: ref.minPeakHeight * k };
 }
 

@@ -201,7 +201,9 @@ export const terrainParams: TerrainParams = registerParams(
     rockBands: 5,
     rockBandSoftness: 0.45,
     rockBaseColor: 0x9a8f7c,
-    rockTopColor: 0xd9c9a8,
+    // the sunlit rock face shared the sand's problem at S 0.39 — with the
+    // low-sun key that is the orange the top-down bug shot is made of
+    rockTopColor: 0xc9c2b4,
     rockCreviceColor: 0x55483d,
     rockCreviceScale: 0.05,
     rockCreviceStrength: 0.55,
@@ -210,8 +212,18 @@ export const terrainParams: TerrainParams = registerParams(
     rockSideDarken: 0.3,
     rockRoughness: 0.92,
 
-    sandBaseColor: 0xecd9ab,
-    sandShadeColor: 0xd0b382,
+    // PALE CREAM, NOT MUSTARD — and the fault was SATURATION, not hue.
+    // 0xecd9ab / 0xd0b382 measured H 42.5°/37.7° (already inside the tropical
+    // 35-45° window) at S 0.63/0.45, which is 2.5-4x a real beach's 0.10-0.25.
+    // `fbm2` is mean-0.5, so the mean sand albedo drawn was rgb(222,198,150) =
+    // S 0.52: textbook tan. Two render-time multiplies then push it further —
+    // the noon key (0xfff3da) takes S to ~0.59, and the low sun (0xff9440,
+    // linear (1.0,0.30,0.05)) takes it to H 25.5° / S 0.74, which is why the
+    // sunset shots read as terracotta rather than merely warm. Post `vibrance`
+    // 0.18 acts hardest in exactly this saturation range. So these are
+    // authored at the BOTTOM of the target band and let the light warm them.
+    sandBaseColor: 0xe2ded5,
+    sandShadeColor: 0xcec5b6,
     sandShadeScale: 0.045,
     sandGrainScale: 14,
     sandGrainStrength: 0.1,

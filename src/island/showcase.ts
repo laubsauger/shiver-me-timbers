@@ -38,7 +38,7 @@
  *  - lagoon*: see `params/island.ts` — the floor depth is set by the measured
  *    swell trough, not by taste.
  */
-import { islandParams, type IslandParams } from '../params/island';
+import { type IslandParams } from '../params/island';
 import type { ArchetypeName } from './archetypes';
 import type { IslandHeightmap } from './heightmap';
 
@@ -74,6 +74,19 @@ export const SHOWCASE_LAGOON: ShowcaseIsland = {
     // which is the band the swash actually happens in, so it is deliberately
     // a nudge and not the 0.66 that would buy 39 m.
     rimStart: 0.78,
+    // THE OVERRIDE §T.52 SAID IT ADDED AND THEN NEVER APPLIED. That entry
+    // records per-island param overrides being introduced precisely because
+    // "`islandPeakHeights` scales peak with radius so a 260 m island was a
+    // 115 m mountain" — and no `peakHeight` was ever put in this object, so
+    // the island shipped at exactly the 115.6 m (floor 98.2 m) the note was
+    // written to prevent. That is the mountain in docs/bugs/bug-islands-*.png.
+    //
+    // `peakHeightGrowth` now takes most of it (260 m → 19.6 m), and this
+    // trims the rest: the showcase island is the one the player anchors at,
+    // so it is the one that has to read as the reference's sand platform
+    // rather than as scenery.
+    peakHeight: 14,
+    minPeakHeight: 8,
     // ~4.5 m clears the measured -3.96 m swell trough with margin, so the
     // basin always holds water. The 0-3 m band lives OUTSIDE it, on the beach
     // shelf, where it dries and refloods every wave — that is the shore break.
@@ -90,10 +103,13 @@ export const SHOWCASE_LAGOON: ShowcaseIsland = {
   },
 };
 
-/** resolved params for the showcase island (tests + the archipelago builder) */
-export function showcaseParams(base: IslandParams = islandParams): IslandParams {
-  return { ...base, radius: SHOWCASE_LAGOON.radius, ...SHOWCASE_LAGOON.overrides };
-}
+// `showcaseParams()` USED TO LIVE HERE AND IT WAS A SECOND OWNER OF THE SAME
+// FACT. It returned `{...base, radius, ...overrides}` — WITHOUT the
+// radius-derived peak heights that `archipelago.siteParams` applies — so it
+// reported peakHeight 40 for an island the world actually built at 115.6, a
+// 3× disagreement about the same object with no caller to notice. Deleted
+// rather than repaired: `siteParams(sites[0])` is the one resolution path and
+// a second one can only ever drift from it again.
 
 export interface Anchorage {
   /** island-LOCAL metres; add the island centre for world coords */

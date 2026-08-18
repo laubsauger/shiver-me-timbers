@@ -74,7 +74,6 @@ export {
   SHOWCASE_LAGOON,
   SHOWCASE_SEED_STRIDE,
   findLagoonAnchorage,
-  showcaseParams,
   type Anchorage,
   type AnchorageOptions,
   type ShowcaseIsland,

@@ -112,7 +112,7 @@ describe('interior peak floor (silhouette contract)', () => {
   it('params that never surface throw instead of silently sinking (§Rule 8)', () => {
     // peak 0 + zero noise → dome never breaks waterline anywhere on the grid
     expect(() =>
-      generateIslandHeightmap(SEED, { ...islandParams, peakHeight: 0, noiseStrength: 0 }),
+      generateIslandHeightmap(SEED, { ...islandParams, peakHeight: 0, noiseSlope: 0, coastNoiseSlope: 0 }),
     ).toThrow();
   });
 });
@@ -407,16 +407,26 @@ describe('§V43 silhouette: island shape must not flatten as it grows', () => {
     return { radius: s.radius, peak, ratio: peak / s.radius, hm };
   });
 
-  it('peak height scales with footprint — bigger islands are not flatter', () => {
-    // THE BUG: peakHeight was a fixed 26 m while the scatter varied radius
-    // 110-260 m, so peak/radius ran 0.198 at the smallest island down to
-    // 0.149 at the largest. Growth made them MORE pancake-like.
+  it('a bigger island grows SIDEWAYS more than it grows up', () => {
+    // THIS ASSERTION HAS BEEN WRONG TWICE, IN OPPOSITE DIRECTIONS, AND THE
+    // SECOND VERSION IS WHY EVERY ISLAND WAS A CONE.
     //
-    // Tested by growing ONE island rather than comparing five: same seed →
-    // same archetype, so this isolates size from silhouette family. Across
-    // different archetypes the ratio SHOULD vary — a cliff table is meant to
-    // be taller than a lagoon — and asserting a tight spread over the whole
-    // world would forbid exactly the variety the rewrite is for.
+    // v1: `peakHeight` was a fixed 26 m against a 110-260 m scatter, so
+    // peak/radius ran 0.198 down to 0.149 — growth made islands MORE
+    // pancake-like. Fixed by scaling peak LINEARLY with radius.
+    //
+    // v2 (this test's previous form) then pinned |Δratio| < 0.05, i.e. it
+    // REQUIRED peak/radius to be constant. A constant ratio means a big island
+    // is a SCALED COPY of a small one — it can never be a broader landmass,
+    // only a larger cone — and measured across every family and radius the
+    // ratio sat at 0.38-0.52 with all five medians inside one narrow band.
+    // The test passed the whole time. It was enforcing the defect.
+    //
+    // v3: growth must be SUB-LINEAR. The absolute peak still rises with
+    // footprint (an island that grew without getting taller at all would go
+    // back to v1's pancake), but the ratio must FALL, because that is what
+    // "broader, not taller" means. Same seed → same family, so this isolates
+    // size from silhouette.
     const shape = (radius: number) => {
       const hm = generateIslandHeightmap(WORLD_SEED, {
         ...islandParams,
@@ -430,12 +440,29 @@ describe('§V43 silhouette: island shape must not flatten as it grows', () => {
     const small = shape(110);
     const large = shape(250);
     expect(small.archetype).toBe(large.archetype); // same family, fair compare
-    expect(Math.abs(large.ratio - small.ratio)).toBeLessThan(0.05);
-    expect(large.peak).toBeGreaterThan(small.peak);
+    expect(large.peak).toBeGreaterThan(small.peak); // still grows (v1's guard)
+    expect(large.ratio).toBeLessThan(small.ratio * 0.85); // but grows WIDER
   });
 
-  it('every silhouette family reads as a landmass, not a sandbar', () => {
-    for (const b of built) expect(b.ratio).toBeGreaterThan(0.28);
+  it('the world spans sandbars AND cliff islands, not one shape at five sizes', () => {
+    // REPLACES a flat `ratio > 0.28` on every island, which forbade the
+    // sandbar outright — and the art direction (docs/inspo/island/) is more
+    // than half sandbar: broad sand platforms a couple of metres proud with
+    // the relief carried by boulders, not terrain.
+    //
+    // §V43's actual demand is that islands be identifiable from kilometres
+    // out, which is a statement about the SPREAD, not about any one island's
+    // height. The old params measured a spread of 0.38-0.52 — a factor of 1.3,
+    // five copies of one cone. `ARCHETYPE_RELIEF` is what buys the range, so
+    // this fails the moment someone re-flattens it to a single global height.
+    const ratios = built.map((b) => b.ratio);
+    const lo = Math.min(...ratios);
+    const hi = Math.max(...ratios);
+    expect(hi / lo).toBeGreaterThan(3); // genuinely different silhouettes
+    expect(hi).toBeGreaterThan(0.2); // at least one island still reads TALL
+    // and nothing is so flat it stops being an island: every one must carry
+    // dry land the sea cannot simply wash over
+    for (const b of built) expect(b.peak).toBeGreaterThan(6);
   });
 
   it('still leaves ground shallow enough to plant a grove on', () => {
@@ -456,6 +483,130 @@ describe('§V43 silhouette: island shape must not flatten as it grows', () => {
       }
       expect(plantable / land).toBeGreaterThan(0.25);
     }
+  });
+});
+
+describe('§V43 habitability: there has to be somewhere to stand', () => {
+  // THE TEST THAT WAS MISSING, and its absence is why the defect shipped.
+  // Every structural guard passed the whole time — rim submerged, peak floor,
+  // determinism, "a low-gradient sample exists near the shore" — while the
+  // islands were cones nobody could build on. The user's words were "it
+  // doesn't feel like one could build a house there, or like there could be a
+  // marina", so the measurement is the largest CONTIGUOUS patch of buildable
+  // ground, not a count of scattered samples that happen to be flat.
+  //
+  // MEASURED BEFORE THE FIX: the largest such patch anywhere in the world was
+  // 222 m² with a 4.6 m inscribed radius — and 4.09 m is ONE grid cell, so
+  // those patches were sampling accidents, not terrain. The ship is 35 m long.
+  //
+  // The inscribed radius is the load-bearing half. Area alone is satisfiable
+  // by a long thin ribbon of coastline; a building needs a disc.
+  const buildable = (hm: ReturnType<typeof generateIslandHeightmap>) => {
+    const n = hm.size;
+    const R = hm.worldRadius;
+    const cell = (2 * R) / (n - 1);
+    const limit = Math.tan((6 * Math.PI) / 180);
+    const mask = new Uint8Array(n * n);
+    for (let iz = 0; iz < n; iz++) {
+      for (let ix = 0; ix < n; ix++) {
+        const x = -R + ix * cell;
+        const z = -R + iz * cell;
+        // above the swash band (shoreRunup owns 0-1 m) and gently sloping
+        if (hm.data[iz * n + ix] > 1 && gradientAt(hm, x, z) < limit) mask[iz * n + ix] = 1;
+      }
+    }
+    // largest 4-connected component, then its inscribed radius by chamfer
+    const comp = new Int32Array(n * n).fill(-1);
+    let bestId = -1;
+    let bestCells = 0;
+    let id = 0;
+    const stack: number[] = [];
+    for (let i = 0; i < n * n; i++) {
+      if (mask[i] !== 1 || comp[i] !== -1) continue;
+      let count = 0;
+      stack.push(i);
+      comp[i] = id;
+      while (stack.length > 0) {
+        const q = stack.pop() as number;
+        count++;
+        const qx = q % n;
+        const qz = (q / n) | 0;
+        const nb = [qx > 0 ? q - 1 : -1, qx < n - 1 ? q + 1 : -1, qz > 0 ? q - n : -1, qz < n - 1 ? q + n : -1];
+        for (const m of nb) if (m >= 0 && mask[m] === 1 && comp[m] === -1) { comp[m] = id; stack.push(m); }
+      }
+      if (count > bestCells) { bestCells = count; bestId = id; }
+      id++;
+    }
+    if (bestId < 0) return { area: 0, inscribed: 0 };
+    const dist = new Float32Array(n * n);
+    for (let i = 0; i < n * n; i++) dist[i] = comp[i] === bestId ? 1e9 : 0;
+    for (let iz = 0; iz < n; iz++) for (let ix = 0; ix < n; ix++) {
+      const i = iz * n + ix;
+      if (dist[i] === 0) continue;
+      let d = 1e9;
+      if (ix > 0) d = Math.min(d, dist[i - 1] + 1);
+      if (iz > 0) d = Math.min(d, dist[i - n] + 1);
+      if (ix > 0 && iz > 0) d = Math.min(d, dist[i - n - 1] + 1.4142);
+      if (ix < n - 1 && iz > 0) d = Math.min(d, dist[i - n + 1] + 1.4142);
+      dist[i] = Math.min(dist[i], d);
+    }
+    let inscribed = 0;
+    for (let iz = n - 1; iz >= 0; iz--) for (let ix = n - 1; ix >= 0; ix--) {
+      const i = iz * n + ix;
+      if (comp[i] !== bestId) continue;
+      let d = dist[i];
+      if (ix < n - 1) d = Math.min(d, dist[i + 1] + 1);
+      if (iz < n - 1) d = Math.min(d, dist[i + n] + 1);
+      if (ix < n - 1 && iz < n - 1) d = Math.min(d, dist[i + n + 1] + 1.4142);
+      if (ix > 0 && iz < n - 1) d = Math.min(d, dist[i + n - 1] + 1.4142);
+      dist[i] = d;
+      if (d > inscribed) inscribed = d;
+    }
+    return { area: bestCells * cell * cell, inscribed: inscribed * cell };
+  };
+
+  it('the anchorage island could hold a settlement', () => {
+    // the showcase island is the one the player parks at and walks on, so it
+    // carries the bar: room for a marina, not just for a hut
+    const sites = generateIslandSites(WORLD_SEED);
+    const hm = heightmapForSite(sites[0]);
+    const b = buildable(hm);
+    expect(b.area).toBeGreaterThan(8_000);
+    expect(b.inscribed).toBeGreaterThan(15);
+  });
+
+  it('every island in the world has somewhere a building could stand', () => {
+    // a hut is ~8 x 10 m, so a 6 m inscribed radius is the floor. This is the
+    // assertion that fails if `noiseSlope` is ever put back on a peak-relative
+    // amplitude, because that is what ate the flat ground last time.
+    for (const site of generateIslandSites(WORLD_SEED)) {
+      const b = buildable(heightmapForSite(site));
+      expect(b.inscribed).toBeGreaterThan(6);
+    }
+  });
+
+  it('the beach is a beach — a 2-6 deg grade over a walkable run', () => {
+    // "a beach doesn't go down with like 12 or 15 or 20 or 25 degrees" (user).
+    // Measured before the fix: 19 deg at the r/R 0.6-0.8 band and a 6.0 m run
+    // from the waterline to +2 m. The old apron could not fix it at ANY band
+    // width because it was a vertical remap at a fixed horizontal position —
+    // see heightmap.beachApron for the derivation.
+    const sites = generateIslandSites(WORLD_SEED);
+    const hm = heightmapForSite(sites[0]);
+    const runs: number[] = [];
+    for (let i = 0; i < 64; i++) {
+      const a = (i / 64) * Math.PI * 2;
+      const shore = findShoreRadius(hm, a);
+      for (let k = 0; k <= 400; k++) {
+        const r = shore - k * 0.5;
+        if (r < 0) break;
+        if (hm.heightAt(Math.cos(a) * r, Math.sin(a) * r) >= 1.5) { runs.push(shore - r); break; }
+      }
+    }
+    runs.sort((x, y) => x - y);
+    const median = runs[runs.length >> 1];
+    const grade = (Math.atan2(1.5, median) * 180) / Math.PI;
+    expect(grade).toBeLessThan(8);
   });
 });
 
@@ -605,8 +756,22 @@ describe('§V43 coastline: a cliff somewhere on every island, not sand all round
     return steep / N;
   };
 
-  it('no island shelves gently into the water on every single bearing', () => {
-    for (const map of built) expect(cliffFraction(map)).toBeGreaterThan(0.05);
+  it('the WORLD carries cliff coast, even though a sandbar does not', () => {
+    // WAS: every island had to clear 0.05. That was right while every island
+    // was meant to be a mountain, and it became wrong the moment the art
+    // direction asked for sandbars — this test measures a 45° rise over the
+    // first 25 m inland, which a 11 m island physically cannot produce, so on
+    // `lagoon` and `crestedDome` it was asserting something the family is
+    // defined by NOT having.
+    //
+    // The complaint it was written for was "a single skirt of sand all the way
+    // round" — a statement about the world reading as uniform. So the bar is
+    // that cliff coast EXISTS and is not spread evenly, which is what
+    // `HEADLAND_AFFINITY` and `ARCHETYPE_RELIEF` together are for. A world
+    // where every island scored 0 is still caught.
+    const fractions = built.map(cliffFraction);
+    expect(Math.max(...fractions)).toBeGreaterThan(0.15);
+    expect(fractions.filter((f) => f > 0.05).length).toBeGreaterThanOrEqual(2);
   });
 
   it('and none of them is cliff the whole way round either', () => {

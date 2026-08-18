@@ -56,8 +56,20 @@ export function sampleSeabedHeight(
   for (const isl of islands) {
     const lx = x - isl.center[0];
     const lz = z - isl.center[1];
-    const d = Math.hypot(lx, lz);
     const R = isl.heightmap.worldRadius;
+    // CHEBYSHEV, NOT EUCLIDEAN — the ramp has to start on the same curve the
+    // heightmap ends on, and the heightmap is a SQUARE grid over [-R, R]².
+    // Keyed on `hypot` the ramp began at the inscribed circle, so between
+    // d = R and the corner at d = R√2 the grid was still returning interior
+    // data while the ramp had already carried the field a third of the way to
+    // open depth: measured on the showcase island, -12.0 m at the axes against
+    // -24.3 m at the corners, i.e. a 12.3 m disagreement between the drawn
+    // terrain rim and the depth the water is shaded against, with 4-fold
+    // symmetry. Visible as the turquoise dying at the corners
+    // (`shallowFactor` 0.259 → 0.0) — a soft square-with-rounded-corners
+    // pattern round every island. `max(|lx|,|lz|) − R` is exactly zero on the
+    // grid boundary, so the two agree everywhere by construction.
+    const d = Math.max(Math.abs(lx), Math.abs(lz));
     if (d > R + p.seabedShelfWidth) continue;
     // heightAt already reports -rimDepth outside the footprint, so the local
     // value is continuous across d = R; the shelf ramp carries it to open sea

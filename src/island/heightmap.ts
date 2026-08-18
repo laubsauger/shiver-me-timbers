@@ -37,6 +37,7 @@ import {
   buildArchetype,
   buildHeadlands,
   buildSeaStacks,
+  archetypePeak,
   combineFeatures,
   pickArchetype,
   type ArchetypeName,
@@ -50,19 +51,27 @@ export interface IslandHeightmapParams {
   peakHeight: number;
   minPeakHeight: number;
   noiseScale: number;
-  noiseStrength: number;
+  /** detail relief as a SLOPE budget (m/m) — see params/island.noiseSlope */
+  noiseSlope: number;
   noiseOctaves: number;
   /** fraction of the footprint the archetype's features may occupy */
   featureExtent: number;
   /** metres over which two features fuse instead of creasing */
   featureBlend: number;
-  /** coastline noise: world frequency (1/m) and amplitude as a fraction of peak */
+  /** coastline noise: world frequency (1/m) and its own slope budget (m/m) */
   coastNoiseScale: number;
-  coastNoiseStrength: number;
+  coastNoiseSlope: number;
   /** fraction of the radius inside which the rim envelope does not act */
   rimStart: number;
   beachBandWidth: number;
   beachFlatness: number;
+  beachLandGuard: number;
+  /** authored level shelf — see terrace below; 0 disables */
+  terraceRadius: number;
+  terraceFeather: number;
+  terraceHeight: number;
+  terraceCompress: number;
+  terraceToe: number;
   /** authored lagoon floor — see lagoonBasin below; 0 disables */
   lagoonDepth: number;
   lagoonRadius: number;
@@ -250,12 +259,164 @@ function lagoonBasin(
   return h + (target - h) * w;
 }
 
-/** monotone slope compression around the waterline (see header) */
-function beachApron(h: number, band: number, flatness: number): number {
-  const b = Math.max(band, 1e-3);
-  const a = Math.min(Math.abs(h) / b, 1);
-  const t = a * a * (3 - 2 * a); // smoothstep
-  return h * (flatness + (1 - flatness) * t);
+/**
+ * BEACH APRON — slope compression around the waterline, as the INTEGRAL of a
+ * slope multiplier rather than as a multiply on the height.
+ *
+ * WHY THE OBVIOUS FORM IS WRONG, measured. The old apron was
+ * `h·(f + (1−f)·S(|h|/b))`. Differentiate it: the output slope is
+ * `s·(f + |h|·f′)`, not `s·f`. That second term means the compression is only
+ * real in a vanishing band at exactly h = 0, and it goes the WRONG WAY as soon
+ * as you leave it — at h = 1.5 m the ground came out at 23° where the raw
+ * terrain was 20°, i.e. the apron STEEPENED the ground just above the
+ * waterline, which is precisely the strip the beach is made of. Measured
+ * horizontal run from the waterline to +2 m: 6.0 m, and widening the band from
+ * 3 m to 14 m only bought 12.5 m of it. The user's note — "a beach doesn't go
+ * down with 12 or 15 or 20 or 25 degrees" — was describing this exactly.
+ *
+ * Integrating instead makes the output slope `s·g(|h|)` by construction, with
+ * g ramping f → 1 across the band, so the grade is what the number says and
+ * the run follows from it. With the §V43 noise budget leaving ~9° of natural
+ * grade near the shore, f = 0.15 lands the sand at about 3° over ~35 m.
+ *
+ * Closed form of ∫₀^h g, with S the smoothstep 3t²−2t³:
+ *   h ≤ b:  f·h + (1−f)·b·((h/b)³ − (h/b)⁴/2)
+ *   h > b:  h − (1−f)·b/2            (slope exactly 1× again, a constant drop)
+ *
+ * Odd in h, so the submerged side gets the same shelf — that is the shore
+ * break — and the sign of h is never changed, which is what keeps the
+ * shoreline where the field put it.
+ */
+function beachApron(h: number, land: number, p: IslandHeightmapParams): number {
+  // A CLIFF IS NOT A BEACH, and a wide band makes that distinction load-
+  // bearing. At the old 3 m band the apron only ever touched the immediate
+  // waterline, so nothing else noticed it. At the 10 m band a beach actually
+  // needs, it also swept up every `sheer` headland wall crossing the sea —
+  // measured, it took the fraction of shoreline steeper than 45° to EXACTLY
+  // ZERO on every island in the world and erased the §V43 "a cliff somewhere
+  // on every island" contract in one line. Gate on the ARCHETYPE's landmass,
+  // the same way `lagoonBasin` does and for the same reason: the features are
+  // what know whether this is a beach or the foot of a wall, and the noise is
+  // what would lie about it.
+  const guard = Math.max(p.beachLandGuard, 1e-3); // §V28 floored divisor
+  const gate = 1 - smoothstep01(land / guard);
+  const f = p.beachFlatness + (1 - p.beachFlatness) * (1 - gate);
+  const b = Math.max(p.beachBandWidth, 1e-3); // §V28 floored divisor
+  const a = Math.abs(h);
+  const s = Math.sign(h);
+  if (a >= b) return s * (a - (1 - f) * b * 0.5);
+  const t = a / b;
+  return s * (f * a + (1 - f) * b * (t * t * t - (t * t * t * t) * 0.5));
+}
+
+/**
+ * TERRACE — the level ground the composition could not previously express.
+ *
+ * Every archetype feature is a monotone radial falloff merged with `smoothMax`,
+ * so the field can only ADD land and every primitive is flat only exactly at
+ * its own summit. There was no way to say "this ground is level at +5 m", and
+ * the consequence was measurable: across the entire shipped world the largest
+ * contiguous patch above 1.5 m with a gradient under 6° was 222 m² at a 4.6 m
+ * inscribed radius. The ship is 35 m long. Nowhere in the world could a hut
+ * have stood level.
+ *
+ * THE OPERATOR IS `beachApron`'S, KEYED ON POSITION INSTEAD OF ON |h|: compress
+ * the departure from a target, do not clamp to it. A clamp leaves a lip
+ * wherever the land was already above the target and a step at the disc edge;
+ * a compression blended over a feather has neither, by construction rather
+ * than by tuning.
+ *
+ * THE TOE GATE IS THE SAFETY PROPERTY, and it is the dual of `lagoonBasin`'s.
+ * The basin lerps toward a NEGATIVE target and guarantees it can never create
+ * dry land. This lerps toward a POSITIVE one, so ungated it lifts shallow
+ * water into land and MOVES THE SHORELINE — measured, it added 4,000 m² of
+ * land doing exactly that. Ramping the weight from 0 at `toe` to 1 at `2·toe`
+ * makes the operator the identity at and below the waterline, so the shoreline
+ * cannot move however the shelf is tuned.
+ *
+ * MONOTONE IN h, WHICH IS THE PROPERTY THAT MATTERS, and it constrains the
+ * params. With W(h) the toe ramp, the map is
+ *   f(h) = T + (h−T)·(1 − W(h)·(1−c))
+ *   f′(h) = (1 − W(1−c)) − (h−T)·W′·(1−c)
+ * The first term is ≥ c > 0. The second can only turn f′ negative where
+ * h > T, and W′ is non-zero only on h ∈ [toe, 2·toe] — so requiring
+ * T ≥ 2·toe puts the whole ramp below the target and f′ > 0 everywhere.
+ * `terraceHeight` is floored against that below. Monotone ⇒ no new waterline
+ * crossings, which is the same guarantee the apron carries and the reason
+ * both are safe to run before the rim envelope.
+ *
+ * @param h  height (m) here, after the archetype, noise and basin
+ * @param d  distance (m) from the shelf CENTRE (see findTerraceSite)
+ */
+function terrace(h: number, d: number, R: number, p: IslandHeightmapParams): number {
+  if (p.terraceRadius <= 0) return h;
+  const toe = Math.max(p.terraceToe, 1e-3); // §V28 floored divisor
+  // the monotonicity constraint derived above, enforced rather than trusted
+  const target = Math.max(p.terraceHeight, 2 * toe);
+  const feather = Math.max(p.terraceFeather * R, 1e-3); // §V28 floored divisor
+  const disc = 1 - smoothstep01((d - p.terraceRadius * R) / feather);
+  if (disc <= 0) return h;
+  const w = disc * smoothstep01((h - toe) / toe);
+  if (w <= 0) return h;
+  return target + (h - target) * (1 - w * (1 - p.terraceCompress));
+}
+
+/** candidate shelf centres scanned — resolution, not a look tunable */
+const TERRACE_SCAN_ANGLES = 48;
+/** radial stations per bearing in that scan */
+const TERRACE_SCAN_RINGS = [0.3, 0.4, 0.5, 0.6] as const;
+/** ring samples used to score one candidate */
+const TERRACE_SCORE_SAMPLES = 20;
+
+/**
+ * WHERE THE SHELF GOES — the gentlest ground already near the target
+ * elevation, MEASURED, exactly as `findBayBearing` measures where the bay is
+ * (§V71: resolve against the real surface, never an authored constant that
+ * happened to match one seed).
+ *
+ * Scoring on |h − target| rather than on slope is deliberate: the terrace can
+ * flatten any slope, but it cannot move ground a long way vertically without
+ * the feather turning into a wall, so the cheap shelf is the one already at
+ * roughly the right height. The waterline penalty keeps it off ground the toe
+ * gate would make it inert on anyway.
+ */
+function findTerraceSite(
+  rawHeight: (x: number, z: number) => number,
+  R: number,
+  p: IslandHeightmapParams,
+): [number, number] {
+  const target = Math.max(p.terraceHeight, 2 * Math.max(p.terraceToe, 1e-3));
+  const rad = p.terraceRadius * R;
+  let bestX = 0;
+  let bestZ = 0;
+  let bestScore = Infinity;
+  for (let i = 0; i < TERRACE_SCAN_ANGLES; i++) {
+    const a = (i / TERRACE_SCAN_ANGLES) * Math.PI * 2;
+    const ca = Math.cos(a);
+    const sa = Math.sin(a);
+    for (const frac of TERRACE_SCAN_RINGS) {
+      const cx = ca * frac * R;
+      const cz = sa * frac * R;
+      let score = 0;
+      for (let k = 0; k < TERRACE_SCORE_SAMPLES; k++) {
+        const aa = (k / TERRACE_SCORE_SAMPLES) * Math.PI * 2;
+        // two rings, so a candidate straddling a ridge scores worse than one
+        // sitting in a bowl of the same mean height
+        for (const rr of [0.45, 0.85]) {
+          const h = rawHeight(cx + Math.cos(aa) * rad * rr, cz + Math.sin(aa) * rad * rr);
+          // below the toe the terrace is inert, so a candidate hanging over
+          // water is not merely worse, it is a shelf that would not exist
+          score += Math.abs(h - target) + (h < p.terraceToe ? target * 8 : 0);
+        }
+      }
+      if (score < bestScore) {
+        bestScore = score;
+        bestX = cx;
+        bestZ = cz;
+      }
+    }
+  }
+  return [bestX, bestZ];
 }
 
 export function generateIslandHeightmap(
@@ -285,6 +446,11 @@ export function generateIslandHeightmap(
   // Landmass first, then the stacks standing off it. Both go through the same
   // smooth-max, so a stack that happens to land against a headland fuses with
   // it instead of creasing, and one in open water stays an isolated column.
+  // Headlands and stacks scale off the FAMILY's relief, not the island's raw
+  // `peakHeight` — they are fractions of "how tall is this island", and a
+  // cliff family whose walls were sized off the flat number would have a
+  // fortress-rock skyline with sandbar cliffs at the water.
+  const familyPeak = archetypePeak(archetype, p.peakHeight);
   const features = [
     ...buildArchetype(archetype, rng, R * p.featureExtent, p.peakHeight),
     ...buildHeadlands(archetype, rng, {
@@ -292,8 +458,8 @@ export function generateIslandHeightmap(
       offset: R * p.headlandOffset,
       radiusMin: R * p.headlandRadiusMin,
       radiusMax: R * p.headlandRadiusMax,
-      heightMin: p.peakHeight * p.headlandHeightMin,
-      heightMax: p.peakHeight * p.headlandHeightMax,
+      heightMin: familyPeak * p.headlandHeightMin,
+      heightMax: familyPeak * p.headlandHeightMax,
       edgeFraction: p.headlandEdge,
     }),
     ...buildSeaStacks(archetype, rng, {
@@ -301,15 +467,23 @@ export function generateIslandHeightmap(
       ring: R * p.seaStackRing,
       radiusMin: R * p.seaStackRadiusMin,
       radiusMax: R * p.seaStackRadiusMax,
-      heightMin: p.peakHeight * p.seaStackHeightMin,
-      heightMax: p.peakHeight * p.seaStackHeightMax,
+      heightMin: familyPeak * p.seaStackHeightMin,
+      heightMax: familyPeak * p.seaStackHeightMax,
     }),
   ];
   const blend = Math.max(p.featureBlend, 1e-3); // §V28 floored divisor
-  // amplitude relative to peak, so a taller island gets a bolder coastline —
-  // and so a zero-peak island stays fully submerged and throws below
-  const coastAmp = p.peakHeight * p.coastNoiseStrength;
-  const detailAmp = p.peakHeight * p.noiseStrength;
+  // SLOPE BUDGET, NOT A FRACTION OF PEAK (§V43). Amplitude used to be
+  // `peakHeight × strength`, and `peakHeight` scales with radius while these
+  // frequencies are WORLD-space and do not — so noise slope grew linearly with
+  // island size and every "make it bigger" move made the island strictly
+  // steeper. At R = 260 the detail field was ±20.8 m over a 29 m wavelength,
+  // a 55° slope laid over every square metre INCLUDING the flat ground the
+  // archetypes had already built: `mesaCliff` at that size has 16,865 m² of
+  // sub-6° ground with the noise off and 134 m² — one grid cell — with it on.
+  // `slope × (halfWavelength)` is radius-independent by construction, so the
+  // shape of an island stops depending on its size.
+  const coastAmp = p.coastNoiseSlope * (0.5 / Math.max(p.coastNoiseScale, 1e-6));
+  const detailAmp = p.noiseSlope * (0.5 / Math.max(p.noiseScale, 1e-6));
   const rimStart = Math.min(Math.max(p.rimStart, 0.05), 0.99);
   const rimSpan = Math.max(1 - rimStart, 1e-3); // §V28 floored divisor
 
@@ -319,7 +493,10 @@ export function generateIslandHeightmap(
   const bayX = Math.cos(bayAngle) * p.lagoonOffset * R;
   const bayZ = Math.sin(bayAngle) * p.lagoonOffset * R;
 
-  const rawHeight = (x: number, z: number): number => {
+  // Pre-terrace field. Split out so `findTerraceSite` can probe the same
+  // surface the grid will be built from — the shelf is sited against the real
+  // field, not against a guess about where the archetype put its land (§V71).
+  const landField = (x: number, z: number): { h: number; land: number; detail: number } => {
     const land = combineFeatures(features, x, z, blend);
 
     // COASTLINE NOISE at absolute amplitude. The old field multiplied noise by
@@ -332,7 +509,7 @@ export function generateIslandHeightmap(
     // surface detail, weighted up on high ground so summits are broken and
     // the beach apron stays walkable
     const n = fbm2Cpu(x * p.noiseScale + ox, z * p.noiseScale + oz, p.noiseOctaves) * 2 - 1;
-    const relief = Math.min(Math.max(land / Math.max(p.peakHeight, 1e-3), 0), 1);
+    const relief = Math.min(Math.max(land / Math.max(familyPeak, 1e-3), 0), 1);
     const detail = n * detailAmp * (0.3 + 0.7 * relief);
 
     // BASIN BEFORE THE RIM ENVELOPE, and the order is load-bearing. The basin
@@ -344,8 +521,45 @@ export function generateIslandHeightmap(
     // field exactly on the square boundary: a ledge in the geometry and a hard
     // ring in the §V24 tint. Ahead of the envelope the rim guarantee is
     // untouched by construction and the basin blends out into it.
+    // APRON HERE — ON THE NATURAL FIELD, AHEAD OF THE BASIN AND THE ENVELOPE.
+    // It used to run dead last, which was harmless only because its band was
+    // 3 m. At the 10 m band a beach needs, running last meant it also
+    // compressed (a) the authored lagoon floor, crushing the basin's -4.5 m to
+    // -1.26 m so the lagoon drained, and (b) the envelope's guaranteed
+    // -rimDepth, so the deepest water anywhere inside the footprint became
+    // ~2.6 m and `findLagoonAnchorage` could not find a berth she would float
+    // at. Both are the same mistake: the apron shapes the BEACH, so it belongs
+    // on the field the beach is made of, before anything authored is written
+    // over the top of it.
+    return { h: beachApron(land + coast + detail, land, p), land, detail };
+  };
+
+  // The basin is a WATER feature and the terrace a LAND one, so the shelf is
+  // sited on the field BEFORE the basin. Siting it after coupled the two: the
+  // basin moves the surface it probes, so turning the basin on or off relocated
+  // the shelf and changed land heights on the far side of the island by ~1 mm —
+  // enough to break the basin's own "can never make land taller" guarantee for
+  // a reason that had nothing to do with the basin. The terrace's toe gate
+  // already makes it inert over water, so nothing is lost by ignoring the
+  // basin here.
+  const preTerrace = (x: number, z: number): number => landField(x, z).h;
+
+  // WHERE THE SHELF GOES — measured off the field above, once, before the grid
+  // loop. Costs one 48×4×40 probe sweep at build time (~4 ms on a 260 m
+  // island) and nothing at all per frame.
+  const [terraceX, terraceZ] =
+    p.terraceRadius > 0 ? findTerraceSite(preTerrace, R, p) : [0, 0];
+
+  const rawHeight = (x: number, z: number): number => {
+    const { h: beached, land, detail } = landField(x, z);
     const bayDist = Math.hypot(x - bayX, z - bayZ);
-    const shaped = lagoonBasin(land + coast + detail, land, detail, bayDist, R, p);
+    const basined = lagoonBasin(beached, land, detail, bayDist, R, p);
+    // TERRACE BEFORE THE RIM ENVELOPE, for the reason the basin is: applied
+    // after, its feather would overwrite the envelope's guaranteed -rimDepth
+    // near the footprint edge and leave a step in the seabed field exactly on
+    // the square boundary (§T.52's 7.5 m ledge, by the same route). Ahead of
+    // it the rim guarantee is untouched by construction.
+    const shaped = terrace(basined, Math.hypot(x - terraceX, z - terraceZ), R, p);
 
     // RIM ENVELOPE. The rim guarantee used to be bought by multiplying the
     // whole field by a dome that vanished at d=1, which is what made every
@@ -355,8 +569,7 @@ export function generateIslandHeightmap(
     const d = Math.hypot(x, z) / Math.max(R, 1e-3);
     const t = Math.min(Math.max((d - rimStart) / rimSpan, 0), 1);
     const edge = t * t * (3 - 2 * t);
-    const h = shaped * (1 - edge) + -p.rimDepth * edge;
-    return beachApron(h, p.beachBandWidth, p.beachFlatness);
+    return shaped * (1 - edge) + -p.rimDepth * edge;
   };
 
   const data = new Float32Array(size * size);
