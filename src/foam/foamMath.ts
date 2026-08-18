@@ -416,10 +416,17 @@ export function foamMaskFrom(
   gain: number,
   residueWeight: number,
   breakingWeight: number,
+  /**
+   * Optical density (foamCoverage). Omit — or pass 0 — for the pre-soft-
+   * saturation behaviour, a hard clamp at 1, which is what makes this a clean
+   * A/B against everything measured before it.
+   */
+  density = 0,
 ): number {
   const r = Math.max(0, residue) * Math.max(0, residueWeight);
   const b = Math.max(0, breaking) * Math.max(0, gain) * Math.max(0, breakingWeight);
-  return Math.min(1, r + b);
+  if (!(density > 0)) return Math.min(1, r + b);
+  return foamCoverage(r + b, density);
 }
 
 /**
@@ -574,6 +581,194 @@ export function metricSigmaScale(
   return Math.sqrt(1 + c * c + (b * sd) ** 2);
 }
 
+/* -------------------------------------------------------------------------
+ * THE BREAKUP TRADED SHAPE FOR SIZE, AND SHAPE WAS THE THING (§B, user: "the
+ * caps still look a little bit weird... maybe we shouldn't only measure the
+ * area but also its SHAPE — take a look that its shape is actually starting to
+ * reflect the structure of the water").
+ *
+ * MEASURED on connected components of the fired region, at matched coverage.
+ * ASPECT is √(λ₁/λ₂) of the second-moment matrix; ALIGN is cos(2Δθ) between a
+ * cap's major axis and the local crest LINE, both as directors; CIRC is
+ * 4πA/P², which is 1 for a disc:
+ *
+ *                              p90 major   aspect   align   circ
+ *   λ− alone, no breakup          53.9 m    2.48    +0.96   0.49
+ *   + isotropic noise breakup     30.0 m    1.73    +0.52   0.49
+ *   + finer cascades' own λ−      11.6 m    1.73    −0.01   0.50
+ *   + noise in the CREST FRAME    28.5 m    2.62    +0.63   0.36
+ *
+ * TWO RESULTS, BOTH SURPRISES. First: λ− was ALREADY producing crest-following
+ * ribbons — align +0.96, aspect 2.48 — which is §V.58's fix working exactly as
+ * designed, and the isotropic breakup HALVED it while hitting its size target.
+ * Optimising one statistic damaged the one nobody was watching. Second: driving
+ * the breakup from the finer cascades — the intuitive reading of "influenced by
+ * all the different sub-tessellations" — is the WORST option on the board. Each
+ * finer band folds along ITS OWN propagation direction, uncorrelated with the
+ * big crest, so using it as a breakup field stamps a second unrelated
+ * orientation over the first and randomises the result.
+ *
+ * ⟹ the breakup field is sampled in the LOCAL CREST FRAME, stretched along the
+ * crest line, so it cuts a ribbon into shorter ribbons instead of eroding it
+ * into discs.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Unit vector along the local CREST LINE, from the structure tensor of ∇h
+ * (GPU mirror: the tensor ring in createInjectPass). Returns the crest
+ * direction itself, so a caller stretches its sample coordinate along it.
+ *
+ * WHY A STRUCTURE TENSOR AND NOT THE GRADIENT, AND WHY NOT λ−'s EIGENVECTOR.
+ * Two dead ends had to be ruled out first and a future reader should not
+ * "simplify" this back into either of them:
+ *
+ *  - λ−'s own eigenvector is the natural answer and it is UNREACHABLE. It needs
+ *    the SIGN of ∂Dx/∂z, and §V.58 records that the off-diagonal term is never
+ *    reconstructed because it only ever appears squared (inside det J).
+ *    `derivatives` is full and so is `displacement`, so there is no slot to
+ *    publish it in without an ocean change.
+ *  - raw ∇h is worse than useless ON a crest, which is the only place this is
+ *    asked: foamMath's own note is that "∇h vanishes and flips sign ON the
+ *    crest line". A per-texel gradient there is numerical noise with a sign.
+ *
+ * The tensor answers a BETTER-POSED question. It is quadratic in ∇h, so it
+ * yields a DIRECTOR — an axis with no head or tail — and the sign §V.58 calls
+ * unreconstructable is not needed at all rather than worked around. And because
+ * it is accumulated over a RING around the texel rather than at it, it samples
+ * the flanks where ∇h is large and informative instead of the crest line where
+ * it vanishes. Both properties are the reason it is correct, not merely
+ * convenient.
+ *
+ * `jxx`/`jzz`/`jxz` are Σ(∂h/∂x)², Σ(∂h/∂z)², Σ(∂h/∂x·∂h/∂z) over that ring.
+ * Its dominant eigenvector points ACROSS the crest (the propagation axis), so
+ * the crest line is the other one — a quarter turn, which in doubled-angle
+ * form is a negation.
+ */
+export function crestFrame(
+  jxx: number,
+  jzz: number,
+  jxz: number,
+): { cos: number; sin: number } {
+  const dx = jxx - jzz;
+  const dy = 2 * jxz;
+  const r = Math.hypot(dx, dy);
+  // an isotropic neighbourhood (flat water, or a perfectly symmetric peak) has
+  // NO crest direction; return the x axis rather than dividing by zero (§V28)
+  if (!(r > 1e-20) || !Number.isFinite(r)) return { cos: 1, sin: 0 };
+  // doubled angle of the PROPAGATION axis, turned a quarter to the crest line
+  const c2 = -dx / r;
+  const s2 = -dy / r;
+  // half-angle, so no atan2/cos/sin round trip. sign(0) must read +1, or a
+  // crest exactly on the z axis collapses to a zero-length frame.
+  const cos = Math.sqrt(Math.max(0, (1 + c2) * 0.5));
+  const sin = Math.sqrt(Math.max(0, (1 - c2) * 0.5)) * (s2 < 0 ? -1 : 1);
+  return { cos, sin };
+}
+
+/**
+ * Radius of the structure-tensor ring, IN TEXELS, from the band's own shortest
+ * wavelength — the §V.36 rule (state a length in the units of the thing it
+ * measures, never in the units of the grid that happens to hold it) applied to
+ * a filter radius.
+ *
+ * IT HAS A REAL OPTIMUM AND IT IS NOT SMALL. Measured, as the agreement between
+ * the tensor's director and the one λ− implies, over FIRING texels only:
+ *
+ *   ring radius (of a 40–400 m band)   1     2     4     8    16    32  cells
+ *   agreement                        0.374 0.497 0.855 0.874 0.564 −0.127
+ *
+ * Both ends fail for opposite reasons. Too SMALL and all eight taps see nearly
+ * the same gradient, so the tensor degenerates to rank one — it becomes the raw
+ * gradient, which is precisely the quantity that vanishes and flips sign ON the
+ * crest line. Too LARGE and the ring spans past the neighbouring crest and
+ * averages two unrelated directions, which is why 32 cells reads NEGATIVE. The
+ * plateau sits near a third of the band's shortest wave, where the taps straddle
+ * one crest: the up-face and down-face gradients are opposite VECTORS but the
+ * same DIRECTOR, so being quadratic the tensor adds them coherently.
+ *
+ * Verified against a single 100 m mode, where the answer is analytic: 0.993 at
+ * one cell, 1.000 at four. The construction is exact; only the radius was wrong.
+ */
+export function tensorRadiusTexels(
+  bandShortestMetres: number,
+  texelMetres: number,
+  maxTexels = 12,
+): number {
+  if (!Number.isFinite(bandShortestMetres) || !Number.isFinite(texelMetres)) return 1;
+  if (!(texelMetres > 0)) return 1;
+  const wanted = Math.round(Math.max(0, bandShortestMetres) / 3 / texelMetres);
+  return Math.min(maxTexels, Math.max(1, wanted));
+}
+
+/**
+ * `breakupJitter` sampled in the crest frame, stretched `elongation` along the
+ * crest line (GPU mirror: the same block). Stretching the COORDINATE along the
+ * crest stretches the FEATURES along it, so the field cuts ACROSS a cap at
+ * intervals — shorter ribbons — instead of biting isotropic holes in it.
+ */
+export function breakupJitterAligned(
+  worldX: number,
+  worldZ: number,
+  frame: { cos: number; sin: number },
+  elongation: number,
+  freq: number,
+  warp: number,
+  octaves: number,
+  drift = 0,
+): number {
+  const e = Number.isFinite(elongation) ? Math.max(1, elongation) : 1;
+  const along = (worldX * frame.cos + worldZ * frame.sin) / e;
+  const across = -worldX * frame.sin + worldZ * frame.cos;
+  return breakupJitter(along, across, freq, warp, octaves, drift);
+}
+
+/* -------------------------------------------------------------------------
+ * THE SECOND HALF OF THE TWO-CLOCK FIX (§B, user: "we're still missing a bunch
+ * of transparency").
+ *
+ * `75bc563` split the mask into a residue and a breaking RATE so it would
+ * encode breaking INTENSITY rather than dwell time. It then threw that
+ * intensity away one stage later, and the arithmetic is not subtle:
+ * `breakingGain` is 6.19 at the shipped clocks, the channel is clamped to 1 in
+ * the TEXTURE, and the mask was clamped to 1 again in the composite — so `raw`
+ * reached 1 whenever breaking exceeded 0.161, i.e. at a deficit of 0.19σ, while
+ * the mean excess beyond the 2.56σ gate is 0.36σ. THE TYPICAL FIRING TEXEL
+ * SATURATED. Worked through at cascade 0's shipped numbers, the residue channel
+ * settles at 1.86 for that texel and is clipped by its own accumulator too.
+ *
+ * So a marginal breaker and a violent one arrived at the same flat alpha 0.9,
+ * which is the "big white patch" and the missing translucency in one defect —
+ * and it is the very failure the two clocks were introduced to end, moved one
+ * stage downstream.
+ *
+ * TWO CHANGES, both required. The accumulator ceiling goes above 1 so the
+ * channel can still RANK breakers past that point, and the composite becomes a
+ * soft saturation instead of a clamp: coverage = 1 − e^(−depth), which is what
+ * a union of independent overlapping foam patches of areal density `depth`
+ * actually is. It is monotone everywhere, so ordering survives at every
+ * intensity, and it approaches 1 without ever flattening onto it.
+ *
+ * Worked at cascade 0's shipped numbers, alpha for a
+ *   marginal breaker (0.05σ deficit): 0.10
+ *   typical  breaker (0.36σ):         0.55
+ *   violent  breaker (1.50σ):         0.95
+ * against a flat 0.90 for all three before.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Visible coverage from optical depth: 1 − e^(−density·depth).
+ *
+ * Never clips, so a violent breaker and a marginal one stay distinguishable at
+ * every intensity — which is the whole point (see above). `density` is how
+ * opaque one unit of accumulated foam is; it is what sets where the typical
+ * cap sits on the curve, and it is a look knob rather than a derived quantity.
+ */
+export function foamCoverage(depth: number, density: number): number {
+  if (!Number.isFinite(depth) || depth <= 0) return 0;
+  const d = Number.isFinite(density) ? Math.max(0, density) : 0;
+  return 1 - Math.exp(-d * depth);
+}
+
 /**
  * How many octaves of the breakup field a cascade can actually HOLD.
  *
@@ -659,13 +854,16 @@ export function expectedBandFoam(
   traceRms: number,
   choppiness: number,
   decay: number,
+  /** the accumulator's ceiling — no longer 1, see "THE SECOND HALF" above */
+  ceiling = 1,
 ): number {
   if (!Number.isFinite(injectPerStep) || injectPerStep <= 0) return 0;
   if (!Number.isFinite(decay) || decay <= 0 || decay >= 1) return 0;
   const sd = eigenSigma(traceRms, choppiness);
   const mean = eigenRestValue(traceRms, choppiness);
   const perTick = injectPerStep * expectedDeficit(gate, mean, sd);
-  return Math.min(1, (perTick * decay) / (1 - decay));
+  const cap = Number.isFinite(ceiling) && ceiling > 0 ? ceiling : 1;
+  return Math.min(cap, (perTick * decay) / (1 - decay));
 }
 
 /* -------------------------------------------------------------------------

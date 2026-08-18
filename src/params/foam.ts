@@ -131,6 +131,54 @@ export interface FoamParams {
    * cure the ocean's wavelet lattice took (`9bf32d7`), at a different scale.
    */
   breakupWarp: number;
+  /**
+   * How far the breakup field is stretched ALONG the local crest line.
+   *
+   * 1 is isotropic and is what `33b6c33` shipped — it hit its size target and
+   * damaged the shape nobody was measuring. On connected components of the
+   * fired region, at matched coverage (aspect = √(λ₁/λ₂) of the second-moment
+   * matrix, align = cos(2Δθ) against the local crest line as directors,
+   * circ = 4πA/P² which is 1 for a disc):
+   *
+   *                              p90 major   aspect   align   circ   >35 m
+   *   λ− alone, no breakup          53.9 m    2.48    +0.96   0.49    76%
+   *   isotropic breakup (was)       30.0 m    1.73    +0.52   0.49    32%
+   *   crest-frame ×4, 2.5σ          21.2 m    2.62    +0.52   0.44    18%
+   *   crest-frame ×8, 2.0σ  ← ship  28.5 m    2.62    +0.63   0.36    39%
+   *
+   * λ− was ALREADY producing crest-following ribbons — that is §V.58 working —
+   * and isotropic noise erodes them into discs. Stretching the field along the
+   * crest cuts a ribbon into shorter ribbons instead, which is what a real
+   * breaking crest does.
+   *
+   * READ THE >35 m COLUMN CAREFULLY: it rises against the isotropic build, and
+   * that is not a regression. At aspect 1.73 a 35 m component is a BLOB; at
+   * 2.62 it is a 35 × 13 m RIBBON, which is what a breaking crest looks like.
+   * The area statistic was the wrong instrument — it is what this whole round
+   * exists to correct — and it is kept here only so the trade is visible.
+   */
+  breakupElongation: number;
+  /**
+   * How opaque one unit of accumulated foam is: coverage = 1 − e^(−density·depth)
+   * (foamMath.foamCoverage). NOT a clamp — that is the point.
+   *
+   * The mask used to clamp at 1, and `breakingGain` is 6.19, so it saturated at
+   * a deficit of 0.19σ while the mean excess beyond the gate is 0.36σ: THE
+   * TYPICAL FIRING TEXEL WAS FLAT AT MAXIMUM, which is the "big white patch"
+   * and the "missing transparency" in one defect — and it discarded exactly the
+   * intensity ranking `75bc563` split the mask to provide. At the shipped value
+   * a marginal breaker (0.05σ) reads 0.10, a typical one (0.36σ) 0.55 and a
+   * violent one (1.50σ) 0.95, against a flat 0.90 for all three before.
+   *
+   * 0 restores the old hard clamp exactly, which is the A/B.
+   */
+  foamDensity: number;
+  /**
+   * Ceiling on both foam accumulators. 1 was the old value and it clipped: at
+   * cascade 0's shipped numbers the residue settles at 1.86 for a typical
+   * firing texel, so half the intensity range never reached the composite.
+   */
+  foamAccumMax: number;
   /** 3×3 blur tap offset in texels — spread speed of the progressive blur */
   blurRadius: number;
   /**
@@ -340,8 +388,11 @@ export const foamParams: FoamParams = registerParams(
     breakingWeight: 1.0,
     crestBiasSigma: 0.5,
     breakupMetres: 16,
-    breakupSigma: 2.5,
+    breakupSigma: 2.0,
     breakupWarp: 0.35,
+    breakupElongation: 8,
+    foamDensity: 0.33,
+    foamAccumMax: 4,
     blurRadius: 1.0,
     // = the smallest injected minor axis measured across bands and presets
     // (cascade 1 at swell, 0.72 m), so no band's caps are re-rounded
@@ -409,6 +460,9 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
     breakupMetres: { min: 2, max: 60, step: 0.5 },
     breakupSigma: { min: 0, max: 6, step: 0.05 },
     breakupWarp: { min: 0, max: 1.5, step: 0.05 },
+    breakupElongation: { min: 1, max: 10, step: 0.25 },
+    foamDensity: { min: 0, max: 2, step: 0.01 },
+    foamAccumMax: { min: 1, max: 8, step: 0.5 },
     blurRadius: { min: 0, max: 4, step: 0.25 },
     blurSpreadMetres: { min: 0, max: 8, step: 0.05 },
     artCrestMetres: { min: 0.5, max: 40, step: 0.25 },

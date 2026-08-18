@@ -18,6 +18,9 @@ import {
   blurMixPerStep,
   breakingGain,
   breakupJitter,
+  breakupJitterAligned,
+  crestFrame,
+  tensorRadiusTexels,
   metricSigmaScale,
   breakupOctaves,
   expectedBandFoam,
@@ -1712,5 +1715,266 @@ describe('§V.70 a retiring band fades to its MEAN, not to zero', () => {
     expect(normalCdf(Number.NaN)).toBe(0.5);
     expect(normalCdf(-40)).toBeGreaterThanOrEqual(0);
     expect(expectedDeficit(0.5, 0.5, 0)).toBe(0);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * SHAPE, NOT SIZE (§B, user: "maybe we shouldn't only measure the area but
+ * also its SHAPE — take a look that its shape is actually starting to reflect
+ * the structure of the water").
+ *
+ * THIS BLOCK EXISTS BECAUSE THE PREVIOUS ROUND SATISFIED ITS STATISTIC AND
+ * MADE THE PICTURE WORSE. The breakup hit its cap-size target and, unwatched,
+ * took crest alignment +0.96 → +0.52 and aspect 2.48 → 1.73 with it — λ− was
+ * already producing crest-following ribbons (that is §V.58 working) and
+ * isotropic noise eroded them into discs. One number can always be moved; the
+ * only defence is measuring more than one, so all four are pinned here.
+ *
+ *   ASPECT √(λ₁/λ₂) of the second moments — a whitecap is a ribbon, not a disc
+ *   ALIGN  cos(2Δθ) between a cap's major axis and the local crest LINE, both
+ *          as directors, so opposite headings are the same line
+ *   CIRC   4πA/P², 1 for a perfect disc — "blotchy", directly
+ *   p90    the size statistic, kept so a shape win cannot hide a size loss
+ * ------------------------------------------------------------------------ */
+
+interface CapShape { area: number; major: number; aspect: number; align: number; circ: number }
+
+const shapeCache = new Map<string, ReturnType<typeof computeShapes>>();
+function capShapes(elongation: number, breakupSigma: number) {
+  const key = `${elongation}|${breakupSigma}`;
+  const hit = shapeCache.get(key);
+  if (hit) return hit;
+  const v = computeShapes(elongation, breakupSigma);
+  shapeCache.set(key, v);
+  return v;
+}
+
+function computeShapes(elongation: number, breakupSigma: number): {
+  coverage: number; count: number; p90: number;
+  aspect: number; align: number; circ: number; frameAgreement: number;
+} {
+  const N = 384;
+  const WIN = 900;
+  const cell = WIN / N;
+  const TEXEL = 1.97;
+  const octaves = breakupOctaves(foamParams.breakupMetres, TEXEL);
+  const freq = 1 / foamParams.breakupMetres;
+  const CHOP = 0.95;
+  const MODES = 32;
+  const waves = Array.from({ length: MODES }, (_, i) => {
+    const lambda = 40 * 10 ** (i / (MODES - 1));
+    const k = (2 * Math.PI) / lambda;
+    const th = i * Math.PI * (3 - Math.sqrt(5));
+    return { k, cx: Math.cos(th), cz: Math.sin(th), ph: i * 1.7, amp: 0.03 / k };
+  });
+
+  const metric = new Float32Array(N * N);
+  const gx = new Float32Array(N * N);
+  const gz = new Float32Array(N * N);
+  const crest = new Float32Array(N * N * 2); // λ−'s own crest director
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const i = y * N + x;
+      const wx = x * cell;
+      const wz = y * cell;
+      let dxx = 0; let dzz = 0; let dxz = 0; let hx = 0; let hz = 0;
+      for (const w of waves) {
+        const ph = w.k * (wx * w.cx + wz * w.cz) + w.ph;
+        const c = Math.cos(ph) * w.amp * w.k;
+        dxx -= c * w.cx * w.cx; dzz -= c * w.cz * w.cz; dxz -= c * w.cx * w.cz;
+        const sn = Math.sin(ph) * w.amp * w.k;
+        hx -= sn * w.cx; hz -= sn * w.cz;
+      }
+      gx[i] = hx; gz[i] = hz;
+      const a = CHOP * dxx; const b = CHOP * dzz; const c2 = CHOP * dxz;
+      metric[i] = minEigenvalue(2 + a + b, (1 + a) * (1 + b) - c2 * c2);
+      const th = 0.5 * Math.atan2(2 * c2, a - b);
+      crest[i * 2] = Math.cos(2 * th); crest[i * 2 + 1] = Math.sin(2 * th);
+    }
+  }
+
+  // the structure-tensor frame, exactly as the inject pass builds it
+  const R = tensorRadiusTexels(40, cell);
+  const fc = new Float32Array(N * N);
+  const fs = new Float32Array(N * N);
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      let jxx = 0; let jzz = 0; let jxz = 0;
+      for (let t = 0; t < 8; t++) {
+        const ang = (t / 8) * Math.PI * 2;
+        const tx = (((x + Math.round(Math.cos(ang) * R)) % N) + N) % N;
+        const tz = (((y + Math.round(Math.sin(ang) * R)) % N) + N) % N;
+        const a = gx[tz * N + tx]; const b = gz[tz * N + tx];
+        jxx += a * a; jzz += b * b; jxz += a * b;
+      }
+      const fr = crestFrame(jxx, jzz, jxz);
+      fc[y * N + x] = fr.cos; fs[y * N + x] = fr.sin;
+    }
+  }
+
+  let m = 0;
+  for (let i = 0; i < N * N; i++) m += metric[i];
+  m /= N * N;
+  let v = 0;
+  for (let i = 0; i < N * N; i++) v += (metric[i] - m) ** 2;
+  const sd = Math.sqrt(v / (N * N));
+  const gate = m - 2.4 * sd * metricSigmaScale(0, breakupSigma, octaves);
+
+  // FRAME AGREEMENT over FIRING texels only. λ−'s director carries a factor of
+  // −h, so it flips between crest and trough and a whole-grid average cancels
+  // to zero — which is exactly how a broken frame once measured as "0.010" and
+  // nearly got shipped.
+  let fd = 0; let fw = 0;
+  for (let i = 0; i < N * N; i++) {
+    const c = fc[i]; const s = fs[i];
+    const d = (c * c - s * s) * crest[i * 2] + 2 * c * s * crest[i * 2 + 1];
+    const w = Math.max(0, gate - metric[i]);
+    fd += d * w; fw += w;
+  }
+
+  const on = new Uint8Array(N * N);
+  let fired = 0;
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      const i = y * N + x;
+      const j = breakupSigma
+        ? breakupJitterAligned(
+            x * cell, y * cell, { cos: fc[i], sin: fs[i] }, elongation,
+            freq, foamParams.breakupWarp, octaves,
+          ) * breakupSigma * sd
+        : 0;
+      on[i] = metric[i] + j < gate ? 1 : 0;
+      fired += on[i];
+    }
+  }
+
+  // components
+  const seen = new Uint8Array(N * N);
+  const stack: number[] = [];
+  const comps: CapShape[] = [];
+  for (let s0 = 0; s0 < N * N; s0++) {
+    if (!on[s0] || seen[s0]) continue;
+    stack.length = 0; stack.push(s0); seen[s0] = 1;
+    const xs: number[] = []; const ys: number[] = [];
+    while (stack.length) {
+      const i = stack.pop()!;
+      const x = i % N; const y = (i / N) | 0;
+      xs.push(x); ys.push(y);
+      const nb = [x > 0 ? i - 1 : -1, x < N - 1 ? i + 1 : -1, y > 0 ? i - N : -1, y < N - 1 ? i + N : -1];
+      for (const jj of nb) if (jj >= 0 && on[jj] && !seen[jj]) { seen[jj] = 1; stack.push(jj); }
+    }
+    const cnt = xs.length;
+    if (cnt < 4) continue;
+    let mx = 0; let my = 0;
+    for (let i = 0; i < cnt; i++) { mx += xs[i]; my += ys[i]; }
+    mx /= cnt; my /= cnt;
+    let sxx = 0; let syy = 0; let sxy = 0;
+    for (let i = 0; i < cnt; i++) {
+      const dx = xs[i] - mx; const dy = ys[i] - my;
+      sxx += dx * dx; syy += dy * dy; sxy += dx * dy;
+    }
+    sxx /= cnt; syy /= cnt; sxy /= cnt;
+    const tr = sxx + syy;
+    const root = Math.sqrt(Math.max(0, (tr * tr) / 4 - (sxx * syy - sxy * sxy)));
+    // FLOOR λ₂ at a sixteenth of a cell²: a one-texel-wide sliver otherwise
+    // reports an unbounded aspect and would make this test lie in our favour
+    const l1 = tr / 2 + root;
+    const l2 = Math.max(1 / 16, tr / 2 - root);
+    let per = 0;
+    for (let i = 0; i < cnt; i++) {
+      const x = xs[i]; const y = ys[i]; const idx = y * N + x;
+      if (x === 0 || !on[idx - 1]) per++;
+      if (x === N - 1 || !on[idx + 1]) per++;
+      if (y === 0 || !on[idx - N]) per++;
+      if (y === N - 1 || !on[idx + N]) per++;
+    }
+    const area = cnt * cell * cell;
+    const P = per * cell;
+    const theta = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+    let cx2 = 0; let sy2 = 0;
+    for (let i = 0; i < cnt; i++) {
+      const idx = ys[i] * N + xs[i];
+      cx2 += crest[idx * 2]; sy2 += crest[idx * 2 + 1];
+    }
+    comps.push({
+      area, major: 4 * Math.sqrt(l1) * cell, aspect: Math.sqrt(l1 / l2),
+      align: Math.hypot(cx2, sy2) > 1e-9 ? Math.cos(2 * theta - Math.atan2(sy2, cx2)) : 0,
+      circ: P > 0 ? (4 * Math.PI * area) / (P * P) : 0,
+    });
+  }
+  const med = (v2: number[]) => {
+    const s2 = [...v2].sort((a, b) => a - b);
+    return s2.length ? s2[Math.floor(s2.length / 2)] : NaN;
+  };
+  let wa = 0; let ws = 0;
+  for (const c of comps) { wa += c.align * c.area; ws += c.area; }
+  const majors = [...comps.map((c) => c.major)].sort((a, b) => a - b);
+  return {
+    coverage: fired / (N * N),
+    count: comps.length,
+    p90: majors.length ? majors[Math.floor(0.9 * majors.length)] : 0,
+    aspect: med(comps.map((c) => c.aspect)),
+    align: ws > 0 ? wa / ws : NaN,
+    circ: med(comps.map((c) => c.circ)),
+    frameAgreement: fw > 0 ? fd / fw : NaN,
+  };
+}
+
+describe('§B the crest frame: caps shaped like the water, not like the noise', () => {
+  it('the structure tensor really does recover the crest axis', () => {
+    // WHY THIS TEST EXISTS AND WHY IT IS WEIGHTED: the first version of this
+    // frame measured 0.010 agreement — it recovered NOTHING — and the reason
+    // the bug survived a whole measurement pass is that λ−'s director carries a
+    // factor of −h, so it flips between crest and trough and an unweighted
+    // whole-grid average cancels to zero whether the frame is right or wrong.
+    // Weighting by the firing deficit is what makes this question answerable.
+    // Verified against a single 100 m mode, where the answer is analytic: 1.000.
+    const s = capShapes(foamParams.breakupElongation, foamParams.breakupSigma);
+    expect(s.frameAgreement).toBeGreaterThan(0.75); // measured 0.899
+  });
+
+  it('the ring radius has an optimum and a fixed texel count misses it', () => {
+    // Too SMALL and all eight taps see one gradient, so the tensor degenerates
+    // to rank one — it becomes the raw gradient, the one quantity that vanishes
+    // ON the crest line. Too LARGE and the ring spans the next crest and
+    // averages two unrelated directions. Measured agreement across radii of a
+    // 40–400 m band: 0.374 / 0.497 / 0.855 / 0.874 / 0.564 / −0.127 at 1 / 2 /
+    // 4 / 8 / 16 / 32 cells. Shipping a fixed 2 texels sat at 0.497.
+    expect(tensorRadiusTexels(40, 1.97)).toBe(7); // cascade 0: 40 m band
+    expect(tensorRadiusTexels(8.3, 0.191)).toBe(12); // cascade 1, clamped
+    expect(tensorRadiusTexels(0, 0.044)).toBe(1); // finest band: no kMax
+    expect(tensorRadiusTexels(40, 0)).toBe(1); // §V28
+    expect(tensorRadiusTexels(Number.NaN, 1)).toBe(1);
+  });
+
+  it('crest-frame breakup keeps the ribbon that isotropic noise erodes', () => {
+    // THE REGRESSION THIS ROUND EXISTS TO UNDO. Isotropic noise measured
+    // aspect 1.73 and align +0.52 against λ−'s own unbroken 2.48 / +0.96.
+    const iso = capShapes(1, foamParams.breakupSigma);
+    const aligned = capShapes(foamParams.breakupElongation, foamParams.breakupSigma);
+    // ribbons, not discs — at or above what λ− produces on its own
+    const plain = capShapes(1, 0);
+    // ribbons, not discs — at or above what λ− produces on its own unbroken
+    expect(aligned.aspect).toBeGreaterThan(2.55); // measured 2.618
+    expect(aligned.aspect).toBeGreaterThan(plain.aspect); // λ−'s own 2.476
+    expect(aligned.aspect).toBeGreaterThan(iso.aspect); // 2.449
+    // and they point along the crest they sit on
+    expect(aligned.align).toBeGreaterThan(0.6); // measured 0.631
+    expect(aligned.align).toBeGreaterThan(iso.align + 0.08); // iso 0.517
+    // less disc-like: a perfect disc is 1.0
+    expect(aligned.circ).toBeLessThan(0.42); // measured 0.363
+    expect(aligned.circ).toBeLessThan(iso.circ * 0.85); // iso 0.503
+  });
+
+  it('the shape win does not cost the size win (§33b6c33)', () => {
+    // the trap this whole round is about: one statistic satisfied while
+    // another quietly goes. p90 must stay in the range the size fix reached.
+    const plain = capShapes(1, 0);
+    const aligned = capShapes(foamParams.breakupElongation, foamParams.breakupSigma);
+    expect(aligned.p90).toBeLessThan(plain.p90 * 0.65); // 28.5 vs 53.9
+    expect(aligned.count).toBeGreaterThan(plain.count * 2); // 37 vs 15
+    // and it is still a redistribution, not a deletion (§V.64)
+    expect(aligned.coverage).toBeGreaterThan(plain.coverage * 0.6);
+    expect(aligned.coverage).toBeLessThan(plain.coverage * 1.6);
   });
 });

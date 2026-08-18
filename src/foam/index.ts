@@ -35,11 +35,13 @@ import { advanceAccumulator, SIM_DT } from '../core/loop';
 import { createOutputTexture, type CascadeLayer } from '../ocean/oceanTextures';
 import { foamParams } from '../params/foam';
 import { oceanParams } from '../params/ocean';
+import { cascadeBand } from '../ocean/oceanMath';
 import {
   blurMixPerStep,
   breakingGain,
   breakupOctaves,
   metricSigmaScale,
+  tensorRadiusTexels,
   crestBiasPerMetre,
   eigenSigma,
   expectedBandFoam,
@@ -168,6 +170,11 @@ const uTierFadeSpan = uniform(2);
 const uResidueWeight = uniform(1);
 const uBreakingWeight = uniform(0);
 const uBreakingGain = uniform(1);
+/**
+ * Optical density of the composite (foamMath.foamCoverage). 0 keeps the old
+ * hard clamp at 1, which is the A/B this shipped behind.
+ */
+const uFoamDensity = uniform(0);
 
 export function createFoamSim(
   cascades: FoamCascadeInput[],
@@ -246,6 +253,14 @@ export function createFoamSim(
     const octaves = breakupOctaves(
       foamParams.breakupMetres, foamTexelMetres(c.domain, resolution),
     );
+    // the band's shortest wave sets the tensor ring: cascadeBand's kMax is
+    // Infinity for the finest cascade, which floors the radius at 1 — correct,
+    // its caps are already sub-metre and the frame barely matters there
+    const bandKMax = cascadeBand(i, oceanParams.splitWavelengths).kMax;
+    const tensorRadius = tensorRadiusTexels(
+      Number.isFinite(bandKMax) ? (2 * Math.PI) / bandKMax : 0,
+      foamTexelMetres(c.domain, resolution),
+    );
     const wantsTier = i < cascades.length - 1;
     const coarse = wantsTier ? createOutputTexture(coarseN) : null;
     return {
@@ -266,7 +281,9 @@ export function createFoamSim(
       // measured against the sim grid, since a StorageTexture has no mip chain
       // and nothing downstream can filter an octave written sub-texel.
       octaves,
-      inject: createInjectPass(cascades, i, front, back, resolution, lu, octaves),
+      inject: createInjectPass(
+        cascades, i, front, back, resolution, lu, octaves, tensorRadius,
+      ),
       blurDecay: createBlurDecayPass(back, front, resolution, lu),
       // the reduction runs off `front`, i.e. AFTER the blur+decay of this tick,
       // so the tier is always a filtered view of what is actually on screen
@@ -367,6 +384,8 @@ export function createFoamSim(
           : Math.max(0, foamParams.breakupSigma) * eigenSigma(steep, lambda);
         lane.u.uBreakupFreq.value = 1 / Math.max(0.5, foamParams.breakupMetres);
         lane.u.uBreakupWarp.value = Math.max(0, foamParams.breakupWarp);
+        lane.u.uBreakupElong.value = Math.max(1, foamParams.breakupElongation);
+        lane.u.uAccumMax.value = Math.max(1, foamParams.foamAccumMax);
         // slow enough that a cap never sees it move (0.21 m/s at the shipped
         // 16 m cell) but fast enough that the same texels are not permanently
         // the foamy ones — the §B.4 lifecycle argument, at the breakup's scale
@@ -376,9 +395,11 @@ export function createFoamSim(
         // frame is not on the table
         lane.u.uMeanResidue.value = expectedBandFoam(
           lane.u.uBias.value, lane.u.uInjectPerFrame.value, steep, lambda, decay,
+          lane.u.uAccumMax.value,
         );
         lane.u.uMeanBreaking.value = expectedBandFoam(
           lane.u.uBias.value, lane.u.uInjectPerFrame.value, steep, lambda, breakingDecay,
+          lane.u.uAccumMax.value,
         );
         lane.u.uRadius.value = foamParams.blurRadius;
         // ONE world diffusion length for every band (§B: the blur was the
@@ -402,6 +423,7 @@ export function createFoamSim(
       uResidueWeight.value = Math.max(0, foamParams.residueWeight);
       uBreakingWeight.value = Math.max(0, foamParams.breakingWeight);
       uBreakingGain.value = breakingGain(decay, breakingDecay);
+      uFoamDensity.value = Math.max(0, foamParams.foamDensity);
       // shading uniforms are display-side: refresh them every frame, even on
       // frames that owe no sim step
       updateFoamShadingUniforms(foamParams, time, oceanParams.windDirection);
@@ -501,7 +523,15 @@ export function createFoamSim(
       // formed HERE, before that multiply, and the fbm is evaluated once (§V17).
       const share = clamp(breaking.div(raw.max(1e-4)), 0, 1);
       raw = raw.mul(capVariationNode(worldXZ));
-      return foamDetailMask(clamp(raw, 0, 1), worldXZ, share);
+      // SOFT SATURATION, not a clamp (foamMath.foamCoverage, "THE SECOND HALF
+      // OF THE TWO-CLOCK FIX"). `raw` is now an optical DEPTH — a union of
+      // independent overlapping foam patches of that areal density covers
+      // 1 − e^(−depth) of the pixel — so it is monotone at every intensity and
+      // a violent breaker still outranks a marginal one instead of both
+      // arriving flat at maximum. Clamping here is what discarded the very
+      // intensity ranking the two clocks were introduced to carry.
+      const covered = float(1).sub(raw.mul(uFoamDensity).negate().exp());
+      return foamDetailMask(clamp(covered, 0, 1), worldXZ, share);
     },
 
     dispose(): void {

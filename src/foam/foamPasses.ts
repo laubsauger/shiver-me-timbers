@@ -21,6 +21,7 @@ import {
   int,
   ivec2,
   textureLoad,
+  select,
   textureStore,
   uniform,
   vec2,
@@ -63,6 +64,12 @@ export function createFoamUniforms() {
     uBreakupFreq: uniform(1),
     /** domain-warp amplitude, in units of one breakup cell (§B.39 anti-lattice) */
     uBreakupWarp: uniform(0),
+    /**
+     * How far the breakup field is stretched ALONG the local crest line. 1 is
+     * isotropic, which measured aspect 1.73 / align +0.52 against λ−'s own
+     * 2.48 / +0.96 — see foamMath, "THE BREAKUP TRADED SHAPE FOR SIZE".
+     */
+    uBreakupElong: uniform(1),
     /** slow drift of the breakup field, so the same texels do not always foam */
     uBreakupTime: uniform(0),
     /**
@@ -73,6 +80,15 @@ export function createFoamUniforms() {
      */
     uMeanResidue: uniform(0),
     uMeanBreaking: uniform(0),
+    /**
+     * Ceiling on BOTH accumulators. No longer 1: at cascade 0's shipped
+     * numbers the residue settles at 1.86 for a TYPICAL firing texel, so a
+     * clamp at 1 threw away the intensity ranking that `75bc563` introduced
+     * the second clock to provide (foamMath, "THE SECOND HALF OF THE TWO-CLOCK
+     * FIX"). The composite soft-saturates instead, so values above 1 are
+     * meaningful rather than illegal.
+     */
+    uAccumMax: uniform(1),
     /** blur tap offset in texels */
     uRadius: uniform(1),
     /**
@@ -96,6 +112,34 @@ export function createFoamUniforms() {
 }
 
 export type FoamUniforms = ReturnType<typeof createFoamUniforms>;
+
+/**
+ * Structure-tensor ring: taps and radius IN TEXELS, both build-time.
+ *
+ * A RING and not a 3×3 block, on purpose — the tensor exists to read the crest
+ * direction, ∇h vanishes ON the crest line, and a ring samples the flanks
+ * where the gradient actually carries the direction. 8 taps is the cheapest
+ * count that still resolves an axis to better than the ±22.5° a 4-tap cross
+ * gives; radius 2 keeps the estimate local to one crest rather than averaging
+ * across the trough behind it (cascade 0: 3.9 m against 40 m-and-longer waves).
+ *
+ * The RADIUS is not here — it is per band, from that band's own shortest
+ * wavelength (foamMath.tensorRadiusTexels), because it has a sharp optimum and
+ * a fixed texel count lands on the wrong side of it in every band but one.
+ *
+ * §V.17: this is +8 `textureLoad` per texel in a COMPUTE pass, on top of the 4
+ * it already did. Compute budget is ≤4 ms against a render budget of 8 that is
+ * the one under pressure, and these are unfiltered integer loads of a texture
+ * already resident and already read this pass. Costed rather than assumed —
+ * but NOT measured on hardware, and nobody has profiled the frame since post
+ * landed, so this is the first thing to look at if the compute total moves.
+ */
+const TENSOR_TAPS = 8;
+
+/** wrap a texel index into [0, n) — cascade textures tile with their domain */
+function wrapTexel(v: ReturnType<typeof int>, n: number) {
+  return v.add(int(n)).mod(int(n));
+}
 
 /** one cascade's ocean outputs, as the inject pass needs them */
 export interface InjectCascade {
@@ -155,6 +199,8 @@ export function createInjectPass(
    * 0 disables the breakup entirely.
    */
   octaves = 0,
+  /** structure-tensor ring radius in texels (foamMath.tensorRadiusTexels) */
+  tensorRadius = 1,
 ) {
   const own = cascades[index];
   if (!own) throw new Error(`foam: inject pass for missing cascade ${index}`);
@@ -215,7 +261,58 @@ export function createInjectPass(
     // islands. §B.39's dissolve, one stage upstream: break the region ALLOWED
     // to fire rather than the silhouette of a mask that already exists.
     if (octaves > 0) {
-      const bp = vec2(worldX, worldZ).mul(u.uBreakupFreq).toVar();
+      // ── THE CREST FRAME, from the structure tensor of ∇h ─────────────────
+      // Isotropic noise erodes a crest-following ribbon into discs: measured,
+      // it took aspect 2.48 → 1.73 and crest alignment +0.96 → +0.52 while
+      // hitting its size target (foamMath, "THE BREAKUP TRADED SHAPE FOR
+      // SIZE"). Stretching the field ALONG the crest cuts the ribbon into
+      // shorter ribbons instead.
+      //
+      // WHY THE TENSOR AND NOT SOMETHING SIMPLER — do not "simplify" this back:
+      //  · λ−'s own eigenvector is the natural frame and is UNREACHABLE. It
+      //    needs the SIGN of ∂Dx/∂z, which §V.58 records is never
+      //    reconstructed because it only ever appears squared inside det J,
+      //    and both ocean textures are full so there is nowhere to publish it.
+      //  · raw ∇h is worst exactly here: it VANISHES AND FLIPS SIGN ON THE
+      //    CREST LINE (foamMath's own note), which is the only place this is
+      //    asked.
+      // The tensor is QUADRATIC in ∇h, so it yields a DIRECTOR — an axis with
+      // no head or tail — and the sign §V.58 calls unreconstructable is simply
+      // not needed rather than worked around. Accumulated over a RING and not
+      // at the texel, it samples the flanks where ∇h is large instead of the
+      // crest line where it is zero.
+      const jxx = float(0).toVar();
+      const jzz = float(0).toVar();
+      const jxz = float(0).toVar();
+      for (let t = 0; t < TENSOR_TAPS; t++) {
+        const ang = (t / TENSOR_TAPS) * Math.PI * 2;
+        const ox = Math.round(Math.cos(ang) * tensorRadius);
+        const oz = Math.round(Math.sin(ang) * tensorRadius);
+        const tx = wrapTexel(x.add(int(ox)), n);
+        const tz = wrapTexel(y.add(int(oz)), n);
+        const g = loadCascadeLayer(own.derivatives, ivec2(tx, tz));
+        jxx.addAssign(g.x.mul(g.x));
+        jzz.addAssign(g.y.mul(g.y));
+        jxz.addAssign(g.x.mul(g.y));
+      }
+      // foamMath.crestFrame: doubled angle of the propagation axis, turned a
+      // quarter onto the crest line (a negation in doubled-angle form), then
+      // half-angled back without an atan2 round trip.
+      const dxT = jxx.sub(jzz);
+      const dyT = jxz.mul(2);
+      const rT = dxT.mul(dxT).add(dyT.mul(dyT)).sqrt().max(1e-20);
+      const c2 = dxT.div(rT).negate();
+      const s2 = dyT.div(rT).negate();
+      const ct = c2.add(1).mul(0.5).max(0).sqrt();
+      // sign(0) must read +1 or a crest exactly on the z axis collapses the
+      // frame to zero length — `select`, not `sign` (§V28)
+      const st = float(1).sub(c2).mul(0.5).max(0).sqrt()
+        .mul(select(s2.lessThan(0), float(-1), float(1)));
+      // stretch the SAMPLE COORDINATE along the crest ⟹ the FEATURES stretch
+      // along it, so the field cuts across the cap at intervals
+      const along = worldX.mul(ct).add(worldZ.mul(st)).div(u.uBreakupElong.max(1));
+      const across = worldX.mul(st).negate().add(worldZ.mul(ct));
+      const bp = vec2(along, across).mul(u.uBreakupFreq).toVar();
       const drift = u.uBreakupTime;
       // DOMAIN WARP, and it is the anti-lattice half. Value noise has round
       // level sets (§B.39), so on its own this would bite round holes and
@@ -237,8 +334,8 @@ export function createInjectPass(
     // scrub foam that is already there
     const injected = u.uBias.sub(metric).max(0).mul(u.uInjectPerFrame);
     // foamMath.accumulateFoam: clamp ≤ 1 (mask feeds a mix factor)
-    const residue = previous.r.add(injected).min(1);
-    const breaking = previous.g.add(injected).min(1);
+    const residue = previous.r.add(injected).min(u.uAccumMax);
+    const breaking = previous.g.add(injected).min(u.uAccumMax);
     textureStore(dst, coord, vec4(residue, breaking, 0, 1)).toWriteOnly();
   })().compute(n * n);
 }
@@ -328,8 +425,8 @@ export function createBlurDecayPass(
     // identity half of the mixed kernel — the tap the gaussian is blended
     // against, so total weight is exactly (1−w) + w·Σg = 1 (mass conserved)
     sum.addAssign(textureLoad(src, ivec2(x, y)).rg.mul(float(1).sub(u.uBlurMix)));
-    const residue = sum.x.mul(u.uDecay).min(1);
-    const breaking = sum.y.mul(u.uDecayBreaking).min(1);
+    const residue = sum.x.mul(u.uDecay).min(u.uAccumMax);
+    const breaking = sum.y.mul(u.uDecayBreaking).min(u.uAccumMax);
     textureStore(dst, ivec2(x, y), vec4(residue, breaking, 0, 1)).toWriteOnly();
   })().compute(n * n);
 }
