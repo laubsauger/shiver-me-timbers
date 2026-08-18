@@ -20,7 +20,18 @@ export interface FlowFoamParams {
   farRegionSize: number;
   /** far-tier resolution (texels per side, startup constant) */
   farResolution: number;
-  /** far-tier decay half-life (s) — the long settle, minutes not seconds */
+  /**
+   * Far-tier decay half-life (s) — THE knob that decides how far astern the
+   * trail survives, because past the near tier's 60 m this is the only tier
+   * left. Distance is what the eye reads, and distance = speed × halfLife/ln2:
+   * at 18 kt, 6 s put the half-brightness point 40 m astern and 22 s puts it
+   * 205 m astern.
+   *
+   * It is NOT a brightness knob — `farInject` sets the level, this sets the
+   * gradient — and the two must not be confused, because raising the level to
+   * buy reach is what pins the trail above the ocean's dissolve gate and turns
+   * it into a painted slab (see `farInject`).
+   */
   farDecayHalfLife: number;
   /** far-tier radial edge fade, as a fraction of its half-size. Much wider than
    * the near tier's: it is the LAST thing before bare ocean, so its falloff has
@@ -373,17 +384,67 @@ export const flowFoamParams: FlowFoamParams = registerParams(
   {
     regionSize: 120,
     resolution: 512,
+    // Stays 640, and both ways of "sharpening" the far tier were tried and
+    // rejected, so they are recorded here rather than re-attempted:
+    //   460 m (1.8 m/texel) — the far tier's radial edge fade is a FRACTION of
+    //     its half-size (farEdgeFade 0.45), so shrinking the region drags the
+    //     fade inward with it: measured trail level at 200 m astern collapsed
+    //     from 0.278 to 0.061. Reach is this tier's whole job.
+    //   res 512 (0.9 m/texel) — breaks the §V48 invariant that justifies
+    //     `useDetail: false` here (at 0.9 m it could hold the transverse
+    //     crests), and the material reads .ba from the NEAR tier only, so the
+    //     4× compute would feed a channel nothing consumes.
     farRegionSize: 640,
     farResolution: 256,
-    farDecayHalfLife: 6,
+    // 6 → 12. Paired with farInject 0.85 → 0.6 below; the two move together.
+    // This is the knob that decides REACH: measured trail level 200 m astern
+    // goes 0.102 → 0.183, and the half-brightness point at 18 kt moves from
+    // 40 m to 80 m astern.
+    //
+    // It is capped at 12 by the tier crossover, not by taste. The two regions
+    // hand over at ~40-50 m, and a far tier that outlives the near one is
+    // BRIGHTER than it there, so the trail re-brightens as it recedes —
+    // "NO HARD CUT" in tests/flowfoam.test.ts pins that, correctly: a wake that
+    // gets whiter further astern is a worse artefact than a shorter one.
+    // Everything past 12 fails it at every farInject that also clears the
+    // brightness-match check.
+    farDecayHalfLife: 12,
     farStrength: 1.0,
     farEdgeFade: 0.45,
-    farInject: 0.85,
+    // 0.85 → 0.6, DOWN, and that is not a typo: the far tier now lives twice
+    // as long, so the same rate would settle it ~2× higher and it would
+    // out-shine the near tier at the crossover (see farDecayHalfLife). Reach
+    // comes from the half-life; this only sets the level, and the two must not
+    // be confused. Raising this to buy reach is the documented way to pin the
+    // wake into a painted slab: tried at 1.5 and 2.2 and the far field settled
+    // at 0.29-0.33 everywhere, past the TOP of the ocean's dissolve gate
+    // (0.005 + U[0, 0.22]) where every texel survives — the same failure
+    // `trailInject` and `moundIntensity` were both retuned for.
+    farInject: 0.6,
     farBlendStart: 0.3,
     captureHeight: 50,
     depthThreshold: 0.35,
     maskFeather: 0.5,
     injectStrength: 0.03,
+    /*
+     * STAYS 5, and that is a constraint finding rather than a preference.
+     *
+     * This is the wake's real limiter — the far tier only inherits it — and
+     * raising it IS visibly better in isolation: at 11 s the measured trail at
+     * 200 m astern went 0.102 → 0.290 in the accumulation model, nearly 3×.
+     * But it is pinned from both sides at once:
+     *   - raise it alone and the trail's interior stops falling through the
+     *     ocean's dissolve gate ("STRADDLES the dissolve gate": coverage at
+     *     80 m went 0.348 against a 0.225 ceiling), so the wake goes back to
+     *     being one painted sheet — the bug-wake-solid-white failure;
+     *   - scale `trailInject` down to compensate and the far tier scales down
+     *     with it, giving the reach straight back.
+     * Searched all four knobs (decayHalfLife × trailInject × farDecayHalfLife ×
+     * farInject, 3600 combinations) against every invariant in
+     * tests/flowfoam.test.ts simultaneously: the best legal cell reaches 0.238
+     * at 200 m and needs `g80` within 0.4% of the ceiling, which is not a
+     * margin worth shipping. The best cell with real margin is the pair below.
+     */
     decayHalfLife: 5,
     advectSpeed: 1.0,
     blurRadius: 1.0,

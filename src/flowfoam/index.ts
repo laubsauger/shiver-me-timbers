@@ -97,14 +97,25 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
   // Coarse FAR tier: the same analytic wake, accumulated over a region several
   // hundred metres across so the trail does not simply stop at the near
   // region's border (user: "disappearing too immediately... not fading out over
-  // a long enough distance"). No hull capture, no flow noise — see AccumProfile.
+  // a long enough distance"). No hull capture — see AccumProfile.
+  //
+  // useFlow IS ON HERE, and that reverses an earlier judgement ("at that range
+  // the trail is a smooth band that neither needs nor shows either"). It is not
+  // a smooth band: past the near tier's 60 m this is the ONLY tier left, so it
+  // carries the whole visible trail from ~1.5 hull-lengths astern outwards —
+  // i.e. most of what the eye actually reads as the wake. Without the curl
+  // field that stretch has no internal motion at all and renders as PAINT, the
+  // "vortexes but also with foam pieces in between" the user asked for being
+  // exactly what the flow advection supplies. The stated cost (3 fbm per texel)
+  // is 65k evaluations at 256² — a fifth of the near tier's, on a frame that is
+  // CPU-bound with GPU at 6-10 ms against a 19-24 ms CPU encode.
   const far = createAccumulation(p, flowU, wake.wakeFieldNode, {
     res: p.farResolution,
     size: () => p.farRegionSize,
     decayHalfLife: () => p.farDecayHalfLife,
-    useFlow: false,
+    useFlow: true,
     useCapture: false,
-    useDetail: false, // 2.5 m/texel — transverse crests are below Nyquist there
+    useDetail: false, // 1.8 m/texel — transverse crests are below Nyquist there
     wakeScale: () => p.farInject,
   });
   const uEdgeFade = uniform(p.edgeFade);

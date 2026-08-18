@@ -61,10 +61,9 @@ export const FOAM_INJECTION_LAYER = 27;
  * buy one by giving up the other.
  *   near — 512² over ~120 m (0.23 m/texel): hull capture, flow advection, all
  *          the structure the eye resolves.
- *   far  — 256² over ~600 m (2.3 m/texel): the long fading streak only. No
- *          hull capture and no flow-noise advection (3 fbm evaluations per
- *          texel) — at that range the trail is a smooth band that neither
- *          needs nor shows either.
+ *   far  — 256² over ~460 m (1.8 m/texel): everything from 60 m astern out,
+ *          which is most of the visible trail. No hull capture, but it DOES
+ *          advect on the flow field — see the useFlow note in index.ts.
  */
 export interface AccumProfile {
   /** texels per side — startup constant (allocation + dispatch size) */
@@ -79,9 +78,10 @@ export interface AccumProfile {
   useCapture: boolean;
   /**
    * Write the transverse Kelvin crests into .ba (near only). The far tier is
-   * 2.5 m per texel and the shortest transverse wavelength in play is 5.8 m
-   * (3 m/s) — 2.3 texels per wave, below Nyquist. Writing it there would be
-   * pure aliasing into a field that ends up in the surface NORMAL (§V48/§V49).
+   * 1.8 m per texel and the shortest transverse wavelength in play is 5.8 m
+   * (3 m/s) — 3.2 texels per wave, still under the 4-6 the band limit asks for.
+   * Writing it there would alias into a field that ends up in the surface
+   * NORMAL (§V48/§V49).
    */
   useDetail: boolean;
   /**
