@@ -4,6 +4,14 @@
  * heading amidships, canvas to starboard — sharing one clipped-corner shape so
  * they read as three fittings on the same binnacle rather than three widgets.
  * Imported and injected by styles.ts (single <style> tag).
+ *
+ * POSITIONING RULE (§B.50). Exactly two things in this file are absolutely
+ * positioned against the frame: `.smt-compass` at the top and `.smt-binnacle`
+ * at the bottom. Everything else stacks in the binnacle's flow column. Four
+ * elements here used to carry hand-measured `top:`/`bottom:` offsets and three
+ * of the six pairs overlapped, because every one of those offsets was tuned
+ * against a row whose height is set by its own text — one emoji glyph falling
+ * back to a taller font moved the plaque row 26px and ate two of them.
  */
 
 export const HUD_CSS = /* css */ `
@@ -100,21 +108,35 @@ export const HUD_CSS = /* css */ `
   .smt-quick-controls.is-visible { transform: translate(-50%, 0); }
   .smt-quick-controls.is-leaving { transform: translate(-50%, 8px); }
 }
+/* The heading band, and nothing else in it. The tape needs a ground: it sits
+   permanently against sky — cream at timeOfDay 17.6, mid-blue at 15.0 — and
+   1px pale ticks over pale sky are invisible at both. The wash is masked by
+   the same horizontal gradient as the ticks, so it has no edges of its own and
+   still fades into the view rather than sitting on it as a bar (§V21). */
 .smt-compass {
   position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
   width: min(460px, 62vw); height: 46px; overflow: hidden;
+  background: linear-gradient(180deg,
+    rgba(6, 14, 18, 0) 0%, rgba(6, 14, 18, 0.5) 20%,
+    rgba(6, 14, 18, 0.58) 86%, rgba(6, 14, 18, 0) 100%);
   -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 18%, #000 82%, transparent 100%);
   mask-image: linear-gradient(90deg, transparent 0, #000 18%, #000 82%, transparent 100%);
 }
 .smt-compass-tape { position: absolute; top: 16px; left: 50%; height: 28px; will-change: transform; }
-.smt-tick { position: absolute; bottom: 2px; width: 1px; background: rgba(240, 230, 200, 0.85); }
+/* a 1px pale tick over a pale sky is nothing at all — every mark on this band
+   carries its own dark halo so the tape survives a cream sunset (§V21) */
+.smt-tick {
+  position: absolute; bottom: 2px; width: 1px; background: rgba(240, 230, 200, 0.85);
+  box-shadow: 0 0 2px rgba(4, 18, 22, 0.9);
+}
 .smt-tick.is-minor { height: 5px; opacity: 0.5; }
 .smt-tick.is-mid { height: 8px; opacity: 0.75; }
 .smt-tick.is-major { height: 12px; }
 .smt-tick-label {
   position: absolute; bottom: 15px; transform: translateX(-50%);
   font-size: 13px; letter-spacing: 0.08em; font-variant-caps: small-caps;
-  color: #f0e6c8; text-shadow: 0 1px 2px rgba(4, 18, 22, 0.85);
+  color: #f0e6c8;
+  text-shadow: 0 0 5px rgba(4, 18, 22, 1), 0 1px 2px rgba(4, 18, 22, 0.95);
 }
 .smt-tick-label.is-cardinal { color: var(--brass-hi); font-size: 15px; }
 .smt-lubber {
@@ -131,10 +153,15 @@ export const HUD_CSS = /* css */ `
   background: linear-gradient(180deg, var(--brass-hi), rgba(223, 192, 109, 0));
 }
 
-.smt-bottom {
+/* the binnacle: the ONE absolutely-positioned box at the bottom of the frame.
+   Its children stack bottom-up, so the plaque row stays pinned 18px off the
+   edge while the seal, the diamonds and the true-wind line grow upward off it
+   and can never reach it. */
+.smt-binnacle {
   position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
-  display: flex; align-items: center; gap: 10px;
+  display: flex; flex-direction: column; align-items: center; gap: 9px;
 }
+.smt-bottom { display: flex; align-items: stretch; gap: 10px; }
 .smt-plate {
   display: flex; align-items: center; gap: 16px; padding: 9px 30px;
   background: linear-gradient(180deg, rgba(26, 18, 10, 0.82), rgba(13, 9, 5, 0.88));
@@ -146,6 +173,14 @@ export const HUD_CSS = /* css */ `
 .smt-plate-side .smt-plate-value { font-size: 19px; }
 .smt-plate-side .smt-plate-cell { min-width: 62px; }
 .smt-plate-cell { text-align: center; min-width: 78px; }
+/* names the quantity when the same unit appears twice on screen — see
+   plaqueCell(). Dimmer and smaller than the label so it reads as a heading
+   over the figure, not as a second reading. */
+.smt-plate-key {
+  margin-bottom: 1px; font-size: 8px; letter-spacing: 0.3em; text-indent: 0.3em;
+  text-transform: uppercase; color: rgba(231, 216, 174, 0.4);
+  white-space: nowrap;
+}
 .smt-plate-value {
   font-family: var(--figures); font-size: 24px; line-height: 1.1;
   font-variant-numeric: tabular-nums; color: var(--parch-hi);
@@ -176,7 +211,11 @@ export const HUD_CSS = /* css */ `
 }
 .smt-wind-staff { stroke: rgba(223, 192, 109, 0.7); stroke-width: 1; }
 
-.smt-plate.is-canvas { flex-direction: column; gap: 4px; align-items: stretch; }
+/* the column-stacked plates need their own main-axis centring now that
+   .smt-bottom stretches every plaque to one height */
+.smt-plate.is-canvas {
+  flex-direction: column; justify-content: center; gap: 4px; align-items: stretch;
+}
 .smt-canvas-bar {
   height: 3px; width: 62px; margin: 0 auto;
   background: rgba(231, 216, 174, 0.16);
@@ -188,14 +227,23 @@ export const HUD_CSS = /* css */ `
   transition: width 0.2s ease;
 }
 
-/* TRUE wind, engraved under the compass. The sky's wind lines already point
-   at the bearing, so this carries only what the sky cannot say: strength. */
+/* TRUE wind, engraved at the head of the binnacle, directly over the apparent
+   card it is meant to be read against. The sky's wind lines already point at
+   the bearing, so this carries only what the sky cannot say: strength.
+   It carries its own ground for the same reason the compass does: measured on
+   the live frame, unbacked text here lands on the SUNLIT DECK, which is as
+   bright as any sky. Slimmer and dimmer than the plaques so it reads as a
+   caption on the binnacle rather than a fifth gauge. */
 .smt-truewind {
-  position: absolute; top: 46px; left: 50%; transform: translateX(-50%);
   display: flex; align-items: baseline; gap: 9px; white-space: nowrap;
+  padding: 3px 15px 4px;
   font-size: 11px; letter-spacing: 0.18em; text-transform: lowercase;
   color: rgba(231, 216, 174, 0.62);
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+  background: linear-gradient(180deg, rgba(22, 15, 8, 0.7), rgba(11, 8, 4, 0.78));
+  box-shadow: inset 0 0 0 1px rgba(223, 192, 109, 0.2);
+  clip-path: polygon(8px 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%,
+    8px 100%, 0 50%);
 }
 .smt-truewind-key { font-size: 9px; letter-spacing: 0.3em; opacity: 0.62; }
 .smt-truewind-value {
@@ -207,8 +255,7 @@ export const HUD_CSS = /* css */ `
    the one thing on the HUD that means "you cannot sail until you fix this",
    so it must not read as another brass gauge. Absent when she IS sailing. */
 .smt-stalled {
-  position: absolute; bottom: 100px; left: 50%;
-  transform: translateX(-50%) translateY(4px);
+  transform: translateY(4px);
   padding: 4px 15px 5px; white-space: nowrap;
   font-size: 11px; letter-spacing: 0.26em; text-indent: 0.26em;
   text-transform: uppercase; font-variant-caps: small-caps;
@@ -220,14 +267,14 @@ export const HUD_CSS = /* css */ `
   transition: opacity 0.25s ease, transform 0.25s ease, visibility 0s linear 0.25s;
 }
 .smt-stalled.is-on {
-  opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0);
+  opacity: 1; visibility: visible; transform: translateY(0);
   transition-delay: 0s;
 }
 
 /* the anchor: the HUD's only button, so it has to LOOK pressable without
    becoming a web widget sitting on a ship's binnacle */
 .smt-anchor {
-  flex-direction: column; gap: 2px; padding: 7px 16px;
+  flex-direction: column; justify-content: center; gap: 2px; padding: 7px 16px;
   font: inherit; color: var(--parch); cursor: pointer;
   border: 0; pointer-events: auto;
   transition: box-shadow 0.18s ease, background 0.18s ease;
@@ -243,10 +290,7 @@ export const HUD_CSS = /* css */ `
 }
 .smt-anchor.is-down { background: linear-gradient(180deg, rgba(46, 32, 14, 0.9), rgba(20, 14, 7, 0.92)); }
 
-.smt-damage {
-  position: absolute; bottom: 78px; left: 50%; transform: translateX(-50%);
-  display: flex; gap: 9px;
-}
+.smt-damage { display: flex; gap: 9px; }
 .smt-damage-slot {
   width: 10px; height: 10px; transform: rotate(45deg);
   border: 1px solid rgba(231, 216, 174, 0.45); background: rgba(13, 9, 5, 0.45);
@@ -257,5 +301,21 @@ export const HUD_CSS = /* css */ `
 .smt-damage-slot.is-lvl3 {
   background: var(--wax); border-color: #d8574c;
   box-shadow: 0 0 8px rgba(216, 87, 76, 0.55);
+}
+
+/* Narrow frames. The plaque row is 696px of fixed padding and min-widths, so
+   below ~700px of viewport it hung 28px off BOTH edges — measured on main, not
+   introduced here, but it is the same defect as the one this pass is fixing
+   and the row is the thing that now carries the wind. Trimming the padding
+   buys ~100px and keeps every plaque whole down to 600px; the true-wind line
+   and the seal are their own rows and were never the problem.
+   Breakpoint matches the quick-controls block above — one in this file. */
+@media (max-width: 760px) {
+  .smt-bottom { gap: 7px; }
+  .smt-plate { padding: 9px 18px; gap: 12px; }
+  .smt-plate-side { padding: 7px 11px; gap: 8px; }
+  .smt-plate-cell { min-width: 66px; }
+  .smt-plate-side .smt-plate-cell { min-width: 54px; }
+  .smt-anchor { padding: 7px 10px; }
 }
 `;

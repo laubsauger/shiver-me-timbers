@@ -1,9 +1,30 @@
 /**
  * In-game HUD frame (§V21, subtle by design — must not fight the 3D view;
- * §V16: opacity/tape-scale/wind tunables live in params/ui.ts). Top: engraved
- * compass tick-tape under a brass lubber diamond, edge-masked so it fades into
- * the sky. Bottom: a triptych of brass plaques — apparent wind to port, knots
- * and heading amidships, canvas to starboard. Damage diamonds sit above them.
+ * §V16: opacity/tape-scale/wind tunables live in params/ui.ts).
+ *
+ * TWO BANDS, ONE QUESTION EACH. The top band answers "where am I pointed" and
+ * holds NOTHING but the compass tick-tape under its brass lubber diamond. The
+ * bottom band — the binnacle — answers "what is she doing, and what is the
+ * wind doing", and every part of it lives in ONE flow column:
+ *
+ *     [ at anchor ]            the seal, when she is not making way
+ *      ◆ ◆ ◆ ◆                 damage diamonds
+ *   true wind 21.4 kt f6 …     TRUE wind, strength only
+ *  [⚓][dial|apparent][knots|heading][canvas]
+ *
+ * That column is the fix for §B.50. The true-wind line used to be pinned 46px
+ * from the top of the frame, inside the compass's own 12–58px band, so the
+ * words ran through the tick marks; the seal and the damage diamonds were
+ * likewise pinned at hand-measured `bottom:` offsets that the plaque row grew
+ * past. Absolute offsets tuned against one frame cannot stay clear of a row
+ * whose height depends on its own text — so nothing here is absolutely
+ * positioned any more except the column itself. Overlap is now structurally
+ * impossible rather than merely tuned away.
+ *
+ * Both wind readouts also now sit one above the other, which is the other half
+ * of the complaint: two different knot numbers at opposite ends of the frame
+ * read as a contradiction. Adjacent and labelled, they read as what they are —
+ * the wind over the sea, and the wind the ship feels.
  *
  * The wind and canvas plaques answer §I ui/hud: see the wind, then answer it.
  * Both derive from the SAME functions the ship itself uses (apparentWind for
@@ -118,20 +139,40 @@ function buildTape(tape: HTMLElement, pxPerDeg: number): void {
   }
 }
 
-function plaqueCell(value: string, label: string): { root: HTMLElement; value: HTMLElement; label: HTMLElement } {
+/**
+ * A plaque cell. `key` names WHICH quantity this is and is only worth its
+ * height where the same unit appears twice on screen — the wind card carries
+ * "apparent" because the true-wind line right above it reads knots too, and a
+ * player who cannot tell the two apart has two numbers that look like a
+ * contradiction (the whole of §B.50's second half).
+ */
+function plaqueCell(
+  value: string,
+  label: string,
+  key?: string,
+): { root: HTMLElement; value: HTMLElement; label: HTMLElement } {
   const v = el('div', 'smt-plate-value', value);
   const l = el('div', 'smt-plate-label', label);
-  return { root: div('smt-plate-cell', v, l), value: v, label: l };
+  const root = key === undefined
+    ? div('smt-plate-cell', v, l)
+    : div('smt-plate-cell', el('div', 'smt-plate-key', key), v, l);
+  return { root, value: v, label: l };
 }
 
 export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
   const tape = div('smt-compass-tape');
   const compass = div('smt-compass', tape, div('smt-lubber'));
 
-  // TRUE wind, under the compass. Deliberately not a second copy of the dial:
-  // the sky already draws the BEARING (§T.47's wind lines vanish toward it),
-  // so what a deck cannot tell you is the STRENGTH — hence knots and a force,
-  // and no direction. The two readouts complement rather than duplicate.
+  // TRUE wind. Deliberately not a second copy of the dial: the sky already
+  // draws the BEARING (§T.47's wind lines vanish toward it), so what a deck
+  // cannot tell you is the STRENGTH — hence knots and a force, and no
+  // direction. The two readouts complement rather than duplicate.
+  //
+  // It rides at the head of the binnacle column rather than under the compass:
+  // the top band is always against sky, which is cream at 17.6 and mid-blue at
+  // 15.0, and an unbacked engraved line there is unreadable at both. Down here
+  // it is over dark sea and directly above the apparent-wind card it should be
+  // compared with.
   const trueWindValue = el('span', 'smt-truewind-value', '0.0 kt');
   const trueWindName = el('span', 'smt-truewind-name', 'calm');
   const trueWind = div(
@@ -148,7 +189,7 @@ export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
   const plate = div('smt-plate', speedCell, div('smt-plate-sep'), headingCell);
 
   const dial = createWindDial(uiParams.windNoGoDegrees);
-  const windCell = plaqueCell('0.0', 'no wind');
+  const windCell = plaqueCell('0.0', 'no wind', 'apparent');
   const windCard = div('smt-plate smt-plate-side', dial.root, windCell.root);
 
   const canvasCell = plaqueCell('—', 'canvas');
@@ -182,7 +223,11 @@ export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
   const damageSlots = new Map<string, HTMLElement>();
 
   const bottom = div('smt-bottom', anchorBtn, windCard, plate, canvasCard);
-  const hud = div('smt-hud', compass, trueWind, stalled, damageRow, bottom);
+  // ONE flow column. The seal keeps its box when it is off (visibility, not
+  // display) so that a ship running aground does not shove the whole binnacle
+  // up the screen — and so that nothing below it has to guess its height.
+  const binnacle = div('smt-binnacle', stalled, damageRow, trueWind, bottom);
+  const hud = div('smt-hud', compass, binnacle);
   root.appendChild(hud);
 
   let tapePx = uiParams.compassPixelsPerDegree;
