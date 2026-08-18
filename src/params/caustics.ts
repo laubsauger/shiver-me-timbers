@@ -53,6 +53,64 @@ export interface CausticsParams {
   foldSoftness: number;
   /** σ growth per meter of depth — deep folds are broader and dimmer */
   foldSoftnessPerMeter: number;
+  /**
+   * Depth (m) at which the sea's OWN curvature first folds a sun ray — the
+   * anchor for the only mechanism in this module that makes the caustic
+   * PATTERN, and not merely its fold width, change with depth.
+   *
+   * DERIVED, NOT PICKED. A wave of wavenumber k and amplitude a is a lens
+   * focusing at d = 1/((1 − 1/n)·a·k²); for a random surface the same formula
+   * reads on the RMS Laplacian σ_∇²h, giving
+   *
+   *     foldDepth = 1 / ((1 − 1/n) · σ_∇²h),   1 − 1/n = 0.2500 at n = 1.33335
+   *
+   * Measured on the live spectrum by integrating k⁴·S(k) over all three
+   * cascades: σ_∇²h = 1.659 1/m ⟹ 2.41 m. It came out identical to four
+   * significant figures at wind 6, 11 and 16 m/s, because the moment is
+   * dominated by the saturated high-k tail rather than by the wind sea — which
+   * is why a constant here is a measurement and not a fit (§B.12's rule). It
+   * DOES scale with `oceanParams.resolution`, since a coarser grid simply has
+   * no sharp ripples to fold; tests/caustics.test.ts re-derives it from the
+   * live spectrum and fails if the ocean moves out from under it.
+   *
+   * `causticDefocus` turns it into the 0..1 weight both consumers ride, and
+   * that weight is EXACTLY ZERO shallower than this, so everything from the
+   * hull waterline down to 2.41 m evaluates the shipped expression — bit-exact
+   * for the two stencil blends, and one ULP short of it for the response
+   * exponent, because WGSL's `pow(x, 1.0)` is exp2(log2(x)) rather than the
+   * identity. See causticsNode's `defocus`.
+   */
+  foldDepth: number;
+  /**
+   * Exponent the bright lobe's response reaches once the receiver is far past
+   * `foldDepth` (1 = the shipped linear response, and what is still used
+   * shallower than foldDepth).
+   *
+   * THE FOURTH REPORT OF "TOO MUCH CAUSTIC ON THE FLOOR" WAS A COVERAGE
+   * PROBLEM, NOT A BRIGHTNESS ONE, and no amplitude knob in this file can
+   * reach it: `bright` = max(gain − 1, 0) turns on wherever |det M| < |det A|
+   * — most of the receiver — and is a smooth monotone map of |det M| over that
+   * whole range, so sweeping `strength` only fades the web uniformly. Measured
+   * on the shipped build at 5 m, sun 43°, 22% of the seabed sat above a
+   * quarter of the frame's peak.
+   *
+   * lit^p has its fixed point at lit = 1 and leaves the Reinhard cap alone, so
+   * the peak — the `strength × maxGain` = 0.66 ledger below — does not move; it
+   * only collapses the mid-tone hump. Measured on a modelled transect of the
+   * live spectrum at the shipped 2.5, against the shipped build, sun 43°
+   * (coverage = fraction above a quarter of the frame's peak):
+   *
+   *            coverage        peak         pattern λ
+   *   d = 3 m  14.0% → 5.8%   1.71 → 2.04   2.23 → 2.35 m
+   *   d = 5 m  21.9% → 4.8%   1.26 → 1.66   2.36 → 3.21 m
+   *   d = 8 m  25.3% → 5.8%   0.80 → 0.74   2.26 → 3.96 m
+   *
+   * That is "more defined edges … more height" as a consequence of
+   * concentrating the same energy, not as a second brightness knob — and the
+   * pattern wavelength column is the low-pass half of the same weight doing the
+   * "way too fine grained" half of the complaint.
+   */
+  foldExponent: number;
   /** overall caustic gain applied to the bright lobe */
   strength: number;
   /**
@@ -350,6 +408,30 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
   foldSoftness: 0.16,
   foldSoftnessPerMeter: 0.045,
   /**
+   * 2.41 m — 1/((1 − 1/n)·σ_∇²h) with σ_∇²h = 1.659 1/m measured over the three
+   * cascades. See the interface doc; tests/caustics.test.ts re-derives it.
+   *
+   * THIS IS THE NUMBER THE PARAGRAPH UNDER `curvatureEpsilonPerMeter` SAID WAS
+   * MISSING. `eps` low-passes only the finite difference that builds B = ∂w/∂u;
+   * det M(d)'s other two coefficients are built from the RAW per-texel slope,
+   * so the pattern traced every ripple the finest cascade resolves at EVERY
+   * depth. Measured on the shipped build (sun 43°, showcase lagoon spectrum),
+   * the energy-weighted wavelength of the receiver pattern was 2.74 m at 1 m
+   * depth and 2.26 m at 8 m — it got FINER going deeper, where focused light
+   * gets coarser. That is what "it looks like a water texture on the floor"
+   * means, and it is a frequency fault, not an amplitude one.
+   */
+  foldDepth: 2.41,
+  /**
+   * 2.5, A/B'd on screen against 1 (off), 2 and 3 at a 6.9 m seabed, sun 43 deg,
+   * sim frozen. At 1 the floor is the wall-to-wall lacework the user reported;
+   * at 2 the grain is gone and coarse loops remain; at 3 the deeper half of the
+   * frame goes nearly featureless, which reads as "the caustics were deleted"
+   * rather than as focused light. 2.5 keeps the fold set and the dark water
+   * between it. It is a slider, and the two ends are both defensible looks.
+   */
+  foldExponent: 2.5,
+  /**
    * strength 0.6 -> 0.32 and maxGain 1.15 -> 3.0, TOGETHER (user: "opacity and
    * brightness including variations of both, so it's less uniform").
    *
@@ -516,6 +598,8 @@ function causticsParamsMeta() {
     curvatureEpsilonPerMeter: { min: 0, max: 0.4, step: 0.005 },
     foldSoftness: { min: 0.01, max: 1, step: 0.005 },
     foldSoftnessPerMeter: { min: 0, max: 0.4, step: 0.005 },
+    foldDepth: { min: 0.2, max: 20, step: 0.05 },
+    foldExponent: { min: 1, max: 6, step: 0.05 },
     strength: { min: 0, max: 6, step: 0.05 },
     maxGain: { min: 0.2, max: 12, step: 0.1 },
     darkStrength: { min: 0, max: 1, step: 0.01 },

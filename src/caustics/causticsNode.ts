@@ -54,6 +54,10 @@ export interface CausticsUniforms {
   epsilonPerMeter: TslNode;
   softness: TslNode;
   softnessPerMeter: TslNode;
+  /** depth (m) at which the sea's own curvature first folds a ray (§B) */
+  foldDepth: TslNode;
+  /** bright-lobe exponent reached far past `foldDepth` */
+  foldExponent: TslNode;
   strength: TslNode;
   maxGain: TslNode;
   darkStrength: TslNode;
@@ -89,6 +93,8 @@ export function createCausticsUniforms(): CausticsUniforms {
     epsilonPerMeter: uniform(cp.curvatureEpsilonPerMeter),
     softness: uniform(cp.foldSoftness),
     softnessPerMeter: uniform(cp.foldSoftnessPerMeter),
+    foldDepth: uniform(cp.foldDepth),
+    foldExponent: uniform(cp.foldExponent),
     strength: uniform(cp.strength),
     maxGain: uniform(cp.maxGain),
     darkStrength: uniform(cp.darkStrength),
@@ -121,6 +127,8 @@ export function refreshCausticsUniforms(u: CausticsUniforms): void {
   u.epsilonPerMeter.value = cp.curvatureEpsilonPerMeter;
   u.softness.value = cp.foldSoftness;
   u.softnessPerMeter.value = cp.foldSoftnessPerMeter;
+  u.foldDepth.value = cp.foldDepth;
+  u.foldExponent.value = cp.foldExponent;
   u.strength.value = cp.strength;
   u.maxGain.value = cp.maxGain;
   u.darkStrength.value = cp.darkStrength;
@@ -157,12 +165,28 @@ const cascadeUv = (worldXZ: TslNode, domain: number) =>
  * `fade` long before the cascades would drop.
  */
 export function surfaceSlopeNode(sim: OceanSimulation, u: CausticsUniforms, worldXZ: TslNode) {
+  return stretchFromDerivatives(u, derivativesNode(sim, worldXZ));
+}
+
+/**
+ * The summed (∂h/∂x, ∂h/∂z, ∂Dx/∂x, ∂Dz/∂z) of all three cascades at a world
+ * XZ. Split out of `surfaceSlopeNode` so the caller can FILTER the summed
+ * derivative before the non-linear stretch division turns it into a slope —
+ * see the defocus stencil in `causticsNode`. Filtering after the division
+ * would be filtering a quotient, which is not the same operator.
+ */
+function derivativesNode(sim: OceanSimulation, worldXZ: TslNode): TslNode {
   let der: TslNode = null;
   for (const c of sim.cascades) {
     // one array texture, one sampler, all three cascades (§V.40)
     const t = sampleCascadeLayer(c.derivatives, cascadeUv(worldXZ, c.domain));
     der = der === null ? t : der.add(t);
   }
+  return der;
+}
+
+/** pure ALU: derivative sample → { g, a11, a22 }, causticsMath.surfaceStretch */
+function stretchFromDerivatives(u: CausticsUniforms, der: TslNode) {
   // (∂h/∂x, ∂h/∂z, ∂Dx/∂x, ∂Dz/∂z) → true slope needs the choppy stretch out
   const a11 = float(1).add(der.z.mul(u.choppiness)).max(0.05); // floored (§V28)
   const a22 = float(1).add(der.w.mul(u.choppiness)).max(0.05);
@@ -391,13 +415,20 @@ function causticGainNode(j: TslNode, span: TslNode, u: CausticsUniforms): TslNod
  * as a factor in [1 − darkStrength, 1] and negative light is impossible by
  * construction. Flat water → { bright: 0, darken: 1 }.
  */
-function causticResponseNode(gain: TslNode, u: CausticsUniforms) {
+function causticResponseNode(gain: TslNode, u: CausticsUniforms, power: TslNode) {
   const raw = gain.sub(1);
-  const lit = raw.max(0);
+  // `power` (≥1, see foldPowerNode) collapses the mid-tone hump onto the fold
+  // neighbourhood. Fixed point at lit = 1 and the Reinhard cap is untouched,
+  // so `strength × maxGain` remains the peak and the §B ledger still balances.
+  // The base is floored at 0 before the pow — a negative base is undefined.
+  const lit = raw.max(0).pow(power);
   // gain ≥ 0 by construction, so raw ≥ −1 and the shortfall is already 0..1
   const shortfall = raw.min(0).negate().clamp(0, 1);
   return {
     bright: lit.div(float(1).add(lit.div(u.maxGain.max(1e-3)))),
+    // NOT raised to `power` — see causticsMath.causticResponse for why the
+    // asymmetry is deliberate (the dark lobe is what makes the water between
+    // the filaments dim, which is the half the user reported missing).
     darken: float(1).sub(shortfall.mul(u.darkStrength.clamp(0, 1))),
   };
 }
@@ -421,8 +452,10 @@ function causticResponseNode(gain: TslNode, u: CausticsUniforms) {
  *
  * TAP BUDGET (per shaded pixel, RGBA32F, no mips):
  *   3  derivatives @ receiver XZ   (back-projection seed, iterations=1 only)
- *   9  derivatives @ entry, +εx, +εz
- *   = 12, plus 3 displacement taps if the caller does not supply waterHeight.
+ *  15  derivatives @ entry, ±εx, ±εz
+ *   = 18, plus 3 displacement taps if the caller does not supply waterHeight.
+ * All of them are the ONE cascade array texture behind the ONE sampler, so the
+ * §V.40 binding budget is unaffected by the count — see the defocus stencil.
  */
 export function causticsNode(
   sim: OceanSimulation,
@@ -498,7 +531,7 @@ export function causticsNode(
       : worldXZ.sub(mix(driftNode(u, seed.g, false).drift.mul(aboveSpan), below, submerged));
   }
 
-  // ── one tap set at the entry point and two finite-difference neighbours ──
+  // ── the stencil radius ──
   // §B.17: the stencil must track the span ACTUALLY in use. Deriving it from
   // belowSpan alone meant every above-water fragment — which travels
   // `aboveSpan`, not `belowSpan` — was evaluated at the narrowest legal
@@ -510,24 +543,87 @@ export function causticsNode(
   // below that the difference only reads the bilinear interpolant and the
   // caustic goes blocky, and |∂w| ≤ 2·maxDrift/eps stops being a bound
   const eps = u.epsilon.add(u.epsilonPerMeter.mul(travel)).max(0.05);
-  const s0 = surfaceSlopeNode(sim, u, entry);
-  const sx = surfaceSlopeNode(sim, u, entry.add(vec2(eps, 0)));
-  const sz = surfaceSlopeNode(sim, u, entry.add(vec2(0, eps)));
+
+  // ── HOW FAR PAST FOCUS THIS RECEIVER IS (§B, causticsMath.causticDefocus) ──
+  //
+  // THE ONE MECHANISM THAT MAKES THE PATTERN — NOT JUST THE FOLD WIDTH —
+  // DEFOCUS WITH DEPTH, AND THE MODULE HAD NEVER HAD IT. Short waves are
+  // strong lenses (focal depth ∝ 1/(a k²)) and are already past focus, crossed
+  // and re-spread, at any seabed; long waves have not focused yet. So the
+  // caustic at depth d must be built from the part of the spectrum whose focal
+  // depth is still ≥ d. `foldDepth` is that depth for the summed sea; the
+  // fraction of curvature still short of focus is min(1, foldDepth/d), and
+  // this is the remainder.
+  //
+  // EXACTLY ZERO for travel ≤ foldDepth, so every line below collapses to the
+  // shipped expression over the whole hull/waterline regime — by construction,
+  // not by tuning. `mix(a, b, 0)` is exactly `a` for finite b, and both new
+  // stencil terms are finite sums of texture samples, so the two defocus
+  // blends are bit-exact there. The response exponent is one ULP short of
+  // bit-exact and honestly so: WGSL evaluates `pow(x, 1.0)` as
+  // exp2(1.0 · log2(x)), a round trip that is correctly rounded but not
+  // guaranteed to be the identity. Sub-ULP, invisible, and stated rather than
+  // glossed (§Rule 8).
+  const defocus = float(1)
+    .sub(u.foldDepth.max(0).div(travel.max(1e-3)).min(1))
+    .clamp(0, 1);
+  // 1 shallow → foldExponent far past the fold depth. Same weight, because the
+  // reason is the same: with no fold formed there is no fold set to concentrate
+  // energy onto (causticsMath.foldPower).
+  const foldPower = float(1).add(u.foldExponent.max(1).sub(1).mul(defocus));
+
+  // ── one tap set at the entry point and FOUR neighbours at ±eps ──
+  // The two extra taps (−x, −z) are what buy a SYMMETRIC stencil, and they buy
+  // both halves of the defocus at once. They hit the same array texture behind
+  // the same sampler as the other three (§V.40 is unmoved: 18 taps, 0 new
+  // bindings).
+  const d0 = derivativesNode(sim, entry);
+  const dxp = derivativesNode(sim, entry.add(vec2(eps, 0)));
+  const dxm = derivativesNode(sim, entry.sub(vec2(eps, 0)));
+  const dzp = derivativesNode(sim, entry.add(vec2(0, eps)));
+  const dzm = derivativesNode(sim, entry.sub(vec2(0, eps)));
+  // Mean of the FOUR neighbours (the centre is deliberately left out): for a
+  // wave along either axis its transfer is (1 + cos(k·eps))/2, a raised cosine
+  // with a TRUE ZERO at λ = 2·eps. Including the centre would give
+  // (1 + 2cos + 2cos)/5, which never falls below 1/5 — a low-pass with no zero
+  // is a dimmer, not a filter.
+  const mean4 = dxp.add(dxm).add(dzp).add(dzm).mul(0.25);
+  // C is built from the defocused surface; the raw entry survives only as the
+  // base of the forward difference, so that at defocus = 0 the difference is
+  // the shipped one to the bit (mixing a filtered base with raw neighbours
+  // would inject a spurious constant into B).
+  const s0 = stretchFromDerivatives(u, mix(d0, mean4, defocus));
+  const s0raw = stretchFromDerivatives(u, d0);
+  const sxp = stretchFromDerivatives(u, dxp);
+  const sxm = stretchFromDerivatives(u, dxm);
+  const szp = stretchFromDerivatives(u, dzp);
+  const szm = stretchFromDerivatives(u, dzm);
 
   const build = (isBelow: boolean) => {
     const w0 = driftNode(u, s0.g, isBelow);
-    const wx = driftNode(u, sx.g, isBelow).drift;
-    const wz = driftNode(u, sz.g, isBelow).drift;
-    const j = rayJacobianNode(
-      s0.a11, s0.a22, w0.drift, s0.g,
-      wx.sub(w0.drift).div(eps),
-      wz.sub(w0.drift).div(eps),
-    );
+    const w0raw = driftNode(u, s0raw.g, isBelow).drift;
+    const wxp = driftNode(u, sxp.g, isBelow).drift;
+    const wxm = driftNode(u, sxm.g, isBelow).drift;
+    const wzp = driftNode(u, szp.g, isBelow).drift;
+    const wzm = driftNode(u, szm.g, isBelow).drift;
+    // LOW-PASSING C IS NOT ENOUGH, and measuring that is what picked this
+    // shape. det M(d) = detC + d·mixed + d²·detB, and at seabed depths the
+    // d·mixed term carries most of the VARIATION — filtering the entry tap
+    // alone moved the measured pattern wavelength at 8 m by 3%. B has to be
+    // band-limited too, and the forward difference is the wrong operator for
+    // it: its transfer 2|sin(kε/2)|/ε PLATEAUS at 2/ε, so every wavelength
+    // under 2ε aliases in at full weight. The central difference's |sin(kε)|/ε
+    // has a zero at exactly the λ = 2ε the mean above cancels. Blending the two
+    // by the same weight keeps the shipped forward difference at defocus = 0
+    // and reaches the band-limited operator past focus.
+    const dDx = mix(wxp.sub(w0raw).div(eps), wxp.sub(wxm).div(eps.mul(2)), defocus);
+    const dDz = mix(wzp.sub(w0raw).div(eps), wzp.sub(wzm).div(eps.mul(2)), defocus);
+    const j = rayJacobianNode(s0.a11, s0.a22, w0.drift, s0.g, dDx, dDz);
     return { j, ...w0 };
   };
 
   const response = (j: TslNode, span: TslNode) =>
-    causticResponseNode(causticGainNode(j, span, u), u);
+    causticResponseNode(causticGainNode(j, span, u), u, foldPower);
 
   const refr = build(true);
   const refrResp = response(refr.j, belowSpan);

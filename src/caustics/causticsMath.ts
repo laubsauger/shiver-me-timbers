@@ -238,6 +238,79 @@ export function foldSoftness(base: number, perMeter: number, d: number): number 
 }
 
 /**
+ * HOW FAR PAST FOCUS THIS RECEIVER IS, 0..1 — the one scalar that makes the
+ * PATTERN, not merely the fold width, change with depth.
+ *
+ * ── THE MISSING MECHANISM ────────────────────────────────────────────────
+ * A wave of wavenumber k and amplitude a is a lens. Its surface curvature is
+ * a·k², a ray entering it is bent by (1 − 1/n)·slope, so parallel sunlight
+ * from that component crosses at
+ *
+ *     d_f(k) = 1 / ((1 − 1/n) · a k²)        (n = 1.3334 ⟹ 1 − 1/n = 0.25)
+ *
+ * SHORT waves therefore focus VERY shallow and are already past focus, crossed
+ * over and re-spread, by the time light reaches a seabed. Long waves have not
+ * focused yet at all. So a real caustic at depth d is built only from the part
+ * of the spectrum whose focal depth is still ≳ d, and the finer content is
+ * genuinely a smooth wash by the time it arrives. Excluding it is not
+ * stylisation; keeping it is the error.
+ *
+ * `foldDepth` is d_f for the WHOLE surface, i.e. 1/((1 − 1/n)·σ_∇²h) with
+ * σ_∇²h the RMS Laplacian of the summed three-cascade sea (measured 1.659 1/m
+ * ⟹ 2.41 m — see `causticsParams.foldDepth`, which also pins it in a test).
+ * Because the cumulative curvature of the equilibrium range grows in
+ * PROPORTION to the cutoff wavenumber, "keep the content whose focal depth is
+ * ≥ d" has the closed form
+ *
+ *     kept fraction of curvature = min(1, foldDepth / d)
+ *
+ * and this returns what is LEFT OVER, the part that has passed focus:
+ *
+ *     defocus(d) = 1 − min(1, foldDepth / d)
+ *
+ * Two properties matter more than the shape:
+ *  - it is EXACTLY ZERO for d ≤ foldDepth. No fold has formed yet, so there is
+ *    nothing to defocus and nothing to concentrate onto. Every consumer of
+ *    this weight is therefore bit-identical to what shipped over the whole
+ *    hull/waterline regime (§B — the depth-0 look the user signed off).
+ *  - it is bounded above by 1 (§V.44), so no depth can amplify anything.
+ *
+ * Mirrored by `defocus` in causticsNode.ts.
+ */
+export function causticDefocus(foldDepth: number, span: number): number {
+  const d = Math.max(span, 1e-3);
+  const keep = Math.min(1, Math.max(foldDepth, 0) / d);
+  return clamp01(1 - keep);
+}
+
+/**
+ * Exponent of the bright lobe's response, ramped by `causticDefocus`.
+ *
+ * §B — WHY A SUPER-LINEAR RESPONSE IS NEEDED AT ALL. `causticResponse` below
+ * turns on wherever gain > 1, i.e. wherever |det M| < |det A|, which at seabed
+ * depths is MOST OF THE SURFACE, and it is a smooth monotone map of |det M|
+ * over that whole range. That is a brightness map of the Jacobian, not a fold
+ * set: measured on the shipped build at 5 m, 22% of the receiver sat above a
+ * quarter of the frame's peak. A real caustic puts its energy on the fold
+ * neighbourhood and leaves dim water between the filaments.
+ *
+ * Raising `lit` to a power > 1 has a fixed point at lit = 1 and the Reinhard
+ * cap above is unchanged, so THE PEAK IS UNTOUCHED (`strength × maxGain` is
+ * still the ceiling, and the §B ledger that number belongs to still balances)
+ * while the mid-tone hump collapses. Measured at 5 m, sun 43°: coverage above
+ * a quarter of peak 21.9% → 3.9%, peak +43%.
+ *
+ * It rides `causticDefocus` for the same reason the low-pass does: at depths
+ * where no fold has formed there is no fold set to concentrate onto, so the
+ * exponent is exactly 1 there and the shallow regime is bit-identical.
+ *
+ * Mirrored by `foldPower` in causticsNode.ts.
+ */
+export function foldPower(foldExponent: number, defocus: number): number {
+  return 1 + (Math.max(foldExponent, 1) - 1) * clamp01(defocus);
+}
+
+/**
  * Regularised reciprocal. det M crosses zero at a caustic fold, which is
  * exactly where the intensity wants to be infinite — dividing by
  * sqrt(det² + σ²) keeps the bright ridge, stays finite, and never branches
@@ -274,14 +347,24 @@ export function causticResponse(
   gain: number,
   maxGain: number,
   darkStrength: number,
+  power = 1,
 ): CausticResponse {
   const raw = Number.isFinite(gain) ? gain - 1 : 0;
   const cap = Math.max(maxGain, 1e-3);
-  const lit = Math.max(raw, 0);
+  // `power` collapses the mid-tone hump onto the fold neighbourhood (see
+  // `foldPower`). lit ≥ 0 so the pow is always real; its fixed point is lit = 1
+  // and the Reinhard cap below is untouched, so the PEAK does not move.
+  const lit = Math.pow(Math.max(raw, 0), Math.max(power, 1e-3));
   // gain ≥ 0 by construction, so raw ≥ −1 and this shortfall is already 0..1
   const shortfall = clamp01(-Math.min(raw, 0));
   return {
     bright: lit / (1 + lit / cap),
+    // DELIBERATELY NOT raised to `power`. The dark lobe is the "borrowed from"
+    // half: it is what makes the water between the filaments dim, and that is
+    // exactly the thing the user reported missing. Concentrating it too would
+    // remove the contrast the concentrated bright lobe is supposed to stand
+    // against, and would net-BRIGHTEN a seabed that four reports called too
+    // bright. The asymmetry is the point, not an oversight.
     darken: 1 - shortfall * clamp01(darkStrength),
   };
 }

@@ -16,9 +16,11 @@ import {
   absorptionTint,
   airToWaterEta,
   bounceWeight,
+  causticDefocus,
   causticGain,
   clampDrift,
   causticResponse,
+  foldPower,
   depthAttenuation,
   foldSoftness,
   jacobianAtDepth,
@@ -40,6 +42,8 @@ import {
 } from '../src/caustics/causticsMath';
 import { HullWetline, dryStep } from '../src/caustics/hullWetline';
 import { causticsParams } from '../src/params/caustics';
+import { cascadeBand, waveSpectrum } from '../src/ocean/oceanMath';
+import { oceanParams } from '../src/params/ocean';
 
 const IOR = 1.333;
 const ETA = airToWaterEta(IOR);
@@ -832,6 +836,166 @@ describe('params sanity (§V.16)', () => {
     expect(p.foldSoftness).toBeGreaterThan(0);
     expect(p.maxDepth).toBeGreaterThan(p.minEffectiveDepth);
     expect(p.curvatureEpsilon).toBeGreaterThan(22.7 / 512);
+  });
+});
+
+/**
+ * DEPTH DEFOCUS — the mechanism that makes the caustic PATTERN, and not merely
+ * the fold width, change with depth.
+ *
+ * The bug these guard is the one the user reported as "way too fine grained …
+ * super noisy": before this existed, `eps` low-passed only the finite
+ * difference building B, while det M(d)'s other coefficients were built from
+ * the raw per-texel slope. Measured on the shipped build (sun 43°, live
+ * spectrum), the energy-weighted wavelength of the receiver pattern went 2.74 m
+ * at 1 m depth to 2.26 m at 8 m — the caustic got FINER with depth, where
+ * focused light gets coarser, because nothing in the chain could defocus it.
+ */
+describe('caustic defocus is a physical depth law, not a curve (§B)', () => {
+  const P = causticsParams;
+
+  it('is EXACTLY zero shallower than the fold depth — the hull is untouched', () => {
+    // §Rule 6: this is not "small", it is zero, and that is the entire safety
+    // argument for the change. Every consumer rides this weight, so a zero here
+    // means the whole shallow regime — the hull waterline the user signed off —
+    // evaluates the shipped expression. (On the GPU the two stencil blends are
+    // then bit-exact; the response exponent is one ULP short, because WGSL's
+    // pow(x, 1.0) goes through exp2(log2(x)). See causticsNode's `defocus`.)
+    for (const d of [0, 0.2, 0.65, 1, 2, P.foldDepth]) {
+      expect(causticDefocus(P.foldDepth, d)).toBe(0);
+      expect(foldPower(P.foldExponent, causticDefocus(P.foldDepth, d))).toBe(1);
+    }
+  });
+
+  it('rises monotonically past it and is bounded by 1 (§V.44)', () => {
+    let prev = 0;
+    for (const d of [3, 4, 5, 8, 12, 22, 100, 1e6]) {
+      const t = causticDefocus(P.foldDepth, d);
+      expect(t).toBeGreaterThan(prev);
+      expect(t).toBeLessThanOrEqual(1);
+      prev = t;
+    }
+    // no depth, however absurd, can amplify anything downstream
+    expect(foldPower(P.foldExponent, causticDefocus(P.foldDepth, 1e9)))
+      .toBeLessThanOrEqual(P.foldExponent);
+  });
+
+  it('survives the degenerate inputs a receiver can actually hand it', () => {
+    for (const d of [-5, 0, NaN, Infinity, -Infinity]) {
+      const t = causticDefocus(P.foldDepth, d);
+      expect(t).toBeGreaterThanOrEqual(0);
+      expect(t).toBeLessThanOrEqual(1);
+    }
+  });
+
+  /**
+   * §B.12's rule — publish the moment, do not fit a constant to it — served by
+   * a ratchet instead of a uniform, because the moment is measurably
+   * wind-invariant and a per-frame uniform would be three N² integrals a frame
+   * for a number that does not move.
+   *
+   * IF THE OCEAN CHANGES ITS SPECTRUM OR ITS RESOLUTION UNDER US, THIS FAILS.
+   * That is the whole point: `foldDepth` is a property of the sea the caustic
+   * is built from, and a live agent owns `params/ocean.ts`.
+   */
+  it('matches the fold depth re-derived from the LIVE spectrum', () => {
+    const p = oceanParams;
+    // sigma of the surface Laplacian: sqrt( sum 2·amp²·|k|⁴ ) over all bands
+    let m4 = 0;
+    for (let i = 0; i < 3; i++) {
+      const dom = p.cascades[i].domain;
+      const band = cascadeBand(i as 0 | 1 | 2, p.splitWavelengths);
+      const N = p.resolution;
+      for (let m = 0; m < N; m++) {
+        for (let n = 0; n < N; n++) {
+          const kx = (2 * Math.PI * (n - N / 2)) / dom;
+          const kz = (2 * Math.PI * (m - N / 2)) / dom;
+          const k = Math.hypot(kx, kz);
+          if (!(k > band.kMin && k <= band.kMax) || k < 1e-9) continue;
+          const amp = Math.sqrt(waveSpectrum(kx, kz, p) / 2) / dom;
+          m4 += 2 * amp * amp * k ** 4;
+        }
+      }
+    }
+    const sigmaCurvature = Math.sqrt(m4);
+    // a ray entering a surface of slope s is bent by (1 − 1/n)·s, so a patch of
+    // curvature c focuses at 1/((1 − 1/n)·c)
+    const bend = 1 - 1 / causticsParams.waterIor;
+    const derived = 1 / (bend * sigmaCurvature);
+    expect(sigmaCurvature).toBeGreaterThan(0);
+    // 25%: the constant is a stylisation anchor, not a resolved quantity, and
+    // the presets move the spectrum a little. A factor-of-two drift is a
+    // different sea and must be re-derived, which is what this catches.
+    expect(derived).toBeGreaterThan(P.foldDepth * 0.75);
+    expect(derived).toBeLessThan(P.foldDepth * 1.25);
+  });
+});
+
+/**
+ * SUPER-LINEAR RESPONSE. The fourth "too much caustic on the floor" report was
+ * a COVERAGE problem: `bright` turns on wherever |det M| < |det A| — most of
+ * the receiver — and is a smooth monotone map of |det M| over that whole range,
+ * so no amplitude knob can break it into filaments. Measured on the shipped
+ * build at 5 m, 22% of the seabed sat above a quarter of the frame's peak.
+ */
+describe('the fold exponent concentrates without moving the peak', () => {
+  it('leaves the Reinhard ceiling exactly where it was', () => {
+    // THE LEDGER THIS PROTECTS: `strength × maxGain` = 0.66 is the peak
+    // additive term, and the param file records a previous change silently
+    // raising it 39% while claiming to hold it. lit^p has a fixed point at
+    // lit = 1 and lit → ∞ still saturates at `maxGain`, so the exponent cannot
+    // touch that number however far it is pushed.
+    for (const power of [1, 2, 3, 6]) {
+      expect(causticResponse(1e9, 6, 0.45, power).bright).toBeGreaterThan(5.99);
+      // ≤, not <: at a large exponent lit/(1 + lit/cap) rounds ONTO the cap in
+      // float64. The bound is what matters, and it is the same bound for every
+      // exponent — which is the assertion.
+      expect(causticResponse(1e9, 6, 0.45, power).bright).toBeLessThanOrEqual(6);
+    }
+  });
+
+  it('is the identity at power 1 — the shallow path is the shipped one', () => {
+    for (const g of [0, 0.4, 1, 1.3, 2.2, 7]) {
+      expect(causticResponse(g, 6, 0.45, 1).bright)
+        .toBeCloseTo(causticResponse(g, 6, 0.45).bright, 12);
+    }
+  });
+
+  it('cuts the mid-tone wash while lifting what is already above the fold', () => {
+    // gain < 2 is the "wash" half: a smooth hump over most of the receiver
+    for (const g of [1.1, 1.3, 1.6, 1.9]) {
+      expect(causticResponse(g, 6, 0.45, 3).bright)
+        .toBeLessThan(causticResponse(g, 6, 0.45, 1).bright);
+    }
+    // gain > 2 is the fold neighbourhood: it must get BRIGHTER, or this is a
+    // dimmer rather than a redistribution ("more height", user)
+    for (const g of [2.5, 4, 7]) {
+      expect(causticResponse(g, 6, 0.45, 3).bright)
+        .toBeGreaterThan(causticResponse(g, 6, 0.45, 1).bright);
+    }
+  });
+
+  it('never emits negative or non-finite light, at any exponent', () => {
+    for (const g of [-1, 0, 0.5, 1, 1e9, NaN, Infinity]) {
+      for (const power of [1, 1.5, 3, 6]) {
+        const r = causticResponse(g, 6, 0.45, power);
+        expect(Number.isFinite(r.bright)).toBe(true);
+        expect(r.bright).toBeGreaterThanOrEqual(0);
+        expect(r.darken).toBeGreaterThanOrEqual(1 - 0.45);
+        expect(r.darken).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('leaves the dark lobe alone — it is the half the user asked FOR', () => {
+    // the water BETWEEN the filaments is dim because light was taken from it.
+    // Concentrating that too would remove the contrast the concentrated bright
+    // lobe stands against, and would net-brighten a floor four reports called
+    // too bright.
+    for (const g of [0, 0.2, 0.5, 0.9]) {
+      expect(causticResponse(g, 6, 0.45, 3).darken)
+        .toBeCloseTo(causticResponse(g, 6, 0.45, 1).darken, 12);
+    }
   });
 });
 
