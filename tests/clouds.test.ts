@@ -19,7 +19,12 @@ import {
   multiScatteredValue,
   baseGlowValue,
   lobeSunValue,
+  stormBaseDarkValue,
+  shaftSlots,
 } from '../src/clouds/cloudCores';
+import { createWeatherSystem } from '../src/weather';
+import { createWeatherSample } from '../src/weather/sampler';
+import { weatherParams } from '../src/params/weather';
 import { skyParams } from '../src/params/sky';
 import {
   resolveCloudPalette,
@@ -848,5 +853,204 @@ describe('banded stratus layer (§V11 second form, §V43 SoT parity)', () => {
     const before = { ...acc };
     for (const dt of [0, -1, NaN, Infinity, 1e6]) advanceBandDrift(acc, 0, 10, dt);
     expect(acc).toEqual(before);
+  });
+});
+
+/**
+ * §V.63 — STORM CLOUD OVERHEAD WHEREVER IT RAINS.
+ *
+ * User, 2026-08-18: "we want to make sure that we have actual storm clouds
+ * overhead wherever it rains."
+ *
+ * These tests pin the RELATIONSHIP between three systems, not any of their
+ * implementations, because the bug they exist to catch was not in any one of
+ * them. §V46 already made cloud SHAPE read the storm field, and it worked:
+ * a cluster standing on a cell became an anvil. But cluster SITES came off a
+ * ring around the world ORIGIN, while rain is sampled at the SHIP — so the
+ * shape coupling was correct and the placement coupling did not exist. The
+ * measured Pearson r between rain density and storm-cloud cover along a 20 min
+ * sail track was 0.000, with 7 of 7 raining samples under clear sky, and
+ * nothing failed: every unit test passed, because every unit was right.
+ *
+ * So the assertions below deliberately span modules. A test that could be
+ * satisfied by src/clouds alone would not have caught this and would not catch
+ * it coming back.
+ */
+describe('§V.63 rain and storm cloud are the same weather', () => {
+  // Driven through the REAL facade, not through field.ts directly. The bug
+  // this suite exists to catch lived in the wiring between three modules that
+  // were each individually correct, so a test built from the parts rather than
+  // from the assembled system would reproduce the bug instead of catching it.
+  const weather = createWeatherSystem({ seed: 1 });
+  const sample = createWeatherSample();
+
+  /** the sky as it is actually generated: around the VIEWER, from the cells */
+  const skyAt = (x: number, z: number) =>
+    generateClusters(1, cloudParams, weather.stormAt,
+      weather.stormCellsNear(x, z, cloudParams.stormCellRange, []));
+  /** rain density a ship at (x,z) would be given — the sampler's own gate */
+  const rainAt = (x: number, z: number): number =>
+    weather.weatherAt(x, z, sample).rain;
+  /** strongest storm cluster whose footprint covers (x,z); 0 = clear overhead */
+  const cloudOver = (x: number, z: number): number => {
+    let best = 0;
+    for (const c of skyAt(x, z)) {
+      if (Math.hypot(x - c.x, z - c.z) <= c.radius) best = Math.max(best, c.storm);
+    }
+    return best;
+  };
+
+  it('THE COUPLING: rain and storm-cloud cover move together over the world', () => {
+    // The measurement that started this, as an assertion. Before the fix:
+    // r = 0.17 on this grid, and 0.00 along a sail track — a static grid
+    // centred on the origin flatters the old ring layout, which is exactly
+    // why the number alone was never the point.
+    const rain: number[] = [];
+    const cloud: number[] = [];
+    for (let x = -8000; x <= 8000; x += 800) {
+      for (let z = -8000; z <= 8000; z += 800) {
+        rain.push(rainAt(x, z));
+        cloud.push(cloudOver(x, z));
+      }
+    }
+    const mean = (v: number[]): number => v.reduce((s, a) => s + a, 0) / v.length;
+    const mr = mean(rain);
+    const mc = mean(cloud);
+    let num = 0;
+    let dr = 0;
+    let dc = 0;
+    for (let i = 0; i < rain.length; i++) {
+      num += (rain[i] - mr) * (cloud[i] - mc);
+      dr += (rain[i] - mr) ** 2;
+      dc += (cloud[i] - mc) ** 2;
+    }
+    expect(num / Math.sqrt(dr * dc)).toBeGreaterThan(0.6);
+  });
+
+  it('NEVER rain from a clear sky — the assertion the user actually made', () => {
+    // Stronger than the correlation and the one that would have failed
+    // loudest: not "usually", not "on average". EVERY position that is given
+    // rain has a storm cluster standing over it.
+    let wet = 0;
+    for (let x = -8000; x <= 8000; x += 400) {
+      for (let z = -8000; z <= 8000; z += 400) {
+        if (rainAt(x, z) <= 0.01) continue;
+        wet++;
+        expect(cloudOver(x, z)).toBeGreaterThan(0);
+      }
+    }
+    expect(wet).toBeGreaterThan(100); // the sweep must actually find rain
+  });
+
+  it('and you SEE IT COMING: the cloud edge passes over you before the rain', () => {
+    // Two independent guarantees, because losing either one puts the squall
+    // on top of the player with no warning — and being able to read the
+    // weather off the horizon is most of what makes sailing tense.
+    //
+    // 1. a cell gets its cloud well below the amplitude at which it rains
+    expect(cloudParams.stormCellMin).toBeLessThan(weatherParams.rainThreshold);
+    // 2. and the cloud's footprint strictly CONTAINS its own rain footprint
+    let firstCloud = Infinity;
+    let firstRain = Infinity;
+    for (let x = -8000; x <= 8000; x += 25) {
+      if (firstCloud === Infinity && cloudOver(x, -972) > 0) firstCloud = x;
+      if (firstRain === Infinity && rainAt(x, -972) > 0.01) firstRain = x;
+    }
+    expect(firstCloud).toBeLessThan(firstRain);
+    // and by a real margin, not a rounding accident — the drawn mass is wider
+    // still (clusterFlatten and the lobe radii both push past `radius`)
+    expect(firstRain - firstCloud).toBeGreaterThan(100);
+  });
+
+  it('a GLOBAL storm preset makes the whole sky stormy, not just the cells', () => {
+    // The second decoupling, and the one a player would hit first: applying
+    // the storm preset sets ambient storminess to 1, so rain goes to 1
+    // EVERYWHERE. If the cloud layer reads only the cell field it stays
+    // fair-weather cumulus and you get a downpour out of a blue sky.
+    const global = createWeatherSystem({ seed: 1 });
+    global.apply('storm', { lerpSeconds: 0 });
+    for (const [x, z] of [[0, 0], [12345, -6789], [-40000, 25000]]) {
+      expect(global.weatherAt(x, z, createWeatherSample()).rain).toBeGreaterThan(0.9);
+      // ...and every cluster in the sky there is at its storm extreme
+      const sky = generateClusters(1, cloudParams, global.stormAt,
+        global.stormCellsNear(x, z, cloudParams.stormCellRange, []));
+      expect(sky.length).toBeGreaterThan(0);
+      expect(Math.min(...sky.map((c) => c.storm))).toBeGreaterThan(0.99);
+    }
+  });
+
+  it('the cloud stands ON the cell, so the squall drifts as ONE thing', () => {
+    // Rules out a failure that would look like a tuning problem: cloud and
+    // rain both present, both moving, but answering different clocks so the
+    // cloud lags or leads the wet patch.
+    const cells = weather.stormCellsNear(3000, -1500, 2, []);
+    expect(cells.length).toBeGreaterThan(0);
+    for (const cell of cells) {
+      // a cell's own centre reads at least its amplitude from the sampler the
+      // rain uses — this is what makes the two systems one system
+      expect(weather.stormAt(cell.x, cell.z)).toBeGreaterThanOrEqual(cell.amp - 1e-9);
+    }
+  });
+
+  it('a storm cloud has a DARK BASE — the strongest single cue', () => {
+    // A cloud that brightens uniformly with density can never read as
+    // threatening however tall or wide it is: what says "rain" is the
+    // top-to-bottom contrast of an optically thick mass.
+    expect(stormBaseDarkValue(1, 0, cloudParams)).toBeLessThan(
+      stormBaseDarkValue(1, 1, cloudParams) * 0.6,
+    );
+    // and fair weather is untouched — this must not dim the whole sky
+    expect(stormBaseDarkValue(0, 0, cloudParams)).toBe(1);
+    expect(stormBaseDarkValue(0, 1, cloudParams)).toBe(1);
+    // §V44 bounded at source, including on hostile params
+    for (const st of [-1, 0, 0.5, 1, 2, NaN]) {
+      for (const h of [-1, 0, 0.5, 1, 2, NaN]) {
+        const v = stormBaseDarkValue(st, h, { stormBaseDark: 5 });
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('VERTICAL: a rain shaft hangs from a real cloud base, never a constant', () => {
+    // "rain should originate at cloud base" — a shaft whose top is a magic
+    // altitude looks detached even when the horizontal coupling is perfect.
+    const sky = skyAt(0, 0);
+    const slots = shaftSlots(sky, 0, 0, cloudParams.shaftCount, []);
+    expect(slots.length).toBeGreaterThan(0);
+    for (const s of slots) {
+      const owner = sky.find((c) => c.x === s.x && c.z === s.z);
+      expect(owner).toBeDefined();
+      // the shaft's top IS its cloud's base, and its cloud is a storm cloud
+      expect(s.base).toBe(owner?.base);
+      expect(owner?.cell).not.toBeNull();
+      expect(s.strength).toBeGreaterThan(0);
+      // and its footprint is inside the cloud's own — no shaft in clear sky
+      expect(s.radius).toBeLessThanOrEqual((owner as { radius: number }).radius);
+    }
+    // shafts go to the NEAREST squalls — they are a scarce, unrolled slot
+    const d = slots.map((s) => Math.hypot(s.x, s.z));
+    expect([...d].sort((a, b) => a - b)).toEqual(d);
+  });
+
+  it('the sky fits in the instance buffer wherever the ship is (§V28)', () => {
+    // cell clusters are placed around the VIEWER, so unlike the fixed ring
+    // their count is not knowable from the params alone. §V8 would warn and
+    // silently drop lobes, and the dropped ones would be a storm anvil.
+    let worst = 0;
+    for (let x = -20000; x <= 20000; x += 2600) {
+      for (let z = -20000; z <= 20000; z += 2600) {
+        worst = Math.max(worst, countLobes(skyAt(x, z)));
+      }
+    }
+    expect(worst).toBeLessThanOrEqual(cloudParams.maxLobes);
+  });
+
+  it('turning the cell list off leaves the §V46 ring behaviour intact', () => {
+    // the coupling is additive: a caller that does not pass cells (tests, the
+    // reflection preview) must still get exactly the sky it used to get
+    const ring = generateClusters(9, cloudParams, () => 0.4, []);
+    expect(ring).toHaveLength(cloudParams.clusterCount);
+    expect(ring.every((c) => c.cell === null)).toBe(true);
   });
 });

@@ -15,10 +15,12 @@ import {
   mix,
   positionWorld,
   screenUV,
+  select,
   smoothstep,
   texture,
   texture3D,
   uniform,
+  vec2,
   vec3,
 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
@@ -254,6 +256,183 @@ export function createCloudEdge(
 
 export type CloudEdge = ReturnType<typeof createCloudEdge>;
 
+/** one shaft slot: where it stands, how wide, how high its cloud base is */
+export interface ShaftSlot {
+  x: number;
+  z: number;
+  radius: number;
+  /** cloud BASE altitude (m) — the shaft hangs from here, never from a
+   *  constant. This is the vertical half of the §V.63 coupling. */
+  base: number;
+  /** 0..1 storm strength of the cluster overhead */
+  strength: number;
+}
+
+/**
+ * RAIN SHAFTS (§V.63) — the visible column of falling water under a storm
+ * cloud, from its base down to the sea.
+ *
+ * WHY THIS IS THE PIECE THAT SELLS IT. Horizontal coupling (cloud over the
+ * cell) and vertical coupling (rain from the base) can both be exactly right
+ * and the weather will still read as two effects, because at any distance
+ * beyond the ~130 m rain particle volume there is simply nothing between the
+ * cloud and the water. A shaft is the connective tissue: it is what lets a
+ * squall be SEEN from five kilometres off, sailed toward, and sailed out of.
+ *
+ * WHY IT LIVES IN THE COMPOSITE. The composite is already a full-screen
+ * camera-pinned quad, so this adds ZERO draw calls and zero scene traversal —
+ * the frame is CPU-bound at 19-24 ms encode against 6-10 ms of GPU, so
+ * fragment work is the only currency we have. It is a closed-form ray/cylinder
+ * chord, not a march: ~25 ALU per slot, unrolled over `shaftCount` slots.
+ *
+ * WHY A CHORD AND NOT A BILLBOARD. The opacity of a real shaft is the depth of
+ * water you are looking THROUGH, so it is thickest through the middle and
+ * vanishes at the rim — which is exactly the chord of a vertical cylinder.
+ * That comes out of the geometry for free, and it means the shaft's edge is a
+ * silhouette rather than a drawn outline: no `step`, no `smoothstep`, nothing
+ * on a spatial coordinate for §V.48 to catch.
+ */
+function createShafts(count: number, viewDir: N, p: CloudParams) {
+  const n = Math.min(Math.max(Math.floor(count) || 0, 0), 6);
+  const uOpacity = uniform(p.shaftOpacity);
+  const uDensityLen = uniform(p.shaftDensityLength);
+  const uGroundFade = uniform(p.shaftGroundFade);
+  const uTint = uniform(p.shaftTint);
+  const uEdge = uniform(p.shaftEdge);
+  const uTopFade = uniform(p.shaftTopFade);
+  // one vec4 per slot: (x, z, radius, base). Strength rides its own float so
+  // a slot can be switched off by zeroing ONE number without moving geometry.
+  const uGeo = Array.from({ length: n }, () => uniform(new THREE.Vector4(0, 0, 0, 1)));
+  const uStrength = Array.from({ length: n }, () => uniform(0));
+
+  const camXZ = vec2(cameraPosition.x, cameraPosition.z);
+  const dXZ = viewDir.xz;
+  const a = dXZ.dot(dXZ);
+  const aSafe = a.max(1e-6); // §V28: zero for a straight-up ray
+  /**
+   * SIGN-PRESERVING floor on the vertical slope. The naive `vy.max(1e-4)`
+   * flips a downward ray to upward at grazing angles, and a `select` on
+   * `|vy| < eps` puts a hard branch across the horizon line — a one-pixel band
+   * straight through the middle of the image. Flooring the MAGNITUDE and
+   * keeping the sign sends the slab parameters to ±1e6 instead, which is the
+   * geometrically correct answer for a horizontal ray (either the whole ray is
+   * inside the slab or none of it is) and has no edge anywhere.
+   */
+  const vy = viewDir.y;
+  const vySafe = select(vy.greaterThanEqual(0), vy.max(1e-4), vy.min(-1e-4));
+
+  /** 0..1 optical density of one shaft along this view ray */
+  const densityOf = (geo: N, strength: N): N => {
+    const o = camXZ.sub(vec2(geo.x, geo.y));
+    const r = geo.z;
+    const b = o.dot(dXZ);
+    const c = o.dot(o).sub(r.mul(r));
+    const disc = b.mul(b).sub(a.mul(c));
+    // outside the cylinder the chord is 0 CONTINUOUSLY (disc → 0 ⇒ sq → 0 ⇒
+    // t0 = t1), so clamping the discriminant is the whole silhouette — there
+    // is no separate hit test to alias.
+    const sq = disc.max(0).sqrt();
+    const t0 = b.negate().sub(sq).div(aSafe);
+    const t1 = b.negate().add(sq).div(aSafe);
+
+    // the y-slab [0, base]: sea surface to cloud base
+    const tA = cameraPosition.y.negate().div(vySafe);
+    const tB = geo.w.sub(cameraPosition.y).div(vySafe);
+    const lo = t0.max(tA.min(tB)).max(0); // .max(0): nothing behind the lens
+    const hi = t1.min(tA.max(tB));
+    const chord = hi.sub(lo).max(0);
+
+    // Beer-Lambert on the chord: how much water this ray looks THROUGH.
+    const dens = chord.div(uDensityLen.max(1)).negate().exp().oneMinus();
+
+    /**
+     * RADIAL PROFILE — and the chord alone cannot supply it. THE BUG THIS
+     * FIXES, seen: the shaft rendered as a hard-edged BOX with straight
+     * vertical sides. `1 − exp(−chord/L)` is saturating, and a cylinder's
+     * chord rises like a square root at the rim, so even a ray clipping the
+     * very edge already ran through hundreds of metres and came back ~0.5.
+     * The exponential then flattened everything from there inward to ~1 and
+     * the silhouette became the cylinder's own outline. "Thickest through the
+     * middle" is only soft while you are on the LINEAR part of the curve, and
+     * the whole point of a shaft is that it is optically thick.
+     *
+     * So the shape is carried by the ray's perpendicular distance to the axis
+     * instead, which is scale-free and cannot saturate: `perp²` from the same
+     * quadratic already solved above (o·o − b²/a), normalized on the radius.
+     * The chord keeps its own job — how DEEP the column is at that point.
+     */
+    const perp2 = o.dot(o).sub(b.mul(b).div(aSafe)).max(0);
+    const radial = perp2
+      .div(r.mul(r).max(1))
+      .oneMinus()
+      .clamp(0, 1)
+      .pow(uEdge.max(0.05));
+
+    const yMid = cameraPosition.y.add(vy.mul(lo.add(hi).mul(0.5)));
+    const hN = yMid.div(geo.w.max(1)).clamp(0, 1);
+    // thin toward the water: virga that frays out above the surface reads far
+    // better than a column with a sawn-off bottom, and it is what actually
+    // happens as the drops evaporate and the shaft spreads
+    const ground = mix(float(1).sub(uGroundFade.clamp(0, 1)), float(1), hN);
+    /**
+     * ...and fade out INTO the cloud base at the top, for the same reason from
+     * the other end: the slab has one flat lid, the cloud above it does not,
+     * so a shaft at full strength right up to `base` draws a dead straight
+     * horizontal line across the sky wherever the cloud happens to be higher.
+     * A clamped linear ramp, not a smoothstep — nothing here has an edge for
+     * §V.48 to catch, and it must stay that way.
+     */
+    const top = hN.oneMinus().div(uTopFade.clamp(0.02, 1)).clamp(0, 1);
+    return dens
+      .mul(radial)
+      .mul(ground)
+      .mul(top)
+      .mul(strength.clamp(0, 1)) as N;
+  };
+
+  // SOFT UNION, not a sum (§V44 bounded at source, same construction as the
+  // storm field itself): two overlapping shafts saturate toward 1 instead of
+  // stacking to an opaque grey wall.
+  let miss: N = float(1) as N;
+  for (let i = 0; i < n; i++) {
+    miss = miss.mul(densityOf(uGeo[i] as unknown as N, uStrength[i] as unknown as N).oneMinus()) as N;
+  }
+  const alpha = (n === 0 ? float(0) : miss.oneMinus().mul(uOpacity.clamp(0, 1))).clamp(0, 1) as N;
+
+  const scratch = new THREE.Vector4();
+  return {
+    /** 0..1 coverage of the shaft layer for this fragment */
+    alpha,
+    /** multiplier on skyColor for the shaft body */
+    tint: uTint as unknown as N,
+    slots: n,
+    push(cp: CloudParams, list: readonly ShaftSlot[]): void {
+      uOpacity.value = cp.shaftOpacity;
+      uDensityLen.value = cp.shaftDensityLength;
+      uGroundFade.value = cp.shaftGroundFade;
+      uTint.value = cp.shaftTint;
+      uEdge.value = cp.shaftEdge;
+      uTopFade.value = cp.shaftTopFade;
+      for (let i = 0; i < n; i++) {
+        const s = list[i];
+        if (!s || !Number.isFinite(s.strength) || s.strength <= 0) {
+          uStrength[i].value = 0;
+          continue;
+        }
+        // §V28: these come from a live field and feed divisors in the graph
+        scratch.set(
+          Number.isFinite(s.x) ? s.x : 0,
+          Number.isFinite(s.z) ? s.z : 0,
+          Math.max(Number.isFinite(s.radius) ? s.radius : 0, 0) * Math.max(cp.shaftRadius, 0),
+          Math.max(Number.isFinite(s.base) ? s.base : 1, 1),
+        );
+        (uGeo[i].value as THREE.Vector4).copy(scratch);
+        uStrength[i].value = Math.min(Math.max(s.strength, 0), 1);
+      }
+    },
+  };
+}
+
 export function createCloudComposite(
   blurred: THREE.Texture,
   p: CloudParams,
@@ -274,10 +453,23 @@ export function createCloudComposite(
   const coverage = packed.b;
   // channel/B recovers the weighted average from the premultiplied pack
   const denom = coverage.max(1e-4);
-  material.colorNode = uSunColor
+  const cloudColor = uSunColor
     .mul(packed.r.div(denom).add(edge.transmission(packed)))
     .add(uSkyColor.mul(packed.g.div(denom)));
-  material.opacityNode = edge.alpha(packed);
+  const cloudAlpha = edge.alpha(packed);
+
+  // §V.63 rain shafts, composited UNDER the cloud in the same fragment: a
+  // shaft hangs from a cloud base, so wherever the cloud is opaque the shaft
+  // is behind it. Standard over-operator, un-premultiplied because the
+  // material blends normally — colour is divided back out by the total alpha.
+  const shafts = createShafts(p.shaftCount, viewDir, p);
+  const behind = shafts.alpha.mul(cloudAlpha.oneMinus());
+  const totalAlpha = cloudAlpha.add(behind).clamp(0, 1);
+  material.colorNode = cloudColor
+    .mul(cloudAlpha)
+    .add(uSkyColor.mul(shafts.tint).mul(behind))
+    .div(totalAlpha.max(1e-4));
+  material.opacityNode = totalAlpha;
   material.transparent = true;
   material.depthWrite = false;
   material.fog = false;
@@ -293,6 +485,7 @@ export function createCloudComposite(
     uSunColor,
     uSkyColor,
     edge,
+    shafts,
     /** pin the quad to the camera frustum at quadDistance, covering the view */
     fitToCamera(camera: THREE.PerspectiveCamera): void {
       const d = p.quadDistance;

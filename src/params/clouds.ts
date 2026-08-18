@@ -101,6 +101,57 @@ export interface CloudParams {
    *  can take. The field drifts continuously; this is what stops it
    *  regenerating the lobe set on every single frame. */
   stormQuantSteps: number;
+  /** 0..1 how much of the SUN AND SKY a storm cluster's UNDERSIDE loses on
+   *  top of the whole-cluster cuts. The single strongest "it is about to
+   *  rain" cue: an optically thick cloud scatters its light out of the TOP,
+   *  so the base goes dark while the anvil stays bright. Scales with the
+   *  cluster's own storm strength × (1 − height), so fair weather is
+   *  untouched and only the bottom of a squall darkens. */
+  stormBaseDark: number;
+
+  // -- CELL-ANCHORED STORM CLOUD (§V.63) ------------------------------------
+  // The ring above places clouds on hashed sites around the world ORIGIN. A
+  // squall's cloud has to stand on the squall, so storm clusters are placed
+  // from the storm field's own cell list instead. See cloudCores.ts.
+  /** lattice radius of the cell walk around the CAMERA: 2 → 5×5 squares */
+  stormCellRange: number;
+  /** cluster footprint as a fraction of its cell's radius. Must be at or
+   *  above the fraction of the radius at which the field passes
+   *  weatherParams.rainThreshold (0.78 at the shipped values) or rain falls
+   *  in a ring OUTSIDE the cloud that produced it — see the default. */
+  stormCellRadius: number;
+  /** minimum cell amplitude that gets a cloud at all. Keep BELOW the
+   *  weather rainThreshold or rain can start under a cell with no cloud. */
+  stormCellMin: number;
+  /** lobes per cell cluster, inclusive — these are far bigger masses than a
+   *  ring cumulus and need the count to hold together */
+  stormCellLobesMin: number;
+  stormCellLobesMax: number;
+
+  // -- RAIN SHAFTS (§V.63) --------------------------------------------------
+  /** how many nearest storm clusters get a shaft. Unrolled in the shader, so
+   *  this is a COMPILE-time count: changing it needs a reload. */
+  shaftCount: number;
+  /** 0..1 peak opacity of a shaft seen through its own thickest chord */
+  shaftOpacity: number;
+  /** chord length (m) at which a shaft reaches ~63% of its peak opacity */
+  shaftDensityLength: number;
+  /** shaft footprint as a fraction of the CLUSTER's own radius (<1: the
+   *  visible column falls from the core of a cell, not from its soft rim) */
+  shaftRadius: number;
+  /** 0..1 how far the shaft fades out toward the sea surface — virga that
+   *  never quite lands reads better than a column with a cut-off bottom */
+  shaftGroundFade: number;
+  /** brightness multiplier on skyColor for the shaft body */
+  shaftTint: number;
+  /** radial falloff exponent across the column. Higher = a tighter core with
+   *  a softer margin; this, NOT the chord, is what gives a shaft its edge —
+   *  see the note in cloudComposite.ts. */
+  shaftEdge: number;
+  /** fraction of the shaft's height over which it dissolves INTO the cloud
+   *  base. Without it the flat top of the slab draws a straight horizontal
+   *  line wherever the (bumpy) cloud sits higher than `base`. */
+  shaftTopFade: number;
 
   /** instance capacity — read once at construction, reload to change (§V28) */
   maxLobes: number;
@@ -347,6 +398,19 @@ const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   stormSunCut: { min: 0, max: 1, step: 0.01 },
   stormSkyCut: { min: 0, max: 1, step: 0.01 },
   stormQuantSteps: { min: 2, max: 64, step: 1 },
+  stormBaseDark: { min: 0, max: 1, step: 0.01 },
+  stormCellRange: { min: 0, max: 3, step: 1 },
+  stormCellRadius: { min: 0.2, max: 1.5, step: 0.01 },
+  stormCellMin: { min: 0, max: 1, step: 0.01 },
+  stormCellLobesMin: { min: 1, max: 96, step: 1 },
+  stormCellLobesMax: { min: 1, max: 96, step: 1 },
+  shaftOpacity: { min: 0, max: 1, step: 0.01 },
+  shaftDensityLength: { min: 50, max: 4000, step: 10 },
+  shaftRadius: { min: 0.1, max: 1.5, step: 0.01 },
+  shaftGroundFade: { min: 0, max: 1, step: 0.01 },
+  shaftTint: { min: 0, max: 2, step: 0.01 },
+  shaftEdge: { min: 0.2, max: 6, step: 0.05 },
+  shaftTopFade: { min: 0.02, max: 1, step: 0.01 },
   lobesMin: { min: 1, max: 64, step: 1 },
   lobesMax: { min: 1, max: 64, step: 1 },
   clusterFlatten: { min: 0.4, max: 3, step: 0.05 },
@@ -488,6 +552,50 @@ export const cloudParams: CloudParams = registerParams(
     stormSunCut: 0.72,
     stormSkyCut: 0.28,
     stormQuantSteps: 24,
+    stormBaseDark: 0.55,
+
+    // 2 → ±2.5 cells at cellSize 2600 = ±6.5 km of cloud placement around the
+    // ship, comfortably inside maxCloudDist. Raising it puts more anvils on
+    // screen AND more lobes in the buffer; 3 (7×7) is the practical ceiling
+    // before maxLobes.
+    stormCellRange: 2,
+    // 1.0 = the cloud's footprint IS the cell's. MEASURED, not chosen: rain
+    // starts where the field passes weatherParams.rainThreshold, which at full
+    // cell amplitude is 0.78 of the cell radius, so anything below ~0.8 puts a
+    // ring of rain OUTSIDE the cloud that made it. At 1.0 the cloud overhangs
+    // its own rain by 22% of the radius before `clusterFlatten` (1.35) and the
+    // lobe radii widen the drawn mass further — which is a cumulonimbus's
+    // shield overhanging its rain core, and it is what you see approaching.
+    stormCellRadius: 1.0,
+    // below weatherParams.rainThreshold (0.35): a cell strong enough to rain
+    // must already have had a cloud for a while before the first drop
+    stormCellMin: 0.12,
+    // a cell cluster is ~800 m across and ~2 km tall against a ring cumulus's
+    // ~440 m; at the ring's 30-46 lobes it would read as scattered boulders
+    stormCellLobesMin: 54,
+    stormCellLobesMax: 72,
+
+    shaftCount: 3,
+    // 0.70/0.45 chosen against the shipped haze, not in isolation: the band of
+    // sky a distant shaft hangs in is the BRIGHTEST part of the frame, and at
+    // the first pass (0.42/0.62) the column was there in the buffer and
+    // invisible on screen. These read as rain without reading as fog.
+    shaftOpacity: 0.7,
+    // ~a cell radius: a shaft seen edge-on through 800 m of its own core is
+    // near peak, one clipped at the rim is a faint veil
+    shaftDensityLength: 900,
+    shaftRadius: 0.72,
+    shaftGroundFade: 0.55,
+    // MEASURED IN THE BROWSER, not chosen: at edge 1 the column still read as
+    // a slab with vertical sides, because the alpha only reaches half at
+    // perp = 0.71 r. 2.2 puts the half-alpha point at 0.46 r, i.e. a core with
+    // most of the radius given over to the margin — which is what a rain
+    // shaft seen through kilometres of air actually looks like.
+    shaftEdge: 2.2,
+    shaftTopFade: 0.35,
+    // darker than the sky it hangs against — a rain shaft is the one part of
+    // the weather that is unambiguously BELOW the cloud base and unlit
+    shaftTint: 0.45,
 
     // 32 clusters x 64 lobes = the panel maxima, so the panel can never
     // ask for more instances than the buffers hold (§V28)
@@ -688,6 +796,13 @@ export const CLOUD_LAYOUT_KEYS: readonly (keyof CloudParams)[] = [
   'stormRadiusScale',
   'stormBaseDrop',
   'stormLobeScale',
+  // §V.63 cell-anchored storm clouds — all four change the lobe SET, so a
+  // panel edit that skipped this list would silently do nothing
+  'stormCellRange',
+  'stormCellRadius',
+  'stormCellMin',
+  'stormCellLobesMin',
+  'stormCellLobesMax',
 ];
 
 export function cloudLayoutKey(p: CloudParams): string {

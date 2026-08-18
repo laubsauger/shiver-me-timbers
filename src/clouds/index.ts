@@ -36,11 +36,14 @@ import {
   generateClusters,
   createCloudCores,
   stormFieldKey,
+  stormCellKey,
+  shaftSlots,
+  type StormCellSite,
   type StormSampler,
 } from './cloudCores';
 import { createCloudBands, advanceBandDrift } from './cloudBands';
 import { createCloudBlur } from './cloudBlur';
-import { createCloudComposite } from './cloudComposite';
+import { createCloudComposite, type ShaftSlot } from './cloudComposite';
 import { resolveCloudPalette, resolveDomeAmbient } from './cloudPalette';
 
 export interface CloudsHandle {
@@ -72,14 +75,34 @@ export interface CloudsOptions {
   seed: number;
   /** §V46 localised storm field — pass `weather.stormAt`. Default: clear. */
   stormAt?: StormSampler;
+  /**
+   * §V.63 storm CELLS near a world XZ — pass `weather.stormCellsNear`. Fills
+   * and returns the supplied pool. Omit it and there is no storm cloud
+   * overhead and no rain shaft: the ring clusters still shape themselves off
+   * `stormAt` at their own sites, which is §V46's behaviour and measured
+   * r = 0.00 against rain along a sail track.
+   */
+  stormCellsNear?: (
+    x: number,
+    z: number,
+    radiusCells: number,
+    pool: StormCellSite[],
+  ) => StormCellSite[];
 }
 
 export function createClouds(opts: CloudsOptions): CloudsHandle {
   const { renderer, camera, seed } = opts;
   const p = cloudParams;
   const sampleStorm: StormSampler = opts.stormAt ?? (() => 0);
+  const sampleCells = opts.stormCellsNear ?? ((_x, _z, _r, pool) => ((pool.length = 0), pool));
 
-  let clusters = generateClusters(seed, p, sampleStorm);
+  // caller-owned pools: both are refilled every frame (§V.46's allocation-free
+  // sampler discipline — this runs inside the render loop)
+  const cellPool: StormCellSite[] = [];
+  const shaftPool: ShaftSlot[] = [];
+  let cells = sampleCells(camera.position.x, camera.position.z, p.stormCellRange, cellPool);
+
+  let clusters = generateClusters(seed, p, sampleStorm, cells);
   const cores = createCloudCores(clusters, p);
   // §V11 second cloud form: the banded stratus sheet writes the SAME packed RT
   // as the cores, so it inherits the blur, the composite, the day-cycle
@@ -109,6 +132,7 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
   // ~400 lobes of scalar math refilled into the existing instance buffers.
   let layoutKey = cloudLayoutKey(p);
   let stormKey = stormFieldKey(clusters, sampleStorm, p.stormQuantSteps);
+  let cellKey = stormCellKey(cells, p.stormQuantSteps);
 
   // §V.55: the banded layer's drift is a PHASE, accumulated from dt, because
   // `bandDriftSpeed` is a live knob (and is meant to answer the wind later).
@@ -127,15 +151,30 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
 
   return {
     update(time: number, sunDir: THREE.Vector3): void {
+      // §V.63: the cell walk is 25 lattice squares of integer hashing at the
+      // default range — ~µs, and it is the ONLY thing that knows a squall has
+      // drifted over the ship. Its cost is why the key below is quantised
+      // rather than the walk being skipped: skipping it is how the cloud
+      // stops answering the weather between rebuilds.
+      cells = sampleCells(camera.position.x, camera.position.z, p.stormCellRange, cellPool);
       const lKey = cloudLayoutKey(p);
       const sKey = stormFieldKey(clusters, sampleStorm, p.stormQuantSteps);
-      if (lKey !== layoutKey || sKey !== stormKey) {
+      const cKey = stormCellKey(cells, p.stormQuantSteps);
+      if (lKey !== layoutKey || sKey !== stormKey || cKey !== cellKey) {
         layoutKey = lKey;
-        clusters = generateClusters(seed, p, sampleStorm);
+        cellKey = cKey;
+        clusters = generateClusters(seed, p, sampleStorm, cells);
         // re-key off the NEW sites: layout params may have moved them
         stormKey = stormFieldKey(clusters, sampleStorm, p.stormQuantSteps);
         cores.rebuild(clusters);
       }
+      // shafts are pushed EVERY frame, not only on rebuild: their geometry is
+      // camera-relative in the shader but their slot ASSIGNMENT is by distance
+      // to the camera, which moves continuously.
+      composite.shafts.push(
+        p,
+        shaftSlots(clusters, camera.position.x, camera.position.z, p.shaftCount, shaftPool),
+      );
 
       // push live params → uniforms (Tweakpane edits apply without rebuild)
       cores.uCoverage.value = clampCoverage(p.coverage);
@@ -162,6 +201,7 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
       cores.uFluffVary.value = p.fluffScaleVary;
       cores.uStormSunCut.value = p.stormSunCut;
       cores.uStormSkyCut.value = p.stormSkyCut;
+      cores.uStormBaseDark.value = p.stormBaseDark;
       blur.uRadiusNear.value = p.blurRadiusNear;
       blur.uRadiusFar.value = p.blurRadiusFar;
 

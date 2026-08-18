@@ -32,6 +32,7 @@ import {
   hazeAnisotropy,
   hazeContract,
   hazeDensityScale,
+  PRESET_STORMINESS,
   resetPresetWarnings,
   sanitizeFieldConfig,
   stormAt,
@@ -626,14 +627,23 @@ describe('weather system exposes the field (§T.38 integration surface)', () => 
     const a = createWeatherSystem({ seed: 1234 });
     const b = createWeatherSystem({ seed: 1234 });
     const c = createWeatherSystem({ seed: 4321 });
-    // identical seeds agree everywhere; a different seed does not
+    // identical seeds agree everywhere; a different seed does not.
+    //
+    // "IS THERE WEATHER HERE" IS NOT `stormAt > 0` ANY MORE (§V.63). `stormAt`
+    // reports the same scalar `weatherAt().storm` does — the ambient preset's
+    // storminess soft-unioned with the cell field — so at the default `swell`
+    // ambient it never reads below 0.12 even in dead-clear air. The cell field
+    // is the EXCURSION above that floor, and that is what a seed changes.
+    const floor = PRESET_STORMINESS[a.current];
     let differs = 0;
     let anyWeather = 0;
     for (let i = 0; i < 200; i++) {
       const x = i * 143;
       const z = i * -97;
       expect(a.stormAt(x, z)).toBe(b.stormAt(x, z));
-      if (a.stormAt(x, z) > 1e-6 || c.stormAt(x, z) > 1e-6) anyWeather++;
+      // the floor is the ambient, not a cell — nothing may read below it
+      expect(a.stormAt(x, z)).toBeGreaterThanOrEqual(floor - 1e-9);
+      if (a.stormAt(x, z) > floor + 1e-6 || c.stormAt(x, z) > floor + 1e-6) anyWeather++;
       if (Math.abs(a.stormAt(x, z) - c.stormAt(x, z)) > 1e-6) differs++;
     }
     expect(anyWeather).toBeGreaterThan(30);

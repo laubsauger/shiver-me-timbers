@@ -93,6 +93,97 @@ export interface StormFieldDrift {
   z: number;
 }
 
+/**
+ * ONE storm cell, resolved. `stormAt` needs this to answer "how strong is the
+ * weather here"; the CLOUD layer needs the same thing to answer "where do I
+ * put the cloud" (§V.63) — a squall you can sail into has to have its cloud
+ * mass ON its cell, not on an unrelated ring. Both therefore walk `cellAt`.
+ *
+ * Positions are in whichever frame the producer says: `cellAt` reports the
+ * FIELD frame (drift already subtracted from the query), `stormCellsNear`
+ * adds the drift back and reports WORLD.
+ */
+export interface StormCell {
+  /** lattice coordinates — the cell's stable IDENTITY across drift and time.
+   *  Anything that must not reshuffle as a cell breathes keys off these. */
+  i: number;
+  j: number;
+  x: number;
+  z: number;
+  radius: number;
+  /**
+   * The field value at this cell's OWN centre, overlap aside: lifecycle
+   * amplitude × intensity. A ship parked on the centre of an isolated cell
+   * reads exactly this from `stormAt`, which is what makes "cloud where the
+   * rain is" checkable rather than a matter of taste (see tests/clouds).
+   */
+  amp: number;
+}
+
+export function makeStormCell(): StormCell {
+  return { i: 0, j: 0, x: 0, z: 0, radius: 0, amp: 0 };
+}
+
+/**
+ * Geometry and strength of the cell hosted by lattice square (i, j), written
+ * into a caller-owned `out`. Returns false when the square hosts no cell.
+ *
+ * THE SINGLE DEFINITION of where a cell is and how strong it is. `stormAt`
+ * walks it over its 3×3 neighbourhood and `stormCellsNear` over a wider one;
+ * duplicating the salts here is exactly how the cloud layer would end up
+ * drawing its anvil half a kilometre off the rain.
+ *
+ * `cfg` must already be sanitized (both callers do it once, before looping).
+ */
+export function cellAt(
+  cfg: StormFieldConfig,
+  i: number,
+  j: number,
+  time: number,
+  out: StormCell,
+): boolean {
+  if (hashCell(cfg.seed, i, j, 0) >= cfg.coverage) return false;
+  const size = cfg.cellSize;
+  const radiusMax = size * 0.5;
+
+  // centre jittered inside its own square (bounded by `jitter`)
+  const jx = (hashCell(cfg.seed, i, j, 1) - 0.5) * cfg.jitter;
+  const jz = (hashCell(cfg.seed, i, j, 2) - 0.5) * cfg.jitter;
+
+  // radius spread around the mean, re-clamped: variance must not be able to
+  // push a cell past the containment bound the 3×3 walk assumes
+  const spread = (hashCell(cfg.seed, i, j, 3) - 0.5) * cfg.radiusVariance;
+  const radius = Math.min(cfg.cellRadius * (1 + spread), radiusMax);
+  if (radius <= 0) return false;
+
+  // per-cell lifecycle phase — hashed, never shared, or every storm in the
+  // world would breathe in unison (§B4)
+  let amp = 1;
+  if (cfg.lifecycleSeconds > 0 && cfg.lifecycleDepth > 0) {
+    const phase = hashCell(cfg.seed, i, j, 4);
+    const s =
+      Math.sin(2 * Math.PI * (fin(time, 0) / cfg.lifecycleSeconds + phase)) * 0.5 + 0.5;
+    amp = 1 - cfg.lifecycleDepth + cfg.lifecycleDepth * s;
+  }
+
+  out.i = i;
+  out.j = j;
+  out.x = (i + 0.5 + jx) * size;
+  out.z = (j + 0.5 + jz) * size;
+  out.radius = radius;
+  out.amp = clamp01(amp);
+  return true;
+}
+
+/**
+ * Scratch for `stormAt`'s inner loop. Module-level so the hot path allocates
+ * nothing; safe because `cellAt` fully overwrites it and `stormAt` reads it
+ * before the next call. NOT re-entrant — nothing may call `stormAt` from
+ * inside `stormAt`, which nothing does (samplers are called by consumers, not
+ * by the field).
+ */
+const scratchCell = makeStormCell();
+
 const fin = (v: number, fallback: number): number =>
   Number.isFinite(v) ? v : fallback;
 
@@ -135,7 +226,6 @@ export function stormAt(
   if (cfg.intensity <= 0 || cfg.coverage <= 0 || cfg.cellRadius <= 0) return 0;
 
   const size = cfg.cellSize;
-  const radiusMax = size * 0.5;
   // into the field's own (drifting) frame
   const px = fin(x, 0) - fin(drift.x, 0);
   const pz = fin(z, 0) - fin(drift.z, 0);
@@ -147,47 +237,100 @@ export function stormAt(
   let miss = 1;
   for (let di = -1; di <= 1; di++) {
     for (let dj = -1; dj <= 1; dj++) {
-      const i = ci + di;
-      const j = cj + dj;
-      // does this lattice square host a cell at all?
-      if (hashCell(cfg.seed, i, j, 0) >= cfg.coverage) continue;
+      // does this lattice square host a cell at all? — cellAt is the one
+      // place that answers, so the cloud layer cannot disagree with the rain
+      if (!cellAt(cfg, ci + di, cj + dj, t, scratchCell)) continue;
 
-      // centre jittered inside its own square (bounded by `jitter`)
-      const jx = (hashCell(cfg.seed, i, j, 1) - 0.5) * cfg.jitter;
-      const jz = (hashCell(cfg.seed, i, j, 2) - 0.5) * cfg.jitter;
-      const cx = (i + 0.5 + jx) * size;
-      const cz = (j + 0.5 + jz) * size;
-
-      // radius spread around the mean, re-clamped: variance must not be able
-      // to push a cell past the containment bound the 3×3 walk assumes
-      const spread = (hashCell(cfg.seed, i, j, 3) - 0.5) * cfg.radiusVariance;
-      const radius = Math.min(cfg.cellRadius * (1 + spread), radiusMax);
-      if (radius <= 0) continue;
-
-      const dx = px - cx;
-      const dz = pz - cz;
+      const dx = px - scratchCell.x;
+      const dz = pz - scratchCell.z;
       const dist = Math.sqrt(dx * dx + dz * dz);
-      if (dist >= radius) continue; // outside the rim: exactly zero, no epsilon
+      if (dist >= scratchCell.radius) continue; // outside the rim: exactly zero
 
       // 1 in the core, smoothly to 0 at the rim (§V23 functional form)
-      const inner = radius * (1 - cfg.edgeSoftness);
-      const w = 1 - smoothstep(inner, radius, dist);
+      const inner = scratchCell.radius * (1 - cfg.edgeSoftness);
+      const w = 1 - smoothstep(inner, scratchCell.radius, dist);
 
-      // per-cell lifecycle phase — hashed, never shared, or every storm in
-      // the world would breathe in unison (§B4)
-      let amp = 1;
-      if (cfg.lifecycleSeconds > 0 && cfg.lifecycleDepth > 0) {
-        const phase = hashCell(cfg.seed, i, j, 4);
-        const s =
-          Math.sin(2 * Math.PI * (t / cfg.lifecycleSeconds + phase)) * 0.5 + 0.5;
-        amp = 1 - cfg.lifecycleDepth + cfg.lifecycleDepth * s;
-      }
-
-      miss *= 1 - clamp01(w * amp);
+      miss *= 1 - clamp01(w * scratchCell.amp);
       if (miss <= 0) return cfg.intensity; // fully inside overlapping cores
     }
   }
   return (1 - miss) * cfg.intensity;
+}
+
+/**
+ * Every storm cell whose lattice square lies within `radiusCells` of (x, z),
+ * in WORLD coordinates, nearest first. Fills and returns a caller-owned pool
+ * (§V.46's sampler discipline: this runs per frame, a fresh array each call
+ * would be pure GC churn).
+ *
+ * WHY THE CLOUD LAYER NEEDS THIS AND NOT `stormAt`. `stormAt` answers "how
+ * stormy is it HERE" — a scalar, enough to drive rain density or a sea state.
+ * A cloud is an OBJECT: to stand over a squall it needs the squall's CENTRE
+ * and EXTENT, which a point sample cannot report. Sampling `stormAt` on a ring
+ * of guessed sites and hoping one lands on a cell is what the layer used to do,
+ * and it measured out at r = 0.00 between rain and cloud along a sail track.
+ *
+ * `radiusCells` is a lattice radius: 2 walks 5×5 squares, i.e. ±2.5·cellSize.
+ * Nearest-first ordering is what makes "the closest N" a stable, deterministic
+ * choice for the shaft slots.
+ */
+export function stormCellsNear(
+  x: number,
+  z: number,
+  drift: StormFieldDrift,
+  time: number,
+  rawConfig: StormFieldConfig,
+  radiusCells: number,
+  pool: StormCell[],
+): StormCell[] {
+  const cfg = sanitizeFieldConfig(rawConfig);
+  let n = 0;
+  const write = (): StormCell => {
+    let cell = pool[n];
+    if (!cell) cell = pool[n] = makeStormCell();
+    n++;
+    return cell;
+  };
+
+  if (cfg.intensity > 0 && cfg.coverage > 0 && cfg.cellRadius > 0) {
+    const size = cfg.cellSize;
+    const dx = fin(drift.x, 0);
+    const dz = fin(drift.z, 0);
+    const px = fin(x, 0) - dx;
+    const pz = fin(z, 0) - dz;
+    const ci = Math.floor(px / size);
+    const cj = Math.floor(pz / size);
+    const t = fin(time, 0);
+    // §V28: an unsanitized radius would size the walk, so it is floored to a
+    // small int rather than trusted — a NaN here is an infinite loop
+    const r = Math.min(Math.max(Math.floor(fin(radiusCells, 1)) || 0, 0), 8);
+
+    for (let di = -r; di <= r; di++) {
+      for (let dj = -r; dj <= r; dj++) {
+        const out = write();
+        if (!cellAt(cfg, ci + di, cj + dj, t, out)) {
+          n--; // square hosts nothing — hand the slot back
+          continue;
+        }
+        // FIELD frame → WORLD. The cloud that stands on this cell is placed in
+        // world space and must drift with it, not with the camera.
+        out.x += dx;
+        out.z += dz;
+        out.amp *= cfg.intensity;
+      }
+    }
+  }
+
+  pool.length = n;
+  // nearest first — deterministic given (seed, drift, time), so the shaft
+  // slots do not swap between frames for no reason
+  pool.sort(
+    (a, b) =>
+      (a.x - x) * (a.x - x) +
+      (a.z - z) * (a.z - z) -
+      ((b.x - x) * (b.x - x) + (b.z - z) * (b.z - z)),
+  );
+  return pool;
 }
 
 /**

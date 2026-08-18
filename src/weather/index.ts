@@ -36,11 +36,14 @@ import { applyWeatherPreset, type WeatherTransition } from './applyPreset';
 import {
   advanceDrift,
   stormAt,
+  stormCellsNear,
+  type StormCell,
   type StormFieldConfig,
   type StormFieldDrift,
 } from './field';
 import { blendSample, createWeatherSample, type WeatherSample } from './sampler';
-import type { WeatherPresetName } from './presets';
+import { clamp01 } from './field';
+import { PRESET_STORMINESS, type WeatherPresetName } from './presets';
 
 export interface WeatherSystemOpts {
   /** integrator-supplied SimState.weather writer (§V3 — no state import here) */
@@ -62,8 +65,24 @@ export interface WeatherSystem {
    * is only safe if the caller consumes the values before sampling again.
    */
   weatherAt(x: number, z: number, out?: WeatherSample): WeatherSample;
-  /** 0..1 local storm strength only — cheaper when the patch is not needed */
+  /**
+   * 0..1 local storm strength only — cheaper when the patch is not needed.
+   * The SAME scalar `weatherAt().storm` reports: the ambient preset's own
+   * storminess soft-unioned with the local cell field. See the note on the
+   * union in `createWeatherSystem`.
+   */
   stormAt(x: number, z: number): number;
+  /**
+   * §V.63: the storm CELLS near (x, z), world frame, nearest first. What
+   * `stormAt` is to rain density, this is to cloud PLACEMENT — a cloud has to
+   * stand on a cell, and only a cell list says where one is. Fills `pool`.
+   */
+  stormCellsNear(
+    x: number,
+    z: number,
+    radiusCells: number,
+    pool: StormCell[],
+  ): StormCell[];
   /** name of the most recently applied preset (the AMBIENT weather) */
   readonly current: WeatherPresetName;
   /** live field offset — plain {x,z}, mirror straight into SimState (§V2) */
@@ -84,6 +103,32 @@ export function createWeatherSystem(
   };
   let time = 0;
   const shared = createWeatherSample();
+
+  /**
+   * THE UNION THE CLOUD LAYER WAS MISSING (§V.63).
+   *
+   * `weatherAt().storm` — what rain, audio and the sea are gated on — is the
+   * ambient preset's storminess SOFT-UNIONED with the local cell field
+   * (sampler.ts). `stormAt` returned the bare field, so the two disagreed by
+   * exactly the ambient term, and the disagreement was invisible at the
+   * default preset (`swell`, 0.12) and total at the one that matters:
+   * `apply('storm')` sets ambient storminess to 1, so rain went to 1
+   * EVERYWHERE while every cloud in the sky kept reading the cell field —
+   * mostly zero — and stayed fair-weather cumulus. A global storm preset
+   * produced full rain under a fair-weather sky.
+   *
+   * Applied to the CELL AMPLITUDES too, not just the scalar: cell clusters are
+   * both placed and shaped from `amp`, and lifting the shape sampler while
+   * leaving the placement sampler bare would put a fully-formed anvil next to
+   * a cumulus built from the same cell.
+   *
+   * Bounded in [0,1] by construction, same soft union `b + (1-b)·t` the
+   * sampler uses — never a sum that could pass 1 (§V44).
+   */
+  const ambientUnion = (t: number): number => {
+    const base = clamp01(PRESET_STORMINESS[current] ?? 0);
+    return base + (1 - base) * clamp01(Number.isFinite(t) ? t : 0);
+  };
 
   // rebuilt per sample from the LIVE panel values (§V16) — the field must
   // respond to a slider drag, and sanitizeFieldConfig re-clamps every time
@@ -125,7 +170,12 @@ export function createWeatherSystem(
       return blendSample(stormAt(x, z, drift, time, config()), current, out);
     },
     stormAt(x, z): number {
-      return stormAt(x, z, drift, time, config());
+      return ambientUnion(stormAt(x, z, drift, time, config()));
+    },
+    stormCellsNear(x, z, radiusCells, pool): StormCell[] {
+      const cells = stormCellsNear(x, z, drift, time, config(), radiusCells, pool);
+      for (const cell of cells) cell.amp = ambientUnion(cell.amp);
+      return cells;
     },
     get current(): WeatherPresetName {
       return current;
@@ -151,9 +201,13 @@ export {
 } from './presets';
 export {
   advanceDrift,
+  cellAt,
   hashCell,
+  makeStormCell,
   sanitizeFieldConfig,
   stormAt,
+  stormCellsNear,
+  type StormCell,
   type StormFieldConfig,
   type StormFieldDrift,
 } from './field';

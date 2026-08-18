@@ -62,7 +62,10 @@ import {
 import type { Node } from 'three/webgpu';
 import type { ShaderNodeObject } from 'three/tsl';
 import { createRng } from '../state/rng';
+import { hashCell } from '../weather/field';
+import type { StormCell } from '../weather/field';
 import type { CloudParams } from '../params/clouds';
+import type { ShaftSlot } from './cloudComposite';
 
 type N = ShaderNodeObject<Node>;
 
@@ -118,6 +121,16 @@ export interface CloudCluster {
   radius: number;
   /** 0..1 storm field sample at this cluster's own world XZ (§V46) */
   storm: number;
+  /**
+   * Cloud BASE altitude (m). Equal to `y` — every lobe sits at `y + h·vert`
+   * with h ≥ 0 — but named separately because the rain shafts hang FROM it
+   * (§V.63). Rain that starts at an arbitrary altitude is detached however
+   * good the horizontal coupling is.
+   */
+  base: number;
+  /** lattice identity of the storm cell this cluster stands on, or null for
+   *  a ring (fair-weather) cluster. §V.63: what makes the coupling checkable. */
+  cell: { i: number; j: number } | null;
   lobes: CloudLobe[];
 }
 
@@ -129,6 +142,24 @@ const clamp01 = (v: number): number =>
 
 /** 0..1 local storm strength at a world XZ — `weather.stormAt` (§V46) */
 export type StormSampler = (x: number, z: number) => number;
+
+/**
+ * A storm cell to stand a cloud on (§V.63). This is `weather.StormCell`
+ * itself, IMPORTED rather than restated: the whole point of the coupling is
+ * that the cloud is placed from the same numbers the rain is gated on, and a
+ * structural copy of the interface here is precisely how the two would drift
+ * apart again without a compile error.
+ */
+export type StormCellSite = StormCell;
+
+/**
+ * A deterministic int seed for one lattice square's own rng stream. Reuses the
+ * field's audited integer mixer (§V2) rather than inventing a second one —
+ * salt 7 is not used by the field itself.
+ */
+function cellSalt(i: number, j: number): number {
+  return (hashCell(0x5bf03635, i | 0, j | 0, 7) * 4294967296) | 0;
+}
 
 /** the subset of CloudParams that `silhouetteRadius` reads */
 export interface ShapeProfile {
@@ -202,6 +233,19 @@ export function baseGlowValue(
   return Math.max(0, Math.min(2, p.baseGlow)) * lowKey * clamp01(downFace);
 }
 
+/**
+ * CPU mirror of `stormBaseFactor` — the top-to-bottom darkening that makes a
+ * storm cloud read as one (§V.63). `heightN` is 0 at the cloud base, 1 at the
+ * top. See the graph in `createCloudCores` for why it is on both channels.
+ */
+export function stormBaseDarkValue(
+  storm: number,
+  heightN: number,
+  p: Pick<CloudParams, 'stormBaseDark'>,
+): number {
+  return 1 - clamp01(p.stormBaseDark) * clamp01(storm) * (1 - clamp01(heightN));
+}
+
 /** the whole sunlight channel for a lobe face, before the storm cut */
 export function lobeSunValue(
   direct: number,
@@ -254,9 +298,60 @@ export function generateClusters(
   seed: number,
   p: CloudParams,
   sampleStorm: StormSampler = () => 0,
+  /**
+   * §V.63 storm cells near the viewer, WORLD frame — `weather.stormCellsNear`.
+   * Each one gets a cloud standing ON it, which is what makes storm cloud and
+   * rain the same object rather than two systems that happen to be driven by
+   * the same number. Omit it and only the ring clusters exist, which is the
+   * pre-§V.63 behaviour: measured r = 0.00 between rain and cloud along a
+   * sail track, because the ring sits around the world ORIGIN and the rain
+   * follows the ship.
+   */
+  stormCells: readonly StormCellSite[] = [],
 ): CloudCluster[] {
   const rng = createRng(seed);
   const clusters: CloudCluster[] = [];
+
+  // -- cell-anchored storm clouds -------------------------------------------
+  // Placed FIRST so they take the low instance indices: if `maxLobes`
+  // overflows, the thing that gets dropped is a distant fair-weather bank,
+  // never the anvil the player is sailing under.
+  //
+  // OWN RNG STREAM PER CELL, keyed on the cell's LATTICE coordinates. Two
+  // reasons, both structural:
+  //  - it decouples them from the ring stream, so adding or losing a cell as
+  //    the ship sails cannot reshuffle the fair-weather sky;
+  //  - a cell's identity (i, j) is fixed while its amplitude breathes on the
+  //    lifecycle, so lobe COUNT and lobe seeds are drawn from something that
+  //    does not move. Drawing them from `amp` would rebuild a different cloud
+  //    every quantisation step — the same trap the header note describes for
+  //    the ring.
+  for (const cell of stormCells) {
+    const storm = clamp01(cell.amp);
+    if (storm < p.stormCellMin) continue;
+    const cellRng = createRng((seed ^ cellSalt(cell.i, cell.j)) | 0);
+    const shape = clusterShapeAt(p, storm);
+    // radius comes from the CELL, not from clusterRadiusMin/Max × radiusScale:
+    // the cloud's footprint has to be the squall's footprint or you get rain
+    // outside the cloud at exactly the range where you would notice.
+    const cr = Math.max(cell.radius * Math.max(p.stormCellRadius, 0), 1);
+    const cy =
+      lerp(p.altitudeMin, p.altitudeMax, cellRng()) * (1 - shape.baseDrop);
+    const count =
+      p.stormCellLobesMin +
+      Math.floor(cellRng() * (p.stormCellLobesMax - p.stormCellLobesMin + 1));
+    clusters.push({
+      x: cell.x,
+      y: cy,
+      z: cell.z,
+      radius: cr,
+      storm,
+      base: cy,
+      cell: { i: cell.i, j: cell.j },
+      lobes: buildLobes(cellRng, p, shape, cell.x, cy, cell.z, cr, count, storm),
+    });
+  }
+
   for (let c = 0; c < p.clusterCount; c++) {
     // -- rng block A: the SITE. Storm-independent by construction, so a cell
     // drifting over a cluster never moves it (and never moves it out of the
@@ -284,56 +379,90 @@ export function generateClusters(
     const cr = cr0 * shape.radiusScale;
     const cy = cy0 * (1 - shape.baseDrop);
 
-    const horiz = cr * p.clusterFlatten;
-    const vert = cr * shape.clusterHeight;
-    const lobes: CloudLobe[] = [];
-    // -- rng block B: the LOBES. Same call count and same order at every storm
-    // level (see the header note) — lobe i keeps its identity as cells drift.
-    for (let i = 0; i < count; i++) {
-      const a = rng() * Math.PI * 2;
-      // heightBias > 1 packs lobes toward the base (cumulus); 1 spreads them
-      // evenly up a storm column
-      const h = Math.pow(rng(), shape.heightBias);
-      const profile = silhouetteRadius(h, shape);
-      // THE COMMENT HERE USED TO SAY "rng^0.6 is centre-biased" AND IT WAS
-      // BACKWARDS. An exponent BELOW 1 pushes a uniform sample UP — pow(0.5,
-      // 0.6) = 0.66 — so 0.6 is very nearly sqrt(u), i.e. uniform over the
-      // disc's AREA, which spreads lobes evenly to the rim. That is why a
-      // cluster read as a handful of separate potatoes rather than one mass:
-      // the lobes were laid out to cover the footprint, not to overlap in it.
-      // Above 1 biases toward the centre, which is what packs a cumulus.
-      const rN = Math.pow(rng(), p.lobePacking);
-      const px = Math.cos(a) * rN * profile * horiz;
-      const py = h * vert;
-      const pz = Math.sin(a) * rN * profile * horiz;
-      const len = Math.hypot(px, py, pz);
-      // lobe size as a FRACTION of the cluster (no metre-scale magic number),
-      // shrinking with height so the mass tapers into cauliflower at the top
-      const size =
-        lerp(p.lobeScaleMin, p.lobeScaleMax, rng()) * cr * shape.lobeScale * (1 - 0.4 * h);
-      lobes.push({
-        x: cx + px,
-        y: cy + py,
-        z: cz + pz,
-        radius: size,
-        // slight per-axis anisotropy so the union never reads as stacked balls
-        rx: size * lerp(0.9, 1.25, rng()),
-        ry: size * p.lobeOblate,
-        rz: size * lerp(0.9, 1.25, rng()),
-        seed: rng(),
-        heightN: h,
-        dirX: len > 1e-6 ? px / len : 0,
-        dirY: len > 1e-6 ? py / len : 1,
-        dirZ: len > 1e-6 ? pz / len : 0,
-        // buried = near the axis AND low down; that underside is the part a
-        // real cumulus keeps in its own shadow
-        interior: Math.min(1, Math.max(0, (1 - rN * 0.6) * (1 - h))),
-        storm,
-      });
-    }
-    clusters.push({ x: cx, y: cy, z: cz, radius: cr, storm, lobes });
+    clusters.push({
+      x: cx,
+      y: cy,
+      z: cz,
+      radius: cr,
+      storm,
+      base: cy,
+      cell: null,
+      // -- rng block B: the LOBES. Same call count and same order at every
+      // storm level (see the header note) — lobe i keeps its identity as
+      // cells drift.
+      lobes: buildLobes(rng, p, shape, cx, cy, cz, cr, count, storm),
+    });
   }
   return clusters;
+}
+
+/**
+ * The lobe cloud of ONE cluster. Shared verbatim by the ring clusters and the
+ * §V.63 cell-anchored storm clusters — the difference between fair weather and
+ * a squall is entirely in `shape` and `cr` (§V7: storm is a set of numbers, not
+ * a branch), and having two copies of this loop is how they would stop being.
+ *
+ * `rng` is the caller's stream; the call COUNT is fixed at 6 per lobe and does
+ * not depend on `storm`, which is what preserves lobe identity across a
+ * regeneration (see the file header).
+ */
+function buildLobes(
+  rng: () => number,
+  p: CloudParams,
+  shape: ClusterShape,
+  cx: number,
+  cy: number,
+  cz: number,
+  cr: number,
+  count: number,
+  storm: number,
+): CloudLobe[] {
+  const horiz = cr * p.clusterFlatten;
+  const vert = cr * shape.clusterHeight;
+  const lobes: CloudLobe[] = [];
+  for (let i = 0; i < count; i++) {
+    const a = rng() * Math.PI * 2;
+    // heightBias > 1 packs lobes toward the base (cumulus); 1 spreads them
+    // evenly up a storm column
+    const h = Math.pow(rng(), shape.heightBias);
+    const profile = silhouetteRadius(h, shape);
+    // THE COMMENT HERE USED TO SAY "rng^0.6 is centre-biased" AND IT WAS
+    // BACKWARDS. An exponent BELOW 1 pushes a uniform sample UP — pow(0.5,
+    // 0.6) = 0.66 — so 0.6 is very nearly sqrt(u), i.e. uniform over the
+    // disc's AREA, which spreads lobes evenly to the rim. That is why a
+    // cluster read as a handful of separate potatoes rather than one mass:
+    // the lobes were laid out to cover the footprint, not to overlap in it.
+    // Above 1 biases toward the centre, which is what packs a cumulus.
+    const rN = Math.pow(rng(), p.lobePacking);
+    const px = Math.cos(a) * rN * profile * horiz;
+    const py = h * vert;
+    const pz = Math.sin(a) * rN * profile * horiz;
+    const len = Math.hypot(px, py, pz);
+    // lobe size as a FRACTION of the cluster (no metre-scale magic number),
+    // shrinking with height so the mass tapers into cauliflower at the top
+    const size =
+      lerp(p.lobeScaleMin, p.lobeScaleMax, rng()) * cr * shape.lobeScale * (1 - 0.4 * h);
+    lobes.push({
+      x: cx + px,
+      y: cy + py,
+      z: cz + pz,
+      radius: size,
+      // slight per-axis anisotropy so the union never reads as stacked balls
+      rx: size * lerp(0.9, 1.25, rng()),
+      ry: size * p.lobeOblate,
+      rz: size * lerp(0.9, 1.25, rng()),
+      seed: rng(),
+      heightN: h,
+      dirX: len > 1e-6 ? px / len : 0,
+      dirY: len > 1e-6 ? py / len : 1,
+      dirZ: len > 1e-6 ? pz / len : 0,
+      // buried = near the axis AND low down; that underside is the part a
+      // real cumulus keeps in its own shadow
+      interior: Math.min(1, Math.max(0, (1 - rN * 0.6) * (1 - h))),
+      storm,
+    });
+  }
+  return lobes;
 }
 
 /**
@@ -351,6 +480,63 @@ export function stormFieldKey(
   let key = '';
   for (const c of clusters) key += `${Math.round(clamp01(sampleStorm(c.x, c.z)) * n)}|`;
   return key;
+}
+
+/**
+ * Quantised fingerprint of the CELL SET around the viewer (§V.63). The
+ * companion to `stormFieldKey`, and it has to be a second key rather than an
+ * extension of that one: the ring keys off a fixed set of sites and only their
+ * strengths move, whereas cells APPEAR and DISAPPEAR as the ship sails, so the
+ * identity of the set is itself part of the key.
+ *
+ * Amplitude is quantised on the same `stormQuantSteps` grid for the same
+ * reason: a cell breathing on its lifecycle moves continuously and would
+ * otherwise rebuild every lobe in the sky on every frame forever.
+ */
+export function stormCellKey(
+  cells: readonly StormCellSite[],
+  steps: number,
+): string {
+  const n = Math.max(1, Math.floor(steps) || 1);
+  let key = '';
+  for (const c of cells) key += `${c.i},${c.j}:${Math.round(clamp01(c.amp) * n)}|`;
+  return key;
+}
+
+/**
+ * The nearest cell-anchored storm clusters to (x, z), strongest-eligible
+ * first, as rain-shaft slots (§V.63).
+ *
+ * Read off the CLUSTERS, not off the cell list, and that is the point: a shaft
+ * is only ever emitted for a cloud that is actually being drawn, at that
+ * cloud's own footprint and its own base altitude. There is no way to get a
+ * shaft hanging out of clear sky, or hanging from the wrong height, without
+ * the cloud being wrong first.
+ */
+export function shaftSlots(
+  clusters: readonly CloudCluster[],
+  x: number,
+  z: number,
+  count: number,
+  out: ShaftSlot[],
+): ShaftSlot[] {
+  const n = Math.max(Math.floor(count) || 0, 0);
+  out.length = 0;
+  if (n === 0) return out;
+  for (const c of clusters) {
+    if (!c.cell || c.storm <= 0) continue;
+    out.push({ x: c.x, z: c.z, radius: c.radius, base: c.base, strength: c.storm });
+  }
+  // nearest first — the shaft slots are a scarce, unrolled resource, so they
+  // go to the squalls the player can actually see the shape of
+  out.sort(
+    (a, b) =>
+      (a.x - x) * (a.x - x) +
+      (a.z - z) * (a.z - z) -
+      ((b.x - x) * (b.x - x) + (b.z - z) * (b.z - z)),
+  );
+  out.length = Math.min(out.length, n);
+  return out;
 }
 
 /** Total lobe count a cluster list would draw. */
@@ -455,6 +641,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const uBaseGlowSpan = uniform(p.baseGlowLowSun);
   const uStormSunCut = uniform(p.stormSunCut);
   const uStormSkyCut = uniform(p.stormSkyCut);
+  const uStormBaseDark = uniform(p.stormBaseDark);
   const uFluffScale = uniform(p.fluffScale);
   const uFluffAlpha = uniform(p.fluffAlpha);
   const uFluffPower = uniform(p.fluffPower);
@@ -487,6 +674,31 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     float(1).sub(uStormSunCut.clamp(0, 1).mul(st.clamp(0, 1)));
   const stormSkyFactor = (st: N): N =>
     float(1).sub(uStormSkyCut.clamp(0, 1).mul(st.clamp(0, 1)));
+
+  /**
+   * THE DARK BASE (§V.63) — the strongest single cue that a cloud is about to
+   * rain on you, and the one thing the two cuts above cannot give.
+   *
+   * They are whole-cluster: they take the same fraction off the anvil top as
+   * off the underside, so a storm cluster gets uniformly dimmer and reads as a
+   * grey cumulus rather than as a threatening one. What actually happens in a
+   * cumulonimbus is a GRADIENT — it is optically thick enough that essentially
+   * all the light that enters the top is scattered back out of the top, so the
+   * base is lit only by what leaks through kilometres of water, while the anvil
+   * stays brilliant white. That top-to-bottom contrast IS the storm.
+   *
+   * Applied to BOTH channels, unlike the cuts (which deliberately spare the sky
+   * term so a squall goes cool grey rather than black): an underside is dark
+   * because no light of any colour reaches it, so darkening only the sun term
+   * would tip the base blue.
+   *
+   * §V44 bounded at source — the CUT is clamped, not the product, and the two
+   * weights are independently in [0,1], so the factor cannot leave [1-cut, 1].
+   */
+  const stormBaseFactor = (st: N, heightN: N): N =>
+    float(1).sub(
+      uStormBaseDark.clamp(0, 1).mul(st.clamp(0, 1)).mul(heightN.clamp(0, 1).oneMinus()),
+    );
 
   /** normalized view distance of an instance centre (RT alpha channel) */
   const depthOf = (centre: N): N =>
@@ -659,6 +871,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const lobeSun = multiScattered(direct)
     .mul(silver)
     .mul(stormSunFactor(vStorm))
+    .mul(stormBaseFactor(vStorm, vHeight))
     .add(baseGlowAt(N.dot(vec3(0, 1, 0)).negate()))
     .clamp(0, 2);
 
@@ -667,6 +880,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const lobeSky = mix(uSkyMin, uSkyMax, skyFace)
     .mul(heightLift)
     .mul(stormSkyFactor(vStorm))
+    .mul(stormBaseFactor(vStorm, vHeight))
     .clamp(0, 2);
 
   lobeMat.outputNode = vec4(
@@ -752,11 +966,13 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     .mul(mix(float(1).sub(sideGain), float(1), sunSide));
   const fluffSun = multiScattered(fluffDirect)
     .mul(stormSunFactor(iStorm))
+    .mul(stormBaseFactor(iStorm, iHeight))
     .add(baseGlowAt(fluffN.dot(uUpView).negate()))
     .clamp(0, 2);
   const fluffSky = mix(uSkyMin, uSkyMax, fluffN.dot(uUpView).mul(0.5).add(0.5).clamp(0, 1))
     .mul(mix(float(0.85), float(1), iHeight.clamp(0, 1)))
     .mul(stormSkyFactor(iStorm))
+    .mul(stormBaseFactor(iStorm, iHeight))
     .clamp(0, 2);
   const fluffDepth = varying(depthOf(iOffset), 'vFluffDepth');
 
@@ -800,6 +1016,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     uBaseGlowSpan,
     uStormSunCut,
     uStormSkyCut,
+    uStormBaseDark,
     uFluffScale,
     uFluffAlpha,
     uFluffPower,
