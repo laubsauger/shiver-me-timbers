@@ -32,6 +32,10 @@ import {
 import { quatFromAxisAngle, quatMul, rotateVec } from '../src/combat/quatMath';
 import { createRng } from '../src/state/rng';
 import { generateH0, swellWavelengthFor } from '../src/ocean/oceanMath';
+import {
+  REBUILD_ARM_TICKS,
+  SPECTRUM_REBUILD_STEPS,
+} from '../src/ocean/spectrumRebuild';
 import type { ShipState, Vec3 } from '../src/state/simState';
 
 const DT = 1 / 60;
@@ -1232,13 +1236,30 @@ describe('§V.8: CPU mirror and GPU agree on the FOLD-CAPPED choppiness', () => 
   });
 
   it('the cap actually BITES somewhere, or this test guards nothing', () => {
-    // fail loud: if no preset ever folds, a broken cap would look identical
-    // to a working one here
-    const capped = (['calm', 'swell', 'storm'] as const).filter((n) => {
-      const op = testOceanParams({ ...weatherPresets[n].ocean });
-      return gpuLambda(op) < op.choppiness - 1e-9;
+    // fail loud: if the cap never engages on any sea, a broken cap would look
+    // identical to a working one in every test above it.
+    //
+    // IT IS NO LONGER EXERCISED BY A SHIPPED PRESET, and that is the point of
+    // the second half of this test rather than a hole in the first. Until the
+    // storm retune, `storm` authored choppiness 1.9 on an Hs 14.70 m sea and
+    // the cap delivered 1.31 — the preset was over the fold limit and being
+    // rescued by the safety on every frame. Every rung of the weather ladder
+    // now authors a choppiness it actually GETS (tests/weather.test.ts pins
+    // that), which is what "the number in the file means something" requires.
+    // So the cap is exercised here on a DELIBERATELY over-steep sea instead.
+    const over = testOceanParams({
+      ...weatherPresets.storm.ocean,
+      choppiness: weatherPresets.storm.ocean.choppiness * 4,
     });
-    expect(capped.length).toBeGreaterThan(0);
+    expect(gpuLambda(over)).toBeLessThan(over.choppiness - 1e-9);
+
+    // and no shipped preset relies on it — a rung that did would be authoring
+    // a sea it does not get
+    for (const n of Object.keys(weatherPresets) as (keyof typeof weatherPresets)[]) {
+      const op = testOceanParams({ ...weatherPresets[n].ocean });
+      expect(gpuLambda(op), `${n} is being rescued by the anti-fold cap`)
+        .toBeCloseTo(op.choppiness, 9);
+    }
   });
 });
 
@@ -1260,7 +1281,11 @@ describe('live spectrum-param changes (§V.8: weather transitions re-shape the s
     mirror.update(t);
     const during = mirror.heightAt(31.7, -12.4, t);
     const fresh = new CpuOcean(99, op, sp);
-    for (let i = 0; i < 20; i++) {
+    // §B.51: the rebuild is AMORTISED over `SPECTRUM_REBUILD_STEPS` ticks now
+    // instead of landing in one, so the settle window is arm + steps, not 20.
+    // Driven off the constants rather than a literal — a slice-count change
+    // must not be able to make this test silently assert "still the old sea".
+    for (let i = 0; i < REBUILD_ARM_TICKS + SPECTRUM_REBUILD_STEPS + 2; i++) {
       t += DT;
       mirror.update(t);
     }

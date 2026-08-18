@@ -610,7 +610,16 @@ async function boot(): Promise<void> {
   ropes.mesh.castShadow = true;
 
   // §V.8: CPU mirror of the same seeded spectrum the GPU renders
-  const cpuOcean = new CpuOcean(state.seed);
+  /**
+   * §V.8 / §B.51: the mirror is handed the GPU simulation's OWN spectrum
+   * scheduler, not a second one built from the same seed. The rebuild is
+   * amortised over ~26 ticks now, so "both sides ran an identical arm-at-15
+   * countdown" is no longer enough to keep them on the same sea — one shared,
+   * double-buffered snapshot is, because the swap is one pointer both sides
+   * read. It also deletes the ~126 ms of full-res passes the mirror used to
+   * repeat on the same tick the GPU had just computed them.
+   */
+  const cpuOcean = new CpuOcean(state.seed, oceanParams, seaPhysicsParams, ocean.spectrum);
   // §V.72: ...and the same SEABED the ocean material shoals over. The material
   // was handed `archipelago.seabed` above; handing the mirror anything else —
   // including nothing — would put the hull on the open-ocean sea while the
@@ -703,6 +712,12 @@ async function boot(): Promise<void> {
     onAnchorToggle: () => {
       pendingAnchorToggle = !pendingAnchorToggle;
     },
+    // the settings screen's Weather row and the debug panel's dropdown are the
+    // SAME call (§V.62 — two ways in, one owner). The row has already written
+    // the preset's ocean half into the settings store by the time this runs,
+    // so the ocean lanes of this transition find themselves at target and only
+    // the sky and the clouds actually roll in. See `weatherWorldPatch`.
+    onWeatherPreset: (p) => weather.apply(p),
     onPause: () => {
       paused = true; // sim halts, render continues (§V.21)
     },
@@ -968,6 +983,20 @@ async function boot(): Promise<void> {
       // sails the player's exact code path rather than a parallel model
       const enemyCommands = stepAiShip(enemyAi, state, 0);
       stepShipSailing(enemyShip, enemyCommands.input, state.wind, dt);
+      /**
+       * ONE SLICE of the amortised spectrum rebuild, and the swap if this is
+       * the tick it lands on (§B.51).
+       *
+       * HERE, in the sim tick and immediately before `cpuOcean.update`, rather
+       * than inside `ocean.update` down in the render block — §V.8. Both sides
+       * adopt the new spectrum from the same shared snapshot, so whichever runs
+       * first must be the one BOTH are downstream of. Stepping it here means
+       * the mirror picks a swap up on the same tick, BEFORE buoyancy runs, so
+       * the hull and the drawn sea are never a tick apart. `ocean.update`
+       * calls this itself if nobody else did (paused frames, tests), and it is
+       * idempotent per frame.
+       */
+      ocean.advanceSpectrum(oceanParams);
       cpuOcean.update(state.time);
       // §T.16: Space fires the battery the CAMERA bears on (§I gives the
       // player one key, so the side has to be inferred from where she is

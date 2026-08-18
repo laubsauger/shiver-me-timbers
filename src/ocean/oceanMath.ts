@@ -739,6 +739,179 @@ export interface SpectrumData {
   slopeBins: Float64Array;
 }
 
+/**
+ * The fused pass as a RESUMABLE object, so one rebuild can be spread over many
+ * frames instead of landing as one 515 ms stall (§B.51).
+ *
+ * WHY ROW SLICES ARE EXACT, and it is the whole safety argument. The build is
+ * two loops over `m` (rows), and a slice is a contiguous ASCENDING range of
+ * them, so:
+ *  · `gaussianPair` is still drawn once per texel in m-outer/n-inner order,
+ *    with ONE `Rng` carried across the slice boundaries — the RNG sequence is
+ *    part of the spectrum's identity (a reseed would rotate every phase in the
+ *    sea), and carrying the generator is what preserves it;
+ *  · every accumulator receives exactly the same addends in exactly the same
+ *    order, so the doubles land on the same bits — bit-identical, not "within
+ *    tolerance".
+ * Both hold for ANY partition into contiguous ascending row ranges, which is
+ * why the slice COUNT is a free performance knob and not a correctness one:
+ * `tests/ocean.test.ts` pins 1, 3, 7, 24 and 512 slices against each other and
+ * against the six original single-purpose passes.
+ *
+ * TWO PHASES, because they have different dependencies. Phase A (`spectrum`)
+ * fills `re`/`im` and the five moments, one row at a time. Phase B (`pack`)
+ * writes the RGBA h0 texels, and texel (n,m) needs the MIRROR texel (−n,−m),
+ * i.e. row (N−m)%N — which is only available once phase A has finished the
+ * whole grid. So pack cannot start early, and it gets its own row budget.
+ * Measured at the shipped 512²×3: phase A ≈ 135 ms, phase B ≈ 7 ms.
+ */
+export class SpectrumBuild {
+  private readonly rng: Rng;
+  private readonly re: Float32Array;
+  private readonly im: Float32Array;
+  private readonly bins = new Float64Array(SLOPE_BIN_COUNT);
+  private readonly out: Float32Array;
+  private steepVar = 0;
+  private jacVar = 0;
+  private heightVar = 0;
+  private energy = 0;
+  private weighted = 0;
+  /** next un-built row of phase A */
+  private row = 0;
+  /** next un-packed row of phase B */
+  private packRow = 0;
+
+  constructor(
+    private readonly N: number,
+    private readonly domain: number,
+    seed: number,
+    private readonly p: OceanParams,
+    private readonly band: SpectrumBand,
+  ) {
+    this.rng = createRng(seed);
+    this.re = new Float32Array(N * N);
+    this.im = new Float32Array(N * N);
+    this.out = new Float32Array(N * N * 4);
+  }
+
+  get done(): boolean {
+    return this.packRow >= this.N;
+  }
+
+  /** fraction of the whole build already done, phases weighted by row count */
+  get progress(): number {
+    return (this.row + this.packRow) / (2 * this.N);
+  }
+
+  /**
+   * Run phase A up to (not including) row `spectrumRow`, then — only once
+   * phase A has covered the whole grid — phase B up to row `packRow`.
+   *
+   * TARGETS, NOT COUNTS, and that is what makes the schedule independent of
+   * the resolution. A caller that wants S even slices asks for
+   * `floor((j+1)·N/S)` on step j: exactly S steps for any N, with no short
+   * final slice and no dependence on whether S divides N. A per-call ROW COUNT
+   * would give `ceil(N/S)` rows per step and therefore `ceil(N/ceil(N/S))`
+   * steps, which is S at 512 and S−2 at 128 — a schedule that changes with the
+   * grid, on both sides of a §V.8 pair.
+   *
+   * Returns `done`.
+   */
+  runTo(spectrumRow: number, packRow: number): boolean {
+    if (this.row < spectrumRow) this.buildRows(Math.min(this.N, spectrumRow));
+    if (this.row >= this.N && this.packRow < packRow) {
+      this.packRows(Math.min(this.N, packRow));
+    }
+    return this.done;
+  }
+
+  /** run to completion — what the unsliced callers want */
+  finish(): SpectrumData {
+    this.runTo(this.N, this.N);
+    return this.result();
+  }
+
+  private buildRows(endRow: number): void {
+    const { N, domain, p, band, re, im, bins } = this;
+    const rng = this.rng;
+    for (let m = this.row; m < endRow; m++) {
+      for (let n = 0; n < N; n++) {
+        const kx = (2 * Math.PI * (n - N / 2)) / domain;
+        const kz = (2 * Math.PI * (m - N / 2)) / domain;
+        const k = Math.hypot(kx, kz);
+        // drawn unconditionally, as generateH0 does — the RNG sequence is part
+        // of the spectrum's identity, so a band-gated draw would reseed h0
+        const [g1, g2] = gaussianPair(rng);
+        const inBand = k > band.kMin && k <= band.kMax;
+        const amp = inBand ? Math.sqrt(waveSpectrum(kx, kz, p) / 2) / domain : 0;
+        const i = m * N + n;
+        re[i] = g1 * amp;
+        im[i] = g2 * amp;
+        if (!inBand || k < 1e-9) continue;
+        // spectralSteepness — transfer kx²/|k|
+        const transfer = (kx * kx) / k;
+        this.steepVar += 2 * (transfer * amp) ** 2;
+        // spectralJacobianRms — transfer |k|
+        this.jacVar += 2 * (k * amp) ** 2;
+        // spectralHeightVariance / spectralMeanWavenumber — transfer 1
+        const variance = 2 * amp * amp;
+        this.heightVar += variance;
+        this.energy += variance;
+        this.weighted += variance * k;
+        // slopeWavelengthHistogram — slope transfer |k| on the elevation
+        const sv = variance * k * k;
+        if (!(sv > 0)) continue;
+        const lam = (2 * Math.PI) / k;
+        const b = Math.round(
+          (Math.log2(lam) - SLOPE_BIN_MIN_LOG2) * SLOPE_BINS_PER_OCTAVE,
+        );
+        bins[Math.min(SLOPE_BIN_COUNT - 1, Math.max(0, b))] += sv;
+      }
+    }
+    this.row = endRow;
+  }
+
+  private packRows(endRow: number): void {
+    const { N, re, im, out } = this;
+    for (let m = this.packRow; m < endRow; m++) {
+      for (let n = 0; n < N; n++) {
+        const i = m * N + n;
+        const nm = (N - n) % N;
+        const mm = (N - m) % N;
+        const j = mm * N + nm;
+        out[i * 4 + 0] = re[i];
+        out[i * 4 + 1] = im[i];
+        out[i * 4 + 2] = re[j];
+        out[i * 4 + 3] = im[j];
+      }
+    }
+    this.packRow = endRow;
+  }
+
+  /**
+   * The finished spectrum. THROWS while the build is incomplete rather than
+   * returning a half-filled grid: a partially-built h0 is a sea that is
+   * neither the old one nor the new one, and §V.8 says the ship floats on the
+   * sea that is drawn — so "half a spectrum" must be impossible to obtain,
+   * not merely discouraged (§V.28, §Rule 8: fail loud).
+   */
+  result(): SpectrumData {
+    if (!this.done) {
+      throw new Error(
+        `SpectrumBuild.result: incomplete (rows ${this.row}/${this.N}, packed ${this.packRow}/${this.N})`,
+      );
+    }
+    return {
+      h0: this.out,
+      steepnessRms: Math.sqrt(Math.max(0, this.steepVar)),
+      jacobianRms: Math.sqrt(Math.max(0, this.jacVar)),
+      heightVariance: Math.max(0, this.heightVar),
+      meanWavenumber: this.energy > 0 ? this.weighted / this.energy : 0,
+      slopeBins: this.bins,
+    };
+  }
+}
+
 export function generateSpectrumData(
   N: number,
   domain: number,
@@ -746,70 +919,7 @@ export function generateSpectrumData(
   p: OceanParams,
   band: SpectrumBand,
 ): SpectrumData {
-  const rng: Rng = createRng(seed);
-  const re = new Float32Array(N * N);
-  const im = new Float32Array(N * N);
-  const bins = new Float64Array(SLOPE_BIN_COUNT);
-  let steepVar = 0;
-  let jacVar = 0;
-  let heightVar = 0;
-  let energy = 0;
-  let weighted = 0;
-  for (let m = 0; m < N; m++) {
-    for (let n = 0; n < N; n++) {
-      const kx = (2 * Math.PI * (n - N / 2)) / domain;
-      const kz = (2 * Math.PI * (m - N / 2)) / domain;
-      const k = Math.hypot(kx, kz);
-      // drawn unconditionally, as generateH0 does — the RNG sequence is part
-      // of the spectrum's identity, so a band-gated draw would reseed h0
-      const [g1, g2] = gaussianPair(rng);
-      const inBand = k > band.kMin && k <= band.kMax;
-      const amp = inBand ? Math.sqrt(waveSpectrum(kx, kz, p) / 2) / domain : 0;
-      const i = m * N + n;
-      re[i] = g1 * amp;
-      im[i] = g2 * amp;
-      if (!inBand || k < 1e-9) continue;
-      // spectralSteepness — transfer kx²/|k|
-      const transfer = (kx * kx) / k;
-      steepVar += 2 * (transfer * amp) ** 2;
-      // spectralJacobianRms — transfer |k|
-      jacVar += 2 * (k * amp) ** 2;
-      // spectralHeightVariance / spectralMeanWavenumber — transfer 1
-      const variance = 2 * amp * amp;
-      heightVar += variance;
-      energy += variance;
-      weighted += variance * k;
-      // slopeWavelengthHistogram — slope transfer |k| on the elevation
-      const sv = variance * k * k;
-      if (!(sv > 0)) continue;
-      const lam = (2 * Math.PI) / k;
-      const b = Math.round(
-        (Math.log2(lam) - SLOPE_BIN_MIN_LOG2) * SLOPE_BINS_PER_OCTAVE,
-      );
-      bins[Math.min(SLOPE_BIN_COUNT - 1, Math.max(0, b))] += sv;
-    }
-  }
-  const out = new Float32Array(N * N * 4);
-  for (let m = 0; m < N; m++) {
-    for (let n = 0; n < N; n++) {
-      const i = m * N + n;
-      const nm = (N - n) % N;
-      const mm = (N - m) % N;
-      const j = mm * N + nm;
-      out[i * 4 + 0] = re[i];
-      out[i * 4 + 1] = im[i];
-      out[i * 4 + 2] = re[j];
-      out[i * 4 + 3] = im[j];
-    }
-  }
-  return {
-    h0: out,
-    steepnessRms: Math.sqrt(Math.max(0, steepVar)),
-    jacobianRms: Math.sqrt(Math.max(0, jacVar)),
-    heightVariance: Math.max(0, heightVar),
-    meanWavenumber: energy > 0 ? weighted / energy : 0,
-    slopeBins: bins,
-  };
+  return new SpectrumBuild(N, domain, seed, p, band).finish();
 }
 
 /** Box-Muller from seeded rng */

@@ -6,14 +6,18 @@
 import * as THREE from 'three/webgpu';
 import { oceanParams, type OceanParams } from '../params/ocean';
 import {
-  cascadeBand,
   effectiveChoppiness,
   generateButterfly,
-  generateSpectrumData,
   slopeResolutionFootprint,
   slopeVarianceTotal,
   SLOPE_BIN_COUNT,
+  type SpectrumData,
 } from './oceanMath';
+import {
+  CASCADE_COUNT,
+  SpectrumScheduler,
+  type SpectrumSnapshot,
+} from './spectrumRebuild';
 import {
   createDataTexture,
   createOutputArrayTexture,
@@ -78,22 +82,19 @@ export class OceanCascade {
   private passes: unknown[] = [];
   private timeUniform!: { value: number };
   private choppinessUniform!: { value: number };
-  private readonly index: number;
-  private readonly seed: number;
 
   constructor(
     index: number,
-    seed: number,
+    _seed: number,
     butterfly: THREE.DataTexture,
     derivatives: THREE.StorageArrayTexture,
     p: OceanParams,
+    initial: SpectrumData,
   ) {
-    this.index = index;
-    this.seed = seed;
     this.domain = p.cascades[index].domain;
     const n = p.resolution;
 
-    this.h0Texture = createDataTexture(this.generateSpectrumData(p), n, n);
+    this.h0Texture = createDataTexture(this.adopt(initial), n, n);
     this.displacement = createOutputTexture(n);
     // the array is owned by OceanSimulation; this cascade owns layer `index`
     this.derivatives = { texture: derivatives, layer: index };
@@ -112,22 +113,18 @@ export class OceanCascade {
     this.passes = [spectrum.computeNode, ...fft.passes, unpack.computeNode];
   }
 
-  private generateSpectrumData(p: OceanParams): Float32Array {
-    const band = cascadeBand(this.index, p.splitWavelengths);
-    // ONE N² pass for h0 and all five moments (oceanMath.generateSpectrumData).
-    // These were six separate passes over the same grid, each re-evaluating the
-    // same `waveSpectrum` per texel; fusing them is bit-identical and measures
-    // 378 → 103 ms for a full 3-cascade rebuild. The moments are still measured
-    // on the same grid the spectrum uses, so the anti-fold cap keeps tracking
-    // every spectrum-shaping param (amplitude, wind, band split) automatically.
-    // seed offset per cascade → uncorrelated gaussians across cascades
-    const data = generateSpectrumData(
-      p.resolution,
-      this.domain,
-      this.seed + this.index * 7919,
-      p,
-      band,
-    );
+  /**
+   * Take a COMPLETE spectrum for this band and publish its moments.
+   *
+   * The cascade no longer computes its own: `SpectrumScheduler` owns the one
+   * amortised, double-buffered build and the §V.8 CPU mirror reads the SAME
+   * snapshot object, which is what makes "both sides swap atomically" a
+   * pointer identity rather than a schedule that has to be re-argued every
+   * time either side is touched (see spectrumRebuild.ts). The moments still
+   * come off the same grid the spectrum does, so the anti-fold cap keeps
+   * tracking every spectrum-shaping param automatically.
+   */
+  private adopt(data: SpectrumData): Float32Array {
     this.steepnessRms = data.steepnessRms;
     this.jacobianRms = data.jacobianRms;
     this.heightVariance = data.heightVariance;
@@ -158,10 +155,16 @@ export class OceanCascade {
     return slopeVarianceTotal(this.slopeBins);
   }
 
-  /** re-generate h0 after spectrum-shaping params change (live tweak) */
-  rebuild(p: OceanParams): void {
-    const data = this.generateSpectrumData(p);
-    (this.h0Texture.image as { data: unknown }).data = data;
+  /**
+   * Install a finished spectrum — THE SWAP.
+   *
+   * One statement, and until it runs the texture still holds the previous
+   * complete h0: the amortised build writes into its own arrays and this is
+   * the only line that makes them visible, so a half-rebuilt spectrum can
+   * never be drawn (see spectrumRebuild.ts's double-buffer note).
+   */
+  install(data: SpectrumData): void {
+    (this.h0Texture.image as { data: unknown }).data = this.adopt(data);
     this.h0Texture.needsUpdate = true;
   }
 
@@ -174,38 +177,21 @@ export class OceanCascade {
   }
 }
 
-/** params whose change requires h0 regeneration (vs live uniforms) */
 /**
- * EVERY param `waveSpectrum` reads. Omitting one is §B.7 verbatim — the GPU
- * keeps the launch-time h0 while the panel and the weather presets move the
- * number, silently, and the CPU buoyancy mirror then floats ships on a
- * different ocean than the one drawn (§V.8). The swell block was missing here
- * for exactly as long as it took to write this comment, and the presets lerp
- * all three of its keys. tests/ocean.test.ts pins the list against
- * `OceanParams` so the NEXT spectrum param cannot be forgotten either.
+ * The signature and its key list moved to `spectrumRebuild.ts` — the scheduler
+ * that owns the rebuild owns the definition of "the spectrum changed". Kept
+ * re-exported here because every existing consumer imports them from this
+ * module and the split is an implementation detail, not a contract change.
  */
-export const SPECTRUM_SIGNATURE_KEYS = [
-  'resolution', 'amplitude', 'windSpeed', 'windDirection',
-  'spreadPeak', 'spreadBelowPeak', 'spreadAbovePeak', 'spreadMin',
-  'oppositeWaveDamp', 'smallWaveCutoff',
-  'splitWavelengths', 'cascades',
-  'swellPeriod', 'swellAmplitude', 'swellDirection',
-  'swellDirectionality', 'swellBandwidth', 'swellGridModes',
-] as const;
-
-export function spectrumSignature(p: OceanParams): string {
-  return [
-    p.resolution, p.amplitude, p.windSpeed, p.windDirection,
-    p.spreadPeak, p.spreadBelowPeak, p.spreadAbovePeak, p.spreadMin,
-    p.oppositeWaveDamp, p.smallWaveCutoff,
-    p.splitWavelengths, p.cascades.map((c) => c.domain),
-    p.swellPeriod, p.swellAmplitude, p.swellDirection,
-    p.swellDirectionality, p.swellBandwidth, p.swellGridModes,
-  ].join('|');
-}
-
-/** §V.19 floor: three independent bands. Also the derivatives array's depth. */
-const CASCADE_COUNT = 3;
+export {
+  SPECTRUM_SIGNATURE_KEYS,
+  spectrumSignature,
+  SpectrumScheduler,
+  SPECTRUM_REBUILD_SLICES,
+  SPECTRUM_REBUILD_STEPS,
+  REBUILD_ARM_TICKS,
+  type SpectrumSnapshot,
+} from './spectrumRebuild';
 
 export class OceanSimulation {
   readonly cascades: OceanCascade[];
@@ -232,8 +218,21 @@ export class OceanSimulation {
   /** RMS Jacobian trace summed over cascades, at choppiness 1 — see the
    *  per-cascade field. Bands are independent, so variances add. */
   jacobianRms = 0;
-  private signature: string;
-  private rebuildCountdown = -1;
+  /**
+   * THE ONE OWNER OF THE REBUILD — shared with the §V.8 CPU mirror.
+   *
+   * Public so `CpuOcean.setSpectrumScheduler` can be handed THIS object rather
+   * than a second one built from the same seed. Two schedulers with identical
+   * inputs would swap on the same tick today and would stop doing so the first
+   * time either side's schedule was touched; one scheduler makes the mirror
+   * and the drawn sea the same pointer, which is a property nobody can break
+   * by editing one file (see spectrumRebuild.ts).
+   */
+  readonly spectrum: SpectrumScheduler;
+  /** last snapshot installed into the cascade textures — swap detector */
+  private adopted: SpectrumSnapshot;
+  /** guards `advanceSpectrum` to exactly one step per rendered frame */
+  private advancedThisFrame = false;
 
   constructor(seed: number, p: OceanParams = oceanParams) {
     const butterfly = createDataTexture(
@@ -245,26 +244,24 @@ export class OceanSimulation {
     // Allocated here rather than per cascade because the whole point is that
     // the three cascades share a single binding and a single sampler (§V.40).
     this.derivatives = createOutputArrayTexture(p.resolution, CASCADE_COUNT);
+    this.spectrum = new SpectrumScheduler(seed, p, CASCADE_COUNT);
+    this.adopted = this.spectrum.current;
     this.cascades = [0, 1, 2].map(
-      (i) => new OceanCascade(i, seed, butterfly, this.derivatives, p),
+      (i) =>
+        new OceanCascade(i, seed, butterfly, this.derivatives, p, this.adopted.cascades[i]),
     );
-    this.signature = spectrumSignature(p);
     this.refreshSeaState();
   }
 
-  /** bands are independent, so their variances add (quadrature on the RMS) */
+  /**
+   * Adopt the scheduler's whole-sea moments. They are computed once, on the
+   * snapshot, so the mirror's fold cap and this one cannot disagree by
+   * aggregating the same per-band numbers in two places (§V.8).
+   */
   private refreshSeaState(): void {
-    let heightVariance = 0;
-    let steepnessVariance = 0;
-    let jacobianVariance = 0;
-    for (const c of this.cascades) {
-      heightVariance += c.heightVariance;
-      steepnessVariance += c.steepnessRms * c.steepnessRms;
-      jacobianVariance += c.jacobianRms * c.jacobianRms;
-    }
-    this.heightRms = Math.sqrt(Math.max(1e-6, heightVariance));
-    this.steepnessRms = Math.sqrt(Math.max(0, steepnessVariance));
-    this.jacobianRms = Math.sqrt(Math.max(0, jacobianVariance));
+    this.heightRms = this.adopted.heightRms;
+    this.steepnessRms = this.adopted.steepnessRms;
+    this.jacobianRms = this.adopted.jacobianRms;
   }
 
   /**
@@ -292,27 +289,46 @@ export class OceanSimulation {
     return effectiveChoppiness(p.choppiness, this.jacobianRms, p.choppinessFoldLimit);
   }
 
+  /**
+   * ONE STEP of the amortised rebuild, and the swap if this is the step it
+   * lands on. Idempotent within a frame.
+   *
+   * CALL THIS FROM THE SIM TICK, BEFORE `CpuOcean.update`, and that ordering is
+   * the §V.8 contract rather than a preference. Both sides adopt the same
+   * snapshot the moment it exists; whoever runs first must therefore be the
+   * side that BOTH of them are downstream of. main.ts calls it immediately
+   * before `cpuOcean.update(state.time)`, so the mirror picks the new spectrum
+   * up on the same tick, before buoyancy runs — which is what the old
+   * "identical arm-at-15 countdown on both sides" bought, kept exactly.
+   *
+   * If nobody calls it, `update` below calls it, so a caller that only renders
+   * (tests, the headless suite) still gets a live spectrum. The flag is what
+   * stops it being stepped twice on a frame that does both.
+   */
+  advanceSpectrum(p: OceanParams = oceanParams): void {
+    // ALWAYS steps, and the dedupe lives in `update` instead. The other way
+    // round — `advanceSpectrum` skipping when a flag is set, `update` clearing
+    // it — freezes the scheduler FOREVER for any caller that steps the sim
+    // without also rendering it, and freezing is silent: the sea simply never
+    // rebuilds again (§B.7's symptom, §Rule 8). This way the worst a
+    // mis-wiring can do is step the build twice in a frame, which settles the
+    // sea sooner and cannot desynchronise the two sides, because both read the
+    // same snapshot whenever it appears.
+    this.advancedThisFrame = true;
+    if (!this.spectrum.advance(p)) return;
+    // THE SWAP. Until this line the textures still hold the previous complete
+    // h0; after it they hold the new one. There is no reachable in-between.
+    this.adopted = this.spectrum.current;
+    for (let i = 0; i < this.cascades.length; i++) {
+      this.cascades[i].install(this.adopted.cascades[i]);
+    }
+    this.refreshSeaState();
+  }
+
   /** call once per rendered frame with sim time (§V.2: time from SimState) */
   update(renderer: THREE.WebGPURenderer, time: number, p: OceanParams = oceanParams): void {
-    const sig = spectrumSignature(p);
-    if (sig !== this.signature) {
-      this.signature = sig;
-      // RATE LIMIT, NOT A QUIET-DETECTOR. Re-arming on every changed tick is
-      // what the old code did, and it makes a CONTINUOUSLY-changing input
-      // starve the countdown forever — it never reaches 0, so the sea never
-      // rebuilds at all. That is not a corner case: §V.46 drives windSpeed and
-      // amplitude off the storm field at the ship's own position, so a ship
-      // under way changes this signature EVERY TICK. Arming once and letting
-      // it run down gives a rebuild every 16 ticks (~267 ms) on a moving
-      // input, and still coalesces a slider drag into one rebuild after it
-      // stops. The signature is updated on every change, so what finally gets
-      // built is the LATEST spectrum, not the one that armed the counter.
-      if (this.rebuildCountdown < 0) this.rebuildCountdown = 15;
-    }
-    if (this.rebuildCountdown >= 0 && this.rebuildCountdown-- === 0) {
-      for (const c of this.cascades) c.rebuild(p);
-      this.refreshSeaState();
-    }
+    if (!this.advancedThisFrame) this.advanceSpectrum(p);
+    this.advancedThisFrame = false;
     // anti-fold cap, NOT the raw slider: storm raises amplitude AND choppiness,
     // and the summed displacement gradient then passes −1 over ~1.5% of the
     // surface — the sheet turns inside out (faceted crests) and every folded

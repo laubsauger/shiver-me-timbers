@@ -43,11 +43,13 @@ import {
   cpuButterflyIFFT,
   effectiveChoppiness,
   generateButterfly,
-  generateH0,
   GRAVITY,
-  spectralJacobianRms,
-  spectralMeanWavenumber,
+  type SpectrumData,
 } from '../ocean/oceanMath';
+import {
+  SpectrumScheduler,
+  type SpectrumSnapshot,
+} from '../ocean/spectrumRebuild';
 import {
   breakerClip,
   shoalFactor,
@@ -202,7 +204,22 @@ class MirrorCascade {
   private readonly a: { re: Float32Array; im: Float32Array };
   private readonly b: { re: Float32Array; im: Float32Array };
 
-  constructor(index: number, seed: number, p: OceanParams, redN: number) {
+  /**
+   * `spectrum` is THE SAME `SpectrumData` object `OceanCascade` was handed for
+   * this band, out of the one `SpectrumScheduler` snapshot — not a second
+   * computation of it (§V.8, and see spectrumRebuild.ts).
+   *
+   * WHAT THIS DELETED. The mirror used to re-derive, at full 512² and on the
+   * same tick the GPU had just computed the identical numbers:
+   * `spectralMeanWavenumber` per mirrored cascade, `generateH0` per mirrored
+   * cascade, and — the expensive one — `spectralJacobianRms` for all THREE
+   * cascades including the 22.7 m band, which alone measured 67.7 ms. Seven
+   * 512² passes, 126 ms, for numbers that were already sitting in the
+   * snapshot. `p` here is the snapshot's FROZEN params, so the band, the
+   * domain and the resolution are the ones the h0 was actually built with
+   * rather than whatever the live singleton has lerped to since.
+   */
+  constructor(index: number, p: OceanParams, redN: number, spectrum: SpectrumData) {
     this.n = redN;
     this.domain = p.cascades[index].domain;
     this.halfTexel = redN / (2 * p.resolution);
@@ -216,10 +233,8 @@ class MirrorCascade {
           `band kMax ${band.kMax.toFixed(3)} ≥ grid edge ${kEdge.toFixed(3)}`,
       );
     }
-    this.meanWavenumber = spectralMeanWavenumber(p.resolution, this.domain, p, band);
-    // identical h0 call to OceanCascade.generateSpectrumData (§V.8)
-    const full = generateH0(p.resolution, this.domain, seed + index * 7919, p, band);
-    this.h0 = extractCentralBlock(full, p.resolution, redN);
+    this.meanWavenumber = spectrum.meanWavenumber;
+    this.h0 = extractCentralBlock(spectrum.h0, p.resolution, redN);
     const size = redN * redN;
     this.omega = new Float32Array(size);
     this.kxN = new Float32Array(size);
@@ -429,58 +444,43 @@ export interface OceanHeightField {
 }
 
 /**
- * Params whose change requires h0 regeneration — MUST match the GPU's
- * spectrumSignature (oceanCascades.ts): weather transitions lerp
- * amplitude/windSpeed live, the GPU rebuilds its spectrum, and a mirror
- * that kept floating ships on the launch-time sea is exactly the drift V8
- * forbids ("storm waves roll over an unaffected ship").
- * mirrorResolution is CPU-only but rebuild-shaped too, so it's included.
+ * WHAT IS LEFT OF THE MIRROR'S OWN REBUILD TRIGGER, and why it is one field.
+ *
+ * Every SPECTRUM param used to be listed here, duplicating the GPU's
+ * `spectrumSignature` — two lists that had to be kept identical by hand, and
+ * §B.7 is what happens when they are not. They no longer can diverge: the
+ * mirror now rebuilds when the shared `SpectrumScheduler` publishes a new
+ * snapshot, i.e. on the same statement the GPU adopts it, so "the same
+ * spectrum params" is a pointer rather than a string comparison (§V.8).
+ *
+ * `mirrorResolution` is the one rebuild-shaped input the GPU does not have —
+ * it is the mirror's own grid size — so it keeps a trigger of its own.
  */
-function mirrorSignature(p: OceanParams, seaP: SeaPhysicsParams): string {
-  return [
-    p.resolution, p.amplitude, p.windSpeed, p.windDirection,
-    p.spreadPeak, p.spreadBelowPeak, p.spreadAbovePeak, p.spreadMin,
-    p.oppositeWaveDamp, p.smallWaveCutoff,
-    p.splitWavelengths, p.cascades.map((c) => c.domain),
-    // the SWELL train too — the presets lerp all three of these, and a mirror
-    // that misses them is §B.7 in its original form (§V.8)
-    p.swellPeriod, p.swellAmplitude, p.swellDirection,
-    p.swellDirectionality, p.swellBandwidth, p.swellGridModes,
-    seaP.mirrorResolution,
-  ].join('|');
-}
-
-/**
- * Σ-over-cascades displacement-gradient RMS, exactly as OceanSimulation
- * .refreshSeaState aggregates it: variance summed over ALL THREE GPU
- * cascades (not just the two mirrored here — the fold cap the GPU applies
- * is one number for the whole sea) then square-rooted. Cached with the
- * spectrum: it only moves when a spectrum-shaping param moves.
- */
-function totalJacobianRms(p: OceanParams): number {
-  let variance = 0;
-  for (let i = 0; i < p.cascades.length; i++) {
-    const s = spectralJacobianRms(
-      p.resolution,
-      p.cascades[i].domain,
-      p,
-      cascadeBand(i, p.splitWavelengths),
-    );
-    variance += s * s;
-  }
-  return Math.sqrt(Math.max(0, variance));
+function mirrorSignature(seaP: SeaPhysicsParams): string {
+  return String(seaP.mirrorResolution);
 }
 
 export class CpuOcean {
   private cascades: MirrorCascade[];
   private butterfly: Float32Array;
-  private readonly seed: number;
   private readonly oceanP: OceanParams;
   private readonly seaP: SeaPhysicsParams;
   private signature: string;
   /** §V.59 direction-free trace moment — what the fold cap must divide by */
   private jacobianRms: number;
-  private rebuildCountdown = -1;
+  /**
+   * THE SPECTRUM SOURCE (§V.8, §B.51). Normally the very object
+   * `OceanSimulation` owns, handed in by main.ts, so the drawn sea and the
+   * floated sea are downstream of ONE amortised, double-buffered build and
+   * swap on the same statement. When none is supplied — the headless suite,
+   * and any test that drives a mirror with no GPU sim — the mirror builds its
+   * own on the same schedule, so both configurations behave identically.
+   */
+  private readonly scheduler: SpectrumScheduler;
+  /** true when this mirror must step the scheduler itself (no GPU sim above) */
+  private readonly ownsScheduler: boolean;
+  /** last snapshot built from — swap detection is object identity, not a key */
+  private adopted: SpectrumSnapshot;
   private time = NaN;
   private gridTime = NaN;
   /**
@@ -533,19 +533,39 @@ export class CpuOcean {
     seed: number,
     oceanP: OceanParams = oceanParams,
     seaP: SeaPhysicsParams = seaPhysicsParams,
+    scheduler?: SpectrumScheduler,
   ) {
-    this.seed = seed;
     this.oceanP = oceanP;
     this.seaP = seaP;
-    this.signature = mirrorSignature(oceanP, seaP);
-    this.jacobianRms = totalJacobianRms(oceanP);
-    const n = seaP.mirrorResolution;
-    this.butterfly = generateButterfly(n);
+    this.signature = mirrorSignature(seaP);
+    this.ownsScheduler = scheduler === undefined;
+    this.scheduler = scheduler ?? new SpectrumScheduler(seed, oceanP);
+    this.adopted = this.scheduler.current;
+    this.jacobianRms = this.adopted.jacobianRms;
+    this.butterfly = generateButterfly(seaP.mirrorResolution);
+    this.cascades = [];
+    this.buildCascades();
+    this.refreshShoal();
+  }
+
+  /**
+   * (Re)build the mirrored cascades from the CURRENT snapshot. Cheap by
+   * construction — the N² work happened once, in the scheduler, for both
+   * consumers: what is left here is a 64² central-block extraction per
+   * cascade plus the per-mode k tables. Measured under 1 ms against the
+   * 107.7 ms this used to cost (§B.51).
+   */
+  private buildCascades(): void {
+    const n = this.seaP.mirrorResolution;
+    const snap = this.adopted;
     this.cascades = [];
     for (let i = 0; i < MIRRORED_CASCADES; i++) {
-      this.cascades.push(new MirrorCascade(i, seed, oceanP, n));
+      // snap.params, not this.oceanP: an amortised build spans ticks and a
+      // preset lerp moves the live singleton on every one of them, so the band
+      // and the domain must come from the params the h0 was built with
+      this.cascades.push(new MirrorCascade(i, snap.params, n, snap.cascades[i]));
     }
-    this.refreshShoal();
+    this.jacobianRms = snap.jacobianRms;
   }
 
   /**
@@ -654,25 +674,32 @@ export class CpuOcean {
   /** advance mirror to sim time; grids recompute every updateEveryTicks */
   update(time: number): void {
     this.time = time;
-    // track live spectrum-shaping tweaks; same 15-tick RATE LIMIT as the GPU
-    // (OceanSimulation.update) so both sides settle on the new sea on the same
-    // tick. §V.8: this arming rule is part of the mirror contract — arm-once
-    // vs re-arm-on-change differ by MANY TICKS under a continuously-moving
-    // spectrum, so the two sides must not be changed independently.
-    const sig = mirrorSignature(this.oceanP, this.seaP);
-    if (sig !== this.signature) {
+    /**
+     * §V.8 LOCKSTEP. The mirror adopts a new spectrum on the tick the shared
+     * scheduler publishes one, which is the same tick — and, in main.ts, the
+     * same statement — the GPU installs it into its h0 textures. There is no
+     * countdown here any more and that is the point: the old code kept a
+     * SECOND arm-at-15 countdown over a SECOND copy of the signature key list,
+     * and the two agreed only because someone had matched them by hand. An
+     * amortised rebuild would have broken that agreement immediately (the GPU
+     * swap moves 26 ticks later; a hand-matched countdown does not), and the
+     * failure mode is silent: the ship floats correctly on a sea that is drawn
+     * differently (§B.34, four user reports in one day).
+     *
+     * When this mirror owns its scheduler (no GPU sim above it) it steps it
+     * here, on the same once-per-tick cadence `OceanSimulation.advanceSpectrum`
+     * uses, so the two configurations produce the same schedule.
+     */
+    if (this.ownsScheduler) this.scheduler.advance(this.oceanP);
+    const sig = mirrorSignature(this.seaP);
+    const resized = sig !== this.signature;
+    if (resized) {
       this.signature = sig;
-      if (this.rebuildCountdown < 0) this.rebuildCountdown = 15;
+      this.butterfly = generateButterfly(this.seaP.mirrorResolution);
     }
-    if (this.rebuildCountdown >= 0 && this.rebuildCountdown-- === 0) {
-      const n = this.seaP.mirrorResolution;
-      this.butterfly = generateButterfly(n);
-      this.cascades = [];
-      for (let i = 0; i < MIRRORED_CASCADES; i++) {
-        this.cascades.push(new MirrorCascade(i, this.seed, this.oceanP, n));
-      }
-      // the fold cap is measured on the spectrum, so it moves with it
-      this.jacobianRms = totalJacobianRms(this.oceanP);
+    if (resized || this.scheduler.current !== this.adopted) {
+      this.adopted = this.scheduler.current;
+      this.buildCascades();
       this.gridTime = NaN; // force recompute below
     }
     // §V.72: cheap (one max + one divide per cascade) and it has to run every

@@ -61,6 +61,12 @@ import {
   SPECTRUM_SIGNATURE_KEYS,
   spectrumSignature,
 } from '../src/ocean/oceanCascades';
+import { SpectrumBuild } from '../src/ocean/oceanMath';
+import {
+  REBUILD_ARM_TICKS,
+  SPECTRUM_REBUILD_STEPS,
+  SpectrumScheduler,
+} from '../src/ocean/spectrumRebuild';
 import { seaPhysicsParams } from '../src/params/seaPhysics';
 import {
   buildOceanGrid,
@@ -721,14 +727,73 @@ describe('§B.7 every spectrum-shaping param forces a rebuild', () => {
     }
   });
 
+  /**
+   * §V.8 / §B.7: the mirror must rebuild on the SAME SET of params as the GPU.
+   *
+   * THIS USED TO BE A SOURCE-TEXT TEST — it grepped `cpuOcean.ts` for `p.<key>`
+   * for every signature key, because the mirror carried its OWN copy of the
+   * key list and the two had to be kept identical by hand. §B.51 deleted that
+   * copy: there is now one `SpectrumScheduler`, one signature, and the mirror
+   * rebuilds when the shared snapshot object changes. So the grep would now
+   * pass vacuously (it looks for text that is correctly absent) — the guard
+   * has to move to the BEHAVIOUR it was always a proxy for.
+   *
+   * Which is strictly stronger: it drives every spectrum param through a real
+   * mirror and asserts the sea the ship floats on actually moved. A key that
+   * failed to reach the mirror would have passed the grep by having the string
+   * `p.swellPeriod` anywhere in the file.
+   */
   it('the CPU buoyancy mirror rebuilds on the same set (§V.8)', () => {
-    // the two signatures are separate strings by design (the mirror adds its
-    // own resolution) but they must never disagree about WHEN to rebuild
-    const mirrorSrc = cpuOceanSource;
+    const RES = 128; // smallest grid the shipped 64² mirror can be cut from
+    const bumps: Partial<Record<string, unknown>> = {
+      amplitude: oceanParams.amplitude + 0.4,
+      windSpeed: oceanParams.windSpeed + 6,
+      windDirection: oceanParams.windDirection + 0.7,
+      spreadPeak: oceanParams.spreadPeak + 6,
+      spreadBelowPeak: oceanParams.spreadBelowPeak + 2,
+      spreadAbovePeak: oceanParams.spreadAbovePeak + 2,
+      spreadMin: oceanParams.spreadMin + 2,
+      oppositeWaveDamp: oceanParams.oppositeWaveDamp + 0.2,
+      smallWaveCutoff: oceanParams.smallWaveCutoff + 0.05,
+      swellPeriod: oceanParams.swellPeriod + 3,
+      swellAmplitude: oceanParams.swellAmplitude + 0.5,
+      swellDirection: oceanParams.swellDirection + 0.7,
+      // DOWN, not up: `swellEffectiveDirectionality` floors the spread at what
+      // the grid can carry (oceanMath, §V.48's shape on the angular axis), and
+      // the shipped 24 is already ABOVE that ceiling — so raising it is a real
+      // no-op on the GPU too, not a mirror defect. 2 is under every preset's
+      // ceiling, so it moves the sea on both sides.
+      swellDirectionality: 2,
+      // big enough to clear the SAME grid floor: `swellBandSigma` takes the
+      // max of the authored bandwidth and `swellGridModes` grid steps, and the
+      // shipped value sits under that floor, so a small bump is a no-op on the
+      // GPU too. (`swellGridModes` above raises the floor itself, so it bites.)
+      swellBandwidth: 1.2,
+      swellGridModes: oceanParams.swellGridModes + 2,
+    };
+    // every signature key is covered, or this test silently stops guarding one
     for (const key of SPECTRUM_SIGNATURE_KEYS) {
-      if (key === 'resolution' || key === 'cascades') continue;
-      expect(mirrorSrc, `mirrorSignature is missing ${key} (§B.7)`).toContain(`p.${key}`);
+      if (key === 'resolution' || key === 'cascades' || key === 'splitWavelengths') continue;
+      expect(Object.hasOwn(bumps, key), `no bump for signature key ${key}`).toBe(true);
     }
+    for (const [key, value] of Object.entries(bumps)) {
+      const p = { ...oceanParams, resolution: RES };
+      const mirror = new CpuOcean(3, p, { ...seaPhysicsParams });
+      mirror.update(0);
+      const before = mirror.heightAt(21.3, -8.7, 0);
+      (p as unknown as Record<string, unknown>)[key] = value;
+      for (let i = 0; i <= REBUILD_ARM_TICKS + SPECTRUM_REBUILD_STEPS; i++) mirror.update(0);
+      expect(
+        mirror.heightAt(21.3, -8.7, 0),
+        `${key} never reached the buoyancy mirror — ships would float on the old sea (§B.7)`,
+      ).not.toBe(before);
+    }
+    // and the deleted copy stays deleted: the mirror takes its spectrum from
+    // the shared scheduler, so it CANNOT grow a second key list to drift from
+    expect(
+      cpuOceanSource,
+      'cpuOcean must read the shared SpectrumScheduler, not rebuild its own spectrum',
+    ).toContain("from '../ocean/spectrumRebuild'");
   });
 });
 
@@ -2256,16 +2321,30 @@ describe('foam colour (§V.20)', () => {
  * was a sea that ignored the weather entirely until the value happened to
  * settle, and then a full 3-cascade rebuild landing as one stall.
  *
- * Arming ONCE and letting it run down gives a rebuild every 16 ticks under a
- * moving input, still coalesces a slider drag into one rebuild after the drag
+ * Arming ONCE and letting it run down gives a rebuild on a fixed cadence under
+ * a moving input, still coalesces a slider drag into one rebuild after the drag
  * stops, and — because the signature is updated on every change — builds the
  * LATEST spectrum rather than the one that armed the counter.
  *
+ * §B.51 MOVED THE CADENCE, DELIBERATELY, and this is what it now is. The
+ * rebuild is amortised over `SPECTRUM_REBUILD_STEPS` ticks instead of landing
+ * as one 515 ms stall, and the countdown is FROZEN while a build is in flight
+ * — a rebuild already under way IS the reaction to the change, so re-arming
+ * behind it would start a second build the tick the first landed, for a
+ * spectrum nobody ever saw. So a continuously-moving input now settles every
+ * `arm + 1 + steps` ticks rather than every 16, and the cost of each is spread
+ * instead of summed. The gap is asserted against the CONSTANTS rather than a
+ * literal, so a future change to either has to be an intentional one.
+ *
  * The two sides are tested TOGETHER on purpose: a mirror that rebuilds on
- * different ticks from the GPU is §V.8's exact failure, and the arming rule
- * is duplicated in the two files for the same reason `mirrorSignature` is.
+ * different ticks from the GPU is §V.8's exact failure. They can no longer
+ * disagree — both read one shared `SpectrumScheduler` snapshot — but the test
+ * stays, because it is the assertion that would catch anyone re-introducing a
+ * second schedule.
  */
 describe('spectrum rebuild rate limit (§V.8)', () => {
+  /** ticks between settled spectra under an input that moves every tick */
+  const CADENCE = REBUILD_ARM_TICKS + 1 + SPECTRUM_REBUILD_STEPS;
   // 128 is the smallest grid the shipped 64² mirror can be extracted from
   const RESOLUTION = 128;
   const stubRenderer = { compute: (): void => {} } as never;
@@ -2303,20 +2382,104 @@ describe('spectrum rebuild rate limit (§V.8)', () => {
   }
 
   it('a continuously moving spectrum rebuilds on a fixed cadence, not never', () => {
-    const { gpu } = driveContinuously(100);
-    // the old re-arming code produced ZERO rebuilds over these 100 ticks
+    const { gpu } = driveContinuously(6 * CADENCE);
+    // the old re-arming code produced ZERO rebuilds however long this ran
     expect(gpu.length).toBeGreaterThan(4);
-    // first rebuild is the debounce the slider drag wants — not immediate
-    expect(gpu[0]).toBeGreaterThanOrEqual(15);
-    // and then it is REGULAR: every gap is the same 16 ticks (~267 ms)
+    // first rebuild is the debounce the slider drag wants — not immediate, and
+    // it lands only once the amortised build has actually FINISHED. `>=`, not
+    // `===`: the ramp's first tick writes the values the params already hold,
+    // so the signature moves on tick 1, not tick 0.
+    expect(gpu[0]).toBeGreaterThanOrEqual(REBUILD_ARM_TICKS + SPECTRUM_REBUILD_STEPS);
+    // and then it is REGULAR
     const gaps = gpu.slice(1).map((t, i) => t - gpu[i]);
-    for (const gap of gaps) expect(gap).toBe(16);
+    for (const gap of gaps) expect(gap).toBe(CADENCE);
   });
 
   it('the mirror rebuilds on the SAME ticks as the GPU (§V.8)', () => {
-    const { gpu, mirror } = driveContinuously(100);
+    const { gpu, mirror } = driveContinuously(6 * CADENCE);
     expect(gpu.length).toBeGreaterThan(4); // not vacuously equal at zero
     expect(mirror).toEqual(gpu);
+  });
+
+  /**
+   * THE SPECTRUM IS NEVER OBSERVABLY HALF-BUILT — the double buffer, asserted
+   * rather than asserted-about (§B.51).
+   *
+   * A sliced rebuild that wrote into the live h0 would show a sea that is part
+   * of the old spectrum and part of the new one, with moments describing
+   * neither. Ships would float on it and the GPU would draw it. So the test is
+   * not "the swap is atomic" as a claim about the code; it is: on EVERY tick
+   * of the build, the sea state is EXACTLY the old one or EXACTLY the new one,
+   * and it takes exactly one value in between them at no point.
+   */
+  it('never exposes a partially-rebuilt spectrum (double buffer)', () => {
+    const p = { ...oceanParams, resolution: RESOLUTION };
+    const sim = new OceanSimulation(7, p);
+    const before = sim.significantWaveHeight();
+    p.windSpeed = 21;
+    p.amplitude = 1.1;
+    const seen = new Set<number>();
+    for (let i = 0; i < CADENCE; i++) {
+      sim.update(stubRenderer, 0, p);
+      seen.add(sim.significantWaveHeight());
+    }
+    const after = sim.significantWaveHeight();
+    expect(after).not.toBe(before);
+    // exactly two values across the whole build: the old sea and the new one
+    expect([...seen].sort()).toEqual([before, after].sort());
+  });
+
+  /**
+   * §V.8's REAL claim, and the one an amortised rebuild puts at risk: the sea
+   * the ship floats on and the sea that is drawn are the same sea ON EVERY
+   * TICK, not merely at rest. A mirror that swapped three frames after the GPU
+   * would pass every "does it eventually agree" test and still be §B.34.
+   *
+   * The two are compared through the number BOTH derive from the spectrum and
+   * BOTH must act on — the fold-capped Tessendorf λ, which is a function of
+   * the whole-sea Jacobian RMS. It moves when and only when the spectrum
+   * swaps, so tick-by-tick equality of λ is tick-by-tick equality of "which
+   * spectrum am I on".
+   */
+  it('mirror and GPU are on the same spectrum on EVERY tick of a sliced rebuild', () => {
+    const p = { ...oceanParams, resolution: RESOLUTION };
+    const sp = { ...seaPhysicsParams };
+    // the probe below reads λ, and λ only tracks the spectrum WHERE THE FOLD
+    // CAP BITES — under the cap it is just the artist's slider. Raise it so
+    // `effectiveChoppiness` is a direct readout of the whole-sea Jacobian RMS,
+    // i.e. of which spectrum each side is on.
+    p.choppiness = 4;
+    const sim = new OceanSimulation(7, p);
+    // main.ts's wiring: ONE scheduler, both sides downstream of it
+    const mirror = new CpuOcean(7, p, sp, sim.spectrum);
+    const lambdas = new Set<number>();
+    for (let i = 0; i < 3 * CADENCE; i++) {
+      p.windSpeed = 11 + i * 0.25;
+      p.amplitude = 0.24 + i * 0.02;
+      // the main.ts order: step the shared scheduler, then the mirror, then
+      // the GPU — so a swap reaches buoyancy on the same tick it reaches h0
+      sim.advanceSpectrum(p);
+      mirror.update(0);
+      sim.update(stubRenderer, 0, p);
+      expect(mirror.effectiveChoppiness()).toBe(sim.effectiveChoppiness(p));
+      lambdas.add(sim.effectiveChoppiness(p));
+    }
+    // fail loud: if λ never moved, the equality above guarded nothing
+    expect(lambdas.size).toBeGreaterThan(1);
+  });
+
+  /**
+   * The shared scheduler is what makes the lockstep above a property of the
+   * WIRING rather than of two hand-matched countdowns. Pin it: the mirror
+   * built against a sim's scheduler must be reading that sim's actual object.
+   */
+  it('the mirror can be handed the simulation\'s own scheduler', () => {
+    const p = { ...oceanParams, resolution: RESOLUTION };
+    const sim = new OceanSimulation(7, p);
+    expect(sim.spectrum).toBeInstanceOf(SpectrumScheduler);
+    const mirror = new CpuOcean(7, p, { ...seaPhysicsParams }, sim.spectrum);
+    // the mirror's fold cap comes off the SAME snapshot the sim aggregated
+    expect(mirror.effectiveChoppiness()).toBe(sim.effectiveChoppiness(p));
   });
 
   it('a slider drag that STOPS still coalesces into one rebuild', () => {
@@ -2424,6 +2587,66 @@ describe('fused spectrum build (generateSpectrumData)', () => {
       expect(fused.heightVariance).toBe(
         spectralHeightVariance(storm.resolution, domain, storm, band),
       );
+    }
+  });
+
+  /**
+   * SLICING IS BIT-IDENTICAL, AND THAT IS THE SAFETY PROPERTY THE WHOLE §B.51
+   * AMORTISATION RESTS ON (§V.8).
+   *
+   * A rebuild is now spread over ~26 ticks so a sea-state change stops landing
+   * as one 515 ms stall. The sea must not move a bit because of it: the ship
+   * floats on the mirror's h0 and the GPU draws from the same h0, so a slice
+   * boundary that perturbed the RNG sequence by ONE DRAW would silently change
+   * every phase in the ocean — no error, no NaN, just a different sea.
+   *
+   * WHY IT IS EXACT, and it is a property of the PARTITION rather than of the
+   * slice count: a slice is a contiguous ASCENDING range of rows over the same
+   * m-outer/n-inner loop, with ONE `Rng` carried across the boundaries, so
+   * every `gaussianPair` is drawn at the same texel in the same order and every
+   * accumulator receives the same addends in the same order — the doubles land
+   * on the same bits. That argument does not mention the slice count, so the
+   * test does not either: it pins wildly different partitions (1, 3, 7, the
+   * shipped 24, and one row at a time) against the unsliced result and against
+   * each other, on the shipped AND the storm spectrum.
+   *
+   * 3 and 7 are in the list on purpose — they do NOT divide 512, so the last
+   * slice is short and the boundaries land on rows no round number would test.
+   */
+  it('is bit-identical however the rebuild is sliced', () => {
+    for (const params of [p, { ...p, windSpeed: 18, amplitude: 1.2 }]) {
+      for (let i = 0; i < params.cascades.length; i++) {
+        const band = cascadeBand(i, params.splitWavelengths);
+        const domain = params.cascades[i].domain;
+        const seed = 4242 + i;
+        const N = params.resolution;
+        const whole = generateSpectrumData(N, domain, seed, params, band);
+        for (const slices of [1, 3, 7, 24, N]) {
+          const build = new SpectrumBuild(N, domain, seed, params, band);
+          for (let j = 0; j < slices; j++) {
+            // a partial build must be UNREACHABLE, not merely discouraged
+            expect(() => build.result()).toThrow();
+            build.runTo(Math.floor(((j + 1) * N) / slices), 0);
+          }
+          for (let j = 0; j < slices; j++) {
+            build.runTo(N, Math.floor(((j + 1) * N) / slices));
+          }
+          const sliced = build.result();
+          let mismatched = 0;
+          for (let t = 0; t < whole.h0.length; t++) {
+            if (sliced.h0[t] !== whole.h0[t]) mismatched++;
+          }
+          expect(mismatched, `cascade ${i} @ ${slices} slices: h0 texels differ`).toBe(0);
+          expect(sliced.steepnessRms).toBe(whole.steepnessRms);
+          expect(sliced.jacobianRms).toBe(whole.jacobianRms);
+          expect(sliced.heightVariance).toBe(whole.heightVariance);
+          expect(sliced.meanWavenumber).toBe(whole.meanWavenumber);
+          for (let b = 0; b < whole.slopeBins.length; b++) {
+            expect(sliced.slopeBins[b], `cascade ${i} @ ${slices} slices: bin ${b}`)
+              .toBe(whole.slopeBins[b]);
+          }
+        }
+      }
     }
   });
 });
