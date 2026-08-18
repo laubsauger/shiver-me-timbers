@@ -23,7 +23,9 @@ import { div } from './dom';
 import { createQuickControls } from './quickControls';
 
 export type { GameSettings, QualityHints, Quality, SettingsStore } from './settingsStore';
-export { QUALITY_PRESETS, QUALITY_BUNDLES, DEFAULT_SETTINGS } from './settingsStore';
+export {
+  QUALITY_PRESETS, QUALITY_BUNDLES, DEFAULT_SETTINGS, applyWorldSettings,
+} from './settingsStore';
 export type { GraphicsFeatureId } from './graphicsFeatures';
 export { GRAPHICS_FEATURES, setFeatureSink, unwiredFeatures } from './graphicsFeatures';
 export type { WindReadout } from './hud';

@@ -42,6 +42,12 @@ export interface FollowCamHandle {
   isDebugPinned(): boolean;
   /** ship-local position of the wheel — where the H key puts the captain */
   setHelmAnchor(local: Vec3Like): void;
+  /**
+   * CUT the chase to the ship on the next frame instead of damping toward her.
+   * For teleports (§T.52) — the exponential chase would otherwise fly the lens
+   * the whole way, arriving seconds later.
+   */
+  snap(): void;
   dispose(): void;
 }
 
@@ -59,6 +65,7 @@ export function createFollowCam(
     clearDebugPose: () => cam.clearDebugPose(),
     isDebugPinned: () => cam.isDebugPinned(),
     setHelmAnchor: (local) => cam.setHelmAnchor(local),
+    snap: () => cam.snap(),
     dispose: () => cam.dispose(),
   };
 }

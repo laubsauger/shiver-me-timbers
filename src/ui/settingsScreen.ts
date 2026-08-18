@@ -16,6 +16,8 @@ import { featureNeedsReload, featureWired, shadowMapSizeNeedsReload, unwiredFeat
 import { sectionHead, segmentRow, sliderRow, switchRow } from './settingsControls';
 import type { SwitchRow } from './settingsControls';
 import { button, div, el } from './dom';
+import { CARDINALS, cardinal } from './windDial';
+import { DEFAULT_SETTINGS, SEA_RANGES, SEA_STATES, seaStateFor, seaStatePatch } from './settingsStore';
 import { CONTROL_GROUPS } from '../input/controlMap';
 
 /** structural mirror of AudioSystem.musicInfo() — no import into src/audio */
@@ -75,6 +77,107 @@ function clockLabel(v: number): string {
   // 17.999 rounds minutes to 60; carry it rather than printing "17:60"
   const hh = m === 60 ? (h + 1) % 24 : h;
   return `${String(hh).padStart(2, '0')}:${String(m === 60 ? 0 : m).padStart(2, '0')}`;
+}
+
+const DEG = Math.PI / 180;
+
+/**
+ * A wind is NAMED for where it comes FROM — a northerly blows toward the
+ * south. `windDirection` is the bearing it blows TOWARD, so every label on
+ * this control is the stored bearing turned through 180°, and every value
+ * written back is the label's bearing turned through 180° again.
+ *
+ * Getting this backwards is silent and total: the sea, the sails and the
+ * flags would all still agree with each other, and all be reversed against
+ * the word on the button.
+ */
+const oppositeDeg = (deg: number): number => (deg + 180) % 360;
+
+/** the toward-bearing (rad) of a wind named for the compass point it comes from */
+export const WIND_PRESETS: readonly { value: number; label: string }[] = CARDINALS.map(
+  (label, i) => ({ value: oppositeDeg(i * 45) * DEG, label }),
+);
+
+/**
+ * Stored toward-bearing (rad) → the FROM bearing in whole degrees, snapped to
+ * the slider's own 5° step. Rounded rather than truncated because the rad↔deg
+ * round trip is not exact in binary: 225° comes back as 224.99999999999997,
+ * and a truncating slider would read one step low for every preset.
+ */
+export function windFromDeg(rad: number): number {
+  const toward = ((((rad / DEG) % 360) + 360) % 360);
+  return (Math.round(oppositeDeg(toward) / 5) * 5) % 360;
+}
+
+/** the slider's own value IS the FROM bearing: 45 → "from 045° NE" */
+function windLabel(fromDeg: number): string {
+  const d = ((Math.round(fromDeg) % 360) + 360) % 360;
+  return `from ${String(d).padStart(3, '0')}° ${cardinal(d)}`;
+}
+
+/**
+ * Beaufort force and its name for a true wind speed in m/s — the real bands,
+ * not a made-up scale. This is what makes the slider readable instead of a
+ * bare number: Force 3 at 3.4 m/s is where WHITECAPS start, i.e. the first
+ * place the sea itself visibly answers this control, and Force 6 is where the
+ * shipped default sits. A player who wants "a bit more sea" is looking for a
+ * force, not for a metre per second.
+ */
+const BEAUFORT: readonly { from: number; force: number; name: string }[] = [
+  { from: 20.8, force: 9, name: 'strong gale' },
+  { from: 17.2, force: 8, name: 'gale' },
+  { from: 13.9, force: 7, name: 'near gale' },
+  { from: 10.8, force: 6, name: 'strong breeze' },
+  { from: 8.0, force: 5, name: 'fresh breeze' },
+  { from: 5.5, force: 4, name: 'moderate breeze' },
+  { from: 3.4, force: 3, name: 'gentle breeze' },
+  { from: 1.6, force: 2, name: 'light breeze' },
+  { from: 0.5, force: 1, name: 'light air' },
+  { from: 0, force: 0, name: 'calm' },
+];
+
+export function windSpeedLabel(v: number): string {
+  const b = BEAUFORT.find((band) => v >= band.from) ?? BEAUFORT[BEAUFORT.length - 1];
+  return `${v.toFixed(1)} m/s · F${b.force} ${b.name}`;
+}
+
+const GRAVITY = 9.81;
+
+/**
+ * Swell height in the unit a mariner reads: SIGNIFICANT height, which is 4×
+ * the RMS elevation the param stores (see `swellAmplitude` in params/ocean).
+ * Showing the raw 0.34 would be showing a number nobody can picture; 1.4 m is
+ * a sea you can imagine standing in.
+ */
+export function swellHeightLabel(rms: number): string {
+  return rms <= 0 ? 'none — pure wind sea' : `${(4 * rms).toFixed(1)} m`;
+}
+
+/**
+ * Period AND the wavelength it implies (λ = gT²/2π), because the period alone
+ * does not say how far apart the crests are and the wavelength is what decides
+ * whether a 35 m hull lifts to a wave or rides over it.
+ *
+ * MEASURED HEIGHT-NEUTRAL across this whole range — Hs 2.79 m at 4 s against
+ * 2.69 m at 20 s — because the swell spectrum is normalised for its own
+ * height. So this slider changes the sea's CHARACTER and nothing else, which
+ * is exactly the "long rolling swell under light chop" the weather presets
+ * record as unreachable.
+ */
+export function swellPeriodLabel(t: number): string {
+  return `${t.toFixed(1)} s · λ ${Math.round((GRAVITY * t * t) / (2 * Math.PI))} m`;
+}
+
+/**
+ * The wind sea's ENERGY, against the sea as shipped. There is no honest metre
+ * reading for this one: it is the Phillips scale, and the project has already
+ * been bitten by treating it as a height (amplitude fell 0.75 → 0.32 while Hs
+ * ROSE 2.3 → 2.8 m, i.e. the two moved in opposite directions). A multiple of
+ * a sea the player has actually seen is the readable, true thing to print.
+ */
+export function windSeaLabel(v: number, shipped: number): string {
+  if (v <= 0) return 'flat — swell only';
+  return `${(v / Math.max(1e-6, shipped)).toFixed(2)}×`;
 }
 
 /** section title → the switches it holds, in reading order */
@@ -183,11 +286,108 @@ export function createSettingsScreen(store: SettingsStore, onBack: () => void): 
     onInput: (v) => store.set({ world: { timeOfDay: v } }),
   });
 
+  // — wind —
+  // Beside time of day and for the same reason: both stage the world, neither
+  // is a performance decision, and a quality preset must never move either.
+  //
+  // BOTH of these rows commit on RELEASE. windSpeed and windDirection are both
+  // in the ocean's spectrum signature, so either one moving rebuilds all three
+  // FFT cascades — 419 ms warm. See `commitOnRelease` in settingsControls.
+  const windPreset = segmentRow<number>({
+    label: 'Wind',
+    hint: 'Where the wind blows FROM, as a sailor names it. Turns the sea, the sails and the flags together.',
+    options: WIND_PRESETS,
+    onSelect: (v) => store.set({ world: { windDirection: v } }),
+  });
+  const windSlider = sliderRow({
+    label: 'Exact bearing',
+    hint: 'Anything between the eight points. Settles on release — the sea is refitted, not nudged.',
+    min: 0, max: 355, step: 5, format: windLabel,
+    commitOnRelease: true,
+    // the SLIDER is in degrees and the STORE is in radians, and both ends of
+    // the pair go through this one multiplication so a preset and the slider
+    // landing on the same point produce the identical float — otherwise the
+    // preset plate would never light up for a bearing the slider set
+    onInput: (deg) => store.set({ world: { windDirection: oppositeDeg(deg) * DEG } }),
+  });
+  const windSpeed = sliderRow({
+    label: 'Wind speed',
+    hint: 'Force 3 is where the first whitecaps break. Above Force 6 she is hard work under full canvas.',
+    ...SEA_RANGES.windSpeed,
+    format: windSpeedLabel,
+    commitOnRelease: true,
+    onInput: (v) => store.set({ world: { windSpeed: v } }),
+  });
+
+  // — sea state ladder —
+  // Eight rungs where there used to be three presets an ocean apart. The plate
+  // is the coarse gesture ("give me a gale"); the sliders under it are the fine
+  // one, and moving any of them simply drops the plate to Custom.
+  const seaState = segmentRow<string>({
+    label: 'Sea state',
+    hint: 'The Beaufort scale, as a mariner reads it off the deck. Sets the wind sea and suggests a swell to match — both stay yours to alter after.',
+    options: SEA_STATES.map((r) => ({ value: r.id, label: r.label })),
+    onSelect: (id) => {
+      const rung = SEA_STATES.find((r) => r.id === id);
+      if (rung) store.set({ world: seaStatePatch(rung) });
+    },
+  });
+  // the NOAA description of whatever sea is actually set — this is what makes
+  // eight numbered cells legible, and it is quoted rather than written
+  const seaNote = el('p', 'smt-note', '');
+  seaState.root.appendChild(seaNote);
+
+  const windSea = sliderRow({
+    label: 'Wind sea',
+    hint: 'How much energy the local wind puts into the waves it raises. Wind speed sets their LENGTH; this sets their height.',
+    ...SEA_RANGES.amplitude,
+    format: (v) => windSeaLabel(v, DEFAULT_SETTINGS.world.amplitude),
+    commitOnRelease: true,
+    onInput: (v) => store.set({ world: { amplitude: v } }),
+  });
+
+  // The swell is a SECOND wave train, radiated by a storm days away and miles
+  // off, and it is decoupled from the wind on purpose — a long ground swell
+  // under a flat calm is a real sea and one of the best ones there is.
+  const swellHeight = sliderRow({
+    label: 'Swell height',
+    hint: 'The long train running under the wind chop. At nought the sea is pure wind sea.',
+    ...SEA_RANGES.swellAmplitude,
+    format: swellHeightLabel,
+    commitOnRelease: true,
+    onInput: (v) => store.set({ world: { swellAmplitude: v } }),
+  });
+  const swellPeriod = sliderRow({
+    label: 'Swell period',
+    hint: 'Seconds between crests. Long is a slow ocean lift, short is a steep confused sea — the height does not change either way.',
+    ...SEA_RANGES.swellPeriod,
+    format: swellPeriodLabel,
+    commitOnRelease: true,
+    onInput: (v) => store.set({ world: { swellPeriod: v } }),
+  });
+  const swellBearing = sliderRow({
+    label: 'Swell bearing',
+    hint: 'Swell running ACROSS the wind is the clearest sign this water came from somewhere. It does not follow the wind, by design.',
+    min: 0, max: 355, step: 5, format: windLabel,
+    commitOnRelease: true,
+    onInput: (deg) => store.set({ world: { swellDirection: oppositeDeg(deg) * DEG } }),
+  });
+
   const graphicsRows = div(
     'smt-rows',
     div('smt-section', sectionHead('Preset'), quality.root),
     div('smt-section', sectionHead('Display'), resolution.root),
     div('smt-section', sectionHead('World'), todPreset.root, todSlider.root),
+    // the sea gets its own section: it is the biggest group on the screen now,
+    // and "close to weather and all of this kind of stuff" (user) is satisfied
+    // by sitting directly under the hour, not by sharing its rule
+    div(
+      'smt-section',
+      sectionHead('Sea'),
+      seaState.root,
+      windPreset.root, windSlider.root, windSpeed.root, windSea.root,
+      swellHeight.root, swellPeriod.root, swellBearing.root,
+    ),
     ...featureSections,
     div('smt-section', sectionHead('Scenery'), foliage.root),
   );
@@ -301,6 +501,23 @@ export function createSettingsScreen(store: SettingsStore, onBack: () => void): 
     // when the hour sits between named times, which is the honest state
     todPreset.set(s.world.timeOfDay);
     todSlider.set(s.world.timeOfDay);
+    // same contract for the wind: the plate lights only on an exact point, the
+    // slider always shows the truth. The plate goes dark between points and
+    // that is the honest state, not a missing highlight.
+    windPreset.set(s.world.windDirection);
+    windSlider.set(windFromDeg(s.world.windDirection));
+    windSpeed.set(s.world.windSpeed);
+    windSea.set(s.world.amplitude);
+    swellHeight.set(s.world.swellAmplitude);
+    swellPeriod.set(s.world.swellPeriod);
+    swellBearing.set(windFromDeg(s.world.swellDirection));
+    // the ladder highlights only on an exact rung; between rungs it goes dark
+    // and the note says what the sea is anyway, which is the useful half
+    const rung = seaStateFor(s.world);
+    seaState.set(rung?.id ?? '');
+    seaNote.textContent = rung
+      ? `Force ${rung.label} — ${rung.name}. ${rung.sea} About ${rung.hs.toFixed(1)} m.`
+      : 'Between forces — set by hand from the sliders below.';
     for (const [id, row] of switches) {
       const on = s.graphics.features[id];
       const f = GRAPHICS_FEATURES.find((x) => x.id === id)!;

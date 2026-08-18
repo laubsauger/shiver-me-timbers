@@ -12,12 +12,33 @@ import {
   QUALITY_BUNDLES,
   QUALITY_PRESETS,
   STORAGE_KEY,
+  SEA_RANGES,
+  SEA_STATES,
+  applyWorldSettings,
+  seaStateFor,
+  seaStatePatch,
   createSettingsStore,
   presetIntact,
   sanitizeSettings,
 } from '../src/ui/settingsStore';
 import type { Quality, QualityHints, StorageLike } from '../src/ui/settingsStore';
 import { skyParams } from '../src/params/sky';
+// the §V.62 wiring check below drives the REAL wind consumers, not fakes: the
+// spectrum the sea is rebuilt from, and the rig that answers to it
+import { oceanParams } from '../src/params/ocean';
+import { spectrumSignature } from '../src/ocean/oceanCascades';
+import { phillips } from '../src/ocean/oceanMath';
+import { sailDrive } from '../src/ship/sailDynamics';
+import { apparentWind } from '../src/ship/flagDynamics';
+import { shipMaterialParams } from '../src/params/ship';
+import {
+  WIND_PRESETS,
+  swellHeightLabel,
+  swellPeriodLabel,
+  windFromDeg,
+  windSpeedLabel,
+} from '../src/ui/settingsScreen';
+import { cascadeBand, spectralHeightVariance } from '../src/ocean/oceanMath';
 // the REAL param files, imported for the bundle-vs-params check below. The
 // registry inside these tests holds deliberate fakes, which is precisely why
 // three bundle/param divergences shipped unnoticed (§V.62).
@@ -706,5 +727,473 @@ describe('time of day is a first-class setting', () => {
 
   it('defaults to the sky params value, so there are not two drifting defaults', () => {
     expect(DEFAULT_SETTINGS.world.timeOfDay).toBe(skyParams.timeOfDay);
+  });
+});
+
+/**
+ * WIND IS A CONTROL, NOT A DECORATION (§V.62).
+ *
+ * User: "add a control for us then to change the wind direction — that's
+ * important. Same goes for time of day... this should go somewhere close to
+ * weather and all of this kind of stuff."
+ *
+ * `oceanParams.windDirection` had NO runtime writer at all before this — the
+ * weather presets patch `windSpeed` only, and the sole writers were the debug
+ * panel and a `?wind=` boot query on a dev entry point. A settings row that
+ * wrote nothing but the store would therefore have been the thirteenth silent
+ * no-op in §B, and it would have LOOKED right: the row moves, the label reads
+ * back, nothing on screen changes.
+ *
+ * So these tests do not check that a number was stored. They check that the
+ * number reaches the two things the player can actually see move — the SEA
+ * (the FFT spectrum is rebuilt from these keys) and the SAILS (the cloth and
+ * the drive are computed from them) — against the REAL param objects the
+ * engine reads, not a fake.
+ */
+/** a full world block, so a test can name only the keys it is about */
+function world(patch: Partial<typeof DEFAULT_SETTINGS.world> = {}) {
+  return { ...DEFAULT_SETTINGS.world, ...patch };
+}
+
+describe('the wind control reaches the sea and the sails', () => {
+  const shippedWind = { dir: oceanParams.windDirection, speed: oceanParams.windSpeed };
+  const shippedHour = skyParams.timeOfDay;
+  const shippedSea = {
+    amplitude: oceanParams.amplitude,
+    swellAmplitude: oceanParams.swellAmplitude,
+    swellPeriod: oceanParams.swellPeriod,
+    swellDirection: oceanParams.swellDirection,
+  };
+  afterEach(() => {
+    Object.assign(oceanParams, shippedSea);
+    // these tests write the SHIPPED singletons on purpose — a fake would prove
+    // exactly nothing about whether the control is wired
+    oceanParams.windDirection = shippedWind.dir;
+    oceanParams.windSpeed = shippedWind.speed;
+    skyParams.timeOfDay = shippedHour;
+  });
+
+  it('defaults to the ocean params, so there are not two drifting defaults', () => {
+    expect(DEFAULT_SETTINGS.world.windDirection).toBe(oceanParams.windDirection);
+    expect(DEFAULT_SETTINGS.world.windSpeed).toBe(oceanParams.windSpeed);
+  });
+
+  it('lands on oceanParams — the ONE wind source every system reads', () => {
+    applyWorldSettings(world({ timeOfDay: 9, windDirection: 2.5, windSpeed: 7 }));
+    expect(oceanParams.windDirection).toBe(2.5);
+    expect(oceanParams.windSpeed).toBe(7);
+    expect(skyParams.timeOfDay).toBe(9); // the same bridge still carries the hour
+  });
+
+  it('MOVES THE SEA: both keys are in the spectrum signature, so the sea is refitted', () => {
+    // this is the actual mechanism — OceanSimulation.update compares this
+    // string and rebuilds all three cascades when it changes. If a future
+    // refactor drops either key from the signature the control goes dead
+    // silently, with the row still moving.
+    applyWorldSettings(world({ timeOfDay: 9, windDirection: 0.5, windSpeed: 9 }));
+    const before = spectrumSignature(oceanParams);
+    applyWorldSettings(world({ timeOfDay: 9, windDirection: 2.0, windSpeed: 9 }));
+    expect(spectrumSignature(oceanParams)).not.toBe(before);
+    applyWorldSettings(world({ timeOfDay: 9, windDirection: 2.0, windSpeed: 18 }));
+    expect(spectrumSignature(oceanParams)).not.toBe(before);
+  });
+
+  it('MOVES THE SEA: turning the wind turns the wave energy with it', () => {
+    // the signature proves a rebuild happens; this proves the rebuild lands on
+    // a DIFFERENT sea rather than an identical one. Phillips is the function
+    // that turns wind into wave energy, so a mode across the new wind must
+    // gain what a mode across the old one loses.
+    const kx = 0.05;
+    const kz = 0.0;
+    applyWorldSettings(world({ timeOfDay: 9, windDirection: 0, windSpeed: 11 }));
+    const along = phillips(kx, kz, oceanParams);
+    applyWorldSettings(world({ timeOfDay: 9, windDirection: Math.PI / 2, windSpeed: 11 }));
+    const across = phillips(kx, kz, oceanParams);
+    expect(along).toBeGreaterThan(across * 2);
+  });
+
+  it('MOVES THE SAILS: the same write changes how the cloth is loaded', () => {
+    // a ship on a fixed heading, wind turned from dead astern to dead ahead.
+    // `sailDrive` reads windDirection/windSpeed straight off its input, and
+    // main.ts feeds it `state.wind`, which is copied from oceanParams every
+    // tick — so this is the value the control writes, one hop later.
+    const ship = { forwardX: 0, forwardZ: 1, shipVelX: 0, shipVelZ: 0, yawRate: 0 };
+    applyWorldSettings(world({ timeOfDay: 9, windDirection: 0, windSpeed: 11 }));
+    const running = sailDrive(
+      { ...ship, windDirection: oceanParams.windDirection, windSpeed: oceanParams.windSpeed },
+      shipMaterialParams,
+    );
+    applyWorldSettings(world({ timeOfDay: 9, windDirection: Math.PI, windSpeed: 11 }));
+    const irons = sailDrive(
+      { ...ship, windDirection: oceanParams.windDirection, windSpeed: oceanParams.windSpeed },
+      shipMaterialParams,
+    );
+    // dead astern draws, head to wind does not — if the two came back equal the
+    // write never reached the rig
+    expect(running.drive).toBeGreaterThan(irons.drive);
+
+    // and the SPEED knob has to matter on its own, not only the bearing
+    applyWorldSettings(world({ timeOfDay: 9, windDirection: 0, windSpeed: 3 }));
+    const breeze = sailDrive(
+      { ...ship, windDirection: oceanParams.windDirection, windSpeed: oceanParams.windSpeed },
+      shipMaterialParams,
+    );
+    expect(running.drive).toBeGreaterThan(breeze.drive);
+  });
+
+  it('names the wind for where it comes FROM, which is the reversible half', () => {
+    // A northerly blows toward the SOUTH. Get this backwards and NOTHING looks
+    // wrong — the sea, the sails and the flags all still agree with each other
+    // and all disagree with the word on the button, in every direction at once.
+    const north = WIND_PRESETS.find((p) => p.label === 'N')!;
+    const w = apparentWind({
+      windDirection: north.value, windSpeed: 10, shipVelX: 0, shipVelZ: 0,
+    });
+    expect(w.z).toBeLessThan(-0.99); // blowing toward −Z, i.e. southward
+    const east = WIND_PRESETS.find((p) => p.label === 'E')!;
+    const e = apparentWind({
+      windDirection: east.value, windSpeed: 10, shipVelX: 0, shipVelZ: 0,
+    });
+    expect(e.x).toBeLessThan(-0.99); // an easterly blows toward −X, westward
+  });
+
+  it('round-trips the slider through the store without losing a compass point', () => {
+    // the segment plate highlights on EXACT equality, so a preset and the
+    // slider landing on the same bearing must produce the identical float
+    for (const p of WIND_PRESETS) {
+      const stored = sanitizeSettings({ world: { windDirection: p.value } }).world.windDirection;
+      expect(stored).toBe(p.value);
+      expect(WIND_PRESETS[windFromDeg(stored) / 45].label).toBe(p.label);
+    }
+  });
+
+  it('WRAPS the bearing instead of clamping it — an angle has no ends', () => {
+    // clamping would pile a north-westerly (7π/4) onto due south
+    const tau = Math.PI * 2;
+    expect(sanitizeSettings({ world: { windDirection: tau + 0.5 } }).world.windDirection)
+      .toBeCloseTo(0.5, 9);
+    expect(sanitizeSettings({ world: { windDirection: -0.5 } }).world.windDirection)
+      .toBeCloseTo(tau - 0.5, 9);
+    expect(sanitizeSettings({ world: { windDirection: 'northerly' } }).world.windDirection)
+      .toBe(DEFAULT_SETTINGS.world.windDirection);
+    expect(sanitizeSettings({ world: { windDirection: NaN } }).world.windDirection)
+      .toBe(DEFAULT_SETTINGS.world.windDirection);
+  });
+
+  it('clamps wind speed to a sea the spectrum can carry', () => {
+    // 0 is not a light breeze, it is "delete the ocean": Phillips' fetch length
+    // is V²/g, so at zero there is no wind sea at all
+    expect(sanitizeSettings({ world: { windSpeed: 0 } }).world.windSpeed)
+      .toBe(SEA_RANGES.windSpeed.min);
+    expect(sanitizeSettings({ world: { windSpeed: 400 } }).world.windSpeed)
+      .toBe(SEA_RANGES.windSpeed.max);
+    expect(sanitizeSettings({ world: { windSpeed: NaN } }).world.windSpeed)
+      .toBe(DEFAULT_SETTINGS.world.windSpeed);
+  });
+
+  it('persists across a reload and is NEVER touched by a quality preset', () => {
+    const mem = fakeStorage();
+    const a = createSettingsStore(mem);
+    a.set({ world: { windDirection: 3.1, windSpeed: 17.5 } });
+    const b = createSettingsStore(mem);
+    expect(b.get().world.windDirection).toBeCloseTo(3.1, 9);
+    expect(b.get().world.windSpeed).toBeCloseTo(17.5, 9);
+    for (const q of ['low', 'medium', 'high'] as const) {
+      b.applyQuality(q);
+      expect(b.get().world.windDirection).toBeCloseTo(3.1, 9);
+      expect(b.get().world.windSpeed).toBeCloseTo(17.5, 9);
+    }
+  });
+
+  it('reads the slider in Beaufort, with Force 3 on the whitecap threshold', () => {
+    // the label is the whole reason this slider is usable: 3.7 m/s is where the
+    // foam gate starts producing whitecaps, and "F3" is what tells the player
+    // that without them having to learn a metre per second
+    expect(windSpeedLabel(3.7)).toContain('F3');
+    expect(windSpeedLabel(3.3)).toContain('F2');
+    expect(windSpeedLabel(DEFAULT_SETTINGS.world.windSpeed)).toContain('F6');
+    expect(windSpeedLabel(11)).toContain('11.0 m/s');
+  });
+});
+
+/**
+ * §B CANDIDATE, PINNED RATHER THAN BLESSED — the sea and the sails read the
+ * SAME `windDirection` through two DIFFERENT conventions.
+ *
+ *   src/ocean/oceanMath.ts `phillips`  : wind = (cos θ, sin θ)  — from +X
+ *   src/ship/flagDynamics.ts `apparentWind` : wind = (sin θ, cos θ) — from +Z
+ *
+ * Those are a reflection of each other, so the wave bearing is 90° − θ while
+ * the rig feels θ. Measured over the shipped spectrum, energy-weighted:
+ *
+ *   θ =   0°  sea  90°  sails   0°   90° apart
+ *   θ =  45°  sea  45°  sails  45°    AGREE
+ *   θ =  90°  sea   0°  sails  90°   90° apart
+ *   θ = 135°  sea 315°  sails 135°  180° apart — sea runs dead against the rig
+ *   θ = 225°  sea 225°  sails 225°   AGREE
+ *
+ * It has never been visible because the shipped default is exactly π/4 = 45°,
+ * one of the two fixed points of that reflection. The wind control is what
+ * exposes it: the first drag off the default splits the world in two.
+ *
+ * The camps split the project roughly in half — cos/sin: the ocean spectrum,
+ * spray, palm sway, foam shading, rain slant; sin/cos: sails, flags, AI
+ * steering, audio panning, the HUD dial. Reconciling them is a cross-cutting
+ * change to main.ts's tick block among others, so it is NOT done here.
+ *
+ * This test pins the CURRENT relationship so the divergence is a visible,
+ * named fact rather than a surprise, and so that whoever fixes it has to come
+ * here and delete this block on purpose.
+ */
+describe('KNOWN DIVERGENCE: sea and sails read windDirection mirrored', () => {
+  it('the wave bearing is 90° − windDirection while the rig feels windDirection', () => {
+    for (const deg of [0, 45, 90, 135]) {
+      const theta = (deg * Math.PI) / 180;
+      // a mode running along the SAILS' wind vector, and one along the SEA's
+      const sail = { x: Math.sin(theta), z: Math.cos(theta) };
+      const sea = { x: Math.cos(theta), z: Math.sin(theta) };
+      const p = { ...oceanParams, windDirection: theta };
+      const eSail = phillips(0.05 * sail.x, 0.05 * sail.z, p);
+      const eSea = phillips(0.05 * sea.x, 0.05 * sea.z, p);
+      // the spectrum peaks along ITS OWN convention, not the rig's — equal only
+      // at the 45° fixed point, where the two conventions coincide
+      if (deg === 45) expect(eSail).toBeCloseTo(eSea, 12);
+      else expect(eSea).toBeGreaterThan(eSail);
+    }
+  });
+});
+
+/**
+ * THE BEAUFORT LADDER (user: "we probably want more presets so that we can be
+ * a little bit more fine-grained... our storm is a little bit too intense —
+ * basically too crazy to be in... some more interesting things like a perfect,
+ * almost perfect flatness... as well as subdivisions on the way up").
+ *
+ * The complaint is about SPACING, so the tests are about spacing, and they are
+ * measured rather than asserted from the authored numbers: every rung's `hs`
+ * is recomputed here from the live spectrum. That means a change to the ocean
+ * — a retuned amplitude, a new cascade domain, a different spreading fit —
+ * cannot silently pull the ladder out from under the labels.
+ */
+describe('the sea state ladder is evenly spaced and measured, not guessed', () => {
+  // these tests write the SHIPPED oceanParams (that is the §V.62 point), so
+  // they must put it back — the ladder ends on a gale, and leaking that into
+  // the next file's defaults check is a confusing way to fail
+  const shipped = {
+    windSpeed: oceanParams.windSpeed,
+    windDirection: oceanParams.windDirection,
+    amplitude: oceanParams.amplitude,
+    swellAmplitude: oceanParams.swellAmplitude,
+    swellPeriod: oceanParams.swellPeriod,
+    swellDirection: oceanParams.swellDirection,
+  };
+  afterEach(() => Object.assign(oceanParams, shipped));
+
+  /** Hs = 4√m₀ summed over the three cascades, off the real spectrum */
+  function measureHs(w: ReturnType<typeof world>): number {
+    const p = {
+      ...oceanParams,
+      windSpeed: w.windSpeed,
+      amplitude: w.amplitude,
+      swellAmplitude: w.swellAmplitude,
+      swellPeriod: w.swellPeriod,
+    };
+    let v = 0;
+    for (let i = 0; i < 3; i++) {
+      v += spectralHeightVariance(128, p.cascades[i].domain, p, cascadeBand(i, p.splitWavelengths));
+    }
+    return 4 * Math.sqrt(v);
+  }
+
+  it('every rung really is the wave height it claims', () => {
+    for (const rung of SEA_STATES) {
+      const measured = measureHs(world(seaStatePatch(rung)));
+      // 5% — the authored number is a rounded readout, not a magic constant
+      expect(measured, `${rung.id} claims ${rung.hs} m`).toBeCloseTo(rung.hs, 1);
+      expect(Math.abs(measured - rung.hs) / rung.hs).toBeLessThan(0.05);
+    }
+  });
+
+  it('climbs without a gap you could fall through — THE actual complaint', () => {
+    // three presets measured 1.23 / 2.78 / 14.70 m: the top step was 5.3× and
+    // there was nothing at all between a working sea and an unsurvivable one
+    const hs = SEA_STATES.map((r) => r.hs);
+    for (let i = 1; i < hs.length; i++) {
+      expect(hs[i], 'the ladder must be monotonic').toBeGreaterThan(hs[i - 1]);
+      // no rung may more than double the sea under it
+      expect(hs[i] / hs[i - 1], `step ${SEA_STATES[i].id} is a cliff`).toBeLessThan(2.2);
+    }
+    expect(hs[0]).toBeLessThan(0.25); // "almost perfect flatness"
+    expect(hs[hs.length - 1]).toBeGreaterThan(9); // still a real gale at the top
+  });
+
+  it('the top rung is survivable, unlike the storm preset it replaces', () => {
+    // storm authors amplitude 1.15 at wind 18 and measures Hs 14.70 m — worse
+    // than the worst recorded North Atlantic sea, and past the 8–10 m its own
+    // comment says it was cut to. "Too crazy to be in" (user) is that number.
+    const gale = SEA_STATES[SEA_STATES.length - 1];
+    const asShipped = measureHs(world({ ...seaStatePatch(gale), amplitude: 1.15 }));
+    expect(asShipped).toBeGreaterThan(14);
+    expect(measureHs(world(seaStatePatch(gale)))).toBeLessThan(10.5);
+    // the wind is NOT what was wrong, so the recalibration leaves it alone
+    expect(gale.windSpeed).toBe(18);
+  });
+
+  it('puts the first whitecaps on Force 3, where the published law puts them', () => {
+    // Callaghan 2008 fits whitecap onset at 3.70 m/s; NOAA's Force 3 begins at
+    // 3.60 m/s and is the first mention of white horses in the whole scale.
+    // The ladder has to straddle that, or "first foam" lands on a rung whose
+    // description does not mention foam at all.
+    const f3 = SEA_STATES.find((r) => r.id === 'f3')!;
+    const f2 = SEA_STATES.find((r) => r.id === 'f2')!;
+    expect(f2.windSpeed).toBeLessThan(3.7); // no foam is possible here
+    expect(f3.windSpeed).toBeGreaterThan(3.7); // and some is, here
+    expect(f3.sea.toLowerCase()).toContain('white horses');
+  });
+
+  it('a rung NEVER touches a bearing — a preset must not spin the compass', () => {
+    const patch = seaStatePatch(SEA_STATES[0]);
+    expect(patch).not.toHaveProperty('windDirection');
+    expect(patch).not.toHaveProperty('swellDirection');
+    const store = createSettingsStore(fakeStorage());
+    store.set({ world: { windDirection: 1.23, swellDirection: 4.56 } });
+    for (const rung of SEA_STATES) {
+      store.set({ world: seaStatePatch(rung) });
+      expect(store.get().world.windDirection).toBeCloseTo(1.23, 9);
+      expect(store.get().world.swellDirection).toBeCloseTo(4.56, 9);
+    }
+  });
+
+  it('SUGGESTS a swell but never locks it — a big swell on a calm day is real', () => {
+    // the user was explicit that the two are independent, and params/ocean.ts:92
+    // decouples them on purpose. A rung writes a swell that suits it; dragging
+    // the swell afterwards must stick, and must simply read as Custom.
+    const store = createSettingsStore(fakeStorage());
+    const glass = SEA_STATES[0];
+    store.set({ world: seaStatePatch(glass) });
+    expect(seaStateFor(store.get().world)?.id).toBe('f1');
+    // a heavy ground swell under a glassy calm: the single sea that proves it
+    store.set({ world: { swellAmplitude: 1.2, swellPeriod: 16 } });
+    const s = store.get().world;
+    expect(s.swellAmplitude).toBeCloseTo(1.2, 9);
+    expect(s.windSpeed).toBe(glass.windSpeed); // the calm survived the swell
+    expect(seaStateFor(s)).toBeNull(); // and the plate honestly reads Custom
+    expect(measureHs(s)).toBeGreaterThan(4); // a genuinely big sea, in a calm
+  });
+
+  it('every rung round-trips through the store and lights its own plate', () => {
+    // the plate highlights on exact equality after sanitize, so a rung written
+    // through the store must come back bit-identical or nothing ever lights up
+    const store = createSettingsStore(fakeStorage());
+    for (const rung of SEA_STATES) {
+      store.set({ world: seaStatePatch(rung) });
+      expect(seaStateFor(store.get().world)?.id, `${rung.id} does not light`).toBe(rung.id);
+    }
+  });
+
+  it('drives the SEA and the SAILS on every rung, not just the store (§V.62)', () => {
+    const seen = new Set<string>();
+    let lastDrive = Infinity;
+    for (const rung of SEA_STATES) {
+      applyWorldSettings(world(seaStatePatch(rung)));
+      // the sea: a distinct spectrum per rung, so each one really rebuilds
+      seen.add(spectrumSignature(oceanParams));
+      // the sails: more wind must mean more drive, all the way up the ladder
+      const d = sailDrive(
+        {
+          forwardX: 0, forwardZ: 1, shipVelX: 0, shipVelZ: 0, yawRate: 0,
+          windDirection: oceanParams.windDirection, windSpeed: oceanParams.windSpeed,
+        },
+        shipMaterialParams,
+      ).drive;
+      expect(d, `${rung.id} does not draw more than the rung below`).toBeGreaterThan(
+        lastDrive === Infinity ? -1 : lastDrive,
+      );
+      lastDrive = d;
+    }
+    expect(seen.size).toBe(SEA_STATES.length);
+  });
+});
+
+/**
+ * The continuous swell controls — the half of the ask the ladder does NOT
+ * answer, because Beaufort describes wind sea and says nothing about a train
+ * radiated by a storm that has since blown itself out.
+ */
+describe('swell is continuous, independent, and actually reaches the water', () => {
+  const shipped = {
+    amplitude: oceanParams.amplitude,
+    swellAmplitude: oceanParams.swellAmplitude,
+    swellPeriod: oceanParams.swellPeriod,
+    swellDirection: oceanParams.swellDirection,
+    windSpeed: oceanParams.windSpeed,
+    windDirection: oceanParams.windDirection,
+  };
+  afterEach(() => Object.assign(oceanParams, shipped));
+
+  it('defaults to the ocean params, so there are not two drifting defaults', () => {
+    expect(DEFAULT_SETTINGS.world.amplitude).toBe(oceanParams.amplitude);
+    expect(DEFAULT_SETTINGS.world.swellAmplitude).toBe(oceanParams.swellAmplitude);
+    expect(DEFAULT_SETTINGS.world.swellPeriod).toBe(oceanParams.swellPeriod);
+    expect(DEFAULT_SETTINGS.world.swellDirection).toBe(oceanParams.swellDirection);
+  });
+
+  it('every swell key is a SPECTRUM key, so none of them is a free ride', () => {
+    // verified rather than assumed: if any of these were outside the signature
+    // it could be driven live instead of on release — and if a refactor drops
+    // one, the slider goes dead with the row still moving
+    const base = spectrumSignature(oceanParams);
+    for (const patch of [
+      { swellAmplitude: 0.9 },
+      { swellPeriod: 6 },
+      { swellDirection: 1.0 },
+      { amplitude: 0.9 },
+    ]) {
+      applyWorldSettings(world(patch));
+      expect(spectrumSignature(oceanParams), `${Object.keys(patch)[0]} is not in the signature`)
+        .not.toBe(base);
+      Object.assign(oceanParams, shipped);
+    }
+  });
+
+  it('swell direction is NOT tied to the wind — that decoupling is the point', () => {
+    applyWorldSettings(world({ windDirection: 0.3, swellDirection: 3.0 }));
+    expect(oceanParams.windDirection).toBeCloseTo(0.3, 9);
+    expect(oceanParams.swellDirection).toBeCloseTo(3.0, 9);
+    // turning the wind right around leaves the swell exactly where it was
+    applyWorldSettings(world({ windDirection: 3.4, swellDirection: 3.0 }));
+    expect(oceanParams.swellDirection).toBeCloseTo(3.0, 9);
+  });
+
+  it('reads swell height in metres a sailor can picture, not RMS', () => {
+    // the param is RMS elevation and the significant height is 4× it — showing
+    // the raw 0.34 would be showing a number nobody can stand next to
+    expect(swellHeightLabel(0.34)).toBe('1.4 m');
+    expect(swellHeightLabel(0)).toContain('none');
+  });
+
+  it('reads swell period with the wavelength it implies', () => {
+    // lambda = gT^2/2pi: 11 s is 189 m, which is what decides whether a 35 m
+    // hull lifts to the wave or rides over it
+    expect(swellPeriodLabel(11)).toContain('189 m');
+    expect(swellPeriodLabel(11)).toContain('11.0 s');
+  });
+
+  it('clamps and wraps the swell the same way the wind is', () => {
+    expect(sanitizeSettings({ world: { swellAmplitude: -3 } }).world.swellAmplitude)
+      .toBe(SEA_RANGES.swellAmplitude.min);
+    expect(sanitizeSettings({ world: { swellPeriod: 99 } }).world.swellPeriod)
+      .toBe(SEA_RANGES.swellPeriod.max);
+    expect(sanitizeSettings({ world: { swellDirection: -0.5 } }).world.swellDirection)
+      .toBeCloseTo(Math.PI * 2 - 0.5, 9);
+    expect(sanitizeSettings({ world: { swellPeriod: 'long' } }).world.swellPeriod)
+      .toBe(DEFAULT_SETTINGS.world.swellPeriod);
+  });
+
+  it('every slider step is at least as coarse as the sim can hold', () => {
+    // the §V.46 field publishes windSpeed quantised to 0.5 m/s and amplitude to
+    // 0.02, so a finer step would offer the player precision the sim discards
+    expect(SEA_RANGES.windSpeed.step).toBeGreaterThanOrEqual(0.5);
+    expect(SEA_RANGES.amplitude.step).toBeGreaterThanOrEqual(0.02);
   });
 });

@@ -33,6 +33,20 @@ export interface SliderSpec {
   step: number;
   format: (v: number) => string;
   onInput: (v: number) => void;
+  /**
+   * Report only on RELEASE, not per pixel of the drag. The readout still
+   * tracks the knob live, so the row feels identical — what changes is how
+   * many times the engine is told.
+   *
+   * For anything that costs a rebuild rather than a uniform write. The ocean
+   * spectrum is the case this exists for: windSpeed and windDirection are both
+   * in `SPECTRUM_SIGNATURE_KEYS`, and a rebuild measures 419 ms warm — 52 frame
+   * budgets. `OceanSimulation.update` rate-limits to one rebuild per 16 ticks,
+   * so a live drag would not hang, but it would still stall four times a
+   * second for a third of a second each. One commit is the honest number of
+   * rebuilds a slider drag is worth.
+   */
+  commitOnRelease?: boolean;
 }
 
 export interface SliderRow extends Row {
@@ -47,7 +61,17 @@ export function sliderRow(spec: SliderSpec): SliderRow {
   input.max = String(spec.max);
   input.step = String(spec.step);
   input.setAttribute('aria-label', spec.label);
-  input.addEventListener('input', () => spec.onInput(Number(input.value)));
+  // the readout always follows the knob — a deferred COMMIT must never read as
+  // a frozen control, so the label is driven by `input` in both modes
+  input.addEventListener('input', () => {
+    value.textContent = spec.format(Number(input.value));
+    if (!spec.commitOnRelease) spec.onInput(Number(input.value));
+  });
+  // `change` on a range is pointer-release, and one event per keypress for the
+  // arrow keys — so keyboard users still get a commit per step, not per drag
+  if (spec.commitOnRelease) {
+    input.addEventListener('change', () => spec.onInput(Number(input.value)));
+  }
   const root = div('smt-row', rowHead(spec.label, spec.hint, value), input);
   return {
     root,

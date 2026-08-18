@@ -4,6 +4,7 @@ import { GameLoop } from './core/loop';
 import { createInitialState } from './state/simState';
 import type { SimState } from './state/simState';
 import { createDebugShell } from './debug';
+import { installGpuTimer, formatGpuHud, reportGpu } from './debug/gpuTimer';
 import { createSky } from './sky';
 import { createLanterns } from './lanterns';
 import { createOceanSim, oceanParams } from './ocean';
@@ -24,7 +25,11 @@ import { trimDropScale } from './ship/sailDynamics';
 import { createInputCollector } from './sailing/input';
 import { stepShipSailing } from './sailing/shipKinematics';
 import { createFollowCam } from './camera';
-import { createWeatherSystem, createWeatherSample } from './weather';
+import {
+  createAmbientHold,
+  createWeatherSystem,
+  createWeatherSample,
+} from './weather';
 import { createRain } from './rain';
 import { createPostPipeline } from './core/postPipeline';
 import { createUnderwater } from './underwater';
@@ -36,7 +41,7 @@ import {
 } from './core/compileProfile';
 // exposed on __game so a browser check can re-rank without a reload
 import { postParams } from './params/post';
-import { createGameUI, initGraphicsSettings, setFeatureSink } from './ui';
+import { applyWorldSettings, createGameUI, initGraphicsSettings, setFeatureSink } from './ui';
 import {
   createAudio,
   attachAudioSettings,
@@ -58,7 +63,12 @@ import { buildDeckHeightfield } from './ship/deckHeightfield';
 import { createDeckWater, setActiveDeckWater } from './deckwater';
 import { createPlanarReflection } from './reflection';
 import { createArchipelago } from './island';
-import { bootJumpTarget, installJump } from './debug/jump';
+import {
+  DEFAULT_BOOT_TARGET,
+  SPAWN_TARGET,
+  bootJumpTarget,
+  installJump,
+} from './debug/jump';
 import { palmWindStrength } from './vegetation';
 import { createRopes } from './ropes';
 import {
@@ -219,6 +229,15 @@ async function boot(): Promise<void> {
 
   await showBootPhase('renderer');
   const app = await App.create(root);
+  /**
+   * §V.39's instrument, installed HERE — after `renderer.init()` (the device
+   * must exist) and before the first render (three lazily builds its own
+   * latching pool on the first pass and never replaces it). See
+   * src/debug/gpuTimer.ts for why three's own pool cannot be trusted: every
+   * one of its failure paths returns the PREVIOUS reading, which is §V.63's
+   * constant 29.688 ms.
+   */
+  const gpuTimer = installGpuTimer(app.renderer);
   bootMark('renderer');
   await showBootPhase('scene build');
   const state: SimState = createInitialState(1337);
@@ -245,6 +264,20 @@ async function boot(): Promise<void> {
   });
   // §T.38: reused per frame — weatherAt fills a caller-owned sample, no alloc
   const weatherHere = createWeatherSample();
+  // §V.46 write-back guard: these two keys are BOTH ends of the blend below —
+  // the sample's `from` and the sim tick's destination. Without the hold the
+  // field blends from its own last output and ratchets to storm (createAmbientHold).
+  // The steps are the field's PUBLISH GRID, and they are load-bearing: both keys
+  // re-cut the spectrum on the GPU and the §V.8 mirror (~490 ms of main-thread
+  // work at 512²), so a value that moved every tick would stall the game under
+  // way. 0.5 m/s and 0.02 are ~5× and ~2× the panel's own steps, below what is
+  // readable from a deck, and bound the whole calm↔storm range to ≤14 and ≤46
+  // distinct spectra. Anchored at ambient, so presets and panel drags are exact.
+  const oceanAmbient = createAmbientHold(
+    ['windSpeed', 'amplitude'],
+    oceanParams,
+    { windSpeed: 0.5, amplitude: 0.02 },
+  );
   const debug = createDebugShell({ onWeatherPreset: (p) => weather.apply(p) });
 
   const sky = createSky({ scene: app.scene });
@@ -617,14 +650,20 @@ async function boot(): Promise<void> {
   applyResolution();
   settings.subscribe(applyResolution);
 
-  // time of day: the UI owns the setting, the sky reads the param. Pushed on
-  // every change AND once up front, so a stored hour survives a reload — during
-  // alpha the point is to come back to the light you were last looking at.
-  const applyTimeOfDay = (s = settings.get()): void => {
-    skyParams.timeOfDay = s.world.timeOfDay;
+  // world staging — time of day and the wind. The UI owns the settings, the
+  // engine reads the params, and `applyWorldSettings` is the single mapping
+  // between them (it is what the §V.62 wiring test holds). Pushed on every
+  // change AND once up front, so a stored sky and a stored wind survive a
+  // reload — during alpha the point is to come back to what you were sailing.
+  //
+  // The wind lands on `oceanParams`, which is where the sim tick below reads
+  // `state.wind` from — so one write moves the spectrum, the sails, the AI,
+  // the flags, the spray, the palms and the weather cells' drift together.
+  const applyWorld = (s = settings.get()): void => {
+    applyWorldSettings(s.world);
   };
-  applyTimeOfDay();
-  settings.subscribe(applyTimeOfDay);
+  applyWorld();
+  settings.subscribe(applyWorld);
 
   // volumes come from the persisted settings store, and stay bound to it so
   // pause-menu changes apply live and survive reload (§I, §V21)
@@ -777,18 +816,41 @@ async function boot(): Promise<void> {
       followCam.snap();
     },
   });
-  const bootAt = bootJumpTarget(window.location.search);
-  if (bootAt !== null && !jump.jumpTo(bootAt)) {
-    console.warn(
-      `[jump] ?at=${bootAt} is not a destination — have: ` +
-        jump.targets.map((t) => t.name).join(', '),
-    );
+  /**
+   * BOOT AT ANCHOR IN THE LAGOON (user: "anchored in this lagoon, with the
+   * ship being static there, sitting with fully packed up sails").
+   *
+   * `requestedAt` is kept separate from `bootAt` so a missing destination only
+   * warns when someone actually ASKED for it — a default that silently falls
+   * back to the origin (a blueprint with no islands) is correct behaviour, not
+   * a misconfiguration. `?at=spawn` is the open-water venue for ocean parity.
+   *
+   * FURLED, and that is what holds her: `teleportShip` already zeroes velocity
+   * and spin, and trim 0 is the same "canvas off her, so she holds station"
+   * idiom combatArena uses when it heaves a ship to. Measured in-browser at
+   * the anchorage: 0.78 m of drift over 20 s, against 17-24 knots under the
+   * 0.8 trim she used to boot with. No anchor mechanic is needed for her to
+   * still be there when the user has finished looking at the beach.
+   */
+  const requestedAt = bootJumpTarget(window.location.search);
+  const bootAt = requestedAt ?? DEFAULT_BOOT_TARGET;
+  if (!jump.jumpTo(bootAt)) {
+    if (requestedAt !== null) {
+      console.warn(
+        `[jump] ?at=${bootAt} is not a destination — have: ` +
+          jump.targets.map((t) => t.name).join(', '),
+      );
+    }
+  } else if (bootAt !== SPAWN_TARGET.name) {
+    playerShip.sailTrim = 0;
   }
   /**
    * Sim time of the last ocean FFT dispatch — see the guard in the render path.
    * NaN so the first frame always dispatches (NaN !== NaN).
    */
   let lastOceanTime = Number.NaN;
+  /** HUD refresh divider for the GPU block — the sort is per-call, not per-frame */
+  let perfFrame = 0;
 
   const loop = new GameLoop(
     (dt) => {
@@ -803,9 +865,12 @@ async function boot(): Promise<void> {
       // the sample at the ship's own position is what makes sailing into a
       // squall real — and because rain and cell drift both read oceanParams,
       // sea, rain and cloud stay self-consistent for free.
+      // AFTER weather.update: the transition lerp writes ambient into
+      // oceanParams and restore() is what adopts it (§V.62 — same path a
+      // panel drag takes). BEFORE weatherAt: it is the blend's `from` end.
+      oceanAmbient.restore();
       weather.weatherAt(playerShip.position[0], playerShip.position[2], weatherHere);
-      oceanParams.windSpeed = weatherHere.ocean.windSpeed;
-      oceanParams.amplitude = weatherHere.ocean.amplitude;
+      oceanAmbient.publish(weatherHere.ocean);
       const snapshot = input.sample(dt);
       stepShipSailing(playerShip, snapshot, state.wind, dt);
       // §V.15: the AI emits the SAME InputState a keyboard produces, so she
@@ -885,7 +950,6 @@ async function boot(): Promise<void> {
     },
     (alpha, frameDt) => {
       debug.hud.frame(frameDt * 1000);
-
       sky.setShadowFocus(playerShip.position[0], playerShip.position[1], playerShip.position[2]);
       sky.update(skyParams.timeOfDay);
 
@@ -1185,24 +1249,34 @@ async function boot(): Promise<void> {
       }
       debug.hud.setRenderStats(app.renderer.info.render);
       /**
-       * DRAIN THE TIMESTAMP POOL, or §V.39's own method breaks (third time).
+       * DRAIN THE TIMESTAMP POOLS, or §V.39's own method breaks (third time).
        *
-       * `trackTimestamp` is on at construction so GPU timings are available
-       * without a rebuild — but three writes a query pair per pass EVERY frame
-       * and only recycles them when someone resolves. Nothing did, so the pool
-       * filled and the console reported "Maximum number of queries exceeded",
-       * after which the numbers are silently wrong rather than absent. That is
-       * the same shape as §B.25: the sanctioned measurement was itself the
-       * broken thing, and it reads as a slow scene rather than as a bug.
+       * three writes a query pair per pass EVERY frame and only recycles them
+       * when someone resolves. Nothing did, so the pool filled and the console
+       * reported "Maximum number of queries exceeded", after which the numbers
+       * are silently wrong rather than absent — the same shape as §B.25: the
+       * sanctioned measurement was itself the broken thing, and it reads as a
+       * slow scene rather than as a bug.
        *
-       * Resolved unawaited on purpose: this is a readback of the PREVIOUS
-       * frame's queries, so awaiting it here would stall the render thread on
-       * the GPU to measure the GPU. Errors are swallowed — a diagnostic must
-       * never be able to take the frame down.
+       * BOTH pools, not just RENDER. Compute gets its own query set and the
+       * ocean FFT lives there, so resolving only RENDER left the compute pool
+       * permanently full — and three's overflow path returns `null`, which
+       * `initTimestampQuery` writes into `beginningOfPassWriteIndex` unchecked,
+       * where WebIDL turns it into 0. An overflowed pool therefore ALIASES every
+       * later pass onto query pair 0 instead of erroring.
+       *
+       * Unawaited on purpose: this reads back the queries submitted moments
+       * ago, so awaiting it would stall the render thread on the GPU in order
+       * to measure the GPU. Errors are swallowed — a diagnostic must never be
+       * able to take the frame down.
        */
-      void app.renderer
-        .resolveTimestampsAsync(TimestampQuery.RENDER)
-        .catch(() => undefined);
+      if (gpuTimer !== null) {
+        gpuTimer.tick();
+        if (++perfFrame % 15 === 0) debug.hud.setGpu(formatGpuHud(gpuTimer));
+      } else {
+        void app.renderer.resolveTimestampsAsync(TimestampQuery.RENDER).catch(() => undefined);
+        void app.renderer.resolveTimestampsAsync(TimestampQuery.COMPUTE).catch(() => undefined);
+      }
 
       // audio LAST: the panner listener reads camera.matrixWorld, which is
       // only final after the render — updating earlier lags it one frame.
@@ -1352,6 +1426,26 @@ async function boot(): Promise<void> {
   };
   void warmDeferred();
 
+
+  /**
+   * §V.39 measurement handle. `__perf.report()` prints the per-pass min-of-N
+   * table; `__perf.reset()` starts a fresh window, which is what an A/B leg
+   * needs (frozen tick + forced camera, §V.63). `__perf.timer` is null when
+   * GPU timestamps are unavailable on this machine — and null means NO NUMBER,
+   * not "fall back to wall clock" (§B.25).
+   */
+  (window as unknown as Record<string, unknown>).__perf = {
+    timer: gpuTimer,
+    report: (): void => {
+      if (gpuTimer === null) {
+        console.warn('[gpuTimer] not installed — GPU timing unavailable (§V.39).');
+        return;
+      }
+      reportGpu(gpuTimer);
+    },
+    reset: (): void => gpuTimer?.reset(),
+    health: () => gpuTimer?.health() ?? null,
+  };
 
   // dev console handle (not part of any interface contract)
   (window as unknown as Record<string, unknown>).__game = {

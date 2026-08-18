@@ -15,7 +15,7 @@ import { shipRigParams } from '../params/ship';
 import { apparentWind, wrapAngle } from '../ship/flagDynamics';
 import { sailStateForTrim, trimDropScale } from '../ship/sailDynamics';
 import type { SailStateId } from '../ship/pieceTypes';
-import { createWindDial, pointOfSail } from './windDial';
+import { CARDINALS, cardinal, createWindDial, pointOfSail } from './windDial';
 import { div, el } from './dom';
 
 export interface WindReadout {
@@ -42,7 +42,6 @@ export interface Hud {
   dispose(): void;
 }
 
-const CARDINALS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 const RAD_TO_DEG = 180 / Math.PI;
 const MS_TO_KNOTS = 1.944;
 const SAIL_LABEL: Record<SailStateId, string> = {
@@ -138,8 +137,8 @@ export function createHud(root: HTMLElement): Hud {
       applyParams();
       const deg = ((rad * RAD_TO_DEG) % 360 + 360) % 360;
       tape.style.transform = `translateX(${(-deg * tapePx).toFixed(2)}px)`;
-      const cardinal = CARDINALS[Math.round(deg / 45) % 8];
-      headingValue.textContent = `${String(Math.round(deg) % 360).padStart(3, '0')}° ${cardinal}`;
+      headingValue.textContent =
+        `${String(Math.round(deg) % 360).padStart(3, '0')}° ${cardinal(deg)}`;
     },
     setSpeed(knots: number): void {
       speedValue.textContent = Math.max(0, knots).toFixed(1);

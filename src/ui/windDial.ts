@@ -14,6 +14,19 @@ import { svg, svgChild } from './dom';
 const R = 27;
 const C = 32;
 
+/**
+ * The eight compass points in bearing order from north. Shared with the HUD's
+ * heading tape and the settings screen's wind control so that one bearing
+ * cannot pick up two different names in two places on the same screen.
+ */
+export const CARDINALS: readonly string[] = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+
+/** compass point nearest a bearing in DEGREES clockwise from north */
+export function cardinal(deg: number): string {
+  const d = Number.isFinite(deg) ? (((deg % 360) + 360) % 360) : 0;
+  return CARDINALS[Math.round(d / 45) % 8];
+}
+
 /** point on the rim at a bearing clockwise from dead ahead (radians) */
 function rim(bearing: number, radius = R): [number, number] {
   return [C + radius * Math.sin(bearing), C - radius * Math.cos(bearing)];
