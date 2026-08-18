@@ -58,6 +58,7 @@ import { buildDeckHeightfield } from './ship/deckHeightfield';
 import { createDeckWater, setActiveDeckWater } from './deckwater';
 import { createPlanarReflection } from './reflection';
 import { createArchipelago } from './island';
+import { bootJumpTarget, installJump } from './debug/jump';
 import { palmWindStrength } from './vegetation';
 import { createRopes } from './ropes';
 import {
@@ -744,6 +745,40 @@ async function boot(): Promise<void> {
   prevVel.copy(currVel);
   // interpolated view of the player ship handed to render-side consumers
   const renderShipView = structuredClone(playerShip);
+
+  // §T.52 dev jump. `J` cycles the archipelago's anchorages (the showcase
+  // lagoon) and `Shift+J` returns to spawn; `?at=lagoon` boots there. The
+  // callback is the whole reason this is not a one-liner: teleporting has to
+  // collapse the render-side prev/curr interpolation pair AND cut the camera,
+  // or she smears across the map for a frame and the lens chases her for
+  // seconds (see followCam.snap).
+  const jump = installJump({
+    target: window,
+    ship: playerShip,
+    targets: archipelago.anchorages.map((a) => ({
+      name: a.name,
+      x: a.x,
+      z: a.z,
+      heading: a.heading,
+    })),
+    waterLevelAt: (x, z) => cpuOcean.heightAt(x, z, state.time),
+    onTeleport: () => {
+      currPos.fromArray(playerShip.position);
+      currQuat.fromArray(playerShip.quaternion);
+      currVel.fromArray(playerShip.velocity);
+      prevPos.copy(currPos);
+      prevQuat.copy(currQuat);
+      prevVel.copy(currVel);
+      followCam.snap();
+    },
+  });
+  const bootAt = bootJumpTarget(window.location.search);
+  if (bootAt !== null && !jump.jumpTo(bootAt)) {
+    console.warn(
+      `[jump] ?at=${bootAt} is not a destination — have: ` +
+        jump.targets.map((t) => t.name).join(', '),
+    );
+  }
   /**
    * Sim time of the last ocean FFT dispatch — see the guard in the render path.
    * NaN so the first frame always dispatches (NaN !== NaN).
@@ -1342,6 +1377,9 @@ async function boot(): Promise<void> {
     // re-rank over whatever has been warmed so far.
     compilePhases,
     compileRanking: (): ReturnType<typeof rankCompile> => rankCompile(compilePhases),
+    /** §T.52: `__game.jumpTo('lagoon')` / `('spawn')` — same path as the J key */
+    jumpTo: jump.jumpTo,
+    jumpTargets: jump.targets,
     /** debug: put the hull at a speed without waiting on the wind */
     setSpeed(knots: number): void {
       const ms = knots / 1.944;

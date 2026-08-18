@@ -25,7 +25,13 @@ import {
 } from '../src/island/heightmap';
 import { generateRockPlacements } from '../src/island/rocks';
 import { islandPalmPlacement, palmLodCount, palmGroveAngles } from '../src/island/palms';
-import { generateIslandSites, createArchipelago } from '../src/island/archipelago';
+import {
+  generateIslandSites,
+  createArchipelago,
+  siteParams,
+  type IslandSite,
+} from '../src/island/archipelago';
+import { SHOWCASE_LAGOON, findLagoonAnchorage } from '../src/island/showcase';
 import { sampleSeabedHeight } from '../src/island/seabed';
 import { smoothMax } from '../src/island/archetypes';
 import { buildIslandGeometry, selectTerrainLod } from '../src/island/islandMesh';
@@ -37,6 +43,17 @@ import { getParamsEntry } from '../src/params/registry';
 const SEED = 42;
 const hm = generateIslandHeightmap(SEED, islandParams);
 const R = hm.worldRadius;
+
+/**
+ * The heightmap a site ACTUALLY builds — archetype override and per-island
+ * param overrides included. Every §V43 quality contract below goes through
+ * this rather than re-deriving `{...islandParams, radius}`: the showcase island
+ * (island/showcase.ts) carries overrides, and a test that ignored them would
+ * be measuring an island the world does not contain (§V71 — a part-vs-host
+ * test must evaluate the host).
+ */
+const heightmapForSite = (site: IslandSite) =>
+  generateIslandHeightmap(site.seed, siteParams(site));
 
 describe('heightmap determinism (§V2-adjacent)', () => {
   it('same seed → byte-identical grid and identical heightAt samples', () => {
@@ -257,7 +274,7 @@ describe('archipelago scatter (§V2: same seed ⇒ same world)', () => {
 describe('seabed depth field (T33 keystone — ocean tint + §V8 grounding)', () => {
   const sites = generateIslandSites(WORLD_SEED);
   const islands = sites.map((s) => ({
-    heightmap: generateIslandHeightmap(s.seed, { ...islandParams, radius: s.radius }),
+    heightmap: heightmapForSite(s),
     center: s.position,
   }));
   const seabedAt = (x: number, z: number) => sampleSeabedHeight(islands, x, z);
@@ -384,11 +401,7 @@ describe('LOD selection (§V17 — scenery has to be cheap)', () => {
 describe('§V43 silhouette: island shape must not flatten as it grows', () => {
   const sites = generateIslandSites(WORLD_SEED);
   const built = sites.map((s) => {
-    const hm = generateIslandHeightmap(s.seed, {
-      ...islandParams,
-      radius: s.radius,
-      ...islandPeakHeights(s.radius),
-    });
+    const hm = heightmapForSite(s);
     let peak = -Infinity;
     for (const h of hm.data) if (h > peak) peak = h;
     return { radius: s.radius, peak, ratio: peak / s.radius, hm };
@@ -490,11 +503,7 @@ describe('§V43 vegetation: palms grow in groves, not scattered', () => {
     // which is exactly what "evenly scattered palms" looks like and the most
     // obvious generated tell on an island (§V43). Poisson is CV = 1.
     for (const s of sites) {
-      const hm = generateIslandHeightmap(s.seed, {
-        ...islandParams,
-        radius: s.radius,
-        ...islandPeakHeights(s.radius),
-      });
+      const hm = heightmapForSite(s);
       const palms = generatePlacements(
         islandPalmCount(s.radius),
         s.seed + 2027,
@@ -512,11 +521,7 @@ describe('§V43 vegetation: palms grow in groves, not scattered', () => {
 
   it('every palm still obeys the terrain rules it did before', () => {
     // clustering must not smuggle palms into the sea or onto a cliff
-    const hm = generateIslandHeightmap(sites[0].seed, {
-      ...islandParams,
-      radius: sites[0].radius,
-      ...islandPeakHeights(sites[0].radius),
-    });
+    const hm = heightmapForSite(sites[0]);
     for (const pl of generatePlacements(40, 5, islandPalmPlacement(hm, islandParams, 5))) {
       const [x, y, z] = pl.position;
       expect(y).toBeGreaterThanOrEqual(islandParams.palmMinHeight);
@@ -549,11 +554,7 @@ describe('§V43 silhouette: every island a different shape', () => {
     // Coves, spits and headlands are the whole difference between an island
     // and a hill in water.
     for (const site of generateIslandSites(WORLD_SEED)) {
-      const hm = generateIslandHeightmap(site.seed, {
-        ...islandParams,
-        radius: site.radius,
-        ...islandPeakHeights(site.radius),
-      });
+      const hm = heightmapForSite(site);
       const shores: number[] = [];
       for (let i = 0; i < 128; i++) shores.push(findShoreRadius(hm, (i / 128) * Math.PI * 2));
       const mean = shores.reduce((a, b) => a + b, 0) / shores.length;
@@ -589,13 +590,7 @@ describe('§V43 coastline: a cliff somewhere on every island, not sand all round
   // a profile with a wall in it can, which is what `sheer` headlands are. This
   // test fails the moment headlands are disabled or detuned back to tangency.
   const sites = generateIslandSites(WORLD_SEED);
-  const built = sites.map((s) =>
-    generateIslandHeightmap(s.seed, {
-      ...islandParams,
-      radius: s.radius,
-      ...islandPeakHeights(s.radius),
-    }),
-  );
+  const built = sites.map(heightmapForSite);
 
   /** fraction of bearings where the land rises >45° in the first 25 m inland */
   const cliffFraction = (map: (typeof built)[number]): number => {
@@ -636,13 +631,7 @@ describe('§V43 sea stacks: silhouette that survives to the horizon', () => {
   // drawn, so no draw call, no pipeline (three appends object.uuid to the
   // material cache key for every InstancedMesh) and no cull distance.
   const sites = generateIslandSites(WORLD_SEED);
-  const built = sites.map((s) =>
-    generateIslandHeightmap(s.seed, {
-      ...islandParams,
-      radius: s.radius,
-      ...islandPeakHeights(s.radius),
-    }),
-  );
+  const built = sites.map(heightmapForSite);
 
   it('every island stands at least one sheer feature clear of the water', () => {
     for (const map of built) {
@@ -682,5 +671,216 @@ describe('§V43 sea stacks: silhouette that survives to the horizon', () => {
     const outside = map.heightAt(f.x + f.radius * 1.05, f.z);
     // rises the bulk of its height inside its own footprint radius
     expect(top - outside).toBeGreaterThan(f.height * 0.4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §T52 — THE SHOWCASE LAGOON. These are venue contracts, not shape trivia:
+// each one is a system that had nowhere to be observed before this island
+// existed, expressed as the thing that must be true for it to be observable.
+// Swept over several world seeds on purpose — the island is hand-PLACED but
+// still seeded, so "it works on 1337" is not the claim being made.
+// ---------------------------------------------------------------------------
+describe('§T52 showcase lagoon: a venue for the shore systems', () => {
+  const WORLD_SEEDS = [1337, 42, 7, 20259, 999];
+  const showcaseOf = (seed: number) => {
+    const site = generateIslandSites(seed)[0];
+    return { site, hm: heightmapForSite(site) };
+  };
+  /** m² of the footprint whose depth falls in [lo, hi) */
+  const areaBetween = (
+    hm: ReturnType<typeof heightmapForSite>,
+    lo: number,
+    hi: number,
+  ): number => {
+    const R = hm.worldRadius;
+    const N = 260;
+    const cell = ((2 * R) / (N - 1)) ** 2;
+    let area = 0;
+    for (let i = 0; i < N; i++) {
+      for (let j = 0; j < N; j++) {
+        const x = -R + (2 * R * i) / (N - 1);
+        const z = -R + (2 * R * j) / (N - 1);
+        if (Math.hypot(x, z) > R) continue;
+        const d = -hm.heightAt(x, z);
+        if (d >= lo && d < hi) area += cell;
+      }
+    }
+    return area;
+  };
+
+  it('is the first island in the layout, hand-placed and off the starboard bow', () => {
+    // the ship spawns at the origin facing +z, so +x is to her right. It has
+    // to be sites[0] because generateIslandSites seeds the rejection loop with
+    // it — that ordering is what makes the scattered islands route around it.
+    for (const seed of WORLD_SEEDS) {
+      const site = generateIslandSites(seed)[0];
+      expect(site.position).toEqual(SHOWCASE_LAGOON.position);
+      expect(site.archetype).toBe('lagoon');
+      expect(site.position[0]).toBeGreaterThan(0);
+    }
+  });
+
+  it('still obeys every rule the scattered islands obey', () => {
+    // a hand-placed exception that quietly broke the spawn clearance or the
+    // inter-island gap would be exactly the "magic entry" this is not
+    for (const seed of WORLD_SEEDS) {
+      const sites = generateIslandSites(seed);
+      expect(sites).toHaveLength(islandParams.islandCount);
+      for (const s of sites) {
+        const d = Math.hypot(s.position[0], s.position[1]);
+        expect(d - s.radius).toBeGreaterThanOrEqual(islandParams.spawnClearance);
+      }
+      for (let i = 0; i < sites.length; i++) {
+        for (let j = i + 1; j < sites.length; j++) {
+          const d = Math.hypot(
+            sites[i].position[0] - sites[j].position[0],
+            sites[i].position[1] - sites[j].position[1],
+          );
+          expect(d).toBeGreaterThanOrEqual(
+            sites[i].radius + sites[j].radius + islandParams.islandGap,
+          );
+        }
+      }
+    }
+  });
+
+  it('holds a lagoon that never drains, because the sea it sits in is 4 m deep', () => {
+    // THE POINT. There is no shoaling: the ocean surface swings its full
+    // open-ocean amplitude over a 1 m floor exactly as over 45 m, and the
+    // measured deepest trough in the shipped `swell` sea is -3.96 m. A floor
+    // shallower than that is EXPOSED — the water mesh drops below the sand and
+    // the lagoon flickers dry once per wave. So the basin clears the trough,
+    // and this is the assertion that stops anyone "fixing" it shallower.
+    const SWELL_TROUGH = -3.96;
+    for (const seed of WORLD_SEEDS) {
+      const { hm } = showcaseOf(seed);
+      expect(hm.lagoonCenter).not.toBeNull();
+      const alwaysWet = areaBetween(hm, -SWELL_TROUGH, 8);
+      expect(alwaysWet).toBeGreaterThan(30_000);
+      // and it is a FLOOR, not a hole: the basin centre sits at the authored
+      // depth rather than wherever the noise left it
+      const [cx, cz] = hm.lagoonCenter!;
+      expect(-hm.heightAt(cx, cz)).toBeGreaterThan(3.5);
+      expect(-hm.heightAt(cx, cz)).toBeLessThan(6);
+    }
+  });
+
+  it('keeps a broad 0-3 m shelf, which is where the shore break actually is', () => {
+    // The user asked for 1-3 m of standing water. In this sea that band cannot
+    // stand — it dries and refloods every cycle. That is not a compromise: the
+    // drying band IS the swash `terrain/shoreRunup.ts` paints, so it is the
+    // thing worth having. It must be big enough to read from a ship's deck.
+    for (const seed of WORLD_SEEDS) {
+      const { hm } = showcaseOf(seed);
+      expect(areaBetween(hm, 0, 3)).toBeGreaterThan(15_000);
+    }
+  });
+
+  it('opens to the sea instead of being a landlocked crater', () => {
+    // The `lagoon` archetype alone does NOT give this. Its lobes sit at ring
+    // 0.50-0.62·extent with radius 0.34-0.46·extent, so each reaches ±33-67°
+    // and the two bounding its gap close it from the sides: measured 1-7% of
+    // bearings open, widest mouth 2-22°, with the basin at the island origin.
+    // Pushing the basin out along the archetype's own least-land bearing is
+    // what turns the crater into a cove — and a cove you cannot see into is
+    // not a venue.
+    for (const seed of WORLD_SEEDS) {
+      const { hm } = showcaseOf(seed);
+      const [cx, cz] = hm.lagoonCenter!;
+      const R = hm.worldRadius;
+      const N = 180;
+      const open: boolean[] = [];
+      for (let i = 0; i < N; i++) {
+        const a = (i / N) * Math.PI * 2;
+        let clear = true;
+        for (let r = 0; r <= 2 * R; r += 2) {
+          const x = cx + Math.cos(a) * r;
+          const z = cz + Math.sin(a) * r;
+          if (Math.hypot(x, z) > R) break; // reached open sea
+          if (hm.heightAt(x, z) > 0) { clear = false; break; }
+        }
+        open.push(clear);
+      }
+      let run = 0;
+      let widest = 0;
+      for (let i = 0; i < N * 2; i++) {
+        if (open[i % N]) { run++; widest = Math.max(widest, run); } else run = 0;
+      }
+      expect(Math.min(widest, N) * (360 / N)).toBeGreaterThan(90);
+    }
+  });
+
+  it('offers a berth she will not ground on, facing the lagoon', () => {
+    // draft 2 m + the 3.96 m trough = 5.96 m before the keel touches at all,
+    // and `stepShipGrounding` tests the KEEL, so a berth measured only at the
+    // ship's origin can still drop her bow onto a bank (§V54: give the lumped
+    // model the body's own extent).
+    for (const seed of WORLD_SEEDS) {
+      const { hm } = showcaseOf(seed);
+      const a = findLagoonAnchorage(hm);
+      expect(a.depth).toBeGreaterThanOrEqual(7);
+      for (let i = 0; i < 16; i++) {
+        const t = (i / 16) * Math.PI * 2;
+        const d = -hm.heightAt(a.x + Math.cos(t) * 22, a.z + Math.sin(t) * 22);
+        expect(d).toBeGreaterThanOrEqual(6.2);
+      }
+      // and she is pointed at the lagoon, not away from it: heading is a yaw
+      // about +Y, which maps her forward [0,0,1] to [sin, 0, cos]
+      const [cx, cz] = hm.lagoonCenter!;
+      const fwd = [Math.sin(a.heading), Math.cos(a.heading)];
+      const toLagoon = [cx - a.x, cz - a.z];
+      const len = Math.hypot(toLagoon[0], toLagoon[1]);
+      expect((fwd[0] * toLagoon[0] + fwd[1] * toLagoon[1]) / len).toBeGreaterThan(0.99);
+      // close enough that the beach behind the lagoon is in frame, not a smudge
+      expect(len).toBeLessThan(hm.worldRadius);
+    }
+  });
+
+  it('leaves every other island in the world exactly as it was', () => {
+    // the basin is opt-in (`lagoonDepth` 0) so a change made for one island
+    // cannot silently reshape the other four
+    for (const seed of WORLD_SEEDS) {
+      for (const site of generateIslandSites(seed).slice(1)) {
+        const hm = heightmapForSite(site);
+        expect(hm.lagoonCenter).toBeNull();
+        expect(siteParams(site).lagoonDepth).toBe(0);
+      }
+    }
+  });
+
+  it('the basin can never turn water into land, or make land taller', () => {
+    // THE GUARANTEE, stated as h' = h(1-w) + target·w with target < 0 and
+    // w in [0,1]  =>  h' <= max(h, target) <= max(h, 0). Tested against the
+    // SAME island with the basin switched off, so it is a claim about the
+    // operator rather than about one tuning of it.
+    //
+    // Note what is deliberately NOT claimed: the basin does RAISE ground that
+    // was deeper than the floor — lifting a noise hole up to the sand is half
+    // its job. And it yields to the archetype's own lobes, so an islet inside
+    // the disc stays an islet. Both are why the naive "everything near the
+    // centre is water" version of this test failed, correctly.
+    for (const seed of WORLD_SEEDS) {
+      const site = generateIslandSites(seed)[0];
+      const withBasin = heightmapForSite(site);
+      const without = generateIslandHeightmap(site.seed, {
+        ...siteParams(site),
+        lagoonDepth: 0,
+      });
+      const R = withBasin.worldRadius;
+      let changed = 0;
+      for (let i = 0; i < 120; i++) {
+        for (let j = 0; j < 120; j++) {
+          const x = -R + (2 * R * i) / 119;
+          const z = -R + (2 * R * j) / 119;
+          const a = withBasin.heightAt(x, z);
+          const b = without.heightAt(x, z);
+          if (b <= 0) expect(a).toBeLessThanOrEqual(0);
+          if (Math.abs(a - b) > 0.05) changed++;
+        }
+      }
+      // ...and it did something, or the guarantee above is vacuous
+      expect(changed).toBeGreaterThan(500);
+    }
   });
 });

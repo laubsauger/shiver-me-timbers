@@ -260,6 +260,29 @@ interface ShipSeaMemory {
 
 const seaMemory = new WeakMap<ShipState, ShipSeaMemory>();
 
+/**
+ * Drop this ship's derived sea state. Call after TELEPORTING her — nothing
+ * else should need it, because the memory is otherwise self-maintaining.
+ *
+ * WHY THE OBVIOUS HALF IS NOT ENOUGH. Zeroing velocity and angularVelocity is
+ * the part everyone thinks of. `prevHeights` is the part that bites: it holds
+ * last tick's pressure head under each station AT THE OLD LOCATION, and the
+ * step immediately differences it against the new one. A kilometre of
+ * translation makes that difference enormous; it is clamped to MAX_SURFACE_VY,
+ * so she arrives with a full 8 m/s of relative surface velocity being damped
+ * out of her on tick one — a kick, from a sea she was never in. NaN is the
+ * documented "no previous sample" value and the read is already
+ * `Number.isFinite`-guarded, so dropping the whole entry is the clean reset.
+ *
+ * KEEP THIS IN STEP WITH THE SOLVER. `093a7a5` added Smith-effect attenuation
+ * and added mass, so this state is richer than it looks; anything else that
+ * accumulates PER LOCATION (as opposed to per body) has to be reset here too,
+ * or a teleport will silently carry one place's sea into another.
+ */
+export function resetSeaMemory(ship: ShipState): void {
+  seaMemory.delete(ship);
+}
+
 /** water surface vy is clamped: K-tick mirror recomputes (updateEveryTicks
  * > 1) make heights jump discretely, and an unclamped spike would kick the
  * hull (impulse-free forces, feel target #4) */

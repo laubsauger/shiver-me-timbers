@@ -63,9 +63,20 @@ export {
 export {
   generateIslandSites,
   createArchipelago,
+  siteParams,
   type IslandSite,
   type Archipelago,
   type WaterLevelFn,
+  type WorldAnchorage,
   type CreateArchipelagoOptions,
 } from './archipelago';
+export {
+  SHOWCASE_LAGOON,
+  SHOWCASE_SEED_STRIDE,
+  findLagoonAnchorage,
+  showcaseParams,
+  type Anchorage,
+  type AnchorageOptions,
+  type ShowcaseIsland,
+} from './showcase';
 export { islandParams, type IslandParams } from '../params/island';

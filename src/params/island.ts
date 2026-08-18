@@ -86,6 +86,53 @@ export interface IslandParams {
   /** slope multiplier at the waterline (0 = dead flat, 1 = no apron) */
   beachFlatness: number;
 
+  // -- lagoon basin (authored shallow floor; see heightmap.lagoonBasin) ------
+  /**
+   * Depth (m) of the authored lagoon floor. 0 DISABLES the basin entirely,
+   * which is the default: only the showcase island (island/showcase.ts) turns
+   * it on, and every procedurally scattered island is byte-identical without
+   * it.
+   *
+   * THE NUMBER IS SET BY THE SEA, NOT BY TASTE. There is no shoaling anywhere
+   * in the ocean (the seabed field drives COLOUR only — surfaceMaterial's
+   * `seabedShallowFactorNode` feeds the tint mix, nothing touches
+   * displacement), so the surface swings its full open-ocean amplitude over a
+   * 1 m floor exactly as it does over 45 m. Measured deepest trough over 60 s
+   * of a 320 m patch through the CpuOcean mirror: calm −1.20 m, swell (the
+   * shipped default) −3.96 m, storm −18.3 m. A floor shallower than the trough
+   * is EXPOSED — the ocean mesh drops below the sand, loses the depth test,
+   * and the whole lagoon flickers dry in lockstep with the swell. So the basin
+   * clears the swell trough, and the genuinely 0-3 m water is the beach shelf
+   * OUTSIDE the basin, which dries and refloods every cycle by design: that
+   * band is the shore break, not a defect.
+   */
+  lagoonDepth: number;
+  /** basin disc radius, fraction of the footprint radius */
+  lagoonRadius: number;
+  /** metres (as a fraction of footprint radius) the basin fades out over */
+  lagoonFeather: number;
+  /**
+   * Metres of ARCHETYPE landmass over which the basin yields. The gate is on
+   * the feature height, not on the finished height — see heightmap.lagoonBasin
+   * for the measurement that forced that (an h-gate fired nowhere, because
+   * coast noise had already filled the bay with dry land).
+   */
+  lagoonLandGuard: number;
+  /**
+   * Fraction of the island's own detail noise kept on the basin floor, so the
+   * lagoon bed undulates like sand instead of reading as a plane. Small: the
+   * detail field is scaled off `peakHeight` and is tens of metres tall on a
+   * big island, and this floor is 4.5 m under water.
+   */
+  lagoonFloorRelief: number;
+  /**
+   * How far the basin centre is pushed out from the island origin, as a
+   * fraction of the footprint radius, along the bearing carrying the least
+   * landmass (heightmap.findBayBearing). 0 leaves it at the origin, which
+   * measured as a landlocked crater on every world seed.
+   */
+  lagoonOffset: number;
+
   // -- submerged rim + mesh skirt --------------------------------------------
   /** guaranteed depth (m) of the island boundary below waterline */
   rimDepth: number;
@@ -225,6 +272,12 @@ export const islandParams: IslandParams = registerParams(
     headlandEdge: 0.1,
     beachBandWidth: 3.0,
     beachFlatness: 0.24,
+    lagoonDepth: 0,
+    lagoonRadius: 0.3,
+    lagoonFeather: 0.24,
+    lagoonLandGuard: 6,
+    lagoonFloorRelief: 0.05,
+    lagoonOffset: 0.6,
     rimDepth: 6,
     skirtDepth: 8,
     palmCount: 28,
@@ -301,6 +354,12 @@ function islandParamsMeta(): Partial<Record<keyof IslandParams, ParamMeta>> {
     headlandEdge: { min: 0.04, max: 0.6, step: 0.01 },
     beachBandWidth: { min: 0.2, max: 6, step: 0.1 },
     beachFlatness: { min: 0.05, max: 1, step: 0.05 },
+    lagoonDepth: { min: 0, max: 12, step: 0.1 },
+    lagoonRadius: { min: 0.05, max: 0.8, step: 0.01 },
+    lagoonFeather: { min: 0.02, max: 0.6, step: 0.01 },
+    lagoonLandGuard: { min: 0.5, max: 30, step: 0.5 },
+    lagoonFloorRelief: { min: 0, max: 0.4, step: 0.01 },
+    lagoonOffset: { min: 0, max: 0.8, step: 0.01 },
     rimDepth: { min: 1, max: 20, step: 0.5 },
     skirtDepth: { min: 2, max: 30, step: 0.5 },
     palmCount: { min: 0, max: 120, step: 1 },

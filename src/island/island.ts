@@ -21,13 +21,20 @@
  * cycle through the barrel.
  */
 import * as THREE from 'three/webgpu';
-import { islandParams } from '../params/island';
+import { islandParams, type IslandParams } from '../params/island';
 import { findShoreRadius, generateIslandHeightmap, gradientAt, type IslandHeightmap } from './heightmap';
 import type { ArchetypeName } from './archetypes';
 import { createIslandMesh, selectTerrainLod, type IslandMeshHandle } from './islandMesh';
 import { createRocks, type Rocks } from './rocks';
 import { createIslandPalms, type IslandPalms } from './palms';
 import type { IslandMaterials } from './islandMaterials';
+
+/**
+ * Everything an island is built from: the world tunables, plus the two
+ * per-island build inputs that are NOT Tweakpane knobs (§V16 — `archetype` is
+ * a choice made once at construction, not a value anyone drags).
+ */
+export type ResolvedIslandParams = IslandParams & { archetype?: ArchetypeName };
 
 /** decorrelate the sub-system rng streams derived from the island seed */
 const ROCK_SEED_OFFSET = 1013;
@@ -41,6 +48,16 @@ export interface CreateIslandOptions {
   position: [number, number];
   /** overrides islandParams.radius for this island */
   radius?: number;
+  /**
+   * Force a silhouette family instead of drawing one from the seed. One
+   * caller: the hand-placed showcase island (showcase.ts).
+   */
+  archetype?: ArchetypeName;
+  /**
+   * Params applied on top of islandParams (and on top of the radius-derived
+   * peak heights) for this island alone. Build-time, like `radius`.
+   */
+  overrides?: Partial<IslandParams>;
   /**
    * Shared shader set (islandMaterials.ts). When present the island renders
    * with it and does NOT push uniforms itself — the archipelago does that once
@@ -164,10 +181,20 @@ function buildWaterfallSocket(hm: IslandHeightmap): THREE.Object3D {
 }
 
 export function createIsland(opts: CreateIslandOptions): Island {
-  const p =
-    opts.radius !== undefined
-      ? { ...islandParams, radius: opts.radius, ...islandPeakHeights(opts.radius) }
-      : islandParams;
+  const bespoke =
+    opts.radius !== undefined || opts.overrides !== undefined || opts.archetype !== undefined;
+  const p: ResolvedIslandParams = bespoke
+    ? {
+        ...islandParams,
+        ...(opts.radius !== undefined
+          ? { radius: opts.radius, ...islandPeakHeights(opts.radius) }
+          : {}),
+        // LAST, deliberately: an override of `peakHeight` must beat the
+        // radius-derived one, not be silently replaced by it
+        ...opts.overrides,
+        archetype: opts.archetype,
+      }
+    : islandParams;
   const heightmap = generateIslandHeightmap(opts.seed, p, opts.avoidArchetypes);
 
   const shared = opts.materials;

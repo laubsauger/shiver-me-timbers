@@ -152,6 +152,23 @@ export class FollowCam {
   }
 
   /**
+   * CUT, don't chase. The chase position is exponentially damped toward the
+   * ship, which is exactly right when she is sailing and exactly wrong when she
+   * has been teleported: the camera would fly the whole kilometre at
+   * `posHalfLife`, arriving seconds later having flown through the island on
+   * the way. Dropping `initialized` makes the next update() seat the lens at
+   * its desired pose in one frame; clearing `blend` stops a mode-switch ramp
+   * from re-softening it.
+   *
+   * Deliberately NOT wired into the mode machinery — teleporting is not a mode
+   * change, and setMode() already has its own (correct) glide behaviour.
+   */
+  snap(): void {
+    this.initialized = false;
+    this.blend = 0;
+  }
+
+  /**
    * Ship-LOCAL position of the helm (the wheel's own socket). main.ts resolves
    * it from the assembly at boot so this file never has to know the galleon's
    * dimensions — and so a change to the sterncastle moves the captain's eye

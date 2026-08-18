@@ -63,7 +63,21 @@ export interface IslandHeightmapParams {
   rimStart: number;
   beachBandWidth: number;
   beachFlatness: number;
+  /** authored lagoon floor — see lagoonBasin below; 0 disables */
+  lagoonDepth: number;
+  lagoonRadius: number;
+  lagoonFeather: number;
+  lagoonLandGuard: number;
+  lagoonFloorRelief: number;
+  lagoonOffset: number;
   rimDepth: number;
+  /**
+   * Force a silhouette family instead of drawing one from the seed. Exists for
+   * ONE caller — the hand-placed showcase island (island/showcase.ts), which
+   * has to be a lagoon every time rather than 23% of the time. Undefined (the
+   * normal case) leaves `pickArchetype` in charge.
+   */
+  archetype?: ArchetypeName;
   /** sea stacks (see archetypes.buildSeaStacks) — fractions, resolved below */
   seaStackCount: number;
   seaStackRing: number;
@@ -92,8 +106,148 @@ export interface IslandHeightmap {
   size: number;
   /** grid spans [-worldRadius, worldRadius] on x and z */
   worldRadius: number;
+  /**
+   * Island-local centre of the authored lagoon basin, or null when this island
+   * has none (`lagoonDepth` 0 — every procedurally scattered island). PUBLISHED
+   * rather than recomputed by consumers: the anchorage solver and the tests
+   * both need "where is the lagoon", and two derivations of the same bearing
+   * are two things that can disagree.
+   */
+  lagoonCenter: [number, number] | null;
   /** bilinear height sample, island-local coords; outside grid → -rimDepth */
   heightAt(x: number, z: number): number;
+}
+
+const smoothstep01 = (t: number): number => {
+  const c = Math.min(Math.max(t, 0), 1);
+  return c * c * (3 - 2 * c);
+};
+
+/** bearings scanned for the bay opening — resolution, not a look tunable */
+const BAY_SCAN_ANGLES = 96;
+/** radial samples per bearing in that scan */
+const BAY_SCAN_STEPS = 24;
+
+/**
+ * WHERE THE ARCHETYPE LEFT ITS BAY OPEN — the bearing carrying the least
+ * landmass, measured, so the basin can be pushed out along it.
+ *
+ * WHY THIS IS NEEDED AND THE ISLAND ORIGIN IS NOT ENOUGH. The `lagoon`
+ * archetype rings its lobes around the origin with a `gap` of 0.7-1.15 rad of
+ * open bearing — but each lobe sits at ring ∈ 0.50-0.62·extent with radius
+ * 0.34-0.46·extent, so it reaches ±asin(r/ring) = ±33-67° around its own
+ * bearing. The two lobes bounding the gap therefore close most or all of it
+ * from the sides. Measured over five world seeds with the basin at the origin:
+ * bay openness 1-7% of bearings, widest mouth 2-22°. That is a CRATER, not a
+ * cove — a pool with no way in and nothing to see it from.
+ *
+ * It is not the noise. Dropping `coastNoiseStrength` 0.14→0.05 and
+ * `noiseStrength` 0.18→0.08 made it WORSE (widest mouth 4°→0°), because a
+ * flatter field also flattens the deep channels the ship needs.
+ *
+ * So: score each bearing by the TALLEST landmass anywhere along it and take
+ * the lowest. Purely a function of the feature list, so it costs one scan at
+ * build time and moves with the archetype's own seeded spin (§V71 — resolve
+ * against the real surface, never against an authored constant that happened
+ * to match one seed).
+ */
+function findBayBearing(features: readonly Feature[], R: number, blend: number): number {
+  let bestAngle = 0;
+  let bestPeak = Infinity;
+  for (let i = 0; i < BAY_SCAN_ANGLES; i++) {
+    const angle = (i / BAY_SCAN_ANGLES) * Math.PI * 2;
+    const cx = Math.cos(angle);
+    const cz = Math.sin(angle);
+    let peak = -Infinity;
+    for (let k = 1; k <= BAY_SCAN_STEPS; k++) {
+      const r = (k / BAY_SCAN_STEPS) * R;
+      const land = combineFeatures(features, cx * r, cz * r, blend);
+      if (land > peak) peak = land;
+    }
+    if (peak < bestPeak) {
+      bestPeak = peak;
+      bestAngle = angle;
+    }
+  }
+  return bestAngle;
+}
+
+/**
+ * LAGOON BASIN — the one shape the composition could not previously express.
+ *
+ * Every feature in archetypes.ts is merged with `smoothMax`, so the field can
+ * only ever ADD land: there is no term that says "this basin's floor is at
+ * −N m". Measured on three `lagoon` seeds at R = 260 m, the bay inside the arc
+ * of lobes is nothing but coast noise at absolute amplitude — 22-45k m² of it
+ * 5-8 m deep and 4-12k m² deeper than 8 m, against ~13-19k m² in the 0-3 m
+ * band, and none of it controlled. A lagoon you can see the sand through has
+ * to be authored.
+ *
+ * TWO GATES:
+ *  - the DISC (`radius` + `feather`) says where the lagoon is. Its feather is
+ *    not cosmetic: it IS the shelving bank up out of the basin, so the floor
+ *    meets the beach on a ramp instead of a step.
+ *  - the LAND GUARD says the basin yields to the ARCHETYPE's own landmass,
+ *    fading out over the first `landGuard` metres of feature height.
+ *
+ * THE GATE IS ON `land`, NOT ON `h`, AND THAT IS THE WHOLE POINT. Gating on
+ * the finished height looks more obviously safe and does not work: coast and
+ * detail noise are applied at ABSOLUTE amplitude, scaled off `peakHeight`,
+ * which scales with the footprint — so on a 260 m island they are a ±16 m and
+ * ±21 m field laid over everything, INCLUDING the bay. Measured with an
+ * h-gate: the archetype's bay floor came out at +0.2 m at the island's own
+ * centre and rose to +4.6 m fifteen metres out, i.e. the "lagoon" was dry
+ * land, the basin's gate read it as land, and the basin fired NOWHERE. The
+ * landmass is the thing that actually defines the bay; the noise is what the
+ * basin is there to overrule.
+ *
+ * ONE COUPLING WORTH KNOWING ABOUT. Where the archetype puts no landmass but
+ * the noise piled up anyway, the basin pulls that ground DOWN — correctly, it
+ * is a lagoon — and if that happened to be the island's tallest point it lowers
+ * the grid maximum. The `minPeakHeight` rescale below then scales every
+ * positive height up to compensate, so turning the basin on can move land
+ * heights elsewhere by a few centimetres. Benign, but it is the reason the
+ * with/without comparison in the tests is stated as "water stays water" rather
+ * than as a pointwise "never higher".
+ *
+ * WHAT IT GUARANTEES. Wherever it acts the result is `h' = h·(1−w) − depth·w`
+ * with depth > 0 and w ∈ [0,1], so h' ≤ max(h, −depth): the basin can lift a
+ * hole up toward the floor and it can sink a noise islet, but it can NEVER
+ * create dry land, and inside the disc it guarantees water at the authored
+ * depth. That one-directional guarantee is why it is safe to run before the
+ * apron, which assumes it is handed a shoreline it may soften but not move.
+ *
+ * @param h     height (m) at this point before the basin
+ * @param land  the ARCHETYPE's feature height here, before any noise
+ * @param d     distance (m) from the BASIN CENTRE (see findBayBearing — it is
+ *              pushed out along the archetype's own opening, not left at the
+ *              island origin, or the lagoon is a landlocked crater)
+ * @param R     footprint radius (m); the disc fractions resolve against it
+ */
+function lagoonBasin(
+  h: number,
+  land: number,
+  detail: number,
+  d: number,
+  R: number,
+  p: IslandHeightmapParams,
+): number {
+  if (p.lagoonDepth <= 0) return h;
+  const feather = Math.max(p.lagoonFeather * R, 1e-3); // §V28 floored divisor
+  const disc = 1 - smoothstep01((d - p.lagoonRadius * R) / feather);
+  if (disc <= 0) return h;
+  const guard = Math.max(p.lagoonLandGuard, 1e-3); // §V28 floored divisor
+  const w = disc * (1 - smoothstep01(land / guard));
+  // A FLOOR IS NOT A TABLE. At full weight the target is the only thing left,
+  // so a constant would put a dead-flat 156 m disc under clear water with
+  // caustics playing across it — the one place in this scene where the seabed
+  // is genuinely visible is the last place it should be a plane. Keeping a
+  // small fraction of the SAME detail field the rest of the island uses costs
+  // nothing and stays band-limited by construction (this is a CPU height grid;
+  // normals come from computeVertexNormals, not from screen-space derivatives,
+  // so §V38/§V48 do not bite here).
+  const target = -p.lagoonDepth + detail * p.lagoonFloorRelief;
+  return h + (target - h) * w;
 }
 
 /** monotone slope compression around the waterline (see header) */
@@ -123,7 +277,11 @@ export function generateIslandHeightmap(
   const cx = rng() * 1024;
   const cz = rng() * 1024;
 
-  const archetype = pickArchetype(rng, avoidArchetypes);
+  // The draw is taken either way, so a forced archetype leaves the rest of the
+  // rng stream byte-identical to the unforced one — the override changes the
+  // silhouette family and nothing else about the island.
+  const picked = pickArchetype(rng, avoidArchetypes);
+  const archetype = p.archetype ?? picked;
   // Landmass first, then the stacks standing off it. Both go through the same
   // smooth-max, so a stack that happens to land against a headland fuses with
   // it instead of creasing, and one in open water stays an isolated column.
@@ -155,6 +313,12 @@ export function generateIslandHeightmap(
   const rimStart = Math.min(Math.max(p.rimStart, 0.05), 0.99);
   const rimSpan = Math.max(1 - rimStart, 1e-3); // §V28 floored divisor
 
+  // basin centre: out along the archetype's own opening, so the lagoon is a
+  // COVE (open to the sea, sheltered on three sides) instead of a crater
+  const bayAngle = p.lagoonDepth > 0 ? findBayBearing(features, R, blend) : 0;
+  const bayX = Math.cos(bayAngle) * p.lagoonOffset * R;
+  const bayZ = Math.sin(bayAngle) * p.lagoonOffset * R;
+
   const rawHeight = (x: number, z: number): number => {
     const land = combineFeatures(features, x, z, blend);
 
@@ -171,6 +335,18 @@ export function generateIslandHeightmap(
     const relief = Math.min(Math.max(land / Math.max(p.peakHeight, 1e-3), 0), 1);
     const detail = n * detailAmp * (0.3 + 0.7 * relief);
 
+    // BASIN BEFORE THE RIM ENVELOPE, and the order is load-bearing. The basin
+    // is pushed out along the bay bearing (`lagoonOffset`), so at the offsets
+    // that actually open the bay its disc reaches the footprint edge — and
+    // applied AFTER the envelope it would overwrite the rim's guaranteed
+    // -rimDepth with its own -4.5 m. `heightAt` still reports -rimDepth for
+    // anything outside the grid, so that leaves a 7.5 m STEP in the seabed
+    // field exactly on the square boundary: a ledge in the geometry and a hard
+    // ring in the §V24 tint. Ahead of the envelope the rim guarantee is
+    // untouched by construction and the basin blends out into it.
+    const bayDist = Math.hypot(x - bayX, z - bayZ);
+    const shaped = lagoonBasin(land + coast + detail, land, detail, bayDist, R, p);
+
     // RIM ENVELOPE. The rim guarantee used to be bought by multiplying the
     // whole field by a dome that vanished at d=1, which is what made every
     // coastline a circle. This instead leaves everything inside `rimStart`
@@ -179,7 +355,7 @@ export function generateIslandHeightmap(
     const d = Math.hypot(x, z) / Math.max(R, 1e-3);
     const t = Math.min(Math.max((d - rimStart) / rimSpan, 0), 1);
     const edge = t * t * (3 - 2 * t);
-    const h = (land + coast + detail) * (1 - edge) + -p.rimDepth * edge;
+    const h = shaped * (1 - edge) + -p.rimDepth * edge;
     return beachApron(h, p.beachBandWidth, p.beachFlatness);
   };
 
@@ -225,7 +401,15 @@ export function generateIslandHeightmap(
     return a + (b - a) * fz;
   };
 
-  return { data, size, worldRadius: R, heightAt, archetype, features };
+  return {
+    data,
+    size,
+    worldRadius: R,
+    heightAt,
+    archetype,
+    features,
+    lagoonCenter: p.lagoonDepth > 0 ? [bayX, bayZ] : null,
+  };
 }
 
 /**

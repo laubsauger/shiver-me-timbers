@@ -18,10 +18,22 @@
 import * as THREE from 'three/webgpu';
 import { createRng } from '../state/rng';
 import { islandParams, type IslandParams } from '../params/island';
-import { createIsland, type Island, type IslandFrame } from './island';
+import {
+  createIsland,
+  islandPeakHeights,
+  type Island,
+  type IslandFrame,
+  type ResolvedIslandParams,
+} from './island';
 import { createIslandMaterials, type IslandMaterials } from './islandMaterials';
 import type { ArchetypeName } from './archetypes';
 import { createSeabedField, type SeabedField, type SeabedIsland } from './seabed';
+import {
+  findLagoonAnchorage,
+  SHOWCASE_LAGOON,
+  SHOWCASE_SEED_STRIDE,
+  type Anchorage,
+} from './showcase';
 
 /** placement attempts per island before the layout is declared impossible */
 const PLACEMENT_ATTEMPTS = 512;
@@ -37,6 +49,31 @@ export interface IslandSite {
   position: [number, number];
   /** footprint radius (m) */
   radius: number;
+  /**
+   * Forced silhouette family. Set ONLY by the hand-placed showcase island —
+   * see showcase.ts for why one deliberate exception beats seed-hunting.
+   */
+  archetype?: ArchetypeName;
+  /** params applied on top of `islandParams` for this island alone */
+  overrides?: Partial<IslandParams>;
+}
+
+/**
+ * Resolve the params an island is actually built from. ONE function so tests,
+ * the seabed field and the renderer cannot each apply a different subset of
+ * the overrides and then disagree about where the ground is.
+ */
+export function siteParams(
+  site: IslandSite,
+  base: IslandParams = islandParams,
+): ResolvedIslandParams {
+  return {
+    ...base,
+    radius: site.radius,
+    ...islandPeakHeights(site.radius, base),
+    ...site.overrides,
+    archetype: site.archetype,
+  };
 }
 
 /**
@@ -54,21 +91,43 @@ export function generateIslandSites(
   const rMax = Math.max(p.scatterMinDistance, p.scatterMaxDistance);
 
   const count = Math.max(0, Math.floor(p.islandCount));
+
+  // THE SHOWCASE ISLAND GOES IN FIRST, and that ordering is the whole trick:
+  // the rejection loop below already tests every candidate against everything
+  // in `sites`, so seeding the list with a hand-placed island makes the
+  // procedural ones route around it automatically, at every seed, with no
+  // second constraint to keep in sync. It takes one of the `islandCount`
+  // slots rather than adding to them (see showcase.ts).
+  const showcase = count > 0;
+  if (showcase) {
+    sites.push({
+      seed: seed + SHOWCASE_SEED_STRIDE,
+      position: [...SHOWCASE_LAGOON.position],
+      radius: SHOWCASE_LAGOON.radius,
+      archetype: SHOWCASE_LAGOON.archetype,
+      overrides: SHOWCASE_LAGOON.overrides,
+    });
+  }
+  const scattered = showcase ? count - 1 : count;
+
   // one seeded rotation for the whole ring, so the nearest island isn't
   // always off the same bow
   const ringPhase = rng();
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < scattered; i++) {
     let placed = false;
     for (let attempt = 0; attempt < PLACEMENT_ATTEMPTS && !placed; attempt++) {
-      // STRATIFIED, not uniform: island i owns radial band i/count and angular
-      // sector i/count. Uniform sampling of a 700..3600 m annulus put every
-      // island past 1900 m — the world had no landfall you could sail to and
-      // nothing in the near field to look at. Stratifying guarantees the set
-      // spans the whole range (one close, one at the haze distance) and makes
-      // the gap constraint almost always satisfiable on the first attempt.
-      const sector = (i + rng()) / count;
+      // STRATIFIED, not uniform: island i owns radial band i/scattered and
+      // angular sector i/scattered. Uniform sampling of a 700..3600 m annulus
+      // put every island past 1900 m — the world had no landfall you could
+      // sail to and nothing in the near field to look at. Stratifying
+      // guarantees the set spans the whole range (one close, one at the haze
+      // distance) and makes the gap constraint almost always satisfiable on
+      // the first attempt. The strata run over the SCATTERED count, not the
+      // total: the showcase island is not on this ring and must not consume a
+      // band, or the far end of the range would go unsampled.
+      const sector = (i + rng()) / scattered;
       const angle = (sector + ringPhase) * Math.PI * 2;
-      const band = (i + rng()) / count;
+      const band = (i + rng()) / scattered;
       const dist = rMin + (rMax - rMin) * band;
       const radius = p.scatterRadiusMin + (p.scatterRadiusMax - p.scatterRadiusMin) * rng();
       const x = Math.cos(angle) * dist;
@@ -92,7 +151,7 @@ export function generateIslandSites(
     }
     if (!placed) {
       throw new Error(
-        `generateIslandSites: could not place island ${i + 1}/${p.islandCount} in ` +
+        `generateIslandSites: could not place scattered island ${i + 1}/${scattered} in ` +
           `${PLACEMENT_ATTEMPTS} attempts — annulus ${rMin}..${rMax} m is too small ` +
           `for ${p.islandCount} islands of radius ≤${p.scatterRadiusMax} m with ` +
           `${p.islandGap} m gaps and ${p.spawnClearance} m spawn clearance`,
@@ -102,11 +161,24 @@ export function generateIslandSites(
   return sites;
 }
 
+/** an anchorage in WORLD coords — the debug jump's destination list */
+export interface WorldAnchorage extends Omit<Anchorage, 'x' | 'z'> {
+  /** stable id used by the jump key and `?at=` */
+  name: string;
+  x: number;
+  z: number;
+}
+
 export interface Archipelago {
   /** add this to the scene — one group holds every island */
   group: THREE.Group;
   islands: Island[];
   sites: IslandSite[];
+  /**
+   * Places worth parking at, solved from the built heightmaps. Empty when the
+   * world has no islands. Feeds the debug jump (src/debug/jump.ts).
+   */
+  anchorages: WorldAnchorage[];
   /**
    * Shared seabed depth field: ocean shallows tint, §V8 grounding, §V34
    * caustics receivers. See src/island/seabed.ts for the sampler contract.
@@ -151,6 +223,8 @@ export function createArchipelago(opts: CreateArchipelagoOptions): Archipelago {
       seed: site.seed,
       position: site.position,
       radius: site.radius,
+      archetype: site.archetype,
+      overrides: site.overrides,
       materials,
       avoidArchetypes: usedArchetypes,
     });
@@ -158,6 +232,21 @@ export function createArchipelago(opts: CreateArchipelagoOptions): Archipelago {
     islands.push(island);
     foamTargets.push(...island.foamTargets);
     group.add(island.group);
+  }
+
+  // The showcase island is sites[0] by construction (see generateIslandSites).
+  // Its anchorage is solved from the heightmap that was actually built, not
+  // from a stored constant — same island, same bay mouth, one source of truth.
+  const anchorages: WorldAnchorage[] = [];
+  if (sites.length > 0 && sites[0].archetype !== undefined) {
+    const local = findLagoonAnchorage(islands[0].heightmap);
+    anchorages.push({
+      name: 'lagoon',
+      x: islands[0].center[0] + local.x,
+      z: islands[0].center[1] + local.z,
+      heading: local.heading,
+      depth: local.depth,
+    });
   }
 
   const seabedIslands: SeabedIsland[] = islands.map((i) => ({
@@ -170,6 +259,7 @@ export function createArchipelago(opts: CreateArchipelagoOptions): Archipelago {
     group,
     islands,
     sites,
+    anchorages,
     seabed,
     foamTargets,
     materials,
