@@ -28,7 +28,12 @@ export interface RenderStats {
 
 export interface PerfHud {
   el: HTMLDivElement;
-  /** call once per rAF with the frame duration in ms */
+  /**
+   * Call once per rAF with the frame duration in ms. Nothing on the overlay
+   * reports this sample on its own — it feeds the FPS_WINDOW ring, and the
+   * frame row prints avg/min/max of that ring. See `redraw()` for why a single
+   * sample beside a windowed fps was worse than useless.
+   */
   frame(frameMs: number): void;
   setPassTiming(label: string, ms: number): void;
   setRenderStats(stats: RenderStats): void;
@@ -57,7 +62,6 @@ export function createPerfHud(parent: HTMLElement = document.body): PerfHud {
   const samples = new Float32Array(FPS_WINDOW);
   let sampleCount = 0;
   let cursor = 0;
-  let lastFrameMs = 0;
   const passes = new Map<string, number>();
   /**
    * A SNAPSHOT, not the live `renderer.info.render`.
@@ -79,14 +83,60 @@ export function createPerfHud(parent: HTMLElement = document.body): PerfHud {
   let gpu: readonly string[] | null = null;
 
   const redraw = (): void => {
+    /**
+     * THE FRAME ROW IS A WINDOW, NOT A SAMPLE.
+     *
+     * It used to print the single most recent `frameDt`. Beside a 30-frame
+     * average fps that is inconsistent by construction, and it is how
+     * `fps 261.1` came to sit next to `frame 0.00 ms` on the same overlay: two
+     * statistics of different things, neither labelled. A capture reading
+     * `frame 9.30 ms` was likewise honest and useless — the same window
+     * averaged 23.3 ms, so the frame was JITTERY, not cheap, and a whole
+     * investigation was steered by reading one sample as steady state.
+     *
+     * `avg` is now exactly `1000 / fps` by construction, so the two rows can
+     * never disagree, and `min`/`max` put the jitter on screen where the
+     * average hides it.
+     */
     let sum = 0;
-    for (let i = 0; i < sampleCount; i++) sum += samples[i];
+    let min = Infinity;
+    let max = 0;
+    let zeros = 0;
+    for (let i = 0; i < sampleCount; i++) {
+      const v = samples[i];
+      sum += v;
+      if (v < min) min = v;
+      if (v > max) max = v;
+      // `<= 0`, not `=== 0`: a regressed rAF timestamp gives a NEGATIVE dt,
+      // which drags the average down and inflates fps just as badly.
+      if (v <= 0) zeros++;
+    }
     const avgMs = sampleCount > 0 ? sum / sampleCount : 0;
     const fps = avgMs > 0 ? 1000 / avgMs : 0;
     const lines = [
-      `fps   ${fps.toFixed(1)}`,
-      `frame ${lastFrameMs.toFixed(2)} ms`,
+      `fps   ${fps.toFixed(1)}  (${sampleCount}-frame avg)`,
+      `frame ${avgMs.toFixed(2)} avg  ${(sampleCount > 0 ? min : 0).toFixed(2)} min  ` +
+        `${max.toFixed(2)} max ms`,
     ];
+    /**
+     * A ZERO-LENGTH FRAME IS NOT A FRAME.
+     *
+     * `frameDt` is `(rAF timestamp - previous rAF timestamp)`, and Chrome hands
+     * every callback fired for one frame the SAME timestamp. So a dt of exactly
+     * 0 does not mean an instant frame — it means the render callback ran twice
+     * against one timestamp, which inflates fps by the duplication factor while
+     * showing 0 in the frame row. That is the failure mode `fps 261.1` /
+     * `frame 0.00 ms` looks like, and it is silent unless it is said out loud.
+     *
+     * The arithmetic fits: a window alternating 7.66 ms and 0 averages 3.83 ms,
+     * i.e. exactly `fps 261.1`, on a machine actually running 130.5 fps
+     * (`tests/perfHudFrameRow.test.ts` reconstructs it). NOT PROVEN to be what
+     * produced that capture — the source of a duplicated dispatch was never
+     * found, and this row can only report the symptom.
+     */
+    if (zeros > 0) {
+      lines.push(`!! ${zeros}/${sampleCount} frames had dt<=0 — fps is INFLATED, not real`);
+    }
     if (passes.size > 0) {
       lines.push('--- passes ---');
       for (const [label, ms] of passes) {
@@ -107,7 +157,6 @@ export function createPerfHud(parent: HTMLElement = document.body): PerfHud {
   return {
     el,
     frame(frameMs: number): void {
-      lastFrameMs = frameMs;
       samples[cursor] = frameMs;
       cursor = (cursor + 1) % FPS_WINDOW;
       if (sampleCount < FPS_WINDOW) sampleCount++;

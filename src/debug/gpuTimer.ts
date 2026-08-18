@@ -31,6 +31,12 @@
  *    a measurement (§Rule 8).
  *  - Never aliases. Overflow goes to a dedicated scratch pair that is excluded
  *    from every sum, and is counted.
+ *  - Never shows a partial ranking. An overflow means an unknown set of passes
+ *    was not timed, and a truncated top-8 is plausible, ordered and wrong — so
+ *    an overflowed window prints the reason INSTEAD OF the list, and the
+ *    frame's total is not recorded at all (see `formatGpuHud`).
+ *  - Never averages an unknown number of frames together. `tick()` is the frame
+ *    boundary and a batch is exactly one frame; see the block below.
  *  - Keeps the per-pass split, keyed by render-context id (stable across
  *    frames — `RenderContexts` chain-maps them by scene/camera/attachment) and
  *    labelled with the render target's name and size.
@@ -46,12 +52,53 @@
  * also where the ocean FFT lives, i.e. the number most worth having.
  */
 
-/** Query pairs held per pool. 2048 pairs is ~1024 passes/frame of headroom. */
-const MAX_QUERIES = 4096;
+/**
+ * ONE BATCH IS ONE FRAME, ENFORCED.
+ *
+ * The pool used to hold a single readback buffer, so only one `mapAsync` could
+ * be in flight; every frame that ticked while it was busy kept ALLOCATING into
+ * the same query set. Measured on this scene: render 26 pairs/frame (54 peak),
+ * compute 85 pairs/frame (143 peak), and a readback latency of ~4 frames — so
+ * a "batch" routinely carried 4-6 frames, and under contention 28. At 85
+ * pairs/frame a 2047-pair pool exhausts after 24 frames, which is EXACTLY the
+ * `ovf 89` capture: the pool did not overflow because a frame was big, it
+ * overflowed because the drain could not keep up and the pool has no per-frame
+ * boundary.
+ *
+ * The old code then tried to recover the frame count from the data
+ * (`frames = max occurrences of any key`), which is a guess: it needs some pass
+ * to run on every frame AND every pass to have a distinct key. Both were false
+ * — see `describe()` on unnamed render targets — so every per-frame average was
+ * divided by a wrong number.
+ *
+ * Now: RESULT_SLOTS readbacks may be in flight at once, `tick()` is the frame
+ * boundary, and a frame that cannot get a slot is DROPPED (its queries are
+ * discarded) rather than merged into the next batch. A batch is therefore one
+ * frame by construction, there is no division, and the pool only has to hold a
+ * single frame's passes.
+ */
+
+/** Readbacks allowed in flight. Measured `mapAsync` latency is ~4 frames. */
+const RESULT_SLOTS = 6;
+/**
+ * Query pairs held per pool. Sized from the measurement above: the worst frame
+ * seen was 143 compute pairs, so 1024 pairs is ~7x headroom on a per-frame
+ * budget. Overflow now means one FRAME had more passes than this, which is a
+ * real anomaly worth shouting about — not a drain that fell behind.
+ */
+const MAX_PAIRS = 1024;
+const MAX_QUERIES = MAX_PAIRS * 2;
 /** Last pair is the overflow sink — allocated to, never summed. */
 const SCRATCH_BASE = MAX_QUERIES - 2;
 /** Frames retained for the min-of-N window (§V.39). */
 export const WINDOW = 60;
+/**
+ * Age past which a reading stops being reported as a number. A min-of-window
+ * total is historical by design, but once the last successful read is this old
+ * the instrument is not describing the current frame and must not look as
+ * though it is.
+ */
+const STALE_MS = 1000;
 
 export type TimerKind = 'render' | 'compute';
 
@@ -69,10 +116,31 @@ export interface GpuPassSample {
 export interface GpuTimerHealth {
   /** frames read back successfully */
   reads: number;
-  /** resolve calls that returned nothing (busy buffer, nothing allocated) */
+  /**
+   * Frames whose queries were thrown away because every readback slot was
+   * still in flight. NOT an error — the instrument is sampling rather than
+   * capturing every frame — but a large ratio to `reads` means the window
+   * covers fewer frames than it looks like it does.
+   */
   misses: number;
-  /** passes dropped into the scratch pair because the set was full */
+  /**
+   * Ticks where the pool had nothing allocated, i.e. the pass simply did not
+   * run this frame. Explicitly NOT a miss: the old code counted these as
+   * failures and produced the notorious `miss 9282` beside 166 reads.
+   */
+  idle: number;
+  /**
+   * Passes dropped into the scratch pair because ONE FRAME exceeded the pool.
+   * Nonzero means the pass list below is MISSING PASSES and cannot be read as
+   * a ranking.
+   */
   overflows: number;
+  /** batches drained that had overflowed — their totals are never recorded */
+  incompleteReads: number;
+  /** pass count of the most recent drained frame, per pool */
+  passesPerFrame: Record<TimerKind, number>;
+  /** pairs the pool can hold in one frame, for sizing arguments */
+  capacityPairs: number;
   /**
    * Query pairs that came back with end <= begin, i.e. NEVER WRITTEN. A
    * nonzero, growing count here means the GPU is not honouring
@@ -82,9 +150,10 @@ export interface GpuTimerHealth {
   /** ms since the last successful read; grows without bound if wedged */
   staleMs: number;
   /**
-   * Frames covered by the most recent batch. >1 means the readback outran the
-   * frame; per-pass numbers are divided by this, so a large or jittery value
-   * widens the error bar on every reading.
+   * Frames covered by the most recent batch. Now 1 BY CONSTRUCTION — `tick()`
+   * is the frame boundary and a frame that cannot be drained is discarded, so
+   * nothing is ever divided. Kept in the interface as an assertion: anything
+   * other than 1 here is a bug in this file, not a property of the scene.
    */
   batchFrames: number;
   /**
@@ -123,14 +192,45 @@ export interface GpuTimer {
  */
 export function formatGpuHud(timer: GpuTimer, topN = 8): string[] {
   const h = timer.health();
-  const ms = (v: number): string => (Number.isFinite(v) ? v.toFixed(2) : '--');
+  /**
+   * A NUMBER OLDER THAN `STALE_MS` IS NOT THIS FRAME'S NUMBER.
+   *
+   * This is the same fault the module was written to escape: three's pool
+   * returns its last successful reading on every failure path, and a constant
+   * reads as a perfectly steady frame. Printing a min-of-window total while the
+   * last successful read was eight seconds ago reproduces that exactly — the
+   * value is real, it is simply not about now. `--` is the honest render.
+   */
+  const stale = h.staleMs > STALE_MS;
+  const ms = (v: number): string => (!stale && Number.isFinite(v) ? v.toFixed(2) : '--');
   const lines = [
-    `render ${ms(timer.total('render'))} ms   compute ${ms(timer.total('compute'))} ms`,
+    `render ${ms(timer.total('render'))} ms /${h.passesPerFrame.render} p` +
+      `   compute ${ms(timer.total('compute'))} ms /${h.passesPerFrame.compute} p`,
   ];
-  if (h.reads === 0 || h.unwritten > 0 || h.overflows > 0 || h.staleMs > 1000) {
+  if (h.reads === 0 || h.unwritten > 0 || h.overflows > 0 || stale) {
+    const age = Number.isFinite(h.staleMs) ? `${(h.staleMs / 1000).toFixed(1)}s` : 'never';
     lines.push(
-      `!! reads ${h.reads} miss ${h.misses} unwritten ${h.unwritten} ovf ${h.overflows}`,
+      `!! reads ${h.reads} drop ${h.misses} unwritten ${h.unwritten} ` +
+        `ovf ${h.overflows} last ${age} ago`,
     );
+  }
+  /**
+   * OVERFLOW MUST BREAK THE LIST, NOT DECORATE IT.
+   *
+   * A truncated top-8 is the single most dangerous thing this module can print:
+   * it is plausible, it is ordered, and nothing about it says that the pass
+   * which actually dominated the frame was never timed. The module's own rule
+   * is that a missing number must LOOK missing (§Rule 8), so a window that
+   * overflowed prints the reason where the ranking would have been and prints
+   * no ranking at all.
+   */
+  if (h.overflows > 0) {
+    lines.push(
+      `!! PASS LIST SUPPRESSED — ${h.overflows} passes were never timed`,
+      `!! one frame exceeded ${h.capacityPairs} pairs; ${h.incompleteReads} batches incomplete`,
+      '!! any ranking would be missing rows — __perf.reset() after fixing',
+    );
+    return lines;
   }
   for (const kind of ['render', 'compute'] as const) {
     for (const p of timer.passes(kind).slice(0, topN)) {
@@ -149,6 +249,21 @@ export function reportGpu(timer: GpuTimer): void {
       h,
     );
     return;
+  }
+  if (h.overflows > 0) {
+    console.warn(
+      `[gpuTimer] ${h.overflows} passes overflowed the pool — the per-pass table would be ` +
+        `MISSING ROWS and the totals are understated. Refusing to print a ranking (§Rule 8).`,
+      h,
+    );
+    return;
+  }
+  if (h.staleMs > STALE_MS) {
+    console.warn(
+      `[gpuTimer] the last successful read was ${(h.staleMs / 1000).toFixed(1)} s ago ` +
+        `(${h.reads} reads, ${h.misses} frames discarded). The table below is history, ` +
+        'not the current frame — do not quote it as one (§Rule 8).',
+    );
   }
   for (const kind of ['render', 'compute'] as const) {
     const rows = timer.passes(kind);
@@ -187,7 +302,9 @@ class Ring {
 interface Counters {
   reads: number;
   misses: number;
+  idle: number;
   overflows: number;
+  incompleteReads: number;
   unwritten: number;
   lastReadAt: number;
   lastError: string | null;
@@ -203,13 +320,25 @@ interface Counters {
 class PerPassPool {
   readonly querySet: GPUQuerySet;
   private readonly resolveBuffer: GPUBuffer;
-  private readonly resultBuffer: GPUBuffer;
+  /**
+   * One readback buffer was the whole bug. With a single buffer only one
+   * `mapAsync` can be outstanding, and the pool kept allocating for every frame
+   * that ticked while it was busy — so the "batch" grew until it overflowed.
+   * A ring of slots lets a drain start every frame; the query set itself is
+   * safely reused because the resolve+copy for frame k is submitted before
+   * frame k+1's passes and WebGPU executes command buffers in submission order.
+   */
+  private readonly slots: Array<{ buf: GPUBuffer; inFlight: boolean }> = [];
+  private slotCursor = 0;
   private next = 0;
   /** insertion-ordered: uid -> base query index, for THIS frame only */
   private offsets: Array<[string, number]> = [];
   private seq = 0;
-  private busy = false;
   private disposed = false;
+  /** did any allocation this frame land in the scratch pair? */
+  private overflowedThisFrame = false;
+  /** pass count of the most recent drained frame */
+  lastPasses = 0;
   /** smallest nonzero duration ever seen = the browser's timestamp quantum */
   quantum = 0;
 
@@ -217,7 +346,11 @@ class PerPassPool {
     private readonly device: GPUDevice,
     kind: TimerKind,
     private readonly counters: Counters,
-    private readonly onFrame: (rows: Array<[string, number]>, total: number) => void,
+    private readonly onFrame: (
+      rows: Array<[string, number]>,
+      total: number,
+      incomplete: boolean,
+    ) => void,
   ) {
     this.querySet = device.createQuerySet({
       type: 'timestamp',
@@ -229,20 +362,25 @@ class PerPassPool {
       size: MAX_QUERIES * 8,
       usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
     });
-    this.resultBuffer = device.createBuffer({
-      label: `gpuTimer_result_${kind}`,
-      size: MAX_QUERIES * 8,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
+    for (let i = 0; i < RESULT_SLOTS; i++) {
+      this.slots.push({
+        buf: device.createBuffer({
+          label: `gpuTimer_result_${kind}_${i}`,
+          size: MAX_QUERIES * 8,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        }),
+        inFlight: false,
+      });
+    }
   }
 
   /**
-   * `mapState` is a live getter, but TS narrows the property access from the
-   * earlier `!== 'unmapped'` guard and then calls every later comparison dead.
-   * Reading it through a method breaks that narrowing without a cast.
+   * `mapState` is a live getter, but TS narrows the property access from an
+   * earlier `!== 'unmapped'` comparison and then calls every later one dead.
+   * Reading it through a function breaks that narrowing without a cast.
    */
-  private mapState(): GPUBufferMapState {
-    return this.resultBuffer.mapState;
+  private static mapState(buf: GPUBuffer): GPUBufferMapState {
+    return buf.mapState;
   }
 
   /**
@@ -253,6 +391,7 @@ class PerPassPool {
     if (this.disposed) return SCRATCH_BASE;
     if (this.next + 2 > SCRATCH_BASE) {
       this.counters.overflows++;
+      this.overflowedThisFrame = true;
       return SCRATCH_BASE;
     }
     const base = this.next;
@@ -264,38 +403,71 @@ class PerPassPool {
     return base;
   }
 
+  private freeSlot(): { buf: GPUBuffer; inFlight: boolean } | null {
+    for (let i = 0; i < this.slots.length; i++) {
+      const s = this.slots[(this.slotCursor + i) % this.slots.length];
+      if (!s.inFlight && PerPassPool.mapState(s.buf) === 'unmapped') {
+        this.slotCursor = (this.slotCursor + i + 1) % this.slots.length;
+        return s;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Called once per frame from `tick()`, AFTER the frame's last pass. This is
+   * the frame boundary — the thing the old implementation did not have.
+   */
   async resolveQueriesAsync(): Promise<number> {
     if (this.disposed) return NaN;
-    // A readback still in flight, nothing allocated since the last drain, or a
-    // buffer mid-map: all three are "no reading this frame", NOT "same as last
-    // frame". Do not reset `next` — the queries stay allocated and are read on
-    // the next successful drain.
-    if (this.busy || this.next === 0 || this.resultBuffer.mapState !== 'unmapped') {
+
+    // Nothing allocated: the passes simply did not run this frame. That is NOT
+    // an instrument failure and must not be counted as one — counting it was
+    // what produced `miss 9282` next to 166 reads and made the health line
+    // unreadable.
+    if (this.next === 0) {
+      this.counters.idle++;
+      return NaN;
+    }
+
+    const slot = this.freeSlot();
+    if (slot === null) {
+      // Every readback is still in flight. DISCARD this frame's queries rather
+      // than letting them pile onto the next batch: an unbounded pool is what
+      // overflowed, and a batch spanning several frames is what forced the
+      // per-frame division that was never trustworthy. Sampling fewer frames is
+      // honest; averaging an unknown number of them is not.
       this.counters.misses++;
+      this.offsets = [];
+      this.next = 0;
+      this.seq = 0;
+      this.overflowedThisFrame = false;
       return NaN;
     }
 
     const rows = this.offsets;
     const count = this.next;
+    const incomplete = this.overflowedThisFrame;
     this.offsets = [];
     this.next = 0;
     this.seq = 0;
-    this.busy = true;
+    this.overflowedThisFrame = false;
+    slot.inFlight = true;
 
     try {
       const bytes = count * 8;
       const enc = this.device.createCommandEncoder({ label: 'gpuTimer_resolve' });
       enc.resolveQuerySet(this.querySet, 0, count, this.resolveBuffer, 0);
-      enc.copyBufferToBuffer(this.resolveBuffer, 0, this.resultBuffer, 0, bytes);
+      enc.copyBufferToBuffer(this.resolveBuffer, 0, slot.buf, 0, bytes);
       this.device.queue.submit([enc.finish()]);
 
-      await this.resultBuffer.mapAsync(GPUMapMode.READ, 0, bytes);
+      await slot.buf.mapAsync(GPUMapMode.READ, 0, bytes);
       if (this.disposed) {
-        if (this.mapState() === 'mapped') this.resultBuffer.unmap();
+        if (PerPassPool.mapState(slot.buf) === 'mapped') slot.buf.unmap();
         return NaN;
       }
 
-      const times = new BigUint64Array(this.resultBuffer.getMappedRange(0, bytes));
+      const times = new BigUint64Array(slot.buf.getMappedRange(0, bytes));
       const out: Array<[string, number]> = [];
       let total = 0;
       let unwritten = 0;
@@ -305,6 +477,15 @@ class PerPassPool {
         const t1 = times[base + 1];
         // 0/0 is a pair the GPU never wrote — WebGPU zero-inits, and an
         // unavailable query resolves to zero. That is instrument failure.
+        //
+        // KNOWN GAP, unchanged from the original and not fixed here: the query
+        // SET is reused from index 0 every frame and WebGPU offers no way to
+        // clear it, so this only catches a pair that has never been written at
+        // that index. A pair that was written on an earlier frame and skipped on
+        // this one reads as the EARLIER frame's timestamps, i.e. as a plausible
+        // duration rather than as a detected failure. `unwritten` therefore
+        // proves a dead instrument when it is nonzero but does not prove a live
+        // one when it is zero.
         if (t0 === 0n && t1 === 0n) {
           unwritten++;
           continue;
@@ -320,7 +501,7 @@ class PerPassPool {
         out.push([uid, ms]);
         total += ms;
       }
-      this.resultBuffer.unmap();
+      slot.buf.unmap();
 
       this.counters.unwritten += unwritten;
       if (written === 0) {
@@ -331,28 +512,32 @@ class PerPassPool {
       }
       this.counters.reads++;
       this.counters.lastReadAt = performance.now();
-      this.onFrame(out, total);
+      this.lastPasses = rows.length;
+      if (incomplete) this.counters.incompleteReads++;
+      this.onFrame(out, total, incomplete);
       return total;
     } catch (err) {
       this.counters.lastError = err instanceof Error ? err.message : String(err);
-      if (this.mapState() === 'mapped') this.resultBuffer.unmap();
+      if (PerPassPool.mapState(slot.buf) === 'mapped') slot.buf.unmap();
       return NaN;
     } finally {
-      this.busy = false;
+      slot.inFlight = false;
     }
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    try {
-      if (this.mapState() === 'mapped') this.resultBuffer.unmap();
-    } catch {
-      /* already unmapped */
+    for (const s of this.slots) {
+      try {
+        if (PerPassPool.mapState(s.buf) === 'mapped') s.buf.unmap();
+      } catch {
+        /* already unmapped */
+      }
+      s.buf.destroy();
     }
     this.querySet.destroy();
     this.resolveBuffer.destroy();
-    this.resultBuffer.destroy();
   }
 }
 
@@ -368,6 +553,37 @@ function keyOf(uid: string): string {
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+/**
+ * Stable synthetic ids for render targets that carry no name.
+ *
+ * `RenderTarget` has no `.id` in three r180 (checked: `core/RenderTarget.js`
+ * assigns none), so the old fallback chain
+ * `rt.texture?.name || rt.name || \`rt${rt.id ?? ''}\` || 'rt'` produced
+ * `` `rt${''}` `` = the bare string `rt` for EVERY unnamed target. Two unnamed
+ * targets of the same size sharing a RenderContext therefore became ONE row —
+ * their times summed, and the old `frames = max hit count` heuristic read the
+ * doubled hit count as an extra frame, which is the suspected mechanism behind
+ * `batchFrames` reading 2 on a frame that was fully drained.
+ *
+ * NOT VERIFIED that this was the specific collision behind a wrong
+ * `batchFrames`: the captures that exercised it had four unnamed targets whose
+ * RenderContext ids already differed, so `keyOf()` kept them apart anyway.
+ * Key collisions ARE real and measured (27 render passes onto 23 keys) — this
+ * is one contributor to them, not proven to be the one that bit. Fixed here
+ * because a row labelled `rt` names nothing; moot for the frame count, since
+ * nothing derives one from hit counts any more.
+ */
+const rtIds = new WeakMap<object, number>();
+let nextRtId = 0;
+function rtId(rt: object): number {
+  let id = rtIds.get(rt);
+  if (id === undefined) {
+    id = nextRtId++;
+    rtIds.set(rt, id);
+  }
+  return id;
+}
+
 /** Human label for a render context or a compute node/group. */
 function describe(ctx: any): string {
   if (Array.isArray(ctx)) {
@@ -379,7 +595,7 @@ function describe(ctx: any): string {
   const name: string =
     rt === null || rt === undefined
       ? 'canvas'
-      : rt.texture?.name || rt.name || `rt${rt.id ?? ''}` || 'rt';
+      : rt.texture?.name || rt.name || `rt#${rtId(rt)}`;
   const w = ctx?.width ?? 0;
   const h = ctx?.height ?? 0;
   const ms = rt?.samples ? `x${rt.samples}` : '';
@@ -425,7 +641,9 @@ export function installGpuTimer(renderer: any): GpuTimer | null {
   const counters: Counters = {
     reads: 0,
     misses: 0,
+    idle: 0,
     overflows: 0,
+    incompleteReads: 0,
     unwritten: 0,
     lastReadAt: 0,
     lastError: null,
@@ -436,40 +654,50 @@ export function installGpuTimer(renderer: any): GpuTimer | null {
 
   const makeSink =
     (kind: TimerKind) =>
-    (rows: Array<[string, number]>, total: number): void => {
+    (rows: Array<[string, number]>, total: number, incomplete: boolean): void => {
       const map = rings[kind];
       /**
-       * A BATCH IS NOT A FRAME. `mapAsync` routinely takes longer than one
-       * frame (measured: ~2 misses per successful read), and the pool keeps
-       * allocating while a readback is in flight, so one batch carries every
-       * pass from every frame since the last read. Summing it and calling the
-       * result "the frame" is how you get an 84 ms frame on a 68 fps app.
+       * ONE BATCH IS ONE FRAME — see the header. There is no division here any
+       * more, and that is the point.
        *
-       * The batch's frame count is recoverable from the data itself: a pass
-       * that runs once per frame appears once per frame, so the MAXIMUM
-       * occurrence count across keys IS the number of frames spanned. Dividing
-       * by it gives per-frame AMORTISED cost, which is the right number for a
-       * budget — a pass that runs on half the frames should read as half.
+       * What used to be here: `frames = max occurrences of any key`, then
+       * divide everything by it. That heuristic needs two things that were both
+       * untrue — that some pass runs on EVERY frame of the batch (fails when
+       * every pass is conditional, and then it OVER-states every row), and that
+       * no two distinct passes share a key within one frame (and then it
+       * OVER-counts frames, so it UNDER-states every row).
+       *
+       * The second is not an edge case, it is the normal state of this scene.
+       * MEASURED LIVE: 27 render passes collapse onto 23 keys, and 141 compute
+       * passes onto 89. Some key is therefore hit two or more times in a single
+       * frame, and the heuristic reads that as two or more frames — which is
+       * exactly `batchFrames` reporting 2 on frames that were all drained, and
+       * 9-10 against a reads/misses ratio implying 3.8.
+       *
+       * A pass that runs on some frames and not others now reads as its REAL
+       * cost on the frames it runs, and is simply absent from the rest, which
+       * min-of-window handles correctly without anyone amortising anything.
        */
       const sums = new Map<string, number>();
-      const hits = new Map<string, number>();
       for (const [uid, ms] of rows) {
         const k = keyOf(uid);
         sums.set(k, (sums.get(k) ?? 0) + ms);
-        hits.set(k, (hits.get(k) ?? 0) + 1);
       }
-      let frames = 1;
-      for (const c of hits.values()) if (c > frames) frames = c;
-      batchFrames = frames;
+      batchFrames = 1;
       for (const [k, ms] of sums) {
         let ring = map.get(k);
         if (ring === undefined) {
           ring = new Ring();
           map.set(k, ring);
         }
-        ring.push(ms / frames);
+        ring.push(ms);
       }
-      totals[kind].push(total / frames);
+      // An overflowed frame is missing an unknown number of passes, so its sum
+      // is an UNDER-count of the frame. The individual passes that were timed
+      // are still real measurements and are kept; the total is not recorded at
+      // all, so `total()` stays the min over frames that were complete — or NaN
+      // if none were (§Rule 8).
+      if (!incomplete) totals[kind].push(total);
     };
 
   const pools: Record<TimerKind, PerPassPool> = {
@@ -501,12 +729,16 @@ export function installGpuTimer(renderer: any): GpuTimer | null {
       // be able to take the frame down.
       void pools.render.resolveQueriesAsync().catch(() => NaN);
       void pools.compute.resolveQueriesAsync().catch(() => NaN);
-      if (!warnedStuck && counters.misses > 240 && counters.reads === 0) {
+      // `idle` counts too: 240 ticks with nothing ever allocated means three
+      // never asked for a query pair, which is the instrument being dead in a
+      // different way from a readback that never lands.
+      if (!warnedStuck && counters.misses + counters.idle > 240 && counters.reads === 0) {
         warnedStuck = true;
         console.warn(
-          `[gpuTimer] ${counters.misses} resolve attempts, 0 successful reads ` +
-            `(unwritten pairs: ${counters.unwritten}, last error: ${counters.lastError}). ` +
-            'GPU timestamps are NOT working on this machine — do not quote a timing (§Rule 8).',
+          `[gpuTimer] ${counters.misses} frames discarded, ${counters.idle} idle ticks, ` +
+            `0 successful reads (unwritten pairs: ${counters.unwritten}, last error: ` +
+            `${counters.lastError}). GPU timestamps are NOT working on this machine — ` +
+            'do not quote a timing (§Rule 8).',
         );
       }
     },
@@ -525,7 +757,14 @@ export function installGpuTimer(renderer: any): GpuTimer | null {
       return {
         reads: counters.reads,
         misses: counters.misses,
+        idle: counters.idle,
         overflows: counters.overflows,
+        incompleteReads: counters.incompleteReads,
+        passesPerFrame: {
+          render: pools.render.lastPasses,
+          compute: pools.compute.lastPasses,
+        },
+        capacityPairs: SCRATCH_BASE / 2,
         unwritten: counters.unwritten,
         staleMs: counters.lastReadAt === 0 ? Infinity : performance.now() - counters.lastReadAt,
         batchFrames,
@@ -543,7 +782,9 @@ export function installGpuTimer(renderer: any): GpuTimer | null {
       totals.compute = new Ring();
       counters.reads = 0;
       counters.misses = 0;
+      counters.idle = 0;
       counters.overflows = 0;
+      counters.incompleteReads = 0;
       counters.unwritten = 0;
       counters.lastError = null;
     },
