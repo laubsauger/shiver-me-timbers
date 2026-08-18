@@ -52,6 +52,18 @@ export interface UnderwaterParams {
   rayDecay: number;
   /** luminance threshold for the bright mask feeding the streaks */
   rayThreshold: number;
+  /**
+   * §V.44 — bounds every tap the march can read, in LINEAR scene units.
+   *
+   * The sibling above-water module has always had this (`godRayClamp`); this
+   * one never did, and underwater is the case that needs it most. Looking up
+   * through the surface the sun disc is a compact four-digit HDR value against
+   * a near-black volume, so each of the `rayTaps` samples deposited an
+   * unbounded copy of it — a stack of discrete hard suns rather than a shaft.
+   * Bounding at SOURCE (before the mask, before the accumulate) is what makes
+   * the accumulated total provably ≤ clamp·intensity instead of open-ended.
+   */
+  rayClamp: number;
   /** how far toward the sun each streak reaches (0..1 of screen) */
   rayLength: number;
   /** screen-UV radius around the sun beyond which rays fade to zero */
@@ -101,6 +113,10 @@ export const underwaterParams: UnderwaterParams = registerParams(
     rayTaps: 12,
     rayDecay: 0.86,
     rayThreshold: 0.55,
+    // same value the above-water rays use (postParams.godRayClamp) — the two
+    // marches read the same scene in the same linear units, so a different
+    // bound here would only mean one of them is wrong.
+    rayClamp: 12,
     rayLength: 0.55,
     rayFalloff: 0.9,
     hysteresisBand: 0.5,
@@ -129,6 +145,7 @@ export const underwaterParams: UnderwaterParams = registerParams(
     rayTaps: { min: 4, max: 32, step: 1 },
     rayDecay: { min: 0.5, max: 0.99, step: 0.01 },
     rayThreshold: { min: 0, max: 1, step: 0.01 },
+    rayClamp: { min: 1, max: 64, step: 0.5 },
     rayLength: { min: 0.05, max: 1, step: 0.01 },
     rayFalloff: { min: 0.1, max: 2, step: 0.01 },
     hysteresisBand: { min: 0.05, max: 3, step: 0.05 },
