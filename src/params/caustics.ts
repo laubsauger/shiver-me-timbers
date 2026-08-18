@@ -320,8 +320,33 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
   enabled: true,
   waterIor: 1.33335,
   curvatureEpsilon: 0.32,
-  // ≈5× the 6.9 mm/m solar-disc blur — see the field comment above
-  curvatureEpsilonPerMeter: 0.035,
+  /**
+   * 0.035 -> 0.07. THE BLUR BARELY MOVED WITH DEPTH, AND THAT IS HALF OF "IT
+   * LOOKS LIKE A WATER TEXTURE ON THE FLOOR".
+   *
+   * Measured on the shipped pair: eps(1 m) = 0.355 m, eps(10 m) = 0.670 m — the
+   * caustic is only 1.9x softer ten metres down than one metre down, where the
+   * solar disc says 10x (6.94 mm per metre of depth, the anchor in the field
+   * comment above). 90% of the regulariser at 1 m and 48% at 10 m is the
+   * DEPTH-INDEPENDENT constant, so a seabed at 2 m and one at 9 m are drawn at
+   * almost the same sharpness, which is exactly what a projected decal does and
+   * what focused light does not.
+   *
+   * Doubling only the per-metre term takes the spread to 2.7x and leaves the
+   * constant alone, so depth 0 — the hull waterline regime the user signed off —
+   * is bit-identical. It is still ~10x the physical blur at 10 m; going the rest
+   * of the way is the stylisation the field comment defends, not a bug.
+   *
+   * THIS DOES NOT FIX THE PATTERN'S SPATIAL FREQUENCY, and it cannot: `eps` only
+   * low-passes the finite difference that builds B = dw/du. The CONSTANT term of
+   * det M(d) is det C = det(A + w(x)g), built from the RAW per-pixel slope at the
+   * entry point, and at seabed depths det C dominates. So the caustic still
+   * traces every ripple the finest cascade resolves, at every depth. Fixing that
+   * needs the entry-point SLOPE low-passed too (the mean of the three taps
+   * causticsNode already makes is free and grows with depth), which is a change
+   * in causticsNode.ts, not here.
+   */
+  curvatureEpsilonPerMeter: 0.07,
   foldSoftness: 0.16,
   foldSoftnessPerMeter: 0.045,
   /**
@@ -351,9 +376,39 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
    * not the problem: `waterLighting.ts` adds it to emissiveNode, which is
    * correct for a light pattern. The amplitude is. If it still reads hot with
    * the key modulation in, this is the slider - not the compositing.
+   *
+   * 0.22 -> 0.11 WITH maxGain 3.0 -> 6.0, and this time the peak really is held:
+   * strength x maxGain = 0.66 before and 0.66 after (the paragraph above records
+   * the last attempt at this trade raising it 39% instead, so the arithmetic is
+   * spelled out rather than asserted).
+   *
+   * FOURTH REPORT OF THE SAME THING (user: "we are overdoing the caustics on the
+   * floor hard - they are super exaggerated ... it looks like a water texture on
+   * the floor"). Matched-frame A/B over the showcase lagoon at 2-4 m, sun 43 deg,
+   * bloom off, sim paused: with `strength` at 0 the floor is plain sand; at 0.22
+   * it carries a dense high-contrast web over essentially ITS WHOLE AREA. The
+   * web is the caustic - that part of the report is exactly right.
+   *
+   * WHAT MOVED AND WHAT DID NOT. Reinhard at cap C maps lit -> lit/(1+lit/C), so
+   * raising C while dropping `strength` proportionally leaves the fold peaks
+   * untouched and pulls the MID-TONES down: at gain 1.5 the term goes 0.094 ->
+   * 0.051, a 46% cut, while a fold at the |detA|/sigma ceiling lands where it
+   * always did. That is the right shape for this complaint, because the mid-tones
+   * ARE the "texture" and the folds are the caustic.
+   *
+   * IT IS A MITIGATION, NOT A FIX, AND THE MEASUREMENT SAYS SO. Sweeping
+   * `strength` from 0.22 down to 0.055 (maxGain 12) on the frozen frame only
+   * fades the web uniformly - it never breaks into filaments with dim water
+   * between them. Coverage is structural: `bright` = max(gain-1, 0) turns on
+   * wherever |det M| < sqrt(detA^2 - sigma^2), i.e. |det M| < 0.97 at 2 m, which
+   * is most of the surface, and it is a smooth monotone map of |det M| over that
+   * whole range. A real caustic puts its energy on the fold SET. No value of any
+   * knob in this file changes that; it needs a super-linear response (bright ~
+   * (gain-1)^p) and a caustic that MODULATES the transmitted sun instead of
+   * adding to an already fully lit seabed. Both live in causticsNode.ts.
    */
-  strength: 0.22,
-  maxGain: 3.0,
+  strength: 0.11,
+  maxGain: 6.0,
   darkStrength: 0.45,
   maxDrift: 2.5,
   maxAddLight: 1.5,
