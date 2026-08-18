@@ -2030,7 +2030,43 @@ export function buildOceanSurfaceMaterial(
     // painted dome. Curve > 1 keeps the mid-field readable and pushes the
     // melt into the last stretch, ending exactly on the sky's haze colour so
     // the disc rim is invisible.
-    col.assign(mix(col, uHazeColor, hazeT));
+    //
+    // THE MELT TARGET IS THE SKY ITSELF, ASKED ALONG THIS PIXEL'S OWN VIEW RAY
+    // — not `uHazeColor`. Same §T.39 single-authority argument that put
+    // `skyDomeColor(refl)` in the reflected-sky term 500 lines up, and it fixes
+    // the same class of drift, here at the one place in the frame where the two
+    // models are drawn EDGE TO EDGE.
+    //
+    // `uHazeColor` is `scene.fog.color`, a CPU reproduction of the dome
+    // (src/sky/lighting.ts, "reproduce that exact blend here"). It is not one,
+    // and cannot be: `skyDome` at the horizon is
+    //   mix( mix(uMid, uHaze, hazeStrength + sunSide·sunHazeStrength),
+    //        uWarm, sunSide²·horizonWarmStrength·warm )
+    // — AZIMUTHAL through `sunSide` — while the CPU form drops `sunHazeStrength`
+    // entirely and warms toward the SUN colour at a flat 0.35·lowSunWarmth
+    // instead of toward `horizonWarmColor` at sunSide². So the far water melts
+    // to one colour for the whole compass while the sky above it does not, and
+    // the sea ends on a line. MEASURED against what the background node
+    // actually draws, ACES + exposure 1.1, 0-255:
+    //   tod 15.0  seam 4-9/255, roughly flat in azimuth
+    //   tod 17.6  seam 21-25/255, and SWINGING 25→14→22→23 across the compass,
+    //             i.e. not a constant offset anyone could dial out with a tint
+    // After this line the seam is 0 at every azimuth at both angles by
+    // CONSTRUCTION, except within ~5° of the sun where the background adds its
+    // glow/halo lobe that the water deliberately does not (see the reflected-sky
+    // note above — re-adding the disc through the water paints a blob):
+    // residual 3/255 at 15.0, 17/255 at 17.6, inside the lobe only.
+    //
+    // `viewDir.negate()` is eye→surface, which points DOWN for any water below
+    // the camera — and `skyDome`'s first line is `dir.y.max(0)`, so every
+    // downward ray already collapses to the horizon colour at that azimuth.
+    // The flattening is free; do not add a separate horizon ray.
+    // No new binding: `skyDomeColor` is pure ALU (one `pow`, one `exp`).
+    // `uHazeColor` stays the fallback for a build with no sky wired, and stays
+    // the source for the skylight/foam/sky-tint terms above — those want ONE
+    // scene-wide sky, not a per-pixel azimuth.
+    const hazeTarget = skyDomeColor ? skyDomeColor(viewDir.negate()) : uHazeColor;
+    col.assign(mix(col, hazeTarget, hazeT));
     // glints punch partway through the haze — a sun path fading to nothing
     // at 2 km looks like fog, not distance
     //
