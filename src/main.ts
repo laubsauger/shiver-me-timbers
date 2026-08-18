@@ -586,6 +586,12 @@ async function boot(): Promise<void> {
   // including nothing — would put the hull on the open-ocean sea while the
   // drawn water calmed over the shallows, which is §V.8's whole subject.
   cpuOcean.setSeabed(archipelago.seabed, -archipelago.seabed.openHeight);
+  // §V.72, THIRD CONSUMER OF THE SAME NUMBER. The terrain reconstructs the sea
+  // surface in its own fragment shader to know how deep it is drowned; it has
+  // to shoal that reconstruction exactly as the material and the mirror do, or
+  // it paints water onto dry beach. Same open depth, same `shoalWavenumber`.
+  // Deliberately after createArchipelago: the seabed field is built inside it.
+  caustics.setSeabedOpenDepth(-archipelago.seabed.openHeight);
 
   // hull waterline contact (§T.33 support): coarse stations round the hull
   // outline, sampled against the SAME sea every tick. Consumers: bow spray

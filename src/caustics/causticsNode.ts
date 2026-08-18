@@ -32,6 +32,7 @@ import {
 import type { OceanSimulation } from '../ocean/oceanCascades';
 import { sampleCascadeLayer } from '../ocean/oceanTextures';
 import { oceanParams } from '../params/ocean';
+import { breakerClipNodes, shoalFactorNode, shoalWavenumber } from '../ocean/shoaling';
 import { causticsParams as cp } from '../params/caustics';
 import { MIN_VERTICAL } from './causticsMath';
 
@@ -161,14 +162,102 @@ export function surfaceSlopeNode(sim: OceanSimulation, u: CausticsUniforms, worl
   return { g: vec2(der.x.div(a11), der.y.div(a22)), a11, a22 };
 }
 
-/** world Y of the sea surface at a world XZ, summed over all cascades */
-export function waterHeightNode(sim: OceanSimulation, worldXZ: TslNode): TslNode {
+/**
+ * §V.72 — the shoaling uniforms a RECEIVER needs to reconstruct the sea
+ * surface at the height the ocean actually draws it.
+ *
+ * A third copy of these, alongside surfaceMaterial's `uShoalK`/`uBreaker` and
+ * `CpuOcean.shoalK`, and that is the established shape rather than a smell:
+ * all three derive their values from the ONE law in `ocean/shoaling.ts`
+ * (`shoalWavenumber`), exactly as `CpuOcean.refreshShoal()` does. The law has
+ * one owner; the uniform buffers cannot be shared because the three consumers
+ * are a material, a mirror and a receiver built at different times.
+ */
+export interface ShoalingUniforms {
+  /** per-cascade shoaling wavenumber (rad/m) */
+  k: TslNode[];
+  /** (shoalBreakerIndex, shoalColumnCeiling) */
+  breaker: TslNode;
+}
+
+export function createShoalingUniforms(sim: OceanSimulation): ShoalingUniforms {
+  return {
+    k: sim.cascades.map(() => uniform(0)),
+    breaker: uniform(
+      new THREE.Vector2(oceanParams.shoalBreakerIndex, oceanParams.shoalColumnCeiling),
+    ),
+  };
+}
+
+/**
+ * Push the current spectrum + params into `u`. `openDepth` is the seabed's own
+ * open-ocean depth (m, positive); 0 means "no seabed wired", which pins every
+ * wavenumber at the floor and is only ever read when a caller supplies a
+ * depth node anyway.
+ */
+export function refreshShoalingUniforms(
+  u: ShoalingUniforms,
+  sim: OceanSimulation,
+  openDepth: number,
+): void {
+  for (const [i, c] of sim.cascades.entries()) {
+    u.k[i].value = shoalWavenumber(c.meanWavenumber, openDepth, oceanParams);
+  }
+  (u.breaker.value as THREE.Vector2).set(
+    oceanParams.shoalBreakerIndex,
+    oceanParams.shoalColumnCeiling,
+  );
+}
+
+/**
+ * World Y of the sea surface at a world XZ, summed over all cascades.
+ *
+ * §V.72, AND THE BUG THIS SIGNATURE EXISTS TO CLOSE. Without `shoal` this is
+ * the RAW open-ocean spectrum — the same quantity `CpuOcean.sampleRaw` returns
+ * and, like it, NOT "how high is the water here". The ocean surface material
+ * draws its vertices at Σ heightᵢ·shoalFactor(kᵢ, d) put through
+ * `breakerClip`, so a receiver that asks this question without a depth gets a
+ * sea level that disagrees with the one on screen by the whole shoaling term
+ * — which goes to 1.0 offshore and to ZERO at the waterline, i.e. it is
+ * wrong by the entire wave amplitude exactly where a beach is.
+ *
+ * Measured on the showcase island's 180° transect (swell preset, one instant):
+ * raw swung -1.945 m … +1.610 m across the 100 m of beach either side of the
+ * waterline while the drawn sea sat at 0.000 … 0.281 m. On a 0.2-2° beach that
+ * false sea level marks a hundred metres of DRY SAND as submerged — the user's
+ * "weird purple patches marching over the land" (the §V.34 absorption tint and
+ * caustics painted onto land) — and, on the half-cycle where it swings the
+ * other way, leaves genuinely submerged sand with NO darkening at all ("the
+ * terrain underwater is not really getting darkened"). One sign error's worth
+ * of the same disagreement, both symptoms, one cause.
+ *
+ * `shoal.depth` is the still-water column (m, ≥ 0) at this point. It is the
+ * CALLER's, deliberately: a terrain receiver knows its own depth exactly as
+ * `-positionWorld.y` — the surface IS the seabed — which is a better number
+ * than any resample of the baked field and, being the position the fragment is
+ * actually being shaded at, cannot drift from the geometry the way a second
+ * texture lookup can. A receiver that is NOT the bed (a hull) must pass the
+ * bed's depth or nothing at all.
+ *
+ * This is the line-for-line TSL twin of `CpuOcean.shoaledSum` (§V.8), built
+ * from the same `shoalFactor` / `breakerClip` exports.
+ */
+export function waterHeightNode(
+  sim: OceanSimulation,
+  worldXZ: TslNode,
+  shoal?: { u: ShoalingUniforms; depth: TslNode },
+): TslNode {
   let h: TslNode = null;
-  for (const c of sim.cascades) {
-    const t = texture(c.displacement, cascadeUv(worldXZ, c.domain)).y;
+  for (const [i, c] of sim.cascades.entries()) {
+    let t = texture(c.displacement, cascadeUv(worldXZ, c.domain)).y;
+    // per cascade, by its OWN wavenumber — long swell feels the bottom far
+    // offshore, short chop stays lively until it is almost aground (§V.19)
+    if (shoal) t = t.mul(shoalFactorNode(shoal.u.k[i], shoal.depth));
     h = h === null ? t : h.add(t);
   }
-  return h;
+  if (!shoal) return h;
+  // term B on the SUMMED elevation, same as the vertex stage (§V.72)
+  return breakerClipNodes(h, shoal.depth, shoal.u.breaker.x, shoal.u.breaker.y).clipped;
 }
 
 /** normalize(-gx, 1, -gz) — the water normal from its world slope */

@@ -43,9 +43,12 @@ import type { OceanSimulation } from '../ocean/oceanCascades';
 import { causticsParams } from '../params/caustics';
 import {
   createCausticsUniforms,
+  createShoalingUniforms,
   refreshCausticsUniforms,
+  refreshShoalingUniforms,
   waterHeightNode,
   type CausticsUniforms,
+  type ShoalingUniforms,
   type TslNode,
 } from './causticsNode';
 import {
@@ -87,15 +90,36 @@ export class Caustics {
   readonly params = causticsParams;
   readonly caustics: CausticsUniforms;
   readonly lighting: WaterLightingUniforms;
+  /** §V.72 — see `waterHeight`; refreshed from the spectrum every frame */
+  readonly shoaling: ShoalingUniforms;
   wetline?: HullWetline;
   private wetlineSpan?: TslNode;
   private sunLight?: THREE.DirectionalLight;
+  /**
+   * Seabed open-ocean depth (m, positive). Zero until `setSeabedOpenDepth`,
+   * which main.ts calls once the archipelago exists — the seabed field is
+   * built INSIDE createArchipelago, and receiver materials are baked in there
+   * too, so this cannot be a constructor argument. It only feeds a uniform,
+   * so arriving after the graph is built is fine (§V.62: it is pushed every
+   * frame by `update()`, not once).
+   */
+  private openDepth = 0;
 
   constructor(sim: OceanSimulation, opts: CausticsOptions = {}) {
     this.sim = sim;
     this.sunLight = opts.sunLight;
     this.caustics = createCausticsUniforms();
     this.lighting = createWaterLightingUniforms();
+    this.shoaling = createShoalingUniforms(sim);
+  }
+
+  /**
+   * The depth the shoaling law is compressed against — `SeabedField.openHeight`
+   * negated, the SAME number surfaceMaterial and CpuOcean use. All three call
+   * `shoalWavenumber()` with it, so the three shoal identically (§V.72).
+   */
+  setSeabedOpenDepth(openDepth: number): void {
+    this.openDepth = Math.max(openDepth, 0);
   }
 
   /** the sun shadow node the ocean already published, or undefined */
@@ -127,9 +151,20 @@ export class Caustics {
     );
   }
 
-  /** world Y of the sea at a world XZ — receivers that only need depth */
-  waterHeight(worldXZ: TslNode): TslNode {
-    return waterHeightNode(this.sim, worldXZ);
+  /**
+   * World Y of the sea at a world XZ — receivers that only need depth.
+   *
+   * PASS `depth` IF YOU ARE THE SEABED. Without it this returns the raw
+   * open-ocean spectrum, which is not the height the ocean draws anywhere
+   * shallow: see `waterHeightNode`'s docstring for the measured 1.9 m
+   * disagreement at a waterline and the two symptoms it produced.
+   */
+  waterHeight(worldXZ: TslNode, depth?: TslNode): TslNode {
+    return waterHeightNode(
+      this.sim,
+      worldXZ,
+      depth ? { u: this.shoaling, depth } : undefined,
+    );
   }
 
   /** per frame, after the ocean sim updates */
@@ -142,6 +177,9 @@ export class Caustics {
     // (§B.41's shape, second file). moonCycle re-aims this same light after
     // dark, so passing it hands the caustic the moon for free.
     refreshWaterLightingUniforms(this.lighting, this.sunLight);
+    // §V.62: every tick, not only on rebuild — `shoalDeepFraction` and the
+    // seabed's open depth are not spectrum params and would never move
+    refreshShoalingUniforms(this.shoaling, this.sim, this.openDepth);
   }
 }
 

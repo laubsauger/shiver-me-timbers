@@ -11,7 +11,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
-import { normalWorld, positionWorld, vec3 } from 'three/tsl';
+import { float, normalWorld, positionWorld, vec3 } from 'three/tsl';
 import { createOceanSim } from '../src/ocean';
 import {
   activeCaustics,
@@ -20,6 +20,8 @@ import {
   waterLighting,
 } from '../src/caustics';
 import { causticsParams } from '../src/params/caustics';
+import { oceanParams } from '../src/params/ocean';
+import { shoalFactor, shoalWavenumber } from '../src/ocean/shoaling';
 import { skyParams } from '../src/params/sky';
 import {
   createWaterLightingUniforms,
@@ -307,5 +309,84 @@ describe('caustics are made of the key light (§B.41 twin)', () => {
     expect(r.color.getHexString()).toBe(
       new THREE.Color(causticsParams.causticColor).getHexString(),
     );
+  });
+});
+
+/**
+ * §V.72 — THE SEA A RECEIVER RECONSTRUCTS MUST BE THE SEA THAT IS DRAWN.
+ *
+ * `waterHeightNode` sums the cascade displacement, which is the RAW open-ocean
+ * spectrum. The ocean surface material draws its vertices at that sum times
+ * `shoalFactor(kᵢ, depth)` per cascade, put through `breakerClip`, and
+ * `CpuOcean.shoaledSum` mirrors it for buoyancy. A receiver that skipped the
+ * shoaling therefore had a sea level that was wrong by the WHOLE shoaling
+ * term — 1.0 offshore, 0.0 at the waterline — and the terrain is the receiver
+ * that matters, because it uses it to decide how drowned it is.
+ *
+ * Consequence when it was missing (measured in-browser on the showcase
+ * island's 180° transect, swell preset): raw ran -1.945 … +1.610 m across the
+ * beach while the drawn sea sat at 0.000 … 0.281 m, so a hundred metres of dry
+ * sand was told it was underwater (absorption tint + caustics painted onto
+ * land, marching with the swell) and, on the other half of the cycle,
+ * genuinely submerged sand got no darkening at all.
+ *
+ * These tests pin the two halves that can silently rot: that the wavenumbers a
+ * receiver shoals with come from the SAME law the material and the mirror use,
+ * and that the law actually collapses the sea to nothing at a waterline.
+ */
+describe('§V.72 receiver shoaling', () => {
+  it('derives its wavenumbers from the one law, so it cannot drift', () => {
+    const water = createCaustics(sim);
+    const openDepth = 45;
+    water.setSeabedOpenDepth(openDepth);
+    water.update(new THREE.Vector3(0, 1, 0));
+    // the identical call surfaceMaterial's refreshShoal and CpuOcean's
+    // refreshShoal make — if any consumer grows its own formula, this fails
+    for (const [i, c] of sim.cascades.entries()) {
+      expect(water.shoaling.k[i].value).toBeCloseTo(
+        shoalWavenumber(c.meanWavenumber, openDepth, oceanParams),
+        10,
+      );
+    }
+    // and the breaker pair is the params', not a literal
+    expect(water.shoaling.breaker.value.x).toBe(oceanParams.shoalBreakerIndex);
+    expect(water.shoaling.breaker.value.y).toBe(oceanParams.shoalColumnCeiling);
+  });
+
+  it('is refreshed every frame, not only on rebuild (§V.62)', () => {
+    const water = createCaustics(sim);
+    water.setSeabedOpenDepth(45);
+    water.update(new THREE.Vector3(0, 1, 0));
+    const before = water.shoaling.k.map((u) => u.value as number);
+    // openDepth is not a spectrum param: nothing rebuilds when it moves, so a
+    // once-only push would leave every receiver shoaling against a stale sea
+    water.setSeabedOpenDepth(10);
+    water.update(new THREE.Vector3(0, 1, 0));
+    const after = water.shoaling.k.map((u) => u.value as number);
+    expect(after).not.toEqual(before);
+  });
+
+  it('collapses the sea to nothing at a waterline, at every wavelength', () => {
+    const openDepth = 45;
+    for (const c of sim.cascades) {
+      const k = shoalWavenumber(c.meanWavenumber, openDepth, oceanParams);
+      // dry sand: the terrain passes max(-y, 0) = 0, so the reconstructed sea
+      // is EXACTLY 0 — a beach above the waterline cannot be told it is
+      // submerged by construction rather than by a threshold
+      expect(shoalFactor(k, 0)).toBe(0);
+      // and it is back to open ocean by the seabed's own floor depth
+      expect(shoalFactor(k, openDepth)).toBeGreaterThan(0.999);
+    }
+  });
+
+  it('accepts a depth and changes the graph it builds', () => {
+    const water = createCaustics(sim);
+    water.setSeabedOpenDepth(45);
+    const raw = water.waterHeight(positionWorld.xz);
+    const shoaled = water.waterHeight(positionWorld.xz, float(3));
+    expect(raw).toBeTruthy();
+    expect(shoaled).toBeTruthy();
+    // the shoaled branch ends in breakerClip, the raw one in a bare add
+    expect(shoaled).not.toBe(raw);
   });
 });
