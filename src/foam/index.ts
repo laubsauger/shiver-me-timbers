@@ -51,6 +51,7 @@ import {
   foamTexelMetres,
   jacobianSigma,
   meanFoamAgeTicks,
+  phaseLeadTexels,
   whitecapWindScale,
   NEVER_INJECT_BIAS,
 } from './foamMath';
@@ -103,7 +104,16 @@ export interface FoamSeaMoments {
    * that moment is direction-dependent and the sea now carries two trains with
    * very different headings and spreads — see foamMath's JACOBIAN_SIGMA_PER_TRACE.
    */
-  readonly cascades: readonly { readonly jacobianRms: number }[];
+  readonly cascades: readonly {
+    readonly jacobianRms: number;
+    /**
+     * Energy-weighted mean wavenumber of the band (rad/m) — what the PHASE
+     * LEAD's c = √(g/k̄) is built from (foamMath.bandPhaseSpeed). Already
+     * published per cascade for shoaling, so this costs the ocean nothing and
+     * tracks a spectrum rebuild like every other moment here (§B.12).
+     */
+    readonly meanWavenumber: number;
+  }[];
   /** the same moment summed in quadrature over all cascades */
   readonly jacobianRms: number;
   /**
@@ -353,6 +363,26 @@ export function createFoamSim(
       // ~8 scalar ops, once per frame, CPU-side: no texture, no sampler, no
       // pass, no per-fragment work.
       const windScale = whitecapWindScale(oceanParams.windSpeed, foamParams.whitecapWindRef);
+      // ── THE PHASE LEAD'S DIRECTION ────────────────────────────────────────
+      // ONE direction for every band, and it is `windDirection`.
+      //
+      // [GAP], stated because the research states it: the identity the lead
+      // rests on assumes a single narrow-band train per cascade, and our sea
+      // carries two at ~78° (`swellDirection`). The energy-weighted mean
+      // direction PER BAND is the honest input and nothing publishes it — the
+      // CPU moment integrator that already produces `meanWavenumber` could, in
+      // the same loop, but today it does not.
+      //
+      // WHY IT IS TAKEN ANYWAY RATHER THAN BLOCKING ON THAT. The error is
+      // bounded by the DISTANCE walked, which the λ/8 cap keeps small, and it
+      // is largest exactly where the walk is shortest: the swell lives in
+      // cascade 0, whose 1.97 m texel quantises a 0.2 s lead to a single texel
+      // regardless of direction. Cascades 1 and 2 — 5 and 10 texels of lead,
+      // i.e. all of the measured effect — are wind sea, where this direction
+      // is the right one. Publishing the per-band direction would refine a 2 m
+      // offset on an 87 m wave.
+      const leadDirX = Math.cos(oceanParams.windDirection);
+      const leadDirZ = Math.sin(oceanParams.windDirection);
       for (const lane of lanes) {
         const steep = sea.cascades[lane.index].jacobianRms;
         const bandSigma = jacobianSigma(steep, lambda);
@@ -412,6 +442,20 @@ export function createFoamSim(
           lane.u.uBias.value, lane.u.uInjectPerFrame.value, steep, lambda, breakingDecay,
           lane.u.uAccumMax.value,
         );
+        // PHASE LEAD (foamMath, "FOAM THAT LEADS THE BREAK"). A switched-off
+        // band reads nothing, so its lead is meaningless — zeroed rather than
+        // left stale, for the same reason its crest bias is.
+        const lead = off
+          ? { x: 0, z: 0 }
+          : phaseLeadTexels(
+              sea.cascades[lane.index].meanWavenumber,
+              foamParams.leadSeconds,
+              leadDirX,
+              leadDirZ,
+              lane.texelMetres,
+            );
+        lane.u.uLeadX.value = lead.x;
+        lane.u.uLeadZ.value = lead.z;
         lane.u.uRadius.value = foamParams.blurRadius;
         // ONE world diffusion length for every band (§B: the blur was the
         // shape, and it was a grid quantity). `blurRadius` alone made the
@@ -455,7 +499,17 @@ export function createFoamSim(
      * clamped, then crest-crackle → soft-mottle detail blend (§V6).
      * `worldXZ` = same node the material uses to sample displacement.
      */
-    shadingNode(worldXZ: any, surfaceLift?: any): any {
+    shadingNode(
+      worldXZ: any,
+      surfaceLift?: any,
+      /**
+       * Out-param for the foam's OWN shading normal (§T.42) — pass an object
+       * and `slope` comes back as the world-XZ tilt to add to the water's
+       * normal before its N·L. Omitted, nothing extra is built: no taps, no
+       * second composite, and the mask is the expression it always was.
+       */
+      relief?: { slope?: any },
+    ): any {
       // fbm domain-warp on the LOOKUP (world meters) — the low-res sim RT's
       // texel grid otherwise reads as boxy patches (§V20 critique)
       const warped = worldXZ.add(foamWarpVec(worldXZ));
@@ -546,7 +600,7 @@ export function createFoamSim(
       // the dissolve (foamShading, "THE WAVE CARVES THE FOAM"). Passed through
       // rather than derived here: this module has no access to the surface,
       // and the material that calls it already holds both numbers.
-      return foamDetailMask(clamp(covered, 0, 1), worldXZ, share, surfaceLift);
+      return foamDetailMask(clamp(covered, 0, 1), worldXZ, share, surfaceLift, relief);
     },
 
     dispose(): void {

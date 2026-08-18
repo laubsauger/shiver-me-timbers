@@ -97,6 +97,222 @@ export function bandCanFold(bandSigma: number, seaSigma: number): boolean {
   return bandSigma > Math.max(MIN_BAND_JACOBIAN_SIGMA, DEAD_BAND_SIGMA_FRACTION * seaSigma);
 }
 
+/* -------------------------------------------------------------------------
+ * FOAM THAT LEADS THE BREAK (docs/research-poseidon.md §3.3A, ranked #1 —
+ * user: foam should ANTICIPATE the break rather than trail it).
+ *
+ * §3.1 proves neither our sim nor the reference can currently do it, and the
+ * proof is one line of calculus rather than a claim about either codebase:
+ * for one mode h = A cos θ with Tessendorf's choppy displacement,
+ * jxx = 1 − λAk cos θ, which is MINIMAL AT θ = 0 — exactly the crest. The fold
+ * metric is therefore SYMMETRIC ABOUT THE CREST BY CONSTRUCTION, for det J and
+ * for λ− alike, so it cannot know which face is forward. Every asymmetry in
+ * either system comes from the temporal accumulator, which by definition
+ * TRAILS: our breaking channel is a first-order lag with a 0.22 s time
+ * constant and the residue's is 1.30 s.
+ *
+ * THE FIX IS KINEMATIC, NOT A TUNING. For a travelling field f(x,t) = F(x−ct),
+ *
+ *     f(x, t+τ) = f(x − cτ·d̂, t)
+ *
+ * — the future here is the present UPWAVE. So the inject pass reads its whole
+ * gate at `p − cτ·d̂` and writes the foam at `p`: the water ahead of an
+ * oncoming crest whitens τ seconds before the crest arrives.
+ *
+ * WHY THE WHOLE GATE AND NOT A `min` WITH THE LOCAL VALUE. The research
+ * proposes `max(0, gate − min(λ−(p), λ−(p−cτd̂)))`, which keeps the foam at the
+ * crest AND adds it ahead. That form is a UNION OF TWO FIRING EVENTS and can
+ * only ADD foam — it is one-sided in coverage by construction, and coverage is
+ * the one pinned quantity here. Reading the gate ENTIRELY at the lead texel is
+ * instead a pure TRANSLATION of the fired field, whose distribution — and
+ * therefore whose coverage — is unchanged at every parameter, by exactly the
+ * measure-preserving-rearrangement argument `waveCarveOffset` rests on.
+ * THE RESIDUAL IS NOT ZERO AND IT IS NOT THE TRANSLATION. Each band leads by
+ * its OWN c, so caps that used to stack across bands overlap slightly less;
+ * the composite's peaks thin and the low-residue knee removes the tails. That
+ * is a genuine −1% and it is declared rather than compensated (§V.64):
+ * `injectStrength` is the one-line knob if the sea wants it back.
+ *
+ * MEASURED, shaded, end to end through the real chain — art texture, dissolve,
+ * body, cap variation, soft saturation (tests/zzScratchFoamResearch.test.ts).
+ * AT N = 256, the mirror resolution closest to the GPU's 512, the harness
+ * reproduces the pinned coverage to three figures — 0.6192% / 0.6221% against
+ * 0.62% — which is what makes the deltas below trustworthy rather than merely
+ * internal. Taken on BOTH spectra, because `splitWavelengths` moved under this
+ * work and a coverage claim that only holds on one sea is not a claim:
+ *
+ *   spectrum                    lead τ   coverage   Δ        crest30  crest10  fwdShare
+ *   [40, 8.3] bias 0.600        0        0.6192%    —        92.9%    70.8%    54.08%
+ *                               0.20 s   0.6127%    −1.04%   92.6%    72.6%    63.20%
+ *   [40, 5]   bias 0.623        0        0.6221%    —        95.1%    73.0%    52.37%
+ *                               0.20 s   0.6231%    +0.16%   94.7%    73.6%    63.05%
+ *
+ * and the τ SWEEP, at N = 128 where a 7-config run is affordable (that mirror
+ * reads 0.85% absolute — one octave short in every band — so read it for shape,
+ * not for level):
+ *
+ *   lead τ      coverage    Δ        crest30   crest10   fwdShare
+ *   0 (ship)    0.8499%     —        94.8%     75.2%     50.93%
+ *   0.20 s      0.8425%     −0.87%   94.9%     75.5%     60.36%
+ *   0.30 s      0.8356%     −1.68%   93.8%     70.6%     69.80%
+ *   0.50 s      0.6913%     −18.7%   82.4%     53.4%     81.33%
+ *   1.00 s      0.6750%     −20.6%   81.1%     22.0%     81.07%
+ *
+ * `fwdShare` is the share of shaded foam mass on the FORWARD flank (−∇h·d̂ > 0)
+ * and is the anticipation statistic — nothing in this repo measured it before.
+ * The shipped build sits at 51–54% on every spectrum measured, i.e. symmetric
+ * to within a few points, which is §3.1's proof showing up as a number. 0.2 s
+ * buys 9–11 points of it while leaving both crest-placement statistics alone —
+ * top-10 placement in fact IMPROVES on both seas (70.8% → 72.6%, 73.0% →
+ * 73.6%), because the lead cancels part of the accumulator's own drift off the
+ * crest. Coverage moves by ±1% and its SIGN is not stable across the two
+ * spectra, which is the honest reading: the translation is exactly
+ * measure-preserving and what is left is a second-order decorrelation between
+ * bands, not a systematic gain or loss.
+ *
+ * AND THE CURVE TURNS OVER HARD, which is why there is a cap below. Past ~λ/8
+ * the lead walks the gate off its own crest and onto the next trough: 0.5 s
+ * costs 12 points of crest30 and 22 of crest10 for 21 more points of forward
+ * share, and 1.0 s throws away two thirds of the top-decile placement the
+ * two-clock split and the cross-band bias were built to earn.
+ * ---------------------------------------------------------------------- */
+
+/** m/s² — deep-water dispersion, the same g the ocean's ω(k) uses */
+const GRAVITY = 9.81;
+
+/**
+ * Deep-water phase speed of a band, c = √(g/k̄), from the energy-weighted mean
+ * wavenumber the ocean already publishes per cascade (`OceanCascade
+ * .meanWavenumber`). No new measurement: it is a live moment for the same
+ * reason `jacobianRms` is, so the lead tracks a spectrum rebuild instead of
+ * being fitted to one sea state (§B.12).
+ */
+export function bandPhaseSpeed(meanWavenumber: number): number {
+  if (!Number.isFinite(meanWavenumber) || !(meanWavenumber > 0)) return 0;
+  return Math.sqrt(GRAVITY / meanWavenumber);
+}
+
+/**
+ * Hard ceiling on the lead, as a fraction of the band's OWN mean wavelength.
+ *
+ * NOT a safety margin — a validity limit. The identity f(x,t+τ) = f(x−cτd̂,t)
+ * is exact only for a single narrow-band train travelling at one speed in one
+ * direction, and a cascade is neither: it disperses across its band and our
+ * sea carries two trains at ~78°. Both errors grow with the DISTANCE walked,
+ * so the honest bound is a fraction of a wavelength rather than a time. At λ/8
+ * the sweep above is still on the flat part of the crest-placement curve and
+ * 0.5 s (≈λ/6 in cascade 1) is already past its knee.
+ */
+export const MAX_LEAD_WAVELENGTHS = 1 / 8;
+
+/**
+ * The inject pass's read offset, in TEXELS of this band's own grid.
+ *
+ * INTEGER, because a compute pass reads with `textureLoad` and there is no
+ * sampler to interpolate with — which is also why it costs nothing. The
+ * rounding is the lead's real resolution: cascade 0's 1.97 m texel quantises a
+ * 0.2 s lead (2.3 m) to one texel, while cascade 2's 0.044 m texel resolves it
+ * to ten. Coarse bands therefore get a coarser lead, which is the correct
+ * direction — they are also the ones whose single-direction assumption is
+ * weakest (see the [GAP] on `windDirection` in index.ts).
+ */
+export function phaseLeadTexels(
+  meanWavenumber: number,
+  leadSeconds: number,
+  dirX: number,
+  dirZ: number,
+  texelMetres: number,
+): { x: number; z: number } {
+  const none = { x: 0, z: 0 };
+  if (!Number.isFinite(leadSeconds) || !(leadSeconds > 0)) return none;
+  if (!Number.isFinite(texelMetres) || !(texelMetres > 0)) return none;
+  if (!Number.isFinite(dirX) || !Number.isFinite(dirZ)) return none;
+  const c = bandPhaseSpeed(meanWavenumber);
+  if (!(c > 0)) return none;
+  const wavelength = (2 * Math.PI) / meanWavenumber;
+  const metres = Math.min(c * leadSeconds, MAX_LEAD_WAVELENGTHS * wavelength);
+  const texels = metres / texelMetres;
+  // NEGATIVE: the future here is the present UPWAVE, so the read walks
+  // BACKWARDS along the direction of travel
+  return { x: -Math.round(texels * dirX), z: -Math.round(texels * dirZ) };
+}
+
+/* -------------------------------------------------------------------------
+ * TWO THINGS THAT ARE NOT HERE, AND THE NUMBERS THAT KEPT THEM OUT.
+ *
+ * Both are ranked items in the research (docs/research-poseidon.md §3.3B/§3.3C
+ * = #3 and #4; docs/research-water-implementations.md §2.2/§4-item-4). Both
+ * were built in the CPU harness (tests/zzScratchFoamResearch.test.ts), measured
+ * end to end through the real shading chain against the shipped build, and
+ * rejected. Written down so the next reader does not pay for them twice —
+ * docs/research-cascade-tiling.md is the precedent.
+ *
+ * ── (a) THE WINDWARD-FACE INJECTION GATE ────────────────────────────────
+ *
+ * A second injector on the leading flank, `saturate(−∇h·d̂ / (Sσ))`, feeding
+ * the residue channel with its own strength, exactly as the reference asset
+ * exposes it (`windwardStrength`: "drives foam onto the rising face;
+ * persistence carries it past the crest"). Shaped three ways — S = 1σ (most of
+ * the flank), 2σ, 3σ (the steepest sliver near the crest):
+ *
+ *   config             coverage    Δ        crest30   crest10   fwdShare
+ *   shipped            0.8499%     —        94.8%     75.2%     50.93%
+ *   0.05 @ 2σ          0.8580%     +0.96%   94.5%     74.5%     51.11%
+ *   0.20 @ 3σ          0.8807%     +3.63%   93.1%     72.2%     51.89%
+ *   0.20 @ 2σ          0.8886%     +4.56%   91.5%     70.3%     52.40%
+ *   0.20 @ 1σ          0.9025%     +6.20%   87.8%     65.8%     53.64%
+ *
+ * IT IS DOMINATED ON EVERY AXIS by the phase lead above, which buys 9.4 points
+ * of forward share for −0.87% of coverage and no loss of placement, where the
+ * best windward setting buys 2.7 points for +6.2% of coverage and SEVEN points
+ * of crest-30 placement.
+ *
+ * AND THE REASON IS STRUCTURAL, NOT A TUNING MISS — which is why the shaping
+ * sweep is in the table rather than a single point. Slope is maximal at the
+ * wave's INFLECTION, not at its crest, so a slope gate necessarily deposits
+ * foam mid-flank; tightening S moves the deposit toward the crest and toward
+ * zero effect at the same rate, which is what the three rows show. The
+ * reference needs this term because its fold metric is det J, which is
+ * direction-free and gives it no crest structure at all (§V.58). Ours is λ−
+ * plus the cross-band straining bias and already places 94.8% / 75.2% of foam
+ * in the top 30% / 10% of the sea by elevation. There is nothing here for a
+ * slope test to add, and a real cost for it to impose.
+ *
+ * ── (b) THE PEAK-HOLD ONSET ON THE BREAKING CHANNEL ─────────────────────
+ *
+ * `f ← max(d, f·decay)` in place of `f ← (f + d)·decay`, the "one max for one
+ * add" steal from poseidon's instant onset. Run with the peak put on the
+ * accumulator's own scale (k = b/(1−b), so the mean firing texel arrives where
+ * it does today) and then recalibrated down:
+ *
+ *   config             coverage    Δ         crest30   crest10   fwdShare
+ *   shipped            0.8499%     —         94.8%     75.2%     50.93%
+ *   peak-hold          1.0453%     +23.0%    91.2%     67.4%     48.22%
+ *   peak-hold ×0.55    0.6140%     −27.8%    92.3%     68.6%     46.50%
+ *   peak-hold ×0.35    0.4111%     −51.6%    93.8%     69.1%     46.19%
+ *
+ * NO SCALE HOLDS BOTH COVERAGE AND PLACEMENT: the coverage-neutral point sits
+ * near ×0.78, and there the crest share is ~91.7% / ~68%, i.e. three and seven
+ * points below shipped. It also moves the forward share the WRONG WAY at every
+ * setting — 46–48% against 50.9%.
+ *
+ * WHY IT GOES BACKWARDS, WHICH IS THE PART WORTH KEEPING. Their `min` is
+ * instant in BOTH directions: `turb ≤ J` pointwise at every texel and every
+ * frame (research §3.1), so their foam is CEILINGED by what the current fold
+ * licenses and drops the moment the fold passes. A `max` ported into our
+ * accumulator keeps the instant onset and throws the offset away — once the
+ * peak is set it decays from full value whether or not the texel is still
+ * breaking. That is MORE dwell time, not less, and dwell time in the breaking
+ * channel is exactly the defect the two-clock split exists to end ("THE MASK
+ * WAS DWELL TIME", above). Porting the ceiling too would fix that and delete
+ * the residue trail with it — the reference cannot trail at all, and we keep
+ * that trail on purpose.
+ *
+ * So the re-derivation the research correctly identifies as the real cost —
+ * `breakingGain`, `foamMaskFrom` and their tests — would have been paid for a
+ * regression on all three statistics.
+ * ---------------------------------------------------------------------- */
+
 /**
  * σ of one band's det J, from the moments the ocean already publishes:
  * `OceanCascade.jacobianRms` (at λ=1) × the effective choppiness λ actually

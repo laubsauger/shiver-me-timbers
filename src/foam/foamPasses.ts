@@ -89,6 +89,21 @@ export function createFoamUniforms() {
      * meaningful rather than illegal.
      */
     uAccumMax: uniform(1),
+    /**
+     * PHASE LEAD (foamMath, "FOAM THAT LEADS THE BREAK"): the whole gate is
+     * read this many texels away and the foam is written here, so the fired
+     * field is the shipped one TRANSLATED downwave — coverage-exact, and the
+     * water ahead of an oncoming crest whitens before the crest arrives.
+     * 0/0 restores the shipped read exactly, which is the A/B.
+     *
+     * Two scalar uniforms rather than an ivec2, for the reason `foamShading`'s
+     * `uPropX`/`uPropZ` pair records: `uniform(ivec2(...))` seeds the uniform
+     * with a NODE whose `.value` has no components to write, so the offset
+     * would silently never update. Assigned exact integers and read through
+     * `int()`, whose truncation is exact on them.
+     */
+    uLeadX: uniform(0),
+    uLeadZ: uniform(0),
     /** blur tap offset in texels */
     uRadius: uniform(1),
     /**
@@ -211,11 +226,24 @@ export function createInjectPass(
     const x = int(instanceIndex.mod(n)).toVar();
     const y = int(instanceIndex.div(n)).toVar();
     const coord = ivec2(x, y);
+    // ── THE PHASE LEAD ────────────────────────────────────────────────────
+    // The gate is evaluated `uLead` texels UPWAVE and the foam is stored here,
+    // because for a travelling field the future at p is the present at
+    // p − cτ·d̂ (foamMath, "FOAM THAT LEADS THE BREAK"). EVERY term of the
+    // gate moves together — λ−, the cross-band straining elevation, the
+    // structure-tensor ring and the breakup field's world coordinate — which
+    // is what makes it a pure TRANSLATION of the fired region and therefore
+    // exactly coverage-neutral. Reading only λ− at the offset and the rest
+    // here would be a different field, not a shifted one.
+    // ZERO EXTRA LOADS: this replaces the read address, it does not add a tap.
+    const gx = wrapTexel(x.add(int(u.uLeadX)), n).toVar();
+    const gy = wrapTexel(y.add(int(u.uLeadZ)), n).toVar();
+    const leadCoord = ivec2(gx, gy);
 
     // (λDx, h, λDz, det J) and (∂h/∂x, ∂h/∂z, ∂Dx/∂x, ∂Dz/∂z) — see unpackPass
-    const det = textureLoad(own.displacement, coord).w;
+    const det = textureLoad(own.displacement, leadCoord).w;
     // derivatives is a LAYER of the ocean's shared array texture (§V.40)
-    const d = loadCascadeLayer(own.derivatives, coord);
+    const d = loadCascadeLayer(own.derivatives, leadCoord);
     // tr J = 2 + λ(∂Dx/∂x + ∂Dz/∂z)
     const trace = float(2).add(u.uChoppiness.mul(d.z.add(d.w))).toVar();
     // foamMath.minEigenvalue. The discriminant is ≥ 0 for a real symmetric
@@ -225,10 +253,12 @@ export function createInjectPass(
     const minEigen = trace.sub(disc.sqrt()).mul(0.5).toVar();
 
     // ── the long-wave straining term ───────────────────────────────────────
-    // This texel's world position, at the texel CENTRE (+0.5) so the sample
-    // lands where the texel actually is rather than half a texel upwind.
-    const worldX = float(x).add(0.5).mul(texelMetres);
-    const worldZ = float(y).add(0.5).mul(texelMetres);
+    // The LEAD texel's world position, at the texel CENTRE (+0.5) so the
+    // sample lands where the texel actually is rather than half a texel
+    // upwind. It is the lead texel's and not this one's on purpose: the whole
+    // gate is evaluated there, or the shift stops being a translation.
+    const worldX = float(gx).add(0.5).mul(texelMetres);
+    const worldZ = float(gy).add(0.5).mul(texelMetres);
     const hOther = float(0).toVar();
     for (let c = 0; c < cascades.length; c++) {
       if (c === index) continue;
@@ -288,8 +318,8 @@ export function createInjectPass(
         const ang = (t / TENSOR_TAPS) * Math.PI * 2;
         const ox = Math.round(Math.cos(ang) * tensorRadius);
         const oz = Math.round(Math.sin(ang) * tensorRadius);
-        const tx = wrapTexel(x.add(int(ox)), n);
-        const tz = wrapTexel(y.add(int(oz)), n);
+        const tx = wrapTexel(gx.add(int(ox)), n);
+        const tz = wrapTexel(gy.add(int(oz)), n);
         const g = loadCascadeLayer(own.derivatives, ivec2(tx, tz));
         jxx.addAssign(g.x.mul(g.x));
         jzz.addAssign(g.y.mul(g.y));

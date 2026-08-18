@@ -76,6 +76,7 @@ const uSheetFlatten = uniform(0.5);
 const uSheetKeep = uniform(0.55);
 const uHandoverTear = uniform(0.45);
 const uTipCarve = uniform(0.35);
+const uFoamNormal = uniform(0);
 const uDetailKeepPixels = uniform(2);
 const uDetailFadeSpan = uniform(3.5);
 const uFarFoamFade = uniform(0);
@@ -103,6 +104,34 @@ const uPropZ = uniform(0);
  */
 const CAP_VAR_OCTAVES = 4;
 
+/**
+ * Nyquist margin for the FOAM RELIEF's finite difference, in pixels — the same
+ * constant `detailKeepPixels` / `tierKeepPixels` / ship's bandLimit use, and
+ * for the same reason: at one sample per feature, neighbouring pixels still
+ * straddle it whole.
+ *
+ * IT IS INFLATED BY THE GAIN, and that is `ba4eae5`'s lesson rather than a
+ * precaution. §V.48 band-limits the FIELD; it says nothing about the NORMAL a
+ * gain multiplies out of that field. A 2.0° plank crown became a 34.4° normal
+ * swing at `bumpScale` 20 and moiréd at a period §V.48 called resolved, because
+ * 2 px is a margin calibrated for UNIT GAIN and the reconstruction residual is
+ * proportional to amplitude. `foamNormalStrength` is exactly such a gain, so
+ * the difference step widens with it: `RELIEF_FILTER_PIXELS · (1 + max(0, g−1))`,
+ * which is the identity at g = 1 (so the shipped-null case is exact) and 2×
+ * wider at g = 3.
+ */
+const RELIEF_FILTER_PIXELS = 2;
+
+/**
+ * Fraction of one BREAKUP CELL the relief difference steps by in the near
+ * field. Below ~½ a cell both taps land inside the same piece of lace and the
+ * difference measures nothing; above one cell it straddles two unrelated ones
+ * and the relief becomes noise with no relation to the silhouette. 0.35 puts
+ * the pair across one wall of the lace network, which is the feature whose
+ * shape the relief is supposed to be.
+ */
+const RELIEF_CELL_STEP = 0.35;
+
 /** push live param values + sim time into the shading uniforms (per tick) */
 export function updateFoamShadingUniforms(
   p: FoamParams,
@@ -127,6 +156,7 @@ export function updateFoamShadingUniforms(
   uSheetKeep.value = Math.min(1, Math.max(0, p.sheetKeep));
   uHandoverTear.value = Math.max(0, p.handoverTear);
   uTipCarve.value = Math.max(0, p.tipCarve);
+  uFoamNormal.value = Math.max(0, p.foamNormalStrength);
   uDetailKeepPixels.value = Math.max(0.5, p.detailKeepPixels);
   uDetailFadeSpan.value = Math.max(1.05, p.detailFadeSpan);
   uFarFoamFade.value = p.farFoamFade;
@@ -284,6 +314,21 @@ export function foamDetailMask(
    * exactly. See `breakup` below for why it is the elevation and not det J.
    */
   surfaceLift?: AnyNode,
+  /**
+   * OUT-PARAMETER for the foam's OWN SHADING NORMAL (§T.42, and the direct
+   * answer to "the foam reads as decals slapped on top"). Pass an object and
+   * `slope` comes back as the world-XZ tilt to add to the water's normal
+   * before its N·L; omit it and NOTHING extra is evaluated — not the two taps,
+   * not the second composite — so the wake path and every existing caller are
+   * bit-identical and free.
+   *
+   * WHY AN OUT-PARAM AND NOT A RETURN. The mask is a scalar that six
+   * expressions in `surfaceMaterial` multiply; widening the return type would
+   * touch all of them for a term only ONE of them wants. The relief also has
+   * to be built from the SAME art taps the mask already made — recomputing it
+   * outside would double the fetches this exists to keep at two.
+   */
+  out?: { slope?: AnyNode },
 ): AnyNode {
   const art = foamArtTexture();
   // per-position phase (§B.4: NO shared global timeline) — coarse value
@@ -397,10 +442,9 @@ export function foamDetailMask(
       ? surfaceLift.clamp(-2, 2).mul(uTipCarve)
       : float(0);
   const carveUv = vec2(carve, carve.mul(-0.6));
-  const crestTex = texture(
-    art,
-    aniso.div(crestMetres).add(vec2(t, t.mul(-0.7))).add(carveUv),
-  );
+  /** hoisted so the relief's two taps can step off exactly this coordinate */
+  const crestUv = aniso.div(crestMetres).add(vec2(t, t.mul(-0.7))).add(carveUv);
+  const crestTex = texture(art, crestUv);
   const softTex = texture(
     art,
     // the broad tap takes the SAME world displacement, which at its 4.7×
@@ -492,12 +536,17 @@ export function foamDetailMask(
   const blendMean = mix(float(FOAM_SOFT_MEAN), float(FOAM_CREST_MEAN), bodyBlend);
   /** the mean the body MUST keep — the one `freshness` alone would have given */
   const bodyMean = mix(float(FOAM_SOFT_MEAN), float(FOAM_CREST_MEAN), freshness);
-  // BODY — the interior of the patch (R = crest lace, G = soft mottle)
-  const textured = mix(softTex.g, crestTex.r, bodyBlend).sub(blendMean).add(bodyMean);
   const flat = sheetN.mul(uSheetFlatten).clamp(0, 1);
-  const sheeted = mix(textured, float(1), flat).add(
-    flat.mul(uSheetKeep.clamp(0, 1)).mul(textured.sub(bodyMean)),
-  );
+  // BODY — the interior of the patch (R = crest lace, G = soft mottle).
+  // A FUNCTION OF THE CREST TAP, not a value, so the relief below can rebuild
+  // it at two offset taps without a second copy of the algebra. Called with
+  // `crestTex.r` it is the expression it replaced, term for term.
+  const bodyOf = (crestR: AnyNode): AnyNode => {
+    const textured = mix(softTex.g, crestR, bodyBlend).sub(blendMean).add(bodyMean);
+    return mix(textured, float(1), flat).add(
+      flat.mul(uSheetKeep.clamp(0, 1)).mul(textured.sub(bodyMean)),
+    );
+  };
 
   // FAR-FIELD DETAIL FADE — a BACKSTOP, not the band limit, and now keyed on
   // the PIXEL FOOTPRINT rather than on camera distance.
@@ -534,7 +583,7 @@ export function foamDetailMask(
     keepMetres,
     pixelMetres,
   );
-  const detail = mix(float(1), sheeted, detailFade);
+  const detailOf = (crestR: AnyNode): AnyNode => mix(float(1), bodyOf(crestR), detailFade);
 
   // ── THE DISSOLVE: the art texture carves the SILHOUETTE ─────────────────
   //
@@ -556,7 +605,6 @@ export function foamDetailMask(
   // the jacobian injection gate and the two must be retuned together — as a
   // shader literal at (0.03, 0.12) it once silently swallowed a whole
   // injection fix. `erodeDepth = 0` reproduces the old gate exactly.
-  const breakup = mix(softTex.b, crestTex.b, freshness);
   /**
    * 1 while the dissolve's own cells still resolve on screen, 0 once they are
    * sub-pixel. Measured against the FEATURE (one breakup cell), never against
@@ -579,7 +627,6 @@ export function foamDetailMask(
   // §V.48(b) went from a 0.045 residual to 0.478, i.e. distant foam coverage
   // would differ from near foam coverage by half. Coverage is instead paid for
   // where it is visible and testable, at `residueKneeLow/High` (params/foam).
-  const threshold = uKneeLow.add(breakup.mul(erode).mul(resolved));
   // §V.48(b) — AND THE MEAN THAT MATTERS IS NOT THE FIELD'S. Fading `breakup`
   // to its own mean (0.5, exactly, by construction) would leave a step at a
   // shifted threshold, which is a fade to a hard edge. The average a pixel
@@ -604,12 +651,91 @@ export function foamDetailMask(
     .add(erode.mul(float(1).sub(resolved)))
     .max(fwidth(rawFoam).mul(2))
     .max(1e-4);
-  const knee = smoothstep(threshold, threshold.add(softness), rawFoam);
+  // a FUNCTION of the crest tap, for the same reason `bodyOf` is
+  const kneeOf = (crestB: AnyNode): AnyNode => {
+    const breakup = mix(softTex.b, crestB, freshness);
+    const threshold = uKneeLow.add(breakup.mul(erode).mul(resolved));
+    // @band-limited-elsewhere: `softness` three lines up carries
+    // fwidth(rawFoam)·2 and the `erode·(1−resolved)` retirement widening —
+    // both halves of §V.48 are in the argument this reads.
+    return smoothstep(threshold, threshold.add(softness), rawFoam);
+  };
   // optional far-field COVERAGE softening on top of the detail fade, off by
   // default: reach for this only if the horizon still reads too white once
   // the detail shimmer is gone — it removes real foam, the detail fade does not
   const farSoften = mix(float(1), detailFade, uFarFoamFade.clamp(0, 1));
-  return rawFoam.mul(detail).mul(knee).mul(farSoften).clamp(0, 1);
+  /** the foam ALPHA, as a function of the crest tap it was built from */
+  const alphaOf = (crestR: AnyNode, crestB: AnyNode): AnyNode =>
+    rawFoam.mul(detailOf(crestR)).mul(kneeOf(crestB)).mul(farSoften).clamp(0, 1);
+  const alpha = alphaOf(crestTex.r, crestTex.b);
+
+  // ── §T.42 FOAM'S OWN NORMAL, FROM THE MASK THE DISSOLVE ACTUALLY MADE ────
+  //
+  // User, repeatedly: the foam reads as decals "slapped on top", with no
+  // substance. `57269ca` deleted the art texture's relief channel (A) for
+  // exactly this reason — it was a height authored BESIDE the mask, read by
+  // nothing — and recorded the replacement in its own docstring
+  // (`foamPattern.FOAM_UNUSED_ALPHA`): finite-difference the ALREADY
+  // THRESHOLDED foam, so the relief is the relief of the silhouette the
+  // dissolve produced rather than of a second field that merely resembles it.
+  // Crest Ocean System does the same thing (`OceanFoam.hlsl`,
+  // docs/research-water-implementations.md §3.3) and it is the whole reason
+  // the technique is cheap: the taps are of a texture that is ALREADY BOUND
+  // and ALREADY SAMPLED, so §V.40's contested fragment sampler is untouched.
+  //
+  // TWO TAPS, NOT FOUR. The soft tap is held: at `artSoftMetres`/`artCrestMetres`
+  // = 4.67× the repeat its features are 4.67× wider, so per unit of amplitude
+  // it carries ~1/4.67 of the gradient — and the relief we want is the LACE,
+  // which is the crest channel by construction. Differencing both would double
+  // the fetches for a fifth of the signal.
+  //
+  // ── THE STEP IS GAIN-AWARE, AND THAT IS `ba4eae5` ───────────────────────
+  //
+  // §V.48 band-limits the FIELD and says nothing about the NORMAL a gain
+  // multiplies out of it: a 2.0° plank crown became a 34.4° normal swing at
+  // gain 20 and moiréd at a period §V.48 called resolved. `FILTER_PIXELS = 2`
+  // is a Nyquist margin calibrated for UNIT GAIN, and the reconstruction
+  // residual scales with amplitude, so the difference step widens with
+  // `foamNormalStrength` — see RELIEF_FILTER_PIXELS.
+  //
+  // THE AMPLITUDE HALF IS FREE HERE, and it is worth saying why rather than
+  // relying on it silently. Two independent mechanisms already fade the relief
+  // as the foam retires: the art texture's own mip chain returns the channel's
+  // MEAN once a cell is sub-pixel, so both taps converge and the difference
+  // goes to zero; and `resolved` fades the dissolve's threshold variation over
+  // the same span, so `kneeOf` stops depending on the tap at all. Neither is
+  // an approximation — both drive the difference to exactly 0.
+  //
+  // §V.64: what the fade removes is a zero-mean tilt (the crest channel's
+  // gradient integrates to zero over the tile, so the FIRST-ORDER brightness
+  // shift is nil) and it is therefore not carried anywhere. The residual is
+  // the asymmetry of a clamped N·L over the tilt range, which could not be
+  // given an honest coefficient — stated, not hidden.
+  //
+  // NO PHONG LOBE, deliberately, though Crest ships one at
+  // `_WaveFoamSpecularBoost` 0.15 / falloff 293. This material's own foam block
+  // records two user reports caused by foam luminance alone ("too white… too
+  // solid white"), and sea-spray white sits within a few percent of the bloom
+  // threshold at every sky colour. A specular lobe on top of that is the one
+  // change most likely to reopen them, and it is not what "no substance" asks
+  // for — the substance is the N·L relief.
+  if (out) {
+    // identity at gain 1, so `foamNormalStrength = 1` is the exact
+    // unwidened form and the null case can be asserted rather than trusted
+    const gain = float(1).add(uFoamNormal.sub(1).max(0));
+    const cellStep = crestMetres.div(FOAM_BREAKUP_CELLS).mul(RELIEF_CELL_STEP);
+    const stepMetres = cellStep.max(pixelMetres.mul(RELIEF_FILTER_PIXELS).mul(gain));
+    const du = stepMetres.div(crestMetres);
+    const tapX = texture(art, crestUv.add(vec2(du, 0)));
+    const tapZ = texture(art, crestUv.add(vec2(0, du)));
+    // Crest's form: fN = normalize(n + strength·(−dfdx, 0, −dfdz)), with
+    // dfdx = f(x+d) − f(x). The caller adds this to the water normal's XZ.
+    out.slope = vec2(
+      alpha.sub(alphaOf(tapX.r, tapX.b)),
+      alpha.sub(alphaOf(tapZ.r, tapZ.b)),
+    ).mul(uFoamNormal);
+  }
+  return alpha;
 }
 
 /**

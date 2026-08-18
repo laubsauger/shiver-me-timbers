@@ -1577,7 +1577,16 @@ export function buildOceanSurfaceMaterial(
       // which are bound in the VERTEX stage only, and §V.72 records that the
       // contested spare is a FRAGMENT spare.
       const surfaceLift = totalDisp.y.div(sigma);
-      if (foam) foamMask = foam.shadingNode(worldXZ, surfaceLift);
+      // §T.42 FOAM'S OWN NORMAL. `src/foam/foamShading` finite-differences the
+      // foam alpha it has already built, from two extra taps of the art
+      // texture it has already bound (no new binding, no new sampler, §V.40),
+      // and hands back the world-XZ tilt. It is an OUT-PARAM so the mask this
+      // block composites is the same scalar expression it always was —
+      // `foamAmount`, and therefore coverage, cannot move. See foamShading for
+      // the gain-aware band limit and for why there is no Phong lobe.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node
+      const foamRelief: { slope?: any } = {};
+      if (foam) foamMask = foam.shadingNode(worldXZ, surfaceLift, foamRelief);
       // §V.10 THE WAKE IS NOT A WHITECAP, and it is kept on its own mask all
       // the way to the composite for that reason. It used to be `max`ed into
       // the whitecap mask on the line it was built, which forced two different
@@ -1665,9 +1674,26 @@ export function buildOceanSurfaceMaterial(
       // the cool near-white it is authored as, and against a warm sunset sky a
       // cool white foam reads wrong even once coverage is right
       const foamBase = mix(uFoam, uHazeColor, uFoamSkyTint.clamp(0, 1));
+      // §T.42 — FOAM IS LIT BY ITS OWN NORMAL, not by the water's. Foam
+      // composited as albedo over a shared normal is the mechanical cause of
+      // "slapped on top": every pixel of a cap took the same N·L as the water
+      // under it, so the cap had no interior shading at all and read as a flat
+      // decal however torn its outline was. `foamRelief.slope` is the tilt the
+      // dissolve's OWN silhouette implies (built in foamShading from taps it
+      // already had), so a cap now has a lit side and a shaded side that follow
+      // its lace. Water-side terms are untouched: this normal is used for the
+      // foam's diffuse and nothing else, and never for the specular, the
+      // reflection or the slope variance.
+      const foamNdl = foamRelief.slope
+        ? normalize(vec3(
+            normalWorld.x.add(foamRelief.slope.x),
+            normalWorld.y,
+            normalWorld.z.add(foamRelief.slope.y),
+          )).dot(sunDirectionUniform).max(0)
+        : ndl;
       const foamCol = foamBase
         .mul(foamTintNode())
-        .mul(ndl.mul(uLightGain.mul(0.6)).mul(shade).add(uLightFloor.add(0.1)));
+        .mul(foamNdl.mul(uLightGain.mul(0.6)).mul(shade).add(uLightFloor.add(0.1)));
       // whitecaps first, then the wake over them in ITS own colour. Two
       // composites rather than one over a `max`, which is what lets the two
       // carry different materials; `foamAmount` still reports the union so the

@@ -49,6 +49,9 @@ import {
   injectAmount,
   jacobianSigma,
   whitecapCoverage,
+  bandPhaseSpeed,
+  phaseLeadTexels,
+  MAX_LEAD_WAVELENGTHS,
   whitecapWindScale,
   WHITECAP_ONSET_MS,
   wrapIndex,
@@ -60,6 +63,7 @@ import {
   FOAM_SOFT_MEAN,
 } from '../src/foam/foamPattern';
 import { foamParams } from '../src/params/foam';
+import foamShadingSource from '../src/foam/foamShading.ts?raw';
 import { oceanParams, type OceanParams } from '../src/params/ocean';
 import {
   cascadeBand,
@@ -2268,5 +2272,162 @@ describe('whitecaps follow the WIND, not just the fold (§V36, research §4.1)',
     expect(Number.isFinite(gate)).toBe(true);
     expect(at(8) / at(11)).toBeCloseTo(whitecapWindScale(8, 11), 9);
     expect(at(2)).toBe(0); // below onset: the gate is unchanged, nothing injects
+  });
+});
+
+/**
+ * THE PHASE LEAD (docs/research-poseidon.md §3.3A, ranked #1; foamMath, "FOAM
+ * THAT LEADS THE BREAK").
+ *
+ * The research's own §3.1 proves — in one line of calculus, not as a claim
+ * about either codebase — that the fold metric is symmetric about the crest by
+ * construction, so no tuning of it can put foam ahead of a break. These tests
+ * pin the three things that make the cure safe rather than merely present:
+ * that it is OFF at 0, that it walks UPWAVE, and that it is a REARRANGEMENT.
+ */
+describe('§3.3A the phase lead: foam ahead of the break', () => {
+  /** cascade 1's shipped geometry — the band that carries most of the lead */
+  const K = (2 * Math.PI) / 15; // 15 m mean wave
+  const TEXEL = 98 / 512;
+
+  it('c is the deep-water phase speed of the band, and 0 where there is none', () => {
+    // NOT a fitted speed: √(g/k̄) off the moment the ocean already publishes,
+    // so the lead tracks a spectrum rebuild instead of one calibrated sea.
+    expect(bandPhaseSpeed(K)).toBeCloseTo(Math.sqrt(9.81 / K), 12);
+    expect(bandPhaseSpeed(0)).toBe(0);
+    expect(bandPhaseSpeed(-1)).toBe(0);
+    expect(bandPhaseSpeed(Number.NaN)).toBe(0);
+  });
+
+  it('leadSeconds 0 is the shipped read, texel for texel', () => {
+    // the A/B contract every other foam change ships behind
+    expect(phaseLeadTexels(K, 0, 1, 0, TEXEL)).toEqual({ x: 0, z: 0 });
+    // and every degenerate input falls back to it rather than to a NaN offset,
+    // which would sample texel NaN and return zero foam in silence (§V28)
+    expect(phaseLeadTexels(0, 0.2, 1, 0, TEXEL)).toEqual({ x: 0, z: 0 });
+    expect(phaseLeadTexels(K, 0.2, Number.NaN, 0, TEXEL)).toEqual({ x: 0, z: 0 });
+    expect(phaseLeadTexels(K, 0.2, 1, 0, 0)).toEqual({ x: 0, z: 0 });
+    expect(phaseLeadTexels(K, Number.NaN, 1, 0, TEXEL)).toEqual({ x: 0, z: 0 });
+  });
+
+  it('the read walks UPWAVE — the future here is the present behind', () => {
+    // f(x, t+τ) = f(x − cτ·d̂, t). If this ever comes back positive the foam
+    // lags by τ instead of leading by it, which is the defect, doubled.
+    const d = { x: Math.cos(0.6), z: Math.sin(0.6) };
+    const lead = phaseLeadTexels(K, 0.2, d.x, d.z, TEXEL);
+    expect(lead.x * d.x + lead.z * d.z).toBeLessThan(0);
+    // magnitude is c·τ in texels, to within the integer rounding a
+    // `textureLoad` forces (there is no sampler in a compute pass)
+    const want = (bandPhaseSpeed(K) * 0.2) / TEXEL;
+    expect(Math.hypot(lead.x, lead.z)).toBeGreaterThan(want - 1.5);
+    expect(Math.hypot(lead.x, lead.z)).toBeLessThan(want + 1.5);
+  });
+
+  it('saturates at λ/8 — the identity is only valid for a short walk', () => {
+    // WHY A CEILING AT ALL: f(x,t+τ) = f(x−cτd̂,t) is exact for ONE narrow-band
+    // train at ONE speed in ONE direction, and a cascade is none of those — it
+    // disperses across its band and our sea carries two trains at ~78°. Both
+    // errors grow with the DISTANCE walked, so the bound is a fraction of a
+    // wavelength. MEASURED: 0.5 s (≈λ/6 in this band) already costs 12 points
+    // of crest-30 placement and 22 of crest-10.
+    const far = phaseLeadTexels(K, 100, 1, 0, TEXEL);
+    const cap = (MAX_LEAD_WAVELENGTHS * ((2 * Math.PI) / K)) / TEXEL;
+    expect(Math.abs(far.x)).toBe(Math.round(cap));
+    // and the slider cannot get past it however far it is dragged
+    expect(phaseLeadTexels(K, 1000, 1, 0, TEXEL)).toEqual(far);
+  });
+
+  it('IT IS A REARRANGEMENT, so coverage cannot move — the pinned invariant', () => {
+    // THE WHOLE REASON THE GATE IS READ ENTIRELY AT THE LEAD TEXEL rather than
+    // `min`ed with the local one, which is the form the research proposes. A
+    // `min` is a UNION of two firing events and can only ADD foam — one-sided
+    // in the one quantity that is pinned. Reading the whole gate at the offset
+    // is a pure TRANSLATION of the fired field, so its distribution — and
+    // therefore its coverage at EVERY threshold — is unchanged, by exactly the
+    // measure-preserving argument `waveCarveOffset` rests on.
+    const N = 64;
+    const field = new Float64Array(N * N);
+    let seed = 991;
+    const rnd = (): number => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    for (let i = 0; i < N * N; i++) field[i] = rnd();
+    const fire = (lx: number, lz: number): number[] => {
+      const out: number[] = [];
+      for (let y = 0; y < N; y++) {
+        for (let x = 0; x < N; x++) {
+          out.push(Math.max(0, 0.3 - field[wrapIndex(y + lz, N) * N + wrapIndex(x + lx, N)]));
+        }
+      }
+      return out.sort((a, b) => a - b);
+    };
+    const plain = fire(0, 0);
+    const led = fire(-5, 3);
+    // the SAME multiset of injected values, in a different place: identical
+    // mean, identical coverage at every threshold, only the position moved
+    for (let i = 0; i < plain.length; i++) expect(led[i]).toBe(plain[i]);
+    // the `min` form the research proposes, for contrast — strictly MORE foam
+    let plainSum = 0;
+    let minSum = 0;
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const here = field[y * N + x];
+        const there = field[wrapIndex(y + 3, N) * N + wrapIndex(x - 5, N)];
+        plainSum += Math.max(0, 0.3 - here);
+        minSum += Math.max(0, 0.3 - Math.min(here, there));
+      }
+    }
+    expect(minSum).toBeGreaterThan(plainSum * 1.3);
+  });
+
+  it('the shipped lead is the accumulator\'s own lag, not a taste', () => {
+    // The breaking channel is a first-order filter; its time constant is
+    // halfLife/ln2 and the lead exists to cancel exactly that. If either
+    // number moves without the other this stops being true, which is the
+    // §V.36 failure ("a constant calibrated against one statistic") applied to
+    // a time rather than to a threshold.
+    const tau = foamParams.breakingHalfLife / Math.LN2;
+    expect(foamParams.leadSeconds).toBeGreaterThan(tau * 0.7);
+    expect(foamParams.leadSeconds).toBeLessThan(tau * 1.3);
+  });
+});
+
+/**
+ * §T.42 FOAM'S OWN NORMAL (docs/research-water-implementations.md §3.3, ranked
+ * #6; foamShading, "FOAM'S OWN NORMAL"). The mechanism is a TSL graph and
+ * cannot be evaluated headless, so what is pinned here is the contract that
+ * makes it safe: that it is off by default-null, that it cannot touch coverage,
+ * and that its filter is gain-aware (§V.48 band-limits the field, not the
+ * normal — `ba4eae5`).
+ */
+describe('§T.42 the foam relief', () => {
+  it('is an OUT-PARAM, so the alpha it is built from is unchanged', () => {
+    // The relief multiplies the foam's COLOUR. `foamAmount` — the quantity
+    // every coverage measurement in this project reads — is built from the
+    // same expression it always was, and this is what says so mechanically:
+    // the mask is still the single value `foamDetailMask` returns.
+    expect(foamShadingSource).toContain('const alpha = alphaOf(crestTex.r, crestTex.b)');
+    expect(foamShadingSource).toContain('return alpha;');
+    // nothing extra is even BUILT without the out-param — the wake path
+    // (§V.10) and every other caller pay nothing
+    expect(foamShadingSource).toContain('if (out) {');
+  });
+
+  it('the difference step is GAIN-AWARE, and the identity at gain 1 is exact', () => {
+    // ba4eae5: a 2.0° plank crown became a 34.4° normal swing at gain 20 and
+    // moiréd at a period §V.48 called resolved, because FILTER_PIXELS = 2 is a
+    // margin calibrated for UNIT GAIN. `foamNormalStrength` is such a gain.
+    expect(foamShadingSource).toContain('const gain = float(1).add(uFoamNormal.sub(1).max(0))');
+    expect(foamShadingSource).toContain('pixelMetres.mul(RELIEF_FILTER_PIXELS).mul(gain)');
+  });
+
+  it('costs TWO taps of a texture already bound — not four, and not a sampler', () => {
+    // §V.40: the ocean fragment stage's spare sampler is contested. Both taps
+    // are of `art`, the same texture object the mask already reads, so they
+    // dedupe to the existing binding. The SOFT tap is deliberately held —
+    // 4.67× the repeat means 4.67× less gradient for double the fetches.
+    const taps = foamShadingSource.match(/texture\(\s*art\b/g) ?? [];
+    expect(taps.length).toBe(4); // crest, soft, and the relief's two
   });
 });

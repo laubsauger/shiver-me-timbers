@@ -99,6 +99,49 @@ export interface FoamParams {
    */
   crestBiasSigma: number;
   /**
+   * SECONDS OF PHASE LEAD — how far into the future the inject pass reads its
+   * own gate, so foam appears AHEAD of a breaking crest instead of behind it
+   * (foamMath, "FOAM THAT LEADS THE BREAK"; docs/research-poseidon.md §3.3A,
+   * the #1 ranked item).
+   *
+   * 0 restores the shipped read exactly, texel for texel, which is the A/B.
+   *
+   * WHY IT IS A TIME AND NOT A DISTANCE. The lead a band needs is c·τ and c is
+   * √(g/k̄) — a per-band quantity that moves with the spectrum — so a metre
+   * constant would mean something different in every cascade and in every sea
+   * state, which is §V.36's whole subject. In seconds it means one thing
+   * everywhere and each band solves for its own texel offset.
+   *
+   * WHY 0.2. It is the accumulator's own lag, not a taste: the breaking
+   * channel is a first-order filter with time constant
+   * `breakingHalfLife`/ln2 = 0.216 s, and the lead's job is to cancel exactly
+   * that. MEASURED shaded end to end (tests/zzScratchFoamResearch), on the
+   * mirror whose ABSOLUTE coverage reproduces the pinned 0.62% to three
+   * figures, so the delta is trustworthy rather than merely internal:
+   *   spectrum               τ       coverage  Δ        crest30 crest10 fwdShare
+   *   [40, 8.3] bias 0.600   0       0.6192%   —        92.9%   70.8%   54.1%
+   *                          0.20 s  0.6127%   −1.04%   92.6%   72.6%   63.2%
+   *   [40, 5]   bias 0.623   0       0.6221%   —        95.1%   73.0%   52.4%
+   *                          0.20 s  0.6231%   +0.16%   94.7%   73.6%   63.1%
+   * — both spectra, because `splitWavelengths` moved during this work and a
+   * coverage claim that holds on only one sea is not a claim.
+   * `fwdShare` is foam mass on the FORWARD flank — 52–54% shipped, i.e.
+   * symmetric to within a few points, which is research §3.1's proof appearing
+   * as a number. 0.2 s buys 9–11 points of it for ±1% of coverage whose SIGN is
+   * not stable between the two spectra, and no loss of crest placement (the TOP
+   * DECILE improves on both). The residual is DECLARED, not compensated
+   * (§V.64): the translation itself is exactly measure-preserving, what is left
+   * is the three bands decorrelating from each other because each leads by its
+   * own c, and `injectStrength` is the knob if a sea wants it back.
+   *
+   * Past 0.2 s the gate walks off its own crest: on the coarser sweep 0.3 s
+   * costs 4.6 points of crest-10 for 9 more of forward share, 0.5 s costs 22,
+   * and 1.0 s costs 53. Hence the λ/8 ceiling in
+   * `foamMath.MAX_LEAD_WAVELENGTHS`, which this slider cannot exceed however
+   * far it is dragged.
+   */
+  leadSeconds: number;
+  /**
    * WORLD METRES of the coarsest cell of the per-texel BREAKUP field — the
    * thing that decides how big a whitecap is (§B, user: "we are still very
    * patchy on the foam cresting, we are still huge blobs").
@@ -381,6 +424,36 @@ export interface FoamParams {
    */
   tipCarve: number;
   /**
+   * How hard the foam's OWN relief tilts the normal it is lit by, as a
+   * multiplier on the finite difference of the thresholded foam alpha
+   * (foamShading, "§T.42 FOAM'S OWN NORMAL"). 0 = the pre-relief look exactly:
+   * foam lit by the water's normal, which is the A/B this shipped behind.
+   *
+   * IT CANNOT MOVE COVERAGE, and that is structural rather than lucky. The
+   * relief is returned as a separate out-param and multiplies the foam's
+   * COLOUR; `foamAmount` — the alpha every coverage measurement reads — is
+   * built from the same expression it always was, term for term.
+   *
+   * A GAIN, so the finite-difference step widens with it (§V.48 band-limits
+   * the field, not the normal — `ba4eae5`). At 1 the step is the unwidened
+   * 2-pixel/0.35-cell form exactly; at 3 it is twice as wide, so asking for
+   * more relief buys correspondingly coarser relief rather than moiré.
+   *
+   * THE TWO TAPS ARE PAID FOR EVEN AT 0, and that is deliberate. This is a
+   * live uniform, so the graph carries the difference whatever it is set to;
+   * building it conditionally would make dragging the slider off 0 a silent
+   * no-op until reload, which is the §B "silent no-op" family. The cost is 2
+   * fragment FETCHES of a texture already bound and already sampled — §V.17's
+   * budget, not §V.40's (tests/oceanBindingBudget pins that: 0 new bindings).
+   *
+   * Crest ships `_WaveFoamNormalStrength` 3.5, but its difference is of a raw
+   * texture tap where ours is of the ALPHA — already multiplied by the body
+   * and the dissolve — so the same tilt needs a much smaller number here. 1.5
+   * puts a typical lace edge at ~15–20° of tilt, which is a shading gradient
+   * across a cap rather than a relit decal.
+   */
+  foamNormalStrength: number;
+  /**
    * PIXELS the COARSEST detail layer (1/mottleScale metres) must still span
    * for the detail composite to be worth evaluating at all.
    *
@@ -458,6 +531,7 @@ export const foamParams: FoamParams = registerParams(
     residueWeight: 0.3,
     breakingWeight: 1.0,
     crestBiasSigma: 0.5,
+    leadSeconds: 0.2,
     breakupMetres: 16,
     breakupSigma: 2.0,
     breakupWarp: 0.35,
@@ -503,6 +577,7 @@ export const foamParams: FoamParams = registerParams(
     sheetKeep: 0.55,
     handoverTear: 0.45,
     tipCarve: 0.35,
+    foamNormalStrength: 1.5,
     tierKeepPixels: 2,
     tierFadeSpan: 2,
     detailKeepPixels: 2,
@@ -534,6 +609,7 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
     residueWeight: { min: 0, max: 1, step: 0.01 },
     breakingWeight: { min: 0, max: 4, step: 0.05 },
     crestBiasSigma: { min: 0, max: 4, step: 0.05 },
+    leadSeconds: { min: 0, max: 1.5, step: 0.01 },
     breakupMetres: { min: 2, max: 60, step: 0.5 },
     breakupSigma: { min: 0, max: 6, step: 0.05 },
     breakupWarp: { min: 0, max: 1.5, step: 0.05 },
@@ -561,6 +637,7 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
     sheetKeep: { min: 0, max: 1, step: 0.01 },
     handoverTear: { min: 0, max: 1, step: 0.01 },
     tipCarve: { min: 0, max: 1, step: 0.01 },
+    foamNormalStrength: { min: 0, max: 6, step: 0.05 },
     tierKeepPixels: { min: 0.5, max: 12, step: 0.25 },
     tierFadeSpan: { min: 1.05, max: 6, step: 0.05 },
     detailKeepPixels: { min: 0.5, max: 12, step: 0.25 },
