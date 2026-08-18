@@ -59,6 +59,22 @@ export function createPerfHud(parent: HTMLElement = document.body): PerfHud {
   let cursor = 0;
   let lastFrameMs = 0;
   const passes = new Map<string, number>();
+  /**
+   * A SNAPSHOT, not the live `renderer.info.render`.
+   *
+   * `Renderer.init()` starts three's own rAF loop (`Animation.start()`,
+   * Renderer.js:803), registered during renderer construction — i.e. BEFORE
+   * §V.2's loop registers its own. Every tick therefore runs three's callback
+   * first, and that callback opens with `info.reset()`. §V.2's loop then calls
+   * `hud.frame()` at the TOP of its callback, so a HUD holding a reference to
+   * the live object redraws in the one window where the counters are
+   * guaranteed to be zero — measured `draws 0  tris 0` on a frame that drew
+   * 515 objects and 1.86 M triangles. Copying the values at
+   * `setRenderStats()` time (which main.ts calls immediately AFTER the render,
+   * before the reset) is what makes the row a measurement rather than proof
+   * that reset ran. Same class of fault as §B.25: the counter was never
+   * broken, it was read at the wrong instant.
+   */
   let stats: RenderStats | null = null;
   let gpu: readonly string[] | null = null;
 
@@ -101,7 +117,11 @@ export function createPerfHud(parent: HTMLElement = document.body): PerfHud {
       passes.set(label, ms);
     },
     setRenderStats(s: RenderStats): void {
-      stats = s;
+      // copy, do not alias — see the `stats` declaration above
+      if (stats === null) stats = { calls: 0, drawCalls: 0, triangles: 0 };
+      stats.calls = s.calls;
+      stats.drawCalls = s.drawCalls;
+      stats.triangles = s.triangles;
     },
     setGpu(lines: readonly string[] | null): void {
       gpu = lines;

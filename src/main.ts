@@ -1010,19 +1010,6 @@ async function boot(): Promise<void> {
       });
       hullWetline.updateFromHullContact(frameDt, hullContact.stations, hullContact.depth);
 
-      t = performance.now();
-      // NOT guardable on `state.time` the way the ocean above is, and the
-      // resemblance is a trap. `clouds.update` refits the camera-pinned
-      // composite + band quads (`fitToCamera`), rebuilds the view-space sun/up
-      // basis from `camera.matrixWorld`, and renders the cores pass FROM the
-      // camera into an offscreen RT. The camera moves every render frame
-      // (followCam runs at display rate), so skipping a no-tick frame would
-      // leave the cloud quads fitted to the previous frame's view and the
-      // puffs lit in a stale basis — clouds visibly swimming against the
-      // camera. Its output is a function of the CAMERA, not of time alone.
-      clouds.update(state.time, sky.sunDirection);
-      debug.hud.setPassTiming('clouds cpu-dispatch', performance.now() - t);
-
       // spray + wake systems follow the ship (§V.6, §V.10)
       const shipYaw = Math.atan2(
         rotateVec(playerShip.quaternion, [0, 0, 1])[0],
@@ -1140,6 +1127,36 @@ async function boot(): Promise<void> {
       followCam.update(renderShipView, frameDt, (x, z) => cpuOcean.heightAt(x, z, state.time));
       combat.shake.update(frameDt, app.camera);
       combat.shake.apply(app.camera);
+
+      /**
+       * CLOUDS RUN HERE, AFTER THE CAMERA IS FINAL — not before it.
+       *
+       * `clouds.update` refits the camera-pinned composite + band quads
+       * (`fitToCamera`), rebuilds the view-space sun/up basis from
+       * `camera.matrixWorld`, and renders the cores pass FROM the camera into
+       * an offscreen RT. Its output is a function of the CAMERA, which is why
+       * it is (correctly) excluded from the ocean's no-tick guard.
+       *
+       * It used to sit ~120 lines earlier, ABOVE `followCam.update` and
+       * `combat.shake.apply` — so every frame it fitted the cloud layer to the
+       * PREVIOUS frame's view matrix and the scene then rendered with the new
+       * one. Translation hides that; rotation does not. The whole cloud layer
+       * slides against the rest of the image by exactly one frame of angular
+       * velocity, which is what "the clouds don't keep their position when I
+       * look up and down" is. This is a CORRECTNESS bug, not a budget one: it
+       * survives at any frame rate and only gets less visible as frames get
+       * shorter (~2.1° of slip at 43 fps for a 90°/s look, ~0.75° at 120).
+       *
+       * The old comment here reasoned about exactly this hazard — "skipping a
+       * no-tick frame would leave the cloud quads fitted to the previous
+       * frame's view" — and then the call was placed where it took the stale
+       * view on EVERY frame, tick or not. Anything camera-derived belongs
+       * after the last writer of `camera.matrixWorld`, which is
+       * `combat.shake.apply` directly above.
+       */
+      t = performance.now();
+      clouds.update(state.time, sky.sunDirection);
+      debug.hud.setPassTiming('clouds cpu-dispatch', performance.now() - t);
 
       // after the camera pose is final, before surface.update/render. This
       // only publishes pose, layer masks and live params — the mirror pass
