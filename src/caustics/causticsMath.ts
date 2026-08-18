@@ -361,3 +361,67 @@ export function reflectedReach(
 export function receiverFacing(nY: number, limit: number): number {
   return smoothstep(Math.max(limit, 1e-3), 0, nY);
 }
+
+/**
+ * cos(incidence) between the REFLECTED RAY and the receiver's own normal —
+ * the term this branch never had, and the reason the pattern "becomes very
+ * distorted at the furthest out of the water" on a curved bow.
+ *
+ * `receiverFacing` above is a pure function of nY, so it answers only "is this
+ * surface pointing up". A hull curving round the bow holds nY = 0 through the
+ * whole sweep, so that gate reads 1.000 for every azimuth while the projection
+ * behind it stretches without bound. Measured on a vertical side: 1.4x stretch
+ * facing a 45 deg sun square, 2.8x at 45 deg off it, and at a 60 deg sun the
+ * WHOLE vertical hull is already past 2x — where a projected pattern has
+ * stopped reading as caustics at all.
+ *
+ * The pattern is transported along the reflected ray, and the areal stretch of
+ * a beam landing on a surface is exactly 1/|cos(incidence)|, so fading by that
+ * cosine makes the contribution vanish precisely as the stretch diverges. It
+ * is not a tuned falloff — it is the cosine every irradiance calculation
+ * carries, and its absence is why a vertical hull was lit at full strength by
+ * a noon sun whose sea-reflected light goes straight up past it.
+ *
+ * `drift` is lateral travel per metre of rise, so the ray direction is
+ * (drift.x, 1, drift.z) normalized. `amount` at 0 restores the old ungated
+ * behaviour exactly. Bounded to [0,1] at source (§V.44) — a non-unit normal
+ * can only ever be clamped, never amplify the term.
+ *
+ * Mirrored by `incidence` in causticsNode.ts.
+ */
+export function reflectedIncidence(drift: Vec2, normal: Vec3, amount: number): number {
+  const len = Math.hypot(drift[0], 1, drift[1]);
+  // light TRAVELS along the ray, so it lands on a face whose normal opposes it
+  const cos =
+    -(drift[0] * normal[0] + normal[1] + drift[1] * normal[2]) / len;
+  return 1 + (clamp01(cos) - 1) * clamp01(amount);
+}
+
+/**
+ * Half-width of the ABOVE-water side of the waterline crossfade, shrunk by the
+ * receiver's own slope.
+ *
+ * A VERTICAL band means completely different things on two receivers, which is
+ * the §V.52 shape (one coefficient setting two physically independent
+ * responses). `waterlineBlend` is 0.8 m because a hull needed that much to stop
+ * the above/below branches meeting in a visible seam — and on a hull, 0.8 m of
+ * height is 0.8 m of surface. On a beach the same 0.8 m is 0.8/slope metres of
+ * DRY SAND: 6 m at 1:10, 24 m at 1:40. That is the user's "on shore seem to go
+ * up a little bit too high", and no amount of moving the constant fixes both,
+ * because the constant is right for one receiver and wrong for the other.
+ *
+ * So bound it in the receiver's own dimension (§V.66): scale the above-water
+ * half-width by the horizontal component of the normal, which IS the slope.
+ * A vertical side (nY = 0) keeps the full 0.8 m and the signed-off hull
+ * crossfade is preserved BIT FOR BIT; a flat beach (nY = 1) takes it to zero
+ * and the caustic stops at the water's edge where it belongs.
+ *
+ * Only the ABOVE side moves. Below the waterline the receiver is genuinely lit
+ * through water at any slope, so that half keeps `waterlineBlend` untouched.
+ *
+ * Mirrored by `aboveBand` in causticsNode.ts.
+ */
+export function waterlineAboveBand(blend: number, nY: number, amount: number): number {
+  const slope = Math.sqrt(Math.max(1 - nY * nY, 0));
+  return Math.max(blend, 0) * (1 + (slope - 1) * clamp01(amount));
+}

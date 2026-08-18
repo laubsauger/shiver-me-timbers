@@ -28,7 +28,9 @@ import {
   reflectedDrift,
   smoothstep,
   receiverFacing,
+  reflectedIncidence,
   reflectedReach,
+  waterlineAboveBand,
   refract,
   refractedDrift,
   surfaceStretch,
@@ -870,7 +872,44 @@ describe('reflected caustics stay on surfaces that can see the water', () => {
   it('still lights the waterline, so the bound did not kill the effect', () => {
     // the whole point of the branch: sun off the waves onto the wet topside
     expect(reflectedReach(0, P.reflectedHeightFalloff, P.reflectedMaxHeight)).toBeCloseTo(1, 6);
-    expect(reflectedReach(1, P.reflectedHeightFalloff, P.reflectedMaxHeight)).toBeGreaterThan(0.5);
+    // still strong through the wet band the effect is actually FOR. This used
+    // to assert > 0.5 at ONE FULL METRE up, which is the plateau the user kept
+    // reporting rather than the effect — see the next test (§Rule 6: it encoded
+    // the old number, not the intent).
+    expect(reflectedReach(0.25, P.reflectedHeightFalloff, P.reflectedMaxHeight))
+      .toBeGreaterThan(0.5);
+  });
+
+  /**
+   * THE TRIPWIRE FOR "STILL TOO HIGH", REPORTED THREE TIMES.
+   *
+   * The first two rounds moved `reflectedMaxHeight` down and neither read as a
+   * change, because the ceiling was never the shape. At the shipped 4.5 m
+   * falloff the exponential decayed only to 0.587 across the WHOLE 2.4 m
+   * window, so the band was a plateau at >=72% up to 1.44 m with a cut at the
+   * top — lowering the cut just slid a hard edge down a uniformly bright wall.
+   *
+   * `reflectedMaxHeight * 0.6` is where the ceiling smoothstep is still exactly
+   * 1, so the value there is the exponential ALONE. Asserting it well below 1
+   * is the assertion that says "the falloff does real work inside its own
+   * window" — the thing that was false for the entire life of this branch.
+   */
+  it('falls off INSIDE the window — the ceiling is not the only shape', () => {
+    const knee = P.reflectedMaxHeight * 0.6;
+    const bareAtKnee = Math.exp(-knee / P.reflectedHeightFalloff);
+    expect(reflectedReach(knee, P.reflectedHeightFalloff, P.reflectedMaxHeight))
+      .toBeCloseTo(bareAtKnee, 6);
+    expect(bareAtKnee).toBeLessThan(0.6);
+    // and half strength must arrive in the FIRST HALF of the reach, not at 73%
+    // of the ceiling the way it did at 1.76 m of a 2.4 m window
+    let half = Infinity;
+    for (let h = 0; h <= P.reflectedMaxHeight; h += 0.005) {
+      if (reflectedReach(h, P.reflectedHeightFalloff, P.reflectedMaxHeight) < 0.5) {
+        half = h;
+        break;
+      }
+    }
+    expect(half).toBeLessThan(P.reflectedMaxHeight * 0.5);
   });
 
   it('decreases monotonically — no band of re-brightening up the hull', () => {
@@ -913,5 +952,173 @@ describe('reflected caustics stay on surfaces that can see the water', () => {
     expect(reflectedReach(lowDeck, P.reflectedHeightFalloff, P.reflectedMaxHeight))
       .toBeGreaterThan(0.3);
     expect(receiverFacing(1, P.reflectedFaceLimit)).toBe(0);
+  });
+});
+
+/**
+ * THE CURVATURE COMPLAINT. User, third report on reach and first on shape:
+ * "on the boat especially, due to the curvature, they become very distorted at
+ * the furthest out of the water".
+ *
+ * That is a projection failure, and `receiverFacing` above cannot see it: it is
+ * a pure function of n.y, so it answers "is this surface pointing up" and
+ * nothing else. A hull curving round the bow holds n.y = 0 through the entire
+ * azimuthal sweep and passes that gate at 1.000 for every fragment, while the
+ * pattern projected onto it stretches by 1/|cos(incidence)| behind it.
+ *
+ * These tests pin the cosine, not a tuned falloff — the stretch and the fade
+ * are the same quantity, so the term must vanish exactly where the pattern
+ * stops reading as caustics.
+ */
+describe('reflected caustics fade as the projection stretches (curvature)', () => {
+  const P = causticsParams;
+  /** flat sea, sun at `elevDeg` in the +x azimuth → reflected drift = cot(elev) */
+  const driftFor = (elevDeg: number): Vec2 => [
+    Math.min(1 / Math.tan((elevDeg * Math.PI) / 180), P.maxDrift),
+    0,
+  ];
+  /** a vertical hull side whose normal is `phiDeg` off the sun's azimuth */
+  const sideNormal = (phiDeg: number): Vec3 => {
+    const p = (phiDeg * Math.PI) / 180;
+    return [-Math.cos(p), 0, -Math.sin(p)];
+  };
+  const stretch = (elevDeg: number, phiDeg: number): number => {
+    const c = reflectedIncidence(driftFor(elevDeg), sideNormal(phiDeg), 1);
+    return c > 1e-6 ? 1 / c : Infinity;
+  };
+
+  it('is the cosine: the fade EQUALS the reciprocal of the areal stretch', () => {
+    // this is the whole design claim — not "a falloff that looks right", but
+    // the same 1/|cos| that sets how far the pattern is smeared
+    for (const elev of [15, 30, 45, 60]) {
+      for (const phi of [0, 30, 60]) {
+        const c = reflectedIncidence(driftFor(elev), sideNormal(phi), 1);
+        expect(c).toBeCloseTo(1 / stretch(elev, phi), 12);
+      }
+    }
+  });
+
+  it('is already dim wherever the pattern is stretched past 2x', () => {
+    // a projected pattern stretched more than ~2x has stopped reading as
+    // caustics; the term must be at most half strength by then, by construction
+    for (const elev of [10, 20, 30, 45, 60, 75]) {
+      for (const phi of [0, 15, 30, 45, 60, 75, 85]) {
+        const s = stretch(elev, phi);
+        if (s > 2) {
+          expect(reflectedIncidence(driftFor(elev), sideNormal(phi), 1))
+            .toBeLessThanOrEqual(0.5 + 1e-12);
+        }
+      }
+    }
+  });
+
+  it('goes to zero at noon — sea-reflected light goes straight UP past a topside', () => {
+    // the case the old gate got most wrong: at a high sun the reflected ray is
+    // nearly vertical, so a vertical hull side receives almost none of it, and
+    // `receiverFacing` was handing it FULL strength (n.y = 0 → 1.000)
+    expect(receiverFacing(0, P.reflectedFaceLimit)).toBe(1);
+    expect(reflectedIncidence([0, 0], sideNormal(0), 1)).toBeCloseTo(0, 12);
+    expect(reflectedIncidence(driftFor(75), sideNormal(0), 1)).toBeLessThan(0.3);
+  });
+
+  it('keeps the low-sun hull sparkle the branch exists for', () => {
+    // a low sun throws its reflection nearly horizontally, which strikes a
+    // vertical topside square — the effect must SURVIVE there
+    expect(reflectedIncidence(driftFor(15), sideNormal(0), 1)).toBeGreaterThan(0.9);
+    expect(reflectedIncidence(driftFor(30), sideNormal(0), 1)).toBeGreaterThan(0.8);
+  });
+
+  it('gives a DECK nothing, so it subsumes the n.y gate rather than fighting it', () => {
+    for (const elev of [15, 30, 45, 60]) {
+      expect(reflectedIncidence(driftFor(elev), [0, 1, 0], 1)).toBe(0);
+    }
+  });
+
+  it('is bounded in [0,1] at source for any normal, unit or not (§V.44)', () => {
+    for (const n of [[0, 1, 0], [0, -1, 0], [-5, 0, 0], [3, -4, 12]] as Vec3[]) {
+      for (const elev of [5, 45, 89]) {
+        const v = reflectedIncidence(driftFor(elev), n, 1);
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('amount 0 restores the ungated behaviour exactly — the A/B is one slider', () => {
+    for (const elev of [15, 45, 89]) {
+      for (const phi of [0, 45, 90]) {
+        expect(reflectedIncidence(driftFor(elev), sideNormal(phi), 0)).toBe(1);
+      }
+    }
+  });
+});
+
+/**
+ * THE SHORE COMPLAINT, which is the same constant wearing different clothes.
+ * User: "the above-surface caustics on the boat AS WELL AS ON SHORE seem to go
+ * up a little bit too high".
+ *
+ * `waterlineBlend` is 0.8 m because a HULL needed that much to stop the above-
+ * and below-water branches meeting in a visible seam. On a hull, 0.8 m of
+ * height is 0.8 m of surface. On a beach it is 0.8/slope metres of dry sand —
+ * 6 m at 1:10, 24 m at 1:40 — so one coefficient was setting two physically
+ * independent reaches (§V.52), and the shore's was never tuned because terrain
+ * calls with `mode: 'below'` and so none of the `reflected*` bounds touch it.
+ *
+ * The bound therefore has to be expressed in the RECEIVER's own dimension
+ * (§V.66), which is what these pin.
+ */
+describe('the waterline band is bound in the receiver own dimension (shore)', () => {
+  const P = causticsParams;
+  /** n.y for a beach of the given slope */
+  const beachNy = (rise: number, run: number) => run / Math.hypot(rise, run);
+  /** metres of receiver SURFACE the band covers at that slope */
+  const surfaceReach = (rise: number, run: number) => {
+    const ny = beachNy(rise, run);
+    const band = waterlineAboveBand(P.waterlineBlend, ny, P.waterlineSlopeBound);
+    return band / (rise / Math.hypot(rise, run));
+  };
+
+  it('leaves a VERTICAL hull side bit-identical — the signed-off crossfade', () => {
+    // waterlineBlend went 0.3 → 0.8 to kill a visible seam along the hull; this
+    // change must not quietly undo that fix
+    expect(waterlineAboveBand(P.waterlineBlend, 0, 1)).toBeCloseTo(P.waterlineBlend, 12);
+    expect(waterlineAboveBand(P.waterlineBlend, 0, P.waterlineSlopeBound))
+      .toBeCloseTo(P.waterlineBlend, 12);
+  });
+
+  it('stops a shallow beach spreading caustics over tens of metres of dry sand', () => {
+    // the defect, in the units the user actually sees. Unbounded, a 1:20 beach
+    // carried the band 0.8/0.05 = 16 m inland.
+    for (const [rise, run] of [[1, 10], [1, 20], [1, 40]]) {
+      const unbounded = P.waterlineBlend / (rise / Math.hypot(rise, run));
+      expect(unbounded).toBeGreaterThan(7); // what it used to be
+      expect(surfaceReach(rise, run)).toBeLessThan(1.2); // what it is now
+    }
+  });
+
+  it('makes the SURFACE reach slope-independent, which is the whole point', () => {
+    // every slope now gets about the same distance of shoreline, instead of the
+    // same vertical height — a flat beach and a steep one read the same way
+    const reaches = [[1, 2], [1, 5], [1, 10], [1, 20], [1, 40]].map(([a, b]) =>
+      surfaceReach(a, b),
+    );
+    for (const r of reaches) expect(r).toBeCloseTo(P.waterlineBlend, 6);
+  });
+
+  it('never widens the band, at any slope or amount (§V.44 bounded at source)', () => {
+    for (let ny = -1; ny <= 1; ny += 0.05) {
+      for (const amt of [0, 0.3, 1]) {
+        const b = waterlineAboveBand(P.waterlineBlend, ny, amt);
+        expect(b).toBeGreaterThanOrEqual(0);
+        expect(b).toBeLessThanOrEqual(P.waterlineBlend + 1e-12);
+      }
+    }
+  });
+
+  it('amount 0 restores the fixed vertical band exactly', () => {
+    for (const ny of [0, 0.5, 0.99, 1]) {
+      expect(waterlineAboveBand(P.waterlineBlend, ny, 0)).toBeCloseTo(P.waterlineBlend, 12);
+    }
   });
 });

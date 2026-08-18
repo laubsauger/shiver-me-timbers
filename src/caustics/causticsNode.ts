@@ -60,6 +60,10 @@ export interface CausticsUniforms {
   reflectedMaxHeight: TslNode;
   /** receiver n.y at which sea-bounced light stops reaching it */
   reflectedFaceLimit: TslNode;
+  /** 0..1 how much of the physical cos(incidence) the reflected branch obeys */
+  reflectedIncidence: TslNode;
+  /** 0..1 how far the above-water waterline band is shrunk by receiver slope */
+  waterlineSlopeBound: TslNode;
   choppiness: TslNode;
   waterlineBlend: TslNode;
   faceGate: TslNode;
@@ -93,6 +97,8 @@ export function createCausticsUniforms(): CausticsUniforms {
     reflectedFalloff: uniform(cp.reflectedHeightFalloff),
     reflectedMaxHeight: uniform(cp.reflectedMaxHeight),
     reflectedFaceLimit: uniform(cp.reflectedFaceLimit),
+    reflectedIncidence: uniform(cp.reflectedIncidence),
+    waterlineSlopeBound: uniform(cp.waterlineSlopeBound),
     choppiness: uniform(oceanParams.choppiness),
     waterlineBlend: uniform(cp.waterlineBlend),
     faceGate: uniform(cp.faceGateSoftness),
@@ -120,6 +126,8 @@ export function refreshCausticsUniforms(u: CausticsUniforms): void {
   u.reflectedFalloff.value = cp.reflectedHeightFalloff;
   u.reflectedMaxHeight.value = cp.reflectedMaxHeight;
   u.reflectedFaceLimit.value = cp.reflectedFaceLimit;
+  u.reflectedIncidence.value = cp.reflectedIncidence;
+  u.waterlineSlopeBound.value = cp.waterlineSlopeBound;
   u.choppiness.value = oceanParams.choppiness;
   u.waterlineBlend.value = cp.waterlineBlend;
   u.faceGate.value = cp.faceGateSoftness;
@@ -329,9 +337,27 @@ export function causticsNode(
   // up to `minEffectiveDepth`, and the maxDepth ramp is DECREASING so it
   // returns 1 for every negative depth. Dry land therefore passed every
   // gate at full strength, out to `fadeEnd`.
-  const submerged = smoothstep(
-    u.waterlineBlend.negate(), u.waterlineBlend, depth,
+  //
+  // THE ABOVE-WATER HALF IS BOUND IN THE RECEIVER'S OWN DIMENSION (§V.66).
+  // `waterlineBlend` is 0.8 m because a HULL needed that much to stop the two
+  // branches meeting in a visible seam, and on a hull 0.8 m of height is 0.8 m
+  // of surface. On a beach it is 0.8/slope metres of DRY SAND — 6 m at 1:10,
+  // 24 m at 1:40 — which is the user's "on shore seem to go up a little bit too
+  // high", reported separately from the hull and never tuned because the shore
+  // reads a gate no caustics param owns (terrainParams.causticsWaterlineBand).
+  // One constant was setting two physically independent reaches: §V.52's shape.
+  // Scaling by the normal's horizontal component leaves a vertical side at the
+  // full 0.8 m — the signed-off hull crossfade is bit-identical — and takes a
+  // flat beach to zero. Only the ABOVE side moves; below the line a receiver is
+  // genuinely lit through water whatever its slope.
+  const slope =
+    receiverNormal === undefined
+      ? float(1)
+      : vec2(receiverNormal.x, receiverNormal.z).length().clamp(0, 1);
+  const aboveBand = u.waterlineBlend.mul(
+    mix(float(1), slope, u.waterlineSlopeBound),
   );
+  const submerged = smoothstep(aboveBand.negate(), u.waterlineBlend, depth);
 
   // ── back-projection: find the surface point that actually lights us ──
   let entry: TslNode = worldXZ;
@@ -437,16 +463,57 @@ export function causticsNode(
       receiverNormal === undefined
         ? float(1)
         : smoothstep(u.reflectedFaceLimit.max(1e-3), float(0), receiverNormal.y);
+    // 3. AND THAT GATE IS A FUNCTION OF n.y ALONE, so it answers only "is this
+    //    surface pointing up". A hull curving round the bow holds n.y = 0
+    //    through the entire azimuthal sweep, so `facing` reads 1.000 for every
+    //    one of those fragments while the PROJECTION behind it stretches
+    //    without bound — the user's "due to the curvature they become very
+    //    distorted at the furthest out of the water".
+    //
+    //    The pattern is transported ALONG THE REFLECTED RAY, and the areal
+    //    stretch of a beam landing on a surface is 1/|cos(incidence)|. So the
+    //    missing term is the cosine itself, and it is missing in the strongest
+    //    possible sense: at a 60 deg sun the sea's reflected light travels
+    //    nearly straight up, cos(incidence) on a vertical topside is ~0.5 and
+    //    heading to 0 at noon, and the old code lit it at FULL strength there.
+    //    Measured stretch on a vertical side: 1.4x square to a 45 deg sun,
+    //    2.8x at 45 deg off it, past 2x everywhere once the sun clears 60 deg.
+    //    Fading by the cosine takes the contribution out exactly as the stretch
+    //    diverges, and it is physics rather than a tuned curve. It also
+    //    SUBSUMES `facing` (a deck's cosine is negative), which is kept only so
+    //    that `reflectedIncidence` = 0 restores the old behaviour exactly.
+    const incidence =
+      receiverNormal === undefined
+        ? float(1)
+        : mix(
+            float(1),
+            // ray direction is (drift.x, 1, drift.z) normalized; light TRAVELS
+            // along it, so it lands on a face whose normal opposes it. Clamped
+            // to [0,1] at source (§V.44) — a non-unit normal cannot amplify.
+            vec3(refl.drift.x, 1, refl.drift.y)
+              .normalize()
+              .dot(receiverNormal)
+              .negate()
+              .clamp(0, 1),
+            u.reflectedIncidence,
+          );
     const overwater = vec3(reflResp.bright)
       .mul(heightFade)
       .mul(facing)
+      .mul(incidence)
       .mul(u.reflectedStrength)
       .mul(refl.valid);
     bright = mix(overwater, underwater, submerged);
     darken = mix(
       // the darkening rides the SAME two gates — a gate applied to the bright
       // lobe alone leaves a shadow cast by light that is no longer arriving
-      mix(float(1), reflResp.darken, refl.valid.mul(heightFade).mul(facing).mul(gate)),
+      // ... and `incidence` is one of those gates, or a bow would keep an
+      // inter-filament shadow cast by a pattern no longer being drawn on it
+      mix(
+        float(1),
+        reflResp.darken,
+        refl.valid.mul(heightFade).mul(facing).mul(incidence).mul(gate),
+      ),
       darken,
       submerged,
     );

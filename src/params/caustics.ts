@@ -169,6 +169,43 @@ export interface CausticsParams {
    * square. 0 would clip flared topsides; much above ~0.5 lets the deck glow.
    */
   reflectedFaceLimit: number;
+  /**
+   * 0..1 how much of the physical cos(incidence) between the REFLECTED RAY and
+   * the receiver's own normal the above-water branch obeys. 1 = the full
+   * cosine, 0 = the ungated behaviour this branch shipped with.
+   *
+   * `reflectedFaceLimit` above is a function of n.y ALONE, so it only ever asks
+   * "is this surface pointing up". A hull curving round the bow holds n.y = 0
+   * through the whole sweep and passes that gate at 1.000 for every azimuth,
+   * while the projected pattern stretches by 1/|cos(incidence)| behind it —
+   * measured 1.4x facing a 45 deg sun square, 2.8x at 45 deg off it, and past
+   * 2x over the ENTIRE vertical hull once the sun clears 60 deg. That is the
+   * user's "due to the curvature they become very distorted at the furthest out
+   * of the water"; a pattern stretched more than ~2x has stopped reading as
+   * caustics.
+   *
+   * This is not a tuned falloff. It is the cosine every irradiance calculation
+   * carries, and its absence meant a noon sun — whose sea-reflected light
+   * travels straight UP past a vertical topside — lit that topside at full
+   * strength. Expect the effect to concentrate at low sun, which is both
+   * correct and where it looks best.
+   */
+  reflectedIncidence: number;
+  /**
+   * 0..1 how far the ABOVE-water half of the waterline crossfade is shrunk by
+   * the receiver's own slope. 1 = scaled by the normal's horizontal component,
+   * 0 = the fixed vertical band it used to be.
+   *
+   * `waterlineBlend` is one constant setting two physically independent reaches
+   * (§V.52): on a hull 0.8 m of height is 0.8 m of surface, on a beach it is
+   * 0.8/slope metres of DRY SAND — 6 m at 1:10, 24 m at 1:40. The shore has no
+   * reflected branch at all (terrain calls with `mode: 'below'`), so none of
+   * the `reflected*` bounds apply to it and its reach was never tuned. At 1 a
+   * vertical side keeps the full band bit-for-bit and a flat beach takes it to
+   * zero, which bounds the shore in its own dimension (§V.66) without touching
+   * the hull crossfade the user signed off.
+   */
+  waterlineSlopeBound: number;
 
   // ── water bounce fill (the sea lighting the ship) ───────────────────
   /** upward fill from the sea onto everything above it (sRGB hex) */
@@ -356,11 +393,33 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
    * waterline caustics intact, which is how the A/B was attributed.
    */
   reflectedStrength: 0.12,
-  reflectedHeightFalloff: 4.5,
-  // just above the galleon's waist rail: high enough to keep the wet topside
-  // sparkle the branch is for, low enough that nothing reaches the sterncastle
-  reflectedMaxHeight: 2.4,
+  /**
+   * falloff 4.5 -> 1.0 and maxHeight 2.4 -> 1.6, and the FALLOFF is the fix.
+   *
+   * THIRD REPORT OF "TOO HIGH", and the first two moved the ceiling alone. That
+   * could not work, because at a 4.5 m falloff the exponential only decays to
+   * 0.587 across the ENTIRE 2.4 m window — the ceiling smoothstep was the only
+   * shape in the profile. Measured: >=72% of full strength all the way up to
+   * 1.44 m, half-strength at 1.76 m, 5% at 2.23 m. So the band was a PLATEAU
+   * with a cut at the top, and lowering the cut just moved a hard edge down a
+   * still-uniformly-bright wall. That is why two rounds of "bring the number
+   * down" did not read as a change.
+   *
+   * At falloff 1.0 the exponential is the shape again: half-strength at 0.69 m,
+   * 5% at 1.36 m, zero at 1.6 m. Peak AT the waterline is untouched, so the wet
+   * topside sparkle this branch exists for survives intact and only the climb
+   * up the topsides goes.
+   *
+   * NOTE THE REFERENCE MOVES. `depth` is measured from the LIVE FFT surface, so
+   * this is height above the local instantaneous wave, not above mean sea
+   * level: in a swell the visible reach is this plus the local crest. Correct
+   * for a reflected ray, and worth knowing before reading a screenshot.
+   */
+  reflectedHeightFalloff: 1.0,
+  reflectedMaxHeight: 1.6,
   reflectedFaceLimit: 0.35,
+  reflectedIncidence: 1,
+  waterlineSlopeBound: 1,
 
   // between the ocean's deepColor (#093642) and sssColor (#32d0c0): the sea
   // seen from a hull is body pigment lifted by scattered sun, not either end
@@ -419,6 +478,8 @@ function causticsParamsMeta() {
     reflectedHeightFalloff: { min: 0.2, max: 30, step: 0.1 },
     reflectedMaxHeight: { min: 0.5, max: 40, step: 0.5 },
     reflectedFaceLimit: { min: 0.02, max: 1, step: 0.01 },
+    reflectedIncidence: { min: 0, max: 1, step: 0.01 },
+    waterlineSlopeBound: { min: 0, max: 1, step: 0.01 },
     bounceStrength: { min: 0, max: 3, step: 0.01 },
     bounceFollowSky: { min: 0, max: 1, step: 0.01 },
     bounceTint: { min: 0, max: 1, step: 0.01 },
