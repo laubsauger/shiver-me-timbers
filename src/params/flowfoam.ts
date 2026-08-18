@@ -60,8 +60,30 @@ export interface FlowFoamParams {
   advectSpeed: number;
   /** 3×3 blur tap offset in texels — spread speed of the progressive blur */
   blurRadius: number;
-  /** 0 = no blur, 1 = full 3×3 gaussian per frame — partial blur keeps streaky structure */
-  blurMix: number;
+  /**
+   * Foam diffusion as a WORLD rate: the gaussian σ in metres the trail spreads
+   * after ONE second, so σ(t) = blurSpread·√t. The per-step 3×3 kernel weight
+   * is solved from this, the tick's dt and the tier's texel — see
+   * flowMath.blurMixForDt, which also records what this replaced.
+   *
+   * IT REPLACED A FIXED PER-FRAME `blurMix` 0.35, which was wrong twice. Once
+   * per §V2: the blur ran once per RENDER frame while the decay beside it was
+   * dt-scaled, so diffusion was proportional to frame rate — 13× more spread
+   * per second at 60 fps than in the 4.6 fps session the wake was tuned in.
+   * And once per §V.36: variance per step goes as texel², so one shared weight
+   * diffused the 2.5 m far tier 114× faster in METRES than the 0.234 m near
+   * tier, reaching σ = 33.7 m over the far tier's own mean visible lifetime.
+   * That smear was wider than the bright core of the trail it was carrying,
+   * and it is the missing term behind the standing discrepancy that every CPU
+   * model in tests/flowfoam.test.ts — none of which diffuse — predicted several
+   * times the coverage the GPU actually held.
+   *
+   * 0.76 IS THE NEAR TIER'S OLD BEHAVIOUR AT 60 fps, TO 0.1%, and that is why
+   * it is 0.76: the near field is what the user sees around the hull, the
+   * standing complaint about it is that it is too white, and this fix was not
+   * allowed to brighten it. The far tier is where the 114× actually lands.
+   */
+  blurSpread: number;
   /** curl/eddy multiplier where foam = 1 — the trail churns, open ocean stays calm */
   wakeChurn: number;
   /** fraction of the region half-width over which sampled foam fades at the border */
@@ -448,7 +470,10 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     decayHalfLife: 5,
     advectSpeed: 1.0,
     blurRadius: 1.0,
-    blurMix: 0.35,
+    // σ metres after 1 s. Solves to mix 0.350 on the near tier at 60 fps —
+    // i.e. exactly what shipped — and to 0.0031 on the far tier, which is the
+    // 114× grid error coming out. See the interface doc.
+    blurSpread: 0.76,
     wakeChurn: 1.8,
     edgeFade: 0.16,
     noiseScale: 0.12,
@@ -573,7 +598,7 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     decayHalfLife: { min: 0.05, max: 120, step: 0.05 },
     advectSpeed: { min: 0, max: 4, step: 0.05 },
     blurRadius: { min: 0, max: 4, step: 0.25 },
-    blurMix: { min: 0, max: 1, step: 0.05 },
+    blurSpread: { min: 0, max: 4, step: 0.02 },
     wakeChurn: { min: 0, max: 8, step: 0.1 },
     edgeFade: { min: 0.01, max: 0.45, step: 0.01 },
     noiseScale: { min: 0.005, max: 0.5, step: 0.005 },

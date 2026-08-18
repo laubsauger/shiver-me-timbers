@@ -16,6 +16,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   advectLookupUv,
+  blurMixForDt,
+  blurSpreadOver,
   farBlendWeightCpu,
   flowPotentialCpu,
   flowVectorCpu,
@@ -229,6 +231,132 @@ describe('decay factor (§V10 accumulation fade, shared with §V6)', () => {
   it('non-positive half-life kills foam instantly instead of dividing by zero', () => {
     expect(decayFactorPerFrame(0, 1 / 60)).toBe(0);
     expect(decayFactorPerFrame(-1, 1 / 60)).toBe(0);
+  });
+});
+
+/**
+ * §B — THE BLUR NEXT TO THAT DECAY WAS NOT DT-SCALED, AND NOT WORLD-SCALED.
+ *
+ * The decay above is frame-rate independent and the tests said so. The 3×3
+ * blur sitting in the very next compute pass was a fixed `blurMix` 0.35 run
+ * ONCE PER RENDER FRAME, so diffusion was proportional to fps — a 60 fps
+ * session spread foam 13× further per second than the 4.6 fps session the wake
+ * was measured in (§V2, the same rule the sim tick keeps).
+ *
+ * And variance per step goes as texel², so ONE shared weight across a 0.234 m
+ * near tier and a 2.5 m far tier diffused the far tier 114× faster in METRES
+ * (§V.36 — state a quantity in the units of the thing it measures, never in
+ * the units of the grid that happens to hold it; foamMath's `blurMixPerStep`
+ * header records the identical lesson from the whitecap cascades).
+ *
+ * NOTHING IN THIS FILE COULD SEE EITHER, because every CPU model here is a
+ * point accumulation with no diffusion at all. Measured on a model that does
+ * diffuse, the far tier reached σ = 33.7 m over its own mean visible life —
+ * wider than the turbulent core it exists to carry — which cost 4.5× of the
+ * rendered coverage at 200 m astern and put a 0.18 STEP at the near window's
+ * border, i.e. the user's "straight hard line cutoff" that the shipped
+ * NO-HARD-CUT test above certifies as absent. These three assertions are what
+ * that test could not make.
+ */
+describe('foam diffusion is a WORLD rate, not a frame or a grid one (§V2, §V.36)', () => {
+  const NEAR_TEXEL = flowFoamParams.regionSize / flowFoamParams.resolution;
+  const FAR_TEXEL = flowFoamParams.farRegionSize / flowFoamParams.farResolution;
+  /** variance (m²) one step lays down at kernel weight w — the 1-D second moment */
+  const varPerStep = (w: number, texel: number) =>
+    w * 0.5 * flowFoamParams.blurRadius ** 2 * texel * texel;
+
+  it('spreads the same distance per SECOND at any frame rate (§V2)', () => {
+    // WHY: this is the wake's shape. If it scales with fps the trail is a
+    // different width on a 144 Hz monitor than a 60 Hz one, and different
+    // again the moment another agent's tab steals the GPU.
+    const secondsOfVariance = (fps: number, texel: number) =>
+      varPerStep(blurMixForDt(flowFoamParams.blurSpread, texel, flowFoamParams.blurRadius, 1 / fps), texel) *
+      fps;
+    for (const texel of [NEAR_TEXEL, FAR_TEXEL]) {
+      const ref = secondsOfVariance(60, texel);
+      // 21 fps is where the near tier's 1-texel kernel saturates (see below),
+      // so this is the whole range in which the rate CAN be held
+      for (const fps of [30, 60, 120, 240]) {
+        expect(secondsOfVariance(fps, texel)).toBeCloseTo(ref, 9);
+      }
+      // and it really is the declared rate: σ² per second = blurSpread²
+      expect(ref).toBeCloseTo(flowFoamParams.blurSpread ** 2, 9);
+    }
+
+    // THE DISCRIMINATOR: the fixed per-frame weight this replaced fails it,
+    // or the assertion above would pass on the broken code too.
+    const legacy = (fps: number, texel: number) => varPerStep(0.35, texel) * fps;
+    expect(legacy(120, NEAR_TEXEL) / legacy(30, NEAR_TEXEL)).toBeCloseTo(4, 6);
+  });
+
+  it('both tiers diffuse at ONE rate in metres, whatever their texels (§V.36)', () => {
+    // WHY: the near and far tiers hold the SAME foam at different resolutions.
+    // Foam spreading is one physical process, so it has one world rate; a
+    // weight shared between them instead is a rate shared by their GRIDS.
+    const dt = 1 / 60;
+    const near = varPerStep(
+      blurMixForDt(flowFoamParams.blurSpread, NEAR_TEXEL, flowFoamParams.blurRadius, dt),
+      NEAR_TEXEL,
+    );
+    const far = varPerStep(
+      blurMixForDt(flowFoamParams.blurSpread, FAR_TEXEL, flowFoamParams.blurRadius, dt),
+      FAR_TEXEL,
+    );
+    expect(far).toBeCloseTo(near, 12);
+
+    // the discriminator again: one shared weight is off by the texel ratio²
+    const sharedNear = varPerStep(0.35, NEAR_TEXEL);
+    const sharedFar = varPerStep(0.35, FAR_TEXEL);
+    expect(sharedFar / sharedNear).toBeCloseTo((FAR_TEXEL / NEAR_TEXEL) ** 2, 6);
+    expect(sharedFar / sharedNear).toBeGreaterThan(100); // the 114x, measured
+  });
+
+  it('the far tier may not smear away the core it exists to carry', () => {
+    // The invariant with a LENGTH in it. The far tier carries the trail from
+    // ~60 m astern out, and the narrowest thing in it is the turbulent core,
+    // which is scaled by the hull's beam (sternWidth × beam ≈ 7.7 m on the
+    // galleon). Diffuse by more than that over the foam's own visible life and
+    // the tier destroys its own content — which is exactly what it did.
+    const beam = 8.5;
+    const coreWidth = flowFoamParams.sternWidth * beam;
+    const farLife = flowFoamParams.farDecayHalfLife / Math.LN2; // mean visible age
+    expect(blurSpreadOver(flowFoamParams.blurSpread, farLife)).toBeLessThan(coreWidth);
+
+    // what the fixed weight produced at 60 fps, for the record: σ 33.7 m
+    const legacySigma = Math.sqrt(varPerStep(0.35, FAR_TEXEL) * 60 * farLife);
+    expect(legacySigma).toBeGreaterThan(coreWidth * 4);
+  });
+
+  it('the kernel is CLAMPED, never unstable, and never negative (§V28)', () => {
+    // One 3×3 tap cannot move foam further than its own kernel however long
+    // the frame was, so below ~21 fps the near tier saturates and diffuses
+    // slower than the world rate asks. Bounded and monotone beats
+    // proportional-to-fps, but it IS a limit and not a guard.
+    const slow = blurMixForDt(flowFoamParams.blurSpread, NEAR_TEXEL, flowFoamParams.blurRadius, 1);
+    expect(slow).toBe(1);
+    let prev = 0;
+    for (const fps of [240, 120, 60, 30, 20, 10]) {
+      const w = blurMixForDt(flowFoamParams.blurSpread, NEAR_TEXEL, flowFoamParams.blurRadius, 1 / fps);
+      expect(w).toBeGreaterThanOrEqual(prev); // monotone as dt grows
+      expect(w).toBeLessThanOrEqual(1);
+      prev = w;
+    }
+    // a zero-length tick, a zero texel or a poisoned uniform must not produce
+    // a NaN weight — one NaN texel spreads to the whole region in nine frames
+    for (const bad of [
+      blurMixForDt(NaN, NEAR_TEXEL, 1, 1 / 60),
+      blurMixForDt(0.76, 0, 1, 1 / 60),
+      blurMixForDt(0.76, NEAR_TEXEL, 0, 1 / 60),
+      blurMixForDt(0.76, NEAR_TEXEL, 1, 0),
+      blurMixForDt(0.76, NEAR_TEXEL, 1, NaN),
+      blurMixForDt(-1, NEAR_TEXEL, 1, 1 / 60),
+    ]) {
+      expect(Number.isFinite(bad)).toBe(true);
+      expect(bad).toBeGreaterThanOrEqual(0);
+      expect(bad).toBeLessThanOrEqual(1);
+    }
+    expect(blurSpreadOver(flowFoamParams.blurSpread, 0)).toBe(0);
+    expect(blurSpreadOver(NaN, 4)).toBe(0);
   });
 });
 

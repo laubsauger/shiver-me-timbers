@@ -120,6 +120,79 @@ export function regionShiftUv(
   return [(cx - prevCx) / size, (prevCz - cz) / size];
 }
 
+/* -------------------------------------------------------------------------
+ * THE BLUR WAS A FRAME QUANTITY *AND* A GRID QUANTITY (§V2, §B).
+ *
+ * The 3×3 blur ran once per RENDER frame at a fixed `blurMix` 0.35 while the
+ * decay next to it used `decayFactorPerFrame`. So diffusion was proportional
+ * to frame rate: a 60 fps session spread foam 13× further per SECOND than the
+ * 4.6 fps session the tuning was measured in, and the wake looked different on
+ * a 144 Hz monitor than a 60 Hz one and different again under GPU contention.
+ * That is the same defect §V2 pins for the sim tick, in a compute pass.
+ *
+ * It was a GRID quantity too, and that half was larger. Variance per step is
+ * `mix · 0.5 · radius² · texel²`, so ONE shared `blurMix` across two tiers
+ * whose texels are 0.234 m and 2.5 m diffused the far tier (2.5/0.234)² = 114×
+ * faster in WORLD terms. Measured: at 60 fps the far tier reached σ = 33.7 m
+ * over its own mean visible lifetime — wider than the bright core of the trail
+ * it was carrying, which is why the far field read as a smeared band and why
+ * every CPU model in tests/flowfoam.test.ts (none of which diffuse at all)
+ * predicted several times the coverage the GPU actually held.
+ *
+ * Foam spreading is ONE physical process with ONE world rate — exactly the
+ * lesson foamMath's `blurMixPerStep` header records for the whitecap cascades.
+ * The difference here is that the two tiers hold the same foam at DIFFERENT
+ * AGES (5 s vs 12 s half-life), so they must share a diffusion RATE and reach
+ * different spreads, rather than share a spread as the cascades do.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Per-step 3×3 kernel weight that diffuses at a fixed WORLD rate over a fixed
+ * time, whatever the texel size and whatever the frame took.
+ *
+ * `spreadPerRootSecond` is the gaussian σ in metres the foam reaches after ONE
+ * second, so σ(t) = spread·√t (variances add linearly in time — that is what
+ * makes a diffusion a diffusion, and why the knob is per-√second rather than
+ * per-second). The implied diffusivity is D = spread² m²/s.
+ *
+ * A 1-D (1,2,1)/4 kernel at a tap offset of `radius` texels has variance
+ * 0.5·radius² texels²; mixing it with the identity at weight w gives exactly
+ * w× that. Setting the variance laid down in one step equal to D·dt gives
+ * w = spread²·dt / (0.5·radius²·texel²).
+ *
+ * CLAMPED AT 1, which is a real limit and not a guard: one 3×3 tap cannot move
+ * foam further than its own kernel however long the frame was, so below
+ * ~21 fps the near tier saturates and diffuses SLOWER than the world rate asks.
+ * That is bounded and monotone rather than proportional-to-fps, which is the
+ * whole point, but it does mean a heavily contended session under-diffuses —
+ * sub-stepping the pass would be the fix if that ever matters visually.
+ */
+export function blurMixForDt(
+  spreadPerRootSecond: number,
+  texelMetres: number,
+  radius: number,
+  dt: number,
+): number {
+  const perStep = 0.5 * radius * radius * texelMetres * texelMetres;
+  if (!(perStep > 0) || !(dt > 0) || !Number.isFinite(dt)) return 0;
+  // NaN fails every comparison, so Math.max(0, NaN) is NaN — guard the
+  // numerator explicitly or one bad uniform poisons the kernel weight (§V28)
+  if (!Number.isFinite(spreadPerRootSecond)) return 0;
+  const w = (Math.max(0, spreadPerRootSecond) ** 2 * dt) / perStep;
+  return Math.min(1, Math.max(0, w));
+}
+
+/**
+ * Gaussian σ (m) the diffusion reaches over `seconds` — σ = spread·√t. Used by
+ * the tests to state the far tier's smear as a LENGTH against the width of the
+ * trail it is carrying, rather than as a kernel weight.
+ */
+export function blurSpreadOver(spreadPerRootSecond: number, seconds: number): number {
+  if (!(seconds > 0) || !Number.isFinite(seconds)) return 0;
+  if (!Number.isFinite(spreadPerRootSecond)) return 0;
+  return Math.max(0, spreadPerRootSecond) * Math.sqrt(seconds);
+}
+
 /** snap a center coordinate to the texel grid (size/res) — exact-texel shifts */
 export function snapToTexel(c: number, size: number, res: number): number {
   const texel = size / res;

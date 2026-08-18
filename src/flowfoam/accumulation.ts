@@ -48,7 +48,7 @@ import {
 import { decayFactorPerFrame, GAUSSIAN_3X3 } from '../foam/foamMath';
 import { worldIntersectionMaskNode } from './intersectionMask';
 import { flowVectorNode, type FlowNoiseUniforms } from './flowNoise';
-import { regionShiftUv, snapToTexel } from './flowMath';
+import { blurMixForDt, regionShiftUv, snapToTexel } from './flowMath';
 import type { FlowFoamParams } from '../params/flowfoam';
 
 /** scene layer owned by the injection capture (tagged meshes get it) */
@@ -150,7 +150,15 @@ export function createAccumulation(
   const uDt = uniform(0); // wake rate is foam/sec; scaled per fixed tick (§V2)
   const uWakeScale = uniform(profile.wakeScale());
   const uBlurRadius = uniform(p.blurRadius);
-  const uBlurMix = uniform(p.blurMix);
+  /**
+   * Solved per step from a WORLD diffusion rate and the live dt — never a
+   * fixed per-frame constant. flowMath.blurMixForDt explains why both halves
+   * of that matter (§V2: it was proportional to frame rate; §V.36: and to the
+   * tier's texel, so the far tier diffused 114× faster in metres).
+   */
+  const uBlurMix = uniform(
+    blurMixForDt(p.blurSpread, profile.size() / res, p.blurRadius, 1 / 60),
+  );
   const uWakeChurn = uniform(p.wakeChurn);
   const uWaterHeight = uniform(0);
   const uThreshold = uniform(p.depthThreshold);
@@ -270,7 +278,9 @@ export function createAccumulation(
         }
       }
       // partial blur (§V23 functional mix): full 3×3 every frame at 60+fps
-      // flattens streaks to mush — blurMix keeps structure while softening.
+      // flattens streaks to mush — the mix weight keeps structure while
+      // softening, and it is SOLVED per step from a world diffusion rate
+      // (flowMath.blurMixForDt) rather than being a per-frame constant.
       // All four channels take the same kernel: the weights sum to 1, so the
       // signed slope in .ba is low-passed (a 1-texel kernel barely touches a
       // 6 m wave) rather than biased.
@@ -355,7 +365,9 @@ export function createAccumulation(
       uDt.value = dt;
       uWakeScale.value = profile.wakeScale();
       uBlurRadius.value = p.blurRadius;
-      uBlurMix.value = p.blurMix;
+      // §V2: diffusion is a rate per SECOND, so the kernel weight is solved
+      // against this tick's dt and this tier's texel (flowMath.blurMixForDt)
+      uBlurMix.value = blurMixForDt(p.blurSpread, uSize.value / res, p.blurRadius, dt);
       uWakeChurn.value = p.wakeChurn;
       uThreshold.value = p.depthThreshold;
       uFeather.value = p.maskFeather;
