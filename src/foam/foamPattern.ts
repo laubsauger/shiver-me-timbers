@@ -47,9 +47,28 @@ export const FOAM_CHANNEL = {
   soft: 1,
   /** B: dissolve threshold — uniform on [0,1], mean exactly 0.5 */
   breakup: 2,
-  /** A: relief height of the foam's own surface */
-  relief: 3,
 } as const;
+
+/**
+ * A IS UNUSED, AND THAT IS A DECISION RATHER THAN AN OVERSIGHT.
+ *
+ * It used to hold a "relief height", generated at every startup and read by
+ * NOTHING — `foamShading` samples `.r`, `.g` and `.b` and there has never been
+ * a fourth consumer. Its own comment defended a normal map that does not
+ * exist, which is worse than the waste: it would have told the next reader the
+ * albedo and the relief were kept in step for a lighting term nobody wrote.
+ *
+ * §T.42 (foam composites as albedo only — no normal, no roughness — which is
+ * the mechanical cause of "painted on / not three-dimensional") is real and
+ * still open, but a relief TEXTURE is not its fix. The cheap route is to
+ * finite-difference the already-thresholded foam mask: 2 extra taps of a
+ * texture already sampled, no new binding, and the normal then matches the
+ * mask the dissolve actually produced instead of a height authored beside it.
+ * That change lives in the surface material's lighting, so it waits for that
+ * file. Left at a constant here rather than filled with something plausible,
+ * so it cannot be mistaken for a signal.
+ */
+export const FOAM_UNUSED_ALPHA = 255;
 
 /**
  * Worley cells per unit tile in the BREAKUP channel. Exported because the
@@ -66,6 +85,13 @@ export const FOAM_BREAKUP_CELLS = 14;
  * measured against.
  */
 export const FOAM_SOFT_CELLS = 3;
+
+/**
+ * Worley cells per unit tile in the CREST lace's bubble raft. ONE density is
+ * exported and used: the fine network at 2× this is a highlight only, never a
+ * second wall network — see sampleFoamPattern.
+ */
+export const RAFT_CELLS = 26;
 
 /* ---------------------------------------------------------------- lattice */
 
@@ -242,44 +268,75 @@ export interface FoamPatternSample {
   soft: number;
   /** B: dissolve threshold, PRE-normalisation (the caller ranks it) */
   breakup: number;
-  /** A: the foam's own relief height */
-  relief: number;
 }
 
 /**
  * One texel of all four channels.
  *
- * ONE function rather than four because the crest lace and the relief share
- * the fine bubble raft — the relief must be the HEIGHT OF THE SAME BUBBLES the
- * lace draws, or a normal map built from it would light structure that is not
- * in the albedo. Sharing the lookup makes that true by construction instead of
- * by two constants agreeing (§V.37's lesson: mating pieces share their
- * sampling constants).
+ * ONE function rather than three because the channels share lookups — the
+ * crest lace's two worley densities are one warped coordinate between them, so
+ * the highlight and the wall can never disagree about where a bubble is
+ * (§V.37: mating pieces share their sampling constants).
  */
 export function sampleFoamPattern(x: number, y: number): FoamPatternSample {
-  // ── the bubble raft, warped so it is a packing and not a honeycomb ──
-  const wr = warp(x, y, 0.09, 6, 1601);
-  const big = tiledWorley(wr.x, wr.y, 26, 1117);
-  const fine = tiledWorley(wr.x, wr.y, 52, 2237);
-  // wall width scaled by the cell size so both densities draw a line of
-  // comparable RELATIVE thickness rather than the fine one drawing a smear.
+  /* ── the bubble raft: ONE wall network, in BROKEN SEGMENTS ──────────────
+   *
+   * A WARPED VORONOI IS STILL A VORONOI (§B, user: "one layer has a very very
+   * visible Voronoi or similar-to-Voronoi pattern"). This is §B.39's real
+   * lesson one level deeper than it was first applied. Warping bends cell
+   * walls; it does not stop them being a NETWORK OF WALLS MEETING AT
+   * JUNCTIONS, and that network is what the eye names. Measured before the
+   * rewrite: the warp was shearing correctly (26–70% differential across one
+   * cell), so "the warp is too weak" was refuted, not untested — the generator
+   * was simply the wrong shape, exactly as value noise was.
+   *
+   * Real foam lace is BROKEN ARCS THAT TERMINATE, not a tessellation. Three
+   * changes make it one:
+   *  1. ONE network, not two. `max(wallBig, wallFine)` overlaid two COMPLETE
+   *     tessellations at 26 and 52 cells, which is what made the cell
+   *     structure unmistakable — you could see both nested polygon webs.
+   *  2. A SEGMENT FIELD kills the wall over part of its length, so lace ends
+   *     in mid-air instead of closing every cell. This is the whole cure: a
+   *     complete boundary graph reads as Voronoi at any warp amplitude, and an
+   *     incomplete one cannot.
+   *  3. The WARP RUNS AT THE CELL FREQUENCY, not 4–8× below it. At freq 6
+   *     against 26/52 cells it was coherent over several cells and merely
+   *     rotated groups of them into rosettes — which is the user's "very
+   *     visible circular ringed pattern", the term meant to DISORGANISE
+   *     imposing its own order (§B.33(d)'s shape, one file over).
+   */
+  const wr = warp(x, y, 0.030, 13, 1601);
+  const big = tiledWorley(wr.x, wr.y, RAFT_CELLS, 1117);
+  const fine = tiledWorley(wr.x, wr.y, RAFT_CELLS * 2, 2237);
+  // wall width scaled by the cell size so the line keeps a constant RELATIVE
+  // thickness rather than the density deciding how heavy it draws
   // @band-limited-elsewhere — reason at `smoothstep` above (texel space + mips)
-  const wallBig = 1 - smoothstep(0, 0.34 / 26, big.f2 - big.f1);
-  const wallFine = 1 - smoothstep(0, 0.30 / 52, fine.f2 - fine.f1);
-  const walls = Math.max(wallBig * 0.8, wallFine * 0.55);
-  // TORN GAPS. Warped hard (0.42) and at a frequency close to the raft's own,
-  // because the first render had these as large round holes — which is the
-  // "blotchy" defect reappearing INSIDE the texture that exists to cure it.
-  const wt = warp(x, y, 0.42, 5, 3331);
-  const torn = tiledFbm(wt.x, wt.y, 9, 3, 5557);
+  const wallRaw = 1 - smoothstep(0, 0.24 / RAFT_CELLS, big.f2 - big.f1);
+  // the segment field varies over ~one cell (it runs AT the cell frequency),
+  // so a given wall is present for a stretch and gone for the next
+  const seg = tiledFbm(wr.x, wr.y, RAFT_CELLS, 2, 4507);
   // @band-limited-elsewhere — reason at `smoothstep` above (texel space + mips)
-  const raft = smoothstep(0.34, 0.56, torn);
-  // bubble domes catch a little extra light at their centres
-  const dome = clamp01(fine.f1 * 52 * 1.6);
-  const crest = clamp01((1 - 0.18 * dome) * (1 - 0.55 * walls) * (0.25 + 0.75 * raft));
+  const walls = wallRaw * smoothstep(0.46, 0.74, seg);
+  // TORN GAPS. Higher base frequency and a much weaker warp than the first
+  // render: at 0.42/f5 the warp's own low frequency made the 6 m TILE legible
+  // (measured — the same dark cluster twice in a 14 m patch), which is a
+  // second-order version of the rosette defect above.
+  const wt = warp(x, y, 0.18, 9, 3331);
+  const torn = tiledFbm(wt.x, wt.y, 15, 3, 5557);
+  // @band-limited-elsewhere — reason at `smoothstep` above (texel space + mips)
+  const raft = smoothstep(0.42, 0.66, torn);
+  // bubble domes catch a little extra light at their centres. The FINE worley
+  // survives only as this — a highlight at a point, not a second wall network.
+  const dome = clamp01(fine.f1 * RAFT_CELLS * 2 * 1.6);
+  const crest = clamp01((1 - 0.12 * dome) * (1 - 0.42 * walls) * (0.18 + 0.82 * raft));
 
   // ── the slick the lace blends out to: broad, no cellular structure ──
-  const n = tiledFbm(x, y, FOAM_SOFT_CELLS, 4, 6661);
+  // WARPED, and it is the last channel to get it. Unwarped `tiledFbm` is value
+  // noise with ROUND LEVEL SETS — §B.39 verbatim, surviving untouched in the
+  // one channel the original cure never reached, and measured as the "blotch
+  // itself is not organic enough" half of the report.
+  const ws = warp(x, y, 0.20, 7, 8123);
+  const n = tiledFbm(ws.x, ws.y, FOAM_SOFT_CELLS, 4, 6661);
   // @band-limited-elsewhere — reason at `smoothstep` above (texel space + mips)
   const soft = clamp01(0.527 + 0.47 * smoothstep(0.2, 0.85, n));
 
@@ -294,18 +351,19 @@ export function sampleFoamPattern(x: number, y: number): FoamPatternSample {
   // freq 5 rather than 0.45 at freq 3 for the same reason one level up: strong
   // low-frequency content makes the TILE itself legible, and this texture
   // repeats every 6 m at the crest scale.
-  const wb = warp(x, y, 0.26, 5, 7771);
-  const nb = tiledFbm(wb.x, wb.y, 8, 4, 9991);
-  const wc = warp(x, y, 0.16, 5, 2113);
+  //
+  // The ridge's warp now runs AT its own cell frequency for the same reason
+  // the raft's does — at freq 5 against 14 cells it rotated groups of cells
+  // rather than distorting them, and the wall web read clearly through the fbm
+  // despite carrying only 0.12 of the weight.
+  const wb = warp(x, y, 0.22, 7, 7771);
+  const nb = tiledFbm(wb.x, wb.y, 9, 4, 9991);
+  const wc = warp(x, y, 0.045, FOAM_BREAKUP_CELLS, 2113);
   const c = tiledWorley(wc.x, wc.y, FOAM_BREAKUP_CELLS, 1229);
   const ridge = clamp01(((c.f2 - c.f1) * FOAM_BREAKUP_CELLS) / 0.6);
-  const breakup = 0.88 * nb + 0.12 * ridge;
+  const breakup = 0.9 * nb + 0.1 * ridge;
 
-  // ── relief: the SAME bubbles the lace draws, over broad clumps ──
-  const clump = tiledFbm(x, y, 5, 3, 1483);
-  const relief = clamp01(0.25 + 0.45 * clump + 0.35 * clamp01(1 - fine.f1 * 52 * 1.9));
-
-  return { crest, soft, breakup, relief };
+  return { crest, soft, breakup };
 }
 
 /* ------------------------------------------------------------------ build */
@@ -337,7 +395,7 @@ export function buildFoamPattern(n: number): Uint8Array {
       const s = sampleFoamPattern(u, v);
       data[i * 4 + FOAM_CHANNEL.crest] = Math.round(255 * s.crest);
       data[i * 4 + FOAM_CHANNEL.soft] = Math.round(255 * s.soft);
-      data[i * 4 + FOAM_CHANNEL.relief] = Math.round(255 * s.relief);
+      data[i * 4 + 3] = FOAM_UNUSED_ALPHA;
       breakup[i] = s.breakup;
     }
   }
