@@ -38,6 +38,7 @@ import {
   smoothstep,
   texture,
   uniform,
+  varying,
   vec2,
   vec3,
   viewportDepthTexture,
@@ -65,6 +66,14 @@ import {
   shoalFactorNode,
   shoalWavenumber,
 } from './shoaling';
+import {
+  developmentRatioNode,
+  fetchBandCoefficient,
+  fetchBandGainNode,
+  fullyDevelopedFetch,
+  fullyDevelopedPeakWavenumber,
+} from './fetch';
+import { fetchFieldNode, type FetchField } from './fetchField';
 import type { PlanarReflection } from '../reflection';
 
 export interface OceanSurfaceMaterial {
@@ -200,6 +209,7 @@ export function buildOceanSurfaceMaterial(
   reflection?: PlanarReflection | null,
   hdrSceneTarget = false,
   skyDomeColor?: (dir: TslNode) => TslNode,
+  fetch?: FetchField | null,
 ): OceanSurfaceMaterial {
   /**
    * §V24 scene-colour copy target — and a §V28-class silent failure if it is
@@ -424,6 +434,30 @@ export function buildOceanSurfaceMaterial(
       oceanParams.shoalColumnCeiling,
     );
   };
+  /**
+   * §V.73 FETCH — per-cascade (k_pfull/k_band)², plus the two scalars the
+   * per-vertex half needs.
+   *
+   * The split is deliberate and it is what makes this affordable: everything
+   * that depends only on the WIND and the SPECTRUM is a uniform refreshed once
+   * a frame, so the per-vertex work is one texture fetch, one divide and one
+   * exp() per cascade. Per cascade for the same reason shoaling is — §V.19 has
+   * already band-split the spectrum, and a fetch limit is precisely a statement
+   * about which bands survive, so killing the long cascades and keeping the
+   * short ones IS fetch limitation and it comes out as short steep chop for
+   * free. See src/ocean/fetch.ts.
+   */
+  const uFetchC = sim.cascades.map(() => uniform(0));
+  const uFetchFull = uniform(1);
+  const uFetchMaxGain = uniform(oceanParams.fetchMaxGain);
+  const refreshFetch = () => {
+    const peakK = fullyDevelopedPeakWavenumber(oceanParams.windSpeed);
+    for (const [i, c] of sim.cascades.entries()) {
+      uFetchC[i].value = fetchBandCoefficient(peakK, c.meanWavenumber, oceanParams);
+    }
+    uFetchFull.value = fullyDevelopedFetch(oceanParams.windSpeed, oceanParams);
+    uFetchMaxGain.value = oceanParams.fetchMaxGain;
+  };
   const refreshNormFoot = () => {
     for (const [i, c] of sim.cascades.entries()) {
       (uNormFoot[i].value as THREE.Vector2).set(
@@ -435,6 +469,7 @@ export function buildOceanSurfaceMaterial(
   };
   refreshNormFoot();
   refreshShoal();
+  refreshFetch();
 
   const worldXZ = positionLocal.xz.add(originUniform);
   const camDist = worldXZ.sub(cameraPosition.xz).length();
@@ -554,9 +589,50 @@ export function buildOceanSurfaceMaterial(
    * folds away at compile time, so an open-ocean scene is bit-identical to
    * what it was before shoaling existed.
    */
-  const shoal = sim.cascades.map((_, i) =>
-    shoalDepth ? shoalFactorNode(uShoalK[i], shoalDepth) : float(1),
-  );
+  /**
+   * §V.73 HOW GROWN THE SEA IS HERE, 0..1 — and the two decisions in this line.
+   *
+   * IT IS A `varying`, which is why fetch costs the FRAGMENT stage NOTHING.
+   * The gain is needed in both stages (the vertex displacement and the shading
+   * normals must agree about how much wave is here, exactly as §V.72 requires
+   * for shoaling), and bindings are keyed on (node, shaderStage) — so sampling
+   * the field in both would have spent the ONE fragment sampler of headroom
+   * this material has left. `varying()` forces the sample into the vertex
+   * stage and interpolates the scalar across the triangle, so the ledger moves
+   * only on the vertex axis, which has twelve spare (§V.40). The residual is
+   * the interpolation error of a field the blur has already band-limited to
+   * several texels; it is bounded and quoted in the report.
+   *
+   * ONE SCALAR, NOT THREE GAINS. The development ratio is a property of the
+   * PLACE, not of the band — every cascade divides the same number by its own
+   * coefficient — so interpolating it carries all three gains for one varying
+   * and keeps the per-cascade law where the law lives.
+   */
+  const fetchRatio = fetch
+    ? varying(developmentRatioNode(fetchFieldNode(fetch, worldXZ), uFetchFull))
+    : null;
+  /**
+   * THE ONE PER-CASCADE GAIN, and it must stay one expression.
+   *
+   * Shoaling (depth: can this wave still stand up here) and fetch (upwind
+   * water: was this wave ever built) are disjoint physics and compose as a
+   * product. Folding them together HERE rather than at the call sites is what
+   * makes the rest of this file correct for free: `dispGain`, the Jacobian the
+   * §V.6 foam gate reads, the shading normals and the slope variance all
+   * already multiply by `shoal[i]`, so every one of them carries fetch without
+   * a second edit and none of them can be forgotten. f62e037 is the cost of
+   * the alternative — one consumer summing a differently-modulated sea
+   * produced four separate user reports in a day.
+   *
+   * With neither field wired both factors are the constant 1 and the whole
+   * chain folds away at compile time, so an open-ocean scene is bit-identical
+   * to what it was before either feature existed.
+   */
+  const shoal = sim.cascades.map((_, i) => {
+    const s = shoalDepth ? shoalFactorNode(uShoalK[i], shoalDepth) : float(1);
+    if (!fetchRatio) return s;
+    return s.mul(fetchBandGainNode(uFetchC[i], fetchRatio, uFetchMaxGain));
+  });
 
   // vertex displacement: Σ cascades (λDx, h, λDz, J), each Nyquist-gated and
   // each shoaled by its OWN wavelength (§V.72)
@@ -2131,6 +2207,10 @@ export function buildOceanSurfaceMaterial(
     // across the presets) AND depend on two params that never touch h0, so
     // neither the rebuild path nor construction alone would keep them live.
     refreshShoal();
+    // §V.73: the fetch coefficients depend on the live WIND SPEED as well as
+    // on each band's mean wavenumber, and windSpeed is published continuously
+    // by the §V.46 weather field — so this cannot live on the rebuild path.
+    refreshFetch();
   };
 
   return {

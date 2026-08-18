@@ -53,6 +53,13 @@ import {
   shoalFactor,
   shoalWavenumber,
 } from '../ocean/shoaling';
+import {
+  developmentRatio,
+  fetchBandCoefficient,
+  fetchBandGain,
+  fullyDevelopedPeakWavenumber,
+  type FetchSource,
+} from '../ocean/fetch';
 import { oceanParams, type OceanParams } from '../params/ocean';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../params/seaPhysics';
 import type { SeabedField } from './grounding';
@@ -500,6 +507,27 @@ export class CpuOcean {
   private shoalK: number[] = [];
   /** open-ocean water depth (m) reported by the bed away from any island */
   private openDepth = 0;
+  /**
+   * §V.73 THE SHELTER FIELD, optional and structural for exactly the reasons
+   * the seabed above is: an open-ocean scene has no land to hide behind, and a
+   * test needs to be able to hand this an analytic shelter (`{ fetchAt: () =>
+   * 120 }`) to assert the law at a KNOWN fetch.
+   *
+   * §V.8: this must be THE SAME field the ocean material and the terrain read.
+   * Handing the mirror a different one — including none — floats the hull on
+   * the open-ocean sea while the drawn water lies down inside the rim, which
+   * is §B.34's disagreement arriving by a third route.
+   */
+  private fetch: FetchSource | null = null;
+  /**
+   * Per-cascade (k_pfull/k_band)² — the band's entire dependence on wavenumber
+   * in the fetch law, cached per tick for the same reason `shoalK` is: it moves
+   * only when the spectrum or the wind speed moves, and `heightAt` is called
+   * many times per tick by the hull stations.
+   */
+  private fetchC: number[] = [];
+  /** scratch for `bandGains` — the hot path must not allocate */
+  private readonly gains: number[] = [];
 
   constructor(
     seed: number,
@@ -535,11 +563,58 @@ export class CpuOcean {
     this.refreshShoal();
   }
 
+  /**
+   * Wire the shelter field the sea is fetch-limited by (§V.73). Same contract
+   * as `setSeabed`: call it once, at startup, with the SAME field the ocean
+   * material and the caustics receiver were handed.
+   */
+  setFetch(fetch: FetchSource | null): void {
+    this.fetch = fetch;
+    this.refreshFetch();
+  }
+
   /** per-cascade shoaling wavenumbers — see `shoalK` */
   private refreshShoal(): void {
     this.shoalK = this.cascades.map((c) =>
       shoalWavenumber(c.meanWavenumber, this.openDepth, this.oceanP),
     );
+  }
+
+  /** per-cascade fetch coefficients — see `fetchC` */
+  private refreshFetch(): void {
+    const peakK = fullyDevelopedPeakWavenumber(this.oceanP.windSpeed);
+    this.fetchC = this.cascades.map((c) =>
+      fetchBandCoefficient(peakK, c.meanWavenumber, this.oceanP),
+    );
+  }
+
+  /**
+   * Per-cascade fetch gain at a GRID coord, into the shared scratch.
+   *
+   * ONE ratio for all bands — it is a property of the place, not of the band —
+   * and one bilinear field sample per call, which is why the shelter field is
+   * baked rather than marched (see fetchField.ts). All 1 with no field wired,
+   * so every path below is bit-identical to what it was before fetch existed.
+   *
+   * §V.72's trap (a), inherited verbatim: the caller passes the GRID coord `q`
+   * the inverse displacement solved for, never the query `x`. The GPU
+   * fetch-limits the vertex it is DISPLACING, so reading the field at `x`
+   * would put the two seas metres apart horizontally near shore.
+   */
+  private bandGains(qx: number, qz: number): number[] {
+    const g = this.gains;
+    const n = this.cascades.length;
+    if (!this.fetch) {
+      for (let i = 0; i < n; i++) g[i] = 1;
+      return g;
+    }
+    const ratio = developmentRatio(
+      this.fetch.fetchAt(qx, qz),
+      this.oceanP.windSpeed,
+      this.oceanP,
+    );
+    for (let i = 0; i < n; i++) g[i] = fetchBandGain(this.fetchC[i], ratio, this.oceanP);
+    return g;
   }
 
   /**
@@ -606,6 +681,12 @@ export class CpuOcean {
     // on the rebuild path would ignore a live tweak (§V.62). The GPU refreshes
     // the same numbers in `updateFromParams`, from the same function.
     this.refreshShoal();
+    // §V.73, same argument one file over: the fetch coefficients are BOTH
+    // spectrum-derived (each band's mean k) and wind-derived, and windSpeed
+    // reaches the mirror through the rate-limited rebuild — so a value cached
+    // on the rebuild path alone would lag the wind by up to 15 ticks while the
+    // material's own refresh moved immediately (§V.62, §V.8).
+    this.refreshFetch();
     const staleFor = Math.abs(time - this.gridTime);
     if (staleFor < this.seaP.updateEveryTicks * SIM_DT - 1e-9) return;
     const lambda = this.effectiveChoppiness();
@@ -671,10 +752,16 @@ export class CpuOcean {
       // the depth at the current iterate converges to depth(q) along with the
       // coord itself, so the two sides land on the same grid point instead of
       // one of them solving a slightly different equation.
+      // §V.73: the fixed point gains a second factor and the argument is
+      // unchanged — the vertex shader scales the WHOLE displacement, horizontal
+      // included, by shoal·fetch, so the mirror must solve for the same point
+      // or the two sides are inverting different equations.
       const depth = this.depthAt(qx, qz);
+      const fetchG = this.bandGains(qx, qz);
       for (let i = 0; i < this.cascades.length; i++) {
         const c = this.cascades[i];
-        const g = this.seabed ? shoalFactor(this.shoalK[i], depth) : 1;
+        const shoal = this.seabed ? shoalFactor(this.shoalK[i], depth) : 1;
+        const g = shoal * fetchG[i];
         dx += c.sample(c.dx, qx, qz) * g;
         dz += c.sample(c.dz, qx, qz) * g;
       }
@@ -703,18 +790,24 @@ export class CpuOcean {
     qx: number,
     qz: number,
   ): number {
-    if (!this.seabed) {
+    if (!this.seabed && !this.fetch) {
       let sum = 0;
       for (const c of this.cascades) sum += c.sample(grid(c), qx, qz);
       return sum;
     }
     const depth = this.depthAt(qx, qz);
+    const fetchG = this.bandGains(qx, qz);
     let sum = 0;
     for (let i = 0; i < this.cascades.length; i++) {
       const c = this.cascades[i];
-      sum += c.sample(grid(c), qx, qz) * shoalFactor(this.shoalK[i], depth);
+      const shoal = this.seabed ? shoalFactor(this.shoalK[i], depth) : 1;
+      sum += c.sample(grid(c), qx, qz) * shoal * fetchG[i];
     }
-    return breakerClip(sum, depth, this.oceanP);
+    // §V.73 is a SPECTRUM statement and term B is a WATER COLUMN statement, so
+    // the clip still keys on the bed alone. With no bed there is no column to
+    // limit against and `depthAt` reports 0 — clipping to that would flatten a
+    // fetch-only scene to nothing.
+    return this.seabed ? breakerClip(sum, depth, this.oceanP) : sum;
   }
 
   private readonly q: [number, number] = [0, 0];

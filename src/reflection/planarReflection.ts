@@ -214,6 +214,7 @@ export function createPlanarReflection(
       sunColorLive: opts.clouds.sunColorLive,
       skyColorLive: opts.clouds.skyColorLive,
       sunDirLive: opts.clouds.sunDirLive,
+      shaftSlots: opts.clouds.shaftSlots,
       params: opts.clouds.params ?? cloudParams,
     });
   }

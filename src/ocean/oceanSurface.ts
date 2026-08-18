@@ -24,6 +24,7 @@ import { buildOceanGrid, snapToGrid, type SurfaceGridOptions } from './surfaceGe
 import { oceanSurfaceParams as sp } from '../params/oceanSurface';
 import { skyParams } from '../params/sky';
 import type { SeabedField } from '../island/seabed';
+import type { FetchField } from './fetchField';
 import type { PlanarReflection } from '../reflection';
 import { postParams } from '../params/post';
 
@@ -35,6 +36,14 @@ export interface OceanSurfaceOptions {
    * the shallow term compiles out entirely and open ocean is unaffected.
    */
   seabed?: SeabedField | null;
+  /**
+   * Shelter field (§V.73 fetch). Absent → the fetch term compiles out entirely
+   * and the sea is bit-identically the one it was, exactly like `seabed`.
+   * §V.8: whatever is passed here MUST also be handed to `CpuOcean.setFetch`
+   * and `Caustics.setFetchField`, or the drawn sea, the sea the hull floats on
+   * and the sea the beach thinks it is drowned by are three different seas.
+   */
+  fetch?: FetchField | null;
   /**
    * Planar reflection (§V26). Absent → the analytic sky term is used, so this
    * is a no-op the main thread can wire whenever the perf picture allows.
@@ -100,6 +109,7 @@ export class OceanSurface {
       opts.reflection,
       opts.hdrSceneTarget ?? postParams.enabled,
       opts.skyDomeColor,
+      opts.fetch,
     );
     this.group = new THREE.Group();
     this.mesh = new THREE.Mesh(buildOceanGrid(this.grid), this.surface.material);

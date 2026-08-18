@@ -201,6 +201,98 @@ export interface OceanParams {
    * contour, which reads as a painted ring on the water.
    */
   shoalColumnCeiling: number;
+
+  // -- fetch (§V.73): water with land upwind cannot grow the sea the wind asks
+  /**
+   * THE ONE COMPRESSION IN THE FETCH MODEL, and the exact counterpart of
+   * `shoalDeepFraction`: world metres → physical fetch metres.
+   *
+   * Needed because our world is not planet-scale. Full development at the
+   * shipped 11 m/s takes F̃ = 2.2e4, i.e. 271 km of open water; our archipelago
+   * is 9 km across, so the UNCOMPRESSED model would fetch-limit the entire
+   * world and collapse the open ocean — the same failure the shoaling floor
+   * exists to prevent, one file over.
+   *
+   * At 260 the sea is fully developed after 138 m of clear upwind water at
+   * calm (4 m/s), 1043 m at the shipped swell (11 m/s) and 2794 m at storm
+   * (18 m/s). So open water between islands is untouched and the model acts
+   * inside rims and in the few hundred metres directly downwind of land.
+   * RAISING it weakens the shelter (full development arrives sooner);
+   * LOWERING it strengthens the shelter and lengthens the lee shadow, which
+   * must stay inside `fetchFieldMargin` or the shadow is truncated at the
+   * field border. See src/ocean/fetch.ts.
+   */
+  fetchWorldScale: number;
+  /**
+   * Ceiling on the young-sea steepening term, `r^(−0.11)` = √(the JONSWAP α
+   * ratio). A short-fetch sea has a FATTER equilibrium tail than a fully
+   * developed one at the same wind — that is real, and it is why enclosed
+   * water looks choppy and mean while being half a metre high — but it is the
+   * only term in the model that ADDS energy and it diverges as fetch → 0.
+   *
+   * This is a §V.44 boundedness guard, not a look knob: the gain scales the
+   * Jacobian the §V.6 foam gate reads, so an unbounded version would eventually
+   * whitecap a puddle. At 1.25 it binds only below r ≈ 0.03, i.e. a few metres
+   * of upwind water. Must be ≥ 1 or it would damp the OPEN ocean.
+   */
+  fetchMaxGain: number;
+  /**
+   * THE SECOND COMPRESSION (§V.73): the largest λ_band/λ_peak a band may be
+   * treated as. It bounds how SHARP the low-frequency cutoff can get.
+   *
+   * The cutoff's exponent carries (λ_band/λ_peak)², so a band far longer than
+   * the fully developed peak turns a smooth exponential into a step. MEASURED
+   * on calm (4 m/s, peak λ 16 m) where cascade 0's mean λ is 249 m: the raw
+   * coefficient is 256 and the gain falls 1.000 → 0.000 across FOURTEEN METRES
+   * of fetch — a painted ring on the water.
+   *
+   * That band's energy at calm is not wind sea; it is the authored swell train,
+   * which §V.36 deliberately decouples from `windSpeed`. This is where that
+   * interaction is paid for. At 2 it touches neither swell (0.74) nor storm
+   * (0.45) and spreads calm's step over ~100 m of fetch. Raising it sharpens
+   * the shelter edge; 1 flattens the model's whole band selectivity, which is
+   * the one thing that must not happen — see src/ocean/fetch.ts.
+   */
+  fetchLongBandLimit: number;
+  /**
+   * Texels per axis of the baked shelter field (src/ocean/fetchField.ts). The
+   * field spans the seabed's bounds plus `fetchFieldMargin` on every side, so
+   * this sets the texel size: at the shipped archipelago (9.0 km) and margin
+   * that is ~30 m, i.e. a 120 m anchorage is ~4 texels across. Doubling it
+   * quadruples the sweep, which is the per-wind-turn CPU cost.
+   */
+  fetchFieldSize: number;
+  /**
+   * World metres the shelter field extends BEYOND the seabed's own bounds.
+   *
+   * It must exceed `fullyDevelopedFetch` at the highest wind in play, or a lee
+   * shadow is still recovering when it reaches the field border and
+   * clamp-to-edge draws a ring on the water. At the shipped 3200 against
+   * storm's 2794 m there is 400 m of headroom; the 30 m/s slider limit wants
+   * 7763 m and is knowingly not covered (see the report's residuals).
+   */
+  fetchFieldMargin: number;
+  /**
+   * Separable box-blur radius, in texels, applied to the swept field.
+   *
+   * Two jobs, one number. It is the §V.48 BAND LIMIT — this texture carries no
+   * mip chain (it is re-swept when the wind turns, so a chain would have to be
+   * regenerated with it) and the ocean's vertex spacing reaches ~90 m against a
+   * ~30 m texel. And it is the honest SHAPE of a wind shadow's edge, which is a
+   * turbulent mixing layer rather than the hard line a binary land mask gives.
+   * 0 disables it and draws that hard line; do not.
+   */
+  fetchBlurTexels: number;
+  /**
+   * How far the wind must turn (radians) before the shelter field is re-swept.
+   *
+   * The sweep is the only per-direction cost in the model — wind SPEED enters
+   * as a scalar uniform and never rebuilds anything — and `windDirection` is
+   * not a key the weather presets patch, so in practice this fires on a panel
+   * drag and almost never in play. At 0.03 rad (1.7°) a shadow 3 km downwind
+   * moves ~50 m between sweeps, under two texels, which the blur hides.
+   */
+  fetchRebuildRadians: number;
 }
 
 export const oceanParams: OceanParams = registerParams('ocean', {
@@ -280,6 +372,18 @@ export const oceanParams: OceanParams = registerParams('ocean', {
   shoalDeepFraction: 0.6,
   shoalBreakerIndex: 0.78,
   shoalColumnCeiling: 0.85,
+  // §V.73 — see the interface docs. 260 puts full development at 1043 m of
+  // clear upwind water at the shipped 11 m/s, so the open sea between islands
+  // is exactly the sea it was and the model acts inside rims and lee shadows.
+  fetchWorldScale: 260,
+  fetchMaxGain: 1.25,
+  fetchLongBandLimit: 2,
+  fetchFieldSize: 512,
+  // 3200 > storm's 2794 m fully-developed fetch, so a lee shadow has recovered
+  // before the field border and clamp-to-edge cannot draw a ring
+  fetchFieldMargin: 3200,
+  fetchBlurTexels: 3,
+  fetchRebuildRadians: 0.03,
 }, oceanParamsMeta());
 
 function oceanParamsMeta() {
@@ -305,5 +409,19 @@ function oceanParamsMeta() {
     shoalDeepFraction: { min: 0.05, max: 1.5, step: 0.01 },
     shoalBreakerIndex: { min: 0.1, max: 0.95, step: 0.01 },
     shoalColumnCeiling: { min: 0.15, max: 0.99, step: 0.01 },
+    // §V.73. The floor on `fetchWorldScale` is not cosmetic: at 1 the world is
+    // uncompressed and every square metre of it is fetch-limited.
+    fetchWorldScale: { min: 20, max: 4000, step: 10 },
+    // min 1 — below it the model would damp the OPEN ocean, which is the one
+    // thing it may never do
+    fetchMaxGain: { min: 1, max: 3, step: 0.01 },
+    // min 1 — at 1 every band longer than the peak is treated identically and
+    // the model stops selecting bands at all, i.e. it becomes the amplitude
+    // fade this whole file exists not to be
+    fetchLongBandLimit: { min: 1, max: 16, step: 0.1 },
+    fetchFieldSize: { min: 64, max: 1024, step: 64 },
+    fetchFieldMargin: { min: 0, max: 8000, step: 100 },
+    fetchBlurTexels: { min: 0, max: 8, step: 1 },
+    fetchRebuildRadians: { min: 0.005, max: 0.5, step: 0.005 },
   };
 }

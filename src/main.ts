@@ -64,6 +64,7 @@ import { buildDeckHeightfield } from './ship/deckHeightfield';
 import { createDeckWater, setActiveDeckWater } from './deckwater';
 import { createPlanarReflection } from './reflection';
 import { createArchipelago } from './island';
+import { createFetchField } from './ocean/fetchField';
 import {
   DEFAULT_BOOT_TARGET,
   SPAWN_TARGET,
@@ -337,6 +338,17 @@ async function boot(): Promise<void> {
   // palm). Their seabed field still feeds the ocean material and grounding
   // from the moment it is built — only the DRAWING waits.
   addOrDefer('islands', archipelago.group);
+  /**
+   * §V.73 THE SHELTER FIELD — "how much clear water is upwind of here",
+   * swept from the seabed's own land. Built here, immediately after the
+   * archipelago and BEFORE the ocean surface, because TSL bakes material
+   * graphs at construction and the material has to be handed the texture.
+   *
+   * §V.8: this one object goes to all THREE consumers below — the drawn sea,
+   * the mirror the hull floats on, and the terrain's reconstruction of the sea
+   * it is drowned by. Three fields would be three different seas.
+   */
+  const fetchField = createFetchField(archipelago.seabed);
 
   // §T.30 planar reflections (§V26). Compiled into the material but DORMANT:
   // reflectionParams.live defaults 0, because the mirror pass costs ~1.0–1.5ms
@@ -372,6 +384,8 @@ async function boot(): Promise<void> {
   const surface = new OceanSurface(ocean, foam, flowFoam, {
     sunLight: sky.sunLight,
     seabed: archipelago.seabed,
+    // §V.73 fetch — the sea inside a rim is not the sea outside it
+    fetch: fetchField,
     reflection,
     // §V.26 the reflected sky is the SKY's own dome function (sun disc
     // excluded), not a second ramp inside the water material.
@@ -592,6 +606,12 @@ async function boot(): Promise<void> {
   // it paints water onto dry beach. Same open depth, same `shoalWavenumber`.
   // Deliberately after createArchipelago: the seabed field is built inside it.
   caustics.setSeabedOpenDepth(-archipelago.seabed.openHeight);
+  // §V.73, and the same three-consumer argument one law over: the terrain
+  // reconstructs the sea to know how drowned it is, so it must carry the fetch
+  // gain the ocean drew with or it paints an open-ocean waterline inside a
+  // sheltered lagoon — f62e037's defect with a different modulation.
+  caustics.setFetchField(fetchField);
+  cpuOcean.setFetch(fetchField);
 
   // hull waterline contact (§T.33 support): coarse stations round the hull
   // outline, sampled against the SAME sea every tick. Consumers: bow spray
@@ -1083,6 +1103,14 @@ async function boot(): Promise<void> {
       debug.hud.setPassTiming('ocean+foam cpu-dispatch', performance.now() - t);
 
       caustics.update(sky.sunDirection);
+      /**
+       * §V.73: re-sweep the shelter field only when the wind has actually
+       * turned past `fetchRebuildRadians`. Wind SPEED never reaches this — it
+       * enters the model as a scalar uniform — so a freshening breeze costs
+       * nothing here and only a change of BEARING does. In play that is a
+       * panel drag; `windDirection` is not a key the weather presets patch.
+       */
+      fetchField.update(oceanParams.windDirection);
       // rain volume follows the camera through cameraPosition, so it only
       // needs local intensity + σ for the below-waterline cull (§V24/§V36)
       rain.update({

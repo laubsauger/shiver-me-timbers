@@ -40,6 +40,7 @@
 import type * as THREE from 'three/webgpu';
 import { float, vec2, vec3 } from 'three/tsl';
 import type { OceanSimulation } from '../ocean/oceanCascades';
+import { fetchFieldNode, type FetchField } from '../ocean/fetchField';
 import { causticsParams } from '../params/caustics';
 import {
   createCausticsUniforms,
@@ -104,6 +105,14 @@ export class Caustics {
    * frame by `update()`, not once).
    */
   private openDepth = 0;
+  /**
+   * §V.73 — the shelter field the sea is fetch-limited by. Wired the same way
+   * and at the same moment as `openDepth`: it is built from the seabed, which
+   * is built inside `createArchipelago`, long after this object exists.
+   * Absent → the fetch term folds away and receivers reconstruct the
+   * shoaling-only sea, exactly as they did before.
+   */
+  private fetchField: FetchField | null = null;
 
   constructor(sim: OceanSimulation, opts: CausticsOptions = {}) {
     this.sim = sim;
@@ -120,6 +129,15 @@ export class Caustics {
    */
   setSeabedOpenDepth(openDepth: number): void {
     this.openDepth = Math.max(openDepth, 0);
+  }
+
+  /**
+   * §V.73 — THE SAME shelter field the ocean material and `CpuOcean` were
+   * handed. Three consumers, one field, one law; anything else and the beach
+   * is drowned by a sea nobody draws (f62e037).
+   */
+  setFetchField(field: FetchField | null): void {
+    this.fetchField = field;
   }
 
   /** the sun shadow node the ocean already published, or undefined */
@@ -163,7 +181,16 @@ export class Caustics {
     return waterHeightNode(
       this.sim,
       worldXZ,
-      depth ? { u: this.shoaling, depth } : undefined,
+      depth
+        ? {
+            u: this.shoaling,
+            depth,
+            // sampled HERE rather than asked of the caller: every receiver
+            // already hands us its world XZ, and making the shelter lookup the
+            // caller's job is how one of them ends up forgetting it
+            fetch: this.fetchField ? fetchFieldNode(this.fetchField, worldXZ) : null,
+          }
+        : undefined,
     );
   }
 

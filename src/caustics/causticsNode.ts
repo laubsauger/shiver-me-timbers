@@ -33,6 +33,13 @@ import type { OceanSimulation } from '../ocean/oceanCascades';
 import { sampleCascadeLayer } from '../ocean/oceanTextures';
 import { oceanParams } from '../params/ocean';
 import { breakerClipNodes, shoalFactorNode, shoalWavenumber } from '../ocean/shoaling';
+import {
+  developmentRatioNode,
+  fetchBandCoefficient,
+  fetchBandGainNode,
+  fullyDevelopedFetch,
+  fullyDevelopedPeakWavenumber,
+} from '../ocean/fetch';
 import { causticsParams as cp } from '../params/caustics';
 import { MIN_VERTICAL } from './causticsMath';
 
@@ -178,6 +185,19 @@ export interface ShoalingUniforms {
   k: TslNode[];
   /** (shoalBreakerIndex, shoalColumnCeiling) */
   breaker: TslNode;
+  /**
+   * §V.73 per-cascade fetch coefficient, (k_pfull/k_band)². Carried in the
+   * SAME bag as the shoaling wavenumbers on purpose: the two are the two
+   * factors of one per-cascade gain, and a receiver that reconstructed the sea
+   * with one of them and not the other would be f62e037 all over again — that
+   * bug was `waterHeightNode` summing the raw spectrum while the ocean drew a
+   * modulated one, and it cost four user reports in a day.
+   */
+  fetchC: TslNode[];
+  /** world metres of clear upwind water for full development at this wind */
+  fetchFull: TslNode;
+  /** §V.44 ceiling on the young-sea steepening term */
+  fetchMaxGain: TslNode;
 }
 
 export function createShoalingUniforms(sim: OceanSimulation): ShoalingUniforms {
@@ -186,6 +206,9 @@ export function createShoalingUniforms(sim: OceanSimulation): ShoalingUniforms {
     breaker: uniform(
       new THREE.Vector2(oceanParams.shoalBreakerIndex, oceanParams.shoalColumnCeiling),
     ),
+    fetchC: sim.cascades.map(() => uniform(0)),
+    fetchFull: uniform(1),
+    fetchMaxGain: uniform(oceanParams.fetchMaxGain),
   };
 }
 
@@ -207,6 +230,13 @@ export function refreshShoalingUniforms(
     oceanParams.shoalBreakerIndex,
     oceanParams.shoalColumnCeiling,
   );
+  // §V.73, from the same one law surfaceMaterial and CpuOcean call
+  const peakK = fullyDevelopedPeakWavenumber(oceanParams.windSpeed);
+  for (const [i, c] of sim.cascades.entries()) {
+    u.fetchC[i].value = fetchBandCoefficient(peakK, c.meanWavenumber, oceanParams);
+  }
+  u.fetchFull.value = fullyDevelopedFetch(oceanParams.windSpeed, oceanParams);
+  u.fetchMaxGain.value = oceanParams.fetchMaxGain;
 }
 
 /**
@@ -245,14 +275,24 @@ export function refreshShoalingUniforms(
 export function waterHeightNode(
   sim: OceanSimulation,
   worldXZ: TslNode,
-  shoal?: { u: ShoalingUniforms; depth: TslNode },
+  shoal?: { u: ShoalingUniforms; depth: TslNode; fetch?: TslNode | null },
 ): TslNode {
+  // §V.73: one ratio for every band — it is a property of the place, not of
+  // the band. Absent shelter field ⟹ null ⟹ the whole term folds away and the
+  // reconstruction is bit-identically the shoaling-only one.
+  const ratio =
+    shoal && shoal.fetch ? developmentRatioNode(shoal.fetch, shoal.u.fetchFull) : null;
   let h: TslNode = null;
   for (const [i, c] of sim.cascades.entries()) {
     let t = texture(c.displacement, cascadeUv(worldXZ, c.domain)).y;
     // per cascade, by its OWN wavenumber — long swell feels the bottom far
     // offshore, short chop stays lively until it is almost aground (§V.19)
     if (shoal) t = t.mul(shoalFactorNode(shoal.u.k[i], shoal.depth));
+    // ...and by its own band's fetch gain, the SAME product surfaceMaterial's
+    // `shoal[i]` and `CpuOcean.shoaledSum` build (§V.8)
+    if (shoal && ratio) {
+      t = t.mul(fetchBandGainNode(shoal.u.fetchC[i], ratio, shoal.u.fetchMaxGain));
+    }
     h = h === null ? t : h.add(t);
   }
   if (!shoal) return h;

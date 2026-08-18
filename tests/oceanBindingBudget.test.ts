@@ -127,6 +127,7 @@ import reflectionShadingSource from '../src/reflection/reflectionShading.ts?raw'
 import planarReflectionSource from '../src/reflection/planarReflection.ts?raw';
 import uncoloredShadowSource from '../src/sky/uncoloredShadowNode.ts?raw';
 import oceanTexturesSource from '../src/ocean/oceanTextures.ts?raw';
+import fetchFieldSource from '../src/ocean/fetchField.ts?raw';
 
 /** WebGPU's DEFAULT per-stage limits — what an adapter grants if nobody asks */
 const WEBGPU_DEFAULT_SAMPLED_TEXTURES_PER_STAGE = 16;
@@ -288,6 +289,31 @@ const LEDGER: readonly LedgerEntry[] = [
     why: 'seabedShallowFactorNode → texture() [fragment]; seabedHeightLodNode → texture().level() [vertex]',
   },
   {
+    file: 'src/ocean/fetchField.ts',
+    source: fetchFieldSource,
+    // `fetchFieldNode` — one filtered `texture()` on the baked shelter field.
+    sites: 1,
+    // ZERO IN THE FRAGMENT STAGE, and that is a design decision rather than an
+    // accident. The §V.73 gain is needed in BOTH stages (the vertex
+    // displacement and the shading normals have to agree about how much wave
+    // is here, exactly as §V.72 requires for shoaling), and bindings are keyed
+    // on (node, shaderStage) — so reading the field in both would have spent
+    // the ONE fragment sampler of headroom this material has left, which
+    // §V.40 says needs a reclamation and not a good argument.
+    //
+    // surfaceMaterial wraps the sample in `varying()`. three's VaryingNode
+    // calls `flowNodeFromShaderStage(VERTEX, …)`, so the fetch is EMITTED in
+    // the vertex shader and the fragment stage receives an interpolated
+    // scalar with no binding of its own. The development ratio is a property
+    // of the PLACE and not of the band, so one interpolated float carries all
+    // three cascades' gains.
+    fragmentTextures: 0,
+    fragmentSamplers: 0,
+    vertexTextures: 1,
+    vertexSamplers: 1,
+    why: 'fetchFieldNode → texture(), pulled into the vertex stage by varying()',
+  },
+  {
     file: 'src/reflection/reflectionShading.ts',
     source: reflectionShadingSource,
     sites: 1,
@@ -400,8 +426,9 @@ describe('§V.40 ocean material binding budget', () => {
     // silicon the adapter grants far more than 16 textures once asked, while
     // `maxSamplersPerShaderStage` IS 16 and asking changes nothing. Count
     // samplers; the texture number is a leading indicator, not a limit.
-    // 4/4 and under no pressure — three displacement textures plus the §V.72
-    // seabed depth. THE AXIS THAT IS SCARCE IS THE FRAGMENT ONE, and this is
+    // 5/5 and under no pressure — three displacement textures, the §V.72
+    // seabed depth and the §V.73 shelter field. THE AXIS THAT IS SCARCE IS THE
+    // FRAGMENT ONE, and this is
     // worth stating because it decided a whole feature's design: bindings are
     // keyed on (node, shaderStage), so the ONE contested spare everybody
     // budgets against is a FRAGMENT spare and the vertex stage has twelve
@@ -412,8 +439,8 @@ describe('§V.40 ocean material binding budget', () => {
     // If the FRAGMENT side ever needs the displacement textures, see "THE
     // VERTEX ESCAPE HATCH" in this file's header: an array displacement with a
     // hand-rolled 4-tap bilinear costs 1 texture and 0 samplers here.
-    expect(sum((e) => e.vertexTextures)).toBe(4);
-    expect(sum((e) => e.vertexSamplers)).toBe(4);
+    expect(sum((e) => e.vertexTextures)).toBe(5);
+    expect(sum((e) => e.vertexSamplers)).toBe(5);
   });
 
   it('still requests the raised limits at device creation', () => {
