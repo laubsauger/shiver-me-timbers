@@ -26,6 +26,8 @@ import {
   tiledValueNoise,
   tiledWorley,
   FOAM_CHANNEL,
+  FOAM_CREST_MEAN,
+  FOAM_SOFT_MEAN,
 } from '../src/foam/foamPattern';
 
 /**
@@ -267,5 +269,24 @@ describe('build contract (§V28: fail loud at construction)', () => {
     const soft = mean(channel(PATTERN, N, FOAM_CHANNEL.soft));
     expect(Math.abs(crest - 0.409)).toBeLessThan(0.06);
     expect(Math.abs(soft - 0.758)).toBeLessThan(0.06);
+  });
+
+  it('the published channel means ARE the generator’s means', () => {
+    // `foamShading` fades the sheet term toward these two numbers, and it does
+    // so as CONSTANTS — a shader cannot reduce a texture. That is only sound
+    // while the constants track the generator: if a retune moved a channel's
+    // mean and left `FOAM_*_MEAN` behind, the "zero-mean" modulation would
+    // stop being zero-mean and the sheet would silently change foam COVERAGE
+    // while claiming to be a shape change. That is 57269ca's 0.590-against-
+    // 0.500 mistake with the evidence hidden one file away, so it is pinned
+    // TIGHT (1e-3) rather than to the 0.06 look-tolerance above.
+    expect(mean(channel(PATTERN, N, FOAM_CHANNEL.crest))).toBeCloseTo(
+      FOAM_CREST_MEAN,
+      3,
+    );
+    expect(mean(channel(PATTERN, N, FOAM_CHANNEL.soft))).toBeCloseTo(
+      FOAM_SOFT_MEAN,
+      3,
+    );
   });
 });

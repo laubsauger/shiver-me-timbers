@@ -455,7 +455,7 @@ export function createFoamSim(
      * clamped, then crest-crackle → soft-mottle detail blend (§V6).
      * `worldXZ` = same node the material uses to sample displacement.
      */
-    shadingNode(worldXZ: any): any {
+    shadingNode(worldXZ: any, surfaceLift?: any): any {
       // fbm domain-warp on the LOOKUP (world meters) — the low-res sim RT's
       // texel grid otherwise reads as boxy patches (§V20 critique)
       const warped = worldXZ.add(foamWarpVec(worldXZ));
@@ -542,7 +542,11 @@ export function createFoamSim(
       // arriving flat at maximum. Clamping here is what discarded the very
       // intensity ranking the two clocks were introduced to carry.
       const covered = float(1).sub(raw.mul(uFoamDensity).negate().exp());
-      return foamDetailMask(clamp(covered, 0, 1), worldXZ, share);
+      // `surfaceLift` = local elevation in σ units, so the wave shape carves
+      // the dissolve (foamShading, "THE WAVE CARVES THE FOAM"). Passed through
+      // rather than derived here: this module has no access to the surface,
+      // and the material that calls it already holds both numbers.
+      return foamDetailMask(clamp(covered, 0, 1), worldXZ, share, surfaceLift);
     },
 
     dispose(): void {

@@ -1375,7 +1375,17 @@ export function buildOceanSurfaceMaterial(
     if (foam || flowFoam) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
       let foamMask: any = float(0);
-      if (foam) foamMask = foam.shadingNode(worldXZ);
+      // §B THE WAVE CARVES THE FOAM. The foam shading used to consult nothing
+      // about the surface it sits on, so it read as a decal (user: the layers
+      // are "not properly … decimated by the tips of the wave"). This hands
+      // over the local elevation IN UNITS OF THE SEA'S OWN RMS — the same
+      // quantity `crestMask` above is built from, and free here because both
+      // halves are already in this stage. NOT det J: that is the honest
+      // stretch signal (§V.58) but it lives in the displacement textures,
+      // which are bound in the VERTEX stage only, and §V.72 records that the
+      // contested spare is a FRAGMENT spare.
+      const surfaceLift = totalDisp.y.div(sigma);
+      if (foam) foamMask = foam.shadingNode(worldXZ, surfaceLift);
       // §V.10 THE WAKE IS NOT A WHITECAP, and it is kept on its own mask all
       // the way to the composite for that reason. It used to be `max`ed into
       // the whitecap mask on the line it was built, which forced two different

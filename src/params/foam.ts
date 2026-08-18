@@ -325,10 +325,61 @@ export interface FoamParams {
    * detail tuned for 10% coverage reads as noise at 80% (§V7 big patches).
    */
   sheetKnee: number;
-  /** detail frequency multiplier at full saturation (< 1 = broader patches) */
+  /**
+   * How far saturated foam hands its BODY over to the broad (soft) lookup —
+   * < 1 = broader patches, 1 = no handover, same direction it always had.
+   *
+   * IT USED TO DIVIDE THE WORLD REPEAT, and that was the ring bug: a
+   * spatially varying scale on an ABSOLUTE world coordinate has a sampling
+   * rate carrying |worldXZ| as a lever arm, so the art texture was sampled
+   * 856× past Nyquist at the §T.52 lagoon and 3670× at the far archipelago,
+   * and the moiré's iso-lines are the level sets of the foam mask — visible
+   * as fine nested contour rings inside every saturated raft. The breadth is
+   * now bought from the soft tap, which is already 4.7× broader and already
+   * sampled. See foamShading.ts for the measurements.
+   */
   sheetBroaden: number;
   /** how far saturated foam flattens toward an unbroken sheet, 0..1 */
   sheetFlatten: number;
+  /**
+   * The share of its own structure a flattened sheet KEEPS, 0..1.
+   *
+   * `sheetFlatten` alone converges on a CONSTANT, so a saturated raft became
+   * an opaque white decal with a drawn outline — the "top layer … slapped on
+   * top" of the report. A thick raft is more foam, not a different material.
+   * Carried as a ZERO-MEAN modulation about the channel's own mean
+   * (`FOAM_*_MEAN`), because the body multiplies the foam ALPHA and fading
+   * toward anything else would move coverage (§V.48(b)).
+   */
+  sheetKeep: number;
+  /**
+   * How far the breakup channel JITTERS the crest→soft body handover, in
+   * units of that channel (which is uniform on [0,1], so 0.5 is the full
+   * range). `breakingShare` is smooth, so an un-jittered handover draws ONE
+   * contour between the two layers and they read as two stacked decals rather
+   * than as one substance thinning. Body only — the dissolve keeps the
+   * un-jittered freshness, so this cannot move coverage.
+   */
+  handoverTear: number;
+  /**
+   * How hard the WAVE SHAPE carves the foam, as a displacement of the art
+   * lookup in CREST-TEXTURE REPEATS per σ of surface elevation (so 0.35 with
+   * `artCrestMetres` 6 m is ~2 m of world shift at a 1σ crest).
+   *
+   * The foam shading used to consult nothing about the surface it sat on, so
+   * its tearing was statistically independent of the wave underneath — the
+   * definition of a decal (user: "not properly … decimated by the tips of the
+   * wave"). This ties every hole and lace break to the geometry.
+   *
+   * A DISPLACEMENT rather than a thinning, and that is a coverage argument
+   * rather than an aesthetic one: displacing a lookup is measure-preserving,
+   * so the distribution of dissolve thresholds is bit-for-bit unchanged and
+   * coverage cannot move at any mask or any setting. The obvious alternative —
+   * raising the threshold on tips, lowering it in troughs — preserves the
+   * field's mean but NOT the coverage integral, and was measured at 3.4× the
+   * residue skirt before it was rejected. See foamMath.waveCarveOffset.
+   */
+  tipCarve: number;
   /**
    * PIXELS the COARSEST detail layer (1/mottleScale metres) must still span
    * for the detail composite to be worth evaluating at all.
@@ -449,6 +500,9 @@ export const foamParams: FoamParams = registerParams(
     sheetKnee: 0.7,
     sheetBroaden: 0.35,
     sheetFlatten: 0.5,
+    sheetKeep: 0.55,
+    handoverTear: 0.45,
+    tipCarve: 0.35,
     tierKeepPixels: 2,
     tierFadeSpan: 2,
     detailKeepPixels: 2,
@@ -504,6 +558,9 @@ function foamParamsMeta(): Partial<Record<keyof FoamParams, ParamMeta>> {
     sheetKnee: { min: 0.1, max: 1, step: 0.01 },
     sheetBroaden: { min: 0.05, max: 1, step: 0.01 },
     sheetFlatten: { min: 0, max: 1, step: 0.01 },
+    sheetKeep: { min: 0, max: 1, step: 0.01 },
+    handoverTear: { min: 0, max: 1, step: 0.01 },
+    tipCarve: { min: 0, max: 1, step: 0.01 },
     tierKeepPixels: { min: 0.5, max: 12, step: 0.25 },
     tierFadeSpan: { min: 1.05, max: 6, step: 0.05 },
     detailKeepPixels: { min: 0.5, max: 12, step: 0.25 },

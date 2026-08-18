@@ -1223,6 +1223,105 @@ export function dissolveKnee(
 }
 
 /**
+ * THE WAVE SHAPE CARVED INTO THE FOAM — GPU mirror: `surfaceLift` in
+ * `foamShading.foamDetailMask`. Returns the art-texture UV OFFSET, in texture
+ * repeats, that the wave surface displaces the whole foam lookup by.
+ *
+ * User: the layers are "not properly … decimated by the tips of the wave".
+ * They were not, at all — the foam shading consulted NOTHING about the surface
+ * it sat on, so its tearing was statistically independent of the geometry and
+ * it read as a decal. `lift` is the local elevation in units of the sea's own
+ * RMS, and displacing the lookup by it ties every hole, tendril and lace break
+ * to the wave under it: the same crest carries the same tear as it moves.
+ *
+ * ── WHY A DISPLACEMENT AND NOT A THINNING, WHICH IS WHAT WAS TRIED FIRST ──
+ *
+ * The obvious form is to raise the dissolve threshold on tips and lower it in
+ * troughs — `clamp(breakup + a·lift)` — and it LOOKS coverage-neutral: the
+ * breakup field is exactly uniform on [0,1] (rankNormalise) and elevation is
+ * symmetric about zero, and E[clamp(U+a)] + E[clamp(U−a)] = 1 for every a, so
+ * the field's MEAN really is preserved.
+ *
+ * The mean of the field is not the coverage. Coverage is E[g(field)] for the
+ * gate g, and g is a step-like function that lives entirely in the BOTTOM of
+ * the range — at a mask of 0.02 with the shipped knee only the lowest 6.8% of
+ * the field passes. Down there the clamp at zero is a one-sided atom: a
+ * negative lift piles mass onto "passes", a positive lift cannot take mass
+ * below "already zero", so coverage is CONVEX in the shift and Jensen makes
+ * any symmetric carve gain. MEASURED with the real gate: 0.0589 against
+ * 0.0172, i.e. the residue skirt would have got 3.4× more foam — the "dirty
+ * beige smudge" `residueKneeLow` exists to kill — while the change was
+ * described as a shape fix. This is the same atom that `foamShading`'s
+ * `threshold` paragraph rejected a signed threshold shift over, reached from
+ * the other side, and it generalises: NO smooth symmetric perturbation of a
+ * clamped threshold is coverage-neutral, because the response is convex at the
+ * end where the clamp is.
+ *
+ * A DISPLACEMENT HAS NO SUCH PROBLEM, and the guarantee is exact rather than
+ * tuned: moving where the texture is sampled is a MEASURE-PRESERVING
+ * REARRANGEMENT of the plane, so the distribution of threshold values is
+ * bit-for-bit what it was and coverage is unchanged at EVERY mask value and
+ * EVERY parameter setting, not merely on average.
+ *
+ * ADDITIVE, never multiplicative, and that is the whole lesson of the ring bug
+ * one file over: a term that SCALES a world coordinate picks up |worldXZ| as a
+ * lever arm on its derivative. A translation's derivative is just ∂lift/∂x,
+ * which the wave itself band-limits (~2σ over a ~50 m wavelength ⇒ 0.012 UV/m
+ * against the crest lookup's own 0.167 UV/m, a 7% warp).
+ *
+ * The lift is clamped to ±2σ first: a rogue crest must not be able to drag the
+ * lookup a whole repeat, and past 2σ the carve is saturated anyway.
+ */
+/**
+ * THE BODY of the foam composite — GPU mirror: `textured` → `sheeted` in
+ * `foamShading.foamDetailMask`. Returns the multiplier the interior of a foam
+ * patch gets, given the two art-texture taps at this texel.
+ *
+ * WHY THIS HAS A CPU MIRROR AT ALL. The body is a MULTIPLY ON THE FOAM ALPHA,
+ * so its mean over the texture IS foam coverage — the one quantity six user
+ * reports have been arguing about, and the one 57269ca caught a shape change
+ * moving from 0.500 to 0.590 while claiming not to. Two of the terms here
+ * (handing a saturated raft to the broader tap, and keeping some of its
+ * structure through the flatten) would each have moved it, so both are
+ * re-centred and `tests/foam.test.ts` integrates this over the REAL texture to
+ * prove the mean did not move.
+ *
+ * `crestMean`/`softMean` are the channels' own measured means
+ * (foamPattern.FOAM_*_MEAN) and are what everything is re-centred against.
+ */
+export function foamBodyLevel(
+  softTap: number,
+  crestTap: number,
+  /** the age blend the DISSOLVE uses — the level the body must keep */
+  freshness: number,
+  /** the age blend the body actually samples with (torn + broadened) */
+  bodyBlend: number,
+  /** sheetN · sheetFlatten */
+  flat: number,
+  /** sheetKeep */
+  keep: number,
+  crestMean: number,
+  softMean: number,
+): number {
+  const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+  const blendMean = lerp(softMean, crestMean, bodyBlend);
+  const bodyMean = lerp(softMean, crestMean, freshness);
+  // re-centred: the broad tap's PATTERN at the fresh tap's LEVEL
+  const textured = lerp(softTap, crestTap, bodyBlend) - blendMean + bodyMean;
+  const f = Math.min(1, Math.max(0, flat));
+  const k = Math.min(1, Math.max(0, keep));
+  // flatten toward the sheet, then add back a ZERO-MEAN share of the structure
+  // the flatten removed — a thick raft is more foam, not a different material
+  return lerp(textured, 1, f) + f * k * (textured - bodyMean);
+}
+
+export function waveCarveOffset(lift: number, tipCarve: number): number {
+  if (!Number.isFinite(lift) || !Number.isFinite(tipCarve)) return 0;
+  const l = Math.min(2, Math.max(-2, lift));
+  return l * Math.max(0, tipCarve);
+}
+
+/**
  * One texel of the box-reduction pass (GPU mirror: createReducePass): the
  * plain MEAN of the factor×factor source block. Mean, not sum and not a
  * weighted kernel — the far tier must be the same foam, band-limited, or

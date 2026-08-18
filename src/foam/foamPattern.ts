@@ -93,6 +93,22 @@ export const FOAM_SOFT_CELLS = 3;
  */
 export const RAFT_CELLS = 26;
 
+/**
+ * The MEASURED means of the two body channels, over the whole 256² tile after
+ * 8-bit encoding. Exported because `foamShading` needs them as numbers, not as
+ * an intuition: the body is a MULTIPLY ON THE FOAM ALPHA, so any term that
+ * reshapes it has to fade toward the channel's own mean or it moves foam
+ * COVERAGE while claiming to be a shape change (§V.48(b), and the mistake
+ * 57269ca caught at 0.590 against 0.500).
+ *
+ * These are constants rather than a runtime reduction because the generator is
+ * deterministic and seedless — `tests/foamTexture.test.ts` pins them, so a
+ * retune of the channels that forgets to update them fails there rather than
+ * silently shifting coverage here.
+ */
+export const FOAM_CREST_MEAN = 0.4302;
+export const FOAM_SOFT_MEAN = 0.7605;
+
 /* ---------------------------------------------------------------- lattice */
 
 /** integer hash → [0,1). Two rounds of xorshift-multiply; no float error path */

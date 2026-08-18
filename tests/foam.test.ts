@@ -44,6 +44,8 @@ import {
   foamTexelMetres,
   decayFactorPerFrame,
   dissolveKnee,
+  waveCarveOffset,
+  foamBodyLevel,
   injectAmount,
   jacobianSigma,
   whitecapCoverage,
@@ -51,6 +53,12 @@ import {
   WHITECAP_ONSET_MS,
   wrapIndex,
 } from '../src/foam/foamMath';
+import {
+  buildFoamPattern,
+  FOAM_CHANNEL,
+  FOAM_CREST_MEAN,
+  FOAM_SOFT_MEAN,
+} from '../src/foam/foamPattern';
 import { foamParams } from '../src/params/foam';
 import { oceanParams, type OceanParams } from '../src/params/ocean';
 import {
@@ -1128,6 +1136,177 @@ describe('the dissolve gate (§T.5 stage 3, foamShading mirror)', () => {
     // all of the coverage is
     expect(naiveWorst).toBeGreaterThan(0.35);
     expect(naiveWorst).toBeGreaterThan(ourWorst * 5);
+  });
+
+  it('§B the body composite does not move COVERAGE — over the real texture', () => {
+    // THE BODY IS A MULTIPLY ON THE FOAM ALPHA, so its mean over the art
+    // texture IS foam coverage. Two of this pass's changes would each have
+    // moved it silently: handing a saturated raft to the SOFT tap (mean 0.760)
+    // instead of the CREST tap (mean 0.430) is worth up to +0.21 of body —
+    // +50% foam alpha in fresh saturated foam — and keeping structure through
+    // the flatten adds a term whose mean is only zero if it is centred on the
+    // right number. Both are re-centred in `foamBodyLevel`; this integrates it
+    // over every texel of the REAL generated texture and compares against the
+    // level the un-broadened, un-flattened-with-keep composite had.
+    const N = 128;
+    const data = buildFoamPattern(N);
+    const crestCh = new Float64Array(N * N);
+    const softCh = new Float64Array(N * N);
+    for (let i = 0; i < N * N; i++) {
+      crestCh[i] = data[i * 4 + FOAM_CHANNEL.crest] / 255;
+      softCh[i] = data[i * 4 + FOAM_CHANNEL.soft] / 255;
+    }
+    const cM = FOAM_CREST_MEAN;
+    const sM = FOAM_SOFT_MEAN;
+    for (const freshness of [0, 0.35, 0.7, 1]) {
+      for (const sheetN of [0, 0.5, 1]) {
+        // what the body was BEFORE this pass: plain mix at `freshness`,
+        // flattened toward 1 with no structure kept
+        const flat = sheetN * 0.5;
+        let before = 0;
+        let after = 0;
+        for (let i = 0; i < N * N; i++) {
+          const plain = softCh[i] + (crestCh[i] - softCh[i]) * freshness;
+          before += plain + (1 - plain) * flat;
+          // the shipped form, at the worst-case broadening (sheetBroaden 0.35)
+          // and the shipped sheetKeep
+          const bodyBlend = freshness * (1 - sheetN * 0.65);
+          after += foamBodyLevel(
+            softCh[i], crestCh[i], freshness, bodyBlend, flat, 0.55, cM, sM,
+          );
+        }
+        before /= N * N;
+        after /= N * N;
+        expect(
+          Math.abs(after - before),
+          `freshness ${freshness} sheetN ${sheetN}: body ${after.toFixed(4)} vs ${before.toFixed(4)}`,
+        ).toBeLessThan(0.005);
+      }
+    }
+  });
+
+  it('§B and it is not a no-op: the PATTERN changes where the level does not', () => {
+    // Coverage-neutral is worthless if nothing moved. At full saturation the
+    // body must be drawing the BROAD channel's structure — measured as the
+    // correlation of the composite with each tap — while keeping the fresh
+    // level. Without this the re-centring could be satisfied by simply not
+    // broadening at all.
+    const N = 128;
+    const data = buildFoamPattern(N);
+    const cM = FOAM_CREST_MEAN;
+    const sM = FOAM_SOFT_MEAN;
+    const corr = (a: Float64Array, b: Float64Array): number => {
+      let ma = 0, mb = 0;
+      for (let i = 0; i < a.length; i++) { ma += a[i]; mb += b[i]; }
+      ma /= a.length; mb /= b.length;
+      let num = 0, da = 0, db = 0;
+      for (let i = 0; i < a.length; i++) {
+        num += (a[i] - ma) * (b[i] - mb);
+        da += (a[i] - ma) ** 2;
+        db += (b[i] - mb) ** 2;
+      }
+      return num / Math.sqrt(da * db);
+    };
+    const crestCh = new Float64Array(N * N);
+    const softCh = new Float64Array(N * N);
+    for (let i = 0; i < N * N; i++) {
+      crestCh[i] = data[i * 4 + FOAM_CHANNEL.crest] / 255;
+      softCh[i] = data[i * 4 + FOAM_CHANNEL.soft] / 255;
+    }
+    /** fresh foam, at saturation `s`, at the shipped sheetBroaden 0.35 */
+    const bodyAt = (s: number): Float64Array => {
+      const out = new Float64Array(N * N);
+      for (let i = 0; i < N * N; i++) {
+        out[i] = foamBodyLevel(
+          softCh[i], crestCh[i], 1, 1 * (1 - s * 0.65), s * 0.5, 0.55, cM, sM,
+        );
+      }
+      return out;
+    };
+    const unsaturated = bodyAt(0);
+    const saturated = bodyAt(1);
+    // Saturating must move the composite AWAY from the fine lace and TOWARD
+    // the broad mottle. It does not have to be soft-DOMINATED and the bar is
+    // deliberately not written that way: the crest channel carries several
+    // times the variance of the soft one (lace against a smooth slick), so a
+    // 35% crest weight still leads the correlation. What "broader" means here
+    // is the SHARE, and the share is what this measures.
+    expect(corr(saturated, crestCh)).toBeLessThan(corr(unsaturated, crestCh) - 0.1);
+    expect(corr(saturated, softCh)).toBeGreaterThan(corr(unsaturated, softCh) + 0.2);
+  });
+
+  it('§B the REJECTED carve: a symmetric threshold shift is NOT coverage-neutral', () => {
+    // Kept as a test rather than as a sentence, because the rejected form is
+    // the one anyone would write next and its defect is invisible to the
+    // argument that motivates it. Shifting the dissolve field by ±a preserves
+    // the FIELD's mean exactly (E[clamp(U+a)] + E[clamp(U−a)] = 1 for uniform
+    // U) — but coverage is E[gate(field)], the gate lives in the bottom of the
+    // range, and the clamp at zero is a one-sided atom there. Coverage is
+    // therefore CONVEX in the shift and Jensen makes every symmetric carve
+    // gain. This pins the size of that gain so the shipped displacement form
+    // (foamMath.waveCarveOffset) cannot be "simplified" back into it.
+    const KNEE_LOW = 0.005;
+    const KNEE_HIGH = 0.03;
+    const D = 0.22;
+    const shiftedCover = (mask: number, lift: number, carve: number): number => {
+      let sum = 0;
+      for (let k = 0; k < 400; k++) {
+        const u = (k + 0.5) / 400;
+        const shifted = Math.min(1, Math.max(0, u + lift * carve));
+        sum += dissolveKnee(mask, shifted, KNEE_LOW, KNEE_HIGH, D, 1);
+      }
+      return sum / 400;
+    };
+    const mask = 0.02;
+    const flat = shiftedCover(mask, 0, 0);
+    let carved = 0;
+    let n = 0;
+    for (let i = -20; i <= 20; i++, n++) carved += shiftedCover(mask, i / 10, 0.15);
+    carved /= n;
+    // measured 0.0589 against 0.0172 — 3.4× the residue skirt, silently
+    expect(carved).toBeGreaterThan(flat * 3);
+  });
+
+  it('§B the shipped carve is a REARRANGEMENT, so coverage cannot move', () => {
+    // `waveCarveOffset` returns a UV displacement, and displacing a lookup is
+    // measure-preserving: the multiset of threshold values a patch sees is
+    // unchanged, so the coverage integral is unchanged at EVERY mask and every
+    // parameter — exactly, not on average. The mechanical statement of that
+    // here is that the offset never touches the field's values at all, and
+    // that it is bounded so it can never drag the lookup a whole repeat (which
+    // would be a rearrangement too, but a visible one).
+    for (const carveAmt of [0, 0.35, 1]) {
+      for (const lift of [-9, -2, -1, 0, 1, 2, 9]) {
+        const off = waveCarveOffset(lift, carveAmt);
+        expect(Number.isFinite(off)).toBe(true);
+        expect(Math.abs(off)).toBeLessThanOrEqual(2 * carveAmt + 1e-9);
+      }
+    }
+    // it is antisymmetric in the lift, so a symmetric sea displaces the lookup
+    // by zero on average — no net drift of the pattern with sea state
+    for (const l of [0.3, 1, 1.7, 5]) {
+      expect(waveCarveOffset(l, 0.35) + waveCarveOffset(-l, 0.35)).toBeCloseTo(0, 12);
+    }
+    // and it is monotone, so "higher water" always means "further along the
+    // texture" — a non-monotone carve would fold the lookup and pinch
+    let prev = -Infinity;
+    for (let i = -30; i <= 30; i++) {
+      const v = waveCarveOffset(i / 10, 0.35);
+      expect(v).toBeGreaterThanOrEqual(prev);
+      prev = v;
+    }
+  });
+
+  it('carveOffset is finite for degenerate inputs (§V28)', () => {
+    for (const v of [
+      waveCarveOffset(NaN, 0.3),
+      waveCarveOffset(Infinity, 0.3),
+      waveCarveOffset(1, NaN),
+      waveCarveOffset(1, -5),
+      waveCarveOffset(-1e300, 1),
+    ]) {
+      expect(Number.isFinite(v)).toBe(true);
+    }
   });
 
   it('§V.60: the gate is never narrower than the body it multiplies', () => {

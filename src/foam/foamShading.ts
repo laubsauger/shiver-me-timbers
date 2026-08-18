@@ -51,7 +51,12 @@ import {
 import type * as THREE from 'three/webgpu';
 import { fbm2, valueNoise2 } from '../terrain/noise';
 import type { FoamParams } from '../params/foam';
-import { FOAM_BREAKUP_CELLS, FOAM_SOFT_CELLS } from './foamPattern';
+import {
+  FOAM_BREAKUP_CELLS,
+  FOAM_CREST_MEAN,
+  FOAM_SOFT_CELLS,
+  FOAM_SOFT_MEAN,
+} from './foamPattern';
 import { foamArtTexture } from './foamTexture';
 
 const uArtCrestMetres = uniform(6.0);
@@ -68,6 +73,9 @@ const uElong = uniform(3.0);
 const uSheetKnee = uniform(0.7);
 const uSheetBroaden = uniform(0.35);
 const uSheetFlatten = uniform(0.5);
+const uSheetKeep = uniform(0.55);
+const uHandoverTear = uniform(0.45);
+const uTipCarve = uniform(0.35);
 const uDetailKeepPixels = uniform(2);
 const uDetailFadeSpan = uniform(3.5);
 const uFarFoamFade = uniform(0);
@@ -116,6 +124,9 @@ export function updateFoamShadingUniforms(
   uSheetKnee.value = p.sheetKnee;
   uSheetBroaden.value = p.sheetBroaden;
   uSheetFlatten.value = p.sheetFlatten;
+  uSheetKeep.value = Math.min(1, Math.max(0, p.sheetKeep));
+  uHandoverTear.value = Math.max(0, p.handoverTear);
+  uTipCarve.value = Math.max(0, p.tipCarve);
   uDetailKeepPixels.value = Math.max(0.5, p.detailKeepPixels);
   uDetailFadeSpan.value = Math.max(1.05, p.detailFadeSpan);
   uFarFoamFade.value = p.farFoamFade;
@@ -265,6 +276,14 @@ export function foamDetailMask(
    * `breakingWeight = 0` reproduce the pre-split look bit for bit.
    */
   breakingShare?: AnyNode,
+  /**
+   * Local surface elevation in units of the sea's own RMS (σ), i.e. a
+   * zero-mean, roughly-unit-variance "how near a wave tip is this pixel".
+   * Optional: the wake foam (§V.10) rides a ship-made surface the ocean's σ
+   * does not describe, and omitting it reproduces the un-carved dissolve
+   * exactly. See `breakup` below for why it is the elevation and not det J.
+   */
+  surfaceLift?: AnyNode,
 ): AnyNode {
   const art = foamArtTexture();
   // per-position phase (§B.4: NO shared global timeline) — coarse value
@@ -279,25 +298,120 @@ export function foamDetailMask(
   // (§B.33 (c) — a single tilt on every streak in the world is the lattice).
   const aniso = crestAnisoCoord(coord.add(churn));
 
-  // COVERAGE-ADAPTIVE SCALE (user, storm preset: "blobby noise in parts").
+  // COVERAGE-ADAPTIVE BREADTH (user, storm preset: "blobby noise in parts").
   // Detail texture that reads well at 10% coverage reads as high-frequency
-  // noise when the whole sea is foaming. Where foam SATURATES, broaden the
-  // detail into wind-driven sheets and flatten its contrast — §V7 asks storm
-  // for big patches, and the reference storm foam is broad streaks running
-  // with the swell, not 30 cm mottle stretched over everything.
+  // noise when the whole sea is foaming. Where foam SATURATES the composite has
+  // to read as broad wind-driven sheets — §V7 asks storm for big patches, and
+  // the reference storm foam is broad streaks running with the swell, not 30 cm
+  // mottle stretched over everything.
+  //
+  // ── §B THIS TERM USED TO DIVIDE THE WORLD SCALE, AND THAT IS THE RING BUG ──
+  //
+  // It was `crestMetres = artCrestMetres / broaden(x)`, which makes the lookup
+  //
+  //     uv(x) = x · broaden(x) / metres
+  //
+  // — A SPATIALLY VARYING SCALE APPLIED TO AN ABSOLUTE WORLD COORDINATE. Its
+  // sampling rate is not `1/metres` but `(broaden + |x|·∂broaden)/metres`, and
+  // the second term carries THE DISTANCE TO THE WORLD ORIGIN as a lever arm.
+  // `x` is world XZ over a 7 km archipelago, so that lever arm is unbounded.
+  //
+  // MEASURED, on the shipped params, as texture repeats crossed per pixel from
+  // a 30 m top-down camera (the correct rate is 0.0112):
+  //
+  //     world origin (0, 0)        0.361     32×  past Nyquist
+  //     §T.52 lagoon (1105, 215)   9.591    856×
+  //     far archipelago (3500²)   41.107   3670×
+  //
+  // What the mip chain returns at that rate is the texture's own mean plus a
+  // low-contrast moiré whose iso-lines are THE LEVEL SETS OF `sheetN`: fine
+  // nested contour rings around every local maximum of the foam mask, warped by
+  // the mask's own noise. That is the user's "super high frequency circular
+  // effects, displaced by some noise" exactly, and it is NOT the rosette
+  // 57269ca cured — those were ~1 m features baked INTO the tile by a too-slow
+  // domain warp, and they are gone. These are generated at SAMPLE TIME, scale
+  // with world position, and no change to the art texture could have touched
+  // them. Two ring reports, two unrelated mechanisms.
+  //
+  // GENERAL RULE, and the reason this is worth the paragraph: a smoothly
+  // varying SIMILARITY TRANSFORM (scale or rotation) on an absolute world
+  // coordinate is not a smooth operation on the thing you sample with it. Its
+  // derivative picks up |x|·∂(transform), so the artifact is invisible at the
+  // origin — where every unit test and every early screenshot lives — and gets
+  // worse the further the player sails. Ask what the LEVER ARM is before
+  // multiplying a world coordinate by a field.
+  //
+  // The breadth is now bought where it costs nothing: the soft lookup is
+  // ALREADY `artSoftMetres/artCrestMetres` = 4.7× broader and is ALREADY
+  // sampled, so saturated foam simply reads more of it (see `bodyBlend`). No
+  // varying scale, no third tap, no extra sampler (§V.40).
   const sheetN = smoothstep(uSheetKnee, float(1.0), rawFoam);
-  const broaden = mix(float(1), uSheetBroaden.max(0.05), sheetN);
 
   // ONE TEXTURE, TWO WORLD SCALES — the talk's crest/soft pair. Both reads hit
   // the SAME texture object, so they dedupe to one binding and ONE SAMPLER
   // (§V.40 hashes on `value.uuid`); two texture objects would have cost both
-  // of the ocean's spare samplers for one feature. Broadening DIVIDES the
-  // repeat, so a saturated storm sea draws the same texture bigger rather than
-  // a different one (§V7: presets touch params, never code paths).
-  const crestMetres = uArtCrestMetres.max(0.25).div(broaden.max(0.05));
-  const softMetres = uArtSoftMetres.max(1).div(broaden.max(0.05));
-  const crestTex = texture(art, aniso.div(crestMetres).add(vec2(t, t.mul(-0.7))));
-  const softTex = texture(art, aniso.div(softMetres).sub(vec2(t.mul(0.4), t.mul(-0.3))));
+  // of the ocean's spare samplers for one feature. CONSTANT, per the block
+  // above: the repeat is never a function of position.
+  const crestMetres = uArtCrestMetres.max(0.25);
+  const softMetres = uArtSoftMetres.max(1);
+
+  // ── §B THE WAVE CARVES THE FOAM ─────────────────────────────────────────
+  //
+  // User: the layers are "not properly … decimated by the tips of the wave".
+  // They were not, at all. Foam PLACEMENT is geometry-aware (the sim injects on
+  // λ⁻, §V.58) but the SHADING consulted NOTHING about the surface it sat on,
+  // so the lace, the holes and the torn silhouette were statistically
+  // INDEPENDENT OF THE WAVE UNDERNEATH — the definition of a decal. This
+  // displaces the whole art lookup by the local surface height, so the tearing
+  // is a function of the geometry: the same crest carries the same tear, holes
+  // open on the tips and the pattern crowds into the troughs behind.
+  //
+  // A DISPLACEMENT, NOT A THINNING, AND THAT IS THE COVERAGE ARGUMENT.
+  // Raising the dissolve threshold on tips and lowering it in troughs is the
+  // obvious form and it was written first. It preserves the breakup field's
+  // MEAN exactly — but coverage is E[gate(field)], the gate lives in the
+  // bottom of the range, and down there the clamp at zero is a ONE-SIDED ATOM,
+  // so coverage is convex in the shift and Jensen makes any symmetric carve
+  // GAIN. Measured with the real gate at a 0.02 mask: 0.0589 against 0.0172 —
+  // the residue skirt would have taken 3.4× more foam while the change was
+  // being described as a shape fix. Displacing the LOOKUP is instead a
+  // measure-preserving rearrangement of the plane, so the distribution of
+  // threshold values is bit-for-bit unchanged and coverage is exact at every
+  // mask and every parameter, not merely on average. Full derivation and the
+  // measurement in foamMath.waveCarveOffset.
+  //
+  // ADDITIVE, NEVER MULTIPLICATIVE — the ring bug above is what a term that
+  // scales a world coordinate costs. A translation's derivative is ∂lift/∂x,
+  // which the wave band-limits for us (~2σ over a ~50 m wavelength ⇒ 0.012 UV
+  // per metre against the crest lookup's own 0.167, a 7% warp).
+  //
+  // NOT det J / λ⁻, and that is scheduling rather than preference: the
+  // direction-aware stretch (§V.58, §V.59) is the honest signal for "the
+  // surface is being pulled apart here", but it lives in the displacement
+  // textures, which are bound in the VERTEX stage only, and §V.72 records that
+  // the contested spare is a FRAGMENT spare. Elevation-in-σ is free — the
+  // material already holds both halves for `crestMask` — and it is monotone in
+  // how near the tip a pixel is, which is what this needs.
+  const carve =
+    surfaceLift !== undefined
+      ? surfaceLift.clamp(-2, 2).mul(uTipCarve)
+      : float(0);
+  const carveUv = vec2(carve, carve.mul(-0.6));
+  const crestTex = texture(
+    art,
+    aniso.div(crestMetres).add(vec2(t, t.mul(-0.7))).add(carveUv),
+  );
+  const softTex = texture(
+    art,
+    // the broad tap takes the SAME world displacement, which at its 4.7×
+    // coarser repeat is 4.7× less UV — so the two layers shift together in
+    // world space instead of sliding across each other (§V.37: mating pieces
+    // share their sampling constants)
+    aniso
+      .div(softMetres)
+      .sub(vec2(t.mul(0.4), t.mul(-0.3)))
+      .add(carveUv.mul(crestMetres.div(softMetres))),
+  );
 
   // AGE. It used to be the foam VALUE standing in for an age nothing measured
   // ("injection writes ~1 at crests and decay only lowers it") — and that was
@@ -316,10 +430,74 @@ export function foamDetailMask(
         // is carried into `softness` below via `fwidth(rawFoam)`.
         smoothstep(float(0.25), float(0.8), breakingShare)
       : smoothstep(float(0.25), float(0.8), rawFoam);
+  // ── THE BODY: ONE SUBSTANCE, NOT TWO DECALS ─────────────────────────────
+  //
+  // User: the two layers are "not properly blended … with each other — they
+  // look like slapped on top of each other". Two separate mechanisms were
+  // drawing that, and both are here rather than in the art texture.
+  //
+  // (1) THE HANDOVER WAS A CLEAN LEVEL SET. `breakingShare` is a smooth ratio
+  //     of two blurred accumulator channels, so `smoothstep` on it hands the
+  //     crest lace over to the soft mottle along ONE CONTOUR — two materials
+  //     meeting at a drawn line, which is what "slapped on top" describes.
+  //     Jittering the handover by the breakup channel makes them
+  //     INTERPENETRATE instead: lace survives in patches well inside the
+  //     mottle and mottle eats into the lace, so the pair reads as one
+  //     substance thinning rather than as two stacked silhouettes.
+  //
+  //     ON THE BODY ONLY, deliberately. The dissolve below keeps the
+  //     un-jittered `freshness`, so this cannot move COVERAGE — it is a tone
+  //     boundary, and the tone boundary is what reads as two decals.
+  //
+  // (2) SATURATED FOAM WAS REPLACED BY FLAT WHITE. `mix(textured, 1, …)`
+  //     converges on a CONSTANT, so a saturated raft lost all structure and
+  //     its edge became a level set of `sheetN` — an opaque decal with a drawn
+  //     outline, which is the "top layer" in the report. A thick raft is more
+  //     foam, not a different material, so it keeps a share of its own
+  //     structure as a ZERO-MEAN modulation on top of the sheet. Zero-mean
+  //     against the CHANNEL'S OWN MEAN (§V.48(b) — `FOAM_*_MEAN`), because the
+  //     body multiplies the foam alpha: fading toward anything else would move
+  //     coverage while claiming to be a shape change.
+  //     `bodyFresh` carries no spatial frequency of its own: `breakingShare` is
+  //     a ratio of two filtered sim-texture channels already retired against
+  //     their measured footprint by `tierWeight` (index.shadingNode), and
+  //     `tear` is a filtered read of the art texture's mip chain (§V.48,
+  //     foamTexture.ts). It only chooses between two taps already band-limited.
+  const tear = softTex.b.sub(0.5).mul(uHandoverTear);
+  const torn = (breakingShare ?? rawFoam).add(tear);
+  // @band-limited-elsewhere — reason four lines up (both inputs are filtered)
+  const bodyFresh = smoothstep(float(0.25), float(0.8), torn);
+  // saturated foam hands the body over to the BROAD lookup. `sheetBroaden`
+  // keeps its meaning and its direction (lower = broader); it is read as a mix
+  // weight now rather than as a divisor on the repeat.
+  const broadenMix = float(1).sub(uSheetBroaden.clamp(0.05, 1));
+  const bodyBlend = bodyFresh.mul(float(1).sub(sheetN.mul(broadenMix))).clamp(0, 1);
+
+  // ── AND THE HANDOVER IS RENORMALISED, WHICH IS NOT OPTIONAL ─────────────
+  //
+  // THE BODY IS A MULTIPLY ON THE FOAM ALPHA (`return rawFoam·detail·knee`),
+  // so its MEAN IS FOAM COVERAGE and any term that changes which tap wins
+  // changes coverage. The two body channels do not have the same mean — crest
+  // 0.430, soft 0.760, both pinned in tests/foamTexture.test.ts — so handing a
+  // saturated raft over to the soft tap raises the body by up to 0.21, i.e.
+  // **+50% foam alpha in fresh saturated foam**, for a change that is
+  // advertised as a change of PATTERN. That is 57269ca's 0.590-against-0.500
+  // mistake exactly, and it was measured here rather than shipped.
+  //
+  // So the mix is re-centred: subtract the mean the blend it ACTUALLY used
+  // has, add back the mean the blend it WOULD have used has. The pattern
+  // becomes the broad one; the level stays the fresh one; the expected body,
+  // and therefore coverage, is unchanged pixel for pixel. §V.48(b)'s
+  // fade-to-the-right-mean, applied to a channel swap instead of to a fade.
+  const blendMean = mix(float(FOAM_SOFT_MEAN), float(FOAM_CREST_MEAN), bodyBlend);
+  /** the mean the body MUST keep — the one `freshness` alone would have given */
+  const bodyMean = mix(float(FOAM_SOFT_MEAN), float(FOAM_CREST_MEAN), freshness);
   // BODY — the interior of the patch (R = crest lace, G = soft mottle)
-  const textured = mix(softTex.g, crestTex.r, freshness);
-  // saturated foam settles toward an unbroken sheet
-  const sheeted = mix(textured, float(1), sheetN.mul(uSheetFlatten).clamp(0, 1));
+  const textured = mix(softTex.g, crestTex.r, bodyBlend).sub(blendMean).add(bodyMean);
+  const flat = sheetN.mul(uSheetFlatten).clamp(0, 1);
+  const sheeted = mix(textured, float(1), flat).add(
+    flat.mul(uSheetKeep.clamp(0, 1)).mul(textured.sub(bodyMean)),
+  );
 
   // FAR-FIELD DETAIL FADE — a BACKSTOP, not the band limit, and now keyed on
   // the PIXEL FOOTPRINT rather than on camera distance.
