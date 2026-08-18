@@ -80,6 +80,44 @@ export interface TerrainParams {
   sparkleStrength: number;
   sandRoughnessDry: number;
   sandRoughnessWet: number;
+  /**
+   * FLOOR on the roughness of SUBMERGED terrain — the seabed, the shelf and
+   * anything else below the waterline. Defaults to `sandRoughnessWet`, and
+   * that identity is the whole argument.
+   *
+   * The user's report was "massive blue reflection on the bottom of the sea
+   * from the sun" (backprop pending).
+   * WETNESS WAS BEING APPLIED TWICE to the same surface. The sand branch
+   * already models it — `roughness = mix(sandRoughnessDry, sandRoughnessWet,
+   * gloss)`, and `gloss` is exactly 1 below the waterline — and then
+   * `applyWaterLighting` multiplied that result AGAIN by the caustics module's
+   * `wetRoughness` (0.22). Submerged sand therefore shaded at 0.3 × 0.22 =
+   * 0.066, which is not wet sand, it is a MIRROR: GGX at α = r² = 0.0044 has
+   * D(0) = 1/(πα²) ≈ 16 400, and the seabed is a huge, near-planar, near-
+   * horizontal surface, so the sun's mirror image lands on it whole.
+   *
+   * MEASURED at ?at=lagoon, tod 15.0, camera 45 m looking down the sun's
+   * azimuth (scene-linear peak radiance of the frame, ACES white point = 4):
+   *
+   *   floor 0     → 363.3   (71.3, 438.0, 483.3)   2892 px above white
+   *   floor 0.15  →  14.4
+   *   floor 0.2   →   5.6
+   *   floor 0.25  →   3.6                             0 px above white
+   *   floor 0.3   →   3.0   — peak leaves the seabed entirely
+   *
+   * At 0.3 the frame's brightest pixel is no longer the seabed at all but the
+   * ocean's own glint road at ~2.7-3.0, which is where it belongs. The warm
+   * white spike read BLUE because the water body absorbs red on the way out —
+   * (1017, 912, 713) at the seabed became (71, 438, 483) at the eye.
+   *
+   * The multiplier is not wrong in general: it is the gloss of a WATER FILM
+   * over a dry material, and it is what makes a hull and a beach look wet as
+   * the swash retreats. It has no meaning below the waterline, where there is
+   * no air interface to be glossy against — hence a floor rather than a
+   * deletion, so rock and ground cover (which model no wetness of their own)
+   * keep their submerged sheen.
+   */
+  underwaterRoughnessFloor: number;
 
   // -- wave-formed sand ripples (the submerged shelf's only structure) -------
   /**
@@ -397,6 +435,7 @@ export const terrainParams: TerrainParams = registerParams(
     sparkleStrength: 1.4,
     sandRoughnessDry: 0.95,
     sandRoughnessWet: 0.3,
+    underwaterRoughnessFloor: 0.3,
 
     rippleStrength: 0.22,
     /**
@@ -638,6 +677,7 @@ function terrainParamsMeta(): Partial<Record<keyof TerrainParams, ParamMeta>> {
     sparkleStrength: { min: 0, max: 4, step: 0.05 },
     sandRoughnessDry: { min: 0, max: 1, step: 0.01 },
     sandRoughnessWet: { min: 0, max: 1, step: 0.01 },
+    underwaterRoughnessFloor: { min: 0, max: 1, step: 0.01 },
     rippleStrength: { min: 0, max: 0.6, step: 0.01 },
     rippleWavelength: { min: 0.1, max: 4, step: 0.05 },
     rippleDepthFade: { min: 1, max: 45, step: 0.5 },

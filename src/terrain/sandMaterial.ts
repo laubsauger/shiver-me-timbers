@@ -131,6 +131,8 @@ function applyWaterLighting(
   base: { color: any; roughness: any; emissive: any },
   depthBelow: any,
   band: any,
+  /** `terrainParams.underwaterRoughnessFloor` — see the roughness note below */
+  roughFloor: any,
 ) {
   const w = waterLighting({
     worldPos: positionWorld,
@@ -142,7 +144,21 @@ function applyWaterLighting(
   const inWater = smoothstep(band.negate(), band, depthBelow);
   return {
     color: base.color.mul(mix(vec3(1, 1, 1), w.tint, inWater)),
-    roughness: base.roughness.mul(mix(float(1), w.roughnessScale, inWater)),
+    /**
+     * THE FLOOR IS LOAD-BEARING — it is the whole of the fix for "massive blue
+     * reflection on the bottom of the sea from the sun" (backprop pending).
+     * `w.roughnessScale` is a water-FILM gloss meant for a dry receiver, but
+     * the sand branch has already crossfaded to `sandRoughnessWet` by the time
+     * it arrives — `gloss` is 1 everywhere below the waterline — so the two
+     * wetness models multiplied and drove the submerged shelf to 0.066, a
+     * mirror the size of the seabed. `underwaterRoughnessFloor` carries the
+     * measurement; `.mul(inWater)` rides the SAME ramp the multiplier does, so
+     * the floor is exactly 0 above the waterline and cannot touch dry sand,
+     * dry rock or ground cover.
+     */
+    roughness: base.roughness
+      .mul(mix(float(1), w.roughnessScale, inWater))
+      .max(roughFloor.mul(inWater)),
     emissive: base.emissive.add(w.addLight.mul(inWater)),
   };
 }
@@ -165,6 +181,7 @@ export function createSandUniforms(opts: SandMaterialOptions = {}) {
     sparkleStrength: uniform(p.sparkleStrength),
     roughnessDry: uniform(p.sandRoughnessDry),
     roughnessWet: uniform(p.sandRoughnessWet),
+    underwaterRoughFloor: uniform(p.underwaterRoughnessFloor),
     rippleStrength: uniform(p.rippleStrength),
     rippleWavelength: uniform(p.rippleWavelength),
     rippleDepthFade: uniform(p.rippleDepthFade),
@@ -206,6 +223,7 @@ export function updateSandUniforms(u: SandUniforms): void {
   u.sparkleStrength.value = p.sparkleStrength;
   u.roughnessDry.value = p.sandRoughnessDry;
   u.roughnessWet.value = p.sandRoughnessWet;
+  u.underwaterRoughFloor.value = p.underwaterRoughnessFloor;
   u.rippleStrength.value = p.rippleStrength;
   u.rippleWavelength.value = p.rippleWavelength;
   u.rippleDepthFade.value = p.rippleDepthFade;
@@ -567,7 +585,12 @@ export function createSandMaterial(opts: SandMaterialOptions = {}) {
   const nodes = buildSandNodes(uniforms, terrainParams.noiseOctaves, shore);
   const material = new THREE.MeshStandardNodeMaterial();
   // §V34 water lighting, same contract as terrainBlendMaterial below
-  const lit = applyWaterLighting(nodes, nodes.depthBelow, uniforms.causticsBand);
+  const lit = applyWaterLighting(
+    nodes,
+    nodes.depthBelow,
+    uniforms.causticsBand,
+    uniforms.underwaterRoughFloor,
+  );
   material.colorNode = lit.color;
   material.roughnessNode = lit.roughness;
   material.emissiveNode = lit.emissive;
@@ -711,6 +734,7 @@ export function terrainBlendMaterial(
     },
     sandNodes.depthBelow,
     sand.causticsBand,
+    sand.underwaterRoughFloor,
   );
   material.colorNode = lit.color;
   material.roughnessNode = lit.roughness;
