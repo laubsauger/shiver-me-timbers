@@ -27,6 +27,22 @@ import {
 } from '../src/sky/sunCycle';
 import { shadowBasis, shadowTexelSize, snapShadowCenter } from '../src/sky/shadowMath';
 
+/**
+ * The §T39 golden-hour hero look, as an hour rather than as "whatever the
+ * default happens to be".
+ *
+ * This WAS `skyParams.timeOfDay`, back when the shipped default and the hero
+ * look were the same 17.3. They are no longer: the default moved to 15.0 so
+ * that visual defects are inspectable instead of being lost in a near-black
+ * scene, while the sunset stayed a look you reach for on the slider. Two
+ * tests below assert properties of a LOW SUN — that the sunset grade actually
+ * renders, and that shadow coverage degenerates into a thin strip — and both
+ * failed on that default change while nothing they test had moved. Binding a
+ * low-sun invariant to a knob that is free to leave the low sun is the bug,
+ * and naming the hour is the fix.
+ */
+const GOLDEN_HOUR = 17.3;
+
 const len = (v: [number, number, number]) => Math.hypot(v[0], v[1], v[2]);
 const angleBetween = (a: [number, number, number], b: [number, number, number]) =>
   Math.acos(Math.min(1, Math.max(-1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])));
@@ -355,15 +371,38 @@ describe('key light vs golden hour — the two ramps must OVERLAP (§T39)', () =
   // never rendered at all. Every assertion below fails if either ramp is
   // retuned without the other.
 
-  it('the SHIPPED default actually renders the sunset grade', () => {
-    // the headline regression: warm == 0 at the default means the four
-    // sunsetXxxColor params are dead code and nobody can see the grade
-    const e = sunElevation(skyParams.timeOfDay, skyParams.latitude);
-    // 0.7, not 0.95: the default deliberately sits BELOW warm's plateau so
+  it('the golden hour actually renders the sunset grade', () => {
+    // the headline regression: warm == 0 there means the four sunsetXxxColor
+    // params are dead code and nobody can ever see the grade.
+    //
+    // THIS USED TO BE BOUND TO `skyParams.timeOfDay`, AND THAT BINDING WAS
+    // WRONG. It conflated two separate things — "the sunset grade is
+    // reachable" (a real invariant, the one the original bug violated) and
+    // "the shipped default IS the sunset" (an art choice, and one the user
+    // has since reversed: the default moved 17.3 → 15.0 so that defects are
+    // inspectable rather than lost in a near-black scene). Pinning an
+    // invariant to a knob means every legitimate move of that knob reads as
+    // a regression. The hour is named here instead.
+    const e = sunElevation(GOLDEN_HOUR, skyParams.latitude);
+    // 0.7, not 0.95: the hero hour deliberately sits BELOW warm's plateau so
     // the sea is not maximally molten and N·L is high enough for shadows to
-    // read (see timeOfDay's comment). This bound still catches the original
-    // bug — a default past lowSunWarmth's upper edge scores exactly 0.
+    // read. This bound still catches the original bug exactly — an hour past
+    // lowSunWarmth's upper edge scores 0, not 0.7.
     expect(skyPalette(e, skyParams).warm).toBeGreaterThan(0.7);
+  });
+
+  it('the sunset grade stays REACHABLE from the slider, wherever the default sits', () => {
+    // the guard the test above used to provide for free and no longer does.
+    // The original bug was two ramps with DISJOINT saturation windows, so no
+    // hour existed with both a saturated palette and a full key. Sweeping for
+    // the existence of such an hour tests that directly, and — unlike the old
+    // form — it cannot be broken merely by moving the default.
+    let found = false;
+    for (let h = 0; h < 24; h += 0.05) {
+      const e = sunElevation(h, skyParams.latitude);
+      if (skyPalette(e, skyParams).warm > 0.7 && daylight(e) > 0.7) found = true;
+    }
+    expect(found).toBe(true);
   });
 
   it('keeps enough N·L on flat water for a shadow to be VISIBLE', () => {
@@ -628,8 +667,17 @@ describe('shadow texel snapping (why: unsnapped = crawling shadow edges)', () =>
     // shadow" and "it does receive shadow at some point very far away" in the
     // same frame. If a coverage fix lands, these numbers move and this test
     // must be re-derived rather than deleted.
-    const s = sunDirection(skyParams.timeOfDay, skyParams.latitude);
-    const e = sunElevation(skyParams.timeOfDay, skyParams.latitude);
+    //
+    // ASSERTED AT THE GOLDEN HOUR, NOT AT THE SHIPPED DEFAULT. The whole
+    // premise here is "at a LOW sun the covered water is a long thin strip" —
+    // the anisotropy is 1/sin(elevation), so the defect is a property of a low
+    // sun, not of whatever hour happens to be the default. It used to read
+    // `skyParams.timeOfDay` only because the default was itself a low-sun
+    // hero look; when that moved 17.3 → 15.0 the test failed while nothing
+    // about shadow coverage had changed. The severity bounds below belong to
+    // the hour, so the hour is named.
+    const s = sunDirection(GOLDEN_HOUR, skyParams.latitude);
+    const e = sunElevation(GOLDEN_HOUR, skyParams.latitude);
     const { x, y } = shadowBasis(s);
     const ext = skyParams.shadowExtent;
     const reach = (azFromSun: number): number => {
