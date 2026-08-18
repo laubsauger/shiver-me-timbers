@@ -291,7 +291,17 @@ export class OceanSimulation {
     const sig = spectrumSignature(p);
     if (sig !== this.signature) {
       this.signature = sig;
-      this.rebuildCountdown = 15; // debounce slider drags (~250ms)
+      // RATE LIMIT, NOT A QUIET-DETECTOR. Re-arming on every changed tick is
+      // what the old code did, and it makes a CONTINUOUSLY-changing input
+      // starve the countdown forever — it never reaches 0, so the sea never
+      // rebuilds at all. That is not a corner case: §V.46 drives windSpeed and
+      // amplitude off the storm field at the ship's own position, so a ship
+      // under way changes this signature EVERY TICK. Arming once and letting
+      // it run down gives a rebuild every 16 ticks (~267 ms) on a moving
+      // input, and still coalesces a slider drag into one rebuild after it
+      // stops. The signature is updated on every change, so what finally gets
+      // built is the LATEST spectrum, not the one that armed the counter.
+      if (this.rebuildCountdown < 0) this.rebuildCountdown = 15;
     }
     if (this.rebuildCountdown >= 0 && this.rebuildCountdown-- === 0) {
       for (const c of this.cascades) c.rebuild(p);

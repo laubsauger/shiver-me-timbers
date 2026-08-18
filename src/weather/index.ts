@@ -159,7 +159,9 @@ export {
 } from './field';
 export {
   blendSample,
+  createAmbientHold,
   createWeatherSample,
+  type AmbientHold,
   type WeatherSample,
 } from './sampler';
 export {

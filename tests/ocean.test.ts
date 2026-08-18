@@ -30,6 +30,9 @@ import {
   windSeaSpread,
 } from '../src/ocean/oceanMath';
 import { oceanParams } from '../src/params/ocean';
+import { OceanSimulation } from '../src/ocean/oceanCascades';
+import { CpuOcean } from '../src/sea-physics/cpuOcean';
+import { SIM_DT } from '../src/core/loop';
 import { oceanSurfaceParams } from '../src/params/oceanSurface';
 import { skyParams } from '../src/params/sky';
 // §V.33: the water's extinction and the geometry it has to reveal both live
@@ -2042,5 +2045,101 @@ describe('foam colour (§V.20)', () => {
   it('foam takes some of the sky colour — reference foam is warm cream', () => {
     expect(sp.foamSkyTint).toBeGreaterThan(0);
     expect(sp.foamSkyTint).toBeLessThan(1);
+  });
+});
+
+/**
+ * THE SPECTRUM REBUILD IS A RATE LIMIT, NOT A QUIET-DETECTOR (§B).
+ *
+ * Both sides of the §V.8 mirror pair gate their h0 regeneration on a 15-tick
+ * countdown armed by a change in the spectrum signature. The countdown was
+ * RE-ARMED on every changed tick, which is a detector for the input going
+ * quiet, not a rate limit: an input that moves every tick never lets it reach
+ * zero and the sea NEVER rebuilds. That is not a corner case — §V.46 drives
+ * `windSpeed` and `amplitude` off the storm field at the ship's own position,
+ * so a ship under way moves the signature on every single tick. The symptom
+ * was a sea that ignored the weather entirely until the value happened to
+ * settle, and then a full 3-cascade rebuild landing as one stall.
+ *
+ * Arming ONCE and letting it run down gives a rebuild every 16 ticks under a
+ * moving input, still coalesces a slider drag into one rebuild after the drag
+ * stops, and — because the signature is updated on every change — builds the
+ * LATEST spectrum rather than the one that armed the counter.
+ *
+ * The two sides are tested TOGETHER on purpose: a mirror that rebuilds on
+ * different ticks from the GPU is §V.8's exact failure, and the arming rule
+ * is duplicated in the two files for the same reason `mirrorSignature` is.
+ */
+describe('spectrum rebuild rate limit (§V.8)', () => {
+  // 128 is the smallest grid the shipped 64² mirror can be extracted from
+  const RESOLUTION = 128;
+  const stubRenderer = { compute: (): void => {} } as never;
+
+  /** ramp the spectrum every tick, exactly as a ship sailing into a cell does */
+  function driveContinuously(ticks: number): { gpu: number[]; mirror: number[] } {
+    const p = { ...oceanParams, resolution: RESOLUTION };
+    const sp = { ...seaPhysicsParams }; // shipped mirrorResolution: cascade 0's band needs it
+    const sim = new OceanSimulation(7, p);
+    const mirror = new CpuOcean(7, p, sp);
+    const gpu: number[] = [];
+    const mirrorTicks: number[] = [];
+    // sim time is held CONSTANT so the mirror's grids are stale-gated on every
+    // tick EXCEPT the ones a rebuild forces — which makes `heightAt` an exact
+    // rebuild detector rather than a proxy that only fires once a cap engages
+    let lastHs = sim.significantWaveHeight();
+    let lastHeight = mirror.heightAt(0, 0, 0);
+    for (let i = 0; i < ticks; i++) {
+      p.windSpeed = 11 + i * 0.25; // moves the signature EVERY tick
+      p.amplitude = 0.24 + i * 0.02;
+      sim.update(stubRenderer, 0, p);
+      mirror.update(0);
+      const hs = sim.significantWaveHeight();
+      if (hs !== lastHs) {
+        gpu.push(i);
+        lastHs = hs;
+      }
+      const height = mirror.heightAt(0, 0, 0);
+      if (height !== lastHeight) {
+        mirrorTicks.push(i);
+        lastHeight = height;
+      }
+    }
+    return { gpu, mirror: mirrorTicks };
+  }
+
+  it('a continuously moving spectrum rebuilds on a fixed cadence, not never', () => {
+    const { gpu } = driveContinuously(100);
+    // the old re-arming code produced ZERO rebuilds over these 100 ticks
+    expect(gpu.length).toBeGreaterThan(4);
+    // first rebuild is the debounce the slider drag wants — not immediate
+    expect(gpu[0]).toBeGreaterThanOrEqual(15);
+    // and then it is REGULAR: every gap is the same 16 ticks (~267 ms)
+    const gaps = gpu.slice(1).map((t, i) => t - gpu[i]);
+    for (const gap of gaps) expect(gap).toBe(16);
+  });
+
+  it('the mirror rebuilds on the SAME ticks as the GPU (§V.8)', () => {
+    const { gpu, mirror } = driveContinuously(100);
+    expect(gpu.length).toBeGreaterThan(4); // not vacuously equal at zero
+    expect(mirror).toEqual(gpu);
+  });
+
+  it('a slider drag that STOPS still coalesces into one rebuild', () => {
+    const p = { ...oceanParams, resolution: RESOLUTION };
+    const sim = new OceanSimulation(7, p);
+    let rebuilds = 0;
+    let lastHs = sim.significantWaveHeight();
+    for (let i = 0; i < 60; i++) {
+      if (i < 10) p.windSpeed = 11 + i * 0.5; // the drag
+      sim.update(stubRenderer, i * SIM_DT, p);
+      const hs = sim.significantWaveHeight();
+      if (hs !== lastHs) {
+        rebuilds++;
+        lastHs = hs;
+      }
+    }
+    // ten changed ticks, ONE rebuild — and it carries the value the drag
+    // ended on, because the signature tracks every change
+    expect(rebuilds).toBe(1);
   });
 });

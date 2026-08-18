@@ -5,7 +5,7 @@
  * and applying one is nothing but writing values into the live registry
  * objects — every param not named in a patch stays untouched.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   clearParamsRegistry,
   registerParams,
@@ -25,6 +25,7 @@ import {
   advanceDrift,
   applyWeatherPreset,
   blendSample,
+  createAmbientHold,
   createWeatherSample,
   createWeatherSystem,
   hashCell,
@@ -839,5 +840,260 @@ describe('layout lanes are quantised so the sky is not rebuilt every frame', () 
     // and it still LANDS exactly on target — quantising progress, not value
     expect(fakes.clouds.clusterHeight).toBe(weatherPresets.storm.clouds.clusterHeight);
     expect(fakes.clouds.anvilSpread).toBe(weatherPresets.storm.clouds.anvilSpread);
+  });
+});
+
+/**
+ * §V.46 THE STORM FIELD MUST NOT FEED ON ITS OWN OUTPUT (§B).
+ *
+ * `blendSample` takes its `from` end from the LIVE params objects — by
+ * design, that is what makes ambient weather mean "whatever the preset lerp
+ * last wrote". main.ts then drove the sea by writing the sampled values
+ * BACK into those same params, so every tick blended from a number that
+ * already contained the previous tick's blend. The first test below is the
+ * reproduction: it runs the old wiring and shows the sea walking to the storm
+ * preset under a cell that is only ever a THIRD of a storm, and staying there
+ * through a minute of clear air. The rest pin the guard.
+ *
+ * WHY IT MATTERS beyond the numbers: `windSpeed` is the wind the sails and
+ * the storm-cell drift read, so a pinned wind is also "wind and waves feel
+ * disconnected"; and `amplitude`+`windSpeed` are both spectrum-signature
+ * keys, so the ratchet silently re-cut the whole sea state (Hs 2.78 → 14.45 m
+ * on the shipped params) for the rest of the session.
+ */
+describe('§V.46 storm-field write-back (the ratchet)', () => {
+  /** the two keys main.ts publishes — the only ones that could compound */
+  const DRIVEN = ['windSpeed', 'amplitude'] as const;
+  /**
+   * THE STEPS main.ts really ships — the tests are worthless against different
+   * ones, and these bound how often the field re-cuts the spectrum (~490 ms).
+   */
+  const STEPS = { windSpeed: 0.5, amplitude: 0.02 };
+  /** every other ocean key the storm patch names: must stay ambient */
+  const UNDRIVEN = Object.keys(weatherPresets.storm.ocean).filter(
+    (k) => !(DRIVEN as readonly string[]).includes(k),
+  );
+
+  let saved: Record<string, unknown>;
+  beforeEach(() => {
+    // the REAL module singleton, because that is the object main.ts blends
+    // from and publishes into — a fake would not prove anything about the
+    // shipped wiring. Registered so applyWeatherPreset can reach it too.
+    saved = { ...(oceanParams as unknown as Record<string, unknown>) };
+    registerParams('ocean', oceanParams);
+  });
+  afterEach(() => {
+    Object.assign(oceanParams, saved);
+  });
+
+  it('REPRODUCTION: writing the sample back makes a third of a storm a whole one', () => {
+    const out = createWeatherSample();
+    const ambientWind = oceanParams.windSpeed;
+    const ambientAmp = oceanParams.amplitude;
+    // the old main.ts sim tick, verbatim
+    const tick = (cell: number): void => {
+      blendSample(cell, 'swell', out);
+      oceanParams.windSpeed = out.ocean.windSpeed;
+      oceanParams.amplitude = out.ocean.amplitude;
+    };
+
+    for (let i = 0; i < 30; i++) tick(0.3);
+    // a CONSTANT 0.3 cell, and the sea is at the full storm preset
+    expect(oceanParams.windSpeed).toBeCloseTo(weatherPresets.storm.ocean.windSpeed, 2);
+    expect(oceanParams.amplitude).toBeCloseTo(weatherPresets.storm.ocean.amplitude, 2);
+
+    for (let i = 0; i < 60; i++) tick(0); // a full second of clear air
+    expect(oceanParams.windSpeed).toBeCloseTo(weatherPresets.storm.ocean.windSpeed, 2);
+    expect(oceanParams.windSpeed).not.toBeCloseTo(ambientWind, 1);
+    expect(oceanParams.amplitude).not.toBeCloseTo(ambientAmp, 1);
+  });
+
+  it('the hold keeps a constant cell at a constant sea, and clear air undoes it', () => {
+    const out = createWeatherSample();
+    const ambientWind = oceanParams.windSpeed;
+    const ambientAmp = oceanParams.amplitude;
+    const hold = createAmbientHold(DRIVEN, oceanParams, STEPS);
+    const tick = (cell: number): void => {
+      hold.restore();
+      blendSample(cell, 'swell', out);
+      hold.publish(out.ocean);
+    };
+
+    tick(0.3);
+    const oneBlendWind = oceanParams.windSpeed;
+    const oneBlendAmp = oceanParams.amplitude;
+    // a single blend of 11 → 18 at t=0.3 is 13.1, published on the 0.5 grid
+    // anchored at ambient 11 → 13.0. Within half a step of the true blend.
+    const trueBlend =
+      ambientWind + (weatherPresets.storm.ocean.windSpeed - ambientWind) * 0.3;
+    expect(oneBlendWind).toBeCloseTo(13.0, 9);
+    expect(Math.abs(oneBlendWind - trueBlend)).toBeLessThanOrEqual(STEPS.windSpeed / 2);
+    // 200 more ticks of the identical cell must not move it one metre/second
+    for (let i = 0; i < 200; i++) tick(0.3);
+    expect(oceanParams.windSpeed).toBeCloseTo(oneBlendWind, 9);
+    expect(oceanParams.amplitude).toBeCloseTo(oneBlendAmp, 9);
+
+    // sail out of the squall: the ambient sea comes back EXACTLY
+    for (let i = 0; i < 60; i++) tick(0);
+    expect(oceanParams.windSpeed).toBe(ambientWind);
+    expect(oceanParams.amplitude).toBe(ambientAmp);
+  });
+
+  it('nothing but the driven keys moves — the other storm keys stay ambient', () => {
+    const out = createWeatherSample();
+    const before = { ...(oceanParams as unknown as Record<string, number>) };
+    const hold = createAmbientHold(DRIVEN, oceanParams, STEPS);
+    for (let i = 0; i < 50; i++) {
+      hold.restore();
+      blendSample(0.7, 'swell', out);
+      hold.publish(out.ocean);
+    }
+    for (const key of UNDRIVEN) {
+      expect((oceanParams as unknown as Record<string, number>)[key]).toBe(before[key]);
+    }
+  });
+
+  it('§V.62 a weather transition still moves the ambient sea, cell or no cell', () => {
+    const out = createWeatherSample();
+    const hold = createAmbientHold(DRIVEN, oceanParams, STEPS);
+    const original = console.warn;
+    console.warn = () => {};
+    let transition;
+    try {
+      transition = applyWeatherPreset('calm', { lerpSeconds: 1 });
+    } finally {
+      console.warn = original;
+    }
+    // 2 s of transition while parked inside a steady cell — main.ts's order:
+    // weather.update() first, THEN restore/sample/publish
+    for (let i = 0; i < 120; i++) {
+      transition.update(1 / 60);
+      hold.restore();
+      blendSample(0.5, 'calm', out);
+      hold.publish(out.ocean);
+    }
+    // the cell is still on, so the live sea is half way to storm...
+    const calm = weatherPresets.calm.ocean;
+    const storm = weatherPresets.storm.ocean;
+    expect(oceanParams.windSpeed).toBeCloseTo(calm.windSpeed + (storm.windSpeed - calm.windSpeed) * 0.5, 9);
+    // ...and leaving it lands on CALM, not on the swell we started from
+    for (let i = 0; i < 5; i++) {
+      hold.restore();
+      blendSample(0, 'calm', out);
+      hold.publish(out.ocean);
+    }
+    expect(oceanParams.windSpeed).toBe(calm.windSpeed);
+    expect(oceanParams.amplitude).toBe(calm.amplitude);
+  });
+
+  it('§V.62 a debug-panel drag still drives the sea — the knob is not a no-op', () => {
+    const out = createWeatherSample();
+    const hold = createAmbientHold(DRIVEN, oceanParams, STEPS);
+    const tick = (cell: number): void => {
+      hold.restore();
+      blendSample(cell, 'swell', out);
+      hold.publish(out.ocean);
+    };
+    for (let i = 0; i < 10; i++) tick(0.5);
+    // Tweakpane writes straight into the params object, between ticks
+    oceanParams.windSpeed = 7.5;
+    tick(0.5);
+    const storm = weatherPresets.storm.ocean.windSpeed;
+    // blend 12.75, on the 0.5 grid anchored at the value the panel just set
+    expect(oceanParams.windSpeed).toBeCloseTo(
+      7.5 + Math.round(((storm - 7.5) * 0.5) / STEPS.windSpeed) * STEPS.windSpeed,
+      9,
+    );
+    expect(Math.abs(oceanParams.windSpeed - (7.5 + (storm - 7.5) * 0.5)))
+      .toBeLessThanOrEqual(STEPS.windSpeed / 2);
+    // and it is the new AMBIENT, so it is what clear air returns to
+    for (let i = 0; i < 10; i++) tick(0);
+    expect(oceanParams.windSpeed).toBe(7.5);
+  });
+});
+
+/**
+ * THE PUBLISH STEP (§B, same family as the ratchet above).
+ *
+ * `windSpeed` and `amplitude` are spectrum-signature keys: moving either
+ * re-cuts h0 on the GPU and on the §V.8 mirror, measured warm at the shipped
+ * 512² at ~490 ms of MAIN-THREAD work (394 ms GPU-side + 96 ms mirror; the
+ * cost is `generateSpectrumData`, six analytic 512² passes per cascade — NOT
+ * the FFT). A §V.46 field sampled at the ship's own position moves on every
+ * tick she is under way, so publishing it raw arms the ocean's rebuild rate
+ * limit forever and buys a ~490 ms stall every 16 ticks.
+ *
+ * The step is what makes the sea answer the weather affordably. These tests
+ * pin BOTH halves of that bargain: that it genuinely bounds the number of
+ * distinct spectra, and that it costs nothing at the two places a value has
+ * to be exact — an authored preset and a panel drag (§V.62).
+ */
+describe('§V.46 publish step (the spectrum is not free)', () => {
+  const DRIVEN = ['windSpeed', 'amplitude'] as const;
+  const STEPS = { windSpeed: 0.5, amplitude: 0.02 }; // as main.ts ships them
+
+  let saved: Record<string, unknown>;
+  beforeEach(() => {
+    saved = { ...(oceanParams as unknown as Record<string, unknown>) };
+    registerParams('ocean', oceanParams);
+  });
+  afterEach(() => {
+    Object.assign(oceanParams, saved);
+  });
+
+  it('a smooth sweep through a whole squall yields a few dozen spectra, not one per tick', () => {
+    const out = createWeatherSample();
+    const hold = createAmbientHold(DRIVEN, oceanParams, STEPS);
+    const spectra = new Set<string>();
+    const TICKS = 1200; // 20 s of sim, a cell strength moving every single tick
+    for (let i = 0; i < TICKS; i++) {
+      hold.restore();
+      blendSample(i / (TICKS - 1), 'swell', out); // 0 → 1, monotone, never repeats
+      hold.publish(out.ocean);
+      spectra.add(`${oceanParams.windSpeed}|${oceanParams.amplitude}`);
+    }
+    // the range holds (18−11)/0.5 = 14 windSpeed steps and (1.15−0.24)/0.02
+    // ≈ 45 amplitude steps. They do NOT cross in lockstep, so what bounds the
+    // spectra is their UNION, 14 + 45 + 1 = 60 — against 1200 distinct spectra
+    // (one per tick, each a ~490 ms rebuild) if the raw blend were published
+    expect(spectra.size).toBeLessThanOrEqual(61);
+    expect(spectra.size).toBeGreaterThan(20); // and it still MOVES, finely
+  });
+
+  it('never departs from the true blend by more than half a step', () => {
+    const out = createWeatherSample();
+    const hold = createAmbientHold(DRIVEN, oceanParams, STEPS);
+    const ambientWind = oceanParams.windSpeed;
+    const ambientAmp = oceanParams.amplitude;
+    const storm = weatherPresets.storm.ocean;
+    for (let i = 0; i <= 100; i++) {
+      const t = i / 100;
+      hold.restore();
+      blendSample(t, 'swell', out);
+      hold.publish(out.ocean);
+      const trueWind = ambientWind + (storm.windSpeed - ambientWind) * t;
+      const trueAmp = ambientAmp + (storm.amplitude - ambientAmp) * t;
+      expect(Math.abs(oceanParams.windSpeed - trueWind)).toBeLessThanOrEqual(
+        STEPS.windSpeed / 2 + 1e-9,
+      );
+      expect(Math.abs(oceanParams.amplitude - trueAmp)).toBeLessThanOrEqual(
+        STEPS.amplitude / 2 + 1e-9,
+      );
+    }
+  });
+
+  it('§V.62 the grid is anchored at ambient, so a preset and a knob stay EXACT', () => {
+    const out = createWeatherSample();
+    const hold = createAmbientHold(DRIVEN, oceanParams, STEPS);
+    // 1.15 is not a multiple of 0.02 and 0.24 is not the same phase as 1.15 —
+    // an absolute grid would round the authored storm amplitude to 1.16 and
+    // swallow every other step of the panel's own 0.01 drag
+    for (const knob of [0.24, 0.25, 0.26, 0.27, 1.15]) {
+      oceanParams.amplitude = knob;
+      hold.restore();
+      blendSample(0, 'swell', out); // clear air: the blend IS ambient
+      hold.publish(out.ocean);
+      expect(oceanParams.amplitude).toBe(knob);
+    }
   });
 });

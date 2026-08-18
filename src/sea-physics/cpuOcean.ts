@@ -579,12 +579,15 @@ export class CpuOcean {
   /** advance mirror to sim time; grids recompute every updateEveryTicks */
   update(time: number): void {
     this.time = time;
-    // track live spectrum-shaping tweaks; same 15-tick debounce (~250 ms)
-    // as the GPU so both sides settle on the new sea near-simultaneously
+    // track live spectrum-shaping tweaks; same 15-tick RATE LIMIT as the GPU
+    // (OceanSimulation.update) so both sides settle on the new sea on the same
+    // tick. §V.8: this arming rule is part of the mirror contract — arm-once
+    // vs re-arm-on-change differ by MANY TICKS under a continuously-moving
+    // spectrum, so the two sides must not be changed independently.
     const sig = mirrorSignature(this.oceanP, this.seaP);
     if (sig !== this.signature) {
       this.signature = sig;
-      this.rebuildCountdown = 15;
+      if (this.rebuildCountdown < 0) this.rebuildCountdown = 15;
     }
     if (this.rebuildCountdown >= 0 && this.rebuildCountdown-- === 0) {
       const n = this.seaP.mirrorResolution;
