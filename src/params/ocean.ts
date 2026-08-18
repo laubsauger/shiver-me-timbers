@@ -155,6 +155,52 @@ export interface OceanParams {
    * per-cascade `displacement.w` must do the same.
    */
   jacobianFoamBias: number;
+
+  // -- shoaling (§V.72): the sea calms over its own shallows ----------------
+  /**
+   * THE ONE ARTISTIC COMPRESSION IN THE SHOALING MODEL, as a fraction of the
+   * seabed's OWN open-ocean depth: every band must be back to full open-ocean
+   * amplitude by this fraction of it.
+   *
+   * Needed because our world is not planet-scale. A wave is in deep water
+   * below d = λ/2; the shipped storm swell is λ 143 m, so it would want 71 m
+   * while the sea floor is 45 m — the uncompressed criterion damps the OPEN
+   * OCEAN by 37% at storm. This pins the transition inside the depth range
+   * the world actually has, by flooring the wavenumber at π/(fraction·depth)
+   * (`shoaling.shoalWavenumberFloor`).
+   *
+   * MEASURED at 0.6: 1 − tanh(k·45 m) = 5.7e-5 for every band at every preset,
+   * i.e. the shipped open ocean cannot move. Raising it toward 1 starts the
+   * calming further out and eventually eats into the open sea; lowering it
+   * squeezes the whole shoaling band into the last few metres of shelf, which
+   * is what makes a beach look like a bathtub edge.
+   */
+  shoalDeepFraction: number;
+  /**
+   * The McCowan breaker index: the fraction of the local water column a wave
+   * may occupy before depth-limited breaking starts to bite. 0.78 is the
+   * textbook value (H ≈ 0.78·d at breaking), NOT a tuned one, and below it the
+   * clip is EXACTLY the identity — so this term is a true no-op on any sea
+   * that is not about to run out of water.
+   *
+   * Measured over 60 s of the mirror at depths 1–200 m: it never fires at calm
+   * or at swell (0.00% of samples), and fires on 21.6% of the surface at 1 m /
+   * 7.0% at 10 m / 0.8% at 20 m / 0% at 45 m at storm. That disjointness is
+   * the design, not a coincidence to be tuned away.
+   */
+  shoalBreakerIndex: number;
+  /**
+   * Hard saturation: the fraction of the local water column a wave may NEVER
+   * exceed. This is the playability guarantee — (1 − this)·d metres of water
+   * always remain, so the ocean mesh can never drop below the sand and flicker
+   * a lagoon dry. At 0.85 a 4.5 m basin keeps 0.67 m at the deepest storm
+   * trough, against −24.3 m of raw storm swell.
+   *
+   * MUST stay above `shoalBreakerIndex` (the gap between them is the soft
+   * knee's width); at or below it the clip becomes a hard corner along a depth
+   * contour, which reads as a painted ring on the water.
+   */
+  shoalColumnCeiling: number;
 }
 
 export const oceanParams: OceanParams = registerParams('ocean', {
@@ -229,6 +275,11 @@ export const oceanParams: OceanParams = registerParams('ocean', {
   swellDirectionality: 24,
   swellBandwidth: 0.12,
   swellGridModes: 2,
+  // see the interface docs — 0.6 measured at 5.7e-5 of open-ocean change,
+  // 0.78 is the McCowan breaker index, 0.85 is the playability guarantee
+  shoalDeepFraction: 0.6,
+  shoalBreakerIndex: 0.78,
+  shoalColumnCeiling: 0.85,
 }, oceanParamsMeta());
 
 function oceanParamsMeta() {
@@ -251,5 +302,8 @@ function oceanParamsMeta() {
     swellDirectionality: { min: 0, max: 64, step: 0.5 },
     swellBandwidth: { min: 0.02, max: 1, step: 0.01 },
     swellGridModes: { min: 0.5, max: 8, step: 0.1 },
+    shoalDeepFraction: { min: 0.05, max: 1.5, step: 0.01 },
+    shoalBreakerIndex: { min: 0.1, max: 0.95, step: 0.01 },
+    shoalColumnCeiling: { min: 0.15, max: 0.99, step: 0.01 },
   };
 }

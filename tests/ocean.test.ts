@@ -647,8 +647,24 @@ describe('§V.19 directional spread is a function of SCALE, not a constant', () 
 });
 
 describe('§B.7 every spectrum-shaping param forces a rebuild', () => {
-  /** params that do NOT shape h0 — everything else must be in the signature */
-  const NOT_SPECTRAL = new Set(['choppiness', 'choppinessFoldLimit', 'jacobianFoamBias']);
+  /**
+   * params that do NOT shape h0 — everything else must be in the signature.
+   *
+   * The three `shoal*` params are post-processing on top of the finished
+   * spectrum (§V.72: an attenuation applied at the sampler, per cascade), so
+   * they must NOT force an h0 rebuild — and precisely because they are outside
+   * the signature, BOTH sides re-read them every frame rather than caching
+   * them on the rebuild path (surfaceMaterial's `refreshShoal`,
+   * CpuOcean.update). Adding one here without doing that is §V.62.
+   */
+  const NOT_SPECTRAL = new Set([
+    'choppiness',
+    'choppinessFoldLimit',
+    'jacobianFoamBias',
+    'shoalDeepFraction',
+    'shoalBreakerIndex',
+    'shoalColumnCeiling',
+  ]);
 
   it('the signature key list covers every spectral param in OceanParams', () => {
     const covered = new Set<string>(SPECTRUM_SIGNATURE_KEYS);

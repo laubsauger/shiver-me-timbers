@@ -11,6 +11,7 @@ import {
   generateButterfly,
   generateH0,
   spectralHeightVariance,
+  spectralMeanWavenumber,
   slopeResolutionFootprint,
   slopeVarianceTotal,
   slopeWavelengthHistogram,
@@ -61,6 +62,21 @@ export class OceanCascade {
   jacobianRms = 0;
   /** elevation variance of this cascade's band (m²) — sea-state scale */
   heightVariance = 0;
+  /**
+   * Energy-weighted mean wavenumber of this band (rad/m) — the ONE k that
+   * stands for this cascade when something needs to ask "how long are these
+   * waves", and the input `src/ocean/shoaling.ts` keys the per-cascade
+   * attenuation on (a wave feels the bottom below d = λ/2, so shoaling is
+   * wavelength-dependent and §V.19's band split is what makes per-cascade
+   * behaviour possible at all).
+   *
+   * Published as a live MEASUREMENT for the same reason `jacobianRms` is:
+   * cascade 0's mean wavelength moves 249 → 87 → 143 m across calm/swell/storm
+   * as the wind sea and the swell train trade dominance inside its band, so a
+   * baked per-cascade constant would be wrong on two of the three presets
+   * (§B.12: publish the moment, do not fit a constant to it).
+   */
+  meanWavenumber = 0;
   /** slope variance binned by wavelength — see `slopeFootprint` */
   private slopeBins: Float64Array<ArrayBufferLike> = new Float64Array(SLOPE_BIN_COUNT);
   private h0Texture: THREE.DataTexture;
@@ -108,6 +124,7 @@ export class OceanCascade {
     this.steepnessRms = spectralSteepness(p.resolution, this.domain, p, band);
     this.jacobianRms = spectralJacobianRms(p.resolution, this.domain, p, band);
     this.heightVariance = spectralHeightVariance(p.resolution, this.domain, p, band);
+    this.meanWavenumber = spectralMeanWavenumber(p.resolution, this.domain, p, band);
     this.slopeBins = slopeWavelengthHistogram(p.resolution, this.domain, p, band);
     // seed offset per cascade → uncorrelated gaussians across cascades
     return generateH0(p.resolution, this.domain, this.seed + this.index * 7919, p, band);

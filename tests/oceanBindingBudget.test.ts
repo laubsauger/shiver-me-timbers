@@ -272,13 +272,20 @@ const LEDGER: readonly LedgerEntry[] = [
   {
     file: 'src/island/seabed.ts',
     source: seabedSource,
-    sites: 1,
+    // `seabedHeightNode` (§V.24 tint, fragment) and `seabedHeightLodNode`
+    // (§V.72 shoaling, vertex). TWO call sites, ONE texture: bindings dedupe
+    // on `value.uuid` per stage and both read the same DataTexture, so the
+    // fragment count does not move and the vertex stage gains exactly one.
+    sites: 2,
     // §V.24 shallows tint. Half-float DataTexture, LinearFilter → filterable.
     fragmentTextures: 1,
     fragmentSamplers: 1,
-    vertexTextures: 0,
-    vertexSamplers: 0,
-    why: 'seabedShallowFactorNode → texture(field.texture)',
+    // §V.72 shoaling: the ocean's `positionNode` reads the seabed depth to
+    // attenuate each cascade over shallow water. THE CONTESTED SPARE IS A
+    // FRAGMENT SPARE — see the assertions below — and this spends none of it.
+    vertexTextures: 1,
+    vertexSamplers: 1,
+    why: 'seabedShallowFactorNode → texture() [fragment]; seabedHeightLodNode → texture().level() [vertex]',
   },
   {
     file: 'src/reflection/reflectionShading.ts',
@@ -393,11 +400,20 @@ describe('§V.40 ocean material binding budget', () => {
     // silicon the adapter grants far more than 16 textures once asked, while
     // `maxSamplersPerShaderStage` IS 16 and asking changes nothing. Count
     // samplers; the texture number is a leading indicator, not a limit.
-    // 3/3 and under no pressure — the vertex stage samples only the three
-    // displacement textures. If the FRAGMENT side ever needs them, see "THE
+    // 4/4 and under no pressure — three displacement textures plus the §V.72
+    // seabed depth. THE AXIS THAT IS SCARCE IS THE FRAGMENT ONE, and this is
+    // worth stating because it decided a whole feature's design: bindings are
+    // keyed on (node, shaderStage), so the ONE contested spare everybody
+    // budgets against is a FRAGMENT spare and the vertex stage has twelve
+    // free. Shoaling needed the seabed depth in `positionNode` and it cost
+    // nothing anyone was competing for; its fragment half re-reads a texture
+    // already bound there and cost nothing at all. Check WHICH STAGE before
+    // concluding a feature is unaffordable.
+    // If the FRAGMENT side ever needs the displacement textures, see "THE
     // VERTEX ESCAPE HATCH" in this file's header: an array displacement with a
     // hand-rolled 4-tap bilinear costs 1 texture and 0 samplers here.
-    expect(sum((e) => e.vertexTextures)).toBe(3);
+    expect(sum((e) => e.vertexTextures)).toBe(4);
+    expect(sum((e) => e.vertexSamplers)).toBe(4);
   });
 
   it('still requests the raised limits at device creation', () => {

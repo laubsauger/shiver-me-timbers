@@ -543,6 +543,54 @@ export function slopeVarianceTotal(bins: Float64Array): number {
 }
 
 /**
+ * THE BAND'S OWN WAVENUMBER (rad/m) — its ELEVATION-ENERGY-WEIGHTED mean k,
+ * i.e. Σ k·|h|² / Σ |h|² over the modes this cascade actually carries.
+ *
+ * Shoaling is strongly wavelength-dependent (a wave feels the bottom below
+ * d = λ/2), so `src/ocean/shoaling.ts` needs ONE k per cascade. Publishing it
+ * as a MEASUREMENT rather than baking a constant per cascade is the same
+ * discipline as `spectralHeightVariance` / `slopeFootprint`, and here it is
+ * load-bearing rather than tidy: cascade 0 spans λ 40–1010 m and its mean
+ * wavelength moves 249 m → 87 m → 143 m across the calm/swell/storm presets,
+ * because the wind sea and the swell train trade dominance inside that one
+ * band. A baked constant would be wrong on two of the three.
+ *
+ * Weighted by ENERGY, not by amplitude or by mode count: k is being used to
+ * decide when this band's CONTRIBUTION TO THE SURFACE stops feeling the
+ * bottom, and that contribution is what the variance measures. Weighting by
+ * mode count would answer with the band's geometric centre, which on a
+ * log-spaced-energy spectrum is nowhere near where the sea's motion lives.
+ *
+ * Same loop shape as `spectralHeightVariance` (transfer function 1), so the
+ * two can only ever disagree about the weighting, never about the band.
+ */
+export function spectralMeanWavenumber(
+  N: number,
+  domain: number,
+  p: OceanParams,
+  band: SpectrumBand,
+): number {
+  let energy = 0;
+  let weighted = 0;
+  for (let m = 0; m < N; m++) {
+    for (let n = 0; n < N; n++) {
+      const kx = (2 * Math.PI * (n - N / 2)) / domain;
+      const kz = (2 * Math.PI * (m - N / 2)) / domain;
+      const k = Math.hypot(kx, kz);
+      if (!(k > band.kMin && k <= band.kMax) || k < 1e-9) continue;
+      const amp = Math.sqrt(waveSpectrum(kx, kz, p) / 2) / domain;
+      const variance = 2 * amp * amp;
+      energy += variance;
+      weighted += variance * k;
+    }
+  }
+  // an empty or zero-energy band has no wavelength to report; 0 lets the
+  // caller's own floor (shoaling.shoalWavenumber) supply the answer rather
+  // than propagating a NaN into every vertex (§V.28)
+  return energy > 0 ? weighted / energy : 0;
+}
+
+/**
  * RMS surface elevation contributed by one cascade's band (σ_h). Summed in
  * quadrature across cascades this is the sea state's scale: significant wave
  * height Hs = 4σ. Shading thresholds that mean "a crest" must be expressed in

@@ -24,6 +24,18 @@
  * choppiness λ on Dx/Dz. Slope/jacobian fields are skipped — buoyancy
  * needs only height + horizontal displacement; the shared fields' math is
  * bit-identical in structure to the GPU's.
+ *
+ * SHOALING (§V.72) rides on top of all of that, from the SHARED definition in
+ * src/ocean/shoaling.ts rather than from a second implementation: the sea
+ * calms over its own shallows on the GPU, so it must calm identically here or
+ * the hull floats at open-ocean height over a calmed lagoon. Two things make
+ * "same formula" insufficient and are therefore load-bearing here —
+ *  · the depth is read at the GRID COORD the inversion solves for, not at the
+ *    query point, because that grid coord is the vertex the GPU displaced;
+ *  · the depth is measured against STILL WATER, so neither side has to know
+ *    the other's displacement to agree.
+ * Both are §V.72's own text. Cascade 2 is still unmirrored, so the two sides
+ * differ by its (σ ≈ 0.07 m) contribution exactly as they did before.
  */
 import { SIM_DT } from '../core/loop';
 import {
@@ -34,9 +46,16 @@ import {
   generateH0,
   GRAVITY,
   spectralJacobianRms,
+  spectralMeanWavenumber,
 } from '../ocean/oceanMath';
+import {
+  breakerClip,
+  shoalFactor,
+  shoalWavenumber,
+} from '../ocean/shoaling';
 import { oceanParams, type OceanParams } from '../params/ocean';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../params/seaPhysics';
+import type { SeabedField } from './grounding';
 
 /** cascades mirrored for buoyancy (see header: cascade 2 excluded) */
 export const MIRRORED_CASCADES = 2;
@@ -97,6 +116,13 @@ export function extractCentralBlock(
 
 class MirrorCascade {
   readonly domain: number;
+  /**
+   * This band's energy-weighted mean wavenumber (rad/m), from the SAME
+   * `spectralMeanWavenumber` call `OceanCascade` makes — so the shoaling
+   * attenuation the ship floats on is derived from the same measurement of the
+   * same band as the one the GPU draws (§V.8, §V.72).
+   */
+  readonly meanWavenumber: number;
   readonly height: Float32Array;
   /**
    * THE SMITH-CORRECTED HEIGHT — the field a hull actually feels (§V.68).
@@ -183,6 +209,7 @@ class MirrorCascade {
           `band kMax ${band.kMax.toFixed(3)} ≥ grid edge ${kEdge.toFixed(3)}`,
       );
     }
+    this.meanWavenumber = spectralMeanWavenumber(p.resolution, this.domain, p, band);
     // identical h0 call to OceanCascade.generateSpectrumData (§V.8)
     const full = generateH0(p.resolution, this.domain, seed + index * 7919, p, band);
     this.h0 = extractCentralBlock(full, p.resolution, redN);
@@ -449,6 +476,30 @@ export class CpuOcean {
   private rebuildCountdown = -1;
   private time = NaN;
   private gridTime = NaN;
+  /**
+   * §V.72 THE SEABED, and the reason it is OPTIONAL and STRUCTURAL.
+   *
+   * Optional: an open-ocean scene (and most of the test suite) has no islands,
+   * and with no bed there is nothing to shoal against — every path below
+   * short-circuits to the pre-shoaling behaviour, bit-identically.
+   *
+   * Structural (`{ heightAt }`, the interface grounding.ts already declares)
+   * rather than the concrete `island/seabed`: §V.3 keeps sea-physics free of
+   * the engine and of the island's params, and a test can hand this an
+   * analytic beach — `{ heightAt: () => -3 }` — which is the only way to
+   * assert the shoaling law at a KNOWN depth.
+   */
+  private seabed: SeabedField | null = null;
+  /**
+   * Per-cascade shoaling wavenumber (rad/m) — the band's own mean k, floored
+   * so no band's transition reaches deeper than the world's sea floor. Cached
+   * per tick rather than per sample: it moves only when the spectrum, the
+   * shoaling params or the bed's open depth move, and `heightAt` is called
+   * many times per tick by the hull stations.
+   */
+  private shoalK: number[] = [];
+  /** open-ocean water depth (m) reported by the bed away from any island */
+  private openDepth = 0;
 
   constructor(
     seed: number,
@@ -466,6 +517,40 @@ export class CpuOcean {
     for (let i = 0; i < MIRRORED_CASCADES; i++) {
       this.cascades.push(new MirrorCascade(i, seed, oceanP, n));
     }
+    this.refreshShoal();
+  }
+
+  /**
+   * Wire the seabed the sea shoals over (§V.72). Separate from the constructor
+   * because the mirror is built from a seed alone and the archipelago is built
+   * later; call it once, at startup, with the SAME field the ocean material
+   * was handed — two different beds is §V.8 with extra steps.
+   *
+   * `openDepth` is read from the field rather than from params/island so that
+   * sea-physics keeps its §V.3 independence: it is data, not a dependency.
+   */
+  setSeabed(seabed: SeabedField | null, openDepth: number): void {
+    this.seabed = seabed;
+    this.openDepth = Math.max(openDepth, 0);
+    this.refreshShoal();
+  }
+
+  /** per-cascade shoaling wavenumbers — see `shoalK` */
+  private refreshShoal(): void {
+    this.shoalK = this.cascades.map((c) =>
+      shoalWavenumber(c.meanWavenumber, this.openDepth, this.oceanP),
+    );
+  }
+
+  /**
+   * Water depth (m, ≥ 0) under still water at a GRID coord.
+   *
+   * §V.72: still water (y = 0), never the displaced surface — the displacement
+   * is what is being attenuated, so keying it on itself is a feedback loop,
+   * and the bed's own depth is what the vertex shader can cheaply agree with.
+   */
+  private depthAt(x: number, z: number): number {
+    return this.seabed ? Math.max(-this.seabed.heightAt(x, z), 0) : 0;
   }
 
   /** sim time of the last update() call (grids may lag ≤ updateEveryTicks) */
@@ -512,6 +597,12 @@ export class CpuOcean {
       this.jacobianRms = totalJacobianRms(this.oceanP);
       this.gridTime = NaN; // force recompute below
     }
+    // §V.72: cheap (one max + one divide per cascade) and it has to run every
+    // tick, not only on rebuild — the shoaling params are NOT spectrum params,
+    // so `mirrorSignature` deliberately does not see them and a value cached
+    // on the rebuild path would ignore a live tweak (§V.62). The GPU refreshes
+    // the same numbers in `updateFromParams`, from the same function.
+    this.refreshShoal();
     const staleFor = Math.abs(time - this.gridTime);
     if (staleFor < this.seaP.updateEveryTicks * SIM_DT - 1e-9) return;
     const lambda = this.effectiveChoppiness();
@@ -539,7 +630,12 @@ export class CpuOcean {
     return Math.max(0, this.seaP.hullDraft * this.seaP.smithDepthScale);
   }
 
-  /** summed cascade fields at UNDISPLACED grid coords (x,z) — no inversion */
+  /**
+   * Summed cascade fields at UNDISPLACED grid coords (x,z) — no inversion, and
+   * deliberately NO shoaling either: this is the open-ocean spectrum as the
+   * IFFT produced it, which is what a statistical check of the mirror wants.
+   * Anything asking "how high is the water HERE" must use `heightAt` (§V.8).
+   */
   sampleRaw(x: number, z: number): SurfaceSample {
     let height = 0;
     let dx = 0;
@@ -566,9 +662,18 @@ export class CpuOcean {
     for (let it = 0; it < this.seaP.inverseDisplacementIterations; it++) {
       let dx = 0;
       let dz = 0;
-      for (const c of this.cascades) {
-        dx += c.sample(c.dx, qx, qz);
-        dz += c.sample(c.dz, qx, qz);
+      // §V.72: the fixed point the GPU actually satisfies is
+      // x = q + shoal(depth(q))·D(q) — the vertex shader scales the WHOLE
+      // displacement, horizontal included, by the per-cascade factor. Reading
+      // the depth at the current iterate converges to depth(q) along with the
+      // coord itself, so the two sides land on the same grid point instead of
+      // one of them solving a slightly different equation.
+      const depth = this.depthAt(qx, qz);
+      for (let i = 0; i < this.cascades.length; i++) {
+        const c = this.cascades[i];
+        const g = this.seabed ? shoalFactor(this.shoalK[i], depth) : 1;
+        dx += c.sample(c.dx, qx, qz) * g;
+        dz += c.sample(c.dz, qx, qz) * g;
       }
       qx = x - dx;
       qz = z - dz;
@@ -577,23 +682,51 @@ export class CpuOcean {
     out[1] = qz;
   }
 
+  /**
+   * Σ over cascades of a grid, each band scaled by its own shoaling factor,
+   * then depth-limited (§V.72). ONE place, because `heightAt` and
+   * `pressureHeadAt` must not be able to shoal differently — and because this
+   * is the expression that has to stay in step with `positionNode` in
+   * surfaceMaterial.ts.
+   *
+   * The clip is applied to the PRESSURE HEAD too. It is a geometric limiter,
+   * not a pressure one, so that is an approximation; it is the right one,
+   * because a hull in water shallow enough for the clip to engage is a hull
+   * that grounding already owns, and letting the two fields disagree about how
+   * big the wave is would put buoyancy and waterline on different seas.
+   */
+  private shoaledSum(
+    grid: (c: MirrorCascade) => Float32Array,
+    qx: number,
+    qz: number,
+  ): number {
+    if (!this.seabed) {
+      let sum = 0;
+      for (const c of this.cascades) sum += c.sample(grid(c), qx, qz);
+      return sum;
+    }
+    const depth = this.depthAt(qx, qz);
+    let sum = 0;
+    for (let i = 0; i < this.cascades.length; i++) {
+      const c = this.cascades[i];
+      sum += c.sample(grid(c), qx, qz) * shoalFactor(this.shoalK[i], depth);
+    }
+    return breakerClip(sum, depth, this.oceanP);
+  }
+
   private readonly q: [number, number] = [0, 0];
 
   /** Water height at world (x,z) — the surface as drawn (§V.8). */
   heightAt(x: number, z: number, time: number): number {
     if (time !== this.time || Number.isNaN(this.gridTime)) this.update(time);
     this.gridCoord(x, z, this.q);
-    let height = 0;
-    for (const c of this.cascades) height += c.sample(c.height, this.q[0], this.q[1]);
-    return height;
+    return this.shoaledSum((c) => c.height, this.q[0], this.q[1]);
   }
 
   /** Smith-attenuated equivalent elevation at world (x,z) — see the field. */
   pressureHeadAt(x: number, z: number, time: number): number {
     if (time !== this.time || Number.isNaN(this.gridTime)) this.update(time);
     this.gridCoord(x, z, this.q);
-    let head = 0;
-    for (const c of this.cascades) head += c.sample(c.head, this.q[0], this.q[1]);
-    return head;
+    return this.shoaledSum((c) => c.head, this.q[0], this.q[1]);
   }
 }

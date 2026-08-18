@@ -55,7 +55,16 @@ import { oceanSurfaceParams as sp } from '../params/oceanSurface';
 import { causticsParams as cp } from '../params/caustics';
 import { oceanParams } from '../params/ocean';
 import { solveGrowthRate, type SurfaceGridOptions } from './surfaceGeometry';
-import { seabedShallowFactorNode, type SeabedField } from '../island/seabed';
+import {
+  seabedHeightLodNode,
+  seabedShallowFactorNode,
+  type SeabedField,
+} from '../island/seabed';
+import {
+  breakerClipNodes,
+  shoalFactorNode,
+  shoalWavenumber,
+} from './shoaling';
 import type { PlanarReflection } from '../reflection';
 
 export interface OceanSurfaceMaterial {
@@ -343,6 +352,34 @@ export function buildOceanSurfaceMaterial(
    * measurement, so the two can never disagree about what a cascade contains.
    */
   const uSlopeVar = sim.cascades.map(() => uniform(0));
+  /**
+   * §V.72 SHOALING — per-cascade shoaling wavenumber (rad/m), and the breaker
+   * pair (index, column ceiling).
+   *
+   * Per cascade because shoaling is wavelength-dependent: long swell feels the
+   * bottom in deep water, short chop barely notices until it is aground. §V.19
+   * band-splits the cascades, so each already HAS a characteristic wavelength
+   * and this costs three scalars to exploit. Refreshed in `updateFromParams`
+   * rather than only on rebuild, because two of its three inputs
+   * (`shoalDeepFraction`, and the seabed's open depth) are not spectrum
+   * params and would otherwise never move (§V.62).
+   */
+  const uShoalK = sim.cascades.map(() => uniform(0));
+  const uBreaker = uniform(
+    new THREE.Vector2(oceanParams.shoalBreakerIndex, oceanParams.shoalColumnCeiling),
+  );
+  const refreshShoal = () => {
+    // no seabed (open-ocean scene) ⟹ nothing to shoal against; the whole term
+    // is compiled out below, so these uniforms are never read
+    const openDepth = seabed ? Math.max(-seabed.openHeight, 0) : 0;
+    for (const [i, c] of sim.cascades.entries()) {
+      uShoalK[i].value = shoalWavenumber(c.meanWavenumber, openDepth, oceanParams);
+    }
+    (uBreaker.value as THREE.Vector2).set(
+      oceanParams.shoalBreakerIndex,
+      oceanParams.shoalColumnCeiling,
+    );
+  };
   const refreshNormFoot = () => {
     for (const [i, c] of sim.cascades.entries()) {
       (uNormFoot[i].value as THREE.Vector2).set(
@@ -353,6 +390,7 @@ export function buildOceanSurfaceMaterial(
     }
   };
   refreshNormFoot();
+  refreshShoal();
 
   const worldXZ = positionLocal.xz.add(originUniform);
   const camDist = worldXZ.sub(cameraPosition.xz).length();
@@ -430,17 +468,103 @@ export function buildOceanSurfaceMaterial(
     return lodWeight(c.domain, uNormalStretch).mul(filtered);
   });
 
-  // vertex displacement: Σ cascades (λDx, h, λDz, J), each Nyquist-gated
+  /**
+   * §V.72 WATER DEPTH UNDER THIS VERTEX — and the two things about it that
+   * make the CPU mirror agree instead of merely using the same formula.
+   *
+   * MEASURED AGAINST STILL WATER (y = 0), never against the displaced surface.
+   * The displacement is what we are about to attenuate, so keying its own
+   * attenuation on it would be a feedback loop; the bed's depth below the
+   * waterline is a property of the bed alone, which is also what makes it
+   * trivially reproducible on the CPU side.
+   *
+   * SAMPLED AT THE UNDISPLACED GRID POSITION. This vertex will LAND at
+   * worldXZ + D, but it IS the grid point worldXZ, and `CpuOcean.heightAt`
+   * inverts the displacement to find exactly this grid coord before summing.
+   * Sampling at the displaced position instead would put the two seas 1–2 m
+   * apart horizontally near shore — §B.34's defect by a different route.
+   *
+   * §V.40: this is +1 texture and +1 SAMPLER IN THE VERTEX STAGE, which was at
+   * 3/3 against a ceiling of 16. The contested spare everyone budgets against
+   * is a FRAGMENT spare; bindings are keyed on (node, shaderStage), so vertex
+   * has twelve free and this spends none of the fragment's one. The fragment
+   * half of shoaling (below) re-reads a texture that is ALREADY bound there
+   * for the §V.24 tint, so it costs nothing at all.
+   *
+   * §V.48: read through `seabedHeightLodNode`, at the level this vertex's own
+   * SPACING earns. The vertex stage cannot take an implicit-derivative sample
+   * in three r180 — every non-fragment read is rewritten to level 0 — so a mip
+   * chain alone would leave the rim, where one vertex spans ~13 seabed texels,
+   * point-sampling the island heightmap's noise and crawling as the clipmap
+   * snaps. `spacing` is the §V.30 LOD law itself, so this fade rides the LOD.
+   */
+  const shoalDepth = seabed
+    ? seabedHeightLodNode(seabed, worldXZ, spacing).negate().max(0)
+    : null;
+  /**
+   * Per-cascade survival fraction, 0..1 — see src/ocean/shoaling.ts for why
+   * this is tanh(k·d) and why keying on DEPTH rather than on distance-to-land
+   * is what gives the user rough cliffs for free.
+   *
+   * Without a seabed the factor is the constant 1 and every multiply below
+   * folds away at compile time, so an open-ocean scene is bit-identical to
+   * what it was before shoaling existed.
+   */
+  const shoal = sim.cascades.map((_, i) =>
+    shoalDepth ? shoalFactorNode(uShoalK[i], shoalDepth) : float(1),
+  );
+
+  // vertex displacement: Σ cascades (λDx, h, λDz, J), each Nyquist-gated and
+  // each shoaled by its OWN wavelength (§V.72)
   const sampleDisp = (i: number) =>
     texture(sim.cascades[i].displacement, worldXZ.div(sim.cascades[i].domain).fract());
   const d0 = sampleDisp(0);
   const d1 = sampleDisp(1);
   const d2 = sampleDisp(2);
-  const totalDisp = d0.xyz
-    .mul(dispLod[0])
-    .add(d1.xyz.mul(dispLod[1]))
-    .add(d2.xyz.mul(dispLod[2]));
-  const jacobian = d0.w.add(d1.w).add(d2.w).sub(2); // 3 cascades each ≈1 at rest
+  const dispGain = sim.cascades.map((_, i) => dispLod[i].mul(shoal[i]));
+  const rawDisp = d0.xyz
+    .mul(dispGain[0])
+    .add(d1.xyz.mul(dispGain[1]))
+    .add(d2.xyz.mul(dispGain[2]));
+  /**
+   * THE JACOBIAN CARRIES THE SAME GAIN, and this is a correctness item rather
+   * than a look one. `displacement.w` is det J of that cascade's horizontal
+   * displacement, ≈1 at rest; scaling the displacement by g scales its
+   * gradients by g too, so the deviation from rest scales by g. Leaving it
+   * alone would leave the foam gate (§V.6, which reads this sum) firing over a
+   * lagoon whose surface has been flattened — white caps on glass.
+   *
+   * The `1 + Σ(w−1)·g` shape keeps this quantity ≈1 AT REST, which is the
+   * convention every downstream reader is calibrated against
+   * (`oceanParams.jacobianFoamBias`'s docstring names it explicitly). At gain
+   * 1 it is algebraically identical to the `d0.w+d1.w+d2.w−2` it replaces.
+   */
+  const jacobian = float(1)
+    .add(d0.w.sub(1).mul(dispGain[0]))
+    .add(d1.w.sub(1).mul(dispGain[1]))
+    .add(d2.w.sub(1).mul(dispGain[2]));
+
+  /**
+   * §V.72 TERM B — depth-limited breaking, applied to the SUMMED elevation.
+   *
+   * Exact identity until a wave occupies `shoalBreakerIndex` of the local
+   * water column, then saturating to `shoalColumnCeiling` of it, so the sheet
+   * can never dig through the sand and flicker a lagoon dry. Measured: it
+   * never fires at calm or at swell, at any depth — the shipped seas get pure
+   * term A and their look cannot move. See shoaling.ts.
+   *
+   * `slope` is the clip's own derivative and it is NOT optional: the fragment
+   * normals have to carry it or the flat trough bottoms this creates get shaded
+   * with the slopes of the wave that was clipped away — a flat sheet wearing a
+   * wave's reflections. It is free here (1 − saturation²).
+   */
+  const clip =
+    shoalDepth !== null
+      ? breakerClipNodes(rawDisp.y, shoalDepth, uBreaker.x, uBreaker.y)
+      : null;
+  const totalDisp = clip
+    ? vec3(rawDisp.x, clip.clipped, rawDisp.z)
+    : rawDisp;
 
   const positionNode = positionLocal.add(totalDisp);
 
@@ -488,6 +612,17 @@ export function buildOceanSurfaceMaterial(
    *
    * §V.40: ZERO textures, ZERO samplers. §V.44: a sum of non-negative terms,
    * and the consumer clamps it to `specularAaMax`.
+   *
+   * THE SHOALING FACTOR IS DELIBERATELY ABSENT HERE, and someone will try to
+   * "fix" that, so: §V.64 is about SUB-PIXEL variance, where roughness is the
+   * correct fate because the detail is still there and the pixel simply cannot
+   * resolve it. Shoaled-away slope is not unresolved — the water over a shelf
+   * genuinely IS calmer, and there is no missing microfacet distribution to
+   * account for. Routing it here would make a glassy lagoon shade as frosted
+   * glass, i.e. the exact opposite of the look the calming exists to produce.
+   * The energy shoaling removes belongs to the SHORE (runup, swash, breaking),
+   * not to the specular lobe — see the note in the foam block below for where
+   * that consumer should live and why it is not in this material.
    */
   const cascadeUnresolvedVar = sim.cascades
     .map((_, i) => float(1).sub(normLod[i].mul(normFade)).max(0).mul(uSlopeVar[i]))
@@ -523,13 +658,17 @@ export function buildOceanSurfaceMaterial(
     // its phase coordinate by exactly this field, so the warp costs no extra
     // fetch and — because §V.19 band-splits at 8.3 m — carries no wavelength
     // short enough for the churn to alias against.
+    // §V.72: the SAME per-cascade shoaling gain the vertex displacement was
+    // built with. Geometry and shading have to agree about how much wave is
+    // here or the calmed water shades as open sea — and it is the same
+    // expression, not a second one, so they cannot drift.
     const derLong = sampleDeriv(0)
-      .mul(normLod[0])
-      .add(sampleDeriv(1).mul(normLod[1]))
+      .mul(normLod[0].mul(shoal[0]))
+      .add(sampleDeriv(1).mul(normLod[1].mul(shoal[1])))
       .mul(normFade)
       .toVar();
     const der = derLong.add(
-      sampleDeriv(2).mul(normLod[2]).mul(wakeSmooth).mul(normFade),
+      sampleDeriv(2).mul(normLod[2].mul(shoal[2])).mul(wakeSmooth).mul(normFade),
     );
     // the SAME λ the vertex displacement was built with (anti-fold cap
     // applied), pushed per frame — a baked oceanParams.choppiness read here
@@ -538,8 +677,24 @@ export function buildOceanSurfaceMaterial(
     const lambda = uChoppiness;
     const denomX = float(1).add(der.z.mul(lambda)).max(0.05);
     const denomZ = float(1).add(der.w.mul(lambda)).max(0.05);
-    const slopeX = der.x.div(denomX).toVar();
-    const slopeZ = der.y.div(denomZ).toVar();
+    /**
+     * §V.72 TERM B's derivative, on the FFT slope only.
+     *
+     * The vertex stage clipped the summed elevation; d(clipped)/d(elevation) is
+     * therefore the factor its slope was scaled by, and without it the flat
+     * trough bottoms the clip creates would be shaded with the slopes of the
+     * wave that was clipped away — a flat sheet wearing a wave's reflections.
+     * It is exactly 1 wherever the clip is the identity, i.e. everywhere at
+     * calm and swell, so this costs the shipped seas nothing.
+     *
+     * Applied HERE, before the churn and the wake are added: those are separate
+     * surface fields riding on top of the water, not part of the wave whose
+     * amplitude the breaker limited. (The churn is gated on `slopeMag` below,
+     * so it still calms with the sea it rides on.)
+     */
+    const clipSlope = clip ? clip.slope : float(1);
+    const slopeX = der.x.div(denomX).mul(clipSlope).toVar();
+    const slopeZ = der.y.div(denomZ).mul(clipSlope).toVar();
 
     // ── turbulent sub-noise (user, SoT storm reference) ──────────────────
     // Wave faces in the reference are visibly churned, not smooth flanks with
@@ -1262,6 +1417,22 @@ export function buildOceanSurfaceMaterial(
       // strength (`foamParams.injectStrength`), both of which keep the shape,
       // the placement and the two-clock intensity the sim spent four commits
       // earning. `max`-ing a smooth ribbon over that can only degrade it.
+      //
+      // §V.72 TOOK THAT RULING AND OBEYED IT, which is worth recording because
+      // the obvious next feature lands right here. Shoaling removes wave
+      // energy near shore, and the honest place for that energy is
+      // whitewater — so a "shore break" term keyed on `breakerSaturation`
+      // (shoaling.ts) is the natural §V.64 accounting, and it would cost ZERO
+      // bindings because the seabed texture is already bound in this stage.
+      // It is deliberately NOT built, because it would be exactly the thing
+      // this block forbids: a smooth gate on a smooth field, whose super-level
+      // set is one unbroken ribbon — here following a DEPTH CONTOUR, i.e. a
+      // painted ring around every island. The shape problem is not tunable.
+      // If shore break is wanted, it belongs in src/foam, where the
+      // accumulator, the fold metric and the breakup field already exist to
+      // turn an injection rate into broken caps; the seabed depth would have
+      // to reach that compute pass. Until then the shoaled sea simply sheds
+      // less foam, which is at least honest about the geometry it is drawing.
       // foam takes the sky's colour — the reference's foam is warm cream, not
       // the cool near-white it is authored as, and against a warm sunset sky a
       // cool white foam reads wrong even once coverage is right
@@ -1631,6 +1802,11 @@ export function buildOceanSurfaceMaterial(
     // spectrum-derived, so a weather preset or a slider that rebuilds h0 moves
     // them — a value cached at construction is §B.7's shape one level up.
     refreshNormFoot();
+    // §V.72: same argument, one level further out. The shoaling wavenumbers are
+    // spectrum-derived (cascade 0's mean wavelength moves 249 → 87 → 143 m
+    // across the presets) AND depend on two params that never touch h0, so
+    // neither the rebuild path nor construction alone would keep them live.
+    refreshShoal();
   };
 
   return {

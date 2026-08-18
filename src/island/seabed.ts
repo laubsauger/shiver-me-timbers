@@ -80,6 +80,8 @@ export interface SeabedField {
   origin: [number, number];
   /** world span (m) the texture covers on both axes */
   size: number;
+  /** world size (m) of ONE texel — what a reader band-limits against (§V.48) */
+  texelSize: number;
   /** seabed height reported where no island reaches (m, negative) */
   openHeight: number;
   /** live uniforms backing the TSL helpers (origin, 1/size) */
@@ -143,13 +145,32 @@ export function createSeabedField(
 
   const tex = new THREE.DataTexture(data, res, res, THREE.RedFormat, THREE.HalfFloatType);
   tex.name = 'island/seabedHeight';
-  tex.minFilter = THREE.LinearFilter;
+  /**
+   * §V.48 — MIPPED, and it is not optional now that this field drives geometry.
+   *
+   * This texture is minified by both of its readers. The fragment tint has
+   * always been one (screen resolution against a texel that is `size/res`
+   * metres — with the shipped archipelago that is ~6.8 m, so any view from
+   * more than a few hundred metres minifies it), and §V.72's shoaling added a
+   * second in the VERTEX stage, where the sampling rate is the clipmap's
+   * vertex spacing: 0.5 m under the camera but ~90 m at the rim, i.e. thirteen
+   * texels per sample. Unmipped minified sampling is a point sample of a field
+   * that carries the island heightmap's own noise, and the shoaling factor
+   * derived from it then wobbles per vertex as the clipmap snaps — §V.48's
+   * "uniform speckle over a whole surface", arriving as a crawling shoreline.
+   *
+   * The mip chain is what a filtered tier IS for a texture that can carry one
+   * (unlike the compute-written derivative StorageTextures, which cannot, and
+   * whose absence of one is why surfaceMaterial has to reconstruct the same
+   * thing from the spectrum). Cost is 33% of 2 MB, once, at build time.
+   */
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
   tex.magFilter = THREE.LinearFilter;
   // clamp is correct, not a fallback: the margin guarantees the border ring is
   // already open-ocean depth, so sampling far outside reads open sea
   tex.wrapS = THREE.ClampToEdgeWrapping;
   tex.wrapT = THREE.ClampToEdgeWrapping;
-  tex.generateMipmaps = false;
+  tex.generateMipmaps = true;
   tex.needsUpdate = true;
 
   const uniforms = {
@@ -164,6 +185,7 @@ export function createSeabedField(
     texture: tex,
     origin,
     size,
+    texelSize: cell,
     openHeight,
     uniforms,
     dispose(): void {
@@ -179,6 +201,36 @@ export function createSeabedField(
 export function seabedHeightNode(field: SeabedField, worldXZ: any): any {
   const uv = worldXZ.sub(field.uniforms.origin).mul(field.uniforms.invSize);
   return texture(field.texture, uv).r;
+}
+
+/**
+ * TSL: seabed height at an EXPLICIT mip level chosen from the reader's own
+ * sampling footprint — the vertex-stage twin of `seabedHeightNode`.
+ *
+ * §V.48, AND THE REASON THE MIP CHAIN ALONE IS NOT THE FIX. In three r180 the
+ * vertex stage cannot take an implicit-derivative sample (`textureSample` is
+ * fragment-only), so `WGSLNodeBuilder._generateTextureSample` rewrites every
+ * non-fragment read as `textureSampleLevel(..., 0)` — LEVEL ZERO, hardcoded.
+ * A vertex reader therefore point-samples the finest mip no matter how coarse
+ * its own sampling grid is, and mipping the texture buys it nothing at all.
+ * The level has to be handed in, which is what this exists to do.
+ *
+ * `footprint` is the world size (m) of one sample of the CALLING grid — for
+ * the ocean clipmap that is its local vertex spacing, which already grows with
+ * distance under the §V.30 LOD law, so this rides the LOD instead of ending in
+ * a ring. The fragment stage needs none of this: there `texture()` picks its
+ * own level from screen derivatives, and mipping the texture is the whole fix.
+ */
+export function seabedHeightLodNode(
+  field: SeabedField,
+  worldXZ: any,
+  footprint: any,
+): any {
+  const uv = worldXZ.sub(field.uniforms.origin).mul(field.uniforms.invSize);
+  // log2 of "how many texels does one sample of mine cover", floored at 0 —
+  // magnification is level 0 and negative levels are not a thing (§V.28)
+  const level = footprint.div(Math.max(field.texelSize, 1e-3)).max(1).log2();
+  return texture(field.texture, uv).level(level).r;
 }
 
 /**
