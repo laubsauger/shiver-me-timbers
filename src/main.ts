@@ -4,6 +4,7 @@ import { GameLoop } from './core/loop';
 import { createInitialState } from './state/simState';
 import type { SimState } from './state/simState';
 import { createDebugShell } from './debug';
+import { createCascadeView } from './debug/cascadeView';
 import { installGpuTimer, formatGpuHud, reportGpu } from './debug/gpuTimer';
 import { createSky } from './sky';
 import { createLanterns } from './lanterns';
@@ -299,6 +300,21 @@ async function boot(): Promise<void> {
     // band's own σ (§V36), so it has to see spectrum rebuilds, not a snapshot
     ocean,
   );
+  /**
+   * The cascade spectrum view (research-poseidon §2.3) — its own ortho scene,
+   * so it costs the ocean material NOTHING: no debug uniform, no branch, and
+   * above all no binding against §V.40's one spare fragment sampler. Nothing
+   * is compiled here; the per-(field, band) materials are built lazily on
+   * first selection, so a launch that never presses G pays one boolean test
+   * per frame and no pipeline compiles at all.
+   */
+  const cascadeView = createCascadeView(
+    ocean.cascades,
+    ocean,
+    foam.foamTextures,
+    oceanParams.resolution,
+  );
+
   // §V.10 intersection foam + ship wake (T13) — created before the surface
   // so the material can sample the wake mask
   const flowFoam = createFlowFoam();
@@ -1400,7 +1416,13 @@ async function boot(): Promise<void> {
         (x, z) => cpuOcean.heightAt(x, z, state.time),
         state.time,
       );
-      if (usePost()) {
+      if (cascadeView.isOn()) {
+        // INSTEAD OF the game frame, not on top of it (research-poseidon
+        // §2.3). The sim above still ran, so the tile on screen is THIS
+        // frame's data — and the 595 draws and 18 passes it replaces are
+        // exactly why the view is affordable on a CPU-bound frame.
+        cascadeView.render(app.renderer);
+      } else if (usePost()) {
         post.updateFromParams();
         post.render();
       } else {
@@ -1632,6 +1654,21 @@ async function boot(): Promise<void> {
     // because nothing ever asked it whether it was running.
     underwater,
     reflection,
+    /**
+     * §2.3 verification handle, and the reason the view is an instrument
+     * rather than a picture: every control is reachable without a keypress, so
+     * an A/B is a script and not a hand.
+     *   __game.cascadeView.set('lambdaMinus', 2)
+     *   await __game.cascadeView.stats(__game.app.renderer)
+     *   __game.cascadeView.off()
+     * `stats()` is a real GPU readback reduced through the same `foamMath`
+     * mirrors the foam tests pin — it is what the foam-synchrony work had to
+     * transliterate by hand.
+     */
+    cascadeView: {
+      ...cascadeView,
+      stats: () => cascadeView.stats(app.renderer),
+    },
     archipelago,
     hullContact,
     cpuOcean,

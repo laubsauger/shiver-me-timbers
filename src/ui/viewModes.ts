@@ -25,6 +25,7 @@ import { applyDevLayer } from './devLayer';
 import type { FullscreenControl } from './fullscreen';
 import { div } from './dom';
 import { isFullscreenShortcut } from '../input/controlMap';
+import { cascadeViewAction, emitCascadeView } from './cascadeViewChannel';
 
 export interface ViewState {
   /** the player's standing intent for the dev layer */
@@ -173,6 +174,16 @@ export function createViewModes(root: HTMLElement, fullscreen: FullscreenControl
     } else if (e.key === 'F2' || e.key === 'p' || e.key === 'P') {
       e.preventDefault();
       dispatch({ type: 'togglePhoto' });
+    } else {
+      // THE CASCADE SPECTRUM VIEW (research-poseidon §2.3). This controller is
+      // the documented single owner of dev-layer keys, so the instrument in
+      // src/debug does NOT bind its own listener — it registers with the
+      // channel and this reader hands it the action. `preventDefault` only
+      // when the view actually acted: `1`/`2`/`3` and `[`/`]` mean nothing
+      // while it is closed, and swallowing them there would be the same silent
+      // no-op the view exists to catch (§V.62).
+      const probe = cascadeViewAction(e.code);
+      if (probe !== null && emitCascadeView(probe)) e.preventDefault();
     }
   }
   window.addEventListener('keydown', onKeyDown);
