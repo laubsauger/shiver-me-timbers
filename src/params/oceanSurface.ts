@@ -26,6 +26,133 @@ export const oceanSurfaceParams = registerParams(
     /** fraction of outer rings blended square→circle (circular rim) */
     gridRimRound: 0.3,
     /**
+     * §V.30b RADIAL LOD — target SCREEN HEIGHT, in pixels, of one radial ring
+     * step. This is the only number in the block that is not baked: it drives a
+     * per-frame uniform, so it toggles live and 0 restores the pre-LOD mesh
+     * bit-identically (the vertex stage `select`s on it — see
+     * `radialLodXZNode`).
+     *
+     * WHY IT EXISTS. The clipmap equalises WORLD angular size (spacing/r
+     * constant), but the screen sees a radial step through the grazing
+     * compression f·h·Δr/r², one power of r more. Measured on the shipped grid
+     * at a 12 m deck eye / 55° fov / 1440p: one ring is 0.59 px at 500 m,
+     * 0.29 px at 1 km and 0.17 px at 2 km, against 6.4 px of TANGENTIAL detail
+     * on the same triangle. Rings past ~1 km are 48% of all triangles and the
+     * screen cannot resolve a single one of them radially — and the ocean is
+     * ONE draw call costing 17–19 ms of a ~28 ms frame, which three rounds of
+     * `onSubmittedWorkDone` legs pinned on PER-PRIMITIVE tiling work: not CPU
+     * (main thread 44% idle), not vertex (0.48 ms, 4.7% of the mesh), not fill
+     * (16× fewer pixels made it SLOWER, 10.31 → 14.39 ms).
+     *
+     * 1.0 = one radial step per pixel of screen height. Below ~0.5 the saving
+     * mostly disappears (0.5 is one octave of stride less everywhere); above
+     * ~1.5 the collapsed rings start to be resolvable and the far sea's
+     * silhouette visibly loses its radial structure. It is a SCREEN quantity,
+     * so it holds at every distance and every camera height by construction —
+     * the height enters through the uniform, not through this number.
+     *
+     * It does NOT move the cascade Nyquist gates (`lodSamplesFull/Cut`), and
+     * that is deliberate: those gate what the mesh can carry LATERALLY, the
+     * angular density is untouched, and re-gating on the coarsened radial step
+     * would delete displacement that is still fully resolvable across the
+     * triangle. Zero displacement content moves when this is turned on.
+     *
+     * WHAT THE PIXEL TARGET IS NOT, and it cost a user report to learn: a
+     * radial step being sub-pixel does NOT make collapsing it invisible. At a
+     * grazing framing the geometry sets the INCIDENCE ANGLE, and the shading
+     * footprint `pixWorld = fwidth(worldXZ)` goes as 1/sin(incidence). From a
+     * 12 m eye at 1 km the plane's own grazing angle is 0.69°, while the sea's
+     * slope RMS of 0.16 tilts real facets by ~9° — so a band the LOD has
+     * flattened has a footprint several times larger than the same band with
+     * its waves, and every §V.48/§V.48b fade that is gated on `pixWorld`
+     * (normLod, the sparkle cell, the resolve crossfade) is crossed by the LOD
+     * itself. Stepped, that is a hard tonal wall across the frame with paler,
+     * flatter water beyond it (user, and `37513f4` for the same shape in the
+     * sparkle mean). This is why the collapse is MORPHED (`radialLodMorph`) and
+     * not switched, and why the honest setting for this number is the one that
+     * is invisible in motion rather than the one the pixel algebra licenses.
+     *
+     * ── MEASURED TRADE CURVE ──────────────────────────────────────────────
+     * Deck framing (12 m eye, ship + island + open sea, f6 "swell" preset),
+     * interleaved A/B legs bracketed by `queue.onSubmittedWorkDone()`,
+     * min-of-9. Control legs reproduced to within 0.2/255 per screen row.
+     * "delta" is the largest row-mean luminance change against the LOD-off
+     * control; "rows" is how many of the 856 screen rows move by more than
+     * 3/255 (the eye's floor on a broad flat area):
+     *
+     *   pixels   ms/frame (min)  delta       rows   where
+     *   0        26.62 (ref)     —           —      —
+     *   0.125    25.37   −4.7%   1.3/255     0      INVISIBLE — shipped
+     *   0.25     24.12   −9.4%   19/255      6      1.1–3.3 km, at the horizon
+     *   0.5      22.86  −14.0%   24/255     19      reaches in to 365 m
+     *   1.0      22.54  −15.2%   27/255     30+     the whole mid-field
+     *
+     * TWO THINGS THAT CURVE SAYS. The saving SATURATES by 0.5 — the first
+     * octave of collapse is nearly all of it, so there is never a reason to run
+     * this aggressive. And the visible cost has a CLIFF between 0.125 and 0.25
+     * (1.3 → 19/255), because that is where the first collapsed ring enters the
+     * band the horizon compresses into ~6 screen rows.
+     *
+     * Shipped at the invisible end: 0.125 is 1.3/255 — under the 0.2/255 × 6
+     * reproducibility of the control legs by a factor that leaves no row of the
+     * frame moving by an amount anyone can see — and it still takes 4.7% of the
+     * frame off. The knob is live and one slider away in the oceanSurface panel
+     * if the user wants to buy the other 9% and judge the horizon band
+     * themselves; "no visible fidelity loss" was the standing bar and 19/255 on
+     * the horizon is not that, so it is not the default.
+     *
+     * At 40 m, 120 m and 300 m of eye height the law disables itself
+     * (measured: −0.5, −0.1, −0.1 /255 at 0.25), so nothing here is a
+     * crow's-nest or free-camera regression at any setting.
+     */
+    radialLodPixels: 0.125,
+    /**
+     * FLOOR on the eye height (m) the law is evaluated at — and it is the §V.8
+     * guard, not a nicety.
+     *
+     * kRadial = pixels/(f·h) blows up as the eye approaches the water, so an
+     * eye at 1 m would start collapsing rings from 50 m out — inside the radius
+     * `cpuOcean` (and therefore buoyancy, hull contact and the shore runup)
+     * assumes it agrees with the drawn sea. At 4 m the first collapse is at
+     * ~125 m whatever the camera does, which is 3× the ship and leaves the
+     * mirror's whole domain on vertices the shader provably does not move.
+     * Raising this only ever makes the LOD weaker.
+     */
+    radialLodMinEye: 4,
+    /**
+     * OCTAVES OF RADIUS over which a ring MORPHS onto its parent instead of
+     * snapping to it — the fix for the wall, and the reason this is a clipmap
+     * geomorph and not a switch.
+     *
+     * A ring's collapse is licensed when `fit = kRadial·r² / (stride·Δr_base)`
+     * reaches 1. Stepping there is a discontinuity in what the surface can
+     * REPRESENT — the band beyond is flat, the band before is not — and the
+     * discontinuity lands on the shading, not just the silhouette (see
+     * `radialLodPixels`). Instead the ring's effective index is interpolated
+     * toward its parent's across `fit ∈ [2^-morph, 1]`, so the two densities
+     * agree exactly at the boundary and the surface is continuous in r at every
+     * level. `fit` grows roughly as r, so 1 octave is a transition band a
+     * factor of two wide in DISTANCE — 350→700 m for the first level at a deck
+     * eye, which is a gradient nobody can point at rather than a line.
+     *
+     * IT COSTS THE SAVING IT BUYS BACK IN SMOOTHNESS: a ring only becomes
+     * zero-area at `fit ≥ 1`, so everything mid-morph is still drawn. Wider is
+     * smoother and slower. 0 restores the stepped behaviour, i.e. the bug.
+     */
+    radialLodMorph: 1.0,
+    /**
+     * Cap on the collapse stride, as a power of two (4 ⟹ at most 16 rings
+     * collapse onto one). BAKED INTO THE NODE GRAPH — it is the unrolled loop
+     * count, so it needs a reload, unlike `radialLodPixels`.
+     *
+     * It also bounds the square→circle fold check: the rim blend moves by at
+     * most `rimRound`-slope × stride/half per collapsed group while the ring
+     * radius grows by e^{k·stride}, and at stride 16 that is 1.39× growth
+     * against a 0.885× shape shrink — 1.23, still monotone. Past 5 the two
+     * cross and outer rings can fold inside inner ones at the diagonals.
+     */
+    radialLodMaxLevel: 4,
+    /**
      * Nyquist gate for cascade displacement: a cascade is at full strength
      * while its domain spans ≥ lodSamplesFull vertices and gone once it spans
      * ≤ lodSamplesCut. Because vertex spacing grows with distance (see
@@ -711,8 +838,25 @@ export const oceanSurfaceParams = registerParams(
     foamSkyTint: 0.35,
 
     // ── distance haze (§V30: this replaces scene fog ON THE WATER) ──────
-    /** the water melts into haze between these radii (m) */
-    hazeStart: 900,
+    /**
+     * The water melts into haze between these radii (m).
+     *
+     * `hazeStart` 900 → 750 on the user's "we can bring in the start of the
+     * haze a little bit earlier — the far view is great but it feels a little
+     * bit excessive". A 17% earlier onset, deliberately small: this radius is
+     * also where §V.56's `grazingSaturationFar` hump hands the far field over to
+     * the sky (the re-saturation is scaled by 1 − hazeT), so moving it moves
+     * where the sea stops taking its own pigment, and that lever cost two
+     * rounds of "solid turquoise" to place.
+     *
+     * IT IS NOT COVER FOR §V.30b, and was checked rather than assumed: with the
+     * radial LOD at 0.5 the far band's luminance change against LOD-off is
+     * 24.3/255 at `hazeStart` 900 and 23.9/255 at 700 — i.e. haze moves the
+     * seam by 2%, so it neither causes nor cures it. The two changes are
+     * independent and this one is here because it was asked for.
+     * NOT YET SIGNED OFF BY EYE (§V.22) — measured, not judged.
+     */
+    hazeStart: 750,
     hazeEnd: 4600,
     /** >1 keeps the mid-field clear and pushes the melt to the last stretch */
     hazeCurve: 1.7,
@@ -766,8 +910,17 @@ export const oceanSurfaceParams = registerParams(
     // ── underside (§V.24/§V.25: camera below the waterline) ─────────────
     /** total-internal-reflection ceiling colour seen outside Snell's window */
     underCeilingColor: '#0e5a5e',
-    /** brightness of the sky disc inside Snell's window */
-    underWindowBrightness: 1.15,
+    /**
+     * ARTISTIC trim on the sky seen through Snell's window — and ONLY that.
+     *
+     * It used to be 1.15 and was carrying two jobs. The window drew a two-stop
+     * elevation ramp with no n² radiance scaling anywhere in the tree, and 1.15
+     * happened to land near the n² = 1.777 that was missing, so the CENTRE of
+     * the window measured within 8% of correct while its rim was 3× too dark.
+     * `WATER_RADIANCE_GAIN` in surfaceMaterial.ts now owns the physics, so this
+     * is 1.0 = "the sky, as bright as the sky actually is from down here".
+     */
+    underWindowBrightness: 1.0,
     /** softness of the Snell window edge (cos units) */
     underWindowSoftness: 0.12,
   },
@@ -776,6 +929,10 @@ export const oceanSurfaceParams = registerParams(
     gridCoreSpacing: { min: 0.2, max: 4, step: 0.05 },
     gridHorizonRadius: { min: 500, max: 20000, step: 100 },
     gridRimRound: { min: 0, max: 1, step: 0.01 },
+    radialLodPixels: { min: 0, max: 4, step: 0.05 },
+    radialLodMinEye: { min: 1, max: 40, step: 0.5 },
+    radialLodMorph: { min: 0, max: 4, step: 0.05 },
+    radialLodMaxLevel: { min: 0, max: 5, step: 1 },
     lodSamplesFull: { min: 4, max: 32, step: 0.5 },
     lodSamplesCut: { min: 2, max: 24, step: 0.5 },
     normalDetailStretch: { min: 1, max: 8, step: 0.1 },

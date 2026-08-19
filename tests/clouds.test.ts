@@ -435,18 +435,23 @@ describe('fluff actually feathers the rim (§V11b: cores stay sculpted)', () => 
   });
 
   it('and carry real alpha AT the rim, not a rounding error', () => {
-    // the lobe underneath is at `coverage` alpha; anything below a few percent
-    // of that is invisible against it no matter how wide the sprite is
+    // RELATIVE to the lobe it feathers, not absolute. The lobe's peak density
+    // is `coverage * lobeDensity` — both factors are on the fluff too — so
+    // pinning an absolute number here would silently stop meaning anything the
+    // moment either moves, which is exactly what happened when `lobeDensity`
+    // arrived and took the cores off "near-opaque disc" (§V11b chord profile).
     const seedMean = 0.8; // iSeed*0.4 + 0.6 over a uniform seed
+    const lobePeak = cloudParams.coverage * cloudParams.lobeDensity;
     const atRim =
       fluffAlphaAt(MEAN_LOBE_RIM / cloudParams.fluffScale, cloudParams) *
       seedMean *
       cloudParams.fluffAlpha *
-      cloudParams.coverage;
-    expect(atRim).toBeGreaterThan(0.1);
-    // ...but the sprite must still be a skirt, not a second opaque disc, or
-    // the flat billboard shading buries the lobe's sculpted lighting
-    expect(atRim).toBeLessThan(cloudParams.coverage * 0.5);
+      lobePeak;
+    // visible against the lobe underneath...
+    expect(atRim).toBeGreaterThan(lobePeak * 0.1);
+    // ...but still a skirt, not a second opaque disc, or the flat billboard
+    // shading buries the lobe's sculpted lighting
+    expect(atRim).toBeLessThan(lobePeak * 0.5);
   });
 
   it('softness is not uniform: tops and sunward shoulders stay crisp', () => {

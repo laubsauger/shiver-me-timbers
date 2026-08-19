@@ -33,6 +33,7 @@ import {
   positionLocal,
   pow,
   reflect,
+  screenSize,
   screenUV,
   shadow,
   smoothstep,
@@ -55,7 +56,11 @@ import { oceanSurfaceParams as sp } from '../params/oceanSurface';
 // with the caustics runtime (which itself imports the ocean sim).
 import { causticsParams as cp } from '../params/caustics';
 import { oceanParams } from '../params/ocean';
-import { solveGrowthRate, type SurfaceGridOptions } from './surfaceGeometry';
+import {
+  radialLodXZNode,
+  solveGrowthRate,
+  type SurfaceGridOptions,
+} from './surfaceGeometry';
 import {
   seabedHeightLodNode,
   seabedShallowFactorNode,
@@ -90,6 +95,12 @@ export interface OceanSurfaceMaterial {
   seaRmsUniform: { value: number };
   /** fold-capped choppiness λ — must match what the displacement was built with */
   choppinessUniform: { value: number };
+  /**
+   * §V.30b radial LOD: `2·radialLodPixels·tan(fov/2) / eyeHeight`. The shader
+   * divides by the drawing-buffer height to get kRadial. 0 disables the LOD
+   * and restores the pre-LOD mesh bit-identically. OceanSurface.update owns it.
+   */
+  radialLodUniform: { value: number };
   /** true when the scene-colour copy target was built for a half-float pass */
   readonly hdrSceneTarget: boolean;
   /** live sun colour — push from the DirectionalLight every frame */
@@ -218,10 +229,12 @@ const GLINT_RADIANCE_MAX = 32;
  * the artistic trim on top; conflating the two is how a 1.15 knob came to be
  * standing in for a 1.777 constant and left the window's rim 3× too dark.
  */
-const WATER_IOR = 1.333;
-const WATER_RADIANCE_GAIN = WATER_IOR * WATER_IOR; // n², the air→water scale
+export const WATER_IOR = 1.333;
+/** n², the air→water radiance scale — exported so the §T.61 test asserts THIS
+ *  number rather than a copy of it that could drift from the shader's */
+export const WATER_RADIANCE_GAIN = WATER_IOR * WATER_IOR;
 /** cos of the critical angle — derived, so it cannot drift from `WATER_IOR` */
-const CRITICAL_COS = Math.sqrt(1 - 1 / (WATER_IOR * WATER_IOR));
+export const CRITICAL_COS = Math.sqrt(1 - 1 / (WATER_IOR * WATER_IOR));
 
 export function buildOceanSurfaceMaterial(
   sim: OceanSimulation,
@@ -234,6 +247,15 @@ export function buildOceanSurfaceMaterial(
   hdrSceneTarget = false,
   skyDomeColor?: (dir: TslNode) => TslNode,
   fetch?: FetchField | null,
+  /**
+   * §T.61 — the SUN's own disc/glow/halo toward an arbitrary direction
+   * (`SkyHandle.skySunTerm`). Consumed in exactly ONE place: the Snell's-window
+   * branch at the bottom of `colorNode`. It is a separate argument from
+   * `skyDomeColor` rather than a flag on it precisely so that the reflected sky
+   * cannot reach it — §V.26 is about REFLECTION off a rough interface and stays
+   * in force there.
+   */
+  skySunTerm?: (dir: TslNode) => TslNode,
 ): OceanSurfaceMaterial {
   /**
    * §V24 scene-colour copy target — and a §V28-class silent failure if it is
@@ -413,9 +435,15 @@ export function buildOceanSurfaceMaterial(
     horizonRadius: sp.gridHorizonRadius,
     rimRound: sp.gridRimRound,
   };
-  const uLodLaw = uniform(
-    new THREE.Vector2(gridOpts.coreSpacing, solveGrowthRate(gridOpts)),
-  );
+  const gridK = solveGrowthRate(gridOpts);
+  const uLodLaw = uniform(new THREE.Vector2(gridOpts.coreSpacing, gridK));
+  /**
+   * §V.30b radial LOD, in the form the vertex stage can use without knowing the
+   * viewport: `2·pixels·tan(fov/2) / h`, so kRadial = this / screenSize.y.
+   * OceanSurface.update owns it (it has the camera, and the hysteresis on h).
+   * 0 ⟹ every vertex stays on its own ring, bit-identically.
+   */
+  const uRadialA = uniform(0);
   const uLodSamples = uniform(new THREE.Vector2(sp.lodSamplesFull, sp.lodSamplesCut));
   const uNormalStretch = uniform(sp.normalDetailStretch);
   // (full, cut) footprint in METRES per cascade — measured from the live
@@ -495,7 +523,26 @@ export function buildOceanSurfaceMaterial(
   refreshShoal();
   refreshFetch();
 
-  const worldXZ = positionLocal.xz.add(originUniform);
+  /**
+   * §V.30b — THE VERTEX'S MESH-LOCAL XZ, after the radial LOD has decided which
+   * ring it sits on. `positionLocal.xz` everywhere below is replaced by this,
+   * and it must be: `worldXZ` is what the cascades are sampled at, what the
+   * shoaling depth is read at and what the fragment stage interpolates, so a
+   * vertex that MOVED and a vertex that was SAMPLED somewhere else are two
+   * different bugs and only the first one is wanted.
+   *
+   * When the LOD is off (or the vertex is inside the core, or its ring is
+   * already a stride multiple) this is `positionLocal.xz` itself, not a
+   * re-derivation of it — see `radialLodXZNode`.
+   */
+  const gridXZ = radialLodXZNode(
+    gridOpts,
+    gridK,
+    uRadialA.div(screenSize.y.max(1)),
+    Math.max(0, Math.round(sp.radialLodMaxLevel)),
+    sp.radialLodMorph,
+  );
+  const worldXZ = gridXZ.add(originUniform);
   const camDist = worldXZ.sub(cameraPosition.xz).length();
 
   // §V30: local vertex spacing from the clipmap law (surfaceGeometry header).
@@ -710,7 +757,28 @@ export function buildOceanSurfaceMaterial(
     ? vec3(rawDisp.x, clip.clipped, rawDisp.z)
     : rawDisp;
 
-  const positionNode = positionLocal.add(totalDisp);
+  /**
+   * §V.30b: the drawn vertex is the LOD-placed grid point plus the displacement
+   * that was sampled AT that same point — one coordinate, never two.
+   *
+   * THE WAKE IS GEOMETRY NOW (flowfoam/index.ts `wakeHeightNode`, `790e6b2`).
+   * Its elevation texture has been written every frame and read by nobody; this
+   * is the line that turns it on. Sampled at the UNDISPLACED `worldXZ` like
+   * every other field here, per §V.72(a) — `CpuOcean.heightAt` inverts the
+   * horizontal displacement to find exactly that grid coord before it sums, so
+   * reading at the post-displacement point puts the drawn sea and the floated
+   * sea 1–2 m apart horizontally (§B.34 by a third route).
+   *
+   * NO NYQUIST GATE ON IT, deliberately, and §V.30b does not add one: a gate on
+   * vertex spacing cannot be mirrored because spacing is a function of the
+   * CAMERA, and §V.8 forbids the floated sea depending on where anyone is
+   * looking (slickMath.ts's header states this). What the radial LOD DOES do is
+   * move the self-limiting bound that stands in a gate's place — see
+   * `radialLodPixels` for the recheck.
+   */
+  const positionNode = vec3(gridXZ.x, positionLocal.y, gridXZ.y)
+    .add(totalDisp)
+    .add(flowFoam ? vec3(0, flowFoam.wakeHeightNode(worldXZ), 0) : vec3(0));
 
   // fragment normal from Σ derivatives: (∂h/∂x, ∂h/∂z, ∂Dx/∂x, ∂Dz/∂z).
   // Normals are per-pixel so they outlive the geometry (normalDetailStretch),
@@ -2215,7 +2283,46 @@ export function buildOceanSurfaceMaterial(
     // The fallback keeps its two-stop ramp but is now indexed by the AIR-side
     // cosine, so even a build with no sky wired sweeps horizon→zenith across
     // the window instead of showing its top third.
-    const windowCol = (skyDomeColor ? skyDomeColor(airDir) : mix(horizonLive, zenithLive, cosA))
+    /**
+     * §T.61 — THE SUN, THROUGH THE WINDOW. The user has asked for this four
+     * times, most recently with a frame in which the hull's specular is blown
+     * out, the god rays converge on a point past the bow and caustics dance
+     * overhead: three independent paths all reading the sun's direction
+     * correctly while the window that is the SOURCE of all three shows
+     * nothing. It showed nothing because `skyDomeColor` is by construction
+     * incapable of containing a sun (§V.26) and it was the only thing filling
+     * the window.
+     *
+     * §V.26 IS SCOPED, NOT REOPENED, and the code now says so structurally:
+     * the disc arrives through its OWN argument (`skySunTerm`), used on this
+     * one line and nowhere else, so the reflected sky 700 lines up cannot
+     * reach it. The exclusion's argument — "re-adding the disc paints a clean
+     * circular blob, because a rough sea reflects the sun as a glint ROAD" —
+     * is about REFLECTION OFF a rough interface. Transmission THROUGH one is
+     * the opposite case: from below, the sun is a real object at a real place
+     * in a compressed hemisphere, and its absence is the defect.
+     *
+     * NOT A CLEAN DISC, and nothing extra is needed to make that true (user:
+     * "at least like this distorted bright spot"). `airDir` is refracted about
+     * `normalWorld`, the LIVE per-pixel wave normal, and near the rim of the
+     * window the refraction's own Jacobian dθ_air/dθ_water = n·cosθ_w/cosθ_a
+     * runs away — so a millimetre of wave slope swings the sun's image by
+     * degrees and it smears and wobbles with the surface exactly as it does in
+     * life. The disc's ANGULAR SIZE is correctly left alone: it is evaluated in
+     * AIR space where the sun really is ~0.5° across, and all of the
+     * compression into the 48.6° cone is carried by the mapping.
+     *
+     * ADDED BEFORE THE n² GAIN ON PURPOSE. The sun's disc is a radiance in air
+     * like any other part of the sky, so it takes the same L_water = n²·L_air
+     * scaling; pulling it out to add afterwards would make it the one part of
+     * the hemisphere that did not obey the boundary condition.
+     *
+     * §V.40: zero textures, zero samplers — one smoothstep and two `pow` on
+     * uniforms the sky already owns. The fragment stage is at 15/16 and does
+     * not move.
+     */
+    const skyIn = skyDomeColor ? skyDomeColor(airDir) : mix(horizonLive, zenithLive, cosA);
+    const windowCol = (skySunTerm ? skyIn.add(skySunTerm(airDir)) : skyIn)
       .mul(WATER_RADIANCE_GAIN)
       .mul(uUnderWindow.x);
     const ceiling = uUnderCeiling.mul(uLightFloor.add(ndl.mul(uLightGain).mul(0.5)));
@@ -2379,6 +2486,7 @@ export function buildOceanSurfaceMaterial(
     hazeColorUniform: uHazeColor as unknown as { value: THREE.Color },
     seaRmsUniform: uSeaRms as unknown as { value: number },
     choppinessUniform: uChoppiness as unknown as { value: number },
+    radialLodUniform: uRadialA as unknown as { value: number },
     hdrSceneTarget,
     sunColorUniform: uSunLightColor as unknown as { value: THREE.Color },
     updateFromParams,
