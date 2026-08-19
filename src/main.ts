@@ -40,6 +40,7 @@ import {
   rankCompile,
   type CompilePhase,
 } from './core/compileProfile';
+import { installNodeTypeCache } from './core/nodeTypeCache';
 // exposed on __game so a browser check can re-rank without a reload
 import { postParams } from './params/post';
 import { applyWorldSettings, createGameUI, initGraphicsSettings, setFeatureSink } from './ui';
@@ -200,6 +201,12 @@ async function finishSplashTitleEntrance(): Promise<void> {
 async function boot(): Promise<void> {
   const root = document.getElementById('app');
   if (!root) throw new Error('missing #app root');
+
+  // §T.79 — FIRST, before any node graph is built. three r180's `getNodeType`
+  // has no memo and re-walks every shared subexpression once per path that
+  // reaches it, which is what made `shader compile` 231 s of MAIN-THREAD JS.
+  // Prototype patch, so it must be in place before the first NodeBuilder runs.
+  installNodeTypeCache();
 
   if (!(await webgpuAvailable())) {
     renderGatePage(root);
