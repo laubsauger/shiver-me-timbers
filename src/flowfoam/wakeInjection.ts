@@ -164,6 +164,21 @@ export function createWakeInjector(p: FlowFoamParams) {
   const pose: TrackPose = { x: 0, z: 0, fx: 0, fz: 1, speed: 0 };
   const hull: WakeHull = { length: 20, beam: 6 };
   let moundSpeed = 0;
+  /**
+   * THE EARLY-OUT AABB, held as ONE object both consumers read (§V.8).
+   *
+   * `wakeFieldNode` returns exactly 0 outside `uTrackMin/uTrackMax` — it is the
+   * first thing the shader tests. `elevationCpu` must therefore return exactly 0
+   * there too, or the mirror carries the exponential tails of the aft features
+   * over a region the GPU zeroed outright. Both sides read THIS object rather
+   * than each recomputing `trackBounds`, for the same reason the spectrum swap
+   * is an identity check and not a matched countdown (§B.34, `3ad1212`): two
+   * computations that must agree eventually stop agreeing.
+   *
+   * Degenerate (min > max) until the first `advance()` lays a track, so a query
+   * before the ship has moved is 0 on both sides.
+   */
+  const aabb = { minX: 1, minZ: 1, maxX: -1, maxZ: -1 };
 
   /** falling edge: 1 at x = 0, 0 at x = e (§V23 functional smoothstep) */
   const fadeTo = (e: any, x: any): any => smoothstep(float(0), e.max(EPS), x).oneMinus();
@@ -516,17 +531,38 @@ export function createWakeInjector(p: FlowFoamParams) {
      *  (c) `texel` is the NEAR tier's, because the near tier is the only one
      *      that writes elevation — the §V48 band gates inside the formulas must
      *      see the grid the value is actually stored on.
+     *  (d) the AABB early-out is the SAME object the uniforms were set from
+     *      this tick (see `aabb`), so "outside the wake" is one decision rather
+     *      than two agreeing ones.
      *
-     * Residual against the GPU, bounded and not chased: the shader evaluates at
-     * texel CENTRES and the material bilinearly interpolates, while this
-     * evaluates exactly at the query point. On a 0.234 m grid carrying nothing
-     * finer than a 5.8 m feature that is a sub-millimetre reconstruction error
-     * (< 0.2% of amplitude) — three orders below §B.34's 6.90 m.
+     * RESIDUAL AGAINST THE GPU — MEASURED, and NOT sub-millimetre. The shader
+     * evaluates at texel CENTRES and the material bilinearly interpolates, while
+     * this evaluates exactly at the query point, so the residual is that
+     * reconstruction error. Over a full manoeuvre (tests/wakeSea.test.ts):
+     *
+     *   ahead of the cutwater      0.007 m
+     *   0-2 m astern (the APEX)    0.311 m   ← NOT small; see below
+     *   2-4 m astern               0.043 m
+     *   4 m and beyond             0.041 m,  RMS over all of it 0.004 m
+     *
+     * THE APEX IS SUB-TEXEL AND IT IS THE FIELD'S OWN PROPERTY, not the
+     * mirror's. `slickFieldCpu`'s `innerFade` confines the transverse train to
+     * the Kelvin wedge, so its full-amplitude half-width is 0.265·d — 0.13 m at
+     * d = 0.5 m, half a texel, while the elevation it carries there is the full
+     * a/k ≈ 0.30 m. A 0.234 m grid cannot hold a 0.3 m notch a quarter of a
+     * metre wide; the drawn surface smooths it and this does not. §V.48's own
+     * cure applies (fade a term where its FEATURE, not its period, goes
+     * sub-texel) and WOULD be mirrorable — the texel belongs to the region, not
+     * to the camera, unlike the vertex-spacing gate this module's header rules
+     * out — but it changes the drawn bow wave, so it is STATED here and left to
+     * the owner rather than taken unilaterally.
      *
      * `smithDepth` > 0 asks the §V.68 question instead of the geometric one:
      * see slickMath.smithAtten. Callers other than buoyancy want 0.
      */
     elevationCpu(wx: number, wz: number, smithDepth = 0): number {
+      // the shader's own first test, off the same numbers — see `aabb`
+      if (wx < aabb.minX || wx > aabb.maxX || wz < aabb.minZ || wz > aabb.maxZ) return 0;
       const pts = trackPoints(track, pose);
       if (pts.length < 2) return 0;
       const texel = p.regionSize / Math.max(p.resolution, 1);
@@ -591,13 +627,19 @@ export function createWakeInjector(p: FlowFoamParams) {
       const maxDist = count >= 2 ? pts[count - 1].dist : 0;
       const bounds = trackBounds(pts.slice(0, count), wakeReachCpu(maxDist, hull, p));
       if (bounds) {
-        uTrackMin.value.set(bounds.minX, bounds.minZ);
-        uTrackMax.value.set(bounds.maxX, bounds.maxZ);
+        aabb.minX = bounds.minX;
+        aabb.minZ = bounds.minZ;
+        aabb.maxX = bounds.maxX;
+        aabb.maxZ = bounds.maxZ;
       } else {
         // degenerate track: empty AABB so the loop is skipped entirely
-        uTrackMin.value.set(1, 1);
-        uTrackMax.value.set(-1, -1);
+        aabb.minX = 1;
+        aabb.minZ = 1;
+        aabb.maxX = -1;
+        aabb.maxZ = -1;
       }
+      uTrackMin.value.set(aabb.minX, aabb.minZ);
+      uTrackMax.value.set(aabb.maxX, aabb.maxZ);
     },
 
     /** push live param values (called from index.update each tick, §V16) */

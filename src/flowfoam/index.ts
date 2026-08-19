@@ -150,6 +150,10 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
   const uNearFeature = uniform((p.regionSize / p.resolution) * p.waveBandLow);
   const uFarFeature = uniform((p.farRegionSize / p.farResolution) * p.waveBandLow);
   let time = 0;
+  /** has the sim tick ever driven the track? — see `advanceWake`/`update` */
+  let wakeAdvanced = false;
+  /** one-shot latch so a paused frame cannot spam the console */
+  let warnedNoAdvance = false;
 
   /**
    * RADIAL border fade of one tier (flowMath.regionEdgeFadeCpu): the old
@@ -273,16 +277,81 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
      * reader passes 0.
      *
      * Must be called on the same tick as `advanceWake`, after it.
+     *
+     * THE ±2 m CLAMP IS THE TEXTURE'S, NOT A SECOND ONE. accumulation.ts stores
+     * `field.elev.clamp(-2, 2)` into `elevTexture`, so that clamp is part of the
+     * surface the GPU actually draws; a mirror that skipped it would float the
+     * hull on an unclamped field the moment a param push drove any term past the
+     * backstop. It never fires at shipped params (peak 0.47 m) — which is
+     * exactly why it must be mirrored rather than argued away (§V.62).
      */
     wakeHeightCpu(x: number, z: number, smithDepth = 0): number {
       const e = wake.elevationCpu(x, z, smithDepth);
       if (e === 0) return 0;
       const c = acc.uniforms.uCenter.value;
-      return e * regionEdgeFadeCpu(x - c.x, z - c.y, acc.uniforms.uSize.value, p.edgeFade);
+      const stored = e < -2 ? -2 : e > 2 ? 2 : e;
+      return stored * regionEdgeFadeCpu(x - c.x, z - c.y, acc.uniforms.uSize.value, p.edgeFade);
+    },
+
+    /**
+     * ── THE WAKE'S SIM STEP (§V.2) — CALL FROM THE FIXED TICK ────────────────
+     *
+     * Ages the world-space cutwater track, lays a new sample if the ship has
+     * travelled far enough, advances the mound's lagged speed and uploads the
+     * polyline + its AABB. Call ONCE PER SIM TICK on `SIM_DT`, after `setShip`
+     * and `setCenter` and BEFORE buoyancy.
+     *
+     * WHY IT IS NOT IN `update()` ANY MORE. It used to run there, and `update()`
+     * runs in main.ts's RENDER block on `frameDt`, which made the trail's
+     * spatial resolution a function of frame rate — a §V.2 defect of exactly
+     * `52cd1b5`'s shape (a per-frame quantity that was really a per-second one).
+     * It became a §V.8 defect the moment `wakeHeightCpu` was wired into
+     * `CpuOcean`: buoyancy runs inside the fixed tick, so a track aged in the
+     * render block would float the hull on a wake laid at a different instant
+     * from the one being drawn — and at any frame rate above 60 there are
+     * frames with no tick at all and ticks with no frame below it.
+     *
+     * SPLIT HERE, not one call lower: everything this touches is sim state
+     * (the polyline, the odometer, the lag) and everything left in `update()`
+     * is a GPU dispatch. `pushParams` comes along because the uniforms it
+     * writes are the ones the track walk is evaluated against, and the mirror
+     * reads the same live params — a param that moved between the tick and the
+     * draw would otherwise be read differently by the two sides.
+     */
+    advanceWake(dt: number): void {
+      wake.advance(dt);
+      wake.pushParams();
+      wakeAdvanced = true;
     },
 
     /** advance the sim one fixed tick (§V2): pushes live params, runs computes */
     update(renderer: THREE.WebGPURenderer, dt: number): void {
+      /**
+       * §V.2/§V.8 FAIL LOUD, ONCE, AND DELIBERATELY NOT BY THROWING.
+       *
+       * A caller that dispatches the computes but never drives `advanceWake`
+       * gets a frozen track, which renders as a wake that is simply SHORT —
+       * plausible enough to ship and to tune around. The previous agent
+       * declined to split this call for exactly that reason ("a half-built API
+       * that freezes the trail is worse than a stated one"); this is the split
+       * with the trap named rather than left silent.
+       *
+       * WHY NOT `throw`. `GameLoop` renders while PAUSED (§V.21: sim halts,
+       * render continues), so a pause taken before the very first tick — Esc
+       * during the compile warm-up — would reach this line with no tick behind
+       * it and kill the frame, every frame. That is a worse failure than the
+       * one being guarded against, and the guard cannot tell the two apart from
+       * in here. The regression itself is pinned in tests/wakeSea.test.ts, where
+       * `advanceWake` is the only thing that can move the track at all.
+       */
+      if (!wakeAdvanced && !warnedNoAdvance) {
+        warnedNoAdvance = true;
+        console.error(
+          'flowFoam.update: the wake track has never been advanced. Call ' +
+            'advanceWake(dt) from the SIM TICK (§V.2) — it is sim state, and ' +
+            'buoyancy reads it through CpuOcean.setWakeField (§V.8).',
+        );
+      }
       time += dt;
       flowU.uTime.value = time;
       flowU.uNoiseScale.value = p.noiseScale;
@@ -300,25 +369,8 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       // regionSize is live-tweakable, resolution is a startup constant
       uNearFeature.value = (p.regionSize / p.resolution) * p.waveBandLow;
       uFarFeature.value = (p.farRegionSize / p.farResolution) * p.waveBandLow;
-      /**
-       * age + extend the world-space cutwater track BEFORE the computes read it
-       *
-       * §V.2/§V.8 — THIS IS IN THE WRONG BLOCK AND MUST MOVE, and it is
-       * recorded here rather than half-moved. `main.ts` calls `update()` from
-       * the RENDER block on `frameDt`, so the trail's spatial resolution is
-       * frame-rate dependent today. That was already a §V.2 defect; it becomes
-       * a §V.8 one the moment `wakeHeightCpu` is wired into `CpuOcean.heightAt`,
-       * because buoyancy runs inside the FIXED tick and would then float the
-       * hull on a track aged later in the same frame.
-       *
-       * The fix is to age the track in the sim tick, after `setShip` and before
-       * buoyancy — which needs `shipYaw`/`shipSpeed` hoisted out of the render
-       * block in main.ts. Not done here: splitting the call without moving the
-       * caller freezes the trail, and a half-built API is worse than a stated
-       * one. See the session report.
-       */
-      wake.advance(dt);
-      wake.pushParams();
+      // the track was aged in the SIM TICK (`advanceWake`); what is left here is
+      // the GPU work, which is per-FRAME by definition
       acc.step(renderer, dt);
       far.step(renderer, dt);
     },

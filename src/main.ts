@@ -651,6 +651,20 @@ async function boot(): Promise<void> {
   // sheltered lagoon — f62e037's defect with a different modulation.
   caustics.setFetchField(fetchField);
   cpuOcean.setFetch(fetchField);
+  /**
+   * §V.8, AND THE SAME ARGUMENT A THIRD TIME. `d9e8e22` put the wake into the
+   * ocean material's `positionNode`, so the drawn surface carries wake
+   * elevation; from that commit until this line the hull was floating on a sea
+   * that no longer matched the one on screen. Same object as the material was
+   * handed (`surface` above), so the elevation the vertex stage samples and the
+   * elevation buoyancy reads come off ONE track, one odometer and one lagged
+   * mound speed — not two schedules that agree.
+   *
+   * Gated on the same FEATURE flag the material's own wake wiring is: with
+   * flowFoam off there is no wake texture to draw and no wake to float on, and
+   * both sides must reach that state by the same switch.
+   */
+  if (FEATURES.flowFoam) cpuOcean.setWakeField(flowFoam);
 
   // hull waterline contact (§T.33 support): coarse stations round the hull
   // outline, sampled against the SAME sea every tick. Consumers: bow spray
@@ -1012,6 +1026,46 @@ async function boot(): Promise<void> {
        */
       ocean.advanceSpectrum(oceanParams);
       cpuOcean.update(state.time);
+      /**
+       * §V.2 + §V.8 — THE WAKE IS SIM STATE, so it is aged HERE.
+       *
+       * It used to live in the render block on `frameDt`, which made the
+       * cutwater track's spatial resolution a function of frame rate (`52cd1b5`
+       * is the same defect one field over: a per-second quantity driven
+       * per-frame). Once `cpuOcean.setWakeField` was wired it stopped being only
+       * a §V.2 defect: buoyancy runs a dozen lines below this, so a track aged
+       * in the render block would have the hull floating on a wake from a
+       * different instant than the one the vertex stage draws.
+       *
+       * BEFORE BUOYANCY AND AFTER SAILING, both deliberately. Sailing owns the
+       * planar integration (§B.22), so the cutwater pose is final for this tick
+       * by now; buoyancy integrates y only and `setShip` takes no y, no pitch
+       * and no roll, so nothing below can move the wake this tick — that is what
+       * makes reading it from inside the same tick well-defined rather than a
+       * race (see `CpuOcean.setWakeField`).
+       *
+       * The pose feeds the region, the flow direction and the track together:
+       * `wakeHeightCpu` folds in the region's edge fade, so a centre moved on a
+       * different clock from the track is the same disagreement in a third
+       * place.
+       */
+      if (FEATURES.flowFoam) {
+        const wakeYaw = Math.atan2(
+          rotateVec(playerShip.quaternion, [0, 0, 1])[0],
+          rotateVec(playerShip.quaternion, [0, 0, 1])[2],
+        );
+        flowFoam.setCenter(playerShip.position[0], playerShip.position[2]);
+        flowFoam.setFlowDir([-playerShip.velocity[0], -playerShip.velocity[2]]);
+        flowFoam.setShip(
+          [playerShip.position[0], playerShip.position[2]],
+          wakeYaw,
+          Math.hypot(playerShip.velocity[0], playerShip.velocity[2]),
+          stemZ,
+          transomZ,
+          beamHalf * 2,
+        );
+        flowFoam.advanceWake(dt);
+      }
       // §T.16: Space fires the battery the CAMERA bears on (§I gives the
       // player one key, so the side has to be inferred from where she is
       // looking). The enemy's order comes out of the SAME state machine that
@@ -1179,12 +1233,8 @@ async function boot(): Promise<void> {
       });
       hullWetline.updateFromHullContact(frameDt, hullContact.stations, hullContact.depth);
 
-      // spray + wake systems follow the ship (§V.6, §V.10)
-      const shipYaw = Math.atan2(
-        rotateVec(playerShip.quaternion, [0, 0, 1])[0],
-        rotateVec(playerShip.quaternion, [0, 0, 1])[2],
-      );
-      const shipSpeed = Math.hypot(playerShip.velocity[0], playerShip.velocity[2]);
+      // spray follows the ship (§V.6). The WAKE's own pose moved into the sim
+      // tick with the track it drives (§V.2/§V.8).
       spray.centerUniform.value.set(playerShip.position[0], playerShip.position[2]);
       // wind VELOCITY, not a direction: spray is carried by the air it is
       // thrown into, so a gale has to blow it further than a breeze does
@@ -1251,16 +1301,10 @@ async function boot(): Promise<void> {
       );
 
       if (FEATURES.flowFoam) {
-        flowFoam.setCenter(playerShip.position[0], playerShip.position[2]);
-        flowFoam.setFlowDir([-playerShip.velocity[0], -playerShip.velocity[2]]);
-        flowFoam.setShip(
-          [playerShip.position[0], playerShip.position[2]],
-          shipYaw,
-          shipSpeed,
-          stemZ,
-          transomZ,
-          beamHalf * 2,
-        );
+        // region, flow direction, ship pose and the track were all set in the
+        // SIM TICK (§V.2/§V.8 — see there). What is left is the GPU work: the
+        // ortho capture and the advect/blur dispatches, both per-frame by
+        // definition, both reading uniforms the tick already published.
         flowFoam.renderInjection(app.renderer, app.scene);
         flowFoam.update(app.renderer, frameDt);
       }

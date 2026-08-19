@@ -413,6 +413,46 @@ export interface SurfaceSample {
 }
 
 /**
+ * §V.8 THE SHIP'S OWN WAKE, as part of the sea she floats on.
+ *
+ * `d9e8e22` wired `flowFoam.wakeHeightNode` into the ocean material's
+ * `positionNode`, so the DRAWN surface carries wake elevation. This is the
+ * other half: without it the hull floats on a sea that no longer exists, which
+ * is §V.8's exact failure mode and the class of bug `f62e037` produced four
+ * separate user reports from in one day.
+ *
+ * INCLUDE IT IN BOTH, WITH §V.68 DOING THE BOUNDING — this is the decision, and
+ * the reason it is safe is STRUCTURAL rather than tuned:
+ *  · `heightAt` (geometry: waterline, cutwater, spray, camera) takes the wake at
+ *    FULL amplitude, because that is the surface the GPU draws;
+ *  · `pressureHeadAt` (force: buoyancy) takes it attenuated by e^(−k·T) at each
+ *    term's own wavenumber, exactly as this mirror's spectrum already does for
+ *    every FFT mode (see `MirrorCascade.head`);
+ *  · NO hull exclusion and NO damping, because `setShip(pos[x,z], yaw, speed,…)`
+ *    takes NO y, NO pitch and NO roll. The wake field has no dependence on any
+ *    degree of freedom buoyancy controls, so the heave→wake→heave loop is absent
+ *    by construction rather than by being small.
+ *
+ * The one loop that is NOT closed by that argument is SURGE: buoyancy adds a
+ * horizontal wave-slope force, so speed → mound → head gradient → surge → speed
+ * is a real path, at one tick of delay. It is bounded by `smithAtten` like
+ * everything else here and measured in the stability sweep (seaPhysics tests),
+ * not assumed away.
+ *
+ * Structural (a one-method interface), not the concrete `FlowFoam`: §V.3 keeps
+ * sea-physics free of the engine, and a test needs to be able to hand this an
+ * analytic wake whose elevation and depth decay it knows in closed form.
+ */
+export interface WakeElevationField {
+  /**
+   * Wake surface elevation (m, signed) at a world XZ. `smithDepth` 0 = the true
+   * free surface (geometry); > 0 = the elevation whose hydrostatic head equals
+   * the wake's dynamic pressure at that depth (§V.68, force).
+   */
+  wakeHeightCpu(x: number, z: number, smithDepth: number): number;
+}
+
+/**
  * The slice of the mirror buoyancy actually consumes. Declared structurally
  * so tests can drive the hull with an analytic sea (a single sine of known
  * wavelength) and assert the hull's frequency response directly — with the
@@ -519,6 +559,8 @@ export class CpuOcean {
    * is §B.34's disagreement arriving by a third route.
    */
   private fetch: FetchSource | null = null;
+  /** §V.8 the ship's own wake — see `WakeElevationField` and `setWakeField` */
+  private wake: WakeElevationField | null = null;
   /**
    * Per-cascade (k_pfull/k_band)² — the band's entire dependence on wavenumber
    * in the fetch law, cached per tick for the same reason `shoalK` is: it moves
@@ -591,6 +633,23 @@ export class CpuOcean {
   setFetch(fetch: FetchSource | null): void {
     this.fetch = fetch;
     this.refreshFetch();
+  }
+
+  /**
+   * Wire the wake the sea carries (§V.8). Same contract as `setSeabed` and
+   * `setFetch`: call it once, at startup, with THE SAME `FlowFoam` instance the
+   * ocean material was handed — the material reads `wakeHeightNode` off that
+   * object's elevation texture and this reads `wakeHeightCpu` off the same
+   * object's track, so "the same wake" is a pointer rather than two schedules
+   * that have to agree (§B.34, `3ad1212`).
+   *
+   * ORDERING, and it is load-bearing: the field must be advanced (`advanceWake`)
+   * INSIDE the sim tick, before buoyancy samples it. Left in the render block it
+   * is aged on `frameDt`, and then the hull floats on a track from a different
+   * instant than the one drawn — §V.2 and §V.8 in one defect.
+   */
+  setWakeField(wake: WakeElevationField | null): void {
+    this.wake = wake;
   }
 
   /** per-cascade shoaling wavenumbers — see `shoalK` */
@@ -839,17 +898,42 @@ export class CpuOcean {
 
   private readonly q: [number, number] = [0, 0];
 
+  /**
+   * The wake's contribution at the GRID coord `gridCoord` just solved for, NOT
+   * at the query point — §V.72(a), and the reason is the same one the shoaling
+   * depth is read there. `surfaceMaterial.positionNode` adds
+   * `wakeHeightNode(worldXZ)` at the UNDISPLACED grid position and then lets the
+   * cascades carry that vertex sideways; reading the wake at the post-
+   * displacement point instead would put the drawn sea and the floated sea 1–2 m
+   * apart horizontally, which is §B.34 arriving by a third route.
+   *
+   * OUTSIDE `shoaledSum` on purpose: the GPU adds the wake AFTER `totalDisp`,
+   * so it is neither shoaled, nor fetch-limited, nor breaker-clipped. A wake is
+   * a hull's own disturbance of the local surface, not a component of the wind
+   * spectrum, and every one of those three modifiers is a spectrum statement.
+   */
+  private wakeAt(smithDepth: number): number {
+    return this.wake ? this.wake.wakeHeightCpu(this.q[0], this.q[1], smithDepth) : 0;
+  }
+
   /** Water height at world (x,z) — the surface as drawn (§V.8). */
   heightAt(x: number, z: number, time: number): number {
     if (time !== this.time || Number.isNaN(this.gridTime)) this.update(time);
     this.gridCoord(x, z, this.q);
-    return this.shoaledSum((c) => c.height, this.q[0], this.q[1]);
+    // FULL amplitude: this is the geometric question, and the geometry the GPU
+    // drew carries the whole wake (§V.8, `d9e8e22`)
+    return this.shoaledSum((c) => c.height, this.q[0], this.q[1]) + this.wakeAt(0);
   }
 
   /** Smith-attenuated equivalent elevation at world (x,z) — see the field. */
   pressureHeadAt(x: number, z: number, time: number): number {
     if (time !== this.time || Number.isNaN(this.gridTime)) this.update(time);
     this.gridCoord(x, z, this.q);
-    return this.shoaledSum((c) => c.head, this.q[0], this.q[1]);
+    // §V.68: the FORCE integrates pressure, so the wake is attenuated by
+    // e^(−k·T) at each term's own wavenumber, exactly as every FFT mode above
+    // already is. Same `smithDepth()` — one draft, one sea.
+    return (
+      this.shoaledSum((c) => c.head, this.q[0], this.q[1]) + this.wakeAt(this.smithDepth())
+    );
   }
 }
