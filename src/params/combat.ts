@@ -306,6 +306,14 @@ export interface CombatFxParams {
   /** rad/s — peak tumble. 0 freezes the roll, which reads as sliding decals */
   splinterSpin: number;
   /**
+   * §T.63 — how far the ejecta plume leans DOWNRANGE, as a multiple of the
+   * surface normal. 0 = the old symmetric dome about the hull normal, i.e.
+   * a hit that has forgotten which way the ball was going; 1 = the burst
+   * leans 45° along the shot's tangential component. Applies to the things
+   * with mass (splinters, chunks) and not to the flash or the powder smoke.
+   */
+  splinterMomentum: number;
+  /**
    * How wide the shards leave the impact: 0 is a beam along the hull's
    * outward normal, 1 is a full hemisphere. Wood does not spray back
    * isotropically out of a hole — it follows the ball through.
@@ -541,6 +549,7 @@ export const combatFxParams: CombatFxParams = registerParams(
     splinterAlpha: 0.92,
     splinterAspect: 4.5,
     splinterSpin: 7,
+    splinterMomentum: 0.85,
     // 0.5 not the old 0.85. At 0.85 the burst was very nearly a full
     // hemisphere, i.e. it had no relationship to the impact at all — which is
     // why it read as "generic particles" no matter what colour they were.
@@ -668,6 +677,7 @@ export const combatFxParams: CombatFxParams = registerParams(
     // top half does nothing is a knob that lies)
     splinterAspect: { min: 1, max: 6, step: 0.1 },
     splinterSpin: { min: 0, max: 20, step: 0.5 },
+    splinterMomentum: { min: 0, max: 3, step: 0.05 },
     splinterSpread: { min: 0, max: 1, step: 0.01 },
     // `chunkCount` has no range entry on purpose: the pool is sized at
     // construction (§V.28) and a live slider on it would be a dead knob, which

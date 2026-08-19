@@ -31,6 +31,19 @@ export interface HitEvent {
   /** world-space impact point */
   point: Vec3;
   projectileId: number;
+  /**
+   * §T.63 — UNIT direction the ball was travelling when it struck.
+   *
+   * Every ejecta cue used to be built from the ship's OUTWARD NORMAL alone,
+   * so timber left a breach in a symmetric dome no matter which way the shot
+   * came from — the one piece of information that says a ball went THROUGH
+   * something was thrown away at the only place it was ever known. It is a
+   * pure by-product of the segment test (`velocity` is already in hand), so
+   * carrying it costs a normalise per hit and nothing per frame.
+   *
+   * Absent when there is no projectile (the `forceHit` dev path).
+   */
+  direction?: Vec3;
 }
 
 /**
@@ -69,11 +82,19 @@ export function testHits(
       }
     }
     if (bestTarget) {
+      const v = p.velocity;
+      const speed = Math.hypot(v[0], v[1], v[2]);
       events.push({
         shipIndex: bestTarget.shipIndex,
         pieceId: bestTarget.pieceId,
         point: lerp(prev, curr, bestT),
         projectileId: p.id,
+        // §V.28: a stalled projectile would divide by zero; no direction is
+        // better than a NaN one, and the consumers all treat it as optional
+        direction:
+          Number.isFinite(speed) && speed > 1e-6
+            ? [v[0] / speed, v[1] / speed, v[2] / speed]
+            : undefined,
       });
     } else {
       surviving.push(p);

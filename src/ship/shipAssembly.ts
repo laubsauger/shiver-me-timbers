@@ -6,6 +6,8 @@
 import * as THREE from 'three';
 import type { DamageStateId, PieceDef, PieceKind, SailStateId, Vec3 } from './pieceTypes';
 import { buildHoledVariant, buildPieceGeometry, buildSailGeometry } from './pieceGeometry';
+import type { PieceBreach } from './pieceGeometryHoled';
+import { destructionParams } from '../params/destruction';
 import { createHoleMaterial, createPieceMaterial } from './pieceMaterials';
 import { buildDeckHeightfield, type DeckHeightfield } from './deckHeightfield';
 import { sailClothPoint, type SailClothState } from './sailShape';
@@ -44,6 +46,8 @@ interface PieceRuntime {
   damage: DamageStateId;
   /** trim state of a 'sail' piece; 'full' (and unused) on everything else */
   sail: SailStateId;
+  /** §T.63 — every breach this piece is carrying, in the order they landed */
+  breaches: PieceBreach[];
 }
 
 export class ShipAssembly {
@@ -93,7 +97,7 @@ export class ShipAssembly {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       node.add(mesh);
-      this.pieces.set(def.id, { def, node, mesh, damage: 'intact', sail: 'full' });
+      this.pieces.set(def.id, { def, node, mesh, damage: 'intact', sail: 'full', breaches: [] });
       for (const socket of def.sockets) {
         if (this.socketOwner.has(socket.id)) throw new Error(`duplicate socket id: ${socket.id}`);
         this.socketOwner.set(socket.id, def.id);
@@ -123,21 +127,73 @@ export class ShipAssembly {
       rt.mesh.visible = false;
     } else {
       rt.mesh.visible = true;
-      // outboard face: loft hints know their side; fallback = origin side
-      const side = rt.def.shape?.side ?? rt.def.transform.position[0];
-      const faceSign: 1 | -1 = side < 0 ? -1 : 1;
-      const next =
-        stateId === 'holed'
-          ? buildHoledVariant(rt.def.kind, rt.def.aabb, faceSign, rt.def.shape)
-          : buildPieceGeometry(rt.def.kind, rt.def.aabb, rt.def.shape);
-      rt.mesh.geometry.dispose();
-      rt.mesh.geometry = next;
-      rt.mesh.material =
-        stateId === 'holed'
-          ? [this.material(rt.def.kind, 'base'), this.material(rt.def.kind, 'hole')]
-          : this.material(rt.def.kind, 'base');
+      if (stateId === 'intact') rt.breaches.length = 0; // repaired: shell whole again
+      this.rebuild(rt, stateId);
     }
     rt.damage = stateId;
+  }
+
+  /**
+   * §T.63 — record a breach on `pieceId` and re-cut the shell.
+   *
+   * WHY THIS EXISTS SEPARATELY FROM `setDamageState`. The state swap is
+   * exactly-once at the hp threshold, so it could only ever produce ONE hole
+   * per section, at an authored station, whatever the player did. A hit is
+   * what makes a hole, and every hit makes its own: `breachesPerPiece` is the
+   * only thing that stops the list, and it is a look budget, not a rule of
+   * the sim — hp, flooding and the holed threshold are untouched by this
+   * call.
+   *
+   * Returns whether the breach was taken, so a caller can tell "recorded" from
+   * "at the cap" instead of guessing (§V.62 — a silent no-op here would read
+   * exactly like a hit that did not register, which is the bug being fixed).
+   */
+  addBreach(pieceId: string, breach: PieceBreach): boolean {
+    const rt = this.piece(pieceId);
+    if (!rt.def.damageStates.some((s) => s.id === 'holed')) return false;
+    if (rt.damage === 'destroyed') return false;
+    if (!breach.point.every(Number.isFinite) || !Number.isFinite(breach.radius)) return false; // §V.28
+    const cap = Math.max(1, Math.floor(destructionParams.breachesPerPiece));
+    if (rt.breaches.length >= cap) return false;
+    // A second ball into the SAME hole does not make a second hole. Recording
+    // it would spend a slot and a rebuild on an aperture the shell geometry
+    // then drops anyway (two apertures cannot share cells — see `sideStrip`),
+    // which is a silent no-op of exactly the §V.62 shape. Rejecting it here is
+    // the same answer, said out loud through the return value.
+    const near = rt.breaches.some((b) => {
+      const dy = b.point[1] - breach.point[1];
+      const dz = b.point[2] - breach.point[2];
+      return Math.hypot(dy, dz) < b.radius + breach.radius;
+    });
+    if (near) return false;
+    rt.breaches.push(breach);
+    rt.mesh.visible = true;
+    // the shell is perforated the moment the first ball goes through it; the
+    // hp threshold still owns splinters, flooding and the 'holed' bookkeeping
+    this.rebuild(rt, 'holed');
+    rt.damage = 'holed';
+    return true;
+  }
+
+  /** breaches currently cut into a piece (tests/tools; the live list) */
+  breachesOf(pieceId: string): readonly PieceBreach[] {
+    return this.piece(pieceId).breaches;
+  }
+
+  private rebuild(rt: PieceRuntime, stateId: 'intact' | 'holed'): void {
+    // outboard face: loft hints know their side; fallback = origin side
+    const side = rt.def.shape?.side ?? rt.def.transform.position[0];
+    const faceSign: 1 | -1 = side < 0 ? -1 : 1;
+    const next =
+      stateId === 'holed'
+        ? buildHoledVariant(rt.def.kind, rt.def.aabb, faceSign, rt.def.shape, rt.breaches)
+        : buildPieceGeometry(rt.def.kind, rt.def.aabb, rt.def.shape);
+    rt.mesh.geometry.dispose();
+    rt.mesh.geometry = next;
+    rt.mesh.material =
+      stateId === 'holed'
+        ? [this.material(rt.def.kind, 'base'), this.material(rt.def.kind, 'hole')]
+        : this.material(rt.def.kind, 'base');
   }
 
   /** sail trim swap (furled | reefed | full) — sail pieces only */

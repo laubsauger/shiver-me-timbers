@@ -211,12 +211,27 @@ export function createPieceMaterial(
   return tracked(handle, `piece-${kind}`);
 }
 
-/** dark interior seen through a breach (holed variant group 1) */
+/**
+ * Dark interior seen THROUGH a breach (holed variant group 1).
+ *
+ * §T.63 — DoubleSide, and that is not cosmetic. This used to be a flat disc
+ * facing outboard, so FrontSide was enough. It is now a CONE set back into the
+ * hull, and what the player looks at is the cone's INSIDE; front-face culling
+ * would leave the cavity invisible from every angle and the breach would show
+ * whatever is inside the ship instead. It matches the shell it sits in, which
+ * is DoubleSide for the same reason (OPEN_SHELL_KINDS above).
+ *
+ * It stays OPAQUE and depth-writing: it is the far wall of a hole, not glass.
+ * The transmissiveness of the breach comes from the planking being GONE
+ * (hullAperture.ts), never from this being see-through.
+ */
 export function createHoleMaterial(): THREE.MeshStandardNodeMaterial {
   const mat = new THREE.MeshStandardNodeMaterial();
   mat.color.setHex(shipMaterialParams.holeColor);
   mat.roughness = 1;
   mat.metalness = 0;
+  mat.side = THREE.DoubleSide;
+  mat.shadowSide = THREE.FrontSide;
   mat.name = 'piece-hole';
   return mat;
 }

@@ -27,7 +27,7 @@ import type { PieceDef, Vec3 as PieceVec3 } from '../ship/pieceTypes';
 import type { ShipAssembly } from '../ship/shipAssembly';
 import { applyHitDamage, type DestructionEvent } from '../ship/destruction';
 import type { SimState, ShipState, Vec3 } from '../state/simState';
-import { combatParams, type CombatParams } from '../params/combat';
+import { combatFxParams, combatParams, type CombatParams } from '../params/combat';
 import {
   resolveWaterEntry,
   stepProjectiles,
@@ -249,7 +249,26 @@ export function createCombat(
     const ship = state.ships[hit.shipIndex];
     if (rig === undefined || ship === undefined) return;
     frame.hits.push(hit);
-    const result = applyHitDamage(rig.config.assembly, rig.config.blueprint, hit, ship.damage);
+    // §T.63 — the seat is what turns `hit.point` into a hole in the planking
+    // instead of a decal at an authored station. The piece frame is the one
+    // `buildHitTargetSet` already resolved for hit detection, so the shell is
+    // cut against exactly the box the ball was tested against (§V.72).
+    const target = rig.targets.pieces.find((p) => p.pieceId === hit.pieceId);
+    const result = applyHitDamage(
+      rig.config.assembly,
+      rig.config.blueprint,
+      hit,
+      ship.damage,
+      undefined,
+      target === undefined
+        ? undefined
+        : {
+            shipPosition: ship.position,
+            shipQuaternion: ship.quaternion,
+            pieceFrame: target.frame,
+            ballRadius: combatFxParams.ballDrawRadius,
+          },
+    );
     frame.destruction.push(...result.events);
     if (result.detachedSubtree !== undefined) frame.detached.push(result.detachedSubtree);
     // applyHitDamage emits splinters exactly once, at the moment a piece
@@ -360,8 +379,13 @@ export function createCombat(
         rotateVec(piece.frame.quaternion, [outboard, mid[1], mid[2]]),
       );
       const point = add(ship.position, rotateVec(ship.quaternion, local));
+      // §T.63 — the dev key must carry a SHOT DIRECTION too, or the one path
+      // built to make §V.14 observable is the one path that cannot show the
+      // ejecta leaning downrange. A ball reaching this face came from abeam,
+      // i.e. inbound along the face's own outward normal, reversed.
+      const inward = rotateVec(ship.quaternion, [outboard >= 0 ? -1 : 1, 0, 0]);
       for (let i = 0; i < Math.max(1, Math.floor(count)); i++) {
-        applyHit(state, { shipIndex, pieceId, point, projectileId: -1 });
+        applyHit(state, { shipIndex, pieceId, point, projectileId: -1, direction: inward });
       }
       return frame;
     },

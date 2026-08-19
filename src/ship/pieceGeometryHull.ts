@@ -15,6 +15,16 @@ import {
   type HullShape,
 } from './hullMath';
 import { vjitter, vside } from './variation';
+import {
+  blocksOverlap,
+  buildAperturePatch,
+  seatAperture,
+  type ApertureBlock,
+  type ShellBreach,
+  type ShellRim,
+} from './hullAperture';
+
+export type { ShellBreach, ShellRim } from './hullAperture';
 
 export { asHullShape, hullEnvelope, hullHalfWidthAt, hullSheer, hullTopY } from './hullMath';
 export type { HullShape } from './hullMath';
@@ -107,7 +117,13 @@ const LIP_ROWS = 2;
  * the new ones, so the strake coordinate the wood material reads simply
  * continues up into the lip (uv.y > 1 there).
  */
-function sideStrip(s: HullShape, side: number): THREE.BufferGeometry {
+function sideStrip(
+  s: HullShape,
+  side: number,
+  breaches: readonly ShellBreach[] = [],
+  collarDepth = 0,
+  rimsOut?: ShellRim[],
+): THREE.BufferGeometry {
   const positions: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
@@ -146,14 +162,45 @@ function sideStrip(s: HullShape, side: number): THREE.BufferGeometry {
   }
   const row = H_STEPS + 1 + (proud ? LIP_ROWS : 0);
   const hSteps = row - 1;
+  // §T.63 — the cells a breach replaces. Seated FIRST so the quad loop below
+  // can skip them; an aperture that cannot be seated (see `seatAperture`)
+  // simply cuts nothing, which is visible rather than silent.
+  const coarse = (i: number, j: number): readonly [number, number, number] => {
+    const o = (i * row + j) * 3;
+    return [positions[o], positions[o + 1], positions[o + 2]];
+  };
+  const blocks: ApertureBlock[] = [];
+  const patches: { b: ShellBreach; block: ApertureBlock }[] = [];
+  for (const b of breaches) {
+    const block = seatAperture(b, s, Z_SLICES, H_STEPS);
+    // two apertures sharing a cell would each weld to a perimeter the other
+    // has already deleted; the later one is dropped (deterministic, §V.2)
+    if (block === null || blocks.some((x) => blocksOverlap(x, block))) continue;
+    blocks.push(block);
+    patches.push({ b, block });
+  }
+  const cut = (i: number, j: number): boolean =>
+    blocks.some((k) => i >= k.i0 && i < k.i1 && j >= k.j0 && j < k.j1);
+
   for (let i = 0; i < Z_SLICES; i++) {
     for (let j = 0; j < hSteps; j++) {
+      if (cut(i, j)) continue;
       const a = i * row + j;
       const b = (i + 1) * row + j;
       // wind so the face normal points outboard (±x) for each side
       if (side >= 0) indices.push(a, a + 1, b, b, a + 1, b + 1);
       else indices.push(a, b, a + 1, a + 1, b, b + 1);
     }
+  }
+  for (const { b, block } of patches) {
+    const patch = buildAperturePatch(
+      b, block, s, side, Z_SLICES, H_STEPS, collarDepth, coarse,
+    );
+    rimsOut?.push(patch.rim);
+    const base = positions.length / 3;
+    positions.push(...patch.positions);
+    uvs.push(...patch.uvs);
+    for (const idx of patch.indices) indices.push(base + idx);
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -164,10 +211,33 @@ function sideStrip(s: HullShape, side: number): THREE.BufferGeometry {
 }
 
 /** one hull half-shell (side planking + its half of the bottom), translated
- *  into piece-local (origin x=0, z=center) */
-export function buildLoftedHullSection(s: HullShape): THREE.BufferGeometry {
-  const geo = mergeStrips([sideStrip(s, s.side), bottomHalf(s, s.side)]);
+ *  into piece-local (origin x=0, z=center).
+ *
+ *  `breaches` are SHIP-space (§T.63): each one removes a block of the shell
+ *  grid and welds a torn annulus in its place. Empty = the intact hull, byte
+ *  for byte — the intact path must not change when the damaged one gains a
+ *  feature. */
+export function buildLoftedHullSection(
+  s: HullShape,
+  breaches: readonly ShellBreach[] = [],
+  collarDepth = 0,
+  rimsOut?: ShellRim[],
+): THREE.BufferGeometry {
+  const geo = mergeStrips([
+    sideStrip(s, s.side, breaches, collarDepth, rimsOut),
+    bottomHalf(s, s.side),
+  ]);
   geo.translate(0, 0, -(s.z0 + s.z1) / 2);
+  // rims come out of the loft in SHIP space; hand them back in the SAME frame
+  // the geometry is now in, so the fringe and the cavity cannot be built in a
+  // different frame from the hole they belong to
+  if (rimsOut !== undefined) {
+    const dz = -(s.z0 + s.z1) / 2;
+    for (const rim of rimsOut) {
+      for (const pt of rim.points) pt.z += dz;
+      rim.centre.z += dz;
+    }
+  }
   return geo;
 }
 

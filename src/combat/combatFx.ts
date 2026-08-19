@@ -454,6 +454,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
       const columnN = sanitizeCount(p.columnPerHit, 12, 64);
       const breechN = sanitizeCount(p.breechPerShot, 6, 64);
       const vary = nn(p.variation, 0.45);
+      const momentum = Math.max(0, nn(p.splinterMomentum, 0.85));
 
       for (const m of frame.muzzles) {
         const axis: [number, number, number] = [
@@ -524,6 +525,9 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         // through the impact point: debris off a hull sprays back the way the
         // ball came, and a hard-coded [0,1,0] fountains it out of the deck.
         const axis = outwardAxis(ships?.[hit.shipIndex], hit.point);
+        // what has MASS leans downrange; the flash and the powder smoke stay
+        // on the surface normal, which is where they physically belong
+        const throwAxis = ejectaAxis(axis, hit.direction, momentum);
         const seed = (Math.imul(hit.projectileId, 2654435761) + h * 40503) >>> 0;
         spawn('impactFlash', hit.point, axis, 0, prof.impactFlash, seed, vary * 0.4);
         flash.strike(hit.point[0], hit.point[1], hit.point[2], 0.85);
@@ -537,7 +541,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
             : combatShakeParams.otherHitStrength, 0.55),
         );
         for (let k = 0; k < debrisN; k++) {
-          spawn('splinter', hit.point, axis, k, prof.splinter, seed, vary);
+          spawn('splinter', hit.point, throwAxis, k, prof.splinter, seed, vary);
         }
         for (let k = 0; k < impactSmokeN; k++) {
           spawn('impactSmoke', hit.point, axis, k, prof.impactSmoke, seed, vary);
@@ -545,7 +549,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         // and the pieces that are actually going to LAND. Two, not twelve:
         // these are chunks of the ship, and a hull that sheds a dozen planks
         // per ball reads as papier-mache.
-        debris.spawn(hit.point, axis, sanitizeCount(p.chunkPerHit, 2, 16), seed);
+        debris.spawn(hit.point, throwAxis, sanitizeCount(p.chunkPerHit, 2, 16), seed);
       }
 
       // a BREACH escalates the hit above — it does not gate it. This is the
@@ -565,7 +569,11 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         const cause = frame.hits.find((h) => samePoint(h.point, e.position));
         const axis = cause === undefined
           ? ([0, 1, 0] as [number, number, number])
-          : outwardAxis(ships?.[cause.shipIndex], e.position);
+          : ejectaAxis(
+              outwardAxis(ships?.[cause.shipIndex], e.position),
+              cause.direction,
+              momentum,
+            );
         for (let k = 0; k < n; k++) {
           spawn('splinter', e.position, axis, k, prof.splinter, seed, vary);
         }
@@ -790,6 +798,49 @@ function outwardAxis(
     // an undamped one at deck level would fountain debris straight up again
     (finite(point[1]) - finite(ship.position[1])) * 0.35 + 0.25,
     finite(point[2]) - finite(ship.position[2]),
+  );
+}
+
+/**
+ * §T.63 — the axis timber actually leaves along: the surface normal, LEANED
+ * DOWNRANGE by the shot's own tangential momentum.
+ *
+ * The bug this fixes: everything ejected from a hit was aimed along
+ * `outwardAxis` alone, which is the ship's radial direction. A ball arriving
+ * from fine on the bow and one arriving from square abeam therefore threw
+ * identical, symmetric domes — the shot carried no momentum through the wood
+ * at all, and the user read that (correctly) as the hit not registering.
+ *
+ * WHY THE TANGENT AND NOT THE BALL DIRECTION ITSELF. `ballDir` points INTO
+ * the hull; mixing it with the outward normal passes through zero at
+ * mid-blend, so the plume would collapse to a point and then normalise a
+ * near-zero vector — §V.28's exact failure. Projecting the ball's direction
+ * onto the surface PLANE removes that: the tangential part is orthogonal to
+ * the normal, so `outward + momentum · tangent` has an outward component of
+ * exactly 1 for any `momentum`, can never degenerate, and leans the burst
+ * the way the shot was going. `momentum` = 0 restores the old radial dome,
+ * which is what the §V.62 test compares against.
+ */
+function ejectaAxis(
+  outward: readonly [number, number, number],
+  ballDir: readonly number[] | undefined,
+  momentum: number,
+): [number, number, number] {
+  const m = finite(momentum);
+  if (ballDir === undefined || m === 0) return [outward[0], outward[1], outward[2]];
+  const dx = finite(ballDir[0]);
+  const dy = finite(ballDir[1]);
+  const dz = finite(ballDir[2]);
+  const len = Math.hypot(dx, dy, dz);
+  if (len < 1e-6) return [outward[0], outward[1], outward[2]]; // §V.28
+  const ux = dx / len;
+  const uy = dy / len;
+  const uz = dz / len;
+  const along = ux * outward[0] + uy * outward[1] + uz * outward[2];
+  return normalized(
+    outward[0] + m * (ux - along * outward[0]),
+    outward[1] + m * (uy - along * outward[1]),
+    outward[2] + m * (uz - along * outward[2]),
   );
 }
 

@@ -11,11 +11,15 @@ import { buildGalleonBlueprint } from '../src/ship/shipBlueprint';
 import { ShipAssembly } from '../src/ship/shipAssembly';
 import type { HitEvent } from '../src/combat/hitTest';
 import { quatFromAxisAngle } from '../src/combat/quatMath';
+import { destructionParams } from '../src/params/destruction';
 import type { Quat } from '../src/state/simState';
 
 const stub = (): Material => ({ dispose(): void {} }) as unknown as Material;
 const IDENTITY: Quat = [0, 0, 0, 1];
-const P = { hitDamage: 0.25, holedThreshold: 0.5, splinterCount: 10 };
+// the shipped look knobs with the two hp numbers this file is about pinned:
+// §T.63 added breach-geometry params to the same group, and a hand-built
+// literal would silently drift from them
+const P = { ...destructionParams, hitDamage: 0.25, holedThreshold: 0.5, splinterCount: 10 };
 const hitOn = (pieceId: string): HitEvent => ({
   shipIndex: 0,
   pieceId,

@@ -9,8 +9,9 @@
 import type { Object3D } from 'three';
 import type { HitEvent } from '../combat/hitTest';
 import type { Quat } from '../state/simState';
-import { rotateVec } from '../combat/quatMath';
+import { invRotateVec, rotateVec } from '../combat/quatMath';
 import { destructionParams, type DestructionParams } from '../params/destruction';
+import { defaultRadius } from './pieceGeometryHoled';
 import type { DamageStateId, PieceDef, Vec3 } from './pieceTypes';
 import type { ShipAssembly } from './shipAssembly';
 
@@ -33,6 +34,28 @@ export interface HitDamageResult {
   events: DestructionEvent[];
   /** detached mast subtree (mast + yards + sails) for the caller to animate */
   detachedSubtree?: Object3D;
+  /** §T.63 — true when this hit cut a new hole in the shell (false at the
+   *  per-piece cap, on a non-holeable piece, or with no `seat` supplied) */
+  breached?: boolean;
+}
+
+/**
+ * §T.63 — what a hit needs in order to be turned into a HOLE IN THE PLANKING
+ * rather than a decal at an authored station.
+ *
+ * `HitEvent.point` is world space; the shell is cut in piece space, so the
+ * ship's pose and the piece's ship-local frame are what close the gap. Both
+ * already exist at the one call site that matters (`combatSystem.applyHit`
+ * holds the `ShipState` and `buildHitTargetSet`'s resolved frames), so this
+ * carries them rather than re-deriving a second answer here (§V.72).
+ */
+export interface BreachSeat {
+  shipPosition: Vec3;
+  shipQuaternion: Quat;
+  /** ship-local frame of the piece that was hit */
+  pieceFrame: { position: Vec3; quaternion: Quat };
+  /** m — physical ball radius; `defaultRadius` turns it into a hole size */
+  ballRadius?: number;
 }
 
 /**
@@ -46,6 +69,7 @@ export function applyHitDamage(
   hit: HitEvent,
   damageState: Record<string, number>,
   params: DestructionParams = destructionParams,
+  seat?: BreachSeat,
 ): HitDamageResult {
   const piece = blueprint.find((p) => p.id === hit.pieceId);
   if (piece === undefined) throw new Error(`hit references unknown piece: ${hit.pieceId}`);
@@ -62,6 +86,19 @@ export function applyHitDamage(
     return { events, detachedSubtree };
   }
   const canHole = piece.damageStates.some((s) => s.id === 'holed');
+  // §T.63 — EVERY hit through the planking makes its own hole, at the point
+  // the ball went in. This used to be gated on the hp threshold, which is
+  // why a section could only ever show one breach and why the first shots of
+  // an engagement left no mark at all ("hits don't really register").
+  let breached = false;
+  if (canHole && seat !== undefined) {
+    breached = assembly.addBreach(piece.id, {
+      point: pieceLocalPoint(hit.point, seat),
+      radius: defaultRadius(seat.ballRadius),
+      // §V.2: seeded off the impact point, so a replay tears the same shape
+      seed: breachSeed(hit.point),
+    });
+  }
   if (canHole && before > params.holedThreshold && after <= params.holedThreshold) {
     assembly.setDamageState(piece.id, 'holed'); // exactly-once at threshold
     events.push({
@@ -70,7 +107,29 @@ export function applyHitDamage(
       count: params.splinterCount,
     });
   }
-  return { events };
+  return { events, breached };
+}
+
+/** world impact point → the piece's own frame (ship pose, then piece frame) */
+function pieceLocalPoint(point: Vec3, seat: BreachSeat): [number, number, number] {
+  const shipLocal = invRotateVec(seat.shipQuaternion, [
+    point[0] - seat.shipPosition[0],
+    point[1] - seat.shipPosition[1],
+    point[2] - seat.shipPosition[2],
+  ]);
+  const rel: Vec3 = [
+    shipLocal[0] - seat.pieceFrame.position[0],
+    shipLocal[1] - seat.pieceFrame.position[1],
+    shipLocal[2] - seat.pieceFrame.position[2],
+  ];
+  const local = invRotateVec(seat.pieceFrame.quaternion, rel);
+  return [local[0], local[1], local[2]];
+}
+
+/** deterministic, position-derived, and stable across a §V.2 replay */
+function breachSeed(point: Vec3): number {
+  const q = (v: number): number => (Number.isFinite(v) ? Math.round(v * 64) : 0);
+  return (Math.imul(q(point[0]) ^ 0x9e37, 2654435761) ^ Math.imul(q(point[1]) + 7919, 40503) ^ q(point[2])) >>> 0;
 }
 
 export interface FloodingHoles {
