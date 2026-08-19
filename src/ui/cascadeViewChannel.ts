@@ -56,7 +56,15 @@ export function resetCascadeViewSink(): void {
  *
  * G is free: FreeCam swallows only W/A/S/D/R/F, X is the anchor, C the free
  * cam, H the helm, J the jump, B/V the combat arena, Space fires, the arrows
- * lay the guns. Digits and brackets are bound nowhere in `src/` at all.
+ * lay the guns. The brackets are bound nowhere else in `src/`.
+ *
+ * THE DIGITS ARE NO LONGER OURS ALONE. `src/camera/camInput.ts` reads 1..4 for
+ * the shipboard camera stations. It never swallows them, so 1/2/3 still reach
+ * this view and still mean "band" while it is open — but they also move the
+ * lens behind it, so closing the view can leave the camera at a station. The
+ * §V.62 rule below is unchanged and is what keeps the shared key honest: this
+ * view declines a digit it cannot use, so the camera's read is never fighting
+ * a live one. Both sides are documented in `src/input/controlMap.ts`.
  */
 export function cascadeViewAction(code: string): CascadeViewAction | null {
   if (code === 'KeyG') return { type: 'toggle' };

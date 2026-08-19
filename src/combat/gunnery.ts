@@ -39,7 +39,7 @@ import type { PieceDef } from '../ship/pieceTypes';
 import { combatParams, type CombatParams } from '../params/combat';
 import { CONTROL_CODES } from '../input/controlMap';
 import { createAim, muzzleLay, predictImpact, type Aim } from './aim';
-import { buildBattery, batterySide, sideForBearing } from './battery';
+import { buildBattery, batteryCentreGun, sideForBearing } from './battery';
 import { yawOfShip } from './combatSystem';
 
 /** the right mouse button, per the DOM's own numbering */
@@ -128,15 +128,6 @@ const MARK_SVG = `
   <circle cx="27" cy="27" r="1.5" fill="currentColor"/>
 </svg>`;
 
-/**
- * The gun the crosshair speaks for: the MIDDLE gun of the battery that bears.
- * Not the first — a broadside's ends differ by a couple of metres of station
- * and the middle is the honest average of the volley the key actually fires.
- */
-function middleMount(offsets: readonly number[][]): number[] | undefined {
-  return offsets.length === 0 ? undefined : offsets[Math.floor((offsets.length - 1) / 2)];
-}
-
 export function createGunnery(config: GunneryConfig): Gunnery {
   const params = config.params ?? combatParams;
   const aim = createAim(params);
@@ -145,9 +136,12 @@ export function createGunnery(config: GunneryConfig): Gunnery {
   // move on the deck, which is why reading it once is safe (unlike the POSE,
   // which is read every frame below).
   const battery = buildBattery(config.blueprint as PieceDef[]);
+  // §V.77: `batteryCentreGun` is the single owner of "which gun a single
+  // reading speaks for" — the gun camera station (§I camera stations) sits on
+  // the very gun this crosshair reports, because both call this one function.
   const mounts = {
-    port: middleMount(batterySide(battery, 'port').map((g) => g.position)),
-    starboard: middleMount(batterySide(battery, 'starboard').map((g) => g.position)),
+    port: batteryCentreGun(battery, 'port')?.position,
+    starboard: batteryCentreGun(battery, 'starboard')?.position,
   };
 
   const doc = config.domElement.ownerDocument ?? document;

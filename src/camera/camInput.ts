@@ -5,6 +5,7 @@
  *
  * Claimed keys: C toggles the free/detached camera. While free, W/A/S/D
  * fly, R/F rise/descend, Shift/Ctrl scale speed, wheel sets travel speed.
+ * 1..4 jump to the numbered shipboard stations (camStations.ts).
  *
  * The fly keys are bound in the CAPTURE phase on window so they are
  * swallowed before the sailing input collector's bubble-phase listener
@@ -19,6 +20,25 @@ import { CONTROL_CODES } from '../input/controlMap';
 export const TOGGLE_FREE_CODE = CONTROL_CODES.toggleFreeCamera;
 /** H = snap to the captain's eye at the helm, and back out again */
 export const TOGGLE_HELM_CODE = CONTROL_CODES.toggleHelm;
+/**
+ * The number row, in station order (Digit1 → the gun, and so on).
+ *
+ * 1/2/3 ARE SHARED WITH THE CASCADE SPECTRUM VIEW (`src/ui/cascadeViewChannel`),
+ * which reads them through `ui/viewModes` and acts on them only while that
+ * instrument is OPEN — a full-screen debug view of one wave band's raw data,
+ * with no game camera on screen at all. The camera therefore never
+ * `stopPropagation`s a digit: swallowing them would take the band selector
+ * away from the view, and swallowing is what the view's own §V.62 note
+ * forbids in the other direction. The two owners can both act on one press,
+ * and the only visible consequence is that closing the view leaves the lens at
+ * a station. Documented in `input/controlMap.ts` on both sides.
+ */
+export const STATION_CODES: readonly string[] = [
+  CONTROL_CODES.cameraStationGun,
+  CONTROL_CODES.cameraStationBow,
+  CONTROL_CODES.cameraStationStern,
+  CONTROL_CODES.cameraStationNest,
+];
 /** the DOM's number for the right mouse button — gunnery's, not the camera's */
 const AIM_BUTTON = 2;
 
@@ -28,6 +48,8 @@ export interface CamInputHost {
   toggleFree(): void;
   /** helm POV ↔ chase — one key, both directions */
   toggleHelm(): void;
+  /** jump to station `index` of STATION_CODES; pressing it again comes back */
+  station(index: number): void;
   setDragging(dragging: boolean): void;
   /** pointer drag delta — free-look when free, orbit otherwise */
   drag(dx: number, dy: number): void;
@@ -86,6 +108,13 @@ export function attachCamInput(domElement: HTMLElement, host: CamInputHost): () 
     if (e.code === TOGGLE_HELM_CODE && !e.repeat) {
       host.toggleHelm();
       return;
+    }
+    if (!e.repeat) {
+      const station = STATION_CODES.indexOf(e.code);
+      if (station >= 0) {
+        host.station(station);
+        return; // acted, but NOT swallowed — see STATION_CODES
+      }
     }
     if (!host.isFree()) return;
     host.flyKey(e.code, true);

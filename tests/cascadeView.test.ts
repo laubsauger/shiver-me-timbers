@@ -53,12 +53,30 @@ function consumed(s: CascadeViewState, code: string): boolean {
 }
 
 describe('cascade view keys claim nothing another owner already has', () => {
+  /**
+   * THE DIGITS ARE SHARED NOW, DELIBERATELY. The camera stations took 1..4
+   * (`src/camera/camInput.ts` STATION_CODES) at the user's request, and this
+   * test used to assert blanket exclusivity against CONTROL_CODES — which is a
+   * DECISION, not a property (§V.80): it would fail on any legitimate move and
+   * says nothing about why exclusivity mattered. What actually matters is that
+   * two owners never both think a key is theirs to SWALLOW. The camera never
+   * calls stopPropagation on a digit, and this view declines one it cannot use
+   * (the §V.62 block below), so at any instant at most one owner acts on it.
+   */
+  const SHARED_WITH_CAMERA = new Set(['Digit1', 'Digit2', 'Digit3']);
+
   it('does not collide with the flight keys, the anchor, the helm or the guns', () => {
     const claimed = ['KeyG', 'Digit1', 'Digit2', 'Digit3', 'BracketLeft', 'BracketRight'];
     for (const code of claimed) {
       expect(cascadeViewAction(code), `${code} must be ours`).not.toBeNull();
       expect(FLY_KEYS.has(code), `${code} is a FreeCam flight key`).toBe(false);
-      expect(Object.values(CONTROL_CODES)).not.toContain(code);
+      if (SHARED_WITH_CAMERA.has(code)) {
+        // shared, and it has to be shared ON PURPOSE: declared in the binding
+        // map so the Controls page and the code cannot drift apart
+        expect(Object.values(CONTROL_CODES)).toContain(code);
+      } else {
+        expect(Object.values(CONTROL_CODES)).not.toContain(code);
+      }
     }
     // the arena, the jump and the combat keys are bound by code in their own
     // modules; assert the specific ones the brief names as taken

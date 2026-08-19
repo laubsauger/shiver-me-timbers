@@ -68,6 +68,49 @@ export interface CameraParams {
   helmAft: number;
   /** free-look yaw clamp either side of dead ahead, rad (0 = locked forward) */
   helmYawLimit: number;
+
+  // --- shipboard camera stations (1..4) — fixed vantages that ride the deck ---
+  /**
+   * Eye height above a station's own socket, m. One number for bow, stern and
+   * masthead: they are all "a person standing at that fitting", and three
+   * sliders that are always set to the same value are three chances to have
+   * two of them wrong. The gun station is genuinely different (you sit, not
+   * stand) and has its own.
+   */
+  stationEyeHeight: number;
+  /**
+   * Free-look yaw clamp either side of a station's own bearing, rad. Wider
+   * than the helm's on purpose — the helm is a POV with shoulders, a camera
+   * station is a tripod, and the stern station in particular is useless if it
+   * cannot be swung round to look back down the ship.
+   */
+  stationYawLimit: number;
+  /** gun station: eye height above the gun's MOUNT socket, m (bore ≈ +0.50) */
+  gunStationEyeHeight: number;
+  /** gun station: how far INBOARD of the mount, along the bore, the eye sits, m */
+  gunStationBack: number;
+  /** gun station: sit at the PORT battery instead of the starboard one */
+  gunStationPort: boolean;
+
+  // --- arriving at a deck station, and at the helm ---
+  /**
+   * How fast the lens travels into a deck station, m/s. The move's duration is
+   * DISTANCE-SCALED rather than constant: a fixed 1.5 s reads as a leisurely
+   * swoop over the 4 m from one end of the quarterdeck to the other and as a
+   * rocket over 60 m from a wide chase framing. Speed is the invariant a
+   * viewer actually reads.
+   */
+  stationEaseSpeed: number;
+  /** floor on that move, s — a very short hop still needs a beat to register */
+  stationEaseMin: number;
+  /** ceiling on it, s — past this a "move" stops being readable as one */
+  stationEaseMax: number;
+  /**
+   * Beyond this gap the arrival is a CUT, not a move, m. Easing a kilometre
+   * (the free camera's range) at any duration is a smear, not a camera move —
+   * see the note in followCam.setMode about the decision this replaces.
+   */
+  stationCutDistance: number;
 }
 
 export const cameraParams: CameraParams = registerParams(
@@ -107,6 +150,19 @@ export const cameraParams: CameraParams = registerParams(
     helmEyeHeight: 1.62,
     helmAft: 0.85,
     helmYawLimit: 2.6, // ~150° — can look over either shoulder, not behind
+    stationEyeHeight: 1.62,
+    stationYawLimit: Math.PI, // all the way round, either way
+    // the bore axis sits 0.50 m over the mount socket, so this puts the eye a
+    // handspan above it: astride the barrel, sighting along it
+    gunStationEyeHeight: 0.75,
+    // the breech is 0.67 m inboard of the mount and the carriage 0.9 m tall —
+    // 1.15 clears both and keeps the whole gun in the bottom of frame
+    gunStationBack: 1.15,
+    gunStationPort: false,
+    stationEaseSpeed: 45,
+    stationEaseMin: 0.22,
+    stationEaseMax: 1.0,
+    stationCutDistance: 90,
   },
   {
     radius: { min: 2, max: 500, step: 1 },
@@ -137,5 +193,13 @@ export const cameraParams: CameraParams = registerParams(
     helmEyeHeight: { min: 0.5, max: 4, step: 0.01 },
     helmAft: { min: -2, max: 4, step: 0.05 },
     helmYawLimit: { min: 0, max: 3.14, step: 0.01 },
+    stationEyeHeight: { min: 0, max: 4, step: 0.01 },
+    stationYawLimit: { min: 0, max: 3.1416, step: 0.01 },
+    gunStationEyeHeight: { min: -0.5, max: 3, step: 0.01 },
+    gunStationBack: { min: -1, max: 5, step: 0.05 },
+    stationEaseSpeed: { min: 2, max: 400, step: 1 },
+    stationEaseMin: { min: 0, max: 2, step: 0.01 },
+    stationEaseMax: { min: 0.05, max: 6, step: 0.05 },
+    stationCutDistance: { min: 0, max: 1200, step: 5 },
   },
 );

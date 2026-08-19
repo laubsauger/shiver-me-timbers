@@ -20,7 +20,7 @@
  * really does keep W/A/S/D away from the sailing input collector, and
  * everything about how any of it LOOKS.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   clamp,
   dampAngle,
@@ -33,11 +33,20 @@ import {
   wrapAngle,
   yawPitchFromDirection,
 } from '../src/camera/camMath';
-import { FreeCam } from '../src/camera/freeCam';
+import { FLY_KEYS, FreeCam } from '../src/camera/freeCam';
 import { FollowCam } from '../src/camera/followCam';
-import { PerspectiveCamera, Quaternion, Vector3 } from 'three';
+import { STATION_CODES } from '../src/camera/camInput';
+import { STATION_IDS, createShipStations, type StationId } from '../src/camera/camStations';
+import { Euler, PerspectiveCamera, Quaternion, Vector3, type Material } from 'three';
 import type { ShipState } from '../src/state/simState';
 import { cameraParams } from '../src/params/camera';
+import { combatParams } from '../src/params/combat';
+import { CONTROL_CODES, CONTROL_GROUPS } from '../src/input/controlMap';
+import { ShipAssembly } from '../src/ship/shipAssembly';
+import { buildGalleonBlueprint } from '../src/ship/shipBlueprint';
+import type { PieceDef } from '../src/ship/pieceTypes';
+import { batteryCentreGun, batterySide, buildBattery } from '../src/combat/battery';
+import { muzzleLay } from '../src/combat/aim';
 
 describe('exponential damping', () => {
   it('converges monotonically toward the target without overshoot', () => {
@@ -203,6 +212,8 @@ interface CamRig {
   cam: FollowCam;
   ship: ShipState;
   key(type: string, code: string): void;
+  /** a real pointer drag through the real binding, not a poke at a private */
+  drag(dx: number, dy: number): void;
   done(): void;
 }
 
@@ -211,7 +222,8 @@ function mountCam(): CamRig {
   const prev = (globalThis as Record<string, unknown>).window;
   (globalThis as Record<string, unknown>).window = fakeWindow;
   const camera = new PerspectiveCamera(55, 1, 0.1, 5000);
-  const cam = new FollowCam(camera, new EventTarget() as unknown as HTMLElement);
+  const dom = new EventTarget();
+  const cam = new FollowCam(camera, dom as unknown as HTMLElement);
   const ship: ShipState = {
     id: 'p',
     kind: 'player',
@@ -230,6 +242,13 @@ function mountCam(): CamRig {
     ship,
     key: (type, code) => {
       fakeWindow.dispatchEvent(Object.assign(new Event(type), { code }));
+    },
+    drag: (dx, dy) => {
+      dom.dispatchEvent(Object.assign(new Event('pointerdown'), { button: 0, pointerId: 1 }));
+      dom.dispatchEvent(
+        Object.assign(new Event('pointermove'), { pointerId: 1, movementX: dx, movementY: dy }),
+      );
+      dom.dispatchEvent(Object.assign(new Event('pointerup'), { button: 0, pointerId: 1 }));
     },
     done: () => {
       cam.dispose();
@@ -770,20 +789,30 @@ describe('camera vs the interpolated render view', () => {
  * The eye is rigidly parented to the deck. That is not an implementation
  * detail — it is the shot: heel, pitch and heave all arrive for free, and any
  * smoothing would slide the captain around his own deck instead.
+ *
+ * ENTERING used to be an instant cut and is now an eased move, at the user's
+ * explicit request (2026-08-19: "make sure that also has a camera transition …
+ * so that it's not stressingly abrupt but actually the camera moves there").
+ * The rigidity assertions below are unchanged — they are about the pose once
+ * it has ARRIVED, which is the part that must never be smoothed.
  */
 describe('helm POV rides the deck', () => {
   const WHEEL: [number, number, number] = [0, 6.1, -12.4];
+  /** run the arrival to completion — the eased entry is not a cut any more */
+  const settle = (rig: CamRig): void => {
+    for (let i = 0; i < 300; i++) rig.cam.update(rig.ship, 1 / 60);
+  };
 
-  it('snaps instantly — no glide, no smoothing lag', () => {
+  it('holds the arrived pose rigidly — no smoothing lag once it is there', () => {
     const rig = mountCam();
     try {
       rig.cam.setHelmAnchor(WHEEL);
       rig.cam.setMode('helm');
-      rig.cam.update(rig.ship, 1 / 60);
-      const firstFrame = rig.camera.position.clone();
-      // a mode that eased in would still be travelling many frames later
+      settle(rig);
+      const arrived = rig.camera.position.clone();
+      // a pose that were exponentially damped would still be creeping
       for (let i = 0; i < 60; i++) rig.cam.update(rig.ship, 1 / 60);
-      expect(rig.camera.position.distanceTo(firstFrame)).toBeLessThan(1e-9);
+      expect(rig.camera.position.distanceTo(arrived)).toBeLessThan(1e-9);
     } finally {
       rig.done();
     }
@@ -794,7 +823,7 @@ describe('helm POV rides the deck', () => {
     try {
       rig.cam.setHelmAnchor(WHEEL);
       rig.cam.setMode('helm');
-      rig.cam.update(rig.ship, 1 / 60);
+      settle(rig);
       const p = rig.camera.position;
       expect(p.y).toBeCloseTo(WHEEL[1] + cameraParams.helmEyeHeight, 6);
       // ship forward is local +z, so aft is -z: the lens must be BEHIND the
@@ -811,7 +840,7 @@ describe('helm POV rides the deck', () => {
     try {
       rig.cam.setHelmAnchor(WHEEL);
       rig.cam.setMode('helm');
-      rig.cam.update(rig.ship, 1 / 60);
+      settle(rig);
       const upright = rig.camera.position.clone();
 
       // heel 20° to starboard: rotation about the ship's own forward axis (+z)
@@ -834,7 +863,7 @@ describe('helm POV rides the deck', () => {
     try {
       rig.cam.setHelmAnchor(WHEEL);
       rig.cam.setMode('helm');
-      rig.cam.update(rig.ship, 1 / 60);
+      settle(rig);
       const before = rig.camera.position.clone();
 
       rig.ship.position = [120, 0, -80];
@@ -853,7 +882,7 @@ describe('helm POV rides the deck', () => {
     try {
       rig.cam.setHelmAnchor(WHEEL);
       rig.cam.setMode('helm');
-      rig.cam.update(rig.ship, 1 / 60);
+      settle(rig);
       const atHelm = rig.camera.position.clone();
 
       rig.cam.setMode('follow');
@@ -864,6 +893,562 @@ describe('helm POV rides the deck', () => {
       for (let i = 0; i < 600; i++) rig.cam.update(rig.ship, 1 / 60);
       expect(rig.camera.position.distanceTo(atHelm)).toBeGreaterThan(5);
     } finally {
+      rig.done();
+    }
+  });
+});
+
+/**
+ * SHIPBOARD CAMERA STATIONS (1..4) — the gun, the bow, the taffrail, the
+ * masthead. Asked for by name for recording work: "some camera positions …
+ * one that just sits on a cannon and looks along the barrel … one on the
+ * front, one on the back, one in the crow's nest … from which we can then also
+ * adjust the viewpoint, as we can do it on the helm."
+ *
+ * These assert PROPERTIES, not poses (§V.80). A pinned `[3.25, 3.40, 2.00]`
+ * would pass forever while the ship moved out from under it — which is the
+ * §V.71 defect the stations exist to avoid, written down as a test.
+ */
+describe('camera stations ride the ship they are resolved from', () => {
+  const stubFactory = () => ({ dispose(): void {} }) as unknown as Material;
+
+  interface StationRig extends CamRig {
+    asm: ShipAssembly;
+    blueprint: PieceDef[];
+    /** the gun lay the station source reads, mutable per test */
+    elevation: { value: number };
+    /** world position of a socket for the ship pose currently in `rig.ship` */
+    socketWorld(id: string): Vector3;
+    settle(): void;
+  }
+
+  function mountStations(): StationRig {
+    const rig = mountCam();
+    const blueprint = buildGalleonBlueprint();
+    const asm = new ShipAssembly(blueprint, stubFactory);
+    const elevation = { value: combatParams.defaultElevation };
+    rig.cam.setStations(createShipStations(blueprint, asm, () => elevation.value));
+    const inner = rig.done;
+    return {
+      ...rig,
+      asm,
+      blueprint,
+      elevation,
+      socketWorld(id: string): Vector3 {
+        // the assembly is at the origin, so its socket answers are ship-LOCAL;
+        // put them through the pose the camera was handed to get world space
+        const local = new Vector3(...asm.socketWorldPosition(id));
+        const q = new Quaternion(...rig.ship.quaternion);
+        return local.applyQuaternion(q).add(new Vector3(...rig.ship.position));
+      },
+      settle(): void {
+        for (let i = 0; i < 300; i++) rig.cam.update(rig.ship, 1 / 60);
+      },
+      done(): void {
+        asm.dispose();
+        inner();
+      },
+    };
+  }
+
+  /** unit forward the lens is looking along */
+  const forwardOf = (camera: PerspectiveCamera): Vector3 =>
+    camera.getWorldDirection(new Vector3());
+
+  const heel = (rig: CamRig, roll: number, pitch: number): void => {
+    const q = new Quaternion().setFromEuler(new Euler(pitch, 0, roll, 'YXZ'));
+    rig.ship.quaternion = [q.x, q.y, q.z, q.w];
+  };
+
+  /**
+   * THE core §V.71 property, and the one a pinned pose could never state: the
+   * eye is RIGIDLY carried by the fitting it was resolved from. Not "near the
+   * right place at rest" — the offset from the live socket must be a constant
+   * vector in the ship's frame through a whole roll/pitch/heave cycle, which
+   * is only true if the station was resolved against the host rather than
+   * copied out of it.
+   */
+  it('every station holds a constant offset from its own socket through a roll/pitch cycle', () => {
+    const anchors: Record<string, string> = {
+      bow: 'socket-figurehead',
+      nest: 'socket-lookout',
+      gun: 'cannon-starboard-2',
+    };
+    for (const [id, socketId] of Object.entries(anchors)) {
+      const rig = mountStations();
+      try {
+        rig.cam.setStation(id as StationId);
+        rig.settle();
+        const first = rig.camera.position.clone().sub(rig.socketWorld(socketId));
+        let worst = 0;
+        for (let k = 1; k <= 120; k++) {
+          const phase = (k / 120) * Math.PI * 2;
+          heel(rig, Math.sin(phase) * 0.35, Math.cos(phase) * 0.22);
+          rig.ship.position = [Math.sin(phase) * 40, Math.sin(phase * 3) * 2.5, k * 0.7];
+          rig.cam.update(rig.ship, 1 / 60);
+          const gap = rig.camera.position.clone().sub(rig.socketWorld(socketId));
+          // the OFFSET rotates with her, so compare lengths and the ship-frame
+          // vector rather than the world one
+          worst = Math.max(worst, Math.abs(gap.length() - first.length()));
+        }
+        expect(worst, `${id} slipped off ${socketId}`).toBeLessThan(1e-6);
+      } finally {
+        rig.done();
+      }
+    }
+  });
+
+  it('resolves against the LIVE assembly, not the blueprint it was built from (§V.71)', () => {
+    const rig = mountStations();
+    try {
+      rig.cam.setStation('nest');
+      rig.settle();
+      const before = rig.camera.position.clone();
+      // move the HOST. The crow's nest is a piece in the live scene graph; a
+      // station read from an authored constant would not notice, and would
+      // leave the lens hanging where the nest used to be.
+      const nest = rig.asm.group.getObjectByName('crow-nest');
+      expect(nest, 'the crow-nest piece must exist to move').toBeTruthy();
+      nest!.position.y += 3;
+      nest!.updateMatrixWorld(true);
+      rig.cam.update(rig.ship, 1 / 60);
+      expect(rig.camera.position.y - before.y).toBeCloseTo(3, 6);
+    } finally {
+      rig.done();
+    }
+  });
+
+  /**
+   * §V.77: "one expression, not two that agree today". The gun station's
+   * forward axis is not a bearing this file re-derived — it is `muzzleLay`'s
+   * own answer, so it carries the player's live lay. Recomputed here from the
+   * combat side, independently of the camera, and required to MATCH.
+   */
+  it('the gun station sights down the gun’s own bore, and follows it as the lay moves', () => {
+    const rig = mountStations();
+    try {
+      const battery = buildBattery(rig.blueprint);
+      const gun = batteryCentreGun(battery, 'starboard')!;
+      heel(rig, 0.18, -0.07); // and it must be right while she is heeled, too
+      rig.cam.setStation('gun');
+      rig.settle();
+
+      const bore = (elev: number): Vector3 => {
+        const lay = muzzleLay(
+          rig.ship.position,
+          rig.ship.quaternion,
+          gun.position,
+          'starboard',
+          elev,
+        );
+        return new Vector3(...lay.direction).normalize();
+      };
+
+      expect(forwardOf(rig.camera).angleTo(bore(rig.elevation.value))).toBeLessThan(1e-6);
+
+      // raise the guns: the camera must follow the barrel, not hold a bearing
+      const before = forwardOf(rig.camera).clone();
+      rig.elevation.value += 0.3;
+      rig.cam.update(rig.ship, 1 / 60);
+      expect(forwardOf(rig.camera).angleTo(bore(rig.elevation.value))).toBeLessThan(1e-6);
+      expect(forwardOf(rig.camera).angleTo(before)).toBeCloseTo(0.3, 5);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('sits on the very gun the crosshair speaks for, not merely on some gun', () => {
+    const rig = mountStations();
+    try {
+      rig.cam.setStation('gun');
+      rig.settle();
+      const battery = buildBattery(rig.blueprint);
+      const guns = batterySide(battery, 'starboard');
+      // distance from the eye to each gun's mount; the centre gun — the one
+      // `batteryCentreGun` hands the crosshair — must be the nearest, by a
+      // margin bigger than the float noise a tie would leave
+      const ranked = guns
+        .map((g) => ({
+          id: g.socketId,
+          d: rig.camera.position.distanceTo(rig.socketWorld(g.socketId)),
+        }))
+        .sort((a, b) => a.d - b.d);
+      expect(ranked[0].id).toBe(batteryCentreGun(battery, 'starboard')!.socketId);
+      expect(ranked[1].d - ranked[0].d).toBeGreaterThan(1);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('the bow looks forward, the stern aft, the masthead is the highest of them', () => {
+    const rig = mountStations();
+    try {
+      const seen: Record<string, { fwd: Vector3; y: number }> = {};
+      for (const id of ['bow', 'stern', 'nest'] as StationId[]) {
+        rig.cam.setStation(id);
+        rig.settle();
+        seen[id] = { fwd: forwardOf(rig.camera).clone(), y: rig.camera.position.y };
+      }
+      // ship-local +z is forward, and she is upright here
+      expect(seen.bow.fwd.z).toBeGreaterThan(0.99);
+      expect(seen.stern.fwd.z).toBeLessThan(-0.99);
+      expect(seen.nest.y).toBeGreaterThan(seen.bow.y + 20);
+      expect(seen.nest.y).toBeGreaterThan(seen.stern.y + 20);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('a station a hull does not have is reported, not silently ignored (§V.62)', () => {
+    const rig = mountCam(); // no station source handed over at all
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      rig.cam.setStation('nest');
+      rig.cam.update(rig.ship, 1 / 60);
+      expect(warn).toHaveBeenCalled();
+      // ...and the lens falls back to a mode that CAN be drawn
+      expect(rig.cam.getMode()).toBe('follow');
+    } finally {
+      warn.mockRestore();
+      rig.done();
+    }
+  });
+});
+
+/**
+ * "…from which we can then also adjust the viewpoint, as we can do it on the
+ * helm." A station you cannot look around from is useless for footage, and one
+ * that forgets how you left it costs the setup every time you cycle past.
+ */
+describe('station look offsets are per-station and survive a cycle away', () => {
+  const stubFactory = () => ({ dispose(): void {} }) as unknown as Material;
+
+  function mount(): CamRig & { asm: ShipAssembly } {
+    const rig = mountCam();
+    const blueprint = buildGalleonBlueprint();
+    const asm = new ShipAssembly(blueprint, stubFactory);
+    rig.cam.setStations(createShipStations(blueprint, asm, () => 0.1));
+    const inner = rig.done;
+    return { ...rig, asm, done: () => { asm.dispose(); inner(); } };
+  }
+
+  const settle = (rig: CamRig): void => {
+    for (let i = 0; i < 300; i++) rig.cam.update(rig.ship, 1 / 60);
+  };
+  const drag = (rig: CamRig, dx: number, dy: number): void => rig.drag(dx, dy);
+
+  it('remembers each station’s own framing across a trip to another one', () => {
+    const rig = mount();
+    try {
+      rig.cam.setStation('bow');
+      settle(rig);
+      drag(rig, -200, -60); // look off to one side and up
+      rig.cam.update(rig.ship, 1 / 60);
+      const bowAim = rig.camera.getWorldDirection(new Vector3()).clone();
+
+      rig.cam.setStation('stern');
+      settle(rig);
+      const sternAim = rig.camera.getWorldDirection(new Vector3()).clone();
+      // the stern was never dragged, so it must be on its OWN bearing
+      expect(sternAim.z).toBeLessThan(-0.99);
+
+      rig.cam.setStation('bow');
+      settle(rig);
+      expect(rig.camera.getWorldDirection(new Vector3()).angleTo(bowAim)).toBeLessThan(1e-6);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('clamps the look to stationYawLimit — and the knob really is the clamp (§V.62)', () => {
+    const rig = mount();
+    const was = cameraParams.stationYawLimit;
+    try {
+      rig.cam.setStation('bow');
+      settle(rig);
+      cameraParams.stationYawLimit = 0.4;
+      drag(rig, -100000, 0); // lean on it hard
+      rig.cam.update(rig.ship, 1 / 60);
+      const wide = rig.camera.getWorldDirection(new Vector3()).clone();
+      expect(wide.angleTo(new Vector3(0, 0, 1))).toBeCloseTo(0.4, 4);
+
+      cameraParams.stationYawLimit = 0.15;
+      drag(rig, -100000, 0);
+      rig.cam.update(rig.ship, 1 / 60);
+      expect(
+        rig.camera.getWorldDirection(new Vector3()).angleTo(new Vector3(0, 0, 1)),
+      ).toBeCloseTo(0.15, 4);
+    } finally {
+      cameraParams.stationYawLimit = was;
+      rig.done();
+    }
+  });
+});
+
+/**
+ * THE TRANSITION, at ENTRY as well as exit. The user reversed the "instant
+ * cut" decision recorded in followCam.setMode: "make sure that also has a
+ * camera transition, as we have going from free-flying to follow cam, so that
+ * it's not stressingly abrupt but actually the camera moves there, so it
+ * becomes readable."
+ *
+ * The property is CONTINUITY plus ARRIVAL: no frame may swallow a big share of
+ * the trip, and the last frame of the move must land exactly on the rigid pose
+ * (a blend that only asymptotes leaves a pop of its own residual at handover).
+ */
+describe('arriving at a deck station is a readable move, and it lands exactly', () => {
+  const stubFactory = () => ({ dispose(): void {} }) as unknown as Material;
+  const WHEEL: [number, number, number] = [0, 6.1, -12.4];
+
+  function mount(): CamRig & { asm: ShipAssembly } {
+    const rig = mountCam();
+    const blueprint = buildGalleonBlueprint();
+    const asm = new ShipAssembly(blueprint, stubFactory);
+    rig.cam.setStations(createShipStations(blueprint, asm, () => 0.1));
+    rig.cam.setHelmAnchor(WHEEL);
+    const inner = rig.done;
+    return { ...rig, asm, done: () => { asm.dispose(); inner(); } };
+  }
+
+  /** per-frame steps of a move, plus the frame count it took to settle */
+  function trace(rig: CamRig, frames = 400): { steps: number[]; arrived: number } {
+    const steps: number[] = [];
+    let last = rig.camera.position.clone();
+    let arrived = frames;
+    for (let i = 0; i < frames; i++) {
+      rig.cam.update(rig.ship, 1 / 60);
+      const step = rig.camera.position.distanceTo(last);
+      steps.push(step);
+      if (arrived === frames && i > 0 && step < 1e-9) arrived = i;
+      last = rig.camera.position.clone();
+    }
+    return { steps, arrived };
+  }
+
+  it('chase → helm moves instead of cutting, with no frame swallowing the trip', () => {
+    const rig = mount();
+    try {
+      for (let i = 0; i < 3000; i++) rig.cam.update(rig.ship, 1 / 60); // settle astern
+      const from = rig.camera.position.clone();
+      rig.cam.setMode('helm');
+      const { steps, arrived } = trace(rig);
+      const total = from.distanceTo(rig.camera.position);
+      expect(total).toBeGreaterThan(10); // it really is a long way to the wheel
+      expect(arrived).toBeGreaterThan(8); // a MOVE, not a cut
+      // no single frame is a jump: an eased 0.7 s move at 60 fps is ~40 frames
+      for (const s of steps) expect(s).toBeLessThan(total * 0.1);
+      // and it arrives EXACTLY, not asymptotically — the handover to the rigid
+      // pose is where a damped blend would leave its residual as a pop
+      const settled = rig.camera.position.clone();
+      rig.cam.update(rig.ship, 1 / 60);
+      expect(rig.camera.position.distanceTo(settled)).toBe(0);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('station → station is the same move, and it is continuous at the swap', () => {
+    const rig = mount();
+    try {
+      rig.cam.setStation('gun');
+      trace(rig);
+      const from = rig.camera.position.clone();
+      rig.cam.setStation('nest'); // 28 m up the mainmast
+      const { steps, arrived } = trace(rig);
+      const total = from.distanceTo(rig.camera.position);
+      expect(total).toBeGreaterThan(20);
+      expect(arrived).toBeGreaterThan(8);
+      for (const s of steps) expect(s).toBeLessThan(total * 0.1);
+    } finally {
+      rig.done();
+    }
+  });
+
+  it('leaving is continuous too — position AND the heeled horizon roll out', () => {
+    const rig = mount();
+    try {
+      rig.ship.quaternion = [0, 0, Math.sin(0.2), Math.cos(0.2)]; // heeled hard
+      rig.cam.setStation('stern');
+      trace(rig);
+      const heeledUp = rig.camera.up.clone();
+      expect(heeledUp.y).toBeLessThan(0.95); // genuinely rolled
+
+      rig.cam.setMode('follow');
+      let lastUp = heeledUp.clone();
+      let worstRoll = 0;
+      let lastPos = rig.camera.position.clone();
+      let worstStep = 0;
+      for (let i = 0; i < 400; i++) {
+        rig.cam.update(rig.ship, 1 / 60);
+        worstRoll = Math.max(worstRoll, rig.camera.up.angleTo(lastUp));
+        worstStep = Math.max(worstStep, rig.camera.position.distanceTo(lastPos));
+        lastUp = rig.camera.up.clone();
+        lastPos = rig.camera.position.clone();
+      }
+      // the heel was 0.4 rad; rolling it out over the blend means no single
+      // frame may take a large share of it. A snap back to world-up would put
+      // the whole 0.4 into frame one.
+      expect(worstRoll).toBeLessThan(0.05);
+      expect(rig.camera.up.angleTo(new Vector3(0, 1, 0))).toBeLessThan(1e-6);
+      expect(worstStep).toBeLessThan(2);
+    } finally {
+      rig.done();
+    }
+  });
+
+  /**
+   * §V.62 — every one of these knobs must be PROVEN to move the output. The
+   * duration is distance-scaled rather than constant precisely so that the
+   * original objection to easing ("a 30 m swoop") stays dialable: these tests
+   * are what stop `stationEaseSpeed` becoming a slider that drives nothing.
+   */
+  describe('the arrival params really are the arrival', () => {
+    const withParams = (over: Partial<typeof cameraParams>, fn: () => void): void => {
+      const live = cameraParams as unknown as Record<string, unknown>;
+      const saved: Record<string, unknown> = {};
+      for (const k of Object.keys(over)) saved[k] = live[k];
+      Object.assign(cameraParams, over);
+      try {
+        fn();
+      } finally {
+        Object.assign(cameraParams, saved);
+      }
+    };
+
+    const framesToHelm = (): number => {
+      const rig = mount();
+      try {
+        for (let i = 0; i < 3000; i++) rig.cam.update(rig.ship, 1 / 60);
+        rig.cam.setMode('helm');
+        return trace(rig).arrived;
+      } finally {
+        rig.done();
+      }
+    };
+
+    it('stationEaseSpeed sets how long the move takes', () => {
+      let slow = 0;
+      let fast = 0;
+      withParams({ stationEaseSpeed: 20, stationEaseMax: 5 }, () => {
+        slow = framesToHelm();
+      });
+      withParams({ stationEaseSpeed: 80, stationEaseMax: 5 }, () => {
+        fast = framesToHelm();
+      });
+      // 4× the speed over the same gap: 4× fewer frames, within a frame of
+      // rounding either side
+      expect(slow / fast).toBeGreaterThan(3);
+      expect(slow / fast).toBeLessThan(5);
+    });
+
+    it('stationEaseMin and stationEaseMax are the floor and the ceiling', () => {
+      let floored = 0;
+      let capped = 0;
+      // absurdly fast: the FLOOR is what decides the duration
+      withParams({ stationEaseSpeed: 5000, stationEaseMin: 0.5 }, () => {
+        floored = framesToHelm();
+      });
+      expect(floored).toBeGreaterThan(0.5 * 60 - 3);
+      // absurdly slow: the CEILING is
+      withParams({ stationEaseSpeed: 0.5, stationEaseMax: 0.35 }, () => {
+        capped = framesToHelm();
+      });
+      expect(capped).toBeLessThan(0.35 * 60 + 3);
+    });
+
+    it('stationCutDistance turns a long approach back into a cut', () => {
+      const rig = mount();
+      try {
+        for (let i = 0; i < 3000; i++) rig.cam.update(rig.ship, 1 / 60);
+        const from = rig.camera.position.clone();
+        withParams({ stationCutDistance: 1 }, () => {
+          rig.cam.setMode('helm');
+          rig.cam.update(rig.ship, 1 / 60);
+        });
+        // frame one is already there: that IS the behaviour the original
+        // "instant cut" comment defended, kept for the distances it was right about
+        const landed = rig.camera.position.clone();
+        expect(landed.distanceTo(from)).toBeGreaterThan(10);
+        rig.cam.update(rig.ship, 1 / 60);
+        expect(rig.camera.position.distanceTo(landed)).toBe(0);
+      } finally {
+        rig.done();
+      }
+    });
+
+    it('stationEyeHeight lifts every standing station off its socket', () => {
+      const eyeY = (h: number): number => {
+        const rig = mount();
+        try {
+          withParams({ stationEyeHeight: h }, () => {
+            rig.cam.setStation('bow');
+            trace(rig);
+          });
+          return rig.camera.position.y;
+        } finally {
+          rig.done();
+        }
+      };
+      expect(eyeY(2.5) - eyeY(1.0)).toBeCloseTo(1.5, 6);
+    });
+
+    it('the gun station knobs move the eye, and the side switch changes sides', () => {
+      const eye = (over: Partial<typeof cameraParams>): Vector3 => {
+        const rig = mount();
+        try {
+          let out = new Vector3();
+          withParams(over, () => {
+            rig.cam.setStation('gun');
+            trace(rig);
+            out = rig.camera.position.clone();
+          });
+          return out;
+        } finally {
+          rig.done();
+        }
+      };
+      const base = eye({});
+      expect(eye({ gunStationEyeHeight: 1.75 }).y - base.y).toBeCloseTo(1, 5);
+      // further back along the bore = further inboard, i.e. toward x = 0
+      expect(Math.abs(eye({ gunStationBack: 3 }).x)).toBeLessThan(Math.abs(base.x));
+      expect(base.x).toBeGreaterThan(0); // starboard by default
+      expect(eye({ gunStationPort: true }).x).toBeLessThan(0);
+    });
+  });
+});
+
+describe('the station keys are declared, unique, and reach exactly one action', () => {
+  it('every station code maps to one station and is advertised on the Controls page', () => {
+    expect(STATION_CODES).toHaveLength(STATION_IDS.length);
+    expect(new Set(STATION_CODES).size).toBe(STATION_CODES.length);
+    for (const code of STATION_CODES) {
+      expect(FLY_KEYS.has(code), `${code} is a FreeCam flight key`).toBe(false);
+      expect(code).not.toBe(CONTROL_CODES.toggleFreeCamera);
+      expect(code).not.toBe(CONTROL_CODES.toggleHelm);
+      expect(code).not.toBe(CONTROL_CODES.toggleAnchor);
+      expect(code).not.toBe(CONTROL_CODES.fire);
+    }
+    const bindings = CONTROL_GROUPS.flatMap((g) => g.bindings);
+    for (const action of ['Gun station', 'Bow station', 'Stern station', 'Crow’s nest']) {
+      expect(bindings.find((b) => b.action === action), action).toBeTruthy();
+    }
+  });
+
+  it('the real key path drives the real stations, and re-pressing comes back', () => {
+    const rig = mountCam();
+    const blueprint = buildGalleonBlueprint();
+    const asm = new ShipAssembly(blueprint, () => ({ dispose(): void {} }) as unknown as Material);
+    try {
+      rig.cam.setStations(createShipStations(blueprint, asm, () => 0.1));
+      rig.key('keydown', STATION_CODES[2]);
+      expect(rig.cam.getMode()).toBe('station');
+      expect(rig.cam.getStation()).toBe(STATION_IDS[2]);
+      rig.key('keydown', STATION_CODES[0]);
+      expect(rig.cam.getStation()).toBe(STATION_IDS[0]);
+      rig.key('keydown', STATION_CODES[0]); // same key again = back to the chase
+      expect(rig.cam.getMode()).toBe('follow');
+    } finally {
+      asm.dispose();
       rig.done();
     }
   });

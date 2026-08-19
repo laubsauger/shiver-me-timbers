@@ -25,7 +25,7 @@ import { updateRig } from './ship/rigTrim';
 import { trimDropScale } from './ship/sailDynamics';
 import { createInputCollector } from './sailing/input';
 import { stepShipSailing } from './sailing/shipKinematics';
-import { createFollowCam } from './camera';
+import { createFollowCam, createShipStations } from './camera';
 import {
   createAmbientHold,
   createWeatherSystem,
@@ -852,6 +852,14 @@ async function boot(): Promise<void> {
     blueprint: galleonBlueprint,
     domElement: app.renderer.domElement,
   });
+  // §I camera stations: the 1..4 keys. Built here and not in the camera module
+  // because it is the only place that has BOTH the live assembly (every
+  // station resolves against it, §V.71) and the player's gun lay (the gun
+  // station sights down the live bore, §V.77). One call, no per-frame wiring —
+  // the source is pulled by the camera on the frames it needs it.
+  followCam.setStations(
+    createShipStations(galleonBlueprint, shipAssembly, () => gunnery.elevation()),
+  );
   const arena = createCombatArena(state, combat, followCam, galleonBlueprint);
   // hoisted + mutated per frame: the render callback runs every frame and a
   // fresh object graph here would be pure GC churn

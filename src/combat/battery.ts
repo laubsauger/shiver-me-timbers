@@ -64,6 +64,27 @@ export function batterySide(battery: Battery, side: BroadsideSide): GunMount[] {
 }
 
 /**
+ * The one gun a single reading speaks for: the MIDDLE gun of the battery.
+ * Not the first — a broadside's ends differ by a couple of metres of station
+ * and the middle is the honest average of the volley the fire key sends.
+ *
+ * §V.77 ONE EXPRESSION. Two consumers ask this question — the crosshair
+ * (`combat/gunnery.ts`, which reports that gun's range and elevation) and the
+ * gun camera station (`camera/camStations.ts`, which sits astride it). They
+ * must name the SAME gun or the reticle reports a barrel the shot is not
+ * leaving: with an even battery the choice is arbitrary, so two
+ * independently-written `Math.floor` expressions agreeing today is luck, not
+ * a contract. This function is the contract.
+ */
+export function batteryCentreGun(
+  battery: Battery,
+  side: BroadsideSide,
+): GunMount | undefined {
+  const guns = batterySide(battery, side);
+  return guns.length === 0 ? undefined : guns[Math.floor((guns.length - 1) / 2)];
+}
+
+/**
  * Which broadside bears on a world bearing (the direction the gunner is
  * looking along), given the hull's yaw. Positive cross product ⇒ the bearing
  * lies to starboard of the bow.

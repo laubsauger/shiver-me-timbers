@@ -19,9 +19,12 @@
  */
 import type { PerspectiveCamera } from 'three';
 import { FollowCam, type CamMode, type HeightFn, type Vec3Like } from './followCam';
+import type { StationId, StationSource } from './camStations';
 import type { ShipState } from '../state/simState';
 
 export type { CamMode, HeightFn, Vec3Like } from './followCam';
+export type { StationId, StationPose, StationSource } from './camStations';
+export { STATION_IDS, createStations, createShipStations } from './camStations';
 export { FollowCam } from './followCam';
 export { FreeCam } from './freeCam';
 
@@ -42,6 +45,14 @@ export interface FollowCamHandle {
   isDebugPinned(): boolean;
   /** ship-local position of the wheel — where the H key puts the captain */
   setHelmAnchor(local: Vec3Like): void;
+  /**
+   * The numbered shipboard vantages the 1..4 keys jump to (camStations.ts).
+   * Until this is handed over the number row is inert.
+   */
+  setStations(stations: StationSource | null): void;
+  /** go to a station, or back to the chase if already at that one */
+  setStation(id: StationId): void;
+  getStation(): StationId;
   /**
    * CUT the chase to the ship on the next frame instead of damping toward her.
    * For teleports (§T.52) — the exponential chase would otherwise fly the lens
@@ -65,6 +76,9 @@ export function createFollowCam(
     clearDebugPose: () => cam.clearDebugPose(),
     isDebugPinned: () => cam.isDebugPinned(),
     setHelmAnchor: (local) => cam.setHelmAnchor(local),
+    setStations: (stations) => cam.setStations(stations),
+    setStation: (id) => cam.setStation(id),
+    getStation: () => cam.getStation(),
     snap: () => cam.snap(),
     dispose: () => cam.dispose(),
   };
