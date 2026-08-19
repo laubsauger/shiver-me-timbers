@@ -10,7 +10,7 @@ import type * as THREE from 'three/webgpu';
 import { ropeParams } from '../params/ropes';
 import type { Vec3Like } from './catenaryMath';
 import { createRopeCompute, type RopeCompute } from './ropeCompute';
-import { createRopeMesh } from './ropeMesh';
+import { createRopeMesh, type RopeMesh } from './ropeMesh';
 import { createRatlineMesh } from './ratlineMesh';
 import { createBlocks, type Blocks } from './blocks';
 import type { BlockDescriptor } from './blockMath';
@@ -55,12 +55,29 @@ export interface Ropes {
   setRopeCount(n: number): void;
   /** re-upload the descriptor buffer (setRope calls this automatically) */
   markDirty(): void;
+  /**
+   * Push the live `ropeParams` into every rope uniform (§V62). Call once per
+   * frame, before `renderer.compute(computeNode)`.
+   *
+   * WHY THIS EXISTS: `uniform(x)` COPIES x at construction, it does not bind
+   * to it — so every tunable this system owns was seeded once at boot and then
+   * frozen, and the whole `ropes` folder of the debug panel drove nothing.
+   * The compute pass's frame-derived uniforms (dt, time, wind, camera) keep
+   * their own `.onFrameUpdate` hooks; this is for the PANEL-owned values.
+   */
+  update(): void;
   /** dispatch every frame: renderer.compute(ropes.computeNode) */
   computeNode: THREE.ComputeNode;
   /** add to the scene once; draws all rope segments in one instanced call */
   mesh: THREE.Object3D;
   /** dev handle: the GPU-written buffers, for readback verification */
   buffers: Pick<RopeCompute, 'points' | 'tangents' | 'descA' | 'descB' | 'pointsPerRope'>;
+  /**
+   * dev handle: the two uniform blocks `update()` refreshes that are not
+   * otherwise reachable from here (the ratlines' and blocks' own handles are
+   * already exposed below). Console tuning and the §V62 refresh test read it.
+   */
+  uniforms: { compute: RopeCompute; mesh: RopeMesh };
   /** §V45 rung meshes, or null when the ship has no chainplate fans */
   ratlines: ReturnType<typeof createRatlineMesh> | null;
   /** the pulley instances, or null when no block descriptors were given */
@@ -150,9 +167,16 @@ export function createRopes(opts: RopesOptions): Ropes {
       rm.setCount(n * segments);
     },
     markDirty,
+    update(): void {
+      rc.refresh();
+      rm.refresh();
+      ratlines?.refresh();
+      blocks?.refresh();
+    },
     computeNode: rc.computeNode,
     mesh: rm.mesh,
     buffers: rc,
+    uniforms: { compute: rc, mesh: rm },
     ratlines,
     blocks,
     dispose(): void {

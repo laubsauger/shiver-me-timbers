@@ -51,7 +51,7 @@ import {
 import type { ShaderNodeObject } from 'three/tsl';
 import { Z_MIN } from './catenaryMath';
 import { ropeParams } from '../params/ropes';
-import type { RopeCompute } from './ropeCompute';
+import { pushParam, type RopeCompute } from './ropeCompute';
 
 /** |tangent.y| above this → chord ~vertical, swap frame reference to +x */
 const REF_SWAP = 0.99;
@@ -242,6 +242,21 @@ export function createRopeMesh(rc: RopeCompute, maxRopes: number, segments: numb
     uFarWidthPx,
     uNearWidthPx,
     uFarLightness,
+    /**
+     * Re-read the live tunables (§V62). Colours are mutated IN PLACE —
+     * `.value.set(hex)` on the existing THREE.Color, never a fresh Color
+     * assigned to `.value`, so nothing can drop the binding — and
+     * `Color.set(number)` routes to `setHex(hex, SRGBColorSpace)`, which is
+     * the §V31 entry point (a bare setRGB would land in linear space).
+     */
+    refresh(): void {
+      uColor.value.set(ropeParams.colorHex);
+      pushParam(uRoughness, ropeParams.roughness);
+      pushParam(uMinWidthPx, ropeParams.aaMinWidthPx);
+      pushParam(uFarWidthPx, ropeParams.farWidthPx);
+      pushParam(uNearWidthPx, ropeParams.nearWidthPx);
+      pushParam(uFarLightness, ropeParams.farLightness);
+    },
     /** both regimes always draw the same segment range — the crossfade picks
      *  which one is visible, never which one exists */
     setCount(instances: number): void {

@@ -60,7 +60,7 @@ import {
 } from 'three/tsl';
 import { Z_MIN } from './catenaryMath';
 import { ropeParams } from '../params/ropes';
-import type { RopeCompute } from './ropeCompute';
+import { pushParam, type RopeCompute } from './ropeCompute';
 import { projectedWidthPx } from './ropeMesh';
 import type { BlockDescriptor } from './blockMath';
 import { AXLE_SOFTNESS, packBlocks } from './blockMath';
@@ -110,6 +110,18 @@ export interface Blocks {
   mesh: THREE.Object3D;
   /** dev handle: the packed descriptor buffer, for console verification */
   descriptors: THREE.StorageInstancedBufferAttribute;
+  /** the live-tunable uniforms, exposed for the same reason the rope mesh
+   *  returns its own: they are what §V62's refresh test reads */
+  uniforms: {
+    uShell: { value: THREE.Color };
+    uSheave: { value: THREE.Color };
+    uStrop: { value: THREE.Color };
+    uSlackSpan: { value: number };
+    uDetailMinPx: { value: number };
+    uDetailMaxPx: { value: number };
+  };
+  /** re-read the live params (§V62); called per frame by ropes/index.ts */
+  refresh(): void;
   dispose(): void;
 }
 
@@ -316,6 +328,18 @@ export function createBlocks(
   return {
     mesh,
     descriptors: descAttr,
+    uniforms: { uShell, uSheave, uStrop, uSlackSpan, uDetailMinPx, uDetailMaxPx },
+    refresh(): void {
+      // colours mutated in place (binding kept) and through Color.set(hex),
+      // which is setHex(…, SRGBColorSpace) — the §V31 entry point
+      uShell.value.set(ropeParams.blockColorHex);
+      uSheave.value.set(ropeParams.blockSheaveColorHex);
+      // the strop IS rope, so it keeps tracking the rope's own albedo
+      uStrop.value.set(ropeParams.colorHex);
+      pushParam(uSlackSpan, ropeParams.blockSlackSpan);
+      pushParam(uDetailMinPx, ropeParams.blockDetailMinPx);
+      pushParam(uDetailMaxPx, ropeParams.blockDetailMaxPx);
+    },
     dispose(): void {
       geometry.dispose();
       material.dispose();

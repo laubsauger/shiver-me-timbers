@@ -1434,6 +1434,10 @@ async function boot(): Promise<void> {
         );
         // no applyBlocks: the pulleys hang off the solved curve on the GPU, so
         // re-anchoring the ropes above is the only CPU work the rig needs
+        // §V62: push the panel's rope params into the uniforms before the
+        // dispatch — uniform() copied them at construction, so without this
+        // every slider in the `ropes` folder is dead
+        ropes.update();
         app.renderer.compute(ropes.computeNode);
 
         enemyAssembly.group.updateMatrixWorld(true);
@@ -1443,6 +1447,7 @@ async function boot(): Promise<void> {
           (id) => enemyAssembly.socketWorldPosition(id),
           furl,
         );
+        enemyRopes.update();
         app.renderer.compute(enemyRopes.computeNode);
       }
 

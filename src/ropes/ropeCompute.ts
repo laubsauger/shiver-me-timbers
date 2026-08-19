@@ -85,6 +85,25 @@ type N = ShaderNodeObject<Node>;
  *  false and sends the particle back to its rest position */
 const SANITY_SCALE = 1e4;
 
+/**
+ * Push a live param into a scalar uniform (§V62: a knob that drives nothing is
+ * a defect — every rope tunable is refreshed through here every frame).
+ *
+ * NON-FINITE VALUES ARE DROPPED, keeping the last good one (§V28). A param is
+ * caller-fed — the panel binds it, and `__params.ropes.x = NaN` from the
+ * console is one keystroke away — and these uniforms scale GEOMETRY (rope
+ * radius, phone-wire widening), where a NaN is not a visual bug but a
+ * NaN-sized primitive that wedges the GPU process (§B5).
+ *
+ * Cost is nil: three's UniformsGroup compares each value against its cached
+ * copy and only writes the buffer when it actually moved (updateNumber /
+ * updateColor), and a uniform write never touches the compiled pipeline. So
+ * these run unconditionally rather than behind a change-check.
+ */
+export function pushParam(u: { value: number }, v: number): void {
+  if (Number.isFinite(v)) u.value = v;
+}
+
 // Hyperbolics via exp so the GPU formulation matches the CPU reference
 // exactly in shape (Math.sinh/cosh/asinh are the same expressions).
 const sinhT = (x: N) => exp(x).sub(exp(x.negate())).mul(0.5);
@@ -389,6 +408,31 @@ export function createRopeCompute(maxRopes: number, segments: number) {
     camPos,
     computeNode,
     pointsPerRope,
+    /**
+     * Re-read every live rope tunable (§V62). Called once per frame from
+     * ropes/index.ts `update()`, before the dispatch — the panel mutates
+     * `ropeParams` in place, and `uniform(x)` COPIED x at construction, so
+     * without this every slider in the `ropes` folder is dead.
+     *
+     * `constraintIterations` / `substeps` are deliberately absent: they are
+     * literal TSL Loop bounds (§V28), fixed at construction, and params/ropes
+     * already documents them as startup-only.
+     */
+    refresh(): void {
+      // boolean → 0/1 at the refresh site, the same shape as the unit
+      // conversion foam does when it pushes `1 / breakupMetres`
+      uDynamic.value = ropeParams.dynamic ? 1 : 0;
+      pushParam(uGravity, ropeParams.gravity);
+      pushParam(uDamping, ropeParams.damping);
+      pushParam(uWindForce, ropeParams.windForce);
+      pushParam(uGustSpeed, ropeParams.gustSpeed);
+      pushParam(uGustDepth, ropeParams.gustDepth);
+      pushParam(uMaxStray, ropeParams.maxStray);
+      pushParam(uStrayFraction, ropeParams.strayFraction);
+      pushParam(uTeleport, ropeParams.teleportDistance);
+      pushParam(uSimDistance, ropeParams.simDistance);
+      pushParam(uSimFadeBand, ropeParams.simFadeBand);
+    },
   };
 }
 

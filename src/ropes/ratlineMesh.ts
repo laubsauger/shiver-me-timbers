@@ -34,7 +34,7 @@ import type { ShaderNodeObject } from 'three/tsl';
 import { Z_MIN } from './catenaryMath';
 import { MIN_RUNG } from '../ship/ratlinePlan';
 import { ropeParams } from '../params/ropes';
-import type { RopeCompute } from './ropeCompute';
+import { pushParam, type RopeCompute } from './ropeCompute';
 import { phoneWireRegime, type RegimeUniforms } from './ropeMesh';
 
 /** |tangent.y| above this → rung ~vertical, swap frame reference to +x */
@@ -71,6 +71,10 @@ export function createRatlineMesh(
   const uColor = uniform(new THREE.Color(ropeParams.colorHex));
   const uRoughness = uniform(ropeParams.roughness);
   const uFarLightness = uniform(ropeParams.farLightness);
+  // STATIC BY DESIGN (§V62 classification): MIN_RUNG is the ship's ratline
+  // plan constant, not a rope tunable — it has no param and no panel control,
+  // so there is nothing live to refresh it from. Uniform only so the cutoff
+  // reads as one named value in the graph.
   const uMinRung = uniform(MIN_RUNG);
   const pts = rc.pointsRead;
 
@@ -246,7 +250,15 @@ export function createRatlineMesh(
     descA,
     descB,
     uColor,
+    uRoughness,
     uFarLightness,
+    /** §V62, same contract as the rope mesh's: colour mutated in place so the
+     *  binding survives, scalars pushed through the finite guard. */
+    refresh(): void {
+      uColor.value.set(ropeParams.colorHex);
+      pushParam(uRoughness, ropeParams.roughness);
+      pushParam(uFarLightness, ropeParams.farLightness);
+    },
     setRungCount(n: number): void {
       const instances = Math.max(0, Math.min(maxRungs, n)) * SEGMENTS_PER_RUNG;
       nearMesh.count = instances;

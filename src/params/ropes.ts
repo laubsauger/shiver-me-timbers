@@ -1,9 +1,19 @@
 /**
  * Rope rigging tunables (§V16: every tunable in a params module, no shader
  * magic constants). Consumed by src/ropes/* (§V12 catenary compute + render).
- * `segmentsPerRope` / `radialSegments` are startup-only: they size the storage
- * buffers and instanced geometry, so changing them live has no effect until
- * the ropes system is recreated. Everything else is live via uniforms.
+ *
+ * WHAT IS LIVE, EXACTLY (§V62 — this header used to claim "everything else is
+ * live via uniforms" while 25 uniforms were seeded once and frozen):
+ *  - LIVE: every value carried by a uniform. `ropes.update()` re-reads them
+ *    from this object each frame, so the panel moves them in real time.
+ *  - STARTUP-ONLY, because they size a buffer, a geometry or a literal TSL
+ *    Loop bound: segmentsPerRope, radialSegments, farRadialSegments,
+ *    constraintIterations, substeps, blockSegments, maxBlocks.
+ *  - BUILD-TIME, because they are baked into descriptors when the rig is
+ *    built: blockSize, blockAnchorT, rungTiltFraction.
+ *  - FALLBACK-ONLY: slackFactor and defaultThickness are the defaults setRope
+ *    uses when a caller omits length/thickness, and the ship rig always passes
+ *    both (shipRigging.applyRiggingPlan) — so they drive nothing in game.
  */
 import { registerParams, type ParamMeta } from './registry';
 
