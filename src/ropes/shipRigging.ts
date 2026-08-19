@@ -14,7 +14,10 @@
  *   stays      forestay (foremost masthead → bowsprit tip), inter-mast stays
  *              (masthead → next masthead), backstays from the AFTMOST masthead
  *              only, bobstays (bowsprit tip → bow cleats)
- *   shrouds    masthead → the chainplate FAN abeam of that same mast
+ *   shrouds    the HOUNDS (the lower masthead, blueprintRig.shroudHeadSocket)
+ *              → the chainplate FAN abeam of that same mast. Not the truck:
+ *              the fan has to be closed where the course yard swings or the
+ *              yards cannot brace past it (§T.75)
  *   lifts      upper yard ends → their own masthead
  *   braces     yard ends → the chainplate of the NEXT MAST AFT (the aftmost
  *              mast's yards → the stern cleats)
@@ -39,6 +42,7 @@
  * silently mis-rigging.
  */
 import type { PieceDef } from '../ship/pieceTypes';
+import { shroudHeadSocket } from '../ship/blueprintRig';
 import type { Vec3Like } from './catenaryMath';
 import type { BlockDescriptor } from './blockMath';
 import { ropeParams } from '../params/ropes';
@@ -255,7 +259,10 @@ export function buildRiggingPlan(blueprint: PieceDef[]): RiggingRope[] {
         // it; the mast keeps its backstays and inter-mast stay meanwhile.
         const drop = piece.transform.position[1] - (socketY.get(foot) ?? -Infinity);
         if (drop > STEPPED_DECK_MARGIN) continue;
-        add(masthead(m), foot, 'shroud');
+        // to the HOUNDS, not the truck — see the header and §T.75. The ratline
+        // plan resolves the same socket through the same helper, so the ladder
+        // cannot climb past the top of its own shrouds.
+        add(shroudHeadSocket(m, (id) => ids.has(id)), foot, 'shroud');
       }
     }
   }

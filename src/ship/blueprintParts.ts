@@ -285,7 +285,11 @@ export function buildHullSections(
         const plates = Math.max(1, Math.round(p.channelPlates));
         for (let i = 0; i < plates; i++) {
           const z = station.z - i * p.channelPlateSpacing; // fan rakes aft
-          const x = sign * (hullHalfWidthAt(z, y, shape) + 0.06);
+          // OUT ON THE CHANNEL, not against the planking: `channelProjection`
+          // is the deadeye's own station, so the shroud lands in the eye that
+          // is drawn for it and every hull-side belay keeps that stand-off
+          // from the topsides (§T.75).
+          const x = sign * (hullHalfWidthAt(z, y, shape) + p.channelProjection);
           sockets.push({
             id: `anchor-channel-${side}-${station.name}-${i + 1}`,
             type: 'rope-anchor',

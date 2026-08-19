@@ -29,6 +29,10 @@ import type { InputState } from './input';
 import { quatFromAxisAngle, quatMul, rotateVec } from '../combat/quatMath';
 import { groundGrip } from '../sea-physics/grounding';
 import { sailingParams, type SailingParams } from '../params/sailing';
+// THE YARDS ARE SIM STATE NOW (§T.76), so the sim reads the rig's own numbers.
+// `params/ship.ts` is plain data with no three.js in it, and `braceMax` is the
+// SAME object the geometry clearance tests read — one clamp, not two (§V.77).
+import { shipRigParams, type ShipRigParams } from '../params/ship';
 
 export interface Wind {
   direction: number; // radians, blowing toward
@@ -81,6 +85,90 @@ export function noGoGate(theta: number, params: SailingParams = sailingParams): 
   return smoothstep01((theta - params.deadZone) / params.deadZoneRamp);
 }
 
+/**
+ * WHERE THE WIND IS, RELATIVE TO HER — signed, wrapped to ±π.
+ *
+ *   0     wind dead astern, blowing the way she points (a run)
+ *   ±π    head to wind
+ *   +ve   the wind blows TOWARD her starboard side, i.e. it comes from to
+ *         port and she is on the PORT TACK
+ *
+ * The unsigned angle off the eye of the wind that `trimEfficiency` wants is
+ * just `π − |gamma|`, so there is one expression for the wind's bearing here
+ * and no second one anywhere (§V.77).
+ */
+export function windBearing(yaw: number, windDirection: number): number {
+  return wrapPi(windDirection - yaw);
+}
+
+/**
+ * A SQUARE SAIL IS A FLAT PLATE — and this is the whole of §T.76's model.
+ *
+ * `beta` is the yards' brace: rotation about the ship's vertical, positive
+ * sending the STARBOARD yardarm aft, which is exactly the number the yards
+ * are drawn at (`ShipAssembly.setRigTrim`). So the sail's normal is the hull's
+ * forward turned by `beta` toward starboard, and the wind meets the canvas at
+ * `gamma − beta`:
+ *
+ *   0      wind square into the BACK of the sail — she draws her best
+ *   ±90°   wind edge-on to the canvas — it shivers, no force either way
+ *   ±180°  wind flat on the FRONT of the canvas — full aback
+ *
+ * Plate pressure goes as the SQUARE of the wind's normal component (one power
+ * for the pressure, one for the projected area the wind sees), and only the
+ * part of that force lying along the hull drives her — hence `cos beta`.
+ *
+ * THE POINT of splitting draw from back rather than returning one signed
+ * number: they are consumed differently. The drawing side scales the drive;
+ * the backed side is added to §B.49's aback push, and it may only ever ADD.
+ */
+export function braceDrive(beta: number, gamma: number): number {
+  const c = Math.cos(gamma - beta);
+  return c > 0 ? c * c * Math.cos(beta) : 0;
+}
+
+/** the same plate with the wind on the wrong side of it — what backs her. */
+export function braceBack(beta: number, gamma: number): number {
+  const c = Math.cos(gamma - beta);
+  return c < 0 ? c * c * Math.cos(beta) : 0;
+}
+
+/**
+ * THE BRACE A GOOD CREW WOULD SET: the angle that maximises `braceDrive` for
+ * the wind she has, inside the range the shrouds allow. This is the DEFAULT —
+ * a player who never touches Q/E sails on this and gives up nothing, because
+ * the drive term below is measured RELATIVE to it (see `stepShipSailing`).
+ *
+ * Closed form, not a search. d/dβ[cos²(γ−β)·cosβ] = 0 ⟺ tanβ = 2·tan(γ−β),
+ * which with t = tanβ, G = tanγ is `G·t² + 3t − 2G = 0`; the root that shares
+ * γ's sign is `t = 4sinγ / (√(9cos²γ + 8sin²γ) + 3cosγ)`, written that way
+ * rather than as `(√(9+8G²)−3)/2G` so it stays finite on the beam where tanγ
+ * blows up. Past the beam (cosγ ≤ 0) the root is beyond the clamp anyway —
+ * the unclamped optimum is 54.7° on a beam reach and 74.5° close-hauled, both
+ * well outside the shipped 35°, which is §T.75's whole problem stated in
+ * degrees of yard.
+ *
+ * The tack flip is the one thing kept from the bisector rule this replaces:
+ * `braceTackWidth` blends the sign through the eye of the wind so a ship
+ * rolling across it does not whip her whole rig from one side to the other.
+ * It is applied ONLY abaft the beam (cosγ ≤ 0, where the root is past the
+ * clamp anyway and the yards would otherwise flip hard at γ = ±π). Forward of
+ * that the signed root is already continuous through a dead run on its own,
+ * and blending there measurably moved the yards OFF the optimum — 0.03% of
+ * drive, small, but it is the one property the "auto costs you nothing"
+ * contract rests on, so it does not get to be approximately true.
+ */
+export function autoBrace(gamma: number, p: ShipRigParams = shipRigParams): number {
+  const bMax = Math.max(0, p.braceMax);
+  const s = Math.sin(gamma);
+  const c = Math.cos(gamma);
+  const brace =
+    c > 0
+      ? clamp(Math.atan((4 * s) / (Math.sqrt(9 * c * c + 8 * s * s) + 3 * c)), -bMax, bMax)
+      : bMax * clamp(s / Math.max(0.01, p.braceTackWidth), -1, 1);
+  return Number.isFinite(brace) ? brace : 0;
+}
+
 export function stepShipSailing(
   ship: ShipState,
   input: InputState,
@@ -114,11 +202,90 @@ export function stepShipSailing(
   // HUD button and a replayed input log all arrive here and nowhere else)
   if (input.anchorToggle) ship.anchored = !ship.anchored;
 
-  // --- sail thrust: windSpeed² · trimEfficiency(angle off wind) · trim ---
+  // --- the yards (§T.76). SIM STATE, and this is its single owner, exactly
+  // as `sailTrim` and `anchored` are: Q/E, an AI and a replayed input log all
+  // arrive here as `input.braceDelta` and nowhere else, so the yard angle is
+  // part of the tick hash and replays identically (§V.2).
+  //
+  // IT USED TO BE A RENDER-SIDE ANIMATION. `rigTrim.updateRig` computed the
+  // target from `oceanParams.windDirection` and slewed toward it on the RENDER
+  // frame delta, which was harmless while the yards drove nothing and is not
+  // harmless now — the same §V.2 defect §T.78 found in the wake. The slew is
+  // here, on the fixed tick; `updateRig` now only DISPLAYS this number.
+  const rig = shipRigParams;
+  const gamma = windBearing(yaw, wind.direction);
+  const betaStar = autoBrace(gamma, rig);
+  let beta = Number.isFinite(ship.brace as number) ? (ship.brace as number) : betaStar;
+  // MANUAL AUTHORITY IS A COUNTDOWN, not a mode flag. Pressing Q or E takes
+  // the yards; `braceHoldTime` seconds after the last press they slew back to
+  // the crew's own brace, at the same rate they always move — so the lever is
+  // something you WORK, never a chore you can forget yourself into and then
+  // wonder why she has stopped sailing. Set the param to 0 to hold forever.
+  let hold = Number.isFinite(ship.braceHold as number) ? (ship.braceHold as number) : 0;
+  // §V.28 + §V.3: the input log is a PERSISTED format, so a snapshot recorded
+  // before this field existed will arrive without it. Unguarded that is
+  // `beta + undefined` = NaN written straight into sim state and out through
+  // every transform downstream. Missing means "leave them to the crew".
+  const braceIn = Number.isFinite(input.braceDelta) ? clamp(input.braceDelta, -1, 1) : 0;
+  if (braceIn !== 0) hold = Math.max(0, params.braceHoldTime);
+  else if (hold > 0) hold = Math.max(0, hold - dt);
+  const braceTarget =
+    hold > 0
+      ? clamp(beta + braceIn * rig.braceRate * dt, -rig.braceMax, rig.braceMax)
+      : betaStar;
+  const braceStep = Math.max(0, rig.braceRate) * dt;
+  const braceErr = braceTarget - beta;
+  beta =
+    Math.abs(braceErr) <= braceStep ? braceTarget : beta + Math.sign(braceErr) * braceStep;
+  ship.brace = beta;
+  ship.braceHold = hold;
+
+  // --- sail thrust: windSpeed² · trimEfficiency(angle off wind) · trim,
+  //     now scaled by HOW THE YARDS ARE BRACED ---
   const wx = Math.sin(wind.direction);
   const wz = Math.cos(wind.direction);
-  const theta = Math.acos(clamp(-(fx * wx + fz * wz), -1, 1));
+  // identical to the acos of −(forward·wind) this replaces — see windBearing
+  const theta = Math.PI - Math.abs(gamma);
   const windForce = wind.speed * wind.speed * ship.sailTrim * params.thrustScale;
+
+  // THE BRACE TERM IS **RELATIVE**, and that is a deliberate choice, not a
+  // fudge. `trimEfficiency` keeps owning the point of sail — how good a course
+  // this is — and the plate law owns only how much of that the yards are
+  // actually collecting, referenced to the best they could do in range:
+  //
+  //     braceGain = braceDrive(beta) / braceDrive(betaStar)
+  //
+  // so at the automatic brace it is EXACTLY 1 and a player who never presses
+  // Q or E sails exactly as she did before this existed. An absolute plate law
+  // would have been the other choice and it was rejected with numbers: even at
+  // §T.75's 45° a square yard cannot draw AT ALL until the wind is 45° off the
+  // bow, so an absolute law would have shut the whole band between the shipped
+  // ±30° dead zone and 45° and made her flatly slower than she was.
+  //
+  // Hence the brace's AUTHORITY is scaled by how much drive the rig can make
+  // at all on this point of sail. Where the yards have real drive to give the
+  // ratio governs outright; where the clamp has left them none (dStar → 0,
+  // close-hauled) the arcade curve governs alone. A BLEND and not a threshold,
+  // deliberately: a hard cut-off left a knife edge at θ ≈ 50°, where dStar is
+  // 0.005 and the gain fell 1 → 0 across five degrees of yard, a quarter second
+  // at `braceRate`. The honest fix for that band is more RANGE (§T.75), and
+  // this leaves room for it — widen `braceMax` and the authority arrives on
+  // its own, with no curve to re-tune.
+  //
+  // At the automatic brace the ratio is exactly 1, so `braceGain` is exactly 1
+  // whatever the authority: the "auto costs you nothing" contract does not
+  // depend on this blend being tuned right.
+  const driveStar = braceDrive(betaStar, gamma);
+  const authority = smoothstep01(driveStar / Math.max(1e-6, params.braceAuthorityRef));
+  const braceRatio = driveStar > 0 ? clamp(braceDrive(beta, gamma) / driveStar, 0, 1) : 1;
+  const braceGain = 1 - authority * (1 - braceRatio);
+  // ...and ONE-WAY on the aback term. Turning the yards so the wind takes the
+  // FRONT of the canvas backs her, which is real and is most of what makes the
+  // lever interesting; but this is the max(0, ·) of the difference from the
+  // crew's own brace, so the manual brace can only ever ADD sternway and can
+  // never subtract §B.49's escape from irons. That deadlock is not coming back
+  // through a control the player can hold down.
+  const backExtra = Math.max(0, braceBack(beta, gamma) - braceBack(betaStar, gamma));
   // ABACK (§B.49). `trimEfficiency` is exactly 0 inside the dead zone, and the
   // rudder is exactly 0 below steerageSpeed, so head to wind used to be a
   // closed loop with no exit: no thrust ⇒ no way ⇒ no helm ⇒ no thrust. What
@@ -129,7 +296,9 @@ export function stepShipSailing(
   // wind, gone by the time the sails draw, and nothing aback dead downwind.
   const gate = noGoGate(theta, params);
   const thrust =
-    windForce * trimEfficiency(theta, params) - windForce * params.abackRatio * (1 - gate);
+    windForce * trimEfficiency(theta, params) * braceGain -
+    windForce * params.abackRatio * (1 - gate) -
+    windForce * params.abackRatio * backExtra;
 
   // --- aground: the bank eats the drive before it ever reaches the water.
   // OWNERSHIP (§B.6, stated because this contract has been broken here

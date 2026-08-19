@@ -66,6 +66,9 @@ export function buildHullFittings(
         zc,
         plates: plates.length,
         radius: d.deadeyeRadius,
+        // the board has to reach past the deadeye, and the deadeye's station
+        // is the plate socket itself — one number, not two (§T.75)
+        proj: p.channelProjection,
       };
       let minZ = Infinity;
       let maxZ = -Infinity;

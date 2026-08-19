@@ -1415,12 +1415,19 @@ async function boot(): Promise<void> {
       // itself runs inside the main render, when the ocean material draws.
       reflection?.update(app.camera, state.time);
 
-      // yards brace round to the apparent wind + reef state follows trim.
+      // yards DISPLAY the sim's brace + reef state follows trim.
       // MUST run before the ropes block: yards rotate → the block's
       // updateMatrixWorld(true) picks it up → rope anchors resolve braced.
       // updateRig owns the trim→state predicate and is edge-triggered
-      // internally, so passing the raw scalar every frame is safe.
-      updateRig(shipAssembly, frameDt, playerShip.sailTrim, playerShip.rudder);
+      // internally, so passing the raw scalars every frame is safe. §T.76:
+      // `brace` is chosen and rate-limited by stepShipSailing, not here.
+      updateRig(
+        shipAssembly,
+        frameDt,
+        playerShip.sailTrim,
+        playerShip.rudder,
+        playerShip.brace,
+      );
 
       // lanterns follow the INTERPOLATED pose, so they do not judder against
       // the hull they hang from on frames between two ticks.
@@ -1451,7 +1458,13 @@ async function boot(): Promise<void> {
         enemyShip.quaternion[2],
         enemyShip.quaternion[3],
       );
-      updateRig(enemyAssembly, frameDt, enemyShip.sailTrim, enemyShip.rudder);
+      updateRig(
+        enemyAssembly,
+        frameDt,
+        enemyShip.sailTrim,
+        enemyShip.rudder,
+        enemyShip.brace,
+      );
 
       // rigging follows the moving ship: rewrite anchors, GPU re-solves (§V.12)
       if (FEATURES.ropes) {

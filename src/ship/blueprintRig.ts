@@ -13,6 +13,22 @@ export type MastName = 'fore' | 'main' | 'rear';
 
 const SAIL_STATES: SailStateDef[] = [{ id: 'furled' }, { id: 'reefed' }, { id: 'full' }];
 
+/**
+ * WHERE A MAST'S SHROUD FAN RISES TO — the hounds if the mast declares them,
+ * else the truck. ONE resolver, because two consumers have to agree: the
+ * rigging plan draws the shrouds (src/ropes/shipRigging) and the ratline plan
+ * hangs its rungs across the same two lines (ratlinePlan). If they disagreed
+ * the ladder would climb past the top of its own ropes — the §V.45 shape,
+ * where a part is authored against another part's assumed pose.
+ *
+ * The fallback keeps a blueprint without a hounds socket rigging exactly as
+ * before rather than forking on ship class (§V.18).
+ */
+export function shroudHeadSocket(mast: MastName | string, has: (id: string) => boolean): string {
+  const hounds = `anchor-hounds-${mast}`;
+  return has(hounds) ? hounds : `anchor-masthead-${mast}`;
+}
+
 /** One mast with two yards; optional sail per yard, optional crow's nest. */
 export function buildMastRig(
   p: ShipClassParams,
@@ -33,6 +49,14 @@ export function buildMastRig(
         id: `anchor-masthead-${name}`,
         type: 'rope-anchor',
         position: [0, height, 0],
+      }, {
+        // THE HOUNDS — where the lower shrouds are set up, just above the
+        // course yard. Stays and backstays still go to the truck above; only
+        // the fan stops here, which is what leaves the yards room to brace
+        // (§T.75, params/ship shroudHoundsFrac).
+        id: `anchor-hounds-${name}`,
+        type: 'rope-anchor',
+        position: [0, height * Math.min(1, Math.max(0, p.shroudHoundsFrac)), 0],
       }],
     }),
   ];

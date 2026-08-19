@@ -104,6 +104,7 @@ describe('sailing determinism (V2)', () => {
     const inputAt = (i: number): InputState => ({
       rudder: i < 300 ? 1 : i < 600 ? -0.5 : 0,
       sailTrimDelta: i < 120 ? 1 : 0,
+      braceDelta: 0,
       brake: i >= 800,
       fire: false,
       // two anchor edges in the log: the replay has to reproduce both, or the

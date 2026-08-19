@@ -26,6 +26,7 @@
 import { shipDetailParams } from '../params/ship';
 import type { PieceDef, SocketDef } from './pieceTypes';
 import { vhash, vjitter } from './variation';
+import { shroudHeadSocket } from './blueprintRig';
 
 const SIDES = ['port', 'starboard'] as const;
 export type RigSide = (typeof SIDES)[number];
@@ -134,9 +135,13 @@ export function buildRatlinePlan(blueprint: PieceDef[]): RatlineLadder[] {
   for (const mast of blueprint) {
     if (mast.kind !== 'mast') continue;
     const name = mast.id.replace(/^mast-/, '');
-    const masthead = `anchor-masthead-${name}`;
-    if (shipPos(blueprint, masthead) === null) continue;
-    const head = shipPos(blueprint, masthead)!;
+    // THE SAME SOCKET THE SHROUDS RISE TO. A ladder is seized across two
+    // shrouds; resolving its top independently is exactly the §V.45 fault this
+    // module's header describes, one level up — the rungs would climb to the
+    // truck while the ropes stopped at the hounds.
+    const masthead = shroudHeadSocket(name, (id) => shipPos(blueprint, id) !== null);
+    const head = shipPos(blueprint, masthead);
+    if (head === null) continue;
 
     for (const side of SIDES) {
       const feet = fanFeet(blueprint, name, side);

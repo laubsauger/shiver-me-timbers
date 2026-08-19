@@ -60,7 +60,17 @@ export function stepAiShip(
   const player = state.ships[playerIndex];
   const idle: AiCommands = {
     // the AI never anchors — she is here to fight, not to lie to a cable
-    input: { rudder: 0, sailTrimDelta: 0, brake: false, fire: false, anchorToggle: false },
+    // braceDelta 0 = leave the yards to the crew's automatic brace (§T.76).
+    // The AI does not work her yards by hand; auto is the best in-range angle
+    // anyway, so she is not handicapped by it.
+    input: {
+      rudder: 0,
+      sailTrimDelta: 0,
+      braceDelta: 0,
+      brake: false,
+      fire: false,
+      anchorToggle: false,
+    },
     order: { shipIndex: ai.shipIndex, fire: false },
   };
   if (ship === undefined || player === undefined) return idle;
@@ -80,6 +90,7 @@ export function stepAiShip(
     input: {
       rudder: Math.max(-1, Math.min(1, intent.rudder)) * authority,
       sailTrimDelta: Math.abs(trimError) < TRIM_DEADBAND ? 0 : Math.sign(trimError),
+      braceDelta: 0, // automatic brace — see `idle` above
       brake: false,
       fire: intent.fire !== undefined,
       anchorToggle: false,

@@ -19,14 +19,8 @@
 import type * as THREE from 'three';
 import { shipMaterialParams, shipRigParams, type ShipRigParams } from '../params/ship';
 import { setShipWorldMatrix } from './woodMaterial';
-import { oceanParams } from '../params/ocean';
 import type { ShipAssembly } from './shipAssembly';
-import {
-  SAIL_GUST_DETUNE,
-  braceAngle,
-  sailGustRate,
-  trimDropScale,
-} from './sailDynamics';
+import { SAIL_GUST_DETUNE, sailGustRate, trimDropScale } from './sailDynamics';
 import { writeSailWindFrame, type SailWindFrame } from './sailFrame';
 
 const TAU = Math.PI * 2;
@@ -118,11 +112,18 @@ export function helmWheelAngle(rudder: number, p: ShipRigParams): number {
 }
 
 /**
- * @param dt     render frame delta (s) — rate-limits the swing
+ * @param dt     render frame delta (s) — advances the gust and velocity filters
  * @param trim   sim `sailTrim` 0..1; omit to leave the canvas at full
  * @param rudder sim `ship.rudder` −1..1; omit to leave the wheel amidships
+ * @param brace  sim `ship.brace` rad; omit to leave the yards where they are
  */
-export function updateRig(assembly: ShipAssembly, dt: number, trim = 1, rudder = 0): void {
+export function updateRig(
+  assembly: ShipAssembly,
+  dt: number,
+  trim = 1,
+  rudder = 0,
+  brace?: number,
+): void {
   const p = shipRigParams;
   const step = Math.min(0.25, Math.max(0, Number.isFinite(dt) ? dt : 0));
 
@@ -142,21 +143,16 @@ export function updateRig(assembly: ShipAssembly, dt: number, trim = 1, rudder =
   // cannot drift apart the way §B.30 measured them drifting.
   const frame = advanceFrame(assembly, assembly.group, step);
 
-  // --- brace: yards swing toward the wind-derived target, never snap ------
-  const target = braceAngle(
-    {
-      forwardX: frame.shipForwardX,
-      forwardZ: frame.shipForwardZ,
-      windDirection: oceanParams.windDirection,
-    },
-    p,
-  );
-  const current = assembly.braceAngle;
-  const maxStep = Math.max(0, p.braceRate) * step;
-  const delta = target - current;
-  const next =
-    Math.abs(delta) <= maxStep ? target : current + Math.sign(delta) * maxStep;
-  assembly.setRigTrim(next);
+  // --- brace: the yards DISPLAY the sim's own angle, they no longer choose it
+  //
+  // This used to compute its own target from `oceanParams.windDirection` and
+  // slew toward it on the RENDER delta. Both halves were wrong the moment the
+  // brace started driving the ship (§T.76): the wind it read was a second copy
+  // of the one the sim steps on (§V.77), and a slew on the frame delta makes a
+  // FORCE frame-rate dependent (§V.2 — the same defect §T.78 found in the
+  // wake). `shipKinematics.stepShipSailing` owns the target, the manual
+  // override and the rate limit; there is nothing left to decide here.
+  if (brace !== undefined && Number.isFinite(brace)) assembly.setRigTrim(brace);
 
   // --- trim: one continuous cloth drop, and NO geometry swap at all --------
   // NOTHING here selects a mesh, and nothing may start doing so again. The

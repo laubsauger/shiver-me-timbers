@@ -64,6 +64,40 @@ export interface SailingParams {
   /** sailTrim units per second from trim keys */
   trimSpeed: number;
   /**
+   * §T.76 — how long the player keeps the yards after the last Q/E press, in
+   * seconds, before they slew back to the automatic brace.
+   *
+   * The brace HAD to default to automatic: it is a new lever, not a new chore,
+   * and a player who never discovers Q/E must sail exactly as well as before.
+   * Handing back on a timer rather than on a second keybinding is the cheaper
+   * of the two, and it is forgiving in the direction that matters — brace her
+   * wrong, get distracted, and she comes right on her own instead of quietly
+   * sailing at half speed for the rest of the voyage.
+   *
+   * 0 means the yards are handed back on the very next tick, i.e. it disables
+   * MANUAL bracing rather than the hand-back — stated because the opposite
+   * reading is the natural one. A long hold is a large value, not zero, and it
+   * has to stay finite: `Infinity` does not survive `JSON.stringify` and this
+   * value reaches sim state through `ShipState.braceHold` (§V.2).
+   */
+  braceHoldTime: number;
+  /**
+   * §T.76 — the plate drive at which the yards get FULL say over her speed.
+   *
+   * The brace scales the drive by how far it is from the best angle the
+   * shrouds allow, but only in proportion to how much drive that best angle
+   * can actually make: `smoothstep(driveStar / this)`. Close-hauled the clamp
+   * leaves a square yard nothing to collect (drive 0.005 at θ = 50°, 0 at
+   * 45°), and letting a ratio of two near-zero numbers govern there put a
+   * knife edge across five degrees of yard. Above this value the plate law
+   * governs outright; below it the point-of-sail curve does.
+   *
+   * 0.05 sits just under the drive available on a close reach (0.047 at
+   * θ = 60°), so the lever is essentially fully live everywhere she really
+   * sails and fades out only where the RIG, not the model, has run out.
+   */
+  braceAuthorityRef: number;
+  /**
    * Leeway: fraction of the sail's geometric side force (drive × cot(θ/2))
    * that actually pushes the hull sideways after the keel and deadwood have
    * had their say. 0 = the ship travels exactly where she points, which is
@@ -127,6 +161,10 @@ export const sailingParams: SailingParams = registerParams(
     abackRatio: 0.07,
     anchorHold: 3,
     trimSpeed: 0.5,
+    // ~5 s of yard travel at braceRate = 0.35 rad/s, i.e. long enough to
+    // brace her round, look at what she is doing and correct it
+    braceHoldTime: 15,
+    braceAuthorityRef: 0.05,
     // measured leeway at the shipped wind: ~1° running, ~3° on a beam
     // reach, ~7° close-hauled — the classic square-rigger shape, and enough
     // that the wake trails visibly off the quarter instead of dead astern
@@ -162,6 +200,8 @@ export const sailingParams: SailingParams = registerParams(
     abackRatio: { min: 0, max: 0.5, step: 0.005 },
     anchorHold: { min: 0.1, max: 10, step: 0.1 },
     trimSpeed: { min: 0.1, max: 3, step: 0.05 },
+    braceHoldTime: { min: 0, max: 60, step: 1 },
+    braceAuthorityRef: { min: 0.001, max: 0.5, step: 0.001 },
     leewayRatio: { min: 0, max: 2, step: 0.01 },
     maxSideForceRatio: { min: 1, max: 10, step: 0.1 },
     weatherHelmGain: { min: 0, max: 0.2, step: 0.001 },

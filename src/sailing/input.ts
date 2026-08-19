@@ -6,8 +6,8 @@
  * the sim with no DOM involved. Sim code imports only the InputState type.
  *
  * Mapping: A/D rudder (analog ramp while held, springs back to 0),
- * W/E trim sail up, Q/S trim sail down, S also brakes, Space fires,
- * X drops or weighs the anchor (§I).
+ * W trims the sails in, S eases them out and brakes, Q/E brace the yards
+ * round (§T.76), Space fires, X drops or weighs the anchor (§I).
  */
 import { sailingParams } from '../params/sailing';
 import { CONTROL_CODES } from '../input/controlMap';
@@ -17,6 +17,14 @@ export interface InputState {
   rudder: number;
   /** -1 | 0 | 1 — sail trim intent this tick; sim integrates via trimSpeed */
   sailTrimDelta: number;
+  /**
+   * -1 | 0 | 1 — which way to brace the yards this tick (§T.76). +1 turns the
+   * sail's face to STARBOARD (the starboard yardarm goes aft), matching the
+   * sign of `ShipState.brace`. The sim integrates it at `braceRate` and hands
+   * the yards back to the automatic brace `braceHoldTime` after the last
+   * non-zero value, so 0 means "leave them to the crew", not "hold them here".
+   */
+  braceDelta: number;
   /** S held: kill forward way */
   brake: boolean;
   /** Space held (§I: fire cannon; consumed by combat, not sailing) */
@@ -33,7 +41,14 @@ export interface InputState {
 }
 
 export function neutralInput(): InputState {
-  return { rudder: 0, sailTrimDelta: 0, brake: false, fire: false, anchorToggle: false };
+  return {
+    rudder: 0,
+    sailTrimDelta: 0,
+    braceDelta: 0,
+    brake: false,
+    fire: false,
+    anchorToggle: false,
+  };
 }
 
 /**
@@ -80,16 +95,13 @@ export class KeyboardInput {
           ? 0
           : this.rudderValue - Math.sign(this.rudderValue) * step;
     }
-    const up =
-      this.held.has(CONTROL_CODES.trimInPrimary) ||
-      this.held.has(CONTROL_CODES.trimInAlternate)
-        ? 1
-        : 0;
-    const down =
-      this.held.has(CONTROL_CODES.trimOutAlternate) ||
-      this.held.has(CONTROL_CODES.trimOutPrimary)
-        ? 1
-        : 0;
+    const up = this.held.has(CONTROL_CODES.trimIn) ? 1 : 0;
+    const down = this.held.has(CONTROL_CODES.trimOut) ? 1 : 0;
+    // §T.76: Q and E used to be a SECOND trim pair duplicating W and S, which
+    // is what the user saw as "Q and E bring the sails up and down". They now
+    // brace the yards, which is a force the sim actually reads.
+    const braceStbd = this.held.has(CONTROL_CODES.braceToStarboard) ? 1 : 0;
+    const bracePort = this.held.has(CONTROL_CODES.braceToPort) ? 1 : 0;
     // an odd number of presses since the last tick is one net toggle; an even
     // number is none. Counting rather than flagging means a double-tap inside
     // a single tick cannot silently become one flip.
@@ -98,7 +110,8 @@ export class KeyboardInput {
     return {
       rudder: this.rudderValue,
       sailTrimDelta: up - down,
-      brake: this.held.has(CONTROL_CODES.trimOutAlternate),
+      braceDelta: braceStbd - bracePort,
+      brake: this.held.has(CONTROL_CODES.trimOut),
       fire: this.held.has(CONTROL_CODES.fire),
       anchorToggle,
     };

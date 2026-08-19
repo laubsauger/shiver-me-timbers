@@ -26,7 +26,6 @@ import {
 } from '../src/ship/hullMath';
 import {
   SAIL_GUST_DETUNE,
-  braceAngle,
   sailDrive,
   sailStateForTrim,
   trimDropScale,
@@ -660,47 +659,13 @@ describe('sail wind response (§V22 "the sails appear too static")', () => {
 });
 
 describe('yards brace round with the wind (§V22 "static, especially turning")', () => {
-  const p = shipRigParams;
-  const ahead = { forwardX: 0, forwardZ: 1 }; // ship heading world +z
-
-  it('is square on a run and swings round as the ship comes up to the wind', () => {
-    // WHY: frozen athwartships yards are the visible half of the complaint,
-    // and a rig braced hard round while running is just as wrong as one that
-    // never moves. windDirection = blowing TOWARD (src/sailing convention).
-    const running = braceAngle({ ...ahead, windDirection: 0 }, p);
-    const beam = braceAngle({ ...ahead, windDirection: Math.PI / 2 }, p);
-    expect(Math.abs(running)).toBeLessThan(0.02);
-    expect(Math.abs(beam)).toBeGreaterThan(0.3);
-  });
-
-  it('braces the WINDWARD yardarm forward, and flips with the tack', () => {
-    // wind blowing toward +x = coming from port → port arm leads. A positive
-    // rotation about +y sends the starboard arm aft, so port tack = positive.
-    const portTack = braceAngle({ ...ahead, windDirection: Math.PI / 2 }, p);
-    const starboardTack = braceAngle({ ...ahead, windDirection: -Math.PI / 2 }, p);
-    expect(portTack).toBeGreaterThan(0);
-    expect(starboardTack).toBeLessThan(0);
-    expect(portTack).toBeCloseTo(-starboardTack, 6);
-  });
-
-  it('never exceeds the clamp — beyond it a yard fouls its own shrouds', () => {
-    for (let a = 0; a < Math.PI * 2; a += 0.05) {
-      const angle = braceAngle({ ...ahead, windDirection: a }, p);
-      expect(Math.abs(angle), `wind ${a.toFixed(2)}`).toBeLessThanOrEqual(p.braceMax + 1e-9);
-      expect(Number.isFinite(angle)).toBe(true);
-    }
-  });
-
-  it('crosses the eye of the wind without snapping the rig over', () => {
-    // WHY: a hard sign flip at head-to-wind would whip every yard across the
-    // ship in one frame. The tack blend must be continuous through it.
-    let prev = braceAngle({ ...ahead, windDirection: Math.PI - 0.4 }, p);
-    for (let d = -0.4; d <= 0.4; d += 0.02) {
-      const angle = braceAngle({ ...ahead, windDirection: Math.PI + d }, p);
-      expect(Math.abs(angle - prev), `step at ${d.toFixed(2)}`).toBeLessThan(0.2);
-      prev = angle;
-    }
-  });
+  // THE ANGLE ITSELF MOVED TO THE SIM (§T.76). `braceAngle`'s bisector rule
+  // used to live in sailDynamics and be evaluated render-side; the yards now
+  // make thrust, so the rule that picks their angle is
+  // `sailing/shipKinematics.autoBrace` and its properties are asserted in
+  // tests/sailingBrace.test.ts against the force model they feed. What is
+  // still this file's business is that the piece graph MOVES when it is told
+  // to, which is the render half of the same feature.
 
   it('setRigTrim swings the yards AND the sails and anchors riding them', () => {
     // WHY: bracing has to be a piece-graph op (§V13) — the sail is a child of
@@ -720,27 +685,28 @@ describe('yards brace round with the wind (§V22 "static, especially turning")',
 });
 
 describe('updateRig — the one call main.ts makes per frame', () => {
-  it('rate-limits the swing and never jumps the rig across in one frame', () => {
-    // WHY: this is the integration surface. An unlimited setRigTrim would
-    // teleport six yards (and their sails and rope anchors) whenever the wind
-    // or heading changed, which reads worse than not bracing at all.
+  it('DISPLAYS the sim\u2019s brace and integrates nothing of its own', () => {
+    // WHY THIS CHANGED SHAPE (§T.76): updateRig used to pick the yards\u2019 target
+    // from `oceanParams.windDirection` — a SECOND copy of the wind the sim
+    // steps on (§V.77) — and slew toward it on the RENDER delta, which made the
+    // yard angle frame-rate dependent. Harmless while the yards drove nothing;
+    // a §V.2 violation the moment they drove the ship. `stepShipSailing` owns
+    // the target and the rate limit now, so the ONLY correct behaviour left
+    // here is to show the number it is handed.
     const asm = new ShipAssembly(buildGalleonBlueprint(), stubFactory);
     const saved = oceanParams.windDirection;
     try {
-      oceanParams.windDirection = Math.PI / 2; // beam wind, hard brace target
+      oceanParams.windDirection = Math.PI / 2; // a wind it must now IGNORE
       asm.group.updateMatrixWorld(true);
-      const dt = 1 / 60;
-      let prev = asm.braceAngle;
-      for (let i = 0; i < 400; i++) {
-        updateRig(asm, dt, 1);
-        expect(Math.abs(asm.braceAngle - prev)).toBeLessThanOrEqual(
-          shipRigParams.braceRate * dt + 1e-9,
-        );
-        prev = asm.braceAngle;
+      for (const dt of [1 / 30, 1 / 60, 1 / 144]) {
+        for (let i = 0; i < 200; i++) updateRig(asm, dt, 1);
+        expect(asm.braceAngle).toBe(0); // no target of its own, so no drift
       }
-      expect(asm.braceAngle).toBeCloseTo(shipRigParams.braceMax, 6); // settled
-      updateRig(asm, NaN, 1); // §V28: a bad dt must not move anything
-      expect(asm.braceAngle).toBeCloseTo(shipRigParams.braceMax, 6);
+      updateRig(asm, 1 / 60, 1, 0, 0.42);
+      expect(asm.braceAngle).toBe(0.42); // verbatim, no slew, no lag
+      expect(asm.group.getObjectByName('yard-main-lower')!.rotation.y).toBeCloseTo(0.42, 9);
+      updateRig(asm, 1 / 60, 1, 0, NaN); // §V28: a bad angle poisons nothing
+      expect(asm.braceAngle).toBe(0.42);
     } finally {
       oceanParams.windDirection = saved;
     }

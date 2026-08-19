@@ -146,6 +146,51 @@ export interface ShipClassParams {
   channelPlates: number;
   /** fore-aft spacing between chainplates (m); the fan rakes aft */
   channelPlateSpacing: number;
+  /**
+   * HOW FAR OUTBOARD OF THE SHELL THE SHROUD IS ACTUALLY SET UP (m) — the
+   * channel's projection, and the reason a channel exists at all.
+   *
+   * It was 0.06 m: the rope anchor sat against the planking while the deadeye
+   * drawn for it (pieceGeometryDetail.buildChannelGeometry) stood 0.20 m
+   * further out on the channel board. The shroud therefore ended 0.20 m
+   * INBOARD of the eye it is rove through — the board and the ironwork were
+   * right and only the anchor was wrong. Now one number places both, so the
+   * line lands in its deadeye by construction.
+   *
+   * It is also the margin every hull-side belay has against the topsides:
+   * braces and sheets are belayed at the forward plate of the next fan aft,
+   * and a catenary that sags a centimetre off a 0.06 m stand-off grazes the
+   * flare below it (the §T.75 galleon sheet, 0.009 m inside the shell).
+   */
+  channelProjection: number;
+  /**
+   * THE HOUNDS: fraction of mast height at which the LOWER SHROUDS are set up.
+   *
+   * They used to rise to the truck, which is not how any square rig is stayed
+   * and is why §T.75's yards could not brace: a shroud that runs from the very
+   * masthead to the channel is still 0.7–1.3 m outboard of the mast axis at
+   * the COURSE yard's own height, and the yard sweeps that circle at
+   * atan(standOff / thatOffset) ≈ 24° surface-to-surface. On a real ship the
+   * lower shrouds stop at the lower masthead just above the course yard, the
+   * topmast carries its own, and the fan is nearly closed where the course
+   * swings — which is what buys a square-rigger its brace.
+   *
+   * 0.56 puts the course yard at 0.89 of the lower mast's height on the
+   * galleon (0.5/0.56) and 0.93 on the brigantine — a lower yard IS slung just
+   * under the top — and leaves the topsail and topgallant yards clear ABOVE
+   * the fan entirely, which is why they brace sharper than the course on a
+   * real ship too. §V.62, and asserted in tests/shipRigging.test.ts: the brace
+   * stop (at the 0.10 m surface margin) moves with this — 1.00 → 19°,
+   * 0.70 → 28°, 0.66 → 32°, 0.58 → 43°, 0.56 → 47°.
+   *
+   * IT IS THE ONLY LEVER THAT WORKS, and the two obvious ones do not. YARD
+   * LENGTH is irrelevant: contact lands 1.2–1.4 m from the mast, 12–19% of the
+   * way out a half-yard, so the yard would have to be shorter than the fan is
+   * wide before it stopped reaching. And WIDENING the channels makes it WORSE
+   * (the stop is atan(standOff ÷ fan half-width at the yard), so a wider fan
+   * closes sooner) — 0.06 → 0.45 m of projection costs 1–2°.
+   */
+  shroudHoundsFrac: number;
   sheerBow: number; // rail rise toward the stem (m)
   sheerStern: number; // rail rise toward the transom (m)
   tumblehome: number; // inward lean of topsides, fraction of half-beam
@@ -180,6 +225,7 @@ export const brigantineParams: ShipClassParams = registerParams(
     railHeight: 0.9, railThickness: 0.12, railInset: 0.2, railLengthFactor: 0.85,
     rudderHeight: 2.2, rudderChord: 1.2, rudderThickness: 0.15,
     transomCrown: 0.35, channelPlates: 3, channelPlateSpacing: 0.7,
+    channelProjection: 0.26, shroudHoundsFrac: 0.56,
     sheerBow: 0.8, sheerStern: 0.5, tumblehome: 0.1, keelPinch: 0.12,
     cannonMountHeight: 1.3, cannonInset: 0, cannonSpacing: 4, cannonsPerSide: 4,
   },
@@ -226,6 +272,7 @@ export const galleonParams: ShipClassParams = registerParams(
     railHeight: 1.0, railThickness: 0.13, railInset: 0.22, railLengthFactor: 0.8,
     rudderHeight: 2.6, rudderChord: 1.4, rudderThickness: 0.18,
     transomCrown: 0.45, channelPlates: 3, channelPlateSpacing: 0.8,
+    channelProjection: 0.26, shroudHoundsFrac: 0.56,
     sheerBow: 1.1, sheerStern: 0.7, tumblehome: 0.12, keelPinch: 0.1,
     cannonMountHeight: 0, cannonInset: 1.0, cannonSpacing: 4, cannonsPerSide: 4,
   },
@@ -485,9 +532,36 @@ export const shipFlagParams: ShipFlagParams = registerParams(
  * on them, so they are safe to drag live in the panel.
  */
 export interface ShipRigParams {
-  /** max yard swing from athwartships (rad) — beyond this yards foul shrouds */
+  /**
+   * MAX YARD SWING FROM ATHWARTSHIPS (rad) — and it is now a CONSEQUENCE of
+   * the rig rather than a wish (§T.75).
+   *
+   * READ BY THE SIM as well as by the geometry tests since §T.76: it clamps
+   * `ShipState.brace`, which scales the drive.
+   *
+   * It was 0.61 (35°) and the geometry did not back it: with the shrouds
+   * rising to the TRUCK the course yards fouled their own fan, surface to
+   * surface, at ~24° — so from 24° up the yardarms were cutting through shroud
+   * after shroud INSIDE the shipped limit, and raising the clamp alone would
+   * have bought nothing but more penetration.
+   *
+   * 0.785 (45°) is what the fan gives once it is set up at the hounds
+   * (`ShipClassParams.shroudHoundsFrac`): measured worst surface-to-surface
+   * clearance, every yard against every shroud, both tacks, is 0.120 m on the
+   * galleon and 0.108 m on the brigantine AT this angle, against hard contact
+   * at 55°/57°. tests/shipRigging.test.ts asserts that 0.10 m margin across
+   * the whole range, so raising this past what the rig can carry FAILS rather
+   * than silently putting the yards back through the rigging.
+   *
+   * A SQUARE RIG CANNOT REACH 90°, which is what the user asked for. The yard
+   * sweeps a circle about its mast and the shrouds cross that circle, so the
+   * stop is atan(yard stand-off ÷ fan half-width at the yard's own height) and
+   * 90° would need a fan of literally zero width where the course swings. 45°
+   * is the sharp-up limit of a fast square-rigger.
+   */
   braceMax: number;
-  /** how fast yards swing toward their brace target (rad/s) */
+  /** how fast yards swing toward their brace target (rad/s) — the rate limit
+   *  now lives in `stepShipSailing`, on the fixed tick */
   braceRate: number;
   /**
    * TURNS OF THE WHEEL FROM HARD OVER TO HARD OVER — the barrel's gearing, and
@@ -505,9 +579,8 @@ export interface ShipRigParams {
    * rudder · turns · 2π / 2.
    */
   helmTurnsLockToLock: number;
-  /** how much of the "bisect the apparent wind" angle the crew actually uses */
-  braceBisect: number;
-  /** blend width of the tack flip, in units of the lateral wind component */
+  /** blend width of the tack flip, in units of the lateral wind component —
+   *  read by `sailing/shipKinematics.autoBrace` */
   braceTackWidth: number;
   /** sailTrim below this → furled */
   reefFurledBelow: number;
@@ -545,10 +618,9 @@ export interface ShipRigParams {
 export const shipRigParams: ShipRigParams = registerParams(
   'ship-rig',
   {
-    braceMax: 0.61, // ~35°
+    braceMax: 0.785, // 45° — the measured stop, see above (§T.75)
     braceRate: 0.35,
     helmTurnsLockToLock: 3.5,
-    braceBisect: 0.9,
     braceTackWidth: 0.18,
     reefFurledBelow: 0.15,
     reefReefedBelow: 0.55,
@@ -563,7 +635,6 @@ export const shipRigParams: ShipRigParams = registerParams(
     braceMax: { min: 0, max: 1.2, step: 0.01 },
     braceRate: { min: 0.02, max: 3, step: 0.01 },
     helmTurnsLockToLock: { min: 0.25, max: 8, step: 0.25 },
-    braceBisect: { min: 0, max: 1.5, step: 0.01 },
     braceTackWidth: { min: 0.02, max: 1, step: 0.01 },
     reefFurledBelow: { min: 0, max: 0.5, step: 0.01 },
     reefReefedBelow: { min: 0.1, max: 0.95, step: 0.01 },
@@ -1118,6 +1189,8 @@ function shipParamsMeta(): Partial<Record<keyof ShipClassParams, ParamMeta>> {
     transomCrown: { min: 0, max: 1.5, step: 0.01 },
     channelPlates: { min: 1, max: 5, step: 1 },
     channelPlateSpacing: { min: 0.3, max: 2, step: 0.05 },
+    channelProjection: { min: 0.03, max: 1.2, step: 0.01 },
+    shroudHoundsFrac: { min: 0.3, max: 1, step: 0.01 },
     cannonsPerSide: { min: 0, max: 8, step: 1 },
   };
 }

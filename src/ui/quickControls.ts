@@ -26,9 +26,14 @@ export function createQuickControls(root: HTMLElement): QuickControls {
       hint: 'left / right',
     },
     {
-      codes: [CONTROL_CODES.trimInPrimary, CONTROL_CODES.trimOutPrimary],
-      action: 'Trim sails',
-      hint: 'haul / ease',
+      codes: [CONTROL_CODES.trimIn, CONTROL_CODES.trimOut],
+      action: 'Set canvas',
+      hint: 'more / less',
+    },
+    {
+      codes: [CONTROL_CODES.braceToPort, CONTROL_CODES.braceToStarboard],
+      action: 'Brace the yards',
+      hint: 'turn the sails into the wind',
     },
     {
       codes: [CONTROL_CODES.toggleHelm],

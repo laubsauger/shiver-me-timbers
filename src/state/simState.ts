@@ -35,6 +35,25 @@ export interface ShipState {
    * `undefined` and `false` both mean "under way".
    */
   anchored?: boolean;
+  /**
+   * THE YARDS (§T.76): brace angle in radians about the ship's vertical,
+   * positive sending the starboard yardarm aft. SIM state, not a render
+   * animation — it scales the drive (`shipKinematics.braceDrive`), so it has
+   * to advance on the fixed tick and replay from the input log like every
+   * other force term. `src/ship/rigTrim.ts` only DISPLAYS it.
+   *
+   * OPTIONAL for the same reason `anchored` is: the existing ShipState
+   * literals stay valid, and an unset value means "wherever the crew would
+   * have her", which `stepShipSailing` seeds on the first tick.
+   */
+  brace?: number;
+  /**
+   * Seconds of MANUAL brace authority left. Q/E set it to `braceHoldTime`;
+   * when it runs out the yards slew back to the automatic brace. State rather
+   * than a collector latch for the §V.3 reason `anchorToggle` is not latched:
+   * the input snapshot has to be the whole truth of its tick.
+   */
+  braceHold?: number;
   flood: number; // 0..1, 1 = sunk
   /** damage zone id → remaining hp 0..1 */
   damage: Record<string, number>;

@@ -7,10 +7,29 @@
 export const CONTROL_CODES = {
   steerLeft: 'KeyA',
   steerRight: 'KeyD',
-  trimInPrimary: 'KeyW',
-  trimInAlternate: 'KeyE',
-  trimOutPrimary: 'KeyQ',
-  trimOutAlternate: 'KeyS',
+  /** how much canvas is set — `ShipState.sailTrim` */
+  trimIn: 'KeyW',
+  trimOut: 'KeyS',
+  /**
+   * WHICH WAY THE YARDS POINT — `ShipState.brace` (§T.76).
+   *
+   * These two used to be `trimInAlternate` / `trimOutPrimary`, a second trim
+   * pair duplicating W and S, which is what the user reported as "Q and E
+   * bring the sails up and down instead of rotating them". They are now the
+   * brace, and the brace is a force the sim reads, not a yard animation.
+   *
+   * SIGN, so it is not rediscovered: E is positive, sending the STARBOARD
+   * yardarm aft and turning the sail's face to starboard — clockwise seen
+   * from above, matching D-is-right on the row above. Q is the mirror.
+   *
+   * `KeyQ`/`KeyE` are free everywhere else — freeCam swallows only
+   * W/A/S/D/R/F (`tests/camera.test.ts` asserts it does not consume Q or E),
+   * combatArena takes B/N/V/M/J/P, the jump takes J, gunnery the arrows and
+   * the right mouse button, `Digit1..4` are the camera stations, and the
+   * panel's search box stops propagation on keydown.
+   */
+  braceToPort: 'KeyQ',
+  braceToStarboard: 'KeyE',
   fire: 'Space',
   /**
    * Drop / weigh the anchor. `KeyX` is free everywhere else — freeCam only
@@ -67,9 +86,13 @@ export const CONTROL_GROUPS: readonly ControlGroup[] = [
     title: 'Sailing',
     bindings: [
       { keys: ['A', 'D'], action: 'Turn the rudder', hint: 'Left / right' },
-      { keys: ['W', 'E'], action: 'Trim sails in' },
-      { keys: ['Q', 'S'], action: 'Ease sails out' },
-      { keys: ['S'], action: 'Brake the ship', hint: 'Also eases the sails' },
+      { keys: ['W'], action: 'Set more canvas' },
+      { keys: ['S'], action: 'Take in canvas', hint: 'Also brakes her' },
+      {
+        keys: ['Q', 'E'],
+        action: 'Brace the yards',
+        hint: 'Turn the sails into the wind without steering — she draws best square to it. Let go and the crew brace her back',
+      },
       { keys: ['X'], action: 'Drop / weigh anchor', hint: 'At anchor she holds station whatever the canvas is doing' },
     ],
   },

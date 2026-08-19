@@ -188,7 +188,15 @@ describe('buildRiggingPlan (§V13 sockets → §V12 ropes)', () => {
       expect(shrouds.length).toBeGreaterThanOrEqual(4);
       const perMastSide = new Map<string, number>();
       for (const shroud of shrouds) {
-        const mast = /^anchor-masthead-(\w+)$/.exec(shroud.socketA)?.[1];
+        // RE-CUT (§V.80). This read `^anchor-masthead-(\w+)$`, which pins the
+        // DECISION "a shroud rises to the truck" rather than the property "a
+        // shroud belongs to one mast and lands on that mast's own plates" —
+        // and that decision was the §T.75 defect: a fan carried to the truck is
+        // still 0.7-1.3 m wide where the course yard swings, so the yards
+        // fouled it at 24°. They are set up at the hounds now
+        // (blueprintRig.shroudHeadSocket). The mast identity is what this test
+        // is for, and it is asserted below exactly as before.
+        const mast = /^anchor-(?:hounds|masthead)-(\w+)$/.exec(shroud.socketA)?.[1];
         expect(mast, shroud.socketA).toBeDefined();
         // NUMBERED plate: the unnumbered `anchor-channel-{side}-{mast}` is a
         // deprecated alias the ship system keeps only until this consumes the
@@ -228,7 +236,8 @@ describe('rig LOCALITY (anti spider-web — docs/ship-reference-schema.png)', ()
     const shrouds = resolvePlan(buildGalleonBlueprint()).filter((r) => r.rope.role === 'shroud');
     expect(shrouds.length).toBeGreaterThanOrEqual(4);
     for (const { rope, a, b } of shrouds) {
-      expect(String(rope.socketA)).toMatch(/^anchor-masthead-/);
+      // the head is the mast's, truck or hounds — see the re-cut above
+      expect(String(rope.socketA)).toMatch(/^anchor-(?:hounds|masthead)-/);
       // within the fan's own rake of its mast — never a bay away
       expect(Math.abs(b[2] - a[2]), String(rope.socketA)).toBeLessThanOrEqual(4);
       expect(Math.abs(b[0])).toBeGreaterThan(galleonParams.beam * 0.3);
@@ -245,9 +254,12 @@ describe('rig LOCALITY (anti spider-web — docs/ship-reference-schema.png)', ()
     const resolved = resolvePlan(buildGalleonBlueprint());
     const sternZ = galleonParams.hullLength / -2;
     for (const { rope, a, b } of resolved) {
-      if (typeof rope.socketA !== 'string' || !rope.socketA.startsWith('anchor-masthead-')) continue;
+      // truck OR hounds: the shrouds moved to the hounds (§T.75) and dropping
+      // them out of this sweep would quietly shrink what it covers
+      if (typeof rope.socketA !== 'string'
+        || !/^anchor-(?:hounds|masthead)-/.test(rope.socketA)) continue;
       if (b[2] > sternZ + 6) continue; // not a stern-quarter termination
-      expect(rope.socketA, `${rope.socketA} reaches the stern`).toBe('anchor-masthead-rear');
+      expect(rope.socketA, `${rope.socketA} reaches the stern`).toMatch(/-rear$/);
       expect(a[2]).toBeGreaterThan(b[2]);
     }
     const backstays = resolved.filter(
@@ -405,7 +417,7 @@ describe('rig CLEARANCE (no rope inside the hull or through the deck)', () => {
     // to stay anyway, because nothing stops a future hull rework from
     // reintroducing the drop. So: shipped ⇒ rigged and clear, sunk ⇒ dropped.
     const mizzen = (plan: RiggingRope[]): RiggingRope[] =>
-      plan.filter((r) => r.role === 'shroud' && r.socketA === 'anchor-masthead-rear');
+      plan.filter((r) => r.role === 'shroud' && /^anchor-\w+-rear$/.test(String(r.socketA)));
 
     const shipped = buildGalleonBlueprint();
     const plates = [...collectRopeAnchorIds(shipped)].filter((id) =>
@@ -417,7 +429,7 @@ describe('rig CLEARANCE (no rope inside the hull or through the deck)', () => {
     // …and every mizzen shroud clears the castle it runs past
     const solid = hullSolid(shipped);
     for (const { rope, a, b, length } of resolvePlan(shipped)) {
-      if (rope.role !== 'shroud' || rope.socketA !== 'anchor-masthead-rear') continue;
+      if (rope.role !== 'shroud' || !/^anchor-\w+-rear$/.test(String(rope.socketA))) continue;
       for (const pt of solveCatenary(
         { x: a[0], y: a[1], z: a[2] },
         { x: b[0], y: b[1], z: b[2] },
@@ -487,6 +499,182 @@ describe('rig CLEARANCE (no rope inside the hull or through the deck)', () => {
       const cap = rope.role === 'stay' || rope.role === 'shroud' ? 1.01 : 1.06;
       expect(rope.slack, rope.role).toBeLessThanOrEqual(cap);
     }
+  });
+});
+
+/**
+ * §T.75 — THE BRACE ENVELOPE. `braceMax` is a clamp on how far the yards swing,
+ * and until now NOTHING checked that the rig it swings through has room for it.
+ * It did not: with the shrouds carried to the truck the fan was 0.7–1.3 m wide
+ * at the course yard's own height and the yardarms crossed shroud after shroud
+ * from ~24°, i.e. INSIDE the shipped 35° limit, on every tack, silently.
+ *
+ * These assert the PROPERTY (§V.80) — every yard clears every shroud, surface
+ * to surface, at every angle the clamp allows — rather than the number. Raising
+ * `braceMax`, lengthening a yard, widening the channels or lifting the hounds
+ * all fail here, which is exactly the coupling that was missing.
+ */
+const CLEARANCE_MARGIN = 0.1; // m of air between the two TUBES, a hand's width
+
+/** shortest distance between segments AB and CD */
+function segSegDist(a: Point, b: Point, c: Point, d: Point): number {
+  const dot = (p: number[], q: number[]): number => p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+  const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const v = [d[0] - c[0], d[1] - c[1], d[2] - c[2]];
+  const w = [a[0] - c[0], a[1] - c[1], a[2] - c[2]];
+  const A = dot(u, u); const B = dot(u, v); const C = dot(v, v);
+  const D = dot(u, w); const E = dot(v, w);
+  const den = A * C - B * B;
+  let s = den > 1e-12 ? Math.min(1, Math.max(0, (B * E - C * D) / den)) : 0;
+  const t = C > 1e-12 ? Math.min(1, Math.max(0, (B * s + E) / C)) : 0;
+  s = A > 1e-12 ? Math.min(1, Math.max(0, (B * t - D) / A)) : 0;
+  const p = [a[0] + u[0] * s, a[1] + u[1] * s, a[2] + u[2] * s];
+  const q = [c[0] + v[0] * t, c[1] + v[1] * t, c[2] + v[2] * t];
+  return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+}
+
+/**
+ * Worst surface-to-surface clearance between any yard and any shroud at one
+ * brace angle. The shrouds are sampled off the SOLVED catenary, not the chord
+ * (§V.71 — the yard has to clear the rope that is drawn, and standing rigging
+ * still sags a couple of centimetres); the yard's own radius comes from its
+ * aabb, so a change to `yardSlenderness` moves this too.
+ */
+function yardShroudClearance(
+  blueprint: PieceDef[],
+  brace: number,
+): { gap: number; yard: string; shroud: string } {
+  const assembly = new ShipAssembly(blueprint, stubFactory);
+  // shrouds are mast → hull and do not move with the brace, so solve once
+  assembly.setRigTrim(0);
+  assembly.group.updateWorldMatrix(true, true);
+  const lines = buildRiggingPlan(blueprint)
+    .filter((r) => r.role === 'shroud')
+    .map((rope) => {
+      const a = assembly.socketWorldPosition(rope.socketA as string);
+      const b = assembly.socketWorldPosition(rope.socketB as string);
+      const chord = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+      return {
+        id: `${rope.socketA}→${rope.socketB}`,
+        radius: rope.thickness,
+        pts: solveCatenary(
+          { x: a[0], y: a[1], z: a[2] },
+          { x: b[0], y: b[1], z: b[2] },
+          chord * rope.slack,
+          24,
+        ).map((p) => [p.x, p.y, p.z] as Point),
+      };
+    });
+  assembly.setRigTrim(brace);
+  assembly.group.updateWorldMatrix(true, true);
+
+  let gap = Infinity; let yard = ''; let shroud = '';
+  for (const piece of blueprint) {
+    if (piece.kind !== 'yard') continue;
+    const pa = assembly.socketWorldPosition(`anchor-${piece.id}-port`) as Point;
+    const pb = assembly.socketWorldPosition(`anchor-${piece.id}-starboard`) as Point;
+    const yr = piece.aabb.max[1];
+    for (const line of lines) {
+      for (let i = 0; i + 1 < line.pts.length; i++) {
+        const d = segSegDist(pa, pb, line.pts[i], line.pts[i + 1]) - yr - line.radius;
+        if (d < gap) { gap = d; yard = piece.id; shroud = line.id; }
+      }
+    }
+  }
+  return { gap, yard, shroud };
+}
+
+describe('§T.75 brace envelope: the clamp is a consequence of the rig', () => {
+  it.each(shipCases)(
+    '%s: every yard clears every shroud by ≥ 0.10 m at every brace up to the clamp, both tacks',
+    (_n, build) => {
+      // WHY: THE assertion whose absence let the yards cut the rigging for so
+      // long. `braceMax` promised the yards could swing this far; nothing ever
+      // checked the fan they swing through. Both tacks, because the fan is
+      // symmetric but the yard's stand-off forward of its mast is not — one
+      // arm sweeps aft into the shrouds while the other sweeps forward away
+      // from them, and the binding case swaps sides with the tack.
+      const blueprint = build();
+      const max = shipRigParams.braceMax;
+      for (let i = 0; i <= 24; i++) {
+        const mag = (max * i) / 24;
+        for (const brace of [mag, -mag]) {
+          const w = yardShroudClearance(blueprint, brace);
+          expect(
+            w.gap,
+            `${w.yard} vs ${w.shroud} at brace ${((brace * 180) / Math.PI).toFixed(1)}°`,
+          ).toBeGreaterThanOrEqual(CLEARANCE_MARGIN);
+        }
+      }
+    },
+  );
+
+  it.each(shipCases)('%s: …and the stop is REAL — it bites just beyond the clamp', (_n, build) => {
+    // WHY: the other half, and the one that makes this a consequence rather
+    // than a coincidence. A clamp far below the geometric stop would pass the
+    // test above while leaving the rig's range unexplained — which is how 35°
+    // shipped. So: the fan must actually close on the yards within 15° of the
+    // clamp. Measured contact (gap ≤ 0) is 55° galleon / 57° brigantine
+    // against a 45° clamp; the margin is gone by 51°/54°.
+    const blueprint = build();
+    const beyond = shipRigParams.braceMax + (15 * Math.PI) / 180;
+    const w = yardShroudClearance(blueprint, beyond);
+    expect(
+      w.gap,
+      `nothing fouls at ${((beyond * 180) / Math.PI).toFixed(0)}° — the clamp is not the rig's limit`,
+    ).toBeLessThan(CLEARANCE_MARGIN);
+  });
+
+  it('the HOUNDS drive the stop — the fan height is what buys the brace (§V.62)', () => {
+    // WHY: `shroudHoundsFrac` is a new knob and §V.62 is this repo's most
+    // expensive lesson. Prove it reaches the geometry: carrying the fan to the
+    // truck (1.0, the old rig) must put the yards back inside the shrouds at
+    // the shipped clamp, and lifting the hounds monotonically opens the stop.
+    const stopAngle = (frac: number): number => {
+      const before = galleonParams.shroudHoundsFrac;
+      galleonParams.shroudHoundsFrac = frac;
+      try {
+        const blueprint = buildGalleonBlueprint();
+        for (let deg = 0; deg <= 90; deg += 1) {
+          if (yardShroudClearance(blueprint, (deg * Math.PI) / 180).gap < CLEARANCE_MARGIN) {
+            return deg;
+          }
+        }
+        return 90;
+      } finally {
+        galleonParams.shroudHoundsFrac = before;
+      }
+    };
+    const truck = stopAngle(1);
+    const shipped = stopAngle(galleonParams.shroudHoundsFrac);
+    expect(truck, 'shrouds to the truck: the old geometry').toBeLessThan(25);
+    expect(shipped, 'shrouds to the hounds').toBeGreaterThan((shipRigParams.braceMax * 180) / Math.PI);
+    expect(stopAngle(0.7)).toBeGreaterThan(truck); // monotone in the fan height
+    expect(shipped).toBeGreaterThan(stopAngle(0.7));
+  });
+
+  it.each(shipCases)('%s: the shroud lands in its deadeye, out on the channel', (_n, build, params) => {
+    // WHY: the plate socket sat 0.06 m off the planking while the deadeye drawn
+    // for it stood 0.20 m further out on the channel board — the line ended
+    // short of the ironwork it is rove through, and that same 0.06 m was all
+    // the clearance every brace and sheet belayed there had against the flare
+    // below (the galleon sheet that entered the hull at full brace). One number
+    // places both now; this pins the socket to it, on the live hull loft.
+    const blueprint = build();
+    const shape = asHullShape(blueprint.find((p) => p.kind === 'deck')?.shape)!;
+    const assembly = new ShipAssembly(blueprint, stubFactory);
+    assembly.group.updateWorldMatrix(true, true);
+    let plates = 0;
+    for (const piece of blueprint) {
+      for (const socket of piece.sockets) {
+        if (!/^anchor-channel-(port|starboard)-\w+-\d+$/.test(socket.id)) continue;
+        const [x, y, z] = assembly.socketWorldPosition(socket.id);
+        expect(Math.abs(x) - hullHalfWidthAt(z, y, shape), socket.id)
+          .toBeCloseTo(params.channelProjection, 6);
+        plates++;
+      }
+    }
+    expect(plates, 'ship declares chainplates at all').toBeGreaterThanOrEqual(12);
   });
 });
 

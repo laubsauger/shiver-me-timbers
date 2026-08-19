@@ -148,24 +148,35 @@ export function buildChannelGeometry(shape: Record<string, number>): THREE.Buffe
 
   // the channel: a stout board projecting outboard, spreading the shrouds
   // clear of the topsides. Spans the fan with a little to spare each end.
+  //
+  // ITS WIDTH IS THE PLATE'S OWN PROJECTION (§V.66, and §T.75): the plate
+  // socket now sits ON the board at `channelProjection` from the shell, so the
+  // board must reach past it — inner edge a hand inside the planking, outer
+  // edge a hand outside the deadeye. It used to be a bare 0.42 m while the
+  // socket sat at 0.06 m, i.e. the board was sized for a stand-off nothing
+  // else knew about.
+  const proj = Math.max(0.03, shape.proj ?? 0.26);
   const zMin = Math.min(...pts.map((p) => p.z));
   const zMax = Math.max(...pts.map((p) => p.z));
   const yBoard = pts[0].y;
   const frame = shellFrame(zMax + zc, yBoard, s, side);
-  const board = new THREE.BoxGeometry(0.42, 0.11, zMax - zMin + 0.7);
-  board.translate(0.16, 0, 0);
+  const board = new THREE.BoxGeometry(proj + 0.16, 0.11, zMax - zMin + 0.7);
+  board.translate((proj + 0.06) / 2, 0, 0);
   parts.push(onShell(board, frame, yBoard, (zMin + zMax) / 2));
 
   for (let i = 0; i < plates; i++) {
     const p = pts[i];
-    const outX = p.x + side * 0.2;
+    // the plate socket IS the deadeye's station now — the shroud is set up in
+    // this eye, so nothing may re-offset it
+    const outX = p.x;
+    const shellX = p.x - side * proj;
     // iron chainplate strap: from under the channel, down the topsides, and
     // it is riveted by hand so no two rake alike
     const strapTilt = vjitter(0.05 * jitter, i, p.z);
     parts.push(
       barBetween(
         new THREE.Vector3(outX, p.y - 0.02, p.z),
-        new THREE.Vector3(p.x - side * 0.05, p.y - 0.85, p.z + strapTilt),
+        new THREE.Vector3(shellX + side * 0.01, p.y - 0.85, p.z + strapTilt),
         0.035,
         4,
       ),

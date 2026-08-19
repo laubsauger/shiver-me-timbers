@@ -216,44 +216,15 @@ export function sailDrive(input: SailWindInput, p: ShipMaterialParams): SailDriv
   return { drive, luff, skew };
 }
 
-/**
- * Yard brace angle (rad about the ship's vertical) for a square rig, from
- * the ship's OWN heading — not a sail's, which is already braced.
- *
- * Rule of thumb the crew uses: the yard bisects the angle between the
- * apparent wind and the centreline, so it is square when running and swings
- * round as the ship comes up toward the wind. Sign: the WINDWARD yardarm
- * goes forward (on a port tack, the port arm leads), which for three's
- * left-handed +y rotation means a positive angle when the wind is on the
- * port bow. Clamped — beyond ~35° a yard fouls its own shrouds.
- *
- * Continuous through both dead-astern and head-to-wind: the magnitude goes
- * to zero on a run, and the tack flip is a smooth blend over
- * `braceTackWidth`, so a ship rolling through the eye of the wind does not
- * snap its whole rig from one side to the other.
+/*
+ * WHERE `braceAngle` WENT (§T.76). It used to live here: a bisector rule that
+ * chose the yards' angle from the ship's heading and the wind, for the RENDER
+ * to animate. The yards now make thrust, so the angle is sim state and the
+ * rule that picks it is `sailing/shipKinematics.autoBrace` — one expression,
+ * on the fixed tick, stepped from the same wind the hull is (§V.77, §V.2).
+ * `sailDrive` below still reads the BRACED forward through `forwardX/Z`; the
+ * caller passes the sail's own world transform, which follows the yard.
  */
-export function braceAngle(
-  input: Pick<SailWindInput, 'forwardX' | 'forwardZ' | 'windDirection'>,
-  p: ShipRigParams,
-): number {
-  const fx = finite(input.forwardX);
-  const fz = finite(input.forwardZ, 1);
-  const len = Math.max(1e-4, Math.hypot(fx, fz)); // §V28 floored divisor
-  const ux = fx / len;
-  const uz = fz / len;
-  const wx = Math.sin(finite(input.windDirection));
-  const wz = Math.cos(finite(input.windDirection));
-  // SAME convention as sailDrive above and as src/sailing: windDirection is
-  // where the wind blows TOWARD, so +1 here is the wind dead astern
-  const along = clamp(ux * wx + uz * wz, -1, 1);
-  const theta = Math.acos(clamp(-along, -1, 1)); // 0 = head to wind, π = running
-  const magnitude = Math.min((Math.PI - theta) * p.braceBisect * 0.5, p.braceMax);
-  // starboard = forward rotated −90° about +y
-  const lateral = clamp(uz * -wx + -ux * -wz, -1, 1); // wind FROM, to starboard
-  const tack = clamp(-lateral / Math.max(0.01, p.braceTackWidth), -1, 1);
-  const brace = magnitude * tack;
-  return Number.isFinite(brace) ? brace : 0;
-}
 
 /**
  * sailTrim (0..1, the sim's value) → §V13 sail state, with hysteresis so a
