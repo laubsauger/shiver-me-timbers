@@ -268,7 +268,11 @@ export interface SkyParams {
    * water is a long thin STRIP, not a disc — measured at 17.7 with extent 80:
    * 1055 m along the sun line, 160 m at 30° off it, 80 m crosswind. Any
    * caster off that strip is absent from the map and casts NOTHING: the
-   * enemy ship at ENEMY_SPAWN [190,-150] lands at u = -146 and is excluded.
+   * enemy ship landed at u = -146 and was excluded when this was measured, at
+   * the hardcoded [190, -150] she used to spawn on. That constant is gone —
+   * `ai/enemySpawn.ts` now berths her 150-220 m from the player instead of the
+   * ~1000 m that was — so the NUMBER is historical; the anisotropy it
+   * demonstrates is not.
    * That anisotropy is visible to the user as "islands cast no shadow, but it
    * does receive shadow at some point very far away". Fixing it is a
    * cascade/coverage problem and CANNOT be solved by raising this number —

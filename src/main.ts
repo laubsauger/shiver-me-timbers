@@ -84,9 +84,7 @@ import { ropeParams } from './params/ropes';
 import { buildRatlinePlan } from './ship/ratlinePlan';
 import { buildRungDescriptors } from './ropes/ratlines';
 import { createAiShip, stepAiShip } from './ai/aiShip';
-
-/** enemy spawn, world XZ — far enough to frame, close enough to watch */
-const ENEMY_SPAWN: [number, number] = [190, -150];
+import { enemySpawn } from './ai/enemySpawn';
 
 // bisect switches for the renderer-freeze hunt — all true = full game
 const FEATURES = {
@@ -523,11 +521,39 @@ async function boot(): Promise<void> {
   const LANTERN_IDS = Object.keys(LANTERN_SOCKETS);
   const lanterns = createLanterns({ scene: app.scene, ids: LANTERN_IDS });
 
-  // ENEMY SHIP (§T.19/§V.15). Placed off the starboard bow at a distance that
-  // frames well rather than alongside — she is here to be looked at. Sailing
-  // and buoyancy key per-ship state off a WeakMap, so they need no second
-  // instance; the rig does, because applyRiggingPlan writes indices 0..n-1
-  // with no offset and would otherwise overwrite the player's ropes.
+  /**
+   * WHERE THE PLAYER ACTUALLY BOOTS — not the origin since §T.52 made the
+   * lagoon the default destination. Resolved HERE as well as at the jump below
+   * because the enemy is placed relative to her and the two must agree: same
+   * list (`archipelago.anchorages`), same fallback (an unknown `?at=` leaves
+   * her at the origin, which is exactly what `jump.jumpTo` returning false
+   * does). The declarations are hoisted from the jump block rather than
+   * duplicated, so there is still one `bootAt`.
+   */
+  const requestedAt = bootJumpTarget(window.location.search);
+  const bootAt = requestedAt ?? DEFAULT_BOOT_TARGET;
+  const bootBerth = archipelago.anchorages.find((a) => a.name === bootAt);
+  const playerSpawn: [number, number] = bootBerth
+    ? [bootBerth.x, bootBerth.z]
+    : [SPAWN_TARGET.x, SPAWN_TARGET.z];
+
+  // ENEMY SHIP (§T.19/§V.15). Her berth is DERIVED, not typed — see
+  // ai/enemySpawn.ts for the three properties it holds (in sight, off the
+  // wind, inside the AI's engage envelope) and the measurements that killed
+  // the old hardcoded [190, -150]. Sailing and buoyancy key per-ship state off
+  // a WeakMap, so they need no second instance; the rig does, because
+  // applyRiggingPlan writes indices 0..n-1 with no offset and would otherwise
+  // overwrite the player's ropes.
+  const ENEMY_SPAWN = enemySpawn({
+    player: playerSpawn,
+    heading: bootBerth?.heading ?? SPAWN_TARGET.heading,
+    // The wind `applyWorldSettings` pushes into `oceanParams` further down.
+    // Read from the STORE because that mapping has not run yet at this point
+    // in boot, and the store is the value it will write — one owner, read
+    // early, rather than a second default that could drift (§V.62).
+    windDirection: settings.get().world.windDirection,
+    seabedAt: (x, z) => archipelago.seabed.heightAt(x, z),
+  });
   state.ships.push({
     id: 'enemy-1',
     kind: 'enemy',
@@ -966,8 +992,6 @@ async function boot(): Promise<void> {
    * means the state she boots in is one the HUD can name and a button can
    * clear, instead of a ship that is silently, invisibly furled.
    */
-  const requestedAt = bootJumpTarget(window.location.search);
-  const bootAt = requestedAt ?? DEFAULT_BOOT_TARGET;
   if (!jump.jumpTo(bootAt)) {
     if (requestedAt !== null) {
       console.warn(

@@ -35,7 +35,17 @@ import { clampElevation, createAim, muzzleLay, predictImpact } from '../src/comb
 import { combatParams } from '../src/params/combat';
 import type { FireOrder } from '../src/combat/combatSystem';
 
-/** the spawns main.ts really uses: 1014 m apart, and that is the whole point */
+/**
+ * 1014 m apart, and that distance is the whole point: past the 133.6 m a ball
+ * can reach, so `layGuns` must not answer with the maxElevation clamp.
+ *
+ * This WAS the shipped pair — the lagoon berth against the hardcoded enemy
+ * spawn (36c5a8d). The enemy's berth is derived now (src/ai/enemySpawn.ts) and
+ * comes out 150-220 m away, so the game no longer produces this geometry at
+ * boot. The guard is kept, and kept at this range, because the FAILURE it
+ * pins is "an out-of-range solution silently becomes a mortar shot" and that
+ * is reachable from any range the player can open up by sailing away.
+ */
 const PLAYER_SPAWN: [number, number] = [1129.5, 232.1];
 const ENEMY_SPAWN: [number, number] = [190, -150];
 

@@ -54,7 +54,12 @@ import { aiParams } from '../src/params/ai';
 import { elevationForRange, shotRange } from '../src/combat/ballistics';
 import { isSunk } from '../src/combat/sinking';
 
-/** the spawn main.ts really uses — the test is worthless against a different one */
+/**
+ * 242 m off the origin. This WAS the spawn main.ts used; the berth is derived
+ * now (src/ai/enemySpawn.ts) and lands 150-220 m from the player, so the
+ * constant stays as this rig's own geometry — a range she has to close under
+ * sail — and no longer claims to be the game's.
+ */
 const ENEMY_SPAWN: [number, number] = [190, -150];
 
 const stub = (): Material => ({ dispose(): void {} }) as unknown as Material;
@@ -112,7 +117,7 @@ function rig(playerAt: [number, number], enemyAt: [number, number], audio = true
 }
 
 describe('the enemy actually shoots at us (§V.15 broadside → §T.16 gun)', () => {
-  it('opens fire from the spawn main.ts uses, and the balls reach SimState', () => {
+  it('opens fire from a spawn she must close under sail, and the balls reach SimState', () => {
     const { state, runtime } = rig([0, 0], ENEMY_SPAWN, false);
     const ai = createAiShip(1, ENEMY_SPAWN);
     let firstMuzzleTick = -1;
