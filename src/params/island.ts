@@ -336,6 +336,19 @@ export interface IslandParams {
   rockBedLevel: number;
   /** 0 = no bedding flat, 1 = the base is a plane at -rockBedLevel */
   rockBedFlatten: number;
+  /**
+   * Fraction of boulders that clump onto the rocky flanks (`cliffGroupAngles`)
+   * instead of scattering on a uniform bearing.
+   *
+   * A uniform bearing is a Poisson process, and Poisson on a ring is exactly
+   * what "evenly spread" looks like — the same measurement that sent the palms
+   * into groves. Boulders are the DEBRIS of the masses they came off, so they
+   * belong in fields at the foot of the headlands with clean beach between.
+   * The remainder stay loose so the beaches are not perfectly swept either.
+   */
+  rockClumpFraction: number;
+  /** angular half-spread (rad) of one boulder field around its flank */
+  rockClumpSpread: number;
 
   // -- cliff masses (the island's silhouette, §V43) ---------------------------
   /**
@@ -357,6 +370,101 @@ export interface IslandParams {
   cliffRadialOuter: number;
   /** how deep a cliff mass sinks, fraction of its half-height */
   cliffEmbed: number;
+
+  // -- structures: jetties, piers, huts (src/island/structures.ts) ----------
+  /**
+   * Stretches of shore the built stuff clusters on. Built things CLUSTER — the
+   * references put every jetty and every hut on one or two bays and leave the
+   * rest of the island empty — so this is the same device as `palmGroveCount`
+   * and `cliffGroups`, on its own decorrelated stream.
+   */
+  structureSettlements: number;
+  /** arc half-width (m) of one settlement along the shore */
+  structureSettlementSpread: number;
+  /** upper bound on jetties per settlement (1..this, drawn per settlement) */
+  structureJettiesPerSettlement: number;
+  /**
+   * A jetty shorter than this is not worth building, so the bearing is skipped.
+   * Jetty LENGTH itself is NOT a tunable range — it is read off the seabed (see
+   * structures.planJetty): a jetty runs out until it reaches `structureBerthDepth`
+   * of water. The user's note on the references was "naturally different
+   * lengths", and a uniform random length is precisely not that.
+   */
+  structureJettyMinLength: number;
+  /** hard stop on the walk seaward (m) */
+  structureJettyMaxLength: number;
+  structureJettyWidth: number;
+  /** clear water (m) between two jetty decks at the shore */
+  structureJettyGap: number;
+  /** deck top above still water (m) — a deck is level, so this is one number */
+  structureDeckHeight: number;
+  /** spacing (m) of the pile bays, and the deck's structural module */
+  structureBayLength: number;
+  /** how far inland of the waterline the deck starts; the ramp bridges the rest */
+  structureRootInset: number;
+  /** max terrain gradient at the root — a jetty needs a beach, not a cliff */
+  structureShoreSlopeLimit: number;
+  /** water depth (m) the jetty is trying to reach; it stops on arrival */
+  structureBerthDepth: number;
+  /**
+   * Per-jetty variation (±fraction) on that target depth. THIS IS WHERE THE
+   * LENGTH SPREAD COMES FROM — see structures.planJetty. At 0 a settlement's
+   * jetties measured 16.8, 16.8 and 16.8 m, because a 34 m arc of shore has
+   * one profile; each jetty now reaches for the water its own boat needs.
+   */
+  structureBerthDepthVar: number;
+  /** past this depth (m) a pile no longer reaches bottom — the walk gives up */
+  structureMaxPileDepth: number;
+  /** longest pile that can be driven (m) — floors the foot off the bathymetry */
+  structureMaxPileLength: number;
+  structurePileEmbed: number;
+  structurePileRadius: number;
+  /** lateral offset (m) of a pile top — a driven pile is never plumb */
+  structurePileLean: number;
+  /** chance a pile stands proud of the deck as a bollard (ref-island-147/149) */
+  structureBollardChance: number;
+  structureBollardRise: number;
+  structureStringerWidth: number;
+  structureStringerDepth: number;
+  structureBraceChance: number;
+  structureBraceSize: number;
+  /** deck board width / gap / thickness (m) — REAL boards, not shader seams */
+  structurePlankWidth: number;
+  structurePlankGap: number;
+  structurePlankThickness: number;
+  /** per-board cant (rad), roll (rad) and lift (m) — hand-laid, not milled */
+  structurePlankCant: number;
+  structurePlankRoll: number;
+  structurePlankLift: number;
+  structurePlankOverhang: number;
+  /** chance a decayed jetty is missing a board, at the seaward end */
+  structureMissingPlank: number;
+  /** chance a jetty is a wreck rather than sound */
+  structureDecayChance: number;
+  /** run (m) of the loose boards ramping from the deck onto the sand */
+  structureRampRun: number;
+  structureRailChance: number;
+  structureRailHeight: number;
+  structureRailSize: number;
+  /** huts at `radius`, scaled with footprint like palmCount and cliffCount */
+  structureHutCount: number;
+  structureHutSize: number;
+  structureHutWallHeight: number;
+  structureHutRoofRise: number;
+  /** how far inland of the shoreline a dry-land hut sits (m) */
+  structureHutSetback: number;
+  structureHutMinHeight: number;
+  structureHutSlopeLimit: number;
+  /** how high a dry-land hut may be lifted on stumps (m) */
+  structureHutStilt: number;
+  /** how much wider huts spread than the jetties of the same settlement */
+  structureHutFlare: number;
+  structurePostRadius: number;
+  /** fraction of huts standing in the shallows on stilts (ref-island-150) */
+  structureStiltFraction: number;
+  /** chance a wall board is missing — a gap you can see daylight through */
+  structureMissingBoard: number;
+  structureEaveOverhang: number;
 
   // -- archipelago scatter (T33; §V2: same seed ⇒ same world) ----------------
   /** islands scattered around the play area */
@@ -418,6 +526,20 @@ export interface IslandParams {
   lodPalmCull: number;
   /** rocks hidden beyond this camera distance (m) */
   lodRockCull: number;
+  /**
+   * Structures hidden beyond this camera distance (m). Tighter than the rocks:
+   * a jetty is a 2 m wide ribbon of 0.28 m boards, so it is under a pixel long
+   * before a 20 m granite mass is, and hiding it is zero draws in the main pass
+   * AND the shadow pass.
+   *
+   * MEASURED, on a CPU-bound frame where draw calls are the whole budget: at
+   * the lagoon anchorage 2200 m put THREE islands' settlements in the frame for
+   * 3 draws, of which two were islands 1.1-2.2 km away whose jetties are a few
+   * pixels of grey. 1400 m keeps the one you are anchored at and drops the
+   * rest, for 1 draw. Deliberately tighter than `lodRockCull` (4000) because a
+   * 20 m granite mass is still a silhouette at 4 km and a plank is not.
+   */
+  lodStructureCull: number;
   /**
    * How far outside its own footprint an island stays tagged as a §V10
    * intersection-foam target (m). flowfoam's injection pass captures every
@@ -516,6 +638,8 @@ export const islandParams: IslandParams = registerParams(
     rockFacetSoftness: 0.22,
     rockBedLevel: 0.45,
     rockBedFlatten: 0.55,
+    rockClumpFraction: 0.72,
+    rockClumpSpread: 0.55,
     cliffCount: 4,
     cliffGroups: 3,
     cliffGroupSpread: 0.42,
@@ -526,6 +650,56 @@ export const islandParams: IslandParams = registerParams(
     cliffRadialInner: 0.44,
     cliffRadialOuter: 1.14,
     cliffEmbed: 0.6,
+    structureSettlements: 2,
+    structureSettlementSpread: 60,
+    structureJettiesPerSettlement: 3,
+    structureJettyMinLength: 7,
+    structureJettyMaxLength: 34,
+    structureJettyWidth: 2.4,
+    structureJettyGap: 7,
+    structureDeckHeight: 1.7,
+    structureBayLength: 2.8,
+    structureRootInset: 3,
+    structureShoreSlopeLimit: 0.45,
+    structureBerthDepth: 2.2,
+    structureBerthDepthVar: 0.45,
+    structureMaxPileDepth: 4.5,
+    structureMaxPileLength: 9,
+    structurePileEmbed: 0.7,
+    structurePileRadius: 0.16,
+    structurePileLean: 0.22,
+    structureBollardChance: 0.3,
+    structureBollardRise: 0.9,
+    structureStringerWidth: 0.16,
+    structureStringerDepth: 0.24,
+    structureBraceChance: 0.35,
+    structureBraceSize: 0.12,
+    structurePlankWidth: 0.28,
+    structurePlankGap: 0.035,
+    structurePlankThickness: 0.07,
+    structurePlankCant: 0.05,
+    structurePlankRoll: 0.05,
+    structurePlankLift: 0.012,
+    structurePlankOverhang: 0.16,
+    structureMissingPlank: 0.35,
+    structureDecayChance: 0.4,
+    structureRampRun: 3.2,
+    structureRailChance: 0.5,
+    structureRailHeight: 0.95,
+    structureRailSize: 0.09,
+    structureHutCount: 3,
+    structureHutSize: 4.2,
+    structureHutWallHeight: 2.3,
+    structureHutRoofRise: 1.3,
+    structureHutSetback: 9,
+    structureHutMinHeight: 0.5,
+    structureHutSlopeLimit: 0.3,
+    structureHutStilt: 0.7,
+    structureHutFlare: 1.6,
+    structurePostRadius: 0.13,
+    structureStiltFraction: 0.3,
+    structureMissingBoard: 0.1,
+    structureEaveOverhang: 0.45,
     islandCount: 5,
     // the sky agent's haze test case wants objects at 2-4 km; the near end
     // keeps one island reachable within a couple of minutes of sailing
@@ -545,6 +719,7 @@ export const islandParams: IslandParams = registerParams(
     lodPalmFull: 500,
     lodPalmCull: 1400,
     lodRockCull: 4000,
+    lodStructureCull: 1400,
     foamTargetMargin: 220,
     castShadows: true,
   },
@@ -626,6 +801,8 @@ function islandParamsMeta(): Partial<Record<keyof IslandParams, ParamMeta>> {
     rockFacetSoftness: { min: 0.02, max: 1, step: 0.02 },
     rockBedLevel: { min: 0.1, max: 1, step: 0.05 },
     rockBedFlatten: { min: 0, max: 1, step: 0.05 },
+    rockClumpFraction: { min: 0, max: 1, step: 0.02 },
+    rockClumpSpread: { min: 0.05, max: 2, step: 0.02 },
     cliffCount: { min: 0, max: 24, step: 1 },
     cliffGroups: { min: 1, max: 8, step: 1 },
     cliffGroupSpread: { min: 0.05, max: 1.5, step: 0.02 },
@@ -636,6 +813,56 @@ function islandParamsMeta(): Partial<Record<keyof IslandParams, ParamMeta>> {
     cliffRadialInner: { min: 0, max: 1.4, step: 0.02 },
     cliffRadialOuter: { min: 0, max: 1.6, step: 0.02 },
     cliffEmbed: { min: 0, max: 1, step: 0.05 },
+    structureSettlements: { min: 0, max: 6, step: 1 },
+    structureSettlementSpread: { min: 2, max: 200, step: 1 },
+    structureJettiesPerSettlement: { min: 1, max: 8, step: 1 },
+    structureJettyMinLength: { min: 2, max: 40, step: 0.5 },
+    structureJettyMaxLength: { min: 4, max: 90, step: 1 },
+    structureJettyWidth: { min: 1, max: 6, step: 0.1 },
+    structureJettyGap: { min: 0, max: 40, step: 0.5 },
+    structureDeckHeight: { min: 0.4, max: 5, step: 0.05 },
+    structureBayLength: { min: 1, max: 8, step: 0.1 },
+    structureRootInset: { min: 0, max: 20, step: 0.5 },
+    structureShoreSlopeLimit: { min: 0.05, max: 1.5, step: 0.05 },
+    structureBerthDepth: { min: 0.5, max: 8, step: 0.1 },
+    structureBerthDepthVar: { min: 0, max: 0.8, step: 0.05 },
+    structureMaxPileDepth: { min: 1, max: 14, step: 0.5 },
+    structureMaxPileLength: { min: 2, max: 20, step: 0.5 },
+    structurePileEmbed: { min: 0, max: 3, step: 0.05 },
+    structurePileRadius: { min: 0.04, max: 0.6, step: 0.01 },
+    structurePileLean: { min: 0, max: 1, step: 0.02 },
+    structureBollardChance: { min: 0, max: 1, step: 0.05 },
+    structureBollardRise: { min: 0, max: 2.5, step: 0.05 },
+    structureStringerWidth: { min: 0.04, max: 0.6, step: 0.01 },
+    structureStringerDepth: { min: 0.04, max: 0.8, step: 0.01 },
+    structureBraceChance: { min: 0, max: 1, step: 0.05 },
+    structureBraceSize: { min: 0.03, max: 0.4, step: 0.01 },
+    structurePlankWidth: { min: 0.08, max: 0.8, step: 0.01 },
+    structurePlankGap: { min: 0, max: 0.2, step: 0.005 },
+    structurePlankThickness: { min: 0.02, max: 0.25, step: 0.005 },
+    structurePlankCant: { min: 0, max: 0.3, step: 0.005 },
+    structurePlankRoll: { min: 0, max: 0.3, step: 0.005 },
+    structurePlankLift: { min: 0, max: 0.1, step: 0.002 },
+    structurePlankOverhang: { min: 0, max: 0.8, step: 0.01 },
+    structureMissingPlank: { min: 0, max: 1, step: 0.05 },
+    structureDecayChance: { min: 0, max: 1, step: 0.05 },
+    structureRampRun: { min: 0.5, max: 12, step: 0.1 },
+    structureRailChance: { min: 0, max: 1, step: 0.05 },
+    structureRailHeight: { min: 0.3, max: 1.6, step: 0.05 },
+    structureRailSize: { min: 0.03, max: 0.3, step: 0.01 },
+    structureHutCount: { min: 0, max: 20, step: 1 },
+    structureHutSize: { min: 1.5, max: 12, step: 0.1 },
+    structureHutWallHeight: { min: 1, max: 5, step: 0.1 },
+    structureHutRoofRise: { min: 0, max: 4, step: 0.05 },
+    structureHutSetback: { min: 0, max: 60, step: 0.5 },
+    structureHutMinHeight: { min: 0, max: 6, step: 0.1 },
+    structureHutSlopeLimit: { min: 0.05, max: 1.2, step: 0.05 },
+    structureHutStilt: { min: 0, max: 3, step: 0.05 },
+    structureHutFlare: { min: 1, max: 5, step: 0.1 },
+    structurePostRadius: { min: 0.04, max: 0.5, step: 0.01 },
+    structureStiltFraction: { min: 0, max: 1, step: 0.05 },
+    structureMissingBoard: { min: 0, max: 0.6, step: 0.02 },
+    structureEaveOverhang: { min: 0, max: 1.5, step: 0.05 },
     islandCount: { min: 0, max: 12, step: 1 },
     scatterMinDistance: { min: 200, max: 4000, step: 50 },
     scatterMaxDistance: { min: 400, max: 4500, step: 50 },
@@ -653,6 +880,7 @@ function islandParamsMeta(): Partial<Record<keyof IslandParams, ParamMeta>> {
     lodPalmFull: { min: 50, max: 3000, step: 25 },
     lodPalmCull: { min: 50, max: 4000, step: 25 },
     lodRockCull: { min: 50, max: 4600, step: 25 },
+    lodStructureCull: { min: 50, max: 4600, step: 25 },
     foamTargetMargin: { min: 20, max: 1000, step: 10 },
   };
 }

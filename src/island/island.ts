@@ -27,6 +27,7 @@ import type { ArchetypeName } from './archetypes';
 import { createIslandMesh, selectTerrainLod, type IslandMeshHandle } from './islandMesh';
 import { createRocks, type Rocks } from './rocks';
 import { createIslandPalms, type IslandPalms } from './palms';
+import { createStructures, type Structures } from './structures';
 import { createGroundCover, type GroundCoverMeshes } from '../terrain';
 import type { IslandMaterials } from './islandMaterials';
 
@@ -41,6 +42,7 @@ export type ResolvedIslandParams = IslandParams & { archetype?: ArchetypeName };
 const ROCK_SEED_OFFSET = 1013;
 const PALM_SEED_OFFSET = 2027;
 const COVER_SEED_OFFSET = 3041;
+const STRUCTURE_SEED_OFFSET = 4057;
 /** shoreline angles scanned when picking the waterfall socket location */
 const SOCKET_SCAN_ANGLES = 64;
 
@@ -119,6 +121,8 @@ export interface Island {
   palms: IslandPalms;
   /** instanced grass + shrubs (§V43) — two draws, gated to near range */
   cover: GroundCoverMeshes;
+  /** jetties, piers and huts — ONE draw for the whole settlement */
+  structures: Structures;
   dispose(): void;
 }
 
@@ -232,11 +236,23 @@ export function createIsland(opts: CreateIslandOptions): Island {
     heightmap,
     material: shared?.cover,
   });
+  const structures = createStructures({
+    seed: opts.seed + STRUCTURE_SEED_OFFSET,
+    heightmap,
+    material: shared?.structure.material,
+  });
   const waterfallSocket = buildWaterfallSocket(heightmap);
 
   const group = new THREE.Group();
   group.name = 'island';
-  group.add(terrain.mesh, rocks.group, palms.mesh, cover.group, waterfallSocket);
+  group.add(
+    terrain.mesh,
+    rocks.group,
+    palms.mesh,
+    cover.group,
+    structures.mesh,
+    waterfallSocket,
+  );
   const [px, pz] = opts.position;
   group.position.set(px, 0, pz);
 
@@ -253,7 +269,12 @@ export function createIsland(opts: CreateIslandOptions): Island {
    * on the frames where the toggle actually moved. Steady state is now a single
    * boolean compare per island per frame instead of a scene walk.
    */
-  const shadowCasters: THREE.Object3D[] = [terrain.mesh, palms.mesh, ...rocks.group.children];
+  const shadowCasters: THREE.Object3D[] = [
+    terrain.mesh,
+    palms.mesh,
+    structures.mesh,
+    ...rocks.group.children,
+  ];
   let appliedCastShadows: boolean | null = null;
 
   return {
@@ -279,6 +300,7 @@ export function createIsland(opts: CreateIslandOptions): Island {
         terrain.material.setSwell(frame.swell);
         terrain.setWaterline(frame.waterLevel);
         rocks.updateFromParams();
+        structures.updateFromParams();
       }
 
       // LOD by distance to the island CENTRE, not to the nearest point: one
@@ -295,6 +317,7 @@ export function createIsland(opts: CreateIslandOptions): Island {
       palms.setLodDistance(dist);
       rocks.setVisible(dist <= p.lodRockCull);
       cover.setLodDistance(dist);
+      structures.setLodDistance(dist);
       // §V10/§V17: flowfoam re-tags every foamTarget in the scene each frame
       // and its capture region is ~120 m wide, so an island across the map is
       // pure wasted draws in that pass. Untag it until the ship is near.
@@ -307,7 +330,9 @@ export function createIsland(opts: CreateIslandOptions): Island {
     rocks,
     palms,
     cover,
+    structures,
     dispose(): void {
+      structures.dispose();
       cover.dispose();
       palms.dispose();
       rocks.dispose();

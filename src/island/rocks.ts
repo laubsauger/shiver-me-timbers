@@ -127,10 +127,36 @@ export function generateRockPlacements(
     });
   };
 
-  // -- boulder scatter: the shoreline ring, as before -----------------------
+  /**
+   * THE ROCKY FLANKS, resolved ONCE and shared by the boulders and the cliff
+   * masses below.
+   *
+   * "The big rocks — maybe they're all a little bit too evenly and same
+   * shaped." The shapes are the other half of this fix (see deformRockGeometry);
+   * this is the EVENLY. A uniform random bearing is a Poisson process, and a
+   * Poisson process on a ring is exactly what "evenly spread" looks like to the
+   * eye — the same measurement that sent the palms into groves (angular-gap
+   * CV 0.84). Real granite scatter does not do that: boulders are the DEBRIS
+   * of the masses they came off, so they lie in fields at the foot of the
+   * headlands and in the surf line below them, with clean beach in between.
+   *
+   * The cliff groups are already the island's rocky flanks, so the boulders
+   * simply inherit them — one bearing set, two systems, and the scatter reads
+   * as talus off the headland instead of as a ring of props. A minority stay
+   * loose so the beaches are not perfectly swept either.
+   */
+  const groups = cliffGroupAngles(seed + 7717, p);
+
+  // -- boulder scatter: clumped on the flanks, along the shoreline ----------
   const boulders = countForRadius(p.rockCount, hm, p);
   for (let i = 0; i < boulders; i++) {
-    const angle = rng() * Math.PI * 2;
+    const clumped = rng() < p.rockClumpFraction;
+    // triangular jitter packs the field toward its flank and thins at the
+    // edges (same shape and reason as the palm groves and the cliff groups)
+    const angle = clumped
+      ? groups[Math.floor(rng() * groups.length) % groups.length] +
+        (rng() + rng() - 1) * p.rockClumpSpread
+      : rng() * Math.PI * 2;
     const r = findShoreRadius(hm, angle) + (rng() * 2 - 1) * p.rockSpread;
     const x = Math.cos(angle) * r;
     const z = Math.sin(angle) * r;
@@ -150,7 +176,7 @@ export function generateRockPlacements(
   // These are scale features, not props. They go in the SAME instanced
   // batches as the boulders (see createRocks) so they cost no extra draw
   // call — the only difference here is where they sit and how big they are.
-  const groups = cliffGroupAngles(seed + 7717, p);
+  // Bearings come from `groups` above, which the boulders now share.
   const cliffs = countForRadius(p.cliffCount, hm, p);
   for (let i = 0; i < cliffs; i++) {
     const centre = groups[Math.floor(rng() * groups.length) % groups.length];
@@ -223,20 +249,88 @@ function weldGeometry(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
 }
 
 /**
- * One granite mass, as a unit-radius blob.
+ * SHAPE FAMILIES — the answer to "they're all a little bit too evenly and same
+ * shaped".
  *
- * Three shape terms, deliberately at three different scales — the note asked
+ * The previous pass fixed the FACETING (non-indexed icosahedra could only take
+ * flat per-face normals) and widened the per-instance transform. The user then
+ * looked straight past that at the SILHOUETTE, which is a different axis and
+ * one the transform cannot reach: `scale`, `squash`, `aspect`, `yaw` and `tilt`
+ * are all affine, and no affine map turns a dome into a wedge. Every boulder on
+ * the beach was one blob at several sizes because the GENERATOR only had one
+ * blob in it — four variants sampled from the same distribution are four
+ * samples of the same shape, not four shapes.
+ *
+ * So the variants are now archetypally different rather than differently
+ * seeded. Real granite scatter is slabs, wedges, split blocks and whale-backs
+ * lying together; that is what the references show and it is what the seeded
+ * generator now has to draw from.
+ *
+ * IT COSTS NOTHING. `createRocks` already builds one InstancedMesh per variant,
+ * so the draw-call count is `rockGeoVariants` whatever the variants contain —
+ * exactly the trick that put the cliff masses in the boulders' batches. Four
+ * genuinely different silhouettes and four rounded potatoes are the same four
+ * draws.
+ */
+export const ROCK_FAMILIES = ['dome', 'slab', 'wedge', 'block'] as const;
+export type RockFamily = (typeof ROCK_FAMILIES)[number];
+
+interface FamilyShape {
+  /** multiplier on `rockStretch` — how far from round in plan */
+  stretch: number;
+  /** vertical scale applied BEFORE the noise (1 = untouched, <1 = a slab) */
+  flatten: number;
+  /** multiplier on `rockFacetCount` */
+  cuts: number;
+  /** multiplier on `rockFacetSoftness` — small = a hard arris, large = rolled */
+  softness: number;
+  /**
+   * How far the cuts are pulled toward HORIZONTAL. 1 gives bedding planes and
+   * a table top; 0 leaves them uniform on the sphere (shoulders and faces).
+   */
+  layering: number;
+  /** linear thinning along one horizontal axis, 0..0.8 — a prow or a cone */
+  taper: number;
+  /** multiplier on the grain amplitude — a split block is not a lumpy one */
+  grain: number;
+}
+
+const FAMILY_SHAPE: Record<RockFamily, FamilyShape> = {
+  // the shipped whale-back, unchanged, so the family the references show most
+  // of is still the one that comes up most
+  dome: { stretch: 1, flatten: 1, cuts: 1, softness: 1, layering: 0, taper: 0, grain: 1 },
+  // a bedded table: wide, low, with a near-horizontal top cut. These are the
+  // rocks you see lying half-buried at the top of a beach.
+  slab: { stretch: 1.5, flatten: 0.52, cuts: 1.2, softness: 0.55, layering: 0.9, taper: 0.12, grain: 0.8 },
+  // the prow — ref-island-146's pointed rocks and ref-island-150's cones in
+  // the shallows. One end stands tall and the body thins away from it.
+  wedge: { stretch: 1.2, flatten: 1.15, cuts: 0.75, softness: 1.3, layering: 0.2, taper: 0.62, grain: 0.9 },
+  // a split block: more cuts, deeper, and hard-edged, so it reads as granite
+  // that has cleaved rather than as granite that has weathered
+  block: { stretch: 0.85, flatten: 0.92, cuts: 1.8, softness: 0.35, layering: 0.45, taper: 0.2, grain: 0.7 },
+};
+
+/**
+ * One granite mass, as a unit-radius blob of a given FAMILY (above).
+ *
+ * Four shape terms, deliberately at four different scales — the note asked
  * for "surface texture at two scales (large fracture planes, fine grain)" and
  * a rock that is only fbm-on-a-sphere reads as a potato at every size:
  *
  *  1. ANISOTROPY. A per-variant axis stretch, so the family contains loaves
  *     and whale-backs rather than N spheres. Applied BEFORE the noise so the
- *     displacement follows the stretched body instead of fighting it.
- *  2. FRACTURE PLANES. A few seeded half-space cuts that flatten the blob
+ *     displacement follows the stretched body instead of fighting it. The
+ *     family scales it, and supplies a vertical term as well, which is what
+ *     makes a slab a slab rather than a squashed instance of a dome.
+ *  2. TAPER. A linear thinning along one horizontal axis. This is the term no
+ *     amount of scaling could ever produce, because it is not affine: it turns
+ *     the body into a wedge with a tall end and a thin one.
+ *  3. FRACTURE PLANES. A few seeded half-space cuts that flatten the blob
  *     where they bite. This is what makes granite read as granite instead of
  *     as a pebble: broad flat faces meeting in soft edges. Softness comes
  *     from a smooth min, so the cut never puts a crease back in the shading.
- *  3. GRAIN. The existing three-projection fbm, at the existing amplitude,
+ *     The family sets how many, how hard, and how nearly horizontal.
+ *  4. GRAIN. The existing three-projection fbm, at the existing amplitude,
  *     supplying the fine lumpiness on top.
  *
  * Finally the base is flattened: `bedFlatten` pulls the bottom cap up toward a
@@ -247,60 +341,88 @@ function weldGeometry(geometry: THREE.BufferGeometry): THREE.BufferGeometry {
 export function deformRockGeometry(
   seed: number,
   p: IslandParams = islandParams,
+  family: RockFamily = 'dome',
 ): THREE.BufferGeometry {
   const geometry = weldGeometry(new THREE.IcosahedronGeometry(1, p.rockDetail));
   const rng = createRng(seed);
+  const fam = FAMILY_SHAPE[family];
   const o = [rng() * 256, rng() * 256, rng() * 256, rng() * 256, rng() * 256, rng() * 256];
 
   // (1) per-variant anisotropy, mean-preserving-ish so scale still means size
-  const ax = 1 + (rng() * 2 - 1) * p.rockStretch;
-  const az = 1 + (rng() * 2 - 1) * p.rockStretch;
+  const ax = 1 + (rng() * 2 - 1) * p.rockStretch * fam.stretch;
+  const az = 1 + (rng() * 2 - 1) * p.rockStretch * fam.stretch;
+  const ay = fam.flatten;
 
-  // (2) fracture planes: unit normals with an offset inside the body
-  const planeCount = Math.max(0, Math.floor(p.rockFacetCount));
+  // (2) the taper axis — a horizontal bearing the body thins along
+  const taperAngle = rng() * Math.PI * 2;
+  const tax = Math.cos(taperAngle);
+  const taz = Math.sin(taperAngle);
+  const taper = fam.taper * (0.7 + rng() * 0.6);
+
+  // (3) fracture planes: unit normals with an offset inside the body
+  const planeCount = Math.max(0, Math.round(p.rockFacetCount * fam.cuts));
   const planes: { nx: number; ny: number; nz: number; d: number }[] = [];
   for (let i = 0; i < planeCount; i++) {
     // uniform on the sphere, biased away from straight down so the cuts read
     // as faces and shoulders rather than as a sawn-off base (the base has its
-    // own term below)
+    // own term below), then pulled toward horizontal by the family's
+    // `layering` so a slab gets a table top instead of a random chamfer
     const u = rng() * 2 - 1;
     const phi = rng() * Math.PI * 2;
     const s = Math.sqrt(Math.max(0, 1 - u * u));
+    let nx = Math.cos(phi) * s;
+    let ny = u * 0.6 + 0.15;
+    let nz = Math.sin(phi) * s;
+    if (fam.layering > 0) {
+      // lerp the normal toward straight up, then renormalise — a bedding plane
+      const w = fam.layering * (0.5 + rng() * 0.5);
+      nx *= 1 - w;
+      nz *= 1 - w;
+      ny = ny * (1 - w) + w;
+      const nl = Math.hypot(nx, ny, nz) || 1; // §V28 floored divisor
+      nx /= nl;
+      ny /= nl;
+      nz /= nl;
+    }
     planes.push({
-      nx: Math.cos(phi) * s,
-      ny: u * 0.6 + 0.15,
-      nz: Math.sin(phi) * s,
+      nx,
+      ny,
+      nz,
       d: p.rockFacetDepth + rng() * (1 - p.rockFacetDepth),
     });
   }
 
   const pos = geometry.getAttribute('position') as THREE.BufferAttribute;
   const f = p.rockNoiseFreq;
-  const soft = Math.max(p.rockFacetSoftness, 1e-3); // §V28 floored divisor
+  const soft = Math.max(p.rockFacetSoftness * fam.softness, 1e-3); // §V28 floored divisor
   for (let i = 0; i < pos.count; i++) {
     const ux = pos.getX(i);
     const uy = pos.getY(i);
     const uz = pos.getZ(i);
 
-    // (3) grain — sampled on the UNDEFORMED unit direction so the noise field
+    // (4) grain — sampled on the UNDEFORMED unit direction so the noise field
     // is a property of the variant, not of the stretch applied to it
     const n =
       (fbm2Cpu(ux * f + o[0], uy * f + o[1], p.rockNoiseOctaves) +
         fbm2Cpu(uy * f + o[2], uz * f + o[3], p.rockNoiseOctaves) +
         fbm2Cpu(uz * f + o[4], ux * f + o[5], p.rockNoiseOctaves)) /
       3;
-    let k = 1 + (n * 2 - 1) * p.rockNoiseAmp;
+    let k = 1 + (n * 2 - 1) * p.rockNoiseAmp * fam.grain;
 
-    // (2) apply the cuts: each plane scales the radius down where the surface
+    // (3) apply the cuts: each plane scales the radius down where the surface
     // pokes past it. exp(-x/soft) is a smooth one-sided clamp — it reaches the
     // plane asymptotically instead of crossing it, so no crease is created.
     let x = ux * ax;
-    let y = uy;
+    let y = uy * ay;
     let z = uz * az;
     const len = Math.hypot(x, y, z) || 1; // §V28 floored divisor
     x /= len;
     y /= len;
     z /= len;
+    // (2) TAPER, applied to the radius on the unit direction: a smooth linear
+    // thinning toward +taperAxis. Clamped well clear of zero so the far end
+    // stays a face and never pinches into a degenerate spike.
+    if (taper > 0) k *= 1 - taper * (0.5 + 0.5 * (x * tax + z * taz));
     for (const pl of planes) {
       const dot = x * pl.nx + y * pl.ny + z * pl.nz;
       const over = dot - pl.d;
@@ -355,7 +477,11 @@ export function createRocks(opts: CreateRocksOptions): Rocks {
   const placements = generateRockPlacements(opts.seed, opts.heightmap, p);
   const variants: THREE.BufferGeometry[] = [];
   for (let v = 0; v < p.rockGeoVariants; v++) {
-    variants.push(deformRockGeometry(opts.seed + 101 * (v + 1), p));
+    // families cycle, so the FIRST rockGeoVariants variants are guaranteed to
+    // be one of each rather than a random draw that might hand out three domes
+    variants.push(
+      deformRockGeometry(opts.seed + 101 * (v + 1), p, ROCK_FAMILIES[v % ROCK_FAMILIES.length]),
+    );
   }
   const ownMaterial: RockMaterialHandle | null = opts.material ? null : createRockMaterial();
   const material = opts.material ?? ownMaterial!.material;

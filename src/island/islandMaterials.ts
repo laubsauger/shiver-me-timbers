@@ -26,6 +26,8 @@ import {
 } from '../terrain';
 import { applyWindSway, createPalmMaterial } from '../vegetation';
 import type { WindSway } from '../vegetation/windSway';
+import { createStructureMaterial } from './structures';
+import type { ShipMaterialHandle } from '../ship/woodMaterial';
 
 export interface IslandMaterials {
   terrain: TerrainBlendMaterialHandle;
@@ -34,6 +36,13 @@ export interface IslandMaterials {
   palmSway: WindSway;
   /** grass + shrub instances — one shader for every tuft in the world (§V17) */
   cover: CoverMeshMaterial;
+  /**
+   * Jetties, piers and huts — the SHIP's timber (src/ship/woodMaterial.ts), so
+   * a dock belongs to the same world as the galleon tied up alongside it by
+   * construction rather than by two palettes being hand-matched. One handle for
+   * every structure on every island (§V17).
+   */
+  structure: ShipMaterialHandle;
   /**
    * Per-frame push for every shared shader. `waterLevel` is the live sea
    * height at the shore being looked at (§V8: same CpuOcean mirror buoyancy
@@ -61,6 +70,7 @@ export function createIslandMaterials(): IslandMaterials {
     amplitudeScale: attribute('instanceSway', 'float'),
   });
   const cover = createCoverMeshMaterial();
+  const structure = createStructureMaterial();
 
   return {
     terrain,
@@ -68,6 +78,7 @@ export function createIslandMaterials(): IslandMaterials {
     palm,
     palmSway,
     cover,
+    structure,
     update(frame): void {
       // the grass reads the SAME wind the palms and the sea do, so a gust
       // crosses the whole scene at once instead of each system having its own
@@ -90,12 +101,16 @@ export function createIslandMaterials(): IslandMaterials {
       (rock.uniforms.sunDirection.value as THREE.Vector3)
         .copy(frame.sunDirection)
         .normalize();
+      // the docks track the SHIP's timber params, so one Tweakpane edit moves
+      // the hull and the pier it is tied to together
+      structure.refresh();
     },
     dispose(): void {
       terrain.dispose();
       rock.dispose();
       palm.material.dispose();
       cover.dispose();
+      structure.material.dispose();
     },
   };
 }

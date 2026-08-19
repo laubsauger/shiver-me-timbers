@@ -26,6 +26,17 @@ export interface VegetationParams {
   frondWidth: number;
   frondDroop: number; // quadratic tip drop (m) over frond length
   frondCrease: number; // V-fold depth as fraction of local half-width
+  /**
+   * Lateral curve of the midrib, as a fraction of frond length, drawn ± per
+   * frond. A real frond is NOT PLANAR and the shipped one was, which is most
+   * of why the crowns read as a flat fan rather than as a head of leaves.
+   */
+  frondSweep: number;
+  /**
+   * Roll (rad) of the V-crease about the midrib, drawn ± per frond, so the
+   * fold does not sit in the vertical plane on every single frond.
+   */
+  frondRoll: number;
   frondSegments: number;
   coconutChance: number; // 0..1 chance a palm grows a coconut cluster
   coconutRadius: number;
@@ -80,13 +91,19 @@ export const vegetationParams: VegetationParams = registerParams(
     trunkTopRadius: 0.16,
     trunkSegments: 20,
     trunkRadialSegments: 10,
-    frondsMin: 6,
-    frondsMax: 10,
+    frondsMin: 8,
+    frondsMax: 13,
     frondLength: 3.4,
     frondWidth: 0.8,
     frondDroop: 1.6,
     frondCrease: 0.45,
-    frondSegments: 16,
+    frondSweep: 0.16,
+    frondRoll: 0.5,
+    // 8-13, not 6-10: the references are dense heads of leaves and six fronds
+    // reads as a spider. Segments come down 16 -> 13 to pay for it, so the
+    // worst-case palm stays under the 4000-triangle ceiling tests/vegetation
+    // pins (measured max ~2.6k).
+    frondSegments: 13,
     coconutChance: 0.75,
     coconutRadius: 0.17,
     trunkTopWindWeight: 0.35,
@@ -138,6 +155,8 @@ export const vegetationParams: VegetationParams = registerParams(
     frondWidth: { min: 0.2, max: 2, step: 0.05 },
     frondDroop: { min: 0, max: 4, step: 0.05 },
     frondCrease: { min: 0, max: 1, step: 0.01 },
+    frondSweep: { min: 0, max: 0.6, step: 0.01 },
+    frondRoll: { min: 0, max: 1.5, step: 0.02 },
     frondSegments: { min: 4, max: 32, step: 1 },
     coconutChance: { min: 0, max: 1, step: 0.05 },
     coconutRadius: { min: 0.05, max: 0.4, step: 0.01 },

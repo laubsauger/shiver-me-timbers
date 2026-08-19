@@ -91,6 +91,25 @@ export const CONTROL_GROUPS: readonly ControlGroup[] = [
       { keys: ['Tab', 'F1'], action: 'Show or hide dev tools' },
     ],
   },
+  {
+    // Read-only reference, as the anchor and gunnery bindings are — the panel
+    // only calls `addBinding` on primitives (§T.52), so there is no rebinding
+    // path here and this page is where a new key becomes discoverable.
+    title: 'Sea instruments',
+    bindings: [
+      {
+        keys: ['G'],
+        action: 'Cascade spectrum view',
+        hint: 'Shows one wave band’s own data instead of the sea; press again to return',
+      },
+      { keys: ['1', '2', '3'], action: 'Choose the wave band', hint: 'Cascade view only' },
+      {
+        keys: ['[', ']'],
+        action: 'Step through the fields',
+        hint: 'Cascade view only — height, displacement, slope, det J, λ⁻, foam',
+      },
+    ],
+  },
 ];
 
 export function isFullscreenShortcut(
