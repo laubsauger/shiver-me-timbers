@@ -256,3 +256,39 @@ measured **0.30/255 at midday and up to +62/255 at 17.6** — so a fix validated
 at one angle can look like a cure and be a no-op at the other.
 
 **Check both `timeOfDay` 15.0 and 17.6** before claiming anything is fixed.
+
+---
+
+## 9. A background tab is eventually FROZEN, not merely throttled
+
+§1's escapes have a shelf life. After roughly **five minutes** in the
+background, Chrome freezes the tab outright: `setTimeout`, `MessageChannel`
+**and** worker→main messages all stop. The `MessageChannel` pump in §1(a)
+therefore dies mid-run, and it dies silently — the page simply stops
+advancing while still answering CDP.
+
+And **driving the loop from one long synchronous CDP eval crashes the
+renderer** (measured: a tab died at ~9,000 frames).
+
+What survives a long run: a **patched rAF queue drained by a worker with
+strict one-in-flight pacing**, plus **self-reporting over a socket** rather
+than polling the tab for results. Budget for the freeze; do not assume a
+quiet tab is a slow one.
+
+---
+
+## 10. Ask what TRIGGERS a cost, not just what it costs
+
+A cost that fires on **position** looks exactly like a leak from inside the
+frame: it grows the longer you play, never recovers while you keep moving,
+and shows nothing in `renderer.info.memory` or a heap walk.
+
+The ocean spectrum re-cut is the worked example. One 0.5 m/s wind step — the
+smallest the §V.46 ambient hold allows — costs **~1,960 ms of excess
+main-thread work**, and the wind field varies **spatially**: a 10 km transect
+measured wind swinging 11 → 18 → 11 → 18 m/s. Sailing across that gradient
+steps the quantised key repeatedly, so the tax scales with **distance
+travelled**, not elapsed time.
+
+Before hunting an accumulator, plot the suspect against **position** as well
+as against time.
