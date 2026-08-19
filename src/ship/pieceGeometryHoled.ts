@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import type { AABB, PieceKind } from './pieceTypes';
 import { buildPieceGeometry } from './pieceGeometry';
 import { aabbCenter, aabbSize, mergeNonIndexed } from './pieceGeometryShapes';
-import { asHullShape, hullEnvelope } from './pieceGeometryHull';
+import { asHullShape, hullHalfWidthAt } from './pieceGeometryHull';
 
 const SPIKES = 9;
 
@@ -52,14 +52,39 @@ export function buildHoledVariant(
   for (const overlay of [ring, disc]) {
     overlay.rotateY((faceSign * Math.PI) / 2); // face normal → ±x (outboard)
   }
-  // lofted hull: sit the breach on the actual shell near the waterline,
-  // otherwise proud of the AABB face
+  // ── SEAT THE BREACH ON THE SHELL, VIA THE ONE FUNCTION THAT OWNS IT ────
+  // This used to be `beamHalf · hullEnvelope(zMid) · 0.93`. `hullEnvelope` is
+  // the PLAN-VIEW half-breadth — the hull's width at whatever height it is
+  // widest — and the shell is not a cylinder: `sectionHalf` pinches it in
+  // toward the keel, and the breach sits LOW, a quarter of the draft below the
+  // waterline, exactly where that pinch bites hardest. The 0.93 was a fudge
+  // standing in for a pinch that varies from section to section, so it could
+  // not have been right at more than one of them.
+  //
+  // Measured on the shipped galleon: the overlay stood proud of the planking
+  // by 0.457 m at the bow section, 0.497 m amidships and 0.568 m at the stern.
+  // Half a metre of daylight between the wound and the ship — so it read as a
+  // plate hovering alongside rather than as a hole in her side, and it
+  // parallaxed against the hull from any oblique angle.
+  //
+  // `hullHalfWidthAt(z, y)` is the single owner of "half-width of the SHELL at
+  // this station and this height", and every other part that has to mate with
+  // the planking already goes through it (decks, castle slabs, cabin, gallery,
+  // balustrade, and the beakhead plate twenty lines away in pieceGeometryHull).
+  // This was the one place still re-deriving it from a fraction of the beam.
+  //
+  // THE STATION IS `zMid`, NOT `c.z`, and the difference is not cosmetic.
+  // `buildLoftedHullSection` lofts the shell in SHIP space and then recentres
+  // it by `-(z0+z1)/2`, so piece-local z = 0 IS ship station `zMid`. The aabb
+  // centre is 0 for every section, bow and stern included; sampling the hull
+  // there would ask for the width amidships and put the bow's breach on a
+  // station 11.7 m from the piece it belongs to.
   const hull = asHullShape(shape);
+  const holeY = hull !== null ? -hull.draft * 0.25 : c.y;
   const surfaceX =
     hull !== null
-      ? hull.beamHalf * hullEnvelope((hull.z0 + hull.z1) / 2, hull) * 0.93
+      ? hullHalfWidthAt((hull.z0 + hull.z1) / 2, holeY, hull)
       : Math.abs(c.x) + s.x / 2;
-  const holeY = hull !== null ? -hull.draft * 0.25 : c.y;
   ring.translate(faceSign * (surfaceX + 0.02), holeY, c.z);
   disc.translate(faceSign * (surfaceX - 0.03), holeY, c.z);
 

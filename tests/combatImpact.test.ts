@@ -38,6 +38,7 @@ import { createCombatRuntime } from '../src/combat/combatRuntime';
 import { createCombatFx } from '../src/combat/combatFx';
 import { createFlashLight } from '../src/combat/flashLight';
 import { createImpactRings } from '../src/combat/impactRing';
+import { createDebris } from '../src/combat/debris';
 import { createProfiles, fillProfiles } from '../src/combat/fxProfiles';
 import { BOOST_MAX, brightnessAt } from '../src/combat/fxMath';
 import { combatFxParams } from '../src/params/combat';
@@ -494,5 +495,203 @@ describe('the surface ring (§V.28, §V.62)', () => {
     const geo = (rings.mesh as unknown as { geometry: { attributes: { position: { array: Float32Array } } } }).geometry;
     for (const v of geo.attributes.position.array) expect(Number.isFinite(v)).toBe(true);
     rings.dispose();
+  });
+});
+
+/**
+ * SOLID DEBRIS (§T.63) — the half of an impact that outlives the impact.
+ *
+ * The user's report was "hits don't really feel like they register" and "I'd
+ * expect wood splintering and breaking and FLYING OFF". Everything the fx pool
+ * threw was a camera-facing sprite, and a sprite has no attitude in the world,
+ * so it cannot land — it can only fade wherever it happens to be. Nothing a
+ * hit produced left any trace once the burst was over, which is what "doesn't
+ * register" means mechanically.
+ *
+ * These tests are written against the two ways this feature can silently fail:
+ * it never reaches the render graph at all (§V.62 — this repo has fifteen-plus
+ * recorded no-ops, several found the same day this landed), or it reaches it
+ * and never costs nothing when idle (076ad93's lesson).
+ */
+describe('a hit throws solid debris that LANDS (§T.63)', () => {
+  const debrisMesh = (root: Object3D): Object3D => {
+    const mesh = root.getObjectByName('combat-debris');
+    if (mesh === undefined) throw new Error('combat-debris is not in the fx group');
+    return mesh;
+  };
+  const instanced = (m: Object3D): { count: number; visible: boolean } =>
+    m as unknown as { count: number; visible: boolean };
+
+  const hit = (point: [number, number, number], id = 7): HitEvent[] =>
+    [{ shipIndex: 0, pieceId: 'hull-port-mid', point, projectileId: id }];
+
+  it('reaches the RENDER GRAPH — a hit makes a visible instanced draw', () => {
+    // §V.62 in its plainest form: the call landing is not the same as the
+    // pixels landing. This asserts the mesh is in the group the scene gets,
+    // and that a hit actually raises its instance count off zero.
+    const fx = createCombatFx();
+    const mesh = debrisMesh(fx.group);
+    expect(instanced(mesh).visible, 'idle debris must not draw').toBe(false);
+    expect(instanced(mesh).count).toBe(0);
+
+    fx.emit(frameWith(hit([3, 6, 1])));
+    fx.update(1 / 60, [], () => 0);
+
+    expect(instanced(mesh).count, 'a hit must put chunks on screen').toBeGreaterThan(0);
+    expect(instanced(mesh).visible).toBe(true);
+    fx.dispose();
+  });
+
+  it('costs EXACTLY NOTHING when nothing is happening', () => {
+    // 076ad93 made the sprite walk idle-skipping after measuring 68 KB/frame
+    // of uploads on a quiet cruise with the whole pool dead. A second pool
+    // that reintroduces per-frame work on an empty world would give that back.
+    const fx = createCombatFx();
+    const mesh = debrisMesh(fx.group);
+    let seaCalls = 0;
+    const sea = (): number => {
+      seaCalls++;
+      return 0;
+    };
+    for (let i = 0; i < 120; i++) fx.update(1 / 60, [], sea);
+    expect(seaCalls, 'an empty pool must not sample the sea').toBe(0);
+    expect(instanced(mesh).visible).toBe(false);
+    expect(instanced(mesh).count).toBe(0);
+    fx.dispose();
+  });
+
+  it('rings the sea through the EXISTING mesh — no second splash path', () => {
+    // 376d02d built rings that fit the local wave PLANE (rim error 0.376 m →
+    // 0.142 m) plus a crown, mist and foam scar, all off meshes that already
+    // existed, for zero new draw calls. A chunk hitting the water is the
+    // second thing in the game that can do that, and it must go through the
+    // same code — a private splash inside debris.ts would be a second thing to
+    // keep correct and a second draw call to pay for.
+    //
+    // The frame carries NO projectiles, so nothing but a landing chunk can put
+    // a ring on the water: any ring geometry that moves is debris' doing.
+    const fx = createCombatFx();
+    const mesh = debrisMesh(fx.group);
+    const rings = fx.group.getObjectByName('combat-impact-rings');
+    expect(rings, 'debris must reuse the existing ring mesh').toBeDefined();
+    // the PER-INSTANCE transforms, not `geometry.position`. The disc template
+    // is shared by every ring and never moves; a ring being born shows up as
+    // an instance matrix leaving zero scale (§V.28 — dead is zero-SCALE).
+    const ringGeo = () => [...(rings as unknown as {
+      instanceMatrix: { array: Float32Array };
+    }).instanceMatrix.array];
+
+    // settle the ring pool first, so "changed" means "a ring was born"
+    for (let i = 0; i < 30; i++) fx.update(1 / 60, [], () => 0);
+    const quiet = ringGeo();
+    let ringsMoved = 0;
+    for (let i = 0; i < 30; i++) {
+      fx.update(1 / 60, [], () => 0);
+      if (ringGeo().some((v, k) => v !== quiet[k])) ringsMoved++;
+    }
+    expect(ringsMoved, 'no rings without an impact').toBe(0);
+
+    // now hit her high above a flat sea and let the chunks fall all the way in
+    fx.emit(frameWith(hit([0, 12, 0])));
+    expect(instanced(mesh).visible).toBe(false); // emit alone draws nothing yet
+    let sawChunks = false;
+    let sawRings = false;
+    for (let i = 0; i < 60 * 10; i++) {
+      fx.update(1 / 60, [], () => 0);
+      if (instanced(mesh).count > 0) sawChunks = true;
+      // sampled INSIDE the loop, not after it: a ring lives ~1.4 s and its
+      // scar a few seconds more, so by the end of a ten-second run everything
+      // is back at zero scale and byte-identical to the quiet baseline. A
+      // check placed after the loop would pass for the one reason that has
+      // nothing to do with the feature working.
+      if (!sawRings && ringGeo().some((v, k) => v !== quiet[k])) sawRings = true;
+    }
+    expect(sawChunks, 'the chunks must have flown').toBe(true);
+    // …and the water was marked. This is the assertion that proves the
+    // callback is WIRED: combatFx passes `rings.spawn` straight through, and
+    // an unbound method reference that silently did nothing would leave these
+    // transforms byte-identical to the quiet baseline (§V.62).
+    expect(sawRings, 'a landing must ring the sea').toBe(true);
+    // the pool drains completely: nothing hangs in the air for ever, and the
+    // idle skip re-arms so the next quiet minute costs nothing again
+    expect(instanced(mesh).count, 'debris must not persist for ever').toBe(0);
+    expect(instanced(mesh).visible).toBe(false);
+    fx.dispose();
+  });
+
+  it('lands ON the surface and rings it exactly once per chunk', () => {
+    // Driven through the module directly so the splash callback is observable
+    // — combatFx binds it to `rings.spawn`, which has no return value.
+    const debris = createDebris({ count: 8, speed: 6, spread: 0.4, floatLife: 1 });
+    const splashes: Array<[number, number, number]> = [];
+    debris.spawn([0, 20, 0], [0, 1, 0], 5, 1234);
+    expect(debris.liveCount()).toBe(0); // not counted until the first update
+
+    // a flat sea at y = 0 so "landed" has an exact meaning
+    for (let i = 0; i < 60 * 10; i++) {
+      debris.update(1 / 60, () => 0, (x, y, z) => splashes.push([x, y, z]));
+    }
+    // FIVE chunks thrown, FIVE splashes — never zero (they fell through the
+    // world or never got there) and never more (a chunk re-triggering every
+    // frame it spends in the water, which is the obvious way to write this
+    // wrong and would machine-gun the ring pool)
+    expect(splashes).toHaveLength(5);
+    for (const [, y] of splashes) expect(y).toBe(0);
+    debris.dispose();
+  });
+
+  it('rides the LIVE sea while it floats, instead of pinning to its splash height', () => {
+    // §V.71's lesson, applied to a floating object: the sea moves metres under
+    // it inside its own float life, so a chunk pinned to the height it landed
+    // at sinks into the next crest and pops out of the one after.
+    const debris = createDebris({ count: 4, speed: 2, spread: 0, floatLife: 6, life: 20 });
+    debris.spawn([0, 3, 0], [0, -1, 0], 1, 99);
+    let level = 0;
+    const pool = () => (debris.mesh as unknown as {
+      userData: { debrisPool: { py: Float32Array; wet: Float32Array } };
+    }).userData.debrisPool;
+
+    // fall in at sea level 0
+    for (let i = 0; i < 120; i++) debris.update(1 / 60, () => level);
+    const afloat = [...pool().wet].some((w) => w >= 0);
+    expect(afloat, 'the chunk must have landed').toBe(true);
+
+    // now raise the sea and let one frame pass: the chunk must come WITH it
+    level = 4;
+    debris.update(1 / 60, () => level);
+    const y = [...pool().py].filter((v) => v !== 0);
+    expect(y.some((v) => Math.abs(v - 4) < 0.01), 'a floater must track the sea').toBe(true);
+    debris.dispose();
+  });
+
+  it('is DETERMINISTIC — the same impact always throws the same debris (§V.2)', () => {
+    // no Math.random and no wall clock may reach a chunk, or a replay diverges
+    const read = (): number[] => {
+      const d = createDebris({ count: 12 });
+      d.spawn([1, 5, 2], [1, 0, 0], 6, 4242);
+      d.update(1 / 60, () => -100); // far below: nothing lands, pure ballistics
+      const p = (d.mesh as unknown as {
+        userData: { debrisPool: { px: Float32Array; py: Float32Array; sx: Float32Array } };
+      }).userData.debrisPool;
+      const out = [...p.px, ...p.py, ...p.sx];
+      d.dispose();
+      return out;
+    };
+    expect(read()).toEqual(read());
+  });
+
+  it('survives a hostile dt and hostile params without a NaN in the pool (§V.28)', () => {
+    const debris = createDebris({
+      count: 6, speed: Number.NaN, size: Number.NaN, life: Number.NaN,
+      spin: Number.NaN, spread: Number.NaN, gravity: Number.NaN,
+    });
+    debris.spawn([Number.NaN, 1, 2], [0, 0, 0], 6, 5);
+    debris.update(Number.NaN, () => Number.NaN);
+    debris.update(1e9, () => Number.NaN); // a restored tab
+    const p = (debris.mesh as unknown as {
+      userData: { debrisPool: { px: Float32Array; py: Float32Array; pz: Float32Array } };
+    }).userData.debrisPool;
+    for (const v of [...p.px, ...p.py, ...p.pz]) expect(Number.isFinite(v)).toBe(true);
+    debris.dispose();
   });
 });

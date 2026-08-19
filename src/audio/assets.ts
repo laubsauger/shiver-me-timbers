@@ -28,6 +28,7 @@ export type SampleName =
   | 'cannonFireC'
   | 'woodSplinterA'
   | 'woodSplinterB'
+  | 'woodSplinterC'
   | 'mastBreakCrack'
   | 'ballSplashA'
   | 'ballSplashB'
@@ -93,6 +94,10 @@ export const SAMPLE_URLS: Record<SampleName, string> = {
     '../../assets/audio/sfx/elevenlabs-wood-splinter-b.mp3',
     import.meta.url,
   ).href,
+  woodSplinterC: new URL(
+    '../../assets/audio/sfx/elevenlabs-wood-splinter-c.mp3',
+    import.meta.url,
+  ).href,
   mastBreakCrack: new URL('../../assets/audio/sfx/elevenlabs-mast-break.mp3', import.meta.url).href,
   ballSplashA: new URL('../../assets/audio/sfx/elevenlabs-ball-splash-a.mp3', import.meta.url).href,
   ballSplashB: new URL('../../assets/audio/sfx/elevenlabs-ball-splash-b.mp3', import.meta.url).href,
@@ -125,8 +130,12 @@ export const LOAD_ORDER: readonly SampleName[] = [
   'cannonFireA',
   'cannonFireB',
   'cannonFireC',
+  // ahead of the splashes: the splinter pool is the most-fired pool in the
+  // game (both `ballHit` and `splinter` draw from it), so it is the one whose
+  // absence is noticed first — see the WHY VARIATIONS note in generate-sfx.mjs
   'woodSplinterA',
   'woodSplinterB',
+  'woodSplinterC',
   'ballSplashA',
   'ballSplashB',
   'canvasCrackA',

@@ -131,7 +131,14 @@ type PoolName = 'cannon' | 'splinter' | 'ballSplash' | 'whoosh';
 /** which decoded samples feed which round-robin pool */
 export const POOLS: Record<PoolName, readonly SampleName[]> = {
   cannon: ['cannonFireA', 'cannonFireB', 'cannonFireC'],
-  splinter: ['woodSplinterA', 'woodSplinterB'],
+  // THREE takes, like the cannon, and for a sharper reason than the cannon's.
+  // This pool is drawn by BOTH `ballHit` (every ball that touches a hull) and
+  // `splinter` (every breach), so a broadside that connects can pull from it
+  // half a dozen times inside a second — it is the most-fired pool in the game
+  // and it was the shallowest. Two takes rotating that fast is heard as one
+  // sound repeating, and a sound the ear has filed as a loop stops registering
+  // as an impact at all.
+  splinter: ['woodSplinterA', 'woodSplinterB', 'woodSplinterC'],
   ballSplash: ['ballSplashA', 'ballSplashB'],
   whoosh: ['ballWhooshA', 'ballWhooshB'],
 };

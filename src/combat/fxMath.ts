@@ -184,6 +184,69 @@ export function particleSpin(seed: number, index: number): number {
   return hash01(seed, index * 7 + 6) * Math.PI * 2;
 }
 
+/**
+ * Ceiling on a SPLINTER's length:width ratio.
+ *
+ * Deliberately far above {@link ASPECT_MAX}, and the two are not the same
+ * knob wearing different names. `ASPECT_MAX` = 2 bounds how far a puff of
+ * SMOKE may deviate from round, and round is the correct base shape there —
+ * the stretch only exists to stop a cluster of them reading as a cluster of
+ * discs (§V.65). A splinter's base shape is not round at all: a shard blown
+ * out of a plank is a SLIVER, and a 2:1 sliver still reads as a blob. 6:1 is
+ * the ratio at which the silhouette stops being ambiguous.
+ */
+export const SPLINTER_ASPECT_MAX = 6;
+
+/**
+ * Length:width of one splinter, always ≥ 1 (long, never squat).
+ *
+ * `particleAspect` is symmetric about 1 on purpose — a squashed puff and a
+ * stretched one are equally valid smoke. A squashed SPLINTER is not a
+ * splinter, it is a chip, so this is one-sided: every shard is at least as
+ * long as it is wide, and `ratio` sets how long the longest may be.
+ *
+ * AREA IS PRESERVED, exactly as it is for smoke: combatFx scales the sprite
+ * `(s·a, s/a)`, so a 6:1 shard at `splinterSize` 0.3 is 1.8 m × 0.05 m and
+ * carries the same footprint as the 0.3 m disc it replaces. That is the
+ * reason the ratio is bounded rather than free — the `s/a` divisor is floored
+ * AT SOURCE (§V.28) and, just as importantly, an unbounded ratio would thin
+ * the shard below one pixel and delete it at exactly the moment it got
+ * longest.
+ */
+export function splinterAspect(seed: number, index: number, ratio: number): number {
+  const r = Number.isFinite(ratio)
+    ? Math.min(SPLINTER_ASPECT_MAX, Math.max(1, ratio))
+    : 1;
+  // biased toward the LONG end: a burst of shards should read as slivers with
+  // a few stubs in it, not as a uniform spread from chip to needle
+  const u = hash01(seed, index * 7 + 8);
+  return 1 + (r - 1) * (0.35 + 0.65 * u);
+}
+
+/**
+ * Tumble rate for one splinter, rad/s, signed — a shard blown off a plank
+ * spins, and a burst of them spins BOTH WAYS.
+ *
+ * A sprite that holds one roll angle for its whole life reads as a decal
+ * sliding through the air, which is precisely why the elongation alone is not
+ * enough: stretching a sprite without rotating it trades one static shape for
+ * another. The rate is deterministic in (seed, index) like every other draw
+ * here, so a replay tumbles identically (§V.2).
+ */
+export function splinterTumble(seed: number, index: number, rate: number): number {
+  const r = Number.isFinite(rate) ? Math.max(0, rate) : 0;
+  // exact +0, not the -0 the sign branch below would produce half the time.
+  // combatFx gates its whole tumble path on `spin !== 0` and JS compares -0
+  // equal to 0, so this is not load-bearing for the skip — it is load-bearing
+  // for the TEST that proves the skip, and a property that can only be
+  // asserted with Object.is is a property nobody will keep asserting.
+  if (r === 0) return 0;
+  // ±rate, with a floor on |spin| so no shard is frozen while its neighbours
+  // turn — a stationary one in a spinning burst reads as a stuck sprite
+  const s = hash01(seed, index * 7 + 9) * 2 - 1;
+  return (s < 0 ? -1 : 1) * (0.25 + 0.75 * Math.abs(s)) * r;
+}
+
 /** additive brightness over life: quick bloom, then a fade to nothing */
 export function brightnessAt(t: number): number {
   if (t >= 1 || t < 0) return 0;

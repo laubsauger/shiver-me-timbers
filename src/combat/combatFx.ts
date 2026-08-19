@@ -55,6 +55,7 @@ import { combatFxParams, type CombatFxParams } from '../params/combat';
 import type { CombatFrame } from './combatSystem';
 import { createFlashLight, type FlashLight } from './flashLight';
 import { createImpactRings, type ImpactRings } from './impactRing';
+import { createDebris, type DebrisChunks } from './debris';
 import { createProfiles, fillProfiles } from './fxProfiles';
 import { tornAlpha } from './smokeShape';
 import { createCameraShake, type CameraShake } from './cameraShake';
@@ -69,6 +70,8 @@ import {
   particleAspect,
   particleSpin,
   sizeAt,
+  splinterAspect,
+  splinterTumble,
   stepVelocity,
   type FxKind,
   type FxProfile,
@@ -155,6 +158,15 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
   const seedArr = new Float32Array(count);
   /** per-particle tear strength — 0 for every kind that is not smoke */
   const tearArr = new Float32Array(count);
+  /**
+   * Per-particle ROLL RATE, turns/s — nonzero for splinters and nothing else.
+   *
+   * A separate array rather than a derivation, because `update` no longer has
+   * the (seed, index) pair the particle was born from and re-deriving it would
+   * mean storing that instead. It is 6 KB for the whole pool and it never
+   * reaches the GPU: `seedArr` is the attribute, this is only what advances it.
+   */
+  const spinArr = new Float32Array(count);
   /**
    * Per-particle OPACITY WEIGHT (§V.44-adjacent, and see the blend note on the
    * material below). 0 = pure additive light, 1 = opaque. Powder smoke, flash
@@ -294,13 +306,30 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
   const rings: ImpactRings = createImpactRings(p);
   const flash: FlashLight = createFlashLight(p);
   const shake: CameraShake = createCameraShake();
+  /**
+   * Solid debris. Its splash callback is bound to `rings.spawn` below, in
+   * `update` — a chunk landing in the sea gets the SAME ring and foam scar a
+   * cannonball does, off the same mesh, for no new draw call (376d02d). A
+   * second splash path for the second thing that can hit the water is exactly
+   * the duplication impactRing.ts's header argues against.
+   */
+  const debris: DebrisChunks = createDebris({
+    count: sanitizeCount(p.chunkCount, 40, 256),
+    life: nn(p.chunkLife, 6),
+    floatLife: nn(p.chunkFloatLife, 3),
+    speed: nn(p.chunkSpeed, 7),
+    spread: nn(p.chunkSpread, 0.55),
+    size: nn(p.chunkSize, 0.8),
+    spin: nn(p.chunkSpin, 6),
+    gravity: nn(combatParams.gravity, 9.81),
+  });
 
   const group = new THREE.Group();
   group.name = 'combat-fx';
   // ORDER MATTERS to tests/combatWiring's instanced-mesh lookup: the balls
   // must be reachable by their own name, which they now are (both this and
   // the rings are InstancedMeshes).
-  group.add(sprites, balls, rings.mesh);
+  group.add(sprites, balls, rings.mesh, debris.mesh);
 
   /** refilled in place each frame so a Tweakpane edit is live, without churn */
   const prof = createProfiles();
@@ -364,13 +393,31 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
     // §V.28: bounded at the spawn boundary, where it can be tested
     alphaArr[i] = clamp01(nn(profile.alpha, 0));
 
-    // §V.65 silhouette: only the smoke family is stretched and torn. Sparks
-    // and splinters are meant to read as points and streaks, and an elliptical
-    // spark is just a wrong-shaped spark.
+    // §V.65 silhouette. THREE families, not two, and the middle one is what
+    // was missing: smoke is stretched-and-torn, a SPLINTER is stretched hard
+    // and tumbles but is never torn (a shard has a solid outline — that is the
+    // whole point of it), and everything else stays a round point of light.
+    //
+    // The tear stays off for splinters deliberately: `tornAlpha` is the only
+    // per-fragment cost in this system, and chewing holes in a sliver that is
+    // already ~1.5 px wide at combat range would spend fill rate to delete it.
     const smoky = SMOKE_KINDS.has(kind);
-    aspectArr[i] = smoky ? particleAspect(seed, index, nn(p.smokeAspect, 0.75)) : 1;
-    seedArr[i] = smoky ? particleSpin(seed, index) / (Math.PI * 2) : 0;
+    const shard = kind === 'splinter';
+    aspectArr[i] = smoky
+      ? particleAspect(seed, index, nn(p.smokeAspect, 0.75))
+      : shard
+        ? splinterAspect(seed, index, nn(p.splinterAspect, 4.5))
+        : 1;
+    // `seedArr` is the sprite's ROLL, in turns (the material multiplies by 2π).
+    // For a shard it is an initial angle that `update` then advances; for smoke
+    // it is a fixed roll that also decorrelates the tear.
+    seedArr[i] = smoky || shard ? particleSpin(seed, index) / (Math.PI * 2) : 0;
     tearArr[i] = smoky ? clamp01(nn(p.smokeDissolve, 0.55)) : 0;
+    // turns/s, signed. Zero for every kind but the shard, so the tumble branch
+    // in `update` is provably a no-op for everything that existed before.
+    spinArr[i] = shard
+      ? splinterTumble(seed, index, nn(p.splinterSpin, 7)) / (Math.PI * 2)
+      : 0;
     // §V.79 idle skip: the longest life still unspent in the pool. `update`
     // counts it down and skips the whole 1536-slot walk (and its seven buffer
     // uploads, ~68 KB/frame) once it reaches zero. Taking the MAX rather than
@@ -378,9 +425,14 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
     // particle's death is known the moment it is born, so the pool is provably
     // empty once the longest of them has run out.
     if (life[i] > liveFor) liveFor = life[i];
-    // aspect/seed/tear are written HERE and nowhere else, so they are uploaded
-    // here and nowhere else. They used to be re-flagged every frame in
-    // `update`, re-uploading 18 KB of bytes that had not changed.
+    // aspect/tear are written HERE and nowhere else, so they are uploaded here
+    // and nowhere else. They used to be re-flagged every frame in `update`,
+    // re-uploading 18 KB of bytes that had not changed.
+    //
+    // `seed` is the exception SINCE THE TUMBLE: a shard's roll advances every
+    // frame, so `update` re-uploads it — but ONLY on frames where a shard is
+    // actually alive, and never at all in a fight with `splinterSpin` at 0.
+    // That is 6 KB on frames that already carry 68 KB of particle motion.
     aspectAttr.needsUpdate = true;
     seedAttr.needsUpdate = true;
     tearAttr.needsUpdate = true;
@@ -490,6 +542,10 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         for (let k = 0; k < impactSmokeN; k++) {
           spawn('impactSmoke', hit.point, axis, k, prof.impactSmoke, seed, vary);
         }
+        // and the pieces that are actually going to LAND. Two, not twelve:
+        // these are chunks of the ship, and a hull that sheds a dozen planks
+        // per ball reads as papier-mache.
+        debris.spawn(hit.point, axis, sanitizeCount(p.chunkPerHit, 2, 16), seed);
       }
 
       // a BREACH escalates the hit above — it does not gate it. This is the
@@ -499,9 +555,26 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         if (e.type !== 'splinters') continue;
         const n = Math.min(splinterN, sanitizeCount(e.count, splinterN, 64));
         const seed = Math.round(finite(e.position[0]) * 977 + finite(e.position[1]) * 131);
+        // Same outward normal the HIT used, not [0,1,0]. A breach is emitted
+        // by applyHitDamage from inside the hit that caused it, so the ball
+        // that stove the section in is in THIS frame at THIS point — matching
+        // on the point recovers the ship, and with it the direction the timber
+        // should be going. A hard-coded up-axis fountained the heaviest burst
+        // in the whole system straight out of the deck, at right angles to the
+        // debris the very same impact had just thrown along the hull normal.
+        const cause = frame.hits.find((h) => samePoint(h.point, e.position));
+        const axis = cause === undefined
+          ? ([0, 1, 0] as [number, number, number])
+          : outwardAxis(ships?.[cause.shipIndex], e.position);
         for (let k = 0; k < n; k++) {
-          spawn('splinter', e.position, [0, 1, 0], k, prof.splinter, seed, vary);
+          spawn('splinter', e.position, axis, k, prof.splinter, seed, vary);
         }
+        // the section coming apart throws real timber, several times what an
+        // ordinary hit does — this is the one moment the ship visibly loses
+        // pieces of herself, and it is what a breach has never had
+        debris.spawn(
+          e.position, axis, sanitizeCount(p.chunkPerBreach, 8, 32), seed ^ 0x6d2b79f5,
+        );
       }
 
       // ── WATER ENTRY ──────────────────────────────────────────────────
@@ -571,6 +644,8 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
        */
       if (liveFor > 0) {
         liveFor = Math.max(0, liveFor - dt);
+        /** did any shard actually turn this frame? Gates the seed re-upload */
+        let tumbled = false;
         for (let i = 0; i < count; i++) {
           const t = ageFraction(age[i], life[i]);
           if (t >= 1) {
@@ -578,6 +653,16 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
             continue;
           }
           age[i] += dt;
+          // TUMBLE. `spinArr` is zero for every kind but the splinter, so this
+          // is one compare per slot for every effect that existed before, and
+          // the buffer is not re-uploaded at all unless a shard is in the air.
+          // Wrapped to [0,1) turns so a long-lived particle cannot drift the
+          // float into a range where 2π·seed loses angular precision.
+          if (spinArr[i] !== 0) {
+            const turns = seedArr[i] + spinArr[i] * dt;
+            seedArr[i] = turns - Math.floor(turns);
+            tumbled = true;
+          }
           const pr = prof[kinds[i]];
           const v = stepVelocity(
             velArr[i * 3], velArr[i * 3 + 1], velArr[i * 3 + 2], pr, dt, windX, windZ,
@@ -623,12 +708,24 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         colAttr.needsUpdate = true;
         sizeAttr.needsUpdate = true;
         alphaAttr.needsUpdate = true;
+        // gated, not unconditional: with no shard in the air (or `splinterSpin`
+        // at 0) `seedArr` is byte-identical to what the GPU already holds, and
+        // re-flagging it is exactly the 18 KB/frame of dead upload 076ad93
+        // removed from this loop
+        if (tumbled) seedAttr.needsUpdate = true;
       }
       uDissolveScale.value = Math.max(0.01, nn(p.smokeDissolveScale, 2.6));
 
       // the wind reaches the rings for the foam scars alone: they float IN the
       // surface layer, which is wind-driven, so they drift with it
       rings.update(dt, seaHeightAt, windX, windZ);
+      // Debris BEFORE the rings would put a chunk's splash ring one frame
+      // ahead of its own landing; after them, the ring spawned this frame is
+      // laid on the surface by the NEXT `rings.update`, which is the same
+      // one-frame relationship a cannonball's splash already has (both are
+      // spawned from `emit`, which runs before this). Consistency here is what
+      // stops a chunk's ring and a ball's ring from behaving differently.
+      debris.update(dt, seaHeightAt, rings.spawn);
       flash.update(dt);
 
       const r = Math.max(1e-3, nn(p.ballDrawRadius, 0.16));
@@ -669,6 +766,7 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
       ballMat.dispose();
       ballGeo.dispose();
       rings.dispose();
+      debris.dispose();
       flash.dispose();
       shake.dispose();
     },
@@ -693,6 +791,17 @@ function outwardAxis(
     (finite(point[1]) - finite(ship.position[1])) * 0.35 + 0.25,
     finite(point[2]) - finite(ship.position[2]),
   );
+}
+
+/**
+ * Are these the same impact point? Exact equality would be correct today —
+ * destruction copies the hit's own point by value — but a millimetre tolerance
+ * costs nothing and survives that copy becoming a transform.
+ */
+function samePoint(a: readonly number[], b: readonly number[]): boolean {
+  return Math.abs(finite(a[0]) - finite(b[0])) < 1e-3
+    && Math.abs(finite(a[1]) - finite(b[1])) < 1e-3
+    && Math.abs(finite(a[2]) - finite(b[2])) < 1e-3;
 }
 
 /** dispatch/buffer sizes come from sanitized construction-time ints (§V.28) */

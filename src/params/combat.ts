@@ -279,9 +279,62 @@ export interface CombatFxParams {
    * behaviour, which is exactly what the user reported seeing.
    */
   variation: number;
+  // ── SPLINTERS (what a ball knocks OUT of a plank) ──────────────────────
+  // These four are what separate "wood came off her" from "brown particles".
+  // A splinter is not a puff of anything: it is a piece of the ship, with
+  // mass, a long axis and a tumble, and it HIDES what is behind it.
   splinterLife: number;
   splinterSize: number;
   splinterSpeed: number;
+  /**
+   * 0..1 opacity. 0 = additive light, 1 = opaque timber. See FxProfile.alpha.
+   *
+   * THE REASON THIS EXISTS is the same one that took the water column off
+   * additive, and it is worth restating because splinters were left behind
+   * when that landed: additive can ONLY brighten what is behind it. An
+   * additive brown sprite over a bright sky is a faint warm smudge and over a
+   * sunlit hull it is nothing at all — it cannot occlude, and occlusion is the
+   * whole reason a solid object reads as solid. Powder smoke genuinely is
+   * light and stays at 0; oak is a substance and does not.
+   */
+  splinterAlpha: number;
+  /**
+   * Length:width of a shard, ≥ 1 (see fxMath.splinterAspect). 1 restores the
+   * round sprite exactly, so the knob is provable.
+   */
+  splinterAspect: number;
+  /** rad/s — peak tumble. 0 freezes the roll, which reads as sliding decals */
+  splinterSpin: number;
+  /**
+   * How wide the shards leave the impact: 0 is a beam along the hull's
+   * outward normal, 1 is a full hemisphere. Wood does not spray back
+   * isotropically out of a hole — it follows the ball through.
+   */
+  splinterSpread: number;
+
+  // ── SOLID DEBRIS (see combat/debris.ts) ────────────────────────────────
+  // A sprite cannot LAND — it has no attitude in the world, so it can only
+  // fade wherever it happens to be, and something that vanishes in mid-air
+  // leaves no evidence a hit occurred. These are a handful of real boxes that
+  // arc, tumble on three axes, come down, and disturb the sea where they hit.
+  // One instanced draw while any is in the air, and ZERO when none is.
+  /** pool size — the oldest chunk is evicted when a burst overflows it */
+  chunkCount: number;
+  /** chunks thrown by an ordinary hit. Keep it LOW: these are pieces of ship */
+  chunkPerHit: number;
+  /** chunks thrown when a section actually stoves in — the escalation */
+  chunkPerBreach: number;
+  /** s airborne before it fades, even if it never finds water */
+  chunkLife: number;
+  /** s bobbing on the surface after it lands, before it goes under */
+  chunkFloatLife: number;
+  chunkSpeed: number;
+  /** 0 = a beam along the hull normal, 1 = a full hemisphere */
+  chunkSpread: number;
+  /** m — nominal plank LENGTH; thickness and width are fractions of it */
+  chunkSize: number;
+  /** rad/s — peak tumble */
+  chunkSpin: number;
   // ── WATER ENTRY: the mist ─────────────────────────────────────────────
   // The aerated haze left hanging round the base of the column. It used to be
   // the whole splash — a 3 m additive disc over the entry point, which is what
@@ -475,8 +528,37 @@ export const combatFxParams: CombatFxParams = registerParams(
     ballStretchMax: 9,
     variation: 0.45,
     splinterLife: 1.1,
-    splinterSize: 0.28,
+    // 0.3 rather than 0.28 because the shard is now area-preserved against a
+    // 4.5:1 stretch: (0.3·4.5) x (0.3/4.5) = 1.35 m x 0.067 m. That width is
+    // ~1.5 px at the §V.15 broadside range of 90 m, which is the floor this
+    // size is set against — thinner and the shard vanishes at exactly the
+    // moment the stretch makes it longest.
+    splinterSize: 0.3,
     splinterSpeed: 9,
+    // 0.92 not 1: `brightnessAt` peaks at ~0.85, so a shard is never fully
+    // opaque anyway, and the last 8% buys a little motion-blur read on a
+    // sprite that is genuinely moving 9 m/s.
+    splinterAlpha: 0.92,
+    splinterAspect: 4.5,
+    splinterSpin: 7,
+    // 0.5 not the old 0.85. At 0.85 the burst was very nearly a full
+    // hemisphere, i.e. it had no relationship to the impact at all — which is
+    // why it read as "generic particles" no matter what colour they were.
+    splinterSpread: 0.5,
+    chunkCount: 40,
+    // 2 per hit and 8 on a breach: the RATIO is the statement, not the
+    // numbers. An ordinary ball punching through planking knocks a couple of
+    // pieces loose; a section actually stoving in is where the ship comes
+    // apart, and if the two look the same then the breach — the one moment
+    // that matters — reads as just another hit.
+    chunkPerHit: 2,
+    chunkPerBreach: 8,
+    chunkLife: 6,
+    chunkFloatLife: 3,
+    chunkSpeed: 7,
+    chunkSpread: 0.55,
+    chunkSize: 0.8,
+    chunkSpin: 6,
     splashLife: 1.5,
     splashSize: 0.55,
     splashSpeed: 3.2,
@@ -580,6 +662,24 @@ export const combatFxParams: CombatFxParams = registerParams(
     splinterLife: { min: 0.1, max: 4, step: 0.05 },
     splinterSize: { min: 0.05, max: 1, step: 0.01 },
     splinterSpeed: { min: 0, max: 30, step: 0.5 },
+    splinterAlpha: { min: 0, max: 1, step: 0.01 },
+    // max matches fxMath.SPLINTER_ASPECT_MAX — the slider cannot ask for a
+    // ratio the spawn boundary will silently clamp away (§V.62: a knob whose
+    // top half does nothing is a knob that lies)
+    splinterAspect: { min: 1, max: 6, step: 0.1 },
+    splinterSpin: { min: 0, max: 20, step: 0.5 },
+    splinterSpread: { min: 0, max: 1, step: 0.01 },
+    // `chunkCount` has no range entry on purpose: the pool is sized at
+    // construction (§V.28) and a live slider on it would be a dead knob, which
+    // is the §V.62 defect this project keeps re-finding.
+    chunkPerHit: { min: 0, max: 16, step: 1 },
+    chunkPerBreach: { min: 0, max: 32, step: 1 },
+    chunkLife: { min: 0.5, max: 20, step: 0.5 },
+    chunkFloatLife: { min: 0, max: 20, step: 0.5 },
+    chunkSpeed: { min: 0, max: 25, step: 0.5 },
+    chunkSpread: { min: 0, max: 1, step: 0.01 },
+    chunkSize: { min: 0.1, max: 3, step: 0.05 },
+    chunkSpin: { min: 0, max: 20, step: 0.5 },
     splashLife: { min: 0.1, max: 4, step: 0.05 },
     splashSize: { min: 0.1, max: 5, step: 0.1 },
     splashSpeed: { min: 0, max: 30, step: 0.5 },

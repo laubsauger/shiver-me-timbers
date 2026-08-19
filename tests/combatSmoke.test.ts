@@ -17,7 +17,10 @@
  */
 import { describe, expect, it } from 'vitest';
 import { createProfiles, fillProfiles } from '../src/combat/fxProfiles';
-import { sizeAt, stepVelocity, particleAspect, ASPECT_MAX, brightnessAt } from '../src/combat/fxMath';
+import {
+  sizeAt, stepVelocity, particleAspect, ASPECT_MAX, brightnessAt,
+  splinterAspect, splinterTumble, SPLINTER_ASPECT_MAX,
+} from '../src/combat/fxMath';
 import { combatFxParams, combatParams } from '../src/params/combat';
 import { createCombatFx } from '../src/combat/combatFx';
 import type { CombatFrame } from '../src/combat/combatSystem';
@@ -30,6 +33,8 @@ interface FxPool {
   position: Float32Array;
   size: Float32Array;
   aspect: Float32Array;
+  /** the sprite's ROLL, in turns — the material multiplies it by 2*pi */
+  seed: Float32Array;
   tear: Float32Array;
   kinds: string[];
 }
@@ -242,9 +247,13 @@ describe('smoke is carried by the LIVE wind', () => {
     // is (One, OneMinusSrcAlpha) with colour = tint·cover and alpha = cover·0.
     // Those are the same expression, and this pins it so a future edit to
     // either half cannot silently regrade every puff of powder smoke.
+    // `splinter` was in this list and has been REMOVED on purpose — see the
+    // "a splinter OCCLUDES" test below. It is the only kind ever to leave the
+    // additive family, and it left because it is the only one that was never
+    // light in the first place.
     const p = profiles();
     const sea = [0.02, 0.12, 0.13];
-    for (const kind of ['flash', 'smoke', 'spark', 'breech', 'impactSmoke', 'splinter'] as const) {
+    for (const kind of ['flash', 'smoke', 'spark', 'breech', 'impactSmoke'] as const) {
       const pr = p[kind];
       expect(pr.alpha, `${kind} must stay additive`).toBe(0);
       for (const cover of [0.15, 0.5, 1]) {
@@ -275,6 +284,84 @@ describe('smoke is carried by the LIVE wind', () => {
     // physical claim, not the individual numbers
     expect(p.crown.alpha).toBeGreaterThan(p.column.alpha);
     expect(p.column.alpha).toBeGreaterThan(p.splash.alpha);
+  });
+
+  it('a splinter OCCLUDES — it is a piece of the ship, not a glow over it', () => {
+    /**
+     * THE USER REPORT THIS EXISTS FOR: "hits don't really feel like they
+     * register", "I'd expect wood splintering and breaking and flying off".
+     * The splinter burst was firing on every hit the whole time — it was
+     * simply invisible, for exactly the reason the water column was before
+     * §T.16: `alpha` 0 is ADDITIVE, and additive can only ever BRIGHTEN what
+     * is behind it. A brown sprite that can only brighten is a faint warm
+     * smudge over a sunlit hull and nothing at all against a bright sky.
+     *
+     * Stated as the property, not the number: there must exist a background
+     * bright enough that a splinter DARKENS it. That is false for every
+     * additive kind at every setting, and it is what "solid object" means.
+     * Powder smoke must NOT satisfy it, or the smoke turns to grey cardboard —
+     * so the same assertion is run in reverse on `smoke` to pin the split.
+     */
+    const p = profiles();
+    const sky = [0.9, 0.95, 1]; // linear bright overcast — the worst case
+    const cover = 1;
+    const fade = brightnessAt(0.3); // near the peak of a shard's visible life
+
+    const composite = (pr: { color: number[]; alpha: number }, c: number): number =>
+      pr.color[c] * fade * cover + sky[c] * (1 - cover * pr.alpha * fade);
+
+    let splinterDarkens = false;
+    for (let c = 0; c < 3; c++) {
+      if (composite(p.splinter, c) < sky[c] - 1e-6) splinterDarkens = true;
+      // powder smoke is light: it may never subtract from the sky
+      expect(composite(p.smoke, c), `smoke must stay additive c${c}`)
+        .toBeGreaterThanOrEqual(sky[c] - 1e-9);
+    }
+    expect(splinterDarkens, 'a splinter must be able to darken a bright sky').toBe(true);
+  });
+
+  it('a splinter is a SLIVER and it TUMBLES — the two halves of reading as wood', () => {
+    /**
+     * Opacity alone is not enough: an opaque round dot is a mud pellet. Wood
+     * blown out of a plank is long, thin and spinning, and both of those are
+     * silhouette properties (§V.65 — the eye reads the outline).
+     *
+     * Both knobs are checked at their NEUTRAL value too, because a knob whose
+     * off position does not restore the old behaviour is not a knob, it is a
+     * hardcode with a slider on it (§V.62).
+     */
+    // one-sided: a splinter is never squatter than square, unlike a smoke puff
+    for (let i = 0; i < 200; i++) {
+      const a = splinterAspect(i * 7919, i, 4.5);
+      expect(a).toBeGreaterThanOrEqual(1);
+      expect(a).toBeLessThanOrEqual(4.5 + 1e-9);
+    }
+    // …and it is genuinely LONG on average, not nominally over 1
+    let sum = 0;
+    for (let i = 0; i < 400; i++) sum += splinterAspect(i * 2654435761, i, 4.5);
+    expect(sum / 400).toBeGreaterThan(2.5);
+
+    // the ratio is bounded at source, so no params edit can thin a shard to
+    // nothing (the `s/a` divisor is floored — §V.28)
+    expect(splinterAspect(1, 1, 1e9)).toBeLessThanOrEqual(SPLINTER_ASPECT_MAX);
+    expect(splinterAspect(1, 1, NaN)).toBe(1);
+    // neutral: ratio 1 is exactly the round sprite it replaced
+    for (let i = 0; i < 20; i++) expect(splinterAspect(i, i, 1)).toBe(1);
+
+    // TUMBLE: both directions must occur, or the burst rotates as one body
+    let cw = 0;
+    let ccw = 0;
+    for (let i = 0; i < 400; i++) {
+      const s = splinterTumble(i * 40503, i, 7);
+      expect(Math.abs(s)).toBeGreaterThan(0); // no shard is frozen mid-burst
+      expect(Math.abs(s)).toBeLessThanOrEqual(7 + 1e-9);
+      if (s > 0) cw++;
+      else ccw++;
+    }
+    expect(Math.min(cw, ccw) / 400).toBeGreaterThan(0.3);
+    // neutral: rate 0 freezes the roll exactly, so `update`'s tumble branch is
+    // provably a no-op and the seed buffer is never re-uploaded
+    for (let i = 0; i < 20; i++) expect(splinterTumble(i, i, 0)).toBe(0);
   });
 });
 
@@ -339,9 +426,65 @@ describe('the silhouette is not a disc (§V.65)', () => {
     for (let i = 0; i < 20; i++) expect(particleAspect(i, i, 0)).toBeCloseTo(1, 12);
   });
 
-  it('SMOKE gets stretched and torn; sparks and splinters do NOT', () => {
+  it('the shard stretch and tumble REACH THE POOL, not just the params (§V.62)', () => {
+    /**
+     * The gap this closes was found by mutation: `splinterAspect` could be
+     * taken from 4.5 to 1 — deleting the entire silhouette change — and every
+     * test still went green, because they all called the math directly with a
+     * literal instead of going through the spawn boundary. A knob nothing
+     * observes is the §V.62 defect wearing a slider.
+     *
+     * So this drives a real HIT through `createCombatFx` and reads the
+     * PUBLISHED buffers, which are the bytes the GPU is handed.
+     */
+    const fx = createCombatFx();
+    const frame: CombatFrame = {
+      muzzles: [],
+      hits: [{ shipIndex: 0, pieceId: 'hull-port-mid', point: [3, 2, 1], projectileId: 7 }],
+      projectiles: [], destruction: [], detached: [],
+    };
+    fx.emit(frame);
+    fx.update(1 / 60, []);
+
+    const { kinds, aspect, size, seed, tear } = pool(fx.group);
+    const shards: number[] = [];
+    for (let i = 0; i < size.length; i++) {
+      if (size[i] > 0 && kinds[i] === 'splinter') shards.push(i);
+    }
+    expect(shards.length, 'a hit must throw splinters').toBeGreaterThan(4);
+
+    for (const i of shards) {
+      // LONG, and one-sided: a shard is never squatter than square
+      expect(aspect[i], 'a splinter must be a sliver').toBeGreaterThan(1);
+      // …but never torn. `tornAlpha` is the only per-fragment cost in this
+      // system and chewing holes in a ~1.5 px sliver would spend fill rate to
+      // delete it.
+      expect(tear[i], 'a splinter must not be torn').toBe(0);
+    }
+    // they must not all be the SAME sliver, or the burst is one shape stamped
+    const distinct = new Set(shards.map((i) => aspect[i].toFixed(4)));
+    expect(distinct.size, 'shards must differ in shape').toBeGreaterThan(3);
+
+    // TUMBLE: the roll must actually advance between frames. A per-particle
+    // roll written once at spawn reads as decals sliding through the air, and
+    // it is invisible to any test that only looks at one frame.
+    const before = shards.map((i) => seed[i]);
+    fx.update(1 / 60, []);
+    const after = shards.map((i) => seed[i]);
+    expect(after.some((v, k) => v !== before[k]), 'shards must tumble').toBe(true);
+    // and the roll stays in [0,1) turns, so a long-lived shard cannot drift
+    // the float into a range where 2*pi*seed loses angular precision
+    for (const v of after) expect(v).toBeGreaterThanOrEqual(0);
+    for (const v of after) expect(v).toBeLessThan(1);
+    fx.dispose();
+  });
+
+  it('SMOKE gets stretched and torn; sparks do NOT', () => {
     // an elliptical spark is just a wrong-shaped spark, and tearing a point
-    // of light does nothing but cost fill rate
+    // of light does nothing but cost fill rate. NOTE: splinters used to be
+    // asserted round here too — they are now deliberately the most stretched
+    // thing in the pool, which is what the test above pins. This frame is
+    // muzzle-only, so no splinter reaches it either way.
     const fx = createCombatFx();
     const frame: CombatFrame = {
       muzzles: [{

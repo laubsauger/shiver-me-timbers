@@ -139,10 +139,27 @@ export function fillProfiles(
     sizeEnd: pos(p.trailSize, 0.22) * pos(p.trailGrowth, 3.2),
     gravity: -0.2, drag: 2.5, speed: 0.6, spread: 1, boost: 1,
   });
+  // SPLINTERS — the one kind that is a piece of the SHIP rather than an
+  // effect over it, and it was being drawn as neither.
+  //
+  // It had three things wrong with it at once, which is why no single tweak
+  // ever made it read: it was `alpha` 0 (additive, so a brown sprite could
+  // only ever brighten the hull behind it and could not occlude anything);
+  // aspect 1 (a round disc, because the §V.65 stretch was deliberately scoped
+  // to the smoke family); and `spread` 0.85 (a near-hemisphere, so the burst
+  // carried no memory of which way the ball had been travelling). Additive +
+  // round + isotropic is the definition of a generic particle, whatever
+  // colour it is tinted, and "brown particles, not wood" is what the user saw.
+  //
+  // The three cures are in the three lines below plus the aspect/tumble pair
+  // written at the spawn boundary in combatFx. Every one of them is a param
+  // whose neutral value reproduces the old look exactly.
   set(dst.splinter, {
-    life: pos(p.splinterLife, 1.1), sizeStart: pos(p.splinterSize, 0.28),
-    sizeEnd: pos(p.splinterSize, 0.28) * 0.5, gravity: 9.81, drag: 0.4,
-    speed: nn(p.splinterSpeed, 9), spread: 0.85, boost: 1,
+    life: pos(p.splinterLife, 1.1), sizeStart: pos(p.splinterSize, 0.3),
+    sizeEnd: pos(p.splinterSize, 0.3) * 0.5, gravity: 9.81, drag: 0.4,
+    speed: nn(p.splinterSpeed, 9), spread: clamp01(nn(p.splinterSpread, 0.5)),
+    boost: 1,
+    alpha: clamp01(nn(p.splinterAlpha, 0.92)),
   });
   // THE MIST, and it used to be the whole splash. As a 1.4 → 3.1 m additive
   // disc thrown at 6 m/s it was one big soft glow hanging over the entry
