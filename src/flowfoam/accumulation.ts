@@ -26,6 +26,24 @@
  *   ba transverse Kelvin slope (signed) — OVERWRITTEN every frame, never
  *      accumulated: the Kelvin pattern is steady in the SHIP's frame, so at a
  *      fixed world texel its phase advances and a time integral averages to 0.
+ *
+ * A SECOND, SEPARATE TEXTURE carries the wake's ELEVATION (`elevTexture`, near
+ * tier only, RGBA16F, .r used). Three reasons it is its own texture and not a
+ * fifth channel, in order of decisiveness:
+ *   1. there is no fifth channel — all four above are load-bearing;
+ *   2. §V.40. It is read ONLY by the ocean's VERTEX stage, and bindings key on
+ *      (node, shaderStage). The fragment stage is at 16/16 sampled textures and
+ *      cannot take another; the vertex stage had twelve free. Folding elevation
+ *      into the state texture would have been free of new bindings ONLY if the
+ *      fragment also wanted it, and it does not — it already has the slope;
+ *   3. it is neither accumulated, advected NOR blurred — it is a fresh analytic
+ *      write every frame, exactly like .ba — so it needs no ping-pong pair and
+ *      costs one 512² RGBA16F (0.5 MB) and one extra `textureStore`.
+ * RGBA16F rather than R32F because a filterable float32 needs the optional
+ * `float32-filterable` feature this project does not request (see
+ * island/seabed.ts, ship/deckFieldTexture.ts) and r16float is not a core
+ * WebGPU storage format; rgba16float is both filterable and storable. Half
+ * float resolves 1 mm at a 1 m elevation, against a 0.63 m peak.
  */
 import * as THREE from 'three/webgpu';
 import {
@@ -131,6 +149,23 @@ export function createAccumulation(
   };
   const texA = makeState(); // front — sampled by materials, blur output
   const texB = makeState(); // scratch — advect output
+  /**
+   * Wake ELEVATION (m, signed) in .r — the ocean vertex stage's displacement
+   * input. Single-buffered: written fresh by the advect pass every frame from
+   * the analytic field, never read back, never blurred, so there is nothing to
+   * ping-pong. The far tier writes zero into it (`useDetail` false) and it is
+   * only ever SAMPLED for the near tier, so it is allocated 1×1 there.
+   */
+  const elevTexture = (() => {
+    const n = profile.useDetail ? res : 1;
+    const t = new THREE.StorageTexture(n, n);
+    t.type = THREE.HalfFloatType; // rgba16float: filterable AND storable
+    t.format = THREE.RGBAFormat;
+    t.minFilter = THREE.LinearFilter;
+    t.magFilter = THREE.LinearFilter;
+    t.generateMipmaps = false;
+    return t;
+  })();
 
   // far tier never captures, so it never allocates the RT (1×1 placeholder)
   const injectionRT = new THREE.RenderTarget(profile.useCapture ? res : 1, profile.useCapture ? res : 1, {
@@ -160,7 +195,41 @@ export function createAccumulation(
     blurMixForDt(p.blurSpread, profile.size() / res, p.blurRadius, 1 / 60),
   );
   const uWakeChurn = uniform(p.wakeChurn);
+  /**
+   * ── THE WATERLINE THE HULL SHEDS FOAM AT, AS A PLANE ────────────────────
+   *
+   * `uWaterHeight` is the sea's height AT THE REGION CENTRE and `uWaterSlope`
+   * is (∂h/∂x, ∂h/∂z) there, so the injection band is the tangent plane of the
+   * actual sea rather than a fixed altitude.
+   *
+   * WHAT THIS FIXES (user: "we don't get a feeling that the waves are lapping
+   * against the hull — they're just moving THROUGH it"). This uniform existed,
+   * was initialised to 0, and NOTHING EVER SET IT: `setWaterHeight` had zero
+   * callers and `createFlowFoam()` is constructed with no options. So the band
+   * every hull injects foam through was the absolute slab |world y| < 0.35 m,
+   * for every sea state. At the shipped swell the surface at the hull swings
+   * ±2 m about that slab, so for most of every wave cycle the band was
+   * entirely above or entirely below the real waterline: the hull shed its
+   * foam at a height the water was not at. A wetted line that does not move
+   * IS a decal, which is exactly what the user reported seeing.
+   *
+   * A PLANE, NOT A SCALAR, and the extra two numbers are free. A hull is ~20 m
+   * long in a swell of λ ≈ 100 m; a single height at the ship's centre is wrong
+   * by h'·10 m at the ends — up to ±0.6 m at the shipped sea, i.e. larger than
+   * the 0.35 m band itself, so the stem and the transom would still inject at
+   * the wrong height while amidships was right. The gradient is fitted from
+   * `hullContact`'s station depths, which are already sampled every tick for
+   * buoyancy and spray, so it costs NO new ocean queries (§V.8: and it is
+   * therefore literally the same sea, not a second evaluation of it).
+   *
+   * Residual, bounded: a plane cannot express the sea's CURVATURE over the
+   * hull, so a wave shorter than ~2 hull-lengths is fitted rather than
+   * followed. That is the honest limit of a uniform-driven band; the exact fix
+   * is to sample the ocean's own displacement inside the injection material,
+   * which costs that pass three cascade bindings it does not have today.
+   */
   const uWaterHeight = uniform(0);
+  const uWaterSlope = uniform(new THREE.Vector2(0, 0));
   const uThreshold = uniform(p.depthThreshold);
   const uFeather = uniform(p.maskFeather);
 
@@ -171,10 +240,14 @@ export function createAccumulation(
   camera.layers.set(FOAM_INJECTION_LAYER);
 
   const injectionMaterial = new THREE.MeshBasicNodeMaterial();
+  // the sea's tangent plane at the region centre — see uWaterSlope's header
+  const waterPlaneNode = uWaterHeight
+    .add(positionWorld.x.sub(uCenter.x).mul(uWaterSlope.x))
+    .add(positionWorld.z.sub(uCenter.y).mul(uWaterSlope.y));
   injectionMaterial.outputNode = vec4(
     worldIntersectionMaskNode({
       heightNode: positionWorld.y,
-      waterHeightNode: uWaterHeight,
+      waterHeightNode: waterPlaneNode,
       thresholdNode: uThreshold,
       featherNode: uFeather,
     }),
@@ -245,9 +318,10 @@ export function createAccumulation(
       // analytic ship wake composes ADDITIVELY with the ortho capture
       // every periodic term is band-limited against THIS tier's texel, inside
       // the injector, before it is ever written (§V48 at the source)
-      const wake = wakeFieldNode
+      const field = wakeFieldNode
         ? wakeFieldNode(vec2(wx, wz), profile.useDetail, uSize.div(res))
-        : vec4(0, 0, 0, 0);
+        : { rate: vec4(0, 0, 0, 0), elev: float(0) };
+      const wake = field.rate;
       const rate = wake.mul(uDt).mul(uWakeScale);
       const foam = prev.x.mul(uDecay).add(inject.mul(uInjectPerFrame)).add(rate.x).min(1);
       // the slick is a coverage that BUILDS and then relaxes — same accumulate/
@@ -261,6 +335,23 @@ export function createAccumulation(
         ivec2(x, y),
         vec4(foam, slick, wake.z.clamp(-1, 1), wake.w.clamp(-1, 1)),
       ).toWriteOnly();
+      /**
+       * The elevation, written NOT scaled by dt and NOT by `uWakeScale`: it is
+       * a HEIGHT, not a rate. The .rg channels above are doses accumulated over
+       * time and must be per-second; .ba and this are the instantaneous shape
+       * of the water and are simply the current value of the field.
+       *
+       * §V.44 clamped at source. ±2 m is a backstop, not a shaper: the terms
+       * sum to 0.63 m (mound) + 0.40 m (eddies) + transSlope·v²/g at the
+       * shipped params, and each is bounded by construction in slickInjection.
+       */
+      if (profile.useDetail) {
+        textureStore(
+          elevTexture,
+          ivec2(x, y),
+          vec4(field.elev.clamp(-2, 2), 0, 0, 1),
+        ).toWriteOnly();
+      }
     });
   })().compute(res * res);
 
@@ -301,8 +392,10 @@ export function createAccumulation(
 
   return {
     foamTexture: texA,
+    /** wake elevation (m) in .r — vertex-stage displacement, near tier only */
+    elevTexture,
     injectionTexture: injectionRT.texture,
-    uniforms: { uCenter, uSize, uWaterHeight },
+    uniforms: { uCenter, uSize, uWaterHeight, uWaterSlope },
 
     /** move the region (world XZ). Snaps to the texel grid (see header). */
     setCenter(x: number, z: number): void {
@@ -380,6 +473,7 @@ export function createAccumulation(
     dispose(): void {
       texA.dispose();
       texB.dispose();
+      elevTexture.dispose();
       injectionRT.dispose();
       injectionMaterial.dispose();
     },

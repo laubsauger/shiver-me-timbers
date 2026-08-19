@@ -73,6 +73,7 @@
 import type * as THREE from 'three/webgpu';
 import { float, fwidth, mix, smoothstep, texture, uniform, vec2 } from 'three/tsl';
 import { flowFoamParams, type FlowFoamParams } from '../params/flowfoam';
+import { regionEdgeFadeCpu } from './flowMath';
 import { createFlowNoiseUniforms } from './flowNoise';
 import { createAccumulation, FOAM_INJECTION_LAYER } from './accumulation';
 import { intersectionMaskNode } from './intersectionMask';
@@ -219,6 +220,19 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       else flowU.uFlowDir.value.set(0, 0);
     },
 
+    /**
+     * The sea's TANGENT PLANE under the ship: height at the region centre plus
+     * (∂h/∂x, ∂h/∂z). This is what the hull's foam-injection band rides, so the
+     * wetted line moves up and down the topsides as a wave passes instead of
+     * sitting at a fixed altitude — accumulation.uWaterSlope's header has the
+     * whole defect and its measured size. Call every tick; both tiers share it
+     * (only the near one captures).
+     */
+    setWaterPlane(h: number, dhdx: number, dhdz: number): void {
+      acc.uniforms.uWaterHeight.value = h;
+      acc.uniforms.uWaterSlope.value.set(dhdx, dhdz);
+    },
+
     setWaterHeight(h: number): void {
       acc.uniforms.uWaterHeight.value = h;
     },
@@ -251,6 +265,22 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       return wake.moundDrive;
     },
 
+    /**
+     * Wake surface elevation (m) at a world XZ — the CPU mirror of
+     * `wakeHeightNode`, region edge fade included, so the sea the hull answers
+     * to is the sea that is drawn (§V.8). `smithDepth` > 0 asks §V.68's
+     * pressure question instead: buoyancy passes the draft, every GEOMETRIC
+     * reader passes 0.
+     *
+     * Must be called on the same tick as `advanceWake`, after it.
+     */
+    wakeHeightCpu(x: number, z: number, smithDepth = 0): number {
+      const e = wake.elevationCpu(x, z, smithDepth);
+      if (e === 0) return 0;
+      const c = acc.uniforms.uCenter.value;
+      return e * regionEdgeFadeCpu(x - c.x, z - c.y, acc.uniforms.uSize.value, p.edgeFade);
+    },
+
     /** advance the sim one fixed tick (§V2): pushes live params, runs computes */
     update(renderer: THREE.WebGPURenderer, dt: number): void {
       time += dt;
@@ -270,7 +300,23 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       // regionSize is live-tweakable, resolution is a startup constant
       uNearFeature.value = (p.regionSize / p.resolution) * p.waveBandLow;
       uFarFeature.value = (p.farRegionSize / p.farResolution) * p.waveBandLow;
-      // age + extend the world-space cutwater track BEFORE the computes read it
+      /**
+       * age + extend the world-space cutwater track BEFORE the computes read it
+       *
+       * §V.2/§V.8 — THIS IS IN THE WRONG BLOCK AND MUST MOVE, and it is
+       * recorded here rather than half-moved. `main.ts` calls `update()` from
+       * the RENDER block on `frameDt`, so the trail's spatial resolution is
+       * frame-rate dependent today. That was already a §V.2 defect; it becomes
+       * a §V.8 one the moment `wakeHeightCpu` is wired into `CpuOcean.heightAt`,
+       * because buoyancy runs inside the FIXED tick and would then float the
+       * hull on a track aged later in the same frame.
+       *
+       * The fix is to age the track in the sim tick, after `setShip` and before
+       * buoyancy — which needs `shipYaw`/`shipSpeed` hoisted out of the render
+       * block in main.ts. Not done here: splitting the call without moving the
+       * caller freezes the trail, and a half-built API is worse than a stated
+       * one. See the session report.
+       */
       wake.advance(dt);
       wake.pushParams();
       acc.step(renderer, dt);
@@ -355,6 +401,53 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       return texture(acc.foamTexture, regionUv(acc, worldXZ))
         .ba.mul(regionEdge(acc, uEdgeFade, worldXZ))
         .mul(bandKeepNode(px, uNearFeature, uSlickBandFull, uSlickBandCut));
+    },
+
+    /**
+     * ── THE WAKE AS GEOMETRY (m, signed) — for the ocean's VERTEX stage ──────
+     *
+     * "A slope, never a displacement: the ocean owns its geometry" was the
+     * standing rule and this is its considered reversal. A field that only
+     * tilts the normal produces shading variation and NOTHING ELSE — no
+     * silhouette, no parallax, no deformation — so the wake read as paint
+     * because it WAS paint. This node is the scalar whose gradient is
+     * `wakeSlopeNode`, so it is not a new wake: it is the one already modelled,
+     * finally allowed to move the mesh. slickMath's header derives each
+     * potential term by term.
+     *
+     *   material.positionNode = positionLocal.add(totalDisp)
+     *                                        .add(vec3(0, ff.wakeHeightNode(worldXZ), 0))
+     *
+     * Sample it at the SAME undisplaced grid `worldXZ` the cascades are sampled
+     * at, never at the displaced position — §V.72(a): `CpuOcean.heightAt`
+     * inverts the horizontal displacement to find exactly that grid coord
+     * before it sums, so anything read at the post-displacement point puts the
+     * two seas 1–2 m apart horizontally (§B.34 by a third route).
+     *
+     * NEAR TIER ONLY, like the slope: the far tier is 2.5 m per texel and
+     * carries neither wave train nor mound, so there is nothing to displace by
+     * out there and this reads 0 as the near region fades.
+     *
+     * NO BAND-LIMIT GATE, and that is a decision rather than an omission.
+     * `wakeSlopeNode` needs `bandKeepNode` because a slope is DIFFERENTIATED in
+     * screen space (§V.49) and its aliasing comes back amplified. A DISPLACEMENT
+     * is not differentiated by anyone — the normals come from the cascades and
+     * from `wakeSlopeNode`, never from this mesh — so its only exposure is the
+     * vertex grid's own Nyquist limit, and the field band-limits ITSELF there:
+     * amplitude = slope·λ/2π, so any term short enough to alias is also small
+     * enough not to matter (measured: 4.5 mm at the ship, 26 mm worst case
+     * anywhere in the LOD's range). A gate here would ALSO be unmirrorable —
+     * vertex spacing is a function of the CAMERA, and §V.8 forbids the floated
+     * sea depending on where anyone is looking. The bound is stated instead.
+     *
+     * §V.40: +1 texture, +1 sampler, IN THE VERTEX STAGE — which was at 4/4
+     * against 16. The fragment stage is at 16/16 sampled textures and this
+     * spends none of it; bindings key on (node, shaderStage), and the fragment
+     * already has the slope it needs.
+     */
+    wakeHeightNode(worldXZ: any): any {
+      return texture(acc.elevTexture, regionUv(acc, worldXZ))
+        .r.mul(regionEdge(acc, uEdgeFade, worldXZ));
     },
 
     dispose(): void {

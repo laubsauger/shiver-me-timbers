@@ -270,17 +270,34 @@ const LEDGER: readonly LedgerEntry[] = [
   {
     file: 'src/flowfoam/index.ts',
     source: flowFoamSource,
-    sites: 3,
-    // The ocean now calls ALL THREE — foamSampleNode (white paint),
-    // wakeSmoothNode (capillary damping) and wakeSlopeNode (the wake's own
-    // surface). It costs NOTHING extra: all three read the SAME two storage
-    // textures (acc.foamTexture, far.foamTexture) and bindings dedupe by
-    // texture UUID per stage, so 3 call sites are still 2 textures.
+    sites: 4,
+    /**
+     * The ocean calls all four. THREE OF THEM ARE FRAGMENT AND COST TWO
+     * BINDINGS BETWEEN THEM — foamSampleNode (white paint), wakeSmoothNode
+     * (capillary damping) and wakeSlopeNode (the wake's own slope) all read the
+     * SAME two storage textures (acc.foamTexture, far.foamTexture), and
+     * bindings dedupe by texture UUID per stage.
+     *
+     * THE FOURTH IS VERTEX-ONLY, and that is the whole reason it is affordable.
+     * `wakeHeightNode` (§T.13 wake displacement) reads a THIRD texture,
+     * `acc.elevTexture`, which nothing else reads — but it is called from
+     * `positionNode`, and `uniformGPU` keys on (node, shaderStage), so it
+     * lands on the VERTEX ledger. The fragment stage is at 16/16 sampled
+     * textures and could not have taken it; the vertex stage was at 4/4
+     * against 16. §V.72's own note is the rule being applied here: check WHICH
+     * STAGE before calling a feature unaffordable.
+     *
+     * If `wakeHeightNode` is ever ALSO called from the fragment stage this
+     * entry must go to fragmentTextures 3 / fragmentSamplers 3 — which the
+     * material cannot afford. It is deliberately not needed there: the
+     * fragment already has the slope, which is this field's own derivative.
+     */
     fragmentTextures: 2,
     fragmentSamplers: 2,
-    vertexTextures: 0,
-    vertexSamplers: 0,
-    why: 'foamSampleNode: acc.foamTexture + far.foamTexture',
+    vertexTextures: 1,
+    vertexSamplers: 1,
+    why: 'fragment foamSampleNode/wakeSmoothNode/wakeSlopeNode: acc.foamTexture'
+      + ' + far.foamTexture; vertex wakeHeightNode: acc.elevTexture',
   },
   {
     file: 'src/island/seabed.ts',
@@ -438,8 +455,9 @@ describe('§V.40 ocean material binding budget', () => {
     // silicon the adapter grants far more than 16 textures once asked, while
     // `maxSamplersPerShaderStage` IS 16 and asking changes nothing. Count
     // samplers; the texture number is a leading indicator, not a limit.
-    // 5/5 and under no pressure — three displacement textures, the §V.72
-    // seabed depth and the §V.73 shelter field. THE AXIS THAT IS SCARCE IS THE
+    // 6/6 and under no pressure — three displacement textures, the §V.72
+    // seabed depth, the §V.73 shelter field and the §T.13 wake elevation the
+    // ocean now DISPLACES by. THE AXIS THAT IS SCARCE IS THE
     // FRAGMENT ONE, and this is
     // worth stating because it decided a whole feature's design: bindings are
     // keyed on (node, shaderStage), so the ONE contested spare everybody
@@ -451,8 +469,8 @@ describe('§V.40 ocean material binding budget', () => {
     // If the FRAGMENT side ever needs the displacement textures, see "THE
     // VERTEX ESCAPE HATCH" in this file's header: an array displacement with a
     // hand-rolled 4-tap bilinear costs 1 texture and 0 samplers here.
-    expect(sum((e) => e.vertexTextures)).toBe(5);
-    expect(sum((e) => e.vertexSamplers)).toBe(5);
+    expect(sum((e) => e.vertexTextures)).toBe(6);
+    expect(sum((e) => e.vertexSamplers)).toBe(6);
   });
 
   it('still requests the raised limits at device creation', () => {

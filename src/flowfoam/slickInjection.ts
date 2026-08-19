@@ -15,7 +15,7 @@
  * §V28: every divisor floored, every smoothstep span floored, no unbounded
  * term. §V44: |slope| ≤ transSlope and slick ≥ 0 by construction, at SOURCE.
  */
-import { float, smoothstep, uniform, vec2, vec3 } from 'three/tsl';
+import { float, smoothstep, uniform, vec2, vec3, vec4 } from 'three/tsl';
 import { GRAVITY, KELVIN_R_MAX, KELVIN_TAN_MAX, RIDGE_PEAK } from './slickMath';
 import type { FlowFoamParams } from '../params/flowfoam';
 
@@ -113,7 +113,14 @@ export function createSlickInjector(p: FlowFoamParams) {
 
   return {
     /**
-     * vec3(slickRate, slopeX, slopeZ) at one texel.
+     * vec4(slickRate, slopeX, slopeZ, elevation) at one texel.
+     *
+     * `.w` is the SCALAR WHOSE GRADIENT IS `.yz`, less the divergent train —
+     * slickMath's header derives all four potentials and states why the
+     * divergent branch is shading-only and why the remainder needs no Nyquist
+     * gate. It is what the ocean's vertex stage displaces by and what the CPU
+     * mirror adds to `heightAt`, so the drawn wake and the floated wake are one
+     * expression (§V.8).
      *
      * `detail` = false drops the transverse crests entirely. The FAR tier is
      * 2.5 m per texel and the shortest transverse wavelength in play is 5.8 m
@@ -137,7 +144,7 @@ export function createSlickInjector(p: FlowFoamParams) {
         .mul(lane)
         .mul(f.age.div(uSlickDecay.max(EPS)).negate().exp());
 
-      if (!detail) return vec3(slick, 0, 0);
+      if (!detail) return vec4(slick, 0, 0, 0);
 
       // --- 2. BOTH Kelvin wave systems, from ONE stationary-phase solve -----
       // 2r·t² − t + r = 0, r = |lat|/dist ⟹ t = [1 ± √(1−8r²)]/(4r). The minus
@@ -181,14 +188,20 @@ export function createSlickInjector(p: FlowFoamParams) {
       // 2a. transverse — long crests across the track, peak on the centreline
       const e0 = f.kelvin.mul(uTransInner);
       const innerFade = smoothstep(e0, f.kelvin.max(e0.add(EPS)), f.ay).oneMinus();
-      const magT = uTransSlope
+      const ampT = uTransSlope
         .mul(f.sf)
         .mul(f.envelope)
         .mul(innerFade)
         .mul(f.age.div(uTransDecay.max(EPS)).negate().exp())
         .mul(spreadOf(uTransSpread))
         .mul(bandOf(tT))
-        .mul(phaseOf(tT).sin());
+        .toVar();
+      const phiT = phaseOf(tT);
+      const magT = ampT.mul(phiT.sin());
+      // η = −(a/k)·cos φ, k = |∇φ| = (g/v²)(1+t²) — the potential of the line
+      // above, so amplitude = slope·λ/2π falls out instead of being a knob
+      const kT = float(GRAVITY).mul(sq(tT)).div(v.mul(v)).max(EPS);
+      const elevT = ampT.negate().mul(phiT.cos()).div(kT);
 
       // 2b. DIVERGENT — the bow wave. sf SQUARED (f.envelope carries one sf,
       // this adds the second), matching the foam arms' own shaping: the user
@@ -237,6 +250,10 @@ export function createSlickInjector(p: FlowFoamParams) {
       // lives in the track's own frame, not in a per-point mirrored one
       const latS = f.ay.mul(f.latSign);
       const rightAbs = vec2(f.fwd.y, f.fwd.x.negate());
+      // vec3(slopeX, slopeZ, η/magE). The potential −coreR·e^(−u²)/RIDGE_PEAK
+      // differentiates radially back into the 2u·e^(−u²) profile above, so the
+      // dimple the eye sees IS the dimple the shading solves. Negative because
+      // a vortex core is a depression.
       const core = (off: any, phase: any): any => {
         const qE = f.odo.sub(phase).div(uVortexSpacing.max(EPS));
         // q − round(q) ∈ [−½, ½] → signed distance to the NEAREST core
@@ -244,9 +261,11 @@ export function createSlickInjector(p: FlowFoamParams) {
         const dAcross = latS.sub(off);
         const rE = vec2(dAlong, dAcross).length();
         const uE = rE.div(coreR);
+        const bell = uE.mul(uE).negate().exp();
         // 2u·e^(−u²) over its own extremum: peak exactly 1 at u = 1/√2
-        const prof = uE.mul(2).mul(uE.mul(uE).negate().exp()).div(RIDGE_PEAK);
-        return f.fwd.mul(dAlong).add(rightAbs.mul(dAcross)).div(rE.max(EPS)).mul(prof);
+        const prof = uE.mul(2).mul(bell).div(RIDGE_PEAK);
+        const s = f.fwd.mul(dAlong).add(rightAbs.mul(dAcross)).div(rE.max(EPS)).mul(prof);
+        return vec3(s.x, s.y, coreR.negate().mul(bell).div(RIDGE_PEAK));
       };
       // port lags starboard by half a period — the alternation IS the street
       const street = core(vOff, float(0)).add(
@@ -273,8 +292,11 @@ export function createSlickInjector(p: FlowFoamParams) {
         .mul(innerFade)
         .mul(f.age.div(uVortexDecay.max(EPS)).negate().exp())
         .mul(bandE);
-      const slope = dirOf(tT).mul(magT).add(dirOf(tD).mul(magD)).add(street.mul(magE));
-      return vec3(slick, slope.x, slope.y);
+      const slope = dirOf(tT).mul(magT).add(dirOf(tD).mul(magD)).add(street.xy.mul(magE));
+      // .w: the divergent train is absent ON PURPOSE (slickMath header —
+      // sub-Nyquist on the ocean mesh over the inner half of its own wedge)
+      const elev = elevT.add(street.z.mul(magE));
+      return vec4(slick, slope.x, slope.y, elev);
     },
 
     /**
@@ -290,7 +312,8 @@ export function createSlickInjector(p: FlowFoamParams) {
      */
     bowSlopeNode(b: BowFrame): any {
       const u = b.dc.div(b.thick.max(EPS));
-      const ridge = u.mul(-2).mul(u.mul(u).negate().exp()).div(RIDGE_PEAK);
+      const bell = u.mul(u).negate().exp();
+      const ridge = u.mul(-2).mul(bell).div(RIDGE_PEAK);
       const lat = smoothstep(float(0), b.span.max(EPS), b.aside).oneMinus();
       // §V48: the ridge is ~2·thick wide — if that goes sub-texel, fade it
       const band = smoothstep(
@@ -302,7 +325,23 @@ export function createSlickInjector(p: FlowFoamParams) {
       // ∇(distance from the crest) = forward + sweep·(signed lateral)
       const right = vec2(b.fwd.y, b.fwd.x.negate()).mul(b.sgn);
       const grad = b.fwd.add(right.mul(b.sweep));
-      return grad.div(grad.length().max(EPS)).mul(mag);
+      const len = grad.length().max(EPS);
+      const s = grad.div(len).mul(mag);
+      /**
+       * .z — THE MOUND AS A RIDGE OF WATER (user: "we actually show the water
+       * pushed forward"). η = A·e^(−u²), A = moundSlope·thick/(RIDGE_PEAK·|∇dc|),
+       * so ∇η is EXACTLY the vector above. The |∇dc| divisor is not cosmetic:
+       * the slope is written on the NORMALISED gradient, and without it shape
+       * and shading disagree by a constant 1.35× at the shipped `moundSweep`.
+       */
+      const elev = uMoundSlope
+        .mul(b.drive)
+        .mul(lat)
+        .mul(band)
+        .mul(b.thick)
+        .mul(bell)
+        .div(float(RIDGE_PEAK).mul(len));
+      return vec3(s.x, s.y, elev);
     },
 
     /** live param push (§V16), called from wakeInjection.pushParams */

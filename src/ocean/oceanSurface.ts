@@ -60,6 +60,15 @@ export interface OceanSurfaceOptions {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
   skyDomeColor?: (dir: any) => any;
   /**
+   * §T.61 — `SkyHandle.skySunTerm`, the sun's own disc/glow/halo toward an
+   * arbitrary direction. Used ONLY inside the Snell's-window branch (a
+   * TRANSMITTED path); the reflected sky above deliberately never sees it,
+   * which is §V.26 still holding. Absent → the window has no sun, i.e. exactly
+   * the behaviour this exists to fix.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+  skySunTerm?: (dir: any) => any;
+  /**
    * True when the scene is rendered into a HALF-FLOAT pass target rather than
    * straight to the canvas — i.e. when post-processing is on. The §V24
    * scene-colour copy has to be allocated in that format or WebGPU rejects
@@ -90,6 +99,22 @@ export class OceanSurface {
   private warnedHdrMismatch = false;
   private surface: OceanSurfaceMaterial;
   private grid: SurfaceGridOptions;
+  /**
+   * §V.30b QUANTISED EYE HEIGHT (m) the radial LOD is evaluated at — half
+   * octaves, with hysteresis, and NOT the live camera height.
+   *
+   * The law is kRadial = pixels/(f·h), so feeding it a live height would move
+   * every collapsed ring as the deck heaves: a 12 ± 2 m eye would re-place the
+   * far field at wave frequency, which is a shimmer on the horizon and a
+   * frame-to-frame difference in a quantity the user judges by looking at it.
+   * Half-octave bands hold it still through the bob (12 m and 14 m are the same
+   * band) and cost at most 2^0.5 of the available saving; the 8% hysteresis
+   * stops a camera parked on a band edge from oscillating.
+   *
+   * §V.2: this is a pure function of the current height and the current band —
+   * no dt, no rate limit, no accumulation — so it cannot depend on frame rate.
+   */
+  private lodEyeBand = 0;
 
   constructor(
     sim: OceanSimulation,
@@ -111,6 +136,7 @@ export class OceanSurface {
       opts.hdrSceneTarget ?? postParams.enabled,
       opts.skyDomeColor,
       opts.fetch,
+      opts.skySunTerm,
     );
     this.group = new THREE.Group();
     this.mesh = new THREE.Mesh(buildOceanGrid(this.grid), this.surface.material);
@@ -166,6 +192,7 @@ export class OceanSurface {
     // needs the live far plane to turn it back into meters
     const persp = camera as THREE.PerspectiveCamera;
     if (persp.isPerspectiveCamera) this.surface.cameraFarUniform.value = persp.far;
+    this.surface.radialLodUniform.value = this.radialLodCoefficient(persp);
     // haze target = the scene's fog colour (the sky rig retints it per frame),
     // so water and objects melt into the same horizon (§V30 — no seam where
     // the sea disc ends). With fog removed entirely, fall back to the sky's
@@ -189,5 +216,33 @@ export class OceanSurface {
       );
     }
     this.surface.updateFromParams();
+  }
+
+  /**
+   * §V.30b — `2·pixels·tan(fov/2)/h`, the viewport-free half of
+   * kRadial = pixels/(f·h). The shader divides by the drawing-buffer height,
+   * which is the one term this class cannot see (f = (H/2)/tan(fov/2)).
+   *
+   * Returns 0 — the exact off switch — for a non-perspective camera or a
+   * disabled param, so an orthographic pass and `radialLodPixels = 0` both draw
+   * the pre-LOD mesh rather than an approximation of it.
+   */
+  private radialLodCoefficient(camera: THREE.PerspectiveCamera): number {
+    if (!camera.isPerspectiveCamera || !(sp.radialLodPixels > 0)) return 0;
+    // §V.8 GUARD: h is clamped away from the waterline, so the first collapsed
+    // ring is ~125 m out at ANY camera height and the whole of cpuOcean's
+    // domain — buoyancy, hull contact, shore runup — sits on vertices the
+    // vertex shader provably does not move.
+    const h = Math.max(sp.radialLodMinEye, camera.position.y);
+    // half-octave band, floored (the band's LOW edge ⟹ a weaker LOD than the
+    // live height would license, never a stronger one), held by 8% hysteresis
+    const band = Math.pow(2, Math.floor(Math.log2(h) * 2) / 2);
+    if (h < this.lodEyeBand * 0.92 || h > this.lodEyeBand * Math.SQRT2 * 1.08) {
+      this.lodEyeBand = band;
+    } else if (this.lodEyeBand === 0) {
+      this.lodEyeBand = band;
+    }
+    const tanHalfFov = Math.tan((camera.fov * Math.PI) / 360);
+    return (2 * sp.radialLodPixels * tanHalfFov) / Math.max(1e-3, this.lodEyeBand);
   }
 }

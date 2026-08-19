@@ -415,6 +415,11 @@ async function boot(): Promise<void> {
     // §V.26 the reflected sky is the SKY's own dome function (sun disc
     // excluded), not a second ramp inside the water material.
     skyDomeColor: sky.skyDomeColor,
+    // §T.61 the sun ITSELF, for the Snell's-window branch only. §V.26 keeps it
+    // out of the reflection above; transmission through the surface is the
+    // other case, and a window with no sun in it is what the user has been
+    // reporting.
+    skySunTerm: sky.skySunTerm,
   });
   app.scene.add(surface.group);
 

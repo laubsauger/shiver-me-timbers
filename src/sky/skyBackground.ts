@@ -165,17 +165,61 @@ export function createSkyBackground(p: SkyParams) {
   // three pins the background mesh to the camera (matrixWorld.copyPosition),
   // so world position minus camera position is exactly the view ray.
   const viewDir = positionWorld.sub(cameraPosition).normalize();
-  const d = viewDir.dot(uSunDir);
   const warmed = skyDome(viewDir);
 
-  // 4. analytic sun: HDR disc + tight glow + wide halo, all additive.
-  //    smoothstep(e0,e1,x) functional form; e0 = cos(outer) < e1 = cos(inner)
-  //    because cosine falls as the angle grows.
-  const disc = smoothstep(uDiscCosOuter, uDiscCosInner, d).mul(uDiscIntensity);
-  const toSun = d.clamp(0, 1); // clamp before pow — negative base = NaN (§V28)
-  const glow = toSun.pow(uGlowPower.max(EPS)).mul(uGlowStrength);
-  const halo = toSun.pow(uHaloPower.max(EPS)).mul(uHaloStrength);
-  const sunTerm = vec3(uSunColor).mul(disc.add(glow).add(halo));
+  /**
+   * 4. analytic sun: HDR disc + tight glow + wide halo, all additive.
+   *    smoothstep(e0,e1,x) functional form; e0 = cos(outer) < e1 = cos(inner)
+   *    because cosine falls as the angle grows.
+   *
+   * §T.61 — A FUNCTION OF `dir`, NOT OF THE BACKGROUND'S OWN VIEW RAY. It was
+   * a straight-line expression on `viewDir` because the background mesh was
+   * its only consumer. It now has a second one: the ocean's Snell's-window
+   * branch, which needs the sun's radiance toward a REFRACTED direction that
+   * has nothing to do with any view ray. Same terms, same uniforms, no cost
+   * change on this side — `sunTerm` below is this called on `viewDir`.
+   *
+   * §V.26 IS DELIBERATELY NOT WEAKENED. `skyDome` still excludes all three
+   * terms, and this is published SEPARATELY rather than folded into it, so
+   * the above-water reflection cannot pick the disc up by accident. See
+   * `skySunTerm`'s own note for why transmission is the other case.
+   */
+  const sunFor = Fn(([dir]: [ReturnType<typeof vec3>]) => {
+    const c = dir.dot(uSunDir);
+    /**
+     * §V.48, BOTH HALVES — and it is not the background that needs it. On the
+     * sky mesh `dir` is the view ray, `fwidth(c)` is a fraction of a degree,
+     * and the `max` below is a no-op: this block is algebraically the disc it
+     * replaces. The consumer that needs it is the ocean's Snell's window,
+     * where `dir` is refracted about the LIVE PER-PIXEL WAVE NORMAL and the
+     * refraction's Jacobian n·cosθ_w/cosθ_a runs away at the rim — so the
+     * sun's image there is a sub-pixel-thin arc swinging by degrees between
+     * neighbouring pixels. An unfiltered HDR disc under those conditions is a
+     * firefly field, straight into the bloom.
+     *
+     * (a) WIDEN the transition to at least 2 px of `c`'s own screen footprint;
+     * (b) and drop the amplitude by the SAME ratio, so the widened disc keeps
+     *     the energy of the authored one instead of gaining a fatter core.
+     *     Without (b) a smeared sun is BRIGHTER than a sharp one, which is the
+     *     §V.48(b) mistake with the sign flipped.
+     * Both collapse to identity when the authored width already wins.
+     *
+     * FRAGMENT-STAGE ONLY, by `fwidth`. Both callers are fragment; a vertex
+     * caller would need the widening handed in, as §V.48 requires everywhere
+     * else in this project.
+     */
+    const w0 = uDiscCosInner.sub(uDiscCosOuter).max(EPS);
+    const w = w0.max(fwidth(c).mul(2));
+    const mid = uDiscCosOuter.add(uDiscCosInner).mul(0.5);
+    const disc = smoothstep(mid.sub(w.mul(0.5)), mid.add(w.mul(0.5)), c)
+      .mul(uDiscIntensity)
+      .mul(w0.div(w));
+    const toSun = c.clamp(0, 1); // clamp before pow — negative base = NaN (§V28)
+    const glow = toSun.pow(uGlowPower.max(EPS)).mul(uGlowStrength);
+    const halo = toSun.pow(uHaloPower.max(EPS)).mul(uHaloStrength);
+    return vec3(uSunColor).mul(disc.add(glow).add(halo));
+  });
+  const sunTerm = sunFor(viewDir);
 
   // 5. analytic MOON: disc, phase terminator, tight glow, tight halo.
   //
@@ -261,6 +305,33 @@ export function createSkyBackground(p: SkyParams) {
      * azimuth and drifts from this one the moment either is tuned (§T39).
      */
     skyDomeColor: (dir: ReturnType<typeof vec3>) => skyDome(dir),
+    /**
+     * §T.61 — THE SUN ITSELF (disc + glow + halo) toward an arbitrary
+     * direction, in the same scene-linear units `skyDomeColor` returns. Add
+     * the two to get the full sky radiance; `skyDomeColor` alone is the sky
+     * WITHOUT the sun, which is what §V.26 requires of a reflection.
+     *
+     * WHY THIS EXISTS AND WHAT IT MAY BE USED FOR. §V.26 keeps the disc out of
+     * `skyDomeColor` because re-adding it to the ocean's REFLECTION paints a
+     * clean circular blob: a wind-roughened sea reflects the sun as a glint
+     * ROAD, and the water's own specular plus the glint field already own that
+     * light. That argument is entirely about reflection off a ROUGH INTERFACE.
+     * It does not transfer to TRANSMISSION THROUGH one — looking up from below,
+     * the sun is a real object at a real place in a compressed hemisphere, and
+     * a Snell's window with no sun in it is the defect the user has now
+     * reported four times: the hull's specular blows out, the god rays
+     * converge, the caustics dance, and the window that all three are evidence
+     * of shows nothing.
+     *
+     * So: legitimate for the underwater window and for any other TRANSMITTED
+     * path. NOT legitimate for the above-water reflected sky, which is why
+     * this is a second function and not a flag on the first.
+     *
+     * §V.40: pure ALU on uniforms this material already holds — one
+     * smoothstep, two `pow`, no texture and no sampler. Safe on a stage at
+     * 15/16.
+     */
+    skySunTerm: (dir: ReturnType<typeof vec3>) => sunFor(dir),
     uniforms: { uSunDir, uSunColor, uZenith, uMid, uHaze, uWarm },
     /**
      * Re-derive all ramp-driven uniforms for a new KEY state.

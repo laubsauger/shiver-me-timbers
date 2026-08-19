@@ -78,6 +78,15 @@ export interface SkyHandle {
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
   skyDomeColor: (dir: any) => any;
+  /**
+   * §T.61 — the SUN's own radiance (disc + glow + halo) toward an arbitrary
+   * world direction, in `skyDomeColor`'s units. For TRANSMITTED paths only:
+   * §V.26 keeps the disc out of the reflected sky because a rough sea gives a
+   * glint road rather than a mirror image, and that argument does not apply to
+   * looking UP THROUGH the surface. See skyBackground.skySunTerm.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+  skySunTerm: (dir: any) => any;
   /** keep the sun-shadow frustum centered on the player ship */
   setShadowFocus(x: number, y: number, z: number): void;
   configureRenderer(renderer: THREE.WebGPURenderer): void;
@@ -97,6 +106,7 @@ export function createSky(opts: { scene: THREE.Scene }): SkyHandle {
     nightFactor: 0,
     sunLight: rig.sunLight,
     skyDomeColor: background.skyDomeColor,
+    skySunTerm: background.skySunTerm,
     setShadowFocus: (x, y, z) => rig.setShadowFocus(x, y, z),
     update(timeOfDay: number, wind: WindFrame = NO_WIND): void {
       // ONE call resolves who owns the key — sun, moon, or mid-handover — and

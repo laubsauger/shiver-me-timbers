@@ -47,10 +47,12 @@ import {
   uniform,
   uniformArray,
   vec2,
+  vec3,
   vec4,
 } from 'three/tsl';
 import { fbm2 } from '../terrain/noise';
 import { FLOW_OCTAVES } from './flowMath';
+import { bowSlopeCpu, slickFieldCpu } from './slickMath';
 import { createSlickInjector } from './slickInjection';
 import { INV_SQRT2, wakeReachCpu, type WakeHull } from './wakeMath';
 import {
@@ -170,18 +172,28 @@ export function createWakeInjector(p: FlowFoamParams) {
 
   return {
     /**
-     * TSL wake field at a world-XZ node:
-     *   x = foam injection rate  (foam/second)  — CPU mirror wakeMath.wakeRateCpu
-     *   y = slick coverage rate  (1/second)     — CPU mirror slickMath.slickFieldCpu
-     *   zw = transverse-wave world slope        — same mirror
+     * TSL wake field at a world-XZ node. Returns `{ rate, elev }`:
+     *   rate.x = foam injection rate (foam/second) — mirror wakeMath.wakeRateCpu
+     *   rate.y = slick coverage rate (1/second)    — mirror slickMath.slickFieldCpu
+     *   rate.zw = wake world SLOPE (signed)        — same mirror
+     *   elev   = wake world ELEVATION (m, signed)  — same mirror
      *
-     * ONE polyline walk feeds all four. `detail = false` (the far tier) drops
-     * both wave trains and the bow mound's slope, all of which are below
-     * Nyquist at 2.5 m per texel. `texel` is the tier's own world texel size —
-     * every periodic term is band-limited against it AT THE SOURCE (§V48).
+     * `elev` is the SCALAR POTENTIAL of `rate.zw` less the divergent train, so
+     * it is the same field and not a second one — slickMath's header derives
+     * each potential and states the two exclusions. It is stored in its own
+     * texture rather than a channel because all four of the accumulation's are
+     * spoken for, and it is read ONLY by the ocean's VERTEX stage (§V.40: the
+     * fragment ledger does not move).
+     *
+     * ONE polyline walk feeds all five. `detail = false` (the far tier) drops
+     * both wave trains, the bow mound's slope AND the elevation, all of which
+     * are below Nyquist at 2.5 m per texel. `texel` is the tier's own world
+     * texel size — every periodic term is band-limited against it AT THE
+     * SOURCE (§V48).
      */
     wakeFieldNode(worldXZ: any, detail = true, texel: any = float(0.25)): any {
       const rate = vec4(0, 0, 0, 0).toVar();
+      const elev = float(0).toVar();
       // AABB early-out: most of a 512² region is open water far from the track
       const inRange = worldXZ.x
         .greaterThanEqual(uTrackMin.x)
@@ -446,10 +458,12 @@ export function createWakeInjector(p: FlowFoamParams) {
               drive: mGate.mul(mSf),
               texel,
             })
-          : vec2(0, 0);
+          : vec3(0, 0, 0);
         rate.assign(vec4(foam, sk.x, sk.y.add(bowSlope.x), sk.z.add(bowSlope.y)));
+        // one surface, so its elevation sums exactly as its slope does
+        elev.assign(sk.w.add(bowSlope.z));
       });
-      return rate;
+      return { rate, elev };
     },
 
     /**
@@ -480,6 +494,47 @@ export function createWakeInjector(p: FlowFoamParams) {
     /** exposed for tests/debug: the live world-space history (index 0 = newest) */
     get trackSamples() {
       return track.samples;
+    },
+
+    /**
+     * ── THE §V.8 MIRROR OF `elev` ────────────────────────────────────────────
+     * Wake surface elevation (m) at a world XZ, on the CPU, from the SAME track
+     * polyline, the SAME lagged mound speed and the SAME wrapped odometer the
+     * compute pass is handed this tick. Not an approximation of the GPU field —
+     * the same two functions (`slickFieldCpu`, `bowSlopeCpu`) whose TSL twins
+     * `slickFieldNode`/`bowSlopeNode` are, which is the contract the rest of
+     * this module already lives under.
+     *
+     * THREE THINGS THAT MAKE THIS AGREE RATHER THAN MERELY MATCH, and each of
+     * them is a way §B.34 could arrive again:
+     *  (a) `liveSpeed` is `moundSpeed`, the LAGGED speed — not `pose.speed`.
+     *      The shader's `liveGate` is built on `uMoundSpeed`; handing the raw
+     *      pose speed here would gate the two sides differently through every
+     *      acceleration, which is most of the time a player is sailing.
+     *  (b) `odo` is the WRAPPED odometer, the identical float the uniform got
+     *      in `advance()` this tick, so the two vortex streets sit at one phase.
+     *  (c) `texel` is the NEAR tier's, because the near tier is the only one
+     *      that writes elevation — the §V48 band gates inside the formulas must
+     *      see the grid the value is actually stored on.
+     *
+     * Residual against the GPU, bounded and not chased: the shader evaluates at
+     * texel CENTRES and the material bilinearly interpolates, while this
+     * evaluates exactly at the query point. On a 0.234 m grid carrying nothing
+     * finer than a 5.8 m feature that is a sub-millimetre reconstruction error
+     * (< 0.2% of amplitude) — three orders below §B.34's 6.90 m.
+     *
+     * `smithDepth` > 0 asks the §V.68 question instead of the geometric one:
+     * see slickMath.smithAtten. Callers other than buoyancy want 0.
+     */
+    elevationCpu(wx: number, wz: number, smithDepth = 0): number {
+      const pts = trackPoints(track, pose);
+      if (pts.length < 2) return 0;
+      const texel = p.regionSize / Math.max(p.resolution, 1);
+      const period = Math.max(p.vortexSpacing, EPS);
+      const odo = track.odo - Math.floor(track.odo / period) * period;
+      const sk = slickFieldCpu(pts, wx, wz, hull, p, moundSpeed, texel, odo, smithDepth);
+      const bow = bowSlopeCpu(pts[0], wx, wz, moundSpeed, p, texel, smithDepth);
+      return sk.elev + bow.elev;
     },
 
     /**

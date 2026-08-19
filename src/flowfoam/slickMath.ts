@@ -23,8 +23,54 @@
  *      = asin(1/3), a constant of the dispersion relation and famously
  *      independent of ship speed), the transverse wavelength is strongly
  *      speed-dependent: 5.8 m at 3 m/s, 41 m at 8 m/s. Published as an
- *      ADDITIVE SLOPE (index.wakeSlopeNode), never as displacement — the
- *      ocean's geometry belongs to the ocean.
+ *      ADDITIVE SLOPE (index.wakeSlopeNode) AND, since §T13's displacement
+ *      pass, as an ELEVATION (index.wakeHeightNode) — see below.
+ *
+ *   3. THE SAME FIELD AS A DISPLACEMENT. "A slope, never a displacement" was
+ *      the standing rule and the user has asked for it revisited: a wake that
+ *      only tilts the normal changes shading and nothing else — no silhouette,
+ *      no parallax, no deformation, i.e. paint. DISPLACEMENT IS THE INTEGRAL OF
+ *      SLOPE, and every mechanism here is the gradient of a CLOSED-FORM scalar,
+ *      so nothing is invented and no numerical integration is needed:
+ *
+ *        term        slope (already shipped)          its potential η
+ *        ─────────── ──────────────────────────────── ────────────────────────
+ *        transverse  a·sin(φ)·dir̂                     −(a/k)·cos(φ)
+ *        divergent   a·sin(φ)·dir̂                     NOT DISPLACED — see below
+ *        eddy core   m·(2u·e^(−u²)/RIDGE_PEAK)·r̂      −m·coreR·e^(−u²)/RIDGE_PEAK
+ *        bow mound   M·(−2u·e^(−u²)/RIDGE_PEAK)·ĝ     +M·thick·e^(−u²)/(RIDGE_PEAK·|g|)
+ *
+ *      k = 2π/λ is the term's OWN local wavenumber, so amplitude = slope·λ/2π
+ *      falls out of the algebra rather than being a second tuning. `|g|` is the
+ *      length of ∇(crest distance) = |fwd + sweep·right| — it appears because
+ *      the shipped mound slope is written on the NORMALISED gradient, and
+ *      dividing by it is what makes η's gradient equal that vector EXACTLY
+ *      instead of approximately. There is no new look knob in any of this: move
+ *      `transSlope`/`moundSlope`/`eddySlope` and the shape moves with the
+ *      shading, because they are one field.
+ *
+ *      THE DIVERGENT TRAIN IS DELIBERATELY NOT DISPLACED, and someone will try
+ *      to "fix" that. Its wavelength is λ_T/(1+t²) with t ≥ 1/√2 and running to
+ *      KELVIN_TAN_MAX toward the centreline, so over the inner half of the
+ *      wedge it is below the ocean mesh's Nyquist limit at EVERY speed (vertex
+ *      spacing ≈ 1.1 m at the ship, §V.30). A per-vertex gate would delete it
+ *      over most of its own extent; displacing it ungated puts ~4 cm of
+ *      crawling moiré on the geometry. Its job — the feathered cusp texture —
+ *      is a SHADING job, it is already band-limited against PIXELS in the
+ *      fragment slope, and there it survives to ranges no mesh could carry.
+ *
+ *      WHY THE REMAINDER NEEDS NO NYQUIST GATE AT ALL, which is the property
+ *      that keeps the CPU mirror camera-free (§V.8: a gate on vertex spacing
+ *      could not be mirrored, because spacing is a function of the CAMERA).
+ *      The mound (6.4 m ridge) and the eddies (7.65 m cores) are FIXED-SIZE
+ *      features, comfortably above 2× the ~1.1 m spacing. The transverse train
+ *      is the only variable one, and it band-limits ITSELF: amplitude = slope·
+ *      λ/2π and λ = 2πv²/g, so a train short enough to alias is also slow
+ *      enough to be tiny. MEASURED at the shipped params: the transverse train
+ *      reaches λ = 2·spacing at v = 1.84 m/s, where `sf` has faded it to
+ *      amplitude 4.5 mm. Worst case anywhere in the LOD's range (spacing 2.6 m
+ *      at 100 m from the camera) is 26 mm, by which distance the region edge
+ *      fade is already taking it out. State the bound, do not build the gate.
  *
  * PHASE IS A FUNCTION OF `dist`, NOT OF TIME. The Kelvin pattern is steady in
  * the SHIP's frame, so at a fixed world point the phase advances as the ship
@@ -197,9 +243,46 @@ export interface SlickField {
   slopeX: number;
   /** additive world-Z surface slope from the transverse waves (signed) */
   slopeZ: number;
+  /**
+   * ELEVATION (m, signed) — the scalar whose gradient is (slopeX, slopeZ),
+   * minus the divergent train (module header explains why that one stays
+   * shading-only). This is what the ocean's VERTEX stage adds to its own
+   * displacement and what `CpuOcean` adds to `heightAt`, so the ship floats on
+   * the wake she is drawn sitting in (§V.8).
+   *
+   * RESIDUAL, bounded not chased: η's gradient equals the slope field exactly
+   * for the carrier (the sin/cos pair and the two ridge profiles) and only
+   * approximately for the ENVELOPES — `innerFade`, the exponential decays and
+   * `spread` all vary with position, so ∇η carries an extra (∇amp)·cos(φ)/k
+   * term the slope field does not. Envelope scales are tens of metres against
+   * wavelengths of 6–23 m, so the disagreement is ≈ λ/(2π·L_env) ≲ 9% of the
+   * slope. It shows as shading that leads or trails the geometry by a fraction
+   * of a crest at the trail's outer fade, and nowhere else.
+   */
+  elev: number;
 }
 
-const ZERO: SlickField = { slick: 0, slopeX: 0, slopeZ: 0 };
+const ZERO: SlickField = { slick: 0, slopeX: 0, slopeZ: 0, elev: 0 };
+
+/**
+ * §V.68 THE SMITH CORRECTION, applied to the wake exactly as the mirror's
+ * spectrum applies it to every FFT mode: linear deep-water dynamic pressure
+ * decays as e^(−k·d), so a hull LOW-PASSES the sea by its own draft. A wake
+ * feature is a free-surface deformation like any other and obeys the same law.
+ *
+ * It is what bounds the one loop this whole displacement pass could close. The
+ * ship sits in her own bow mound — physically true, and she should — but she
+ * feels 14% of it, not all of it, and by the same arithmetic every other
+ * floating body already answers to. `d = 0` returns 1 exactly, so the geometric
+ * readers are bit-identical to an un-attenuated field.
+ *
+ * GPU twin: none, deliberately. The GPU DRAWS the true surface; only buoyancy
+ * asks a pressure question, and buoyancy is CPU-side.
+ */
+export function smithAtten(k: number, depth: number): number {
+  if (!(depth > 0)) return 1;
+  return Math.exp(-Math.max(k, 0) * depth);
+}
 
 /** falling edge with a flat CORE: 1 inside w·(1−edge), 0 at w */
 function plateau(w: number, edge: number, x: number): number {
@@ -238,6 +321,16 @@ export function slickFieldCpu(
    * GPU streets sit at different phases.
    */
   odoHead = 0,
+  /**
+   * §V.68 SMITH DEPTH (m). 0 = the TRUE free surface, which is what every
+   * GEOMETRIC reader wants (§V.8: the drawn sea, the waterline, the cutwater).
+   * > 0 = the elevation whose hydrostatic head equals this wake's dynamic
+   * pressure at that depth, each term attenuated by e^(−k·d) at its OWN
+   * wavenumber — which is what BUOYANCY must read, exactly as it already does
+   * for every FFT mode. It affects `elev` only; the slope is a shading quantity
+   * and has no depth.
+   */
+  smithDepth = 0,
 ): SlickField {
   const n = projectOnTrack(points, wx, wz);
   if (!n.found) return ZERO;
@@ -334,10 +427,19 @@ export function slickFieldCpu(
     Math.exp(-a / Math.max(p.transDecay, 1e-6)) *
     spread(p.transSpread) *
     bandGate(br.tT);
-  const magT = ampT * Math.sin(kelvinPhaseCpu(d, ay, br.tT, v));
+  const phiT = kelvinPhaseCpu(d, ay, br.tT, v);
+  const magT = ampT * Math.sin(phiT);
   // slope points along the propagation direction: aft·cosθ + lateral·sinθ
   const cT = 1 / Math.sqrt(1 + br.tT * br.tT);
   const sT = br.tT * cT;
+  /**
+   * THE TRANSVERSE TRAIN AS AN ELEVATION. |∇φ| = (g/v²)(1+t²) = 2π/λ = k, so
+   * η = −(a/k)·cos φ has exactly ∇η = a·sin(φ)·dir̂ — the vector two lines
+   * above. Amplitude a/k = a·λ/2π is therefore not a second tuning but the
+   * consequence of the one `transSlope` already sets.
+   */
+  const kT = (GRAVITY * (1 + br.tT * br.tT)) / (v * v);
+  const elevT = (-ampT * Math.cos(phiT) * smithAtten(kT, smithDepth)) / Math.max(kT, 1e-6);
 
   // 2b. DIVERGENT — THE BOW WAVE. Short steep crests fanning off the stem,
   // strongest at the cusp line and dying inward. sf SQUARED, the same shaping
@@ -384,7 +486,14 @@ export function slickFieldCpu(
   const latS = ay * sgn; // SIGNED lateral, in the track's own frame
   const rax = n.fz; // unsigned right = (fz, −fx)
   const raz = -n.fx;
-  const core = (off: number, phase: number): [number, number] => {
+  /**
+   * Returns [slopeX, slopeZ, η/magE] for one core. The dimple's potential is
+   * −coreR·e^(−u²)/RIDGE_PEAK: differentiating it radially gives back exactly
+   * the 2u·e^(−u²)/RIDGE_PEAK profile above, so the surface the eye sees and
+   * the surface the shading solves are the same one. NEGATIVE — a vortex core
+   * is a depression, which is what the street should read as.
+   */
+  const core = (off: number, phase: number): [number, number, number] => {
     const qE = (odo - phase) / Math.max(p.vortexSpacing, 1e-6);
     const dAlong = (qE - Math.floor(qE + 0.5)) * p.vortexSpacing;
     const dAcross = latS - off;
@@ -393,7 +502,11 @@ export function slickFieldCpu(
     // 2u·e^(−u²) over its own extremum: one core peaks at exactly eddySlope
     const prof = (2 * uE * Math.exp(-uE * uE)) / RIDGE_PEAK;
     const inv = prof / Math.max(rE, 1e-6);
-    return [(n.fx * dAlong + rax * dAcross) * inv, (n.fz * dAlong + raz * dAcross) * inv];
+    return [
+      (n.fx * dAlong + rax * dAcross) * inv,
+      (n.fz * dAlong + raz * dAcross) * inv,
+      (-coreR * Math.exp(-uE * uE)) / RIDGE_PEAK,
+    ];
   };
   const cS = core(vOff, 0);
   const cP = core(-vOff, p.vortexSpacing * 0.5);
@@ -415,7 +528,14 @@ export function slickFieldCpu(
   // aft unit vector = −forward; both trains propagate away from the hull
   const slopeX = magT * (-n.fx * cT + rx * sT) + magD * (-n.fx * cD + rx * sD) + magE * (cS[0] + cP[0]);
   const slopeZ = magT * (-n.fz * cT + rz * sT) + magD * (-n.fz * cD + rz * sD) + magE * (cS[1] + cP[1]);
-  return { slick, slopeX, slopeZ };
+  /**
+   * A Gaussian dimple has no single wavenumber; π/coreR (i.e. λ = 2·coreR, the
+   * core's full width) is the one that reproduces its own extremum spacing and
+   * is the same yardstick §V48 is already measured on for this feature. At the
+   * shipped 3.83 m radius and a 2 m draft that is e^(−1.64) = 0.19.
+   */
+  const elevE = magE * (cS[2] + cP[2]) * smithAtten(Math.PI / coreR, smithDepth);
+  return { slick, slopeX, slopeZ, elev: elevT + elevE };
 }
 
 /**
@@ -444,13 +564,15 @@ export function bowSlopeCpu(
   moundSpeed: number,
   p: SlickParams,
   texel = 0,
-): { slopeX: number; slopeZ: number } {
+  /** §V.68 pressure depth (m); 0 = the true free surface — see smithAtten */
+  smithDepth = 0,
+): { slopeX: number; slopeZ: number; elev: number } {
   const gate = smoothstepCpu(
     p.speedThreshold,
     Math.max(p.speedThreshold * 2, p.speedThreshold + 1e-6),
     moundSpeed,
   );
-  if (gate <= 0) return { slopeX: 0, slopeZ: 0 };
+  if (gate <= 0) return { slopeX: 0, slopeZ: 0, elev: 0 };
   const sf = smoothstepCpu(
     p.speedThreshold,
     Math.max(p.fullWakeSpeed, p.speedThreshold + 1e-6),
@@ -476,7 +598,20 @@ export function bowSlopeCpu(
   const gx = head.fx + p.moundSweep * head.fz * sgn;
   const gz = head.fz - p.moundSweep * head.fx * sgn;
   const len = Math.max(Math.hypot(gx, gz), 1e-6);
-  return { slopeX: (mag * gx) / len, slopeZ: (mag * gz) / len };
+  /**
+   * THE MOUND AS A RIDGE OF WATER, not just as a tilt. η = A·e^(−u²) with
+   * A = moundSlope·thick/(RIDGE_PEAK·|∇dc|) has ∇η equal to the returned slope
+   * vector EXACTLY — the `|∇dc|` divisor is there because the slope above is
+   * written on the NORMALISED gradient, and without it the shape and the
+   * shading would disagree by a constant 1.35× at the shipped `moundSweep`.
+   *
+   * λ = 2·moundThick = 6.4 m for the §V.68 factor: the ridge's full width, the
+   * same yardstick its own §V48 band gate is measured on.
+   */
+  const elev =
+    (p.moundSlope * gate * sf * lat * band * thick * Math.exp(-u * u) * smithAtten(Math.PI / thick, smithDepth)) /
+    (RIDGE_PEAK * len);
+  return { slopeX: (mag * gx) / len, slopeZ: (mag * gz) / len, elev };
 }
 
 /**
