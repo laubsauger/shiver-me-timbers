@@ -75,22 +75,55 @@ export const SAIL_FLUTTER_EDGE = 1.3; // extra ripple toward the leeches
 export const SAIL_FLUTTER_V = 2.1; // ripple phase advance down the cloth
 
 /**
- * ARC-LENGTH COEFFICIENT. A parabolic arc of depth d over a chord c has
- * length c·(1 + 8/3·(d/c)² − …), so a strip of cloth that bows by d must give
- * up that much SPAN to keep the length it was cut with.
+ * ARC-LENGTH COEFFICIENT: the EXCESS LENGTH a bowed strip carries, as a
+ * multiple of the square of its camber ratio. `L = span·(1 + COEFF·(d/span)²)`.
  *
- * This is the term that was missing, and it is a third cause of "bulgy",
- * independent of how deep the belly is: without it the sail gains SURFACE
- * AREA as the wind rises. It inflates like a balloon instead of bowing like a
- * fixed piece of canvas, and no amount of depth tuning can hide that.
+ * It owns BOTH directions of one relation and that is deliberate (§V.72's
+ * shape): `arcShorten` spends it to work out how much span a strip gives up to
+ * pay for its bow, and `sailCamberRatio` INVERTS it to work out how much bow a
+ * given excess buys. Two constants would let the sail's depth and the sail's
+ * outline disagree about the same piece of cloth.
  *
- * Exact for the horizontal section, which IS a parabola pinned at both
- * leeches ({@link sailDraftProfile}). Reused verbatim for the vertical bow,
- * whose profile is a different single-hump shape — nobody can perceive the
- * difference between 8/3 and the ~2.4 that profile's own integral gives, and
- * one coefficient with one derivation is worth more than two.
+ * Without it the sail gains SURFACE AREA as the wind rises — it inflates like
+ * a balloon instead of bowing like a fixed piece of canvas, and no amount of
+ * depth tuning can hide that.
+ *
+ * 1.9, AND IT IS MEASURED, NOT DERIVED — this is the change §T.74a forced.
+ * 8/3 is the exact coefficient for a PARABOLA, which is what this used to be
+ * and what {@link sailDraftProfile} is on its own. The cloth is not a parabola
+ * any more: the corner tension field flattens both ends of every strip, the
+ * leech standoff adds a term that peaks where the membrane vanishes, and the
+ * vertical profile was never one to begin with. Integrating `∫f'²/2` over the
+ * realised shape family gives coefficients from 0.50 (v=0.8, where there is
+ * almost no bow left) through 1.43 at the draft to 2.54 along the foot — a
+ * FIVEFOLD spread that no single number fits.
+ *
+ * So it is fitted rather than assumed, against the only thing that matters:
+ * whether the cloth keeps its length. Worst-case |L/cut − 1| over 6 horizontal
+ * and 9 vertical strips × 4 fills:
+ *
+ *     8/3 (the parabola)          6.81%   ← and it SIGN-FLIPS: the foot GAINS
+ *                                            2.95% of cloth while the draft
+ *                                            loses 2.06%, which is a sail that
+ *                                            stretches, not one that bows
+ *     1.9 (fitted, shipped)       2.67%
+ *
+ * The exact quadratic solve of the same relation — `span = cut·(1 + √(1 −
+ * 4·C·k²))/2`, which is what the first-order form approximates — was tried and
+ * is WORSE (3.46% at its own best coefficient). Recorded because it looks like
+ * the obvious upgrade: it is exact for the length model, and the length model
+ * is the part that is wrong, so being exact about it buys nothing.
+ *
+ * WHAT THIS DOES NOT DO: 2.67% of the cloth's own length is still 2.67%. Full
+ * conservation needs the strip's true arc length, which is an integral along
+ * the strip and therefore a per-vertex quadrature in the vertex stage. That is
+ * the next model up, not this one (§Rule 2).
  */
-export const SAIL_ARC_COEFF = 8 / 3;
+export const SAIL_ARC_COEFF = 1.9;
+
+/** the radius, as a fraction of the sail's diagonal, over which a clew's grip
+ *  stops growing — a cringle has a size, and 1/r must not run to infinity */
+export const SAIL_CLEW_SOFTEN = 0.03;
 
 /** 1 at mid-width, 0 at both leeches. Its complement is the leech weight. */
 export function midArch(u: number): number {
@@ -111,12 +144,118 @@ export function midArch(u: number): number {
  * §V28: floored divisor, and never fewer than two cloths.
  */
 /**
- * Peak camber as a fraction of the CHORD, from the wind drive. Signed: a
- * backed sail bows the other way. Bounded at source (§V44).
+ * Peak camber as a fraction of the CHORD. Signed: a backed sail bows the other
+ * way. Bounded at source (§V44).
+ *
+ * §T.74a — DEPTH IS NOT AUTHORED, IT IS THE CONSEQUENCE OF EXCESS CLOTH.
+ * `sailClothExcess` is how much longer the cloth is than the line between the
+ * points it is set between; a strip of chord `c` bowing by `d` is
+ * `c·(1 + 8/3·(d/c)²)` long ({@link SAIL_ARC_COEFF}), so inverting that gives
+ * `d/c = √(3e/8)` and there is no free parameter left. The drive multiplies the
+ * excess TAKEN UP, not the depth: slack cloth has not yet formed an arc, and
+ * once it has, more wind buys tension rather than belly.
+ *
+ * The observable consequence, and the reason this is not a rename: camber goes
+ * as √drive. The old law was linear, so a gale looked twice as deep as a breeze
+ * however the curve upstream was shaped. Now a sail fills EARLY and then stops
+ * — which is what canvas does, and is why the cap below almost never binds.
  */
 export function sailCamberRatio(drive: number, p: ShipMaterialParams): number {
   const cap = Math.max(0, finite(p.sailCamberMax, 0.15));
-  return clamp(finite(drive) * Math.max(0, finite(p.sailCamber)), -cap, cap);
+  const d = finite(drive);
+  // §V28: excess ≥ 0 and |d| ≥ 0, so the sqrt argument can never go negative
+  /**
+   * HOW MUCH OF THE CUT EXCESS THE WIND HAS ACTUALLY TAKEN UP.
+   *
+   * `smoothstep`, not `|drive|`, AND THE REASON IS THE SQUARE ROOT UNDERNEATH.
+   * √|d| has an INFINITE derivative at zero, so a sail crossing from backed to
+   * drawing would snap between the two shapes at unbounded rate — measured on
+   * the first cut of this: an anchor moved 0.102 m over the first 1% of drive,
+   * against 0.063 m for §V.71's whole-travel continuity bound. The old linear
+   * law was C1 through zero and would have made that a regression nobody asked
+   * for. smoothstep is quadratic at the origin, so the √ of it is LINEAR there
+   * and the crossing is smooth again, while the curve stays concave everywhere
+   * above it — which is the part that was worth having.
+   *
+   * It is also the better physical statement: slack cloth does not snap taut,
+   * it is drawn taut, and the excess arrives over a range of pressure.
+   */
+  // @band-limited-elsewhere: the argument is `drive`, a WIND SCALAR that is
+  // uniform over the whole sail. There is no spatial coordinate here, no
+  // period, and no pixel — nothing to alias against (§V.48).
+  // @band-limited-elsewhere
+  const takenUp = Math.max(0, finite(p.sailClothExcess)) * smoothstep(0, 1, Math.abs(d));
+  // e = SAIL_ARC_COEFF·k²  ⟹  k = √(e / SAIL_ARC_COEFF). ONE inversion, and it
+  // is the same coefficient `arcShorten` spends, so the two cannot drift.
+  const camber = Math.sqrt(takenUp / SAIL_ARC_COEFF);
+  return clamp(Math.sign(d) * camber, -cap, cap);
+}
+
+/**
+ * HOW MUCH HARDER THE CLOTH IS PULLING AT (u, v) THAN AT THE BELLY'S OWN
+ * REFERENCE STATION. ≥ 0, and exactly 1 at (0.5, SAIL_BELLY_FOOT) by
+ * construction, for a sail of any size.
+ *
+ * §T.74c, and the user's words: "really shaping the bulge FROM THE CORNERS
+ * where force is applied… they should only be anchored where it makes sense,
+ * and in this case only at the corners with the ropes — that's where the
+ * tension point should be."
+ *
+ * THE PHYSICS. A square sail's boundary is fixed along the head (bent to its
+ * yard) and at exactly TWO POINTS, the clews. The pressure on every element of
+ * cloth in the lower sail has to be carried to one of those two points, so the
+ * load crossing a circle of radius r about a clew is roughly FIXED while the
+ * circumference it crosses is 2πr — tension per unit length therefore grows as
+ * 1/r, without bound. Cloth pulled that hard cannot bow: the membrane equation
+ * ∇·(T∇w) = −p with T ∝ 1/r gives w ∝ r³ at the corner against w ∝ r² in the
+ * field, so the clew sits in a flat, taut, nearly ruled triangle of canvas and
+ * the belly hangs slack inboard of it.
+ *
+ * That is the OPPOSITE of the separable field this replaced, whose depth at a
+ * clew was set by a profile that knew nothing about the pin. Measured on the
+ * old shape at full drive, local slack (arc/chord − 1 over a ±0.06u window) ran
+ * 0.00169 at the clew against 0.00083 in the belly — TWICE AS SLACK where it
+ * should have been tautest, which is precisely why the sail read as a bulge
+ * pushed into a plate.
+ *
+ * WHY IT IS NORMALISED AT THE REFERENCE STATION rather than at its own minimum:
+ * `sailCamberRatio` is defined as the camber AT the belly's deepest point, and
+ * (mid-width, SAIL_BELLY_FOOT) is where `sailDraftProfile × sailBellyProfile`
+ * peaks. Pinning the field to 1 there keeps camber meaning what it says on
+ * every sail of every aspect, so `sailCamberMax` stays a true ceiling (§V44)
+ * and the chord-relative camber law survives unchanged.
+ *
+ * §V66 — SCALED BY ITS OWN DIMENSION. The distances are METRES on the cut
+ * panel, not (u, v): a clew's grip reaches a physical distance into the cloth,
+ * so a 12 m course and a 6 m topgallant must not get the same reach in
+ * normalised coordinates. That is why this needs the drop as well as the width.
+ *
+ * §V28 — the distance is SOFTENED (`√(r² + ε²)`), not floored with a `max`. A
+ * max is C0, and the surface's normal comes from a finite difference of this
+ * function across a 0.03-in-u step that straddles the kink at the clew; the
+ * soft form is smooth everywhere and costs the same.
+ */
+export function cornerTension(
+  u: number,
+  v: number,
+  width: number,
+  drop: number,
+  grip: number,
+): number {
+  const c = Math.max(0.01, finite(width)); // §V28
+  const h = Math.max(0.01, finite(drop)); // §V28
+  const diag = Math.hypot(c, h);
+  const reach = Math.max(0, finite(grip)) * diag;
+  // the softening length: a clew is a CRINGLE, not a mathematical point, and
+  // this is the radius over which its grip stops growing. A fixed fraction of
+  // the diagonal, so it rides the sail's size like everything else.
+  const eps2 = (SAIL_CLEW_SOFTEN * diag) ** 2;
+  const t = (uu: number, vv: number): number => {
+    const rp = Math.sqrt((uu * c) ** 2 + (vv * h) ** 2 + eps2);
+    const rs = Math.sqrt(((1 - uu) * c) ** 2 + (vv * h) ** 2 + eps2);
+    return 1 + reach / rp + reach / rs; // divisors ≥ ε·diag > 0 by construction
+  };
+  return t(clamp01(finite(u)), clamp01(finite(v))) / t(0.5, SAIL_BELLY_FOOT);
 }
 
 /**

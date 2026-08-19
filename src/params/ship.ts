@@ -620,19 +620,56 @@ export interface ShipMaterialParams {
   sailBacklitColor: number;
   sailBacklitStrength: number;
   /**
-   * PEAK CAMBER PER UNIT DRIVE, AS A FRACTION OF THE CHORD.
+   * EXCESS CLOTH — how much MORE canvas the sail is cut with than the distance
+   * between the points it is set between, as a fraction of that distance.
    *
-   * Was `sailBillow`, "fraction of sail DROP" — and that was the whole of the
-   * user's standing "still looks very very bulgy". The belly is a section
-   * bowing across the sail's WIDTH, so its depth is camber and camber is
-   * measured against the chord it bows over. Scaling it by the drop measured
-   * it against the wrong dimension, and the number could not be read as
-   * camber at all: at the shipped 0.68 the main course carried 24.8% of chord
-   * at the default sea and 40.7% in a storm, against a real square sail's
-   * 10-15%. RENAMED rather than retuned on purpose — a silent meaning change
-   * is §B.12's trap, and a stale 0.68 in a saved preset must fail loudly.
+   * THIS IS THE KNOB THAT REPLACED `sailCamber`, AND THE REPLACEMENT IS §T.74a.
+   * Camber was an AUTHORED DEPTH: a number of centimetres of bulge, pushed into
+   * the panel. A real sail has no such number. It has a shape it was CUT to,
+   * and the belly is simply the surface a sheet takes when it holds more cloth
+   * than the straight line between its corners — so depth is a CONSEQUENCE, and
+   * the cut is the cause. User: "it feels like we're pushing a bulge into a
+   * concrete plate instead of the cloth stretching as a whole".
+   *
+   * The conversion is exact for the parabolic section the cloth actually takes
+   * ({@link sailDraftProfile}): a strip bowing by depth `d` over a chord `c` is
+   * `c·(1 + 8/3·(d/c)²)` long, so excess `e` buys camber `√(3e/8)` and no more.
+   * `sailCamberRatio` is the ONE place that inversion happens.
+   *
+   * TWO THINGS FALL OUT THAT THE OLD KNOB COULD NOT DO, and both are the point:
+   *  · camber goes as √drive, not drive — the cloth rounds up almost at once in
+   *    light air and then STOPS deepening, because once the excess is taken up
+   *    there is no more cloth to bulge with. More wind buys tension, not depth.
+   *    That is how canvas behaves and a linear law cannot express it.
+   *  · a flatter sail is now a DIFFERENTLY CUT sail rather than a less inflated
+   *    one, which is why the arc-length shrink and the belly can no longer
+   *    disagree: they read the same number.
+   *
+   * Real broadseam excess on a working square sail is a few per cent; 0.08 puts
+   * peak camber at 17.3% of chord, just above the 10-15% band a course carries
+   * and comfortably under {@link sailCamberMax}.
    */
-  sailCamber: number;
+  sailClothExcess: number;
+  /**
+   * CORNER GRIP — how far a clew's pull reaches into the cloth, as a fraction
+   * of the sail's own diagonal. This is §T.74c, and it is the whole of the
+   * user's "shaping the bulge FROM THE CORNERS where force is applied".
+   *
+   * A square sail's boundary is fixed at the head (bent to its yard along the
+   * whole length) and at exactly TWO POINTS, the clews. Everything the wind
+   * pushes on in the lower half of the sail has to route its load through one
+   * of those two points, so the tension there is not merely high, it is
+   * SINGULAR: the load crossing a circle of radius r about a clew is fixed, the
+   * circumference is 2πr, so the tension per unit length grows as 1/r. Cloth
+   * under high tension cannot bulge. The corner is therefore FLAT AND TAUT and
+   * the belly is slack — measured on the old shape, the ratio ran the wrong
+   * way (the cloth was 2-3x SLACKER at the clew than in the belly), which is
+   * exactly the "bulge pushed into a plate" reading.
+   *
+   * 0 restores the old separable field and the flat-plate look; the effect is
+   * bounded above because the field only ever DIVIDES the belly.
+   */
+  sailCornerGrip: number;
   /** hard ceiling on peak camber (fraction of chord). The sheets are hauled
    *  taut: past full load more pressure buys tension, not depth. Bites only
    *  above ~18 m/s, which is what a ceiling is for */
@@ -924,7 +961,18 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
      * binds below a gale — the clamp was inert at 0.15 too, which is why
      * A/B-ing `sailCamberMax` alone moved nothing.
      */
-    sailCamber: 0.20, sailCamberMax: 0.20, sailLoadCurve: 0.45,
+    /**
+     * §T.74a: 0.065 of excess cloth ⟹ √(0.065/SAIL_ARC_COEFF) = 18.5% of
+     * chord at full drive, against the old linear law's 20.0% — the SHAPE
+     * changed, the depth deliberately did not, so this is not a retune wearing
+     * a physics costume. Under way at the default sea (drive 0.74) it reads
+     * 16.9% against 14.8%, because the √ curve does what the old linear one
+     * could not: a sail is either full or it is not, and wind above that buys
+     * tension rather than belly. 6.5% is also a believable BROADSEAM — the old
+     * knob was a depth and had no such reading.
+     */
+    sailClothExcess: 0.065, sailCornerGrip: 0.28,
+    sailCamberMax: 0.20, sailLoadCurve: 0.45,
     sailLeechOpen: 0.3, sailFootRoach: 0.035, sailTwist: 0.12,
     sailSheetPull: 1.0, sailSheetSpread: 0.45,
     sailFlutterLuffRate: 1.8,
@@ -987,8 +1035,12 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     waleDarken: { min: 0, max: 1, step: 0.01 },
     sailWeaveScale: { min: 2, max: 60, step: 0.5 },
     sailBacklitStrength: { min: 0, max: 2, step: 0.01 },
-    // both in fractions of CHORD, so the slider reads as camber directly
-    sailCamber: { min: 0, max: 0.4, step: 0.005 },
+    // excess is a fraction of the CUT LENGTH; camber √(3e/8) follows from it,
+    // so 0.25 of excess is already 30% of chord and past any real sail
+    sailClothExcess: { min: 0, max: 0.25, step: 0.002 },
+    // a fraction of the sail's own DIAGONAL — how far a clew's grip reaches
+    sailCornerGrip: { min: 0, max: 0.6, step: 0.01 },
+    // in fractions of CHORD, so the slider reads as camber directly
     sailCamberMax: { min: 0.02, max: 0.5, step: 0.005 },
     sailLeechOpen: { min: 0, max: 1, step: 0.01 },
     sailFootRoach: { min: 0, max: 0.25, step: 0.005 },

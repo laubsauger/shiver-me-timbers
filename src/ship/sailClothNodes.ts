@@ -35,6 +35,7 @@ import {
   SAIL_ARC_COEFF,
   SAIL_BELLY_FOOT,
   SAIL_BELLY_HEAD,
+  SAIL_CLEW_SOFTEN,
   SAIL_DRAFT_MAX,
   SAIL_DRAFT_MIN,
   SAIL_FLUTTER_BASE,
@@ -55,7 +56,8 @@ type UniformNode = ReturnType<typeof uniform>;
 
 /** the shape uniforms, so the material can refresh them from params */
 export interface SailShapeUniforms {
-  camber: UniformNode;
+  clothExcess: UniformNode;
+  cornerGrip: UniformNode;
   camberMax: UniformNode;
   leechOpen: UniformNode;
   footRoach: UniformNode;
@@ -126,18 +128,59 @@ export function createSailClothNodes(
    * PEAK CAMBER AS A FRACTION OF THE CHORD, bounded at source (§V44), and
    * eased by the trim because a deeply reefed sail is flatter.
    *
-   * This used to be `sailBillow × drop` — a fraction of the sail's HEIGHT for
-   * a bow that runs across its WIDTH. Measured on the shipped params, the main
-   * course carried 24.8% of chord at the default sea and 40.7% in a storm,
-   * against a real square sail's 10-15%. That mis-scaling is the whole of the
-   * user's "still looks very very bulgy".
+   * Transliteration of sailShapeProfiles.sailCamberRatio — §T.74a: DEPTH IS
+   * DERIVED FROM EXCESS CLOTH, not authored. `e = SAIL_ARC_COEFF·k²` inverted,
+   * with the drive scaling the excess TAKEN UP rather than the depth, so camber
+   * goes as √drive: the sail fills early and then stops deepening.
+   *
+   * `max(…, 0)` before the sqrt is §V28/§B.5's rule for `pow`: a WGSL `sqrt` of
+   * a value a hair below zero is undefined, and undefined here is a NaN vertex.
    */
+  // smoothstep, NOT |drive| — √|d| has an infinite derivative at zero, so a
+  // sail crossing from backed to drawing would snap between the two shapes at
+  // unbounded rate (measured: 0.102 m of anchor travel over the first 1% of
+  // drive, against §V.71's 0.063 m whole-travel bound). smoothstep is quadratic
+  // at the origin, so its √ is linear there. §V23: functional 3-arg form.
+  // @band-limited-elsewhere: the argument is `drive`, a UNIFORM — one wind
+  // scalar for the whole sail. No spatial coordinate, no period, no pixel, so
+  // there is nothing for it to alias against (§V.48).
+  const takenUp = max(u.clothExcess, float(0)).mul(
+    // @band-limited-elsewhere
+    smoothstep(float(0), float(1), wind.drive.abs()),
+  );
   const camber = clamp(
-    wind.drive.mul(u.camber),
+    takenUp.div(SAIL_ARC_COEFF).max(float(0)).sqrt().mul(wind.drive.sign()),
     u.camberMax.negate(),
     u.camberMax,
   ).mul(set);
   const depth = camber.mul(width);
+
+  /**
+   * THE CORNER TENSION FIELD (§T.74c) — transliteration of
+   * sailShapeProfiles.cornerTension. Distances in METRES on the cut panel
+   * (§V66), softened rather than floored so the finite-difference normal below
+   * never straddles a kink (§V28), and normalised at (0.5, SAIL_BELLY_FOOT) so
+   * `camber` keeps meaning the peak on a sail of any aspect.
+   */
+  const diag = width.mul(width).add(builtDrop.mul(builtDrop)).sqrt();
+  const reach = max(u.cornerGrip, float(0)).mul(diag);
+  const eps2 = diag.mul(SAIL_CLEW_SOFTEN).mul(diag.mul(SAIL_CLEW_SOFTEN));
+  const tensionRaw = Fn(([uu, v]: [Node, Node]) => {
+    const dy = v.mul(builtDrop);
+    const dp = uu.mul(width);
+    const ds = uu.oneMinus().mul(width);
+    // squared by multiplication, never pow(): a WGSL pow() with a base a hair
+    // below zero is undefined (§V28, §B.5), and sqrt of a sum of squares is
+    // non-negative by construction here
+    const rp = dp.mul(dp).add(dy.mul(dy)).add(eps2).sqrt();
+    const rs = ds.mul(ds).add(dy.mul(dy)).add(eps2).sqrt();
+    // divisors ≥ SAIL_CLEW_SOFTEN·diag > 0 by construction (§V28)
+    return float(1).add(reach.div(rp)).add(reach.div(rs));
+  });
+  const tensionRef = tensionRaw(float(0.5), float(SAIL_BELLY_FOOT));
+  const tensionAt = Fn(([uu, v]: [Node, Node]) =>
+    max(tensionRaw(uu, v).div(tensionRef), float(1e-3)), // §V28
+  );
 
   /**
    * THE CORNER CONSTRAINT — transliteration of sailShape.sailCornerPull.
@@ -226,9 +269,13 @@ export function createSailClothNodes(
     // painted on a smooth interior does not change how the surface reads.
     const q = sin(uu.sub(SAIL_LACE_MARGIN).div(SAIL_LACE_SPAN).mul(laces.sub(1)).mul(Math.PI));
     const quilt = u.seamQuilt.mul(q.mul(q).sub(0.5)).mul(acrossAt(uu, v)).mul(downAt(v));
-    const belly = depth.mul(
-      acrossAt(uu, v).mul(downAt(v)).add(quilt).add(u.leechOpen.mul(leechAt(uu, v))),
-    );
+    // §T.74c: the tension field divides the WHOLE section — quilting and leech
+    // standoff are cloth too, and cloth hauled bar-taut into a clew cannot
+    // corrugate or fly any more than it can belly. Division only ever takes
+    // depth away, so `depth` stays the §V44 bound on the whole expression.
+    const belly = depth
+      .mul(acrossAt(uu, v).mul(downAt(v)).add(quilt).add(u.leechOpen.mul(leechAt(uu, v))))
+      .div(tensionAt(uu, v));
     // THE CARRIER IS AN ACCUMULATED PHASE (§V.55, §B.30). `time × ω(luff)` is
     // a phase only while ω is constant, and luff breathes with every gust —
     // measured on the flags at 0.93 Hz intended, 59.5 Hz after ten minutes.
@@ -270,14 +317,29 @@ export function createSailClothNodes(
    * foot, out of arc length alone. `sailFootRoach` is the static cut on top,
    * so the bottom edge is not a straight line even becalmed.
    */
+  // EACH SHRINK READS THE BOW ITS OWN STRIP ACTUALLY TAKES, tension included —
+  // a strip held taut by a clew does not bow, so it gives up no span. Sampled
+  // at the strip's own PEAK (mid-width across, the draft height down), because
+  // sampling at (u, v) would shorten a strip differently at each of its ends,
+  // which is a shear rather than a shortening. See sailShape.sailClothPoint.
   const clothX = Fn(([uu, v]: [Node, Node]) =>
-    uu.sub(0.5).mul(width).mul(arcShorten(camber.mul(downAt(v)))).add(cornerPull(uu, v).x),
+    uu
+      .sub(0.5)
+      .mul(width)
+      .mul(arcShorten(camber.mul(downAt(v)).div(tensionAt(float(0.5), v))))
+      .add(cornerPull(uu, v).x),
   );
   const clothY = Fn(([uu, v]: [Node, Node]) => {
     // both terms of the section bow this strip: the membrane belly (zero at
     // the leech) and the leech's own standoff (zero at mid-width)
     const stripBow = acrossAt(uu, v).add(u.leechOpen.mul(midArch(uu).oneMinus()));
-    const spanShrink = arcShorten(camber.mul(stripBow).mul(width).div(builtDrop));
+    const spanShrink = arcShorten(
+      camber
+        .mul(stripBow)
+        .mul(width)
+        .div(builtDrop)
+        .div(tensionAt(uu, float(SAIL_BELLY_FOOT))),
+    );
     const roach = float(1).sub(u.footRoach.mul(midArch(uu)));
     return v
       .oneMinus()
@@ -396,7 +458,8 @@ export function createSailClothNodes(
 /** build the shape uniforms; the material owns refreshing them */
 export function createSailShapeUniforms(p: ShipMaterialParams): SailShapeUniforms {
   return {
-    camber: uniform(p.sailCamber),
+    clothExcess: uniform(p.sailClothExcess),
+    cornerGrip: uniform(p.sailCornerGrip),
     camberMax: uniform(p.sailCamberMax),
     leechOpen: uniform(p.sailLeechOpen),
     footRoach: uniform(p.sailFootRoach),
@@ -416,7 +479,8 @@ export function createSailShapeUniforms(p: ShipMaterialParams): SailShapeUniform
 
 /** push live param values into the shape uniforms (§V16: Tweakpane drives them) */
 export function refreshSailShapeUniforms(u: SailShapeUniforms, p: ShipMaterialParams): void {
-  u.camber.value = p.sailCamber;
+  u.clothExcess.value = p.sailClothExcess;
+  u.cornerGrip.value = p.sailCornerGrip;
   u.camberMax.value = p.sailCamberMax;
   u.leechOpen.value = p.sailLeechOpen;
   u.footRoach.value = p.sailFootRoach;

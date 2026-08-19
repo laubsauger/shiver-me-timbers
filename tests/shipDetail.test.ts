@@ -705,7 +705,9 @@ describe('sail-attached anchors ride the canvas (§V12 endpoints, §V.45 rule)',
   it('the flat socket station and the live one agree when there is no cloth', () => {
     // a zero-drive, zero-flutter sail must resolve to exactly its built corner,
     // or the CPU mirror has drifted from the panel it claims to describe
-    const p = { ...shipMaterialParams, sailCamber: 0, sailFootRoach: 0, sailFlutterAmp: 0 };
+    // §T.74a: `sailClothExcess` is the knob now — a sail cut with no excess
+    // cloth has nothing to bulge with, which is the honest way to say "flat"
+    const p = { ...shipMaterialParams, sailClothExcess: 0, sailFootRoach: 0, sailFlutterAmp: 0 };
     const sail = galleon.find((s) => s.id === 'sail-main-lower')!;
     const width = sail.aabb.max[0] - sail.aabb.min[0];
     const drop = -sail.aabb.min[1];
