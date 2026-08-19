@@ -305,6 +305,13 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
   /** refilled in place each frame so a Tweakpane edit is live, without churn */
   const prof = createProfiles();
   let cursor = 0;
+  /**
+   * Seconds of particle life still unspent, i.e. an upper bound on how long
+   * the pool can still contain anything alive. `spawn` raises it, `update`
+   * counts it down. Zero means every slot is provably dead, which is the one
+   * condition under which skipping the walk cannot change a pixel.
+   */
+  let liveFor = 0;
 
   /**
    * `seed` keys the per-particle variation. Two guns in one broadside get
@@ -364,6 +371,19 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
     aspectArr[i] = smoky ? particleAspect(seed, index, nn(p.smokeAspect, 0.75)) : 1;
     seedArr[i] = smoky ? particleSpin(seed, index) / (Math.PI * 2) : 0;
     tearArr[i] = smoky ? clamp01(nn(p.smokeDissolve, 0.55)) : 0;
+    // §V.79 idle skip: the longest life still unspent in the pool. `update`
+    // counts it down and skips the whole 1536-slot walk (and its seven buffer
+    // uploads, ~68 KB/frame) once it reaches zero. Taking the MAX rather than
+    // tracking a live count is exact and costs one compare per spawn: every
+    // particle's death is known the moment it is born, so the pool is provably
+    // empty once the longest of them has run out.
+    if (life[i] > liveFor) liveFor = life[i];
+    // aspect/seed/tear are written HERE and nowhere else, so they are uploaded
+    // here and nowhere else. They used to be re-flagged every frame in
+    // `update`, re-uploading 18 KB of bytes that had not changed.
+    aspectAttr.needsUpdate = true;
+    seedAttr.needsUpdate = true;
+    tearAttr.needsUpdate = true;
   };
 
   return {
@@ -536,61 +556,74 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
       fillProfiles(prof, p);
       const gain = nn(p.intensity, 1);
 
-      for (let i = 0; i < count; i++) {
-        const t = ageFraction(age[i], life[i]);
-        if (t >= 1) {
-          sizeArr[i] = 0; // §V.28: dead is zero-SIZE, not zero-opacity
-          continue;
-        }
-        age[i] += dt;
-        const pr = prof[kinds[i]];
-        const v = stepVelocity(
-          velArr[i * 3], velArr[i * 3 + 1], velArr[i * 3 + 2], pr, dt, windX, windZ,
-        );
-        velArr[i * 3] = v[0];
-        velArr[i * 3 + 1] = v[1];
-        velArr[i * 3 + 2] = v[2];
-        posArr[i * 3] += v[0] * dt;
-        posArr[i * 3 + 1] += v[1] * dt;
-        posArr[i * 3 + 2] += v[2] * dt;
+      /**
+       * NOTHING IN FLIGHT → NOTHING TO DO. Measured before this guard: the
+       * loop below walked all 1536 slots and re-uploaded seven attribute
+       * buffers (~68 KB) every single frame of a quiet cruise, with the whole
+       * pool dead and every `sizeArr` entry already zero.
+       *
+       * `liveFor` is an upper bound on remaining life, so it hits zero only
+       * AFTER the frame on which the last particle's `t >= 1` branch wrote its
+       * final `sizeArr[i] = 0` and flagged the upload — the pool is flushed
+       * before it is skipped, which is why this cannot leave a stuck sprite on
+       * screen. The param pushes below stay OUTSIDE the guard so a live
+       * Tweakpane drag still lands while idle.
+       */
+      if (liveFor > 0) {
+        liveFor = Math.max(0, liveFor - dt);
+        for (let i = 0; i < count; i++) {
+          const t = ageFraction(age[i], life[i]);
+          if (t >= 1) {
+            sizeArr[i] = 0; // §V.28: dead is zero-SIZE, not zero-opacity
+            continue;
+          }
+          age[i] += dt;
+          const pr = prof[kinds[i]];
+          const v = stepVelocity(
+            velArr[i * 3], velArr[i * 3 + 1], velArr[i * 3 + 2], pr, dt, windX, windZ,
+          );
+          velArr[i * 3] = v[0];
+          velArr[i * 3 + 1] = v[1];
+          velArr[i * 3 + 2] = v[2];
+          posArr[i * 3] += v[0] * dt;
+          posArr[i * 3 + 1] += v[1] * dt;
+          posArr[i * 3 + 2] += v[2] * dt;
 
-        const next = ageFraction(age[i], life[i]);
-        // §V.44: every factor is bounded at source — brightnessAt ∈ [0,1],
-        // boost ≤ BOOST_MAX, colour ∈ [0,1] — so the product is too
-        const fade = brightnessAt(next);
-        const b = fade * gain * pr.boost;
-        sizeArr[i] = sizeAt(pr, next) * sizeScale[i];
-        colArr[i * 3] = pr.color[0] * b;
-        colArr[i * 3 + 1] = pr.color[1] * b;
-        colArr[i * 3 + 2] = pr.color[2] * b;
-        /**
-         * THE FADE HAS TO BE IN THE ALPHA TOO, and this is not symmetry for
-         * its own sake — it is what makes the composite a composite.
-         *
-         * `colArr` carries colour ALREADY MULTIPLIED by the age fade, because
-         * for an additive particle the fade IS the brightness. Leaving the
-         * alpha at a flat per-kind constant then hands the blender a fully
-         * OPAQUE fragment whose colour has been faded toward black, so a
-         * water particle paints DARK at both ends of its life — hardest in the
-         * first 80 ms, where `brightnessAt` is still ramping in from zero and
-         * the particle is at its largest. Caught on screen: the new column
-         * rendered as a navy bruise on the sea rather than as white water.
-         *
-         * Multiplying the same fade into the alpha makes both channels agree
-         * on one coverage f = cover·fade, so the fragment is exactly
-         * `colour·f` over `dst·(1−f)` — a correct source-over of water that
-         * thins as it dies instead of darkening. Additive kinds are at
-         * `alpha` 0 and are untouched by this line.
-         */
-        alphaArr[i] = clamp01(pr.alpha) * fade;
+          const next = ageFraction(age[i], life[i]);
+          // §V.44: every factor is bounded at source — brightnessAt ∈ [0,1],
+          // boost ≤ BOOST_MAX, colour ∈ [0,1] — so the product is too
+          const fade = brightnessAt(next);
+          const b = fade * gain * pr.boost;
+          sizeArr[i] = sizeAt(pr, next) * sizeScale[i];
+          colArr[i * 3] = pr.color[0] * b;
+          colArr[i * 3 + 1] = pr.color[1] * b;
+          colArr[i * 3 + 2] = pr.color[2] * b;
+          /**
+           * THE FADE HAS TO BE IN THE ALPHA TOO, and this is not symmetry for
+           * its own sake — it is what makes the composite a composite.
+           *
+           * `colArr` carries colour ALREADY MULTIPLIED by the age fade, because
+           * for an additive particle the fade IS the brightness. Leaving the
+           * alpha at a flat per-kind constant then hands the blender a fully
+           * OPAQUE fragment whose colour has been faded toward black, so a
+           * water particle paints DARK at both ends of its life — hardest in the
+           * first 80 ms, where `brightnessAt` is still ramping in from zero and
+           * the particle is at its largest. Caught on screen: the new column
+           * rendered as a navy bruise on the sea rather than as white water.
+           *
+           * Multiplying the same fade into the alpha makes both channels agree
+           * on one coverage f = cover·fade, so the fragment is exactly
+           * `colour·f` over `dst·(1−f)` — a correct source-over of water that
+           * thins as it dies instead of darkening. Additive kinds are at
+           * `alpha` 0 and are untouched by this line.
+           */
+          alphaArr[i] = clamp01(pr.alpha) * fade;
+        }
+        posAttr.needsUpdate = true;
+        colAttr.needsUpdate = true;
+        sizeAttr.needsUpdate = true;
+        alphaAttr.needsUpdate = true;
       }
-      posAttr.needsUpdate = true;
-      colAttr.needsUpdate = true;
-      sizeAttr.needsUpdate = true;
-      aspectAttr.needsUpdate = true;
-      seedAttr.needsUpdate = true;
-      tearAttr.needsUpdate = true;
-      alphaAttr.needsUpdate = true;
       uDissolveScale.value = Math.max(0.01, nn(p.smokeDissolveScale, 2.6));
 
       // the wind reaches the rings for the foam scars alone: they float IN the
