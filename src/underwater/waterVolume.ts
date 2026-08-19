@@ -41,7 +41,13 @@
  * depth exactly, because `seaY` is sampled at its own XZ where the plane and
  * the displaced surface do coincide. Everything else is ray direction:
  *
- *     underLen = min( rayLen, max(0, seaY - camY) / max(dirY, ε) )
+ *     underLen = min( rayLen, (camDepth + rise) / max(dirY, ε) )
+ *
+ * where `rise` is how much higher the surface is AT THE FRAGMENT than under
+ * the eye — because the exit is a point on a displaced wave, not on a plane
+ * (§V.71). Without it the tint terminates on a straight horizontal line and
+ * crests draw through it unfogged; see the `rise` block below for the
+ * derivation and the cap.
  *
  * Above the surface the numerator is 0, so the volume is the exact identity on
  * every pixel — no lag, no residue, and §V.24's see-through path keeps sole
@@ -54,9 +60,12 @@
  * floor stays for what it is actually for — a grazing upward ray must not
  * divide by zero.
  *
- * SNELL'S WINDOW IS STILL FREE, and is now the same expression: path length
- * grows as 1/sin(elevation), so straight up is one depth of water and the
- * horizon closes exponentially. Nothing draws the window; it is depth/dirY.
+ * SNELL'S WINDOW'S FALLOFF IS STILL FREE, and is the same expression: path
+ * length grows as 1/sin(elevation), so straight up is one depth of water and
+ * the horizon closes exponentially. Note this is only the window's ATTENUATION
+ * — what is drawn INSIDE it (the refracted sky, the n² radiance gain, the
+ * critical angle) belongs to src/ocean/surfaceMaterial.ts's backface branch,
+ * which is where the window itself lives.
  *
  * COEFFICIENTS ARE NOT OURS. Extinction is `submergedAbsorption*` from
  * params/caustics — Jerlov K_d in 1/m, the SAME numbers the hull tint and the
@@ -104,6 +113,13 @@ export interface VolumeUniforms {
   camPos: ShaderNodeObject<UniformNode<THREE.Vector3>>;
   /** sea surface height (m) at the camera's own XZ — the split plane */
   seaY: ShaderNodeObject<UniformNode<number>>;
+  /**
+   * How far above `seaY` a crest may reach near the eye, in metres — the LIVE
+   * envelope, measured off the same height function the hull floats on (§V.8),
+   * never authored. See `rise` below for what it is for and why it is a CAP
+   * rather than a height.
+   */
+  waveRise: ShaderNodeObject<UniformNode<number>>;
 }
 
 export interface WaterVolume {
@@ -123,6 +139,7 @@ export function createVolumeUniforms(): VolumeUniforms {
     camWorld: uniform(new THREE.Matrix4()),
     camPos: uniform(new THREE.Vector3()),
     seaY: uniform(0),
+    waveRise: uniform(1),
   };
 }
 
@@ -205,33 +222,99 @@ export function buildWaterVolume(
 
   // ── submerged path length of THIS ray (see header) ────────────────────
   // The camera's own depth is exact: `seaY` is sampled at its XZ, the one
-  // place the split plane and the displaced surface actually coincide. The
-  // far endpoint's height is deliberately NOT consulted — it is a point on a
-  // wave kilometres away, and reading it against this plane is what put a
-  // solid green-blue wash over the frame at every crossing.
+  // place the split plane and the displaced surface actually coincide. It is
+  // the ONLY thing that can switch the volume on — the far endpoint gets a
+  // vote on where the ray EXITS (see `rise`) but never on whether there is any
+  // water at all, because reading the far end against this plane as a second
+  // depth is what put a solid green-blue wash over the frame at every crossing.
   const camDepth = v.seaY.sub(v.camPos.y).max(0);
-  // An upward ray breaks the surface after depth/sin(elevation) metres. A
-  // downward or level one never does, and that is stated as a SELECT rather
-  // than leaned on the §V.28 floor: `depth/ε` is only "past any reachable
-  // rayLen" while depth is large, so at 1 cm under, a floor of 1e-4 caps the
-  // lower half of the frame at 100 m of water instead of the whole ray. The
-  // unit test caught exactly that. The floor stays where it belongs — keeping
-  // a grazing upward ray from dividing by zero — and the physics is said out
-  // loud. Above the surface camDepth is 0 and BOTH arms are 0, so the volume
-  // is the exact identity on every pixel (§V.24 keeps the above-water case).
-  const exitLen = camDepth.div(rayUp.max(1e-4));
+  // THE SURFACE THE RAY EXITS THROUGH IS NOT A PLANE (§V.71, and the fourth
+  // report of this shape in this project). `camDepth/rayUp` alone answers
+  // "where does this ray cross the horizontal plane y = seaY", and the sea is
+  // a Tessendorf FFT with metres of vertical displacement, so that plane cuts
+  // straight through the swell. The visible consequence, and the user's exact
+  // words: "the underwater tint is a straight line instead of following the
+  // shape of the water surface... part of the wave above it revealing an
+  // untinted view". A crest 2 m proud of the local sea level, 30 m away, is
+  // seen at rayUp ≈ 0.1; the plane says the ray left the water after 10 m, so
+  // 20 m of water is simply not drawn and the crest reads unfogged. Because
+  // that clamp is a function of screen ELEVATION ONLY it is constant along
+  // every horizontal line of the frame — hence a straight edge, with the waves
+  // poking through it.
+  //
+  // NOT a regression of the two-ended `submergedFraction` fix above: that one
+  // deleted the FAR endpoint because it was measured against the wrong plane.
+  // This is the residual half of the same §V.8 error — the near endpoint's
+  // plane was left standing in for the whole surface.
+  //
+  // THE FIX IS THE FRAGMENT'S OWN HEIGHT, and it is exact where it matters.
+  // Every upward ray in a submerged frame terminates on the ocean clipmap
+  // (the mesh writes depth, so it also wins over anything in the air behind
+  // it), so the drawn fragment IS the exit point, and `rise` is how much
+  // higher the surface is there than under the eye. Substituting: the exit
+  //     (camDepth + rise)/rayUp  ==  rayLen
+  // identically when the fragment is on the surface, so the min() stops
+  // clipping crests and the boundary becomes the wave. Over a TROUGH the
+  // fragment is nearer than the plane crossing and min() already took it, so
+  // `rise` clamps at 0 and nothing changes.
+  //
+  // WHY IT IS CAPPED at `waveRise` rather than trusted. `fragWorld.y` is not
+  // guaranteed to be a surface point: a background pixel sits on the far plane
+  // (kilometres up), and a coarse near-field triangle can miss a 1 cm-deep
+  // exit and hand back a crest 50 m away. Capping `rise` at the LIVE crest
+  // envelope bounds the worst case at a few metres of extra water — the old
+  // behaviour is the floor of the range, the true answer is inside it, and
+  // nothing can run away. §V.8: that envelope is sampled off `cpuOcean`'s own
+  // height function in index.ts, never authored, so it tracks the sea state
+  // the ship is actually floating on.
+  const rise = fragWorld.y.sub(v.seaY).clamp(0, v.waveRise.max(0));
+  const exitLen = camDepth.add(rise).div(rayUp.max(1e-4));
+  // An upward ray breaks the surface after that many metres. A downward or
+  // level one never does, and that is stated as a SELECT rather than leaned on
+  // the §V.28 floor: `depth/ε` is only "past any reachable rayLen" while depth
+  // is large, so at 1 cm under, a floor of 1e-4 caps the lower half of the
+  // frame at 100 m of water instead of the whole ray. The unit test caught
+  // exactly that. The floor stays where it belongs — keeping a grazing upward
+  // ray from dividing by zero.
+  //
+  // THE `camDepth > 0` GATE IS NOW THE OUTER SELECT, and that is load-bearing
+  // rather than tidier: with `rise` in the numerator the upward arm is no
+  // longer identically 0 above the surface, so the exact above-water identity
+  // (§V.24 owns that case, and a lapse there is the solid green-blue frame in
+  // the header) has to be stated instead of falling out.
   const underLen = select(
-    rayUp.greaterThan(0),
-    min(rayLen, exitLen),
-    select(camDepth.greaterThan(0), rayLen, float(0)),
+    camDepth.greaterThan(0),
+    select(rayUp.greaterThan(0), min(rayLen, exitLen), rayLen),
+    float(0),
+  );
+
+  // ── the light's own leg, which is NOT the eye's ───────────────────────
+  // `submergedPathScale` = 1.4 exists because a RECEIVER only knows its own
+  // depth: the seabed is lit by light that already sank to it, so the eye→
+  // fragment segment understates the water the photons crossed. Applying it
+  // as a flat multiplier on `underLen` charges that same 40% to Snell's
+  // window, where the eye→surface path is the ENTIRE path — the light was in
+  // air one metre earlier. One scalar cannot serve both, so it is split: the
+  // extra leg is the FRAGMENT'S OWN DEPTH, which we have exactly.
+  //
+  // It agrees with the old model in its canonical case (looking straight down
+  // at a seabed 40 m under: 40 + 0.4·40 = 56 m either way) and diverges where
+  // the old one was wrong — 0 extra metres on a surface fragment, so the
+  // window brightens by the 40% it was never owed, most visibly in RED, which
+  // is where the sunset lives (K_r = 0.36/m: at 10 m down the red through the
+  // window goes 0.006 → 0.027 transmitted).
+  //
+  // Gated by the same `camDepth > 0` as the eye leg, or a seabed 40 m below a
+  // camera in open air would fog the frame the moment it left the water.
+  const sinkLen = select(
+    camDepth.greaterThan(0),
+    v.seaY.sub(fragWorld.y).max(0).mul(uPathScale.sub(1).max(0)),
+    float(0),
   );
 
   // ── per-channel Beer–Lambert ──────────────────────────────────────────
-  // `submergedPathScale` is the same honest-path multiplier the hull uses:
-  // the receiver only knows its own depth, but light also travels back to the
-  // eye through water.
-  const k = uAbsorb.mul(uMurk).mul(uPathScale);
-  const transmit = exp(k.mul(underLen).negate());
+  const k = uAbsorb.mul(uMurk);
+  const transmit = exp(k.mul(underLen.add(sinkLen)).negate());
 
   // ── inscattered water colour ──────────────────────────────────────────
   // Deepens with the CAMERA's depth (the body of water you are inside of),
@@ -281,22 +364,49 @@ export function buildWaterVolume(
  * deleted rather than deprecated — leaving it exported would let the old
  * question keep being asked.
  *
+ * `rise` is the §V.71 half: the surface at the far end is a displaced wave,
+ * not the plane through the eye, and leaving it out is what drew the tint as a
+ * straight horizontal line with crests poking through it unfogged.
+ *
  * @param camDepth metres the camera is below the sea plane (≤ 0 → above it)
  * @param rayUp ray elevation, +1 straight up, −1 straight down
  * @param rayLen distance to whatever this pixel drew, in metres
+ * @param rise metres the surface at the fragment stands above `seaY`, already
+ *        capped at the live crest envelope by the caller (negative → 0)
  * @returns metres of water on this ray, ∈ [0, rayLen]
  */
 export function submergedPathLength(
   camDepth: number,
   rayUp: number,
   rayLen: number,
+  rise = 0,
 ): number {
   const depth = Math.max(0, camDepth);
   const len = Math.max(0, rayLen);
-  // upward: exits after depth/sin(elevation). Otherwise it never exits, so
-  // the whole ray is water — but only if the eye is in the water at all.
-  if (rayUp > 0) return Math.min(len, depth / Math.max(rayUp, 1e-4));
-  return depth > 0 ? len : 0;
+  // §V.24 owns every pixel above the surface, and with `rise` in the numerator
+  // that is no longer implied by the arithmetic — so it is said first.
+  if (depth <= 0) return 0;
+  // upward: exits where the ray meets the SURFACE, which stands `rise` metres
+  // higher out there than it does over the eye. Otherwise it never exits, so
+  // the whole ray is water.
+  if (rayUp > 0) {
+    return Math.min(len, (depth + Math.max(0, rise)) / Math.max(rayUp, 1e-4));
+  }
+  return len;
+}
+
+/**
+ * CPU mirror of the LIGHT's own leg — the metres of water the photons crossed
+ * on their way DOWN to the fragment, which the eye→fragment segment does not
+ * contain. This is the half of `submergedPathScale` that Snell's window must
+ * not be charged for: a surface fragment has zero depth, so it pays nothing,
+ * while a seabed 40 m down pays 40·(scale−1).
+ *
+ * @param fragDepth metres the fragment sits below the sea plane (≤ 0 → 0)
+ * @param pathScale `causticsParams.submergedPathScale`; ≤ 1 → no extra leg
+ */
+export function lightSinkLength(fragDepth: number, pathScale: number): number {
+  return Math.max(0, fragDepth) * Math.max(0, pathScale - 1);
 }
 
 /**

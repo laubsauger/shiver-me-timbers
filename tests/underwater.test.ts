@@ -12,7 +12,11 @@ import {
   submersionState,
   type SubmersionState,
 } from '../src/underwater/submersion';
-import { submergedPathLength, transmittance } from '../src/underwater/waterVolume';
+import {
+  lightSinkLength,
+  submergedPathLength,
+  transmittance,
+} from '../src/underwater/waterVolume';
 import underwaterIndexSource from '../src/underwater/index.ts?raw';
 import waterlineBandSource from '../src/underwater/waterlineBand.ts?raw';
 import waterVolumeSource from '../src/underwater/waterVolume.ts?raw';
@@ -182,6 +186,119 @@ describe('submerged path length (the meridian, mirrors waterVolume.ts)', () => {
     const near = submergedPathLength(1e-6, 0.5, RAY);
     expect(near).toBeCloseTo(0, 5);
     expect(submergedPathLength(0, 0.5, RAY)).toBe(0);
+  });
+});
+
+/**
+ * §V.71 — the exit is a point on a DISPLACED wave, and a term that resolves it
+ * against the rest pose draws a straight line through a sea that has none.
+ *
+ * The user shot this from just under the surface: "the underwater tint is a
+ * straight line instead of following the shape of the water surface... part of
+ * the wave above it revealing an untinted view". WHY it matters, i.e. what
+ * these tests are protecting: the clamp that produced it is a function of
+ * screen ELEVATION only, so it is constant along every horizontal line of the
+ * frame — the artifact is not a soft error in a wave, it is a hard edge across
+ * the whole picture with unfogged geometry above it.
+ */
+describe('the exit rides the swell, not the plane through the eye (§V.71)', () => {
+  it('a CREST at the far end is fogged over the whole ray, not to the plane', () => {
+    // eye 1 m down; a crest 2 m proud of the local sea level, 30 m out. Its
+    // elevation is (1+2)/30, so the plane says the ray left the water after
+    // 10 m and 20 m of water goes undrawn — that missing 20 m IS the untinted
+    // wave in the screenshot. With the surface's real height at the far end
+    // the exit lands exactly on the fragment.
+    const rayUp = 3 / 30;
+    expect(submergedPathLength(1, rayUp, 30)).toBeCloseTo(10, 9); // the bug
+    expect(submergedPathLength(1, rayUp, 30, 2)).toBeCloseTo(30, 9); // the fix
+  });
+
+  it('the exit lands ON any fragment that is on the surface, at any depth', () => {
+    // The identity the fix rests on: for a surface fragment, rayUp·rayLen is
+    // camDepth + rise by construction, so (camDepth + rise)/rayUp == rayLen
+    // and min() stops clipping. If this ever stops holding, crests clip again.
+    for (const [depth, rise, len] of [
+      [3, 1.5, 40],
+      [0.2, 0.9, 12],
+      [15, 4, 300],
+    ]) {
+      const rayUp = (depth + rise) / len;
+      expect(submergedPathLength(depth, rayUp, len, rise)).toBeCloseTo(len, 6);
+    }
+  });
+
+  it('a TROUGH at the far end is unchanged — the fragment was already nearer', () => {
+    // rise is one-sided on purpose. Over a trough the fragment sits inside the
+    // plane crossing, min() already took it, and a negative rise would pull the
+    // exit in twice.
+    const rayUp = 0.2;
+    expect(submergedPathLength(1, rayUp, 3, -5)).toBe(3);
+    expect(submergedPathLength(1, rayUp, 3, 0)).toBe(3);
+  });
+
+  it('ABOVE the surface, no crest anywhere can put water on the ray', () => {
+    // THE REGRESSION GUARD. `rise` sits in the numerator that used to be
+    // camDepth alone, so the above-water identity (§V.24 owns that case) is no
+    // longer implied by the arithmetic — it is stated. Losing it is the solid
+    // green-blue frame at every waterline crossing, all over again.
+    for (const rayUp of [-1, -0.5, 0, 0.01, 0.5, 1]) {
+      expect(submergedPathLength(0, rayUp, 3000, 5)).toBe(0);
+      expect(submergedPathLength(-0.5, rayUp, 3000, 5)).toBe(0);
+    }
+  });
+
+  it('is still bounded by the ray it is measured along (§V.44)', () => {
+    // the cap on `rise` bounds how far the exit can be pushed, but the min()
+    // against the fragment is what makes it impossible to extinguish light
+    // that never reached the eye. Both halves, on absurd input.
+    expect(submergedPathLength(1, 0.001, 50, 30)).toBe(50);
+    expect(submergedPathLength(1, 1e-9, 10, 1e9)).toBe(10);
+    expect(submergedPathLength(1, 1, -5, 30)).toBe(0);
+  });
+});
+
+/**
+ * The other half of `submergedPathScale`, and why it had to be split.
+ *
+ * 1.4 exists because a RECEIVER only knows its own depth — the seabed is lit
+ * by light that already sank to it. Charged as a flat multiplier it also bills
+ * Snell's window 40% extra, where the eye→surface path is the ENTIRE path
+ * because the light was in air a metre earlier. One scalar, two different
+ * questions.
+ */
+describe("the light's own leg is the FRAGMENT's depth, not a multiplier", () => {
+  const SCALE = causticsParams.submergedPathScale;
+
+  it('a SURFACE fragment pays nothing — this is the window brightening', () => {
+    expect(lightSinkLength(0, SCALE)).toBe(0);
+    expect(lightSinkLength(-2, SCALE)).toBe(0); // a crest, above the plane
+  });
+
+  it('agrees with the old flat multiplier in its canonical case', () => {
+    // looking straight down at a seabed 40 m under: eye leg 40 m, sink leg
+    // 0.4·40 = 16 m, total 56 m — exactly 1.4·40. The split is a refinement of
+    // this model, not a replacement, so the seabed must not move.
+    const d = 40;
+    expect(submergedPathLength(d, -1, d) + lightSinkLength(d, SCALE)).toBeCloseTo(
+      d * SCALE,
+      9,
+    );
+  });
+
+  it('scales with the fragment, so a deep seabed still darkens', () => {
+    expect(lightSinkLength(80, SCALE)).toBeCloseTo(2 * lightSinkLength(40, SCALE), 9);
+    expect(lightSinkLength(40, 1)).toBe(0); // scale 1 = no extra leg at all
+    expect(lightSinkLength(40, 0.2)).toBe(0); // and never negative
+  });
+
+  it('buys the window back its RED, which is where the sunset is', () => {
+    // K_r = 0.36/m. At 10 m of water the flat 1.4 multiplier left 0.006 of the
+    // red through the window; the split leaves 0.027 — 4.7×, and red is the
+    // channel a 17.6 sky is made of.
+    const kR = causticsParams.submergedAbsorptionR;
+    const before = transmittance(kR, 10, 1, SCALE);
+    const after = transmittance(kR, 10 + lightSinkLength(0, SCALE));
+    expect(after).toBeGreaterThan(before * 4);
   });
 });
 

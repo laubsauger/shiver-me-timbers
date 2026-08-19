@@ -81,6 +81,47 @@ function finite(v: number, fallback: number): number {
 
 const FLAT_SEA: WaterHeightFn = () => 0;
 
+/**
+ * Where the volume asks the sea how tall it is (§V.8, §V.71).
+ *
+ * `waterVolume.ts` solves the exit of each upward ray against the DISPLACED
+ * surface, and caps the correction at the local crest envelope so a background
+ * pixel or a coarse near-field triangle cannot run away with it. That cap is a
+ * property of the live sea, so it is measured off the same height function the
+ * hull floats on rather than authored as a param that would be silently wrong
+ * the moment the wind changed — which is the whole failure §V.71 names.
+ *
+ * TWO RADII, EIGHT WAYS. 20 m is the near field the eye is actually inside of;
+ * 80 m is about as far as the water is still transmitting anything (K_blue
+ * 0.03/m puts a 100 m path at 5%), so a crest beyond it cannot be the one
+ * "revealing an untinted view". Sixteen bilinear grid samples per frame, next
+ * to the hundreds buoyancy already takes.
+ */
+const RISE_RADII = [20, 80] as const;
+const RISE_RING: ReadonlyArray<readonly [number, number]> = Array.from(
+  { length: 8 },
+  (_, i) => {
+    const a = (i * Math.PI) / 4;
+    return [Math.cos(a), Math.sin(a)] as const;
+  },
+);
+/** ring samples land BETWEEN crests, so the cap gets headroom, a floor for a
+ *  glassy sea, and a §V.28 ceiling so one bad sample cannot fog the frame */
+const RISE_HEADROOM = 2;
+const RISE_MIN = 1;
+const RISE_MAX = 30;
+
+function crestRiseNear(hf: WaterHeightFn, x: number, z: number, seaY: number): number {
+  let peak = 0;
+  for (const r of RISE_RADII) {
+    for (const [cx, cz] of RISE_RING) {
+      const h = hf(x + cx * r, z + cz * r);
+      if (Number.isFinite(h) && h - seaY > peak) peak = h - seaY;
+    }
+  }
+  return Math.min(RISE_MAX, Math.max(RISE_MIN, peak * RISE_HEADROOM));
+}
+
 export function createUnderwater(opts: {
   camera: THREE.PerspectiveCamera;
   sunDirProvider: () => THREE.Vector3;
@@ -151,6 +192,14 @@ export function createUnderwater(opts: {
       // The split plane is the sea at the CAMERA's XZ, so the meridian rides
       // the swell with the lens instead of sitting at a world-fixed y = 0.
       vol.seaY.value = finite(h, 0);
+      // ...and the surface AWAY from the camera is not that plane, so the
+      // volume also gets how far above it the swell reaches (see crestRiseNear
+      // and the `rise` block in waterVolume.ts). Only while submerged: this is
+      // sixteen height samples, and above the surface the volume is the exact
+      // identity and never reads it.
+      vol.waveRise.value = state.blend > 0
+        ? finite(crestRiseNear(waterHeightFn, camera.position.x, camera.position.z, vol.seaY.value), RISE_MIN)
+        : RISE_MIN;
 
       // sun screen position + visibility (in front of camera, smooth edge)
       const sunDir = sunDirProvider();

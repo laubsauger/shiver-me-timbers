@@ -199,6 +199,30 @@ const COX_MUNK_CALM_SLOPE_VAR = 0.003;
  */
 const GLINT_RADIANCE_MAX = 32;
 
+/**
+ * Refractive index of sea water at visible wavelengths. ONE number, three
+ * consequences, all of them in the Snell's-window block at the bottom of
+ * `colorNode` — which is why it is stated once here rather than as three
+ * unrelated literals down there:
+ *
+ *   · the critical angle,      cos θc = sqrt(1 − 1/n²) = 0.6614  (48.61°)
+ *   · the refraction itself,   sin θ_air = n · sin θ_water
+ *   · the RADIANCE SCALING,    L_water = L_air · n²
+ *
+ * The third is the one this project did not have anywhere. Radiance is not
+ * conserved across a refractive boundary; the invariant is L/n², so light
+ * crossing air→water is multiplied by n² = 1.777. The whole above-water sky is
+ * 1.777× brighter seen from below than seen from above, before any of the
+ * water's own extinction — that is most of "looking up should feel bright".
+ * It is PHYSICS and it is deliberately NOT `underWindowBrightness`, which is
+ * the artistic trim on top; conflating the two is how a 1.15 knob came to be
+ * standing in for a 1.777 constant and left the window's rim 3× too dark.
+ */
+const WATER_IOR = 1.333;
+const WATER_RADIANCE_GAIN = WATER_IOR * WATER_IOR; // n², the air→water scale
+/** cos of the critical angle — derived, so it cannot drift from `WATER_IOR` */
+const CRITICAL_COS = Math.sqrt(1 - 1 / (WATER_IOR * WATER_IOR));
+
 export function buildOceanSurfaceMaterial(
   sim: OceanSimulation,
   foam?: FoamSim,
@@ -2130,10 +2154,70 @@ export function buildOceanSurfaceMaterial(
     // surface is kinda broken off"). From underneath the sea is a mirror
     // ceiling except inside Snell's window (θ < 48.6°, cos ≈ 0.661), where
     // the sky pours through.
-    const upDot = viewDir.negate().dot(normalWorld).max(0); // eye→surface vs up
+    //
+    // THE WINDOW SHOWS THE SKY, REFRACTED — not a two-stop ramp indexed by the
+    // water-side angle. What was here was `mix(horizonLive, zenithLive, upDot)`,
+    // and `upDot` inside the window only ever spans 0.661→1, so the entire
+    // 180° hemisphere above the sea was drawn as the TOP THIRD of an elevation
+    // gradient. It never reached the horizon colour at all: no azimuth, no
+    // sunset band, no sense of where the sun is. Measured against the sky the
+    // background node actually draws, scene-linear at tod 17.6, the rim of the
+    // window came out at 0.359 where the correct answer (sky × n²) is 1.092 —
+    // 3× too dark exactly where the sunset lives, while the CENTRE was
+    // accidentally within 8% because the 1.15 brightness knob happens to sit
+    // near n². The user's report is that shape precisely: "as soon as we go
+    // below the surface it's very dark immediately, even looking towards the
+    // sun".
+    //
+    // This is the SAME defect that was fixed for the reflected sky 600 lines
+    // up, and the same fix: ask `skyDomeColor`. The underwater window was
+    // simply left on the pre-fix formulation. §T.39 — one sky model.
+    //
+    // §V.26 IS NOT REOPENED, AND IS NOW SCOPED. The exclusion of the sun
+    // disc/glow/halo from `skyDomeColor` was written for the ABOVE-WATER
+    // REFLECTION, where re-adding the disc paints the clean circular blob the
+    // user shot: a rough sea reflects the sun as a glint road, not as a mirror
+    // image. That argument is about a REFLECTION off a rough interface and it
+    // does not transfer to TRANSMISSION through it — from below, the sun is a
+    // real object that ought to be visible in the compressed hemisphere. It is
+    // still absent here only because the disc term lives in
+    // src/sky/skyBackground.ts and is not exported; see the note in the
+    // session report. Nothing here re-derives it.
+    //
+    // No new binding, and the §V.40 budget is untouched: `skyDomeColor` is
+    // pure ALU (one `pow`, one `exp`) and is already called twice in this same
+    // body. The refraction below is a dot, a sqrt and a normalize-by-known-
+    // length — no texture, no uniform, no branch.
+    const eyeToSurf = viewDir.negate(); // eye→surface; points UP from below
+    const upDot = eyeToSurf.dot(normalWorld).max(0); // cos θ in WATER
     const soft = uUnderWindow.y.max(0.01);
-    const snellWindow = smoothstep(float(0.661).sub(soft), float(0.661).add(soft), upDot);
-    const windowCol = mix(horizonLive, zenithLive, upDot).mul(uUnderWindow.x);
+    const snellWindow = smoothstep(
+      float(CRITICAL_COS).sub(soft),
+      float(CRITICAL_COS).add(soft),
+      upDot,
+    );
+    // Refract water→air about the LIVE wave normal (§V.71: the window rides
+    // the surface's real shape, so rolling swell swings it — which is what it
+    // does in life). Built explicitly rather than with `refract()` because
+    // refract returns vec3(0) past the critical angle and a normalize of that
+    // is a NaN that `snellWindow`'s zero cannot mop up (0 × NaN = NaN).
+    // `tangent` has length exactly sin θ_water — both inputs are unit and
+    // `upDot` is their dot — so the §V.28-floored divide IS the normalize, and
+    // it degenerates to 0 looking straight up, where the tangent is unused.
+    const sinW = float(1).sub(upDot.mul(upDot)).max(0).sqrt();
+    const tangent = eyeToSurf.sub(normalWorld.mul(upDot)).div(sinW.max(1e-4));
+    const sinA = sinW.mul(WATER_IOR).min(1); // Snell; clamped past critical
+    const cosA = float(1).sub(sinA.mul(sinA)).max(0).sqrt();
+    const airDir = tangent.mul(sinA).add(normalWorld.mul(cosA));
+    // n² is PHYSICS (see WATER_RADIANCE_GAIN); `uUnderWindow.x` is the trim.
+    // Two quantities, two names — its default drops 1.15 → 1.0 because the
+    // 1.15 was standing in for the n² that was missing.
+    // The fallback keeps its two-stop ramp but is now indexed by the AIR-side
+    // cosine, so even a build with no sky wired sweeps horizon→zenith across
+    // the window instead of showing its top third.
+    const windowCol = (skyDomeColor ? skyDomeColor(airDir) : mix(horizonLive, zenithLive, cosA))
+      .mul(WATER_RADIANCE_GAIN)
+      .mul(uUnderWindow.x);
     const ceiling = uUnderCeiling.mul(uLightFloor.add(ndl.mul(uLightGain).mul(0.5)));
     const under = mix(ceiling, windowCol, snellWindow).toVar();
     // whitecaps and wake still read as bright patches from below
