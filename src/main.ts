@@ -276,10 +276,19 @@ async function boot(): Promise<void> {
   // way. 0.5 m/s and 0.02 are ~5× and ~2× the panel's own steps, below what is
   // readable from a deck, and bound the whole calm↔storm range to ≤14 and ≤46
   // distinct spectra. Anchored at ambient, so presets and panel drags are exact.
+  //
+  // THE 3 IS THE HYSTERESIS BAND (§B.59), and it is what makes the grid a rate
+  // limit rather than a resolution. The grid alone fired a MEASURED median of
+  // 34 re-cuts over an 805 s cruise — runs of up to 14 back to back, 71 on the
+  // worst leg at 9 m/s — because a field sampled at the hull sits on a grid
+  // edge and re-crosses it forever. The band makes the weather move 1.5 m/s
+  // from the last committed value before the sea restates it: 34 → 6, longest
+  // run 14 → 1. See createAmbientHold's THE BAND for the table and the trade.
   const oceanAmbient = createAmbientHold(
     ['windSpeed', 'amplitude'],
     oceanParams,
     { windSpeed: 0.5, amplitude: 0.02 },
+    3,
   );
   const debug = createDebugShell({ onWeatherPreset: (p) => weather.apply(p) });
 

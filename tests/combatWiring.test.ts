@@ -859,16 +859,21 @@ function findInstanced(root: Object3D): (Object3D & { count: number }) | null {
   return (found as (Object3D & { count: number }) | undefined) ?? null;
 }
 
-/** the sprite pool's per-instance size attribute (0 = dead, §V.28) */
+/**
+ * The sprite pool's per-instance size buffer (0 = dead, §V.28).
+ *
+ * Reads the pool's PUBLISHED buffers rather than reaching through the node
+ * graph. The old lookup walked `material.scaleNode.value.array`, which only
+ * resolved while `scaleNode` happened to be the bare size attribute — adding
+ * the per-particle aspect stretch composed it into a `vec2(...)` expression
+ * and the lookup silently returned null, failing five unrelated tests with a
+ * shading change that had nothing to do with what they assert.
+ */
 function findSpriteSizes(root: Object3D): Float32Array | null {
-  let found: Float32Array | null = null;
-  root.traverse((o) => {
-    const material = (o as unknown as { material?: { scaleNode?: { value?: { array?: unknown } } } })
-      .material;
-    const array = material?.scaleNode?.value?.array;
-    if (found === null && array instanceof Float32Array) found = array;
-  });
-  return found;
+  const sprites = root.getObjectByName('combat-sprites');
+  const pool = (sprites as unknown as { userData?: { fxPool?: { size?: Float32Array } } })
+    ?.userData?.fxPool;
+  return pool?.size ?? null;
 }
 
 function maxOf(a: Float32Array): number {

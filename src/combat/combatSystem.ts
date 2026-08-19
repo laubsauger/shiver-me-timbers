@@ -99,6 +99,44 @@ interface PendingShot {
   elevation: number;
 }
 
+/**
+ * Hard cap on `CombatMemory.holes`, per ship.
+ *
+ * THE DEFECT IT CLOSES, stated at the size it actually is. The list is read
+ * twice per sim tick (flooding + the buoyancy list torque) and three more
+ * times inside the flooding solver, and NOTHING ever removed an entry. One
+ * engagement does plateau on its own — `recordBreach` fires on the SPLINTER
+ * event, i.e. once per piece as it crosses into 'holed', so a galleon tops out
+ * at 12 entries (6 holeable sections × shot hole + zone; MEASURED over 180 s
+ * of continuous broadside: 36 hits, 12 holes, flat from t = 40 s). What is
+ * unbounded is the cycle: clearing a ship's DAMAGE does not clear her HOLES,
+ * so every re-damage cycle appends another full set on top of the last. The
+ * combat arena's reset key does exactly that (`combatArena.place`:
+ * `ship.damage = {}`, `flood = 0`, holes untouched), and the list lives in a
+ * closure, so no heap walk and no `renderer.info` counter can see it grow.
+ *
+ * WORTH KNOWING SEPARATELY, and NOT fixed here because it belongs to whoever
+ * owns the arena: those retained holes mean a ship "reset" to undamaged starts
+ * flooding again from breaches she no longer has.
+ *
+ * WHY A HOLE CAN BE FORGOTTEN, and why 32 is not a guess. Flooding is a SUM
+ * over SUBMERGED holes: `ingressRatePerHole` is 0.02 flood/s against a
+ * `pumpRate` of 0.03, so TWO holes under water already beat the pumps, and at
+ * `sinkThreshold` 0.6 the ramp is one-way and reaches 1 within `sinkDuration`
+ * (12 s) whatever the ingress. The outcome of a fight is therefore decided by
+ * the first handful of breaches below the waterline; every hole after that
+ * only changes how fast an already-sinking ship goes down, and `sinkDuration`
+ * bounds that anyway. 32 is roughly an order of magnitude past the point where
+ * the result stops depending on the count, and no ship in the shipped scene
+ * survives long enough to reach it.
+ *
+ * FIFO, oldest first: the newest breach is the one the player just made, the
+ * one the list torque should lean the hull toward, and the one nearest the
+ * fight. Eviction is deterministic, so §V.2 replay is unaffected, and the
+ * serialised state stays bounded.
+ */
+export const MAX_RECORDED_HOLES = 32;
+
 /** plain-data, JSON round-trippable (see §V.2 note in the header) */
 export interface CombatMemory {
   reloadPort: number[];
@@ -455,6 +493,11 @@ function recordBreach(rig: ShipRig, ship: ShipState, hit: HitEvent): void {
   for (const zone of rig.damageZones.get(hit.pieceId) ?? []) {
     rig.memory.holes.push([zone[0], zone[1], zone[2]]);
   }
+  // FIFO past the cap — the OLDEST breaches go, not the newest (see
+  // MAX_RECORDED_HOLES). splice rather than shift so a burst that pushes
+  // several entries in one call still costs one array op.
+  const over = rig.memory.holes.length - MAX_RECORDED_HOLES;
+  if (over > 0) rig.memory.holes.splice(0, over);
 }
 
 function toVec3(v: PieceVec3): Vec3 {

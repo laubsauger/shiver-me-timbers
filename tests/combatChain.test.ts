@@ -21,7 +21,11 @@ import {
 } from '../src/state/simState';
 import { buildGalleonBlueprint } from '../src/ship/shipBlueprint';
 import { ShipAssembly } from '../src/ship/shipAssembly';
-import { createCombat, type CombatShipConfig } from '../src/combat/combatSystem';
+import {
+  createCombat,
+  MAX_RECORDED_HOLES,
+  type CombatShipConfig,
+} from '../src/combat/combatSystem';
 import { buildBattery, sideForBearing } from '../src/combat/battery';
 import { buildHitTargetSet, poseTargets } from '../src/combat/hitTargets';
 import { testHits, type HitTarget } from '../src/combat/hitTest';
@@ -234,6 +238,54 @@ describe('fire → hit → breach → hole → flood → sink (§V14 end to end)
     // returns 0 for all of them and the ship floats forever while every
     // "damage applied" assertion still passes
     expect(holes.some((h) => h[1] < 0)).toBe(true);
+    dispose();
+  });
+
+  it('the hole list is BOUNDED — clearing damage and re-taking it cannot grow it', () => {
+    // `memory.holes` is walked twice per sim tick plus three more times inside
+    // the flooding solver, and NOTHING ever removed an entry. One engagement
+    // plateaus on its own (a breach is recorded once per piece, on the tick it
+    // crosses into 'holed' — measured 12 on a galleon), but clearing a ship's
+    // damage does NOT clear her holes, so every re-damage cycle appends
+    // another full set. That is the combat arena's reset key (combatArena
+    // `place`: `ship.damage = {}`), and it never comes back down.
+    const { state, configs, dispose } = scene([[0, 0, 0], [45, 0, 0]]);
+    const combat = createCombat(configs);
+    const target = 1;
+    const holeable = configs[0].blueprint
+      .filter((p) => p.damageStates.some((s) => s.id === 'holed'))
+      .map((p) => p.id);
+    expect(holeable.length).toBeGreaterThan(0);
+    for (let cycle = 0; cycle < 12; cycle++) {
+      for (const id of holeable) combat.forceHit(state, target, id, 8);
+      state.ships[target].damage = {}; // exactly what an arena reset does
+      state.ships[target].flood = 0;
+    }
+    const holes = combat.memoryOf(target)?.holes ?? [];
+    expect(holes.length).toBeGreaterThan(0);
+    expect(holes.length).toBeLessThanOrEqual(MAX_RECORDED_HOLES);
+    dispose();
+  });
+
+  it('...and she still floods on what the cap keeps (eviction is not a cure)', () => {
+    // the eviction must not become a quiet way to make a hulk unsinkable
+    // (§Rule 8) — same real broadside as the chain test above, then sink her
+    // on nothing but the holes that survived the cap
+    const { state, configs, dispose } = scene([[0, 0, 0], [45, 0, 0]]);
+    const combat = createCombat(configs);
+    const enemy = state.ships[1];
+    for (let tick = 0; tick < 60 * 40; tick++) {
+      state.tick++;
+      combat.step(state, SIM_DT, [{ shipIndex: 0, fire: true, side: 'starboard' }]);
+    }
+    expect((combat.memoryOf(1)?.holes ?? []).length).toBeLessThanOrEqual(
+      MAX_RECORDED_HOLES,
+    );
+    enemy.flood = 0;
+    for (let tick = 0; tick < 60 * 120 && !isSunk(enemy); tick++) {
+      stepFlooding(enemy, combat.floodHoles(state, 1, 0), SIM_DT, FLOOD);
+    }
+    expect(isSunk(enemy)).toBe(true);
     dispose();
   });
 

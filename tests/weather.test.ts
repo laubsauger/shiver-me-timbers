@@ -1529,3 +1529,142 @@ describe('§V.46 publish step (the spectrum is not free)', () => {
     }
   });
 });
+
+/**
+ * §B.59 THE PUBLISH BAND — the grid bounds the VALUE, the band bounds the RATE.
+ *
+ * The step above bounds how MANY distinct spectra exist. It does not bound how
+ * OFTEN one is asked for, and those are different quantities: a grid has an
+ * edge every `step`, and the §V.46 field — sampled at the hull, continuous in
+ * space and drifting downwind past a ship at anchor — sits on one and
+ * re-crosses it indefinitely. Each crossing is a full h0 re-cut on the GPU AND
+ * the §V.8 mirror. Replaying the shipped wiring over an 805 s cruise measured a
+ * MEDIAN of 34 of them, worst heading 43, in runs of up to 14 back to back, at
+ * ~0.9-2.0 s of main-thread work each — the user's "it accumulates even with
+ * nothing on screen", which is not an accumulation at all.
+ *
+ * These tests pin the three properties that make the band a fix rather than a
+ * dulling: it kills a wobble outright, it still commits on real weather and
+ * still lands on the grid when it does, and it does not blunt a knob (§V.62).
+ */
+describe('§B.59 the publish band (a grid is not a rate limit)', () => {
+  const DRIVEN = ['windSpeed', 'amplitude'] as const;
+  const STEPS = { windSpeed: 0.5, amplitude: 0.02 };
+  const BAND = 3; // as main.ts ships it
+
+  let saved: Record<string, unknown>;
+  beforeEach(() => {
+    saved = { ...(oceanParams as unknown as Record<string, unknown>) };
+    registerParams('ocean', oceanParams);
+  });
+  afterEach(() => {
+    Object.assign(oceanParams, saved);
+  });
+
+  /** ticks on which the published spectrum signature MOVED = rebuilds asked for */
+  const runCell = (band: number, cellAt: (i: number) => number, ticks: number): number => {
+    const out = createWeatherSample();
+    const hold = createAmbientHold(DRIVEN, oceanParams, STEPS, band);
+    let last = '';
+    let changes = 0;
+    for (let i = 0; i < ticks; i++) {
+      hold.restore();
+      blendSample(cellAt(i), 'swell', out);
+      hold.publish(out.ocean);
+      const sig = `${oceanParams.windSpeed}|${oceanParams.amplitude}`;
+      if (i > 0 && sig !== last) changes++;
+      last = sig;
+    }
+    return changes;
+  };
+
+  it('a hull parked on a grid edge re-cuts the spectrum every tick without a band', () => {
+    const storm = weatherPresets.storm.ocean;
+    const ambient = oceanParams.windSpeed;
+    // t that puts the blended wind EXACTLY on a decision edge of the grid (the
+    // half-way point between two published values, 2.5 steps up), then a wobble
+    // of ±0.1 m/s about it — a fifth of a step, far below anything a player
+    // could see, and the smallest excursion the field can offer
+    const edge = (2.5 * STEPS.windSpeed) / (storm.windSpeed - ambient);
+    const wobble = 0.1 / (storm.windSpeed - ambient);
+    const cell = (i: number): number => edge + (i % 2 === 0 ? wobble : -wobble);
+
+    // WITHOUT the band the sea re-cuts on essentially every tick: 0.1 m/s of
+    // weather, 60 rebuilds a second, and no player can tell the two seas apart
+    expect(runCell(0, cell, 600)).toBeGreaterThan(500);
+    // WITH it, the wobble never leaves the band and the sea is cut once
+    expect(runCell(BAND, cell, 600)).toBe(0);
+  });
+
+  it('still answers real weather — and lands on the grid when it does', () => {
+    const out = createWeatherSample();
+    const hold = createAmbientHold(DRIVEN, oceanParams, STEPS, BAND);
+    const ambient = oceanParams.windSpeed;
+    const storm = weatherPresets.storm.ocean;
+    const seen: number[] = [];
+    // a full calm → storm sweep, the shape of sailing into a squall
+    for (let i = 0; i <= 600; i++) {
+      hold.restore();
+      blendSample(i / 600, 'swell', out);
+      hold.publish(out.ocean);
+      const w = oceanParams.windSpeed;
+      if (seen[seen.length - 1] !== w) seen.push(w);
+    }
+    // it arrives: the far end of the sweep IS the storm, within a band
+    expect(Math.abs(seen[seen.length - 1] - storm.windSpeed)).toBeLessThanOrEqual(
+      STEPS.windSpeed * BAND,
+    );
+    // every committed value is still ON the grid — the band changes WHEN the
+    // sea restates the weather, never how precisely it states it
+    for (const w of seen) {
+      const k = (w - ambient) / STEPS.windSpeed;
+      expect(Math.abs(k - Math.round(k))).toBeLessThan(1e-9);
+    }
+    // and the whole squall costs a handful of re-cuts, not one per grid edge:
+    // the wind lane alone holds (18.5 − 11) / 0.5 = 15 edges
+    expect(seen.length).toBeLessThanOrEqual(
+      Math.ceil((storm.windSpeed - ambient) / (STEPS.windSpeed * BAND)) + 2,
+    );
+  });
+
+  it('one commit carries BOTH lanes, so two spectrum keys cost one rebuild', () => {
+    const out = createWeatherSample();
+    const hold = createAmbientHold(DRIVEN, oceanParams, STEPS, BAND);
+    let ampOnly = 0;
+    let prevW = oceanParams.windSpeed;
+    let prevA = oceanParams.amplitude;
+    for (let i = 0; i <= 600; i++) {
+      hold.restore();
+      blendSample(i / 600, 'swell', out);
+      hold.publish(out.ocean);
+      const w = oceanParams.windSpeed;
+      const a = oceanParams.amplitude;
+      // amplitude moving on a tick of its own would be a SECOND rebuild for a
+      // sea the wind lane is about to re-cut anyway
+      if (a !== prevA && w === prevW) ampOnly++;
+      prevW = w;
+      prevA = a;
+    }
+    expect(ampOnly).toBe(0);
+  });
+
+  it('§V.62 an outside edit clears the band — a knob still drives on the next tick', () => {
+    const out = createWeatherSample();
+    const hold = createAmbientHold(DRIVEN, oceanParams, STEPS, BAND);
+    // sail into the cell first, so the hold is holding a committed value that
+    // a small knob move would otherwise sit inside
+    for (let i = 0; i < 10; i++) {
+      hold.restore();
+      blendSample(0.5, 'swell', out);
+      hold.publish(out.ocean);
+    }
+    // one panel step of wind — a tenth of the band
+    const knob = oceanParams.windSpeed + 0.1;
+    oceanParams.windSpeed = knob;
+    hold.restore();
+    expect(oceanParams.windSpeed).toBe(knob); // adopted as the new ambient
+    blendSample(0, 'swell', out); // clear air: the blend IS ambient
+    hold.publish(out.ocean);
+    expect(oceanParams.windSpeed).toBe(knob); // and published EXACTLY
+  });
+});
