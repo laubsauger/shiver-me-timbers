@@ -2101,10 +2101,21 @@ export function buildOceanSurfaceMaterial(
     // the one key-driven term in the material that escaped `uSunLightColor` —
     // and the moon owns the key after dark (src/sky/moonCycle.ts). With the
     // literal in place the moon painted a NOON-BRIGHT DAYLIGHT-CREAM road on
-    // black water, which is exactly the failure `KeyLight`'s header warns
-    // about: the colour alone sets how bright the moon's road burns, so the
-    // colour has to actually arrive. It now does, and the road is amber at
-    // sunset and cool at 0x8ea9d6 · moonBrightness under the moon for free.
+    // black water. It now carries the key, so the road is amber at sunset and
+    // cool under the moon for free.
+    //
+    // `uSunLightColor` IS RADIANCE, NOT HUE, and that correction is younger
+    // than this block. It used to be a bare copy of `sunLight.color`, so the
+    // sentence that stood here — "cool at 0x8ea9d6 · moonBrightness" — was
+    // false in its second half: `moonBrightness` never reached this multiply,
+    // and the road burned at the moon's HUE luminance (0.390, i.e. 43% of a
+    // noon sun) at every phase, whether the moon was full or a sliver. The
+    // level now arrives with the colour (oceanSurface.ts, §V.72), so the road
+    // scales with `moonKeyWeight` — phase, moon elevation and the night ramp —
+    // exactly as the key that lights the ship does, and the sentence is true.
+    // See §V.75's UNIT BRIDGE note above: E_⊥/π is `uSunLightColor ·
+    // uLightGain`, so a `uSunLightColor` missing its level is a bridge
+    // anchored to the wrong irradiance, not a bridge that is wrong.
     //
     // §B.9 colour space: `uSunLightColor` is a three Color, written from the
     // key by `setSrgb()` (sRGB → working space) and read here as LINEAR

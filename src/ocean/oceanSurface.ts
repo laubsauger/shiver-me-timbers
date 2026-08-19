@@ -23,6 +23,7 @@ import { buildOceanSurfaceMaterial, type OceanSurfaceMaterial } from './surfaceM
 import { buildOceanGrid, snapToGrid, type SurfaceGridOptions } from './surfaceGeometry';
 import { oceanSurfaceParams as sp } from '../params/oceanSurface';
 import { skyParams } from '../params/sky';
+import { keyRadianceScale } from '../sky/lighting';
 import type { SeabedField } from '../island/seabed';
 import type { FetchField } from './fetchField';
 import type { PlanarReflection } from '../reflection';
@@ -135,9 +136,32 @@ export class OceanSurface {
     // normals must solve the same surface the vertices drew (§B storm fold)
     this.surface.choppinessUniform.value = this.sim.effectiveChoppiness();
     if (sunDirection) this.surface.sunDirectionUniform.value.copy(sunDirection);
-    // live sun COLOUR: every sun-driven water term is tinted by it, so a dim
-    // amber sunset scatters dim amber light instead of static near-white
-    if (this.sunLight) this.surface.sunColorUniform.value.copy(this.sunLight.color);
+    // Live key RADIANCE — colour x level, not colour alone (§V.72).
+    //
+    // THE LEVEL IS HALF OF IT AND IT USED TO BE MISSING. Every sun-driven water
+    // term is tinted by this: the diffuse, the foam, the sparkle and the §V.75
+    // glint road, whose unit bridge is READ OFF that diffuse so the two cannot
+    // drift. Feed it a hue with no level and the bridge is exact but anchored
+    // to the wrong irradiance — and after dark the key is the moon, whose hue
+    // (moonColor, luminance 0.390) is 43% of a noon sun's while the moon
+    // really keys at moonIntensity/sunIntensity = 0.22. So the water lit and
+    // burned a road at ~2.5x the moon it was told about, which is the reported
+    // "same size as what the sun is doing"; caustics/waterLighting.ts was
+    // meanwhile computing the correct 0.22 from the same light. One expression
+    // now, not two that disagree by 4.53x.
+    //
+    // §B.9/§V.31b: both operands are already LINEAR — `sunLight.color` is
+    // written by sky/lighting.ts's setSrgb(), and the scale is a plain
+    // radiance ratio — so this is a linear multiply with no transfer, which is
+    // what a light level composed onto a light colour has to be.
+    //
+    // It is exactly 1 whenever the sun owns the key, so every daylight and
+    // sunset framing is untouched by construction.
+    if (this.sunLight) {
+      this.surface.sunColorUniform.value
+        .copy(this.sunLight.color)
+        .multiplyScalar(keyRadianceScale(this.sunLight));
+    }
     // §B.3: linearDepth() is normalized over the camera range — the material
     // needs the live far plane to turn it back into meters
     const persp = camera as THREE.PerspectiveCamera;

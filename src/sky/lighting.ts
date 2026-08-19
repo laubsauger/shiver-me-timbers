@@ -44,6 +44,27 @@ import {
   type Rgb,
 } from './sunCycle';
 
+/**
+ * §V.72. Read the key's LINEAR radiance scale off the light this file writes.
+ *
+ * Anything that consumes `sunLight.color` WITHOUT `sunLight.intensity` is
+ * making a claim about how bright the key is, and the colour alone cannot
+ * answer that — at night it is a fixed blue hue whose luminance (0.390) is
+ * 43% of a noon sun's, while the moon really keys at 22%. Multiply by this,
+ * in the working (linear) space, and the two agree. See
+ * `moonCycle.keyRadianceScale()`.
+ *
+ * It rides on `userData` rather than in a signature so the one consumer that
+ * needs it (`ocean/oceanSurface.ts`, which already holds this light) does not
+ * force a new argument through main.ts's render block. Absent — any build that
+ * never calls `update()` — it reads 1, i.e. exactly the old behaviour, so this
+ * can only ever dim a scene that has a live sky rig.
+ */
+export function keyRadianceScale(light: THREE.DirectionalLight): number {
+  const v = (light.userData as { keyRadianceScale?: unknown }).keyRadianceScale;
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.min(v, 1) : 1;
+}
+
 function mulRgb(c: Rgb, tint: Rgb): Rgb {
   return [c[0] * tint[0], c[1] * tint[1], c[2] * tint[2]];
 }
@@ -167,6 +188,13 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
       // sunset that was signed off (moonWeight is exactly 0 above the horizon)
       setSrgb(sunLight.color, key.color);
       sunLight.intensity = key.intensity;
+      // §V.72. The pair above is complete for anything that shades with a
+      // three light (colour x intensity). It is NOT complete for a consumer
+      // that reads the colour alone — the ocean does — so publish the level
+      // separately rather than let that consumer infer it from the hue. Read
+      // it with keyRadianceScale() above; see moonCycle for why the water was
+      // claiming a 43%-of-noon moon while the caustics claimed 9.5%.
+      sunLight.userData.keyRadianceScale = key.radianceScale;
       // the fog/haze block below still wants the SUN's own colour: haze is
       // painted by the sky, and the sky is the sun's even after it has set
       const sun = sunColor(elevation);

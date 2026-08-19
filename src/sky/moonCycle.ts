@@ -209,6 +209,44 @@ export function keyDirectionWeight(sunElev: number): number {
   return 1 - smoothstep(HANDOVER_END, SUN_BELOW, sunElev);
 }
 
+/**
+ * THE KEY'S RADIANCE, as a fraction of a full-strength sun (§V.72), 0..1.
+ *
+ * WHY THIS EXISTS, AND WHAT IT REPLACES. The ocean copied `sunLight.color`
+ * and NOTHING ELSE into the water's light tint, so the sea's idea of "how
+ * bright is the key" was the key's HUE — a number that only moves when the
+ * colour ramp moves. `moonColor`'s luminance is 0.390 against a noon sun's
+ * 0.904, so the moon laid a road at 43% of noon's and 55% of a sun at the
+ * same elevation, while keying the ship at 0.75/3.4 = 22%. Two statements
+ * about one body's brightness, 2.5x apart — and the user saw the louder one:
+ * "it's like the same size as what the sun is doing".
+ *
+ * THIS IS NOT A NEW MODEL. `caustics/waterLighting.ts:setCausticKey` already
+ * computes exactly this expression, for exactly this reason, and its header
+ * already states the answer this file was contradicting: "a full moon keys at
+ * moonIntensity/sunIntensity = 0.75/3.4 = 0.22 in a 0.39-luminance blue, i.e.
+ * 9.5% of noon's caustic radiance". The caustics were right and the water was
+ * wrong; this publishes the caustics' number so both read ONE expression
+ * instead of two that disagree by 4.53x. Clamped 0..1 on the same §V.44
+ * argument setCausticKey states: it may only ever DIM the water relative to
+ * its authored daytime calibration, whatever the panel does to either knob.
+ *
+ * GATED ON `dirW`, WHICH IS WHY NO SUN FRAME CAN MOVE. `keyDirectionWeight`
+ * is exactly 0 at every sun elevation at or above SUN_BELOW, so this returns
+ * exactly 1 for every hour the sun owns the key — the §T39 sunset and the
+ * signed-off 15.0/17.6 framings are bit-identical BY CONSTRUCTION, not by a
+ * value that happens to land on 1. The un-gated form (`key.intensity /
+ * sunIntensity`, the caustics' own) would additionally carry `beamStrength`'s
+ * KEY_FLOOR onto the water below 5.7 deg of sun and dim the late sunset by up
+ * to 2.9x. That is arguably more correct and is deliberately NOT taken here:
+ * it is a change to a signed-off frame that wants eyes on it, not a moon fix.
+ */
+export function keyRadianceScale(dirW: number, moonW: number, p: SkyParams): number {
+  const sun = Math.max(p.sunIntensity, 1e-3);
+  const moon = (Math.max(0, p.moonIntensity) * clamp01(moonW)) / sun;
+  return clamp01(1 + clamp01(dirW) * (clamp01(moon) - 1));
+}
+
 /** floor for any normalize() (§V28: normalize(0) is NaN, not 0) */
 const MIN_LEN = 1e-6;
 
@@ -269,23 +307,36 @@ export function ambientLevel(day: number, moonW: number, p: SkyParams): number {
  * Everything the light rig and the sky background need to know about who owns
  * the key right now.
  *
- * `color` is the key's RADIANCE TINT and `intensity` is the light rig's
- * multiplier, and they are SEPARATE KNOBS ON PURPOSE — this is not
- * redundancy. `src/ocean/oceanSurface.ts:130` copies `sunLight.color` (and
- * NOT its intensity) into the water's glint tint, so the colour alone sets
- * how bright the moon's glint road burns while the intensity alone sets how
- * hard the moon keys the ship. Fold the night's dimming into one of them and
- * the other is wrong: put it all in the intensity and the moon paints a
- * noon-bright road on black water; put it all in the colour and the ship goes
- * unlit under a blazing sea.
+ * `color` is the key's HUE and `intensity` is its LEVEL. That split used to be
+ * load-bearing in a way it should never have been: `oceanSurface.ts` copied
+ * `sunLight.color` and not its intensity, so the colour alone set how bright
+ * the moon's road burned while the intensity alone set how hard it keyed the
+ * ship — two independent statements of one body's brightness, and they drifted
+ * 2.5x apart. That is fixed at the source rather than balanced by hand: the
+ * water now multiplies the hue by `radianceScale`, so ONE number moves the
+ * moon and `moonIntensity` is the single knob for how bright the moon is.
+ *
+ * `color` is therefore free to be what it says it is — a hue. `moonColor`'s
+ * deliberate Purkinje blue is an ART CHOICE about the tint of moonlight and
+ * carries no claim about its level; see the header. Do not put level back into
+ * it, and do not "correct" the blue to the physically warmer 4100 K.
  */
 export interface KeyLight {
   /** unit vector from the origin toward the body that owns the key */
   direction: Vec3;
-  /** sRGB tint — what every sun-driven water term is multiplied by */
+  /** sRGB HUE — what every sun-driven water term is tinted by */
   color: Rgb;
   /** DirectionalLight intensity, ≥ 0 */
   intensity: number;
+  /**
+   * 0..1 the key's LINEAR radiance as a fraction of a full-strength sun —
+   * exactly 1 for every hour the sun owns the key. Any consumer that reads
+   * `color` WITHOUT `intensity` must multiply by this, in the linear working
+   * space, or it is claiming the moon is as bright as the sun. See
+   * `keyRadianceScale()` for the whole argument. `sky/lighting.ts` publishes
+   * it on the DirectionalLight so the water can reach it.
+   */
+  radianceScale: number;
   /** 0..1 how much of the key the moon owns — drives night tint + ambient */
   moonWeight: number;
   /**
@@ -343,6 +394,7 @@ export function keyLight(timeOfDay: number, p: SkyParams): KeyLight {
     // factors, and the two terms are disjoint so it never exceeds the larger
     // of the two peak intensities.
     intensity: Math.max(0, p.sunIntensity) * day + Math.max(0, p.moonIntensity) * moonW,
+    radianceScale: keyRadianceScale(dirW, moonW, p),
     moonWeight: moonW,
     nightFactor: nightFactor(sunElev),
     ambient: ambientLevel(day, moonW, p),

@@ -24,6 +24,7 @@ import {
   blendKeyDirection,
   keyDirectionWeight,
   keyLight,
+  keyRadianceScale,
   moonAboveHorizon,
   moonBrightness,
   moonDirection,
@@ -270,6 +271,100 @@ describe('§T39 NON-REGRESSION — night must not cost the sunset', () => {
     expect(moonlit).toEqual(hexToRgb(P.moonlitNightTint));
     // brighter in every channel — a lit sky, not a differently-tinted one
     for (let i = 0; i < 3; i++) expect(moonlit[i]).toBeGreaterThan(moonless[i]);
+  });
+});
+
+/**
+ * §V.72 — ONE statement of how bright the key is.
+ *
+ * These exist because there were two. The ocean read `sunLight.color` and not
+ * its intensity, so the water's idea of the moon's brightness was
+ * `moonColor`'s luminance (0.390, i.e. 43% of a noon sun) while the ship's was
+ * `moonIntensity / sunIntensity` (0.221). The road burned 2.5x brighter than
+ * the moon that laid it, which is what the user saw and reported as "the same
+ * size as what the sun is doing".
+ *
+ * A test that only checked `radianceScale`'s value could not fail when that
+ * drifts back, so the load-bearing one here is the RATIO test: the moon's
+ * road-to-key ratio must equal the sun's, because a glint road is the specular
+ * lobe of the key and the lobe's shape is the sea's slope statistics, not the
+ * source's brightness. That is the invariant, and it holds at every phase.
+ */
+describe('§V.72 the key states its brightness ONCE', () => {
+  it('is exactly 1 for every hour the sun owns the key — no sun frame moves', () => {
+    // The §T39 sunset and the signed-off 15.0 / 17.6 framings are bit-identical
+    // BY CONSTRUCTION, not by a value that happens to land on 1: `dirW` is 0
+    // at every sun elevation at or above SUN_BELOW.
+    for (const t of hours(0.005)) {
+      if (sunElevation(t, LAT) < SUN_BELOW) continue;
+      expect(keyLight(t, P).radianceScale).toBe(1);
+    }
+    for (const t of [15.0, 17.3, 17.6]) {
+      expect(keyLight(t, P).radianceScale).toBe(1);
+    }
+  });
+
+  it('at full moon the water is told the SAME 0.22 the ship and caustics are', () => {
+    const k = keyLight(0, P);
+    expect(k.moonWeight).toBe(1);
+    // caustics/waterLighting.ts computes key.intensity / sunIntensity for the
+    // identical reason; if these two ever disagree, one of them is lying about
+    // the moon and the frame will show it as a road that outshines its source.
+    expect(k.radianceScale).toBeCloseTo(P.moonIntensity / P.sunIntensity, 12);
+    expect(k.radianceScale).toBeCloseTo(k.intensity / P.sunIntensity, 12);
+  });
+
+  it('the moon road-to-key ratio EQUALS the sun\'s, at every phase', () => {
+    // The whole point. `road ∝ radianceScale`, `key ∝ intensity`, so the ratio
+    // is what has to match — and it has to match at every phase, because
+    // MOON_SURGE makes the key wildly non-linear in phase while the lobe's
+    // geometry does not move at all.
+    const sunRatio = keyLight(12, P).radianceScale / keyLight(12, P).intensity;
+    for (const ph of [0.42, 0.46, 0.5, 0.54, 0.58]) {
+      const k = keyLight(0, withParams({ moonPhase: ph }));
+      expect(k.moonWeight).toBeGreaterThan(0);
+      expect(k.radianceScale / k.intensity).toBeCloseTo(sunRatio, 12);
+    }
+  });
+
+  it('tracks moonKeyWeight, so a crescent lays a crescent\'s road', () => {
+    // Before the fix this was CONSTANT across phase: the road burned at
+    // moonColor's full luminance under a sliver of moon.
+    const full = keyLight(0, withParams({ moonPhase: 0.5 })).radianceScale;
+    const gibbous = keyLight(0, withParams({ moonPhase: 0.44 })).radianceScale;
+    const sliver = keyLight(0, withParams({ moonPhase: 0.36 })).radianceScale;
+    expect(full).toBeGreaterThan(gibbous);
+    expect(gibbous).toBeGreaterThan(sliver);
+    expect(sliver).toBeGreaterThan(0);
+  });
+
+  it('a new moon leaves the water exactly as dark as a moonless night', () => {
+    expect(keyLight(0, withParams({ moonPhase: 0 })).radianceScale).toBe(0);
+  });
+
+  it('never leaves 0..1 — it may only DIM the water (§V44)', () => {
+    // Same argument setCausticKey states: whatever the panel does to either
+    // intensity knob, this may not brighten the sea past its daytime
+    // calibration, because `lightGain` is authored against a full-strength sun.
+    for (const mi of [0, 0.75, 4, 40, -1, Number.NaN]) {
+      for (const si of [0.001, 3.4, 8]) {
+        const p = withParams({ moonIntensity: mi, sunIntensity: si });
+        for (const t of hours(0.05)) {
+          const s = keyLight(t, p).radianceScale;
+          expect(Number.isFinite(s)).toBe(true);
+          expect(s).toBeGreaterThanOrEqual(0);
+          expect(s).toBeLessThanOrEqual(1);
+        }
+      }
+    }
+    for (const d of [-1, 0, 0.5, 1, 2, Number.NaN]) {
+      for (const w of [-1, 0, 0.5, 1, 2, Number.NaN]) {
+        const s = keyRadianceScale(d, w, P);
+        expect(Number.isFinite(s)).toBe(true);
+        expect(s).toBeGreaterThanOrEqual(0);
+        expect(s).toBeLessThanOrEqual(1);
+      }
+    }
   });
 });
 

@@ -74,10 +74,19 @@ export interface SkyParams {
    * well as how lit it is — a full moon rises at sunset and is overhead at
    * midnight, a crescent trails the sun and has set by the small hours.
    *
-   * `moonColor` and `moonIntensity` are NOT redundant. The ocean copies the
-   * key light's COLOUR (not its intensity) into the water's glint tint, so
-   * the colour sets how bright the moon's road burns on the sea while the
-   * intensity sets how hard the moon keys the ship. See KeyLight's docstring.
+   * `moonIntensity` IS THE MOON'S BRIGHTNESS — all of it, one knob. It keys
+   * the ship, and (through `KeyLight.radianceScale`) it sets how bright the
+   * moon's road burns on the sea and how much moonlight the water scatters.
+   * `moonColor` is HUE ONLY and carries no level.
+   *
+   * That is a correction, and the docstring it replaces is why this bug
+   * happened. The ocean used to copy the key's COLOUR and not its intensity,
+   * so `moonColor`'s luminance WAS the road's brightness — and at 0.390
+   * against a noon sun's 0.904 the moon laid a road at 43% of noon's while
+   * keying the ship at 0.75/3.4 = 22%. Two knobs, 2.5x apart, and the one
+   * named for hue won: "it's like the same size as what the sun is doing".
+   * `caustics/waterLighting.ts` had the right expression the whole time.
+   * Do not put level back into the colour; turn `moonIntensity` down instead.
    *
    * `moonColor` is a deliberate PURKINJE STYLISATION. Real moonlight is
    * reflected sunlight off a grey body — ~4100 K, if anything WARMER than
@@ -417,12 +426,14 @@ export const skyParams: SkyParams = registerParams(
     // (~40%). 0.18 sits in the middle of that band and is wide enough that the
     // terminator survives its own §V.48 floor at 1080p.
     moonDiscPhase: 0.18,
-    // Pale cool blue-white. Luminance was chosen against the glint road, not
-    // against the light: in LINEAR terms this carries 0.38 of sunColorNoon's
-    // luminance, so the moon's road on the water burns at ~41% of the noon
-    // sun's — bright enough to be the single brightest thing in a night
-    // frame, which is exactly what a moon road is, without reading as a
-    // second daytime.
+    // Pale cool blue-white — HUE ONLY. Unchanged in value, but no longer
+    // load-bearing for brightness: the paragraph that stood here chose this
+    // luminance "against the glint road, not against the light" and read the
+    // result as "~41% of the noon sun's", which is precisely the disproportion
+    // the user reported. The road's level is `moonIntensity` now (§V.72), so
+    // this is free to be the Purkinje stylisation it is named as. It is still
+    // 0.390 linear luminance against sunColorNoon's 0.904 and that ratio is a
+    // COLOUR ratio: it tints, it does not brighten.
     moonColor: 0x8ea9d6,
     // Derived, not guessed. Target: the moonlit side of the hull lands near
     // 0.04 linear so it tonemaps to a clearly-visible dark blue-grey rather
@@ -430,11 +441,31 @@ export const skyParams: SkyParams = registerParams(
     // luminance(0.38) x N.L(~0.7) = 0.04 at intensity 0.75. The physical
     // sun:moon ratio of 400,000:1 would give 8.5e-6 and a black frame — see
     // moonCycle.ts's header for why a fixed exposure forbids using it.
+    // THIS IS THE KNOB. It now sets the road, the sea's moonlit diffuse, the
+    // caustics and the ship together, in one ratio — `moonIntensity /
+    // sunIntensity` — so "the moon is too bright" is one slider and no longer
+    // needs `moonColor` touched. 0.75 is kept because the hull target above is
+    // still the binding constraint; if a night still reads too bright after
+    // this, lower THIS, and expect the road to follow it linearly.
     moonIntensity: 0.75,
     // roughly 2x nightTint's luminance and a little less saturated: a moonlit
     // sky is a deep blue you can read cloud shapes against, not a flat navy
     moonlitNightTint: 0x304c74,
-    moonAmbient: 0.3,
+    // 0.30 → 0.22, and the number is READ OFF THE KEY rather than dialled.
+    // `ambientLevel()` puts this in the same slot as `daylight()`, whose peak
+    // is 1 = full sun, so this IS "the moon's ambient as a fraction of the
+    // sun's" and it can be checked against the key's own fraction:
+    // moonIntensity/sunIntensity = 0.75/3.4 = 0.221. At 0.30 the moon lifted
+    // ambient to 40.5% of a full day's while keying at 22% — an unshadowed
+    // term, applied to every pixel in the frame, running ~1.4x the directional
+    // light it is meant to accompany. That is the "washes stuff out" half of
+    // the report, and 1.4x is the whole of the correction.
+    //
+    // NOT a double count, which is worth stating because it looks like one:
+    // `ambientLevel` is `floor + (1 - floor) * max(day, moonAmbient * moonW)`
+    // — a max inside a lerp toward 1, so the moon never ADDS on top of
+    // `nightAmbientFloor` and §V.74 is not in play here. It was simply too big.
+    moonAmbient: 0.22,
     nightAmbientFloor: 0.15,
     // The real moon is 0.26° in radius. Enlarged like the sun disc is (1.1
     // against a real 0.27°), and a good deal more, because the PHASE has to be
