@@ -14,14 +14,33 @@ export interface SailingParams {
   keelGrip: number;
   /** brake (S held): linear decel coefficient on forward speed, 1/s */
   brakeDrag: number;
-  /** max yaw rate at/above reference speed, rad/s */
+  /**
+   * yaw rate at `rudderRefSpeed` with the helm hard over, rad/s. With the
+   * rate ∝ speed below that, `rudderRefSpeed / rudderRate` IS her turning
+   * radius in metres (§T.83) — tune the pair as a radius, not as a rate.
+   */
   rudderRate: number;
+  /**
+   * §T.83 — hull side-drag in a turn: forward deceleration per (rad/s)² of
+   * yaw rate, per m/s of way, i.e. `turnDrag · r² · f`. This is what makes
+   * a hard turn COST her speed — a real hull loses about a third of her way
+   * round a hard turn — and it is quadratic in the rate so the swell's yaw
+   * hunting barely taxes her. 0 = a turn is free, a rail car.
+   */
+  turnDrag: number;
   /**
    * how fast the actual yaw rate converges on the rudder's target, 1/s
    * (time constant 1/x). Low = heavy: the turn builds over seconds and
    * keeps swinging after the helm centres. High = arcade snap-to-rudder.
    */
   yawResponse: number;
+  /**
+   * §T.83 — floor on the speed scaling of `yawResponse` (0..1). The yaw
+   * damping is ∝ way like the rudder is, so a ship losing her way keeps her
+   * swing (that is what carries her through a tack); this is the share that
+   * stays when she has stopped, so a swing on a stopped ship still dies.
+   */
+  yawDampFloor: number;
   /** forward speed at which the rudder reaches full authority, m/s */
   rudderRefSpeed: number;
   /** rudder authority floor once the ship has steerage way (0..1) */
@@ -144,12 +163,21 @@ export const sailingParams: SailingParams = registerParams(
     // velocity vector snapping to the new heading
     keelGrip: 1.5,
     brakeDrag: 0.8,
-    rudderRate: 0.5,
-    // τ = 2 s to spin up or wind down a turn — the ship leans into the
-    // circle rather than stepping onto it
-    yawResponse: 0.5,
-    rudderRefSpeed: 4,
-    minSteerFactor: 0.25,
+    // 12 / 0.126 = 95 m turning radius ≈ 2.5 LWL, tactical diameter ~5
+    // lengths — a sailing ship of her size, not a launch. Measured before:
+    // 28.6°/s from 4 m/s up, 180° in 8.4 s, the circle ONE ship length
+    // across. After: 4–6°/s at speed, 180° in ~50 s, ~5 lengths, and she
+    // comes out of it with a third of her way gone (§T.83).
+    rudderRate: 0.126,
+    // τ = 4 s at 10 m/s to spin up or wind down a turn — the ship leans
+    // into the circle rather than stepping onto it — and longer as she
+    // slows (∝ 1/way, floored by yawDampFloor)
+    yawResponse: 0.3,
+    yawDampFloor: 0.4,
+    // above her top speed on purpose: the rate never saturates under sail
+    rudderRefSpeed: 12,
+    minSteerFactor: 0.4,
+    turnDrag: 26,
     steerageSpeed: 0.05,
     deadZone: Math.PI / 6,
     deadZoneRamp: 0.35,
@@ -174,8 +202,11 @@ export const sailingParams: SailingParams = registerParams(
     // enough that the helm is a live thing, far short of rounding up
     weatherHelmGain: 0.015,
     // at the swell's roll rates (±0.2 rad/s) this swings the heading a
-    // couple of degrees either side of her course, at the roll period
-    rollYawGain: 0.35,
+    // couple of degrees either side of her course, at the roll period.
+    // Re-sized with §T.83: the yaw lag is 4 s at speed now, not 2, so the
+    // hull follows less of each roll — 0.35 measured 0.80° RMS of wander
+    // under the old lag and 0.38° under the new; 0.8 puts it back near 0.7°
+    rollYawGain: 0.8,
     // 20% of full rudder: a storm can make her wander, never steer her
     maxSeaHelmRate: 0.1,
     heelGain: 0.004,
@@ -189,8 +220,10 @@ export const sailingParams: SailingParams = registerParams(
     dragCoef: { min: 0.001, max: 0.2, step: 0.001 },
     keelGrip: { min: 0, max: 10, step: 0.1 },
     brakeDrag: { min: 0, max: 5, step: 0.05 },
-    rudderRate: { min: 0, max: 2, step: 0.01 },
+    rudderRate: { min: 0, max: 2, step: 0.001 },
+    turnDrag: { min: 0, max: 100, step: 0.5 },
     yawResponse: { min: 0.05, max: 5, step: 0.05 },
+    yawDampFloor: { min: 0.01, max: 1, step: 0.01 },
     rudderRefSpeed: { min: 0.5, max: 15, step: 0.1 },
     minSteerFactor: { min: 0, max: 1, step: 0.01 },
     steerageSpeed: { min: 0, max: 1, step: 0.01 },

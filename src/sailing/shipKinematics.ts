@@ -360,9 +360,26 @@ export function stepShipSailing(
   const sideForce =
     Math.max(0, drive) * sideOverDrive * params.leewayRatio * Math.sign(leeSign);
 
+  // TURN DRAG (§T.83). A hull in a turn is dragged bodily sideways: she takes
+  // up a drift angle ∝ yaw rate / speed, and the side force that bends her
+  // track is tilted back by that angle, so it costs way. Induced drag of a
+  // lifting body goes as the square of its angle of attack, hence r² — which
+  // also keeps the swell's small yaw hunting (§B.23) from taxing her the way a
+  // hard turn does. Reads LAST tick's rate (the rudder block below writes this
+  // tick's), deterministic and 60 Hz-invisible. Exactly 0 with the helm
+  // centred and the sea flat, so the straight-line polar is untouched.
+  // MEASURED before this existed: full helm from a beam reach turned 180° in
+  // 8.4 s inside ONE ship length — a rail car, not 400 tons of ship.
+  const yawNow = ship.angularVelocity[1];
+  const turnDrag = params.turnDrag * yawNow * yawNow;
   // semi-implicit Euler: quadratic hull drag opposes each component,
   // brake adds linear decel on forward way only
-  f += (drive - params.dragCoef * speed * f - (input.brake ? params.brakeDrag * f : 0)) * dt;
+  f +=
+    (drive -
+      params.dragCoef * speed * f -
+      turnDrag * f -
+      (input.brake ? params.brakeDrag * f : 0)) *
+    dt;
   l += (sideForce - params.dragCoef * speed * l) * dt;
   // keel grip: kill a frame-rate-scaled fraction of sideways velocity
   l *= Math.max(0, 1 - params.keelGrip * dt);
@@ -396,7 +413,20 @@ export function stepShipSailing(
   // --- rudder: yaw rate ∝ forward speed, min steerage once under way.
   // The rudder sets a TARGET rate; the actual rate lags it with time
   // constant 1/yawResponse, because a few hundred tons of ship take
-  // seconds to spin up about its own mast and seconds to stop. Momentum
+  // seconds to spin up about its own mast and seconds to stop.
+  //
+  // WHY THE TARGET IS ∝ SPEED (§T.83): the blade's moment goes as v²·δ and
+  // the hull's yaw damping as v·r, so the steady rate is r = v·δ/R with R a
+  // TURNING RADIUS that does not depend on speed — `rudderRefSpeed /
+  // rudderRate`, 95 m ≈ 2.5 LWL, tactical diameter ~5 lengths. The old
+  // `rudderRefSpeed` of 4 m/s saturated below cruising speed, so from 4 m/s
+  // up she turned at a fixed 28.6°/s whatever her way: radius 20 m at
+  // 10 m/s, a U-turn in eight seconds, inside her own length. `rudderRefSpeed`
+  // now sits ABOVE her top speed, deliberately, so the clamp at 1 is never
+  // reached under sail and the ∝ v law holds over the whole polar. The
+  // `minSteerFactor` floor is a gameplay floor kept for §B.49: a ship
+  // backing out of irons at half a knot must still be able to fall off.
+  // Momentum
   // lives in ship.angularVelocity[1] — sailing is its sole owner (§B.6,
   // buoyancy never writes it), so it is real sim state: centre the helm
   // mid-turn and the ship keeps swinging round before it settles.
@@ -439,9 +469,19 @@ export function stepShipSailing(
     params.maxSeaHelmRate,
   );
   const targetYawRate = (ship.rudder * params.rudderRate + seaHelm) * steer;
+  // THE DAMPING IS ∝ SPEED TOO (§T.83): yaw damping is water flowing past
+  // the hull, so a ship that has lost her way also loses the thing that
+  // stops her swinging — she CARRIES her turn through the eye of the wind on
+  // rotational momentum, which is how a square-rigger gets through a tack at
+  // all. With a speed-independent τ she stopped swinging the moment she
+  // stopped moving and hung in irons for a minute (measured: 0.00 m/s, 65 s
+  // to come through). `yawDampFloor` is the residual, speed-free share —
+  // without it a ship at rest with a swing on would spin for ever.
+  const damp =
+    params.yawResponse * clamp(way / params.rudderRefSpeed, params.yawDampFloor, 1);
   const yawRate =
     ship.angularVelocity[1] +
-    (targetYawRate - ship.angularVelocity[1]) * (1 - Math.exp(-params.yawResponse * dt));
+    (targetYawRate - ship.angularVelocity[1]) * (1 - Math.exp(-damp * dt));
   const newYaw = yaw + yawRate * dt;
   ship.angularVelocity[1] = yawRate;
 

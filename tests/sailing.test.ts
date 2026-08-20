@@ -207,7 +207,10 @@ describe('force model', () => {
     const input = { ...neutralInput(), rudder: 1 };
     let prev = yawOf(ship.quaternion);
     let turned = 0;
-    for (let i = 0; i < 6000; i++) {
+    // 200 s: a starboard circle from this heading goes THROUGH the eye of the
+    // wind, where she hangs in stays (§T.83 — she no longer whips across the
+    // dead zone in two seconds), and round the rest at ~4°/s
+    for (let i = 0; i < 12000; i++) {
       stepShipSailing(ship, input, WIND, SIM_DT);
       const yaw = yawOf(ship.quaternion);
       turned += wrapPi(yaw - prev);
@@ -269,15 +272,25 @@ describe('force model', () => {
     const yawAtRelease = yawOf(ship.quaternion);
     let carried = 0;
     let prev = yawAtRelease;
-    for (let i = 0; i < 300; i++) {
+    // 15 s: the wind-down is ~4 s at speed (§T.83), so this window is several
+    // time constants, long enough that "does not wind down" would show
+    for (let i = 0; i < 900; i++) {
       stepShipSailing(ship, neutralInput(), WIND, SIM_DT);
       const y = yawOf(ship.quaternion);
       carried += wrapPi(y - prev);
       prev = y;
     }
-    expect(rateAtRelease).toBeGreaterThan(0.3);
-    // keeps turning tens of degrees after the helm is centred...
-    expect(carried).toBeGreaterThan(0.5);
+    // a real turn was on — at least half the steady rate for this speed
+    // (the PROPERTY, not a number: §T.83 moved the rate from 28°/s to ~4°/s)
+    const yawNow = yawOf(ship.quaternion);
+    const fwd = rotateVec(ship.quaternion, [0, 0, 1]);
+    const way = Math.abs(ship.velocity[0] * fwd[0] + ship.velocity[2] * fwd[2]);
+    const steadyRate = (sailingParams.rudderRate * way) / sailingParams.rudderRefSpeed;
+    expect(Number.isFinite(yawNow)).toBe(true);
+    expect(rateAtRelease).toBeGreaterThan(steadyRate * 0.5);
+    // keeps turning a good many degrees after the helm is centred — more
+    // than one second's worth of the turn she was in...
+    expect(carried).toBeGreaterThan(rateAtRelease * 2);
     // ...but the swing does wind down, it is a lag and not a flywheel
     expect(ship.angularVelocity[1]).toBeLessThan(rateAtRelease * 0.2);
   });
@@ -394,7 +407,9 @@ describe('orientation contract with buoyancy (§B.6)', () => {
     ocean.update(901 * SIM_DT);
     stepShipBuoyancy(ship, ocean, SIM_DT);
     expect(ship.angularVelocity[1]).toBe(beforeBuoyancy);
-    expect(Math.abs(beforeBuoyancy)).toBeGreaterThan(0.3); // a real turn
+    // a real turn: 15 s of full helm has her past half the ~4°/s steady rate
+    // this speed commands (§T.83) — the property, not the old 0.3 rad/s
+    expect(Math.abs(beforeBuoyancy)).toBeGreaterThan(0.035);
   });
 });
 
@@ -540,6 +555,142 @@ describe('§B.23: she crabs and she hunts — a ship, not a rail vehicle', () =>
     expect(flat).toBeLessThan(0.05); // glass: she tracks
     expect(seaway).toBeGreaterThan(0.5); // swell: she hunts, visibly
     expect(seaway).toBeLessThan(15); // …but she is not broaching
+  });
+});
+
+describe('§T.83: she is 400 tons of ship, not a rail car — the turn is wide and it costs her', () => {
+  // WHY: "the steering rotation is too intense — we can U-turn hard at those
+  // speeds." Measured before: full helm from a beam reach at 9.8 m/s gave a
+  // steady 28.6°/s, 180° in 8.4 s, and the whole circle fitted inside ONE
+  // ship length. A sailing ship of her size (LWL 38.5 m) turns in a tactical
+  // diameter of 4–6 lengths, takes the better part of a minute to come round
+  // 180°, and comes out of a hard turn with about a third of her way gone.
+  // These pin the PROPERTIES (§V.80) with the margins of a ship, not the
+  // numbers of this tuning.
+  const LWL = 38.5;
+
+  /** full-drive beam reach, then the helm hard over AWAY from the wind (so
+   *  the circle does not pass through irons, which is a different story) */
+  function hardTurn(sailTrim = 1) {
+    const ship = makeShip(Math.PI / 2, sailTrim);
+    for (let i = 0; i < 3600; i++) stepShipSailing(ship, neutralInput(), WIND, SIM_DT, HELM_STEADY);
+    const entry = planarSpeed(ship.velocity);
+    const helm = { ...neutralInput(), rudder: -1 };
+    let prev = yawOf(ship.quaternion);
+    let turned = 0;
+    let t180 = -1;
+    let v180 = 0;
+    let v90 = 0;
+    let r90 = 0;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (let i = 0; i < 12000; i++) {
+      stepShipSailing(ship, helm, WIND, SIM_DT, HELM_STEADY);
+      const y = yawOf(ship.quaternion);
+      turned += wrapPi(y - prev);
+      prev = y;
+      if (r90 === 0 && -turned >= Math.PI / 2) {
+        v90 = planarSpeed(ship.velocity);
+        r90 = Math.abs(ship.angularVelocity[1]);
+      }
+      if (t180 < 0 && -turned >= Math.PI) {
+        t180 = (i + 1) * SIM_DT;
+        v180 = planarSpeed(ship.velocity);
+      }
+      if (-turned <= 2 * Math.PI) {
+        minX = Math.min(minX, ship.position[0]);
+        maxX = Math.max(maxX, ship.position[0]);
+        minZ = Math.min(minZ, ship.position[2]);
+        maxZ = Math.max(maxZ, ship.position[2]);
+      }
+    }
+    const diameter = Math.max(maxX - minX, maxZ - minZ);
+    return { entry, t180, v180, v90, r90, diameter, turned: -turned };
+  }
+
+  it('her turning circle is several ship lengths across, and a U-turn takes most of a minute', () => {
+    const t = hardTurn();
+    expect(t.turned).toBeGreaterThan(2 * Math.PI); // she did get round
+    expect(t.diameter / LWL).toBeGreaterThanOrEqual(3.5);
+    expect(t.diameter / LWL).toBeLessThan(8); // …and is not sailing in a straight line
+    expect(t.t180).toBeGreaterThanOrEqual(45);
+    expect(t.t180).toBeLessThan(120);
+  });
+
+  it('a hard turn BLEEDS way — she comes out of it a third slower than she went in', () => {
+    const t = hardTurn();
+    expect(t.entry).toBeGreaterThan(8);
+    expect(t.v180).toBeLessThanOrEqual(t.entry * 0.75);
+    expect(t.v180).toBeGreaterThan(t.entry * 0.3); // slowed, not stopped
+  });
+
+  it('the loss is the HULL dragging sideways, not the sails — furled and coasting, the helm over still costs her', () => {
+    // isolates the side-drag from the point of sail: no canvas, so the only
+    // difference between the two runs is the turn itself
+    const coast = (rudder: number): number => {
+      const ship = makeShip(Math.PI / 2);
+      for (let i = 0; i < 3600; i++) stepShipSailing(ship, neutralInput(), WIND, SIM_DT, HELM_STEADY);
+      ship.sailTrim = 0;
+      const helm = { ...neutralInput(), rudder };
+      for (let i = 0; i < 600; i++) stepShipSailing(ship, helm, WIND, SIM_DT, HELM_STEADY);
+      return planarSpeed(ship.velocity);
+    };
+    const straight = coast(0);
+    const turning = coast(1);
+    expect(straight).toBeGreaterThan(1);
+    expect(turning).toBeLessThan(straight * 0.9);
+  });
+
+  it('the rudder is a blade in a stream: the rate goes with her way, the RADIUS does not', () => {
+    // moment ∝ v²·δ against damping ∝ v·r ⇒ r = v·δ/R with R a property of the
+    // hull. Half the drive is ~70% of the speed; the rate must fall with it
+    // and v/r must stay put. A rate that did NOT fall is the old model —
+    // saturated at 4 m/s, the same 28.6°/s at every speed she sails.
+    // Half DRIVE, not quarter: below ~4.8 m/s the `minSteerFactor` steerage
+    // floor (kept for §B.49's exit from irons) takes over and the radius
+    // closes up again — stated, so nobody reads this as "∝ v at every speed".
+    const full = hardTurn(1);
+    const half = hardTurn(0.5);
+    expect(half.v90).toBeLessThan(full.v90 * 0.85);
+    expect(half.r90).toBeLessThan(full.r90 * 0.85);
+    const radiusFull = full.v90 / full.r90;
+    const radiusHalf = half.v90 / half.r90;
+    expect(Math.abs(radiusHalf - radiusFull) / radiusFull).toBeLessThan(0.2);
+  });
+
+  it('with the helm amidships the straight-line polar is exactly what it was', () => {
+    // the turn model must be invisible to a ship sailing straight: every
+    // §T.83 knob set to the values that reproduce the OLD model — a fixed rate
+    // above 4 m/s, τ = 2 s, no turn drag — gives the same speed at every point
+    // of sail to 1e-3. (turnDrag reads the yaw rate, which is 0 here.)
+    const OLD_HELM = {
+      ...HELM_STEADY,
+      rudderRate: 0.5,
+      yawResponse: 0.5,
+      rudderRefSpeed: 4,
+      minSteerFactor: 0.25,
+      yawDampFloor: 1,
+      turnDrag: 0,
+    };
+    for (const theta of [0.1, 0.5, 1.0, Math.PI / 2, 2.0, 2.4, 2.6]) {
+      const a = makeShip(theta);
+      const b = makeShip(theta);
+      for (let i = 0; i < 3600; i++) {
+        stepShipSailing(a, neutralInput(), WIND, SIM_DT, HELM_STEADY);
+        stepShipSailing(b, neutralInput(), WIND, SIM_DT, OLD_HELM);
+      }
+      expect(Math.abs(planarSpeed(a.velocity) - planarSpeed(b.velocity))).toBeLessThan(1e-3);
+      expect(Math.abs(yawOf(a.quaternion) - yawOf(b.quaternion))).toBeLessThan(1e-6);
+    }
+  });
+
+  it('a stopped ship cannot turn — full helm at rest leaves the yaw rate at zero', () => {
+    const ship = makeShip(0.3, 0);
+    const helm = { ...neutralInput(), rudder: 1 };
+    for (let i = 0; i < 600; i++) stepShipSailing(ship, helm, WIND, SIM_DT, HELM_STEADY);
+    expect(ship.angularVelocity[1]).toBe(0);
   });
 });
 

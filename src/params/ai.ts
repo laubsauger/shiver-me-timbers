@@ -60,9 +60,15 @@ export const aiParams: AiParams = registerParams(
     ironsCone: Math.PI / 4,
     tackAngle: Math.PI / 4,
     tackHysteresis: 0.15,
-    patrolLegMin: 80,
-    patrolLegMax: 220,
-    waypointRadius: 15,
+    // §T.83: her turning radius is ~95 m now (was 20 m), so a patrol leg has
+    // to be a few radii long and the arrival circle wider than her own track
+    // error, or she orbits a waypoint she can never get inside. Measured with
+    // 80–220 m legs / 15 m radius under the new hull: median heading error 51°
+    // (circling), 12% of the time stalled in stays. With 250–500 / 40: 3.3°,
+    // 4%, and she still makes a waypoint every ~100 s.
+    patrolLegMin: 250,
+    patrolLegMax: 500,
+    waypointRadius: 40,
     fleeFloodThreshold: 0.5,
     fleeDamageThreshold: 0.35,
     broadReachAngle: (Math.PI * 3) / 4,
