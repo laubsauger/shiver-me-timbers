@@ -1279,6 +1279,14 @@ const SP: SlickParams = { ...flowFoamParams };
  * rather than the sum — the same idiom as `noStreet` and `flat` above.
  */
 const SP_WAVES: SlickParams = { ...SP, eddySlope: 0 };
+/**
+ * The street ALONE — the converse isolation. The Kelvin trains are stationary
+ * in the SHIP's frame, so at a fixed patch of water they sweep past at hull
+ * speed; a test asking whether the street stays put must not sample them on
+ * top of it, or it is pinning whatever phase the train happens to have at the
+ * probe (§T.82 moved that phase by half a wavelength and the mixed read flipped).
+ */
+const SP_STREET: SlickParams = { ...SP, transSlope: 0, divSlope: 0 };
 
 describe('capillary-damping lane (the glassy track, §V10 follow-up)', () => {
   it('THE CLAIM: the lane follows the TRACK, not the live heading', () => {
@@ -2040,8 +2048,11 @@ describe('the shed eddies: the vortex street as a surface', () => {
     // terms grow by the same `moved`, so it is CONSTANT at a fixed world point.
     const speed = 6;
     const a = eddySail(speed, 40);
-    const probe = { x: 4, z: a.pose.z - 40 };
-    const before = slickFieldCpu(a.points, probe.x, probe.z, EDDY_HULL, SP, speed, TEXEL, a.t.odo);
+    // clear of the `sternOnset` ramp (3 m past the 38.5 m transom): a probe at
+    // 40 m reads the street at HALF onset and then at full three seconds later,
+    // which is the ramp switching on, not the street drifting
+    const probe = { x: 4, z: a.pose.z - 60 };
+    const before = slickFieldCpu(a.points, probe.x, probe.z, EDDY_HULL, SP_STREET, speed, TEXEL, a.t.odo);
     // sail on for three more seconds and look at the SAME patch of water
     for (let i = 0; i < 3 / DT; i++) {
       a.pose.z += speed * DT;
@@ -2052,7 +2063,7 @@ describe('the shed eddies: the vortex street as a surface', () => {
       probe.x,
       probe.z,
       EDDY_HULL,
-      SP,
+      SP_STREET,
       speed,
       TEXEL,
       a.t.odo,

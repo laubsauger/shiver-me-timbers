@@ -196,7 +196,10 @@ export function createSlickInjector(p: FlowFoamParams) {
         .mul(spreadOf(uTransSpread))
         .mul(bandOf(tT))
         .toVar();
-      const phiT = phaseOf(tT);
+      // +π: a CREST at the stem, not a trough — the bow is a stagnation region,
+      // not a pressure point. Mirror of slickMath.slickFieldCpu (§T.82), where
+      // the reasoning lives; the shift moves sin and cos together so ∇η = slope.
+      const phiT = phaseOf(tT).add(Math.PI);
       const magT = ampT.mul(phiT.sin());
       // η = −(a/k)·cos φ, k = |∇φ| = (g/v²)(1+t²) — the potential of the line
       // above, so amplitude = slope·λ/2π falls out instead of being a knob

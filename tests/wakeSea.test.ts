@@ -48,6 +48,7 @@ import { equilibriumDraft, stepShipBuoyancy } from '../src/sea-physics/buoyancy'
 import { oceanParams, type OceanParams } from '../src/params/ocean';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../src/params/seaPhysics';
 import { weatherPresets } from '../src/weather/presets';
+import { GRAVITY } from '../src/ocean/oceanMath';
 import { SIM_DT, advanceAccumulator } from '../src/core/loop';
 import type { ShipState } from '../src/state/simState';
 
@@ -420,8 +421,15 @@ describe('§V.8 CpuOcean carries the wake, and §V.68 bounds what the hull feels
     // the geometric peak is why drawn-only was rejected: two thirds of sigma at
     // swell is not something a hull can be allowed to ignore
     expect(geoPeak).toBeGreaterThan(0.3);
-    // and the force sees a small fraction of it, purely from e^(−k·T)
-    expect(headPeak).toBeLessThan(geoPeak * 0.35);
+    // and the force sees a fraction of it, purely from e^(−k·T). The bound IS
+    // that law, not a number: the longest wave anywhere in the field is the
+    // transverse train at the hull's own speed (λ = 2πv²/g, k = g/v²), and
+    // every other feature is shorter, so nothing can reach the keel at more
+    // than e^(−(g/v²)·T). A fixed fraction held only while the peak sat on the
+    // 6.4 m mound (felt at 14%); §T.82 put the train's crest under the stem
+    // where the mound is, and a 31 m wave at 7 m/s is legitimately felt at 67%.
+    const kLongest = GRAVITY / (c.speed * c.speed);
+    expect(headPeak).toBeLessThan(geoPeak * Math.exp(-kLongest * SMITH_DEPTH));
     expect(headPeak).toBeGreaterThan(0); // not silently switched off
   });
 

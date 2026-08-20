@@ -427,7 +427,28 @@ export function slickFieldCpu(
     Math.exp(-a / Math.max(p.transDecay, 1e-6)) *
     spread(p.transSpread) *
     bandGate(br.tT);
-  const phiT = kelvinPhaseCpu(d, ay, br.tT, v);
+  /**
+   * PHASE ORIGIN: A CREST AT THE STEM, NOT A TROUGH (§T.82). `kelvinPhaseCpu`
+   * is 0 at the cutwater, and with η = −(a/k)·cos φ below that put the train's
+   * first TROUGH under the stem — the moving-PRESSURE-POINT picture, where the
+   * source pushes the water down. A hull is not a pressure point: its bow is a
+   * stagnation region and the bow wave is the CREST that climbs the stem
+   * (thin-ship theory puts a SOURCE at the entrance, and a source raises the
+   * water behind it; the stern, a sink, starts with a trough). The +π moves
+   * cos AND sin together, so ∇η = slope still holds exactly and the drawn
+   * surface and its shading shift by half a wavelength as one.
+   *
+   * LOAD-BEARING, not cosmetic, since buoyancy reads this field (§T.78): a/k
+   * is 0.5 m at 10 m/s after Smith attenuation and λ/2 = 32 m against a 38.5 m
+   * hull, so the trough-at-stem phase sat her stem in a 0.5 m hole with her
+   * stern on a 0.5 m crest — measured −1.2° by the head on a flat sea, the
+   * user's "front heavy". With the crest at the bow the same train trims her
+   * by the STERN at that Froude number (Fn 0.51, past the hump), which is what
+   * a displacement hull does. It also closes the apex gap §T.78 recorded: the
+   * mound's +0.5 m crest 1.6 m ahead of the stem no longer drops into a −0.5 m
+   * trough at the cutwater.
+   */
+  const phiT = kelvinPhaseCpu(d, ay, br.tT, v) + Math.PI;
   const magT = ampT * Math.sin(phiT);
   // slope points along the propagation direction: aft·cosθ + lateral·sinθ
   const cT = 1 / Math.sqrt(1 + br.tT * br.tT);
