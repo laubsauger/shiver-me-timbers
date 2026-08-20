@@ -6,7 +6,14 @@
  */
 import { shipDetailParams, type ShipClassParams } from '../params/ship';
 import { LANTERN_ARM_REACH, type PieceDef, type Vec3 } from './pieceTypes';
-import { companionwayStations, hullShapeHints, mkPiece } from './blueprintParts';
+import {
+  CAPSTAN_HALF,
+  capstanStation,
+  companionwayStations,
+  helmStation,
+  hullShapeHints,
+  mkPiece,
+} from './blueprintParts';
 import { hullHalfWidthAt, type HullShape } from './hullMath';
 import { wheelHubHeight } from './pieceGeometryFittings';
 
@@ -47,7 +54,7 @@ export function buildCastles(p: ShipClassParams): PieceDef[] {
         sockets: [{
           id: 'socket-wheel',
           type: 'fixture',
-          position: [0, 0.05, p.sterncastleLength / 2 - 0.4],
+          position: [0, 0.05, helmStation(p).socketZ],
         }],
         shape: {
           ...hullShapeHints(p, 0, -L2, -L2 + p.sterncastleLength),
@@ -71,6 +78,24 @@ export function buildCastles(p: ShipClassParams): PieceDef[] {
         min: [-galleryHalf, -p.galleryHeight / 2, -0.18],
         max: [galleryHalf, p.galleryHeight / 2, 0],
       }),
+    ...buildLanternPosts(p),
+  ];
+}
+
+/**
+ * The two lantern posts at the taffrail. Shared by both classes: they stand on
+ * the HIGHEST STERN DECK, which is the cabin roof on the galleon and the main
+ * deck on a class without castles — the same expression the stern cleats use
+ * for the taffrail in blueprintEnds (§V.77). A class with `lanternPostHeight`
+ * 0 carries none (§V.18: skipped, not forked).
+ */
+export function buildLanternPosts(p: ShipClassParams): PieceDef[] {
+  if (p.lanternPostHeight <= 0) return [];
+  const L2 = p.hullLength / 2;
+  const deckY = p.freeboard + p.sterncastleRise + p.cabinHeight;
+  const sternHints = hullShapeHints(p, 0, -L2, -L2) as unknown as HullShape;
+  const postHalf = hullHalfWidthAt(-(L2 - 0.1), deckY, sternHints) * 0.92;
+  return [
     // The hang points for the ship's practical lanterns (src/lanterns). The
     // posts already carried the bulb geometry but declared no socket, so the
     // lights had nowhere here to mount and hung off `anchor-cleat-stern-*`
@@ -90,7 +115,7 @@ export function buildCastles(p: ShipClassParams): PieceDef[] {
     // short of it. The AABB carries the bracket, so the piece's bounds are the
     // piece's real extent (§V.54's lesson in the geometry domain).
     mkPiece('lantern-post-port', 'lantern-post',
-      [-cabinAftHalf * 0.82, roofY, -(L2 - 0.5)],
+      [-postHalf * 0.82, deckY, -(L2 - 0.5)],
       { min: [-0.1, 0, -(LANTERN_ARM_REACH + 0.1)], max: [0.1, p.lanternPostHeight, 0.1] },
       {
         sockets: [{
@@ -100,7 +125,7 @@ export function buildCastles(p: ShipClassParams): PieceDef[] {
         }],
       }),
     mkPiece('lantern-post-starboard', 'lantern-post',
-      [cabinAftHalf * 0.82, roofY, -(L2 - 0.5)],
+      [postHalf * 0.82, deckY, -(L2 - 0.5)],
       { min: [-0.1, 0, -(LANTERN_ARM_REACH + 0.1)], max: [0.1, p.lanternPostHeight, 0.1] },
       {
         sockets: [{
@@ -115,12 +140,12 @@ export function buildCastles(p: ShipClassParams): PieceDef[] {
 /** deck furniture: wheel + capstan at their fixture sockets, hatch
  *  grating, companionway stairs to both castles (§V22 review) */
 export function buildFurniture(p: ShipClassParams): PieceDef[] {
-  const sl2 = p.sterncastleLength / 2;
+  const helm = helmStation(p); // quarterdeck on the galleon, main deck aft on the brig
   const WHEEL_HUB_Y = wheelHubHeight({ min: [-0.75, 0, -0.3], max: [0.75, 1.5, 0.3] });
   return [
-    mkPiece('wheel', 'wheel', [0, 0.05, sl2 - 0.7],
+    mkPiece('wheel', 'wheel', [0, 0.05, helm.wheelZ],
       { min: [-0.75, 0, -0.3], max: [0.75, 1.5, 0.3] },
-      { parent: 'sterncastle-deck' }),
+      { parent: helm.deckId }),
     // THE TURNING HALF, parented to the pedestal at the axle. Same shape as a
     // yard on its mast: the moving part is its own piece so it has its own
     // transform, and ShipAssembly.setHelmAngle spins it. Its aabb is the
@@ -128,10 +153,11 @@ export function buildFurniture(p: ShipClassParams): PieceDef[] {
     mkPiece('wheel-disc', 'wheel-disc', [0, WHEEL_HUB_Y, 0],
       { min: [-0.75, 0, -0.3], max: [0.75, 1.5, 0.3] },
       { parent: 'wheel' }),
-    mkPiece('capstan', 'capstan', [0, 0.05, p.hullLength * 0.18],
-      { min: [-0.85, 0, -0.85], max: [0.85, 1.15, 0.85] },
+    mkPiece('capstan', 'capstan', [0, 0.05, capstanStation(p)],
+      { min: [-CAPSTAN_HALF, 0, -CAPSTAN_HALF], max: [CAPSTAN_HALF, 1.15, CAPSTAN_HALF] },
       { parent: 'deck' }),
-    mkPiece('grating-main', 'grating', [0, 0.02, -2],
+    // the main hatch, abaft the mainmast's fiferail (galleon: z −2, as ever)
+    mkPiece('grating-main', 'grating', [0, 0.02, p.mainMastZ - 2.5],
       { min: [-0.85, 0, -1.0], max: [0.85, 0.24, 1.0] },
       { parent: 'deck' }),
     ...buildCompanionways(p),

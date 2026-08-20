@@ -209,7 +209,9 @@ export const brigantineParams: ShipClassParams = registerParams(
     bowLength: 2.8,
     forecastleLength: 0, forecastleRise: 0,
     sterncastleLength: 0, sterncastleRise: 0, cabinHeight: 0,
-    galleryHeight: 0, lanternPostHeight: 0,
+    // no gallery; the lantern posts stand on the main deck at the transom
+    // head, so they are taller than the galleon's (hers sit on a cabin roof)
+    galleryHeight: 0, lanternPostHeight: 1.6,
     foreMastZ: 7.5, foreMastHeight: 19,
     mainMastZ: -3, mainMastHeight: 23,
     rearMastZ: 0, rearMastHeight: 0,

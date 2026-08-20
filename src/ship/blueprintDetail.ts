@@ -16,7 +16,15 @@
  */
 import { galleonParams, shipDetailParams, type ShipClassParams } from '../params/ship';
 import type { PieceDef, SocketDef } from './pieceTypes';
-import { companionwayStations, figureheadStation, hullShapeHints, mkPiece } from './blueprintParts';
+import {
+  PIN_RAIL_HALF,
+  PIN_RAIL_SETBACK,
+  companionwayStations,
+  figureheadStation,
+  helmStation,
+  hullShapeHints,
+  mkPiece,
+} from './blueprintParts';
 import { hullHalfWidthAt, hullTopY, type HullShape } from './hullMath';
 import { FLAG_STYLE_JOLLY, FLAG_STYLE_PENNANT } from './flagMaterial';
 import { vjitter } from './variation';
@@ -150,11 +158,11 @@ export function buildRigDetail(p: ShipClassParams, built: PieceDef[]): PieceDef[
     const deckId = Math.abs(baseY - p.freeboard) < 0.05 ? 'deck' : 'sterncastle-deck';
     const deckPiece = built.find((piece) => piece.id === deckId);
     if (deckPiece !== undefined) {
-      const localZ = mastZ - deckPiece.transform.position[2] - 1.15;
+      const localZ = mastZ - deckPiece.transform.position[2] - PIN_RAIL_SETBACK;
       pieces.push(
         mkPiece(`pin-rail-${name}`, 'pin-rail', [0, 0.04, localZ], {
-          min: [-1.15, 0, -0.12],
-          max: [1.15, 1.05, 0.12],
+          min: [-1.15, 0, -PIN_RAIL_HALF],
+          max: [1.15, 1.05, PIN_RAIL_HALF],
         }, { parent: deckId }),
       );
     }
@@ -167,19 +175,24 @@ export function buildRigDetail(p: ShipClassParams, built: PieceDef[]): PieceDef[
  * figurehead finally mounts `socket-figurehead`, which existed with nothing
  * on it.
  */
-export function buildHeadWorks(p: ShipClassParams): PieceDef[] {
+export function buildHeadWorks(
+  p: ShipClassParams,
+  opts: { figurehead: boolean }, // the same flag buildBowAndTransom's socket takes
+): PieceDef[] {
   const L2 = p.hullLength / 2;
   const bowHints = hullShapeHints(p, 0, L2, L2 + p.bowLength);
   const shell = bowHints as unknown as HullShape;
   const stem = figureheadStation(p); // the same station socket-figurehead uses
   const size = Math.max(1, p.bowLength * 0.62);
-  const pieces: PieceDef[] = [
-    // rides the stem: the bow piece is what a bow-on ram destroys (§V13)
-    mkPiece('figurehead', 'figurehead', [0, stem.y, stem.z - L2], {
-      min: [-size * 0.45, -size * 0.75, -size * 0.2],
-      max: [size * 0.45, size * 0.45, size * 1.35],
-    }, { parent: 'bow' }),
-  ];
+  const pieces: PieceDef[] = opts.figurehead
+    ? [
+        // rides the stem: the bow piece is what a bow-on ram destroys (§V13)
+        mkPiece('figurehead', 'figurehead', [0, stem.y, stem.z - L2], {
+          min: [-size * 0.45, -size * 0.75, -size * 0.2],
+          max: [size * 0.45, size * 0.45, size * 1.35],
+        }, { parent: 'bow' }),
+      ]
+    : [];
 
   for (const [name, sign] of [['port', -1], ['starboard', 1]] as const) {
     pieces.push(
@@ -330,23 +343,38 @@ export function buildDeckRails(p: ShipClassParams = galleonParams): PieceDef[] {
   return pieces;
 }
 
-/** stern cabin lights, the ensign staff, and the binnacle by the wheel */
+/**
+ * Stern cabin lights, the ensign staff, and the binnacle by the wheel. A class
+ * without a gallery has no lights to glaze; one without a cabin flies her
+ * ensign off the transom head instead of the cabin roof (§V.18).
+ */
 export function buildSternDetail(p: ShipClassParams): PieceDef[] {
   const d = shipDetailParams;
+  const L2 = p.hullLength / 2;
   const cabinLen = p.sterncastleLength * 0.5;
-  const sl2 = p.sterncastleLength / 2;
+  const helm = helmStation(p);
+  const onCabin = p.cabinHeight > 0;
+  const sternHints = hullShapeHints(p, 0, -L2, -L2) as unknown as HullShape;
+  const ensignZ = -(L2 - 0.25); // ship-space, 0.25 m forward of the counter
   return [
     // glazing behind the gallery's mullions (the band had none at all)
-    mkPiece('stern-lights', 'window', [0, 0, -0.055], {
-      min: [-0.01, -p.galleryHeight * 0.34, -0.05],
-      max: [0.01, p.galleryHeight * 0.34, 0.05],
-    }, { parent: 'gallery', shape: { lights: 5 } }),
+    ...(p.galleryHeight > 0
+      ? [
+          mkPiece('stern-lights', 'window', [0, 0, -0.055], {
+            min: [-0.01, -p.galleryHeight * 0.34, -0.05],
+            max: [0.01, p.galleryHeight * 0.34, 0.05],
+          }, { parent: 'gallery', shape: { lights: 5 } }),
+        ]
+      : []),
     // the ensign at the taffrail, on its own raked staff
-    mkPiece('ensign-stern', 'pennant', [0, p.cabinHeight, -cabinLen / 2 + 0.15], {
+    mkPiece('ensign-stern', 'pennant',
+      onCabin
+        ? [0, p.cabinHeight, -cabinLen / 2 + 0.15]
+        : [0, hullTopY(ensignZ, sternHints), ensignZ + L2], {
       min: [0, -d.pennantHoist * 1.5, -0.1],
       max: [d.pennantFly * 0.65, d.ensignStaff + 0.2, 0.1],
     }, {
-      parent: 'cabin',
+      parent: onCabin ? 'cabin' : 'transom',
       rotation: [-0.26, 0, 0], // staffs at the taffrail rake aft
       shape: {
         fly: d.pennantFly * 0.62,
@@ -357,9 +385,10 @@ export function buildSternDetail(p: ShipClassParams): PieceDef[] {
         staff: 1,
       },
     }),
-    mkPiece('binnacle', 'binnacle', [0.95, 0.04, sl2 - 1.75], {
+    // 1.05 m abaft the wheel and off the centreline, on the helmsman's deck
+    mkPiece('binnacle', 'binnacle', [0.95, 0.04, helm.wheelZ - 1.05], {
       min: [-0.3, 0, -0.26],
       max: [0.3, 1.1, 0.26],
-    }, { parent: 'sterncastle-deck' }),
+    }, { parent: helm.deckId }),
   ];
 }

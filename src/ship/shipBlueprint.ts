@@ -13,7 +13,7 @@ import {
   buildKeel,
 } from './blueprintParts';
 import { buildBowAndTransom, buildRails, buildRudder } from './blueprintEnds';
-import { buildCastles, buildFurniture } from './blueprintCastles';
+import { buildCastles, buildFurniture, buildLanternPosts } from './blueprintCastles';
 import { buildBowsprit, buildMastRig } from './blueprintRig';
 import {
   buildDeckRails,
@@ -43,10 +43,15 @@ export function buildBrigantineBlueprint(
   });
   const core = [
     buildKeel(p),
-    buildDeck(p, { deckCannons: false, capstan: false }),
+    buildDeck(p, { deckCannons: false, capstan: true }),
     ...hull,
     ...buildCannons(hull),
     ...buildBowAndTransom(p, { figurehead: false }),
+    // no castles, but the same deck fittings on the same builders (§V.18):
+    // wheel + binnacle on the main deck aft (helmStation), capstan between
+    // the masts, the main hatch, lantern posts at the transom head
+    ...buildFurniture(p),
+    ...buildLanternPosts(p),
     ...buildMastRig(p, 'fore', p.foreMastZ, p.foreMastHeight, p.freeboard, rig),
     ...buildMastRig(p, 'main', p.mainMastZ, p.mainMastHeight, p.freeboard, rig),
     buildBowsprit(p),
@@ -55,7 +60,15 @@ export function buildBrigantineBlueprint(
   ];
   // §T.34 fittings are DERIVED from the core pieces (see blueprintDetail.ts),
   // so they are appended after it rather than woven into it
-  return [...core, ...buildHullFittings(p, hull), ...buildRigDetail(p, core)];
+  // buildDeckRails is NOT here: it rails the castle decks, and she has none —
+  // her waist rail already runs the whole hull (blueprintEnds)
+  return [
+    ...core,
+    ...buildHullFittings(p, hull),
+    ...buildRigDetail(p, core),
+    ...buildHeadWorks(p, { figurehead: false }),
+    ...buildSternDetail(p),
+  ];
 }
 
 /**
@@ -104,7 +117,7 @@ export function buildGalleonBlueprint(
     ...core,
     ...buildHullFittings(p, hull),
     ...buildRigDetail(p, core),
-    ...buildHeadWorks(p),
+    ...buildHeadWorks(p, { figurehead: true }),
     ...buildDeckRails(p),
     ...buildSternDetail(p),
   ];

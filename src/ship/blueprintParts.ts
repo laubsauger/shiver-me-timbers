@@ -166,6 +166,53 @@ export function figureheadStation(p: ShipClassParams): { y: number; z: number } 
   return { y: hullTopY(z, shape) - 0.55, z };
 }
 
+/**
+ * THE HELM STATION — where the wheel stands, and therefore where
+ * `socket-wheel` is declared, the binnacle is set, and the helm camera parks.
+ *
+ * On a class WITH a sterncastle the wheel is on the quarterdeck, just aft of
+ * its break (the galleon, docs/ship-reference-schema.png). On a class WITHOUT
+ * one (the brigantine, §T.73) there is no raised deck to put it on, so it
+ * stands on the MAIN DECK aft, a tenth of the hull forward of the transom and
+ * ahead of the rudder head — where a brig's wheel is. Same function, one
+ * expression per class feature (§V.18 / §V.77): the socket, the pedestal and
+ * the binnacle all read THIS, so they cannot disagree about which deck the
+ * helmsman is on (§V.37).
+ *
+ * `z` values are LOCAL to `deckId`.
+ */
+export function helmStation(p: ShipClassParams): {
+  deckId: 'deck' | 'sterncastle-deck';
+  wheelZ: number;
+  socketZ: number;
+} {
+  if (p.sterncastleLength > 0 && p.sterncastleRise > 0) {
+    const sl2 = p.sterncastleLength / 2;
+    return { deckId: 'sterncastle-deck', wheelZ: sl2 - 0.7, socketZ: sl2 - 0.4 };
+  }
+  const wheelZ = -(p.hullLength / 2 - p.hullLength * 0.1);
+  return { deckId: 'deck', wheelZ, socketZ: wheelZ + 0.3 };
+}
+
+/** fiferail setback forward of its mast foot, and its half-thickness (m) —
+ *  shared with `capstanStation` so the drum cannot stand in the rail */
+export const PIN_RAIL_SETBACK = 1.15;
+export const PIN_RAIL_HALF = 0.12;
+/** capstan drum + bars, half-extent (m) */
+export const CAPSTAN_HALF = 0.85;
+
+/**
+ * Where the capstan stands (ship-space z): a fixed fraction of the hull
+ * forward of midships, CLAMPED clear of the fore mast's fiferail. The fraction
+ * alone put the brigantine's drum 0.02 m inside her fore pin-rail (5.40 vs a
+ * rail face at 6.23); on the galleon the clamp never bites (6.30 vs 7.78).
+ * One source for the deck socket AND the piece on it (§V.37).
+ */
+export function capstanStation(p: ShipClassParams): number {
+  const railFace = p.foreMastZ - PIN_RAIL_SETBACK - PIN_RAIL_HALF;
+  return Math.min(p.hullLength * 0.18, railFace - CAPSTAN_HALF - 0.1);
+}
+
 export function buildKeel(p: ShipClassParams): PieceDef {
   return mkPiece('keel', 'keel', [0, -p.draft, 0], {
     min: [-p.keelWidth / 2, -p.keelHeight, -p.hullLength / 2],
@@ -195,8 +242,14 @@ export function buildDeck(
     sockets.push({
       id: 'socket-capstan',
       type: 'fixture',
-      position: [0, 0.05, p.hullLength * 0.18],
+      position: [0, 0.05, capstanStation(p)],
     });
+  }
+  // a class with no quarterdeck steers from HERE (see helmStation) — the
+  // galleon's socket lives on her sterncastle-deck instead
+  const helm = helmStation(p);
+  if (helm.deckId === 'deck') {
+    sockets.push({ id: 'socket-wheel', type: 'fixture', position: [0, 0.05, helm.socketZ] });
   }
   return mkPiece('deck', 'deck', [0, p.freeboard, 0], {
     min: [-p.beam / 2, -p.deckThickness, -p.hullLength / 2],
