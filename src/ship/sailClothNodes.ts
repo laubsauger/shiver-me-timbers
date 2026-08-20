@@ -8,7 +8,7 @@
  * code — one is JS arithmetic and the other is a node graph — so the next best
  * thing is that any drift shows up in a side-by-side diff. Keep the order.
  *
- * §V23: functional mix()/smoothstep() only. A chained `a.mix(b,t)` reads the
+ * §V23: functional mix() only. A chained `a.mix(b,t)` reads the
  * RECEIVER as the factor (§B.1/§B.2).
  * §V28: every divisor floored; a NaN here is a NaN vertex.
  * §V57: every node below is built inside `createSailClothNodes` (called from
@@ -25,7 +25,6 @@ import {
   mix,
   positionLocal,
   sin,
-  smoothstep,
   uniform,
   uv,
   vec3,
@@ -33,15 +32,18 @@ import {
 import type { ShipMaterialParams } from '../params/ship';
 import {
   SAIL_ARC_COEFF,
-  SAIL_BELLY_FOOT,
-  SAIL_BELLY_HEAD,
+  SAIL_ARC_COEFF_V,
+  SAIL_BELLY_REF,
   SAIL_CLEW_SOFTEN,
   SAIL_DRAFT_MAX,
   SAIL_DRAFT_MIN,
   SAIL_FLUTTER_BASE,
   SAIL_FLUTTER_EDGE,
   SAIL_FLUTTER_V,
-  SAIL_FOOT_FILL,
+  SAIL_FOLD_CYCLES_A,
+  SAIL_FOLD_CYCLES_B,
+  SAIL_FOLD_PHASE_A,
+  SAIL_FOLD_PHASE_B,
   SAIL_LACE_MARGIN,
   SAIL_LACE_SPAN,
   SAIL_LEAD_MAX,
@@ -59,6 +61,7 @@ export interface SailShapeUniforms {
   clothExcess: UniformNode;
   cornerGrip: UniformNode;
   camberMax: UniformNode;
+  slackFold: UniformNode;
   leechOpen: UniformNode;
   footRoach: UniformNode;
   twist: UniformNode;
@@ -94,11 +97,13 @@ export interface SailClothNodes {
 }
 
 /**
- * `1 / (1 + 8/3·k²)` — the span a bowed strip gives up to keep its arc length.
- * Divisor ≥ 1 by construction, so §V28 needs no floor (cf. arcShorten).
+ * `1 / (1 + C·k²)` — the span a bowed strip gives up to keep its arc length.
+ * Divisor ≥ 1 by construction, so §V28 needs no floor (cf. arcShorten). `C` is
+ * SAIL_ARC_COEFF for a horizontal strip (held at both ends) and
+ * SAIL_ARC_COEFF_V for a vertical one (free at the foot) — see the constants.
  */
-function arcShorten(k: Node): Node {
-  return float(1).div(float(1).add(k.mul(k).mul(SAIL_ARC_COEFF)));
+function arcShorten(k: Node, coeff: number = SAIL_ARC_COEFF): Node {
+  return float(1).div(float(1).add(k.mul(k).mul(coeff)));
 }
 
 /** 1 at mid-width, 0 at both leeches — its complement is the leech weight */
@@ -129,37 +134,30 @@ export function createSailClothNodes(
    * eased by the trim because a deeply reefed sail is flatter.
    *
    * Transliteration of sailShapeProfiles.sailCamberRatio — §T.74a: DEPTH IS
-   * DERIVED FROM EXCESS CLOTH, not authored. `e = SAIL_ARC_COEFF·k²` inverted,
-   * with the drive scaling the excess TAKEN UP rather than the depth, so camber
-   * goes as √drive: the sail fills early and then stops deepening.
+   * DERIVED FROM EXCESS CLOTH, not authored: `e = SAIL_ARC_COEFF·k²` inverted.
+   * `drive` IS THE FULLNESS (sailDynamics.sailDrive maps dynamic pressure to
+   * 0..1, signed for aback) and camber is LINEAR in it — a half-loaded sail
+   * shows half its camber, and the old √smoothstep front-loading that put the
+   * cloth at 61% of full in 2 kn is gone. Linear is C1 through zero (§V.71).
    *
-   * `max(…, 0)` before the sqrt is §V28/§B.5's rule for `pow`: a WGSL `sqrt` of
-   * a value a hair below zero is undefined, and undefined here is a NaN vertex.
+   * `max(…, 0)` before the sqrt is §V28/§B.5's rule: a WGSL `sqrt` of a value
+   * a hair below zero is undefined, and undefined here is a NaN vertex.
    */
-  // smoothstep, NOT |drive| — √|d| has an infinite derivative at zero, so a
-  // sail crossing from backed to drawing would snap between the two shapes at
-  // unbounded rate (measured: 0.102 m of anchor travel over the first 1% of
-  // drive, against §V.71's 0.063 m whole-travel bound). smoothstep is quadratic
-  // at the origin, so its √ is linear there. §V23: functional 3-arg form.
-  // @band-limited-elsewhere: the argument is `drive`, a UNIFORM — one wind
-  // scalar for the whole sail. No spatial coordinate, no period, no pixel, so
-  // there is nothing for it to alias against (§V.48).
-  const takenUp = max(u.clothExcess, float(0)).mul(
-    // @band-limited-elsewhere
-    smoothstep(float(0), float(1), wind.drive.abs()),
-  );
+  const fill = clamp(wind.drive, float(-1), float(1));
   const camber = clamp(
-    takenUp.div(SAIL_ARC_COEFF).max(float(0)).sqrt().mul(wind.drive.sign()),
+    max(u.clothExcess, float(0)).div(SAIL_ARC_COEFF).sqrt().mul(fill),
     u.camberMax.negate(),
     u.camberMax,
   ).mul(set);
+  /** how full she is, 0..1 — scales the slack folds and the flutter OUT */
+  const fullness = fill.abs();
   const depth = camber.mul(width);
 
   /**
    * THE CORNER TENSION FIELD (§T.74c) — transliteration of
    * sailShapeProfiles.cornerTension. Distances in METRES on the cut panel
    * (§V66), softened rather than floored so the finite-difference normal below
-   * never straddles a kink (§V28), and normalised at (0.5, SAIL_BELLY_FOOT) so
+   * never straddles a kink (§V28), and normalised at (0.5, SAIL_BELLY_REF) so
    * `camber` keeps meaning the peak on a sail of any aspect.
    */
   const diag = width.mul(width).add(builtDrop.mul(builtDrop)).sqrt();
@@ -177,7 +175,7 @@ export function createSailClothNodes(
     // divisors ≥ SAIL_CLEW_SOFTEN·diag > 0 by construction (§V28)
     return float(1).add(reach.div(rp)).add(reach.div(rs));
   });
-  const tensionRef = tensionRaw(float(0.5), float(SAIL_BELLY_FOOT));
+  const tensionRef = tensionRaw(float(0.5), float(SAIL_BELLY_REF));
   const tensionAt = Fn(([uu, v]: [Node, Node]) =>
     max(tensionRaw(uu, v).div(tensionRef), float(1e-3)), // §V28
   );
@@ -214,7 +212,7 @@ export function createSailClothNodes(
     const draft = clamp(
       u.draftPos
         .sub(wind.skew.mul(SAIL_SKEW_LEAD).mul(v.oneMinus()))
-        .add(u.twist.mul(wind.drive).mul(v.sub(SAIL_BELLY_FOOT))),
+        .add(u.twist.mul(wind.drive).mul(v.sub(SAIL_BELLY_REF))),
       float(SAIL_DRAFT_MIN),
       float(SAIL_DRAFT_MAX),
     );
@@ -234,48 +232,81 @@ export function createSailClothNodes(
     return max(w.mul(w.oneMinus()).mul(4), float(0)).pow(u.draftFullness);
   });
 
-  /** deepest around mid-height, tapering to the yard, easing at the free foot */
-  // VERTEX STAGE. A vertex displacement is band-limited
-  // by the MESH, not the pixel grid — `fwidth` is not even defined here, and the
-  // panel can carry no feature finer than its own quads. The limit is
-  // samples-per-feature on the mesh, and it is ENFORCED: buildSailGeometry sizes
-  // its segments through sailClothSegments() from the same lacing count the
-  // shape uses, at SAIL_SAMPLES_PER_PANEL each. This profile is one smooth hump
-  // over the whole drop — far coarser than the quilting that sets that bound.
+  /**
+   * VERTICAL PROFILE — transliteration of sailShapeProfiles.sailBellyProfile:
+   * `1 − v²`, 1 at the free foot, 0 at the yard. Deepest LOW, curving the
+   * whole way up.
+   *
+   * VERTEX STAGE. A vertex displacement is band-limited by the MESH, not the
+   * pixel grid — `fwidth` is not even defined here. The limit is samples-per-
+   * feature on the mesh, ENFORCED by buildSailGeometry through
+   * sailClothSegments(); this profile is one smooth curve over the whole drop.
+   */
   // @band-limited-elsewhere
-  const downAt = Fn(([v]: [Node]) => {
-    const headTaper = smoothstep(float(0), float(SAIL_BELLY_HEAD), v.oneMinus());
-    // @band-limited-elsewhere — see above
-    const footEase = mix(float(SAIL_FOOT_FILL), float(1), smoothstep(float(0), float(SAIL_BELLY_FOOT), v));
-    return headTaper.mul(footEase);
-  });
+  const downAt = Fn(([v]: [Node]) => v.mul(v).oneMinus());
+
+  /** how far the free LEECH flies at height v, as a fraction of the centre's
+   *  depth there — sailShapeProfiles.leechFraction × sailLeechOpen. Zero at
+   *  the clew and the yardarm, where the edge is actually made fast. */
+  const leechAt = Fn(([v]: [Node]) =>
+    clamp(u.leechOpen, float(0), float(1)).mul(v.mul(v.oneMinus()).mul(4)),
+  );
 
   /**
-   * The free LEECH: zero at the yardarm (v = 1) and at the clew (v = 0),
-   * maximal between; zero at mid-width, maximal at both edges. A square sail's
-   * leech is bent to the ship at exactly two points and flies between them —
-   * pinning it at every height is what made the outline a perfect rectangle.
+   * THE SECTION — ONE 2D FUNCTION OF (u, v), transliteration of
+   * sailShapeProfiles.sailSection. At height v an arc from leech to leech,
+   * the leeches standing `leechAt(v)` of the way forward and the interior
+   * bowing the rest on the membrane parabola; the whole scaled by the vertical
+   * profile. §V23: functional 3-arg mix, factor LAST.
    */
-  const leechAt = Fn(([uu, v]: [Node, Node]) =>
-    midArch(uu).oneMinus().mul(sin(v.mul(Math.PI))),
+  const sectionAt = Fn(([uu, v]: [Node, Node]) =>
+    downAt(v).mul(mix(leechAt(v), float(1), acrossAt(uu, v))),
   );
+
+  /** the vertical strip at width u's bow relative to the centre strip — its
+   *  section at the reference height (sailShapeProfiles.sailStripBow) */
+  const stripBowAt = Fn(([uu]: [Node]) =>
+    mix(leechAt(float(SAIL_BELLY_REF)), float(1), acrossAt(uu, float(SAIL_BELLY_REF))),
+  );
+
+  /**
+   * SLACK FOLDS — transliteration of sailShapeProfiles.slackFoldProfile. Two
+   * incommensurate sines across the cloth, growing toward the free foot.
+   * Scaled by (1 − fullness) below: the wind pulls them out as it fills her.
+   * @band-limited-elsewhere — 3.5 cycles across a cloth the mesh samples at
+   * ≥ 4 per panel over ≥ 7 panels; see SAIL_SAMPLES_PER_PANEL.
+   */
+  const foldAt = Fn(([uu, v]: [Node, Node]) => {
+    // zero at exactly the two clews, which the sheets hold whatever the wind
+    const sheeted = float(1).sub(v.oneMinus().mul(midArch(uu).oneMinus()));
+    return sin(uu.mul(TAU * SAIL_FOLD_CYCLES_A).add(SAIL_FOLD_PHASE_A))
+      .mul(0.6)
+      .add(sin(uu.mul(TAU * SAIL_FOLD_CYCLES_B).add(SAIL_FOLD_PHASE_B)).mul(0.4))
+      .mul(v.oneMinus())
+      .mul(sheeted);
+  });
 
   /** billow + flutter offset (m, along local +z = forward of the yard) */
   const clothZ = Fn(([uu, v]: [Node, Node]) => {
+    const section = sectionAt(uu, v);
     // QUILTING (sailShapeProfiles.seamQuiltProfile): each cloth panel bellies
     // between its two seams, which hold. Zero-mean, so it redistributes camber
-    // rather than adding any, and it rides the belly envelope so it dies at the
-    // pinned leeches and at the head. IN THE SHAPE, not the shading — a line
-    // painted on a smooth interior does not change how the surface reads.
+    // rather than adding any, and it rides the section so it dies at the head.
+    // IN THE SHAPE, not the shading — a line painted on a smooth interior does
+    // not change how the surface reads.
     const q = sin(uu.sub(SAIL_LACE_MARGIN).div(SAIL_LACE_SPAN).mul(laces.sub(1)).mul(Math.PI));
-    const quilt = u.seamQuilt.mul(q.mul(q).sub(0.5)).mul(acrossAt(uu, v)).mul(downAt(v));
-    // §T.74c: the tension field divides the WHOLE section — quilting and leech
-    // standoff are cloth too, and cloth hauled bar-taut into a clew cannot
-    // corrugate or fly any more than it can belly. Division only ever takes
-    // depth away, so `depth` stays the §V44 bound on the whole expression.
-    const belly = depth
-      .mul(acrossAt(uu, v).mul(downAt(v)).add(quilt).add(u.leechOpen.mul(leechAt(uu, v))))
-      .div(tensionAt(uu, v));
+    const quilt = u.seamQuilt.mul(q.mul(q).sub(0.5)).mul(section);
+    // SLACK: becalmed canvas hangs in folds; amplitude a fraction of the chord
+    const slack = max(u.slackFold, float(0))
+      .mul(width)
+      .mul(set)
+      .mul(fullness.oneMinus())
+      .mul(foldAt(uu, v));
+    // §T.74c: the tension field divides the WHOLE section — quilting and the
+    // folds are cloth too, and cloth hauled bar-taut into a clew cannot
+    // corrugate or hang any more than it can belly. Division only ever takes
+    // depth away, so `depth` stays the §V44 bound on the filled expression.
+    const belly = depth.mul(section.add(quilt)).add(slack).div(tensionAt(uu, v));
     // THE CARRIER IS AN ACCUMULATED PHASE (§V.55, §B.30). `time × ω(luff)` is
     // a phase only while ω is constant, and luff breathes with every gust —
     // measured on the flags at 0.93 Hz intended, 59.5 Hz after ten minutes.
@@ -290,8 +321,18 @@ export function createSailClothNodes(
     // sailShape.sailClothOffset for the measurement: without it, 0.227 m of
     // remaining canvas was being waved ±0.406 m, which is the flapping tab the
     // user photographed on the packed bundles.
+    // `.mul(1 − fullness)` — a drum-tight sail does not ripple; the flutter is
+    // the luffing/slack read and fades as the wind fills her.
     return belly
-      .add(wave.mul(u.flutterAmp).mul(shake).mul(v.oneMinus()).mul(edge).mul(set))
+      .add(
+        wave
+          .mul(u.flutterAmp)
+          .mul(shake)
+          .mul(v.oneMinus())
+          .mul(edge)
+          .mul(set)
+          .mul(fullness.oneMinus()),
+      )
       .add(cornerPull(uu, v).z);
   });
 
@@ -326,19 +367,22 @@ export function createSailClothNodes(
     uu
       .sub(0.5)
       .mul(width)
-      .mul(arcShorten(camber.mul(downAt(v)).div(tensionAt(float(0.5), v))))
+      // the horizontal strip bows from its LEECHES to its centre — the
+      // leeches stand forward too, so the bow is the difference
+      .mul(arcShorten(camber.mul(downAt(v)).mul(leechAt(v).oneMinus()).div(tensionAt(float(0.5), v))))
       .add(cornerPull(uu, v).x),
   );
   const clothY = Fn(([uu, v]: [Node, Node]) => {
-    // both terms of the section bow this strip: the membrane belly (zero at
-    // the leech) and the leech's own standoff (zero at mid-width)
-    const stripBow = acrossAt(uu, v).add(u.leechOpen.mul(midArch(uu).oneMinus()));
+    // the vertical strip is bent to the yard and FREE at the foot: it swings
+    // forward rather than bowing back — a different curve with its own
+    // coefficient (SAIL_ARC_COEFF_V), bow sampled at the reference height
     const spanShrink = arcShorten(
       camber
-        .mul(stripBow)
+        .mul(stripBowAt(uu))
         .mul(width)
         .div(builtDrop)
-        .div(tensionAt(uu, float(SAIL_BELLY_FOOT))),
+        .div(tensionAt(uu, float(SAIL_BELLY_REF))),
+      SAIL_ARC_COEFF_V,
     );
     const roach = float(1).sub(u.footRoach.mul(midArch(uu)));
     return v
@@ -461,6 +505,7 @@ export function createSailShapeUniforms(p: ShipMaterialParams): SailShapeUniform
     clothExcess: uniform(p.sailClothExcess),
     cornerGrip: uniform(p.sailCornerGrip),
     camberMax: uniform(p.sailCamberMax),
+    slackFold: uniform(p.sailSlackFold),
     leechOpen: uniform(p.sailLeechOpen),
     footRoach: uniform(p.sailFootRoach),
     twist: uniform(p.sailTwist),
@@ -482,6 +527,7 @@ export function refreshSailShapeUniforms(u: SailShapeUniforms, p: ShipMaterialPa
   u.clothExcess.value = p.sailClothExcess;
   u.cornerGrip.value = p.sailCornerGrip;
   u.camberMax.value = p.sailCamberMax;
+  u.slackFold.value = p.sailSlackFold;
   u.leechOpen.value = p.sailLeechOpen;
   u.footRoach.value = p.sailFootRoach;
   u.twist.value = p.sailTwist;

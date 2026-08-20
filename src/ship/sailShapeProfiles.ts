@@ -47,29 +47,22 @@ export const SAIL_SKEW_LEAD = 0.22; // how far the DRAFT shifts to leeward
  * means the falloff is a boundary layer at the edge, not the whole
  * half-width. The EDGE ITSELF is then allowed to stand off the bellied
  * surface by `sailLeechOpen`, which is a separate term; see
- * {@link leechStandoff} for why pinning it at every height was wrong.
+ * {@link leechFraction} for why pinning it at every height was wrong.
  */
 export const SAIL_DRAFT_MIN = 0.28; // draft cannot crowd the luff…
 export const SAIL_DRAFT_MAX = 0.72; // …nor the leech
 export const SAIL_LEAD_MAX = 0.3; // |lead|·π < 1 keeps the warp monotone
 /**
- * VERTICAL BELLY PROFILE (user: "they have no billow to them").
- *
- * This used to be one monotone ramp — `smoothstep(0, 0.9, 1−v)` — which is
- * zero at the head and DEEPEST AT THE FOOT. That is the shape of a flag
- * blowing off a pole, not of a sail under load: the vertical section has no
- * inflection, so the whole lower sail moves forward together and the surface
- * reads as a tilted plane no matter how deep the number says it is. It shaded
- * flat because it genuinely was flat in one direction.
- *
- * A square sail is bent to its yard at the head and hauled down at the clews,
- * so the canvas is deepest around the middle and comes back at BOTH ends. The
- * foot never returns fully — it is a free edge — hence FOOT_FILL rather than
- * a second taper to zero.
+ * VERTICAL BELLY PROFILE — see {@link sailBellyProfile}. The section's
+ * REFERENCE STATION is where `sailCamberRatio` MEANS what it says: the corner
+ * tension field is normalised to 1 at (0.5, SAIL_BELLY_REF), the vertical
+ * strips' bow is sampled there, and the twist pivots there. The profile alone
+ * peaks at the foot; the clews' grip lifts the realised peak to v ≈ 0.03 on a
+ * wide sail and v ≈ 0.24 on a square one. 0.12 sits between: MEASURED peak
+ * depth / `sailCamberRatio` = 0.977…0.979 over six aspects from 18×6 to
+ * 12×12 (0.942…0.971 at 0.22), re-measured by tests/sailMembrane.test.ts.
  */
-export const SAIL_BELLY_HEAD = 0.55; // taper span below the head, in v
-export const SAIL_BELLY_FOOT = 0.45; // ease span above the foot, in v
-export const SAIL_FOOT_FILL = 0.55; // belly remaining at the free foot
+export const SAIL_BELLY_REF = 0.12;
 export const SAIL_FLUTTER_BASE = 0.3; // shake floor before luff adds to it
 export const SAIL_FLUTTER_EDGE = 1.3; // extra ripple toward the leeches
 export const SAIL_FLUTTER_V = 2.1; // ripple phase advance down the cloth
@@ -121,6 +114,37 @@ export const SAIL_FLUTTER_V = 2.1; // ripple phase advance down the cloth
  */
 export const SAIL_ARC_COEFF = 1.9;
 
+/**
+ * THE SAME RELATION FOR A VERTICAL STRIP, WHICH IS A DIFFERENT CURVE.
+ *
+ * A horizontal strip is held at both ends and bows between them — a parabola,
+ * coefficient 8/3 before the clews flatten it. A vertical strip is bent to the
+ * yard at its head and FREE at its foot: it does not bow back, it swings
+ * forward as `1 − v²` ({@link sailBellyProfile}), and ∫½(dz/dv)² over that
+ * curve is exactly 2/3 of (d/h)². Spending the horizontal 1.9 on it shortens
+ * every vertical strip ~3× too much. MEASURED on the main course at full
+ * load, |L/cut − 1| per strip:
+ *
+ *     1.9   vertical strips at u = 0.25…0.5 read 7.2…9.1% SHORT of cut (a
+ *           sign flip against the horizontal strips, which read 2-4% long),
+ *           and the foot centre rises 1.17 m — 9.6% of chord
+ *     2/3   worst strip anywhere 2.5% (horizontal, v = 0.15), NO strip short,
+ *           foot centre rises 0.46 m — which is what the curve's own length
+ *           demands: √(6.3² − 2.05²) is 0.44 m shorter than 6.3
+ *
+ * Derived from the profile, not fitted; the length test in
+ * tests/sailMembrane.test.ts is what holds it honest.
+ */
+export const SAIL_ARC_COEFF_V = 2 / 3;
+
+/** slack-canvas folds: cycles across the cloth and the phase of each.
+ *  Two incommensurate wavelengths so the hang is not a regular corrugation
+ *  (§V43 — a regular repeat is the "generated" tell). */
+export const SAIL_FOLD_CYCLES_A = 1.5;
+export const SAIL_FOLD_CYCLES_B = 3.5;
+export const SAIL_FOLD_PHASE_A = 0.9;
+export const SAIL_FOLD_PHASE_B = 2.3;
+
 /** the radius, as a fraction of the sail's diagonal, over which a clew's grip
  *  stops growing — a cringle has a size, and 1/r must not run to infinity */
 export const SAIL_CLEW_SOFTEN = 0.03;
@@ -162,38 +186,28 @@ export function midArch(u: number): number {
  */
 export function sailCamberRatio(drive: number, p: ShipMaterialParams): number {
   const cap = Math.max(0, finite(p.sailCamberMax, 0.15));
-  const d = finite(drive);
-  // §V28: excess ≥ 0 and |d| ≥ 0, so the sqrt argument can never go negative
+  const d = clamp(finite(drive), -1, 1);
   /**
-   * HOW MUCH OF THE CUT EXCESS THE WIND HAS ACTUALLY TAKEN UP.
-   *
-   * `smoothstep`, not `|drive|`, AND THE REASON IS THE SQUARE ROOT UNDERNEATH.
-   * √|d| has an INFINITE derivative at zero, so a sail crossing from backed to
-   * drawing would snap between the two shapes at unbounded rate — measured on
-   * the first cut of this: an anchor moved 0.102 m over the first 1% of drive,
-   * against 0.063 m for §V.71's whole-travel continuity bound. The old linear
-   * law was C1 through zero and would have made that a regression nobody asked
-   * for. smoothstep is quadratic at the origin, so the √ of it is LINEAR there
-   * and the crossing is smooth again, while the curve stays concave everywhere
-   * above it — which is the part that was worth having.
-   *
-   * It is also the better physical statement: slack cloth does not snap taut,
-   * it is drawn taut, and the excess arrives over a range of pressure.
+   * `drive` IS THE FULLNESS. sailDynamics.sailDrive maps the dynamic pressure
+   * the canvas actually sees onto 0..1 with a saturating curve (~0 at 2 kn,
+   * slack at 5, half at ~10, drum-tight by 20), signed for a backed sail. The
+   * camber is LINEAR in it: the full excess buys `√(e/COEFF)` of camber, and a
+   * half-loaded sail shows half of that. The old form took √(smoothstep(drive))
+   * here on top of a front-loaded load curve, so the cloth was at 61% of full
+   * camber in 2 kn of wind and a breeze and a gale were the same sail — the
+   * user's "binary has-wind / has-no-wind". Linear is also C1 through zero, so
+   * a sail crossing from backed to drawing moves at a bounded rate (§V.71).
    */
-  // @band-limited-elsewhere: the argument is `drive`, a WIND SCALAR that is
-  // uniform over the whole sail. There is no spatial coordinate here, no
-  // period, and no pixel — nothing to alias against (§V.48).
-  // @band-limited-elsewhere
-  const takenUp = Math.max(0, finite(p.sailClothExcess)) * smoothstep(0, 1, Math.abs(d));
   // e = SAIL_ARC_COEFF·k²  ⟹  k = √(e / SAIL_ARC_COEFF). ONE inversion, and it
   // is the same coefficient `arcShorten` spends, so the two cannot drift.
-  const camber = Math.sqrt(takenUp / SAIL_ARC_COEFF);
-  return clamp(Math.sign(d) * camber, -cap, cap);
+  // §V28: excess ≥ 0, so the sqrt argument can never go negative.
+  const full = Math.sqrt(Math.max(0, finite(p.sailClothExcess)) / SAIL_ARC_COEFF);
+  return clamp(full * d, -cap, cap);
 }
 
 /**
  * HOW MUCH HARDER THE CLOTH IS PULLING AT (u, v) THAN AT THE BELLY'S OWN
- * REFERENCE STATION. ≥ 0, and exactly 1 at (0.5, SAIL_BELLY_FOOT) by
+ * REFERENCE STATION. ≥ 0, and exactly 1 at (0.5, SAIL_BELLY_REF) by
  * construction, for a sail of any size.
  *
  * §T.74c, and the user's words: "really shaping the bulge FROM THE CORNERS
@@ -220,7 +234,7 @@ export function sailCamberRatio(drive: number, p: ShipMaterialParams): number {
  *
  * WHY IT IS NORMALISED AT THE REFERENCE STATION rather than at its own minimum:
  * `sailCamberRatio` is defined as the camber AT the belly's deepest point, and
- * (mid-width, SAIL_BELLY_FOOT) is where `sailDraftProfile × sailBellyProfile`
+ * (mid-width, SAIL_BELLY_REF) is where the realised section
  * peaks. Pinning the field to 1 there keeps camber meaning what it says on
  * every sail of every aspect, so `sailCamberMax` stays a true ceiling (§V44)
  * and the chord-relative camber law survives unchanged.
@@ -255,7 +269,7 @@ export function cornerTension(
     const rs = Math.sqrt(((1 - uu) * c) ** 2 + (vv * h) ** 2 + eps2);
     return 1 + reach / rp + reach / rs; // divisors ≥ ε·diag > 0 by construction
   };
-  return t(clamp01(finite(u)), clamp01(finite(v))) / t(0.5, SAIL_BELLY_FOOT);
+  return t(clamp01(finite(u)), clamp01(finite(v))) / t(0.5, SAIL_BELLY_REF);
 }
 
 /**
@@ -267,33 +281,94 @@ export function cornerTension(
  * single cue that separates cloth from an inflating bag, and the reason the
  * sheets and their blocks now have something real to follow.
  */
-export function arcShorten(camberRatio: number): number {
+export function arcShorten(camberRatio: number, coeff: number = SAIL_ARC_COEFF): number {
   const k = finite(camberRatio);
-  return 1 / (1 + SAIL_ARC_COEFF * k * k);
+  return 1 / (1 + Math.max(0, finite(coeff, SAIL_ARC_COEFF)) * k * k);
 }
 
 /**
- * How far the free LEECH stands off the bellied surface, as a fraction of the
- * peak camber depth.
+ * How far the free LEECH flies forward at height v, as a fraction of the
+ * centre's depth at that height — the edge's own bow between the two points
+ * it is actually made fast at. Zero at v = 0 (the clew, sheeted) and v = 1
+ * (the yardarm), a parabola between: a free edge under uniform load, exactly
+ * the shape a horizontal strip takes between the leeches.
  *
  * THE OLD MODEL PINNED BOTH LEECHES TO ZERO AT EVERY HEIGHT, on the reasoning
- * that they are "bolt-roped and sheeted, so a belly that did not close there
- * would tear the cloth off its own edges". That reasoning is wrong, and it is
- * why the sail's projected outline was a PERFECT RECTANGLE in every wind, at
- * every angle, at every trim. A bolt rope is sewn ALONG an edge; it stiffens
- * the edge, it does not attach it to anything. A square sail's leech is bent
- * to the ship at exactly TWO points — the yardarm at the head and the clew at
- * the foot — and flies free between them.
- *
- * So: zero at v = 1 (bent to the yard) and at v = 0 (hauled to the sheet),
- * maximal in between; zero at mid-width, maximal at both edges. That is the
- * curved leech in the reference, and half of the user's twice-made complaint
- * that "the top and bottom corners don't have to be perfectly straight
- * aligned" — a z-only displacement field pinned at its edges cannot round a
- * corner, by construction.
+ * that they are "bolt-roped and sheeted". A bolt rope is sewn ALONG an edge; it
+ * stiffens it, it does not attach it to anything. Pinning it is why the sail's
+ * outline was a perfect rectangle in every wind.
  */
-export function leechStandoff(u: number, v: number): number {
-  return (1 - midArch(clamp01(finite(u)))) * Math.sin(Math.PI * clamp01(finite(v)));
+export function leechFraction(v: number): number {
+  const vv = clamp01(finite(v));
+  return 4 * vv * (1 - vv);
+}
+
+/**
+ * THE SECTION — ONE 2D FUNCTION OF (u, v), as a fraction of the peak depth,
+ * before the corner tension field divides it (§V.77: one expression, not an
+ * interior term and an edge term that have to agree).
+ *
+ * At height v the cloth is an arc from leech to leech: the leeches themselves
+ * stand `leechOpen·leechFraction(v)` of the way forward, and the interior
+ * bows the rest of the way to the centre line on the membrane parabola
+ * ({@link sailDraftProfile}, carrying the draft lead). The whole section is
+ * then scaled by the vertical profile: flat at the yard, deepest at the foot.
+ *
+ *   v = 1  → 0 everywhere: the head is bent to its yard.
+ *   v = 0  → a clean arc clew to clew: the foot is a FREE edge, held only at
+ *            its two corners, and bows forward as one piece.
+ *   0<v<1  → the leech is forward of the yard plane, the centre further.
+ *
+ * User: "very central bow bulge instead of the whole fabric stretching". The
+ * old field was `across × down`, zero on all three free edges, so the shape
+ * was a dome that died before it reached any edge.
+ */
+export function sailSection(
+  u: number,
+  v: number,
+  lead: number,
+  fullness: number,
+  leechOpen: number,
+): number {
+  const across = sailDraftProfile(u, lead, fullness);
+  const e = clamp01(finite(leechOpen)) * leechFraction(v);
+  return sailBellyProfile(v) * (e + (1 - e) * across);
+}
+
+/**
+ * How much the vertical strip at width u bows, relative to the centre strip —
+ * its section at the reference height. The arc-length shrink of that strip
+ * is paid against this (sailShape.sailClothPoint).
+ */
+export function sailStripBow(u: number, lead: number, fullness: number, leechOpen: number): number {
+  const e = clamp01(finite(leechOpen)) * leechFraction(SAIL_BELLY_REF);
+  return e + (1 - e) * sailDraftProfile(u, lead, fullness);
+}
+
+/**
+ * SLACK CANVAS HANGS IN FOLDS, it does not lie flat. A square sail with no
+ * wind in it hangs from its yard under gravity with the clews sheeted, so the
+ * cloth falls in a few vertical folds that grow toward the free foot. Zero at
+ * the head (laced), growing as (1 − v); a couple of low-frequency sines across
+ * the cloth, and ZERO AT THE CLEWS — the sheets hold those two corners
+ * whatever the wind does — via `1 − (1 − v)·(1 − midArch(u))`, which is 1
+ * along the head line and at mid-foot and 0 at exactly the two clews. The
+ * tension field divides it again like every other term. Scaled by
+ * (1 − fullness) by the caller — the wind pulls the folds out as it fills
+ * her, which is the continuous slack → full read the user asked for instead
+ * of a binary has-wind / no-wind.
+ */
+export function slackFoldProfile(u: number, v: number): number {
+  const uu = clamp01(finite(u));
+  const vv = clamp01(finite(v));
+  const TAU = Math.PI * 2;
+  const sheeted = 1 - (1 - vv) * (1 - midArch(uu));
+  return (
+    (0.6 * Math.sin(TAU * SAIL_FOLD_CYCLES_A * uu + SAIL_FOLD_PHASE_A)
+      + 0.4 * Math.sin(TAU * SAIL_FOLD_CYCLES_B * uu + SAIL_FOLD_PHASE_B))
+    * (1 - vv)
+    * sheeted
+  );
 }
 
 /**
@@ -317,7 +392,7 @@ export function sailDraftAt(
   return (
     finite(p.sailDraftPos, 0.4)
     - finite(skew) * SAIL_SKEW_LEAD * (1 - vv)
-    + finite(p.sailTwist) * finite(drive) * (vv - SAIL_BELLY_FOOT)
+    + finite(p.sailTwist) * finite(drive) * (vv - SAIL_BELLY_REF)
   );
 }
 
@@ -394,16 +469,23 @@ export function seamQuiltProfile(panelCoord: number): number {
   return s * s - 0.5;
 }
 
+/**
+ * VERTICAL BELLY PROFILE: 1 at the free foot, 0 at the yard, `1 − v²`.
+ *
+ * A square sail is bent to its yard along the head and is FREE below it: the
+ * foot is held at the two clews only, and between them it is the freest cloth
+ * on the sail. So the vertical section is deepest LOW — the foot bellies most
+ * and the cloth comes back to the yard with curvature the whole way (constant
+ * second derivative, so it never reads as a tilted plane). The previous
+ * profile peaked at mid-height and came back to 55% at the foot, which put a
+ * dome in the middle of the sail and left the foot nearly flat.
+ *
+ * The corner tension field then lifts the REALISED peak off the foot edge
+ * toward SAIL_BELLY_REF, because the clews grip the cloth nearest them.
+ */
 export function sailBellyProfile(v: number): number {
   const vv = clamp01(finite(v));
-  // THIS FILE IS PLAIN CPU ARITHMETIC — the mirror the
-  // rope anchors resolve through. There is no fragment and no pixel here, so
-  // there is no footprint to measure against. Its shader twin lives in
-  // sailClothNodes.ts and is band-limited by the MESH; see the marker there.
-  // @band-limited-elsewhere
-  const headTaper = smoothstep(0, SAIL_BELLY_HEAD, 1 - vv);
-  const footEase = SAIL_FOOT_FILL + (1 - SAIL_FOOT_FILL) * smoothstep(0, SAIL_BELLY_FOOT, vv);
-  return headTaper * footEase;
+  return 1 - vv * vv;
 }
 
 /**

@@ -52,7 +52,8 @@
  */
 import type { ShipMaterialParams } from '../params/ship';
 import {
-  SAIL_BELLY_FOOT,
+  SAIL_ARC_COEFF_V,
+  SAIL_BELLY_REF,
   SAIL_FLUTTER_BASE,
   SAIL_FLUTTER_EDGE,
   SAIL_FLUTTER_V,
@@ -61,15 +62,17 @@ import {
   clamp01,
   cornerTension,
   finite,
+  leechFraction,
   midArch,
   sailBellyProfile,
   sailCamberRatio,
   sailDraftAt,
   sailDraftLead,
-  sailDraftProfile,
   sailPanelCoord,
+  sailSection,
+  sailStripBow,
   seamQuiltProfile,
-  leechStandoff,
+  slackFoldProfile,
 } from './sailShapeProfiles';
 
 export * from './sailShapeProfiles';
@@ -180,44 +183,49 @@ export function sailClothOffset(
   // between its yard and the reef band, so the belly eases with the trim
   const set = clamp01(finite(s.dropScale, 1));
 
-  // belly: a membrane section across the cloth × the vertical profile. The
-  // ship's swing lags the DRAFT to leeward rather than translating the whole
-  // curve — translating it walked the belly off the leech (at full skew the
-  // old form left 44% of the peak standing at the bolt rope). The head cannot
-  // lag at all, hence the (1 − v) inside sailDraftAt.
+  // THE SECTION: one 2D function of (u, v) — sailShapeProfiles.sailSection.
+  // At each height an arc from leech to leech, the leeches themselves standing
+  // forward of the yard plane; scaled by a vertical profile that is flat at
+  // the yard and deepest at the free foot. The ship's swing lags the DRAFT to
+  // leeward rather than translating the whole curve (translating it walked the
+  // belly off the leech); the head cannot lag at all, hence (1 − v) inside
+  // sailDraftAt.
   //
   // DEPTH IS CAMBER × CHORD, not a fraction of the drop: the section bows
   // across the WIDTH, so that is the length it must be measured against.
   const lead = sailDraftLead(sailDraftAt(vv, s.drive, s.skew, p));
-  const across = sailDraftProfile(uu, lead, p.sailDraftFullness);
-  const down = sailBellyProfile(vv);
+  const section = sailSection(uu, vv, lead, p.sailDraftFullness, p.sailLeechOpen);
   const depth = sailCamberRatio(finite(s.drive), p) * chord * set;
+  // how full she is, 0..1 — `drive` IS the fullness (sailDynamics.sailDrive)
+  const fullness = clamp01(Math.abs(finite(s.drive)));
   // QUILTING: each cloth panel bellies between its two seams, which hold. It
-  // rides the belly envelope, so it vanishes at the pinned leeches and at the
-  // head and scales with the wind exactly as the main camber does — a
-  // second-order camber on the primary one, never a fixed corrugation.
+  // rides the section, so it vanishes at the head and scales with the wind
+  // exactly as the main camber does — a second-order camber on the primary
+  // one, never a fixed corrugation.
   const quilt =
     Math.max(0, finite(p.sailSeamQuilt))
     * seamQuiltProfile(sailPanelCoord(uu, p.sailLacingPoints))
-    * across
-    * down;
+    * section;
+  // SLACK: canvas with no wind in it hangs in folds from its yard. Amplitude
+  // is a fraction of the chord, fading as the wind takes the folds out.
+  const slack =
+    Math.max(0, finite(p.sailSlackFold)) * chord * set * (1 - fullness)
+    * slackFoldProfile(uu, vv);
   /**
    * THE CORNER TENSION FIELD DIVIDES THE WHOLE SECTION (§T.74c).
    *
-   * Not just the membrane term: the quilting and the leech's standoff are cloth
+   * Not just the membrane term: the quilting and the slack folds are cloth
    * too, and cloth that is being pulled bar-taut into a clew cannot corrugate
-   * or fly any more than it can belly. Dividing the bracket rather than one
+   * or hang any more than it can belly. Dividing the bracket rather than one
    * term inside it is also what keeps the quilt zero-mean about the belly it
    * rides — see `seamQuiltProfile`.
    *
    * It is a DIVISION and the divisor is ≥ 1 wherever the clews pull harder than
    * the reference station, so this can only ever take depth away. `depth`
-   * therefore stays the §V44 bound on the whole expression.
+   * therefore stays the §V44 bound on the filled expression.
    */
   const tension = cornerTension(uu, vv, chord, drop, p.sailCornerGrip);
-  const belly =
-    (depth * (across * down + quilt + p.sailLeechOpen * leechStandoff(uu, vv)))
-    / Math.max(1e-3, tension); // §V28
+  const belly = (depth * (section + quilt) + slack) / Math.max(1e-3, tension); // §V28
 
   // flutter: travelling ripples, biggest at the free foot and the leeches.
   //
@@ -268,7 +276,9 @@ export function sailClothOffset(
    * scaling of `sailFlutterAmp` itself is left alone (§Rule 3); it is honest
    * for a sail that is actually set, which is every case but this one.
    */
-  const flutter = wave * p.sailFlutterAmp * shake * (1 - vv) * edge * set;
+  // `× (1 − fullness)`: a drum-tight sail does not ripple. The flutter is the
+  // luffing/slack read, and it fades as the wind fills her.
+  const flutter = wave * p.sailFlutterAmp * shake * (1 - vv) * edge * set * (1 - fullness);
 
   return finite(belly + flutter);
 }
@@ -385,7 +395,6 @@ export function sailClothPoint(
   // Both fall out of arc length alone. Neither is a shaping hack, and both
   // vanish correctly when the sail is becalmed.
   const lead = sailDraftLead(sailDraftAt(vv, s.drive, s.skew, p));
-  const across = sailDraftProfile(uu, lead, p.sailDraftFullness);
   /**
    * EACH SHRINK READS THE BOW ITS OWN STRIP ACTUALLY TAKES, TENSION INCLUDED.
    *
@@ -399,23 +408,29 @@ export function sailClothPoint(
    *
    * Each strip is shortened by its OWN PEAK bow, so the tension is sampled at
    * that peak and not at (u, v): a horizontal strip peaks near mid-width, a
-   * vertical one at the draft height. Sampling at the point would shorten each
-   * strip by a different amount at each end of itself, which is a shear, not a
-   * shortening.
+   * vertical one at the reference height. Sampling at the point would shorten
+   * each strip by a different amount at each end of itself, which is a shear,
+   * not a shortening.
+   *
+   * The horizontal strip at height v bows from its LEECHES to its centre — the
+   * leeches stand forward too (sailSection), so the bow is the difference.
    */
+  const leech = clamp01(finite(p.sailLeechOpen)) * leechFraction(vv);
   const chordShrink = arcShorten(
-    (camber * sailBellyProfile(vv)) / Math.max(1e-3, cornerTension(0.5, vv, chord, drop, p.sailCornerGrip)),
+    (camber * sailBellyProfile(vv) * (1 - leech))
+    / Math.max(1e-3, cornerTension(0.5, vv, chord, drop, p.sailCornerGrip)),
   );
-  // the vertical strip at width u bows by BOTH terms of the section — the
-  // membrane belly, which is zero at the leech, and the leech's own standoff,
-  // which is zero at mid-width. Counting only the first left the clews the one
-  // part of the outline that did not move, and the leech is precisely the edge
-  // that now flies.
-  const stripBow = across + Math.max(0, finite(p.sailLeechOpen)) * (1 - midArch(uu));
+  // the vertical strip at width u is bent to the yard and FREE at the foot: it
+  // swings forward rather than bowing back, which is a different curve with
+  // its own coefficient (SAIL_ARC_COEFF_V). Its bow is its section at the
+  // reference height relative to the centre strip's — leech strips included,
+  // because the leech is precisely the edge that flies.
+  const stripBow = sailStripBow(uu, lead, p.sailDraftFullness, p.sailLeechOpen);
   const spanShrink = arcShorten(
     (camber * stripBow * chord)
     / drop
-    / Math.max(1e-3, cornerTension(uu, SAIL_BELLY_FOOT, chord, drop, p.sailCornerGrip)),
+    / Math.max(1e-3, cornerTension(uu, SAIL_BELLY_REF, chord, drop, p.sailCornerGrip)),
+    SAIL_ARC_COEFF_V,
   );
   // ROACH: the foot is CUT with an arch — a static shortening at mid-width,
   // so the bottom edge is not a straight line even with no wind in her.

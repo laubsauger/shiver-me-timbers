@@ -795,23 +795,22 @@ export interface ShipMaterialParams {
   sailDraftFullness: number; // section exponent: 1 = membrane parabola, >1 narrows it
   sailFurlSwag: number; // foot gather depth as a fraction of drop, at full furl
   sailFurlBays: number; // gathering bays across the foot (buntline stations)
-  /** APPARENT wind (m/s) at which the cloth is ~63% loaded. Was 16 and authored
-   *  against the TRUE wind; the apparent-wind work then fed it a quantity that
-   *  runs 1-21 m/s in ordinary sailing, so the useful part of the curve sat
-   *  outside the game. Halved, and the curve saturates rather than clamping */
+  /**
+   * THE LOAD SCALE: the APPARENT wind (m/s), square on, at which the canvas is
+   * 63% full. Fullness is `1 − exp(−(v·cp / sailWindRef)²)` — a saturating
+   * function of the DYNAMIC PRESSURE the cloth sees (q ∝ v², times the
+   * pressure coefficient of the sail's own angle to the wind), so camber is a
+   * continuous read of the force she is catching and not a has-wind switch.
+   * At 6.43 m/s (12.5 kn): ~0 at 2 kn, slack at 5 (15%), half at 10.4,
+   * three-quarters at 15, drum-tight (92%) at 20, 98% at 25.
+   */
   sailWindRef: number;
   /**
-   * Shape of the load curve, as an exponent on the saturating pressure. Below
-   * 1 = EARLY ONSET: most of the camber arrives in the first few knots and the
-   * rest of the range is plateau, which is what makes a sail read as drawing
-   * long before it is perfectly trimmed. It still passes through zero, so a
-   * becalmed sail hangs slack — an additive floor would not.
-   *
-   * It is also what keeps a ship running dead downwind at near wind speed
-   * showing a rounded sail: her apparent wind really is ~1 m/s there, and a
-   * linear map rendered that as a flat sheet.
+   * SLACK FOLDS: amplitude of the hanging folds in becalmed canvas, as a
+   * fraction of the chord, at the foot. Fades as (1 − fullness) — the wind
+   * pulls them out as it fills her (sailShapeProfiles.slackFoldProfile).
    */
-  sailLoadCurve: number;
+  sailSlackFold: number;
   sailBackBillow: number; // max belly INVERSION when the wind heads the sail
   sailLuffFlap: number; // extra ripple amplitude when the sail is not drawing
   sailGustAmp: number; // gust modulation depth 0..1
@@ -1053,13 +1052,13 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
      * knob was a depth and had no such reading.
      */
     sailClothExcess: 0.065, sailCornerGrip: 0.28,
-    sailCamberMax: 0.20, sailLoadCurve: 0.45,
+    sailCamberMax: 0.20, sailSlackFold: 0.02,
     sailLeechOpen: 0.3, sailFootRoach: 0.035, sailTwist: 0.12,
     sailSheetPull: 1.0, sailSheetSpread: 0.45,
     sailFlutterLuffRate: 1.8,
     sailDraftPos: 0.4, sailDraftFullness: 1,
     sailFurlSwag: 0.16, sailFurlBays: 3,
-    sailWindRef: 8, sailBackBillow: 0.18, sailLuffFlap: 2.6,
+    sailWindRef: 6.43, sailBackBillow: 0.18, sailLuffFlap: 2.6,
     sailGustAmp: 0.3, sailGustFreq: 0.55, sailTurnSkew: 1.6, sailResponse: 2.2,
     sailFlutterAmp: 0.14, sailFlutterFreq: 2.4, sailRippleCount: 2.5,
     /**
@@ -1137,7 +1136,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     // are the cloth those lines gather
     sailFurlBays: { min: 1, max: 6, step: 1 },
     sailWindRef: { min: 1, max: 30, step: 0.5 },
-    sailLoadCurve: { min: 0.1, max: 2, step: 0.05 },
+    sailSlackFold: { min: 0, max: 0.1, step: 0.002 },
     sailBackBillow: { min: 0, max: 0.8, step: 0.01 },
     sailLuffFlap: { min: 0, max: 6, step: 0.05 },
     sailGustAmp: { min: 0, max: 1, step: 0.01 },

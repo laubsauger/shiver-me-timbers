@@ -33,12 +33,15 @@ import { describe, expect, it } from 'vitest';
 import { shipMaterialParams } from '../src/params/ship';
 import {
   SAIL_ARC_COEFF,
-  SAIL_BELLY_FOOT,
+  SAIL_BELLY_REF,
   arcShorten,
   sailCamberRatio,
+  sailClothOffset,
   sailClothPoint,
   type SailClothState,
 } from '../src/ship/sailShape';
+import { sailDrive } from '../src/ship/sailDynamics';
+import { autoBrace } from '../src/sailing/shipKinematics';
 
 const FLAT_SHEETS = {
   sheetLeadPort: [0, 0, 0] as [number, number, number],
@@ -49,7 +52,7 @@ const WIDTH = 12.17;
 const DROP = 6.3;
 /** flutter and quilt off: these are all statements about the STANDING shape,
  *  and a travelling ripple would make every one of them sampling-dependent */
-const P = { ...shipMaterialParams, sailFlutterAmp: 0, sailSeamQuilt: 0 };
+const P = { ...shipMaterialParams, sailFlutterAmp: 0, sailSeamQuilt: 0, sailSlackFold: 0 };
 /** roach off where the assertion is about the MEMBRANE — the roach is a static
  *  cut and would otherwise be credited to the wind */
 const P_CUT = { ...P, sailFootRoach: 0 };
@@ -121,27 +124,23 @@ describe('§T.74a — the belly is the CONSEQUENCE of excess cloth, not an autho
     expect(single).toBeCloseTo(Math.sqrt(0.04 / SAIL_ARC_COEFF), 12);
   });
 
-  it('fills EARLY and then stops deepening — wind above full buys tension, not belly', () => {
-    // §T.74a's "depth follows from excess length AND PRESSURE": pressure decides
-    // whether the excess has been taken up, and once it has there is no more
-    // cloth to bulge with. The old law was linear in drive, so a gale was
-    // exactly twice the belly of a half-drawing breeze forever.
-    //
-    // Asserted as CONCAVITY, which is the shape of the claim, rather than as a
-    // ratio between two chosen wind speeds — that would pin the curve.
+  it('camber is LINEAR in the fullness the driver hands it, and C1 through zero', () => {
+    // §T.85 RE-CUT. This used to assert CONCAVITY in `drive` ("fills early,
+    // then stops deepening"), which combined with a front-loaded load curve put
+    // the cloth at 61% of full camber in 2 kn of wind — the binary has-wind /
+    // no-wind the user then reported. The saturation now lives in ONE place,
+    // sailDrive's pressure curve (asserted in §T.85 below), and `drive` IS the
+    // fullness; camber follows it linearly so a half-loaded sail shows half.
     const camber = (d: number): number => sailCamberRatio(d, { ...P, sailCamberMax: 1 });
-    const firstQuarter = camber(0.25) - camber(0);
-    const lastQuarter = camber(1) - camber(0.75);
-    expect(firstQuarter).toBeGreaterThan(lastQuarter * 3); // measured 3.73x
-    // and it is monotone the whole way, so more wind never means less canvas
-    let prev = -Infinity;
+    const full = camber(1);
     for (let i = 0; i <= 20; i++) {
-      const c = camber(i / 20);
-      expect(c).toBeGreaterThanOrEqual(prev - 1e-12);
-      prev = c;
+      expect(camber(i / 20)).toBeCloseTo(full * (i / 20), 12);
+      expect(camber(-i / 20)).toBeCloseTo(-full * (i / 20), 12); // aback: same law, other way
     }
-    // becalmed is genuinely flat: no cloth taken up, no belly
-    expect(camber(0)).toBeCloseTo(0, 12);
+    expect(camber(0)).toBeCloseTo(0, 12); // becalmed is genuinely flat
+    // bounded by construction, whatever the driver hands it (§V44)
+    expect(camber(7)).toBeCloseTo(full, 12);
+    expect(camber(-7)).toBeCloseTo(-full, 12);
   });
 
   it('THE CLOTH DOES NOT STRETCH: every strip keeps the length it was cut with', () => {
@@ -156,9 +155,11 @@ describe('§T.74a — the belly is the CONSEQUENCE of excess cloth, not an autho
      *
      * The bar is a RATIO of the cloth's own length so it survives any resize of
      * any sail, and it is set at 3.5% against a measured 3.17% — deliberately
-     * not tighter, because the residual is a KNOWN limitation of a single arc
-     * coefficient (see SAIL_ARC_COEFF) and tightening it would be asserting the
-     * fit rather than the physics.
+     * not tighter, because the residual is a KNOWN limitation of a first-order
+     * arc coefficient (see SAIL_ARC_COEFF / SAIL_ARC_COEFF_V) and tightening it
+     * would be asserting the fit rather than the physics. §T.85 re-measured:
+     * 2.83% worst, and NO strip reads short — the sign flip is what the
+     * vertical strips' own coefficient removed (1.9 on them read 9% short).
      */
     let worst = 0;
     let where = '';
@@ -256,7 +257,7 @@ describe('§T.74b/d — the free edges pull in and the whole sheet moves', () =>
    * strips near the clews, which is precisely the region that scallops the
    * foot, so it is the change most able to flatten these back out.
    */
-  it('(b) scallops the FOOT and bows the LEECH, in the silhouette', () => {
+  it('(b) scallops the FOOT and draws the LEECH in, in the silhouette', () => {
     const clewP = pt(0, 0, 1);
     const clewS = pt(1, 0, 1);
     // the foot climbs above the line joining its two clews — this is the
@@ -268,19 +269,24 @@ describe('§T.74b/d — the free edges pull in and the whole sheet moves', () =>
       const onChord = clewP[1] + (clewS[1] - clewP[1]) * ((q[0] - clewP[0]) / (clewS[0] - clewP[0]));
       rise = Math.max(rise, q[1] - onChord);
     }
-    // measured 1.14 m = 9.4% of chord; asserted as a fraction so it survives
-    // any resize, and it is the EDGE that must not be straight
-    expect(rise / WIDTH).toBeGreaterThan(0.05);
-    // and the leech draws in from the line joining the yardarm to the clew
+    // §T.85: measured 0.46 m = 3.8% of chord (was 1.14 m = 9.4% — that figure
+    // was the horizontal arc coefficient over-shortening the vertical strips
+    // by 3×, see SAIL_ARC_COEFF_V). 0.46 m is what the centre strip's own
+    // length demands: √(6.3² − 2.05²) is 0.44 m short of 6.3. Asserted as a
+    // fraction so it survives any resize, and it is the EDGE that must not be
+    // straight.
+    expect(rise / WIDTH).toBeGreaterThan(0.025);
+    // and the leech is NOT a straight vertical line: the clew is drawn inboard
+    // of the yardarm, most where the cloth bows most (the foot), and the edge
+    // between flies forward of the yard plane (asserted in §T.85 below)
     const yarm = pt(0, 1, 1);
-    let inset = 0;
-    for (let i = 1; i < 40; i++) {
-      const v = i / 40;
-      const q = pt(0, v, 1);
-      const onChord = yarm[0] + (clewP[0] - yarm[0]) * ((q[1] - yarm[1]) / (clewP[1] - yarm[1]));
-      inset = Math.max(inset, q[0] - onChord);
+    expect(clewP[0] - yarm[0]).toBeGreaterThan(0.01 * WIDTH); // measured 3.0%
+    let prev = yarm[0];
+    for (let i = 1; i <= 40; i++) {
+      const x = pt(0, 1 - i / 40, 1)[0];
+      expect(x).toBeGreaterThanOrEqual(prev - 1e-9); // monotone toward the clew
+      prev = x;
     }
-    expect(inset / DROP).toBeGreaterThan(0.02); // measured 4.9% of drop
   });
 
   it('(d) filling the sail SHRINKS its projected extent, monotonically', () => {
@@ -315,7 +321,8 @@ describe('§T.74b/d — the free edges pull in and the whole sheet moves', () =>
       prevSpan = s;
       prevArea = a;
     }
-    // and by an amount that reads, not by a rounding: measured 13.1% of area
+    // and by an amount that reads, not by a rounding: measured 5.7% of area
+    // (§T.85; was 13.1% with the vertical strips over-shortened, see (b))
     expect(area(1) / area(0)).toBeLessThan(0.95);
     // the head itself is untouched — it is laced to the yard and cannot move
     expect(pt(0, 1, 1)[0]).toBeCloseTo(-WIDTH / 2, 9);
@@ -400,6 +407,187 @@ describe('§T.74 — the belly is at the reference station, so the peak is where
     }
     expect(best.u).toBeGreaterThan(0.3);
     expect(best.u).toBeLessThan(0.7);
-    expect(Math.abs(best.v - SAIL_BELLY_FOOT)).toBeLessThan(0.15);
+    expect(Math.abs(best.v - SAIL_BELLY_REF)).toBeLessThan(0.15);
+  });
+});
+
+/**
+ * §T.85 — THE SAIL READS AS A MEMBRANE UNDER PRESSURE, AND FULLNESS IS THE LOAD.
+ *
+ * User, with a screenshot at ~15 kn apparent on a beam reach: "the bulge on
+ * our sail still seems very much centralized in the middle — it doesn't look
+ * like the whole fabric as a thing is stretching forward… And we don't see the
+ * amount of force we're catching: it should be much fuller, fully stretched
+ * out at 20 knots and above, and as the wind power we're capturing lowers we
+ * should visually see that — not a binary has-wind / has-no-wind."
+ *
+ * Every bar is a property (§V.80): monotone, saturating, ordered, signed,
+ * different-per-sail, finite. Numbers in comments are what the shipped params
+ * measure; the bars sit clear of them.
+ */
+const KN = 0.5144;
+/** fullness the driver hands the cloth for a sail square to `kn` of apparent wind */
+const driveAt = (kn: number, over: Partial<typeof shipMaterialParams> = {}): number =>
+  sailDrive(
+    { forwardX: 0, forwardZ: 1, windDirection: 0, windSpeed: kn * KN, yawRate: 0 },
+    { ...shipMaterialParams, ...over },
+  ).drive;
+/** the sail's deepest cloth at that wind, as a fraction of chord */
+const camberAtKn = (kn: number): number => {
+  const d = driveAt(kn);
+  let z = 0;
+  for (let i = 0; i <= 32; i++) for (let j = 0; j <= 32; j++) z = Math.max(z, pt(i / 32, j / 32, d)[2]);
+  return z / WIDTH;
+};
+
+describe('§T.85 — LOAD → FULLNESS: camber is a continuous, saturating function of dynamic pressure', () => {
+  it('is monotone in wind speed and saturates — the gain from 20→25 kn is small beside 5→10', () => {
+    // measured: 0.5% at 2 kn, 3.1% at 5, 9.7% at 10, 15.0% at 15, 17.5% at
+    // 20, 18.3% at 25 (camber of chord). The old law: 11.3% at 2 kn, 14.9% at 5.
+    const c = [2, 5, 8, 10, 12, 15, 20, 25, 30].map(camberAtKn);
+    for (let i = 1; i < c.length; i++) expect(c[i]).toBeGreaterThan(c[i - 1]);
+    const full = sailCamberRatio(1, P_CUT);
+    expect(camberAtKn(2)).toBeLessThan(0.01); // ~0 at 2 kn
+    expect(camberAtKn(5)).toBeLessThan(0.3 * full); // slack at 5
+    expect(camberAtKn(10)).toBeGreaterThan(0.4 * full); // about half at 10-12…
+    expect(camberAtKn(12)).toBeLessThan(0.75 * full);
+    expect(camberAtKn(20)).toBeGreaterThan(0.9 * full); // …drum-tight by 20
+    expect(camberAtKn(25) - camberAtKn(20)).toBeLessThan(0.25 * (camberAtKn(10) - camberAtKn(5)));
+  });
+
+  it('becalmed is slack: no apparent wind, no fullness', () => {
+    expect(driveAt(0)).toBeCloseTo(0, 9);
+    // and a ship running at wind speed feels nothing — her canvas goes soft
+    const running = sailDrive(
+      { forwardX: 0, forwardZ: 1, windDirection: 0, windSpeed: 8, shipVelZ: 8, yawRate: 0 },
+      shipMaterialParams,
+    ).drive;
+    expect(running).toBeLessThan(0.02);
+  });
+
+  it('ABACK flips the sign: the cloth presses the other way, same law', () => {
+    const irons = sailDrive(
+      { forwardX: 0, forwardZ: 1, windDirection: Math.PI, windSpeed: 20 * KN, yawRate: 0 },
+      shipMaterialParams,
+    );
+    expect(irons.drive).toBeLessThan(0);
+    // the foot centre, the deepest cloth, goes BEHIND the yard plane…
+    expect(pt(0.5, 0, irons.drive)[2]).toBeLessThan(0);
+    // …and the shape is the mirror of the drawing one, not a different sail
+    // (to the twist, which migrates the draft the other way when backed)
+    expect(pt(0.5, 0, -0.6)[2] / -pt(0.5, 0, 0.6)[2]).toBeCloseTo(1, 1);
+  });
+
+  it('TWO SAILS braced differently in the SAME wind are visibly different sails', () => {
+    // beam reach, 15 kn apparent: the crew's own brace vs half of it vs square.
+    // `braceGain` is the hull's own number (shipKinematics, §V.77), so the
+    // cloth and the thrust flatten together. Measured 0.81 / 0.47 / 0.00.
+    const gamma = Math.PI / 2;
+    const at = (beta: number): number =>
+      sailDrive(
+        {
+          forwardX: Math.sin(beta), forwardZ: Math.cos(beta),
+          shipForwardX: 0, shipForwardZ: 1,
+          windDirection: gamma, windSpeed: 15 * KN, yawRate: 0,
+        },
+        shipMaterialParams,
+      ).drive;
+    const best = at(autoBrace(gamma));
+    const half = at(autoBrace(gamma) / 2);
+    const square = at(0);
+    expect(best).toBeGreaterThan(half + 0.1);
+    expect(half).toBeGreaterThan(square + 0.1);
+    // and the difference reaches the CLOTH, not just the number
+    expect(pt(0.5, 0, best)[2] - pt(0.5, 0, half)[2]).toBeGreaterThan(0.02 * WIDTH);
+  });
+});
+
+describe('§T.85 — SHAPE: a membrane bent to the yard, sheeted at the clews, free everywhere else', () => {
+  it('the belly is LOW: the foot centre stands further forward than mid-height, the head not at all', () => {
+    // measured (chord %): foot 17.3, mid-height 14.6, v=0.9 4.1, head 0
+    const foot = pt(0.5, 0, 1)[2];
+    const mid = pt(0.5, 0.5, 1)[2];
+    const head = pt(0.5, 1, 1)[2];
+    expect(head).toBeCloseTo(0, 9);
+    expect(foot).toBeGreaterThan(mid);
+    expect(mid).toBeGreaterThan(0.5 * foot);
+    // the realised peak sits in the LOWEST QUARTER (the clews' grip lifts it
+    // just off the foot edge, measured v ≈ 0.04), and above it the centre
+    // line comes back to the yard monotonically: no dome in the middle
+    const zs = Array.from({ length: 41 }, (_, j) => pt(0.5, j / 40, 1)[2]);
+    const arg = zs.indexOf(Math.max(...zs));
+    expect(arg / 40).toBeLessThan(0.25);
+    for (let j = arg + 1; j < zs.length; j++) expect(zs[j]).toBeLessThanOrEqual(zs[j - 1] + 1e-9);
+  });
+
+  it('the LEECH flies forward between yardarm and clew — the edges are not pinned flat', () => {
+    // measured 0.45 m (3.7% of chord) at mid-leech, both sides
+    for (const u of [0, 1]) {
+      expect(pt(u, 0.5, 1)[2]).toBeGreaterThan(0.02 * WIDTH);
+      expect(Math.abs(pt(u, 0, 1)[2])).toBeLessThan(1e-6); // the clew is sheeted
+      expect(Math.abs(pt(u, 1, 1)[2])).toBeLessThan(1e-6); // the yardarm
+      expect(pt(u, 0.5, 0)[2]).toBeCloseTo(0, 9); // and it is the WIND that does it
+    }
+    // the foot between the clews is one clean arc: rising to a single maximum
+    const zs = Array.from({ length: 41 }, (_, i) => pt(i / 40, 0, 1)[2]);
+    const arg = zs.indexOf(Math.max(...zs));
+    for (let i = 1; i <= arg; i++) expect(zs[i]).toBeGreaterThanOrEqual(zs[i - 1] - 1e-9);
+    for (let i = arg + 1; i < zs.length; i++) expect(zs[i]).toBeLessThanOrEqual(zs[i - 1] + 1e-9);
+    expect(zs[arg] / WIDTH).toBeGreaterThan(0.1); // a real camber at the foot (10-15%+)
+  });
+
+  it('the deepest cloth is within 10% of what the cut excess allows — no more, no less', () => {
+    // the belly is the EXCESS showing: √(e/COEFF) of chord (measured 0.977 of it)
+    const implied = Math.sqrt(P_CUT.sailClothExcess / SAIL_ARC_COEFF);
+    expect(peakDepth(1) / WIDTH).toBeGreaterThan(0.9 * implied);
+    expect(peakDepth(1) / WIDTH).toBeLessThanOrEqual(1.02 * implied);
+  });
+
+  it('SLACK canvas hangs in folds that the wind takes OUT', () => {
+    const folded = { ...P_CUT, sailSlackFold: shipMaterialParams.sailSlackFold };
+    const at = (d: number, u: number, v: number): number =>
+      sailClothPoint(u, v, WIDTH, DROP, st(d), folded)[2];
+    // becalmed is not flat…
+    let slackAmp = 0;
+    for (let i = 0; i <= 40; i++) slackAmp = Math.max(slackAmp, Math.abs(at(0, i / 40, 0.2)));
+    expect(slackAmp).toBeGreaterThan(0.05);
+    // …the folds are zero at the head and die at the sheeted clews…
+    expect(Math.abs(at(0, 0.3, 1))).toBeLessThan(1e-9);
+    expect(Math.abs(at(0, 0, 0))).toBeLessThan(1e-9);
+    expect(Math.abs(at(0, 1, 0))).toBeLessThan(1e-9);
+    // …and a full sail has none: the shape at drive 1 is the membrane alone
+    for (let i = 0; i <= 40; i++) {
+      expect(at(1, i / 40, 0.2)).toBeCloseTo(pt(i / 40, 0.2, 1)[2], 9);
+    }
+  });
+
+  it('the FLUTTER fades as she fills: a drum-tight sail does not ripple', () => {
+    const flap = { ...P_CUT, sailFlutterAmp: shipMaterialParams.sailFlutterAmp };
+    const z = (d: number, phase: number): number =>
+      sailClothOffset(0.5, 0.2, WIDTH, DROP, { ...st(d), luff: 1, flutterPhase: phase }, flap);
+    const ripple = (d: number): number => Math.abs(z(d, 0) - z(d, Math.PI));
+    expect(ripple(0)).toBeGreaterThan(0.05); // luffing, slack: shaking
+    expect(ripple(0.5)).toBeLessThan(ripple(0));
+    expect(ripple(1)).toBeCloseTo(0, 9); // full: still
+  });
+
+  it('is NaN-safe at every input (§V.28) — a NaN here is a NaN rope and a NaN vertex', () => {
+    const bad = sailDrive(
+      { forwardX: NaN, forwardZ: NaN, shipForwardX: NaN, shipForwardZ: NaN, windDirection: NaN, windSpeed: NaN, shipVelX: NaN, shipVelZ: NaN, yawRate: NaN },
+      shipMaterialParams,
+    );
+    expect(Number.isFinite(bad.drive)).toBe(true);
+    expect(Number.isFinite(bad.luff)).toBe(true);
+    const nanState: SailClothState = {
+      drive: NaN, luff: NaN, skew: NaN, dropScale: NaN, flutterPhase: NaN,
+      sheetLeadPort: [NaN, NaN, NaN], sheetLeadStarboard: [NaN, NaN, NaN],
+    };
+    for (const q of [
+      sailClothPoint(NaN, NaN, NaN, NaN, nanState, P_CUT),
+      sailClothPoint(0.5, 0.2, WIDTH, DROP, nanState, { ...P_CUT, sailLeechOpen: NaN, sailSlackFold: NaN, sailClothExcess: NaN }),
+      sailClothPoint(-3, 7, 0, -1, st(Infinity), P_CUT),
+    ]) {
+      for (const x of q) expect(Number.isFinite(x)).toBe(true);
+    }
   });
 });

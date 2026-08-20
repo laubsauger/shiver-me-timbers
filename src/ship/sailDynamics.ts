@@ -13,7 +13,8 @@
  */
 import type { ShipMaterialParams, ShipRigParams } from '../params/ship';
 import type { SailStateId } from './pieceTypes';
-import { trimEfficiency } from '../sailing/shipKinematics';
+import { autoBrace, braceDrive, trimEfficiency, windBearing } from '../sailing/shipKinematics';
+import { sailingParams } from '../params/sailing';
 import { apparentWind } from './flagDynamics';
 
 export interface SailWindInput {
@@ -114,45 +115,6 @@ export function sailDrive(input: SailWindInput, p: ShipMaterialParams): SailDriv
   // +1 = wind dead astern (running), -1 = in irons
   const along = clamp((fx * wx + fz * wz) / len, -1, 1);
 
-  /**
-   * DYNAMIC RANGE (the §B "flagStreamRef 7 against a wind of 11" bug again).
-   *
-   * `sailWindRef` is the wind that fills the sail COMPLETELY, so it has to sit
-   * ABOVE the wind the game normally runs at or `press` is pinned at its top
-   * whenever anyone is actually sailing, and a breeze and a gale produce
-   * identical canvas. At the old ref of 11 against a default wind of 11 that
-   * is precisely what happened: press = 1.0, fill ≈ 0.9, so drive ≈ 0.9 of a
-   * usable 1.0 in ordinary conditions and essentially all of the range sat
-   * above where the game lives.
-   *
-   * With the ref above the working wind, ordinary sailing lands near two
-   * thirds and there is real room left above it. The ceiling comes down to
-   * 1.25 at the same time: the belly is now deep enough per unit of drive that
-   * 1.5 would blow the cloth clean through the rigging in a squall.
-   */
-  /**
-   * HOW HARD THE CLOTH IS LOADED — early onset, saturating, floored.
-   *
-   * `1 − exp(−v/ref)` rather than a linear ramp into a clamp. Three properties
-   * the user asked for in as many words: it starts responding IMMEDIATELY
-   * (slope 1/ref at zero, so the first knot of breeze already shows), it is
-   * BROAD through the middle, and it SATURATES — "up to a certain max, from
-   * which more speed is not gonna necessarily do more bending". A real sail
-   * runs out of cloth; the ceiling is physical, not a taper.
-   *
-   * The FLOOR is the sail's own cut. Canvas is broadseamed, so it carries
-   * shape with no load on it at all — which is also what stops a ship running
-   * dead downwind at near wind speed from showing a flat sheet. Her apparent
-   * wind really is ~1 m/s there and the load really is nearly nothing, but the
-   * sail still has the shape it was sewn with.
-   */
-  const wind = Math.max(0.5, finite(p.sailWindRef, 8));
-  const press = 1 - Math.exp(-Math.max(0, app.speed) / wind);
-  // CONCAVE, not a floor. An additive floor would hold camber in a DEAD CALM,
-  // where canvas simply hangs. An exponent below 1 gives the same early onset
-  // — most of the shape arrives in the first few knots — while still passing
-  // through zero, so a becalmed sail is genuinely slack.
-  const load = Math.pow(press, Math.max(0.05, finite(p.sailLoadCurve, 0.45)));
   const gust = gustFactor(finite(input.gustPhase), finite(input.gustPhaseB), p);
   // TRUE wind for the ANGLE. See the note on `eff` below.
   const twx = Math.sin(finite(input.windDirection));
@@ -189,28 +151,70 @@ export function sailDrive(input: SailWindInput, p: ShipMaterialParams): SailDriv
    * wind arrives 39° off the bow, `eff` falls 1.00 → 0.35, and the sail read
    * 3.6% camber where the sim was making full thrust.
    *
-   * That is precisely the "too sensitive… only happening when we're exactly at
-   * the very perfect, to the milli-degree, set" report, and it is the failure
-   * the original comment here warned about: the cloth must not contradict the
-   * thrust the player feels. Same curve, same wind, same answer as the hull.
-   *
-   * Apparent wind keeps the job it is right for — `load` above, i.e. how hard
-   * the cloth is pressed, which is where boat speed genuinely belongs.
+   * Apparent wind keeps the job it is right for — the dynamic pressure below,
+   * i.e. how hard the cloth is pressed, which is where boat speed belongs.
    */
   const alongShip = clamp((sfx * twx + sfz * twz) / slen, -1, 1);
   const theta = Math.acos(clamp(-alongShip, -1, 1)); // 0 = head to wind, π = running
   const eff = trimEfficiency(theta);
+  /**
+   * THE BRACE, EXACTLY AS THE HULL FEELS IT (§T.76, §V.77 — imported, not
+   * re-derived). `stepShipSailing` scales thrust by
+   * `braceGain = 1 − authority·(1 − braceDrive(β)/braceDrive(β*))`: at the
+   * crew's own brace it is exactly 1, braced off it the plate law takes drive
+   * away, and where the clamp leaves the yards no drive at all (close-hauled)
+   * the arcade curve governs alone. The cloth reads the SAME number, so a
+   * yard braced edge-on to the wind goes as flat as her thrust does, and two
+   * sails braced differently in one wind are visibly different sails. β is
+   * the sail's own yaw against the hull's — the angle the yards are drawn at.
+   */
+  const yaw = Math.atan2(sfx, sfz);
+  const gamma = windBearing(yaw, finite(input.windDirection));
+  let beta = Math.atan2(fx, fz) - yaw;
+  if (beta > Math.PI) beta -= 2 * Math.PI;
+  else if (beta < -Math.PI) beta += 2 * Math.PI;
+  const betaStar = autoBrace(gamma);
+  const driveStar = braceDrive(betaStar, gamma);
+  const authRef = Math.max(1e-6, finite(sailingParams.braceAuthorityRef, 0.05));
+  const authT = clamp(driveStar / authRef, 0, 1);
+  const authority = authT * authT * (3 - 2 * authT);
+  const braceRatio = driveStar > 0 ? clamp(braceDrive(beta, gamma) / driveStar, 0, 1) : 1;
+  const braceGain = finite(1 - authority * (1 - braceRatio), 1);
   // Dead downwind the arcade curve dips but a square sail is at its fullest
   // there, hence max(eff, along).
-  const fill = clamp(Math.max(eff, along), 0, 1);
+  const fill = clamp(Math.max(eff, along), 0, 1) * braceGain;
   // headed sail: the wind presses it back against the rig instead of filling
   const backed = Math.max(0, -along) * p.sailBackBillow * (1 - fill);
-  const drive = clamp((fill - backed) * load * gust, -1, 1.5);
+  /** signed PRESSURE COEFFICIENT on the canvas, −1..1: + draws, − aback */
+  const cp = clamp(fill - backed, -1, 1);
+
+  /**
+   * FULLNESS IS A CONTINUOUS FUNCTION OF DYNAMIC PRESSURE, AND IT SATURATES.
+   *
+   * User: "we don't see the amount of force we're catching: it should be much
+   * fuller, fully stretched out at 20 knots and above, and as the wind power
+   * we're capturing lowers we should visually see that — not a binary
+   * has-wind / has-no-wind." The old law was `(1 − e^(−v/ref))^0.45` under a
+   * √ in the camber: 61% of full camber in 2 kn of wind, 80% at 5 kn.
+   *
+   * q = ½ρv² · cp, and fullness = 1 − exp(−q/q₀) with q₀ written as a
+   * reference wind `sailWindRef` (6.43 m/s = 12.5 kn): ~0 at 2 kn (2.5%),
+   * slack at 5 (15%), half at 10.4, 76% at 15, 92% at 20, 98% at 25. The
+   * gust rides the SPEED, where a gust lives. It passes through zero, so a
+   * becalmed sail is genuinely slack, and it is bounded by construction.
+   */
+  const ref = Math.max(0.5, finite(p.sailWindRef, 6.43));
+  const vq = (Math.max(0, app.speed) * gust) / ref;
+  const q = vq * vq;
+  const fullness = 1 - Math.exp(-q * Math.abs(cp));
+  const drive = clamp(Math.sign(cp) * fullness, -1, 1);
 
   const yawRate = finite(input.yawRate);
-  // not drawing → shaking; a swing under the rudder shakes it too
+  // not drawing → shaking; a swing under the rudder shakes it too. The wind
+  // factor saturates faster than the fill: a sail in 12 kn that is not
+  // drawing flogs hard long before the same wind would have filled it.
   const turning = clamp(Math.abs(yawRate) * p.sailTurnSkew * 0.6, 0, 0.6);
-  const luff = clamp((1 - fill) * Math.min(1, load) + turning, 0, 1.4);
+  const luff = clamp((1 - fill) * (1 - Math.exp(-2 * q)) + turning, 0, 1.4);
 
   const skew = clamp(yawRate * p.sailTurnSkew, -1, 1);
   return { drive, luff, skew };
