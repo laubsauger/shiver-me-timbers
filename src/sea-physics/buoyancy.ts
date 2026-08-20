@@ -14,19 +14,22 @@ import { seaPhysicsParams, type SeaPhysicsParams } from '../params/seaPhysics';
 import type { OceanHeightField } from './cpuOcean';
 import { buoyancyScale, floodListTorque, floodMassFactor } from './flooding';
 
-/** galleon design waterline in ship space (§B.22 keeps these = the loft) */
-const HULL_BOW_Z = 19;
-const HULL_STERN_Z = -16.5;
-const HULL_HALF_BEAM = 4.25;
+/**
+ * The design-waterline plan the stations are laid on — per CLASS (§T.73),
+ * read off `SeaPhysicsParams` (`waterlineOf` keeps it equal to the loft,
+ * §B.22). Used to be three galleon constants here, which made ship 1 float
+ * as a 35 m galleon whatever blueprint she was built from.
+ */
+export type HullPlan = Pick<SeaPhysicsParams, 'hullBowZ' | 'hullSternZ' | 'hullHalfBeam'>;
 
 /**
- * Normalised half-breadth of the waterline outline, 0..1 of HULL_HALF_BEAM.
+ * Normalised half-breadth of the waterline outline, 0..1 of `hullHalfBeam`.
  * Same elliptical family as hullContact.waterlineFromBox — pointed at the
  * stem, cut off at 0.55 beam across the transom.
  */
-function halfBreadth(z: number): number {
-  const mid = (HULL_BOW_Z + HULL_STERN_Z) / 2;
-  const halfLen = (HULL_BOW_Z - HULL_STERN_Z) / 2;
+function halfBreadth(z: number, hull: HullPlan): number {
+  const mid = (hull.hullBowZ + hull.hullSternZ) / 2;
+  const halfLen = (hull.hullBowZ - hull.hullSternZ) / 2;
   const u = Math.min(1, Math.max(-1, (z - mid) / halfLen));
   const ell = Math.sqrt(Math.max(0, 1 - u * u));
   return u >= 0 ? ell : Math.max(ell, 0.55);
@@ -113,7 +116,7 @@ export interface StationSet {
 const BEAM_NODE: readonly number[] = [-Math.sqrt(3 / 5), 0, Math.sqrt(3 / 5)];
 const BEAM_WEIGHT: readonly number[] = [5 / 18, 4 / 9, 5 / 18];
 
-function buildStations(slices: number): StationSet {
+function buildStations(slices: number, hull: HullPlan): StationSet {
   const n = Math.max(1, Math.round(slices));
   const stations: ProbeStation[] = [];
   let wSum = 0;
@@ -123,8 +126,8 @@ function buildStations(slices: number): StationSet {
   for (let i = 0; i < n; i++) {
     // cell centres, so the end stations stand for half-cells at bow/stern
     const t = (i + 0.5) / n;
-    const z = HULL_BOW_Z + (HULL_STERN_Z - HULL_BOW_Z) * t;
-    const b = halfBreadth(z);
+    const z = hull.hullBowZ + (hull.hullSternZ - hull.hullBowZ) * t;
+    const b = halfBreadth(z, hull);
     zs.push(z);
     bs.push(b);
     wSum += b;
@@ -152,7 +155,7 @@ function buildStations(slices: number): StationSet {
     // ballasted to float on her lines, and Σ w·z = 0 is what makes flat
     // water produce exactly zero pitch torque (no phantom static trim)
     const z = zs[i] - zBar;
-    const half = bs[i] * HULL_HALF_BEAM;
+    const half = bs[i] * hull.hullHalfBeam;
     const share = bs[i] / wSum;
     const addedShare = (bs[i] * bs[i]) / bSq;
     for (let j = 0; j < BEAM_NODE.length; j++) {
@@ -169,13 +172,14 @@ function buildStations(slices: number): StationSet {
   return { stations, z2: Math.max(1e-6, z2), x2: Math.max(1e-6, x2), az2, ax2 };
 }
 
-/** stations are pure geometry — build once per distinct slice count */
-const stationCache = new Map<number, StationSet>();
-export function probeStations(slices: number): StationSet {
-  const key = Math.max(1, Math.round(slices));
+/** stations are pure geometry — build once per distinct (slice count, plan) */
+const stationCache = new Map<string, StationSet>();
+export function probeStations(slices: number, hull: HullPlan = seaPhysicsParams): StationSet {
+  const n = Math.max(1, Math.round(slices));
+  const key = `${n}|${hull.hullBowZ}|${hull.hullSternZ}|${hull.hullHalfBeam}`;
   let s = stationCache.get(key);
   if (s === undefined) {
-    s = buildStations(key);
+    s = buildStations(n, hull);
     stationCache.set(key, s);
   }
   return s;
@@ -388,7 +392,7 @@ export function stepShipBuoyancy(
     throw new Error('stepShipBuoyancy: call ocean.update(time) first');
   }
 
-  const stationSet = probeStations(p.probeSlices);
+  const stationSet = probeStations(p.probeSlices, p);
   const stations = stationSet.stations;
   let mem = seaMemory.get(ship);
   if (mem === undefined || mem.prevHeights.length !== stations.length) {

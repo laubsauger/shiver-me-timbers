@@ -59,7 +59,7 @@ import {
 } from './sea-physics/hullContact';
 import { stepFlooding } from './sea-physics/flooding';
 import { stepShipGrounding } from './sea-physics/grounding';
-import { seaPhysicsParams } from './params/seaPhysics';
+import { brigantineSeaParams, seaPhysicsParams } from './params/seaPhysics';
 import { galleonParams, shipMaterialParams, shipRigParams } from './params/ship';
 import { createCaustics, setActiveCaustics } from './caustics';
 import { buildDeckHeightfield } from './ship/deckHeightfield';
@@ -1161,7 +1161,9 @@ async function boot(): Promise<void> {
       }
       const enemyHoles = combat.floodHoles(state, 1);
       stepFlooding(enemyShip, enemyHoles, dt);
-      stepShipBuoyancy(enemyShip, cpuOcean, dt, undefined, enemyHoles);
+      // §T.73: she is a brigantine, so she floats as one — her own plan,
+      // draft, displacement and inertia (`sea-brigantine`), not the galleon's
+      stepShipBuoyancy(enemyShip, cpuOcean, dt, brigantineSeaParams, enemyHoles);
       // AFTER buoyancy: at flood = 1 support and probe damping are both gone,
       // so this is the only floor under the wreck (§T.18, sinking.ts).
       combat.settle(state, dt);

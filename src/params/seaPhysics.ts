@@ -3,7 +3,8 @@
  * Mirror params control fidelity/cost of the CPU ocean copy; the rest are
  * rigid-body constants for the buoyancy integrator.
  */
-import { registerParams } from './registry';
+import { registerParams, type ParamMeta } from './registry';
+import { brigantineParams, galleonParams, type ShipClassParams } from './ship';
 
 export interface SeaPhysicsParams {
   /** CPU mirror grid N×N, power of two ≤ ocean resolution (§V.8) */
@@ -12,8 +13,21 @@ export interface SeaPhysicsParams {
   updateEveryTicks: number;
   /** fixed-point iterations for inverse-displacement height lookup */
   inverseDisplacementIterations: number;
-  /** scales the canonical ~35 m station layout to the hull size */
+  /** scales the station layout to the hull size (a live tweak knob; the
+   * layout itself is the class's own waterline below) */
   probeLayoutScale: number;
+  /**
+   * DESIGN-WATERLINE PLAN of this hull class, ship space (§V.13: forward +z,
+   * beam x): z of the stem and transom where the loft meets y = 0, and the
+   * half-beam there. These three ARE the hull the station quadrature
+   * integrates — waterplane area, second moments, added-mass gyradii, the
+   * lot (see buoyancy `buildStations`) — so they are per CLASS, not sea
+   * constants. Read from the class's `ShipClassParams` through
+   * `waterlineOf`, never typed in twice (§V.77).
+   */
+  hullBowZ: number;
+  hullSternZ: number;
+  hullHalfBeam: number;
   /**
    * Number of waterplane slices sampled bow→stern (each becomes a
    * port/starboard station pair). This is the resolution of the ∫b(z)h(z)dz
@@ -206,13 +220,47 @@ export interface SeaPhysicsParams {
   groundingFriction: number;
 }
 
+/**
+ * Where a class's LOFT crosses the design waterline, from its own params.
+ * The galleon's station plan was MEASURED against her loft in §B.22 at
+ * bow 19 / stern −16.5 / half-beam 4.25 on a stem point at 21, transom at
+ * −17.5, beam 8.5: the raked stem meets y = 0 three-sevenths of the way
+ * along the bow wedge, the rounded transom 1 m forward of the loft's sternZ
+ * on a 17.5 m half-length. Those are RATIOS of the loft, so one expression
+ * reproduces the galleon's numbers exactly AND gives every other class hers
+ * (§V.77 — the brigantine's plan is not a second set of typed constants that
+ * agree with `brigantineParams` today).
+ */
+export function waterlineOf(c: ShipClassParams): {
+  bowZ: number;
+  sternZ: number;
+  halfBeam: number;
+} {
+  return {
+    bowZ: c.hullLength / 2 + c.bowLength * (1.5 / 3.5),
+    sternZ: (-c.hullLength / 2) * (16.5 / 17.5),
+    halfBeam: c.beam / 2,
+  };
+}
+
+const galleonWaterline = waterlineOf(galleonParams);
+
+/**
+ * THE GALLEON — the player's hull, and the hull every number below was
+ * measured on (§B.22, §B.27, §V.68–70). Registered as `sea-galleon` next to
+ * `ship-galleon`; the brigantine's group is derived from it further down.
+ */
 export const seaPhysicsParams: SeaPhysicsParams = registerParams(
-  'seaPhysics',
+  'sea-galleon',
   {
     mirrorResolution: 64,
     updateEveryTicks: 1,
     inverseDisplacementIterations: 3,
     probeLayoutScale: 1,
+    // 19 / −16.5 / 4.25 — the §B.22 plan, now READ off `galleonParams`
+    hullBowZ: galleonWaterline.bowZ,
+    hullSternZ: galleonWaterline.sternZ,
+    hullHalfBeam: galleonWaterline.halfBeam,
     // 18 slices = 1.97 m apart over the 35.5 m waterline: 4.2 samples per
     // wavelength at the shortest mirrored wave (λ 8.3 m, cascade 2 is not
     // mirrored), so the length integral is honest across the whole band the
@@ -419,9 +467,68 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     // mountain — the user's "our sails magically continue to propulse us".
     groundingFriction: 1,
   },
-  {
+  seaPhysicsMeta(),
+);
+
+/**
+ * THE BRIGANTINE (§T.73) — ship 1. She is built from the SAME loft family as
+ * the galleon (`hullMath`: one `hullEnvelope`, one `sectionHalf`), so her
+ * block coefficient IS the galleon's, and every hull-form number here is the
+ * galleon's scaled by her own dimensions — read from `brigantineParams`, and
+ * nothing else typed in:
+ *   plan          waterlineOf(brigantineParams): bow 16.2 / stern −14.14 /
+ *                 half-beam 3.6 → L_wl 30.34 m on the galleon's 35.5
+ *   draft/freeb.  1.7 / 1.8 m, her loft's own
+ *   A_wp ratio    s = (L_wl·B)_b/(L_wl·B)_g = 0.724 → spring ρgA_wp 1.76e6
+ *   ∇ ratio       r = (L_wl·B·T)_b/(L_wl·B·T)_g = 0.615 → mass 372 t
+ *                 (heavier than a historical ~200 t brigantine because her
+ *                 authored loft is fuller and beamier than one; she must
+ *                 float her OWN loft, not a textbook's)
+ *   ride          m·g/K − T = 2.438·(T_b/T_g) − T_b = 0.37 m below her marks,
+ *                 the same 0.22·T the galleon floats past hers
+ *   damping       c ∝ √(K·M) so ζ (§V.53, dimensionless) is unchanged
+ *   inertia       same gyradii (0.25·L_wl pitch, 0.45·B roll): I ∝ m·L²
+ *   grounding     spring/damper ∝ mass, so rest penetration is unchanged
+ * Everything dimensionless or belonging to the SEA (mirror, slices, kernels,
+ * Smith scale, damping ratios, added-mass coefficients, slam thresholds,
+ * friction) is carried over as-is.
+ */
+function brigantineSea(g: SeaPhysicsParams): SeaPhysicsParams {
+  const b = waterlineOf(brigantineParams);
+  const lwlB = b.bowZ - b.sternZ;
+  const lwlG = g.hullBowZ - g.hullSternZ;
+  const planRatio = (lwlB * b.halfBeam) / (lwlG * g.hullHalfBeam);
+  const volumeRatio = (planRatio * brigantineParams.draft) / g.hullDraft;
+  return {
+    ...g,
+    hullBowZ: b.bowZ,
+    hullSternZ: b.sternZ,
+    hullHalfBeam: b.halfBeam,
+    hullDraft: brigantineParams.draft,
+    hullFreeboard: brigantineParams.freeboard,
+    buoyancySpring: g.buoyancySpring * planRatio,
+    mass: g.mass * volumeRatio,
+    buoyancyDamping: g.buoyancyDamping * Math.sqrt(planRatio * volumeRatio),
+    inertiaPitch: g.inertiaPitch * volumeRatio * (lwlB / lwlG) ** 2,
+    inertiaRoll: g.inertiaRoll * volumeRatio * (b.halfBeam / g.hullHalfBeam) ** 2,
+    groundingSpring: g.groundingSpring * volumeRatio,
+    groundingDamping: g.groundingDamping * volumeRatio,
+  };
+}
+
+export const brigantineSeaParams: SeaPhysicsParams = registerParams(
+  'sea-brigantine',
+  brigantineSea(seaPhysicsParams),
+  seaPhysicsMeta(),
+);
+
+function seaPhysicsMeta(): Partial<Record<keyof SeaPhysicsParams, ParamMeta>> {
+  return {
     updateEveryTicks: { min: 1, max: 10, step: 1 },
     inverseDisplacementIterations: { min: 0, max: 6, step: 1 },
+    hullBowZ: { min: 5, max: 40, step: 0.1 },
+    hullSternZ: { min: -40, max: -5, step: 0.1 },
+    hullHalfBeam: { min: 1, max: 10, step: 0.05 },
     hullDraft: { min: 0, max: 6, step: 0.05 },
     hullFreeboard: { min: 0, max: 8, step: 0.05 },
     probeLayoutScale: { min: 0.2, max: 3, step: 0.05 },
@@ -450,5 +557,5 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     groundingDamping: { min: 0, max: 8e6, step: 1e4 },
     groundingMaxSupport: { min: 1, max: 20, step: 0.1 },
     groundingFriction: { min: 0, max: 3, step: 0.05 },
-  },
-);
+  };
+}
