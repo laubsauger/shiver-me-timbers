@@ -188,7 +188,11 @@ export function createSailClothMaterial(
     mix(float(0.92), float(1.03), panelTone),
     periodResolved(panelCoord, panelFilter),
   );
+  // `wind.tint` is per-mesh (sailDriver.ts): the NPC's red canvas rides the
+  // same material as the player's bleached cloth, so the backlit transmission
+  // and the lee darkening below inherit it for free
   const base = mix(uDark, uLight, weave)
+    .mul(wind.tint)
     .mul(mix(float(1).sub(uStain), float(1), stain))
     .mul(panelToneMul);
 

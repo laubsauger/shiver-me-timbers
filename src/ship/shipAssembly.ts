@@ -225,6 +225,19 @@ export class ShipAssembly {
     this.piece(pieceId).mesh.userData.sailDropScale = scale;
   }
 
+  /**
+   * §T.73 — dye every sail on this ship. A hex RGB multiplier on the cloth
+   * colour, read per mesh by the shared sail material (sailDriver.ts
+   * `tint`), so a second ship's canvas costs no second material. 0xffffff
+   * restores the default canvas.
+   */
+  setSailTint(hex: number): void {
+    if (!Number.isFinite(hex)) return; // §V28
+    for (const rt of this.pieces.values()) {
+      if (rt.def.kind === 'sail') rt.mesh.userData.sailTint = hex;
+    }
+  }
+
   /** every sail piece id, in blueprint order */
   sailPieceIds(): string[] {
     const ids: string[] = [];

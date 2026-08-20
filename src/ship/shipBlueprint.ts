@@ -25,12 +25,14 @@ import {
 
 /**
  * Two-masted brigantine, ~30 m. Guns are hull-mounted (4/side across the
- * hull sections); no raised castles, no sails in blueprint, no crow's nest.
+ * hull sections); no raised castles, no crow's nest. She carries the same
+ * three tiers of canvas per mast as the galleon: she is the ENEMY hull
+ * (§T.73), and a ship the AI sails under bare poles reads as a wreck.
  */
 export function buildBrigantineBlueprint(
   p: ShipClassParams = brigantineParams,
 ): PieceDef[] {
-  const rig = { sails: false, crowNest: false };
+  const rig = { sails: true, crowNest: false };
   // chainplates abeam each mast that exists on this class (§V12 shroud feet)
   const hull = buildHullSections(p, {
     hullCannons: true,

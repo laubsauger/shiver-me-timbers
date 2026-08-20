@@ -69,6 +69,15 @@ export interface SailWindUniforms {
    *  toward — see sailFrame.sheetLeadDirections and sailShape.sailCornerPull */
   sheetLeadPort: ReturnType<typeof uniform>;
   sheetLeadStarboard: ReturnType<typeof uniform>;
+  /**
+   * RGB multiplier on the canvas colour, per sail mesh (§T.73 — the NPC flies
+   * red canvas; the reference is docs/inspo/ship/ref-npc-smaller-variant.png).
+   * An OBJECT-group uniform, like `dropScale`, so both ships keep sharing the
+   * one sail material and pipeline (§T.40); ShipAssembly.setSailTint writes
+   * the hex onto each sail mesh's userData and this reads it back. White when
+   * unset — the player's canvas is unchanged.
+   */
+  tint: ReturnType<typeof uniform>;
 }
 
 /** per-sail flutter phase, owned here and mirrored onto the mesh */
@@ -98,6 +107,7 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
   const flutterPhase = uniform(0).setGroup(objectGroup);
   const sheetLeadPort = uniform(new THREE.Vector3()).setGroup(objectGroup);
   const sheetLeadStarboard = uniform(new THREE.Vector3()).setGroup(objectGroup);
+  const tint = uniform(new THREE.Color(1, 1, 1)).setGroup(objectGroup);
   const smoothed = new WeakMap<THREE.Object3D, SailDriveState>();
   const flutter = new WeakMap<THREE.Object3D, FlutterMemory>();
 
@@ -147,6 +157,9 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
     skew.value = s.skew;
     const trimDrop = object.userData.sailDropScale;
     dropScale.value = typeof trimDrop === 'number' && Number.isFinite(trimDrop) ? trimDrop : 1;
+    const sailTint = object.userData.sailTint;
+    if (typeof sailTint === 'number' && Number.isFinite(sailTint)) tint.value.set(sailTint);
+    else tint.value.setScalar(1);
 
     /**
      * THE FLUTTER PHASE, AND WHY IT IS INTEGRATED HERE (§V.55, §B.30).
@@ -185,5 +198,5 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
     sheetLeadStarboard.value.set(leads.starboard[0], leads.starboard[1], leads.starboard[2]);
   });
 
-  return { drive, luff, skew, dropScale, flutterPhase, sheetLeadPort, sheetLeadStarboard };
+  return { drive, luff, skew, dropScale, flutterPhase, sheetLeadPort, sheetLeadStarboard, tint };
 }

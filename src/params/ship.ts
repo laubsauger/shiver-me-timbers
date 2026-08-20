@@ -687,6 +687,13 @@ export interface ShipMaterialParams {
   glassLit: number; // warm glow behind them (emissive floor)
   sailLight: number;
   sailDark: number;
+  /**
+   * §T.73 — RGB multiplier on the ENEMY's canvas (ShipAssembly.setSailTint).
+   * The reference (docs/inspo/ship/ref-npc-smaller-variant.png) flies dark
+   * red sails; this is what makes "which ship is that" readable at the range
+   * the AI fights at, before the mast count does.
+   */
+  npcSailTint: number;
   sailWeaveScale: number; // warp/weft noise frequency
   sailBacklitColor: number;
   sailBacklitStrength: number;
@@ -1019,6 +1026,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     ironLight: 0x4a4640, ironDark: 0x24211d,
     glassColor: 0x3c4a44, glassLit: 0x2a1c0c,
     sailLight: 0xe6dcc2, sailDark: 0xa8977a,
+    npcSailTint: 0x9e2e28,
     sailWeaveScale: 18, sailBacklitColor: 0xfff0d2, sailBacklitStrength: 0.5,
     /**
      * MEASURED IN THE BROWSER, main course, default sea: drive 0.74 and the

@@ -17,7 +17,7 @@ import { createCombatArena, createCombatRuntime, createGunnery, viewBearing } fr
 import type { FireOrder } from './combat';
 import { createClouds } from './clouds';
 import { skyParams } from './params/sky';
-import { buildGalleonBlueprint } from './ship/shipBlueprint';
+import { buildBrigantineBlueprint, buildGalleonBlueprint } from './ship/shipBlueprint';
 import { ShipAssembly, type MaterialFactory } from './ship/shipAssembly';
 import { createHoleMaterial, createPieceMaterial } from './ship/pieceMaterials';
 import { createDeckFieldTexture } from './ship/deckFieldTexture';
@@ -60,7 +60,7 @@ import {
 import { stepFlooding } from './sea-physics/flooding';
 import { stepShipGrounding } from './sea-physics/grounding';
 import { seaPhysicsParams } from './params/seaPhysics';
-import { galleonParams, shipRigParams } from './params/ship';
+import { galleonParams, shipMaterialParams, shipRigParams } from './params/ship';
 import { createCaustics, setActiveCaustics } from './caustics';
 import { buildDeckHeightfield } from './ship/deckHeightfield';
 import { createDeckWater, setActiveDeckWater } from './deckwater';
@@ -568,11 +568,17 @@ async function boot(): Promise<void> {
     damage: {},
   });
   const enemyShip = state.ships[1];
-  const enemyBlueprint = buildGalleonBlueprint();
+  // §T.73: the brigantine, not a second galleon — two masts, 30 m, guns in
+  // the hull. Everything downstream (rigging, ratlines, hit targets, battery,
+  // flags, AI stations) derives from THIS blueprint's pieces and sockets, so
+  // nothing else here has to know which class she is.
+  const enemyBlueprint = buildBrigantineBlueprint();
   const enemyAssembly = new ShipAssembly(enemyBlueprint, sharedPieceMaterials);
   // stays in the scene from frame one: sharing the player's materials means
   // she brings NO new pipelines, so deferring her would buy nothing and cost
-  // a pop-in on a ship that is meant to be looked at.
+  // a pop-in on a ship that is meant to be looked at. The red canvas is a
+  // per-mesh uniform on that same shared sail material, not a second one.
+  enemyAssembly.setSailTint(shipMaterialParams.npcSailTint);
   app.scene.add(enemyAssembly.group);
   const enemyAi = createAiShip(1, ENEMY_SPAWN);
 
@@ -860,7 +866,9 @@ async function boot(): Promise<void> {
   followCam.setStations(
     createShipStations(galleonBlueprint, shipAssembly, () => gunnery.elevation()),
   );
-  const arena = createCombatArena(state, combat, followCam, galleonBlueprint);
+  // the arena force-hits SHIP 1, so its target ids must come from HER piece
+  // graph — the brigantine's — not the player's (§T.73, §V.77)
+  const arena = createCombatArena(state, combat, followCam, enemyBlueprint);
   // hoisted + mutated per frame: the render callback runs every frame and a
   // fresh object graph here would be pure GC churn
   // held as its own non-optional binding so the per-frame writes below don't
