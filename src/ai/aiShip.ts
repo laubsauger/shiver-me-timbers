@@ -19,6 +19,8 @@ import type { InputState } from '../sailing/input';
 import type { SimState } from '../state/simState';
 import type { FireOrder } from '../combat/combatSystem';
 import { controlAuthority, isSunk } from '../combat/sinking';
+import { slewRudder } from '../sailing/shipKinematics';
+import { SIM_DT } from '../core/loop';
 import { aiParams, type AiParams } from '../params/ai';
 import { createAiMemory, type AiMemory } from './aiTypes';
 import { stepAi } from './stateMachine';
@@ -88,7 +90,10 @@ export function stepAiShip(
 
   const commands: AiCommands = {
     input: {
-      rudder: Math.max(-1, Math.min(1, intent.rudder)) * authority,
+      // §T.77: her helmsman turns the wheel no faster than the player's.
+      // `ship.rudder` is where the blade stands now (sailing wrote it last
+      // tick), so the same slew the keyboard runs on applies here.
+      rudder: slewRudder(ship.rudder, Math.max(-1, Math.min(1, intent.rudder)) * authority, SIM_DT),
       sailTrimDelta: Math.abs(trimError) < TRIM_DEADBAND ? 0 : Math.sign(trimError),
       braceDelta: 0, // automatic brace — see `idle` above
       brake: false,

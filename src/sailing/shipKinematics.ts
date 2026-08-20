@@ -70,6 +70,32 @@ function wrapPi(a: number): number {
  * to wind, π/2 = beam reach, π = running). Dead zone in irons, best at
  * beam/broad reach (sin peak), decent floor dead downwind.
  */
+/**
+ * The helmsman's hands (§T.77): move `current` rudder toward `target` at the
+ * rate a crew can turn the wheel — `rudderRampRate` going over (away from
+ * midships), `rudderSpringRate` coming back. Returns the new rudder, never
+ * overshooting the target. This is the ONE rudder rate limit: the keyboard
+ * collector slews its held direction through it and the AI slews its intent
+ * through it, so both helms, and the wheel geared off `ship.rudder`, move at
+ * the same speed (§V.77 — one expression, not two that agree today).
+ */
+export function slewRudder(
+  current: number,
+  target: number,
+  dt: number,
+  params: SailingParams = sailingParams,
+): number {
+  const t = clamp(Number.isFinite(target) ? target : 0, -1, 1);
+  const delta = t - current;
+  if (delta === 0) return current;
+  const d = Math.sign(delta);
+  // going over = moving away from midships (or off it); anything else is
+  // winding back toward centre
+  const goingOver = current === 0 || d === Math.sign(current);
+  const step = (goingOver ? params.rudderRampRate : params.rudderSpringRate) * dt;
+  return Math.abs(delta) <= step ? t : current + d * step;
+}
+
 export function trimEfficiency(theta: number, params: SailingParams = sailingParams): number {
   const shape = params.downwindEff + (1 - params.downwindEff) * Math.sin(theta);
   return noGoGate(theta, params) * shape;

@@ -28,6 +28,9 @@ import {
   type InputState,
 } from '../src/sailing/input';
 import { sailingParams } from '../src/params/sailing';
+import { shipRigParams } from '../src/params/ship';
+import { createAiShip, stepAiShip } from '../src/ai/aiShip';
+import { helmWheelAngle } from '../src/ship/rigTrim';
 import { oceanParams } from '../src/params/ocean';
 import { spectrumSignature } from '../src/ocean/oceanCascades';
 import {
@@ -432,12 +435,145 @@ describe('input snapshots (replay contract, V3)', () => {
   it('rudder ramps while held and springs back to exactly 0', () => {
     const kb = new KeyboardInput();
     kb.keyDown('KeyA');
-    for (let i = 0; i < 120; i++) kb.sample(SIM_DT);
+    for (let i = 0; i < 6 * 60; i++) kb.sample(SIM_DT);
     expect(kb.sample(SIM_DT).rudder).toBe(1); // A reaches the screen-left turn command
     kb.keyUp('KeyA');
     let last = -1;
-    for (let i = 0; i < 120; i++) last = kb.sample(SIM_DT).rudder;
+    for (let i = 0; i < 8 * 60; i++) last = kb.sample(SIM_DT).rudder;
     expect(last).toBe(0); // exact zero: no residual drift in the log
+  });
+});
+
+/**
+ * §T.77 — "our steering wheel is moving a little bit fast." The wheel is
+ * geared off `ship.rudder` (helmWheelAngle = rudder × turns × π, no rate of
+ * its own), so its speed IS the rudder's slew. Measured before: the keyboard
+ * ramped 0→1 in 0.40 s and sprang back in 0.33 s — 1.75 turns of a 3.5-turn
+ * wheel in under half a second, ~1600°/s. A helmsman on a 35 m ship winds
+ * hard over in seconds, not frames. These are properties (§V.80), not the
+ * numbers: the bands below are what "a crew turning a wheel" means.
+ */
+describe('helm slew rate (§T.77)', () => {
+  /** ticks of a held key until the rudder first reaches ±1 */
+  function ticksToHardOver(kb: KeyboardInput): number {
+    for (let i = 1; i <= 20 * 60; i++) {
+      if (Math.abs(kb.sample(SIM_DT).rudder) >= 1) return i;
+    }
+    return Infinity;
+  }
+  /** ticks after release until the rudder is exactly 0 */
+  function ticksToCentre(kb: KeyboardInput): number {
+    for (let i = 1; i <= 20 * 60; i++) {
+      if (kb.sample(SIM_DT).rudder === 0) return i;
+    }
+    return Infinity;
+  }
+
+  it('hard over takes seconds of held key, not frames — 1.5 s ≤ t ≤ 6 s', () => {
+    // a helmsman at ~1 turn/s puts 1.75 turns over in under 2 s; the old
+    // 0.4 s was four turns a second, a flick. The upper bound keeps it a
+    // game: past 6 s a held key reads as a stuck helm
+    const kb = new KeyboardInput();
+    kb.keyDown('KeyD');
+    const s = ticksToHardOver(kb) * SIM_DT;
+    expect(s).toBeGreaterThanOrEqual(1.5);
+    expect(s).toBeLessThanOrEqual(6);
+  });
+
+  it('letting go winds the wheel back no faster than it went over', () => {
+    const kb = new KeyboardInput();
+    kb.keyDown('KeyD');
+    const over = ticksToHardOver(kb);
+    kb.keyUp('KeyD');
+    const back = ticksToCentre(kb);
+    expect(back).toBeGreaterThanOrEqual(over);
+    expect(back * SIM_DT).toBeLessThanOrEqual(8); // and it does come back
+  });
+
+  it('a single 1/60 s tap is a small, deliberate nudge — not nothing, not a swing', () => {
+    const kb = new KeyboardInput();
+    kb.keyDown('KeyD');
+    const tap = Math.abs(kb.sample(SIM_DT).rudder);
+    kb.keyUp('KeyD');
+    expect(tap).toBeGreaterThanOrEqual(0.03); // visible: about one spoke of wheel
+    expect(tap).toBeLessThanOrEqual(0.1); // small: a tenth of the travel at most
+    // and it goes away again — a tap is not a latch
+    expect(ticksToCentre(kb)).toBeLessThan(60);
+    // holding is the same helmsman: the second tick is no bigger a step than the first
+    const held = new KeyboardInput();
+    held.keyDown('KeyD');
+    const first = Math.abs(held.sample(SIM_DT).rudder);
+    const second = Math.abs(held.sample(SIM_DT).rudder);
+    expect(second - first).toBeLessThan(first);
+  });
+
+  it('the AI helm goes through the SAME slew — her blade cannot outrun a helmsman either', () => {
+    // stepAi asks for full rudder the moment she has a heading error; the
+    // ship must still take seconds to get it, via ship.rudder, not a second
+    // ramp of her own (§V.77)
+    const state = createInitialState(1);
+    state.ships.push(makeShip(0, 1), makeShip(Math.PI / 2, 1));
+    state.ships[0].position = [0, 0, 0];
+    state.ships[1].position = [120, 0, 0];
+    const ai = createAiShip(1, [120, 0]);
+    let maxStep = 0;
+    let reached = Infinity;
+    for (let i = 0; i < 10 * 60; i++) {
+      state.tick++;
+      const before = state.ships[1].rudder;
+      const commands = stepAiShip(ai, state, 0);
+      stepShipSailing(state.ships[1], commands.input, state.wind, SIM_DT);
+      maxStep = Math.max(maxStep, Math.abs(state.ships[1].rudder - before));
+      if (Math.abs(state.ships[1].rudder) >= 1 && reached === Infinity) reached = i;
+    }
+    const ramp = Math.max(sailingParams.rudderRampRate, sailingParams.rudderSpringRate) * SIM_DT;
+    expect(maxStep).toBeLessThanOrEqual(ramp + 1e-9);
+    // she does want the helm over at some point in those ten seconds, and it
+    // took her at least the helmsman's time to get there
+    expect(reached).toBeLessThan(Infinity);
+    expect(reached).toBeGreaterThanOrEqual(Math.floor(1 / (sailingParams.rudderRampRate * SIM_DT)) - 1);
+  });
+
+  it('a press against the current helm does not jump across midships', () => {
+    const kb = new KeyboardInput();
+    kb.keyDown('KeyD');
+    for (let i = 0; i < 60; i++) kb.sample(SIM_DT);
+    const before = kb.sample(SIM_DT).rudder; // ~-0.3 (D is the screen-right, -1 side)
+    kb.keyUp('KeyD');
+    kb.keyDown('KeyA');
+    const after = kb.sample(SIM_DT).rudder;
+    expect(Math.sign(after)).toBe(Math.sign(before));
+    expect(Math.abs(before - after)).toBeLessThan(0.05); // one tick of slew, no tap jump
+  });
+
+  it('the wheel shows the rudder and nothing else: angle = rudder × turns × π, same tick', () => {
+    // one expression (§V.77): no second smoothing between blade and wheel, so
+    // the wheel's speed is exactly the helmsman's
+    const kb = new KeyboardInput();
+    kb.keyDown('KeyA');
+    for (let i = 0; i < 90; i++) {
+      const r = kb.sample(SIM_DT).rudder;
+      expect(helmWheelAngle(r, shipRigParams)).toBeCloseTo(
+        r * shipRigParams.helmTurnsLockToLock * Math.PI,
+        12,
+      );
+    }
+  });
+
+  it('the sim takes the slewed value as the blade: ship.rudder never outruns the helmsman', () => {
+    const ship = makeShip(0, 2);
+    const wind: Wind = { direction: 0, speed: 8 };
+    const kb = new KeyboardInput();
+    kb.keyDown('KeyA');
+    let prev = 0;
+    for (let i = 0; i < 120; i++) {
+      stepShipSailing(ship, kb.sample(SIM_DT), wind, SIM_DT);
+      const step = Math.abs(ship.rudder - prev);
+      prev = ship.rudder;
+      // per-tick motion bounded by the ramp (plus the one-off tap on the first tick)
+      const bound = (i === 0 ? sailingParams.rudderTapStep : 0) + sailingParams.rudderRampRate * SIM_DT + 1e-9;
+      expect(step).toBeLessThanOrEqual(bound);
+    }
   });
 });
 

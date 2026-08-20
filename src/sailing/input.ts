@@ -5,12 +5,14 @@
  * is plain data so future replay/netcode can feed identical snapshots into
  * the sim with no DOM involved. Sim code imports only the InputState type.
  *
- * Mapping: A/D rudder (analog ramp while held, springs back to 0),
+ * Mapping: A/D rudder (slews at helmsman speed while held, winds back to 0
+ * when released; a fresh press always puts on at least one spoke, §T.77),
  * W trims the sails in, S eases them out and brakes, Q/E brace the yards
  * round (§T.76), Space fires, X drops or weighs the anchor (§I).
  */
 import { sailingParams } from '../params/sailing';
 import { CONTROL_CODES } from '../input/controlMap';
+import { slewRudder } from './shipKinematics';
 
 export interface InputState {
   /** -1 .. 1 rudder intent; keyboard direction is mapped at collection time */
@@ -61,9 +63,17 @@ export class KeyboardInput {
   private rudderValue = 0;
   /** anchor key edges seen since the last sample() — see InputState.anchorToggle */
   private anchorEdges = 0;
+  /** a steer key went down since the last sample() — a fresh press, not a hold */
+  private steerPressed = false;
 
   keyDown(code: string): void {
     if (code === CONTROL_CODES.toggleAnchor && !this.held.has(code)) this.anchorEdges++;
+    if (
+      (code === CONTROL_CODES.steerLeft || code === CONTROL_CODES.steerRight) &&
+      !this.held.has(code)
+    ) {
+      this.steerPressed = true;
+    }
     this.held.add(code);
   }
 
@@ -83,18 +93,18 @@ export class KeyboardInput {
     const dir =
       (this.held.has(CONTROL_CODES.steerLeft) ? 1 : 0) -
       (this.held.has(CONTROL_CODES.steerRight) ? 1 : 0);
-    if (dir !== 0) {
-      // ramp toward the held direction
-      const next = this.rudderValue + dir * p.rudderRampRate * dt;
-      this.rudderValue = Math.max(-1, Math.min(1, next));
-    } else if (this.rudderValue !== 0) {
-      // spring back to center without crossing zero
-      const step = p.rudderSpringRate * dt;
-      this.rudderValue =
-        Math.abs(this.rudderValue) <= step
-          ? 0
-          : this.rudderValue - Math.sign(this.rudderValue) * step;
+    if (dir !== 0 && this.steerPressed) {
+      // §T.77: a tap is a deliberate nudge, not 1/60 s of a 3 s ramp. A fresh
+      // press puts on at least `rudderTapStep` in its own direction — only if
+      // the blade is not already past that, and never by jumping across
+      // midships when the press opposes the current helm.
+      const along = this.rudderValue * dir;
+      if (along >= 0 && along < p.rudderTapStep) this.rudderValue = dir * p.rudderTapStep;
     }
+    this.steerPressed = false;
+    // helmsman speed toward the held direction, or back to midships when
+    // released — the same slew the AI helm and the wheel run on (§V.77)
+    this.rudderValue = slewRudder(this.rudderValue, dir, dt, p);
     const up = this.held.has(CONTROL_CODES.trimIn) ? 1 : 0;
     const down = this.held.has(CONTROL_CODES.trimOut) ? 1 : 0;
     // §T.76: Q and E used to be a SECOND trim pair duplicating W and S, which

@@ -147,10 +147,27 @@ export interface SailingParams {
   maxHeel: number;
   /** exp approach rate toward target heel, 1/s */
   heelResponse: number;
-  /** input feel: rudder units/s toward the held direction */
+  /**
+   * HELMSMAN speed: rudder units/s the blade slews toward a held intent
+   * (§T.77). This is the ONE rate limit on the rudder — keyboard and AI both
+   * go through `slewRudder`, and the wheel is geared off `ship.rudder`, so
+   * this number IS how fast the wheel spins. 0..1 is 1.75 turns of a
+   * 3.5-turn wheel; at 0.3 that is 3.3 s, ~0.5 turn/s, 8 handles passing the
+   * eye at a pace you can count. The old 2.5 flicked hard over in 0.4 s.
+   */
   rudderRampRate: number;
-  /** input feel: rudder units/s springing back to center */
+  /**
+   * rudder units/s the blade comes back to midships when the helm is let go.
+   * Not faster than going over: the wheel is wound back by the same hands.
+   */
   rudderSpringRate: number;
+  /**
+   * smallest deflection a fresh key press commands, rudder units. At a
+   * helmsman's ramp a single 1/60 s tap would move the blade 0.005 — the key
+   * would be useless as a nudge — so a press always puts at least this much
+   * on before the ramp takes over. 0.03 is ~19° of wheel, one spoke.
+   */
+  rudderTapStep: number;
 }
 
 export const sailingParams: SailingParams = registerParams(
@@ -213,8 +230,13 @@ export const sailingParams: SailingParams = registerParams(
     heelGain: 0.004,
     maxHeel: 0.35,
     heelResponse: 1.5,
-    rudderRampRate: 2.5,
-    rudderSpringRate: 3,
+    // §T.77: a helmsman, not a flick. 0.5/s is 2 s to hard over = 1.75
+    // turns of the wheel at ~0.9 turn/s (was 2.5/s: 0.4 s, 4.4 turns/s). The
+    // spring back is a touch slower - nobody spins a wheel back faster than
+    // they put it over
+    rudderRampRate: 0.5,
+    rudderSpringRate: 0.4,
+    rudderTapStep: 0.03,
   },
   {
     thrustScale: { min: 0, max: 0.2, step: 0.001 },
@@ -244,7 +266,8 @@ export const sailingParams: SailingParams = registerParams(
     heelGain: { min: 0, max: 0.02, step: 0.0005 },
     maxHeel: { min: 0, max: 0.8, step: 0.01 },
     heelResponse: { min: 0.1, max: 8, step: 0.1 },
-    rudderRampRate: { min: 0.5, max: 10, step: 0.1 },
-    rudderSpringRate: { min: 0.5, max: 10, step: 0.1 },
+    rudderRampRate: { min: 0.05, max: 10, step: 0.01 },
+    rudderSpringRate: { min: 0.05, max: 10, step: 0.01 },
+    rudderTapStep: { min: 0, max: 0.2, step: 0.005 },
   },
 );
