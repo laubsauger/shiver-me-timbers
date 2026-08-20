@@ -1689,12 +1689,32 @@ async function boot(): Promise<void> {
     return pending;
   };
 
-  /** compile ONE object against the context it will actually be drawn in. */
+  /**
+   * compile ONE object against the context it will actually be drawn in.
+   *
+   * INSIDE A MIRROR OF THE SCENE, NOT BARE (§T.79). `compileAsync(root, …)`
+   * builds every render object against `root` when it is a Scene and against
+   * three's private EMPTY scene otherwise (Renderer.js:860). The node-builder
+   * cache is keyed by `RenderObject.initialCacheKey`, whose dynamic half
+   * hashes the scene's FOG and ENVIRONMENT nodes (Nodes.js:395-411) — so a
+   * warm-up rooted at the bare object compiled every deferred material under
+   * a key the real frame never asks for, and islands, enemy rigging, spray and
+   * combat fx were all rebuilt SYNCHRONOUSLY on their first draw: the exact
+   * hitch this mechanism exists to prevent. The mirror carries the SAME fog
+   * and environment objects, so the keys match (tests/warmScene.test.ts);
+   * lights still come from `app.scene` through the targetScene argument. The
+   * object is reparented into `app.scene` by the caller afterwards, so
+   * nothing stays behind in the mirror.
+   */
+  const warmScene = new Scene();
   const warmObject = async (object: Object3D): Promise<void> => {
-    await withFullCoverage(object, () =>
+    warmScene.fog = app.scene.fog;
+    warmScene.environment = app.scene.environment;
+    warmScene.add(object);
+    await withFullCoverage(warmScene, () =>
       postParams.enabled
-        ? post.warmObject(object)
-        : app.renderer.compileAsync(object, app.camera, app.scene),
+        ? post.warmObject(warmScene)
+        : app.renderer.compileAsync(warmScene, app.camera, app.scene),
     );
   };
 
@@ -1857,6 +1877,7 @@ async function boot(): Promise<void> {
 import {
   Color,
   Quaternion,
+  Scene,
   TimestampQuery,
   Vector2,
   Vector3,

@@ -368,14 +368,16 @@ export function createPostPipeline(
     },
     updateFromParams,
     async warmup(): Promise<void> {
-      // Warms the scene materials against the PASS target (which is where they
-      // are actually drawn when post is on) plus the post quads themselves
-      // (bloom alone adds ~12 pipelines, and they are full-screen quads that
-      // live outside the scene graph, so `compileAsync(scene, camera)` never
-      // sees them). That plain call also warms the CANVAS context — a
-      // different sample count and colour format, therefore a different
-      // pipeline cache key, therefore work the first post frame throws away
-      // and redoes SYNCHRONOUSLY, right as the splash lifts.
+      // Warms the scene materials against the PASS target, which is where they
+      // are actually drawn when post is on. It warms NOTHING ELSE (§T.79):
+      // the pass target is bound before the call, so the canvas context is
+      // never touched here, and the post quads (bloom alone is ~12 pipelines;
+      // full-screen quads outside the scene graph) are not walked by
+      // `compileAsync(scene, …)` at all. Both compile on the first
+      // `presentAsync()` — synchronously, inside the 'first frame' boot phase,
+      // before the splash lifts. Warming them up front would take
+      // `PostProcessing`'s quad (`post._quadMesh`, private in r180) compiled
+      // with the canvas as the render target; not done blind.
       syncPassTarget();
       const prevTarget = renderer.getRenderTarget();
       const prevMRT = renderer.getMRT();

@@ -23,6 +23,17 @@
  * A cache hit costs ~0 on every counter, which is exactly what makes shared
  * materials visible in the output: two ships with their own material set show
  * up twice, two ships sharing one set show up once.
+ *
+ * NESTED PASSES (§T.79). `_createObjectPipeline` runs each object's
+ * `updateBefore` nodes (Renderer.js:3050), and a `ShadowNode` or reflector
+ * answers that with a WHOLE `renderer.render()` of the scene — which, inside
+ * `compileAsync`, still routes every object through `_createObjectPipeline`
+ * (`_handleObjectFunction` is only reset when compileAsync returns,
+ * Renderer.js:959). So the first lit object's sample used to CONTAIN the
+ * entire shadow pass and the reflection pass, and summing samples counted
+ * that work twice. Every counter is now EXCLUSIVE — the object's own work,
+ * children subtracted — and `depth` says which pass a sample came from:
+ * 0 is the compile root's own list, 1+ is a pass a node opened under it.
  */
 import type * as THREE from 'three/webgpu';
 
@@ -41,6 +52,8 @@ export interface CompileSample {
   programs: number;
   /** bytes of WGSL those new programs contain */
   wgsl: number;
+  /** 0 = compile root's own render list; 1+ = a nested pass (shadow, reflection) */
+  depth: number;
 }
 
 export interface CompilePhase {
@@ -91,6 +104,9 @@ export async function profileCompile(
   const original = internals._createObjectPipeline;
   const samples: CompileSample[] = [];
   const t0 = performance.now();
+  /** inclusive totals of the samples opened UNDER each in-flight call */
+  const nestedStack: Array<{ sync: number; pipelines: number; programs: number; wgsl: number }> =
+    [];
 
   internals._createObjectPipeline = function (
     this: unknown,
@@ -105,21 +121,36 @@ export async function profileCompile(
     const vert0 = pipes.programs.vertex.size;
     const frag0 = pipes.programs.fragment.size;
 
+    const nested = { sync: 0, pipelines: 0, programs: 0, wgsl: 0 };
+    nestedStack.push(nested);
     const start = performance.now();
     original.apply(this, args);
     const end = performance.now();
+    nestedStack.pop();
 
+    // inclusive deltas, then the children's inclusive totals come off
+    const inclusive = {
+      sync: end - start,
+      pipelines: pipes.caches.size - cache0,
+      programs: pipes.programs.vertex.size - vert0 + (pipes.programs.fragment.size - frag0),
+      wgsl: newKeyBytes(pipes.programs.vertex, vert0) + newKeyBytes(pipes.programs.fragment, frag0),
+    };
+    const parent = nestedStack[nestedStack.length - 1];
+    if (parent !== undefined) {
+      parent.sync += inclusive.sync;
+      parent.pipelines += inclusive.pipelines;
+      parent.programs += inclusive.programs;
+      parent.wgsl += inclusive.wgsl;
+    }
     const sample: CompileSample = {
       object: object?.name || object?.type || '?',
       material: material?.name || material?.type || '?',
-      sync: end - start,
+      sync: inclusive.sync - nested.sync,
       wait: 0,
-      pipelines: pipes.caches.size - cache0,
-      programs:
-        pipes.programs.vertex.size - vert0 + (pipes.programs.fragment.size - frag0),
-      wgsl:
-        newKeyBytes(pipes.programs.vertex, vert0) +
-        newKeyBytes(pipes.programs.fragment, frag0),
+      pipelines: inclusive.pipelines - nested.pipelines,
+      programs: inclusive.programs - nested.programs,
+      wgsl: inclusive.wgsl - nested.wgsl,
+      depth: nestedStack.length,
     };
     samples.push(sample);
 
