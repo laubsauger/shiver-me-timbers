@@ -418,7 +418,8 @@ export function stepShipSailing(
   // WHY THE TARGET IS ∝ SPEED (§T.83): the blade's moment goes as v²·δ and
   // the hull's yaw damping as v·r, so the steady rate is r = v·δ/R with R a
   // TURNING RADIUS that does not depend on speed — `rudderRefSpeed /
-  // rudderRate`, 95 m ≈ 2.5 LWL, tactical diameter ~5 lengths. The old
+  // rudderRate`, 60 m ≈ 1.6 LWL, tactical diameter ~3 lengths (the first
+  // cut at 95 m / 5 lengths was a ship, and "too extreme for a game"). The old
   // `rudderRefSpeed` of 4 m/s saturated below cruising speed, so from 4 m/s
   // up she turned at a fixed 28.6°/s whatever her way: radius 20 m at
   // 10 m/s, a U-turn in eight seconds, inside her own length. `rudderRefSpeed`

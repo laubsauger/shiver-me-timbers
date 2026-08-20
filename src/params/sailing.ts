@@ -163,21 +163,22 @@ export const sailingParams: SailingParams = registerParams(
     // velocity vector snapping to the new heading
     keelGrip: 1.5,
     brakeDrag: 0.8,
-    // 12 / 0.126 = 95 m turning radius ≈ 2.5 LWL, tactical diameter ~5
-    // lengths — a sailing ship of her size, not a launch. Measured before:
-    // 28.6°/s from 4 m/s up, 180° in 8.4 s, the circle ONE ship length
-    // across. After: 4–6°/s at speed, 180° in ~50 s, ~5 lengths, and she
-    // comes out of it with a third of her way gone (§T.83).
-    rudderRate: 0.126,
-    // τ = 4 s at 10 m/s to spin up or wind down a turn — the ship leans
+    // 12 / 0.2 = 60 m turning radius, tactical diameter ~3 LWL. Measured
+    // before §T.83: 28.6°/s from 4 m/s up, 180° in 8.4 s, the circle ONE
+    // ship length across. The first §T.83 cut (0.126, 95 m, ~5 lengths, 180°
+    // in ~50 s) was a ship; the user called it "too extreme for a game", so
+    // this sits between: a 35 m hull that still cannot pivot, at a cadence a
+    // player will wait for.
+    rudderRate: 0.2,
+    // τ ≈ 2.7 s at 10 m/s to spin up or wind down a turn — the ship leans
     // into the circle rather than stepping onto it — and longer as she
     // slows (∝ 1/way, floored by yawDampFloor)
-    yawResponse: 0.3,
+    yawResponse: 0.45,
     yawDampFloor: 0.4,
     // above her top speed on purpose: the rate never saturates under sail
     rudderRefSpeed: 12,
-    minSteerFactor: 0.4,
-    turnDrag: 26,
+    minSteerFactor: 0.3,
+    turnDrag: 16,
     steerageSpeed: 0.05,
     deadZone: Math.PI / 6,
     deadZoneRamp: 0.35,

@@ -563,8 +563,10 @@ describe('§T.83: she is 400 tons of ship, not a rail car — the turn is wide a
   // speeds." Measured before: full helm from a beam reach at 9.8 m/s gave a
   // steady 28.6°/s, 180° in 8.4 s, and the whole circle fitted inside ONE
   // ship length. A sailing ship of her size (LWL 38.5 m) turns in a tactical
-  // diameter of 4–6 lengths, takes the better part of a minute to come round
-  // 180°, and comes out of a hard turn with about a third of her way gone.
+  // diameter of 4–6 lengths and takes the better part of a minute to come
+  // round; the game sits a little tighter than that on purpose (the first
+  // cut at 5 lengths was called "too extreme for a game"), but she still
+  // cannot pivot, and she comes out of a hard turn with her way cut down.
   // These pin the PROPERTIES (§V.80) with the margins of a ship, not the
   // numbers of this tuning.
   const LWL = 38.5;
@@ -610,12 +612,12 @@ describe('§T.83: she is 400 tons of ship, not a rail car — the turn is wide a
     return { entry, t180, v180, v90, r90, diameter, turned: -turned };
   }
 
-  it('her turning circle is several ship lengths across, and a U-turn takes most of a minute', () => {
+  it('her turning circle is several ship lengths across, and a U-turn takes tens of seconds', () => {
     const t = hardTurn();
     expect(t.turned).toBeGreaterThan(2 * Math.PI); // she did get round
-    expect(t.diameter / LWL).toBeGreaterThanOrEqual(3.5);
+    expect(t.diameter / LWL).toBeGreaterThanOrEqual(2.5);
     expect(t.diameter / LWL).toBeLessThan(8); // …and is not sailing in a straight line
-    expect(t.t180).toBeGreaterThanOrEqual(45);
+    expect(t.t180).toBeGreaterThanOrEqual(20);
     expect(t.t180).toBeLessThan(120);
   });
 
@@ -648,7 +650,7 @@ describe('§T.83: she is 400 tons of ship, not a rail car — the turn is wide a
     // hull. Half the drive is ~70% of the speed; the rate must fall with it
     // and v/r must stay put. A rate that did NOT fall is the old model —
     // saturated at 4 m/s, the same 28.6°/s at every speed she sails.
-    // Half DRIVE, not quarter: below ~4.8 m/s the `minSteerFactor` steerage
+    // Half DRIVE, not quarter: below ~3.6 m/s the `minSteerFactor` steerage
     // floor (kept for §B.49's exit from irons) takes over and the radius
     // closes up again — stated, so nobody reads this as "∝ v at every speed".
     const full = hardTurn(1);
