@@ -9,8 +9,13 @@
  *
  *     [ at anchor ]            the seal, when she is not making way
  *      ◆ ◆ ◆ ◆                 damage diamonds
- *   true wind 21.4 kt f6 …     TRUE wind, strength only
- *  [⚓][dial|apparent][knots|heading][canvas]
+ *  [⚓][gizmo|apparent kt, point of sail, true F6][knots|heading][canvas]
+ *
+ * §T.84 folded the old third line — "true wind 21.4 kt f6" — into the gizmo's
+ * caption: the vane's LENGTH is the apparent strength, the caption's small
+ * line is the true wind's knots and force. One row fewer over the sea, and the
+ * gizmo now carries the yards too (see windDial.ts), which is what made the
+ * old rose insufficient once Q/E braced them independently of the helm.
  *
  * That column is the fix for §B.50. The true-wind line used to be pinned 46px
  * from the top of the frame, inside the compass's own 12–58px band, so the
@@ -21,10 +26,10 @@
  * positioned any more except the column itself. Overlap is now structurally
  * impossible rather than merely tuned away.
  *
- * Both wind readouts also now sit one above the other, which is the other half
- * of the complaint: two different knot numbers at opposite ends of the frame
- * read as a contradiction. Adjacent and labelled, they read as what they are —
- * the wind over the sea, and the wind the ship feels.
+ * Both wind readouts also sit together, which is the other half of the
+ * complaint: two different knot numbers at opposite ends of the frame read as
+ * a contradiction. Adjacent and labelled, they read as what they are — the
+ * wind over the sea, and the wind the ship feels.
  *
  * The wind and canvas plaques answer §I ui/hud: see the wind, then answer it.
  * Both derive from the SAME functions the ship itself uses (apparentWind for
@@ -33,10 +38,11 @@
  */
 import { uiParams } from '../params/ui';
 import { shipRigParams } from '../params/ship';
+import { sailingParams } from '../params/sailing';
 import { apparentWind, wrapAngle } from '../ship/flagDynamics';
 import { sailStateForTrim, trimDropScale } from '../ship/sailDynamics';
 import type { SailStateId } from '../ship/pieceTypes';
-import { CARDINALS, beaufort, cardinal, createWindDial, pointOfSail } from './windDial';
+import { CARDINALS, beaufort, cardinal, createWindDial, noGoBand, pointOfSail } from './windDial';
 import { div, el } from './dom';
 
 export interface WindReadout {
@@ -48,6 +54,8 @@ export interface WindReadout {
   shipVelZ: number;
   /** ship heading (rad), same convention as setHeading */
   headingRad: number;
+  /** the yards' brace (ShipState.brace, rad) — drawn as the gizmo's yard bar */
+  brace?: number;
   /** riding to her anchor (ShipState.anchored) */
   anchored?: boolean;
   /** the seabed is holding her (grounding published a non-zero grip) */
@@ -163,34 +171,23 @@ export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
   const tape = div('smt-compass-tape');
   const compass = div('smt-compass', tape, div('smt-lubber'));
 
-  // TRUE wind. Deliberately not a second copy of the dial: the sky already
-  // draws the BEARING (§T.47's wind lines vanish toward it), so what a deck
-  // cannot tell you is the STRENGTH — hence knots and a force, and no
-  // direction. The two readouts complement rather than duplicate.
-  //
-  // It rides at the head of the binnacle column rather than under the compass:
-  // the top band is always against sky, which is cream at 17.6 and mid-blue at
-  // 15.0, and an unbacked engraved line there is unreadable at both. Down here
-  // it is over dark sea and directly above the apparent-wind card it should be
-  // compared with.
-  const trueWindValue = el('span', 'smt-truewind-value', '0.0 kt');
-  const trueWindName = el('span', 'smt-truewind-name', 'calm');
-  const trueWind = div(
-    'smt-truewind',
-    el('span', 'smt-truewind-key', 'true wind'),
-    trueWindValue,
-    trueWindName,
-  );
-
   const speedValue = el('div', 'smt-plate-value', '0.0');
   const speedCell = div('smt-plate-cell', speedValue, el('div', 'smt-plate-label', 'knots'));
   const headingValue = el('div', 'smt-plate-value', '000°');
   const headingCell = div('smt-plate-cell', headingValue, el('div', 'smt-plate-label', 'heading'));
   const plate = div('smt-plate', speedCell, div('smt-plate-sep'), headingCell);
 
-  const dial = createWindDial(uiParams.windNoGoDegrees);
+  // THE GIZMO and its caption. The caption carries what a 96px face cannot
+  // letter: the apparent knots (the wind the ship feels), the point of sail or
+  // the "aback" warning, and — as a small line under it — the TRUE wind's
+  // knots and force, which is the one the settings screen sets and the one
+  // that decides whether she can sail at all. The sky already draws the true
+  // BEARING (§T.47's wind lines vanish toward it), so only strength is lettered.
+  const dial = createWindDial(noGoBand(sailingParams));
   const windCell = plaqueCell('0.0', 'no wind', 'apparent');
-  const windCard = div('smt-plate smt-plate-side', dial.root, windCell.root);
+  const trueWindLine = el('div', 'smt-truewind', 'true 0.0 kt · F0');
+  windCell.root.appendChild(trueWindLine);
+  const windCard = div('smt-plate smt-plate-side is-wind', dial.root, windCell.root);
 
   const canvasCell = plaqueCell('—', 'canvas');
   const dropFill = div('smt-canvas-fill');
@@ -226,13 +223,15 @@ export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
   // ONE flow column. The seal keeps its box when it is off (visibility, not
   // display) so that a ship running aground does not shove the whole binnacle
   // up the screen — and so that nothing below it has to guess its height.
-  const binnacle = div('smt-binnacle', stalled, damageRow, trueWind, bottom);
+  const binnacle = div('smt-binnacle', stalled, damageRow, bottom);
   const hud = div('smt-hud', compass, binnacle);
   root.appendChild(hud);
 
   let tapePx = uiParams.compassPixelsPerDegree;
   let hudOpacity = uiParams.hudOpacity;
   let noGo = uiParams.windNoGoDegrees;
+  let deadZone = sailingParams.deadZone;
+  let deadZoneRamp = sailingParams.deadZoneRamp;
   buildTape(tape, tapePx);
   hud.style.setProperty('--smt-hud-opacity', String(hudOpacity));
 
@@ -246,9 +245,14 @@ export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
       hudOpacity = uiParams.hudOpacity;
       hud.style.setProperty('--smt-hud-opacity', String(hudOpacity));
     }
-    if (uiParams.windNoGoDegrees !== noGo) {
-      noGo = uiParams.windNoGoDegrees;
-      dial.setNoGo(noGo);
+    if (uiParams.windNoGoDegrees !== noGo) noGo = uiParams.windNoGoDegrees;
+    // the wedge is the FORCE MODEL's dead zone (§V.77), so it follows the
+    // sailing tunables, not the HUD's own label threshold
+    if (sailingParams.deadZone !== deadZone || sailingParams.deadZoneRamp !== deadZoneRamp) {
+      deadZone = sailingParams.deadZone;
+      deadZoneRamp = sailingParams.deadZoneRamp;
+      const band = noGoBand(sailingParams);
+      dial.setNoGo(band.hard, band.full);
     }
   }
 
@@ -283,18 +287,25 @@ export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
       const k = Math.min(1, Math.max(0, uiParams.windVaneSmoothing));
       vaneBearing = wrapAngle(vaneBearing + wrapAngle(target - vaneBearing) * k);
       dial.setBearing(vaneBearing);
+      // the yards as the SIM has them — the rig draws this same number
+      if (w.brace !== undefined) dial.setBrace(w.brace);
       const knots = aw.speed * MS_TO_KNOTS;
       dial.setStrength(Math.min(1, knots / 20));
       windCell.value.textContent = knots.toFixed(1);
-      windCell.label.textContent = aw.speed < 0.2 ? 'no wind' : pointOfSail(vaneBearing, noGo);
+      // "aback" outranks the point of sail: it is the thing to FIX, and the
+      // gizmo's flipped, wax-red sail says the same thing in shape
+      const aback = dial.model.aback && lastTrim > 0 && aw.speed >= 0.2;
+      windCell.label.textContent = aw.speed < 0.2
+        ? 'no wind'
+        : aback ? 'aback' : pointOfSail(vaneBearing, noGo);
+      windCell.label.classList.toggle('is-aback', aback);
 
-      // TRUE wind, which is the one the settings screen sets and the one that
-      // decides whether she can sail at all — the apparent-wind plaque beside
-      // the dial reads a different number for the same air and always has.
+      // TRUE wind — the one the settings screen sets and the one that decides
+      // whether she can sail at all; the apparent figure above it reads a
+      // different number for the same air and always has.
       const trueKnots = Math.max(0, w.windSpeed) * MS_TO_KNOTS;
       const force = beaufort(w.windSpeed);
-      trueWindValue.textContent = `${trueKnots.toFixed(1)} kt`;
-      trueWindName.textContent = `F${force.force} ${force.name}`;
+      trueWindLine.textContent = `true ${trueKnots.toFixed(1)} kt · F${force.force}`;
 
       // angle off the eye of the TRUE wind, with the SAME (sin, cos) heading
       // basis stepShipSailing builds its own theta from — the readout has to
@@ -327,6 +338,7 @@ export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
       sailState = sailStateForTrim(trim, sailState, shipRigParams);
       lastTrim = trim;
       const t = Math.min(1, Math.max(0, trim));
+      dial.setTrim(t);
       canvasCell.value.textContent = `${Math.round(t * 100)}%`;
       canvasCell.label.textContent = SAIL_LABEL[sailState];
       const drop = trimDropScale(trim, shipRigParams);

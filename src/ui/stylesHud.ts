@@ -196,20 +196,71 @@ export const HUD_CSS = /* css */ `
   background: linear-gradient(180deg, transparent, rgba(223, 192, 109, 0.5), transparent);
 }
 
-.smt-wind-dial { width: 44px; height: 44px; flex: none; }
+/* THE SAILING GIZMO (§T.84, drawn in windDial.ts). 96px so the yard bar and
+   the ghost yard separate from a couch at 1080p; every state also has a
+   SHAPE — bars converge, sail flips, wedge is a wedge — so the colour is a
+   second channel, never the only one. Palette: brass for "drawing well",
+   amber for "could be better", wax red for "backed / no drive". */
+.smt-wind-dial { width: 96px; height: 96px; flex: none; overflow: visible; }
+.smt-plate.is-wind { padding: 5px 18px 5px 10px; }
 .smt-wind-ring { fill: none; stroke: rgba(223, 192, 109, 0.42); stroke-width: 1; }
-.smt-wind-nogo { fill: rgba(142, 43, 37, 0.28); stroke: rgba(216, 87, 76, 0.3); stroke-width: 0.6; }
+.smt-wind-nogo { fill: rgba(142, 43, 37, 0.34); stroke: rgba(216, 87, 76, 0.35); stroke-width: 0.6; }
+.smt-wind-nogo.is-ramp { fill: rgba(142, 43, 37, 0.16); stroke: none; }
 .smt-wind-tick { stroke: rgba(231, 216, 174, 0.45); stroke-width: 1; }
 .smt-wind-tick.is-major { stroke: rgba(223, 192, 109, 0.85); stroke-width: 1.4; }
 .smt-wind-hull {
-  fill: rgba(231, 216, 174, 0.22); stroke: rgba(231, 216, 174, 0.5); stroke-width: 0.9;
+  fill: rgba(231, 216, 174, 0.2); stroke: rgba(231, 216, 174, 0.55); stroke-width: 1;
 }
+/* the ghost yard: where the crew would brace. Dashed + chevron caps so it
+   reads as a TARGET rather than a second yard */
+.smt-wind-ghost { transition: transform 0.12s linear; }
+.smt-wind-ghost-bar {
+  stroke: rgba(223, 192, 109, 0.55); stroke-width: 1.2; stroke-dasharray: 3 2.2;
+}
+.smt-wind-ghost-cap { fill: none; stroke: rgba(223, 192, 109, 0.7); stroke-width: 1.1; }
+/* the yards, coloured by drive — and glowed, because a thin brass bar over a
+   brass ghost bar is a weak signal on its own */
+.smt-wind-yard { transition: transform 0.12s linear; }
+.smt-wind-yard-bar {
+  stroke: var(--brass-hi); stroke-width: 3; stroke-linecap: round;
+  transition: stroke 0.2s ease, filter 0.2s ease;
+}
+.smt-wind-mast { fill: #0d0905; stroke: var(--brass-hi); stroke-width: 1; }
+.smt-wind-sail-cloth {
+  fill: rgba(231, 216, 174, 0.55); stroke: rgba(231, 216, 174, 0.7); stroke-width: 0.6;
+  transition: fill 0.2s ease;
+}
+.smt-wind-dial.is-good .smt-wind-yard-bar {
+  filter: drop-shadow(0 0 2.5px rgba(223, 192, 109, 0.95));
+}
+.smt-wind-dial.is-fair .smt-wind-yard-bar { stroke: #e8a24a; }
+.smt-wind-dial.is-fair .smt-wind-sail-cloth { fill: rgba(232, 162, 74, 0.42); }
+.smt-wind-dial.is-poor .smt-wind-yard-bar { stroke: #d8574c; }
+.smt-wind-dial.is-poor .smt-wind-sail-cloth { fill: rgba(216, 87, 76, 0.38); }
+.smt-wind-dial.is-aback .smt-wind-yard-bar {
+  stroke: #d8574c; filter: drop-shadow(0 0 3px rgba(216, 87, 76, 0.9));
+}
+.smt-wind-dial.is-aback .smt-wind-sail-cloth {
+  fill: rgba(216, 87, 76, 0.55); stroke: #f0d9a6;
+}
+/* becalmed or furled: no verdict — the bar is plain brass, the sail pale */
+.smt-wind-dial.is-slack .smt-wind-yard-bar {
+  stroke: rgba(231, 216, 174, 0.65); filter: none;
+}
+.smt-wind-dial.is-slack .smt-wind-sail-cloth { fill: rgba(231, 216, 174, 0.3); stroke: rgba(231, 216, 174, 0.5); }
+/* the vane: an arrow from the rim toward the hull, longer in a blow */
 .smt-wind-vane { transition: transform 0.08s linear; }
 .smt-wind-flag {
   fill: var(--brass-hi);
-  opacity: calc(0.32 + 0.68 * var(--smt-vane, 0));
+  opacity: calc(0.35 + 0.65 * var(--smt-vane, 0));
 }
-.smt-wind-staff { stroke: rgba(223, 192, 109, 0.7); stroke-width: 1; }
+.smt-wind-staff {
+  stroke: var(--brass-hi); stroke-width: 1.6; stroke-linecap: round;
+  opacity: calc(0.35 + 0.65 * var(--smt-vane, 0));
+}
+.smt-wind-head { fill: var(--brass-hi); opacity: calc(0.35 + 0.65 * var(--smt-vane, 0)); }
+/* caption: "aback" is a warning, and gets the seal's wax colour */
+.smt-plate-label.is-aback { color: #f0a89c; font-weight: 600; }
 
 /* the column-stacked plates need their own main-axis centring now that
    .smt-bottom stretches every plaque to one height */
@@ -227,28 +278,15 @@ export const HUD_CSS = /* css */ `
   transition: width 0.2s ease;
 }
 
-/* TRUE wind, engraved at the head of the binnacle, directly over the apparent
-   card it is meant to be read against. The sky's wind lines already point at
-   the bearing, so this carries only what the sky cannot say: strength.
-   It carries its own ground for the same reason the compass does: measured on
-   the live frame, unbacked text here lands on the SUNLIT DECK, which is as
-   bright as any sky. Slimmer and dimmer than the plaques so it reads as a
-   caption on the binnacle rather than a fifth gauge. */
+/* TRUE wind, the small line under the apparent figure in the gizmo's caption.
+   The sky's wind lines already point at the bearing, so this carries only what
+   the sky cannot say: strength. Was its own engraved row above the plaques
+   until §T.84 folded it in here. */
 .smt-truewind {
-  display: flex; align-items: baseline; gap: 9px; white-space: nowrap;
-  padding: 3px 15px 4px;
-  font-size: 11px; letter-spacing: 0.18em; text-transform: lowercase;
-  color: rgba(231, 216, 174, 0.62);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
-  background: linear-gradient(180deg, rgba(22, 15, 8, 0.7), rgba(11, 8, 4, 0.78));
-  box-shadow: inset 0 0 0 1px rgba(223, 192, 109, 0.2);
-  clip-path: polygon(8px 0, calc(100% - 8px) 0, 100% 50%, calc(100% - 8px) 100%,
-    8px 100%, 0 50%);
-}
-.smt-truewind-key { font-size: 9px; letter-spacing: 0.3em; opacity: 0.62; }
-.smt-truewind-value {
-  font-family: var(--figures); font-size: 15px; letter-spacing: 0.04em;
-  font-variant-numeric: tabular-nums; color: var(--parch-hi);
+  margin-top: 3px; padding-top: 3px; white-space: nowrap;
+  border-top: 1px solid rgba(223, 192, 109, 0.22);
+  font-family: var(--figures); font-size: 10.5px; letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums; color: rgba(231, 216, 174, 0.62);
 }
 
 /* WHY she is not making way (§B.49). A wax-red seal above the binnacle: it is

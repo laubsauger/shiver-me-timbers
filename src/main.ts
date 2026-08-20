@@ -1536,6 +1536,9 @@ async function boot(): Promise<void> {
         shipVelX: playerShip.velocity[0],
         shipVelZ: playerShip.velocity[2],
         headingRad,
+        // §T.84: the gizmo draws the yards at the SIM's brace, the same number
+        // setRigTrim just posed the rig at — not a HUD-side copy
+        brace: playerShip.brace,
         // §B.49: the HUD names WHY she is not making way. Both of these are
         // read from the sim rather than mirrored in the UI, so the plaque
         // cannot claim she is at anchor while the force model disagrees.

@@ -67,7 +67,16 @@ import {
   shadowMapSizeNeedsReload,
   unwiredFeatures,
 } from '../src/ui/graphicsFeatures';
-import { pointOfSail } from '../src/ui/windDial';
+import {
+  createWindDial,
+  driveClass,
+  noGoBand,
+  pointOfSail,
+  sailingGizmoModel,
+} from '../src/ui/windDial';
+import { autoBrace, braceBack, braceDrive } from '../src/sailing/shipKinematics';
+import { shipRigParams } from '../src/params/ship';
+import { sailingParams } from '../src/params/sailing';
 import {
   INITIAL_VIEW_STATE,
   devLayerFor,
@@ -1483,5 +1492,204 @@ describe('the weather preset row reaches the sea (§V.62)', () => {
     for (const rung of SEA_STATES) {
       expect(weatherPresetFor(world(seaStatePatch(rung)))).toBeNull();
     }
+  });
+});
+
+/**
+ * THE SAILING GIZMO (§T.84). Since the yards brace independently of the helm
+ * the HUD draws three angles on one face, and every one of them is the SIM's
+ * number (§V.77). These pin the PROPERTIES (§V.80): the ghost yard is the
+ * argmax of the drive law the thrust is scaled by, the yard colour is monotone
+ * in that drive, "aback" is the plate law's own backed condition, and a NaN
+ * from a stale snapshot cannot blank the instrument (§V.28).
+ */
+describe('the sailing gizmo reads the sim, not its own idea of sailing', () => {
+  const DEG = Math.PI / 180;
+  const noGo = noGoBand(sailingParams);
+
+  it('the no-go wedge is deadZone (+ramp) from the sailing params, in degrees', () => {
+    expect(noGo.hard).toBeCloseTo(sailingParams.deadZone / DEG, 9);
+    expect(noGo.full).toBeCloseTo((sailingParams.deadZone + sailingParams.deadZoneRamp) / DEG, 9);
+    expect(noGo.full).toBeGreaterThan(noGo.hard);
+    // and it tracks a retune rather than a copied constant
+    expect(noGoBand({ ...sailingParams, deadZone: 0.2, deadZoneRamp: 0.1 }).full)
+      .toBeCloseTo(0.3 / DEG, 9);
+  });
+
+  it('the ghost yard is the argmax of braceDrive within braceMax, for every bearing outside the no-go', () => {
+    const bMax = shipRigParams.braceMax;
+    const step = 0.25 * DEG;
+    let checked = 0;
+    for (let deg = -179; deg <= 179; deg += 2) {
+      if (Math.abs(deg) <= noGo.full) continue; // in irons the marker is moot
+      const bearing = deg * DEG; // apparent wind FROM, off the bow
+      const m = sailingGizmoModel(bearing, 0);
+      let best = -Infinity;
+      let argmax = 0;
+      for (let b = -bMax; b <= bMax + 1e-9; b += step) {
+        const d = braceDrive(b, m.gamma);
+        if (d > best) { best = d; argmax = b; }
+      }
+      expect(Math.abs(m.optimum - argmax), `bearing ${deg}°`).toBeLessThanOrEqual(step);
+      expect(m.optimum).toBe(autoBrace(m.gamma, shipRigParams));
+      checked++;
+    }
+    expect(checked).toBeGreaterThan(100);
+  });
+
+  it('efficiency is the sim’s braceRatio: 1 at the ghost yard, falling away from it', () => {
+    for (const deg of [-150, -110, -70, 70, 110, 150]) {
+      const bearing = deg * DEG;
+      const at = sailingGizmoModel(bearing, sailingGizmoModel(bearing, 0).optimum);
+      expect(at.efficiency).toBeCloseTo(1, 9);
+      expect(at.driveClass).toBe('good');
+      // monotone away from the optimum on each side, in steps of 5°
+      for (const sign of [-1, 1]) {
+        let last = 1;
+        for (let off = 5; off <= 45; off += 5) {
+          const m = sailingGizmoModel(bearing, at.optimum + sign * off * DEG);
+          expect(m.efficiency, `bearing ${deg}° off ${sign * off}°`).toBeLessThanOrEqual(last + 1e-9);
+          last = m.efficiency;
+        }
+      }
+    }
+  });
+
+  it('the colour class is monotone in drive — more drive can never read redder', () => {
+    const rank = { poor: 0, fair: 1, good: 2 } as const;
+    let last = -1;
+    for (let e = 0; e <= 1.0001; e += 0.01) {
+      const r = rank[driveClass(e)];
+      expect(r).toBeGreaterThanOrEqual(last);
+      last = r;
+    }
+    expect(driveClass(0)).toBe('poor');
+    expect(driveClass(1)).toBe('good');
+    // and the model's class IS the class of its own efficiency
+    const m = sailingGizmoModel(100 * DEG, 0.6);
+    expect(m.driveClass).toBe(driveClass(m.efficiency));
+  });
+
+  it('aback is flagged exactly when the plate law has the wind on the sail’s face', () => {
+    let backed = 0;
+    for (let deg = -180; deg < 180; deg += 7) {
+      for (let b = -0.785; b <= 0.785; b += 0.157) {
+        const m = sailingGizmoModel(deg * DEG, b);
+        const simAback = braceBack(b, m.gamma) > 0;
+        expect(m.aback, `bearing ${deg}° brace ${b.toFixed(2)}`).toBe(simAback);
+        if (simAback) backed++;
+      }
+    }
+    expect(backed).toBeGreaterThan(0);
+    // the canonical case: yards square, wind dead ahead — backed; dead astern — drawing
+    expect(sailingGizmoModel(0, 0).aback).toBe(true);
+    expect(sailingGizmoModel(Math.PI, 0).aback).toBe(false);
+    // and a beam wind with the yards braced the WRONG way round is backed
+    const beam = sailingGizmoModel(90 * DEG, 0);
+    expect(sailingGizmoModel(90 * DEG, -beam.optimum).aback)
+      .toBe(braceBack(-beam.optimum, beam.gamma) > 0);
+  });
+
+  it('the sim convention is honoured: wind FROM starboard is gamma < 0 (port tack is +ve)', () => {
+    // windBearing: +ve means the wind blows TOWARD starboard, i.e. from port
+    expect(sailingGizmoModel(90 * DEG, 0).gamma).toBeCloseTo(-90 * DEG, 9);
+    expect(sailingGizmoModel(-90 * DEG, 0).gamma).toBeCloseTo(90 * DEG, 9);
+  });
+});
+
+describe('the gizmo’s DOM face: NaN cannot blank it (§V.28), the yard is the sim’s brace', () => {
+  const attrs = () => new Map<string, string>();
+  const fakeEl = (): any => {
+    const a = attrs();
+    const style = new Map<string, string>();
+    const classes = new Set<string>();
+    return {
+      attrs: a,
+      children: [] as any[],
+      setAttribute(k: string, v: string) { a.set(k, v); },
+      getAttribute(k: string) { return a.get(k) ?? null; },
+      appendChild(c: any) { this.children.push(c); return c; },
+      style: { setProperty(k: string, v: string) { style.set(k, v); }, get: (k: string) => style.get(k) },
+      classList: {
+        toggle(c: string, on: boolean) { if (on) classes.add(c); else classes.delete(c); },
+        contains: (c: string) => classes.has(c),
+      },
+    };
+  };
+  const prior = (globalThis as any).document;
+  beforeEach(() => {
+    (globalThis as any).document = { createElementNS: () => fakeEl(), createElement: () => fakeEl() };
+  });
+  afterEach(() => {
+    (globalThis as any).document = prior;
+  });
+
+  const find = (node: any, cls: string): any => {
+    if (node.attrs?.get('class') === cls) return node;
+    for (const c of node.children ?? []) {
+      const hit = find(c, cls);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const rotation = (node: any): number =>
+    Number(/rotate\(([-\d.]+)/.exec(node.getAttribute('transform') ?? '')?.[1] ?? NaN);
+
+  it('the yard bar rotates by exactly the brace the sim holds', () => {
+    const dial = createWindDial();
+    const yard = find(dial.root, 'smt-wind-yard');
+    for (const b of [-0.785, -0.3, 0, 0.42, 0.785]) {
+      dial.setBrace(b);
+      expect(rotation(yard)).toBeCloseTo((b * 180) / Math.PI, 1);
+    }
+  });
+
+  it('the ghost yard sits at autoBrace for the bearing shown, and colour class follows the model', () => {
+    const dial = createWindDial();
+    const ghost = find(dial.root, 'smt-wind-ghost');
+    dial.setBearing((110 * Math.PI) / 180);
+    expect(rotation(ghost)).toBeCloseTo((dial.model.optimum * 180) / Math.PI, 1);
+    dial.setBrace(dial.model.optimum);
+    expect(dial.root.classList.contains('is-good')).toBe(true);
+    expect(dial.root.classList.contains('is-aback')).toBe(false);
+    // yards square to a wind dead ahead: backed, and the face says so
+    dial.setBearing(0);
+    dial.setBrace(0);
+    expect(dial.root.classList.contains('is-aback')).toBe(true);
+  });
+
+  it('no wind or no canvas gives NO verdict — a becalmed ship is not "badly braced"', () => {
+    const dial = createWindDial();
+    dial.setBearing((110 * Math.PI) / 180);
+    dial.setBrace(0);
+    dial.setStrength(0.6);
+    dial.setTrim(1);
+    expect(dial.root.classList.contains('is-slack')).toBe(false);
+    dial.setStrength(0);
+    expect(dial.root.classList.contains('is-slack')).toBe(true);
+    dial.setStrength(0.6);
+    dial.setTrim(0);
+    expect(dial.root.classList.contains('is-slack')).toBe(true);
+  });
+
+  it('setBearing / setStrength / setBrace / setTrim reject NaN and keep the last good reading', () => {
+    const dial = createWindDial();
+    const vane = find(dial.root, 'smt-wind-vane');
+    const yard = find(dial.root, 'smt-wind-yard');
+    dial.setBearing(1);
+    dial.setBrace(0.5);
+    dial.setStrength(0.7);
+    dial.setTrim(0.8);
+    const css = dial.root.style as unknown as { get(k: string): string | undefined };
+    const before = [vane.getAttribute('transform'), yard.getAttribute('transform'),
+      css.get('--smt-vane'), css.get('--smt-canvas')];
+    dial.setBearing(NaN);
+    dial.setBrace(NaN);
+    dial.setStrength(NaN);
+    dial.setTrim(NaN);
+    expect([vane.getAttribute('transform'), yard.getAttribute('transform'),
+      css.get('--smt-vane'), css.get('--smt-canvas')]).toEqual(before);
+    expect(vane.getAttribute('transform')).not.toContain('NaN');
+    expect(dial.model.efficiency).not.toBeNaN();
   });
 });
