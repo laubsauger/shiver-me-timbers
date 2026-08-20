@@ -1099,7 +1099,7 @@ describe('§T52 showcase lagoon: a venue for the shore systems', () => {
     }
   });
 
-  it('offers a berth she will not ground on, facing the lagoon', () => {
+  it('offers a berth she will not ground on, beam-on with the lagoon to port', () => {
     // draft 2 m + the 3.96 m trough = 5.96 m before the keel touches at all,
     // and `stepShipGrounding` tests the KEEL, so a berth measured only at the
     // ship's origin can still drop her bow onto a bank (§V54: give the lumped
@@ -1113,13 +1113,18 @@ describe('§T52 showcase lagoon: a venue for the shore systems', () => {
         const d = -hm.heightAt(a.x + Math.cos(t) * 22, a.z + Math.sin(t) * 22);
         expect(d).toBeGreaterThanOrEqual(6.2);
       }
-      // and she is pointed at the lagoon, not away from it: heading is a yaw
-      // about +Y, which maps her forward [0,0,1] to [sin, 0, cos]
+      // and she lies BEAM-ON to the lagoon with it on her port side, so
+      // weighing anchor and trimming in is "go", not "turn 90 degrees first".
+      // heading is a yaw about +Y, which maps her forward [0,0,1] to
+      // [sin, 0, cos]; port of that is [cos, -sin] (positive yaw turns to
+      // port, so port lies ahead of a positive quarter turn)
       const [cx, cz] = hm.lagoonCenter!;
       const fwd = [Math.sin(a.heading), Math.cos(a.heading)];
+      const port = [Math.cos(a.heading), -Math.sin(a.heading)];
       const toLagoon = [cx - a.x, cz - a.z];
       const len = Math.hypot(toLagoon[0], toLagoon[1]);
-      expect((fwd[0] * toLagoon[0] + fwd[1] * toLagoon[1]) / len).toBeGreaterThan(0.99);
+      expect(Math.abs(fwd[0] * toLagoon[0] + fwd[1] * toLagoon[1]) / len).toBeLessThan(0.01);
+      expect((port[0] * toLagoon[0] + port[1] * toLagoon[1]) / len).toBeGreaterThan(0.99);
       // close enough that the beach behind the lagoon is in frame, not a smudge
       expect(len).toBeLessThan(hm.worldRadius);
     }

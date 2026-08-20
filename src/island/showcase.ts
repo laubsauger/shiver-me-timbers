@@ -219,8 +219,12 @@ export function findLagoonAnchorage(
       best = {
         x,
         z,
-        // face the lagoon: the follow camera sits astern of the bow
-        heading: Math.atan2(tx - x, tz - z),
+        // beam-on to the lagoon, bow to STARBOARD of it: she boots on anchor
+        // and the user wants to weigh and go without first turning through
+        // 90 degrees. Starboard of forward [sin h, cos h] is yaw h - pi/2 (a
+        // positive yaw about +Y turns her to port). The lagoon still fills
+        // the port side of the follow-camera frame from astern of the bow.
+        heading: Math.atan2(tx - x, tz - z) - Math.PI / 2,
         depth,
       };
     }
