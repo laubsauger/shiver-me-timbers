@@ -36,7 +36,7 @@ Terrain: T111 research, T112a quick wins, T112c erosion pass stage. Lookdev sets
 R0 (grade frames), R1 (pre-fix raft), R2 (walk), T108 (moon).
 
 ## In flight when paused (agents told to finish, not to start more)
-1. **B70/B73/B75/B76/B79 raft visual fixer** (owns src/ship/raft*, preview*, flagMaterial,
+1. **DONE, committed e95e646** — raft visual fixer (B70/B73/B75/B76/B79–B85). Remaining gaps = B86. Frames: `docs/raft2100/lookdev/R1-fix/` (README lists defect→cause→fix). Formerly: **B70/B73/B75/B76/B79 raft visual fixer** (owns src/ship/raft*, preview*, flagMaterial,
    new `src/ship/raftRigging.ts` + 1-line hunk in `src/raft/raftScene.ts`): materials routing,
    preview hang, sails set/oriented, janky rig (yard cock/rake, forward sheet pull), bipod aft
    rake, ladder orientation, splashboards 0.5–0.6 m + longer run, furl bundle ∝ area, rigging
@@ -44,13 +44,14 @@ R0 (grade frames), R1 (pre-fix raft), R2 (walk), T108 (moon).
    hands + fov. Output: `docs/raft2100/lookdev/R1-fix/` + README. Uncommitted WIP in src/ship.
 2. **T112b path-first authoring** — `src/island/pathGraph.ts`, carve pass inserted before
    `thermalSmooth`, publishes `hm.path = {distance, routeMask, forkMask, pois, routes}`.
-3. **T112d terrain-info texture + layered shading** — `src/island/terrainInfo.ts`,
+3. **DONE, committed b4c9c88** — T112d terrain-info + layered shading. Formerly: **T112d terrain-info texture + layered shading** — `src/island/terrainInfo.ts`,
    `sierraMaterial.ts` as its own material, `terrain/rockMaterial.ts`; exports channel layout.
-4. **B77 moon terminator** — `src/sky/skyBackground.ts`/`moonCycle.ts`/`starfield.ts`.
+4. **DONE, committed 2f31020** — B77 moon terminator + star dusk gate. Formerly: **B77 moon terminator** — `src/sky/skyBackground.ts`/`moonCycle.ts`/`starfield.ts`.
 If any died (session limit), resume via the transcript or respawn "continue from disk" — the
 briefs live in this session's transcript; the SPEC rows carry the requirements.
 
 ## Queued (not started) — in priority order
+- B86 raft follow-ups (halyards/forestay sockets, raft sailWindRef, furl yard lowering, interact reach) — fold into T115 or a small raft pass.
 - T114 sails pass through masts (all ships; B74) — after fixer exits src/ship.
 - T115 R2 walk fixes (B78: boarding height, tiller spawn walled, strip dead-end, lookout eye).
 - T113 dedupe mode glue (§V95: withFullCoverage, material cache, quat helpers, preview HUD).
