@@ -7,6 +7,8 @@
  *             hour per real minute.
  * startHour   time of day the entry boots at (overridable with `?tod=`).
  * clockRunning false freezes the sun where it is (lookdev, §V.88 stations).
+ * defaultPreset the sea the raft boots into and falls back to when a refused
+ *             preset is asked for. User: "calm be the default on raft mode".
  * maxStorminess presets whose `PRESET_STORMINESS` exceeds this are refused
  *             by the raft entry and replaced by the calmest default (§T.98
  *             "storm presets excluded"). 0.12 admits glass…swell.
@@ -18,6 +20,7 @@ export interface RaftWorldParams {
   startHour: number;
   clockRunning: boolean;
   maxStorminess: number;
+  defaultPreset: 'glass' | 'calm' | 'breeze' | 'swell';
 }
 
 export const raftWorldParams: RaftWorldParams = registerParams(
@@ -27,6 +30,7 @@ export const raftWorldParams: RaftWorldParams = registerParams(
     startHour: 7,
     clockRunning: true,
     maxStorminess: 0.12,
+    defaultPreset: 'calm',
   },
   {
     dayMinutes: { min: 1, max: 240, step: 1 },

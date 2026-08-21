@@ -56,7 +56,7 @@ import { PRESET_STORMINESS, WEATHER_PRESET_NAMES } from '../src/weather/presets'
 import type { ShipState } from '../src/state/simState';
 import type { SkyParams } from '../src/params/sky';
 
-const P = { dayMinutes: 24, startHour: 7, clockRunning: true, maxStorminess: 0.12 };
+const P = { dayMinutes: 24, startHour: 7, clockRunning: true, maxStorminess: 0.12, defaultPreset: 'calm' as const };
 
 function ship(over: Partial<ShipState> = {}): ShipState {
   return {
@@ -118,9 +118,10 @@ describe('weather ceiling (§T.98 storm presets excluded)', () => {
       const out = calmPreset(n, P);
       expect(PRESET_STORMINESS[out]).toBeLessThanOrEqual(P.maxStorminess);
       if (PRESET_STORMINESS[n] <= P.maxStorminess) expect(out).toBe(n);
-      else expect(out).toBe('swell');
+      else expect(out).toBe(P.defaultPreset);
     }
-    expect(calmPreset('not-a-preset', P)).toBe('swell');
+    expect(calmPreset('not-a-preset', P)).toBe(P.defaultPreset);
+    expect(P.defaultPreset).toBe('calm'); // user: calm is the raft's default sea
   });
 });
 

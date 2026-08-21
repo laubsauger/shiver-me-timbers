@@ -32,6 +32,7 @@ import { createRaftFrame } from './raft/raftFrame';
 import { pushOffRaft, stepRaftShip, placeRaftAtStart } from './raft/raftShip';
 import { applyDebugChannel, bindRaftActions, radio, raftBeach, raftControls } from './raft/raftActions';
 import { bootTimeOfDay, calmPreset, createDayClock } from './raft/raftWorld';
+import { raftWorldParams } from './params/raftWorld';
 import type { Object3D } from 'three/webgpu';
 
 /** compileAsync never rebuilds the frustum, so cull nothing during the walk (see main.ts) */
@@ -129,6 +130,7 @@ async function boot(): Promise<void> {
   const applyWorld = (s = settings.get()): void => applyWorldSettings(s.world);
   applyWorld();
   settings.subscribe(applyWorld);
+  applyWeather(new URLSearchParams(window.location.search).get('weather') ?? raftWorldParams.defaultPreset); // calm sea by default
   // the day clock owns the sun from here on; a settings change still re-seeds it
   const clock = createDayClock();
   clock.set(bootTimeOfDay(window.location.search));

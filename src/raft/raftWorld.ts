@@ -20,8 +20,6 @@ import {
 
 /** the hour the sleeping mat wakes you at */
 export const DAWN_HOUR = 6;
-/** what the entry sails in when a refused preset is asked for */
-export const RAFT_FALLBACK_PRESET: WeatherPresetName = 'swell';
 
 function fin(x: number, fallback: number): number {
   return Number.isFinite(x) ? x : fallback;
@@ -62,7 +60,7 @@ export function raftWeatherPresets(p: RaftWorldParams = raftWorldParams): Weathe
 export function calmPreset(name: string, p: RaftWorldParams = raftWorldParams): WeatherPresetName {
   const n = name as WeatherPresetName;
   const s = PRESET_STORMINESS[n];
-  if (s === undefined || s > p.maxStorminess) return RAFT_FALLBACK_PRESET;
+  if (s === undefined || s > p.maxStorminess) return p.defaultPreset;
   return n;
 }
 
