@@ -12,6 +12,9 @@
  *                      still rolls the darkened highlights off gracefully
  *     → renderOutput   ACES + working→sRGB  (PostProcessing.outputColorTransform
  *                      is false so this happens HERE, not implicitly last)
+ *     → grade          LGG + split tone + tod-blended 3D LUT, display space
+ *                      (src/core/grade, §V.89) — BYPASSED when off, not
+ *                      identity-sampled (§V.17)
  *     → vibrance       EXTRAPOLATING op — must see bounded 0..1 input
  *     → +dither        immediately before 8-bit quantisation
  *     → SMAA           LAST, on the finished display-referred image
@@ -63,9 +66,11 @@ import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
 import { smaa } from 'three/addons/tsl/display/SMAANode.js';
 import { postParams as pp } from '../params/post';
+import { gradeParams } from '../params/grade';
 import { skyParams } from '../params/sky';
 import { sunDirection as solarDirection } from '../sky/sunCycle';
 import { buildGodRays } from './postGodRays';
+import { createGradeNode, type GradeNode } from './grade';
 
 export interface PostOptions {
   /**
@@ -119,6 +124,8 @@ export interface PostPipeline {
    * environment match what the object will actually be drawn with.
    */
   warmObject(object: THREE.Object3D): Promise<void>;
+  /** the grade node when `gradeParams.enabled` built one — for `__game.grade` (gradeBake.ts) */
+  grade: GradeNode | null;
 }
 
 /** §V.28: no caller-fed uniform reaches a shader unguarded. */
@@ -170,6 +177,7 @@ export function createPostPipeline(
     ['vibranceEnabled', pp.vibranceEnabled, () => pp.vibranceEnabled],
     ['grainEnabled', pp.grainEnabled, () => pp.grainEnabled],
     ['smaaEnabled', pp.smaaEnabled, () => pp.smaaEnabled],
+    ['grade.enabled', gradeParams.enabled, () => gradeParams.enabled],
   ];
   const drifted = new Set<string>();
   const checkGateDrift = (): void => {
@@ -284,7 +292,13 @@ export function createPostPipeline(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let graded: any = renderOutput(vec4(hdr, 1)).rgb;
 
-  // --- grade (display space, bounded input) ------------------------------
+  // --- colour grade (§T.101, §V.89) ---------------------------------------
+  // Construction gate like every other stage: off = not in the graph. The
+  // node owns 2 LUT texture bindings and 11 uniforms; see grade.ts.
+  const grade: GradeNode | null = gradeParams.enabled ? createGradeNode(graded) : null;
+  if (grade !== null) graded = grade.node;
+
+  // --- vibrance (display space, bounded input) ----------------------------
   const uVibrance = uniform(0);
   if (pp.vibranceEnabled) graded = vibrance(graded, uVibrance);
 
@@ -345,6 +359,7 @@ export function createPostPipeline(
     // smoothstep a step function at the frame centre.
     uVigEnd.value = Math.max(finite(pp.vignetteEnd, 0.72), uVigStart.value + 1e-3);
     uGrain.value = pp.grainEnabled ? finite(pp.grainAmount, 0) : 0;
+    grade?.update();
   };
   updateFromParams();
 
@@ -367,6 +382,7 @@ export function createPostPipeline(
       post.render();
     },
     updateFromParams,
+    grade,
     async warmup(): Promise<void> {
       // Warms the scene materials against the PASS target, which is where they
       // are actually drawn when post is on. It warms NOTHING ELSE (§T.79):
