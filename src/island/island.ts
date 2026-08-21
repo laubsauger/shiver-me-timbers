@@ -255,6 +255,9 @@ export function createIsland(opts: CreateIslandOptions): Island {
     seed: opts.seed + COVER_SEED_OFFSET,
     heightmap,
     material: shared?.cover,
+    // §T.112e: bunchgrass + deadfall + cones on a granite island, the tropical
+    // grass/shrub pair on a pirate one — same material, same LOD gate
+    sierra: sierra ? heightmap : undefined,
   });
   const structures = createStructures({
     seed: opts.seed + STRUCTURE_SEED_OFFSET,
@@ -307,9 +310,13 @@ export function createIsland(opts: CreateIslandOptions): Island {
     update(frame): void {
       // shared shaders are driven once by the archipelago; pushing the same
       // uniforms five times a frame is pure waste
+      // §T.112e: the sun is pushed for SHARED islands too. It drives the
+      // foliage wrap + back-transmission terms, and the shared path (which
+      // islandMaterials.ts owns) never pushed a sun to the conifer material
+      // because until now nothing on a pine read one.
+      palms.setSunDirection(frame.sunDirection);
       if (!shared) {
         palms.update(frame.time, frame.windDir, frame.windStrength);
-        palms.setSunDirection(frame.sunDirection);
         // updateFromParams FIRST: it re-reads terrainParams.waterline (the
         // Tweakpane default), so the live sea level has to be pushed after it
         // or the panel value would win every frame

@@ -311,8 +311,6 @@ export interface SierraParams {
   // ── T112e vegetation (vegetation/sierraScatter.ts, terrain/groundCoverMesh.ts) ──
   /** candidate grid spacing (m): one blue-noise cell = one chance per species */
   vegSampleSpacing: number;
-  /** rounds of footprint competition, run once across all three species */
-  vegCompetitionRounds: number;
   /** curvature (1/m) at which the concave/convex species preference saturates */
   vegCurvatureRef: number;
   /** ramp width of every moisture threshold, in 0..1 channel units */
@@ -640,17 +638,16 @@ export const sierraParams: SierraParams = registerParams(
     bandStrength: 0.5,
 
     // ── T112e vegetation ──
-    vegSampleSpacing: 3,
-    vegCompetitionRounds: 3,
+    vegSampleSpacing: 2,
     vegCurvatureRef: 0.008,
     vegMoistureFeather: 0.2,
-    vegClumpBare: 0.4,
+    vegClumpBare: 0.6,
     // 3π/2: the aspect channel is atan2(z, x) of the DOWNHILL direction, so a
     // face looking at −z (the sun's side in this world) reads 4.712
     vegSunAspect: 4.712,
-    pineDensity: 0.06,
+    pineDensity: 0.8,
     pineMoistureMin: 0.2,
-    juniperDensity: 0.14,
+    juniperDensity: 1.2,
     juniperMoistureMax: 0.5,
     juniperWindWeight: 0.5,
     juniperFootprint: 1.1,
@@ -661,14 +658,14 @@ export const sierraParams: SierraParams = registerParams(
     juniperLimbs: 3,
     juniperLobeRadius: 0.5,
     juniperLobeSquash: 0.6,
-    manzanitaDensity: 0.16,
+    manzanitaDensity: 0.55,
     manzanitaMoistureMax: 0.45,
     manzanitaSkyExponent: 2,
     manzanitaAspectWeight: 0.5,
-    manzanitaSlopeLimit: 0.65, // tan 33° — the fork's own scramble cap
+    manzanitaSlopeLimit: 0.9, // tan 42° — chaparral holds ground no tree will
     manzanitaForkRange: 12,
-    manzanitaForkBoost: 0.6,
-    manzanitaFootprint: 0.5,
+    manzanitaForkBoost: 0.85,
+    manzanitaFootprint: 0.32,
     manzanitaHeight: 1.1,
     manzanitaSpread: 0.75,
     manzanitaStems: 4,
@@ -685,9 +682,9 @@ export const sierraParams: SierraParams = registerParams(
     foliageTransmissionColor: 0x93ad5c,
     understorySpacing: 2.5,
     understorySlopeLimit: 0.5,
-    understoryGrassDensity: 0.06,
-    understoryDeadfallDensity: 0.02,
-    understoryConeDensity: 0.05,
+    understoryGrassDensity: 0.15,
+    understoryDeadfallDensity: 0.035,
+    understoryConeDensity: 0.09,
     bunchgrassHeight: 0.45,
     deadfallLength: 2.2,
     deadfallRadius: 0.13,
@@ -895,14 +892,13 @@ export const sierraParams: SierraParams = registerParams(
 
     // ── T112e vegetation ──
     vegSampleSpacing: { min: 1, max: 8, step: 0.25 },
-    vegCompetitionRounds: { min: 0, max: 5, step: 1 },
     vegCurvatureRef: { min: 0.001, max: 0.05, step: 0.001 },
     vegMoistureFeather: { min: 0.02, max: 0.6, step: 0.01 },
     vegClumpBare: { min: 0, max: 0.9, step: 0.01 },
     vegSunAspect: { min: 0, max: 6.2832, step: 0.01 },
-    pineDensity: { min: 0, max: 0.3, step: 0.005 },
+    pineDensity: { min: 0, max: 2.5, step: 0.01 },
     pineMoistureMin: { min: 0, max: 1, step: 0.01 },
-    juniperDensity: { min: 0, max: 0.5, step: 0.005 },
+    juniperDensity: { min: 0, max: 4, step: 0.01 },
     juniperMoistureMax: { min: 0, max: 1, step: 0.01 },
     juniperWindWeight: { min: 0, max: 1, step: 0.01 },
     juniperFootprint: { min: 0.2, max: 5, step: 0.05 },
@@ -913,7 +909,7 @@ export const sierraParams: SierraParams = registerParams(
     juniperLimbs: { min: 1, max: 5, step: 1 },
     juniperLobeRadius: { min: 0.2, max: 1, step: 0.02 },
     juniperLobeSquash: { min: 0.2, max: 1.2, step: 0.02 },
-    manzanitaDensity: { min: 0, max: 0.6, step: 0.005 },
+    manzanitaDensity: { min: 0, max: 2.5, step: 0.01 },
     manzanitaMoistureMax: { min: 0, max: 1, step: 0.01 },
     manzanitaSkyExponent: { min: 0, max: 6, step: 0.1 },
     manzanitaAspectWeight: { min: 0, max: 1, step: 0.01 },

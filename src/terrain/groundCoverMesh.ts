@@ -55,7 +55,10 @@ import {
 } from 'three/tsl';
 import { createRng, type Rng } from '../state/rng';
 import { terrainParams } from '../params/terrain';
+import { sierraParams, type SierraParams } from '../params/sierra';
 import { fbm2Cpu } from './noiseCpu';
+import { sierraUnderstoryPlacements } from '../vegetation/sierraScatter';
+import type { IslandHeightmap } from '../island/heightmap';
 
 /** what a heightmap has to offer for cover to be placed on it */
 export interface CoverTerrain {
@@ -245,6 +248,135 @@ export function buildShrubGeometry(seed: number, p = terrainParams): THREE.Buffe
       p.shrubRadius * 0.8,
       Math.max(1, Math.floor(p.grassSegments)),
     );
+  }
+  return finish(b);
+}
+
+/* ----------------------------- the SIERRA set (§T.112e) ------------------
+ * Three layers that only exist on a granite island, all on the SAME material
+ * and the same instance contract as the tropical pair — a flooded-Sierra bench
+ * is bunchgrass, fallen limbs and cones, not tropical tufts and leaf domes.
+ *
+ * THEY RIDE THE DRY END OF THE SHARED PALETTE. `createCoverMeshMaterial`
+ * crosses from the greens to `coverDryColor` (a warm straw) above `tint` 0.72,
+ * so the sierra placements are emitted with tints in 0.74..1 and land on the
+ * straw without a second material, a second sampler, or a fork of the shader
+ * (§V17, §V40). The bleached-tan read is the RIGHT one for all three.
+ * ---------------------------------------------------------------------- */
+
+/** a fallen limb: a tapered log lying along +x, resting on the ground */
+function pushLog(b: Builder, length: number, radius: number, sides: number): void {
+  const first = b.positions.length / 3;
+  for (let j = 0; j <= 1; j++) {
+    const r = radius * (j === 0 ? 1 : 0.6);
+    for (let i = 0; i < sides; i++) {
+      const a = (i / sides) * Math.PI * 2;
+      const ny = Math.cos(a);
+      const nz = Math.sin(a);
+      b.positions.push(j * length, radius + ny * r, nz * r);
+      b.normals.push(0, ny, nz);
+      // 0.3..0.55: dark where it meets the ground (the contact cue), lit on
+      // top. It is also the sway weight, and a fallen limb must barely move —
+      // the material's amplitude is weight², so 0.55 is a few centimetres.
+      b.weights.push(0.3 + 0.25 * (ny * 0.5 + 0.5));
+    }
+  }
+  for (let i = 0; i < sides; i++) {
+    const n = (i + 1) % sides;
+    b.indices.push(first + i, first + sides + i, first + n, first + n, first + sides + i, first + sides + n);
+  }
+  // the broken end, so the limb has a face rather than a hole
+  const cap = b.positions.length / 3;
+  b.positions.push(length, radius, 0);
+  b.normals.push(1, 0, 0);
+  b.weights.push(0.5);
+  for (let i = 0; i < sides; i++) {
+    b.indices.push(first + sides + i, cap, first + sides + ((i + 1) % sides));
+  }
+}
+
+/** a pine cone: a squat cone standing on its base */
+function pushCone(b: Builder, height: number, radius: number, sides: number): void {
+  const first = b.positions.length / 3;
+  for (let i = 0; i < sides; i++) {
+    const a = (i / sides) * Math.PI * 2;
+    b.positions.push(Math.cos(a) * radius, 0, Math.sin(a) * radius);
+    b.normals.push(Math.cos(a) * 0.7, 0.7, Math.sin(a) * 0.7);
+    b.weights.push(0.15);
+  }
+  const apex = b.positions.length / 3;
+  b.positions.push(0, height, 0);
+  b.normals.push(0, 1, 0);
+  b.weights.push(0.5);
+  for (let i = 0; i < sides; i++) b.indices.push(first + i, apex, first + ((i + 1) % sides));
+}
+
+/** A bunchgrass tussock: the same blades, taller, stiffer and drier than a tropical tuft. */
+export function buildBunchgrassGeometry(
+  seed: number,
+  p: SierraParams = sierraParams,
+  t = terrainParams,
+): THREE.BufferGeometry {
+  const rng = createRng(seed);
+  const b = newBuilder();
+  const blades = Math.max(1, Math.floor(t.grassBlades));
+  for (let i = 0; i < blades; i++) {
+    const yaw = i * 2.39996 + rng() * 0.9;
+    pushBlade(
+      b,
+      rng,
+      yaw,
+      p.bunchgrassHeight * (0.7 + rng() * 0.7),
+      t.grassWidth * (0.6 + rng() * 0.4),
+      // a tussock stands up: a third of the tropical bend
+      t.grassBend * (0.2 + rng() * 0.35),
+      Math.max(1, Math.floor(t.grassSegments)),
+    );
+  }
+  return finish(b);
+}
+
+/** Two fallen limbs crossed at the root end — deadfall under the pines. */
+export function buildDeadfallGeometry(seed: number, p: SierraParams = sierraParams): THREE.BufferGeometry {
+  const rng = createRng(seed);
+  const b = newBuilder();
+  pushLog(b, p.deadfallLength * (0.8 + rng() * 0.5), p.deadfallRadius * (0.85 + rng() * 0.3), 4);
+  // a second, thinner limb across it: one log reads as a placed prop, two read
+  // as something that fell
+  const a = 1.1 + rng() * 0.9;
+  const first = b.positions.length / 3;
+  pushLog(b, p.deadfallLength * (0.4 + rng() * 0.3), p.deadfallRadius * 0.55, 3);
+  const ca = Math.cos(a);
+  const sa = Math.sin(a);
+  for (let i = first; i < b.positions.length / 3; i++) {
+    const x = b.positions[i * 3];
+    const z = b.positions[i * 3 + 2];
+    b.positions[i * 3] = x * ca - z * sa;
+    b.positions[i * 3 + 2] = x * sa + z * ca;
+    const nx = b.normals[i * 3];
+    const nz = b.normals[i * 3 + 2];
+    b.normals[i * 3] = nx * ca - nz * sa;
+    b.normals[i * 3 + 2] = nx * sa + nz * ca;
+  }
+  return finish(b);
+}
+
+/** A scatter of three cones — one instance is a small drift, not a single cone. */
+export function buildConeGeometry(seed: number, p: SierraParams = sierraParams): THREE.BufferGeometry {
+  const rng = createRng(seed);
+  const b = newBuilder();
+  for (let i = 0; i < 3; i++) {
+    const first = b.positions.length / 3;
+    const h = p.coneHeight * (0.8 + rng() * 0.5);
+    pushCone(b, h, h * 0.42, 5);
+    const a = i * 2.39996 + rng();
+    const off = i === 0 ? 0 : p.coneHeight * (1.2 + rng() * 1.6);
+    const ox = Math.cos(a) * off;
+    const oz = Math.sin(a) * off;
+    for (let v = first; v < b.positions.length / 3; v++) {
+      b.positions[v * 3] += ox;
+      b.positions[v * 3 + 2] += oz;
+    }
   }
   return finish(b);
 }
@@ -464,6 +596,13 @@ export interface CreateGroundCoverOptions {
   heightmap: CoverTerrain;
   /** shared material (islandMaterials.ts); omit and this builds its own */
   material?: CoverMeshMaterial;
+  /**
+   * §T.112e: build the SIERRA understory set (bunchgrass on the moist flats,
+   * deadfall and cones keyed to the pine-density field) instead of the
+   * tropical grass/shrub pair. Pass the island's own heightmap — the density
+   * maps read its terrain-info bake and its route masks.
+   */
+  sierra?: IslandHeightmap;
 }
 
 export interface GroundCoverMeshes {
@@ -521,12 +660,59 @@ function buildBatch(
 }
 
 /**
- * Build one island's ground cover: two instanced batches, LOD-gated together.
+ * The sierra understory (§T.112e): THREE batches instead of two, on the same
+ * material, LOD-gated as one unit exactly like the tropical pair. The extra
+ * draw over the tropical set buys the layer §V94 names as "micro (ground
+ * cover, litter)" — and it is the only place the pine canopy leaves a mark on
+ * the ground, since T112d's litter is a shading layer this file cannot reach.
+ */
+function createSierraCover(
+  opts: CreateGroundCoverOptions,
+  hm: IslandHeightmap,
+  material: THREE.Material,
+  own: CoverMeshMaterial | null,
+): GroundCoverMeshes {
+  const sp = sierraParams;
+  const grassGeo = buildBunchgrassGeometry(opts.seed, sp);
+  const deadfallGeo = buildDeadfallGeometry(opts.seed + 5501, sp);
+  const coneGeo = buildConeGeometry(opts.seed + 7717, sp);
+  const pl = sierraUnderstoryPlacements(opts.seed, hm, sp);
+
+  const group = new THREE.Group();
+  group.name = 'island-ground-cover';
+  const batches = [
+    buildBatch('island-bunchgrass', grassGeo, material, pl.bunchgrass),
+    buildBatch('island-deadfall', deadfallGeo, material, pl.deadfall),
+    buildBatch('island-cones', coneGeo, material, pl.cones),
+  ];
+  for (const batch of batches) if (batch) group.add(batch);
+
+  return {
+    group,
+    instanceCount: pl.bunchgrass.length + pl.deadfall.length + pl.cones.length,
+    setLodDistance(cameraDistance: number): void {
+      group.visible = cameraDistance <= terrainParams.coverCullDistance;
+    },
+    dispose(): void {
+      grassGeo.dispose();
+      deadfallGeo.dispose();
+      coneGeo.dispose();
+      for (const batch of batches) batch?.dispose();
+      own?.dispose();
+    },
+  };
+}
+
+/**
+ * Build one island's ground cover: two instanced batches, LOD-gated together
+ * (three on a sierra island — see `createSierraCover`).
  */
 export function createGroundCover(opts: CreateGroundCoverOptions): GroundCoverMeshes {
   const p = terrainParams;
   const own = opts.material ? null : createCoverMeshMaterial();
   const material = (opts.material ?? own!).material;
+
+  if (opts.sierra) return createSierraCover(opts, opts.sierra, material, own);
 
   const grassGeo = buildGrassGeometry(opts.seed, p);
   const shrubGeo = buildShrubGeometry(opts.seed + 5501, p);

@@ -1,7 +1,9 @@
 /**
- * Low-poly conifer geometry (§T.99) — Jeffrey pine / juniper / dead snag.
- * Deterministic per seed (§V2-adjacent: createRng only). Geometry only: no
- * materials, no renderer — safe in node tests.
+ * Low-poly conifer geometry (§T.99) — Jeffrey pine / juniper / dead snag, plus
+ * the SHARED low-poly builder every sierra plant is assembled from
+ * (juniperGeometry.ts, manzanitaGeometry.ts, §T.112e). Deterministic per seed
+ * (§V2-adjacent: createRng only). Geometry only: no materials, no renderer —
+ * safe in node tests.
  *
  * One tree = a tapered 6-sided trunk + 3–4 stacked cone tiers (pine), two wide
  * low tiers on a stub (juniper), or a bare trunk with a few drooping branch
@@ -13,14 +15,33 @@
  * Bakes the attributes the wind shader (windSway.ts) contractually reads:
  *   windWeight  — 0 at the trunk base → ~1 at the top tier (sway ∝ weight²)
  *   phaseOffset — per tier / per branch so the crown does not move as one
- *   role        — 0 trunk, 1 pine needles, 2 dead wood, 3 juniper needles
- *                 (pineScatter.ts's material tints by role)
+ *   role        — 0 trunk, 1 pine needles, 2 dead wood, 3 juniper needles,
+ *                 4 manzanita leaf, 5 manzanita stem (pineScatter.ts's
+ *                 material tints by role)
+ *
+ * CLUSTER NORMALS ARE BAKED HERE, NOT SHADED (§T.112e, research §2 foliage).
+ * A cone tier lit by its own facet normals reads as a cone — the giveaway that
+ * makes low-poly foliage look like folded card. Production foliage blends the
+ * surface normal toward the normal of the CANOPY VOLUME the leaf belongs to,
+ * so a clump lights as one soft mass. That blend depends on nothing but the
+ * mesh, so it is a bake: `markCluster` records which canopy sphere each vertex
+ * belongs to and `finishGeometry` writes the blended normal into the `normal`
+ * attribute. Zero shader cost, and it is a pure function the CPU tests can
+ * read (see foliage.ts / tests/sierraVegetation.test.ts).
  */
 import * as THREE from 'three/webgpu';
 import { createRng, type Rng } from '../state/rng';
 import { sierraParams, type SierraParams } from '../params/sierra';
+import { applyClusterNormals } from './foliage';
 
-export const PINE_ROLE = { trunk: 0, needles: 1, deadWood: 2, juniper: 3 } as const;
+export const PINE_ROLE = {
+  trunk: 0,
+  needles: 1,
+  deadWood: 2,
+  juniper: 3,
+  manzanitaLeaf: 4,
+  manzanitaStem: 5,
+} as const;
 export type PineVariant = 'pine' | 'juniper' | 'dead';
 
 const TRUNK_SIDES = 6;
@@ -28,18 +49,33 @@ const TRUNK_RINGS = 3;
 const TIER_SIDES = 8;
 const BRANCH_SIDES = 3;
 
-const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
+export const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
 
-interface GeoBuilder {
+export interface GeoBuilder {
   positions: number[];
   uvs: number[];
   windWeights: number[];
   phases: number[];
   roles: number[];
+  /** canopy-sphere centre this vertex belongs to (3 per vertex) */
+  centers: number[];
+  /** 0 = wood (keep the facet normal), 1 = foliage (blend to the canopy) */
+  clusterW: number[];
   indices: number[];
 }
 
-function pushVert(
+export const newGeoBuilder = (): GeoBuilder => ({
+  positions: [],
+  uvs: [],
+  windWeights: [],
+  phases: [],
+  roles: [],
+  centers: [],
+  clusterW: [],
+  indices: [],
+});
+
+export function pushVert(
   b: GeoBuilder,
   x: number, y: number, z: number,
   u: number, v: number,
@@ -50,11 +86,31 @@ function pushVert(
   b.windWeights.push(wind);
   b.phases.push(phase);
   b.roles.push(role);
+  b.centers.push(0, 0, 0);
+  b.clusterW.push(0);
   return b.positions.length / 3 - 1;
 }
 
-/** a tapered tube along +y from y0 to y1, optionally capped at the top */
-function pushTube(
+/**
+ * Tag vertices [first, end) as belonging to one canopy sphere centred at
+ * (cx, cy, cz). `weight` 1 = full cluster normal, 0 = leave the facet normal.
+ */
+export function markCluster(
+  b: GeoBuilder,
+  first: number,
+  cx: number, cy: number, cz: number,
+  weight = 1,
+): void {
+  for (let i = first; i < b.positions.length / 3; i++) {
+    b.centers[i * 3] = cx;
+    b.centers[i * 3 + 1] = cy;
+    b.centers[i * 3 + 2] = cz;
+    b.clusterW[i] = weight;
+  }
+}
+
+/** a tapered tube along +y from y0 to y1, capped at the top */
+export function pushTube(
   b: GeoBuilder,
   x: number, z: number,
   y0: number, y1: number,
@@ -115,8 +171,71 @@ function pushTier(
 }
 
 /**
+ * A squashed leaf lobe — the broad, rounded mass a juniper or a manzanita is
+ * made of. Top half only (the underside is never seen and doubles the count).
+ */
+export function pushLobe(
+  b: GeoBuilder,
+  cx: number, cy: number, cz: number,
+  radius: number, squash: number,
+  rings: number, segments: number,
+  height: number, role: number, phase: number, wind: number,
+): void {
+  const first = b.positions.length / 3;
+  const inv = 1 / Math.max(height, 1e-3); // §V28
+  // ONE apex vertex, then `rings` latitude rings. A full lat-0 ring would be
+  // `segments` coincident vertices and `segments` zero-area triangles, which
+  // is a quarter of a lobe's whole budget spent on nothing.
+  const apex = pushVert(b, cx, cy + radius * squash, cz, 0.5, (cy + radius * squash) * inv, wind, phase, role);
+  const ringStart = first + 1;
+  for (let r = 1; r <= rings; r++) {
+    const lat = (r / rings) * Math.PI * 0.5;
+    const sy = Math.cos(lat);
+    const sr = Math.sin(lat);
+    for (let c = 0; c < segments; c++) {
+      const lon = (c / segments) * Math.PI * 2;
+      const vy = cy + sy * radius * squash;
+      pushVert(b, cx + Math.cos(lon) * sr * radius, vy, cz + Math.sin(lon) * sr * radius, c / segments, vy * inv, wind, phase, role);
+    }
+  }
+  for (let c = 0; c < segments; c++) {
+    b.indices.push(ringStart + c, apex, ringStart + ((c + 1) % segments));
+  }
+  for (let r = 0; r < rings - 1; r++) {
+    for (let c = 0; c < segments; c++) {
+      const n = (c + 1) % segments;
+      const a = ringStart + r * segments + c;
+      const bb = ringStart + r * segments + n;
+      const cc = a + segments;
+      const d = bb + segments;
+      b.indices.push(a, cc, bb, bb, cc, d);
+    }
+  }
+  // the lobe IS a canopy sphere: this is exactly the cluster normals blend to
+  markCluster(b, first, cx, cy, cz, 1);
+}
+
+/**
+ * Close the builder into a geometry: position/uv/windWeight/phaseOffset/role,
+ * computed facet normals, then the CLUSTER-NORMAL bake on top of them.
+ */
+export function finishGeometry(b: GeoBuilder, clusterBlend: number): THREE.BufferGeometry {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(b.positions), 3));
+  geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(b.uvs), 2));
+  geometry.setAttribute('windWeight', new THREE.BufferAttribute(new Float32Array(b.windWeights), 1));
+  geometry.setAttribute('phaseOffset', new THREE.BufferAttribute(new Float32Array(b.phases), 1));
+  geometry.setAttribute('role', new THREE.BufferAttribute(new Float32Array(b.roles), 1));
+  geometry.setIndex(b.indices);
+  geometry.computeVertexNormals();
+  applyClusterNormals(geometry, Float32Array.from(b.centers), Float32Array.from(b.clusterW), clusterBlend);
+  return geometry;
+}
+
+/**
  * Build one tree. Same (seed, variant, params) → byte-identical buffers.
- * Attributes: position, normal (computed), uv, windWeight, phaseOffset, role.
+ * Attributes: position, normal (facet + cluster blend), uv, windWeight,
+ * phaseOffset, role.
  */
 export function buildPineGeometry(
   seed: number,
@@ -124,7 +243,7 @@ export function buildPineGeometry(
   p: SierraParams = sierraParams,
 ): THREE.BufferGeometry {
   const rng: Rng = createRng(seed);
-  const b: GeoBuilder = { positions: [], uvs: [], windWeights: [], phases: [], roles: [], indices: [] };
+  const b = newGeoBuilder();
 
   if (variant === 'dead') {
     const h = p.deadPineHeight * lerp(0.85, 1.15, rng());
@@ -167,6 +286,10 @@ export function buildPineGeometry(
     const role = juniper ? PINE_ROLE.juniper : PINE_ROLE.needles;
     const spread = juniper ? p.pineTierSpread * 2.6 : p.pineTierSpread;
     const span = h - crownBase;
+    // ONE canopy sphere for the whole crown, not one per tier: the tiers are a
+    // construction, and the thing the light should see is a single soft cone
+    // of needles. Its centre sits at the crown's midpoint.
+    const crownFirst = b.positions.length / 3;
     for (let i = 0; i < tiers; i++) {
       const t = i / tiers;
       const y = crownBase + span * t;
@@ -177,15 +300,8 @@ export function buildPineGeometry(
       const wind = Math.min(1, 0.35 + 0.65 * Math.pow((y + coneHeight) / h, 1.5));
       pushTier(b, y, radius, coneHeight, h, role, rng() * Math.PI * 2, wind);
     }
+    markCluster(b, crownFirst, 0, crownBase + span * 0.5, 0, 1);
   }
 
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(b.positions), 3));
-  geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(b.uvs), 2));
-  geometry.setAttribute('windWeight', new THREE.BufferAttribute(new Float32Array(b.windWeights), 1));
-  geometry.setAttribute('phaseOffset', new THREE.BufferAttribute(new Float32Array(b.phases), 1));
-  geometry.setAttribute('role', new THREE.BufferAttribute(new Float32Array(b.roles), 1));
-  geometry.setIndex(b.indices);
-  geometry.computeVertexNormals();
-  return geometry;
+  return finishGeometry(b, p.foliageClusterBlend);
 }

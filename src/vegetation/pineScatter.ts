@@ -1,21 +1,28 @@
 /**
- * Sierra vegetation (§T.99): pines and junipers on the benches, dead pines
- * standing in the water on a drowned ridge's treeline. Reuses the palm stack
- * wholesale — `scatterPalms` for the instance buffers, `applyWindSway` for the
- * motion, the same `IslandPalms` contract so island.ts swaps one for the
- * other by archetype family and nothing downstream notices.
+ * Sierra vegetation (§T.99, §T.112a, §T.112e): the ONE conifer-family material
+ * and the assembly of every plant batch on a sierra island — pines, junipers,
+ * manzanita, and the dead snags standing in the water on a drowned ridge's
+ * treeline. Reuses the palm stack wholesale — `scatterPalms` for the instance
+ * buffers, `applyWindSway` for the motion (§V95: there is ONE wind system),
+ * the same `IslandPalms` contract so island.ts swaps one for the other by
+ * archetype family and nothing downstream notices.
  *
- * Placement rules (pinned by tests/sierra.test.ts):
- * - live trees on BENCHES: |∇h| ≤ `pineSlopeLimit` (tan 25°) and height above
- *   `pineMinHeight` (the DG-sand band is bare)
- * - in STANDS, like the palms' groves (§V43 — a Poisson scatter is the most
- *   obvious generated tell): seeded stand centres inland, triangular jitter,
- *   fewer on south-facing benches, then FOOTPRINT COMPETITION (§T.112a):
- *   the smaller of any two overlapping crowns dies, two rounds
+ * WHERE THE PLANTS COME FROM (§T.112e). The candidate set is
+ * `sierraCandidates` in sierraScatter.ts — three ecological density maps read
+ * off T112d's terrain-info channels, sampled on a jittered grid. This file
+ * owns the second half: FOOTPRINT COMPETITION, which is what turns a density
+ * sample into a stand that looks grown, and the batching.
+ *
+ * Placement rules (pinned by tests/sierraVegetation.test.ts + tests/sierra.ts):
+ * - pines in the moist concave hollows, junipers on the bare windward convex
+ *   knobs, manzanita on sunny bare gravel and thick along the distraction fork
+ * - NOTHING inside the route or fork corridor masks (T112b) — the walk stays
+ *   walkable and there is no foliage collision
  * - dead pines exactly at the heightmap's `sierra.treeline` markers, feet on
  *   the seabed, so the trunk stands in water and the top clears it
- * The count scales with the bench area actually available, so an island with
- * little level ground gets a thin stand rather than a placement that throws.
+ * The counts scale with the HABITAT AREA the island actually offers, so an
+ * island with little level ground gets a thin stand rather than a placement
+ * that throws.
  */
 import * as THREE from 'three/webgpu';
 import { attribute, float, mix, step, uniform, uv } from 'three/tsl';
@@ -28,13 +35,23 @@ import { palmLodCount, type IslandPalms } from '../island/palms';
 import { scatterPalms, type PlacementFn } from './scatter';
 import { applyWindSway, type WindSway } from './windSway';
 import { buildPineGeometry } from './pineGeometry';
+import { buildJuniperGeometry } from './juniperGeometry';
+import { buildManzanitaGeometry } from './manzanitaGeometry';
+import {
+  createFoliageLightUniforms,
+  foliageEmissive,
+  updateFoliageLightUniforms,
+  type FoliageLightUniforms,
+} from './foliage';
+import { sierraCandidates, type SierraPlant } from './sierraScatter';
 
-/** re-rolls per tree before giving up — algorithm bound, not a look tunable */
+/** re-rolls per point before giving up — algorithm bound, not a look tunable */
 const PLACEMENT_ATTEMPTS = 96;
 /** bench-area probe resolution */
 const BENCH_PROBES = 48;
 const JUNIPER_SEED_OFFSET = 577;
 const DEAD_SEED_OFFSET = 1153;
+const MANZANITA_SEED_OFFSET = 2311;
 
 // ── material ──────────────────────────────────────────────────────────────
 
@@ -48,27 +65,49 @@ export function createPineMaterial(p: SierraParams = sierraParams) {
   const uNeedleLight = uniform(new THREE.Color(p.needleLightColor));
   const uJuniper = uniform(new THREE.Color(p.juniperNeedleColor));
   const uDead = uniform(new THREE.Color(p.deadWoodColor));
+  const uManzanitaLeaf = uniform(new THREE.Color(p.manzanitaLeafColor));
+  const uManzanitaStem = uniform(new THREE.Color(p.manzanitaStemColor));
+  const foliage: FoliageLightUniforms = createFoliageLightUniforms(p);
 
-  // role masks: 0 trunk, 1 needles, 2 dead wood, 3 juniper (pineGeometry.ts)
+  // role masks: 0 trunk, 1 needles, 2 dead wood, 3 juniper, 4 manzanita leaf,
+  // 5 manzanita stem (pineGeometry.ts)
   const role = attribute('role', 'float');
-  // @band-limited-elsewhere: `role` is a per-vertex integer tag (0..3), constant across each
+  // @band-limited-elsewhere: `role` is a per-vertex integer tag (0..5), constant across each
   // primitive — these steps select a vertex class, they are not edges in space
-  const needleMask = step(float(0.5), role).mul(step(float(1.5), role).oneMinus()); // @band-limited-elsewhere: vertex class tag
-  const deadMask = step(float(1.5), role).mul(step(float(2.5), role).oneMinus()); // @band-limited-elsewhere: vertex class tag
-  const juniperMask = step(float(2.5), role); // @band-limited-elsewhere: vertex class tag
-  const trunkMask = step(float(0.5), role).oneMinus(); // @band-limited-elsewhere: vertex class tag
+  const atLeast = (v: number) => step(float(v), role); // @band-limited-elsewhere: vertex class tag
+  const trunkMask = atLeast(0.5).oneMinus();
+  const needleMask = atLeast(0.5).mul(atLeast(1.5).oneMinus());
+  const deadMask = atLeast(1.5).mul(atLeast(2.5).oneMinus());
+  const juniperMask = atLeast(2.5).mul(atLeast(3.5).oneMinus());
+  const manzLeafMask = atLeast(3.5).mul(atLeast(4.5).oneMinus());
+  const manzStemMask = atLeast(4.5);
 
   // needles: darker low on the tree, lit toward the top tier — a flat band
   // per tier reads as cut-out; the ramp is what makes a cone read as foliage
   const needle = mix(uNeedleDark, uNeedleLight, uv().y);
-  material.colorNode = uBark
+  const juniperLeaf = mix(uJuniper, uNeedleLight, uv().y.mul(0.5));
+  const manzLeaf = mix(uManzanitaLeaf, uNeedleLight, uv().y.mul(0.35));
+  const albedo = uBark
     .mul(trunkMask)
     .add(needle.mul(needleMask))
     .add(uDead.mul(deadMask))
-    .add(mix(uJuniper, uNeedleLight, uv().y.mul(0.5)).mul(juniperMask));
+    .add(juniperLeaf.mul(juniperMask))
+    .add(manzLeaf.mul(manzLeafMask))
+    .add(uManzanitaStem.mul(manzStemMask));
+  material.colorNode = albedo;
+
+  // §T.112e: wrap + back transmission on the LEAF roles only. Wood is opaque,
+  // and a glowing trunk is the tell that someone masked this wrong.
+  const leafMask = needleMask.add(juniperMask).add(manzLeafMask);
+  material.emissiveNode = foliageEmissive(foliage, albedo, leafMask);
 
   return {
     material,
+    foliage,
+    /** world-space direction TO the sun — drives wrap + back transmission */
+    setSunDirection(v: THREE.Vector3): void {
+      (foliage.sunDirection.value as THREE.Vector3).copy(v).normalize();
+    },
     /** re-read live-tweakable params (Tweakpane mutates them in place) */
     refresh(): void {
       uBark.value.set(p.pineBarkColor);
@@ -76,6 +115,9 @@ export function createPineMaterial(p: SierraParams = sierraParams) {
       uNeedleLight.value.set(p.needleLightColor);
       uJuniper.value.set(p.juniperNeedleColor);
       uDead.value.set(p.deadWoodColor);
+      uManzanitaLeaf.value.set(p.manzanitaLeafColor);
+      uManzanitaStem.value.set(p.manzanitaStemColor);
+      updateFoliageLightUniforms(foliage, p);
     },
   };
 }
@@ -104,7 +146,7 @@ function pineSwayParams(p: SierraParams, v: VegetationParams): VegetationParams 
   };
 }
 
-/** one shader for every conifer in the world (§V17) */
+/** one shader for every conifer and shrub in the world (§V17) */
 export function createPineMaterialSet(p: SierraParams = sierraParams): PineMaterialSet {
   const pine = createPineMaterial(p);
   const sway = applyWindSway(pine.material, {
@@ -123,8 +165,9 @@ function isBench(hm: IslandHeightmap, x: number, z: number, p: SierraParams): bo
 }
 
 /**
- * Fraction of the footprint that is bench (level, above the sand band).
- * Drives the count so a steep island thins its stand instead of throwing.
+ * Fraction of the footprint that is bench (level, above the sand band). The
+ * coarse habitat measure the panel and the T112a tests read; the species maps
+ * (sierraScatter.ts) are the fine one.
  */
 export function benchFraction(hm: IslandHeightmap, p: SierraParams = sierraParams): number {
   let hits = 0;
@@ -139,48 +182,13 @@ export function benchFraction(hm: IslandHeightmap, p: SierraParams = sierraParam
   return hits / (BENCH_PROBES * BENCH_PROBES);
 }
 
-/** live trees for this island: linear in radius (like the palms), scaled by bench area */
+/** the nominal stand size the panel authors: linear in radius, scaled by bench area */
 export function sierraPineCount(hm: IslandHeightmap, p: SierraParams = sierraParams): number {
   const nominal = hm.worldRadius * p.pinesPerRadius;
   // a footprint at the reference bench fraction carries the nominal stand;
   // less, proportionally fewer
   const area = Math.min(benchFraction(hm, p) / Math.max(p.pineBenchReference, 1e-3), 1);
   return Math.max(0, Math.round(nominal * area));
-}
-
-/** seeded stand centres: inland points on benches, each jittered around */
-export function pineStandCentres(hm: IslandHeightmap, seed: number, p: SierraParams = sierraParams): [number, number][] {
-  const rng = createRng(seed);
-  const out: [number, number][] = [];
-  const count = Math.max(1, Math.floor(p.pineStandCount));
-  for (let i = 0; i < count; i++) {
-    let placed = false;
-    for (let attempt = 0; attempt < PLACEMENT_ATTEMPTS && !placed; attempt++) {
-      const a = rng() * Math.PI * 2;
-      const r = Math.sqrt(rng()) * hm.worldRadius * 0.8;
-      const x = Math.cos(a) * r;
-      const z = Math.sin(a) * r;
-      if (!isBench(hm, x, z, p)) continue;
-      out.push([x, z]);
-      placed = true;
-    }
-  }
-  // no bench anywhere: the stand centre is the island centre and the
-  // placement below will find whatever it can
-  if (out.length === 0) out.push([0, 0]);
-  return out;
-}
-
-/** aspect of the slope at a point: +1 facing −z ("south", sun-baked), −1 facing +z */
-function southness(hm: IslandHeightmap, x: number, z: number): number {
-  const eps = (2 * hm.worldRadius) / (hm.size - 1);
-  const dhdx = (hm.heightAt(x + eps, z) - hm.heightAt(x - eps, z)) / (2 * eps);
-  const dhdz = (hm.heightAt(x, z + eps) - hm.heightAt(x, z - eps)) / (2 * eps);
-  const g = Math.hypot(dhdx, dhdz);
-  // flat ground has no aspect: weight the term by how steep it is (tan 5° → full)
-  const steep = Math.min(g / 0.0875, 1);
-  // the slope FACES downhill = −∇h; facing −z is dhdz > 0
-  return g > 1e-6 ? (dhdz / g) * steep : 0;
 }
 
 export interface PineCandidate {
@@ -193,71 +201,41 @@ export interface PineCandidate {
   juniper: boolean;
 }
 
+/** the minimum any competitor has to expose: where it is and how wide it is */
+export interface FootprintCandidate {
+  x: number;
+  z: number;
+  scale: number;
+  footprint: number;
+}
+
 export interface PinePlan {
   pines: PineCandidate[];
   junipers: PineCandidate[];
-  /** how many candidates the stands produced before competition */
+  /** how many candidates the density maps produced before competition */
   candidates: number;
 }
 
-/** seed offset for the candidate stream — distinct from the scatter's own */
-const CANDIDATE_SEED_OFFSET = 911;
-
 /**
- * Generate the stand candidates: a stand, a jitter, the bench rules, then the
- * ASPECT rule (§T.112a): a south-facing bench is sun-baked and carries fewer
- * trees than a north-facing one — `pineSouthAspectFactor` is the acceptance
- * on a full south face, 1 on a north face. Deterministic over (hm, seed).
+ * FOOTPRINT COMPETITION (§T.112a, extended to every species in §T.112e,
+ * research §2 vegetation): of any two crowns that overlap, the smaller dies.
+ * Each round grows the crowns by `pineFootprintGrowth` and re-runs, so
+ * survivors end up spaced by their own size and the stand reads as a grown
+ * thing rather than a jitter. Removals in a round are decided against the set
+ * that ENTERED the round, in index order, so the result is independent of
+ * iteration tricks (deterministic).
+ *
+ * GENERIC over the candidate type, and it compares FOOTPRINT rather than
+ * `scale`: T112e runs one competition across all three species at once, and
+ * `scale` is per-species (a manzanita at scale 1.2 is a 0.6 m bush, a pine at
+ * scale 0.9 is a 12 m tree). Crown radius is the only currency the three have
+ * in common, and it is what "the smaller of two overlapping crowns" means.
  */
-export function pineCandidates(
-  hm: IslandHeightmap,
-  seed: number,
-  count: number,
-  p: SierraParams = sierraParams,
-  v: VegetationParams = vegetationParams,
-): PineCandidate[] {
-  const stands = pineStandCentres(hm, seed, p);
-  const rng = createRng(seed + CANDIDATE_SEED_OFFSET);
-  const out: PineCandidate[] = [];
-  for (let i = 0; i < count; i++) {
-    for (let attempt = 0; attempt < PLACEMENT_ATTEMPTS; attempt++) {
-      const [sx, sz] = stands[Math.floor(rng() * stands.length) % stands.length];
-      // triangular jitter packs the stand toward its centre
-      const x = sx + (rng() + rng() - 1) * p.pineStandSpread;
-      const z = sz + (rng() + rng() - 1) * p.pineStandSpread;
-      if (Math.hypot(x, z) > hm.worldRadius) continue;
-      if (!isBench(hm, x, z, p)) continue;
-      const south = Math.max(0, southness(hm, x, z));
-      const accept = 1 - south * (1 - Math.min(Math.max(p.pineSouthAspectFactor, 0), 1));
-      if (rng() > accept) continue;
-      const scale = v.scaleMin + (v.scaleMax - v.scaleMin) * rng();
-      out.push({
-        x,
-        z,
-        y: hm.heightAt(x, z),
-        scale,
-        footprint: p.pineFootprint * scale,
-        juniper: rng() < p.juniperFraction,
-      });
-      break;
-    }
-  }
-  return out;
-}
-
-/**
- * FOOTPRINT COMPETITION (§T.112a, research §2 vegetation): of any two crowns
- * that overlap, the smaller dies. Each round grows the crowns by
- * `pineFootprintGrowth` and re-runs, so survivors end up spaced by their own
- * size and the stand reads as a grown thing rather than a jitter. Removals
- * in a round are decided against the set that ENTERED the round, in index
- * order, so the result is independent of iteration tricks (deterministic).
- */
-export function competeFootprints(
-  candidates: readonly PineCandidate[],
+export function competeFootprints<T extends FootprintCandidate>(
+  candidates: readonly T[],
   rounds: number,
   growth: number,
-): PineCandidate[] {
+): T[] {
   let alive = candidates.map((_, i) => i);
   for (let r = 0; r < Math.max(0, Math.floor(rounds)); r++) {
     const k = 1 + r * growth;
@@ -272,8 +250,8 @@ export function competeFootprints(
         const dx = ci.x - cj.x;
         const dz = ci.z - cj.z;
         if (dx * dx + dz * dz >= reach * reach) continue;
-        // the smaller dies; equal size → the later one (stable)
-        dead.add(ci.scale < cj.scale ? i : cj.scale < ci.scale ? j : j);
+        // the smaller crown dies; equal size → the later one (stable)
+        dead.add(ci.footprint < cj.footprint ? i : cj.footprint < ci.footprint ? j : j);
       }
     }
     alive = alive.filter((i) => !dead.has(i));
@@ -281,19 +259,66 @@ export function competeFootprints(
   return alive.map((i) => candidates[i]);
 }
 
-/** the whole stand for an island: candidates → competition → species split */
+export interface SierraVegetationPlan {
+  pines: SierraPlant[];
+  junipers: SierraPlant[];
+  manzanita: SierraPlant[];
+  /** every survivor, in one list — the overlap and hash tests read this */
+  all: SierraPlant[];
+  /** how many the density maps produced before competition */
+  candidates: number;
+  bakeMs: number;
+}
+
+/**
+ * The whole island's living layer: density maps → candidates → ONE competition
+ * across all three species → the species split. One competition, not three: a
+ * manzanita growing inside a pine's crown is the thing competition exists to
+ * remove, and three separate passes would each be blind to the other two.
+ */
+export function planSierraVegetation(
+  hm: IslandHeightmap,
+  seed: number,
+  p: SierraParams = sierraParams,
+  v: VegetationParams = vegetationParams,
+): SierraVegetationPlan {
+  const t0 = performance.now();
+  const candidates = sierraCandidates(hm, seed, p, v);
+  const survivors = competeFootprints(candidates, p.pineCompetitionRounds, p.pineFootprintGrowth);
+  return {
+    pines: survivors.filter((c) => c.species === 'pine'),
+    junipers: survivors.filter((c) => c.species === 'juniper'),
+    manzanita: survivors.filter((c) => c.species === 'manzanita'),
+    all: survivors,
+    candidates: candidates.length,
+    bakeMs: performance.now() - t0,
+  };
+}
+
+/** the T112a-shaped view of the plan: the two CANOPY species only */
 export function planSierraPines(
   hm: IslandHeightmap,
   seed: number,
   p: SierraParams = sierraParams,
   v: VegetationParams = vegetationParams,
 ): PinePlan {
-  const candidates = pineCandidates(hm, seed, sierraPineCount(hm, p), p, v);
-  const survivors = competeFootprints(candidates, p.pineCompetitionRounds, p.pineFootprintGrowth);
+  const plan = planSierraVegetation(hm, seed, p, v);
+  const strip = (c: SierraPlant): PineCandidate => ({
+    x: c.x,
+    z: c.z,
+    y: c.y,
+    scale: c.scale,
+    footprint: c.footprint,
+    juniper: c.juniper,
+  });
   return {
-    pines: survivors.filter((c) => !c.juniper),
-    junipers: survivors.filter((c) => c.juniper),
-    candidates: candidates.length,
+    pines: plan.pines.map(strip),
+    junipers: plan.junipers.map(strip),
+    // the canopy share of the candidate pool, so "thinned, not razed" is
+    // measured against the pool these survivors actually came from
+    candidates: Math.round(
+      (plan.candidates * (plan.pines.length + plan.junipers.length)) / Math.max(plan.all.length, 1),
+    ),
   };
 }
 
@@ -320,10 +345,10 @@ export function uniformNearestNeighbour(n: number, area: number): number {
 
 /**
  * The uniform-random reference ON THE SAME BENCH SET: `n` points drawn
- * uniformly over the footprint and kept where `isBench` holds (no stands, no
- * aspect, no competition). Clark–Evans assumes a contiguous area; a ridge's
- * bench is a thin broken strip where the 2-D formula under-reads the uniform
- * NN distance, so the clustering test measures against THIS.
+ * uniformly over the footprint and kept where `isBench` holds (no density
+ * maps, no clumping, no competition). Clark–Evans assumes a contiguous area; a
+ * ridge's bench is a thin broken strip where the 2-D formula under-reads the
+ * uniform NN distance, so the clustering test measures against THIS.
  */
 export function uniformBenchNearestNeighbour(
   hm: IslandHeightmap,
@@ -347,11 +372,13 @@ export function uniformBenchNearestNeighbour(
  * scatter's own rng is still consumed for rotation so the wind phase etc.
  * stay on the same stream as before (§V2).
  */
-export function plannedPlacement(list: readonly PineCandidate[]): PlacementFn {
+export function plannedPlacement(
+  list: readonly { x: number; y: number; z: number; scale: number }[],
+): PlacementFn {
   let i = 0;
   return (rng) => {
     const c = list[i++];
-    if (!c) throw new Error('plannedPlacement: asked for more trees than the plan holds'); // §Rule 8
+    if (!c) throw new Error('plannedPlacement: asked for more plants than the plan holds'); // §Rule 8
     return { position: [c.x, c.y, c.z], scale: c.scale, rotation: rng() * Math.PI * 2 };
   };
 }
@@ -384,8 +411,10 @@ export interface CreateSierraPinesOptions {
 
 /**
  * Same contract as `createIslandPalms` so island.ts can swap by family. The
- * juniper and dead-pine batches hang off the pine batch as children: one
- * handle, one visibility toggle, one LOD.
+ * juniper, manzanita and dead-pine batches hang off the pine batch as
+ * children: one handle, one visibility toggle, one LOD, FOUR draws on ONE
+ * material (T112g turns these into impostor buckets; until then the instance
+ * count is the cost — see tests/sierraVegetation.test.ts).
  */
 export function createSierraPines(opts: CreateSierraPinesOptions): IslandPalms {
   const p = opts.params ?? sierraParams;
@@ -393,14 +422,16 @@ export function createSierraPines(opts: CreateSierraPinesOptions): IslandPalms {
   const set = opts.shared ?? createPineMaterialSet(p);
   const material = set.pine.material;
 
-  const plan = planSierraPines(hm, opts.seed, p);
+  const plan = planSierraVegetation(hm, opts.seed, p);
   const pines = plan.pines.length;
   const junipers = plan.junipers.length;
-  const live = pines + junipers;
+  const manzanita = plan.manzanita.length;
+  const live = pines + junipers + manzanita;
   const dead = hm.sierra?.treeline.length ?? 0;
 
   const pineGeometry = buildPineGeometry(opts.seed, 'pine', p);
-  const juniperGeometry = buildPineGeometry(opts.seed + JUNIPER_SEED_OFFSET, 'juniper', p);
+  const juniperGeometry = buildJuniperGeometry(opts.seed + JUNIPER_SEED_OFFSET, p);
+  const manzanitaGeometry = buildManzanitaGeometry(opts.seed + MANZANITA_SEED_OFFSET, p);
   const deadGeometry = buildPineGeometry(opts.seed + DEAD_SEED_OFFSET, 'dead', p);
 
   const mesh = scatterPalms({
@@ -421,6 +452,15 @@ export function createSierraPines(opts: CreateSierraPinesOptions): IslandPalms {
     lodSort: true,
   });
   juniperMesh.name = 'island-junipers';
+  const manzanitaMesh = scatterPalms({
+    count: manzanita,
+    seed: opts.seed + MANZANITA_SEED_OFFSET,
+    geometry: manzanitaGeometry,
+    material,
+    placementFn: plannedPlacement(plan.manzanita),
+    lodSort: true,
+  });
+  manzanitaMesh.name = 'island-manzanita';
   const deadMesh = scatterPalms({
     count: dead,
     seed: opts.seed + DEAD_SEED_OFFSET,
@@ -432,11 +472,17 @@ export function createSierraPines(opts: CreateSierraPinesOptions): IslandPalms {
   // the drowned treeline is THE read of a drowned ridge; it is tagged so the
   // §V10 intersection foam collars each trunk where it meets the water
   deadMesh.userData.foamTarget = true;
-  mesh.add(juniperMesh, deadMesh);
-  for (const m of [mesh, juniperMesh, deadMesh]) {
+  mesh.add(juniperMesh, manzanitaMesh, deadMesh);
+  const batches = [mesh, juniperMesh, manzanitaMesh, deadMesh];
+  for (const m of batches) {
     m.castShadow = islandParams.castShadows;
     m.receiveShadow = true;
   }
+  // a shrub's shadow is what puts it ON the ground rather than in front of it,
+  // but a 1 m manzanita casts about a shadow texel at the shipped rig and
+  // every caster is a second draw in the CPU-bound shadow pass — the same
+  // trade groundCoverMesh.ts makes one size class down.
+  manzanitaMesh.castShadow = false;
 
   return {
     mesh,
@@ -449,23 +495,24 @@ export function createSierraPines(opts: CreateSierraPinesOptions): IslandPalms {
     setLodDistance(cameraDistance: number): void {
       mesh.count = palmLodCount(pines, cameraDistance);
       juniperMesh.count = palmLodCount(junipers, cameraDistance);
+      manzanitaMesh.count = palmLodCount(manzanita, cameraDistance);
       deadMesh.count = palmLodCount(dead, cameraDistance);
-      const any = mesh.count + juniperMesh.count + deadMesh.count > 0;
+      const any = mesh.count + juniperMesh.count + manzanitaMesh.count + deadMesh.count > 0;
       mesh.visible = any;
       juniperMesh.visible = juniperMesh.count > 0;
+      manzanitaMesh.visible = manzanitaMesh.count > 0;
       deadMesh.visible = deadMesh.count > 0;
     },
-    setSunDirection(): void {
-      // no backlit term on needles — nothing to push
+    setSunDirection(v: THREE.Vector3): void {
+      set.pine.setSunDirection(v);
     },
     dispose(): void {
       pineGeometry.dispose();
       juniperGeometry.dispose();
+      manzanitaGeometry.dispose();
       deadGeometry.dispose();
       if (!opts.shared) material.dispose();
-      mesh.dispose();
-      juniperMesh.dispose();
-      deadMesh.dispose();
+      for (const m of batches) m.dispose();
     },
   };
 }
