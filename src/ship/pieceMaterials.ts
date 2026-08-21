@@ -61,6 +61,18 @@ const FAMILY_OF: Record<PieceKind, Family> = {
   rudder: 'trim',
   'lantern-post': 'trim',
   sail: 'sail',
+  // Raft kinds (§T.89) — provisional families until §T.90 lands raft materials.
+  log: 'spar',
+  crossbeam: 'spar',
+  'bamboo-deck': 'deck',
+  guara: 'trim',
+  'cabin-wall': 'trim',
+  'thatch-roof': 'trim',
+  'bipod-mast': 'spar',
+  'steering-oar': 'spar',
+  crate: 'trim',
+  splashboard: 'trim',
+  'stern-block': 'spar',
 };
 
 /**

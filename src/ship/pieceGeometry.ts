@@ -59,6 +59,17 @@ import {
   buildWindowGeometry,
 } from './pieceGeometryRig';
 
+import {
+  buildCabinWallGeometry,
+  buildCrateGeometry,
+  buildCrossbeamGeometry,
+  buildLogGeometry,
+  buildPoleGeometry,
+  buildRaftSlabGeometry,
+  buildSteeringOarGeometry,
+  buildSternBlockGeometry,
+} from './pieceGeometryRaft';
+
 export { buildSailGeometry } from './pieceGeometrySail';
 export { buildHoledVariant } from './pieceGeometryHoled';
 
@@ -214,5 +225,25 @@ export function buildPieceGeometry(
     case 'keel':
     case 'rudder':
       return box(aabb);
+    // --- RAFT 2100 (§T89)
+    case 'log':
+      return buildLogGeometry(aabb, shape);
+    case 'crossbeam':
+      return buildCrossbeamGeometry(aabb, shape);
+    case 'bipod-mast':
+      return buildPoleGeometry(aabb, shape);
+    case 'cabin-wall':
+      return buildCabinWallGeometry(aabb, shape);
+    case 'stern-block':
+      return buildSternBlockGeometry(aabb, shape);
+    case 'steering-oar':
+      return buildSteeringOarGeometry(aabb, shape);
+    case 'crate':
+      return buildCrateGeometry(aabb, shape);
+    case 'bamboo-deck':
+    case 'thatch-roof':
+    case 'guara':
+    case 'splashboard':
+      return buildRaftSlabGeometry(aabb);
   }
 }

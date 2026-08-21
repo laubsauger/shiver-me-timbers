@@ -62,7 +62,20 @@ export type PieceKind =
   | 'pin-rail' // belaying pin rack at a mast foot
   | 'binnacle'
   | 'window' // glazed lights (stern gallery)
-  | 'moulding'; // decorative sheer batten
+  | 'moulding' // decorative sheer batten
+  // --- RAFT 2100 (§T89). Kon-Tiki balsa raft kinds; geometry in
+  // pieceGeometryRaft.ts, built by src/ship/raftBlueprint.ts.
+  | 'log' // balsa main log / foot-rail (tapered cylinder along local z)
+  | 'crossbeam' // athwartships balsa beam on the logs (along local x)
+  | 'bamboo-deck' // mat / split-bamboo slab; also the cabin floor and the lookout platform
+  | 'guara' // centreboard plank on edge in a chink
+  | 'cabin-wall' // woven split-bamboo panel; `shape.gable` = rise to the ridge
+  | 'thatch-roof' // one slope of the gabled roof
+  | 'bipod-mast' // a mangrove pole along local +y (bipod leg, flag pole); `shape.ladder` = rope ladder
+  | 'steering-oar' // shaft + blade + tiller cross-piece, pivoting between the thole-pins
+  | 'crate' // 2100 dressing: crates, cans, drum (`shape.round`), dinghy, cage
+  | 'splashboard' // low bow plank across the log stagger
+  | 'stern-block'; // balsa block carrying the thole-pins
 
 /**
  * 'fixture' = named attach point for deck furniture / ornaments
