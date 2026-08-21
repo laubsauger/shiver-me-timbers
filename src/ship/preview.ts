@@ -13,14 +13,24 @@
  *   tod=<h>                           time of day → sun angle
  *   nbias/sbias/extent                shadow A/B (defaults track params/sky)
  *   plain=1                           flat materials, isolates geometry
+ *   ship=galleon|brigantine|raft      which blueprint (default galleon)
+ *   station=tiller|radio|bow|nest|cabin   raft on-deck eye stations (§T91)
+ *   fp=1                              walk the raft (WASD, click to lock)
  */
 import * as THREE from 'three/webgpu';
-import { buildGalleonBlueprint } from './shipBlueprint';
 import { ShipAssembly } from './shipAssembly';
 import { updateRig } from './rigTrim';
 import { oceanParams } from '../params/ocean';
 import { skyParams } from '../params/sky';
 import { sunDirection } from '../sky/sunCycle';
+import {
+  attachFirstPerson,
+  blueprintAabb,
+  buildShipBlueprint,
+  placeAtStation,
+  shipNameOf,
+  tintForShip,
+} from './previewRaft';
 
 const q = new URLSearchParams(location.search);
 const num = (key: string, fallback: number): number => {
@@ -81,13 +91,17 @@ scene.add(sea);
 // when the preview itself is under suspicion (§B.5 taught us to isolate GPU
 // work before blaming geometry)
 const plain = q.get('plain') === '1';
+const shipName = shipNameOf(q.get('ship'));
+const blueprint = buildShipBlueprint(shipName);
 const assembly = new ShipAssembly(
-  buildGalleonBlueprint(),
+  blueprint,
   plain
     ? () => new THREE.MeshStandardMaterial({ color: 0xb08050, roughness: 0.9, side: THREE.DoubleSide })
     : undefined,
 );
 assembly.group.rotation.y = num('heading', 0);
+const tint = tintForShip(shipName);
+if (tint !== undefined) assembly.setSailTint(tint);
 assembly.group.traverse((o) => {
   const mesh = o as THREE.Mesh;
   if (mesh.isMesh) {
@@ -108,13 +122,25 @@ const VIEWS: Record<string, { yaw: number; height: number; dist: number }> = {
   sun: { yaw: SUN_YAW, height: 14, dist: 52 },
   lee: { yaw: SUN_YAW + Math.PI, height: 14, dist: 52 },
 };
+// the exterior stations were authored for the galleon; other classes scale
+// them by hull length off their own AABB (galleon ratio = 1, so unchanged)
+const box = blueprintAabb(blueprint);
+const lengthOf = (b: ReturnType<typeof blueprintAabb>): number => b.max[2] - b.min[2];
+const fit = shipName === 'galleon' ? 1 : lengthOf(box) / lengthOf(blueprintAabb(buildShipBlueprint('galleon')));
 const view = VIEWS[q.get('view') ?? 'stern'] ?? VIEWS.stern;
 const yaw = num('yaw', view.yaw);
-const dist = num('dist', view.dist);
-const height = num('height', view.height);
+const dist = num('dist', view.dist * fit);
+const height = num('height', view.height * fit);
 camera.position.set(Math.sin(yaw) * dist, height, Math.cos(yaw) * dist);
-camera.lookAt(0, num('lookY', 9), 0);
+camera.lookAt(0, num('lookY', shipName === 'galleon' ? 9 : (box.max[1] + box.min[1]) * 0.4), 0);
 sun.target.position.set(0, 8, 0);
+const station = q.get('station');
+if (station !== null && !placeAtStation(camera, assembly, station)) {
+  console.warn(`preview: unknown station '${station}'`);
+}
+const walk = q.get('fp') === '1' && shipName === 'raft'
+  ? attachFirstPerson(assembly, blueprint, renderer.domElement, station ?? undefined)
+  : undefined;
 
 const hud = document.getElementById('hud') as HTMLDivElement;
 let frames = 0;
@@ -127,7 +153,9 @@ renderer.setAnimationLoop(() => {
   // — the deck heightfield is sampled in WORLD space, so its planking slides
   // off the deck the moment ?heading= is non-zero
   const nowFrame = performance.now();
-  updateRig(assembly, (nowFrame - prevFrame) / 1000, num('trim', 1));
+  const dt = (nowFrame - prevFrame) / 1000;
+  updateRig(assembly, dt, num('trim', 1));
+  walk?.update(dt, camera);
   prevFrame = nowFrame;
 
   renderer.render(scene, camera);
@@ -150,4 +178,4 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-(window as unknown as Record<string, unknown>).__preview = { assembly, sun, scene, camera, renderer };
+(window as unknown as Record<string, unknown>).__preview = { assembly, sun, scene, camera, renderer, walk };

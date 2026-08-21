@@ -63,6 +63,7 @@ import { brigantineSeaParams, seaPhysicsParams } from './params/seaPhysics';
 import { galleonParams, shipMaterialParams, shipRigParams } from './params/ship';
 import { createCaustics, setActiveCaustics } from './caustics';
 import { buildDeckHeightfield } from './ship/deckHeightfield';
+import { buildRaftBlueprint } from './ship/raftBlueprint';
 import { createDeckWater, setActiveDeckWater } from './deckwater';
 import { createPlanarReflection } from './reflection';
 import { createArchipelago } from './island';
@@ -460,7 +461,11 @@ async function boot(): Promise<void> {
     damage: {},
   });
   const playerShip = state.ships[0];
-  const galleonBlueprint = buildGalleonBlueprint();
+  // §T91 RAFT 2100 switch — the ONLY pirate-boot edit the raft makes (§V81)
+  const galleonBlueprint =
+    new URLSearchParams(location.search).get('ship') === 'raft'
+      ? buildRaftBlueprint()
+      : buildGalleonBlueprint();
 
   // §T.12/§T.31 deck water. ONE procedurally-generated deck heightfield (per
   // the talk's "artist supplied static heightfield") serves two consumers: the
