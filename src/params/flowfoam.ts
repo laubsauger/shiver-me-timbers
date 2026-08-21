@@ -335,6 +335,16 @@ export interface FlowFoamParams {
   /** fraction of the Kelvin half-width inside which the crests are at full
    * amplitude; they fade to 0 at the wedge boundary */
   transInner: number;
+  /**
+   * MINIMUM width of the transverse train's lateral feather, as a fraction of
+   * the transverse wavelength λ = 2πv²/g. The envelope's gradient is then
+   * ≤ transSlope·1.5/(2π·transFeather) — 1.5× the crest slope at 0.16 — so the
+   * wedge edge cannot be steeper than the wave inside it (§T.78: the
+   * "chunky, sharp-edged" bow wave was a feather 0.088·d wide carrying 0.5 m).
+   * `transInner` still sets the feather where the wedge is wide enough for a
+   * bigger one.
+   */
+  transFeather: number;
 
   // --- divergent (cusp) crests: THE BOW WAVE ------------------------------
   // The second Kelvin wave system — short, steep crests fanning off the stem at
@@ -565,6 +575,7 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     transDecay: 26,
     transSpread: 40,
     transInner: 0.75,
+    transFeather: 0.16,
     divSlope: 0.11,
     divDecay: 11,
     divSpread: 22,
@@ -670,6 +681,7 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     transDecay: { min: 1, max: 240, step: 1 },
     transSpread: { min: 1, max: 400, step: 1 },
     transInner: { min: 0.05, max: 1, step: 0.05 },
+    transFeather: { min: 0, max: 0.5, step: 0.01 },
     divSlope: { min: 0, max: 0.8, step: 0.005 },
     divDecay: { min: 0.5, max: 120, step: 0.5 },
     divSpread: { min: 1, max: 400, step: 1 },

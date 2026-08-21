@@ -386,7 +386,11 @@ export function createWakeInjector(p: FlowFoamParams) {
         const mSf = smoothstep(uSpeedThreshold, uFullWakeSpeed.max(uSpeedThreshold.add(EPS)), ms);
         const hd = worldXZ.sub(vec2(uHead.x, uHead.y));
         const mAhead = hd.x.mul(uHead.z).add(hd.y.mul(uHead.w));
-        const mAside = hd.x.mul(uHead.w).sub(hd.y.mul(uHead.z)).abs();
+        // SOFT |side| — slickMath.moundNoseCpu: rounds the chevron's nose over
+        // thick/2 so the ridge has no C⁰ fold down the centreline
+        const mSide = hd.x.mul(uHead.w).sub(hd.y.mul(uHead.z));
+        const mNoseR = uMoundThick.mul(0.5);
+        const mAside = vec2(mSide, mNoseR).length().sub(mNoseR);
         // signed distance from the crest, which sweeps aft as it goes outboard
         const dc = mAhead.sub(uMoundLead.sub(uMoundSweep.mul(mAside)));
         // thin on the leading face, moundFill× thicker behind — fills the gap
@@ -441,11 +445,12 @@ export function createWakeInjector(p: FlowFoamParams) {
             halfBeam: uBeam.mul(0.5),
             fwd: bestFwd,
             latSign: select(bestLat.lessThan(0), float(-1), float(1)),
-            envelope: liveGate.mul(tail).mul(clip),
+            envelope: liveGate.mul(tail),
+            clip,
             texel,
             // world-anchored along-track coordinate of THIS water
             odo: uOdo.sub(d),
-            onset,
+            ds,
           },
           detail,
         );
@@ -464,11 +469,8 @@ export function createWakeInjector(p: FlowFoamParams) {
               aside: mAside,
               span: uMoundSpan,
               sweep: uMoundSweep,
-              sgn: select(
-                hd.x.mul(uHead.w).sub(hd.y.mul(uHead.z)).lessThan(0),
-                float(-1),
-                float(1),
-              ),
+              // d(mAside)/d(side): the soft sign, so ∇η = slope exactly
+              sgn: mSide.div(vec2(mSide, mNoseR).length().max(EPS)),
               fwd: vec2(uHead.z, uHead.w),
               drive: mGate.mul(mSf),
               texel,

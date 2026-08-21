@@ -89,7 +89,7 @@
  * exponential. `slickDampCpu` returns a value in [1 − slickDamp, 1] for ANY
  * input including non-finite ones (it fails to 1 = no damping).
  */
-import { projectOnTrack, smoothstepCpu, type WakeHull } from './wakeMath';
+import { moundNoseCpu, projectOnTrack, smoothstepCpu, type WakeHull } from './wakeMath';
 import { TRACK_CAPACITY, trackReachCpu, type TrackSample } from './wakeTrack';
 
 /** m/s² — the only place the transverse wavelength's constant lives */
@@ -175,7 +175,13 @@ export function kelvinBranchesCpu(r: number): KelvinBranches {
   const disc = Math.sqrt(Math.max(1 - 8 * rr * rr, 0));
   return {
     disc,
-    tT: (2 * rr) / (1 + disc),
+    // OUTSIDE the wedge (disc = 0) the root would run on as 2r, which is not a
+    // wave of anything: the phase it feeds would be (g/v²)·4r²·|y| and the
+    // cos of that is noise. Held at the CUSP value 1/√2 instead, so the train's
+    // lateral feather (slickFieldCpu `innerFade`, which may reach past the
+    // 19.47° line by the hull's half-beam) fades out a continuation of the cusp
+    // wave — C¹ across the cusp, because ∂φ/∂t = 0 there by construction.
+    tT: Math.min((2 * rr) / (1 + disc), Math.SQRT1_2),
     tD: Math.min((1 + disc) / (4 * rr), KELVIN_TAN_MAX),
   };
 }
@@ -186,10 +192,26 @@ export function kelvinWavelengthCpu(speed: number, t: number): number {
   return (2 * Math.PI * v * v) / (GRAVITY * (1 + t * t));
 }
 
-/** stationary phase (rad) of either branch: φ = (g/v²)(d + |y|t)√(1+t²) */
+/**
+ * Stationary phase (rad) of either branch: φ = (g/v²)(d − |y|t)√(1+t²).
+ *
+ * THE SIGN IS THE WHOLE RESULT. A component at angle θ to the track has
+ * k = g/(v²cos²θ) and phase k·(d cosθ + y sinθ); for a point at |y| > 0 the
+ * stationary component is the one with sinθ < 0 — wave vector aft and INWARD,
+ * toward the centreline — which is what 2r·t² − t + r = 0 (kelvinBranchesCpu)
+ * solves. Written with `+` (as it shipped until §T.78's finish pass) the phase
+ * is NOT stationary in t, so ∇φ picks up (∂φ/∂t)·∇t, and ∇t has a √ singularity
+ * at the cusp: measured |∇φ|/k = 1.36 at r = 0.25, 3.3 at 0.33, 28 at 0.353 —
+ * the wedge edge was a crease 28× steeper than the wave, and the transverse
+ * crests bowed FORWARD. With `−`, |∇φ| = (g/v²)(1+t²) = k to 1e-8 over the
+ * whole wedge, ∇η = slope holds exactly as the elevation derivation assumes,
+ * and the crests bow backward toward the cusp (x = cosθ(1+sin²θ) along a
+ * crest, Lighthill's figure). The propagation vector below follows suit:
+ * aft·cosθ − outward·sinθ.
+ */
 export function kelvinPhaseCpu(d: number, ay: number, t: number, speed: number): number {
   const v = Math.max(Math.abs(speed), 1e-6);
-  return ((GRAVITY / (v * v)) * (d + ay * t) * Math.sqrt(1 + t * t));
+  return ((GRAVITY / (v * v)) * (d - ay * t) * Math.sqrt(1 + t * t));
 }
 
 /** slick/transverse tunables — a structural subset of FlowFoamParams */
@@ -207,6 +229,7 @@ export interface SlickParams {
   transDecay: number;
   transSpread: number;
   transInner: number;
+  transFeather: number;
   divSlope: number;
   divDecay: number;
   divSpread: number;
@@ -377,7 +400,10 @@ export function slickFieldCpu(
   const h = points[0];
   const ahead = (wx - h.x) * h.fx + (wz - h.z) * h.fz;
   const clip = 1 - smoothstepCpu(0, Math.max(p.bowClip, 1e-6), ahead);
-  const common = sf * liveGate * tail * clip;
+  // `envelope` is what every feature shares; `common` adds the 0.8 m forward
+  // clip, which the TRANSVERSE TRAIN must not take — see `innerFade` below.
+  const envelope = sf * liveGate * tail;
+  const common = envelope * clip;
 
   // --- 1. the glassy lane ---------------------------------------------------
   // Width: the hull's own beam at the stem, widening with the water's AGE (the
@@ -418,11 +444,54 @@ export function slickFieldCpu(
   // 2a. TRANSVERSE — long crests across the track, strongest on the centreline.
   // Solved on its own branch rather than the old d-only approximation, so the
   // crests correctly bow backward toward the cusp instead of running straight.
-  const innerFade =
-    1 - smoothstepCpu(kelvin * p.transInner, Math.max(kelvin, kelvin * p.transInner + 1e-6), ay);
+  /**
+   * THE TRAIN'S LATERAL ENVELOPE — where the bow wave used to read "chunky and
+   * sharp edged" (user, after §T.82). Three defects in the old
+   * `1 − smoothstep(kelvin·transInner, kelvin, ay)`, all at the source:
+   *
+   *   1. THE APEX NEEDLE. `kelvin = d·tanθ` is 0 at the cutwater, so a train
+   *      carrying the full a/k (0.5 m at 10 m/s) was confined to a wedge
+   *      0.265·d wide — 0.13 m at d = 0.5 m, half a texel, a 0.58 m spike
+   *      between two adjacent 0.25 m samples (rasterised: |∇η| = 1.48 there,
+   *      against the train's own slope of 0.06). §T.78(c) measured it as the
+   *      0.311 m apex mirror error. A hull is not a point: its wave system
+   *      starts the BEAM wide, so the envelope is `halfBeam + kelvin` — the
+   *      same wedge, apex moved ahead of the stem by halfBeam/tanθ.
+   *   2. THE CLIFF ALONG THE WEDGE. The feather was 25% of the wedge width,
+   *      0.088·d metres: 0.5 m of water falling over 0.9 m at d = 10, over
+   *      2.6 m at d = 30 — an envelope gradient 3–10× the wave's slope, a
+   *      crease the eye reads as an edge however smooth the cos inside it is.
+   *      Now the feather is AT LEAST `transFeather·λ` wide, so its gradient is
+   *      bounded BY THE WAVE'S OWN: (a/k)·1.5/(transFeather·λ) = a·1.5/(2π·
+   *      transFeather), i.e. ≤ 1.5× the crest slope at the shipped 0.16 — the
+   *      test pins that ratio. Where the wedge is narrower than the feather
+   *      (the first ~30 m at 10 m/s) the centreline never reaches full
+   *      amplitude, which is the smooth onset a finite hull's train has.
+   *   3. THE FORWARD CLIP. With the envelope beam-wide at d = 0 the train
+   *      reaches ahead of the stem, and `clip`'s 0.8 m fade would cut it there
+   *      as a 0.3 m step. It takes `envelope` instead: ahead of the head `d`
+   *      is 0 and `ay` is the RADIAL distance, so this same feather already
+   *      brings it to zero within `halfBeam` of the stem, continuously, under
+   *      the mound. (The lane and the divergent train keep the clip.)
+   *
+   * C¹ everywhere: smoothstep × smooth factors; the wedge edge is the feather
+   * (no step at 19.47°), and `kelvinBranchesCpu` holds t at the cusp beyond
+   * it so the carrier is continuous wherever the feather is non-zero. The
+   * feather is measured on a SOFT |y| (`moundNoseCpu`, rounded over half the
+   * beam): where the wedge is narrower than the feather the fade is already
+   * falling AT y = 0, and a fade in |y| there is a fold down the centreline
+   * (and a cone at the stem, where `ay` is radial) — under the keel, but a
+   * C⁰ line all the same. On the soft |y| it is flat through zero. The
+   * envelope therefore reaches zero at ay = √(w² + w·halfBeam) ≤ w + beam/4.
+   */
+  const wedgeW = halfBeam + kelvin;
+  const feather = p.transFeather * transverseWavelengthCpu(v);
+  const e0 = Math.min(wedgeW * p.transInner, wedgeW - feather);
+  const aySoft = moundNoseCpu(ay, halfBeam);
+  const innerFade = 1 - smoothstepCpu(e0, Math.max(wedgeW, e0 + 1e-6), aySoft);
   const ampT =
     p.transSlope *
-    common *
+    envelope *
     innerFade *
     Math.exp(-a / Math.max(p.transDecay, 1e-6)) *
     spread(p.transSpread) *
@@ -450,7 +519,8 @@ export function slickFieldCpu(
    */
   const phiT = kelvinPhaseCpu(d, ay, br.tT, v) + Math.PI;
   const magT = ampT * Math.sin(phiT);
-  // slope points along the propagation direction: aft·cosθ + lateral·sinθ
+  // slope points along the propagation direction: aft·cosθ − outward·sinθ
+  // (inward — see kelvinPhaseCpu; it is ∇φ/|∇φ| exactly, nothing else)
   const cT = 1 / Math.sqrt(1 + br.tT * br.tT);
   const sT = br.tT * cT;
   /**
@@ -500,8 +570,14 @@ export function slickFieldCpu(
   // BOTH cores are summed. Taking only the near-side one leaves a step across
   // the centreline where the lateral sign flips, and a step in a field the
   // ocean differentiates is a 1-px line (§V38).
-  const onset = smoothstepCpu(0, Math.max(p.sternOnset, 1e-6), d - hull.length);
   const coreR = Math.max(halfBeam * p.eddyRadius, 1e-6);
+  // Ramped in over THREE core radii (11.5 m ≈ one shedding period), not the
+  // foam's 3 m `sternOnset`: a 0.4 m dimple switched on over 3 m is a 0.2
+  // slope step behind the transom, 2× the dimple's own peak slope; over
+  // 3·coreR it is 0.05, under the street's own interior gradient, so the first
+  // core rises out of flat water no steeper than the ones behind it. C¹ at the
+  // transom (smoothstep); the hull-boundary test pins it against the interior.
+  const onset = smoothstepCpu(0, 3 * coreR, d - hull.length);
   const vOff = halfBeam * p.vortexOffset;
   const odo = odoHead - d;
   const latS = ay * sgn; // SIGNED lateral, in the track's own frame
@@ -547,8 +623,8 @@ export function slickFieldCpu(
     bandE;
 
   // aft unit vector = −forward; both trains propagate away from the hull
-  const slopeX = magT * (-n.fx * cT + rx * sT) + magD * (-n.fx * cD + rx * sD) + magE * (cS[0] + cP[0]);
-  const slopeZ = magT * (-n.fz * cT + rz * sT) + magD * (-n.fz * cD + rz * sD) + magE * (cS[1] + cP[1]);
+  const slopeX = magT * (-n.fx * cT - rx * sT) + magD * (-n.fx * cD - rx * sD) + magE * (cS[0] + cP[0]);
+  const slopeZ = magT * (-n.fz * cT - rz * sT) + magD * (-n.fz * cD - rz * sD) + magE * (cS[1] + cP[1]);
   /**
    * A Gaussian dimple has no single wavenumber; π/coreR (i.e. λ = 2·coreR, the
    * core's full width) is the one that reproduces its own extremum spacing and
@@ -603,10 +679,20 @@ export function bowSlopeCpu(
   const dz = wz - head.z;
   const ahead = dx * head.fx + dz * head.fz;
   const side = dx * head.fz - dz * head.fx; // right = (fz, −fx)
-  const aside = Math.abs(side);
-  const sgn = side < 0 ? -1 : 1;
-  // signed distance from the swept crest line — the same shape the foam uses
   const thick = Math.max(p.moundThick, 1e-6);
+  /**
+   * SOFT |side|: the crest line sweeps aft as a chevron, and a true |·| puts a
+   * C⁰ fold down the centreline ahead of the stem — the lateral slope of the
+   * ridge jumps by 2·moundSlope·moundSweep·(peak of 2u·e^(−u²))/RIDGE_PEAK =
+   * 0.27 across x = 0, a crease sharper than the mound's own 0.17 face.
+   * `moundNoseCpu` rounds the nose over half the ridge thickness; its
+   * derivative `sgnSoft` replaces the ±1 sign so ∇η still equals the returned
+   * slope EXACTLY. Same rounding in the foam mound (wakeMath.bowMoundCpu), so
+   * the paint stays on the shape.
+   */
+  const aside = moundNoseCpu(side, thick);
+  const sgn = side / Math.hypot(side, thick * 0.5);
+  // signed distance from the swept crest line — the same shape the foam uses
   const u = (ahead - (p.moundLead - p.moundSweep * aside)) / thick;
   // §V48: the ridge is ~2·moundThick wide; if that goes sub-texel it must fade
   const band = texel > 0

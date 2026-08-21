@@ -1509,12 +1509,16 @@ describe('transverse Kelvin waves (λ = 2πv²/g, the speed-dependent half)', ()
   it('crests stay INSIDE the wedge and point across the track', () => {
     const s = sail([{ fx: 0, fz: 1, seconds: 20 }], 6);
     const d = 50;
-    // Outside the V there is no wave at all — measured past the divergent
-    // train's outer FEATHER. The wedge boundary is a real physical edge, but a
-    // hard step in a field the material differentiates is a 1-px line (§V38),
-    // so the divergent amplitude is eased to zero over `divOuterFade` of the
-    // half-width just outside the cusp. Past that, exactly nothing.
-    const clear = d * TAN * (1 + flowFoamParams.divOuterFade) + 0.5;
+    // Outside the V there is no wave at all — measured past BOTH feathers. The
+    // wedge boundary is a real physical edge, but a hard step in a field the
+    // material differentiates is a 1-px line (§V38), so the divergent
+    // amplitude is eased to zero over `divOuterFade` of the half-width just
+    // outside the cusp, and the transverse train's envelope is the hull's
+    // `halfBeam + d·tanθ` (a ship's train starts the beam wide, §T.78 finish),
+    // measured on a |y| rounded over beam/4 so it reaches zero at
+    // √(w² + w·halfBeam). Past the wider of the two, exactly nothing.
+    const wT = HULL.beam / 2 + d * TAN;
+    const clear = Math.max(d * TAN * (1 + flowFoamParams.divOuterFade), Math.sqrt(wT * wT + wT * HULL.beam / 2)) + 0.5;
     const out = slickFieldCpu(s.points, clear, s.z - d, HULL, SP, 6, TEXEL);
     // …and that stays true of the STREET too: it obeys the same Kelvin envelope
     expect(out.slopeX).toBe(0);

@@ -45,8 +45,10 @@ export interface SlickFrame {
   fwd: any;
   /** +1 if the point is to starboard of the track, −1 to port */
   latSign: any;
-  /** tail × clip × liveGate — the foam pass's own eviction/clip envelope */
+  /** tail × liveGate — the foam pass's own eviction envelope, WITHOUT the clip */
   envelope: any;
+  /** fadeTo(bowClip, ahead) — the 0.8 m forward clip; the transverse train skips it */
+  clip: any;
   /** world size (m) of one texel of the tier being written — the §V48 yardstick */
   texel: any;
   /**
@@ -56,8 +58,8 @@ export interface SlickFrame {
    * see wakeTrack.WakeTrack.odo for why `dist` cannot do this job.
    */
   odo: any;
-  /** smoothstep(0, sternOnset, dist − hullLength): 0 until the transom passes */
-  onset: any;
+  /** dist − hullLength (m): + once the transom has passed */
+  ds: any;
 }
 
 /**
@@ -76,7 +78,7 @@ export interface BowFrame {
   span: any;
   /** crest aft-sweep per metre outboard */
   sweep: any;
-  /** +1 starboard, −1 port */
+  /** side/√(side² + (thick/2)²): the SOFT sign, d(mAside)/d(side) — slickMath.moundNoseCpu */
   sgn: any;
   /** live stem forward (world XZ) */
   fwd: any;
@@ -97,6 +99,7 @@ export function createSlickInjector(p: FlowFoamParams) {
   const uTransDecay = uniform(p.transDecay);
   const uTransSpread = uniform(p.transSpread);
   const uTransInner = uniform(p.transInner);
+  const uTransFeather = uniform(p.transFeather);
   const uDivSlope = uniform(p.divSlope);
   const uDivDecay = uniform(p.divDecay);
   const uDivSpread = uniform(p.divSpread);
@@ -141,6 +144,7 @@ export function createSlickInjector(p: FlowFoamParams) {
       const slick = uSlickIntensity
         .mul(f.sf)
         .mul(f.envelope)
+        .mul(f.clip)
         .mul(lane)
         .mul(f.age.div(uSlickDecay.max(EPS)).negate().exp());
 
@@ -158,15 +162,20 @@ export function createSlickInjector(p: FlowFoamParams) {
       const disc = float(1).sub(rf.mul(rf).mul(8)).max(0).sqrt();
       // 2r/(1+disc), NOT (1−disc)/(4r): algebraically identical, but the latter
       // is 0/0 on the centreline where the transverse train is strongest
-      const tT = rf.mul(2).div(disc.add(1).max(EPS));
+      // held at the CUSP value outside the wedge (disc = 0 ⟹ 2r runs on) so
+      // the feathered edge below fades a continuation of the cusp wave, not a
+      // phase that grows as r² — slickMath.kelvinBranchesCpu
+      const tT = rf.mul(2).div(disc.add(1).max(EPS)).min(Math.SQRT1_2);
       // the divergent root runs to ∞ on the centreline (λ → 0 there). Clamped
       // because 0 × NaN is NaN, not 0 — the band gate below is already 0 by
       // then, but only a FINITE phase can be multiplied by it (§V44).
       const tD = disc.add(1).div(rf.mul(4).max(EPS)).min(KELVIN_TAN_MAX);
 
-      // φ = (g/v²)(d + |y|t)√(1+t²);  λ = 2πv²/(g(1+t²))
+      // φ = (g/v²)(d − |y|t)√(1+t²);  λ = 2πv²/(g(1+t²)). MINUS: the stationary
+      // component points aft and INWARD; with + the phase is not stationary
+      // and |∇φ| runs to 28× k at the cusp — slickMath.kelvinPhaseCpu
       const sq = (t: any) => float(1).add(t.mul(t));
-      const phaseOf = (t: any) => kk.mul(f.d.add(f.ay.mul(t))).mul(sq(t).sqrt());
+      const phaseOf = (t: any) => kk.mul(f.d.sub(f.ay.mul(t))).mul(sq(t).sqrt());
       // §V48 AT THE SOURCE: fade a train to its own mean (zero — it is a
       // zero-mean crest field) once its wavelength goes sub-texel. This is what
       // makes the divergent branch's centreline singularity harmless.
@@ -177,17 +186,28 @@ export function createSlickInjector(p: FlowFoamParams) {
           float(Math.PI * 2).mul(v).mul(v).div(float(GRAVITY).mul(sq(t))).div(f.texel.max(EPS)),
         );
       const spreadOf = (L: any) => float(1).add(f.d.div(L.max(EPS))).sqrt().max(EPS).reciprocal();
-      // propagation is aft·cosθ + lateral·sinθ; the slope points along it
+      // propagation is aft·cosθ − outward·sinθ (= ∇φ/|∇φ|); the slope points along it
       const aft = f.fwd.negate();
       const right = vec2(f.fwd.y, f.fwd.x.negate()).mul(f.latSign);
       const dirOf = (t: any) => {
         const c = sq(t).sqrt().max(EPS).reciprocal();
-        return aft.mul(c).add(right.mul(t.mul(c)));
+        return aft.mul(c).sub(right.mul(t.mul(c)));
       };
 
       // 2a. transverse — long crests across the track, peak on the centreline
-      const e0 = f.kelvin.mul(uTransInner);
-      const innerFade = smoothstep(e0, f.kelvin.max(e0.add(EPS)), f.ay).oneMinus();
+      // envelope `halfBeam + kelvin` (a hull's train starts the beam wide, not
+      // at a point), feathered over at least `transFeather·λ` so the envelope's
+      // gradient is bounded by the wave's own slope, and WITHOUT the forward
+      // clip — slickMath.slickFieldCpu `innerFade` for the three defects this
+      // removes (apex needle, wedge cliff, clip step). Mirror exactly.
+      const wedgeW = f.kelvin.add(f.halfBeam);
+      const feather = uTransFeather.mul(float(Math.PI * 2).mul(v).mul(v).div(GRAVITY));
+      const e0 = wedgeW.mul(uTransInner).min(wedgeW.sub(feather));
+      // soft |y|, rounded over beam/4 (wakeMath.moundNoseCpu): flat through the
+      // centreline, so a feather wider than the wedge is not a fold under the keel
+      const noseR = f.halfBeam.mul(0.5);
+      const aySoft = vec2(f.ay, noseR).length().sub(noseR);
+      const innerFade = smoothstep(e0, wedgeW.max(e0.add(EPS)), aySoft).oneMinus();
       const ampT = uTransSlope
         .mul(f.sf)
         .mul(f.envelope)
@@ -220,6 +240,7 @@ export function createSlickInjector(p: FlowFoamParams) {
         .mul(f.sf)
         .mul(f.sf)
         .mul(f.envelope)
+        .mul(f.clip)
         .mul(outer)
         .mul(f.age.div(uDivDecay.max(EPS)).negate().exp())
         .mul(spreadOf(uDivSpread))
@@ -285,10 +306,14 @@ export function createSlickInjector(p: FlowFoamParams) {
         uWaveBandHigh.max(uWaveBandLow.add(EPS)),
         coreR.mul(2).div(f.texel.max(EPS)),
       );
+      // ramped in over three core radii, not the foam's `sternOnset`, so the
+      // first dimple rises no steeper than the street behind it (slickMath)
+      const onset = smoothstep(float(0), coreR.mul(3), f.ds);
       const magE = uEddySlope
         .mul(f.sf)
         .mul(f.envelope)
-        .mul(f.onset)
+        .mul(f.clip)
+        .mul(onset)
         // nothing aft may pan out past the Kelvin wedge — the same envelope
         // every aft feature obeys, and it is what keeps "outside the V there is
         // exactly nothing" true of the SURFACE and not just of the foam
@@ -359,6 +384,7 @@ export function createSlickInjector(p: FlowFoamParams) {
       uTransDecay.value = p.transDecay;
       uTransSpread.value = p.transSpread;
       uTransInner.value = p.transInner;
+      uTransFeather.value = p.transFeather;
       uDivSlope.value = p.divSlope;
       uDivDecay.value = p.divDecay;
       uDivSpread.value = p.divSpread;

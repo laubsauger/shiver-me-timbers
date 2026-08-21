@@ -58,6 +58,18 @@ export function smoothstepCpu(e0: number, e1: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
+/**
+ * Rounded |side| for the bow mound's chevron crest line: √(s² + r²) − r with
+ * r = thick/2, so it is 0 on the centreline like |s|, → |s| − r far out, and
+ * C^∞ through zero — a true |s| folds the ridge down the centreline (§T.78).
+ * Shared by the foam mound (bowMoundCpu) and its surface (slickMath.bowSlopeCpu);
+ * GPU twin: wakeInjection's `mAside`.
+ */
+export function moundNoseCpu(side: number, thick: number): number {
+  const r = thick * 0.5;
+  return Math.hypot(side, r) - r;
+}
+
 /** falling edge: 1 at x=0, 0 at x=e — the fade idiom used all over the field */
 const fadeTo = (e: number, x: number): number => 1 - smoothstepCpu(0, Math.max(e, 1e-6), x);
 
@@ -245,7 +257,9 @@ export function bowMoundCpu(
   const dx = wx - head.x;
   const dz = wz - head.z;
   const ahead = dx * head.fx + dz * head.fz;
-  const aside = Math.abs(dx * head.fz - dz * head.fx); // right = (fz, −fx)
+  // right = (fz, −fx); SOFT |side| so the chevron has no centreline fold —
+  // the same rounding the mound's SURFACE uses (slickMath.bowSlopeCpu)
+  const aside = moundNoseCpu(dx * head.fz - dz * head.fx, Math.max(p.moundThick, 1e-6));
   // signed distance from the swept crest line
   const dc = ahead - (p.moundLead - p.moundSweep * aside);
   const thick = dc >= 0 ? p.moundThick : p.moundThick * p.moundFill;
