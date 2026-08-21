@@ -1,0 +1,345 @@
+<title>Raft 2100</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@400;600;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#EDF1EF; --bg2:#E2E8E5; --ink:#1B2426; --ink2:#4A5456; --mute:#7A7F79;
+  --line:#C9D1CD; --teal:#2F6E70; --teal-soft:#D6E6E4; --rust:#B2472A; --ochre:#C99A3C;
+  --balsa:#C6A87A; --sea:#3E7F86; --card:#F6F8F6; --code:#E6ECE9;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0F1A1D; --bg2:#15232700; --ink:#E4E9E6; --ink2:#B2BCB8; --mute:#7D8A86;
+    --line:#28383B; --teal:#79B7B6; --teal-soft:#173033; --rust:#E06A45; --ochre:#E1B55A;
+    --balsa:#B9996C; --sea:#63A6AD; --card:#142225; --code:#182A2E;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0F1A1D; --bg2:#15232700; --ink:#E4E9E6; --ink2:#B2BCB8; --mute:#7D8A86;
+  --line:#28383B; --teal:#79B7B6; --teal-soft:#173033; --rust:#E06A45; --ochre:#E1B55A;
+  --balsa:#B9996C; --sea:#63A6AD; --card:#142225; --code:#182A2E;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;font-size:16.5px;line-height:1.6;margin:0}
+a{color:var(--teal);text-decoration-color:var(--line);text-underline-offset:3px}
+a:focus-visible,button:focus-visible{outline:2px solid var(--rust);outline-offset:2px}
+.wrap{max-width:1120px;margin:0 auto;padding:0 clamp(16px,4vw,48px)}
+.col{max-width:70ch}
+h1,h2,h3,h4{font-family:"Shippori Mincho","Hiragino Mincho ProN","Yu Mincho",Georgia,serif;text-wrap:balance;line-height:1.15;margin:0}
+h1{font-size:clamp(52px,9vw,112px);font-weight:800;letter-spacing:-.01em}
+h2{font-size:clamp(30px,4vw,42px);font-weight:600;margin:0 0 .6em}
+h3{font-size:22px;font-weight:600;margin:1.6em 0 .5em}
+h4{font-size:17px;font-weight:600;font-family:"IBM Plex Sans",sans-serif;margin:1.3em 0 .4em}
+p{margin:0 0 1em}
+.eyebrow{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute)}
+.eyebrow b{color:var(--rust);font-weight:500}
+nav.toc{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+nav.toc ul{list-style:none;margin:0;padding:10px 0;display:flex;gap:4px 18px;flex-wrap:wrap;font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.06em}
+nav.toc a{color:var(--ink2);text-decoration:none}
+nav.toc a:hover{color:var(--rust)}
+header.hero{padding:72px 0 0}
+.hero .thesis{font-family:"Shippori Mincho",serif;font-size:clamp(20px,2.4vw,27px);line-height:1.4;max-width:30ch;margin:20px 0 12px;color:var(--ink)}
+.hero .sub{color:var(--ink2);max-width:60ch}
+figure{margin:0}
+figure.lead{margin:40px 0 0}
+figure img{display:block;width:100%;height:auto;border-radius:3px}
+figcaption{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--mute);margin-top:8px;line-height:1.5}
+section{padding:64px 0 24px;border-top:1px solid var(--line)}
+section:first-of-type{border-top:0}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:24px 40px}
+.grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+.card{background:var(--card);border:1px solid var(--line);padding:18px 20px;border-radius:3px}
+.card h4{margin-top:0}
+.card .eyebrow{margin-bottom:6px}
+ul,ol{padding-left:1.2em;margin:0 0 1em}
+li{margin:.25em 0}
+.pillar{border-left:3px solid var(--rust);padding:2px 0 2px 16px;margin:18px 0}
+.pillar b{font-family:"Shippori Mincho",serif;font-size:19px;font-weight:600;display:block}
+table{border-collapse:collapse;width:100%;font-size:14.5px;font-variant-numeric:tabular-nums}
+th,td{text-align:left;vertical-align:top;padding:8px 12px 8px 0;border-bottom:1px solid var(--line)}
+th{font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--mute);font-weight:500}
+td.num{font-family:"IBM Plex Mono",monospace;white-space:nowrap}
+.tw{overflow-x:auto;margin:12px 0 24px}
+code{font-family:"IBM Plex Mono",monospace;font-size:.88em;background:var(--code);padding:1px 5px;border-radius:3px}
+pre{background:var(--code);padding:14px 16px;overflow-x:auto;border-radius:3px;font-size:13px;line-height:1.5}
+pre code{background:none;padding:0}
+.loop{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:20px 0}
+.loop div{background:var(--card);border:1px solid var(--line);padding:14px;border-radius:3px;min-height:118px}
+.loop .eyebrow{margin-bottom:4px}
+.loop b{font-family:"Shippori Mincho",serif;font-size:18px;font-weight:600;display:block;margin-bottom:4px}
+.loop small{color:var(--ink2);font-size:13.5px;line-height:1.45;display:block}
+.swatches{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:14px 0 22px}
+.sw{border-radius:3px;padding:10px;min-height:96px;display:flex;flex-direction:column;justify-content:flex-end;border:1px solid rgba(0,0,0,.08)}
+.sw span{font-family:"IBM Plex Mono",monospace;font-size:11px;line-height:1.4}
+.tod{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:14px 0 22px}
+.tod div{height:86px;border-radius:3px;padding:8px;font-family:"IBM Plex Mono",monospace;font-size:11px;display:flex;align-items:flex-end}
+.gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;margin:20px 0}
+.callout{background:var(--teal-soft);border-left:3px solid var(--teal);padding:12px 16px;margin:18px 0;border-radius:0 3px 3px 0}
+.callout.warn{background:color-mix(in srgb,var(--rust) 10%,var(--bg));border-color:var(--rust)}
+.phases{counter-reset:ph}
+.phase{display:grid;grid-template-columns:64px 1fr;gap:16px;padding:18px 0;border-bottom:1px solid var(--line)}
+.phase .n{font-family:"Shippori Mincho",serif;font-size:34px;font-weight:800;color:var(--rust);line-height:1}
+.phase h4{margin:4px 0 6px}
+.phase .meta{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--mute);margin-bottom:6px}
+.q{display:grid;grid-template-columns:28px 1fr;gap:10px;padding:10px 0;border-bottom:1px dashed var(--line)}
+.q .m{font-family:"IBM Plex Mono",monospace;color:var(--rust);font-size:13px;padding-top:3px}
+.dl dt{font-weight:600;margin-top:10px}.dl dd{margin:0;color:var(--ink2)}
+footer{padding:40px 0 80px;color:var(--mute);font-family:"IBM Plex Mono",monospace;font-size:12px}
+@media (max-width:640px){.tod{grid-template-columns:repeat(2,1fr)}.phase{grid-template-columns:44px 1fr}}
+@media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+</style>
+
+<nav class="toc"><div class="wrap"><ul>
+<li><a href="#concept">Concept</a></li><li><a href="#loop">Loop</a></li><li><a href="#world">World</a></li><li><a href="#raft">Raft</a></li><li><a href="#radio">Radio</a></li><li><a href="#islands">Islands</a></li><li><a href="#ad">Art direction</a></li><li><a href="#audio">Audio</a></li><li><a href="#tech">Tech plan</a></li>
+</ul></div></nav>
+
+<header class="hero"><div class="wrap">
+  <div class="eyebrow">Design document · design document · v3 · 2026-08-21 · <b>signed off, in build</b></div>
+  <h1>Raft 2100</h1>
+  <p class="thesis">A balsa raft, a radio, and a drowned mountain range. You sail toward voices.</p>
+  <p class="sub">Ambient first-person exploration on the Shiver Me Timbers engine. The Kon-Tiki raft, rebuilt to its 1947 bones, carries you between the high ground of a flooded Sierra in the year 2100, following fragments on the radio to islands where Alan Watts is waiting in pieces.</p>
+  <figure class="lead"><img src="@@IMG10@@" alt="Kon-Tiki under sail in 1947, colour photograph, port quarter view showing the bipod mast, topsail, mizzen and stern flag pole"><figcaption>Kon-Tiki at sea, 1947. The single best reference frame: bipod mast with rope ladder and lookout platform, main square sail with topsail above, small mizzen and flag pole at the stern, bow splashboards, cargo stacked against the cabin. Wikimedia Commons / National Library of Norway.</figcaption></figure>
+</div></header>
+
+<section id="concept"><div class="wrap"><div class="col">
+  <div class="eyebrow">01 · Concept</div>
+  <h2>What this is, and what it is not</h2>
+  <p>Raft 2100 is a second game mode in the same repository. It shares the ocean, sky, clouds, islands, ropes, audio and post pipeline with the pirate simulation and shares none of its intent. There is no combat, no enemy, no failure state. The pace is set by a raft that makes three knots downwind and cannot point into the wind. Waiting is part of the design, not a cost of it.</p>
+  <p>The content is the recorded voice of Alan Watts (1915–1973), supplied through our cooperation with the Alan Watts Organization and Mark Watts. The game does not explain Watts. It places you somewhere quiet and lets a three-minute fragment land on you while you are doing something else with your hands: holding a tiller, tuning a dial, walking a beach at dusk. One island, one teaching, assembled from scattered pieces.</p>
+
+  <div class="pillar"><b>Slowness is the mechanic.</b>The raft's real handling limits (downwind-ish, guaras and a steering oar, no reverse) are the source of the mood. We tune toward accessible, not arcade. A harder "true Kon-Tiki" toggle exists for those who want it.</div>
+  <div class="pillar"><b>Everything is touched, nothing is clicked.</b>In play, every action is a place on the raft you walk to: the oar at the stern, the radio in the cabin corner, the guara planks in the chinks between logs, the sheet at the cabin wall. Hotkeys exist for debugging and for filming from outside cameras. They are not the experience.</div>
+  <div class="pillar"><b>The voice is the reward, the world is the frame.</b>Teachings are not collectibles. Each island is built around one idea; the clues on it are the idea's parts, found in an order the terrain suggests. Some parts only resolve later, back on the raft, at night, through the radio. That is the reason to leave.</div>
+  <div class="pillar"><b>Plumbing first, content later.</b>Every clip is a placeholder MP3 behind a manifest. Curated Watts material drops in without code changes once chosen. We spend zero time on clip selection now.</div>
+
+  <h3>Tone</h3>
+  <p>Whimsical but not cute. Japanese-inspired in its restraint and its reverence for weather: Ghibli's water and light (Ponyo's sea, Mononoke's forests on the high ground) for colour and generosity; Firewatch and Olly Moss for how a landscape is reduced to layered planes and a palette per hour of the day. No post-apocalypse grime. The flood happened a long time ago; the world has settled into it.</p>
+</div></div></section>
+
+<section id="loop"><div class="wrap">
+  <div class="col"><div class="eyebrow">02 · Core loop</div>
+  <h2>Listen, dial, sail, land, walk, return</h2>
+  <p>One full cycle is 20–30 minutes: a short sail, an island, a night on the raft. The vertical slice has three islands and three teachings, arranged so that each voyage crosses a different kind of water and a different hour of the day.</p></div>
+  <div class="loop">
+    <div><div class="eyebrow">1 · raft</div><b>Listen</b><small>Static on the radio. Fragments drift in and out: a sentence, a laugh, a bell. Each fragment belongs to a station somewhere in the archipelago.</small></div>
+    <div><div class="eyebrow">2 · cabin</div><b>Dial in</b><small>Turn the tuning knob until a fragment steadies. Lock it. Signal strength is directional: sweep the raft's heading and the static thins toward the source.</small></div>
+    <div><div class="eyebrow">3 · deck</div><b>Sail</b><small>A marker settles on the horizon and on the paper chart. Raise a guara forward, lower one aft, lean on the oar. Voyage music and weather fill the crossing. No teachings during the sail.</small></div>
+    <div><div class="eyebrow">4 · shore</div><b>Land</b><small>Beach the raft or anchor off. Step down onto sand. The raft stays where you left it, tugging at its line.</small></div>
+    <div><div class="eyebrow">5 · island</div><b>Walk</b><small>Follow the island's own logic (a path of cairns, a dead orchard, a drowned lookout) through 3–5 clue spots. Proximity audio, found objects, readable text.</small></div>
+    <div><div class="eyebrow">6 · night</div><b>Return</b><small>Some parts only complete on the raft after dark, on the radio. You sleep. Dawn brings a new fragment. Repeat.</small></div>
+  </div>
+  <div class="col">
+  <h3>Why each part is there</h3>
+  <ul>
+    <li><b>Directional radio</b> replaces a quest marker with a skill. You learn to read static the way you read wind.</li>
+    <li><b>No teachings while sailing</b> keeps the voyage a voyage: music, weather, the raft creaking. If Watts played during transit the islands would have no reason to exist.</li>
+    <li><b>Raft-radio callbacks at night</b> close each island's idea away from the island, turning the raft from vehicle into home.</li>
+    <li><b>Three islands</b> is the smallest number that creates a route, a choice of order, and a sense of archipelago.</li>
+    <li><b>Arrival is beaching.</b> The raft grounds on the beach apron; you step off the bow. Push off to leave. No anchor ritual.</li>
+    <li><b>Night is optional.</b> Lie on the mat and dawn comes; stay up and the night plays in real time. The radio callback plays either way.</li>
+  </ul>
+  </div>
+</div></section>
+
+<section id="world"><div class="wrap"><div class="col">
+  <div class="eyebrow">03 · World</div>
+  <h2>The high ground of the Sierra, 2100</h2>
+  <p>Loose inspiration, not a digital elevation model. One exception: a single Half-Dome-like silhouette stands on the far horizon, unreachable, for anyone who knows the valley. The flood is deep enough that the Central Valley is open sea and only the granite high country stands: domes, benches, cirques, a few drowned conifer ridgelines with their tops above water. Recognisability is not a goal; Sierra <i>character</i> is. Glacial-polished granite, Jeffrey pine and juniper on the benches, manzanita and snowbrush lower, a beach where the old treeline meets the new waterline.</p>
+  <p>The existing archipelago generator (<code>src/island/</code>: archetypes, beach apron, terraces, lagoon basin, sea stacks, headlands) already produces islands with a beach band. For this mode we author a new archetype family: <b>granite dome</b> (smooth, round-shouldered, exfoliation terraces), <b>drowned ridge</b> (long, narrow, a line of tree tops just breaking the surface to leeward), and <b>cirque bowl</b> (a half-ring enclosing a still lagoon). Palms become pines; sand becomes decomposed granite with a drift line.</p>
+  <h3>Scale and distances</h3>
+  <div class="tw"><table>
+    <tr><th>Quantity</th><th>Value</th><th>Why</th></tr>
+    <tr><td>Raft speed (default)</td><td class="num">3–4 kn (1.5–2 m/s)</td><td>Kon-Tiki averaged 1.5 kn over 101 days; we allow a little more so a crossing never exceeds 6 min.</td></tr>
+    <tr><td>Island spacing</td><td class="num">500–700 m</td><td>3–6 min crossings. Existing generator uses 400 m gaps in a 700–3600 m annulus; we tighten the annulus.</td></tr>
+    <tr><td>Island radius</td><td class="num">150–300 m</td><td>A 10–15 min walk with 3–5 stops. Terrain grid at 128² gives 1.2–2.3 m cells; raise to 256² for walkable islands.</td></tr>
+    <tr><td>Day length</td><td class="num">24 real min</td><td>One island visit ≈ one daylight; nights are for the radio and sleep. Adjustable.</td></tr>
+    <tr><td>Playable islands (slice)</td><td class="num">3 + raft start</td><td>Hub loop; order free.</td></tr>
+  </table></div>
+  <h3>Realism dial</h3>
+  <p>We keep the engine's physically-based ocean, sky and sun (it is a real asset here) and apply the stylisation in three places only: terrain and vegetation forms, a colour grade per hour, and atmospheric layering (fog banks between islands that Firewatch-flatten the far planes). That gives a Ghibli-bright close world on a believable sea without a full NPR rewrite.</p>
+</div></div></section>
+
+<section id="raft"><div class="wrap">
+  <div class="col"><div class="eyebrow">04 · The raft</div>
+  <h2>Kon-Tiki, 1947 bones, 2100 dressing</h2>
+  <p>The structure is the real raft at true scale, from Heyerdahl's own account and the museum raft in Oslo (full reference with citations: <code>docs/raft2100/kon-tiki-reference.md</code>). The dressing is re-imagined for 2100: same crates in the same places, different contents. The Kon-Tiki face stays on the sail; it is the one piece of 1947 the fiction keeps on purpose.</p></div>
+
+  <div class="gallery">
+    <figure><img src="@@IMG01@@" alt="Starboard side of the Kon-Tiki raft in the museum: open cabin wall, stacked boxes, rope ladder and stays"><figcaption>Starboard elevation. The cabin's only opening is a third of this wall; the kitchen box sits outside it in the lee.</figcaption></figure>
+    <figure><img src="@@IMG02@@" alt="Bow-on view of the raft showing splashboards, staggered log ends, bamboo deck battens and the painted sail"><figcaption>Bow-on. Staggered log ends behind low splashboards; bamboo battens fore-aft over split-cane deck; mast legs about a sail-width apart.</figcaption></figure>
+    <figure><img src="@@IMG04@@" alt="Port side of the raft with yellow dinghy, crates, centreboards and the steering oar"><figcaption>Port side: no deck here, only crates lashed against the cabin, the dinghy on edge, and guara planks leaning.</figcaption></figure>
+    <figure><img src="@@IMG08@@" alt="Stern of the raft: the steering oar between two thole pins on a heavy balsa block lashed across the projecting centre logs"><figcaption>Stern. Steering oar between two thole-pins on a squared block over the three projecting centre logs. Bare logs aft of the cabin.</figcaption></figure>
+    <figure><img src="@@IMG09@@" alt="Looking into the cabin through the starboard opening: woven bamboo walls, matting and stores"><figcaption>Through the doorway: woven bamboo walls, matting over the stowed boxes, ridge too low to stand under.</figcaption></figure>
+  </div>
+
+  <div class="col"><h3>Dimensions we build to</h3></div>
+  <div class="tw"><table>
+    <tr><th>Part</th><th>Dimension</th><th>Notes</th></tr>
+    <tr><td>Main logs</td><td class="num">9 × balsa, Ø 0.50–0.60 m</td><td>Centre 13.7 m; outer 9.1 m; symmetric stagger → V bow, square stern. 3 centre logs project ~0.6 m aft. Gaps 2–8 cm, irregular, seeded.</td></tr>
+    <tr><td>Beam</td><td class="num">≈ 5.4 m</td><td>Inferred from 5.5 m cross-beams.</td></tr>
+    <tr><td>Cross-beams</td><td class="num">9 × Ø 0.30 m, 0.91 m pitch</td><td>Athwartships on top of logs, under the decked midsection. Boxes and 56 water cans between them.</td></tr>
+    <tr><td>Deck</td><td class="num">split bamboo + mats</td><td>Only forward of cabin and the starboard strip. Port of cabin = cargo; stern = bare logs. One slim foot-rail log per side, no bulwark.</td></tr>
+    <tr><td>Freeboard</td><td class="num">≈ 0.45 m at cabin sill</td><td>Deck edge is 1.5 m out from the cabin wall. Water comes aboard in any sea. Deck-water solver applies.</td></tr>
+    <tr><td>Cabin</td><td class="num">2.4 × 4.3 m, ridge ≈ 1.4 m</td><td>Aft of the mast, ridge fore-aft. Woven split-bamboo walls, banana-leaf/thatch gable roof with 0.25 m overhang. Starboard wall open for 1.4 m. Floor = matting over 8 lashed boxes. <b>Cannot stand: auto-crouch.</b></td></tr>
+    <tr><td>Bipod mast</td><td class="num">8.8 m, legs Ø 0.18 m, ≈ 4.5 m apart at deck</td><td>Mangrove, crossed and lashed at the top; lookout platform at the crossing; rope ladder up one leg; short pole above for topsail and flag yard; stays fore/aft/side.</td></tr>
+    <tr><td>Main sail</td><td class="num">5.5 m × 4.6 m</td><td>Square, on a doubled bamboo yard; two rows of reef points; Kon-Tiki face, rust red with 8 rays, ≈ 1.8 m tall.</td></tr>
+    <tr><td>Topsail / mizzen</td><td class="num">≈ 2.2 × 1.6 m / ≈ 1.8 × 1.6 m</td><td>Sizes unrecorded; estimated from the 1947 photo. Mizzen on a short pole at the stern; flag/antenna pole beside it.</td></tr>
+    <tr><td>Guaras</td><td class="num">5 × 2.0 × 0.6 × 0.025 m</td><td>Fir planks in the chinks: 2 forward, 2 aft, 1 midships. Each has raised/half/lowered states.</td></tr>
+    <tr><td>Steering oar</td><td class="num">5.8 m shaft, blade 1.2 × 0.4 m</td><td>Between two 0.3 m thole-pins on a 2.5 × 0.3 m block across the stern logs. Cross-piece tiller. Sweep limited by ropes to the raft sides.</td></tr>
+  </table></div>
+
+  <div class="col"><h3>Walkable, to scale</h3>
+  <p>Eye height 1.65 m standing, 1.05 m crouched; the cabin forces the crouch on entry and releases it at the door. Walkable surface = the raft's own heightfield: logs (round, so footing slopes toward the chinks), deck mats (flat, proud of the logs by the cross-beam height ≈ 0.30 m), cabin floor (mats over boxes, another 0.35 m up). Moving between these is stepping, not climbing. The deck edge is a real edge: you can walk off it into the sea; the raft drifts slowly and is always catchable, and you climb back at the foot-rail. There is no death state.</p>
+  <p>Your hands are in frame. In the first build they are simple low-poly mitts with a grab pose, enough to prove every station; sculpted hands and per-station animation come in the polish phase. The parrot's cage hangs under the roof, empty, door open.</p>
+  <p>Interaction stations, all diegetic and all placed where the real crew stood: <b>tiller</b> (stern, on the bare logs), <b>five guaras</b> (grab a plank, pull up or push down), <b>sheets</b> (cleats on the cabin's forward corners), <b>halyard</b> (mast foot), <b>radio</b> (cabin, port-aft corner, behind the partition), <b>lantern</b> (aft gable), <b>chart</b> (cabin, starboard wall by the door), <b>sleeping mat</b> (cabin), <b>ladder</b> (climb to the lookout platform), <b>gangway</b> (any deck edge within 1 m of ground = step ashore).</p>
+
+  <h3>2100 dressing, item by item</h3></div>
+  <div class="tw"><table>
+    <tr><th>1947</th><th>2100</th><th>Place</th></tr>
+    <tr><td>US Army ration cartons</td><td>Mixed salvaged crates: plastic fish boxes, a faded cooler, wooden wine crates</td><td>Port side of cabin, forward of cabin</td></tr>
+    <tr><td>56 tin water cans under deck</td><td>Blue plastic jerrycans and a rain-catch tarp funnelling into a drum</td><td>Under deck; drum at cabin aft corner</td></tr>
+    <tr><td>NC-173 valve receiver, hand generator</td><td>Jury-rigged shortwave: salvaged car radio face, hand-crank, a wire aerial to the masthead, one LED meter. The dial is the game's main interface.</td><td>Cabin radio corner</td></tr>
+    <tr><td>Paraffin hurricane lantern</td><td>A solar LED lantern and one real oil lamp (the oil lamp is the one you light)</td><td>Aft gable; cabin</td></tr>
+    <tr><td>Yellow rubber dinghy</td><td>Small flexible solar panel on the cabin roof, port slope; the dinghy becomes a patched inflatable in the same spot</td><td>Cabin port wall; roof</td></tr>
+    <tr><td>Wicker fruit baskets, coconuts</td><td>Net bags of foraged pine nuts and manzanita berries; a planter box of greens on the roof ridge</td><td>Foredeck; ridge</td></tr>
+    <tr><td>Primus stove kitchen box</td><td>Rocket stove in a steel ammo tin; enamel pot; same box, same lashing</td><td>Starboard, outside door</td></tr>
+    <tr><td>Courtesy flags of nations</td><td>One hand-dyed pennant; the flag yard otherwise carries drying laundry</td><td>Masthead yard</td></tr>
+    <tr><td>Parrot cage</td><td>An empty bird cage, door open (someone was here)</td><td>Under cabin roof</td></tr>
+    <tr><td>Kon-Tiki face on sail</td><td><b>Unchanged.</b> Repainted, fading at the edges.</td><td>Main sail</td></tr>
+  </table></div>
+  <div class="col"><div class="callout warn"><b>Known uncertainties in the reference.</b> Mast height (8.8 m vs "nearly 10 m"), leg spacing and lean are photo estimates. Sail colour is "orange" in the book and ochre in the museum. Guara positions were never recorded. Topsail and mizzen have no published sizes. None of these block the build; all are parameters.</div></div>
+</div></section>
+
+<section id="radio"><div class="wrap"><div class="col">
+  <div class="eyebrow">05 · Radio</div>
+  <h2>The dial is the map</h2>
+  <p>The radio is a diegetic object you kneel in front of. One tuning knob, one volume knob, one signal meter, one speaker, a hand crank. There is no menu.</p>
+  <h4>Stations</h4>
+  <p>Each island broadcasts on a fixed frequency from a fixed world position. A station has a <i>fragment pool</i> (3–6 short audio pieces, placeholder MP3s), a <i>locked marker</i>, and a <i>night pool</i> (the callbacks). Stations do not move.</p>
+  <h4>Tuning</h4>
+  <p>Audible signal = <code>clarity(Δf) × strength(d, bearing)</code>. Clarity is a narrow window around the station frequency; strength falls with distance and is multiplied by a cardioid on the raft's heading relative to the station (the aerial runs fore-aft along the mast, so the fiction holds). Static fills the remainder of the gain. Below a clarity threshold you hear words through noise; above it for two seconds, the station <b>locks</b>: a soft chime, the meter holds, and a marker appears on the horizon haze and on the paper chart.</p>
+  <h4>Night</h4>
+  <p>After dusk, locked stations whose island has been visited open their night pool; the radio, left on, plays one callback per night. Propagation is better at night (true of shortwave, and a useful excuse): range roughly doubles.</p>
+  <h4>Implementation surface</h4>
+  <ul>
+    <li><code>src/radio/</code> (new): <code>stations.ts</code> (data + manifest), <code>tuner.ts</code> (pure: frequency, bearing, distance → clarity/strength), <code>radioAudio.ts</code> (static synth + two-deck fragment player on the existing music bus, HRTF-positioned at the radio prop).</li>
+    <li>Marker rendering: a sprite in the sky haze layer plus a chart. The chart is a toggled overlay first (phase 4) and becomes a paper prop on the cabin wall in the polish phase.</li>
+    <li>Tests: tuner purity and the cardioid (heading toward station ⇒ strength up), lock hysteresis, night-range doubling.</li>
+  </ul>
+</div></div></section>
+
+<section id="islands"><div class="wrap"><div class="col">
+  <div class="eyebrow">06 · Islands &amp; teachings</div>
+  <h2>One idea per island</h2>
+  <p>A teaching is an <i>idea</i>, not a lecture. The island's form, its props and its clue order all serve that one idea. Content is placeholder until the Foundation's clips are chosen; the structure is built now.</p>
+  <h4>Clue types (all three in the slice)</h4>
+  <ul>
+    <li><b>Proximity audio.</b> A source object (a bell in a tree, a half-buried speaker, a shell, a cairn) plays a fragment spatially when you approach; repeats on re-approach after a cooldown.</li>
+    <li><b>Found objects + text.</b> A carved plank, a notebook under a rock, a painted sign. Diegetic, readable by picking up. Short.</li>
+    <li><b>Raft-radio callbacks.</b> The idea's last piece. Plays only at night on the raft after the island's clues are found.</li>
+  </ul>
+  <h4>Data model</h4>
+  <pre><code>// src/teachings/manifest.ts — placeholder content, real structure
+export interface Teaching {
+  id: string;              // 'clouds', 'wave', 'rope'
+  islandSeed: number;
+  station: { freqMHz: number; };
+  clues: Clue[];           // ordered by suggested discovery, not enforced
+  night: AudioRef[];       // raft-radio callbacks
+}
+type Clue =
+  | { kind: 'audio'; prop: PropId; at: IslandLocal; clip: AudioRef; radius: number }
+  | { kind: 'object'; prop: PropId; at: IslandLocal; text: string }
+type AudioRef = { src: string; durationSec: number; title: string; credit: string }</code></pre>
+  <h4>The three slice islands (working titles, all placeholder ideas)</h4>
+  <div class="grid3">
+    <div class="card"><div class="eyebrow">Granite dome · morning</div><h4>The Wiggle</h4><p>On the pattern that is never the same twice. A dome you climb in a spiral of cairns; the last cairn is the station's aerial on the summit.</p></div>
+    <div class="card"><div class="eyebrow">Drowned ridge · afternoon</div><h4>Treetops</h4><p>On what stays when the ground is gone. A narrow ridge; the clues are in the standing dead pines; one bell in a tree you reach by wading.</p></div>
+    <div class="card"><div class="eyebrow">Cirque bowl · dusk</div><h4>The Still Lagoon</h4><p>On water that takes the shape of whatever holds it. A still lagoon inside a half-ring of granite; you pole the raft in; the last clue is read from the raft.</p></div>
+  </div>
+</div></div></section>
+
+<section id="ad"><div class="wrap">
+  <div class="col"><div class="eyebrow">07 · Art direction</div>
+  <h2>Ghibli light on Sierra granite</h2>
+  <p>Two touchstones, one job each. <b>Ghibli</b> (Ponyo, Mononoke) decides colour: generous, saturated, clean water blues and leaf greens, warm skin-light on wood. <b>Firewatch / Olly Moss</b> decides <i>composition</i>: a palette per hour, far planes flattened by haze into 3–4 tones, bold silhouettes, sun always placed for a rim. The engine's physically-based sea, sun and clouds stay; the grade and the landscape forms do the stylising.</p></div>
+  <h3 style="margin-top:0">Material palette</h3>
+  <div class="swatches">
+    <div class="sw" style="background:#C6A87A;color:#2B2418"><span>balsa, dry<br>#C6A87A</span></div>
+    <div class="sw" style="background:#8E8A7E;color:#1E1C18"><span>balsa, weathered grey<br>#8E8A7E</span></div>
+    <div class="sw" style="background:#D9B55E;color:#2B2418"><span>bamboo<br>#D9B55E</span></div>
+    <div class="sw" style="background:#B2472A;color:#FFF2E8"><span>Kon-Tiki red<br>#B2472A</span></div>
+    <div class="sw" style="background:#E3CFA3;color:#2B2418"><span>sail linen<br>#E3CFA3</span></div>
+    <div class="sw" style="background:#A9A39A;color:#1E1C18"><span>granite, polished<br>#A9A39A</span></div>
+    <div class="sw" style="background:#4F6F4A;color:#EAF1E6"><span>Jeffrey pine<br>#4F6F4A</span></div>
+    <div class="sw" style="background:#2F6E70;color:#E6F2F1"><span>deep water<br>#2F6E70</span></div>
+    <div class="sw" style="background:#6FB2B0;color:#0F2A2A"><span>lagoon shallows<br>#6FB2B0</span></div>
+  </div>
+  <h3>Palette per hour (grade targets)</h3>
+  <div class="tod">
+    <div style="background:linear-gradient(180deg,#F3C9A8,#8EB0C4);color:#2B2418">dawn 06 · peach over slate, fog in the gaps</div>
+    <div style="background:linear-gradient(180deg,#8FC3E6,#3E8FA8);color:#07222B">noon 12 · clean cyan, hard shadows, white granite</div>
+    <div style="background:linear-gradient(180deg,#F0A45A,#5A4B7A);color:#2B1A10">dusk 19 · Olly Moss amber to violet, rim light</div>
+    <div style="background:linear-gradient(180deg,#17283A,#0A1218);color:#C9D6E0">night 23 · indigo, moon road on the water, one lantern</div>
+  </div>
+  <div class="col">
+  <h3>Grading pipeline</h3>
+  <p>The post pipeline today ends in ACES + vibrance + grain + SMAA; there is no LUT or lift-gamma-gain stage. We add one <b>grade node</b> after tonemapping (slot at <code>postPipeline.ts:289</code>): a 3D LUT (32³) per hour band, blended by time of day, plus a global lift/gamma/gain for quick iteration. LUTs are authored in-engine from screenshots of each hour, not imported from film stock. Vignette stays; grain drops to near zero (grain reads as grit, and this world is not gritty).</p>
+  <h3>Atmosphere</h3>
+  <ul>
+    <li>Fog as a device: banks between islands, so a destination appears as a silhouette first, then a tone, then a place. Weather presets reuse the existing spatial weather field with the storm presets removed.</li>
+    <li>Far planes flatten: haze strength biased up so distant islands collapse to 2–3 values. Near planes stay full-range.</li>
+    <li>Sun placement: the day clock is tuned so that the scripted arrival times at each slice island fall at a flattering hour.</li>
+  </ul>
+  <h3>Typography in-world</h3>
+  <p>Signs and the chart use a hand-lettered brush face; the radio's dial plate uses a worn DIN-like engraving. No UI typography in play except the settings screens.</p>
+  </div>
+</div></section>
+
+<section id="audio"><div class="wrap"><div class="col">
+  <div class="eyebrow">08 · Audio</div>
+  <h2>Three layers, never silent</h2>
+  <ol>
+    <li><b>Bed</b>: the existing ocean/wind bed and procedural fallback, plus raft-specific loops (rope creak on load, bamboo deck flex, water through the chinks, sail luff). Reuses <code>src/audio/bed.ts</code>.</li>
+    <li><b>Score</b>: an original ambient score (koto, shakuhachi, soft synth drones; bespoke MP3s, Suno allowed). Situations: <code>'voyage' | 'approach' | 'island' | 'night'</code>; the existing playlist selector already has <code>'island'</code> and an unwired <code>landDistance</code> hook. Score ducks fully for any Watts clip.</li>
+    <li><b>Voice</b>: Watts fragments. Spatial (HRTF) when from a prop or the radio; dry only for the night callbacks heard lying in the cabin. Placeholder MP3s now; manifest swap later.</li>
+  </ol>
+  <p>Asset convention: <code>assets/audio/teachings/&lt;teaching&gt;/&lt;clue&gt;.mp3</code>, credited in <code>CREDITS.md</code>, discovered by the same build-time glob as music.</p>
+</div></div></section>
+
+<section id="tech"><div class="wrap">
+  <div class="col"><div class="eyebrow">09 · Tech plan</div>
+  <h2>What exists, what is new, in what order</h2>
+  <h3>Reused as-is</h3>
+  <ul>
+    <li>Ocean sim + surface, CPU ocean height query, clouds, sky (sun, moon, stars, fog tinting), weather field, post pipeline, audio facade with HRTF emitters and two-deck music player, islands generator with <code>heightAt</code>, ropes compute solver, settings UI, game loop.</li>
+    <li>Ship pipeline contract: <code>PieceDef[]</code> blueprint → <code>ShipAssembly</code>, deterministic <code>variation.ts</code>, TSL tri-planar materials, deck heightfield with <code>solid</code> obstacle map. The raft is a third blueprint, selectable alongside galleon and brigantine.</li>
+  </ul>
+  <h3>New systems (each its own directory = its own agent owner)</h3>
+  <div class="tw"><table>
+    <tr><th>Dir</th><th>Owns</th><th>Key tests</th></tr>
+    <tr><td><code>src/ship/raft*</code></td><td><code>buildRaftBlueprint</code>, new piece kinds (<code>log, crossbeam, bamboo-deck, guara, cabin-wall, thatch-roof, bipod-mast, steering-oar, crate</code>), <code>raftParams</code>, bamboo/thatch/balsa/rope TSL materials, sail face decal</td><td>determinism; cabin interior volume ≥ 2.4×4.3×1.2 m clear; every station socket resolves; tri budget &lt; galleon</td></tr>
+    <tr><td><code>src/player/</code></td><td>First-person controller: capsule on raft heightfield + island <code>heightAt</code>, ship-frame locomotion (§V.73), auto-crouch volumes, swim, step-ashore, pointer lock, hands rig + interaction reach</td><td>walking on a rolling deck keeps deck-relative speed; crouch triggers on cabin sill; cannot clip cabin walls</td></tr>
+    <tr><td><code>src/radio/</code></td><td>Stations, tuner math, static synth, lock/marker, night pools</td><td>cardioid monotonic; lock hysteresis; night range</td></tr>
+    <tr><td><code>src/teachings/</code></td><td>Manifest, clue triggers (proximity/object), progression state, placeholder assets</td><td>each slice island has ≥3 clues reachable on foot; night callback gated on island completion</td></tr>
+    <tr><td><code>src/sailing/raft*</code></td><td>Raft kinematics: downwind polar, guara lift/drag per position, oar torque, leeway; "accessible" vs "true" tuning sets</td><td>can't point above ~100° TWA in true mode; guara forward-down turns bow downwind</td></tr>
+    <tr><td><code>src/island/sierra*</code></td><td>Archetypes: dome, drowned ridge, cirque; pine/manzanita vegetation; granite + DG sand materials; 256² grids</td><td>beach band walkable from waterline; slope &lt; 35° on clue paths</td></tr>
+    <tr><td><code>src/core/grade*</code></td><td>LUT grade node, per-hour blend</td><td>identity LUT = no-op within 1/255</td></tr>
+    <tr><td><code>src/main-raft.ts</code></td><td>Second entry <code>raft.html</code> with its own bundle and boot, shared modules; day clock; mode wiring. Pirate <code>main.ts</code> untouched.</td><td>boot smoke in browser harness</td></tr>
+  </table></div>
+  </div>
+  <div class="col"><h3>Phases</h3></div>
+  <div class="phases">
+    <div class="phase"><div class="n">0</div><div><div class="meta">now · signoff gate</div><h4>This document + AD board</h4><p>Resolve open questions below. Produce 3 in-engine lookdev screenshots (dawn / noon / dusk) from the existing engine with a prototype grade, to lock the palette before modelling anything.</p></div></div>
+    <div class="phase"><div class="n">1</div><div><div class="meta">raft · in build (blueprint, sailing model and walker landed 2026-08-21)</div><h4>Kon-Tiki blueprint, to scale, in the pirate sim</h4><p>Third ship variant, selectable. Logs, beams, deck, cabin with interior, bipod rig with three sails, guaras, oar, 2100 dressing as simple crates first. Materials. Camera stations at tiller, radio, bow, lookout so it can be reviewed before a walker exists. Exit: user signoff on screenshots vs the museum photos (§V.22).</p></div></div>
+    <div class="phase"><div class="n">2</div><div><div class="meta">player · parallel with 1</div><h4>First-person walker</h4><p>Controller on the galleon deck first (it has the heightfield today), then on the raft. Pointer lock, crouch, swim, step ashore onto an island. Hands as a placeholder mesh with one grab pose. Exit: walk from the raft's tiller into the cabin, crouch, back out, off the edge, swim, climb back.</p></div></div>
+    <div class="phase"><div class="n">3</div><div><div class="meta">mode</div><h4>Raft 2100 entry point + world</h4><p>Second entry, day clock, Sierra archetypes, three slice islands placed, grade node with first LUTs. No pirate systems loaded. Exit: sail raft between three islands across a full day.</p></div></div>
+    <div class="phase"><div class="n">4</div><div><div class="meta">radio + teachings</div><h4>The loop</h4><p>Diegetic radio, stations, lock/marker, clue triggers, night callbacks, placeholder audio and score. Exit: the full 20–30 min cycle, three times, with placeholder content.</p></div></div>
+    <div class="phase"><div class="n">5</div><div><div class="meta">polish</div><h4>Grade, props, hands, content drop-in</h4><p>Per-hour LUTs final, 2100 dressing detail, hands animations per station, real Watts clips via manifest, score tracks.</p></div></div>
+  </div>
+  <div class="col"><div class="callout"><b>Hazards already visible.</b> (1) Module-level singletons (<code>setActiveCaustics</code>, <code>setActiveDeckWater</code>) assume one world per page; the second entry must not import the pirate boot. (2) The raft's deck is three surfaces at three heights plus round logs; the deck heightfield generator assumes a planked camber and needs a raft-specific writer. (3) The sail membrane model assumes a yard-hung square sail, which the raft has; the topsail and mizzen reuse it unchanged. (4) Terrain at 128² is too coarse for on-foot stairs; the slice islands go to 256².</div></div>
+</div></section>
+
+
+
+<footer><div class="wrap">Reference: docs/raft2100/kon-tiki-reference.md · Photos: Wikimedia Commons, Kon-Tiki Museum Oslo, National Library of Norway · Primary text: Heyerdahl, The Kon-Tiki Expedition (1950)</div></footer>

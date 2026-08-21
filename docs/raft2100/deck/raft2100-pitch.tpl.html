@@ -1,0 +1,211 @@
+<title>Raft 2100 Pitch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@400;600;800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#0E171A; --bg2:#142124; --ink:#E8ECE9; --ink2:#B5BFBA; --mute:#7E8B87;
+  --line:#25363A; --amber:#E2A24A; --rust:#D8633F; --sea:#5FA6AC; --sea-deep:#1E4B50; --card:#132022;
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    --bg:#EEF1EF; --bg2:#E3E9E6; --ink:#1B2426; --ink2:#4A5456; --mute:#7A7F79;
+    --line:#CBD3CF; --amber:#B97A22; --rust:#B2472A; --sea:#2F6E70; --sea-deep:#D5E6E5; --card:#F7F9F7;
+  }
+}
+:root[data-theme="light"]{
+  --bg:#EEF1EF; --bg2:#E3E9E6; --ink:#1B2426; --ink2:#4A5456; --mute:#7A7F79;
+  --line:#CBD3CF; --amber:#B97A22; --rust:#B2472A; --sea:#2F6E70; --sea-deep:#D5E6E5; --card:#F7F9F7;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;font-size:17px;line-height:1.55;margin:0}
+a{color:var(--sea)}
+a:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+h1,h2,h3{font-family:"Shippori Mincho","Hiragino Mincho ProN","Yu Mincho",Georgia,serif;text-wrap:balance;line-height:1.1;margin:0}
+h1{font-size:clamp(56px,10vw,136px);font-weight:800;letter-spacing:-.015em}
+h2{font-size:clamp(34px,5vw,58px);font-weight:600}
+h3{font-size:24px;font-weight:600;margin:0 0 .4em}
+p{margin:0 0 1em;max-width:62ch}
+.slide{min-height:100svh;display:flex;flex-direction:column;justify-content:center;padding:clamp(40px,7vh,96px) clamp(20px,6vw,96px);border-top:1px solid var(--line);position:relative}
+.slide:first-of-type{border-top:0}
+.n{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);margin-bottom:18px}
+.n b{color:var(--amber);font-weight:500}
+.lede{font-family:"Shippori Mincho",serif;font-size:clamp(22px,2.6vw,32px);line-height:1.35;max-width:28ch;margin:18px 0 14px}
+.sub{color:var(--ink2);font-size:18px;max-width:58ch}
+.hero{background:linear-gradient(180deg,var(--bg2),var(--bg))}
+.hero figure{margin:36px 0 0;max-width:1100px}
+figure img{display:block;width:100%;height:auto;border-radius:4px}
+figcaption{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--mute);margin-top:8px}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:40px;align-items:start;max-width:1200px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;max-width:1200px;margin-top:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:18px}
+.card .k{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);margin-bottom:6px}
+.card b{font-family:"Shippori Mincho",serif;font-size:20px;font-weight:600;display:block;margin-bottom:6px}
+.card p{font-size:15px;color:var(--ink2);margin:0}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:18px 32px;margin-top:18px;max-width:1100px}
+.fact .v{font-family:"Shippori Mincho",serif;font-size:40px;font-weight:800;color:var(--amber);line-height:1;font-variant-numeric:tabular-nums}
+.fact .l{color:var(--ink2);font-size:15px;margin-top:6px}
+.hours{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;max-width:1100px;margin:20px 0}
+.hours div{height:120px;border-radius:4px;padding:10px;font-family:"IBM Plex Mono",monospace;font-size:11px;display:flex;align-items:flex-end}
+.sw{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.sw span{width:44px;height:44px;border-radius:4px;border:1px solid rgba(255,255,255,.08)}
+ul{padding-left:1.1em;margin:0 0 1em;max-width:62ch}
+li{margin:.3em 0}
+.mile{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;max-width:1200px;margin-top:18px}
+.mile div{border-top:3px solid var(--sea);padding-top:12px}
+.mile .k{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute)}
+.mile b{font-family:"Shippori Mincho",serif;font-size:19px;font-weight:600;display:block;margin:4px 0}
+.mile p{font-size:14.5px;color:var(--ink2);margin:0}
+.mile .done{border-top-color:var(--amber)}
+.quote{font-family:"Shippori Mincho",serif;font-size:clamp(22px,3vw,36px);line-height:1.3;max-width:26ch;color:var(--ink)}
+.quote small{display:block;font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--mute);margin-top:14px;letter-spacing:.1em}
+.ask{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--amber);padding:22px 26px;border-radius:4px;max-width:720px}
+.ask .ph{font-family:"IBM Plex Mono",monospace;color:var(--rust);font-size:13px}
+.eng{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;max-width:1200px;margin:22px 0 8px}
+.eng figure{margin:0}
+.eng img{border-radius:4px}
+.eng .wide{grid-column:1/-1}
+.engcap{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--mute);max-width:1200px}
+.engcap b{color:var(--amber);font-weight:500}
+footer{padding:28px clamp(20px,6vw,96px) 60px;color:var(--mute);font-family:"IBM Plex Mono",monospace;font-size:12px;border-top:1px solid var(--line)}
+@media (max-width:640px){.hours{grid-template-columns:repeat(2,1fr)}}
+@media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+</style>
+
+<section class="slide hero">
+  <div class="n">Pitch · <b>Raft 2100</b> · 2026</div>
+  <h1>Raft 2100</h1>
+  <p class="lede">A balsa raft, a radio, and a drowned mountain range. You sail toward voices.</p>
+  <p class="sub">A first-person ambient exploration game. The Kon-Tiki raft carries you between the high ground of a flooded Sierra in the year 2100, following fragments on shortwave to islands where the recorded voice of Alan Watts is waiting in pieces.</p>
+  <figure><img src="@@IMG10@@" alt="Kon-Tiki under sail, 1947"><figcaption>Kon-Tiki, Pacific, 1947. We rebuild her to the last lashing.</figcaption></figure>
+</section>
+
+<section class="slide">
+  <div class="n">01 · <b>The idea</b></div>
+  <h2>Slow is the point.</h2>
+  <div class="two">
+    <div>
+      <p class="sub" style="margin-top:18px">There is no combat, no enemy, no failure. The raft makes three knots downwind and cannot point into the wind. You steer by raising and lowering planks between the logs, the way Heyerdahl did. Waiting is part of the design.</p>
+      <p class="sub">The reward is a voice. Each island carries one idea from Alan Watts, assembled from fragments you find on foot. Some parts only resolve later, back on the raft, at night, on the radio. That is the reason to leave again.</p>
+    </div>
+    <div>
+      <p class="quote">The game never explains a word of it. It puts a tiller in your hands and lets a voice arrive while you are busy steering.<small>Design principle · the teaching is never a cutscene</small></p>
+    </div>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="n">02 · <b>The loop</b></div>
+  <h2>Listen, dial, sail, land, walk, return.</h2>
+  <p class="sub" style="margin-top:14px">One cycle is 20–30 minutes. The first playable has three islands, three ideas, and a raft that becomes home.</p>
+  <div class="cards">
+    <div class="card"><div class="k">raft</div><b>Listen</b><p>Static, then fragments: a sentence, a laugh, a bell.</p></div>
+    <div class="card"><div class="k">cabin</div><b>Dial in</b><p>Tune by hand. Signal strength is directional; sweep the heading and the static thins toward the source.</p></div>
+    <div class="card"><div class="k">deck</div><b>Sail</b><p>A marker on the horizon. Guaras, steering oar, sheet. Music and weather carry the crossing.</p></div>
+    <div class="card"><div class="k">shore</div><b>Land</b><p>Beach the raft, step off the bow onto granite sand.</p></div>
+    <div class="card"><div class="k">island</div><b>Walk</b><p>Cairns, a dead orchard, a drowned lookout. Three to five clue spots, one idea.</p></div>
+    <div class="card"><div class="k">night</div><b>Return</b><p>The idea's last piece plays on the raft after dark. Sleep, or don't. Dawn brings a new fragment.</p></div>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="n">03 · <b>The raft</b></div>
+  <h2>A real vessel, to the centimetre.</h2>
+  <div class="two" style="margin-top:14px">
+    <div>
+      <p class="sub">Built from Heyerdahl's own account and the museum raft in Oslo: nine balsa logs, a woven bamboo cabin you have to crouch to enter, a bipod mast with the painted sun-god face on the sail, five steering planks, a six-metre oar. Every station is a place you walk to. Nothing is a menu.</p>
+      <div class="facts">
+        <div class="fact"><div class="v">9</div><div class="l">balsa logs, 13.7 m centre, lashed with 300 hemp ties</div></div>
+        <div class="fact"><div class="v">1.4 m</div><div class="l">cabin ridge — you crouch, as six men did for 101 days</div></div>
+        <div class="fact"><div class="v">3 kn</div><div class="l">downwind. Crossings of three to six minutes between islands</div></div>
+        <div class="fact"><div class="v">0</div><div class="l">HUD elements in play. Radio dial, paper chart, your hands</div></div>
+      </div>
+    </div>
+    <figure><img src="@@IMG09@@" alt="Inside the Kon-Tiki cabin through the starboard doorway"><figcaption>Through the cabin door, Kon-Tiki Museum. The interior is walkable at true scale.</figcaption></figure>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="n">04 · <b>The voice</b></div>
+  <h2>Alan Watts, in cooperation with his family.</h2>
+  <div class="two" style="margin-top:14px">
+    <div>
+      <p class="sub">We are working with the Alan Watts Organization and Mark Watts on the selection and use of archival recordings. The game is built as a framework: clips, texts and their places in the world live in a manifest, so the curated material drops in without touching code.</p>
+      <p class="sub">Watts is never explained or gamified. A fragment lands on you while your hands are busy with a tiller or a dial. The world is the frame; the voice is the picture.</p>
+    </div>
+    <div>
+      <ul class="sub">
+        <li>Proximity audio from objects on the islands: a bell in a tree, a half-buried speaker, a shell.</li>
+        <li>Found text: carved planks, a notebook under a rock, a painted sign.</li>
+        <li>Night callbacks on the raft radio that close each idea away from its island.</li>
+        <li>Original ambient score (koto, shakuhachi, soft synth) for the voyages; the score ducks fully for the voice.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="n">05 · <b>The look</b></div>
+  <h2>Ghibli light on Sierra granite.</h2>
+  <p class="sub" style="margin-top:14px">A physically based sea, sky and sun, graded per hour of the day. Far islands flatten into two or three tones the way a screen print does; near things are generous and saturated. Whimsical, not cute. The flood happened long ago; the world has settled into it.</p>
+  <div class="hours">
+    <div style="background:linear-gradient(180deg,#F3C9A8,#8EB0C4);color:#2B2418">dawn · peach over slate, fog between islands</div>
+    <div style="background:linear-gradient(180deg,#8FC3E6,#3E8FA8);color:#07222B">noon · clean cyan, hard shadows, white granite</div>
+    <div style="background:linear-gradient(180deg,#F0A45A,#5A4B7A);color:#2B1A10">dusk · amber to violet, rim light</div>
+    <div style="background:linear-gradient(180deg,#17283A,#0A1218);color:#C9D6E0">night · indigo, a moon road on the water, one lantern</div>
+  </div>
+  <div class="sw"><span style="background:#C6A87A"></span><span style="background:#8E8A7E"></span><span style="background:#D9B55E"></span><span style="background:#B2472A"></span><span style="background:#E3CFA3"></span><span style="background:#A9A39A"></span><span style="background:#4F6F4A"></span><span style="background:#2F6E70"></span><span style="background:#6FB2B0"></span></div>
+  <figcaption>balsa · weathered balsa · bamboo · Kon-Tiki red · sail linen · granite · Jeffrey pine · deep water · lagoon</figcaption>
+</section>
+
+<section class="slide">
+  <div class="n">06 · <b>Why we can build it</b></div>
+  <h2>The engine already floats.</h2>
+  <div class="two" style="margin-top:14px">
+    <div>
+      <p class="sub">Raft 2100 runs on our WebGPU engine built for a sailing combat simulation: a spectral FFT ocean, volumetric clouds, a physically based sky with sun and moon, compute-solved rope rigging, a membrane sail model, procedural islands with beaches, HRTF spatial audio, deterministic fixed-step simulation. It runs in a browser, on a link, with nothing to install.</p>
+      <p class="sub">The raft blueprint, its sailing model and the first-person walker landed this week; materials and hand stations are in progress. What remains is the world, the radio and the content plumbing.</p>
+    </div>
+    <div>
+      <ul class="sub">
+        <li><b>Ocean, sky, clouds, weather</b> — shipping today.</li>
+        <li><b>Procedural vessels</b> — three classes share one piece contract; the raft is the third.</li>
+        <li><b>Islands</b> — generator with beach apron, terraces, lagoons; Sierra archetypes next.</li>
+        <li><b>Audio</b> — spatial emitters, two-deck music player, ducking; the radio reuses it.</li>
+        <li><b>Browser-first</b> — playable from a URL; ideal for press, partners and the Foundation.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="eng">
+    <figure class="wide"><img src="@@ENG_STORM@@" alt="Engine frame: galleon heeled under full sail in heavy sea with whitecaps and spray"></figure>
+    <figure><img src="@@ENG_DUSK@@" alt="Engine frame: dusk over the lagoon, amber horizon and sun road"></figure>
+    <figure><img src="@@ENG_REFL@@" alt="Engine frame: galleon on calm water with the hull and clouds reflected"></figure>
+    <figure><img src="@@ENG_DAWN@@" alt="Engine frame: dawn over the lagoon, peach over slate with fog between islands"></figure>
+    <figure><img src="@@ENG_DETAIL@@" alt="Engine frame: hull planking and rigging with spray at the waterline"></figure>
+  </div>
+  <p class="engcap"><b>Engine frames, August 2026.</b> Captured from the current sailing build — a different game, not the Raft 2100 art direction. Shown for what the water, sky and light already do: spectral sea, spray and whitecaps, reflections, atmospheric dusk and dawn. The Raft 2100 look grades and stylises on top of this.</p>
+</section>
+
+<section class="slide">
+  <div class="n">07 · <b>Plan</b></div>
+  <h2>Five phases to a first playable.</h2>
+  <div class="mile">
+    <div class="done"><div class="k">phase 1 · in build</div><b>The raft</b><p>Kon-Tiki to scale, materials, sailing model, walkable deck and cabin.</p></div>
+    <div class="done"><div class="k">phase 2 · in build</div><b>First person</b><p>Walker, hands, stations: tiller, guaras, sheets, radio, ladder, gangway.</p></div>
+    <div><div class="k">phase 3</div><b>The world</b><p>Sierra archipelago, three islands, day clock, per-hour grade.</p></div>
+    <div><div class="k">phase 4</div><b>The loop</b><p>Radio, stations, markers, clues, night callbacks, placeholder content.</p></div>
+    <div><div class="k">phase 5</div><b>Polish + content</b><p>Final grade, dressing, sculpted hands, curated Watts material, score.</p></div>
+  </div>
+  <p class="sub" style="margin-top:22px">Deliverable at the end of phase 4: a 60–90 minute vertical slice, three islands, playable in a browser, with placeholder audio ready for the Foundation's selection.</p>
+</section>
+
+<section class="slide">
+  <div class="n">08 · <b>The ask</b></div>
+  <h2>Fund the slice.</h2>
+  <div class="ask" style="margin-top:14px">
+    <p><span class="ph">[ amount · duration · team — to be filled by Flo before sending ]</span></p>
+    <p class="sub" style="margin:0">Covers phases 3–5: world, loop, polish and content integration, delivered as a hosted browser build plus source. Partners receive a private build link at each phase.</p>
+  </div>
+  <p class="sub" style="margin-top:26px">Contact: <span class="ph">[ name · email ]</span></p>
+</section>
+
+<footer>Photos: Wikimedia Commons · Kon-Tiki Museum Oslo · National Library of Norway. Raft reference: Heyerdahl, The Kon-Tiki Expedition (1950). Alan Watts material subject to agreement with the Alan Watts Organization.</footer>
