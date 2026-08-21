@@ -226,6 +226,84 @@ export interface SierraParams {
   smoothIters: number;
   /** land that erosion pushed under is held at this height above the sea (m) */
   floodFloor: number;
+
+  // ── T112b paths (island/pathGraph.ts, pathCarve.ts) ─────────────────────
+  /** 0 = no path graph / carve (A/B), 1 = author the route */
+  pathEnabled: number;
+  /** islands with a footprint radius under this get no route (fillers) */
+  pathMinRadius: number;
+  /** corridor tread width (m) and the bench falloff beyond it (m) */
+  pathCorridorWidth: number;
+  pathCorridorFalloff: number;
+  /** slope caps (°): main route, fork, the one scramble segment, and its length (m) */
+  pathMainSlope: number;
+  pathForkSlope: number;
+  pathScrambleSlope: number;
+  pathScrambleLength: number;
+  /** A* cost: slope penalty gain, turn penalty gain, beach-band cost factor */
+  pathSlopeCost: number;
+  pathTurnCost: number;
+  pathBeachCost: number;
+  /** fork: junction / return positions along the main route (0..1), POI offset from the route (m) */
+  pathForkAt: number;
+  pathForkReturnAt: number;
+  pathForkOffset: number;
+  /** exit beach is kept at least this far (rad) around the coast from the landing */
+  pathExitSeparation: number;
+  /** soft gate around the station: ring radius (m), cut height (m), riser width (m), feather off the route (m) */
+  pathGateRadius: number;
+  pathGateStep: number;
+  pathGateWidth: number;
+  pathGateFeather: number;
+  /** occluder ridge before the station: route distance (m) of the LOS test, crest height (m), half-width along the route (m), span across it (m) */
+  pathOccluderDistance: number;
+  pathOccluderHeight: number;
+  pathOccluderSigma: number;
+  pathOccluderSpan: number;
+  /** Journey tilt: total drop across the island toward the next slice island (m) */
+  pathTilt: number;
+  // ── T112d shading (island/terrainInfo.ts + sierraMaterial.ts) ──────────
+  /** polished granite: convex curvature (1/m) and slope (°) ceiling, debris (m) ceiling */
+  polishCurvature: number;
+  polishSlope: number;
+  polishDebrisMax: number;
+  polishedColor: number;
+  /** fractured granite: joint-density threshold 0..1 and slope (°) floor */
+  fracturedJoint: number;
+  fracturedSlope: number;
+  fracturedColor: number;
+  fracturedRoughness: number;
+  /** grus: debris thickness (m) at which the tread is fully gravel */
+  grusDebrisMin: number;
+  /** litter: moisture proxy threshold 0..1 (under-canopy proxy until T112e pine density) */
+  litterMoisture: number;
+  /** lichen on shaded faces: the shaded azimuth (rad, atan(z, x)), aspect weight 0..1, sky-AO weight 0..1 */
+  lichenAspectAzimuth: number;
+  lichenAspectStrength: number;
+  lichenShadeStrength: number;
+  /** implied trail: wear half-width (m) around the route centreline, strength 0..1, worn colour */
+  pathWearWidth: number;
+  pathWearStrength: number;
+  pathWornColor: number;
+  /** sheeting bands: spacing (m) along the curvature axis, riser fraction, darkening 0..1, convexity (1/m) at full, relief (m) */
+  sheetBandSpacing: number;
+  sheetBandRiser: number;
+  sheetBandStrength: number;
+  sheetBandConvexity: number;
+  sheetBandRelief: number;
+  /** height blend: crossfade width in score units, per-layer height amplitude */
+  layerBlendWidth: number;
+  layerHeightAmp: number;
+  /** elevation bands (Firewatch value grouping): band tops (m), crossfade (m), tints, strength 0..1 */
+  bandLowHeight: number;
+  bandMidHeight: number;
+  bandHighHeight: number;
+  bandWidth: number;
+  bandLowTint: number;
+  bandMidTint: number;
+  bandHighTint: number;
+  bandCrownTint: number;
+  bandStrength: number;
 }
 
 export const sierraParams: SierraParams = registerParams(
@@ -372,6 +450,68 @@ export const sierraParams: SierraParams = registerParams(
     smoothRepose: 1.2, // tan 50°
     smoothIters: 6,
     floodFloor: 0.3,
+
+    // ── T112b paths ──
+    pathEnabled: 1,
+    pathMinRadius: 120,
+    pathCorridorWidth: 4,
+    pathCorridorFalloff: 6,
+    pathMainSlope: 27,
+    pathForkSlope: 31,
+    pathScrambleSlope: 34,
+    pathScrambleLength: 10,
+    pathSlopeCost: 4,
+    pathTurnCost: 1.5,
+    pathBeachCost: 0.6,
+    pathForkAt: 0.45,
+    pathForkReturnAt: 0.72,
+    pathForkOffset: 40,
+    pathExitSeparation: 1.2,
+    pathGateRadius: 32,
+    pathGateStep: 7,
+    pathGateWidth: 5,
+    pathGateFeather: 6,
+    pathOccluderDistance: 50,
+    pathOccluderHeight: 5,
+    pathOccluderSigma: 7,
+    pathOccluderSpan: 36,
+    pathTilt: 2,
+    pathGuardStart: 2.5,
+    pathGuardWidth: 3,
+    // ── T112d shading ──
+    // polish where curvature > +0.02/m and slope < 15°, on bare bedrock
+    polishCurvature: 0.02,
+    polishSlope: 15,
+    polishDebrisMax: 0.3,
+    polishedColor: 0xc9c4ba,
+    fracturedJoint: 0.55,
+    fracturedSlope: 30,
+    fracturedColor: 0x8e887f,
+    fracturedRoughness: 0.95,
+    grusDebrisMin: 0.4,
+    litterMoisture: 0.55,
+    lichenAspectAzimuth: Math.PI * 1.5, // −z faces
+    lichenAspectStrength: 0.6,
+    lichenShadeStrength: 0.5,
+    pathWearWidth: 6,
+    pathWearStrength: 0.6,
+    pathWornColor: 0xc2b49a,
+    sheetBandSpacing: 2.5,
+    sheetBandRiser: 0.3,
+    sheetBandStrength: 0.22,
+    sheetBandConvexity: 0.01,
+    sheetBandRelief: 0.12,
+    layerBlendWidth: 0.25,
+    layerHeightAmp: 0.3,
+    bandLowHeight: 8,
+    bandMidHeight: 24,
+    bandHighHeight: 48,
+    bandWidth: 6,
+    bandLowTint: 0xd6c9b4,
+    bandMidTint: 0xffffff,
+    bandHighTint: 0xc9d0d8,
+    bandCrownTint: 0xe8e4dc,
+    bandStrength: 0.5,
   },
   {
     sliceCount: { min: 1, max: 3, step: 1 },
@@ -487,5 +627,58 @@ export const sierraParams: SierraParams = registerParams(
     smoothRepose: { min: 0.3, max: 3, step: 0.05 },
     smoothIters: { min: 0, max: 50, step: 1 },
     floodFloor: { min: 0, max: 3, step: 0.1 },
+    // ── T112b paths ──
+    pathEnabled: { min: 0, max: 1, step: 1 },
+    pathMinRadius: { min: 0, max: 300, step: 5 },
+    pathCorridorWidth: { min: 2, max: 10, step: 0.5 },
+    pathCorridorFalloff: { min: 1, max: 20, step: 0.5 },
+    pathMainSlope: { min: 10, max: 34, step: 0.5 },
+    pathForkSlope: { min: 10, max: 34, step: 0.5 },
+    pathScrambleSlope: { min: 30, max: 35, step: 0.25 },
+    pathScrambleLength: { min: 3, max: 30, step: 1 },
+    pathSlopeCost: { min: 0, max: 20, step: 0.25 },
+    pathTurnCost: { min: 0, max: 10, step: 0.1 },
+    pathBeachCost: { min: 0.1, max: 1, step: 0.05 },
+    pathForkAt: { min: 0.1, max: 0.9, step: 0.01 },
+    pathForkReturnAt: { min: 0.1, max: 0.95, step: 0.01 },
+    pathForkOffset: { min: 10, max: 120, step: 1 },
+    pathExitSeparation: { min: 0, max: 3, step: 0.05 },
+    pathGateRadius: { min: 10, max: 80, step: 1 },
+    pathGateStep: { min: 0, max: 20, step: 0.5 },
+    pathGateWidth: { min: 2, max: 20, step: 0.5 },
+    pathGateFeather: { min: 0, max: 20, step: 0.5 },
+    pathOccluderDistance: { min: 20, max: 150, step: 1 },
+    pathOccluderHeight: { min: 0, max: 15, step: 0.5 },
+    pathOccluderSigma: { min: 2, max: 30, step: 0.5 },
+    pathOccluderSpan: { min: 10, max: 100, step: 1 },
+    pathTilt: { min: 0, max: 10, step: 0.1 },
+    pathGuardStart: { min: 0, max: 30, step: 0.5 },
+    pathGuardWidth: { min: 1, max: 30, step: 0.5 },
+    // ── T112d shading ──
+    polishCurvature: { min: 0, max: 0.05, step: 0.001 },
+    polishSlope: { min: 0, max: 45, step: 1 },
+    polishDebrisMax: { min: 0, max: 4, step: 0.05 },
+    fracturedJoint: { min: 0, max: 1, step: 0.01 },
+    fracturedSlope: { min: 0, max: 70, step: 1 },
+    fracturedRoughness: { min: 0, max: 1, step: 0.01 },
+    grusDebrisMin: { min: 0, max: 4, step: 0.05 },
+    litterMoisture: { min: 0, max: 1, step: 0.01 },
+    lichenAspectAzimuth: { min: 0, max: 6.2832, step: 0.01 },
+    lichenAspectStrength: { min: 0, max: 1, step: 0.01 },
+    lichenShadeStrength: { min: 0, max: 1, step: 0.01 },
+    pathWearWidth: { min: 0, max: 32, step: 0.5 },
+    pathWearStrength: { min: 0, max: 1, step: 0.01 },
+    sheetBandSpacing: { min: 0.5, max: 10, step: 0.1 },
+    sheetBandRiser: { min: 0.05, max: 0.9, step: 0.01 },
+    sheetBandStrength: { min: 0, max: 1, step: 0.01 },
+    sheetBandConvexity: { min: 0.0005, max: 0.05, step: 0.0005 },
+    sheetBandRelief: { min: 0, max: 1, step: 0.01 },
+    layerBlendWidth: { min: 0.02, max: 1, step: 0.01 },
+    layerHeightAmp: { min: 0, max: 1, step: 0.01 },
+    bandLowHeight: { min: 0, max: 100, step: 1 },
+    bandMidHeight: { min: 0, max: 200, step: 1 },
+    bandHighHeight: { min: 0, max: 300, step: 1 },
+    bandWidth: { min: 0.5, max: 40, step: 0.5 },
+    bandStrength: { min: 0, max: 1, step: 0.01 },
   },
 );

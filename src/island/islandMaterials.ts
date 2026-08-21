@@ -35,6 +35,8 @@ import {
   type SierraRockMaterialHandle,
 } from './sierraMaterial';
 import { horizonMapFor } from './horizonMap';
+import { terrainInfoFor } from './terrainInfoBake';
+import type { SierraMaterialOptions } from './sierraMaterial';
 import type { IslandHeightmap } from './heightmap';
 import { createPineMaterialSet, type PineMaterialSet } from '../vegetation/pineScatter';
 
@@ -126,6 +128,11 @@ export function createIslandMaterials(): IslandMaterials {
     m.outputNode = aerialOutputNode(aerial);
   }
 
+  // §T.112d: the per-island bindings — horizon map (T112a) + terrain-info
+  // texture + the seeded ice axis (the sheeting fallback). One bake each per
+  // heightmap, memoised in their own modules.
+  const sierraOpts = (hm?: IslandHeightmap): SierraMaterialOptions =>
+    hm ? { horizon: horizonMapFor(hm), info: terrainInfoFor(hm), iceAzimuth: hm.sierra?.iceAzimuth ?? 0 } : {};
   const sierraTerrains = new Map<IslandHeightmap | null, TerrainBlendMaterialHandle>();
   const sierraRocks = new Map<IslandHeightmap | null, SierraRockMaterialHandle>();
   let pines: PineMaterialSet | null = null;
@@ -133,7 +140,7 @@ export function createIslandMaterials(): IslandMaterials {
     const key = hm ?? null;
     let h = sierraTerrains.get(key);
     if (!h) {
-      h = createSierraTerrainMaterial(undefined, hm ? { horizon: horizonMapFor(hm) } : {});
+      h = createSierraTerrainMaterial(undefined, sierraOpts(hm));
       sierraTerrains.set(key, h);
     }
     return h;
@@ -142,7 +149,7 @@ export function createIslandMaterials(): IslandMaterials {
     const key = hm ?? null;
     let h = sierraRocks.get(key);
     if (!h) {
-      h = createSierraRockMaterial(undefined, hm ? { horizon: horizonMapFor(hm) } : {});
+      h = createSierraRockMaterial(undefined, sierraOpts(hm));
       // same §B67 rule as the pirate rock: one haze curve per island
       h.material.fog = false;
       h.material.outputNode = aerialOutputNode(aerial);
