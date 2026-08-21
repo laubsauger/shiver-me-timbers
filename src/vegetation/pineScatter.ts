@@ -49,10 +49,12 @@ export function createPineMaterial(p: SierraParams = sierraParams) {
 
   // role masks: 0 trunk, 1 needles, 2 dead wood, 3 juniper (pineGeometry.ts)
   const role = attribute('role', 'float');
-  const needleMask = step(float(0.5), role).mul(step(float(1.5), role).oneMinus());
-  const deadMask = step(float(1.5), role).mul(step(float(2.5), role).oneMinus());
-  const juniperMask = step(float(2.5), role);
-  const trunkMask = step(float(0.5), role).oneMinus();
+  // @band-limited-elsewhere: `role` is a per-vertex integer tag (0..3), constant across each
+  // primitive — these steps select a vertex class, they are not edges in space
+  const needleMask = step(float(0.5), role).mul(step(float(1.5), role).oneMinus()); // @band-limited-elsewhere: vertex class tag
+  const deadMask = step(float(1.5), role).mul(step(float(2.5), role).oneMinus()); // @band-limited-elsewhere: vertex class tag
+  const juniperMask = step(float(2.5), role); // @band-limited-elsewhere: vertex class tag
+  const trunkMask = step(float(0.5), role).oneMinus(); // @band-limited-elsewhere: vertex class tag
 
   // needles: darker low on the tree, lit toward the top tier — a flat band
   // per tier reads as cut-out; the ramp is what makes a cone read as foliage

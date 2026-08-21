@@ -84,6 +84,7 @@ function jointSet(azimuth: number, u: SierraUniforms): AnyNode {
   const coord = positionWorld.xz.dot(dir).div(u.jointSpacing.max(1e-3));
   // distance to the nearest joint as a triangle wave: continuous everywhere,
   // so the wrap lands mid-block instead of on the edge (§V48, §B20)
+  // @band-limited-elsewhere: this fract is the INPUT to bandLimitedEdge below, which filters on the joint width
   const distance = fract(coord.add(0.5)).sub(0.5).abs();
   const feature = u.jointWidth.div(u.jointSpacing.max(1e-3));
   return bandLimitedEdge(distance, coord, feature);
@@ -105,6 +106,7 @@ export function createSierraTerrainMaterial(p: SierraParams = sierraParams): Ter
   // base paints rock (§V71 — same surface, not a second derivation)
   const up = normalWorldGeometry.y;
   const w = blend.slopeBlendWidth.max(1e-3);
+  // @band-limited-elsewhere: slope mask on the geometric normal (not a periodic spatial term); width = slopeBlendWidth param
   const rockW = up.smoothstep(blend.slopeThreshold.sub(w), blend.slopeThreshold.add(w)).oneMinus();
 
   // jointing: two sets multiply — where both dip the block corner is darkest
@@ -132,6 +134,7 @@ export function createSierraTerrainMaterial(p: SierraParams = sierraParams): Ter
   material.colorNode = mix(tinted, tinted.mul(lichenRatio), lichenMask);
 
   // polished flats: up-facing rock is glossier
+  // @band-limited-elsewhere: slope mask on the geometric normal, 0.15 wide in normal.y — not a spatial edge
   const flatW = up.smoothstep(0.82, 0.97).mul(rockW);
   const rough = material.roughnessNode as AnyNode;
   if (rough) material.roughnessNode = rough.mul(float(1).sub(flatW.mul(u.polishGloss)));
