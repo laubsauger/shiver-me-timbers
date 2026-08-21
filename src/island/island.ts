@@ -32,6 +32,7 @@ import { createGroundCover, type GroundCoverMeshes } from '../terrain';
 import type { IslandMaterials } from './islandMaterials';
 import { isSierraArchetype } from './sierraArchetypes';
 import { createSierraTerrainMaterial } from './sierraMaterial';
+import { horizonMapFor } from './horizonMap';
 import { createSierraPines } from '../vegetation/pineScatter';
 
 /**
@@ -226,13 +227,17 @@ export function createIsland(opts: CreateIslandOptions): Island {
   // granite + DG sand and pines; a pirate island in the same world is
   // untouched. An unshared sierra island owns its granite handle.
   const sierra = isSierraArchetype(heightmap.archetype);
-  const ownSierraTerrain = sierra && !shared ? createSierraTerrainMaterial() : null;
-  const terrainMaterial = sierra ? (shared?.sierraTerrain() ?? ownSierraTerrain ?? undefined) : shared?.terrain;
+  // §T.112a: the sierra handles are PER HEIGHTMAP (they bind the island's
+  // horizon map — see islandMaterials.sierraTerrain); the pirate ones stay
+  // one per world. An unshared sierra island owns its own.
+  const ownSierraTerrain =
+    sierra && !shared ? createSierraTerrainMaterial(undefined, { horizon: horizonMapFor(heightmap) }) : null;
+  const terrainMaterial = sierra ? (shared?.sierraTerrain(heightmap) ?? ownSierraTerrain ?? undefined) : shared?.terrain;
   const terrain = createIslandMesh(heightmap, p.skirtDepth, terrainMaterial);
   const rocks = createRocks({
     seed: opts.seed + ROCK_SEED_OFFSET,
     heightmap,
-    material: shared?.rock.material,
+    material: sierra ? shared?.sierraRock(heightmap).material : shared?.rock.material,
   });
   const palms = sierra
     ? createSierraPines({

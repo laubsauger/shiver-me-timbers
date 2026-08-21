@@ -106,6 +106,48 @@ export interface SierraParams {
   dgSandColor: number;
   dgSandShadeColor: number;
 
+  // ── cover retint (§T.112a: the 18 m tropical green never reached sierra) ──
+  /** grus (decomposed-granite gravel) on the flats, pine litter under the macro noise */
+  grusColor: number;
+  litterColor: number;
+  /** slope (°) below which the ground is grus, above which it is bare granite */
+  coverGrusSlope: number;
+  coverBareSlope: number;
+  /** 60 m macro field: world frequency (1/m) and tone variation 0..1 */
+  coverMacroScale: number;
+  coverMacroVariation: number;
+  /** litter coverage of the macro field 0..1 and blend strength 0..1 */
+  litterCoverage: number;
+  litterStrength: number;
+  /** grus grain: world frequency (1/m) and contrast 0..1 */
+  coverGrainScale: number;
+  coverGrainStrength: number;
+
+  // ── horizon map (§T.112a: sun self-shadow + sky AO) ────────────────────
+  /** shadow terminator half-width (rad) on the sun-elevation vs horizon compare */
+  horizonShadowSoftness: number;
+  /** 0..1 how much of the direct sun the horizon removes (1 = full shadow) */
+  horizonShadowStrength: number;
+  /** 0..1 how much of the sky AO reaches the ambient term */
+  horizonSkyAoStrength: number;
+
+  // ── inland boulders (§T.112a) ────────────────────────────────────────────
+  /** boulders on convex + steep cells per metre of footprint radius */
+  inlandBouldersPerRadius: number;
+  /** glacial erratics on the flat treads (per island) */
+  erraticCount: number;
+  /** convexity gate: −Laplacian of h (1/m) a cell must exceed */
+  boulderConvexity: number;
+  /** slope (rise/run) a convex cell must exceed to shed a boulder */
+  boulderSlopeMin: number;
+  /** erratics sit on ground flatter than this (rise/run) */
+  erraticSlopeMax: number;
+  /** inland band: metres above the waterline the beach apron must be cleared by */
+  boulderMinHeight: number;
+  /** size range (m) of the inland scatter; erratics use the top of it */
+  boulderMinScale: number;
+  boulderMaxScale: number;
+
   // ── pines / junipers / dead pines ──────────────────────────────────────
   /** live trees per metre of footprint radius */
   pinesPerRadius: number;
@@ -126,6 +168,12 @@ export interface SierraParams {
   /** stand clustering: number of seeded stands, spread (m) */
   pineStandCount: number;
   pineStandSpread: number;
+  /** footprint competition: crown radius (m) at scale 1, growth per round, rounds */
+  pineFootprint: number;
+  pineFootprintGrowth: number;
+  pineCompetitionRounds: number;
+  /** acceptance on a south-facing (sun-baked) slope relative to north-facing, 0..1 */
+  pineSouthAspectFactor: number;
   /** dead pines at the treeline: trunk height (m), branch count */
   deadPineHeight: number;
   deadBranchCount: number;
@@ -138,6 +186,46 @@ export interface SierraParams {
   needleLightColor: number;
   juniperNeedleColor: number;
   deadWoodColor: number;
+
+  // ── T112c erosion (island/erosion*.ts) ──────────────────────────────────
+  /** 0 = analytic archetype only (A/B), 1 = run the erosion pass stage */
+  erosionEnabled: number;
+  /** crest displacement along the ice vector at peak height (m) — the roche moutonnée shear */
+  iceShear: number;
+  /** sheet thickness measured along the normal (m), riser fraction of a sheet */
+  sheetThickness: number;
+  sheetRiser: number;
+  /** convex curvature (1/m) at which the sheeting mask is full */
+  sheetCurvature: number;
+  /** sheeting strength on the stoss (polished) flank relative to the lee (plucked) */
+  sheetStossFactor: number;
+  /** plate-offset noise wavelength (m): sheets break into plates this size */
+  sheetPlateSize: number;
+  /** joint-density noise frequency (1/m) */
+  jointScale: number;
+  /** beach guard: erosion fades in from this height (m) over this width (m) */
+  erodeBandStart: number;
+  erodeBandWidth: number;
+  /** stream power K·dt (per iteration), uplift per iteration at mask 1 (m), area exponent m */
+  streamRate: number;
+  streamUplift: number;
+  streamAreaExp: number;
+  /** stream-power iterations per family (0 = off; the dome keeps its crown) */
+  streamItersDome: number;
+  streamItersRidge: number;
+  streamItersCirque: number;
+  /** rockfall: bedrock slope (tan) above which it sheds, rate (m per unit excess), source steps */
+  rockfallSlope: number;
+  rockfallRate: number;
+  rockfallSteps: number;
+  /** talus repose (tan 35° = 0.70) and thermal iterations */
+  talusRepose: number;
+  thermalIters: number;
+  /** final bedrock smoothing: repose (tan) and iterations */
+  smoothRepose: number;
+  smoothIters: number;
+  /** land that erosion pushed under is held at this height above the sea (m) */
+  floodFloor: number;
 }
 
 export const sierraParams: SierraParams = registerParams(
@@ -200,7 +288,33 @@ export const sierraParams: SierraParams = registerParams(
     dgSandColor: 0xd8c4a2,
     dgSandShadeColor: 0xbda987,
 
-    pinesPerRadius: 0.28,
+    grusColor: 0xb8a98e,
+    litterColor: 0x6e5a42,
+    coverGrusSlope: 20,
+    coverBareSlope: 35,
+    coverMacroScale: 1 / 60,
+    coverMacroVariation: 0.22,
+    litterCoverage: 0.35,
+    litterStrength: 0.7,
+    coverGrainScale: 0.5,
+    coverGrainStrength: 0.18,
+
+    horizonShadowSoftness: 0.06,
+    horizonShadowStrength: 0.9,
+    horizonSkyAoStrength: 1,
+
+    inlandBouldersPerRadius: 0.32,
+    erraticCount: 4,
+    boulderConvexity: 0.02,
+    boulderSlopeMin: 0.47, // tan 25°
+    erraticSlopeMax: 0.14, // tan 8°
+    boulderMinHeight: 4,
+    boulderMinScale: 1.2,
+    boulderMaxScale: 5.5,
+
+    // 0.28 → 2.0 (7×, §T.112a): the R0 frames had ~12 trees on a 250 m
+    // island; the stand is then thinned by footprint competition below
+    pinesPerRadius: 2.0,
     juniperFraction: 0.3,
     pineHeightMin: 9,
     pineHeightMax: 16,
@@ -208,13 +322,21 @@ export const sierraParams: SierraParams = registerParams(
     pineTiersMax: 4,
     pineTierSpread: 0.2,
     pineTrunkRadius: 0.28,
-    pineSlopeLimit: 0.53, // tan 28°
+    pineSlopeLimit: 0.47, // tan 25° (was 28°; benches only)
     pineMinHeight: 2.5,
     // measured bench fractions at the defaults: dome 9%, cirque 0.7%, ridge
     // 0.3% — level ground is scarce on a ridge, and a ridge is still wooded
     pineBenchReference: 0.04,
-    pineStandCount: 5,
-    pineStandSpread: 34,
+    // measured (tests/terrainQuickWins.test.ts): 8 stands × 28 m with a 1 m
+    // crown at competition puts the dome/cirque NN distance at 0.63-0.91 of a
+    // uniform scatter on the same bench; wider stands or bigger crowns push
+    // it past 1 (regular, the competition's own spacing wins)
+    pineStandCount: 8,
+    pineStandSpread: 28,
+    pineFootprint: 1.0,
+    pineFootprintGrowth: 0.25,
+    pineCompetitionRounds: 2,
+    pineSouthAspectFactor: 0.35,
     deadPineHeight: 11,
     deadBranchCount: 5,
     pineSwayAmplitude: 0.18,
@@ -224,6 +346,32 @@ export const sierraParams: SierraParams = registerParams(
     needleLightColor: 0x5b7d47,
     juniperNeedleColor: 0x5f7358,
     deadWoodColor: 0x8d837a,
+
+    // ── T112c erosion ──
+    erosionEnabled: 1,
+    iceShear: 14,
+    sheetThickness: 2.5,
+    sheetRiser: 0.5,
+    sheetCurvature: 0.0025,
+    sheetStossFactor: 0.35,
+    sheetPlateSize: 40,
+    jointScale: 0.02,
+    erodeBandStart: 14,
+    erodeBandWidth: 12,
+    streamRate: 0.006,
+    streamUplift: 0.12,
+    streamAreaExp: 0.5,
+    streamItersDome: 0,
+    streamItersRidge: 12,
+    streamItersCirque: 12,
+    rockfallSlope: 1.0, // tan 45°
+    rockfallRate: 0.35,
+    rockfallSteps: 4,
+    talusRepose: 0.7, // tan 35°
+    thermalIters: 40,
+    smoothRepose: 1.2, // tan 50°
+    smoothIters: 6,
+    floodFloor: 0.3,
   },
   {
     sliceCount: { min: 1, max: 3, step: 1 },
@@ -274,7 +422,7 @@ export const sierraParams: SierraParams = registerParams(
     lichenCoverage: { min: 0, max: 1, step: 0.01 },
     lichenStrength: { min: 0, max: 1, step: 0.01 },
     polishGloss: { min: 0, max: 1, step: 0.01 },
-    pinesPerRadius: { min: 0, max: 1.5, step: 0.01 },
+    pinesPerRadius: { min: 0, max: 4, step: 0.01 },
     juniperFraction: { min: 0, max: 1, step: 0.01 },
     pineHeightMin: { min: 3, max: 30, step: 0.5 },
     pineHeightMax: { min: 3, max: 40, step: 0.5 },
@@ -287,9 +435,57 @@ export const sierraParams: SierraParams = registerParams(
     pineBenchReference: { min: 0.005, max: 0.5, step: 0.005 },
     pineStandCount: { min: 1, max: 12, step: 1 },
     pineStandSpread: { min: 5, max: 120, step: 1 },
+    pineFootprint: { min: 0.5, max: 8, step: 0.1 },
+    pineFootprintGrowth: { min: 0, max: 1, step: 0.05 },
+    pineCompetitionRounds: { min: 0, max: 4, step: 1 },
+    pineSouthAspectFactor: { min: 0, max: 1, step: 0.01 },
+    coverGrusSlope: { min: 0, max: 45, step: 1 },
+    coverBareSlope: { min: 5, max: 70, step: 1 },
+    coverMacroScale: { min: 0.005, max: 0.1, step: 0.001 },
+    coverMacroVariation: { min: 0, max: 0.6, step: 0.01 },
+    litterCoverage: { min: 0, max: 1, step: 0.01 },
+    litterStrength: { min: 0, max: 1, step: 0.01 },
+    coverGrainScale: { min: 0.05, max: 4, step: 0.05 },
+    coverGrainStrength: { min: 0, max: 0.6, step: 0.01 },
+    horizonShadowSoftness: { min: 0.005, max: 0.3, step: 0.005 },
+    horizonShadowStrength: { min: 0, max: 1, step: 0.01 },
+    horizonSkyAoStrength: { min: 0, max: 1, step: 0.01 },
+    inlandBouldersPerRadius: { min: 0, max: 2, step: 0.01 },
+    erraticCount: { min: 0, max: 20, step: 1 },
+    boulderConvexity: { min: 0, max: 0.2, step: 0.001 },
+    boulderSlopeMin: { min: 0, max: 1.5, step: 0.01 },
+    erraticSlopeMax: { min: 0, max: 0.6, step: 0.01 },
+    boulderMinHeight: { min: 0, max: 30, step: 0.5 },
+    boulderMinScale: { min: 0.3, max: 10, step: 0.1 },
+    boulderMaxScale: { min: 0.5, max: 20, step: 0.1 },
     deadPineHeight: { min: 3, max: 25, step: 0.5 },
     deadBranchCount: { min: 0, max: 12, step: 1 },
     pineSwayAmplitude: { min: 0, max: 1, step: 0.01 },
     pineFlutterAmplitude: { min: 0, max: 0.3, step: 0.005 },
+    // ── T112c erosion ──
+    erosionEnabled: { min: 0, max: 1, step: 1 },
+    iceShear: { min: 0, max: 60, step: 1 },
+    sheetThickness: { min: 0.5, max: 10, step: 0.25 },
+    sheetRiser: { min: 0.1, max: 0.9, step: 0.05 },
+    sheetCurvature: { min: 0.0002, max: 0.02, step: 0.0002 },
+    sheetStossFactor: { min: 0, max: 1, step: 0.05 },
+    sheetPlateSize: { min: 5, max: 200, step: 5 },
+    jointScale: { min: 0.002, max: 0.2, step: 0.002 },
+    erodeBandStart: { min: 0, max: 60, step: 1 },
+    erodeBandWidth: { min: 1, max: 60, step: 1 },
+    streamRate: { min: 0, max: 0.05, step: 0.0005 },
+    streamUplift: { min: 0, max: 1, step: 0.01 },
+    streamAreaExp: { min: 0.2, max: 1, step: 0.05 },
+    streamItersDome: { min: 0, max: 60, step: 1 },
+    streamItersRidge: { min: 0, max: 60, step: 1 },
+    streamItersCirque: { min: 0, max: 60, step: 1 },
+    rockfallSlope: { min: 0.3, max: 3, step: 0.05 },
+    rockfallRate: { min: 0, max: 2, step: 0.05 },
+    rockfallSteps: { min: 0, max: 20, step: 1 },
+    talusRepose: { min: 0.3, max: 1.5, step: 0.01 },
+    thermalIters: { min: 0, max: 200, step: 1 },
+    smoothRepose: { min: 0.3, max: 3, step: 0.05 },
+    smoothIters: { min: 0, max: 50, step: 1 },
+    floodFloor: { min: 0, max: 3, step: 0.1 },
   },
 );

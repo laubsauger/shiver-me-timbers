@@ -416,8 +416,12 @@ describe('generateSierraSites: the slice', () => {
       for (const island of arch.islands) {
         expect(isSierraArchetype(island.heightmap.archetype)).toBe(true);
         expect(island.palms.mesh.name).toBe('island-pines');
-        // every island renders with the granite handle, not the pirate one
-        expect(island.terrain.material).toBe(arch.materials.sierraTerrain());
+        // every island renders with ITS granite handle, not the pirate one —
+        // re-cut for §T.112a: the handle is per heightmap (it binds the
+        // island's horizon map), so the pin is "the one for this heightmap"
+        // and "never the pirate handle", not "one object world-wide" (§V80)
+        expect(island.terrain.material).toBe(arch.materials.sierraTerrain(island.heightmap));
+        expect(island.terrain.material).not.toBe(arch.materials.terrain);
         if (island.heightmap.sierra?.name === 'drownedRidge') {
           const dead = island.palms.mesh.children.find((c) => c.name === 'island-dead-pines');
           expect(dead).toBeDefined();

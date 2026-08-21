@@ -61,6 +61,17 @@ export const postParams = registerParams(
     //    reflections or a dedicated pass.
     // Turn it on when shooting a close hull/deck shot where the interior
     // occlusion is the point and edge aliasing is not.
+    //
+    // §T.112a RAFT/SIERRA RECOMMENDATION (not measured — no GPU in the agent
+    // that wrote this; the R3 lookdev should try `aoEnabled: true` on
+    // `raft.html` and read the perf HUD). Read from postPipeline.ts: the pass
+    // is GTAO at `resolutionScale 0.5` with depth-reconstructed normals, i.e.
+    // a quarter-resolution ray-march plus the denoise, typically ~0.5-1 ms at
+    // 1440p, and the real price is the MSAA it forces off (above). The raft
+    // has ~no thin rigging, so that price is smaller than on the galleon; the
+    // terrain now carries its OWN sky AO from the horizon map
+    // (island/horizonMap.ts), so GTAO would add only the metre-scale contact
+    // term (boulder feet, pine trunks). Default stays off until measured.
     aoEnabled: false,
     aoStrength: 0.6,
 

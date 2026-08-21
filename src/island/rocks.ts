@@ -18,7 +18,10 @@ import { createRng } from '../state/rng';
 import { fbm2Cpu } from '../terrain/noiseCpu';
 import { createRockMaterial, type RockMaterialHandle } from '../terrain';
 import { islandParams, type IslandParams } from '../params/island';
-import { findShoreRadius, type IslandHeightmap } from './heightmap';
+import { sierraParams, type SierraParams } from '../params/sierra';
+import { findShoreRadius, gradientAt, type IslandHeightmap } from './heightmap';
+import { createSierraRockMaterial } from './sierraMaterial';
+import { horizonMapFor } from './horizonMap';
 
 export interface RockPlacement {
   /** island-local; y = terrain height + partial embed */
@@ -44,6 +47,112 @@ export interface RockPlacement {
   foamTarget: boolean;
   /** true for the big headland masses, false for the boulder scatter */
   cliff: boolean;
+  /** §T.112a: where a sierra boulder came from (undefined on the shore scatter) */
+  origin?: 'convex' | 'erratic';
+}
+
+/** seeded stream for the inland scatter — after the shore loops, so pirate bytes never move */
+const INLAND_SEED_OFFSET = 3391;
+/** curvature probe stride in cells — resolution, not a look tunable */
+const INLAND_PROBE_STRIDE = 2;
+
+/**
+ * −Laplacian of h at an island-local point (1/m): > 0 on a convex cell (a
+ * rib, a shoulder, a dome crest), < 0 in a hollow. Central differences on
+ * `heightAt`, the same truth `gradientAt` reads, at the grid's own spacing.
+ */
+export function convexityAt(hm: IslandHeightmap, x: number, z: number): number {
+  const eps = (2 * hm.worldRadius) / (hm.size - 1);
+  const h0 = hm.heightAt(x, z);
+  const lap =
+    (hm.heightAt(x + eps, z) + hm.heightAt(x - eps, z) + hm.heightAt(x, z + eps) + hm.heightAt(x, z - eps) - 4 * h0) /
+    (eps * eps);
+  return -lap;
+}
+
+/** inland = above the apron AND inside the shore radius by the DG band */
+function isInland(hm: IslandHeightmap, x: number, z: number, sp: SierraParams): boolean {
+  if (hm.heightAt(x, z) < sp.boulderMinHeight) return false;
+  const angle = Math.atan2(z, x);
+  return Math.hypot(x, z) < findShoreRadius(hm, angle) - sp.dgSandBand;
+}
+
+/**
+ * §T.112a, research D9: the shore ring was the only place a rock could be.
+ * On a granite dome the boulders are on the CONVEX, STEEP ground — ribs and
+ * shoulders that shed their sheets — plus a few glacial ERRATICS dropped on
+ * the flat treads. Sierra islands only (`hm.sierra`), a separate rng stream,
+ * and pushed after the shore scatter, so every pirate placement is
+ * byte-identical to before.
+ */
+export function generateInlandPlacements(
+  seed: number,
+  hm: IslandHeightmap,
+  p: IslandParams = islandParams,
+  sp: SierraParams = sierraParams,
+): RockPlacement[] {
+  if (!hm.sierra) return [];
+  const rng = createRng(seed + INLAND_SEED_OFFSET);
+  const R = hm.worldRadius;
+  const cell = (2 * R) / (hm.size - 1);
+  const convex: [number, number][] = [];
+  const treads: [number, number][] = [];
+  for (let iz = 1; iz < hm.size - 1; iz += INLAND_PROBE_STRIDE) {
+    for (let ix = 1; ix < hm.size - 1; ix += INLAND_PROBE_STRIDE) {
+      const x = -R + ix * cell;
+      const z = -R + iz * cell;
+      if (!isInland(hm, x, z, sp)) continue;
+      const slope = gradientAt(hm, x, z);
+      if (slope > sp.boulderSlopeMin && convexityAt(hm, x, z) > sp.boulderConvexity) convex.push([x, z]);
+      else if (slope < sp.erraticSlopeMax) treads.push([x, z]);
+    }
+  }
+  const out: RockPlacement[] = [];
+  const place = (cells: [number, number][], count: number, origin: 'convex' | 'erratic'): void => {
+    for (let i = 0; i < count && cells.length > 0; i++) {
+      const c = cells[Math.floor(rng() * cells.length) % cells.length];
+      let x = c[0];
+      let z = c[1];
+      // a half-cell jitter off the probe grid, re-checked against the gate:
+      // curvature turns over inside a cell, and a boulder that drew a convex
+      // cell must still SIT on convex ground (tests pin it at the boulder)
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const jx = c[0] + (rng() - 0.5) * cell;
+        const jz = c[1] + (rng() - 0.5) * cell;
+        const ok =
+          origin === 'convex'
+            ? convexityAt(hm, jx, jz) > 0 && gradientAt(hm, jx, jz) > sp.boulderSlopeMin * 0.5
+            : gradientAt(hm, jx, jz) < sp.erraticSlopeMax;
+        if (ok) {
+          x = jx;
+          z = jz;
+          break;
+        }
+      }
+      // heavy-tailed like the shore scatter; erratics draw from the big end
+      const t = origin === 'erratic' ? 0.6 + 0.4 * rng() : rng() ** 3;
+      const scale = sp.boulderMinScale + (sp.boulderMaxScale - sp.boulderMinScale) * t;
+      const squash = p.rockSquashMin + (p.rockSquashMax - p.rockSquashMin) * rng();
+      const aspect = p.rockAspectMin + (p.rockAspectMax - p.rockAspectMin) * rng();
+      const halfHeight = scale * squash;
+      out.push({
+        position: [x, hm.heightAt(x, z) + halfHeight * (1 - p.rockEmbed), z],
+        scale,
+        squash,
+        aspect,
+        yaw: rng() * Math.PI * 2,
+        tilt: rng() * p.rockTiltMax,
+        tiltDir: rng() * Math.PI * 2,
+        variant: Math.floor(rng() * p.rockGeoVariants) % p.rockGeoVariants,
+        foamTarget: false,
+        cliff: false,
+        origin,
+      });
+    }
+  };
+  place(convex, Math.round(sp.inlandBouldersPerRadius * R), 'convex');
+  place(treads, Math.round(sp.erraticCount), 'erratic');
+  return out;
 }
 
 /**
@@ -198,6 +307,7 @@ export function generateRockPlacements(
     const squash = p.cliffSquashMin + (p.cliffSquashMax - p.cliffSquashMin) * rng();
     push(x, z, scale, squash, p.cliffEmbed, true);
   }
+  placements.push(...generateInlandPlacements(seed, hm, p));
   return placements;
 }
 
@@ -483,7 +593,13 @@ export function createRocks(opts: CreateRocksOptions): Rocks {
       deformRockGeometry(opts.seed + 101 * (v + 1), p, ROCK_FAMILIES[v % ROCK_FAMILIES.length]),
     );
   }
-  const ownMaterial: RockMaterialHandle | null = opts.material ? null : createRockMaterial();
+  // an unshared sierra island owns a GRANITE handle (§T.112a); the shared
+  // path gets it from islandMaterials.sierraRock
+  const ownMaterial: RockMaterialHandle | null = opts.material
+    ? null
+    : opts.heightmap.sierra
+      ? createSierraRockMaterial(undefined, { horizon: horizonMapFor(opts.heightmap) })
+      : createRockMaterial();
   const material = opts.material ?? ownMaterial!.material;
 
   const group = new THREE.Group();
@@ -519,6 +635,9 @@ export function createRocks(opts: CreateRocksOptions): Rocks {
       straddles = straddles || pl.foamTarget;
     }
     mesh.instanceMatrix.needsUpdate = true;
+    // the sierra rock material's horizon shadow rides `receivedShadowNode`,
+    // which only runs on a receiver (§T.112a)
+    if (opts.heightmap.sierra) mesh.receiveShadow = true;
     // instance matrices are baked, so the default unit-icosahedron bounds
     // would cull the whole batch the moment the origin leaves the frustum
     mesh.computeBoundingSphere();

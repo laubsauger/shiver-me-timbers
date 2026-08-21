@@ -29,7 +29,13 @@ import type { WindSway } from '../vegetation/windSway';
 import { createStructureMaterial } from './structures';
 import type { ShipMaterialHandle } from '../ship/woodMaterial';
 import { aerialOutputNode } from '../terrain/aerialPerspective';
-import { createSierraTerrainMaterial } from './sierraMaterial';
+import {
+  createSierraRockMaterial,
+  createSierraTerrainMaterial,
+  type SierraRockMaterialHandle,
+} from './sierraMaterial';
+import { horizonMapFor } from './horizonMap';
+import type { IslandHeightmap } from './heightmap';
 import { createPineMaterialSet, type PineMaterialSet } from '../vegetation/pineScatter';
 
 export interface IslandMaterials {
@@ -49,9 +55,20 @@ export interface IslandMaterials {
   /**
    * Granite + DG sand for the sierra families (§T.99, sierraMaterial.ts).
    * Built on first request — a pirate world never asks and never pays for
-   * the node graph. One handle for every sierra island (§V17).
+   * the node graph.
+   *
+   * §T.112a: ONE HANDLE PER SIERRA HEIGHTMAP, not per world. The horizon map
+   * (sun self-shadow + sky AO) is a per-island texture and the material binds
+   * it, so two islands cannot share a material object. They DO share the
+   * program: the node graph is identical, only the texture binding differs,
+   * and the WebGPU pipeline cache keys on the generated code. The cost is one
+   * NodeBuilder run per sierra island (≈6 in the slice), not one per mesh.
+   * Called without a heightmap it returns a horizon-less handle (tests, the
+   * R0 path) that every caller without a heightmap shares.
    */
-  sierraTerrain(): TerrainBlendMaterialHandle;
+  sierraTerrain(hm?: IslandHeightmap): TerrainBlendMaterialHandle;
+  /** granite boulders with the island's horizon map — same per-heightmap rule */
+  sierraRock(hm?: IslandHeightmap): SierraRockMaterialHandle;
   /** pines/junipers/dead pines — same lazy rule, one shader world-wide */
   pines(): PineMaterialSet;
   /**
@@ -109,11 +126,29 @@ export function createIslandMaterials(): IslandMaterials {
     m.outputNode = aerialOutputNode(aerial);
   }
 
-  let sierraTerrain: TerrainBlendMaterialHandle | null = null;
+  const sierraTerrains = new Map<IslandHeightmap | null, TerrainBlendMaterialHandle>();
+  const sierraRocks = new Map<IslandHeightmap | null, SierraRockMaterialHandle>();
   let pines: PineMaterialSet | null = null;
-  const getSierraTerrain = (): TerrainBlendMaterialHandle => {
-    if (!sierraTerrain) sierraTerrain = createSierraTerrainMaterial();
-    return sierraTerrain;
+  const getSierraTerrain = (hm?: IslandHeightmap): TerrainBlendMaterialHandle => {
+    const key = hm ?? null;
+    let h = sierraTerrains.get(key);
+    if (!h) {
+      h = createSierraTerrainMaterial(undefined, hm ? { horizon: horizonMapFor(hm) } : {});
+      sierraTerrains.set(key, h);
+    }
+    return h;
+  };
+  const getSierraRock = (hm?: IslandHeightmap): SierraRockMaterialHandle => {
+    const key = hm ?? null;
+    let h = sierraRocks.get(key);
+    if (!h) {
+      h = createSierraRockMaterial(undefined, hm ? { horizon: horizonMapFor(hm) } : {});
+      // same §B67 rule as the pirate rock: one haze curve per island
+      h.material.fog = false;
+      h.material.outputNode = aerialOutputNode(aerial);
+      sierraRocks.set(key, h);
+    }
+    return h;
   };
   const getPines = (): PineMaterialSet => {
     if (!pines) {
@@ -133,15 +168,20 @@ export function createIslandMaterials(): IslandMaterials {
     cover,
     structure,
     sierraTerrain: getSierraTerrain,
+    sierraRock: getSierraRock,
     pines: getPines,
     update(frame): void {
-      if (sierraTerrain) {
+      for (const sierraTerrain of sierraTerrains.values()) {
         sierraTerrain.updateFromParams();
         sierraTerrain.setSunDirection(frame.sunDirection);
         sierraTerrain.setHazeColor(frame.hazeColor);
         sierraTerrain.setTime(frame.time);
         sierraTerrain.setSwell(frame.swell);
         sierraTerrain.setWaterline(frame.waterLevel);
+      }
+      for (const sierraRock of sierraRocks.values()) {
+        sierraRock.updateFromParams();
+        (sierraRock.uniforms.sunDirection.value as THREE.Vector3).copy(frame.sunDirection).normalize();
       }
       if (pines) {
         pines.sway.setWind(frame.time, frame.windDir, frame.windStrength);
@@ -174,7 +214,8 @@ export function createIslandMaterials(): IslandMaterials {
       structure.refresh();
     },
     dispose(): void {
-      sierraTerrain?.dispose();
+      for (const h of sierraTerrains.values()) h.dispose();
+      for (const h of sierraRocks.values()) h.dispose();
       pines?.pine.material.dispose();
       terrain.dispose();
       rock.dispose();
