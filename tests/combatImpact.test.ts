@@ -596,11 +596,13 @@ describe('a hit throws solid debris that LANDS (§T.63)', () => {
     expect(instanced(mesh).visible).toBe(false); // emit alone draws nothing yet
     let sawChunks = false;
     let sawRings = false;
-    for (let i = 0; i < 60 * 10; i++) {
+    // long enough for the planks to go under: they float chunkFloatLife
+    // after they land (25 s), which is the point of them
+    for (let i = 0; i < 60 * 40; i++) {
       fx.update(1 / 60, [], () => 0);
       if (instanced(mesh).count > 0) sawChunks = true;
       // sampled INSIDE the loop, not after it: a ring lives ~1.4 s and its
-      // scar a few seconds more, so by the end of a ten-second run everything
+      // scar a few seconds more, so by the end of a forty-second run everything
       // is back at zero scale and byte-identical to the quiet baseline. A
       // check placed after the loop would pass for the one reason that has
       // nothing to do with the feature working.
@@ -637,6 +639,38 @@ describe('a hit throws solid debris that LANDS (§T.63)', () => {
     // wrong and would machine-gun the ring pool)
     expect(splashes).toHaveLength(5);
     for (const [, y] of splashes) expect(y).toBe(0);
+    debris.dispose();
+  });
+
+  it('floats for its FLOAT life, however long it flew, and goes under rather than blinking out', () => {
+    // User: "the debris ending up on the ocean vanishes too quickly." The
+    // airborne clock kept running after splashdown and the airborne life was
+    // the only life there was, so a plank that flew 1.5 s bobbed 4.5 s and a
+    // plank that flew 5 s bobbed 1 s - and chunkFloatLife was a dead knob.
+    // Landing restarts the clock: a short flight and a long flight float for
+    // the same time, and the end of it is a shrink into the water, not a pop.
+    const debris = createDebris({ count: 2, speed: 0, spread: 0, floatLife: 10, life: 6 });
+    const pool = () => (debris.mesh as unknown as {
+      userData: { debrisPool: { wet: Float32Array; age: Float32Array; life: Float32Array } };
+    }).userData.debrisPool;
+    // two drops from different heights = different flight times
+    debris.spawn([0, 2, 0], [0, -1, 0], 1, 7);
+    debris.spawn([5, 40, 5], [0, -1, 0], 1, 8);
+    const landedAt: number[] = [NaN, NaN];
+    const goneAt: number[] = [NaN, NaN];
+    for (let f = 1; f <= 60 * 30; f++) {
+      debris.update(1 / 60, () => 0);
+      const { wet, age, life } = pool();
+      for (let i = 0; i < 2; i++) {
+        if (Number.isNaN(landedAt[i]) && wet[i] >= 0) landedAt[i] = f / 60;
+        if (Number.isNaN(goneAt[i]) && age[i] >= life[i]) goneAt[i] = f / 60;
+      }
+    }
+    expect(landedAt[1] - landedAt[0]).toBeGreaterThan(1.5); // genuinely different flights
+    const floated = [goneAt[0] - landedAt[0], goneAt[1] - landedAt[1]];
+    expect(floated[0]).toBeCloseTo(10, 1);
+    expect(Math.abs(floated[0] - floated[1])).toBeLessThan(0.05); // flight time is not float time
+    expect(debris.liveCount()).toBe(0); // and it does go
     debris.dispose();
   });
 

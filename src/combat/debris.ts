@@ -321,6 +321,14 @@ export function createDebris(config: Partial<DebrisConfig> = {}): DebrisChunks {
               // quarter of a metre, which is a visible plunge-through.
               py[i] = sea;
               wet[i] = 0;
+              // LANDING RESTARTS ITS CLOCK. `life` was the airborne budget
+              // (a chunk that never finds water still has to go); afloat it
+              // is the float life, so how long a plank bobs does not depend
+              // on how long it flew, and the shrink window at the end of it
+              // is the plank going under, not a plank vanishing mid-air.
+              age[i] = 0;
+              life[i] = floatLife;
+              if (floatLife > liveFor) liveFor = floatLife; // the idle skip must wait for it
               // the ring is the caller's to make — it already owns a mesh that
               // fits the local wave plane (376d02d), and a second splash path
               // is exactly the duplication that file's header argues against
@@ -346,9 +354,6 @@ export function createDebris(config: Partial<DebrisConfig> = {}): DebrisChunks {
           // the tumble washes out fast in water, but does not stop dead
           ang[i] += spin[i] * step;
           spin[i] *= 0.9;
-          if (wet[i] >= floatLife) {
-            age[i] = life[i]; // waterlogged: it goes under
-          }
         }
 
         if (age[i] >= life[i]) continue; // died this frame; leave it unwritten
@@ -359,8 +364,9 @@ export function createDebris(config: Partial<DebrisConfig> = {}): DebrisChunks {
         // away and getting smaller reads as distance, which is free honesty.
         const t = age[i] / Math.max(life[i], 1e-4);
         const fade = t > 0.75 ? Math.max(0, 1 - (t - 0.75) / 0.25) : 1;
-        // afloat, it also settles INTO the water rather than resting on it
-        const sink = wet[i] > 0 ? Math.min(1, wet[i] / floatLife) * sy[i] * 0.5 : 0;
+        // afloat, it settles INTO the water rather than resting on it, and
+        // through the shrink window it goes under altogether: waterlogged
+        const sink = wet[i] > 0 ? (Math.min(1, wet[i] / floatLife) * 0.5 + (1 - fade)) * sy[i] : 0;
 
         tmpAxis.set(ax[i], ay[i], az[i]);
         q.setFromAxisAngle(tmpAxis, ang[i]);

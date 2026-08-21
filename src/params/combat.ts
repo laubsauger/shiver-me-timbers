@@ -554,7 +554,7 @@ export const combatFxParams: CombatFxParams = registerParams(
     // hemisphere, i.e. it had no relationship to the impact at all — which is
     // why it read as "generic particles" no matter what colour they were.
     splinterSpread: 0.5,
-    chunkCount: 40,
+    chunkCount: 64,
     // 2 per hit and 8 on a breach: the RATIO is the statement, not the
     // numbers. An ordinary ball punching through planking knocks a couple of
     // pieces loose; a section actually stoving in is where the ship comes
@@ -563,7 +563,11 @@ export const combatFxParams: CombatFxParams = registerParams(
     chunkPerHit: 2,
     chunkPerBreach: 8,
     chunkLife: 6,
-    chunkFloatLife: 3,
+    // oak floats. Was 3 - and in practice less, because the airborne clock
+    // kept running after splashdown - so the evidence of a hit was gone
+    // before the smoke was. Long enough to sail past; the pool evicts the
+    // oldest when a fight outruns it.
+    chunkFloatLife: 25,
     chunkSpeed: 7,
     chunkSpread: 0.55,
     chunkSize: 0.8,
@@ -685,7 +689,7 @@ export const combatFxParams: CombatFxParams = registerParams(
     chunkPerHit: { min: 0, max: 16, step: 1 },
     chunkPerBreach: { min: 0, max: 32, step: 1 },
     chunkLife: { min: 0.5, max: 20, step: 0.5 },
-    chunkFloatLife: { min: 0, max: 20, step: 0.5 },
+    chunkFloatLife: { min: 0, max: 90, step: 0.5 },
     chunkSpeed: { min: 0, max: 25, step: 0.5 },
     chunkSpread: { min: 0, max: 1, step: 0.01 },
     chunkSize: { min: 0.1, max: 3, step: 0.05 },
