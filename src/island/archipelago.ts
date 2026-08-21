@@ -56,6 +56,12 @@ export interface IslandSite {
   archetype?: ArchetypeName;
   /** params applied on top of `islandParams` for this island alone */
   overrides?: Partial<IslandParams>;
+  /**
+   * Silhouette only (§V90): the Half-Dome island on the far horizon. Nothing
+   * routes to it, no anchorage is solved for it, and it stays ≥ 1.5× the
+   * furthest reachable station away. Set by `generateSierraSites`.
+   */
+  unreachable?: boolean;
 }
 
 /**
@@ -205,11 +211,17 @@ export interface CreateArchipelagoOptions {
   seed: number;
   /** overrides islandParams for this build (tests) */
   params?: IslandParams;
+  /**
+   * A hand-built site list instead of `generateIslandSites` — the sierra
+   * slice (`generateSierraSites`, sierraSites.ts). Must already be resolved
+   * (positions, radii, archetypes, overrides); nothing here re-validates it.
+   */
+  sites?: IslandSite[];
 }
 
 export function createArchipelago(opts: CreateArchipelagoOptions): Archipelago {
   const p = opts.params ?? islandParams;
-  const sites = generateIslandSites(opts.seed, p);
+  const sites = opts.sites ?? generateIslandSites(opts.seed, p);
 
   const group = new THREE.Group();
   group.name = 'archipelago';
@@ -238,7 +250,9 @@ export function createArchipelago(opts: CreateArchipelagoOptions): Archipelago {
   // Its anchorage is solved from the heightmap that was actually built, not
   // from a stored constant — same island, same bay mouth, one source of truth.
   const anchorages: WorldAnchorage[] = [];
-  if (sites.length > 0 && sites[0].archetype !== undefined) {
+  // `=== 'lagoon'`, not `!== undefined`: a sierra site list also forces its
+  // archetypes, and `findLagoonAnchorage` throws on an island with no basin
+  if (sites.length > 0 && sites[0].archetype === 'lagoon') {
     const local = findLagoonAnchorage(islands[0].heightmap);
     anchorages.push({
       name: 'lagoon',

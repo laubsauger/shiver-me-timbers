@@ -22,6 +22,8 @@
  * coastline lives, and measured a shore-radius variation of only 10–16%.
  */
 
+import type { SierraArchetypeName } from './sierraArchetypes';
+
 /** one height contribution in island-local metres */
 export interface Feature {
   kind: 'cone' | 'mesa' | 'ridge' | 'sheer';
@@ -134,7 +136,15 @@ export const ARCHETYPES = [
   'crestedDome',
   'lagoon',
 ] as const;
-export type ArchetypeName = (typeof ARCHETYPES)[number];
+/** the galleon-era families this file builds — what `pickArchetype` draws from */
+export type PirateArchetypeName = (typeof ARCHETYPES)[number];
+/**
+ * Every silhouette family the heightmap can be asked for. The sierra names
+ * (§T.99, sierraArchetypes.ts) are never drawn by `pickArchetype`: they only
+ * arrive as a forced `archetype` from a sierra site, so the pirate world's
+ * seeded draws are untouched by their existence.
+ */
+export type ArchetypeName = PirateArchetypeName | SierraArchetypeName;
 
 type Rng = () => number;
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
@@ -191,7 +201,7 @@ const BASE_POWER = 1.1;
  * and walks on, and it is the one the user was looking at when they said the
  * scale made no sense.
  */
-const ARCHETYPE_RELIEF: Record<ArchetypeName, number> = {
+const ARCHETYPE_RELIEF: Record<PirateArchetypeName, number> = {
   mesaCliff: 2.4,
   spine: 2.1,
   twinPeaks: 1.5,
@@ -200,12 +210,12 @@ const ARCHETYPE_RELIEF: Record<ArchetypeName, number> = {
 };
 
 /** the peak an archetype actually builds to, before any feature fractions */
-export function archetypePeak(name: ArchetypeName, peak: number): number {
+export function archetypePeak(name: PirateArchetypeName, peak: number): number {
   return peak * ARCHETYPE_RELIEF[name];
 }
 
 export function buildArchetype(
-  name: ArchetypeName,
+  name: PirateArchetypeName,
   rng: Rng,
   extent: number,
   rawPeak: number,
@@ -321,7 +331,7 @@ export function buildArchetype(
  * outliers around it, a broad hill is the shape that does not. Zero would make
  * the family look impoverished next to the others, so the floor is one.
  */
-const STACK_AFFINITY: Record<ArchetypeName, number> = {
+const STACK_AFFINITY: Record<PirateArchetypeName, number> = {
   spine: 1,
   mesaCliff: 0.85,
   lagoon: 0.7,
@@ -363,7 +373,7 @@ export interface SeaStackSpec {
  * for. `radiusMin` has to stay comfortably above that cell size.
  */
 export function buildSeaStacks(
-  name: ArchetypeName,
+  name: PirateArchetypeName,
   rng: Rng,
   spec: SeaStackSpec,
 ): Feature[] {
@@ -395,7 +405,7 @@ export function buildSeaStacks(
  * with no cliff anywhere on it is the shipping look this work exists to
  * replace, so no family is allowed back to a beach on every bearing.
  */
-const HEADLAND_AFFINITY: Record<ArchetypeName, number> = {
+const HEADLAND_AFFINITY: Record<PirateArchetypeName, number> = {
   mesaCliff: 1,
   spine: 1,
   twinPeaks: 0.7,
@@ -440,7 +450,7 @@ export interface HeadlandSpec {
  * features stop.
  */
 export function buildHeadlands(
-  name: ArchetypeName,
+  name: PirateArchetypeName,
   rng: Rng,
   spec: HeadlandSpec,
 ): Feature[] {
@@ -473,7 +483,7 @@ export function buildHeadlands(
  * fails the "identifiable from miles out" bar as surely as one where all five
  * are (§V43).
  */
-export function pickArchetype(rng: Rng, avoid: readonly ArchetypeName[] = []): ArchetypeName {
+export function pickArchetype(rng: Rng, avoid: readonly ArchetypeName[] = []): PirateArchetypeName {
   const pool = ARCHETYPES.filter((a) => !avoid.includes(a));
   const from = pool.length > 0 ? pool : ARCHETYPES;
   return from[Math.floor(rng() * from.length) % from.length];

@@ -28,6 +28,9 @@ import { applyWindSway, createPalmMaterial } from '../vegetation';
 import type { WindSway } from '../vegetation/windSway';
 import { createStructureMaterial } from './structures';
 import type { ShipMaterialHandle } from '../ship/woodMaterial';
+import { aerialOutputNode } from '../terrain/aerialPerspective';
+import { createSierraTerrainMaterial } from './sierraMaterial';
+import { createPineMaterialSet, type PineMaterialSet } from '../vegetation/pineScatter';
 
 export interface IslandMaterials {
   terrain: TerrainBlendMaterialHandle;
@@ -43,6 +46,14 @@ export interface IslandMaterials {
    * every structure on every island (§V17).
    */
   structure: ShipMaterialHandle;
+  /**
+   * Granite + DG sand for the sierra families (§T.99, sierraMaterial.ts).
+   * Built on first request — a pirate world never asks and never pays for
+   * the node graph. One handle for every sierra island (§V17).
+   */
+  sierraTerrain(): TerrainBlendMaterialHandle;
+  /** pines/junipers/dead pines — same lazy rule, one shader world-wide */
+  pines(): PineMaterialSet;
   /**
    * Per-frame push for every shared shader. `waterLevel` is the live sea
    * height at the shore being looked at (§V8: same CpuOcean mirror buoyancy
@@ -72,6 +83,48 @@ export function createIslandMaterials(): IslandMaterials {
   const cover = createCoverMeshMaterial();
   const structure = createStructureMaterial();
 
+  // §B67 — EVERY island prop melts on the TERRAIN's aerial curve.
+  //
+  // THE DEFECT, measured against docs/raft2100/lookdev/R0/params.md: the far
+  // island (~1.5 km) stayed sharp while the lookdev dragged `sky.fogNear/
+  // fogFar` to 150/1400 m. It was not the LOD — both LOD levels are one mesh
+  // with one material (islandMesh.ts `setLod` swaps geometry only). The
+  // terrain reads the OCEAN's haze curve (`oceanSurface.hazeStart/End/Curve`,
+  // 750/4600/^1.7 → 2% at 1.5 km) and sets `fog = false`, by design, so land
+  // and sea agree at the shoreline (§V30, aerialPerspective.ts). But the
+  // rocks, palms, ground cover and jetties were MeshStandardNodeMaterials on
+  // scene fog — a different curve, the one the lookdev WAS dragging — so at
+  // 0.75 km the props hazed (fog 48%) on terrain that did not (0%), and at
+  // 1.5 km the props vanished into fog (100%) while the terrain stayed 2%
+  // hazed: "the lagoon island is fully hazed, the far island is sharp brown".
+  //
+  // Cure at the cause: the props take the terrain's OWN aerial output node,
+  // sharing its uniforms, so the whole island is one curve and one knob.
+  // `fog = false` + `outputNode` are a pair (or they haze twice). The knob to
+  // flatten the far plane is therefore `oceanSurface.hazeStart/hazeEnd/
+  // hazeCurve` — which moves the sea too, which is the point.
+  const aerial = terrain.uniforms.aerial;
+  for (const m of [rock.material, palm.material, cover.material, structure.material]) {
+    m.fog = false;
+    m.outputNode = aerialOutputNode(aerial);
+  }
+
+  let sierraTerrain: TerrainBlendMaterialHandle | null = null;
+  let pines: PineMaterialSet | null = null;
+  const getSierraTerrain = (): TerrainBlendMaterialHandle => {
+    if (!sierraTerrain) sierraTerrain = createSierraTerrainMaterial();
+    return sierraTerrain;
+  };
+  const getPines = (): PineMaterialSet => {
+    if (!pines) {
+      pines = createPineMaterialSet();
+      // same §B67 rule as the palms: one haze curve per island
+      pines.pine.material.fog = false;
+      pines.pine.material.outputNode = aerialOutputNode(aerial);
+    }
+    return pines;
+  };
+
   return {
     terrain,
     rock,
@@ -79,7 +132,22 @@ export function createIslandMaterials(): IslandMaterials {
     palmSway,
     cover,
     structure,
+    sierraTerrain: getSierraTerrain,
+    pines: getPines,
     update(frame): void {
+      if (sierraTerrain) {
+        sierraTerrain.updateFromParams();
+        sierraTerrain.setSunDirection(frame.sunDirection);
+        sierraTerrain.setHazeColor(frame.hazeColor);
+        sierraTerrain.setTime(frame.time);
+        sierraTerrain.setSwell(frame.swell);
+        sierraTerrain.setWaterline(frame.waterLevel);
+      }
+      if (pines) {
+        pines.sway.setWind(frame.time, frame.windDir, frame.windStrength);
+        pines.sway.syncParams();
+        pines.pine.refresh();
+      }
       // the grass reads the SAME wind the palms and the sea do, so a gust
       // crosses the whole scene at once instead of each system having its own
       cover.setWind(frame.time, frame.windDir, frame.windStrength);
@@ -106,6 +174,8 @@ export function createIslandMaterials(): IslandMaterials {
       structure.refresh();
     },
     dispose(): void {
+      sierraTerrain?.dispose();
+      pines?.pine.material.dispose();
       terrain.dispose();
       rock.dispose();
       palm.material.dispose();

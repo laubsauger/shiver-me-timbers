@@ -43,6 +43,14 @@ import {
   type ArchetypeName,
   type Feature,
 } from './archetypes';
+import {
+  buildSierraShape,
+  emitTreeline,
+  isSierraArchetype,
+  sierraPeak,
+  type SierraMeta,
+  type SierraShape,
+} from './sierraArchetypes';
 
 /** structural subset of params/island.ts `IslandParams` used by generation */
 export interface IslandHeightmapParams {
@@ -123,6 +131,12 @@ export interface IslandHeightmap {
    * are two things that can disagree.
    */
   lagoonCenter: [number, number] | null;
+  /**
+   * Sierra-only metadata (§T.99): the seeded axis, terrace count and the
+   * treeline markers for dead pines standing in the water. Undefined on every
+   * pirate island.
+   */
+  sierra?: SierraMeta;
   /** bilinear height sample, island-local coords; outside grid → -rimDepth */
   heightAt(x: number, z: number): number;
 }
@@ -443,35 +457,48 @@ export function generateIslandHeightmap(
   // silhouette family and nothing else about the island.
   const picked = pickArchetype(rng, avoidArchetypes);
   const archetype = p.archetype ?? picked;
-  // Landmass first, then the stacks standing off it. Both go through the same
-  // smooth-max, so a stack that happens to land against a headland fuses with
-  // it instead of creasing, and one in open water stays an isolated column.
-  // Headlands and stacks scale off the FAMILY's relief, not the island's raw
-  // `peakHeight` — they are fractions of "how tall is this island", and a
-  // cliff family whose walls were sized off the flat number would have a
-  // fortress-rock skyline with sandbar cliffs at the water.
-  const familyPeak = archetypePeak(archetype, p.peakHeight);
-  const features = [
-    ...buildArchetype(archetype, rng, R * p.featureExtent, p.peakHeight),
-    ...buildHeadlands(archetype, rng, {
-      count: p.headlandCount,
-      offset: R * p.headlandOffset,
-      radiusMin: R * p.headlandRadiusMin,
-      radiusMax: R * p.headlandRadiusMax,
-      heightMin: familyPeak * p.headlandHeightMin,
-      heightMax: familyPeak * p.headlandHeightMax,
-      edgeFraction: p.headlandEdge,
-    }),
-    ...buildSeaStacks(archetype, rng, {
-      maxCount: p.seaStackCount,
-      ring: R * p.seaStackRing,
-      radiusMin: R * p.seaStackRadiusMin,
-      radiusMax: R * p.seaStackRadiusMax,
-      heightMin: familyPeak * p.seaStackHeightMin,
-      heightMax: familyPeak * p.seaStackHeightMax,
-    }),
-  ];
   const blend = Math.max(p.featureBlend, 1e-3); // §V28 floored divisor
+  let familyPeak: number;
+  let features: Feature[];
+  let sierra: SierraShape | null = null;
+  if (isSierraArchetype(archetype)) {
+    // SIERRA BRANCH (§T.99): a sierra family owns its landmass term outright —
+    // see sierraArchetypes.ts for why a terrace or a drowned crest cannot be a
+    // feature. No headlands and no stacks: those are the pirate coast's
+    // cliffs, and §V90 wants a DG-sand beach continuous from the waterline.
+    sierra = buildSierraShape(archetype, rng, R * p.featureExtent, p.peakHeight, blend);
+    familyPeak = sierraPeak(archetype, p.peakHeight);
+    features = sierra.features;
+  } else {
+    // Landmass first, then the stacks standing off it. Both go through the same
+    // smooth-max, so a stack that happens to land against a headland fuses with
+    // it instead of creasing, and one in open water stays an isolated column.
+    // Headlands and stacks scale off the FAMILY's relief, not the island's raw
+    // `peakHeight` — they are fractions of "how tall is this island", and a
+    // cliff family whose walls were sized off the flat number would have a
+    // fortress-rock skyline with sandbar cliffs at the water.
+    familyPeak = archetypePeak(archetype, p.peakHeight);
+    features = [
+      ...buildArchetype(archetype, rng, R * p.featureExtent, p.peakHeight),
+      ...buildHeadlands(archetype, rng, {
+        count: p.headlandCount,
+        offset: R * p.headlandOffset,
+        radiusMin: R * p.headlandRadiusMin,
+        radiusMax: R * p.headlandRadiusMax,
+        heightMin: familyPeak * p.headlandHeightMin,
+        heightMax: familyPeak * p.headlandHeightMax,
+        edgeFraction: p.headlandEdge,
+      }),
+      ...buildSeaStacks(archetype, rng, {
+        maxCount: p.seaStackCount,
+        ring: R * p.seaStackRing,
+        radiusMin: R * p.seaStackRadiusMin,
+        radiusMax: R * p.seaStackRadiusMax,
+        heightMin: familyPeak * p.seaStackHeightMin,
+        heightMax: familyPeak * p.seaStackHeightMax,
+      }),
+    ];
+  }
   // SLOPE BUDGET, NOT A FRACTION OF PEAK (§V43). Amplitude used to be
   // `peakHeight × strength`, and `peakHeight` scales with radius while these
   // frequencies are WORLD-space and do not — so noise slope grew linearly with
@@ -497,7 +524,7 @@ export function generateIslandHeightmap(
   // surface the grid will be built from — the shelf is sited against the real
   // field, not against a guess about where the archetype put its land (§V71).
   const landField = (x: number, z: number): { h: number; land: number; detail: number } => {
-    const land = combineFeatures(features, x, z, blend);
+    const land = sierra ? sierra.landAt(x, z) : combineFeatures(features, x, z, blend);
 
     // COASTLINE NOISE at absolute amplitude. The old field multiplied noise by
     // the dome, which zeroed it exactly at the rim — the one place coastline
@@ -553,7 +580,10 @@ export function generateIslandHeightmap(
   const rawHeight = (x: number, z: number): number => {
     const { h: beached, land, detail } = landField(x, z);
     const bayDist = Math.hypot(x - bayX, z - bayZ);
-    const basined = lagoonBasin(beached, land, detail, bayDist, R, p);
+    const basined0 = lagoonBasin(beached, land, detail, bayDist, R, p);
+    // the drowned crest (sierraArchetypes.ts) — a second negative-target term
+    // with the basin's own guarantee, so it sits where the basin sits
+    const basined = sierra?.shape ? sierra.shape(basined0, land, x, z) : basined0;
     // TERRACE BEFORE THE RIM ENVELOPE, for the reason the basin is: applied
     // after, its feather would overwrite the envelope's guaranteed -rimDepth
     // near the footprint edge and leave a step in the seabed field exactly on
@@ -622,6 +652,14 @@ export function generateIslandHeightmap(
     archetype,
     features,
     lagoonCenter: p.lagoonDepth > 0 ? [bayX, bayZ] : null,
+    // the treeline is read off the FINISHED grid (after the peak floor), so a
+    // marker is where the water actually is that shallow
+    sierra: sierra
+      ? {
+          ...sierra.meta,
+          treeline: sierra.treelineSegment ? emitTreeline(heightAt, sierra.treelineSegment) : [],
+        }
+      : undefined,
   };
 }
 

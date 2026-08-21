@@ -30,6 +30,9 @@ import { createIslandPalms, type IslandPalms } from './palms';
 import { createStructures, type Structures } from './structures';
 import { createGroundCover, type GroundCoverMeshes } from '../terrain';
 import type { IslandMaterials } from './islandMaterials';
+import { isSierraArchetype } from './sierraArchetypes';
+import { createSierraTerrainMaterial } from './sierraMaterial';
+import { createSierraPines } from '../vegetation/pineScatter';
 
 /**
  * Everything an island is built from: the world tunables, plus the two
@@ -219,18 +222,30 @@ export function createIsland(opts: CreateIslandOptions): Island {
   const heightmap = generateIslandHeightmap(opts.seed, p, opts.avoidArchetypes);
 
   const shared = opts.materials;
-  const terrain = createIslandMesh(heightmap, p.skirtDepth, shared?.terrain);
+  // BRANCH BY FAMILY, not by a global switch (§T.99): a sierra island gets
+  // granite + DG sand and pines; a pirate island in the same world is
+  // untouched. An unshared sierra island owns its granite handle.
+  const sierra = isSierraArchetype(heightmap.archetype);
+  const ownSierraTerrain = sierra && !shared ? createSierraTerrainMaterial() : null;
+  const terrainMaterial = sierra ? (shared?.sierraTerrain() ?? ownSierraTerrain ?? undefined) : shared?.terrain;
+  const terrain = createIslandMesh(heightmap, p.skirtDepth, terrainMaterial);
   const rocks = createRocks({
     seed: opts.seed + ROCK_SEED_OFFSET,
     heightmap,
     material: shared?.rock.material,
   });
-  const palms = createIslandPalms({
-    seed: opts.seed + PALM_SEED_OFFSET,
-    heightmap,
-    count: islandPalmCount(p.radius, islandParams),
-    shared: shared ? { palm: shared.palm, sway: shared.palmSway } : undefined,
-  });
+  const palms = sierra
+    ? createSierraPines({
+        seed: opts.seed + PALM_SEED_OFFSET,
+        heightmap,
+        shared: shared?.pines(),
+      })
+    : createIslandPalms({
+        seed: opts.seed + PALM_SEED_OFFSET,
+        heightmap,
+        count: islandPalmCount(p.radius, islandParams),
+        shared: shared ? { palm: shared.palm, sway: shared.palmSway } : undefined,
+      });
   const cover = createGroundCover({
     seed: opts.seed + COVER_SEED_OFFSET,
     heightmap,
@@ -337,6 +352,7 @@ export function createIsland(opts: CreateIslandOptions): Island {
       palms.dispose();
       rocks.dispose();
       terrain.dispose();
+      ownSierraTerrain?.dispose();
     },
   };
 }
