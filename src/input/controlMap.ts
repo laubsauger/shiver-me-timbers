@@ -68,6 +68,22 @@ export const CONTROL_CODES = {
    */
   elevateGuns: 'ArrowUp',
   depressGuns: 'ArrowDown',
+  /**
+   * FIRST-PERSON WALKER (§T.94, `src/player/`). `KeyT` is free everywhere
+   * else (T/I/O/K/L/U/Y/Z were the unclaimed letters). W/A/S/D/Space/Ctrl
+   * are SHARED with sailing, gunnery and the free camera's precise-flight
+   * modifier: the walker listens in the CAPTURE phase and swallows them ONLY
+   * while the first-person view owns the lens, the way freeCam does for its
+   * fly keys, so a step forward is never also a sail trimmed.
+   */
+  toggleFirstPerson: 'KeyT',
+  walkForward: 'KeyW',
+  walkBack: 'KeyS',
+  walkLeft: 'KeyA',
+  walkRight: 'KeyD',
+  walkJump: 'Space',
+  walkCrouch: 'ControlLeft',
+  walkCrouchRight: 'ControlRight',
 } as const;
 
 export interface ControlBinding {
@@ -135,6 +151,16 @@ export const CONTROL_GROUPS: readonly ControlGroup[] = [
       { keys: ['W', 'A', 'S', 'D'], action: 'Fly camera', hint: 'Free camera only' },
       { keys: ['R', 'F'], action: 'Rise / descend', hint: 'Free camera only' },
       { keys: ['Shift', 'Ctrl'], action: 'Fast / precise flight', hint: 'Free camera only' },
+    ],
+  },
+  {
+    title: 'On deck',
+    bindings: [
+      { keys: ['T'], action: 'Walk the deck', hint: 'First-person view; press again to return' },
+      { keys: ['Click'], action: 'Take the mouse', hint: 'Esc gives it back' },
+      { keys: ['W', 'A', 'S', 'D'], action: 'Walk', hint: 'On deck only' },
+      { keys: ['Space'], action: 'Hop', hint: 'On deck only' },
+      { keys: ['Ctrl'], action: 'Crouch', hint: 'Ducks by itself under a low deckhead' },
     ],
   },
   {

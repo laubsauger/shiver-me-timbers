@@ -46,7 +46,9 @@ import {
   yawPitchFromDirection,
 } from './camMath';
 
-export type CamMode = 'follow' | 'orbit' | 'free' | 'helm' | 'station';
+export type CamMode = 'follow' | 'orbit' | 'free' | 'helm' | 'station' | 'fp';
+/** a WORLD eye pose supplied from outside — the first-person walker (§T.94) */
+export type PoseSource = () => { position: Vector3; quaternion: Quaternion };
 export type HeightFn = (x: number, z: number) => number;
 export type { Vec3Like } from './debugPose';
 export type { StationId } from './camStations';
@@ -133,6 +135,8 @@ export class FollowCam {
   private deckWorld = new Vector3();
   private deckAim = new Vector3();
   private deckUp = new Vector3();
+  /** 'fp' mode's pose — the lens is a puppet of the walker, no orbit, no smoothing */
+  private poseSource: PoseSource | null = null;
   private detach: () => void;
 
   constructor(
@@ -151,7 +155,7 @@ export class FollowCam {
         this.dragging = d;
       },
       drag: (dx, dy) => {
-        if (!this.dragging) return;
+        if (!this.dragging || this.mode === 'fp') return; // fp: pointer lock owns the mouse
         const p = cameraParams;
         if (this.mode === 'free') {
           this.free.look(dx, dy);
@@ -194,6 +198,7 @@ export class FollowCam {
       },
       wheel: (deltaY) => {
         const p = cameraParams;
+        if (this.mode === 'fp') return;
         if (this.mode === 'free') {
           this.free.adjustSpeed(deltaY);
           return;
@@ -318,13 +323,25 @@ export class FollowCam {
     }
   }
 
+  /**
+   * Hand the lens to the first-person walker (§T.94). Mode 'fp' reads this
+   * every frame and applies it verbatim — the walker already integrates in
+   * the ship frame and rides the deck, so any damping here would be the
+   * observer sliding on his own planks. Without a source, 'fp' falls back to
+   * the chase rather than freezing.
+   */
+  setPoseSource(source: PoseSource | null): void {
+    this.poseSource = source;
+  }
+
   setMode(mode: CamMode): void {
     if (mode === this.mode) return;
     const p = cameraParams;
     // switching modes is an explicit "give me the camera back" gesture
     this.clearDebugPose();
     const toDeck = mode === 'helm' || mode === 'station';
-    const fromDeck = this.mode === 'helm' || this.mode === 'station';
+    // leaving the walker glides back like leaving a deck station
+    const fromDeck = this.mode === 'helm' || this.mode === 'station' || this.mode === 'fp';
     if (mode === 'helm') {
       // Angles reset so H always lands looking dead ahead over the bow. NOT
       // true of the numbered stations, which keep their own offsets — the helm
@@ -539,6 +556,19 @@ export class FollowCam {
     if (this.pin.pinned) {
       this.pin.apply(this.camera);
       return;
+    }
+
+    if (this.mode === 'fp') {
+      if (this.poseSource !== null) {
+        const pose = this.poseSource();
+        this.camera.up.copy(WORLD_UP);
+        this.camera.position.copy(pose.position);
+        this.camera.quaternion.copy(pose.quaternion);
+        return;
+      }
+      this.mode = 'follow';
+      this.initialized = false;
+      this.blend = 0;
     }
 
     if (this.mode === 'free') {

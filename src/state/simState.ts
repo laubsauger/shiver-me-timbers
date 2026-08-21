@@ -11,6 +11,8 @@
 // type-checking at the one call site that writes it (src/main.ts), while a
 // rung REMOVED from the ladder would leave a name here nothing can produce.
 import type { WeatherPresetName } from '../weather/presets';
+// Type-only for the same reason: the player core is plain data (§T.94).
+import type { PlayerState } from '../player/playerStep';
 
 export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
@@ -85,6 +87,12 @@ export interface SimState {
   ships: ShipState[];
   projectiles: ProjectileState[];
   nextProjectileId: number;
+  /**
+   * FIRST-PERSON WALKER (§T.94/§V85). Ship-local feet position while aboard,
+   * world while swimming. OPTIONAL for the reason `anchored` is: a state
+   * without a walker serializes — and hashes — exactly as it did before.
+   */
+  player?: PlayerState;
 }
 
 export function createInitialState(seed: number): SimState {
