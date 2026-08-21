@@ -154,16 +154,17 @@ function summitReachable(hm: IslandHeightmap): boolean {
   return false;
 }
 
-/** plateaus along the terraced flank: flat runs ≥ 3 m (< 10°) separated by steeper ground */
-function countPlateaus(hm: IslandHeightmap): number {
-  const a = hm.sierra!.terraceAzimuth;
+/** plateaus along a bearing of the terraced flank: flat runs ≥ 3 m (< 10°) separated by steeper ground */
+function countPlateaus(hm: IslandHeightmap, a: number = hm.sierra!.terraceAzimuth): number {
   const cx = Math.cos(a);
   const sz = Math.sin(a);
   const shore = findShoreRadius(hm, a);
   let plateaus = 0;
   let flatRun = 0;
   let open = true;
-  for (let r = shore; r > 0; r -= 1) {
+  // the apex (r < 10 m) is the summit, not a terrace — T112b's station approach
+  // ramps over it, and before that the old count was crediting it
+  for (let r = shore; r > 10; r -= 1) {
     const h = hm.heightAt(cx * r, sz * r);
     if (h < sierraParams.dgSandBand) continue; // the sand band is not a terrace
     const g = gradientAt(hm, cx * r, sz * r);
@@ -255,11 +256,46 @@ describe('§V90 beach band continuous from the waterline (DG sand, every family,
   }
 });
 
-describe('§V90 clue path: beach → summit on foot, every segment < 35°', () => {
+/**
+ * §V90 clue path — RE-CUT for T112b. The BFS used to DISCOVER a walkable
+ * beach→summit path after the fact (luck, asserted). The route is now
+ * AUTHORED content: `hm.path.routes.main` runs landing → station (the summit)
+ * → exit, carved at ≤ pathMainSlope. So the property is stated on the
+ * authored data — the station IS the summit region, the route reaches it
+ * from the beach with every 2 m of walked ground under 35° — and the BFS
+ * stays as the independent cross-check that the carved grid agrees (the
+ * route must be a subset of what the grid allows). tests/pathGraph.test.ts
+ * owns the finer route properties (mean slope, fork, gate, occluder).
+ */
+describe('§V90 clue path: the AUTHORED route climbs beach → summit on foot, every 2 m < 35°', () => {
   for (const name of SIERRA_SLICE_ARCHETYPES) {
     for (let i = 0; i < SEEDS.length; i++) {
       it(`${name} seed ${SEEDS[i]} on the ${GRID}² grid`, () => {
-        expect(summitReachable(hmFor(name, i))).toBe(true);
+        const hm = hmFor(name, i);
+        expect(hm.path, 'a slice island publishes its route').toBeDefined();
+        const main = hm.path!.routes.main;
+        const station = hm.path!.pois.find((q) => q.kind === 'station')!;
+        const landing = hm.path!.pois.find((q) => q.kind === 'landing')!;
+        // from the beach (landing under the DG band) to the summit region
+        expect(landing.y).toBeGreaterThan(0);
+        expect(landing.y).toBeLessThan(sierraParams.dgSandBand);
+        let peak = -Infinity;
+        for (let k = 0; k < hm.data.length; k++) peak = Math.max(peak, hm.data[k]);
+        expect(station.y, 'the station stands on the summit').toBeGreaterThan(peak - 8);
+        // every 2 m of walked ground under 35°
+        let a = 0;
+        let run = 0;
+        let worst = 0;
+        for (let b = 1; b < main.length; b++) {
+          run += Math.hypot(main[b][0] - main[b - 1][0], main[b][2] - main[b - 1][2]);
+          if (run < 2) continue;
+          worst = Math.max(worst, Math.abs(main[b][1] - main[a][1]) / run);
+          a = b;
+          run = 0;
+        }
+        expect(worst, `steepest 2 m: ${(Math.atan(worst) * DEG).toFixed(1)}°`).toBeLessThan(TAN35);
+        // and the grid agrees: the carved field still admits a BFS path
+        expect(summitReachable(hm)).toBe(true);
       });
     }
   }
@@ -279,10 +315,21 @@ describe('dome: exfoliation terraces', () => {
     expect(terraceSteps(17, 10, 3, 5, 0.4)).toBeCloseTo(15, 9);
   });
   for (let i = 0; i < SEEDS.length; i++) {
-    it(`seed ${SEEDS[i]}: ≥ 2 plateaus on the terraced flank`, () => {
+    it(`seed ${SEEDS[i]}: ≥ 2 plateaus on the terraced flank, off the trail`, () => {
       const hm = hmFor('dome', i);
       expect(hm.sierra?.name).toBe('dome');
-      expect(countPlateaus(hm)).toBeGreaterThanOrEqual(2);
+      // RE-CUT for T112b (§V80): the old test scanned the ONE bearing of the
+      // terrace azimuth, and the authored route climbs the terraced flank
+      // because it is the gentlest — with the occluder crest/saddle across it
+      // 50 m under the summit, that one line lost a plateau. The property is
+      // "the flank has terraces": the BEST bearing inside the terraced sector
+      // still reads ≥ 2 plateaus beyond the apex.
+      // (a trail can only remove plateaus, so no bearing is skipped)
+      const az = hm.sierra!.terraceAzimuth;
+      const half = sierraParams.domeTerraceSector * 0.6;
+      let best = 0;
+      for (let k = -6; k <= 6; k++) best = Math.max(best, countPlateaus(hm, az + (k / 6) * half));
+      expect(best).toBeGreaterThanOrEqual(2);
     });
   }
 });

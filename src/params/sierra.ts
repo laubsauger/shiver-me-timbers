@@ -262,6 +262,9 @@ export interface SierraParams {
   pathOccluderSpan: number;
   /** Journey tilt: total drop across the island toward the next slice island (m) */
   pathTilt: number;
+  /** the corridor's own beach guard: the blend fades in from this height (m) over this width (m) */
+  pathGuardStart: number;
+  pathGuardWidth: number;
   // ── T112d shading (island/terrainInfo.ts + sierraMaterial.ts) ──────────
   /** polished granite: convex curvature (1/m) and slope (°) ceiling, debris (m) ceiling */
   polishCurvature: number;
@@ -458,8 +461,8 @@ export const sierraParams: SierraParams = registerParams(
     pathCorridorFalloff: 6,
     pathMainSlope: 27,
     pathForkSlope: 31,
-    pathScrambleSlope: 34,
-    pathScrambleLength: 10,
+    pathScrambleSlope: 34.25,
+    pathScrambleLength: 16,
     pathSlopeCost: 4,
     pathTurnCost: 1.5,
     pathBeachCost: 0.6,
@@ -472,12 +475,12 @@ export const sierraParams: SierraParams = registerParams(
     pathGateWidth: 5,
     pathGateFeather: 6,
     pathOccluderDistance: 50,
-    pathOccluderHeight: 5,
+    pathOccluderHeight: 6,
     pathOccluderSigma: 7,
     pathOccluderSpan: 36,
     pathTilt: 2,
-    pathGuardStart: 2.5,
-    pathGuardWidth: 3,
+    pathGuardStart: 0.5,
+    pathGuardWidth: 1,
     // ── T112d shading ──
     // polish where curvature > +0.02/m and slope < 15°, on bare bedrock
     polishCurvature: 0.02,

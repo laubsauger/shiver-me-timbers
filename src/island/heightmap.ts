@@ -51,7 +51,17 @@ import {
   type SierraMeta,
   type SierraShape,
 } from './sierraArchetypes';
-import { buildErosionContext, erodeAndShape, type BakeStats, type ErosionBake } from './erosion';
+import {
+  buildErosionContext,
+  defaultErosionPasses,
+  erodeAndShape,
+  insertPassBefore,
+  type BakeStats,
+  type ErosionBake,
+} from './erosion';
+import { pathCarvePass, type IslandPath, type PathCarve } from './pathCarve';
+import { defaultPathHints } from './pathGraph';
+import { SIERRA_SLICE_ARCHETYPES } from './sierraArchetypes';
 import { sierraParams } from '../params/sierra';
 
 /** structural subset of params/island.ts `IslandParams` used by generation */
@@ -103,6 +113,14 @@ export interface IslandHeightmapParams {
    * tests); undefined = 'full'. Pirate islands never enter the stage.
    */
   erosion?: 'full' | 'shapeOnly';
+  /**
+   * T112b: island-local bearings (rad) the path graph is authored against —
+   * the landing faces `pathApproach` (where the raft comes from), the exit
+   * and the Journey tilt face `pathNext` (the next slice island). Set by
+   * `generateSierraSites`; undefined draws both from the seed.
+   */
+  pathApproach?: number;
+  pathNext?: number;
   /** sea stacks (see archetypes.buildSeaStacks) — fractions, resolved below */
   seaStackCount: number;
   seaStackRing: number;
@@ -151,6 +169,12 @@ export interface IslandHeightmap {
    * stage did not run (pirate islands, 'shapeOnly').
    */
   erosion?: { debris: Float32Array; bakeStats: BakeStats };
+  /**
+   * T112b: the authored route — distance to the nearest centreline (m, full
+   * grid), corridor masks, POIs and the route polylines with final y. Slice
+   * islands only (sierra, radius ≥ `pathMinRadius`, the erosion stage ran).
+   */
+  path?: IslandPath;
   /** bilinear height sample, island-local coords; outside grid → -rimDepth */
   heightAt(x: number, z: number): number;
 }
@@ -660,6 +684,7 @@ function buildIsland(
   // uplift, the passes own the silhouette from here. `heightAt` below reads
   // the grid the stage wrote, so it stays the one truth for everything.
   let bake: ErosionBake | null = null;
+  let carve: PathCarve | null = null;
   let field: { bedrock: Float64Array; debris: Float64Array } | null = null;
   if (erode && sierra && uplift) {
     const bedrock = Float64Array.from(data);
@@ -684,7 +709,22 @@ function buildIsland(
       p: sierraParams,
       streamIters,
     });
-    bake = erodeAndShape({ size, cell, bedrock, debris }, ctx);
+    // T112b: the path carve goes between rockfallThermal and thermalSmooth,
+    // on the slice islands only (a filler islet has no station to walk to)
+    const passes = defaultErosionPasses(ctx);
+    const routed =
+      sierraParams.pathEnabled > 0 &&
+      R >= sierraParams.pathMinRadius &&
+      (SIERRA_SLICE_ARCHETYPES as readonly string[]).includes(name);
+    if (routed) {
+      const hints = defaultPathHints(seed);
+      carve = pathCarvePass({
+        seed,
+        hints: { approach: p.pathApproach ?? hints.approach, next: p.pathNext ?? hints.next },
+      });
+      insertPassBefore(passes, 'thermalSmooth', carve.pass);
+    }
+    bake = erodeAndShape({ size, cell, bedrock, debris }, ctx, passes);
   }
 
   const finalize = (): IslandHeightmap => {
@@ -694,7 +734,9 @@ function buildIsland(
       for (let i = 0; i < data.length; i++) data[i] = field.bedrock[i] + field.debris[i];
       erosion = { debris: Float32Array.from(field.debris), bakeStats: bake.stats };
     }
-    return assemble(erosion);
+    const hm = assemble(erosion);
+    if (carve) hm.path = carve.publish(hm.heightAt);
+    return hm;
   };
 
   const assemble = (erosion: IslandHeightmap['erosion']): IslandHeightmap => {

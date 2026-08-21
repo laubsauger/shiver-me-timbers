@@ -18,7 +18,9 @@ import { createRng } from '../state/rng';
 import { islandParams, type IslandParams } from '../params/island';
 import { sierraParams, type SierraParams } from '../params/sierra';
 import { islandPeakHeights, type ResolvedIslandParams } from './island';
-import type { IslandSite } from './archipelago';
+import { siteParams, type IslandSite } from './archipelago';
+import { generateIslandHeightmap, type IslandHeightmapParams } from './heightmap';
+import type { PoiKind } from './pathGraph';
 import { SIERRA_SLICE_ARCHETYPES, type SierraArchetypeName } from './sierraArchetypes';
 
 /** placement attempts before the layout is declared impossible */
@@ -39,6 +41,46 @@ export interface SierraWorld {
   /** slice islands first (one per archetype), then fillers, then the half dome */
   sites: IslandSite[];
   start: SierraStart;
+  /**
+   * T112b: the slice islands in visiting order (indices into `sites`): the
+   * start's nearest first, then nearest-unvisited. Each slice site's
+   * `overrides` carries `pathApproach` (bearing toward where you sail from)
+   * and `pathNext` (toward the next station) for the path graph.
+   */
+  order: number[];
+}
+
+/** a route POI in WORLD coordinates (island offset applied) */
+export interface SierraPoi {
+  kind: PoiKind;
+  x: number;
+  y: number;
+  z: number;
+  /** index into `SierraWorld.sites` */
+  site: number;
+}
+
+/** the per-island path hints the slice sites carry in `overrides` */
+export type SierraPathHints = Pick<IslandHeightmapParams, 'pathApproach' | 'pathNext'>;
+
+/**
+ * The route POIs of one slice site — landing, station, exit, fork — in world
+ * coordinates, by BAKING the island (the POIs are where the carve put them,
+ * §V71: one resolution path, `siteParams`). The archipelago bakes the same
+ * island for rendering; read `island.heightmap.path.pois` there instead of
+ * calling this twice. Empty for a site with no route (fillers, Half Dome).
+ */
+export function sierraSitePois(sites: IslandSite[], index: number): SierraPoi[] {
+  const site = sites[index];
+  const hm = generateIslandHeightmap(site.seed, siteParams(site));
+  if (!hm.path) return [];
+  return hm.path.pois.map((q) => ({
+    kind: q.kind,
+    x: q.x + site.position[0],
+    y: q.y,
+    z: q.z + site.position[1],
+    site: index,
+  }));
 }
 
 /**
@@ -300,5 +342,44 @@ export function generateSierraSites(
   // yaw convention as showcase.ts: forward is [sin h, cos h]
   const heading = Math.atan2(nearest.position[0], nearest.position[1]);
 
-  return { sites, start: { x: 0, z: 0, heading } };
+  // T112b: visiting order (nearest-unvisited chain from the start) and the
+  // per-island bearings the path graph is authored against — the landing
+  // faces where you sail from, the exit and the Journey tilt face the next
+  // station (the last island faces home)
+  const visit: number[] = [];
+  {
+    let px = 0;
+    let pz = 0;
+    const left = new Set<number>();
+    for (let i = 0; i < count; i++) left.add(i);
+    while (left.size) {
+      let best = -1;
+      let bd = Infinity;
+      for (const i of left) {
+        const d = Math.hypot(sites[i].position[0] - px, sites[i].position[1] - pz);
+        if (d < bd) {
+          bd = d;
+          best = i;
+        }
+      }
+      visit.push(best);
+      left.delete(best);
+      px = sites[best].position[0];
+      pz = sites[best].position[1];
+    }
+  }
+  for (let k = 0; k < visit.length; k++) {
+    const s = sites[visit[k]];
+    const prev: [number, number] = k === 0 ? [0, 0] : sites[visit[k - 1]].position;
+    const next: [number, number] = k === visit.length - 1 ? [0, 0] : sites[visit[k + 1]].position;
+    const hints: SierraPathHints = {
+      pathApproach: Math.atan2(prev[1] - s.position[1], prev[0] - s.position[0]),
+      pathNext: Math.atan2(next[1] - s.position[1], next[0] - s.position[0]),
+    };
+    // `overrides` is Partial<IslandParams>; the hints are heightmap inputs
+    // that `siteParams` spreads through untouched (they are not knobs)
+    s.overrides = { ...s.overrides, ...hints } as IslandSite['overrides'];
+  }
+
+  return { sites, start: { x: 0, z: 0, heading }, order: visit };
 }
