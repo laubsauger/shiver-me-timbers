@@ -131,3 +131,7 @@ Plans: Haugland 1:50 drawings + Platou/Marlow 1953 line drawings exist in Kon-Ti
 8. Door: starboard per book; museum rebuild 1948–50 may differ in size/position.
 9. No dimensioned plan online.
 10. Museum dressing (boxes, mattress, lantern, dinghy, tarp) is curatorial.
+
+## 10. User-supplied reference photos (2026-08-21) — `docs/raft2100/ref/`
+- `kon-tiki-1947-sailing.jpg` — Kon-Tiki under way, 1947 (colour). Rig jank: yard cocked + pitched fwd, foot pulled forward, crooked bipod, loose topsail, small mizzen on a sprit, sagging stays, rope ladder, high splashboards running aft. Governs B73.
+- `replica-moored-beam.png` — moored replica, beam view, sails furled. Details to borrow (not replicate): logs near-touching (B81); bamboo deck over the midsection; a plank CHEST/box lashed on the fore-deck (stbd of cabin front); a low "railing" = a slack rope run between short stanchion posts along the deck edge, sloppy; thatch roof with ragged eave; mainsail FURLED = a tidy long bundle lashed along the yard with a few ties, yard lowered to ~2/3 height; stays fan from the masthead (~6 visible) + a single forestay; a small tall flag/antenna pole at the stern with a pennant; a sea-anchor/dinghy towed astern. Governs B75 furl read + decoration pass.
