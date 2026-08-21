@@ -5,7 +5,8 @@
  * `PlayerInput` snapshot (§V3: the log is the format).
  *
  * KEYS (registered in `input/controlMap.ts`): W/A/S/D move, Space hops,
- * Ctrl crouches, T toggles the first-person view. W/A/S/D/Space are SHARED
+ * Ctrl crouches, E grabs/releases a station (§T.95), T toggles the
+ * first-person view. W/A/S/D/Space are SHARED
  * with sailing and gunnery, so while the walker is active they are swallowed
  * in the CAPTURE phase exactly as freeCam swallows its fly keys — otherwise
  * walking forward would also set more canvas. keyup is never swallowed.
@@ -22,12 +23,14 @@ const MOVE_CODES: readonly string[] = [
   CONTROL_CODES.walkJump,
   CONTROL_CODES.walkCrouch,
   CONTROL_CODES.walkCrouchRight,
+  CONTROL_CODES.interact,
 ];
 
 export class PlayerKeys {
   private held = new Set<string>();
   private jumpEdges = 0;
   private toggleEdges = 0;
+  private interactEdges = 0;
 
   /** true for the keys the walker swallows while active */
   static consumes(code: string): boolean {
@@ -38,6 +41,7 @@ export class PlayerKeys {
     if (!this.held.has(code)) {
       if (code === CONTROL_CODES.walkJump) this.jumpEdges++;
       if (code === CONTROL_CODES.toggleFirstPerson) this.toggleEdges++;
+      if (code === CONTROL_CODES.interact) this.interactEdges++;
     }
     this.held.add(code);
   }
@@ -55,6 +59,13 @@ export class PlayerKeys {
     const t = this.toggleEdges % 2 === 1;
     this.toggleEdges = 0;
     return t;
+  }
+
+  /** §T.95: number of E presses since the last sample, each a grab or a release */
+  takeInteract(): number {
+    const n = this.interactEdges;
+    this.interactEdges = 0;
+    return n;
   }
 
   sample(look: LookDelta = { yawDelta: 0, pitchDelta: 0 }): PlayerInput {

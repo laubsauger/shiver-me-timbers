@@ -41,6 +41,21 @@ export interface PlayerParams {
   lookSensitivity: number;
   /** pitch limit, degrees — straight up/down would gimbal the camera */
   pitchLimitDeg: number;
+  /** §T.95 stations: how far a hand reaches, and how far off the look axis a station still counts */
+  reach: number;
+  focusConeDeg: number;
+  /** while holding a station the head may turn this far either side of its facing */
+  holdYawLimitDeg: number;
+  /** hold-turn / hold-slide: channel units per radian of mouse travel */
+  turnSensitivity: number;
+  slideSensitivity: number;
+  /** step-off: how far outboard of the gangway socket the foot lands */
+  stepOffDistance: number;
+  /** placeholder hands: pose blend time (s) and radians of wrist per channel unit */
+  handPoseTime: number;
+  handTurnGain: number;
+  /** dev-layer hotkeys: channel change per keydown */
+  debugStep: number;
 }
 
 export const playerParams: PlayerParams = registerParams<PlayerParams>(
@@ -65,6 +80,15 @@ export const playerParams: PlayerParams = registerParams<PlayerParams>(
     boardVertical: 1.5,
     lookSensitivity: 0.0022,
     pitchLimitDeg: 89,
+    reach: 1.6,
+    focusConeDeg: 35,
+    holdYawLimitDeg: 60,
+    turnSensitivity: 1.2,
+    slideSensitivity: 1.5,
+    stepOffDistance: 0.6,
+    handPoseTime: 0.15,
+    handTurnGain: 1.0,
+    debugStep: 0.05,
   },
   {
     capsuleRadius: { min: 0.1, max: 0.6, step: 0.01 },
@@ -86,5 +110,14 @@ export const playerParams: PlayerParams = registerParams<PlayerParams>(
     boardVertical: { min: 0.2, max: 4, step: 0.05 },
     lookSensitivity: { min: 0.0002, max: 0.01, step: 0.0001 },
     pitchLimitDeg: { min: 45, max: 89.9, step: 0.1 },
+    reach: { min: 0.5, max: 4, step: 0.05 },
+    focusConeDeg: { min: 5, max: 90, step: 1 },
+    holdYawLimitDeg: { min: 10, max: 180, step: 1 },
+    turnSensitivity: { min: 0.1, max: 10, step: 0.1 },
+    slideSensitivity: { min: 0.1, max: 10, step: 0.1 },
+    stepOffDistance: { min: 0.1, max: 2, step: 0.05 },
+    handPoseTime: { min: 0.02, max: 1, step: 0.01 },
+    handTurnGain: { min: 0, max: 5, step: 0.05 },
+    debugStep: { min: 0.01, max: 0.5, step: 0.01 },
   },
 );

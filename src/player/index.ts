@@ -15,6 +15,9 @@ import { playerParams } from '../params/player';
 import { createDeckSurface } from './deckSurface';
 import { LookAccumulator, attachPointerLock, type LockElement } from './pointerLock';
 import { PlayerKeys, attachPlayerKeys } from './playerInput';
+import { createInteract, type Interact, type SocketResolver } from './interact';
+import { attachDebugKeys, type DebugChannel } from './debugKeys';
+import type { Hands } from './hands';
 import {
   createPlayerState,
   eyeHeight,
@@ -25,6 +28,9 @@ import {
 } from './playerStep';
 
 export type { PlayerInput, PlayerState, WalkSurface } from './playerStep';
+export type { Interact, SocketResolver } from './interact';
+export type { RaftAction } from './stations';
+export type { DebugChannel } from './debugKeys';
 
 export interface ShipPose {
   position: SimVec3;
@@ -49,6 +55,18 @@ export interface PlayerOptions {
   canvas?: LockElement;
   /** called on the tick T was pressed — main wiring flips the camera mode */
   onToggle?: () => void;
+  /**
+   * §T.95 stations. `socketWorld` resolves a blueprint socket to its LIVE
+   * world position (`assembly.socketWorldPosition`, §V71); absent = no
+   * stations. `groundAt` is world ground height (null over water) for the
+   * gangways. `hands` is the placeholder mitt rig, driven from here.
+   */
+  socketWorld?: SocketResolver;
+  groundAt?: (x: number, z: number) => number | null;
+  hands?: Hands;
+  /** raft debug hotkeys (§V84): heard only while this is true AND the walker is inactive */
+  devLayerOn?: () => boolean;
+  onDebug?: (channel: DebugChannel, delta: number) => void;
 }
 
 export interface CameraPose {
@@ -74,6 +92,10 @@ export interface Player {
    */
   onAction(name: string, handler: ActionHandler): () => void;
   applyAction(name: string, value?: unknown): boolean;
+  /** §T.95 station interaction; inert (no stations) when `socketWorld` is absent */
+  readonly interact: Interact;
+  /** the placeholder hands, if main passed them */
+  readonly hands: Hands | null;
   dispose(): void;
 }
 
@@ -119,6 +141,47 @@ export function createPlayer(o: PlayerOptions): Player {
     ? (): void => {}
     : attachPointerLock(o.canvas, { isActive: () => active, look });
   const actions = new Map<string, ActionHandler>();
+  const applyAction = (name: string, value?: unknown): boolean => {
+    const h = actions.get(name);
+    if (h === undefined) return false;
+    h(value);
+    return true;
+  };
+  const worldToShip = (w: Vec3): Vec3 => {
+    const s = o.shipPose();
+    const q = s.quaternion;
+    const d: Vec3 = [w[0] - s.position[0], w[1] - s.position[1], w[2] - s.position[2]];
+    return rotate([-q[0], -q[1], -q[2], q[3]], d);
+  };
+  const interact = createInteract(
+    {
+      get state() {
+        return sim.player as PlayerState;
+      },
+      setState: (next) => {
+        sim.player = next;
+      },
+      applyAction,
+      shipToWorld,
+      worldToShip,
+    },
+    { socketWorld: o.socketWorld ?? (() => null), groundAt: o.groundAt },
+  );
+  const detachDebug = o.onDebug === undefined
+    ? (): void => {}
+    : attachDebugKeys(o.keyTarget ?? window, {
+        isDevLayerOn: () => o.devLayerOn?.() ?? false,
+        isPlayerActive: () => active,
+        onDebug: o.onDebug,
+      });
+  const hands = o.hands ?? null;
+  let turning = false;
+  /** aloft on the lookout the deck field is far below: stand on the perch instead */
+  const perchSurface: WalkSurface = {
+    heightAt: () => interact.perch()?.[1] ?? null,
+    solidAt: () => false,
+    shipToWorld,
+  };
 
   const pos = new Vector3();
   const quat = new Quaternion();
@@ -134,8 +197,22 @@ export function createPlayer(o: PlayerOptions): Player {
     },
     step(dt) {
       if (keys.takeToggle()) o.onToggle?.();
-      const input = keys.sample(active ? look.take() : { yawDelta: 0, pitchDelta: 0 });
-      sim.player = stepPlayer(sim.player as PlayerState, input, surface, dt);
+      const lookDelta = active ? look.take() : { yawDelta: 0, pitchDelta: 0 };
+      const input = keys.sample(lookDelta);
+      const presses = active ? keys.takeInteract() : 0;
+      for (let i = 0; i < presses; i++) interact.begin();
+      interact.step(dt, lookDelta);
+      const walk = interact.perch() === null ? surface : perchSurface;
+      sim.player = interact.constrain(stepPlayer(sim.player as PlayerState, interact.shapeInput(input), walk, dt));
+      if (hands !== null) {
+        const held = interact.held();
+        const d = interact.lastDelta();
+        if (held === null) turning = false;
+        else if (d !== 0) turning = true;
+        hands.setPose(held === null ? 'idle' : turning ? 'turn' : 'grab');
+        if (d !== 0) hands.turnBy(d);
+        hands.update(dt);
+      }
     },
     cameraPose() {
       const s = sim.player as PlayerState;
@@ -158,7 +235,10 @@ export function createPlayer(o: PlayerOptions): Player {
     isActive: () => active,
     setActive(a) {
       active = a;
-      if (!a) keys.clear();
+      if (!a) {
+        keys.clear();
+        interact.end();
+      }
     },
     onAction(name, handler) {
       actions.set(name, handler);
@@ -166,15 +246,13 @@ export function createPlayer(o: PlayerOptions): Player {
         if (actions.get(name) === handler) actions.delete(name);
       };
     },
-    applyAction(name, value) {
-      const h = actions.get(name);
-      if (h === undefined) return false;
-      h(value);
-      return true;
-    },
+    applyAction,
+    interact,
+    hands,
     dispose() {
       detachKeys();
       detachLock();
+      detachDebug();
     },
   };
 }

@@ -84,6 +84,29 @@ export const CONTROL_CODES = {
   walkJump: 'Space',
   walkCrouch: 'ControlLeft',
   walkCrouchRight: 'ControlRight',
+  /**
+   * §T.95: grab / let go of the station being looked at. `KeyE` is the brace
+   * key under sail; the walker hears it ONLY while it owns the lens and
+   * swallows it there, as with W/A/S/D.
+   */
+  interact: 'KeyE',
+  /**
+   * RAFT DEBUG HOTKEYS (§I raft/input, §V84): heard ONLY while the dev layer
+   * is on AND the first-person view is NOT active — a player never needs
+   * them, every action has a station on deck. A/D/Q/E/W/S are shared with
+   * sailing and the brace, deliberately: on the raft entry there is no
+   * galleon sailing collector. §I says `T` for tune, but `KeyT` is the
+   * first-person toggle above, so tune took `KeyY` (unclaimed). `KeyN` is
+   * also combatArena's, which the raft entry does not mount.
+   */
+  debugOarPort: 'KeyA',
+  debugOarStarboard: 'KeyD',
+  debugGuaraFwd: 'KeyQ',
+  debugGuaraAft: 'KeyE',
+  debugSheetIn: 'KeyW',
+  debugSheetOut: 'KeyS',
+  debugTune: 'KeyY',
+  debugDawn: 'KeyN',
 } as const;
 
 export interface ControlBinding {
@@ -161,6 +184,18 @@ export const CONTROL_GROUPS: readonly ControlGroup[] = [
       { keys: ['W', 'A', 'S', 'D'], action: 'Walk', hint: 'On deck only' },
       { keys: ['Space'], action: 'Hop', hint: 'On deck only' },
       { keys: ['Ctrl'], action: 'Crouch', hint: 'Ducks by itself under a low deckhead' },
+      { keys: ['E'], action: 'Take hold / let go', hint: 'Tiller, guaras, sheets, halyard, radio, ladder, mat — look at it, within arm’s reach' },
+      { keys: ['Mouse'], action: 'Work the station', hint: 'Left / right turns a tiller or knob; up / down hauls a line or a board' },
+    ],
+  },
+  {
+    title: 'Raft (debug)',
+    bindings: [
+      { keys: ['A', 'D'], action: 'Steering oar', hint: 'Dev layer on, outside the first-person view only' },
+      { keys: ['Q', 'E'], action: 'Forward / aft guaras down', hint: 'Shift to raise' },
+      { keys: ['W', 'S'], action: 'Sheet in / out' },
+      { keys: ['Y'], action: 'Tune the radio', hint: 'Shift for the other way' },
+      { keys: ['N'], action: 'Skip to dawn' },
     ],
   },
   {
