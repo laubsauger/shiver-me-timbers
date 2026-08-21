@@ -15,6 +15,7 @@ Reference: `docs/raft2100/kon-tiki-reference.md`, `terrain-research.md`.
 
 ## Run
 - Pirate: `npm run dev` → `/` (unchanged). `?ship=raft` swaps the player ship (T91).
+- Raft mode boots into the CALM preset (`raftWorldParams.defaultPreset`; `?weather=` overrides).
 - Raft mode: `/raft.html` (own bundle, `src/main-raft.ts`, boots no enemy/combat). `?tod=`, `?at=`.
   `window.__game = { state, player, raftControls, radio, clock, beach, followCam, assembly, setFp, grade }`.
 - Raft lookdev harness: `/src/ship/preview.html?ship=raft&view=beam|bow|lee|stern|top&tod=12`,
@@ -35,14 +36,14 @@ Fixes: T108 moon orbit + horizon gates (B63/B65), T110 sun-road/god-ray disc wid
 Terrain: T111 research, T112a quick wins, T112c erosion pass stage. Lookdev sets on disk:
 R0 (grade frames), R1 (pre-fix raft), R2 (walk), T108 (moon).
 
-## In flight when paused (agents told to finish, not to start more)
+## In flight when paused — NONE. All four landed. Full suite 2707 pass / 24 pre-existing skips, both entries build.
 1. **DONE, committed e95e646** — raft visual fixer (B70/B73/B75/B76/B79–B85). Remaining gaps = B86. Frames: `docs/raft2100/lookdev/R1-fix/` (README lists defect→cause→fix). Formerly: **B70/B73/B75/B76/B79 raft visual fixer** (owns src/ship/raft*, preview*, flagMaterial,
    new `src/ship/raftRigging.ts` + 1-line hunk in `src/raft/raftScene.ts`): materials routing,
    preview hang, sails set/oriented, janky rig (yard cock/rake, forward sheet pull), bipod aft
    rake, ladder orientation, splashboards 0.5–0.6 m + longer run, furl bundle ∝ area, rigging
    lines (CAPPED per B79: <25 ropes, per-class table), flag wave hoist→fly, preview interact +
    hands + fov. Output: `docs/raft2100/lookdev/R1-fix/` + README. Uncommitted WIP in src/ship.
-2. **T112b path-first authoring** — `src/island/pathGraph.ts`, carve pass inserted before
+2. **DONE, committed 09b24da** — T112b path-first authoring (hm.path contract in pathCarve.ts). Formerly: **T112b path-first authoring** — `src/island/pathGraph.ts`, carve pass inserted before
    `thermalSmooth`, publishes `hm.path = {distance, routeMask, forkMask, pois, routes}`.
 3. **DONE, committed b4c9c88** — T112d terrain-info + layered shading. Formerly: **T112d terrain-info texture + layered shading** — `src/island/terrainInfo.ts`,
    `sierraMaterial.ts` as its own material, `terrain/rockMaterial.ts`; exports channel layout.
