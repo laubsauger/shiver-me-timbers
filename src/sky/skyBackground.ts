@@ -105,14 +105,17 @@ export function createSkyBackground(p: SkyParams) {
   const uMoonIntensity = uniform(p.moonDiscIntensity);
   /** cos of the phase angle: +1 = new (nothing lit), -1 = full (all lit) */
   const uMoonTermK = uniform(-1);
+  /** unit vector ⊥ uMoonDir the lit limb faces — the sun's projection (§B77) */
+  const uMoonLitAxis = uniform(new THREE.Vector3(1, 0, 0));
   const uMoonTermSoft = uniform(p.moonTerminatorSoftness);
   const uMoonGlowPower = uniform(p.moonGlowPower);
   const uMoonGlowStrength = uniform(p.moonGlowStrength);
   const uMoonHaloPower = uniform(p.moonHaloPower);
   const uMoonHaloStrength = uniform(p.moonHaloStrength);
   /** 0..1 lit FRACTION of the drawn disc — scales glow/halo so a new moon
-   *  has no aura. Driven by `moonDiscPhase`, not `moonPhase`, so the aura
-   *  always matches the disc actually on screen, and by the lit AREA rather
+   *  has no aura. Driven by `moonDrawPhase` (the orbit's phase, floored by
+   *  `moonDiscPhase`), so the aura matches the disc actually on screen, and by
+   *  the lit AREA rather
    *  than by MOON_SURGE: the surge is a reflectance law about light leaving
    *  the regolith, while an aura is bloom off the disc you can see. */
   const uMoonBright = uniform(0);
@@ -242,13 +245,16 @@ export function createSkyBackground(p: SkyParams) {
   // limb (k=+1, new: nothing lit) through the centre (k=0, quarter: half lit)
   // to the far limb (k=-1, full: everything lit).
   //
-  // §V28: `right` is degenerate when the moon sits exactly at the zenith, so
-  // the length is floored rather than trusted — that collapses x to 0 (a
-  // half moon at an arbitrary roll) instead of NaN-ing the entire sky.
+  // `right` is THE DIRECTION THE LIT LIMB FACES: the sun's direction projected
+  // into the disc's plane, resolved on the CPU as a unit vector
+  // (moonCycle.moonLitAxis, §B77). It used to be `moonDir × up`, a fixed
+  // horizontal axis, which put the bright limb on the south side of every
+  // moon seen looking east whatever the sun was doing. A unit uniform needs no
+  // §V28 floor here; the CPU side owns the degenerate cases (new, full,
+  // zenith) and never publishes a zero. `up2` is then any perpendicular.
   const md = viewDir.dot(uMoonDir);
-  const rAxis = uMoonDir.cross(vec3(0, 1, 0));
-  const right = rAxis.div(rAxis.length().max(EPS));
-  const up2 = right.cross(uMoonDir);
+  const right = vec3(uMoonLitAxis);
+  const up2 = uMoonDir.cross(right);
   const inv = float(1).div(uMoonSinRadius.max(EPS));
   const dx = viewDir.dot(right).mul(inv);
   const dy = viewDir.dot(up2).mul(inv).clamp(-1, 1);
@@ -417,12 +423,13 @@ export function createSkyBackground(p: SkyParams) {
       uMoonSinRadius.value = Math.sin((Math.max(0, p.moonDiscSize) * Math.PI) / 180);
       uMoonIntensity.value = p.moonDiscIntensity;
       // k = cos(phase angle): +1 new (nothing lit) → -1 full (all lit).
-      // `key.moonDrawPhase`: `moonDiscPhase` (the documented crescent cheat —
-      // the orbit stays full for the Night preset's low moon and MOON_SURGE,
-      // only the drawn disc is a crescent) capped by the ORBITAL phase, so the
-      // disc is never more lit than the moon's real elongation allows and a
-      // near-new moon is dark (§V91). See moonCycle.moonDiscState.
+      // `key.moonDrawPhase` is the ORBIT's phase, floored to the `moonDiscPhase`
+      // crescent for a young/old moon — full is full (§B77). The lit limb
+      // faces `key.moonLitAxis`, the sun's projection into the disc plane.
+      // See moonCycle.moonDiscState / moonLitAxis.
       uMoonTermK.value = Math.cos(2 * Math.PI * key.moonDrawPhase);
+      const la = key.moonLitAxis;
+      uMoonLitAxis.value.set(la[0], la[1], la[2]);
       uMoonTermSoft.value = Math.max(1e-3, p.moonTerminatorSoftness);
       uMoonGlowPower.value = p.moonGlowPower;
       uMoonGlowStrength.value = p.moonGlowStrength;

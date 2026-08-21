@@ -315,12 +315,18 @@ export function keyRadianceScale(dirW: number, moonW: number, p: SkyParams): num
  * ≤2%-lit sliver inside the sun's forward scatter, and drawing it is the
  * "second disc beside the setting sun" of §B63.
  *
- * `drawPhase` is the phase the TERMINATOR is cut at. `moonDiscPhase` is a
- * documented cheat (a crescent drawn on a full-moon orbit, see the param), and
- * it stays — but it can only ever SUBTRACT from the truth: the drawn disc is
- * never more lit than the orbit says it is, so a near-new moon is a near-new
- * moon whatever the cheat asks for. `litFraction` is the lit AREA of that
- * drawn disc; it scales the aura (glow/halo) as before.
+ * `drawPhase` is the phase the TERMINATOR is cut at: the ORBIT's phase, so
+ * the disc agrees with `moonIllumination(moonPhase)` — a full moon is FULL
+ * (§B77: the old `min` by illumination let the 0.18 cheat beat phase 0.5 and
+ * drew every full moon as a 21% crescent). `moonDiscPhase` survives only as
+ * a FLOOR on the drawn crescent's width (see the param): it can only ever
+ * ADD to a thin crescent, never subtract from a fat one. `litFraction` is the
+ * lit AREA of that drawn disc; it scales the aura (glow/halo) as before.
+ *
+ * A third gate, `moonMinLit`: the orbit's OWN illumination below this is a
+ * sliver that no floor should resurrect — a 2%-lit moon is a moon nobody sees,
+ * in or out of the glare cone. It reaches exactly 0 at the threshold, which is
+ * what lets the visible term be 0 rather than "very faint" (§B77's sliver).
  *
  * Every factor is a 0..1 smoothstep or a product of them — bounded at source
  * (§V44), never clamped after the fact.
@@ -334,6 +340,8 @@ export interface MoonDiscState {
 
 /** deg. Floor for the glare ramp's width (§V28: a zero-width smoothstep is 0/0) */
 const MIN_GLARE_SOFT = 0.01;
+/** Floor for the lit-fraction ramp's width (§V28, same reason) */
+const MIN_LIT_SOFT = 1e-3;
 
 export function moonDiscState(
   sunElev: number,
@@ -349,16 +357,69 @@ export function moonDiscState(
   const glare = smoothstep(glare0, glare0 + soft, Number.isFinite(elongationDeg) ? elongationDeg : 0);
   const orbit = clamp01(p.moonPhase);
   const cheat = clamp01(p.moonDiscPhase);
-  // min by ILLUMINATION: illumination is even about 0.5, so the two
+  const orbitLit = moonIllumination(orbit);
+  // the orbit's own illumination gates the disc: ramp from minLit to 2·minLit
+  // (floored width), exactly 0 at and below the threshold
+  const minLit = clamp01(p.moonMinLit);
+  // @band-limited-elsewhere: CPU scalar over the orbit's lit fraction, once per frame, a uniform
+  const litGate = smoothstep(minLit, minLit + Math.max(MIN_LIT_SOFT, minLit), orbitLit);
+  // FLOOR by ILLUMINATION: illumination is even about 0.5, so the two
   // candidates with equal illumination have equal cos(2πp) and the switch
-  // is continuous in the terminator's k.
-  const drawPhase = moonIllumination(cheat) <= moonIllumination(orbit) ? cheat : orbit;
+  // is continuous in the terminator's k. The orbit wins whenever it is at
+  // least as lit as the cheat — full stays full.
+  const drawPhase = orbitLit < moonIllumination(cheat) ? cheat : orbit;
   return {
     sunDiscGate,
-    moonDiscGate: horizon * glare,
+    moonDiscGate: horizon * glare * litGate,
     drawPhase,
     litFraction: moonIllumination(drawPhase),
   };
+}
+
+/**
+ * The direction the moon's LIT LIMB faces, as a unit vector in the disc's
+ * plane (⊥ `moonDir`): the sun's direction with its component along the moon
+ * removed. The sun is at infinity, so the direction observer→sun IS the
+ * direction moon→sun, and the lit hemisphere of a sphere faces its light —
+ * a crescent's horns point away from the sun, its bright limb toward it.
+ *
+ * Degenerate exactly at new and full (sun along the moon's axis): there the
+ * disc is all-dark or all-lit and no axis matters, so the fallback is the
+ * old fixed horizontal axis `moonDir × up`, and if the moon is at the zenith
+ * too, +x. Never normalize(0) (§V28): every branch returns a unit vector.
+ */
+export function moonLitAxis(sunDir: Vec3, moonDir: Vec3): Vec3 {
+  const s = sunDir.map((v) => (Number.isFinite(v) ? v : 0)) as Vec3;
+  const m = moonDir.map((v) => (Number.isFinite(v) ? v : 0)) as Vec3;
+  const sm = s[0] * m[0] + s[1] * m[1] + s[2] * m[2];
+  const candidates: Vec3[] = [
+    [s[0] - m[0] * sm, s[1] - m[1] * sm, s[2] - m[2] * sm],
+    // moonDir × (0,1,0)
+    [-m[2], 0, m[0]],
+    [1, 0, 0],
+  ];
+  for (const c of candidates) {
+    const l = Math.hypot(c[0], c[1], c[2]);
+    if (l > MIN_LEN) return [c[0] / l, c[1] / l, c[2] / l];
+  }
+  return [1, 0, 0];
+}
+
+/**
+ * CPU mirror of the sky background's terminator (skyBackground.ts, step 5):
+ * the disc basis `litAxis` (x, toward the sun) / `moonDir × litAxis` (y), and
+ * the cut `k = cos(2π·drawPhase)` — a disc point (x, y) in radius units is lit
+ * where x > k·√(1−y²). The lit area of that cut is (1−k)/2 by construction,
+ * which is `moonIllumination(drawPhase)`: the shader and the CPU cannot
+ * disagree on the lit fraction, only on the axis — and the axis is this one.
+ */
+export function moonTerminator(
+  sunDir: Vec3,
+  moonDir: Vec3,
+  drawPhase: number,
+): { litAxis: Vec3; k: number; litFraction: number } {
+  const k = Math.cos(2 * Math.PI * clamp01(drawPhase));
+  return { litAxis: moonLitAxis(sunDir, moonDir), k, litFraction: (1 - k) / 2 };
 }
 
 /** floor for any normalize() (§V28: normalize(0) is NaN, not 0) */
@@ -485,6 +546,8 @@ export interface KeyLight {
   /** phase the moon's terminator is cut at, and the lit area of that disc */
   moonDrawPhase: number;
   moonLitFraction: number;
+  /** unit vector ⊥ moonDirection that the lit limb faces — see moonLitAxis (§B77) */
+  moonLitAxis: Vec3;
 }
 
 /**
@@ -540,5 +603,6 @@ export function keyLight(timeOfDay: number, p: SkyParams): KeyLight {
     moonDiscGate: disc.moonDiscGate,
     moonDrawPhase: disc.drawPhase,
     moonLitFraction: disc.litFraction,
+    moonLitAxis: moonLitAxis(sunDir, moonDir),
   };
 }

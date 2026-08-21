@@ -120,31 +120,34 @@ export interface SkyParams {
   moonGlareSoftness: number;
   bodyHorizonMargin: number;
   /**
-   * THE DISC'S APPEARANCE ONLY — a deliberate, named cheat. Read this before
-   * "unifying" it with `moonPhase`; it was one knob and the single knob could
-   * not satisfy the references.
+   * `moonMinLit` 0..1: the orbit's own lit fraction below which the disc is
+   * not drawn at all (ramps to full over the same width again). A 2%-lit moon
+   * is a sub-pixel sliver whatever the terminator's softness floor smears it
+   * into, and it was still faintly there at phase 0.05 in twilight (§B77).
+   * Reaches exactly 0, so "not visible" is 0 and not "very faint".
+   */
+  moonMinLit: number;
+  /**
+   * MINIMUM WIDTH OF A DRAWN CRESCENT — the drawn disc is never THINNER than
+   * this phase's crescent. It used to be the other way round (a crescent
+   * forced onto the full-moon orbit for the night references, with the lit
+   * limb facing a fixed axis) and that is the §B77 report: a full moon drawn
+   * as a 21% crescent lit away from the sun. Now the ORBIT's phase cuts the
+   * terminator and the lit limb faces the sun; this knob only lifts a young
+   * or old moon (phase ≲ 0.18 / ≳ 0.82) to a crescent a viewer can read, so
+   * that a moon that survives `moonGlareAngle` and `moonMinLit` is a moon and
+   * not a hairline. At the shipped `moonPhase` 0.5 it is inactive.
    *
-   * `moonPhase` is an HOUR-ANGLE LAG, so it drives three things at once:
-   * WHERE the moon is, HOW MUCH light it delivers (via MOON_SURGE), and what
-   * the disc looks like. Every one of the twelve night references in
-   * docs/inspo/night/ pairs a CRESCENT with a LOW moon over a dense starfield
-   * — and those two are mutually exclusive under one knob:
-   *   - a low moon at the Night preset needs the full-moon lag (0.5): a full
-   *     moon is antipodal to the sun, so it rises AS the sun sets and is the
-   *     only phase that is low at 19:15. At 0.35 the moon still sits at 72°
-   *     at 21:00 (measured), which lays no glint road at all.
-   *   - MOON_SURGE is brutally non-linear: at phase 0.35 the key is already
-   *     down to 0.42 of full, and a reference-accurate 0.18 would leave 0.044
-   *     — a night too dark to read, with the ship a black cut-out.
-   * So the ORBIT and the LIGHT keep the full-moon phase and only the drawn
-   * disc is given a crescent. Cost of the cheat, stated plainly: the moon's
-   * lit limb no longer agrees with where the sun is. At a 3.6° disc, over
-   * water, nobody but an astronomer can see that; a dark night and a road-less
-   * moon are visible to everyone. The references are the authority on the look.
+   * History worth keeping: `moonPhase` is an HOUR-ANGLE LAG driving WHERE the
+   * moon is and HOW MUCH light it delivers (MOON_SURGE), and the twelve night
+   * references in docs/inspo/night/ pair a CRESCENT with a LOW moon. Only the
+   * full-moon lag (0.5) is low at 19:15, and MOON_SURGE at 0.18 leaves 0.044
+   * of the light. If the references' crescent-on-a-low-moon is wanted back,
+   * it needs its own decision (an orbit/light split, §V22), not a `min` here.
    *
    * Same 0..1 convention as `moonPhase` (0 new, 0.25 first quarter, 0.5 full)
-   * and it drives the terminator AND the glow/halo weight, so the aura always
-   * matches the disc that is actually drawn.
+   * and, when active, it drives the terminator AND the glow/halo weight, so
+   * the aura always matches the disc that is actually drawn.
    */
   moonDiscPhase: number;
   moonColor: number;
@@ -208,6 +211,16 @@ export interface SkyParams {
   starColorWarm: number;
   /** viewDir.y at which the field has fully faded into the haze band */
   starHorizonFade: number;
+  /**
+   * SUN ELEVATION (deg, negative = below the horizon) at which the stars
+   * start to show (`starDuskStart`) and are fully on (`starDuskEnd`). Stars
+   * are not lamps: a lamp is lit before the sky is dark, a star is only SEEN
+   * once it is. Multiplies `nightFactor` in the starfield only — lanterns,
+   * lamp and windows keep their own earlier edges (§B77: stars were full on
+   * at −4° over a pink sky, and still on at +7°).
+   */
+  starDuskStart: number;
+  starDuskEnd: number;
   /**
    * WIND LINES (§T.47 — src/sky/windLines.ts holds the whole argument).
    *
@@ -480,11 +493,15 @@ export const skyParams: SkyParams = registerParams(
     // 1°: gate reaches 0 at -(radius + 1°) so a body that has just set does
     // not keep a glow on the horizon, and nothing is ever drawn below the sea.
     bodyHorizonMargin: 1.0,
-    // Waxing crescent, 28.7% lit. Measured off the references: the moon spans
-    // 3.1-4.7° in docs/inspo/night/ (cgi7573…, sovereigns, images 1-4) and is
-    // a crescent in every one, from a thin sliver (~12% lit) to a fat one
-    // (~40%). 0.18 sits in the middle of that band and is wide enough that the
-    // terminator survives its own §V.48 floor at 1080p.
+    // 3%: phase 0.05 is 2.4% lit and was the §B77 twilight sliver; phase 0.1
+    // is 9.5% and is a crescent. Ramps to full over 0.03..0.06.
+    moonMinLit: 0.03,
+    // Floor crescent, 28.7% lit (inactive at the shipped phase 0.5 — see the
+    // param). Measured off the references: the moon spans 3.1-4.7° in
+    // docs/inspo/night/ (cgi7573…, sovereigns, images 1-4) and is a crescent
+    // in every one, from a thin sliver (~12% lit) to a fat one (~40%). 0.18
+    // sits in the middle of that band and is wide enough that the terminator
+    // survives its own §V.48 floor at 1080p.
     moonDiscPhase: 0.18,
     // Pale cool blue-white — HUE ONLY. Unchanged in value, but no longer
     // load-bearing for brightness: the paragraph that stood here chose this
@@ -548,10 +565,12 @@ export const skyParams: SkyParams = registerParams(
     // GLOW/HALO ARE WEIGHTED BY THE DISC'S ILLUMINATED FRACTION, not by
     // MOON_SURGE. The surge is a REFLECTANCE law about light leaving the
     // moon's regolith; an aura is bloom off the disc you can see, so it scales
-    // with lit AREA. At the shipped moonDiscPhase 0.18 that weight is 0.287,
-    // and these two strengths are authored so the product lands where the old
-    // full-moon values did (0.9 × 0.287 = 0.258 vs 0.25; 0.20 × 0.287 = 0.057
-    // vs 0.06) — i.e. the crescent is a change of SHAPE, not of exposure.
+    // with lit AREA. These two strengths were authored for the 0.18 crescent
+    // (weight 0.287: 0.9 × 0.287 = 0.258, 0.20 × 0.287 = 0.057 — the old
+    // full-moon products 0.25 / 0.06). Since §B77 the shipped moon is drawn
+    // FULL (weight 1.0), so the aura at default is 0.9 / 0.2: 3.5× that
+    // exposure. Left as-is for the §V22 pass to judge against the sky — the
+    // old full-moon values are 0.25 / 0.06 if it reads as too much.
     // 900 → 400 widens the glow from ~2 disc radii to ~4, which is what the
     // references show around a crescent (docs/inspo/night/images (1).jpeg).
     moonGlowPower: 400,
@@ -586,6 +605,11 @@ export const skyParams: SkyParams = registerParams(
     starColorWarm: 0xffd7a8,
     // ~5.7°: the references keep stars out of the horizon haze entirely
     starHorizonFade: 0.1,
+    // civil dusk (−6°) to nautical dusk (−12°): the brightest stars appear
+    // once the sky has lost its colour at the zenith, the field is complete
+    // when the horizon has
+    starDuskStart: -6,
+    starDuskEnd: -12,
     // ── WIND LINES ────────────────────────────────────────────────────────
     // 49 streaks about the wind axis: 7.3° apart at the axis's own equator
     // (the great circle through the zenith and the two crosswind horizon
@@ -683,6 +707,7 @@ export const skyParams: SkyParams = registerParams(
     moonGlareAngle: { min: 0, max: 45, step: 0.5 },
     moonGlareSoftness: { min: 0.5, max: 45, step: 0.5 },
     bodyHorizonMargin: { min: 0, max: 5, step: 0.1 },
+    moonMinLit: { min: 0, max: 0.2, step: 0.005 },
     moonDiscPhase: { min: 0, max: 1, step: 0.01 },
     moonIntensity: { min: 0, max: 4, step: 0.01 },
     moonAmbient: { min: 0, max: 1, step: 0.01 },
@@ -702,6 +727,8 @@ export const skyParams: SkyParams = registerParams(
     starTwinkleAmount: { min: 0, max: 1, step: 0.01 },
     starTwinkleRate: { min: 0, max: 8, step: 0.05 },
     starHorizonFade: { min: 0.01, max: 0.6, step: 0.01 },
+    starDuskStart: { min: -12, max: 5, step: 0.5 },
+    starDuskEnd: { min: -18, max: 0, step: 0.5 },
     windLineCount: { min: 7, max: 151, step: 2 },
     windLineWidth: { min: 0.01, max: 0.4, step: 0.005 },
     windLineBrightness: { min: 0, max: 0.5, step: 0.005 },

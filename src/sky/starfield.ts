@@ -48,7 +48,7 @@ import { bandLimitAmplitude, bandLimitEnergy, bandLimitWidth } from '../ship/ban
 import { hash3 } from '../terrain/noise';
 import { hash3Cpu } from '../terrain/noiseCpu';
 import type { SkyParams } from '../params/sky';
-import { hexToRgb } from './sunCycle';
+import { hexToRgb, smoothstep as smoothstepCpu } from './sunCycle';
 import type { KeyLight } from './moonCycle';
 
 /** any TSL node — this math is structural, not typed */
@@ -438,9 +438,29 @@ export function createStarfield(p: SkyParams) {
       const warm = hexToRgb(p.starColorWarm);
       uCool.value.setRGB(cool[0], cool[1], cool[2], THREE.SRGBColorSpace);
       uWarm.value.setRGB(warm[0], warm[1], warm[2], THREE.SRGBColorSpace);
-      uNight.value = Math.min(1, Math.max(0, key.nightFactor));
+      // nightFactor is the family clock; the dusk window is the stars' own
+      // later edge on the same clock (the sun's elevation), not a second one.
+      uNight.value = Math.min(1, Math.max(0, key.nightFactor)) * starDuskGate(key.sunElevation, p);
     },
   };
+}
+
+/**
+ * 0..1 how far the sun is into the stars' dusk window: 0 at and above
+ * `starDuskStart` (deg), 1 at and below `starDuskEnd`. Multiplies
+ * `nightFactor` in the starfield ONLY. `nightFactor` starts at +1.7° because
+ * lamps are lit before dark; stars are SEEN only once the sky is dark, which
+ * at −4° over a pink sunset it is not (§B77). Consumers of `nightFactor`
+ * (lanterns, lamp, windows) are untouched. Monotone in elevation; a swapped
+ * or collapsed pair degrades to a step at `starDuskStart`, never NaN (§V28).
+ */
+export function starDuskGate(sunElevRad: number, p: SkyParams): number {
+  const DEG = Math.PI / 180;
+  const elev = Number.isFinite(sunElevRad) ? sunElevRad : 0;
+  const start = (Number.isFinite(p.starDuskStart) ? p.starDuskStart : -6) * DEG;
+  const end = Math.min((Number.isFinite(p.starDuskEnd) ? p.starDuskEnd : -12) * DEG, start - 1e-4);
+  // @band-limited-elsewhere: CPU scalar over SUN ELEVATION, once per frame, a uniform
+  return 1 - smoothstepCpu(end, start, elev);
 }
 
 export type Starfield = ReturnType<typeof createStarfield>;

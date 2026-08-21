@@ -30,8 +30,13 @@ import {
   moonElongation,
   moonIllumination,
   moonDiscState,
+  moonLitAxis,
+  moonTerminator,
+  nightFactor,
   nightRamp,
 } from '../src/sky/moonCycle';
+import { starDuskGate } from '../src/sky/starfield';
+import type { Vec3 } from '../src/sky/sunCycle';
 import { bodyHorizonGate, daylight, sunDirection, sunElevation } from '../src/sky/sunCycle';
 
 const P = skyParams;
@@ -235,28 +240,37 @@ describe('a near-new moon is DARK, and is not drawn beside the sun (§B63)', () 
     }
   });
 
-  it('the drawn disc is never more lit than the orbit says — the crescent cheat can only subtract', () => {
+  // RE-CUT (§V80, §B77). The previous pin here — "the drawn disc is never
+  // more lit than the orbit says, the cheat can only subtract" — PASSED WHILE
+  // ENFORCING THE DEFECT: a `min` by illumination is exactly what drew every
+  // full moon as the 0.18 crescent. The property that matters is the other
+  // way round: the drawn disc is never LESS lit than the orbit says, and
+  // never thinner than the floor crescent, and the two agree wherever the
+  // floor is inactive.
+  it('the drawn disc is at least as lit as the orbit AND as the floor crescent; the orbit wins when it is fatter', () => {
     for (const ph of PHASES) {
       for (const cheat of [0, 0.18, 0.5, 1]) {
         const k = keyLight(18.5, withParams({ moonPhase: ph, moonDiscPhase: cheat }));
-        expect(k.moonLitFraction).toBeLessThanOrEqual(moonIllumination(ph) + 1e-12);
-        expect(k.moonLitFraction).toBeLessThanOrEqual(moonIllumination(cheat) + 1e-12);
+        expect(k.moonLitFraction).toBeGreaterThanOrEqual(moonIllumination(ph) - 1e-12);
+        expect(k.moonLitFraction).toBeGreaterThanOrEqual(moonIllumination(cheat) - 1e-12);
+        if (moonIllumination(ph) >= moonIllumination(cheat)) expect(k.moonDrawPhase).toBe(ph);
       }
     }
-    // at new moon the disc itself is dark, whatever the cheat asks for
+    // at new moon the floor may widen the crescent, but the GATE is 0: the
+    // orbit's own 0% lit is below moonMinLit, and nothing is drawn
     for (const cheat of [0.18, 0.5]) {
       const k = keyLight(18.5, withParams({ moonPhase: 0, moonDiscPhase: cheat }));
-      expect(k.moonLitFraction).toBe(0);
       expect(k.moonDiscGate).toBe(0);
     }
   });
 
-  it('the shipped default (full orbit, 0.18 crescent) draws exactly the crescent it always did', () => {
-    // non-regression for the signed-off Night look: the cap is inactive at
-    // phase 0.5, so the terminator and aura weight are the old values
+  it('the shipped default (full orbit) draws a FULL disc — the floor is inactive at phase 0.5 (§B77)', () => {
+    // the §B77 report: phase 0.5 rendered as a ~20% crescent. The shipped
+    // moonPhase IS full, and the disc must say so.
+    expect(P.moonPhase).toBe(0.5);
     const k = keyLight(19.25, P);
-    expect(k.moonDrawPhase).toBe(P.moonDiscPhase);
-    expect(k.moonLitFraction).toBe(moonIllumination(P.moonDiscPhase));
+    expect(k.moonDrawPhase).toBe(P.moonPhase);
+    expect(k.moonLitFraction).toBe(1);
     expect(k.moonDiscGate).toBe(1);
   });
 
@@ -363,5 +377,264 @@ describe('the handover survives the new orbit (moonCycle header — keep the nad
       // is the two ~90° lerps the header describes — no jump
       if (ph <= 0.1 || ph >= 0.9 || ph === 0.5) expect(tilted).toBeLessThan(0.05);
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// §B77 — THE TERMINATOR. The T108 lookdev frames showed phase 0.5 as a ~20%
+// crescent with the lit limb facing AWAY from the sun. Two causes, both CPU:
+// `moonDiscState` took the `min` of cheat and orbit by illumination (so the
+// 0.18 cheat beat full), and the shader's disc axis was `moonDir × up`, a
+// fixed horizontal, not the sun's projection. The shader cannot be run here
+// (§V88), so `rasterLit` below is a line-for-line mirror of skyBackground.ts
+// step 5 fed the same uniforms keyLight publishes.
+// ─────────────────────────────────────────────────────────────────────────
+
+function dot(a: Vec3, b: Vec3): number {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+function cross(a: Vec3, b: Vec3): Vec3 {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+function norm(a: Vec3): Vec3 {
+  const l = Math.hypot(a[0], a[1], a[2]);
+  return [a[0] / l, a[1] / l, a[2] / l];
+}
+
+/**
+ * Shader mirror: march view rays across the moon's disc exactly as the
+ * background does (basis `right` = uMoonLitAxis, `up2` = uMoonDir × right,
+ * disc coords dx/dy in radius units, lit where dx > k·√(1−dy²)) with the
+ * softness at its limit (a hard step; the GPU's smoothstep is symmetric about
+ * the edge so it integrates to the same area). Returns the lit fraction of
+ * the disc and the lit area's centroid in WORLD space, projected into the
+ * disc plane.
+ */
+function rasterLit(
+  moonDir: Vec3,
+  litAxis: Vec3,
+  k: number,
+  sinRadius: number,
+  n = 301,
+): { litFraction: number; centroid: Vec3 } {
+  const right = litAxis;
+  const up2 = cross(moonDir, right);
+  const inv = 1 / Math.max(1e-3, sinRadius);
+  let inDisc = 0;
+  let lit = 0;
+  const c: Vec3 = [0, 0, 0];
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      const x = ((i + 0.5) / n) * 2 - 1;
+      const y = ((j + 0.5) / n) * 2 - 1;
+      if (x * x + y * y > 1) continue;
+      // a view ray through this disc point, as the camera would supply it
+      const v = norm([
+        moonDir[0] + sinRadius * (x * right[0] + y * up2[0]),
+        moonDir[1] + sinRadius * (x * right[1] + y * up2[1]),
+        moonDir[2] + sinRadius * (x * right[2] + y * up2[2]),
+      ]);
+      const dx = dot(v, right) * inv;
+      const dy = Math.min(1, Math.max(-1, dot(v, up2) * inv));
+      const termEdge = Math.sqrt(Math.max(0, 1 - dy * dy)) * k;
+      inDisc++;
+      if (dx > termEdge) {
+        lit++;
+        c[0] += v[0] - moonDir[0];
+        c[1] += v[1] - moonDir[1];
+        c[2] += v[2] - moonDir[2];
+      }
+    }
+  }
+  if (lit > 0) {
+    c[0] /= lit;
+    c[1] /= lit;
+    c[2] /= lit;
+  }
+  return { litFraction: lit / inDisc, centroid: c };
+}
+
+const SIN_R = Math.sin((P.moonDiscSize * Math.PI) / 180);
+
+describe('§B77 — the drawn lit fraction IS moonIllumination, at every phase', () => {
+  it('shader-mirror lit area == moonIllumination(drawPhase) within 2% at 7 phases, and drawPhase == moonPhase wherever the floor is off', () => {
+    for (const ph of [0, 0.1, 0.25, 0.5, 0.75, 0.9, 1]) {
+      const k = keyLight(21, withParams({ moonPhase: ph }));
+      const term = moonTerminator(k.sunDirection, k.moonDirection, k.moonDrawPhase);
+      expect(term.litAxis).toEqual(k.moonLitAxis);
+      expect(Math.abs(term.litFraction - k.moonLitFraction)).toBeLessThan(1e-12);
+      const drawn = rasterLit(k.moonDirection, k.moonLitAxis, term.k, SIN_R);
+      expect(Math.abs(drawn.litFraction - moonIllumination(k.moonDrawPhase))).toBeLessThan(0.02);
+      // the floor only lifts a crescent thinner than the cheat; these phases
+      // are all fatter (or gated dark), so the drawn disc is the ORBIT's
+      if (moonIllumination(ph) >= moonIllumination(P.moonDiscPhase)) {
+        expect(k.moonDrawPhase).toBe(ph);
+        expect(Math.abs(drawn.litFraction - moonIllumination(ph))).toBeLessThan(0.02);
+      }
+    }
+    // and the report's own frame: tod 19, phase 0.5 → full, not 20%
+    const full = keyLight(19, withParams({ moonPhase: 0.5 }));
+    const drawn = rasterLit(full.moonDirection, full.moonLitAxis, Math.cos(2 * Math.PI * full.moonDrawPhase), SIN_R);
+    expect(drawn.litFraction).toBeGreaterThan(0.98);
+  });
+
+  it('the lit limb faces the SUN — lit centroid · sun projection > 0 for every (tod, phase) with a terminator on the disc', () => {
+    let checked = 0;
+    for (const ph of PHASES) {
+      const p = withParams({ moonPhase: ph });
+      for (const t of hours(0.25)) {
+        const k = keyLight(t, p);
+        const axis = k.moonLitAxis;
+        // always a unit vector in the disc plane (§V28: never a zero)
+        expect(Math.abs(len(axis) - 1)).toBeLessThan(1e-9);
+        expect(Math.abs(dot(axis, k.moonDirection))).toBeLessThan(1e-9);
+        const sm = dot(k.sunDirection, k.moonDirection);
+        const proj: Vec3 = [
+          k.sunDirection[0] - k.moonDirection[0] * sm,
+          k.sunDirection[1] - k.moonDirection[1] * sm,
+          k.sunDirection[2] - k.moonDirection[2] * sm,
+        ];
+        if (len(proj) < 1e-3) continue; // new/full: no side to face
+        expect(dot(axis, proj)).toBeGreaterThan(0);
+        const lit = k.moonLitFraction;
+        if (lit < 0.05 || lit > 0.95) continue; // no terminator to read
+        const drawn = rasterLit(k.moonDirection, axis, Math.cos(2 * Math.PI * k.moonDrawPhase), SIN_R, 121);
+        expect(dot(drawn.centroid, proj)).toBeGreaterThan(0);
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(200);
+  });
+
+  it('the old axis was wrong: moonDir × up pointed AWAY from the sun in the report frame (tod 19, phase 0.5, looking east)', () => {
+    // regression witness, not a property: the frame in
+    // docs/raft2100/lookdev/T108/dusk-tod19-phase0.5-east.png, where the
+    // 0.18 crescent was lit on the south limb with the sun in the west.
+    // Measured: old·proĵ = −0.97, new·proĵ = +1.00.
+    const k = keyLight(19, withParams({ moonPhase: 0.5 }));
+    const old = norm(cross(k.moonDirection, [0, 1, 0]));
+    const sm = dot(k.sunDirection, k.moonDirection);
+    const proj = norm([
+      k.sunDirection[0] - k.moonDirection[0] * sm,
+      k.sunDirection[1] - k.moonDirection[1] * sm,
+      k.sunDirection[2] - k.moonDirection[2] * sm,
+    ]);
+    expect(dot(old, proj)).toBeLessThan(-0.9);
+    expect(dot(k.moonLitAxis, proj)).toBeGreaterThan(0.99);
+  });
+
+  it('moonLitAxis is a unit vector for degenerate and garbage input (§V28)', () => {
+    for (const [s, m] of [
+      [[0, 1, 0], [0, 1, 0]], // sun along the moon, moon at zenith
+      [[0, -1, 0], [0, 1, 0]],
+      [[1, 0, 0], [1, 0, 0]],
+      [[0, 0, 0], [0, 0, 0]],
+      [[Number.NaN, 0, 0], [0, 1, 0]],
+      [[1, 0, 0], [Number.NaN, Number.NaN, Number.NaN]],
+    ] as [Vec3, Vec3][]) {
+      const a = moonLitAxis(s, m);
+      expect(a.every(Number.isFinite)).toBe(true);
+      expect(Math.abs(len(a) - 1)).toBeLessThan(1e-9);
+    }
+  });
+});
+
+describe('§B77 — the sliver: visible term is EXACTLY 0 inside the glare angle or under moonMinLit', () => {
+  it('∀ hour × phase: gate 0 when elongation < moonGlareAngle or the orbit is under moonMinLit lit', () => {
+    for (const ph of PHASES) {
+      const p = withParams({ moonPhase: ph });
+      for (const t of hours(0.05)) {
+        const k = keyLight(t, p);
+        const sep = moonElongation(k.sunDirection, k.moonDirection);
+        const visible = k.moonDiscGate * P.moonDiscIntensity * k.moonLitFraction;
+        if (sep <= P.moonGlareAngle || moonIllumination(ph) <= P.moonMinLit) expect(visible).toBe(0);
+      }
+    }
+  });
+
+  it('the report frames: phase 0.05 at 18.5 and 19.0 draw nothing, phase 0.1 at night draws a crescent', () => {
+    for (const t of [18.5, 19]) {
+      const k = keyLight(t, withParams({ moonPhase: 0.05 }));
+      expect(k.moonDiscGate).toBe(0);
+    }
+    // a young moon outside the glare is drawn — the floor makes it readable
+    const young = keyLight(19.5, withParams({ moonPhase: 0.1 }));
+    if (young.moonElevation > 0.1) {
+      expect(young.moonDiscGate).toBeGreaterThan(0);
+      expect(young.moonLitFraction).toBeGreaterThanOrEqual(moonIllumination(P.moonDiscPhase));
+    }
+  });
+
+  it('moonMinLit reaches exactly 0 at the threshold and is continuous above it; garbage is finite', () => {
+    const at = (lit: number) => {
+      const ph = Math.acos(1 - 2 * lit) / (2 * Math.PI); // inverse of moonIllumination
+      return moonDiscState(-0.5, 0.8, 120, withParams({ moonPhase: ph })).moonDiscGate;
+    };
+    expect(at(P.moonMinLit)).toBeLessThan(1e-12); // acos round-trip lands an ulp above the edge
+    expect(at(P.moonMinLit * 0.5)).toBe(0);
+    expect(at(P.moonMinLit * 2)).toBe(1);
+    let prev = at(0);
+    for (let l = 0; l <= 0.2; l += 0.001) {
+      const cur = at(l);
+      expect(cur).toBeGreaterThanOrEqual(prev - 1e-12);
+      expect(cur - prev).toBeLessThan(0.1);
+      prev = cur;
+    }
+    const g = moonDiscState(-0.5, 0.8, 120, withParams({ moonMinLit: Number.NaN, moonPhase: 0.5 }));
+    expect(Number.isFinite(g.moonDiscGate)).toBe(true);
+  });
+});
+
+describe('§B77 — stars gate on solar depression, and nobody else moves', () => {
+  const DEG_ = Math.PI / 180;
+
+  it('0 at +7° and at −2°, 1 at −12°, monotone in elevation', () => {
+    expect(starDuskGate(7 * DEG_, P)).toBe(0);
+    expect(starDuskGate(-2 * DEG_, P)).toBe(0);
+    expect(starDuskGate(-4 * DEG_, P)).toBe(0); // the 18:18 frame: pink sky, no stars
+    expect(starDuskGate(-12 * DEG_, P)).toBe(1);
+    expect(starDuskGate(-30 * DEG_, P)).toBe(1);
+    let prev = starDuskGate(20 * DEG_, P);
+    for (let e = 20; e >= -20; e -= 0.05) {
+      const cur = starDuskGate(e * DEG_, P);
+      expect(cur).toBeGreaterThanOrEqual(prev - 1e-12);
+      expect(cur - prev).toBeLessThan(0.03);
+      prev = cur;
+    }
+  });
+
+  it('the stars begin AFTER civil dusk: strictly 0 down to starDuskStart, strictly > 0 just past it', () => {
+    expect(starDuskGate(P.starDuskStart * DEG_, P)).toBe(0);
+    expect(starDuskGate((P.starDuskStart - 0.5) * DEG_, P)).toBeGreaterThan(0);
+    expect(P.starDuskStart).toBeLessThanOrEqual(-6);
+    expect(P.starDuskEnd).toBeLessThanOrEqual(-12);
+  });
+
+  it('is finite and 0..1 for NaN elevation, NaN, swapped or collapsed edges (§V28)', () => {
+    for (const over of [
+      {},
+      { starDuskStart: Number.NaN },
+      { starDuskEnd: Number.NaN },
+      { starDuskStart: -12, starDuskEnd: -6 },
+      { starDuskStart: -8, starDuskEnd: -8 },
+    ]) {
+      for (const e of [Number.NaN, -1, 0, 1]) {
+        const g = starDuskGate(e, withParams(over));
+        expect(Number.isFinite(g)).toBe(true);
+        expect(g).toBeGreaterThanOrEqual(0);
+        expect(g).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('nightFactor — the lamps\' clock — is untouched by the star gate', () => {
+    for (const t of hours(0.25)) {
+      const k = keyLight(t, P);
+      expect(k.nightFactor).toBe(nightFactor(k.sunElevation));
+    }
+    // lamps are lit before the stars show: at −4° the lamps are on, the sky has no stars
+    const dusk = keyLight(18.3, P);
+    expect(dusk.nightFactor).toBeGreaterThan(0.2);
+    expect(starDuskGate(dusk.sunElevation, P)).toBe(0);
   });
 });
