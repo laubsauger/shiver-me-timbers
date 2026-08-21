@@ -11,6 +11,7 @@
  *   thatch — thatch-roof
  *   plank  — guara, splashboard (the wood material in a dark preset)
  *   crate  — crate (pine / jerrycan / drum / dinghy / cage, per piece id)
+ *   rope   — lashing (the rings at every crossbeam × log crossing)
  *
  * ONE material per kind, shared between ships (§T.40). Per-piece variation is
  * seeded from the mesh (raftMaterialNodes.ts), never from a second material.
@@ -34,7 +35,7 @@ import { createWoodMaterial, type LocalFrame, type ShipMaterialHandle } from './
 export { BALSA_AXIS, createBalsaMaterial, crossbeamStation0 } from './raftMaterialsBalsa';
 export { bambooDeckVariantOf, createThatchMaterial, createWeaveMaterial } from './raftMaterialsWeave';
 
-export type RaftFamily = 'balsa' | 'bamboo' | 'weave' | 'thatch' | 'plank' | 'crate';
+export type RaftFamily = 'balsa' | 'bamboo' | 'weave' | 'thatch' | 'plank' | 'crate' | 'rope';
 
 
 /** crate variants, keyed on the piece ids raftPartsCabin.ts authors */
@@ -145,14 +146,73 @@ export function createPlankMaterial(
   frame?: LocalFrame,
   p: RaftMaterialParams = raftMaterialParams,
 ): ShipMaterialHandle {
+  // THE RELIEF SCALES WITH THE BOARD (§B70). plankRelief / plankTilt / the
+  // plateau step / the seam depth are metres of height over ONE board; keep
+  // them at the galleon's values on a board 0.2 m wide instead of 0.55 and
+  // every slope is 2.75× steeper, the shading normal tips past the horizon
+  // and the guaras and splashboards rendered as black-and-white bar codes.
+  // Same slopes, narrower boards: every height is scaled by the width ratio —
+  // and then by `plankReliefScale`, because a guara stands EDGE-ON to the sun:
+  // at N·L ≈ 0 the galleon's ±40° board swing tips half the boards into the
+  // sun and half out of it, a bar code of white and black (measured: zeroing
+  // bumpScale alone removed it, and a 3× reduction did not — at grazing
+  // incidence ANY tilt is binary lit/unlit). On a sunlit hull the same swing
+  // only modulates; a 25 mm fir plank is honestly flat, so the relief is
+  // all but retired and the boards stay legible through their colour jitter.
+  const ratio = (): number => (p.plankWidth / Math.max(1e-3, shipMaterialParams.plankWidth)) * p.plankReliefScale;
+  const scaled = (key: keyof ShipMaterialParams): PropertyDescriptor => ({
+    get: () => (shipMaterialParams[key] as number) * ratio(),
+    enumerable: true,
+  });
   const overrides: ShipMaterialParams = Object.create(shipMaterialParams, {
     plankWidth: { get: () => p.plankWidth, enumerable: true },
+    plankRelief: scaled('plankRelief'),
+    plankTilt: scaled('plankTilt'),
+    plankStep: scaled('plankStep'),
+    plankChamfer: scaled('plankChamfer'),
+    seamDepth: scaled('seamDepth'),
+    plankWander: scaled('plankWander'),
   });
   return createWoodMaterial(
     { light: p.plankLight, dark: p.plankDark, wale: false, waterline: false },
     frame,
     overrides,
   );
+}
+
+/**
+ * Lashings: three-strand hemp, tan gone grey-brown [§7 Rope]. The ring
+ * geometry carries the turns; here the lay is a noise-darkened strand
+ * pattern, so there is no periodic term to band-limit (§V.48) and nothing
+ * bound (§V40). The rig's running rope (src/ropes) is compute-driven and
+ * cannot be shared with a static piece, which is why this exists.
+ */
+export function createLashingMaterial(
+  frame?: LocalFrame,
+  p: RaftMaterialParams = raftMaterialParams,
+): ShipMaterialHandle {
+  const material = new THREE.MeshStandardNodeMaterial();
+  material.metalness = 0;
+  const uTan = uniform(new THREE.Color(p.ropeTan));
+  const uDark = uniform(new THREE.Color(p.ropeDark));
+  const piece = createRaftPieceUniforms();
+  const pos = positionLocal;
+  // the lay: fine fbm stretched round the ring reads as strands at 1–3 m,
+  // and is a plain mid-tone beyond — fbm's own octaves are its band limit
+  const lay = triplanarFbm(pos.mul(40).add(piece.seed.mul(13)), normalLocal, float(6), 2);
+  const fuzz = triplanarFbm(pos.mul(9), normalLocal, float(6), 2);
+  const color = mix(uDark, uTan, lay.mul(0.7).add(fuzz.mul(0.3)));
+  const water = shipWater(frame);
+  material.colorNode = color.mul(water.tint);
+  material.roughnessNode = float(0.92).mul(water.roughnessScale).clamp(0.04, 1);
+  material.emissiveNode = water.addLight;
+  return {
+    material,
+    refresh(): void {
+      uTan.value.set(p.ropeTan);
+      uDark.value.set(p.ropeDark);
+    },
+  };
 }
 
 /** the factory pieceMaterials.ts routes the raft families through */
@@ -174,5 +234,7 @@ export function createRaftMaterial(
       return createPlankMaterial(frame);
     case 'crate':
       return createCrateMaterial(frame);
+    case 'rope':
+      return createLashingMaterial(frame);
   }
 }

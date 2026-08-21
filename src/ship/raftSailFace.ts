@@ -21,7 +21,7 @@
  * §V23: functional mix()/smoothstep() only.
  */
 import * as THREE from 'three/webgpu';
-import { float, mix, smoothstep, uniform, vec2 } from 'three/tsl';
+import { Fn, float, mix, smoothstep, uniform, vec2 } from 'three/tsl';
 import { bandLimitWidth, coordFilter, periodResolved } from './bandLimit';
 import { fbm2 } from '../terrain/noise';
 import { createRaftPieceUniforms, type AnyNode } from './raftMaterialNodes';
@@ -220,10 +220,24 @@ function sdSegmentNode(pt: AnyNode, a: Pt, b: Pt): AnyNode {
   return pa.sub(ba.mul(h)).length();
 }
 
-function sminNode(a: AnyNode, b: AnyNode): AnyNode {
+/**
+ * A TYPED Fn, NOT an inline expression — and that is the §B70 hang.
+ *
+ * Three's `MathNode`/`OperatorNode.getNodeType` resolve their type by asking
+ * every input, recursively, with no memo. A chain of 35 smin levels, each
+ * reading its predecessor through `mix(b, a, h)` AND through `h` (itself used
+ * three times), unfolds into ~4^35 visits on the first `getNodeType` — the
+ * preview sat on a blocked main thread for minutes before the sail shader was
+ * ever generated. `Fn(…, 'float')` pins the call node's type, so the walk
+ * stops at each level: 35 levels cost 35 × a constant. The body is still
+ * inlined per call (no layout), so the WGSL is the same expression as before.
+ */
+// the typings stop at Fn(jsFunc); the runtime's second argument is the node type
+const typedFn = Fn as unknown as (jsFunc: (args: AnyNode[]) => AnyNode, nodeType: string) => (a: AnyNode, b: AnyNode) => AnyNode;
+const sminNode = typedFn(([a, b]: AnyNode[]): AnyNode => {
   const h = b.sub(a).mul(0.5 / SMOOTH_K).add(0.5).clamp(0, 1);
   return mix(b, a, h).sub(h.mul(h.oneMinus()).mul(SMOOTH_K));
-}
+}, 'float');
 
 /** TSL twin of {@link konTikiFaceDistances}; `pt` = face-centred metres (vec2) */
 export function konTikiFaceNodes(pt: AnyNode, prims: readonly FacePrimitive[], strokeHalf: AnyNode): { fill: AnyNode; stroke: AnyNode } {

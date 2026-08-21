@@ -62,6 +62,7 @@ import {
 import {
   buildCabinWallGeometry,
   buildCrateGeometry,
+  buildLashingGeometry,
   buildCrossbeamGeometry,
   buildLogGeometry,
   buildPoleGeometry,
@@ -179,7 +180,7 @@ export function buildPieceGeometry(
     case 'yard':
       return buildYardGeometry(aabb);
     case 'sail':
-      return buildSailGeometry('full', aabb);
+      return buildSailGeometry('full', aabb, shape);
     case 'crow-nest':
       return crowNest(aabb);
     case 'lantern-post':
@@ -240,6 +241,8 @@ export function buildPieceGeometry(
       return buildSteeringOarGeometry(aabb, shape);
     case 'crate':
       return buildCrateGeometry(aabb, shape);
+    case 'lashing':
+      return buildLashingGeometry(aabb, shape);
     case 'bamboo-deck':
     case 'thatch-roof':
     case 'guara':

@@ -61,15 +61,22 @@ export function buildLogs(p: RaftParams, L: RaftLayout): PieceDef[] {
     }, {
       sockets: sockets.get(k) ?? [],
       // bow end tapers and is chamfered "native fashion"; stern cut square [§1]
-      shape: { taper: p.logBowTaper, chamfer: p.logBowChamfer, sides: 12 },
+      shape: { taper: p.logBowTaper, chamfer: p.logBowChamfer, taperLen: p.logTaperLength, sides: 12 },
     }),
   );
 }
 
-/** low dark planks across the bow stagger, one per side [§1 Bow ends] */
+/**
+ * Dark planks across the bow stagger, one per side [§1 Bow ends], and then a
+ * straight run aft along each outer log (§B73 [ref-sails-1947]: the boards
+ * are a LOW BULWARK down the fore-body, standing ~0.5 m over the logs, not a
+ * pair of boards at the tips). Four planks, lashed through the logs.
+ */
 export function buildSplashboards(p: RaftParams, L: RaftLayout): PieceDef[] {
   const centre = L.logs.find((l) => l.i === 0)!;
   const out: PieceDef[] = [];
+  const h = p.splashboardHeight;
+  const t = p.splashboardThickness;
   for (const [side, sign] of [['port', -1], ['starboard', 1]] as const) {
     const outer = L.logs[sign < 0 ? 0 : L.logs.length - 1];
     const a: Vec3 = [centre.x, 0, centre.zBow - p.splashboardInset];
@@ -77,12 +84,25 @@ export function buildSplashboards(p: RaftParams, L: RaftLayout): PieceDef[] {
     const dx = b[0] - a[0];
     const dz = b[2] - a[2];
     const len = Math.hypot(dx, dz);
+    // on the bow ENDS of the logs, which are tapered: the full-radius
+    // logTopY left the boards floating a hand's width above the tips
+    const yBow = p.logAxisY + outer.r * p.logBowTaper + h / 2 - 0.05;
     out.push(
       mkPiece(`splashboard-${side}`, 'splashboard',
-        [(a[0] + b[0]) / 2, L.logTopY + p.splashboardHeight / 2 - 0.05, (a[2] + b[2]) / 2], {
-          min: [-len / 2, -p.splashboardHeight / 2, -p.splashboardThickness / 2],
-          max: [len / 2, p.splashboardHeight / 2, p.splashboardThickness / 2],
+        [(a[0] + b[0]) / 2, yBow, (a[2] + b[2]) / 2], {
+          min: [-len / 2, -h / 2, -t / 2],
+          max: [len / 2, h / 2, t / 2],
         }, { rotation: [0, Math.atan2(-dz, dx), 0] }),
+    );
+    // the side run: outboard of the outer log, from the bow board aft
+    const run = Math.max(0.5, Math.min(p.splashboardRun, outer.length - p.splashboardInset - 0.5));
+    const z1 = b[2];
+    out.push(
+      mkPiece(`splashboard-${side}-side`, 'splashboard',
+        [outer.x + sign * (outer.r + t / 2), p.logAxisY + outer.r + h / 2 - 0.08, z1 - run / 2], {
+          min: [-t / 2, -h / 2, -run / 2],
+          max: [t / 2, h / 2, run / 2],
+        }),
     );
   }
   return out;
@@ -111,6 +131,44 @@ export function buildCrossbeams(p: RaftParams, L: RaftLayout): PieceDef[] {
           min: [-fr, -fr, -p.footRailLength / 2],
           max: [fr, fr, p.footRailLength / 2],
         }, { shape: { taper: 1, chamfer: 0, sides: 8 } }),
+    );
+  }
+  return out;
+}
+
+/**
+ * Rope lashings, one piece per crossbeam, ringing the crossing with every log
+ * the beam reaches (and it reaches them all: 5.5 m over a ~5.3 m field). The
+ * ring positions ride in `shape` because a geometry builder only sees the
+ * piece's own box (§V18); the §T89 test counts rings against crossings.
+ */
+export function buildLashings(p: RaftParams, L: RaftLayout): PieceDef[] {
+  const d = p.crossbeamDiameter;
+  const count = Math.max(1, Math.round(p.crossbeamCount));
+  const out: PieceDef[] = [];
+  for (let k = 0; k < count; k++) {
+    const z = L.cabinAftZ + 0.2 + k * p.crossbeamPitch;
+    // the OUTER two logs each side: the crossings the deck does not cover,
+    // which is where the photos show the rope [PHOTO-01,08]. The inner five
+    // are under the mats forward of the cabin, and the tri budget is better
+    // spent where it is seen (the §T89 test measures the count).
+    const half = (L.logs.length - 1) / 2;
+    const reached = L.logs.filter((l) => Math.abs(l.i) >= half - 1
+      && Math.abs(l.x) <= p.crossbeamLength / 2 && z > l.zStern && z < l.zBow);
+    const shape: Record<string, number> = {
+      n: reached.length,
+      rope: p.lashingRopeDiameter,
+      turns: p.lashingTurns,
+      beamR: d / 2,
+      logR: Math.max(...reached.map((l) => l.r)),
+    };
+    reached.forEach((l, i) => { shape[`x${i}`] = l.x; });
+    const rMax = shape.logR;
+    out.push(
+      mkPiece(`lashing-${k}`, 'lashing', [0, L.logTopY + d / 2, z], {
+        min: [-p.crossbeamLength / 2, -(d + 2 * rMax), -rMax - 0.05],
+        max: [p.crossbeamLength / 2, d / 2 + 0.05, rMax + 0.05],
+      }, { shape }),
     );
   }
   return out;
@@ -165,8 +223,11 @@ export function buildBambooDeck(p: RaftParams, L: RaftLayout): PieceDef[] {
  * log, so the crew's stand does not ride with the plank).
  */
 export function buildGuaras(p: RaftParams, L: RaftLayout): PieceDef[] {
-  const rMax = Math.max(...L.logs.map((l) => l.r));
-  const bottomLowered = p.logAxisY - rMax - p.guaraDepth;
+  // "1.5 m below raft" is below the LOG AXIS (the waterline): a 2 m plank
+  // then shows 0.5 m fully lowered and ~1.1 m at the half-raised rest pose,
+  // which is the museum's standing planks [PHOTO-04]. Measured from the log
+  // bottoms the top sat UNDER the deck and the guaras were invisible (§B70).
+  const bottomLowered = p.logAxisY - p.guaraDepth;
   const lift = p.guaraTravel * (1 - p.guaraDefaultDepth);
   return guaraStations(p).map((g, idx) => {
     const a = L.logs[g.chink];

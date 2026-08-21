@@ -122,6 +122,20 @@ export interface SheetLeads {
 /** both sheets dead, i.e. the corners stay in the yard's plane */
 export const NO_SHEET_LEADS: SheetLeads = { port: [0, 0, 0], starboard: [0, 0, 0] };
 
+const LEAD_KEY = 'sheetLeadAft';
+
+/**
+ * Which way along the hull a sail's sheets lead: +1 aft (a square-rigger's
+ * clews are hauled to the next mast aft), −1 forward. The raft (§B73) runs
+ * before the wind with its foot pulled FORWARD of the mast, so its sail
+ * pieces carry `shape.sheetLeadAft = -1` and the assembly copies it here.
+ * Finite-guarded like the frame itself (§V28); absent = aft.
+ */
+export function readSheetLeadSign(object: THREE.Object3D): number {
+  const raw = object.userData[LEAD_KEY];
+  return typeof raw === 'number' && Number.isFinite(raw) && raw < 0 ? -1 : 1;
+}
+
 /**
  * WHERE EACH SHEET HAULS ITS CLEW, in the sail's own frame.
  *
@@ -159,6 +173,7 @@ export function sheetLeadDirections(
   shipForwardX: number,
   shipForwardZ: number,
   spread: number,
+  aftSign = 1,
 ): SheetLeads {
   const n = (x: number): number => (Number.isFinite(x) ? x : 0);
   const fx = n(shipForwardX);
@@ -173,9 +188,9 @@ export function sheetLeadDirections(
   const sp = Math.max(0, n(spread));
   const build = (side: number): SailLocalDir => {
     // world-space lead: aft, down, and out to its own side
-    const wx = ax + sx * sp * side;
+    const wx = ax * aftSign + sx * sp * side;
     const wy = -1;
-    const wz = az + sz * sp * side;
+    const wz = az * aftSign + sz * sp * side;
     // world → sail-local by the transpose of the sail's rotation
     const lx = m[0] * wx + m[1] * wy + m[2] * wz;
     const ly = m[4] * wx + m[5] * wy + m[6] * wz;

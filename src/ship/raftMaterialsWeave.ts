@@ -36,6 +36,7 @@ export function createWeaveMaterial(
   const uYellow = uniform(new THREE.Color(p.bambooYellow));
   const uGreen = uniform(new THREE.Color(p.bambooGreen));
   const uStrip = uniform(p.weaveStrip);
+  const uBlock = uniform(Math.max(1, p.weaveBlock));
   const uSlat = uniform(p.bambooSlatWidth);
   const uEdge = uniform(p.weaveEdge);
   const uRelief = uniform(p.weaveRelief);
@@ -65,33 +66,54 @@ export function createWeaveMaterial(
   const fcv = fv.div(width);
   const resolved = periodResolved(cu, fcu).min(periodResolved(cv, fcv));
 
-  // over/under as a SMOOTH checker, zero on every strip edge, so the height
-  // field never steps where the parity flips (§B.20: a step differentiates to
-  // a spike). Slats force the u-strips on top everywhere.
-  const checker = sin(cu.mul(Math.PI)).mul(sin(cv.mul(Math.PI)));
-  const overU = mix(checker.max(0), float(1), variant);
-  const overV = checker.negate().max(0).mul(variant.oneMinus());
+  // BASKET WEAVE IN BLOCKS, not a per-strand checker (§B70). The museum walls
+  // [PHOTO-04,08] are plaited in checks of ~5 strands: inside a block every
+  // strand runs one way, the next block the other. A per-strand over/under
+  // (the previous form) is a 9 cm period that is sub-pixel from 10 m — all
+  // the read there was a moiré — while a 22 cm check is exactly the scale
+  // the reference shows at 10–30 m. `overU` = the block whose strands run
+  // along u; a smooth sin product so the height never steps at a parity
+  // flip (§B.20), faded to its mean ½ once a block is sub-pixel (§V.48b).
+  const bu = cu.div(uBlock);
+  const bv = cv.div(uBlock);
+  const fbu = fcu.div(uBlock);
+  const fbv = fcv.div(uBlock);
+  const blockResolved = periodResolved(bu, fbu).min(periodResolved(bv, fbv));
+  // @band-limited-elsewhere: smooth block parity, faded to its mean by blockResolved (periodResolved)
+  const parity = sin(bu.mul(Math.PI)).mul(sin(bv.mul(Math.PI))).mul(6).clamp(-1, 1).mul(0.5).add(0.5);
+  const overWeave = mix(float(0.5), parity, blockResolved);
+  const overU = mix(overWeave, float(1), variant); // slats: every cane runs along u
+  const overV = overU.oneMinus();
+  // a strand running along u is crowned ACROSS v, and vice versa
   // @band-limited-elsewhere: smooth crowns, gated on the period by `resolved` (periodResolved)
   const crownU = sin(cu.fract().mul(Math.PI));
   const crownV = sin(cv.fract().mul(Math.PI));
-  let height: AnyNode = crownU.mul(overU).add(crownV.mul(overV)).mul(uRelief).mul(resolved);
+  let height: AnyNode = crownV.mul(overU).add(crownU.mul(overV)).mul(uRelief).mul(resolved);
 
-  // strip edges, each measured against the EDGE width (§V.48, §B.20)
-  // @band-limited-elsewhere: both feed bandLimitedEdge two lines down
+  // strand edges, each measured against the EDGE width (§V.48, §B.20): the
+  // visible edges are those of the strands on TOP, plus the block boundary
+  // where a strand dives under its neighbour
+  // @band-limited-elsewhere: both feed bandLimitedEdge below
   const du = cu.fract();
   const dv = cv.fract();
+  // @band-limited-elsewhere: both feed bandLimitedEdge below
+  const dbu = bu.fract();
+  const dbv = bv.fract();
   const edgeU = bandLimitedEdge(du.min(du.oneMinus()), cu, uEdge, fcu);
-  const edgeVraw = bandLimitedEdge(dv.min(dv.oneMinus()), cv, uEdge, fcv);
-  const edgeV = mix(edgeVraw, float(1), variant);
-  const gap = edgeU.min(edgeV).oneMinus();
+  const edgeV = bandLimitedEdge(dv.min(dv.oneMinus()), cv, uEdge, fcv);
+  const blockEdge = bandLimitedEdge(dbu.min(dbu.oneMinus()), bu, uEdge.div(uBlock), fbu)
+    .min(bandLimitedEdge(dbv.min(dbv.oneMinus()), bv, uEdge.div(uBlock), fbv));
+  const strandGap = mix(edgeU, edgeV, overU).oneMinus();
+  const gap = strandGap.max(blockEdge.oneMinus().mul(variant.oneMinus()));
 
-  // per-strip tone, a per-period step gated on the period (§V.48)
-  const toneU = hash2(vec2(cu.floor(), 11.3));
-  const toneV = hash2(vec2(cv.floor(), 23.7));
-  const tone = mix(toneV, toneU, overU.clamp(0, 1)).sub(0.5).mul(2).mul(uToneVar).mul(resolved);
+  // per-strand tone, a per-period step gated on the period (§V.48): a strand
+  // along u is indexed by its v row
+  const toneAlongU = hash2(vec2(cv.floor(), 11.3));
+  const toneAlongV = hash2(vec2(cu.floor(), 23.7));
+  const tone = mix(toneAlongV, toneAlongU, overU.clamp(0, 1)).sub(0.5).mul(2).mul(uToneVar).mul(resolved);
 
   const weather = triplanarFbm(pos.mul(1.4), normalLocal, float(6), 3);
-  const matColor = mix(uDark, uTan, weather.mul(0.5).add(0.4));
+  const matColor = mix(uDark, uTan, weather.mul(0.4).add(0.55));
   // bamboo: yellow with green-grey streaks along the cane
   const streak = fbm2(vec2(cu.mul(0.7), v.mul(3)), 2);
   const caneColor = mix(uYellow, uGreen, streak.sub(0.3).mul(0.8).clamp(0, 1));
@@ -118,6 +140,7 @@ export function createWeaveMaterial(
       uYellow.value.set(p.bambooYellow);
       uGreen.value.set(p.bambooGreen);
       uStrip.value = p.weaveStrip;
+      uBlock.value = Math.max(1, p.weaveBlock);
       uSlat.value = p.bambooSlatWidth;
       uEdge.value = p.weaveEdge;
       uRelief.value = p.weaveRelief;

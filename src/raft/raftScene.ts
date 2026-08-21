@@ -44,7 +44,8 @@ import { buildRaftBlueprint } from '../ship/raftBlueprint';
 import { buildRaftDeckField } from '../ship/raftDeckField';
 import { createDeckWater, setActiveDeckWater } from '../deckwater';
 import { createRopes } from '../ropes';
-import { applyRiggingPlan, buildBlockDescriptors, buildRiggingPlan } from '../ropes/shipRigging';
+import { applyRiggingPlan, buildBlockDescriptors } from '../ropes/shipRigging';
+import { buildRaftRiggingPlan } from '../ship/raftRigging';
 import { buildRatlinePlan } from '../ship/ratlinePlan';
 import { buildRungDescriptors } from '../ropes/ratlines';
 import { ropeParams } from '../params/ropes';
@@ -154,7 +155,7 @@ export function buildRaftVessel(app: App, sea: RaftSea) {
   });
   app.scene.add(assembly.group);
 
-  const riggingPlan = buildRiggingPlan(blueprint);
+  const riggingPlan = buildRaftRiggingPlan(blueprint);
   const rungs = buildRungDescriptors(buildRatlinePlan(blueprint), riggingPlan);
   const blocks = buildBlockDescriptors(riggingPlan, ropeParams.maxBlocks);
   const ropes = createRopes({ maxRopes: Math.max(riggingPlan.length, 32), rungs, blocks });

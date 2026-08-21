@@ -20,7 +20,8 @@ export interface RaftParams {
   logOuterLength: number; // [§1 Side logs] outermost 9.1 m, symmetric linear stagger
   logDiameterMax: number; // [§1 Log diameter] up to 60 cm fresh
   logDiameterMin: number; // [§1 Log diameter] use 50–60 cm
-  logBowTaper: number; // EST — bow radius ÷ stern radius; "tapering" [§1 Log diameter]
+  logBowTaper: number;
+  logTaperLength: number; // EST — m, the bow end tapers over THIS much only; the body is full-round (§B81) // EST — bow radius ÷ stern radius; "tapering" [§1 Log diameter]
   logBowChamfer: number; // EST — length of the pointed tip, m [§1 Bow ends "pointed/chamfered"]
   chinkMin: number; // [§1 Gaps] 2 cm
   chinkMax: number; // [§1 Gaps] 8 cm
@@ -31,10 +32,13 @@ export interface RaftParams {
   splashboardHeight: number; // [§1 Bow ends] 30–40 cm
   splashboardThickness: number; // EST — "dark plank" [§1 Bow ends]
   splashboardInset: number; // EST — set back from the log tips, m [PHOTO-02,03]
+  splashboardRun: number; // EST — m the side boards run aft along the outer logs: a low bulwark down the fore-body [ref-sails-1947]
   crossbeamCount: number; // [§1 Cross-beams] 9
   crossbeamPitch: number; // [§1 Cross-beams] ~0.91 m
   crossbeamDiameter: number; // [§1 Cross-beams] ~30 cm
   crossbeamLength: number; // [§1 Cross-beams] ~5.5 m
+  lashingRopeDiameter: number; // [§1 Lashing] 30 mm hemp
+  lashingTurns: number; // EST — rope turns per crossing, read as the ring's width [PHOTO-08]
   footRailDiameter: number; // EST — "one slim balsa log" [§1 Foot-rails]
   footRailLength: number; // EST — runs the decked length [§1 Foot-rails]
   matThickness: number; // EST — split bamboo + plaited mats [§1 Deck]
@@ -61,6 +65,18 @@ export interface RaftParams {
   platformThickness: number; // EST
   ladderWidth: number; // EST — rope ladder w/ wooden rungs [§4 Masthead]
   ladderRungPitch: number; // EST
+  ladderStandoff: number; // EST — m the ladder hangs off the leg's surface (§B75)
+  // --- §B73 the rig is JANKY [ref-sails-1947]: seeded per-piece cock / rake /
+  // slew, scaled by shipDetailParams.irregularity; every value an upper bound
+  yardCock: number; // EST — rad, a yard hoisted with one arm higher (photo ≈ 6–10°)
+  yardRake: number; // EST — rad, the sail's head pulled forward of its foot (photo ≈ 5°)
+  yardSlew: number; // EST — rad, the yard's resting brace off square
+  yardOffset: number; // EST — m, hoisted off-centre on the mast
+  mastRakeAft: number; // EST — rad, the whole bipod leans AFT [ref-sails-1947 ≈ 5–8°] (§B75)
+  legLeanJitter: number; // EST — rad, each bipod leg's own fore-aft lean
+  topPoleTilt: number; // EST — rad, the topsail pole lashed askew above the crossing
+  crossingWrapWidth: number; // EST — m, the rope bundle at the bipod crossing
+  mizzenSpritAngle: number; // EST — rad, the mizzen's spar stands as a SPRIT, the sail hanging loose off it
   yardLength: number; // [§4 Yard] ~5.5 m+ — EST 6.0 (wider than the 5.5 m sail)
   yardDiameter: number; // EST — two bamboo stems bound together [§4 Yard]
   yardMastClearance: number; // EST — yard rides forward of the legs
@@ -89,7 +105,7 @@ export interface RaftParams {
   guaraHeight: number; // [§2 Size] ~2 m total
   guaraWidth: number; // [§2 Size] 60 cm
   guaraThickness: number; // [§2 Size] 25 mm
-  guaraDepth: number; // [§2 Size] 1.5 m below raft
+  guaraDepth: number; // [§2 Size] 1.5 m below raft — below the log AXIS (y = 0, the waterline), so 0.5 m of a 2 m plank shows fully lowered
   guaraTravel: number; // EST — how far a guara is hand-raised [§2 Fixing "partway"]
   guaraDefaultDepth: number; // EST — 0 = fully raised, 1 = fully lowered; rest pose
   guaraFwdZ: number; // EST — "~2 at bow" [§2 Positions]
@@ -133,6 +149,7 @@ export const raftParams: RaftParams = registerParams(
     logDiameterMax: 0.6,
     logDiameterMin: 0.5,
     logBowTaper: 0.82, // EST
+    logTaperLength: 1.6, // EST — [PHOTO-02,03] the logs are parallel full-round cylinders until the last metre or two
     logBowChamfer: 0.7, // EST
     chinkMin: 0.02,
     chinkMax: 0.08,
@@ -140,13 +157,16 @@ export const raftParams: RaftParams = registerParams(
     sternProjection: 0.6,
     sternProjectingLogs: 3,
     logAxisY: 0,
-    splashboardHeight: 0.35,
-    splashboardThickness: 0.04, // EST
-    splashboardInset: 0.3, // EST
+    splashboardHeight: 0.55, // EST — [ref-sails-1947] the bow boards stand ~0.5–0.6 m over the logs; [§1 Bow ends] 30–40 cm is the museum's cut-down set
+    splashboardThickness: 0.06, // EST
+    splashboardInset: 0.8, // EST — aft of the chamfered tips, where the logs are still full-round
+    splashboardRun: 4.5, // EST
     crossbeamCount: 9,
     crossbeamPitch: 0.91,
     crossbeamDiameter: 0.3,
     crossbeamLength: 5.5,
+    lashingRopeDiameter: 0.03,
+    lashingTurns: 4, // EST
     footRailDiameter: 0.15, // EST
     footRailLength: 7.0, // EST
     matThickness: 0.04, // EST
@@ -171,6 +191,16 @@ export const raftParams: RaftParams = registerParams(
     platformThickness: 0.05, // EST
     ladderWidth: 0.35, // EST
     ladderRungPitch: 0.35, // EST
+    ladderStandoff: 0.1, // EST
+    yardCock: 0.14, // EST
+    yardRake: 0.09, // EST
+    yardSlew: 0.12, // EST
+    yardOffset: 0.2, // EST
+    mastRakeAft: 0.11, // EST ≈ 6.3°
+    legLeanJitter: 0.035, // EST
+    topPoleTilt: 0.03, // EST
+    crossingWrapWidth: 0.45, // EST
+    mizzenSpritAngle: 0.45, // EST
     yardLength: 6.0, // EST
     yardDiameter: 0.12, // EST
     yardMastClearance: 0.05, // EST
@@ -184,7 +214,7 @@ export const raftParams: RaftParams = registerParams(
     topsailDrop: 1.4, // EST
     mizzenZ: -5.4, // EST
     mizzenX: -0.9, // EST
-    mizzenHeight: 3.6, // EST
+    mizzenHeight: 4.4, // EST — [ref-sails-1947] the mizzen flies clear above the cabin ridge
     mizzenDiameter: 0.1, // EST
     mizzenYardLength: 2.2, // EST
     mizzenSailWidth: 2.0, // EST
@@ -233,11 +263,14 @@ export const raftParams: RaftParams = registerParams(
     logOuterLength: m(6, 13.7),
     logDiameterMax: m(0.3, 0.8),
     logDiameterMin: m(0.3, 0.8),
-    logBowTaper: m(0.5, 1),
+    logBowTaper: m(0.5, 1), logTaperLength: m(0.2, 4, 0.1),
     chinkMin: m(0, 0.1, 0.005),
     chinkMax: m(0, 0.15, 0.005),
     cabinEave: m(0.9, 1.5),
     cabinRidge: m(1.2, 1.6),
+    splashboardHeight: m(0.2, 0.8), splashboardRun: m(0, 8, 0.1),
+    yardCock: m(0, 0.4), yardRake: m(0, 0.3), yardSlew: m(0, 0.4), yardOffset: m(0, 0.6),
+    mastRakeAft: m(0, 0.25, 0.005), legLeanJitter: m(0, 0.1, 0.005), topPoleTilt: m(0, 0.1, 0.005), mizzenSpritAngle: m(0, 1.2),
     mastHeight: m(8.5, 10),
     mastLegSpacing: m(3, 5.5),
     mainYardHeight: m(5, 8.8),

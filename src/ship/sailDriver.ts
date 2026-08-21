@@ -15,7 +15,7 @@ import { oceanParams } from '../params/ocean';
 import type { ShipMaterialParams } from '../params/ship';
 import { sailDrive, type SailDriveState } from './sailDynamics';
 import { sailFlutterRate } from './sailShape';
-import { readSailWindFrame, sailPhaseSeed, sheetLeadDirections } from './sailFrame';
+import { readSailWindFrame, readSheetLeadSign, sailPhaseSeed, sheetLeadDirections } from './sailFrame';
 
 const TAU = Math.PI * 2;
 
@@ -193,7 +193,7 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
 
     // where each sheet hauls its clew, in this sail's own frame — recomputed
     // per frame because a bracing yard swings the sail under fixed anchors
-    const leads = sheetLeadDirections(m, wf.shipForwardX, wf.shipForwardZ, shipMaterialParams.sailSheetSpread);
+    const leads = sheetLeadDirections(m, wf.shipForwardX, wf.shipForwardZ, shipMaterialParams.sailSheetSpread, readSheetLeadSign(object));
     sheetLeadPort.value.set(leads.port[0], leads.port[1], leads.port[2]);
     sheetLeadStarboard.value.set(leads.starboard[0], leads.starboard[1], leads.starboard[2]);
   });

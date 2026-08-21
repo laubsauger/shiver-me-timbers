@@ -21,9 +21,11 @@ import {
 import {
   FACE_RAYS,
   konTikiFaceApplies,
+  konTikiFaceNodes,
   konTikiFacePrimitives,
   konTikiFaceSdf,
 } from '../src/ship/raftSailFace';
+import { float, vec2 } from 'three/tsl';
 import { hashPieceId, pieceIdOfMesh } from '../src/ship/raftMaterialNodes';
 import { createSailClothMaterial } from '../src/ship/sailMaterial';
 import { buildRaftBlueprint } from '../src/ship/raftBlueprint';
@@ -195,6 +197,32 @@ describe('the Kon-Tiki face (CPU mirror of the sail decal SDF)', () => {
     expect(calls).toBe(1);
     expect(handle.material.colorNode).toBeDefined();
     handle.material.dispose();
+  });
+});
+
+describe('§B70 — the face SDF resolves its node type in linear time', () => {
+  // WHY: three's MathNode/OperatorNode.getNodeType re-walk every input with no
+  // memo. An inline smin chain re-reads its predecessor ~4× per level, so 35
+  // primitives unfolded to ~4^35 visits and the preview's main thread sat
+  // blocked for minutes before any sail shader existed. A typed Fn pins each
+  // level's type; this bounds the walk so the chain cannot grow back.
+  it('getNodeType on the full fill + stroke chain returns within 250 ms', () => {
+    const builder = {
+      getTypeLength: (t: string) => ({ float: 1, vec2: 2, vec3: 3, vec4: 4, bool: 1, int: 1, uint: 1 }[t] ?? 1),
+      isMatrix: (t: string) => typeof t === 'string' && t.startsWith('mat'),
+      getVectorType: (t: string) => t,
+      changeComponentType: (_t: string, c: string) => c,
+      getIntegerType: (t: string) => t,
+      getNodeProperties: () => ({}),
+      getComponentType: () => 'float',
+      getTypeFromLength: (n: number) => ['float', 'float', 'vec2', 'vec3', 'vec4'][n],
+      getVectorFromMatrix: (t: string) => t,
+    } as never;
+    const d = konTikiFaceNodes(vec2(float(0.1), float(0.2)), konTikiFacePrimitives(), float(0.02));
+    const t0 = performance.now();
+    expect(d.fill.getNodeType(builder)).toBe('float');
+    expect(d.stroke.getNodeType(builder)).toBe('float');
+    expect(performance.now() - t0).toBeLessThan(250);
   });
 });
 

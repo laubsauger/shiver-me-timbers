@@ -102,6 +102,22 @@ export interface FlagState {
  */
 export const FLAG_CRACK_RATIO = 2.3;
 
+/**
+ * CPU mirror of the cloth ripple's phase in flagMaterial.ts `clothAt`:
+ * ωt − k·u, with k = waveCount·2π along the fly. The MINUS is the direction
+ * of travel (§B76): ∂φ/∂t > 0 and ∂φ/∂u < 0 put the crest velocity
+ * −(∂φ/∂t)/(∂φ/∂u) > 0, i.e. from the hoist (u = 0) to the fly (u = 1).
+ */
+export function flagRipplePhase(u: number, wavePhase: number, waveCount: number): number {
+  return finite(wavePhase) - clamp(finite(u), 0, 1) * Math.max(0, finite(waveCount)) * TAU;
+}
+
+/** the ripple's amplitude envelope along the fly — 0 at the hoist, 1 at the fly */
+export function flagRippleGrow(u: number): number {
+  const x = clamp(finite(u), 0, 1);
+  return x * 0.4 + x * x * 0.6;
+}
+
 /** ripple rate (rad/s) at a given stream strength — bounded by construction */
 export function flagWaveRate(strength: number, p: ShipFlagParams): number {
   return Math.max(0, finite(p.flagWaveFreq)) * (0.35 + clamp(finite(strength), 0, 1));

@@ -29,7 +29,7 @@ export type { LocalFrame } from './woodMaterial';
 type Family = 'hull' | 'deck' | 'spar' | 'trim' | 'sail' | 'flag' | 'iron' | 'glass' | RaftFamily;
 
 const RAFT_FAMILIES: ReadonlySet<Family> = new Set<Family>([
-  'balsa', 'bamboo', 'weave', 'thatch', 'plank', 'crate',
+  'balsa', 'bamboo', 'weave', 'thatch', 'plank', 'crate', 'rope',
 ]);
 
 const FAMILY_OF: Record<PieceKind, Family> = {
@@ -79,6 +79,7 @@ const FAMILY_OF: Record<PieceKind, Family> = {
   crate: 'crate',
   splashboard: 'plank',
   'stern-block': 'balsa',
+  lashing: 'rope',
 };
 
 /** the raft's kinds and the family each draws through — exported for the §T90 tests */

@@ -25,12 +25,25 @@ export function buildLogGeometry(aabb: AABB, shape: Record<string, number> = {})
   const sides = Math.max(6, Math.round(shape.sides ?? 12));
   const bodyLen = s.z - chamfer;
   const rBow = r * taper;
+  // §B81: the taper lives in the LAST `taperLen` of the log, not along its
+  // whole length — a 13.7 m log tapering end to end opened 0.1 m of water
+  // between neighbours amidships; the lashed body is full-round [§1 Gaps]
+  const taperLen = Math.min(bodyLen, Math.max(0, shape.taperLen ?? bodyLen));
+  const trunkLen = bodyLen - taperLen;
   const parts: THREE.BufferGeometry[] = [];
   // CylinderGeometry runs along +y with radiusTop at +y; rotateX(π/2) maps +y → +z (bow)
-  const body = new THREE.CylinderGeometry(rBow, r, bodyLen, sides);
-  body.rotateX(Math.PI / 2);
-  body.translate(0, 0, -s.z / 2 + bodyLen / 2);
-  parts.push(body);
+  if (trunkLen > 1e-4) {
+    const trunk = new THREE.CylinderGeometry(r, r, trunkLen, sides);
+    trunk.rotateX(Math.PI / 2);
+    trunk.translate(0, 0, -s.z / 2 + trunkLen / 2);
+    parts.push(trunk);
+  }
+  if (taperLen > 1e-4) {
+    const body = new THREE.CylinderGeometry(rBow, r, taperLen, sides);
+    body.rotateX(Math.PI / 2);
+    body.translate(0, 0, -s.z / 2 + trunkLen + taperLen / 2);
+    parts.push(body);
+  }
   if (chamfer > 0) {
     const tip = new THREE.CylinderGeometry(rBow * 0.3, rBow, chamfer, sides);
     tip.rotateX(Math.PI / 2);
@@ -147,6 +160,39 @@ export function buildCrateGeometry(aabb: AABB, shape: Record<string, number> = {
     return new THREE.CylinderGeometry(r, r, s.y, 12).translate(c.x, c.y, c.z);
   }
   return slab(aabb);
+}
+
+/**
+ * Lashings for ONE crossbeam: at each crossing listed in `shape` (`x0..x{n-1}`
+ * = ship x of a log centreline, `logR` its radius, `beamR` the beam's) a
+ * rope collar round the beam and a ring round the log, both `rope` thick and
+ * `turns` ropes wide. The piece's origin is the beam's axis, so the log ring
+ * hangs `beamR + logR` below it. One piece per beam keeps the draw count at
+ * the beam count, not the crossing count.
+ */
+export function buildLashingGeometry(aabb: AABB, shape: Record<string, number> = {}): THREE.BufferGeometry {
+  const n = Math.max(0, Math.round(shape.n ?? 0));
+  const rope = Math.max(0.01, shape.rope ?? 0.03);
+  const width = rope * Math.max(1, shape.turns ?? 4);
+  const beamR = shape.beamR ?? aabb.max[1];
+  const logR = shape.logR ?? beamR;
+  const parts: THREE.BufferGeometry[] = [];
+  for (let k = 0; k < n; k++) {
+    const x = shape[`x${k}`] ?? 0;
+    // collar round the beam (beam runs along local x)
+    const collar = new THREE.CylinderGeometry(beamR + rope * 0.6, beamR + rope * 0.6, width, 6, 1, true);
+    collar.rotateZ(Math.PI / 2);
+    collar.translate(x, 0, 0);
+    parts.push(collar);
+    if ((shape.ring ?? 1) <= 0) continue; // a wrap round one member only (the bipod crossing)
+    // ring round the log under it (log runs along local z): a torus whose
+    // axis is z, low-poly — the rope is 3 cm, nobody sees its section
+    const ring = new THREE.TorusGeometry(logR + rope * 0.6, rope * 0.55, 3, 6);
+    ring.translate(x, -(beamR + logR), 0);
+    parts.push(ring);
+  }
+  if (parts.length === 0) return new THREE.BufferGeometry();
+  return mergeNonIndexed(parts);
 }
 
 /** mats, thatch slabs, splashboards, guara planks: a box the size of the aabb */

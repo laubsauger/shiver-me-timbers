@@ -42,6 +42,7 @@ export interface RaftMaterialParams {
   weaveTan: number; // greying tan [§7 Bamboo: "cabin weave ... → greying tan"]
   weaveDark: number; // shadowed under-strip / gap
   weaveStrip: number; // m — a strip of split bamboo, 4–5 cm
+  weaveBlock: number; // strands per plaited block — the basket's check, ~5 strands ≈ 22 cm [PHOTO-04,08] EST
   weaveEdge: number; // fraction of a strip — the strip edge, the band-limit width
   weaveRelief: number; // m — over/under crown height
   weaveToneVar: number; // per-strip tone jitter
@@ -62,6 +63,10 @@ export interface RaftMaterialParams {
   plankLight: number; // dark weathered plank [§7 Guaras]
   plankDark: number;
   plankWidth: number; // m — §V66: a 0.6 m guara is not planked in 0.55 m boards
+  plankReliefScale: number; // 0..1 — the galleon's board relief, scaled: a plank edge-on to the sun flips its normal in and out of the light
+  // --- rope (lashings): three-strand hemp, tan → grey-brown [§7 Rope]
+  ropeTan: number;
+  ropeDark: number; // the shadowed lay between strands
   // --- crates (2100 dressing), one material, variant per piece id
   cratePine: number;
   crateKhaki: number; // ration-box cardboard [§7 Boxes]
@@ -93,9 +98,9 @@ const colour: ParamMeta = {};
 export const raftMaterialParams: RaftMaterialParams = registerParams(
   'raft-materials',
   {
-    balsaGrey: 0x8e8a7e,
-    balsaWarm: 0xc6a87a,
-    balsaToneVar: 0.7,
+    balsaGrey: 0x7c7567,
+    balsaWarm: 0xb0906c, // the warm end of the per-log spread — at 0xc6a87a the logs rendered cream at noon [PHOTO-08 reads grey-brown]
+    balsaToneVar: 0.5,
     balsaGrainScale: 9,
     balsaGrainStretch: 6,
     balsaGrainRelief: 0.004,
@@ -122,11 +127,12 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     weaveTan: 0xb9a57a,
     weaveDark: 0x6e6048,
     weaveStrip: 0.045,
+    weaveBlock: 5,
     weaveEdge: 0.12,
     weaveRelief: 0.004,
     weaveToneVar: 0.08,
     weaveRough: 0.82,
-    weaveBump: 6,
+    weaveBump: 2.5, // a vertical wall at noon lives at N·L ≈ 0: at 6 the crowns of one block caught the sun and the next block's did not, a black-and-tan checkerboard from 15 m (§B70)
     thatchLight: 0xc9b07a,
     thatchDark: 0x8c7a50,
     thatchUnder: 0.55,
@@ -137,9 +143,15 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     thatchStrandStretch: 12,
     thatchRelief: 0.006,
     thatchBump: 6,
-    plankLight: 0x6e685d,
-    plankDark: 0x5e5a52,
-    plankWidth: 0.2,
+    // weathered grey-brown, but MID-tone: a guara stands edge-on to the noon
+    // sun and lives on hemisphere light alone, and at 0x6e685d it rendered as
+    // a black slab (§B70). [PHOTO-04] reads the planks as mid grey-brown.
+    plankLight: 0x948b7c,
+    plankDark: 0x6f675b,
+    plankWidth: 0.25,
+    plankReliefScale: 0.08,
+    ropeTan: 0xa8916a,
+    ropeDark: 0x5f5040,
     cratePine: 0xb8945c,
     crateKhaki: 0x8f8a62,
     crateBoardWidth: 0.12,
@@ -173,13 +185,14 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     bambooYellow: colour, bambooGreen: colour,
     bambooNodePitch: m(0.1, 0.8), bambooNodeWidth: m(0.005, 0.06, 0.001), bambooSlatWidth: m(0.02, 0.15, 0.005),
     weaveTan: colour, weaveDark: colour,
-    weaveStrip: m(0.02, 0.1, 0.001), weaveEdge: m(0.02, 0.4), weaveRelief: m(0, 0.02, 0.001),
+    weaveStrip: m(0.02, 0.1, 0.001), weaveBlock: m(1, 10, 1), weaveEdge: m(0.02, 0.4), weaveRelief: m(0, 0.02, 0.001),
     weaveToneVar: m(0, 0.3), weaveRough: m(0.3, 1), weaveBump: m(0, 30, 0.5),
     thatchLight: colour, thatchDark: colour, thatchUnder: m(0, 1),
     thatchRowPitch: m(0.1, 0.8), thatchRowEdge: m(0.005, 0.1, 0.001), thatchRowRagged: m(0, 0.15),
     thatchStrandScale: m(5, 100, 1), thatchStrandStretch: m(1, 40, 0.5), thatchRelief: m(0, 0.02, 0.001),
     thatchBump: m(0, 30, 0.5),
-    plankLight: colour, plankDark: colour, plankWidth: m(0.05, 0.6),
+    plankLight: colour, plankDark: colour, plankWidth: m(0.05, 0.6), plankReliefScale: m(0, 1, 0.05),
+    ropeTan: colour, ropeDark: colour,
     cratePine: colour, crateKhaki: colour, crateBoardWidth: m(0.04, 0.3), jerrycanColor: colour,
     drumColor: colour, dinghyColor: colour, dinghyPatch: m(0, 1), cageColor: colour,
     sailTint: colour, faceFill: colour, faceOutline: colour,

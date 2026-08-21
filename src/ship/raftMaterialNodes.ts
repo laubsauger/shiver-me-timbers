@@ -87,9 +87,20 @@ export function createRaftPieceUniforms(opts: RaftPieceUniformOptions = {}): Raf
   const variant = uniform(0).setGroup(objectGroup);
   const variantOf = opts.variantOf ?? ((): number => 0);
 
-  aabbMin.onObjectUpdate((frame: { object: THREE.Object3D | null }): void => {
+  // THE UPDATE HANGS OFF EVERY UNIFORM, NOT JUST `aabbMin` — §B70. Three runs
+  // a uniform's onObjectUpdate only if THAT uniform is referenced by the
+  // shader. The crate and sail-decal graphs read `seed`/`variant` alone, so
+  // with the hook on aabbMin only they were never updated: every crate drew
+  // as pine, and the Kon-Tiki face never switched on. A per-frame memo keeps
+  // the work at once per object however many of the six are referenced.
+  let lastObject: THREE.Object3D | null = null;
+  let lastFrame = -1;
+  const update = (frame: { object: THREE.Object3D | null; frameId: number }): void => {
     const object = frame.object;
     if (object === null || object === undefined) return;
+    if (object === lastObject && frame.frameId === lastFrame) return;
+    lastObject = object;
+    lastFrame = frame.frameId;
     const mesh = object as THREE.Mesh;
     if (mesh.geometry !== undefined) {
       const box = boundsOf(mesh.geometry);
@@ -107,7 +118,8 @@ export function createRaftPieceUniforms(opts: RaftPieceUniformOptions = {}): Raf
     const id = pieceIdOfMesh(object.name);
     seed.value = hashPieceId(id);
     variant.value = variantOf(id, aabbMax.value.x - aabbMin.value.x);
-  });
+  };
+  for (const u of [aabbMin, aabbMax, origin, downLocal, seed, variant]) u.onObjectUpdate(update);
 
   return { aabbMin, aabbMax, origin, downLocal, seed, variant };
 }

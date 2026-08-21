@@ -20,6 +20,16 @@
 import * as THREE from 'three/webgpu';
 import { ShipAssembly } from './shipAssembly';
 import { updateRig } from './rigTrim';
+import { createPieceMaterial } from './pieceMaterials';
+import { createRopes } from '../ropes';
+import { applyRiggingPlan, buildBlockDescriptors, buildRiggingPlan } from '../ropes/shipRigging';
+import { buildRungDescriptors } from '../ropes/ratlines';
+import { buildRatlinePlan } from './ratlinePlan';
+import { buildRaftRiggingPlan } from './raftRigging';
+import { ropeParams } from '../params/ropes';
+import { shipRigParams } from '../params/ship';
+import { cameraParams } from '../params/camera';
+import { trimDropScale } from './sailDynamics';
 import { oceanParams } from '../params/ocean';
 import { skyParams } from '../params/sky';
 import { sunDirection } from '../sky/sunCycle';
@@ -38,7 +48,10 @@ const num = (key: string, fallback: number): number => {
   return Number.isFinite(v) && q.has(key) ? v : fallback;
 };
 
-oceanParams.windDirection = num('wind', oceanParams.windDirection);
+// a balsa raft runs before the wind (§B73: the 1947 frames are all downwind,
+// belly leading the mast) — so the raft's default wind blows toward the bow
+const shipName = shipNameOf(q.get('ship'));
+oceanParams.windDirection = num('wind', shipName === 'raft' ? 0.25 : oceanParams.windDirection);
 oceanParams.windSpeed = num('speed', oceanParams.windSpeed);
 skyParams.timeOfDay = num('tod', skyParams.timeOfDay);
 
@@ -91,13 +104,18 @@ scene.add(sea);
 // when the preview itself is under suspicion (§B.5 taught us to isolate GPU
 // work before blaming geometry)
 const plain = q.get('plain') === '1';
-const shipName = shipNameOf(q.get('ship'));
 const blueprint = buildShipBlueprint(shipName);
+// ?only=log,sail — real materials for these kinds only, flat for the rest: the
+// bisect that found §B70 (one sail material blocking the thread for minutes)
+const only = q.get('only')?.split(',') ?? null;
+const flatMat = () => new THREE.MeshStandardMaterial({ color: 0xb08050, roughness: 0.9, side: THREE.DoubleSide });
 const assembly = new ShipAssembly(
   blueprint,
   plain
-    ? () => new THREE.MeshStandardMaterial({ color: 0xb08050, roughness: 0.9, side: THREE.DoubleSide })
-    : undefined,
+    ? flatMat
+    : only === null
+      ? undefined
+      : (kind, role) => (role === 'base' && only.includes(kind) ? createPieceMaterial(kind) : flatMat()),
 );
 assembly.group.rotation.y = num('heading', 0);
 const tint = tintForShip(shipName);
@@ -111,7 +129,29 @@ assembly.group.traverse((o) => {
 });
 scene.add(assembly.group);
 
-const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.5, 900);
+// §V12 rigging, the SAME path main.ts and raftScene.ts run (plan → compute
+// catenary solver → rope mesh; rungs and blocks ride the solved curves,
+// §V45). §B75: a harness without the ropes cannot sign off a rig — the
+// stays' sag, the sheets' lead and the braces are the rig. The raft's plan
+// eases its standing rigging (raftRigging.ts); `?ropes=0` leaves them out.
+const riggingPlan = shipName === 'raft' ? buildRaftRiggingPlan(blueprint) : buildRiggingPlan(blueprint);
+const ropes = q.get('ropes') === '0'
+  ? null
+  : createRopes({
+    maxRopes: Math.max(riggingPlan.length, 32),
+    rungs: buildRungDescriptors(buildRatlinePlan(blueprint), riggingPlan),
+    blocks: buildBlockDescriptors(riggingPlan, ropeParams.maxBlocks),
+  });
+if (ropes !== null) {
+  ropes.mesh.castShadow = true;
+  scene.add(ropes.mesh);
+}
+
+// the GAME's lens (core/app.ts: cameraParams.fov, near 0.1) — §B78: at fov 45
+// / near 0.5 the first-person hands were clipped; and the camera is IN the
+// scene, because the hands are its children and three renders no orphan's
+const camera = new THREE.PerspectiveCamera(cameraParams.fov, innerWidth / innerHeight, 0.1, 900);
+scene.add(camera);
 const SUN_YAW = Math.atan2(sd[0], sd[2]);
 const VIEWS: Record<string, { yaw: number; height: number; dist: number }> = {
   stern: { yaw: Math.PI, height: 8, dist: 34 },
@@ -142,6 +182,9 @@ const walk = q.get('fp') === '1' && shipName === 'raft'
   ? attachFirstPerson(assembly, blueprint, renderer.domElement, station ?? undefined)
   : undefined;
 
+// sails SET by default; `?sail=furled` is the bundle, `?trim=` anything between
+const sailTrim = q.get('sail') === 'furled' ? 0 : num('trim', 1);
+
 const hud = document.getElementById('hud') as HTMLDivElement;
 let frames = 0;
 let last = performance.now();
@@ -154,15 +197,26 @@ renderer.setAnimationLoop(() => {
   // off the deck the moment ?heading= is non-zero
   const nowFrame = performance.now();
   const dt = (nowFrame - prevFrame) / 1000;
-  updateRig(assembly, dt, num('trim', 1));
+  updateRig(assembly, dt, sailTrim);
   walk?.update(dt, camera);
   prevFrame = nowFrame;
+  if (ropes !== null) {
+    // furl = the normalised complement of the cloth drop — main.ts's expression
+    const drop = trimDropScale(sailTrim, shipRigParams);
+    const furl = Math.min(1, Math.max(0, (1 - drop) / Math.max(1e-3, 1 - shipRigParams.trimDropMin)));
+    assembly.group.updateMatrixWorld(true);
+    applyRiggingPlan(riggingPlan, ropes, (id) => assembly.socketWorldPosition(id), furl);
+    ropes.update();
+    renderer.compute(ropes.computeNode);
+  }
 
   renderer.render(scene, camera);
   frames++;
   const now = performance.now();
   if (now - last > 500) {
+    const focus = walk?.player.interact.focus() ?? null;
     hud.textContent =
+      (focus === null ? '' : `[E] ${focus} | `) +
       `${((frames * 1000) / (now - last)).toFixed(0)} fps | ` +
       `wind ${oceanParams.windSpeed.toFixed(1)} m/s @ ${oceanParams.windDirection.toFixed(2)} rad | ` +
       `nbias ${sun.shadow.normalBias} | ${mapSize}px @ ±${extent}m ` +

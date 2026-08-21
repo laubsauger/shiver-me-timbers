@@ -83,15 +83,30 @@ export function withSailShape(
  * passed through the head at each seam because the seam is the doubled, strong
  * part of the cloth, so on real canvas they genuinely are the same stations.
  */
-function sailTies(width: number, drop: number): THREE.BufferGeometry[] {
+/**
+ * A roband's size, from the spar it is seized round (§B83, §V66). Without a
+ * yard radius this is the galleon's authored tie (0.36 m tall, seen against a
+ * 0.2–0.3 m yard); given one, the loop is 1.4 radii tall and sits on the
+ * spar's axis — on the raft's 6 cm bamboo yard the galleon tie stood 0.26 m
+ * proud, "a row of uniform wooden pegs".
+ */
+export function sailTieSpec(yardRadius?: number): { height: number; radius: number; centreY: number } {
+  if (yardRadius === undefined || !Number.isFinite(yardRadius) || yardRadius <= 0) {
+    return { height: 0.36, radius: 0.035, centreY: 0.08 };
+  }
+  return { height: Math.min(0.36, yardRadius * 1.4), radius: Math.min(0.035, yardRadius * 0.5), centreY: yardRadius * 0.5 };
+}
+
+function sailTies(width: number, drop: number, yardRadius?: number): THREE.BufferGeometry[] {
   const ties: THREE.BufferGeometry[] = [];
   const count = Math.max(2, Math.round(shipMaterialParams.sailLacingPoints));
+  const spec = sailTieSpec(yardRadius);
   for (let i = 0; i < count; i++) {
     // the ONE definition of these stations — the cloth's seams read the same
     // function, so a roband can never end up between two seams
     const x = (sailLaceStation(i, count) - 0.5) * width;
-    const tie = new THREE.CylinderGeometry(0.035, 0.035, 0.36, 5);
-    tie.translate(x, 0.08, 0);
+    const tie = new THREE.CylinderGeometry(spec.radius, spec.radius, spec.height, 5);
+    tie.translate(x, spec.centreY, 0);
     // WEIGHT 0, and that is correct rather than an oversight: a roband is
     // seized to the YARD, which does not deform, and the head of the cloth is
     // laced to that same spar. Every term of the shape carries a (1 − v) or a
@@ -170,6 +185,21 @@ function gasketStations(width: number, bays: number, seed: number): number[] {
     stations.push(even + drift);
   }
   return stations;
+}
+
+/**
+ * Radius of the furled bundle at full furl — THE ONE OWNER (§V33), ∝ the
+ * canvas it packs: cloth area ÷ the yard it is gathered along, i.e. the
+ * drop, × a packed-cloth factor. §B75: this used to floor at 0.15 m, a
+ * galleon-scaled constant that made a 1.4 m topsail's roll as fat as a
+ * 3 m topgallant's — "a much larger sail than we unpack" (§V66). Only a
+ * degeneracy guard remains; the galleon's bundles above 2.6 m drop are
+ * unchanged to the millimetre.
+ */
+export function furlBundleRadius(width: number, drop: number): number {
+  const w = Math.max(1e-3, Number.isFinite(width) ? width : 1e-3);
+  const area = w * Math.max(0, Number.isFinite(drop) ? drop : 0);
+  return Math.max(0.02, (area / w) * 0.0575);
 }
 
 /**
@@ -359,7 +389,7 @@ function reefPoints(width: number, drop: number): THREE.BufferGeometry[] {
  * label still has three values for the HUD and the haul audio. It does not
  * change the mesh: a statically furled ship is `setSailDropScale(id, 0)`.
  */
-export function buildSailGeometry(state: SailStateId, aabb: AABB): THREE.BufferGeometry {
+export function buildSailGeometry(state: SailStateId, aabb: AABB, shape?: Record<string, number>): THREE.BufferGeometry {
   void state;
   const s = aabbSize(aabb);
   const width = s.x;
@@ -385,11 +415,11 @@ export function buildSailGeometry(state: SailStateId, aabb: AABB): THREE.BufferG
   geo.translate(0, -drop / 2, 0);
   // the bundle is authored at the size it reaches when she is fully in; the
   // shader scales its section down from there, about the head line
-  const baseRadius = Math.max(0.15, drop * 0.05) * 1.15;
+  const baseRadius = furlBundleRadius(width, drop);
   return mergeNonIndexed([
     withSailShape(geo, 1, width, drop),
     ...reefPoints(width, drop),
-    ...sailTies(width, drop),
+    ...sailTies(width, drop, shape?.yardR),
     gatheredBunt(width, drop, baseRadius, seed),
     ...gaskets(width, drop, baseRadius, seed),
   ]);

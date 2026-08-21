@@ -14,6 +14,7 @@ import { sailClothPoint, type SailClothState } from './sailShape';
 import {
   NEUTRAL_SAIL_WIND_FRAME,
   readSailWindFrame,
+  readSheetLeadSign,
   sailPhaseSeed,
   sheetLeadDirections,
   type SailWindFrame,
@@ -90,10 +91,11 @@ export class ShipAssembly {
       node.rotation.set(...def.transform.rotation);
       const geometry =
         def.kind === 'sail'
-          ? buildSailGeometry('full', def.aabb)
+          ? buildSailGeometry('full', def.aabb, def.shape)
           : buildPieceGeometry(def.kind, def.aabb, def.shape);
       const mesh = new THREE.Mesh(geometry, this.material(def.kind, 'base'));
       mesh.name = `${def.id}-mesh`;
+      if (def.shape?.sheetLeadAft !== undefined) mesh.userData.sheetLeadAft = def.shape.sheetLeadAft;
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       node.add(mesh);
@@ -358,7 +360,7 @@ export class ShipAssembly {
     // the SAME pure helper the driver pushes into the uniforms, from the same
     // matrix and the same published heading — so the clew the sheet is tied to
     // and the clew the shader draws are one point (§V.45)
-    const leads = sheetLeadDirections(m, wf.shipForwardX, wf.shipForwardZ, shipMaterialParams.sailSheetSpread);
+    const leads = sheetLeadDirections(m, wf.shipForwardX, wf.shipForwardZ, shipMaterialParams.sailSheetSpread, readSheetLeadSign(rt.mesh));
     return {
       sheetLeadPort: leads.port,
       sheetLeadStarboard: leads.starboard,

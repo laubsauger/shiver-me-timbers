@@ -75,7 +75,8 @@ export type PieceKind =
   | 'steering-oar' // shaft + blade + tiller cross-piece, pivoting between the thole-pins
   | 'crate' // 2100 dressing: crates, cans, drum (`shape.round`), dinghy, cage
   | 'splashboard' // low bow plank across the log stagger
-  | 'stern-block'; // balsa block carrying the thole-pins
+  | 'stern-block' // balsa block carrying the thole-pins
+  | 'lashing'; // hemp rope turns at a crossbeam × log crossing (rings, one piece per beam)
 
 /**
  * 'fixture' = named attach point for deck furniture / ornaments

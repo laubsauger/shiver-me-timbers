@@ -16,6 +16,12 @@ import { ShipAssembly } from '../src/ship/shipAssembly';
 import { buildRiggingPlan } from '../src/ropes/shipRigging';
 import { buildRatlinePlan } from '../src/ship/ratlinePlan';
 import { raftParams } from '../src/params/raft';
+import { shipDetailParams } from '../src/params/ship';
+import { yardAttitude } from '../src/ship/raftPartsRig';
+import { buildRaftRiggingPlan, RAFT_ROPE_MAX, RAFT_ROPE_TABLE, RAFT_STANDING_MAX, RAFT_STANDING_SLACK, raftSailKeyOf } from '../src/ship/raftRigging';
+import { sheetLeadDirections } from '../src/ship/sailFrame';
+import { furlBundleRadius, sailTieSpec } from '../src/ship/pieceGeometrySail';
+import { buildShipBlueprint } from '../src/ship/previewRaft';
 import type { PieceDef } from '../src/ship/pieceTypes';
 
 const stubFactory = () => ({ dispose(): void {} }) as unknown as Material;
@@ -73,7 +79,7 @@ describe('§T89 raft blueprint — piece contract (§V13/§V18)', () => {
 
   it('uses only the §I raft kinds plus the shared rig kinds the sail membrane needs', () => {
     const allowed = new Set(['log', 'crossbeam', 'bamboo-deck', 'guara', 'cabin-wall', 'thatch-roof',
-      'bipod-mast', 'steering-oar', 'crate', 'splashboard', 'stern-block', 'mast', 'yard', 'sail', 'pennant']);
+      'bipod-mast', 'steering-oar', 'crate', 'splashboard', 'stern-block', 'lashing', 'mast', 'yard', 'sail', 'pennant']);
     for (const p of raft) expect(allowed.has(p.kind), `${p.id}: ${p.kind}`).toBe(true);
   });
 
@@ -133,11 +139,44 @@ describe('§V82 hull: nine staggered logs with chinks', () => {
     expect(new Set(L.chinks.map((c) => c.toFixed(4))).size).toBeGreaterThan(1);
   });
 
+  it('no water between the logs: adjacent log SURFACES ≤ 8 cm apart over the decked span (§B81)', () => {
+    // WHY: the user saw "a huge gap between the long logs, water visible" —
+    // the bow taper ran the whole log. [§1 Gaps] 2–8 cm; the body is full-round
+    const span = [L.cabinAftZ, L.cabinFrontZ + 0.5] as const; // the lashed, decked midsection, to the mast step
+    for (let k = 0; k < logs.length - 1; k++) {
+      const a = logs[k];
+      const b = logs[k + 1];
+      // the log is FULL-ROUND over the span: its geometry carries the aabb
+      // radius from the stern to beyond the span's bow end (cylinders only
+      // have vertices at their ends, so this reads the trunk's extent)
+      const fullRoundTo = (lg: PieceDef): number => {
+        const g = buildPieceGeometry(lg.kind, lg.aabb, lg.shape);
+        const pos = g.attributes.position;
+        const R = lg.aabb.max[0];
+        let zMax = -Infinity;
+        for (let i = 0; i < pos.count; i++) {
+          if (Math.hypot(pos.getX(i), pos.getY(i)) < R - 1e-3) continue;
+          zMax = Math.max(zMax, pos.getZ(i) + lg.transform.position[2]);
+        }
+        return zMax;
+      };
+      expect(fullRoundTo(a), `log ${k} full-round past the span`).toBeGreaterThanOrEqual(span[1]);
+      expect(fullRoundTo(b), `log ${k + 1} full-round past the span`).toBeGreaterThanOrEqual(span[1]);
+      const axisGap = b.transform.position[0] - a.transform.position[0];
+      const surfaceGap = axisGap - a.aabb.max[0] - b.aabb.max[0];
+      expect(surfaceGap, `logs ${k}/${k + 1}`).toBeLessThanOrEqual(0.08 + 1e-6);
+      expect(surfaceGap).toBeGreaterThan(0); // they do not intersect either
+    }
+    // the taper is at the bow only: the trunk draws the full aabb radius
+    const centre = logs[Math.floor(logs.length / 2)];
+    expect(p.logTaperLength).toBeLessThan((centre.aabb.max[2] - centre.aabb.min[2]) * 0.3);
+  });
+
   it('the bow is a V that the splashboards follow; the beam matches the crossbeams', () => {
     const bowOf = (x: PieceDef) => x.transform.position[2] + x.aabb.max[2];
     const centre = logs[Math.floor(logs.length / 2)];
     expect(bowOf(logs[0])).toBeLessThan(bowOf(centre) - 1);
-    const boards = raft.filter((x) => x.kind === 'splashboard');
+    const boards = raft.filter((x) => x.kind === 'splashboard' && !x.id.endsWith('-side'));
     expect(boards).toHaveLength(2);
     for (const b of boards) {
       expect(Math.abs(b.transform.rotation[1])).toBeGreaterThan(0.2); // angled, not athwartships
@@ -146,6 +185,240 @@ describe('§V82 hull: nine staggered logs with chinks', () => {
     const beam = 2 * L.halfBeam + logs[0].aabb.max[0] * 2;
     expect(beam).toBeGreaterThan(p.crossbeamLength * 0.85);
     expect(beam).toBeLessThan(p.crossbeamLength * 1.15);
+  });
+
+  it('the splashboards are a LOW BULWARK down the fore-body, not a pair of boards at the tips (§B73)', () => {
+    // WHY: the user read the old 35 cm boards at the log tips as "a frame";
+    // [ref-sails-1947] shows them standing ~½ m over the logs and running aft
+    // along both sides. Heights are relative to the LOG, runs to the hull.
+    const outerR = Math.max(logs[0].aabb.max[1], logs[logs.length - 1].aabb.max[1]);
+    const centreLen = logs[Math.floor(logs.length / 2)].aabb.max[2] - logs[Math.floor(logs.length / 2)].aabb.min[2];
+    const sides = raft.filter((x) => x.kind === 'splashboard' && x.id.endsWith('-side'));
+    expect(sides).toHaveLength(2);
+    for (const b of sides) {
+      const top = b.transform.position[1] + b.aabb.max[1];
+      const logTop = p.logAxisY + outerR;
+      expect(top - logTop).toBeGreaterThan(outerR * 1.2); // stands well over the log, ⊥ a lip
+      expect(top - logTop).toBeLessThan(outerR * 3); // but a bulwark, ⊥ a wall
+      const run = b.aabb.max[2] - b.aabb.min[2];
+      expect(run).toBeGreaterThan(centreLen * 0.2); // runs well aft
+      expect(run).toBeLessThan(centreLen * 0.6); // the stern is bare logs [§1 Deck coverage]
+      expect(b.transform.position[2]).toBeGreaterThan(L.cabinFrontZ - 1); // the fore-body
+      // outboard of the outer log, flush against it
+      const outer = b.transform.position[0] < 0 ? logs[0] : logs[logs.length - 1];
+      expect(Math.abs(b.transform.position[0])).toBeGreaterThan(Math.abs(outer.transform.position[0]) + outer.aabb.max[0]);
+      expect(Math.abs(b.transform.position[0])).toBeLessThan(Math.abs(outer.transform.position[0]) + outer.aabb.max[0] + 0.2);
+    }
+  });
+});
+
+describe('§B73 the rig is janky — seeded, scaled by irregularity, never dead square', () => {
+  const p = raftParams;
+  const raft = buildRaftBlueprint();
+  const irr = shipDetailParams.irregularity;
+
+  it('every yard is cocked, and the main, topsail and mizzen hang differently', () => {
+    // WHY: the 1947 photo never shows a level yard; three yards cocked the
+    // same way would read as one rotated rig, not three lashed spars
+    const keys = [1, 2, 3].map((k) => yardAttitude(p, k));
+    for (const a of keys) {
+      expect(Math.abs(a.cock)).toBeGreaterThan(0);
+      expect(a.rake).toBeGreaterThan(0); // head leads the foot forward
+    }
+    expect(keys[0].cock).not.toBeCloseTo(keys[1].cock, 3);
+    expect(keys[1].cock).not.toBeCloseTo(keys[2].cock, 3);
+    const yards = raft.filter((x) => x.kind === 'yard');
+    expect(yards.length).toBeGreaterThanOrEqual(3);
+    for (const y of yards) expect(Math.abs(y.transform.rotation[2]), y.id).toBeGreaterThan(0);
+  });
+
+  it('irregularity 0 squares every yard — the one dial still zeros it (§T34)', () => {
+    shipDetailParams.irregularity = 0;
+    try {
+      const a = yardAttitude(p, 1);
+      expect(a.cock).toBeCloseTo(0, 12);
+      expect(a.rake).toBeCloseTo(0, 12);
+      expect(a.slew).toBeCloseTo(0, 12);
+      expect(a.offset).toBeCloseTo(0, 12);
+    } finally {
+      shipDetailParams.irregularity = irr;
+    }
+  });
+
+  it('the sheets lead FORWARD of the clews on every raft sail, aft on a square-rigger', () => {
+    // WHY: running before the wind the belly leads the mast; the corner-pull
+    // direction is what the §T85 cloth hauls the foot along
+    const sails = raft.filter((x) => x.kind === 'sail');
+    expect(sails.length).toBeGreaterThanOrEqual(3);
+    for (const s of sails) expect(s.shape?.sheetLeadAft, s.id).toBe(-1);
+    // identity sail frame, hull forward = +z: the lead's z is its fore-aft sense
+    const I = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const fwd = sheetLeadDirections(I, 0, 1, 0.45, -1);
+    const aft = sheetLeadDirections(I, 0, 1, 0.45, 1);
+    expect(fwd.port[2]).toBeGreaterThan(0);
+    expect(fwd.starboard[2]).toBeGreaterThan(0);
+    expect(aft.port[2]).toBeLessThan(0);
+    // the lateral spread is the hull's, whichever way the sheet runs
+    expect(fwd.port[0]).toBeCloseTo(aft.port[0], 6);
+    expect(fwd.port[1]).toBeCloseTo(aft.port[1], 6);
+    expect(fwd.port[0]).toBeLessThan(0);
+    expect(fwd.starboard[0]).toBeGreaterThan(0);
+  });
+
+  it('the standing rigging carries slack — stays and shrouds SAG; running rigging keeps the planner\'s geometry', () => {
+    // WHY: knotted fibre stays, no turnbuckles [§4 Standing rigging]; the
+    // rope solver (§V45) hangs whatever chord excess the plan gives it
+    const shared = buildRiggingPlan(raft);
+    const plan = buildRaftRiggingPlan(raft);
+    const standing = plan.filter((r) => r.role === 'stay' || r.role === 'shroud');
+    expect(standing.length).toBeGreaterThan(0);
+    for (const r of standing) expect(r.slack).toBeGreaterThanOrEqual(RAFT_STANDING_SLACK);
+    expect(RAFT_STANDING_SLACK).toBeGreaterThan(Math.max(...shared.filter((r) => r.role === 'stay').map((r) => r.slack)));
+    for (const r of plan) {
+      const src = shared.find((s) => s.role === r.role && s.socketA === r.socketA && s.socketB === r.socketB)!;
+      expect(src, `${r.role} ${r.socketA}`).toBeDefined(); // every raft rope IS a planner rope, re-dressed
+      // §B80: a rope is a ROPE, not a spar — ≤ 20 mm radius, under a third of the yard's
+      expect(r.thickness).toBeLessThanOrEqual(Math.min(src.thickness, 0.02) + 1e-9);
+      expect(r.thickness).toBeLessThan(raftParams.yardDiameter / 2 / 3);
+      expect(r.thickness).toBeLessThanOrEqual(raftParams.lashingRopeDiameter / 2 + 1e-9); // 30 mm hemp at most
+      expect(r.thickness).toBeGreaterThan(0.004);
+      if (r.role !== 'stay' && r.role !== 'shroud') expect(r.slack).toBe(src.slack);
+    }
+    expect(plan.some((r) => r.thickness < shared.find((s) => s.socketA === r.socketA && s.role === r.role)!.thickness)).toBe(true);
+  });
+
+  it('carries the Kon-Tiki\'s ropes and not a square-rigger\'s: per-sail table, < 25 in all, every rope with a purpose (§B79)', () => {
+    // WHY: the shared planner inherited 69 ropes onto a raft with three
+    // sails — 36 of them buntlines — "on the tiny back sail that's an insane
+    // amount". The table is the reference's [§4 Controls, Standing rigging].
+    const plan = buildRaftRiggingPlan(raft);
+    expect(plan.length).toBeLessThan(25);
+    expect(plan.length).toBeLessThanOrEqual(RAFT_ROPE_MAX);
+    const perSail = new Map<string, number>();
+    let standing = 0;
+    for (const r of plan) {
+      expect(['stay', 'shroud', 'halyard', 'sheet', 'brace', 'lift'], `${r.role} has no place on the raft`).toContain(r.role);
+      if (r.role === 'stay' || r.role === 'shroud') {
+        standing++;
+        continue;
+      }
+      const key = raftSailKeyOf(r.socketA) ?? raftSailKeyOf(r.socketB);
+      expect(key, `${r.role} ${r.socketA} → ${r.socketB} belongs to no sail`).not.toBeNull();
+      const k = `${key}|${r.role}`;
+      perSail.set(k, (perSail.get(k) ?? 0) + 1);
+    }
+    expect(standing).toBeGreaterThanOrEqual(3); // side guys + the aft line, at least
+    expect(standing).toBeLessThanOrEqual(RAFT_STANDING_MAX);
+    for (const [k, n] of perSail) {
+      const [key, role] = k.split('|') as [keyof typeof RAFT_ROPE_TABLE, keyof (typeof RAFT_ROPE_TABLE)['main-lower']];
+      expect(n, k).toBeLessThanOrEqual(RAFT_ROPE_TABLE[key][role] ?? 0);
+    }
+    // the sails are sheeted — the one control a downwind raft cannot do without
+    expect(perSail.get('main-lower|sheet')).toBe(2);
+    expect(perSail.get('main-upper|sheet')).toBe(2);
+    expect(perSail.get('mizzen-lower|sheet') ?? 0).toBeGreaterThanOrEqual(1);
+    // and the topsail + mizzen carry NO braces: set flying / on a sprit
+    expect(perSail.get('main-upper|brace') ?? 0).toBe(0);
+    expect(perSail.get('mizzen-lower|brace') ?? 0).toBe(0);
+    // no two ropes are the same line
+    expect(new Set(plan.map((r) => `${r.role}|${r.socketA}|${r.socketB}`)).size).toBe(plan.length);
+  });
+
+  it('the bipod crossing is wrapped, and each leg has its own lean', () => {
+    const wrap = raft.find((x) => x.id === 'lashing-crossing')!;
+    expect(wrap).toBeDefined();
+    expect(wrap.kind).toBe('lashing');
+    const legs = raft.filter((x) => x.kind === 'bipod-mast' && x.id.startsWith('bipod-leg'));
+    expect(legs).toHaveLength(2);
+    expect(wrap.transform.position[1]).toBeCloseTo(legs[0].transform.position[1] + p.mastHeight * Math.cos(p.mastRakeAft), 6);
+    expect(legs[0].transform.rotation[0]).not.toBeCloseTo(legs[1].transform.rotation[0], 4); // crooked, not an A
+  });
+
+  it('the bipod is RAKED AFT as one, crossing, pole and wrap landing on the same point (§B75)', () => {
+    // WHY: [ref-sails-1947] the mast leans aft; a crossing wrap authored at
+    // the vertical crossing would float forward of the raked legs
+    expect(p.mastRakeAft).toBeGreaterThan(0.05);
+    expect(p.mastRakeAft).toBeLessThan(0.2);
+    const legs = raft.filter((x) => x.id.startsWith('bipod-leg'));
+    const pole = raft.find((x) => x.id === 'mast-main')!;
+    const wrap = raft.find((x) => x.id === 'lashing-crossing')!;
+    // every deck-stepped member leans aft by the rake (± its own jitter)
+    for (const m of [...legs, pole]) {
+      expect(m.transform.rotation[0], m.id).toBeLessThan(-p.mastRakeAft + p.legLeanJitter + p.topPoleTilt + 1e-9);
+      expect(m.transform.rotation[0], m.id).toBeGreaterThan(-p.mastRakeAft - p.legLeanJitter - p.topPoleTilt - 1e-9);
+    }
+    // the wrap sits AFT of the mast step by the rake's throw
+    expect(wrap.transform.position[2]).toBeLessThan(legs[0].transform.position[2] - 0.5);
+    expect(wrap.transform.position[2]).toBeCloseTo(legs[0].transform.position[2] - p.mastHeight * Math.sin(p.mastRakeAft), 6);
+    // and the geometry agrees: the leg tips (minus their overlap) meet the wrap
+    const asm = new ShipAssembly(raft, stubFactory);
+    for (const leg of legs) {
+      const box = worldBox(asm, leg.id);
+      expect(box.max.y).toBeGreaterThan(wrap.transform.position[1]);
+      expect(box.min.z).toBeLessThan(wrap.transform.position[2] + 0.3);
+    }
+  });
+
+  it('the rope ladder hugs the starboard leg: stringers ∥ the leg, rungs ⊥ the leg and ⊥ its outward normal (§B75/§B83)', () => {
+    const ladder = raft.find((x) => x.id === 'mast-ladder')!;
+    const leg = raft.find((x) => x.id === 'bipod-leg-starboard')!;
+    expect(ladder.parent).toBe(leg.id); // the leg's frame — it follows the lean AND the rake
+    const legR = leg.aabb.max[0];
+    const rot = new THREE.Euler(...(ladder.transform.rotation ?? [0, 0, 0]));
+    // the ladder() geometry: stringers along local +y, rungs along local +x
+    const stringer = new THREE.Vector3(0, 1, 0).applyEuler(rot);
+    const rung = new THREE.Vector3(1, 0, 0).applyEuler(rot);
+    const legAxis = new THREE.Vector3(0, 1, 0); // in the leg's own frame
+    const outward = new THREE.Vector3(1, 0, 0); // starboard leg: outboard = +x
+    expect(Math.acos(Math.abs(stringer.dot(legAxis)))).toBeLessThan((5 * Math.PI) / 180);
+    expect(Math.abs(rung.dot(legAxis))).toBeLessThan(0.05);
+    expect(Math.abs(rung.dot(outward))).toBeLessThan(0.05);
+    const w = ladder.aabb.max[0] - ladder.aabb.min[0];
+    const h = ladder.aabb.max[1] - ladder.aabb.min[1];
+    expect(h).toBeGreaterThan(w * 5); // long along the leg
+    // centred fore-aft on the leg, a hand off its outboard face
+    expect(Math.abs(ladder.transform.position[2])).toBeLessThan(legR);
+    const standoff = ladder.transform.position[0] - legR;
+    expect(standoff).toBeGreaterThan(0.03);
+    expect(standoff).toBeLessThan(0.2);
+  });
+
+  it('the robands are loops round THIS yard, not pegs standing on it (§B83, §V66)', () => {
+    // WHY: the galleon's 0.36 m tie on a 6 cm bamboo yard stood 0.26 m proud —
+    // "a row of uniform wooden pegs" in the top view
+    for (const s of raft.filter((x) => x.kind === 'sail')) {
+      const yard = raft.find((y) => y.id === s.parent)!;
+      const yr = yard.aabb.max[1];
+      expect(s.shape?.yardR, s.id).toBeCloseTo(yr, 9);
+      const tie = sailTieSpec(s.shape!.yardR);
+      expect(tie.height).toBeLessThanOrEqual(yr * 1.5);
+      expect(tie.centreY + tie.height / 2).toBeLessThanOrEqual(yr * 1.5); // never above the spar's top
+      expect(tie.radius).toBeLessThanOrEqual(yr);
+    }
+    // and the galleon's tie is the authored one, untouched
+    expect(sailTieSpec(undefined)).toEqual({ height: 0.36, radius: 0.035, centreY: 0.08 });
+  });
+});
+
+describe('§B75 the furled bundle is the canvas it packs (§V66)', () => {
+  it('bundle radius ∝ area ÷ yard length on every sail of every ship — no floor fattening the small ones', () => {
+    // WHY: a fixed 0.15 m floor made a 1.4 m topsail's roll as fat as a 3 m
+    // topgallant's, "suggesting a much larger sail than we unpack"
+    const ratios: number[] = [];
+    for (const ship of ['galleon', 'brigantine', 'raft'] as const) {
+      for (const s of buildShipBlueprint(ship).filter((x) => x.kind === 'sail')) {
+        const width = s.aabb.max[0] - s.aabb.min[0];
+        const drop = -s.aabb.min[1];
+        const r = furlBundleRadius(width, drop);
+        ratios.push(r / ((width * drop) / width));
+        expect(r).toBeLessThan(drop * 0.1); // never a roll thicker than a tenth of its own drop
+      }
+    }
+    expect(ratios.length).toBeGreaterThan(10);
+    const k = ratios[0];
+    for (const x of ratios) expect(x).toBeCloseTo(k, 9);
+    // the galleon's course is where the constant was fitted: unchanged
+    expect(furlBundleRadius(12.17, 7.56)).toBeCloseTo(Math.max(0.15, 7.56 * 0.05) * 1.15, 3);
   });
 });
 
@@ -222,15 +495,18 @@ describe('§V82 deck, cabin, mast, guaras, steering', () => {
     const crossingY = crossing.transform.position[1] + crossing.aabb.min[1];
     expect(crossingY - L.logTopY).toBeGreaterThanOrEqual(8.5);
     expect(crossingY - L.logTopY).toBeLessThanOrEqual(10);
+    // the crossing's WORLD height is the pole length foreshortened by the
+    // aft rake (§B75) — the reference band is the pole, the meeting point is raked
+    const rakedY = L.logTopY + (crossingY - L.logTopY) * Math.cos(p.mastRakeAft);
     for (const [i, b] of tops.entries()) {
-      expect(b.max.y).toBeGreaterThanOrEqual(crossingY);
+      expect(b.max.y).toBeGreaterThanOrEqual(rakedY);
       // the leg's own tip (local +y end) lands at the centreline, at the crossing
       const leg = legs[i];
       const tip = new THREE.Vector3(0, leg.aabb.max[1] - p.mastCrossingOverlap, 0)
         .applyEuler(new THREE.Euler(...leg.transform.rotation))
         .add(new THREE.Vector3(...leg.transform.position));
       expect(Math.abs(tip.x), `${leg.id} leans INWARD`).toBeLessThan(0.2);
-      expect(tip.y).toBeCloseTo(crossingY, 1);
+      expect(tip.y).toBeCloseTo(rakedY, 1);
     }
     // platform + ladder are on the mast
     expect(raft.find((x) => x.id === 'lookout-platform')?.parent).toBe('mast-main');
@@ -283,6 +559,39 @@ describe('§V82 deck, cabin, mast, guaras, steering', () => {
     }
     expect(fwd).toBeGreaterThanOrEqual(2);
     expect(aft).toBeGreaterThanOrEqual(2);
+  });
+
+  it('every guara stands clear of the deck at its rest pose — a plank nobody can see cannot be hauled (§V84)', () => {
+    // WHY: §B70 — measured from the log bottoms the tops sat UNDER the mats;
+    // the crew's steering gear was invisible from every station
+    for (const g of raft.filter((x) => x.kind === 'guara')) {
+      expect(g.transform.position[1] + g.aabb.max[1], `${g.id} top`).toBeGreaterThan(L.deckY + 0.3);
+    }
+  });
+
+  it('lashes every crossbeam to every log it crosses: one ring set per crossing, none in mid-air', () => {
+    const beams = raft.filter((x) => x.kind === 'crossbeam');
+    const lashings = raft.filter((x) => x.kind === 'lashing' && x.id !== 'lashing-crossing');
+    const logs = raft.filter((x) => x.kind === 'log' && x.id.startsWith('log-'));
+    expect(lashings).toHaveLength(beams.length);
+    for (const l of lashings) {
+      const z = l.transform.position[2];
+      const beam = beams.find((b) => Math.abs(b.transform.position[2] - z) < 1e-6)!;
+      expect(beam, `${l.id} sits on a beam`).toBeDefined();
+      expect(l.transform.position[1]).toBeCloseTo(beam.transform.position[1], 6);
+      // the crossings are exactly the OUTER two logs each side under this
+      // beam (the inner five are under the mats), in ship x
+      const half = (logs.length - 1) / 2;
+      const under = logs.filter((lg, k) => Math.abs(k - half) >= half - 1
+        && z > lg.transform.position[2] + lg.aabb.min[2] && z < lg.transform.position[2] + lg.aabb.max[2]);
+      expect(under.length).toBeGreaterThanOrEqual(2);
+      const n = l.shape!.n;
+      expect(n).toBe(under.length);
+      for (let i = 0; i < n; i++) {
+        const x = l.shape![`x${i}`];
+        expect(under.some((lg) => Math.abs(lg.transform.position[0] - x) < 1e-6), `${l.id} ring ${i} on a log`).toBe(true);
+      }
+    }
   });
 
   it('the oar pivots between the thole-pins above the block, which spans the 3 projecting logs', () => {

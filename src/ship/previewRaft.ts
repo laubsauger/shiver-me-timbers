@@ -103,6 +103,15 @@ export function attachFirstPerson(
     const l = new THREE.Vector3(w[0], w[1], w[2]).applyQuaternion(q.clone().invert());
     spawn = [l.x, l.y, l.z];
   }
+  // stations resolve LIVE through the assembly (§V71) — main-raft's resolver;
+  // without it `interact` is inert and the ladder/lookout cannot be tested (§B78)
+  const socketWorld = (id: string): [number, number, number] | null => {
+    try {
+      return assembly.socketWorldPosition(id);
+    } catch {
+      return null;
+    }
+  };
   const player = createPlayer({
     sim,
     shipPose: () => ({ position: [0, 0, 0], quaternion: [q.x, q.y, q.z, q.w] }),
@@ -112,6 +121,7 @@ export function attachFirstPerson(
     spawn,
     canvas,
     hands: createHands(),
+    socketWorld,
   });
   player.setActive(true);
   let hung = false;

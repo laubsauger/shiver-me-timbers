@@ -14,11 +14,32 @@
  * them, which is what "ratlines 0" needs.
  */
 import type { RaftParams } from '../params/raft';
-import type { PieceDef, SailStateDef, SocketDef } from './pieceTypes';
+import type { PieceDef, SailStateDef, SocketDef, Vec3 } from './pieceTypes';
 import { mkPiece } from './blueprintParts';
 import { SAIL_ANCHOR_UV } from './sailShape';
-import { FLAG_STYLE_JOLLY } from './flagMaterial';
+import { FLAG_STYLE_NORWAY } from './flagMaterial';
 import type { RaftLayout } from './raftPartsLayout';
+import { shipDetailParams } from '../params/ship';
+import { vhash, vjitter } from './variation';
+
+/**
+ * §B73 — a yard on this raft is never square to its mast. Seeded off the
+ * yard's own key so the main, topsail and mizzen each hang differently, and
+ * scaled by the ship-wide `irregularity` dial (§T34) so one knob still zeros
+ * it. Cock is never zero at irregularity 1: magnitude ½..1 of the bound, sign
+ * by hash — a yard that happens to hang dead level is the one thing the 1947
+ * photo never shows.
+ */
+export function yardAttitude(p: RaftParams, key: number, sprit = 0): { cock: number; rake: number; slew: number; offset: number } {
+  const irr = Math.max(0, shipDetailParams.irregularity);
+  const sign = vhash(key, 2) < 0.5 ? -1 : 1;
+  return {
+    cock: (sprit + p.yardCock * (0.5 + 0.5 * vhash(key, 1)) * sign) * irr,
+    rake: p.yardRake * (0.5 + 0.5 * vhash(key, 3)) * irr,
+    slew: vjitter(p.yardSlew, key, 4) * irr,
+    offset: vjitter(p.yardOffset, key, 5) * irr,
+  };
+}
 
 const SAIL_STATES: SailStateDef[] = [{ id: 'furled' }, { id: 'reefed' }, { id: 'full' }];
 
@@ -33,17 +54,22 @@ function yardAndSail(
   mastR: number,
   sailWidth: number,
   sailDrop: number,
+  key: number,
+  sprit = 0,
 ): PieceDef[] {
   const yardId = `yard-${mast}-${level}`;
   const sailId = `sail-${mast}-${level}`;
+  const att = yardAttitude(p, key, sprit);
   const ends: SocketDef[] = [
     { id: `anchor-${yardId}-port`, type: 'rope-anchor', position: [-len / 2, 0, 0] },
     { id: `anchor-${yardId}-starboard`, type: 'rope-anchor', position: [len / 2, 0, 0] },
   ];
-  const yard = mkPiece(yardId, 'yard', [0, y, mastR + yr + p.yardMastClearance], {
+  // rotation about +x by +rake tips the hanging canvas (−y) aft, i.e. the
+  // head leads the foot forward; +z cock lifts the STARBOARD arm
+  const yard = mkPiece(yardId, 'yard', [att.offset, y, mastR + yr + p.yardMastClearance], {
     min: [-len / 2, -yr, -yr],
     max: [len / 2, yr, yr],
-  }, { parent: `mast-${mast}`, sockets: ends, shape: { doubled: 1 } });
+  }, { parent: `mast-${mast}`, sockets: ends, shape: { doubled: 1 }, rotation: [att.rake, att.slew, att.cock] });
   const clothSockets: SocketDef[] = Object.entries(SAIL_ANCHOR_UV).map(([suffix, [u, v]]) => ({
     id: `anchor-${sailId}-${suffix}`,
     type: 'rope-anchor' as const,
@@ -53,7 +79,15 @@ function yardAndSail(
   const sail = mkPiece(sailId, 'sail', [0, -yr, p.sailYardOffset], {
     min: [-sailWidth / 2, -sailDrop, -0.5],
     max: [sailWidth / 2, 0.15, 0.5],
-  }, { parent: yardId, sockets: clothSockets, sailStates: SAIL_STATES.map((s) => ({ ...s })) });
+  }, {
+    parent: yardId,
+    sockets: clothSockets,
+    sailStates: SAIL_STATES.map((s) => ({ ...s })),
+    // §B73 [ref-sails-1947]: running before the wind, the foot is hauled
+    // FORWARD of the mast — the belly leads. sailFrame.readSheetLeadSign
+    // §B83: the robands are sized to THIS yard (pieceGeometrySail.sailTieSpec)
+    shape: { sheetLeadAft: -1, yardR: yr },
+  });
   return [yard, sail];
 }
 
@@ -63,6 +97,11 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
   const halfSpan = p.mastLegSpacing / 2;
   const lean = Math.atan2(halfSpan, p.mastHeight);
   const legLen = Math.hypot(halfSpan, p.mastHeight) + p.mastCrossingOverlap;
+  // §B75: the whole bipod is RAKED AFT. Rotation about +x by +θ tips a +y pole
+  // toward +z (the bow), so aft is −rake; every piece stepped at deck level
+  // (legs, topsail pole) carries it and the crossing lands at `crossingAt`
+  const rake = Math.max(0, p.mastRakeAft);
+  const crossingAt: Vec3 = [0, L.logTopY + p.mastHeight * Math.cos(rake), L.mastZ - p.mastHeight * Math.sin(rake)];
   // two legs stepped through the deck onto the logs, leaning to the crossing
   for (const [side, sign] of [['port', -1], ['starboard', 1]] as const) {
     const sockets: SocketDef[] = side === 'starboard'
@@ -74,19 +113,29 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
         max: [legR, legLen, legR],
       }, {
         // rotation about z by +θ tips a +y pole toward −x, so the PORT leg
-        // (sign −1) takes −lean to reach the centreline
-        rotation: [0, 0, sign * lean],
+        // (sign −1) takes −lean to reach the centreline; each leg also has its
+        // own fore-aft lean (§B73: the bipod is two crooked poles, not an A)
+        rotation: [-rake + vjitter(p.legLeanJitter, sign, 7) * Math.max(0, shipDetailParams.irregularity), 0, sign * lean],
         sockets,
         shape: { taper: 0.8, sides: 10 },
       }),
     );
   }
-  // rope ladder with wooden rungs up the starboard leg [§4 Masthead]
+  // rope ladder with wooden rungs up the starboard leg [§4 Masthead] — hung
+  // on the leg's outboard face, a hand off the pole, in the leg's own frame so
+  // its stringers run with the lean and the rungs lie square to it (§B75/§B83)
   out.push(
-    mkPiece('mast-ladder', 'bipod-mast', [0.3, 0.4, 0], {
+    mkPiece('mast-ladder', 'bipod-mast', [legR + p.ladderStandoff, 0.4, 0], {
       min: [-p.ladderWidth / 2, 0, -0.04],
       max: [p.ladderWidth / 2, legLen - p.mastCrossingOverlap - 1.2, 0.04],
-    }, { parent: 'bipod-leg-starboard', shape: { ladder: 1, rungPitch: p.ladderRungPitch } }),
+    }, {
+      parent: 'bipod-leg-starboard',
+      // the ladder() geometry lays its rungs along local x; a quarter turn
+      // about the leg axis hangs it on the leg's OUTBOARD face, rungs running
+      // fore-aft — ⊥ the leg and ⊥ the leg's outward normal (§B83)
+      rotation: [0, Math.PI / 2, 0],
+      shape: { ladder: 1, rungPitch: p.ladderRungPitch },
+    }),
   );
 
   // the topsail pole = the rig's `mast-main` (see header). Stepped at deck
@@ -94,11 +143,16 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
   const poleR = legR * 0.8;
   const crossing = p.mastHeight;
   const top = crossing + p.topPoleHeight;
+  const irr = Math.max(0, shipDetailParams.irregularity);
   out.push(
     mkPiece('mast-main', 'mast', [0, L.logTopY, L.mastZ], {
       min: [-poleR, crossing, -poleR],
       max: [poleR, top, poleR],
     }, {
+      // raked with the legs, and lashed askew above the crossing (§B73);
+      // small, because the piece pivots at deck level and the crossing
+      // bundle has to hide the offset
+      rotation: [-rake + vjitter(p.topPoleTilt, 11) * irr, 0, vjitter(p.topPoleTilt, 12) * irr],
       sockets: [
         { id: 'anchor-masthead-main', type: 'rope-anchor', position: [0, top, 0] },
         // stays and guys are made fast at the CROSSING, not the pole tip
@@ -118,13 +172,25 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
       sockets: [{ id: 'station-lookout', type: 'fixture', position: [0, p.platformThickness, 0] }],
     }),
   );
+  // the crossing itself: a rope bundle wrapping both legs where they meet
+  // [§4 Mast "lashed crosswise at top"], the wrap axis vertical
+  const wrapR = legR * 1.5;
+  out.push(
+    mkPiece('lashing-crossing', 'lashing', crossingAt, {
+      min: [-p.crossingWrapWidth / 2, -wrapR - 0.02, -wrapR - 0.02],
+      max: [p.crossingWrapWidth / 2, wrapR + 0.02, wrapR + 0.02],
+    }, {
+      rotation: [-rake, 0, Math.PI / 2],
+      shape: { n: 1, x0: 0, rope: p.lashingRopeDiameter, turns: p.crossingWrapWidth / p.lashingRopeDiameter, beamR: wrapR, ring: 0 },
+    }),
+  );
   const yr = p.yardDiameter / 2;
   // main yard hoisted below the crossing; the legs are ~legR apart there so
   // the yard clears them on the leg radius
-  out.push(...yardAndSail(p, 'main', 'lower', p.mainYardHeight, p.yardLength, yr, legR, p.mainSailWidth, p.mainSailDrop));
+  out.push(...yardAndSail(p, 'main', 'lower', p.mainYardHeight, p.yardLength, yr, legR, p.mainSailWidth, p.mainSailDrop, 1));
   // small topsail on the pole above the crossing [§4 Topsail]
   out.push(...yardAndSail(p, 'main', 'upper', crossing + p.topsailHeightAboveCrossing,
-    p.topsailYardLength, yr * 0.6, poleR, p.topsailWidth, p.topsailDrop));
+    p.topsailYardLength, yr * 0.6, poleR, p.topsailWidth, p.topsailDrop, 2));
   return out;
 }
 
@@ -141,8 +207,11 @@ export function buildMizzenAndFlag(p: RaftParams, L: RaftLayout): PieceDef[] {
     }),
   );
   const yr = p.yardDiameter * 0.3;
-  out.push(...yardAndSail(p, 'mizzen', 'lower', p.mizzenHeight - 0.35, p.mizzenYardLength, yr, mr,
-    p.mizzenSailWidth, p.mizzenSailDrop));
+  // the mizzen's spar is a SPRIT (§B73 [ref-sails-1947]): hoisted to the
+  // pole head and stood up at `mizzenSpritAngle`, the small sail hanging
+  // loose off it — in the photo it flies ABOVE the cabin ridge, not behind it
+  out.push(...yardAndSail(p, 'mizzen', 'lower', p.mizzenHeight - 0.25, p.mizzenYardLength, yr, mr,
+    p.mizzenSailWidth, p.mizzenSailDrop, 3, p.mizzenSpritAngle));
 
   const fr = p.flagpoleDiameter / 2;
   out.push(
@@ -157,7 +226,7 @@ export function buildMizzenAndFlag(p: RaftParams, L: RaftLayout): PieceDef[] {
       max: [p.flagFly, 0.1, 0.1],
     }, {
       parent: 'flagpole',
-      shape: { fly: p.flagFly, hoist: p.flagHoist, style: FLAG_STYLE_JOLLY, taper: 0, headY: 0, staff: 0 },
+      shape: { fly: p.flagFly, hoist: p.flagHoist, style: FLAG_STYLE_NORWAY, taper: 0, headY: 0, staff: 0 },
     }),
   );
   return out;

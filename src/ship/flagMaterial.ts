@@ -36,6 +36,7 @@ import {
   vec2,
   vec3,
 } from 'three/tsl';
+import { bandLimitedEdge } from './bandLimit';
 import { fbm2, hash2 } from '../terrain/noise';
 import { shipFlagParams, type ShipFlagParams } from '../params/ship';
 import { createFlagWindUniforms } from './flagDriver';
@@ -49,6 +50,8 @@ const TAU = Math.PI * 2;
 /** style ids carried in the geometry's `flagShape.w` (see pieceGeometryRig) */
 export const FLAG_STYLE_JOLLY = 0;
 export const FLAG_STYLE_PENNANT = 1;
+/** the raft's ensign (§T89 [§4 Mizzen]): red field, white-bordered blue Nordic cross */
+export const FLAG_STYLE_NORWAY = 2;
 
 export function createFlagClothMaterial(
   p: ShipFlagParams = shipFlagParams,
@@ -122,9 +125,13 @@ export function createFlagClothMaterial(
     // flagDriver.ts and wrapped there (§B "FLAG BUG AGAIN" — third time a flag
     // has had a rate/reference defect, and the first that was not a saturated
     // reference).
+    // §B76: a crest sits where ωt − k·u is constant, so it moves toward +u —
+    // FROM the hoist TO the fly. With `+ spatial` (the old form) the wave ran
+    // in from the free end and the flag read as "starting at the tip".
+    // Mirror: flagDynamics.flagRipplePhase / flagRippleGrow.
     const grow = u.mul(0.4).add(u.mul(u).mul(0.6));
     const spatial = u.mul(uWaveCount.mul(TAU));
-    const carrier = uWavePhase.add(phase).add(spatial);
+    const carrier = uWavePhase.add(phase).sub(spatial);
     const wave = sin(carrier.add(v.mul(1.7)));
     // the snap: a faster, shorter crack that only appears once it is really
     // blowing — below half strength there is nothing to crack. Its own
@@ -132,7 +139,7 @@ export function createFlagClothMaterial(
     // still scaled by the same ratio, exactly as the old `carrier.mul(2.3)` did
     const cracking = smoothstep(float(0.45), float(0.95), uStrength);
     const crack = sin(
-      uCrackPhase.add(phase.mul(1.3)).add(spatial.mul(FLAG_CRACK_RATIO)),
+      uCrackPhase.add(phase.mul(1.3)).sub(spatial.mul(FLAG_CRACK_RATIO)),
     )
       .mul(uSnap)
       .mul(cracking);
@@ -169,7 +176,18 @@ export function createFlagClothMaterial(
   const jollyColor = mix(uField, uBadge, badge.mul(isJolly));
   // coachwhip pennant: a bold two-band streamer, readable at masthead range
   const pennantColor = mix(uPennant, uStripe, smoothstep(float(0.52), float(0.6), v0));
-  const pattern = mix(pennantColor, jollyColor, isJolly);
+  // Norwegian ensign: Nordic cross, hoist-side arm at 6/22 of the fly, the
+  // cross 4/22 wide with the blue 2/22 inside it — the flag's own proportions
+  // @band-limited-elsewhere: `style` is a per-vertex constant, not a coordinate
+  const isNorway = smoothstep(float(1.4), float(1.6), style);
+  const cx = u0.sub(8 / 22).abs();
+  const cy = v0.sub(0.5).abs();
+  const nd = cx.min(cy); // distance to the nearer arm's centreline
+  // the cross edges are steps in uv: widened to the pixel footprint (§V.48)
+  const white = bandLimitedEdge(nd.sub(2 / 22).max(0), u0.add(v0), float(0.3 / 22)).oneMinus();
+  const blue = bandLimitedEdge(nd.sub(1 / 22).max(0), u0.add(v0), float(0.3 / 22)).oneMinus();
+  const norwayColor = mix(mix(vec3(0.52, 0.02, 0.06), vec3(0.9, 0.88, 0.84), white), vec3(0.0, 0.06, 0.28), blue);
+  const pattern = mix(mix(pennantColor, jollyColor, isJolly), norwayColor, isNorway);
 
   // weave + weathering: a flag lives at the masthead and is the most beaten
   // piece of cloth on the ship, so the fly end is faded and thin
