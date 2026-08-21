@@ -307,6 +307,129 @@ export interface SierraParams {
   bandHighTint: number;
   bandCrownTint: number;
   bandStrength: number;
+
+  // ── T112e vegetation (vegetation/sierraScatter.ts, terrain/groundCoverMesh.ts) ──
+  /** candidate grid spacing (m): one blue-noise cell = one chance per species */
+  vegSampleSpacing: number;
+  /** rounds of footprint competition, run once across all three species */
+  vegCompetitionRounds: number;
+  /** curvature (1/m) at which the concave/convex species preference saturates */
+  vegCurvatureRef: number;
+  /** ramp width of every moisture threshold, in 0..1 channel units */
+  vegMoistureFeather: number;
+  /** clump noise: fraction of the field that is bare ground between stands */
+  vegClumpBare: number;
+  /** the sun-facing downhill azimuth (rad, atan2(z, x)) both aspect rules read */
+  vegSunAspect: number;
+  /** pine: instances/m² at full suitability, and the moisture floor it needs */
+  pineDensity: number;
+  pineMoistureMin: number;
+  /** juniper: instances/m² (scaled by juniperFraction), moisture ceiling, windward weight 0..1 */
+  juniperDensity: number;
+  juniperMoistureMax: number;
+  juniperWindWeight: number;
+  /** juniper crown radius (m) at scale 1 — the competition's currency */
+  juniperFootprint: number;
+  /** juniper geometry: height (m), crown spread + bole radius + lean (× height), limbs */
+  juniperHeight: number;
+  juniperSpread: number;
+  juniperBoleRadius: number;
+  juniperLean: number;
+  juniperLimbs: number;
+  /** juniper leaf cushions: radius (× spread) and vertical squash */
+  juniperLobeRadius: number;
+  juniperLobeSquash: number;
+  /** manzanita: instances/m², moisture ceiling, sky-exposure exponent, aspect weight 0..1 */
+  manzanitaDensity: number;
+  manzanitaMoistureMax: number;
+  manzanitaSkyExponent: number;
+  manzanitaAspectWeight: number;
+  /** a shrub holds steeper ground than a tree (rise/run) */
+  manzanitaSlopeLimit: number;
+  /** the fork corridor: half-width (m) of the thicket and the density it ADDS 0..1 */
+  manzanitaForkRange: number;
+  manzanitaForkBoost: number;
+  manzanitaFootprint: number;
+  /** manzanita geometry: height (m), spread + stem radius (× height), stems, lobes */
+  manzanitaHeight: number;
+  manzanitaSpread: number;
+  manzanitaStems: number;
+  manzanitaStemRadius: number;
+  manzanitaLobeRadius: number;
+  manzanitaLobeSquash: number;
+  manzanitaLeafColor: number;
+  manzanitaStemColor: number;
+  /** foliage lighting: cluster-normal blend 0..1 (baked), wrap width + strength */
+  foliageClusterBlend: number;
+  foliageWrap: number;
+  foliageWrapStrength: number;
+  /** back transmission: strength, tightness of the view lobe, and the colour through a leaf */
+  foliageTransmission: number;
+  foliageTransmissionPower: number;
+  foliageTransmissionColor: number;
+  /** understory: sample spacing (m), slope ceiling (rise/run), densities (per m²) */
+  understorySpacing: number;
+  understorySlopeLimit: number;
+  understoryGrassDensity: number;
+  understoryDeadfallDensity: number;
+  understoryConeDensity: number;
+  /** understory geometry: bunchgrass height (m), fallen limb length + radius (m), cone height (m) */
+  bunchgrassHeight: number;
+  deadfallLength: number;
+  deadfallRadius: number;
+  coneHeight: number;
+  // ── T112f rocks (island/rocks.ts) ────────────────────────────────────────
+  /** talus: debris thickness (m) a cell must carry before it can shed a block */
+  talusDebrisMin: number;
+  /** talus: thickness (m) at which the apron is fully populated — density ∝ debris */
+  talusDebrisFull: number;
+  /** talus: minimum spacing between blocks (m) */
+  talusSpacing: number;
+  /**
+   * Talus SORTING: block size (m) at the apron HEAD (the source cliff) and at
+   * its FOOT. A talus cone sorts downslope — the fines stay under the cliff,
+   * the big blocks bounce to the toe — so the size is a function of how far
+   * BELOW the apron's own crest the block sits, not of the seed.
+   */
+  talusHeadScale: number;
+  talusFootScale: number;
+  /** talus: ± fraction of seeded size jitter on top of the sort */
+  talusSizeJitter: number;
+  /** talus: how deep a block beds into the apron (fraction of its half-height) */
+  talusEmbed: number;
+  /** talus: its own geometry pool — small blocks, many of them, so one detail level down */
+  talusGeoVariants: number;
+  /** outcrop slabs per metre of footprint radius */
+  outcropsPerRadius: number;
+  /** outcrop: convex curvature (1/m) and joint density (0..1) a cell must exceed */
+  outcropCurvature: number;
+  outcropJoint: number;
+  /** outcrop: debris (m) ceiling — a sheeting slab is bare bedrock, not a buried one */
+  outcropDebrisMax: number;
+  /** outcrop: minimum spacing (m), size range (m) */
+  outcropSpacing: number;
+  outcropMinScale: number;
+  outcropMaxScale: number;
+  /** outcrop: vertical squash (a slab is a plate) and its bedding-tilt cap (rad) */
+  outcropSquash: number;
+  outcropTiltMax: number;
+  /** outcrop: how deep the slab beds into the bedrock */
+  outcropEmbed: number;
+  /** cirque wall blocks: how many per island, minimum spacing (m), size range (m) */
+  cirqueBlockCount: number;
+  cirqueBlockSpacing: number;
+  cirqueBlockMinScale: number;
+  cirqueBlockMaxScale: number;
+  /** cirque wall foot: greatest height above the bowl water (m) a block may stand at */
+  cirqueBlockMaxHeight: number;
+  /** the wall it must stand under: this rise (m) within this run (m) straight uphill */
+  cirqueWallRise: number;
+  cirqueWallRun: number;
+  /** INSIDE the bowl: how strongly uphill must point AWAY from the island centre (cos) */
+  cirqueBowlOutward: number;
+  /** every rock keeps this clear (m) of the walk corridor masks */
+  rockPathClearance: number;
+
 }
 
 export const sierraParams: SierraParams = registerParams(
@@ -515,6 +638,92 @@ export const sierraParams: SierraParams = registerParams(
     bandHighTint: 0xc9d0d8,
     bandCrownTint: 0xe8e4dc,
     bandStrength: 0.5,
+
+    // ── T112e vegetation ──
+    vegSampleSpacing: 3,
+    vegCompetitionRounds: 3,
+    vegCurvatureRef: 0.008,
+    vegMoistureFeather: 0.2,
+    vegClumpBare: 0.4,
+    // 3π/2: the aspect channel is atan2(z, x) of the DOWNHILL direction, so a
+    // face looking at −z (the sun's side in this world) reads 4.712
+    vegSunAspect: 4.712,
+    pineDensity: 0.06,
+    pineMoistureMin: 0.2,
+    juniperDensity: 0.14,
+    juniperMoistureMax: 0.5,
+    juniperWindWeight: 0.5,
+    juniperFootprint: 1.1,
+    juniperHeight: 2.6,
+    juniperSpread: 1.15,
+    juniperBoleRadius: 0.09,
+    juniperLean: 0.35,
+    juniperLimbs: 3,
+    juniperLobeRadius: 0.5,
+    juniperLobeSquash: 0.6,
+    manzanitaDensity: 0.16,
+    manzanitaMoistureMax: 0.45,
+    manzanitaSkyExponent: 2,
+    manzanitaAspectWeight: 0.5,
+    manzanitaSlopeLimit: 0.65, // tan 33° — the fork's own scramble cap
+    manzanitaForkRange: 12,
+    manzanitaForkBoost: 0.6,
+    manzanitaFootprint: 0.5,
+    manzanitaHeight: 1.1,
+    manzanitaSpread: 0.75,
+    manzanitaStems: 4,
+    manzanitaStemRadius: 0.045,
+    manzanitaLobeRadius: 0.5,
+    manzanitaLobeSquash: 0.62,
+    manzanitaLeafColor: 0x71805a,
+    manzanitaStemColor: 0x8f4b33,
+    foliageClusterBlend: 0.55,
+    foliageWrap: 0.45,
+    foliageWrapStrength: 0.35,
+    foliageTransmission: 0.45,
+    foliageTransmissionPower: 3,
+    foliageTransmissionColor: 0x93ad5c,
+    understorySpacing: 2.5,
+    understorySlopeLimit: 0.5,
+    understoryGrassDensity: 0.06,
+    understoryDeadfallDensity: 0.02,
+    understoryConeDensity: 0.05,
+    bunchgrassHeight: 0.45,
+    deadfallLength: 2.2,
+    deadfallRadius: 0.13,
+    coneHeight: 0.12,
+    // ── T112f rocks ──
+    // the debris channel is thin: measured over the three slice archetypes it
+    // reaches 0.75 m on a dome and 1.8 m in a cirque, and is ~0 on a drowned
+    // ridge (which is mostly under water). 0.15 m is "an apron is here".
+    talusDebrisMin: 0.15,
+    talusDebrisFull: 0.8,
+    talusSpacing: 2.4,
+    talusHeadScale: 0.45,
+    talusFootScale: 2.1,
+    talusSizeJitter: 0.18,
+    talusEmbed: 0.55,
+    talusGeoVariants: 2,
+    outcropsPerRadius: 0.16,
+    outcropCurvature: 0.015,
+    outcropJoint: 0.62,
+    outcropDebrisMax: 0.2,
+    outcropSpacing: 7,
+    outcropMinScale: 1.6,
+    outcropMaxScale: 4.5,
+    outcropSquash: 0.32,
+    outcropTiltMax: 0.45,
+    outcropEmbed: 0.5,
+    cirqueBlockCount: 12,
+    cirqueBlockSpacing: 9,
+    cirqueBlockMinScale: 2.8,
+    cirqueBlockMaxScale: 6.5,
+    cirqueBlockMaxHeight: 8,
+    cirqueWallRise: 10,
+    cirqueWallRun: 18,
+    cirqueBowlOutward: 0.4,
+    rockPathClearance: 1.5,
+
   },
   {
     sliceCount: { min: 1, max: 3, step: 1 },
@@ -683,5 +892,83 @@ export const sierraParams: SierraParams = registerParams(
     bandHighHeight: { min: 0, max: 300, step: 1 },
     bandWidth: { min: 0.5, max: 40, step: 0.5 },
     bandStrength: { min: 0, max: 1, step: 0.01 },
+
+    // ── T112e vegetation ──
+    vegSampleSpacing: { min: 1, max: 8, step: 0.25 },
+    vegCompetitionRounds: { min: 0, max: 5, step: 1 },
+    vegCurvatureRef: { min: 0.001, max: 0.05, step: 0.001 },
+    vegMoistureFeather: { min: 0.02, max: 0.6, step: 0.01 },
+    vegClumpBare: { min: 0, max: 0.9, step: 0.01 },
+    vegSunAspect: { min: 0, max: 6.2832, step: 0.01 },
+    pineDensity: { min: 0, max: 0.3, step: 0.005 },
+    pineMoistureMin: { min: 0, max: 1, step: 0.01 },
+    juniperDensity: { min: 0, max: 0.5, step: 0.005 },
+    juniperMoistureMax: { min: 0, max: 1, step: 0.01 },
+    juniperWindWeight: { min: 0, max: 1, step: 0.01 },
+    juniperFootprint: { min: 0.2, max: 5, step: 0.05 },
+    juniperHeight: { min: 1, max: 6, step: 0.1 },
+    juniperSpread: { min: 0.4, max: 2, step: 0.05 },
+    juniperBoleRadius: { min: 0.02, max: 0.25, step: 0.005 },
+    juniperLean: { min: 0, max: 1, step: 0.05 },
+    juniperLimbs: { min: 1, max: 5, step: 1 },
+    juniperLobeRadius: { min: 0.2, max: 1, step: 0.02 },
+    juniperLobeSquash: { min: 0.2, max: 1.2, step: 0.02 },
+    manzanitaDensity: { min: 0, max: 0.6, step: 0.005 },
+    manzanitaMoistureMax: { min: 0, max: 1, step: 0.01 },
+    manzanitaSkyExponent: { min: 0, max: 6, step: 0.1 },
+    manzanitaAspectWeight: { min: 0, max: 1, step: 0.01 },
+    manzanitaSlopeLimit: { min: 0.1, max: 1.5, step: 0.01 },
+    manzanitaForkRange: { min: 0, max: 40, step: 0.5 },
+    manzanitaForkBoost: { min: 0, max: 1, step: 0.01 },
+    manzanitaFootprint: { min: 0.1, max: 3, step: 0.05 },
+    manzanitaHeight: { min: 0.3, max: 3, step: 0.05 },
+    manzanitaSpread: { min: 0.2, max: 2, step: 0.05 },
+    manzanitaStems: { min: 1, max: 7, step: 1 },
+    manzanitaStemRadius: { min: 0.01, max: 0.15, step: 0.005 },
+    manzanitaLobeRadius: { min: 0.2, max: 1, step: 0.02 },
+    manzanitaLobeSquash: { min: 0.2, max: 1.2, step: 0.02 },
+    foliageClusterBlend: { min: 0, max: 1, step: 0.01 },
+    foliageWrap: { min: 0, max: 1, step: 0.01 },
+    foliageWrapStrength: { min: 0, max: 1, step: 0.01 },
+    foliageTransmission: { min: 0, max: 2, step: 0.01 },
+    foliageTransmissionPower: { min: 0.5, max: 12, step: 0.1 },
+    understorySpacing: { min: 0.5, max: 6, step: 0.1 },
+    understorySlopeLimit: { min: 0.05, max: 1.5, step: 0.01 },
+    understoryGrassDensity: { min: 0, max: 0.5, step: 0.005 },
+    understoryDeadfallDensity: { min: 0, max: 0.2, step: 0.002 },
+    understoryConeDensity: { min: 0, max: 0.5, step: 0.005 },
+    bunchgrassHeight: { min: 0.1, max: 1.2, step: 0.02 },
+    deadfallLength: { min: 0.5, max: 5, step: 0.1 },
+    deadfallRadius: { min: 0.03, max: 0.5, step: 0.01 },
+    coneHeight: { min: 0.03, max: 0.4, step: 0.01 },
+    // ── T112f rocks ──
+    talusDebrisMin: { min: 0.02, max: 2, step: 0.01 },
+    talusDebrisFull: { min: 0.05, max: 4, step: 0.05 },
+    talusSpacing: { min: 0.5, max: 12, step: 0.1 },
+    talusHeadScale: { min: 0.2, max: 4, step: 0.05 },
+    talusFootScale: { min: 0.2, max: 8, step: 0.05 },
+    talusSizeJitter: { min: 0, max: 0.6, step: 0.01 },
+    talusEmbed: { min: 0, max: 1, step: 0.01 },
+    talusGeoVariants: { min: 1, max: 4, step: 1 },
+    outcropsPerRadius: { min: 0, max: 1, step: 0.01 },
+    outcropCurvature: { min: 0, max: 0.05, step: 0.001 },
+    outcropJoint: { min: 0, max: 1, step: 0.01 },
+    outcropDebrisMax: { min: 0, max: 4, step: 0.05 },
+    outcropSpacing: { min: 1, max: 30, step: 0.5 },
+    outcropMinScale: { min: 0.5, max: 12, step: 0.1 },
+    outcropMaxScale: { min: 0.5, max: 20, step: 0.1 },
+    outcropSquash: { min: 0.1, max: 1, step: 0.01 },
+    outcropTiltMax: { min: 0, max: 1.2, step: 0.01 },
+    outcropEmbed: { min: 0, max: 1, step: 0.01 },
+    cirqueBlockCount: { min: 0, max: 40, step: 1 },
+    cirqueBlockSpacing: { min: 1, max: 40, step: 0.5 },
+    cirqueBlockMinScale: { min: 0.5, max: 15, step: 0.1 },
+    cirqueBlockMaxScale: { min: 0.5, max: 25, step: 0.1 },
+    cirqueBlockMaxHeight: { min: 1, max: 40, step: 0.5 },
+    cirqueWallRise: { min: 2, max: 60, step: 0.5 },
+    cirqueWallRun: { min: 4, max: 60, step: 1 },
+    cirqueBowlOutward: { min: 0, max: 1, step: 0.01 },
+    rockPathClearance: { min: 0, max: 12, step: 0.1 },
+
   },
 );

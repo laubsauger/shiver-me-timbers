@@ -205,7 +205,18 @@ describe('boulders (§T.112a item 6)', () => {
     expect(generateInlandPlacements(5, hm)).not.toEqual(generateInlandPlacements(6, hm));
     const all = generateRockPlacements(5, hm);
     const shore = all.filter((r) => !r.origin);
-    expect(all.length).toBe(shore.length + generateInlandPlacements(5, hm).length);
+    // §V80 RE-CUT (§T.112f). This read `all.length === shore.length + inland.length`,
+    // which pinned the DECISION "the inland scatter is the only thing appended" —
+    // and duly failed the moment §T.112f appended a second sierra family (talus,
+    // outcrop slabs, cirque blocks) behind it, while the thing it was written to
+    // protect was untouched. The PROPERTY is that the shore scatter never moves:
+    // it is a byte-identical PREFIX of the list, and everything after it is
+    // tagged with an origin. That holds for §T.112f and for the next family too.
+    expect(all.slice(0, shore.length)).toEqual(shore);
+    expect(all.slice(0, shore.length)).toEqual(generateRockPlacements(5, hm).slice(0, shore.length));
+    expect(all.slice(shore.length).every((r) => r.origin !== undefined)).toBe(true);
+    const inland = generateInlandPlacements(5, hm);
+    expect(all.slice(shore.length, shore.length + inland.length)).toEqual(inland);
     const pirate = generateIslandHeightmap(42, islandParams);
     expect(pirate.sierra).toBeUndefined();
     expect(generateInlandPlacements(5, pirate)).toEqual([]);

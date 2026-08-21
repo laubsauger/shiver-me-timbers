@@ -22,6 +22,8 @@ import { sierraParams, type SierraParams } from '../params/sierra';
 import { findShoreRadius, gradientAt, type IslandHeightmap } from './heightmap';
 import { createSierraRockMaterial } from './sierraMaterial';
 import { horizonMapFor } from './horizonMap';
+import { terrainInfoFor } from './terrainInfoBake';
+import { decodeTerrainInfo, sheetingDirectionCpu, type TerrainInfo } from './terrainInfo';
 
 export interface RockPlacement {
   /** island-local; y = terrain height + partial embed */
@@ -47,12 +49,32 @@ export interface RockPlacement {
   foamTarget: boolean;
   /** true for the big headland masses, false for the boulder scatter */
   cliff: boolean;
-  /** §T.112a: where a sierra boulder came from (undefined on the shore scatter) */
-  origin?: 'convex' | 'erratic';
+  /** §T.112a/§T.112f: where a sierra rock came from (undefined on the shore scatter) */
+  origin?: RockOrigin;
+  /**
+   * §T.112f talus only — WHERE IN THE APRON this block sits: 0 at the apron's
+   * own crest (the source cliff) and 1 at its toe. The size is read off this,
+   * which is the sorting law a talus cone obeys.
+   */
+  apronT?: number;
+  /**
+   * §T.112f outcrop only — the sheeting BAND direction in island-local xz
+   * (unit): the axis the slab's long side lies along. See `generateMesoPlacements`.
+   */
+  sheetAxis?: [number, number];
 }
+
+/**
+ * §T.112f: the three meso families join §T.112a's two. `talus` draws from its
+ * OWN geometry pool (see `createRocks`); the other four index the shared one.
+ */
+export const ROCK_ORIGINS = ['convex', 'erratic', 'talus', 'outcrop', 'cirqueBlock'] as const;
+export type RockOrigin = (typeof ROCK_ORIGINS)[number];
 
 /** seeded stream for the inland scatter — after the shore loops, so pirate bytes never move */
 const INLAND_SEED_OFFSET = 3391;
+/** seeded stream for the §T.112f meso families — after the inland scatter, same reason */
+const MESO_SEED_OFFSET = 5701;
 /** curvature probe stride in cells — resolution, not a look tunable */
 const INLAND_PROBE_STRIDE = 2;
 
@@ -70,9 +92,38 @@ export function convexityAt(hm: IslandHeightmap, x: number, z: number): number {
   return -lap;
 }
 
-/** inland = above the apron AND inside the shore radius by the DG band */
+/**
+ * §T.112f: NO ROCK IN THE WALK CORRIDOR. T112b carved the route to be walkable
+ * and published `routeMask`/`forkMask`; a boulder dropped in the tread undoes
+ * the carve, and the player has no way around it. The masks are tested at the
+ * nearest cell AND its four neighbours, so a placement jittered up to half a
+ * cell off its probe still cannot land in a masked one; `rockPathClearance`
+ * keeps a metre and a half of margin outside the mask on top of that.
+ *
+ * True (clear) on every island with no path — pirate islands, fillers, the
+ * silhouette island — so the gate costs those nothing.
+ */
+export function clearOfPath(hm: IslandHeightmap, x: number, z: number, sp: SierraParams = sierraParams): boolean {
+  const path = hm.path;
+  if (!path) return true;
+  const size = hm.size;
+  const cell = (2 * hm.worldRadius) / (size - 1);
+  const gx = Math.round((x + hm.worldRadius) / cell);
+  const gz = Math.round((z + hm.worldRadius) / cell);
+  for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+    const ix = Math.min(Math.max(gx + dx, 0), size - 1);
+    const iz = Math.min(Math.max(gz + dz, 0), size - 1);
+    const i = iz * size + ix;
+    if (path.routeMask[i] || path.forkMask[i]) return false;
+    if (path.distance[i] <= path.treadHalf + sp.rockPathClearance) return false;
+  }
+  return true;
+}
+
+/** inland = above the apron, inside the shore radius by the DG band, off the route */
 function isInland(hm: IslandHeightmap, x: number, z: number, sp: SierraParams): boolean {
   if (hm.heightAt(x, z) < sp.boulderMinHeight) return false;
+  if (!clearOfPath(hm, x, z, sp)) return false;
   const angle = Math.atan2(z, x);
   return Math.hypot(x, z) < findShoreRadius(hm, angle) - sp.dgSandBand;
 }
@@ -120,9 +171,10 @@ export function generateInlandPlacements(
         const jx = c[0] + (rng() - 0.5) * cell;
         const jz = c[1] + (rng() - 0.5) * cell;
         const ok =
-          origin === 'convex'
+          clearOfPath(hm, jx, jz, sp) &&
+          (origin === 'convex'
             ? convexityAt(hm, jx, jz) > 0 && gradientAt(hm, jx, jz) > sp.boulderSlopeMin * 0.5
-            : gradientAt(hm, jx, jz) < sp.erraticSlopeMax;
+            : gradientAt(hm, jx, jz) < sp.erraticSlopeMax);
         if (ok) {
           x = jx;
           z = jz;
@@ -153,6 +205,336 @@ export function generateInlandPlacements(
   place(convex, Math.round(sp.inlandBouldersPerRadius * R), 'convex');
   place(treads, Math.round(sp.erraticCount), 'erratic');
   return out;
+}
+
+// ── §T.112f MESO ROCK: talus, sheeting outcrops, cirque wall blocks ───────
+
+/** downhill bearing (rad, atan2(z, x)) and slope (tan) at an island-local point */
+function downhillAt(hm: IslandHeightmap, x: number, z: number): { azimuth: number; tan: number } {
+  const e = (2 * hm.worldRadius) / (hm.size - 1);
+  const gx = (hm.heightAt(x + e, z) - hm.heightAt(x - e, z)) / (2 * e);
+  const gz = (hm.heightAt(x, z + e) - hm.heightAt(x, z - e)) / (2 * e);
+  return { azimuth: Math.atan2(-gz, -gx), tan: Math.hypot(gx, gz) };
+}
+
+/** in-place Fisher-Yates on the seeded stream — a deterministic dart order */
+function shuffleSeeded<T>(items: T[], rng: () => number): T[] {
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1)) % (i + 1);
+    const t = items[i];
+    items[i] = items[j];
+    items[j] = t;
+  }
+  return items;
+}
+
+/**
+ * Which shared geometry variants carry a given FAMILY. `createRocks` cycles
+ * `ROCK_FAMILIES` over `rockGeoVariants`, so variant v is family v % 4 — the
+ * slabs and the split blocks are already in the batch, and asking for one by
+ * family costs no extra draw call (the whole point of the variant scheme).
+ */
+function variantsOfFamily(p: IslandParams, family: RockFamily): number[] {
+  const n = Math.max(1, Math.floor(p.rockGeoVariants));
+  const out: number[] = [];
+  for (let v = 0; v < n; v++) if (ROCK_FAMILIES[v % ROCK_FAMILIES.length] === family) out.push(v);
+  return out.length > 0 ? out : [n - 1];
+}
+
+/** grid-free spacing test — n is ≲ 200 per island, so the O(n²) walk is ~20 µs */
+function farEnough(taken: [number, number][], x: number, z: number, spacing: number): boolean {
+  const d2 = spacing * spacing;
+  for (const [tx, tz] of taken) {
+    const dx = tx - x;
+    const dz = tz - z;
+    if (dx * dx + dz * dz < d2) return false;
+  }
+  return true;
+}
+
+/** debris thickness in METRES at a grid index (the channel is 0..1 over 4 m) */
+const debrisMetresAt = (info: TerrainInfo, i: number): number =>
+  decodeTerrainInfo.debrisMetres(info.channels.debris[i]);
+
+/**
+ * THE APRONS, as connected deposits.
+ *
+ * A talus cone is one body, and its sorting is a property OF THAT BODY: fines
+ * under the source cliff, the blocks that bounced furthest at the toe. So the
+ * debris mask is labelled into 8-connected components first, and each cell is
+ * given `apronT` = how far below its OWN component's crest it lies, 0..1 —
+ * a coordinate that means the same thing on a 40 m cirque apron and on a 6 m
+ * one under a dome rib. Reading the size off a raw elevation instead would
+ * make every apron on a tall island coarse and every apron on a low one fine,
+ * which is not what sorting says.
+ */
+function labelAprons(hm: IslandHeightmap, info: TerrainInfo, sp: SierraParams): { label: Int32Array; apronT: Float32Array } {
+  const size = info.size;
+  const n = size * size;
+  const label = new Int32Array(n).fill(-1);
+  const apronT = new Float32Array(n);
+  const h = hm.data;
+  const isDebris = (i: number): boolean => debrisMetresAt(info, i) > sp.talusDebrisMin && h[i] > 0;
+  const stack: number[] = [];
+  const members: number[] = [];
+  let next = 0;
+  for (let start = 0; start < n; start++) {
+    if (label[start] >= 0 || !isDebris(start)) continue;
+    const id = next++;
+    members.length = 0;
+    stack.length = 0;
+    stack.push(start);
+    label[start] = id;
+    let hTop = -Infinity;
+    let hBot = Infinity;
+    while (stack.length > 0) {
+      const i = stack.pop()!;
+      members.push(i);
+      if (h[i] > hTop) hTop = h[i];
+      if (h[i] < hBot) hBot = h[i];
+      const ix = i % size;
+      const iz = (i - ix) / size;
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dz === 0) continue;
+          const jx = ix + dx;
+          const jz = iz + dz;
+          if (jx < 0 || jz < 0 || jx >= size || jz >= size) continue;
+          const j = jz * size + jx;
+          if (label[j] >= 0 || !isDebris(j)) continue;
+          label[j] = id;
+          stack.push(j);
+        }
+      }
+    }
+    // §V28 floored divisor: a one-cell apron has zero relief and is all head
+    const span = Math.max(hTop - hBot, 1e-3);
+    for (const i of members) apronT[i] = Math.min(Math.max((hTop - h[i]) / span, 0), 1);
+  }
+  return { label, apronT };
+}
+
+/**
+ * §T.112f, research §2.3/D9 — MESO ROCK WHERE THE HEIGHTFIELD IMPLIES IT.
+ * Three families, all reading T112c/T112d's baked channels rather than a
+ * scatter rule of their own:
+ *
+ *  1. TALUS. The debris channel IS the thermal-erosion talus thickness, so an
+ *     apron is not guessed at: it is where the erosion pass put material.
+ *     Density is proportional to that thickness, size increases DOWNSLOPE
+ *     through `apronT` (above), and each block is bedded into the apron with
+ *     its own tilt taken from the surface — capped at `talusRepose`, because a
+ *     block on a slope steeper than repose would not be sitting there.
+ *  2. OUTCROP SLABS on convex, joint-dense, debris-free bedrock, lying ALONG
+ *     the sheeting the terrain material draws. `sheetBands` in sierraMaterial
+ *     puts its bands on the level sets of `localXZ · sheetingDirection`, i.e.
+ *     the bands RUN PERPENDICULAR to ∇κ — so the slab's long axis is the
+ *     perpendicular of `sheetingDirectionCpu`, published here as `sheetAxis`.
+ *     §V71: the axis is resolved against the terrain's own live curvature
+ *     field, not against an authored bearing that happened to match it.
+ *  3. CIRQUE WALL BLOCKS at the foot of the bowl wall — bigger, blockier and
+ *     far fewer. "Inside the bowl" is measured, not named: a cell is in a bowl
+ *     when the ground rises as you walk AWAY from the island centre, and it is
+ *     at a wall foot when `cirqueWallRise` metres stand within `cirqueWallRun`
+ *     of it straight uphill. Measured over the three slice archetypes × three
+ *     seeds that test finds 550-1038 cells on every cirque and exactly 0 on
+ *     every dome and drowned ridge, so no archetype name is needed.
+ *
+ * Sierra islands only, own rng stream, appended after the T112a scatter — the
+ * pirate world never enters here and its bytes cannot move.
+ */
+export function generateMesoPlacements(
+  seed: number,
+  hm: IslandHeightmap,
+  p: IslandParams = islandParams,
+  sp: SierraParams = sierraParams,
+): RockPlacement[] {
+  if (!hm.sierra) return [];
+  const info = terrainInfoFor(hm);
+  const rng = createRng(seed + MESO_SEED_OFFSET);
+  const R = hm.worldRadius;
+  const size = info.size;
+  const cell = info.cell;
+  const out: RockPlacement[] = [];
+  const taken: [number, number][] = [];
+  const localOf = (i: number): [number, number] => [-R + (i % size) * cell, -R + Math.floor(i / size) * cell];
+
+  const push = (
+    x: number,
+    z: number,
+    scale: number,
+    squash: number,
+    aspect: number,
+    embed: number,
+    variant: number,
+    origin: RockOrigin,
+    tilt: number,
+    tiltDir: number,
+    yaw: number,
+    extra: { apronT?: number; sheetAxis?: [number, number] } = {},
+  ): void => {
+    const halfHeight = scale * squash;
+    out.push({
+      position: [x, hm.heightAt(x, z) + halfHeight * (1 - embed), z],
+      scale,
+      squash,
+      aspect,
+      yaw,
+      tilt,
+      tiltDir,
+      variant,
+      foamTarget: false,
+      cliff: false,
+      origin,
+      ...extra,
+    });
+    taken.push([x, z]);
+  };
+
+  // ── 1. talus ────────────────────────────────────────────────────────────
+  const { apronT } = labelAprons(hm, info, sp);
+  const talusCells: number[] = [];
+  for (let i = 0; i < size * size; i++) {
+    if (debrisMetresAt(info, i) <= sp.talusDebrisMin) continue;
+    const [x, z] = localOf(i);
+    if (!isInland(hm, x, z, sp)) continue;
+    talusCells.push(i);
+  }
+  const talusPool = Math.max(1, Math.floor(sp.talusGeoVariants));
+  const reposeTilt = Math.atan(sp.talusRepose);
+  for (const i of shuffleSeeded(talusCells, rng)) {
+    // DENSITY ∝ THICKNESS: a 0.15 m dusting sheds the odd block, a full apron
+    // is paved with them. The draw is taken for every candidate whatever the
+    // outcome, so the stream does not depend on the spacing rejections.
+    const accept = rng() < Math.min(debrisMetresAt(info, i) / Math.max(sp.talusDebrisFull, 1e-3), 1);
+    const t = apronT[i];
+    const jitter = 1 + (rng() * 2 - 1) * sp.talusSizeJitter;
+    const variant = Math.floor(rng() * talusPool) % talusPool;
+    const squash = p.rockSquashMin + (p.rockSquashMax - p.rockSquashMin) * rng();
+    const aspect = p.rockAspectMin + (p.rockAspectMax - p.rockAspectMin) * rng();
+    const yaw = rng() * Math.PI * 2;
+    const [x, z] = localOf(i);
+    if (!accept || !farEnough(taken, x, z, sp.talusSpacing)) continue;
+    // THE SORT: head → foot, small → large. Nothing else moves the size.
+    const scale = Math.max(sp.talusHeadScale + (sp.talusFootScale - sp.talusHeadScale) * t, 0.05) * jitter;
+    // bedded IN the apron: the block lies parallel to the surface it sits on,
+    // never leaning past the angle of repose the apron itself was built at
+    const down = downhillAt(hm, x, z);
+    push(x, z, scale, squash, aspect, sp.talusEmbed, variant, 'talus',
+      Math.min(Math.atan(down.tan), reposeTilt), down.azimuth - Math.PI / 2, yaw, { apronT: t });
+  }
+
+  // ── 2. outcrop slabs ────────────────────────────────────────────────────
+  const slabVariants = variantsOfFamily(p, 'slab');
+  const outcropCells: number[] = [];
+  for (let i = 0; i < size * size; i++) {
+    if (decodeTerrainInfo.curvaturePerMetre(info.channels.curvature[i]) <= sp.outcropCurvature) continue;
+    if (info.channels.joint[i] <= sp.outcropJoint) continue;
+    if (debrisMetresAt(info, i) >= sp.outcropDebrisMax) continue;
+    const [x, z] = localOf(i);
+    if (!isInland(hm, x, z, sp)) continue;
+    outcropCells.push(i);
+  }
+  const outcropTarget = Math.max(0, Math.round(sp.outcropsPerRadius * R));
+  let outcrops = 0;
+  for (const i of shuffleSeeded(outcropCells, rng)) {
+    if (outcrops >= outcropTarget) break;
+    const scale = sp.outcropMinScale + (sp.outcropMaxScale - sp.outcropMinScale) * rng() ** 1.6;
+    const aspectJitter = 0.9 + rng() * 0.2;
+    const [x, z] = localOf(i);
+    if (!farEnough(taken, x, z, sp.outcropSpacing)) continue;
+    // ⊥ ∇κ = ALONG the band the terrain material shades (see the note above)
+    const [gx, gz] = sheetingDirectionCpu(info, x, z, hm.sierra.iceAzimuth);
+    const bx = -gz;
+    const bz = gx;
+    /**
+     * THE SLAB HINGES ABOUT ITS OWN LONG AXIS. A sheet lying on a dome tips
+     * ACROSS its trace, not along it, so the tilt axis is the band itself —
+     * which has the second virtue of leaving the plan bearing untouched, so
+     * the yaw solved in `createRocks` survives the bedding. Tilting about the
+     * contour instead (the talus rule) would swing the long axis out of the
+     * band by up to 30°, which is exactly what the sheeting must not do (§V71).
+     */
+    const down = downhillAt(hm, x, z);
+    // slope component across the band: the downhill vector dotted with ⊥band
+    const across = down.tan * (Math.cos(down.azimuth) * -bz + Math.sin(down.azimuth) * bx);
+    push(x, z, scale, sp.outcropSquash * aspectJitter, 1, sp.outcropEmbed,
+      slabVariants[Math.floor(rng() * slabVariants.length) % slabVariants.length], 'outcrop',
+      Math.min(Math.atan(Math.abs(across)), sp.outcropTiltMax),
+      Math.atan2(bz, bx) + (across < 0 ? Math.PI : 0),
+      // yaw is resolved against the variant's own plan axis in `createRocks`
+      0, { sheetAxis: [bx, bz] });
+    outcrops++;
+  }
+
+  // ── 3. cirque wall blocks ───────────────────────────────────────────────
+  const blockVariants = variantsOfFamily(p, 'block');
+  const wallCells: number[] = [];
+  for (let iz = 1; iz < size - 1; iz++) {
+    for (let ix = 1; ix < size - 1; ix++) {
+      const i = iz * size + ix;
+      const x = -R + ix * cell;
+      const z = -R + iz * cell;
+      const h = hm.heightAt(x, z);
+      if (h < 0.5 || h > sp.cirqueBlockMaxHeight) continue;
+      if (!clearOfPath(hm, x, z, sp)) continue;
+      const down = downhillAt(hm, x, z);
+      const radial = Math.hypot(x, z) || 1; // §V28 floored divisor
+      // uphill points AWAY from the island centre ⇒ this is a bowl, not a flank
+      const ux = -Math.cos(down.azimuth);
+      const uz = -Math.sin(down.azimuth);
+      if ((ux * x + uz * z) / radial <= sp.cirqueBowlOutward) continue;
+      let rise = 0;
+      for (let s = cell; s <= sp.cirqueWallRun; s += cell) {
+        rise = Math.max(rise, hm.heightAt(x + ux * s, z + uz * s) - h);
+      }
+      if (rise < sp.cirqueWallRise) continue;
+      wallCells.push(i);
+    }
+  }
+  let blocks = 0;
+  for (const i of shuffleSeeded(wallCells, rng)) {
+    if (blocks >= Math.max(0, Math.round(sp.cirqueBlockCount))) break;
+    const scale = sp.cirqueBlockMinScale + (sp.cirqueBlockMaxScale - sp.cirqueBlockMinScale) * rng();
+    const squash = p.rockSquashMin + (p.rockSquashMax - p.rockSquashMin) * rng();
+    const aspect = p.rockAspectMin + (p.rockAspectMax - p.rockAspectMin) * rng();
+    const yaw = rng() * Math.PI * 2;
+    const tilt = rng() * p.rockTiltMax;
+    const tiltDir = rng() * Math.PI * 2;
+    const [x, z] = localOf(i);
+    if (!farEnough(taken, x, z, sp.cirqueBlockSpacing)) continue;
+    push(x, z, scale, squash, aspect, p.rockEmbed,
+      blockVariants[Math.floor(rng() * blockVariants.length) % blockVariants.length], 'cirqueBlock',
+      tilt, tiltDir, yaw);
+    blocks++;
+  }
+
+  return out;
+}
+
+/**
+ * PLAN-VIEW LONG AXIS of a deformed variant (rad, atan2(z, x) convention), by
+ * the principal axis of its xz second moment. `createRocks` uses it to point an
+ * outcrop slab's long side along `sheetAxis`: a Y-rotation by `yaw` maps a
+ * local plan bearing φ to φ − yaw, so `yaw = φ_variant − φ_target`.
+ *
+ * The slab's plan anisotropy is the GEOMETRY's (family `slab` stretches 1.5×),
+ * which is why the outcrops carry `aspect = 1` — an instance stretch on top
+ * would rotate the axis away from the one measured here.
+ */
+export function planAxisAngle(geometry: THREE.BufferGeometry): number {
+  const pos = geometry.getAttribute('position') as THREE.BufferAttribute;
+  let sxx = 0;
+  let sxz = 0;
+  let szz = 0;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const z = pos.getZ(i);
+    sxx += x * x;
+    sxz += x * z;
+    szz += z * z;
+  }
+  return 0.5 * Math.atan2(2 * sxz, sxx - szz);
 }
 
 /**
@@ -308,6 +690,7 @@ export function generateRockPlacements(
     push(x, z, scale, squash, p.cliffEmbed, true);
   }
   placements.push(...generateInlandPlacements(seed, hm, p));
+  placements.push(...generateMesoPlacements(seed, hm, p));
   return placements;
 }
 
@@ -584,6 +967,7 @@ export interface Rocks {
  */
 export function createRocks(opts: CreateRocksOptions): Rocks {
   const p = islandParams;
+  const sp = sierraParams;
   const placements = generateRockPlacements(opts.seed, opts.heightmap, p);
   const variants: THREE.BufferGeometry[] = [];
   for (let v = 0; v < p.rockGeoVariants; v++) {
@@ -593,6 +977,27 @@ export function createRocks(opts: CreateRocksOptions): Rocks {
       deformRockGeometry(opts.seed + 101 * (v + 1), p, ROCK_FAMILIES[v % ROCK_FAMILIES.length]),
     );
   }
+  /**
+   * §T.112f: TALUS GETS ITS OWN, CHEAPER POOL (§V17). An apron carries the
+   * biggest instance count on the island and its blocks are 0.4-2.5 m — at
+   * `rockDetail` they would be 1280 triangles each to hold a silhouette a
+   * metre wide. One detail level down is 320, a 4× saving over the family
+   * that needs it least, at the cost of `talusGeoVariants` extra draws (2)
+   * rather than the 4 a full second pool would add. The outcrops and the
+   * cirque blocks are scale features and stay on the full-detail pool.
+   */
+  const hasTalus = placements.some((pl) => pl.origin === 'talus');
+  const talusDetail = { ...p, rockDetail: Math.max(1, p.rockDetail - 1) };
+  const talusVariants: THREE.BufferGeometry[] = [];
+  if (hasTalus) {
+    for (let v = 0; v < Math.max(1, Math.floor(sp.talusGeoVariants)); v++) {
+      talusVariants.push(
+        deformRockGeometry(opts.seed + 7331 + 101 * v, talusDetail, ROCK_FAMILIES[(v + 3) % ROCK_FAMILIES.length]),
+      );
+    }
+  }
+  /** §T.112f: the slab's plan axis, per shared variant — see `planAxisAngle` */
+  const planAxis = variants.map(planAxisAngle);
   // an unshared sierra island owns a GRANITE handle (§T.112a); the shared
   // path gets it from islandMaterials.sierraRock
   const ownMaterial: RockMaterialHandle | null = opts.material
@@ -615,38 +1020,48 @@ export function createRocks(opts: CreateRocksOptions): Rocks {
   const scale = new THREE.Vector3();
   const up = new THREE.Vector3(0, 1, 0);
 
-  for (let v = 0; v < variants.length; v++) {
-    const forVariant = placements.filter((pl) => pl.variant === v);
-    if (forVariant.length === 0) continue;
-    const mesh = new THREE.InstancedMesh(variants[v], material, forVariant.length);
-    mesh.name = `island-rocks-${v}`;
-    let straddles = false;
-    for (let i = 0; i < forVariant.length; i++) {
-      const pl = forVariant[i];
-      position.set(...pl.position);
-      // yaw first, then tilt about a horizontal axis — same composition order
-      // as scatter.ts's palm lean, so the two read as one convention
-      yawQ.setFromAxisAngle(up, pl.yaw);
-      tiltAxis.set(Math.cos(pl.tiltDir), 0, Math.sin(pl.tiltDir));
-      tiltQ.setFromAxisAngle(tiltAxis, pl.tilt);
-      quat.copy(tiltQ).multiply(yawQ);
-      scale.set(pl.scale, pl.scale * pl.squash, pl.scale * pl.aspect);
-      mesh.setMatrixAt(i, matrix.compose(position, quat, scale));
-      straddles = straddles || pl.foamTarget;
+  const buildPool = (geoms: THREE.BufferGeometry[], label: string, isMine: (pl: RockPlacement) => boolean): void => {
+    for (let v = 0; v < geoms.length; v++) {
+      const forVariant = placements.filter((pl) => isMine(pl) && pl.variant === v);
+      if (forVariant.length === 0) continue;
+      const mesh = new THREE.InstancedMesh(geoms[v], material, forVariant.length);
+      mesh.name = `island-rocks-${label}${v}`;
+      let straddles = false;
+      for (let i = 0; i < forVariant.length; i++) {
+        const pl = forVariant[i];
+        position.set(...pl.position);
+        // §T.112f: an outcrop's yaw is not authored — it is SOLVED here against
+        // the variant's own plan axis so the slab's long side ends up along
+        // `sheetAxis`, the band the terrain material is shading (§V71)
+        const yaw = pl.sheetAxis
+          ? planAxis[v] - Math.atan2(pl.sheetAxis[1], pl.sheetAxis[0])
+          : pl.yaw;
+        // yaw first, then tilt about a horizontal axis — same composition order
+        // as scatter.ts's palm lean, so the two read as one convention
+        yawQ.setFromAxisAngle(up, yaw);
+        tiltAxis.set(Math.cos(pl.tiltDir), 0, Math.sin(pl.tiltDir));
+        tiltQ.setFromAxisAngle(tiltAxis, pl.tilt);
+        quat.copy(tiltQ).multiply(yawQ);
+        scale.set(pl.scale, pl.scale * pl.squash, pl.scale * pl.aspect);
+        mesh.setMatrixAt(i, matrix.compose(position, quat, scale));
+        straddles = straddles || pl.foamTarget;
+      }
+      mesh.instanceMatrix.needsUpdate = true;
+      // the sierra rock material's horizon shadow rides `receivedShadowNode`,
+      // which only runs on a receiver (§T.112a)
+      if (opts.heightmap.sierra) mesh.receiveShadow = true;
+      // instance matrices are baked, so the default unit-icosahedron bounds
+      // would cull the whole batch the moment the origin leaves the frustum
+      mesh.computeBoundingSphere();
+      if (straddles) {
+        mesh.userData.foamTarget = true; // T13 socket, §V10
+        foamTargets.push(mesh);
+      }
+      group.add(mesh);
     }
-    mesh.instanceMatrix.needsUpdate = true;
-    // the sierra rock material's horizon shadow rides `receivedShadowNode`,
-    // which only runs on a receiver (§T.112a)
-    if (opts.heightmap.sierra) mesh.receiveShadow = true;
-    // instance matrices are baked, so the default unit-icosahedron bounds
-    // would cull the whole batch the moment the origin leaves the frustum
-    mesh.computeBoundingSphere();
-    if (straddles) {
-      mesh.userData.foamTarget = true; // T13 socket, §V10
-      foamTargets.push(mesh);
-    }
-    group.add(mesh);
-  }
+  };
+  buildPool(variants, '', (pl) => pl.origin !== 'talus');
+  buildPool(talusVariants, 'talus-', (pl) => pl.origin === 'talus');
 
   return {
     group,
@@ -660,6 +1075,7 @@ export function createRocks(opts: CreateRocksOptions): Rocks {
     },
     dispose(): void {
       for (const g of variants) g.dispose();
+      for (const g of talusVariants) g.dispose();
       for (const child of group.children) (child as THREE.InstancedMesh).dispose?.();
       ownMaterial?.dispose();
     },
