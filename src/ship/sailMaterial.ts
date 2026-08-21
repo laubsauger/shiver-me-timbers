@@ -104,9 +104,32 @@ export const uShipSunDirection = /*@__PURE__*/ uniform(
   uShipSunDirection.value.set(d[0], d[1], d[2]);
 });
 
+/**
+ * A PAINTED FIGURE on the cloth (§T90: the Kon-Tiki face). Composed into the
+ * albedo BEFORE the fold occlusion, the lee darkening and the backlit
+ * transmission, so the paint is lit, shaded and shone through exactly as the
+ * canvas under it is — a decal applied after lighting would read as a sticker.
+ * The sail material is otherwise untouched: this is a hook, not a fork.
+ */
+export interface SailDecal {
+  /**
+   * @param color       the cloth's albedo so far (vec3 node)
+   * @param cloth       the cloth uv: x across, y = 0 at the foot, 1 at the head
+   * @param clothWeight 1 on flying canvas, 0 on robands and the furled bundle
+   * @returns the albedo with the figure painted in
+   */
+  apply(color: AnyNode, cloth: AnyNode, clothWeight: AnyNode): AnyNode;
+  refresh?(): void;
+}
+
+/** TSL nodes are structurally different per operation; loose type on purpose */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyNode = any;
+
 /** off-white weathered canvas: wind-driven shape + backlit translucency */
 export function createSailClothMaterial(
   p: ShipMaterialParams = shipMaterialParams,
+  decal?: SailDecal,
 ): ShipMaterialHandle {
   const material = new THREE.MeshStandardNodeMaterial();
   material.side = THREE.DoubleSide; // sails are single surfaces
@@ -203,7 +226,10 @@ export function createSailClothMaterial(
     float(0.03),
     cloth.x.min(cloth.x.oneMinus()).min(cloth.y),
   );
-  const cloth3raw = mix(base.mul(uSeamDarken), base, panelMask.min(hemMask));
+  const cloth3seamed = mix(base.mul(uSeamDarken), base, panelMask.min(hemMask));
+  // the painted figure, if this sail wears one (see SailDecal)
+  const cloth3raw =
+    decal === undefined ? cloth3seamed : decal.apply(cloth3seamed, cloth, cloth3d.clothWeight);
 
   /**
    * FOLD OCCLUSION ON THE GATHERED ROLL — half of "the texture of it changes
@@ -382,6 +408,7 @@ export function createSailClothMaterial(
       uStain.value = p.sailStainStrength;
       uBuntShade.value = p.sailBuntShade;
       uBacklitWeave.value = p.sailBacklitWeave;
+      decal?.refresh?.();
       refreshSailShapeUniforms(shape, p);
     },
   };

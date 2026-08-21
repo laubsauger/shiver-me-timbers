@@ -18,13 +18,19 @@ import {
 import { createSailClothMaterial } from './sailMaterial';
 import { createFlagClothMaterial } from './flagMaterial';
 import { createGlassMaterial, createIronMaterial } from './fittingMaterials';
+import { createRaftMaterial, type RaftFamily } from './raftMaterials';
+import { createKonTikiDecal } from './raftSailFace';
 import type { DeckFieldSampler } from './deckFieldTexture';
 
 export { uShipSunDirection } from './sailMaterial';
 export { createLocalFrame, setShipWorldMatrix, shipLocalFrame } from './woodMaterial';
 export type { LocalFrame } from './woodMaterial';
 
-type Family = 'hull' | 'deck' | 'spar' | 'trim' | 'sail' | 'flag' | 'iron' | 'glass';
+type Family = 'hull' | 'deck' | 'spar' | 'trim' | 'sail' | 'flag' | 'iron' | 'glass' | RaftFamily;
+
+const RAFT_FAMILIES: ReadonlySet<Family> = new Set<Family>([
+  'balsa', 'bamboo', 'weave', 'thatch', 'plank', 'crate',
+]);
 
 const FAMILY_OF: Record<PieceKind, Family> = {
   pennant: 'flag',
@@ -61,19 +67,24 @@ const FAMILY_OF: Record<PieceKind, Family> = {
   rudder: 'trim',
   'lantern-post': 'trim',
   sail: 'sail',
-  // Raft kinds (§T.89) — provisional families until §T.90 lands raft materials.
-  log: 'spar',
-  crossbeam: 'spar',
-  'bamboo-deck': 'deck',
-  guara: 'trim',
-  'cabin-wall': 'trim',
-  'thatch-roof': 'trim',
-  'bipod-mast': 'spar',
-  'steering-oar': 'spar',
-  crate: 'trim',
-  splashboard: 'trim',
-  'stern-block': 'spar',
+  // Raft kinds (§T.89/§T.90) — procedural families in raftMaterials.ts
+  log: 'balsa',
+  crossbeam: 'balsa',
+  'bamboo-deck': 'bamboo',
+  guara: 'plank',
+  'cabin-wall': 'weave',
+  'thatch-roof': 'thatch',
+  'bipod-mast': 'balsa',
+  'steering-oar': 'balsa',
+  crate: 'crate',
+  splashboard: 'plank',
+  'stern-block': 'balsa',
 };
+
+/** the raft's kinds and the family each draws through — exported for the §T90 tests */
+export function familyOf(kind: PieceKind): Family {
+  return FAMILY_OF[kind];
+}
 
 /**
  * Pieces whose LOCAL y is ship-space y, so `y < 0` genuinely means below the
@@ -110,7 +121,7 @@ export const SPAR_AXIS: Partial<Record<PieceKind, 'x' | 'y'>> = {
   yard: 'x',
 };
 
-type WoodFamily = Exclude<Family, 'sail' | 'flag' | 'iron' | 'glass'>;
+type WoodFamily = Exclude<Family, 'sail' | 'flag' | 'iron' | 'glass' | RaftFamily>;
 
 function woodTones(
   family: WoodFamily,
@@ -190,9 +201,15 @@ export function createPieceMaterial(
 ): THREE.MeshStandardNodeMaterial {
   const family = FAMILY_OF[kind];
   let handle: ShipMaterialHandle;
+  if (RAFT_FAMILIES.has(family)) {
+    return tracked(createRaftMaterial(family as RaftFamily, kind, frame ?? undefined), `piece-${kind}`);
+  }
   switch (family) {
     case 'sail':
-      handle = createSailClothMaterial();
+      // every sail carries the Kon-Tiki decal hook; it switches itself on per
+      // object (raftSailFace.konTikiFaceApplies) so the galleons' canvas is
+      // untouched and there is still ONE sail material (§T.40)
+      handle = createSailClothMaterial(undefined, createKonTikiDecal());
       break;
     case 'flag':
       handle = createFlagClothMaterial();
@@ -205,7 +222,8 @@ export function createPieceMaterial(
       break;
     default:
       handle = createWoodMaterial(
-        woodTones(family, kind, WATERLINE_KINDS.has(kind), deckField),
+        // the raft families returned above; what is left is timber
+        woodTones(family as WoodFamily, kind, WATERLINE_KINDS.has(kind), deckField),
         frame ?? undefined,
       );
   }
