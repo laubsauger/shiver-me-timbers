@@ -19,13 +19,13 @@ import type { AudioFrame, AudioSystem, ShipAudioInput } from '../audio';
 import { oceanParams } from '../ocean';
 import { skyParams } from '../params/sky';
 import { shipRigParams } from '../params/ship';
-import { raftParams } from '../params/raft';
+import { raftSeaParams } from '../params/seaPhysics';
 import { stepShipBuoyancy } from '../sea-physics/buoyancy';
-import { stepShipGrounding } from '../sea-physics/grounding';
+import { raftContactPoints } from '../sailing/raftBeaching';
 import { updateRig } from '../ship/rigTrim';
 import { trimDropScale } from '../ship/sailDynamics';
 import { palmWindStrength } from '../vegetation';
-import { rotateVec } from './raftShip';
+import { rotateVec, stepRaftBeach, type BeachHolder } from './raftShip';
 import type { RaftSea, RaftVessel } from './raftScene';
 
 export interface RaftFrameDeps {
@@ -35,6 +35,8 @@ export interface RaftFrameDeps {
   sky: SkyHandle;
   state: SimState;
   raft: ShipState;
+  /** §T.100 beaching memory (`raftActions.raftBeach`); `.state` is replaced each tick */
+  beach: BeachHolder;
   weatherHere: WeatherSample;
   audio: AudioSystem;
   /** §V.8 sea height at world XZ, this tick */
@@ -57,8 +59,9 @@ export function createRaftFrame(d: RaftFrameDeps) {
   const shipFwd = new Vector3();
   const tmpDir = new Vector3();
   const renderShipView = structuredClone(raft);
-  // TODO(§T.96 sea params): the raft floats on the galleon's displacement until a raft SeaPhysicsParams exists
-  const raftDraft = raftParams.logDiameterMax / 2;
+  // the log undersides (§T.100): a pure function of raftParams, taken once —
+  // the raft is not reshaped mid-sail, and the set is ~60 points a tick
+  const contacts = raftContactPoints();
   let lastOceanTime = Number.NaN;
   let bowImmersion = 0;
   let drop = 1;
@@ -83,8 +86,8 @@ export function createRaftFrame(d: RaftFrameDeps) {
   return {
     /** collapse the interpolation pair after a teleport */
     snap,
-    /** sim tick, AFTER sailing wrote x/z/yaw: wake, buoyancy, contact, grounding, deck water */
-    tickSea(dt: number): { aground: boolean } {
+    /** sim tick, AFTER sailing wrote x/z/yaw: wake, buoyancy, contact, beaching, deck water */
+    tickSea(dt: number): { aground: boolean; beached: boolean } {
       sea.ocean.advanceSpectrum(oceanParams);
       sea.cpuOcean.update(state.time);
       const fwd = rotateVec(raft.quaternion, [0, 0, 1]);
@@ -96,10 +99,12 @@ export function createRaftFrame(d: RaftFrameDeps) {
         vessel.stemZ, vessel.transomZ, vessel.beamHalf * 2,
       );
       sea.flowFoam.advanceWake(dt);
-      stepShipBuoyancy(raft, sea.cpuOcean, dt);
+      // the raft's own displacement (§T.109): 15 t on a 0.3 m draft, not the galleon's 604 t on 2 m
+      stepShipBuoyancy(raft, sea.cpuOcean, dt, raftSeaParams);
       vessel.hullContact.update(raft, sea.cpuOcean, state.time);
-      // TODO(§T.101): raftBeaching replaces keel grounding once src/sailing/raftBeaching lands
-      const aground = stepShipGrounding(raft, vessel.hullContact, sea.archipelago.seabed, raftDraft, dt).aground;
+      // §T.100 in place of keel grounding: the log undersides meet the sand, she
+      // slows, and below beachHoldSpeed she is HELD until the crew push off
+      const b = stepRaftBeach(raft, d.beach, contacts, sea.archipelago.seabed, dt);
       vessel.deckWater.update(
         app.renderer,
         { quaternion: raft.quaternion, speed, seaSigma: sea.ocean.heightRms, hull: vessel.hullContact },
@@ -109,7 +114,7 @@ export function createRaftFrame(d: RaftFrameDeps) {
       prevQuat.copy(currQuat);
       currPos.fromArray(raft.position);
       currQuat.fromArray(raft.quaternion);
-      return { aground };
+      return { aground: b.aground, beached: b.beach.beached };
     },
     /** render, part one: everything that does not depend on this frame's camera */
     renderSea(frameDt: number, paused: boolean): void {

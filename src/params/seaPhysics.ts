@@ -5,6 +5,7 @@
  */
 import { registerParams, type ParamMeta } from './registry';
 import { brigantineParams, galleonParams, type ShipClassParams } from './ship';
+import { raftParams, type RaftParams } from './raft';
 
 export interface SeaPhysicsParams {
   /** CPU mirror grid N×N, power of two ≤ ocean resolution (§V.8) */
@@ -520,6 +521,68 @@ export const brigantineSeaParams: SeaPhysicsParams = registerParams(
   'sea-brigantine',
   brigantineSea(seaPhysicsParams),
   seaPhysicsMeta(),
+);
+
+/**
+ * THE RAFT (§T.109 R3e) — Kon-Tiki, nine balsa logs and no loft at all
+ * (`hullContact` falls back to the blueprint box). Every hull-form number is
+ * read off `raftParams` or `docs/raft2100/kon-tiki-reference.md` §1 and
+ * cited per key; `// EST` marks a guess. She floats with her logs HALF
+ * submerged [§1 Draft], so the design waterline is the log axis
+ * (`logAxisY` = 0), the keel is the log underside one radius below it, and
+ * the spring is set so m·g/K lands exactly on that draft — the marks are
+ * hers, not a textbook's. `mass` deliberately matches `raftBeachingParams`
+ * (15 t: green logs mid-voyage; 20 t is the Oslo 1947 waterlogged figure).
+ * Everything belonging to the SEA (mirror, slices, kernels, Smith scale,
+ * slam thresholds, friction) is the galleon's, as for the brigantine.
+ */
+function raftSea(g: SeaPhysicsParams, r: RaftParams = raftParams): SeaPhysicsParams {
+  const GRAVITY = 9.81;
+  const mass = 15000; // [§1 Weight] ~20 t waterlogged (Oslo 1947); 15 t = raftBeachingParams.mass, one number for buoyancy AND beaching
+  const draft = r.logDiameterMax / 2; // [§1 Draft] logs ~half submerged → keel = log underside, one radius (0.3 m) under the axis
+  const freeboard = r.logDiameterMax / 2; // [§1 Freeboard] the body ends at the log TOP, 0.3 m up (the 45 cm cabin sill is a structure, not hull)
+  const bowZ = r.logCentreLength / 2; // [§1 Centre log] 13.7 m, projecting at both ends
+  const sternZ = -r.logCentreLength / 2 - r.sternProjection; // [§1 Stern] three middle logs project ~0.6 m
+  const halfBeam = r.crossbeamLength / 2; // [§1 Cross-beams] ~5.5 m long → beam 5–5.5 m [§1 Overall]
+  const lwl = bowZ - sternZ;
+  // ρ·g·A_wp: nine logs × ~0.55 m mean beam × ~11.4 m mean length ≈ 56 m² → 5.6e5 N/m (EST); the
+  // ride-height form m·g/T = 4.9e5 is within 15 % of it and puts her exactly on her marks, so it wins
+  const spring = (mass * GRAVITY) / draft;
+  const planRatio = spring / g.buoyancySpring;
+  const massRatio = mass / g.mass;
+  return {
+    ...g,
+    hullBowZ: bowZ,
+    hullSternZ: sternZ,
+    hullHalfBeam: halfBeam,
+    hullDraft: draft,
+    hullFreeboard: freeboard,
+    buoyancySpring: spring,
+    mass,
+    // c ∝ √(K·M) keeps ζ (§V.53) the galleon's; the flat-raft scales below are what differ
+    buoyancyDamping: g.buoyancyDamping * Math.sqrt(planRatio * massRatio),
+    // EST: a 5.5 m wide slab with no keel and no bilge follows the surface instead of
+    // swinging through it — nothing to roll ABOUT. ζ_roll up from 0.09 toward critical.
+    rollDampingScale: 0.6,
+    pitchDampingScale: 0.6, // EST: same argument fore-aft; the logs bend to the swell, they do not pitch against it
+    // gyradii as the galleon's (0.25·L_wl pitch, 0.45·B roll) on 15 t: I ∝ m·L² — low, as a log raft is
+    inertiaPitch: mass * (0.25 * lwl) ** 2,
+    inertiaRoll: mass * (0.45 * 2 * halfBeam) ** 2,
+    // spring/damper ∝ mass, so rest penetration in the sand is unchanged (raftBeaching scales the same way)
+    groundingSpring: g.groundingSpring * massRatio,
+    groundingDamping: g.groundingDamping * massRatio,
+  };
+}
+
+export const raftSeaParams: SeaPhysicsParams = registerParams(
+  'sea-physics-raft',
+  raftSea(seaPhysicsParams),
+  {
+    ...seaPhysicsMeta(),
+    mass: { min: 5e3, max: 6e4, step: 500 },
+    inertiaPitch: { min: 1e4, max: 1e7, step: 1e4 },
+    inertiaRoll: { min: 1e4, max: 1e7, step: 1e4 },
+  },
 );
 
 function seaPhysicsMeta(): Partial<Record<keyof SeaPhysicsParams, ParamMeta>> {

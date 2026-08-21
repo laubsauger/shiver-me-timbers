@@ -11,6 +11,13 @@
  * - actions: every station name maps to ONE documented control with the
  *   documented clamp; a name that maps to nothing is the §V.62 defect.
  * - tuning: `activeRaftTuning()` is a live switch and must be read per tick.
+ * - beaching (§T.109): the tick wrapper must run `stepRaftBeaching` AFTER
+ *   sailing on the raft's own params, hold her once beached, and route the
+ *   `push-off` station to `pushOff` — and only offer it while beached. A
+ *   raft that sails through the sand, or a push-off that does nothing, is
+ *   the §V.62 dead-knob shape.
+ * - raft sea params: the raft is 15 t on a 0.3 m draft; floating her on the
+ *   galleon's 604 t / 2 m (what §T.98 shipped) puts the deck under water.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SIM_DT } from '../src/core/loop';
@@ -25,15 +32,24 @@ import {
   skipToDawn,
 } from '../src/raft/raftWorld';
 import { raftWorldParams } from '../src/params/raftWorld';
-import { motionOf, quatFromAxisAngle, quatMul, rotateVec, stepRaftShip, writeMotion, yawOf } from '../src/raft/raftShip';
+import {
+  motionOf, pushOffRaft, quatFromAxisAngle, quatMul, rotateVec, stepRaftBeach, stepRaftShip, writeMotion, yawOf,
+} from '../src/raft/raftShip';
 import {
   applyDebugChannel,
   applyRaftAction,
   bindRaftActions,
   initialRaftControls,
   radio,
+  raftBeach,
   type ActionHost,
 } from '../src/raft/raftActions';
+import { neutralRaftBeaching, raftContactPoints } from '../src/sailing/raftBeaching';
+import { raftBeachingParams } from '../src/params/raftBeaching';
+import { brigantineSeaParams, raftSeaParams, seaPhysicsParams } from '../src/params/seaPhysics';
+import { equilibriumDraft } from '../src/sea-physics/buoyancy';
+import { getParamsEntry } from '../src/params/registry';
+import { raftParams } from '../src/params/raft';
 import { RAFT_ACTIONS } from '../src/player/stations';
 import * as raftSailingParams from '../src/params/raftSailing';
 import { PRESET_STORMINESS, WEATHER_PRESET_NAMES } from '../src/weather/presets';
@@ -274,5 +290,117 @@ describe('RaftAction → RaftControls (§V.84, §V.62)', () => {
     expect(c.sheet).toBe(1);
     applyDebugChannel(c, 'dawn', 1, s);
     expect(s.skipToDawn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('raft SeaPhysicsParams (§T.109: 15 t on a log-radius draft, not the galleon)', () => {
+  it('is registered, light, shallow, and floats on her marks (logs half submerged)', () => {
+    expect(getParamsEntry('sea-physics-raft')?.params).toBe(raftSeaParams);
+    expect(raftSeaParams.hullDraft).toBeLessThan(0.4);
+    expect(raftSeaParams.hullDraft).toBeCloseTo(raftParams.logDiameterMax / 2, 9);
+    expect(raftSeaParams.mass).toBeGreaterThanOrEqual(10000);
+    expect(raftSeaParams.mass).toBeLessThanOrEqual(25000);
+    // one mass for buoyancy and beaching, or the sand carries a different raft than the sea does
+    expect(raftSeaParams.mass).toBe(raftBeachingParams.mass);
+    // m·g/K = draft: the design waterline IS the log axis
+    expect(Math.abs(equilibriumDraft(raftSeaParams))).toBeLessThan(0.01);
+    expect(raftSeaParams.hullFreeboard).toBeLessThan(0.5);
+    // the plan is the raft's, not the galleon's or the brigantine's
+    expect(raftSeaParams.hullHalfBeam).toBeCloseTo(raftParams.crossbeamLength / 2, 9);
+    expect(raftSeaParams.hullBowZ - raftSeaParams.hullSternZ).toBeCloseTo(raftParams.logCentreLength + raftParams.sternProjection, 9);
+    expect(raftSeaParams.inertiaPitch).toBeLessThan(seaPhysicsParams.inertiaPitch / 50);
+    expect(raftSeaParams.rollDampingScale).toBeGreaterThan(brigantineSeaParams.rollDampingScale);
+    // the sea's own numbers are carried over, not retyped
+    expect(raftSeaParams.mirrorResolution).toBe(seaPhysicsParams.mirrorResolution);
+    expect(raftSeaParams.smithDepthScale).toBe(seaPhysicsParams.smithDepthScale);
+  });
+});
+
+describe('beaching through the tick wrapper (§T.109, §T.100)', () => {
+  const wind = { speed: 8, direction: 0 };
+  /** a beach apron rising toward +z: seabed −3 m at z ≤ 0, up through the waterline at z = 30 */
+  const apron = { heightAt: (_x: number, z: number): number => -3 + Math.max(0, z) * 0.1 };
+  const deep = { heightAt: (): number => -50 };
+
+  it('stepRaftBeach after stepRaftShip grounds her on a rising beach, HOLDS her, and the sail cannot creep her', () => {
+    const s = ship({ position: [0, 0, 0] });
+    const holder = { state: neutralRaftBeaching() };
+    const c = initialRaftControls();
+    c.sheet = 1;
+    const points = raftContactPoints();
+    expect(points.length).toBeGreaterThan(9);
+    let beachedAt = -1;
+    for (let i = 0; i < 6000 && beachedAt < 0; i++) {
+      stepRaftShip(s, c, wind, SIM_DT);
+      const b = stepRaftBeach(s, holder, points, apron, SIM_DT);
+      if (b.beach.beached) beachedAt = i;
+    }
+    expect(beachedAt).toBeGreaterThan(0);
+    expect(holder.state.beached).toBe(true);
+    expect(holder.state.hold).not.toBeNull();
+    const hold = [...s.position] as [number, number, number];
+    const yaw = yawOf(s.quaternion);
+    // she is in the sand, not out at sea: the log undersides reach the apron
+    expect(apron.heightAt(hold[0], hold[2])).toBeGreaterThan(-raftSeaParams.hullDraft - raftBeachingParams.draft - 0.5);
+    for (let i = 0; i < 500; i++) {
+      stepRaftShip(s, c, wind, SIM_DT);
+      stepRaftBeach(s, holder, points, apron, SIM_DT);
+    }
+    expect(s.position[0]).toBeCloseTo(hold[0], 9);
+    expect(s.position[2]).toBeCloseTo(hold[2], 9);
+    expect(yawOf(s.quaternion)).toBeCloseTo(yaw, 9);
+    expect(Math.hypot(s.velocity[0], s.velocity[2])).toBe(0);
+    expect(holder.state.beached).toBe(true);
+  });
+
+  it('in deep water nothing happens, and the state object is replaced, not mutated (§V.3)', () => {
+    const s = ship({ position: [0, -0.1, 0], velocity: [0, 0, 1.5] });
+    const before = neutralRaftBeaching();
+    const holder = { state: before };
+    const b = stepRaftBeach(s, holder, raftContactPoints(), deep, SIM_DT);
+    expect(b.aground).toBe(false);
+    expect(holder.state.beached).toBe(false);
+    expect(holder.state).not.toBe(before);
+    expect(before).toEqual(neutralRaftBeaching());
+  });
+
+  it('pushOffRaft backs a beached raft astern and frees the hold; it refuses (writes nothing) afloat', () => {
+    const afloat = ship({ velocity: [0, 0, 1] });
+    const holder = { state: neutralRaftBeaching() };
+    expect(pushOffRaft(afloat, holder)).toBe(false);
+    expect(afloat.velocity).toEqual([0, 0, 1]);
+    const yaw = 0.7;
+    const s = ship({ position: [5, 0, 20], quaternion: quatFromAxisAngle([0, 1, 0], yaw) });
+    holder.state = { beached: true, release: 0, hold: [5, 0, 20], holdYaw: yaw };
+    expect(pushOffRaft(s, holder)).toBe(true);
+    expect(holder.state.beached).toBe(false);
+    expect(holder.state.release).toBeCloseTo(raftBeachingParams.pushOffTime, 9);
+    const astern = rotateVec(s.quaternion, [0, 0, -1]);
+    const v = raftBeachingParams.pushOffSpeed;
+    expect(s.velocity[0]).toBeCloseTo(astern[0] * v, 9);
+    expect(s.velocity[2]).toBeCloseTo(astern[2] * v, 9);
+    expect(yawOf(s.quaternion)).toBeCloseTo(yaw, 9);
+  });
+
+  it('the push-off station routes to the pushOff sink, and the entry gates it on raftBeach.state.beached', () => {
+    const c = initialRaftControls();
+    const s = ship({ position: [0, 0, 0] });
+    const sinks = { skipToDawn: vi.fn(), pushOff: () => void pushOffRaft(s, raftBeach) };
+    const actionEnabled = (a: string): boolean => a !== 'push-off' || raftBeach.state.beached;
+    const saved = raftBeach.state;
+    try {
+      raftBeach.state = neutralRaftBeaching();
+      expect(actionEnabled('push-off')).toBe(false);
+      expect(actionEnabled('tiller')).toBe(true);
+      applyRaftAction(c, 'push-off', undefined, sinks);
+      expect(s.velocity).toEqual([0, 0, 0]); // afloat: the sink is a no-op
+      raftBeach.state = { beached: true, release: 0, hold: [0, 0, 0], holdYaw: 0 };
+      expect(actionEnabled('push-off')).toBe(true);
+      applyRaftAction(c, 'push-off', undefined, sinks);
+      expect(raftBeach.state.beached).toBe(false);
+      expect(s.velocity[2]).toBeCloseTo(-raftBeachingParams.pushOffSpeed, 9);
+    } finally {
+      raftBeach.state = saved;
+    }
   });
 });

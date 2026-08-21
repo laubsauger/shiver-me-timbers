@@ -13,23 +13,36 @@
  *   radio         → radio.tune    0..1 (stub store until §T.103)
  *   sleep         → sinks.skipToDawn()
  *   chart         → no-op (§T.104)
- *   push-off      → sinks.pushOff() when the beaching wiring provides it (§T.100)
+ *   push-off      → sinks.pushOff() — `pushOffRaft` in raftShip.ts (§T.100/§T.109)
  *   ladder, gangway-* → no-op here: interact.ts owns the perch and the step-off
  *
  * `raftControls` is the module-level object the sim tick hands to
  * `stepRaftShip`; the handlers mutate it in place, which is why it is not
- * recreated per tick.
+ * recreated per tick. `raftBeach` is its sibling for §T.100's beaching
+ * memory: `stepRaftBeaching` returns NEW plain data each tick (§V.3), so the
+ * holder is what stays put and `.state` is what gets replaced — the frame
+ * writes it, `actionEnabled` and the dev console (`__game.beach`) read it.
+ * It is not on `SimState` (yet): one raft, one beach, and §T.98 keeps the
+ * state type additive-only for the pirate sim.
  */
 import { neutralRaftControls, type RaftControls } from '../sailing/raftKinematics';
+import { neutralRaftBeaching, type RaftBeachingState } from '../sailing/raftBeaching';
 import { RAFT_ACTIONS, type RaftAction } from '../player/stations';
 import type { DebugChannel } from '../player/debugKeys';
 
 export interface RaftActionSinks {
   /** the sleeping mat: advance the day clock to dawn */
   skipToDawn(): void;
-  /** §T.100 push-off from a beach; absent until the beaching state is wired (raftBeaching.ts) */
+  /** §T.100 push-off from a beach; optional so a host without beaching wired (tests, preview) still binds */
   pushOff?(): void;
 }
+
+/** the beaching memory beside `raftControls`; `.state` is replaced, never mutated (§V.3) */
+export interface RaftBeachHolder {
+  state: RaftBeachingState;
+}
+
+export const raftBeach: RaftBeachHolder = { state: neutralRaftBeaching() };
 
 /** radio stub — the knob's value, read by nothing yet (§T.103 wires the tuner) */
 export const radio = { tune: 0 };

@@ -11,13 +11,21 @@
  * y-x'-z''), the yaw is replaced, and pitch and roll go back in untouched.
  * `position[1]` and `velocity[1]` are never written here.
  *
+ * The same seam serves §T.100's beaching (`stepRaftBeach`, `pushOffRaft`):
+ * both are planar too, and a beached raft held at her hold-point still
+ * heaves, pitches and rolls on whatever buoyancy gives her.
+ *
  * Quaternion helpers are local: the shared ones live in `combat/quatMath`,
  * and §V.81 keeps the raft entry out of that directory.
  */
 import type { Quat, ShipState, Vec3 } from '../state/simState';
 import type { Wind } from '../sailing/shipKinematics';
 import { stepRaftSailing, type RaftControls, type RaftMotion, type RaftStep } from '../sailing/raftKinematics';
+import { pushOff, stepRaftBeaching, type RaftBeachingStep } from '../sailing/raftBeaching';
+import type { SeabedField } from '../sea-physics/grounding';
 import { activeRaftTuning } from '../params/raftSailing';
+import { raftBeachingParams } from '../params/raftBeaching';
+import { raftSeaParams, type SeaPhysicsParams } from '../params/seaPhysics';
 
 export function quatMul(a: Quat, b: Quat): Quat {
   const [ax, ay, az, aw] = a;
@@ -110,4 +118,39 @@ export function stepRaftShip(ship: ShipState, c: RaftControls, wind: Wind, dt: n
   ship.rudder = clamp(Number.isFinite(c.oarAngle) ? c.oarAngle : 0, -1, 1);
   ship.sailTrim = c.sailUp ? clamp(Number.isFinite(c.sheet) ? c.sheet : 0, 0, 1) : 0;
   return out;
+}
+
+/** the `.state`-replacing holder `raftActions.ts` exports as `raftBeach` */
+export interface BeachHolder {
+  state: RaftBeachingStep['beach'];
+}
+
+/**
+ * One sim tick of beaching on a ShipState, AFTER `stepRaftShip` and after
+ * buoyancy has written y this tick (the log undersides are probed at the
+ * raft's live height). Planar result written back, the new beach state
+ * into the holder; the seabed is the archipelago's field. Params are read
+ * live (§V.62): the beaching knobs and the raft's own SeaPhysicsParams.
+ */
+export function stepRaftBeach(
+  ship: ShipState,
+  holder: BeachHolder,
+  points: readonly Vec3[],
+  seabed: SeabedField,
+  dt: number,
+  sea: SeaPhysicsParams = raftSeaParams,
+): RaftBeachingStep {
+  const out = stepRaftBeaching(motionOf(ship), holder.state, points, seabed, dt, raftBeachingParams, sea);
+  writeMotion(ship, out.motion);
+  holder.state = out.beach;
+  return out;
+}
+
+/** the crew shove her off the sand; false (and nothing written) when she is not beached */
+export function pushOffRaft(ship: ShipState, holder: BeachHolder): boolean {
+  if (!holder.state.beached) return false;
+  const out = pushOff(motionOf(ship), holder.state, raftBeachingParams);
+  writeMotion(ship, out.motion);
+  holder.state = out.beach;
+  return true;
 }

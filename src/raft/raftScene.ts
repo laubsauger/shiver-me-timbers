@@ -69,6 +69,9 @@ export function buildRaftSea(app: App, state: SimState, sky: SkyHandle, weather:
   clouds.attachTo(app.scene);
   const caustics = createCaustics(ocean, { sunLight: sky.sunLight });
   setActiveCaustics(caustics);
+  // TODO(§T.99): `import { generateSierraSites } from '../island/sierraSites'` and pass
+  // `sites: generateSierraSites(state.seed, …)` here, so the raft sails the Sierra
+  // slices and not the pirate sites (`createArchipelago` already takes `sites`)
   const archipelago = createArchipelago({ seed: state.seed });
   app.scene.add(archipelago.group);
   const fetchField = createFetchField(archipelago.seabed);

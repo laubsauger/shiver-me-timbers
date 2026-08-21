@@ -29,8 +29,8 @@ import { createPlayer } from './player';
 import { createHands } from './player/hands';
 import { buildRaftSea, buildRaftVessel } from './raft/raftScene';
 import { createRaftFrame } from './raft/raftFrame';
-import { stepRaftShip } from './raft/raftShip';
-import { applyDebugChannel, bindRaftActions, radio, raftControls } from './raft/raftActions';
+import { pushOffRaft, stepRaftShip } from './raft/raftShip';
+import { applyDebugChannel, bindRaftActions, radio, raftBeach, raftControls } from './raft/raftActions';
 import { bootTimeOfDay, calmPreset, createDayClock } from './raft/raftWorld';
 import type { Object3D } from 'three/webgpu';
 
@@ -160,12 +160,13 @@ async function boot(): Promise<void> {
   const { assembly } = vessel;
   assembly.group.updateMatrixWorld(true);
   const tillerLocal = assembly.socketWorldPosition('station-tiller'); // assembly is at the origin here
-  const sinks = { skipToDawn: () => clock.skipToDawn() };
-  // TODO(§T.100): swap for the `ashore` ground sampler once src/player/ashore lands
-  const groundAt = (x: number, z: number): number | null => {
-    const h = sea.archipelago.seabed.heightAt(x, z);
-    return h > 0 ? h : null;
+  const sinks = {
+    skipToDawn: () => clock.skipToDawn(),
+    pushOff: () => void pushOffRaft(raft, raftBeach),
   };
+  // the island field, unfiltered: the player's terrain surface (`ashore.ts`)
+  // and the gangway decide for themselves where water − swimDepth ends ground
+  const groundAt = (x: number, z: number): number => sea.archipelago.seabed.heightAt(x, z);
   const socketWorld = (id: string): [number, number, number] | null => {
     try {
       return assembly.socketWorldPosition(id);
@@ -189,6 +190,7 @@ async function boot(): Promise<void> {
     hands: createHands(),
     socketWorld,
     groundAt,
+    actionEnabled: (a) => a !== 'push-off' || raftBeach.state.beached,
     devLayerOn: () => ui.isDevLayerVisible(),
     onDebug: (ch, d) => applyDebugChannel(raftControls, ch, d, sinks),
     onToggle: () => setFp(!player.isActive()),
@@ -201,7 +203,7 @@ async function boot(): Promise<void> {
   app.scene.add(app.camera);
 
   const frame = createRaftFrame({
-    app, sea, vessel, sky, state, raft, weatherHere, audio, waterAt,
+    app, sea, vessel, sky, state, raft, beach: raftBeach, weatherHere, audio, waterAt,
     placeCamera: (view, dt) => followCam.update(view, dt, waterAt),
   });
   const jump = installJump({
@@ -284,7 +286,7 @@ async function boot(): Promise<void> {
 
   // dev console handle for the lookdev agent (§V.88) — not an interface contract
   (window as unknown as Record<string, unknown>).__game = {
-    app, state, sky, ui, player, raftControls, radio, clock, followCam, assembly, weather,
+    app, state, sky, ui, player, raftControls, radio, beach: raftBeach, clock, followCam, assembly, weather,
     archipelago: sea.archipelago, cpuOcean: sea.cpuOcean,
     jumpTo: jump.jumpTo, jumpTargets: jump.targets,
     setFp,
