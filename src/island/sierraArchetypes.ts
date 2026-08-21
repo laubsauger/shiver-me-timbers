@@ -63,6 +63,12 @@ export interface SierraMeta {
   terraceCount: number;
   /** drownedRidge: dead pines in the water (empty for the other families) */
   treeline: TreelineMarker[];
+  /**
+   * T112c: seeded ice-flow azimuth (rad). The erosion stage drags the form
+   * along it (stoss upstream: polished and gentle; lee downstream: plucked
+   * and steep). Drawn LAST from the rng so every earlier draw is unchanged.
+   */
+  iceAzimuth: number;
 }
 
 export interface SierraShape {
@@ -72,6 +78,8 @@ export interface SierraShape {
   /** post-basin shaping (the drowned crest); identity when absent */
   shape?(h: number, land: number, x: number, z: number): number;
   meta: Omit<SierraMeta, 'treeline'>;
+  /** the family's peak (m) — the erosion stage's UPLIFT mask is landAt/peak */
+  peak: number;
   /** drownedRidge: the axis segment the treeline is emitted along */
   treelineSegment?: { ax: number; az: number; bx: number; bz: number };
 }
@@ -170,7 +178,8 @@ function buildDome(
   ];
   return {
     features,
-    meta: { name: sheared ? 'halfDome' : 'dome', axis, terraceAzimuth: axis, terraceCount },
+    meta: { name: sheared ? 'halfDome' : 'dome', axis, terraceAzimuth: axis, terraceCount, iceAzimuth: 0 },
+    peak,
     landAt(x, z): number {
       const dx = x - ox;
       const dz = z - oz;
@@ -258,7 +267,8 @@ function buildDrownedRidge(
   const bankW = Math.max(width * 0.9, 1e-3); // §V28 floored divisor
   return {
     features,
-    meta: { name: 'drownedRidge', axis, terraceAzimuth: axis, terraceCount: 0 },
+    meta: { name: 'drownedRidge', axis, terraceAzimuth: axis, terraceCount: 0, iceAzimuth: 0 },
+    peak,
     // from just past the drown point to a little beyond the ridge's own end
     // — the bank keeps going under the rim envelope's reach
     treelineSegment: {
@@ -335,7 +345,8 @@ function buildCirque(
   }
   return {
     features,
-    meta: { name: 'cirque', axis, terraceAzimuth: axis, terraceCount: 0 },
+    meta: { name: 'cirque', axis, terraceAzimuth: axis, terraceCount: 0, iceAzimuth: 0 },
+    peak,
     landAt(x, z): number {
       // the ring's inner face is steepened by a smooth max against the
       // platform, the same operator the pirate features use
@@ -392,6 +403,9 @@ export function buildSierraShape(
   }
   const raw = shape.landAt;
   shape.landAt = (x, z) => sinkOpenWater(raw(x, z));
+  // T112c: the ice vector, drawn after everything else so the family's own
+  // draws (axis, offsets, terrace count) are byte-identical to pre-erosion
+  shape.meta.iceAzimuth = rng() * Math.PI * 2;
   return shape;
 }
 

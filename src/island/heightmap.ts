@@ -51,6 +51,8 @@ import {
   type SierraMeta,
   type SierraShape,
 } from './sierraArchetypes';
+import { buildErosionContext, erodeAndShape, type BakeStats, type ErosionBake } from './erosion';
+import { sierraParams } from '../params/sierra';
 
 /** structural subset of params/island.ts `IslandParams` used by generation */
 export interface IslandHeightmapParams {
@@ -95,6 +97,12 @@ export interface IslandHeightmapParams {
    * normal case) leaves `pickArchetype` in charge.
    */
   archetype?: ArchetypeName;
+  /**
+   * T112c: sierra islands run the erosion pass stage after the analytic
+   * composition. 'shapeOnly' keeps the old analytic result reachable (A/B in
+   * tests); undefined = 'full'. Pirate islands never enter the stage.
+   */
+  erosion?: 'full' | 'shapeOnly';
   /** sea stacks (see archetypes.buildSeaStacks) — fractions, resolved below */
   seaStackCount: number;
   seaStackRing: number;
@@ -137,6 +145,12 @@ export interface IslandHeightmap {
    * pirate island.
    */
   sierra?: SierraMeta;
+  /**
+   * T112c: the erosion bake's debris layer (m, talus thickness per cell —
+   * T112d/f read it) and its performance.now() timings. Undefined when the
+   * stage did not run (pirate islands, 'shapeOnly').
+   */
+  erosion?: { debris: Float32Array; bakeStats: BakeStats };
   /** bilinear height sample, island-local coords; outside grid → -rimDepth */
   heightAt(x: number, z: number): number;
 }
@@ -433,12 +447,18 @@ function findTerraceSite(
   return [bestX, bestZ];
 }
 
-export function generateIslandHeightmap(
+/** the analytic composition + (sierra) the erosion bake, split so a loader can yield */
+interface IslandBuild {
+  /** null when the island does not enter the erosion stage */
+  bake: ErosionBake | null;
+  finalize(): IslandHeightmap;
+}
+
+function buildIsland(
   seed: number,
   params: IslandHeightmapParams,
-  /** archetypes the caller wants avoided — the archipelago spreads silhouettes */
-  avoidArchetypes: readonly ArchetypeName[] = [],
-): IslandHeightmap {
+  avoidArchetypes: readonly ArchetypeName[],
+): IslandBuild {
   const p = params;
   const size = Math.max(2, Math.floor(p.gridSize));
   const R = p.radius;
@@ -605,12 +625,20 @@ export function generateIslandHeightmap(
   const data = new Float32Array(size * size);
   const cell = (2 * R) / (size - 1);
   let max = -Infinity;
+  // T112c: the archetype's landmass is the erosion stage's UPLIFT mask, read
+  // off during the same sweep rather than evaluated a second time
+  const erode = sierra !== null && p.erosion !== 'shapeOnly' && sierraParams.erosionEnabled > 0;
+  const uplift = erode ? new Float64Array(size * size) : null;
   for (let iz = 0; iz < size; iz++) {
     const z = -R + iz * cell;
     for (let ix = 0; ix < size; ix++) {
-      const h = rawHeight(-R + ix * cell, z);
+      const x = -R + ix * cell;
+      const h = rawHeight(x, z);
       data[iz * size + ix] = h;
       if (h > max) max = h;
+      if (uplift && sierra) {
+        uplift[iz * size + ix] = Math.min(Math.max(sierra.landAt(x, z) / sierra.peak, 0), 1);
+      }
     }
   }
 
@@ -627,39 +655,130 @@ export function generateIslandHeightmap(
     }
   }
 
-  const heightAt = (x: number, z: number): number => {
-    const gx = (x + R) / cell;
-    const gz = (z + R) / cell;
-    if (gx < 0 || gz < 0 || gx > size - 1 || gz > size - 1) return -p.rimDepth;
-    const x0 = Math.min(Math.floor(gx), size - 2);
-    const z0 = Math.min(Math.floor(gz), size - 2);
-    const fx = gx - x0;
-    const fz = gz - z0;
-    const i00 = data[z0 * size + x0];
-    const i10 = data[z0 * size + x0 + 1];
-    const i01 = data[(z0 + 1) * size + x0];
-    const i11 = data[(z0 + 1) * size + x0 + 1];
-    const a = i00 + (i10 - i00) * fx;
-    const b = i01 + (i11 - i01) * fx;
-    return a + (b - a) * fz;
+  // ── T112c EROSION PASS STAGE ─────────────────────────────────────────────
+  // After the peak floor, on the finished analytic grid: the archetype is the
+  // uplift, the passes own the silhouette from here. `heightAt` below reads
+  // the grid the stage wrote, so it stays the one truth for everything.
+  let bake: ErosionBake | null = null;
+  let field: { bedrock: Float64Array; debris: Float64Array } | null = null;
+  if (erode && sierra && uplift) {
+    const bedrock = Float64Array.from(data);
+    const debris = new Float64Array(size * size);
+    field = { bedrock, debris };
+    const name = sierra.meta.name;
+    const streamIters =
+      name === 'drownedRidge'
+        ? sierraParams.streamItersRidge
+        : name === 'cirque'
+          ? sierraParams.streamItersCirque
+          : sierraParams.streamItersDome;
+    const ctx = buildErosionContext({
+      size,
+      cell,
+      worldRadius: R,
+      peak: sierra.peak,
+      iceAzimuth: sierra.meta.iceAzimuth,
+      uplift,
+      h0: Float64Array.from(data),
+      noiseOffset: [ox, oz],
+      p: sierraParams,
+      streamIters,
+    });
+    bake = erodeAndShape({ size, cell, bedrock, debris }, ctx);
+  }
+
+  const finalize = (): IslandHeightmap => {
+    if (bake && !bake.done) throw new Error('generateIslandHeightmap: erosion bake not finished');
+    let erosion: IslandHeightmap['erosion'];
+    if (bake && field) {
+      for (let i = 0; i < data.length; i++) data[i] = field.bedrock[i] + field.debris[i];
+      erosion = { debris: Float32Array.from(field.debris), bakeStats: bake.stats };
+    }
+    return assemble(erosion);
   };
 
+  const assemble = (erosion: IslandHeightmap['erosion']): IslandHeightmap => {
+    const heightAt = (x: number, z: number): number => {
+      const gx = (x + R) / cell;
+      const gz = (z + R) / cell;
+      if (gx < 0 || gz < 0 || gx > size - 1 || gz > size - 1) return -p.rimDepth;
+      const x0 = Math.min(Math.floor(gx), size - 2);
+      const z0 = Math.min(Math.floor(gz), size - 2);
+      const fx = gx - x0;
+      const fz = gz - z0;
+      const i00 = data[z0 * size + x0];
+      const i10 = data[z0 * size + x0 + 1];
+      const i01 = data[(z0 + 1) * size + x0];
+      const i11 = data[(z0 + 1) * size + x0 + 1];
+      const a = i00 + (i10 - i00) * fx;
+      const b = i01 + (i11 - i01) * fx;
+      return a + (b - a) * fz;
+    };
+
+    return {
+      data,
+      size,
+      worldRadius: R,
+      heightAt,
+      archetype,
+      features,
+      lagoonCenter: p.lagoonDepth > 0 ? [bayX, bayZ] : null,
+      // the treeline is read off the FINISHED grid (after the peak floor and
+      // the erosion stage), so a marker is where the water actually is that
+      // shallow
+      sierra: sierra
+        ? {
+            ...sierra.meta,
+            treeline: sierra.treelineSegment ? emitTreeline(heightAt, sierra.treelineSegment) : [],
+          }
+        : undefined,
+      erosion,
+    };
+  };
+
+  return { bake, finalize };
+}
+
+export function generateIslandHeightmap(
+  seed: number,
+  params: IslandHeightmapParams,
+  /** archetypes the caller wants avoided — the archipelago spreads silhouettes */
+  avoidArchetypes: readonly ArchetypeName[] = [],
+): IslandHeightmap {
+  const b = buildIsland(seed, params, avoidArchetypes);
+  b.bake?.finish();
+  return b.finalize();
+}
+
+/**
+ * CHUNKED twin of `generateIslandHeightmap` (T112c): `step(msBudget)` does
+ * the analytic composition on its first call (one piece — it is a single
+ * sweep) and then erosion pass steps until the budget is spent; returns true
+ * once finished, after which `result()` assembles the island. Same code path
+ * as the one-shot, so the grids are byte-identical (pinned in
+ * tests/erosion.test.ts).
+ */
+export function generateIslandHeightmapChunked(
+  seed: number,
+  params: IslandHeightmapParams,
+  avoidArchetypes: readonly ArchetypeName[] = [],
+): { advance(msBudget: number): boolean; result(): IslandHeightmap } {
+  let b: IslandBuild | null = null;
+  let out: IslandHeightmap | null = null;
   return {
-    data,
-    size,
-    worldRadius: R,
-    heightAt,
-    archetype,
-    features,
-    lagoonCenter: p.lagoonDepth > 0 ? [bayX, bayZ] : null,
-    // the treeline is read off the FINISHED grid (after the peak floor), so a
-    // marker is where the water actually is that shallow
-    sierra: sierra
-      ? {
-          ...sierra.meta,
-          treeline: sierra.treelineSegment ? emitTreeline(heightAt, sierra.treelineSegment) : [],
-        }
-      : undefined,
+    advance(msBudget) {
+      if (!b) b = buildIsland(seed, params, avoidArchetypes);
+      if (b.bake && !b.bake.done) return b.bake.advance(msBudget);
+      return true;
+    },
+    result() {
+      if (!b) {
+        b = buildIsland(seed, params, avoidArchetypes);
+        b.bake?.finish();
+      }
+      if (!out) out = b.finalize();
+      return out;
+    },
   };
 }
 

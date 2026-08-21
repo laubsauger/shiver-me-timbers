@@ -93,3 +93,101 @@ export function triplanarFbm(
   const nz = fbm2(pos.xy, octaves, lacunarity, gain);
   return nx.mul(w.x).add(ny.mul(w.y)).add(nz.mul(w.z));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T112c twins of noiseCpu.ts's gradient noise (for T112d's terrain shading).
+// gradNoise2 → vec3(v, dv/dx, dv/dy); fbmDeriv2 → vec3; swissTurbulence2 →
+// float [0,1]. Same hash, same fade, same √2 normalisation as the CPU side.
+// CPU-only (no twin yet, the bake does not need them in a shader): ridged2Cpu,
+// jordanTurbulence2Cpu, domainWarp2Cpu.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 30t²(t−1)² — derivative of `fade` */
+export const fadeDeriv = /*@__PURE__*/ Fn(([t]: any[]) => {
+  const u = t.sub(1);
+  return t.mul(t).mul(u).mul(u).mul(30);
+});
+
+const gradAtNode = (i: any): any => {
+  const a = hash2(i).mul(Math.PI * 2);
+  return vec2(a.cos(), a.sin());
+};
+
+/** 2D Perlin gradient noise with analytic derivatives: vec3(v, dv/dx, dv/dy), v ∈ [-1, 1] */
+export const gradNoise2 = /*@__PURE__*/ Fn(([p]: any[]) => {
+  const i = p.floor();
+  // @band-limited-elsewhere: lattice-cell fraction for gradient noise; callers (fbmDeriv2) are octave-limited by the bake, not a screen-space edge
+  const f = p.fract();
+  const ga = gradAtNode(i);
+  const gb = gradAtNode(i.add(vec2(1, 0)));
+  const gc = gradAtNode(i.add(vec2(0, 1)));
+  const gd = gradAtNode(i.add(vec2(1, 1)));
+  const a = ga.dot(f);
+  const b = gb.dot(f.sub(vec2(1, 0)));
+  const c = gc.dot(f.sub(vec2(0, 1)));
+  const d = gd.dot(f.sub(vec2(1, 1)));
+  const u = fade(f.x);
+  const v = fade(f.y);
+  const du = fadeDeriv(f.x);
+  const dv = fadeDeriv(f.y);
+  const k1 = b.sub(a);
+  const k2 = c.sub(a);
+  const k3 = a.sub(b).sub(c).add(d);
+  const val = a.add(u.mul(k1)).add(v.mul(k2)).add(u.mul(v).mul(k3));
+  const gx = ga.x
+    .add(u.mul(gb.x.sub(ga.x)))
+    .add(v.mul(gc.x.sub(ga.x)))
+    .add(u.mul(v).mul(ga.x.sub(gb.x).sub(gc.x).add(gd.x)))
+    .add(du.mul(k1.add(v.mul(k3))));
+  const gy = ga.y
+    .add(u.mul(gb.y.sub(ga.y)))
+    .add(v.mul(gc.y.sub(ga.y)))
+    .add(u.mul(v).mul(ga.y.sub(gb.y).sub(gc.y).add(gd.y)))
+    .add(dv.mul(k2.add(u.mul(k3))));
+  return vec3(val, gx, gy).mul(Math.SQRT2);
+});
+
+/** fbm of gradNoise2 with the derivative carried (chain rule through freq); vec3, v ∈ [-1, 1] */
+export function fbmDeriv2(p: any, octaves: number, lacunarity = 2, gain = 0.5): any {
+  let sum: any = vec3(0);
+  let freq = 1;
+  let amp = 1;
+  let norm = 0;
+  for (let i = 0; i < octaves; i++) {
+    const n = gradNoise2(p.mul(freq));
+    sum = sum.add(vec3(n.x, n.y.mul(freq), n.z.mul(freq)).mul(amp));
+    norm += amp;
+    freq *= lacunarity;
+    amp *= gain;
+  }
+  return sum.div(norm);
+}
+
+/**
+ * Swiss turbulence twin of swissTurbulence2Cpu (octave count unrolled at
+ * build time). The sum-driven gain damping is the one data-dependent term,
+ * hence the running `sum`/`norm` nodes. Output [0, 1].
+ */
+export function swissTurbulence2(
+  p: any,
+  octaves: number,
+  lacunarity = 2,
+  gain = 0.5,
+  warp = 0.15,
+): any {
+  let sum: any = float(0);
+  let norm: any = float(0);
+  let ds: any = vec2(0);
+  let amp: any = float(1);
+  let freq = 1;
+  for (let i = 0; i < octaves; i++) {
+    const n = gradNoise2(p.add(ds.mul(warp)).mul(freq));
+    sum = sum.add(amp.mul(float(1).sub(n.x.abs())));
+    ds = ds.add(vec2(n.y, n.z).mul(n.x.negate()).mul(amp));
+    norm = norm.add(amp);
+    freq *= lacunarity;
+    // the data-dependent gain damping: amp *= gain · clamp(sum/norm, 0, 1)
+    amp = amp.mul(gain).mul(sum.div(norm).clamp(0, 1));
+  }
+  return sum.div(norm.max(1e-6));
+}
