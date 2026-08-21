@@ -71,4 +71,15 @@ describe('§V81 the raft entry never reaches into the pirate boot', () => {
     expect(all).toMatch(/setActiveCaustics\(/);
     expect(all).toMatch(/setActiveDeckWater\(/);
   });
+  it('§V93: one vessel — the entry pushes exactly one ship and never an enemy/AI', () => {
+    // createInitialState seeds an empty ships[]; the raft boot pushes the raft and nothing else.
+    const pushes = (mainRaft.match(/state\.ships\.push\(/g) ?? []).length;
+    expect(pushes).toBe(1);
+    for (const src of [mainRaft, ...Object.values(raftDir)]) {
+      // identifiers, not prose: the header comment may SAY 'no enemy'
+      expect(src).not.toMatch(/\b(buildBrigantineBlueprint|buildGalleonBlueprint|createCombatArena|createShipAi|enemyBlueprint)\b/);
+      expect(imports(src).some((p) => /enemy|\/ai\b/.test(p))).toBe(false);
+    }
+  });
+
 });
