@@ -36,7 +36,7 @@ import { oceanParams, type OceanParams } from '../src/params/ocean';
 import { seaPhysicsParams } from '../src/params/seaPhysics';
 import { SIM_DT } from '../src/core/loop';
 import { GRAVITY } from '../src/ocean/oceanMath';
-import { quatFromAxisAngle, rotateVec } from '../src/combat/quatMath';
+import { quatFromAxisAngle, rotateVec } from '../src/core/quat';
 import type { ShipState } from '../src/state/simState';
 
 const DT = SIM_DT;

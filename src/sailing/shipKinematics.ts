@@ -26,7 +26,7 @@
  */
 import type { Quat, ShipState } from '../state/simState';
 import type { InputState } from './input';
-import { quatFromAxisAngle, quatMul, rotateVec } from '../combat/quatMath';
+import { quatFromAxisAngle, quatMul, rotateVec } from '../core/quat';
 import { groundGrip } from '../sea-physics/grounding';
 import { sailingParams, type SailingParams } from '../params/sailing';
 // THE YARDS ARE SIM STATE NOW (§T.76), so the sim reads the rig's own numbers.

@@ -15,7 +15,7 @@ import type { Quat, SimState, ProjectileState, Vec3 } from '../state/simState';
 import type { AABB } from '../ship/pieceTypes';
 import { SIM_DT } from '../core/loop';
 import { combatParams } from '../params/combat';
-import { invRotateVec, lerp, scale, sub } from './quatMath';
+import { invRotateVec, lerp, scale, sub } from '../core/quat';
 
 export interface HitTarget {
   shipIndex: number;

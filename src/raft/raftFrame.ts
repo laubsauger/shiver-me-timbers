@@ -15,7 +15,7 @@ import type { App } from '../core/app';
 import type { SkyHandle } from '../sky';
 import type { ShipState, SimState } from '../state/simState';
 import type { WeatherSample } from '../weather';
-import type { AudioFrame, AudioSystem, ShipAudioInput } from '../audio';
+import type { AudioSystem } from '../audio';
 import { oceanParams } from '../ocean';
 import { skyParams } from '../params/sky';
 import { shipRigParams } from '../params/ship';
@@ -25,7 +25,9 @@ import { raftContactPoints } from '../sailing/raftBeaching';
 import { updateRig } from '../ship/rigTrim';
 import { trimDropScale } from '../ship/sailDynamics';
 import { palmWindStrength } from '../vegetation';
-import { rotateVec, stepRaftBeach, type BeachHolder } from './raftShip';
+import { rotateVec } from '../core/quat';
+import { createShipAudioFeed } from '../core/bootShared';
+import { stepRaftBeach, type BeachHolder } from './raftShip';
 import type { RaftSea, RaftVessel } from './raftScene';
 
 export interface RaftFrameDeps {
@@ -66,14 +68,9 @@ export function createRaftFrame(d: RaftFrameDeps) {
   let bowImmersion = 0;
   let drop = 1;
 
-  const audioShip: ShipAudioInput = {
-    position: raft.position, quaternion: raft.quaternion, velocity: raft.velocity,
-    angularVelocity: raft.angularVelocity, sailTrim: raft.sailTrim, bowImmersion: 0, bowWorld: [0, 0, 0],
-  };
-  const audioBowWorld = audioShip.bowWorld as [number, number, number];
-  const audioFrame: AudioFrame = {
-    dt: 0, camera: app.camera, wind: { speed: 0, direction: 0 }, weather: state.weather, ship: audioShip,
-  };
+  // the hoisted per-frame audio input, built and filled the same way main.ts
+  // does — one implementation, in core/bootShared (§V95)
+  const audioFeed = createShipAudioFeed(app.camera, state);
 
   const snap = (): void => {
     currPos.fromArray(raft.position);
@@ -188,22 +185,8 @@ export function createRaftFrame(d: RaftFrameDeps) {
     },
     /** audio LAST: the listener reads camera.matrixWorld, final only after the render */
     renderAudio(frameDt: number): void {
-      audioFrame.dt = frameDt;
-      audioFrame.wind.speed = state.wind.speed;
-      audioFrame.wind.direction = state.wind.direction;
-      audioFrame.weather = state.weather;
-      audioShip.position = renderShipView.position;
-      audioShip.quaternion = renderShipView.quaternion;
-      audioShip.velocity = raft.velocity;
-      audioShip.angularVelocity = raft.angularVelocity;
-      audioShip.sailTrim = raft.sailTrim;
-      audioShip.bowImmersion = bowImmersion;
-      audioShip.contact = vessel.hullContact;
-      audioShip.sailDrop = drop;
-      audioBowWorld[0] = bowWorld.x;
-      audioBowWorld[1] = bowWorld.y;
-      audioBowWorld[2] = bowWorld.z;
-      d.audio.update(audioFrame);
+      audioFeed.publish(frameDt, raft, renderShipView, bowImmersion, bowWorld, drop, vessel.hullContact);
+      d.audio.update(audioFeed.frame);
     },
   };
 }

@@ -11,7 +11,7 @@
  * differently-sampled sea would put the spray back off the waves (§B.7).
  */
 import { describe, expect, it } from 'vitest';
-import { quatFromAxisAngle, quatMul, rotateVec } from '../src/combat/quatMath';
+import { quatFromAxisAngle, quatMul, rotateVec } from '../src/core/quat';
 import { oceanParams, type OceanParams } from '../src/params/ocean';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../src/params/seaPhysics';
 import { cascadeBand, spectralHeightVariance } from '../src/ocean/oceanMath';

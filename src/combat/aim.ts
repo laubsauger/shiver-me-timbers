@@ -25,7 +25,7 @@ import type { Quat, Vec3 } from '../state/simState';
 import { combatParams, type CombatParams } from '../params/combat';
 import { shotRange } from './ballistics';
 import type { BroadsideSide } from './battery';
-import { add, rotateVec } from './quatMath';
+import { add, rotateVec } from '../core/quat';
 
 /** the player's gun lay: one number, clamped to what the carriages allow */
 export interface Aim {

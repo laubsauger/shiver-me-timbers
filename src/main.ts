@@ -12,14 +12,13 @@ import { createOceanSim, oceanParams } from './ocean';
 import { OceanSurface } from './ocean/oceanSurface';
 import { createFoamSim, createSpray, createBowSpray } from './foam';
 import { createFlowFoam } from './flowfoam';
-import { rotateVec } from './combat/quatMath';
+import { rotateVec } from './core/quat';
 import { createCombatArena, createCombatRuntime, createGunnery, viewBearing } from './combat';
 import type { FireOrder } from './combat';
 import { createClouds } from './clouds';
 import { skyParams } from './params/sky';
 import { buildBrigantineBlueprint, buildGalleonBlueprint } from './ship/shipBlueprint';
-import { ShipAssembly, type MaterialFactory } from './ship/shipAssembly';
-import { createHoleMaterial, createPieceMaterial } from './ship/pieceMaterials';
+import { ShipAssembly } from './ship/shipAssembly';
 import { createDeckFieldTexture } from './ship/deckFieldTexture';
 import { updateRig } from './ship/rigTrim';
 import { trimDropScale } from './ship/sailDynamics';
@@ -41,15 +40,14 @@ import {
   type CompilePhase,
 } from './core/compileProfile';
 import { installNodeTypeCache } from './core/nodeTypeCache';
+import { createPostWarmGate, withFullCoverage } from './core/bootCompile';
+import { bindResolution, bindWorldSettings } from './core/bootSettings';
+import { bootReady, finishSplashTitleEntrance, showBootPhase } from './core/bootSplash';
+import { createPieceMaterialCache, createShipAudioFeed } from './core/bootShared';
 // exposed on __game so a browser check can re-rank without a reload
 import { postParams } from './params/post';
-import { applyWorldSettings, createGameUI, initGraphicsSettings, setFeatureSink } from './ui';
-import {
-  createAudio,
-  attachAudioSettings,
-  type AudioFrame,
-  type ShipAudioInput,
-} from './audio';
+import { createGameUI, initGraphicsSettings, setFeatureSink } from './ui';
+import { createAudio, attachAudioSettings } from './audio';
 import { CpuOcean } from './sea-physics/cpuOcean';
 import { stepShipBuoyancy } from './sea-physics/buoyancy';
 import {
@@ -108,95 +106,6 @@ const FEATURES = {
 const BOOT_BASELINE =
   new URLSearchParams(window.location.search).get('boot') === 'baseline';
 
-/**
- * Bound a COSMETIC wait so it can never gate boot (§V.39, §B.21).
- *
- * Everything the presentation layer offers to wait on — `requestAnimationFrame`
- * and the Web Animations `finished` promise alike — is driven by the frame
- * clock, and Chrome STOPS that clock in a hidden tab. Measured on this page:
- * 3037ms of wall clock, 0 rAF callbacks, animation `currentTime` still 0 with
- * `playState: 'running'`. A promise from that clock does not resolve late in a
- * background tab, it resolves NEVER — and every automated verification of this
- * project runs in exactly that tab.
- *
- * So: race the pretty thing against a real timer, and swallow its rejection.
- * `setTimeout` keeps running when hidden; that is the whole reason it is here
- * and not another rAF.
- */
-function atMost(work: Promise<unknown>, ms: number): Promise<void> {
-  return Promise.race([
-    // a cancelled animation REJECTS (AbortError) — cosmetics must not throw
-    // into the boot chain, so the rejection is absorbed here.
-    work.then(
-      () => undefined,
-      () => undefined,
-    ),
-    new Promise<void>((resolve) => {
-      window.setTimeout(resolve, ms);
-    }),
-  ]);
-}
-
-const afterSplashPaint = (): Promise<void> => {
-  // a hidden tab paints nothing and fires no rAF, so there is no paint to wait
-  // for — skip rather than pay the deadline once per boot phase.
-  if (document.visibilityState === 'hidden') return Promise.resolve();
-  return atMost(
-    new Promise<void>((resolve) => {
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-    }),
-    PAINT_DEADLINE_MS,
-  );
-};
-
-/** two frames at 60Hz plus slack; a hidden tab pays this once per phase */
-const PAINT_DEADLINE_MS = 120;
-/** last letter lands at ~1.71s (888ms delay + 820ms); slack for a slow load */
-const ENTRANCE_DEADLINE_MS = 2500;
-
-/**
- * Let the splash title complete its entrance before scene construction takes
- * the main thread. CSS animation time keeps advancing during a long task, but
- * its intermediate frames cannot be painted; starting the build immediately
- * therefore left the title visibly stranded halfway through the word.
- *
- * This waits on the real final-letter animation rather than duplicating its
- * duration here. Two animation frames after `finished` are intentional: rAF
- * callbacks run before paint, so the first frame commits the final style and
- * the second proves that final style has actually had a paint opportunity.
- *
- * Every wait in here is a COURTESY to a human watching, and is bounded
- * accordingly (see `atMost`). Nothing cosmetic may throw either: a missing
- * splash element means the entrance cannot be watched, which is worth a
- * warning and nothing more — it is not worth the whole application.
- */
-async function finishSplashTitleEntrance(): Promise<void> {
-  // nobody is watching a hidden tab, and its frame clock is stopped anyway
-  if (document.visibilityState === 'hidden') return;
-  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-
-  const letters = document.querySelectorAll<HTMLElement>('.boot-splash__letter');
-  const lastLetter = letters.item(letters.length - 1);
-  if (!lastLetter) {
-    console.warn('[boot] no splash title letters — skipping the entrance wait');
-    return;
-  }
-
-  const entrance = lastLetter
-    .getAnimations()
-    .find(
-      (animation) =>
-        animation instanceof CSSAnimation && animation.animationName === 'boot-letter-rise',
-    );
-  if (!entrance) {
-    console.warn('[boot] no splash title entrance animation — skipping the wait');
-    return;
-  }
-
-  await atMost(entrance.finished, ENTRANCE_DEADLINE_MS);
-  await afterSplashPaint();
-}
-
 async function boot(): Promise<void> {
   const root = document.getElementById('app');
   if (!root) throw new Error('missing #app root');
@@ -213,11 +122,6 @@ async function boot(): Promise<void> {
   }
 
   await finishSplashTitleEntrance();
-  const showBootPhase = async (label: string): Promise<void> => {
-    (window as unknown as { __bootProgress?: (s: string) => void }).__bootProgress?.(label);
-    await afterSplashPaint();
-  };
-
   // boot timing — the splash now holds until a real frame exists, so every ms
   // here is user-visible waiting. Phase marks land on __game.bootTimings and
   // in the console so the cost can be attacked with numbers, not guesses.
@@ -486,21 +390,10 @@ async function boot(): Promise<void> {
   // Semantically free: piece materials already key nothing off which ship they
   // sit on — `uShipWorldInverse` and `uShipSunDirection` are module-level
   // singletons that every assembly has always shared.
-  const sharedPieceMaterials = ((): MaterialFactory | undefined => {
-    if (BOOT_BASELINE || deckField === undefined) return undefined;
-    const deckFieldTexture = createDeckFieldTexture(deckField);
-    const cache = new Map<string, Material>();
-    return (kind, role) => {
-      const key = `${kind}:${role}`;
-      let material = cache.get(key);
-      if (material === undefined) {
-        material =
-          role === 'hole' ? createHoleMaterial() : createPieceMaterial(kind, deckFieldTexture);
-        cache.set(key, material);
-      }
-      return material;
-    };
-  })();
+  const sharedPieceMaterials =
+    BOOT_BASELINE || deckField === undefined
+      ? undefined
+      : createPieceMaterialCache(createDeckFieldTexture(deckField));
 
   const shipAssembly = new ShipAssembly(galleonBlueprint, sharedPieceMaterials);
   app.scene.add(shipAssembly.group);
@@ -799,28 +692,11 @@ async function boot(): Promise<void> {
   });
 
   // resolution scale: the UI owns the setting, the renderer is ours
-  const applyResolution = (s = settings.get()): void => {
-    app.renderer.setPixelRatio(
-      Math.min(window.devicePixelRatio, 2) * s.graphics.resolutionScale,
-    );
-  };
-  applyResolution();
-  settings.subscribe(applyResolution);
+  bindResolution(app.renderer, settings);
 
-  // world staging — time of day and the wind. The UI owns the settings, the
-  // engine reads the params, and `applyWorldSettings` is the single mapping
-  // between them (it is what the §V.62 wiring test holds). Pushed on every
-  // change AND once up front, so a stored sky and a stored wind survive a
-  // reload — during alpha the point is to come back to what you were sailing.
-  //
-  // The wind lands on `oceanParams`, which is where the sim tick below reads
-  // `state.wind` from — so one write moves the spectrum, the sails, the AI,
-  // the flags, the spray, the palms and the weather cells' drift together.
-  const applyWorld = (s = settings.get()): void => {
-    applyWorldSettings(s.world);
-  };
-  applyWorld();
-  settings.subscribe(applyWorld);
+  // world staging — time of day and the wind (core/bootSettings.ts owns the
+  // mapping, and the raft entry stages its world through the same call)
+  bindWorldSettings(settings);
 
   // volumes come from the persisted settings store, and stay bound to it so
   // pause-menu changes apply live and survive reload (§I, §V21)
@@ -875,26 +751,9 @@ async function boot(): Promise<void> {
   // graph — the brigantine's — not the player's (§T.73, §V.77)
   const arena = createCombatArena(state, combat, followCam, enemyBlueprint);
   // hoisted + mutated per frame: the render callback runs every frame and a
-  // fresh object graph here would be pure GC churn
-  // held as its own non-optional binding so the per-frame writes below don't
-  // have to re-narrow AudioFrame['ship'] (which is optional by contract)
-  const audioShip: ShipAudioInput = {
-    position: playerShip.position,
-    quaternion: playerShip.quaternion,
-    velocity: playerShip.velocity,
-    angularVelocity: playerShip.angularVelocity,
-    sailTrim: playerShip.sailTrim,
-    bowImmersion: 0,
-    bowWorld: [0, 0, 0],
-  };
-  const audioBowWorld = audioShip.bowWorld as [number, number, number];
-  const audioFrame: AudioFrame = {
-    dt: 0,
-    camera: app.camera,
-    wind: { speed: 0, direction: 0 },
-    weather: state.weather,
-    ship: audioShip,
-  };
+  // fresh object graph here would be pure GC churn. Built and filled by
+  // core/bootShared, which the raft entry feeds identically (§V95).
+  const audioFeed = createShipAudioFeed(app.camera, state);
 
   // §V.25 / §T.29. The underwater handle owns two things that live in
   // different places: a scene-pass mesh (the meniscus band, drawn over
@@ -921,31 +780,18 @@ async function boot(): Promise<void> {
     sunDirection: () => sky.sunDirection,
   });
 
-  // §T.40. The post switch has `reload: false`, so it can flip mid-session —
-  // and post renders the scene into its OWN target, whose colour format and
-  // sample count give every material a different pipeline cache key. Flipping
-  // it on cold recompiles the entire scene synchronously inside one frame
-  // (seconds, frozen). So: warm it in the background on the first request and
-  // keep drawing direct to the canvas until the pipelines exist.
+  // §T.40's background post warm-up (core/bootCompile.ts, shared with the raft
+  // entry); the profile it measures is this boot's, so it is passed in.
   // `compilePhases` is filled in below; this closure only ever pushes to it.
   const compilePhases: CompilePhase[] = [];
-  let postWarm = postParams.enabled;
-  let postWarming = false;
-  const usePost = (): boolean => {
-    if (!postParams.enabled) return false;
-    if (postWarm) return true;
-    if (!postWarming) {
-      postWarming = true;
-      void (async (): Promise<void> => {
-        const phase = await profileCompile(app.renderer, 'warm:post', () => post.warmup());
-        compilePhases.push(phase);
-        postWarm = true;
-        postWarming = false;
-        console.info(`[boot] post path warmed in ${phase.wall}ms`);
-      })();
-    }
-    return false;
-  };
+  const usePost = createPostWarmGate({
+    enabled: () => postParams.enabled,
+    warm: async (): Promise<void> => {
+      const phase = await profileCompile(app.renderer, 'warm:post', () => post.warmup());
+      compilePhases.push(phase);
+      console.info(`[boot] post path warmed in ${phase.wall}ms`);
+    },
+  });
 
   // render-side interpolation caches (§V.2: sim ticks at 60Hz, render at
   // display rate — lerping prev→curr tick kills transform micro-stutter)
@@ -1624,27 +1470,16 @@ async function boot(): Promise<void> {
       // audio LAST: the panner listener reads camera.matrixWorld, which is
       // only final after the render — updating earlier lags it one frame.
       // Frame object is hoisted + mutated to keep this allocation-free.
-      audioFrame.dt = frameDt;
-      audioFrame.wind.speed = state.wind.speed;
-      audioFrame.wind.direction = state.wind.direction;
-      audioFrame.weather = state.weather;
-      audioShip.position = renderShipView.position;
-      audioShip.quaternion = renderShipView.quaternion;
-      audioShip.velocity = playerShip.velocity;
-      audioShip.angularVelocity = playerShip.angularVelocity;
-      audioShip.sailTrim = playerShip.sailTrim;
-      audioShip.bowImmersion = bowImmersion;
-      // the whole contact set, typed structurally so src/audio imports nothing
-      // from sea-physics. Drives hull working (creak) and the slam trigger —
-      // arrays are reused per tick, audio reads them inside update() only.
-      audioShip.contact = hullContact;
-      // the SAME scalar updateRig uses, so the haul sound and the cloth move
-      // together by construction rather than by coincidence
-      audioShip.sailDrop = trimDropScale(playerShip.sailTrim, shipRigParams);
-      audioBowWorld[0] = bowWorldTmp.x;
-      audioBowWorld[1] = bowWorldTmp.y;
-      audioBowWorld[2] = bowWorldTmp.z;
-      audio.update(audioFrame);
+      audioFeed.publish(
+        frameDt,
+        playerShip,
+        renderShipView,
+        bowImmersion,
+        bowWorldTmp,
+        trimDropScale(playerShip.sailTrim, shipRigParams),
+        hullContact,
+      );
+      audio.update(audioFeed.frame);
     },
     // the loop owns the pause, so the accumulator stops with the sim and the
     // interpolation alpha holds flat (§V.21) — see GameLoop.frame
@@ -1661,38 +1496,6 @@ async function boot(): Promise<void> {
   // splash lifts, spread across frames, so the game is sailing while it
   // finishes. Every phase is measured per material (compileProfile.ts) —
   // "which subsystem feels heavy" is exactly how this got to 52s.
-
-  /**
-   * COVERAGE GUARD, and it is a real hole rather than a precaution.
-   * `Renderer.compileAsync()` runs the same `_projectObject` walk a render
-   * does — including the frustum cull — but it never rebuilds `_frustum`
-   * (only `_renderScene` does, three r180 Renderer.js:1410). So the warm-up
-   * culls against whatever was left there: on a cold boot, a default Frustum
-   * whose six planes are all `x + 0 = 0`, which rejects every object whose
-   * centre sits at negative world X. Those materials are then MISSING from
-   * the warm-up and compile synchronously on their first draw — a hitch,
-   * silently, and exactly what the splash is meant to have already paid for.
-   * Nor does it update matrices, so the cull runs on stale ones.
-   *
-   * Turn culling off for the walk, restore precisely what was there. The
-   * restore happens BEFORE the await: compileAsync is synchronous up to its
-   * final `Promise.all`, so by then the walk is done, and leaving the flags
-   * off across the wait would silently un-cull the running game.
-   */
-  const withFullCoverage = (root: Object3D, compile: () => Promise<unknown>): Promise<unknown> => {
-    const culled: boolean[] = [];
-    root.updateMatrixWorld(true);
-    root.traverse((o) => {
-      culled.push(o.frustumCulled);
-      o.frustumCulled = false;
-    });
-    const pending = compile();
-    let i = 0;
-    root.traverse((o) => {
-      o.frustumCulled = culled[i++] ?? o.frustumCulled;
-    });
-    return pending;
-  };
 
   /**
    * compile ONE object against the context it will actually be drawn in.
@@ -1758,7 +1561,7 @@ async function boot(): Promise<void> {
   loop.start();
   bootTimings.push(['TOTAL', +(performance.now() - bootT0).toFixed(1)]);
   console.info('[boot]', bootTimings.map(([k, v]) => `${k} ${v}ms`).join('  ·  '));
-  (window as unknown as { __bootReady?: () => void }).__bootReady?.();
+  bootReady();
   ui.showQuickControls();
 
   // --- part two: warm the deferred subsystems, one per turn of the event
@@ -1886,7 +1689,6 @@ import {
   TimestampQuery,
   Vector2,
   Vector3,
-  type Material,
   type Mesh,
   type Object3D,
 } from 'three/webgpu';

@@ -28,7 +28,7 @@
  *
  * Deterministic and engine-free: plain numbers, no three.js, fixed-dt.
  */
-import { rotateVec } from '../combat/quatMath';
+import { rotateVec } from '../core/quat';
 import { asHullShape, hullHalfWidthAt } from '../ship/hullMath';
 import type { ShipState, Vec3 } from '../state/simState';
 import type { OceanHeightField } from './cpuOcean';

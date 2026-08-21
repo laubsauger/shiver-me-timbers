@@ -41,7 +41,7 @@ import {
   type Vec3,
 } from '../src/state/simState';
 import { SIM_DT } from '../src/core/loop';
-import { quatFromAxisAngle, rotateVec } from '../src/combat/quatMath';
+import { quatFromAxisAngle, rotateVec } from '../src/core/quat';
 import {
   KeyboardInput,
   attachKeyboard,

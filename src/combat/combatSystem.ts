@@ -39,7 +39,7 @@ import { fireCannon } from './cannons';
 import { buildHitTargetSet, poseTargets } from './hitTargets';
 import { testHits, type HitEvent, type HitTarget } from './hitTest';
 import { resolvePieceFrames, socketLocalPosition } from './pieceFrame';
-import { add, invRotateVec, lerp, rotateVec, sub } from './quatMath';
+import { add, invRotateVec, lerp, rotateVec, sub } from '../core/quat';
 import { isSunk } from './sinking';
 import { createRng } from '../state/rng';
 

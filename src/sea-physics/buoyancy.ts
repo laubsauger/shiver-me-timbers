@@ -7,7 +7,7 @@
  *
  * Ship body frame matches the proc ship (§V.13): forward +z, beam x, up y.
  */
-import { rotateVec, invRotateVec, quatFromAxisAngle, quatMul } from '../combat/quatMath';
+import { rotateVec, invRotateVec, quatFromAxisAngle, quatMul } from '../core/quat';
 import type { Quat, ShipState, Vec3 } from '../state/simState';
 import { GRAVITY } from '../ocean/oceanMath';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../params/seaPhysics';

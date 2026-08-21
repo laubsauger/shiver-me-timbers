@@ -18,6 +18,7 @@
  *   fp=1                              walk the raft (WASD, click to lock)
  */
 import * as THREE from 'three/webgpu';
+import { createHarnessHud } from '../debug/harnessHud';
 import { ShipAssembly } from './shipAssembly';
 import { updateRig } from './rigTrim';
 import { createPieceMaterial } from './pieceMaterials';
@@ -185,21 +186,25 @@ const walk = q.get('fp') === '1' && shipName === 'raft'
 // sails SET by default; `?sail=furled` is the bundle, `?trim=` anything between
 const sailTrim = q.get('sail') === 'furled' ? 0 : num('trim', 1);
 
-const hud = document.getElementById('hud') as HTMLDivElement;
-let frames = 0;
-let last = performance.now();
-let prevFrame = performance.now();
+// the game's own perf HUD, frame clock included (§V95): a harness that counts
+// its own frames reports a different fps than the game does, and then the two
+// numbers get compared anyway
+const hud = createHarnessHud();
+const rigNote =
+  `wind ${oceanParams.windSpeed.toFixed(1)} m/s @ ${oceanParams.windDirection.toFixed(2)} rad | ` +
+  `nbias ${sun.shadow.normalBias} | ${mapSize}px @ ±${extent}m ` +
+  `(${((2 * extent * 100) / mapSize).toFixed(1)} cm/texel, game ${(gameTexel * 100).toFixed(1)})`;
+hud.setNotes([rigNote]);
+let lastFocus: string | null = null;
 renderer.setAnimationLoop(() => {
   // the preview must run the same per-frame rig update main.ts does, or it is
   // not a faithful harness: yards never brace, sails never trim, and — since
   // updateRig is what publishes the ship's world matrix to the piece materials
   // — the deck heightfield is sampled in WORLD space, so its planking slides
   // off the deck the moment ?heading= is non-zero
-  const nowFrame = performance.now();
-  const dt = (nowFrame - prevFrame) / 1000;
+  const dt = hud.frame();
   updateRig(assembly, dt, sailTrim);
   walk?.update(dt, camera);
-  prevFrame = nowFrame;
   if (ropes !== null) {
     // furl = the normalised complement of the cloth drop — main.ts's expression
     const drop = trimDropScale(sailTrim, shipRigParams);
@@ -211,18 +216,13 @@ renderer.setAnimationLoop(() => {
   }
 
   renderer.render(scene, camera);
-  frames++;
-  const now = performance.now();
-  if (now - last > 500) {
-    const focus = walk?.player.interact.focus() ?? null;
-    hud.textContent =
-      (focus === null ? '' : `[E] ${focus} | `) +
-      `${((frames * 1000) / (now - last)).toFixed(0)} fps | ` +
-      `wind ${oceanParams.windSpeed.toFixed(1)} m/s @ ${oceanParams.windDirection.toFixed(2)} rad | ` +
-      `nbias ${sun.shadow.normalBias} | ${mapSize}px @ ±${extent}m ` +
-      `(${((2 * extent * 100) / mapSize).toFixed(1)} cm/texel, game ${(gameTexel * 100).toFixed(1)})`;
-    frames = 0;
-    last = now;
+  hud.hud.setRenderStats(renderer.info.render);
+  // the prompt row is rebuilt only when the focused station changes — the HUD
+  // redraws every frame, the string does not have to
+  const focus = walk?.player.interact.focus() ?? null;
+  if (focus !== lastFocus) {
+    lastFocus = focus;
+    hud.setNotes([focus === null ? rigNote : `[E] ${focus} | ${rigNote}`]);
   }
 });
 

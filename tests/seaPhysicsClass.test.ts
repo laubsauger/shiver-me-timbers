@@ -27,7 +27,7 @@ import {
   probeStations,
   stepShipBuoyancy,
 } from '../src/sea-physics/buoyancy';
-import { rotateVec } from '../src/combat/quatMath';
+import { rotateVec } from '../src/core/quat';
 import type { ShipState } from '../src/state/simState';
 
 const DT = 1 / 60;

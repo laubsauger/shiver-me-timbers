@@ -11,7 +11,7 @@
  *    (the "no-go" bearing) = direction + π.
  */
 import type { Quat, Vec3 } from '../state/simState';
-import { rotateVec } from '../combat/quatMath';
+import { rotateVec } from '../core/quat';
 import type { AiParams } from '../params/ai';
 
 /** Wrap an angle to (-π, π]. */

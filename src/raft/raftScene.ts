@@ -37,9 +37,9 @@ import { createRain } from '../rain';
 import { CpuOcean } from '../sea-physics/cpuOcean';
 import { createHullContact, waterlineFromBlueprint, waterlineFromBox } from '../sea-physics/hullContact';
 import { seaPhysicsParams } from '../params/seaPhysics';
-import { ShipAssembly, type MaterialFactory } from '../ship/shipAssembly';
-import { createHoleMaterial, createPieceMaterial } from '../ship/pieceMaterials';
+import { ShipAssembly } from '../ship/shipAssembly';
 import { createDeckFieldTexture } from '../ship/deckFieldTexture';
+import { createPieceMaterialCache } from '../core/bootShared';
 import { buildRaftBlueprint } from '../ship/raftBlueprint';
 import { buildRaftDeckField } from '../ship/raftDeckField';
 import { createDeckWater, setActiveDeckWater } from '../deckwater';
@@ -131,17 +131,8 @@ export function buildRaftVessel(app: App, sea: RaftSea) {
   const deckField = buildRaftDeckField(blueprint);
   const deckWater = createDeckWater({ source: deckField });
   setActiveDeckWater(deckWater);
-  const deckFieldTexture = createDeckFieldTexture(deckField);
-  const cache = new Map<string, ReturnType<MaterialFactory>>();
-  const materials: MaterialFactory = (kind, role) => {
-    const key = `${kind}:${role}`;
-    let m = cache.get(key);
-    if (m === undefined) {
-      m = role === 'hole' ? createHoleMaterial() : createPieceMaterial(kind, deckFieldTexture);
-      cache.set(key, m);
-    }
-    return m;
-  };
+  // §T.40's one-set-per-class cache, the same factory main.ts builds (§V95)
+  const materials = createPieceMaterialCache(createDeckFieldTexture(deckField));
   const assembly = new ShipAssembly(blueprint, materials);
   assembly.setSailTint(raftMaterialParams.sailTint);
   assembly.group.traverse((o) => {

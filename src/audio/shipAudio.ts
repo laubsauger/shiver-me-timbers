@@ -21,7 +21,7 @@ import { createHullEvents, type HullEvents } from './hullEvents';
 import { createSailHaul, type SailHaul } from './sailHaul';
 import { playSample } from './sampleShot';
 import { createRng, type Rng } from '../state/rng';
-import { rotateVec } from '../combat/quatMath';
+import { rotateVec } from '../core/quat';
 import type { Quat, Vec3 } from '../state/simState';
 import type { SampleName } from './assets';
 

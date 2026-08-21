@@ -8,7 +8,7 @@
  * this runs every tick for a ship that is almost never aground.
  */
 import { describe, expect, it } from 'vitest';
-import { quatFromAxisAngle, rotateVec } from '../src/combat/quatMath';
+import { quatFromAxisAngle, rotateVec } from '../src/core/quat';
 import { oceanParams } from '../src/params/ocean';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../src/params/seaPhysics';
 import { CpuOcean } from '../src/sea-physics/cpuOcean';

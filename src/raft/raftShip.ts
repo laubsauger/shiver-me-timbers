@@ -15,10 +15,13 @@
  * both are planar too, and a beached raft held at her hold-point still
  * heaves, pitches and rolls on whatever buoyancy gives her.
  *
- * Quaternion helpers are local: the shared ones live in `combat/quatMath`,
- * and §V.81 keeps the raft entry out of that directory.
+ * Quaternion helpers come from `core/quat` — the one implementation every
+ * mode shares (§V95). They used to be copied in here because the shared set
+ * sat in `combat/`, which §V.81 keeps the raft out of; §T.113 moved the
+ * module to neutral ground instead of keeping two of it.
  */
 import type { Quat, ShipState, Vec3 } from '../state/simState';
+import { quatFromAxisAngle, quatMul, rotateVec } from '../core/quat';
 import type { Wind } from '../sailing/shipKinematics';
 import { stepRaftSailing, type RaftControls, type RaftMotion, type RaftStep } from '../sailing/raftKinematics';
 import { pushOff, stepRaftBeaching, type RaftBeachingStep } from '../sailing/raftBeaching';
@@ -26,35 +29,6 @@ import type { SeabedField } from '../sea-physics/grounding';
 import { activeRaftTuning } from '../params/raftSailing';
 import { raftBeachingParams } from '../params/raftBeaching';
 import { raftSeaParams, type SeaPhysicsParams } from '../params/seaPhysics';
-
-export function quatMul(a: Quat, b: Quat): Quat {
-  const [ax, ay, az, aw] = a;
-  const [bx, by, bz, bw] = b;
-  return [
-    aw * bx + ax * bw + ay * bz - az * by,
-    aw * by - ax * bz + ay * bw + az * bx,
-    aw * bz + ax * by - ay * bx + az * bw,
-    aw * bw - ax * bx - ay * by - az * bz,
-  ];
-}
-
-export function quatFromAxisAngle(axis: Vec3, angle: number): Quat {
-  const h = angle / 2;
-  const s = Math.sin(h);
-  return [axis[0] * s, axis[1] * s, axis[2] * s, Math.cos(h)];
-}
-
-export function rotateVec(q: Quat, v: Vec3): Vec3 {
-  const [qx, qy, qz, qw] = q;
-  const tx = 2 * (qy * v[2] - qz * v[1]);
-  const ty = 2 * (qz * v[0] - qx * v[2]);
-  const tz = 2 * (qx * v[1] - qy * v[0]);
-  return [
-    v[0] + qw * tx + (qy * tz - qz * ty),
-    v[1] + qw * ty + (qz * tx - qx * tz),
-    v[2] + qw * tz + (qx * ty - qy * tx),
-  ];
-}
 
 function wrapPi(a: number): number {
   let x = a % (Math.PI * 2);

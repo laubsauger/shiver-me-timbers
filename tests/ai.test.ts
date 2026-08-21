@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import type { Quat, ShipState, Vec3 } from '../src/state/simState';
 import { createRng } from '../src/state/rng';
 import { SIM_DT } from '../src/core/loop';
-import { quatFromAxisAngle } from '../src/combat/quatMath';
+import { quatFromAxisAngle } from '../src/core/quat';
 import { combatParams } from '../src/params/combat';
 import { aiParams, type AiParams } from '../src/params/ai';
 import { createAiMemory, type AiMemory } from '../src/ai/aiTypes';

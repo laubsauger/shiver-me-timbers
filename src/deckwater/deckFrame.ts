@@ -15,7 +15,7 @@
  * Two independent copies of it would put the water and its shading in
  * different places and no test would notice.
  */
-import { invRotateVec } from '../combat/quatMath';
+import { invRotateVec } from '../core/quat';
 import type { Quat } from '../state/simState';
 
 /** the ship-space rectangle the grid covers (metres, ship-local) */

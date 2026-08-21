@@ -25,7 +25,7 @@
  * owns thrust, rudder and yaw; it simply finds the ship slower, as it would
  * against any drag. It never touches yaw or the quaternion directly.
  */
-import { rotateVec, invRotateVec } from '../combat/quatMath';
+import { rotateVec, invRotateVec } from '../core/quat';
 import { GRAVITY } from '../ocean/oceanMath';
 import type { ShipState, Vec3 } from '../state/simState';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../params/seaPhysics';

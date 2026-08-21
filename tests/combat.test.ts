@@ -23,7 +23,7 @@ import {
   type ProjectileEvent,
 } from '../src/combat/ballistics';
 import { testHits, type HitTarget } from '../src/combat/hitTest';
-import { quatFromAxisAngle } from '../src/combat/quatMath';
+import { quatFromAxisAngle } from '../src/core/quat';
 import {
   ageFraction,
   brightnessAt,

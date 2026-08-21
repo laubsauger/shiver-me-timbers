@@ -1,8 +1,14 @@
 /**
- * Minimal vec3/quaternion helpers for the combat sim.
+ * Minimal vec3/quaternion helpers — ONE implementation for every mode (§V95).
  * §V.3: the sim layer stays engine-free (no three.js) so it runs headless
  * and byte-identical for future netcode. Quaternions are [x, y, z, w],
  * matching ShipState.quaternion; all quats here are assumed unit-length.
+ *
+ * Lived in `combat/quatMath.ts` until §T.113. Nothing here is combat — it is
+ * arithmetic — and §V.81 keeps the raft entry out of `src/combat/`, so the
+ * raft had grown its own copy of quatMul/quatFromAxisAngle/rotateVec (§B71).
+ * `src/core` is neutral ground: pirate, raft and harness all import it, and
+ * the forbidden-import list stays exactly as strict as it was.
  */
 import type { Quat, Vec3 } from '../state/simState';
 

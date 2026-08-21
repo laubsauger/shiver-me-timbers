@@ -17,7 +17,7 @@ import {
   type Vec3,
 } from '../src/state/simState';
 import { SIM_DT } from '../src/core/loop';
-import { quatFromAxisAngle, quatMul, rotateVec } from '../src/combat/quatMath';
+import { quatFromAxisAngle, quatMul, rotateVec } from '../src/core/quat';
 import { stepShipSailing, type Wind } from '../src/sailing/shipKinematics';
 import { CpuOcean } from '../src/sea-physics/cpuOcean';
 import { stepShipBuoyancy } from '../src/sea-physics/buoyancy';

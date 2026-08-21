@@ -54,6 +54,94 @@ describe('§V81 the raft entry never reaches into the pirate boot', () => {
     expect(mainRaft.split('\n').length).toBeLessThanOrEqual(300);
   });
 
+  /**
+   * §B71: the raw scan above only reads `src/main-raft.ts` + `src/raft/`, so a
+   * forbidden module reached through a THIRD file was invisible to it — which
+   * is exactly what happened: `sailing/raftBeaching.ts` imported
+   * `combat/quatMath` for pure quaternion arithmetic, and the raft entry
+   * therefore pulled `src/combat/` in transitively while every assertion above
+   * stayed green. §T.113 moved that module to `src/core/quat.ts` (neutral
+   * ground, §V95's one implementation); this walks the whole graph so the next
+   * one cannot hide behind an intermediary either.
+   */
+  it('§B71 nothing the raft entry reaches, at any depth, lives in combat or ai', () => {
+    const all = import.meta.glob('../src/**/*.ts', { query: '?raw', import: 'default', eager: true }) as Record<
+      string,
+      string
+    >;
+    const resolve = (fromKey: string, spec: string): string | null => {
+      if (!spec.startsWith('.')) return null; // three, vitest, bare deps
+      const base = fromKey.replace(/\/[^/]+$/, '');
+      const parts = `${base}/${spec}`.split('/');
+      const out: string[] = [];
+      for (const part of parts) {
+        if (part === '.' || part === '') continue;
+        if (part === '..') out.pop();
+        else out.push(part);
+      }
+      const path = out.join('/');
+      for (const cand of [`${path}.ts`, `${path}/index.ts`]) {
+        // the glob keys are '../src/…'; rebuild that prefix
+        const key = cand.startsWith('..') ? cand : `../${cand}`;
+        if (key in all) return key;
+      }
+      return null;
+    };
+    const seen = new Set<string>(['../src/main-raft.ts']);
+    const queue = ['../src/main-raft.ts'];
+    while (queue.length > 0) {
+      const key = queue.shift() as string;
+      const src = key === '../src/main-raft.ts' ? mainRaft : all[key];
+      if (src === undefined) continue;
+      for (const spec of imports(src)) {
+        const next = resolve(key, spec);
+        if (next === null || seen.has(next)) continue;
+        seen.add(next);
+        queue.push(next);
+      }
+    }
+    // the walk has to have actually walked — a resolver that resolves nothing
+    // would pass this test by visiting one file
+    expect(seen.size).toBeGreaterThan(60);
+    expect(seen).toContain('../src/sailing/raftBeaching.ts'); // §B71's bridge
+    expect(seen).toContain('../src/core/quat.ts'); // where the helpers live now
+    const forbidden = [...seen].filter((k) => /\/(combat|ai)\//.test(k)).sort();
+    /**
+     * A SECOND LEAK OF §B71's SHAPE, and this test is what found it.
+     *
+     * `camera/followCam.ts` needs `STATION_IDS`, so it imports
+     * `camera/camStations.ts`, which builds the GUN stations out of
+     * `combat/battery` + `combat/aim`. The raft has no guns and never calls
+     * those stations — but its module graph contains them, which is precisely
+     * what §V81 says it must not, and it is invisible to the raw scans above
+     * because the route runs through `src/camera/`.
+     *
+     * Recorded rather than fixed: `src/camera/` is not §T.113's to reshape
+     * (splitting the station ids from the battery geometry is its own task).
+     * The list is a RATCHET — it must shrink to `[]` when camStations stops
+     * reaching for the battery, and a new route makes this test red the day it
+     * lands rather than at the next audit.
+     */
+    const KNOWN_LEAK = [
+      '../src/combat/aim.ts',
+      '../src/combat/ballistics.ts',
+      '../src/combat/battery.ts',
+      '../src/combat/pieceFrame.ts',
+    ];
+    expect(forbidden, `raft reaches ${forbidden.join(', ')}`).toEqual(KNOWN_LEAK);
+    // and it reaches them by exactly ONE route: any second bridge is a new bug
+    const bridges = [...seen]
+      .filter((k) => !/\/(combat|ai)\//.test(k))
+      .filter((k) => {
+        const src = k === '../src/main-raft.ts' ? mainRaft : all[k];
+        return src !== undefined && imports(src).some((spec) => {
+          const r = resolve(k, spec);
+          return r !== null && /\/(combat|ai)\//.test(r);
+        });
+      });
+    expect(bridges).toEqual(['../src/camera/camStations.ts']);
+  });
+
   it('vite builds BOTH entries (§I raft/app)', () => {
     expect(viteConfig).toMatch(/rollupOptions/);
     expect(viteConfig).toMatch(/main:\s*['"]index\.html['"]/);

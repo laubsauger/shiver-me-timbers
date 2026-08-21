@@ -33,8 +33,10 @@ import {
 } from '../src/raft/raftWorld';
 import { raftWorldParams } from '../src/params/raftWorld';
 import {
-  motionOf, pushOffRaft, quatFromAxisAngle, quatMul, rotateVec, stepRaftBeach, stepRaftShip, writeMotion, yawOf,
+  motionOf, pushOffRaft, stepRaftBeach, stepRaftShip, writeMotion, yawOf,
 } from '../src/raft/raftShip';
+// §V95/§T.113: the quat helpers are `core/quat`'s, not a raft-local copy
+import { quatFromAxisAngle, quatMul, rotateVec } from '../src/core/quat';
 import {
   applyDebugChannel,
   applyRaftAction,

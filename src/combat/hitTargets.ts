@@ -15,7 +15,7 @@ import type { PieceDef, PieceKind } from '../ship/pieceTypes';
 import type { Quat, ShipState, Vec3 } from '../state/simState';
 import type { HitTarget } from './hitTest';
 import { resolvePieceFrames, type PieceFrame } from './pieceFrame';
-import { add, quatMul, rotateVec } from './quatMath';
+import { add, quatMul, rotateVec } from '../core/quat';
 
 /**
  * Structure a cannonball can bite on. Deliberately excludes cloth and

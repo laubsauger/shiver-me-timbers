@@ -19,7 +19,7 @@
 import type { SimState, ProjectileState, Vec3 } from '../state/simState';
 import { SIM_DT } from '../core/loop';
 import { combatParams, type CombatParams } from '../params/combat';
-import { lerp } from './quatMath';
+import { lerp } from '../core/quat';
 
 export interface ProjectileEvent {
   type: 'splash' | 'expired';

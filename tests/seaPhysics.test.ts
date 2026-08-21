@@ -29,7 +29,7 @@ import {
   probeStations,
   stepShipBuoyancy,
 } from '../src/sea-physics/buoyancy';
-import { quatFromAxisAngle, quatMul, rotateVec } from '../src/combat/quatMath';
+import { quatFromAxisAngle, quatMul, rotateVec } from '../src/core/quat';
 import { createRng } from '../src/state/rng';
 import { generateH0, swellWavelengthFor } from '../src/ocean/oceanMath';
 import {

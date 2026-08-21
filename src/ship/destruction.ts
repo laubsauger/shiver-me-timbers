@@ -9,7 +9,7 @@
 import type { Object3D } from 'three';
 import type { HitEvent } from '../combat/hitTest';
 import type { Quat } from '../state/simState';
-import { invRotateVec, rotateVec } from '../combat/quatMath';
+import { invRotateVec, rotateVec } from '../core/quat';
 import { destructionParams, type DestructionParams } from '../params/destruction';
 import { defaultRadius } from './pieceGeometryHoled';
 import type { DamageStateId, PieceDef, Vec3 } from './pieceTypes';

@@ -9,7 +9,7 @@
 import type { ProjectileState, SimState, Vec3 } from '../state/simState';
 import { createRng } from '../state/rng';
 import { combatParams, type CombatParams } from '../params/combat';
-import { add, rotateVec, scale } from './quatMath';
+import { add, rotateVec, scale } from '../core/quat';
 
 export interface CannonAim {
   /** barrel elevation above horizontal, radians */

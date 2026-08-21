@@ -28,7 +28,7 @@
 import { raftParams, type RaftParams } from '../params/raft';
 import { raftBeachingParams, type RaftBeachingParams } from '../params/raftBeaching';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../params/seaPhysics';
-import { quatFromAxisAngle, rotateVec } from '../combat/quatMath';
+import { quatFromAxisAngle, rotateVec } from '../core/quat';
 import { stepShipGrounding, type GroundContact, type SeabedField } from '../sea-physics/grounding';
 import type { ContactStation } from '../sea-physics/hullContact';
 import { raftLayout } from '../ship/raftPartsLayout';

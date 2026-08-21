@@ -20,7 +20,7 @@ import {
   teleportShip,
   type JumpTarget,
 } from '../src/debug/jump';
-import { rotateVec } from '../src/combat/quatMath';
+import { rotateVec } from '../src/core/quat';
 import type { ShipState } from '../src/state/simState';
 
 const LAGOON: JumpTarget = { name: 'lagoon', x: 900, z: 150, heading: Math.PI / 2 };

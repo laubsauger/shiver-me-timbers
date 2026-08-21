@@ -39,6 +39,14 @@ export interface PerfHud {
   setRenderStats(stats: RenderStats): void;
   /** GPU timestamp block, pre-formatted; null hides it (§V.39) */
   setGpu(lines: readonly string[] | null): void;
+  /**
+   * Free-text rows under the timings; null clears them. For facts a harness
+   * needs on screen beside the frame budget (the focused station prompt, the
+   * wind it was launched with, the shadow rig it is A/B-ing) — so a preview
+   * page never has a reason to grow a second overlay with its own fps math
+   * (§V95).
+   */
+  setNotes(lines: readonly string[] | null): void;
   dispose(): void;
 }
 
@@ -81,6 +89,7 @@ export function createPerfHud(parent: HTMLElement = document.body): PerfHud {
    */
   let stats: RenderStats | null = null;
   let gpu: readonly string[] | null = null;
+  let notes: readonly string[] | null = null;
 
   const redraw = (): void => {
     /**
@@ -151,6 +160,9 @@ export function createPerfHud(parent: HTMLElement = document.body): PerfHud {
       lines.push('--- render ---');
       lines.push(`draws ${stats.drawCalls}  tris ${stats.triangles}`);
     }
+    if (notes !== null && notes.length > 0) {
+      for (const l of notes) lines.push(l);
+    }
     el.textContent = lines.join('\n');
   };
 
@@ -174,6 +186,9 @@ export function createPerfHud(parent: HTMLElement = document.body): PerfHud {
     },
     setGpu(lines: readonly string[] | null): void {
       gpu = lines;
+    },
+    setNotes(lines: readonly string[] | null): void {
+      notes = lines;
     },
     dispose(): void {
       el.remove();

@@ -14,7 +14,7 @@
  */
 import type { PieceDef, Vec3 } from '../ship/pieceTypes';
 import type { Quat } from '../state/simState';
-import { add, quatFromEulerXYZ, quatMul, rotateVec } from './quatMath';
+import { add, quatFromEulerXYZ, quatMul, rotateVec } from '../core/quat';
 
 export interface PieceFrame {
   /** ship-local origin of the piece */

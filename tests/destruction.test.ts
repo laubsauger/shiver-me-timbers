@@ -10,7 +10,7 @@ import { applyHitDamage, floodingHoles, type DestructionEvent } from '../src/shi
 import { buildGalleonBlueprint } from '../src/ship/shipBlueprint';
 import { ShipAssembly } from '../src/ship/shipAssembly';
 import type { HitEvent } from '../src/combat/hitTest';
-import { quatFromAxisAngle } from '../src/combat/quatMath';
+import { quatFromAxisAngle } from '../src/core/quat';
 import { destructionParams } from '../src/params/destruction';
 import type { Quat } from '../src/state/simState';
 

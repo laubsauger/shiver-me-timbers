@@ -20,8 +20,11 @@ import { oceanParams } from './ocean';
 import { postParams } from './params/post';
 import { createAmbientHold, createWeatherSystem, createWeatherSample, weatherWorldPatch } from './weather';
 import { createPostPipeline } from './core/postPipeline';
+import { createPostWarmGate, withFullCoverage } from './core/bootCompile';
+import { bindResolution, bindWorldSettings } from './core/bootSettings';
+import { bootProgress, bootReady } from './core/bootSplash';
 import { createUnderwater } from './underwater';
-import { applyWorldSettings, createGameUI, initGraphicsSettings, setFeatureSink } from './ui';
+import { createGameUI, initGraphicsSettings, setFeatureSink } from './ui';
 import { createAudio, attachAudioSettings } from './audio';
 import { createRaftCeiling, raftBoardingPoints } from './ship/raftDeckField';
 import { FollowCam } from './camera';
@@ -33,23 +36,6 @@ import { pushOffRaft, stepRaftShip, placeRaftAtStart } from './raft/raftShip';
 import { applyDebugChannel, bindRaftActions, radio, raftBeach, raftControls } from './raft/raftActions';
 import { bootTimeOfDay, calmPreset, createDayClock } from './raft/raftWorld';
 import { raftWorldParams } from './params/raftWorld';
-import type { Object3D } from 'three/webgpu';
-
-/** compileAsync never rebuilds the frustum, so cull nothing during the walk (see main.ts) */
-function withFullCoverage(root: Object3D, compile: () => Promise<unknown>): Promise<unknown> {
-  const culled: boolean[] = [];
-  root.updateMatrixWorld(true);
-  root.traverse((o) => {
-    culled.push(o.frustumCulled);
-    o.frustumCulled = false;
-  });
-  const pending = compile();
-  let i = 0;
-  root.traverse((o) => {
-    o.frustumCulled = culled[i++] ?? o.frustumCulled;
-  });
-  return pending;
-}
 
 async function boot(): Promise<void> {
   installNodeTypeCache();
@@ -59,13 +45,10 @@ async function boot(): Promise<void> {
     renderGatePage(root);
     return;
   }
-  const w = window as unknown as { __bootProgress?: (s: string) => void; __bootReady?: () => void };
-  const phase = (label: string): void => w.__bootProgress?.(label);
-
   const settings = initGraphicsSettings();
-  phase('renderer');
+  bootProgress('renderer');
   const app = await App.create(root);
-  phase('scene build');
+  bootProgress('scene build');
   const state: SimState = createInitialState(2100);
 
   const weather = createWeatherSystem({
@@ -122,14 +105,8 @@ async function boot(): Promise<void> {
       paused = false;
     },
   });
-  const applyResolution = (s = settings.get()): void => {
-    app.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2) * s.graphics.resolutionScale);
-  };
-  applyResolution();
-  settings.subscribe(applyResolution);
-  const applyWorld = (s = settings.get()): void => applyWorldSettings(s.world);
-  applyWorld();
-  settings.subscribe(applyWorld);
+  bindResolution(app.renderer, settings);
+  bindWorldSettings(settings);
   applyWeather(new URLSearchParams(window.location.search).get('weather') ?? raftWorldParams.defaultPreset); // calm sea by default
   // the day clock owns the sun from here on; a settings change still re-seeds it
   const clock = createDayClock();
@@ -144,20 +121,7 @@ async function boot(): Promise<void> {
     underwater,
     sunDirection: () => sky.sunDirection,
   });
-  let postWarm = postParams.enabled;
-  let postWarming = false;
-  const usePost = (): boolean => {
-    if (!postParams.enabled) return false;
-    if (postWarm) return true;
-    if (!postWarming) {
-      postWarming = true;
-      void post.warmup().then(() => {
-        postWarm = true;
-        postWarming = false;
-      });
-    }
-    return false;
-  };
+  const usePost = createPostWarmGate({ enabled: () => postParams.enabled, warm: () => post.warmup() });
 
   // --- the walker (§T.94/§T.95), spawned at the tiller, first person on boot ---
   const { assembly } = vessel;
@@ -268,11 +232,11 @@ async function boot(): Promise<void> {
     () => paused,
   );
 
-  phase('shader compile');
+  bootProgress('shader compile');
   await withFullCoverage(app.scene, () =>
     postParams.enabled ? post.warmup() : app.renderer.compileAsync(app.scene, app.camera),
   );
-  phase('first frame');
+  bootProgress('first frame');
   sea.ocean.update(app.renderer, state.time);
   sea.foam.update(app.renderer);
   sea.clouds.update(state.time, sky.sunDirection);
@@ -284,7 +248,7 @@ async function boot(): Promise<void> {
     await app.renderer.renderAsync(app.scene, app.camera);
   }
   loop.start();
-  w.__bootReady?.();
+  bootReady();
   ui.showQuickControls();
 
   // dev console handle for the lookdev agent (§V.88) — not an interface contract

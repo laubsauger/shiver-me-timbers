@@ -24,6 +24,8 @@ import { setDevLayerSink } from '../ui/devLayer';
 
 export type { DebugPanel, WeatherPreset } from './panel';
 export type { PerfHud, RenderStats } from './perfHud';
+// the same HUD, for the preview harnesses — no page counts its own frames (§V95)
+export { createHarnessHud, type HarnessHud } from './harnessHud';
 
 export interface DebugShell {
   panel: DebugPanel;
