@@ -59,6 +59,7 @@
 import { skyParams, type SkyParams } from '../params/sky';
 import {
   SUN_BELOW,
+  bodyHorizonGate,
   clamp01,
   hexToRgb,
   smoothstep,
@@ -89,23 +90,67 @@ export const NIGHT_FULL = -0.25;
 const MOON_SURGE = 2.5;
 
 /**
- * Unit vector toward the moon.
+ * Unit vector toward the moon — ON ITS OWN ORBIT (§V91, §B63).
  *
- * The moon's hour angle LAGS the sun's by its phase angle — that lag IS the
- * phase. So the moon at phase p is simply the sun 24·p hours ago, which
- * reuses `sunDirection()` wholesale and is therefore normalized, continuous
- * across midnight and correct at every latitude by construction.
+ * It used to be `sunDirection(tod − 24·phase)`: the sun's own track,
+ * time-shifted. That put the moon ON the sun's path at every phase, so near
+ * new/old phase it rode a few degrees beside the setting sun and the pair
+ * read as one body changing into the other (§B63). The orbit here is the
+ * sun's diurnal circle TILTED by `inclinationDeg` about a node line that sits
+ * `nodeOffsetDeg` along the track from the sun:
  *
- * Sanity: at phase 0.5 (full) the offset is 12 h, i.e. exactly antipodal to
- * the sun, so the moon rises at sunset and culminates at local midnight —
- * which is what a full moon does. At phase 0 (new) it sits on the sun.
+ *   e1 = sun, e2 = the sun a quarter-day earlier (so e1,e2 span the track),
+ *   u  = cos E·e1 + sin E·e2            the un-tilted moon, E = 2π·phase
+ *        (identical to the old sunDirection(tod − 24·phase) — see test),
+ *   a  = cos Ω·e1 + sin Ω·e2            the node line, in the track plane,
+ *   m  = Rot(a, i)·u                    Rodrigues, closed form.
+ *
+ * A rotation of a unit vector is a unit vector, so this is normalized BY
+ * CONSTRUCTION with no normalize() and therefore no §V28 NaN; every term is a
+ * sin/cos of a finite angle, so it is continuous in t and in phase and
+ * periodic in both. With i = 0 it reduces exactly to the old expression, which
+ * is how the tests pin that nothing ELSE moved.
+ *
+ * Elongation from the sun is phase·360° around the orbit: full (0.5) is
+ * opposite the sun within i — it rises as the sun sets and culminates near
+ * midnight; new (0) is within i of the sun, and DARK (see moonIllumination /
+ * moonDiscState). At the default Ω = 90° the full and new moons sit at the
+ * full tilt rather than on the track — the non-eclipse month.
  */
 export function moonDirection(
   timeOfDay: number,
   phase: number = skyParams.moonPhase,
   latitude: number = skyParams.latitude,
+  inclinationDeg: number = skyParams.moonInclination,
+  nodeOffsetDeg: number = skyParams.moonNodeOffset,
 ): Vec3 {
-  return sunDirection(timeOfDay - 24 * clamp01(phase), latitude);
+  const t = Number.isFinite(timeOfDay) ? timeOfDay : 0;
+  const e1 = sunDirection(t, latitude);
+  const e2 = sunDirection(t - 6, latitude);
+  const E = 2 * Math.PI * clamp01(phase);
+  const cE = Math.cos(E);
+  const sE = Math.sin(E);
+  const u: Vec3 = [cE * e1[0] + sE * e2[0], cE * e1[1] + sE * e2[1], cE * e1[2] + sE * e2[2]];
+  const i = ((Number.isFinite(inclinationDeg) ? inclinationDeg : 0) * Math.PI) / 180;
+  if (i === 0) return u;
+  const O = ((Number.isFinite(nodeOffsetDeg) ? nodeOffsetDeg : 0) * Math.PI) / 180;
+  const cO = Math.cos(O);
+  const sO = Math.sin(O);
+  const a: Vec3 = [cO * e1[0] + sO * e2[0], cO * e1[1] + sO * e2[1], cO * e1[2] + sO * e2[2]];
+  // Rodrigues: u·cos i + (a×u)·sin i + a·(a·u)·(1 − cos i)
+  const ci = Math.cos(i);
+  const si = Math.sin(i);
+  const ax: Vec3 = [
+    a[1] * u[2] - a[2] * u[1],
+    a[2] * u[0] - a[0] * u[2],
+    a[0] * u[1] - a[1] * u[0],
+  ];
+  const au = (a[0] * u[0] + a[1] * u[1] + a[2] * u[2]) * (1 - ci);
+  return [
+    u[0] * ci + ax[0] * si + a[0] * au,
+    u[1] * ci + ax[1] * si + a[1] * au,
+    u[2] * ci + ax[2] * si + a[2] * au,
+  ];
 }
 
 /** Moon elevation above the horizon in radians (negative when it has set). */
@@ -113,9 +158,21 @@ export function moonElevation(
   timeOfDay: number,
   phase: number = skyParams.moonPhase,
   latitude: number = skyParams.latitude,
+  inclinationDeg: number = skyParams.moonInclination,
+  nodeOffsetDeg: number = skyParams.moonNodeOffset,
 ): number {
-  const y = moonDirection(timeOfDay, phase, latitude)[1];
+  const y = moonDirection(timeOfDay, phase, latitude, inclinationDeg, nodeOffsetDeg)[1];
   return Math.asin(Math.min(1, Math.max(-1, y)));
+}
+
+/**
+ * Angle between the sun and the moon in DEGREES, 0..180. The moon's true
+ * elongation; what decides whether a crescent is a sight or a sliver lost in
+ * the sun's glare. Clamped dot (§V28: acos of 1+ε is NaN).
+ */
+export function moonElongation(sunDir: Vec3, moonDir: Vec3): number {
+  const d = sunDir[0] * moonDir[0] + sunDir[1] * moonDir[1] + sunDir[2] * moonDir[2];
+  return (Math.acos(Math.min(1, Math.max(-1, d))) * 180) / Math.PI;
 }
 
 /**
@@ -247,6 +304,63 @@ export function keyRadianceScale(dirW: number, moonW: number, p: SkyParams): num
   return clamp01(1 + clamp01(dirW) * (clamp01(moon) - 1));
 }
 
+/**
+ * Everything the sky background needs to DRAW the two bodies — all of it
+ * resolved on the CPU, once per frame, and delivered as uniforms (§V91).
+ *
+ * `sunDiscGate` / `moonDiscGate` multiply every disc, glow and halo term of
+ * their body: exactly 0 once the body is `bodyHorizonMargin` below the horizon
+ * plus its own radius (nothing is drawn from under the sea), and for the moon
+ * additionally 0 inside `moonGlareAngle` of the sun — a moon that close is a
+ * ≤2%-lit sliver inside the sun's forward scatter, and drawing it is the
+ * "second disc beside the setting sun" of §B63.
+ *
+ * `drawPhase` is the phase the TERMINATOR is cut at. `moonDiscPhase` is a
+ * documented cheat (a crescent drawn on a full-moon orbit, see the param), and
+ * it stays — but it can only ever SUBTRACT from the truth: the drawn disc is
+ * never more lit than the orbit says it is, so a near-new moon is a near-new
+ * moon whatever the cheat asks for. `litFraction` is the lit AREA of that
+ * drawn disc; it scales the aura (glow/halo) as before.
+ *
+ * Every factor is a 0..1 smoothstep or a product of them — bounded at source
+ * (§V44), never clamped after the fact.
+ */
+export interface MoonDiscState {
+  sunDiscGate: number;
+  moonDiscGate: number;
+  drawPhase: number;
+  litFraction: number;
+}
+
+/** deg. Floor for the glare ramp's width (§V28: a zero-width smoothstep is 0/0) */
+const MIN_GLARE_SOFT = 0.01;
+
+export function moonDiscState(
+  sunElev: number,
+  moonElev: number,
+  elongationDeg: number,
+  p: SkyParams,
+): MoonDiscState {
+  const sunDiscGate = bodyHorizonGate(sunElev, p.sunDiscSize, p.bodyHorizonMargin);
+  const horizon = bodyHorizonGate(moonElev, p.moonDiscSize, p.bodyHorizonMargin);
+  const glare0 = Number.isFinite(p.moonGlareAngle) ? Math.max(0, p.moonGlareAngle) : 0;
+  const soft = Number.isFinite(p.moonGlareSoftness) ? Math.max(MIN_GLARE_SOFT, p.moonGlareSoftness) : MIN_GLARE_SOFT;
+  // @band-limited-elsewhere: CPU scalar over ELONGATION, once per frame, a uniform
+  const glare = smoothstep(glare0, glare0 + soft, Number.isFinite(elongationDeg) ? elongationDeg : 0);
+  const orbit = clamp01(p.moonPhase);
+  const cheat = clamp01(p.moonDiscPhase);
+  // min by ILLUMINATION: illumination is even about 0.5, so the two
+  // candidates with equal illumination have equal cos(2πp) and the switch
+  // is continuous in the terminator's k.
+  const drawPhase = moonIllumination(cheat) <= moonIllumination(orbit) ? cheat : orbit;
+  return {
+    sunDiscGate,
+    moonDiscGate: horizon * glare,
+    drawPhase,
+    litFraction: moonIllumination(drawPhase),
+  };
+}
+
 /** floor for any normalize() (§V28: normalize(0) is NaN, not 0) */
 const MIN_LEN = 1e-6;
 
@@ -358,6 +472,19 @@ export interface KeyLight {
    * mid-swing through the nadir and points at neither body.
    */
   moonDirection: Vec3;
+  /**
+   * Unit vector toward the SUN — the true sun, at every hour (§V91). The
+   * sun's DISC is drawn here, never along `direction`: after the handover
+   * `direction` is the moon's, and a sun disc drawn along it sat ON the moon
+   * every night (ember-coloured, 14× HDR) — "the sun turned into the moon".
+   */
+  sunDirection: Vec3;
+  /** 0..1 gates on the sun's and the moon's disc/glow/halo — see moonDiscState */
+  sunDiscGate: number;
+  moonDiscGate: number;
+  /** phase the moon's terminator is cut at, and the lit area of that disc */
+  moonDrawPhase: number;
+  moonLitFraction: number;
 }
 
 /**
@@ -371,9 +498,16 @@ export interface KeyLight {
  */
 export function keyLight(timeOfDay: number, p: SkyParams): KeyLight {
   const sunElev = sunElevation(timeOfDay, p.latitude);
-  const moonElev = moonElevation(timeOfDay, p.moonPhase, p.latitude);
   const sunDir = sunDirection(timeOfDay, p.latitude);
-  const moonDir = moonDirection(timeOfDay, p.moonPhase, p.latitude);
+  const moonDir = moonDirection(
+    timeOfDay,
+    p.moonPhase,
+    p.latitude,
+    p.moonInclination,
+    p.moonNodeOffset,
+  );
+  const moonElev = Math.asin(Math.min(1, Math.max(-1, moonDir[1])));
+  const disc = moonDiscState(sunElev, moonElev, moonElongation(sunDir, moonDir), p);
 
   const moonW = moonKeyWeight(sunElev, moonElev, p.moonPhase);
   const dirW = keyDirectionWeight(sunElev);
@@ -401,5 +535,10 @@ export function keyLight(timeOfDay: number, p: SkyParams): KeyLight {
     sunElevation: sunElev,
     moonElevation: moonElev,
     moonDirection: moonDir,
+    sunDirection: sunDir,
+    sunDiscGate: disc.sunDiscGate,
+    moonDiscGate: disc.moonDiscGate,
+    moonDrawPhase: disc.drawPhase,
+    moonLitFraction: disc.litFraction,
   };
 }

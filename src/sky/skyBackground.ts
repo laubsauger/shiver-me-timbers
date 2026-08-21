@@ -34,7 +34,7 @@ import {
   vec3,
 } from 'three/tsl';
 import type { SkyParams } from '../params/sky';
-import { moonIllumination, type KeyLight } from './moonCycle';
+import type { KeyLight } from './moonCycle';
 import { createStarfield } from './starfield';
 import { createWindLines, type WindFrame } from './windLines';
 import {
@@ -64,6 +64,14 @@ const EPS = 1e-3;
 
 export function createSkyBackground(p: SkyParams) {
   const uSunDir = uniform(new THREE.Vector3(0, 1, 0));
+  // THE SUN ITSELF, as opposed to `uSunDir` which is THE KEY (§V91, §B63).
+  // `uSunDir` swings to the moon each dusk and the haze lift rightly follows
+  // it; the sun's DISC must not — drawn along the key it sat on the moon all
+  // night in ember orange, which is the "sun turned into the moon" report.
+  const uSunBodyDir = uniform(new THREE.Vector3(0, 1, 0));
+  // 0..1 CPU horizon gates on the discs (bodyHorizonGate): 0 below the sea
+  const uSunGate = uniform(0);
+  const uMoonGate = uniform(0);
   const uSunColor = uniform(new THREE.Color());
   const uZenith = uniform(new THREE.Color());
   const uMid = uniform(new THREE.Color());
@@ -185,7 +193,7 @@ export function createSkyBackground(p: SkyParams) {
    * `skySunTerm`'s own note for why transmission is the other case.
    */
   const sunFor = Fn(([dir]: [ReturnType<typeof vec3>]) => {
-    const c = dir.dot(uSunDir);
+    const c = dir.dot(uSunBodyDir);
     /**
      * §V.48, BOTH HALVES — and it is not the background that needs it. On the
      * sky mesh `dir` is the view ray, `fwidth(c)` is a fraction of a degree,
@@ -217,7 +225,10 @@ export function createSkyBackground(p: SkyParams) {
     const toSun = c.clamp(0, 1); // clamp before pow — negative base = NaN (§V28)
     const glow = toSun.pow(uGlowPower.max(EPS)).mul(uGlowStrength);
     const halo = toSun.pow(uHaloPower.max(EPS)).mul(uHaloStrength);
-    return vec3(uSunColor).mul(disc.add(glow).add(halo));
+    // §V91: the whole body — disc, glow AND halo — is gated by the CPU
+    // horizon gate, so a set sun leaves no glow on the sea and nothing is
+    // ever drawn from below it (ocean Snell's window included).
+    return vec3(uSunColor).mul(disc.add(glow).add(halo).mul(uSunGate));
   });
   const sunTerm = sunFor(viewDir);
 
@@ -263,8 +274,10 @@ export function createSkyBackground(p: SkyParams) {
   // §V44 bounded at source: every factor is a 0..1 smoothstep or a clamped
   // pow, and the phase weight zeroes the whole term at new moon rather than
   // relying on a clamp downstream.
+  // §V91: and the whole moon is gated by its horizon+glare gate — 0 below the
+  // sea, 0 inside the sun's glare — so a near-new moon is simply not there.
   const moonTerm = vec3(uMoonColor).mul(
-    moonDisc.add(moonGlow.add(moonHalo).mul(uMoonBright)),
+    moonDisc.add(moonGlow.add(moonHalo).mul(uMoonBright)).mul(uMoonGate),
   );
 
   // 6. stars and wind lines. Added LAST and only here — see the note by
@@ -354,6 +367,12 @@ export function createSkyBackground(p: SkyParams) {
       const sunDir = key.direction;
       const elevation = key.sunElevation;
       uSunDir.value.set(sunDir[0], sunDir[1], sunDir[2]);
+      // the DISC follows the true sun and is gated by the true sun's
+      // elevation — never the key's (§V91)
+      const sd = key.sunDirection;
+      uSunBodyDir.value.set(sd[0], sd[1], sd[2]);
+      uSunGate.value = key.sunDiscGate;
+      uMoonGate.value = key.moonDiscGate;
       const tint = skyTint(elevation, key.moonWeight);
       const sun = sunColor(elevation);
       // one palette for sky + fog + ambient, crossfaded to golden hour (§T39)
@@ -398,19 +417,18 @@ export function createSkyBackground(p: SkyParams) {
       uMoonSinRadius.value = Math.sin((Math.max(0, p.moonDiscSize) * Math.PI) / 180);
       uMoonIntensity.value = p.moonDiscIntensity;
       // k = cos(phase angle): +1 new (nothing lit) → -1 full (all lit).
-      // `moonDiscPhase`, NOT `moonPhase` — see the param's docstring. The
-      // orbital phase has to stay full (it is what puts the moon low enough at
-      // the Night preset to lay a glint road, and what keeps MOON_SURGE from
-      // dropping the key to 0.044), while every reference shows a crescent.
-      // The disc is the only thing given the crescent.
-      const discPhase = Math.min(1, Math.max(0, p.moonDiscPhase));
-      uMoonTermK.value = Math.cos(2 * Math.PI * discPhase);
+      // `key.moonDrawPhase`: `moonDiscPhase` (the documented crescent cheat —
+      // the orbit stays full for the Night preset's low moon and MOON_SURGE,
+      // only the drawn disc is a crescent) capped by the ORBITAL phase, so the
+      // disc is never more lit than the moon's real elongation allows and a
+      // near-new moon is dark (§V91). See moonCycle.moonDiscState.
+      uMoonTermK.value = Math.cos(2 * Math.PI * key.moonDrawPhase);
       uMoonTermSoft.value = Math.max(1e-3, p.moonTerminatorSoftness);
       uMoonGlowPower.value = p.moonGlowPower;
       uMoonGlowStrength.value = p.moonGlowStrength;
       uMoonHaloPower.value = p.moonHaloPower;
       uMoonHaloStrength.value = p.moonHaloStrength;
-      uMoonBright.value = moonIllumination(discPhase);
+      uMoonBright.value = key.moonLitFraction;
 
       starfield.update(key);
       // uHaze, not a second palette lookup: the streaks must warm on exactly

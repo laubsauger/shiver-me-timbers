@@ -61,33 +61,55 @@ function hours(step = 0.002): number[] {
   return out;
 }
 
-describe('moon geometry (the phase IS an hour-angle lag, not a texture)', () => {
-  it('a full moon sits exactly opposite the sun — that is what "full" means', () => {
+/** the orbit's tilt, in radians — the one tolerance the geometry tests allow */
+const INCL = (P.moonInclination * Math.PI) / 180;
+
+describe('moon geometry (the phase IS an elongation, not a texture)', () => {
+  // §V80 re-cut (§V91): this pinned dot === -1 to 12 digits, i.e. "the full
+  // moon is EXACTLY antipodal" — which is only true of a moon on the sun's
+  // own track, the very defect §B63 removes. The PROPERTY a full moon has is
+  // "opposite the sun to within the orbit's tilt", and exactly antipodal
+  // only when that tilt is 0.
+  it('a full moon sits opposite the sun, to within the orbit\'s inclination', () => {
     for (const t of [0, 3.5, 7, 11, 15.25, 19, 22.5]) {
       const s = sunDirection(t, LAT);
       const m = moonDirection(t, 0.5, LAT);
-      // antipodal to floating point: dot === -1
-      expect(s[0] * m[0] + s[1] * m[1] + s[2] * m[2]).toBeCloseTo(-1, 12);
+      const dot = s[0] * m[0] + s[1] * m[1] + s[2] * m[2];
+      expect(dot).toBeLessThanOrEqual(-Math.cos(INCL) + 1e-12);
+      // and with the tilt switched off it is the antipode, to floating point
+      const flat = moonDirection(t, 0.5, LAT, 0);
+      expect(s[0] * flat[0] + s[1] * flat[1] + s[2] * flat[2]).toBeCloseTo(-1, 12);
     }
   });
 
+  // §V80 re-cut: pinned elev(0) === -sunElev(0) and elev(18) === 0 to 10-12
+  // digits — the same "on the sun's track" decision. The property is that a
+  // full moon is up for the hours the sun is not: it crosses the horizon
+  // within the tilt of sunset/sunrise and peaks at midnight.
   it('a full moon rises at sunset and is highest at midnight', () => {
     // the whole reason a full moon is the right default for a night scene:
     // it is up for exactly the hours the sun is not.
-    expect(moonElevation(0, 0.5, LAT)).toBeCloseTo(-sunElevation(0, LAT), 12);
+    expect(Math.abs(moonElevation(0, 0.5, LAT) + sunElevation(0, LAT))).toBeLessThanOrEqual(INCL + 1e-12);
     const midnight = moonElevation(0, 0.5, LAT);
     for (const t of [1, 2, 4, 20, 22, 23]) {
       expect(moonElevation(t, 0.5, LAT)).toBeLessThan(midnight);
     }
     // and it crosses the horizon as the sun does, in the other direction
-    expect(moonElevation(18, 0.5, LAT)).toBeCloseTo(0, 10);
-    expect(moonElevation(6, 0.5, LAT)).toBeCloseTo(0, 10);
+    expect(Math.abs(moonElevation(18, 0.5, LAT))).toBeLessThanOrEqual(INCL);
+    expect(Math.abs(moonElevation(6, 0.5, LAT))).toBeLessThanOrEqual(INCL);
   });
 
-  it('a new moon sits ON the sun — so it is never up at night', () => {
+  // §V80 re-cut: pinned dist(moon, sun) === 0 — a moon ON the sun, which
+  // with any drawn disc is the §B63 "second disc beside the sun". The property
+  // is: near the sun (within the tilt), and DARK — nothing to see.
+  it('a new moon sits beside the sun, within the tilt, and is dark', () => {
     for (const t of [0, 6, 13, 21]) {
-      expect(dist(moonDirection(t, 0, LAT), sunDirection(t, LAT))).toBeCloseTo(0, 12);
+      const d = dist(moonDirection(t, 0, LAT), sunDirection(t, LAT));
+      expect(d).toBeLessThanOrEqual(2 * Math.sin(INCL / 2) + 1e-12);
+      expect(d).toBeGreaterThan(0); // beside, not on
     }
+    expect(moonIllumination(0)).toBe(0);
+    expect(moonBrightness(0)).toBe(0);
   });
 
   it('a crescent trails the sun and has set by the small hours', () => {

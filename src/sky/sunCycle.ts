@@ -133,6 +133,31 @@ export function sunAboveHorizon(elevation: number): number {
 }
 
 /**
+ * Is a body's DISC drawable, 0..1 (§V91). Exactly 0 once the body's centre is
+ * `radiusDeg + marginDeg` below the horizon, exactly 1 once it is `radiusDeg`
+ * above it — i.e. the whole disc has cleared the sea. Multiplies every disc,
+ * glow and halo term of the sun AND the moon in the sky background, so no
+ * body is ever painted from under the water, through the world, or into the
+ * Snell's window when it is not actually up.
+ *
+ * This is NOT `sunAboveHorizon()`: that gate is the key LIGHT's and its edges
+ * are the apparent sunset widened for the day clock; this one is about the
+ * PICTURE of the body and follows the authored disc size. Distinct on purpose
+ * — widening the light's gate must not start drawing discs underwater.
+ *
+ * CPU scalar over elevation, delivered as a uniform — no per-fragment branch,
+ * no pixel footprint (§V48 does not apply). Edge gap is floored (§V28).
+ */
+export function bodyHorizonGate(elevation: number, radiusDeg: number, marginDeg: number): number {
+  const r = (Number.isFinite(radiusDeg) ? Math.max(0, radiusDeg) : 0) * (Math.PI / 180);
+  const m = (Number.isFinite(marginDeg) ? Math.max(0, marginDeg) : 0) * (Math.PI / 180);
+  const lo = -(r + m);
+  const hi = Math.max(r, lo + MIN_EDGE_GAP);
+  // @band-limited-elsewhere: CPU scalar over ELEVATION, once per frame, a uniform
+  return smoothstep(lo, hi, elevation);
+}
+
+/**
  * Residual broadband strength of the beam, KEY_FLOOR..1 — never 0 while the
  * sun is up. The art-directed half of `daylight()`.
  *

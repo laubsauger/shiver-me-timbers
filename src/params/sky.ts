@@ -70,9 +70,29 @@ export interface SkyParams {
    * MOONLIGHT (see src/sky/moonCycle.ts for the whole argument).
    *
    * `moonPhase` 0..1: 0 = new, 0.25 = first quarter, 0.5 = FULL, 0.75 = last
-   * quarter. It is a real hour-angle lag, so it moves WHEN the moon is up as
-   * well as how lit it is — a full moon rises at sunset and is overhead at
-   * midnight, a crescent trails the sun and has set by the small hours.
+   * quarter. It is the moon's ELONGATION around its own orbit (phase·360°
+   * from the sun), so it moves WHEN the moon is up as well as how lit it is —
+   * a full moon rises at sunset and is overhead at midnight, a crescent
+   * trails the sun and has set by the small hours.
+   *
+   * `moonInclination` (deg) tilts that orbit off the sun's track and
+   * `moonNodeOffset` (deg) says where along the track the two planes cross
+   * (§V91). Together they are why the moon is never ON the sun's path: at
+   * the default node (90°) the full moon passes `moonInclination` above or
+   * below the anti-sun point instead of through it, and the new moon passes
+   * the same distance beside the sun. 5.1° is the real orbit's tilt.
+   *
+   * `moonGlareAngle` / `moonGlareSoftness` (deg): a moon closer to the sun
+   * than the glare angle is not drawn at all — it is a sliver of a few
+   * percent lit, lost in the sun's forward scatter (the youngest crescent
+   * ever sighted was ~7.5° out; 15° is a comfortable "nobody sees it"). This
+   * is what stops a near-new moon sitting beside the setting sun as a second
+   * disc (§B63). Ramps to full visibility over the softness.
+   *
+   * `bodyHorizonMargin` (deg): the sun and moon discs (plus glow and halo)
+   * are gated to exactly 0 once the body is this far below the horizon PLUS
+   * its own radius, and full once its radius clears it. No body is drawn
+   * from under the sea (§V91).
    *
    * `moonIntensity` IS THE MOON'S BRIGHTNESS — all of it, one knob. It keys
    * the ship, and (through `KeyLight.radianceScale`) it sets how bright the
@@ -94,6 +114,11 @@ export interface SkyParams {
    * so it reads as an art choice rather than as a physics error.
    */
   moonPhase: number;
+  moonInclination: number;
+  moonNodeOffset: number;
+  moonGlareAngle: number;
+  moonGlareSoftness: number;
+  bodyHorizonMargin: number;
   /**
    * THE DISC'S APPEARANCE ONLY — a deliberate, named cheat. Read this before
    * "unifying" it with `moonPhase`; it was one knob and the single knob could
@@ -424,6 +449,24 @@ export const skyParams: SkyParams = registerParams(
     // FULL MOON — and it stays full, because this knob is the ORBIT and the
     // LIGHT, not the picture. See moonDiscPhase for the whole argument.
     moonPhase: 0.5,
+    // The real orbit's tilt against the ecliptic. The sun's own track stands
+    // in for the ecliptic here (declination-0 sun), so this is the whole of
+    // "the moon is not on the sun's path". At the Night preset (19:15, full
+    // moon) it moves the moon's rise ~5° along the horizon and ~0.3° in
+    // elevation — the glint road is untouched.
+    moonInclination: 5.1,
+    // 90°: the planes cross a quarter-orbit from the sun, so the full moon
+    // sits at the FULL tilt above/below the anti-sun point rather than on it
+    // (0° would be the eclipse geometry, a moon exactly antipodal). Slowly
+    // regresses in reality (18.6 yr); a static knob here.
+    moonNodeOffset: 90,
+    // Below 15° elongation the disc is ≤1.7% lit and inside the sun's glare;
+    // drawing it there is precisely the "sun beside a moon" report (§B63).
+    moonGlareAngle: 15,
+    moonGlareSoftness: 10,
+    // 1°: gate reaches 0 at -(radius + 1°) so a body that has just set does
+    // not keep a glow on the horizon, and nothing is ever drawn below the sea.
+    bodyHorizonMargin: 1.0,
     // Waxing crescent, 28.7% lit. Measured off the references: the moon spans
     // 3.1-4.7° in docs/inspo/night/ (cgi7573…, sovereigns, images 1-4) and is
     // a crescent in every one, from a thin sliver (~12% lit) to a fat one
@@ -621,6 +664,11 @@ export const skyParams: SkyParams = registerParams(
     sunHazeStrength: { min: 0, max: 1, step: 0.01 },
     horizonWarmStrength: { min: 0, max: 1, step: 0.01 },
     moonPhase: { min: 0, max: 1, step: 0.01 },
+    moonInclination: { min: 0, max: 30, step: 0.1 },
+    moonNodeOffset: { min: 0, max: 360, step: 1 },
+    moonGlareAngle: { min: 0, max: 45, step: 0.5 },
+    moonGlareSoftness: { min: 0.5, max: 45, step: 0.5 },
+    bodyHorizonMargin: { min: 0, max: 5, step: 0.1 },
     moonDiscPhase: { min: 0, max: 1, step: 0.01 },
     moonIntensity: { min: 0, max: 4, step: 0.01 },
     moonAmbient: { min: 0, max: 1, step: 0.01 },
