@@ -65,6 +65,8 @@ import {
   brightnessAt,
   burstDirection,
   crownDirection,
+  DISC_FALLOFF_POW,
+  heatAt,
   jitterScale,
   hash01,
   particleAspect,
@@ -124,6 +126,14 @@ export interface CombatFx {
   shake: CameraShake;
   dispose(): void;
 }
+
+/**
+ * The flash tint fresh powder smoke is lit with from inside, and for how long
+ * (s). Module constants, not params: they are one frame's worth of colour
+ * under a 0.09 s flash and there is nothing to tune against.
+ */
+const HEAT_TINT: readonly [number, number, number] = [1, 0.62, 0.3]; // linear
+const HEAT_WINDOW = 0.12;
 
 /** the sphere's own long axis — what the stretch aligns with the velocity */
 const BALL_UP = /*@__PURE__*/ new THREE.Vector3(0, 1, 0);
@@ -212,9 +222,10 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
 
   const tint = instancedBufferAttribute(colAttr, 'vec3');
   // soft round falloff; brightness IS the fade and a dead particle is already
-  // zero-size before it can contribute anything
+  // zero-size before it can contribute anything. The exponent is fxMath's so
+  // the CPU coverage twin (`discCoverage`) is provably the same curve.
   const q = uv().mul(2).sub(1);
-  const shape = q.dot(q).oneMinus().max(0).pow(1.5);
+  const shape = q.dot(q).oneMinus().max(0).pow(DISC_FALLOFF_POW);
   // the torn contour rides on top of that disc; `tearNode` is 0 for every
   // non-smoke kind, which leaves `shape` mathematically untouched for them
   const cover = tornAlpha(shape, uv(), tearNode, seedNode, uDissolveScale);
@@ -543,8 +554,17 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
         for (let k = 0; k < debrisN; k++) {
           spawn('splinter', hit.point, throwAxis, k, prof.splinter, seed, vary);
         }
+        // a hand OUTSIDE the planking along the normal: `hit.point` is the
+        // ball's swept-sphere centre at first contact, so a sprite centred on
+        // it has its hull-side half depth-clipped at any grazing view
+        const off = Math.max(0, nn(p.impactStandoff, 0.5));
+        const dustPos: [number, number, number] = [
+          finite(hit.point[0]) + axis[0] * off,
+          finite(hit.point[1]) + axis[1] * off,
+          finite(hit.point[2]) + axis[2] * off,
+        ];
         for (let k = 0; k < impactSmokeN; k++) {
-          spawn('impactSmoke', hit.point, axis, k, prof.impactSmoke, seed, vary);
+          spawn('impactSmoke', dustPos, axis, k, prof.impactSmoke, seed, vary);
         }
         // and the pieces that are actually going to LAND. Two, not twelve:
         // these are chunks of the ship, and a hull that sheds a dozen planks
@@ -685,12 +705,23 @@ export function createCombatFx(p: CombatFxParams = combatFxParams): CombatFx {
           const next = ageFraction(age[i], life[i]);
           // §V.44: every factor is bounded at source — brightnessAt ∈ [0,1],
           // boost ≤ BOOST_MAX, colour ∈ [0,1] — so the product is too
-          const fade = brightnessAt(next);
+          const fade = brightnessAt(next, pr.linger);
           const b = fade * gain * pr.boost;
           sizeArr[i] = sizeAt(pr, next) * sizeScale[i];
-          colArr[i * 3] = pr.color[0] * b;
-          colArr[i * 3 + 1] = pr.color[1] * b;
-          colArr[i * 3 + 2] = pr.color[2] * b;
+          // the first ~0.1 s of powder smoke is lit from inside by the flash:
+          // a lerp toward HEAT_TINT that is exactly 0 past HEAT_WINDOW, and
+          // 0 always for the kinds that are not smoke (the branch is skipped)
+          const heat = kinds[i] === 'smoke' || kinds[i] === 'breech'
+            ? heatAt(age[i], HEAT_WINDOW) : 0;
+          if (heat > 0) {
+            colArr[i * 3] = (pr.color[0] + (HEAT_TINT[0] - pr.color[0]) * heat) * b;
+            colArr[i * 3 + 1] = (pr.color[1] + (HEAT_TINT[1] - pr.color[1]) * heat) * b;
+            colArr[i * 3 + 2] = (pr.color[2] + (HEAT_TINT[2] - pr.color[2]) * heat) * b;
+          } else {
+            colArr[i * 3] = pr.color[0] * b;
+            colArr[i * 3 + 1] = pr.color[1] * b;
+            colArr[i * 3 + 2] = pr.color[2] * b;
+          }
           /**
            * THE FADE HAS TO BE IN THE ALPHA TOO, and this is not symmetry for
            * its own sake — it is what makes the composite a composite.

@@ -246,14 +246,15 @@ describe('smoke is carried by the LIVE wind', () => {
     // (SrcAlpha, One) with colour = tint and opacity = cover; the new function
     // is (One, OneMinusSrcAlpha) with colour = tint·cover and alpha = cover·0.
     // Those are the same expression, and this pins it so a future edit to
-    // either half cannot silently regrade every puff of powder smoke.
-    // `splinter` was in this list and has been REMOVED on purpose — see the
-    // "a splinter OCCLUDES" test below. It is the only kind ever to leave the
-    // additive family, and it left because it is the only one that was never
-    // light in the first place.
+    // either half cannot silently regrade the flash.
+    // `splinter` left this list first, and the three SMOKE kinds left it on
+    // §T.87: a list that pinned "smoke must stay additive" was pinning the
+    // very decision that made the muzzle cloud invisible (§V.80) — additive
+    // grey over a bright sky occludes nothing. What remains is genuinely
+    // LIGHT: the flash, the strike, the sparks.
     const p = profiles();
     const sea = [0.02, 0.12, 0.13];
-    for (const kind of ['flash', 'smoke', 'spark', 'breech', 'impactSmoke'] as const) {
+    for (const kind of ['flash', 'spark', 'impactFlash'] as const) {
       const pr = p[kind];
       expect(pr.alpha, `${kind} must stay additive`).toBe(0);
       for (const cover of [0.15, 0.5, 1]) {
@@ -266,18 +267,20 @@ describe('smoke is carried by the LIVE wind', () => {
     }
   });
 
-  it('water is OPAQUE and light is ADDITIVE (the blend split)', () => {
+  it('SUBSTANCE is OPAQUE and LIGHT is ADDITIVE (the blend split)', () => {
     // WHY: additive can only ever brighten what is behind it. An additive
     // splash column reads as a glow latched onto the sea and disappears
     // outright against a bright sky, which is exactly the angle it is seen
     // from on a deck — verbatim the user's "latched on top / doesn't look
-    // like it interacts with the water". Powder and flame genuinely ARE light
-    // and must stay at 0, or the smoke turns into grey cardboard.
+    // like it interacts with the water". The SAME failure, one system over,
+    // was the muzzle cloud (§T.87: "almost not visible at all") — powder
+    // smoke is a substance too, and it was shipped as light. Flame IS light
+    // and must stay at 0, or the flash stops glaring.
     const p = profiles();
-    for (const kind of ['column', 'crown', 'splash'] as const) {
+    for (const kind of ['column', 'crown', 'splash', 'smoke', 'breech', 'impactSmoke'] as const) {
       expect(p[kind].alpha, `${kind} alpha`).toBeGreaterThan(0);
     }
-    for (const kind of ['flash', 'smoke', 'spark', 'breech', 'impactFlash', 'impactSmoke'] as const) {
+    for (const kind of ['flash', 'spark', 'impactFlash'] as const) {
       expect(p[kind].alpha, `${kind} alpha`).toBe(0);
     }
     // the crown is bulk sea and the mist is half-atomised: the ORDER is the
@@ -299,8 +302,10 @@ describe('smoke is carried by the LIVE wind', () => {
      * Stated as the property, not the number: there must exist a background
      * bright enough that a splinter DARKENS it. That is false for every
      * additive kind at every setting, and it is what "solid object" means.
-     * Powder smoke must NOT satisfy it, or the smoke turns to grey cardboard —
-     * so the same assertion is run in reverse on `smoke` to pin the split.
+     * The FLASH must NOT satisfy it — a flash that can darken a sky is not a
+     * flash — so the same assertion is run in reverse on `flash` to pin the
+     * split. (It used to be run on `smoke`, which pinned the muzzle cloud
+     * to the additive family that made it invisible — §T.87, §V.80.)
      */
     const p = profiles();
     const sky = [0.9, 0.95, 1]; // linear bright overcast — the worst case
@@ -313,8 +318,8 @@ describe('smoke is carried by the LIVE wind', () => {
     let splinterDarkens = false;
     for (let c = 0; c < 3; c++) {
       if (composite(p.splinter, c) < sky[c] - 1e-6) splinterDarkens = true;
-      // powder smoke is light: it may never subtract from the sky
-      expect(composite(p.smoke, c), `smoke must stay additive c${c}`)
+      // the flash is light: it may never subtract from the sky
+      expect(composite(p.flash, c), `flash must stay additive c${c}`)
         .toBeGreaterThanOrEqual(sky[c] - 1e-9);
     }
     expect(splinterDarkens, 'a splinter must be able to darken a bright sky').toBe(true);

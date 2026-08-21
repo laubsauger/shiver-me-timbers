@@ -116,6 +116,12 @@ export interface FxProfile {
    * and stay at 0; aerated water is a substance and does not.
    */
   alpha: number;
+  /**
+   * ≥ 1 — how long the fade HOLDS before it lets go (see `brightnessAt`).
+   * Optional and defaulting to 1 so every kind that does not name it keeps
+   * the original `(1 − t)²` curve on the identical code path.
+   */
+  linger?: number;
 }
 
 /**
@@ -247,11 +253,70 @@ export function splinterTumble(seed: number, index: number, rate: number): numbe
   return (s < 0 ? -1 : 1) * (0.25 + 0.75 * Math.abs(s)) * r;
 }
 
-/** additive brightness over life: quick bloom, then a fade to nothing */
-export function brightnessAt(t: number): number {
+/**
+ * Brightness/coverage over life: quick bloom, then a fade to nothing.
+ *
+ * `linger` ≥ 1 holds the fade up before it lets go: the curve is
+ * `(1 − t^linger)²`, so at 1 it is EXACTLY the original `(1 − t)²` and takes
+ * the identical code path. Powder smoke needs it because `(1 − t)²` is a
+ * FLASH curve — it is at a quarter by half-life and under 5% at 0.78, which
+ * on a 3.2 s puff means the cloud is gone from the screen by ~1.5 s while
+ * the pool is still stepping it. A 0.08 rise keeps a newborn from popping.
+ */
+export function brightnessAt(t: number, linger = 1): number {
   if (t >= 1 || t < 0) return 0;
   const rise = Math.min(1, t / 0.08); // floored: 0.08 is a literal, never 0
-  return rise * (1 - t) * (1 - t);
+  const l = Number.isFinite(linger) && linger > 1 ? linger : 1;
+  const u = l === 1 ? t : Math.pow(t, l);
+  return rise * (1 - u) * (1 - u);
+}
+
+/**
+ * The sprite's radial falloff exponent: the fragment shader's `shape` is
+ * `(1 − |q|²)^DISC_FALLOFF_POW`, q ∈ [−1,1] across the quad. Owned HERE and
+ * imported by the TSL call-site in combatFx so the CPU coverage mirror below
+ * (used by the headless rasteriser and its tests) cannot drift from what is
+ * drawn (§V.77).
+ */
+export const DISC_FALLOFF_POW = 1.5;
+
+/**
+ * Coverage of one sprite at normalised radius `r` (0 at the centre, 1 at the
+ * quad's edge = half its `size`). The CPU twin of the shader's `shape`.
+ */
+export function discCoverage(r: number): number {
+  if (!Number.isFinite(r)) return 0;
+  const q = 1 - r * r;
+  return q <= 0 ? 0 : Math.pow(q, DISC_FALLOFF_POW);
+}
+
+/**
+ * Accumulated OCCLUSION of a stack of source-over fragments at one pixel:
+ * `1 − Π(1 − fᵢ)` where each fᵢ is `cover·alpha·fade`. This is the blender's
+ * `dst·(1 − f)` applied in sequence, so it is the number that says how much
+ * of the sea/sky behind a cloud survives — an additive sprite has f = 0 and
+ * contributes NOTHING here however bright it is, which is the whole
+ * diagnosis of "the smoke is almost not visible".
+ */
+export function stackOcclusion(fractions: ArrayLike<number>): number {
+  let keep = 1;
+  for (let i = 0; i < fractions.length; i++) {
+    const f = fractions[i];
+    if (Number.isFinite(f) && f > 0) keep *= 1 - Math.min(1, f);
+  }
+  return 1 - keep;
+}
+
+/**
+ * Warm FLASH TINT weight for fresh powder smoke: 1 at birth, 0 after
+ * `window` seconds. The first puffs out of the bore are lit by the muzzle
+ * flash from inside; without it the smoke is a grey cloud that appears in
+ * the same frame as an orange flash and reads as two unrelated sprites.
+ */
+export function heatAt(age: number, window: number): number {
+  if (!Number.isFinite(age) || !Number.isFinite(window) || window <= 0) return 0;
+  const w = 1 - age / window;
+  return w < 0 ? 0 : w > 1 ? 1 : w;
 }
 
 /**

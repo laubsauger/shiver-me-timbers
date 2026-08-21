@@ -24,7 +24,12 @@ import { sanitizeBoost, type FxKind, type FxProfile } from './fxMath';
 /** §V.31: sRGB-authored tints enter through THREE.Color, never bare setRGB */
 const TINTS: Record<FxKind, THREE.Color> = {
   flash: new THREE.Color(0xffd08a),
-  smoke: new THREE.Color(0x9a958c),
+  // WHITE-GREY, not mid-grey: the bank is now an OPAQUE source-over body
+  // (`smokeAlpha`), so its tint is what the cloud IS rather than what it
+  // adds. 0x9a958c (0.32 linear) was tuned for additive and as a body it
+  // read as a dirty smudge; fresh powder smoke is bright, it darkens as it
+  // thins (the fade takes care of that)
+  smoke: new THREE.Color(0xdedad2),
   // burning powder grains: hotter and far more saturated than the smoke they
   // fly through, which is the only reason they read at all against it
   spark: new THREE.Color(0xffa53a),
@@ -32,7 +37,7 @@ const TINTS: Record<FxKind, THREE.Color> = {
   splash: new THREE.Color(0xcfe6e2),
   // the vent puff: the same powder as the muzzle bank, and it must read as
   // the same substance, so it shares the tint and differs only in scale
-  breech: new THREE.Color(0x9a958c),
+  breech: new THREE.Color(0xdedad2),
   // the ball's own wake: thin, cool, and DIM on purpose — a bright trail
   // turns a wooden-ship demo into science fiction
   trail: new THREE.Color(0x6f7a80),
@@ -41,7 +46,7 @@ const TINTS: Record<FxKind, THREE.Color> = {
   impactFlash: new THREE.Color(0xffe9c4),
   // oak dust, distinctly BROWNER than powder smoke — the two appear at
   // opposite ends of the same shot and must not read as the same cloud
-  impactSmoke: new THREE.Color(0x8a7f70),
+  impactSmoke: new THREE.Color(0xc4ac86),
   // the pillar is aerated water: brighter and greener than the droplets that
   // detach off its top, which are already thinning toward spray
   column: new THREE.Color(0xdaeeea),
@@ -126,8 +131,14 @@ export function fillProfiles(
     sizeEnd: pos(p.smokeSize, 0.8) * pos(p.smokeGrowth, 7),
     gravity: 0, drag: nn(p.smokeDrag, 4.5), speed: nn(p.smokeSpeed, 14),
     spread: 0.3, boost: 1,
-    riseSpeed: nn(p.smokeRiseSpeed, 2), windCoupling: nn(p.smokeWind, 0.7),
+    riseSpeed: nn(p.smokeRiseSpeed, 2), windCoupling: nn(p.smokeWind, 0.35),
     growthExp: pos(p.smokeGrowthExp, 0.5),
+    // A BODY, not a light. Additive smoke cannot darken a bright sky and
+    // that is the angle a gun is seen from on deck; rasterised headlessly
+    // the shipped additive bank had accumulated occlusion 0.000 over its
+    // whole life. Opaque source-over with a held fade is the SoT read: a
+    // fat white-grey cloud that hangs, then thins.
+    alpha: clamp01(nn(p.smokeAlpha, 0.85)), linger: lingerOf(p.smokeLinger),
   });
   set(dst.spark, {
     life: pos(p.sparkLife, 0.4), sizeStart: pos(p.sparkSize, 0.14),
@@ -197,8 +208,11 @@ export function fillProfiles(
     sizeEnd: pos(p.impactSmokeSize, 0.65) * pos(p.impactSmokeGrowth, 6),
     gravity: 0, drag: 3, speed: nn(p.impactSmokeSpeed, 5),
     spread: 0.55, boost: 1,
-    riseSpeed: nn(p.impactSmokeRise, 1.2), windCoupling: nn(p.smokeWind, 0.7) * 0.8,
+    riseSpeed: nn(p.impactSmokeRise, 1.2), windCoupling: nn(p.smokeWind, 0.35) * 0.8,
     growthExp: pos(p.smokeGrowthExp, 0.5),
+    // tan DUST — a body that hides the planking behind it, so a hit on a
+    // red hull reads as a cloud off the hull rather than a warm glow on it
+    alpha: clamp01(nn(p.impactSmokeAlpha, 0.8)), linger: lingerOf(p.smokeLinger),
   });
 
   // BREECH VENT. A muzzle-loader fires through the vent as well as the
@@ -208,8 +222,9 @@ export function fillProfiles(
     life: pos(p.breechLife, 1.4), sizeStart: pos(p.breechSize, 0.3),
     sizeEnd: pos(p.breechSize, 0.3) * pos(p.breechGrowth, 5),
     gravity: 0, drag: 5, speed: nn(p.breechSpeed, 6), spread: 0.28, boost: 1,
-    riseSpeed: nn(p.breechRise, 2.6), windCoupling: nn(p.smokeWind, 0.7),
+    riseSpeed: nn(p.breechRise, 2.6), windCoupling: nn(p.smokeWind, 0.35),
     growthExp: pos(p.smokeGrowthExp, 0.5),
+    alpha: clamp01(nn(p.smokeAlpha, 0.85)), linger: lingerOf(p.smokeLinger),
   });
 
   // --- the water column --------------------------------------------------
@@ -256,8 +271,8 @@ export function fillProfiles(
  * paths rather than merely equivalent ones. Only the smoke kinds opt in, and
  * you can see which by reading this file.
  */
-type ProfileFields = Omit<FxProfile, 'color' | 'riseSpeed' | 'windCoupling' | 'growthExp' | 'alpha'>
-  & Partial<Pick<FxProfile, 'riseSpeed' | 'windCoupling' | 'growthExp' | 'alpha'>>;
+type ProfileFields = Omit<FxProfile, 'color' | 'riseSpeed' | 'windCoupling' | 'growthExp' | 'alpha' | 'linger'>
+  & Partial<Pick<FxProfile, 'riseSpeed' | 'windCoupling' | 'growthExp' | 'alpha' | 'linger'>>;
 
 function set(dst: FxProfile, src: ProfileFields): void {
   dst.life = src.life;
@@ -272,6 +287,12 @@ function set(dst: FxProfile, src: ProfileFields): void {
   dst.windCoupling = src.windCoupling ?? 0;
   dst.growthExp = src.growthExp ?? 1;
   dst.alpha = src.alpha ?? 0;
+  dst.linger = src.linger ?? 1;
+}
+
+/** `linger` ≥ 1, floored — below 1 the curve would front-load harder than the flash */
+function lingerOf(v: number): number {
+  return Number.isFinite(v) && v > 1 ? v : 1;
 }
 
 function pos(v: number, fallback: number): number {

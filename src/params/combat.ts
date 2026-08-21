@@ -243,6 +243,20 @@ export interface CombatFxParams {
    */
   smokeWind: number;
   /**
+   * 0..1 — how OPAQUE powder smoke is. 0 was the shipped value and it is the
+   * reason the muzzle cloud did not read: additive can only brighten, and a
+   * 0.32-linear grey added to a 1–3-linear sky is nothing (headless
+   * rasteriser: accumulated occlusion 0.000 for the whole life of the cloud).
+   * Powder smoke is a SUBSTANCE — it hides the sea behind it.
+   */
+  smokeAlpha: number;
+  /**
+   * ≥ 1 — how long the smoke's fade HOLDS before it lets go (`brightnessAt`
+   * linger). 1 is the flash curve `(1 − t)²`, a quarter by half-life: on a
+   * 3.2 s puff that is gone from the screen by ~1.5 s.
+   */
+  smokeLinger: number;
+  /**
    * Exponent on age driving size. 0.5 = the turbulent-puff law: expands fast
    * while the eddies are energetic, then tapers. 1 = linear, which is what
    * reads as a balloon inflating at a constant rate.
@@ -372,6 +386,15 @@ export interface CombatFxParams {
   impactSmokeRise: number;
   /** particles per HIT (every hit, not only the one that breaches) */
   impactSmokePerHit: number;
+  /** 0..1 — how opaque the dust is (see `smokeAlpha`) */
+  impactSmokeAlpha: number;
+  /**
+   * m — the dust cloud is born THIS far outside the hit point along the
+   * hull's outward normal. The hit point is the ball's swept-sphere centre
+   * at first contact, `ballRadius` off the planking, and a sprite centred
+   * there has its hull-side half depth-clipped at any grazing view.
+   */
+  impactStandoff: number;
   debrisPerHit: number;
 
   // ── BREECH VENT (a muzzle-loader fires from BOTH ends) ─────────────────
@@ -520,7 +543,13 @@ export const combatFxParams: CombatFxParams = registerParams(
     smokeSpeed: 14,
     smokeDrag: 4.5,
     smokeRiseSpeed: 2,
-    smokeWind: 0.7,
+    // 0.35, ⊥ 0.7: coupled at 0.7 to a 10 m/s true wind the bank was 5.7 m
+    // from the muzzle at 1 s and 12.7 m at 2 s (rasterised) — carried off
+    // before it had finished billowing. A dense powder bank sits in the
+    // hull's own boundary layer for its first seconds; it is not a tracer.
+    smokeWind: 0.35,
+    smokeAlpha: 0.85,
+    smokeLinger: 2.0,
     smokeGrowthExp: 0.5,
     smokeRise: 0.35,
     sparkLife: 0.4,
@@ -580,12 +609,14 @@ export const combatFxParams: CombatFxParams = registerParams(
     splashAlpha: 0.45,
     impactFlashLife: 0.07,
     impactFlashSize: 1.5,
-    impactSmokeLife: 3.4,
-    impactSmokeSize: 0.65,
+    impactSmokeLife: 2.4,
+    impactSmokeSize: 0.75,
     impactSmokeGrowth: 6,
     impactSmokeSpeed: 5,
     impactSmokeRise: 1.2,
     impactSmokePerHit: 10,
+    impactSmokeAlpha: 0.8,
+    impactStandoff: 0.5,
     debrisPerHit: 12,
     breechLife: 1.4,
     breechSize: 0.3,
@@ -655,6 +686,8 @@ export const combatFxParams: CombatFxParams = registerParams(
     smokeDrag: { min: 0.1, max: 15, step: 0.1 },
     smokeRiseSpeed: { min: 0, max: 8, step: 0.05 },
     smokeWind: { min: 0, max: 1, step: 0.01 },
+    smokeAlpha: { min: 0, max: 1, step: 0.01 },
+    smokeLinger: { min: 1, max: 5, step: 0.1 },
     smokeGrowthExp: { min: 0.2, max: 2, step: 0.05 },
     smokeRise: { min: 0, max: 2, step: 0.05 },
     sparkLife: { min: 0.05, max: 2, step: 0.01 },
@@ -712,6 +745,8 @@ export const combatFxParams: CombatFxParams = registerParams(
     breechPerShot: { min: 0, max: 64, step: 1 },
     breechUp: { min: 0, max: 1, step: 0.01 },
     impactSmokePerHit: { min: 0, max: 64, step: 1 },
+    impactSmokeAlpha: { min: 0, max: 1, step: 0.01 },
+    impactStandoff: { min: 0, max: 2, step: 0.05 },
     debrisPerHit: { min: 0, max: 64, step: 1 },
     columnLife: { min: 0.1, max: 4, step: 0.05 },
     columnSize: { min: 0.05, max: 3, step: 0.05 },
