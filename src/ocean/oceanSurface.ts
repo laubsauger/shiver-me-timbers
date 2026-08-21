@@ -90,6 +90,27 @@ function gridFromParams(): SurfaceGridOptions {
   };
 }
 
+/**
+ * §V92 the sun as an AREA source, for the glint road: [tan r, tan r/2,
+ * gateLo, gateHi]. r = drawn disc radius + glare (degrees). The gate edges are
+ * `bodyHorizonGate`'s (sunCycle.ts) transcribed to sin(elevation), i.e. the
+ * key's y: 0 once the disc is `radius + margin` below the sea, 1 once it has
+ * cleared it — so the road exists exactly while the sky draws the disc.
+ * Finite-guarded and floored here (§V28): the panel is free to feed garbage.
+ */
+export function sunSourceVector(
+  discDeg: number,
+  glareDeg: number,
+  marginDeg: number,
+): [number, number, number, number] {
+  const san = (v: number) => (Number.isFinite(v) ? Math.max(0, v) : 0);
+  const disc = Math.min(san(discDeg), 45);
+  const r = Math.min(disc + san(glareDeg), 60) * (Math.PI / 180);
+  const lo = -Math.sin(Math.min(disc + san(marginDeg), 60) * (Math.PI / 180));
+  const hi = Math.max(Math.sin(disc * (Math.PI / 180)), lo + 1e-4);
+  return [Math.tan(r), Math.tan(r / 2), lo, hi];
+}
+
 export class OceanSurface {
   readonly group: THREE.Group;
   readonly mesh: THREE.Mesh;
@@ -162,6 +183,14 @@ export class OceanSurface {
     // normals must solve the same surface the vertices drew (§B storm fold)
     this.surface.choppinessUniform.value = this.sim.effectiveChoppiness();
     if (sunDirection) this.surface.sunDirectionUniform.value.copy(sunDirection);
+    // §V92 the sun's width, live from the sky params (§V62: every frame, not
+    // captured at construction). The material never reads the sky params.
+    const src = sunSourceVector(
+      skyParams.sunDiscSize,
+      skyParams.sunGlareRadiusDeg,
+      skyParams.bodyHorizonMargin,
+    );
+    this.surface.sunSourceUniform.value.set(src[0], src[1], src[2], src[3]);
     // Live key RADIANCE — colour x level, not colour alone (§V.72).
     //
     // THE LEVEL IS HALF OF IT AND IT USED TO BE MISSING. Every sun-driven water

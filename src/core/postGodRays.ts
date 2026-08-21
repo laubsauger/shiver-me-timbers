@@ -40,8 +40,9 @@
  * the symptom §V.48 names. The bright pass therefore does a 4-tap box reduction
  * on the way down instead of a point sample, and the march reads THAT.
  *
- * The two RTTs cost, at scale 0.5 and 32 taps, about 9 full-res taps of work.
- * Both are tunable; measure before assuming (§V.17).
+ * The two RTTs cost, at scale 0.5 and 32 taps, about 9 full-res taps of work
+ * PER ORIGIN, and §V92 marches to `godRaySourceTaps` (4) origins round the
+ * disc, so ~36. All three are tunable; measure before assuming (§V.17).
  */
 import * as THREE from 'three/webgpu';
 import type { Node, PassNode } from 'three/webgpu';
@@ -60,6 +61,8 @@ import {
 } from 'three/tsl';
 import type { ShaderNodeObject } from 'three/tsl';
 import { postParams as pp } from '../params/post';
+import { skyParams } from '../params/sky';
+import { bodyHorizonGate } from '../sky/sunCycle';
 
 export interface PostGodRays {
   /** vec3 ADDITIVE term in scene-linear space — add before the tone map */
@@ -89,6 +92,50 @@ export interface SunScreenState {
   y: number;
   /** 0..1 fade applied to the whole effect */
   vis: number;
+}
+
+/**
+ * §V92 THE SOURCE IS A DISC. Screen-UV radius (x, y) of a disc of angular
+ * radius `radiusDeg` centred `facing` = cos(angle off the view axis) from the
+ * optical axis. On-axis a small disc subtends tan(r)/tan(fov/2) of the NDC
+ * half-height, i.e. tan(r)/(2·tanY) in UV; the UV x axis spans `aspect` times
+ * more world, so the same disc is 1/aspect as wide in u. Off-axis a disc
+ * projects larger by 1/cos² (the radial stretch of a gnomonic projection) —
+ * taken as the radius on both axes, conservative. Capped at half the frame:
+ * a fish-eye fov or a garbage radius must not send the origins off-screen.
+ * Pure, CPU, mirrored in tests/sunRoad.test.ts.
+ */
+export function projectedSourceRadius(
+  radiusDeg: number,
+  fovDeg: number,
+  aspect: number,
+  facing: number,
+): { x: number; y: number } {
+  const r = Number.isFinite(radiusDeg)
+    ? Math.min(Math.max(radiusDeg, 0), 60)
+    : 0;
+  const fov = Number.isFinite(fovDeg) ? Math.min(Math.max(fovDeg, 1), 179) : 55;
+  const tanY = Math.tan((fov * Math.PI) / 360);
+  const c = Number.isFinite(facing) ? Math.max(facing, 0.2) : 1;
+  const y = Math.min(0.5, Math.tan((r * Math.PI) / 180) / (2 * tanY) / (c * c));
+  const a = Number.isFinite(aspect) && aspect > 0 ? aspect : 16 / 9;
+  return { x: Math.min(0.5, y / a), y };
+}
+
+/**
+ * §V92 / §T108: no rays from a body that is not drawn. The same gate the sky
+ * puts on the sun disc — 0 once the centre is `sunDiscSize + bodyHorizonMargin`
+ * below the horizon, 1 once the disc has cleared it — evaluated on the KEY's
+ * elevation (the march follows the key: the moon's road at night is the
+ * point, §sky/index). `y` is the key direction's y = sin(elevation).
+ */
+export function sourceHorizonGate(y: number): number {
+  const yy = Number.isFinite(y) ? Math.min(1, Math.max(-1, y)) : -1;
+  return bodyHorizonGate(
+    Math.asin(yy),
+    skyParams.sunDiscSize,
+    skyParams.bodyHorizonMargin,
+  );
 }
 
 const _sunWorld = /*@__PURE__*/ new THREE.Vector3();
@@ -195,11 +242,18 @@ export function buildGodRays(opts: {
   // gates. Everything else below is a live uniform.
   const TAPS = Math.max(4, Math.min(128, Math.round(finite(pp.godRayTaps, 32))));
   const scale = Math.min(1, Math.max(0.1, finite(pp.godRayScale, 0.5)));
+  // §V92 origins round the disc — JS-unrolled, so a literal too
+  const SRC_TAPS = Math.max(
+    1,
+    Math.min(8, Math.round(finite(pp.godRaySourceTaps, 4))),
+  );
 
   // 0.1, not 0.9: screen UV has y = 0 at the TOP (see updateSunScreen), so
   // "up in the sky" is a SMALL v. Pre-first-update only — vis is 0 until then.
   const uSunScreen = uniform(new THREE.Vector2(0.5, 0.1));
   const uSunVis = uniform(0);
+  /** §V92 screen-UV radius (x, y) of the disc the origins sit on */
+  const uSrcRadius = uniform(new THREE.Vector2(0, 0));
   const uThreshold = uniform(1);
   const uKnee = uniform(0.5);
   const uClamp = uniform(pp.godRayClamp);
@@ -207,8 +261,8 @@ export function buildGodRays(opts: {
   const uLength = uniform(pp.godRayLength);
   const uFalloff = uniform(pp.godRayFalloff);
   const uIntensity = uniform(0);
-  /** 1 / Σ decay^i — CPU-computed so decay changes shaft SHAPE, not brightness */
-  const uNorm = uniform(1 / TAPS);
+  /** 1 / (SRC_TAPS · Σ decay^i) — CPU-computed so decay changes shaft SHAPE, not brightness */
+  const uNorm = uniform(1 / (TAPS * SRC_TAPS));
   /** one texel of the reduced target, in UV */
   const uTexel = uniform(new THREE.Vector2(1 / 640, 1 / 360));
   /**
@@ -254,42 +308,63 @@ export function buildGodRays(opts: {
   const raysFn = Fn(() => {
     const p = uv();
     const toSun = uSunScreen.sub(p);
-    const stepUv = toSun.mul(uLength.div(TAPS));
 
     const acc = vec3(0).toVar();
-    const walk = p.toVar();
-    const weight = float(1).toVar();
-    Loop(TAPS, () => {
-      walk.addAssign(stepUv);
-      weight.mulAssign(uDecay);
-      /**
-       * OFF-SCREEN TAPS CONTRIBUTE NOTHING.
-       *
-       * `rtt()` targets are ClampToEdge, and `updateSunScreen` deliberately
-       * HOLDS the sun position outside 0..1 while `vis` is still positive —
-       * the edge fade runs `godRayEdgeFade` (25°) PAST the frame corner by
-       * design, so shafts keep coming from a just-off-screen sun. The two
-       * combined meant every tap that walked out of the frame returned the
-       * EDGE TEXEL and smeared that one row or column along the whole ray: a
-       * bright streak with no source in the image, appearing, swinging and
-       * vanishing as the sun crossed the border. That is the "projected in a
-       * very weird direction… changes very dramatically depending on the angle
-       * of the camera" report, and it is a real defect rather than a
-       * consequence of the technique.
-       *
-       * A multiply, never a branch — §V.44 wants attenuation expressed
-       * multiplicatively, and a divergent `If` inside a 32-iteration Loop costs
-       * more than the four comparisons it saves.
-       */
-      const inFrame = walk.x
-        .greaterThanEqual(0)
-        .and(walk.x.lessThanEqual(1))
-        .and(walk.y.greaterThanEqual(0))
-        .and(walk.y.lessThanEqual(1));
-      acc.addAssign(
-        brightTex.sample(walk).rgb.mul(weight).mul(inFrame.select(float(1), float(0))),
-      );
-    });
+    /**
+     * §V92 THE FAN'S APEX IS THE DISC. One march per origin, the origins
+     * spread evenly round a circle of `uSrcRadius` about the sun's centre
+     * (a single origin sits ON the centre, restoring the old point source).
+     * Every pixel marches toward all of them, so near the sun the rays from
+     * different rim points cross instead of pinching to one pixel — which at
+     * a horizon sun was the whole fan collapsing to a point (user). The
+     * average of the origins is the centre, so the shaft DIRECTIONS far from
+     * the sun are unchanged; only the apex opens up. uNorm carries 1/SRC_TAPS.
+     */
+    for (let s = 0; s < SRC_TAPS; s++) {
+      const ang = ((s + 0.5) / SRC_TAPS) * 2 * Math.PI;
+      const offset =
+        SRC_TAPS === 1
+          ? vec2(0, 0)
+          : uSrcRadius.mul(vec2(Math.cos(ang), Math.sin(ang)));
+      // the march stays in plain UV — a straight line is affine-invariant
+      const stepUv = toSun.add(offset).mul(uLength.div(TAPS));
+      const walk = p.toVar();
+      const weight = float(1).toVar();
+      Loop(TAPS, () => {
+        walk.addAssign(stepUv);
+        weight.mulAssign(uDecay);
+        /**
+         * OFF-SCREEN TAPS CONTRIBUTE NOTHING.
+         *
+         * `rtt()` targets are ClampToEdge, and `updateSunScreen` deliberately
+         * HOLDS the sun position outside 0..1 while `vis` is still positive —
+         * the edge fade runs `godRayEdgeFade` (25°) PAST the frame corner by
+         * design, so shafts keep coming from a just-off-screen sun. The two
+         * combined meant every tap that walked out of the frame returned the
+         * EDGE TEXEL and smeared that one row or column along the whole ray: a
+         * bright streak with no source in the image, appearing, swinging and
+         * vanishing as the sun crossed the border. That is the "projected in a
+         * very weird direction… changes very dramatically depending on the angle
+         * of the camera" report, and it is a real defect rather than a
+         * consequence of the technique.
+         *
+         * A multiply, never a branch — §V.44 wants attenuation expressed
+         * multiplicatively, and a divergent `If` inside a 32-iteration Loop costs
+         * more than the four comparisons it saves.
+         */
+        const inFrame = walk.x
+          .greaterThanEqual(0)
+          .and(walk.x.lessThanEqual(1))
+          .and(walk.y.greaterThanEqual(0))
+          .and(walk.y.lessThanEqual(1));
+        acc.addAssign(
+          brightTex
+            .sample(walk)
+            .rgb.mul(weight)
+            .mul(inFrame.select(float(1), float(0))),
+        );
+      });
+    }
 
     // Radial falloff so the shafts hug the sun instead of streaking the whole
     // frame (the ocean glint road is bright too, and would otherwise smear).
@@ -306,8 +381,9 @@ export function buildGodRays(opts: {
       smoothstep(float(0), uFalloff, toSun.mul(uAspect).length()),
     );
 
-    // acc ≤ clamp·Σdecay^i, and uNorm is exactly 1/Σdecay^i, so the product is
-    // bounded by clamp·intensity — provably, not by hoping (§V.44).
+    // acc ≤ clamp·SRC_TAPS·Σdecay^i, and uNorm is exactly 1/(SRC_TAPS·Σdecay^i),
+    // so the product is bounded by clamp·intensity — provably, not by hoping
+    // (§V.44).
     return vec4(
       acc.mul(uNorm).mul(uIntensity).mul(falloff.clamp(0, 1)).mul(uSunVis),
       1,
@@ -344,9 +420,29 @@ export function buildGodRays(opts: {
     // the horizon is the money shot, not an edge case. Below the horizon the
     // sky stops drawing a sun disc, so the bright pass finds nothing and the
     // rays fade on their own.
-    updateSunScreen(sunState, camera, sunDirection(), finite(pp.godRayEdgeFade, 25));
+    const dir = sunDirection();
+    updateSunScreen(sunState, camera, dir, finite(pp.godRayEdgeFade, 25));
     uSunScreen.value.set(sunState.x, sunState.y);
-    uSunVis.value = sunState.vis;
+    // §V92 / §T108: gated like the disc — a body `radius + margin` below the
+    // horizon draws nothing, so nothing may fan from it (the bright pass
+    // would otherwise still find the glow's tail and the road's apex).
+    uSunVis.value = sunState.vis * sourceHorizonGate(dir.y);
+    // the disc's screen radius, from the SAME width the ocean road is floored
+    // at (sunDiscSize + sunGlareRadiusDeg), scaled by the post knob
+    camera.getWorldDirection(_forward);
+    const srcDeg =
+      Math.max(
+        0,
+        finite(skyParams.sunDiscSize, 1.1) +
+          finite(skyParams.sunGlareRadiusDeg, 1.5),
+      ) * Math.max(0, finite(pp.godRaySourceRadiusScale, 1));
+    const sr = projectedSourceRadius(
+      srcDeg,
+      camera.fov,
+      camera.aspect,
+      _forward.dot(dir),
+    );
+    uSrcRadius.value.set(sr.x, sr.y);
 
     // display-referred → scene-linear pre-exposure, same convention as bloom
     // (§V.31b: the same maths in the wrong space under-corrects silently)
@@ -370,7 +466,7 @@ export function buildGodRays(opts: {
       term *= decay;
       sum += term;
     }
-    uNorm.value = sum > 1e-6 ? 1 / sum : 0;
+    uNorm.value = sum > 1e-6 ? 1 / (sum * SRC_TAPS) : 0;
   };
 
   update();

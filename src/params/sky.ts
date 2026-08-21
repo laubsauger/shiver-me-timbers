@@ -255,6 +255,19 @@ export interface SkyParams {
   /** wide atmospheric halo around the sun (low power = very broad) */
   sunHaloPower: number;
   sunHaloStrength: number;
+  /**
+   * §V92 GLARE radius (degrees) added to `sunDiscSize` to make the SOURCE
+   * WIDTH every sun-originated effect inherits: the ocean's glint road is
+   * floored at this angular radius (the road at the horizon starts as a bar
+   * this wide, never a point) and the god rays fan from a disc of this
+   * radius on screen rather than from the sun's centre pixel. Reference: the
+   * drawn glow `cos^sunGlowPower` has its half-maximum at
+   * acos(0.5^(1/240)) = 4.4°, so 1.5° is the bright inner third of the
+   * perceived ring, not the whole aura. The real sun is 0.265°; the DRAWN
+   * disc is `sunDiscSize` (1.1°), and §V66 says scale by the dimension the
+   * user sees, which is the drawn one.
+   */
+  sunGlareRadiusDeg: number;
   /** shape of the mid→zenith gradient (higher = blue stays low longer) */
   gradientCurve: number;
   /** DirectionalLight peak intensity and its distance from origin (m) */
@@ -632,6 +645,7 @@ export const skyParams: SkyParams = registerParams(
     sunGlowStrength: 1.2,
     sunHaloPower: 6,
     sunHaloStrength: 0.16,
+    sunGlareRadiusDeg: 1.5,
     gradientCurve: 1.5,
     sunIntensity: 3.4,
     sunDistance: 1200,
@@ -709,6 +723,7 @@ export const skyParams: SkyParams = registerParams(
     sunGlowStrength: { min: 0, max: 4, step: 0.01 },
     sunHaloPower: { min: 1, max: 32, step: 0.5 },
     sunHaloStrength: { min: 0, max: 1, step: 0.01 },
+    sunGlareRadiusDeg: { min: 0, max: 6, step: 0.05 },
     gradientCurve: { min: 0.2, max: 4, step: 0.01 },
     sunIntensity: { min: 0, max: 8, step: 0.05 },
     sunDistance: { min: 100, max: 4000, step: 10 },

@@ -147,6 +147,21 @@ export const postParams = registerParams(
     godRayEdgeFade: 25,
     /** BUILD-TIME (§V.28: Loop bounds must be literal). Reload to change. */
     godRayTaps: 32,
+    /**
+     * §V92 THE SOURCE IS A DISC, NOT A PIXEL. The march used to converge on
+     * the sun's centre point, so at a low sun every shaft pinched to one
+     * pixel on the horizon. It now converges on `godRaySourceTaps` origins
+     * spread round a circle of radius `godRaySourceRadiusScale × (sunDiscSize
+     * + sunGlareRadiusDeg)` projected to the screen, so the fan's apex is the
+     * whole disc. 1.0 = the drawn disc plus its glare, exactly what the ocean
+     * road is floored at, so the two agree on how wide the sun is.
+     */
+    godRaySourceRadiusScale: 1.0,
+    /**
+     * BUILD-TIME (JS-unrolled, each origin is its own `godRayTaps` march, so
+     * the march cost is ×this). 1 restores the single-point origin. Reload.
+     */
+    godRaySourceTaps: 4,
     /** BUILD-TIME resolution scale for both god-ray targets. Reload. */
     godRayScale: 0.5,
 
@@ -213,6 +228,8 @@ export const postParams = registerParams(
     godRayClamp: { min: 1, max: 64, step: 0.5 },
     godRayEdgeFade: { min: 1, max: 90, step: 1 },
     godRayTaps: { min: 4, max: 128, step: 1 },
+    godRaySourceRadiusScale: { min: 0, max: 4, step: 0.05 },
+    godRaySourceTaps: { min: 1, max: 8, step: 1 },
     godRayScale: { min: 0.1, max: 1, step: 0.05 },
     dofFocus: { min: 1, max: 400, step: 0.5 },
     dofRange: { min: 1, max: 400, step: 0.5 },

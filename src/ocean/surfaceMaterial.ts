@@ -86,6 +86,15 @@ export interface OceanSurfaceMaterial {
   /** world-space XZ of the mesh origin — set on camera snap */
   originUniform: { value: THREE.Vector2 };
   sunDirectionUniform: { value: THREE.Vector3 };
+  /**
+   * §V92 the SUN'S WIDTH, as the road sees it: (tan r, tan r/2, gateLo,
+   * gateHi) with r = drawn disc radius + glare (degrees → radians on the
+   * CPU), and the gate edges in sin(elevation) = key.y — the same edges as the
+   * sky's disc gate, so the road exists exactly while the disc is drawn.
+   * Owned per frame by `OceanSurface.update` (it reads the sky params; this
+   * file deliberately does not).
+   */
+  sunSourceUniform: { value: THREE.Vector4 };
   timeUniform: { value: number };
   /** camera far plane, in meters — B3: linearDepth() is normalized, not meters */
   cameraFarUniform: { value: number };
@@ -279,6 +288,9 @@ export function buildOceanSurfaceMaterial(
   }
   const originUniform = uniform(new THREE.Vector2());
   const sunDirectionUniform = uniform(new THREE.Vector3(0.5, 0.6, 0.2).normalize());
+  // pre-first-update placeholder: a 2.6° source, gate −2.1°..+1.1° (see the
+  // interface note — the live values come from OceanSurface.update)
+  const uSunSource = uniform(new THREE.Vector4(0.0454, 0.0227, -0.0366, 0.0192));
   const timeUniform = uniform(0);
 
   const uDeep = uniform(color(sp.deepColor));
@@ -2088,8 +2100,54 @@ export function buildOceanSurfaceMaterial(
     // above needs the same quantity — there is ONE σ² in this material and
     // every sun term reads it. See that block for the measurement that moved
     // it off `normalVar`.
-    // ── Beckmann D(h) ────────────────────────────────────────────────
-    const cosH2 = ndoth.mul(ndoth).max(1e-4);
+    /**
+     * §V92 THE SUN HAS A WIDTH — the representative point of a disc source.
+     *
+     * MEASURED DEFECT (user: "the reflection road… converges in too small of
+     * a spot, like a point source"). With L the sun's CENTRE, the road's
+     * azimuthal half-width at its apex (the water point whose half vector is
+     * vertical) is 2·tan(elev)·θ_hm exactly — a facet has to tilt
+     * φ/(2 tan elev) across the sun's bearing to swing a grazing reflection
+     * by φ, so as the sun sets the road's apex narrows to NOTHING whatever
+     * σ² is. CPU mirror, σ² = 0.003: 0.09° at 1°, 0.46° at 5°, 9.1° at 60°,
+     * against a drawn disc 1.1° in radius. No widening of σ² can fix it,
+     * because σ² widens the lobe in HALF-VECTOR space and the pinch is the
+     * Jacobian from half vector to reflection direction going to zero at
+     * grazing. Only a source with an angular extent survives it: the mirror
+     * image of a disc on the horizon is as wide as the disc.
+     *
+     * THE MODEL (Karis 2013, "representative point"): move the light to the
+     * point of the disc nearest the pixel's own mirror direction `refl`, and
+     * shade with THAT direction. Inside the disc's image the half vector is
+     * exactly N (the plateau = the mirrored disc, saturating at
+     * GLINT_RADIANCE_MAX like a real sun's reflection blows out); outside it
+     * the Beckmann lobe decays from the disc's RIM instead of from its centre.
+     * The disc radius `r` is the DRAWN disc plus `sunGlareRadiusDeg`
+     * (sunSourceUniform, from the sky params — §V66, the dimension the user
+     * sees). Normalised by Karis's (σ/(σ + tan(r/2)))², the peak of a lobe
+     * whose width grew by the source: measured against the true disc-averaged
+     * point lobe (clamped at GLINT_RADIANCE_MAX, CPU mirror, σ² 0.003 and
+     * 0.0607) it is 0.97–1.2 at 30–60° where the daytime look lives, and
+     * 1.4–3.5 at 1–5° where the widened apex bar IS the requested change. k ≤ 1 and the clamp keep it bounded at source
+     * (§V44): no pixel can exceed the point lobe's own peak.
+     *
+     * `halfVec`/`ndoth` (the sparkle and the glint TRAIN) keep the centre:
+     * those are footprints, not radiances, and a point-sized sparkle is the
+     * point. Only the road — the energy — takes the source's width.
+     */
+    const srcAlong = refl.dot(sunDirectionUniform);
+    const srcToRay = refl.mul(srcAlong).sub(sunDirectionUniform); // centre → mirror ray, ⊥ L
+    const srcToRayLen = srcToRay.length().max(1e-6);
+    const srcDir = normalize(
+      sunDirectionUniform.add(srcToRay.mul(uSunSource.x.div(srcToRayLen).min(1))),
+    ).toVar();
+    const srcSigma = glintVar.sqrt();
+    const srcNorm = srcSigma.div(srcSigma.add(uSunSource.y.max(0)));
+    const srcEnergy = srcNorm.mul(srcNorm).toVar();
+    // ── Beckmann D(h) — on the SOURCE's half vector (§V92, see srcDir) ──
+    const srcHalf = normalize(viewDir.add(srcDir));
+    const srcNdoth = normalWorld.dot(srcHalf).max(0);
+    const cosH2 = srcNdoth.mul(srcNdoth).max(1e-4);
     const tanH2 = float(1).sub(cosH2).div(cosH2);
     const ndf = tanH2
       .div(glintVar)
@@ -2097,7 +2155,9 @@ export function buildOceanSurfaceMaterial(
       .exp()
       .div(glintVar.mul(Math.PI).mul(cosH2).mul(cosH2));
     // ── Smith height-correlated visibility (includes 1/(4 N·L N·V)) ──
-    const nol = ndl.max(1e-3);
+    // N·L of the representative point: a half-set sun's UPPER rim still
+    // lights the water, which is why the road can outlive `sunUpFactor`
+    const nol = normalWorld.dot(srcDir).max(1e-3);
     const nov = cosTheta.max(1e-3);
     const oneMinusA2 = float(1).sub(glintVar).max(0);
     const vis = float(0.5).div(
@@ -2107,7 +2167,7 @@ export function buildOceanSurfaceMaterial(
         .max(1e-5),
     );
     // ── Schlick at the microfacet's own incidence ────────────────────
-    const voh = viewDir.dot(halfVec).clamp(0, 1);
+    const voh = viewDir.dot(srcHalf).clamp(0, 1);
     const fSun = uFresnelR0.add(
       float(1).sub(uFresnelR0).mul(pow(float(1).sub(voh), 5)),
     );
@@ -2118,7 +2178,20 @@ export function buildOceanSurfaceMaterial(
       .mul(Math.PI)
       .mul(uLightGain)
       .mul(uGlintRoad)
+      .mul(srcEnergy)
       .clamp(0, GLINT_RADIANCE_MAX);
+    // §V92 the road's own horizon gate: the sky's disc-gate edges in key.y
+    // (fully set at −(disc + margin), clear at +disc). `sunUpFactor` starts at
+    // +0.3°, which left a half-set disc on the horizon with NO road under it
+    // — part of the "wonky horizon". The sparkle keeps `sunUp`: it is a
+    // footprint over a hash, not the sun's energy. §V28: edge gap floored.
+    // @band-limited-elsewhere: a ramp over a per-frame UNIFORM (key.y), no
+    // pixel footprint — same class as sunUpFactor above.
+    const roadGate = smoothstep(
+      uSunSource.z,
+      uSunSource.w.max(uSunSource.z.add(1e-4)),
+      sunDirectionUniform.y,
+    );
     const sparkWiden = widen(uSparklePower);
     const sparkle = sparkleField
       .mul(pow(ndoth, uSparklePower.div(sparkWiden)).div(sparkWiden))
@@ -2137,8 +2210,8 @@ export function buildOceanSurfaceMaterial(
     // the road is a smooth low-frequency lobe: nothing to alias, so it is
     // NOT distance-faded and carries the sun path all the way to the rim
     const glint = sparkle
-      .add(road)
       .mul(sunUp)
+      .add(road.mul(roadGate))
       .mul(shade)
       .mul(float(1).sub(foamAmount.mul(0.7)));
 
@@ -2481,6 +2554,7 @@ export function buildOceanSurfaceMaterial(
     material,
     originUniform: originUniform as unknown as { value: THREE.Vector2 },
     sunDirectionUniform: sunDirectionUniform as unknown as { value: THREE.Vector3 },
+    sunSourceUniform: uSunSource as unknown as { value: THREE.Vector4 },
     timeUniform: timeUniform as unknown as { value: number },
     cameraFarUniform: uCameraFar as unknown as { value: number },
     hazeColorUniform: uHazeColor as unknown as { value: THREE.Color },

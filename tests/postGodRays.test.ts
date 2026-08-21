@@ -204,7 +204,10 @@ describe('god-ray sun projection (§T.39)', () => {
   it('measures the radial falloff in a round metric, not in raw UV', () => {
     expect(godRaysSource).toContain('toSun.mul(uAspect).length()');
     // the march itself stays in plain UV — a straight line is affine-invariant
-    expect(godRaysSource).toContain('const stepUv = toSun.mul(uLength.div(TAPS))');
+    // §V92 re-cut: the step now runs to `toSun` plus a per-origin disc offset;
+    // the PROPERTY (no uAspect on the march) is what this pins, not the text
+    expect(godRaysSource).toMatch(/const stepUv = toSun(\.add\(offset\))?\.mul\(uLength\.div\(TAPS\)\)/);
+    expect(godRaysSource).not.toMatch(/stepUv = .*uAspect/);
   });
 
   it('the falloff radius is small enough to actually bite', () => {
