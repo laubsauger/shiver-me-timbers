@@ -29,7 +29,7 @@ import { createPlayer } from './player';
 import { createHands } from './player/hands';
 import { buildRaftSea, buildRaftVessel } from './raft/raftScene';
 import { createRaftFrame } from './raft/raftFrame';
-import { pushOffRaft, stepRaftShip } from './raft/raftShip';
+import { pushOffRaft, stepRaftShip, placeRaftAtStart } from './raft/raftShip';
 import { applyDebugChannel, bindRaftActions, radio, raftBeach, raftControls } from './raft/raftActions';
 import { bootTimeOfDay, calmPreset, createDayClock } from './raft/raftWorld';
 import type { Object3D } from 'three/webgpu';
@@ -96,6 +96,7 @@ async function boot(): Promise<void> {
     rudder: 0, sailTrim: 0.5, anchored: false, flood: 0, damage: {},
   });
   const raft = state.ships[0];
+  placeRaftAtStart(raft, sea.sierra.start);
   const vessel = buildRaftVessel(app, sea);
   const waterAt = (x: number, z: number): number => sea.cpuOcean.heightAt(x, z, state.time);
 

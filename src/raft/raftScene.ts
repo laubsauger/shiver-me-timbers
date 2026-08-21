@@ -30,6 +30,7 @@ import { createFlowFoam } from '../flowfoam';
 import { createClouds } from '../clouds';
 import { createCaustics, setActiveCaustics } from '../caustics';
 import { createArchipelago } from '../island';
+import { generateSierraSites } from '../island/sierraSites';
 import { createFetchField } from '../ocean/fetchField';
 import { createPlanarReflection } from '../reflection';
 import { createRain } from '../rain';
@@ -69,10 +70,9 @@ export function buildRaftSea(app: App, state: SimState, sky: SkyHandle, weather:
   clouds.attachTo(app.scene);
   const caustics = createCaustics(ocean, { sunLight: sky.sunLight });
   setActiveCaustics(caustics);
-  // TODO(§T.99): `import { generateSierraSites } from '../island/sierraSites'` and pass
-  // `sites: generateSierraSites(state.seed, …)` here, so the raft sails the Sierra
-  // slices and not the pirate sites (`createArchipelago` already takes `sites`)
-  const archipelago = createArchipelago({ seed: state.seed });
+  // §T.99 / §T.109: the raft sails the Sierra slices, not the pirate sites
+  const sierra = generateSierraSites(state.seed);
+  const archipelago = createArchipelago({ seed: state.seed, sites: sierra.sites });
   app.scene.add(archipelago.group);
   const fetchField = createFetchField(archipelago.seabed);
   const reflection = createPlanarReflection({
@@ -117,7 +117,7 @@ export function buildRaftSea(app: App, state: SimState, sky: SkyHandle, weather:
   cpuOcean.setWakeField(flowFoam);
 
   return {
-    ocean, foam, flowFoam, clouds, caustics, archipelago, fetchField, reflection,
+    ocean, foam, flowFoam, clouds, caustics, archipelago, fetchField, reflection, sierra,
     surface, spray, bowSpray, rain, cpuOcean,
   };
 }

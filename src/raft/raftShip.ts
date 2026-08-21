@@ -154,3 +154,16 @@ export function pushOffRaft(ship: ShipState, holder: BeachHolder): boolean {
   holder.state = out.beach;
   return true;
 }
+
+/**
+ * Spawn pose from the Sierra world's start (§T.99): origin, bow toward the nearest
+ * slice island. Yaw convention = shipKinematics: forward = [sin yaw, 0, cos yaw].
+ */
+export function placeRaftAtStart(
+  raft: { position: number[]; quaternion: number[] },
+  start: { x: number; z: number; heading: number },
+): void {
+  raft.position[0] = start.x;
+  raft.position[2] = start.z;
+  raft.quaternion = [0, Math.sin(start.heading / 2), 0, Math.cos(start.heading / 2)];
+}
