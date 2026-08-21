@@ -93,6 +93,14 @@ export function groundGrip(ship: ShipState, dt: number): number {
   return g.resist;
 }
 
+/**
+ * The slice of a hull-contact sampler the grounding step reads: station
+ * count and this tick's world positions. `HullContact` satisfies it; so does
+ * the raft's log-bottom sampler (`sailing/raftBeaching.ts`, §T.100), which
+ * has no waterline outline to speak of.
+ */
+export type GroundContact = Pick<HullContact, 'stations' | 'worldX' | 'worldY' | 'worldZ'>;
+
 export interface GroundingResult {
   /** any part of the keel line is in the seabed */
   aground: boolean;
@@ -116,7 +124,7 @@ export interface GroundingResult {
  */
 export function stepShipGrounding(
   ship: ShipState,
-  contact: HullContact,
+  contact: GroundContact,
   seabed: SeabedField,
   draft: number,
   dt: number,

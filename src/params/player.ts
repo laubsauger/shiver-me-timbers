@@ -56,6 +56,15 @@ export interface PlayerParams {
   handTurnGain: number;
   /** dev-layer hotkeys: channel change per keydown */
   debugStep: number;
+  /** §T.100 ashore: ground this far under the sea surface is swimming, not wading */
+  swimDepth: number;
+  /** §T.100 ashore: terrain steeper than this (degrees) is a wall in any direction */
+  terrainSlopeDeg: number;
+  /** §T.100 ashore: walking-speed multiplier at terrainSlopeDeg (1 = no slowdown on slopes) */
+  slopeSlowdown: number;
+  /** §T.100 ashore: climb back aboard from the ground within this reach / height of a deck edge (§V85) */
+  ashoreReach: number;
+  ashoreVertical: number;
 }
 
 export const playerParams: PlayerParams = registerParams<PlayerParams>(
@@ -89,6 +98,11 @@ export const playerParams: PlayerParams = registerParams<PlayerParams>(
     handPoseTime: 0.15,
     handTurnGain: 1.0,
     debugStep: 0.05,
+    swimDepth: 0.3,
+    terrainSlopeDeg: 35,
+    slopeSlowdown: 0.5,
+    ashoreReach: 1.0,
+    ashoreVertical: 0.6,
   },
   {
     capsuleRadius: { min: 0.1, max: 0.6, step: 0.01 },
@@ -119,5 +133,10 @@ export const playerParams: PlayerParams = registerParams<PlayerParams>(
     handPoseTime: { min: 0.02, max: 1, step: 0.01 },
     handTurnGain: { min: 0, max: 5, step: 0.05 },
     debugStep: { min: 0.01, max: 0.5, step: 0.01 },
+    swimDepth: { min: 0.05, max: 1.5, step: 0.05 },
+    terrainSlopeDeg: { min: 10, max: 70, step: 1 },
+    slopeSlowdown: { min: 0.1, max: 1, step: 0.05 },
+    ashoreReach: { min: 0.2, max: 3, step: 0.05 },
+    ashoreVertical: { min: 0.1, max: 2, step: 0.05 },
   },
 );

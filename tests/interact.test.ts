@@ -91,10 +91,10 @@ describe('§V84 every action has a station on the real raft', () => {
     expect(raftAsm.socketWorldPosition(LOOKOUT_SOCKET).every(Number.isFinite)).toBe(true);
   });
 
-  it('the table covers every member of the union exactly once, and each socket is claimed by one action', () => {
-    const sockets = RAFT_ACTIONS.map((a) => RAFT_STATIONS[a].socket);
-    expect(new Set(sockets).size).toBe(sockets.length);
-    expect(RAFT_ACTIONS.length).toBe(17);
+  it('the table covers every member of the union exactly once, and each socket is claimed by one action PER FRAME (§T.100: push-off shares the bow gangway socket from the sand)', () => {
+    const keys = RAFT_ACTIONS.map((a) => `${RAFT_STATIONS[a].frame ?? 'ship'}:${RAFT_STATIONS[a].socket}`);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(RAFT_ACTIONS.length).toBe(18);
   });
 
   it('each action fires headlessly through interact at its own socket', () => {
@@ -113,9 +113,11 @@ describe('§V84 every action has a station on the real raft', () => {
       for (const back of approaches) {
         const { pos, yaw } = standAt(q, back);
         host = fakeHost(pos, yaw);
+        if (st.frame !== undefined) host.st.frame = st.frame; // a station worked from the sand (push-off)
         ix = createInteract(host, {
           socketWorld: raftSocket,
-          groundAt: () => 0, // ground everywhere, so the gangways have somewhere to go
+          groundAt: () => pos[1], // ground everywhere, level with the feet, so the gangways have somewhere to go
+          waterAt: () => -10, // the fake stances sit below y = 0; the sea is lower still
         });
         if (ix.focus() === a) {
           found = true;
@@ -274,13 +276,14 @@ describe('climb and step-off move the walker', () => {
     expect(dry.log).toEqual([]);
 
     const wet = fakeHost(pos, yaw);
-    const ixWet = createInteract(wet, { socketWorld: raftSocket, groundAt: () => 0.2 });
+    // ground 0.2 m below the feet: within ashoreVertical of the deck edge (§T.100)
+    const ixWet = createInteract(wet, { socketWorld: raftSocket, groundAt: () => pos[1] - 0.2, waterAt: () => -10 });
     ixWet.begin();
     expect(wet.state.frame).toBe('world');
     // starboard gangway: 0.6 m further to +x of the socket, standing on the ground
     expect(wet.state.pos[0]).toBeCloseTo(g[0] + P.stepOffDistance, 9);
     expect(wet.state.pos[2]).toBeCloseTo(g[2], 9);
-    expect(wet.state.pos[1]).toBe(0.2);
+    expect(wet.state.pos[1]).toBe(pos[1] - 0.2);
     expect(wet.log).toEqual([['gangway-starboard', 1]]);
   });
 
@@ -294,7 +297,7 @@ describe('climb and step-off move the walker', () => {
     const toL = (p: Vec3): Vec3 => [Math.cos(R) * p[0] - Math.sin(R) * p[2], p[1], Math.sin(R) * p[0] + Math.cos(R) * p[2]];
     host.shipToWorld = toW;
     host.worldToShip = toL;
-    const ix = createInteract(host, { socketWorld: (id) => (raftSocket(id) === null ? null : toW(raftSocket(id) as Vec3)), groundAt: () => 0 });
+    const ix = createInteract(host, { socketWorld: (id) => (raftSocket(id) === null ? null : toW(raftSocket(id) as Vec3)), groundAt: () => pos[1], waterAt: () => -10 });
     expect(ix.focus()).toBe('gangway-bow');
     ix.begin();
     const gw = toW(g);

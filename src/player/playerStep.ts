@@ -62,6 +62,8 @@ export interface WalkSurface {
   boardingPoints?: readonly Vec3[];
   /** the live ship transform; identity when absent */
   shipToWorld?(p: Vec3): Vec3;
+  /** walking-speed multiplier here (terrain slope, §T.100); 1 when absent */
+  speedAt?(x: number, z: number): number;
 }
 
 export function neutralPlayerInput(): PlayerInput {
@@ -166,7 +168,7 @@ function stepWalk(
   const clearance = ceiling === null ? Infinity : ceiling - ground;
   const standThreshold = s.crouch ? p.standHeight + p.crouchHysteresis : p.standHeight;
   s.crouch = Boolean(input.crouch) || clearance < standThreshold;
-  const speed = s.crouch ? p.crouchSpeed : p.walkSpeed;
+  const speed = (s.crouch ? p.crouchSpeed : p.walkSpeed) * clamp(num(surface.speedAt?.(x, z) ?? 1, 1), 0, 1);
   const vx = wx * speed;
   const vz = wz * speed;
 

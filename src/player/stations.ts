@@ -11,6 +11,12 @@
  *  - press       one press, a look (chart)
  *  - climb       ladder: up to `station-lookout`, second use comes back down
  *  - step-off    gangway: leave the raft onto ground, if there is any
+ *  - press       push-off (§T.100): shove a BEACHED raft off the sand. Done
+ *                from the SAND (`frame: 'world'`) — the crew push from the
+ *                beach and clamber aboard — so it shares the bow gangway's
+ *                socket without contesting it (the gangway is ship-frame
+ *                only). The raft wiring gates it on the beaching state
+ *                (`Interact`'s `enabled` filter hides it otherwise).
  *
  * `dir` is the sign that makes the natural gesture positive: push a guara
  * DOWN (mouse down) to lower it, haul a halyard/sheet UP/in (mouse up) to
@@ -36,7 +42,8 @@ export type RaftAction =
   | 'gangway-bow'
   | 'gangway-port'
   | 'gangway-starboard'
-  | 'gangway-stern';
+  | 'gangway-stern'
+  | 'push-off';
 
 export type StationKind = 'hold-turn' | 'hold-slide' | 'toggle' | 'press' | 'climb' | 'step-off';
 export type StationAxis = 'mouse-x' | 'mouse-y' | 'forward';
@@ -52,6 +59,8 @@ export interface RaftStation {
   dir?: 1 | -1;
   /** step-off only: ship-local outboard direction, unit, horizontal */
   out?: readonly [number, number];
+  /** the player frame this station is usable from; absent = aboard ('ship'); step-off is always 'ship' */
+  frame?: 'ship' | 'world' | 'swim';
 }
 
 const guara = (n: 1 | 2 | 3 | 4 | 5): RaftStation => ({
@@ -81,6 +90,7 @@ export const RAFT_STATIONS: Record<RaftAction, RaftStation> = {
   'gangway-port': { socket: 'station-gangway-port', kind: 'step-off', out: [-1, 0] },
   'gangway-starboard': { socket: 'station-gangway-starboard', kind: 'step-off', out: [1, 0] },
   'gangway-stern': { socket: 'station-gangway-stern', kind: 'step-off', out: [0, -1] },
+  'push-off': { socket: 'station-gangway-bow', kind: 'press', frame: 'world' },
 };
 
 export const RAFT_ACTIONS = Object.keys(RAFT_STATIONS) as RaftAction[];

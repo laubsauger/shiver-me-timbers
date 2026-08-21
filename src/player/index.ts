@@ -13,9 +13,12 @@ import type { Quat, SimState, Vec3 as SimVec3 } from '../state/simState';
 import type { DeckHeightfield } from '../ship/deckHeightfield';
 import { playerParams } from '../params/player';
 import { createDeckSurface } from './deckSurface';
+import { createTerrainSurface } from './ashore';
+import { transitionFrame, type FrameContext } from './frames';
 import { LookAccumulator, attachPointerLock, type LockElement } from './pointerLock';
 import { PlayerKeys, attachPlayerKeys } from './playerInput';
 import { createInteract, type Interact, type SocketResolver } from './interact';
+import type { RaftAction } from './stations';
 import { attachDebugKeys, type DebugChannel } from './debugKeys';
 import type { Hands } from './hands';
 import {
@@ -27,7 +30,8 @@ import {
   type WalkSurface,
 } from './playerStep';
 
-export type { PlayerInput, PlayerState, WalkSurface } from './playerStep';
+export type { PlayerFrame, PlayerInput, PlayerState, WalkSurface } from './playerStep';
+export type { FrameContext } from './frames';
 export type { Interact, SocketResolver } from './interact';
 export type { RaftAction } from './stations';
 export type { DebugChannel } from './debugKeys';
@@ -59,10 +63,14 @@ export interface PlayerOptions {
    * §T.95 stations. `socketWorld` resolves a blueprint socket to its LIVE
    * world position (`assembly.socketWorldPosition`, §V71); absent = no
    * stations. `groundAt` is world ground height (null over water) for the
-   * gangways. `hands` is the placeholder mitt rig, driven from here.
+   * gangways AND the terrain the walker stands on ashore (§T.100).
+   * `obstacleAt` marks solid props ashore. `actionEnabled` gates stations
+   * (push-off only while beached). `hands` is the placeholder mitt rig.
    */
   socketWorld?: SocketResolver;
   groundAt?: (x: number, z: number) => number | null;
+  obstacleAt?: (x: number, z: number) => boolean;
+  actionEnabled?: (action: RaftAction) => boolean;
   hands?: Hands;
   /** raft debug hotkeys (§V84): heard only while this is true AND the walker is inactive */
   devLayerOn?: () => boolean;
@@ -125,6 +133,8 @@ export function createPlayer(o: PlayerOptions): Player {
     shipToWorld,
     ceilingAt: o.ceilingAt,
   });
+  const groundAt = o.groundAt ?? ((): null => null);
+  const terrain: WalkSurface = createTerrainSurface({ groundAt, waterAt, obstacleAt: o.obstacleAt });
   if (sim.player === undefined) {
     const spawn = o.spawn ?? [0, o.deckField.deckY, 0];
     const st = createPlayerState(spawn);
@@ -165,8 +175,16 @@ export function createPlayer(o: PlayerOptions): Player {
       shipToWorld,
       worldToShip,
     },
-    { socketWorld: o.socketWorld ?? (() => null), groundAt: o.groundAt },
+    { socketWorld: o.socketWorld ?? (() => null), groundAt: o.groundAt, waterAt, enabled: o.actionEnabled },
   );
+  const frameCtx: FrameContext = {
+    shipToWorld,
+    worldToShip,
+    groundAt,
+    waterAt,
+    deckHeightAt: (x, z) => surface.heightAt(x, z),
+    boardingPoints: o.boardingPoints,
+  };
   const detachDebug = o.onDebug === undefined
     ? (): void => {}
     : attachDebugKeys(o.keyTarget ?? window, {
@@ -202,8 +220,14 @@ export function createPlayer(o: PlayerOptions): Player {
       const presses = active ? keys.takeInteract() : 0;
       for (let i = 0; i < presses; i++) interact.begin();
       interact.step(dt, lookDelta);
-      const walk = interact.perch() === null ? surface : perchSurface;
-      sim.player = interact.constrain(stepPlayer(sim.player as PlayerState, interact.shapeInput(input), walk, dt));
+      const frame = (sim.player as PlayerState).frame;
+      // the surface is the FRAME's (§V85): deck while aboard and swimming
+      // (the deck carries the boarding points), terrain ashore
+      const walk = interact.perch() !== null ? perchSurface : frame === 'world' ? terrain : surface;
+      sim.player = transitionFrame(
+        interact.constrain(stepPlayer(sim.player as PlayerState, interact.shapeInput(input), walk, dt)),
+        frameCtx,
+      );
       if (hands !== null) {
         const held = interact.held();
         const d = interact.lastDelta();

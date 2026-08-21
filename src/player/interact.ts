@@ -16,6 +16,7 @@
 import { playerParams, type PlayerParams } from '../params/player';
 import type { LookDelta } from './pointerLock';
 import { neutralPlayerInput, wrapAngle, type PlayerInput, type PlayerState, type Vec3 } from './playerStep';
+import { enterWorldFrame } from './frames';
 import {
   isHold,
   LOOKOUT_SOCKET,
@@ -42,6 +43,10 @@ export interface InteractOptions {
   socketWorld: SocketResolver;
   /** WORLD ground height at (x,z), null over water — step-off needs it */
   groundAt?: (x: number, z: number) => number | null;
+  /** WORLD sea height; absent = flat sea at y = 0. Step-off refuses ground deeper than swimDepth (§T.100) */
+  waterAt?: (x: number, z: number) => number;
+  /** per-action gate (push-off only while beached, §T.100); absent = everything enabled */
+  enabled?: (action: RaftAction) => boolean;
   /** starting channel values; defaults below */
   initial?: Partial<Record<RaftAction, number>>;
 }
@@ -114,13 +119,6 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
     return (host.worldToShip ?? identity)(w);
   };
 
-  const shipYaw = (): number => {
-    const tw = host.shipToWorld ?? identity;
-    const a = tw([0, 0, 0]);
-    const b = tw([0, 0, 1]);
-    return Math.atan2(b[0] - a[0], b[2] - a[2]);
-  };
-
   const focus = (): RaftAction | null => {
     const s = host.state;
     if (aloft !== null) return 'ladder'; // the only thing to do up there is come down
@@ -132,6 +130,8 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
     for (const a of RAFT_ACTIONS) {
       const st = RAFT_STATIONS[a];
       if (st.kind === 'step-off' && s.frame !== 'ship') continue;
+      if ((st.frame ?? 'ship') !== s.frame && s.frame !== 'swim') continue;
+      if (o.enabled !== undefined && !o.enabled(a)) continue;
       const q = socketLocal(st.socket);
       if (q === null) continue;
       const dx = q[0] - eye[0];
@@ -189,15 +189,13 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
     const z = w[2] + oz * p.stepOffDistance;
     const g = o.groundAt(x, z);
     if (g === null || !Number.isFinite(g)) return;
-    host.setState({
-      frame: 'world',
-      pos: [x, g, z],
-      yaw: wrapAngle(s.yaw + shipYaw()),
-      pitch: s.pitch,
-      vel: [0, 0, 0],
-      crouch: false,
-      grounded: true,
-    });
+    // §T.100/§V85: ground under more than swimDepth of water is not a landing,
+    // and the deck edge must be within ashoreVertical of it — measured from
+    // the walker's own feet, which stand on that edge
+    if (g < (o.waterAt ?? (() => 0))(x, z) - p.swimDepth) return;
+    const feet = tw(s.pos);
+    if (Math.abs(g - feet[1]) > p.ashoreVertical) return;
+    host.setState(enterWorldFrame(s, [x, g, z], { shipToWorld: tw }));
     host.applyAction(a, 1);
   };
 
