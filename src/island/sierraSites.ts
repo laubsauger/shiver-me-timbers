@@ -100,6 +100,9 @@ export function sierraOverrides(
     terraceRadius: 0,
     // granite is smooth and the coast noise is what makes random islets
     noiseSlope: p.graniteNoiseSlope,
+    // T130: the finest octave was 3.6 m — two cells at 256² and the scale the
+    // user read as noise from the deck. See sierra.graniteNoiseOctaves.
+    noiseOctaves: p.graniteNoiseOctaves,
     coastNoiseSlope: p.sierraCoastSlope,
     beachBandWidth: p.dgSandBand,
     // the apron's land gate exists to keep `sheer` walls out of the beach

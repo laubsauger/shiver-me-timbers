@@ -529,6 +529,34 @@ export interface SierraParams {
    * family's relief and leaves the crown's own profile alone.
    */
   profileRiseFraction: number;
+  /**
+   * THE SCALE THE SHEETING MASK MEASURES CURVATURE AT (m) — §T.112c's
+   * `sheetingStep` blur, made a knob because its radius was the bug.
+   *
+   * Martel 2006 says sheet joints form on CONVEX SURFACES, and the surface he
+   * means is the landform, not the gravel on it. The pass blurred by one cell
+   * (≈ 2 m at 256² on a 250 m island) before taking the Laplacian, so the mask
+   * read the surface-detail fbm's own finest octave (3.6 m) as curvature and
+   * fired across the whole island rather than on the noses. At 8 m the mask
+   * reads the FORM. Measured on the dome: rms|∇h| over the land 0.51 → 0.46
+   * with the silhouette unchanged — the steps stop being sprayed over flat
+   * ground. It does not move the sheeting's own wavelength (that is
+   * `sheetThickness` / slope, and 4 m sheets were measured and rejected — see
+   * that knob).
+   */
+  sheetCurvatureBlur: number;
+  /**
+   * OCTAVES OF SURFACE DETAIL a sierra island gets (§V43's slope budget still
+   * sets the amplitude; this sets the FLOOR of the wavelength). The pirate
+   * default is 4, which at `noiseScale` 0.035 puts the finest octave at 3.6 m
+   * — two grid cells at 256² on a 250 m island. That is the wavelength the
+   * user called "too detailed and too fine" from the deck, and it is also
+   * what the sheeting mask was reading as curvature. 3 octaves floors the
+   * detail at 7.2 m; granite is smooth at arm's length anyway, and the
+   * material's own band-limited grain (§T.112d) is what carries the metre
+   * scale.
+   */
+  graniteNoiseOctaves: number;
 }
 
 export const sierraParams: SierraParams = registerParams(
@@ -560,12 +588,26 @@ export const sierraParams: SierraParams = registerParams(
     halfDomePeak: 320,
 
     domeRelief: 2.4,
-    ridgeRelief: 1.5,
+    // T130: 1.5 was authored against the pre-T130 profile, where the ridge
+    // topped out at 27-31 m. The apron remap compresses the LOW band and this
+    // family lives entirely inside it, so 1.5 came out at 16-19 m — low enough
+    // that §T.112b could not find a fork POI on two of three seeds and its
+    // soft gate had nothing to cut. 1.95 puts the crest back at 21-25 m with
+    // the long shallow foot the remap bought. Above ~2.0 the crest turns into
+    // a knife edge the walker's own 35° gate refuses (measured: the summit's
+    // walkable component fell to 8 cells at 2.0, seed 988). The ridge was
+    // never the wall the user complained about: it read 9-14° from 20 m off
+    // before T130 and 4-8° after.
+    ridgeRelief: 1.95,
     cirqueRelief: 2.2,
     domeCrownPower: 1.5,
     domeTerraceMin: 2,
     domeTerraceMax: 4,
-    domeTerraceRise: 5,
+    // T130: 5 m steps read as 5 m before the apron remap; after it a step on
+    // the dome's shoulder is compressed to ~0.5× and the treads stopped
+    // separating (seed 988 fell from 2 plateaus to 1). 6.5 m of AUTHORED rise
+    // is ~3.4 m of built tread-to-tread, which is what 5 m used to be.
+    domeTerraceRise: 6.5,
     domeTerraceRiser: 0.4,
     domeTerraceSector: 1.1,
     ridgeLength: 2.0,
@@ -639,9 +681,15 @@ export const sierraParams: SierraParams = registerParams(
     pineTrunkRadius: 0.28,
     pineSlopeLimit: 0.47, // tan 25° (was 28°; benches only)
     pineMinHeight: 2.5,
-    // measured bench fractions at the defaults: dome 9%, cirque 0.7%, ridge
-    // 0.3% — level ground is scarce on a ridge, and a ridge is still wooded
-    pineBenchReference: 0.04,
+    // T130: the re-profiled islands roughly DOUBLED their bench (measured at
+    // R = 250, seed 1965: dome 6.9% → 14.5%, cirque 3.5% → 8.7%, ridge 1.1% →
+    // 4.0%), so 0.04 saturated the `min(bench/reference, 1)` clamp on all three
+    // and every family carried the same nominal stand — the property "a steep
+    // island thins rather than throws" stopped being expressible. 0.14 is the
+    // new dome bench, so the reference still means "a footprint this benched
+    // carries the nominal stand" and the families separate again (500 / 311 /
+    // 144 against 500 / 434 / 141 before).
+    pineBenchReference: 0.14,
     // measured (tests/terrainQuickWins.test.ts): 8 stands × 28 m with a 1 m
     // crown at competition puts the dome/cirque NN distance at 0.63-0.91 of a
     // uniform scatter on the same bench; wider stands or bigger crowns push
@@ -665,14 +713,33 @@ export const sierraParams: SierraParams = registerParams(
     // ── T112c erosion ──
     erosionEnabled: 1,
     iceShear: 14,
+    // T130 measured and REJECTED: 4 m sheets (riser 0.65) put the exfoliation
+    // steps ~9 m apart instead of ~4 m, but a 2 m riser is a wall to a 0.3 m
+    // capsule and it closed §T.112b's carved corridor on the cirque (17 of 519
+    // route samples went `solidAt` at the 35° gate). The wavelength is bought
+    // by `sheetCurvatureBlur` and `graniteNoiseOctaves` instead, which move the
+    // mask and the source rather than the step height.
     sheetThickness: 2.5,
     sheetRiser: 0.5,
+    // T130 measured and REJECTED: recalibrating this to the FORM's own
+    // curvature (0.008/m — a 38 m crown over a 175 m radius) once
+    // `sheetCurvatureBlur` took the noise out of the Laplacian bought 10% of
+    // relief wavelength on the dome and broke nine downstream properties at
+    // once (talus sort, cirque blocks, the cirque's walk-ashore, two occluder
+    // sight lines, the pine clustering). The mask stays where §T.112c put it.
     sheetCurvature: 0.0025,
     sheetStossFactor: 0.35,
     sheetPlateSize: 40,
     jointScale: 0.02,
-    erodeBandStart: 14,
-    erodeBandWidth: 12,
+    // T130: these are the DG-sand band's own heights, and the band moved. The
+    // apron remap (heightmap.profileApron) puts the top of `dgSandBand` at
+    // 3.2-3.9 m of ELEVATION instead of 12 m, so 14/12 was guarding four times
+    // the beach that exists — on the re-profiled drowned ridge (peak 16 m)
+    // almost nothing cleared 14 m and the erosion stage, T112b's soft gate and
+    // its occluder all went inert. 4/4 keeps the same ratios to the sand's top
+    // (start ≈ 1.1×, full ≈ 2.2×) that 14/12 had to the old one.
+    erodeBandStart: 4,
+    erodeBandWidth: 4,
     streamRate: 0.006,
     streamUplift: 0.12,
     streamAreaExp: 0.5,
@@ -708,8 +775,16 @@ export const sierraParams: SierraParams = registerParams(
     pathGateStep: 7,
     pathGateWidth: 5,
     pathGateFeather: 6,
-    pathOccluderDistance: 50,
-    pathOccluderHeight: 6,
+    // T130: 50/6 was authored against islands 40% taller. `pathCarve` builds
+    // the occluder as ySaddle + min(pathOccluderHeight, D·0.25·tan(pathMainSlope)·0.95),
+    // so on the re-profiled ground the 6 m param BOUND the crest while the
+    // approach's own dip was ramped away by the profile clamp — the sight line
+    // from D cleared the crest by 0.16 m on the drowned ridge, seed 2942.
+    // 60 m of approach lets the geometry own the crest (the cap term is 7.3 m)
+    // and 8 m takes the param out of the way rather than replacing one
+    // arbitrary binding constant with another.
+    pathOccluderDistance: 60,
+    pathOccluderHeight: 8,
     pathOccluderSigma: 7,
     pathOccluderSpan: 36,
     pathTilt: 2,
@@ -777,9 +852,9 @@ export const sierraParams: SierraParams = registerParams(
     // 3π/2: the aspect channel is atan2(z, x) of the DOWNHILL direction, so a
     // face looking at −z (the sun's side in this world) reads 4.712
     vegSunAspect: 4.712,
-    pineDensity: 0.8,
+    pineDensity: 0.45,
     pineMoistureMin: 0.2,
-    juniperDensity: 1.2,
+    juniperDensity: 0.65,
     juniperMoistureMax: 0.5,
     juniperWindWeight: 0.5,
     juniperFootprint: 1.1,
@@ -825,7 +900,14 @@ export const sierraParams: SierraParams = registerParams(
     // the debris channel is thin: measured over the three slice archetypes it
     // reaches 0.75 m on a dome and 1.8 m in a cirque, and is ~0 on a drowned
     // ridge (which is mostly under water). 0.15 m is "an apron is here".
-    talusDebrisMin: 0.15,
+    // T130: the re-profiled ground is gentler, so the rockfall source is
+    // weaker and the debris channel spreads thinner and further — at 0.15 m
+    // the flood fill in `labelAprons` merged separate aprons into one
+    // component and the downslope SORT stopped being measurable across it
+    // (foot median 19.1 m against head 17.8 m on the cirque). 0.2 m separates
+    // the aprons again. This is the §T.112f coupling the profile change was
+    // expected to move.
+    talusDebrisMin: 0.2,
     talusDebrisFull: 0.8,
     talusSpacing: 2.4,
     talusHeadScale: 0.45,
@@ -848,20 +930,28 @@ export const sierraParams: SierraParams = registerParams(
     cirqueBlockMinScale: 2.8,
     cirqueBlockMaxScale: 6.5,
     cirqueBlockMaxHeight: 8,
-    cirqueWallRise: 10,
-    cirqueWallRun: 18,
+    // T130: the cirque ring is 30 m instead of 46 m after the apron remap, so
+    // 10 m of rise within 18 m uphill stopped finding a wall foot on two seeds
+    // (6 of 12 blocks placed). 9 within 24 finds the same wall on the lower
+    // ring and still excludes the dome and the ridge, which is the property.
+    cirqueWallRise: 9,
+    cirqueWallRun: 24,
     cirqueBowlOutward: 0.4,
     rockPathClearance: 1.5,
 
     // ── T130 profile ──
-    // Measured (tests/islandLandfall.test.ts, 3 families × 3 seeds): 0.3/0.6
-    // takes the raft's-eye horizon angle 20 m off a 250 m dome from 23° to
-    // 11°, the ground 50 m inland from 27 m to 10 m, and the run from the
-    // waterline to +3 m from 10 m to 44 m — a beach she can ground on and
-    // walk up. Lower toe grades flatten the crown's foot into a table.
+    // Measured from the raft's eye (1.6 m) over 3 families × 3 seeds, at
+    // 0.22/0.85, on the 250 m dome: horizon angle 20 m off the beach 23.0° →
+    // 13.9°, the ground 50 m inland 27.3 m → 11.6 m, the mean grade over the
+    // first fifth of the radius 28.7° → 13.1°, and the run from the waterline
+    // to +3 m 10 m → 21 m. Below ~0.18 the crown's foot flattens into a table
+    // and the archetypes stop reading apart; above ~0.3 the 20 m horizon angle
+    // is still over 16° and the shore still reads as a bank.
     profileEnabled: 1,
-    profileToeGrade: 0.3,
-    profileRiseFraction: 0.6,
+    profileToeGrade: 0.22,
+    profileRiseFraction: 0.85,
+    sheetCurvatureBlur: 8,
+    graniteNoiseOctaves: 3,
 
   },
   {
@@ -1119,6 +1209,8 @@ export const sierraParams: SierraParams = registerParams(
     profileEnabled: { min: 0, max: 1, step: 1 },
     profileToeGrade: { min: 0.05, max: 1, step: 0.01 },
     profileRiseFraction: { min: 0.1, max: 1.5, step: 0.05 },
+    sheetCurvatureBlur: { min: 1, max: 30, step: 0.5 },
+    graniteNoiseOctaves: { min: 1, max: 6, step: 1 },
 
   },
 );

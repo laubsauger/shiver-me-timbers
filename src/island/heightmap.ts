@@ -25,6 +25,9 @@
  *   compressed (×beachFlatness at the line, blending to 1 at the band edge),
  *   giving the gentle 0..~2 m sand ring of the refs. The remap is monotone,
  *   so it never creates new waterline crossings.
+ * - T130 profile (SIERRA ONLY): the same operator at the scale of the island
+ *   rather than of the sand — `profileApron` below. Also monotone and also
+ *   zero at h = 0, so it lowers the island without moving its shoreline.
  *
  * heightAt(x, z) bilinearly samples the grid (island-local coords, y-up,
  * x/z ∈ [-radius, radius]; outside → -rimDepth). Mesh vertices come from the
@@ -362,6 +365,61 @@ function beachApron(h: number, land: number, p: IslandHeightmapParams): number {
 }
 
 /**
+ * T130 PROFILE — HEIGHT EARNED OVER DISTANCE, not at the waterline.
+ *
+ * WHAT WAS WRONG, measured from the raft's own eye (1.6 m) rather than in
+ * plan. Sailing up to a 250 m dome: the horizon angle 20 m off the beach was
+ * 23°, the ground was 27 m up 50 m inland and 45 m up 100 m inland, and the
+ * whole run from the waterline to +5 m was 13 m of shore. From a deck 1.6 m
+ * above the sea that is a WALL. §V90's beach test passed the entire time,
+ * because it only ever asked about the FIRST METRE of rise — 8 m of run to
+ * +2 m is a fine 14° first metre and a hopeless landfall.
+ *
+ * WHY THE ISLAND WAS SHAPED THAT WAY, and why it is not the archetype's
+ * fault. `sinkOpenWater` (sierraArchetypes.ts) takes the empty water down 10 m
+ * so a ridge does not grow noise islets, so the SHORELINE sits where the raw
+ * landmass is ~7.5 m — and on the dome's `(1 − u²)^k` crown that contour is at
+ * u ≈ 0.86, i.e. the waterline cuts the crown high on its own shoulder, right
+ * where the curve is steepest. The island has no foot: it starts at the
+ * steepest ground it owns.
+ *
+ * THE OPERATOR IS `beachApron`'S, AT THE SCALE OF THE ISLAND INSTEAD OF THE
+ * SAND. Integrate a slope multiplier `g(h) = a + (1−a)·S(h/H)` so the output
+ * slope is `s·g(h)` BY CONSTRUCTION (the same reason beachApron integrates —
+ * multiplying the height instead makes the compression real only in a
+ * vanishing band at h = 0 and steepens the ground just above it). Closed form,
+ * with S the smoothstep 3t² − 2t³:
+ *   h ≤ H:  a·h + (1−a)·H·((h/H)³ − (h/H)⁴/2)
+ *   h > H:  h − (1−a)·H/2          (slope exactly 1× again: a constant drop)
+ *
+ * PROPERTIES IT CARRIES. Monotone (g ≥ a > 0), so it creates no new waterline
+ * crossing and cannot reorder any two heights — every §V90/§T.112b property
+ * that is stated on the shoreline or on a route's slope keeps holding in the
+ * same places. Zero at h = 0, so THE SHORELINE DOES NOT MOVE: this makes the
+ * island lower, never smaller. Identity above the band bar a constant, so the
+ * crown keeps its own profile and only rides lower.
+ *
+ * LAND ONLY, deliberately. `beachApron` is odd in h because a shore break is
+ * symmetric over ±12 m of sand; this band is tens of metres and its odd twin
+ * would lift the seabed with it — the drowned crest's treeline stands in
+ * 0.4-5 m of water (§T.99), the cirque lagoon is 2.2 m deep and the raft's
+ * berth needs 1.5 m (§T.125). Those depths are measured contracts; the
+ * complaint was about height above the water, so that is all this touches.
+ *
+ * @param h    height (m) after the archetype, noise and the beach apron
+ * @param toe  slope multiplier at the waterline (sierra.profileToeGrade)
+ * @param rise the band (m) over which it ramps back to 1
+ */
+function profileApron(h: number, toe: number, rise: number): number {
+  if (h <= 0) return h;
+  const H = Math.max(rise, 1e-3); // §V28 floored divisor
+  const a = Math.min(Math.max(toe, 0.02), 1);
+  if (h >= H) return h - (1 - a) * H * 0.5;
+  const t = h / H;
+  return a * h + (1 - a) * H * (t * t * t - t * t * t * t * 0.5);
+}
+
+/**
  * TERRACE — the level ground the composition could not previously express.
  *
  * Every archetype feature is a monotone radial falloff merged with `smoothMax`,
@@ -558,6 +616,16 @@ function buildIsland(
   const rimStart = Math.min(Math.max(p.rimStart, 0.05), 0.99);
   const rimSpan = Math.max(1 - rimStart, 1e-3); // §V28 floored divisor
 
+  // T130: the band `profileApron` ramps over, as a fraction of the FAMILY's
+  // peak rather than in metres — §V43's lesson (a fixed-metre band would
+  // flatten a 70 m filler islet outright and be invisible on the Half Dome).
+  // 0 on every pirate island and whenever the knob is off, which is what
+  // keeps the term out of the pinned pirate grids.
+  const profileRise =
+    sierra !== null && sierraParams.profileEnabled > 0
+      ? Math.max(sierraParams.profileRiseFraction * familyPeak, 1e-3)
+      : 0;
+
   // basin centre: out along the archetype's own opening, so the lagoon is a
   // COVE (open to the sea, sheltered on three sides) instead of a crater
   const bayAngle = p.lagoonDepth > 0 ? findBayBearing(features, R, blend) : 0;
@@ -602,7 +670,10 @@ function buildIsland(
     // at. Both are the same mistake: the apron shapes the BEACH, so it belongs
     // on the field the beach is made of, before anything authored is written
     // over the top of it.
-    return { h: beachApron(land + coast + detail, land, p), land, detail };
+    // T130: the island's own profile, after the sand's. Sierra only — a
+    // pirate island's grid is pinned byte-for-byte (tests/sierra.test.ts).
+    const beached = beachApron(land + coast + detail, land, p);
+    return { h: profileRise > 0 ? profileApron(beached, sierraParams.profileToeGrade, profileRise) : beached, land, detail };
   };
 
   // The basin is a WATER feature and the terrace a LAND one, so the shelf is

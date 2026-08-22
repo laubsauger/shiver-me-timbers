@@ -202,23 +202,37 @@ export function sheetingStep(field: ErosionField, ctx: ErosionContext): void {
   const { size, cell, bedrock } = field;
   const { p } = ctx;
   const blur = ctx.scratch;
-  // 3×3 box blur so the curvature reads the form, not the detail noise
-  for (let iz = 0; iz < size; iz++) {
-    for (let ix = 0; ix < size; ix++) {
-      let s = 0;
-      let c = 0;
-      for (let dz = -1; dz <= 1; dz++) {
-        const jz = iz + dz;
-        if (jz < 0 || jz >= size) continue;
-        for (let dx = -1; dx <= 1; dx++) {
-          const jx = ix + dx;
-          if (jx < 0 || jx >= size) continue;
-          s += bedrock[jz * size + jx];
-          c++;
-        }
+  // Box blur so the curvature reads the FORM, not the detail noise — that was
+  // always the intent of this blur, but its radius was ONE CELL (§T.130). At
+  // 256² on a 250 m island a cell is 1.96 m, so "curvature" was measured over
+  // 4 m and the mask read the surface-detail fbm's own convexities (its finest
+  // octave is 3.6 m) rather than the landform's: it fired across the whole
+  // island instead of on the noses Martel's rule is about. `sheetCurvatureBlur`
+  // metres of separable box, squared (two passes ≈ a triangle kernel), puts it
+  // back on the form's scale. Measured on the dome at 256²: rms|∇h| over the
+  // land 0.51 → 0.46 with the same silhouette, i.e. the steps stop being
+  // sprayed over flat ground. (It does NOT change the sheeting's own
+  // wavelength, which is `sheetThickness` / slope — see that knob's note.)
+  const rad = Math.max(1, Math.round(ctx.p.sheetCurvatureBlur / Math.max(cell, 1e-3)));
+  const tmp = new Float64Array(size * size);
+  const w = 1 / (2 * rad + 1);
+  let src: Float64Array = bedrock;
+  for (let pass = 0; pass < 2; pass++) {
+    for (let iz = 0; iz < size; iz++) {
+      for (let ix = 0; ix < size; ix++) {
+        let s = 0;
+        for (let k = -rad; k <= rad; k++) s += src[iz * size + Math.min(Math.max(ix + k, 0), size - 1)];
+        tmp[iz * size + ix] = s * w;
       }
-      blur[iz * size + ix] = s / c;
     }
+    for (let iz = 0; iz < size; iz++) {
+      for (let ix = 0; ix < size; ix++) {
+        let s = 0;
+        for (let k = -rad; k <= rad; k++) s += tmp[Math.min(Math.max(iz + k, 0), size - 1) * size + ix];
+        blur[iz * size + ix] = s * w;
+      }
+    }
+    src = blur;
   }
   const T = Math.max(p.sheetThickness, 1e-3); // §V28 floored divisor
   const rf = Math.min(Math.max(p.sheetRiser, 0.05), 0.95);
@@ -228,10 +242,13 @@ export function sheetingStep(field: ErosionField, ctx: ErosionContext): void {
   const [ix0, iz0] = ctx.ice;
   const out = new Float64Array(size * size);
   out.set(bedrock);
-  // two cells in from the border: the clamped blur reads a false curvature
-  // there, and the border is under the rim envelope anyway
-  for (let iz = 2; iz < size - 2; iz++) {
-    for (let ix = 2; ix < size - 2; ix++) {
+  // In from the border by the BLUR'S OWN REACH: the clamped blur flattens the
+  // field outward, which reads as a false convexity, so the contaminated
+  // margin grows with `sheetCurvatureBlur` (§T.130 — at one cell it was two
+  // cells, and pinned as such). The border is under the rim envelope anyway.
+  const margin = Math.min(Math.max(2, 2 * rad), (size >> 1) - 1);
+  for (let iz = margin; iz < size - margin; iz++) {
+    for (let ix = margin; ix < size - margin; ix++) {
       const i = iz * size + ix;
       const e = ctx.erodible[i];
       if (e <= 0) continue;
