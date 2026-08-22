@@ -1506,7 +1506,7 @@ describe('§T.137 the deck edge: mats, foot-rail and railing on one line', () =>
    * `rope-rail` has no case in `raftDeckFieldCells.ts` and never will (§V85),
    * so the railing moves in the eye only, not in the walk field.
    */
-  it.skip('(ROUTED) the railing stands at the outer edge on BOTH sides', () => {
+  it('(ROUTED) the railing stands at the outer edge on BOTH sides', () => {
     for (const side of ['port', 'starboard'] as const) {
       const rail = byId.get(`rail-${side}`)!;
       const inset = Math.abs(face[side]) - Math.abs(rail.transform.position[0]);

@@ -451,11 +451,17 @@ export function buildDressing(p: RaftParams, L: RaftLayout): PieceDef[] {
     }));
     cursor -= d / 2;
   }
-  // jerrycans outboard of the crates (2100 stand-in for the 56 water cans)
+  // §T.137: jerrycans STACKED ON the crates, not outboard of them. Outboard
+  // they reached x -2.06 and held the port walkway to 0.29 m of standable
+  // centre — 0.62 m of floor for a 0.60 m capsule, which is why the port side
+  // was unwalkable in practice. On top they cost no deck at all (the crate
+  // stack is already an obstacle) and read the same: water cans stowed on the
+  // cargo, in the lee of the cabin [§6].
   for (let k = 0; k < 2; k++) {
-    const x1 = crateX1 - cw - 0.05;
+    const x1 = crateX1 - 0.12;
     const zc = L.cabinFrontZ - 0.5 - k * 0.4;
-    out.push(box(`jerrycan-${k + 1}`, 'crate', x1 - 0.18, x1, y0, y0 + p.jerrycanHeight, zc - 0.175, zc + 0.175));
+    const top = y0 + p.crateHeight;
+    out.push(box(`jerrycan-${k + 1}`, 'crate', x1 - 0.18, x1, top, top + p.jerrycanHeight, zc - 0.175, zc + 0.175));
   }
   // yellow ring dinghy on edge against the port wall, aft of the crates [§6]
   const dz1 = L.cabinAftZ + 0.1 + p.dinghyLength;
@@ -510,7 +516,12 @@ export function buildDressing(p: RaftParams, L: RaftLayout): PieceDef[] {
     const zA = L.cabinAftZ + 0.3;
     const zB = Math.min(outer.zBow - 0.7, L.cabinFrontZ + p.footRailLength * 0.45);
     out.push(
-      mkPiece(`rail-${side}`, 'rope-rail', [outer.x - sign * outer.r * 0.3, L.logTopY, (zA + zB) / 2], {
+      // §T.137: the posts stand on the log's OUTBOARD shoulder, their outer face
+      // flush with its own face — authored off the log's radius so a re-seeded
+      // field carries them (§V71). They used to sit 0.3r INBOARD of the
+      // centreline, i.e. inboard of the foot-rail as well, which is the
+      // 0.34-0.38 m inset the user saw on both sides.
+      mkPiece(`rail-${side}`, 'rope-rail', [outer.x + sign * (outer.r - p.railPostDiameter / 2), L.logTopY, (zA + zB) / 2], {
         min: [-p.railPostDiameter / 2, 0, -(zB - zA) / 2],
         max: [p.railPostDiameter / 2, p.railHeight, (zB - zA) / 2],
       }, {
