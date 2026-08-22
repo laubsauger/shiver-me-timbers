@@ -13,9 +13,13 @@ export interface RaftMaterialParams {
   // --- balsa (logs, crossbeams, stern block, oar shaft, bipod legs)
   balsaGrey: number; // museum "round grey logs" [§7 Balsa]
   balsaWarm: number; // drier, warmer tone some logs keep
+  balsaShadow: number; // §T147 — the dark weathered end of the grain and the stain patches
   balsaToneVar: number; // 0..1 — how far a piece's seeded tone swings grey→warm
   balsaGrainScale: number; // noise cells per metre ACROSS the grain
   balsaGrainStretch: number; // ×longer along the axis (long shallow streaks)
+  balsaGrainContrast: number; // 0..1 — §T147: how far the grain's dark end reaches toward `balsaShadow`
+  balsaBlotchScale: number; // cells per metre ACROSS a weathering patch (metre-scale, survives minification)
+  balsaBlotchStrength: number; // 0..1 — how dark a stain patch goes
   balsaGrainRelief: number; // m — height of the grain ridges
   balsaEndZone: number; // m — end-grain checks reach this far in from either end
   balsaCheckCount: number; // radial checks round a log end
@@ -29,7 +33,9 @@ export interface RaftMaterialParams {
   weedHalfBand: number; // m — band is ±this about the log axis (y = 0)
   weedBowFade: number; // m — the band thins out over this length toward the bow
   weedStrength: number; // 0..1
-  wetDarken: number; // 0..1 below the waterline
+  wetDarken: number; // 0..1 at and below the waterline
+  wetRise: number; // m ABOVE the waterline the constantly-splashed dark band reaches
+  balsaCrevice: number; // 0..1 — §T147: ambient occlusion on a log flank that faces its neighbour across a chink
   balsaRough: number;
   balsaBump: number; // relief gain
   // --- bamboo (lookout platform slats, default mats' bamboo edge)
@@ -114,16 +120,37 @@ const colour: ParamMeta = {};
 export const raftMaterialParams: RaftMaterialParams = registerParams(
   'raft-materials',
   {
-    balsaGrey: 0x7c7567,
-    balsaWarm: 0xb0906c, // the warm end of the per-log spread — at 0xc6a87a the logs rendered cream at noon [PHOTO-08 reads grey-brown]
-    balsaToneVar: 0.5,
+    balsaGrey: 0x6f6a5c, // §T147 — a stop darker: [ref kon-tiki-1947-sailing] the logs at sea are a mid grey-brown, and R3 rendered them cream
+    balsaWarm: 0xa88a63, // the warm end of the per-log spread — at 0xc6a87a the logs rendered cream at noon [PHOTO-08 reads grey-brown]
+    // §T147 — the DARK end the grain and the stains reach toward. woodMaterial
+    // has had this the whole time (`mix(hullDark, hullLight, grain)`, a 2:1
+    // ratio WITH a hue swing); the balsa multiplied brightness by 0.86..1.1,
+    // which on a 3-octave fbm that lives in 0.3..0.7 is a ±5% achromatic
+    // ripple. That is the "way too even … looks like plastic" the user filmed.
+    balsaShadow: 0x3f382e,
+    balsaToneVar: 0.62,
     balsaGrainScale: 9,
     balsaGrainStretch: 6,
+    balsaGrainContrast: 0.5,
+    // §T147 — stain patches at the scale the VIEWER stands at. It rides the
+    // same `balsaGrainStretch`, so 1.7 cells per metre across the girth is
+    // 0.59 m round the log × 3.5 m along it: three or four patches round a
+    // 0.55 m log and four along a 13.7 m one. THE POINT IS THE SCALE — the
+    // grain's finest octave is 2.8 cm and averages to one flat tone the moment
+    // the raft is a few metres off (which is where the user was standing),
+    // while a 3.5 m patch is still several pixels at 100 m. Seeded per piece,
+    // so two logs never wear the same way [§7 "no two logs alike"].
+    balsaBlotchScale: 1.7,
+    balsaBlotchStrength: 0.42,
     balsaGrainRelief: 0.004,
     balsaEndZone: 0.4,
     balsaCheckCount: 9,
     balsaCheckWidth: 0.012,
-    balsaCheckDepth: 0.02,
+    // §T147 — the crack is 12 mm wide, so 20 mm of depth at `balsaBump` 8 was
+    // an 87° wall (see the §T134 face-slope test): the log ends rendered as
+    // black caps with white radial lines. 12 mm deep in a 12 mm crack is a
+    // 66° wall at the honest gain, which is what a dried check actually is.
+    balsaCheckDepth: 0.012,
     balsaCheckDarken: 0.45,
     grooveWidth: 0.04,
     grooveDepth: 0.012,
@@ -132,9 +159,25 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     weedHalfBand: 0.15,
     weedBowFade: 2.5,
     weedStrength: 0.8,
-    wetDarken: 0.35,
+    // §T147 — the logs are HALF SUBMERGED (`logAxisY` = 0 is the waterline), so
+    // a band that only existed below y = 0 was painting the half nobody can
+    // see. [ref kon-tiki-1947-sailing] the dark wet band straddles the water:
+    // near-black at the surface, fading out about a fifth of a radius up.
+    wetDarken: 0.5,
+    wetRise: 0.12,
+    // §T147 — two 0.55 m logs 5 cm apart form a slot that sees almost no sky,
+    // which is why the reference's chinks read as dark LINES and ours read as
+    // open water. `aoNode` is indirect-diffuse only, so the sun still rakes the
+    // crowns untouched.
+    balsaCrevice: 0.75,
     balsaRough: 0.86,
-    balsaBump: 8,
+    // §T147, and it is §T134's arithmetic again — `reliefNormal` is exact and
+    // every relief here is in METRES, so this gain is pure exaggeration. At 8
+    // the rope groove presented a 78° wall, the grain 49°, and an end check
+    // 87°: moulded plastic, which is the word the user used. 1.5 keeps a little
+    // exaggeration (groove 34°, grain 12°, check 66°) and lets the ALBEDO carry
+    // the wood, which is how woodMaterial has always done it.
+    balsaBump: 1.5,
     bambooYellow: 0xd9b55e,
     bambooGreen: 0x9a9a6a,
     bambooNodePitch: 0.35,
@@ -232,12 +275,14 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     faceSailMaxWidth: 8,
   },
   {
-    balsaGrey: colour, balsaWarm: colour, weedColor: colour,
+    balsaGrey: colour, balsaWarm: colour, balsaShadow: colour, weedColor: colour,
     balsaToneVar: m(0, 1), balsaGrainScale: m(1, 30, 0.5), balsaGrainStretch: m(1, 20, 0.5),
+    balsaGrainContrast: m(0, 1), balsaBlotchScale: m(0.2, 8, 0.05), balsaBlotchStrength: m(0, 1),
     balsaGrainRelief: m(0, 0.02, 0.001), balsaEndZone: m(0, 1.5), balsaCheckCount: m(3, 16, 1),
     balsaCheckWidth: m(0.002, 0.05, 0.001), balsaCheckDepth: m(0, 0.05, 0.001), balsaCheckDarken: m(0, 1),
     grooveWidth: m(0.01, 0.1, 0.005), grooveDepth: m(0, 0.05, 0.001), grooveDarken: m(0, 1),
     weedHalfBand: m(0, 0.4), weedBowFade: m(0.1, 6, 0.1), weedStrength: m(0, 1), wetDarken: m(0, 1),
+    wetRise: m(0, 0.4), balsaCrevice: m(0, 1),
     balsaRough: m(0.3, 1), balsaBump: m(0, 30, 0.5),
     bambooYellow: colour, bambooGreen: colour,
     bambooNodePitch: m(0.1, 0.8), bambooNodeWidth: m(0.005, 0.06, 0.001), bambooSlatWidth: m(0.02, 0.15, 0.005),

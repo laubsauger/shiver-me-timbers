@@ -53,13 +53,42 @@ export function pieceIdOfMesh(meshName: string): string {
   return meshName.endsWith('-mesh') ? meshName.slice(0, -'-mesh'.length) : meshName;
 }
 
-/** deterministic 0..1 from a string (FNV-1a folded) — §V2, seeded never random */
+/**
+ * Deterministic 0..1 from a string (FNV-1a + an avalanche) — §V2, seeded never
+ * random. This is the ONLY source of per-piece variation on the raft: nine
+ * logs, nine crossbeams, a dozen crates and three sails all key their look on
+ * it (§T90's "one material per kind, per-piece variation from a seed").
+ *
+ * §T147 — WHY THE AVALANCHE IS NOT DECORATION. Plain FNV-1a folded as
+ * `(h >>> 8) / 2²⁴` was returning, for the ids this project actually uses:
+ *
+ *     log-0 … log-8          0.5631 … 0.6100   (spread 0.047 of the range)
+ *     crossbeam-0 … -8       0.8497 … 0.8966   (spread 0.047)
+ *
+ * i.e. a step of 1/256 between consecutive ids and nothing else. The reason is
+ * structural, not bad luck: FNV mixes UPWARD, so a one-character difference in
+ * the LAST byte reaches the top 24 bits only through the single multiply that
+ * follows it — `1 × 0x01000193`, which is 1/256 of the word. Every piece in a
+ * numbered family therefore drew at very nearly one seed, which is precisely
+ * the "way too even … no two logs alike is not happening" the user filmed, and
+ * no amount of widening `balsaToneVar` could have fixed it.
+ *
+ * The finaliser is Murmur3's fmix32 — three xor-shifts and two multiplies,
+ * whose whole job is to carry the low bits into the high ones. Deterministic,
+ * no allocation, no randomness. tests/raftMaterials.test.ts holds the PROPERTY
+ * (a numbered family spans the range) rather than these particular values.
+ */
 export function hashPieceId(id: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < id.length; i++) {
     h ^= id.charCodeAt(i);
     h = Math.imul(h, 0x01000193) >>> 0;
   }
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b) >>> 0;
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35) >>> 0;
+  h ^= h >>> 16;
   return (h >>> 8) / 0x01000000;
 }
 
@@ -177,6 +206,15 @@ export function createRaftPieceUniforms(opts: RaftPieceUniformOptions = {}): Raf
  * §B.20), and it fades to 1 — the surrounding level, a groove's honest mean
  * (§V.70) — once the ring is sub-pixel.
  *
+ * §T147 — RING 0 IS AT `along = phase`, which is what the parameter has always
+ * claimed and what the balsa's caller has always assumed. It was not: the
+ * centred distance was `|fract(c) − 0.5|`, which is ZERO at fract(c) = 0.5, so
+ * every ring sat HALF A PITCH past its station. On the bamboo canes the phase
+ * is an arbitrary wobble and nobody could see it; on the logs the phase is the
+ * crossbeam station read off the blueprint (§V37), and it put all nine rope
+ * grooves 0.455 m aft of the beams that cut them. Caught by the CPU twin
+ * `balsaGrooveAt` the moment one existed (§V80).
+ *
  * @param along  smooth metres coordinate along the piece
  * @param pitch  metres between rings (uniform)
  * @param width  the ring's width in metres (uniform)
@@ -186,7 +224,7 @@ export function ringMask(along: AnyNode, pitch: AnyNode, width: AnyNode, phase: 
   const c = along.sub(phase).div(pitch.max(1e-3));
   const filter = coordFilter(c);
   // @band-limited-elsewhere: bandLimitedEdge below widens and fades it
-  const centred = c.fract().sub(0.5).abs(); // 0 at a ring, 0.5 between
+  const centred = c.add(0.5).fract().sub(0.5).abs(); // 0 at a ring, 0.5 between
   const half = width.div(pitch.max(1e-3)).mul(0.5);
   // distance OUTSIDE the ring's own width, 0 across the whole ring; the edge
   // ramp is the ring's half-width, widened and faded by bandLimitedEdge

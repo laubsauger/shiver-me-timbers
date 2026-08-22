@@ -14,8 +14,17 @@ import { createPieceMaterial, familyOf } from '../src/ship/pieceMaterials';
 import {
   BALSA_AXIS,
   CRATE_VARIANT,
+  balsaContrastStretch,
+  balsaCreviceAt,
+  balsaEndness,
+  balsaGrooveAt,
+  balsaLuminance,
+  balsaToneRange,
+  balsaWeedBand,
+  balsaWetBand,
   bambooDeckVariantOf,
   crateVariantOf,
+  createBalsaMaterial,
   crossbeamStation0,
 } from '../src/ship/raftMaterials';
 import {
@@ -27,12 +36,19 @@ import {
 } from '../src/ship/raftSailFace';
 import * as THREE from 'three/webgpu';
 import { float, vec2 } from 'three/tsl';
-import { SHIP_ROOT_NAME, hashPieceId, pieceIdOfMesh, shipFrameDown } from '../src/ship/raftMaterialNodes';
+import { coordFilter } from '../src/ship/bandLimit';
+import {
+  SHIP_ROOT_NAME,
+  createRaftPieceUniforms,
+  hashPieceId,
+  pieceIdOfMesh,
+  shipFrameDown,
+} from '../src/ship/raftMaterialNodes';
 import { ShipAssembly } from '../src/ship/shipAssembly';
 import { createSailClothMaterial } from '../src/ship/sailMaterial';
 import { thatchSlopeAxes } from '../src/ship/raftMaterialsWeave';
 import { roofSlope } from '../src/ship/raftPartsCabin';
-import { buildRaftBlueprint } from '../src/ship/raftBlueprint';
+import { buildRaftBlueprint, raftLayout } from '../src/ship/raftBlueprint';
 import { raftParams } from '../src/params/raft';
 import { raftMaterialParams } from '../src/params/raftMaterials';
 import { getParamsEntry } from '../src/params/registry';
@@ -493,3 +509,359 @@ describe('§V16 raft material params', () => {
     }
   });
 });
+
+/**
+ * §T147 — THE LOGS READ AS PLASTIC. The user, from the stern: "the colours are
+ * a little bit lame, way too even. It looks like plastic instead of wood…
+ * the textures are still a little bit weak."
+ *
+ * The chink half of the task was answered by MEASUREMENT and needed no change —
+ * see tests/raft.test.ts, where the built raft's log surfaces sit 2.5–7.1 cm
+ * apart along the whole parallel body, dead inside the reference's 2–8 cm.
+ * What follows is the material half: the properties that separate timber from
+ * a tube, each asserted against the thing woodMaterial.ts has and this file
+ * did not.
+ */
+describe('§T147 the balsa reads as wood, not as a moulded tube', () => {
+  const m = raftMaterialParams;
+  const LOG_IDS = Array.from({ length: raftParams.logCount }, (_, k) => `log-${k}`);
+
+  /**
+   * ref §7 — "no two logs alike". A shared material can only deliver this
+   * through the per-object seed (§B85/§T90), so the property has two halves and
+   * BOTH were broken before §T147:
+   *
+   *   • the SEED had to spread. `hashPieceId` was plain FNV-1a folded to its
+   *     top 24 bits, and FNV mixes upward, so `log-0 … log-8` came back as
+   *     0.5631 … 0.6100 — a 1/256 step between neighbours and 4.7% of the range
+   *     for the whole family. Nine logs at one seed is nine identical logs.
+   *   • the TONE had to use the seed. `seed × toneVar` is one-sided, so even a
+   *     spread seed only ever reached the grey half of the grey→warm ramp.
+   *
+   * Asserted as a DISTRIBUTION, not per pair: a hash is allowed to put two
+   * neighbours near each other — what it may not do is put all nine there.
+   */
+  it('no two logs alike: the seeded tones spread across the palette', () => {
+    const lum = LOG_IDS.map((id) => balsaLuminance(balsaToneRange(hashPieceId(id)).tone));
+    const base = lum.reduce((s, x) => s + x, 0) / lum.length;
+    const spread = (Math.max(...lum) - Math.min(...lum)) / base;
+    const adj = lum.slice(1).map((x, k) => Math.abs(x - lum[k]) / base).sort((a, b) => a - b);
+    const median = adj[Math.floor(adj.length / 2)];
+
+    // the defect, as the number it was: the whole nine-log family used to span
+    // 4.7% of the seed range, which came out as ~1.4% of tone
+    expect(spread, `nine logs still span only ${(spread * 100).toFixed(1)}% of tone`)
+      .toBeGreaterThan(0.25);
+    expect(median, 'the typical pair of neighbours is the same log twice')
+      .toBeGreaterThan(0.05);
+    for (let k = 1; k < lum.length; k++) {
+      expect(Math.abs(lum[k] - lum[k - 1]) / base, `log-${k - 1} and log-${k} are identical`)
+        .toBeGreaterThan(0.005);
+    }
+    // and the crossbeams — "the second layer" — spread too, on the same seed
+    const beams = Array.from({ length: raftParams.crossbeamCount }, (_, k) =>
+      balsaLuminance(balsaToneRange(hashPieceId(`crossbeam-${k}`)).tone));
+    const bBase = beams.reduce((s, x) => s + x, 0) / beams.length;
+    expect((Math.max(...beams) - Math.min(...beams)) / bBase).toBeGreaterThan(0.25);
+  });
+
+  it('the seed spreads for ANY numbered family — the §T147 root cause', () => {
+    // The property, held away from the balsa so it fails wherever it breaks:
+    // consecutive ids in a family must land all over 0..1, not in one bucket.
+    for (const family of ['log-', 'crossbeam-', 'crate-', 'guara-', 'lashing-']) {
+      const s = Array.from({ length: 9 }, (_, k) => hashPieceId(`${family}${k}`));
+      // the recorded defect is 0.047 of the range for a nine-piece family; nine
+      // samples of a genuinely spread hash bounce around 0.8 with a fat lower
+      // tail, so the bar is set an order of magnitude above the defect, not at
+      // the ideal (§V80: the property is "spread", not a particular draw)
+      expect(Math.max(...s) - Math.min(...s), `${family}* all draw at one seed`)
+        .toBeGreaterThan(0.4);
+      expect(new Set(s.map((x) => Math.floor(x * 5))).size, `${family}* seeds bunch`)
+        .toBeGreaterThanOrEqual(3);
+      // …and the ORDER is not the value: a monotone hash is a gradient painted
+      // across the raft, which is not variation either
+      const rising = s.slice(1).filter((x, k) => x > s[k]).length;
+      expect(rising, `${family}* seeds march in order`).toBeGreaterThan(1);
+      expect(rising, `${family}* seeds march in order`).toBeLessThan(7);
+    }
+  });
+
+  it('the seed the tone rides on actually reaches the shader (§B85)', () => {
+    // §B85's failure was silent: the hook lived on `aabbMin` alone, three fires
+    // a uniform's object update only when THAT uniform is in the shader, and a
+    // seed-only graph therefore never updated — every crate drew as pine. The
+    // balsa's whole "no two logs alike" property hangs off the same hook, so
+    // it is driven here rather than trusted.
+    const u = createRaftPieceUniforms();
+    const stubFactory = (): THREE.Material => ({ dispose(): void {} }) as unknown as THREE.Material;
+    const asm = new ShipAssembly(buildRaftBlueprint(), stubFactory);
+    asm.group.updateMatrixWorld(true);
+    for (const id of ['log-0', 'log-4', 'crossbeam-3']) {
+      const mesh = asm.group.getObjectByName(`${id}-mesh`);
+      expect(mesh, `${id} is not in the assembly`).toBeDefined();
+      const node = u.seed as unknown as { updateType: string; update(f: unknown): void; value: number };
+      expect(node.updateType).toBe('object');
+      node.update({ object: mesh, frameId: Math.random() });
+      expect(node.value, `${id}'s seed never arrived`).toBe(hashPieceId(id));
+    }
+    // and the graph reads it — a hook on a uniform nothing samples is a no-op
+    expect(raftMaterialsBalsaSource).toContain('piece.seed');
+  });
+
+  it('the grain is a COLOUR ramp with contrast, not a ±3% brightness ripple', () => {
+    // THE DEFECT, as arithmetic. `mix(0.86, 1.1, grain)` is ±12% ACHROMATIC at
+    // its extremes, and a 3-octave value fbm measured over a log flank has mean
+    // 0.51 and sd 0.129 — so what reached the pixel was a brightness sd of
+    // 0.24 × 0.129 = ±3.1%, with no hue movement at all. woodMaterial has
+    // always run `mix(hullDark, hullLight, grain)` between two DIFFERENT
+    // colours 1.6–2.0× apart per channel. That is the difference the user saw.
+    const OLD_RELATIVE_SD = 0.24 * 0.129;
+    expect(OLD_RELATIVE_SD).toBeLessThan(0.04); // the recorded defect
+
+    // …and the OTHER half of why it was invisible: the fbm never reaches its
+    // own extremes. The contrast stretch is what puts a measured p10/p90 pair
+    // (0.343 / 0.674) somewhere near the ends of the ramp, and it is
+    // mean-preserving, so it darkens nothing on average.
+    expect(balsaContrastStretch(0.5)).toBeCloseTo(0.5, 9);
+    expect(balsaContrastStretch(0.343)).toBeLessThan(0.2);
+    expect(balsaContrastStretch(0.674)).toBeGreaterThan(0.8);
+    expect(balsaContrastStretch(0.5 - 0.16) + balsaContrastStretch(0.5 + 0.16)).toBeCloseTo(1, 9);
+
+    for (const seed of [0.05, 0.5, 0.95]) {
+      const { dark, lite, tone } = balsaToneRange(seed);
+      const ratio = balsaLuminance(lite) / balsaLuminance(dark);
+      expect(ratio, 'the grain ends are the same colour twice').toBeGreaterThan(1.6);
+      // …and it MOVES THE HUE, which a brightness multiply cannot: the dark end
+      // is relatively warmer/browner than the light end (weathered balsa greys
+      // where it is dry and browns where it holds water)
+      const hue = (c: THREE.Color): number => c.r / Math.max(1e-6, c.b);
+      expect(hue(dark), 'the dark end is a scaled copy of the light one')
+        .not.toBeCloseTo(hue(lite), 2);
+      // the spread the pixel actually sees, in units of the base tone: the
+      // stretched fbm has sd 0.27 (measured, see CONTRAST_GAIN), so
+      // sd(colour) ≈ 0.27 × |lite − dark|
+      const spread = 0.27 * (balsaLuminance(lite) - balsaLuminance(dark)) / balsaLuminance(tone);
+      expect(spread, `seed ${seed}: still too even`).toBeGreaterThan(4 * OLD_RELATIVE_SD);
+    }
+  });
+
+  it('something varies at the scale the viewer stands at — the empty band', () => {
+    // §V66/§V48 read together. Every varying term used to be either per-PIECE
+    // (one tone for a whole 13.7 m log) or 2.8 cm grain, which is sub-pixel
+    // past a few metres and averages to ONE FLAT COLOUR. At the 10 m the raft
+    // is looked at there was, arithmetically, nothing left — which is exactly
+    // what "way too even" describes. woodMaterial fills that band with 0.55 m
+    // per-board tone steps; a log has no boards, so the stain does it.
+    const acrossGrain = 1 / m.balsaGrainScale; // m, the grain's base cell
+    const acrossStain = 1 / m.balsaBlotchScale;
+    const alongStain = m.balsaGrainStretch / m.balsaBlotchScale;
+    expect(acrossGrain, 'the grain is not the fine term any more').toBeLessThan(0.2);
+    // a stain is a fraction of the girth across and metres along
+    const girth = Math.PI * raftParams.logDiameterMax;
+    expect(acrossStain).toBeGreaterThan(girth * 0.2);
+    expect(acrossStain).toBeLessThan(girth * 0.6);
+    expect(alongStain).toBeGreaterThan(1.5);
+    // …and a 13.7 m log carries several of them, so it is not one flat piece
+    expect(raftParams.logCentreLength / alongStain).toBeGreaterThanOrEqual(3);
+    // it is a STAIN, not a speckle: much coarser than the grain it sits over
+    expect(acrossStain / acrossGrain).toBeGreaterThan(4);
+  });
+
+  it('the relief presents believable faces — §T134 arithmetic on a third family', () => {
+    // `reliefNormal` is exact (Mikkelsen on the true screen gradient) and every
+    // depth here is in METRES, so `balsaBump` is pure exaggeration. At the
+    // shipped 8 the numbers below came out 87.1° (an end check), 78.5° (a rope
+    // groove) and 48.7° (the grain): the log ends rendered as black caps with
+    // white radial lines, which is the "plastic" half nobody had measured.
+    const grooveFace = (depth: number, width: number, bump: number): number =>
+      THREE.MathUtils.radToDeg(Math.atan((1.5 * depth * bump) / width));
+    const check = grooveFace(m.balsaCheckDepth, m.balsaCheckWidth, m.balsaBump);
+    const groove = grooveFace(m.grooveDepth, m.grooveWidth, m.balsaBump);
+    // the grain's own face: its finest octave's cell, across the member
+    const grainCell = 1 / (m.balsaGrainScale * 2 ** 2);
+    const grain = THREE.MathUtils.radToDeg(Math.atan((m.balsaGrainRelief * m.balsaBump) / grainCell));
+
+    expect(check, 'an end check is a moulded slot, not a crack').toBeLessThan(72);
+    expect(check, 'the checks have gone flat — painted lines again').toBeGreaterThan(40);
+    expect(groove, 'the lashing groove reads as a moulded rib').toBeLessThan(40);
+    expect(groove, 'the rope has stopped biting into the log').toBeGreaterThan(12);
+    expect(grain, 'the grain is embossed, not grain').toBeLessThan(20);
+    expect(grain, 'the grain has no relief at all').toBeGreaterThan(4);
+    // the defect, recorded so it cannot be quietly reverted
+    expect(grooveFace(0.02, m.balsaCheckWidth, 8)).toBeGreaterThan(85);
+  });
+
+  it('the weed band sits AT the waterline and only there [§7 Balsa]', () => {
+    expect(balsaWeedBand(0)).toBeCloseTo(1, 6);
+    expect(balsaWeedBand(m.weedHalfBand * 1.01), 'weed above the band').toBe(0);
+    expect(balsaWeedBand(-m.weedHalfBand * 1.01), 'weed below the band').toBe(0);
+    // monotone away from the water, both ways — it is a band, not a stripe pair
+    for (let i = 1; i <= 12; i++) {
+      const y = (i / 12) * m.weedHalfBand;
+      expect(balsaWeedBand(y)).toBeLessThanOrEqual(balsaWeedBand(y - m.weedHalfBand / 12) + 1e-9);
+      expect(balsaWeedBand(y)).toBeCloseTo(balsaWeedBand(-y), 9);
+    }
+    // and the band is a band, not the whole log: a 0.55 m log is half out
+    expect(m.weedHalfBand).toBeLessThan(raftParams.logDiameterMin / 2);
+  });
+
+  it('the wet band STRADDLES the waterline instead of hiding under it', () => {
+    // §T147 — `logAxisY` = 0 IS the waterline (the logs float half submerged),
+    // so the pre-fix `wet = max(−y/0.15, 0)` painted only the half nobody can
+    // see: at y = 0 it was exactly zero and the visible flank kept its dry tone
+    // right down to the sea. [ref kon-tiki-1947-sailing] shows the opposite.
+    const oldWet = (y: number): number => Math.min(1, Math.max(0, -y / 0.15));
+    expect(oldWet(0), 'the defect: nothing visible was ever wet').toBe(0);
+
+    expect(balsaWetBand(0), 'the waterline itself is dry').toBeGreaterThan(0.5);
+    expect(balsaWetBand(-raftParams.logDiameterMin / 2)).toBeCloseTo(1, 6);
+    expect(balsaWetBand(m.wetRise * 1.01), 'the whole log is wet').toBe(0);
+    // …and it does not swallow the log: the crown stays dry
+    expect(m.wetRise).toBeLessThan(raftParams.logDiameterMin / 4);
+  });
+
+  it('end-grain checks appear within `balsaEndZone` of an end and nowhere else', () => {
+    expect(balsaEndness(0)).toBeCloseTo(1, 6);
+    expect(balsaEndness(m.balsaEndZone * 1.01), 'checks in the middle of a log').toBe(0);
+    for (let i = 1; i <= 10; i++) {
+      const d = (i / 10) * m.balsaEndZone;
+      expect(balsaEndness(d)).toBeLessThanOrEqual(balsaEndness(d - m.balsaEndZone / 10) + 1e-9);
+    }
+    // §V66 — the zone is a fraction of the SHORTEST member it is drawn on, or
+    // the "ends" meet in the middle and the whole log is end grain
+    expect(raftParams.logOuterLength / (2 * m.balsaEndZone)).toBeGreaterThan(8);
+    expect(raftParams.crossbeamLength / (2 * m.balsaEndZone)).toBeGreaterThan(4);
+  });
+
+  it('lashing grooves land at the crossbeam stations and nowhere between them', () => {
+    const raft = buildRaftBlueprint();
+    const log = raft.find((d) => d.id === 'log-4')!; // the centre log, reached by every beam
+    const beams = raft.filter((d) => d.id.startsWith('crossbeam-'));
+    expect(beams.length).toBe(raftParams.crossbeamCount);
+    const oz = log.transform.position[2];
+    const ox = log.transform.position[0];
+    for (const beam of beams) {
+      const along = beam.transform.position[2] - oz;
+      expect(balsaGrooveAt(along, oz, ox), `no groove under ${beam.id}`).toBeGreaterThan(0.9);
+      // …and half a station away there is bare log
+      expect(balsaGrooveAt(along + raftParams.crossbeamPitch / 2, oz, ox),
+        `groove between stations, aft of ${beam.id}`).toBe(0);
+    }
+    // outside the run of beams the log is unlashed
+    const first = beams[0].transform.position[2] - oz;
+    expect(balsaGrooveAt(first - raftParams.crossbeamPitch, oz, ox)).toBe(0);
+    // the 5.5 m beams DO span the whole 4.9 m log field, so every log is
+    // lashed at every station — but a log outside their reach carries none,
+    // which is the gate that keeps the grooves honest if the field widens
+    const outer = raft.find((d) => d.id === 'log-0')!;
+    expect(Math.abs(outer.transform.position[0])).toBeLessThan(raftParams.crossbeamLength / 2);
+    expect(balsaGrooveAt(beams[4].transform.position[2] - outer.transform.position[2],
+      outer.transform.position[2], outer.transform.position[0])).toBeGreaterThan(0.9);
+    expect(balsaGrooveAt(0, oz, raftParams.crossbeamLength / 2 + 0.5),
+      'a log the beams cannot reach is still being grooved').toBe(0);
+  });
+
+  it('the chink reads as a dark slot — but the sea-facing flank of an outer log does not', () => {
+    // §T147 half (a). The gap is INSIDE the reference band (tests/raft.test.ts
+    // measures it), so the defect is the READ: two 0.55 m logs 5 cm apart form
+    // a slot that sees almost no sky, and ours had both walls lit by the full
+    // hemisphere. The exemption matters as much as the term — the beam station
+    // looks straight at the one face that genuinely IS open.
+    const half = raftLayout().halfBeam;
+    const inner = raftLayout().logs.find((l) => l.i === 1)!.x;
+    expect(balsaCreviceAt(1, inner, half), 'an inboard flank sees the sky').toBeCloseTo(m.balsaCrevice, 6);
+    expect(balsaCreviceAt(-1, inner, half)).toBeCloseTo(m.balsaCrevice, 6);
+    // the outer log: inboard flank occluded, outboard flank open
+    expect(balsaCreviceAt(-1, half, half), 'the outer log lost its chink').toBeCloseTo(m.balsaCrevice, 6);
+    expect(balsaCreviceAt(1, half, half), 'the sea-facing flank is being shaded').toBeCloseTo(0, 6);
+    expect(balsaCreviceAt(-1, -half, -half)).toBeCloseTo(0, 6);
+    // the crown is open sky whichever log it is on — the sun still rakes it
+    expect(balsaCreviceAt(0, inner, half)).toBe(0);
+    expect(balsaCreviceAt(0.5, inner, half)).toBe(0);
+  });
+
+  it('the balsa albedo is a THREE-channel colour — the §B96 vec2 witness', () => {
+    // §B96 zeroed the islands' BLUE by handing `periodResolved` a vec2: the
+    // filter came back per-component, `mix(float, float, vec2)` widened every
+    // downstream field, and `NodeBuilder.format` pads vec2 → `vec3(v, 0.0)`.
+    // Nothing in a node-shape test can see that; the TYPE can. This file passes
+    // only scalars, and this is what keeps that true.
+    const renderer = new THREE.WebGPURenderer({ canvas: t147StubCanvas() });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshStandardNodeMaterial());
+    const backend = (renderer as unknown as { backend: Record<string, unknown> }).backend;
+    backend.renderer = renderer;
+    const builder = (
+      backend as unknown as { createNodeBuilder: (o: THREE.Object3D, r: THREE.WebGPURenderer) => Record<string, unknown> }
+    ).createNodeBuilder(mesh, renderer);
+    builder.material = mesh.material;
+    const typeOf = (n: unknown): string => (n as { getNodeType(b: unknown): string }).getNodeType(builder);
+    // three names a 3-component colour `color`, not `vec3` — what matters is
+    // the COMPONENT COUNT, because §B96's damage was a vec2 padded to
+    // `vec3(v, 0.0)` and the missing component is the whole bug
+    const LENGTH: Record<string, number> = { float: 1, color: 3, vec2: 2, vec3: 3, vec4: 4 };
+    const width = (n: unknown): number => LENGTH[typeOf(n)] ?? -1;
+
+    // the trap is still live in bandLimit, which is why nothing in this file
+    // may hand it a vec2 (§B96 lists the call sites that still do)
+    expect(typeOf(coordFilter(vec2(1, 2)))).toBe('vec2');
+
+    for (const kind of ['log', 'crossbeam', 'stern-block'] as const) {
+      const handle = createBalsaMaterial(kind);
+      expect(width(handle.material.colorNode), `${kind} albedo lost a channel`).toBe(3);
+      expect(width(handle.material.roughnessNode), `${kind} roughness widened`).toBe(1);
+      expect(width(handle.material.aoNode), `${kind} ao widened`).toBe(1);
+      handle.material.dispose();
+    }
+  });
+
+  it('the balsa pattern is a constant of the PIECE, not of the raft attitude (§T134)', () => {
+    // The thatch's bug was a live WORLD-down vector in a per-object uniform.
+    // The balsa samples `positionLocal`/`normalLocal` and the bounds/origin/seed
+    // uniforms, none of which the sea can touch — asserted both ways so a
+    // future "just project it onto the sea" cannot land here quietly.
+    expect(raftMaterialsBalsaSource, '§T134: the balsa must not read the down vector')
+      .not.toContain('downRest');
+
+    const stubFactory = (): THREE.Material => ({ dispose(): void {} }) as unknown as THREE.Material;
+    const asm = new ShipAssembly(buildRaftBlueprint(), stubFactory);
+    const u = createRaftPieceUniforms();
+    const node = u as unknown as Record<string, { update(f: unknown): void; value: { clone(): unknown } }>;
+    const read = (meshName: string, euler: THREE.Euler): string => {
+      asm.group.quaternion.setFromEuler(euler);
+      asm.group.updateMatrixWorld(true);
+      const mesh = asm.group.getObjectByName(meshName)!;
+      const out: string[] = [];
+      for (const key of ['aabbMin', 'aabbMax', 'origin', 'seed']) {
+        node[key].update({ object: mesh, frameId: Math.random() });
+        out.push(JSON.stringify(node[key].value));
+      }
+      return out.join('|');
+    };
+    for (const meshName of ['log-0-mesh', 'log-4-mesh', 'crossbeam-2-mesh']) {
+      const rest = read(meshName, new THREE.Euler(0, 0, 0));
+      for (const [label, euler] of [
+        ['15° heel', new THREE.Euler(0, 0, THREE.MathUtils.degToRad(15))],
+        ['15° pitch', new THREE.Euler(THREE.MathUtils.degToRad(15), 0, 0)],
+        ['heading 130°', new THREE.Euler(0, THREE.MathUtils.degToRad(130), 0)],
+      ] as const) {
+        expect(read(meshName, euler), `${meshName} moved at ${label}`).toBe(rest);
+      }
+    }
+    asm.group.quaternion.identity();
+    asm.group.updateMatrixWorld(true);
+  });
+});
+
+/** the sierra suite's stub — a WebGPURenderer built only to hand out a node builder */
+function t147StubCanvas(): HTMLCanvasElement {
+  return {
+    width: 4,
+    height: 4,
+    style: {},
+    getContext: (): null => null,
+    addEventListener: (): void => {},
+    removeEventListener: (): void => {},
+    getRootNode: (): unknown => ({}),
+    setAttribute: (): void => {},
+  } as unknown as HTMLCanvasElement;
+}

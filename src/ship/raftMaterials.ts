@@ -34,7 +34,20 @@ import { createBalsaMaterial } from './raftMaterialsBalsa';
 import { createThatchMaterial, createWeaveMaterial } from './raftMaterialsWeave';
 import { createWoodMaterial, type LocalFrame, type ShipMaterialHandle } from './woodMaterial';
 
-export { BALSA_AXIS, createBalsaMaterial, crossbeamStation0 } from './raftMaterialsBalsa';
+export {
+  BALSA_AXIS,
+  balsaContrastStretch,
+  balsaCreviceAt,
+  balsaEndness,
+  balsaGrooveAt,
+  balsaLuminance,
+  balsaToneRange,
+  balsaWeedBand,
+  balsaWetBand,
+  createBalsaMaterial,
+  crossbeamStation0,
+  type BalsaToneRange,
+} from './raftMaterialsBalsa';
 export { bambooDeckVariantOf, createThatchMaterial, createWeaveMaterial } from './raftMaterialsWeave';
 
 export type RaftFamily = 'balsa' | 'bamboo' | 'weave' | 'thatch' | 'plank' | 'crate' | 'rope' | 'radio';
