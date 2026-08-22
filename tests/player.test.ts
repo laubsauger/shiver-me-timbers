@@ -754,3 +754,74 @@ describe('§T.135 Space in the water is a haul-out', () => {
     player.dispose();
   });
 });
+
+/**
+ * §B103 — THE LENS RIDES THE HULL THAT IS DRAWN, NOT THE ONE THAT WAS SIMULATED.
+ *
+ * The sim steps at a fixed 60 Hz; `raftFrame.renderVessel` draws the hull
+ * BETWEEN two sim states using the loop's `alpha`. The camera was converting
+ * the walker's ship-local eye through the raw end-of-tick pose, so every frame
+ * the lens and the deck disagreed by the interpolation residual — the whole
+ * world shook against the camera at the beat between the sim rate and the
+ * display rate, worst while simply standing on a heaving deck.
+ *
+ * The user's own observation is the proof of the mechanism: "the hands don't
+ * seem to jitter, the hands seem to be the only thing that's stable." The hands
+ * are parented to the camera, so they are the one thing in the scene that
+ * CANNOT show this error.
+ *
+ * The bar: given a render pose that differs from the sim pose, the eye must
+ * land where the DRAWN hull puts it. A tolerance would let the residual back
+ * in, so this is exact.
+ */
+describe('§B103 the camera reads the drawn hull, not the simulated one', () => {
+  const galleon103 = buildGalleonBlueprint();
+  const field103 = buildDeckHeightfield(galleon103);
+  if (field103 === null) throw new Error('galleon has no deck field');
+  const shipAt = (x: number): { position: [number, number, number]; quaternion: [number, number, number, number] } => ({
+    position: [x, 0, 0],
+    quaternion: [0, 0, 0, 1],
+  });
+
+  it('the eye follows the render pose when it differs from the sim pose', () => {
+    const sim = createInitialState(1);
+    const p = createPlayer({
+      sim,
+      shipPose: () => shipAt(0),
+      renderPose: () => shipAt(3),
+      deckField: field103,
+      keyTarget: new EventTarget(),
+      spawn: [1.5, field103.deckY, 0],
+    });
+    const drawn = p.cameraPose().position.x;
+    const p2 = createPlayer({
+      sim: createInitialState(1),
+      shipPose: () => shipAt(0),
+      deckField: field103,
+      keyTarget: new EventTarget(),
+      spawn: [1.5, field103.deckY, 0],
+    });
+    // 3 m of hull motion between two sim states must move the lens 3 m with it
+    expect(drawn - p2.cameraPose().position.x).toBeCloseTo(3, 10);
+  });
+
+  it('without a render pose it still reads the sim pose, so a harness is unaffected', () => {
+    const sim = createInitialState(1);
+    const p = createPlayer({
+      sim,
+      shipPose: () => shipAt(3),
+      deckField: field103,
+      keyTarget: new EventTarget(),
+      spawn: [1.5, field103.deckY, 0],
+    });
+    const q = createPlayer({
+      sim: createInitialState(1),
+      shipPose: () => shipAt(3),
+      renderPose: () => shipAt(3),
+      deckField: field103,
+      keyTarget: new EventTarget(),
+      spawn: [1.5, field103.deckY, 0],
+    });
+    expect(p.cameraPose().position.x).toBeCloseTo(q.cameraPose().position.x, 10);
+  });
+});

@@ -79,6 +79,12 @@ export function createRaftFrame(d: RaftFrameDeps) {
   snap();
 
   return {
+    /**
+     * The pose the hull is DRAWN at — updated by `renderVessel` every frame.
+     * The walker's lens reads this so it cannot disagree with the deck (§B103);
+     * the object is stable, its contents are not.
+     */
+    shipRenderPose: renderShipView,
     /** collapse the interpolation pair after a teleport */
     snap,
     /** sim tick, AFTER sailing wrote x/z/yaw: wake, buoyancy, contact, beaching, deck water */

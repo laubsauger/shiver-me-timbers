@@ -46,6 +46,26 @@ export interface PlayerOptions {
   sim: SimState;
   /** the live pose the deck is drawn at — `() => sim.ships[0]` works */
   shipPose: () => ShipPose;
+  /**
+   * The pose the HULL IS DRAWN AT this frame, if it differs from the sim's.
+   *
+   * §T.139/§B103. The sim steps at a fixed 60 Hz and the hull is rendered
+   * between two sim states by the loop's `alpha` (`raftFrame.renderVessel`
+   * lerps/slerps into the assembly group). The camera was converting the
+   * walker's ship-local eye through the RAW end-of-tick pose, so every frame
+   * the lens and the deck disagreed by the interpolation residual — the world
+   * shook against the camera at the beat between the sim rate and the display
+   * rate. The hands never shook, because they are children of the camera and
+   * therefore the one thing that cannot show the error.
+   *
+   * Only `cameraPose()` uses this. Stepping, boarding and the frame
+   * transitions keep the sim pose: they are sim-time facts and interpolating
+   * them would put the walker somewhere the simulation never was.
+   *
+   * Defaults to `shipPose`, so a harness that draws the hull uninterpolated
+   * (`preview.ts`) is unaffected.
+   */
+  renderPose?: () => ShipPose;
   deckField: DeckHeightfield;
   /** WORLD sea height; absent = flat sea at y = 0 */
   waterAt?: (x: number, z: number) => number;
@@ -255,9 +275,11 @@ export function createPlayer(o: PlayerOptions): Player {
       pitchQ.setFromAxisAngle(X, s.pitch);
       quat.copy(yawQ).multiply(pitchQ);
       if (s.frame === 'ship') {
-        const w = shipToWorld(eye);
-        pos.set(w[0], w[1], w[2]);
-        const q = o.shipPose().quaternion;
+        // the LENS rides the drawn hull, not the simulated one (§B103)
+        const rp = (o.renderPose ?? o.shipPose)();
+        const r = rotate(rp.quaternion, eye);
+        pos.set(r[0] + rp.position[0], r[1] + rp.position[1], r[2] + rp.position[2]);
+        const q = rp.quaternion;
         shipQ.set(q[0], q[1], q[2], q[3]);
         quat.premultiply(shipQ);
       } else {

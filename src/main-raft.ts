@@ -146,9 +146,13 @@ async function boot(): Promise<void> {
     player.setActive(on);
     followCam.setMode(on ? 'fp' : 'follow');
   };
+  // §B103: the lens must ride the pose the hull is DRAWN at, which the frame
+  // publishes once it exists; until then the sim pose is the only one there is
+  let drawnPose: { position: number[]; quaternion: number[] } = raft;
   const player = createPlayer({
     sim: state,
     shipPose: () => raft,
+    renderPose: () => drawnPose as typeof raft,
     deckField: vessel.deckField,
     waterAt,
     boardingPoints: raftBoardingPoints(vessel.blueprint),
@@ -191,6 +195,7 @@ async function boot(): Promise<void> {
     app, sea, vessel, sky, state, raft, beach: raftBeach, weatherHere, audio, waterAt,
     placeCamera: (view, dt) => followCam.update(view, dt, waterAt),
   });
+  drawnPose = frame.shipRenderPose;
   const jump = installJump({
     target: window,
     ship: raft,

@@ -10,7 +10,6 @@
  * from the row. The oar shares the rudder sign of `shipKinematics`
  * (+ = starboard) so one input layer serves both hulls.
  */
-import { buildRaftBlueprint } from '../src/ship/raftBlueprint';
 import { raftParams } from '../src/params/raft';
 import { describe, expect, it } from 'vitest';
 import {
