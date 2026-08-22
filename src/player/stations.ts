@@ -124,22 +124,42 @@ export interface StationLabel {
   name: string;
   /** hold-* only: what the drag does while it is held */
   verb?: string;
+  /**
+   * §T.136a — WHAT MORE OF THE CHANNEL IS CALLED, and what less is called.
+   * USER, at a guara: "it says raise or lower, but then I don't know how to
+   * actually raise or lower this. What do we do? Do we click?" — the verb
+   * named the effect and never the gesture. These two words are the effect;
+   * `dragHint` below pairs them with the MOUSE DIRECTION, which it derives
+   * from the station's own `axis`/`dir` rather than from a third authored
+   * string that is free to point the wrong way (§V62).
+   *
+   * Required for every hold-* station; `tests/raftPrompt.test.ts` is
+   * exhaustive over the union, so a new lever cannot ship without them.
+   */
+  more?: string;
+  less?: string;
 }
 
-const guaraLabel = (where: string): StationLabel => ({ name: `Guara — ${where}`, verb: 'raise / lower' });
+const guaraLabel = (where: string): StationLabel => ({
+  name: `Guara — ${where}`,
+  verb: 'raise / lower',
+  // the channel IS depth: 1 is the board driven down through the chink
+  more: 'lower',
+  less: 'raise',
+});
 
 export const RAFT_LABELS: Record<RaftAction, StationLabel> = {
-  tiller: { name: 'Tiller', verb: 'turn' },
+  tiller: { name: 'Tiller', verb: 'turn', more: 'starboard', less: 'port' },
   // the five boards in the order buildLogs sockets them (raftPartsLayout.guaraStations)
   'guara-1': guaraLabel('bow port'),
   'guara-2': guaraLabel('bow starboard'),
   'guara-3': guaraLabel('midships'),
   'guara-4': guaraLabel('stern port'),
   'guara-5': guaraLabel('stern starboard'),
-  'sheet-p': { name: 'Port sheet', verb: 'haul' },
-  'sheet-s': { name: 'Starboard sheet', verb: 'haul' },
-  halyard: { name: 'Halyard', verb: 'hoist / lower' },
-  radio: { name: 'Radio', verb: 'tune' },
+  'sheet-p': { name: 'Port sheet', verb: 'haul', more: 'haul in', less: 'ease' },
+  'sheet-s': { name: 'Starboard sheet', verb: 'haul', more: 'haul in', less: 'ease' },
+  halyard: { name: 'Halyard', verb: 'hoist / lower', more: 'hoist', less: 'lower' },
+  radio: { name: 'Radio', verb: 'tune', more: 'tune up', less: 'tune down' },
   chart: { name: 'Chart' },
   sleep: { name: 'Sleeping mat' },
   ladder: { name: 'Ladder' },
@@ -151,3 +171,65 @@ export const RAFT_LABELS: Record<RaftAction, StationLabel> = {
   'gangway-stern': { name: 'Step ashore' },
   'push-off': { name: 'Push her off' },
 };
+
+/**
+ * §T.136a — THE GESTURE, DERIVED FROM THE STATION ITSELF.
+ *
+ * Which way the mouse goes is not authored anywhere: it is read off the two
+ * fields `interact.step` reads to move the channel. `axis` picks the pair of
+ * words, and `dir` picks which of them is MORE — so the hint and the code that
+ * answers the mouse are the same statement twice, and a station whose `dir`
+ * flips gets a hint that flips with it. Authoring a third string here is
+ * exactly the §V62 shape: a label that is free to disagree with the control.
+ *
+ * `interact.step` reads `-yawDelta` for mouse-x and `+pitchDelta` for mouse-y,
+ * and `pointerLock.lookFromMouse` makes mouse-right a NEGATIVE yaw and
+ * mouse-up a POSITIVE pitch (mouse down is negative). So on both axes a
+ * positive `dir` means right / up increases the channel.
+ */
+const AXIS_WORDS: Record<StationAxis, readonly [string, string]> = {
+  'mouse-x': ['right', 'left'],
+  'mouse-y': ['up', 'down'],
+  forward: ['forward', 'back'],
+};
+
+export interface DragHint {
+  /** e.g. 'mouse right' — the direction that increases the channel */
+  moreWay: string;
+  moreDoes: string;
+  lessWay: string;
+  lessDoes: string;
+  /** one line for the plaque: 'mouse up: hoist · down: lower' */
+  text: string;
+}
+
+/** the gesture for a hold station, or null for the kinds that have none */
+export function dragHint(action: RaftAction): DragHint | null {
+  const st = RAFT_STATIONS[action];
+  const label = RAFT_LABELS[action];
+  if (st === undefined || label === undefined || !isHold(st.kind)) return null;
+  if (label.more === undefined || label.less === undefined) return null;
+  const [pos, neg] = AXIS_WORDS[st.axis ?? 'mouse-x'];
+  const up = (st.dir ?? 1) > 0;
+  const moreWay = `mouse ${up ? pos : neg}`;
+  const lessWay = up ? neg : pos;
+  return {
+    moreWay,
+    moreDoes: label.more,
+    lessWay,
+    lessDoes: label.less,
+    text: `${moreWay}: ${label.more} · ${lessWay}: ${label.less}`,
+  };
+}
+
+/**
+ * §T.135 — THE ONE PROMPT THAT IS NOT A STATION. A swimmer alongside is told
+ * how to get back aboard, and the thing he is being offered is a metre of
+ * foot-rail, not a socket: `raftBoardingPoints` emits nineteen of them along
+ * the rails and the stern and the nearest one wins, so it cannot live in
+ * `RAFT_STATIONS` (and adding it there would break §V84's "∀ RaftAction ∃ a
+ * socket that resolves on the assembly"). It lives HERE beside the labels
+ * because the copy rule and the label table are what it shares — the prompt
+ * module renders it through exactly the same plaque (§V95).
+ */
+export const CLIMB_ABOARD: StationLabel = { name: 'Climb aboard' };

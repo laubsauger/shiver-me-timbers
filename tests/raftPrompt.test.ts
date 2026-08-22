@@ -31,9 +31,11 @@ import {
   type Vec3,
 } from '../src/ui/raftPrompt';
 import {
+  CLIMB_ABOARD,
   RAFT_ACTIONS,
   RAFT_LABELS,
   RAFT_STATIONS,
+  dragHint,
   isHold,
   type RaftAction,
 } from '../src/player/stations';
@@ -469,5 +471,208 @@ describe('§T.116 station labels are wired to the stations they name', () => {
       expect(RAFT_STATIONS[a], a).toBeDefined();
       expect(RAFT_STATIONS[a].socket, a).toMatch(/^station-/);
     }
+  });
+});
+
+/**
+ * §T.136 A CONTROL YOU CANNOT TELL IS WORKING IS NOT A CONTROL.
+ *
+ * USER at a guara: "I can click E and then it says raise or lower, but then I
+ * don't know how to actually raise or lower this. What do we do? Do we click?
+ * And there's also no visual feedback as to if there's anything happening or
+ * not." §T.116 shipped the verb — the EFFECT — and never the gesture or the
+ * state. The blocks below pin all three halves of the fix as properties:
+ * the gesture is derived from the station's own axis/dir so it cannot point
+ * the wrong way, the readout moves with the channel, and out of reach says so.
+ */
+describe('§T.136a the prompt names the GESTURE, not only the effect', () => {
+  it('every hold station has one, derived from the axis it actually reads', () => {
+    // exhaustive over the union: a new lever with no `more`/`less` fails HERE
+    // rather than walking up to the player saying "raise / lower" and nothing
+    for (const a of RAFT_ACTIONS) {
+      const st = RAFT_STATIONS[a];
+      if (!isHold(st.kind)) {
+        expect(dragHint(a), a).toBeNull();
+        continue;
+      }
+      const hint = dragHint(a);
+      expect(hint, a).not.toBeNull();
+      const h = hint as NonNullable<typeof hint>;
+      // it names a mouse direction and what that direction DOES
+      expect(h.moreWay, a).toMatch(/^mouse (left|right|up|down)$/);
+      expect(h.moreDoes.length, a).toBeGreaterThan(0);
+      expect(h.lessDoes.length, a).toBeGreaterThan(0);
+      expect(h.moreDoes, a).not.toBe(h.lessDoes);
+      expect(h.text, a).toContain(h.moreWay);
+      expect(h.text, a).toContain(h.moreDoes);
+      expect(h.text, a).toContain(h.lessDoes);
+      // and the two directions are the two ENDS of one axis, never the same
+      expect(h.lessWay, a).not.toBe(h.moreWay.replace('mouse ', ''));
+      const axis = st.axis === 'mouse-x' ? ['left', 'right'] : ['up', 'down'];
+      expect(axis, a).toContain(h.moreWay.replace('mouse ', ''));
+      expect(axis, a).toContain(h.lessWay);
+    }
+  });
+
+  it('the direction FOLLOWS `dir`, which is the field interact.step reads', () => {
+    // §V62: this is why the hint is derived and not authored. A guara's dir is
+    // −1 (mouse DOWN pushes the board deeper) and the sheets' is +1 (mouse UP
+    // hauls); the hint must disagree with itself exactly where they disagree.
+    expect(RAFT_STATIONS['guara-1'].dir).toBe(-1);
+    expect(RAFT_STATIONS['sheet-p'].dir).toBe(1);
+    expect(dragHint('guara-1')?.moreWay).toBe('mouse down');
+    expect(dragHint('sheet-p')?.moreWay).toBe('mouse up');
+    // …and the tiller, on the other axis, with the natural sense: right = stbd
+    expect(dragHint('tiller')?.moreWay).toBe('mouse right');
+    expect(dragHint('tiller')?.moreDoes).toBe('starboard');
+  });
+
+  it('the plaque carries the gesture and how to LET GO, only while held', () => {
+    const cam = viewProjection(cameraAt([0, EYE, 0]));
+    const world = sockets({ [RAFT_STATIONS.halyard.socket]: [0, EYE, 1] });
+    const base = { hidden: false, socketWorld: world, viewProj: cam, width: W, height: H };
+    const offered = promptState({ ...base, focus: 'halyard', held: null });
+    expect(offered?.gesture).toBeNull(); // not yet grabbed: it is a nameplate
+    expect(offered?.release).toBeNull();
+    const held = promptState({ ...base, focus: 'halyard', held: 'halyard' });
+    expect(held?.gesture).toBe(dragHint('halyard')?.text);
+    // the grab is a TOGGLE, not a hold — the player who pressed E to take it
+    // has no way of knowing that unless told
+    expect(held?.release).toBe(`${keyLabel(CONTROL_CODES.interact)} to let go`);
+  });
+});
+
+describe('§T.136b the live channel is on screen while the hands are on it', () => {
+  const cam = viewProjection(cameraAt([0, EYE, 0]));
+  const world = sockets({
+    [RAFT_STATIONS.halyard.socket]: [0, EYE, 1],
+    [TILLER]: [0, EYE, 1],
+  });
+  const shown = (action: RaftAction, v: number) =>
+    promptState({
+      focus: action, held: action, hidden: false, socketWorld: world,
+      value: () => v, viewProj: cam, width: W, height: H,
+    });
+
+  it('the readout and the bar MOVE with the channel — the user saw nothing move', () => {
+    const a = shown('halyard', 0.2);
+    const b = shown('halyard', 0.8);
+    expect(a?.readout).not.toBe(b?.readout);
+    expect((b?.bar as { to: number }).to).toBeGreaterThan((a?.bar as { to: number }).to);
+    // …and the bar is the channel, in the station's OWN range (0..1 here)
+    expect(a?.bar).toEqual({ from: 0, to: 0.2 });
+    expect(b?.bar).toEqual({ from: 0, to: 0.8 });
+  });
+
+  it('a signed channel fills from the middle and names the side it is over', () => {
+    // §V80: the property is that amidships is the ZERO of the bar, not that
+    // the tiller's range happens to be −1..1 today
+    expect(RAFT_STATIONS.tiller.min).toBeLessThan(0);
+    const mid = shown('tiller', 0);
+    expect(mid?.bar).toEqual({ from: 0.5, to: 0.5 }); // empty, not half full
+    expect(mid?.readout).toBe('amidships');
+    const stbd = shown('tiller', 0.5);
+    const port = shown('tiller', -0.5);
+    expect((stbd?.bar as { from: number }).from).toBe(0.5);
+    expect((port?.bar as { to: number }).to).toBe(0.5);
+    expect(stbd?.readout).toContain(dragHint('tiller')?.moreDoes);
+    expect(port?.readout).toContain(dragHint('tiller')?.lessDoes);
+  });
+
+  it('no readout at all when nothing is held, or at a station with no channel', () => {
+    const offered = promptState({
+      focus: 'halyard', held: null, hidden: false, socketWorld: world,
+      value: () => 0.5, viewProj: cam, width: W, height: H,
+    });
+    expect(offered?.readout).toBeNull();
+    expect(offered?.bar).toBeNull();
+  });
+});
+
+describe('§T.136d a station out of arm’s reach says so instead of going quiet', () => {
+  /** a walker at the origin with the tiller `d` metres in front of him */
+  const at = (d: number) => {
+    const host = fakeHost();
+    const socket: [number, number, number] = [0, EYE, d];
+    const interact = createInteract(host, { socketWorld: (id) => (id === TILLER ? socket : null) });
+    return { interact, socket };
+  };
+
+  it('silence and "not interactive" are the same thing to a player, so it is never silent', () => {
+    const near = at(P.reach * 0.5);
+    expect(near.interact.focus()).toBe('tiller');
+    expect(near.interact.outOfReach()).toBeNull(); // it is offered; nothing to say
+
+    const far = at((P.reach + P.reachHint) / 2);
+    expect(far.interact.focus()).toBeNull(); // E would do nothing…
+    expect(far.interact.outOfReach()).toBe('tiller'); // …and the player is told why
+
+    const gone = at(P.reachHint + 1);
+    expect(gone.interact.outOfReach()).toBeNull(); // a nameplate across the raft is noise
+  });
+
+  it('the plaque names it, drops the keycap, and flags itself out of reach', () => {
+    const cam = viewProjection(cameraAt([0, EYE, 0]));
+    const world = sockets({ [TILLER]: [0, EYE, 1] });
+    const far = promptState({
+      focus: null, held: null, outOfReach: 'tiller', hidden: false,
+      socketWorld: world, viewProj: cam, width: W, height: H,
+    });
+    expect(far?.action).toBe('tiller');
+    expect(far?.name).toBe(RAFT_LABELS.tiller.name);
+    expect(far?.outOfReach).toBe(true);
+    // a keycap on a plaque that means "you cannot do this from here" is the
+    // contradiction §T.136d is about
+    expect(far?.key).toBeNull();
+    // …and focus always outranks it: the moment E would work, the key is back
+    const near = promptState({
+      focus: 'tiller', held: null, outOfReach: 'radio', hidden: false,
+      socketWorld: world, viewProj: cam, width: W, height: H,
+    });
+    expect(near?.action).toBe('tiller');
+    expect(near?.outOfReach).toBe(false);
+    expect(near?.key).toBe('E');
+  });
+});
+
+describe('§T.135 the swimmer is told how to get back aboard', () => {
+  const cam = viewProjection(cameraAt([0, EYE, 0]));
+  const world = sockets({ [TILLER]: [0, EYE, 1] });
+  const base = { hidden: false, socketWorld: world, viewProj: cam, width: W, height: H };
+
+  it('shows [Space] Climb aboard at the rail, through the SAME plaque', () => {
+    const p = promptState({ ...base, focus: null, held: null, board: [0, EYE - 0.4, 1] });
+    expect(p?.action).toBe('climb-aboard');
+    expect(p?.name).toBe(CLIMB_ABOARD.name);
+    // the key is read from the control map, not spelled out here — rebinding
+    // jump must re-letter the plaque (§V62)
+    expect(p?.key).toBe(keyLabel(CONTROL_CODES.walkJump));
+    expect(p?.key).not.toBe(keyLabel(CONTROL_CODES.interact));
+    // it hangs on the rail it names, not in the middle of the screen
+    expect(p?.x).toBeGreaterThan(0);
+    expect(p?.y).toBeGreaterThan(0);
+  });
+
+  it('outranks the stations a swimmer can somehow resolve, and yields to a hold', () => {
+    // `interact.scan` lets stations resolve from the water; a man in the sea
+    // being offered the tiller is worse than useless
+    const swimming = promptState({ ...base, focus: 'tiller', held: null, board: [0, EYE, 1] });
+    expect(swimming?.action).toBe('climb-aboard');
+    // …but a station in HAND still outranks everything, as §T.116 has it
+    const busy = promptState({ ...base, focus: 'tiller', held: 'tiller', board: [0, EYE, 1] });
+    expect(busy?.action).toBe('tiller');
+  });
+
+  it('is gone the moment there is nothing to climb, and in photo mode', () => {
+    expect(promptState({ ...base, focus: null, held: null, board: null })).toBeNull();
+    expect(promptState({ ...base, focus: null, held: null, board: [0, EYE, 1], hidden: true })).toBeNull();
+  });
+
+  it('draws no station cues from the water — a dot on a lever he cannot take is a lie', () => {
+    const dots = cuePoints({
+      ...base, focus: null, held: null, board: [0, EYE, 1],
+      inReach: ['tiller', 'radio'], mergePx: P.cueMergePx, maxDots: P.cueMaxDots,
+    });
+    expect(dots).toEqual([]);
   });
 });

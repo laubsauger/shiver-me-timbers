@@ -60,6 +60,17 @@ export interface Interact {
    * draws these, and `focus()` is the one of them being looked at.
    */
   inReach(): RaftAction[];
+  /**
+   * §T.136d — the station the walker is LOOKING AT but standing too far from:
+   * inside the cone, beyond `reach`, within `reachHint`. Null whenever
+   * `focus()` has an answer, because then there is nothing to be told.
+   *
+   * USER: at a guara, "I don't know how to actually raise or lower this" —
+   * half of that is standing out of arm's reach and getting the same silence
+   * a bollard gives. Silence cannot be told apart from "not interactive", so
+   * the prompt says the name and "step closer" instead.
+   */
+  outOfReach(): RaftAction | null;
   /** E pressed: take hold of the focus, or fire its one-shot */
   begin(): void;
   /** E pressed again / let go */
@@ -160,7 +171,7 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
    * this filter would be free to disagree about what is reachable, and then
    * the cue would light things E does not take.
    */
-  const scan = (aimed: boolean): RaftAction[] => {
+  const scan = (aimed: boolean, maxRange = p.reach, minRange = 0): RaftAction[] => {
     const s = host.state;
     const eye = eyeOf(s, p);
     const dir = lookDir(num(s.yaw), num(s.pitch));
@@ -180,7 +191,7 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
       if (d < 1e-6) continue;
       // range from the capsule, aim from the eye (see capsuleDistance)
       const range = capsuleDistance(s, q, p);
-      if (range > p.reach) continue;
+      if (range > maxRange || range <= minRange) continue;
       if (aimed) {
         const cos = (dx * dir[0] + dy * dir[1] + dz * dir[2]) / d;
         if (cos < cosCone) continue;
@@ -289,6 +300,9 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
     // aloft the ladder is the only thing in reach, which is also the only
     // thing `focus` offers up there
     inReach: () => (aloft !== null ? ['ladder'] : scan(false)),
+    // §T.136d: the SAME scan, one band further out. Sharing it is the point —
+    // a second filter would be free to name a station `focus` would never take
+    outOfReach: () => (aloft !== null || focus() !== null ? null : scan(true, p.reachHint, p.reach)[0] ?? null),
     begin,
     end,
     held: () => held,

@@ -29,7 +29,15 @@
  */
 import { CONTROL_CODES } from '../input/controlMap';
 import { playerParams, type PlayerParams } from '../params/player';
-import { RAFT_LABELS, RAFT_STATIONS, type RaftAction } from '../player/stations';
+import {
+  CLIMB_ABOARD,
+  dragHint,
+  isHold,
+  RAFT_LABELS,
+  RAFT_STATIONS,
+  type RaftAction,
+  type RaftStation,
+} from '../player/stations';
 import { div, el } from './dom';
 import { ensureUiStyles } from './styles';
 
@@ -63,14 +71,43 @@ export interface ScreenPoint {
   y: number;
 }
 
+/**
+ * §T.135 — `'climb-aboard'` is a prompt, not a station. It is deliberately NOT
+ * a `RaftAction`: it has no socket (the anchor is whichever metre of foot-rail
+ * the swimmer is beside), no channel and no `E`, and adding it to the union
+ * would break §V84's "∀ RaftAction ∃ a socket that resolves on the assembly".
+ * Everything else about it — the plaque, the fade, the keycap, the label table
+ * — is shared, which is the §V95 half that matters.
+ */
+export type PromptAction = RaftAction | 'climb-aboard';
+
 export interface PromptState {
-  action: RaftAction;
+  action: PromptAction;
   /** the station's name; empty while held — the verb speaks instead */
   name: string;
   /** the key to press, or null while the station is already in hand */
   key: string | null;
   /** what the drag does; only while held */
   verb: string | null;
+  /**
+   * §T.136a — the gesture, while held: 'mouse up: hoist · down: lower'. The
+   * verb says what the station DOES and this says what the hand does, which is
+   * the half §T.116 left out ("I don't know how to actually raise or lower
+   * this. What do we do? Do we click?").
+   */
+  gesture: string | null;
+  /** §T.136a — how to let go, while held; the grab is a toggle, not a hold */
+  release: string | null;
+  /**
+   * §T.136b — the live channel while held, so the player SEES the number move
+   * as they drag. `readout` is the printed value, `bar` is the same value as a
+   * fill of the track (`from`/`to` in 0..1) — signed channels fill out from
+   * the middle, so the tiller reads as an angle either side of amidships.
+   */
+  readout: string | null;
+  bar: { from: number; to: number } | null;
+  /** §T.136d — the station is named but out of arm's reach; the plaque says so */
+  outOfReach: boolean;
   x: number;
   y: number;
 }
@@ -85,6 +122,50 @@ export interface PromptSource {
   focus(): RaftAction | null;
   held(): RaftAction | null;
   inReach(): RaftAction[];
+  /** §T.136b — the live channel of a hold station, for the readout and the bar */
+  value(action: RaftAction): number;
+  /** §T.136d — looked at, named, too far to touch */
+  outOfReach(): RaftAction | null;
+}
+
+/**
+ * §T.136b — WHERE THE FILL STARTS AND WHERE IT ENDS, in 0..1 of the track.
+ *
+ * A 0..1 channel (guara depth, sheet, halyard) fills from the empty end. A
+ * signed one (the tiller, −1..1) fills from the middle, because amidships is
+ * not "empty" — it is the rest position, and a bar that reads half full with
+ * the oar straight would say the helm is over when it is not.
+ */
+export function channelBar(st: RaftStation, value: number): { from: number; to: number } {
+  const min = st.min ?? 0;
+  const max = st.max ?? 1;
+  const span = max - min;
+  if (!(span > 1e-9) || !Number.isFinite(value)) return { from: 0, to: 0 };
+  const t = Math.min(1, Math.max(0, (value - min) / span));
+  const zero = min < 0 && max > 0 ? -min / span : 0;
+  return t < zero ? { from: t, to: zero } : { from: zero, to: t };
+}
+
+/**
+ * §T.136b — the printed value. A signed channel reads as a percentage of full
+ * travel with the SIDE named, because "−0.42" tells a helmsman nothing and
+ * "42% to port" tells him where his oar is; an unsigned one is a plain
+ * percentage of its own range.
+ */
+export function channelReadout(action: RaftAction, st: RaftStation, value: number): string {
+  const min = st.min ?? 0;
+  const max = st.max ?? 1;
+  const span = max - min;
+  if (!(span > 1e-9) || !Number.isFinite(value)) return '';
+  const v = Math.min(max, Math.max(min, value));
+  if (min < 0 && max > 0) {
+    const pct = Math.round((Math.abs(v) / Math.max(-min, max)) * 100);
+    if (pct === 0) return 'amidships';
+    const hint = dragHint(action);
+    const side = v > 0 ? hint?.moreDoes : hint?.lessDoes;
+    return side === undefined ? `${pct}%` : `${pct}% — ${side}`;
+  }
+  return `${Math.round(((v - min) / span) * 100)}%`;
 }
 
 /** view-projection = projection · view, column-major, three's element order */
@@ -140,6 +221,16 @@ export function projectPoint(
 export interface PromptInput {
   focus: RaftAction | null;
   held: RaftAction | null;
+  /** §T.136d — named but too far to touch; used only when `focus` is null */
+  outOfReach?: RaftAction | null;
+  /**
+   * §T.135 — the WORLD point of the foot-rail a SWIMMER could haul out at, or
+   * null. `Player.boardingAnchor` answers it with the same reach the haul-out
+   * itself uses, so the plaque appears exactly when Space would work.
+   */
+  board?: Vec3 | null;
+  /** §T.136b — live channel of a hold station; absent = no readout */
+  value?: (action: RaftAction) => number;
   /** photo or cinematic mode: nothing over the render at all */
   hidden: boolean;
   socketWorld: SocketResolver;
@@ -149,14 +240,40 @@ export interface PromptInput {
 }
 
 /**
- * The one station being offered, resolved to a screen point — or null, which
- * means the plaque fades out. Held outranks focus: while the tiller is in hand
- * the walker may look wherever the yaw limit allows, and the prompt must not
- * hop to whatever else passes through the cone.
+ * The one thing being offered, resolved to a screen point — or null, which
+ * means the plaque fades out. The order of precedence, strongest first:
+ *
+ *   held    while the tiller is in hand the walker may look wherever the yaw
+ *           limit allows, and the prompt must not hop to whatever else passes
+ *           through the cone.
+ *   board   a swimmer has exactly one thing to do and it is not the tiller
+ *           (§T.135). `interact.scan` lets stations resolve from the water,
+ *           so without this a man in the sea would be offered the helm.
+ *   focus   the station being looked at from arm's reach.
+ *   too far the station being looked at from beyond it, which says so
+ *           (§T.136d) rather than staying silent.
  */
 export function promptState(o: PromptInput): PromptState | null {
   if (o.hidden) return null;
-  const action = o.held ?? o.focus;
+  if (o.held === null && o.board !== undefined && o.board !== null) {
+    const at = projectPoint(o.board, o.viewProj, o.width, o.height);
+    if (at === null) return null;
+    return {
+      action: 'climb-aboard',
+      name: CLIMB_ABOARD.name,
+      key: keyLabel(CONTROL_CODES.walkJump),
+      verb: null,
+      gesture: null,
+      release: null,
+      readout: null,
+      bar: null,
+      outOfReach: false,
+      x: at.x,
+      y: at.y,
+    };
+  }
+  const far = o.held === null && o.focus === null ? o.outOfReach ?? null : null;
+  const action = o.held ?? o.focus ?? far;
   if (action === null) return null;
   const station = RAFT_STATIONS[action];
   const label = RAFT_LABELS[action];
@@ -169,11 +286,21 @@ export function promptState(o: PromptInput): PromptState | null {
   // a hold with no verb still says the name: silence would be worse than a
   // nameplate, and the §V80 test refuses the table that gets there
   const verb = held ? label.verb ?? null : null;
+  const hold = isHold(station.kind);
+  const v = held && hold && o.value !== undefined ? o.value(action) : null;
   return {
     action,
     name: held && verb !== null ? '' : label.name,
-    key: held ? null : keyLabel(CONTROL_CODES.interact),
+    // out of reach there is no key to offer: pressing it does nothing, and a
+    // keycap on a plaque that says "step closer" is the contradiction §T.136d
+    // is about
+    key: held || far !== null ? null : keyLabel(CONTROL_CODES.interact),
     verb,
+    gesture: held ? dragHint(action)?.text ?? null : null,
+    release: held ? `${keyLabel(CONTROL_CODES.interact)} to let go` : null,
+    readout: v === null ? null : channelReadout(action, station, v),
+    bar: v === null ? null : channelBar(station, v),
+    outOfReach: far !== null,
     x: at.x,
     y: at.y,
   };
@@ -193,7 +320,9 @@ export interface CueInput extends PromptInput {
  * other options is noise at that moment.
  */
 export function cuePoints(o: CueInput): Array<ScreenPoint & { action: RaftAction }> {
-  if (o.hidden || o.held !== null) return [];
+  // …and nothing at all from the water: a swimmer's one job is the rail
+  // (§T.135), and dots on the tiller he cannot take would be a lie
+  if (o.hidden || o.held !== null || (o.board !== undefined && o.board !== null)) return [];
   const out: Array<ScreenPoint & { action: RaftAction }> = [];
   const merge = Math.max(0, o.mergePx);
   for (const a of o.inReach) {
@@ -228,6 +357,12 @@ export function stepFade(alpha: number, target: number, dt: number, fadeSec: num
 export interface RaftPromptOptions {
   /** the walker's stations — `player.interact` */
   interact: PromptSource;
+  /**
+   * §T.135 — `player.boardingAnchor`: the rail a SWIMMER can haul out at, in
+   * world coordinates, or null. Optional so a harness with no water (the ship
+   * preview) simply never shows it.
+   */
+  board?: () => Vec3 | null;
   /** LIVE socket resolver (§V71), the assembly's own */
   socketWorld: SocketResolver;
   /** the lens the frame was drawn through */
@@ -272,7 +407,18 @@ export function createRaftPrompt(o: RaftPromptOptions): RaftPrompt {
   const name = el('span', 'smt-prompt-name', '');
   const key = el('kbd', 'smt-key', keyLabel(CONTROL_CODES.interact));
   const verb = el('span', 'smt-prompt-verb', '');
-  const plaque = div('smt-prompt', key, name, verb);
+  // §T.136 — the second line. It only ever carries what a HELD station needs
+  // (the gesture, the live value and its bar, how to let go) or the "step
+  // closer" of §T.136d, so an idle plaque is exactly the nameplate it was.
+  const gesture = el('span', 'smt-prompt-gesture', '');
+  const readout = el('span', 'smt-prompt-readout', '');
+  const fill = div('smt-prompt-fill');
+  const bar = div('smt-prompt-bar', fill);
+  const release = el('span', 'smt-prompt-release', '');
+  const far = el('span', 'smt-prompt-far', 'step closer');
+  const line1 = div('smt-prompt-line', key, name, verb);
+  const line2 = div('smt-prompt-line smt-prompt-how', gesture, bar, readout, release, far);
+  const plaque = div('smt-prompt', line1, line2);
   plaque.setAttribute('role', 'status');
   plaque.style.opacity = '0';
   plaque.style.visibility = 'hidden';
@@ -321,10 +467,14 @@ export function createRaftPrompt(o: RaftPromptOptions): RaftPrompt {
       const camera = o.camera();
       const view = o.size?.() ?? { x: window.innerWidth, y: window.innerHeight };
       const hidden = o.hidden?.() ?? false;
+      const dark = hidden || camera === null;
       const input: PromptInput = {
-        focus: hidden || camera === null ? null : o.interact.focus(),
-        held: hidden || camera === null ? null : o.interact.held(),
-        hidden: hidden || camera === null,
+        focus: dark ? null : o.interact.focus(),
+        held: dark ? null : o.interact.held(),
+        outOfReach: dark ? null : o.interact.outOfReach(),
+        board: dark ? null : o.board?.() ?? null,
+        value: (a) => o.interact.value(a),
+        hidden: dark,
         socketWorld: o.socketWorld,
         // §V71: resolved from THIS frame's lens, not a cached one
         viewProj: camera === null ? [] : viewProjection(camera),
@@ -336,9 +486,30 @@ export function createRaftPrompt(o: RaftPromptOptions): RaftPrompt {
         shown = next;
         name.textContent = next.name;
         verb.textContent = next.verb ?? '';
+        key.textContent = next.key ?? '';
         key.style.display = next.key === null ? 'none' : '';
         name.style.display = next.name === '' ? 'none' : '';
         verb.style.display = next.verb === null ? 'none' : '';
+        // §T.136 second line — every part hidden unless this state carries it,
+        // so `display` and the state agree and nothing lingers from a previous
+        // station (a stale readout under a new nameplate is a lie about which
+        // lever the number belongs to)
+        gesture.textContent = next.gesture ?? '';
+        gesture.style.display = next.gesture === null ? 'none' : '';
+        readout.textContent = next.readout ?? '';
+        readout.style.display = next.readout === null ? 'none' : '';
+        release.textContent = next.release ?? '';
+        release.style.display = next.release === null ? 'none' : '';
+        far.style.display = next.outOfReach ? '' : 'none';
+        bar.style.display = next.bar === null ? 'none' : '';
+        if (next.bar !== null) {
+          fill.style.left = `${(next.bar.from * 100).toFixed(2)}%`;
+          fill.style.width = `${Math.max(0, (next.bar.to - next.bar.from) * 100).toFixed(2)}%`;
+        }
+        line2.style.display =
+          next.gesture === null && next.readout === null && next.release === null && !next.outOfReach
+            ? 'none'
+            : '';
         // the plaque floats above the socket, pointing down at it
         place(plaque, next.x, next.y - p.promptRisePx, 'translate(-50%, -100%)');
       } else {

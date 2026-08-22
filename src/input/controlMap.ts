@@ -182,7 +182,10 @@ export const CONTROL_GROUPS: readonly ControlGroup[] = [
       { keys: ['T'], action: 'Walk the deck', hint: 'First-person view; press again to return' },
       { keys: ['Click'], action: 'Take the mouse', hint: 'Esc gives it back' },
       { keys: ['W', 'A', 'S', 'D'], action: 'Walk', hint: 'On deck only' },
-      { keys: ['Space'], action: 'Hop', hint: 'On deck only' },
+      // §T.135: it was a 7 cm hop and the card said so; it is a jump now, and
+      // the same key is how a man in the water gets back on the raft
+      { keys: ['Space'], action: 'Jump', hint: 'Stand up first — not from a crouch' },
+      { keys: ['Space'], action: 'Climb aboard', hint: 'In the water, alongside a rail' },
       { keys: ['Ctrl'], action: 'Crouch', hint: 'Ducks by itself under a low deckhead' },
       { keys: ['E'], action: 'Take hold / let go', hint: 'Tiller, guaras, sheets, halyard, radio, ladder, mat — look at it, within arm’s reach' },
       { keys: ['Mouse'], action: 'Work the station', hint: 'Left / right turns a tiller or knob; up / down hauls a line or a board' },

@@ -27,8 +27,14 @@ export interface PlayerParams {
   slopeProbe: number;
   /** stand back up only once head clearance exceeds standHeight by this much */
   crouchHysteresis: number;
-  /** a hop, not a leap: a deck is not a parkour course */
-  jumpSpeed: number;
+  /**
+   * §T.135 — HOW HIGH THE FEET LEAVE THE DECK, in metres of APEX, not a launch
+   * speed. The knob a designer means is the height; the speed that produces it
+   * is √(2·g·h), derived in `playerStep` so the two can never disagree when
+   * `gravity` moves (the old `jumpSpeed: 1.2` was a 7 cm hop — §T.135's whole
+   * complaint was that Space read as unbound).
+   */
+  jumpHeight: number;
   /** gravity in the SHIP frame; the deck's own acceleration is ignored */
   gravity: number;
   /** swimming: the eye rides this far above the water, and follows it at this rate */
@@ -43,6 +49,23 @@ export interface PlayerParams {
    */
   boardReach: number;
   boardVertical: number;
+  /**
+   * §T.135 THE HAUL-OUT — the same climb, asked for on purpose. Pressing the
+   * jump key in the water is a LUNGE: the swimmer kicks, gets both forearms
+   * over the rail and hauls, so it reaches further out and further up than the
+   * passive drift-aboard above. The passive one stays exactly as it was — a
+   * player who never learns the key must still get back on the raft (§B78) —
+   * so these two are strictly the more generous pair, never a replacement.
+   */
+  boardLungeReach: number;
+  boardLungeVertical: number;
+  /**
+   * …and how far INBOARD the lunge lands. A drift-aboard puts the feet on the
+   * rail itself; a man who throws himself over one ends up on the deck behind
+   * it. Used only when the deck that far in is real, level within `stepUp` and
+   * not a wall — otherwise the feet go on the rail like the passive route.
+   */
+  boardStepIn: number;
   /** mouse: radians of yaw per pixel of pointer-lock movement */
   lookSensitivity: number;
   /** pitch limit, degrees — straight up/down would gimbal the camera */
@@ -50,6 +73,13 @@ export interface PlayerParams {
   /** §T.95 stations: how far a hand reaches, and how far off the look axis a station still counts */
   reach: number;
   focusConeDeg: number;
+  /**
+   * §T.136d — a station looked at from between `reach` and this says SO ("step
+   * closer") instead of staying silent, which is indistinguishable from "this
+   * is not a thing you can touch". Past it there is no prompt at all: a
+   * nameplate on everything you glance at across the raft is noise.
+   */
+  reachHint: number;
   /** while holding a station the head may turn this far either side of its facing */
   holdYawLimitDeg: number;
   /** hold-turn / hold-slide: channel units per radian of mouse travel */
@@ -99,16 +129,20 @@ export const playerParams: PlayerParams = registerParams<PlayerParams>(
     maxSlopeDeg: 40,
     slopeProbe: 0.15,
     crouchHysteresis: 0.05,
-    jumpSpeed: 1.2,
+    jumpHeight: 0.5,
     gravity: 9.81,
     swimEyeAbove: 0.25,
     swimBobRate: 6,
     boardReach: 0.8,
     boardVertical: 1.5,
+    boardLungeReach: 1.4,
+    boardLungeVertical: 2.2,
+    boardStepIn: 0.5,
     lookSensitivity: 0.0022,
     pitchLimitDeg: 89,
     reach: 1.6,
     focusConeDeg: 35,
+    reachHint: 3.0,
     holdYawLimitDeg: 60,
     turnSensitivity: 1.2,
     slideSensitivity: 1.5,
@@ -138,16 +172,20 @@ export const playerParams: PlayerParams = registerParams<PlayerParams>(
     maxSlopeDeg: { min: 10, max: 70, step: 1 },
     slopeProbe: { min: 0.05, max: 0.5, step: 0.01 },
     crouchHysteresis: { min: 0, max: 0.3, step: 0.01 },
-    jumpSpeed: { min: 0, max: 5, step: 0.1 },
+    jumpHeight: { min: 0, max: 1.5, step: 0.05 },
     gravity: { min: 0, max: 20, step: 0.1 },
     swimEyeAbove: { min: 0, max: 1, step: 0.01 },
     swimBobRate: { min: 0.5, max: 20, step: 0.5 },
     boardReach: { min: 0.2, max: 3, step: 0.05 },
     boardVertical: { min: 0.2, max: 4, step: 0.05 },
+    boardLungeReach: { min: 0.2, max: 4, step: 0.05 },
+    boardLungeVertical: { min: 0.2, max: 5, step: 0.05 },
+    boardStepIn: { min: 0, max: 1.5, step: 0.05 },
     lookSensitivity: { min: 0.0002, max: 0.01, step: 0.0001 },
     pitchLimitDeg: { min: 45, max: 89.9, step: 0.1 },
     reach: { min: 0.5, max: 4, step: 0.05 },
     focusConeDeg: { min: 5, max: 90, step: 1 },
+    reachHint: { min: 0.5, max: 8, step: 0.1 },
     holdYawLimitDeg: { min: 10, max: 180, step: 1 },
     turnSensitivity: { min: 0.1, max: 10, step: 0.1 },
     slideSensitivity: { min: 0.1, max: 10, step: 0.1 },

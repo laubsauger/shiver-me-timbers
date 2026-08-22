@@ -20,7 +20,8 @@ export const PROMPT_CSS = /* css */ `
    injected last, and both selectors are one class). Only the clipping is ours. */
 .smt-prompt-layer { overflow: hidden; }
 .smt-prompt {
-  position: absolute; top: 0; left: 0; display: flex; align-items: center; gap: 8px;
+  position: absolute; top: 0; left: 0; display: flex; align-items: center; gap: 3px;
+  flex-direction: column;
   padding: 5px 12px 6px; white-space: nowrap; will-change: transform, opacity;
   color: var(--parch-hi);
   background: linear-gradient(180deg, rgba(12, 9, 5, 0.78), rgba(6, 4, 2, 0.72));
@@ -39,6 +40,41 @@ export const PROMPT_CSS = /* css */ `
 .smt-prompt-verb {
   font-size: 12.5px; letter-spacing: 0.14em; color: var(--brass-hi); opacity: 0.9;
   text-shadow: 0 1px 2px rgba(4, 18, 22, 0.9);
+}
+/* §T.136 — the plaque is two rows now: the nameplate, and underneath it what
+   the hands are being asked to DO and where the channel currently stands. The
+   second row exists only while a station is HELD (or, dimmed, when it is out
+   of reach), so an idle prompt is the same one-line plaque §T.116 shipped. */
+.smt-prompt-line { display: flex; align-items: center; gap: 8px; }
+/* the gesture: 'mouse up: hoist · down: lower'. Lower case and quieter than
+   the nameplate — an instruction, not a title. */
+.smt-prompt-gesture {
+  font-size: 11.5px; letter-spacing: 0.06em; color: var(--parch-hi); opacity: 0.72;
+  text-shadow: 0 1px 2px rgba(4, 18, 22, 0.9);
+}
+/* the live channel. USER: "there's also no visual feedback as to if there's
+   anything happening or not" — so the bar is the thing that MOVES while the
+   mouse moves, and the readout is the number beside it. */
+.smt-prompt-bar {
+  position: relative; width: 54px; height: 4px; flex: 0 0 auto;
+  background: rgba(4, 18, 22, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(223, 192, 109, 0.28);
+}
+.smt-prompt-fill {
+  position: absolute; top: 0; bottom: 0; left: 0; width: 0;
+  background: linear-gradient(180deg, var(--brass-hi), var(--brass));
+}
+.smt-prompt-readout {
+  font-size: 11.5px; letter-spacing: 0.06em; color: var(--brass-hi);
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 2px rgba(4, 18, 22, 0.9);
+}
+.smt-prompt-release { font-size: 11px; letter-spacing: 0.06em; opacity: 0.55; }
+/* §T.136d — "step closer": the answer to a station being looked at from out of
+   arm's reach, which used to be silence and therefore unreadable. */
+.smt-prompt-far {
+  font-size: 11.5px; letter-spacing: 0.1em; font-variant-caps: small-caps;
+  color: var(--parch-hi); opacity: 0.6;
 }
 /* the brass diamond that marks a station in reach but not looked at. Same
    lozenge as the compass lubber mark and the fleuron, 7px: present enough to

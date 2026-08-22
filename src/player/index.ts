@@ -22,6 +22,7 @@ import type { RaftAction } from './stations';
 import { attachDebugKeys, type DebugChannel } from './debugKeys';
 import type { Hands } from './hands';
 import {
+  boardingCandidate,
   createPlayerState,
   eyeHeight,
   stepPlayer,
@@ -100,6 +101,14 @@ export interface Player {
    */
   onAction(name: string, handler: ActionHandler): () => void;
   applyAction(name: string, value?: unknown): boolean;
+  /**
+   * §T.135 — the WORLD point the swimmer's `[Space] Climb aboard` plaque hangs
+   * on, or null when there is nothing to climb. It answers with the SAME
+   * `boardingCandidate` the haul-out itself takes and with the SAME lunge
+   * limits, so the prompt is on screen exactly when the key would work: a
+   * second copy of that rule would advertise a climb Space refuses (§V62).
+   */
+  boardingAnchor(): Vec3 | null;
   /** §T.95 station interaction; inert (no stations) when `socketWorld` is absent */
   readonly interact: Interact;
   /** the placeholder hands, if main passed them */
@@ -255,6 +264,20 @@ export function createPlayer(o: PlayerOptions): Player {
         pos.set(eye[0], eye[1], eye[2]);
       }
       return { position: pos, quaternion: quat };
+    },
+    boardingAnchor() {
+      const s = sim.player as PlayerState;
+      if (s.frame !== 'swim') return null;
+      const water = waterAt(s.pos[0], s.pos[2]);
+      const hit = boardingCandidate(
+        surface,
+        s.pos[0],
+        s.pos[2],
+        water,
+        playerParams.boardLungeReach,
+        playerParams.boardLungeVertical,
+      );
+      return hit === null ? null : hit.world;
     },
     isActive: () => active,
     setActive(a) {

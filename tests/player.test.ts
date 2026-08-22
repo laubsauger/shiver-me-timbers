@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { PerspectiveCamera, Quaternion, Vector3 } from 'three';
 import {
   createPlayerState,
+  jumpSpeed,
   neutralPlayerInput,
   stepPlayer,
   type PlayerInput,
@@ -27,6 +28,8 @@ import { lookFromMouse, LookAccumulator } from '../src/player/pointerLock';
 import { PlayerKeys, attachPlayerKeys } from '../src/player/playerInput';
 import { createDeckSurface } from '../src/player/deckSurface';
 import { createPlayer } from '../src/player/index';
+import { createInteract } from '../src/player/interact';
+import { RAFT_STATIONS } from '../src/player/stations';
 import { playerParams } from '../src/params/player';
 import { CONTROL_CODES } from '../src/input/controlMap';
 import { buildGalleonBlueprint } from '../src/ship/shipBlueprint';
@@ -470,7 +473,7 @@ describe('§V2 determinism and NaN safety', () => {
     for (const v of [...s.pos, ...s.vel, s.yaw, s.pitch]) expect(Number.isFinite(v)).toBe(true);
   });
 
-  it('a hop leaves the deck and lands back on it with no residual velocity', () => {
+  it('a jump leaves the deck and lands back on it with no residual velocity', () => {
     const surface = flat(() => 0);
     let s = stepPlayer(settled(surface), walkInput({ forward: 0, jump: true }), surface, DT);
     expect(s.grounded).toBe(false);
@@ -479,10 +482,275 @@ describe('§V2 determinism and NaN safety', () => {
       s = stepPlayer(s, neutralPlayerInput(), surface, DT);
       peak = Math.max(peak, s.pos[1]);
     }
-    expect(peak).toBeGreaterThan(0.03);
-    expect(peak).toBeLessThan(0.2); // small — a hop, not a leap
+    // §V80 — the PROPERTY is "the feet reach the authored apex", read from the
+    // same knob the code reads. The assertion this replaces was `peak < 0.2`
+    // "a hop, not a leap", which pinned the DECISION: it passed for the entire
+    // life of the 7 cm twitch §T.135 was filed about, and would have failed on
+    // any legitimate move of the height.
+    expect(peak).toBeGreaterThan(P.jumpHeight * 0.9);
+    expect(peak).toBeLessThan(P.jumpHeight * 1.1);
     expect(s.grounded).toBe(true);
     expect(s.pos[1]).toBe(0);
     expect(s.vel[1]).toBe(0);
+  });
+});
+
+/**
+ * §T.135 JUMP, AND CLIMBING BACK ABOARD WITH IT. USER: "we need to be able to
+ * jump on spacebar, right? And also that's probably how we get back on the
+ * boat when we fell off."
+ *
+ * The keydown blocks below go through the REAL `KeyboardInput` on a REAL
+ * EventTarget and assert `SimState.player` moved, because §V62's whole point
+ * is that Space WAS bound before this task and drove a 7 cm hop nobody could
+ * see — a control that looks wired and is not is this project's signature
+ * defect, and "the height is in the params" is not evidence that pressing the
+ * key does anything.
+ */
+describe('§T.135 the jump', () => {
+  const deck = buildDeckHeightfield(buildGalleonBlueprint());
+  if (deck === null) throw new Error('galleon has no deck field');
+
+  it('a real Space KeyboardEvent raises SimState.player by jumpHeight ±10%', () => {
+    const sim = createInitialState(1);
+    const target = new EventTarget();
+    const player = createPlayer({
+      sim,
+      shipPose: () => ({ position: [0, 0, 0], quaternion: [0, 0, 0, 1] }),
+      deckField: deck,
+      keyTarget: target,
+      spawn: [0, 0, 0],
+    });
+    player.setActive(true);
+    for (let i = 0; i < 5; i++) player.step(DT);
+    const floor = (sim.player as PlayerState).pos[1];
+    target.dispatchEvent(keyEvent('keydown', CONTROL_CODES.walkJump));
+    target.dispatchEvent(keyEvent('keyup', CONTROL_CODES.walkJump));
+    let peak = floor;
+    for (let i = 0; i < 120; i++) {
+      player.step(DT);
+      peak = Math.max(peak, (sim.player as PlayerState).pos[1]);
+    }
+    const risen = peak - floor;
+    expect(risen).toBeGreaterThan(P.jumpHeight * 0.9);
+    expect(risen).toBeLessThan(P.jumpHeight * 1.1);
+    // …and back down: a jump that leaves the walker hovering is not a jump
+    expect((sim.player as PlayerState).pos[1]).toBeCloseTo(floor, 6);
+    player.dispose();
+  });
+
+  it('the launch speed follows gravity, so the apex is the knob and not a coincidence', () => {
+    // §V80/§V62: `jumpHeight` is the authored number and √(2gh) is arithmetic.
+    // Halving gravity must NOT double the jump — that is exactly the drift a
+    // stored `jumpSpeed` had, and it is invisible until someone tunes gravity.
+    const moon = { ...playerParams, gravity: playerParams.gravity / 4 };
+    expect(jumpSpeed(moon)).toBeCloseTo(jumpSpeed(playerParams) / 2, 9);
+    const surface = flat(() => 0);
+    let s = stepPlayer(settled(surface), walkInput({ forward: 0, jump: true }), surface, DT, moon);
+    let peak = 0;
+    for (let i = 0; i < 400; i++) {
+      s = stepPlayer(s, neutralPlayerInput(), surface, DT, moon);
+      peak = Math.max(peak, s.pos[1]);
+    }
+    expect(peak).toBeGreaterThan(moon.jumpHeight * 0.9);
+    expect(peak).toBeLessThan(moon.jumpHeight * 1.1);
+    // a zero height is a disabled jump, not a NaN launch
+    const off = { ...playerParams, jumpHeight: 0 };
+    expect(jumpSpeed(off)).toBe(0);
+    expect(stepPlayer(settled(surface), walkInput({ forward: 0, jump: true }), surface, DT, off).grounded).toBe(true);
+  });
+
+  it('does nothing mid-air: hammering the key through the flight is still one arc', () => {
+    const surface = flat(() => 0);
+    let s = stepPlayer(settled(surface), walkInput({ forward: 0, jump: true }), surface, DT);
+    const vy: number[] = [];
+    // an edge on EVERY tick of the flight — the strongest form of the input a
+    // stuck key or a mashed spacebar can produce
+    for (let i = 0; i < 200 && !s.grounded; i++) {
+      s = stepPlayer(s, walkInput({ forward: 0, jump: true }), surface, DT);
+      vy.push(s.vel[1]);
+    }
+    expect(s.grounded).toBe(true); // he came down: no hovering on a held key
+    // one arc = the vertical velocity only ever falls, from launch to landing
+    for (let i = 1; i < vy.length - 1; i++) expect(vy[i]).toBeLessThan(vy[i - 1] + 1e-9);
+    expect(Math.max(...vy)).toBeLessThan(jumpSpeed(P));
+  });
+
+  it('§V62 holding Space down is ONE jump — the collector reports edges, not the key state', () => {
+    // the mid-air gate above is `grounded`; this is the other half of it, and
+    // it is the half that lives in the keyboard collector. A `jump` that meant
+    // "the key is down" would re-launch the walker every time he touched the
+    // deck, which is a pogo stick and not a jump.
+    const keys = new PlayerKeys();
+    keys.keyDown(CONTROL_CODES.walkJump);
+    expect(keys.sample().jump).toBe(true);
+    for (let i = 0; i < 10; i++) expect(keys.sample().jump).toBe(false);
+    keys.keyDown(CONTROL_CODES.walkJump); // a repeat while already held
+    expect(keys.sample().jump).toBe(false);
+    keys.keyUp(CONTROL_CODES.walkJump);
+    keys.keyDown(CONTROL_CODES.walkJump);
+    expect(keys.sample().jump).toBe(true);
+  });
+
+  it('does nothing while crouched — the roof is 0.9 m over the mattress', () => {
+    // the auto-crouch of §V85 is the walker telling us there is a ceiling
+    // under head height; launching there puts the head through the thatch
+    const low = flat(() => 0, { ceilingAt: () => P.standHeight - 0.2 });
+    let s = settled(low);
+    expect(s.crouch).toBe(true);
+    s = stepPlayer(s, walkInput({ forward: 0, jump: true }), low, DT);
+    expect(s.grounded).toBe(true);
+    expect(s.pos[1]).toBe(0);
+    // and the same key in the open, standing, DOES jump — so the gate is the
+    // crouch and not a broken binding
+    const open = flat(() => 0);
+    expect(stepPlayer(settled(open), walkInput({ forward: 0, jump: true }), open, DT).grounded).toBe(false);
+  });
+
+  it('does nothing while a station is held: the hands are on the tiller', () => {
+    const host = {
+      st: { ...createPlayerState([0, 0, 0], 0), grounded: true } as PlayerState,
+      get state() {
+        return host.st;
+      },
+      setState(n: PlayerState): void {
+        host.st = n;
+      },
+      applyAction: () => true,
+    };
+    const socket: Vec3 = [0, P.standHeight - P.eyeDrop, 1];
+    const interact = createInteract(host, { socketWorld: (id) => (id === RAFT_STATIONS.tiller.socket ? socket : null) });
+    expect(interact.focus()).toBe('tiller');
+    interact.begin();
+    expect(interact.held()).toBe('tiller');
+    const surface = flat(() => 0);
+    const shaped = interact.shapeInput(walkInput({ forward: 0, jump: true }));
+    expect(shaped.jump).toBe(false);
+    expect(stepPlayer(host.st, shaped, surface, DT).grounded).toBe(true);
+  });
+});
+
+describe('§T.135 Space in the water is a haul-out', () => {
+  const deck = buildDeckHeightfield(buildGalleonBlueprint());
+  if (deck === null) throw new Error('galleon has no deck field');
+
+  /** a rail whose freeboard is `y`, reachable from `reach` metres off */
+  const rail = (y: number, deckAt: (x: number, z: number) => number | null): WalkSurface =>
+    flat(deckAt, { waterAt: () => 0, boardingPoints: [[0, y, 0]] });
+
+  /** a swimmer floating `d` metres to starboard of the rail at the origin */
+  const swimmer = (d: number): PlayerState => ({
+    frame: 'swim',
+    pos: [d, P.swimEyeAbove - (P.standHeight - P.eyeDrop), 0],
+    yaw: 0, pitch: 0, vel: [0, 0, 0], crouch: false, grounded: false,
+  });
+
+  it('hauls out from beyond the passive reach, where drifting alone never boards', () => {
+    // the property, not the numbers: the lunge is strictly the more generous
+    // pair, so there is a band where only the deliberate climb works
+    expect(P.boardLungeReach).toBeGreaterThan(P.boardReach);
+    expect(P.boardLungeVertical).toBeGreaterThan(P.boardVertical);
+    const mid = (P.boardReach + P.boardLungeReach) / 2;
+    const surface = rail(0.44, () => 0.44);
+    // …drifting there, with no key, stays in the water however long he waits
+    let passive = swimmer(mid);
+    for (let i = 0; i < 60; i++) passive = stepPlayer(passive, neutralPlayerInput(), surface, DT);
+    expect(passive.frame).toBe('swim');
+    // …one press of the jump key and he is aboard, in the SHIP frame
+    const hauled = stepPlayer(swimmer(mid), { ...neutralPlayerInput(), jump: true }, surface, DT);
+    expect(hauled.frame).toBe('ship');
+    expect(hauled.grounded).toBe(true);
+    expect(surface.heightAt(hauled.pos[0], hauled.pos[2])).not.toBeNull();
+  });
+
+  it('hauls over a rail the passive climb cannot: a swell that lifted the freeboard', () => {
+    const high = (P.boardVertical + P.boardLungeVertical) / 2;
+    const surface = rail(high, () => high);
+    let passive = swimmer(0.1);
+    for (let i = 0; i < 60; i++) passive = stepPlayer(passive, neutralPlayerInput(), surface, DT);
+    expect(passive.frame).toBe('swim');
+    expect(stepPlayer(swimmer(0.1), { ...neutralPlayerInput(), jump: true }, surface, DT).frame).toBe('ship');
+  });
+
+  it('a rail out of even the lunge is still refused — this is a climb, not a teleport', () => {
+    const surface = rail(P.boardLungeVertical + 0.5, () => P.boardLungeVertical + 0.5);
+    expect(stepPlayer(swimmer(0.1), { ...neutralPlayerInput(), jump: true }, surface, DT).frame).toBe('swim');
+    const far = rail(0.44, () => 0.44);
+    expect(stepPlayer(swimmer(P.boardLungeReach + 0.5), { ...neutralPlayerInput(), jump: true }, far, DT).frame).toBe('swim');
+  });
+
+  it('lands the lunge INBOARD of the rail, on deck, when there is deck to land on', () => {
+    // §T.135: "both paths must land the player at a sane spot on deck". The
+    // rail is at x = 2 and the deck runs in from it; a man who throws himself
+    // over a rail ends up behind it, not balanced on it.
+    const boarding: Vec3 = [2, 0.44, 0];
+    const surface = flat(
+      (x, z) => (Math.abs(x) <= 2.1 && Math.abs(z) <= 3 ? 0.44 : null),
+      { waterAt: () => 0, boardingPoints: [boarding] },
+    );
+    const s: PlayerState = { ...swimmer(0), pos: [2.4, -1.35, 0] };
+    const aboard = stepPlayer(s, { ...neutralPlayerInput(), jump: true }, surface, DT);
+    expect(aboard.frame).toBe('ship');
+    expect(aboard.pos[0]).toBeCloseTo(boarding[0] - P.boardStepIn, 6);
+    expect(aboard.pos[2]).toBeCloseTo(0, 6);
+    // …and NOT when the step-in is over the side (a rail with nothing behind
+    // it): then the feet go on the rail, exactly where the passive route puts
+    // them, rather than into thin air
+    const knife = flat((x, z) => (Math.abs(x - 2) < 0.05 && Math.abs(z) < 3 ? 0.44 : null), {
+      waterAt: () => 0,
+      boardingPoints: [boarding],
+    });
+    const perched = stepPlayer(s, { ...neutralPlayerInput(), jump: true }, knife, DT);
+    expect(perched.frame).toBe('ship');
+    expect(perched.pos).toEqual(boarding);
+  });
+
+  it('the passive drift-aboard is untouched: no key pressed, still boards at the rail', () => {
+    // §B78's fix is the FALLBACK and must not regress — a player who never
+    // learns the key still gets back on the raft. Same surface, same spot, no
+    // input at all.
+    const boarding: Vec3 = [0.5, 0.44, 0];
+    const surface = flat((x, z) => (Math.abs(x) <= 1 && Math.abs(z) <= 1 ? 0.44 : null), {
+      waterAt: () => 0,
+      boardingPoints: [boarding],
+    });
+    const aboard = stepPlayer(swimmer(0.6), neutralPlayerInput(), surface, DT);
+    expect(aboard.frame).toBe('ship');
+    expect(aboard.pos).toEqual(boarding); // AT the rail, ship-local
+    expect(aboard.grounded).toBe(true);
+  });
+
+  it('§V62 a real Space KeyboardEvent takes SimState.player out of the water', () => {
+    const sim = createInitialState(1);
+    const target = new EventTarget();
+    const boarding: Vec3 = [3, 0.44, 0];
+    const player = createPlayer({
+      sim,
+      shipPose: () => ({ position: [0, 0, 0], quaternion: [0, 0, 0, 1] }),
+      deckField: deck,
+      waterAt: () => 0,
+      boardingPoints: [boarding],
+      keyTarget: target,
+      spawn: [0, 0, 0],
+    });
+    player.setActive(true);
+    // put him in the water a lunge — but more than a drift — off the rail
+    sim.player = {
+      frame: 'swim',
+      pos: [boarding[0] + (P.boardReach + P.boardLungeReach) / 2, -1.35, 0],
+      yaw: 0, pitch: 0, vel: [0, 0, 0], crouch: false, grounded: false,
+    };
+    for (let i = 0; i < 30; i++) player.step(DT);
+    expect((sim.player as PlayerState).frame).toBe('swim');
+    // …and the prompt is on screen for exactly that reason, at the rail
+    const anchor = player.boardingAnchor();
+    expect(anchor).not.toBeNull();
+    expect(anchor?.[0]).toBeCloseTo(boarding[0], 6);
+    target.dispatchEvent(keyEvent('keydown', CONTROL_CODES.walkJump));
+    target.dispatchEvent(keyEvent('keyup', CONTROL_CODES.walkJump));
+    player.step(DT);
+    expect((sim.player as PlayerState).frame).toBe('ship');
+    expect(player.boardingAnchor()).toBeNull(); // aboard, nothing left to climb
+    player.dispose();
   });
 });

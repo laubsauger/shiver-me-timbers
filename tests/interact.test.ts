@@ -28,7 +28,10 @@ import { ShipAssembly } from '../src/ship/shipAssembly';
 import { buildDeckHeightfield } from '../src/ship/deckHeightfield';
 import { buildRaftDeckField, createRaftCeiling } from '../src/ship/raftDeckField';
 import { createDeckSurface } from '../src/player/deckSurface';
-import { createInitialState } from '../src/state/simState';
+import { createInitialState, type ShipState } from '../src/state/simState';
+import { updateShipRig } from '../src/ship/rigTrim';
+import { applyRaftAction, initialRaftControls } from '../src/raft/raftActions';
+import { stepRaftShip } from '../src/raft/raftShip';
 
 const DT = 1 / 60;
 const P = playerParams;
@@ -616,5 +619,151 @@ describe('§B69 stations focus from a natural standing stance on the real deck',
     const far = fakeHost(feet, 0, Math.atan2(-EYE, P.reach + 0.2));
     const ixFar = createInteract(far, { socketWorld: (id) => (id === 'station-tiller' ? [0, 0, P.reach + 0.2] as Vec3 : null) });
     expect(ixFar.focus()).toBeNull();
+  });
+});
+
+/**
+ * §T.136c THE PIECE MUST MOVE. USER at a guara: "there's also no visual
+ * feedback as to if there's anything happening or not."
+ *
+ * §B92 is exactly this defect and it went unnoticed for weeks — the wheel
+ * turned, the rudder blade never did, on every hull in the game. So this
+ * block does not inspect wiring: it drives the REAL interact path with a
+ * REAL mouse delta and asserts BOTH that the channel moved AND that the
+ * three.js transform of the piece the station names moved with it.
+ */
+describe('§T.136c a hold station moves the thing it names', () => {
+  const WIND = { direction: 0, speed: 9 };
+  const raftShipState = (): ShipState => ({
+    id: 'raft', kind: 'player', position: [0, 0, 0], quaternion: [0, 0, 0, 1],
+    velocity: [0, 0, 0], angularVelocity: [0, 0, 0],
+    rudder: 0, sailTrim: 1, flood: 0, damage: {},
+  });
+
+  /** the walker standing under `action`'s socket, looking at it, holding it */
+  function holding(action: RaftAction, publish: (a: string, v: unknown) => void) {
+    const st = RAFT_STATIONS[action];
+    const socket = raftAsm.socketWorldPosition(st.socket) as Vec3;
+    // half a metre back from it, eye level with it: the stance the §V84 block
+    // above proves every station has
+    const feet: Vec3 = [socket[0], socket[1] - EYE, socket[2] - 0.5];
+    const host = fakeHost(feet, 0, 0);
+    const ix = createInteract(
+      {
+        get state() {
+          return host.st;
+        },
+        setState: (n: PlayerState) => {
+          host.st = n;
+        },
+        applyAction: (n: string, v: unknown) => {
+          publish(n, v);
+          return true;
+        },
+      },
+      { socketWorld: (id) => (id === st.socket ? socket : null) },
+    );
+    expect(ix.focus(), `${action} is not focusable from its own stance`).toBe(action);
+    ix.begin();
+    expect(ix.held()).toBe(action);
+    return ix;
+  }
+
+  /** the sail's yard node, by the blueprint's own parent link */
+  function yardOf(asm: ShipAssembly): { y: () => number; drop: () => number } {
+    const sailId = asm.sailPieceIds()[0];
+    expect(sailId, 'the raft carries no canvas: this test would prove nothing').toBeDefined();
+    const def = raft.find((q) => q.id === sailId);
+    const yard = asm.group.getObjectByName(def?.parent ?? '');
+    expect(yard, `sail ${sailId} has no yard node to move`).toBeDefined();
+    return {
+      y: () => (yard as { position: { y: number } }).position.y,
+      drop: () => (asm.sailMesh(sailId).userData.sailDropScale as number),
+    };
+  }
+
+  it('the sheets shorten the canvas and lower the yard, through the real path', () => {
+    // the whole chain, no shortcuts: interact → applyRaftAction → RaftControls
+    // → stepRaftShip → ShipState.sailTrim → updateShipRig → the yard's node
+    const asm = new ShipAssembly(raft, stubFactory);
+    const controls = initialRaftControls();
+    controls.sailUp = true;
+    const ship = raftShipState();
+    const spar = yardOf(asm);
+    const drive = (): void => {
+      stepRaftShip(ship, controls, WIND, DT);
+      updateShipRig(ship, asm, DT);
+    };
+    const ix = holding('sheet-p', (n, v) => applyRaftAction(controls, n, v, { skipToDawn: () => {} }));
+    // sheet home: the mouse goes UP, which is exactly what the plaque now says
+    for (let i = 0; i < 60; i++) ix.step(DT, { yawDelta: 0, pitchDelta: 0.05 });
+    drive();
+    expect(ix.value('sheet-p')).toBeGreaterThan(0.9);
+    expect(controls.sheet).toBeCloseTo(ix.value('sheet-p'), 9);
+    const full = { y: spar.y(), drop: spar.drop() };
+    // …and now ease it right off
+    for (let i = 0; i < 120; i++) ix.step(DT, { yawDelta: 0, pitchDelta: -0.05 });
+    drive();
+    expect(ix.value('sheet-p')).toBeLessThan(0.1);
+    expect(controls.sheet).toBeCloseTo(ix.value('sheet-p'), 9);
+    // THE PIECE MOVED. Either assertion alone would have passed §B92 too: the
+    // canvas is shorter AND the spar has come down its own travel.
+    expect(spar.drop()).toBeLessThan(full.drop);
+    expect(spar.y()).toBeLessThan(full.y - 1e-6);
+  });
+
+  it('the halyard lowers the same yard, so the station and the spar agree', () => {
+    const asm = new ShipAssembly(raft, stubFactory);
+    const controls = initialRaftControls();
+    controls.sheet = 1;
+    const ship = raftShipState();
+    const spar = yardOf(asm);
+    const drive = (): void => {
+      stepRaftShip(ship, controls, WIND, DT);
+      updateShipRig(ship, asm, DT);
+    };
+    const ix = holding('halyard', (n, v) => applyRaftAction(controls, n, v, { skipToDawn: () => {} }));
+    for (let i = 0; i < 60; i++) ix.step(DT, { yawDelta: 0, pitchDelta: 0.05 });
+    drive();
+    expect(controls.sailUp).toBe(true);
+    const hoisted = spar.y();
+    for (let i = 0; i < 120; i++) ix.step(DT, { yawDelta: 0, pitchDelta: -0.05 });
+    drive();
+    expect(controls.sailUp).toBe(false);
+    expect(spar.y()).toBeLessThan(hoisted - 1e-6);
+  });
+
+  /**
+   * §T.136c, THE HALF THAT IS NOT FIXED HERE — reported, not papered over.
+   *
+   *   · the TILLER publishes `oarAngle` → `ship.rudder` (raftShip.ts:92) and
+   *     `updateRig` turns `wheel-disc` and `rudder` pieces. The raft has
+   *     NEITHER: her blade is a `steering-oar` piece (raftPartsHull.ts:273),
+   *     which no `set*Angle` in `shipAssembly.ts` touches. §T.118 found this
+   *     and it is still true.
+   *   · the GUARAS publish `guaraDepth[i]`, which reaches `raftKinematics`
+   *     and stops there. `buildGuaras` (raftPartsHull.ts:227) authors
+   *     `shape: { depth, travel }` and its own comment says "the sim
+   *     raises/lowers a guara by moving the piece along y by up to
+   *     `shape.travel`" — nothing in the codebase does. `grep setGuara` is
+   *     empty.
+   *
+   * Both fixes live in `src/ship/**`, which this task does not own, so what
+   * is asserted here is the CONTRACT the fix will need: the travel exists in
+   * the blueprint, and it is a real distance. A test that asserted the
+   * defect would write it down (§V80); this one fails the day someone
+   * deletes the affordance and passes the day someone drives it.
+   */
+  it('the guara pieces carry the travel a fix would move them along', () => {
+    const boards = raft.filter((q) => q.kind === 'guara');
+    expect(boards.length).toBe(5);
+    for (const b of boards) {
+      expect(b.shape?.travel, `${b.id} has no authored travel`).toBeGreaterThan(0.1);
+      expect(b.shape?.depth, `${b.id} has no rest depth`).toBeGreaterThanOrEqual(0);
+    }
+    // and the steering oar is one piece with a real lever to swing
+    const oar = raft.find((q) => q.kind === 'steering-oar');
+    expect(oar, 'no steering oar to turn').toBeDefined();
+    expect(oar?.shape?.tillerLength, 'the oar has no tiller cross-piece').toBeGreaterThan(0);
   });
 });

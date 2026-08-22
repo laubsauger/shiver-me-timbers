@@ -171,6 +171,9 @@ async function boot(): Promise<void> {
   // modes' own state rather than a flag of its own.
   const prompt = createRaftPrompt({
     interact: player.interact,
+    // §T.135: in the water the plaque becomes `[Space] Climb aboard`, hung on
+    // the foot-rail the haul-out would actually take
+    board: () => player.boardingAnchor(),
     socketWorld,
     camera: () => app.camera,
     // photo mode only: cinematic == full screen (§I ui/cinematic), and most

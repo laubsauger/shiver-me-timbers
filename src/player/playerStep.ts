@@ -99,6 +99,42 @@ export function eyeHeight(crouch: boolean, p: PlayerParams = playerParams): numb
   return capsuleHeight(crouch, p) - p.eyeDrop;
 }
 
+/**
+ * §T.135 — LAUNCH SPEED FOR THE AUTHORED APEX, v = √(2·g·h).
+ *
+ * `jumpHeight` is the knob because the height is the design decision; the
+ * speed is arithmetic. Deriving it here rather than storing it is the §V62
+ * shape in reverse: move `gravity` on the panel and the jump keeps the apex
+ * it was authored at, instead of silently becoming a different jump.
+ *
+ * WHY 0.5 m (params/player.ts). It is a real adult's standing vertical, and
+ * it is 8× the 1.2 m/s the walker shipped with — a 7 cm twitch that read as
+ * "Space is not bound" (§T.135's whole complaint). What it CHANGES about the
+ * raft, measured against the field rather than guessed:
+ *
+ *  · the walking deck is 0.63 m over the sea and the cabin FLOOR 0.30 m over
+ *    that, with the eave 1.20 m and the ridge 1.45 m over the floor. The
+ *    HIGHEST thing the walk can stand on anywhere aboard is 1.08 m (the
+ *    cabin's box layer), so apex + `stepUp` tops out at 1.98 against an eave
+ *    at 2.13 — 0.15 m of margin, and `tests/raftDeckField.test.ts` asserts
+ *    that inequality against the live field rather than these numbers.
+ *  · and it could not at ANY height: the whole cabin envelope is `solid` in
+ *    the deck field, and `admits()` below refuses a solid cell whatever the
+ *    walker's altitude. The roof-trap §T.135 warns about is structurally
+ *    impossible here, and `tests/raftDeckField.test.ts` proves it by flooding
+ *    the real field — every cell a jump can land on is one the WALK already
+ *    reaches.
+ *  · airtime is 2√(2h/g) = 0.64 s, which is 1.02 m of travel at `walkSpeed`.
+ *    The starboard lane is one capsule wide (0.6 m, §T.115), so a jump ALONG
+ *    the lane is free and a jump ACROSS it goes in the water — which, as of
+ *    this task, is a mistake you swim out of rather than a dead end.
+ */
+export function jumpSpeed(p: PlayerParams = playerParams): number {
+  const h = num(p.jumpHeight);
+  const g = num(p.gravity);
+  return h > 0 && g > 0 ? Math.sqrt(2 * g * h) : 0;
+}
+
 /** yaw of the ship's +z in the world, derived from the transform alone */
 export function shipYawOf(surface: WalkSurface): number {
   if (surface.shipToWorld === undefined) return 0;
@@ -140,7 +176,7 @@ export function stepPlayer(
     crouch: Boolean(state.crouch),
     grounded: Boolean(state.grounded),
   };
-  if (next.frame === 'swim') return stepSwim(next, surface, wx, wz, dt, p);
+  if (next.frame === 'swim') return stepSwim(next, input, surface, wx, wz, dt, p);
   return stepWalk(next, input, surface, wx, wz, dt, p);
 }
 
@@ -174,8 +210,16 @@ function stepWalk(
 
   // vertical first, so the horizontal pass knows whether it is a stride or a fall
   let vy = s.vel[1];
-  if (s.grounded && input.jump && p.jumpSpeed > 0) {
-    vy = p.jumpSpeed;
+  const launch = jumpSpeed(p);
+  // NOT WHILE CROUCHED (§T.135). A jump is the legs straightening, and the
+  // only reason the walker is crouched aboard is that §V85's auto-crouch found
+  // a ceiling under head height — the cabin's thatch, 0.9 m over the mattress.
+  // Launching there drives the head through the roof. Ctrl-crouch in the open
+  // is refused by the same rule, which is the conventional reading: stand up
+  // first. `s.crouch` is settled a few lines above, so this sees THIS tick's
+  // stance and not the last one's.
+  if (s.grounded && !s.crouch && input.jump && launch > 0) {
+    vy = launch;
     s.grounded = false;
   } else if (!s.grounded) {
     vy -= p.gravity * dt;
@@ -256,8 +300,83 @@ function goOverboard(s: PlayerState, surface: WalkSurface): PlayerState {
   };
 }
 
+/**
+ * §V85/§B78 — THE CLIMB IS MEASURED FROM THE SEA, NOT FROM THE FEET, and this
+ * is the ONE place that measures it (§V95). Three callers ask the same
+ * question with different generosity: the passive drift-aboard, §T.135's
+ * deliberate haul-out, and the prompt that tells the swimmer the key exists —
+ * a second copy of the rule would light a prompt for a climb Space refuses.
+ *
+ * A swimmer floats with the EYE `swimEyeAbove` over the surface, so the feet
+ * hang a whole body below it (−1.35 m on flat water). Measuring a boarding
+ * point against the FEET therefore asked the raft's foot-rail — 0.44 m of
+ * honest freeboard — to be within `boardVertical` of a point 1.8 m under it,
+ * and no point on this raft ever qualified: re-boarding was impossible (R2
+ * walk review, §B78-1). What a swimmer actually pulls himself over is the
+ * FREEBOARD: how far the rail stands above the water he is in.
+ *
+ * The sea is sampled AT THE BOARDING POINT (a wave lifts the rail and the
+ * swimmer by different amounts); with no `waterAt` it is the flat sea the
+ * swimmer is already floating on, so nothing else changes meaning.
+ *
+ * Returns the SHIP-LOCAL boarding point and its WORLD position — the caller
+ * needs the first to stand on and the second to hang a label from.
+ */
+export function boardingCandidate(
+  surface: WalkSurface,
+  x: number,
+  z: number,
+  water: number,
+  reach: number,
+  vertical: number,
+): { local: Vec3; world: Vec3 } | null {
+  const toWorld = surface.shipToWorld ?? identity;
+  for (const bp of surface.boardingPoints ?? []) {
+    const w = toWorld(bp);
+    if (Math.hypot(w[0] - x, w[2] - z) > reach) continue;
+    const sea = surface.waterAt === undefined ? water : num(surface.waterAt(w[0], w[2]));
+    if (Math.abs(w[1] - sea) > vertical) continue;
+    return { local: [bp[0], bp[1], bp[2]], world: [w[0], w[1], w[2]] };
+  }
+  return null;
+}
+
+/**
+ * Where a HAUL-OUT puts the feet: one `boardStepIn` inboard of the rail he
+ * came over, if the deck there is real, not a wall and level with the rail
+ * within a stride. Otherwise the rail itself — the same spot the passive
+ * route uses, which is why the passive route is not given this step (it is a
+ * hand-over-hand crawl onto the rail, not a man throwing himself over it, and
+ * §V85's "climbs back aboard AT the rail" pins that).
+ */
+function haulLanding(surface: WalkSurface, bp: Vec3, p: PlayerParams): Vec3 {
+  const d = Math.hypot(bp[0], bp[2]);
+  if (!(d > 1e-6) || !(p.boardStepIn > 0)) return bp;
+  const tx = bp[0] - (bp[0] / d) * p.boardStepIn;
+  const tz = bp[2] - (bp[2] / d) * p.boardStepIn;
+  const h = surface.heightAt(tx, tz);
+  if (h === null || !Number.isFinite(h)) return bp;
+  if (surface.solidAt(tx, tz)) return bp;
+  if (Math.abs(h - bp[1]) > p.stepUp) return bp;
+  return [tx, h, tz];
+}
+
+/** the swimmer's state once he is over the rail, in the ship's frame */
+function comeAboard(s: PlayerState, surface: WalkSurface, at: Vec3): PlayerState {
+  return {
+    frame: 'ship',
+    pos: [at[0], at[1], at[2]],
+    yaw: wrapAngle(s.yaw - shipYawOf(surface)),
+    pitch: s.pitch,
+    vel: [0, 0, 0],
+    crouch: false,
+    grounded: true,
+  };
+}
+
 function stepSwim(
   s: PlayerState,
+  input: PlayerInput,
   surface: WalkSurface,
   wx: number,
   wz: number,
@@ -276,36 +395,21 @@ function stepSwim(
   s.vel = [vx, (ny - s.pos[1]) / dt, vz];
   s.pos = [nx, ny, nz];
 
-  const toWorld = surface.shipToWorld ?? identity;
   /**
-   * §V85/§B78 — THE CLIMB IS MEASURED FROM THE SEA, NOT FROM THE FEET.
+   * §T.135 — SPACE IN THE WATER IS A HAUL-OUT, and it is tried FIRST.
    *
-   * A swimmer floats with the EYE `swimEyeAbove` over the surface, so the feet
-   * hang a whole body below it (−1.35 m on flat water). Measuring a boarding
-   * point against the FEET therefore asked the raft's foot-rail — 0.44 m of
-   * honest freeboard — to be within `boardVertical` of a point 1.8 m under it,
-   * and no point on this raft ever qualified: re-boarding was impossible
-   * (R2 walk review, §B78-1). What a swimmer actually pulls himself over is
-   * the FREEBOARD: how far the rail stands above the water he is in.
-   *
-   * The sea is sampled AT THE BOARDING POINT (a wave lifts the rail and the
-   * swimmer by different amounts); with no `waterAt` it is the flat sea the
-   * swimmer is already floating on, so nothing else changes meaning.
+   * The passive board below is the forgiving fallback and stays exactly as it
+   * was (§B78: a player who never learns the key must still get back aboard).
+   * The lunge is the same rule with the swimmer's own effort behind it — a
+   * longer reach and a higher haul — so anything the passive route accepts,
+   * this accepts too, and the only difference the player can feel is that it
+   * works from further off and lands them on the deck rather than the rail.
    */
-  for (const bp of surface.boardingPoints ?? []) {
-    const w = toWorld(bp);
-    if (Math.hypot(w[0] - nx, w[2] - nz) > p.boardReach) continue;
-    const sea = surface.waterAt === undefined ? water : num(surface.waterAt(w[0], w[2]));
-    if (Math.abs(w[1] - sea) > p.boardVertical) continue;
-    return {
-      frame: 'ship',
-      pos: [bp[0], bp[1], bp[2]],
-      yaw: wrapAngle(s.yaw - shipYawOf(surface)),
-      pitch: s.pitch,
-      vel: [0, 0, 0],
-      crouch: false,
-      grounded: true,
-    };
+  if (input.jump) {
+    const lunge = boardingCandidate(surface, nx, nz, water, p.boardLungeReach, p.boardLungeVertical);
+    if (lunge !== null) return comeAboard(s, surface, haulLanding(surface, lunge.local, p));
   }
+  const drift = boardingCandidate(surface, nx, nz, water, p.boardReach, p.boardVertical);
+  if (drift !== null) return comeAboard(s, surface, drift.local);
   return s;
 }
