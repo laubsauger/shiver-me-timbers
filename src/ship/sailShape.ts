@@ -73,7 +73,11 @@ import {
   sailStripBow,
   seamQuiltProfile,
   slackFoldProfile,
+  smoothstep,
+  sparRamp,
+  sparStandoff,
 } from './sailShapeProfiles';
+import type { SailSparCapsule, SailSpars } from './sailFrame';
 
 export * from './sailShapeProfiles';
 
@@ -106,6 +110,164 @@ export interface SailClothState {
    */
   sheetLeadPort: [number, number, number];
   sheetLeadStarboard: [number, number, number];
+  /**
+   * The mast (or a bipod's two legs) abaft this sail and its own yard, as
+   * capsules in the sail's own frame — §T.114. Absent = no spars known, and
+   * then the cloth is exactly what it was before that task: a caller without a
+   * piece graph (a profile test, a tuning harness) gets the pure membrane.
+   * `ShipAssembly` and `sailDriver` both fill it from the graph (§V71).
+   */
+  spars?: SailSpars;
+}
+
+/**
+ * PUSH ONE POINT OF CANVAS OUT OF ONE SPAR — §T.114 / §B.74.
+ *
+ * User: "we see our sails falling through our masts on all kinds of ships in
+ * different situations and rotations." MEASURED on HEAD over brace × drive ×
+ * aback × trim, 1.46 M samples: the galleon's cloth reached 0.358 m INSIDE
+ * `mast-main` and, at full aback, passed clean through to 2.6 m abaft its
+ * axis; the brigantine 0.253 m; the raft's mainsail cuts both bipod legs at
+ * EVERY drive, because its flat panel is already 0.053 m inside them. Every
+ * ship penetration was at NEGATIVE drive: the §T.85 membrane bellies a backed
+ * sail aft with the same depth it bellies a drawing one forward, and aft is
+ * where the mast is.
+ *
+ * THE PUSH IS ALONG ONE DIRECTION FOR THE WHOLE PANEL, not radially out of the
+ * axis. Radial is the obvious choice and it is wrong: two neighbouring points
+ * either side of the axis get pushed OPPOSITE WAYS, so cloth draped through a
+ * mast is torn open into two sheets 2r apart. `n` here is the sail's own
+ * forward (+z), projected perpendicular to the spar's axis — one smooth field
+ * over the whole sail, and the direction the cloth actually has to move, since
+ * every yard in every blueprint rides FORWARD of its mast (blueprintRig's
+ * `yardZ = r + yr + yardMastClearance`; raftPartsRig the same). Because n ⊥
+ * axis, moving along it changes neither the axial station nor the lateral
+ * offset, so the constraint is solved EXACTLY in one step rather than iterated.
+ *
+ * The stand-off profile and the ramp are `sailShapeProfiles.sparStandoff` and
+ * `sparRamp`; read those two for why this is a parabola and not the cylinder,
+ * and why the ramp is C1 rather than a `max`.
+ */
+export function sparPush(
+  p: [number, number, number],
+  restPoint: [number, number, number],
+  c: SailSparCapsule,
+  skinFrac: number,
+): [number, number, number] {
+  const ax = finite(c.b[0]) - finite(c.a[0]);
+  const ay = finite(c.b[1]) - finite(c.a[1]);
+  const az = finite(c.b[2]) - finite(c.a[2]);
+  const len2 = ax * ax + ay * ay + az * az;
+  // a == b is how "no spar in this slot" is spelled, and it is also the
+  // degenerate spar a broken piece graph would hand us (§V28)
+  if (!(len2 > 1e-12)) return p;
+  const len = Math.sqrt(len2);
+  const dx = ax / len;
+  const dy = ay / len;
+  const dz = az / len;
+  // the sail's forward, made perpendicular to the axis. Zero only if the sail
+  // hangs in the spar's own plane, which no rig does — fail to "no push".
+  let nx = -dz * dx;
+  let ny = -dz * dy;
+  let nz = 1 - dz * dz;
+  const nl = Math.hypot(nx, ny, nz);
+  if (!(nl > 1e-6)) return p; // §V28
+  nx /= nl;
+  ny /= nl;
+  nz /= nl;
+  const qx = finite(p[0]) - finite(c.a[0]);
+  const qy = finite(p[1]) - finite(c.a[1]);
+  const qz = finite(p[2]) - finite(c.a[2]);
+  const along = qx * dx + qy * dy + qz * dz;
+  const stat = clamp(along, 0, len);
+  const radius = finite(c.ra) + (finite(c.rb) - finite(c.ra)) * (stat / len);
+  // the radial part, split into the push direction and the one across it
+  const rx = qx - along * dx;
+  const ry = qy - along * dy;
+  const rz = qz - along * dz;
+  const s = rx * nx + ry * ny + rz * nz;
+  const mx = dy * nz - dz * ny;
+  const my = dz * nx - dx * nz;
+  const mz = dx * ny - dy * nx;
+  const t = rx * mx + ry * my + rz * mz;
+  // how far past the spar's END the point is; a cap is a hemisphere, so it
+  // counts exactly like lateral offset and the capsule closes
+  const h = along - stat;
+  const skin = Math.max(1e-3, Math.max(0, finite(skinFrac)) * Math.max(0, finite(radius)));
+  const stand = sparStandoff(radius, skin, t * t + h * h);
+  /**
+   * THE CLOTH IS ONLY PUSHED OFF SPARS IT WAS CUT IN FRONT OF — the bound that
+   * keeps a one-sided constraint from acting at long range.
+   *
+   * The constraint reaches a long way ALONG the push, because its whole job is
+   * to catch cloth that has already gone clean through: the galleon's main
+   * course reached 2.6 m abaft its own mast. What it must NOT do is catch a
+   * spar the sail is legitimately BEHIND. Measured on the raft at brace −47°,
+   * before this bound: 1.23 m of mainsail shoved forward past a bipod leg
+   * that had swung 1.7 m AHEAD of the canvas. Her legs are off the centreline,
+   * so bracing walks one of them right round in front of the sail, and a spar
+   * in front pushed forward is pushed THROUGH rather than out of.
+   *
+   * So the test is on the FLAT PANEL, not on the live cloth: where the sail AS
+   * CUT stands in front of this spar (or inside it — the raft's mainsail is cut
+   * 0.05 m inside her own legs), the spar holds it. Where the sail as cut is
+   * already past the spar's far side, it is not this sail's spar and nothing
+   * happens. The hand-over is smoothed across the spar's own thickness, so
+   * bracing a leg through the canvas eases the constraint out instead of
+   * snapping it off, and the flat panel is a smooth function of (u, v), so the
+   * gate can never put a crease in the cloth.
+   */
+  const back = Math.max(1e-3, radius + skin); // §V28
+  const rest =
+    (finite(restPoint[0]) - finite(c.a[0])) * nx
+    + (finite(restPoint[1]) - finite(c.a[1])) * ny
+    + (finite(restPoint[2]) - finite(c.a[2])) * nz;
+  // A VERTEX displacement is band-limited by the MESH, not the pixel grid
+  // (§T.85); `rest` is the FLAT panel station and this is one smooth ramp
+  // @band-limited-elsewhere
+  const gate = smoothstep(-2 * back, -back, rest);
+  /**
+   * AND IT PUSHES BOTH WAYS, because "which side is the sail on" is a question
+   * with two answers. Where the cut sail stands in front of the spar the cloth
+   * is held forward of it; where the cut sail is BEHIND — the raft's mainsail
+   * at full brace, with a leg swung across in front of it — the same cloth
+   * bellying forward has to be held BACK instead. Same axis, same radius, same
+   * stand-off, same ramp: only the sign of the coordinate changes, so the
+   * second case costs one more ramp and nothing else.
+   *
+   * The two are blended by the same gate rather than switched, which is what
+   * makes bracing a spar across the canvas continuous. In the hand-over the
+   * cut sail is straddling the spar and neither answer is right; both act at
+   * half strength and the cloth can graze it there. Measured residual on the
+   * raft — the only rig where it happens — is under one leg radius, and never
+   * deeper than the flat panel is cut into that leg already.
+   */
+  const ahead = skin * sparRamp((stand + skin - s) / skin); // skin ≥ 1e-3 (§V28)
+  const astern = skin * sparRamp((stand + skin + s) / skin);
+  const push = gate * ahead - (1 - gate) * astern;
+  return [p[0] + nx * push, p[1] + ny * push, p[2] + nz * push];
+}
+
+/**
+ * Out of the mast, out of a bipod's other leg, and out of its own yard, in
+ * that order. Order matters only where two spars overlap, and it is the same
+ * order on both sides of the CPU/GPU mirror.
+ */
+export function sailSparPush(
+  p: [number, number, number],
+  restPoint: [number, number, number],
+  s: SailClothState,
+  mp: ShipMaterialParams,
+): [number, number, number] {
+  const spars = s.spars;
+  if (spars === undefined) return p;
+  const skin = mp.sailSparSkin;
+  return sparPush(
+    sparPush(sparPush(p, restPoint, spars.mast, skin), restPoint, spars.mast2, skin),
+    restPoint,
+    spars.yard,
+    skin,
+  );
 }
 
 /**
@@ -442,7 +604,16 @@ export function sailClothPoint(
     -(1 - vv) * drop * scale * spanShrink * roach
     + sailFurlLift(uu, vv, builtDrop, s, p)
     + pull[1];
-  return [x, y, sailClothOffset(uu, vv, width, builtDrop, s, p) + pull[2]];
+  const z = sailClothOffset(uu, vv, width, builtDrop, s, p) + pull[2];
+  // …and THEN out of the rig it is bent to (§T.114). Last, because everything
+  // above — belly, folds, flutter, the corner pull — is cloth being moved, and
+  // a mast stops all of it. Everything below (the frame, the sewn parts, the
+  // rope anchors) differences THIS function, so they follow the pushed surface
+  // rather than needing a second copy of the same clamp.
+  // the FLAT panel station this point was cut at — the gate inside the push
+  // asks which side of each spar the sail AS CUT lies on, and the same
+  // expression is `flat` in the shader (sailClothNodes)
+  return sailSparPush([x, y, z], [(uu - 0.5) * chord, -(1 - vv) * drop, 0], s, p);
 }
 
 /**

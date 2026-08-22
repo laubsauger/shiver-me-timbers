@@ -13,9 +13,17 @@ import { objectGroup, uniform } from 'three/tsl';
 import { shipMaterialParams } from '../params/ship';
 import { oceanParams } from '../params/ocean';
 import type { ShipMaterialParams } from '../params/ship';
-import { sailDrive, type SailDriveState } from './sailDynamics';
+import { readSailWindRef, sailDrive, type SailDriveState } from './sailDynamics';
 import { sailFlutterRate } from './sailShape';
-import { readSailWindFrame, readSheetLeadSign, sailPhaseSeed, sheetLeadDirections } from './sailFrame';
+import {
+  readSailSparSources,
+  readSailWindFrame,
+  readSheetLeadSign,
+  resolveSailSpars,
+  sailPhaseSeed,
+  sheetLeadDirections,
+  type SailSparCapsule,
+} from './sailFrame';
 
 const TAU = Math.PI * 2;
 
@@ -78,6 +86,40 @@ export interface SailWindUniforms {
    * unset — the player's canvas is unchanged.
    */
   tint: ReturnType<typeof uniform>;
+  /**
+   * THE SPARS THIS SAIL MAY NOT PASS THROUGH (§T.114 / §B.74), as capsules in
+   * the sail's OWN frame: two masts (a bipod is two legs) and its own yard,
+   * each an axis `a`→`b` and a radius at each end packed as (ra, rb).
+   *
+   * OBJECT-group like `dropScale` and `tint`, which is the whole reason one
+   * shared sail material can still serve nine sails on two ships plus a raft:
+   * the geometry that differs per sail arrives per object, not per material.
+   * Resolved live from the piece graph every frame (§V71) — bracing swings the
+   * yard about its mast, so these move whenever the crew touches a brace.
+   */
+  mastA: ReturnType<typeof uniform>;
+  mastB: ReturnType<typeof uniform>;
+  mastR: ReturnType<typeof uniform>;
+  mast2A: ReturnType<typeof uniform>;
+  mast2B: ReturnType<typeof uniform>;
+  mast2R: ReturnType<typeof uniform>;
+  yardA: ReturnType<typeof uniform>;
+  yardB: ReturnType<typeof uniform>;
+  yardR: ReturnType<typeof uniform>;
+}
+
+/** one capsule into its three uniforms; §V28 finite-guarded, since these move
+ *  vertices and a NaN here is a NaN sail */
+function writeCapsule(
+  a: { value: THREE.Vector3 },
+  b: { value: THREE.Vector3 },
+  r: { value: THREE.Vector2 },
+  c: SailSparCapsule,
+): void {
+  const n = (x: number): number => (Number.isFinite(x) ? x : 0);
+  a.value.set(n(c.a[0]), n(c.a[1]), n(c.a[2]));
+  b.value.set(n(c.b[0]), n(c.b[1]), n(c.b[2]));
+  r.value.set(Math.max(0, n(c.ra)), Math.max(0, n(c.rb)));
 }
 
 /** per-sail flutter phase, owned here and mirrored onto the mesh */
@@ -108,6 +150,18 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
   const sheetLeadPort = uniform(new THREE.Vector3()).setGroup(objectGroup);
   const sheetLeadStarboard = uniform(new THREE.Vector3()).setGroup(objectGroup);
   const tint = uniform(new THREE.Color(1, 1, 1)).setGroup(objectGroup);
+  // §T.114 spar capsules. Seeded to a == b, which every evaluator reads as "no
+  // spar" — a sail whose per-object update never runs draws exactly the cloth
+  // it drew before this task rather than being pushed by a made-up mast.
+  const mastA = uniform(new THREE.Vector3()).setGroup(objectGroup);
+  const mastB = uniform(new THREE.Vector3()).setGroup(objectGroup);
+  const mastR = uniform(new THREE.Vector2()).setGroup(objectGroup);
+  const mast2A = uniform(new THREE.Vector3()).setGroup(objectGroup);
+  const mast2B = uniform(new THREE.Vector3()).setGroup(objectGroup);
+  const mast2R = uniform(new THREE.Vector2()).setGroup(objectGroup);
+  const yardA = uniform(new THREE.Vector3()).setGroup(objectGroup);
+  const yardB = uniform(new THREE.Vector3()).setGroup(objectGroup);
+  const yardR = uniform(new THREE.Vector2()).setGroup(objectGroup);
   const smoothed = new WeakMap<THREE.Object3D, SailDriveState>();
   const flutter = new WeakMap<THREE.Object3D, FlutterMemory>();
 
@@ -138,6 +192,8 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
         yawRate: motion.yawRate,
         gustPhase: wf.gustPhase,
         gustPhaseB: wf.gustPhaseB,
+        // §B86-2: this sail's own saturating wind, if its class set one
+        windRef: readSailWindRef(object, p.sailWindRef),
       },
       p,
     );
@@ -196,7 +252,33 @@ export function createSailWindUniforms(p: ShipMaterialParams): SailWindUniforms 
     const leads = sheetLeadDirections(m, wf.shipForwardX, wf.shipForwardZ, shipMaterialParams.sailSheetSpread, readSheetLeadSign(object));
     sheetLeadPort.value.set(leads.port[0], leads.port[1], leads.port[2]);
     sheetLeadStarboard.value.set(leads.starboard[0], leads.starboard[1], leads.starboard[2]);
+
+    // the mast(s) and yard this sail may not pass through, in its own frame.
+    // Re-resolved here rather than cached because the yard braces: the mast
+    // walks right round the sail's local frame as the crew trims (§V71).
+    const spars = resolveSailSpars(object, readSailSparSources(object));
+    writeCapsule(
+      mastA as unknown as { value: THREE.Vector3 },
+      mastB as unknown as { value: THREE.Vector3 },
+      mastR as unknown as { value: THREE.Vector2 },
+      spars.mast,
+    );
+    writeCapsule(
+      mast2A as unknown as { value: THREE.Vector3 },
+      mast2B as unknown as { value: THREE.Vector3 },
+      mast2R as unknown as { value: THREE.Vector2 },
+      spars.mast2,
+    );
+    writeCapsule(
+      yardA as unknown as { value: THREE.Vector3 },
+      yardB as unknown as { value: THREE.Vector3 },
+      yardR as unknown as { value: THREE.Vector2 },
+      spars.yard,
+    );
   });
 
-  return { drive, luff, skew, dropScale, flutterPhase, sheetLeadPort, sheetLeadStarboard, tint };
+  return {
+    drive, luff, skew, dropScale, flutterPhase, sheetLeadPort, sheetLeadStarboard, tint,
+    mastA, mastB, mastR, mast2A, mast2B, mast2R, yardA, yardB, yardR,
+  };
 }

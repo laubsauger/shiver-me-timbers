@@ -25,6 +25,7 @@ import {
   mix,
   positionLocal,
   sin,
+  smoothstep,
   uniform,
   uv,
   vec3,
@@ -48,6 +49,8 @@ import {
   SAIL_LACE_SPAN,
   SAIL_LEAD_MAX,
   SAIL_SKEW_LEAD,
+  SAIL_SPAR_MIN_R,
+  SAIL_SPAR_WRAP,
 } from './sailShape';
 import type { SailWindUniforms } from './sailDriver';
 
@@ -75,6 +78,8 @@ export interface SailShapeUniforms {
   flutterAmp: UniformNode;
   luffFlap: UniformNode;
   rippleCount: UniformNode;
+  /** stand-off from a spar, as a fraction of that spar's radius (§T.114) */
+  sparSkin: UniformNode;
 }
 
 export interface SailClothNodes {
@@ -396,6 +401,75 @@ export function createSailClothNodes(
       .add(cornerPull(uu, v).y);
   });
 
+  /**
+   * PUSH ONE POINT OF CANVAS OUT OF ONE SPAR — transliteration of
+   * sailShape.sparPush, same order and the same floors. Read that function's
+   * note for why the push is along ONE direction rather than radially out of
+   * the axis (radially TEARS cloth draped through a mast), and
+   * sailShapeProfiles.sparStandoff / sparRamp for the two curves.
+   */
+  /** transliteration of sailShapeProfiles.sparRamp — `max(0, y)` with its
+   *  corner rounded off over [0, 1], so the push leaves no crease */
+  const sparRampAt = Fn(([y]: [Node]) => {
+    const yc = clamp(y, float(0), float(1));
+    return yc.mul(yc).mul(float(2).sub(yc)).add(max(y.sub(1), float(0)));
+  });
+  const sparPushAt = Fn(([p, flatAt, a, b, r]: [Node, Node, Node, Node, Node]) => {
+    const ab = b.sub(a);
+    const len2 = ab.dot(ab);
+    const len = max(len2, float(1e-12)).sqrt(); // §V28 floored divisor
+    const d = ab.div(len);
+    // the sail's own forward (+z), made perpendicular to the spar's axis
+    const nRaw = vec3(d.z.negate().mul(d.x), d.z.negate().mul(d.y), float(1).sub(d.z.mul(d.z)));
+    const n = nRaw.div(max(nRaw.dot(nRaw).sqrt(), float(1e-6))); // §V28
+    const q = p.sub(a);
+    const along = q.dot(d);
+    const stat = clamp(along, float(0), len);
+    const radius = r.x.add(r.y.sub(r.x).mul(stat.div(len)));
+    // the radial part, split into the push direction and the one across it.
+    // n ⊥ axis, so the push changes neither `along` nor `t` — the constraint
+    // is solved exactly in one step instead of iterated.
+    const rad = q.sub(d.mul(along));
+    const s = rad.dot(n);
+    const t = rad.dot(cross(d, n));
+    // how far past the spar's END the point is; a cap is a hemisphere, so it
+    // counts exactly like lateral offset and the capsule closes
+    const h = along.sub(stat);
+    const skin = max(float(1e-3), max(u.sparSkin, float(0)).mul(max(radius, float(0))));
+    const rr = max(radius, float(SAIL_SPAR_MIN_R)); // §V28
+    const rs = rr.add(skin);
+    const off2 = t.mul(t).add(h.mul(h));
+    const stand = rs.sub(rs.mul(SAIL_SPAR_WRAP).mul(off2).div(rr.mul(rr)));
+    // the cloth is only pushed off spars it was CUT in front of, and is held
+    // BACK from ones it was cut behind — see sailShape.sparPush for the raft
+    // leg both halves were measured on
+    const back = max(radius.add(skin), float(1e-3)); // §V28
+    const rest = flatAt.sub(a).dot(n);
+    // vertex stage: the limit is samples-per-feature on the MESH
+    // (sailClothSegments), and `rest` is the flat panel station
+    // @band-limited-elsewhere
+    const gate = smoothstep(back.mul(-2), back.negate(), rest);
+    const ahead = skin.mul(sparRampAt(stand.add(skin).sub(s).div(skin))); // §V28
+    const astern = skin.mul(sparRampAt(stand.add(skin).add(s).div(skin)));
+    // a == b is how "no spar in this slot" is spelled. The CPU returns early;
+    // this multiplies the push out instead — same number, no vertex branch.
+    const live = clamp(len2.mul(1e12), float(0), float(1));
+    const push = gate.mul(ahead).sub(gate.oneMinus().mul(astern)).mul(live);
+    return p.add(n.mul(push));
+  });
+
+  /** out of the mast, out of a bipod's other leg, out of its own yard — the
+   *  same order sailShape.sailSparPush applies them in */
+  const sparPushAll = Fn(([p, flatAt]: [Node, Node]) =>
+    sparPushAt(
+      sparPushAt(
+        sparPushAt(p, flatAt, wind.mastA, wind.mastB, wind.mastR),
+        flatAt, wind.mast2A, wind.mast2B, wind.mast2R,
+      ),
+      flatAt, wind.yardA, wind.yardB, wind.yardR,
+    ),
+  );
+
   const cloth = uv();
   const u0 = cloth.x;
   const v0 = cloth.y;
@@ -406,22 +480,28 @@ export function createSailClothNodes(
   // lets a reef-point quad — four vertices sharing ONE uv — move rigidly with
   // the point of cloth it is sewn to.
   const flat = vec3(u0.sub(0.5).mul(width), v0.oneMinus().negate().mul(builtDrop), float(0));
-  const shaped = vec3(clothX(u0, v0), clothY(u0, v0), clothZ(u0, v0));
+  // …and then out of the rig it is bent to (§T.114), which is the LAST thing
+  // that happens to a point of canvas: belly, folds, flutter and the corner
+  // pull are all cloth being moved, and a mast stops all of it. Transliteration
+  // pair with sailShape.sailClothPoint's closing line.
+  const clothAt = Fn(([uu, v]: [Node, Node]) =>
+    sparPushAll(
+      vec3(clothX(uu, v), clothY(uu, v), clothZ(uu, v)),
+      // the FLAT panel station — the same expression as `flat` below, and the
+      // pair of sailShape.sailClothPoint's second argument
+      vec3(uu.sub(0.5).mul(width), v.oneMinus().negate().mul(builtDrop), float(0)),
+    ),
+  );
+  const shaped = clothAt(u0, v0);
 
   // The surface's own frame at this (u, v), from the same finite differences
   // the normal is built from. `e` is a fixed step in cloth space, so these are
-  // proportional to the true tangents and only need normalising.
+  // proportional to the true tangents and only need normalising. They difference
+  // the PUSHED point, so the shading follows the cloth over a mast rather than
+  // through it — the CPU mirror (sailClothFrame) differences the same function.
   const e = float(0.03);
-  const du = vec3(
-    clothX(u0.add(e), v0).sub(shaped.x),
-    clothY(u0.add(e), v0).sub(shaped.y),
-    clothZ(u0.add(e), v0).sub(shaped.z),
-  );
-  const dv = vec3(
-    clothX(u0, v0.add(e)).sub(shaped.x),
-    clothY(u0, v0.add(e)).sub(shaped.y),
-    clothZ(u0, v0.add(e)).sub(shaped.z),
-  );
+  const du = clothAt(u0.add(e), v0).sub(shaped);
+  const dv = clothAt(u0, v0.add(e)).sub(shaped);
   const nrm = cross(du, dv).normalize();
   const tanU = du.normalize();
   const tanV = cross(nrm, tanU); // orthogonalised +v, so the basis is rigid
@@ -519,6 +599,7 @@ export function createSailShapeUniforms(p: ShipMaterialParams): SailShapeUniform
     flutterAmp: uniform(p.sailFlutterAmp),
     luffFlap: uniform(p.sailLuffFlap),
     rippleCount: uniform(p.sailRippleCount),
+    sparSkin: uniform(p.sailSparSkin),
   };
 }
 
@@ -541,4 +622,5 @@ export function refreshSailShapeUniforms(u: SailShapeUniforms, p: ShipMaterialPa
   u.flutterAmp.value = p.sailFlutterAmp;
   u.luffFlap.value = p.sailLuffFlap;
   u.rippleCount.value = p.sailRippleCount;
+  u.sparSkin.value = p.sailSparSkin;
 }

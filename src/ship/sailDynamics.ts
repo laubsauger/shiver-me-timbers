@@ -57,6 +57,15 @@ export interface SailWindInput {
    */
   gustPhase?: number;
   gustPhaseB?: number;
+  /**
+   * §B86-2 — THIS sail's saturating reference wind (m/s), overriding
+   * `shipMaterialParams.sailWindRef`. Per-sail because one number cannot be
+   * right for a galleon's courses and a raft's cotton square at the same
+   * time; it rides the mesh (`readSailWindRef` below) so the two
+   * evaluators of the cloth — the shader's uniforms and the CPU anchor
+   * mirror — read the same value (§B.30).
+   */
+  windRef?: number;
 }
 
 export interface SailDriveState {
@@ -75,6 +84,9 @@ function finite(x: number | undefined, fallback = 0): number {
 function clamp(x: number, lo: number, hi: number): number {
   return x < lo ? lo : x > hi ? hi : x;
 }
+
+/** `mesh.userData` key a sail's own reference wind rides on (§B86-2) */
+export const SAIL_WIND_REF_KEY = 'sailWindRef';
 
 /** the detune between the gust train's two accumulators — see SailWindInput */
 export const SAIL_GUST_DETUNE = 1.63;
@@ -95,6 +107,29 @@ export function gustFactor(
 ): number {
   const g = 0.5 * Math.sin(finite(phaseA)) + 0.5 * Math.sin(finite(phaseB) + 1.7);
   return 1 + p.sailGustAmp * g * 0.5;
+}
+
+/**
+ * §B86-2 — THE WIND A SAIL CALLS "FULL", PER SAIL MESH.
+ *
+ * `sailDrive` saturates fullness at `shipMaterialParams.sailWindRef`, and that
+ * number was fitted to the galleon's canvas (6.43 m/s = half full at 10.4).
+ * The raft's mainsail is light cotton on a bamboo yard in the trades: at her
+ * own 8–11 m/s she should be drum-full, and on the shared reference she
+ * bellied modestly instead (§B86-2). A GLOBAL knob cannot hold two answers,
+ * and forking the membrane for one ship is the §V33 mistake — so the sail
+ * carries its own reference the way it already carries `sheetLeadAft` and
+ * `sailDropScale`: on the mesh, read per object, ONE material and ONE
+ * pipeline for every class (§T.40).
+ *
+ * `shape.windRef` on a sail piece is copied onto `mesh.userData.sailWindRef`
+ * by `ShipAssembly`; absent or non-finite falls back to the shared param, so
+ * nothing else moves (§V28). Structurally typed on purpose: this module has
+ * no three.js import and is not about to grow one.
+ */
+export function readSailWindRef(object: { userData: Record<string, unknown> }, fallback: number): number {
+  const raw = object.userData[SAIL_WIND_REF_KEY];
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : fallback;
 }
 
 export function sailDrive(input: SailWindInput, p: ShipMaterialParams): SailDriveState {
@@ -203,7 +238,9 @@ export function sailDrive(input: SailWindInput, p: ShipMaterialParams): SailDriv
    * gust rides the SPEED, where a gust lives. It passes through zero, so a
    * becalmed sail is genuinely slack, and it is bounded by construction.
    */
-  const ref = Math.max(0.5, finite(p.sailWindRef, 6.43));
+  // §B86-2: a sail may carry its OWN reference wind — the raft's canvas is
+  // full at 8–11 m/s where the galleon's is half. Absent, the shared param.
+  const ref = Math.max(0.5, finite(input.windRef ?? p.sailWindRef, finite(p.sailWindRef, 6.43)));
   const vq = (Math.max(0, app.speed) * gust) / ref;
   const q = vq * vq;
   const fullness = 1 - Math.exp(-q * Math.abs(cp));

@@ -59,6 +59,14 @@ function radiusAt(rBase: number, topScale: number, t: number): number {
 }
 
 /**
+ * A MAST'S RADIUS AT THE HEAD, as a fraction of its radius at the foot. ONE
+ * owner, because two systems read it: `pieceGeometry.ts` builds the spar with
+ * it, and `shipAssembly.ts` builds the collision capsule the sail is pushed
+ * off with it (§T.114, §V71 — the collider is the DRAWN mast, not a box).
+ */
+export const MAST_TOP_SCALE = 0.45;
+
+/**
  * A tapered spar with its ironwork: hoops up the length, a woolding group low
  * down, and (for a mast stepped on a deck) a partner collar at the foot.
  *

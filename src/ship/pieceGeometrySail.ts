@@ -196,10 +196,19 @@ function gasketStations(width: number, bays: number, seed: number): number[] {
  * degeneracy guard remains; the galleon's bundles above 2.6 m drop are
  * unchanged to the millimetre.
  */
-export function furlBundleRadius(width: number, drop: number): number {
+export const FURL_PACK = 0.0575;
+
+export function furlBundleRadius(width: number, drop: number, yardLength?: number, pack = FURL_PACK): number {
   const w = Math.max(1e-3, Number.isFinite(width) ? width : 1e-3);
   const area = w * Math.max(0, Number.isFinite(drop) ? drop : 0);
-  return Math.max(0.02, (area / w) * 0.0575);
+  // §B86-3: the cloth is gathered along the YARD, which is longer than the
+  // sail is wide, and how TIGHTLY it packs is a property of the cloth — heavy
+  // flax on a galleon's course, light cotton on the raft's bamboo yard, whose
+  // roll in the moored replica frame is about a hand thick. Both default to
+  // what they were, so the galleon's bundles are unchanged to the millimetre.
+  const along = yardLength !== undefined && Number.isFinite(yardLength) && yardLength > 1e-3 ? yardLength : w;
+  const k = Number.isFinite(pack) && pack > 0 ? pack : FURL_PACK;
+  return Math.max(0.02, (area / along) * k);
 }
 
 /**
@@ -415,7 +424,7 @@ export function buildSailGeometry(state: SailStateId, aabb: AABB, shape?: Record
   geo.translate(0, -drop / 2, 0);
   // the bundle is authored at the size it reaches when she is fully in; the
   // shader scales its section down from there, about the head line
-  const baseRadius = furlBundleRadius(width, drop);
+  const baseRadius = furlBundleRadius(width, drop, shape?.yardLength, shape?.furlPack);
   return mergeNonIndexed([
     withSailShape(geo, 1, width, drop),
     ...reefPoints(width, drop),

@@ -22,7 +22,7 @@
  * every sail, a detached mast keeps responding (§V14), and a second ship gets
  * its own values for free.
  */
-import type * as THREE from 'three';
+import * as THREE from 'three';
 
 /** what `updateRig` publishes onto every sail mesh, once per frame */
 export interface SailWindFrame {
@@ -108,6 +108,112 @@ function hash2Scalar(x: number, y: number): number {
   p3y += d;
   p3z += d;
   return f((p3x + p3y) * p3z);
+}
+
+/**
+ * ─────────── THE SPARS A SAIL CAN HIT, IN THE SAIL'S OWN FRAME ───────────
+ * §T.114 / §B.74. The cloth evaluators need the mast as GEOMETRY, and §V71
+ * says that geometry comes from the piece it belongs to, resolved LIVE — not
+ * from a constant that happens to match the rest pose. The rest pose is
+ * exactly what a constant would get wrong here: bracing swings the yard about
+ * the mast, so the mast's position IN THE SAIL'S FRAME moves every time the
+ * crew touches a brace, and on the raft the legs lean and rake as well.
+ *
+ * The CANDIDATE LIST is topology and is picked once (ShipAssembly's
+ * constructor, published on the sail mesh); the CAPSULES are re-resolved from
+ * `matrixWorld` every frame by the two readers, exactly like the wind frame
+ * above. Both readers run the same pure function, so the cloth the sheets are
+ * tied to and the cloth the shader draws are pushed off the same mast.
+ */
+export interface SailSparCapsule {
+  /** capsule ends, in the SAIL's local frame (m) */
+  a: [number, number, number];
+  b: [number, number, number];
+  /** radius at `a` and at `b` — spars taper, and a mast tapers a lot */
+  ra: number;
+  rb: number;
+}
+
+/**
+ * THREE capsules, and the count is the whole raft story. A square-rigger's
+ * sail has one mast behind it; the raft's mainsail hangs BETWEEN THE TWO LEGS
+ * of a bipod, and either leg alone leaves the other one cutting the canvas.
+ * So the slot is "the two nearest spars abaft this sail" rather than "its
+ * mast", which costs the ships nothing (their second slot is the next mast
+ * along, metres away and never in contact) and makes the raft correct.
+ */
+export interface SailSpars {
+  mast: SailSparCapsule;
+  mast2: SailSparCapsule;
+  /** the sail's own yard — rigid relative to it, and resolved the same way so
+   *  there is one code path rather than a special case */
+  yard: SailSparCapsule;
+}
+
+const NO_SPAR: SailSparCapsule = { a: [0, 0, 0], b: [0, 0, 0], ra: 0, rb: 0 };
+
+/** a == b ⟹ no axis ⟹ the evaluators leave the cloth alone (§V28) */
+export const NO_SAIL_SPARS: SailSpars = { mast: NO_SPAR, mast2: NO_SPAR, yard: NO_SPAR };
+
+/**
+ * One spar the sail might foul, as the piece graph describes it: the object
+ * whose transform it rides, the two ends of its axis IN ITS OWN local frame,
+ * and its radius at each end. ShipAssembly builds these from `PieceDef.aabb`
+ * and the geometry builders' own taper, so a re-sized mast moves the collider
+ * with it.
+ */
+export interface SailSparSource {
+  node: THREE.Object3D;
+  a: [number, number, number];
+  b: [number, number, number];
+  ra: number;
+  rb: number;
+}
+
+const SPARS_KEY = 'sailSparSources';
+
+export function writeSailSparSources(object: THREE.Object3D, spars: SailSparSource[]): void {
+  object.userData[SPARS_KEY] = spars;
+}
+
+export function readSailSparSources(object: THREE.Object3D): SailSparSource[] {
+  const raw = object.userData[SPARS_KEY];
+  return Array.isArray(raw) ? (raw as SailSparSource[]) : [];
+}
+
+const mSpar = new THREE.Matrix4();
+const vSpar = new THREE.Vector3();
+
+function toSailLocal(s: SailSparSource, inv: THREE.Matrix4): SailSparCapsule {
+  s.node.updateWorldMatrix(true, false);
+  mSpar.multiplyMatrices(inv, s.node.matrixWorld);
+  const end = (p: [number, number, number]): [number, number, number] => {
+    vSpar.set(p[0], p[1], p[2]).applyMatrix4(mSpar);
+    return [vSpar.x, vSpar.y, vSpar.z];
+  };
+  const r = (x: number): number => (Number.isFinite(x) && x > 0 ? x : 0); // §V28
+  return { a: end(s.a), b: end(s.b), ra: r(s.ra), rb: r(s.rb) };
+}
+
+const invSail = new THREE.Matrix4();
+
+/**
+ * Resolve the published candidates into the sail's own frame, live.
+ *
+ * Slots are filled in the order the sources were ranked, so the same spar
+ * lands in the same slot every frame — a slot that swapped between frames
+ * would make the cloth jump even though nothing moved.
+ */
+export function resolveSailSpars(
+  sailNode: THREE.Object3D,
+  sources: SailSparSource[],
+): SailSpars {
+  if (sources.length === 0) return NO_SAIL_SPARS;
+  sailNode.updateWorldMatrix(true, false);
+  invSail.copy(sailNode.matrixWorld).invert();
+  const at = (i: number): SailSparCapsule =>
+    i < sources.length ? toSailLocal(sources[i], invSail) : NO_SPAR;
+  return { mast: at(0), mast2: at(1), yard: at(2) };
 }
 
 /** a unit-ish direction in the SAIL's own local frame */

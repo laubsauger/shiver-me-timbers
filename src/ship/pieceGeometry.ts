@@ -15,7 +15,7 @@ import {
   mergeNonIndexed,
 } from './pieceGeometryShapes';
 import { buildSailGeometry } from './pieceGeometrySail';
-import { buildMastGeometry, buildYardGeometry } from './pieceGeometrySpar';
+import { MAST_TOP_SCALE, buildMastGeometry, buildYardGeometry } from './pieceGeometrySpar';
 import {
   asHullShape,
   buildEnvelopeDeck,
@@ -173,7 +173,7 @@ export function buildPieceGeometry(
       return hull !== null ? buildCabinGeometry(hull, aabbSize(aabb).y) : box(aabb);
     case 'mast':
       // hoops, woolding and a partner collar at the deck (§T.34)
-      return buildMastGeometry(aabb, 0.45, { partners: true });
+      return buildMastGeometry(aabb, MAST_TOP_SCALE, { partners: true });
     case 'bowsprit':
       // banded like a mast, but it passes through no deck, so no collar
       return buildMastGeometry(aabb, 0.4);

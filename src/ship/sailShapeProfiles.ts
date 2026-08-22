@@ -517,6 +517,76 @@ export function sailDraftProfile(u: number, lead: number, fullness: number): num
   return Math.pow(arc, Math.max(0.5, finite(fullness, 1)));
 }
 
+/**
+ * ─────────────── THE SPAR STAND-OFF (§T.114 / §B.74) ────────────────
+ *
+ * HOW FAR FORWARD OF A SPAR'S AXIS THE CLOTH HAS TO STAY, at a lateral offset
+ * `off` from that axis. This is the whole collision model: the mast is aft of
+ * the sail, the sail may only bulge FORWARD past it, so one signed coordinate
+ * along the sail's own forward direction carries the entire constraint.
+ *
+ * WHY NOT THE EXACT CYLINDER, `√(r² − off²)`. That profile has an INFINITE
+ * SLOPE at the silhouette (off → r), and cloth lying against a mast crosses
+ * that silhouette — so the exact solve creases the canvas along two vertical
+ * lines and, for cloth that is already behind the spar, TEARS it: one sample
+ * inside the shadow gets lifted to the mast's face while its neighbour a
+ * centimetre outside is left where it was. A parabola in off² has neither
+ * problem: it is C∞, it decays through zero and keeps going negative, and
+ * that negative tail is what RELEASES cloth that is legitimately abaft the
+ * spar (a clew hauled aft by its sheet is 6 m to the side and must not move).
+ *
+ * IT STILL ENCLOSES THE CYLINDER, which is the property that makes the push
+ * a guarantee rather than a nudge. With rs ≥ r,
+ *   rs·(1 − κ·x) ≥ r·(1 − x/2) ≥ r·√(1 − x)   for x = (off/r)² ∈ [0, 1]
+ * — the middle step is (1 − x/2)² = 1 − x + x²/4 ≥ 1 − x — so ANY κ ≤ ½
+ * proves it, and ½ is the widest that does. Taking the widest keeps the
+ * stand-off's lateral falloff as gentle as the proof allows, because that
+ * falloff is the slope of the ridge the cloth makes over the spar.
+ */
+export const SAIL_SPAR_WRAP = 0.5;
+
+/** a spar radius this small IS no spar; floors the divisor below (§V28) */
+export const SAIL_SPAR_MIN_R = 1e-4;
+
+export function sparStandoff(radius: number, skin: number, off2: number): number {
+  const r = Math.max(SAIL_SPAR_MIN_R, finite(radius));
+  const rs = r + Math.max(0, finite(skin));
+  return rs - (rs * SAIL_SPAR_WRAP * Math.max(0, finite(off2))) / (r * r); // §V28
+}
+
+/**
+ * THE PUSH RAMP — `max(0, y)` with its corner rounded off over [0, 1].
+ *
+ * A hard `max` is a crease in the surface and a step in its normal, which is
+ * the one thing a vertex displacement may not have (§T.85's band-limit note).
+ * `y²(2 − y)` is the cubic with φ(0) = φ'(0) = 0 and φ(1) = φ'(1) = 1, so it
+ * joins BOTH branches with matching slope — C1 everywhere — and is exactly 1:1
+ * beyond the band, so a deeply penetrating point lands EXACTLY on the stand-off
+ * surface and stays there under a second application.
+ *
+ * TWO THINGS IT IS NOT, both provably unobtainable together with C1, both
+ * measured rather than waved away:
+ *
+ * · NOT EXACTLY IDEMPOTENT. A projection is idempotent only when its image is
+ *   its fixed-point set, which puts the `max`'s corner straight back. Inside
+ *   the band φ(y) < y, so a second application moves the point again — by at
+ *   most 0.041 of the skin (y − φ(y) peaks at 0.148 at y = ⅓, and φ(0.148) =
+ *   0.041), and geometrically less each time after.
+ * · NOT MONOTONE, by 0.148 of the skin. The pushed coordinate is
+ *   `stand + skin·(1 − y + φ(y))`, and that bracket dips to 0.852 at y = ⅓
+ *   before returning to 1 — because φ' reaches 4/3 and a C1 ramp that never
+ *   exceeded slope 1 could not reach a full push at all (∫φ' < 1 when
+ *   φ'(0) = 0 and φ' ≤ 1). So two points of cloth a few millimetres apart in
+ *   depth can swap order by up to 0.148·skin: 7 mm on a galleon mast, 1.6 mm
+ *   on a raft leg, inside a band the sail mesh samples once. Bounded and
+ *   asserted in tests/sailMastClearance.test.ts; the alternative buys
+ *   monotonicity at the price of half the push and a worse residual.
+ */
+export function sparRamp(y: number): number {
+  const t = clamp01(finite(y));
+  return t * t * (2 - t) + Math.max(0, finite(y) - 1);
+}
+
 export function finite(x: number, fallback = 0): number {
   return Number.isFinite(x) ? x : fallback;
 }
