@@ -32,9 +32,10 @@ export type RaftSailKey = 'main-lower' | 'main-upper' | 'mizzen-lower';
  *   main    — 2 sheets + 2 braces (+ halyard, + ≤ 2 lifts) [§4 Controls]
  *   topsail — 2 sheets (+ halyard); it is set flying, no braces [ref-sails-1947]
  *   mizzen  — ≤ 2 sheets (+ halyard); a loose sail on a sprit, no braces
- * Roles absent from a row are forbidden for that sail. The planner emits no
- * halyards yet (it has no masthead block socket), so the halyard column is
- * an allowance, not a count.
+ * Roles absent from a row are forbidden for that sail. The planner still
+ * emits no halyards — its one halyard rule runs from a CROW'S NEST, which a
+ * raft does not have — so each sail's halyard comes from `RAFT_EXTRA_ROPES`
+ * below and this column is what the §T89 test counts it against.
  */
 export const RAFT_ROPE_TABLE: Record<RaftSailKey, Partial<Record<RigRole, number>>> = {
   'main-lower': { sheet: 2, brace: 2, halyard: 1, lift: 2 },
@@ -59,7 +60,67 @@ export const RAFT_ROPE_RADIUS: Record<RigRole, number> = {
   leechline: 0.008,
 };
 
-/** standing rigging: fore/aft/two side guys on the bipod, the mizzen's pair aft — and no more */
+/** running gear on a raft is knotted and eased, not set up on a winch */
+export const RAFT_RUNNING_SLACK = 1.02;
+
+/**
+ * §B86-1 — THE GEAR THE SHARED PLANNER CANNOT SEE, and why it is a table
+ * here rather than a rule there.
+ *
+ * `buildRiggingPlan` reaches a bow only through a BOWSPRIT and hoists only
+ * from a CROW'S NEST; the raft has neither, so it emitted no halyard and no
+ * forestay at all — a rig of three sails nobody could ever have got up. The
+ * 1947 frame has both: stays fanning to the crossing, one line running on to
+ * the stem, and the ensign on its own halyard aft.
+ *
+ * Each row is named by SOCKET, like every other rope in the plan, so a socket
+ * rename fails loud in `validateRiggingPlan` instead of silently mis-rigging,
+ * and they are counted against the same §B79 cap as everything else.
+ *
+ * WHERE EACH RUN GOES IS A §V71 DECISION, not a convenience: the bipod rakes
+ * AFT and every sail hangs FORWARD of it, so a halyard belayed on the fore
+ * deck would pass straight through the mainsail, and a forestay taken from
+ * the POLE TIP would graze the topsail's head. Both halyards come down the
+ * mast's aft side; the forestay leaves from the crossing, where this raft's
+ * standing rigging is made fast anyway.
+ */
+export interface RaftExtraRope {
+  a: string;
+  b: string;
+  role: RigRole;
+  /** the sail this line works, for the §B79 per-sail count; absent = none */
+  sail?: RaftSailKey;
+}
+
+export const RAFT_EXTRA_ROPES: readonly RaftExtraRope[] = [
+  { a: 'anchor-hounds-main', b: 'anchor-stem-bow', role: 'stay' },
+  { a: 'anchor-hounds-main', b: 'anchor-belay-main-port', role: 'halyard', sail: 'main-lower' },
+  { a: 'anchor-masthead-main', b: 'anchor-belay-main-starboard', role: 'halyard', sail: 'main-upper' },
+  { a: 'anchor-masthead-mizzen', b: 'anchor-cleat-stern-mid', role: 'halyard', sail: 'mizzen-lower' },
+  // the ensign's own halyard — the one line aboard that hoists something
+  // which is not canvas, so it answers to no row of RAFT_ROPE_TABLE
+  { a: 'anchor-truck-flag', b: 'anchor-cleat-stern-starboard', role: 'halyard' },
+];
+
+const extraKey = (role: RigRole, a: string, b: string): string => `${role}|${a}|${b}`;
+
+const EXTRA_BY_KEY = new Map(RAFT_EXTRA_ROPES.map((e) => [extraKey(e.role, e.a, e.b), e]));
+
+/** the raft-only row a rope came from, or null if the shared planner made it */
+export function raftExtraRopeOf(rope: Pick<RiggingRope, 'role' | 'socketA' | 'socketB'>): RaftExtraRope | null {
+  return EXTRA_BY_KEY.get(extraKey(rope.role, rope.socketA, rope.socketB)) ?? null;
+}
+
+/**
+ * Which sail a rope in the raft's plan works — from its socket names where the
+ * planner made it, from the table where this file did. Null = it works no
+ * sail: the standing rigging, and the ensign's halyard.
+ */
+export function raftRopeSail(rope: Pick<RiggingRope, 'role' | 'socketA' | 'socketB'>): RaftSailKey | null {
+  return raftSailKeyOf(rope.socketA) ?? raftSailKeyOf(rope.socketB) ?? raftExtraRopeOf(rope)?.sail ?? null;
+}
+
+/** standing rigging: two side guys on the bipod, the mizzen's line and its pair aft, the forestay — and no more */
 export const RAFT_STANDING_MAX = 6;
 /** the whole raft, every rope [§B79 "total raft ropes < 25"] */
 export const RAFT_ROPE_MAX = 24;
@@ -104,6 +165,19 @@ export function buildRaftRiggingPlan(blueprint: PieceDef[], p: RaftParams = raft
       // §B80: the raft's own rope radii, never the planner's galleon gear
       thickness: Math.min(rope.thickness, standing ? hempR : RAFT_ROPE_RADIUS[rope.role]),
       slack: standing ? Math.max(rope.slack, RAFT_STANDING_SLACK) : rope.slack,
+    });
+  }
+  for (const e of RAFT_EXTRA_ROPES) {
+    const id = extraKey(e.role, e.a, e.b);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const standing = e.role === 'stay' || e.role === 'shroud';
+    out.push({
+      socketA: e.a,
+      socketB: e.b,
+      role: e.role,
+      thickness: standing ? hempR : RAFT_ROPE_RADIUS[e.role],
+      slack: standing ? RAFT_STANDING_SLACK : RAFT_RUNNING_SLACK,
     });
   }
   return out;

@@ -13,12 +13,24 @@ import { buildRaftBlueprint, raftLayout } from '../src/ship/raftBlueprint';
 import { buildBrigantineBlueprint } from '../src/ship/shipBlueprint';
 import { buildPieceGeometry, buildSailGeometry } from '../src/ship/pieceGeometry';
 import { ShipAssembly } from '../src/ship/shipAssembly';
-import { buildRiggingPlan } from '../src/ropes/shipRigging';
+import { buildRiggingPlan, validateRiggingPlan } from '../src/ropes/shipRigging';
+import { updateRig } from '../src/ship/rigTrim';
+import { playerParams } from '../src/params/player';
 import { buildRatlinePlan } from '../src/ship/ratlinePlan';
 import { raftParams } from '../src/params/raft';
-import { shipDetailParams } from '../src/params/ship';
+import { shipDetailParams, shipMaterialParams } from '../src/params/ship';
+import { readSailWindRef, sailDrive } from '../src/ship/sailDynamics';
 import { yardAttitude } from '../src/ship/raftPartsRig';
-import { buildRaftRiggingPlan, RAFT_ROPE_MAX, RAFT_ROPE_TABLE, RAFT_STANDING_MAX, RAFT_STANDING_SLACK, raftSailKeyOf } from '../src/ship/raftRigging';
+import {
+  buildRaftRiggingPlan,
+  raftExtraRopeOf,
+  raftRopeSail,
+  RAFT_ROPE_MAX,
+  RAFT_ROPE_TABLE,
+  RAFT_RUNNING_SLACK,
+  RAFT_STANDING_MAX,
+  RAFT_STANDING_SLACK,
+} from '../src/ship/raftRigging';
 import { sheetLeadDirections } from '../src/ship/sailFrame';
 import { furlBundleRadius, sailTieSpec } from '../src/ship/pieceGeometrySail';
 import { buildShipBlueprint } from '../src/ship/previewRaft';
@@ -275,14 +287,18 @@ describe('§B73 the rig is janky — seeded, scaled by irregularity, never dead 
     for (const r of standing) expect(r.slack).toBeGreaterThanOrEqual(RAFT_STANDING_SLACK);
     expect(RAFT_STANDING_SLACK).toBeGreaterThan(Math.max(...shared.filter((r) => r.role === 'stay').map((r) => r.slack)));
     for (const r of plan) {
-      const src = shared.find((s) => s.role === r.role && s.socketA === r.socketA && s.socketB === r.socketB)!;
-      expect(src, `${r.role} ${r.socketA}`).toBeDefined(); // every raft rope IS a planner rope, re-dressed
-      // §B80: a rope is a ROPE, not a spar — ≤ 20 mm radius, under a third of the yard's
-      expect(r.thickness).toBeLessThanOrEqual(Math.min(src.thickness, 0.02) + 1e-9);
+      // §B86-1: a raft rope is either the planner's, re-dressed, or one of the
+      // raft-only rows (halyards, forestay, the ensign's halyard) — the
+      // planner has no rule that can reach a stem or a bipod crossing. Either
+      // way §B80 binds: a rope is a ROPE, not a spar.
+      const src = shared.find((s) => s.role === r.role && s.socketA === r.socketA && s.socketB === r.socketB);
+      const extra = raftExtraRopeOf(r);
+      expect(src !== undefined || extra !== null, `${r.role} ${r.socketA} → ${r.socketB} came from nowhere`).toBe(true);
+      expect(r.thickness).toBeLessThanOrEqual(Math.min(src?.thickness ?? Infinity, 0.02) + 1e-9);
       expect(r.thickness).toBeLessThan(raftParams.yardDiameter / 2 / 3);
       expect(r.thickness).toBeLessThanOrEqual(raftParams.lashingRopeDiameter / 2 + 1e-9); // 30 mm hemp at most
       expect(r.thickness).toBeGreaterThan(0.004);
-      if (r.role !== 'stay' && r.role !== 'shroud') expect(r.slack).toBe(src.slack);
+      if (r.role !== 'stay' && r.role !== 'shroud') expect(r.slack).toBe(src?.slack ?? RAFT_RUNNING_SLACK);
     }
     expect(plan.some((r) => r.thickness < shared.find((s) => s.socketA === r.socketA && s.role === r.role)!.thickness)).toBe(true);
   });
@@ -296,19 +312,27 @@ describe('§B73 the rig is janky — seeded, scaled by irregularity, never dead 
     expect(plan.length).toBeLessThanOrEqual(RAFT_ROPE_MAX);
     const perSail = new Map<string, number>();
     let standing = 0;
+    let ensign = 0;
     for (const r of plan) {
       expect(['stay', 'shroud', 'halyard', 'sheet', 'brace', 'lift'], `${r.role} has no place on the raft`).toContain(r.role);
       if (r.role === 'stay' || r.role === 'shroud') {
         standing++;
         continue;
       }
-      const key = raftSailKeyOf(r.socketA) ?? raftSailKeyOf(r.socketB);
-      expect(key, `${r.role} ${r.socketA} → ${r.socketB} belongs to no sail`).not.toBeNull();
+      const key = raftRopeSail(r);
+      if (key === null) {
+        // the ONE running line that hoists something which is not canvas
+        // (§B86-1). Anything else with no sail is a rope with no purpose.
+        expect(`${r.role} ${r.socketA} → ${r.socketB}`).toBe('halyard anchor-truck-flag → anchor-cleat-stern-starboard');
+        ensign++;
+        continue;
+      }
       const k = `${key}|${r.role}`;
       perSail.set(k, (perSail.get(k) ?? 0) + 1);
     }
     expect(standing).toBeGreaterThanOrEqual(3); // side guys + the aft line, at least
     expect(standing).toBeLessThanOrEqual(RAFT_STANDING_MAX);
+    expect(ensign).toBe(1); // §B86-1: the flag has a halyard, and only one
     for (const [k, n] of perSail) {
       const [key, role] = k.split('|') as [keyof typeof RAFT_ROPE_TABLE, keyof (typeof RAFT_ROPE_TABLE)['main-lower']];
       expect(n, k).toBeLessThanOrEqual(RAFT_ROPE_TABLE[key][role] ?? 0);
@@ -649,5 +673,162 @@ describe('§V82 deck, cabin, mast, guaras, steering', () => {
       expect(asm.socketWorldPosition(rope.socketB)).toHaveLength(3);
     }
     expect(buildRatlinePlan(raft)).toHaveLength(0);
+  });
+});
+
+/**
+ * §B78-4 / §B86-1 / §B86-3 — THE RIG AS A THING A CREW USES: a perch you can
+ * see from, gear you could have hoisted the sails with, and a furl that puts
+ * the canvas where a furled sail goes.
+ */
+describe('§B78/§B86 the raft rig serves the crew', () => {
+  const raft = buildRaftBlueprint();
+  const asm = new ShipAssembly(raft, stubFactory);
+  asm.group.updateMatrixWorld(true);
+  const P = playerParams;
+
+  /** world AABB of a piece's drawn mesh, through the live assembly (§V71) */
+  const sailBox = (id: string): THREE.Box3 => new THREE.Box3().setFromObject(asm.sailMesh(id));
+
+  it('(B78-4) a lookout STANDING on the perch has his head clear of the topsail', () => {
+    // R2: "forward is 100 % topsail cloth (eye 10.74 is inside the topsail's
+    // 9.46-11.23 span). Not a usable perch." Measured against the SAIL's own
+    // live bounds and the WALKER's own eye height — not against the authored
+    // `topsailHeightAboveCrossing`, which is free to move (§V80).
+    const perch = asm.socketWorldPosition('station-lookout');
+    const eye = perch[1] + P.standHeight - P.eyeDrop;
+    const box = sailBox('sail-main-upper');
+    expect(box.min.y, 'topsail foot over the lookout\'s eye').toBeGreaterThan(eye);
+    // and over his head, not just his eye — he stands up there
+    expect(box.min.y).toBeGreaterThan(perch[1] + P.standHeight);
+    // the pole still carries the yard: nothing hangs off the end of it
+    expect(asm.socketWorldPosition('anchor-masthead-main')[1]).toBeGreaterThan(box.max.y);
+    // the MAIN sail is below the perch — the lookout climbs past it, not into it
+    expect(sailBox('sail-main-lower').max.y).toBeLessThan(perch[1] + P.standHeight);
+  });
+
+  it('(B78-3) the ladder station is ON the ladder — inboard of the rail, up at the rungs', () => {
+    // R2: "the ladder socket itself is at x 2.69, OUTBOARD of the foot-rail",
+    // i.e. over the water at the leg's foot, while the rungs it names run up
+    // the leg. §V71: a fixture on a part is resolved against THAT part.
+    const q = asm.socketWorldPosition('station-ladder');
+    const L = raftLayout();
+    expect(Math.abs(q[0]), 'outboard of the foot-rail').toBeLessThan(L.halfBeam);
+    expect(q[1], 'at hand height on the rungs, not on the deck').toBeGreaterThan(L.deckY + 0.5);
+    // and it rides the leg: the whole bipod leans and rakes, so the socket
+    // must sit on the leg's own axis, not at an authored ship-space point
+    const legFoot = raft.find((x) => x.id === 'bipod-leg-starboard')!.transform.position;
+    // the leg leans in and rakes aft, so climbing height BUYS inboard room:
+    // the grab point is inboard of the leg's own step even though it hangs on
+    // the leg's outboard face (§B83)
+    expect(q[0], 'the lean has not carried the grab inboard').toBeLessThan(legFoot[0]);
+  });
+
+  it('(B86-1) the sails could have been hoisted: a halyard each, a forestay to the stem, and the ensign on its own', () => {
+    // R1-fix gap 1: "no halyards, no forestay, no flag halyard — the planner
+    // has no masthead block socket or bow anchor". A rig with no halyard is a
+    // rig nobody could have set.
+    const plan = buildRaftRiggingPlan(raft);
+    const halyards = plan.filter((r) => r.role === 'halyard');
+    expect(halyards.length).toBe(4); // three sails + the ensign
+    for (const key of ['main-lower', 'main-upper', 'mizzen-lower'] as const) {
+      expect(halyards.filter((r) => raftRopeSail(r) === key).length, `${key} halyard`).toBe(1);
+    }
+    // the forestay lands on the STEM — a socket the shared planner never had
+    const fore = plan.find((r) => r.socketB === 'anchor-stem-bow' || r.socketA === 'anchor-stem-bow');
+    expect(fore, 'forestay').toBeDefined();
+    expect((fore as { role: string }).role).toBe('stay');
+    const stem = asm.socketWorldPosition('anchor-stem-bow');
+    expect(stem[2]).toBeGreaterThan(raftLayout().mastZ + 4); // it really does go forward
+    // §B79/§B80 still bind with the new gear aboard
+    expect(plan.length).toBeLessThan(25);
+    for (const r of plan) expect(r.thickness, `${r.role} ${r.socketA}`).toBeLessThanOrEqual(0.02);
+    // every endpoint is a real rope-anchor: a rename fails loud, not silently
+    validateRiggingPlan(plan, raft);
+  });
+
+  it('(B86-3) furling LOWERS the main yard and the roll is the cloth it packs', () => {
+    // R1-fix gap 3: "the furled main reads heavy and the yard does not lower
+    // on furl". A square sail is not furled where it is set — the replica
+    // frame (ref §10) carries its roll a couple of metres over the deck.
+    const yardY = (): number => asm.socketWorldPosition('anchor-yard-main-lower-port')[1];
+    updateRig(asm, 1 / 60, 1); // canvas set
+    asm.group.updateMatrixWorld(true);
+    const set = yardY();
+    updateRig(asm, 1 / 60, 0); // and in
+    asm.group.updateMatrixWorld(true);
+    const furled = yardY();
+    expect(furled, 'the yard came down its halyard').toBeLessThan(set - 1);
+    const masthead = asm.socketWorldPosition('anchor-masthead-main')[1];
+    expect(furled).toBeLessThan(0.75 * masthead);
+    // …and it is still ABOVE the cabin, not lying on the roof
+    const L = raftLayout();
+    expect(furled).toBeGreaterThan(L.cabinFloorY + raftParams.cabinRidge);
+    updateRig(asm, 1 / 60, 1);
+    asm.group.updateMatrixWorld(true);
+    expect(yardY()).toBeCloseTo(set, 6); // and goes back up: it is a hoist, not a one-way trip
+
+    // the roll's SECTION is cloth area ÷ the yard it is gathered along, at
+    // this class's own packing — §B75's law, with the two terms it was
+    // missing (a yard is longer than its sail is wide; cotton packs tighter
+    // than flax). The galleon's own bundles are untouched by both defaults.
+    for (const s of raft.filter((x) => x.kind === 'sail')) {
+      const width = s.aabb.max[0] - s.aabb.min[0];
+      const drop = -s.aabb.min[1];
+      const len = s.shape?.yardLength as number;
+      expect(len, `${s.id} names its yard`).toBeGreaterThan(width);
+      const r = furlBundleRadius(width, drop, len, s.shape?.furlPack);
+      expect(r).toBeCloseTo(((width * drop) / len) * raftParams.furlBundlePack, 9);
+      expect(r).toBeLessThan(furlBundleRadius(width, drop)); // slimmer than the galleon law
+    }
+    // …and the default call is bit-identical to what it always was
+    expect(furlBundleRadius(4, 3)).toBeCloseTo(3 * 0.0575, 12);
+  });
+});
+
+/**
+ * §B86-2 — THE RAFT'S CANVAS ANSWERS THE RAFT'S WIND. The membrane's
+ * saturating reference was fitted to the galleon (`sailWindRef` 6.43: half
+ * full at 10.4 m/s), and at the raft's own 8–11 m/s her cotton square bellied
+ * modestly instead of reading drum-full. The fix is per-SAIL, not a fork of
+ * the membrane and not a second global.
+ */
+describe('§B86-2 per-sail reference wind', () => {
+  const raft = buildRaftBlueprint();
+  const asm = new ShipAssembly(raft, stubFactory);
+  /** dead before the wind, no way on, gust at rest — the raft's own point of sail */
+  const running = (windSpeed: number): Parameters<typeof sailDrive>[0] => ({
+    forwardX: 0, forwardZ: 1, shipForwardX: 0, shipForwardZ: 1,
+    windDirection: 0, windSpeed, yawRate: 0, gustPhase: 0, gustPhaseB: 0,
+  });
+
+  it('every raft sail carries its own reference, and the assembly puts it on the mesh', () => {
+    const sails = raft.filter((s) => s.kind === 'sail');
+    expect(sails.length).toBe(3);
+    for (const s of sails) {
+      expect(s.shape?.windRef, `${s.id}`).toBe(raftParams.sailWindRef);
+      expect(asm.sailMesh(s.id).userData.sailWindRef).toBe(raftParams.sailWindRef);
+    }
+    // …and a sail whose class sets none is left on the shared param (§V28)
+    expect(readSailWindRef({ userData: {} }, 6.43)).toBe(6.43);
+    expect(readSailWindRef({ userData: { sailWindRef: Number.NaN } }, 6.43)).toBe(6.43);
+    expect(readSailWindRef({ userData: { sailWindRef: -1 } }, 6.43)).toBe(6.43);
+    expect(readSailWindRef({ userData: { sailWindRef: 4.2 } }, 6.43)).toBe(4.2);
+  });
+
+  it('reads FULL through the raft\'s own 8–11 m/s, where the galleon\'s reference leaves it slack', () => {
+    for (const v of [8, 9, 10, 11]) {
+      const mine = sailDrive({ ...running(v), windRef: raftParams.sailWindRef }, shipMaterialParams);
+      const shared = sailDrive(running(v), shipMaterialParams);
+      expect(mine.drive, `${v} m/s on the raft's reference`).toBeGreaterThan(0.9);
+      expect(mine.drive, `${v} m/s: the override must actually bite`).toBeGreaterThan(shared.drive);
+    }
+    // it is still a CURVE, not a constant: a becalmed raft is slack, and it
+    // saturates rather than running away (§V62 — a knob that drives nothing)
+    expect(sailDrive({ ...running(1), windRef: raftParams.sailWindRef }, shipMaterialParams).drive).toBeLessThan(0.1);
+    expect(sailDrive({ ...running(25), windRef: raftParams.sailWindRef }, shipMaterialParams).drive).toBeLessThanOrEqual(1);
+    // and the shared param still owns every ship that sets none
+    expect(sailDrive(running(9), shipMaterialParams).drive)
+      .toBeCloseTo(sailDrive({ ...running(9), windRef: shipMaterialParams.sailWindRef }, shipMaterialParams).drive, 12);
   });
 });

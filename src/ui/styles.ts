@@ -6,6 +6,7 @@
  * System old-style serif stack only — no font fetches, CSP-clean.
  */
 import { HUD_CSS } from './stylesHud';
+import { PROMPT_CSS } from './stylesRaftPrompt';
 import { SETTINGS_CSS } from './stylesSettings';
 
 const BASE_CSS = /* css */ `
@@ -139,7 +140,7 @@ export function ensureUiStyles(): void {
   if (injected || document.getElementById('smt-ui-styles')) return;
   const tag = document.createElement('style');
   tag.id = 'smt-ui-styles';
-  tag.textContent = BASE_CSS + PAUSE_CSS + SETTINGS_CSS + HUD_CSS;
+  tag.textContent = BASE_CSS + PAUSE_CSS + SETTINGS_CSS + HUD_CSS + PROMPT_CSS;
   document.head.appendChild(tag);
   injected = true;
 }

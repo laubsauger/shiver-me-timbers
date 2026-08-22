@@ -54,6 +54,58 @@ export interface RaftParams {
   cabinBoxHeight: number; // EST — floor mats over 8 lashed boxes [§3 Floor]
   roofOverhang: number; // [§3 Roof] 20–30 cm
   roofThickness: number; // EST — laths + leaves [§3 Roof]
+  // --- §B87 the roof is COURSES, not a slab [§3 Roof: "overlapping banana
+  // leaves like tiles"; museum ragged 20–30 cm overhang]
+  roofCoursePitch: number; // EST — m up the slope from one course butt to the next
+  roofCourseOverlap: number; // EST — m each course reaches back UNDER the one above it
+  roofCourseRise: number; // EST — m a course stands proud of the course below: the step that self-shadows at a grazing sun
+  roofEaveSegments: number; // EST — the eave course is broken into this many butts, each its own length
+  roofEaveRagged: number; // EST — m the eave butts wander about roofOverhang; the sum lands in the reference's 20–30 cm
+  roofLathCount: number; // EST — bamboo laths per slope, under the thatch [§3 Roof "bamboo laths"]
+  roofLathSection: number; // EST — m, square section of one lath
+  // --- §B87 cabin interior: it must read as lived-in from the doorway [§3
+  // Floor / Radio corner / Museum]
+  floorMatLength: number; // EST — a loose reed mat thrown over the box layer [§3 Floor]
+  floorMatWidth: number; // EST
+  floorMatThickness: number; // EST
+  mattressLength: number; // EST — straw mattress; the crew slept fore-and-aft along the logs [§3 Floor]
+  mattressWidth: number; // EST
+  mattressHeight: number; // EST
+  partitionLength: number; // EST — cardboard partition screening the radio corner [§3 Radio corner]
+  partitionHeight: number; // EST — chest-high on a sitting man, well under the eave
+  partitionThickness: number; // EST — cardboard
+  radioCrateWidth: number; // EST — §B87: the set SITS on a crate; a radio in mid-air was the bug
+  radioCrateDepth: number; // EST
+  radioCrateHeight: number; // EST — tall enough that a crouched player's eye is near level with the dial
+  radioWidth: number; // EST — a salvaged car-radio face in a jury-rigged case [2100 dressing]
+  radioHeight: number; // EST
+  radioDepth: number; // EST
+  radioDialDiameter: number; // EST — the game's main interface (T103): identifiable at arm's length
+  radioMeterWidth: number; // EST — signal meter
+  radioMeterHeight: number; // EST
+  radioCrankReach: number; // EST — m the hand crank stands off the case side
+  radioYaw: number; // EST — rad the set is turned to face the crouch station
+  batteryCaseWidth: number; // EST — battery cases beside the set [§3 Radio corner]
+  batteryCaseHeight: number; // EST
+  batteryCaseDepth: number; // EST
+  potDiameter: number; // EST — pots/ladle on the wall by the door [§3 Museum, §6]
+  potHeight: number; // EST
+  chartWidth: number; // EST — chart on the starboard wall by the door [§6]
+  chartHeight: number; // EST
+  aerialSag: number; // EST — m the wire aerial dips between the aft gable and the mast crossing
+  // --- ref §10 (replica-moored-beam, inspiration only)
+  railHeight: number; // EST — m over the log tops: a low sloppy railing, not a bulwark
+  railPostDiameter: number; // EST
+  railPosts: number; // EST — stanchions per side
+  railRopeDiameter: number; // EST
+  railRopeSag: number; // EST — m the rope dips in a span; the point is that it is SLACK
+  chestLength: number; // EST — plank chest lashed on the fore-deck [ref §10]
+  chestWidth: number; // EST
+  chestHeight: number; // EST
+  // --- §T34 seeded variation of the dressing (⊥ one box copied three times)
+  crateSizeVar: number; // EST — 0..1, how far the three cabin-side crates differ in each dimension
+  crateYawVar: number; // EST — rad, how far each is shoved off square
+  crateLashRope: number; // EST — m, the rope band round a lashed crate
   // --- §4 Mast & rig
   mastGapToCabin: number; // EST — legs "just forward of cabin front wall" [§4 Leg spacing]
   mastHeight: number; // [§4 Height] 8.8 m to crossing (WP); museum "nearly 10" — EST range 8.5–10
@@ -66,6 +118,8 @@ export interface RaftParams {
   ladderWidth: number; // EST — rope ladder w/ wooden rungs [§4 Masthead]
   ladderRungPitch: number; // EST
   ladderStandoff: number; // EST — m the ladder hangs off the leg's surface (§B75)
+  ladderGrabHeight: number; // EST — m up the leg the climber takes hold; the `station-ladder` socket rides here (§B78-3)
+  lookoutHeadroom: number; // EST — m of clear air over the lookout platform: the topsail's foot is hoisted above a standing man (§B78-4)
   // --- §B73 the rig is JANKY [ref-sails-1947]: seeded per-piece cock / rake /
   // slew, scaled by shipDetailParams.irregularity; every value an upper bound
   yardCock: number; // EST — rad, a yard hoisted with one arm higher (photo ≈ 6–10°)
@@ -82,8 +136,11 @@ export interface RaftParams {
   yardMastClearance: number; // EST — yard rides forward of the legs
   sailYardOffset: number; // EST — cloth forward of the yard axis
   mainYardHeight: number; // EST — hoisted below the crossing [PHOTO-10]
+  mainYardFurlDrop: number; // EST — m the main yard comes DOWN its halyard when furled [ref §10 replica-moored-beam: the roll rides ~2.3 m over the deck] (§B86-3)
+  furlBundlePack: number; // EST — furled-roll radius per (cloth area ÷ yard length); light cotton packs tighter than a galleon's flax (§B86-3)
   mainSailWidth: number; // [§4 Mainsail] 5.5 m wide
   mainSailDrop: number; // [§4 Mainsail] 4.6 m drop
+  sailWindRef: number; // EST — m/s of apparent wind at which THIS raft's canvas reads full (§B86-2); overrides shipMaterialParams.sailWindRef per sail
   topsailHeightAboveCrossing: number; // EST — on the short pole [§4 Topsail]
   topsailYardLength: number; // EST — [§9.2] topsail size unknown
   topsailWidth: number; // EST
@@ -181,17 +238,65 @@ export const raftParams: RaftParams = registerParams(
     cabinBoxHeight: 0.3, // EST
     roofOverhang: 0.25,
     roofThickness: 0.08, // EST
+    roofCoursePitch: 0.3, // EST — 5 courses over the 1.48 m slope [PHOTO-07,09]
+    roofCourseOverlap: 0.14, // EST — a course laps back about half its pitch
+    roofCourseRise: 0.015, // EST — 5 × 0.015 keeps the ridge under the §V82 1.6 m cap
+    roofEaveSegments: 6, // EST
+    roofEaveRagged: 0.05, // EST — 0.25 ± 0.05 = the reference's 20–30 cm
+    roofLathCount: 6, // EST
+    roofLathSection: 0.045, // EST — split bamboo
+    floorMatLength: 1.9, // EST
+    floorMatWidth: 1.5, // EST
+    floorMatThickness: 0.02, // EST
+    mattressLength: 1.9, // EST — a man's length; laid fore-and-aft [§3 Floor]
+    mattressWidth: 0.68, // EST
+    mattressHeight: 0.13, // EST
+    partitionLength: 0.96, // EST
+    partitionHeight: 0.95, // EST
+    partitionThickness: 0.04, // EST
+    radioCrateWidth: 0.52, // EST
+    radioCrateDepth: 0.52, // EST
+    radioCrateHeight: 0.68, // EST — dial at floor + 0.83; a crouched eye sits at 1.05
+    radioWidth: 0.4, // EST
+    radioHeight: 0.26, // EST
+    radioDepth: 0.22, // EST
+    radioDialDiameter: 0.13, // EST — a third of the face; reads from 0.6 m
+    radioMeterWidth: 0.11, // EST
+    radioMeterHeight: 0.07, // EST
+    radioCrankReach: 0.12, // EST
+    radioYaw: 0.37, // EST — rad, turned toward the crouch station
+    batteryCaseWidth: 0.34, // EST
+    batteryCaseHeight: 0.26, // EST
+    batteryCaseDepth: 0.34, // EST
+    potDiameter: 0.24, // EST
+    potHeight: 0.2, // EST
+    chartWidth: 0.6, // EST
+    chartHeight: 0.45, // EST
+    aerialSag: 0.35, // EST
+    railHeight: 0.78, // EST — 0.4 m over the mats: knee-to-thigh, as the reference
+    railPostDiameter: 0.08, // EST
+    railPosts: 5, // EST
+    railRopeDiameter: 0.022, // EST
+    railRopeSag: 0.11, // EST
+    chestLength: 0.8, // EST
+    chestWidth: 0.5, // EST
+    chestHeight: 0.42, // EST
+    crateSizeVar: 0.28, // EST
+    crateYawVar: 0.24, // EST ≈ 14°
+    crateLashRope: 0.022, // EST
     mastGapToCabin: 0.6, // EST
     mastHeight: 8.8, // EST 8.5–10
     mastLegSpacing: 4.5, // EST
     mastLegDiameter: 0.18,
     mastCrossingOverlap: 0.35, // EST
-    topPoleHeight: 2.4, // EST
+    topPoleHeight: 3.6, // EST — long enough to carry the topsail clear of the lookout (§B78-4)
     platformSize: 0.9, // EST
     platformThickness: 0.05, // EST
     ladderWidth: 0.35, // EST
     ladderRungPitch: 0.35, // EST
     ladderStandoff: 0.1, // EST
+    ladderGrabHeight: 1.15, // EST — chest height on the rungs
+    lookoutHeadroom: 1.85, // EST — a lookout standing on the perch, head and a hand clear
     yardCock: 0.14, // EST
     yardRake: 0.09, // EST
     yardSlew: 0.12, // EST
@@ -206,12 +311,17 @@ export const raftParams: RaftParams = registerParams(
     yardMastClearance: 0.05, // EST
     sailYardOffset: 0.12, // EST
     mainYardHeight: 7.2, // EST
+    mainYardFurlDrop: 4.5, // EST — 7.2 → 2.7 on the mast, ≈ 2.7 m over the log tops [ref §10]
+    furlBundlePack: 0.029, // EST — ≈ 0.24 m thick on the 5.5 × 4.6 m main [ref §10]
     mainSailWidth: 5.5,
     mainSailDrop: 4.6,
-    topsailHeightAboveCrossing: 1.8, // EST
-    topsailYardLength: 3.0, // EST
-    topsailWidth: 2.6, // EST
-    topsailDrop: 1.4, // EST
+    // §B86-2 [ref-sails-1947]: light cotton on a bamboo yard in the trades is
+    // drum-full at 8–11 m/s, where the galleon's 6.43 leaves it half-bellied
+    sailWindRef: 4.2,
+    topsailHeightAboveCrossing: 3.3, // EST — hoisted above the lookout's head (§B78-4)
+    topsailYardLength: 2.3, // EST
+    topsailWidth: 2.0, // EST
+    topsailDrop: 0.9, // EST — a small sail set flying on a short pole [§9.2 size unknown]
     mizzenZ: -5.4, // EST
     mizzenX: -0.9, // EST
     mizzenHeight: 4.4, // EST — [ref-sails-1947] the mizzen flies clear above the cabin ridge
@@ -255,7 +365,7 @@ export const raftParams: RaftParams = registerParams(
     dinghyHeight: 1.0, // EST
     dinghyThickness: 0.35, // EST
     cageSize: 0.4, // EST
-    kitchenBoxSize: 0.6, // EST
+    kitchenBoxSize: 0.45, // EST — a Primus box; sized so the strip stays a road (§B78-2)
   },
   {
     seed: m(0, 99999, 1),
@@ -274,9 +384,20 @@ export const raftParams: RaftParams = registerParams(
     mastHeight: m(8.5, 10),
     mastLegSpacing: m(3, 5.5),
     mainYardHeight: m(5, 8.8),
+    mainYardFurlDrop: m(0, 6, 0.1),
+    furlBundlePack: m(0.005, 0.1, 0.001),
     mainSailWidth: m(4, 6),
     mainSailDrop: m(3.5, 5),
+    sailWindRef: m(1, 30, 0.5),
+    lookoutHeadroom: m(1.2, 3),
     guaraDefaultDepth: m(0, 1),
     oarDip: m(0, 0.8),
+    // §B87 — the dials the look-dev pass actually turns
+    roofCoursePitch: m(0.12, 0.6), roofCourseOverlap: m(0, 0.3), roofCourseRise: m(0, 0.05, 0.001),
+    roofEaveSegments: m(1, 16, 1), roofEaveRagged: m(0, 0.12, 0.005),
+    roofLathCount: m(0, 12, 1), roofLathSection: m(0.02, 0.1, 0.005),
+    radioCrateHeight: m(0.2, 1), radioDialDiameter: m(0.04, 0.25, 0.005), radioYaw: m(-1.6, 1.6, 0.01),
+    railHeight: m(0.3, 1.4), railPosts: m(0, 12, 1), railRopeSag: m(0, 0.4),
+    crateSizeVar: m(0, 1), crateYawVar: m(0, 0.8),
   },
 );

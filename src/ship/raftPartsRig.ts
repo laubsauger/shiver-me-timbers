@@ -56,6 +56,7 @@ function yardAndSail(
   sailDrop: number,
   key: number,
   sprit = 0,
+  furlDrop = 0,
 ): PieceDef[] {
   const yardId = `yard-${mast}-${level}`;
   const sailId = `sail-${mast}-${level}`;
@@ -69,7 +70,14 @@ function yardAndSail(
   const yard = mkPiece(yardId, 'yard', [att.offset, y, mastR + yr + p.yardMastClearance], {
     min: [-len / 2, -yr, -yr],
     max: [len / 2, yr, yr],
-  }, { parent: `mast-${mast}`, sockets: ends, shape: { doubled: 1 }, rotation: [att.rake, att.slew, att.cock] });
+  }, {
+    parent: `mast-${mast}`,
+    sockets: ends,
+    // §B86-3: how far this yard comes down its halyard when the sail is in
+    // (ShipAssembly.setYardHoist); 0 = it stays where it is hoisted
+    shape: { doubled: 1, hoistDrop: furlDrop },
+    rotation: [att.rake, att.slew, att.cock],
+  });
   const clothSockets: SocketDef[] = Object.entries(SAIL_ANCHOR_UV).map(([suffix, [u, v]]) => ({
     id: `anchor-${sailId}-${suffix}`,
     type: 'rope-anchor' as const,
@@ -86,7 +94,10 @@ function yardAndSail(
     // §B73 [ref-sails-1947]: running before the wind, the foot is hauled
     // FORWARD of the mast — the belly leads. sailFrame.readSheetLeadSign
     // §B83: the robands are sized to THIS yard (pieceGeometrySail.sailTieSpec)
-    shape: { sheetLeadAft: -1, yardR: yr },
+    // §B86-2: and this raft's own saturating wind, so one shared membrane
+    // still answers two very different suits of canvas (sailDynamics.readSailWindRef)
+    // §B86-3: the roll is gathered along THIS yard, at the raft's own packing
+    shape: { sheetLeadAft: -1, yardR: yr, windRef: p.sailWindRef, yardLength: len, furlPack: p.furlBundlePack },
   });
   return [yard, sail];
 }
@@ -104,9 +115,21 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
   const crossingAt: Vec3 = [0, L.logTopY + p.mastHeight * Math.cos(rake), L.mastZ - p.mastHeight * Math.sin(rake)];
   // two legs stepped through the deck onto the logs, leaning to the crossing
   for (const [side, sign] of [['port', -1], ['starboard', 1]] as const) {
-    const sockets: SocketDef[] = side === 'starboard'
-      ? [{ id: 'station-ladder', type: 'fixture', position: [0.45, 0, 0.3] }]
-      : [];
+    // §B86-1: where a halyard is made fast. Both come down the mast's AFT
+    // side (−z on the leg) because the sails hang FORWARD of it — a belay on
+    // the fore deck would run the line straight through the mainsail.
+    const sockets: SocketDef[] = [
+      { id: `anchor-belay-main-${side}`, type: 'rope-anchor', position: [-sign * (legR + 0.05), 0.25, -0.3] },
+    ];
+    // §B78-3: the ladder station used to sit at the leg's FOOT, 0.45 m
+    // OUTBOARD of it — x 2.69 in ship space, past the foot-rail and off the
+    // walkable deck, so no stance on this raft could ever take hold of it.
+    // It rides the ladder now, `ladderGrabHeight` up the leg on the same
+    // outboard face the rungs hang from (§B83); the leg's lean carries that
+    // point INBOARD of the rail, over deck a walker can stand on.
+    if (side === 'starboard') {
+      sockets.push({ id: 'station-ladder', type: 'fixture', position: [legR + p.ladderStandoff, p.ladderGrabHeight, 0] });
+    }
     out.push(
       mkPiece(`bipod-leg-${side}`, 'bipod-mast', [sign * halfSpan, L.logTopY, L.mastZ], {
         min: [-legR, 0, -legR],
@@ -142,7 +165,23 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
   // level, drawn from the crossing up.
   const poleR = legR * 0.8;
   const crossing = p.mastHeight;
-  const top = crossing + p.topPoleHeight;
+  /**
+   * §B78-4 — THE PERCH IS A PLACE TO LOOK FROM, and the topsail is resolved
+   * against it (§V71), never the other way round. The platform is at the
+   * crossing [§4 Masthead] and the topsail is set on the pole above it; with
+   * both authored as free numbers they overlapped, and the lookout's eye
+   * stood INSIDE the cloth — "forward is 100 % topsail" (R2 walk review).
+   * The sail's FOOT is hoisted `lookoutHeadroom` above the platform and the
+   * pole grows to carry the yard, so no knob can put the canvas back over the
+   * lookout's head.
+   */
+  const perchY = crossing + p.platformThickness;
+  // how far the cloth can hang BELOW its yard for ANY attitude `yardAttitude`
+  // gives it (§V71: the live shape, not the rest pose) — the farthest cloth
+  // corner from the yard's own axis, so no cock/rake/slew can dip under it
+  const topsailReach = Math.hypot(p.topsailWidth / 2, p.yardDiameter * 0.3 + p.topsailDrop, p.sailYardOffset);
+  const topsailY = Math.max(crossing + p.topsailHeightAboveCrossing, perchY + p.lookoutHeadroom + topsailReach);
+  const top = Math.max(crossing + p.topPoleHeight, topsailY + p.yardDiameter * 2);
   const irr = Math.max(0, shipDetailParams.irregularity);
   out.push(
     mkPiece('mast-main', 'mast', [0, L.logTopY, L.mastZ], {
@@ -187,9 +226,11 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
   const yr = p.yardDiameter / 2;
   // main yard hoisted below the crossing; the legs are ~legR apart there so
   // the yard clears them on the leg radius
-  out.push(...yardAndSail(p, 'main', 'lower', p.mainYardHeight, p.yardLength, yr, legR, p.mainSailWidth, p.mainSailDrop, 1));
-  // small topsail on the pole above the crossing [§4 Topsail]
-  out.push(...yardAndSail(p, 'main', 'upper', crossing + p.topsailHeightAboveCrossing,
+  out.push(...yardAndSail(p, 'main', 'lower', p.mainYardHeight, p.yardLength, yr, legR,
+    p.mainSailWidth, p.mainSailDrop, 1, 0, p.mainYardFurlDrop));
+  // small topsail on the pole above the crossing [§4 Topsail], hoisted clear
+  // of the lookout (see `topsailY`)
+  out.push(...yardAndSail(p, 'main', 'upper', topsailY,
     p.topsailYardLength, yr * 0.6, poleR, p.topsailWidth, p.topsailDrop, 2));
   return out;
 }
@@ -218,7 +259,11 @@ export function buildMizzenAndFlag(p: RaftParams, L: RaftLayout): PieceDef[] {
     mkPiece('flagpole', 'bipod-mast', [p.flagpoleX, L.logTopY, p.mizzenZ], {
       min: [-fr, 0, -fr],
       max: [fr, p.flagpoleHeight, fr],
-    }, { shape: { taper: 0.7, sides: 8 } }),
+    }, {
+      shape: { taper: 0.7, sides: 8 },
+      // §B86-1: the truck the ensign's own halyard is rove through
+      sockets: [{ id: 'anchor-truck-flag', type: 'rope-anchor', position: [0, p.flagpoleHeight - 0.05, 0] }],
+    }),
   );
   out.push(
     mkPiece('flag-stern', 'pennant', [0, p.flagpoleHeight - 0.05, 0], {

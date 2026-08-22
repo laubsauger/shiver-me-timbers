@@ -53,6 +53,16 @@ export function devLayerFor(s: ViewState): boolean {
   return s.dev && !s.photo;
 }
 
+/**
+ * CINEMATIC: full screen, i.e. "I am recording now" (§I ui/cinematic). Derived
+ * from the SAME parked-intent field the dev layer already uses — a second
+ * boolean tracking full screen would be free to disagree with the one the
+ * reducer maintains, and the §T.116 prompts hide on this.
+ */
+export function isCinematic(s: ViewState): boolean {
+  return s.devBeforeFullscreen !== null;
+}
+
 export interface ViewTransition {
   state: ViewState;
   /** true = this Escape was spent here and must not also reach the pause menu */
@@ -108,6 +118,8 @@ export function reduceView(s: ViewState, action: ViewAction): ViewTransition {
 export interface ViewModes {
   isPhoto(): boolean;
   isDevVisible(): boolean;
+  /** full screen = cinematic (§I ui/cinematic): the game's own overlays step aside too */
+  isCinematic(): boolean;
   /** Escape handler for the pause menu: true = the key was spent here */
   peelEscape(): boolean;
   dispose(): void;
@@ -195,6 +207,7 @@ export function createViewModes(root: HTMLElement, fullscreen: FullscreenControl
   return {
     isPhoto: () => state.photo,
     isDevVisible: () => devLayerFor(state),
+    isCinematic: () => isCinematic(state),
     peelEscape: () => dispatch({ type: 'escape' }),
     dispose(): void {
       window.removeEventListener('keydown', onKeyDown);

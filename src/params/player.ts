@@ -34,7 +34,13 @@ export interface PlayerParams {
   /** swimming: the eye rides this far above the water, and follows it at this rate */
   swimEyeAbove: number;
   swimBobRate: number;
-  /** climb back aboard within this reach (horizontal) and height of a boarding point */
+  /**
+   * Climb back aboard within this reach (horizontal) of a boarding point whose
+   * FREEBOARD — its height above the sea surface, §V85/§B78 — is at most
+   * `boardVertical`. Measured from the sea and not from the swimmer's feet:
+   * the feet hang a body-length under the surface, so a feet-relative test
+   * refused every rail on a raft with 0.4 m of freeboard.
+   */
   boardReach: number;
   boardVertical: number;
   /** mouse: radians of yaw per pixel of pointer-lock movement */
@@ -65,6 +71,18 @@ export interface PlayerParams {
   /** §T.100 ashore: climb back aboard from the ground within this reach / height of a deck edge (§V85) */
   ashoreReach: number;
   ashoreVertical: number;
+  /** §T.116 prompt: seconds the plaque takes to fade in, and again to fade out */
+  promptFade: number;
+  /** §T.116 prompt: how far ABOVE the socket the plaque floats, screen px */
+  promptRisePx: number;
+  /**
+   * §T.116 cue: two dots projecting closer than this are ONE dot — the port
+   * and starboard sheets are 0.5 m apart and would otherwise land on top of
+   * each other. The far one is dropped (the near one is the one E takes).
+   */
+  cueMergePx: number;
+  /** §T.116 cue: the most dots drawn at once, nearest first */
+  cueMaxDots: number;
 }
 
 export const playerParams: PlayerParams = registerParams<PlayerParams>(
@@ -103,6 +121,10 @@ export const playerParams: PlayerParams = registerParams<PlayerParams>(
     slopeSlowdown: 0.5,
     ashoreReach: 1.0,
     ashoreVertical: 0.6,
+    promptFade: 0.15,
+    promptRisePx: 22,
+    cueMergePx: 26,
+    cueMaxDots: 4,
   },
   {
     capsuleRadius: { min: 0.1, max: 0.6, step: 0.01 },
@@ -138,5 +160,9 @@ export const playerParams: PlayerParams = registerParams<PlayerParams>(
     slopeSlowdown: { min: 0.1, max: 1, step: 0.05 },
     ashoreReach: { min: 0.2, max: 3, step: 0.05 },
     ashoreVertical: { min: 0.1, max: 2, step: 0.05 },
+    promptFade: { min: 0, max: 1, step: 0.01 },
+    promptRisePx: { min: 0, max: 120, step: 1 },
+    cueMergePx: { min: 0, max: 120, step: 1 },
+    cueMaxDots: { min: 1, max: 12, step: 1 },
   },
 );

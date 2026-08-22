@@ -71,6 +71,8 @@ export interface GameUi {
   isPaused: () => boolean;
   /** §I ui/cinematic — photo mode hides every overlay, HUD included */
   isPhotoMode: () => boolean;
+  /** §I ui/cinematic — full screen is the capture gesture; §T.116 prompts hide on it */
+  isCinematicMode: () => boolean;
   isDevLayerVisible: () => boolean;
   /** short-lived getting-started card; call when the first game frame exists */
   showQuickControls(): void;
@@ -123,6 +125,7 @@ export function createGameUI(callbacks: GameUiCallbacks): GameUi {
     resume: menu.close,
     isPaused: menu.isOpen,
     isPhotoMode: viewModes.isPhoto,
+    isCinematicMode: viewModes.isCinematic,
     isDevLayerVisible: viewModes.isDevVisible,
     showQuickControls: quickControls.show,
     dispose(): void {

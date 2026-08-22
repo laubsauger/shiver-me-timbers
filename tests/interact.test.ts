@@ -13,7 +13,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { Material } from 'three';
-import { createInteract, lookDir, type InteractHost } from '../src/player/interact';
+import { capsuleDistance, createInteract, lookDir, type InteractHost } from '../src/player/interact';
 import { LOOKOUT_SOCKET, RAFT_ACTIONS, RAFT_STATIONS, type RaftAction } from '../src/player/stations';
 import { HandBlend, lerpTransform, poseTransform, turnAngle } from '../src/player/handPoses';
 import { attachDebugKeys, debugKeyAction, type DebugChannel } from '../src/player/debugKeys';
@@ -26,6 +26,8 @@ import { buildRaftBlueprint } from '../src/ship/raftBlueprint';
 import { buildGalleonBlueprint } from '../src/ship/shipBlueprint';
 import { ShipAssembly } from '../src/ship/shipAssembly';
 import { buildDeckHeightfield } from '../src/ship/deckHeightfield';
+import { buildRaftDeckField, createRaftCeiling } from '../src/ship/raftDeckField';
+import { createDeckSurface } from '../src/player/deckSurface';
 import { createInitialState } from '../src/state/simState';
 
 const DT = 1 / 60;
@@ -526,5 +528,93 @@ describe('§V2 determinism and NaN safety', () => {
     expect(ix.focus()).toBeNull();
     host.st = { ...host.st, yaw: Number.NaN };
     expect(() => ix.focus()).not.toThrow();
+  });
+});
+
+/**
+ * §B69 / §B86-4 — A STATION YOU CAN ONLY TOUCH BY CROUCHING IS NOT A STATION.
+ *
+ * `focus()` returned null 0.7 m from the tiller while looking straight at it,
+ * and the gangways (sockets on the log tops, 0.29 m up) only came into focus
+ * from a crouch. The cause was the RANGE metric, not the raft: the distance
+ * was taken eye→socket, so a standing eye 1.6 m over a deck-level socket had
+ * already spent the whole `reach` before moving a step. The property is about
+ * the STANCE, so it is measured on the real deck: from somewhere a walker can
+ * actually stand, at a distance a person would stand at, looking at it.
+ */
+describe('§B69 stations focus from a natural standing stance on the real deck', () => {
+  const deckField = buildRaftDeckField(raft);
+  const ceiling = createRaftCeiling();
+  const deck = createDeckSurface(deckField, { ceilingAt: ceiling });
+  const NEAR = 0.6;
+  const FAR = 1.4;
+
+  interface Stance { d: number; crouch: boolean }
+
+  function stanceThatFocuses(a: RaftAction, standingOnly: boolean): Stance | null {
+    const st = RAFT_STATIONS[a];
+    const q = raftSocket(st.socket) as Vec3;
+    for (let d = NEAR; d <= FAR + 1e-9; d += 0.05) {
+      for (let k = 0; k < 24; k++) {
+        const t = (k / 24) * Math.PI * 2;
+        const x = q[0] + Math.cos(t) * d;
+        const z = q[2] + Math.sin(t) * d;
+        const world = st.frame === 'world';
+        // stand where the raft lets you stand — real deck height, no walls
+        const h = world ? q[1] : deck.heightAt(x, z);
+        if (h === null || (!world && deck.solidAt(x, z))) continue;
+        const c = world ? null : ceiling(x, z);
+        const crouch = c !== null && c - h < P.standHeight;
+        if (standingOnly && crouch) continue;
+        const eye = h + (crouch ? P.crouchHeight : P.standHeight) - P.eyeDrop;
+        const host = fakeHost([x, h, z], Math.atan2(q[0] - x, q[2] - z), Math.atan2(q[1] - eye, d));
+        host.st.crouch = crouch;
+        if (world) host.st.frame = 'world';
+        const ix = createInteract(host, {
+          socketWorld: raftSocket,
+          groundAt: () => h,
+          waterAt: () => h - 10,
+        });
+        if (ix.focus() === a) return { d, crouch };
+      }
+    }
+    return null;
+  }
+
+  it('every station comes into focus from 0.6–1.4 m, standing where the deck lets you stand', () => {
+    for (const a of RAFT_ACTIONS) {
+      const st = RAFT_STATIONS[a];
+      const q = raftSocket(st.socket) as Vec3;
+      const s = stanceThatFocuses(a, false);
+      expect(s, `${a} (${st.socket}) has no stance in reach`).not.toBeNull();
+      const found = s as Stance;
+      expect(found.d).toBeGreaterThanOrEqual(NEAR - 1e-9);
+      expect(found.d).toBeLessThanOrEqual(FAR + 1e-9);
+      // UNDER THE SKY, STANDING MUST BE ENOUGH. The cabin roof is 1.2 m over
+      // its floor [§3 Height], so the stations inside it are worked on your
+      // knees by design (§V85 auto-crouch) — but a crouch anywhere ELSE is
+      // the §B69 defect: nothing about the stance changed, only the eye.
+      const roofed = st.frame !== 'world' && ceiling(q[0], q[2]) !== null;
+      if (!roofed) {
+        expect(stanceThatFocuses(a, true), `${a} focuses only from a crouch`).not.toBeNull();
+      }
+    }
+    expect(raftSocket(LOOKOUT_SOCKET)).not.toBeNull();
+  });
+
+  it('the reach is the CAPSULE\'s, not the eye\'s: a socket at the feet is in reach at arm\'s length', () => {
+    // the exact §B86-4 report: 0.7 m from the tiller socket, which sits at
+    // deck level, facing it. The eye metric made that hypot(0.7, 1.6) = 1.75.
+    const feet: Vec3 = [0, 0, 0];
+    const socket: Vec3 = [0, 0, 0.7]; // level with the boots, 0.7 m ahead
+    const host = fakeHost(feet, 0, Math.atan2(-EYE, 0.7));
+    const ix = createInteract(host, { socketWorld: (id) => (id === 'station-tiller' ? socket : null) });
+    expect(Math.hypot(0.7, EYE)).toBeGreaterThan(P.reach); // the old metric refused it
+    expect(capsuleDistance(host.st, socket, P)).toBeCloseTo(0.7, 6);
+    expect(ix.focus()).toBe('tiller');
+    // and it is still a REACH: the same socket a full reach away is out
+    const far = fakeHost(feet, 0, Math.atan2(-EYE, P.reach + 0.2));
+    const ixFar = createInteract(far, { socketWorld: (id) => (id === 'station-tiller' ? [0, 0, P.reach + 0.2] as Vec3 : null) });
+    expect(ixFar.focus()).toBeNull();
   });
 });

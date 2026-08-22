@@ -15,6 +15,7 @@ import { buildBrigantineBlueprint, buildGalleonBlueprint } from './shipBlueprint
 import { buildRaftDeckField, createRaftCeiling, raftBoardingPoints } from './raftDeckField';
 import { createPlayer, type Player } from '../player';
 import { createHands } from '../player/hands';
+import { createRaftPrompt, type CameraLike, type RaftPrompt } from '../ui/raftPrompt';
 import { raftMaterialParams } from '../params/raftMaterials';
 import { createInitialState } from '../state/simState';
 
@@ -76,8 +77,11 @@ export function placeAtStation(camera: THREE.Camera, assembly: ShipAssembly, nam
 
 export interface FirstPersonWalk {
   player: Player;
+  /** the §T.116 station prompts, drawn over the harness canvas */
+  prompt: RaftPrompt;
   /** advance the walker and write the camera; dt in seconds */
   update(dt: number, camera: THREE.Camera): void;
+  dispose(): void;
 }
 
 /**
@@ -124,9 +128,16 @@ export function attachFirstPerson(
     socketWorld,
   });
   player.setActive(true);
+  // §T.116: the harness gets the SAME prompts the game does — one module, one
+  // label table (§V95). `?fp=1` is where the §V22 reviewer walks the raft, so
+  // an affordance the harness cannot show is an affordance nobody reviews.
+  // There are no view modes here, hence nothing to hide it.
+  let lens: CameraLike | null = null;
+  const prompt = createRaftPrompt({ interact: player.interact, socketWorld, camera: () => lens });
   let hung = false;
   return {
     player,
+    prompt,
     update(dt, camera) {
       if (!hung && player.hands !== null) {
         camera.add(player.hands.group);
@@ -136,6 +147,12 @@ export function attachFirstPerson(
       const pose = player.cameraPose();
       camera.position.copy(pose.position);
       camera.quaternion.copy(pose.quaternion);
+      lens = camera;
+      prompt.update(dt);
+    },
+    dispose(): void {
+      prompt.dispose();
+      player.dispose();
     },
   };
 }

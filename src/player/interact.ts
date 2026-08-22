@@ -54,6 +54,12 @@ export interface InteractOptions {
 export interface Interact {
   /** nearest station within reach and inside the look cone, or null */
   focus(): RaftAction | null;
+  /**
+   * Every station a hand could reach from where the walker stands, NEAREST
+   * FIRST, whether or not they are looking at it — the affordance cue (§T.116)
+   * draws these, and `focus()` is the one of them being looked at.
+   */
+  inReach(): RaftAction[];
   /** E pressed: take hold of the focus, or fire its one-shot */
   begin(): void;
   /** E pressed again / let go */
@@ -101,6 +107,33 @@ function eyeOf(s: PlayerState, p: PlayerParams): Vec3 {
   return [s.pos[0], s.pos[1] + h, s.pos[2]];
 }
 
+/**
+ * §B69/§B86-4 — REACH IS MEASURED FROM THE BODY, NOT FROM THE EYEBALL.
+ *
+ * `focus` used to take the eye→socket distance. The raft's stations are on
+ * the DECK: the tiller socket is 0.29 m up, the gangways sit on the log tops,
+ * and a standing eye is 1.6 m over the feet — so the vertical leg alone ate
+ * the whole 1.6 m `reach` and `focus()` returned null at 0.7 m from the
+ * tiller while looking straight at it (R1-fix §5). Crouching "fixed" it,
+ * which is the tell: nothing about the stance had changed but the eye's
+ * height, and the hands were in the same place either way.
+ *
+ * A person reaches with the hands, and the hands travel the length of the
+ * body. So the RANGE test is the distance from the socket to the walker's
+ * CAPSULE — the vertical segment from the feet to the eye — which is the
+ * honest "can I put a hand on that from here". Level with the eye it is
+ * exactly the old distance, so every station authored at eye height (and the
+ * §V84 tests that stand at them) is unchanged; below the eye it collapses to
+ * the horizontal distance, which is what a helmsman at his tiller has.
+ *
+ * The look CONE is still measured eye→socket: you must look at the thing.
+ */
+export function capsuleDistance(s: PlayerState, q: Vec3, p: PlayerParams): number {
+  const top = s.pos[1] + (s.crouch ? p.crouchHeight : p.standHeight) - p.eyeDrop;
+  const y = clamp(q[1], Math.min(s.pos[1], top), top);
+  return Math.hypot(q[0] - s.pos[0], q[1] - y, q[2] - s.pos[2]);
+}
+
 export function createInteract(host: InteractHost, o: InteractOptions, p: PlayerParams = playerParams): Interact {
   const values = new Map<RaftAction, number>();
   for (const a of RAFT_ACTIONS) values.set(a, o.initial?.[a] ?? DEFAULTS[a] ?? 0);
@@ -119,14 +152,20 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
     return (host.worldToShip ?? identity)(w);
   };
 
-  const focus = (): RaftAction | null => {
+  /**
+   * The stations usable from where the walker stands, nearest first. `aimed`
+   * additionally demands that they be LOOKING at it, which is the difference
+   * between `focus` (one station, the one being offered) and `inReach` (every
+   * station the cue may mark). One scan, one set of rules: a second copy of
+   * this filter would be free to disagree about what is reachable, and then
+   * the cue would light things E does not take.
+   */
+  const scan = (aimed: boolean): RaftAction[] => {
     const s = host.state;
-    if (aloft !== null) return 'ladder'; // the only thing to do up there is come down
     const eye = eyeOf(s, p);
     const dir = lookDir(num(s.yaw), num(s.pitch));
     const cosCone = Math.cos((p.focusConeDeg * Math.PI) / 180);
-    let best: RaftAction | null = null;
-    let bestD = Infinity;
+    const hit: Array<{ a: RaftAction; range: number }> = [];
     for (const a of RAFT_ACTIONS) {
       const st = RAFT_STATIONS[a];
       if (st.kind === 'step-off' && s.frame !== 'ship') continue;
@@ -138,15 +177,25 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
       const dy = q[1] - eye[1];
       const dz = q[2] - eye[2];
       const d = Math.hypot(dx, dy, dz);
-      if (d > p.reach || d < 1e-6) continue;
-      const cos = (dx * dir[0] + dy * dir[1] + dz * dir[2]) / d;
-      if (cos < cosCone) continue;
-      if (d < bestD) {
-        bestD = d;
-        best = a;
+      if (d < 1e-6) continue;
+      // range from the capsule, aim from the eye (see capsuleDistance)
+      const range = capsuleDistance(s, q, p);
+      if (range > p.reach) continue;
+      if (aimed) {
+        const cos = (dx * dir[0] + dy * dir[1] + dz * dir[2]) / d;
+        if (cos < cosCone) continue;
       }
+      hit.push({ a, range });
     }
-    return best;
+    // stable by construction: ties keep RAFT_ACTIONS order, as the old
+    // strictly-less-than scan did
+    hit.sort((x, y) => x.range - y.range);
+    return hit.map((h) => h.a);
+  };
+
+  const focus = (): RaftAction | null => {
+    if (aloft !== null) return 'ladder'; // the only thing to do up there is come down
+    return scan(true)[0] ?? null;
   };
 
   const publish = (a: RaftAction, v: number): void => {
@@ -237,6 +286,9 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
 
   return {
     focus,
+    // aloft the ladder is the only thing in reach, which is also the only
+    // thing `focus` offers up there
+    inReach: () => (aloft !== null ? ['ladder'] : scan(false)),
     begin,
     end,
     held: () => held,

@@ -101,3 +101,53 @@ export const LOOKOUT_SOCKET = 'station-lookout';
 export function isHold(kind: StationKind): boolean {
   return kind === 'hold-turn' || kind === 'hold-slide';
 }
+
+/**
+ * WHAT THE PLAYER IS TOLD A STATION IS (§T.116). Beside the table above on
+ * purpose: a second module naming the same eighteen actions would be a second
+ * source of truth (§V95), and `Record<RaftAction, …>` makes an unlabelled new
+ * action a COMPILE error here rather than a station that walks up silent.
+ *
+ * COPY RULE, the same one the HUD and the quick-controls card follow: name
+ * the THING the player is looking at, in the words the raft itself carries —
+ * 'Guara', not 'centreboard'; 'Halyard', not 'raise sail'. Two actions have
+ * no object to name ('Sleeping mat' is the object of `sleep`; pushing her off
+ * the sand and stepping ashore are gestures), and those read as the gesture.
+ *
+ * `verb` is what the MOUSE does once the station is held, and it exists only
+ * for the hold-* kinds — the prompt swaps the name and the [E] for it while
+ * the hands are busy, because at that moment the player already knows what
+ * they grabbed and does not know which way to pull.
+ */
+export interface StationLabel {
+  /** short human name, shown beside the key */
+  name: string;
+  /** hold-* only: what the drag does while it is held */
+  verb?: string;
+}
+
+const guaraLabel = (where: string): StationLabel => ({ name: `Guara — ${where}`, verb: 'raise / lower' });
+
+export const RAFT_LABELS: Record<RaftAction, StationLabel> = {
+  tiller: { name: 'Tiller', verb: 'turn' },
+  // the five boards in the order buildLogs sockets them (raftPartsLayout.guaraStations)
+  'guara-1': guaraLabel('bow port'),
+  'guara-2': guaraLabel('bow starboard'),
+  'guara-3': guaraLabel('midships'),
+  'guara-4': guaraLabel('stern port'),
+  'guara-5': guaraLabel('stern starboard'),
+  'sheet-p': { name: 'Port sheet', verb: 'haul' },
+  'sheet-s': { name: 'Starboard sheet', verb: 'haul' },
+  halyard: { name: 'Halyard', verb: 'hoist / lower' },
+  radio: { name: 'Radio', verb: 'tune' },
+  chart: { name: 'Chart' },
+  sleep: { name: 'Sleeping mat' },
+  ladder: { name: 'Ladder' },
+  // one wording for all four edges: the player is standing on the one they
+  // are being offered, so naming the side is noise they can already see
+  'gangway-bow': { name: 'Step ashore' },
+  'gangway-port': { name: 'Step ashore' },
+  'gangway-starboard': { name: 'Step ashore' },
+  'gangway-stern': { name: 'Step ashore' },
+  'push-off': { name: 'Push her off' },
+};

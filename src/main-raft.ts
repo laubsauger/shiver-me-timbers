@@ -25,6 +25,7 @@ import { bindResolution, bindWorldSettings } from './core/bootSettings';
 import { bootProgress, bootReady } from './core/bootSplash';
 import { createUnderwater } from './underwater';
 import { createGameUI, initGraphicsSettings, setFeatureSink } from './ui';
+import { createRaftPrompt } from './ui/raftPrompt';
 import { createAudio, attachAudioSettings } from './audio';
 import { createRaftCeiling, raftBoardingPoints } from './ship/raftDeckField';
 import { FollowCam } from './camera';
@@ -163,6 +164,20 @@ async function boot(): Promise<void> {
     onToggle: () => setFp(!player.isActive()),
   });
   bindRaftActions(player, raftControls, sinks);
+  // §T.116: the station being offered, named on screen at its own socket. It
+  // reads `player.interact` and the SAME live socket resolver the stations do
+  // (§V71), and it goes dark whenever the frame is being captured (§I
+  // ui/cinematic) — photo mode and full-screen cinematic both, from the view
+  // modes' own state rather than a flag of its own.
+  const prompt = createRaftPrompt({
+    interact: player.interact,
+    socketWorld,
+    camera: () => app.camera,
+    // photo mode only: cinematic == full screen (§I ui/cinematic), and most
+    // people PLAY full screen — hiding the affordances there would take the
+    // prompts away from the players who need them (§T.116 flagged this)
+    hidden: () => ui.isPhotoMode() || !player.isActive(),
+  });
   followCam.setPoseSource(() => player.cameraPose());
   setFp(true);
   // the hands ride the lens; the camera joins the scene so they draw (and compile now)
@@ -227,6 +242,8 @@ async function boot(): Promise<void> {
         app.render();
       }
       debug.hud.setRenderStats(app.renderer.info.render);
+      // after the render: the lens is where the drawn frame put it
+      prompt.update(frameDt);
       frame.renderAudio(frameDt);
     },
     () => paused,

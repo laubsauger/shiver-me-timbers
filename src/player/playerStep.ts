@@ -277,10 +277,26 @@ function stepSwim(
   s.pos = [nx, ny, nz];
 
   const toWorld = surface.shipToWorld ?? identity;
+  /**
+   * §V85/§B78 — THE CLIMB IS MEASURED FROM THE SEA, NOT FROM THE FEET.
+   *
+   * A swimmer floats with the EYE `swimEyeAbove` over the surface, so the feet
+   * hang a whole body below it (−1.35 m on flat water). Measuring a boarding
+   * point against the FEET therefore asked the raft's foot-rail — 0.44 m of
+   * honest freeboard — to be within `boardVertical` of a point 1.8 m under it,
+   * and no point on this raft ever qualified: re-boarding was impossible
+   * (R2 walk review, §B78-1). What a swimmer actually pulls himself over is
+   * the FREEBOARD: how far the rail stands above the water he is in.
+   *
+   * The sea is sampled AT THE BOARDING POINT (a wave lifts the rail and the
+   * swimmer by different amounts); with no `waterAt` it is the flat sea the
+   * swimmer is already floating on, so nothing else changes meaning.
+   */
   for (const bp of surface.boardingPoints ?? []) {
     const w = toWorld(bp);
     if (Math.hypot(w[0] - nx, w[2] - nz) > p.boardReach) continue;
-    if (Math.abs(w[1] - ny) > p.boardVertical) continue;
+    const sea = surface.waterAt === undefined ? water : num(surface.waterAt(w[0], w[2]));
+    if (Math.abs(w[1] - sea) > p.boardVertical) continue;
     return {
       frame: 'ship',
       pos: [bp[0], bp[1], bp[2]],

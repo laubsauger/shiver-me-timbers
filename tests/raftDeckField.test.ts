@@ -24,6 +24,9 @@ import {
   type WalkSurface,
 } from '../src/player/playerStep';
 import type { PieceDef } from '../src/ship/pieceTypes';
+import type { Material } from 'three';
+import { ShipAssembly } from '../src/ship/shipAssembly';
+import { RAFT_ACTIONS, RAFT_STATIONS } from '../src/player/stations';
 
 const p = raftParams;
 const L = raftLayout(p);
@@ -58,6 +61,10 @@ const h = (x: number, z: number): number => {
   return v;
 };
 const solidAt = (x: number, z: number): boolean => sampleDeckField(field, field.solid, x, z) >= 0.5;
+/** a socket's SHIP-space position through the live assembly (§V71: parented
+ *  pieces — the ladder rides a leaning bipod leg — resolve through it) */
+const assembly = new ShipAssembly(blueprint, () => ({ dispose(): void {} }) as unknown as Material);
+const asmSocket = (id: string): [number, number, number] => assembly.socketWorldPosition(id) as [number, number, number];
 
 const logs = L.logs;
 const centre = logs.find((l) => l.i === 0)!;
@@ -306,5 +313,174 @@ describe('(7) the real player walks the raft', () => {
     });
     expect(reached).toBe(1);
     expect(Math.abs(s.pos[1] - L.logTopY)).toBeLessThan(0.2);
+  });
+});
+
+/**
+ * §T115 / §B78 — THE RAFT AS A PLACE TO WALK, not as a set of surfaces that
+ * happen to be there. The R2 walk review spawned at the tiller and could not
+ * leave it, dead-ended on the starboard strip at the bipod, never found the
+ * ladder, and never got back aboard after going overboard. Every assertion
+ * below is a PROPERTY of the walkable field (§V80) measured with the walker's
+ * OWN consumer numbers (§V83: capsule 0.3, step 0.4), not with a route that
+ * happened to work.
+ */
+describe('§T115 the raft is connected: spawn → door → bow → back aboard', () => {
+  /** the walker's own admissibility, at one point: deck, no wall, headroom */
+  function free(x: number, z: number): number | null {
+    const h = surface.heightAt(x, z);
+    if (h === null) return null;
+    if (surface.solidAt(x, z)) return null;
+    const c = surface.ceilingAt?.(x, z) ?? null;
+    if (c !== null && c - h < playerParams.crouchHeight) return null;
+    return h;
+  }
+
+  // half a capsule radius: fine enough that no gap a shoulder fits through is
+  // missed, coarse enough to sweep the whole raft in a few ms
+  const CELL = playerParams.capsuleRadius / 2;
+  const cell = (x: number, z: number): string => `${Math.round(x / CELL)},${Math.round(z / CELL)}`;
+
+  /** 8-neighbour flood over the walkable field; an edge exists iff a stride
+   *  could take it, i.e. the rise is within the walker's own `stepUp` */
+  function flood(from: readonly [number, number]): Map<string, number> {
+    const seen = new Map<string, number>();
+    const i0 = Math.round(from[0] / CELL);
+    const j0 = Math.round(from[1] / CELL);
+    const h0 = free(i0 * CELL, j0 * CELL);
+    if (h0 === null) return seen;
+    seen.set(`${i0},${j0}`, h0);
+    const queue: Array<[number, number]> = [[i0, j0]];
+    const iMax = Math.ceil(Math.max(-field.minX, field.maxX) / CELL);
+    const jMax = Math.ceil(Math.max(-field.minZ, field.maxZ) / CELL);
+    for (let head = 0; head < queue.length; head++) {
+      const [i, j] = queue[head];
+      const h = seen.get(`${i},${j}`) as number;
+      for (let di = -1; di <= 1; di++) {
+        for (let dj = -1; dj <= 1; dj++) {
+          if (di === 0 && dj === 0) continue;
+          const ni = i + di;
+          const nj = j + dj;
+          if (Math.abs(ni) > iMax || Math.abs(nj) > jMax) continue;
+          const k = `${ni},${nj}`;
+          if (seen.has(k)) continue;
+          const nh = free(ni * CELL, nj * CELL);
+          if (nh === null || Math.abs(nh - h) > playerParams.stepUp) continue;
+          seen.set(k, nh);
+          queue.push([ni, nj]);
+        }
+      }
+    }
+    return seen;
+  }
+
+  const reached = flood([socketPos('station-tiller')[0], socketPos('station-tiller')[2]]);
+  const canReach = (x: number, z: number): boolean => reached.has(cell(x, z));
+
+  it('(T115-2) the tiller spawn is not an island: a free 8-neighbour path runs from it to the doorway', () => {
+    // §B78-2: "the stern is an island — a tiller spawn cannot reach the rest
+    // of the raft". The spawn cell itself must be standable, and the doorway,
+    // the cabin floor, the fore deck and the bow tip must all be in its
+    // component — no jumping (`jumpSpeed` is a hop, and the review found
+    // Space does nothing aboard).
+    expect(reached.size).toBeGreaterThan(0);
+    const laneOutside = L.halfBeam - 0.15; // the strip, outboard of the stores
+    expect(canReach(laneOutside, doorZ), 'the strip abeam the doorway').toBe(true);
+    expect(canReach(hw - 0.6, doorZ), 'the sill').toBe(true);
+    expect(canReach(0, cabinZ), 'the cabin floor').toBe(true);
+    expect(canReach(0, foreMatZ), 'the fore deck').toBe(true);
+    expect(canReach(0, L.bowZ - 1.0), 'the bow').toBe(true);
+  });
+
+  it('(T115-3) the starboard road runs stern → doorway → bow, a full capsule wide the whole way', () => {
+    // §B78-3: the strip dead-ended at the bipod leg. The property is not
+    // "x = 2.3 is walkable" (the leg has to stand somewhere) but that at
+    // EVERY station along the raft there is a lane on the starboard side at
+    // least one capsule DIAMETER wide — a road, not a slot the width of the
+    // man in it. The stores used to leave 0.46 m of it.
+    const width = playerParams.capsuleRadius * 2;
+    const lane = (z: number): number => {
+      let best = 0;
+      let run = 0;
+      for (let x = 0.2; x <= field.maxX; x += 0.02) {
+        run = free(x, z) === null ? 0 : run + 0.02;
+        best = Math.max(best, run);
+      }
+      return best;
+    };
+    // …over the DECKED length. Forward of the mats the raft is bare tapering
+    // logs closing to a point [§1 Bow ends]: it narrows because it is a bow,
+    // and the flood above already proves the tip is reachable.
+    const tip = piece('deck-fore-tip');
+    const deckFwdZ = tip.transform.position[2] + tip.aabb.max[2];
+    for (let z = L.sternZ + 0.5; z <= deckFwdZ; z += 0.1) {
+      expect(lane(z), `starboard lane at z=${z.toFixed(2)}`).toBeGreaterThanOrEqual(width);
+    }
+  });
+
+  it('(T115-3) every station on the raft stands in the walker\'s own component', () => {
+    // §V84 is only true if the stations are REACHABLE ON FOOT. A socket the
+    // flood cannot get within arm's length of is a station that does not
+    // exist for the player — which is what the ladder was, hung 0.26 m
+    // outboard of the deck edge.
+    for (const a of RAFT_ACTIONS) {
+      const q = asmSocket(RAFT_STATIONS[a].socket);
+      let near = false;
+      for (let r = 0.4; r <= playerParams.reach && !near; r += 0.1) {
+        for (let k = 0; k < 16 && !near; k++) {
+          const t = (k / 16) * Math.PI * 2;
+          near = canReach(q[0] + Math.cos(t) * r, q[2] + Math.sin(t) * r);
+        }
+      }
+      expect(near, `${a} (${RAFT_STATIONS[a].socket}) has nowhere to stand`).toBe(true);
+    }
+  });
+
+  it('(T115-1/§V85) every boarding point is within a swimmer\'s climb of the sea', () => {
+    // §B78-1: the climb used to be measured from the swimmer's FEET, which
+    // hang a body-length under the surface — the rails are 0.44 m of honest
+    // freeboard and 1.8 m over his boots, so NOTHING qualified. The property
+    // is about the raft: her freeboard is a climb, at every boarding point.
+    for (const [x, y, z] of raftBoardingPoints(blueprint, p)) {
+      expect(y, `boarding point ${x.toFixed(2)},${z.toFixed(2)} above the sea`).toBeGreaterThan(0);
+      expect(y).toBeLessThanOrEqual(playerParams.boardVertical);
+    }
+  });
+
+  it('(§V85) a swimmer 20 m astern of a drifting raft catches it AND climbs back aboard inside 60 s', () => {
+    // The §V85 test that was only ever run against a synthetic rail: on the
+    // REAL raft, with the REAL boarding points, drifting at the fastest the
+    // invariant allows (swim × 0.5). "Always catchable" includes getting ON.
+    let raftX = 0;
+    const drifting = createDeckSurface(field, {
+      ceilingAt: createRaftCeiling(p),
+      boardingPoints: raftBoardingPoints(blueprint, p),
+      waterAt: () => 0,
+      shipToWorld: (q) => [q[0] + raftX, q[1], q[2]],
+    });
+    const target = raftBoardingPoints(blueprint, p).find(([, , z]) => Math.abs(z - doorZ) < 0.6) as [number, number, number];
+    expect(target).toBeDefined();
+    let s: PlayerState = {
+      frame: 'swim',
+      pos: [target[0] + 20, playerParams.swimEyeAbove - (playerParams.standHeight - playerParams.eyeDrop), target[2]],
+      yaw: 0, pitch: 0, vel: [0, 0, 0], crouch: false, grounded: false,
+    };
+    let t = 0;
+    while (t < 60 && s.frame === 'swim') {
+      raftX += playerParams.swimSpeed * 0.5 * DT; // away from him, at the §V85 limit
+      const bx = target[0] + raftX;
+      s = stepPlayer(
+        { ...s, yaw: Math.atan2(bx - s.pos[0], target[2] - s.pos[2]) },
+        { ...neutralPlayerInput(), forward: 1 },
+        drifting,
+        DT,
+      );
+      t += DT;
+    }
+    expect(s.frame, `still swimming after ${t.toFixed(1)} s`).toBe('ship');
+    expect(t).toBeLessThan(60);
+    // and he is standing on the raft's own deck, in raft-local coordinates
+    expect(surface.heightAt(s.pos[0], s.pos[2])).not.toBeNull();
+    expect(Math.abs((surface.heightAt(s.pos[0], s.pos[2]) as number) - s.pos[1])).toBeLessThan(0.4);
   });
 });
