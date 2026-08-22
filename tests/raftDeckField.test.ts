@@ -443,43 +443,57 @@ describe('§T115 the raft is connected: spawn → door → bow → back aboard',
      * particular: it refuses a SOLID cell whatever the walker's altitude, and
      * the whole cabin envelope — walls, wall tops, roof — is solid in the
      * field. There is no cabin roof surface to land on at any jump height.
+     *
+     * §T.141 RE-RUN WITH THE TUCK. A jump-crouch raises the FEET by the crouch
+     * delta, so the apex the flood must use is the apex of the TUCKED feet —
+     * `jumpHeight + (standHeight − crouchHeight)`, 1.1 m against 0.5 — and
+     * with `stepUp` on top of it the flight is credited 1.5 m of climb where
+     * §T.135 credited 0.9. The whole test is re-run at that number below and
+     * the two answers are compared, because "the flood still passes" is worth
+     * nothing if the flood never saw the extra reach.
      */
-    const apex = playerParams.jumpHeight;
-    const airborne = new Map<string, number>();
-    const queue: Array<[number, number, number]> = []; // i, j, ceiling of the arc
-    for (const [k, h] of reached) {
-      const [i, j] = k.split(',').map(Number);
-      airborne.set(k, h + apex);
-      queue.push([i, j, h + apex]);
-    }
     const iMax = Math.ceil(Math.max(-field.minX, field.maxX) / CELL);
     const jMax = Math.ceil(Math.max(-field.minZ, field.maxZ) / CELL);
-    for (let head = 0; head < queue.length; head++) {
-      const [i, j, ceilY] = queue[head];
-      for (let di = -1; di <= 1; di++) {
-        for (let dj = -1; dj <= 1; dj++) {
-          if (di === 0 && dj === 0) continue;
-          const ni = i + di;
-          const nj = j + dj;
-          if (Math.abs(ni) > iMax || Math.abs(nj) > jMax) continue;
-          // `free` IS the walker's own admissibility — deck, not a wall, and
-          // headroom for the crouched capsule. A cell it refuses is refused
-          // mid-air too (playerStep.admits checks exactly these three).
-          const nh = free(ni * CELL, nj * CELL);
-          if (nh === null) continue;
-          // he can be over this cell if its floor is no more than a stride
-          // above the height he is flying at
-          if (nh - ceilY > playerParams.stepUp) continue;
-          // and once over it he can keep flying at the higher of the two
-          const carry = Math.max(ceilY, nh + apex);
-          const k = `${ni},${nj}`;
-          const seen = airborne.get(k);
-          if (seen !== undefined && seen >= carry - 1e-9) continue;
-          airborne.set(k, carry);
-          queue.push([ni, nj, carry]);
+    /** every cell the flight can be OVER, given how high the feet get */
+    const airborneAt = (apex: number): Map<string, number> => {
+      const seenAt = new Map<string, number>();
+      const queue: Array<[number, number, number]> = []; // i, j, ceiling of the arc
+      for (const [k, h] of reached) {
+        const [i, j] = k.split(',').map(Number);
+        seenAt.set(k, h + apex);
+        queue.push([i, j, h + apex]);
+      }
+      for (let head = 0; head < queue.length; head++) {
+        const [i, j, ceilY] = queue[head];
+        for (let di = -1; di <= 1; di++) {
+          for (let dj = -1; dj <= 1; dj++) {
+            if (di === 0 && dj === 0) continue;
+            const ni = i + di;
+            const nj = j + dj;
+            if (Math.abs(ni) > iMax || Math.abs(nj) > jMax) continue;
+            // `free` IS the walker's own admissibility — deck, not a wall, and
+            // headroom for the crouched capsule. A cell it refuses is refused
+            // mid-air too (playerStep.admits checks exactly these three).
+            const nh = free(ni * CELL, nj * CELL);
+            if (nh === null) continue;
+            // he can be over this cell if its floor is no more than a stride
+            // above the height he is flying at
+            if (nh - ceilY > playerParams.stepUp) continue;
+            // and once over it he can keep flying at the higher of the two
+            const carry = Math.max(ceilY, nh + apex);
+            const k = `${ni},${nj}`;
+            const was = seenAt.get(k);
+            if (was !== undefined && was >= carry - 1e-9) continue;
+            seenAt.set(k, carry);
+            queue.push([ni, nj, carry]);
+          }
         }
       }
-    }
+      return seenAt;
+    };
+    const tuck = playerParams.standHeight - playerParams.crouchHeight;
+    const apex = playerParams.jumpHeight + tuck;
+    const airborne = airborneAt(apex);
     /**
      * A landing is any cell the flight can be over: he falls onto it. Now the
      * question §T.135 actually asks — CAN HE LEAVE? Three ways out, and they
@@ -530,14 +544,54 @@ describe('§T115 the raft is connected: spawn → door → bow → back aboard',
       `${trapped.length} cells a jump can land on and the walk cannot leave`,
     ).toEqual([]);
 
-    // …and the reason it holds is worth pinning too, or the next roof gets
-    // authored as a walkable slab and this test silently keeps passing on a
-    // raft with a ladder onto it. The cabin roof is SOLID over its whole
-    // footprint, and its underside is out of reach of apex + a stride.
+    /**
+     * §T.141 — AND ON THIS RAFT THE TUCK OPENED NOTHING, which is the half of
+     * the answer worth having. Re-run at the PLAIN apex the flood returns the
+     * SAME set, cell for cell: the raft's walkable field runs 0.03 m (the
+     * outer log shoulder at the water) to 1.08 m (the cabin's box layer) and
+     * there is no lip anywhere in the 0.9–1.5 m band where the tuck's extra
+     * reach is the difference. If a future deck grows one, this is the line
+     * that will say so — and the trap check above will then be answering a
+     * question it has actually been asked.
+     */
+    const plain = airborneAt(playerParams.jumpHeight);
+    const opened = [...airborne.keys()].filter((k) => !plain.has(k));
+    expect(
+      opened.slice(0, 8).map((k) => {
+        const [i, j] = k.split(',').map(Number);
+        return `${(i * CELL).toFixed(2)},${(j * CELL).toFixed(2)} @ ${free(i * CELL, j * CELL)}`;
+      }),
+      `${opened.length} cells only a jump-CROUCH can reach — re-read the trap check above`,
+    ).toEqual([]);
+    expect(airborne.size).toBe(plain.size);
+
+    /**
+     * …and the reason it holds is worth pinning too, or the next roof gets
+     * authored as a walkable slab and this test silently keeps passing on a
+     * raft with a ladder onto it.
+     *
+     * §T.141 RE-CUT (§V80). This used to read `deckTop + apex + stepUp <
+     * eaveY` — 1.98 against a 2.13 eave, fifteen centimetres of margin — and
+     * a tuck spends 60 of them, so the inequality is now FALSE and the roof is
+     * still unreachable. It was a DECISION pinned as though it were the
+     * reason. The reason a jump cannot get onto this cabin has never been how
+     * high the eave is: it is that THERE IS NOTHING UP THERE TO LAND ON. The
+     * deck field reports no walkable surface anywhere at roof height — the
+     * envelope is solid, and `free()`/`admits()` refuse a solid cell whatever
+     * the walker's altitude — so however far the flight reaches, the highest
+     * floor under it is still the deck the walk already stands on. That is
+     * what the three lines below say, and they stay true at any apex.
+     */
     const ridgeY = L.cabinFloorY + p.cabinRidge;
     const eaveY = L.cabinFloorY + p.cabinEave;
     const deckTop = Math.max(...[...reached.values()]);
-    expect(deckTop + apex + playerParams.stepUp).toBeLessThan(eaveY);
+    // the tucked flight now reaches ABOVE the eave — and finds no floor there
+    expect(deckTop + apex + playerParams.stepUp).toBeGreaterThan(eaveY);
+    expect(deckTop).toBeLessThan(eaveY);
+    expect(Math.max(...[...airborne.keys()].map((k) => {
+      const [i, j] = k.split(',').map(Number);
+      return free(i * CELL, j * CELL) as number;
+    }))).toBeCloseTo(deckTop, 9);
     expect(eaveY).toBeLessThan(ridgeY);
     for (let z = L.cabinAftZ + 0.1; z < L.cabinFrontZ; z += 0.2) {
       for (let x = -hw + 0.1; x < hw; x += 0.2) {

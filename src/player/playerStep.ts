@@ -116,8 +116,9 @@ export function eyeHeight(crouch: boolean, p: PlayerParams = playerParams): numb
  *    that, with the eave 1.20 m and the ridge 1.45 m over the floor. The
  *    HIGHEST thing the walk can stand on anywhere aboard is 1.08 m (the
  *    cabin's box layer), so apex + `stepUp` tops out at 1.98 against an eave
- *    at 2.13 — 0.15 m of margin, and `tests/raftDeckField.test.ts` asserts
- *    that inequality against the live field rather than these numbers.
+ *    at 2.13. §T.141's tuck spends that margin — a jump-crouch puts the feet
+ *    1.1 m up, 2.58 with a stride on top — and the roof is STILL unreachable,
+ *    for the reason in the next bullet and not for the arithmetic.
  *  · and it could not at ANY height: the whole cabin envelope is `solid` in
  *    the deck field, and `admits()` below refuses a solid cell whatever the
  *    walker's altitude. The roof-trap §T.135 warns about is structurally
@@ -189,7 +190,9 @@ function stepWalk(
   dt: number,
   p: PlayerParams,
 ): PlayerState {
-  const [x, y, z] = s.pos;
+  const x = s.pos[0];
+  const z = s.pos[2];
+  let y = s.pos[1]; // §T.141: a mid-air crouch moves the FEET, so this moves
   const toWorld = surface.shipToWorld ?? identity;
   const ground = surface.heightAt(x, z);
   if (ground === null) return goOverboard(s, surface);
@@ -203,8 +206,62 @@ function stepWalk(
   const ceiling = surface.ceilingAt?.(x, z) ?? null;
   const clearance = ceiling === null ? Infinity : ceiling - ground;
   const standThreshold = s.crouch ? p.standHeight + p.crouchHysteresis : p.standHeight;
-  s.crouch = Boolean(input.crouch) || clearance < standThreshold;
-  const speed = (s.crouch ? p.crouchSpeed : p.walkSpeed) * clamp(num(surface.speedAt?.(x, z) ?? 1, 1), 0, 1);
+  const wasCrouch = s.crouch;
+  // …and the auto half of it is a fact about the room he is STANDING in:
+  // `clearance` is the headroom of a man on this cell, which an airborne one
+  // is not. Gating it on `grounded` is what keeps §T.141's tuck below a thing
+  // the player ASKED for — otherwise flying under an eave would tuck his legs,
+  // and hand him the tuck's extra reach, with no key pressed (§V85 unchanged
+  // on the ground, which is the only place the auto-crouch ever meant
+  // anything: the cabin, the sill, the §T.115 lanes).
+  s.crouch = Boolean(input.crouch) || (s.grounded && clearance < standThreshold);
+
+  /**
+   * §T.141 — A CROUCH MOVES WHICHEVER END OF THE BODY IS FREE.
+   *
+   * `pos` is the FEET and the eye is `pos.y + eyeHeight(crouch)`, so a crouch
+   * is a head-down move by construction. Standing on a deck that is exactly
+   * right: the feet are held by the planks and the head is the end that can
+   * go anywhere. IN THE AIR IT IS BACKWARDS, and that was §T.141's report —
+   * "it pulls the upper body down instead of the lower body up". Nothing
+   * holds a jumper's feet; the head is a ballistic particle travelling
+   * through the body's own arc and no leg can move it. Tucking raises the
+   * FEET; extending lowers them again.
+   *
+   * So on any crouch transition while airborne the feet take the whole delta
+   * and the eye keeps its parabola to the bit. Note what this leaves alone:
+   * the capsule TOP is `pos.y + capsuleHeight(crouch)`, and raising y by
+   * exactly the amount capsuleHeight falls leaves it untouched — the tucked
+   * capsule is a strict SUBSET of the standing one at the same instant, so a
+   * tuck can never push the head into something the standing jump cleared.
+   * All it buys is reach under the feet, which is the point: apex + `stepUp`
+   * becomes apex + delta + `stepUp`, and that is the lip a jump-crouch clears
+   * and a plain jump does not.
+   *
+   * THE RELEASE MID-AIR IS A HOLD, NOT A PUSH-OUT. If the legs cannot extend
+   * — the tucked feet are over a surface less than a delta below them, i.e.
+   * inside the very ledge he tucked to clear — the tuck is KEPT for this
+   * tick and retried on the next. A push-out would have to pick a direction
+   * and would move the EYE, which is the exact pop this task exists to
+   * remove; holding is a no-op on the eye, is deterministic, and resolves
+   * itself either when he clears the ledge or when he lands (landing puts the
+   * feet ON the surface, and the stand-up then happens grounded, where the
+   * eye moving IS the correct reading).
+   */
+  if (!s.grounded && s.crouch !== wasCrouch) {
+    // never negative: a panel with crouchHeight above standHeight would
+    // otherwise drive the feet DOWN on a tuck (§V28 — a knob out of order is
+    // a no-op here, not an inverted body)
+    const tuck = Math.max(0, num(p.standHeight) - num(p.crouchHeight));
+    if (s.crouch) y += tuck;
+    else if (y - tuck >= ground) y -= tuck;
+    else s.crouch = true; // no room to put the feet down: hold the tuck
+  }
+
+  // the crouch speed is a LEG cost — a duck-walk is slow because the legs are
+  // carrying the body bent. Mid-air they are carrying nothing, and a tuck that
+  // halved his ground speed would fall SHORT of the thing he tucked to clear.
+  const speed = (s.crouch && s.grounded ? p.crouchSpeed : p.walkSpeed) * clamp(num(surface.speedAt?.(x, z) ?? 1, 1), 0, 1);
   const vx = wx * speed;
   const vz = wz * speed;
 

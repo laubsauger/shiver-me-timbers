@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { PerspectiveCamera, Quaternion, Vector3 } from 'three';
 import {
   createPlayerState,
+  eyeHeight,
   jumpSpeed,
   neutralPlayerInput,
   stepPlayer,
@@ -823,5 +824,249 @@ describe('§B103 the camera reads the drawn hull, not the simulated one', () => 
       spawn: [1.5, field103.deckY, 0],
     });
     expect(p.cameraPose().position.x).toBeCloseTo(q.cameraPose().position.x, 10);
+  });
+});
+
+/**
+ * §T.141 THE TUCK. USER: "if we jump and then crouch, we are getting pulled
+ * down — jump-crouch doesn't follow the jump trajectory, it pulls the upper
+ * body down instead of the lower body up, so we can't jump-crouch onto
+ * certain things."
+ *
+ * `pos` is the FEET and the eye is derived as `pos.y + eyeHeight(crouch)`, so
+ * every crouch is a HEAD-DOWN move. On the ground that is right — the feet are
+ * pinned to the deck and the head is what can go anywhere. In the air it is
+ * exactly backwards: nothing is holding the feet, the body is on a ballistic
+ * arc through its own mass, and pulling the legs up is the only thing a jumper
+ * can actually do. So the rule below is one rule with two readings of the same
+ * fact — A CROUCH MOVES WHICHEVER END IS FREE:
+ *
+ *   grounded  → the feet are held, the eye drops by the crouch delta;
+ *   airborne  → the eye is held on its arc, the feet rise by the crouch delta.
+ *
+ * The capsule TOP is `pos.y + capsuleHeight(crouch)`, which the airborne form
+ * leaves untouched by construction: the tucked capsule is a strict SUBSET of
+ * the standing one at the same instant, so no tuck can push the head into
+ * anything the standing jump was clear of. All the tuck buys is reach under
+ * the feet — which is the capability §T.141 is about.
+ */
+describe('§T.141 jump + crouch is a TUCK: the feet come up, the head keeps its arc', () => {
+  const delta = P.standHeight - P.crouchHeight;
+  const eyeOf = (s: PlayerState): number => s.pos[1] + eyeHeight(s.crouch);
+
+  it('mid-air crouch leaves the EYE’s y trajectory unchanged to the millimetre, and raises the FEET by the crouch delta', () => {
+    // THE defect, in the smallest form that shows it: two identical jumps off
+    // the same flat deck, one of which tucks a few ticks after launch. The
+    // head is a ballistic particle and nothing the legs do can move it, so the
+    // two eye tracks must be the same curve. Before the fix the tucked one
+    // sagged by the whole crouch delta on the tick the key went down.
+    const surface = flat(() => 0);
+    const launch = walkInput({ forward: 0, jump: true });
+    let plain = stepPlayer(settled(surface), launch, surface, DT);
+    let tucked = stepPlayer(settled(surface), launch, surface, DT);
+    expect(plain.grounded).toBe(false);
+
+    const TUCK_AT = 6; // a few ticks up, well clear of the deck
+    let worstEye = 0;
+    let sawTuck = false;
+    for (let i = 0; i < 200; i++) {
+      plain = stepPlayer(plain, neutralPlayerInput(), surface, DT);
+      tucked = stepPlayer(tucked, walkInput({ forward: 0, crouch: i >= TUCK_AT }), surface, DT);
+      // the tucked arc outlives the plain one — his feet are a delta higher,
+      // so they reach the deck later. Compare only where both are still flying.
+      if (plain.grounded) break;
+      if (i < TUCK_AT) continue;
+      sawTuck = true;
+      expect(tucked.crouch).toBe(true);
+      expect(tucked.grounded).toBe(false); // the tuck does not "land" him early
+      worstEye = Math.max(worstEye, Math.abs(eyeOf(tucked) - eyeOf(plain)));
+      // …and the whole difference went into the FEET
+      expect(tucked.pos[1] - plain.pos[1]).toBeCloseTo(delta, 9);
+    }
+    expect(sawTuck).toBe(true);
+    expect(worstEye, 'worst eye divergence over the arc, metres').toBeLessThan(1e-3);
+  });
+
+  it('the tuck does not change the flight either: same vertical velocity, same air control', () => {
+    // a tuck that slowed him down would fall SHORT of the thing he tucked to
+    // clear, which is the other half of "we can't jump-crouch onto certain
+    // things" — the crouch speed is a LEG cost and the legs are not carrying
+    // him mid-air.
+    const surface = flat(() => 0);
+    const launch = walkInput({ jump: true });
+    let plain = stepPlayer(settled(surface), launch, surface, DT);
+    let tucked = stepPlayer(settled(surface), launch, surface, DT);
+    for (let i = 0; i < 200; i++) {
+      plain = stepPlayer(plain, walkInput(), surface, DT);
+      tucked = stepPlayer(tucked, walkInput({ crouch: i >= 4 }), surface, DT);
+      if (plain.grounded) break;
+      expect(tucked.vel[1]).toBeCloseTo(plain.vel[1], 9);
+      expect(tucked.vel[2]).toBeCloseTo(plain.vel[2], 9);
+      expect(tucked.pos[2]).toBeCloseTo(plain.pos[2], 9);
+    }
+  });
+
+  /**
+   * The lip is SYNTHETIC, and deliberately so. The real raft has no ledge of
+   * this kind: `tests/raftDeckField.test.ts` measures its walkable field at
+   * 0.03 m (the outer log shoulder at the waterline) to 1.08 m (the cabin's
+   * box layer), every one of those surfaces already inside the walk's own
+   * flood, and the one thing standing higher — the cabin roof — is SOLID over
+   * its whole footprint and refused by `admits()` at any altitude. A lip only
+   * a tuck can clear does not exist aboard, so pinning this property to the
+   * raft would pin it to nothing. It is a property of the LOCOMOTION, and the
+   * fixture is the smallest surface that states it.
+   */
+  const LIP = P.jumpHeight + P.stepUp + 0.15; // just out of the plain jump's reach
+  const ledge = flat((_x, z) => (z >= 2 ? LIP : 0));
+
+  function jumpAt(z0: number, crouchFrom: number): PlayerState {
+    // crouch is NEVER held at launch: §T.135 refuses a jump from a crouch
+    let s = stepPlayer(settled(ledge, [0, 0, z0]), walkInput({ jump: true }), ledge, DT);
+    for (let i = 0; i < 240; i++) {
+      s = stepPlayer(s, walkInput({ crouch: i >= crouchFrom }), ledge, DT);
+      if (s.grounded && i > crouchFrom + 2) break;
+    }
+    return s;
+  }
+
+  it('a jump-CROUCH clears a lip the plain jump cannot — the reach the tuck is for', () => {
+    const plain = jumpAt(1.55, Number.POSITIVE_INFINITY);
+    expect(plain.grounded).toBe(true);
+    expect(plain.pos[1], 'the plain jump is turned away by the lip').toBe(0);
+    expect(plain.pos[2]).toBeLessThan(2);
+
+    const tuck = jumpAt(1.55, 1);
+    expect(tuck.grounded).toBe(true);
+    expect(tuck.pos[2], 'the tuck got him over the lip').toBeGreaterThanOrEqual(2);
+    expect(tuck.pos[1], 'and onto it, not into it').toBeCloseTo(LIP, 9);
+    // the gate is the tuck's extra reach and nothing else: apex + stepUp with
+    // the feet tucked clears LIP, and without it does not
+    expect(P.jumpHeight + P.stepUp).toBeLessThan(LIP);
+    expect(P.jumpHeight + delta + P.stepUp).toBeGreaterThan(LIP);
+  });
+
+  it('releasing the tuck mid-air over the lip HOLDS it rather than dropping the feet into the deck', () => {
+    // he tucked to clear the lip and his feet are now inside the lip's volume.
+    // Extending the legs there is not a thing a body can do, and doing it
+    // anyway teleports the feet through a surface. The tuck is HELD — a no-op
+    // on the eye, retried every tick — and it resolves itself the moment he
+    // lands (below) or the geometry under him clears.
+    const RELEASE = 18;
+    let s = stepPlayer(settled(ledge, [0, 0, 1.55]), walkInput({ jump: true }), ledge, DT);
+    let heldWhileInside = false;
+    for (let i = 0; i < 240; i++) {
+      // tuck on tick 1, release again on tick 18 — by then he is past the
+      // lip's edge with his tucked feet a good 0.5 m INSIDE its volume
+      s = stepPlayer(s, walkInput({ crouch: i >= 1 && i < RELEASE }), ledge, DT);
+      const ground = ledge.heightAt(s.pos[0], s.pos[2]);
+      expect(ground).not.toBeNull();
+      expect(s.pos[1], 'the feet never end a tick below the surface they are over').toBeGreaterThanOrEqual(
+        (ground as number) - 1e-9,
+      );
+      if (i >= RELEASE && !s.grounded && s.pos[1] - delta < (ground as number)) {
+        expect(s.crouch, 'no room to extend: the tuck is held').toBe(true);
+        heldWhileInside = true;
+      }
+      if (s.grounded && i > RELEASE) break;
+    }
+    expect(heldWhileInside, 'the scenario actually exercised a blocked release').toBe(true);
+    expect(s.grounded).toBe(true);
+    expect(s.pos[1]).toBeCloseTo(LIP, 9);
+    // and now that he is standing on it, the release he asked for takes effect
+    s = stepPlayer(s, walkInput({ forward: 0 }), ledge, DT);
+    expect(s.crouch).toBe(false);
+    expect(s.pos[1], 'standing up on the lip moves the HEAD, not the feet').toBeCloseTo(LIP, 9);
+  });
+
+  it('releasing the tuck over OPEN AIR extends the legs: the feet drop by the delta, the eye does not move', () => {
+    // the mirror of the case above, and the reason it is a HOLD and not a
+    // refusal: with room under him the legs come back down, and it is again
+    // the feet that move.
+    const pit = flat(() => -20);
+    let s = stepPlayer(settled(pit, [0, 0, 0]), walkInput({ forward: 0, jump: true }), pit, DT);
+    for (let i = 0; i < 6; i++) s = stepPlayer(s, walkInput({ forward: 0, crouch: true }), pit, DT);
+    expect(s.crouch).toBe(true);
+    const before = { feet: s.pos[1], eye: eyeOf(s) };
+    s = stepPlayer(s, walkInput({ forward: 0, crouch: false }), pit, DT);
+    expect(s.crouch).toBe(false);
+    // gravity for the tick lands on both alike; the delta is all that differs
+    expect(s.pos[1]).toBeCloseTo(before.feet - delta + s.vel[1] * DT, 9);
+    expect(eyeOf(s)).toBeCloseTo(before.eye + s.vel[1] * DT, 9);
+  });
+
+  it('landing tucked puts him ON the surface at the deck field’s own step-up rule, never inside it', () => {
+    // the fall resolves against `heightAt` exactly as the standing landing
+    // does — the tucked feet ARE the bottom of the capsule, so the same test
+    // (`ny <= h`) is the right one and the snap can never exceed `stepUp`.
+    const step = flat((_x, z) => (z >= 2 ? 0.3 : 0));
+    let s = stepPlayer(settled(step, [0, 0, 1.6]), walkInput({ jump: true }), step, DT);
+    let minClearance = Infinity;
+    for (let i = 0; i < 240; i++) {
+      s = stepPlayer(s, walkInput({ crouch: true }), step, DT);
+      const g = step.heightAt(s.pos[0], s.pos[2]) as number;
+      minClearance = Math.min(minClearance, s.pos[1] - g);
+      if (s.grounded && i > 4) break;
+    }
+    expect(minClearance, 'never a tick with the feet under the deck').toBeGreaterThanOrEqual(-1e-9);
+    expect(s.grounded).toBe(true);
+    expect(s.pos[2]).toBeGreaterThanOrEqual(2);
+    expect(s.pos[1]).toBeCloseTo(0.3, 9);
+    expect(s.crouch).toBe(true); // still holding the key: crouched ON the step
+    // release: he stands up where he landed, feet unmoved
+    const up = stepPlayer(s, walkInput({ forward: 0 }), step, DT);
+    expect(up.crouch).toBe(false);
+    expect(up.pos[1]).toBeCloseTo(0.3, 9);
+  });
+
+  it('GROUNDED crouch is untouched: the feet stay on the deck and the EYE takes the whole delta', () => {
+    // the §T.115 lanes, the cabin auto-crouch and the doorway sill are all
+    // grounded, and §T.141 must be invisible to every one of them. The
+    // property that says so — and that the airborne rule cannot leak into —
+    // is that while `grounded` the feet are exactly `heightAt`, every tick,
+    // through crouch downs and ups and a moving ceiling.
+    let ceiling: number | null = null;
+    const rolling = flat((x, z) => 0.25 * Math.sin(x * 0.7) + 0.15 * z, { ceilingAt: () => ceiling });
+    let s = settled(rolling, [0, 0, 0]);
+    let toggles = 0;
+    for (let i = 0; i < 600; i++) {
+      ceiling = i % 200 < 100 ? null : 1.4;
+      const before = { crouch: s.crouch, eye: eyeOf(s) };
+      s = stepPlayer(s, walkInput({ forward: i % 60 < 40 ? 1 : -1, crouch: i % 37 === 0 }), rolling, DT);
+      expect(s.grounded, `tick ${i} never leaves the deck`).toBe(true);
+      expect(s.pos[1]).toBeCloseTo(rolling.heightAt(s.pos[0], s.pos[2]) as number, 12);
+      if (s.crouch !== before.crouch) {
+        toggles++;
+        // the eye carries the crouch delta plus whatever the deck did under
+        // him — never the feet carrying it instead
+        const deckMove = s.pos[1] - (before.eye - eyeHeight(before.crouch));
+        expect(eyeOf(s) - before.eye - deckMove).toBeCloseTo(s.crouch ? -delta : delta, 12);
+      }
+    }
+    expect(toggles, 'the scenario really did stand up and crouch down again').toBeGreaterThan(4);
+  });
+
+  it('§V2 the tuck is deterministic and NaN-safe', () => {
+    const script = (): string => {
+      const surface = flat((_x, z) => (z > 2 ? 0.9 : 0), { ceilingAt: (_x, z) => (z > 6 ? 1.4 : null) });
+      let s = settled(surface);
+      for (let i = 0; i < 600; i++) {
+        s = stepPlayer(
+          s,
+          { forward: i % 50 < 40 ? 1 : -1, strafe: 0, jump: i % 45 === 0, crouch: i % 45 > 2 && i % 45 < 20, yawDelta: 0.002, pitchDelta: 0 },
+          surface,
+          DT,
+        );
+      }
+      return JSON.stringify(s);
+    };
+    expect(script()).toBe(script());
+    const bad = flat(() => 0);
+    let s = settled(bad);
+    s = stepPlayer(s, walkInput({ jump: true }), bad, DT);
+    s = stepPlayer({ ...s, pos: [0, Number.NaN, 0] }, walkInput({ crouch: true }), bad, DT);
+    s = stepPlayer(s, walkInput({ crouch: false }), bad, Number.NaN);
+    s = stepPlayer(s, walkInput({ crouch: true }), bad, DT);
+    for (const v of [...s.pos, ...s.vel, s.yaw, s.pitch]) expect(Number.isFinite(v)).toBe(true);
   });
 });
