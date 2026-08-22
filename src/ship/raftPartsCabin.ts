@@ -221,11 +221,24 @@ export function buildCabin(p: RaftParams, L: RaftLayout): PieceDef[] {
   }));
 
   // WALLS — thin woven panels; the material does the weave (§T90)
-  out.push(box('cabin-wall-port', 'cabin-wall', -hw, -hw + t, base, eaveY, z0, z1));
+  //
+  // §T129b — THE SIDE WALLS STOP AT THE GABLES. They used to run the full
+  // `cabinLength` while the gables ran the full `cabinWidth`, so at each of the
+  // four corners the two panels occupied the SAME 5 cm × 5 cm × 1.5 m of space:
+  // the side wall's outer face and the gable's end face landed on one plane
+  // pointing one way, and so did the gable's outer face and the side wall's end
+  // cap. Eight patches of surface the depth buffer had no way to order, which
+  // is the user's "the side walls and the back walls are stuck in each other".
+  // The gables span the width and close the corners; the side walls fill the
+  // clear length BETWEEN them, butting each gable's inner face — a butt joint's
+  // two faces are anti-parallel, so one is always culled and it cannot fight.
+  const sideZ0 = z0 + t;
+  const sideZ1 = z1 - t;
+  out.push(box('cabin-wall-port', 'cabin-wall', -hw, -hw + t, base, eaveY, sideZ0, sideZ1));
   const openZ0 = z0 + p.cabinOpeningAftOffset;
   const openZ1 = openZ0 + p.cabinOpeningLength;
-  out.push(box('cabin-wall-starboard-aft', 'cabin-wall', hw - t, hw, base, eaveY, z0, openZ0));
-  out.push(box('cabin-wall-starboard-fwd', 'cabin-wall', hw - t, hw, base, eaveY, openZ1, z1));
+  out.push(box('cabin-wall-starboard-aft', 'cabin-wall', hw - t, hw, base, eaveY, sideZ0, openZ0));
+  out.push(box('cabin-wall-starboard-fwd', 'cabin-wall', hw - t, hw, base, eaveY, openZ1, sideZ1));
   // gable ends: wall height + the triangle up to the ridge [§3 Museum: gable ends woven]
   const rise = ridgeY - eaveY;
   for (const [name, za, zb] of [['aft', z0, z0 + t], ['fwd', z1 - t, z1]] as const) {

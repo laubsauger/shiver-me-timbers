@@ -84,14 +84,21 @@ export function createWeaveMaterial(
   const fcv = fv.div(width);
   const resolved = periodResolved(cu, fcu).min(periodResolved(cv, fcv));
 
-  // BASKET WEAVE IN BLOCKS, not a per-strand checker (§B70). The museum walls
-  // [PHOTO-04,08] are plaited in checks of ~5 strands: inside a block every
-  // strand runs one way, the next block the other. A per-strand over/under
-  // (the previous form) is a 9 cm period that is sub-pixel from 10 m — all
-  // the read there was a moiré — while a 22 cm check is exactly the scale
-  // the reference shows at 10–30 m. `overU` = the block whose strands run
-  // along u; a smooth sin product so the height never steps at a parity
-  // flip (§B.20), faded to its mean ½ once a block is sub-pixel (§V.48b).
+  // BASKET WEAVE IN CHECKS of `weaveBlock` strands: inside a check every
+  // strand runs one way, the next check the other. `overU` = the check whose
+  // strands run along u; a smooth sin product so the height never steps at a
+  // parity flip (§B.20), faded to its mean ½ once a check is sub-pixel (§V.48b).
+  //
+  // §T129c — THE CHECK IS ONE STRAND WIDE AGAIN, i.e. a plain over-under
+  // plait. §B70 widened it to five because a per-strand parity was a 9 cm
+  // period going sub-pixel from 10 m and all that survived was a moiré — but
+  // the cure for THAT is the band-limit, and `blockResolved` below is now it:
+  // the parity fades to a flat ½ the moment a check stops resolving, so it
+  // cannot moiré at any range. What the five bought instead was a 22.5 cm
+  // repeat, and [§3 Walls] gives the cabin ONE dimension — the 4–5 cm split
+  // bamboo strip. The user photographed the difference: "the wall reads as
+  // stacked crates, not woven cane" (§V66 — a feature is scaled by its own
+  // dimension, and the check's own dimension is the strand it is made of).
   const bu = cu.div(uBlock);
   const bv = cv.div(uBlock);
   const fbu = fcu.div(uBlock);
@@ -122,7 +129,11 @@ export function createWeaveMaterial(
   const blockEdge = bandLimitedEdge(dbu.min(dbu.oneMinus()), bu, uEdge.div(uBlock), fbu)
     .min(bandLimitedEdge(dbv.min(dbv.oneMinus()), bv, uEdge.div(uBlock), fbv));
   const strandGap = mix(edgeU, edgeV, overU).oneMinus();
-  const gap = strandGap.max(blockEdge.oneMinus().mul(variant.oneMinus()));
+  // …and a check ONE strand wide has no boundary of its own: `blockEdge` would
+  // then be the strand grid a second time, and darkening BOTH axes everywhere
+  // turns the plait into a lattice — only the strand on TOP shows its gap.
+  const checked = uBlock.sub(1).clamp(0, 1);
+  const gap = strandGap.max(blockEdge.oneMinus().mul(variant.oneMinus()).mul(checked));
 
   // per-strand tone, a per-period step gated on the period (§V.48): a strand
   // along u is indexed by its v row
@@ -182,6 +193,36 @@ export function createWeaveMaterial(
 }
 // ---------------------------------------------------------------------------
 
+/**
+ * §T129 — THE DOWN-SLOPE AXIS of a pitched slab, and the ridge axis across it,
+ * from WORLD DOWN expressed in the slab's own axes (`piece.downLocal`). CPU
+ * mirror of the three node lines at the head of {@link createThatchMaterial},
+ * in the same spirit as `periodResolvedValue`: the node graph belongs to the
+ * GPU, the contract it has to keep is testable here.
+ *
+ * WHY IT IS NOT `downLocal` ITSELF — the defect the user photographed. Every
+ * thatch piece is a slab whose local +y is its face normal, so world down
+ * splits into a component lying ALONG the face (the axis a course of leaves is
+ * laid against, and the only one that means anything to the pattern) and one
+ * going THROUGH it. On a slab pitched at θ the first is sin θ of the whole: at
+ * the cabin roof's 11.8° that is 0.204, so `positionLocal.dot(downLocal)`
+ * advanced 0.20 m per metre travelled down the slope and every course line,
+ * strand and eave band came out 4.9× too long — a shadow smeared the length of
+ * the roof instead of a course every 12 cm. §V66: scale a feature by its OWN
+ * dimension, and this feature's dimension is the metre down the SLOPE.
+ *
+ * A slab with NO pitch has no down-slope axis at all, and both vectors come
+ * back zero rather than pointing somewhere arbitrary — the pattern goes flat,
+ * which is the honest answer to "which way do the leaves run" on the flat.
+ */
+export function thatchSlopeAxes(downLocal: THREE.Vector3): { along: THREE.Vector3; across: THREE.Vector3 } {
+  const along = new THREE.Vector3(downLocal.x, 0, downLocal.z);
+  along.divideScalar(Math.max(1e-4, along.length()));
+  const across = new THREE.Vector3().crossVectors(along, new THREE.Vector3(0, 1, 0));
+  across.divideScalar(Math.max(1e-3, across.length()));
+  return { along, across };
+}
+
 export function createThatchMaterial(
   frame?: LocalFrame,
   p: RaftMaterialParams = raftMaterialParams,
@@ -202,9 +243,12 @@ export function createThatchMaterial(
   const uStagger = uniform(p.thatchTileStagger);
   const piece = createRaftPieceUniforms();
 
-  // strands run DOWN the slope: world down, expressed in piece axes per object
+  // strands run DOWN THE SLOPE — the slab's own axis, ⊥ down the WORLD. These
+  // four lines are {@link thatchSlopeAxes}; read its docstring for why the
+  // difference is a 4.9× stretch of everything below (§T129a, §V66).
   const pos = positionLocal;
-  const down = piece.downLocal;
+  const alongRaw = piece.downLocal.mul(vec3(1, 0, 1));
+  const down = alongRaw.div(alongRaw.length().max(1e-4));
   const acrossRaw = cross(down, vec3(0, 1, 0));
   const across = acrossRaw.div(acrossRaw.length().max(1e-3));
   const along = pos.dot(down); // metres down the slope

@@ -318,8 +318,19 @@ export function buildThatchRoofGeometry(aabb: AABB, shape: Record<string, number
   const parts: THREE.BufferGeometry[] = [];
   for (let k = 0; k < courses.length; k++) {
     const c = courses[k];
-    const x0 = Math.min(at(c.head), at(c.butt));
-    const x1 = Math.max(at(c.head), at(c.butt));
+    // §T129a — DRAW THE COURSE, NOT THE PART OF IT THAT IS BURIED. A course
+    // laps back under the one above it (that lap is real, and `thatchCourses`
+    // keeps it), but every course shares ONE underside, so the lapped stretch
+    // put two course boxes on the same ceiling plane facing the same way over
+    // 0.14 m × 4.8 m — 2 m² of z-fighting under each slope, and the fight lands
+    // exactly on the eave soffit a man at the tiller is looking up at. The
+    // upper course's box already fills that stretch (same bottom, higher top),
+    // so the lower one starts where its neighbour's butt ends: identical
+    // silhouette, no shared plane, no overdraw (same box count, so the tri
+    // budget is untouched).
+    const head = k === 0 ? c.head : Math.max(c.head, courses[k - 1].butt);
+    const x0 = Math.min(at(head), at(c.butt));
+    const x1 = Math.max(at(head), at(c.butt));
     if (k < courses.length - 1) {
       parts.push(boxBetween(x0, x1, c.bottom, c.top, -zHalf, zHalf));
       continue;

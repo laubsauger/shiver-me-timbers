@@ -42,7 +42,7 @@ export interface RaftMaterialParams {
   weaveTan: number; // greying tan [§7 Bamboo: "cabin weave ... → greying tan"]
   weaveDark: number; // shadowed under-strip / gap
   weaveStrip: number; // m — a strip of split bamboo, 4–5 cm
-  weaveBlock: number; // strands per plaited block — the basket's check, ~5 strands ≈ 22 cm [PHOTO-04,08] EST
+  weaveBlock: number; // strands per plaited check. 1 = the plain over-under plait [§3 Walls]; >1 widens the check, which §T129c found reading as crates at 5
   weaveEdge: number; // fraction of a strip — the strip edge, the band-limit width
   weaveRelief: number; // m — over/under crown height
   weaveToneVar: number; // per-strip tone jitter
@@ -143,7 +143,7 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     weaveTan: 0xb9a57a,
     weaveDark: 0x6e6048,
     weaveStrip: 0.045,
-    weaveBlock: 5,
+    weaveBlock: 1, // §T129c — [§3 Walls] 4–5 cm strips; at 5 the wall repeated every 22.5 cm and read as stacked crates
     weaveEdge: 0.12,
     weaveRelief: 0.004,
     weaveToneVar: 0.08,

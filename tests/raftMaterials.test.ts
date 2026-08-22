@@ -25,9 +25,12 @@ import {
   konTikiFacePrimitives,
   konTikiFaceSdf,
 } from '../src/ship/raftSailFace';
+import * as THREE from 'three/webgpu';
 import { float, vec2 } from 'three/tsl';
 import { hashPieceId, pieceIdOfMesh } from '../src/ship/raftMaterialNodes';
 import { createSailClothMaterial } from '../src/ship/sailMaterial';
+import { thatchSlopeAxes } from '../src/ship/raftMaterialsWeave';
+import { roofSlope } from '../src/ship/raftPartsCabin';
 import { buildRaftBlueprint } from '../src/ship/raftBlueprint';
 import { raftParams } from '../src/params/raft';
 import { raftMaterialParams } from '../src/params/raftMaterials';
@@ -270,6 +273,74 @@ describe('§B70 — the face SDF resolves its node type in linear time', () => {
     expect(d.fill.getNodeType(builder)).toBe('float');
     expect(d.stroke.getNodeType(builder)).toBe('float');
     expect(performance.now() - t0).toBeLessThan(250);
+  });
+});
+
+/**
+ * §T129 — WHAT THE CABIN IS DRAWN AT. Both halves are §V66: a feature is
+ * scaled by its OWN dimension, and both of these had drifted onto somebody
+ * else's. The weave was reading at the plaited CHECK (an EST) instead of at
+ * the split-bamboo strip the reference gives a number for; the thatch was
+ * reading down the WORLD instead of down the ROOF.
+ */
+describe('§T129 the cabin weave and the thatch are on the reference dimension (§V66)', () => {
+  const m = raftMaterialParams;
+
+  it('the wall plaits at the reference strip: the unit the eye reads is 4–5 cm, not a 20 cm check', () => {
+    // [§3 Walls] "split-bamboo basket weave (~4–5 cm strips)" — the ONE
+    // dimension the reference gives the cabin wall. `weaveStrip` had it right
+    // all along; `weaveBlock` then multiplied it by five, and what the frame
+    // shows is the product: 22.5 cm slabs of parallel canes that read as
+    // stacked crates. The number that has to sit in the band is therefore the
+    // repeat the wall actually presents, not the strip hiding inside it.
+    expect(m.weaveStrip).toBeGreaterThanOrEqual(0.04);
+    expect(m.weaveStrip).toBeLessThanOrEqual(0.05);
+    const check = m.weaveStrip * Math.max(1, m.weaveBlock);
+    expect(check, 'the plaited check is off the reference band').toBeGreaterThanOrEqual(0.04);
+    expect(check, 'the plaited check is off the reference band').toBeLessThanOrEqual(0.05);
+    // …and the ratio §V66 actually cares about: the cabin's own 2.4 m wall
+    // carries the reference's ~50 strips across, not a dozen crates
+    expect(raftParams.cabinWidth / check).toBeGreaterThanOrEqual(48);
+  });
+
+  it('the thatch runs down the SLOPE, not down the WORLD — a metre of course is a metre of roof', () => {
+    const slope = roofSlope(raftParams);
+    for (const sign of [-1, 1]) {
+      // the roof slab's own frame: rotated about z by −sign·slope, so world
+      // down lands in the slab's axes as `down` (this is `piece.downLocal`)
+      const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, -sign * slope));
+      const down = new THREE.Vector3(0, -1, 0).applyQuaternion(q.clone().invert());
+      const { along, across } = thatchSlopeAxes(down);
+      // it lies IN the slab (local +y is the slab's normal) and is unit
+      expect(along.y).toBeCloseTo(0, 9);
+      expect(along.length()).toBeCloseTo(1, 9);
+      // and it points DOWN the slope: +x to starboard, −x to port
+      expect(Math.sign(along.x)).toBe(sign);
+      // THE PROPERTY. One metre travelled down the slope must advance the
+      // coordinate by one metre — otherwise every course, strand and eave band
+      // is stretched by the reciprocal. Read raw, `downLocal` gives sin θ.
+      const step = new THREE.Vector3(sign, 0, 0);
+      expect(step.dot(along), 'the course coordinate is not measured on the roof').toBeCloseTo(1, 9);
+      expect(step.dot(down), 'the frame this replaces: 1/sin θ = 4.9× too long').toBeCloseTo(Math.sin(slope), 9);
+      // the ridge axis is unit, perpendicular, and runs fore-and-aft
+      expect(across.length()).toBeCloseTo(1, 9);
+      expect(Math.abs(across.z)).toBeCloseTo(1, 9);
+      expect(along.dot(across)).toBeCloseTo(0, 9);
+    }
+  });
+
+  it('the thatch pattern is many courses down the slope and many tiles along the ridge', () => {
+    // §V66 again, each term against the dimension it runs on: a "course" that
+    // spans the whole slope is a stripe, and a "tile" as long as the ridge is
+    // a rule ruled across it. Both were true on screen because the coordinate
+    // was 4.9× long, not because these numbers were wrong — so they are
+    // asserted as the ratios that keep the fix honest if the roof is resized.
+    const p = raftParams;
+    const slope = roofSlope(p);
+    const slabLen = (p.cabinWidth / 2 + p.roofOverhang) / Math.cos(slope); // ridge → eave tip
+    const ridgeLen = p.cabinLength + 2 * p.roofOverhang;
+    expect(slabLen / m.thatchRowPitch, 'the slope reads as one stripe, not courses').toBeGreaterThanOrEqual(6);
+    expect(ridgeLen / m.thatchTileWidth, 'the course line runs the whole ridge unbroken').toBeGreaterThanOrEqual(8);
   });
 });
 

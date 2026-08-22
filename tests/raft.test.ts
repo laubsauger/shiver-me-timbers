@@ -76,6 +76,113 @@ function worldBox(asm: ShipAssembly, id: string): THREE.Box3 {
   return mesh.geometry.boundingBox!.clone().applyMatrix4(mesh.matrixWorld);
 }
 
+/** every triangle of a piece's mesh, in world space, with its own plane */
+interface Facet {
+  id: string;
+  /** unit normal, world space */
+  n: THREE.Vector3;
+  /** plane constant: n·v for any vertex on it */
+  d: number;
+  p: readonly THREE.Vector3[];
+}
+
+function facetsOf(asm: ShipAssembly, id: string): Facet[] {
+  const mesh = asm.group.getObjectByName(`${id}-mesh`) as THREE.Mesh | undefined;
+  if (mesh === undefined) throw new Error(`no mesh for ${id}`);
+  asm.group.updateWorldMatrix(true, true);
+  const pos = mesh.geometry.attributes.position;
+  const index = mesh.geometry.index;
+  const count = index !== null ? index.count : pos.count;
+  const out: Facet[] = [];
+  for (let i = 0; i + 2 < count; i += 3) {
+    const p = [0, 1, 2].map((k) => new THREE.Vector3()
+      .fromBufferAttribute(pos, index !== null ? index.getX(i + k) : i + k)
+      .applyMatrix4(mesh.matrixWorld));
+    const n = new THREE.Vector3().subVectors(p[1], p[0])
+      .cross(new THREE.Vector3().subVectors(p[2], p[0]));
+    const len = n.length();
+    if (len < 1e-12) continue; // a degenerate cap triangle carries no surface
+    n.divideScalar(len);
+    out.push({ id, n, d: n.dot(p[0]), p });
+  }
+  return out;
+}
+
+/** signed area of a 2D polygon (shoelace) */
+function polyArea(poly: readonly (readonly [number, number])[]): number {
+  let a = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const [x0, y0] = poly[i];
+    const [x1, y1] = poly[(i + 1) % poly.length];
+    a += x0 * y1 - x1 * y0;
+  }
+  return a / 2;
+}
+
+/** area the two facets have in common, in their shared plane (Sutherland–Hodgman) */
+function sharedArea(a: Facet, b: Facet): number {
+  const u = (Math.abs(a.n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0))
+    .cross(a.n).normalize();
+  const w = new THREE.Vector3().crossVectors(a.n, u);
+  const flat = (f: Facet): [number, number][] => {
+    const t = f.p.map((q) => [q.dot(u), q.dot(w)] as [number, number]);
+    return polyArea(t) < 0 ? [t[0], t[2], t[1]] : t;
+  };
+  let poly: [number, number][] = flat(a);
+  const clip = flat(b);
+  for (let e = 0; e < clip.length && poly.length > 0; e++) {
+    const [x0, y0] = clip[e];
+    const [x1, y1] = clip[(e + 1) % clip.length];
+    const side = (q: [number, number]): number => (x1 - x0) * (q[1] - y0) - (y1 - y0) * (q[0] - x0);
+    const next: [number, number][] = [];
+    for (let k = 0; k < poly.length; k++) {
+      const c = poly[k];
+      const nx = poly[(k + 1) % poly.length];
+      const sc = side(c);
+      const sn = side(nx);
+      if (sc >= 0) next.push(c);
+      if ((sc >= 0) !== (sn >= 0)) {
+        const t = sc / (sc - sn);
+        next.push([c[0] + (nx[0] - c[0]) * t, c[1] + (nx[1] - c[1]) * t]);
+      }
+    }
+    poly = next;
+  }
+  return Math.abs(polyArea(poly));
+}
+
+/**
+ * §T129 — CO-FACING COPLANAR OVERLAPS: the one arrangement the depth buffer
+ * cannot separate, and the user's "the side walls and the back walls are stuck
+ * in each other". Three conditions together, and only together:
+ *   • the two triangles lie in the SAME plane, within `slack` metres;
+ *   • they face the SAME way — a butt joint's two faces are anti-parallel, so
+ *     one of them is always culled and it has never fought;
+ *   • and they cover a common patch of AREA — the two halves of one quad share
+ *     an edge, and two panels that merely meet along a line share a line.
+ * Anything else (touching, parallel-and-offset, one behind the other) is legal
+ * and this must not flag it, or every butted box on the raft is a "defect".
+ */
+function coplanarFights(
+  asm: ShipAssembly, ids: readonly string[], slack = 0.001, minArea = 1e-4,
+): string[] {
+  const all = ids.flatMap((id) => facetsOf(asm, id));
+  const bad = new Map<string, number>();
+  for (let i = 0; i < all.length; i++) {
+    for (let j = i + 1; j < all.length; j++) {
+      const a = all[i];
+      const b = all[j];
+      if (a.n.dot(b.n) < 1 - 1e-6) continue;
+      if (Math.abs(a.d - b.d) > slack) continue;
+      const area = sharedArea(a, b);
+      if (area <= minArea) continue;
+      const key = `${a.id} ∥ ${b.id} on n=(${a.n.toArray().map((v) => v.toFixed(2)).join(',')}) @ ${a.d.toFixed(4)}`;
+      bad.set(key, (bad.get(key) ?? 0) + area);
+    }
+  }
+  return [...bad].map(([k, area]) => `${k}: ${area.toFixed(3)} m² fighting`);
+}
+
 describe('§T89 raft blueprint — piece contract (§V13/§V18)', () => {
   const raft = buildRaftBlueprint();
 
@@ -492,8 +599,10 @@ describe('§V82 deck, cabin, mast, guaras, steering', () => {
     const port = walls.find((w) => w.id === 'cabin-wall-port')!;
     const stbd = walls.filter((w) => w.id.startsWith('cabin-wall-starboard'));
     // port wall continuous; starboard wall in two pieces with a gap of the
-    // reference's door length between them, in the aft half
-    expect(port.aabb.max[2] - port.aabb.min[2]).toBeCloseTo(p.cabinLength, 9);
+    // reference's door length between them, in the aft half. §T129b: the side
+    // walls close the CLEAR length, gable to gable — they used to run the full
+    // `cabinLength` and interpenetrate all four corners.
+    expect(port.aabb.max[2] - port.aabb.min[2]).toBeCloseTo(p.cabinLength - 2 * p.cabinWallThickness, 9);
     expect(stbd).toHaveLength(2);
     for (const w of stbd) expect(w.transform.position[0]).toBeGreaterThan(0); // +x = starboard
     const [a, b] = stbd.sort((u, v) => worldZ(u) - worldZ(v));
@@ -1184,5 +1293,111 @@ describe('§B87 the cabin is furnished, and the roof is thatch', () => {
     // §V17: the raft is walked in first person beside the sierra terrain, so
     // she stays well under the square-rigger she shares a frame budget with
     expect(totalTris(raft)).toBeLessThan(totalTris(buildBrigantineBlueprint()) / 2);
+  });
+});
+
+/**
+ * §T129 — THE CABIN'S ROOF, WALLS AND WEAVE. The user, head-on from the tiller
+ * (`docs/raft2100/ref/bug-cabin-roof-weave.png`): the roof "has normal issues
+ * — a super lengthy stretched weird shadow", and "we have z-fighting on the
+ * walls of the cabin — the side walls and the back walls are stuck in each
+ * other".
+ *
+ * The properties, not the decisions (§V80). Z-FIGHTING is not "the walls are
+ * 5 cm thick" or "the wall runs 4.3 m" — it is two opaque surfaces the depth
+ * buffer cannot order, which is `coplanarFights` above and nothing else. The
+ * STRETCH is not "thatchRowPitch is 0.12" — it is a course of leaves that
+ * measures a metre of ROOF per metre it advances, which is §V66's rule read
+ * off the roof's own dimension.
+ */
+describe('§T129 the cabin shell: no fighting faces, and courses that step', () => {
+  const p = raftParams;
+  const raft = buildRaftBlueprint();
+  const L = raftLayout();
+  const asm = new ShipAssembly(raft, stubFactory);
+  asm.group.updateMatrixWorld(true);
+  const byId = new Map(raft.map((d) => [d.id, d]));
+  const walls = raft.filter((d) => d.kind === 'cabin-wall').map((d) => d.id);
+
+  it('(b) no two cabin wall or gable surfaces share a plane, a facing and a patch of area', () => {
+    // WHY THIS IS THE TEST. Before the fix the port wall and both starboard
+    // walls ran the FULL cabin length while the two gables ran the full width,
+    // so each of the four corners had the side wall's outer face and the
+    // gable's end face on one plane pointing one way over the gable's whole
+    // 5 cm × 1.54 m section, and the gable's outer face and the side wall's
+    // end cap likewise — eight patches, 0.077 m² each on the sides and
+    // 0.002 m² on the sills. No metre value could have caught it: every one of
+    // those metre values was right, and the arrangement was still wrong.
+    expect(coplanarFights(asm, walls).join('\n')).toBe('');
+  });
+
+  it('(b) the cabin is still CLOSED: the side walls meet the gables, gable to gable, with no gap', () => {
+    // the cure for the fight must not open the shell — a wall shortened PAST
+    // the gable is a slot of daylight at the corner, the same defect with the
+    // sign flipped, and it is why this is asserted alongside the one above
+    const t = p.cabinWallThickness;
+    for (const id of ['cabin-wall-port', 'cabin-wall-starboard-aft', 'cabin-wall-starboard-fwd']) {
+      const w = byId.get(id)!;
+      const z0 = w.transform.position[2] + w.aabb.min[2];
+      const z1 = w.transform.position[2] + w.aabb.max[2];
+      expect(z0, `${id} misses the aft gable`).toBeGreaterThanOrEqual(L.cabinAftZ + t - 1e-9);
+      expect(z1, `${id} misses the forward gable`).toBeLessThanOrEqual(L.cabinFrontZ - t + 1e-9);
+    }
+    // the port side is closed gable to gable in one piece — no door that side
+    const port = byId.get('cabin-wall-port')!;
+    expect(port.transform.position[2] + port.aabb.min[2]).toBeCloseTo(L.cabinAftZ + t, 9);
+    expect(port.transform.position[2] + port.aabb.max[2]).toBeCloseTo(L.cabinFrontZ - t, 9);
+    // …and the gables still span the full width, so the corners stay solid to
+    // the walker (raftDeckFieldCells reads every cabin-wall as one solid)
+    for (const id of ['cabin-wall-aft', 'cabin-wall-fwd']) {
+      const g = byId.get(id)!;
+      expect(g.aabb.max[0] - g.aabb.min[0]).toBeCloseTo(p.cabinWidth, 9);
+    }
+  });
+
+  it('(a) no two courses of one roof slope share a plane, a facing and a patch of area', () => {
+    // the roof's own version of the same fault, and the one a man at the
+    // tiller is looking straight up into: every course box reached back UNDER
+    // its neighbour to the SAME shared underside, so consecutive courses put
+    // 0.14 m × 4.8 m of soffit on one plane facing one way — 2.0 m² a slope.
+    for (const side of ['port', 'starboard'] as const) {
+      expect(coplanarFights(asm, [`thatch-roof-${side}`]).join('\n'), side).toBe('');
+    }
+  });
+
+  it('(a) every roof normal is unit, and a lap turns the surface: course face, riser, underside', () => {
+    for (const side of ['port', 'starboard'] as const) {
+      const roof = byId.get(`thatch-roof-${side}`)!;
+      const g = buildPieceGeometry(roof.kind, roof.aabb, roof.shape);
+      const n = g.attributes.normal;
+      for (let i = 0; i < n.count; i++) {
+        const len = Math.hypot(n.getX(i), n.getY(i), n.getZ(i));
+        expect(len, `${side} normal ${i} is not unit`).toBeCloseTo(1, 5);
+      }
+      // a slope shaded as ONE plane is the failure the user described. The
+      // courses must present at least the six directions a stepped solid has,
+      // and a riser standing at EVERY lap — that step is what a low sun
+      // catches, and it is the only thing separating thatch from a painted box.
+      const dirs = new Set<string>();
+      for (let i = 0; i < n.count; i++) {
+        dirs.add([n.getX(i), n.getY(i), n.getZ(i)].map((v) => v.toFixed(3)).join(','));
+      }
+      expect(dirs.size, `${side}: the slope is shaded as one plane`).toBeGreaterThanOrEqual(6);
+      const slabLen = roof.aabb.max[0] - roof.aabb.min[0];
+      const courses = thatchCourses(slabLen, roof.aabb.max[1], roof.shape ?? {});
+      const sign = (roof.shape?.eaveSign ?? 1) < 0 ? -1 : 1;
+      const pos = g.attributes.position;
+      for (let k = 0; k < courses.length - 1; k++) {
+        const x = sign * (courses[k].butt - slabLen / 2);
+        let riser = false;
+        for (let i = 0; i + 2 < pos.count && !riser; i += 3) {
+          if (Math.abs(Math.abs(n.getX(i)) - 1) > 1e-6) continue;
+          if (Math.abs(pos.getX(i) - x) > 1e-6) continue;
+          riser = true;
+        }
+        expect(riser, `${side}: course ${k} has no riser at its butt — no step, no shadow`).toBe(true);
+      }
+      g.dispose();
+    }
   });
 });
