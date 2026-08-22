@@ -57,6 +57,22 @@ export function buildLogs(p: RaftParams, L: RaftLayout): PieceDef[] {
   add(n - 1, logSocket(L.logs[n - 1], 'anchor-channel-starboard-main-1', 'rope-anchor', L.mastZ));
   add(1, logSocket(L.logs[1], 'anchor-channel-port-mizzen-1', 'rope-anchor', p.mizzenZ));
   add(n - 2, logSocket(L.logs[n - 2], 'anchor-channel-starboard-mizzen-1', 'rope-anchor', p.mizzenZ));
+  /**
+   * §B104/§V71 — A SHEET STATION STANDS WHERE THE SHEET IS MADE FAST.
+   *
+   * `station-sheet-p`/`-s` were sockets on `deck-fore`, at the cabin's forward
+   * corners (∓1.2, 0.63, +0.35), while the main's sheets actually belay on the
+   * mizzen's channel logs (∓1.83, 0.28, −5.4): the player hauled the main
+   * sheet 6.4 m from any sheet. A station is resolved against the ROPE IT
+   * WORKS, so it is authored HERE, on the same log piece and at the same z as
+   * the belay it serves — move the belay and the stance follows it.
+   *
+   * (Only the MAIN's sheets have stations: `RaftControls` carries one sheet
+   * scalar for every sail, so a topsail station would be a second knob on the
+   * same channel — §T.148's job, not this socket's.)
+   */
+  add(1, logSocket(L.logs[1], 'station-sheet-p', 'fixture', p.mizzenZ, 0.35));
+  add(n - 2, logSocket(L.logs[n - 2], 'station-sheet-s', 'fixture', p.mizzenZ, -0.35));
 
   return L.logs.map((log, k) =>
     mkPiece(`log-${k}`, 'log', [log.x, p.logAxisY, (log.zStern + log.zBow) / 2], {
@@ -245,11 +261,11 @@ export function buildBambooDeck(p: RaftParams, L: RaftLayout): PieceDef[] {
   const zFull = Math.max(L.cabinFrontZ + 0.5,
     Math.min(zA, Math.min(outerP.zBow, outerS.zBow) - p.logTaperLength));
   const fore = slab('deck-fore', outerP.x - outerP.r, outerS.x + outerS.r, L.cabinFrontZ, zFull, y0, y1, [
-    // hauling stations at the mast foot and the two sheets at the cabin's
-    // forward corners (§V84 — every sailing action has a place to stand)
+    // the halyard is hauled at the mast foot, where it comes down the leg
+    // (§V84 — every sailing action has a place to stand). §B104 took the two
+    // SHEET stations off this slab: they belong on the logs abeam the mizzen,
+    // where the sheets are actually belayed (see `buildLogs`).
     { id: 'station-halyard', type: 'fixture', position: [-0.8, (y1 - y0) / 2, L.mastZ - (L.cabinFrontZ + zFull) / 2] },
-    { id: 'station-sheet-p', type: 'fixture', position: [-halfW, (y1 - y0) / 2, 0.35 - (zFull - L.cabinFrontZ) / 2] },
-    { id: 'station-sheet-s', type: 'fixture', position: [halfW, (y1 - y0) / 2, 0.35 - (zFull - L.cabinFrontZ) / 2] },
   ]);
   const taper = slab('deck-fore-taper',
     outerP.x - logHalfAt(p, outerP, zA), outerS.x + logHalfAt(p, outerS, zA), zFull, zA, y0, y1);
@@ -278,14 +294,34 @@ export function buildGuaras(p: RaftParams, L: RaftLayout): PieceDef[] {
   // bottoms the top sat UNDER the deck and the guaras were invisible (§B70).
   const bottomLowered = p.logAxisY - p.guaraDepth;
   const lift = p.guaraTravel * (1 - p.guaraDefaultDepth);
-  return guaraStations(p).map((g, idx) => {
+  const out: PieceDef[] = [];
+  guaraStations(p).forEach((g, idx) => {
     const a = L.logs[g.chink];
     const x = a.x + a.r + L.chinks[g.chink] / 2;
-    return mkPiece(`guara-${idx + 1}`, 'guara', [x, bottomLowered + p.guaraHeight / 2 + lift, g.z], {
+    out.push(mkPiece(`guara-${idx + 1}`, 'guara', [x, bottomLowered + p.guaraHeight / 2 + lift, g.z], {
       min: [-p.guaraThickness / 2, -p.guaraHeight / 2, -p.guaraWidth / 2],
       max: [p.guaraThickness / 2, p.guaraHeight / 2, p.guaraWidth / 2],
-    }, { shape: { depth: p.guaraDefaultDepth, travel: p.guaraTravel } });
+    }, { shape: { depth: p.guaraDefaultDepth, travel: p.guaraTravel } }));
+    /**
+     * §T.144 — AND THE SLOT IT STANDS IN, so the plank reads as fitted rather
+     * than "plopped in and random" (USER). The hole is `guaraSlotClear` times
+     * the board's OWN thickness (§V66) and a little longer than its width, and
+     * it sits on whatever surface the plank comes through: the mats forward of
+     * the cabin, the bare log crowns aft of it [§1 Deck coverage]. It is a
+     * piece of the raft, not of the plank — the board slides through it
+     * (§B100/§V71) — and it is invisible to the walk field, because the
+     * plank's own cell is already occupied (raftDeckFieldCells: `guara`).
+     */
+    const slotX = (p.guaraThickness * p.guaraSlotClear) / 2;
+    const slotZ = p.guaraWidth / 2 + p.guaraThickness;
+    const base = g.z > L.cabinFrontZ ? L.deckY : L.logTopY;
+    out.push(mkPiece(`guara-collar-${idx + 1}`, 'splashboard',
+      [x, base + p.guaraCollarHeight / 2, g.z], {
+        min: [-slotX - p.guaraCollarCheek, -p.guaraCollarHeight / 2, -slotZ - p.guaraCollarCheek],
+        max: [slotX + p.guaraCollarCheek, p.guaraCollarHeight / 2, slotZ + p.guaraCollarCheek],
+      }, { shape: { collar: 1, slotX, slotZ } }));
   });
+  return out;
 }
 
 /** balsa block across the three projecting stern logs, thole-pins, and the oar [§5] */

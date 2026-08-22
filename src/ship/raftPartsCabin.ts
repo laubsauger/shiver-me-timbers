@@ -29,7 +29,7 @@ import { mkPiece } from './blueprintParts';
 import { shipDetailParams } from '../params/ship';
 import { thatchCourses } from './pieceGeometryRaft';
 import { vhash, vjitter, vrange } from './variation';
-import type { RaftLayout } from './raftPartsLayout';
+import { guaraStations, type RaftLayout } from './raftPartsLayout';
 
 interface BoxOpts {
   sockets?: SocketDef[];
@@ -264,6 +264,21 @@ export function buildCabin(p: RaftParams, L: RaftLayout): PieceDef[] {
     const eaveTipY = ridgeY - run * Math.tan(slope);
     // which way local +x runs DOWN the slope: the two slabs are mirrored about
     // the ridge, so it is +1 to starboard and −1 to port
+    /**
+     * §B97/§T.140 — THE TWO SLOPES ARE MITRED AT THE RIDGE, NOT LAPPED.
+     *
+     * Each slab's ridge end used to be a face square to its OWN slope, so it
+     * leaned past the centreline by (thickness × sin θ) and the two gable-end
+     * caps overlapped, co-facing and coplanar, over 0.002 m² each — 0.038 m of
+     * interpenetration at the apex, which is the fighting patch the user saw.
+     * §T.129 measured it and left it because TRIMMING alone opens a 7 cm
+     * groove where the two top surfaces should meet. A mitre does both at
+     * once: the underside stops exactly on the ridge plane and the top face
+     * reaches it, so the slopes butt (anti-parallel faces, always one culled)
+     * and the apex closes. `mitre` is the extra local-x the cut face needs at
+     * the top, which the aabb carries and `thatchSlabRun` takes back off.
+     */
+    const mitre = p.roofThickness * Math.tan(slope);
     const shape = {
       overhang: p.roofOverhang,
       eaveSign: sign,
@@ -272,13 +287,16 @@ export function buildCabin(p: RaftParams, L: RaftLayout): PieceDef[] {
       courseRise: p.roofCourseRise,
       eaveSegments: p.roofEaveSegments,
       eaveRagged: p.roofEaveRagged,
+      ridgeSlope: slope,
+      mitre,
       seed: p.seed + sign,
     };
     out.push(
       mkPiece(`thatch-roof-${side}`, 'thatch-roof',
         [sign * run / 2, (ridgeY + eaveTipY) / 2, (z0 + z1) / 2], {
-          min: [-slabLen / 2, 0, -roofZLen / 2],
-          max: [slabLen / 2, p.roofThickness, roofZLen / 2],
+          // the ridge end is local −sign·slabLen/2, so the allowance goes there
+          min: [-slabLen / 2 - (sign > 0 ? mitre : 0), 0, -roofZLen / 2],
+          max: [slabLen / 2 + (sign > 0 ? 0 : mitre), p.roofThickness, roofZLen / 2],
         }, { rotation: [0, 0, -sign * slope], shape }),
     );
     // the laths the thatch is tied to, riding the slope with it. They run DOWN
@@ -287,6 +305,8 @@ export function buildCabin(p: RaftParams, L: RaftLayout): PieceDef[] {
     // inside the cabin looking up. `platform` keeps them out of the deck field
     // (raftDeckFieldCells.ts: a bamboo member at a level nobody walks on).
     const under = thatchCourses(slabLen, p.roofThickness, shape)[0].bottom;
+    // the laths run the un-mitred slope: they are under the thatch, not part
+    // of the cut (a ridge pole is what really sits where they meet)
     out.push(
       mkPiece(`roof-lath-${side}`, 'bamboo-deck', [0, 0, 0], {
         min: [-slabLen / 2, under - p.roofLathSection, -p.cabinLength / 2],
@@ -497,11 +517,30 @@ export function buildDressing(p: RaftParams, L: RaftLayout): PieceDef[] {
   // raft carries hers. Kept INBOARD of `station-sheet-s` (x = cabinWidth/2)
   // and clear of `station-halyard` at the mast foot: the fore-deck is the
   // raft's one big open floor and the chest must not close either road.
-  const chestZ = L.cabinFrontZ + 0.6;
+  /**
+   * §T.144 — AND IT IS PLACED AGAINST THE GUARA SLOT, not at an authored z.
+   * USER: "the middle front guara is clipping into the crate that is there."
+   * Measured: the chest ran z 0.584 → 1.116 and `guara-3`'s plank starts at
+   * 1.100 — 16 mm of overlap through 0.43 m of height, with the crate's §T34
+   * yaw swinging its corner another 46 mm into the board. The nominal position
+   * left ZERO clearance, so it was not the variation reaching too far; the
+   * variation only made a touching pair intersect. The chest now backs off the
+   * nearest forward guara's own COLLAR footprint by its own yawed half-depth
+   * plus a hand's width, so re-seeding the yaw, widening the board or moving
+   * the slot all carry it (§V71).
+   */
+  const chestYaw = vjitter(0.12, p.seed, 88) * irr;
+  const chestHalfZ = (p.chestLength * Math.abs(Math.sin(chestYaw))
+    + p.chestWidth * Math.abs(Math.cos(chestYaw))) / 2;
+  const slotHalfZ = p.guaraWidth / 2 + p.guaraThickness + p.guaraCollarCheek;
+  const fwdGuaraZ = Math.min(...guaraStations(p)
+    .filter((g) => g.z > L.cabinFrontZ).map((g) => g.z), Infinity);
+  const chestCZ = Math.min(L.cabinFrontZ + 0.6 + p.chestWidth / 2,
+    fwdGuaraZ - slotHalfZ - chestHalfZ - 0.12);
   out.push(box('plank-chest', 'crate',
     -0.10, -0.10 + p.chestLength, L.deckY, L.deckY + p.chestHeight,
-    chestZ, chestZ + p.chestWidth, {
-      rotation: [0, vjitter(0.12, p.seed, 88) * Math.max(0, shipDetailParams.irregularity), 0],
+    chestCZ - p.chestWidth / 2, chestCZ + p.chestWidth / 2, {
+      rotation: [0, chestYaw, 0],
       shape: { lash: 2, lashRope: p.crateLashRope, seed: p.seed + 9 },
     }));
 

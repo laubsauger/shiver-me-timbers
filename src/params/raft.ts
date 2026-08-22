@@ -53,7 +53,17 @@ export interface RaftParams {
   cabinOpeningAftOffset: number; // EST — opening "mid-to-aft" [§3 Museum]: from the aft wall
   cabinBoxHeight: number; // EST — floor mats over 8 lashed boxes [§3 Floor]
   roofOverhang: number; // [§3 Roof] 20–30 cm
-  roofThickness: number; // EST — laths + leaves [§3 Roof]
+  /**
+   * EST — m, the FULL depth of the thatch at the RIDGE course [§3 Roof].
+   *
+   * §T.140 — THIS IS NOW THE NUMBER THE SLAB IS ACTUALLY BUILT TO. It used to
+   * be the aabb's height while `thatchCourses` anchored the shared underside
+   * 0.092 m BELOW the aabb's own min, so a "0.08" roof was drawn 0.172 m thick
+   * at the ridge and 0.112 at the eave — the user's "the roof is a little bit
+   * too chunky too", and the same lie that put §B97's soffit across the ridge.
+   * The courses hang UNDER this: eave course = roofThickness − (n−1)·rise.
+   */
+  roofThickness: number;
   // --- §B87 the roof is COURSES, not a slab [§3 Roof: "overlapping banana
   // leaves like tiles"; museum ragged 20–30 cm overhang]
   roofCoursePitch: number; // EST — m up the slope from one course butt to the next
@@ -107,9 +117,37 @@ export interface RaftParams {
   crateLashRope: number; // EST — m, the rope band round a lashed crate
   // --- §4 Mast & rig
   mastGapToCabin: number; // EST — legs "just forward of cabin front wall" [§4 Leg spacing]
-  mastHeight: number; // [§4 Height] 8.8 m to crossing (WP); museum "nearly 10" — EST range 8.5–10
+  /**
+   * m from the log tops to the BIPOD CROSSING, along the raked pole.
+   *
+   * §T.140 — MEASURED OFF `docs/raft2100/ref/kon-tiki-rig-proportions.png`,
+   * which is a known-scale subject: the cabin is 4.3 m long (470 px at the
+   * midship depth), its eave 1.2 m (157 px) and the mainsail's drop 4.6 m
+   * (the head-to-clew span, 600 px) — three independent rules that all land on
+   * 129 px/m. On that scale the crossing stands 6.4–6.6 m over the deck and
+   * the main yard 4.9, i.e. the yard is hoisted to 0.77 of the crossing with
+   * only ~1.5 m of mast above it. The reference's "8.8 m" [§4 Height] reads as
+   * the POLE from its step to the truck (crossing 6.5 + ~1.5 of topsail pole
+   * + freeboard ≈ 8.5), and "nearly 10" as the aerial whip above that; it is
+   * not the crossing's height over the deck, which is what this is. USER: "I
+   * don't think this mast was this crazy high… the tippity top of the topmast
+   * is like 8 metres above the deck."
+   */
+  mastHeight: number;
   mastLegSpacing: number; // EST — ≈ 4.5 m at deck [§4 Leg spacing]
-  mastLegDiameter: number; // [§4 Pole Ø] 15–20 cm
+  /**
+   * A SPAR'S LENGTH ÷ ITS DIAMETER (§V66: scale a feature by its OWN
+   * dimension). Every pole and yard on this rig takes its thickness from this
+   * one ratio and its own length, because a typed metre constant is exactly
+   * the error §V66 names: the mast was 8.8 m of 0.18 m pole (49) while the
+   * yard was 6.0 m of 0.12 (50) — two numbers that agreed by luck and could
+   * not survive either length moving.
+   *
+   * 45 is the photo: the far bipod leg reads 18 px at its own depth (0.158 m
+   * over a 6.9 m leg) and the main yard 20 px across its own axis (0.132 m
+   * over 5.8–6.0 m). [§4 Pole Ø "15–20 cm", §4 Yard "two bamboo stems bound"]
+   */
+  sparSlenderness: number;
   mastCrossingOverlap: number; // EST — legs run past the crossing, lashed [§4 Mast]
   topPoleHeight: number; // EST — "short pole above crossing" [§4 Masthead]
   platformSize: number; // EST — "wooden lookout platform at crossing" [§4 Masthead]
@@ -118,7 +156,18 @@ export interface RaftParams {
   ladderRungPitch: number; // EST
   ladderStandoff: number; // EST — m the ladder hangs off the leg's surface (§B75)
   ladderGrabHeight: number; // EST — m up the leg the climber takes hold; the `station-ladder` socket rides here (§B78-3)
-  lookoutHeadroom: number; // EST — m of clear air over the lookout platform: the topsail's foot is hoisted above a standing man (§B78-4)
+  /**
+   * EST — m of clear air a lookout STANDING on the perch keeps over the
+   * topsail's HEAD.
+   *
+   * §T.140 RE-MADE §T.115's TRADE THE OTHER WAY. §B78-4 hoisted the topsail's
+   * FOOT above the lookout's eye, which cost 3.6 m of pole and put the sail in
+   * the sky. The photo says the topsail straddles the masthead: its yard sits
+   * ~0.25 m ABOVE the crossing and its cloth hangs BELOW the platform, so the
+   * man on the perch looks OVER the topsail's head, not under its foot. Same
+   * §V71 relationship, opposite sign, and it costs no mast at all.
+   */
+  lookoutHeadroom: number;
   // --- §B73 the rig is JANKY [ref-sails-1947]: seeded per-piece cock / rake /
   // slew, scaled by shipDetailParams.irregularity; every value an upper bound
   yardCock: number; // EST — rad, a yard hoisted with one arm higher (photo ≈ 6–10°)
@@ -131,7 +180,6 @@ export interface RaftParams {
   crossingWrapWidth: number; // EST — m, the rope bundle at the bipod crossing
   mizzenSpritAngle: number; // EST — rad, the mizzen's spar stands as a SPRIT, the sail hanging loose off it
   yardLength: number; // [§4 Yard] ~5.5 m+ — EST 6.0 (wider than the 5.5 m sail)
-  yardDiameter: number; // EST — two bamboo stems bound together [§4 Yard]
   /**
    * EST — m from the MAST/LEG axis to the yard axis, i.e. the slack in the
    * rope parrel that holds the yard to the spar it is hoisted on.
@@ -143,19 +191,28 @@ export interface RaftParams {
    */
   yardMastClearance: number;
   /**
-   * EST — m of AIR between a SINGLE pole and the yard parreled to it (topsail,
-   * mizzen), as opposed to the bipod's `yardMastClearance`.
+   * The air between a SINGLE pole and the yard parreled to it (topsail,
+   * mizzen), as a MULTIPLE OF THAT POLE'S OWN DIAMETER — as opposed to the
+   * bipod's `yardMastClearance`, which is metres because it is sized by the
+   * legs' splay and not by any one pole.
    *
    * §T.138/§V66: `yardMastClearance` is 0.30 m because the MAIN yard hangs
    * between two legs that SPLAY, and its cloth has to miss both. A yard on one
    * pole has no such problem, and 0.30 m of nothing between a 0.10 m mizzen
    * pole and its 0.07 m yard is what the user saw as "the horizontal bar for
    * the back sail is floating mid-air" — the spar read as unattached because
-   * the gap was three times the pole's own diameter. A parrel's slack is a
-   * rope turn or two of the spar it goes round, and `lashing-parrel-{mast}`
-   * draws the seizing across it. [§4 Topsail, Mizzen]
+   * the gap was three times the pole's own diameter.
+   *
+   * §T.140 MADE IT A RATIO, which is what §T.138's own sentence said it was:
+   * "a parrel's slack is a rope turn or two of the SPAR IT GOES ROUND". Left
+   * at 0.12 m it survived exactly as long as the poles did — the topsail pole
+   * came down to its photo section (0.041 m, from `sparSlenderness`) and 0.12
+   * was three pole-diameters of air again, the same defect the same test
+   * caught the first time. `lashing-parrel-{mast}` draws the seizing across it.
+   * [§4 Topsail, Mizzen]
    */
   poleParrelGap: number;
+
   sailYardOffset: number; // EST — cloth forward of the yard axis
   mainYardHeight: number; // EST — hoisted below the crossing [PHOTO-10]
   mainYardFurlDrop: number; // EST — m the main yard comes DOWN its halyard when furled [ref §10 replica-moored-beam: the roll rides ~2.3 m over the deck] (§B86-3)
@@ -175,7 +232,6 @@ export interface RaftParams {
    */
   mizzenX: number;
   mizzenHeight: number; // EST — [§9.2] mizzen size unknown
-  mizzenDiameter: number; // EST
   mizzenYardLength: number; // EST
   mizzenSailWidth: number; // EST
   mizzenSailDrop: number; // EST
@@ -191,6 +247,24 @@ export interface RaftParams {
   guaraThickness: number; // [§2 Size] 25 mm
   guaraDepth: number; // [§2 Size] 1.5 m below raft — below the log AXIS (y = 0, the waterline), so 0.5 m of a 2 m plank shows fully lowered
   guaraTravel: number; // EST — how far a guara is hand-raised [§2 Fixing "partway"]
+  /**
+   * §T.144 — THE SLOT THE PLANK STANDS IN. USER: "it could be neat to have the
+   * guara rails have a little bit of a slot on top of the deck so that they
+   * don't look so plopped in and random." [§2 Fixing] holds a guara "on edge,
+   * wedges + ropes", which is also the honest reason a 25 mm plank stands
+   * upright on a raft at all. m the collar's timber stands over the surface it
+   * is pegged to (the mats forward, the bare logs aft).
+   */
+  guaraCollarHeight: number;
+  guaraCollarCheek: number; // EST — m of timber outboard of the slot on every side
+  /**
+   * EST — the slot's clear width as a MULTIPLE of the plank's own thickness
+   * (§V66), so the plank keeps sliding through it at any `guaraThickness`.
+   * The collar is a child of the DECK, not of the plank: §B100 wired
+   * `setGuaraDepths` to `shape.travel`, and the whole point of a slot is that
+   * it stays put while the board goes up and down through it (§V71).
+   */
+  guaraSlotClear: number;
   guaraDefaultDepth: number; // EST — 0 = fully raised, 1 = fully lowered; rest pose
   guaraFwdZ: number; // EST — "~2 at bow" [§2 Positions]
   guaraAftZ: number; // EST — "~2 at stern"
@@ -264,7 +338,11 @@ export const raftParams: RaftParams = registerParams(
     cabinOpeningAftOffset: 0.9, // EST
     cabinBoxHeight: 0.3, // EST
     roofOverhang: 0.25,
-    roofThickness: 0.08, // EST
+    // §T.140 — 0.11 m of thatch at the ridge over 0.05 at the eave, where the
+    // old anchoring drew 0.172 over 0.112. The step at each course butt
+    // (`roofCourseRise`) is untouched, so §T.117's five lapped courses and
+    // §T.134's four 0.075 m leaf laps per 0.30 m course still read the same.
+    roofThickness: 0.11,
     roofCoursePitch: 0.3, // EST — 5 courses over the 1.48 m slope [PHOTO-07,09]
     roofCourseOverlap: 0.14, // EST — a course laps back about half its pitch
     roofCourseRise: 0.015, // EST — 5 × 0.015 keeps the ridge under the §V82 1.6 m cap
@@ -310,20 +388,52 @@ export const raftParams: RaftParams = registerParams(
     crateSizeVar: 0.28, // EST
     crateYawVar: 0.24, // EST ≈ 14°
     crateLashRope: 0.022, // EST
-    mastGapToCabin: 0.6, // EST
-    mastHeight: 8.8, // EST 8.5–10
+    /**
+     * §T.144 — MEASURED, NOT NUDGED. USER: "it's almost impossible to pass
+     * between this and the house without crouching." On the built raft the
+     * corridor across the fore-deck, between the roof's forward overhang
+     * (z 0.250) and the starboard leg's AFT face, was 0.235 m at knee height,
+     * 0.120 m crouched and **0.043 m standing** — the leg rakes aft 0.11 rad,
+     * so every metre of climb steals 0.11 m of the gap, and the roof's 0.25 m
+     * overhang had already spent half of it. A capsule is 0.60 m across
+     * (playerParams.capsuleRadius 0.30). 1.2 m of step-to-wall opens the
+     * standing corridor to 0.64 m; the sail's centre of effort moves forward
+     * with it and `raftGuaraPositions` follows (§B102), leaving 3 boards
+     * forward of the CE and 2 aft (§T.96/§T.138).
+     */
+    mastGapToCabin: 1.2,
+    mastHeight: 6.5, // §T.140 photo: crossing 6.4–6.6 m over the deck
     mastLegSpacing: 4.5, // EST
-    mastLegDiameter: 0.18,
-    mastCrossingOverlap: 0.35, // EST
-    topPoleHeight: 3.6, // EST — long enough to carry the topsail clear of the lookout (§B78-4)
-    platformSize: 0.9, // EST
+    sparSlenderness: 45, // §T.140 photo: leg 0.158/6.9, main yard 0.132/5.9
+    // §T.140 — the legs are seized 0.25 m past the crossing, not 0.35: those
+    // tips are the lowest thing the topsail has to clear (see `topsailDrop`),
+    // and `crossingWrapWidth` 0.45 covers the seizing either way
+    mastCrossingOverlap: 0.25,
+    // §T.140 — the truck lands 8.0 m over the LOG TOPS, 7.7 over the deck:
+    // USER, "the tippity top of the topmast is like 8 metres above the deck".
+    // The photo's own pole above the crossing is a thin stick (6 px ≈ 0.05 m)
+    // carrying the topsail's yard and the flag yard, nothing else.
+    topPoleHeight: 1.5,
+    // §T.140 — a board a man stands on at the crossing, not a top. 0.9 m
+    // square put its forward edge (0.45) OUTSIDE the topsail's cloth plane
+    // (0.30 m forward of the pole axis) once the sail came down astride the
+    // masthead where the photo has it; the board is also shoved AFT until its
+    // forward edge is abaft that plane (`buildBipodMast`, §V71) — the lookout
+    // stands BEHIND the topsail, which is where the 1947 frames put him.
+    platformSize: 0.6,
     platformThickness: 0.05, // EST
     ladderWidth: 0.35, // EST
     ladderRungPitch: 0.35, // EST
     ladderStandoff: 0.1, // EST
     ladderGrabHeight: 1.15, // EST — chest height on the rungs
-    lookoutHeadroom: 1.85, // EST — a lookout standing on the perch, head and a hand clear
-    yardCock: 0.14, // EST
+    lookoutHeadroom: 1.25, // EST — §T.140: the topsail's head, this far over the perch at most
+    // §T.140 — 8° of cock added 1.09 m to the mainsail's live vertical extent
+    // (4.6 m of cloth reading 5.69 m tall), which is what forced the yard to
+    // be hoisted 7.5 m to keep the foot off the deck. Both 1947 frames read
+    // the yard's own cant as mostly PERSPECTIVE on an athwartships spar (31.7°
+    // in the near colour frame, 13° in the distant b&w one — the same spar);
+    // 0.08 keeps the §B73 jank and costs 0.5 m of hoist instead of 1.1.
+    yardCock: 0.08,
     yardRake: 0.09, // EST
     yardSlew: 0.12, // EST
     yardOffset: 0.2, // EST
@@ -333,7 +443,6 @@ export const raftParams: RaftParams = registerParams(
     crossingWrapWidth: 0.45, // EST
     mizzenSpritAngle: 0.45, // EST
     yardLength: 6.0, // EST
-    yardDiameter: 0.12, // EST
     // §B74 — 0.15 m of AIR between a 0.18 m leg and a 0.12 m yard: a parrel
     // with slack in it, which is what a raft's jury rig has. This lifts the
     // topsail off its pole (0.043 → 0.18 m), the mizzen off its own (0.060 →
@@ -349,20 +458,59 @@ export const raftParams: RaftParams = registerParams(
     // the panel moves 0.54 % → 0.30 % and the worst point stays at ≈ −0.05 m.
     // The cloth-side push (§T.114 sparPush) is the fix for that band.
     yardMastClearance: 0.3, // EST
-    poleParrelGap: 0.12, // EST — §T.138: ≈ one mizzen-pole diameter of slack, seized
+    poleParrelGap: 1.2, // EST — §T.138/§V66: 1.2 × the POLE'S own diameter of slack, seized
     sailYardOffset: 0.12, // EST
-    mainYardHeight: 7.2, // EST
-    mainYardFurlDrop: 4.5, // EST — 7.2 → 2.7 on the mast, ≈ 2.7 m over the log tops [ref §10]
+    // §T.140 — the photo hoists the main yard to 0.77 of the crossing (4.9 m
+    // over the deck against 6.4), with the sail's foot just clear of the logs
+    // and only ~1.5 m of mast showing above the yard. 5.35 over the log tops
+    // = 5.01 over the deck, and the live cloth's foot lands ~0.4 m over the
+    // mats (§V71: measured on the membrane, not on `mainSailDrop`).
+    mainYardHeight: 5.7,
+    mainYardFurlDrop: 3.0, // EST — 5.35 → 2.7 on the mast, ≈ 2.7 m over the log tops [ref §10]
     furlBundlePack: 0.029, // EST — ≈ 0.24 m thick on the 5.5 × 4.6 m main [ref §10]
     mainSailWidth: 5.5,
     mainSailDrop: 4.6,
     // §B86-2 [ref-sails-1947]: light cotton on a bamboo yard in the trades is
     // drum-full at 8–11 m/s, where the galleon's 6.43 leaves it half-bellied
     sailWindRef: 4.2,
-    topsailHeightAboveCrossing: 3.3, // EST — hoisted above the lookout's head (§B78-4)
-    topsailYardLength: 2.3, // EST
-    topsailWidth: 2.0, // EST
-    topsailDrop: 0.9, // EST — a small sail set flying on a short pole [§9.2 size unknown]
+    // §T.140 — THE TOPSAIL STRADDLES THE MASTHEAD. USER: "the topsail and the
+    // bottom sail here basically almost overlap, there's no huge gap between
+    // them, and what we're seeing right now is meters and meters of gap." In
+    // the colour frame the topsail's yard sits ~0.3 m over the crossing and
+    // its clew hangs ~0.7 m BELOW it, half a metre clear of the main's head;
+    // the b&w frame has the two all but touching. Measured 0.93 m and ~0.3 m
+    // respectively — a fifth of the main's own 4.6 m drop, never metres.
+    // 0.65 and not the photo's 0.3 because OUR cloth is cocked and bellied
+    // where the photo's is flat: measured on the spar axes, 0.65 puts 0.50 m
+    // of air between the main's head and the topsail's foot — 0.11 of the
+    // main's own 4.6 m drop, which is the fraction both frames show.
+    // §T.140 — AND THE SAIL HAS TO CLEAR THE CROSSING ITSELF. The photo hangs
+    // the topsail's clew ~0.7 m BELOW the crossing, and geometry forbids us
+    // that: §B74's legs SPLAY, so cloth that reaches down among them is pierced
+    // by one of them at some brace (measured −0.063 m at the starboard stop
+    // with the foot 0.65 m under the crossing). The sail is therefore cut to
+    // sit ENTIRELY above the crossing — see `topsailDrop` for what that costs.
+    topsailHeightAboveCrossing: 1.1,
+    // and it is not a handkerchief: 215 px of lateral spread at the clews =
+    // 3.3 m athwartships, 0.6 of the main's 5.5 [§9.2 topsail size unknown]
+    topsailYardLength: 3.4, // EST
+    topsailWidth: 3.0, // EST
+    /**
+     * EST — the photo reads 1.3–1.75 m of drop; ours is cut to 0.9, and this
+     * is the ONE place §T.140 knowingly departs from it.
+     *
+     * THE TRADE §T.115 MADE, RE-MADE (see `lookoutHeadroom`). The perch is at
+     * the crossing and it is a place a PLAYER STANDS: 1.6 m of eye over the
+     * board. The cloth cannot dip below the crossing (§B74's splaying legs
+     * pierce it) and its head must stay under the lookout's eye, so the whole
+     * sail — drop plus roach plus the §B73 cock — has to live inside that
+     * 1.6 m. 0.9 m of drop leaves the head 0.40 m under the eye. The three
+     * ways out were: this; LOWER THE PERCH (which only moves the eye down with
+     * it, so the sail gains nothing); or ACCEPT A CROUCHED LOOKOUT (eye 1.0 m,
+     * which a 1.3 m sail still blocks). Shrinking the sail is the only one
+     * that actually buys the clearance.
+     */
+    topsailDrop: 0.6,
     mizzenZ: -5.4, // EST
     // §T.138 — at ±0.9 both stern poles stood in the two aft guara CHINKS
     // (Δx to guara-4 0.035 m, to guara-5 0.005 m: the flagpole's box ran clean
@@ -371,7 +519,6 @@ export const raftParams: RaftParams = registerParams(
     // of the helmsman's tiller swing.
     mizzenX: -1.2, // EST
     mizzenHeight: 4.4, // EST — [ref-sails-1947] the mizzen flies clear above the cabin ridge
-    mizzenDiameter: 0.1, // EST
     mizzenYardLength: 2.2, // EST
     mizzenSailWidth: 2.0, // EST
     mizzenSailDrop: 1.6, // EST
@@ -386,6 +533,9 @@ export const raftParams: RaftParams = registerParams(
     guaraThickness: 0.025,
     guaraDepth: 1.5,
     guaraTravel: 1.2, // EST
+    guaraCollarHeight: 0.09, // EST — a hand's depth of timber [§2 Fixing]
+    guaraCollarCheek: 0.07, // EST
+    guaraSlotClear: 1.6, // EST — 1.6 × a 25 mm plank = a 40 mm slot it slides in
     guaraDefaultDepth: 0.5, // EST
     guaraFwdZ: 2.2, // EST
     // §T.138 — the aft pair used to sit 0.99 m from `station-tiller`, inside
@@ -432,21 +582,28 @@ export const raftParams: RaftParams = registerParams(
     splashboardHeight: m(0.2, 0.8), splashboardRun: m(0, 8, 0.1),
     yardCock: m(0, 0.4), yardRake: m(0, 0.3), yardSlew: m(0, 0.4), yardOffset: m(0, 0.6),
     mastRakeAft: m(0, 0.25, 0.005), legLeanJitter: m(0, 0.1, 0.005), topPoleTilt: m(0, 0.1, 0.005), mizzenSpritAngle: m(0, 1.2),
-    mastHeight: m(8.5, 10),
+    // §T.140/§V80 — the band is the PHOTO's, not [§4 Height]'s 8.8: see the
+    // field's own docstring for why those two measure different things
+    mastHeight: m(5, 8),
     mastLegSpacing: m(3, 5.5),
-    mainYardHeight: m(5, 8.8),
+    mainYardHeight: m(3, 7),
     mainYardFurlDrop: m(0, 6, 0.1),
     furlBundlePack: m(0.005, 0.1, 0.001),
     mainSailWidth: m(4, 6),
     mainSailDrop: m(3.5, 5),
     sailWindRef: m(1, 30, 0.5),
-    lookoutHeadroom: m(1.2, 3),
+    lookoutHeadroom: m(0.4, 3),
     guaraDefaultDepth: m(0, 1),
     oarDip: m(0, 0.8),
     // §B87 — the dials the look-dev pass actually turns
     roofCoursePitch: m(0.12, 0.6), roofCourseOverlap: m(0, 0.3), roofCourseRise: m(0, 0.05, 0.001),
     roofEaveSegments: m(1, 16, 1), roofEaveRagged: m(0, 0.12, 0.005),
     roofLathCount: m(0, 12, 1), roofLathSection: m(0.02, 0.1, 0.005),
+    roofThickness: m(0.03, 0.3, 0.005),
+    sparSlenderness: m(20, 90, 1),
+    topsailHeightAboveCrossing: m(0, 3), topsailDrop: m(0.4, 3), topsailWidth: m(1, 5),
+    topPoleHeight: m(0.4, 5), mastGapToCabin: m(0.3, 2.5),
+    guaraCollarHeight: m(0, 0.3, 0.005), guaraCollarCheek: m(0.02, 0.2, 0.005), guaraSlotClear: m(1.1, 3, 0.05),
     radioCrateHeight: m(0.2, 1), radioDialDiameter: m(0.04, 0.25, 0.005),
     railHeight: m(0.3, 1.4), railPosts: m(0, 12, 1), railRopeSag: m(0, 0.4),
     crateSizeVar: m(0, 1), crateYawVar: m(0, 0.8),

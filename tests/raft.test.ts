@@ -10,21 +10,25 @@ import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import type { Material } from 'three';
 import { buildRaftBlueprint, raftLayout } from '../src/ship/raftBlueprint';
-import { buildBrigantineBlueprint } from '../src/ship/shipBlueprint';
+import { buildBrigantineBlueprint, buildGalleonBlueprint } from '../src/ship/shipBlueprint';
 import { buildPieceGeometry, buildSailGeometry } from '../src/ship/pieceGeometry';
 import { ShipAssembly } from '../src/ship/shipAssembly';
-import { buildRiggingPlan, validateRiggingPlan } from '../src/ropes/shipRigging';
+import { buildBlockDescriptors, buildRiggingPlan, validateRiggingPlan } from '../src/ropes/shipRigging';
+import { ropeParams } from '../src/params/ropes';
 import { updateRig } from '../src/ship/rigTrim';
 import { playerParams } from '../src/params/player';
 import { buildRatlinePlan } from '../src/ship/ratlinePlan';
 import { raftParams } from '../src/params/raft';
 import { shipDetailParams, shipMaterialParams } from '../src/params/ship';
 import { readSailWindRef, sailDrive } from '../src/ship/sailDynamics';
-import { yardAttitude } from '../src/ship/raftPartsRig';
+import { raftSparDiameter, yardAttitude } from '../src/ship/raftPartsRig';
 import { cabinRoom, radioCorner, roofSlope } from '../src/ship/raftPartsCabin';
-import { thatchCourses, thatchEaveButts } from '../src/ship/pieceGeometryRaft';
+import { thatchCourses, thatchEaveButts, thatchSlabRun } from '../src/ship/pieceGeometryRaft';
 import {
   buildRaftRiggingPlan,
+  raftBlockSize,
+  raftSheetBelay,
+  RAFT_BLOCK_PER_ROPE_DIAMETER,
   raftExtraRopeOf,
   raftRopeSail,
   RAFT_ROPE_MAX,
@@ -268,6 +272,85 @@ describe('§V82 hull: nine staggered logs with chinks', () => {
     expect(new Set(L.chinks.map((c) => c.toFixed(4))).size).toBeGreaterThan(1);
   });
 
+  /**
+   * §T147 — THE MEASUREMENT, BEFORE ANYONE NARROWS ANYTHING AGAIN.
+   *
+   * USER: "there's a bit too big of a gap between the huge wooden trunks."
+   * §B81 had already brought the chinks into the reference band and §T129 had
+   * stopped the taper widening them, so the task was to MEASURE first — and the
+   * measurement says the gap is right. This reads the BUILT geometry (12-sided
+   * cylinders, not the aabb the test above uses) and slices it at the
+   * waterline, where the eye actually reads the chink.
+   *
+   * Measured, port → starboard, anywhere on the parallel body:
+   *   0.033  0.071  0.068  0.025  0.062  0.053  0.053  0.042  m
+   * against [§1 Gaps] "irregular, ~2–8 cm". So the chink is NOT too wide, and
+   * narrowing it further would contradict the reference twice over — Heyerdahl
+   * drained through these gaps and watched fish between the logs [HEY p.83,
+   * 109]. What was wrong was the READ, and §T147 fixed that in the material
+   * (raftMaterialsBalsa's crevice occlusion + the wet band at the waterline).
+   */
+  it('§T147 the chink MEASURED on the built geometry is inside the reference band', () => {
+    const built = logs.map((d) => ({
+      d,
+      g: buildPieceGeometry(d.kind, d.aabb, d.shape),
+    }));
+    /** extreme local x of the surface at local z, sampled in the waterline slab */
+    const edgeAt = (g: THREE.BufferGeometry, z: number, sign: 1 | -1): number | null => {
+      const pos = g.attributes.position;
+      const idx = g.getIndex();
+      const n = idx ? idx.count : pos.count;
+      const at = (i: number): [number, number, number] => {
+        const j = idx ? idx.getX(i) : i;
+        return [pos.getX(j), pos.getY(j), pos.getZ(j)];
+      };
+      let best: number | null = null;
+      for (let t = 0; t < n; t += 3) {
+        const v = [at(t), at(t + 1), at(t + 2)];
+        for (let e = 0; e < 3; e++) {
+          const a = v[e];
+          const b = v[(e + 1) % 3];
+          if ((a[2] - z) * (b[2] - z) > 0 || Math.abs(a[2] - b[2]) < 1e-12) continue;
+          const f = (z - a[2]) / (b[2] - a[2]);
+          if (f < 0 || f > 1) continue;
+          if (Math.abs(a[1] + (b[1] - a[1]) * f) > 0.02) continue; // the waterline slab
+          const x = a[0] + (b[0] - a[0]) * f;
+          if (best === null || x * sign > best * sign) best = x;
+        }
+      }
+      return best;
+    };
+
+    // the parallel body: from the square stern to the mast step, which is the
+    // whole of what a player standing on the raft or swimming beside it sees
+    const stations = [L.sternZ, L.cabinAftZ, 0, L.cabinFrontZ, L.mastZ];
+    const seen: number[] = [];
+    for (const z of stations) {
+      for (let k = 0; k < built.length - 1; k++) {
+        const a = built[k];
+        const b = built[k + 1];
+        const ra = edgeAt(a.g, z - a.d.transform.position[2], 1);
+        const rb = edgeAt(b.g, z - b.d.transform.position[2], -1);
+        if (ra === null || rb === null) continue; // past a shorter log's bow
+        const gap = (b.d.transform.position[0] + rb) - (a.d.transform.position[0] + ra);
+        seen.push(gap);
+        expect(gap, `logs ${k}/${k + 1} at z=${z.toFixed(2)} are ${(gap * 100).toFixed(1)} cm apart`)
+          .toBeGreaterThanOrEqual(p.chinkMin - 1e-6);
+        expect(gap, `logs ${k}/${k + 1} at z=${z.toFixed(2)} are ${(gap * 100).toFixed(1)} cm apart`)
+          .toBeLessThanOrEqual(p.chinkMax + 1e-6);
+      }
+    }
+    expect(seen.length).toBeGreaterThan(30);
+    // …and they are IRREGULAR [§1 Gaps], which is what the reference says and
+    // what stops a narrowing pass from flattening them all to `chinkMin`
+    const lo = Math.min(...seen);
+    const hi = Math.max(...seen);
+    expect(hi / lo, 'the chinks have been regularised').toBeGreaterThan(1.6);
+    // THE GUARD THIS TEST EXISTS FOR: not narrower than the reference either.
+    // Water drains through these gaps [HEY p.83] — a caulked raft is a boat.
+    expect(lo, 'the chinks have been closed past the reference').toBeGreaterThanOrEqual(0.02);
+  });
+
   it('no water between the logs: adjacent log SURFACES ≤ 8 cm apart over the decked span (§B81)', () => {
     // WHY: the user saw "a huge gap between the long logs, water visible" —
     // the bow taper ran the whole log. [§1 Gaps] 2–8 cm; the body is full-round
@@ -305,7 +388,10 @@ describe('§V82 hull: nine staggered logs with chinks', () => {
     const bowOf = (x: PieceDef) => x.transform.position[2] + x.aabb.max[2];
     const centre = logs[Math.floor(logs.length / 2)];
     expect(bowOf(logs[0])).toBeLessThan(bowOf(centre) - 1);
-    const boards = raft.filter((x) => x.kind === 'splashboard' && !x.id.endsWith('-side'));
+    // §T.144 put the guara COLLARS on the same kind (same plank timber, and
+    // the same "invisible to the walk field" contract) — this is about the BOW
+    // boards, so name them
+    const boards = raft.filter((x) => /^splashboard-(port|starboard)$/.test(x.id));
     expect(boards).toHaveLength(2);
     for (const b of boards) {
       expect(Math.abs(b.transform.rotation[1])).toBeGreaterThan(0.2); // angled, not athwartships
@@ -408,11 +494,16 @@ describe('§B73 the rig is janky — seeded, scaled by irregularity, never dead 
       // raft-only rows (halyards, forestay, the ensign's halyard) — the
       // planner has no rule that can reach a stem or a bipod crossing. Either
       // way §B80 binds: a rope is a ROPE, not a spar.
-      const src = shared.find((s) => s.role === r.role && s.socketA === r.socketA && s.socketB === r.socketB);
+      // §T.145: the raft re-points `main-upper`'s sheets to their own pins on
+      // the bipod (the shared planner belays every sheet at the next mast aft,
+      // which put both square sails on one socket) — so a rope may be the
+      // planner's with the raft's own belay end
+      const src = shared.find((s) => s.role === r.role && s.socketA === r.socketA
+        && (s.socketB === r.socketB || raftSheetBelay(s) === r.socketB));
       const extra = raftExtraRopeOf(r);
       expect(src !== undefined || extra !== null, `${r.role} ${r.socketA} → ${r.socketB} came from nowhere`).toBe(true);
       expect(r.thickness).toBeLessThanOrEqual(Math.min(src?.thickness ?? Infinity, 0.02) + 1e-9);
-      expect(r.thickness).toBeLessThan(raftParams.yardDiameter / 2 / 3);
+      expect(r.thickness).toBeLessThan(raftSparDiameter(raftParams, raftParams.yardLength) / 2 / 3);
       expect(r.thickness).toBeLessThanOrEqual(raftParams.lashingRopeDiameter / 2 + 1e-9); // 30 mm hemp at most
       expect(r.thickness).toBeGreaterThan(0.004);
       if (r.role !== 'stay' && r.role !== 'shroud') expect(r.slack).toBe(src?.slack ?? RAFT_RUNNING_SLACK);
@@ -636,8 +727,18 @@ describe('§V82 deck, cabin, mast, guaras, steering', () => {
     // both legs reach the crossing, and the crossing is in the reference band
     const crossing = raft.find((x) => x.id === 'mast-main')!;
     const crossingY = crossing.transform.position[1] + crossing.aabb.min[1];
-    expect(crossingY - L.logTopY).toBeGreaterThanOrEqual(8.5);
-    expect(crossingY - L.logTopY).toBeLessThanOrEqual(10);
+    /**
+     * §T.140/§V80 — THE BAND IS THE PHOTOGRAPH'S, and it is not [§4 Height]'s
+     * 8.8 m, because those two measure different things. Scaled off
+     * `docs/raft2100/ref/kon-tiki-rig-proportions.png` at 129 px/m (the cabin's
+     * 4.3 m length, its 1.2 m eave and the mainsail's 4.6 m drop all give the
+     * same figure), the bipod crossing stands 6.4–6.6 m over the deck; the
+     * reference row's 8.8 is the POLE from its step to the truck. Held to
+     * ±10 % of 6.5, which is about what a 129 px/m read of a 1947 postcard is
+     * worth (±0.4 m at the extremes of the three scale rules).
+     */
+    expect(crossingY - L.logTopY).toBeGreaterThanOrEqual(5.9);
+    expect(crossingY - L.logTopY).toBeLessThanOrEqual(7.2);
     // the crossing's WORLD height is the pole length foreshortened by the
     // aft rake (§B75) — the reference band is the pole, the meeting point is raked
     const rakedY = L.logTopY + (crossingY - L.logTopY) * Math.cos(p.mastRakeAft);
@@ -782,7 +883,10 @@ describe('§V82 deck, cabin, mast, guaras, steering', () => {
     expect(asm.socketWorldPosition('station-sheet-p')[0]).toBeLessThan(0);
     expect(asm.socketWorldPosition('station-sheet-s')[0]).toBeGreaterThan(0);
     expect(asm.socketWorldPosition('station-tiller')[2]).toBeLessThan(L.cabinAftZ);
-    expect(asm.socketWorldPosition('station-lookout')[1]).toBeGreaterThan(8);
+    // §T.140/§V80: the perch is AT THE CROSSING [§4 Masthead], so read it off
+    // the crossing rather than pinning the metre value §T.140 moved
+    expect(asm.socketWorldPosition('station-lookout')[1])
+      .toBeGreaterThan(L.logTopY + p.mastHeight - 0.1);
   });
 
   it('rigs through the shared plan: sheets on the main clews, no ratlines, every rope end resolves', () => {
@@ -807,23 +911,47 @@ describe('§B78/§B86 the raft rig serves the crew', () => {
   const asm = new ShipAssembly(raft, stubFactory);
   asm.group.updateMatrixWorld(true);
   const P = playerParams;
+  const p = raftParams;
 
   /** world AABB of a piece's drawn mesh, through the live assembly (§V71) */
   const sailBox = (id: string): THREE.Box3 => new THREE.Box3().setFromObject(asm.sailMesh(id));
 
-  it('(B78-4) a lookout STANDING on the perch has his head clear of the topsail', () => {
-    // R2: "forward is 100 % topsail cloth (eye 10.74 is inside the topsail's
-    // 9.46-11.23 span). Not a usable perch." Measured against the SAIL's own
-    // live bounds and the WALKER's own eye height — not against the authored
-    // `topsailHeightAboveCrossing`, which is free to move (§V80).
+  it('(B78-4) a lookout STANDING on the perch sees OVER the topsail, and past it', () => {
+    /**
+     * R2: "forward is 100 % topsail cloth (eye 10.74 is inside the topsail's
+     * 9.46-11.23 span). Not a usable perch." The PROPERTY is that the eye is
+     * not inside the cloth's span — §T.115 bought that by hoisting the sail's
+     * FOOT above the eye, which cost 3.6 m of pole and a 12.4 m mast the user
+     * then rejected ("I don't think this mast was this crazy high").
+     *
+     * §T.140 buys the same property from the other side: the topsail's HEAD
+     * stays under the eye, so the lookout looks over the top of it. Same
+     * relationship, evaluated the same way — the sail's own LIVE bounds
+     * against the WALKER's own eye height, never against the authored
+     * `topsailHeightAboveCrossing`, which is free to move (§V80).
+     */
     const perch = asm.socketWorldPosition('station-lookout');
     const eye = perch[1] + P.standHeight - P.eyeDrop;
     const box = sailBox('sail-main-upper');
-    expect(box.min.y, 'topsail foot over the lookout\'s eye').toBeGreaterThan(eye);
-    // and over his head, not just his eye — he stands up there
-    expect(box.min.y).toBeGreaterThan(perch[1] + P.standHeight);
+    expect(box.max.y, 'topsail head under the lookout\'s eye').toBeLessThan(eye);
+    // by a real margin, not a millimetre: a sail level with the eye is still
+    // the R2 complaint, and the cock/rake give the head 0.16 m of wander
+    expect(eye - box.max.y, 'the topsail crowds the eye').toBeGreaterThan(0.25);
+    // the BOARD is shoved abaft the cloth's plane (§V71: read off the topsail's
+    // own hoist, not off an authored perch offset) — the lookout stands behind
+    // the canvas, which is where the 1947 frames put him
+    const byIdR = new Map(raft.map((d) => [d.id, d]));
+    const board = byIdR.get('lookout-platform')!;
+    const topYard = byIdR.get('yard-main-upper')!;
+    const clothZ = topYard.transform.position[2] + p.sailYardOffset;
+    expect(board.parent).toBe('mast-main');
+    expect(board.transform.position[2] + board.aabb.max[2],
+      'the perch reaches into the topsail\'s plane').toBeLessThan(clothZ);
     // the pole still carries the yard: nothing hangs off the end of it
     expect(asm.socketWorldPosition('anchor-masthead-main')[1]).toBeGreaterThan(box.max.y);
+    // (how far the cloth may hang past the crossing into the two SPLAYING legs
+    // is §B74's live test, not a height here: the legs cross, so a foot 0.25 m
+    // under the crossing still clears them while one 0.9 m under does not)
     // the MAIN sail is below the perch — the lookout climbs past it, not into it
     expect(sailBox('sail-main-lower').max.y).toBeLessThan(perch[1] + P.standHeight);
   });
@@ -1186,7 +1314,10 @@ describe('§B87 the cabin is furnished, and the roof is thatch', () => {
     const slope = roofSlope(p);
     for (const side of ['port', 'starboard'] as const) {
       const roof = byId.get(`thatch-roof-${side}`)!;
-      const slabLen = roof.aabb.max[0] - roof.aabb.min[0];
+      // §T.140: the aabb carries the ridge MITRE's allowance on its ridge side,
+      // which is not slope the courses are laid over — ask the same function
+      // the builder does, or a 1.481 m slope silently gains a sixth course
+      const slabLen = thatchSlabRun(roof.aabb, roof.shape ?? {});
       const courses = thatchCourses(slabLen, roof.aabb.max[1], roof.shape ?? {});
       expect(courses.length, `${side}: a slab is one course`).toBeGreaterThan(2);
       for (let k = 0; k < courses.length - 1; k++) {
@@ -1385,7 +1516,7 @@ describe('§T129 the cabin shell: no fighting faces, and courses that step', () 
         dirs.add([n.getX(i), n.getY(i), n.getZ(i)].map((v) => v.toFixed(3)).join(','));
       }
       expect(dirs.size, `${side}: the slope is shaded as one plane`).toBeGreaterThanOrEqual(6);
-      const slabLen = roof.aabb.max[0] - roof.aabb.min[0];
+      const slabLen = thatchSlabRun(roof.aabb, roof.shape ?? {});
       const courses = thatchCourses(slabLen, roof.aabb.max[1], roof.shape ?? {});
       const sign = (roof.shape?.eaveSign ?? 1) < 0 ? -1 : 1;
       const pos = g.attributes.position;
@@ -1646,9 +1777,11 @@ describe('§T.138 the mizzen is held, and the stern poles stand on logs', () => 
     // between two SPLAYING bipod legs and its cloth has to miss both. Applied
     // to a single 0.10 m pole it is three pole-diameters of nothing, which is
     // what the user saw. The bar is the POLE'S OWN diameter, not a metre value.
+    // §T.140/§V66: both poles' radii come from their OWN length now, so the
+    // bar is read the same way the rig reads it — never a typed constant
     const singles: Array<[string, string, number]> = [
-      ['mast-mizzen', 'yard-mizzen-lower', p.mizzenDiameter / 2],
-      ['mast-main', 'yard-main-upper', (p.mastLegDiameter / 2) * 0.8],
+      ['mast-mizzen', 'yard-mizzen-lower', raftSparDiameter(p, p.mizzenHeight) / 2],
+      ['mast-main', 'yard-main-upper', byId.get('mast-main')!.aabb.max[0]],
     ];
     for (const [poleId, yardId, poleR] of singles) {
       const yard = byId.get(yardId)!;
@@ -1714,5 +1847,395 @@ describe('§T.138 the mizzen is held, and the stern poles stand on logs', () => 
     const again = buildRaftBlueprint();
     expect(JSON.stringify(again)).toBe(JSON.stringify(raft));
     expect(totalTris(raft)).toBeLessThan(totalTris(buildBrigantineBlueprint()) / 2);
+  });
+});
+
+/**
+ * §T.140 — THE RIG IS THE PHOTOGRAPH'S SHAPE, TO SCALE (§V82).
+ *
+ * USER, against `docs/raft2100/ref/kon-tiki-rig-proportions.png`: "the masts
+ * are still a little bit too chunky… the rope blocks look a little oversized
+ * for this boat… the topsail is way too high — I don't think this mast was
+ * this crazy high. Guesstimating from the images, the tippity top of the
+ * topmast is like 8 metres above the deck. The topsail and the bottom sail
+ * here basically almost overlap, there's no huge gap between them, and what
+ * we're seeing right now is meters and meters of gap."
+ *
+ * HOW THE PHOTOGRAPH WAS SCALED, because every band below is only worth what
+ * this is. Three known dimensions in the frame, each measured independently:
+ *   the cabin runs 470 px along the hull and is 4.3 m [§3 Plan]  → 128 px/m*
+ *   its eave stands 157 px over the deck, 1.2 m [§3 Height]      → 131 px/m
+ *   the mainsail's head-to-clew drop is 600 px, 4.6 m [§4]       → 130 px/m
+ *   (*at 30° off the beam, which the yard's own foreshortening fixes)
+ * 129 px/m, and a camera 1.0 m over the water — solved, not assumed, from the
+ * deck line and the man at the cabin being 1.80 m. On that scale, over the
+ * DECK: bipod crossing 6.5, main yard 4.9, main foot 0.25, topsail foot 5.4,
+ * topsail head 6.7, pole truck ≈ 8 (frame-cut, and the user's own estimate);
+ * bipod leg Ø 0.158, main yard Ø 0.132, a block ≈ 0.2 m on 30 mm hemp.
+ *
+ * WHY THE BANDS ARE ±15 % AND NOT TIGHTER: a 129 px/m read of a 1947 postcard
+ * is worth ±3 % on the scale itself, and the three rules above spread that
+ * far; and OUR cloth is not the photograph's — the §B73 cock and the live
+ * membrane make a 4.6 m sail 5.4 m tall on the bounding box, so the yard has
+ * to hang ~0.5 m higher than the photo's to keep the foot off the mats. The
+ * bands are asserted as RATIOS to the crossing (§V66/§V80), so re-hoisting the
+ * mast carries the whole rig and no metre value locks the read in.
+ */
+describe('§T.140 rig proportions, measured off the 1947 frame', () => {
+  const p = raftParams;
+  const raft = buildRaftBlueprint();
+  const L = raftLayout();
+  const asm = new ShipAssembly(raft, stubFactory);
+  asm.group.updateMatrixWorld(true);
+  const byId = new Map(raft.map((d) => [d.id, d]));
+  const deck = L.deckY;
+  /** height over the DECK, which is what the photo's rules are read against */
+  const over = (y: number): number => y - deck;
+  const crossing = over(L.logTopY + p.mastHeight * Math.cos(p.mastRakeAft));
+
+  it('masthead, yard and sails sit at the photo\'s FRACTIONS of the crossing', () => {
+    // the truck: the user's one absolute number, "like 8 metres above the deck"
+    const pole = byId.get('mast-main')!;
+    const truck = over(pole.transform.position[1] + pole.aabb.max[1]);
+    expect(truck, 'the topmast is back in the sky').toBeLessThan(8 * 1.15);
+    expect(truck).toBeGreaterThan(8 * 0.85);
+    // the crossing: 6.5 m over the deck, i.e. 0.81 of the truck
+    expect(crossing).toBeGreaterThan(6.5 * 0.85);
+    expect(crossing).toBeLessThan(6.5 * 1.15);
+    // the main yard hangs at 4.9/6.5 = 0.75 of the crossing, with real mast
+    // above it — read off the YARD'S AXIS, the same line the photo shows
+    const yard = byId.get('yard-main-lower')!;
+    const yardY = over(L.logTopY + yard.transform.position[1]);
+    expect(yardY / crossing).toBeGreaterThan(0.75 * 0.9);
+    expect(yardY / crossing).toBeLessThan(0.75 * 1.2);
+    expect(crossing - yardY, 'the yard is hoisted into the crossing').toBeGreaterThan(0.4);
+    // and the mainsail's foot is JUST off the deck [photo: 0.25 m], never
+    // sweeping it and never a storey up
+    const foot = over(new THREE.Box3().setFromObject(asm.sailMesh('sail-main-lower')).min.y);
+    expect(foot, 'the mainsail sweeps the deck').toBeGreaterThan(0.15);
+    expect(foot, 'the mainsail is set a storey up').toBeLessThan(1.2);
+  });
+
+  it('the gap between the main\'s head and the topsail\'s foot is a FRACTION of the main\'s own drop', () => {
+    // "…basically almost overlap, there's no huge gap between them, and what
+    // we're seeing right now is meters and meters of gap": 3.05 m before, on a
+    // 4.6 m sail. Measured per-x on the LIVE meshes (§V71), because the two
+    // sails are cocked opposite ways and their bounding boxes overlap while
+    // the cloth does not — a box test here reads −0.18 m and means nothing.
+    const bins = (id: string): Map<number, [number, number]> => {
+      const m = new Map<number, [number, number]>();
+      const root = asm.sailMesh(id);
+      root.updateWorldMatrix(true, true);
+      root.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh !== true) return;
+        const pos = mesh.geometry.attributes.position;
+        const v = new THREE.Vector3();
+        for (let i = 0; i < pos.count; i++) {
+          v.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
+          const k = Math.round(v.x * 4);
+          const cur = m.get(k);
+          m.set(k, cur === undefined ? [v.y, v.y] : [Math.min(cur[0], v.y), Math.max(cur[1], v.y)]);
+        }
+      });
+      return m;
+    };
+    const lower = bins('sail-main-lower');
+    const upper = bins('sail-main-upper');
+    let worst = Infinity;
+    let overlapped = 0;
+    for (const [k, [lo]] of upper) {
+      const l = lower.get(k);
+      if (l === undefined) continue;
+      overlapped++;
+      worst = Math.min(worst, lo - l[1]);
+    }
+    expect(overlapped, 'the two sails share no x at all').toBeGreaterThan(4);
+    const drop = p.mainSailDrop;
+    // they must not INTERPENETRATE — the photo has them close, not merged
+    expect(worst, 'the topsail is inside the mainsail').toBeGreaterThan(0);
+    // …and the air between them is a fraction of the main's own drop (§V66:
+    // the gap is scaled by the sail it sits over, never by a metre value)
+    expect(worst / drop, 'metres and metres of sky between the two sails')
+      .toBeLessThan(0.25);
+  });
+
+  it('every pole and yard is as thick as its OWN length says (§V66), ⊥ a typed constant', () => {
+    // §V66: "the mast was 8.8 m of 0.18 m pole while the yard was 6.0 m of
+    // 0.12 — two constants that agreed by luck and could not survive either
+    // length moving." The user, twice: "the masts are still a little bit too
+    // chunky", "they could really still be ever so slightly tuned down."
+    const spars: Array<[string, number]> = [
+      ['bipod-leg-port', Math.hypot(p.mastLegSpacing / 2, p.mastHeight) + p.mastCrossingOverlap],
+      ['bipod-leg-starboard', Math.hypot(p.mastLegSpacing / 2, p.mastHeight) + p.mastCrossingOverlap],
+      ['mast-mizzen', p.mizzenHeight],
+      ['yard-main-lower', p.yardLength],
+      ['yard-main-upper', p.topsailYardLength],
+      ['yard-mizzen-lower', p.mizzenYardLength],
+    ];
+    for (const [id, len] of spars) {
+      const d = byId.get(id)!;
+      const r = id.startsWith('yard-') ? d.aabb.max[1] : d.aabb.max[0];
+      expect(r * 2, `${id} Ø`).toBeCloseTo(raftSparDiameter(p, len), 9);
+    }
+    // the pole above the crossing measures its own drawn length + the overlap
+    // it is lashed down by — it is a spar in its own right, not 0.8 of a leg
+    const pole = byId.get('mast-main')!;
+    expect(pole.aabb.max[0] * 2)
+      .toBeCloseTo(raftSparDiameter(p, pole.aabb.max[1] - pole.aabb.min[1] + p.mastCrossingOverlap), 9);
+    // and the photo's own sections come out of the rule, not out of a table
+    expect(byId.get('bipod-leg-port')!.aabb.max[0] * 2).toBeGreaterThan(0.13);
+    expect(byId.get('bipod-leg-port')!.aabb.max[0] * 2).toBeLessThan(0.19);
+    expect(byId.get('yard-main-lower')!.aabb.max[1] * 2).toBeGreaterThan(0.11);
+    expect(byId.get('yard-main-lower')!.aabb.max[1] * 2).toBeLessThan(0.16);
+  });
+
+  it('a block is sized by the ROPE it carries — and the square-riggers keep theirs', () => {
+    // USER: "the rope blocks look a little oversized for this boat." They were
+    // `ropeParams.blockSize` 0.25 m — a galleon's block, fitted on a galleon's
+    // 56 mm halyard — hung on the raft's 20 mm gear at twelve rope-diameters.
+    const plan = buildRaftRiggingPlan(raft);
+    const blocks = buildBlockDescriptors(plan, ropeParams.maxBlocks, ropeParams.blockAnchorT, raftBlockSize);
+    expect(blocks.length).toBeGreaterThan(0);
+    for (const b of blocks) {
+      const rope = plan[b.rope];
+      expect(b.size, `${b.socket} block`).toBeCloseTo(rope.thickness * 2 * RAFT_BLOCK_PER_ROPE_DIAMETER, 9);
+      // the PROPERTY, not the constant: a shell is a handful of rope-diameters
+      expect(b.size / (rope.thickness * 2)).toBeGreaterThan(4);
+      expect(b.size / (rope.thickness * 2)).toBeLessThan(10);
+      expect(b.size, 'still a galleon\'s block on a raft').toBeLessThan(ropeParams.blockSize);
+    }
+    // and nothing changed for the two square-riggers: same call, same numbers
+    for (const ship of [buildGalleonBlueprint(), buildBrigantineBlueprint()]) {
+      const sq = buildRiggingPlan(ship);
+      for (const b of buildBlockDescriptors(sq, ropeParams.maxBlocks)) {
+        expect(b.size).toBe(ropeParams.blockSize);
+      }
+    }
+  });
+});
+
+/**
+ * §B97 — THE RIDGE. §T.129 measured it and left it: the two roof slabs
+ * interpenetrated 0.038 m at the apex because `thatchCourses` put the shared
+ * underside 0.092 m below the piece's own aabb min, so each soffit crossed the
+ * centreline and the two gable-end caps overlapped, co-facing and coplanar,
+ * over 0.002 m² each. §T.129's detector could not see it because it was scoped
+ * to ONE slope at a time; this runs it across BOTH, which is where the fight is.
+ */
+describe('§B97 the two roof slopes MITRE at the ridge', () => {
+  const p = raftParams;
+  const raft = buildRaftBlueprint();
+  const asm = new ShipAssembly(raft, stubFactory);
+  asm.group.updateMatrixWorld(true);
+  const byId = new Map(raft.map((d) => [d.id, d]));
+  const slopes = ['thatch-roof-port', 'thatch-roof-starboard'];
+
+  it('no two roof faces share a plane, a facing and a patch of area — ACROSS the ridge', () => {
+    expect(coplanarFights(asm, slopes).join('\n')).toBe('');
+  });
+
+  it('neither slope crosses the ridge plane, and the apex is CLOSED', () => {
+    const box = (id: string): THREE.Box3 => worldBox(asm, id);
+    const port = box('thatch-roof-port');
+    const stbd = box('thatch-roof-starboard');
+    // §T.129 measured 0.019 m of overshoot each; a mitre leaves none…
+    expect(port.max.x, 'the port slope runs past the ridge').toBeLessThanOrEqual(1e-6);
+    expect(stbd.min.x, 'the starboard slope runs past the ridge').toBeGreaterThanOrEqual(-1e-6);
+    // …and it does not open a GROOVE either, which is the other way to lose:
+    // §T.129 noted that trimming alone widens today's 3.3 cm ridge gap to 7 cm
+    expect(stbd.min.x - port.max.x, 'a trimmed ridge, not a mitred one')
+      .toBeLessThan(0.005);
+    // both slopes still reach the same ridge HEIGHT, so the apex is one line
+    expect(port.max.y).toBeCloseTo(stbd.max.y, 3);
+  });
+
+  it('the aabb tells the truth about the slab it declares (§B97\'s root cause)', () => {
+    for (const id of slopes) {
+      const d = byId.get(id)!;
+      const g = buildPieceGeometry(d.kind, d.aabb, d.shape);
+      g.computeBoundingBox();
+      const b = g.boundingBox!;
+      for (const axis of [0, 1, 2] as const) {
+        const lo = [b.min.x, b.min.y, b.min.z][axis];
+        const hi = [b.max.x, b.max.y, b.max.z][axis];
+        expect(lo, `${id} geometry below its own aabb on axis ${axis}`)
+          .toBeGreaterThanOrEqual(d.aabb.min[axis] - 1e-6);
+        expect(hi, `${id} geometry above its own aabb on axis ${axis}`)
+          .toBeLessThanOrEqual(d.aabb.max[axis] + 1e-6);
+      }
+      g.dispose();
+    }
+  });
+
+  it('and the roof is thinner than it was: the ridge course IS `roofThickness`', () => {
+    // USER: "the roof is a little bit too chunky too." The declared 0.08 m was
+    // drawn 0.172 at the ridge and 0.112 at the eave, because the course stack
+    // hung below the aabb it claimed. §T.117's five lapped courses and §T.134's
+    // four 0.075 m leaf laps per 0.30 m course are untouched by the fix.
+    for (const id of slopes) {
+      const d = byId.get(id)!;
+      const courses = thatchCourses(thatchSlabRun(d.aabb, d.shape ?? {}), d.aabb.max[1], d.shape ?? {});
+      expect(courses[0].bottom, 'the stack still hangs below the lath plane').toBe(0);
+      expect(courses[0].top - courses[0].bottom).toBeCloseTo(p.roofThickness, 9);
+      const eave = courses[courses.length - 1];
+      expect(eave.top - eave.bottom)
+        .toBeCloseTo(p.roofThickness - p.roofCourseRise * (courses.length - 1), 9);
+      // a leaf roof, not a slab of timber
+      expect(p.roofThickness).toBeLessThan(0.16);
+      // §T.134's relationship: four material leaf laps inside one course
+      expect(p.roofCoursePitch / 0.075).toBeCloseTo(4, 6);
+    }
+  });
+});
+
+/**
+ * §T.144 — THE DECK AS A PLACE, NOT A DRAWING. Three user notes from the same
+ * pass, all of them relations between parts rather than metre values:
+ *   "it could be neat to have the guara rails have a little bit of a slot on
+ *    top of the deck so that they don't look so plopped in and random";
+ *   "the middle front guara is clipping into the crate that is there";
+ *   "move the forward mast a little bit further forward so that it's easier to
+ *    pass through when walking on the deck — at the moment it's almost
+ *    impossible to pass between this and the house without crouching."
+ */
+describe('§T.144 the guaras are fitted, and the fore-deck is passable', () => {
+  const p = raftParams;
+  const raft = buildRaftBlueprint();
+  const L = raftLayout();
+  const asm = new ShipAssembly(raft, stubFactory);
+  asm.group.updateMatrixWorld(true);
+  const byId = new Map(raft.map((d) => [d.id, d]));
+  const guaras = raft.filter((d) => d.kind === 'guara');
+
+  it('every guara comes through a SLOT, and the slot is a piece of the raft', () => {
+    expect(guaras.length).toBe(p.guaraCount);
+    for (const g of guaras) {
+      const collar = byId.get(g.id.replace('guara-', 'guara-collar-'));
+      expect(collar, `${g.id} stands in nothing`).toBeDefined();
+      const c = collar as PieceDef;
+      // §V71/§B100: the plank SLIDES through it, so it must not be a child of
+      // the plank — and `setGuaraDepths` drives every piece of kind `guara`,
+      // which is exactly why this one is not one
+      expect(c.parent).toBeUndefined();
+      expect(c.kind).not.toBe('guara');
+      // the hole clears the board it holds, and is not a barn door either
+      // (§V66 — the slot is sized by the PLANK, not by a metre value)
+      const slot = (c.shape?.slotX ?? 0) * 2;
+      expect(slot, `${c.id} pinches the plank`).toBeGreaterThan(p.guaraThickness);
+      expect(slot / p.guaraThickness).toBeLessThan(3);
+      expect((c.shape?.slotZ ?? 0) * 2).toBeGreaterThan(p.guaraWidth);
+      // it is over the plank's own chink, and it surrounds it in plan
+      expect(c.transform.position[0]).toBeCloseTo(g.transform.position[0], 9);
+      expect(c.transform.position[2]).toBeCloseTo(g.transform.position[2], 9);
+      expect(c.aabb.max[0]).toBeGreaterThan(p.guaraThickness / 2);
+      // and it SITS on the surface the plank comes through: the mats forward
+      // of the cabin, the bare log crowns aft of it [§1 Deck coverage]
+      const base = c.transform.position[1] + c.aabb.min[1];
+      const surface = g.transform.position[2] > L.cabinFrontZ ? L.deckY : L.logTopY;
+      expect(base, `${c.id} floats over its deck`).toBeCloseTo(surface, 9);
+      expect(c.aabb.max[1] - c.aabb.min[1]).toBeCloseTo(p.guaraCollarHeight, 9);
+    }
+  });
+
+  it('the collar STAYS PUT while the plank it holds runs its whole travel (§V71)', () => {
+    // §B100 wired `setGuaraDepths` to `shape.travel`; a collar that rode up
+    // with the board would be the §T.138 parrel defect in a new place.
+    const collarY = (): number[] => guaras.map((g) =>
+      asm.group.getObjectByName(`${g.id.replace('guara-', 'guara-collar-')}-mesh`)!
+        .getWorldPosition(new THREE.Vector3()).y);
+    const plankY = (): number[] => guaras.map((g) =>
+      asm.group.getObjectByName(`${g.id}-mesh`)!.getWorldPosition(new THREE.Vector3()).y);
+    asm.setGuaraDepths(guaras.map(() => 0));
+    asm.group.updateMatrixWorld(true);
+    const up = { collar: collarY(), plank: plankY() };
+    asm.setGuaraDepths(guaras.map(() => 1));
+    asm.group.updateMatrixWorld(true);
+    const down = { collar: collarY(), plank: plankY() };
+    for (let k = 0; k < guaras.length; k++) {
+      expect(down.plank[k], `${guaras[k].id} does not move`).toBeLessThan(up.plank[k] - 0.5);
+      expect(down.collar[k], `${guaras[k].id}'s collar rides the plank`)
+        .toBeCloseTo(up.collar[k], 9);
+    }
+    asm.setGuaraDepths(guaras.map(() => p.guaraDefaultDepth));
+    asm.group.updateMatrixWorld(true);
+  });
+
+  it('nothing lashed on the deck stands in a guara\'s box, at any depth it can be hauled to', () => {
+    // USER: "the middle front guara is clipping into the crate that is there."
+    // Measured before: `plank-chest` z 0.584→1.116 against `guara-3`'s 1.100 —
+    // 16 mm through 0.43 m of height, and the §T34 yaw swung the corner 46 mm
+    // further in. A guara only moves in y, so a FOOTPRINT overlap is an
+    // interpenetration at every depth the crew can reach.
+    const rectOf = (d: PieceDef): { x0: number; x1: number; z0: number; z1: number } => {
+      const b = worldBox(asm, d.id);
+      return { x0: b.min.x, x1: b.max.x, z0: b.min.z, z1: b.max.z };
+    };
+    const DECK_GEAR = /^(plank-chest|crate-|jerrycan-|kitchen-box|rain-drum|dinghy|chest)/;
+    for (const gear of raft.filter((d) => DECK_GEAR.test(d.id))) {
+      const a = rectOf(gear);
+      for (const g of guaras) {
+        const b = rectOf(g);
+        const dx = Math.max(a.x0 - b.x1, b.x0 - a.x1, 0);
+        const dz = Math.max(a.z0 - b.z1, b.z0 - a.z1, 0);
+        expect(Math.hypot(dx, dz), `${gear.id} is inside ${g.id}`).toBeGreaterThan(0);
+        // …and the collar's own timber has room too
+        const c = rectOf(byId.get(g.id.replace('guara-', 'guara-collar-'))!);
+        const cx = Math.max(a.x0 - c.x1, c.x0 - a.x1, 0);
+        const cz = Math.max(a.z0 - c.z1, c.z0 - a.z1, 0);
+        expect(Math.hypot(cx, cz), `${gear.id} is inside ${g.id}'s collar`).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('a walker can pass between the bipod and the cabin STANDING UP', () => {
+    /**
+     * §T.144-3, measured the way §T.115 measures a lane and NOT taken on
+     * taste. The corridor across the fore-deck is bounded aft by the cabin's
+     * roof — which overhangs 0.25 m forward of its front wall [§3 Roof] — and
+     * forward by the bipod legs, which rake AFT, so every metre a walker's
+     * head rises steals `sin(mastRakeAft)` of it. Before §T.144 it measured
+     * 0.235 m at knee height, 0.120 crouched and 0.043 standing, against a
+     * 0.60 m capsule: not a lane at any stance, which is the user's "almost
+     * impossible to pass between this and the house without crouching".
+     */
+    const roofFwd = Math.max(
+      worldBox(asm, 'thatch-roof-port').max.z, worldBox(asm, 'thatch-roof-starboard').max.z,
+    );
+    const gapAt = (h: number): number => {
+      let aft = Infinity;
+      for (const side of ['port', 'starboard'] as const) {
+        const leg = byId.get(`bipod-leg-${side}`)!;
+        const axis = new THREE.Vector3(0, h, 0)
+          .applyEuler(new THREE.Euler(...leg.transform.rotation))
+          .add(new THREE.Vector3(...leg.transform.position));
+        aft = Math.min(aft, axis.z - leg.aabb.max[0]);
+      }
+      return aft - roofFwd;
+    };
+    const stand = playerParams.standHeight;
+    expect(gapAt(stand), 'the standing lane is narrower than the man walking it')
+      .toBeGreaterThan(2 * playerParams.capsuleRadius);
+    // and it only gets wider on the way down — the rake is the whole story
+    expect(gapAt(playerParams.crouchHeight)).toBeGreaterThan(gapAt(stand));
+    expect(gapAt(0)).toBeGreaterThan(gapAt(playerParams.crouchHeight));
+    // the roof's overhang is still the reference's, not trimmed to buy lane
+    expect(roofFwd - L.cabinFrontZ).toBeGreaterThanOrEqual(0.2);
+    expect(roofFwd - L.cabinFrontZ).toBeLessThanOrEqual(0.3);
+  });
+
+  it('and moving the mast has not cost the guaras their authority (§T.96/§T.138)', () => {
+    // the mast's fore-aft position IS the sail's centre of effort, so opening
+    // the lane moved the CE forward with it. `raftGuaraPositions` follows the
+    // layout (§B102), but the BALANCE about the new CE is a property of its
+    // own and has to be re-asserted, not assumed.
+    const sail = byId.get('sail-main-lower')!;
+    const ce = asm.group.getObjectByName(sail.id)!.getWorldPosition(new THREE.Vector3()).z;
+    const zs = guaras.map((g) => g.transform.position[2]);
+    expect(zs.filter((z) => z > ce).length, 'boards forward of the CE').toBeGreaterThanOrEqual(2);
+    expect(zs.filter((z) => z < ce).length, 'boards aft of the CE').toBeGreaterThanOrEqual(2);
+    expect(L.mastZ, 'the mast is still abaft the fore-deck\'s working room')
+      .toBeLessThan(L.cabinFrontZ + 2);
+    expect(L.mastZ).toBeGreaterThan(L.cabinFrontZ);
   });
 });

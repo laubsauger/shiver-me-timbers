@@ -43,6 +43,23 @@ export function yardAttitude(p: RaftParams, key: number, sprit = 0): { cock: num
 
 const SAIL_STATES: SailStateDef[] = [{ id: 'furled' }, { id: 'reefed' }, { id: 'full' }];
 
+/** m of cloth a sail piece keeps ABOVE its yard's axis (`yardAndSail`'s aabb) */
+const SAIL_ROACH = 0.15;
+
+/**
+ * §V66/§T.140 — A SPAR IS AS THICK AS ITS OWN LENGTH SAYS. Every pole and yard
+ * on the raft (bipod legs, topsail pole, all three yards, the mizzen) reads its
+ * diameter from here, so re-hoisting a mast or re-cutting a yard carries its
+ * section with it. `sparSlenderness` is length ÷ diameter, measured off
+ * `docs/raft2100/ref/kon-tiki-rig-proportions.png` (see the param).
+ *
+ * The one pole that is NOT here is `flagpoleDiameter`: [§4 Mizzen] calls it a
+ * "tall thin flag/antenna pole" — a whip, deliberately three times more
+ * slender than a spar that carries cloth, and typing it is the honest thing.
+ */
+export const raftSparDiameter = (p: RaftParams, length: number): number =>
+  Math.max(0.02, length) / Math.max(4, p.sparSlenderness);
+
 /** a yard on a mast piece (parent-relative y) + its sail, same contract as blueprintRig */
 function yardAndSail(
   p: RaftParams,
@@ -87,7 +104,7 @@ function yardAndSail(
   }));
   const sail = mkPiece(sailId, 'sail', [0, -yr, p.sailYardOffset], {
     min: [-sailWidth / 2, -sailDrop, -0.5],
-    max: [sailWidth / 2, 0.15, 0.5],
+    max: [sailWidth / 2, SAIL_ROACH, 0.5],
   }, {
     parent: yardId,
     sockets: clothSockets,
@@ -128,13 +145,16 @@ function parrelSeizing(
   yr: number,
   gap: number,
   y: number,
+  /** §B73's `yardAttitude.offset`: the yard is hoisted off-centre, and a
+   *  collar that reaches only the pole's own z is not on it (§V71) */
+  offset = 0,
 ): PieceDef {
   const standoff = mastR + yr + gap; // pole axis → yard axis, in the mast's z
-  const wrapR = standoff / 2 + Math.max(mastR, yr);
+  const wrapR = Math.hypot(offset / 2, standoff / 2) + Math.max(mastR, yr);
   const turns = Math.max(3, Math.round(wrapR / p.lashingRopeDiameter));
   const width = p.lashingRopeDiameter * turns;
   const R = wrapR + p.lashingRopeDiameter * 0.6;
-  return mkPiece(`lashing-parrel-${mast}-${level}`, 'lashing', [0, y, standoff / 2], {
+  return mkPiece(`lashing-parrel-${mast}-${level}`, 'lashing', [offset / 2, y, standoff / 2], {
     min: [-width / 2, -R, -R],
     max: [width / 2, R, R],
   }, {
@@ -146,10 +166,10 @@ function parrelSeizing(
 
 export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
   const out: PieceDef[] = [];
-  const legR = p.mastLegDiameter / 2;
   const halfSpan = p.mastLegSpacing / 2;
   const lean = Math.atan2(halfSpan, p.mastHeight);
   const legLen = Math.hypot(halfSpan, p.mastHeight) + p.mastCrossingOverlap;
+  const legR = raftSparDiameter(p, legLen) / 2;
   // §B75: the whole bipod is RAKED AFT. Rotation about +x by +θ tips a +y pole
   // toward +z (the bow), so aft is −rake; every piece stepped at deck level
   // (legs, topsail pole) carries it and the crossing lands at `crossingAt`
@@ -162,6 +182,18 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
     // the fore deck would run the line straight through the mainsail.
     const sockets: SocketDef[] = [
       { id: `anchor-belay-main-${side}`, type: 'rope-anchor', position: [-sign * (legR + 0.05), 0.25, -0.3] },
+      /**
+       * §T.145 — THE TOPSAIL NEEDS ITS OWN BELAY. The shared planner sends
+       * every sheet to `belay(side, aftMast)`, so `main-upper`'s sheets and
+       * `main-lower`'s both landed on `anchor-channel-{side}-mizzen-1`: one
+       * socket, two lines, and no station could ever have addressed either of
+       * them (§V84 wants a station per rope end, and two on one point is not
+       * that). A topsail's sheets come down to the mast it is set on, which on
+       * this rig is the bipod — a second pin above the main's, on the same aft
+       * face, for the same §B86-1 reason (the canvas hangs FORWARD of the legs,
+       * so anything belayed forward would be led through it).
+       */
+      { id: `anchor-belay-topsail-${side}`, type: 'rope-anchor', position: [-sign * (legR + 0.05), 0.62, -0.3] },
     ];
     // §B78-3: the ladder station used to sit at the leg's FOOT, 0.45 m
     // OUTBOARD of it — x 2.69 in ship space, past the foot-rail and off the
@@ -205,25 +237,36 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
 
   // the topsail pole = the rig's `mast-main` (see header). Stepped at deck
   // level, drawn from the crossing up.
-  const poleR = legR * 0.8;
   const crossing = p.mastHeight;
   /**
-   * §B78-4 — THE PERCH IS A PLACE TO LOOK FROM, and the topsail is resolved
-   * against it (§V71), never the other way round. The platform is at the
-   * crossing [§4 Masthead] and the topsail is set on the pole above it; with
-   * both authored as free numbers they overlapped, and the lookout's eye
-   * stood INSIDE the cloth — "forward is 100 % topsail" (R2 walk review).
-   * The sail's FOOT is hoisted `lookoutHeadroom` above the platform and the
-   * pole grows to carry the yard, so no knob can put the canvas back over the
-   * lookout's head.
+   * §B78-4 / §T.140 — THE PERCH IS A PLACE TO LOOK FROM, and the topsail is
+   * still resolved against it (§V71) — but the OTHER WAY UP.
+   *
+   * §B78-4 read "forward is 100 % topsail" (R2 walk review) and hoisted the
+   * sail's FOOT above the lookout's eye. That works, and it costs the whole
+   * rig: the pole had to grow to carry a yard 3.3 m over the crossing, which
+   * is the 12.4 m mast the user then called "crazy high" — and it is not what
+   * the 1947 frames show. There the topsail STRADDLES the masthead: its yard
+   * sits a hand's breadth above the crossing and its cloth hangs BELOW the
+   * platform, so the man standing on the perch looks OVER the sail's head with
+   * his whole body clear of it. The cloth ends up 1.4 m under his eye and
+   * 0.35 m forward of the pole — the bottom edge of his forward view, not the
+   * middle of it. Same relationship, same §V71 discipline (the CLAMP is
+   * evaluated against the perch, not authored beside it), one third the mast.
    */
   const perchY = crossing + p.platformThickness;
-  // how far the cloth can hang BELOW its yard for ANY attitude `yardAttitude`
-  // gives it (§V71: the live shape, not the rest pose) — the farthest cloth
-  // corner from the yard's own axis, so no cock/rake/slew can dip under it
-  const topsailReach = Math.hypot(p.topsailWidth / 2, p.yardDiameter * 0.3 + p.topsailDrop, p.sailYardOffset);
-  const topsailY = Math.max(crossing + p.topsailHeightAboveCrossing, perchY + p.lookoutHeadroom + topsailReach);
-  const top = Math.max(crossing + p.topPoleHeight, topsailY + p.yardDiameter * 2);
+  // how far the cloth can stand ABOVE its yard for ANY attitude `yardAttitude`
+  // gives it (§V71: the live shape, not the rest pose) — half a cocked yard
+  // plus the roach the sail piece keeps over its own head
+  const topsailYr = raftSparDiameter(p, p.topsailYardLength) / 2;
+  const topsailReach = p.topsailWidth * Math.sin(Math.abs(p.yardCock)) / 2 + topsailYr + SAIL_ROACH;
+  const topsailY = Math.min(crossing + p.topsailHeightAboveCrossing,
+    perchY + p.lookoutHeadroom - topsailReach);
+  // the pole runs from its lashing alongside the legs to the truck, so its own
+  // length — and therefore its section (§V66) — includes the overlap
+  const top = Math.max(crossing + p.topPoleHeight, topsailY + topsailYr * 4);
+  const poleR = raftSparDiameter(p, top - crossing + p.mastCrossingOverlap) / 2;
+  const topsailGap = poleR * 2 * p.poleParrelGap;
   const irr = Math.max(0, shipDetailParams.irregularity);
   out.push(
     mkPiece('mast-main', 'mast', [0, L.logTopY, L.mastZ], {
@@ -241,10 +284,21 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
       ],
     }),
   );
-  // lookout platform at the crossing [§4 Masthead]
+  /**
+   * Lookout platform at the crossing [§4 Masthead] — SHOVED AFT OF THE CLOTH.
+   *
+   * §T.140/§V71: with the topsail hanging astride the masthead where the photo
+   * puts it, the sail's plane crosses the platform's level, so the board has
+   * to be resolved against the cloth's actual standoff (pole radius + yard
+   * radius + parrel gap + the sail's own offset forward of its yard) and not
+   * left centred on the pole. The lookout stands ABAFT the topsail, which is
+   * where the 1947 frames have him.
+   */
   const ps = p.platformSize / 2;
+  const clothZ = poleR + topsailYr + topsailGap + p.sailYardOffset;
+  const perchZ = Math.min(0, clothZ - 0.06 - ps);
   out.push(
-    mkPiece('lookout-platform', 'bamboo-deck', [0, crossing, 0], {
+    mkPiece('lookout-platform', 'bamboo-deck', [0, crossing, perchZ], {
       min: [-ps, 0, -ps],
       max: [ps, p.platformThickness, ps],
     }, {
@@ -265,7 +319,7 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
       shape: { n: 1, x0: 0, rope: p.lashingRopeDiameter, turns: p.crossingWrapWidth / p.lashingRopeDiameter, beamR: wrapR, ring: 0 },
     }),
   );
-  const yr = p.yardDiameter / 2;
+  const yr = raftSparDiameter(p, p.yardLength) / 2;
   // main yard hoisted below the crossing; the legs are ~legR apart there so
   // the yard clears them on the leg radius
   out.push(...yardAndSail(p, 'main', 'lower', p.mainYardHeight, p.yardLength, yr, legR,
@@ -274,8 +328,9 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
   // of the lookout (see `topsailY`). §T.138: a yard on ONE pole gets a
   // parrel-sized gap and a seizing across it, not the bipod's splay allowance
   out.push(...yardAndSail(p, 'main', 'upper', topsailY,
-    p.topsailYardLength, yr * 0.6, poleR, p.topsailWidth, p.topsailDrop, 2, 0, 0, p.poleParrelGap));
-  out.push(parrelSeizing(p, 'main', 'upper', poleR, yr * 0.6, p.poleParrelGap, topsailY));
+    p.topsailYardLength, topsailYr, poleR, p.topsailWidth, p.topsailDrop, 2, 0, 0, topsailGap));
+  out.push(parrelSeizing(p, 'main', 'upper', poleR, topsailYr, topsailGap, topsailY,
+    yardAttitude(p, 2).offset));
   return out;
 }
 
@@ -296,7 +351,7 @@ function stepOnLog(p: RaftParams, L: RaftLayout, x: number): { x: number; crown:
 /** short mizzen pole + small square sail, and the tall thin flag pole [§4 Mizzen] */
 export function buildMizzenAndFlag(p: RaftParams, L: RaftLayout): PieceDef[] {
   const out: PieceDef[] = [];
-  const mr = p.mizzenDiameter / 2;
+  const mr = raftSparDiameter(p, p.mizzenHeight) / 2;
   const mizzenFoot = stepOnLog(p, L, p.mizzenX);
   out.push(
     mkPiece('mast-mizzen', 'mast', [mizzenFoot.x, mizzenFoot.crown, p.mizzenZ], {
@@ -306,15 +361,17 @@ export function buildMizzenAndFlag(p: RaftParams, L: RaftLayout): PieceDef[] {
       sockets: [{ id: 'anchor-masthead-mizzen', type: 'rope-anchor', position: [0, p.mizzenHeight, 0] }],
     }),
   );
-  const yr = p.yardDiameter * 0.3;
+  const yr = raftSparDiameter(p, p.mizzenYardLength) / 2;
   // the mizzen's spar is a SPRIT (§B73 [ref-sails-1947]): hoisted to the
   // pole head and stood up at `mizzenSpritAngle`, the small sail hanging
   // loose off it — in the photo it flies ABOVE the cabin ridge, not behind it.
   // §T.138: parreled to the pole with `poleParrelGap` of slack and a seizing
   // across it — at the bipod's 0.30 m it hung in clear air off a 0.10 m pole
+  const mizzenGap = mr * 2 * p.poleParrelGap;
   out.push(...yardAndSail(p, 'mizzen', 'lower', p.mizzenHeight - 0.25, p.mizzenYardLength, yr, mr,
-    p.mizzenSailWidth, p.mizzenSailDrop, 3, p.mizzenSpritAngle, 0, p.poleParrelGap));
-  out.push(parrelSeizing(p, 'mizzen', 'lower', mr, yr, p.poleParrelGap, p.mizzenHeight - 0.25));
+    p.mizzenSailWidth, p.mizzenSailDrop, 3, p.mizzenSpritAngle, 0, mizzenGap));
+  out.push(parrelSeizing(p, 'mizzen', 'lower', mr, yr, mizzenGap, p.mizzenHeight - 0.25,
+    yardAttitude(p, 3, p.mizzenSpritAngle).offset));
 
   const fr = p.flagpoleDiameter / 2;
   const flagFoot = stepOnLog(p, L, p.flagpoleX);

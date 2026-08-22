@@ -25,6 +25,30 @@ function boxBetween(
 }
 
 /**
+ * §B97 — CUT ONE FACE OF A BOX TO A SLANT, keeping every face planar so the
+ * recomputed normals stay exact and unit (§T129's roof test asserts both).
+ *
+ * Every vertex sitting on the plane x = `xFace` slides to x − `shear`·y. The
+ * cut face, the top, the bottom and the two ends all stay flat (the first
+ * because it is the image of a plane under a shear, the others because they
+ * are y- or z-constant), so `computeVertexNormals` on the non-indexed box
+ * gives one exact normal per face and no vertex is shared across two.
+ */
+function mitreFace(box: THREE.BufferGeometry, xFace: number, shear: number): THREE.BufferGeometry {
+  if (Math.abs(shear) < 1e-9) return box;
+  const g = box.index !== null ? box.toNonIndexed() : box;
+  if (g !== box) box.dispose();
+  const pos = g.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    if (Math.abs(pos.getX(i) - xFace) > 1e-9) continue;
+    pos.setX(i, pos.getX(i) - shear * pos.getY(i));
+  }
+  pos.needsUpdate = true;
+  g.computeVertexNormals();
+  return g;
+}
+
+/**
  * A cylinder of radius `r` running from `a` to `b`. `sides` 4 is deliberate on
  * rope and wire: at 2 cm nobody reads the section, and a slack rope needs its
  * SAG (several segments), which is where the triangles are worth spending.
@@ -222,6 +246,37 @@ export function buildCrateGeometry(aabb: AABB, shape: Record<string, number> = {
   return mergeNonIndexed(parts);
 }
 
+/**
+ * §T.144 — THE SLOT A GUARA STANDS IN.
+ *
+ * USER: "it could be neat to have the guara rails have a little bit of a slot
+ * on top of the deck so that they don't look so plopped in and random." [§2
+ * Fixing] holds the planks "on edge, wedges + ropes", which is the same thing
+ * seen from the raft's side: a 25 mm fir board does not stand upright in a
+ * chink by itself. Four timbers round a rectangular hole, pegged to whatever
+ * surface the plank comes through — the mats forward, the bare logs aft.
+ *
+ * WHOSE FRAME (§V71): the collar is a piece of the RAFT, never a child of the
+ * plank. §B100 wired `setGuaraDepths` to `shape.travel`, so a guara now slides
+ * through this hole every time the crew works it; a collar parented to the
+ * board would ride up with it, which is the same defect the parrel seizing
+ * had (§T.138) in a new place. `slotX`/`slotZ` are the hole's HALF sizes.
+ */
+export function buildGuaraCollarGeometry(aabb: AABB, shape: Record<string, number> = {}): THREE.BufferGeometry {
+  const sx = Math.max(1e-3, shape.slotX ?? aabbSize(aabb).x / 4);
+  const sz = Math.max(1e-3, shape.slotZ ?? aabbSize(aabb).z / 4);
+  const [x0, y0, z0] = aabb.min;
+  const [x1, y1, z1] = aabb.max;
+  return mergeNonIndexed([
+    // the two cheeks the board is wedged between, running the length of the slot
+    boxBetween(x0, Math.min(-sx, x1), y0, y1, z0, z1),
+    boxBetween(Math.max(sx, x0), x1, y0, y1, z0, z1),
+    // and the two end blocks that close the hole
+    boxBetween(-sx, sx, y0, y1, z0, Math.min(-sz, z1)),
+    boxBetween(-sx, sx, y0, y1, Math.max(sz, z0), z1),
+  ]);
+}
+
 // ---------------------------------------------------------------------------
 // §B87 — THE ROOF IS COURSES, NOT A SLAB.
 //
@@ -264,7 +319,19 @@ export function thatchCourses(
   const rise = Math.max(0, shape.courseRise ?? 0.015);
   const seed = shape.seed ?? 0;
   const n = Math.max(1, Math.ceil(slabLen / pitch));
-  const bottom = -(top * 0.4 + rise * (n - 1));
+  /**
+   * §T.140 / §B97 — THE UNDERSIDE IS THE PIECE'S OWN FLOOR, y = 0.
+   *
+   * It used to be −(top·0.4 + rise·(n−1)) = −0.092 while the piece's aabb
+   * declared min y = 0, which made a "0.08 m" roof 0.172 m thick at the ridge
+   * (0.112 at the eave) and hung the whole slab below the plane the walls
+   * meet — the user's "the roof is a little bit too chunky", and the reason
+   * each soffit crossed the ridge centreline into the other slope (§B97). The
+   * stack now hangs DOWN from `top`: the ridge course is `roofThickness` deep,
+   * every course toward the eave one `rise` shallower, and the shared
+   * underside is the lath plane the aabb always claimed it was.
+   */
+  const bottom = 0;
   const out: ThatchCourse[] = [];
   for (let k = 0; k < n; k++) {
     // k = 0 at the RIDGE: the upper course lies over the lower one, so the
@@ -302,17 +369,38 @@ export function thatchEaveButts(slabLen: number, shape: Record<string, number> =
 }
 
 /**
+ * §B97/§T.140 — THE RIDGE IS A MITRE, and this is the run the courses are laid
+ * over.
+ *
+ * The slab's ridge end is cut to a plane that is VERTICAL once the piece is
+ * rotated onto its slope, so the two slopes meet ON the ridge plane instead of
+ * each running its own soffit past it. That cut reaches `roofThickness·tan θ`
+ * further up-slope at the top face than at the underside, so the piece's aabb
+ * carries that much extra on its ridge side — and the COURSES must not, or a
+ * 1.481 m slope would silently become 1.504 m and gain a sixth course. Both
+ * the builder and the §V80 property tests ask this one function for the run.
+ */
+export function thatchSlabRun(aabb: AABB, shape: Record<string, number> = {}): number {
+  return aabbSize(aabb).x - Math.max(0, shape.mitre ?? 0);
+}
+
+/**
  * One slope of the thatch. `shape.eaveSign` says which way local +x runs down
  * the slope (the two slabs are mirrored about the ridge, so it is +1 to
- * starboard and −1 to port); the aabb gives the slope length (x), the roof
- * thickness (y) and the ridge length (z).
+ * starboard and −1 to port); the aabb gives the slope length (x, plus the
+ * ridge mitre's allowance), the roof thickness (y) and the ridge length (z).
  */
 export function buildThatchRoofGeometry(aabb: AABB, shape: Record<string, number> = {}): THREE.BufferGeometry {
   const s = aabbSize(aabb);
   const sign = (shape.eaveSign ?? 1) < 0 ? -1 : 1;
-  const half = s.x / 2;
+  const run = thatchSlabRun(aabb, shape);
+  const half = run / 2;
   const zHalf = s.z / 2;
-  const courses = thatchCourses(s.x, aabb.max[1], shape);
+  // local-x displacement per metre of local y that keeps the ridge face on the
+  // ridge PLANE: the piece is rotated by −sign·θ about z, so a point (x, y)
+  // lands at x·cos θ + sign·y·sin θ and the face has to solve for a constant
+  const ridgeShear = sign * Math.tan(Math.max(0, shape.ridgeSlope ?? 0));
+  const courses = thatchCourses(run, aabb.max[1], shape);
   // local x of a distance `d` down-slope from the ridge
   const at = (d: number): number => sign * (d - half);
   const parts: THREE.BufferGeometry[] = [];
@@ -332,19 +420,23 @@ export function buildThatchRoofGeometry(aabb: AABB, shape: Record<string, number
     const x0 = Math.min(at(head), at(c.butt));
     const x1 = Math.max(at(head), at(c.butt));
     if (k < courses.length - 1) {
-      parts.push(boxBetween(x0, x1, c.bottom, c.top, -zHalf, zHalf));
+      const box = boxBetween(x0, x1, c.bottom, c.top, -zHalf, zHalf);
+      // only the RIDGE course reaches the centreline, so only it is mitred
+      parts.push(head <= 1e-9 ? mitreFace(box, at(0), ridgeShear) : box);
       continue;
     }
     // THE EAVE COURSE IS RAGGED: broken into butts of different lengths, so
     // the roof ends in a torn fringe and not a ruled line [§3 Roof]
-    const butts = thatchEaveButts(s.x, shape);
+    const butts = thatchEaveButts(run, shape);
     const ragged = Math.max(0, shape.eaveRagged ?? 0.05);
     for (let j = 0; j < butts.length; j++) {
       const zA = -zHalf + (s.z * j) / butts.length;
       const zB = -zHalf + (s.z * (j + 1)) / butts.length;
       const bx = at(butts[j]);
-      parts.push(boxBetween(Math.min(x0, bx), Math.max(x0, bx), c.bottom, c.top,
-        zA + ragged * 0.1, zB - ragged * 0.1));
+      const box = boxBetween(Math.min(x0, bx), Math.max(x0, bx), c.bottom, c.top,
+        zA + ragged * 0.1, zB - ragged * 0.1);
+      // a one-course slope is its own ridge course as well as its own eave
+      parts.push(head <= 1e-9 ? mitreFace(box, at(0), ridgeShear) : box);
     }
   }
   return mergeNonIndexed(parts);

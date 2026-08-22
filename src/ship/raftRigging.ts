@@ -64,6 +64,26 @@ export const RAFT_ROPE_RADIUS: Record<RigRole, number> = {
 export const RAFT_RUNNING_SLACK = 1.02;
 
 /**
+ * §T.140/§V66 — A BLOCK'S SHELL, FROM THE ROPE IT IS SEIZED INTO.
+ *
+ * USER, against `docs/raft2100/ref/kon-tiki-rig-proportions.png`: "the rope
+ * blocks look a little oversized for this boat." They were: every ship in the
+ * game took `ropeParams.blockSize` = 0.25 m, a number tuned on the galleon,
+ * whose halyards are 56 mm. The raft's running gear is 20 mm [§B80 above], so
+ * the same shell reads at 12 rope-diameters — a ship's block on a raft's line.
+ *
+ * 7 is the traditional proportion and it is what the photo shows: the block
+ * hanging on the main halyard forward of the sail measures ~0.25 × 0.17 m at
+ * the frame's 129 px/m, on 30 mm hemp. `RiggingRope.thickness` is a RADIUS
+ * (§B80), so the shell is 14 × that: 0.14 m on the 20 mm running gear, 0.21 m
+ * on the 30 mm standing hemp — sized by the line, at any line.
+ */
+export const RAFT_BLOCK_PER_ROPE_DIAMETER = 7;
+
+export const raftBlockSize = (rope: Pick<RiggingRope, 'thickness'>): number =>
+  Math.max(0.04, rope.thickness * 2 * RAFT_BLOCK_PER_ROPE_DIAMETER);
+
+/**
  * §B86-1 — THE GEAR THE SHARED PLANNER CANNOT SEE, and why it is a table
  * here rather than a rule there.
  *
@@ -134,6 +154,15 @@ export function raftSailKeyOf(socket: string): RaftSailKey | null {
   return `${m[1]}-${m[2]}` as RaftSailKey;
 }
 
+/**
+ * §T.145 — where a `main-upper` SHEET belays, or null for every other rope.
+ * Keyed off the clew's own side so the port sheet lands on the port leg.
+ */
+export function raftSheetBelay(rope: Pick<RiggingRope, 'role' | 'socketA' | 'socketB'>): string | null {
+  if (rope.role !== 'sheet' || raftSailKeyOf(rope.socketA) !== 'main-upper') return null;
+  return rope.socketA.endsWith('-port') ? 'anchor-belay-topsail-port' : 'anchor-belay-topsail-starboard';
+}
+
 export function buildRaftRiggingPlan(blueprint: PieceDef[], p: RaftParams = raftParams): RiggingRope[] {
   // the standing rigging IS the lashing rope: 30 mm hemp, radius half of it
   const hempR = Math.max(0.0025, p.lashingRopeDiameter / 2);
@@ -162,6 +191,12 @@ export function buildRaftRiggingPlan(blueprint: PieceDef[], p: RaftParams = raft
     }
     out.push({
       ...rope,
+      // §T.145: the topsail's sheets come down to their OWN pins on the bipod.
+      // The shared planner has one rule — a sheet belays at the next mast aft
+      // — and on a two-masted raft that put BOTH square sails' sheets on the
+      // same two sockets, which is a mis-rig the plan cannot see (it dedupes
+      // by role+ends, and these differ only in their clew end).
+      socketB: raftSheetBelay(rope) ?? rope.socketB,
       // §B80: the raft's own rope radii, never the planner's galleon gear
       thickness: Math.min(rope.thickness, standing ? hempR : RAFT_ROPE_RADIUS[rope.role]),
       slack: standing ? Math.max(rope.slack, RAFT_STANDING_SLACK) : rope.slack,

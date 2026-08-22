@@ -26,7 +26,7 @@ import { createRopes } from '../ropes';
 import { applyRiggingPlan, buildBlockDescriptors, buildRiggingPlan } from '../ropes/shipRigging';
 import { buildRungDescriptors } from '../ropes/ratlines';
 import { buildRatlinePlan } from './ratlinePlan';
-import { buildRaftRiggingPlan } from './raftRigging';
+import { buildRaftRiggingPlan, raftBlockSize } from './raftRigging';
 import { ropeParams } from '../params/ropes';
 import { shipRigParams } from '../params/ship';
 import { cameraParams } from '../params/camera';
@@ -141,7 +141,10 @@ const ropes = q.get('ropes') === '0'
   : createRopes({
     maxRopes: Math.max(riggingPlan.length, 32),
     rungs: buildRungDescriptors(buildRatlinePlan(blueprint), riggingPlan),
-    blocks: buildBlockDescriptors(riggingPlan, ropeParams.maxBlocks),
+    // §T.140: the raft's blocks are sized by the line they carry, not by the
+    // galleon's `ropeParams.blockSize` (raftRigging.raftBlockSize)
+    blocks: buildBlockDescriptors(riggingPlan, ropeParams.maxBlocks,
+      ropeParams.blockAnchorT, shipName === 'raft' ? raftBlockSize : ropeParams.blockSize),
   });
 if (ropes !== null) {
   ropes.mesh.castShadow = true;

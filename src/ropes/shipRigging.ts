@@ -373,8 +373,21 @@ export function buildBlockDescriptors(
   plan: RiggingRope[],
   cap: number,
   t: number = ropeParams.blockAnchorT,
-  size: number = ropeParams.blockSize,
+  /**
+   * Shell height (m): a flat number, or a rule read off the rope the block is
+   * seized into.
+   *
+   * §T.140/§V66 — A BLOCK IS SIZED BY THE LINE IT CARRIES. `ropeParams.
+   * blockSize` is 0.25 m, which is a galleon's block on a galleon's 56 mm
+   * halyard; hung on the raft's 20 mm gear it is the "rope blocks look
+   * oversized for this boat" the user reported, and no per-ship constant would
+   * have caught that, because the defect is the RATIO. The two square-riggers
+   * keep the flat default untouched (byte-identical descriptors); the raft
+   * passes `raftBlockSize` (src/ship/raftRigging.ts).
+   */
+  size: number | ((rope: RiggingRope) => number) = ropeParams.blockSize,
 ): BlockDescriptor[] {
+  const sizeOf = typeof size === 'function' ? size : (): number => size;
   const out: BlockDescriptor[] = [];
   const used = new Set<string>();
   const tt = Math.min(0.5, Math.max(0, Number.isFinite(t) ? t : 0));
@@ -383,7 +396,7 @@ export function buildBlockDescriptors(
     if (!BLOCK_ROLES.has(rope.role) || used.has(rope.socketA)) return;
     used.add(rope.socketA);
     // t < 0.5, so the line always runs away from the block toward +t
-    out.push({ rope: index, t: tt, size, away: 1, socket: rope.socketA });
+    out.push({ rope: index, t: tt, size: sizeOf(rope), away: 1, socket: rope.socketA });
   });
   return out;
 }

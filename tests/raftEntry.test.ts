@@ -242,7 +242,7 @@ describe('RaftAction → RaftControls (§V.84, §V.62)', () => {
     expect(c.sailUp).toBe(true);
   });
 
-  it('sleep → skipToDawn; push-off → pushOff; radio → the tune stub 0..1; chart/ladder/gangways change no control', () => {
+  it('sleep → skipToDawn; push-off → pushOff; radio → the tune stub 0..1; ladder/gangways change no control; an undriven name is REFUSED', () => {
     const c = initialRaftControls();
     const s = { ...sinks(), pushOff: vi.fn() };
     const snapshot = JSON.stringify(c);
@@ -256,9 +256,14 @@ describe('RaftAction → RaftControls (§V.84, §V.62)', () => {
     expect(radio.tune).toBe(0.42);
     applyRaftAction(c, 'radio', 9, s);
     expect(radio.tune).toBe(1);
-    for (const a of ['chart', 'ladder', 'gangway-bow', 'gangway-port', 'gangway-starboard', 'gangway-stern']) {
+    for (const a of ['ladder', 'gangway-bow', 'gangway-port', 'gangway-starboard', 'gangway-stern']) {
       expect(applyRaftAction(c, a, 1, s)).toBe(true);
     }
+    // §T.145b — 'chart' used to be in that list: handled, and doing nothing at
+    // all. §T.105's overlay was never built, so the station is withdrawn and
+    // the name now falls to `default`, which is the §V62 shape the header
+    // promises callers can assert on. §T.105 re-adds both together.
+    expect(applyRaftAction(c, 'chart', 1, s)).toBe(false);
     expect(JSON.stringify(c)).toBe(snapshot);
   });
 

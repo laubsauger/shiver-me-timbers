@@ -208,7 +208,15 @@ export function furlBundleRadius(width: number, drop: number, yardLength?: numbe
   // what they were, so the galleon's bundles are unchanged to the millimetre.
   const along = yardLength !== undefined && Number.isFinite(yardLength) && yardLength > 1e-3 ? yardLength : w;
   const k = Number.isFinite(pack) && pack > 0 ? pack : FURL_PACK;
-  return Math.max(0.02, (area / along) * k);
+  // §T.140/§V66 — the floor is a DEGENERACY GUARD, not a size. At 0.02 m it
+  // was a metre constant standing in front of the law, and the raft's 3.0 ×
+  // 0.6 m topsail (§T.140 cut it to fit between the bipod crossing and a
+  // standing lookout's eye) landed under it: 0.0153 m of roll reported as
+  // 0.02, which is the "fixed floor makes a small sail's bundle read as a big
+  // sail's" defect this function was written to remove. 5 mm is small enough
+  // that only a sail with no area can reach it, and every existing bundle on
+  // every class is orders above it.
+  return Math.max(0.005, (area / along) * k);
 }
 
 /**

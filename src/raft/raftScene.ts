@@ -45,6 +45,7 @@ import { buildRaftDeckField } from '../ship/raftDeckField';
 import { createDeckWater, setActiveDeckWater } from '../deckwater';
 import { createRopes } from '../ropes';
 import { applyRiggingPlan, buildBlockDescriptors } from '../ropes/shipRigging';
+import { raftBlockSize } from '../ship/raftRigging';
 import { buildRaftRiggingPlan } from '../ship/raftRigging';
 import { buildRatlinePlan } from '../ship/ratlinePlan';
 import { buildRungDescriptors } from '../ropes/ratlines';
@@ -148,7 +149,11 @@ export function buildRaftVessel(app: App, sea: RaftSea) {
 
   const riggingPlan = buildRaftRiggingPlan(blueprint);
   const rungs = buildRungDescriptors(buildRatlinePlan(blueprint), riggingPlan);
-  const blocks = buildBlockDescriptors(riggingPlan, ropeParams.maxBlocks);
+  // §T.140/§V66: a block is sized by the rope it is seized into, and the raft's
+  // gear is 20 mm where the galleon's is 56 — the same shell read as a ship's
+  // block on a raft's line ("the rope blocks look oversized for this boat")
+  const blocks = buildBlockDescriptors(riggingPlan, ropeParams.maxBlocks,
+    ropeParams.blockAnchorT, raftBlockSize);
   const ropes = createRopes({ maxRopes: Math.max(riggingPlan.length, 32), rungs, blocks });
   ropes.mesh.castShadow = true;
   app.scene.add(ropes.mesh);

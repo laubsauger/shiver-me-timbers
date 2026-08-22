@@ -66,6 +66,7 @@ import {
   buildCrossbeamGeometry,
   buildLogGeometry,
   buildPoleGeometry,
+  buildGuaraCollarGeometry,
   buildRaftSlabGeometry,
   buildRadioGeometry,
   buildRoofLathsGeometry,
@@ -259,6 +260,10 @@ export function buildPieceGeometry(
       return (shape?.laths ?? 0) > 0 ? buildRoofLathsGeometry(aabb, shape!) : buildRaftSlabGeometry(aabb);
     case 'guara':
     case 'splashboard':
-      return buildRaftSlabGeometry(aabb);
+      // §T.144: a splashboard is a plank, but the guara COLLAR is a slotted
+      // frame of the same timber — the hole is the point of it
+      return (shape?.collar ?? 0) > 0
+        ? buildGuaraCollarGeometry(aabb, shape!)
+        : buildRaftSlabGeometry(aabb);
   }
 }
