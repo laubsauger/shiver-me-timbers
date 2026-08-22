@@ -21,6 +21,8 @@ import { raftParams } from '../src/params/raft';
 import { shipDetailParams, shipMaterialParams } from '../src/params/ship';
 import { readSailWindRef, sailDrive } from '../src/ship/sailDynamics';
 import { yardAttitude } from '../src/ship/raftPartsRig';
+import { cabinRoom, radioCorner, roofSlope } from '../src/ship/raftPartsCabin';
+import { thatchCourses, thatchEaveButts } from '../src/ship/pieceGeometryRaft';
 import {
   buildRaftRiggingPlan,
   raftExtraRopeOf,
@@ -31,7 +33,13 @@ import {
   RAFT_STANDING_MAX,
   RAFT_STANDING_SLACK,
 } from '../src/ship/raftRigging';
-import { sheetLeadDirections } from '../src/ship/sailFrame';
+import {
+  readSailSparSources,
+  resolveSailSpars,
+  sheetLeadDirections,
+  type SailSparCapsule,
+} from '../src/ship/sailFrame';
+import { shipRigParams } from '../src/params/ship';
 import { furlBundleRadius, sailTieSpec } from '../src/ship/pieceGeometrySail';
 import { buildShipBlueprint } from '../src/ship/previewRaft';
 import type { PieceDef } from '../src/ship/pieceTypes';
@@ -91,7 +99,9 @@ describe('§T89 raft blueprint — piece contract (§V13/§V18)', () => {
 
   it('uses only the §I raft kinds plus the shared rig kinds the sail membrane needs', () => {
     const allowed = new Set(['log', 'crossbeam', 'bamboo-deck', 'guara', 'cabin-wall', 'thatch-roof',
-      'bipod-mast', 'steering-oar', 'crate', 'splashboard', 'stern-block', 'lashing', 'mast', 'yard', 'sail', 'pennant']);
+      'bipod-mast', 'steering-oar', 'crate', 'splashboard', 'stern-block', 'lashing', 'mast', 'yard', 'sail', 'pennant',
+      // §B87 dressing pass
+      'radio', 'rope-rail']);
     for (const p of raft) expect(allowed.has(p.kind), `${p.id}: ${p.kind}`).toBe(true);
   });
 
@@ -830,5 +840,349 @@ describe('§B86-2 per-sail reference wind', () => {
     // and the shared param still owns every ship that sets none
     expect(sailDrive(running(9), shipMaterialParams).drive)
       .toBeCloseTo(sailDrive({ ...running(9), windRef: shipMaterialParams.sailWindRef }, shipMaterialParams).drive, 12);
+  });
+});
+
+/**
+ * §B74 / §T.114 — THE CANVAS AND THE BIPOD.
+ *
+ * T.114 measured the raft's mainsail 0.053 m INSIDE the legs it hangs between
+ * and wrote the fix down as "her main yard wants more `yardMastClearance`".
+ * MEASURED, that diagnosis is wrong, and the reason is worth writing into a
+ * test so nobody re-derives it a third time:
+ *
+ *   a bipod's legs SPLAY in x. The sail's plane turns about a VERTICAL axis
+ *   when the yard is braced. A splayed line therefore crosses that plane at
+ *   some height, at every brace — including brace 0, where §B73's own yard
+ *   slew (0.12 rad) already tilts it. Standoff slides the crossing UP or DOWN
+ *   the leg; it never removes it, and what clears the port leg braced one way
+ *   fouls the starboard leg braced the other. Swept `yardMastClearance`
+ *   0.05 → 0.55 against `sailYardOffset` 0.12 → 0.34: the fouled fraction of
+ *   the cut panel moves 0.54 % → 0.30 % and the worst point sits at ≈ −0.05 m
+ *   throughout. That band is the CLOTH side's job (§T.114 `sparPush`).
+ *
+ * What the BLUEPRINT owes, and what is asserted here:
+ *   1. every OTHER sail on this raft clears the pole it is set on outright —
+ *      the topsail and the mizzen hang on single poles, and a single pole is
+ *      parallel to its own sail's plane, so there is no excuse there;
+ *   2. the mainsail's HEAD — the edge that is laced to the yard, the one a
+ *      player watching the rig sees cut a leg — clears both legs at square
+ *      and at both brace stops;
+ *   3. no point of the cut panel ever gets past a leg's AXIS. It may be
+ *      inside the leg; it may not be through and out the other side.
+ *
+ * Every bar is a PROPERTY (§V80): "clears the spar's own radius", "never past
+ * the axis". None is a metre value a legitimate re-tune of the rig would break.
+ */
+describe('§B74 the raft\'s canvas and the spars it is set on', () => {
+  const raft = buildRaftBlueprint();
+  const asm = new ShipAssembly(raft, stubFactory);
+  const byId = new Map(raft.map((d) => [d.id, d]));
+  const BRACES = [-shipRigParams.braceMax, 0, shipRigParams.braceMax];
+
+  /**
+   * Distance from a sail-local point to a capsule's SURFACE (> 0 = clear),
+   * and to its AXIS. Written from the geometric definition, deliberately not
+   * from `sparPush`'s algebra (tests/sailMastClearance.test.ts does the same).
+   */
+  function clearance(p: THREE.Vector3, c: SailSparCapsule): { toSurface: number; toAxis: number } {
+    const ab = new THREE.Vector3(c.b[0] - c.a[0], c.b[1] - c.a[1], c.b[2] - c.a[2]);
+    const len2 = ab.lengthSq();
+    if (!(len2 > 1e-12)) return { toSurface: Infinity, toAxis: Infinity }; // empty slot
+    const ap = new THREE.Vector3(p.x - c.a[0], p.y - c.a[1], p.z - c.a[2]);
+    const t = Math.min(1, Math.max(0, ap.dot(ab) / len2));
+    const toAxis = ap.distanceTo(ab.multiplyScalar(t));
+    return { toSurface: toAxis - (c.ra + (c.rb - c.ra) * t), toAxis };
+  }
+
+  /** the FLAT CUT PANEL: the sail as the sailmaker cut it, before any belly */
+  function cutPanel(id: string): { pts: THREE.Vector3[]; head: THREE.Vector3[] } {
+    const def = byId.get(id)!;
+    const w = def.aabb.max[0] - def.aabb.min[0];
+    const drop = -def.aabb.min[1];
+    const pts: THREE.Vector3[] = [];
+    const head: THREE.Vector3[] = [];
+    for (let i = 0; i <= 16; i++) {
+      for (let j = 0; j <= 16; j++) {
+        const p = new THREE.Vector3((i / 16 - 0.5) * w, -(1 - j / 16) * drop, 0);
+        pts.push(p);
+        if (j === 16) head.push(p);
+      }
+    }
+    return { pts, head };
+  }
+
+  /** the two spars abaft this sail, live, in the sail's own frame */
+  function legsOf(id: string): SailSparCapsule[] {
+    const spars = resolveSailSpars(asm.group.getObjectByName(id)!, readSailSparSources(asm.sailMesh(id)));
+    return [spars.mast, spars.mast2]; // NOT `yard`: the head is laced to it
+  }
+
+  it('the topsail and the mizzen clear the single poles they are set on, at every brace', () => {
+    // WHY these two and not the main: a single pole is parallel to its sail's
+    // own plane at every brace, so "the cloth is cut clear of the spar" is a
+    // property this rig CAN hold — and at `yardMastClearance` 0.05 it did not
+    // (0.043 m and 0.060 m, close enough that any re-tune put cloth inside).
+    for (const id of ['sail-main-upper', 'sail-mizzen-lower']) {
+      const { pts } = cutPanel(id);
+      let worst = Infinity;
+      for (const brace of BRACES) {
+        asm.setRigTrim(brace);
+        asm.group.updateMatrixWorld(true);
+        for (const c of legsOf(id)) for (const p of pts) worst = Math.min(worst, clearance(p, c).toSurface);
+      }
+      expect(worst, `${id} cut panel vs its own pole`).toBeGreaterThan(0);
+    }
+  });
+
+  it('the mainsail\'s HEAD is laced FORWARD of the bipod: it clears both legs at square and at both stops', () => {
+    const { head } = cutPanel('sail-main-lower');
+    let worst = { d: Infinity, at: '' };
+    for (const brace of BRACES) {
+      asm.setRigTrim(brace);
+      asm.group.updateMatrixWorld(true);
+      for (const c of legsOf('sail-main-lower')) {
+        for (const p of head) {
+          const d = clearance(p, c).toSurface;
+          if (d < worst.d) worst = { d, at: `brace ${(brace * 180 / Math.PI).toFixed(0)}° x=${p.x.toFixed(2)}` };
+        }
+      }
+    }
+    expect(worst.d, `head of the mainsail inside a bipod leg at ${worst.at}`).toBeGreaterThan(0);
+  });
+
+  it('and no point of the cut panel is EVER past a leg\'s axis — it may touch a leg, not fall through it', () => {
+    const { pts } = cutPanel('sail-main-lower');
+    for (const brace of BRACES) {
+      asm.setRigTrim(brace);
+      asm.group.updateMatrixWorld(true);
+      for (const c of legsOf('sail-main-lower')) {
+        for (const p of pts) {
+          expect(clearance(p, c).toAxis, `cloth on the axis of a leg at brace ${brace}`).toBeGreaterThan(0);
+        }
+      }
+    }
+    asm.setRigTrim(0);
+  });
+});
+
+/**
+ * §B87 — THE DRESSING PASS. The user, looking in through the doorway: "the
+ * inside of the raft looks very barren and very lame. Same goes for the roof —
+ * doesn't really look like a thatched roof. Then the radio inside is just
+ * floating in air. The three boxes look kinda repetitive on the front."
+ *
+ * Four faults, four properties. None of them is "there are N pieces": a count
+ * pins a decision and says nothing about whether the room reads as lived in
+ * (§V80). What is asserted is that every piece is INSIDE the room and out of
+ * the doorway, that the radio RESTS ON something, that the roof is made of
+ * courses that overlap the way tiles do, and that the three crates are three
+ * different crates.
+ */
+describe('§B87 the cabin is furnished, and the roof is thatch', () => {
+  const p = raftParams;
+  const raft = buildRaftBlueprint();
+  const L = raftLayout();
+  const asm = new ShipAssembly(raft, stubFactory);
+  asm.group.updateMatrixWorld(true);
+  const room = cabinRoom(p, L);
+  const corner = radioCorner(p, L);
+  const byId = new Map(raft.map((d) => [d.id, d]));
+
+  /** ship-space box of a piece, resolving the one level of parenting the raft uses */
+  function shipBox(id: string): THREE.Box3 {
+    const d = byId.get(id);
+    if (d === undefined) throw new Error(`no piece ${id}`);
+    const base = d.parent === undefined ? [0, 0, 0] : byId.get(d.parent)!.transform.position;
+    const c = [
+      base[0] + d.transform.position[0],
+      base[1] + d.transform.position[1],
+      base[2] + d.transform.position[2],
+    ];
+    return new THREE.Box3(
+      new THREE.Vector3(c[0] + d.aabb.min[0], c[1] + d.aabb.min[1], c[2] + d.aabb.min[2]),
+      new THREE.Vector3(c[0] + d.aabb.max[0], c[1] + d.aabb.max[1], c[2] + d.aabb.max[2]),
+    );
+  }
+
+  /** everything the dressing pass put INSIDE the cabin */
+  const INTERIOR = ['floor-mat-0', 'floor-mat-1', 'berth-port', 'berth-starboard',
+    'radio-crate', 'radio-set', 'radio-partition', 'battery-1', 'battery-2',
+    'pot-1', 'pot-2', 'ladle', 'chart', 'cage'];
+
+  it('every interior fitting is inside the cabin\'s clear volume, and none stands in the doorway', () => {
+    for (const id of INTERIOR) {
+      const b = shipBox(id);
+      // a yawed box's AABB grows by its own half-diagonal, so the bar is the
+      // WALL, with the wall's own thickness as the tolerance — the point is
+      // "inside the room", not "inside to the millimetre"
+      const slack = p.cabinWallThickness;
+      expect(b.min.x, `${id} through the port wall`).toBeGreaterThan(room.x0 - slack);
+      expect(b.max.x, `${id} through the starboard wall`).toBeLessThan(room.x1 + slack);
+      expect(b.min.z, `${id} through the aft gable`).toBeGreaterThan(room.z0 - slack);
+      expect(b.max.z, `${id} through the forward gable`).toBeLessThan(room.z1 + slack);
+      expect(b.min.y, `${id} through the floor`).toBeGreaterThanOrEqual(room.floor - 1e-6);
+      expect(b.max.y, `${id} through the eave`).toBeLessThanOrEqual(room.eave + 1e-6);
+      // THE DOORWAY IS THE ONLY WAY IN [§3 Opening]: nothing may occupy the
+      // 1.4 m of open starboard wall, or the player walks into furniture the
+      // moment he steps over the sill
+      const inDoorZ = b.max.z > room.doorZ0 && b.min.z < room.doorZ1;
+      if (inDoorZ) {
+        expect(b.max.x, `${id} stands in the doorway`).toBeLessThan(room.x1 - 0.25);
+      }
+    }
+  });
+
+  it('the radio SITS on its crate — it is not floating, and the crate is under it', () => {
+    const set = shipBox('radio-set');
+    const crate = shipBox('radio-crate');
+    // the fault, in one line: the bottom of the set is on the top of the crate
+    expect(set.min.y - crate.max.y, 'the set is off its crate').toBeLessThan(0.02);
+    expect(crate.max.y - set.min.y, 'the set is sunk into its crate').toBeLessThan(0.02);
+    // and it is standing ON it, not beside it: the set's footprint is over the
+    // crate's in both axes
+    expect(set.min.x).toBeGreaterThanOrEqual(crate.min.x - 1e-6);
+    expect(set.max.x).toBeLessThanOrEqual(crate.max.x + 1e-6);
+    expect(set.min.z).toBeGreaterThanOrEqual(crate.min.z - 1e-6);
+    expect(set.max.z).toBeLessThanOrEqual(crate.max.z + 1e-6);
+    // the crate itself stands on the cabin floor
+    expect(crate.min.y).toBeCloseTo(L.cabinFloorY, 6);
+  });
+
+  it('a crouched player at station-radio can reach the dial and is looking DOWN at it', () => {
+    // §V71: the socket through the live assembly, not the authored number
+    const s = asm.socketWorldPosition('station-radio');
+    const eye = [s[0], s[1] + playerParams.crouchHeight - playerParams.eyeDrop, s[2]];
+    const d = corner.dial;
+    const reach = Math.hypot(d[0] - eye[0], d[1] - eye[1], d[2] - eye[2]);
+    // arm's length: near enough to read a dial and to put a hand on it, far
+    // enough that the player is not standing inside the set
+    expect(reach, 'the dial is out of reach from station-radio').toBeLessThan(1.0);
+    expect(reach, 'the player is inside the radio').toBeGreaterThan(0.3);
+    expect(d[1], 'the dial is above a crouched eye').toBeLessThan(eye[1]);
+    // and the station is clear of the furniture it serves: a 0.6 m capsule
+    // fits between the crate, the partition and the battery cases
+    const r = playerParams.capsuleRadius;
+    for (const id of ['radio-crate', 'radio-partition', 'battery-1', 'battery-2']) {
+      const b = shipBox(id);
+      const dx = Math.max(b.min.x - s[0], s[0] - b.max.x, 0);
+      const dz = Math.max(b.min.z - s[2], s[2] - b.max.z, 0);
+      expect(Math.hypot(dx, dz), `${id} is inside the crouch station`).toBeGreaterThan(r);
+    }
+  });
+
+  it('the roof is OVERLAPPING COURSES on laths, not a slab: each course laps its neighbour and the eave hangs 20–30 cm', () => {
+    const slope = roofSlope(p);
+    for (const side of ['port', 'starboard'] as const) {
+      const roof = byId.get(`thatch-roof-${side}`)!;
+      const slabLen = roof.aabb.max[0] - roof.aabb.min[0];
+      const courses = thatchCourses(slabLen, roof.aabb.max[1], roof.shape ?? {});
+      expect(courses.length, `${side}: a slab is one course`).toBeGreaterThan(2);
+      for (let k = 0; k < courses.length - 1; k++) {
+        const a = courses[k];
+        const b = courses[k + 1];
+        // TILES: the lower course reaches back UNDER the one above it, so the
+        // two spans share a stretch of slope — that overlap is what a course
+        // line is, and it is what a single slab has none of
+        expect(b.head, `${side} course ${k + 1} starts below course ${k}'s butt`).toBeLessThan(a.butt);
+        expect(a.butt - b.head, `${side}: courses ${k} and ${k + 1} do not lap`).toBeGreaterThan(0);
+        // and the one nearer the eave sits LOWER, which is the step that
+        // catches a grazing sun
+        expect(b.top, `${side}: course ${k + 1} does not step down`).toBeLessThan(a.top);
+      }
+      // the eave: every butt of the bottom course, as a HORIZONTAL overhang
+      // past the wall face — the reference's ragged 20–30 cm [§3 Roof]
+      const butts = thatchEaveButts(slabLen, roof.shape ?? {});
+      const overhangs = butts.map((b) => b * Math.cos(slope) - p.cabinWidth / 2);
+      for (const o of overhangs) {
+        expect(o, `${side} eave overhang`).toBeGreaterThanOrEqual(0.2 - 1e-6);
+        expect(o, `${side} eave overhang`).toBeLessThanOrEqual(0.3 + 1e-6);
+      }
+      // RAGGED, not ruled: the butts are not all the same
+      expect(new Set(overhangs.map((o) => o.toFixed(3))).size,
+        `${side} eave is a straight line`).toBeGreaterThan(1);
+      // and the laths are under the thatch, riding the same slope
+      const laths = byId.get(`roof-lath-${side}`)!;
+      expect(laths.parent).toBe(`thatch-roof-${side}`);
+      expect(laths.aabb.max[1]).toBeLessThanOrEqual(courses[0].bottom + 1e-9);
+      expect(laths.shape?.laths ?? 0).toBeGreaterThan(1);
+    }
+  });
+
+  it('the three cabin-side crates are three DIFFERENT crates — size and yaw, pairwise (§T34)', () => {
+    const crates = [1, 2, 3].map((k) => byId.get(`crate-${k}`)!);
+    const size = (d: PieceDef): [number, number, number] => [
+      d.aabb.max[0] - d.aabb.min[0], d.aabb.max[1] - d.aabb.min[1], d.aabb.max[2] - d.aabb.min[2],
+    ];
+    for (let i = 0; i < 3; i++) {
+      for (let j = i + 1; j < 3; j++) {
+        const a = size(crates[i]);
+        const b = size(crates[j]);
+        // the copy-paste test: two crates that differ by less than a hand's
+        // breadth in every dimension are the same crate drawn twice
+        const dSize = Math.max(...a.map((v, k) => Math.abs(v - b[k])));
+        expect(dSize, `crate-${i + 1} vs crate-${j + 1} are the same size`).toBeGreaterThan(0.03);
+        const dYaw = Math.abs(crates[i].transform.rotation[1] - crates[j].transform.rotation[1]);
+        expect(dYaw, `crate-${i + 1} vs crate-${j + 1} sit at the same angle`).toBeGreaterThan(0.03);
+      }
+      // …and each is LASHED, with its own number of turns
+      expect(crates[i].shape?.lash ?? 0).toBeGreaterThan(0);
+    }
+    expect(new Set(crates.map((c) => c.shape?.lash)).size,
+      'every crate is lashed with the same number of bands').toBeGreaterThan(1);
+  });
+
+  it('the one `irregularity` dial still puts them back — 0 = three identical crates (§T34)', () => {
+    // §V62/§V80: the property is that the DIAL owns the variation, not that
+    // the variation has a particular size. Same shape as the §B73 yard test.
+    const was = shipDetailParams.irregularity;
+    try {
+      shipDetailParams.irregularity = 0;
+      const flat = buildRaftBlueprint();
+      const crates = [1, 2, 3].map((k) => flat.find((d) => d.id === `crate-${k}`)!);
+      for (const c of crates) {
+        expect(c.transform.rotation[1]).toBeCloseTo(0, 12);
+        expect(c.aabb.max[0] - c.aabb.min[0]).toBeCloseTo(p.crateWidth, 9);
+      }
+    } finally {
+      shipDetailParams.irregularity = was;
+    }
+  });
+
+  it('the deck dressing keeps out of the roads: the chest is inboard of the sheet, the railing stops nobody', () => {
+    // §V85 — the deck edge is a REAL edge you can step off and climb back at,
+    // so the railing must not be a wall to the walker. `rope-rail` has no case
+    // in the deck-field writer, which is the whole point of the kind.
+    for (const side of ['port', 'starboard'] as const) {
+      const rail = byId.get(`rail-${side}`)!;
+      expect(rail.kind).toBe('rope-rail');
+      expect(rail.shape?.posts ?? 0).toBeGreaterThan(1);
+      expect(rail.shape?.sag ?? 0, 'the railing rope is taut, not slack').toBeGreaterThan(0);
+      // it stands on the OUTER log, along the deck edge
+      expect(Math.abs(rail.transform.position[0])).toBeGreaterThan(L.halfBeam - 0.4);
+    }
+    // the plank chest: forward of the cabin, inboard of the starboard sheet
+    // station and clear of the halyard station at the mast foot
+    const chest = shipBox('plank-chest');
+    expect(chest.min.z).toBeGreaterThan(L.cabinFrontZ);
+    const r = playerParams.capsuleRadius;
+    for (const id of ['station-sheet-s', 'station-sheet-p', 'station-halyard']) {
+      const s = asm.socketWorldPosition(id);
+      const dx = Math.max(chest.min.x - s[0], s[0] - chest.max.x, 0);
+      const dz = Math.max(chest.min.z - s[2], s[2] - chest.max.z, 0);
+      expect(Math.hypot(dx, dz), `the chest blocks ${id}`).toBeGreaterThan(r);
+    }
+  });
+
+  it('the whole pass fits the budget: under the §B87 4 000 triangles, and the raft stays the light end of the fleet', () => {
+    const DRESSING = /^(radio-|berth-|floor-mat-|roof-lath|rail-|aerial-|plank-chest|battery-|pot-|ladle$|chart$)/;
+    const added = raft.filter((d) => DRESSING.test(d.id)).reduce((n, d) => n + triCount(d), 0);
+    // the roof and the crates were already pieces; only their COST changed
+    const roof = raft.filter((d) => d.kind === 'thatch-roof' || /^crate-\d/.test(d.id))
+      .reduce((n, d) => n + triCount(d), 0);
+    expect(added + roof, '§B87 budget: ≤ +4 000 tris').toBeLessThan(4000);
+    // §V17: the raft is walked in first person beside the sierra terrain, so
+    // she stays well under the square-rigger she shares a frame budget with
+    expect(totalTris(raft)).toBeLessThan(totalTris(buildBrigantineBlueprint()) / 2);
   });
 });

@@ -144,7 +144,11 @@ describe('raft deck field — §V83 three surfaces + round logs', () => {
     expect(solidAt(-L.halfBeam, L.cabinAftZ + 2)).toBe(false);
     // the stern block and the crates are
     expect(solidAt(0, L.sternZ - p.sternProjection / 2)).toBe(true);
-    expect(solidAt(-hw - 0.03 - p.crateWidth / 2, L.cabinFrontZ - 0.35)).toBe(true);
+    // §B87: the crates alongside the port wall are seeded in size, yaw and
+    // spacing now, so the probe reads WHERE THE CRATE IS off the graph rather
+    // than re-deriving an authored station that is free to move (§V80).
+    const crate = piece('crate-1');
+    expect(solidAt(crate.transform.position[0], crate.transform.position[2])).toBe(true);
   });
 
   it('(4) a log is round: crown higher than its shoulder, falling toward the chink', () => {

@@ -11,12 +11,20 @@ import { bandLimitedEdge, coordFilter, periodResolved } from './bandLimit';
 import { fbm2, hash2, triplanarFbm } from '../terrain/noise';
 import { reliefNormal } from './surfaceRelief';
 import { raftMaterialParams, type RaftMaterialParams } from '../params/raftMaterials';
-import { createRaftPieceUniforms, faceness, ringMask, shipWater, type AnyNode } from './raftMaterialNodes';
+import { createRaftPieceUniforms, faceness, gateAbove, ringMask, shipWater, type AnyNode } from './raftMaterialNodes';
 import type { LocalFrame, ShipMaterialHandle } from './woodMaterial';
 
-/** 0 = plaited mat (deck slabs, cabin floor), 1 = split-bamboo slats (lookout platform) */
+/**
+ * 0 = plaited mat (deck slabs, cabin floor, the loose mats over it),
+ * 1 = split-bamboo canes (lookout platform, and §B87's roof laths — canes
+ *     side by side, which is what a lath course is),
+ * 2 = §B87 straw-mattress ticking (the two berths) — the same plait at a
+ *     coarser strip, in broad stripes [§3 Museum "striped mattress"].
+ */
 export function bambooDeckVariantOf(pieceId: string): number {
-  return pieceId === 'lookout-platform' ? 1 : 0;
+  if (pieceId === 'lookout-platform' || pieceId.startsWith('roof-lath')) return 1;
+  if (pieceId.startsWith('berth-')) return 2;
+  return 0;
 }
 
 /**
@@ -45,8 +53,17 @@ export function createWeaveMaterial(
   const uNodeWidth = uniform(p.bambooNodeWidth);
   const uRough = uniform(p.weaveRough);
   const uBump = uniform(p.weaveBump);
+  const uTickLight = uniform(new THREE.Color(p.tickLight));
+  const uTickDark = uniform(new THREE.Color(p.tickDark));
+  const uTickStrip = uniform(p.tickStrip);
+  const uTickBlock = uniform(Math.max(1, p.tickBlock));
   const piece = createRaftPieceUniforms(slats ? { variantOf: bambooDeckVariantOf } : {});
-  const variant: AnyNode = slats ? piece.variant.clamp(0, 1) : float(0);
+  // THREE looks off ONE integer (§T.40: one material per kind, shared). Each
+  // weight is a tent at its own variant index, so a piece that carries none of
+  // them (a cabin wall, which never gets the variantOf hook) sits on 0 = mat.
+  const vId: AnyNode = slats ? piece.variant : float(0);
+  const variant: AnyNode = float(1).sub(vId.sub(1).abs()).clamp(0, 1); // canes
+  const wTick: AnyNode = float(1).sub(vId.sub(2).abs()).clamp(0, 1); // ticking
 
   // the two in-plane coordinates of whichever box face this is (see
   // woodMaterial's upness blend; footprints blended, not differentiated —
@@ -59,7 +76,8 @@ export function createWeaveMaterial(
   const fu = mix(coordFilter(pos.x), coordFilter(pos.z), xness);
   const fv = mix(coordFilter(pos.y), coordFilter(pos.z), upness);
 
-  const width = mix(uStrip, uSlat, variant);
+  // the strip a look is woven from: split bamboo, a cane, or mattress ticking
+  const width = mix(mix(uStrip, uSlat, variant), uTickStrip, wTick);
   const cu = u.div(width);
   const cv = v.div(width);
   const fcu = fu.div(width);
@@ -117,7 +135,13 @@ export function createWeaveMaterial(
   // bamboo: yellow with green-grey streaks along the cane
   const streak = fbm2(vec2(cu.mul(0.7), v.mul(3)), 2);
   const caneColor = mix(uYellow, uGreen, streak.sub(0.3).mul(0.8).clamp(0, 1));
-  let color: AnyNode = mix(matColor, caneColor, variant).mul(float(1).add(tone));
+  // §B87 straw-mattress ticking: broad woven stripes, `tickBlock` strips to a
+  // stripe, the stripe chosen by a hash of the block index so the bands are
+  // uneven the way a hand-loomed tick is. Faded to its mean by `resolved`
+  // once a strip is sub-pixel, like every other per-period step here (§V48b).
+  const stripe = gateAbove(hash2(vec2(cv.div(uTickBlock).floor(), 7.7)), 0.45).mul(resolved);
+  const tickColor = mix(uTickLight, uTickDark, stripe);
+  let color: AnyNode = mix(mix(matColor, caneColor, variant), tickColor, wTick).mul(float(1).add(tone));
   color = color.mul(mix(float(1), float(0.55), gap));
 
   // node rings along the canes (slats only), phase wandering smoothly per cane
@@ -149,6 +173,10 @@ export function createWeaveMaterial(
       uNodeWidth.value = p.bambooNodeWidth;
       uRough.value = p.weaveRough;
       uBump.value = p.weaveBump;
+      uTickLight.value.set(p.tickLight);
+      uTickDark.value.set(p.tickDark);
+      uTickStrip.value = p.tickStrip;
+      uTickBlock.value = Math.max(1, p.tickBlock);
     },
   };
 }
@@ -170,6 +198,8 @@ export function createThatchMaterial(
   const uStrandStretch = uniform(p.thatchStrandStretch);
   const uRelief = uniform(p.thatchRelief);
   const uBump = uniform(p.thatchBump);
+  const uTileWidth = uniform(p.thatchTileWidth);
+  const uStagger = uniform(p.thatchTileStagger);
   const piece = createRaftPieceUniforms();
 
   // strands run DOWN the slope: world down, expressed in piece axes per object
@@ -184,9 +214,22 @@ export function createThatchMaterial(
   const strand = fbm2(strandPos, 3);
   const strandResolved = periodResolved(float(0), coordFilter(strandPos.x).max(coordFilter(strandPos.y)).mul(4));
 
+  // §B87 — LEAVES LAID LIKE TILES, not stripes ruled across the slope.
+  // The geometry now carries the COURSES (raftParams.roofCoursePitch, ~0.30 m,
+  // real steps that self-shadow at a grazing sun); what is left for the
+  // material is the individual leaf inside a course, and a leaf is a tile of
+  // finite WIDTH. Each tile column gets its own offset of the row line, so the
+  // shadow line breaks every `thatchTileWidth` instead of running the whole
+  // ridge — which is exactly the difference between "thatch" and "corduroy".
+  // A hash per tile column: a per-cell step, so it is faded to its mean by the
+  // tile's own `periodResolved` once a tile is sub-pixel (§V.48b).
+  const tileC = side.div(uTileWidth.max(0.02));
+  const tileF = coordFilter(side).div(uTileWidth.max(0.02));
+  const tileResolved = periodResolved(tileC, tileF);
+  const stagger = hash2(vec2(tileC.floor(), piece.seed.mul(19))).sub(0.5).mul(uStagger).mul(tileResolved);
   // courses of leaves, each edge wandering a little, overlapping down the slope
   const wander = fbm2(vec2(side.mul(2), piece.seed.mul(31)), 2).sub(0.5).mul(uRagged);
-  const rowCoord = along.add(wander).div(uRowPitch.max(0.05));
+  const rowCoord = along.add(wander).add(stagger).div(uRowPitch.max(0.05));
   const rowFilter = coordFilter(along).div(uRowPitch.max(0.05));
   const rowResolved = periodResolved(rowCoord, rowFilter);
   // the shadow line just down-slope of each course's edge, measured in metres
@@ -195,8 +238,12 @@ export function createThatchMaterial(
   const rowTone = hash2(vec2(rowCoord.floor(), piece.seed.mul(53))).sub(0.5).mul(0.16).mul(rowResolved);
   const rowCrown = sin(rowCoord.fract().mul(Math.PI)).mul(rowResolved);
 
+  // the gap between two tiles, measured against the tile's OWN width (§V.48)
+  const tileFr = tileC.fract();
+  const tileSeam = bandLimitedEdge(tileFr.min(tileFr.oneMinus()), tileC, float(0.07), tileF).oneMinus();
   let color: AnyNode = mix(uDark, uLight, strand.mul(0.8).add(0.1)).mul(float(1).add(rowTone));
   color = color.mul(mix(float(1), float(0.6), rowShade));
+  color = color.mul(mix(float(1), float(0.72), tileSeam));
   // the overhang's underside, and the ragged eave end
   const under = normalLocal.y.negate().clamp(0, 1);
   color = color.mul(mix(float(1), uUnder, under));
@@ -211,13 +258,14 @@ export function createThatchMaterial(
     .mul(uRelief)
     .mul(strandResolved)
     .add(rowCrown.mul(uRelief).mul(0.8))
-    .sub(rowShade.mul(uRelief).mul(0.5));
+    .sub(rowShade.mul(uRelief).mul(0.5))
+    .sub(tileSeam.mul(uRelief).mul(0.6));
 
   const water = shipWater(frame);
   material.colorNode = color.mul(water.tint);
   material.roughnessNode = float(0.9).add(strand.mul(0.08)).mul(water.roughnessScale).clamp(0.04, 1);
   material.emissiveNode = water.addLight;
-  material.aoNode = float(1).sub(rowShade.mul(0.4)).sub(under.mul(0.25));
+  material.aoNode = float(1).sub(rowShade.mul(0.4)).sub(tileSeam.mul(0.2)).sub(under.mul(0.25));
   material.normalNode = reliefNormal(height, uBump.mul(water.reliefScale));
 
   return {
@@ -233,6 +281,8 @@ export function createThatchMaterial(
       uStrandStretch.value = p.thatchStrandStretch;
       uRelief.value = p.thatchRelief;
       uBump.value = p.thatchBump;
+      uTileWidth.value = p.thatchTileWidth;
+      uStagger.value = p.thatchTileStagger;
     },
   };
 }

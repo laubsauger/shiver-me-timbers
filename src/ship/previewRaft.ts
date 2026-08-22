@@ -55,7 +55,9 @@ const CROUCH = 1.05;
 /** socket, eye height above it, and ship-local look direction (+z bow, +x starboard) */
 const RAFT_STATIONS: Record<string, { socket: string; eye: number; dir: [number, number, number] }> = {
   tiller: { socket: 'station-tiller', eye: STAND, dir: [0, 0, 1] }, // forward over the cabin
-  radio: { socket: 'station-radio', eye: CROUCH, dir: [-1, -0.2, -1] }, // into the cabin's port-aft corner
+  // §T.117 put the set on a crate: the dial now sits 21 deg below a crouched
+  // eye at 0.73 m, so look DOWN at it, not level into the corner
+  radio: { socket: 'station-radio', eye: CROUCH, dir: [-0.6, -0.5, -1] },
   bow: { socket: 'station-gangway-bow', eye: STAND, dir: [0, 0, -1] }, // aft, at the mast and cabin
   nest: { socket: 'station-lookout', eye: STAND, dir: [0, -0.6, 1] }, // down-forward off the platform
   cabin: { socket: 'station-mat', eye: CROUCH, dir: [1, -0.1, 0.3] }, // toward the starboard door

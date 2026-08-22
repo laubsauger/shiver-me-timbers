@@ -42,6 +42,10 @@ export function buildLogs(p: RaftParams, L: RaftLayout): PieceDef[] {
   });
   const centre = Math.floor(n / 2);
   add(centre, logSocket(L.logs[centre], 'station-gangway-bow', 'fixture', L.logs[centre].zBow - 0.5));
+  // §B86-1: the stem the FORESTAY lands on. The shared planner has no rule
+  // that reaches a bow (a galleon's forestay ends on the bowsprit), so this
+  // is a raft socket for a raft-only rope — see raftRigging.RAFT_EXTRA_ROPES.
+  add(centre, logSocket(L.logs[centre], 'anchor-stem-bow', 'rope-anchor', L.logs[centre].zBow - 0.4));
   // the stern gangway is starboard of the helmsman, on the bare stern logs
   add(centre + 2, logSocket(L.logs[centre + 2], 'station-gangway-stern', 'fixture', L.sternZ + 0.4));
   add(0, logSocket(L.logs[0], 'station-gangway-port', 'fixture', L.cabinAftZ + 1.0));
@@ -259,6 +263,9 @@ export function buildSteering(p: RaftParams, L: RaftLayout): PieceDef[] {
       // stern cleats: backstays and the mizzen's sheets/braces belay here
       { id: 'anchor-cleat-stern-port', type: 'rope-anchor', position: [-p.sternBlockLength / 2 + 0.1, s / 2, 0] },
       { id: 'anchor-cleat-stern-starboard', type: 'rope-anchor', position: [p.sternBlockLength / 2 - 0.1, s / 2, 0] },
+      // §B86-1: the mizzen HALYARD's own belay, clear of the two stern stays
+      // already made fast at the outer pair
+      { id: 'anchor-cleat-stern-mid', type: 'rope-anchor', position: [-p.sternBlockLength / 4, s / 2, 0] },
     ],
   });
   const shaftR = p.oarShaftDiameter / 2;

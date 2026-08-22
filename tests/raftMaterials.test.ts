@@ -37,6 +37,8 @@ import type { PieceKind } from '../src/ship/pieceTypes';
 const RAFT_KINDS: readonly PieceKind[] = [
   'log', 'crossbeam', 'bamboo-deck', 'guara', 'cabin-wall', 'thatch-roof',
   'bipod-mast', 'steering-oar', 'crate', 'splashboard', 'stern-block',
+  // §B87 dressing pass
+  'radio', 'rope-rail',
 ];
 
 describe('§T90 raft material factory', () => {
@@ -84,6 +86,51 @@ describe('§T90 raft material factory', () => {
     expect(bambooDeckVariantOf('lookout-platform')).toBe(1);
     expect(bambooDeckVariantOf('deck-fore')).toBe(0);
     expect(bambooDeckVariantOf('cabin-floor')).toBe(0);
+  });
+
+  /**
+   * §B87 — the dressing pass added ONE crate look and gave four more ids a home
+   * in looks that already existed, because a lane per prop is a lane per prop
+   * in the shader for the rest of the project's life. What the test holds is
+   * that every id the blueprint authors RESOLVES to a look, and that the four
+   * that share are sharing on purpose (pots are the cage's thin dark iron; a
+   * battery case is a jerrycan's dull plastic; the partition and the chart are
+   * the same salvaged card).
+   */
+  it('every §B87 dressing id resolves to a look, and the shared ones share on purpose', () => {
+    const ids = buildRaftBlueprint().filter((d) => d.kind === 'crate').map((d) => d.id);
+    for (const id of ['radio-crate', 'radio-partition', 'battery-1', 'battery-2',
+      'pot-1', 'pot-2', 'ladle', 'chart', 'plank-chest']) {
+      expect(ids, `${id} is not in the blueprint`).toContain(id);
+      expect(Number.isInteger(crateVariantOf(id)), id).toBe(true);
+    }
+    expect(crateVariantOf('radio-partition')).toBe(CRATE_VARIANT.card);
+    expect(crateVariantOf('chart')).toBe(CRATE_VARIANT.card);
+    expect(crateVariantOf('pot-1')).toBe(CRATE_VARIANT.cage);
+    expect(crateVariantOf('ladle')).toBe(CRATE_VARIANT.cage);
+    expect(crateVariantOf('battery-1')).toBe(CRATE_VARIANT.jerrycan);
+    // a lashed crate and the plank chest are still pine/khaki boards
+    expect(crateVariantOf('radio-crate')).toBe(CRATE_VARIANT.pine);
+    expect(crateVariantOf('plank-chest')).toBe(CRATE_VARIANT.pine);
+    // …and the weave family grew the mattress ticking and the roof laths
+    expect(bambooDeckVariantOf('berth-port')).toBe(2);
+    expect(bambooDeckVariantOf('berth-starboard')).toBe(2);
+    expect(bambooDeckVariantOf('roof-lath-port')).toBe(1);
+    expect(bambooDeckVariantOf('floor-mat-0')).toBe(0);
+  });
+
+  it('the radio draws through its own family, and the railing through the hemp one', () => {
+    // §B87: the radio is the one prop a player looks AT (T103 drives its
+    // dial), so it gets a family; a railing post is a weathered stake the same
+    // colour as the rope on it, so it does not.
+    expect(familyOf('radio')).toBe('radio');
+    expect(familyOf('rope-rail')).toBe('rope');
+    const mat = createPieceMaterial('radio');
+    expect(mat.colorNode).toBeDefined();
+    // the LED must be LIT, or it is a red dot nobody sees in a cabin at noon
+    expect(mat.emissiveNode).toBeDefined();
+    expect(mat.metalnessNode).toBeDefined();
+    mat.dispose();
   });
 
   it('reads the rope-groove stations off the blueprint, not a second literal (§V37)', () => {

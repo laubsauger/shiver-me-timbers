@@ -84,7 +84,6 @@ export interface RaftParams {
   radioMeterWidth: number; // EST — signal meter
   radioMeterHeight: number; // EST
   radioCrankReach: number; // EST — m the hand crank stands off the case side
-  radioYaw: number; // EST — rad the set is turned to face the crouch station
   batteryCaseWidth: number; // EST — battery cases beside the set [§3 Radio corner]
   batteryCaseHeight: number; // EST
   batteryCaseDepth: number; // EST
@@ -133,7 +132,16 @@ export interface RaftParams {
   mizzenSpritAngle: number; // EST — rad, the mizzen's spar stands as a SPRIT, the sail hanging loose off it
   yardLength: number; // [§4 Yard] ~5.5 m+ — EST 6.0 (wider than the 5.5 m sail)
   yardDiameter: number; // EST — two bamboo stems bound together [§4 Yard]
-  yardMastClearance: number; // EST — yard rides forward of the legs
+  /**
+   * EST — m from the MAST/LEG axis to the yard axis, i.e. the slack in the
+   * rope parrel that holds the yard to the spar it is hoisted on.
+   *
+   * §B74/T114 measured this one on the raft: at 0.05 the mainsail's flat cut
+   * panel sat 53 mm INSIDE the bipod legs it hangs between, and the topsail
+   * and mizzen cleared their own poles by 43 and 60 mm. See the note on the
+   * value for what this knob can and cannot fix.
+   */
+  yardMastClearance: number;
   sailYardOffset: number; // EST — cloth forward of the yard axis
   mainYardHeight: number; // EST — hoisted below the crossing [PHOTO-10]
   mainYardFurlDrop: number; // EST — m the main yard comes DOWN its halyard when furled [ref §10 replica-moored-beam: the roll rides ~2.3 m over the deck] (§B86-3)
@@ -264,7 +272,6 @@ export const raftParams: RaftParams = registerParams(
     radioMeterWidth: 0.11, // EST
     radioMeterHeight: 0.07, // EST
     radioCrankReach: 0.12, // EST
-    radioYaw: 0.37, // EST — rad, turned toward the crouch station
     batteryCaseWidth: 0.34, // EST
     batteryCaseHeight: 0.26, // EST
     batteryCaseDepth: 0.34, // EST
@@ -308,7 +315,21 @@ export const raftParams: RaftParams = registerParams(
     mizzenSpritAngle: 0.45, // EST
     yardLength: 6.0, // EST
     yardDiameter: 0.12, // EST
-    yardMastClearance: 0.05, // EST
+    // §B74 — 0.15 m of AIR between a 0.18 m leg and a 0.12 m yard: a parrel
+    // with slack in it, which is what a raft's jury rig has. This lifts the
+    // topsail off its pole (0.043 → 0.18 m), the mizzen off its own (0.060 →
+    // 0.23) and the MAINSAIL'S HEAD out of the bipod (−0.031 → +0.024).
+    //
+    // IT DOES NOT CLEAR THE BODY OF THE MAINSAIL, AND NO VALUE OF IT CAN —
+    // measured, `tests/raft.test.ts` states the geometry. The legs SPLAY in x
+    // while the sail's plane turns about a vertical axis with the brace, so
+    // each leg pierces that plane at some height; standoff slides the pierce
+    // point up or down the leg (and what clears the port leg braced one way
+    // fouls the starboard leg braced the other) but never removes it. Swept
+    // 0.05 → 0.55 with `sailYardOffset` 0.12 → 0.34: the fouled fraction of
+    // the panel moves 0.54 % → 0.30 % and the worst point stays at ≈ −0.05 m.
+    // The cloth-side push (§T.114 sparPush) is the fix for that band.
+    yardMastClearance: 0.3, // EST
     sailYardOffset: 0.12, // EST
     mainYardHeight: 7.2, // EST
     mainYardFurlDrop: 4.5, // EST — 7.2 → 2.7 on the mast, ≈ 2.7 m over the log tops [ref §10]
@@ -396,7 +417,7 @@ export const raftParams: RaftParams = registerParams(
     roofCoursePitch: m(0.12, 0.6), roofCourseOverlap: m(0, 0.3), roofCourseRise: m(0, 0.05, 0.001),
     roofEaveSegments: m(1, 16, 1), roofEaveRagged: m(0, 0.12, 0.005),
     roofLathCount: m(0, 12, 1), roofLathSection: m(0.02, 0.1, 0.005),
-    radioCrateHeight: m(0.2, 1), radioDialDiameter: m(0.04, 0.25, 0.005), radioYaw: m(-1.6, 1.6, 0.01),
+    radioCrateHeight: m(0.2, 1), radioDialDiameter: m(0.04, 0.25, 0.005),
     railHeight: m(0.3, 1.4), railPosts: m(0, 12, 1), railRopeSag: m(0, 0.4),
     crateSizeVar: m(0, 1), crateYawVar: m(0, 0.8),
   },

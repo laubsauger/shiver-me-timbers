@@ -57,8 +57,15 @@ export interface RaftMaterialParams {
   thatchRowRagged: number; // m — how far a course edge wanders
   thatchStrandScale: number; // strands per metre ACROSS the slope
   thatchStrandStretch: number; // ×longer down the slope
+  thatchTileWidth: number; // m — ONE leaf across the slope; the course line breaks at every tile [§3 Roof "like tiles"]
+  thatchTileStagger: number; // m — how far a tile's own course line sits above or below its neighbour's
   thatchRelief: number; // m
   thatchBump: number;
+  // --- straw mattress ticking (the berths), drawn by the weave family
+  tickLight: number; // bleached stripe [§3 Museum "striped mattress"]
+  tickDark: number; // the dyed stripe beside it
+  tickStrip: number; // m — one woven strip of ticking (coarser than the wall's 4–5 cm split bamboo)
+  tickBlock: number; // strips per stripe
   // --- plank (guaras, splashboards): the wood material in a dark preset
   plankLight: number; // dark weathered plank [§7 Guaras]
   plankDark: number;
@@ -75,7 +82,16 @@ export interface RaftMaterialParams {
   drumColor: number; // dull blue plastic rain drum
   dinghyColor: number; // faded yellow rubber [§7 Boxes]
   dinghyPatch: number; // 0..1 patch darkening
-  cageColor: number; // thin iron
+  cageColor: number; // thin iron — the parrot cage, and the pots and ladle by the door [§6]
+  crateCard: number; // salvaged cardboard: the radio corner's partition and the chart on the wall [§3 Radio corner]
+  // --- the radio (§B87): a salvaged car-radio face in a jury-rigged case
+  radioCase: number; // dark instrument grey-green
+  radioFace: number; // the pale face plate, dial disc and meter glass
+  radioTrim: number; // the dark furniture standing proud of the plate: knob, needles, rim
+  radioLed: number; // the one LED
+  radioLedGain: number; // emissive multiplier — it must read as LIT in a cabin at noon
+  radioFacePlane: number; // 0..1 of the case's depth: everything in front of this is the pale plate
+  radioTrimPlane: number; // 0..1: …and in front of THIS is dark furniture. One contract with buildRadioGeometry.
   // --- canvas + Kon-Tiki face
   sailTint: number; // RGB multiplier to take the stock linen to ochre [§7 Sail]
   faceFill: number; // rust red
@@ -136,13 +152,22 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     thatchLight: 0xc9b07a,
     thatchDark: 0x8c7a50,
     thatchUnder: 0.55,
-    thatchRowPitch: 0.3,
+    // §B87: the GEOMETRY now carries the courses (raftParams.roofCoursePitch,
+    // 0.30 m), so the material's row is the LEAF inside a course — banana
+    // leaves laid "like tiles" [§3 Roof], several to a course
+    thatchRowPitch: 0.12,
     thatchRowEdge: 0.03,
     thatchRowRagged: 0.04,
     thatchStrandScale: 40,
     thatchStrandStretch: 12,
+    thatchTileWidth: 0.16,
+    thatchTileStagger: 0.05,
     thatchRelief: 0.006,
     thatchBump: 6,
+    tickLight: 0xcfc5ad,
+    tickDark: 0x8f7a63,
+    tickStrip: 0.09,
+    tickBlock: 3,
     // weathered grey-brown, but MID-tone: a guara stands edge-on to the noon
     // sun and lives on hemisphere light alone, and at 0x6e685d it rendered as
     // a black slab (§B70). [PHOTO-04] reads the planks as mid grey-brown.
@@ -160,6 +185,14 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     dinghyColor: 0xd9c15a,
     dinghyPatch: 0.3,
     cageColor: 0x4a4844,
+    crateCard: 0xa89877,
+    radioCase: 0x4a5148,
+    radioFace: 0xc9c0a6,
+    radioTrim: 0x24262a,
+    radioLed: 0xff3a20,
+    radioLedGain: 1.6,
+    radioFacePlane: 0.62,
+    radioTrimPlane: 0.915,
     sailTint: 0xe3cfa3,
     faceFill: 0xb2472a,
     faceOutline: 0x3a2a22,
@@ -191,10 +224,14 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     thatchRowPitch: m(0.1, 0.8), thatchRowEdge: m(0.005, 0.1, 0.001), thatchRowRagged: m(0, 0.15),
     thatchStrandScale: m(5, 100, 1), thatchStrandStretch: m(1, 40, 0.5), thatchRelief: m(0, 0.02, 0.001),
     thatchBump: m(0, 30, 0.5),
+    thatchTileWidth: m(0.04, 0.6), thatchTileStagger: m(0, 0.2),
+    tickLight: colour, tickDark: colour, tickStrip: m(0.02, 0.3, 0.005), tickBlock: m(1, 10, 1),
     plankLight: colour, plankDark: colour, plankWidth: m(0.05, 0.6), plankReliefScale: m(0, 1, 0.05),
     ropeTan: colour, ropeDark: colour,
     cratePine: colour, crateKhaki: colour, crateBoardWidth: m(0.04, 0.3), jerrycanColor: colour,
-    drumColor: colour, dinghyColor: colour, dinghyPatch: m(0, 1), cageColor: colour,
+    drumColor: colour, dinghyColor: colour, dinghyPatch: m(0, 1), cageColor: colour, crateCard: colour,
+    radioCase: colour, radioFace: colour, radioTrim: colour, radioLed: colour,
+    radioLedGain: m(0, 6, 0.05), radioFacePlane: m(0, 1), radioTrimPlane: m(0, 1),
     sailTint: colour, faceFill: colour, faceOutline: colour,
     faceCentreV: m(0.2, 0.8), faceHalfWidth: m(0.3, 1.2), faceHalfHeight: m(0.4, 1.5),
     faceCorner: m(0, 0.6), faceStroke: m(0.005, 0.08, 0.001), faceRayInner: m(0.6, 2), faceRayOuter: m(0.8, 2.5),

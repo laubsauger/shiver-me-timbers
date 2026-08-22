@@ -67,8 +67,12 @@ import {
   buildLogGeometry,
   buildPoleGeometry,
   buildRaftSlabGeometry,
+  buildRadioGeometry,
+  buildRoofLathsGeometry,
+  buildRopeRailGeometry,
   buildSteeringOarGeometry,
   buildSternBlockGeometry,
+  buildThatchRoofGeometry,
 } from './pieceGeometryRaft';
 
 export { buildSailGeometry } from './pieceGeometrySail';
@@ -243,8 +247,16 @@ export function buildPieceGeometry(
       return buildCrateGeometry(aabb, shape);
     case 'lashing':
       return buildLashingGeometry(aabb, shape);
-    case 'bamboo-deck':
+    // §B87 — the roof is overlapping courses on visible laths, never a slab
     case 'thatch-roof':
+      return buildThatchRoofGeometry(aabb, shape ?? {});
+    case 'radio':
+      return buildRadioGeometry(aabb, shape ?? {});
+    case 'rope-rail':
+      return buildRopeRailGeometry(aabb, shape ?? {});
+    case 'bamboo-deck':
+      // a bamboo member that is a set of LATHS rather than a panel (the roof)
+      return (shape?.laths ?? 0) > 0 ? buildRoofLathsGeometry(aabb, shape!) : buildRaftSlabGeometry(aabb);
     case 'guara':
     case 'splashboard':
       return buildRaftSlabGeometry(aabb);

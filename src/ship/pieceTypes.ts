@@ -76,7 +76,10 @@ export type PieceKind =
   | 'crate' // 2100 dressing: crates, cans, drum (`shape.round`), dinghy, cage
   | 'splashboard' // low bow plank across the log stagger
   | 'stern-block' // balsa block carrying the thole-pins
-  | 'lashing'; // hemp rope turns at a crossbeam × log crossing (rings, one piece per beam)
+  | 'lashing' // hemp rope turns at a crossbeam × log crossing (rings, one piece per beam)
+  // --- §B87 raft dressing pass
+  | 'radio' // the jury-rigged shortwave: face plate, dial, meter, crank, LED (T103's interface)
+  | 'rope-rail'; // stanchions + a SLACK rope along a deck edge, or a bare sagging wire (`posts: 0`)
 
 /**
  * 'fixture' = named attach point for deck furniture / ornaments
