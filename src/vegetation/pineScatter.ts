@@ -44,6 +44,7 @@ import {
   type FoliageLightUniforms,
 } from './foliage';
 import { sierraCandidates, type SierraPlant } from './sierraScatter';
+import { createInstanceCuller, type InstanceCuller } from './cull';
 
 /** re-rolls per point before giving up — algorithm bound, not a look tunable */
 const PLACEMENT_ATTEMPTS = 96;
@@ -104,6 +105,14 @@ export function createPineMaterial(p: SierraParams = sierraParams) {
   return {
     material,
     foliage,
+    /**
+     * T112g: the UNLIT albedo and the leaf mask, exposed so `impostor.ts` can
+     * bake an atlas that is the same plant this material draws. Baking the LIT
+     * result would freeze the sun into a distant tree; baking a re-derived
+     * albedo would be a second expression of the same thing (§V77).
+     */
+    albedoNode: albedo,
+    leafMaskNode: leafMask,
     /** world-space direction TO the sun — drives wrap + back transmission */
     setSunDirection(v: THREE.Vector3): void {
       (foliage.sunDirection.value as THREE.Vector3).copy(v).normalize();
@@ -484,6 +493,25 @@ export function createSierraPines(opts: CreateSierraPinesOptions): IslandPalms {
   // trade groundCoverMesh.ts makes one size class down.
   manzanitaMesh.castShadow = false;
 
+  // ── T112g: per-instance visibility ──────────────────────────────────────
+  // Built eagerly (it is a permutation of buffers that already exist, ~1 ms
+  // per island) but INERT until a camera arrives: `setLodDistance` keeps the
+  // old count ramp until the first `setCullCamera`, so an island built by a
+  // caller that never passes a camera behaves exactly as it did before.
+  const cullers: { mesh: THREE.InstancedMesh; culler: InstanceCuller }[] = [];
+  for (const m of [mesh, juniperMesh, manzanitaMesh]) {
+    if (m.count === 0) continue;
+    cullers.push({
+      mesh: m,
+      culler: createInstanceCuller(m, {
+        cellSize: p.vegCullCellSize,
+        swayMargin: p.vegCullSwayMargin,
+        attributes: ['instancePhase', 'instanceSway'],
+      }),
+    });
+  }
+  let culling = false;
+
   return {
     mesh,
     maxCount: live + dead,
@@ -493,15 +521,34 @@ export function createSierraPines(opts: CreateSierraPinesOptions): IslandPalms {
       set.pine.refresh();
     },
     setLodDistance(cameraDistance: number): void {
-      mesh.count = palmLodCount(pines, cameraDistance);
-      juniperMesh.count = palmLodCount(junipers, cameraDistance);
-      manzanitaMesh.count = palmLodCount(manzanita, cameraDistance);
+      // the cull owns the counts once it is live — it drops by WHERE a plant
+      // is, which is strictly better information than the island's centre
+      // distance, and the two writing `count` in the same frame would fight
+      if (!culling) {
+        mesh.count = palmLodCount(pines, cameraDistance);
+        juniperMesh.count = palmLodCount(junipers, cameraDistance);
+        manzanitaMesh.count = palmLodCount(manzanita, cameraDistance);
+      }
       deadMesh.count = palmLodCount(dead, cameraDistance);
       const any = mesh.count + juniperMesh.count + manzanitaMesh.count + deadMesh.count > 0;
       mesh.visible = any;
       juniperMesh.visible = juniperMesh.count > 0;
       manzanitaMesh.visible = manzanitaMesh.count > 0;
       deadMesh.visible = deadMesh.count > 0;
+    },
+    setCullCamera(mvp, camX, camY, camZ, sunDirection): void {
+      culling = true;
+      const sun: [number, number, number] | null = sunDirection
+        ? [sunDirection.x, sunDirection.y, sunDirection.z]
+        : null;
+      let drawn = 0;
+      for (const c of cullers) {
+        c.culler.setShadow(sun, p.vegCullShadowReach);
+        const stats = c.culler.update(mvp, camX, camY, camZ, islandParams.lodPalmCull);
+        c.mesh.visible = stats.drawn > 0;
+        drawn += stats.drawn;
+      }
+      mesh.visible = drawn + deadMesh.count > 0;
     },
     setSunDirection(v: THREE.Vector3): void {
       set.pine.setSunDirection(v);

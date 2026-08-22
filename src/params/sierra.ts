@@ -428,11 +428,64 @@ export interface SierraParams {
   /** every rock keeps this clear (m) of the walk corridor masks */
   rockPathClearance: number;
 
+  // ── T112g LOD ────────────────────────────────────────────────────────────
+  /**
+   * Octahedral impostor atlas: tiles per side and pixels per tile.
+   *
+   * 8 × 128 = a 1024² atlas per target, two targets (albedo+coverage,
+   * normal+leaf mask) = 8 MB per species. The TILE is sized against the SWAP
+   * DISTANCE, not picked round: at `impostorDistance` a 12 m pine covers about
+   * 90 px of a 1440-line viewport at the shipped fov, so a 128 px tile is
+   * still MAGNIFIED when the impostor takes over — which is also why the atlas
+   * needs no mip chain to satisfy §V48. The FRAMES set the angular step: 8
+   * vertices across the hemi-octahedron is ~11° between captured directions,
+   * with the four horizon bearings — the only ones a walking camera uses —
+   * captured exactly rather than interpolated.
+   */
+  impostorFrames: number;
+  impostorTile: number;
+  /** camera distance (m) at which the impostor starts taking over */
+  impostorDistance: number;
+  /** metres over which mesh and impostor cross-fade (dithered, see impostor.ts) */
+  impostorFadeBand: number;
+  /** coverage below this is discarded — a needle cluster's own edge */
+  impostorAlphaTest: number;
+
+  /**
+   * Side (m) of one plant-cull cell. Sets the granularity of the frustum cull:
+   * smaller cells cull tighter and cost more sphere tests and more upload
+   * churn (the instance buffers are recompacted whenever the visible SET
+   * changes, and a smaller cell changes the set more often). 32 m over a 250 m
+   * island is ~60 cells carrying ~25 plants each.
+   */
+  vegCullCellSize: number;
+  /**
+   * Metres added to every plant's cull radius for the wind sway the CPU cannot
+   * see. Same reason `scatterPalms` inflates its bounding sphere: a plant that
+   * can leave its own cull volume pops at the frame edge.
+   */
+  vegCullSwayMargin: number;
+  /**
+   * How far a plant's SHADOW reaches (m), used to keep casters that are behind
+   * the camera but cast into the frame. 0 disables the second test and the
+   * cull starts eating shadows.
+   */
+  vegCullShadowReach: number;
+
 }
 
 export const sierraParams: SierraParams = registerParams(
   'sierra',
   {
+    // ── T112g LOD ──
+    impostorFrames: 8,
+    impostorTile: 128,
+    impostorDistance: 260,
+    impostorFadeBand: 90,
+    impostorAlphaTest: 0.35,
+    vegCullCellSize: 32,
+    vegCullSwayMargin: 1.2,
+    vegCullShadowReach: 40,
     sliceCount: 3,
     sliceMinSpacing: 500,
     sliceMaxSpacing: 700,

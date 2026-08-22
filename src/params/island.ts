@@ -521,6 +521,25 @@ export interface IslandParams {
    * world), which is nothing next to what it protects.
    */
   lodTerrainStride: number;
+
+  // ── T112g LOD ────────────────────────────────────────────────────────────
+  /**
+   * Metres of approach over which the near terrain morphs onto the far
+   * terrain's surface, ending exactly at `lodTerrainDistance` (CDLOD, see
+   * islandMesh.ts). The delta a vertex has to travel is fixed by the two
+   * tessellations; this decides how many frames it is spread over.
+   *
+   * 300 m at a 900 m swap means the morph runs 600 → 900 m. At a walking pace
+   * of ~4 m/s that is 75 s of travel for a motion whose whole amplitude is the
+   * `morphHeightDelta` the handle reports (single metres on the shipped
+   * islands), i.e. millimetres per frame — under the threshold at which a
+   * surface reads as moving at all, which is the property that matters. Set to
+   * 0 for a hard swap; the pop comes back.
+   */
+  lodTerrainMorphBand: number;
+  /** CDLOD morph on/off — an A/B switch for the pop, not a look tunable */
+  lodTerrainMorph: boolean;
+
   /** palm instance count ramps from full to zero between these distances (m) */
   lodPalmFull: number;
   lodPalmCull: number;
@@ -716,6 +735,9 @@ export const islandParams: IslandParams = registerParams(
     seabedTextureMargin: 400,
     lodTerrainDistance: 900,
     lodTerrainStride: 2,
+    // ── T112g LOD ──
+    lodTerrainMorphBand: 300,
+    lodTerrainMorph: true,
     lodPalmFull: 500,
     lodPalmCull: 1400,
     lodRockCull: 4000,
@@ -877,6 +899,8 @@ function islandParamsMeta(): Partial<Record<keyof IslandParams, ParamMeta>> {
     seabedTextureMargin: { min: 0, max: 2000, step: 50 },
     lodTerrainDistance: { min: 100, max: 4000, step: 50 },
     lodTerrainStride: { min: 1, max: 8, step: 1 },
+    // ── T112g LOD ──
+    lodTerrainMorphBand: { min: 0, max: 2000, step: 25 },
     lodPalmFull: { min: 50, max: 3000, step: 25 },
     lodPalmCull: { min: 50, max: 4000, step: 25 },
     lodRockCull: { min: 50, max: 4600, step: 25 },

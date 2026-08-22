@@ -133,6 +133,24 @@ export interface IslandPalms {
   setLodDistance(cameraDistance: number): void;
   /** world sun direction (unit, pointing AT the sun) for the backlit fronds */
   setSunDirection(v: THREE.Vector3): void;
+  /**
+   * T112g, OPTIONAL: per-instance frustum cull against the camera. `mvp` is
+   * projection × view × the island group's world matrix, so the cull runs in
+   * the ISLAND-LOCAL space the instance matrices are written in — a batch that
+   * is offset by its island and tested against world planes culls the wrong
+   * plants, silently, and only when the island is far from the origin.
+   *
+   * Optional because the palm batches have nothing to gain from it (28
+   * instances) and because an island whose caller never supplies a camera must
+   * keep working — `setLodDistance` stays in charge until this is first called.
+   */
+  setCullCamera?(
+    mvp: ArrayLike<number>,
+    camX: number,
+    camY: number,
+    camZ: number,
+    sunDirection?: THREE.Vector3,
+  ): void;
   dispose(): void;
 }
 

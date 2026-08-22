@@ -24,7 +24,7 @@ import * as THREE from 'three/webgpu';
 import { islandParams, type IslandParams } from '../params/island';
 import { findShoreRadius, generateIslandHeightmap, gradientAt, type IslandHeightmap } from './heightmap';
 import type { ArchetypeName } from './archetypes';
-import { createIslandMesh, selectTerrainLod, type IslandMeshHandle } from './islandMesh';
+import { createIslandMesh, type IslandMeshHandle } from './islandMesh';
 import { createRocks, type Rocks } from './rocks';
 import { createIslandPalms, type IslandPalms } from './palms';
 import { createStructures, type Structures } from './structures';
@@ -105,6 +105,16 @@ export interface IslandFrame {
   hazeColor: THREE.Color;
   /** camera world position — drives the LOD (§V17) */
   cameraPosition: THREE.Vector3;
+  /**
+   * T112g, OPTIONAL: the camera itself, for the per-instance plant cull.
+   * `cameraPosition` alone cannot cull — a frustum needs the ORIENTATION, and
+   * the whole win of the cull is dropping the plants behind your head, which
+   * is a fact about where the camera is pointing and nothing else.
+   *
+   * Optional so this contract stays satisfiable by every existing caller;
+   * absent, the plant batches fall back to the distance ramp they always had.
+   */
+  camera?: THREE.Camera;
 }
 
 export interface Island {
@@ -280,6 +290,10 @@ export function createIsland(opts: CreateIslandOptions): Island {
   group.position.set(px, 0, pz);
 
   const camDelta = new THREE.Vector3();
+  // T112g scratch: island world matrix (a fixed translation) and the
+  // model-view-projection the plant cull tests against
+  const islandMatrix = new THREE.Matrix4().makeTranslation(px, 0, pz);
+  const cullMvp = new THREE.Matrix4();
   const foamTargets: THREE.Object3D[] = [terrain.mesh, ...rocks.foamTargets];
   /**
    * THE PER-FRAME `castShadow` TRAVERSAL, HOISTED (already named as a CPU cost
@@ -340,8 +354,27 @@ export function createIsland(opts: CreateIslandOptions): Island {
         for (const caster of shadowCasters) caster.castShadow = p.castShadows;
       }
 
-      terrain.setLod(selectTerrainLod(dist, p));
+      // T112g: level AND CDLOD morph, so the tessellation change is spread
+      // over the approach instead of landing in one frame
+      terrain.setLodDistance(dist, p);
       palms.setLodDistance(dist);
+      // T112g: per-instance plant cull, in ISLAND-LOCAL space. The island's
+      // world matrix is a pure translation that never moves, so it is built
+      // here rather than read off `group.matrixWorld` — that one is written by
+      // the renderer's own traversal and is a frame stale at this point.
+      if (frame.camera && palms.setCullCamera) {
+        frame.camera.updateMatrixWorld();
+        cullMvp
+          .multiplyMatrices(frame.camera.projectionMatrix, frame.camera.matrixWorldInverse)
+          .multiply(islandMatrix);
+        palms.setCullCamera(
+          cullMvp.elements,
+          frame.cameraPosition.x - px,
+          frame.cameraPosition.y,
+          frame.cameraPosition.z - pz,
+          frame.sunDirection,
+        );
+      }
       rocks.setVisible(dist <= p.lodRockCull);
       cover.setLodDistance(dist);
       structures.setLodDistance(dist);

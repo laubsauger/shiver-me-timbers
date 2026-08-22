@@ -1195,6 +1195,10 @@ async function boot(): Promise<void> {
           // over is what keeps land and sea agreeing at every coastline.
           hazeColor: app.scene.fog?.color ?? hazeFallback,
           cameraPosition: app.camera.position,
+          // §T.112g: the per-instance vegetation cull needs the frustum, not just
+          // the position. Passing the camera is the whole activation — the culler
+          // is built and tested; without this line it is inert.
+          camera: app.camera,
         },
         (x, z) => cpuOcean.heightAt(x, z, state.time),
       );
