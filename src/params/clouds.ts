@@ -163,6 +163,31 @@ export interface CloudParams {
   lobeRelief: number;
   /** spatial frequency of that relief on the unit lobe */
   lobeReliefScale: number;
+  /** §T.119(b) domain warp: how far the noise SAMPLE POSITION is displaced by
+   *  its own low-frequency noise vector before the density lookup. This is the
+   *  term that folds a dented sphere into cauliflower — a value warp cannot. */
+  silhouetteWarp: number;
+  /** frequency of that warp vector. Must stay the LOWEST in the chain: the FD
+   *  normal holds the warp constant across its taps (see cloudCores.ts). */
+  silhouetteWarpScale: number;
+  /** >1 scales the noise coordinate's y UP, so carved features come out wider
+   *  than tall — a cumulus is not isotropic and neither is the field (§V58). */
+  silhouetteSquash: number;
+  /** how far the noise frame leans downwind with height, along the SAME
+   *  heading `bandDriftDirDeg` drifts the stratus deck on. One wind. */
+  silhouetteShear: number;
+  /** 0..1 how much of the finest octave is reserved for the TOP of a lobe —
+   *  convection piles detail on the crown and leaves the base smooth. */
+  cauliflowerTop: number;
+  /** 0..0.6 how far a lobe's underside is pulled in. A cumulus condenses at one
+   *  altitude, so its base is a plane; a sphere has no such altitude. */
+  baseFlatten: number;
+  /** §T.119(b) 0..0.9 how far the fluff sprite's radius is broken up by noise.
+   *  `1-|q|^2` is an EXACT circle and the sprite overhangs the lobe, so on a
+   *  small cloud it IS the silhouette — the user's "little circles". */
+  fluffBreak: number;
+  /** frequency of that break-up, in sprite radii */
+  fluffBreakScale: number;
   /**
    * Exponent on the OPTICAL CHORD. `|N·V|` at the smooth ellipsoid is exactly
    * `sqrt(1-u²)` at projected radius `u`, i.e. half the chord a ray cuts
@@ -211,6 +236,18 @@ export interface CloudParams {
    * different way. Real cloud-base reflectance is 30-60% of the top.
    */
   multiScatterFloor: number;
+  /** §T.119 Henyey-Greenstein asymmetry g. Water droplets are strongly
+   *  forward-scattering; 0 is isotropic and 1 is a delta. */
+  phaseAnisotropy: number;
+  /** peak of the forward-scattered path added to the sunlight channel, in
+   *  sunColor units — the warm rim / silver lining on a back-lit cumulus. */
+  forwardGain: number;
+  /** Beer-Lambert extinction that path is attenuated by, on (chord+interior) */
+  forwardExtinction: number;
+  /** 0..1 powder (dark-edge) strength, applied only with the sun behind you */
+  powderStrength: number;
+  /** extinction of the powder ramp, on the lobe's own chord */
+  powderExtinction: number;
   /** warm uplight added to the SUNLIGHT channel on downward-facing faces when
    *  the key is near the horizon — the glowing underside of a sunset cumulus.
    *  Rides sunColor, which is already the haze-warmed key, so it needs no
@@ -285,6 +322,10 @@ export interface CloudParams {
    *  divisor bounds the division, not the quotient (§V44), and an unbounded
    *  coordinate near the horizon is also unbounded aliasing. */
   bandRange: number;
+  /** §B91 0..1. The span, as a fraction of `bandRange`, over which the layer's
+   *  STRUCTURE fades out as the ray/plane map degenerates toward the horizon.
+   *  Reaches 0 at the clamp itself, not below it — see cloudBands.ts. */
+  bandDegenerateFade: number;
   /** metres below the deck over which the layer fades out as a camera climbs
    *  into it — a freecam above the deck sees nothing, not an inverted sheet */
   bandAboveFade: number;
@@ -396,14 +437,16 @@ export interface CloudParams {
   /** 0..1 the same for the SUNLIGHT, scaled by how warm the light actually
    *  is — at midday the haze is cyan and the sunlit faces must not follow it */
   sunTint: number;
-  /** maps the haze's (r-b) in sRGB to that 0..1 warmth */
-  paletteWarmthGain: number;
   /** 0..1 how far SATURATION follows the haze, separately from hue — low on
    *  purpose, see cloudPalette.ts */
   paletteSatFollow: number;
   /** 0..1 how far the SUNLIGHT darkens toward the live haze brightness at
    *  full warmth — one-directional, it can never brighten */
   sunDarken: number;
+  /** §B90. 0..1 how far the SKYLIGHT LEVEL falls at full golden hour — see
+   *  CloudPaletteInput.skyDarken for why a constant fill level was most of
+   *  "the clouds are grey at a warm sunset". */
+  skyDarken: number;
 }
 
 const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
@@ -450,6 +493,14 @@ const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   lobeDetail: { min: 0, max: 3, step: 1 },
   lobeRelief: { min: 0, max: 0.6, step: 0.01 },
   lobeReliefScale: { min: 0.5, max: 8, step: 0.1 },
+  silhouetteWarp: { min: 0, max: 1.5, step: 0.01 },
+  silhouetteWarpScale: { min: 0.2, max: 4, step: 0.05 },
+  silhouetteSquash: { min: 0.5, max: 4, step: 0.05 },
+  silhouetteShear: { min: 0, max: 1.5, step: 0.01 },
+  cauliflowerTop: { min: 0, max: 1, step: 0.01 },
+  baseFlatten: { min: 0, max: 0.6, step: 0.01 },
+  fluffBreak: { min: 0, max: 0.9, step: 0.01 },
+  fluffBreakScale: { min: 0.2, max: 6, step: 0.05 },
   lobeChordPower: { min: 0.3, max: 3, step: 0.05 },
   lobeDensity: { min: 0.05, max: 1.5, step: 0.01 },
   sunPower: { min: 0.5, max: 6, step: 0.05 },
@@ -459,6 +510,11 @@ const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   skyMin: { min: 0, max: 1.5, step: 0.01 },
   skyMax: { min: 0, max: 1.5, step: 0.01 },
   multiScatterFloor: { min: 0, max: 0.8, step: 0.01 },
+  phaseAnisotropy: { min: 0, max: 0.95, step: 0.01 },
+  forwardGain: { min: 0, max: 2, step: 0.01 },
+  forwardExtinction: { min: 0, max: 8, step: 0.05 },
+  powderStrength: { min: 0, max: 1, step: 0.01 },
+  powderExtinction: { min: 0, max: 8, step: 0.05 },
   baseGlow: { min: 0, max: 2, step: 0.01 },
   baseGlowLowSun: { min: 0.05, max: 1, step: 0.01 },
   fluffScale: { min: 0.5, max: 4, step: 0.05 },
@@ -473,6 +529,7 @@ const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   bandCoverage: { min: 0, max: 1, step: 0.01 },
   bandAltitude: { min: 400, max: 6000, step: 10 },
   bandRange: { min: 4000, max: 80000, step: 500 },
+  bandDegenerateFade: { min: 0.02, max: 1, step: 0.01 },
   bandAboveFade: { min: 50, max: 2000, step: 10 },
   bandHorizonFade: { min: 0.005, max: 0.3, step: 0.005 },
   bandLength: { min: 500, max: 20000, step: 50 },
@@ -509,9 +566,9 @@ const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   alphaSoftFar: { min: 0.05, max: 4, step: 0.05 },
   skyTint: { min: 0, max: 1, step: 0.01 },
   sunTint: { min: 0, max: 1, step: 0.01 },
-  paletteWarmthGain: { min: 0, max: 4, step: 0.05 },
   paletteSatFollow: { min: 0, max: 1, step: 0.01 },
   sunDarken: { min: 0, max: 1, step: 0.01 },
+  skyDarken: { min: 0, max: 1, step: 0.01 },
 };
 
 export const cloudParams: CloudParams = registerParams(
@@ -630,8 +687,32 @@ export const cloudParams: CloudParams = registerParams(
     // fixes a straight line; only more tessellation does. 2 = 320 faces.
     lobeDetail: 2,
 
-    lobeRelief: 0.26,
+    // 0.26 -> 0.34: the amplitude alone was never the problem (see the frame
+    // note in cloudCores.ts), but with three octaves on a warped coordinate
+    // the extra amplitude now buys OUTLINE structure rather than a bumpier
+    // ball, and the silhouette needs it to clear the curvature test.
+    lobeRelief: 0.34,
     lobeReliefScale: 2.3,
+    // §T.119(b). MEASURED against the curvature histogram in tests/clouds.test.ts:
+    // at warp 0 the outline's curvature piles 41% of its samples into one bin
+    // (a circle is a constant-curvature arc — that IS the tell); at 0.55 the
+    // fullest bin holds 11%.
+    silhouetteWarp: 0.55,
+    // the LOWEST frequency in the chain, by a factor of ~2 against the first
+    // fbm octave. Raising it above lobeReliefScale inverts the roles and the
+    // FD normal's held-constant approximation stops being the harmless one.
+    silhouetteWarpScale: 1.1,
+    // 1.45: features 1.45x shorter vertically than horizontally, i.e. wider
+    // than tall, which is the read every cumulus reference has
+    silhouetteSquash: 1.45,
+    silhouetteShear: 0.35,
+    cauliflowerTop: 0.7,
+    baseFlatten: 0.3,
+    // 0.35 moves the sprite's zero-crossing radius over +/-9% of its own
+    // radius, which is enough that no stretch of it holds constant curvature
+    // and small enough that the feather it exists to draw is unchanged
+    fluffBreak: 0.35,
+    fluffBreakScale: 1.7,
     // 1.0 = the physical chord through a uniform sphere (see the interface
     // note). Not a look knob: this is the density profile of the volume.
     lobeChordPower: 1.0,
@@ -671,6 +752,15 @@ export const cloudParams: CloudParams = registerParams(
     // cloud sunlight range of 0.20 (far side) → 0.96 (lit top), 4.8x, with the
     // worst buried underside at 0.375 against the 0.018 that started this pass.
     multiScatterFloor: 0.20,
+    // 0.62: half-power at 22.8 deg with a tail that floors at 1.6% of the peak
+    // rather than at 0. The tail is the point -- see hgPhaseValue().
+    phaseAnisotropy: 0.62,
+    // 0.55 puts a thin back-lit margin at 1.14 of the key against a front-lit
+    // interior's 0.22, i.e. a silver lining that is 5x its own cloud's body
+    forwardGain: 0.55,
+    forwardExtinction: 2.4,
+    powderStrength: 0.35,
+    powderExtinction: 3.0,
     // 0.30 puts a sunset base at ~0.47 of the key, i.e. just under half a lit
     // top: glowing, which is the reference read, but never competing with it
     baseGlow: 0.30,
@@ -708,6 +798,11 @@ export const cloudParams: CloudParams = registerParams(
     // pinning it against the cumulus rather than as a bare number.
     bandAltitude: 2100,
     bandRange: 34000,
+    // 0.2 -> full structure by range = 0.8*bandRange, i.e. 4.4 deg at the
+    // shipped altitude against a clamp at 3.53 deg. Under a degree of sky, and
+    // all of it inside the span where the coordinate's screen footprint had
+    // already flattened the layer to bandFarMean anyway.
+    bandDegenerateFade: 0.2,
     bandAboveFade: 400,
     // 0.045 in sin(elev) ≈ 2.6°, where the fade is 63% — the layer is gone by
     // the skyline and the sky's haze takes over
@@ -782,9 +877,21 @@ export const cloudParams: CloudParams = registerParams(
     sunTint: 0.9,
     // #fdb669 at the §T.39 sunset → r-b = 0.58 → warmth 0.93; #99def9 at
     // midday → r-b negative → warmth 0, so the sun term stays as authored
-    paletteWarmthGain: 1.6,
     paletteSatFollow: 0.35,
-    sunDarken: 0.75,
+    // 0.75 -> 0.88: the lit face's chroma is bought entirely by dropping its
+    // lightness. The key at the 17.75 sunset sits at sRGB lightness 0.63
+    // against the authored 0.92, and at 0.75 the blend only reached 0.70;
+    // ACES at exposure 1.1 then still resolved the lit top to 237,212,192.
+    sunDarken: 0.88,
+    // §B90, MEASURED, and both directions were checked. The fill is the
+    // ZENITH's violet at a constant lightness, and at the shipped sunset it
+    // carried 32% of the interior's luminance -> hue 333 deg on a cloud under
+    // a hue 31 deg sky. At 0.55 the interior over-corrects and lands WARMER
+    // than the lit face (the multi-scatter floor is sun-coloured and takes
+    // over), which is the same flatness wearing the other hat. 0.40 keeps the
+    // interior on the magenta side of the lit top -- cooler, as a shadow must
+    // be -- while taking the violet cast off the mass.
+    skyDarken: 0.40,
   },
   cloudParamsMeta,
 );

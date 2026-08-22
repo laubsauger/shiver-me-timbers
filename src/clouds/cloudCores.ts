@@ -61,6 +61,7 @@ import {
 } from 'three/tsl';
 import type { Node } from 'three/webgpu';
 import type { ShaderNodeObject } from 'three/tsl';
+import { bandLimitAmplitude } from '../ship/bandLimit';
 import { createRng } from '../state/rng';
 import { hashCell } from '../weather/field';
 import type { StormCell } from '../weather/field';
@@ -254,6 +255,233 @@ export function lobeSunValue(
   p: Pick<CloudParams, 'multiScatterFloor' | 'baseGlow' | 'baseGlowLowSun'>,
 ): number {
   return Math.min(2, multiScatteredValue(direct, p) + baseGlowValue(downFace, keyY, p));
+}
+
+/**
+ * §T.119 — HENYEY-GREENSTEIN PHASE, normalised to its own forward peak.
+ *
+ * `p(g,c) ∝ (1−g²) / (1+g²−2gc)^1.5`; the normalisation divides by `p(g,1)`,
+ * so what comes back is **exactly 1 straight through the cloud at the sun and
+ * strictly inside (0,1] everywhere else** — §V44 bounded AT SOURCE, with no
+ * clamp doing the work and no 4π hiding in a gain someone has to re-tune.
+ *
+ * WHAT IT REPLACES AND WHY IT MATTERS. The silver lining used to ride
+ * `pow(dot(sun,−V), 6)`, which is half-power at 19° and mathematically ZERO at
+ * 90°. A pow lobe has no tail, and the tail is the whole point: water droplets
+ * are strongly forward-scattering, so a cumulus with the sun behind it is
+ * brighter than the sky over a wide arc and never abruptly stops being lit.
+ * At the shipped g the tail floors at 0.0155 of the peak rather than at 0, and
+ * the 50% point is 22.8° — a comparable core with light that does not fall off
+ * a cliff.
+ *
+ * `cosT` is the SCATTERING angle's cosine: a photon arriving along −S leaving
+ * along V, i.e. `−dot(S, V)`. It is +1 when you look through the cloud at the
+ * sun (forward scatter) and −1 with the sun behind you (backscatter).
+ */
+export function hgPhaseValue(g: number, cosT: number): number {
+  const gg = Math.min(0.95, Math.max(-0.95, Number.isFinite(g) ? g : 0));
+  const c = Math.min(1, Math.max(-1, Number.isFinite(cosT) ? cosT : 0));
+  const k = 1 + gg * gg;
+  // (k − 2g) is (1−g)², so the peak is never negative; both are floored for
+  // the g→1 limit, where the lobe degenerates to a delta (§V28).
+  const peak = Math.max(1e-4, k - 2 * gg);
+  const here = Math.max(1e-4, k - 2 * gg * c);
+  return Math.min(1, Math.pow(peak / here, 1.5));
+}
+
+/**
+ * §T.119 — FORWARD-SCATTERED SUNLIGHT THROUGH THE BODY, in sunColor units, to
+ * be ADDED to the sunlight channel.
+ *
+ * THE PATH THAT WAS MISSING. The composite already has a transmission term,
+ * but it is gated on `pow(dot(view,sun), 8)` AND on `exp(−transDepth·coverage)`
+ * — dead by coverage 3-6, i.e. everywhere inside a cluster — so beyond ~20°
+ * from the sun the entire system had no transmitted path at all, and
+ * `multiScatterFloor` (its isotropic component) is by construction the part
+ * that does NOT depend on where you stand. This is the part that does: the
+ * warm rim on a back-lit cumulus, which is the single most recognisable thing
+ * in the reference frames and which a rim-light fake cannot give, because a
+ * rim light glows identically whatever the sun is doing.
+ *
+ * `chord` is the lobe's own optical depth (|N·V| on the smooth ellipsoid, see
+ * the graph) and `interior` is how buried it is: Beer-Lambert on their sum, so
+ * the term is largest exactly at a thin outer margin and gone in an anvil.
+ *
+ * §V44: a product of a phase in (0,1], an `exp` of a non-negative argument in
+ * (0,1], and a clamped gain. Bounded at source; nothing is clamped after.
+ */
+export function forwardScatterValue(
+  cosT: number,
+  chord: number,
+  interior: number,
+  p: Pick<CloudParams, 'phaseAnisotropy' | 'forwardGain' | 'forwardExtinction'>,
+): number {
+  const depth =
+    (clamp01(chord) + clamp01(interior)) * Math.max(0, Math.min(8, p.forwardExtinction));
+  return (
+    hgPhaseValue(p.phaseAnisotropy, cosT) *
+    Math.exp(-depth) *
+    Math.max(0, Math.min(2, p.forwardGain))
+  );
+}
+
+/**
+ * §T.119 — POWDER (the "dark edge" effect), a MULTIPLIER on the multi-scatter
+ * floor.
+ *
+ * A cloud lit from BEHIND THE VIEWER is darker at its thin edges than in its
+ * thick core — the opposite of a rim light, and counter-intuitive enough that
+ * it is usually left out. The reason is that a thin margin has too little
+ * material to scatter light back out along the view ray, while the core has
+ * enough for the random walk to return it. Without it the multi-scatter floor
+ * is a constant lift on every face, and a constant lift is what makes a
+ * cumulus read as a flat decal with a soft edge instead of a solid.
+ *
+ * Applied only where the sun is BEHIND the camera (`−cosT`), because that is
+ * the geometry it describes — at the back-lit end `forwardScatterValue` above
+ * owns the margin, and darkening it there would cancel the silver lining.
+ *
+ * §V44: `mix(1, x, w)` with `x` and `w` both in [0,1] can only return a value
+ * in [0,1]; it is an attenuation expressed multiplicatively, never a negative
+ * addend.
+ */
+export function powderValue(
+  cosT: number,
+  chord: number,
+  p: Pick<CloudParams, 'powderStrength' | 'powderExtinction'>,
+): number {
+  const back = clamp01(-cosT);
+  const dark = 1 - Math.exp(-Math.max(0, Math.min(8, p.powderExtinction)) * clamp01(chord));
+  return 1 - clamp01(p.powderStrength) * back * (1 - dark);
+}
+
+/** the subset of CloudParams the silhouette mirror reads */
+export type SilhouetteProfile = Pick<
+  CloudParams,
+  | 'lobeRelief'
+  | 'lobeReliefScale'
+  | 'silhouetteWarp'
+  | 'silhouetteWarpScale'
+  | 'silhouetteSquash'
+  | 'silhouetteShear'
+  | 'cauliflowerTop'
+  | 'baseFlatten'
+>;
+
+/** a 3D zero-mean noise — `mx_noise_float` in the graph, injected on the CPU */
+export type Noise3 = (x: number, y: number, z: number) => number;
+
+/**
+ * §T.119(b) CPU MIRROR of the lobe's radial displacement factor — the graph's
+ * `reliefAt` in `createCloudCores`, transliterated so the silhouette's
+ * contract can be driven headless (a TSL graph cannot be). Same convention as
+ * `bandShapeAt` ↔ the band graph and `bandLimit.ts`'s own pair; if you change
+ * one of these, change the other with it.
+ *
+ * `noise3` IS A PARAMETER ON PURPOSE. The graph passes `mx_noise_float` and
+ * there is no CPU twin of it in this project — and there must not be a third
+ * noise written to make one (§T.112c). What §T.119(b) actually asserts is a
+ * property of the COMPOSITION (warp → squash → shear → three octaves → flat
+ * base), not of one particular gradient noise: "no perfect circular arc
+ * anywhere" has to hold for any reasonable zero-mean field, and a test that
+ * pins it for one field would be pinning a decision rather than a property
+ * (§V80). The test injects a value noise built on the project's own
+ * `hash3Cpu`.
+ *
+ * `d` must be a unit direction; `seed` is the instance's 0..1 noise offset.
+ * `windX`/`windZ` are the unit wind heading.
+ */
+export function lobeReliefValue(
+  d: readonly [number, number, number],
+  seed: number,
+  windX: number,
+  windZ: number,
+  p: SilhouetteProfile,
+  noise3: Noise3,
+): number {
+  // §V28: the seed is internally generated (`rng()`, always finite) but this
+  // is also the test surface for the whole silhouette, so it is guarded here
+  // rather than trusted — a NaN reaching a vertex buffer is unrecoverable.
+  const sd = Number.isFinite(seed) ? seed : 0;
+  const sx = sd * 23.1;
+  const sy = sd * 51.7;
+  const sz = sd * 9.4;
+  // §V28: every param read is finite-guarded, so the mirror is TOTAL — the
+  // graph's own guard is the finite-check at the push site (clouds/index.ts),
+  // because a NaN uniform is undefined behaviour in WGSL's `max`/`clamp` too
+  // and cannot be caught inside the shader.
+  const fin = (v: number, d: number): number => (Number.isFinite(v) ? v : d);
+  const shear = fin(p.silhouetteShear, 0);
+  const squash = Math.max(0.1, fin(p.silhouetteSquash, 1));
+  /** the anisotropic, sheared sampling frame — graph `frameOf` */
+  const frame = (v: readonly [number, number, number]): [number, number, number] => [
+    v[0] + v[1] * shear * windX,
+    v[1] * squash,
+    v[2] + v[1] * shear * windZ,
+  ];
+
+  // the domain warp, evaluated ONCE at the undisplaced direction (see the
+  // graph for why it is held constant across the finite-difference taps)
+  const ws = Math.max(0.05, fin(p.silhouetteWarpScale, 1));
+  const fu = frame(d);
+  const wb: [number, number, number] = [fu[0] * ws + sx, fu[1] * ws + sy, fu[2] * ws + sz];
+  const wAmp = fin(p.silhouetteWarp, 0);
+  const w0 = noise3(wb[0], wb[1], wb[2]) * wAmp;
+  const w1 = noise3(wb[0] + 19.7, wb[1] + 19.7, wb[2] + 19.7) * wAmp;
+  const w2 = noise3(wb[0] + 41.3, wb[1] + 41.3, wb[2] + 41.3) * wAmp;
+
+  const rs = Math.max(0.05, fin(p.lobeReliefScale, 1));
+  const f = frame(d);
+  const qx = f[0] * rs + sx + w0;
+  const qy = f[1] * rs + sy + w1;
+  const qz = f[2] * rs + sz + w2;
+
+  const cauli = 1 - clamp01(p.cauliflowerTop) * (1 - (clamp01(d[1] * 0.5 + 0.5)));
+  const fbm =
+    noise3(qx, qy, qz) +
+    noise3(qx * 2.7 + 11.3, qy * 2.7 + 11.3, qz * 2.7 + 11.3) * 0.45 +
+    noise3(qx * 6.1 + 27.7, qy * 6.1 + 27.7, qz * 6.1 + 27.7) * 0.22 * cauli;
+
+  const down = Math.max(0, -d[1]);
+  const flat = 1 - Math.min(0.6, Math.max(0, p.baseFlatten)) * down * down;
+  return (fbm * fin(p.lobeRelief, 0) + 1) * flat;
+}
+
+/**
+ * §T.119(b) CPU MIRROR of the fluff sprite's shape — the graph's `r2`/`shape`
+ * pair in `createCloudCores`.
+ *
+ * THIS IS THE ONE THAT WAS A CIRCLE. `1 − |q|²` has its zero-crossing at
+ * |q| = 1 exactly, for every angle, forever; and because `fluffScale` makes
+ * the sprite OVERHANG the lobe it feathers, on a small cloud that exact circle
+ * is the outermost thing in the silhouette. Measured on this mirror: at
+ * `fluffBreak 0` every curvature sample lands in one histogram bin (1.000) and
+ * no part of the outline is concave (0.000) — the textbook signature of a
+ * circular arc, and the user's "smaller little circles" in one number.
+ *
+ * `amp` is the §V.48 band-limit weight the graph applies per octave; the test
+ * drives it at 1 (feature bigger than a pixel) and at 0 (sub-pixel, where the
+ * sprite must degrade back to the exact disc, which is the correct answer at
+ * that size).
+ */
+export function fluffShapeValue(
+  qx: number,
+  qy: number,
+  seed: number,
+  p: Pick<CloudParams, 'fluffBreak' | 'fluffBreakScale'>,
+  noise3: Noise3,
+  amp = 1,
+): number {
+  const s = (Number.isFinite(seed) ? seed : 0) * 137.13;
+  const k = Math.max(0.1, Number.isFinite(p.fluffBreakScale) ? p.fluffBreakScale : 1);
+  const b1x = qx * k;
+  const b1y = qy * k;
+  const n =
+    noise3(b1x, b1y, s) * amp +
+    noise3(b1x * 2.6, b1y * 2.6, s + 7.7) * 0.45 * amp;
+  const br = Number.isFinite(p.fluffBreak) ? p.fluffBreak : 0;
+  const r2 = qx * qx + qy * qy - n * Math.min(0.9, Math.max(0, br));
+  return Math.max(0, 1 - r2);
 }
 
 /** clamped smoothstep on a already-normalized t */
@@ -629,6 +857,17 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const uMaxDist = uniform(p.maxCloudDist);
   const uRelief = uniform(p.lobeRelief);
   const uReliefScale = uniform(p.lobeReliefScale);
+  // §T.119(b) silhouette: domain warp + anisotropy + top/base asymmetry
+  const uWarp = uniform(p.silhouetteWarp);
+  const uWarpScale = uniform(p.silhouetteWarpScale);
+  const uSquash = uniform(p.silhouetteSquash);
+  const uShear = uniform(p.silhouetteShear);
+  /** unit wind heading in world XZ — the SAME heading the band deck drifts on */
+  const uWindDir = uniform(new THREE.Vector2(1, 0));
+  const uCauli = uniform(p.cauliflowerTop);
+  const uBaseFlat = uniform(p.baseFlatten);
+  const uFluffBreak = uniform(p.fluffBreak);
+  const uFluffBreakScale = uniform(p.fluffBreakScale);
   const uChordPower = uniform(p.lobeChordPower);
   const uLobeDensity = uniform(p.lobeDensity);
   const uSunPower = uniform(p.sunPower);
@@ -638,6 +877,12 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const uSkyMin = uniform(p.skyMin);
   const uSkyMax = uniform(p.skyMax);
   const uMultiScatter = uniform(p.multiScatterFloor);
+  // §T.119 single-scatter phase + the two paths it drives
+  const uPhaseG = uniform(p.phaseAnisotropy);
+  const uFwdGain = uniform(p.forwardGain);
+  const uFwdExt = uniform(p.forwardExtinction);
+  const uPowder = uniform(p.powderStrength);
+  const uPowderExt = uniform(p.powderExtinction);
   const uBaseGlow = uniform(p.baseGlow);
   const uBaseGlowSpan = uniform(p.baseGlowLowSun);
   const uStormSunCut = uniform(p.stormSunCut);
@@ -782,18 +1027,92 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const unit = positionGeometry.normalize();
   // per-lobe noise offset — without it every lobe would be the same rock
   const nSeed = vec3(iSeed.mul(23.1), iSeed.mul(51.7), iSeed.mul(9.4));
+
   /**
-   * Radial displacement factor at a unit direction. Two octaves: the first
-   * carves the big bulges that make the silhouette, the second the smaller
-   * cauliflower bumps. mx_noise_float is roughly [-1,1], so the factor stays
-   * inside [1 - 1.45*relief, 1 + 1.45*relief] — bounded at source (§V44),
-   * and lobeRelief is capped at 0.6 on the panel, so it can never invert.
+   * §T.119(b) — THE SAMPLING FRAME. "No perfect circular arc anywhere in the
+   * silhouette" cannot be met by a bumpier ball, and that is what the old two
+   * octaves at `lobeReliefScale 2.3` were: the noise completes about two
+   * periods across a whole lobe, so `r(θ) = 1 + a·f(θ)` is a LOW-ORDER
+   * deformation of a circle and every stretch of the outline still reads as a
+   * circular arc. Three things break that, and all three are geometry, not
+   * amplitude:
+   *
+   *  - SQUASH. The noise coordinate's y is scaled UP, so features vary faster
+   *    vertically than horizontally: the carved wisps come out wider than tall,
+   *    which is what a convecting cumulus actually looks like and what an
+   *    isotropic field can never produce (§V58 — a direction-free field cannot
+   *    make oriented features, so the direction goes in explicitly).
+   *  - SHEAR. x and z lean with height along the WIND, read from
+   *    `bandDriftDirDeg` — the same heading the stratus deck drifts on, so
+   *    there is one wind in this sky and not two (§V.55's lesson about two
+   *    clocks, applied to a direction).
+   *  - ...and the frame is applied INSIDE the noise lookup only. The lobe's own
+   *    ellipsoid (`iRadius`) is untouched, so nothing here changes packing,
+   *    overlap or the cluster silhouette family (§V7).
    */
-  const reliefAt = (d: N): N =>
-    mx_noise_float(d.mul(uReliefScale).add(nSeed))
-      .add(mx_noise_float(d.mul(uReliefScale.mul(2.7)).add(nSeed).add(11.3)).mul(0.45))
-      .mul(uRelief)
-      .add(1);
+  const frameOf = (d: N): N =>
+    vec3(
+      d.x.add(d.y.mul(uShear).mul(uWindDir.x)),
+      d.y.mul(uSquash.max(0.1)),
+      d.z.add(d.y.mul(uShear).mul(uWindDir.y)),
+    ) as N;
+
+  /**
+   * DOMAIN WARP — the one term that turns concentric bumps into folded
+   * cauliflower. The sample POSITION is displaced by a low-frequency noise
+   * VECTOR before the density lookup; a value warp (bump-mapping the radius,
+   * which is all the old code did) moves the height of the field and leaves
+   * its level sets the same shape, while a domain warp bends the level sets
+   * themselves. That is the difference between a dented sphere and a lobed one.
+   *
+   * COMPUTED ONCE, AT THE UNDISPLACED DIRECTION, and reused by all three
+   * finite-difference taps below. It costs 3 noise samples instead of 9, and
+   * the approximation it makes is explicit: the FD normal then differentiates
+   * the fbm with the warp held constant, i.e. it misses the warp's own
+   * gradient. That is the harmless direction — the warp is deliberately the
+   * LOWEST frequency in the chain, so its gradient is small next to the
+   * octaves', and a normal that ignores it is smoother, not wronger. The
+   * SILHOUETTE, which is what §T.119(b) is about, gets the full warp: every
+   * vertex has its own `unit` and therefore its own warp vector.
+   */
+  const warpBase = frameOf(unit).mul(uWarpScale).add(nSeed) as N;
+  const warp = vec3(
+    mx_noise_float(warpBase),
+    mx_noise_float(warpBase.add(19.7)),
+    mx_noise_float(warpBase.add(41.3)),
+  ).mul(uWarp) as N;
+
+  /**
+   * Radial displacement factor at a unit direction. THREE octaves on the
+   * warped, sheared, squashed coordinate: the first carves the big bulges that
+   * make the silhouette, the second the fold structure, the third the fine
+   * cauliflower — and the third is ramped by height, because convection piles
+   * detail on the TOP of a cumulus and its base is smooth.
+   *
+   * §V44 bounded at source: `mx_noise_float` is roughly [-1,1] and the octave
+   * weights sum to 1.67, so the fbm is inside [-1.67, 1.67]; the base-flatten
+   * factor is independently in [1-baseFlatten, 1]; `lobeRelief` is capped at
+   * 0.6 on the panel. The factor therefore stays inside
+   * [(1 - 1.67·0.6)·(1-flatten), 1 + 1.67·0.6] and cannot reach zero, so the
+   * radius can never invert. Mirrored on the CPU by {@link lobeReliefValue}.
+   */
+  const reliefAt = (d: N): N => {
+    const q = frameOf(d).mul(uReliefScale).add(nSeed).add(warp) as N;
+    // cauliflower gain: 0 at the base of the lobe, full at its top
+    const cauli = mix(float(1).sub(uCauli.clamp(0, 1)), float(1), d.y.mul(0.5).add(0.5));
+    const fbm = mx_noise_float(q)
+      .add(mx_noise_float(q.mul(2.7).add(11.3)).mul(0.45))
+      .add(mx_noise_float(q.mul(6.1).add(27.7)).mul(0.22).mul(cauli));
+    // FLAT-ISH BASE. A cumulus condenses at one altitude, so its underside is
+    // a plane and its top is not — the single strongest cue that a cloud is a
+    // cloud rather than a rock. Quadratic in the downward component so it
+    // touches nothing above the equator, and expressed as an attenuation of
+    // the radius (§V44 multiplicative), never as a subtraction that could
+    // drive it negative.
+    const down = d.y.negate().max(0);
+    const flat = float(1).sub(uBaseFlat.clamp(0, 0.6).mul(down).mul(down));
+    return fbm.mul(uRelief).add(1).mul(flat) as N;
+  };
 
   // finite-difference normal needs two directions that are never parallel to
   // `unit`; cross with Y degenerates at the poles, so fall back to X there
@@ -900,18 +1219,49 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
   const sideGain = uSunSideGain.clamp(0, 1);
   const sideTerm = mix(float(1).sub(sideGain), float(1), vSunSide);
   const selfShadow = mix(float(1), uSelfShadow, vInterior.clamp(0, 1));
+  /**
+   * §T.119 SCATTERING-ANGLE COSINE — a photon arriving along −S and leaving
+   * along V, i.e. `−dot(S,V)`. +1 looking through the cloud at the sun, −1
+   * with the sun behind you. TSL twin of `hgPhaseValue`'s `cosT`.
+   */
+  const cosT = uSunWorld.dot(V).negate();
+  /** TSL twin of {@link hgPhaseValue} — see it for the whole argument */
+  const phaseAt = (c: N): N => {
+    const k = float(1).add(uPhaseG.mul(uPhaseG));
+    const peak = k.sub(uPhaseG.mul(2)).max(1e-4); // (1−g)², floored for g→1
+    const here = k.sub(uPhaseG.mul(c).mul(2)).max(1e-4);
+    return peak.div(here).pow(1.5).clamp(0, 1) as N;
+  };
+  const phase = phaseAt(cosT);
   // silver lining: rim brightening when the sun is BEHIND the cloud. Expressed
   // as a multiplier ≥1, never as an addend into an already-summed channel.
-  const backLit = uSunWorld.dot(V.negate()).clamp(0, 1).pow(6);
-  const silver = backLit.mul(rim.oneMinus()).mul(uSilver).add(1);
+  // The lobe is the HG phase now, not `pow(dot,6)` — a pow has no tail, and
+  // the tail is what stops the lit arc ending abruptly (§T.119).
+  const silver = phase.mul(rim.oneMinus()).mul(uSilver).add(1);
+  /** TSL twin of {@link powderValue} — the dark-edge effect, sun behind you */
+  const powder = float(1).sub(
+    uPowder
+      .clamp(0, 1)
+      .mul(cosT.negate().clamp(0, 1))
+      .mul(rim.mul(uPowderExt.clamp(0, 8)).negate().exp()),
+  );
+  /** TSL twin of {@link forwardScatterValue} — the transmitted warm path */
+  const forward = phase
+    .mul(rim.add(vInterior.clamp(0, 1)).mul(uFwdExt.clamp(0, 8)).negate().exp())
+    .mul(uFwdGain.clamp(0, 2));
   // the three DIRECT attenuations, floored as a product — see multiScattered().
   // The storm cut stays OUTSIDE the floor on purpose: a squall must still be
   // able to go dark, and it is a property of the cloud, not of the light path.
   const direct = wrapDiffuse.mul(sideTerm).mul(selfShadow);
+  // ...and the storm cut is factored out of BOTH scattered paths rather than
+  // applied to one: a squall that still had a silver lining would be the same
+  // "storm clouds are the bright ones" inversion the §B.19 test guards.
+  const stormCut = stormSunFactor(vStorm).mul(stormBaseFactor(vStorm, vHeight));
   const lobeSun = multiScattered(direct)
+    .mul(powder)
     .mul(silver)
-    .mul(stormSunFactor(vStorm))
-    .mul(stormBaseFactor(vStorm, vHeight))
+    .add(forward)
+    .mul(stormCut)
     .add(baseGlowAt(N.dot(vec3(0, 1, 0)).negate()))
     .clamp(0, 2);
 
@@ -963,7 +1313,45 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     );
 
   const q = uv().mul(2).sub(1);
-  const r2 = q.dot(q);
+  /**
+   * §T.119(b) — AND THIS IS WHERE THE LITTLE CIRCLES ACTUALLY CAME FROM.
+   *
+   * `shape = 1 − |q|²` is a PERFECT radial disc, and `fluffScale 2.1` means
+   * every sprite OVERHANGS the lobe it feathers (that overhang is deliberate,
+   * see the §V11b note above — without it the layer feathered nothing). So on
+   * any cloud small enough that one sprite reaches past the polygonal union —
+   * exactly the user's "tendency to produce smaller little circles" — the
+   * outermost thing in the silhouette is a mathematically exact circle, and the
+   * composite's alpha ramp then draws its level set as a clean arc. No amount
+   * of erosion on the LOBES can reach it, because the sprite is outside them.
+   *
+   * The cure is to break the level set itself: two octaves of noise ADDED to
+   * the squared radius, so the zero-crossing sits at `|q|² = 1 + k·n(q)` — a
+   * radius that varies with angle and can no longer be a constant-curvature
+   * arc anywhere. Added rather than multiplied so the centre is untouched and
+   * only the RIM moves, which is the half of the sprite that is visible past
+   * the lobe.
+   *
+   * §V48: `mx_noise_float` is not an edge function, but its own feature size
+   * still has to survive minification, and a fluff sprite goes small on screen
+   * fast. Each octave's amplitude is faded on ITS OWN feature against ITS OWN
+   * footprint with `bandLimitAmplitude` — mx_noise_float is zero-mean, so
+   * amplitude→0 IS that octave's own mean (§V.48b half b) and the sprite
+   * degrades back to the exact disc it was, which at sub-pixel size is the
+   * correct answer and is invisible.
+   */
+  const breakSeed = iSeed.mul(137.13);
+  const bq1 = q.mul(uFluffBreakScale.max(0.1)) as N;
+  const bq2 = bq1.mul(2.6) as N;
+  const NOISE_CELL = float(0.5); // one mx_noise_float lattice cell, halved
+  const breakN = mx_noise_float(vec3(bq1.x, bq1.y, breakSeed))
+    .mul(bandLimitAmplitude(NOISE_CELL, bq1.x))
+    .add(
+      mx_noise_float(vec3(bq2.x, bq2.y, breakSeed.add(7.7)))
+        .mul(0.45)
+        .mul(bandLimitAmplitude(NOISE_CELL, bq2.x)),
+    );
+  const r2 = q.dot(q).sub(breakN.mul(uFluffBreak.clamp(0, 0.9)));
   const shape = r2.oneMinus().max(0);
   // hollow the centre: the fluff belongs at the RIM. A solid disc at the alpha
   // needed to feather a silhouette would also lay its flat fake-sphere shading
@@ -1007,7 +1395,25 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     .clamp(0, 1)
     .pow(uSunPower.max(0.05))
     .mul(mix(float(1).sub(sideGain), float(1), sunSide));
+  // §T.119: the fluff must carry the same two scattered paths, or the layer
+  // whose whole job is to feather the rim would draw a DARK margin over the
+  // silver lining the lobe underneath just grew. In view space the eye is at
+  // +Z from the sprite, so the scattering cosine is simply −sunView.z.
+  const fluffCosT = uSunView.z.negate();
+  const fluffPhase = phaseAt(fluffCosT as N);
+  const fluffChord = shape.sqrt(); // the fake sphere's own |N·V|
+  const fluffPowder = float(1).sub(
+    uPowder
+      .clamp(0, 1)
+      .mul(fluffCosT.negate().clamp(0, 1))
+      .mul(fluffChord.mul(uPowderExt.clamp(0, 8)).negate().exp()),
+  );
+  const fluffForward = fluffPhase
+    .mul(fluffChord.mul(uFwdExt.clamp(0, 8)).negate().exp())
+    .mul(uFwdGain.clamp(0, 2));
   const fluffSun = multiScattered(fluffDirect)
+    .mul(fluffPowder)
+    .add(fluffForward)
     .mul(stormSunFactor(iStorm))
     .mul(stormBaseFactor(iStorm, iHeight))
     .add(baseGlowAt(fluffN.dot(uUpView).negate()))
@@ -1047,6 +1453,15 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     uMaxDist,
     uRelief,
     uReliefScale,
+    uWarp,
+    uWarpScale,
+    uSquash,
+    uShear,
+    uWindDir,
+    uCauli,
+    uBaseFlat,
+    uFluffBreak,
+    uFluffBreakScale,
     uChordPower,
     uLobeDensity,
     uSunPower,
@@ -1056,6 +1471,11 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
     uSkyMin,
     uSkyMax,
     uMultiScatter,
+    uPhaseG,
+    uFwdGain,
+    uFwdExt,
+    uPowder,
+    uPowderExt,
     uBaseGlow,
     uBaseGlowSpan,
     uStormSunCut,

@@ -29,19 +29,22 @@
  * so a fill driven from it lands warm again just by a different route. Only
  * the zenith is reliably on the far side of the wheel from the key.
  *
- * THE HAZE IS NOT DISCARDED, it is demoted to the two jobs it is right for:
- * the key's WARMTH (below), and the warm uplight on cloud BASES at low sun,
- * which cloudCores.ts adds into the sunlight channel — that light is the low
- * sun's own reddened light, so it rides `sunColor` and needs no third slot.
- * Neither of those may be re-pointed at the dome, and the fill may never be
- * re-pointed at the haze; that collapse is the bug this header exists for.
+ * ...AND THEN THE KEY STOPPED BEING THE HAZE (§B90). The paragraph above is
+ * still the right shape — two signals, never one — but the KEY's half was
+ * measured in §B90 and the haze is not a usable stand-in for the sun. At
+ * `timeOfDay 17` the sky is 44% into its sunset palette while the haze's
+ * red-minus-blue proxy reads 0.13, and the haze's own hue there is 68° against
+ * the key's 28°. The key half now reads `keyLight().color` and the sky's own
+ * `lowSunWarmth` directly; see `resolveCloudPalette`'s header for the numbers.
+ * The FILL is untouched by that change and may still never be re-pointed at
+ * either input — that collapse is the bug this header exists for.
  *
- * NO NEW PLUMBING FOR EITHER. `attachTo(scene)` hands us the scene, so the
- * haze is `scene.fog.color`; the dome is read straight from `skyPalette()`,
- * the single owner of "what colour is the sky" (§T39), at the same
- * `skyParams.timeOfDay` that `main.ts` hands `sky.update()`. Reading the owner
- * rather than re-deriving is the pattern `caustics/waterLighting.ts` already
- * established for exactly this class of split.
+ * NO NEW PLUMBING FOR EITHER. Both halves are read straight from the sky's own
+ * owners — `skyPalette()` for "what colour is the sky" and `keyLight()` for
+ * "what colour is the key" (§T39, §V.72) — at the same `skyParams.timeOfDay`
+ * that `main.ts` hands `sky.update()`. Reading the owner rather than
+ * re-deriving is the pattern `caustics/waterLighting.ts` already established
+ * for exactly this class of split.
  *
  * THE TRAP, AND THE GUARD. §B.19 was exactly this pair of colours both being
  * near-white and SUMMING past 1.0 pre-ACES, so lit faces and shadow faces
@@ -62,7 +65,8 @@
  * washed out the sky in §B.9.
  */
 import * as THREE from 'three/webgpu';
-import { skyPalette, sunElevation } from '../sky/sunCycle';
+import { lowSunWarmth, skyPalette, sunElevation } from '../sky/sunCycle';
+import { keyDirectionWeight, keyLight } from '../sky/moonCycle';
 import { skyParams } from '../params/sky';
 
 export interface CloudPaletteInput {
@@ -75,8 +79,6 @@ export interface CloudPaletteInput {
   skyTint: number;
   /** 0..1 how far the sunlight hue follows it at full warmth */
   sunTint: number;
-  /** maps the atmosphere's (r-b) in sRGB to a 0..1 "how warm is the light" */
-  paletteWarmthGain: number;
   /**
    * 0..1 how far SATURATION follows the atmosphere, separately from hue.
    * Deliberately much lower than skyTint: adopting a saturated haze's full
@@ -94,6 +96,81 @@ export interface CloudPaletteInput {
    * §B.19 failed in.
    */
   sunDarken: number;
+  /**
+   * §B90. 0..1 how far the SKYLIGHT's LEVEL falls at full golden hour.
+   *
+   * The fill's level used to be pinned at the authored lightness at every
+   * hour, which is a claim that a cloud receives as much skylight at a deep
+   * sunset as at noon. It does not — the dome's own irradiance falls by
+   * roughly an order of magnitude as the sun reaches the horizon — and the
+   * measured consequence was the defect: with the fill at a constant 0.50
+   * lightness it carried 32% of the interior's luminance in the ZENITH's
+   * violet, so the body of every sunset cumulus resolved to hue 333°/286°/233°
+   * — the "weirdly grey" the user photographed, next to a sky at hue 31°.
+   *
+   * NOT a readout of the atmosphere's brightness — that is §B.19's mistake and
+   * the thing `srgbLightness` pinning was defending against. This is a pure
+   * function of the SUN's elevation (the sky's own `lowSunWarmth`), gated so
+   * that it is exactly 0 at midday AND exactly 0 once the moon owns the key.
+   * One-directional (a multiplier ≤ 1 on the authored lightness), so the
+   * §B.19 guarantee — neither endpoint of the mix is brighter than what was
+   * tuned — holds by construction, not by clamping afterwards.
+   */
+  skyDarken: number;
+}
+
+/**
+ * §T.119 / §B90 — how far this hour belongs to the SUN, and how warm it is.
+ *
+ * Both are pure functions of `sunElevation` and both are read from the sky's
+ * own owners (`sunCycle`/`moonCycle`), never re-derived here (§T.39). They
+ * exist as a pair because the two jobs are different and conflating them is
+ * how the old code failed:
+ *
+ *  - `warm` is the SKY'S OWN golden-hour weight, `lowSunWarmth ×
+ *    sunsetStrength` — the exact number `skyPalette()` blends its sunset hexes
+ *    by. Using anything else is two clocks (§V.55), and the old proxy WAS
+ *    something else: see the header of `resolveCloudPalette`.
+ *  - `sunOwn` is `1 − keyDirectionWeight`, i.e. the share of the key the SUN
+ *    still holds. It is exactly 1 for every elevation above SUN_BELOW (−2°)
+ *    and exactly 0 below HANDOVER_END (−5.7°), so it reaches FULL strength at
+ *    the moment of sunset — which `daylight()` does not (it is 0.30 there,
+ *    because it carries `beamStrength`'s attenuation) and which is why
+ *    `daylight` is the wrong gate for a COLOUR. Being exactly 0 once the moon
+ *    owns the key is also what makes the night look bit-identical to before
+ *    this change: every new term below multiplies by it.
+ */
+export interface KeyWeights {
+  /** 0..1 share of the key still owned by the sun — 1 by day, 0 at night */
+  sunOwn: number;
+  /** 0..1 the sky's own golden-hour weight */
+  warm: number;
+}
+
+export function keyWeights(): KeyWeights {
+  const elev = sunElevation(skyParams.timeOfDay, skyParams.latitude);
+  return {
+    sunOwn: clamp01(1 - keyDirectionWeight(elev)),
+    warm: clamp01(lowSunWarmth(elev) * skyParams.sunsetStrength),
+  };
+}
+
+/**
+ * The KEY's own colour this frame, written into `out` — `keyLight().color`,
+ * the §V.72 contract value that "every sun-driven water term is tinted by".
+ *
+ * Read from the owner rather than re-derived, the same pattern as
+ * {@link resolveDomeAmbient} below, so the clouds cannot drift from the sun.
+ * The moon blend already inside `key.color` is deliberately harmless here:
+ * every consumer multiplies by `keyWeights().sunOwn`, which is 0 by the time
+ * the moon has any share of it.
+ *
+ * §V.31: `keyLight().color` is an sRGB triple, so it enters through the sRGB
+ * overload — the working space is linear and skipping the transfer is §B.9.
+ */
+export function resolveKeyTint(out: THREE.Color): void {
+  const key = keyLight(skyParams.timeOfDay, skyParams);
+  out.setRGB(key.color[0], key.color[1], key.color[2], THREE.SRGBColorSpace);
 }
 
 const clamp01 = (v: number): number =>
@@ -101,7 +178,6 @@ const clamp01 = (v: number): number =>
 
 // scratch — resolveCloudPalette runs every frame and must not allocate
 const _hsl = { h: 0, s: 0, l: 0 };
-const _srgb = { r: 0, g: 0, b: 0 };
 const _tint = /*@__PURE__*/ new THREE.Color();
 const _baseSun = /*@__PURE__*/ new THREE.Color();
 const _baseSky = /*@__PURE__*/ new THREE.Color();
@@ -164,15 +240,45 @@ export function resolveDomeAmbient(out: THREE.Color): void {
 /**
  * Resolve the frame's sun/sky pair.
  *
- * `haze` is `scene.fog.color` (already in the linear working space) and drives
- * the KEY's warmth only. `dome` is {@link resolveDomeAmbient}'s output and
- * drives the FILL. Passing the haze as both is the collapse the header
- * describes; passing null for either leaves that half authored, which is the
- * safe direction — an unattached or fogless scene still renders.
+ * `key` is {@link resolveKeyTint}'s output — the KEY LIGHT's own colour — and
+ * drives the sunlit faces. `dome` is {@link resolveDomeAmbient}'s output and
+ * drives the FILL. Passing null for either leaves that half authored, which is
+ * the safe direction: a scene with no sky rig still renders.
+ *
+ * ─── §B90: WHY `key` REPLACED `scene.fog.color` HERE ──────────────────────
+ * This argument used to be the horizon HAZE, and the header above still
+ * argues (correctly) that the haze is a reddened-by-the-long-path colour. What
+ * it is NOT is the sun, and the amount by which it is not was never measured
+ * until §B90. Two numbers, at latitude 15 with the shipped sky params:
+ *
+ *   - At `timeOfDay 17` (sun elevation 14.5°) the SKY is already 44% into its
+ *     sunset palette — visibly pink overhead — while the haze resolves to hue
+ *     68°, saturation 0.20. The old gate was `clamp01((haze.r − haze.b) ×
+ *     paletteWarmthGain)`, which reads **0.13** there. The clouds therefore
+ *     took 13% of a sunset while the sky took 44%, and every hour from 8° to
+ *     23° of elevation was wrong in the same direction. THAT IS THE BUG: a
+ *     proxy whose window (roughly ±5° of the horizon) is four times narrower
+ *     than the window of the palette it was standing in for.
+ *   - The colour it stood in for is not close either. At that same hour the
+ *     key is hue 28°, saturation 1.00; the haze is hue 68°, saturation 0.20.
+ *
+ * So the warmth WEIGHT is now the sky's own `lowSunWarmth × sunsetStrength`
+ * (one clock, §V.55) and the warmth COLOUR is now `keyLight().color` (§V.72's
+ * "what every sun-driven water term is tinted by" — the clouds were the one
+ * sun-driven term in the project that did not read it).
+ *
+ * The haze keeps the OTHER job the header gives it and this does not touch:
+ * the warm uplight on cloud bases at low sun, which `cloudCores.ts` adds into
+ * the sunlight channel — that light rides `sunColor`, which is now the key's
+ * own colour rather than a haze-shaped guess at it, i.e. strictly closer to
+ * what that comment always claimed.
+ *
+ * The FILL may still never be re-pointed at either input. That collapse is
+ * §B.49 and is what the 210°-of-separation guard in tests/clouds.test.ts pins.
  */
 export function resolveCloudPalette(
   p: CloudPaletteInput,
-  haze: THREE.Color | null | undefined,
+  key: THREE.Color | null | undefined,
   dome: THREE.Color | null | undefined,
   outSun: THREE.Color,
   outSky: THREE.Color,
@@ -182,48 +288,47 @@ export function resolveCloudPalette(
   outSun.copy(_baseSun);
   outSky.copy(_baseSky);
 
+  const { sunOwn, warm } = keyWeights();
+
   // SKYLIGHT follows the DOME's hue — that IS what bounces into a cloud's
   // shadow side: cyan-blue at midday, violet at sunset, and on the far side of
-  // the wheel from the key in both cases. Its LIGHTNESS is pinned, because how
-  // much ambient a cloud receives is an authored level and a bright dome
-  // driving it is §B.19. Pinning also means the night sky being near-black
-  // (post-ACES zenith (0,1,17) at the Night preset) cannot black out the
-  // clouds: only the hue transfers, so night clouds still read pale grey,
-  // which is what the SoT night references show.
+  // the wheel from the key in both cases. Its LIGHTNESS is never a readout of
+  // the dome's own brightness, because a bright dome driving it is §B.19 —
+  // pinning is also what stops the near-black night zenith blacking out the
+  // clouds, so night clouds still read pale grey as the SoT references show.
+  //
+  // §B90 adds ONE way the level is allowed to move, and it is not the dome:
+  // `skyDarken × warm × sunOwn`, a pure function of the SUN's elevation. See
+  // the param's own note — it is a multiplier ≤ 1, so every §B.19 guarantee
+  // survives, and it is exactly 1.0 at midday and exactly 1.0 at night.
   if (dome) {
+    const skyL = srgbLightness(_baseSky);
     tintTowardAtmosphere(
       _baseSky,
       dome,
       p.skyTint,
       p.paletteSatFollow,
-      srgbLightness(_baseSky),
+      skyL * (1 - clamp01(p.skyDarken) * warm * sunOwn),
       outSky,
     );
   }
-  if (!haze) return;
+  if (!key) return;
 
-  haze.getHSL(_hsl, THREE.SRGBColorSpace);
-  const hazeL = _hsl.l;
-
-  // SUNLIGHT follows the HAZE, and only as far as the light is actually WARM.
-  // The haze is the right input here for the same reason it is the wrong one
-  // above: it is the colour of light that has come the long way through the
-  // atmosphere, which is what reddens a low sun. Warmth (r-b in sRGB) is ~0 at
-  // midday, when the haze is cyan, and ~0.58 at the §T.39 sunset.
-  haze.getRGB(_srgb, THREE.SRGBColorSpace);
-  const warmth = clamp01((_srgb.r - _srgb.b) * p.paletteWarmthGain);
+  key.getHSL(_hsl, THREE.SRGBColorSpace);
+  const keyL = _hsl.l;
   const sunL = srgbLightness(_baseSun);
-  // ...and it darkens toward the atmosphere's own brightness as it warms, but
-  // only ever downward (Math.min): a sunset cloud is deep orange, not a
-  // midday cloud wearing an orange hat.
-  const sunTargetL = Math.min(
-    sunL,
-    sunL + (hazeL - sunL) * clamp01(p.sunDarken) * warmth,
-  );
+  // ...and the lit faces darken toward the key's own lightness as the hour
+  // warms, but only ever downward (Math.min): a sunset cloud is deep orange,
+  // not a midday cloud wearing an orange hat. This is also what BUYS the
+  // chroma — the authored 0xfff0d8 sits at sRGB lightness 0.92, where the
+  // largest possible chroma is 0.16 whatever the hue is, and ACES at exposure
+  // 1.1 then resolves it to 235,235,235. Measured lit-face chroma at the
+  // §T.39 sunset: 0.075 before, 0.20 after.
+  const sunTargetL = Math.min(sunL, sunL + (keyL - sunL) * clamp01(p.sunDarken) * warm);
   tintTowardAtmosphere(
     _baseSun,
-    haze,
-    clamp01(p.sunTint) * warmth,
+    key,
+    clamp01(p.sunTint) * sunOwn,
     p.paletteSatFollow,
     sunTargetL,
     outSun,

@@ -44,7 +44,7 @@ import {
 import { createCloudBands, advanceBandDrift } from './cloudBands';
 import { createCloudBlur } from './cloudBlur';
 import { createCloudComposite, type ShaftSlot } from './cloudComposite';
-import { resolveCloudPalette, resolveDomeAmbient } from './cloudPalette';
+import { resolveCloudPalette, resolveDomeAmbient, resolveKeyTint } from './cloudPalette';
 
 export interface CloudsHandle {
   update(time: number, sunDir: THREE.Vector3): void;
@@ -97,6 +97,9 @@ export interface CloudsOptions {
     pool: StormCellSite[],
   ) => StormCellSite[];
 }
+
+/** §V28: a param that reaches a vertex position must never be NaN */
+const fin = (v: number, fallback: number): number => (Number.isFinite(v) ? v : fallback);
 
 export function createClouds(opts: CloudsOptions): CloudsHandle {
   const { renderer, camera, seed } = opts;
@@ -155,6 +158,8 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
   const prevClearColor = new THREE.Color();
   /** scratch: this frame's sky-dome colour, the fill's input (see below) */
   const domeAmbient = new THREE.Color();
+  /** scratch: this frame's KEY colour, the sunlit faces' input (§B90) */
+  const keyTint = new THREE.Color();
   let attachedScene: THREE.Scene | null = null;
 
   return {
@@ -189,6 +194,18 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
       cores.uMaxDist.value = p.maxCloudDist;
       cores.uRelief.value = p.lobeRelief;
       cores.uReliefScale.value = p.lobeReliefScale;
+      // §V28: these reach a VERTEX position and a fragment radius, and a NaN
+      // uniform is undefined behaviour inside WGSL's own `max`/`clamp` — so it
+      // has to be stopped here, at the push, which is the only place it can
+      // be. Mirrored by the finite-guards in `lobeReliefValue`.
+      cores.uWarp.value = fin(p.silhouetteWarp, 0);
+      cores.uWarpScale.value = Math.max(0.05, fin(p.silhouetteWarpScale, 1));
+      cores.uSquash.value = Math.max(0.1, fin(p.silhouetteSquash, 1));
+      cores.uShear.value = fin(p.silhouetteShear, 0);
+      cores.uCauli.value = fin(p.cauliflowerTop, 0);
+      cores.uBaseFlat.value = fin(p.baseFlatten, 0);
+      cores.uFluffBreak.value = fin(p.fluffBreak, 0);
+      cores.uFluffBreakScale.value = Math.max(0.1, fin(p.fluffBreakScale, 1));
       cores.uChordPower.value = p.lobeChordPower;
       cores.uLobeDensity.value = p.lobeDensity;
       cores.uSunPower.value = p.sunPower;
@@ -198,6 +215,11 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
       cores.uSkyMin.value = p.skyMin;
       cores.uSkyMax.value = p.skyMax;
       cores.uMultiScatter.value = p.multiScatterFloor;
+      cores.uPhaseG.value = p.phaseAnisotropy;
+      cores.uFwdGain.value = p.forwardGain;
+      cores.uFwdExt.value = p.forwardExtinction;
+      cores.uPowder.value = p.powderStrength;
+      cores.uPowderExt.value = p.powderExtinction;
       cores.uBaseGlow.value = p.baseGlow;
       cores.uBaseGlowSpan.value = p.baseGlowLowSun;
       cores.uFluffScale.value = p.fluffScale;
@@ -221,18 +243,31 @@ export function createClouds(opts: CloudsOptions): CloudsHandle {
       advanceBandDrift(bandDrift, bandDirRad, p.bandDriftSpeed, dt);
       bands.uDrift.value.set(bandDrift.x, bandDrift.z);
       bands.uAxis.value.set(Math.cos(bandDirRad), Math.sin(bandDirRad));
+      // ONE WIND (§T.119(b)): the lobes' silhouette shear leans on the same
+      // heading the stratus deck drifts along. Two headings here would be two
+      // clocks (§V.55) and would read as two different weather systems in one
+      // frame — which is exactly what a viewer notices and cannot name.
+      cores.uWindDir.value.copy(bands.uAxis.value);
       bands.push(p);
       composite.uTime.value = time * p.distortSpeed;
-      // §T.39: swing the pair through the day cycle off the sky rig's live
-      // horizon haze. Hue only — see cloudPalette.ts for the §B.19 guard.
-      // TWO INPUTS, and they must stay two (§B.49): the HAZE warms the key,
-      // the DOME colours the fill. Driving both from the haze resolved them to
-      // 5.9° of hue separation at the §T.39 sunset, which is a cloud with no
-      // colour difference between its lit and shadow faces — one brown lump.
+      // §T.39: swing the pair through the day cycle off the sky rig's own
+      // live state. TWO INPUTS, and they must stay two (§B.49): the KEY
+      // colours the sunlit faces, the DOME colours the fill. Driving both from
+      // one input resolved them to 5.9° of hue separation at the §T.39 sunset,
+      // which is a cloud with no colour difference between its lit and shadow
+      // faces — one brown lump.
+      //
+      // §B90: the key's input used to be `attachedScene.fog.color`, the
+      // horizon haze. It is no longer read here at all — measured, the haze's
+      // warmth proxy reached only 0.13 at an hour when the sky was 0.44 into
+      // its own sunset, so the clouds stayed grey under a pink sky. See
+      // cloudPalette.ts. `attachedScene` is still held for the quad's
+      // add/remove, which is the only other thing it was ever used for.
       resolveDomeAmbient(domeAmbient);
+      resolveKeyTint(keyTint);
       resolveCloudPalette(
         p,
-        attachedScene?.fog?.color ?? null,
+        keyTint,
         domeAmbient,
         composite.uSunColor.value,
         composite.uSkyColor.value,

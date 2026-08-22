@@ -21,7 +21,15 @@ import {
   lobeSunValue,
   stormBaseDarkValue,
   shaftSlots,
+  hgPhaseValue,
+  forwardScatterValue,
+  powderValue,
+  lobeReliefValue,
+  fluffShapeValue,
+  type SilhouetteProfile,
 } from '../src/clouds/cloudCores';
+import { keyLight } from '../src/sky/moonCycle';
+import { hash3Cpu, fadeCpu } from '../src/terrain/noiseCpu';
 import { createWeatherSystem } from '../src/weather';
 import { createWeatherSample } from '../src/weather/sampler';
 import { weatherParams } from '../src/params/weather';
@@ -29,6 +37,8 @@ import { skyParams } from '../src/params/sky';
 import {
   resolveCloudPalette,
   resolveDomeAmbient,
+  resolveKeyTint,
+  keyWeights,
   srgbLightness,
 } from '../src/clouds/cloudPalette';
 import {
@@ -37,6 +47,7 @@ import {
   bandShapeAt,
   bandSkyAt,
   bandSunAt,
+  bandNonDegenerate,
 } from '../src/clouds/cloudBands';
 import {
   cloudParams,
@@ -44,6 +55,16 @@ import {
   cloudLayoutKey,
   type CloudParams,
 } from '../src/params/clouds';
+
+/**
+ * A copy of the shipped cloud params taken at MODULE LOAD, i.e. before any
+ * test body runs. `weather.apply('storm')` mutates the shared `cloudParams`
+ * registry entry in place — that is the point of the preset system — and the
+ * §V.63 block below calls it, so any later test reading `cloudParams` directly
+ * is reading a storm sky. The §B90 blocks pin PIXELS, so they need the
+ * shipped fair-weather numbers and cannot share that object.
+ */
+const PRISTINE: CloudParams = { ...cloudParams };
 
 const testParams: CloudParams = {
   ...cloudParams,
@@ -325,19 +346,63 @@ describe('live cloud palette (§T.39 day cycle, §B.19 guard)', () => {
     // the §T.39 report was "clouds render lavender-blue under a fully warm
     // sky". Warming the hue is only half of it — a sunset sun is also dimmer,
     // and a cloud that only changes hue reads as a midday cloud in a hat.
-    const before = new THREE.Color().setHex(cloudParams.sunColor);
-    resolveCloudPalette(cloudParams, fog.setHex(SUNSET), dome.setHex(SUNSET), sun, sky);
-    expect(sun.r).toBeGreaterThan(sun.b);
-    expect(sky.r).toBeGreaterThan(sky.b);
-    expect(srgbLightness(sun)).toBeLessThan(srgbLightness(before) - 0.05);
+    //
+    // §B90/§V80: the hour is NAMED here rather than implied by an argument.
+    // The warmth weight is the sky's own `lowSunWarmth`, a function of sun
+    // elevation, so the property belongs to an HOUR — feeding a warm colour in
+    // at a midday clock is not a golden hour and must not behave like one.
+    const restore = skyParams.timeOfDay;
+    try {
+      skyParams.timeOfDay = 17.75; // sun elevation 3.6°, warmth 1.0
+      const before = new THREE.Color().setHex(cloudParams.sunColor);
+      resolveKeyTint(fog);
+      resolveDomeAmbient(dome);
+      resolveCloudPalette(cloudParams, fog, dome, sun, sky);
+      expect(sun.r).toBeGreaterThan(sun.b);
+      expect(srgbLightness(sun)).toBeLessThan(srgbLightness(before) - 0.05);
+      // ...and the FILL goes the other way, which is the whole §B.49 point:
+      // the dome overhead at a sunset is violet, not orange
+      expect(sky.b).toBeGreaterThan(sky.r);
+    } finally {
+      skyParams.timeOfDay = restore;
+    }
   });
 
-  it('does NOT turn sunlit faces blue at midday, when the haze is cyan', () => {
-    resolveCloudPalette(cloudParams, fog.setHex(MIDDAY), dome.setHex(MIDDAY), sun, sky);
-    // the sun term is gated on WARMTH, so a cyan haze leaves it alone
-    expect(sun.getHex()).toBe(cloudParams.sunColor);
-    // the skylight does follow it — that IS the ambient bouncing into the cloud
-    expect(sky.b).toBeGreaterThan(sky.r);
+  it('does NOT turn sunlit faces blue at midday, whatever the key is', () => {
+    // §B90 re-cut. This used to assert `sun.getHex() === cloudParams.sunColor`
+    // for a cyan haze — a DECISION (that the warmth gate happened to read 0),
+    // not the property, and it passed for the whole time the clouds were grey
+    // under a pink sky. The property is that a midday sun is white-to-warm and
+    // the lit faces must never go cool, and it has to hold even if something
+    // hands this a cool colour.
+    const restore = skyParams.timeOfDay;
+    try {
+      // ...and it is asserted against the REAL key at every daylight hour,
+      // which is the only input that can reach this in the shipped rig. Handing
+      // it a cyan colour by hand WOULD tint the faces cyan, and that is
+      // correct: it would mean the sun itself had turned cyan. The old test
+      // asserted the opposite and it is what let §B90 stand — the gate it was
+      // really pinning (`warmth == 0`) also read 0.13 at an hour when the sky
+      // was 0.44 into its own sunset.
+      for (const t of [7, 9, 12, 15, 17, 17.75]) {
+        skyParams.timeOfDay = t;
+        resolveDomeAmbient(dome);
+        resolveKeyTint(fog);
+        resolveCloudPalette(cloudParams, fog, dome, sun, sky);
+        expect(sun.r, `t=${t}`).toBeGreaterThan(sun.b);
+        // the skylight goes the other way — that IS the ambient bouncing in
+        expect(sky.b, `t=${t}`).toBeGreaterThan(sky.r);
+      }
+      // a midday cloud is WHITE, and must stay white: the fix must not paint
+      // an orange sunset over noon
+      skyParams.timeOfDay = 12;
+      resolveDomeAmbient(dome);
+      resolveKeyTint(fog);
+      resolveCloudPalette(cloudParams, fog, dome, sun, sky);
+      expect(sun.r - sun.b).toBeLessThan(0.35);
+    } finally {
+      skyParams.timeOfDay = restore;
+    }
   });
 
   it('KEEPS THE TONAL RANGE for every possible haze — the actual §B.19 guard', () => {
@@ -528,18 +593,18 @@ describe('cloud lighting: key/fill separation (§B.19 lineage, §T.39)', () => {
   });
 
   it('and stays separated across the whole day, not just at the sunset', () => {
+    // §B90: the key is no longer "any colour the sky could publish" — it is
+    // `keyLight().color`, a bounded family (ember → orange → cream → moon
+    // blue). Feeding arbitrary hexes here would be testing a function that no
+    // longer exists; the hour is the free variable now, and it is swept.
     const restore = skyParams.timeOfDay;
     try {
-      for (const t of [6.5, 9, 12, 15, 17.3, 18.5, 20]) {
+      for (const t of [6.5, 9, 12, 15, 17.3, 17.75, 18.5, 20]) {
         skyParams.timeOfDay = t;
         resolveDomeAmbient(dome);
-        // the haze as it actually is at that hour would be better, but the
-        // guard has to hold for ANY haze the sky could publish (§B.19's own
-        // test makes the same argument)
-        for (const hex of [0xfdb669, 0x99def9, 0xff9542]) {
-          resolveCloudPalette(cloudParams, haze.setHex(hex), dome, sun, sky);
-          expect(hueGap(sun, sky), `t=${t} haze #${hex.toString(16)}`).toBeGreaterThan(60);
-        }
+        resolveKeyTint(haze);
+        resolveCloudPalette(cloudParams, haze, dome, sun, sky);
+        expect(hueGap(sun, sky), `t=${t}`).toBeGreaterThan(60);
       }
     } finally {
       skyParams.timeOfDay = restore;
@@ -1057,5 +1122,785 @@ describe('§V.63 rain and storm cloud are the same weather', () => {
     const ring = generateClusters(9, cloudParams, () => 0.4, []);
     expect(ring).toHaveLength(cloudParams.clusterCount);
     expect(ring.every((c) => c.cell === null)).toBe(true);
+  });
+});
+
+/**
+ * ═══ §T.119 / §B90 ═══════════════════════════════════════════════════════
+ *
+ * USER, on a sunset frame: "you can see them being weirdly grey though it's
+ * the brightest and sunniest sunset… their shape also has a tendency to
+ * produce smaller little circles… we need them organic and fluffy, no perfect
+ * circle anywhere."
+ *
+ * Two defects, and the blocks below pin them separately because they had
+ * nothing to do with each other: a colour path that never read the sun, and a
+ * billboard whose outline is an exact circle.
+ */
+
+// ── the composite's own colour reconstruction, as a CPU mirror ─────────────
+// `colour = sunColor·(R/B) + skyColor·(G/B)` (cloudComposite.ts), then the
+// renderer's ACESFilmic at `skyParams.exposure`. Reproduced here because the
+// DEFECT IS ONLY VISIBLE AFTER THE TONEMAP: the pre-tonemap pair looked
+// defensible the whole time — sun hue 31°, saturation 0.99 — while ACES
+// resolved the lit face it produced to 239,224,220. A test on the uniforms
+// alone cannot see that and is exactly the test that was already passing.
+const acesTM = (x: number): number => {
+  const v = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
+  return Math.min(1, Math.max(0, v));
+};
+const linToSrgb = (c: number): number =>
+  c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+
+/** one screen pixel of cloud, sRGB 0..1, from a (sunlight, skylight) pair */
+function cloudPixel(
+  sun: THREE.Color,
+  sky: THREE.Color,
+  rOverB: number,
+  gOverB: number,
+): [number, number, number] {
+  const e = skyParams.exposure;
+  return [
+    linToSrgb(acesTM((sun.r * rOverB + sky.r * gOverB) * e)),
+    linToSrgb(acesTM((sun.g * rOverB + sky.g * gOverB) * e)),
+    linToSrgb(acesTM((sun.b * rOverB + sky.b * gOverB) * e)),
+  ];
+}
+/** CHROMA, not HSL saturation. At lightness 0.92 an HSL saturation of 1.0 is a
+ *  max-min spread of 0.16 — which is why the old palette could report
+ *  saturation 0.94 while looking grey. Chroma cannot lie about that. */
+const chroma = (c: readonly number[]): number => Math.max(...c) - Math.min(...c);
+const lum = (c: readonly number[]): number =>
+  0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+const hueOf = (c: readonly number[]): number => {
+  const t = new THREE.Color();
+  t.setRGB(c[0], c[1], c[2], THREE.SRGBColorSpace);
+  const o = { h: 0, s: 0, l: 0 };
+  t.getHSL(o, THREE.SRGBColorSpace);
+  return o.h * 360;
+};
+const hueDist = (a: number, b: number): number => {
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
+};
+
+/** the four canonical faces, as (R/B, G/B) pairs from cloudCores.ts's graph */
+function faceWeights(p: CloudParams, keyY: number) {
+  const ms = (d: number): number => multiScatteredValue(d, p);
+  const glow = (down: number): number => baseGlowValue(down, keyY, p);
+  // LIT TOP: N·S = 1, exterior, sun side, heightN 1, facing up
+  const lit = { r: ms(1) + glow(0), g: p.skyMax };
+  // INTERIOR: N sideways, buried, heightN 0.5, sun BEHIND THE VIEWER
+  const wrapI = Math.pow(0.5, Math.max(0.05, p.sunPower));
+  const dirI = wrapI * (1 - p.sunSideGain + p.sunSideGain * 0.5) * p.selfShadow;
+  const interior = {
+    r: ms(dirI) * powderValue(-1, 0.8, p) + forwardScatterValue(-1, 0.8, 1, p) + glow(0),
+    g: (p.skyMin + (p.skyMax - p.skyMin) * 0.5) * 0.925,
+  };
+  // BACK-LIT RIM: sun straight behind the cloud, thin outer margin
+  const rim = {
+    r:
+      ms(0) * powderValue(1, 0.12, p) * (hgPhaseValue(p.phaseAnisotropy, 1) * (1 - 0.12) * p.silverLining + 1) +
+      forwardScatterValue(1, 0.12, 0, p) +
+      glow(0.3),
+    g: (p.skyMin + (p.skyMax - p.skyMin) * 0.5) * 0.925,
+  };
+  // SHADOWED UNDERSIDE: facing away and down, heightN 0
+  const under = { r: ms(0) + glow(1), g: p.skyMin * 0.85 };
+  return { lit, interior, rim, under };
+}
+
+describe('§B90 the lit face takes the SUN\'s colour', () => {
+  const sun = new THREE.Color();
+  const sky = new THREE.Color();
+  const dome = new THREE.Color();
+  const key = new THREE.Color();
+  /** every hour the sun owns the key, coarse through the day and fine at dusk */
+  const DAY_HOURS = [7, 8, 10, 12, 14, 16, 17, 17.3, 17.5, 17.75, 18];
+
+  const resolve = (t: number) => {
+    skyParams.timeOfDay = t;
+    resolveDomeAmbient(dome);
+    resolveKeyTint(key);
+    resolveCloudPalette(PRISTINE, key, dome, sun, sky);
+    const k = keyLight(t, skyParams);
+    const f = faceWeights(PRISTINE, k.direction[1]);
+    return { f, k };
+  };
+
+  it('HUE: the lit side is the sun\'s own hue, all day', () => {
+    // §B90's first half in one assertion. The old path drove this off the fog
+    // haze's red-minus-blue, and at timeOfDay 17 the haze is hue 68° against a
+    // key at hue 28° — so the lit faces were 40° off the light that was
+    // supposedly making them, on the hour the user photographed.
+    const restore = skyParams.timeOfDay;
+    try {
+      for (const t of DAY_HOURS) {
+        const { f, k } = resolve(t);
+        const px = cloudPixel(sun, sky, f.lit.r, f.lit.g);
+        const keyHue = hueOf(k.color);
+        // near-neutral pixels have no meaningful hue, and a midday cloud
+        // SHOULD be near-neutral — so the hue is only asserted where there is
+        // enough chroma for it to mean anything
+        if (chroma(px) < 0.05) continue;
+        expect(hueDist(hueOf(px), keyHue), `t=${t}`).toBeLessThan(25);
+      }
+    } finally {
+      skyParams.timeOfDay = restore;
+    }
+  });
+
+  it('CHROMA: it carries the sun\'s colour in proportion to the hour\'s warmth', () => {
+    // THE REGRESSION WITNESS. Measured on this exact mirror, lit-face chroma
+    // BEFORE -> AFTER, against a key chroma of 0.737 at the deepest hour:
+    //   t=12 (warm 0.00)  0.000 -> 0.000   a midday cloud is white, correctly
+    //   t=17 (warm 0.44)  0.004 -> 0.039
+    //   t=17.3 (warm 0.78) 0.024 -> 0.114
+    //   t=17.5 (warm 0.94) 0.055 -> 0.184
+    //   t=17.75 (warm 1.00) 0.075 -> 0.224   the frame the user photographed
+    // The bound below is chosen to sit above every BEFORE value and below
+    // every AFTER one, so this test FAILS on the code that shipped the bug —
+    // which is the only thing that makes it a witness rather than a
+    // description. The property is not "chroma > 0.15" (a decision that moves
+    // with any palette tweak) but that the lit face carries a real fraction of
+    // the key's own colour, in proportion to how warm the SKY says the hour is.
+    const restore = skyParams.timeOfDay;
+    try {
+      for (const t of DAY_HOURS) {
+        const { f, k } = resolve(t);
+        const px = cloudPixel(sun, sky, f.lit.r, f.lit.g);
+        const { warm } = keyWeights();
+        const keyChroma = chroma([k.color[0], k.color[1], k.color[2]]);
+        // QUADRATIC in `warm`, and that is the shape rather than a fudge: the
+        // pixel's chroma is the product of two things that both rise as the
+        // sun drops — how coloured the key is, and how far the lit face's
+        // level has fallen out of ACES's shoulder, where chroma collapses.
+        expect(chroma(px), `t=${t} warm=${warm.toFixed(2)}`).toBeGreaterThanOrEqual(
+          0.14 * warm * warm * keyChroma,
+        );
+      }
+    } finally {
+      skyParams.timeOfDay = restore;
+    }
+  });
+
+  it('...and a MIDDAY cloud is still white — the fix must not paint a sunset on noon', () => {
+    const restore = skyParams.timeOfDay;
+    try {
+      const { f } = resolve(12);
+      const px = cloudPixel(sun, sky, f.lit.r, f.lit.g);
+      expect(chroma(px)).toBeLessThan(0.05);
+      expect(lum(px)).toBeGreaterThan(0.8);
+    } finally {
+      skyParams.timeOfDay = restore;
+    }
+  });
+
+  it('the INTERIOR is darker than the lit side at every hour', () => {
+    // a cloud whose body is as bright as its lit top has no form — that is
+    // §B.19's flatness, and it is the failure mode the darkening in this pass
+    // could most easily have caused
+    const restore = skyParams.timeOfDay;
+    try {
+      for (const t of DAY_HOURS) {
+        const { f } = resolve(t);
+        const lit = cloudPixel(sun, sky, f.lit.r, f.lit.g);
+        const int = cloudPixel(sun, sky, f.interior.r, f.interior.g);
+        expect(lum(int), `t=${t}`).toBeLessThan(lum(lit) * 0.75);
+        expect(lum(int), `t=${t}`).toBeGreaterThan(0.02); // ...and never black
+      }
+    } finally {
+      skyParams.timeOfDay = restore;
+    }
+  });
+
+  it('the interior stays COOLER than the lit side — it must not out-warm it', () => {
+    // The over-correction this pass had to be tuned against: `skyDarken` at
+    // 0.55 dropped the violet fill far enough that the sun-coloured
+    // multi-scatter floor took the interior over and it landed WARMER than the
+    // lit top. That is the same flatness wearing the other hat.
+    //
+    // ASSERTED PRE-TONEMAP, and that is not a convenience: a lit top is
+    // SUPPOSED to clip toward white, and a clipped white has a blue:red ratio
+    // of exactly 1, which beats any warm colour. Comparing pixels would
+    // therefore demand that the lit face be COOLER than its own shadow at
+    // midday, which is nonsense. The property lives in the light, not the
+    // pixel: a shadowed face must take a larger share of its light from the
+    // cool fill than a sunlit one does.
+    const restore = skyParams.timeOfDay;
+    try {
+      for (const t of [12, 17, 17.75]) {
+        const { f } = resolve(t);
+        const litFill = f.lit.g / (f.lit.r + f.lit.g);
+        const intFill = f.interior.g / (f.interior.r + f.interior.g);
+        expect(intFill, `t=${t}`).toBeGreaterThan(litFill * 1.5);
+        // ...and the fill really is on the cool side of the key, at every hour
+        expect(sky.b / Math.max(1e-4, sky.r), `t=${t} fill`).toBeGreaterThan(
+          sun.b / Math.max(1e-4, sun.r),
+        );
+      }
+    } finally {
+      skyParams.timeOfDay = restore;
+    }
+  });
+
+  it('a BACK-LIT rim is brighter than a front-lit interior — the silver lining', () => {
+    // the path §T.119 says was missing. Before this pass the back rim had
+    // `multiScatterFloor × silver` and nothing else: a sun-facing margin was
+    // DARKER than the cloud's own body, which is the opposite of every
+    // reference frame.
+    const restore = skyParams.timeOfDay;
+    try {
+      for (const t of [10, 17.3, 17.75]) {
+        const { f } = resolve(t);
+        // asserted on the LIGHT first — post-ACES both faces are well into the
+        // shoulder, where a 3.5x difference in radiance compresses to 1.3x in
+        // pixels. The shoulder is not the contract; the radiance is.
+        expect(f.rim.r, `t=${t} radiance`).toBeGreaterThan(f.interior.r * 2);
+        const rim = cloudPixel(sun, sky, f.rim.r, f.rim.g);
+        const int = cloudPixel(sun, sky, f.interior.r, f.interior.g);
+        expect(lum(rim), `t=${t} pixel`).toBeGreaterThan(lum(int) * 1.15);
+      }
+    } finally {
+      skyParams.timeOfDay = restore;
+    }
+  });
+
+  it('NIGHT IS UNTOUCHED — the look the user says already works, pinned', () => {
+    // Every §B90 term multiplies by `sunOwn`, which `keyDirectionWeight` makes
+    // exactly 0 below −5.7° of sun elevation. These triples were captured from
+    // this mirror BEFORE the fix and must not move: "clouds look reasonable at
+    // night" is the one thing the report did not complain about.
+    const restore = skyParams.timeOfDay;
+    try {
+      for (const [t, wantLit, wantInt] of [
+        [20, [235, 235, 235], [170, 177, 193]],
+        [22, [235, 235, 235], [170, 177, 193]],
+        [5, [235, 235, 235], [170, 177, 193]],
+      ] as [number, number[], number[]][]) {
+        skyParams.timeOfDay = t;
+        resolveDomeAmbient(dome);
+        resolveKeyTint(key);
+        resolveCloudPalette(PRISTINE, key, dome, sun, sky);
+        expect(keyWeights().sunOwn, `t=${t}`).toBe(0);
+        const k = keyLight(t, skyParams);
+        const f = faceWeights(PRISTINE, k.direction[1]);
+        const lit = cloudPixel(sun, sky, f.lit.r, f.lit.g).map((v) => Math.round(v * 255));
+        const int = cloudPixel(sun, sky, f.interior.r, f.interior.g).map((v) =>
+          Math.round(v * 255),
+        );
+        // the LIT face is bit-identical: every colour term multiplies by
+        // `sunOwn`, which is exactly 0 here
+        expect(lit, `t=${t} lit`).toEqual(wantLit);
+        // the INTERIOR moves by TWO LEVELS, and that is stated rather than
+        // hidden by choosing weights that cannot see it. `powderValue` is
+        // geometry, not colour — it describes how a thin margin scatters,
+        // which is as true of moonlight as of sunlight — so it is deliberately
+        // NOT gated on `sunOwn` and it darkens the night body by 1.2%. Two
+        // levels out of 255 is below the threshold of a visible step, and the
+        // bound is asserted so a future change cannot quietly widen it.
+        for (let c = 0; c < 3; c++) {
+          expect(Math.abs(int[c] - wantInt[c]), `t=${t} interior ch${c}`).toBeLessThanOrEqual(2);
+        }
+      }
+    } finally {
+      skyParams.timeOfDay = restore;
+    }
+  });
+});
+
+describe('§T.119 single scatter: Henyey-Greenstein, forward path, powder', () => {
+  const p = PRISTINE;
+
+  it('the phase is exactly 1 straight through at the sun, and never leaves (0,1]', () => {
+    // normalised to its own peak, so §V44 is satisfied AT SOURCE — nothing
+    // downstream clamps it and no 4π hides in a gain
+    expect(hgPhaseValue(p.phaseAnisotropy, 1)).toBeCloseTo(1, 10);
+    for (const g of [0, 0.3, 0.62, 0.9, 0.95]) {
+      for (let i = 0; i <= 40; i++) {
+        const v = hgPhaseValue(g, -1 + (2 * i) / 40);
+        expect(v, `g=${g}`).toBeGreaterThan(0);
+        expect(v, `g=${g}`).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('IT HAS A TAIL, which is the whole reason it replaced pow(dot,6)', () => {
+    // `pow(dot(sun,−V), 6)` is mathematically ZERO at 90° and beyond, so the
+    // lit arc on a back-lit cumulus ended abruptly. Water droplets do not do
+    // that: forward scattering dominates but the backscatter floor is real.
+    // measured at the shipped g=0.62: 0.0337 at 90 deg, 0.0129 at 180 deg.
+    // Both are small — a silver lining must stay a lining — but they are
+    // FINITE, where a pow lobe is identically zero over that whole half.
+    expect(hgPhaseValue(p.phaseAnisotropy, 0)).toBeGreaterThan(0.02);
+    expect(hgPhaseValue(p.phaseAnisotropy, -1)).toBeGreaterThan(0.008);
+    // ...while still being strongly forward-peaked, which is what makes it a
+    // silver lining rather than an ambient lift
+    expect(hgPhaseValue(p.phaseAnisotropy, 1)).toBeGreaterThan(
+      hgPhaseValue(p.phaseAnisotropy, -1) * 20,
+    );
+  });
+
+  it('is monotone in the scattering angle — no lobe of its own', () => {
+    let prev = -1;
+    for (let i = 0; i <= 200; i++) {
+      const v = hgPhaseValue(p.phaseAnisotropy, -1 + (2 * i) / 200);
+      expect(v).toBeGreaterThanOrEqual(prev);
+      prev = v;
+    }
+  });
+
+  it('g = 0 is isotropic — the family degenerates correctly (§V7)', () => {
+    for (const c of [-1, -0.5, 0, 0.5, 1]) expect(hgPhaseValue(0, c)).toBeCloseTo(1, 10);
+  });
+
+  it('the forward path is largest at a THIN margin and gone in an anvil', () => {
+    const thin = forwardScatterValue(1, 0.05, 0, p);
+    const deep = forwardScatterValue(1, 1, 1, p);
+    expect(thin).toBeGreaterThan(deep * 8);
+    // ...and gone when the sun is behind the viewer, whatever the thickness
+    expect(forwardScatterValue(-1, 0.05, 0, p)).toBeLessThan(thin * 0.1);
+  });
+
+  it('powder darkens a thin edge ONLY with the sun behind you (§T.119)', () => {
+    // the counter-intuitive half: front-lit clouds have DARKER edges than
+    // cores. It must not fire at the back-lit end or it would cancel the
+    // silver lining the forward path just drew.
+    expect(powderValue(-1, 0.02, p)).toBeLessThan(powderValue(-1, 1, p));
+    expect(powderValue(1, 0.02, p)).toBeCloseTo(1, 10);
+    expect(powderValue(0, 0.02, p)).toBeCloseTo(1, 10);
+  });
+
+  it('every new term is bounded and finite for hostile input (§V44, §V28)', () => {
+    const hostile = [-1e9, -1, -0.5, 0, 0.5, 1, 1e9, NaN, Infinity, -Infinity];
+    const badP = {
+      ...p,
+      phaseAnisotropy: NaN,
+      forwardGain: Infinity,
+      forwardExtinction: -5,
+      powderStrength: NaN,
+      powderExtinction: Infinity,
+    };
+    for (const a of hostile) {
+      for (const b of hostile) {
+        for (const c of hostile) {
+          for (const q of [p, badP]) {
+            const f = forwardScatterValue(a, b, c, q);
+            const w = powderValue(a, b, q);
+            const h = hgPhaseValue(a, b);
+            expect(Number.isFinite(f)).toBe(true);
+            expect(f).toBeGreaterThanOrEqual(0);
+            expect(f).toBeLessThanOrEqual(2);
+            expect(Number.isFinite(w)).toBe(true);
+            expect(w).toBeGreaterThanOrEqual(0);
+            expect(w).toBeLessThanOrEqual(1);
+            expect(Number.isFinite(h)).toBe(true);
+          }
+        }
+      }
+    }
+  });
+
+  it('the whole sunlight channel still cannot reach the §B.19 clipping point', () => {
+    // the pair is ADDED in the composite, so a new additive path into R is
+    // exactly the shape §B.19 failed in. Worst case: the brightest rim the
+    // graph can produce against the fullest fill.
+    const worstR =
+      1 * powderValue(-1, 1, p) * (hgPhaseValue(p.phaseAnisotropy, 1) * p.silverLining + 1) +
+      forwardScatterValue(1, 0, 0, p) +
+      Math.min(2, p.baseGlow);
+    const sun = new THREE.Color();
+    const sky = new THREE.Color();
+    const dome = new THREE.Color();
+    const restore = skyParams.timeOfDay;
+    try {
+      for (const t of [6, 9, 12, 15, 17.75, 20]) {
+        skyParams.timeOfDay = t;
+        resolveDomeAmbient(dome);
+        resolveKeyTint(sun);
+        resolveCloudPalette(PRISTINE, sun, dome, sun, sky);
+        for (const ch of ['r', 'g', 'b'] as const) {
+          expect(sun[ch] * Math.min(2, worstR) + sky[ch] * p.skyMax, `t=${t} ${ch}`).toBeLessThan(
+            2.6,
+          );
+        }
+      }
+    } finally {
+      skyParams.timeOfDay = restore;
+    }
+  });
+});
+
+/**
+ * ═══ §T.119(b) SILHOUETTE ════════════════════════════════════════════════
+ *
+ * USER: "no perfect circle anywhere". A circle IS a constant-curvature arc, so
+ * the tell is a SPIKE in the curvature histogram — and it has to be measured
+ * in ABSOLUTE bins, because binning over each curve's own range hides it
+ * (a wilder curve gets wider bins and looks flatter).
+ */
+
+/** trilinear value noise on the project's own hash3Cpu, zero-mean in [-1,1].
+ *  NOT a third noise (§T.112c): the graph runs `mx_noise_float`, which has no
+ *  CPU twin, and what these tests assert is a property of the COMPOSITION
+ *  that must hold for any reasonable zero-mean field (§V80). See
+ *  `lobeReliefValue`'s note for the full argument. */
+function noise3Cpu(x: number, y: number, z: number): number {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const tx = fadeCpu(x - xi), ty = fadeCpu(y - yi), tz = fadeCpu(z - zi);
+  let v = 0;
+  for (let c = 0; c < 8; c++) {
+    const cx = c & 1, cy = (c >> 1) & 1, cz = (c >> 2) & 1;
+    const w = (cx ? tx : 1 - tx) * (cy ? ty : 1 - ty) * (cz ? tz : 1 - tz);
+    v += w * hash3Cpu(xi + cx, yi + cy, zi + cz);
+  }
+  return v * 2 - 1;
+}
+
+/** curvature of a closed polar curve r(θ), sampled uniformly */
+function polarCurvature(r: readonly number[]): number[] {
+  const n = r.length;
+  const h = (Math.PI * 2) / n;
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const rm = r[(i - 1 + n) % n], r0 = r[i], rp = r[(i + 1) % n];
+    const d1 = (rp - rm) / (2 * h);
+    const d2 = (rp - 2 * r0 + rm) / (h * h);
+    out.push((r0 * r0 + 2 * d1 * d1 - r0 * d2) / Math.pow(r0 * r0 + d1 * d1, 1.5));
+  }
+  return out;
+}
+
+/**
+ * Fullest bin of a FIXED-WIDTH curvature histogram, plus the concave fraction.
+ * Bins are absolute (width 0.2 over κ ∈ [−2, 6]) because a unit-radius circle
+ * sits at κ = 1 exactly and the whole question is whether samples pile up
+ * there. `concave` is the second, independent tell: a circle — and any union
+ * of convex arcs — has NO negative curvature anywhere.
+ */
+function curvatureStats(r: readonly number[]): { peak: number; concave: number } {
+  const K_LO = -2, K_HI = 6, BINS = 40;
+  const k = polarCurvature(r);
+  const h = new Array(BINS).fill(0);
+  let concave = 0;
+  for (const v of k) {
+    if (v < 0) concave++;
+    const i = Math.floor(((Math.min(K_HI, Math.max(K_LO, v)) - K_LO) / (K_HI - K_LO)) * BINS);
+    h[Math.min(BINS - 1, i)]++;
+  }
+  return { peak: Math.max(...h) / k.length, concave: concave / k.length };
+}
+
+const SAMPLES = 720;
+/** the fluff sprite's zero-crossing radius at each angle, by bisection */
+function fluffOutline(
+  p: Pick<CloudParams, 'fluffBreak' | 'fluffBreakScale'>,
+  seed: number,
+  amp = 1,
+): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < SAMPLES; i++) {
+    const t = (i / SAMPLES) * Math.PI * 2;
+    const cx = Math.cos(t), cy = Math.sin(t);
+    let lo = 0.05, hi = 2.5;
+    for (let b = 0; b < 50; b++) {
+      const m = (lo + hi) / 2;
+      if (fluffShapeValue(cx * m, cy * m, seed, p, noise3Cpu, amp) > 0) lo = m;
+      else hi = m;
+    }
+    out.push((lo + hi) / 2);
+  }
+  return out;
+}
+/** one great-circle cross-section of a lobe's radial displacement */
+function lobeOutline(p: SilhouetteProfile, seed: number, vertical: boolean): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < SAMPLES; i++) {
+    const t = (i / SAMPLES) * Math.PI * 2;
+    const d: [number, number, number] = vertical
+      ? [Math.cos(t), Math.sin(t), 0]
+      : [Math.cos(t), 0, Math.sin(t)];
+    out.push(lobeReliefValue(d, seed, 1, 0, p, noise3Cpu));
+  }
+  return out;
+}
+const SEEDS = Array.from({ length: 24 }, (_, i) => i / 24);
+const mean = (a: readonly number[]): number => a.reduce((x, y) => x + y, 0) / a.length;
+
+describe('§T.119(b) no perfect circle anywhere in the silhouette', () => {
+  const p = PRISTINE;
+
+  it('THE FLUFF SPRITE WAS THE CIRCLE — an exact one, and it is now not', () => {
+    // This is where the user's "smaller little circles" actually came from,
+    // and it is not the lobes (see the next test, where they already passed).
+    // `shape = 1 − |q|²` puts the zero-crossing at |q| = 1 for EVERY angle,
+    // and `fluffScale 2.1` makes the sprite overhang the polygonal union it
+    // feathers — so on a small cloud that exact circle IS the outline.
+    //
+    // MEASURED on this mirror: fluffBreak 0 → every curvature sample in ONE
+    // bin (1.000) with zero concavity, the textbook signature. Shipped 0.35 →
+    // fullest bin 0.214, concave 0.383.
+    const flat = { fluffBreak: 0, fluffBreakScale: p.fluffBreakScale };
+    for (const seed of SEEDS.slice(0, 4)) {
+      const s = curvatureStats(fluffOutline(flat, seed));
+      expect(s.peak, 'the defect, pinned').toBeCloseTo(1, 6);
+      expect(s.concave, 'the defect, pinned').toBe(0);
+    }
+    const peaks: number[] = [], conc: number[] = [];
+    for (const seed of SEEDS) {
+      const s = curvatureStats(fluffOutline(p, seed));
+      peaks.push(s.peak);
+      conc.push(s.concave);
+    }
+    // no spike at a constant radius...
+    expect(Math.max(...peaks)).toBeLessThan(0.45);
+    expect(mean(peaks)).toBeLessThan(0.30);
+    // ...and real concavity, which a union of convex arcs cannot have at all
+    expect(mean(conc)).toBeGreaterThan(0.2);
+  });
+
+  it('...and it degrades back to the exact disc when it goes sub-pixel (§V.48b)', () => {
+    // mx_noise_float is zero-mean, so fading an octave's amplitude to zero IS
+    // fading it to that octave's own mean — and at sub-pixel size the exact
+    // disc is the CORRECT answer, not a regression. Without this the break-up
+    // would turn into per-pixel speckle along every distant rim, which is the
+    // §V.48 symptom this project has found nine times.
+    for (const seed of SEEDS.slice(0, 4)) {
+      const s = curvatureStats(fluffOutline(p, seed, 0));
+      expect(s.peak).toBeCloseTo(1, 6);
+    }
+  });
+
+  it('the LOBES were already non-circular — and this says so, rather than claiming credit', () => {
+    // §V80, and worth stating plainly: the two-octave relief that shipped
+    // already had fullest bin 0.395 and 46% concavity, i.e. it was NOT the
+    // source of the circles. A perfect sphere (relief 0) measures 1.000/0.000
+    // on the same mirror, which is what makes that number meaningful.
+    const sphere: SilhouetteProfile = { ...p, lobeRelief: 0, silhouetteWarp: 0, baseFlatten: 0 };
+    const s0 = curvatureStats(lobeOutline(sphere, 0.3, true));
+    expect(s0.peak).toBeCloseTo(1, 6);
+    expect(s0.concave).toBe(0);
+    const peaks = SEEDS.map((seed) => curvatureStats(lobeOutline(p, seed, true)).peak);
+    expect(Math.max(...peaks)).toBeLessThan(0.5);
+  });
+
+  it('the silhouette is ANISOTROPIC — wider than tall, which a ball is not', () => {
+    // §V58 in the sky: a direction-free field cannot make oriented features,
+    // so the direction is put in explicitly (`silhouetteSquash`). Measured as
+    // roughness — mean |Δr| per sample — around a VERTICAL great circle
+    // against a HORIZONTAL one. Shipped params give 1.22; the isotropic
+    // control gives 0.95, i.e. no preferred direction at all.
+    const rough = (a: readonly number[]): number => {
+      let t = 0;
+      for (let i = 0; i < a.length; i++) t += Math.abs(a[(i + 1) % a.length] - a[i]);
+      return t / a.length;
+    };
+    const ratio = (q: SilhouetteProfile): number =>
+      mean(SEEDS.map((s) => rough(lobeOutline(q, s, true)))) /
+      mean(SEEDS.map((s) => rough(lobeOutline(q, s, false))));
+    expect(ratio(p)).toBeGreaterThan(1.1);
+    // ...and it is the SQUASH that does it, not luck of the seed
+    const iso: SilhouetteProfile = { ...p, silhouetteSquash: 1, silhouetteShear: 0 };
+    expect(ratio(iso)).toBeLessThan(1.05);
+    expect(ratio(p)).toBeGreaterThan(ratio(iso) * 1.15);
+  });
+
+  it('the BASE is flatter than the top, and the top carries the fine detail', () => {
+    // a cumulus condenses at one altitude, so its underside is a plane and its
+    // crown is cauliflower. A sphere has neither.
+    const below = mean(SEEDS.map((s) => lobeReliefValue([0, -1, 0], s, 1, 0, p, noise3Cpu)));
+    const above = mean(SEEDS.map((s) => lobeReliefValue([0, 1, 0], s, 1, 0, p, noise3Cpu)));
+    expect(below).toBeLessThan(above);
+    // the finest octave is reserved for the crown: zeroing `cauliflowerTop`
+    // must change the TOP and leave the base alone
+    const noCauli: SilhouetteProfile = { ...p, cauliflowerTop: 0 };
+    const topDelta = Math.abs(
+      lobeReliefValue([0.2, 0.98, 0], 0.5, 1, 0, p, noise3Cpu) -
+        lobeReliefValue([0.2, 0.98, 0], 0.5, 1, 0, noCauli, noise3Cpu),
+    );
+    const baseDelta = Math.abs(
+      lobeReliefValue([0.2, -0.98, 0], 0.5, 1, 0, p, noise3Cpu) -
+        lobeReliefValue([0.2, -0.98, 0], 0.5, 1, 0, noCauli, noise3Cpu),
+    );
+    expect(baseDelta).toBeGreaterThan(topDelta);
+  });
+
+  it('the shear leans the field with the WIND, not with an axis of its own', () => {
+    // one wind in this sky (§V.55 applied to a direction): the lobes shear on
+    // the same heading `bandDriftDirDeg` drifts the stratus deck along, so
+    // rotating the wind must rotate the silhouette.
+    const a = lobeReliefValue([0.3, 0.6, 0.2], 0.4, 1, 0, p, noise3Cpu);
+    const b = lobeReliefValue([0.3, 0.6, 0.2], 0.4, 0, 1, p, noise3Cpu);
+    expect(a).not.toBeCloseTo(b, 4);
+    // ...and with the shear off, the wind cannot reach it at all
+    const noShear: SilhouetteProfile = { ...p, silhouetteShear: 0 };
+    expect(lobeReliefValue([0.3, 0.6, 0.2], 0.4, 1, 0, noShear, noise3Cpu)).toBeCloseTo(
+      lobeReliefValue([0.3, 0.6, 0.2], 0.4, 0, 1, noShear, noise3Cpu),
+      12,
+    );
+  });
+
+  it('is DETERMINISTIC and can never invert the radius (§V2, §V44)', () => {
+    for (const seed of SEEDS) {
+      for (let i = 0; i < 64; i++) {
+        const t = (i / 64) * Math.PI * 2;
+        const d: [number, number, number] = [Math.cos(t) * 0.8, Math.sin(t) * 0.6, 0.2];
+        const a = lobeReliefValue(d, seed, 1, 0, p, noise3Cpu);
+        const b = lobeReliefValue(d, seed, 1, 0, p, noise3Cpu);
+        expect(a).toBe(b);
+        expect(a).toBeGreaterThan(0); // a negative factor turns the lobe inside out
+        expect(a).toBeLessThan(2.5);
+      }
+    }
+  });
+
+  it('survives hostile params and hostile directions without NaN (§V28)', () => {
+    const bad: SilhouetteProfile = {
+      lobeRelief: NaN,
+      lobeReliefScale: Infinity,
+      silhouetteWarp: -3,
+      silhouetteWarpScale: NaN,
+      silhouetteSquash: 0,
+      silhouetteShear: Infinity,
+      cauliflowerTop: NaN,
+      baseFlatten: 9,
+    };
+    // NOTE what this asserts and what it cannot: the MIRROR is total, because
+    // it finite-guards every param read. The GRAPH's guard is the finite-check
+    // at the push site in clouds/index.ts — WGSL's own `max`/`clamp` are
+    // undefined on NaN, so a shader cannot catch it from the inside.
+    for (const d of [[0, 0, 0], [1, 0, 0], [0, -1, 0], [1e9, 1e9, 1e9]] as [number, number, number][]) {
+      for (const q of [p, bad]) {
+        for (const seed of [0, 0.5, NaN]) {
+          const v = lobeReliefValue(d, seed, 1, 0, q, noise3Cpu);
+          // a hostile PARAM may legitimately produce a NaN-free zero; what it
+          // may never do is put a NaN into a vertex buffer
+          expect(Number.isNaN(v), `d=${d} seed=${seed}`).toBe(false);
+        }
+      }
+    }
+    for (const s of [0, 0.5]) {
+      for (const q of [{ fluffBreak: NaN, fluffBreakScale: 0 }, PRISTINE]) {
+        const v = fluffShapeValue(0.5, 0.5, s, q, noise3Cpu);
+        expect(Number.isNaN(v)).toBe(false);
+        expect(v).toBeGreaterThanOrEqual(0);
+      }
+    }
+  });
+});
+
+describe('§B91 the banded deck stops drawing where its own map degenerates', () => {
+  const p = PRISTINE;
+  /** eye at 2 m under the shipped 2100 m deck */
+  const RISE = p.bandAltitude - 2;
+  /** sin(elevation) at which `bandRange` starts clamping */
+  const UP_CLAMP = RISE / p.bandRange;
+
+  it('THE DEFECT: below the clamp the hit point carries NO elevation information', () => {
+    // User, on a night frame: "the clouds bending 90° and pointing vertically
+    // into the sea". It is not a bend. Once `rise/up` exceeds `bandRange` the
+    // clamp freezes the ray/plane hit onto a circle of CONSTANT RADIUS, so the
+    // sampled field depends on azimuth alone — every feature is then painted
+    // as a column of constant value, i.e. a mathematically exact vertical
+    // stripe. This states the degeneracy directly: two rays at the same
+    // azimuth and different elevations land on the same point.
+    const hitRadius = (up: number): number =>
+      Math.min(Math.max(1e-4, RISE) / Math.max(1e-4, up), p.bandRange);
+    expect(hitRadius(UP_CLAMP * 0.5)).toBe(hitRadius(UP_CLAMP * 0.1));
+    // ...and the elevation it reaches to is 3.5°, high enough to be a band of
+    // sky rather than a hairline
+    expect((Math.asin(UP_CLAMP) * 180) / Math.PI).toBeGreaterThan(2);
+  });
+
+  it('...and horizonFade alone does NOT cover it, which is why it shipped', () => {
+    // the layer already had a horizon fade; at the top of the degenerate zone
+    // it is still ~0.75, so the stripes rendered at nearly full strength
+    const fade = (up: number): number => 1 - Math.exp(-up / Math.max(1e-4, p.bandHorizonFade));
+    expect(fade(UP_CLAMP)).toBeGreaterThan(0.5);
+  });
+
+  it('THE FIX: structure is exactly 0 through the whole degenerate zone', () => {
+    const nd = (up: number): number =>
+      bandNonDegenerate(up, RISE, p.bandRange, p.bandDegenerateFade);
+    // ...including at the mathematical horizon, exactly — `range` is
+    // `min(reach, bandRange)`, so the ratio is 1 there and no EPS floor leaks
+    // a fraction of a percent of structure through
+    expect(nd(0)).toBe(0);
+    expect(nd(UP_CLAMP * 0.01)).toBe(0);
+    expect(nd(UP_CLAMP * 0.99)).toBe(0);
+    expect(nd(UP_CLAMP)).toBe(0);
+    // ...and it is fully back well inside a degree of sky above the clamp
+    expect(nd(UP_CLAMP / (1 - p.bandDegenerateFade))).toBeCloseTo(1, 6);
+    expect(nd(1)).toBe(1);
+  });
+
+  it('AND IT CLOSES THE HORIZONTAL LINE, the half a horizon fade misses', () => {
+    // The second symptom, and the one that made the first attempt at this fix
+    // wrong. Immediately ABOVE the clamp the coordinate's screen footprint is
+    // enormous and `bandLimitAmplitude` has already taken the structure to ~0;
+    // immediately BELOW, the frozen hit point collapses that footprint and the
+    // structure snaps back to full. That step is the dead-straight horizontal
+    // cut across the whole sky in docs/raft2100/lookdev/pitch/night.png, at
+    // ~3.8° by pixel count against a clamp computed at 3.53°.
+    //
+    // A weight that is 1 at the boundary and falls only below it removes the
+    // stripes and LEAVES THE LINE. So the property is that the weight is
+    // already 0 at the boundary and rises continuously from there — no step
+    // anywhere, in either direction.
+    const nd = (up: number): number =>
+      bandNonDegenerate(up, RISE, p.bandRange, p.bandDegenerateFade);
+    let prev = 0;
+    let biggestStep = 0;
+    const N = 4000;
+    for (let i = 0; i <= N; i++) {
+      const v = nd((i / N) * UP_CLAMP * 4);
+      expect(v).toBeGreaterThanOrEqual(prev - 1e-12); // monotone: never a dip
+      biggestStep = Math.max(biggestStep, v - prev);
+      prev = v;
+    }
+    // no jump anywhere near the size of the 0→1 snap the bug drew
+    expect(biggestStep).toBeLessThan(0.02);
+  });
+
+  it('and it dissolves into the layer\'s own MEAN, not into a hole (§V70)', () => {
+    // the veil must still THIN toward the sea — the night reference has it
+    // brightening as it approaches the water — so the degenerate zone loses
+    // its STRUCTURE, not its coverage. `bandShapeAt` at resolved 0 is exactly
+    // `bandFarMean`, which is what an infinitely distant pixel really sees.
+    for (const field of [-1, -0.3, 0, 0.4, 1]) {
+      const atHorizon = bandShapeAt(
+        field,
+        bandNonDegenerate(1e-6, RISE, p.bandRange, p.bandDegenerateFade),
+        p,
+      );
+      expect(atHorizon).toBeCloseTo(p.bandFarMean, 9);
+    }
+    expect(p.bandFarMean).toBeGreaterThan(0);
+  });
+
+  it('no view elevation in the degenerate zone keeps ANY structure', () => {
+    // the sweep the §V22 reviewer would otherwise have to do by eye
+    const full = Math.abs(bandShapeAt(1, 1, p) - bandShapeAt(-1, 1, p));
+    expect(full).toBeGreaterThan(0.1); // the control: there IS structure to lose
+    for (let i = 0; i <= 400; i++) {
+      const up = (i / 400) * UP_CLAMP;
+      const resolved = bandNonDegenerate(up, RISE, p.bandRange, p.bandDegenerateFade);
+      const spread = Math.abs(bandShapeAt(1, resolved, p) - bandShapeAt(-1, resolved, p));
+      expect(spread, `up=${up.toFixed(6)}`).toBe(0);
+    }
+  });
+
+
+  it('is finite for every hostile input a freecam can produce (§V28)', () => {
+    for (const up of [-1, 0, 1e-9, 1, NaN, Infinity]) {
+      for (const rise of [-500, 0, 2098, NaN, Infinity]) {
+        for (const range of [0, 1, 34000, NaN, -5]) {
+          const v = bandNonDegenerate(up, rise, range, NaN);
+          expect(Number.isFinite(v)).toBe(true);
+          expect(v).toBeGreaterThanOrEqual(0);
+          expect(v).toBeLessThanOrEqual(1);
+        }
+      }
+    }
   });
 });
