@@ -1,4 +1,4 @@
-# Raft 2100 — session handoff (2026-08-21, paused)
+# Raft 2100 — session handoff (updated 2026-08-22)
 
 SPEC.md = source of truth (§G line 5, §I raft/*, §V81–V95, §T88–T115, §B63–B79).
 This file = what SPEC doesn't carry. Pirate-mode handoff stays in `docs/SESSION-HANDOFF.md`.
@@ -36,35 +36,62 @@ Fixes: T108 moon orbit + horizon gates (B63/B65), T110 sun-road/god-ray disc wid
 Terrain: T111 research, T112a quick wins, T112c erosion pass stage. Lookdev sets on disk:
 R0 (grade frames), R1 (pre-fix raft), R2 (walk), T108 (moon).
 
-## In flight when paused — NONE. All four landed. Full suite 2707 pass / 24 pre-existing skips, both entries build.
-1. **DONE, committed e95e646** — raft visual fixer (B70/B73/B75/B76/B79–B85). Remaining gaps = B86. Frames: `docs/raft2100/lookdev/R1-fix/` (README lists defect→cause→fix). Formerly: **B70/B73/B75/B76/B79 raft visual fixer** (owns src/ship/raft*, preview*, flagMaterial,
-   new `src/ship/raftRigging.ts` + 1-line hunk in `src/raft/raftScene.ts`): materials routing,
-   preview hang, sails set/oriented, janky rig (yard cock/rake, forward sheet pull), bipod aft
-   rake, ladder orientation, splashboards 0.5–0.6 m + longer run, furl bundle ∝ area, rigging
-   lines (CAPPED per B79: <25 ropes, per-class table), flag wave hoist→fly, preview interact +
-   hands + fov. Output: `docs/raft2100/lookdev/R1-fix/` + README. Uncommitted WIP in src/ship.
-2. **DONE, committed 09b24da** — T112b path-first authoring (hm.path contract in pathCarve.ts). Formerly: **T112b path-first authoring** — `src/island/pathGraph.ts`, carve pass inserted before
-   `thermalSmooth`, publishes `hm.path = {distance, routeMask, forkMask, pois, routes}`.
-3. **DONE, committed b4c9c88** — T112d terrain-info + layered shading. Formerly: **T112d terrain-info texture + layered shading** — `src/island/terrainInfo.ts`,
-   `sierraMaterial.ts` as its own material, `terrain/rockMaterial.ts`; exports channel layout.
-4. **DONE, committed 2f31020** — B77 moon terminator + star dusk gate. Formerly: **B77 moon terminator** — `src/sky/skyBackground.ts`/`moonCycle.ts`/`starfield.ts`.
-If any died (session limit), resume via the transcript or respawn "continue from disk" — the
-briefs live in this session's transcript; the SPEC rows carry the requirements.
+## 2026-08-22 session — everything queued at the last pause LANDED
+Full suite 2952 pass / 24 skip, tsc clean, both entries build (HEAD b17ecf5).
+
+T113 dedupe (§V95): shared boot glue in `src/core/boot*.ts`, quats moved
+`combat/quatMath` → `src/core/quat.ts`, harness uses `src/debug/harnessHud.ts`.
+main.ts -198 lines. `modeGlue.test.ts` pins it by NAME and by SHAPE (a renamed paste
+fails too); `raftIsolation` now walks imports TRANSITIVELY — which found the raft still
+reaches `src/combat/` via `followCam → camStations → battery/aim`. Ratcheted, not fixed.
+
+T114 sails-through-masts: penetration was ONLY at negative drive (a backed sail bellies
+aft, into the mast). Push is one field per panel, not radial (radial tears cloth into two
+sheets); stand-off is a parabola, not the cylinder's exact profile (infinite slope creases
+the canvas). Square-riggers bit-identical at drive ≥ 0.
+
+T115 walk fixes: 3 of 8 defects were NOT what the review said — re-boarding measured from
+feet a body-length underwater; "walled-in tiller" was a 0.46 m lane vs a 0.6 m capsule;
+"bipod dead-end" was the ladder socket sitting off the deck. Plus interact range now
+measured to the capsule (eye-to-socket spent the whole reach on the player's height).
+
+T116 prompts, T117 dressing (cabin, thatch courses, radio on a crate with dial/meter/LED,
+varied crates, rope railing) — T117 also DISPROVED T114's raft diagnosis by sweep:
+`yardMastClearance` cannot close a bipod (legs splay in x, the sail plane turns about a
+vertical axis), so that band is the cloth's job; the blueprint owed air, 0.05 → 0.30.
+
+T118 enemy rig: `updateRig` WAS being called — the AI used `sailTrim` as a throttle with a
+0.15 floor, which since the membrane is DRAWN as 18% of the hoist. B92: nothing had ever
+rotated a rudder blade on any ship.
+
+T119 clouds: the only sun-driven system not reading §V72's key light (a fog-colour proxy 4×
+too narrow). B91's horizon bars/cut were one cause — a `min(rise/up, bandRange)` clamp
+freezing the hit point onto a constant-radius circle.
+
+T112e/f/g terrain: vegetation, talus/outcrops, CDLOD morph live + cull live (at 900 m the old
+ramp had DELETED 374 of 841 plants). Impostors and hi-z built but INERT — see T120.
+
+B89 resolved by measurement: god-ray defaults were never hot (bloom contributes more); the
+near-sun road was, `glintRoadStrength` 1.0 → 0.75. T110 verified §V22 in-browser.
+B77 retired: the full-moon tame-down is worse than the shipped defaults.
 
 ## Queued (not started) — in priority order
-- B86 raft follow-ups (halyards/forestay sockets, raft sailWindRef, furl yard lowering, interact reach) — fold into T115 or a small raft pass.
-- T114 sails pass through masts (all ships; B74) — after fixer exits src/ship.
-- T115 R2 walk fixes (B78: boarding height, tiller spawn walled, strip dead-end, lookout eye).
-- T113 dedupe mode glue (§V95: withFullCoverage, material cache, quat helpers, preview HUD).
-- T112e vegetation layers, T112f outcrops/talus, T112g LOD (512² tex + 256² mesh + CDLOD,
-  impostors), T112h painterly (gated on R3 lookdev).
-- Pitch SET D frames (god rays, night, lagoon, sun road) — main game would not boot in a
-  hidden tab (livelock); capture in a VISIBLE tab, photo mode `P`, `__game.followCam.setDebugPose`.
-- R3 sync (T102): `raft.html?at=<island>&tod=` × islands × tod + 24-min day timelapse; author
+- T120 finish T112g: impostors live (need a renderer via main.ts), the 512² height field,
+  dithered mesh half of the cross-fade, parallax reprojection. Indirect draws ARE available.
+- T112h painterly (gated on R3 lookdev).
+- DONE: pitch frames captured (`docs/raft2100/lookdev/pitch/`). CAPTURE LESSON: an MCP tab inside
+  the user's big Chrome window never activates → rAF at 0 ticks/s → one frozen frame forever.
+  Use its OWN Chrome window + `osascript activate`; verify visibilityState AND a live rAF counter.
+  Park `state.ships[1]` on long pirate runs — the enemy AI sank the player mid-session.
+- R3 sync (T102) IN FLIGHT at the time of writing — `raft.html?at=<island>&tod=` × islands × tod + 24-min day timelapse; author
   first LUTs via `__game.grade.bake(slot)`. Then T103 radio, T104 teachings, T105 markers/chart/
   sleep/score, T106 playtest. Then the user's "really deep review" of the whole Kon-Tiki build.
-- Open bugs not yet tasked: B66 key radiance mid-swing, B68 chink drain vs mask, B69 gangway
-  socket reach, B71 quatMath in combat/ (T113).
+- Open bugs not yet tasked: B66 key radiance mid-swing, B68 chink drain vs mask,
+  B93 the sky's two low-sun ramps disagree (`lowSunWarmth` to 23°, `sunColor` to 28°) so at
+  tod 7 a warm sky hands the clouds a near-white key — needs a decision, not a patch.
+- Known, deliberately unfixed: `setShipWorldMatrix` is a module singleton both ships write each
+  frame (the enemy wins; both wetlines index in her frame) — fixing it costs the shared material
+  set. The raft's steering oar is still static (different pivot from a rudder).
 
 ## User decisions (don't re-ask)
 Same repo/mode switch · FP with hands · loose Sierra, one Half-Dome silhouette · Ghibli colour +
