@@ -32,8 +32,11 @@ export interface RaftPieceUniforms {
   readonly aabbMax: AnyNode;
   /** the piece's origin in the ship frame — where a log sits along the hull */
   readonly origin: AnyNode;
-  /** world DOWN expressed in piece-local axes (thatch strands run along it) */
-  readonly downLocal: AnyNode;
+  /**
+   * DOWN IN THE SHIP'S OWN FRAME, expressed in piece-local axes — see
+   * {@link shipFrameDown}. A CONSTANT of the piece; ⊥ of the sea (§T134/§B99).
+   */
+  readonly downRest: AnyNode;
   /** 0..1 hash of the piece id — seeds per-piece tone */
   readonly seed: AnyNode;
   /** family-specific integer variant, from {@link RaftPieceUniformOptions.variantOf} */
@@ -61,8 +64,53 @@ export function hashPieceId(id: string): number {
 }
 
 const boxes = new WeakMap<THREE.BufferGeometry, THREE.Box3>();
-const quat = new THREE.Quaternion();
+const restQuat = new THREE.Quaternion();
 const down = new THREE.Vector3();
+
+/**
+ * The name ShipAssembly gives the group that carries the ship's POSE
+ * (shipAssembly.ts: `this.group.name = 'ship'`). Everything BELOW it is the
+ * blueprint's authored transform and never moves; the group itself is what the
+ * sea does to the boat. tests/raftMaterials.test.ts asserts a real assembly's
+ * group still answers to this name, so a rename fails loud instead of quietly
+ * putting the waves back into every piece's local frame.
+ */
+export const SHIP_ROOT_NAME = 'ship';
+
+/**
+ * §T134/§B99 — DOWN IN THE SHIP'S FRAME, expressed in the piece's local axes.
+ *
+ * THE BUG THIS REPLACES. This used to be `object.getWorldQuaternion(q)`, i.e.
+ * down in the WORLD, recomputed every frame. A per-object uniform refilled
+ * from a live world vector is a per-frame ANIMATION of whatever samples it,
+ * and the thatch samples it as the axis its courses are laid against
+ * (raftMaterialsWeave.ts `thatchSlopeAxes`) — so the roof's whole pattern
+ * swung about as the raft pitched and rolled while every other ship material
+ * (woodMaterial's tri-planar `positionLocal`/`normalLocal`) stayed nailed to
+ * its piece. The user photographed it: "it's moving back and forth as the boat
+ * is moving, which none of the other textures are doing".
+ *
+ * WHY THE SWING WAS SO VIOLENT, and why "it only tilts a little" is the wrong
+ * intuition: the piece-plane component of world down is sin θ of the whole, and
+ * the cabin roof's θ is 11.77°, so that component is 0.204. A 15° PITCH puts
+ * 0.259 on the perpendicular in-plane axis and rotates the pattern's axis by
+ * 52.8°; a 15° HEEL exceeds θ outright and FLIPS it 180°. The axis is a
+ * near-degenerate function of the attitude — precisely the reason it must not
+ * be a function of the attitude at all.
+ *
+ * THE FIX: accumulate the object's own transform chain UP TO the ship root
+ * (exclusive), so the ship's pose never enters. What comes back is fixed for
+ * a piece bolted to the boat, and still tracks a piece that genuinely
+ * articulates against the hull (a braced yard turns in the ship frame, so its
+ * grain axis should turn with it).
+ */
+export function shipFrameDown(object: THREE.Object3D, out = new THREE.Vector3()): THREE.Vector3 {
+  restQuat.identity();
+  for (let n: THREE.Object3D | null = object; n !== null && n.name !== SHIP_ROOT_NAME; n = n.parent) {
+    restQuat.premultiply(n.quaternion);
+  }
+  return out.set(0, -1, 0).applyQuaternion(restQuat.invert());
+}
 
 function boundsOf(geometry: THREE.BufferGeometry): THREE.Box3 {
   let box = boxes.get(geometry);
@@ -82,7 +130,7 @@ export function createRaftPieceUniforms(opts: RaftPieceUniformOptions = {}): Raf
   const aabbMin = uniform(new THREE.Vector3(-1, -1, -1)).setGroup(objectGroup);
   const aabbMax = uniform(new THREE.Vector3(1, 1, 1)).setGroup(objectGroup);
   const origin = uniform(new THREE.Vector3()).setGroup(objectGroup);
-  const downLocal = uniform(new THREE.Vector3(0, -1, 0)).setGroup(objectGroup);
+  const downRest = uniform(new THREE.Vector3(0, -1, 0)).setGroup(objectGroup);
   const seed = uniform(0.5).setGroup(objectGroup);
   const variant = uniform(0).setGroup(objectGroup);
   const variantOf = opts.variantOf ?? ((): number => 0);
@@ -112,16 +160,14 @@ export function createRaftPieceUniforms(opts: RaftPieceUniformOptions = {}): Raf
     // which no current consumer of `origin` is)
     const node = object.parent;
     if (node !== null) origin.value.copy(node.position);
-    object.getWorldQuaternion(quat);
-    down.set(0, -1, 0).applyQuaternion(quat.invert());
-    downLocal.value.copy(down);
+    downRest.value.copy(shipFrameDown(object, down));
     const id = pieceIdOfMesh(object.name);
     seed.value = hashPieceId(id);
     variant.value = variantOf(id, aabbMax.value.x - aabbMin.value.x);
   };
-  for (const u of [aabbMin, aabbMax, origin, downLocal, seed, variant]) u.onObjectUpdate(update);
+  for (const u of [aabbMin, aabbMax, origin, downRest, seed, variant]) u.onObjectUpdate(update);
 
-  return { aabbMin, aabbMax, origin, downLocal, seed, variant };
+  return { aabbMin, aabbMax, origin, downRest, seed, variant };
 }
 
 /**

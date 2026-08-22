@@ -27,7 +27,8 @@ import {
 } from '../src/ship/raftSailFace';
 import * as THREE from 'three/webgpu';
 import { float, vec2 } from 'three/tsl';
-import { hashPieceId, pieceIdOfMesh } from '../src/ship/raftMaterialNodes';
+import { SHIP_ROOT_NAME, hashPieceId, pieceIdOfMesh, shipFrameDown } from '../src/ship/raftMaterialNodes';
+import { ShipAssembly } from '../src/ship/shipAssembly';
 import { createSailClothMaterial } from '../src/ship/sailMaterial';
 import { thatchSlopeAxes } from '../src/ship/raftMaterialsWeave';
 import { roofSlope } from '../src/ship/raftPartsCabin';
@@ -307,7 +308,7 @@ describe('§T129 the cabin weave and the thatch are on the reference dimension (
     const slope = roofSlope(raftParams);
     for (const sign of [-1, 1]) {
       // the roof slab's own frame: rotated about z by −sign·slope, so world
-      // down lands in the slab's axes as `down` (this is `piece.downLocal`)
+      // down lands in the slab's axes as `down` (this is `piece.downRest`)
       const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, -sign * slope));
       const down = new THREE.Vector3(0, -1, 0).applyQuaternion(q.clone().invert());
       const { along, across } = thatchSlopeAxes(down);
@@ -318,7 +319,7 @@ describe('§T129 the cabin weave and the thatch are on the reference dimension (
       expect(Math.sign(along.x)).toBe(sign);
       // THE PROPERTY. One metre travelled down the slope must advance the
       // coordinate by one metre — otherwise every course, strand and eave band
-      // is stretched by the reciprocal. Read raw, `downLocal` gives sin θ.
+      // is stretched by the reciprocal. Read raw, `downRest` gives sin θ.
       const step = new THREE.Vector3(sign, 0, 0);
       expect(step.dot(along), 'the course coordinate is not measured on the roof').toBeCloseTo(1, 9);
       expect(step.dot(down), 'the frame this replaces: 1/sin θ = 4.9× too long').toBeCloseTo(Math.sin(slope), 9);
@@ -341,6 +342,144 @@ describe('§T129 the cabin weave and the thatch are on the reference dimension (
     const ridgeLen = p.cabinLength + 2 * p.roofOverhang;
     expect(slabLen / m.thatchRowPitch, 'the slope reads as one stripe, not courses').toBeGreaterThanOrEqual(6);
     expect(ridgeLen / m.thatchTileWidth, 'the course line runs the whole ridge unbroken').toBeGreaterThanOrEqual(8);
+  });
+});
+
+/**
+ * §T134/§B99 — THE PATTERN BELONGS TO THE PIECE, NOT TO THE SEA.
+ *
+ * The user filmed the cabin roof's thatch sliding back and forth as the raft
+ * rocked (`docs/raft2100/ref/bug-thatch-animates-{1,2-annotated}.jpg`): "it
+ * looks like it's animating the whole texture instead of just receiving a
+ * shadow… which none of the other textures are doing". The cause was a live
+ * WORLD-down vector in a per-object uniform, projected onto the slab to give
+ * §T129's down-slope axis — so the axis was a function of the boat's attitude.
+ *
+ * THE WITNESS IS INVARIANCE, and it has to be taken through the ASSEMBLY (§V71:
+ * a part tested against its own authored geometry passes while being wrong).
+ * Rock the real ship group, read the real roof mesh, and the pattern coordinate
+ * of a fixed point on the roof must not move by so much as a float.
+ */
+describe('§T134 the thatch pattern is a constant of the piece, not of the raft attitude', () => {
+  const stubFactory = (): THREE.Material => ({ dispose(): void {} }) as unknown as THREE.Material;
+  const asm = new ShipAssembly(buildRaftBlueprint(), stubFactory);
+  const ROOF = ['thatch-roof-port-mesh', 'thatch-roof-starboard-mesh'] as const;
+
+  /** put the ship at an attitude and read what the material would sample */
+  const sampleAt = (meshName: string, euler: THREE.Euler): { down: THREE.Vector3; along: THREE.Vector3 } => {
+    asm.group.quaternion.setFromEuler(euler);
+    asm.group.updateMatrixWorld(true);
+    const mesh = asm.group.getObjectByName(meshName);
+    expect(mesh, `${meshName} is not in the assembly`).toBeDefined();
+    const down = shipFrameDown(mesh!);
+    return { down, along: thatchSlopeAxes(down).along };
+  };
+
+  /** what the pre-fix code did: the LIVE world quaternion, straight off the mesh */
+  const liveWorldDown = (meshName: string, euler: THREE.Euler): THREE.Vector3 => {
+    asm.group.quaternion.setFromEuler(euler);
+    asm.group.updateMatrixWorld(true);
+    const mesh = asm.group.getObjectByName(meshName)!;
+    const q = mesh.getWorldQuaternion(new THREE.Quaternion());
+    return new THREE.Vector3(0, -1, 0).applyQuaternion(q.invert());
+  };
+
+  const LEVEL = new THREE.Euler(0, 0, 0);
+  // 15° of heel (roll about the fore-aft axis) and 15° of pitch, each alone and
+  // together, plus a heading — a raft in a seaway visits all of them
+  const ATTITUDES: readonly [string, THREE.Euler][] = [
+    ['15° heel', new THREE.Euler(0, 0, THREE.MathUtils.degToRad(15))],
+    ['15° pitch', new THREE.Euler(THREE.MathUtils.degToRad(15), 0, 0)],
+    ['15° pitch + 15° heel', new THREE.Euler(THREE.MathUtils.degToRad(15), 0, THREE.MathUtils.degToRad(15))],
+    ['heading 130°', new THREE.Euler(0, THREE.MathUtils.degToRad(130), 0)],
+  ];
+
+  it('the down-slope axis is IDENTICAL level and rocking — the pattern cannot slide', () => {
+    for (const meshName of ROOF) {
+      const rest = sampleAt(meshName, LEVEL);
+      for (const [label, euler] of ATTITUDES) {
+        const heeled = sampleAt(meshName, euler);
+        // bit-for-bit: the axis is a pure function of the blueprint transform,
+        // so there is no tolerance to spend here
+        expect(heeled.down.equals(rest.down), `downRest moved at ${label} on ${meshName}`).toBe(true);
+        expect(heeled.along.equals(rest.along), `the course axis moved at ${label} on ${meshName}`).toBe(true);
+      }
+    }
+  });
+
+  it('…and the old live-world vector moved it by 53° at a pitch and flipped it at a heel', () => {
+    // WHY THE TEST ABOVE IS WORTH ITS LINES, measured rather than asserted from
+    // memory: `thatchSlopeAxes` keeps only the component of its input lying in
+    // the slab, which on an 11.77° roof is sin θ = 0.204 of a unit vector. That
+    // near-degeneracy is the amplifier — a small change of attitude is a large
+    // change of axis, which is why the roof was the ONLY surface visibly
+    // swimming. These numbers are the defect, recorded so the fix cannot be
+    // quietly reverted into a "surely it barely moves" argument.
+    const mesh = 'thatch-roof-starboard-mesh';
+    const rest = thatchSlopeAxes(liveWorldDown(mesh, LEVEL)).along;
+    expect(rest.x).toBeCloseTo(1, 9); // starboard slab: +x is down-slope
+
+    const pitched = thatchSlopeAxes(liveWorldDown(mesh, ATTITUDES[1][1])).along;
+    const swing = THREE.MathUtils.radToDeg(Math.acos(Math.min(1, rest.dot(pitched))));
+    expect(swing, 'a 15° pitch used to swing the courses by ~53°').toBeGreaterThan(45);
+
+    // …and 15° of heel exceeds the 11.77° pitch of the roof outright, so the
+    // in-plane component changes SIGN and the whole pattern runs backwards
+    const heeled = thatchSlopeAxes(liveWorldDown(mesh, ATTITUDES[0][1])).along;
+    expect(heeled.dot(rest), 'a 15° heel used to flip the courses end for end').toBeLessThan(-0.99);
+
+    // the fixed vector answers the same thing at all three (the test above), so
+    // this describe block is the before/after in one file
+    asm.group.quaternion.identity();
+    asm.group.updateMatrixWorld(true);
+  });
+
+  it('the ship root is the node the pose lives on, and it still answers to that name', () => {
+    // `shipFrameDown` walks UP TO the ship root and stops. If ShipAssembly ever
+    // renames the group, the walk would run past it, swallow the pose, and put
+    // the sea straight back into every piece's local frame — silently. §B85 is
+    // exactly this shape of failure, so the coupling is asserted, not trusted.
+    expect(asm.group.name).toBe(SHIP_ROOT_NAME);
+  });
+});
+
+/**
+ * §T134 — RELIEF IS IN METRES AND `reliefNormal` IS EXACT (Mikkelsen on the
+ * true screen gradient), so a `*Bump` gain is pure exaggeration and the face
+ * slope it produces is arithmetic, not taste. §T129 removed a 4.9× stretch from
+ * the thatch's coordinate and left `thatchBump` 6 behind, which multiplied
+ * every gradient by the same 4.9 — the frames show each leaf course as a lit
+ * slab beside a black one, "a row of crates".
+ */
+describe('§T134 the raft relief presents believable faces, not embossed crates', () => {
+  const m = raftMaterialParams;
+  /** max slope of a half-sine crown of amplitude `amp` over period `p`, degrees */
+  const crownFace = (amp: number, period: number, bump: number): number =>
+    THREE.MathUtils.radToDeg(Math.atan((Math.PI * amp * bump) / period));
+
+  it('a thatch leaf lies ON its neighbour — it does not stand up like a kerb', () => {
+    // the row crown carries 0.8 of `thatchRelief` (raftMaterialsWeave.ts)
+    const face = crownFace(m.thatchRelief * 0.8, m.thatchRowPitch, m.thatchBump);
+    expect(face, 'the thatch reads as corrugated iron').toBeLessThan(20);
+    expect(face, 'the thatch has gone flat — a painted plane again (§B87)').toBeGreaterThan(6);
+  });
+
+  it('a split-bamboo strand is crowned, not moulded', () => {
+    const face = crownFace(m.weaveRelief, m.weaveStrip, m.weaveBump);
+    expect(face, 'the wall reads as moulded plastic').toBeLessThan(28);
+    expect(face, 'the plait has lost its over-under').toBeGreaterThan(10);
+  });
+
+  it("the material's leaf lap is SMALLER than the geometry's structural course", () => {
+    // §V66 — the two are different features and must not compete. The geometry
+    // steps every `roofCoursePitch`; the material draws the leaves INSIDE one
+    // of those steps, so several laps have to fit in a course. At 0.12 against
+    // 0.30 they were 0.4 apart and read as one confused stack of blocks.
+    expect(raftParams.roofCoursePitch / m.thatchRowPitch,
+      'the leaf lap and the structural course are the same feature twice').toBeGreaterThanOrEqual(3);
+    // …and a leaf is wider across the slope than it is deep down it, which is
+    // what makes it a TILE rather than a batten [§3 Roof]
+    expect(m.thatchTileWidth).toBeGreaterThan(m.thatchRowPitch);
   });
 });
 

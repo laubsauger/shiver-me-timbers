@@ -148,22 +148,46 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     weaveRelief: 0.004,
     weaveToneVar: 0.08,
     weaveRough: 0.82,
-    weaveBump: 2.5, // a vertical wall at noon lives at N·L ≈ 0: at 6 the crowns of one block caught the sun and the next block's did not, a black-and-tan checkerboard from 15 m (§B70)
+    // §B70 brought this down from 6 (a vertical wall at noon lives at N·L ≈ 0:
+    // the crowns of one block caught the sun and the next block's did not, a
+    // black-and-tan checkerboard from 15 m). §T134 goes the rest of the way for
+    // the same reason as `thatchBump`: the crown is 0.004 m over a 0.045 m
+    // strip, so it presents πAr/P = 15.6° of its own, and 2.5 turned that into
+    // 35° — a moulded plastic basket at the arm's length the doorway puts the
+    // player at. 1.4 keeps a little exaggeration for a plait's genuinely proud
+    // strand (22.7°) and halves the gradient the frames show.
+    weaveBump: 1.5,
     thatchLight: 0xc9b07a,
     thatchDark: 0x8c7a50,
     thatchUnder: 0.55,
     // §B87: the GEOMETRY now carries the courses (raftParams.roofCoursePitch,
     // 0.30 m), so the material's row is the LEAF inside a course — banana
-    // leaves laid "like tiles" [§3 Roof], several to a course
-    thatchRowPitch: 0.12,
-    thatchRowEdge: 0.03,
-    thatchRowRagged: 0.04,
+    // leaves laid "like tiles" [§3 Roof], several to a course.
+    // §T134 — AND "SEVERAL" HAS TO MEAN SEVERAL. At 0.12 m the material's row
+    // was 0.4 of the geometry's own 0.30 m course: two course systems of
+    // almost the same size, out of phase, on one roof, and at the 2 m a man at
+    // the tiller stands from the eave each one subtends 3.4° — a row of crates,
+    // which is what the user photographed. 0.075 m puts FOUR leaf laps inside
+    // one structural course, which is the thing the material was given to draw.
+    thatchRowPitch: 0.075,
+    // both of these are fractions of the lap they sit on, so they move with it
+    // (§V66) — 0.25 and 0.33 of the pitch, as before
+    thatchRowEdge: 0.018,
+    thatchRowRagged: 0.025,
     thatchStrandScale: 40,
     thatchStrandStretch: 12,
     thatchTileWidth: 0.16,
-    thatchTileStagger: 0.05,
+    thatchTileStagger: 0.03,
     thatchRelief: 0.006,
-    thatchBump: 6,
+    // §T134 — `reliefNormal` is EXACT (Mikkelsen on the true screen gradient)
+    // and `thatchRelief` is in METRES, so `thatchBump` is pure exaggeration and
+    // 1 is the honest value. 6 was tuned against the pre-§T129 field, where the
+    // coordinate advanced at sin θ = 0.204 and the row's effective period on
+    // the roof was 0.588 m — max face slope πAr/P = 8.7°. §T129 removed the
+    // stretch and left the 6 behind: the same crown over 0.12 m presents 37°
+    // faces, and every row reads as a lit slab beside a black one. At 1.0 over
+    // the 0.075 m lap it is 11.4°, i.e. a leaf lying on a leaf.
+    thatchBump: 1,
     tickLight: 0xcfc5ad,
     tickDark: 0x8f7a63,
     tickStrip: 0.09,
@@ -221,7 +245,9 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     weaveStrip: m(0.02, 0.1, 0.001), weaveBlock: m(1, 10, 1), weaveEdge: m(0.02, 0.4), weaveRelief: m(0, 0.02, 0.001),
     weaveToneVar: m(0, 0.3), weaveRough: m(0.3, 1), weaveBump: m(0, 30, 0.5),
     thatchLight: colour, thatchDark: colour, thatchUnder: m(0, 1),
-    thatchRowPitch: m(0.1, 0.8), thatchRowEdge: m(0.005, 0.1, 0.001), thatchRowRagged: m(0, 0.15),
+    // §T134 — the floor was 0.1 while the leaf lap has to live INSIDE the
+    // geometry's 0.30 m course; 0.04 lets the slider reach a lap, not a course
+    thatchRowPitch: m(0.04, 0.8, 0.005), thatchRowEdge: m(0.005, 0.1, 0.001), thatchRowRagged: m(0, 0.15),
     thatchStrandScale: m(5, 100, 1), thatchStrandStretch: m(1, 40, 0.5), thatchRelief: m(0, 0.02, 0.001),
     thatchBump: m(0, 30, 0.5),
     thatchTileWidth: m(0.04, 0.6), thatchTileStagger: m(0, 0.2),

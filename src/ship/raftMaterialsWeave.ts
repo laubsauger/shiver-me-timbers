@@ -195,17 +195,27 @@ export function createWeaveMaterial(
 
 /**
  * §T129 — THE DOWN-SLOPE AXIS of a pitched slab, and the ridge axis across it,
- * from WORLD DOWN expressed in the slab's own axes (`piece.downLocal`). CPU
- * mirror of the three node lines at the head of {@link createThatchMaterial},
- * in the same spirit as `periodResolvedValue`: the node graph belongs to the
- * GPU, the contract it has to keep is testable here.
+ * from SHIP-FRAME DOWN expressed in the slab's own axes (`piece.downRest`).
+ * CPU mirror of the three node lines at the head of
+ * {@link createThatchMaterial}, in the same spirit as `periodResolvedValue`:
+ * the node graph belongs to the GPU, the contract it has to keep is testable
+ * here.
  *
- * WHY IT IS NOT `downLocal` ITSELF — the defect the user photographed. Every
+ * §T134/§B99 — THE INPUT MUST BE THE SHIP'S DOWN, NOT THE WORLD'S. This
+ * function is a near-degenerate projection: it throws away the component
+ * through the face, and on an 11.77° roof only 0.204 of the input survives
+ * that. Feed it a live world vector and 15° of pitch swings the axis it
+ * returns by 52.8°, 15° of heel flips it end for end, and the entire pattern
+ * rides the swell. `shipFrameDown` (raftMaterialNodes.ts) is the vector that
+ * makes the answer a constant of the PIECE; the attitude-invariance test in
+ * tests/raftMaterials.test.ts is the witness that keeps it one.
+ *
+ * WHY IT IS NOT THAT VECTOR ITSELF — the earlier defect. Every
  * thatch piece is a slab whose local +y is its face normal, so world down
  * splits into a component lying ALONG the face (the axis a course of leaves is
  * laid against, and the only one that means anything to the pattern) and one
  * going THROUGH it. On a slab pitched at θ the first is sin θ of the whole: at
- * the cabin roof's 11.8° that is 0.204, so `positionLocal.dot(downLocal)`
+ * the cabin roof's 11.8° that is 0.204, so `positionLocal.dot(downRest)`
  * advanced 0.20 m per metre travelled down the slope and every course line,
  * strand and eave band came out 4.9× too long — a shadow smeared the length of
  * the roof instead of a course every 12 cm. §V66: scale a feature by its OWN
@@ -215,8 +225,8 @@ export function createWeaveMaterial(
  * back zero rather than pointing somewhere arbitrary — the pattern goes flat,
  * which is the honest answer to "which way do the leaves run" on the flat.
  */
-export function thatchSlopeAxes(downLocal: THREE.Vector3): { along: THREE.Vector3; across: THREE.Vector3 } {
-  const along = new THREE.Vector3(downLocal.x, 0, downLocal.z);
+export function thatchSlopeAxes(downRest: THREE.Vector3): { along: THREE.Vector3; across: THREE.Vector3 } {
+  const along = new THREE.Vector3(downRest.x, 0, downRest.z);
   along.divideScalar(Math.max(1e-4, along.length()));
   const across = new THREE.Vector3().crossVectors(along, new THREE.Vector3(0, 1, 0));
   across.divideScalar(Math.max(1e-3, across.length()));
@@ -245,9 +255,10 @@ export function createThatchMaterial(
 
   // strands run DOWN THE SLOPE — the slab's own axis, ⊥ down the WORLD. These
   // four lines are {@link thatchSlopeAxes}; read its docstring for why the
-  // difference is a 4.9× stretch of everything below (§T129a, §V66).
+  // difference is a 4.9× stretch of everything below (§T129a, §V66), and why
+  // the vector fed in is the SHIP's down and not the sea's (§T134/§B99).
   const pos = positionLocal;
-  const alongRaw = piece.downLocal.mul(vec3(1, 0, 1));
+  const alongRaw = piece.downRest.mul(vec3(1, 0, 1));
   const down = alongRaw.div(alongRaw.length().max(1e-4));
   const acrossRaw = cross(down, vec3(0, 1, 0));
   const across = acrossRaw.div(acrossRaw.length().max(1e-3));
