@@ -1,7 +1,7 @@
 /**
  * Horizon map (§T.112a, §V94): per-cell, per-azimuth elevation angle to the
- * terrain, baked on the CPU heightmap grid and uploaded as two RGBA8
- * textures the way `seabed.ts` uploads the depth field.
+ * terrain, baked on the CPU heightmap grid and uploaded as two RGBA8 array
+ * textures — one LAYER per island, see sierraAtlas.ts (§T.132).
  *
  * WHY. The sun shadow map is one 80 m ortho centred on the ship, so a 250 m
  * island has no self-shadow beyond the raft's neighbourhood (research §1.4,
@@ -135,47 +135,20 @@ export function horizonMapFor(hm: IslandHeightmap): HorizonMap {
 
 // ── GPU side ──────────────────────────────────────────────────────────────
 
-export interface HorizonTextures {
-  planes: [THREE.DataTexture, THREE.DataTexture];
-  radius: number;
-  dispose(): void;
-}
-
 /**
- * Two RGBA8 textures over the island's [-R, R]² grid. Linear filtered and
- * mipped (§V48: read under minification from the far island), clamp to edge
- * (the grid border is under water, so its horizon is already 0).
+ * WHAT THE SHADER SAMPLES. §T.132: this is an ATLAS LAYER, not one island's
+ * texture — `planes` are `DataArrayTexture`s shared by every sierra island and
+ * `layer`/`radius` are OBJECT-GROUP uniform nodes that say which island the
+ * mesh being drawn belongs to. Nothing per-island reaches the node graph as a
+ * constant, so one program serves the world (see sierraAtlas.ts).
  */
-export function createHorizonTextures(map: HorizonMap): HorizonTextures {
-  const plane = map.size * map.size * 4;
-  const make = (offset: number, name: string): THREE.DataTexture => {
-    const tex = new THREE.DataTexture(
-      map.angles.subarray(offset, offset + plane),
-      map.size,
-      map.size,
-      THREE.RGBAFormat,
-      THREE.UnsignedByteType,
-    );
-    tex.name = name;
-    tex.minFilter = THREE.LinearMipmapLinearFilter;
-    tex.magFilter = THREE.LinearFilter;
-    tex.wrapS = THREE.ClampToEdgeWrapping;
-    tex.wrapT = THREE.ClampToEdgeWrapping;
-    tex.generateMipmaps = true;
-    tex.needsUpdate = true;
-    return tex;
-  };
-  const planes: [THREE.DataTexture, THREE.DataTexture] = [
-    make(0, 'island/horizon0'),
-    make(plane, 'island/horizon1'),
-  ];
-  return {
-    planes,
-    radius: map.radius,
-    dispose(): void {
-      for (const t of planes) t.dispose();
-    },
-  };
+export interface HorizonSource {
+  /** azimuths 0..3 and 4..7 */
+  planes: [THREE.DataArrayTexture, THREE.DataArrayTexture];
+  /** which layer this object reads — an int-valued node */
+  layer: AnyNode;
+  /** the island's half-extent (m), as a node */
+  radius: AnyNode;
 }
 
 export interface HorizonNodes {
@@ -193,14 +166,14 @@ export interface HorizonNodes {
  * (rad) of the shadow terminator.
  */
 export function horizonNodes(
-  tex: HorizonTextures,
+  src: HorizonSource,
   sunDir: AnyNode,
   softness: AnyNode,
   localXZ: AnyNode = positionLocal.xz,
 ): HorizonNodes {
-  const uv = localXZ.div(2 * tex.radius).add(0.5);
-  const a = texture(tex.planes[0], uv);
-  const b = texture(tex.planes[1], uv);
+  const uv = localXZ.div(src.radius.mul(2)).add(0.5);
+  const a = texture(src.planes[0], uv).depth(src.layer);
+  const b = texture(src.planes[1], uv).depth(src.layer);
   const quadrant = Math.PI / 2;
   const rays = [a.r, a.g, a.b, a.a, b.r, b.g, b.b, b.a].map((n) => n.mul(quadrant));
 

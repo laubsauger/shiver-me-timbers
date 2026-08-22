@@ -22,6 +22,7 @@
  */
 import * as THREE from 'three/webgpu';
 import { islandParams, type IslandParams } from '../params/island';
+import { createSierraAtlas, tagSierraIsland } from './sierraAtlas';
 import { findShoreRadius, generateIslandHeightmap, gradientAt, type IslandHeightmap } from './heightmap';
 import type { ArchetypeName } from './archetypes';
 import { createIslandMesh, type IslandMeshHandle } from './islandMesh';
@@ -32,7 +33,6 @@ import { createGroundCover, type GroundCoverMeshes } from '../terrain';
 import type { IslandMaterials } from './islandMaterials';
 import { isSierraArchetype } from './sierraArchetypes';
 import { createSierraTerrainMaterial } from './sierraMaterial';
-import { horizonMapFor } from './horizonMap';
 import { createSierraPines } from '../vegetation/pineScatter';
 
 /**
@@ -293,17 +293,20 @@ export function createIsland(opts: CreateIslandOptions): Island {
   // granite + DG sand and pines; a pirate island in the same world is
   // untouched. An unshared sierra island owns its granite handle.
   const sierra = isSierraArchetype(heightmap.archetype);
-  // §T.112a: the sierra handles are PER HEIGHTMAP (they bind the island's
-  // horizon map — see islandMaterials.sierraTerrain); the pirate ones stay
-  // one per world. An unshared sierra island owns its own.
-  const ownSierraTerrain =
-    sierra && !shared ? createSierraTerrainMaterial(undefined, { horizon: horizonMapFor(heightmap) }) : null;
+  // §T.132: the sierra handles are ONE PER WORLD — the island's horizon map
+  // and terrain info are LAYERS of a shared array texture and every per-island
+  // number is an object-group uniform, so the node graph is island-agnostic
+  // (see sierraAtlas.ts). An unshared sierra island (tests, a one-off preview)
+  // owns a one-layer atlas and its own handle.
+  const ownAtlas = sierra && !shared ? createSierraAtlas(1) : null;
+  const ownSierraTerrain = ownAtlas ? createSierraTerrainMaterial(undefined, { atlas: ownAtlas }) : null;
   const terrainMaterial = sierra ? (shared?.sierraTerrain(heightmap) ?? ownSierraTerrain ?? undefined) : shared?.terrain;
   const terrain = createIslandMesh(heightmap, p.skirtDepth, terrainMaterial);
   const rocks = createRocks({
     seed: opts.seed + ROCK_SEED_OFFSET,
     heightmap,
     material: sierra ? shared?.sierraRock(heightmap).material : shared?.rock.material,
+    atlas: ownAtlas ?? undefined,
   });
   const palms = sierra
     ? createSierraPines({
@@ -342,6 +345,16 @@ export function createIsland(opts: CreateIslandOptions): Island {
     structures.mesh,
     waterfallSocket,
   );
+  // §T.132: WHICH island each draw belongs to. The sierra materials read the
+  // horizon/info layer and the joint/sheet numbers off object-group uniforms
+  // filled from this — so it has to be stamped before the first frame, and on
+  // every mesh (§B85: three only runs the hook for uniforms the shader
+  // actually compiled in, and terrain and rocks reference different subsets).
+  if (sierra) {
+    if (shared) shared.tagSierra(group, heightmap);
+    else if (ownAtlas) tagSierraIsland(group, ownAtlas.bind(heightmap));
+  }
+
   const [px, pz] = opts.position;
   group.position.set(px, 0, pz);
 
@@ -454,6 +467,8 @@ export function createIsland(opts: CreateIslandOptions): Island {
       rocks.dispose();
       terrain.dispose();
       ownSierraTerrain?.dispose();
+      ownAtlas?.dispose();
+      if (sierra && shared) shared.releaseSierra(heightmap);
     },
   };
 }

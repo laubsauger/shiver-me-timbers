@@ -99,15 +99,15 @@ import { terrainParams } from '../params/terrain';
 import { bandLimitedEdge, coordFilter, periodResolved } from '../ship/bandLimit';
 import { reliefNormal } from '../ship/surfaceRelief';
 import { sierraParams, type SierraParams } from '../params/sierra';
-import { createHorizonTextures, horizonNodes, type HorizonMap, type HorizonTextures } from './horizonMap';
+import { horizonNodes, type HorizonSource } from './horizonMap';
 import {
-  createTerrainInfoTexture,
   terrainInfoNodes,
   TerrainInfoChannels,
-  type TerrainInfo,
   type TerrainInfoNodes,
-  type TerrainInfoTexture,
 } from './terrainInfo';
+// TYPE-ONLY, deliberately: sierraAtlas.ts imports `jointAxes`/`sheetPhase`
+// from here at runtime, and a type import is erased, so the two do not cycle.
+import type { SierraAtlas } from './sierraAtlas';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AnyNode = any;
@@ -727,11 +727,11 @@ export function sierraSurfaceCpu(pt: SierraPointCpu, p: SierraParams = sierraPar
 /** sky AO → aoNode, sun self-shadow → receivedShadowNode (§T.112a item 4) */
 function applyHorizon(
   material: THREE.MeshStandardNodeMaterial,
-  tex: HorizonTextures,
+  src: HorizonSource,
   sunDir: AnyNode,
   u: SierraUniforms,
 ): AnyNode {
-  const h = horizonNodes(tex, sunDir, u.shadowSoftness);
+  const h = horizonNodes(src, sunDir, u.shadowSoftness);
   material.aoNode = mix(float(1), h.skyAO, u.skyAoStrength);
   const sunTerm = mix(float(1), h.sunVisibility, u.shadowStrength);
   material.receivedShadowNode = Fn(([shadow]: [AnyNode]) => shadow.mul(sunTerm)) as any;
@@ -739,44 +739,54 @@ function applyHorizon(
 }
 
 export interface SierraMaterialOptions {
-  /** baked horizon map for THIS island; omit for a horizon-less shared handle */
-  horizon?: HorizonMap;
-  /** baked terrain info for THIS island (T112d); omit with `horizon` for the R0 path */
-  info?: TerrainInfo;
-  /** unit ice-flow azimuth (rad) — `hm.sierra.iceAzimuth`; the sheeting fallback axis */
-  iceAzimuth?: number;
+  /**
+   * §T.132: the shared island atlas. Present ⇒ the material reads every
+   * per-island field (horizon planes, terrain info) out of an array-texture
+   * LAYER named by an object-group uniform, so ONE material draws every sierra
+   * island. Absent ⇒ the horizon-less, info-less handle (tests, the R0 path).
+   *
+   * There is deliberately no "just this one island's textures" option any
+   * more. That was the shape that produced six materials, six programs and
+   * 21 s of codegen for six islands under a comment claiming they shared.
+   */
+  atlas?: SierraAtlas;
 }
 
 interface IslandBindings {
-  horizonTex: HorizonTextures | null;
-  infoTex: TerrainInfoTexture | null;
+  horizon: HorizonSource | null;
   infoNodes: TerrainInfoNodes | null;
   jointOffset: AnyNode;
   jointDirA: AnyNode;
   jointDirB: AnyNode;
   bandPhase: AnyNode;
-  dispose(): void;
 }
 
 function bindIsland(opts: SierraMaterialOptions): IslandBindings {
-  const horizonTex = opts.horizon ? createHorizonTextures(opts.horizon) : null;
-  const infoTex = opts.info ? createTerrainInfoTexture(opts.info) : null;
-  const infoNodes = infoTex ? terrainInfoNodes(infoTex, positionLocal.xz) : null;
-  const [ox, oz] = opts.info?.jointNoiseOffset ?? [0, 0];
-  const az = opts.iceAzimuth ?? 0;
-  const [a, b] = jointAxes(az);
+  const atlas = opts.atlas;
+  if (!atlas) {
+    return {
+      horizon: null,
+      infoNodes: null,
+      jointOffset: vec2(0, 0),
+      jointDirA: vec2(Math.cos(JOINT_AZIMUTH_A), Math.sin(JOINT_AZIMUTH_A)),
+      jointDirB: vec2(Math.cos(JOINT_AZIMUTH_B), Math.sin(JOINT_AZIMUTH_B)),
+      bandPhase: float(0),
+    };
+  }
+  const u = atlas.uniforms;
+  // `.depth()` wants an integer index; the uniform stays a float so the object
+  // group packs as one scalar block (three has no int object-group path here)
+  const layer = u.layer.toInt();
   return {
-    horizonTex,
-    infoTex,
-    infoNodes,
-    jointOffset: vec2(ox, oz),
-    jointDirA: vec2(a[0], a[1]),
-    jointDirB: vec2(b[0], b[1]),
-    bandPhase: float(sheetPhase(az)),
-    dispose(): void {
-      horizonTex?.dispose();
-      infoTex?.dispose();
-    },
+    horizon: { planes: atlas.horizon, layer, radius: u.radius },
+    infoNodes: terrainInfoNodes(
+      { texture: atlas.info, layer, radius: u.radius, texel: atlas.texel, cell: atlas.cell },
+      positionLocal.xz,
+    ),
+    jointOffset: u.jointOffset,
+    jointDirA: u.jointDirA,
+    jointDirB: u.jointDirB,
+    bandPhase: u.bandPhase,
   };
 }
 
@@ -805,7 +815,7 @@ export function createSierraTerrainMaterial(
   const lit = material.colorNode as AnyNode;
   const rough = material.roughnessNode as AnyNode;
   if (!lit || !rough) throw new Error('createSierraTerrainMaterial: blend material has no colour/roughness node'); // §Rule 8
-  const skyAO = bound.horizonTex ? applyHorizon(material, bound.horizonTex, rock.sunDirection, u) : float(1);
+  const skyAO = bound.horizon ? applyHorizon(material, bound.horizon, rock.sunDirection, u) : float(1);
   const surface = buildSierraSurface({
     info: bound.infoNodes,
     skyAO,
@@ -848,7 +858,6 @@ export function createSierraTerrainMaterial(
     },
     dispose(): void {
       base.dispose();
-      bound.dispose();
     },
   };
 }
@@ -869,7 +878,7 @@ export function createSierraRockMaterial(
   const nodes = buildRockNodes(uniforms, terrainParams.noiseOctaves);
   const material = new THREE.MeshStandardNodeMaterial();
   const bound = bindIsland(opts);
-  const skyAO = bound.horizonTex ? applyHorizon(material, bound.horizonTex, uniforms.sunDirection, u) : float(1);
+  const skyAO = bound.horizon ? applyHorizon(material, bound.horizon, uniforms.sunDirection, u) : float(1);
   const surface = buildSierraSurface({
     info: bound.infoNodes,
     skyAO,
@@ -907,7 +916,6 @@ export function createSierraRockMaterial(
     },
     dispose(): void {
       material.dispose();
-      bound.dispose();
     },
   };
 }

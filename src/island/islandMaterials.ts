@@ -34,9 +34,7 @@ import {
   createSierraTerrainMaterial,
   type SierraRockMaterialHandle,
 } from './sierraMaterial';
-import { horizonMapFor } from './horizonMap';
-import { terrainInfoFor } from './terrainInfoBake';
-import type { SierraMaterialOptions } from './sierraMaterial';
+import { createSierraAtlas, tagSierraIsland, type SierraAtlas } from './sierraAtlas';
 import type { IslandHeightmap } from './heightmap';
 import { createPineMaterialSet, type PineMaterialSet } from '../vegetation/pineScatter';
 
@@ -59,18 +57,31 @@ export interface IslandMaterials {
    * Built on first request — a pirate world never asks and never pays for
    * the node graph.
    *
-   * §T.112a: ONE HANDLE PER SIERRA HEIGHTMAP, not per world. The horizon map
-   * (sun self-shadow + sky AO) is a per-island texture and the material binds
-   * it, so two islands cannot share a material object. They DO share the
-   * program: the node graph is identical, only the texture binding differs,
-   * and the WebGPU pipeline cache keys on the generated code. The cost is one
-   * NodeBuilder run per sierra island (≈6 in the slice), not one per mesh.
-   * Called without a heightmap it returns a horizon-less handle (tests, the
-   * R0 path) that every caller without a heightmap shares.
+   * §T.132: ONE HANDLE FOR THE WORLD, whatever the island count. It used to be
+   * one per heightmap, under a comment claiming the six shared a program. They
+   * did not: `2·worldRadius`, the sheeting phase, the joint-noise offset and
+   * the two joint axes were CONSTANTS in the graph, so each island printed its
+   * own WGSL — 6 programs, 12.9 s of terrain codegen and 8.6 s of rock codegen
+   * headless, 58 s of `compileAsync` in the browser, GROWING with island count.
+   * Now the per-island fields live in a shared array texture (sierraAtlas.ts)
+   * and every per-island number is an object-group uniform, so the graph is
+   * island-agnostic: one material, one program, one NodeBuilder run.
+   *
+   * Passing the heightmap still matters — it ALLOCATES the island's atlas
+   * layer and uploads its bakes. Called without one it returns the same handle
+   * with nothing bound for that object (tests, the R0 path).
    */
   sierraTerrain(hm?: IslandHeightmap): TerrainBlendMaterialHandle;
-  /** granite boulders with the island's horizon map — same per-heightmap rule */
+  /** granite boulders off the same atlas — same one-per-world rule */
   sierraRock(hm?: IslandHeightmap): SierraRockMaterialHandle;
+  /**
+   * Stamp the island's atlas binding on every mesh under `root`, so the
+   * object-group uniforms know which island each draw belongs to. Call once
+   * per sierra island after its group is assembled.
+   */
+  tagSierra(root: THREE.Object3D, hm: IslandHeightmap): void;
+  /** hand a destroyed island's atlas layer back to the free list */
+  releaseSierra(hm: IslandHeightmap): void;
   /** pines/junipers/dead pines — same lazy rule, one shader world-wide */
   pines(): PineMaterialSet;
   /**
@@ -128,34 +139,31 @@ export function createIslandMaterials(): IslandMaterials {
     m.outputNode = aerialOutputNode(aerial);
   }
 
-  // §T.112d: the per-island bindings — horizon map (T112a) + terrain-info
-  // texture + the seeded ice axis (the sheeting fallback). One bake each per
-  // heightmap, memoised in their own modules.
-  const sierraOpts = (hm?: IslandHeightmap): SierraMaterialOptions =>
-    hm ? { horizon: horizonMapFor(hm), info: terrainInfoFor(hm), iceAzimuth: hm.sierra?.iceAzimuth ?? 0 } : {};
-  const sierraTerrains = new Map<IslandHeightmap | null, TerrainBlendMaterialHandle>();
-  const sierraRocks = new Map<IslandHeightmap | null, SierraRockMaterialHandle>();
+  // §T.132: the per-island fields (horizon planes, terrain info) live in ONE
+  // array-texture atlas and the per-island numbers in object-group uniforms,
+  // so the two sierra node graphs are built ONCE for the whole world. The
+  // atlas is lazy for the same reason the materials are: a pirate world never
+  // asks and never pays the ~12.6 MB.
+  let atlas: SierraAtlas | null = null;
+  const getAtlas = (): SierraAtlas => (atlas ??= createSierraAtlas());
+  let sierraTerrain: TerrainBlendMaterialHandle | null = null;
+  let sierraRock: SierraRockMaterialHandle | null = null;
   let pines: PineMaterialSet | null = null;
   const getSierraTerrain = (hm?: IslandHeightmap): TerrainBlendMaterialHandle => {
-    const key = hm ?? null;
-    let h = sierraTerrains.get(key);
-    if (!h) {
-      h = createSierraTerrainMaterial(undefined, sierraOpts(hm));
-      sierraTerrains.set(key, h);
-    }
-    return h;
+    const a = getAtlas();
+    if (hm) a.bind(hm);
+    return (sierraTerrain ??= createSierraTerrainMaterial(undefined, { atlas: a }));
   };
   const getSierraRock = (hm?: IslandHeightmap): SierraRockMaterialHandle => {
-    const key = hm ?? null;
-    let h = sierraRocks.get(key);
-    if (!h) {
-      h = createSierraRockMaterial(undefined, sierraOpts(hm));
+    const a = getAtlas();
+    if (hm) a.bind(hm);
+    if (!sierraRock) {
+      sierraRock = createSierraRockMaterial(undefined, { atlas: a });
       // same §B67 rule as the pirate rock: one haze curve per island
-      h.material.fog = false;
-      h.material.outputNode = aerialOutputNode(aerial);
-      sierraRocks.set(key, h);
+      sierraRock.material.fog = false;
+      sierraRock.material.outputNode = aerialOutputNode(aerial);
     }
-    return h;
+    return sierraRock;
   };
   const getPines = (): PineMaterialSet => {
     if (!pines) {
@@ -176,9 +184,15 @@ export function createIslandMaterials(): IslandMaterials {
     structure,
     sierraTerrain: getSierraTerrain,
     sierraRock: getSierraRock,
+    tagSierra(root, hm): void {
+      tagSierraIsland(root, getAtlas().bind(hm));
+    },
+    releaseSierra(hm): void {
+      atlas?.release(hm);
+    },
     pines: getPines,
     update(frame): void {
-      for (const sierraTerrain of sierraTerrains.values()) {
+      if (sierraTerrain) {
         sierraTerrain.updateFromParams();
         sierraTerrain.setSunDirection(frame.sunDirection);
         sierraTerrain.setHazeColor(frame.hazeColor);
@@ -186,7 +200,7 @@ export function createIslandMaterials(): IslandMaterials {
         sierraTerrain.setSwell(frame.swell);
         sierraTerrain.setWaterline(frame.waterLevel);
       }
-      for (const sierraRock of sierraRocks.values()) {
+      if (sierraRock) {
         sierraRock.updateFromParams();
         (sierraRock.uniforms.sunDirection.value as THREE.Vector3).copy(frame.sunDirection).normalize();
       }
@@ -221,8 +235,9 @@ export function createIslandMaterials(): IslandMaterials {
       structure.refresh();
     },
     dispose(): void {
-      for (const h of sierraTerrains.values()) h.dispose();
-      for (const h of sierraRocks.values()) h.dispose();
+      sierraTerrain?.dispose();
+      sierraRock?.dispose();
+      atlas?.dispose();
       pines?.pine.material.dispose();
       terrain.dispose();
       rock.dispose();

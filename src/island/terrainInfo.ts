@@ -199,39 +199,23 @@ export function sheetingDirectionCpu(info: TerrainInfo, x: number, z: number, ic
 
 // ── GPU SIDE ──────────────────────────────────────────────────────────────
 
-export interface TerrainInfoTexture {
-  texture: THREE.DataTexture;
-  radius: number;
-  size: number;
-  cell: number;
-  jointNoiseOffset: [number, number];
-  dispose(): void;
-}
-
 /**
- * One RGBA8 texture over the island's [-R, R]² grid. Linear filtered and
- * mipped (§V48: read under minification from the far island), clamp to edge
- * (the grid border is under water; every mask there is the sea's).
+ * WHAT THE SHADER SAMPLES. §T.132: an ATLAS LAYER, not one island's texture —
+ * `texture` is a `DataArrayTexture` shared by every sierra island, and
+ * `layer`/`radius`/`cell` are OBJECT-GROUP uniform nodes naming the island the
+ * mesh being drawn belongs to. Nothing per-island reaches the node graph as a
+ * constant, so one program serves the world (see sierraAtlas.ts).
  */
-export function createTerrainInfoTexture(info: TerrainInfo): TerrainInfoTexture {
-  const tex = new THREE.DataTexture(info.bytes, info.size, info.size, THREE.RGBAFormat, THREE.UnsignedByteType);
-  tex.name = 'island/terrainInfo';
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
-  tex.magFilter = THREE.LinearFilter;
-  tex.wrapS = THREE.ClampToEdgeWrapping;
-  tex.wrapT = THREE.ClampToEdgeWrapping;
-  tex.generateMipmaps = true;
-  tex.needsUpdate = true;
-  return {
-    texture: tex,
-    radius: info.radius,
-    size: info.size,
-    cell: info.cell,
-    jointNoiseOffset: info.jointNoiseOffset,
-    dispose(): void {
-      tex.dispose();
-    },
-  };
+export interface TerrainInfoSource {
+  texture: THREE.DataArrayTexture;
+  /** which layer this object reads — an int-valued node */
+  layer: AnyNode;
+  /** the island's half-extent (m), as a node */
+  radius: AnyNode;
+  /** uv step of one texel */
+  texel: number;
+  /** metres per texel, as a node */
+  cell: AnyNode;
 }
 
 export interface TerrainInfoNodes {
@@ -255,20 +239,21 @@ export interface TerrainInfoNodes {
  * four neighbours for the curvature gradient — dedupe to one binding and
  * one sampler (§V40: bindings key on texture UUID, not on node).
  */
-export function terrainInfoNodes(tex: TerrainInfoTexture, localXZ: AnyNode = positionLocal.xz): TerrainInfoNodes {
+export function terrainInfoNodes(src: TerrainInfoSource, localXZ: AnyNode = positionLocal.xz): TerrainInfoNodes {
   const enc = TerrainInfoChannels.encode;
-  const uv = localXZ.div(2 * tex.radius).add(0.5);
-  const du = 1 / tex.size;
-  const c = texture(tex.texture, uv);
-  const xp = texture(tex.texture, uv.add(vec2(du, 0))).r;
-  const xm = texture(tex.texture, uv.sub(vec2(du, 0))).r;
-  const zp = texture(tex.texture, uv.add(vec2(0, du))).r;
-  const zm = texture(tex.texture, uv.sub(vec2(0, du))).r;
+  const uv = localXZ.div(src.radius.mul(2)).add(0.5);
+  const du = src.texel;
+  const tap = (at: AnyNode): AnyNode => texture(src.texture, at).depth(src.layer);
+  const c = tap(uv);
+  const xp = tap(uv.add(vec2(du, 0))).r;
+  const xm = tap(uv.sub(vec2(du, 0))).r;
+  const zp = tap(uv.add(vec2(0, du))).r;
+  const zm = tap(uv.sub(vec2(0, du))).r;
   return {
     curvature: c.r.sub(0.5).mul(2 * enc.curvatureRangePerMetre),
     moisture: c.g,
     pathDistance: c.b.mul(enc.pathDistanceMetres),
     debris: c.a.mul(enc.debrisMetres),
-    curvatureGradient: vec2(xp.sub(xm), zp.sub(zm)).div(2 * tex.cell),
+    curvatureGradient: vec2(xp.sub(xm), zp.sub(zm)).div(src.cell.mul(2)),
   };
 }

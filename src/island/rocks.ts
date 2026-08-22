@@ -21,7 +21,7 @@ import { islandParams, type IslandParams } from '../params/island';
 import { sierraParams, type SierraParams } from '../params/sierra';
 import { findShoreRadius, gradientAt, type IslandHeightmap } from './heightmap';
 import { createSierraRockMaterial } from './sierraMaterial';
-import { horizonMapFor } from './horizonMap';
+import type { SierraAtlas } from './sierraAtlas';
 import { terrainInfoFor } from './terrainInfoBake';
 import { decodeTerrainInfo, sheetingDirectionCpu, type TerrainInfo } from './terrainInfo';
 
@@ -944,6 +944,12 @@ export interface CreateRocksOptions {
   heightmap: IslandHeightmap;
   /** inject a shared material (e.g. the island's); default creates its own */
   material?: THREE.Material;
+  /**
+   * §T.132: the island atlas the OWN granite material should read. Only the
+   * unshared path uses it — the shared path injects `material` and never
+   * builds a graph here.
+   */
+  atlas?: SierraAtlas;
 }
 
 export interface Rocks {
@@ -1003,7 +1009,7 @@ export function createRocks(opts: CreateRocksOptions): Rocks {
   const ownMaterial: RockMaterialHandle | null = opts.material
     ? null
     : opts.heightmap.sierra
-      ? createSierraRockMaterial(undefined, { horizon: horizonMapFor(opts.heightmap) })
+      ? createSierraRockMaterial(undefined, { atlas: opts.atlas })
       : createRockMaterial();
   const material = opts.material ?? ownMaterial!.material;
 

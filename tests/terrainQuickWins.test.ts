@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest';
 import { findShoreRadius, generateIslandHeightmap, gradientAt, type IslandHeightmap } from '../src/island/heightmap';
 import { sierraIslandParams } from '../src/island/sierraSites';
 import { bakeHorizonMap, horizonMapFor, sunVisibilityCpu, HORIZON_AZIMUTHS } from '../src/island/horizonMap';
+import { createSierraAtlas } from '../src/island/sierraAtlas';
 import { createSierraRockMaterial, createSierraTerrainMaterial } from '../src/island/sierraMaterial';
 import { createIslandMaterials } from '../src/island/islandMaterials';
 import { convexityAt, generateInlandPlacements, generateRockPlacements } from '../src/island/rocks';
@@ -227,7 +228,9 @@ describe('boulders (§T.112a item 6)', () => {
 describe('sierra materials (§T.112a items 1, 2, 4)', () => {
   it('the terrain handle binds the horizon map (aoNode + receivedShadowNode) and keeps the retint uniforms', () => {
     const hm = hmFor('dome', 0);
-    const h = createSierraTerrainMaterial(undefined, { horizon: horizonMapFor(hm) });
+    const atlas = createSierraAtlas(1);
+    atlas.bind(hm);
+    const h = createSierraTerrainMaterial(undefined, { atlas });
     expect(h.material.aoNode).not.toBeNull();
     expect(h.material.receivedShadowNode).not.toBeNull();
     h.updateFromParams();
@@ -236,18 +239,25 @@ describe('sierra materials (§T.112a items 1, 2, 4)', () => {
     expect(bare.material.aoNode).toBeNull();
     h.dispose();
     bare.dispose();
+    atlas.dispose();
   });
-  it('boulders get a granite handle per island through the shared set, with the §B67 aerial node', () => {
+  // §T.132 / §V80's corollary: this test USED to assert
+  // `sierraRock(a) !== sierraRock(b)`, which wrote the defect down — a handle
+  // per island is six node graphs, six programs and ~21 s of codegen. The
+  // property was never "one handle per island", it was "each island shades as
+  // ITSELF"; that is now object state, so the handles are one. The growth
+  // bound lives in tests/islandMaterialSharing.test.ts.
+  it('boulders share ONE granite handle across islands, with the §B67 aerial node', () => {
     const m = createIslandMaterials();
     try {
       const a = hmFor('dome', 0);
       const b = hmFor('cirque', 0);
       expect(m.sierraRock(a)).toBe(m.sierraRock(a));
-      expect(m.sierraRock(a)).not.toBe(m.sierraRock(b));
+      expect(m.sierraRock(a)).toBe(m.sierraRock(b));
       expect(m.sierraRock(a).material.fog).toBe(false);
       expect(m.sierraRock(a).material.outputNode).not.toBeNull();
       expect(m.sierraRock(a).material.aoNode).not.toBeNull();
-      expect(m.sierraTerrain(a)).not.toBe(m.sierraTerrain(b));
+      expect(m.sierraTerrain(a)).toBe(m.sierraTerrain(b));
       m.sierraRock(a).updateFromParams();
       expect(m.sierraRock(a).uniforms.baseColor.value.getHex()).toBe(sierraParams.graniteBaseColor);
       const own = createSierraRockMaterial();

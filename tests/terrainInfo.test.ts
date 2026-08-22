@@ -22,6 +22,7 @@ import {
 import { bakeTerrainInfo, jointNoiseOffset, terrainInfoFor } from '../src/island/terrainInfoBake';
 import { createIslandMaterials } from '../src/island/islandMaterials';
 import { createSierraRockMaterial, createSierraTerrainMaterial } from '../src/island/sierraMaterial';
+import { createSierraAtlas } from '../src/island/sierraAtlas';
 import { sierraParams } from '../src/params/sierra';
 import terrainInfoSource from '../src/island/terrainInfo.ts?raw';
 import sierraMaterialSource from '../src/island/sierraMaterial.ts?raw';
@@ -254,7 +255,10 @@ describe('§T.112d sierra material', () => {
       expect(h.material.aoNode).not.toBeNull();
       expect(h.material.normalNode).not.toBeNull();
       expect(m.sierraRock(hm).material.aoNode).not.toBeNull();
-      expect(m.sierraTerrain()).not.toBe(h);
+      // §T.132: the handle is the WORLD's, not this island's — asking without
+      // a heightmap returns the same material, because which island a draw
+      // belongs to is object state now, not graph state
+      expect(m.sierraTerrain()).toBe(h);
       h.updateFromParams();
       expect(h.uniforms.rock.baseColor.value.getHex()).toBe(sierraParams.graniteBaseColor);
     } finally {
@@ -263,9 +267,12 @@ describe('§T.112d sierra material', () => {
     const bare = createSierraTerrainMaterial();
     expect(bare.material.aoNode).toBeNull();
     bare.dispose();
-    const rock = createSierraRockMaterial(undefined, { info: terrainInfoFor(dome()), iceAzimuth: 1 });
+    const atlas = createSierraAtlas(1);
+    atlas.bind(dome());
+    const rock = createSierraRockMaterial(undefined, { atlas });
     expect(rock.material.colorNode).not.toBeNull();
     rock.dispose();
+    atlas.dispose();
   });
 
   it('§V40 ledger: sierra terrain fragment ≤ 9 samplers (the deck family budget)', () => {
@@ -274,10 +281,17 @@ describe('§T.112d sierra material', () => {
     //      caustics displacement 3, sun shadow depth 1 (the same six the
     //      pirate terrain pays — see tests/shipBindingBudget.test.ts)
     //   2  horizon planes (T112a)
-    //   1  terrain-info RGBA8 (T112d) — FIVE call sites, ONE texture
+    //   1  terrain-info RGBA8 (T112d)
+    //
+    // §T.132: all three are now ARRAY textures with one layer per island, so
+    // the ledger below is the WHOLE WORLD's, not one island's — it used to be
+    // three textures PER sierra island. The info reader's five taps went
+    // through one `tap()` helper when the layer index arrived, so the source
+    // scan sees one call site where it saw five; the texture count is what the
+    // budget is about and it is unchanged.
     const SHARED_BASE = 6;
     expect(countSites(horizonMapSource)).toBe(2);
-    expect(countSites(terrainInfoSource)).toBe(5);
+    expect(countSites(terrainInfoSource)).toBe(1);
     // the material file itself must add no binding of its own
     expect(countSites(sierraMaterialSource)).toBe(0);
     const horizonTextures = 2;
