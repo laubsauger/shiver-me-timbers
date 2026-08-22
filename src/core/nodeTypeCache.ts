@@ -35,9 +35,28 @@
  *    one graph, and a type answered mid-`setup` is not the final one. Keyed.
  *  - `subBuildFn` — decides which sub-build output a `Fn` call resolves to.
  *    Keyed.
- *  - `subBuildLayers` — `SubBuildNode.getNodeType` pushes a layer, and the
- *    answer then depends on the whole STACK rather than on one comparable
- *    field. Not keyed: the cache is BYPASSED whenever the stack is non-empty.
+ *  - `subBuildLayers` — `SubBuildNode.getNodeType` pushes a layer, and what a
+ *    node's type resolves to then depends on the whole STACK: `subBuild` is
+ *    what `getClosestSubBuild` searches (NodeBuilder.js:2699) and what decides
+ *    which sub-build output a call resolves to. Keyed, on the stack JOINED —
+ *    it is an array of one-word names ('VERTEX', 'NORMAL', 'POSITION') and
+ *    never more than about three deep, so it is as comparable as the four
+ *    scalar fields beside it, and a joined string is a conservative key: it
+ *    distinguishes stacks that `getClosestSubBuild` would treat alike, never
+ *    the reverse.
+ *
+ *    §T.128 — THIS FIELD WAS BYPASSED, AND IT COST ~40 s OF RAFT BOOT. Reading
+ *    "depends on the whole stack" as "cannot be keyed" turned the memo OFF for
+ *    the entire vertex stage, because `NodeMaterial.setupPosition` wraps the
+ *    whole vertex setup in `subBuild(…, 'VERTEX')` (NodeMaterial.js:460) and
+ *    every `varying` wraps its node the same way (VaryingNode.js:135). So the
+ *    exponential re-walk this file exists to kill was still running, in full,
+ *    on every material that displaces or carries a varying. Measured on the
+ *    raft's boot: `piece-sail` 4,049,507 `getNodeType` entries, 100% bypassed,
+ *    0% hit; the sierra terrain 7,791,113, likewise 100% bypassed — against
+ *    the 15%/52% a fragment-only material like the rock was already getting.
+ *    `compileAsync` was 79.2 s of pure main-thread JavaScript, which is what a
+ *    "this tab is not responsive" dialog is made of.
  *  - late `setup` — `Node.build` forces a missing setup stage on demand, so an
  *    `outputNode` can be assigned long after the generate stage began and
  *    every type derived from it changes. An epoch counter bumped on every
@@ -71,6 +90,8 @@ interface Slot {
   buildStage: string | null;
   shaderStage: string | null;
   subBuildFn: string | null;
+  /** `subBuildLayers` joined — '' when the stack is empty (the common case) */
+  subBuildKey: string;
   types: Map<object, string>;
 }
 
@@ -95,6 +116,16 @@ export const nodeTypeCacheStats = {
   resets: 0,
   bypasses: 0,
   epochs: 0,
+  /**
+   * Queries the memo HANDLED inside a sub-build — the vertex stage and every
+   * varying (§T.128). Incremented past the bypass on purpose, so this reads
+   * ZERO the moment sub-builds stop being memoised: it is the direct evidence
+   * that the half of the graph this file used to skip is now covered, and
+   * `tests/nodeTypeCache.test.ts` asserts it is non-zero for the cases carried
+   * to exercise the vertex stage. A ratio bound cannot stand in for it — with
+   * the bypass restored, every material in that suite still clears 400.
+   */
+  subBuildQueries: 0,
 };
 
 /** zero the counters — for a test that measures one build */
@@ -104,6 +135,7 @@ export function resetNodeTypeCacheStats(): void {
   nodeTypeCacheStats.resets = 0;
   nodeTypeCacheStats.bypasses = 0;
   nodeTypeCacheStats.epochs = 0;
+  nodeTypeCacheStats.subBuildQueries = 0;
 }
 
 /**
@@ -160,8 +192,7 @@ export function installNodeTypeCache(): void {
       if (
         builder === undefined ||
         builder === null ||
-        (output !== undefined && output !== null) ||
-        builder.subBuildLayers.length !== 0
+        (output !== undefined && output !== null)
       ) {
         nodeTypeCacheStats.bypasses++;
         return original.call(this, builder, output);
@@ -175,6 +206,11 @@ export function installNodeTypeCache(): void {
       }
 
       const cacheId = builder.cache === null ? -1 : builder.cache.id;
+      // the empty case is the common one and costs no allocation; a sub-build
+      // stack is one to three one-word names, so the join is a few characters
+      const layers = builder.subBuildLayers;
+      const subBuildKey = layers.length === 0 ? '' : layers.join(' ');
+      if (subBuildKey !== '') nodeTypeCacheStats.subBuildQueries++;
       let slot: Slot | undefined;
       for (let i = 0; i < list.length; i++) {
         const s = list[i];
@@ -182,7 +218,8 @@ export function installNodeTypeCache(): void {
           s.cacheId === cacheId &&
           s.buildStage === builder.buildStage &&
           s.shaderStage === builder.shaderStage &&
-          s.subBuildFn === builder.subBuildFn
+          s.subBuildFn === builder.subBuildFn &&
+          s.subBuildKey === subBuildKey
         ) {
           slot = s;
           if (i > 0) {
@@ -198,6 +235,7 @@ export function installNodeTypeCache(): void {
           buildStage: builder.buildStage,
           shaderStage: builder.shaderStage,
           subBuildFn: builder.subBuildFn,
+          subBuildKey,
           types: new Map(),
         };
         list.unshift(slot);
