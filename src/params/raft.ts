@@ -94,6 +94,9 @@ export interface RaftParams {
   radioMeterWidth: number; // EST — signal meter
   radioMeterHeight: number; // EST
   radioCrankReach: number; // EST — m the hand crank stands off the case side
+  radioKnobDiameter: number; // EST — the volume knob [design doc §05: one tuning knob, one volume knob]
+  radioHandleRise: number; // EST — m the carry bail arches above the case top (§T.150: the outline break)
+  radioFootHeight: number; // EST — m the case stands off its crate on rubber feet
   batteryCaseWidth: number; // EST — battery cases beside the set [§3 Radio corner]
   batteryCaseHeight: number; // EST
   batteryCaseDepth: number; // EST
@@ -283,7 +286,17 @@ export interface RaftParams {
   oarInboard: number; // EST — shaft inboard of the pins, m
   oarDip: number; // EST — rad the blade dips below the block
   // --- §6 Deck items (2100 dressing as boxes — all EST against the museum set)
-  crateWidth: number; // EST — pine crates [§6]
+  crateWidth: number; // EST — pine crates [§6]: their FORE-AND-AFT depth
+  /**
+   * …and their ATHWARTSHIPS width, which is the port walkway (§T.152). The
+   * crates stand against the port cabin wall and the man walks outboard of
+   * them, so this dimension alone sets that lane. It was `crateWidth` until
+   * §T.152 measured the lane at 0.41 m of standable centre for a 0.60 m
+   * capsule — "the passageway is not big enough for us to go through,
+   * between the crates and the railing" — and it is a separate knob because
+   * a crate can be narrowed without becoming a smaller crate.
+   */
+  crateBeam: number; // EST
   crateHeight: number; // EST
   jerrycanHeight: number; // EST — 2100 stand-in for the water cans [§6]
   drumDiameter: number; // EST — rain drum (2100)
@@ -292,7 +305,9 @@ export interface RaftParams {
   dinghyHeight: number; // EST
   dinghyThickness: number; // EST
   cageSize: number; // EST — parrot cage under the roof [§6]
-  kitchenBoxSize: number; // EST — Primus box starboard outside the door [§6]
+  kitchenBoxSize: number; // EST — Primus box starboard outside the door [§6]: length + height
+  /** …and its athwartships width — the starboard road, as `crateBeam` is the port one (§T.152) */
+  kitchenBoxWidth: number; // EST
 }
 
 const m = (min: number, max: number, step = 0.01): ParamMeta => ({ min, max, step });
@@ -356,8 +371,17 @@ export const raftParams: RaftParams = registerParams(
     mattressLength: 1.9, // EST — a man's length; laid fore-and-aft [§3 Floor]
     mattressWidth: 0.68, // EST
     mattressHeight: 0.13, // EST
-    partitionLength: 0.96, // EST
-    partitionHeight: 0.95, // EST
+    // §T.150/§B105 — THE CARD SCREEN IS WAIST HIGH AND CLOSES THE NOOK, ⊥ THE
+    // ROOM. USER: "there's still this black huge box in the middle of the
+    // cabin". At 0.96 × 0.95 m it presented 0.63 m² of blank slab from the
+    // doorway and occluded 98.8% of the radio's face behind it — nine times
+    // the set's own area, standing on the one sightline the whole mode is
+    // built around. Now 0.62 m long, which is the nook (crate 0.52 + the
+    // battery cases) and no more, and 0.52 m high, which is BELOW the crate
+    // top: the screen hides the crate and the batteries the way [§3 Radio
+    // corner] wants and the set stands clear above it from any eye in the room.
+    partitionLength: 0.62, // EST
+    partitionHeight: 0.52, // EST
     partitionThickness: 0.04, // EST
     radioCrateWidth: 0.52, // EST
     radioCrateDepth: 0.52, // EST
@@ -369,6 +393,9 @@ export const raftParams: RaftParams = registerParams(
     radioMeterWidth: 0.11, // EST
     radioMeterHeight: 0.07, // EST
     radioCrankReach: 0.12, // EST
+    radioKnobDiameter: 0.042, // EST
+    radioHandleRise: 0.09, // EST
+    radioFootHeight: 0.018, // EST
     batteryCaseWidth: 0.34, // EST
     batteryCaseHeight: 0.26, // EST
     batteryCaseDepth: 0.34, // EST
@@ -558,6 +585,14 @@ export const raftParams: RaftParams = registerParams(
     oarInboard: 1.8, // EST
     oarDip: 0.35, // EST
     crateWidth: 0.6, // EST
+    // §T.152 — 0.6 until the port walkway was measured with the walker's own
+    // capsule: the widest of the three crates reached x = −1.943 on a raft
+    // whose port log face is at −2.721, leaving 0.41 m of standable centre
+    // for a 0.60 m man. 0.36 puts the widest draw at −1.66 and the lane at
+    // 0.71 m — one capsule diameter with a hand's breadth of margin. The
+    // crates keep their 0.6 m depth and 0.5 m height, so they still read as
+    // provision boxes and §B87's three-different-boxes variation survives.
+    crateBeam: 0.36, // EST
     crateHeight: 0.5, // EST
     jerrycanHeight: 0.47, // EST
     drumDiameter: 0.58, // EST
@@ -567,6 +602,10 @@ export const raftParams: RaftParams = registerParams(
     dinghyThickness: 0.35, // EST
     cageSize: 0.4, // EST
     kitchenBoxSize: 0.45, // EST — a Primus box; sized so the strip stays a road (§B78-2)
+    // §T.152 — was `kitchenBoxSize` square: 0.45 held the starboard road to
+    // 0.67 m of standable centre, 0.07 over one capsule. 0.36 opens it to
+    // 0.77, the same margin the port walkway now has.
+    kitchenBoxWidth: 0.36, // EST
   },
   {
     seed: m(0, 99999, 1),
@@ -605,7 +644,10 @@ export const raftParams: RaftParams = registerParams(
     topPoleHeight: m(0.4, 5), mastGapToCabin: m(0.3, 2.5),
     guaraCollarHeight: m(0, 0.3, 0.005), guaraCollarCheek: m(0.02, 0.2, 0.005), guaraSlotClear: m(1.1, 3, 0.05),
     radioCrateHeight: m(0.2, 1), radioDialDiameter: m(0.04, 0.25, 0.005),
+    radioKnobDiameter: m(0.015, 0.09, 0.002), radioHandleRise: m(0, 0.2, 0.005),
+    radioFootHeight: m(0, 0.06, 0.002),
     railHeight: m(0.3, 1.4), railPosts: m(0, 12, 1), railRopeSag: m(0, 0.4),
     crateSizeVar: m(0, 1), crateYawVar: m(0, 0.8),
+    crateBeam: m(0.15, 0.9), kitchenBoxWidth: m(0.15, 0.9),
   },
 );

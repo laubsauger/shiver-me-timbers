@@ -11,8 +11,10 @@ import {
   raftBoardingPoints,
   raftCeilingAt,
   RAFT_FOOT_RADIUS,
+  RAFT_WALK_SLOPE,
 } from '../src/ship/raftDeckField';
 import { DECK_FIELD_BEAM, DECK_FIELD_LENGTH, sampleDeckField } from '../src/ship/deckHeightfield';
+import { barSkirt, readRaftField } from '../src/ship/raftDeckFieldCells';
 import { raftParams } from '../src/params/raft';
 import { playerParams } from '../src/params/player';
 import { createDeckSurface } from '../src/player/deckSurface';
@@ -791,12 +793,306 @@ describe('§T.137 the mats reach the logs\' edges, and the lanes that were roads
    * to touch. Stack the cans ON the crates (or move them to the fore deck)
    * and the walkway opens to ≈ 0.6 m of centre without moving one reference
    * dimension. Un-skip this with that change.
+   *
+   * DONE 2026-08-22 (§T.152) — UN-SKIPPED, and §B102's second half was wrong:
+   * the cans went on top and the walkway still measured 0.41 m, because what
+   * held it was never the cans and never "the log crowns themselves" either.
+   * It was `crate-2`, the middle of the three, whose face reached −1.943 on
+   * the widest draw of `crateWidth`. `free()` runs out to the port log's own
+   * face at −2.70; the crowns cap nothing. The crates' athwartships width is
+   * now its own knob, `crateBeam` = 0.36, and the lane is 0.70 m.
    */
-  it.skip('(ROUTED) the port walkway past the cargo takes a capsule with room', () => {
+  it('(§T.152, was ROUTED) the port walkway past the cargo takes a capsule with room', () => {
     const cap = playerParams.capsuleRadius * 2;
     for (let z = L.cabinAftZ; z <= L.cabinFrontZ; z += 0.05) {
       expect(lane(z, field.minX, -p.cabinWidth / 2), `port walkway at z=${z.toFixed(2)}`)
         .toBeGreaterThanOrEqual(cap);
+    }
+  });
+});
+
+/**
+ * §T.152 — THE MAN IS STOPPED BY NOTHING, AND IT IS THE PORT SIDE HE MEANT.
+ *
+ * USER: "looking forward on the right side the passageway is not big enough
+ * for us to go through, between the crates and the railing — so maybe we can
+ * make the middle crate a little bit less wide… On the right side we also
+ * lost the decking, because now it's super hard to walk there — we have
+ * stumbling between the wooden poles. There is enough space, we just get
+ * stuck in the poles. On the left walkway side we still have it, on the front
+ * we still have it, on the back it's missing and on the right side too."
+ *
+ * WHICH SIDE IS "RIGHT"? `PlayerInput.strafe` is "+ = to the RIGHT" and
+ * `playerStep` turns strafe +1 at yaw 0 into `wx = -1` — so a man facing the
+ * bow has PORT on his right hand. Every clause then lands: his "left walkway"
+ * is the starboard strip (`deck-starboard`, x 1.23 → 2.69), which he still
+ * has; his "right side" is the PORT side, which by the reference [§1 Deck
+ * coverage] is cargo on bare logs and has no mat at all; "the back" is the
+ * stern, bare logs by the same row. Both of the places he says decking is
+ * missing are places the reference says have none — and the user has ruled
+ * (§T.152) that they stay bare. So "we get stuck in the poles" is a defect in
+ * what those bare logs PRESENT TO THE FOOT, and here it is:
+ *
+ * A crossbeam lies ON the logs, so its axis is one radius (0.15 m) above the
+ * crowns; a foot-rail's is 0.06 m above. `barProfile` returned height above
+ * the AXIS clamped at zero, so each member's 35° tangent cone STOPPED IN ITS
+ * OWN AXIS PLANE and ended in a vertical lip of exactly that height. The lip
+ * is well under the walker's 0.4 m `stepUp`, so he never reads it as a wall —
+ * but his 0.15 m slope probe reads a 7 : 1 face and `admits()` refuses the
+ * stride. Five crossbeams cross the port walkway between the cabin's ends,
+ * every 0.91 m, and NONE of them is buried (the mats stop at the cabin's
+ * side): the man walking forward past the cargo was stopped dead at every
+ * one. `barSkirt` now runs the cone on down past the axis plane until the
+ * logs take over, and the same skirt now wraps the members' ENDS.
+ *
+ * MEASURED ON THE BUILT FIELD with §T115's own instrument (free = deck, no
+ * wall, headroom, capsule footprint), widest free run of capsule CENTRES:
+ *
+ *   starboard road (min over the decked length)   0.67 m → 0.76 m
+ *   port walkway   (min alongside the cargo)      0.41 m → 0.70 m
+ *   stern          (min abaft the cabin's wall)   1.18 m → 1.18 m
+ *   fore deck      (min forward of the cabin)     1.47 m → 1.47 m
+ *
+ * READ THAT HONESTLY, twice over. (1) The skirt fix moved NO lane width by a
+ * millimetre — it could not, a lip is not a wall — and yet it is the whole of
+ * the stumbling: the widths above were already walkable and the man still
+ * could not walk them. (2) The two lanes that did move, moved because the
+ * STORES got narrower, exactly as the user asked: `crateBeam` 0.60 → 0.36 and
+ * `kitchenBoxWidth` 0.45 → 0.36. §B102 blamed the port walkway's squeeze on
+ * "the log crowns themselves"; it is not — `free()` reaches the port log's
+ * face at x = −2.70, and what held the lane to 0.41 m was `crate-2`'s
+ * outboard face at −1.943. The crowns were never the cap.
+ */
+describe('§T.152 the stumble: the field never presents a face the walker refuses', () => {
+  const R = playerParams.capsuleRadius;
+  const CAP = 2 * R;
+  /** the margin over one capsule diameter every lane past the stores now has */
+  const MARGIN = 0.10;
+  const tanMax = Math.tan((playerParams.maxSlopeDeg * Math.PI) / 180);
+  const F = readRaftField(blueprint, p);
+
+  function free(x: number, z: number): number | null {
+    const y = surface.heightAt(x, z);
+    if (y === null) return null;
+    if (surface.solidAt(x, z)) return null;
+    const c = surface.ceilingAt?.(x, z) ?? null;
+    if (c !== null && c - y < playerParams.crouchHeight) return null;
+    return y;
+  }
+  /** widest free run of capsule centres in [x0, x1] at station z, and where */
+  function run(z: number, x0: number, x1: number): { w: number; a: number; b: number } {
+    let best = 0;
+    let cur = 0;
+    let end = x0;
+    for (let x = x0; x <= x1; x += 0.005) {
+      cur = free(x, z) === null ? 0 : cur + 0.005;
+      if (cur > best) {
+        best = cur;
+        end = x;
+      }
+    }
+    return { w: best, a: end - best, b: end };
+  }
+  /** …and the tightest of them over a stretch */
+  function tightest(z0: number, z1: number, x0: number, x1: number): { w: number; z: number } {
+    let best = { w: Infinity, z: z0 };
+    for (let z = z0; z <= z1 + 1e-9; z += 0.02) {
+      const w = run(z, x0, x1).w;
+      if (w < best.w) best = { w, z };
+    }
+    return best;
+  }
+  /**
+   * Walk the REAL player down a polyline and report the first waypoint he
+   * cannot leave — half a second of no progress is a stumble, not a pause.
+   */
+  function walk(route: Array<[number, number]>): { stuck: [number, number] | null; s: PlayerState } {
+    const y0 = surface.heightAt(route[0][0], route[0][1]);
+    expect(y0, `no deck at the start ${route[0]}`).not.toBeNull();
+    let s = createPlayerState([route[0][0], y0 as number, route[0][1]]);
+    s.grounded = true;
+    let leg = 1;
+    let stall = 0;
+    for (let i = 0; i < 120 * 60 && leg < route.length; i++) {
+      const [tx, tz] = route[leg];
+      const dx = tx - s.pos[0];
+      const dz = tz - s.pos[2];
+      if (Math.hypot(dx, dz) < 0.1) {
+        leg++;
+        stall = 0;
+        continue;
+      }
+      const was: [number, number] = [s.pos[0], s.pos[2]];
+      s = stepPlayer({ ...s, yaw: Math.atan2(dx, dz) }, { ...neutralPlayerInput(), forward: 1 }, surface, DT);
+      const moved = Math.hypot(s.pos[0] - was[0], s.pos[2] - was[1]);
+      stall = moved < playerParams.walkSpeed * DT * 0.5 ? stall + 1 : 0;
+      if (stall > 30) return { stuck: [s.pos[0], s.pos[2]], s };
+    }
+    return { stuck: leg < route.length ? [s.pos[0], s.pos[2]] : null, s };
+  }
+  /** a route down the middle of a lane, station by station — the road itself */
+  function road(z0: number, z1: number, x0: number, x1: number): Array<[number, number]> {
+    const out: Array<[number, number]> = [];
+    const step = z1 > z0 ? 0.25 : -0.25;
+    for (let z = z0; step > 0 ? z <= z1 : z >= z1; z += step) {
+      const r = run(z, x0, x1);
+      expect(r.w, `no lane at all at z=${z.toFixed(2)}`).toBeGreaterThan(0);
+      out.push([(r.a + r.b) / 2, z]);
+    }
+    return out;
+  }
+
+  /** …and clear of every solid by a capsule radius, so a wall's own proud
+   *  `data` (SOLID_HEIGHT_CAP) is never mistaken for a member's section */
+  function clear(x: number, z: number): number | null {
+    const y = free(x, z);
+    if (y === null) return null;
+    // …and a capsule's width of deck all round: §V85 keeps the deck edge a
+    // real edge, and one texel outboard of it the field is already diving to
+    // the waterline. A man walking with a shoulder over the sea is not what
+    // "the logs are walkable" has to mean.
+    for (const [dx, dz] of [[R, 0], [-R, 0], [0, R], [0, -R]] as const) {
+      if (surface.heightAt(x + dx, z + dz) === null) return null;
+    }
+    for (const s of F.solids) {
+      const dx = Math.max(s.x0 - x, x - s.x1, 0);
+      const dz = Math.max(s.z0 - z, z - s.z1, 0);
+      if (Math.hypot(dx, dz) <= R) return null;
+    }
+    return y;
+  }
+
+  it('(1) no member ends in a cliff: a bar\'s section, resting on a deck, never exceeds its own 35°', () => {
+    // THE DEFECT ITSELF, as pure maths on the evaluator and independent of
+    // any route. Every bar in the field lies ON something — a crossbeam on
+    // the log crowns, a foot-rail on the outer log's shoulder — so its axis
+    // stands `bar.y - deck` proud of it. Compose exactly what the field
+    // composes, `max(deck, bar.y + skirt(d))`, and walk across it: nothing in
+    // that section may be steeper than the 35° the section is drawn at, which
+    // is what a cone truncated in its own axis plane broke (a vertical lip of
+    // 0.19 m at a crossbeam, 0.08 m at a foot-rail — under `stepUp`, so never
+    // a wall, and a 7 : 1 face to the 0.15 m slope probe).
+    expect(F.bars.length).toBeGreaterThan(0);
+    for (const bar of F.bars) {
+      const deck = L.logTopY - 0.05; // a crown under the bar, at its worst
+      const section = (d: number): number => Math.max(deck, bar.y + barSkirt(Math.abs(d), bar.r));
+      const reach = bar.r * 2 + (bar.y - deck) / RAFT_WALK_SLOPE + 0.3;
+      for (let d = -reach; d < reach; d += 0.005) {
+        expect((section(d + 0.005) - section(d)) / 0.005,
+          `bar at ${bar.at.toFixed(2)}, ${d.toFixed(3)} m off its axis`)
+          .toBeLessThanOrEqual(RAFT_WALK_SLOPE + 1e-9);
+      }
+    }
+  });
+
+  it('(1b) …and the built field agrees where it shows: the port walkway and the stern', () => {
+    // The same property read off the BUILT field, over the two stretches the
+    // user walks: the port walkway (five crossbeams cross it and the mats
+    // bury none of them) and the bare stern. Anything within a capsule of a
+    // solid is skipped — a wall's own proud `data` is not a member's section.
+    const probe = playerParams.slopeProbe;
+    const stretches: Array<[string, number, number, number, number]> = [
+      ['port walkway', L.cabinAftZ, L.cabinFrontZ, field.minX, -p.cabinWidth / 2],
+      ['stern', L.sternZ + 0.3, L.cabinAftZ, field.minX, field.maxX],
+    ];
+    for (const [name, z0, z1, x0, x1] of stretches) {
+      for (let x = x0; x <= x1; x += 0.05) {
+        for (let z = z0; z <= z1 - probe; z += 0.02) {
+          const a = clear(x, z);
+          const b = clear(x, z + probe);
+          if (a === null || b === null) continue;
+          expect(Math.abs(b - a) / probe, `${name}, fore-and-aft at x=${x.toFixed(2)} z=${z.toFixed(2)}`)
+            .toBeLessThanOrEqual(tanMax);
+        }
+      }
+      for (let z = z0; z <= z1; z += 0.05) {
+        for (let x = x0; x <= x1 - probe; x += 0.02) {
+          const a = clear(x, z);
+          const b = clear(x + probe, z);
+          if (a === null || b === null) continue;
+          expect(Math.abs(b - a) / probe, `${name}, athwartships at x=${x.toFixed(2)} z=${z.toFixed(2)}`)
+            .toBeLessThanOrEqual(tanMax);
+        }
+      }
+    }
+  });
+
+  it('(2) THE STUMBLE: a capsule walks the port walkway past the cargo, both ways', () => {
+    // The user's "right side". Five crossbeams cross it and every one of them
+    // stopped him; the lane was never the reason, and is now 0.70 m anyway.
+    const z0 = L.cabinAftZ + 0.3;
+    const z1 = L.cabinFrontZ - 0.1;
+    const x1 = -p.cabinWidth / 2;
+    const fwd = walk(road(z0, z1, field.minX, x1));
+    expect(fwd.stuck, `stopped walking forward past the cargo at ${fwd.stuck?.map((v) => v.toFixed(2))}`).toBeNull();
+    const aft = walk(road(z1, z0, field.minX, x1));
+    expect(aft.stuck, `stopped walking aft past the cargo at ${aft.stuck?.map((v) => v.toFixed(2))}`).toBeNull();
+  });
+
+  it('(3) THE STUMBLE: a capsule walks the starboard road the full decked length, both ways', () => {
+    const strip = piece('deck-starboard');
+    const stripX0 = strip.transform.position[0] + strip.aabb.min[0];
+    const tip = piece('deck-fore-tip');
+    const z0 = L.sternZ + 0.5;
+    const z1 = tip.transform.position[2] + tip.aabb.max[2];
+    // …outboard of the cabin's own side, so the lane is the ROAD and not a
+    // free run that ducks through the doorway
+    const fwd = walk(road(z0, z1, stripX0, field.maxX));
+    expect(fwd.stuck, `stopped on the starboard road at ${fwd.stuck?.map((v) => v.toFixed(2))}`).toBeNull();
+    const aft = walk(road(z1, z0, stripX0, field.maxX));
+    expect(aft.stuck, `stopped on the starboard road at ${aft.stuck?.map((v) => v.toFixed(2))}`).toBeNull();
+  });
+
+  it('(4) THE STUMBLE: the cabin\'s aft wall to `station-tiller`, down the centre and round the quarter', () => {
+    const tiller = socketPos('station-tiller');
+    // where a capsule can actually STAND against the aft wall: its own radius
+    // off the wall's face, not on it
+    const standoff = L.cabinAftZ - R - 0.05;
+    const centre = walk([[0, standoff], [tiller[0], tiller[2]]]);
+    expect(centre.stuck, `stopped on the centreline at ${centre.stuck?.map((v) => v.toFixed(2))}`).toBeNull();
+    // and the helmsman's own way out of the door: down the starboard quarter,
+    // outboard of the aft guaras and the flagpole, then in to the tiller
+    const quarter = walk([[L.halfBeam - 0.25, doorZ], [L.halfBeam - 0.25, tiller[2]], [tiller[0], tiller[2]]]);
+    expect(quarter.stuck, `stopped coming round the quarter at ${quarter.stuck?.map((v) => v.toFixed(2))}`).toBeNull();
+  });
+
+  it('(5) the stores leave a stated margin over one capsule, and the crates are what set the port lane', () => {
+    const strip = piece('deck-starboard');
+    const stripX0 = strip.transform.position[0] + strip.aabb.min[0];
+    const kitchen = piece('kitchen-box');
+    const kZ = [kitchen.transform.position[2] + kitchen.aabb.min[2],
+      kitchen.transform.position[2] + kitchen.aabb.max[2]] as const;
+    const stbd = tightest(kZ[0], kZ[1], stripX0, field.maxX);
+    expect(stbd.w, `starboard road past the kitchen box (${stbd.w.toFixed(3)} m at z=${stbd.z.toFixed(2)})`)
+      .toBeGreaterThanOrEqual(CAP + MARGIN);
+
+    const crates = [1, 2, 3].map((k) => piece(`crate-${k}`));
+    const cZ = [Math.min(...crates.map((c) => c.transform.position[2] + c.aabb.min[2])),
+      Math.max(...crates.map((c) => c.transform.position[2] + c.aabb.max[2]))] as const;
+    const port = tightest(cZ[0], cZ[1], field.minX, -p.cabinWidth / 2);
+    expect(port.w, `port walkway past the crates (${port.w.toFixed(3)} m at z=${port.z.toFixed(2)})`)
+      .toBeGreaterThanOrEqual(CAP + MARGIN);
+
+    // …and §B102's diagnosis corrected while we are here: the walkway's
+    // inboard edge is the WIDEST CRATE's face plus the capsule, not the log
+    // crowns — the crowns are free right out to the port log's face.
+    const widest = Math.min(...crates.map((c) => c.transform.position[0] + c.aabb.min[0]));
+    const at = run(port.z, field.minX, -p.cabinWidth / 2);
+    expect(at.b, 'the port lane ends at the crate, one capsule radius off its face')
+      .toBeCloseTo(widest - R, 1);
+    const face = L.logs[0].x - L.logs[0].r;
+    expect(at.a, 'and reaches the port log\'s own face').toBeLessThan(face + field.texelX * 2);
+  });
+
+  it('(6) determinism: the stores and the field are the same on every build', () => {
+    const again = buildRaftDeckField(buildRaftBlueprint(p), p);
+    expect(again.data).toEqual(field.data);
+    expect(again.solid).toEqual(field.solid);
+    for (const id of ['crate-1', 'crate-2', 'crate-3', 'kitchen-box']) {
+      const a = piece(id);
+      const b = buildRaftBlueprint(p).find((q) => q.id === id) as PieceDef;
+      expect(b.transform.position).toEqual(a.transform.position);
+      expect(b.aabb).toEqual(a.aabb);
     }
   });
 });

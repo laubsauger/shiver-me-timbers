@@ -1351,6 +1351,67 @@ describe('§B87 the cabin is furnished, and the roof is thatch', () => {
     }
   });
 
+  /**
+   * §B109 — THE THATCH COVERS THE SLAB IT IS LAID ON, AND NO LATH RUNS PAST IT.
+   *
+   * USER, looking along the cabin: "is that an intentional premature end of
+   * the roof, or like a gap and then a finishing beam at the end, or is that
+   * just an accident? That looks kinda strange to me." It was an accident, and
+   * it was on ONE slope only — which is the tell. §T.129's course-overlap test
+   * and §T.140's mitre tests both pass while it is broken, because both ask
+   * `thatchCourses` (a pure list of numbers) and neither ever looks at the
+   * BOX THE BUILDER ACTUALLY EMITTED. This test does: it drops a ray onto the
+   * slope from outside at a grid of points and asks whether there is thatch
+   * under it. That is the only question the user was asking.
+   */
+  it('§B109 the built thatch covers its whole slab on BOTH slopes, and no lath tip stands past the fringe', () => {
+    for (const side of ['port', 'starboard'] as const) {
+      const roof = byId.get(`thatch-roof-${side}`)!;
+      const shape = roof.shape ?? {};
+      const sign = (shape.eaveSign ?? 1) < 0 ? -1 : 1;
+      const run = thatchSlabRun(roof.aabb, shape);
+      const thickness = roof.aabb.max[1];
+      const mesh = new THREE.Mesh(buildPieceGeometry(roof.kind, roof.aabb, shape));
+      mesh.updateMatrixWorld(true);
+      // local x of a distance `d` DOWN the slope from the ridge — the same map
+      // the builder uses, so a failure here is the builder's and not the test's
+      const at = (d: number): number => sign * (d - run / 2);
+      const rc = new THREE.Raycaster();
+      const dir = new THREE.Vector3(0, -1, 0);
+      const covered = (d: number, z: number): boolean => {
+        rc.set(new THREE.Vector3(at(d), thickness + 1, z), dir);
+        return rc.intersectObject(mesh, false).length > 0;
+      };
+      const zHalf = (roof.aabb.max[2] - roof.aabb.min[2]) / 2;
+      // the SHORTEST butt of the ragged eave: thatch is owed everywhere above
+      // it, and the fringe below it is the reference's ragged overhang
+      const shortest = Math.min(...thatchEaveButts(run, shape));
+      // sample INSIDE each eave butt: the butts are deliberately parted by a
+      // hair (`eaveRagged`/10) so they read as separate bundles, and a ray down
+      // that parting is meant to miss
+      const segs = Math.max(1, Math.round(shape.eaveSegments ?? 6));
+      const zs: number[] = [];
+      for (let j = 0; j < segs; j++) {
+        for (const f of [0.25, 0.5, 0.75]) zs.push(-zHalf + (2 * zHalf * (j + f)) / segs);
+      }
+      for (const z of zs) {
+        for (let id = 0; id <= 40; id++) {
+          const d = (shortest * (id + 0.5)) / 41;
+          expect(covered(d, z),
+            `${side}: bare slab ${d.toFixed(3)} m down the slope at z ${z.toFixed(2)} — the courses stop short of the eave`,
+          ).toBe(true);
+        }
+      }
+      // AND THE LATHS STOP UNDER THE THATCH. A bamboo lath projecting past the
+      // fringe is the "finishing beam hanging in the air" in the user's frame:
+      // there is nothing for it to hold up out there.
+      const laths = byId.get(`roof-lath-${side}`)!;
+      const lathEnd = Math.max(sign * laths.aabb.min[0], sign * laths.aabb.max[0]) + run / 2;
+      expect(lathEnd, `${side}: a lath runs ${(lathEnd - shortest).toFixed(3)} m past the thatch it carries`)
+        .toBeLessThanOrEqual(shortest + 1e-6);
+    }
+  });
+
   it('the three cabin-side crates are three DIFFERENT crates — size and yaw, pairwise (§T34)', () => {
     const crates = [1, 2, 3].map((k) => byId.get(`crate-${k}`)!);
     const size = (d: PieceDef): [number, number, number] => [
@@ -1384,7 +1445,10 @@ describe('§B87 the cabin is furnished, and the roof is thatch', () => {
       const crates = [1, 2, 3].map((k) => flat.find((d) => d.id === `crate-${k}`)!);
       for (const c of crates) {
         expect(c.transform.rotation[1]).toBeCloseTo(0, 12);
-        expect(c.aabb.max[0] - c.aabb.min[0]).toBeCloseTo(p.crateWidth, 9);
+        // §T.152: athwartships is `crateBeam` (the port walkway), fore-and-aft
+        // is `crateWidth` — one crate, two knobs, both flat at irregularity 0
+        expect(c.aabb.max[0] - c.aabb.min[0]).toBeCloseTo(p.crateBeam, 9);
+        expect(c.aabb.max[2] - c.aabb.min[2]).toBeCloseTo(p.crateWidth, 9);
       }
     } finally {
       shipDetailParams.irregularity = was;

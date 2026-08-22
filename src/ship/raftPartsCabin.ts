@@ -27,7 +27,7 @@ import type { RaftParams } from '../params/raft';
 import type { PieceDef, SocketDef, Vec3 } from './pieceTypes';
 import { mkPiece } from './blueprintParts';
 import { shipDetailParams } from '../params/ship';
-import { thatchCourses } from './pieceGeometryRaft';
+import { thatchCourses, thatchEaveButts } from './pieceGeometryRaft';
 import { vhash, vjitter, vrange } from './variation';
 import { guaraStations, type RaftLayout } from './raftPartsLayout';
 
@@ -163,9 +163,17 @@ export function radioCorner(p: RaftParams, L: RaftLayout): RadioCorner {
     top: r.floor + p.partitionHeight,
   };
   const centre: Vec3 = [(crate.x0 + crate.x1) / 2, crate.top + p.radioHeight / 2, (crate.z0 + crate.z1) / 2];
-  // the player kneels at the nook's mouth: forward of the crate, inboard of it,
-  // and forward of the partition's own forward end
-  const station: Vec3 = [partition.x0 - 0.38, r.floor, partition.z1 + 0.06];
+  // The player kneels at the nook's mouth: forward of the crate, inboard of it.
+  //
+  // §T.150 — MEASURED OFF THE CRATE, ⊥ THE PARTITION. It used to be
+  // `partition.x0 − 0.38`, which made the screen's placement and the player's
+  // both hostage to each other: re-tuning `partitionLength` to stop it
+  // occluding the dial (§B105) would have DRAGGED THE STATION 0.34 m aft into
+  // the crate, and nothing would have said so — the crouch test asserts the
+  // reach to the dial, not that the station stayed where §B87 put it. The
+  // crate is what the set stands on, so the crate is what the kneel is
+  // measured from (§V37: one resolver, asked by everyone).
+  const station: Vec3 = [crate.x1 - 0.01, r.floor, crate.z1 + 0.46];
   // face the set at him. Rotation about +y by θ carries local +z (the face
   // plate, see buildRadioGeometry) to (sin θ, 0, cos θ).
   const yaw = Math.atan2(station[0] - centre[0], station[2] - centre[2]);
@@ -306,11 +314,20 @@ export function buildCabin(p: RaftParams, L: RaftLayout): PieceDef[] {
     // (raftDeckFieldCells.ts: a bamboo member at a level nobody walks on).
     const under = thatchCourses(slabLen, p.roofThickness, shape)[0].bottom;
     // the laths run the un-mitred slope: they are under the thatch, not part
-    // of the cut (a ridge pole is what really sits where they meet)
+    // of the cut (a ridge pole is what really sits where they meet) — and
+    // §B109: they stop at the SHORTEST butt of the ragged eave, because a lath
+    // that reaches past the fringe is a beam holding up nothing, which is half
+    // of what the user saw. `thatchEaveButts` is asked for the number rather
+    // than `slabLen` assumed, so a re-tune of `roofEaveRagged` carries (§V37).
+    // `eaveSign` says which way local +x runs DOWN the slope, so the ridge end
+    // is −sign·slabLen/2 and the lath runs `lathRun` from there — mirrored, the
+    // way the courses above it are (§V37: one map, asked twice)
+    const lathRun = Math.min(...thatchEaveButts(slabLen, shape));
+    const lathX0 = sign > 0 ? -slabLen / 2 : slabLen / 2 - lathRun;
     out.push(
       mkPiece(`roof-lath-${side}`, 'bamboo-deck', [0, 0, 0], {
-        min: [-slabLen / 2, under - p.roofLathSection, -p.cabinLength / 2],
-        max: [slabLen / 2, under, p.cabinLength / 2],
+        min: [lathX0, under - p.roofLathSection, -p.cabinLength / 2],
+        max: [lathX0 + lathRun, under, p.cabinLength / 2],
       }, {
         parent: `thatch-roof-${side}`,
         shape: { laths: p.roofLathCount, section: p.roofLathSection, seed: p.seed + sign, platform: 1 },
@@ -379,24 +396,62 @@ function buildCabinInterior(p: RaftParams, L: RaftLayout): PieceDef[] {
     rotation: [0, s.yaw, 0],
     shape: {
       dial: p.radioDialDiameter,
+      knob: p.radioKnobDiameter,
       meterWidth: p.radioMeterWidth,
       meterHeight: p.radioMeterHeight,
       crank: p.radioCrankReach,
-      // needle rest positions — off-station and reading nothing, which is
-      // where T103 will pick them up
-      dialAngle: -0.75,
-      meterAngle: 0.55,
+      handle: p.radioHandleRise,
+      foot: p.radioFootHeight,
+      volumeAngle: 0.4,
     },
     sockets: [
       // where the wire aerial is made fast on the set (T116/T103 read it)
       { id: 'anchor-aerial-radio', type: 'rope-anchor', position: [-s.width * 0.36, s.height * 0.65, -s.depth * 0.2] },
+      // §T.150 — WHERE THE SOUND COMES FROM: the speaker grille, on the set,
+      // ⊥ `station-radio`, which is a spot on the FLOOR the player kneels at
+      // (§T.123). A panner hung off the station would put the voice at the
+      // player's knees, 0.9 m below and 0.5 m out from the thing making it.
+      { id: 'emitter-radio', type: 'fixture', position: [s.width * 0.19, -s.height * 0.17, s.depth * 0.4] },
     ],
   }));
+  /**
+   * §T.136c / §V62 — THE TWO NEEDLES ARE PIECES, so something the player can
+   * SEE turns when he turns the dial.
+   *
+   * §T.117 merged both into `radio-set`'s single buffer, which meant the one
+   * control the whole mode is built around could only ever move a number: the
+   * exact defect §B100 found twice on this raft (the oar that never rotated,
+   * the guaras that never rose). A piece has a node, a node has a rotation,
+   * and `raftRadio.ts` writes both every frame from the tuner's own snapshot.
+   *
+   * They ride `radio-set`, so the corner's yaw carries them for free (§V71),
+   * and they are `splashboard` — the raft's plain dark plank, which is what a
+   * 6 mm pointer is — because the `radio` family shades by DEPTH over the
+   * piece's own bounds, and a needle's own bounds are 8 mm of depth: it would
+   * have come out half pale plate and half LED.
+   */
+  const dialR = p.radioDialDiameter / 2;
+  const nz = s.depth * 0.44;
+  out.push(mkPiece('radio-needle', 'splashboard', [-s.width * 0.28, -s.height * 0.06, nz], {
+    min: [-0.006, -dialR * 0.12, -0.004],
+    max: [0.006, dialR * 0.86, 0.004],
+  }, { parent: 'radio-set', rotation: [0, 0, -0.75] }));
+  const mh = p.radioMeterHeight;
+  out.push(mkPiece('radio-meter-needle', 'splashboard',
+    [s.width * 0.24, s.height * 0.19 - mh * 0.34, nz], {
+      min: [-0.005, -mh * 0.06, -0.004],
+      max: [0.005, mh * 0.8, 0.004],
+    }, { parent: 'radio-set', rotation: [0, 0, 0.55] }));
+
   const q = radio.partition;
   // "one corner behind a cardboard partition (decorated)" — a fore-aft panel,
-  // leaning the way salvaged card does
+  // leaning the way salvaged card does.
+  //
+  // §T.150/§B105 — IT IS A SCREEN, NOT A SIGHT BLOCK. See `partitionHeight` in
+  // params/raft.ts for the measurement that shrank it; `card` is what stops it
+  // being a slab, which is the other half of the same complaint.
   out.push(on('radio-partition', 'crate', q.x0, q.x1, fy, q.top, q.z0, q.z1,
-    { rotation: [0, 0, 0.035] }));
+    { rotation: [0, 0, 0.035], shape: { card: 1, fold: p.partitionThickness * 1.6, seed: p.seed + 7 } }));
   let by = fy;
   for (let k = 0; k < 2; k++) {
     const shrink = k * 0.03;
@@ -455,7 +510,9 @@ export function buildDressing(p: RaftParams, L: RaftLayout): PieceDef[] {
   const crateX1 = -hw - 0.03;
   let cursor = L.cabinFrontZ - 0.25;
   for (let k = 0; k < 3; k++) {
-    const w = cw * (1 + vjitter(p.crateSizeVar, p.seed, 81, k) * irr);
+    // §T.152: the ATHWARTSHIPS width is its own knob, because it is the port
+    // walkway. Same jitter, so the three still differ in all three dimensions.
+    const w = p.crateBeam * (1 + vjitter(p.crateSizeVar, p.seed, 81, k) * irr);
     const d = cw * (1 + vjitter(p.crateSizeVar, p.seed, 82, k) * irr);
     const h = p.crateHeight * (1 + vjitter(p.crateSizeVar * 0.7, p.seed, 83, k) * irr);
     const standOff = vrange(0, 0.07, p.seed, 84, k) * irr;
@@ -508,9 +565,12 @@ export function buildDressing(p: RaftParams, L: RaftLayout): PieceDef[] {
   // Outside door] — LASHED AGAINST THE WALL (§B78-2): the strip is 1.2 m
   // wide and the walker's capsule is 0.6, so a box standing 0.1 m off the
   // wall left the road forward narrower than the man who uses it.
+  // §T.152: and NARROWER THAN IT IS LONG, for the same reason `crateBeam` is
+  // — the box's athwartships width is the starboard road past it.
   const ks = p.kitchenBoxSize;
+  const kw = p.kitchenBoxWidth;
   const kz1 = L.cabinAftZ + p.cabinOpeningAftOffset - 0.1;
-  out.push(box('kitchen-box', 'crate', hw + 0.03, hw + 0.03 + ks, L.deckY, L.deckY + ks * 0.8, kz1 - ks, kz1));
+  out.push(box('kitchen-box', 'crate', hw + 0.03, hw + 0.03 + kw, L.deckY, L.deckY + ks * 0.8, kz1 - ks, kz1));
 
   // §B87 / ref §10 — A PLANK CHEST lashed on the fore-deck, forward of the
   // cabin and a little to starboard of the centreline, where the reference

@@ -39,10 +39,31 @@ const COS_A = 1 / Math.sqrt(1 + RAFT_WALK_SLOPE * RAFT_WALK_SLOPE);
  * Returns height above the AXIS (0 beyond the cone's foot).
  */
 export function barProfile(d: number, r: number): number {
-  if (r <= 0) return 0;
+  return Math.max(0, barSkirt(d, r));
+}
+
+/**
+ * §T.152 — THE SAME SECTION WITH NO FLOOR UNDER IT: the cone keeps falling
+ * past the axis plane instead of stopping in it.
+ *
+ * A member laid ON something has its axis a radius above what it rests on —
+ * a crossbeam's axis is 0.15 m over the log crowns, a foot-rail's 0.06 m —
+ * so a cone that stopped at the axis plane ended in a VERTICAL LIP of that
+ * height at its foot (0.19 m at a crossbeam, 0.08 m at a foot-rail). The lip
+ * is under the walker's `stepUp`, so he never reads it as a wall; his 0.15 m
+ * slope probe reads it as a 7 : 1 face and `admits()` REFUSES the stride. He
+ * is stopped by nothing, at every beam not buried under a mat — which is the
+ * stumbling §T.152 was opened for. Let the skirt run on down and `Math.max`
+ * against the logs absorbs it wherever it is already below them, leaving one
+ * continuous 35° surface from the log crown to the beam's crown.
+ *
+ * Returns height above the axis, NEGATIVE below it — never clamped.
+ */
+export function barSkirt(d: number, r: number): number {
+  if (r <= 0) return -Infinity;
   const d0 = r * SIN_A;
   if (d <= d0) return Math.sqrt(Math.max(0, r * r - d * d));
-  return Math.max(0, r * COS_A - (d - d0) * RAFT_WALK_SLOPE);
+  return r * COS_A - (d - d0) * RAFT_WALK_SLOPE;
 }
 
 interface LogGeom {
@@ -274,11 +295,13 @@ export function raftStructureAt(F: RaftFieldLayout, x: number, z: number, padX =
   if (!covered) return { y, mask: 0, solid: 0 };
 
   for (const bar of F.bars) {
+    // distance to the bar's AXIS SEGMENT, so its ends carry the same 35°
+    // skirt its sides do — a foot-rail that stops abeam the cabin used to
+    // drop its whole crown in one texel (§T.152)
     const along = bar.axis === 'x' ? x : z;
-    if (along < bar.lo || along > bar.hi) continue;
-    const d = Math.abs((bar.axis === 'x' ? z : x) - bar.at);
-    const h = barProfile(d, bar.r);
-    if (h > 0) y = Math.max(y, bar.y + h);
+    const perp = Math.abs((bar.axis === 'x' ? z : x) - bar.at);
+    const past = Math.max(bar.lo - along, along - bar.hi, 0);
+    y = Math.max(y, bar.y + barSkirt(Math.hypot(perp, past), bar.r));
   }
   for (const s of F.slabs) {
     const dx = Math.max(s.x0 - x, x - s.x1, 0);
