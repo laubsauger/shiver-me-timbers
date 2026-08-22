@@ -103,6 +103,31 @@ describe('scatter (§V2-adjacent determinism + count contract)', () => {
     expect(geometry.getAttribute('instancePhase').count).toBe(5);
     expect(geometry.getAttribute('instanceSway').count).toBe(5);
   });
+
+  it('an EMPTY batch still allocates a legal instance buffer (§T.124, §V28)', () => {
+    // A batch of zero is ordinary: `createSierraPines` asks for one whenever an
+    // island carries no pines, or no drowned treeline. What is not ordinary is
+    // what three does with it. `new InstancedMesh(geo, mat, 0)` allocates a
+    // zero-BYTE `instanceMatrix`, and `InstanceNode` binds that array into
+    // `bindGroup_object` as a `buffer()` uniform whatever its length — its
+    // `Math.max(count, 1)` guards the element COUNT declared in the WGSL, not
+    // the byte length of the buffer. WebGPU then refuses the binding
+    //   Binding size for [Buffer "bindingBuffer_UniformBuffer_N"] is zero
+    // the bind group never creates, and the draw that needed it is dropped
+    // WITHOUT a JS-side error. It cost 40 uncaptured GPU errors on every raft
+    // boot. So: the buffer is never empty, and `count` never lies about it.
+    const geometry = buildPalmGeometry(4);
+    const mesh = scatterPalms({ count: 0, seed: 4, geometry });
+    expect(mesh.count).toBe(0);
+    expect(mesh.instanceMatrix.array.length).toBeGreaterThan(0);
+    // the instanced attributes ride the same draw and have the same failure
+    expect(geometry.getAttribute('instancePhase').array.length).toBeGreaterThan(0);
+    expect(geometry.getAttribute('instanceSway').array.length).toBeGreaterThan(0);
+    // exactly one slot: it is there to keep the binding legal, not to hold
+    // anything, and a bigger floor would be an invented allocation on every
+    // empty batch on every island
+    expect(mesh.instanceMatrix.count).toBe(1);
+  });
 });
 
 describe('vegetation params (§V16)', () => {

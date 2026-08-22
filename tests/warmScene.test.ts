@@ -61,3 +61,57 @@ describe('§T.79 warm-up scene key', () => {
     expect(nodes.getCacheKey(copy, lightsNode)).not.toBe(nodes.getCacheKey(real, lightsNode));
   });
 });
+
+/**
+ * §T.124 — the OTHER two ways the warm-up's render context differs from a real
+ * frame's, both of which showed up as WebGPU validation errors on a clean raft
+ * boot at shipped defaults. Neither is reachable without a device, so what is
+ * pinned here is the three-side fact each fix compensates for: if either of
+ * these ever stops being true, `postPipeline.syncPassTarget` /
+ * `bindCompileTarget` are dead code and should go, not quietly keep running.
+ */
+import RenderContexts from 'three/src/renderers/common/RenderContexts.js';
+import { pass } from 'three/tsl';
+
+describe('§T.124 the warm-up binds a real frame\'s target, not a placeholder', () => {
+  it('a PassNode target is 1×1 until something sizes it', () => {
+    // `PassNode.setSize` runs in its own `updateBefore`, i.e. on the first real
+    // frame — AFTER every warm-up. A warm-up that binds the target without
+    // sizing it hands a 1×1 render target to every node whose `updateBefore`
+    // copies the framebuffer (the ocean's viewportTexture/viewportDepthTexture),
+    // and a 1×1 copy out of the full-size depth attachment is rejected outright:
+    //   Copy origin … (1×1) does not cover the entire subresource … Depth24Plus
+    //   … sample count 4  →  Invalid CommandBuffer
+    const scenePass = pass(new THREE.Scene(), new THREE.PerspectiveCamera());
+    expect(scenePass.renderTarget.width).toBe(1);
+    expect(scenePass.renderTarget.height).toBe(1);
+
+    // and this is the sizing a real frame performs, which syncPassTarget mirrors
+    scenePass.setPixelRatio(2);
+    scenePass.setSize(1800, 985);
+    expect(scenePass.renderTarget.width).toBe(3600);
+    expect(scenePass.renderTarget.height).toBe(1970);
+  });
+
+  it('nothing gives a fresh render context a renderTarget — compileAsync never assigns one', () => {
+    // `WebGPUBackend.copyFramebufferToTexture` branches on
+    // `renderContext.renderTarget`: falsy means "read the CANVAS". `_renderScene`
+    // sets it; `compileAsync` (r180) does not, so a warm-up bound to the HDR
+    // pass target still copied out of the bgra8unorm swapchain —
+    //   copyFramebufferToTexture: Source and destination formats do not match.
+    //   bgra8unorm rgba16float
+    // — and a copy that fails is a copy that did not happen.
+    const contexts = new (RenderContexts as unknown as new () => {
+      get(s: THREE.Scene, c: THREE.Camera, t: THREE.RenderTarget): { renderTarget?: unknown | null };
+    })();
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera();
+    const target = new THREE.RenderTarget(64, 64);
+    const context = contexts.get(scene, camera, target);
+    expect(context.renderTarget ?? null).toBeNull();
+
+    // …and the context is keyed on (scene, camera, target), so assigning the
+    // field before compileAsync fetches it reaches the very same object.
+    expect(contexts.get(scene, camera, target)).toBe(context);
+  });
+});

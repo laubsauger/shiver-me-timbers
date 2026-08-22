@@ -100,7 +100,19 @@ export function sortForLod(placements: PalmPlacement[]): PalmPlacement[] {
 export function scatterPalms(opts: ScatterOptions): THREE.InstancedMesh {
   const generated = generatePlacements(opts.count, opts.seed, opts.placementFn);
   const placements = opts.lodSort ? sortForLod(generated) : generated;
-  const mesh = new THREE.InstancedMesh(opts.geometry, opts.material, opts.count);
+  // §V28 — buffer sizes from sanitized construction-time ints. An island with
+  // no pines (or no drowned treeline) asks for a batch of ZERO, and
+  // `new InstancedMesh(geo, mat, 0)` allocates a zero-BYTE `instanceMatrix`.
+  // three's InstanceNode wraps that array in a `buffer()` uniform regardless
+  // (`Math.max(count, 1)` guards the ELEMENT COUNT, not the byte length), so
+  // it lands in `bindGroup_object` as a zero-size binding — which WebGPU
+  // rejects outright: `Binding size for [Buffer "bindingBuffer_UniformBuffer_N"]
+  // is zero`, the bind group fails to create and that draw is dropped. Keep one
+  // slot so the buffer is always legal; `count` stays truthful at zero, so the
+  // batch still draws nothing and the LOD/cull ramps are unaffected.
+  const slots = Math.max(1, opts.count);
+  const mesh = new THREE.InstancedMesh(opts.geometry, opts.material, slots);
+  mesh.count = opts.count;
 
   const matrix = new THREE.Matrix4();
   const position = new THREE.Vector3();
@@ -111,8 +123,10 @@ export function scatterPalms(opts: ScatterOptions): THREE.InstancedMesh {
   const scale = new THREE.Vector3();
   const up = new THREE.Vector3(0, 1, 0);
 
-  const phases = new Float32Array(opts.count);
-  const sways = new Float32Array(opts.count);
+  // same reason as `slots`: a zero-length instanced attribute is a zero-size
+  // vertex buffer, and the geometry these hang off is shared with the batch
+  const phases = new Float32Array(slots);
+  const sways = new Float32Array(slots);
 
   for (let i = 0; i < placements.length; i++) {
     const pl = placements[i];

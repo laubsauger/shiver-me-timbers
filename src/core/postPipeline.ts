@@ -133,6 +133,9 @@ function finite(v: number, fallback: number): number {
   return Number.isFinite(v) ? v : fallback;
 }
 
+/** scratch for `syncPassTarget` — mirrors PassNode's own `_size` */
+const _passSize = /*@__PURE__*/ new THREE.Vector2();
+
 export function createPostPipeline(
   renderer: THREE.WebGPURenderer,
   scene: THREE.Scene,
@@ -375,6 +378,50 @@ export function createPostPipeline(
   const syncPassTarget = (): void => {
     scenePass.renderTarget.samples = readsDepth ? 0 : renderer.samples;
     scenePass.renderTarget.texture.type = renderer.getColorBufferType();
+    // §T.124 — and the SIZE too, for the same reason and one worse one.
+    // `PassNode`'s target is constructed 1×1 and only sized in its own
+    // `updateBefore`, i.e. on the first real frame. So the warm-up used to bind
+    // a 1×1 target, and any node whose `updateBefore` copies the framebuffer
+    // (the ocean's `viewportTexture`/`viewportDepthTexture`) asked for a 1×1
+    // copy out of the full-size framebuffer:
+    //   Copy origin … (1×1) does not cover the entire subresource (3600×1970)
+    //   of [Texture "depthBuffer"] … Depth24Plus … sample count 4
+    // → `Invalid CommandBuffer from CommandEncoder "copyFramebufferToTexture_2"`.
+    // Mirroring PassNode.updateBefore here also means the first real frame no
+    // longer reallocates the pass target from 1×1, which is exactly the hitch
+    // the warm-up exists to remove.
+    renderer.getSize(_passSize);
+    scenePass.setPixelRatio(renderer.getPixelRatio());
+    scenePass.setSize(_passSize.width, _passSize.height);
+  };
+
+  /**
+   * §T.124. `Renderer.compileAsync` builds its render context from
+   * `this._renderTarget` but never assigns `renderContext.renderTarget`
+   * (r180, Renderer.js:868-935 — `_renderScene` does, `compileAsync` does not).
+   * `WebGPUBackend.copyFramebufferToTexture` branches on exactly that field, so
+   * every framebuffer-copy node warmed under `compileAsync` reads the CANVAS
+   * instead of the pass target it was told to compile against:
+   *   copyFramebufferToTexture: Source and destination formats do not match.
+   *   bgra8unorm rgba16float
+   * (canvas → the ocean's `ocean-scene-color`, whose `internalFormat` correctly
+   * tracks the half-float pass target). A copy that fails is a copy that did not
+   * happen. compileAsync DOES fill `renderContext.textures`/`.depthTexture`
+   * from the bound target, so the one missing assignment is all it takes —
+   * and the context is keyed on (scene, camera, target), so this is the same
+   * object compileAsync is about to fetch and the same one `_renderScene`
+   * overwrites on every real frame.
+   */
+  const bindCompileTarget = (): void => {
+    const contexts = (
+      renderer as unknown as {
+        _renderContexts?: {
+          get(scene: THREE.Scene, camera: THREE.Camera, target: THREE.RenderTarget): { renderTarget?: THREE.RenderTarget };
+        };
+      }
+    )._renderContexts;
+    const context = contexts?.get(scene, camera, scenePass.renderTarget);
+    if (context) context.renderTarget = scenePass.renderTarget;
   };
 
   return {
@@ -399,6 +446,7 @@ export function createPostPipeline(
       const prevMRT = renderer.getMRT();
       renderer.setRenderTarget(scenePass.renderTarget);
       renderer.setMRT(scenePass.getMRT());
+      bindCompileTarget();
       // restore before yielding — see warmObject()
       const pending = renderer.compileAsync(scene, camera, scene);
       renderer.setRenderTarget(prevTarget);
@@ -414,6 +462,7 @@ export function createPostPipeline(
       const prevMRT = renderer.getMRT();
       renderer.setRenderTarget(scenePass.renderTarget);
       renderer.setMRT(scenePass.getMRT());
+      bindCompileTarget();
       // compileAsync runs SYNCHRONOUSLY up to its final await, so restoring
       // the target before awaiting is both safe and REQUIRED: yielding with
       // the pass target still bound would send the next frame's render into
