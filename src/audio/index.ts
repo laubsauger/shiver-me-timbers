@@ -20,7 +20,7 @@
  * ambience takes over so the world is not dead quiet.
  */
 import { createAmbience, type Ambience, type AmbienceEnv } from './ambience';
-import { attachGestureResume, createEngine, type Volumes } from './engine';
+import { attachGestureResume, createEngine, type EngineBuses, type Volumes } from './engine';
 import { cannonBoom, creak, hullHit, splash } from './oneshots';
 import { createSampleLoader, type SampleLoader } from './assets';
 import { createBed, type AmbienceBed } from './bed';
@@ -67,9 +67,37 @@ export interface AudioFrame {
   landDistance?: number;
 }
 
+/**
+ * §V95 — HOW A MODE-SPECIFIC SOURCE JOINS THE ONE GRAPH.
+ *
+ * The facade builds its own arms (bed, ship, combat, music) because every mode
+ * has them. The raft's radio does not belong in that list — `src/audio/` has no
+ * business knowing what a station is — but it absolutely must share the
+ * AudioContext, the listener and the three buses, or it is a second audio path
+ * and §V95 is the invariant that says there is exactly one.
+ *
+ * So the facade offers a seam instead of a slot: hand `attach` a factory and it
+ * is called with the live context and buses the moment they exist (which may be
+ * BEFORE or AFTER the gesture unlock — attaching early is the normal case, so
+ * the pending makers are kept and run inside `resume`). The returned handle is
+ * ticked with every frame's dt and disposed with the system. `src/radio/` never
+ * sees an AudioContext it made itself.
+ */
+export interface AudioAttachment {
+  update(dt: number): void;
+  dispose(): void;
+}
+
+export type AudioAttach = (ctx: BaseAudioContext, buses: EngineBuses) => AudioAttachment;
+
 export interface AudioSystem {
   /** create/resume the AudioContext (also fired by the auto gesture unlock) */
   resume(): Promise<void>;
+  /**
+   * Add an extra source graph on the SAME context and buses (§V95). Returns a
+   * detach function. Safe to call before the context exists.
+   */
+  attach(make: AudioAttach): () => void;
   /** per render frame */
   update(frame: AudioFrame): void;
   /** legacy shape kept alive so existing wiring keeps working */
@@ -100,11 +128,20 @@ export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
   let loader: SampleLoader | null = null;
   /** procedural bed — only built if the samples never showed up */
   let synth: Ambience | null = null;
+  /** §V95 seam: makers waiting for a context, and the graphs they became */
+  const pending = new Set<AudioAttach>();
+  const attached = new Map<AudioAttach, AudioAttachment>();
+  const buildAttachments = (ctx: BaseAudioContext, buses: EngineBuses): void => {
+    for (const make of pending) attached.set(make, make(ctx, buses));
+    pending.clear();
+  };
   const resume = async (): Promise<void> => {
     await engine.resume();
     const ctx = engine.getContext();
     const buses = engine.getBuses();
-    if (!ctx || !buses || bed) return;
+    if (!ctx || !buses) return;
+    buildAttachments(ctx, buses);
+    if (bed) return;
     bed = createBed(ctx, buses.ambience);
     ship = createShipAudio(ctx, buses);
     combat = createEventPlayer(ctx, buses.sfx);
@@ -130,6 +167,17 @@ export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
 
   return {
     resume,
+    attach(make: AudioAttach): () => void {
+      const ctx = engine.getContext();
+      const buses = engine.getBuses();
+      if (ctx && buses) attached.set(make, make(ctx, buses));
+      else pending.add(make);
+      return (): void => {
+        pending.delete(make);
+        attached.get(make)?.dispose();
+        attached.delete(make);
+      };
+    },
     update(a: AudioFrame | AmbienceEnv, legacyDt?: number): void {
       const frame: AudioFrame = isFrame(a)
         ? a
@@ -176,6 +224,7 @@ export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
           combatHeat: 0,
         }),
       );
+      for (const a of attached.values()) a.update(dt);
     },
     play(name, opts) {
       const ctx = engine.getContext();
@@ -214,6 +263,9 @@ export function createAudio(initialVolumes?: Partial<Volumes>): AudioSystem {
       combat?.dispose();
       music?.dispose();
       synth?.dispose();
+      for (const a of attached.values()) a.dispose();
+      attached.clear();
+      pending.clear();
       bed = null;
       ship = null;
       combat = null;

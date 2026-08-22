@@ -260,9 +260,18 @@ export function createLashingMaterial(
  * the piece's own geometry bounds arrive as uniforms (raftMaterialNodes), so
  * one shader draws a two-tone instrument and the §V40 budget is untouched.
  *
- * The LED is picked out of that front band by its CORNER (top starboard, the
- * only thing up there), and it is emissive: in a cabin at noon an unlit red
- * dot is invisible, and "the set is alive" is the whole point of it.
+ * §B111 — THE LED IS PICKED BY A FOURTH DEPTH PLANE, `radioLedPlane`, and by
+ * nothing else. It used to be picked by its CORNER — "top starboard, the only
+ * thing up there" — in the mesh's own normalised bounds, and it has been dark
+ * since the day the hand crank was added: the crank reaches 0.279 in x and the
+ * aerial lead 0.200 in y, so the box those fractions are taken over is
+ * 0.47 × 0.33 rather than the case's 0.40 × 0.26, and the lens landed at
+ * f = (0.785, 0.669) against a gate of (0.88, 0.84). Zero, silently, forever —
+ * §V62's shape, arriving through §V71's door: a part resolved against a bound
+ * that a sibling is free to move. Depth cannot be inflated from a flank, so
+ * `buildRadioGeometry` gives the lens the front 4% of the case to itself and
+ * the shader asks one question. It is emissive because in a cabin at noon an
+ * unlit red dot is invisible, and "the set is alive" is the whole point.
  */
 export function createRadioMaterial(
   frame?: LocalFrame,
@@ -276,6 +285,7 @@ export function createRadioMaterial(
   const uLedGain = uniform(p.radioLedGain);
   const uFacePlane = uniform(p.radioFacePlane);
   const uTrimPlane = uniform(p.radioTrimPlane);
+  const uLedPlane = uniform(p.radioLedPlane);
   const piece = createRaftPieceUniforms();
 
   const pos = positionLocal;
@@ -285,8 +295,8 @@ export function createRadioMaterial(
   // side of a plane blends rather than steps (§V23)
   const onPlate = f.z.sub(uFacePlane).div(float(1).sub(uFacePlane).max(1e-3)).clamp(0, 1);
   const onTrim = f.z.sub(uTrimPlane).div(float(1).sub(uTrimPlane).max(1e-3)).mul(2).clamp(0, 1);
-  // the LED: the front band, top starboard corner, and nothing else is there
-  const led = onTrim.mul(f.x.sub(0.88).mul(25).clamp(0, 1)).mul(f.y.sub(0.84).mul(25).clamp(0, 1));
+  // the LED: the frontmost slice of the case, which only the lens reaches
+  const led = f.z.sub(uLedPlane).div(float(1).sub(uLedPlane).max(1e-3)).clamp(0, 1);
 
   const scuff = triplanarFbm(pos.mul(24), normalLocal, float(6), 3);
   let color: AnyNode = mix(uCase, uFace, onPlate);
@@ -311,6 +321,7 @@ export function createRadioMaterial(
       uLedGain.value = p.radioLedGain;
       uFacePlane.value = p.radioFacePlane;
       uTrimPlane.value = p.radioTrimPlane;
+      uLedPlane.value = p.radioLedPlane;
     },
   };
 }

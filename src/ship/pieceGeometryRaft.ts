@@ -8,7 +8,7 @@
 import * as THREE from 'three';
 import type { AABB } from './pieceTypes';
 import { aabbCenter, aabbSize, mergeNonIndexed } from './pieceGeometryShapes';
-import { vjitter, vrange } from './variation';
+import { vhash, vjitter, vrange } from './variation';
 
 function slab(aabb: AABB): THREE.BufferGeometry {
   const s = aabbSize(aabb);
@@ -223,6 +223,32 @@ export function buildCrateGeometry(aabb: AABB, shape: Record<string, number> = {
     const sides = Math.max(5, Math.round(shape.sides ?? 12));
     return new THREE.CylinderGeometry(r, r, s.y, sides).translate(c.x, c.y, c.z);
   }
+  /**
+   * §T.150 — SALVAGED CARD IS NOT A SLAB. The radio corner's screen was one
+   * flat box, and a flat box the size of a door is what the user kept calling
+   * "this black huge box in the middle of the cabin". A sheet of card that has
+   * been aboard a raft is FOLDED (that is how it got here and how it stands up
+   * at all) and its top edge is TORN, so the shape carries a vertical crease
+   * the light breaks on and a ragged head that never reads as a ruled line.
+   * Same aabb, so the deck field and the §V83 obstacle are untouched.
+   */
+  if ((shape.card ?? 0) > 0) {
+    const n = Math.max(2, Math.round(shape.leaves ?? 5));
+    const fold = Math.max(0, shape.fold ?? s.x * 0.9);
+    const tear = Math.max(0, shape.tear ?? s.y * 0.06);
+    const seed = shape.seed ?? 0;
+    const parts: THREE.BufferGeometry[] = [];
+    for (let k = 0; k < n; k++) {
+      const z0 = aabb.min[2] + (s.z * k) / n;
+      const z1 = aabb.min[2] + (s.z * (k + 1)) / n;
+      // a shallow V about the middle of the run: |2t−1| swings the leaf out
+      const t = (k + 0.5) / n;
+      const off = fold * (Math.abs(2 * t - 1) - 0.5);
+      const top = aabb.max[1] - tear * (0.5 + vhash(seed, 71, k));
+      parts.push(boxBetween(aabb.min[0] + off, aabb.max[0] + off, aabb.min[1], top, z0, z1));
+    }
+    return mergeNonIndexed(parts);
+  }
   const bands = Math.max(0, Math.round(shape.lash ?? 0));
   if (bands === 0) return slab(aabb);
   const rope = Math.max(0.005, shape.lashRope ?? 0.02);
@@ -427,13 +453,26 @@ export function buildThatchRoofGeometry(aabb: AABB, shape: Record<string, number
     }
     // THE EAVE COURSE IS RAGGED: broken into butts of different lengths, so
     // the roof ends in a torn fringe and not a ruled line [§3 Roof]
+    //
+    // §B109 — EACH BUTT SPANS `head` → ITS OWN BUTT, and that span is taken in
+    // DOWN-SLOPE metres before it is mapped through `at`, never by min/max on
+    // the already-mapped x. `at` REVERSES on the port slope (`eaveSign` −1), so
+    // the old `Math.min(x0, bx)`/`Math.max(x0, bx)` — with x0 pinned to the
+    // course's full butt — measured the port butt from the wrong end and drew
+    // it as a `ragged`-wide sliver at the very tip. Everything from the fourth
+    // course's butt down to the fringe went missing on that slope alone, which
+    // is the user's "premature end of the roof… a finishing beam at the end":
+    // 0.23 m of bare bamboo lath along the whole 4.8 m port eave. The
+    // starboard slope was correct the entire time, which is exactly why it
+    // read as deliberate.
     const butts = thatchEaveButts(run, shape);
     const ragged = Math.max(0, shape.eaveRagged ?? 0.05);
     for (let j = 0; j < butts.length; j++) {
       const zA = -zHalf + (s.z * j) / butts.length;
       const zB = -zHalf + (s.z * (j + 1)) / butts.length;
+      const hx = at(head);
       const bx = at(butts[j]);
-      const box = boxBetween(Math.min(x0, bx), Math.max(x0, bx), c.bottom, c.top,
+      const box = boxBetween(Math.min(hx, bx), Math.max(hx, bx), c.bottom, c.top,
         zA + ragged * 0.1, zB - ragged * 0.1);
       // a one-course slope is its own ridge course as well as its own eave
       parts.push(head <= 1e-9 ? mitreFace(box, at(0), ridgeShear) : box);
@@ -464,17 +503,36 @@ export function buildRoofLathsGeometry(aabb: AABB, shape: Record<string, number>
 // ---------------------------------------------------------------------------
 
 /**
- * §B87 — THE RADIO. A jury-rigged shortwave built round a salvaged car-radio
- * face: case, face plate, tuning dial with a needle, signal meter with a
- * needle, speaker grille, one LED, a hand crank on the side and the aerial
- * lead-out. The piece's +z is the FACE; the material (raftMaterials
- * createRadioMaterial) reads local z to tell the pale plate from the dark
- * furniture standing proud of it, so the depth bands below are a contract with
- * it: plate/dial/meter faces below 0.42·d, needles/knob/LED above.
+ * §B87 / §T.150 — THE RADIO. A jury-rigged shortwave built round a salvaged
+ * car-radio face [2100 dressing]: a case on rubber feet, a brow standing over
+ * a recessed tuning dial in its bezel, a signal meter, a speaker grille, two
+ * knobs (tuning and volume — design doc §05 names both), one LED, a carry bail
+ * over the top, a hand crank on the flank and the aerial lead-out.
  *
- * This is the game's main interface (T103 drives the dial), so the dial and
- * the meter are modelled at a size that reads from a crouched player's eye,
- * not at a size that is cheap.
+ * §T.150 — WHY IT GREW. Measured from the doorway, the §T.117 set's silhouette
+ * filled 0.88 of its own convex hull: a block with a stub on the side. A radio
+ * is read by its OUTLINE first and its face second — the user's "it should
+ * look like a radio, have a better shape, more complex than just a box" — so
+ * the parts that earn their triangles here are the ones that notch the
+ * outline: the bail, the brow, the feet, the two proud knobs. 260 → ~540 tris,
+ * against a 14 k raft.
+ *
+ * DEPTH IS THE MATERIAL CONTRACT (raftMaterials createRadioMaterial). The
+ * shader reads local z and nothing else: the body behind `radioFacePlane`, the
+ * pale plate/dial/meter glass between the planes, the dark furniture in front
+ * of `radioTrimPlane`, and — §T.150 — THE LED ALONE in front of
+ * `radioLedPlane`, which is why nothing but the lens may reach `zLed`.
+ *
+ * §B111 — THE LED WAS NEVER LIT, and this is the file that broke it. The
+ * material used to pick the lens out of the front band by its CORNER in the
+ * mesh's own normalised bounds ("top starboard, the only thing up there"), but
+ * the crank reaches 0.279 in x and the aerial lead 0.200 in y, so the box the
+ * fractions are taken over is 0.47 × 0.33, not 0.40 × 0.26 — and the lens sat
+ * at f = (0.785, 0.669) against a gate of (0.88, 0.84). It scored zero at
+ * every fragment from the day the crank was added. A DEPTH plane cannot be
+ * moved by anything bolted to a flank, which is the §V71 lesson: resolve a
+ * part against the surface's own evaluator, not against a bound some sibling
+ * is free to inflate.
  */
 export function buildRadioGeometry(aabb: AABB, shape: Record<string, number> = {}): THREE.BufferGeometry {
   const s = aabbSize(aabb);
@@ -483,50 +541,128 @@ export function buildRadioGeometry(aabb: AABB, shape: Record<string, number> = {
   const h = s.y;
   const d = s.z;
   const dialR = Math.max(0.02, shape.dial ?? w * 0.32) / 2;
+  const knobR = Math.max(0.008, shape.knob ?? w * 0.1) / 2;
   const meterW = Math.max(0.02, shape.meterWidth ?? w * 0.28);
   const meterH = Math.max(0.02, shape.meterHeight ?? h * 0.27);
   const crank = Math.max(0.03, shape.crank ?? 0.12);
-  const dialAngle = shape.dialAngle ?? -0.6;
-  const meterAngle = shape.meterAngle ?? 0.35;
+  const bail = Math.max(0, shape.handle ?? h * 0.3);
+  const foot = Math.max(0, shape.foot ?? h * 0.07);
+  const volumeAngle = shape.volumeAngle ?? 0.4;
   const parts: THREE.BufferGeometry[] = [];
   const zPlate = d * 0.2; // back of the face plate
   const zFace = d * 0.38; // plate surface — the pale field
   const zGlass = d * 0.42; // dial disc / meter glass, still pale
-  const zProud = d * 0.5; // needles, knob, LED — dark
+  const zProud = d * 0.46; // needles, knobs, bezel, brow — dark
+  const zLed = d * 0.5; // THE LENS, and nothing else, ever
 
-  // case + face plate
-  parts.push(boxBetween(-w / 2, w / 2, -h / 2, h / 2, -d / 2, zPlate));
-  parts.push(boxBetween(-w * 0.47, w * 0.47, -h * 0.42, h * 0.42, zPlate, zFace));
+  // FEET: the case stands off the crate on four blocks, so the bottom of the
+  // silhouette is broken and a shadow runs under it
+  const bodyY0 = -h / 2 + foot;
+  for (const fx of [-1, 1]) {
+    for (const fz of [-1, 1]) {
+      const x = fx * w * 0.4;
+      const z = fz * d * 0.26;
+      parts.push(boxBetween(x - w * 0.06, x + w * 0.06, -h / 2, bodyY0 + 1e-4,
+        z - d * 0.09, z + d * 0.09));
+    }
+  }
 
-  // TUNING DIAL, port half of the face: a pale disc with a dark centre knob
-  // and a dark needle — the one control a player must find at a glance
+  // CASE + FACE PLATE. The body stops below the top so the brow can stand
+  // over it: a plain box from foot to lid is the shape we are getting rid of.
+  const browY = h * 0.34;
+  parts.push(boxBetween(-w / 2, w / 2, bodyY0, browY, -d / 2, zPlate));
+  parts.push(boxBetween(-w * 0.47, w * 0.47, -h * 0.42, browY - 1e-4, zPlate, zFace));
+  // THE BROW: a lid that overhangs the plate. It is what stops the face
+  // reading as a printed rectangle — it throws a hard line across the dial at
+  // every hour, and it is the top edge of the outline from the doorway.
+  parts.push(boxBetween(-w / 2, w / 2, browY, h / 2, -d / 2, zProud));
+
+  // TUNING DIAL, port half of the face: a pale disc in a proud bezel with a
+  // dark needle — the one control a player must find at a glance
   const dialX = -w * 0.28;
   const dialY = -h * 0.06;
   const disc = new THREE.CylinderGeometry(dialR, dialR, zGlass - zFace, 14);
   disc.rotateX(Math.PI / 2);
   parts.push(disc.translate(dialX, dialY, (zFace + zGlass) / 2));
-  const needle = boxBetween(-0.006, 0.006, -dialR * 0.1, dialR * 0.86, zGlass, zProud * 0.94);
-  needle.rotateZ(dialAngle);
-  parts.push(needle.translate(dialX, dialY, 0));
+  // the bezel: an open tube round the disc, standing proud of the plate, so
+  // the dial is RECESSED rather than painted on
+  const bezel = new THREE.CylinderGeometry(dialR * 1.14, dialR * 1.14, zProud - zFace, 16, 1, true);
+  bezel.rotateX(Math.PI / 2);
+  parts.push(bezel.translate(dialX, dialY, (zFace + zProud) / 2));
   const knob = new THREE.CylinderGeometry(dialR * 0.26, dialR * 0.3, zProud - zGlass, 8);
   knob.rotateX(Math.PI / 2);
   parts.push(knob.translate(dialX, dialY, (zGlass + zProud) / 2));
 
-  // SIGNAL METER, starboard of the grille, and its needle
+  // THE VOLUME KNOB [design doc §05: "one tuning knob, one volume knob"] —
+  // a second knob low on the starboard half, with a pointer nub so a player
+  // can see which way it is turned
+  const volX = w * 0.4;
+  const volY = -h * 0.24;
+  const vol = new THREE.CylinderGeometry(knobR, knobR * 1.12, zProud - zFace, 10);
+  vol.rotateX(Math.PI / 2);
+  parts.push(vol.translate(volX, volY, (zFace + zProud) / 2));
+  const nub = boxBetween(-0.004, 0.004, 0, knobR * 0.9, zProud - 0.004, zProud);
+  nub.rotateZ(volumeAngle);
+  parts.push(nub.translate(volX, volY, 0));
+
+  // SIGNAL METER, starboard of the brow line, its needle, and a frame that
+  // stands proud of the plate the way a meter's bezel does
   const meterX = w * 0.24;
-  const meterY = h * 0.21;
+  const meterY = h * 0.19;
+  // …the needles themselves are their own PIECES (`radio-needle`,
+  // `radio-meter-needle` in raftPartsCabin), because a needle merged into this
+  // buffer can never move, and §T.136c/§V62 say a control the player turns has
+  // to turn something he can see.
   parts.push(boxBetween(meterX - meterW / 2, meterX + meterW / 2,
     meterY - meterH / 2, meterY + meterH / 2, zFace, zGlass));
-  const mNeedle = boxBetween(-0.005, 0.005, -meterH * 0.05, meterH * 0.8, zGlass, zProud * 0.94);
-  mNeedle.rotateZ(meterAngle);
-  parts.push(mNeedle.translate(meterX, meterY - meterH * 0.34, 0));
+  const rim = 0.006;
+  for (const [ax, ay, bx, by] of [
+    [-meterW / 2 - rim, -meterH / 2 - rim, meterW / 2 + rim, -meterH / 2],
+    [-meterW / 2 - rim, meterH / 2, meterW / 2 + rim, meterH / 2 + rim],
+    [-meterW / 2 - rim, -meterH / 2, -meterW / 2, meterH / 2],
+    [meterW / 2, -meterH / 2, meterW / 2 + rim, meterH / 2],
+  ] as const) {
+    parts.push(boxBetween(meterX + ax, meterX + bx, meterY + ay, meterY + by, zFace, zProud * 0.9));
+  }
 
-  // speaker grille (a recessed panel) and the one LED, top starboard corner
-  parts.push(boxBetween(w * 0.06, w * 0.36, -h * 0.34, h * 0.02, zPlate, zFace * 0.96));
-  const ledR = Math.max(0.008, w * 0.035);
-  const led = new THREE.CylinderGeometry(ledR, ledR, zProud - zFace, 6);
+  // SPEAKER GRILLE: a recessed panel with four proud slats across it. Slats,
+  // because a flat rectangle at this size is a sticker and a hole is a hole.
+  const gx0 = w * 0.04;
+  const gx1 = w * 0.34;
+  const gy0 = -h * 0.36;
+  const gy1 = h * 0.02;
+  parts.push(boxBetween(gx0, gx1, gy0, gy1, zPlate, zFace * 0.96));
+  for (let k = 0; k < 4; k++) {
+    const y = gy0 + ((gy1 - gy0) * (k + 0.5)) / 4;
+    parts.push(boxBetween(gx0, gx1, y - 0.004, y + 0.004, zFace * 0.96, zFace + 0.004));
+  }
+
+  // THE LED, top starboard of the plate. It is the ONLY geometry that reaches
+  // `zLed`, which is the whole of how the shader finds it (§B111).
+  const ledR = Math.max(0.006, w * 0.03);
+  const led = new THREE.CylinderGeometry(ledR, ledR, zLed - zFace, 8);
   led.rotateX(Math.PI / 2);
-  parts.push(led.translate(w * 0.44, h * 0.35, (zFace + zProud) / 2));
+  parts.push(led.translate(w * 0.42, h * 0.06, (zFace + zLed) / 2));
+
+  // THE CARRY BAIL over the top: five short members swung up in an arch. The
+  // single biggest break in the outline, and the reason the set reads as a
+  // thing a person carried aboard rather than a block someone left.
+  const bailR = 0.008;
+  const segs = 5;
+  for (let k = 0; k < segs; k++) {
+    const t0 = k / segs;
+    const t1 = (k + 1) / segs;
+    const px = (t: number): number => (t * 2 - 1) * w * 0.34;
+    const py = (t: number): number => h / 2 + bail * Math.sin(Math.PI * t);
+    const ax = px(t0);
+    const ay = py(t0);
+    const bx = px(t1);
+    const by = py(t1);
+    const len = Math.hypot(bx - ax, by - ay);
+    const seg = boxBetween(-len / 2 - bailR, len / 2 + bailR, -bailR, bailR, -bailR, bailR);
+    seg.rotateZ(Math.atan2(by - ay, bx - ax));
+    parts.push(seg.translate((ax + bx) / 2, (ay + by) / 2, -d * 0.08));
+  }
 
   // HAND CRANK on the starboard side: shaft, arm, knob
   const shaft = new THREE.CylinderGeometry(0.012, 0.012, crank * 0.45, 6);

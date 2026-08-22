@@ -33,8 +33,14 @@ const NOISE_SEED_WHITE = 0x5eaf00d;
 /** short setTargetAtTime constant to de-zipper per-frame param writes */
 const WRITE_TAU = 0.05;
 
-/** looped white noise buffer, deterministic fill */
-function whiteNoiseBuffer(ctx: BaseAudioContext, seed: number): AudioBuffer {
+/**
+ * Looped white noise buffer, deterministic fill.
+ *
+ * EXPORTED for `src/radio/radioAudio.ts` (§V95: one implementation per utility
+ * — the radio's static bed is white noise through a filter, which is this
+ * buffer through `createLoopLayer`, not a third copy of the same twelve lines).
+ */
+export function whiteNoiseBuffer(ctx: BaseAudioContext, seed: number): AudioBuffer {
   const n = Math.floor(ctx.sampleRate * NOISE_SECONDS);
   const buf = ctx.createBuffer(1, n, ctx.sampleRate);
   const data = buf.getChannelData(0);

@@ -35,6 +35,8 @@ import { buildRaftSea, buildRaftVessel } from './raft/raftScene';
 import { createRaftFrame } from './raft/raftFrame';
 import { pushOffRaft, stepRaftShip, placeRaftAtStart } from './raft/raftShip';
 import { applyDebugChannel, bindRaftActions, radio, raftBeach, raftControls } from './raft/raftActions';
+import { installRaftDevHandle } from './raft/raftDevHandle';
+import { createRaftRadio } from './raft/raftRadio';
 import { bootTimeOfDay, calmPreset, createDayClock } from './raft/raftWorld';
 import { raftWorldParams } from './params/raftWorld';
 
@@ -177,6 +179,7 @@ async function boot(): Promise<void> {
     onToggle: () => setFp(!player.isActive()),
   });
   bindRaftActions(player, raftControls, sinks);
+  const radioSet = createRaftRadio({ audio, assembly, sierra: sea.sierra });
   // §T.116: the station being offered, named on screen at its own socket. It
   // reads `player.interact` and the SAME live socket resolver the stations do
   // (§V71), and it goes dark whenever the frame is being captured (§I
@@ -238,6 +241,7 @@ async function boot(): Promise<void> {
       stepRaftShip(raft, raftControls, state.wind, dt);
       aground = frame.tickSea(dt).aground;
       player.step(dt);
+      radioSet.step(dt, raft, clock.hour); // §T.150: after the interact step wrote `radio.tune`
     },
     (alpha, frameDt) => {
       debug.hud.frame(frameDt * 1000);
@@ -285,13 +289,11 @@ async function boot(): Promise<void> {
   bootReady();
   ui.showQuickControls();
 
-  // dev console handle for the lookdev agent (§V.88) — not an interface contract
-  (window as unknown as Record<string, unknown>).__game = {
-    app, state, sky, ui, player, raftControls, radio, beach: raftBeach, clock, followCam, assembly, weather,
-    archipelago: sea.archipelago, cpuOcean: sea.cpuOcean,
-    jumpTo: jump.jumpTo, jumpTargets: jump.targets,
-    setFp,
-  };
+  installRaftDevHandle({
+    app, state, sky, ui, player, raftControls, radio, radioSet, beach: raftBeach, clock, followCam, assembly,
+    weather, archipelago: sea.archipelago, cpuOcean: sea.cpuOcean,
+    jumpTo: jump.jumpTo, jumpTargets: jump.targets, setFp,
+  });
 }
 
 boot();

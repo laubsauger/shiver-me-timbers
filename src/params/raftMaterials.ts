@@ -98,6 +98,15 @@ export interface RaftMaterialParams {
   radioLedGain: number; // emissive multiplier — it must read as LIT in a cabin at noon
   radioFacePlane: number; // 0..1 of the case's depth: everything in front of this is the pale plate
   radioTrimPlane: number; // 0..1: …and in front of THIS is dark furniture. One contract with buildRadioGeometry.
+  /**
+   * §B111 — 0..1 of the case's depth: in front of THIS is the LED lens and
+   * nothing else. It used to be picked out of the front band by its corner in
+   * the mesh's normalised bounds, which the hand crank and the aerial lead
+   * silently moved out from under it, so the one emissive part of the game's
+   * main interface scored zero at every fragment. Depth cannot be inflated by
+   * a part bolted to a flank.
+   */
+  radioLedPlane: number;
   // --- canvas + Kon-Tiki face
   sailTint: number; // RGB multiplier to take the stock linen to ochre [§7 Sail]
   faceFill: number; // rust red
@@ -260,6 +269,7 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     radioLedGain: 1.6,
     radioFacePlane: 0.62,
     radioTrimPlane: 0.915,
+    radioLedPlane: 0.97, // the lens reaches 1.0; the next-frontmost part (bezel, knobs, brow) stops at 0.96
     sailTint: 0xe3cfa3,
     faceFill: 0xb2472a,
     faceOutline: 0x3a2a22,
@@ -302,7 +312,7 @@ export const raftMaterialParams: RaftMaterialParams = registerParams(
     cratePine: colour, crateKhaki: colour, crateBoardWidth: m(0.04, 0.3), jerrycanColor: colour,
     drumColor: colour, dinghyColor: colour, dinghyPatch: m(0, 1), cageColor: colour, crateCard: colour,
     radioCase: colour, radioFace: colour, radioTrim: colour, radioLed: colour,
-    radioLedGain: m(0, 6, 0.05), radioFacePlane: m(0, 1), radioTrimPlane: m(0, 1),
+    radioLedGain: m(0, 6, 0.05), radioFacePlane: m(0, 1), radioTrimPlane: m(0, 1), radioLedPlane: m(0, 1),
     sailTint: colour, faceFill: colour, faceOutline: colour,
     faceCentreV: m(0.2, 0.8), faceHalfWidth: m(0.3, 1.2), faceHalfHeight: m(0.4, 1.5),
     faceCorner: m(0, 0.6), faceStroke: m(0.005, 0.08, 0.001), faceRayInner: m(0.6, 2), faceRayOuter: m(0.8, 2.5),

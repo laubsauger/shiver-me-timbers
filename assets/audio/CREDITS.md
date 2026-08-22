@@ -117,3 +117,38 @@ is a byte-identical duplicate of 55844 and is referenced by nothing — a test i
 `assets/audio/music/` is discovered by glob at build time, not by manifest —
 drop a file in and it is in the game (`src/audio/musicAssets.ts`). Provenance
 for those tracks is not recorded here yet.
+
+---
+
+## Radio (§T.150 / §V87) — placeholder, generated
+
+`assets/audio/radio/` holds the shortwave content the cabin set plays. It is
+declared in `src/radio/stations.ts`, **not** in `src/audio/assets.ts`: a station,
+a frequency or a clip is a manifest edit plus a file drop, and no code path
+branches on which teaching it is (§V87).
+
+Every file here is a **synthesised placeholder** standing in for the Watts
+fragments, made with ffmpeg — no third-party audio, no licence question. They
+are warbling formant tones at speech rate: unintelligible on purpose, so nobody
+mistakes them for content, but they carry through the static the way a voice
+does and they behave correctly under the tuner's gain and HRTF.
+
+| file | stands in for |
+|---|---|
+| `wiggle-a.mp3`, `wiggle-b.mp3` | The Wiggle — fragments |
+| `wiggle-night.mp3` | …and its night callback |
+| `treetops-a.mp3`, `treetops-b.mp3`, `treetops-night.mp3` | Treetops |
+| `lagoon-a.mp3`, `lagoon-b.mp3`, `lagoon-night.mp3` | The Still Lagoon |
+| `lock-chime.mp3` | the soft chime a station lock makes (design doc §05) |
+
+Regenerated with, e.g.:
+
+```sh
+ffmpeg -nostdin -y -f lavfi \
+  -i "aevalsrc=0.33*sin(2*PI*t*(196+34*sin(2*PI*2.7*t)))*(0.35+0.65*abs(sin(2*PI*2.1*t)))*exp(-0.18*t):s=32000:d=3.4" \
+  -ac 1 -c:a libmp3lame -b:a 48k assets/audio/radio/wiggle-a.mp3
+```
+
+**To swap in real clips:** drop the mp3s in this directory and point
+`RADIO_STATIONS` at them. Nothing else changes — `tests/radio.test.ts` proves a
+fourth station is a data edit.
