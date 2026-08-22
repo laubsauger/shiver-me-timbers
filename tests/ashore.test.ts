@@ -293,7 +293,11 @@ describe('§T.100 gangway refinements', () => {
     ];
     for (const [label, g, frame] of cases) {
       const player = atGangway(g);
-      expect(player.interact.focus(), label).toBe('gangway-bow');
+      // §T.145a — the prompt IS the action's precondition: a landing the
+      // step-off would refuse is not offered either. This used to assert
+      // `'gangway-bow'` for all five, which is how "step ashore" came to be
+      // offered in the middle of the ocean.
+      expect(player.interact.focus(), label).toBe(frame === 'world' ? 'gangway-bow' : null);
       player.interact.begin();
       expect(player.state.frame, label).toBe(frame);
       if (frame === 'world') expect(player.state.pos[1], label).toBe(g);

@@ -41,7 +41,18 @@ export interface InteractHost {
 export interface InteractOptions {
   /** WORLD position of a socket, null if it does not exist */
   socketWorld: SocketResolver;
-  /** WORLD ground height at (x,z), null over water — step-off needs it */
+  /**
+   * WORLD ground height at (x,z), null where the field has NO SAMPLE. It is
+   * the raw terrain, not a landfall test: `stepOffLanding` below applies the
+   * §V85 wade rule (ground under more than `swimDepth` of water is sea, not
+   * shore) and so does `ashore.ts`, from this same unfiltered function.
+   *
+   * §T.145a — this used to read "null over water", which no caller honoured
+   * and no caller COULD honour: `createTerrainSurface` measures slope by
+   * finite differences on this function, so a sampler that nulled the
+   * shallows would raise an invisible wall at the water's edge instead of
+   * letting the walker wade in. One rule, applied where it is used.
+   */
   groundAt?: (x: number, z: number) => number | null;
   /** WORLD sea height; absent = flat sea at y = 0. Step-off refuses ground deeper than swimDepth (§T.100) */
   waterAt?: (x: number, z: number) => number;
@@ -164,6 +175,45 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
   };
 
   /**
+   * §T.145a — WHERE A STEP-OFF WOULD PUT THE WALKER, or null when it would put
+   * him in the sea. ONE rule, read by `scan` and by `stepOff`.
+   *
+   * USER: "we're showing the step-ashore stuff while we are in the middle of
+   * the ocean." The test existed — it was inside the ACTION — so E was
+   * correctly inert while the prompt went on offering a gangway over 200 m of
+   * water. A prompt that is not the action's own precondition is free to
+   * disagree with it (§V62), which is why the answer is a shared predicate
+   * rather than a copy of the test in `scan`.
+   *
+   * The rule is the §T.100/§V85 one: land `stepOffDistance` outboard of the
+   * socket, refuse ground under more than `swimDepth` of water (so a wadeable
+   * shallow IS a landing), and refuse a drop the deck edge cannot bridge —
+   * measured from the walker's own feet, which stand on that edge.
+   */
+  const stepOffLanding = (st: RaftStation): { x: number; z: number; g: number } | null => {
+    const s = host.state;
+    if (s.frame !== 'ship' || o.groundAt === undefined) return null;
+    const w = o.socketWorld(st.socket);
+    if (w === null || !w.every(Number.isFinite)) return null;
+    const tw = host.shipToWorld ?? identity;
+    const origin = tw([0, 0, 0]);
+    const out = tw([st.out?.[0] ?? 0, 0, st.out?.[1] ?? 0]);
+    let ox = out[0] - origin[0];
+    let oz = out[2] - origin[2];
+    const l = Math.hypot(ox, oz) || 1;
+    ox /= l;
+    oz /= l;
+    const x = w[0] + ox * p.stepOffDistance;
+    const z = w[2] + oz * p.stepOffDistance;
+    const g = o.groundAt(x, z);
+    if (g === null || !Number.isFinite(g)) return null;
+    if (g < (o.waterAt ?? (() => 0))(x, z) - p.swimDepth) return null;
+    const feet = tw(s.pos);
+    if (Math.abs(g - feet[1]) > p.ashoreVertical) return null;
+    return { x, z, g };
+  };
+
+  /**
    * The stations usable from where the walker stands, nearest first. `aimed`
    * additionally demands that they be LOOKING at it, which is the difference
    * between `focus` (one station, the one being offered) and `inReach` (every
@@ -179,7 +229,9 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
     const hit: Array<{ a: RaftAction; range: number }> = [];
     for (const a of RAFT_ACTIONS) {
       const st = RAFT_STATIONS[a];
-      if (st.kind === 'step-off' && s.frame !== 'ship') continue;
+      // §T.145a: a gangway is offered only when there is somewhere to step —
+      // the action's own precondition, asked before the plaque goes up
+      if (st.kind === 'step-off' && (s.frame !== 'ship' || stepOffLanding(st) === null)) continue;
       if ((st.frame ?? 'ship') !== s.frame && s.frame !== 'swim') continue;
       if (o.enabled !== undefined && !o.enabled(a)) continue;
       const q = socketLocal(st.socket);
@@ -233,29 +285,11 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
   };
 
   const stepOff = (a: RaftAction, st: RaftStation): void => {
-    const s = host.state;
-    if (s.frame !== 'ship' || o.groundAt === undefined) return;
-    const w = o.socketWorld(st.socket);
-    if (w === null) return;
-    const tw = host.shipToWorld ?? identity;
-    const origin = tw([0, 0, 0]);
-    const out = tw([st.out?.[0] ?? 0, 0, st.out?.[1] ?? 0]);
-    let ox = out[0] - origin[0];
-    let oz = out[2] - origin[2];
-    const l = Math.hypot(ox, oz) || 1;
-    ox /= l;
-    oz /= l;
-    const x = w[0] + ox * p.stepOffDistance;
-    const z = w[2] + oz * p.stepOffDistance;
-    const g = o.groundAt(x, z);
-    if (g === null || !Number.isFinite(g)) return;
-    // §T.100/§V85: ground under more than swimDepth of water is not a landing,
-    // and the deck edge must be within ashoreVertical of it — measured from
-    // the walker's own feet, which stand on that edge
-    if (g < (o.waterAt ?? (() => 0))(x, z) - p.swimDepth) return;
-    const feet = tw(s.pos);
-    if (Math.abs(g - feet[1]) > p.ashoreVertical) return;
-    host.setState(enterWorldFrame(s, [x, g, z], { shipToWorld: tw }));
+    const land = stepOffLanding(st);
+    if (land === null) return;
+    host.setState(enterWorldFrame(host.state, [land.x, land.g, land.z], {
+      shipToWorld: host.shipToWorld ?? identity,
+    }));
     host.applyAction(a, 1);
   };
 

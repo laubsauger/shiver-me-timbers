@@ -12,7 +12,6 @@
  *   halyard       → sailUp        value > 0.5
  *   radio         → radio.tune    0..1 (stub store until §T.103)
  *   sleep         → sinks.skipToDawn()
- *   chart         → no-op (§T.104)
  *   push-off      → sinks.pushOff() — `pushOffRaft` in raftShip.ts (§T.100/§T.109)
  *   ladder, gangway-* → no-op here: interact.ts owns the perch and the step-off
  *
@@ -115,7 +114,10 @@ export function applyRaftAction(
     case 'push-off':
       sinks.pushOff?.();
       return true;
-    case 'chart':
+    // §T.145b: 'chart' used to sit at the head of this list returning true for
+    // nothing at all. It is gone from `RaftAction` now, so it falls to
+    // `default` and this table answers FALSE — the shape the header promises
+    // callers can assert on.
     case 'ladder':
     case 'gangway-bow':
     case 'gangway-port':

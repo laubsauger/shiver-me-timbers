@@ -132,9 +132,18 @@ async function boot(): Promise<void> {
     skipToDawn: () => clock.skipToDawn(),
     pushOff: () => void pushOffRaft(raft, raftBeach),
   };
-  // the island field, unfiltered: the player's terrain surface (`ashore.ts`)
-  // and the gangway decide for themselves where water − swimDepth ends ground
-  const groundAt = (x: number, z: number): number => sea.archipelago.seabed.heightAt(x, z);
+  // The island field. UNFILTERED ON PURPOSE, and `null` means "no sample",
+  // never "that is sea": `createTerrainSurface` reads slope off THIS function
+  // by finite differences, so nulling the shallows would put an invisible wall
+  // at the water's edge instead of letting the walker wade in and swim off.
+  // The wade rule (ground under more than `swimDepth` of water is not a
+  // landing) lives in `ashore.ts`, `frames.ts` and `interact.ts`, each from
+  // the same raw samples — §T.145a fixed the gangway to ask it BEFORE it
+  // offers the prompt, not only when E is pressed.
+  const groundAt = (x: number, z: number): number | null => {
+    const g = sea.archipelago.seabed.heightAt(x, z);
+    return Number.isFinite(g) ? g : null;
+  };
   const socketWorld = (id: string): [number, number, number] | null => {
     try {
       return assembly.socketWorldPosition(id);

@@ -8,7 +8,6 @@
  *  - hold-turn   hands on a lever/knob; mouse-x drives the channel while held
  *  - hold-slide  hands on a line/board; mouse-y drives the channel while held
  *  - toggle      one press, one event (sleep request)
- *  - press       one press, a look (chart)
  *  - climb       ladder: up to `station-lookout`, second use comes back down
  *  - step-off    gangway: leave the raft onto ground, if there is any
  *  - press       push-off (§T.100): shove a BEACHED raft off the sand. Done
@@ -36,7 +35,6 @@ export type RaftAction =
   | 'sheet-s'
   | 'halyard'
   | 'radio'
-  | 'chart'
   | 'sleep'
   | 'ladder'
   | 'gangway-bow'
@@ -72,6 +70,20 @@ const guara = (n: 1 | 2 | 3 | 4 | 5): RaftStation => ({
   dir: -1, // mouse DOWN (pitchDelta < 0) pushes the board deeper
 });
 
+/**
+ * §T.145b — NO CHART STATION UNTIL THERE IS A CHART.
+ *
+ * `chart` was a `press` on `station-chart` whose whole implementation was
+ * `case 'chart': return true;` — §T.105's overlay was never built, so walking
+ * to the chart table, being offered `[E] Chart` and getting nothing is the
+ * §V62 defect stated exactly ("the control just does nothing, and it is
+ * discovered by a user reporting that a fix did not work" — USER: "the map is
+ * not working, I can't do anything"). The prop and its `station-chart` socket
+ * stay in the cabin; only the PROMISE is withdrawn. §T.105 re-adds the row in
+ * the same change as the overlay, which is the rule §V62 ends on, and
+ * `tests/interact.test.ts`'s exhaustive "every station moves the world" pass
+ * is what refuses it back without one.
+ */
 export const RAFT_STATIONS: Record<RaftAction, RaftStation> = {
   tiller: { socket: 'station-tiller', kind: 'hold-turn', axis: 'mouse-x', min: -1, max: 1, dir: 1 },
   'guara-1': guara(1),
@@ -83,7 +95,6 @@ export const RAFT_STATIONS: Record<RaftAction, RaftStation> = {
   'sheet-s': { socket: 'station-sheet-s', kind: 'hold-slide', axis: 'mouse-y', min: 0, max: 1, dir: 1 },
   halyard: { socket: 'station-halyard', kind: 'hold-slide', axis: 'mouse-y', min: 0, max: 1, dir: 1 },
   radio: { socket: 'station-radio', kind: 'hold-turn', axis: 'mouse-x', min: 0, max: 1, dir: 1 },
-  chart: { socket: 'station-chart', kind: 'press' },
   sleep: { socket: 'station-mat', kind: 'toggle' },
   ladder: { socket: 'station-ladder', kind: 'climb' },
   'gangway-bow': { socket: 'station-gangway-bow', kind: 'step-off', out: [0, 1] },
@@ -104,7 +115,7 @@ export function isHold(kind: StationKind): boolean {
 
 /**
  * WHAT THE PLAYER IS TOLD A STATION IS (§T.116). Beside the table above on
- * purpose: a second module naming the same eighteen actions would be a second
+ * purpose: a second module naming the same seventeen actions would be a second
  * source of truth (§V95), and `Record<RaftAction, …>` makes an unlabelled new
  * action a COMPILE error here rather than a station that walks up silent.
  *
@@ -156,11 +167,15 @@ export const RAFT_LABELS: Record<RaftAction, StationLabel> = {
   'guara-3': guaraLabel('midships'),
   'guara-4': guaraLabel('stern port'),
   'guara-5': guaraLabel('stern starboard'),
-  'sheet-p': { name: 'Port sheet', verb: 'haul', more: 'haul in', less: 'ease' },
-  'sheet-s': { name: 'Starboard sheet', verb: 'haul', more: 'haul in', less: 'ease' },
+  // §T.145c — NAME THE SAIL. USER: "I can only see the main sheets that we can
+  // adjust, I don't find any way to adjust the other sheets." Both of these
+  // are the MAIN's (`RAFT_ROPE_TABLE['main-lower']`), and saying so is what
+  // tells the player that the topsail and the mizzen are not on this pair —
+  // 'Port sheet' let them read as the sheets of whatever sail was in view.
+  'sheet-p': { name: 'Main sheet — port', verb: 'haul', more: 'haul in', less: 'ease' },
+  'sheet-s': { name: 'Main sheet — starboard', verb: 'haul', more: 'haul in', less: 'ease' },
   halyard: { name: 'Halyard', verb: 'hoist / lower', more: 'hoist', less: 'lower' },
   radio: { name: 'Radio', verb: 'tune', more: 'tune up', less: 'tune down' },
-  chart: { name: 'Chart' },
   sleep: { name: 'Sleeping mat' },
   ladder: { name: 'Ladder' },
   // one wording for all four edges: the player is standing on the one they

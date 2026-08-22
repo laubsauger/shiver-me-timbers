@@ -14,7 +14,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Material } from 'three';
 import { capsuleDistance, createInteract, lookDir, type InteractHost } from '../src/player/interact';
-import { LOOKOUT_SOCKET, RAFT_ACTIONS, RAFT_STATIONS, type RaftAction } from '../src/player/stations';
+import { isHold, LOOKOUT_SOCKET, RAFT_ACTIONS, RAFT_STATIONS, type RaftAction } from '../src/player/stations';
 import { HandBlend, lerpTransform, poseTransform, turnAngle } from '../src/player/handPoses';
 import { attachDebugKeys, debugKeyAction, type DebugChannel } from '../src/player/debugKeys';
 import { createPlayer } from '../src/player/index';
@@ -30,7 +30,9 @@ import { buildRaftDeckField, createRaftCeiling } from '../src/ship/raftDeckField
 import { createDeckSurface } from '../src/player/deckSurface';
 import { createInitialState, type ShipState } from '../src/state/simState';
 import { updateShipRig } from '../src/ship/rigTrim';
-import { applyRaftAction, initialRaftControls } from '../src/raft/raftActions';
+import { applyRaftAction, initialRaftControls, radio } from '../src/raft/raftActions';
+import { buildRiggingPlan } from '../src/ropes/shipRigging';
+import { raftRopeSail } from '../src/ship/raftRigging';
 import { stepRaftShip } from '../src/raft/raftShip';
 
 const DT = 1 / 60;
@@ -99,7 +101,10 @@ describe('§V84 every action has a station on the real raft', () => {
   it('the table covers every member of the union exactly once, and each socket is claimed by one action PER FRAME (§T.100: push-off shares the bow gangway socket from the sand)', () => {
     const keys = RAFT_ACTIONS.map((a) => `${RAFT_STATIONS[a].frame ?? 'ship'}:${RAFT_STATIONS[a].socket}`);
     expect(new Set(keys).size).toBe(keys.length);
-    expect(RAFT_ACTIONS.length).toBe(18);
+    // §T.145b withdrew `chart` (a station whose whole implementation was
+    // `return true`), so seventeen: the count is here to make a silent
+    // addition or removal of a station visible in review, nothing more
+    expect(RAFT_ACTIONS.length).toBe(17);
   });
 
   it('each action fires headlessly through interact at its own socket', () => {
@@ -269,12 +274,16 @@ describe('climb and step-off move the walker', () => {
     expect(host.log.map(([n, v]) => `${n}:${v}`)).toEqual(['ladder:1', 'ladder:0']);
   });
 
-  it('a gangway with no ground (groundAt null) is a no-op; with ground it steps the walker off into the world frame', () => {
+  it('a gangway with no ground (groundAt null) is NOT OFFERED and is a no-op; with ground it steps the walker off into the world frame', () => {
     const g = raftSocket('station-gangway-starboard') as Vec3;
     const { pos, yaw } = standAt(g, [-1, 0, 0]);
     const dry = fakeHost(pos, yaw);
     const ixDry = createInteract(dry, { socketWorld: raftSocket, groundAt: () => null });
-    expect(ixDry.focus()).toBe('gangway-starboard');
+    // §T.145a — this assertion used to read `.toBe('gangway-starboard')`: the
+    // prompt was offered over open water and only E knew better, which is the
+    // §V80 corollary (a test that writes the defect down and then asserts it).
+    expect(ixDry.focus()).toBeNull();
+    expect(ixDry.inReach()).not.toContain('gangway-starboard');
     ixDry.begin();
     expect(dry.state.frame).toBe('ship');
     expect(dry.state.pos).toEqual(pos);
@@ -765,5 +774,200 @@ describe('§T.136c a hold station moves the thing it names', () => {
     const oar = raft.find((q) => q.kind === 'steering-oar');
     expect(oar, 'no steering oar to turn').toBeDefined();
     expect(oar?.shape?.tillerLength, 'the oar has no tiller cross-piece').toBeGreaterThan(0);
+  });
+});
+
+/**
+ * §T.145a — A STEP-OFF IS OFFERED ONLY WHERE THERE IS A LANDFALL.
+ *
+ * USER: "we're showing the step-ashore stuff while we are in the middle of the
+ * ocean." Driven against a SYNTHETIC SEABED both ways, because the property is
+ * about the world under the raft, not about the wiring: the same gangway, the
+ * same stance, four depths of water, and the prompt has to agree with what E
+ * would do at each of them. The threshold is read from `playerParams.swimDepth`
+ * (§V80) — "no ground" means further under the water than a walker can wade,
+ * NOT below zero, which is the §T.121 distinction that keeps a shelving beach
+ * walkable.
+ */
+describe('§T.145a step-off focus follows the ground, not the frame', () => {
+  const gangway = 'gangway-starboard';
+  const socket = raftSocket(RAFT_STATIONS[gangway].socket) as Vec3;
+  const { pos, yaw } = standAt(socket, [-1, 0, 0]);
+  /** the sea surface at the deck edge: the walker's own feet */
+  const seaY = pos[1];
+
+  const cases: Array<{ what: string; depth: number; offered: boolean }> = [
+    { what: 'the open ocean, 200 m of water under her', depth: 200, offered: false },
+    { what: 'a fathom of water — swimming, not wading', depth: P.swimDepth + 0.05, offered: false },
+    { what: 'shallows shallow enough to wade', depth: P.swimDepth - 0.05, offered: true },
+    { what: 'beached: sand standing proud of the water', depth: -0.1, offered: true },
+  ];
+
+  for (const c of cases) {
+    it(`${c.offered ? 'offers' : 'does not offer'} the gangway over ${c.what}`, () => {
+      const host = fakeHost(pos, yaw);
+      const ix = createInteract(host, {
+        socketWorld: raftSocket,
+        groundAt: () => seaY - c.depth,
+        waterAt: () => seaY,
+      });
+      // the plaque and the key are the same statement: whatever focus says,
+      // E does. A prompt that disagrees with its own action is §V62.
+      expect(ix.focus(), `focus over ${c.what}`).toBe(c.offered ? gangway : null);
+      expect(ix.inReach().includes(gangway), `cue over ${c.what}`).toBe(c.offered);
+      ix.begin();
+      expect(host.state.frame, `E over ${c.what}`).toBe(c.offered ? 'world' : 'ship');
+    });
+  }
+
+  it('a shelving island offers the gangway on the side the land is on, and not on the other', () => {
+    // one seabed for the whole raft: dry sand to starboard of x = 2.8, deep
+    // water to port. The two gangways are 4.9 m apart, so one landing is on
+    // the beach and the other is in the sea — the same field, two answers.
+    const groundAt = (x: number): number => seaY + (x - 2.8) * 0.4;
+    for (const [a, back] of [[gangway, [-1, 0, 0]], ['gangway-port', [1, 0, 0]]] as const) {
+      const q = raftSocket(RAFT_STATIONS[a as RaftAction].socket) as Vec3;
+      const stance = standAt(q, back as Vec3);
+      const host = fakeHost(stance.pos, stance.yaw);
+      const ix = createInteract(host, { socketWorld: raftSocket, groundAt: (x) => groundAt(x), waterAt: () => seaY });
+      expect(ix.focus(), `${a} against the shelving beach`).toBe(a === gangway ? gangway : null);
+    }
+  });
+});
+
+/**
+ * §T.145b — EVERY STATION MOVES THE WORLD, EXHAUSTIVELY OVER `RaftAction`.
+ *
+ * This is the test that would have caught the chart: `raftActions.ts` answered
+ * `case 'chart': return true;` and nothing anywhere changed, so the player
+ * walked to the chart table, was offered `[E] Chart` and got silence ("the map
+ * is not working, I can't do anything"). Handled ≠ done, which is §V62's whole
+ * subject, and §B100 is the same shape one level deeper (the channel moved,
+ * the piece did not).
+ *
+ * So the assertion is a SNAPSHOT DIFF over everything a station could
+ * plausibly touch — the sailing controls, the radio's channel, the two sinks
+ * and the walker himself — taken through the real interact path at a stance
+ * that really focuses the station. A new action that drives nothing fails
+ * here on the day it is added, not on the day a user reports it.
+ */
+describe('§T.145b every station that focuses does something (§V62, exhaustive)', () => {
+  const approaches: Vec3[] = [[0, 0, -0.8], [0, 0, 0.8], [0.8, 0, 0], [-0.8, 0, 0]];
+
+  it('taking and working each RaftAction changes observable state', () => {
+    for (const a of RAFT_ACTIONS) {
+      const st = RAFT_STATIONS[a];
+      const controls = initialRaftControls();
+      const sinks = { skipToDawn: () => { fired.dawn++; }, pushOff: () => { fired.push++; } };
+      const fired = { dawn: 0, push: 0 };
+      const q = raftSocket(st.socket) as Vec3;
+
+      let host = fakeHost([0, 0, 0]);
+      let ix = createInteract(host, { socketWorld: raftSocket });
+      let found = false;
+      for (const back of approaches) {
+        const stance = standAt(q, back);
+        host = fakeHost(stance.pos, stance.yaw);
+        host.applyAction = (n: string, v?: unknown) => applyRaftAction(controls, n, v, sinks);
+        if (st.frame !== undefined) host.st.frame = st.frame;
+        ix = createInteract(host, {
+          socketWorld: raftSocket,
+          // dry land level with the feet: the gangways have somewhere real to go
+          groundAt: () => stance.pos[1],
+          waterAt: () => stance.pos[1] - 10,
+        });
+        if (ix.focus() === a) {
+          found = true;
+          break;
+        }
+      }
+      expect(found, `no stance focuses ${a}`).toBe(true);
+
+      const world = (): string => JSON.stringify([controls, radio.tune, fired, host.state.pos, host.state.frame]);
+      const before = world();
+      ix.begin();
+      if (isHold(st.kind)) {
+        // drive the channel the way it still has room to go: `halyard` boots
+        // fully hoisted, so pushing it further up would be a legitimate
+        // no-op and this test would read it as a dead control
+        const want = ix.value(a) < (st.max ?? 1) ? 1 : -1;
+        const raw = want * (st.dir ?? 1);
+        for (let i = 0; i < 40; i++) {
+          ix.step(DT, st.axis === 'mouse-x'
+            ? { yawDelta: -0.05 * raw, pitchDelta: 0 }
+            : { yawDelta: 0, pitchDelta: 0.05 * raw });
+        }
+      }
+      expect(world(), `${a} is handled and changes NOTHING (§V62)`).not.toBe(before);
+    }
+  });
+
+  it('the action table answers FALSE for a name it does not drive', () => {
+    const c = initialRaftControls();
+    // 'chart' was in this table returning true for nothing at all (§T.145b);
+    // the §V62 contract is that an undriven name is REFUSED, loudly
+    expect(applyRaftAction(c, 'chart', 1, { skipToDawn: () => {} })).toBe(false);
+    expect(applyRaftAction(c, 'not-a-station', 1, { skipToDawn: () => {} })).toBe(false);
+  });
+});
+
+/**
+ * §T.145c — THE SHEETS THAT EXIST TRIM THE SAIL THEY NAME, and the ones that
+ * do not exist have somewhere to stand waiting for them.
+ *
+ * USER: "I can only see the main sheets that we can adjust, I don't find any
+ * way to adjust the other sheets… and the back one, where do I adjust the sail
+ * on the back?" Two of the raft's three sails have sheets in §B79's table and
+ * no station. The fix is NOT in this task's files — `RaftControls` carries one
+ * `sheet` scalar for the whole rig, so a topsail station wired today would be
+ * a third knob on the main's channel, which is the §V62 defect wearing the
+ * costume of a fix. What is asserted here is the CONTRACT that fix will need,
+ * in the §T.136c manner: the belay the station binds to is a real socket, and
+ * it is where the answer to the user's question says it is.
+ */
+describe('§T.145c the sheets and the sails they name', () => {
+  const WIND = { direction: 0, speed: 9 };
+  const shipState = (): ShipState => ({
+    id: 'raft', kind: 'player', position: [0, 0, 0], quaternion: [0, 0, 0, 1],
+    velocity: [0, 0, 0], angularVelocity: [0, 0, 0],
+    rudder: 0, sailTrim: 1, flood: 0, damage: {},
+  });
+
+  it('every sheet station moves the canvas: its channel reaches ShipState.sailTrim', () => {
+    const sheets = RAFT_ACTIONS.filter((a) => a.startsWith('sheet-'));
+    expect(sheets.length, 'the raft has no sheet station at all').toBeGreaterThan(0);
+    for (const a of sheets) {
+      const controls = initialRaftControls();
+      controls.sailUp = true;
+      const ship = shipState();
+      const socket = raftAsm.socketWorldPosition(RAFT_STATIONS[a].socket) as Vec3;
+      const host = fakeHost([socket[0], socket[1] - EYE, socket[2] - 0.5], 0, 0);
+      host.applyAction = (n: string, v?: unknown) => applyRaftAction(controls, n, v, { skipToDawn: () => {} });
+      const ix = createInteract(host, { socketWorld: raftSocket });
+      expect(ix.focus(), `${a} not focusable from its own stance`).toBe(a);
+      ix.begin();
+      for (let i = 0; i < 60; i++) ix.step(DT, { yawDelta: 0, pitchDelta: -0.05 });
+      stepRaftShip(ship, controls, WIND, DT);
+      const eased = ship.sailTrim;
+      for (let i = 0; i < 120; i++) ix.step(DT, { yawDelta: 0, pitchDelta: 0.05 });
+      stepRaftShip(ship, controls, WIND, DT);
+      expect(ship.sailTrim, `${a} does not reach the sail`).toBeGreaterThan(eased + 0.5);
+    }
+  });
+
+  it('the mizzen is trimmed from the stern: its sheets belay within reach of the helm', () => {
+    // the ANSWER to "where do I adjust the sail on the back?" — read off the
+    // built rigging plan rather than a constant, so it follows the rig (§V71)
+    const plan = buildRiggingPlan(raft);
+    const belays = plan
+      .filter((r) => r.role === 'sheet' && raftRopeSail(r) === 'mizzen-lower')
+      .map((r) => r.socketB);
+    expect(belays.length, 'the mizzen carries no sheets in the plan').toBe(2);
+    const helm = raftAsm.socketWorldPosition('station-tiller') as Vec3;
+    const stance = { ...createPlayerState([helm[0], helm[1], helm[2]]), grounded: true } as PlayerState;
+    for (const id of belays) {
+      const q = raftAsm.socketWorldPosition(id) as Vec3;
+      expect(capsuleDistance(stance, q, P), `${id} is out of the helmsman's reach`).toBeLessThanOrEqual(P.reach);
+    }
   });
 });
