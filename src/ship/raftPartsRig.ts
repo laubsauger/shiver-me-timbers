@@ -180,8 +180,41 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
     // §B86-1: where a halyard is made fast. Both come down the mast's AFT
     // side (−z on the leg) because the sails hang FORWARD of it — a belay on
     // the fore deck would run the line straight through the mainsail.
+    /**
+     * §T.149 — THE BIPOD CARRIES BOTH SQUARE SAILS' SHEETS, AND THE TWO
+     * STATIONS THAT HAUL THEM.
+     *
+     * USER: "I have to go inside the cabin, in the forward left corner —
+     * that's where I can interact with the sail, and it's kinda weird. It
+     * should be on the sides of the sail, on the masts, so that I can do it
+     * from being on deck while looking at it."
+     *
+     * Each pin and its station are AUTHORED AT THE SAME POINT, so the pair
+     * cannot drift the way §B104 measured them drifting (6.4 m): move the
+     * belay and the stance goes with it, because they are one position.
+     *
+     * WHICH PIN IS WHERE is the rig's own logic, not taste:
+     *  · the MAIN's clews hang wide and LOW — the foot of a 4.6 m sail on a
+     *    6.5 m mast is at deck height — so its sheet comes in to a cleat at
+     *    the leg's FOOT, on the OUTBOARD face the clew leads from;
+     *  · the TOPSAIL's clews are 6.6 m up, so its sheets come down the leg's
+     *    INBOARD face to a pin at eye height, well clear of the main's.
+     * The two are 1.8 m apart on the leg, and the higher one is ALSO clear of
+     * `station-ladder` (1.15 up the outboard face) — the raft is dense, and
+     * "no station is shadowed by a neighbour" is a live test, not a hope. It
+     * is how a real rig is belayed anyway: the higher sail on the higher pin.
+     *
+     * §B86-1 still binds on the fore-aft placing: both are on the leg's AFT
+     * side (−z), because every sail hangs FORWARD of the raked bipod and a
+     * line belayed forward would be led through the canvas.
+     */
+    const stn = side === 'port' ? 'p' : 's';
+    const mainSheetPin: Vec3 = [sign * (legR + 0.05), 0.45, -0.3];
+    const topsailPin: Vec3 = [-sign * (legR + 0.05), 2.1, -0.3];
     const sockets: SocketDef[] = [
       { id: `anchor-belay-main-${side}`, type: 'rope-anchor', position: [-sign * (legR + 0.05), 0.25, -0.3] },
+      { id: `anchor-belay-mainsheet-${side}`, type: 'rope-anchor', position: mainSheetPin },
+      { id: `station-sheet-${stn}`, type: 'fixture', position: mainSheetPin },
       /**
        * §T.145 — THE TOPSAIL NEEDS ITS OWN BELAY. The shared planner sends
        * every sheet to `belay(side, aftMast)`, so `main-upper`'s sheets and
@@ -189,11 +222,10 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
        * socket, two lines, and no station could ever have addressed either of
        * them (§V84 wants a station per rope end, and two on one point is not
        * that). A topsail's sheets come down to the mast it is set on, which on
-       * this rig is the bipod — a second pin above the main's, on the same aft
-       * face, for the same §B86-1 reason (the canvas hangs FORWARD of the legs,
-       * so anything belayed forward would be led through it).
+       * this rig is the bipod.
        */
-      { id: `anchor-belay-topsail-${side}`, type: 'rope-anchor', position: [-sign * (legR + 0.05), 0.62, -0.3] },
+      { id: `anchor-belay-topsail-${side}`, type: 'rope-anchor', position: topsailPin },
+      { id: `station-sheet-top-${stn}`, type: 'fixture', position: topsailPin },
     ];
     // §B78-3: the ladder station used to sit at the leg's FOOT, 0.45 m
     // OUTBOARD of it — x 2.69 in ship space, past the foot-rail and off the
@@ -358,7 +390,25 @@ export function buildMizzenAndFlag(p: RaftParams, L: RaftLayout): PieceDef[] {
       min: [-mr, 0, -mr],
       max: [mr, p.mizzenHeight, mr],
     }, {
-      sockets: [{ id: 'anchor-masthead-mizzen', type: 'rope-anchor', position: [0, p.mizzenHeight, 0] }],
+      sockets: [
+        { id: 'anchor-masthead-mizzen', type: 'rope-anchor', position: [0, p.mizzenHeight, 0] },
+        /**
+         * §T.149 — THE MIZZEN IS TRIMMED AT THE MIZZEN. Its two sheets used to
+         * run all the way to `anchor-cleat-stern-{side}` (the shared planner's
+         * "no mast aft ⇒ the stern" rule), which is a real place to belay but
+         * not one you can look at the sail from — the cloth is overhead and
+         * behind you there. A pin each side of the pole's own foot, and the
+         * one station that hauls them BETWEEN the pair on the aft face, so
+         * the stance is level with both ropes it works (§B104/§V71).
+         *
+         * ONE station for two sheets, unlike the square sails' pair: this sail
+         * carries a single trim channel (`mizzen-lower`), and a second station
+         * on the same channel is the §V62 knob §T.148 exists to prevent.
+         */
+        { id: 'anchor-belay-mizzensheet-port', type: 'rope-anchor', position: [-(mr + 0.05), 0.6, -0.12] },
+        { id: 'anchor-belay-mizzensheet-starboard', type: 'rope-anchor', position: [mr + 0.05, 0.6, -0.12] },
+        { id: 'station-sheet-mizzen', type: 'fixture', position: [0, 0.6, -0.22] },
+      ],
     }),
   );
   const yr = raftSparDiameter(p, p.mizzenYardLength) / 2;

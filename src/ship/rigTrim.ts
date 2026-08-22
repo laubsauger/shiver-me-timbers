@@ -171,6 +171,9 @@ export function oarSweepAngle(oar: number, p: ShipRigParams): number {
  * @param trim   sim `sailTrim` 0..1; omit to leave the canvas at full
  * @param rudder sim `ship.rudder` −1..1; omit to leave the wheel amidships
  * @param brace  sim `ship.brace` rad; omit to leave the yards where they are
+ * @param trimBySail §T.148 per-sail override of `trim`, keyed by the sail
+ *        piece's id stem (`sail-main-upper` → `main-upper`); a sail this map
+ *        does not name keeps the ship-wide scalar
  */
 export function updateRig(
   assembly: ShipAssembly,
@@ -179,6 +182,7 @@ export function updateRig(
   rudder = 0,
   brace?: number,
   guaraDepth?: readonly number[],
+  trimBySail?: Readonly<Record<string, number>>,
 ): void {
   const p = shipRigParams;
   const step = Math.min(0.25, Math.max(0, Number.isFinite(dt) ? dt : 0));
@@ -243,14 +247,39 @@ export function updateRig(
   const sails = assembly.sailPieceIds();
   assembly.setSailWindFrame(frame);
   if (sails.length === 0) return;
-  const drop = trimDropScale(trim, p);
   for (const id of sails) {
+    // §T.148: EACH SAIL ON ITS OWN SHEET. One scalar used to be scaled onto
+    // every sail here, which is why the raft's three sheet stations would all
+    // have been the same control (§V62) however carefully they were placed.
+    // A ship whose sim publishes no per-sail map (every square-rigger) is
+    // unchanged: `sailTrimFor` falls back to the ship-wide scalar.
+    const drop = trimDropScale(sailTrimFor(id, trim, trimBySail), p);
     assembly.setSailDropScale(id, drop);
     // §B86-3: the SAME scalar lowers the yard, so the roll arrives at the
     // bottom of the travel exactly as the last of the canvas leaves the hoist
     assembly.setYardHoist(id, drop);
     writeSailWindFrame(assembly.sailMesh(id), frame);
   }
+}
+
+/** the `sail-` prefix every sail piece id carries; its remainder is the sail's key */
+const SAIL_ID_PREFIX = 'sail-';
+
+/**
+ * §T.148 — the trim ONE sail is set to: its own entry in the per-sail map, or
+ * the ship-wide scalar when the class does not carry one. Exported because it
+ * is the whole contract between `ShipState.sailTrimBySail`'s key spelling and
+ * the blueprint's piece ids, and a test holds the two together.
+ */
+export function sailTrimFor(
+  sailPieceId: string,
+  trim: number,
+  trimBySail?: Readonly<Record<string, number>>,
+): number {
+  if (trimBySail === undefined) return trim;
+  const key = sailPieceId.startsWith(SAIL_ID_PREFIX) ? sailPieceId.slice(SAIL_ID_PREFIX.length) : sailPieceId;
+  const v = trimBySail[key];
+  return typeof v === 'number' && Number.isFinite(v) ? v : trim; // §V28
 }
 
 /**
@@ -270,6 +299,13 @@ export interface RiggedShip {
    * index k driving `guara-{k+1}`. Absent = this class has no centreboards.
    */
   guaraDepth?: readonly number[];
+  /**
+   * §T.148 — per-sail canvas set, keyed by the sail piece's id stem. Absent =
+   * this class trims her whole rig on one sheet, which is every square-rigger
+   * in the game; present = each named sail is drawn at its OWN trim and
+   * `sailTrim` stays the whole-rig number the HUD and the ropes read.
+   */
+  sailTrimBySail?: Readonly<Record<string, number>>;
 }
 
 /** What one frame of rig drive produced, for the consumers downstream of it. */
@@ -305,7 +341,11 @@ export function updateShipRig(
   assembly: ShipAssembly,
   dt: number,
 ): ShipRigDrive {
-  updateRig(assembly, dt, ship.sailTrim, ship.rudder, ship.brace, ship.guaraDepth);
+  updateRig(assembly, dt, ship.sailTrim, ship.rudder, ship.brace, ship.guaraDepth, ship.sailTrimBySail);
+  // the RIGGING's furl is still the whole rig's: `applyRiggingPlan` hauls one
+  // plan for the vessel, and `sailTrim` is the area-weighted set on a raft
+  // (`raftShip.stepRaftShip`), so the ropes follow the canvas that is actually
+  // drawing rather than whichever sail happened to be asked last.
   return rigDrive(ship.sailTrim);
 }
 

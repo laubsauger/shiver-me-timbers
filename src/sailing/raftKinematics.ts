@@ -28,12 +28,22 @@
 import type { Vec3 } from '../state/simState';
 import type { Wind } from './shipKinematics';
 import { type RaftTuning } from '../params/raftSailing';
-import { raftParams } from '../params/raft';
+import { raftParams, type RaftParams } from '../params/raft';
 import { guaraStations } from '../ship/raftPartsLayout';
+import { RAFT_SAIL_KEYS, type RaftSailKey } from '../ship/raftRigging';
 
 export interface RaftControls {
-  /** sail sheeted home 0..1 (0 = flogging, draws nothing) */
-  sheet: number;
+  /**
+   * §T.148 — ONE SHEET PER SAIL, 0 (flogging, draws nothing) .. 1 (home).
+   *
+   * This was a single number applied to all three sails, which made the
+   * honest answer to USER's "is that adjusting all three sails at the same
+   * time?" YES — and made any second sheet station a §V62 knob on the main's
+   * channel before it was ever wired. The key is the sail's own
+   * `sail-{mast}-{level}` id stem (`raftRigging.RaftSailKey`), so a trim
+   * cannot be published for a name no sail answers to.
+   */
+  sheet: Record<RaftSailKey, number>;
   /** 5 guaras, each 0 (raised clear) .. 1 (fully lowered) */
   guaraDepth: number[];
   /** 5 guara longitudinal positions, m from centre, + = forward */
@@ -71,10 +81,63 @@ export function raftGuaraPositions(p = raftParams): number[] {
   return guaraStations(p).map((g) => g.z);
 }
 
+/** the same trim on every sail — the whole rig sheeted to `v` */
+export function raftSheetsAll(v: number): Record<RaftSailKey, number> {
+  const out = {} as Record<RaftSailKey, number>;
+  for (const k of RAFT_SAIL_KEYS) out[k] = v;
+  return out;
+}
+
+/**
+ * §T.148 — EACH SAIL'S SHARE OF THE RIG'S CANVAS, by cloth area.
+ *
+ * The weights the three sheets sum through in `stepRaftSailing`. Read off
+ * `raftParams` live (§V62): re-cutting the topsail changes what easing it
+ * costs her, in the same change as the cloth.
+ */
+export function raftSailAreas(p: RaftParams = raftParams): Record<RaftSailKey, number> {
+  return {
+    'main-lower': Math.max(0, p.mainSailWidth * p.mainSailDrop),
+    'main-upper': Math.max(0, p.topsailWidth * p.topsailDrop),
+    'mizzen-lower': Math.max(0, p.mizzenSailWidth * p.mizzenSailDrop),
+  };
+}
+
+/**
+ * §T.148 — HOW MUCH CANVAS IS ACTUALLY DRAWING, 0..1: the area-weighted sum
+ * of the three sheets.
+ *
+ * THE AERODYNAMICS SUM, they do not pick one sail. `sailDrive` is a polar for
+ * the WHOLE square rig — one twa, one apparent wind, one thrust coefficient
+ * fitted with every sail set — so the honest way to carry three sheets
+ * through it is to scale it by the fraction of the rig's area that is
+ * actually sheeted home. Three sails at the same trim give exactly the old
+ * scalar back (Σ w·s = s), so `RaftTuning.thrust` did not have to be re-fitted
+ * when trim went per sail; easing the mizzen alone now costs her its 11 % of
+ * the canvas and easing the main costs 84 %, which is the property a §V62
+ * test can hold each of the three sheets to.
+ *
+ * A per-sail polar (each sail with its own twa off its own yard, its own
+ * blanketing behind the main) is a bigger model than this raft has ever had —
+ * the yards do not brace independently and there is one `sailCE` — so it is
+ * NOT claimed here, and this comment is the "state plainly why it does not".
+ */
+export function raftCanvasSet(c: Pick<RaftControls, 'sheet'>, p: RaftParams = raftParams): number {
+  const area = raftSailAreas(p);
+  let total = 0;
+  let set = 0;
+  for (const k of RAFT_SAIL_KEYS) {
+    const a = fin(area[k]);
+    total += a;
+    set += a * clamp(fin(c.sheet?.[k]), 0, 1);
+  }
+  return total > 1e-9 ? clamp(set / total, 0, 1) : 0;
+}
+
 export function neutralRaftControls(p = raftParams): RaftControls {
   const pos = raftGuaraPositions(p);
   return {
-    sheet: 1,
+    sheet: raftSheetsAll(1),
     guaraDepth: pos.map(() => 1),
     guaraPos: pos,
     oarAngle: 0,
@@ -177,7 +240,9 @@ export function stepRaftSailing(
   const gammaApp = Math.atan2(appLat, appFwd); // 0 = from astern, + toward stbd
   const twa = Math.PI - Math.abs(wrapPi(gammaApp));
 
-  const sheet = c.sailUp ? clamp(fin(c.sheet), 0, 1) : 0;
+  // §T.148: the three sheets, summed by area — see `raftCanvasSet`. The
+  // halyard is still one line for the rig: sails struck, nothing draws.
+  const sheet = c.sailUp ? raftCanvasSet(c) : 0;
   const drive = sailDrive(twa, vApp, t) * sheet;
   // sail side force: beam-on apparent wind, pushing to leeward
   const side = t.sideForce * sheet * vApp * appLat;

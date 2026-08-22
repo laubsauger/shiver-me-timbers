@@ -15,7 +15,10 @@ import { describe, expect, it } from 'vitest';
 import {
   guaraYawMoment,
   neutralRaftControls,
+  raftCanvasSet,
   raftGuaraPositions,
+  raftSailAreas,
+  raftSheetsAll,
   oarTorque,
   sailDrive,
   stepRaftSailing,
@@ -40,6 +43,7 @@ import { shipRigParams } from '../src/params/ship';
 import { applyRaftAction, type RaftActionSinks } from '../src/raft/raftActions';
 import { stepRaftShip } from '../src/raft/raftShip';
 import type { ShipState } from '../src/state/simState';
+import { RAFT_SAIL_KEYS, type RaftSailKey } from '../src/ship/raftRigging';
 
 const W7: Wind = { direction: 0, speed: 7 }; // blowing toward +z
 
@@ -80,6 +84,64 @@ const SETS: [string, RaftTuning][] = [
   ['true', trueRaftTuning],
   ['accessible', accessibleRaftTuning],
 ];
+
+/**
+ * §T.148 — THREE SHEETS REACH THE AERODYNAMICS, AND EACH IS WORTH ITS OWN
+ * CANVAS.
+ *
+ * `stepRaftSailing` used to read ONE `sheet` scalar, so the answer to USER's
+ * "is that adjusting all three sails at the same time?" was yes all the way
+ * down to the force. The properties, ⊥ the numbers (§V80): every sail's sheet
+ * moves the drive (§V62 — a trim that changes nothing is this project's
+ * signature defect), no sail's sheet moves it more than the fraction of the
+ * rig's cloth that sail IS, and the three at one trim reproduce the old
+ * scalar exactly so `RaftTuning.thrust` never had to be re-fitted.
+ */
+describe('§T.148 the three sheets sum through the sail polar', () => {
+  const t = accessibleRaftTuning;
+  const areas = raftSailAreas();
+  // ONE step from ONE pose: the drive is then exactly `sailDrive(twa, vApp)`
+  // scaled by the set fraction, so what the sheets are worth can be read off
+  // it. Integrating first would let her own speed change the apparent wind and
+  // measure the polar instead of the trim.
+  const drive = (sheet: Record<RaftSailKey, number>): number =>
+    stepRaftSailing(raft(0, 1.5), { ...neutralRaftControls(), sheet }, W7, t, SIM_DT).drive;
+
+  it('the whole rig at one trim is the single scalar it replaced', () => {
+    for (const v of [0, 0.25, 0.5, 1]) {
+      expect(raftCanvasSet({ sheet: raftSheetsAll(v) })).toBeCloseTo(v, 12);
+    }
+    // …and a sail that carries no cloth at all cannot weight anything
+    expect(Object.values(areas).every((a) => a > 0)).toBe(true);
+  });
+
+  it('EVERY sheet moves the drive (§V62), and each by its own share of the canvas', () => {
+    const full = drive(raftSheetsAll(1));
+    expect(full).toBeGreaterThan(0);
+    const total = Object.values(areas).reduce((n, a) => n + a, 0);
+    const loss: Record<string, number> = {};
+    for (const k of RAFT_SAIL_KEYS) {
+      const eased = drive({ ...raftSheetsAll(1), [k]: 0 });
+      loss[k] = full - eased;
+      // the knob is alive: this sail, on its own, is worth some of her way
+      expect(loss[k], `easing ${k} changed nothing`).toBeGreaterThan(0);
+      // and worth no more than the sail it is: the drive is linear in the set
+      // fraction, so the loss IS this sail's share of the rig
+      expect(loss[k] / full, `${k} is worth more than its cloth`).toBeCloseTo(areas[k] / total, 6);
+    }
+    // the ORDER is the reference's rig: a 5.5 × 4.6 m mainsail against a
+    // 3.0 × 0.6 m topsail [ref §4]
+    expect(loss['main-lower']).toBeGreaterThan(loss['mizzen-lower']);
+    expect(loss['mizzen-lower']).toBeGreaterThan(loss['main-upper']);
+    // …and letting all three go is letting the whole rig go
+    expect(drive(raftSheetsAll(0))).toBeCloseTo(0, 12);
+  });
+
+  it('the halyard still strikes the WHOLE rig, whatever the three sheets say', () => {
+    const c = { ...neutralRaftControls(), sheet: raftSheetsAll(1), sailUp: false };
+    expect(stepRaftSailing(raft(0, 1.5), c, W7, t, SIM_DT).drive).toBe(0);
+  });
+});
 
 describe('speed polar', () => {
   it('true: dead run in 7 m/s settles to 1.5–2.1 m/s (Heyerdahl 1.5–2)', () => {
@@ -209,7 +271,8 @@ describe.each(SETS)('%s tuning — shared properties', (_name, t) => {
       yawRate: NaN,
     };
     const c: RaftControls = {
-      sheet: NaN,
+      // §T.148: a poisoned trim on EVERY sail, so no sail can carry the step
+      sheet: { 'main-lower': NaN, 'main-upper': NaN, 'mizzen-lower': NaN },
       guaraDepth: [NaN, 1, NaN, 0, 1],
       guaraPos: [NaN, 1, 0, -1, NaN],
       oarAngle: NaN,

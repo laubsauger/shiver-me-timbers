@@ -33,6 +33,9 @@ export type RaftAction =
   | 'guara-5'
   | 'sheet-p'
   | 'sheet-s'
+  | 'sheet-top-p'
+  | 'sheet-top-s'
+  | 'sheet-mizzen'
   | 'halyard'
   | 'radio'
   | 'sleep'
@@ -60,6 +63,27 @@ export interface RaftStation {
   /** the player frame this station is usable from; absent = aboard ('ship'); step-off is always 'ship' */
   frame?: 'ship' | 'world' | 'swim';
 }
+
+/**
+ * §T.149 — THE FIVE SHEET STATIONS, ONE SHAPE.
+ *
+ * Every one of them is the same lever (haul the line in, ease it out); what
+ * differs is which sail's channel it publishes and which spar it stands at.
+ * Authored as a loop so a sixth sheet cannot arrive with a different gesture,
+ * and so the `sheet-` prefix — which `tests/interact.test.ts` selects the
+ * sheets by — is generated rather than remembered.
+ */
+const SHEET_ACTIONS = ['sheet-p', 'sheet-s', 'sheet-top-p', 'sheet-top-s', 'sheet-mizzen'] as const;
+const sheets = Object.fromEntries(
+  SHEET_ACTIONS.map((a) => [a, {
+    socket: `station-${a}`,
+    kind: 'hold-slide' as const,
+    axis: 'mouse-y' as const,
+    min: 0,
+    max: 1,
+    dir: 1 as const,
+  }]),
+) as Record<(typeof SHEET_ACTIONS)[number], RaftStation>;
 
 const guara = (n: 1 | 2 | 3 | 4 | 5): RaftStation => ({
   socket: `station-guara-${n}`,
@@ -91,8 +115,7 @@ export const RAFT_STATIONS: Record<RaftAction, RaftStation> = {
   'guara-3': guara(3),
   'guara-4': guara(4),
   'guara-5': guara(5),
-  'sheet-p': { socket: 'station-sheet-p', kind: 'hold-slide', axis: 'mouse-y', min: 0, max: 1, dir: 1 },
-  'sheet-s': { socket: 'station-sheet-s', kind: 'hold-slide', axis: 'mouse-y', min: 0, max: 1, dir: 1 },
+  ...sheets,
   halyard: { socket: 'station-halyard', kind: 'hold-slide', axis: 'mouse-y', min: 0, max: 1, dir: 1 },
   radio: { socket: 'station-radio', kind: 'hold-turn', axis: 'mouse-x', min: 0, max: 1, dir: 1 },
   sleep: { socket: 'station-mat', kind: 'toggle' },
@@ -167,13 +190,23 @@ export const RAFT_LABELS: Record<RaftAction, StationLabel> = {
   'guara-3': guaraLabel('midships'),
   'guara-4': guaraLabel('stern port'),
   'guara-5': guaraLabel('stern starboard'),
-  // §T.145c — NAME THE SAIL. USER: "I can only see the main sheets that we can
-  // adjust, I don't find any way to adjust the other sheets." Both of these
-  // are the MAIN's (`RAFT_ROPE_TABLE['main-lower']`), and saying so is what
-  // tells the player that the topsail and the mizzen are not on this pair —
-  // 'Port sheet' let them read as the sheets of whatever sail was in view.
+  /**
+   * §T.145c / §T.149 — NAME THE SAIL, OR THREE TRIMS READ AS ONE.
+   *
+   * USER: "I still found only the main sail adjuster. Is that adjusting all
+   * three sails at the same time?" It was (§T.148), and it no longer is —
+   * these five plaques are the only place the player is told which of the
+   * three each lever moves. 'Port sheet' would let a station read as the
+   * sheet of whatever canvas happened to be in view, which is exactly the
+   * confusion §T.145c was reported as.
+   */
   'sheet-p': { name: 'Main sheet — port', verb: 'haul', more: 'haul in', less: 'ease' },
   'sheet-s': { name: 'Main sheet — starboard', verb: 'haul', more: 'haul in', less: 'ease' },
+  'sheet-top-p': { name: 'Topsail sheet — port', verb: 'haul', more: 'haul in', less: 'ease' },
+  'sheet-top-s': { name: 'Topsail sheet — starboard', verb: 'haul', more: 'haul in', less: 'ease' },
+  // one station, both of the mizzen's sheets: the sail carries a single trim
+  // channel, so a second plaque would be a second knob on it (§V62)
+  'sheet-mizzen': { name: 'Mizzen sheet', verb: 'haul', more: 'haul in', less: 'ease' },
   halyard: { name: 'Halyard', verb: 'hoist / lower', more: 'hoist', less: 'lower' },
   radio: { name: 'Radio', verb: 'tune', more: 'tune up', less: 'tune down' },
   sleep: { name: 'Sleeping mat' },

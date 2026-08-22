@@ -23,7 +23,8 @@
 import type { Quat, ShipState, Vec3 } from '../state/simState';
 import { quatFromAxisAngle, quatMul, rotateVec } from '../core/quat';
 import type { Wind } from '../sailing/shipKinematics';
-import { stepRaftSailing, type RaftControls, type RaftMotion, type RaftStep } from '../sailing/raftKinematics';
+import { raftCanvasSet, stepRaftSailing, type RaftControls, type RaftMotion, type RaftStep } from '../sailing/raftKinematics';
+import { RAFT_SAIL_KEYS } from '../ship/raftRigging';
 import { pushOff, stepRaftBeaching, type RaftBeachingStep } from '../sailing/raftBeaching';
 import type { SeabedField } from '../sea-physics/grounding';
 import { activeRaftTuning } from '../params/raftSailing';
@@ -90,7 +91,27 @@ export function stepRaftShip(ship: ShipState, c: RaftControls, wind: Wind, dt: n
   const out = stepRaftSailing(motionOf(ship), c, wind, t, dt);
   writeMotion(ship, out);
   ship.rudder = clamp(Number.isFinite(c.oarAngle) ? c.oarAngle : 0, -1, 1);
-  ship.sailTrim = c.sailUp ? clamp(Number.isFinite(c.sheet) ? c.sheet : 0, 0, 1) : 0;
+  /**
+   * §T.148 — THE THREE SHEETS, AND THE ONE NUMBER THAT STILL MEANS "HOW MUCH
+   * CANVAS IS SET".
+   *
+   * `sailTrim` stays the whole-rig scalar: it is what the HUD reads ("sails
+   * furled"), what `rigDrive` turns into the running rigging's furl, and what
+   * every OTHER hull in the game has. On this raft it is the area-weighted
+   * sum of the three — the same number the aerodynamics drive on, so the
+   * readout and the force can never disagree (§V77).
+   *
+   * `sailTrimBySail` is what moves the individual cloth (`rigTrim.updateRig`),
+   * keyed by the sail's own piece-id stem. Additive and optional exactly like
+   * §B100's `guaraDepth`, and written IN PLACE for the same §V3 reason: the
+   * ShipState is the sim's own copy, never an alias of `RaftControls`.
+   */
+  ship.sailTrim = c.sailUp ? clamp(raftCanvasSet(c), 0, 1) : 0;
+  const trims = ship.sailTrimBySail ?? (ship.sailTrimBySail = {});
+  for (const k of RAFT_SAIL_KEYS) {
+    const v = c.sheet?.[k];
+    trims[k] = c.sailUp ? clamp(typeof v === 'number' && Number.isFinite(v) ? v : 0, 0, 1) : 0;
+  }
   // §B100(b): the guaras go with them. `raftPartsHull` has promised since §T89
   // that the sim moves the plank, and nothing carried the number out of
   // `RaftControls` — so the boards steered her while standing still. Written

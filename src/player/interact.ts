@@ -108,8 +108,14 @@ const DEFAULTS: Record<string, number> = {
   'guara-3': 0.5,
   'guara-4': 0.5,
   'guara-5': 0.5,
+  // §T.148: one row per sheet station, all at the trim `initialRaftControls`
+  // boots the three sails to — the first grab must not jump a sail to a
+  // different set than the one she was already sailing under
   'sheet-p': 0.5,
   'sheet-s': 0.5,
+  'sheet-top-p': 0.5,
+  'sheet-top-s': 0.5,
+  'sheet-mizzen': 0.5,
   halyard: 1,
   radio: 0.5,
 };

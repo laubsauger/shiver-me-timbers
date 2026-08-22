@@ -8,7 +8,9 @@
  *
  *   tiller        → oarAngle      −1..1
  *   guara-N       → guaraDepth[N] 0..1
- *   sheet-p/s     → sheet         0..1 (both sheets drive the one square sail)
+ *   sheet-p/s     → sheet['main-lower']   0..1 (the main's two sheets, one trim)
+ *   sheet-top-p/s → sheet['main-upper']   0..1
+ *   sheet-mizzen  → sheet['mizzen-lower'] 0..1
  *   halyard       → sailUp        value > 0.5
  *   radio         → radio.tune    0..1 (stub store until §T.103)
  *   sleep         → sinks.skipToDawn()
@@ -24,7 +26,8 @@
  * It is not on `SimState` (yet): one raft, one beach, and §T.98 keeps the
  * state type additive-only for the pirate sim.
  */
-import { neutralRaftControls, type RaftControls } from '../sailing/raftKinematics';
+import { neutralRaftControls, raftSheetsAll, type RaftControls } from '../sailing/raftKinematics';
+import { RAFT_SAIL_KEYS, type RaftSailKey } from '../ship/raftRigging';
 import { neutralRaftBeaching, type RaftBeachingState } from '../sailing/raftBeaching';
 import { RAFT_ACTIONS, type RaftAction } from '../player/stations';
 import type { DebugChannel } from '../player/debugKeys';
@@ -54,7 +57,7 @@ export const radio = { tune: 0 };
  */
 export function initialRaftControls(): RaftControls {
   const c = neutralRaftControls();
-  c.sheet = 0.5;
+  c.sheet = raftSheetsAll(0.5);
   c.guaraDepth = [0.5, 0.5, 0.5, 0.5, 0.5];
   return c;
 }
@@ -67,6 +70,21 @@ function clamp(x: number, lo: number, hi: number): number {
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
+
+/**
+ * §T.148/§T.149 — WHICH SAIL EACH SHEET STATION TRIMS. The one place the
+ * answer to USER's "is that adjusting all three sails at the same time?" is
+ * written down: five stations, three channels, and the two pairs are the two
+ * sheets of one square sail (haul either and that sail's trim moves — a real
+ * square sail has a sheet each side and ONE set of the yard).
+ */
+const SHEET: Partial<Record<RaftAction, RaftSailKey>> = {
+  'sheet-p': 'main-lower',
+  'sheet-s': 'main-lower',
+  'sheet-top-p': 'main-upper',
+  'sheet-top-s': 'main-upper',
+  'sheet-mizzen': 'mizzen-lower',
+};
 
 const GUARA: Partial<Record<RaftAction, number>> = {
   'guara-1': 0,
@@ -94,13 +112,14 @@ export function applyRaftAction(
     if (v !== null) c.guaraDepth[g] = clamp(v, 0, 1);
     return true;
   }
+  const sail = SHEET[name as RaftAction];
+  if (sail !== undefined) {
+    if (v !== null) c.sheet[sail] = clamp(v, 0, 1);
+    return true;
+  }
   switch (name as RaftAction) {
     case 'tiller':
       if (v !== null) c.oarAngle = clamp(v, -1, 1);
-      return true;
-    case 'sheet-p':
-    case 'sheet-s':
-      if (v !== null) c.sheet = clamp(v, 0, 1);
       return true;
     case 'halyard':
       if (v !== null) c.sailUp = v > 0.5;
@@ -148,7 +167,10 @@ export function applyDebugChannel(
       for (const i of [3, 4]) c.guaraDepth[i] = clamp(c.guaraDepth[i] + d, 0, 1);
       return;
     case 'sheet':
-      c.sheet = clamp(c.sheet + d, 0, 1);
+      // §T.148: the dev key is ONE coarse channel for the whole rig, and says
+      // so — there is a station per sail for trimming them apart (§V84 keeps
+      // the hotkeys a debug convenience, never the way the game is played)
+      for (const k of RAFT_SAIL_KEYS) c.sheet[k] = clamp(c.sheet[k] + d, 0, 1);
       return;
     case 'tune':
       radio.tune = clamp(radio.tune + d, 0, 1);

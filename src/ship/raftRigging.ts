@@ -24,7 +24,13 @@ import { raftParams, type RaftParams } from '../params/raft';
 /** rope length ÷ chord for the raft's stays, shrouds and guys — EST [ref-sails-1947] */
 export const RAFT_STANDING_SLACK = 1.02;
 
-/** the sails the plan addresses, by the `sail-{mast}-{level}` id stem */
+/**
+ * The sails the plan addresses, by the `sail-{mast}-{level}` id stem — which
+ * is also the key §T.148's per-sail trim travels under, all the way from
+ * `RaftControls.sheet` to `ShipState.sailTrimBySail` to the piece `rigTrim`
+ * scales. ONE spelling of "which sail", so a trim can never be published for
+ * a name no sail answers to (§V95).
+ */
 export type RaftSailKey = 'main-lower' | 'main-upper' | 'mizzen-lower';
 
 /**
@@ -42,6 +48,9 @@ export const RAFT_ROPE_TABLE: Record<RaftSailKey, Partial<Record<RigRole, number
   'main-upper': { sheet: 2, halyard: 1 },
   'mizzen-lower': { sheet: 2, halyard: 1 },
 };
+
+/** the three sails, in blueprint order — derived from the table above, ⊥ retyped */
+export const RAFT_SAIL_KEYS = Object.keys(RAFT_ROPE_TABLE) as RaftSailKey[];
 
 /**
  * §B80 — rope RADIUS (m) per role; `RiggingRope.thickness` is the tube radius
@@ -155,12 +164,37 @@ export function raftSailKeyOf(socket: string): RaftSailKey | null {
 }
 
 /**
- * §T.145 — where a `main-upper` SHEET belays, or null for every other rope.
- * Keyed off the clew's own side so the port sheet lands on the port leg.
+ * §T.149 — EVERY SHEET BELAYS AT THE FOOT OF ITS OWN SPAR, and the station
+ * that hauls it stands on that pin (`raftPartsRig` authors the two sockets
+ * coincident, this table is where the ROPE learns the name).
+ *
+ * The shared planner has ONE sheet rule — belay at the next mast aft — and on
+ * a two-masted raft that sent both square sails to `anchor-channel-{side}-
+ * mizzen-1` and the mizzen's own pair on to the stern cleats. §T.145 took the
+ * topsail off that shared socket; this takes the other two, because the
+ * player's answer to "where do I trim this sail?" has to be "at the sail",
+ * and a station may not be parked away from the rope it works (§B104/§V71).
+ *
+ * USER: "it should be on the sides of the sail, on the masts, so that I can do
+ * it from being on deck while looking at it." Belaying a sheet to a pin on the
+ * mast it is set on is what a jury rig does, so this is not the §V71 defect
+ * §B104 was — the ROPE moved with the station, they are still coincident, and
+ * §B104's property (a sheet station is where its sheet is made fast) is now
+ * true of all three sails instead of one.
  */
+const SHEET_BELAY: Record<RaftSailKey, (side: 'port' | 'starboard') => string> = {
+  'main-lower': (side) => `anchor-belay-mainsheet-${side}`,
+  'main-upper': (side) => `anchor-belay-topsail-${side}`,
+  'mizzen-lower': (side) => `anchor-belay-mizzensheet-${side}`,
+};
+
+/** where a SHEET belays on this raft, or null for every other rope */
 export function raftSheetBelay(rope: Pick<RiggingRope, 'role' | 'socketA' | 'socketB'>): string | null {
-  if (rope.role !== 'sheet' || raftSailKeyOf(rope.socketA) !== 'main-upper') return null;
-  return rope.socketA.endsWith('-port') ? 'anchor-belay-topsail-port' : 'anchor-belay-topsail-starboard';
+  if (rope.role !== 'sheet') return null;
+  const key = raftSailKeyOf(rope.socketA);
+  if (key === null) return null;
+  // keyed off the CLEW's own side, so the port sheet lands on the port pin
+  return SHEET_BELAY[key](rope.socketA.endsWith('-port') ? 'port' : 'starboard');
 }
 
 export function buildRaftRiggingPlan(blueprint: PieceDef[], p: RaftParams = raftParams): RiggingRope[] {
@@ -191,11 +225,12 @@ export function buildRaftRiggingPlan(blueprint: PieceDef[], p: RaftParams = raft
     }
     out.push({
       ...rope,
-      // §T.145: the topsail's sheets come down to their OWN pins on the bipod.
-      // The shared planner has one rule — a sheet belays at the next mast aft
-      // — and on a two-masted raft that put BOTH square sails' sheets on the
-      // same two sockets, which is a mis-rig the plan cannot see (it dedupes
-      // by role+ends, and these differ only in their clew end).
+      // §T.145/§T.149: every sheet comes down to its OWN sail's pins — see
+      // SHEET_BELAY. The shared planner has one rule (a sheet belays at the
+      // next mast aft), and on a two-masted raft that put BOTH square sails'
+      // sheets on the same two sockets and the mizzen's on the stern cleats:
+      // a mis-rig the plan cannot see (it dedupes by role+ends, and the two
+      // square sails' sheets differ only in their clew end).
       socketB: raftSheetBelay(rope) ?? rope.socketB,
       // §B80: the raft's own rope radii, never the planner's galleon gear
       thickness: Math.min(rope.thickness, standing ? hempR : RAFT_ROPE_RADIUS[rope.role]),

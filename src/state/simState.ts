@@ -67,6 +67,23 @@ export interface ShipState {
    * valid, and a vessel with no guaras serializes — and hashes — as before.
    */
   guaraDepth?: number[];
+  /**
+   * §T.148 — PER-SAIL CANVAS SET, 0 (flogging) .. 1 (sheeted home), keyed by
+   * the sail piece's own id stem (`sail-main-upper` → `main-upper`; the raft's
+   * three are `raftRigging.RAFT_SAIL_KEYS`). Written by `stepRaftShip` from
+   * `RaftControls.sheet`, read by `rigTrim.updateRig` to scale each sail's
+   * cloth on its own.
+   *
+   * A PLAIN STRING MAP, not `Record<RaftSailKey, …>`: §V2 keeps this file's
+   * state JSON-serializable and free of an edge into `src/ship`, and the
+   * key spelling is held to the blueprint by a test rather than by an import.
+   *
+   * OPTIONAL like `anchored`, `brace` and `guaraDepth`: a vessel with one
+   * suit of canvas (every square-rigger in the game) serializes — and
+   * therefore hashes — exactly as it did before this field existed, and
+   * `sailTrim` remains the whole-rig scalar for all of them.
+   */
+  sailTrimBySail?: Record<string, number>;
   flood: number; // 0..1, 1 = sunk
   /** damage zone id → remaining hp 0..1 */
   damage: Record<string, number>;

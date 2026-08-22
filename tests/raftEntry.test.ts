@@ -47,6 +47,7 @@ import {
   type ActionHost,
 } from '../src/raft/raftActions';
 import { neutralRaftBeaching, raftContactPoints } from '../src/sailing/raftBeaching';
+import { raftSheetsAll } from '../src/sailing/raftKinematics';
 import { raftBeachingParams } from '../src/params/raftBeaching';
 import { brigantineSeaParams, raftSeaParams, seaPhysicsParams } from '../src/params/seaPhysics';
 import { equilibriumDraft } from '../src/sea-physics/buoyancy';
@@ -159,7 +160,7 @@ describe('RaftMotion ↔ ShipState adapter (§V.77 split)', () => {
     const s = ship({ position: [0, -0.4, 0], velocity: [0, 0.05, 0] });
     const c = initialRaftControls();
     c.oarAngle = 0.4;
-    c.sheet = 1;
+    c.sheet = raftSheetsAll(1);
     for (let i = 0; i < 600; i++) stepRaftShip(s, c, { speed: 8, direction: 0 }, SIM_DT);
     expect(Math.hypot(s.velocity[0], s.velocity[2])).toBeGreaterThan(0.2);
     expect(s.position[1]).toBe(-0.4);
@@ -228,12 +229,27 @@ describe('RaftAction → RaftControls (§V.84, §V.62)', () => {
     }
   });
 
-  it('both sheets → sheet 0..1; halyard > 0.5 hoists, ≤ 0.5 strikes the sail', () => {
+  it('§T.148 each sheet station trims ITS OWN sail 0..1 and no other; halyard > 0.5 hoists, ≤ 0.5 strikes the rig', () => {
+    // WHY: the answer to USER's "is that adjusting all three sails at the same
+    // time?" used to be yes — one `sheet` scalar for the whole rig, so the
+    // topsail and mizzen stations §T.149 adds would have been extra knobs on
+    // the main's channel (§V62). The pairs are the two sheets of ONE square
+    // sail, which is why `sheet-p` and `sheet-s` share a channel and the
+    // topsail's pair share a different one.
     const c = initialRaftControls();
     applyRaftAction(c, 'sheet-p', 0.9, sinks());
-    expect(c.sheet).toBe(0.9);
+    expect(c.sheet['main-lower']).toBe(0.9);
     applyRaftAction(c, 'sheet-s', 3, sinks());
-    expect(c.sheet).toBe(1);
+    expect(c.sheet['main-lower']).toBe(1);
+    // …and the other two sails are exactly where they were left
+    expect(c.sheet['main-upper']).toBe(0.5);
+    expect(c.sheet['mizzen-lower']).toBe(0.5);
+    applyRaftAction(c, 'sheet-top-p', 0.2, sinks());
+    expect(c.sheet['main-upper']).toBe(0.2);
+    applyRaftAction(c, 'sheet-mizzen', -1, sinks());
+    expect(c.sheet['mizzen-lower']).toBe(0);
+    expect(c.sheet['main-lower'], 'the mizzen sheet moved the main').toBe(1);
+    expect(c.sheet['main-upper'], 'the mizzen sheet moved the topsail').toBe(0.2);
     applyRaftAction(c, 'halyard', 0.2, sinks());
     expect(c.sailUp).toBe(false);
     applyRaftAction(c, 'halyard', 0.5, sinks());
@@ -296,8 +312,10 @@ describe('RaftAction → RaftControls (§V.84, §V.62)', () => {
     expect(c.guaraDepth).toEqual([0.75, 0.75, 0.5, 0.5, 0.5]);
     applyDebugChannel(c, 'guara-aft', -1, s);
     expect(c.guaraDepth).toEqual([0.75, 0.75, 0.5, 0, 0]);
+    // the dev key is ONE coarse channel for the whole rig by design (§V84:
+    // hotkeys are debug, the three stations are how the game is played)
     applyDebugChannel(c, 'sheet', 2, s);
-    expect(c.sheet).toBe(1);
+    expect(c.sheet).toEqual({ 'main-lower': 1, 'main-upper': 1, 'mizzen-lower': 1 });
     applyDebugChannel(c, 'dawn', 1, s);
     expect(s.skipToDawn).toHaveBeenCalledTimes(1);
   });
@@ -336,7 +354,7 @@ describe('beaching through the tick wrapper (§T.109, §T.100)', () => {
     const s = ship({ position: [0, 0, 0] });
     const holder = { state: neutralRaftBeaching() };
     const c = initialRaftControls();
-    c.sheet = 1;
+    c.sheet = raftSheetsAll(1);
     const points = raftContactPoints();
     expect(points.length).toBeGreaterThan(9);
     let beachedAt = -1;

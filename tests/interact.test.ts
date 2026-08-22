@@ -31,9 +31,9 @@ import { createDeckSurface } from '../src/player/deckSurface';
 import { createInitialState, type ShipState } from '../src/state/simState';
 import { updateShipRig } from '../src/ship/rigTrim';
 import { applyRaftAction, initialRaftControls, radio } from '../src/raft/raftActions';
-import { buildRiggingPlan } from '../src/ropes/shipRigging';
-import { raftRopeSail } from '../src/ship/raftRigging';
+import { buildRaftRiggingPlan, raftRopeSail, RAFT_SAIL_KEYS, type RaftSailKey } from '../src/ship/raftRigging';
 import { stepRaftShip } from '../src/raft/raftShip';
+import { raftSheetsAll } from '../src/sailing/raftKinematics';
 
 const DT = 1 / 60;
 const P = playerParams;
@@ -102,9 +102,16 @@ describe('§V84 every action has a station on the real raft', () => {
     const keys = RAFT_ACTIONS.map((a) => `${RAFT_STATIONS[a].frame ?? 'ship'}:${RAFT_STATIONS[a].socket}`);
     expect(new Set(keys).size).toBe(keys.length);
     // §T.145b withdrew `chart` (a station whose whole implementation was
-    // `return true`), so seventeen: the count is here to make a silent
-    // addition or removal of a station visible in review, nothing more
-    expect(RAFT_ACTIONS.length).toBe(17);
+    // `return true`) and §T.149 added the topsail's pair and the mizzen's
+    // one, so twenty: the count is here to make a silent addition or removal
+    // of a station visible in review, nothing more
+    expect(RAFT_ACTIONS.length).toBe(20);
+    // …and every sail's sheets are worked from their OWN socket. Three trims
+    // sharing two stances is how §B104 read to the player, and one station
+    // serving two sails would be §V62 wearing a station's clothes.
+    const sheetSockets = RAFT_ACTIONS.filter((a) => a.startsWith('sheet-')).map((a) => RAFT_STATIONS[a].socket);
+    expect(sheetSockets).toHaveLength(5);
+    expect(new Set(sheetSockets).size).toBe(5);
   });
 
   it('each action fires headlessly through interact at its own socket', () => {
@@ -693,7 +700,7 @@ describe('§T.136c a hold station moves the thing it names', () => {
 
   it('the sheets shorten the canvas and lower the yard, through the real path', () => {
     // the whole chain, no shortcuts: interact → applyRaftAction → RaftControls
-    // → stepRaftShip → ShipState.sailTrim → updateShipRig → the yard's node
+    // → stepRaftShip → ShipState.sailTrimBySail → updateShipRig → the yard's node
     const asm = new ShipAssembly(raft, stubFactory);
     const controls = initialRaftControls();
     controls.sailUp = true;
@@ -708,13 +715,13 @@ describe('§T.136c a hold station moves the thing it names', () => {
     for (let i = 0; i < 60; i++) ix.step(DT, { yawDelta: 0, pitchDelta: 0.05 });
     drive();
     expect(ix.value('sheet-p')).toBeGreaterThan(0.9);
-    expect(controls.sheet).toBeCloseTo(ix.value('sheet-p'), 9);
+    expect(controls.sheet['main-lower']).toBeCloseTo(ix.value('sheet-p'), 9);
     const full = { y: spar.y(), drop: spar.drop() };
     // …and now ease it right off
     for (let i = 0; i < 120; i++) ix.step(DT, { yawDelta: 0, pitchDelta: -0.05 });
     drive();
     expect(ix.value('sheet-p')).toBeLessThan(0.1);
-    expect(controls.sheet).toBeCloseTo(ix.value('sheet-p'), 9);
+    expect(controls.sheet['main-lower']).toBeCloseTo(ix.value('sheet-p'), 9);
     // THE PIECE MOVED. Either assertion alone would have passed §B92 too: the
     // canvas is shorter AND the spar has come down its own travel.
     expect(spar.drop()).toBeLessThan(full.drop);
@@ -724,7 +731,7 @@ describe('§T.136c a hold station moves the thing it names', () => {
   it('the halyard lowers the same yard, so the station and the spar agree', () => {
     const asm = new ShipAssembly(raft, stubFactory);
     const controls = initialRaftControls();
-    controls.sheet = 1;
+    controls.sheet = raftSheetsAll(1);
     const ship = raftShipState();
     const spar = yardOf(asm);
     const drive = (): void => {
@@ -912,62 +919,220 @@ describe('§T.145b every station that focuses does something (§V62, exhaustive)
 });
 
 /**
- * §T.145c — THE SHEETS THAT EXIST TRIM THE SAIL THEY NAME, and the ones that
- * do not exist have somewhere to stand waiting for them.
+ * §T.148 / §T.149 — THREE SAILS, THREE TRIMS, AND EACH ONE HAULED AT ITS OWN
+ * SPAR.
  *
- * USER: "I can only see the main sheets that we can adjust, I don't find any
- * way to adjust the other sheets… and the back one, where do I adjust the sail
- * on the back?" Two of the raft's three sails have sheets in §B79's table and
- * no station. The fix is NOT in this task's files — `RaftControls` carries one
- * `sheet` scalar for the whole rig, so a topsail station wired today would be
- * a third knob on the main's channel, which is the §V62 defect wearing the
- * costume of a fix. What is asserted here is the CONTRACT that fix will need,
- * in the §T.136c manner: the belay the station binds to is a real socket, and
- * it is where the answer to the user's question says it is.
+ * USER: "I still found only the main sail adjuster. Is that adjusting all
+ * three sails at the same time? … It should be on the sides of the sail, on
+ * the masts, so that I can do it from being on deck while looking at it."
+ *
+ * Both halves were true. `RaftControls.sheet` was ONE scalar mirrored onto
+ * one `ShipState.sailTrim` and scaled onto every sail by `updateShipRig`
+ * (§T.148), so any station added before that split would have been a second
+ * knob on the main's channel — §V62 by construction — and the only pair that
+ * existed stood 6.4 m from the ropes they hauled until §B104 moved them onto
+ * the mizzen's channel logs, which is nowhere you can see the mainsail from.
+ *
+ * §B100 IS THE LESSON THESE ASSERTIONS ARE CUT TO. A trim that changes while
+ * nothing moves is the defect this project has now found four times (§B92 the
+ * rudder, §B100 the oar and the guaras, §T.145b the chart), so nothing below
+ * is asserted on a channel: the evidence is the WORLD position of the cloth's
+ * own clew anchors, which resolve through the live sail shape (§V71), and the
+ * yard node the halyard lowers.
  */
-describe('§T.145c the sheets and the sails they name', () => {
+describe('§T.148/§T.149 three sails, three trims, each at its own spar', () => {
   const WIND = { direction: 0, speed: 9 };
   const shipState = (): ShipState => ({
     id: 'raft', kind: 'player', position: [0, 0, 0], quaternion: [0, 0, 0, 1],
     velocity: [0, 0, 0], angularVelocity: [0, 0, 0],
     rudder: 0, sailTrim: 1, flood: 0, damage: {},
   });
+  const SHEETS = RAFT_ACTIONS.filter((a) => a.startsWith('sheet-'));
+  /** which sail each sheet station works, read off the ACTION table (§V95) */
+  const sailOf = (a: RaftAction): RaftSailKey => {
+    const c = initialRaftControls();
+    const before = { ...c.sheet };
+    applyRaftAction(c, a, 0, { skipToDawn: () => {} });
+    const moved = RAFT_SAIL_KEYS.filter((k) => c.sheet[k] !== before[k]);
+    expect(moved, `${a} trims ${moved.length} sails, not one`).toHaveLength(1);
+    return moved[0];
+  };
 
-  it('every sheet station moves the canvas: its channel reaches ShipState.sailTrim', () => {
-    const sheets = RAFT_ACTIONS.filter((a) => a.startsWith('sheet-'));
-    expect(sheets.length, 'the raft has no sheet station at all').toBeGreaterThan(0);
-    for (const a of sheets) {
+  /**
+   * Where a sail's cloth actually IS, in the world, right now: its two clew
+   * anchors, resolved through `sailClothPoint` off the live drop scale. The
+   * §B100 assertion is on these and not on `sailDropScale`, because a number
+   * on a mesh is a channel and a clew that has not moved is a sail that has
+   * not moved.
+   */
+  const clews = (asm: ShipAssembly, key: RaftSailKey): Vec3[] =>
+    (['port', 'starboard'] as const).map((s) => asm.socketWorldPosition(`anchor-sail-${key}-clew-${s}`) as Vec3);
+  const moved = (a: Vec3[], b: Vec3[]): number =>
+    Math.max(...a.map((q, i) => Math.hypot(q[0] - b[i][0], q[1] - b[i][1], q[2] - b[i][2])));
+
+  /** hold `action` from a stance right at it and drag the mouse `n` ticks */
+  function haul(action: RaftAction, controls: ReturnType<typeof initialRaftControls>, pitchDelta: number, n: number): void {
+    const socket = raftAsm.socketWorldPosition(RAFT_STATIONS[action].socket) as Vec3;
+    const host = fakeHost([socket[0], socket[1] - EYE, socket[2] - 0.5], 0, 0);
+    host.applyAction = (nm: string, v?: unknown) => applyRaftAction(controls, nm, v, { skipToDawn: () => {} });
+    const ix = createInteract(host, { socketWorld: raftSocket });
+    expect(ix.focus(), `${action} not focusable from its own stance`).toBe(action);
+    ix.begin();
+    for (let i = 0; i < n; i++) ix.step(DT, { yawDelta: 0, pitchDelta });
+  }
+
+  it('each sheet station moves ITS OWN sail — the cloth of the other two does not stir', () => {
+    for (const a of SHEETS) {
+      const mine = sailOf(a);
+      const asm = new ShipAssembly(raft, stubFactory);
       const controls = initialRaftControls();
       controls.sailUp = true;
       const ship = shipState();
-      const socket = raftAsm.socketWorldPosition(RAFT_STATIONS[a].socket) as Vec3;
-      const host = fakeHost([socket[0], socket[1] - EYE, socket[2] - 0.5], 0, 0);
-      host.applyAction = (n: string, v?: unknown) => applyRaftAction(controls, n, v, { skipToDawn: () => {} });
-      const ix = createInteract(host, { socketWorld: raftSocket });
-      expect(ix.focus(), `${a} not focusable from its own stance`).toBe(a);
-      ix.begin();
-      for (let i = 0; i < 60; i++) ix.step(DT, { yawDelta: 0, pitchDelta: -0.05 });
-      stepRaftShip(ship, controls, WIND, DT);
-      const eased = ship.sailTrim;
-      for (let i = 0; i < 120; i++) ix.step(DT, { yawDelta: 0, pitchDelta: 0.05 });
-      stepRaftShip(ship, controls, WIND, DT);
-      expect(ship.sailTrim, `${a} does not reach the sail`).toBeGreaterThan(eased + 0.5);
+      // dt 0 on the rig: the gust and flutter filters would move every clew a
+      // little every frame, and the question here is what the SHEET moved
+      const drive = (): void => {
+        stepRaftShip(ship, controls, WIND, DT);
+        updateShipRig(ship, asm, 0);
+      };
+      haul(a, controls, 0.05, 120); // sheet every sail home first
+      drive();
+      const before = new Map(RAFT_SAIL_KEYS.map((k) => [k, clews(asm, k)]));
+      haul(a, controls, -0.05, 200); // …and ease this one right off
+      drive();
+      expect(ship.sailTrimBySail?.[mine], `${a} does not reach ${mine}`).toBeLessThan(0.05);
+      for (const k of RAFT_SAIL_KEYS) {
+        const d = moved(clews(asm, k), before.get(k) as Vec3[]);
+        if (k === mine) {
+          // THE CLOTH CAME IN. A whole sail's drop is metres; a tenth of one
+          // is far more than any rounding in the shape function.
+          expect(d, `${a} eased ${mine} and its clews did not move`).toBeGreaterThan(0.1);
+        } else {
+          expect(d, `${a} moved ${k}, which it does not trim`).toBeLessThan(1e-9);
+          expect(ship.sailTrimBySail?.[k], `${a} changed ${k}'s trim`).toBeCloseTo(0.5, 9);
+        }
+      }
     }
   });
 
-  it('the mizzen is trimmed from the stern: its sheets belay within reach of the helm', () => {
-    // the ANSWER to "where do I adjust the sail on the back?" — read off the
-    // built rigging plan rather than a constant, so it follows the rig (§V71)
-    const plan = buildRiggingPlan(raft);
-    const belays = plan
-      .filter((r) => r.role === 'sheet' && raftRopeSail(r) === 'mizzen-lower')
-      .map((r) => r.socketB);
-    expect(belays.length, 'the mizzen carries no sheets in the plan').toBe(2);
-    const helm = raftAsm.socketWorldPosition('station-tiller') as Vec3;
-    const stance = { ...createPlayerState([helm[0], helm[1], helm[2]]), grounded: true } as PlayerState;
-    for (const id of belays) {
-      const q = raftAsm.socketWorldPosition(id) as Vec3;
-      expect(capsuleDistance(stance, q, P), `${id} is out of the helmsman's reach`).toBeLessThanOrEqual(P.reach);
+  it('the main\'s yard comes down on the main\'s sheet alone (§B86-3), and the whole-rig trim follows the canvas that is set', () => {
+    const asm = new ShipAssembly(raft, stubFactory);
+    const controls = initialRaftControls();
+    controls.sailUp = true;
+    const ship = shipState();
+    const yardY = (): number => (asm.group.getObjectByName('yard-main-lower') as { position: { y: number } }).position.y;
+    const drive = (): void => {
+      stepRaftShip(ship, controls, WIND, DT);
+      updateShipRig(ship, asm, 0);
+    };
+    haul('sheet-p', controls, 0.05, 120);
+    drive();
+    const full = { y: yardY(), trim: ship.sailTrim };
+    // the MIZZEN right off: a tenth of the rig's canvas, and the main's spar
+    // has no business moving for it
+    haul('sheet-mizzen', controls, -0.05, 200);
+    drive();
+    expect(yardY(), 'the mizzen sheet lowered the MAIN yard').toBeCloseTo(full.y, 9);
+    expect(ship.sailTrim, 'easing the mizzen cost her no canvas at all').toBeLessThan(full.trim);
+    expect(ship.sailTrim, 'easing the mizzen cost her the whole rig').toBeGreaterThan(0.8 * full.trim);
+    // …and now the main, which IS most of the rig
+    haul('sheet-p', controls, -0.05, 200);
+    drive();
+    expect(yardY(), 'the main yard did not come down on its own sheet').toBeLessThan(full.y - 1e-6);
+    expect(ship.sailTrim).toBeLessThan(0.2 * full.trim);
+  });
+
+  /**
+   * §B104, RE-CUT. Its property was "a sheet station stands where its sheet is
+   * made fast"; its ANSWER was "on the mizzen's channel logs", because that is
+   * where the shared planner belayed the main. §T.149 keeps the property and
+   * moves the answer — the belay went to the spar with the station — so the
+   * assertion is on the RELATIONSHIP, never on the place (§V80).
+   */
+  it('every sheet station stands on the pins its own sheets belay to, and nearer them than any other sail\'s', () => {
+    const plan = buildRaftRiggingPlan(raft);
+    const belays = new Map<RaftSailKey, Vec3[]>();
+    for (const r of plan) {
+      if (r.role !== 'sheet') continue;
+      const key = raftRopeSail(r);
+      if (key === null) continue;
+      belays.set(key, [...(belays.get(key) ?? []), raftAsm.socketWorldPosition(r.socketB) as Vec3]);
+    }
+    for (const k of RAFT_SAIL_KEYS) {
+      expect(belays.get(k), `${k} carries no sheet in the plan`).toBeDefined();
+    }
+    const near = (q: Vec3, ps: Vec3[]): number =>
+      Math.min(...ps.map((b) => Math.hypot(q[0] - b[0], q[1] - b[1], q[2] - b[2])));
+    for (const a of SHEETS) {
+      const mine = sailOf(a);
+      const q = raftAsm.socketWorldPosition(RAFT_STATIONS[a].socket) as Vec3;
+      const own = near(q, belays.get(mine) as Vec3[]);
+      // you can put a hand on the rope you are hauling — §B104 measured 6.4 m
+      expect(own, `${a} is ${own.toFixed(2)} m from any ${mine} sheet`).toBeLessThanOrEqual(P.reach);
+      for (const k of RAFT_SAIL_KEYS) {
+        if (k === mine) continue;
+        // …and NOBODY ELSE'S. Standing here, the only sheets under your hand
+        // are the ones the plaque names: the two square sails' pins are 1.67 m
+        // apart on the same leg, which is deliberately more than a reach.
+        expect(near(q, belays.get(k) as Vec3[]), `${a} is within reach of ${k}'s sheets too`)
+          .toBeGreaterThan(P.reach);
+      }
+    }
+  });
+
+  it('every sheet station has a stance on the REAL deck from which its own sail is in view', () => {
+    // §T.115's method: the stance comes from the BUILT deck field, not from a
+    // number, so a deck change that strands a station fails here.
+    //
+    // "In view" is the hold's own geometry, ⊥ a taste bound. While a station
+    // is held `interact.constrain` pins the head inside `holdYawLimitDeg` of
+    // the facing it was taken at, and leaves the PITCH free — so the honest
+    // question is whether the sail's own clews lie inside that yaw window,
+    // which is the difference between trimming a sail you are looking at and
+    // trimming one that is behind you (USER, at the cabin's forward corner:
+    // "that's where I can interact with the sail, and it's kinda weird").
+    const field = buildRaftDeckField(raft);
+    const surface = createDeckSurface(field, { ceilingAt: createRaftCeiling() });
+    const yawLimit = (P.holdYawLimitDeg * Math.PI) / 180;
+    const wrap = (x: number): number => Math.atan2(Math.sin(x), Math.cos(x));
+    for (const a of SHEETS) {
+      const mine = sailOf(a);
+      const q = raftAsm.socketWorldPosition(RAFT_STATIONS[a].socket) as Vec3;
+      const corners = clews(raftAsm, mine);
+      // the BEST stance, ⊥ the first one the sweep happens to hit: the claim
+      // is that somewhere on this deck you can stand and see your own sail
+      let stood: { r: number; off: number; overhead: number } | null = null;
+      for (let r = 0.5; r <= P.reach; r += 0.1) {
+        for (let k = 0; k < 24; k++) {
+          const t = (k / 24) * Math.PI * 2;
+          const x = q[0] + Math.cos(t) * r;
+          const z = q[2] + Math.sin(t) * r;
+          const y = surface.heightAt(x, z);
+          if (y === null) continue; // no deck here: not a place to stand
+          const pos: Vec3 = [x, y, z];
+          const facing = Math.atan2(q[0] - x, q[2] - z);
+          const host = fakeHost(pos, facing, Math.atan2(q[1] - (y + EYE), Math.hypot(q[0] - x, q[2] - z)));
+          const ix = createInteract(host, { socketWorld: raftSocket });
+          if (ix.focus() !== a) continue; // this is not the station offered here
+          // the clew that is easiest to bring the head onto, and how nearly
+          // overhead it is (a sail straight above the stance is in view at any
+          // yaw at all, so the bearing to it says nothing)
+          let off = Infinity;
+          let overhead = Infinity;
+          for (const c of corners) {
+            const flat = Math.hypot(c[0] - x, c[2] - z);
+            off = Math.min(off, Math.abs(wrap(Math.atan2(c[0] - x, c[2] - z) - facing)));
+            overhead = Math.min(overhead, flat);
+          }
+          if (stood === null || off < stood.off) stood = { r, off, overhead };
+        }
+      }
+      expect(stood, `${a} has no stance on the deck that offers it`).not.toBeNull();
+      const s2 = stood as { r: number; off: number; overhead: number };
+      expect(s2.r, `${a} is only reachable at arm's length`).toBeLessThanOrEqual(P.reach);
+      if (s2.overhead > 0.5) {
+        expect(s2.off, `${a} is held with ${mine} outside the hold's own yaw window`)
+          .toBeLessThanOrEqual(yawLimit);
+      }
     }
   });
 });
