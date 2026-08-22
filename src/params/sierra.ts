@@ -308,6 +308,32 @@ export interface SierraParams {
   bandCrownTint: number;
   bandStrength: number;
 
+  // ── T122 layer separation, sheeting contours, fresh rock ────────────────
+  /**
+   * Metres of ELEVATION a sheet trace bows by where the curvature reaches
+   * `sheetBandConvexity` — the term that makes the bands hug a convex nose
+   * instead of lying as exact level sets of height (§T.122, sierraMaterial's
+   * header). 0 = horizontal contours.
+   */
+  sheetBandWarp: number;
+  /**
+   * Joint-density (0..1) at which the two sets are fully drawn; they fade out
+   * 0.15 either side. Below this the rock is not jointed and the sets must not
+   * appear, or the lattice covers the whole island (R3-14's graph paper).
+   */
+  jointCoverage: number;
+  /** share of the joint bite that lands on un-fractured bedrock (was a hard 0.5) */
+  jointBaseBite: number;
+  /**
+   * A block that has fallen is not the slab it fell from: how much of the
+   * ground's grus/litter/wear it sheds (0..1), how much of its lichen (0..1),
+   * and how far it goes toward a fresh fracture face.
+   */
+  rockFreshCover: number;
+  rockFreshLichen: number;
+  rockFreshStrength: number;
+  rockFreshTint: number;
+
   // ── T112e vegetation (vegetation/sierraScatter.ts, terrain/groundCoverMesh.ts) ──
   /** candidate grid spacing (m): one blue-noise cell = one chance per species */
   vegSampleSpacing: number;
@@ -472,6 +498,37 @@ export interface SierraParams {
    */
   vegCullShadowReach: number;
 
+  // ── T130 profile ────────────────────────────────────────────────────────
+  /**
+   * 0 = the raw analytic profile (A/B, and what every pre-T130 measurement
+   * was taken on), 1 = run `profileApron` (heightmap.ts). Sierra only; a
+   * pirate island never reaches the term.
+   */
+  profileEnabled: number;
+  /**
+   * THE APRON'S GRADE AT THE WATERLINE, as a fraction of the raw field's
+   * slope there. `profileApron` integrates a slope multiplier that ramps from
+   * this at h = 0 back to 1 at the top of the band, so the number IS the
+   * grade: 0.3 means the first metres of shore rise at 30% of the angle the
+   * archetype + noise would otherwise have given them.
+   *
+   * WHY IT EXISTS (§T.130). Measured from the raft's eye (1.6 m) 20 m off a
+   * 250 m dome: the horizon angle was 23° and the ground was already 27 m up
+   * 50 m inland — a wall, not a landfall. The whole 30-50 m of relief was
+   * being spent in the first tenth of the footprint because the waterline
+   * cuts the crown high on its shoulder (`sinkOpenWater` puts the shoreline
+   * where the raw landmass is ~7.5 m, which on `(1−u²)^k` is the steepest
+   * part of the curve).
+   */
+  profileToeGrade: number;
+  /**
+   * The band the ramp spans, as a FRACTION OF THE FAMILY'S PEAK rather than
+   * as metres (§V43: the shape of an island must not depend on its size — a
+   * fixed-metre band would flatten a filler islet outright and barely touch
+   * the Half Dome). 0.6 puts the apron + bench under the lower 60% of the
+   * family's relief and leaves the crown's own profile alone.
+   */
+  profileRiseFraction: number;
 }
 
 export const sierraParams: SierraParams = registerParams(
@@ -529,10 +586,10 @@ export const sierraParams: SierraParams = registerParams(
     graniteNoiseSlope: 0.08,
     sierraCoastSlope: 0.1,
 
-    graniteBaseColor: 0xa9a39a,
+    graniteBaseColor: 0xa39e92,
     graniteTopColor: 0xc4bfb6,
     graniteJointColor: 0x6b665f,
-    lichenColor: 0x6a7350,
+    lichenColor: 0x566b41,
     jointSpacing: 6.5,
     jointWidth: 0.3,
     jointStrength: 0.35,
@@ -543,8 +600,11 @@ export const sierraParams: SierraParams = registerParams(
     dgSandColor: 0xd8c4a2,
     dgSandShadeColor: 0xbda987,
 
-    grusColor: 0xb8a98e,
-    litterColor: 0x6e5a42,
+    // §T.122: pale warm DG, a measured 0.052 OKLab clear of bare granite after
+    // ACES at the shipped exposure — the tightest pair in the stack was
+    // granite~grus at noon (0.049 before this nudge)
+    grusColor: 0xcdb98f,
+    litterColor: 0x5b3922,
     coverGrusSlope: 20,
     coverBareSlope: 35,
     coverMacroScale: 1 / 60,
@@ -657,22 +717,27 @@ export const sierraParams: SierraParams = registerParams(
     pathGuardWidth: 1,
     // ── T112d shading ──
     // polish where curvature > +0.02/m and slope < 15°, on bare bedrock
-    polishCurvature: 0.02,
-    polishSlope: 15,
+    polishCurvature: 0.016,
+    polishSlope: 18,
     polishDebrisMax: 0.3,
-    polishedColor: 0xc9c4ba,
-    fracturedJoint: 0.55,
-    fracturedSlope: 30,
-    fracturedColor: 0x8e887f,
+    // §T.122: glacial polish is NOT white. Its brightness on screen is
+    // SPECULAR — `polishGloss` pulls the roughness down — and an albedo up at
+    // 0xcbd4d9 spent the last of the chroma headroom ACES leaves near L 0.9,
+    // landing 0.015 OKLab from the fresh-fracture tint and 0.045 from grus.
+    // A mid cool grey reads as polish because of the sheen, and leaves room.
+    polishedColor: 0xb0b9c2,
+    fracturedJoint: 0.66,
+    fracturedSlope: 38,
+    fracturedColor: 0x7b7368,
     fracturedRoughness: 0.95,
-    grusDebrisMin: 0.4,
+    grusDebrisMin: 0.15,
     litterMoisture: 0.55,
     lichenAspectAzimuth: Math.PI * 1.5, // −z faces
     lichenAspectStrength: 0.6,
     lichenShadeStrength: 0.5,
     pathWearWidth: 6,
     pathWearStrength: 0.6,
-    pathWornColor: 0xc2b49a,
+    pathWornColor: 0x987f62,
     sheetBandSpacing: 2.5,
     sheetBandRiser: 0.3,
     sheetBandStrength: 0.22,
@@ -689,6 +754,20 @@ export const sierraParams: SierraParams = registerParams(
     bandHighTint: 0xc9d0d8,
     bandCrownTint: 0xe8e4dc,
     bandStrength: 0.5,
+
+    // ── T122 ──
+    sheetBandWarp: 0.15,
+    jointCoverage: 0.78,
+    jointBaseBite: 0.15,
+    rockFreshCover: 0.85,
+    rockFreshLichen: 0.7,
+    rockFreshStrength: 0.6,
+    // WARM near-white, not the cool grey it was: a cool 0xbdc4c6 sat 0.025
+    // OKLab from `polishedColor` after the tonemap, so a fallen block on the
+    // glacial crown — exactly where the plucked blocks are — vanished into the
+    // slab it fell from. Feldspar is warm; a polished, water-darkened glacial
+    // surface is cool. Median block~ground separation 0.056 → 0.077 at tod 17.5.
+    rockFreshTint: 0xdcd4c2,
 
     // ── T112e vegetation ──
     vegSampleSpacing: 2,
@@ -773,6 +852,16 @@ export const sierraParams: SierraParams = registerParams(
     cirqueWallRun: 18,
     cirqueBowlOutward: 0.4,
     rockPathClearance: 1.5,
+
+    // ── T130 profile ──
+    // Measured (tests/islandLandfall.test.ts, 3 families × 3 seeds): 0.3/0.6
+    // takes the raft's-eye horizon angle 20 m off a 250 m dome from 23° to
+    // 11°, the ground 50 m inland from 27 m to 10 m, and the run from the
+    // waterline to +3 m from 10 m to 44 m — a beach she can ground on and
+    // walk up. Lower toe grades flatten the crown's foot into a table.
+    profileEnabled: 1,
+    profileToeGrade: 0.3,
+    profileRiseFraction: 0.6,
 
   },
   {
@@ -942,6 +1031,13 @@ export const sierraParams: SierraParams = registerParams(
     bandHighHeight: { min: 0, max: 300, step: 1 },
     bandWidth: { min: 0.5, max: 40, step: 0.5 },
     bandStrength: { min: 0, max: 1, step: 0.01 },
+    // ── T122 ──
+    sheetBandWarp: { min: 0, max: 6, step: 0.1 },
+    jointCoverage: { min: 0, max: 1, step: 0.01 },
+    jointBaseBite: { min: 0, max: 1, step: 0.01 },
+    rockFreshCover: { min: 0, max: 1, step: 0.01 },
+    rockFreshLichen: { min: 0, max: 1, step: 0.01 },
+    rockFreshStrength: { min: 0, max: 1, step: 0.01 },
 
     // ── T112e vegetation ──
     vegSampleSpacing: { min: 1, max: 8, step: 0.25 },
@@ -1018,6 +1114,11 @@ export const sierraParams: SierraParams = registerParams(
     cirqueWallRun: { min: 4, max: 60, step: 1 },
     cirqueBowlOutward: { min: 0, max: 1, step: 0.01 },
     rockPathClearance: { min: 0, max: 12, step: 0.1 },
+
+    // ── T130 profile ──
+    profileEnabled: { min: 0, max: 1, step: 1 },
+    profileToeGrade: { min: 0.05, max: 1, step: 0.01 },
+    profileRiseFraction: { min: 0.1, max: 1.5, step: 0.05 },
 
   },
 );

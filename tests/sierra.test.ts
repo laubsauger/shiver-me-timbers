@@ -20,6 +20,8 @@
  * Heightmap + geometry + node-graph construction only; no renderer.
  */
 import { describe, expect, it } from 'vitest';
+import * as THREE from 'three/webgpu';
+import { float, positionLocal, vec2 } from 'three/tsl';
 import {
   findShoreRadius,
   generateIslandHeightmap,
@@ -29,7 +31,25 @@ import {
 import { createArchipelago, generateIslandSites, siteParams } from '../src/island/archipelago';
 import { createIslandMaterials } from '../src/island/islandMaterials';
 import { createIslandMesh } from '../src/island/islandMesh';
-import { createSierraTerrainMaterial } from '../src/island/sierraMaterial';
+import {
+  LAYER_NAMES,
+  buildSierraSurface,
+  createSierraTerrainMaterial,
+  createSierraUniforms,
+  sheetBandCoordCpu,
+  sheetPhase,
+  sierraLinear,
+  sierraSurfaceCpu,
+  type SierraPointCpu,
+} from '../src/island/sierraMaterial';
+import { sampleTerrainChannel, TerrainInfoChannels, type TerrainInfo } from '../src/island/terrainInfo';
+import { terrainInfoFor } from '../src/island/terrainInfoBake';
+import { coordFilter, periodResolved } from '../src/ship/bandLimit';
+import { fbm2Cpu, swissTurbulence2Cpu } from '../src/terrain/noiseCpu';
+import { keyLight } from '../src/sky/moonCycle';
+import { hemisphereColors, skyPalette, skyTint, srgbToLinear } from '../src/sky/sunCycle';
+import { skyParams } from '../src/params/sky';
+import { postParams } from '../src/params/post';
 import {
   SIERRA_SLICE_ARCHETYPES,
   isSierraArchetype,
@@ -459,7 +479,6 @@ describe('generateSierraSites: the slice', () => {
     const arch = createArchipelago({ seed: 1337, sites: world.sites });
     try {
       expect(arch.islands).toHaveLength(world.sites.length);
-      expect(arch.anchorages).toHaveLength(0); // no lagoon showcase in this world
       for (const island of arch.islands) {
         expect(isSierraArchetype(island.heightmap.archetype)).toBe(true);
         expect(island.palms.mesh.name).toBe('island-pines');
@@ -482,6 +501,99 @@ describe('generateSierraSites: the slice', () => {
 });
 
 type THREE_InstancedMeshLike = { count: number };
+
+/**
+ * §T.125 — `raft.html?at=dome` HAD TO BE A HAND-POSE. `createArchipelago`
+ * minted an anchorage only when `sites[0].archetype === 'lagoon'`, the slice
+ * forces its own families, so the sierra world's jump list was `['spawn']`
+ * and every R3 island frame was shot by writing the raft's position and
+ * pinning `followCam.setDebugPose()` (docs/raft2100/lookdev/R3/README.md).
+ * The old test asserted `anchorages).toHaveLength(0)` — §V80's corollary
+ * exactly: it wrote the defect down and then enforced it.
+ *
+ * The PROPERTY, not the list: every island you can land on has a berth, that
+ * berth is off ITS OWN landing, and it is water she floats in. Names are
+ * asserted as a set because `?at=` needs them, not because the order matters.
+ */
+describe('§T.125 every routed island has an anchorage off its landing', () => {
+  for (const seed of [1337, 991]) {
+    it(`seed ${seed}: one berth per slice island, at its landing, afloat`, () => {
+      const world = generateSierraSites(seed);
+      const arch = createArchipelago({ seed, sites: world.sites });
+      try {
+        const routed = arch.islands.filter((i) => i.heightmap.path !== undefined);
+        // the route is what makes an island landable: fillers are under
+        // `pathMinRadius` and the Half Dome is scenery (§V90)
+        expect(routed).toHaveLength(sierraParams.sliceCount);
+        expect(new Set(arch.anchorages.map((a) => a.name))).toEqual(
+          new Set(SIERRA_SLICE_ARCHETYPES),
+        );
+        for (const a of arch.anchorages) {
+          const island = arch.islands.find((i) => i.heightmap.archetype === a.name)!;
+          const landing = island.heightmap.path!.pois.find((q) => q.kind === 'landing')!;
+          const lx = island.center[0] + landing.x;
+          const lz = island.center[1] + landing.z;
+          // she lies OFF THE BEACH SHE LANDS ON — a berth 200 m round the
+          // coast is a different island as far as the player is concerned
+          expect(Math.hypot(a.x - lx, a.z - lz)).toBeLessThanOrEqual(25);
+          // …and she is afloat there. `depth` is what the solver measured;
+          // the seabed is asked again so the two cannot drift apart.
+          expect(a.depth).toBeGreaterThanOrEqual(1.5);
+          expect(arch.seabed.heightAt(a.x, a.z)).toBeLessThan(0);
+          // bow at the beach: forward is [sin h, cos h] (showcase.ts)
+          const toLanding = Math.hypot(lx - a.x, lz - a.z);
+          const dot = (Math.sin(a.heading) * (lx - a.x) + Math.cos(a.heading) * (lz - a.z)) / toLanding;
+          expect(dot).toBeGreaterThan(0.99);
+          // the berth belongs to its own island, not to a neighbour it drifted to
+          let nearest = arch.islands[0];
+          let best = Infinity;
+          for (const i of arch.islands) {
+            const d = Math.hypot(a.x - i.center[0], a.z - i.center[1]);
+            if (d < best) {
+              best = d;
+              nearest = i;
+            }
+          }
+          expect(nearest.heightmap.archetype).toBe(a.name);
+        }
+        // nothing for the islets or the silhouette
+        expect(arch.anchorages).toHaveLength(sierraParams.sliceCount);
+      } finally {
+        arch.dispose();
+      }
+    });
+  }
+
+  it('the unreachable Half Dome is never a destination, even if it were routed', () => {
+    // §V90: nothing routes to it. The guard is `site.unreachable`, so it holds
+    // whatever the path carve decides to do with a 480 m island later.
+    const world = generateSierraSites(1337);
+    const arch = createArchipelago({ seed: 1337, sites: world.sites });
+    try {
+      const dome = world.sites.findIndex((s) => s.unreachable);
+      expect(dome).toBeGreaterThanOrEqual(0);
+      const [cx, cz] = arch.islands[dome].center;
+      for (const a of arch.anchorages) {
+        expect(Math.hypot(a.x - cx, a.z - cz)).toBeGreaterThan(arch.islands[dome].heightmap.worldRadius);
+      }
+    } finally {
+      arch.dispose();
+    }
+  });
+
+  it('the pirate world still gets its lagoon berth, and only that one', () => {
+    // the slice's anchorages are ADDITIVE: the showcase lagoon is a galleon
+    // berth in 7+ m solved against the basin, and it must not have been
+    // replaced by a raft-sized one at some beach
+    const arch = createArchipelago({ seed: 1337 });
+    try {
+      expect(arch.anchorages.map((a) => a.name)).toEqual(['lagoon']);
+      expect(arch.anchorages[0].depth).toBeGreaterThanOrEqual(7);
+    } finally {
+      arch.dispose();
+    }
+  });
+});
 
 describe('pines: benches, budget, wind contract', () => {
   it('every variant stays ≤ 300 triangles and bakes the wind attributes', () => {
@@ -566,3 +678,408 @@ describe('§B67: far-LOD island skipped the haze — root cause and fix', () => 
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// §T.122 — THE LAND SURFACE ITSELF. PROPERTIES over the CPU twin of
+// `buildSierraSurface`, plus one node-TYPE assertion, all GPU-free (§V88).
+//
+// WHY THESE AND NOT A SCREENSHOT. The defects are R3-13 ("there is no
+// granite, the islands are chartreuse") and R3-14 ("the sheeting bands are a
+// rectilinear grid") in docs/raft2100/lookdev/R3/README.md — SPEC's T122 line
+// cites them as "R3-1", which is the plank material, a different entry.
+// R3 shot every landmass as one flat
+// chartreuse at tod 7.5/12 and one red-brown at 17.5, with talus the same hue
+// as the ground. Three different things can produce that picture and only one
+// of them was true, so each is now a separate assertion that fails on its own:
+//
+//   1. ONE LAYER WINS EVERYWHERE — measured, and it does not: every layer
+//      claims a non-trivial share of every archetype.
+//   2. THE LAYER COLOURS DO NOT SURVIVE THE TONEMAP — measured, at all three
+//      hours, through the shipped key light, ACES and the grade. This is the
+//      one that needs a bar, because "different hex" means nothing at
+//      L 0.9 where ACES has spent the chroma headroom.
+//   3. THE MASKS ARE MULTIPLIED BY SOMETHING THAT FLATTENS THEM — they were.
+//      `periodResolved(vec2)` returned a VEC2, every layer weight became a
+//      vec2, and three pads a vec2 into a vec3 with 0.0, so the land albedo's
+//      BLUE was multiplied by zero on the terrain and the boulders alike.
+//      (r, g, 0) is exactly a chartreuse that turns red-brown as the key
+//      warms. `albedoIsThreeChannel` below is the regression.
+//
+// And the sheeting: T112d's band coordinate was `localXZ · normalize(∇κ)`, a
+// dot with a PER-PIXEL direction, which is not the integral of that direction.
+// Its level sets spiral and its gradient grows with radius — the whirlpool the
+// plan view caught. The replacement is a genuine potential Φ, and the test
+// below fails BOTH an axis-aligned lattice and T112d's own formula.
+// ─────────────────────────────────────────────────────────────────────────
+
+/** the three hours R3 shot, and the three §V94 is judged at */
+const T122_HOURS = [7.5, 12, 17.5];
+
+/**
+ * The bar, in OKLab ΔE, for "these two read apart". OKLab's JND over a large
+ * flat field is ~0.02; 0.045 is a bit over twice that, which is where a
+ * hillside stops being one colour and starts being two materials. Measured
+ * floor across all 28 pairs × 3 hours with the shipped palette: 0.0498
+ * (polished~fresh at noon). Raising this bar is a look decision, not a fix.
+ */
+const T122_SEPARATION = 0.045;
+
+// ── the display chain, transliterated (§V80): key + hemisphere ambient,
+//    ACES at the shipped exposure, then the grade. An albedo pair that is
+//    far apart in linear RGB and 0.01 apart AFTER this is the defect.
+const T122_ACES_IN = [[0.59719, 0.35458, 0.04823], [0.076, 0.90834, 0.01566], [0.0284, 0.13383, 0.83777]];
+const T122_ACES_OUT = [[1.60475, -0.53108, -0.07367], [-0.10208, 1.10813, -0.00605], [-0.00327, -0.07276, 1.07602]];
+type Rgb = [number, number, number];
+const t122Mul = (m: number[][], v: Rgb): Rgb => [
+  m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+  m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+  m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+];
+function t122Aces(c: Rgb, exposure: number): Rgb {
+  const rrt = (v: number): number =>
+    (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.432951) + 0.238081);
+  let v = t122Mul(T122_ACES_IN, [c[0] * (exposure / 0.6), c[1] * (exposure / 0.6), c[2] * (exposure / 0.6)]);
+  v = t122Mul(T122_ACES_OUT, [rrt(v[0]), rrt(v[1]), rrt(v[2])]);
+  return v.map((x) => Math.min(1, Math.max(0, x))) as Rgb;
+}
+/** linear albedo + geometric normal + hour → what the pixel actually shows */
+function t122Display(albedo: Rgb, n: Rgb, tod: number): Rgb {
+  const key = keyLight(tod, skyParams);
+  const kc = key.color.map(srgbToLinear) as Rgb;
+  const ndl = Math.max(0, n[0] * key.direction[0] + n[1] * key.direction[1] + n[2] * key.direction[2]);
+  const pal = skyPalette(key.sunElevation, skyParams);
+  const hc = hemisphereColors(pal.mid, pal.ground, skyTint(key.sunElevation, key.moonWeight), skyParams.ambientDesaturation);
+  const hw = 0.5 * n[1] + 0.5;
+  const hi = skyParams.ambientIntensity * key.ambient;
+  const lit = [0, 1, 2].map(
+    (i) => (albedo[i] * (kc[i] * key.intensity * ndl + (hc.ground[i] + (hc.sky[i] - hc.ground[i]) * hw) * hi)) / Math.PI,
+  ) as Rgb;
+  const out = t122Aces(lit, skyParams.exposure);
+  if (!postParams.vibranceEnabled) return out;
+  const mx = Math.max(out[0], out[1], out[2]);
+  return out.map((v) => Math.min(1, Math.max(0, mx + (v - mx) * (1 + postParams.vibrance)))) as Rgb;
+}
+function t122Oklab(c: Rgb): Rgb {
+  const l = Math.cbrt(0.4122214708 * c[0] + 0.5363325363 * c[1] + 0.0514459929 * c[2]);
+  const m = Math.cbrt(0.2119034982 * c[0] + 0.6806995451 * c[1] + 0.1073969566 * c[2]);
+  const s = Math.cbrt(0.0883024619 * c[0] + 0.2817188376 * c[1] + 0.6299787005 * c[2]);
+  return [
+    0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  ];
+}
+const t122DE = (a: Rgb, b: Rgb): number => {
+  const [x, y] = [t122Oklab(a), t122Oklab(b)];
+  return Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
+};
+
+// ── the surface, sampled over a real island through the shipped CPU twin ──
+const T122_UP: Rgb = [0, 1, 0];
+const t122InfoCache = new Map<string, TerrainInfo>();
+function t122Info(name: SierraArchetypeName, i: number): TerrainInfo {
+  const key = `${name}:${i}`;
+  let info = t122InfoCache.get(key);
+  if (!info) {
+    info = terrainInfoFor(hmFor(name, i));
+    t122InfoCache.set(key, info);
+  }
+  return info;
+}
+function t122Normal(hm: IslandHeightmap, x: number, z: number): Rgb {
+  const e = (2 * hm.worldRadius) / (hm.size - 1);
+  const dx = (hm.heightAt(x + e, z) - hm.heightAt(x - e, z)) / (2 * e);
+  const dz = (hm.heightAt(x, z + e) - hm.heightAt(x, z - e)) / (2 * e);
+  const l = Math.hypot(dx, 1, dz);
+  return [-dx / l, 1 / l, -dz / l];
+}
+/** everything `sierraSurfaceCpu` needs at one island-local point */
+function t122Point(name: SierraArchetypeName, i: number, x: number, z: number, fresh: number): SierraPointCpu {
+  const hm = hmFor(name, i);
+  const info = t122Info(name, i);
+  const enc = TerrainInfoChannels.encode;
+  const p = sierraParams;
+  return {
+    local: [x, z],
+    world: [x, z],
+    height: hm.heightAt(x, z),
+    normal: t122Normal(hm, x, z),
+    curvature: (sampleTerrainChannel(info, 'curvature', x, z) - 0.5) * 2 * enc.curvatureRangePerMetre,
+    moisture: sampleTerrainChannel(info, 'moisture', x, z),
+    pathDistance: sampleTerrainChannel(info, 'pathDistance', x, z) * enc.pathDistanceMetres,
+    debris: sampleTerrainChannel(info, 'debris', x, z) * enc.debrisMetres,
+    skyAO: sampleTerrainChannel(info, 'skyAO', x, z),
+    jointDensity: swissTurbulence2Cpu(x * p.jointScale + info.jointNoiseOffset[0], z * p.jointScale + info.jointNoiseOffset[1], 3),
+    macro: fbm2Cpu(x * p.coverMacroScale, z * p.coverMacroScale, 2),
+    grain: fbm2Cpu(x * p.coverGrainScale, z * p.coverGrainScale, 2),
+    lichenField: fbm2Cpu(x * p.lichenScale, z * p.lichenScale, 3),
+    iceAzimuth: hm.sierra?.iceAzimuth ?? 0,
+    fresh,
+  };
+}
+interface T122Cell { n: Rgb; ground: ReturnType<typeof sierraSurfaceCpu>; block: ReturnType<typeof sierraSurfaceCpu> }
+const t122SweepCache = new Map<string, T122Cell[]>();
+function t122Sweep(name: SierraArchetypeName, i: number): T122Cell[] {
+  const key = `${name}:${i}`;
+  let cells = t122SweepCache.get(key);
+  if (!cells) {
+    const hm = hmFor(name, i);
+    const R = hm.worldRadius;
+    cells = [];
+    for (let z = -R; z <= R; z += 8)
+      for (let x = -R; x <= R; x += 8) {
+        if (hm.heightAt(x, z) < 1.2) continue; // sea and the sand skirt are the base material's
+        cells.push({
+          n: t122Point(name, i, x, z, 0).normal,
+          ground: sierraSurfaceCpu(t122Point(name, i, x, z, 0)),
+          block: sierraSurfaceCpu(t122Point(name, i, x, z, 1)),
+        });
+      }
+    t122SweepCache.set(key, cells);
+  }
+  return cells;
+}
+const T122_FAMILIES: SierraArchetypeName[] = ['dome', 'drownedRidge', 'cirque'];
+
+describe('§T.122 the land is a stack of materials, not one colour', () => {
+  it('every layer claims a non-trivial share of every archetype', () => {
+    // R3-1's first candidate cause: one layer wins the whole island. A layer
+    // that never wins anywhere is a layer the palette work below cannot help,
+    // and a mask threshold that has drifted off the terrain's actual range.
+    const rows: string[] = [];
+    for (const family of T122_FAMILIES) {
+      const cells = t122Sweep(family, 1);
+      expect(cells.length).toBeGreaterThan(250);
+      const wins = LAYER_NAMES.map(() => 0);
+      for (const c of cells) wins[c.ground.winner]++;
+      rows.push(
+        `  ${family.padEnd(13)} ` +
+          LAYER_NAMES.map((n, k) => `${n} ${((100 * wins[k]) / cells.length).toFixed(1)}%`).join('  ') +
+          `  (n=${cells.length})`,
+      );
+      for (let k = 0; k < LAYER_NAMES.length; k++) {
+        // 3%: below that a layer is a speckle, not a material you can see
+        expect.soft(wins[k] / cells.length, `${family} ${LAYER_NAMES[k]}`).toBeGreaterThan(0.03);
+      }
+    }
+    console.log('§T.122 layer win fractions:\n' + rows.join('\n'));
+  });
+
+  it('the layer colours read APART after the key light, ACES and the grade — at 7.5, 12 and 17.5', () => {
+    // The bar has to be measured HERE, not on the hex values: the shipped
+    // exposure puts bare granite near L 0.65 at noon and ACES leaves almost no
+    // chroma headroom above that, so two hexes that look distinct in a picker
+    // can land 0.01 apart on screen. At 17.5 the key is deep orange and the
+    // whole palette collapses toward one dark red-brown — that hour is the
+    // binding constraint on every pair below.
+    const swatches: Record<string, number> = {
+      granite: sierraParams.graniteBaseColor,
+      polished: sierraParams.polishedColor,
+      fractured: sierraParams.fracturedColor,
+      grus: sierraParams.grusColor,
+      litter: sierraParams.litterColor,
+      lichen: sierraParams.lichenColor,
+      path: sierraParams.pathWornColor,
+      fresh: sierraParams.rockFreshTint,
+    };
+    const names = Object.keys(swatches);
+    let floor = Infinity;
+    let floorAt = '';
+    for (const tod of T122_HOURS) {
+      const shown: Record<string, Rgb> = {};
+      for (const k of names) shown[k] = t122Display(sierraLinear(swatches[k]), T122_UP, tod);
+      for (let i = 0; i < names.length; i++)
+        for (let j = i + 1; j < names.length; j++) {
+          const d = t122DE(shown[names[i]], shown[names[j]]);
+          expect.soft(d, `${names[i]}~${names[j]} @ tod ${tod}`).toBeGreaterThan(T122_SEPARATION);
+          if (d < floor) {
+            floor = d;
+            floorAt = `${names[i]}~${names[j]} @ tod ${tod}`;
+          }
+        }
+    }
+    console.log(`§T.122 tightest layer pair after the tonemap: ${floorAt} = ${floor.toFixed(4)} (bar ${T122_SEPARATION})`);
+  });
+
+  it('a fallen block never shades as the ground it is lying on', () => {
+    // T112f put real talus and real outcrops on these islands, and R3 could
+    // not see any of it: the boulders shade through the SAME surface function
+    // at the SAME island-local point, so they were carrying the ground's grus,
+    // litter and lichen and came out as blisters of the terrain. `fresh`
+    // strips the cover, thins the lichen a young face has not grown, and lifts
+    // the block toward a fracture tint. If this fails, T112f's geometry is
+    // invisible again and that whole task is wasted.
+    const rows: string[] = [];
+    for (const family of T122_FAMILIES) {
+      const cells = t122Sweep(family, 1);
+      for (const tod of T122_HOURS) {
+        const ds = cells
+          .map((c) => t122DE(t122Display(c.block.albedo, c.n, tod), t122Display(c.ground.albedo, c.n, tod)))
+          .sort((a, b) => a - b);
+        const median = ds[Math.floor(ds.length / 2)];
+        rows.push(`  ${family.padEnd(13)} tod ${String(tod).padStart(4)}  median ${median.toFixed(4)}  p05 ${ds[Math.floor(ds.length * 0.05)].toFixed(4)}`);
+        // the MEDIAN, because the tail is honest: a fresh block on a polished
+        // glacial slab is genuinely a subtle difference, and pushing that case
+        // apart would mean lying about one of the two
+        expect.soft(median, `${family} @ tod ${tod}`).toBeGreaterThan(0.06);
+      }
+    }
+    console.log('§T.122 talus block vs the ground under it (OKLab dE):\n' + rows.join('\n'));
+  });
+
+  it('the land albedo is a THREE-channel colour — the vec2 that zeroed its blue', () => {
+    // THE ROOT CAUSE, as a type. `coordFilter` is per-component: handed the
+    // vec2 field coordinate it returns a vec2 footprint, `periodResolved`
+    // hands that straight to `smoothstep`, and `mix(float, float, vec2)` takes
+    // the LONGEST input's type. Every fbm field and every layer weight
+    // downstream became a vec2, and `NodeBuilder.format` pads a vec2 into a
+    // vec3 as `vec3(v, 0.0)` — so `layerColour.mul(weight)` multiplied the
+    // whole land albedo's BLUE BY ZERO, on the terrain and the boulders both.
+    // Nothing in a node-graph shape test can see that; the TYPE can.
+    const renderer = new THREE.WebGPURenderer({ canvas: t122StubCanvas() });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshStandardNodeMaterial());
+    const backend = (renderer as unknown as { backend: Record<string, unknown> }).backend;
+    backend.renderer = renderer;
+    const builder = (
+      backend as unknown as { createNodeBuilder: (o: THREE.Object3D, r: THREE.WebGPURenderer) => Record<string, unknown> }
+    ).createNodeBuilder(mesh, renderer);
+    builder.material = mesh.material;
+    const typeOf = (n: unknown): string =>
+      (n as { getNodeType(b: unknown): string }).getNodeType(builder);
+
+    // the trap is still there in bandLimit — this is why `fieldFilter` exists
+    expect(typeOf(coordFilter(vec2(1, 2)))).toBe('vec2');
+    expect(typeOf(periodResolved(vec2(1, 2)))).toBe('vec2');
+
+    const u = createSierraUniforms();
+    const surface = buildSierraSurface({
+      info: null,
+      skyAO: float(1),
+      graniteGrey: u.grusColor,
+      localXZ: positionLocal.xz,
+      jointOffset: vec2(0, 0),
+      jointDirA: vec2(1, 0),
+      jointDirB: vec2(0, 1),
+      bandPhase: float(0),
+      roughness: float(0.8),
+      u,
+    });
+    // 'color' is three's own three-component type; anything of length 2 here
+    // is the defect, whatever it is called
+    const albedoType = typeOf(surface.albedo);
+    expect((builder as unknown as { getTypeLength(t: string): number }).getTypeLength(albedoType)).toBe(3);
+    expect(typeOf(surface.roughness)).toBe('float');
+    expect(typeOf(surface.relief)).toBe('float');
+  });
+
+  it('the sheeting bands are contours of a potential — a lattice and T112d\'s own axis both FAIL this', () => {
+    // `island-dome-plan.png` is what this replaces. Sheets peel PARALLEL to
+    // the surface, so their traces are closed shells round a whaleback: from
+    // the air they must read as concentric rings, and the across-band axis
+    // (∇Φ) must therefore point RADIALLY everywhere on a dome.
+    //
+    // The two controls are the point of the test. An axis-aligned lattice
+    // averages |ĝ·r̂| = 2/π ≈ 0.637 over a circle — it passed the old
+    // "follows ∇κ" phrasing and it must not pass this one. T112d's own
+    // coordinate, `localXZ · normalize(∇κ)`, is a dot with a PER-PIXEL
+    // direction: not the integral of that direction, so its level sets spiral
+    // and |∇Φ| GROWS WITH RADIUS. That growth is the second assertion, and it
+    // is the whirlpool itself — at |∇Φ|·spacing = 8 the bands are 30 cm apart
+    // on the ground and there is nothing a band limit can do with them.
+    const H = 120;
+    const R = 220;
+    const CELL = 2;
+    // a paraboloid whaleback, plus a low bump field so ∇κ has something to
+    // wander on — a mathematically perfect dome would flatter T112d
+    const dome = (x: number, z: number): number =>
+      Math.max(0, H * (1 - (x * x + z * z) / (R * R))) + 3 * Math.sin(x / 28) * Math.sin(z / 28);
+    const kappa = (x: number, z: number): number =>
+      ((dome(x + CELL, z) + dome(x - CELL, z) + dome(x, z + CELL) + dome(x, z - CELL) - 4 * dome(x, z)) / (CELL * CELL)) * 0.5;
+    const grad = (f: (x: number, z: number) => number, x: number, z: number, e: number): [number, number] => [
+      (f(x + e, z) - f(x - e, z)) / (2 * e),
+      (f(x, z + e) - f(x, z - e)) / (2 * e),
+    ];
+    const ice = 0.8;
+    const phase = sheetPhase(ice);
+    const shipped = (x: number, z: number): number => sheetBandCoordCpu(dome(x, z), kappa(x, z), phase);
+    const t112d = (x: number, z: number): number => {
+      const [gx, gz] = grad(kappa, x, z, CELL);
+      const dx = gx + Math.cos(ice) * 2e-4;
+      const dz = gz + Math.sin(ice) * 2e-4;
+      const l = Math.hypot(dx, dz) || 1;
+      return (x * (dx / l) + z * (dz / l)) / sierraParams.sheetBandSpacing;
+    };
+    const lattice = (x: number, z: number): number =>
+      (x * Math.cos(ice) + z * Math.sin(ice)) / sierraParams.sheetBandSpacing;
+
+    /** mean & p10 of |unit(∇Φ)·r̂|, and the worst |∇Φ|·spacing, over the dome */
+    function survey(f: (x: number, z: number) => number): { radial: number; p10: number; worstMag: number } {
+      const rad: number[] = [];
+      let worstMag = 0;
+      for (let a = 0; a < Math.PI * 2 - 1e-9; a += Math.PI / 60)
+        for (let r = 20; r <= R * 0.85; r += 5) {
+          const x = Math.cos(a) * r;
+          const z = Math.sin(a) * r;
+          const [gx, gz] = grad(f, x, z, 1);
+          const l = Math.hypot(gx, gz);
+          if (l < 1e-9) continue;
+          rad.push(Math.abs((gx / l) * Math.cos(a) + (gz / l) * Math.sin(a)));
+          worstMag = Math.max(worstMag, l * sierraParams.sheetBandSpacing);
+        }
+      const sorted = [...rad].sort((p, q) => p - q);
+      return {
+        radial: rad.reduce((p, q) => p + q, 0) / rad.length,
+        p10: sorted[Math.floor(sorted.length * 0.1)],
+        worstMag,
+      };
+    }
+    const now = survey(shipped);
+    const old = survey(t112d);
+    const grid = survey(lattice);
+    console.log(
+      '§T.122 sheeting on a synthetic dome (|∇Φ·r̂|, and the worst |∇Φ|·spacing):\n' +
+        `  shipped Φ     radial ${now.radial.toFixed(3)}  p10 ${now.p10.toFixed(3)}  worst |∇Φ|·s ${now.worstMag.toFixed(2)}\n` +
+        `  T112d ∇κ dot  radial ${old.radial.toFixed(3)}  p10 ${old.p10.toFixed(3)}  worst |∇Φ|·s ${old.worstMag.toFixed(2)}\n` +
+        `  ruled lattice radial ${grid.radial.toFixed(3)}  p10 ${grid.p10.toFixed(3)}  worst |∇Φ|·s ${grid.worstMag.toFixed(2)}`,
+    );
+
+    // concentric: the across-band axis is radial almost everywhere
+    expect(now.radial).toBeGreaterThan(0.9);
+    expect(now.p10).toBeGreaterThan(0.8);
+    // …and one band per `sheetBandSpacing` metres of elevation, never a
+    // coordinate racing away from its own band limit
+    expect(now.worstMag).toBeLessThan(1.5);
+
+    // THE CONTROLS. If either of these ever passes, the test has stopped
+    // measuring what it claims to.
+    expect(grid.radial).toBeLessThan(0.7);
+    expect(grid.p10).toBeLessThan(0.8);
+    expect(old.radial).toBeLessThan(0.9);
+    expect(old.worstMag).toBeGreaterThan(1.5);
+  });
+
+  it('§V2 the surface is a pure function of its point — same point, same bytes', () => {
+    const a = t122Point('dome', 1, 40, -25, 0);
+    const b = t122Point('dome', 1, 40, -25, 0);
+    const sa = sierraSurfaceCpu(a);
+    const sb = sierraSurfaceCpu(b);
+    expect(sb.albedo).toEqual(sa.albedo);
+    expect(sb.weights).toEqual(sa.weights);
+    expect(sb.bandCoord).toBe(sa.bandCoord);
+    // and a block at the same point is a DIFFERENT surface, not a rounding
+    expect(sierraSurfaceCpu(t122Point('dome', 1, 40, -25, 1)).albedo).not.toEqual(sa.albedo);
+  });
+});
+
+function t122StubCanvas(): HTMLCanvasElement {
+  return {
+    width: 4,
+    height: 4,
+    style: {},
+    getContext: (): null => null,
+    addEventListener: (): void => {},
+    removeEventListener: (): void => {},
+    getRootNode: (): unknown => ({}),
+    setAttribute: (): void => {},
+  } as unknown as HTMLCanvasElement;
+}

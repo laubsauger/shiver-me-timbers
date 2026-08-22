@@ -24,11 +24,28 @@
  * On top, in order: sheeting bands (below), joints, lichen, the implied
  * trail, macro tone, elevation bands.
  *
- * SHEETING BANDS FOLLOW THE DOME (research §2.2, Martel). The world-space
- * stripe grid is gone: the band coordinate is the island-local position
- * projected on `sheetingDirection` = ∇κ from the info texture (leans to the
- * tighter axis of an elliptical dome, radial on a round one), with the
- * seeded ice axis as the fallback where ∇κ vanishes. Gated to convex bedrock.
+ * SHEETING BANDS ARE CONTOURS, NOT A RULED GRID (§T.122, research §2.2,
+ * Martel). Sheets peel PARALLEL to the surface, so their traces on it are
+ * contours of the form — closed shells round a whaleback. T112d built the
+ * band coordinate as `localXZ · normalize(∇κ)`, and a dot product with a
+ * PER-PIXEL direction is not the integral of that direction: its level sets
+ * spiral, which is the whirlpool the R3 plan view caught. The coordinate is
+ * now a genuine POTENTIAL whose gradient is the across-band axis:
+ *
+ *     Φ = (y + sheetBandWarp · κ / sheetBandConvexity) / sheetBandSpacing
+ *
+ * ∇Φ carries the fall line AND the curvature gradient (the two are collinear
+ * and radial on a dome, which is why the bands close into rings there), the
+ * spacing is metres of ELEVATION so the traces widen on a flat and tighten on
+ * a face exactly as sheet outcrops do, and the warp bows them out over a
+ * convex nose so they are never exact level sets. Gated to convex bedrock.
+ *
+ * JOINT SETS ARE PER-ISLAND AND PATCHY (§T.122). Two sets at fixed WORLD
+ * azimuths, biting at half strength on every rock pixel, is one lattice laid
+ * over the whole world — the graph paper R3 saw, on the boulders too. The
+ * azimuths are now measured from the island's own seeded ice axis, the
+ * coordinate is island-local, and the bite is gated on the joint-density
+ * field (`jointCoverage`) so the sets show where the rock is actually jointed.
  *
  * IMPLIED TRAIL (T112 decision): `pathDistance` < `pathWearWidth` fades the
  * surface toward a worn grus — one wide smoothstep across the whole width,
@@ -44,6 +61,15 @@
  * are faded to their mean by `periodResolved`; every texture-driven mask is
  * a mipped sample (a filtered tier by construction); slope/curvature masks
  * are compares of non-periodic quantities. §V23/§V57: pure expression tree.
+ *
+ * A FALLEN BLOCK IS NOT THE SLAB IT FELL FROM (§T.122). The boulders shade
+ * through this same function at their island-local position, which is what
+ * makes a rock carry the ground's history — and it also made talus read as
+ * blisters of the ground, because it carried the ground's grus, litter and
+ * lichen as well. `fresh` (1 on the instanced rocks, 0 on the terrain) strips
+ * the cover layers off the block, thins the lichen a young surface has not
+ * grown yet, and lifts it toward `rockFreshTint`, the colour of a fracture
+ * face that has not weathered. Same granite, different age.
  *
  * Branching is BY ARCHETYPE FAMILY at the island (island.ts picks this
  * handle for sierra archetypes) — a pirate island renders exactly as before.
@@ -70,14 +96,13 @@ import {
 } from '../terrain';
 import { swissTurbulence2 } from '../terrain/noise';
 import { terrainParams } from '../params/terrain';
-import { bandLimitedEdge, periodResolved } from '../ship/bandLimit';
+import { bandLimitedEdge, coordFilter, periodResolved } from '../ship/bandLimit';
 import { reliefNormal } from '../ship/surfaceRelief';
 import { sierraParams, type SierraParams } from '../params/sierra';
 import { createHorizonTextures, horizonNodes, type HorizonMap, type HorizonTextures } from './horizonMap';
 import {
   createTerrainInfoTexture,
   terrainInfoNodes,
-  SHEET_DIR_FALLBACK,
   TerrainInfoChannels,
   type TerrainInfo,
   type TerrainInfoNodes,
@@ -100,6 +125,27 @@ const LAYER_HEIGHT_SHARE = [1, 0.5, 1, 0.7, 0.3];
 /** granite's floor score — the others must beat this to claim the pixel */
 const GRANITE_FLOOR = 0.3;
 const DEG = Math.PI / 180;
+
+/**
+ * The island's two joint-set axes, measured from ITS OWN seeded ice azimuth
+ * (§T.122). Joint sets and the glacial axis are both structural, so tying
+ * them together is not a cheat — and it stops every island in the world from
+ * sharing one lattice.
+ */
+export function jointAxes(iceAzimuth: number): [[number, number], [number, number]] {
+  const a = iceAzimuth + JOINT_AZIMUTH_A;
+  const b = iceAzimuth + JOINT_AZIMUTH_B;
+  return [
+    [Math.cos(a), Math.sin(a)],
+    [Math.cos(b), Math.sin(b)],
+  ];
+}
+
+/** per-island sheet phase, so two islands do not band at the same metres */
+export function sheetPhase(iceAzimuth: number): number {
+  const t = ((iceAzimuth / (Math.PI * 2)) * 3) % 1;
+  return t < 0 ? t + 1 : t;
+}
 
 export function createSierraUniforms(p: SierraParams = sierraParams) {
   return {
@@ -149,6 +195,13 @@ export function createSierraUniforms(p: SierraParams = sierraParams) {
     sheetBandStrength: uniform(p.sheetBandStrength),
     sheetBandConvexity: uniform(p.sheetBandConvexity),
     sheetBandRelief: uniform(p.sheetBandRelief),
+    sheetBandWarp: uniform(p.sheetBandWarp),
+    jointCoverage: uniform(p.jointCoverage),
+    jointBaseBite: uniform(p.jointBaseBite),
+    rockFreshCover: uniform(p.rockFreshCover),
+    rockFreshLichen: uniform(p.rockFreshLichen),
+    rockFreshStrength: uniform(p.rockFreshStrength),
+    rockFreshTint: uniform(new THREE.Color(p.rockFreshTint)),
     layerBlendWidth: uniform(p.layerBlendWidth),
     layerHeightAmp: uniform(p.layerHeightAmp),
     bandLowHeight: uniform(p.bandLowHeight),
@@ -208,6 +261,13 @@ export function updateSierraUniforms(u: SierraUniforms, p: SierraParams = sierra
   u.sheetBandStrength.value = p.sheetBandStrength;
   u.sheetBandConvexity.value = p.sheetBandConvexity;
   u.sheetBandRelief.value = p.sheetBandRelief;
+  u.sheetBandWarp.value = p.sheetBandWarp;
+  u.jointCoverage.value = p.jointCoverage;
+  u.jointBaseBite.value = p.jointBaseBite;
+  u.rockFreshCover.value = p.rockFreshCover;
+  u.rockFreshLichen.value = p.rockFreshLichen;
+  u.rockFreshStrength.value = p.rockFreshStrength;
+  u.rockFreshTint.value.setHex(p.rockFreshTint);
   u.layerBlendWidth.value = p.layerBlendWidth;
   u.layerHeightAmp.value = p.layerHeightAmp;
   u.bandLowHeight.value = p.bandLowHeight;
@@ -222,11 +282,33 @@ export function updateSierraUniforms(u: SierraUniforms, p: SierraParams = sierra
   u.jointScale.value = p.jointScale;
 }
 
+/**
+ * SCALAR screen footprint of a 2D FIELD coordinate — the wider of its two
+ * axes, because the field is resolved only when BOTH are.
+ *
+ * WHY IT EXISTS, AND WHY IT IS THE §T.122 BUG (§B). `coordFilter` is
+ * per-component: handed a vec2 it returns a vec2, so `periodResolved(vec2)`
+ * returns a VEC2 fade instead of a float. `mix(float, float, vec2)` takes the
+ * LONGEST input's type (three's MathNode.getInputType), so `macro`, `grain`
+ * and every layer weight downstream of them became vec2 — and three's
+ * NodeBuilder pads a vec2 into a vec3 as `vec3(v, 0.0)` (NodeBuilder.format),
+ * so `layerColour.mul(weight)` MULTIPLIED THE WHOLE LAND ALBEDO'S BLUE BY
+ * ZERO. Every landmass rendered as (r, g, 0): the flat chartreuse at 7.5/12
+ * and the red-brown at 17.5 that R3-13 reported, on the boulders too, because
+ * they share this function. The masks were separating the whole time; there
+ * was no blue left for them to separate IN.
+ */
+function fieldFilter(coord: AnyNode): AnyNode {
+  const f = coordFilter(coord);
+  return f.x.max(f.y);
+}
+
 /** one joint set: 1 away from a joint, dips toward 0 on it, band-limited */
-function jointSet(azimuth: number, u: SierraUniforms): AnyNode {
-  const dir = vec2(Math.cos(azimuth), Math.sin(azimuth));
-  // the SMOOTH coordinate — one unit per joint — is what the filter measures
-  const coord = positionWorld.xz.dot(dir).div(u.jointSpacing.max(1e-3));
+function jointSet(dir: AnyNode, localXZ: AnyNode, u: SierraUniforms): AnyNode {
+  // the SMOOTH coordinate — one unit per joint — is what the filter measures.
+  // ISLAND-LOCAL and on the island's own seeded axes (§T.122): world-space
+  // sets at fixed azimuths are one lattice over the whole archipelago.
+  const coord = localXZ.dot(dir).div(u.jointSpacing.max(1e-3));
   // distance to the nearest joint as a triangle wave: continuous everywhere,
   // so the wrap lands mid-block instead of on the edge (§V48, §B20)
   // @band-limited-elsewhere: this fract is the INPUT to bandLimitedEdge below, which filters on the joint width
@@ -238,25 +320,24 @@ function jointSet(azimuth: number, u: SierraUniforms): AnyNode {
 /** the 60 m macro field, faded to its mean (0.5) once its repeat is sub-pixel */
 function macroField(u: SierraUniforms): AnyNode {
   const coord = positionWorld.xz.mul(u.macroScale);
-  return mix(float(0.5), fbm2(coord, MACRO_OCTAVES), periodResolved(coord));
+  return mix(float(0.5), fbm2(coord, MACRO_OCTAVES), periodResolved(coord, fieldFilter(coord)));
 }
 
 /**
- * The shader's sheeting axis — twin of `sheetingDirectionCpu`: ∇κ from the
- * info texture, the ice axis as a fallback so a flat field never normalises
- * a zero vector.
+ * THE SHEETING POTENTIAL Φ — see the header. One unit per sheet, and its
+ * GRADIENT is the across-band axis, so the bands are level sets of a real
+ * scalar field and cannot spiral. CPU twin: `sheetBandCoordCpu`.
  */
-function sheetingDirection(info: TerrainInfoNodes, iceDir: AnyNode): AnyNode {
-  return info.curvatureGradient.add(iceDir.mul(SHEET_DIR_FALLBACK)).normalize();
+function sheetBandCoord(height: AnyNode, curvature: AnyNode, phase: AnyNode, u: SierraUniforms): AnyNode {
+  const warp = curvature.div(u.sheetBandConvexity.max(1e-4)).mul(u.sheetBandWarp);
+  return height.add(warp).div(u.sheetBandSpacing.max(1e-3)).add(phase);
 }
 
 /**
  * Sheeting bands: 1 on a tread, dips toward 0 on a riser, band-limited on the
- * RISER's width (the feature, not the repeat — §V48). The coordinate is
- * island-local position along the sheeting axis, one unit per sheet.
+ * RISER's width (the feature, not the repeat — §V48).
  */
-function sheetBands(localXZ: AnyNode, dir: AnyNode, u: SierraUniforms): AnyNode {
-  const coord = localXZ.dot(dir).div(u.sheetBandSpacing.max(1e-3));
+function sheetBands(coord: AnyNode, u: SierraUniforms): AnyNode {
   // @band-limited-elsewhere: this fract is the INPUT to bandLimitedEdge below, which filters on the riser width
   const distance = fract(coord.add(0.5)).sub(0.5).abs();
   return bandLimitedEdge(distance, coord, u.sheetBandRiser.mul(0.5));
@@ -273,10 +354,15 @@ export interface SierraSurfaceInputs {
   localXZ: AnyNode;
   /** island-local joint-noise offset, the bake's `jointNoiseOffset` */
   jointOffset: AnyNode;
-  /** unit ice-flow axis (island-local xz) — the sheeting fallback */
-  iceDir: AnyNode;
+  /** the island's two joint-set axes, seeded off its ice azimuth */
+  jointDirA: AnyNode;
+  jointDirB: AnyNode;
+  /** per-island phase (sheets) so two islands do not band at the same metres */
+  bandPhase: AnyNode;
   /** the surface's incoming roughness */
   roughness: AnyNode;
+  /** 1 on a fallen block (the instanced rocks), 0 on the terrain — see header */
+  fresh?: AnyNode;
   u: SierraUniforms;
 }
 
@@ -297,6 +383,9 @@ export function buildSierraSurface(inp: SierraSurfaceInputs): SierraSurface {
   const { info, u } = inp;
   const up = normalWorldGeometry.y;
   const nxz = normalWorldGeometry.xz;
+  const fresh: AnyNode = inp.fresh ?? float(0);
+  /** how much of a cover layer survives on this surface (0 on a fallen block) */
+  const covered = float(1).sub(fresh.mul(u.rockFreshCover));
 
   // ── the eight channels, four from the texture and four derived ──────────
   const curvature: AnyNode = info ? info.curvature : float(0);
@@ -323,18 +412,18 @@ export function buildSierraSurface(inp: SierraSurfaceInputs): SierraSurface {
     .mul(up.smoothstep(u.fracturedUp.sub(0.1), u.fracturedUp.add(0.1)).oneMinus());
   // @band-limited-elsewhere: debris from the mipped info texture, half-threshold wide
   const debrisW = debris.smoothstep(u.grusDebrisMin.mul(0.5), u.grusDebrisMin);
-  const grusW = flatW.mul(debrisW.mul(0.5).add(0.5));
+  const grusW = flatW.mul(debrisW.mul(0.5).add(0.5)).mul(covered);
   const macro = macroField(u);
   const litterEdge = u.litterCoverage.oneMinus();
   // @band-limited-elsewhere: threshold on macroField, which periodResolved fades to its mean; 0.2-wide in a 60 m field
   const macroLitter = macro.smoothstep(litterEdge.sub(0.1), litterEdge.add(0.1));
   // @band-limited-elsewhere: moisture from the mipped info texture, 0.2 wide
   const moistLitter = moisture.smoothstep(u.litterMoisture.sub(0.1), u.litterMoisture.add(0.1));
-  const litterW = macroLitter.max(moistLitter).mul(u.litterStrength).mul(flatW);
+  const litterW = macroLitter.max(moistLitter).mul(u.litterStrength).mul(flatW).mul(covered);
 
   // ── height blend (Far Cry 5): score = mask + amp · layer height ───────────
   const grainCoord = positionWorld.xz.mul(u.grainScale);
-  const grain = mix(float(0.5), fbm2(grainCoord, GRAIN_OCTAVES), periodResolved(grainCoord));
+  const grain = mix(float(0.5), fbm2(grainCoord, GRAIN_OCTAVES), periodResolved(grainCoord, fieldFilter(grainCoord)));
   const masks = [float(GRANITE_FLOOR), polishW, fracturedW, grusW, litterW];
   const scores = masks.map((m, i) => m.add(grain.mul(u.layerHeightAmp).mul(LAYER_HEIGHT_SHARE[i])));
   let top: AnyNode = scores[0];
@@ -351,17 +440,26 @@ export function buildSierraSurface(inp: SierraSurfaceInputs): SierraSurface {
   for (let i = 1; i < colours.length; i++) albedo = albedo.add(colours[i].mul(norm[i]));
   const rockness = norm[0].add(norm[1]).add(norm[2]);
 
-  // ── sheeting bands along the curvature axis, on convex bedrock ───────────
+  // ── sheeting: contours of Φ (see header), on convex bedrock ──────────────
   // @band-limited-elsewhere: convexity gate on the mipped curvature texture; no period
   const convexW = curvature.smoothstep(float(0), u.sheetBandConvexity.max(1e-4)).mul(rockness);
-  const bands = info ? sheetBands(inp.localXZ, sheetingDirection(info, inp.iceDir), u) : float(1);
+  const bands = info
+    ? sheetBands(sheetBandCoord(positionWorld.y, curvature, inp.bandPhase, u), u)
+    : float(1);
   const riser = bands.oneMinus().mul(convexW);
   albedo = albedo.mul(float(1).sub(riser.mul(u.sheetBandStrength)));
   const relief = riser.mul(u.sheetBandRelief).negate();
 
-  // ── joints: two sets multiply; they bite hardest on the fractured layer ──
-  const joints = jointSet(JOINT_AZIMUTH_A, u).mul(jointSet(JOINT_AZIMUTH_B, u));
-  const jointBite = u.jointStrength.mul(norm[2].add(0.5)).mul(rockness);
+  // ── joints: two sets multiply. They bite hardest on the fractured layer,
+  //    and only where the joint-density field says the rock IS jointed — a
+  //    flat bite on every rock pixel is a lattice over the whole island ─────
+  const joints = jointSet(inp.jointDirA, inp.localXZ, u).mul(jointSet(inp.jointDirB, inp.localXZ, u));
+  // @band-limited-elsewhere: joint density is a swiss-turbulence field (3 octaves at jointScale, 50 m): no edge, no period
+  const jointPatch = jointDensity.smoothstep(u.jointCoverage.sub(0.15), u.jointCoverage.add(0.15));
+  const jointBite = u.jointStrength
+    .mul(norm[2].mul(float(1).sub(u.jointBaseBite)).add(u.jointBaseBite))
+    .mul(rockness)
+    .mul(jointPatch);
   albedo = albedo.mul(float(1).sub(joints.oneMinus().mul(jointBite)));
 
   // ── lichen: a low-frequency field thresholded around a coverage that
@@ -375,7 +473,11 @@ export function buildSierraSurface(inp: SierraSurfaceInputs): SierraSurface {
   const lichenField = fbm2(lichenCoord, LICHEN_OCTAVES);
   const edge = coverage.oneMinus();
   const lichenRaw = lichenField.smoothstep(edge.sub(0.08), edge.add(0.08));
-  const lichenMask = mix(coverage, lichenRaw, periodResolved(lichenCoord)).mul(u.lichenStrength).mul(rockness);
+  const lichenMask = mix(coverage, lichenRaw, periodResolved(lichenCoord, fieldFilter(lichenCoord)))
+    .mul(u.lichenStrength)
+    .mul(rockness)
+    // a block that has fallen has not had time to grow the slab's lichen
+    .mul(float(1).sub(fresh.mul(u.rockFreshLichen)));
   albedo = mix(albedo, u.lichenColor, lichenMask);
 
   // ── the implied trail: one wide fade across the whole wear width, the
@@ -385,8 +487,12 @@ export function buildSierraSurface(inp: SierraSurfaceInputs): SierraSurface {
     .smoothstep(float(0), u.pathWearWidth.max(0.5).mul(macro.mul(0.6).add(0.7)))
     .oneMinus()
     .mul(u.pathWearStrength)
-    .mul(flatW);
+    .mul(flatW)
+    .mul(covered);
   albedo = mix(albedo, u.pathWornColor.mul(float(1).add(grain.sub(0.5).mul(u.grainStrength))), wearW);
+
+  // ── a fresh fracture face: cleaner and lighter than the weathered slab ───
+  albedo = mix(albedo, u.rockFreshTint, fresh.mul(u.rockFreshStrength));
 
   // ── macro tone: the same 60 m field the litter reads, so a dark hillside
   //    is dark in its rock and its grus alike ────────────────────────────────
@@ -410,6 +516,212 @@ export function buildSierraSurface(inp: SierraSurfaceInputs): SierraSurface {
   roughness = roughness.mul(float(1).sub(norm[1].mul(u.polishGloss)));
 
   return { albedo, roughness, relief, rockness };
+}
+
+// ── CPU TRANSLITERATION (§V80, §T.122) ────────────────────────────────────
+//
+// The pair to `buildSierraSurface`, the way `bandLimitedEdgeValue` pairs with
+// `bandLimitedEdge` and `sheetingDirectionCpu` with the shader's axis. It
+// exists because the ONLY thing that can be asserted about a layered material
+// without a renderer is its arithmetic, and the §T.122 defect (every layer
+// weight silently becoming a vec2, so the albedo's blue was multiplied by
+// zero) is precisely the class of thing a node-graph shape test cannot see.
+// Evaluated at ZERO filter width — the close read, where every band limit
+// resolves to 1. Keep in step with the node graph above.
+
+const LINEAR_CACHE = new Map<number, [number, number, number]>();
+/** hex (sRGB, the param convention) → linear working-space RGB, as `THREE.Color` uploads it */
+export function sierraLinear(hex: number): [number, number, number] {
+  let v = LINEAR_CACHE.get(hex);
+  if (!v) {
+    const c = new THREE.Color().setHex(hex, THREE.SRGBColorSpace);
+    v = [c.r, c.g, c.b];
+    LINEAR_CACHE.set(hex, v);
+  }
+  return v;
+}
+
+const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
+function smooth(e0: number, e1: number, x: number): number {
+  const t = clamp01((x - e0) / Math.max(e1 - e0, 1e-9));
+  return t * t * (3 - 2 * t);
+}
+/** triangle-wave distance to the nearest repeat, one unit per period */
+function toEdge(coord: number): number {
+  return Math.abs((((coord + 0.5) % 1) + 1) % 1 - 0.5);
+}
+type Rgb3 = [number, number, number];
+const scale = (c: Rgb3, s: number): Rgb3 => [c[0] * s, c[1] * s, c[2] * s];
+const blend = (a: Rgb3, b: Rgb3, t: number): Rgb3 => [
+  a[0] + (b[0] - a[0]) * t,
+  a[1] + (b[1] - a[1]) * t,
+  a[2] + (b[2] - a[2]) * t,
+];
+
+/** CPU twin of `sheetBandCoord` — Φ, one unit per sheet */
+export function sheetBandCoordCpu(
+  height: number,
+  curvature: number,
+  phase: number,
+  p: SierraParams = sierraParams,
+): number {
+  const warp = (curvature / Math.max(p.sheetBandConvexity, 1e-4)) * p.sheetBandWarp;
+  return (height + warp) / Math.max(p.sheetBandSpacing, 1e-3) + phase;
+}
+
+/** everything one point needs to resolve; the caller supplies the fields it already has */
+export interface SierraPointCpu {
+  /** island-local x, z — the joint sets and the info texture read here */
+  local: [number, number];
+  /** world x, z — the macro / grain / lichen fields are world-space */
+  world: [number, number];
+  /** world height (m) */
+  height: number;
+  /** geometric normal (world) */
+  normal: [number, number, number];
+  /** signed mean curvature, 1/m, + convex (decoded) */
+  curvature: number;
+  /** 0..1 */
+  moisture: number;
+  /** metres to the route centreline */
+  pathDistance: number;
+  /** talus thickness, m */
+  debris: number;
+  /** sky AO, 1 open */
+  skyAO: number;
+  /** the joint-density field at this point (`swissTurbulence2Cpu`, 3 octaves) */
+  jointDensity: number;
+  /** the 60 m macro field, the grain field and the lichen field (`fbm2Cpu`) */
+  macro: number;
+  grain: number;
+  lichenField: number;
+  /** the island's seeded ice azimuth */
+  iceAzimuth: number;
+  /** 1 on a fallen block, 0 on the terrain */
+  fresh?: number;
+  /** bare-granite linear RGB; defaults to `graniteBaseColor` */
+  granite?: Rgb3;
+}
+
+export interface SierraSurfaceCpu {
+  /** the five normalised layer weights, in `LAYER_NAMES` order */
+  weights: number[];
+  /** index of the layer that claims the pixel */
+  winner: number;
+  albedo: Rgb3;
+  rockness: number;
+  lichen: number;
+  wear: number;
+  riser: number;
+  bandCoord: number;
+}
+
+/** the five layers, in score/weight order */
+export const LAYER_NAMES = ['granite', 'polished', 'fractured', 'grus', 'litter'] as const;
+
+export function sierraSurfaceCpu(pt: SierraPointCpu, p: SierraParams = sierraParams): SierraSurfaceCpu {
+  const up = pt.normal[1];
+  const fresh = pt.fresh ?? 0;
+  const covered = 1 - fresh * p.rockFreshCover;
+
+  const flatW = smooth(Math.cos(p.coverBareSlope * DEG), Math.max(Math.cos(p.coverGrusSlope * DEG), Math.cos(p.coverBareSlope * DEG) + 1e-3), up);
+  const halfPolish = p.polishCurvature * 0.5;
+  const polishUp = Math.cos(p.polishSlope * DEG);
+  const polishW =
+    smooth(halfPolish, p.polishCurvature + halfPolish, pt.curvature) *
+    smooth(polishUp - 0.06, polishUp + 0.02, up) *
+    (1 - smooth(p.polishDebrisMax * 0.5, p.polishDebrisMax, pt.debris));
+  const fracturedUp = Math.cos(p.fracturedSlope * DEG);
+  const fracturedW =
+    smooth(p.fracturedJoint - 0.1, p.fracturedJoint + 0.1, pt.jointDensity) *
+    (1 - smooth(fracturedUp - 0.1, fracturedUp + 0.1, up));
+  const debrisW = smooth(p.grusDebrisMin * 0.5, p.grusDebrisMin, pt.debris);
+  const grusW = flatW * (debrisW * 0.5 + 0.5) * covered;
+  const litterEdge = 1 - p.litterCoverage;
+  const litterW =
+    Math.max(
+      smooth(litterEdge - 0.1, litterEdge + 0.1, pt.macro),
+      smooth(p.litterMoisture - 0.1, p.litterMoisture + 0.1, pt.moisture),
+    ) *
+    p.litterStrength *
+    flatW *
+    covered;
+
+  const masks = [GRANITE_FLOOR, polishW, fracturedW, grusW, litterW];
+  const scores = masks.map((m, i) => m + pt.grain * p.layerHeightAmp * LAYER_HEIGHT_SHARE[i]);
+  const top = Math.max(...scores);
+  const width = Math.max(p.layerBlendWidth, 1e-3);
+  const raw = scores.map((s) => clamp01((s - top + width) / width));
+  const sum = raw.reduce((a, b) => a + b, 0);
+  const weights = raw.map((w) => w / Math.max(sum, 1e-3));
+
+  const grus = scale(sierraLinear(p.grusColor), 1 + (pt.grain - 0.5) * p.coverGrainStrength * 2);
+  const colours: Rgb3[] = [
+    pt.granite ?? sierraLinear(p.graniteBaseColor),
+    sierraLinear(p.polishedColor),
+    sierraLinear(p.fracturedColor),
+    grus,
+    sierraLinear(p.litterColor),
+  ];
+  let albedo: Rgb3 = [0, 0, 0];
+  for (let i = 0; i < 5; i++) {
+    albedo[0] += colours[i][0] * weights[i];
+    albedo[1] += colours[i][1] * weights[i];
+    albedo[2] += colours[i][2] * weights[i];
+  }
+  const rockness = weights[0] + weights[1] + weights[2];
+
+  const convexW = smooth(0, Math.max(p.sheetBandConvexity, 1e-4), pt.curvature) * rockness;
+  const bandCoord = sheetBandCoordCpu(pt.height, pt.curvature, sheetPhase(pt.iceAzimuth), p);
+  const riser = (1 - smooth(0, Math.max(p.sheetBandRiser * 0.5, 1e-4), toEdge(bandCoord))) * convexW;
+  albedo = scale(albedo, 1 - riser * p.sheetBandStrength);
+
+  const [dirA, dirB] = jointAxes(pt.iceAzimuth);
+  const set = (d: [number, number]): number => {
+    const coord = (pt.local[0] * d[0] + pt.local[1] * d[1]) / Math.max(p.jointSpacing, 1e-3);
+    const feature = p.jointWidth / Math.max(p.jointSpacing, 1e-3);
+    return 1 - (1 - smooth(0, Math.max(feature, 1e-4), toEdge(coord)));
+  };
+  const joints = set(dirA) * set(dirB);
+  const jointPatch = smooth(p.jointCoverage - 0.15, p.jointCoverage + 0.15, pt.jointDensity);
+  const jointBite = p.jointStrength * (weights[2] * (1 - p.jointBaseBite) + p.jointBaseBite) * rockness * jointPatch;
+  albedo = scale(albedo, 1 - (1 - joints) * jointBite);
+
+  const facing = (pt.normal[0] * Math.cos(p.lichenAspectAzimuth) + pt.normal[2] * Math.sin(p.lichenAspectAzimuth)) * 0.5 + 0.5;
+  const coverage = clamp01(
+    p.lichenCoverage * (1 - p.lichenAspectStrength + p.lichenAspectStrength * facing * 2) +
+      (1 - pt.skyAO) * p.lichenShadeStrength,
+  );
+  const lichen =
+    smooth(1 - coverage - 0.08, 1 - coverage + 0.08, pt.lichenField) *
+    p.lichenStrength *
+    rockness *
+    (1 - fresh * p.rockFreshLichen);
+  albedo = blend(albedo, sierraLinear(p.lichenColor), lichen);
+
+  const wear =
+    (1 - smooth(0, Math.max(p.pathWearWidth, 0.5) * (pt.macro * 0.6 + 0.7), pt.pathDistance)) *
+    p.pathWearStrength *
+    flatW *
+    covered;
+  albedo = blend(albedo, scale(sierraLinear(p.pathWornColor), 1 + (pt.grain - 0.5) * p.coverGrainStrength), wear);
+  albedo = blend(albedo, sierraLinear(p.rockFreshTint), fresh * p.rockFreshStrength);
+  albedo = scale(albedo, 1 + (pt.macro - 0.5) * p.coverMacroVariation * 2);
+
+  const bw = Math.max(p.bandWidth, 0.5);
+  let tint = blend(sierraLinear(p.bandLowTint), sierraLinear(p.bandMidTint), smooth(p.bandLowHeight - bw, p.bandLowHeight + bw, pt.height));
+  tint = blend(tint, sierraLinear(p.bandHighTint), smooth(p.bandMidHeight - bw, p.bandMidHeight + bw, pt.height));
+  tint = blend(tint, sierraLinear(p.bandCrownTint), smooth(p.bandHighHeight - bw, p.bandHighHeight + bw, pt.height));
+  const t = p.bandStrength;
+  albedo = [
+    albedo[0] * (1 + (tint[0] - 1) * t),
+    albedo[1] * (1 + (tint[1] - 1) * t),
+    albedo[2] * (1 + (tint[2] - 1) * t),
+  ];
+
+  let winner = 0;
+  for (let i = 1; i < 5; i++) if (scores[i] > scores[winner]) winner = i;
+  return { weights, winner, albedo, rockness, lichen, wear, riser, bandCoord };
 }
 
 /** sky AO → aoNode, sun self-shadow → receivedShadowNode (§T.112a item 4) */
@@ -440,7 +752,9 @@ interface IslandBindings {
   infoTex: TerrainInfoTexture | null;
   infoNodes: TerrainInfoNodes | null;
   jointOffset: AnyNode;
-  iceDir: AnyNode;
+  jointDirA: AnyNode;
+  jointDirB: AnyNode;
+  bandPhase: AnyNode;
   dispose(): void;
 }
 
@@ -450,12 +764,15 @@ function bindIsland(opts: SierraMaterialOptions): IslandBindings {
   const infoNodes = infoTex ? terrainInfoNodes(infoTex, positionLocal.xz) : null;
   const [ox, oz] = opts.info?.jointNoiseOffset ?? [0, 0];
   const az = opts.iceAzimuth ?? 0;
+  const [a, b] = jointAxes(az);
   return {
     horizonTex,
     infoTex,
     infoNodes,
     jointOffset: vec2(ox, oz),
-    iceDir: vec2(Math.cos(az), Math.sin(az)),
+    jointDirA: vec2(a[0], a[1]),
+    jointDirB: vec2(b[0], b[1]),
+    bandPhase: float(sheetPhase(az)),
     dispose(): void {
       horizonTex?.dispose();
       infoTex?.dispose();
@@ -495,7 +812,9 @@ export function createSierraTerrainMaterial(
     graniteGrey: rock.baseColor as AnyNode,
     localXZ: positionLocal.xz,
     jointOffset: bound.jointOffset,
-    iceDir: bound.iceDir,
+    jointDirA: bound.jointDirA,
+    jointDirB: bound.jointDirB,
+    bandPhase: bound.bandPhase,
     roughness: rough,
     u,
   });
@@ -559,8 +878,12 @@ export function createSierraRockMaterial(
     graniteGrey: nodes.color,
     localXZ: positionLocal.xz,
     jointOffset: bound.jointOffset,
-    iceDir: bound.iceDir,
+    jointDirA: bound.jointDirA,
+    jointDirB: bound.jointDirB,
+    bandPhase: bound.bandPhase,
     roughness: nodes.roughness as AnyNode,
+    // every instance here is a block that has fallen or been plucked out
+    fresh: float(1),
     u,
   });
   material.colorNode = surface.albedo;
