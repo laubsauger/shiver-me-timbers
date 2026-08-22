@@ -616,3 +616,133 @@ describe('§T115 the raft is connected: spawn → door → bow → back aboard',
     expect(Math.abs((surface.heightAt(s.pos[0], s.pos[2]) as number) - s.pos[1])).toBeLessThan(0.4);
   });
 });
+
+/**
+ * §T.137 — THE WALK SURFACE USES THE RAFT'S OWN WIDTH.
+ *
+ * USER: "the deck is not wide enough left and right to really use the width,
+ * so we're losing a bunch of space… this should also give us more wiggle room
+ * to move on deck because right now it's very squeezy."
+ *
+ * MEASURED, on the built field, with §T115's own instrument (`free`: deck,
+ * no wall, headroom, capsule-radius footprint), BEFORE → AFTER:
+ *
+ *   starboard road (min over the decked length)   0.67 m → 0.67 m
+ *   port walkway  (min alongside the cabin)       0.29 m → 0.29 m
+ *   stern         (min abaft the cabin's wall)    1.18 m → 1.18 m
+ *   flat mat, starboard strip                     1.20 m → 1.46 m
+ *   flat mat, fore deck                           4.86 m → 5.41 m
+ *   flat mat, bow-tip slab                        3.68 m → 4.24 m
+ *
+ * READ THAT HONESTLY: widening the mats did NOT widen one walkable lane, and
+ * it could not have. The bare logs outboard of the mats were ALREADY walkable
+ * to the very edge — a round log is a 35° ramp in this field, not a wall — so
+ * the mats' width never bounded any lane. What bounds them is the STORES: the
+ * kitchen box holds the starboard road to 0.67 m and the jerrycan stack holds
+ * the port walkway to 0.29 m of standable centre (0.62 m of clear floor for a
+ * 0.60 m man). Both are `buildDressing` pieces. The deck widening is a real
+ * fix to a real defect — the mats stopped at the outer logs' CENTRELINES — but
+ * it is a fix to what the deck LOOKS like and what is flat under foot, not to
+ * the squeeze, and saying otherwise would be the fourth mis-diagnosis this
+ * week (§B78-2 was a lane width, not a wall).
+ */
+describe('§T.137 the mats reach the logs\' edges, and the lanes that were roads still are', () => {
+  const strip = piece('deck-starboard');
+  const outer = { port: L.logs[0], starboard: L.logs[L.logs.length - 1] };
+  const face = {
+    port: outer.port.x - outer.port.r,
+    starboard: outer.starboard.x + outer.starboard.r,
+  };
+
+  function free(x: number, z: number): number | null {
+    const y = surface.heightAt(x, z);
+    if (y === null) return null;
+    if (surface.solidAt(x, z)) return null;
+    const c = surface.ceilingAt?.(x, z) ?? null;
+    if (c !== null && c - y < playerParams.crouchHeight) return null;
+    return y;
+  }
+  /** widest free run of capsule CENTRES in [x0, x1] at station z */
+  function lane(z: number, x0: number, x1: number): number {
+    let best = 0;
+    let run = 0;
+    for (let x = x0; x <= x1; x += 0.01) {
+      run = free(x, z) === null ? 0 : run + 0.01;
+      best = Math.max(best, run);
+    }
+    return best;
+  }
+
+  it('you stand on BAMBOO out to the log faces, not on a rounded log shoulder', () => {
+    // §V83: the field is written from the pieces, so this is the deck's own
+    // width measured where a foot goes. The bar is the mat's own thickness —
+    // "the surface at the edge is the MAT surface" — not a metre value. The
+    // station is one FOOT-SOLE in from the log's face: the field is a 192-texel
+    // grid, so the last texel straddles the edge and blends the mat into the
+    // water; a sole's width in is the outermost place a foot actually rests.
+    // Before: a whole sole in from the face the foot was on ROUND LOG,
+    // 0.18 m below the mats, on both sides and down the whole decked length.
+    const stripZ = [strip.transform.position[2] + strip.aabb.min[2] + 0.2,
+      strip.transform.position[2] + strip.aabb.max[2] - 0.2];
+    for (let z = stripZ[0]; z <= stripZ[1]; z += 0.2) {
+      const y = surface.heightAt(face.starboard - RAFT_FOOT_RADIUS, z);
+      expect(y, `starboard strip edge at z=${z.toFixed(2)}`).not.toBeNull();
+      expect(Math.abs((y as number) - L.deckY), `mat under foot at z=${z.toFixed(2)}`)
+        .toBeLessThanOrEqual(p.matThickness);
+    }
+    const fore = piece('deck-fore');
+    const foreZ = [fore.transform.position[2] + fore.aabb.min[2] + 0.2,
+      fore.transform.position[2] + fore.aabb.max[2] - 0.1];
+    for (let z = foreZ[0]; z <= foreZ[1]; z += 0.2) {
+      for (const side of ['port', 'starboard'] as const) {
+        const x = side === 'port' ? face.port + RAFT_FOOT_RADIUS : face.starboard - RAFT_FOOT_RADIUS;
+        const y = surface.heightAt(x, z);
+        expect(y, `fore deck ${side} edge at z=${z.toFixed(2)}`).not.toBeNull();
+        expect(Math.abs((y as number) - L.deckY), `${side} mat under foot at z=${z.toFixed(2)}`)
+          .toBeLessThanOrEqual(p.matThickness);
+      }
+    }
+  });
+
+  it('the starboard road and the stern are still roads — a capsule diameter with room to spare', () => {
+    // The two lanes §T.137 leaves as roads. Stated margins, measured:
+    // starboard 0.67 m (0.07 over one capsule diameter, held by `kitchen-box`)
+    // stern 1.18 m (0.58 over, held by the cabin's aft wall + `dinghy`)
+    const cap = playerParams.capsuleRadius * 2;
+    const tip = piece('deck-fore-tip');
+    const deckFwdZ = tip.transform.position[2] + tip.aabb.max[2];
+    for (let z = L.sternZ + 0.5; z <= deckFwdZ; z += 0.05) {
+      expect(lane(z, 0.2, field.maxX), `starboard road at z=${z.toFixed(2)}`).toBeGreaterThan(cap);
+    }
+    for (let z = L.sternZ + 0.4; z <= L.cabinAftZ; z += 0.05) {
+      expect(lane(z, field.minX, field.maxX), `stern at z=${z.toFixed(2)}`)
+        .toBeGreaterThan(cap + playerParams.capsuleRadius);
+    }
+  });
+
+  /**
+   * ROUTED, NOT DONE — the same hand-off as §T.137's railing.
+   *
+   * The port walkway is 0.29 m of standable centre at its worst (z ≈ −1.05),
+   * i.e. 0.62 m of clear floor for a 0.60 m capsule: the man gets past with a
+   * shoulder over the water. The reference does call this side "lashed
+   * boxes/gear with narrow walkway" [§1 Deck coverage], so it is meant to be
+   * the tight one — but not this tight.
+   *
+   * WHAT HOLDS IT (measured): the two `jerrycan-*` are placed OUTBOARD of the
+   * port crate stack, at `crateX1 - crateWidth - 0.05`, so the gear reaches
+   * x = −2.06 on a raft whose port face is at −2.72. The crates themselves
+   * reach −2.07 at `crateSizeVar`'s widest draw. Both are in
+   * `src/ship/raftPartsCabin.ts:buildDressing`, which this task was told not
+   * to touch. Stack the cans ON the crates (or move them to the fore deck)
+   * and the walkway opens to ≈ 0.6 m of centre without moving one reference
+   * dimension. Un-skip this with that change.
+   */
+  it.skip('(ROUTED) the port walkway past the cargo takes a capsule with room', () => {
+    const cap = playerParams.capsuleRadius * 2;
+    for (let z = L.cabinAftZ; z <= L.cabinFrontZ; z += 0.05) {
+      expect(lane(z, field.minX, -p.cabinWidth / 2), `port walkway at z=${z.toFixed(2)}`)
+        .toBeGreaterThanOrEqual(cap);
+    }
+  });
+});

@@ -129,9 +129,17 @@ export function buildCrossbeams(p: RaftParams, L: RaftLayout): PieceDef[] {
   }
   const fr = p.footRailDiameter / 2;
   for (const [side, sign] of [['port', -1], ['starboard', 1]] as const) {
+    // §T.137 — "one slim balsa log along EACH DECK EDGE" [§1 Foot-rails]. It
+    // used to lie on the outer log's CENTRELINE (x = ±halfBeam), a quarter of
+    // a metre inboard of the edge it is meant to run along and half of it
+    // under the mats. It rides the outer log's outboard shoulder now, its
+    // outer face flush with the log's, so the deck edge is one line: log
+    // face, foot-rail, mat edge, stanchion rail. §V71: the shoulder comes
+    // from THIS log's own radius, not from a shared beam constant.
+    const outer = L.logs[sign < 0 ? 0 : L.logs.length - 1];
     out.push(
       mkPiece(`foot-rail-${side}`, 'log',
-        [sign * L.halfBeam, L.logTopY + fr, L.cabinAftZ + p.footRailLength / 2], {
+        [outer.x + sign * (outer.r - fr), L.logTopY + fr, L.cabinAftZ + p.footRailLength / 2], {
           min: [-fr, -fr, -p.footRailLength / 2],
           max: [fr, fr, p.footRailLength / 2],
         }, { shape: { taper: 1, chamfer: 0, sides: 8 } }),
@@ -196,7 +204,33 @@ function slab(
  * STARBOARD strip alongside it. Nothing port of the cabin, nothing aft [§1 Deck
  * coverage] — those are bare logs, and the deck-field writer (§V83) reads the
  * same pieces, so the walk surface and the look cannot disagree.
+ *
+ * §T.137 — THE MATS RUN OUT TO THE LOGS' OUTER FACES, not to their
+ * CENTRELINES. USER: "the deck is not wide enough left and right to really use
+ * the width, so we're losing a bunch of space." Measured: `deck-fore` spanned
+ * ±2.432 over a log field whose faces are at −2.721 / +2.692, so a 0.29 m
+ * (port) and 0.26 m (starboard) strip of bare log lay outboard of the mats
+ * down the whole decked length, and the starboard road was 1.20 m of mat
+ * instead of 1.46. The edge x's come from each outer log's OWN radius (§V71)
+ * so a re-seeded log field carries the deck with it. This widens the deck
+ * WITHIN the reference's coverage: still nothing port of the cabin, still
+ * nothing aft [§1 Deck coverage].
  */
+/**
+ * The DRAWN half-width of a log at z — the mesh's own rule (§B81: a parallel
+ * full-round cylinder until `logTaperLength` from the tip, then the taper,
+ * then the chamfered point). §V71: a mat laid to a log's edge has to ask the
+ * log how wide it is THERE, or it hangs over the water at the bow.
+ */
+function logHalfAt(p: RaftParams, log: LogStation, z: number): number {
+  const tip = log.zBow - z;
+  if (tip <= 0) return 0;
+  const r = tip >= p.logTaperLength
+    ? log.r
+    : log.r * (1 - (1 - p.logBowTaper) * (1 - tip / Math.max(1e-6, p.logTaperLength)));
+  return tip < p.logBowChamfer ? r * (tip / Math.max(1e-6, p.logBowChamfer)) : r;
+}
+
 export function buildBambooDeck(p: RaftParams, L: RaftLayout): PieceDef[] {
   const y0 = L.crossbeamTopY;
   const y1 = L.deckY;
@@ -204,20 +238,31 @@ export function buildBambooDeck(p: RaftParams, L: RaftLayout): PieceDef[] {
   const outerS = L.logs[L.logs.length - 1];
   const zA = Math.min(outerP.zBow, outerS.zBow) - 0.2;
   const halfW = p.cabinWidth / 2;
-  const fore = slab('deck-fore', outerP.x, outerS.x, L.cabinFrontZ, zA, y0, y1, [
+  // a slab is a rectangle, so it can only be as wide as the logs are at its
+  // NARROWEST station: the full-beam slab therefore stops where the outer
+  // logs stop being parallel, and a second, slightly narrower one carries the
+  // mats on into the taper
+  const zFull = Math.max(L.cabinFrontZ + 0.5,
+    Math.min(zA, Math.min(outerP.zBow, outerS.zBow) - p.logTaperLength));
+  const fore = slab('deck-fore', outerP.x - outerP.r, outerS.x + outerS.r, L.cabinFrontZ, zFull, y0, y1, [
     // hauling stations at the mast foot and the two sheets at the cabin's
     // forward corners (§V84 — every sailing action has a place to stand)
-    { id: 'station-halyard', type: 'fixture', position: [-0.8, (y1 - y0) / 2, L.mastZ - (L.cabinFrontZ + zA) / 2] },
-    { id: 'station-sheet-p', type: 'fixture', position: [-halfW, (y1 - y0) / 2, 0.35 - (zA - L.cabinFrontZ) / 2] },
-    { id: 'station-sheet-s', type: 'fixture', position: [halfW, (y1 - y0) / 2, 0.35 - (zA - L.cabinFrontZ) / 2] },
+    { id: 'station-halyard', type: 'fixture', position: [-0.8, (y1 - y0) / 2, L.mastZ - (L.cabinFrontZ + zFull) / 2] },
+    { id: 'station-sheet-p', type: 'fixture', position: [-halfW, (y1 - y0) / 2, 0.35 - (zFull - L.cabinFrontZ) / 2] },
+    { id: 'station-sheet-s', type: 'fixture', position: [halfW, (y1 - y0) / 2, 0.35 - (zFull - L.cabinFrontZ) / 2] },
   ]);
+  const taper = slab('deck-fore-taper',
+    outerP.x - logHalfAt(p, outerP, zA), outerS.x + logHalfAt(p, outerS, zA), zFull, zA, y0, y1);
   // the tip slab reaches as far as the next log pair in allows
   const tipP = outermostLogAt(L, zA + 0.6, -1);
   const tipS = outermostLogAt(L, zA + 0.6, 1);
   const zB = Math.min(tipP.zBow, tipS.zBow) - 0.2;
-  const tip = slab('deck-fore-tip', tipP.x, tipS.x, zA, zB, y0, y1);
-  const strip = slab('deck-starboard', halfW + 0.03, outerS.x, L.cabinAftZ, L.cabinFrontZ, y0, y1);
-  return [fore, tip, strip];
+  const tip = slab('deck-fore-tip',
+    tipP.x - logHalfAt(p, tipP, zB), tipS.x + logHalfAt(p, tipS, zB), zA, zB, y0, y1);
+  // the strip's forward edge is at the cabin front, well abaft any taper
+  const strip = slab('deck-starboard', halfW + 0.03,
+    outerS.x + logHalfAt(p, outerS, L.cabinFrontZ), L.cabinAftZ, L.cabinFrontZ, y0, y1);
+  return [fore, taper, tip, strip];
 }
 
 /**

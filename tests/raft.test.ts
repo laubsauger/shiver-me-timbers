@@ -714,7 +714,9 @@ describe('§V82 deck, cabin, mast, guaras, steering', () => {
 
   it('lashes every crossbeam to every log it crosses: one ring set per crossing, none in mid-air', () => {
     const beams = raft.filter((x) => x.kind === 'crossbeam');
-    const lashings = raft.filter((x) => x.kind === 'lashing' && x.id !== 'lashing-crossing');
+    // `lashing-<k>` are the crossbeam seizings; the bipod crossing and the
+    // yard parrels (§T.138) are lashings too, and are counted elsewhere
+    const lashings = raft.filter((x) => /^lashing-\d+$/.test(x.id));
     const logs = raft.filter((x) => x.kind === 'log' && x.id.startsWith('log-'));
     expect(lashings).toHaveLength(beams.length);
     for (const l of lashings) {
@@ -1399,5 +1401,318 @@ describe('§T129 the cabin shell: no fighting faces, and courses that step', () 
       }
       g.dispose();
     }
+  });
+});
+
+/**
+ * §T.137 — THE DECK USES THE RAFT'S OWN WIDTH, AND THE EDGE IS ONE LINE.
+ *
+ * USER: "our guardrails are too much inset, they are not on the outer edge —
+ * on one side at least, and actually on both. The deck is not wide enough left
+ * and right to really use the width, so we're losing a bunch of space."
+ *
+ * MEASURED before the fix, on the built blueprint:
+ *   log field faces      −2.721 / +2.692   (5.41 m of beam over nine logs)
+ *   `deck-fore`          −2.432 / +2.432   → 0.29 m port and 0.26 m starboard
+ *                                            of bare log outboard of the mats
+ *   `deck-starboard`      1.230 / +2.432   → a 1.20 m strip, not 1.46
+ *   `foot-rail-*`        ±2.432             on the outer log's CENTRELINE,
+ *                                            a quarter-metre inboard of the
+ *                                            edge it is named for
+ *   `rail-*`             ±2.354 / ±2.345   → 0.338 / 0.376 m inboard of the
+ *                                            faces, and INBOARD of the
+ *                                            foot-rail as well
+ *
+ * The bars below are relations to the OUTER LOG'S OWN FACE (§V80/§V71), so a
+ * re-seeded log field carries all four with it.
+ */
+describe('§T.137 the deck edge: mats, foot-rail and railing on one line', () => {
+  const p = raftParams;
+  const raft = buildRaftBlueprint();
+  const L = raftLayout();
+  const byId = new Map(raft.map((d) => [d.id, d]));
+  const outer = { port: L.logs[0], starboard: L.logs[L.logs.length - 1] };
+  /** ship-space x of the outer log's outboard face, per side */
+  const face = { port: outer.port.x - outer.port.r, starboard: outer.starboard.x + outer.starboard.r };
+  const span = (id: string, axis: 0 | 2): [number, number] => {
+    const d = byId.get(id)!;
+    return [d.transform.position[axis] + d.aabb.min[axis], d.transform.position[axis] + d.aabb.max[axis]];
+  };
+
+  it('the mats reach the outer logs\' faces on BOTH sides — the deck covers the wood, ⊥ half of it', () => {
+    // WHY THIS IS A PROPERTY: "the deck is 5.41 m wide" would be a magnitude a
+    // re-seeded log field breaks. "The mats end where the wood ends" is the
+    // thing the user asked for and it survives any diameter draw.
+    const TOL = p.matThickness; // a mat's own thickness of slop, no more
+    const [x0, x1] = span('deck-fore', 0);
+    expect(x0, 'deck-fore port edge vs the port log face').toBeLessThanOrEqual(face.port + TOL);
+    expect(x1, 'deck-fore starboard edge vs the starboard log face').toBeGreaterThanOrEqual(face.starboard - TOL);
+    // the starboard strip runs from the cabin wall to the SAME face
+    const [s0, s1] = span('deck-starboard', 0);
+    expect(s0, 'the strip still starts at the cabin wall').toBeGreaterThanOrEqual(p.cabinWidth / 2);
+    expect(s1, 'the strip reaches the starboard log face').toBeGreaterThanOrEqual(face.starboard - TOL);
+    // …and it is wider than one capsule can walk with a shoulder each side
+    expect(s1 - s0, 'the starboard strip').toBeGreaterThan(playerParams.capsuleRadius * 4);
+  });
+
+  it('the deck is STILL not continuous: nothing aft of the cabin, nothing port of it [§1 Deck coverage]', () => {
+    // §T.137 widens the deck WITHIN the reference's coverage. Widening it into
+    // a paved raft would be the same defect in the other direction.
+    const decks = raft.filter((d) => d.kind === 'bamboo-deck' && d.parent === undefined
+      && d.id !== 'cabin-floor' && (d.shape?.platform ?? 0) === 0);
+    for (const d of decks) {
+      const [z0] = span(d.id, 2);
+      const [x0] = span(d.id, 0);
+      expect(z0, `${d.id} reaches aft of the cabin`).toBeGreaterThanOrEqual(L.cabinAftZ - 1e-9);
+      if (z0 < L.cabinFrontZ - 1e-9) {
+        expect(x0, `${d.id} is port of the cabin`).toBeGreaterThanOrEqual(p.cabinWidth / 2);
+      }
+    }
+    // and the stern is bare: no mat abaft the cabin's aft wall
+    const aftMost = Math.min(...decks.map((d) => span(d.id, 2)[0]));
+    expect(aftMost).toBeGreaterThanOrEqual(L.cabinAftZ - 1e-9);
+  });
+
+  it('the foot-rail runs along the DECK EDGE — its outer face flush with the log\'s [§1 Foot-rails]', () => {
+    // §B78/§T.137: it lay on the outer log's centreline, half of it under the
+    // mats and 0.26 m inboard of the edge it is the edge of.
+    for (const side of ['port', 'starboard'] as const) {
+      const [x0, x1] = span(`foot-rail-${side}`, 0);
+      const outboard = side === 'port' ? x0 : x1;
+      expect(Math.abs(outboard - face[side]), `foot-rail-${side} vs the log face`)
+        .toBeLessThanOrEqual(p.footRailDiameter / 2);
+      // still a climb from the sea, not a bulwark (§V85 / T115-1)
+      const rail = byId.get(`foot-rail-${side}`)!;
+      expect(rail.transform.position[1] + rail.aabb.max[1]).toBeLessThanOrEqual(playerParams.boardVertical);
+    }
+  });
+
+  /**
+   * ROUTED, NOT DONE — the one piece of §T.137 this agent could not land.
+   *
+   * `rail-{side}` is built in `src/ship/raftPartsCabin.ts:buildDressing`, which
+   * this task was told not to touch (a live sibling holds §T.134 there). The
+   * change is ONE expression: the stanchion x is authored as
+   *
+   *     outer.x - sign * outer.r * 0.3          // 0.338 m / 0.376 m INBOARD
+   *
+   * i.e. 30 % of the log's radius INBOARD of its centreline, which puts the
+   * posts inboard of the foot-rail as well. It should stand on the log's
+   * outboard shoulder, its own outer face flush with the log's:
+   *
+   *     outer.x + sign * (outer.r - p.railPostDiameter / 2)
+   *
+   * Un-skip this test with that line. Nothing else in §T.137 depends on it —
+   * `rope-rail` has no case in `raftDeckFieldCells.ts` and never will (§V85),
+   * so the railing moves in the eye only, not in the walk field.
+   */
+  it.skip('(ROUTED) the railing stands at the outer edge on BOTH sides', () => {
+    for (const side of ['port', 'starboard'] as const) {
+      const rail = byId.get(`rail-${side}`)!;
+      const inset = Math.abs(face[side]) - Math.abs(rail.transform.position[0]);
+      expect(inset, `rail-${side} inboard of the log face`).toBeLessThanOrEqual(p.railPostDiameter);
+      expect(inset, `rail-${side} outboard of the log face`).toBeGreaterThanOrEqual(-p.railPostDiameter);
+      // and outboard of the foot-rail it runs beside, not inboard of it
+      const [f0, f1] = span(`foot-rail-${side}`, 0);
+      const footInboard = side === 'port' ? f1 : f0;
+      expect(Math.abs(rail.transform.position[0])).toBeGreaterThan(Math.abs(footInboard));
+    }
+  });
+});
+
+/**
+ * §T.138 — THE MIZZEN YARD IS HELD BY SOMETHING, AND THE STERN POLES ARE NOT
+ * STANDING IN THE GUARA SLOTS.
+ *
+ * USER (`docs/raft2100/ref/bug-mizzen-yard-floating.png`): "the guara boards
+ * are kinda weirdly in the way in the back. And the guara boards have two
+ * poles — maybe they were supposed to hold the back sail's horizontal bar or
+ * something, but they are not connected. The horizontal bar for the back sail
+ * is floating mid-air."
+ *
+ * MEASURED before the fix:
+ *   `mast-mizzen`  x −0.900, `station-guara-4` chink at x −0.935  → Δ 0.035 m
+ *   `flagpole`     x +0.900, `station-guara-5` chink at x +0.898  → Δ 0.002 m,
+ *                  and the flagpole's box (z −5.43…−5.37) lies INSIDE the
+ *                  guara plank's (z −5.50…−4.90): a hard interpenetration
+ *   `yard-mizzen-lower` stands off `mast-mizzen` by `yardMastClearance` 0.30 m
+ *                  — 0.30 m of CLEAR AIR between a 0.10 m pole and a 0.072 m
+ *                  yard, i.e. three pole-diameters of nothing, with no parrel
+ *                  drawn across it
+ *
+ * The two poles are NOT the guaras' poles: they are the mizzen mast and the
+ * ensign staff, authored at ±0.9 m, which is exactly where the two aft guara
+ * chinks fall.
+ */
+describe('§T.138 the mizzen is held, and the stern poles stand on logs', () => {
+  const p = raftParams;
+  const raft = buildRaftBlueprint();
+  const L = raftLayout();
+  const byId = new Map(raft.map((d) => [d.id, d]));
+  const asm = new ShipAssembly(raft, stubFactory);
+  asm.group.updateMatrixWorld(true);
+  const rect = (d: PieceDef): { x0: number; x1: number; z0: number; z1: number } => ({
+    x0: d.transform.position[0] + d.aabb.min[0],
+    x1: d.transform.position[0] + d.aabb.max[0],
+    z0: d.transform.position[2] + d.aabb.min[2],
+    z1: d.transform.position[2] + d.aabb.max[2],
+  });
+  const guaras = raft.filter((d) => d.kind === 'guara');
+  const sternPoles = ['mast-mizzen', 'flagpole'];
+
+  it('every deck-stepped pole stands on a LOG CROWN, never in a chink where a guara rides', () => {
+    // WHY: a pole authored as a free x lands in a gap sooner or later, and a
+    // gap is where a centreboard lives. §V71 — resolve against the log field's
+    // own shape. Covers the bipod legs too: the class, not the instance.
+    // every pole's AXIS is over a log, never over a chink…
+    for (const id of [...sternPoles, 'bipod-leg-port', 'bipod-leg-starboard']) {
+      const x = byId.get(id)!.transform.position[0];
+      const log = L.logs.find((l) => Math.abs(l.x - x) <= l.r + 1e-9);
+      expect(log, `${id} at x=${x.toFixed(3)} is stepped in a chink`).toBeDefined();
+    }
+    // …and the two STERN poles, the ones that share the after body with the
+    // guaras, stand wholly on one crown and are seated on THAT log's own
+    // radius (§V71), not on the tallest log's.
+    // MEASURED, out of §T.138's scope: the bipod legs sit at ±2.25 for a
+    // `mastLegSpacing` the log field never agreed to, so `bipod-leg-starboard`
+    // overhangs chink 7 by 12 mm, and both legs are stepped at `L.logTopY` and
+    // float 3 mm (port) / 32 mm (starboard) over the log they stand on. Both
+    // are under the mats and invisible; noted rather than moved.
+    for (const id of sternPoles) {
+      const d = byId.get(id)!;
+      const log = L.logs.find((l) => Math.abs(l.x - d.transform.position[0]) + d.aabb.max[0] <= l.r + 1e-9);
+      expect(log, `${id} overhangs a chink`).toBeDefined();
+      expect(d.transform.position[1] + d.aabb.min[1], `${id} foot`)
+        .toBeCloseTo(p.logAxisY + (log as { r: number }).r, 9);
+    }
+  });
+
+  it('no rig pole passes through a guara plank, at any point of the plank\'s travel', () => {
+    // §B70/§T.138: a guara only moves in y, so a footprint overlap is an
+    // interpenetration at every depth the crew can haul it to. The flagpole
+    // used to be inside `guara-5`'s box outright.
+    for (const id of sternPoles) {
+      const a = rect(byId.get(id)!);
+      for (const g of guaras) {
+        const b = rect(g);
+        const overlap = a.x0 < b.x1 && a.x1 > b.x0 && a.z0 < b.z1 && a.z1 > b.z0;
+        expect(overlap, `${id} intersects ${g.id}`).toBe(false);
+        // …and it is not merely touching it either: a pole a hand's width
+        // from a centreboard still reads as growing out of it
+        const dx = Math.max(a.x0 - b.x1, b.x0 - a.x1, 0);
+        const dz = Math.max(a.z0 - b.z1, b.z0 - a.z1, 0);
+        expect(Math.hypot(dx, dz), `${id} is on top of ${g.id}`)
+          .toBeGreaterThan(p.guaraWidth / 4);
+      }
+    }
+  });
+
+  it('the aft guaras and the stern poles clear the helmsman\'s swing at `station-tiller`', () => {
+    // The working area is HIS, measured from the raft's own numbers: the man
+    // (one capsule radius) plus half the tiller cross-piece he sweeps. Before
+    // the fix `guara-5` sat 0.985 m out, the mizzen pole 0.962 and the
+    // flagpole 0.989 — all three inside a 1.05 m disc.
+    const block = byId.get('stern-block')!;
+    const s = block.sockets.find((q) => q.id === 'station-tiller')!;
+    const tx = block.transform.position[0] + s.position[0];
+    const tz = block.transform.position[2] + s.position[2];
+    const swing = playerParams.capsuleRadius + p.oarTillerLength / 2;
+    const clear = swing + playerParams.capsuleRadius; // …and elbow room round it
+    for (const d of [...guaras, ...sternPoles.map((id) => byId.get(id)!)]) {
+      const b = rect(d);
+      const dx = Math.max(b.x0 - tx, tx - b.x1, 0);
+      const dz = Math.max(b.z0 - tz, tz - b.z1, 0);
+      expect(Math.hypot(dx, dz), `${d.id} stands in the helmsman's way`).toBeGreaterThan(clear);
+    }
+  });
+
+  it('§T.96 still holds: guaras both FORWARD and AFT of the sail\'s centre of effort', () => {
+    // Moving the aft pair must not cost the steering model its authority —
+    // the yaw moment is Σ lift·(pos − CE), so boards all on one side of the CE
+    // can only push one way. CE is read from the MAINSAIL that is actually
+    // built, not from a number (§V71).
+    const sail = byId.get('sail-main-lower')!;
+    const yard = byId.get(sail.parent as string)!;
+    const ce = asm.group.getObjectByName(sail.id)!.getWorldPosition(new THREE.Vector3()).z;
+    expect(Number.isFinite(ce)).toBe(true);
+    expect(yard.parent).toBe('mast-main');
+    const zs = guaras.map((g) => g.transform.position[2]);
+    expect(zs.filter((z) => z > ce).length, 'boards forward of the CE').toBeGreaterThanOrEqual(2);
+    expect(zs.filter((z) => z < ce).length, 'boards aft of the CE').toBeGreaterThanOrEqual(2);
+  });
+
+  it('no yard hoisted on a SINGLE pole hangs in clear air: the gap is parrel-sized and seized', () => {
+    // §V71/§V66 — `yardMastClearance` is 0.30 m because the MAIN yard hangs
+    // between two SPLAYING bipod legs and its cloth has to miss both. Applied
+    // to a single 0.10 m pole it is three pole-diameters of nothing, which is
+    // what the user saw. The bar is the POLE'S OWN diameter, not a metre value.
+    const singles: Array<[string, string, number]> = [
+      ['mast-mizzen', 'yard-mizzen-lower', p.mizzenDiameter / 2],
+      ['mast-main', 'yard-main-upper', (p.mastLegDiameter / 2) * 0.8],
+    ];
+    for (const [poleId, yardId, poleR] of singles) {
+      const yard = byId.get(yardId)!;
+      expect(yard.parent, `${yardId} hangs on ${poleId}`).toBe(poleId);
+      const yr = yard.aabb.max[1];
+      const air = yard.transform.position[2] - poleR - yr;
+      expect(air, `${yardId} floats off ${poleId}`).toBeLessThanOrEqual(poleR * 2 * 1.5);
+      expect(air, 'a parrel has slack in it').toBeGreaterThan(0);
+      // and there is ROPE in that air — a seizing that rides the yard, so it
+      // follows every cock/rake/slew `yardAttitude` gives it (§V71)
+      const parrel = byId.get(`lashing-parrel-${yardId.replace('yard-', '')}`);
+      expect(parrel, `${yardId} has no parrel`).toBeDefined();
+      const q = parrel as PieceDef;
+      // §V71: it hangs on the POLE, the frame the yard pivots in — see the
+      // note on `parrelSeizing`. The live-under-brace check is the next test.
+      expect(q.parent).toBe(poleId);
+      const reach = q.aabb.max[1];
+      const c = q.transform.position;
+      // one rope collar reaching BOTH axes: the pole's (x = z = 0 in the
+      // mast's frame) and the yard's (z = standoff)
+      expect(Math.hypot(c[0], c[2]), 'the parrel does not reach the pole').toBeLessThan(reach);
+      expect(Math.hypot(c[0] - yard.transform.position[0], c[2] - yard.transform.position[2]),
+        'the parrel does not reach its yard').toBeLessThan(reach);
+      expect(Math.abs(c[1] - yard.transform.position[1]), 'the parrel is at the yard\'s height')
+        .toBeLessThanOrEqual(reach);
+    }
+  });
+
+  it('the parrel follows the yard LIVE — brace the rig and it is still on it (§V71)', () => {
+    // WHY THIS TEST EXISTS: the first cut of the parrel hung on the YARD, and
+    // `rigTrim` braces a yard about its own origin — so at −45° the collar had
+    // walked 0.185 m off a pole it reaches 0.171 m around. A seizing that only
+    // touches its spar in the rest pose is §V71's defect, not its cure.
+    const parrel = asm.group.getObjectByName('lashing-parrel-mizzen-lower')!;
+    const yardObj = asm.group.getObjectByName('yard-mizzen-lower')!;
+    const poleObj = asm.group.getObjectByName('mast-mizzen')!;
+    const yardDef = byId.get('yard-mizzen-lower') as PieceDef;
+    const reach = (byId.get('lashing-parrel-mizzen-lower') as PieceDef).aabb.max[1];
+    /** distance from `q` to the yard's AXIS, the yard live in world space */
+    const toYardAxis = (q: THREE.Vector3): number => {
+      const half = yardDef.aabb.max[0];
+      const a = yardObj.localToWorld(new THREE.Vector3(-half, 0, 0));
+      const b = yardObj.localToWorld(new THREE.Vector3(half, 0, 0));
+      const ab = b.clone().sub(a);
+      const t = Math.min(1, Math.max(0, q.clone().sub(a).dot(ab) / ab.lengthSq()));
+      return q.distanceTo(a.clone().addScaledVector(ab, t));
+    };
+    for (const brace of [-shipRigParams.braceMax, 0, shipRigParams.braceMax]) {
+      asm.setRigTrim(brace);
+      asm.group.updateMatrixWorld(true);
+      const a = parrel.getWorldPosition(new THREE.Vector3());
+      const c = poleObj.getWorldPosition(new THREE.Vector3());
+      // the pole is vertical: compare in the horizontal plane, so its LENGTH
+      // is not counted as distance
+      expect(Math.hypot(a.x - c.x, a.z - c.z), `parrel off the pole at brace ${brace.toFixed(2)}`)
+        .toBeLessThan(reach);
+      expect(toYardAxis(a), `parrel off the yard at brace ${brace.toFixed(2)}`).toBeLessThan(reach);
+    }
+    asm.setRigTrim(0);
+  });
+
+  it('is deterministic and still under the brigantine\'s budget with the parrels on', () => {
+    const again = buildRaftBlueprint();
+    expect(JSON.stringify(again)).toBe(JSON.stringify(raft));
+    expect(totalTris(raft)).toBeLessThan(totalTris(buildBrigantineBlueprint()) / 2);
   });
 });

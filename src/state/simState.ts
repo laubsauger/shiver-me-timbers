@@ -56,6 +56,17 @@ export interface ShipState {
    * the input snapshot has to be the whole truth of its tick.
    */
   braceHold?: number;
+  /**
+   * §B100(b) — THE RAFT'S FIVE CENTREBOARDS, 0 (hauled clear) .. 1 (fully
+   * lowered), index k for `guara-{k+1}`. SIM state for the same reason
+   * `brace` is: `guaraYawMoment` steers on it, so it advances on the fixed
+   * tick and replays from the input log; `src/ship/rigTrim.ts` only DISPLAYS
+   * it. Written by `stepRaftShip` from `RaftControls`.
+   *
+   * OPTIONAL like `anchored` and `brace`: the existing ShipState literals stay
+   * valid, and a vessel with no guaras serializes — and hashes — as before.
+   */
+  guaraDepth?: number[];
   flood: number; // 0..1, 1 = sunk
   /** damage zone id → remaining hp 0..1 */
   damage: Record<string, number>;

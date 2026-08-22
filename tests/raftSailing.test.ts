@@ -28,6 +28,16 @@ import {
   type RaftTuning,
 } from '../src/params/raftSailing';
 import { SIM_DT } from '../src/core/loop';
+import * as THREE from 'three';
+import type { Material } from 'three';
+import { ShipAssembly } from '../src/ship/shipAssembly';
+import { buildRaftBlueprint } from '../src/ship/raftBlueprint';
+import { buildBrigantineBlueprint } from '../src/ship/shipBlueprint';
+import { updateShipRig } from '../src/ship/rigTrim';
+import { shipRigParams } from '../src/params/ship';
+import { applyRaftAction, type RaftActionSinks } from '../src/raft/raftActions';
+import { stepRaftShip } from '../src/raft/raftShip';
+import type { ShipState } from '../src/state/simState';
 
 const W7: Wind = { direction: 0, speed: 7 }; // blowing toward +z
 
@@ -246,5 +256,134 @@ describe('pluggable tunings', () => {
       // accessible draws wherever true draws (and then some), never the reverse
       if (sailDrive(a, 7, trueRaftTuning) > 0) expect(sailDrive(a, 7, accessibleRaftTuning)).toBeGreaterThan(0);
     }
+  });
+});
+
+/**
+ * §B100 — A CONTROL THAT MOVES NOTHING. USER (§T.136): "I can click E and then
+ * it says raise or lower, but then I don't know how to actually raise or lower
+ * this… The tiller is also — I don't know how that's to be used."
+ *
+ * MEASURED, before the fix, by driving the REAL path (station value →
+ * `applyRaftAction` → `stepRaftShip` → `updateShipRig`) and reading the PIECE:
+ *
+ *   `steering-oar` world matrix, oar hard a-starboard vs amidships: IDENTICAL.
+ *      `rigTrim` called `setRudderAngle`, which filters `kind === 'rudder'`;
+ *      the raft's blade is kind `steering-oar` (§B92's shape, §T.118's case).
+ *   `guara-1` world position, boards down vs up: IDENTICAL.
+ *      `buildGuaras` authored `shape: { depth, travel }` and documented that
+ *      the sim moves the plank along y by up to `travel`; `grep shape.travel`
+ *      over `src/` returned that comment and nothing else.
+ *
+ * WHY THESE TESTS ARE WRITTEN THIS WAY (§V62): a test that asserts
+ * `controls.oarAngle === 1` or `ship.rudder === 1` PASSES on both defects, and
+ * did, for weeks. The only assertion that could ever have caught them is one
+ * that reads the piece's WORLD TRANSFORM after the frame's own call.
+ */
+describe('§B100 the tiller and the guaras move the things they are named for', () => {
+  const stub = (): Material => ({ dispose(): void {} }) as unknown as Material;
+  const sinks: RaftActionSinks = { skipToDawn: () => {}, pushOff: () => {} };
+
+  function rigged(): { ship: ShipState; c: RaftControls; asm: ShipAssembly } {
+    const asm = new ShipAssembly(buildRaftBlueprint(), stub);
+    const ship: ShipState = {
+      id: 'raft', kind: 'player',
+      position: [0, 0, 0], quaternion: [0, 0, 0, 1],
+      velocity: [0, 0, 0], angularVelocity: [0, 0, 0],
+      rudder: 0, sailTrim: 1, flood: 0, damage: {},
+    };
+    return { ship, c: neutralRaftControls(), asm };
+  }
+  /** one whole frame of the REAL path, from a station value to the drawn piece */
+  function frame(r: ReturnType<typeof rigged>, name: string, value: number): void {
+    expect(applyRaftAction(r.c, name, value, sinks), `${name} is not a station`).toBe(true);
+    stepRaftShip(r.ship, r.c, W7, SIM_DT);
+    updateShipRig(r.ship, r.asm, SIM_DT);
+    r.asm.group.updateMatrixWorld(true);
+  }
+  const worldOf = (asm: ShipAssembly, id: string): THREE.Matrix4 =>
+    (asm.group.getObjectByName(id) as THREE.Object3D).matrixWorld.clone();
+
+  it('(a) the tiller SWEEPS THE OAR — the piece moves, both ways, and stops', () => {
+    const r = rigged();
+    frame(r, 'tiller', 0);
+    const mid = worldOf(r.asm, 'steering-oar');
+    frame(r, 'tiller', 1);
+    const stbd = worldOf(r.asm, 'steering-oar');
+    expect(stbd.equals(mid), 'oar hard over is the same transform as amidships').toBe(false);
+    frame(r, 'tiller', -1);
+    const port = worldOf(r.asm, 'steering-oar');
+    expect(port.equals(mid)).toBe(false);
+    expect(port.equals(stbd), 'port and starboard helm draw the same oar').toBe(false);
+    // …and the sweep is BOUNDED: hard over is one rope stop, not five turns
+    expect(Math.abs(r.asm.oarSweep)).toBeLessThanOrEqual(shipRigParams.rudderBladeMax + 1e-9);
+    expect(Math.abs(r.asm.oarSweep)).toBeGreaterThan(0.05);
+    frame(r, 'tiller', 2); // clamped upstream; the piece may not run past its stop
+    expect(Math.abs(r.asm.oarSweep)).toBeLessThanOrEqual(shipRigParams.rudderBladeMax + 1e-9);
+  });
+
+  it('(a) the oar sweep carries the ship\'s sign: helm to starboard puts the blade to starboard', () => {
+    // the blade lies ABAFT the pins, so the piece rotation is negated — the
+    // property is where the BLADE ends up, in ship space, not the sign of a
+    // number. (`oarTorque` above already pins which way she then swings.)
+    const r = rigged();
+    const def = buildRaftBlueprint().find((d) => d.id === 'steering-oar')!;
+    const bladeLocal = new THREE.Vector3(0, 0, def.aabb.min[2]); // the blade end
+    frame(r, 'tiller', 1);
+    const stbd = (r.asm.group.getObjectByName('steering-oar') as THREE.Object3D)
+      .localToWorld(bladeLocal.clone());
+    frame(r, 'tiller', -1);
+    const port = (r.asm.group.getObjectByName('steering-oar') as THREE.Object3D)
+      .localToWorld(bladeLocal.clone());
+    expect(stbd.x, 'positive helm did not put the blade to starboard').toBeGreaterThan(port.x);
+  });
+
+  it('(b) each guara station RAISES ITS OWN PLANK — and only its own', () => {
+    const r = rigged();
+    for (let k = 1; k <= 5; k++) frame(r, `guara-${k}`, 1);
+    const down = [1, 2, 3, 4, 5].map((k) => worldOf(r.asm, `guara-${k}`));
+    frame(r, 'guara-3', 0); // haul the midships board clear
+    r.asm.group.updateMatrixWorld(true);
+    for (let k = 1; k <= 5; k++) {
+      const now = worldOf(r.asm, `guara-${k}`);
+      expect(now.equals(down[k - 1]),
+        k === 3 ? 'guara-3 did not move when its own station was hauled'
+          : `guara-${k} moved when guara-3's station was hauled`).toBe(k !== 3);
+    }
+    // …and it went UP, by the plank's own travel, not by some other number
+    const def = buildRaftBlueprint().find((d) => d.id === 'guara-3')!;
+    const node = r.asm.group.getObjectByName('guara-3') as THREE.Object3D;
+    expect(node.position.y - def.transform.position[1])
+      .toBeCloseTo((def.shape?.travel ?? 0) * (def.shape?.depth ?? 0), 9);
+    expect(node.position.y, 'raising a guara must LIFT it').toBeGreaterThan(def.transform.position[1]);
+  });
+
+  it('(b) the travel is bounded by the plank\'s own `travel`, at every depth', () => {
+    const r = rigged();
+    const def = buildRaftBlueprint().find((d) => d.id === 'guara-1')!;
+    const travel = def.shape?.travel ?? 0;
+    expect(travel).toBeGreaterThan(0);
+    for (const d of [0, 0.25, 0.5, 0.75, 1, 2, -1, NaN]) {
+      frame(r, 'guara-1', d);
+      const y = (r.asm.group.getObjectByName('guara-1') as THREE.Object3D).position.y;
+      expect(Math.abs(y - def.transform.position[1]), `guara-1 at depth ${d}`)
+        .toBeLessThanOrEqual(travel + 1e-9);
+    }
+    // fully down is the LOWEST it goes, fully up the highest
+    frame(r, 'guara-1', 1);
+    const low = (r.asm.group.getObjectByName('guara-1') as THREE.Object3D).position.y;
+    frame(r, 'guara-1', 0);
+    const high = (r.asm.group.getObjectByName('guara-1') as THREE.Object3D).position.y;
+    expect(high - low).toBeCloseTo(travel, 9);
+  });
+
+  it('a hull with neither piece is untouched by both calls (§V95 one path, all classes)', () => {
+    const asm = new ShipAssembly(buildBrigantineBlueprint(), stub);
+    asm.group.updateMatrixWorld(true);
+    const before = asm.group.getObjectByName('mast-main')!.matrixWorld.clone();
+    updateShipRig({ sailTrim: 1, rudder: 1, brace: 0, guaraDepth: [1, 1, 1, 1, 1] }, asm, SIM_DT);
+    asm.group.updateMatrixWorld(true);
+    expect(asm.group.getObjectByName('mast-main')!.matrixWorld.equals(before)).toBe(true);
+    expect(asm.oarSweep, 'a brigantine has no oar to sweep').toBeDefined();
   });
 });

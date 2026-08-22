@@ -142,6 +142,20 @@ export interface RaftParams {
    * value for what this knob can and cannot fix.
    */
   yardMastClearance: number;
+  /**
+   * EST — m of AIR between a SINGLE pole and the yard parreled to it (topsail,
+   * mizzen), as opposed to the bipod's `yardMastClearance`.
+   *
+   * §T.138/§V66: `yardMastClearance` is 0.30 m because the MAIN yard hangs
+   * between two legs that SPLAY, and its cloth has to miss both. A yard on one
+   * pole has no such problem, and 0.30 m of nothing between a 0.10 m mizzen
+   * pole and its 0.07 m yard is what the user saw as "the horizontal bar for
+   * the back sail is floating mid-air" — the spar read as unattached because
+   * the gap was three times the pole's own diameter. A parrel's slack is a
+   * rope turn or two of the spar it goes round, and `lashing-parrel-{mast}`
+   * draws the seizing across it. [§4 Topsail, Mizzen]
+   */
+  poleParrelGap: number;
   sailYardOffset: number; // EST — cloth forward of the yard axis
   mainYardHeight: number; // EST — hoisted below the crossing [PHOTO-10]
   mainYardFurlDrop: number; // EST — m the main yard comes DOWN its halyard when furled [ref §10 replica-moored-beam: the roll rides ~2.3 m over the deck] (§B86-3)
@@ -154,7 +168,12 @@ export interface RaftParams {
   topsailWidth: number; // EST
   topsailDrop: number; // EST
   mizzenZ: number; // EST — "short mizzen pole at stern" [§4 Mizzen]
-  mizzenX: number; // EST — offset to port to clear the oar sweep [PHOTO-10]
+  /**
+   * EST — WANTED offset to port, to clear the oar sweep [PHOTO-10].
+   * §T.138: `buildMizzenAndFlag` SNAPS this to the crown of the nearest log —
+   * a pole stepped in a chink is a pole standing where a guara rides.
+   */
+  mizzenX: number;
   mizzenHeight: number; // EST — [§9.2] mizzen size unknown
   mizzenDiameter: number; // EST
   mizzenYardLength: number; // EST
@@ -162,7 +181,7 @@ export interface RaftParams {
   mizzenSailDrop: number; // EST
   flagpoleHeight: number; // EST — "tall thin flag/antenna pole" [§4 Mizzen]
   flagpoleDiameter: number; // EST
-  flagpoleX: number; // EST — starboard of the oar, opposite the mizzen
+  flagpoleX: number; // EST — WANTED, snapped to a log crown like `mizzenX`
   flagFly: number; // EST — Norwegian flag [§4 Mizzen]
   flagHoist: number; // EST
   // --- §2 Guaras
@@ -330,6 +349,7 @@ export const raftParams: RaftParams = registerParams(
     // the panel moves 0.54 % → 0.30 % and the worst point stays at ≈ −0.05 m.
     // The cloth-side push (§T.114 sparPush) is the fix for that band.
     yardMastClearance: 0.3, // EST
+    poleParrelGap: 0.12, // EST — §T.138: ≈ one mizzen-pole diameter of slack, seized
     sailYardOffset: 0.12, // EST
     mainYardHeight: 7.2, // EST
     mainYardFurlDrop: 4.5, // EST — 7.2 → 2.7 on the mast, ≈ 2.7 m over the log tops [ref §10]
@@ -344,7 +364,12 @@ export const raftParams: RaftParams = registerParams(
     topsailWidth: 2.0, // EST
     topsailDrop: 0.9, // EST — a small sail set flying on a short pole [§9.2 size unknown]
     mizzenZ: -5.4, // EST
-    mizzenX: -0.9, // EST
+    // §T.138 — at ±0.9 both stern poles stood in the two aft guara CHINKS
+    // (Δx to guara-4 0.035 m, to guara-5 0.005 m: the flagpole's box ran clean
+    // THROUGH the starboard guara plank), which is why the user read them as
+    // "two poles from the guaras". ±1.2 lands on logs ±2, on a crown, outboard
+    // of the helmsman's tiller swing.
+    mizzenX: -1.2, // EST
     mizzenHeight: 4.4, // EST — [ref-sails-1947] the mizzen flies clear above the cabin ridge
     mizzenDiameter: 0.1, // EST
     mizzenYardLength: 2.2, // EST
@@ -352,7 +377,7 @@ export const raftParams: RaftParams = registerParams(
     mizzenSailDrop: 1.6, // EST
     flagpoleHeight: 5.0, // EST
     flagpoleDiameter: 0.06, // EST
-    flagpoleX: 0.9, // EST
+    flagpoleX: 1.2, // EST — mirror of `mizzenX`, also snapped to a crown
     flagFly: 0.9, // EST
     flagHoist: 0.65, // EST
     guaraCount: 5,
@@ -363,7 +388,12 @@ export const raftParams: RaftParams = registerParams(
     guaraTravel: 1.2, // EST
     guaraDefaultDepth: 0.5, // EST
     guaraFwdZ: 2.2, // EST
-    guaraAftZ: -5.0, // EST
+    // §T.138 — the aft pair used to sit 0.99 m from `station-tiller`, inside
+    // the disc the helmsman needs for himself and the tiller bar he sweeps
+    // (capsule 0.30 + half of `oarTillerLength`). Forward to just abaft the
+    // cabin's aft wall: still aft of the sail's centre of effort (§T.96), still
+    // in the larger chinks [§2 Positions], out of the helmsman's way.
+    guaraAftZ: -4.65, // EST
     guaraMidZ: 1.4, // EST
     sternBlockLength: 2.5,
     sternBlockSection: 0.3,

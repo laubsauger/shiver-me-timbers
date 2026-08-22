@@ -174,6 +174,10 @@ export class ShipAssembly {
   private helmAngle = 0;
   /** live rudder blade angle (rad) about the stock, applied to the blade node */
   private rudderAngle = 0;
+  /** §B100(a) — the raft's steering oar, which is not a rudder */
+  private oarAngle = 0;
+  /** §B100(b) — drawn guara depths, by piece id */
+  private readonly guaraDepths = new Map<string, number>();
   private windFrame: SailWindFrame = NEUTRAL_SAIL_WIND_FRAME;
 
   constructor(blueprint: PieceDef[], materialFactory?: MaterialFactory) {
@@ -486,6 +490,74 @@ export class ShipAssembly {
   /** current rudder blade angle (rad) about the stock */
   get bladeAngle(): number {
     return this.rudderAngle;
+  }
+
+  /**
+   * §B100(a) — PUT THE OAR OVER. Same defect as §B92, one class further on:
+   * `setRudderAngle` filters on `kind === 'rudder'` and the raft's blade is
+   * kind `steering-oar`, so the one vessel whose ONLY control surface is that
+   * oar steered with it welded amidships. §T.118 flagged the case when §B92
+   * was fixed and it was never wired.
+   *
+   * NOT A RUDDER, AND SO NOT THE SAME CALL. A rudder hangs on a stock at its
+   * own origin; this oar is a 5.8 m pole lying LOOSE BETWEEN TWO THOLE-PINS
+   * on the stern block [§5 Mount], with its piece origin AT the pins and a
+   * rest rotation of `[-oarDip, 0, 0]` that dips the blade abaft them. About
+   * local +y that is a pure sweep about the pins — the handle goes one way,
+   * the blade the other, which is what a steering oar does — and because
+   * three composes Euler 'XYZ' as Rx·Ry, the dip still applies to the swept
+   * pole rather than the sweep applying to the dipped one. Rotating about the
+   * blade would drag the loom sideways through the helmsman.
+   *
+   * The caller owns the mapping and the rope stop (`rigTrim.oarSweepAngle`).
+   */
+  setSteeringOarAngle(angle: number): void {
+    if (!Number.isFinite(angle)) return; // §V28: never poison a transform
+    if (angle === this.oarAngle) return;
+    this.oarAngle = angle;
+    for (const rt of this.pieces.values()) {
+      if (rt.def.kind !== 'steering-oar') continue;
+      rt.node.rotation.y = rt.def.transform.rotation[1] + angle;
+    }
+  }
+
+  /** current steering-oar sweep (rad) about the thole-pins */
+  get oarSweep(): number {
+    return this.oarAngle;
+  }
+
+  /**
+   * §B100(b) — THE CENTREBOARDS RIDE UP AND DOWN. `raftPartsHull.buildGuaras`
+   * has said since §T89 that "the sim raises/lowers a guara by moving the piece
+   * along y by up to `shape.travel`", and nothing read `shape.travel`: the
+   * boards were scenery while `guaraYawMoment` steered the raft with them. A
+   * control whose only feedback is the heading changing is the §T.136
+   * complaint, and this one had no feedback at all.
+   *
+   * `depths[k]` drives `guara-{k+1}` — the same index `raftActions.GUARA`
+   * publishes, so the station, the debug key and the drawn plank are one
+   * channel. 0 = hauled clear, 1 = fully down; the blueprint pose is at the
+   * piece's own `shape.depth`, so the offset is `travel × (rest − wanted)`
+   * and a re-tune of `guaraDefaultDepth` carries the drawn plank with it.
+   */
+  setGuaraDepths(depths: readonly number[]): void {
+    for (const rt of this.pieces.values()) {
+      if (rt.def.kind !== 'guara') continue;
+      const k = Number.parseInt(rt.def.id.slice(rt.def.id.lastIndexOf('-') + 1), 10) - 1;
+      const raw = depths[k];
+      if (typeof raw !== 'number' || !Number.isFinite(raw)) continue; // §V28
+      const d = Math.min(1, Math.max(0, raw));
+      if (this.guaraDepths.get(rt.def.id) === d) continue; // edge-triggered
+      this.guaraDepths.set(rt.def.id, d);
+      const travel = rt.def.shape?.travel ?? 0;
+      const rest = rt.def.shape?.depth ?? 0;
+      rt.node.position.y = rt.def.transform.position[1] + travel * (rest - d);
+    }
+  }
+
+  /** drawn depth of one guara piece, 0..1; undefined = never driven */
+  guaraDepthOf(pieceId: string): number | undefined {
+    return this.guaraDepths.get(pieceId);
   }
 
   socketWorldPosition(socketId: string): Vec3 {

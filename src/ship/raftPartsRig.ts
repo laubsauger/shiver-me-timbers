@@ -57,6 +57,7 @@ function yardAndSail(
   key: number,
   sprit = 0,
   furlDrop = 0,
+  gap = p.yardMastClearance,
 ): PieceDef[] {
   const yardId = `yard-${mast}-${level}`;
   const sailId = `sail-${mast}-${level}`;
@@ -67,7 +68,7 @@ function yardAndSail(
   ];
   // rotation about +x by +rake tips the hanging canvas (−y) aft, i.e. the
   // head leads the foot forward; +z cock lifts the STARBOARD arm
-  const yard = mkPiece(yardId, 'yard', [att.offset, y, mastR + yr + p.yardMastClearance], {
+  const yard = mkPiece(yardId, 'yard', [att.offset, y, mastR + yr + gap], {
     min: [-len / 2, -yr, -yr],
     max: [len / 2, yr, yr],
   }, {
@@ -100,6 +101,47 @@ function yardAndSail(
     shape: { sheetLeadAft: -1, yardR: yr, windRef: p.sailWindRef, yardLength: len, furlPack: p.furlBundlePack },
   });
   return [yard, sail];
+}
+
+/**
+ * §T.138 — THE SEIZING THAT HOLDS A YARD TO THE POLE IT IS SET ON.
+ *
+ * A yard parreled to a single spar is LASHED to it. With `poleParrelGap` of
+ * air between the two surfaces there has to be rope in that air, or the spar
+ * reads as unattached — USER, of the mizzen: "the horizontal bar for the back
+ * sail is floating mid-air".
+ *
+ * WHOSE FRAME (§V71): the collar is a child of the POLE, not of the yard.
+ * Bracing turns a yard about its OWN origin (`rigTrim`), which is the point
+ * held 'standoff' forward of the pole — i.e. the yard pivots IN its parrel,
+ * exactly as a real one does, and the seizing stays on the mast while the
+ * spar swings inside it. Parented to the yard it would swing away from the
+ * pole at every brace, which is the same defect in a new place. Its span is
+ * derived from the standoff the yard is actually hung at, so re-tuning
+ * `poleParrelGap` carries the rope with it.
+ */
+function parrelSeizing(
+  p: RaftParams,
+  mast: string,
+  level: string,
+  mastR: number,
+  yr: number,
+  gap: number,
+  y: number,
+): PieceDef {
+  const standoff = mastR + yr + gap; // pole axis → yard axis, in the mast's z
+  const wrapR = standoff / 2 + Math.max(mastR, yr);
+  const turns = Math.max(3, Math.round(wrapR / p.lashingRopeDiameter));
+  const width = p.lashingRopeDiameter * turns;
+  const R = wrapR + p.lashingRopeDiameter * 0.6;
+  return mkPiece(`lashing-parrel-${mast}-${level}`, 'lashing', [0, y, standoff / 2], {
+    min: [-width / 2, -R, -R],
+    max: [width / 2, R, R],
+  }, {
+    parent: `mast-${mast}`,
+    // `ring: 0` = a wrap round the pair, no torus under it (as the bipod's)
+    shape: { n: 1, x0: 0, rope: p.lashingRopeDiameter, turns, beamR: wrapR, ring: 0 },
+  });
 }
 
 export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
@@ -229,18 +271,35 @@ export function buildBipodMast(p: RaftParams, L: RaftLayout): PieceDef[] {
   out.push(...yardAndSail(p, 'main', 'lower', p.mainYardHeight, p.yardLength, yr, legR,
     p.mainSailWidth, p.mainSailDrop, 1, 0, p.mainYardFurlDrop));
   // small topsail on the pole above the crossing [§4 Topsail], hoisted clear
-  // of the lookout (see `topsailY`)
+  // of the lookout (see `topsailY`). §T.138: a yard on ONE pole gets a
+  // parrel-sized gap and a seizing across it, not the bipod's splay allowance
   out.push(...yardAndSail(p, 'main', 'upper', topsailY,
-    p.topsailYardLength, yr * 0.6, poleR, p.topsailWidth, p.topsailDrop, 2));
+    p.topsailYardLength, yr * 0.6, poleR, p.topsailWidth, p.topsailDrop, 2, 0, 0, p.poleParrelGap));
+  out.push(parrelSeizing(p, 'main', 'upper', poleR, yr * 0.6, p.poleParrelGap, topsailY));
   return out;
+}
+
+/**
+ * §T.138 / §V71 — a deck pole stands on the CROWN OF A LOG, never in a chink.
+ * The mizzen and flag poles were authored at ±0.9 m, which is where the two
+ * aft guara chinks happen to be: the flagpole's box ran through the starboard
+ * guara plank and the pair read as "two poles from the guaras" (USER). Snap
+ * the wanted x to the nearest log centreline and seat the pole on THAT log's
+ * own crown, so a re-seeded log field can never put a pole in a gap again.
+ */
+function stepOnLog(p: RaftParams, L: RaftLayout, x: number): { x: number; crown: number } {
+  let best = L.logs[0];
+  for (const l of L.logs) if (Math.abs(l.x - x) < Math.abs(best.x - x)) best = l;
+  return { x: best.x, crown: p.logAxisY + best.r };
 }
 
 /** short mizzen pole + small square sail, and the tall thin flag pole [§4 Mizzen] */
 export function buildMizzenAndFlag(p: RaftParams, L: RaftLayout): PieceDef[] {
   const out: PieceDef[] = [];
   const mr = p.mizzenDiameter / 2;
+  const mizzenFoot = stepOnLog(p, L, p.mizzenX);
   out.push(
-    mkPiece('mast-mizzen', 'mast', [p.mizzenX, L.logTopY, p.mizzenZ], {
+    mkPiece('mast-mizzen', 'mast', [mizzenFoot.x, mizzenFoot.crown, p.mizzenZ], {
       min: [-mr, 0, -mr],
       max: [mr, p.mizzenHeight, mr],
     }, {
@@ -250,13 +309,17 @@ export function buildMizzenAndFlag(p: RaftParams, L: RaftLayout): PieceDef[] {
   const yr = p.yardDiameter * 0.3;
   // the mizzen's spar is a SPRIT (§B73 [ref-sails-1947]): hoisted to the
   // pole head and stood up at `mizzenSpritAngle`, the small sail hanging
-  // loose off it — in the photo it flies ABOVE the cabin ridge, not behind it
+  // loose off it — in the photo it flies ABOVE the cabin ridge, not behind it.
+  // §T.138: parreled to the pole with `poleParrelGap` of slack and a seizing
+  // across it — at the bipod's 0.30 m it hung in clear air off a 0.10 m pole
   out.push(...yardAndSail(p, 'mizzen', 'lower', p.mizzenHeight - 0.25, p.mizzenYardLength, yr, mr,
-    p.mizzenSailWidth, p.mizzenSailDrop, 3, p.mizzenSpritAngle));
+    p.mizzenSailWidth, p.mizzenSailDrop, 3, p.mizzenSpritAngle, 0, p.poleParrelGap));
+  out.push(parrelSeizing(p, 'mizzen', 'lower', mr, yr, p.poleParrelGap, p.mizzenHeight - 0.25));
 
   const fr = p.flagpoleDiameter / 2;
+  const flagFoot = stepOnLog(p, L, p.flagpoleX);
   out.push(
-    mkPiece('flagpole', 'bipod-mast', [p.flagpoleX, L.logTopY, p.mizzenZ], {
+    mkPiece('flagpole', 'bipod-mast', [flagFoot.x, flagFoot.crown, p.mizzenZ], {
       min: [-fr, 0, -fr],
       max: [fr, p.flagpoleHeight, fr],
     }, {

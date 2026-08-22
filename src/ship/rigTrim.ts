@@ -146,6 +146,27 @@ export function rudderBladeAngle(rudder: number, p: ShipRigParams): number {
 }
 
 /**
+ * §B100(a) — `ship.rudder` → the RAFT'S STEERING OAR, in radians about the
+ * thole-pins. Its own mapping beside `rudderBladeAngle`, for the reason that
+ * one is its own mapping beside `helmWheelAngle`: the two stops are different
+ * things. A rudder stops at ~35° because past that it stalls; a steering oar
+ * stops because "ropes from each side of the blade to each raft side" limit
+ * the sweep [ref §5 Ropes]. They happen to be the same size of arc, which is
+ * why this reads `rudderBladeMax` rather than inventing a knob nobody will
+ * ever turn — but it is a SEPARATE call, so giving the oar its own rope stop
+ * later is a change to this function and to nothing else.
+ *
+ * SAME SIGN AS THE BLADE, and for the same geometric reason: the oar's own
+ * piece origin is at the pins and its blade lies ABAFT them (−z), so a
+ * positive-y rotation would swing the blade to PORT. `ship.rudder` > 0 turns
+ * her to starboard, which wants the blade to starboard. Hence the negation.
+ */
+export function oarSweepAngle(oar: number, p: ShipRigParams): number {
+  const r = Math.max(-1, Math.min(1, Number.isFinite(oar) ? oar : 0));
+  return -r * Math.max(0, p.rudderBladeMax);
+}
+
+/**
  * @param dt     render frame delta (s) — advances the gust and velocity filters
  * @param trim   sim `sailTrim` 0..1; omit to leave the canvas at full
  * @param rudder sim `ship.rudder` −1..1; omit to leave the wheel amidships
@@ -157,6 +178,7 @@ export function updateRig(
   trim = 1,
   rudder = 0,
   brace?: number,
+  guaraDepth?: readonly number[],
 ): void {
   const p = shipRigParams;
   const step = Math.min(0.25, Math.max(0, Number.isFinite(dt) ? dt : 0));
@@ -208,6 +230,15 @@ export function updateRig(
   // every turn. Its own gearing — a rudder has stops at ~35°, a wheel has
   // turns — see rudderBladeAngle.
   assembly.setRudderAngle(rudderBladeAngle(rudder, p));
+  // §B100(a): ...and the RAFT'S oar, from the same number, through the same
+  // one path (§V95). A vessel with no `steering-oar` piece pays a loop over
+  // nothing; a vessel that HAS one can no longer be forgotten here, which is
+  // exactly how the blade was forgotten in §B92 and the oar in §T.118.
+  assembly.setSteeringOarAngle(oarSweepAngle(rudder, p));
+  // §B100(b): the centreboards the raft actually steers on. Optional because
+  // only one class has them — and `undefined` leaves the planks where the
+  // blueprint put them rather than snapping them to 0.
+  if (guaraDepth !== undefined) assembly.setGuaraDepths(guaraDepth);
 
   const sails = assembly.sailPieceIds();
   assembly.setSailWindFrame(frame);
@@ -234,6 +265,11 @@ export interface RiggedShip {
   rudder: number;
   /** yard brace (rad); absent = this class has no braceable yards */
   brace?: number;
+  /**
+   * §B100(b) — the raft's five guara depths, 0 (hauled clear) .. 1 (down),
+   * index k driving `guara-{k+1}`. Absent = this class has no centreboards.
+   */
+  guaraDepth?: readonly number[];
 }
 
 /** What one frame of rig drive produced, for the consumers downstream of it. */
@@ -269,7 +305,7 @@ export function updateShipRig(
   assembly: ShipAssembly,
   dt: number,
 ): ShipRigDrive {
-  updateRig(assembly, dt, ship.sailTrim, ship.rudder, ship.brace);
+  updateRig(assembly, dt, ship.sailTrim, ship.rudder, ship.brace, ship.guaraDepth);
   return rigDrive(ship.sailTrim);
 }
 

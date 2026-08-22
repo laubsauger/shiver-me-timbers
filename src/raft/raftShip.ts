@@ -91,6 +91,15 @@ export function stepRaftShip(ship: ShipState, c: RaftControls, wind: Wind, dt: n
   writeMotion(ship, out);
   ship.rudder = clamp(Number.isFinite(c.oarAngle) ? c.oarAngle : 0, -1, 1);
   ship.sailTrim = c.sailUp ? clamp(Number.isFinite(c.sheet) ? c.sheet : 0, 0, 1) : 0;
+  // §B100(b): the guaras go with them. `raftPartsHull` has promised since §T89
+  // that the sim moves the plank, and nothing carried the number out of
+  // `RaftControls` — so the boards steered her while standing still. Written
+  // in place, not aliased: ShipState is the sim's own copy (§V3).
+  const g = ship.guaraDepth ?? (ship.guaraDepth = [0, 0, 0, 0, 0]);
+  for (let i = 0; i < g.length; i++) {
+    const v = c.guaraDepth[i];
+    g[i] = clamp(typeof v === 'number' && Number.isFinite(v) ? v : 0, 0, 1);
+  }
   return out;
 }
 
