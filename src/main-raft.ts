@@ -155,7 +155,7 @@ async function boot(): Promise<void> {
     ceilingAt: createRaftCeiling(),
     spawn: [tillerLocal[0], tillerLocal[1], tillerLocal[2]],
     canvas: app.renderer.domElement,
-    hands: createHands(),
+    hands: createHands({ hidden: () => ui.isPhotoMode() }), // §T.127: no mitts in a §V22 capture
     socketWorld,
     groundAt,
     actionEnabled: (a) => a !== 'push-off' || raftBeach.state.beached,

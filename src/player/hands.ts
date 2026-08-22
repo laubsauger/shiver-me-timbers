@@ -42,7 +42,23 @@ function mitt(side: Side, material: THREE.Material): THREE.Group {
   return g;
 }
 
-export function createHands(): Hands {
+export interface HandsOptions {
+  /**
+   * §T.127: true → the mitts stop drawing. Wire to `ui.isPhotoMode()`.
+   *
+   * PHOTO MODE ONLY, not full-screen cinematic: cinematic IS full screen (§I
+   * ui/cinematic) and most people PLAY full screen, so hiding the hands there
+   * would take them out of normal play. Photo mode is the deliberate "I am
+   * taking a frame" gesture — the same call the raft prompts already make.
+   *
+   * A PREDICATE, not a boolean: the mode is a live thing the player toggles
+   * with a key, and a boolean captured here is §V62's exact shape (a value
+   * read once at construction into a closure).
+   */
+  hidden?: () => boolean;
+}
+
+export function createHands(opts: HandsOptions = {}): Hands {
   const material = new THREE.MeshStandardNodeMaterial({ color: 0xb98a62, roughness: 0.85, metalness: 0 });
   const group = new THREE.Group();
   group.name = 'hands';
@@ -52,6 +68,9 @@ export function createHands(): Hands {
   group.add(nodes.left, nodes.right);
   let turn = 0;
   const apply = (): void => {
+    // re-read every tick: the answer changes when the player presses P, and
+    // the group is the one thing that decides whether a capture has mitts in it
+    group.visible = !(opts.hidden?.() ?? false);
     for (const s of sides) {
       const t = blends[s].current(playerParams.handPoseTime);
       nodes[s].position.set(t.position[0], t.position[1], t.position[2]);

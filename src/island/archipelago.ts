@@ -26,6 +26,7 @@ import {
   type ResolvedIslandParams,
 } from './island';
 import { createIslandMaterials, type IslandMaterials } from './islandMaterials';
+import type { IslandHeightmap } from './heightmap';
 import type { ArchetypeName } from './archetypes';
 import { createSeabedField, type SeabedField, type SeabedIsland } from './seabed';
 import {
@@ -167,6 +168,81 @@ export function generateIslandSites(
   return sites;
 }
 
+/**
+ * Water a raft can sit in without her deck logs touching (m). She draws 0.3 m
+ * and the calm-preset trough is about a metre, so this is draft + trough +
+ * margin — the same reasoning as showcase.ts's 7 m, on a hull an order of
+ * magnitude smaller.
+ */
+const LANDING_ANCHOR_DEPTH = 1.5;
+/** how far seaward of the landing the berth may be pushed (m) */
+const LANDING_ANCHOR_REACH = 40;
+/** march step along a candidate bearing (m) */
+const LANDING_ANCHOR_STEP = 2;
+/** bearings tried out of the landing */
+const LANDING_ANCHOR_BEARINGS = 24;
+
+/**
+ * Where a raft would lie off a routed island: the CLOSEST water to that
+ * island's `landing` POI that is deep enough to float her, reached from the
+ * landing without crossing land.
+ *
+ * The landing is where the path graph decided you come ashore (T112b), so it
+ * is the honest anchor — the berth is the last metre of the sail rather than a
+ * viewpoint someone liked. Facing it puts the beach, the route off it and the
+ * summit behind in one frame, which is what `?at=<island>` is for.
+ *
+ * NOT `findLagoonAnchorage`: that one solves for a 35 m galleon in 7 m of
+ * water nearest a lagoon BASIN, and it THROWS on an island with no basin —
+ * which is every sierra island but the cirque. Different hull, different
+ * objective, so a different solver rather than five more options on that one.
+ *
+ * The "without crossing land" rule is the part that cannot be dropped: a
+ * bearing that tunnels over a spit would berth her in the water on the far
+ * side of it, a short swim from a beach she cannot reach.
+ *
+ * Returns null (∅, not a throw) when nothing qualifies — an island with no
+ * route simply has no anchorage, and the world is still valid without one.
+ */
+export function findLandingAnchorage(hm: IslandHeightmap): Anchorage | null {
+  const landing = hm.path?.pois.find((q) => q.kind === 'landing');
+  if (!landing) return null;
+  let best: Anchorage | null = null;
+  let bestD = Infinity;
+  for (let i = 0; i < LANDING_ANCHOR_BEARINGS; i++) {
+    const a = (i / LANDING_ANCHOR_BEARINGS) * Math.PI * 2;
+    const ux = Math.cos(a);
+    const uz = Math.sin(a);
+    // the landing is a LAND cell by construction (a beach cell touching the
+    // sea), so the first metres out of it are still beach — the crossing rule
+    // can only start once she is actually afloat
+    let afloat = false;
+    for (let d = LANDING_ANCHOR_STEP; d <= LANDING_ANCHOR_REACH; d += LANDING_ANCHOR_STEP) {
+      if (d >= bestD) break;
+      const x = landing.x + ux * d;
+      const z = landing.z + uz * d;
+      const depth = -hm.heightAt(x, z);
+      if (depth <= 0) {
+        if (afloat) break; // back onto land: a spit, and the far side is not hers
+        continue;
+      }
+      afloat = true;
+      if (depth < LANDING_ANCHOR_DEPTH) continue;
+      bestD = d;
+      best = {
+        x,
+        z,
+        // forward is [sin h, cos h] (showcase.ts's convention): bow at the
+        // beach she just sailed for
+        heading: Math.atan2(landing.x - x, landing.z - z),
+        depth,
+      };
+      break;
+    }
+  }
+  return best;
+}
+
 /** an anchorage in WORLD coords — the debug jump's destination list */
 export interface WorldAnchorage extends Omit<Anchorage, 'x' | 'z'> {
   /** stable id used by the jump key and `?at=` */
@@ -258,6 +334,30 @@ export function createArchipelago(opts: CreateArchipelagoOptions): Archipelago {
       name: 'lagoon',
       x: islands[0].center[0] + local.x,
       z: islands[0].center[1] + local.z,
+      heading: local.heading,
+      depth: local.depth,
+    });
+  }
+  // §T.125: and one berth per ROUTED island — the sierra slice's whole world
+  // had `jumpTargets === ['spawn']`, so `raft.html?at=dome` did nothing and
+  // every R3 island frame was hand-posed. Membership is the ROUTE, not the
+  // archetype: `heightmap.path` exists only where the path carve ran (a slice
+  // family at ≥ `pathMinRadius`), which is exactly the islands you can land
+  // on — a filler islet and the unreachable Half Dome (§V90) have no route and
+  // get no berth, without this file learning what either of those is.
+  for (let i = 0; i < islands.length; i++) {
+    if (sites[i].unreachable) continue;
+    const local = findLandingAnchorage(islands[i].heightmap);
+    if (!local) continue;
+    const base = islands[i].heightmap.archetype;
+    // the name is the family, which is unique among routed islands; the
+    // suffix is a guard, not an expectation
+    let name: string = base;
+    for (let n = 2; anchorages.some((a) => a.name === name); n++) name = `${base}-${n}`;
+    anchorages.push({
+      name,
+      x: islands[i].center[0] + local.x,
+      z: islands[i].center[1] + local.z,
       heading: local.heading,
       depth: local.depth,
     });

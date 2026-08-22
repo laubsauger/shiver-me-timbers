@@ -215,21 +215,77 @@ function buildWaterfallSocket(hm: IslandHeightmap): THREE.Object3D {
   return socket;
 }
 
+/**
+ * A per-island params view: the keys this island overrides are OWN VALUES, and
+ * every other key is a GETTER onto the live `islandParams` (§V16 —
+ * `registerParams` hands back the very object Tweakpane mutates in place, so
+ * anything that copies it stops hearing the panel).
+ *
+ * IT USED TO BE A SPREAD, and that spread was six dead knobs (§V62, R3-2).
+ * `createArchipelago` passes `radius` for EVERY island, so every island in
+ * every world — sierra and pirate alike — took a snapshot of the panel at
+ * construction; `lodTerrainDistance`, `lodTerrainMorphBand`, `lodTerrainMorph`,
+ * `lodRockCull`, `foamTargetMargin` and `castShadows` are all read PER FRAME
+ * out of this object and were reading boot-time constants. Nothing errored,
+ * the sliders just did nothing (the R3 agent had to instrument
+ * `morphTargetInfluences` to prove the CDLOD morph worked at all).
+ *
+ * WHY GETTERS AND NOT A `Proxy`, AND NOT RESOLVE-PER-READ: this object is read
+ * ~9 times per island per frame, so the cost is what decides the shape.
+ * MEASURED, on the read pattern `update()` actually uses: 9 plain property
+ * loads 13-24 ns, 9 accessor loads 206-219 ns. That is ~23 ns a read — an
+ * accessor is NOT free, the closure does a keyed load on `base` — but at six
+ * islands it is 1.3 µs on a 16.7 ms frame, four orders of magnitude under the
+ * budget and three under the 19-24 ms of encode this frame is actually bound
+ * by. Resolve-per-read would rebuild a ~200-key object six times a frame to
+ * answer nine questions; a `Proxy` adds a trap dispatch on top of the same
+ * lookup and makes the object megamorphic for every other reader.
+ *
+ * The accessors are ENUMERABLE on purpose: this is typed `IslandParams`, the
+ * heightmap generator reads ~80 keys off it and anything may legitimately
+ * spread it. `Object.create(islandParams)` would be faster still (a prototype
+ * hop is a plain load) but `{ ...p }` would then copy ONLY the overrides —
+ * a silent, much worse version of the bug being fixed here.
+ */
+export function liveIslandParams(
+  own: Partial<ResolvedIslandParams>,
+  base: IslandParams = islandParams,
+): ResolvedIslandParams {
+  const p = {} as ResolvedIslandParams;
+  // an own `undefined` is DROPPED, not written: it would shadow the live key
+  // with nothing, which is the spread bug one level down
+  for (const [key, value] of Object.entries(own)) {
+    if (value !== undefined) (p as unknown as Record<string, unknown>)[key] = value;
+  }
+  for (const key of Object.keys(base) as (keyof IslandParams)[]) {
+    if (key in p) continue;
+    Object.defineProperty(p, key, {
+      get: () => base[key],
+      enumerable: true,
+      configurable: true,
+    });
+  }
+  return p;
+}
+
 export function createIsland(opts: CreateIslandOptions): Island {
   const bespoke =
     opts.radius !== undefined || opts.overrides !== undefined || opts.archetype !== undefined;
-  const p: ResolvedIslandParams = bespoke
-    ? {
-        ...islandParams,
-        ...(opts.radius !== undefined
-          ? { radius: opts.radius, ...islandPeakHeights(opts.radius) }
-          : {}),
-        // LAST, deliberately: an override of `peakHeight` must beat the
-        // radius-derived one, not be silently replaced by it
-        ...opts.overrides,
-        archetype: opts.archetype,
-      }
-    : islandParams;
+  // the per-island layer, and NOTHING else: a key that lands here is a build
+  // input this island genuinely owns (its footprint, its family, its slice
+  // overrides); a key that does not stays live to the panel
+  const own: Partial<ResolvedIslandParams> = {
+    ...(opts.radius !== undefined
+      ? { radius: opts.radius, ...islandPeakHeights(opts.radius) }
+      : {}),
+    // LAST, deliberately: an override of `peakHeight` must beat the
+    // radius-derived one, not be silently replaced by it
+    ...opts.overrides,
+    archetype: opts.archetype,
+  };
+  // non-bespoke stays the live object itself — one less indirection, and it is
+  // already exactly what this function returns
+  const p: ResolvedIslandParams = bespoke ? liveIslandParams(own) : islandParams;
   const heightmap = generateIslandHeightmap(opts.seed, p, opts.avoidArchetypes);
 
   const shared = opts.materials;

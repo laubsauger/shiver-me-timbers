@@ -57,6 +57,8 @@ import * as raftSailingParams from '../src/params/raftSailing';
 import { PRESET_STORMINESS, WEATHER_PRESET_NAMES } from '../src/weather/presets';
 import type { ShipState } from '../src/state/simState';
 import type { SkyParams } from '../src/params/sky';
+import { createHands } from '../src/player/hands';
+import mainRaftSource from '../src/main-raft.ts?raw';
 
 const P = { dayMinutes: 24, startHour: 7, clockRunning: true, maxStorminess: 0.12, defaultPreset: 'calm' as const };
 
@@ -405,5 +407,57 @@ describe('beaching through the tick wrapper (§T.109, §T.100)', () => {
     } finally {
       raftBeach.state = saved;
     }
+  });
+});
+
+/**
+ * §T.127 — THE MITTS WERE IN EVERY CAPTURE. `main-raft.ts` does
+ * `app.camera.add(player.hands.group)` so the hands ride the lens, and
+ * `ui.isPhotoMode()` gated the HUD and the station prompts but not them: every
+ * §V22 frame in docs/raft2100/lookdev/R3/ was shot with two hands floating in
+ * the corner until the lookdev agent set `player.hands.group.visible = false`
+ * by hand (defect R3-2).
+ *
+ * The property is the GROUP'S VISIBILITY, and it is a live thing — the mode is
+ * a key the player presses mid-session, so a boolean captured at construction
+ * would be §V62's shape (dead the moment it is written).
+ */
+describe('§T.127 photo mode takes the hands out of the frame', () => {
+  it('the mitts stop drawing in photo mode and come back in play', () => {
+    let photo = false;
+    const hands = createHands({ hidden: () => photo });
+    try {
+      expect(hands.group.visible).toBe(true);
+      photo = true;
+      hands.update(1 / 60);
+      expect(hands.group.visible).toBe(false);
+      // …and back, in the same session: the predicate is re-read, not latched
+      photo = false;
+      hands.update(1 / 60);
+      expect(hands.group.visible).toBe(true);
+    } finally {
+      hands.dispose();
+    }
+  });
+
+  it('a rig with no gate draws always — the preview harness must not go blank', () => {
+    const hands = createHands();
+    try {
+      expect(hands.group.visible).toBe(true);
+      hands.update(1 / 60);
+      hands.setPose('grab');
+      hands.update(1 / 60);
+      expect(hands.group.visible).toBe(true);
+    } finally {
+      hands.dispose();
+    }
+  });
+
+  it('the raft entry gates them on PHOTO mode, not on full screen', () => {
+    // cinematic == full screen (§I ui/cinematic) and most people PLAY full
+    // screen; hiding the hands there would take them out of normal play. Same
+    // call the prompts make, deliberately.
+    expect(mainRaftSource).toMatch(/createHands\(\{\s*hidden:\s*\(\)\s*=>\s*ui\.isPhotoMode\(\)\s*\}\)/);
+    expect(mainRaftSource).not.toMatch(/hands[\s\S]{0,80}isCinematic/);
   });
 });
