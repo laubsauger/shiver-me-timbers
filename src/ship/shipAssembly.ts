@@ -14,15 +14,118 @@ import { sailClothPoint, type SailClothState } from './sailShape';
 import {
   NEUTRAL_SAIL_WIND_FRAME,
   readSailWindFrame,
+  readSailSparSources,
   readSheetLeadSign,
+  resolveSailSpars,
   sailPhaseSeed,
   sheetLeadDirections,
+  writeSailSparSources,
+  type SailSparSource,
   type SailWindFrame,
 } from './sailFrame';
-import { sailDrive } from './sailDynamics';
+import { MAST_TOP_SCALE } from './pieceGeometrySpar';
+import { poleTaper } from './pieceGeometryRaft';
+import { readSailWindRef, sailDrive } from './sailDynamics';
 import { oceanParams } from '../params/ocean';
 import { shipMaterialParams } from '../params/ship';
 import { createDeckFieldTexture, type DeckFieldSampler } from './deckFieldTexture';
+
+
+/**
+ * ─────────── WHICH SPARS EACH SAIL IS PUSHED OFF (§T.114 / §B.74) ───────────
+ *
+ * The cloth may not pass through its mast, and §V71 says the mast it is
+ * pushed off has to BE the mast in the piece graph — its live transform, its
+ * own aabb, and the taper its geometry is actually drawn with. That is what
+ * these three helpers assemble; `sailFrame.resolveSailSpars` then re-expresses
+ * them in the sail's frame every frame, because bracing swings the yard about
+ * the mast and a rest-pose capsule would be wrong the moment the crew trims.
+ */
+
+/** every piece a sail could foul: masts, and a bipod's legs. NOT the rope
+ *  ladder hanging off one of them — it is `bipod-mast` kind but a flat panel,
+ *  and a cylinder round it would hold the canvas half a metre off nothing. */
+function isSparPiece(def: PieceDef): boolean {
+  if (def.kind !== 'mast' && def.kind !== 'bipod-mast') return false;
+  return (def.shape?.ladder ?? 0) <= 0;
+}
+
+/** a pole along local +y, radius from its own aabb and its own taper */
+function poleSource(def: PieceDef, node: THREE.Object3D): SailSparSource {
+  const r = (def.aabb.max[0] - def.aabb.min[0]) / 2;
+  const taper = def.kind === 'mast' ? MAST_TOP_SCALE : poleTaper(def.shape ?? {});
+  return {
+    node,
+    a: [0, def.aabb.min[1], 0],
+    b: [0, def.aabb.max[1], 0],
+    ra: r,
+    rb: r * taper,
+  };
+}
+
+/**
+ * A yard lies along local x and is thickest at the SLINGS, tapering to both
+ * yardarms — a shape one capsule cannot hold. It takes the slings radius at
+ * both ends, which is the conservative read (never thinner than the spar) and
+ * costs nothing: measured worst clearance to its own yard is 0.07 m on every
+ * ship, so this capsule is a guarantee against future re-tunes, not a fix.
+ */
+function yardSource(def: PieceDef, node: THREE.Object3D): SailSparSource {
+  const r = (def.aabb.max[1] - def.aabb.min[1]) / 2;
+  return { node, a: [def.aabb.min[0], 0, 0], b: [def.aabb.max[0], 0, 0], ra: r, rb: r };
+}
+
+const vSpineA = new THREE.Vector3();
+const vSpineB = new THREE.Vector3();
+const vCap = new THREE.Vector3();
+const mSail = new THREE.Matrix4();
+const lineSpar = new THREE.Line3();
+
+/**
+ * The two nearest spars ABAFT this sail, plus its own yard.
+ *
+ * ABAFT is the load-bearing word. Every yard in every blueprint rides FORWARD
+ * of its mast, so the cloth is pushed forward — which means a spar FORWARD of
+ * the sail would be pushed INTO rather than out of. The galleon has one three
+ * masts ahead of another; without this filter her main course would be shoved
+ * 8 m by the foremast. The test asserts the filter holds for all three ships.
+ *
+ * TWO of them, because the raft's mainsail hangs BETWEEN the legs of a bipod
+ * and one capsule leaves the other leg cutting the canvas. On a square-rigger
+ * the second slot picks up the next mast along, metres away, and never fires.
+ */
+function rankSparsForSail(
+  sailDef: PieceDef,
+  sailNode: THREE.Object3D,
+  candidates: Array<{ def: PieceDef; node: THREE.Object3D }>,
+): SailSparSource[] {
+  sailNode.updateWorldMatrix(true, false);
+  mSail.copy(sailNode.matrixWorld).invert();
+  const drop = -sailDef.aabb.min[1];
+  vSpineA.set(0, 0, 0).applyMatrix4(sailNode.matrixWorld); // head centre
+  vSpineB.set(0, -drop, 0).applyMatrix4(sailNode.matrixWorld); // foot centre
+  const ranked: Array<{ src: SailSparSource; d: number }> = [];
+  for (const c of candidates) {
+    const src = poleSource(c.def, c.node);
+    c.node.updateWorldMatrix(true, false);
+    lineSpar.start.set(src.a[0], src.a[1], src.a[2]).applyMatrix4(c.node.matrixWorld);
+    lineSpar.end.set(src.b[0], src.b[1], src.b[2]).applyMatrix4(c.node.matrixWorld);
+    let d = Infinity;
+    let abaft = false;
+    for (const p of [vSpineA, vSpineB]) {
+      lineSpar.closestPointToPoint(p, true, vCap);
+      d = Math.min(d, vCap.distanceTo(p));
+      // the sail's own frame: −z is aft of the canvas, which is where a mast
+      // it may be pushed off has to be
+      if (vCap.applyMatrix4(mSail).z < 0) abaft = true;
+    }
+    if (abaft) ranked.push({ src, d });
+  }
+  // ties broken by nothing but the blueprint's own order, so the slot a spar
+  // lands in is deterministic — a slot that swapped would jump the cloth
+  ranked.sort((a, b) => a.d - b.d);
+  return ranked.slice(0, 2).map((r) => r.src);
+}
 
 export type MaterialFactory = (kind: PieceKind, role: 'base' | 'hole') => THREE.Material;
 
@@ -69,6 +172,8 @@ export class ShipAssembly {
   /** live yard brace angle (rad), applied to every yard node */
   private rigTrim = 0;
   private helmAngle = 0;
+  /** live rudder blade angle (rad) about the stock, applied to the blade node */
+  private rudderAngle = 0;
   private windFrame: SailWindFrame = NEUTRAL_SAIL_WIND_FRAME;
 
   constructor(blueprint: PieceDef[], materialFactory?: MaterialFactory) {
@@ -96,6 +201,9 @@ export class ShipAssembly {
       const mesh = new THREE.Mesh(geometry, this.material(def.kind, 'base'));
       mesh.name = `${def.id}-mesh`;
       if (def.shape?.sheetLeadAft !== undefined) mesh.userData.sheetLeadAft = def.shape.sheetLeadAft;
+      // §B86-2: a per-ship saturating wind, carried on the mesh like the lead
+      // sign above so ONE sail material still serves every class (sailFrame.ts)
+      if (def.shape?.windRef !== undefined) mesh.userData.sailWindRef = def.shape.windRef;
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       node.add(mesh);
@@ -115,6 +223,35 @@ export class ShipAssembly {
         if (parent === undefined) throw new Error(`unknown parent ${parentId} for ${rt.def.id}`);
         parent.node.add(rt.node);
       }
+    }
+    /**
+     * third pass: WHICH SPARS EACH SAIL MAY NOT PASS THROUGH (§T.114).
+     *
+     * The CHOICE is topology and is made once, here — a mast does not stop
+     * being the sail's mast when the yard braces. The CAPSULES are re-resolved
+     * from the live transforms every frame by both evaluators (§V71), which is
+     * the half that has to be live: bracing walks the mast right round the
+     * sail's own frame.
+     */
+    this.group.updateMatrixWorld(true);
+    const spars = [...this.pieces.values()]
+      .filter((rt) => isSparPiece(rt.def))
+      .map((rt) => ({ def: rt.def, node: rt.node }));
+    for (const rt of this.pieces.values()) {
+      if (rt.def.kind !== 'sail') continue;
+      const sources = rankSparsForSail(rt.def, rt.node, spars);
+      const yard = rt.def.parent === undefined ? undefined : this.pieces.get(rt.def.parent);
+      // slot 2 is the sail's own yard; a sail with no yard leaves it empty and
+      // the evaluators read that as "no spar" rather than inventing one
+      if (yard !== undefined && yard.def.kind === 'yard') {
+        // the yard is ALWAYS slot 2, so a sail with only one mast abaft it
+        // pads slot 1 with a null capsule (a == b) rather than shifting the
+        // yard up — a slot that meant different things on different sails
+        // would need a branch in the vertex stage
+        while (sources.length < 2) sources.push({ node: rt.node, a: [0, 0, 0], b: [0, 0, 0], ra: 0, rb: 0 });
+        sources.push(yardSource(yard.def, yard.node));
+      }
+      writeSailSparSources(rt.mesh, sources);
     }
   }
 
@@ -228,6 +365,33 @@ export class ShipAssembly {
   }
 
   /**
+   * §B86-3 — A YARD COMES DOWN AS ITS SAIL FURLS, if its class authored a
+   * travel (`shape.hoistDrop`, metres). A square sail is not furled where it
+   * is set: it is lowered on its halyard and lashed along the yard, and the
+   * moored replica (docs/raft2100/ref/replica-moored-beam.png) carries its
+   * roll a couple of metres over the deck, not up at the crossing. Ours sat
+   * at full hoist with the cloth simply gone — "the yard does not lower on
+   * furl" (§B86-3).
+   *
+   * A TRANSFORM, so it belongs here and not in a uniform: `sailDropScale` can
+   * shorten cloth but cannot move a spar, and the yard carries the sail, its
+   * rope anchors and its own ends with it — every rope re-resolves from the
+   * live sockets next frame (§V71), which is exactly what a halyard should do.
+   * Classes that author no travel (the galleon) never move: `hoistDrop`
+   * absent ⇒ this is a no-op.
+   */
+  setYardHoist(sailPieceId: string, scale: number): void {
+    if (!Number.isFinite(scale)) return; // §V28
+    const rt = this.piece(sailPieceId);
+    const yard = rt.def.parent === undefined ? undefined : this.pieces.get(rt.def.parent);
+    if (yard === undefined || yard.def.kind !== 'yard') return;
+    const travel = yard.def.shape?.hoistDrop ?? 0;
+    if (!(travel > 0)) return;
+    const t = scale < 0 ? 0 : scale > 1 ? 1 : scale;
+    yard.node.position.y = yard.def.transform.position[1] - travel * (1 - t);
+  }
+
+  /**
    * §T.73 — dye every sail on this ship. A hex RGB multiplier on the cloth
    * colour, read per mesh by the shared sail material (sailDriver.ts
    * `tint`), so a second ship's canvas costs no second material. 0xffffff
@@ -290,6 +454,40 @@ export class ShipAssembly {
     return this.helmAngle;
   }
 
+  /**
+   * PUT THE BLADE OVER — §B92. "The rudder does not seem to move on the big
+   * pirate ship, or not enough": it did not move at all. `setHelmAngle` above
+   * turned the WHEEL and nothing turned the thing the wheel is geared to, so
+   * every hull in the game — galleon, brigantine — steered with a blade frozen
+   * amidships while she swung.
+   *
+   * ABOUT LOCAL +Y, WHICH IS THE STOCK. `blueprintEnds.buildRudder` lays the
+   * blade over z ∈ [−chord, 0], i.e. entirely ABAFT its own origin, so the
+   * node origin sits on the leading edge — the pintle line a real rudder hangs
+   * on. Rotating the node about y is therefore a pure swing about the stock
+   * with no lever arm, exactly as `setHelmAngle` is a pure spin about the
+   * axle. Rotating about the blade's centre instead would swim it sideways
+   * through the transom.
+   *
+   * Same shape as the other two piece ops: absolute angle, edge-triggered,
+   * §V28-guarded, and the caller owns the mapping from `ship.rudder`
+   * (`rigTrim.rudderBladeAngle`, which is where the ±35° stop lives).
+   */
+  setRudderAngle(angle: number): void {
+    if (!Number.isFinite(angle)) return; // §V28: never poison a transform
+    if (angle === this.rudderAngle) return;
+    this.rudderAngle = angle;
+    for (const rt of this.pieces.values()) {
+      if (rt.def.kind !== 'rudder') continue;
+      rt.node.rotation.y = rt.def.transform.rotation[1] + angle;
+    }
+  }
+
+  /** current rudder blade angle (rad) about the stock */
+  get bladeAngle(): number {
+    return this.rudderAngle;
+  }
+
   socketWorldPosition(socketId: string): Vec3 {
     const pieceId = this.socketOwner.get(socketId);
     if (pieceId === undefined) throw new Error(`unknown socket: ${socketId}`);
@@ -350,6 +548,9 @@ export class ShipAssembly {
         yawRate: 0, // the skew term is a transient; anchors need the steady shape
         gustPhase: wf.gustPhase,
         gustPhaseB: wf.gustPhaseB,
+        // §B86-2: the SAME per-sail reference the driver pushes into the
+        // uniforms — two evaluators, one value (§B.30)
+        windRef: readSailWindRef(rt.mesh, shipMaterialParams.sailWindRef),
       },
       shipMaterialParams,
     );
@@ -364,6 +565,10 @@ export class ShipAssembly {
     return {
       sheetLeadPort: leads.port,
       sheetLeadStarboard: leads.starboard,
+      // the mast and yard this cloth is pushed off, live (§T.114). The ROPES
+      // resolve through this function, so a clew that ignored the mast would
+      // sit where the shader is not drawing canvas — §V.45's failure again.
+      spars: resolveSailSpars(rt.node, readSailSparSources(rt.mesh)),
       ...drive,
       dropScale: typeof trimDrop === 'number' && Number.isFinite(trimDrop) ? trimDrop : 1,
       // the driver owns this; the seed is only what a sail that has not been

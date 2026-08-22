@@ -20,8 +20,7 @@ import { skyParams } from './params/sky';
 import { buildBrigantineBlueprint, buildGalleonBlueprint } from './ship/shipBlueprint';
 import { ShipAssembly } from './ship/shipAssembly';
 import { createDeckFieldTexture } from './ship/deckFieldTexture';
-import { updateRig } from './ship/rigTrim';
-import { trimDropScale } from './ship/sailDynamics';
+import { updateShipRig } from './ship/rigTrim';
 import { createInputCollector } from './sailing/input';
 import { stepShipSailing } from './sailing/shipKinematics';
 import { createFollowCam, createShipStations } from './camera';
@@ -58,7 +57,7 @@ import {
 import { stepFlooding } from './sea-physics/flooding';
 import { stepShipGrounding } from './sea-physics/grounding';
 import { brigantineSeaParams, seaPhysicsParams } from './params/seaPhysics';
-import { galleonParams, shipMaterialParams, shipRigParams } from './params/ship';
+import { galleonParams, shipMaterialParams } from './params/ship';
 import { createCaustics, setActiveCaustics } from './caustics';
 import { buildDeckHeightfield } from './ship/deckHeightfield';
 import { buildRaftBlueprint } from './ship/raftBlueprint';
@@ -1279,16 +1278,12 @@ async function boot(): Promise<void> {
       // yards DISPLAY the sim's brace + reef state follows trim.
       // MUST run before the ropes block: yards rotate → the block's
       // updateMatrixWorld(true) picks it up → rope anchors resolve braced.
-      // updateRig owns the trim→state predicate and is edge-triggered
-      // internally, so passing the raw scalars every frame is safe. §T.76:
-      // `brace` is chosen and rate-limited by stepShipSailing, not here.
-      updateRig(
-        shipAssembly,
-        frameDt,
-        playerShip.sailTrim,
-        playerShip.rudder,
-        playerShip.brace,
-      );
+      // updateShipRig owns the trim→state predicate and is edge-triggered
+      // internally, so passing the ship every frame is safe. §T.76: `brace` is
+      // chosen and rate-limited by stepShipSailing, not here.
+      // §V95: ONE call that takes a ship, and the enemy below makes the SAME
+      // one — a third hull is correct the day it is added (§B88).
+      const playerRig = updateShipRig(playerShip, shipAssembly, frameDt);
 
       // lanterns follow the INTERPOLATED pose, so they do not judder against
       // the hull they hang from on frames between two ticks.
@@ -1319,31 +1314,24 @@ async function boot(): Promise<void> {
         enemyShip.quaternion[2],
         enemyShip.quaternion[3],
       );
-      updateRig(
-        enemyAssembly,
-        frameDt,
-        enemyShip.sailTrim,
-        enemyShip.rudder,
-        enemyShip.brace,
-      );
+      // HER OWN sailing state through the SAME call the player makes: her trim
+      // sets her canvas, her rudder turns her wheel, her brace swings her
+      // yards. Nothing here is a copy of the block above (§V95/§B88).
+      const enemyRig = updateShipRig(enemyShip, enemyAssembly, frameDt);
 
       // rigging follows the moving ship: rewrite anchors, GPU re-solves (§V.12)
       if (FEATURES.ropes) {
         shipAssembly.group.updateMatrixWorld(true);
         // furl 0..1 from the SAME cloth scalar the sail geometry and the haul
         // audio use, so rope, canvas and sound cannot disagree about how far
-        // she is reefed. dropScale runs trimDropMin (fully reefed) → 1 (full
-        // sail), so furl is its normalised complement.
-        const drop = trimDropScale(playerShip.sailTrim, shipRigParams);
-        const furl = Math.min(
-          1,
-          Math.max(0, (1 - drop) / Math.max(1e-3, 1 - shipRigParams.trimDropMin)),
-        );
+        // she is reefed — `updateShipRig` returned it above, from THIS ship's
+        // trim. It used to be computed here, once, from the player's trim and
+        // then handed to the enemy's plan as well (§B88).
         applyRiggingPlan(
           riggingPlan,
           ropes,
           (id) => shipAssembly.socketWorldPosition(id),
-          furl,
+          playerRig.furl,
         );
         // no applyBlocks: the pulleys hang off the solved curve on the GPU, so
         // re-anchoring the ropes above is the only CPU work the rig needs
@@ -1358,7 +1346,7 @@ async function boot(): Promise<void> {
           enemyRiggingPlan,
           enemyRopes,
           (id) => enemyAssembly.socketWorldPosition(id),
-          furl,
+          enemyRig.furl,
         );
         enemyRopes.update();
         app.renderer.compute(enemyRopes.computeNode);
@@ -1476,7 +1464,7 @@ async function boot(): Promise<void> {
         renderShipView,
         bowImmersion,
         bowWorldTmp,
-        trimDropScale(playerShip.sailTrim, shipRigParams),
+        playerRig.drop,
         hullContact,
       );
       audio.update(audioFeed.frame);

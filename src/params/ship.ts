@@ -581,6 +581,17 @@ export interface ShipRigParams {
    * rudder · turns · 2π / 2.
    */
   helmTurnsLockToLock: number;
+  /**
+   * HARD OVER, AT THE BLADE — half the rudder's swing, in radians (§B92).
+   *
+   * NOT the wheel's mapping. The wheel spins `helmTurnsLockToLock` TURNS from
+   * stop to stop through the barrel's gearing; the blade it is geared to swings
+   * about 35° each way and no further, because past roughly that angle a rudder
+   * stalls and stops steering — which is why the stops are there on a real
+   * ship. Reusing the wheel's angle on the blade would have swung it through
+   * five and a half revolutions.
+   */
+  rudderBladeMax: number;
   /** blend width of the tack flip, in units of the lateral wind component —
    *  read by `sailing/shipKinematics.autoBrace` */
   braceTackWidth: number;
@@ -623,6 +634,7 @@ export const shipRigParams: ShipRigParams = registerParams(
     braceMax: 0.785, // 45° — the measured stop, see above (§T.75)
     braceRate: 0.35,
     helmTurnsLockToLock: 3.5,
+    rudderBladeMax: 0.61, // 35°
     braceTackWidth: 0.18,
     reefFurledBelow: 0.15,
     reefReefedBelow: 0.55,
@@ -637,6 +649,7 @@ export const shipRigParams: ShipRigParams = registerParams(
     braceMax: { min: 0, max: 1.2, step: 0.01 },
     braceRate: { min: 0.02, max: 3, step: 0.01 },
     helmTurnsLockToLock: { min: 0.25, max: 8, step: 0.25 },
+    rudderBladeMax: { min: 0.1, max: 1.2, step: 0.01 },
     braceTackWidth: { min: 0.02, max: 1, step: 0.01 },
     reefFurledBelow: { min: 0, max: 0.5, step: 0.01 },
     reefReefedBelow: { min: 0.1, max: 0.95, step: 0.01 },
@@ -788,6 +801,14 @@ export interface ShipMaterialParams {
    *  DIFFERENCE between the two leads that rotates the foot's chord line
    *  against the head's — i.e. this is where geometric twist comes from */
   sailSheetSpread: number;
+  /**
+   * How far off a mast or yard the cloth is held, AS A FRACTION OF THAT
+   * SPAR'S OWN RADIUS (§V.66 — a stand-off on a 0.09 m raft leg and one on a
+   * 0.42 m mast are not the same length). It is also the width of the band
+   * the push-out is smoothed over, so 0 is not a legal value: it would turn
+   * the stand-off into a hard `max` and put a crease in the canvas (§T.114).
+   */
+  sailSparSkin: number;
   /** extra flutter RATE at full luff, as a multiple of the base. Legal only
    *  because the phase is now integrated by a single owner (§V.55) */
   sailFlutterLuffRate: number;
@@ -1054,7 +1075,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailClothExcess: 0.065, sailCornerGrip: 0.28,
     sailCamberMax: 0.20, sailSlackFold: 0.02,
     sailLeechOpen: 0.3, sailFootRoach: 0.035, sailTwist: 0.12,
-    sailSheetPull: 1.0, sailSheetSpread: 0.45,
+    sailSheetPull: 1.0, sailSheetSpread: 0.45, sailSparSkin: 0.12,
     sailFlutterLuffRate: 1.8,
     sailDraftPos: 0.4, sailDraftFullness: 1,
     sailFurlSwag: 0.16, sailFurlBays: 3,
@@ -1126,6 +1147,7 @@ export const shipMaterialParams: ShipMaterialParams = registerParams(
     sailFootRoach: { min: 0, max: 0.25, step: 0.005 },
     sailTwist: { min: 0, max: 0.4, step: 0.005 },
     sailSheetPull: { min: 0, max: 0.6, step: 0.005 },
+    sailSparSkin: { min: 0.02, max: 0.6, step: 0.01 },
     sailSheetSpread: { min: 0, max: 1.5, step: 0.01 },
     sailFlutterLuffRate: { min: 0, max: 6, step: 0.1 },
     // bounds = the band where the draft warp stays monotone (SAIL_DRAFT_MIN/MAX)

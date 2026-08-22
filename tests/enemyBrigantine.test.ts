@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 import type { Material } from 'three';
 import { buildBrigantineBlueprint, buildGalleonBlueprint } from '../src/ship/shipBlueprint';
 import { ShipAssembly } from '../src/ship/shipAssembly';
+import { updateShipRig } from '../src/ship/rigTrim';
 import { buildBlockDescriptors, buildRiggingPlan } from '../src/ropes/shipRigging';
 import { buildRatlinePlan } from '../src/ship/ratlinePlan';
 import { buildRungDescriptors } from '../src/ropes/ratlines';
@@ -268,6 +269,25 @@ describe('§T.73 she carries her own deck fittings — wheel, binnacle, capstan,
     for (const piece of brig) {
       if (piece.parent !== undefined) expect(ids.has(piece.parent), `${piece.id} -> ${piece.parent}`).toBe(true);
     }
+  });
+
+  it('the boot pipeline ends in a RIG DRIVE: the same call the player makes moves her canvas (§B88)', () => {
+    // WHY: the walk above proves she BUILDS. §B88 is what the user actually
+    // saw — she was built, she sailed, and her canvas stayed struck. The end
+    // of the pipeline is `updateShipRig`, and this is the tie between the two:
+    // the brigantine that came out of the blueprint answers it. The behaviour
+    // itself (under AI, over a chase, in four winds) is tests/enemyRig.test.ts.
+    const asm = new ShipAssembly(brig, stubFactory);
+    updateShipRig({ sailTrim: 0, rudder: 0, brace: 0 }, asm, 1 / 60);
+    const struck = asm.sailPieceIds().map((id) => asm.sailMesh(id).userData.sailDropScale as number);
+    updateShipRig({ sailTrim: 1, rudder: 0.5, brace: 0.4 }, asm, 1 / 60);
+    const set = asm.sailPieceIds().map((id) => asm.sailMesh(id).userData.sailDropScale as number);
+    expect(set.length).toBe(struck.length);
+    expect(set.length).toBeGreaterThan(0);
+    for (let i = 0; i < set.length; i++) expect(set[i]).toBeGreaterThan(struck[i] + 0.5);
+    expect(asm.braceAngle).toBeCloseTo(0.4, 6); // her yards, from her own brace
+    expect(Math.abs(asm.wheelAngle)).toBeGreaterThan(0); // and her wheel, from her rudder
+    asm.dispose();
   });
 
   it('adds NO piece kind (and so no material, no pipeline) the galleon does not already draw', () => {

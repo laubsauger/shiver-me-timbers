@@ -18,12 +18,10 @@ import type { WeatherSample } from '../weather';
 import type { AudioSystem } from '../audio';
 import { oceanParams } from '../ocean';
 import { skyParams } from '../params/sky';
-import { shipRigParams } from '../params/ship';
 import { raftSeaParams } from '../params/seaPhysics';
 import { stepShipBuoyancy } from '../sea-physics/buoyancy';
 import { raftContactPoints } from '../sailing/raftBeaching';
-import { updateRig } from '../ship/rigTrim';
-import { trimDropScale } from '../ship/sailDynamics';
+import { updateShipRig } from '../ship/rigTrim';
 import { palmWindStrength } from '../vegetation';
 import { rotateVec } from '../core/quat';
 import { createShipAudioFeed } from '../core/bootShared';
@@ -173,9 +171,12 @@ export function createRaftFrame(d: RaftFrameDeps) {
       d.placeCamera(renderShipView, frameDt);
       sea.clouds.update(state.time, sky.sunDirection);
       sea.reflection?.update(app.camera as PerspectiveCamera, state.time);
-      updateRig(vessel.assembly, frameDt, raft.sailTrim, raft.rudder);
-      drop = trimDropScale(raft.sailTrim, shipRigParams);
-      vessel.updateRopes(Math.min(1, Math.max(0, (1 - drop) / Math.max(1e-3, 1 - shipRigParams.trimDropMin))));
+      // §V95: the SAME call the two square-riggers make in main.ts. The raft
+      // carries no braceable yards, so `brace` is absent and the rig leaves
+      // them where the blueprint put them — one path, not a raft-shaped copy.
+      const rig = updateShipRig(raft, vessel.assembly, frameDt);
+      drop = rig.drop;
+      vessel.updateRopes(rig.furl);
       sea.surface.update(app.camera, state.time, sky.sunDirection);
       const fwd = g.getWorldDirection(tmpDir);
       return {

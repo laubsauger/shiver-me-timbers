@@ -19,12 +19,38 @@ import {
   headingError,
   resolveHeading,
   rudderFromError,
-  sailTrimFor,
   wrapAngle,
   yawOf,
 } from './steering';
 
 type Wind = SimState['wind'];
+
+/**
+ * THE CANVAS THE AI CREW SETS: all of it, at every point of sail (§B88).
+ *
+ * This used to be `steering.sailTrimFor(yaw, windDirection, p)` — a
+ * point-of-sail THROTTLE that struck her canvas to `minSailTrim` (0.15) inside
+ * the irons cone and only reached 1 at `fullTrimAngle` (90°) off the wind.
+ * Harmless while `sailTrim` merely scaled a force and the cloth was drawn from
+ * a three-way state label; not harmless since §T.85 made the drop CONTINUOUS
+ * in trim (`trimDropScale`, floored at `trimDropMin` = 0.03), because trim 0.15
+ * is then DRAWN as 18% of the hoist — a furled bundle on the yard.
+ *
+ * MEASURED before this changed, four winds × 3 min of chase each: she carried
+ * under 35% of her canvas 12–52% of the time (mean drop 0.54–0.69, min 0.224)
+ * while manoeuvring at 3–7 knots. That is the user's report exactly: "the NPC
+ * ship is steering around and driving around, but the sails are furled".
+ *
+ * §V77 is why it is DELETED rather than re-tuned. `sailing/shipKinematics`
+ * already owns point of sail twice over — `trimEfficiency(θ)` is the polar and
+ * is exactly 0 in the no-go zone, and `autoBrace`/`braceDrive` scale the drive
+ * by how the yards bear — so a third law here, with its own cone constants,
+ * could only disagree with the two that decide whether she actually moves. A
+ * ship closing for action carries full working canvas. What takes canvas off
+ * her is damage, and that is already applied where it belongs: `stepAiShip`
+ * multiplies this by `controlAuthority(ship)` and furls outright once sunk.
+ */
+const AI_SAIL_TRIM = 1;
 
 /** FNV-1a 32-bit over the ship id — stable per-ship rng stream offset. */
 function fnv1a(s: string): number {
@@ -162,7 +188,7 @@ export function stepAi(
   const resolved = resolveHeading(desired, yaw, wind.direction, params);
   const intent: AiIntent = {
     rudder: rudderFromError(headingError(yaw, resolved), params),
-    sailTrim: sailTrimFor(yaw, wind.direction, params),
+    sailTrim: AI_SAIL_TRIM,
   };
   if (fire) intent.fire = fire;
   return intent;

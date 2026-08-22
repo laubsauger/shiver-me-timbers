@@ -69,18 +69,8 @@ export function resolveHeading(
 }
 
 /**
- * Sail trim for the current point of sail: minSailTrim when pinching at
- * the irons cone, ramping linearly to 1 at fullTrimAngle off the wind.
- * Always inside [minSailTrim, 1] ⊂ [0, 1].
+ * HOW MUCH CANVAS THE AI CREW SETS — all of it, at every point of sail. The
+ * value is `AI_SAIL_TRIM` in stateMachine.ts; the point-of-sail throttle that
+ * used to live here (`sailTrimFor`, minSailTrim → 1 across `fullTrimAngle`) is
+ * gone, and the WHY is written down at that constant (§B88, §V77).
  */
-export function sailTrimFor(
-  yaw: number,
-  windDirection: number,
-  p: AiParams,
-): number {
-  const upwind = wrapAngle(windDirection + Math.PI);
-  const off = Math.abs(wrapAngle(yaw - upwind));
-  const span = Math.max(1e-6, p.fullTrimAngle - p.ironsCone);
-  const t = Math.max(0, Math.min(1, (off - p.ironsCone) / span));
-  return p.minSailTrim + (1 - p.minSailTrim) * t;
-}

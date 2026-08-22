@@ -40,10 +40,6 @@ export interface AiParams {
   fleeDamageThreshold: number;
   /** rad — flee heading offset from dead upwind (broad reach ≈135°) */
   broadReachAngle: number;
-  /** sail trim floor when pinched/in irons */
-  minSailTrim: number;
-  /** rad off upwind at which trim reaches 1 */
-  fullTrimAngle: number;
 }
 
 export const aiParams: AiParams = registerParams(
@@ -72,8 +68,6 @@ export const aiParams: AiParams = registerParams(
     fleeFloodThreshold: 0.5,
     fleeDamageThreshold: 0.35,
     broadReachAngle: (Math.PI * 3) / 4,
-    minSailTrim: 0.15,
-    fullTrimAngle: Math.PI / 2,
   },
   {
     engageRange: { min: 50, max: 600, step: 5 },
@@ -93,7 +87,5 @@ export const aiParams: AiParams = registerParams(
     fleeFloodThreshold: { min: 0.05, max: 1, step: 0.05 },
     fleeDamageThreshold: { min: 0, max: 1, step: 0.05 },
     broadReachAngle: { min: 1.6, max: 3, step: 0.01 },
-    minSailTrim: { min: 0, max: 0.5, step: 0.01 },
-    fullTrimAngle: { min: 0.8, max: 3, step: 0.01 },
   },
 );

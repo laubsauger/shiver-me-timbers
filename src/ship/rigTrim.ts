@@ -112,6 +112,40 @@ export function helmWheelAngle(rudder: number, p: ShipRigParams): number {
 }
 
 /**
+ * THE BLADE'S OWN GEARING — rudder → rotation about the stock, in radians.
+ *
+ * §B92: "the rudder does not seem to move on the big pirate ship, or not
+ * enough". It moved not at all — `updateRig` turned the wheel and nothing
+ * turned the blade the wheel is geared to.
+ *
+ * A SEPARATE MAPPING FROM `helmWheelAngle`, and that is the point. The wheel
+ * spins `helmTurnsLockToLock` (3.5) TURNS lock to lock through the barrel;
+ * the blade swings `rudderBladeMax` (35°) each way and stops, because a rudder
+ * past ~35° stalls and steers less, not more. Handing the wheel's angle to the
+ * blade would have rotated it 5½ revolutions at hard over.
+ *
+ * THE SIGN IS THE SHIP'S, not the piece's. `ship.rudder` > 0 turns her to
+ * starboard (`shipKinematics`: "positive rudder turns to starboard"), which
+ * means the blade's TRAILING EDGE goes to starboard — and the blade lies aft
+ * of its own stock (−z), so a positive-y rotation would take that edge to
+ * PORT. Hence the negation: the number is a piece rotation, the property it
+ * has to preserve is which way she swings.
+ *
+ * NO RATE LIMIT OF ITS OWN, for the reason `helmWheelAngle` has none and
+ * stated here because this is where it would be tempting: `ship.rudder` IS the
+ * rate-limited quantity. `shipKinematics.slewRudder` is documented as "the ONE
+ * rudder rate limit — the keyboard, both helms and the AI all pass through
+ * it", so the blade already follows the helm at the helmsman's own speed. A
+ * second limit here would put the BLADE behind the number the hydrodynamics
+ * are already steering on, i.e. draw a rudder that disagrees with the turn it
+ * is making (§V.77, and the §T.78 lesson about second copies of one state).
+ */
+export function rudderBladeAngle(rudder: number, p: ShipRigParams): number {
+  const r = Math.max(-1, Math.min(1, Number.isFinite(rudder) ? rudder : 0));
+  return -r * Math.max(0, p.rudderBladeMax);
+}
+
+/**
  * @param dt     render frame delta (s) — advances the gust and velocity filters
  * @param trim   sim `sailTrim` 0..1; omit to leave the canvas at full
  * @param rudder sim `ship.rudder` −1..1; omit to leave the wheel amidships
@@ -168,6 +202,12 @@ export function updateRig(
   // (rudderRampRate / rudderSpringRate), and adding a second would put the
   // wheel behind the blade it is supposed to be turning.
   assembly.setHelmAngle(helmWheelAngle(rudder, p));
+  // ...and the BLADE the wheel is geared to, from the same number (§B92). Both
+  // here, in one place, so a hull can never get one of the two: the wheel used
+  // to be the only thing that moved and the rudder stood amidships through
+  // every turn. Its own gearing — a rudder has stops at ~35°, a wheel has
+  // turns — see rudderBladeAngle.
+  assembly.setRudderAngle(rudderBladeAngle(rudder, p));
 
   const sails = assembly.sailPieceIds();
   assembly.setSailWindFrame(frame);
@@ -175,6 +215,73 @@ export function updateRig(
   const drop = trimDropScale(trim, p);
   for (const id of sails) {
     assembly.setSailDropScale(id, drop);
+    // §B86-3: the SAME scalar lowers the yard, so the roll arrives at the
+    // bottom of the travel exactly as the last of the canvas leaves the hoist
+    assembly.setYardHoist(id, drop);
     writeSailWindFrame(assembly.sailMesh(id), frame);
   }
+}
+
+/**
+ * The sim state a vessel's rig is drawn from. Structural, not `ShipState`:
+ * `rigTrim` must not import the sim (§V3 one-way), and the three scalars ARE
+ * the whole contract — anything that can produce them can be rigged.
+ */
+export interface RiggedShip {
+  /** 0..1 canvas set */
+  sailTrim: number;
+  /** −1..1 blade angle, geared to the wheel */
+  rudder: number;
+  /** yard brace (rad); absent = this class has no braceable yards */
+  brace?: number;
+}
+
+/** What one frame of rig drive produced, for the consumers downstream of it. */
+export interface ShipRigDrive {
+  /** continuous cloth drop 0..1 — the SAME scalar the canvas, the sheets and
+   *  the haul audio read, so none of the three can disagree (§B.30) */
+  drop: number;
+  /** 0..1 how far the RUNNING RIGGING is furled: the normalised complement of
+   *  `drop`, which is what `applyRiggingPlan` takes */
+  furl: number;
+}
+
+/**
+ * §V95 — THE ONE PER-FRAME RIG DRIVE, AND IT TAKES A SHIP.
+ *
+ * Every vessel in the game goes through this: the player's galleon, the AI's
+ * brigantine, the raft, and whatever is added next. It exists because the
+ * per-frame drive had started to be COPIED per ship instead of shared, and the
+ * copies had already drifted (§B88):
+ *
+ *   · `main.ts` computed the furl scalar for the rigging from the PLAYER's
+ *     `sailTrim` and then handed that same number to the ENEMY's rigging plan,
+ *     so her ropes were hauled by the player's sheets;
+ *   · `raftFrame.ts` carried its own third copy of the same three lines.
+ *
+ * Each copy is one more place a third ship can be forgotten in, which is
+ * exactly the failure §B88 was reported as. `updateRig` below is still the
+ * assembly-level primitive (the ship preview and the profile tests drive it
+ * with a bare scalar and no sim); this is the call a VESSEL makes.
+ */
+export function updateShipRig(
+  ship: RiggedShip,
+  assembly: ShipAssembly,
+  dt: number,
+): ShipRigDrive {
+  updateRig(assembly, dt, ship.sailTrim, ship.rudder, ship.brace);
+  return rigDrive(ship.sailTrim);
+}
+
+/**
+ * trim → (cloth drop, rigging furl), the pair every consumer of "how much
+ * canvas is set" reads. ONE expression: the ropes used to normalise the
+ * complement at two call sites with the same three-line snippet, and a third
+ * ship arrived without it.
+ */
+export function rigDrive(trim: number, p: ShipRigParams = shipRigParams): ShipRigDrive {
+  const drop = trimDropScale(trim, p);
+  // §V28 floored divisor — trimDropMin is a live panel value and may reach 1
+  const span = Math.max(1e-3, 1 - p.trimDropMin);
+  return { drop, furl: Math.min(1, Math.max(0, (1 - drop) / span)) };
 }
