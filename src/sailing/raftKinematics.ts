@@ -27,7 +27,9 @@
  */
 import type { Vec3 } from '../state/simState';
 import type { Wind } from './shipKinematics';
-import { RAFT_GUARA_POS, type RaftTuning } from '../params/raftSailing';
+import { type RaftTuning } from '../params/raftSailing';
+import { raftParams } from '../params/raft';
+import { guaraStations } from '../ship/raftPartsLayout';
 
 export interface RaftControls {
   /** sail sheeted home 0..1 (0 = flogging, draws nothing) */
@@ -56,11 +58,25 @@ export interface RaftStep extends RaftMotion {
   drive: number; // m/s² the sail delivered this tick
 }
 
-export function neutralRaftControls(): RaftControls {
+/**
+ * Where the boards ACTUALLY are, read from the blueprint's own layout (§V71).
+ *
+ * `guaraStations()` is what `buildGuaras` drops the planks through, so the sim
+ * and the geometry cannot drift; a re-authored chink moves the yaw moment with
+ * it. This replaces a hand-written `RAFT_GUARA_POS` that had disagreed with the
+ * built boards by up to 2.8 m for as long as both existed (§B102) — the
+ * steering model was taking moments about planks that are not on this raft.
+ */
+export function raftGuaraPositions(p = raftParams): number[] {
+  return guaraStations(p).map((g) => g.z);
+}
+
+export function neutralRaftControls(p = raftParams): RaftControls {
+  const pos = raftGuaraPositions(p);
   return {
     sheet: 1,
-    guaraDepth: [1, 1, 1, 1, 1],
-    guaraPos: [...RAFT_GUARA_POS],
+    guaraDepth: pos.map(() => 1),
+    guaraPos: pos,
     oarAngle: 0,
     sailUp: true,
   };

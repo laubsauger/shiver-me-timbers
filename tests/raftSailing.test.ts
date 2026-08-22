@@ -10,10 +10,13 @@
  * from the row. The oar shares the rudder sign of `shipKinematics`
  * (+ = starboard) so one input layer serves both hulls.
  */
+import { buildRaftBlueprint } from '../src/ship/raftBlueprint';
+import { raftParams } from '../src/params/raft';
 import { describe, expect, it } from 'vitest';
 import {
   guaraYawMoment,
   neutralRaftControls,
+  raftGuaraPositions,
   oarTorque,
   sailDrive,
   stepRaftSailing,
@@ -385,5 +388,51 @@ describe('§B100 the tiller and the guaras move the things they are named for', 
     asm.group.updateMatrixWorld(true);
     expect(asm.group.getObjectByName('mast-main')!.matrixWorld.equals(before)).toBe(true);
     expect(asm.oarSweep, 'a brigantine has no oar to sweep').toBeDefined();
+  });
+});
+
+/**
+ * §B102 — ONE LAYOUT, NOT TWO.
+ *
+ * `RAFT_GUARA_POS` used to be a hand-written `[5, 3.5, 0, -3.5, -5]` in
+ * `params/raftSailing.ts`, authored independently of `guaraStations()`, which is
+ * what actually drops the planks through the chinks. They disagreed by up to
+ * 2.8 m, so `guaraYawMoment` was taking moments about boards that are not on
+ * this raft — and every sign property in this file passed anyway, because a
+ * moment arm of the wrong length still has the right sign. That is the failure
+ * mode §V71 exists for: a part positioned against another system's geometry has
+ * to resolve against THAT geometry, not against a second copy of it.
+ *
+ * The bar is exact equality with the built pieces, not a tolerance: both sides
+ * now read the same function, so any difference at all means they have been
+ * separated again.
+ */
+describe('§B102 the sim steers with the boards the raft actually carries', () => {
+  it('every guara position equals its built plank, to the metre it is authored at', () => {
+    const bp = buildRaftBlueprint();
+    const planks = bp
+      .filter((pc) => pc.kind === 'guara')
+      .sort((a, b) => Number(a.id.split('-')[1]) - Number(b.id.split('-')[1]));
+    const sim = raftGuaraPositions();
+    expect(planks.length).toBe(sim.length);
+    planks.forEach((pc, i) => {
+      expect(sim[i]).toBe(pc.transform.position[2]);
+    });
+  });
+
+  it('the neutral controls carry one depth per board, however many there are', () => {
+    const c = neutralRaftControls();
+    expect(c.guaraPos.length).toBe(c.guaraDepth.length);
+    expect(c.guaraPos.length).toBe(buildRaftBlueprint().filter((p) => p.kind === 'guara').length);
+  });
+
+  it('a board moved in the layout moves its authority with it', () => {
+    const shifted = { ...raftParams, guaraAftZ: raftParams.guaraAftZ - 1.5 };
+    const before = raftGuaraPositions();
+    const after = raftGuaraPositions(shifted);
+    expect(after).not.toEqual(before);
+    // the aft pair moved astern, the bow pair did not
+    expect(after[3]).toBeLessThan(before[3]);
+    expect(after[0]).toBe(before[0]);
   });
 });

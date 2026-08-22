@@ -127,7 +127,11 @@ export function activeRaftTuning(): RaftTuning {
 }
 
 /**
- * Guara slots, m fwd of centre (+ = bow). Kon-Tiki: "~2 at bow, ~2 at stern,
- * 1 midships" (kon-tiki-reference §2) on a ~13.7 m centre log. EST.
+ * The guara slots USED to be a second copy of the layout here — `[5, 3.5, 0,
+ * -3.5, -5]` — authored independently of where `guaraStations()` actually drops
+ * the boards. They disagreed by up to 2.8 m (§B102): the steering model was
+ * computing its yaw moment about planks that are not the ones on the raft. The
+ * positions now come from the blueprint's own layout, so there is one source
+ * (§V71) and moving a board moves its authority with it. See
+ * `raftGuaraPositions()` in `src/sailing/raftKinematics.ts`.
  */
-export const RAFT_GUARA_POS: readonly number[] = [5, 3.5, 0, -3.5, -5];
