@@ -29,7 +29,7 @@ import { oceanParams, type OceanParams } from '../src/params/ocean';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../src/params/seaPhysics';
 import { CpuOcean } from '../src/sea-physics/cpuOcean';
 import { equilibriumDraft, stepShipBuoyancy } from '../src/sea-physics/buoyancy';
-import { quatFromAxisAngle, quatMul, rotateVec } from '../src/combat/quatMath';
+import { quatFromAxisAngle, quatMul, rotateVec } from '../src/core/quat';
 import type { ShipState } from '../src/state/simState';
 
 const RUN = process.env.SPLIT_PITCH === '1';
