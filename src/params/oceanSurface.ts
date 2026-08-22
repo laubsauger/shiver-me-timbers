@@ -793,7 +793,15 @@ export const oceanSurfaceParams = registerParams(
      * actual roughness came to disagree in the first place, and re-adding one
      * re-opens exactly that.
      */
-    glintRoadStrength: 1.0,
+    // 0.75 (§B89): the user called the sun "pretty convincing… maybe a tad too
+    // much on the rays on the water towards the sun". Measured on a 1080p
+    // capture at tod 17.9: 8.0% of the road band clipped white (L>=250) against
+    // 0.0% off-road on the same rows. The cause is §V92's representative-point
+    // normalisation `srcEnergy`, which its own docstring measures at 1.4-3.5x
+    // at 1-5 deg elevation — it over-delivers at exactly this hour. This scales
+    // radiance only: lobe width, the apex bar and §T.110's behaviour are
+    // untouched, which is what the user endorsed.
+    glintRoadStrength: 0.75,
     /** sparkles fade out as the view leaves grazing angles (starfield guard):
      *  full below grazeFadeStart, gone above grazeFadeEnd (viewDir.y) */
     sparkleGrazeStart: 0.72,
