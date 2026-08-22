@@ -59,6 +59,34 @@ const TAU = Math.PI * 2;
 type Node = ReturnType<typeof float>;
 type UniformNode = ReturnType<typeof uniform>;
 
+/**
+ * §B84, §T.128 — A TYPED `Fn`, AND IT IS THE DIFFERENCE BETWEEN 320 ms AND
+ * 57 ms OF BOOT FOR THIS ONE MATERIAL.
+ *
+ * `ShaderCallNodeInternal.getNodeType` is
+ * `shaderNode.nodeType || getOutputNode(builder).getNodeType(builder)`
+ * (three r180 TSLCore.js:461). Untyped, every type query on a call node
+ * re-walks the WHOLE body — and the shape below is a tree of calls each read
+ * several times (`clothAt` → `sparPushAll` → three nested `sparPushAt`,
+ * `clothZ` → `sectionAt` → `acrossAt`/`leechAt`/`downAt`, and the finite
+ * differences that build the normal call `clothAt` four more times). That is
+ * §B84's ~4^depth again, and it is NOT covered by the §T.79 memo: the vertex
+ * graph is built inside `subBuild(…, 'VERTEX')` (NodeMaterial.js:460) and
+ * `src/core/nodeTypeCache.ts:164` bypasses the memo for the whole of it.
+ *
+ * Pinning the type short-circuits that first `||` and the walk stops at each
+ * level. The body is still INLINED per call (no `layout`), so the emitted
+ * WGSL is unchanged — `tests/sailGraphCost.test.ts` asserts exactly that.
+ *
+ * The cast exists because three's .d.ts stops at `Fn(jsFunc)` while the
+ * runtime takes the node type second; same cast, same reason, as
+ * `raftSailFace.ts`.
+ */
+const typedFn = Fn as unknown as <A extends Node[]>(
+  jsFunc: (args: A) => Node,
+  nodeType: string,
+) => (...args: Array<Node | UniformNode>) => Node;
+
 /** the shape uniforms, so the material can refresh them from params */
 export interface SailShapeUniforms {
   clothExcess: UniformNode;
@@ -168,7 +196,7 @@ export function createSailClothNodes(
   const diag = width.mul(width).add(builtDrop.mul(builtDrop)).sqrt();
   const reach = max(u.cornerGrip, float(0)).mul(diag);
   const eps2 = diag.mul(SAIL_CLEW_SOFTEN).mul(diag.mul(SAIL_CLEW_SOFTEN));
-  const tensionRaw = Fn(([uu, v]: [Node, Node]) => {
+  const tensionRaw = typedFn(([uu, v]: [Node, Node]) => {
     const dy = v.mul(builtDrop);
     const dp = uu.mul(width);
     const ds = uu.oneMinus().mul(width);
@@ -179,10 +207,11 @@ export function createSailClothNodes(
     const rs = ds.mul(ds).add(dy.mul(dy)).add(eps2).sqrt();
     // divisors ≥ SAIL_CLEW_SOFTEN·diag > 0 by construction (§V28)
     return float(1).add(reach.div(rp)).add(reach.div(rs));
-  });
+  }, 'float');
   const tensionRef = tensionRaw(float(0.5), float(SAIL_BELLY_REF));
-  const tensionAt = Fn(([uu, v]: [Node, Node]) =>
+  const tensionAt = typedFn(([uu, v]: [Node, Node]) =>
     max(tensionRaw(uu, v).div(tensionRef), float(1e-3)), // §V28
+    'float',
   );
 
   /**
@@ -205,15 +234,15 @@ export function createSailClothNodes(
     .mul(laces.sub(1));
 
   const haul = camber.abs().mul(u.sheetPull).mul(width);
-  const cornerPull = Fn(([uu, v]: [Node, Node]) => {
+  const cornerPull = typedFn(([uu, v]: [Node, Node]) => {
     const span = v.oneMinus().mul(haul);
     return wind.sheetLeadPort
       .mul(uu.oneMinus().mul(span))
       .add(wind.sheetLeadStarboard.mul(uu.mul(span)));
-  });
+  }, 'vec3');
 
   /** the section's warp lead, at height v — carries skew AND twist */
-  const leadAt = Fn(([v]: [Node]) => {
+  const leadAt = typedFn(([v]: [Node]) => {
     const draft = clamp(
       u.draftPos
         .sub(wind.skew.mul(SAIL_SKEW_LEAD).mul(v.oneMinus()))
@@ -226,16 +255,16 @@ export function createSailClothNodes(
       float(-SAIL_LEAD_MAX),
       float(SAIL_LEAD_MAX),
     );
-  });
+  }, 'float');
 
   /** membrane section across the cloth, pinned at both leeches */
-  const acrossAt = Fn(([uu, v]: [Node, Node]) => {
+  const acrossAt = typedFn(([uu, v]: [Node, Node]) => {
     const w = clamp(uu.add(leadAt(v).mul(sin(uu.mul(Math.PI)))), float(0), float(1));
     // max() BEFORE pow(): WGSL pow() with a base a hair below zero is
     // undefined → NaN vertices (§V28, §B.5). Chained .pow() is receiver^arg,
     // i.e. arc^fullness (§V23: 2-arg chained form, receiver = base).
     return max(w.mul(w.oneMinus()).mul(4), float(0)).pow(u.draftFullness);
-  });
+  }, 'float');
 
   /**
    * VERTICAL PROFILE — transliteration of sailShapeProfiles.sailBellyProfile:
@@ -248,13 +277,14 @@ export function createSailClothNodes(
    * sailClothSegments(); this profile is one smooth curve over the whole drop.
    */
   // @band-limited-elsewhere
-  const downAt = Fn(([v]: [Node]) => v.mul(v).oneMinus());
+  const downAt = typedFn(([v]: [Node]) => v.mul(v).oneMinus(), 'float');
 
   /** how far the free LEECH flies at height v, as a fraction of the centre's
    *  depth there — sailShapeProfiles.leechFraction × sailLeechOpen. Zero at
    *  the clew and the yardarm, where the edge is actually made fast. */
-  const leechAt = Fn(([v]: [Node]) =>
+  const leechAt = typedFn(([v]: [Node]) =>
     clamp(u.leechOpen, float(0), float(1)).mul(v.mul(v.oneMinus()).mul(4)),
+    'float',
   );
 
   /**
@@ -264,14 +294,16 @@ export function createSailClothNodes(
    * bowing the rest on the membrane parabola; the whole scaled by the vertical
    * profile. §V23: functional 3-arg mix, factor LAST.
    */
-  const sectionAt = Fn(([uu, v]: [Node, Node]) =>
+  const sectionAt = typedFn(([uu, v]: [Node, Node]) =>
     downAt(v).mul(mix(leechAt(v), float(1), acrossAt(uu, v))),
+    'float',
   );
 
   /** the vertical strip at width u's bow relative to the centre strip — its
    *  section at the reference height (sailShapeProfiles.sailStripBow) */
-  const stripBowAt = Fn(([uu]: [Node]) =>
+  const stripBowAt = typedFn(([uu]: [Node]) =>
     mix(leechAt(float(SAIL_BELLY_REF)), float(1), acrossAt(uu, float(SAIL_BELLY_REF))),
+    'float',
   );
 
   /**
@@ -281,7 +313,7 @@ export function createSailClothNodes(
    * @band-limited-elsewhere — 3.5 cycles across a cloth the mesh samples at
    * ≥ 4 per panel over ≥ 7 panels; see SAIL_SAMPLES_PER_PANEL.
    */
-  const foldAt = Fn(([uu, v]: [Node, Node]) => {
+  const foldAt = typedFn(([uu, v]: [Node, Node]) => {
     // zero at exactly the two clews, which the sheets hold whatever the wind
     const sheeted = float(1).sub(v.oneMinus().mul(midArch(uu).oneMinus()));
     return sin(uu.mul(TAU * SAIL_FOLD_CYCLES_A).add(SAIL_FOLD_PHASE_A))
@@ -289,10 +321,10 @@ export function createSailClothNodes(
       .add(sin(uu.mul(TAU * SAIL_FOLD_CYCLES_B).add(SAIL_FOLD_PHASE_B)).mul(0.4))
       .mul(v.oneMinus())
       .mul(sheeted);
-  });
+  }, 'float');
 
   /** billow + flutter offset (m, along local +z = forward of the yard) */
-  const clothZ = Fn(([uu, v]: [Node, Node]) => {
+  const clothZ = typedFn(([uu, v]: [Node, Node]) => {
     const section = sectionAt(uu, v);
     // QUILTING (sailShapeProfiles.seamQuiltProfile): each cloth panel bellies
     // between its two seams, which hold. Zero-mean, so it redistributes camber
@@ -339,18 +371,18 @@ export function createSailClothNodes(
           .mul(fullness.oneMinus()),
       )
       .add(cornerPull(uu, v).z);
-  });
+  }, 'float');
 
   /**
    * How far a point of canvas is hauled UP as the sail gathers (m).
    * Transliteration of sailShape.sailFurlLift — same params, same order.
    */
-  const furlLift = Fn(([uu, v]: [Node, Node]) => {
+  const furlLift = typedFn(([uu, v]: [Node, Node]) => {
     const furl = set.oneMinus();
     // 0 at each station (a line made fast), 1 in the middle of a bay
     const station = sin(uu.mul(max(u.furlBays, float(1))).mul(Math.PI)).abs();
     return furl.mul(u.furlSwag).mul(builtDrop).mul(v.oneMinus()).mul(station.oneMinus());
-  });
+  }, 'float');
 
   /**
    * THE OUTLINE — and this is the part that stopped being a rectangle.
@@ -368,7 +400,7 @@ export function createSailClothNodes(
   // at the strip's own PEAK (mid-width across, the draft height down), because
   // sampling at (u, v) would shorten a strip differently at each of its ends,
   // which is a shear rather than a shortening. See sailShape.sailClothPoint.
-  const clothX = Fn(([uu, v]: [Node, Node]) =>
+  const clothX = typedFn(([uu, v]: [Node, Node]) =>
     uu
       .sub(0.5)
       .mul(width)
@@ -376,8 +408,9 @@ export function createSailClothNodes(
       // leeches stand forward too, so the bow is the difference
       .mul(arcShorten(camber.mul(downAt(v)).mul(leechAt(v).oneMinus()).div(tensionAt(float(0.5), v))))
       .add(cornerPull(uu, v).x),
+    'float',
   );
-  const clothY = Fn(([uu, v]: [Node, Node]) => {
+  const clothY = typedFn(([uu, v]: [Node, Node]) => {
     // the vertical strip is bent to the yard and FREE at the foot: it swings
     // forward rather than bowing back — a different curve with its own
     // coefficient (SAIL_ARC_COEFF_V), bow sampled at the reference height
@@ -399,7 +432,7 @@ export function createSailClothNodes(
       .mul(roach)
       .add(furlLift(uu, v))
       .add(cornerPull(uu, v).y);
-  });
+  }, 'float');
 
   /**
    * PUSH ONE POINT OF CANVAS OUT OF ONE SPAR — transliteration of
@@ -410,11 +443,11 @@ export function createSailClothNodes(
    */
   /** transliteration of sailShapeProfiles.sparRamp — `max(0, y)` with its
    *  corner rounded off over [0, 1], so the push leaves no crease */
-  const sparRampAt = Fn(([y]: [Node]) => {
+  const sparRampAt = typedFn(([y]: [Node]) => {
     const yc = clamp(y, float(0), float(1));
     return yc.mul(yc).mul(float(2).sub(yc)).add(max(y.sub(1), float(0)));
-  });
-  const sparPushAt = Fn(([p, flatAt, a, b, r]: [Node, Node, Node, Node, Node]) => {
+  }, 'float');
+  const sparPushAt = typedFn(([p, flatAt, a, b, r]: [Node, Node, Node, Node, Node]) => {
     const ab = b.sub(a);
     const len2 = ab.dot(ab);
     const len = max(len2, float(1e-12)).sqrt(); // §V28 floored divisor
@@ -456,11 +489,11 @@ export function createSailClothNodes(
     const live = clamp(len2.mul(1e12), float(0), float(1));
     const push = gate.mul(ahead).sub(gate.oneMinus().mul(astern)).mul(live);
     return p.add(n.mul(push));
-  });
+  }, 'vec3');
 
   /** out of the mast, out of a bipod's other leg, out of its own yard — the
    *  same order sailShape.sailSparPush applies them in */
-  const sparPushAll = Fn(([p, flatAt]: [Node, Node]) =>
+  const sparPushAll = typedFn(([p, flatAt]: [Node, Node]) =>
     sparPushAt(
       sparPushAt(
         sparPushAt(p, flatAt, wind.mastA, wind.mastB, wind.mastR),
@@ -468,6 +501,7 @@ export function createSailClothNodes(
       ),
       flatAt, wind.yardA, wind.yardB, wind.yardR,
     ),
+    'vec3',
   );
 
   const cloth = uv();
@@ -484,13 +518,14 @@ export function createSailClothNodes(
   // that happens to a point of canvas: belly, folds, flutter and the corner
   // pull are all cloth being moved, and a mast stops all of it. Transliteration
   // pair with sailShape.sailClothPoint's closing line.
-  const clothAt = Fn(([uu, v]: [Node, Node]) =>
+  const clothAt = typedFn(([uu, v]: [Node, Node]) =>
     sparPushAll(
       vec3(clothX(uu, v), clothY(uu, v), clothZ(uu, v)),
       // the FLAT panel station — the same expression as `flat` below, and the
       // pair of sailShape.sailClothPoint's second argument
       vec3(uu.sub(0.5).mul(width), v.oneMinus().negate().mul(builtDrop), float(0)),
     ),
+    'vec3',
   );
   const shaped = clothAt(u0, v0);
 
