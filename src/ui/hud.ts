@@ -261,7 +261,16 @@ export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
   // display) so that a ship running aground does not shove the whole binnacle
   // up the screen — and so that nothing below it has to guess its height.
   const binnacle = div('smt-binnacle', stalled, damageRow, bottom);
-  const hud = div('smt-hud', compass, binnacle);
+  /**
+   * §T.160 — THE CENTRE OF THE SCREEN, MARKED. USER: "maybe we should have a
+   * tiny dot for the centre point as a cursor." First person with a 35°
+   * `focusConeDeg` and no reticle: the player cannot see where the cone is
+   * pointed, which is the other half of §T.136d's "a station reads as not
+   * interactive". It is a DOT, not a crosshair — this is a walking sim, and
+   * its job is to say where the look ray is, not to aim anything.
+   */
+  const cursor = div('smt-cursor');
+  const hud = div('smt-hud', compass, cursor, binnacle);
   root.appendChild(hud);
 
   let tapePx = uiParams.compassPixelsPerDegree;

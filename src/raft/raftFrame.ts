@@ -10,6 +10,7 @@
  * (clouds, reflection) runs in `renderVessel` AFTER the follow cam has
  * written the lens for this frame.
  */
+import { raftWakeParams } from '../params/raftSailing';
 import { Color, Quaternion, Vector2, Vector3, type PerspectiveCamera } from 'three/webgpu';
 import type { App } from '../core/app';
 import type { SkyHandle } from '../sky';
@@ -147,6 +148,8 @@ export function createRaftFrame(d: RaftFrameDeps) {
         sea.bowSpray.update(app.renderer, {
           bowWorldPos: bowWorld, shipVelocity: shipVel, shipForward: shipFwd,
           immersionDepth: bowImmersion, cutwater: vessel.hullContact.cutwater,
+          // §T.161: the ramp is the galleon's; this raft is a third her speed
+          speedScale: raftWakeParams.speedScale,
         });
       }
       sea.archipelago.update(

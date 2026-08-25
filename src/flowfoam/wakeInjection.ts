@@ -78,6 +78,16 @@ const FAR = 1e12;
 const EPS = 1e-6;
 
 export function createWakeInjector(p: FlowFoamParams) {
+  /**
+   * §T.161 — THIS VESSEL'S SPEED SCALE, multiplying BOTH ends of the wake's
+   * speed ramp (`speedThreshold` → `fullWakeSpeed`, authored 0.5 → 5 m/s for a
+   * ship that cruises at 7). The raft's polar tops out at 3.4, so on the
+   * shipped numbers her wake never developed. One factor, applied wherever the
+   * threshold is read — the uniforms, the track's `minSpeed` and the reach
+   * estimate — so the drawn wake and the track that feeds it cannot disagree
+   * about when she is making way.
+   */
+  let speedScale = 1;
   // (x, z, fx, fz) and (age, dist, speed, unused) per slot
   const posVecs = Array.from({ length: TRACK_SLOTS }, () => new THREE.Vector4(0, 0, 0, 1));
   const metaVecs = Array.from({ length: TRACK_SLOTS }, () => new THREE.Vector4());
@@ -186,6 +196,10 @@ export function createWakeInjector(p: FlowFoamParams) {
   const dissipate = (tau: any, a: any): any => a.div(tau.max(EPS)).negate().exp();
 
   return {
+    /** §T.161 — see `speedScale`; 1 = the galleon the ramp was authored on */
+    setSpeedScale(v: number): void {
+      speedScale = Number.isFinite(v) && v > 0 ? v : 1;
+    },
     /**
      * TSL wake field at a world-XZ node. Returns `{ rate, elev }`:
      *   rate.x = foam injection rate (foam/second) — mirror wakeMath.wakeRateCpu
@@ -602,7 +616,7 @@ export function createWakeInjector(p: FlowFoamParams) {
         capacity: TRACK_CAPACITY,
         spacing: Math.max(p.trackSpacing, EPS),
         life: Math.max(p.trackLife, EPS),
-        minSpeed: p.speedThreshold,
+        minSpeed: p.speedThreshold * speedScale,
         maxTurn: (Math.max(p.trackTurn, EPS) * Math.PI) / 180,
         coarsen: Math.max(p.trackCoarsen, EPS),
         coarsenStart: Math.max(p.trackCoarsenStart, 0),
@@ -678,8 +692,8 @@ export function createWakeInjector(p: FlowFoamParams) {
       uVortexWidth.value = p.vortexWidth;
       uVortexSpacing.value = p.vortexSpacing;
       uVortexDecay.value = p.vortexDecay;
-      uSpeedThreshold.value = p.speedThreshold;
-      uFullWakeSpeed.value = p.fullWakeSpeed;
+      uSpeedThreshold.value = p.speedThreshold * speedScale;
+      uFullWakeSpeed.value = p.fullWakeSpeed * speedScale;
       uTrackLife.value = p.trackLife;
       uTrackCapDist.value = trackReachCpu({
         capacity: TRACK_CAPACITY,
@@ -687,7 +701,7 @@ export function createWakeInjector(p: FlowFoamParams) {
         coarsen: Math.max(p.trackCoarsen, EPS),
         coarsenStart: Math.max(p.trackCoarsenStart, 0),
         life: p.trackLife,
-        minSpeed: p.speedThreshold,
+        minSpeed: p.speedThreshold * speedScale,
         maxTurn: 1,
       });
       uTailFade.value = p.tailFade;

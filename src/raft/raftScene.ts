@@ -18,6 +18,7 @@
  * The entry has one ship and no combat, so the whole scene is the first
  * picture, and one `compileAsync` pays for all of it once.
  */
+import { raftWakeParams } from '../params/raftSailing';
 import type { Mesh } from 'three/webgpu';
 import type { App } from '../core/app';
 import type { SimState } from '../state/simState';
@@ -62,6 +63,9 @@ export function buildRaftSea(app: App, state: SimState, sky: SkyHandle, weather:
   }));
   const foam = createFoamSim(bands, oceanParams.resolution, ocean);
   const flowFoam = createFlowFoam();
+  // §T.161: the wake ramp is the galleon's; this raft sails at a third her
+  // speed and never developed one on the shipped thresholds
+  flowFoam.setSpeedScale(raftWakeParams.speedScale);
   const clouds = createClouds({
     renderer: app.renderer,
     camera: app.camera,

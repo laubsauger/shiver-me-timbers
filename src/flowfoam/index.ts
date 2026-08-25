@@ -254,6 +254,8 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
      * strictly better feed than |velocity|.
      */
     setShip: wake.setShip,
+    /** §T.161 — this vessel's speed scale for the wake's own ramp (1 = galleon) */
+    setSpeedScale: wake.setSpeedScale,
 
     /** debug/tests: the live world-space cutwater history (index 0 = newest) */
     get wakeTrack() {

@@ -486,7 +486,15 @@ export const raftParams: RaftParams = registerParams(
     // The cloth-side push (§T.114 sparPush) is the fix for that band.
     yardMastClearance: 0.3, // EST
     poleParrelGap: 1.2, // EST — §T.138/§V66: 1.2 × the POLE'S own diameter of slack, seized
-    sailYardOffset: 0.12, // EST
+    // §T.159 — 0.12 → 0.18. The topsail could not be lengthened past 0.65 m
+    // without its own cloth fouling its own pole: the panel is cocked (§B73)
+    // and raked, so the longer it gets the further its foot swings back into
+    // the spar. Measured, this is the only lever that moves it — raising the
+    // yard changes the foul by exactly nothing (it is in the sail's own frame)
+    // and widening `poleParrelGap` to 1.6/1.8 still fouls AND breaks a second
+    // guard. 6 cm more cloth-to-yard air buys the whole 0.6 → 0.9 drop, and
+    // past ~0.30 it fouls again from the FRONT, so this is not a free knob.
+    sailYardOffset: 0.18, // EST
     // §T.140 — the photo hoists the main yard to 0.77 of the crossing (4.9 m
     // over the deck against 6.4), with the sail's foot just clear of the logs
     // and only ~1.5 m of mast showing above the yard. 5.35 over the log tops
@@ -537,7 +545,15 @@ export const raftParams: RaftParams = registerParams(
      * which a 1.3 m sail still blocks). Shrinking the sail is the only one
      * that actually buys the clearance.
      */
-    topsailDrop: 0.6,
+    /**
+     * §T.159 — 0.6 → 0.9. USER: "the topsail is kind of a slim band even when
+     * fully unfurled, I think it can be a tad longer." At 0.6 on a 3.0 m width
+     * it was a 5:1 letterbox. 0.9 is 0.30 of its own width and sits inside the
+     * photo's own 1.3–1.75 m read once §T.140's clearances are honoured.
+     * See `sailYardOffset` for what made the room, and the note below for the
+     * box this sail has to live in.
+     */
+    topsailDrop: 0.9,
     mizzenZ: -5.4, // EST
     // §T.138 — at ±0.9 both stern poles stood in the two aft guara CHINKS
     // (Δx to guara-4 0.035 m, to guara-5 0.005 m: the flagpole's box ran clean

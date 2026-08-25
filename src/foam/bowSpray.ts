@@ -107,6 +107,13 @@ export interface BowState {
    * normalised velocity when the caller does not supply it.
    */
   shipForward?: THREE.Vector3;
+  /**
+   * §T.161 — this vessel's speed scale for the bow ramp; 1 = the galleon the
+   * thresholds were authored on. The raft passes ~0.35 (her polar tops out at
+   * 3.4 m/s against the galleon's 8), without which she throws 2% of a sheet
+   * and reads as having no bow wave at all.
+   */
+  speedScale?: number;
 }
 
 export function createBowSpray() {
@@ -298,6 +305,7 @@ export function createBowSpray() {
         burialRate,
         inContact,
         sprayParams,
+        bow.speedScale ?? 1,
       );
       if (rate <= 0) return;
       uSheet.value = sheet;

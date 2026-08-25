@@ -10,6 +10,9 @@
  * from the row. The oar shares the rudder sign of `shipKinematics`
  * (+ = starboard) so one input layer serves both hulls.
  */
+import { bowEmission } from '../src/foam/sprayMath';
+import { sprayParams } from '../src/params/spray';
+import { raftWakeParams } from '../src/params/raftSailing';
 import { raftParams } from '../src/params/raft';
 import { describe, expect, it } from 'vitest';
 import {
@@ -496,5 +499,42 @@ describe('§B102 the sim steers with the boards the raft actually carries', () =
     // the aft pair moved astern, the bow pair did not
     expect(after[3]).toBeLessThan(before[3]);
     expect(after[0]).toBe(before[0]);
+  });
+});
+
+/**
+ * §T.161 — A RAMP AUTHORED FOR A GALLEON IS OFF FOR A RAFT.
+ *
+ * USER: "we entirely lost the 3D wake… we had it, it was way exaggerated, then
+ * we tried to dial it down and I think that caused us to lose it completely."
+ * The bow sheet's ramp runs 1 → 8 m/s with a squared exponent, and this raft's
+ * whole polar is 1.5–3.4: at 2 m/s she scored 0.02 of it. The PROPERTY (§V66):
+ * at her own cruising speed she throws a real sheet, and she still throws
+ * nothing when she is not making way.
+ */
+describe('§T.161 the bow sheet is scaled to the vessel that makes it', () => {
+  const SCALE = raftWakeParams.speedScale;
+  const rate = (speed: number, scale: number): number =>
+    bowEmission(0.25, speed, 0, true, sprayParams, scale).rate;
+
+  it('a raft at her cruising speed throws a sheet, where the galleon ramp gave her 2%', () => {
+    // 2 m/s is mid-polar for the accessible tuning (2.4–3.4 on a dead run)
+    expect(rate(2, 1), 'the unscaled ramp was already generous to her').toBeLessThan(20);
+    expect(rate(2, SCALE), 'the raft still throws nothing at cruising speed')
+      .toBeGreaterThan(10 * rate(2, 1));
+  });
+
+  it('…and still nothing when she is not making way', () => {
+    expect(rate(0, SCALE)).toBe(0);
+    expect(rate(0.1, SCALE), 'a drifting raft threw spray').toBeLessThan(rate(2, SCALE) * 0.1);
+  });
+
+  it('the scale is monotone in speed — faster is always more', () => {
+    let prev = -1;
+    for (const v of [0.5, 1, 1.5, 2, 2.5, 3, 3.4]) {
+      const r = rate(v, SCALE);
+      expect(r, `rate fell going from the step before ${v} m/s`).toBeGreaterThanOrEqual(prev);
+      prev = r;
+    }
   });
 });

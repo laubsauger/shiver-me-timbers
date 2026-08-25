@@ -163,6 +163,16 @@ export const HUD_CSS = /* css */ `
   color: var(--brass-hi); opacity: 0.9;
   text-shadow: 0 0 5px rgba(4, 18, 22, 1), 0 1px 2px rgba(4, 18, 22, 0.95);
 }
+/* §T.160 — the look ray's own point. 3 px, brass, with a dark halo so it
+   survives a cream sunset the way the compass ticks do, and 0.5 opacity so it
+   never competes with the thing it is pointed at (§V21). */
+.smt-cursor {
+  position: absolute; top: 50%; left: 50%; width: 3px; height: 3px;
+  transform: translate(-50%, -50%); border-radius: 50%;
+  background: var(--brass-hi); opacity: 0.5;
+  box-shadow: 0 0 3px rgba(4, 18, 22, 0.95);
+  pointer-events: none;
+}
 .smt-lubber {
   position: absolute; top: 0; left: 50%; transform: translateX(-50%);
   width: 9px; height: 46px; pointer-events: none;

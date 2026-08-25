@@ -119,6 +119,27 @@ export const accessibleRaftTuning: RaftTuning = registerParams(
   TRUE_META,
 );
 
+/**
+ * §T.161 — THE RAFT'S SPEED, AS A FRACTION OF THE GALLEON'S.
+ *
+ * Every water-effects ramp in the game — the bow sheet's `bowSpeedThreshold` /
+ * `bowSpeedFull` (1 → 8 m/s), the wake's `speedThreshold` / `fullWakeSpeed`
+ * (0.5 → 5) — was authored on a ship that cruises at 7 m/s. This raft's whole
+ * polar is 1.5–2.1 m/s true and 2.4–3.4 accessible (`tests/raftSailing.ts`
+ * pins both), so at 2 m/s she scored 0.02 of the bow ramp and threw 2% of a
+ * sheet: USER, "we entirely lost the 3D wake… we tried to dial it down and
+ * that caused us to lose it completely."
+ *
+ * ONE number, multiplying BOTH ends of each ramp, so the raft gets the same
+ * CURVE against her own speeds (§V66) instead of a second set of thresholds
+ * that is free to drift from the first. 0.35 puts her full-sheet point at
+ * 2.8 m/s — the top of her own polar — and her threshold at 0.35 m/s, which is
+ * the drift below which there is honestly nothing to see.
+ */
+export const raftWakeParams = registerParams('raft-wake', { speedScale: 0.35 }, {
+  speedScale: { min: 0.05, max: 2, step: 0.01 },
+});
+
 /** which set the raft entry sails on; `accessible` is the shipped default */
 export const raftSailingMode = registerParams('raft-sailing', { accessible: true });
 

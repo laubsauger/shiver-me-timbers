@@ -416,7 +416,19 @@ export function bowEmission(
     | 'bowSlamRateFull'
     | 'bowSlamRate'
   >,
+  /**
+   * §T.161 — THIS VESSEL'S SPEED SCALE. The ramp below is authored for the
+   * galleon (nothing at 1 m/s, full sheet at 8), and the raft's whole polar is
+   * 1.5–3.4 m/s: at 2 m/s she scored `((2−1)/7)² = 0.02` and threw 2% of a
+   * sheet, which is USER's "we entirely lost the 3D wake… we tried to dial it
+   * down and that caused us to lose it completely." One number, multiplying
+   * BOTH ends of the ramp, so a slower ship gets the same CURVE against her
+   * own speeds (§V66 — a feature scaled by its own dimension) rather than a
+   * second set of thresholds free to disagree with these.
+   */
+  speedScale = 1,
 ): { rate: number; sheet: number; slam: number } {
+  const scale = Number.isFinite(speedScale) && speedScale > 0 ? speedScale : 1;
   const cruiseSheet = Math.min(1, Math.max(0, p.bowCruiseSheet));
   // AIRBORNE STEM THROWS NOTHING. Water leaving a hull that is touching no
   // water is the detachment the user reported ("it comes out from something
@@ -426,7 +438,7 @@ export function bowEmission(
   // galleon ghosting along at 6 kn throws the occasional sheet off the stem,
   // not the continuous curtain a linear ramp produced
   const speedN = Math.pow(
-    ramp01(speed, p.bowSpeedThreshold, p.bowSpeedFull),
+    ramp01(speed, p.bowSpeedThreshold * scale, p.bowSpeedFull * scale),
     Math.max(1, p.bowSpeedExponent),
   );
   const immN = ramp01(immersionDepth, p.bowImmersionThreshold, p.bowImmersionFull);

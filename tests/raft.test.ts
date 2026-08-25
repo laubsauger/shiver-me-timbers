@@ -2008,6 +2008,28 @@ describe('§T.140 rig proportions, measured off the 1947 frame', () => {
     expect(foot, 'the mainsail is set a storey up').toBeLessThan(1.2);
   });
 
+  /**
+   * §T.159 — A SAIL, NOT A BAND. USER: "the topsail is kind of a slim band
+   * even when fully unfurled — I think it can be a tad longer." It was 0.6 m
+   * of drop on 3.0 m of width, a 5:1 letterbox. The PROPERTY (§V80, §V66): a
+   * square sail's drop is a real fraction of its own width, so nobody can
+   * shave it back to a band while chasing a clearance — and the ceiling is
+   * real too (the cloth fouls its own pole past ~1.0), so this is a band, not
+   * a floor to push against.
+   */
+  it('§T.159 the topsail is proportioned like a sail', () => {
+    const top = byId.get('sail-main-upper')!;
+    const w = top.aabb.max[0] - top.aabb.min[0];
+    const drop = top.aabb.max[1] - top.aabb.min[1];
+    expect(drop / w, `topsail ${drop.toFixed(2)} m drop on ${w.toFixed(2)} m width`)
+      .toBeGreaterThan(0.25);
+    expect(drop / w, 'the topsail has grown past the pole it is set on').toBeLessThan(0.45);
+    // …and it is still the SMALL sail: a topsail as deep as the main would be
+    // a different rig (§V82 — the photo has it a fraction of her)
+    const main = byId.get('sail-main-lower')!;
+    expect(drop).toBeLessThan((main.aabb.max[1] - main.aabb.min[1]) * 0.5);
+  });
+
   it('the gap between the main\'s head and the topsail\'s foot is a FRACTION of the main\'s own drop', () => {
     // "…basically almost overlap, there's no huge gap between them, and what
     // we're seeing right now is meters and meters of gap": 3.05 m before, on a
