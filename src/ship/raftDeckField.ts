@@ -34,6 +34,7 @@
  * stern block. Foot-rails and crossbeams are NOT solid: they are stepped
  * over (≤ 0.3 m bumps).
  */
+import { SOLID_UNBOUNDED } from './deckHeightfield';
 import type { PieceDef, Vec3 } from './pieceTypes';
 import { DECK_FIELD_BEAM, DECK_FIELD_LENGTH, type DeckHeightfield } from './deckHeightfield';
 import { raftParams, type RaftParams } from '../params/raft';
@@ -66,6 +67,8 @@ export function buildRaftDeckField(
   const plank = new Float32Array(width * height);
   const mask = new Float32Array(width * height);
   const solid = new Float32Array(width * height);
+  // §T.158: metres relative to deckY, like `data` — see DeckHeightfield.solidTop
+  const solidTop = new Float32Array(width * height);
   // a 25 mm guara plank or a 50 mm wall must own at least one whole texel,
   // or the bilinear `solid` sample never reaches the walker's 0.5
   const padX = texelX * 0.5;
@@ -79,9 +82,13 @@ export function buildRaftDeckField(
       data[k] = c.y - deckY;
       mask[k] = c.mask;
       solid[k] = c.solid;
+      solidTop[k] = c.solidTop >= SOLID_UNBOUNDED ? SOLID_UNBOUNDED : c.solidTop - deckY;
     }
   }
-  return { width, height, minX, maxX, minZ, maxZ, texelX, texelZ, deckY, data, plank, mask, solid };
+  return {
+    width, height, minX, maxX, minZ, maxZ, texelX, texelZ, deckY,
+    data, plank, mask, solid, solidTop,
+  };
 }
 
 /**

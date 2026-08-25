@@ -390,6 +390,14 @@ export interface RaftPromptOptions {
   socketWorld: SocketResolver;
   /** §T.157 — `ShipAssembly.pieceNearestPoint`, so a plaque hangs on its object */
   pieceNear?: PieceResolver;
+  /**
+   * §T.155 — WHAT THE PLAQUE IS NAMING, and how far it has faded in. The raft
+   * wiring turns this into the focused piece's outline glow, so the rim
+   * arrives and leaves WITH the prompt instead of on a second timer that is
+   * free to disagree with it (§V62). Called every update, including with
+   * `null` when there is nothing to name.
+   */
+  onFocus?: (action: RaftAction | null, alpha: number) => void;
   /** the lens the frame was drawn through */
   camera: () => CameraLike | null;
   /**
@@ -554,6 +562,8 @@ export function createRaftPrompt(o: RaftPromptOptions): RaftPrompt {
         shown = null;
       }
       alpha = stepFade(alpha, next === null ? 0 : 1, dt, p.promptFade, reduced);
+      // §T.155: the outline follows the plaque — same action, same fade
+      o.onFocus?.(next === null || next.action === 'climb-aboard' ? null : next.action, alpha);
       plaque.style.opacity = alpha.toFixed(3);
       plaque.style.visibility = alpha > 0 ? 'visible' : 'hidden';
       paintDots(

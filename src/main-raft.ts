@@ -37,7 +37,7 @@ import { pushOffRaft, stepRaftShip, placeRaftAtStart } from './raft/raftShip';
 import { applyDebugChannel, bindRaftActions, radio, raftBeach, raftControls } from './raft/raftActions';
 import { installRaftDevHandle } from './raft/raftDevHandle';
 import { createRaftRadio, radioBearings, radioStatusLine } from './raft/raftRadio';
-import { createStationResolvers } from './raft/raftResolvers';
+import { createStationResolvers, highlightFocus } from './raft/raftResolvers';
 import { bootTimeOfDay, calmPreset, createDayClock } from './raft/raftWorld';
 import { raftWorldParams } from './params/raftWorld';
 
@@ -175,8 +175,7 @@ async function boot(): Promise<void> {
     onToggle: () => setFp(!player.isActive()),
   });
   bindRaftActions(player, raftControls, sinks);
-  // §T.156: the knob IS the switch (RaftRadioDeps.power)
-  const radioSet = createRaftRadio({ audio, assembly, sierra: sea.sierra, power: () => player.interact.held() === 'radio' });
+  const radioSet = createRaftRadio({ audio, assembly, sierra: sea.sierra, power: () => player.interact.held() === 'radio' }); // §T.156: the knob IS the switch
   // §T.116: the station being offered, named on screen at its own socket. It
   // reads `player.interact` and the SAME live socket resolver the stations do
   // (§V71), and it goes dark whenever the frame is being captured (§I
@@ -189,6 +188,7 @@ async function boot(): Promise<void> {
     board: () => player.boardingAnchor(),
     socketWorld,
     pieceNear,
+    onFocus: highlightFocus, // §T.155: the focused piece's silhouette lights
     camera: () => app.camera,
     // photo mode only: cinematic == full screen (§I ui/cinematic), and most
     // people PLAY full screen — hiding the affordances there would take the

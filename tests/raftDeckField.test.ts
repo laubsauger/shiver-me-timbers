@@ -1029,6 +1029,70 @@ describe('§T.152 the stumble: the field never presents a face the walker refuse
     expect(aft.stuck, `stopped walking aft past the cargo at ${aft.stuck?.map((v) => v.toFixed(2))}`).toBeNull();
   });
 
+  /**
+   * §T.158/§V99 — A KNEE-HIGH THING IS KNEE-HIGH.
+   *
+   * USER: "getting stuck on all the things and guara boards and what not —
+   * can't even jump over them when pushed down." `solid` carried no height, so
+   * `admits()` refused a guara's cell whatever the walker's feet were doing and
+   * a 0.6 m plank was a wall to the sky. The property, not the number: the
+   * board stops a WALK and does not stop a JUMP.
+   */
+  it('§V99 a guara board stops a walk and does not stop a jump', () => {
+    const board = piece('guara-1');
+    const gx = board.transform.position[0];
+    const gz = board.transform.position[2];
+    const deck = surface.heightAt(gx, gz);
+    expect(deck, 'no deck at the guara').not.toBeNull();
+    // the plank's own cell, from the feet of someone standing on the logs
+    expect(surface.solidAt(gx, gz, L.logTopY), 'a walk strolled through the plank').toBe(true);
+    // …and from the top of a jump, where the feet are over it
+    const apex = L.logTopY + playerParams.jumpHeight;
+    expect(surface.solidAt(gx, gz, apex), 'the plank was still a wall at the top of a jump').toBe(false);
+    // the cell is only clear because there is something to land ON: the field
+    // stands the board proud, so admitting the jump does not drop the walker
+    // through the deck
+    const top = field.deckY + sampleDeckField(field, field.solidTop, gx, gz);
+    expect(top, 'the board reports no top').toBeGreaterThan(L.logTopY + 0.3);
+    expect(top, 'the board is as tall as a wall').toBeLessThan(L.logTopY + 1.0);
+  });
+
+  /**
+   * §T.158 — THE LANES THE DESIGN INTENDS ARE LANES THE BODY FITS THROUGH.
+   *
+   * USER: "it's still a tad tight around the boat and getting into the house is
+   * awkward." Measured with the capsule probe applied — which is what the walk
+   * actually asks — the port lane abaft the cabin was 0.56 m against a 0.60 m
+   * capsule, i.e. SHUT, and the 1.40 m doorway gave a 0.79 m clear run. This
+   * asserts the passages stay passable with margin, so a future re-tune of
+   * `capsuleRadius` or of the cabin cannot quietly close one again.
+   */
+  it('§T.158 the port lane and the cabin doorway both admit the walker, with margin', () => {
+    const d = 2 * playerParams.capsuleRadius;
+    const clearRun = (
+      along: 'x' | 'z', at: number, from: number, to: number, feet: number,
+    ): number => {
+      let best = 0;
+      let run = 0;
+      for (let v = from; v <= to; v += 0.01) {
+        const x = along === 'x' ? v : at;
+        const z = along === 'x' ? at : v;
+        const ok = surface.heightAt(x, z) !== null && !surface.solidAt(x, z, feet);
+        run = ok ? run + 0.01 : 0;
+        best = Math.max(best, run);
+      }
+      return best;
+    };
+    // the port walkway, at its narrowest station (abaft the cabin)
+    const port = clearRun('x', L.cabinAftZ - 0.6, field.minX, -hw, L.logTopY);
+    expect(port, `port lane ${port.toFixed(2)} m vs a ${d.toFixed(2)} m capsule`)
+      .toBeGreaterThan(d + 0.05);
+    // and the doorway, walked through in z along the wall's own plane
+    const door = clearRun('z', hw - p.cabinWallThickness / 2, doorZ0 - 0.3, doorZ1 + 0.3, L.cabinFloorY);
+    expect(door, `doorway ${door.toFixed(2)} m vs a ${d.toFixed(2)} m capsule`)
+      .toBeGreaterThan(d + 0.2);
+  });
+
   it('(3) THE STUMBLE: a capsule walks the starboard road the full decked length, both ways', () => {
     const strip = piece('deck-starboard');
     const stripX0 = strip.transform.position[0] + strip.aabb.min[0];

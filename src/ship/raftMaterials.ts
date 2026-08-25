@@ -30,6 +30,7 @@ import type { PieceKind } from './pieceTypes';
 import { raftMaterialParams, type RaftMaterialParams } from '../params/raftMaterials';
 import { shipMaterialParams, type ShipMaterialParams } from '../params/ship';
 import { createRaftPieceUniforms, faceness, gateAbove, shipWater, type AnyNode } from './raftMaterialNodes';
+import { createHighlightNodes } from './raftHighlight';
 import { createBalsaMaterial } from './raftMaterialsBalsa';
 import { createThatchMaterial, createWeaveMaterial } from './raftMaterialsWeave';
 import { createWoodMaterial, type LocalFrame, type ShipMaterialHandle } from './woodMaterial';
@@ -327,7 +328,32 @@ export function createRadioMaterial(
 }
 
 /** the factory pieceMaterials.ts routes the raft families through */
+/**
+ * §T.155 — EVERY RAFT MATERIAL CARRIES THE FOCUS RIM, and it is added HERE
+ * rather than in each of the eight builders: one place, one graph, so a ninth
+ * family cannot ship without the glow (§V95). The rim is folded into
+ * `emissiveNode` because §B70 — three only runs a per-object uniform's update
+ * hook if the shader actually references it, so a highlight nothing reads is a
+ * highlight nothing drives.
+ */
+function withHighlight(handle: ShipMaterialHandle): ShipMaterialHandle {
+  const { rim } = createHighlightNodes();
+  const m = handle.material as THREE.MeshStandardNodeMaterial & { emissiveNode?: AnyNode };
+  m.emissiveNode = m.emissiveNode === undefined || m.emissiveNode === null
+    ? rim
+    : (m.emissiveNode.add(rim) as AnyNode);
+  return handle;
+}
+
 export function createRaftMaterial(
+  family: RaftFamily,
+  kind: PieceKind,
+  frame?: LocalFrame,
+): ShipMaterialHandle {
+  return withHighlight(createRaftMaterialBase(family, kind, frame));
+}
+
+function createRaftMaterialBase(
   family: RaftFamily,
   kind: PieceKind,
   frame?: LocalFrame,

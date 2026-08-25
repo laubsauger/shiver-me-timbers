@@ -18,6 +18,9 @@
  * pure exports, and the one block that needs elements stubs `document` the way
  * `perfHudFrameRow.test.ts` does (this repo runs vitest in the node env).
  */
+import { highlightFocus } from '../src/raft/raftResolvers';
+import { highlightOf, raftHighlightState } from '../src/ship/raftHighlight';
+import { createRaftMaterial } from '../src/ship/raftMaterials';
 import { describe, expect, it, beforeAll } from 'vitest';
 import {
   createRaftPrompt,
@@ -674,5 +677,41 @@ describe('§T.135 the swimmer is told how to get back aboard', () => {
       inReach: ['tiller', 'radio'], mergePx: P.cueMergePx, maxDots: P.cueMaxDots,
     });
     expect(dots).toEqual([]);
+  });
+});
+
+/**
+ * §T.155 — THE OUTLINE IS DRIVEN, AND IT IS DRIVEN BY THE PLAQUE.
+ *
+ * USER: "everything that can be interacted with could use a little bit of a
+ * shader outline while we're seeing the interaction prompt." §V62 is the whole
+ * risk here: a highlight uniform that nothing reads is a highlight nothing
+ * updates (§B70), and it would look exactly like a feature that shipped. So
+ * this asserts the WORLD-facing value — which piece is lit and how brightly —
+ * and that every raft material carries the rim in a node the shader compiles.
+ */
+describe('§T.155 the focused piece lights', () => {
+  it('a station maps to ITS piece, and nothing else lights', () => {
+    highlightFocus('tiller', 1);
+    expect(raftHighlightState()).toEqual({ piece: 'steering-oar', strength: 1 });
+    expect(highlightOf('steering-oar')).toBe(1);
+    expect(highlightOf('log-0'), 'a log lit up with the tiller').toBe(0);
+    highlightFocus('radio', 0.4);
+    expect(highlightOf('radio-set')).toBeCloseTo(0.4, 6);
+    expect(highlightOf('steering-oar'), 'the old focus stayed lit').toBe(0);
+  });
+
+  it('a station with no piece of its own lights NOTHING, rather than the wrong thing', () => {
+    highlightFocus('gangway-bow', 1);
+    expect(raftHighlightState().piece).toBeNull();
+    highlightFocus(null, 0);
+    expect(raftHighlightState()).toEqual({ piece: null, strength: 0 });
+  });
+
+  it('§B70 every raft material carries the rim in its emissive graph', () => {
+    for (const family of ['balsa', 'bamboo', 'weave', 'thatch', 'plank', 'crate', 'rope', 'radio'] as const) {
+      const handle = createRaftMaterial(family, 'log');
+      expect(handle.material.emissiveNode, `${family} has no emissive to hang the rim on`).toBeDefined();
+    }
   });
 });

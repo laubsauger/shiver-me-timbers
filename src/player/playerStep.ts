@@ -53,7 +53,14 @@ export interface PlayerInput {
  */
 export interface WalkSurface {
   heightAt(x: number, z: number): number | null;
-  solidAt(x: number, z: number): boolean;
+  /**
+   * Is there something in the way at (x, z)? §T.158 — `feet` is the walker's
+   * foot height in this frame; a surface that models obstacle TOPS blocks
+   * only while the feet are below one it cannot step onto. Omit it (or ignore
+   * it) for "a solid is a wall at every altitude", which is what it meant
+   * before and what the galleon's deck still means.
+   */
+  solidAt(x: number, z: number, feet?: number): boolean;
   /** underside of whatever is overhead (cabin roof), or null for open sky */
   ceilingAt?(x: number, z: number): number | null;
   /** WORLD sea-surface height; needed to swim and to notice a submerged deck */
@@ -64,6 +71,18 @@ export interface WalkSurface {
   shipToWorld?(p: Vec3): Vec3;
   /** walking-speed multiplier here (terrain slope, §T.100); 1 when absent */
   speedAt?(x: number, z: number): number;
+  /**
+   * §T.158 — ARE THIS SURFACE'S SOLIDS THINGS YOU CAN SLIP PAST?
+   *
+   * On a deck they are: a crate, a guara, the corner of the cabin, and the
+   * walker rounding one is the "auto-dodge" the user asked for. On TERRAIN
+   * they are not — `createTerrainSurface` reports a slope steeper than
+   * `terrainSlopeDeg` through this same `solidAt`, and deflecting off a 40°
+   * bank would let the walker skim along the hillside instead of being stopped
+   * by it, which is a different game (and the thing `tests/ashore.test.ts`'s
+   * round trip measures). Absent = false = stop, as it always did.
+   */
+  dodgeableSolids?: boolean;
 }
 
 export function neutralPlayerInput(): PlayerInput {
@@ -145,6 +164,20 @@ export function shipYawOf(surface: WalkSurface): number {
 }
 
 const identity = (p: Vec3): Vec3 => [p[0], p[1], p[2]];
+
+/**
+ * §T.158 — the angles a blocked step is retried at, in order, alternating
+ * sides so neither is favoured. USER: "we're not getting auto-dodged, and
+ * getting stuck on all the things… it feels a bit iffy to walk around."
+ *
+ * The old reply to a refused move was to drop a whole AXIS, which is right
+ * only for a wall lying along x or z and turns every other contact into glue:
+ * the walker loses the entire component every tick. Retrying the SAME step
+ * turned a few degrees keeps the speed and rounds the corner, and because
+ * every candidate still goes through `admits`, nothing can be deflected into
+ * a wall, up a cliff or off the deck.
+ */
+const DEFLECT_DEG = [15, -15, 30, -30, 45, -45, 60, -60] as const;
 
 export function stepPlayer(
   state: PlayerState,
@@ -289,31 +322,103 @@ function stepWalk(
   const ux = ul > 1e-9 ? vx / ul : 0;
   const uz = ul > 1e-9 ? vz / ul : 0;
   /** can the foot go to (tx,tz) from height `y` — null means no deck there */
-  const admits = (tx: number, tz: number): boolean => {
+  /**
+   * WHY a refusal has a REASON (§T.158). The dodge below deflects around
+   * OBSTACLES — a crate, a guara, the corner of the cabin — and must not
+   * deflect around GROUND: skimming along a 40° bank instead of stopping at it
+   * changes where walking takes you, and `tests/ashore.test.ts`'s round trip
+   * is the shape of that (she walks up the slope, is stopped by the bank, then
+   * turns for the lagoon). Terrain keeps the behaviour it had; furniture is
+   * what the walker now slips past.
+   */
+  const admitReason = (tx: number, tz: number): 'ok' | 'thing' | 'ground' => {
     const h = surface.heightAt(tx, tz);
-    if (h === null) return true;
-    if (surface.solidAt(tx, tz)) return false;
+    if (h === null) return 'ok';
+    // §T.158/§V99: the feet decide. A solid whose top the walker is already
+    // over — a guara board at the peak of a jump, a crate within a stride —
+    // is something to land ON, not a wall.
+    if (surface.solidAt(tx, tz, y)) return 'thing';
     const c = surface.ceilingAt?.(tx, tz) ?? null;
-    if (c !== null && c - h < p.crouchHeight) return false;
+    if (c !== null && c - h < p.crouchHeight) return 'thing';
     const rise = h - y;
-    if (rise > p.stepUp) return false;
+    if (rise > p.stepUp) return 'ground';
     if (rise > 0 && s.grounded) {
       // a stride onto a rising slope: refuse beyond maxSlope, but a step's
       // flat top reads as 0 and is admitted by `stepUp` above
       const ahead = surface.heightAt(tx + ux * p.slopeProbe, tz + uz * p.slopeProbe);
-      if (ahead !== null && (ahead - h) / p.slopeProbe > tanMax) return false;
+      if (ahead !== null && (ahead - h) / p.slopeProbe > tanMax) return 'ground';
     }
-    return true;
+    return 'ok';
   };
+  const admits = (tx: number, tz: number): boolean => admitReason(tx, tz) === 'ok';
   let nx = x + vx * dt;
   let nz = z + vz * dt;
-  if (!admits(nx, nz)) {
-    // slide: keep whichever axis is free
-    if (admits(nx, z)) nz = z;
-    else if (admits(x, nz)) nx = x;
-    else {
-      nx = x;
-      nz = z;
+  const blockedBy = admitReason(nx, nz);
+  if (blockedBy !== 'ok') {
+    /**
+     * §T.158 — WHAT A BLOCKED STEP DOES INSTEAD OF STOPPING.
+     *
+     * USER: "we're not getting auto-dodged, and getting stuck on all the
+     * things… it feels a bit iffy to walk around." The old reply to a refused
+     * move was to drop a whole AXIS — try (nx, z), then (x, nz), then stand
+     * still — which is right only when the obstacle happens to lie along x or
+     * z. The raft's cabin is square to the hull, so walking the starboard lane
+     * at a few degrees off-parallel lost the entire forward component every
+     * tick and read as glue.
+     *
+     * Three replies, in order, and the first that works wins:
+     *
+     *  1. SLIDE ALONG THE WALL. Probe the two directions perpendicular to the
+     *     step; whichever admits, keep the component of the step that points
+     *     that way. This is the tangent, so a wall at any angle bleeds off the
+     *     normal component and the walker keeps their speed along it.
+     *  2. NUDGE PAST THE CORNER. A capsule caught on the corner of a crate is
+     *     refused from `capsuleRadius` away by the footprint probe. Offer a
+     *     step displaced sideways by one radius, both ways: it clears the
+     *     corner without ever letting the walker through anything, because the
+     *     displaced target is itself put through `admits`.
+     *  3. STOP. Everything is refused; the walker is in a corner.
+     *
+     * Nothing here moves the walker anywhere `admits` has not approved, so no
+     * amount of sliding can push them through a wall or up a cliff.
+     */
+    const stepX = nx - x;
+    const stepZ = nz - z;
+    const len = Math.hypot(stepX, stepZ);
+    let done = false;
+    if (len > 1e-9 && blockedBy === 'thing' && surface.dodgeableSolids === true) {
+      // DEFLECT, don't stop. Try the step turned a little to each side, taking
+      // the first angle that is admitted: against a wall at a slight angle the
+      // walker rounds onto it and keeps their speed, and around the corner of a
+      // crate they step past it instead of gluing to it. 60° is the limit
+      // because the deflected step must still be mostly the direction the
+      // player ASKED for — beyond that a walker facing a flat wall would start
+      // sidling along it, which is a different (and wrong) behaviour.
+      const dirX = stepX / len;
+      const dirZ = stepZ / len;
+      for (const deg of DEFLECT_DEG) {
+        const a = (deg * Math.PI) / 180;
+        const ca = Math.cos(a);
+        const sa = Math.sin(a);
+        const tx = x + (dirX * ca - dirZ * sa) * len;
+        const tz = z + (dirX * sa + dirZ * ca) * len;
+        if (!admits(tx, tz)) continue;
+        nx = tx;
+        nz = tz;
+        done = true;
+        break;
+      }
+    }
+    if (!done) {
+      // the axis drop, kept as the last thing before standing still: it saves
+      // the inside corner that opens along x or z, which no deflection of the
+      // step direction can reach
+      if (admits(nx, z)) nz = z;
+      else if (admits(x, nz)) nx = x;
+      else {
+        nx = x;
+        nz = z;
+      }
     }
   }
   s.vel[0] = (nx - x) / dt;

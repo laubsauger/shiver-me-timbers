@@ -19,6 +19,7 @@
  * of its two logs, so the height dips (water pools along the seam) but never
  * falls toward the waterline. §V83: foot radius > chink ⇒ no fall-through.
  */
+import { SOLID_UNBOUNDED } from './deckHeightfield';
 import type { PieceDef } from './pieceTypes';
 import { raftLayout, type RaftLayout } from './raftPartsLayout';
 import { raftParams, type RaftParams } from '../params/raft';
@@ -261,6 +262,13 @@ export interface RaftCell {
   /** 1 inside the hull outline (logs + chinks), 0 outboard */
   mask: number;
   solid: number;
+  /**
+   * §T.158/§V99 — the ship-space y of the TOP of whatever solid is here, or
+   * `SOLID_UNBOUNDED` when there is none. The walk blocks on this rather than
+   * on `solid` alone, so a knee-high thing is knee-high: a guara board stands
+   * `logTopY + 0.6` and used to be a wall to the sky.
+   */
+  solidTop: number;
 }
 
 /** the surface at one ship-space point; `padX/padZ` widen solids to ≥ 1 texel */
@@ -292,7 +300,7 @@ export function raftStructureAt(F: RaftFieldLayout, x: number, z: number, padX =
     const fb = barProfile(Math.max(0, rb - inset), rb);
     y = Math.max(y, F.axisY + Math.max(fa, fb));
   }
-  if (!covered) return { y, mask: 0, solid: 0 };
+  if (!covered) return { y, mask: 0, solid: 0, solidTop: SOLID_UNBOUNDED };
 
   for (const bar of F.bars) {
     // distance to the bar's AXIS SEGMENT, so its ends carry the same 35°
@@ -315,12 +323,17 @@ export function raftStructureAt(F: RaftFieldLayout, x: number, z: number, padX =
   }
 
   let solid = 0;
+  // the HIGHEST top wins: two solids overlapping a texel are as tall as the
+  // taller of them, and a walk that took the lower one would step into the
+  // other
+  let solidTop = -Infinity;
   for (const s of F.solids) {
     if (x < s.x0 - padX || x > s.x1 + padX || z < s.z0 - padZ || z > s.z1 + padZ) continue;
     solid = 1;
+    solidTop = Math.max(solidTop, s.top);
     // stand proud in `data` too, so the water solver's head keeps water out
     // of it the way it does for the bulwarks (deckwater ignores `solid`)
     y = Math.max(y, Math.min(s.top, y + SOLID_HEIGHT_CAP));
   }
-  return { y, mask: 1, solid };
+  return { y, mask: 1, solid, solidTop: solid === 0 ? SOLID_UNBOUNDED : solidTop };
 }

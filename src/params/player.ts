@@ -9,7 +9,23 @@
 import { registerParams } from './registry';
 
 export interface PlayerParams {
-  /** capsule radius — how close the eye can get to a bulwark */
+  /**
+   * Capsule radius — how close the eye can get to a bulwark, and half the
+   * width of every gap the walker can pass.
+   *
+   * §T.158 — 0.30 MADE THE RAFT TIGHTER THAN IT LOOKS. Measured on the real
+   * field with the capsule probe applied: the cabin's doorway is authored
+   * 1.40 m and gives a 0.79 m clear run, and the PORT LANE abaft the cabin is
+   * 0.56 m — narrower than the 0.60 m capsule, i.e. shut. USER: "it's still a
+   * tad tight around the boat and getting into the house is awkward." At 0.25
+   * (a 0.50 m walker, still a broad adult) the port lane opens with 6 cm to
+   * spare and the doorway gives 0.89 m against a 0.50 m body — a gap you walk
+   * through instead of threading.
+   *
+   * The alternative was to widen the lanes in the blueprint, and that is the
+   * wrong lever: §V82 binds the raft's geometry to the 1947 reference, and the
+   * lanes ARE that width on the real Kon-Tiki. The man is what gives.
+   */
   capsuleRadius: number;
   /** capsule height standing / crouched; eye sits `eyeDrop` below the top */
   standHeight: number;
@@ -118,7 +134,7 @@ export interface PlayerParams {
 export const playerParams: PlayerParams = registerParams<PlayerParams>(
   'player',
   {
-    capsuleRadius: 0.3,
+    capsuleRadius: 0.25, // §T.158 — see the note on the field above
     standHeight: 1.7,
     crouchHeight: 1.1,
     eyeDrop: 0.1,

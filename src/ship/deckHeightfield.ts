@@ -65,7 +65,26 @@ export interface DeckHeightfield {
   mask: Float32Array;
   /** 1 = obstacle the water must not enter (bulwark, coaming, partner, drum) */
   solid: Float32Array;
+  /**
+   * §T.158/§V99 — THE TOP OF THAT OBSTACLE, metres relative to `deckY`, so a
+   * walk can ask how tall the thing in its way is instead of treating every
+   * `solid` texel as a wall to the sky. A guara board stands 0.6 m proud and
+   * used to be unjumpable for exactly that reason.
+   *
+   * `SOLID_UNBOUNDED` where the obstacle has no useful top (a bulwark, a
+   * cabin wall, anything the walker must never get over), which is also the
+   * value a field that does not model tops fills the whole channel with — so
+   * a caller that ignores this channel behaves exactly as it did before.
+   */
+  solidTop: Float32Array;
 }
+
+/**
+ * The height a `solidTop` carries when the obstacle is a wall: far above any
+ * jump, finite so a bilinear sample of it stays finite (an Infinity here
+ * poisons the interpolation of every texel beside it).
+ */
+export const SOLID_UNBOUNDED = 1e3;
 
 /** deck-shape constants, all in metres — the "artist" half of the field */
 const CAMBER = 0.085; // crown at the centreline; decks shed water outboard
@@ -363,6 +382,11 @@ export function buildDeckHeightfield(
   const plank = new Float32Array(width * height);
   const mask = new Float32Array(width * height);
   const solid = new Float32Array(width * height);
+  // §T.158: the galleon's deck does not model obstacle TOPS — its solids are
+  // bulwarks, coamings, partners and the drum, every one of which is meant to
+  // be a wall. Filling the channel with `SOLID_UNBOUNDED` says exactly that,
+  // and keeps this field's behaviour identical to what it was.
+  const solidTop = new Float32Array(width * height).fill(SOLID_UNBOUNDED);
   for (let j = 0; j < height; j++) {
     const z = minZ + (j + 0.5) * texelZ;
     for (let i = 0; i < width; i++) {
@@ -379,7 +403,7 @@ export function buildDeckHeightfield(
   return {
     width, height, minX, maxX, minZ, maxZ, texelX, texelZ,
     deckY: L.deckY,
-    data, plank, mask, solid,
+    data, plank, mask, solid, solidTop,
   };
 }
 

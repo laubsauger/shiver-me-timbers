@@ -46,18 +46,36 @@ export function createDeckSurface(
   const inside = (x: number, z: number): boolean =>
     x >= field.minX && x <= field.maxX && z >= field.minZ && z <= field.maxZ;
   const surface: WalkSurface = {
+    // §T.158: a deck's solids are furniture — the walker slips past them
+    // rather than gluing to them. Terrain's are hillsides and do not.
+    dodgeableSolids: true,
     heightAt(x, z) {
       if (!inside(x, z)) return null;
       if (sampleDeckField(field, field.mask, x, z) < maskMin) return null;
       return field.deckY + sampleDeckField(field, field.data, x, z);
     },
-    solidAt(x, z) {
+    /**
+     * §T.158/§V99 — A SOLID HAS A HEIGHT, and `feet` is what decides whether
+     * this one is in the way. Below `top − stepUp` it is a wall; at or above
+     * that the walker can put a foot on it, so the cell is admitted and the
+     * height field (which already stands the obstacle proud) carries them up
+     * onto it. That is what makes a 0.6 m guara board something a jump clears
+     * instead of a wall to the sky.
+     *
+     * `feet` omitted = the old behaviour, a wall at every altitude. Every
+     * field that does not model tops fills the channel with `SOLID_UNBOUNDED`,
+     * so passing feet changes nothing for those either.
+     */
+    solidAt(x, z, feet) {
       const r = playerParams.capsuleRadius;
       for (const [dx, dz] of FOOTPRINT) {
         const px = x + dx * r;
         const pz = z + dz * r;
         if (!inside(px, pz)) continue;
-        if (sampleDeckField(field, field.solid, px, pz) >= solidMin) return true;
+        if (sampleDeckField(field, field.solid, px, pz) < solidMin) continue;
+        if (feet === undefined) return true;
+        const top = field.deckY + sampleDeckField(field, field.solidTop, px, pz);
+        if (feet < top - playerParams.stepUp) return true;
       }
       return false;
     },

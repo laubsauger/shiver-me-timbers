@@ -13,7 +13,8 @@
  * prompt, the cue dots, §T.155's outline — must ask the SAME pair or be free
  * to disagree about what is being looked at (§V62).
  */
-import type { PieceResolver, Vec3 } from '../player/stations';
+import { RAFT_STATIONS, type PieceResolver, type RaftAction, type Vec3 } from '../player/stations';
+import { setRaftHighlight } from '../ship/raftHighlight';
 import type { ShipAssembly } from '../ship/shipAssembly';
 
 export interface StationResolvers {
@@ -34,4 +35,19 @@ export function createStationResolvers(assembly: ShipAssembly): StationResolvers
     },
     pieceNear: (id, at) => assembly.pieceNearestPoint(id, [at[0], at[1], at[2]]),
   };
+}
+
+/**
+ * §T.155 — THE PROMPT'S FOCUS, AS AN OUTLINE. `createRaftPrompt`'s `onFocus`
+ * hands over the station being named and the plaque's own fade; this turns it
+ * into the piece whose silhouette lights (`RaftStation.piece`, §T.157 — the
+ * same field the plaque and the look cone use, so the glow can never land on
+ * a different object from the one E takes).
+ *
+ * A station with no piece named — the gangways, the sheets belayed to their
+ * pins — lights nothing rather than lighting the wrong thing.
+ */
+export function highlightFocus(action: RaftAction | null, alpha: number): void {
+  const piece = action === null ? undefined : RAFT_STATIONS[action]?.piece;
+  setRaftHighlight(piece ?? null, piece === undefined ? 0 : alpha);
 }
