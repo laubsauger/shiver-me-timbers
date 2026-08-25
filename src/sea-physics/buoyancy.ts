@@ -20,7 +20,10 @@ import { buoyancyScale, floodListTorque, floodMassFactor } from './flooding';
  * §B.22). Used to be three galleon constants here, which made ship 1 float
  * as a 35 m galleon whatever blueprint she was built from.
  */
-export type HullPlan = Pick<SeaPhysicsParams, 'hullBowZ' | 'hullSternZ' | 'hullHalfBeam'>;
+export type HullPlan = Pick<
+  SeaPhysicsParams,
+  'hullBowZ' | 'hullSternZ' | 'hullHalfBeam' | 'hullPlan'
+>;
 
 /**
  * Normalised half-breadth of the waterline outline, 0..1 of `hullHalfBeam`.
@@ -31,6 +34,22 @@ function halfBreadth(z: number, hull: HullPlan): number {
   const mid = (hull.hullBowZ + hull.hullSternZ) / 2;
   const halfLen = (hull.hullBowZ - hull.hullSternZ) / 2;
   const u = Math.min(1, Math.max(-1, (z - mid) / halfLen));
+  /**
+   * §T.162/§V71 — A HULL MAY DECLARE ITS OWN PLAN, sampled stern (u = −1) to
+   * bow (u = +1). The raft does, off her own log stations
+   * (`sailing/raftWaterplane.ts`), because the ellipse below is a GALLEON's
+   * and floating a log raft on it gave her 0.55 of her beam at the extreme
+   * stern where she has none — the "more buoyancy in the back than it should
+   * be" the user reported. Absent (every ship in the pirate sim) = the
+   * ellipse, unchanged.
+   */
+  const plan = hull.hullPlan;
+  if (plan !== undefined && plan.length >= 2) {
+    const t = ((u + 1) / 2) * (plan.length - 1);
+    const i = Math.min(plan.length - 2, Math.max(0, Math.floor(t)));
+    const f = Math.min(1, Math.max(0, t - i));
+    return Math.max(0, plan[i] + (plan[i + 1] - plan[i]) * f);
+  }
   const ell = Math.sqrt(Math.max(0, 1 - u * u));
   return u >= 0 ? ell : Math.max(ell, 0.55);
 }
@@ -176,7 +195,11 @@ function buildStations(slices: number, hull: HullPlan): StationSet {
 const stationCache = new Map<string, StationSet>();
 export function probeStations(slices: number, hull: HullPlan = seaPhysicsParams): StationSet {
   const n = Math.max(1, Math.round(slices));
-  const key = `${n}|${hull.hullBowZ}|${hull.hullSternZ}|${hull.hullHalfBeam}`;
+  // the plan is part of the geometry the stations are built from, so it is
+  // part of their identity — a cache keyed without it would hand the raft the
+  // galleon's stations (§V62's shape: a value that looks right and is stale)
+  const key = `${n}|${hull.hullBowZ}|${hull.hullSternZ}|${hull.hullHalfBeam}`
+    + `|${hull.hullPlan === undefined ? 'ell' : hull.hullPlan.join(',')}`;
   let s = stationCache.get(key);
   if (s === undefined) {
     s = buildStations(n, hull);
@@ -615,6 +638,28 @@ export function stepShipBuoyancy(
     torque[2] += t[2];
   }
   mem.prevTime = time;
+
+  /**
+   * §T.162 — THE STATIC TRIM. The stations are re-centred so Σw·z = 0, which
+   * is what makes flat water produce exactly zero pitch torque; a hull whose
+   * weight is not over that centroid needs the difference put back, and this
+   * is it: a constant moment m·g·`cgOffsetZ`, balanced by the waterplane's own
+   * stiffness, so the ANGLE is the hull's answer and not a second authored
+   * number that could disagree with it.
+   *
+   * Sign: a station at +z (forward) with upward lift contributes −z·f to
+   * `torque[0]`, and −pitch lifts the bow (see the pitch memory below), so a
+   * NEGATIVE `cgOffsetZ` — weight aft — gives a negative torque and puts her
+   * down by the stern. USER: "a little bit heavier on the back and a little
+   * bit lighter on the front."
+   *
+   * Gated on support so she does not trim in mid-air: out of the water there
+   * is nothing for the moment to act against, and applying it there would spin
+   * a leaping hull about its own centre.
+   */
+  if (p.cgOffsetZ !== 0 && support > 0) {
+    torque[0] += p.mass * GRAVITY * p.cgOffsetZ * support;
+  }
 
   // QUADRATIC HEAVE DRAG — a WHOLE-BODY term, and that is not a shortcut.
   //

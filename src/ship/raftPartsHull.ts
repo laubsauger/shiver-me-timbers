@@ -239,7 +239,7 @@ function slab(
  * then the chamfered point). §V71: a mat laid to a log's edge has to ask the
  * log how wide it is THERE, or it hangs over the water at the bow.
  */
-function logHalfAt(p: RaftParams, log: LogStation, z: number): number {
+export function logHalfAt(p: RaftParams, log: LogStation, z: number): number {
   const tip = log.zBow - z;
   if (tip <= 0) return 0;
   const r = tip >= p.logTaperLength

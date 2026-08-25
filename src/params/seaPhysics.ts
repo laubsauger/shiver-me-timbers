@@ -3,6 +3,7 @@
  * Mirror params control fidelity/cost of the CPU ocean copy; the rest are
  * rigid-body constants for the buoyancy integrator.
  */
+import { raftWaterplane } from '../sailing/raftWaterplane';
 import { registerParams, type ParamMeta } from './registry';
 import { brigantineParams, galleonParams, type ShipClassParams } from './ship';
 import { raftParams, type RaftParams } from './raft';
@@ -76,6 +77,31 @@ export interface SeaPhysicsParams {
    */
   hullDraft: number;
   hullFreeboard: number;
+  /**
+   * §T.162/§V71 — this hull's own waterplane, sampled from the stern (index 0,
+   * u = −1) to the bow (last, u = +1), each value the half-breadth there as a
+   * fraction of `hullHalfBeam`. Absent = the elliptical galleon plan
+   * `buoyancy.halfBreadth` has always used, so every ship in the pirate sim is
+   * untouched. The raft fills it from her own log stations, because floating a
+   * nine-log raft on a galleon's fine entry and 0.55-beam transom is what made
+   * her "way too light in the back".
+   */
+  hullPlan?: readonly number[];
+  /**
+   * §T.162 — LONGITUDINAL CENTRE OF GRAVITY, metres from the waterplane's own
+   * centroid; NEGATIVE IS AFT. The probe stations are re-centred so that
+   * Σw·z = 0 (flat water makes exactly zero pitch torque), which floats every
+   * hull dead level — and a raft whose cabin, stern block and steering oar are
+   * all abaft midships does not float dead level.
+   *
+   * USER: "our baseline sitting in the water should be a little bit heavier on
+   * the back and a little bit lighter on the front… it'd be weird to be way
+   * too light in the back, which is probably the heaviest part of the ship."
+   * This is that trim, as the one number that causes it: a constant pitch
+   * moment m·g·`cgOffsetZ` the waterplane's own stiffness balances, so the
+   * angle follows from the hull instead of being authored twice.
+   */
+  cgOffsetZ: number;
   /** N per meter of submersion for the WHOLE waterplane (ρ·g·A_wp; station
    * weights sum to 1, so this and the mass set the ride height together:
    * immersion = mass·g/spring − hullDraft) */
@@ -297,6 +323,7 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
     // the galleon's own loft (params/ship): keel 2.0 m below the design
     // waterline, deck 2.6 m above it
     hullDraft: 2.0,
+    cgOffsetZ: 0, // the galleon is ballasted to her marks (§T.162)
     hullFreeboard: 2.6,
     // ρ·g·A_wp with the station model's own waterplane, A_wp = 241.7 m²
     // (Cwp 0.80). Measured, not chosen: it is the area the 18 slices span.
@@ -564,10 +591,38 @@ function raftSea(g: SeaPhysicsParams, r: RaftParams = raftParams): SeaPhysicsPar
     // EST: a 5.5 m wide slab with no keel and no bilge follows the surface instead of
     // swinging through it — nothing to roll ABOUT. ζ_roll up from 0.09 toward critical.
     rollDampingScale: 0.6,
-    pitchDampingScale: 0.6, // EST: same argument fore-aft; the logs bend to the swell, they do not pitch against it
+    /**
+     * §T.162 — 0.6 → 1.2. USER: "it feels like we are careening back and
+     * forth… our heaving up and down front and back is not really feeling
+     * like it should be."
+     *
+     * The argument was already in this file and only half-applied: nine logs
+     * lashed across three crossbeams BEND to a swell, they do not swing
+     * against it, and 0.6 (against the galleon's 0.33) was a first step in
+     * that direction. Measured peak pitch swing over a minute of the shipped
+     * sea: 13.1° at 0.6, 11.4° at 0.9, 10.6° at 1.2, 9.4° at 1.6. 1.2 puts her
+     * a fifth calmer than she was BEFORE this task's waterplane change — which
+     * on its own cost 1.5° of swing, because her true plan is finer forward
+     * than the ellipse it replaced.
+     */
+    pitchDampingScale: 1.2,
     // gyradii as the galleon's (0.25·L_wl pitch, 0.45·B roll) on 15 t: I ∝ m·L² — low, as a log raft is
     inertiaPitch: mass * (0.25 * lwl) ** 2,
     inertiaRoll: mass * (0.45 * 2 * halfBeam) ** 2,
+    /**
+     * §T.162 — HER OWN WATERPLANE, off her own logs, and a stern that is
+     * genuinely heavier than her bow.
+     *
+     * `hullPlan` replaces the elliptical galleon curve for this hull only; see
+     * `sailing/raftWaterplane.ts` for the measurement that made it necessary.
+     * `cgOffsetZ` is the trim on top of it: her cabin, her stern block, her
+     * steering oar and her helmsman are all abaft midships, so she floats a
+     * little down by the stern. −0.35 m of a 14.3 m hull is about a degree,
+     * which is what "a little bit heavier on the back" looks like from the
+     * deck — visible in how she meets a swell, not as a slope you stand on.
+     */
+    hullPlan: raftWaterplane(sternZ, bowZ, halfBeam, r),
+    cgOffsetZ: -0.35, // EST — see above
     // spring/damper ∝ mass, so rest penetration in the sand is unchanged (raftBeaching scales the same way)
     groundingSpring: g.groundingSpring * massRatio,
     groundingDamping: g.groundingDamping * massRatio,
@@ -594,6 +649,7 @@ function seaPhysicsMeta(): Partial<Record<keyof SeaPhysicsParams, ParamMeta>> {
     hullHalfBeam: { min: 1, max: 10, step: 0.05 },
     hullDraft: { min: 0, max: 6, step: 0.05 },
     hullFreeboard: { min: 0, max: 8, step: 0.05 },
+    cgOffsetZ: { min: -4, max: 4, step: 0.05 },
     probeLayoutScale: { min: 0.2, max: 3, step: 0.05 },
     probeSlices: { min: 1, max: 32, step: 1 },
     hullFootprintLength: { min: 0, max: 15, step: 0.25 },

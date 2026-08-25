@@ -10,6 +10,10 @@
  * from the row. The oar shares the rudder sign of `shipKinematics`
  * (+ = starboard) so one input layer serves both hulls.
  */
+import { raftSeaParams, seaPhysicsParams } from '../src/params/seaPhysics';
+import { CpuOcean } from '../src/sea-physics/cpuOcean';
+import { stepShipBuoyancy } from '../src/sea-physics/buoyancy';
+import { oceanParams } from '../src/params/ocean';
 import { bowEmission } from '../src/foam/sprayMath';
 import { sprayParams } from '../src/params/spray';
 import { raftWakeParams } from '../src/params/raftSailing';
@@ -536,5 +540,71 @@ describe('§T.161 the bow sheet is scaled to the vessel that makes it', () => {
       expect(r, `rate fell going from the step before ${v} m/s`).toBeGreaterThanOrEqual(prev);
       prev = r;
     }
+  });
+});
+
+/**
+ * §T.162/§V71 — SHE FLOATS ON HER OWN LOGS, AND A LITTLE DOWN BY THE STERN.
+ *
+ * USER: "it feels like the front wants to go down and the back kind of has
+ * more buoyancy to it than it should… our baseline sitting in the water should
+ * be a little bit heavier on the back and a little bit lighter on the front…
+ * it'd be weird to be way too light in the back, which is probably the
+ * heaviest part of the ship."
+ *
+ * He was feeling a GALLEON's waterplane: `buoyancy.halfBreadth` is one
+ * elliptical curve — pointed at the stem, floored at 0.55 of the beam across
+ * the transom — and it was the only plan in the game. At the raft's extreme
+ * stern it invents more than half her beam where three projecting logs have
+ * already tapered to nothing.
+ */
+describe('§T.162 the raft floats on her own waterplane', () => {
+  const plan = raftSeaParams.hullPlan;
+
+  it('§V71 the plan comes from her logs, and it is NOT the elliptical one', () => {
+    expect(plan, 'the raft is still floating on the galleon curve').toBeDefined();
+    const p = plan as readonly number[];
+    expect(p.length).toBeGreaterThan(8);
+    for (const v of p) expect(Number.isFinite(v) && v >= 0 && v <= 1).toBe(true);
+    // the ends are ends: nothing is displacing water past the last log
+    expect(p[0], 'the extreme stern still carries beam the raft does not have')
+      .toBeLessThan(0.15);
+    expect(p[p.length - 1], 'the stem is not a stem').toBeLessThan(0.15);
+    // …and the middle is a raft: a broad, flat plateau, not an ellipse's peak
+    const mid = p[(p.length - 1) / 2];
+    expect(mid, 'amidships is not full').toBeGreaterThan(0.8);
+    const quarter = p[Math.round((p.length - 1) * 0.25)];
+    expect(quarter / mid, 'the after body tapers like a galleon, not like a raft')
+      .toBeGreaterThan(0.85);
+  });
+
+  it('§T.162 in flat water she sits down by the stern — a little, not a slope', () => {
+    const sea = new CpuOcean(11, { ...oceanParams, resolution: 128, amplitude: 0, swellAmplitude: 0 } as never, raftSeaParams as never);
+    const s = {
+      id: 's', kind: 'player', position: [0, 0, 0], quaternion: [0, 0, 0, 1],
+      velocity: [0, 0, 0], angularVelocity: [0, 0, 0], rudder: 0, sailTrim: 0,
+      flood: 0, damage: {},
+    } as unknown as ShipState;
+    for (let i = 0; i < 60 * 40; i++) {
+      sea.update(i * SIM_DT);
+      stepShipBuoyancy(s, sea, SIM_DT, raftSeaParams);
+    }
+    const rot = (v: [number, number, number]): number => {
+      const [x, y, z, w] = s.quaternion as unknown as [number, number, number, number];
+      const t: [number, number, number] = [
+        2 * (y * v[2] - z * v[1]), 2 * (z * v[0] - x * v[2]), 2 * (x * v[1] - y * v[0]),
+      ];
+      return v[1] + w * t[1] + (z * t[0] - x * t[2]);
+    };
+    const rise = rot([0, 0, raftSeaParams.hullBowZ]) - rot([0, 0, raftSeaParams.hullSternZ]);
+    // the bow rides HIGHER than the stern, by enough to see and little enough
+    // to stand on: a few tenths of a degree over 14 m of hull
+    expect(rise, 'she floats dead level, or down by the head').toBeGreaterThan(0.05);
+    expect(rise, 'she is trimmed like a wheelbarrow').toBeLessThan(0.40);
+  });
+
+  it('the galleon is untouched: no plan of her own, no trim offset', () => {
+    expect(seaPhysicsParams.hullPlan).toBeUndefined();
+    expect(seaPhysicsParams.cgOffsetZ).toBe(0);
   });
 });
