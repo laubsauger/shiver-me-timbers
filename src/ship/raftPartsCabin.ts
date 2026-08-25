@@ -364,8 +364,18 @@ function buildCabinInterior(p: RaftParams, L: RaftLayout): PieceDef[] {
   const mid = (r.z0 + r.z1) / 2;
   // kept clear of the doorway's own aperture: even a 2 cm mat lying across the
   // sill is a thing the eye reads as "the door does not open"
+  //
+  // §B117/§V98 — AND THE SECOND ONE LIES ON THE FIRST. They overlap by 0.70 m
+  // of the room's length (mat 0 runs to `mid + 0.80`, mat 1 starts at
+  // `mid + 0.10`), and both used to span exactly `fy` … `fy + mt`: one plane,
+  // two opaque quads, 1.02 m² of it in the middle of the floor. USER: "there
+  // is some z-fighting on the floor in the wooden house cabin in the middle
+  // area." Stacking mat 1 by its own thickness is both the fix and what a mat
+  // thrown down over another one actually does — there is no depth bias to
+  // reach for here, because the rasteriser has no right answer to find.
   for (const [k, cx, cz, yaw] of [[0, 0.0, mid - 0.15, 0.05], [1, -0.05, mid + 1.05, -0.04]] as const) {
-    out.push(on(`floor-mat-${k}`, 'bamboo-deck', cx - mw, cx + mw, fy, fy + mt, cz - ml, cz + ml,
+    const y0 = fy + k * mt;
+    out.push(on(`floor-mat-${k}`, 'bamboo-deck', cx - mw, cx + mw, y0, y0 + mt, cz - ml, cz + ml,
       { rotation: [0, yaw, 0] }));
   }
 

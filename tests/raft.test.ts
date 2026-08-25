@@ -1516,6 +1516,34 @@ describe('§T129 the cabin shell: no fighting faces, and courses that step', () 
   const byId = new Map(raft.map((d) => [d.id, d]));
   const walls = raft.filter((d) => d.kind === 'cabin-wall').map((d) => d.id);
 
+  /**
+   * §V98/§B117 — …AND THE SAME RULE OVER THE WHOLE RAFT, not only the cabin
+   * shell. USER: "there is some z-fighting on the floor in the wooden house
+   * cabin on the raft in the middle area" — two reed mats laid over each other
+   * with both tops on one plane, 1.02 m² of it, which §T129's scan never saw
+   * because it was pointed at the walls. The detector already existed and was
+   * aimed too narrowly; this aims it at everything.
+   *
+   * `minArea` is 1 cm²: below that the overlap is a sliver at a butt joint and
+   * a pixel of shimmer nobody will ever see, and holding the raft to zero
+   * there would fail on a rounding difference.
+   */
+  it('§V98 no two pieces share an UP-FACING plane you could stand on and look at', () => {
+    // UP-FACING, and between DIFFERENT pieces: that is the class the walker
+    // actually sees. Two down-facing bottoms resting on one deck are coplanar
+    // too and nobody will ever be under them to watch it shimmer, and a piece
+    // whose own geometry doubles a facet is a builder matter, not a placement
+    // one. Both are excluded on purpose rather than by a tolerance.
+    const ids = raft.map((d) => d.id);
+    const fights = coplanarFights(asm, ids, 0.001, 1e-3)
+      .filter((line) => {
+        const m = /n=\((-?[\d.]+),(-?[\d.]+),(-?[\d.]+)\)/.exec(line);
+        const [a, b] = line.split(' ∥ ');
+        return m !== null && Number(m[2]) > 0.5 && a !== b.split(' on ')[0];
+      });
+    expect(fights.join('\n')).toBe('');
+  });
+
   it('(b) no two cabin wall or gable surfaces share a plane, a facing and a patch of area', () => {
     // WHY THIS IS THE TEST. Before the fix the port wall and both starboard
     // walls ran the FULL cabin length while the two gables ran the full width,
