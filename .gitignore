@@ -10,3 +10,22 @@
 node_modules/
 dist/
 build/
+
+# ── DOCS IMAGERY LIVES LOCALLY, NOT IN THE REPO ──────────────────────────────
+# Every bug report, lookdev frame and reference sheet is a 2–5 MB PNG, and 268
+# of them made the tracked tree 405 MB — 361 MB of it these. That is what a
+# clone pays, what a CI checkout shuffles, and why the free-tier runner is
+# expensive. Keep shooting them, keep them on disk, keep referencing them from
+# SPEC.md and docs/*.md by path — just do not commit them.
+#
+# NOTE: this stops the BLEEDING, it does not undo it. The 395 MB already in
+# history stays there until someone rewrites it (filter-repo + force push),
+# which is a separate, destructive decision. A shallow CI checkout (the
+# default) never fetches that history, so this alone fixes the CI cost.
+docs/**/*.png
+docs/**/*.jpg
+docs/**/*.jpeg
+docs/**/*.gif
+docs/**/*.webp
+docs/**/*.mp4
+docs/**/*.mov

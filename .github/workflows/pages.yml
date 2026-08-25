@@ -29,8 +29,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run tests
-        run: npm test
+      # NO TEST RUN HERE, on purpose. The suite is ~3,200 tests and several
+      # minutes of CPU per push on a free-tier runner, and it is already the
+      # local merge gate — running it again in CI buys nothing and costs
+      # minutes we do not have. `npm run build` still typechecks (tsc
+      # --noEmit) and still builds both entries, so a broken tree cannot
+      # deploy. Re-add a test step when there is a budget for it, and make it
+      # a fast subset rather than the whole suite.
 
       - name: Configure GitHub Pages
         id: pages
