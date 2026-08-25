@@ -22,6 +22,7 @@
  *   only, and the analytic archetype stays reachable for A/B.
  */
 import { describe, expect, it } from 'vitest';
+import { budgetLabel, budgetMs } from './perfBudget';
 import {
   bedrockSheetingPass,
   buildErosionContext,
@@ -363,8 +364,11 @@ describe('bake budget (T112 decision: ≤ 300 ms per slice island at 256², CPU)
         const st = hm.erosion!.bakeStats;
         rows.push(`${name} ${g}²: total ${total.toFixed(0)} ms, bake ${st.totalMs.toFixed(0)} ms`);
         if (g === 256) {
-          expect(st.totalMs).toBeLessThan(300);
-          expect(total).toBeLessThan(300);
+          // §V80 — the budget is 300 ms OF THE MACHINE IT WAS MEASURED ON.
+          // A free-tier CI runner came in at 301.8 and blocked a deploy with
+          // no regression behind it; see tests/perfBudget.ts.
+          expect(st.totalMs, budgetLabel(st.totalMs, 300)).toBeLessThan(budgetMs(300));
+          expect(total, budgetLabel(total, 300)).toBeLessThan(budgetMs(300));
         }
       }
     });

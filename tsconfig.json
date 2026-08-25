@@ -13,5 +13,9 @@
     "verbatimModuleSyntax": true,
     "types": ["vite/client", "@webgpu/types"]
   },
-  "include": ["src", "tests"]
+  "include": ["src", "tests"],
+  // scratch measurement harnesses (tests/zzScratch*) are excluded on purpose:
+  // they import node built-ins and reference renamed params, so they fail
+  // `tsc --noEmit` and took the CI build down with them. See .gitignore.
+  "exclude": ["node_modules", "dist", "tests/zzScratch*"]
 }

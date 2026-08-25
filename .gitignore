@@ -29,3 +29,11 @@ docs/**/*.gif
 docs/**/*.webp
 docs/**/*.mp4
 docs/**/*.mov
+
+# ── SCRATCH TESTS ARE SCRATCH ────────────────────────────────────────────────
+# `tests/zzScratch*.test.ts` are throwaway measurement harnesses: they import
+# node built-ins, leave unused bindings around and reference params that have
+# since been renamed, so `tsc --noEmit` over `tests` fails on them and takes
+# the CI build — and therefore the deploy — down with it. They are useful
+# locally and worthless to anyone else. Keep them on disk, out of the repo.
+tests/zzScratch*

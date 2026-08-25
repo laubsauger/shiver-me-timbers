@@ -8,6 +8,7 @@
  * pin the material's cost.
  */
 import { describe, expect, it } from 'vitest';
+import { budgetLabel, budgetMs } from './perfBudget';
 import { generateIslandHeightmap, type IslandHeightmap } from '../src/island/heightmap';
 import { sierraIslandParams } from '../src/island/sierraSites';
 import { bakeHorizonMap, horizonMapFor } from '../src/island/horizonMap';
@@ -115,7 +116,8 @@ describe('§T.112d channel layout (the shared interface)', () => {
     for (let i = 0; i < 3; i++) ms.push(bakeTerrainInfo(hm, { horizon }).bakeMs);
     ms.sort((a, b) => a - b);
     expect(hm.size).toBe(256);
-    expect(ms[1]).toBeLessThanOrEqual(40);
+    // §V80: 40 ms of the reference machine (tests/perfBudget.ts)
+    expect(ms[1], budgetLabel(ms[1], 40)).toBeLessThanOrEqual(budgetMs(40));
   });
 });
 
