@@ -14,7 +14,15 @@
 import { describe, expect, it } from 'vitest';
 import type { Material } from 'three';
 import { capsuleDistance, createInteract, lookDir, type InteractHost } from '../src/player/interact';
-import { isHold, LOOKOUT_SOCKET, RAFT_ACTIONS, RAFT_STATIONS, type RaftAction } from '../src/player/stations';
+import {
+  isHold,
+  LOOKOUT_SOCKET,
+  RAFT_ACTIONS,
+  RAFT_STATIONS,
+  stationAnchor,
+  type PieceResolver,
+  type RaftAction,
+} from '../src/player/stations';
 import { HandBlend, lerpTransform, poseTransform, turnAngle } from '../src/player/handPoses';
 import { attachDebugKeys, debugKeyAction, type DebugChannel } from '../src/player/debugKeys';
 import { createPlayer } from '../src/player/index';
@@ -96,6 +104,60 @@ describe('§V84 every action has a station on the real raft', () => {
       for (const v of p) expect(Number.isFinite(v), `${a} ${RAFT_STATIONS[a].socket}`).toBe(true);
     }
     expect(raftAsm.socketWorldPosition(LOOKOUT_SOCKET).every(Number.isFinite)).toBe(true);
+  });
+
+  /**
+   * §T.157/§V97 — A SOCKET ANSWERS ONE QUESTION, and the OTHER question is
+   * answered by the piece. USER: "most of the interaction areas and labels for
+   * the things on the raft are not really aligned with where the object in
+   * question is." They were anchored on the STANCE, which for the tiller is
+   * half a metre of bare log and for the radio is a patch of cabin floor.
+   *
+   * The property, not the pixel (§V80): every named piece exists on the REAL
+   * assembly, the anchor lands ON that piece (inside its own world box, with a
+   * millimetre of slack for the clamp), and it is a point a person would call
+   * "the thing" — strictly nearer the piece than the stance is, for every
+   * station whose stance is off the object.
+   */
+  it('§V97 a station that names a piece anchors ON that piece, not on the stance', () => {
+    const near: PieceResolver = (id, at) => raftAsm.pieceNearestPoint(id, [at[0], at[1], at[2]]);
+    const named = RAFT_ACTIONS.filter((a) => RAFT_STATIONS[a].piece !== undefined);
+    expect(named.length, 'no station names its object at all').toBeGreaterThan(5);
+    for (const a of named) {
+      const piece = RAFT_STATIONS[a].piece as string;
+      const stance = raftAsm.socketWorldPosition(RAFT_STATIONS[a].socket) as Vec3;
+      const anchor = stationAnchor(a, () => stance, near);
+      expect(anchor, `${a} names a piece the assembly does not have: ${piece}`).not.toBeNull();
+      for (const v of anchor as Vec3) expect(Number.isFinite(v), `${a} anchor`).toBe(true);
+      // ON the piece: the clamp's own answer, asked again, must not move
+      const again = raftAsm.pieceNearestPoint(piece, anchor as Vec3) as Vec3;
+      const drift = Math.hypot(again[0] - anchor![0], again[1] - anchor![1], again[2] - anchor![2]);
+      expect(drift, `${a}'s anchor is not on ${piece}`).toBeLessThan(1e-3);
+    }
+  });
+
+  /**
+   * …and the half of §V97 that is the USER'S ACTUAL REPORT. For these four the
+   * stance is not on the object at all — the helmsman stands half a metre
+   * forward of the oar, §B87 put the radio's kneel spot at the nook's mouth,
+   * the halyard is hauled from the deck beside the leg — so a plaque anchored
+   * on the stance is the thing that "is not aligned with where the object is".
+   * The gap is asserted to be REAL (it is what was wrong) and to be CLOSED.
+   */
+  it('§V97 the stations whose stance is off the object now anchor on it', () => {
+    const near: PieceResolver = (id, at) => raftAsm.pieceNearestPoint(id, [at[0], at[1], at[2]]);
+    for (const a of ['tiller', 'radio', 'halyard', 'guara-1'] as RaftAction[]) {
+      const stance = raftAsm.socketWorldPosition(RAFT_STATIONS[a].socket) as Vec3;
+      const anchor = stationAnchor(a, () => stance, near) as Vec3;
+      const gap = Math.hypot(anchor[0] - stance[0], anchor[1] - stance[1], anchor[2] - stance[2]);
+      expect(gap, `${a}'s stance is already on its object — this test is stale`).toBeGreaterThan(0.2);
+    }
+  });
+
+  it('a station whose piece does not exist falls back to its stance, never to the origin', () => {
+    const stance: Vec3 = [3, 1.2, -4];
+    const anchor = stationAnchor('tiller', () => stance, () => null);
+    expect(anchor).toEqual(stance);
   });
 
   it('the table covers every member of the union exactly once, and each socket is claimed by one action PER FRAME (§T.100: push-off shares the bow gangway socket from the sand)', () => {

@@ -70,6 +70,15 @@ export const PROMPT_CSS = /* css */ `
   text-shadow: 0 1px 2px rgba(4, 18, 22, 0.9);
 }
 .smt-prompt-release { font-size: 11px; letter-spacing: 0.06em; opacity: 0.55; }
+/* §T.156 — the station's own line: the radio's frequency, its signal and the
+   name of what it has locked. Tabular so a sweeping dial does not jitter the
+   plaque's width, and quieter than the readout: it is context, not the value
+   the hand is moving. */
+.smt-prompt-status {
+  font-size: 11.5px; letter-spacing: 0.06em; color: var(--parch-hi); opacity: 0.72;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 2px rgba(4, 18, 22, 0.9);
+}
 /* §T.136d — "step closer": the answer to a station being looked at from out of
    arm's reach, which used to be silence and therefore unreadable. */
 .smt-prompt-far {

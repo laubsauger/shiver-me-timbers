@@ -79,19 +79,48 @@ export function applyListenerPose(listener: AudioListener, pose: ListenerPose): 
   l.setOrientation?.(pose.fx, pose.fy, pose.fz, pose.ux, pose.uy, pose.uz);
 }
 
-export function createPanner(ctx: BaseAudioContext, out: AudioNode): PannerNode {
+/**
+ * §B115/§V96 — AN EMITTER MAY DECLARE ITS OWN REFERENCE DISTANCE. The shared
+ * `emitterRefDistance` is 10 m, which is a ship-scale number: inside it the
+ * inverse model returns gain EXACTLY 1, so a source with the default ref is
+ * full-volume everywhere aboard a 10 m raft and never fades as you walk away
+ * from it. A hand-sized source in a cabin — the radio's speaker grille — is
+ * heard at arm's length and ! carry its own metre-scale ref.
+ *
+ * `refDistance` only; `maxDistance` and `rolloffFactor` stay shared, because
+ * those describe the SEA the sound crosses and not the thing making it.
+ */
+export interface PannerOptions {
+  /** metres inside which the source is at full gain; default `emitterRefDistance` */
+  refDistance?: number;
+}
+
+export function createPanner(ctx: BaseAudioContext, out: AudioNode, o: PannerOptions = {}): PannerNode {
   const panner = ctx.createPanner();
   panner.panningModel = 'HRTF';
   panner.distanceModel = 'inverse';
-  panner.refDistance = p.emitterRefDistance;
+  panner.refDistance = refOf(o);
   panner.maxDistance = p.emitterMaxDistance;
   panner.rolloffFactor = p.emitterRolloff;
   panner.connect(out);
   return panner;
 }
 
+/** the emitter's own ref, or the shared one; finite and positive either way (§V28) */
+function refOf(o: PannerOptions): number {
+  const own = o.refDistance;
+  if (own !== undefined && Number.isFinite(own) && own > 0) return own;
+  return p.emitterRefDistance;
+}
+
 /** world position write + live re-read of the distance params (§V16) */
-export function setPannerPosition(panner: PannerNode, x: number, y: number, z: number): void {
+export function setPannerPosition(
+  panner: PannerNode,
+  x: number,
+  y: number,
+  z: number,
+  o: PannerOptions = {},
+): void {
   const node = panner as PannerNode & {
     positionX?: AudioParam;
     setPosition?: (x: number, y: number, z: number) => void;
@@ -104,7 +133,7 @@ export function setPannerPosition(panner: PannerNode, x: number, y: number, z: n
   } else {
     node.setPosition?.(x, y, z);
   }
-  panner.refDistance = p.emitterRefDistance;
+  panner.refDistance = refOf(o);
   panner.maxDistance = p.emitterMaxDistance;
   panner.rolloffFactor = p.emitterRolloff;
 }

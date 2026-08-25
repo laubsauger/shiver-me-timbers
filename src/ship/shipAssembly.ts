@@ -142,6 +142,8 @@ function makeDefaultMaterialFactory(deckField?: DeckFieldSampler): MaterialFacto
 
 /** scratch vector — socketWorldPosition is called once per rope per frame */
 const tmpSocket = new THREE.Vector3();
+/** …and its inverse, for `pieceNearestPoint`'s world→local step (§T.157) */
+const tmpMatrix = new THREE.Matrix4();
 
 interface PieceRuntime {
   def: PieceDef;
@@ -558,6 +560,42 @@ export class ShipAssembly {
   /** drawn depth of one guara piece, 0..1; undefined = never driven */
   guaraDepthOf(pieceId: string): number | undefined {
     return this.guaraDepths.get(pieceId);
+  }
+
+  /**
+   * §T.157 — THE POINT ON A PIECE NEAREST A GIVEN WORLD POINT, live.
+   *
+   * What a station's plaque, its cue dot and (§T.155) its outline all want is
+   * "where IS the thing" — and for a long piece the answer depends on where
+   * you are standing: the helmsman wants the oar's TILLER end, not the middle
+   * of a 5.8 m shaft; the halyard's plaque wants the leg at deck height, not
+   * the masthead 8 m up; the kneeling player wants the radio's FACE, not the
+   * middle of the case. Clamping the reference point into the piece's own box
+   * answers all three from one rule, with no per-station offsets to drift
+   * (§V62), and it is resolved through the LIVE matrix (§V71) so a guara being
+   * raised carries its label up with it.
+   *
+   * Returns null for a piece that does not exist, so a station naming a prop
+   * that has not been built yet degrades to its socket rather than anchoring
+   * at the origin.
+   */
+  pieceNearestPoint(pieceId: string, near: Vec3): Vec3 | null {
+    const rt = this.pieces.get(pieceId);
+    if (rt === undefined) return null;
+    if (!near.every((v) => Number.isFinite(v))) return null;
+    rt.node.updateWorldMatrix(true, false);
+    const local = tmpSocket.set(near[0], near[1], near[2]).applyMatrix4(
+      tmpMatrix.copy(rt.node.matrixWorld).invert(),
+    );
+    const lo = rt.def.aabb.min;
+    const hi = rt.def.aabb.max;
+    local.set(
+      Math.min(hi[0], Math.max(lo[0], local.x)),
+      Math.min(hi[1], Math.max(lo[1], local.y)),
+      Math.min(hi[2], Math.max(lo[2], local.z)),
+    );
+    const v = local.applyMatrix4(rt.node.matrixWorld);
+    return [v.x, v.y, v.z];
   }
 
   socketWorldPosition(socketId: string): Vec3 {

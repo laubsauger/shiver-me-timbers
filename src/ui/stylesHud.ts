@@ -139,6 +139,30 @@ export const HUD_CSS = /* css */ `
   text-shadow: 0 0 5px rgba(4, 18, 22, 1), 0 1px 2px rgba(4, 18, 22, 0.95);
 }
 .smt-tick-label.is-cardinal { color: var(--brass-hi); font-size: 15px; }
+/* §T.156 — the radio's fixes. A brass pip on the heading tape with the
+   station's name under it, placed against the lubber line rather than carried
+   by the tape's translate. Deliberately quieter than the cardinal letters
+   (§V21): it is a bearing you have earned, not a quest marker. */
+.smt-compass-marks {
+  position: absolute; top: 10px; left: 50%; height: 46px; width: 0;
+  pointer-events: none;
+}
+.smt-radio-mark {
+  position: absolute; top: 0; left: 0; width: 0; height: 100%;
+  display: flex; flex-direction: column; align-items: center;
+}
+.smt-radio-pip {
+  width: 7px; height: 7px; flex: 0 0 auto;
+  background: var(--brass-hi);
+  clip-path: polygon(50% 100%, 0 0, 100% 0);
+  box-shadow: 0 1px 3px rgba(4, 18, 22, 0.8);
+}
+.smt-radio-name {
+  margin-top: 1px; white-space: nowrap;
+  font-size: 10px; letter-spacing: 0.1em; font-variant-caps: small-caps;
+  color: var(--brass-hi); opacity: 0.9;
+  text-shadow: 0 0 5px rgba(4, 18, 22, 1), 0 1px 2px rgba(4, 18, 22, 0.95);
+}
 .smt-lubber {
   position: absolute; top: 0; left: 50%; transform: translateX(-50%);
   width: 9px; height: 46px; pointer-events: none;

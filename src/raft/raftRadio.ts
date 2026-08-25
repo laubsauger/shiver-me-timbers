@@ -25,7 +25,7 @@
  */
 import type { AudioSystem } from '../audio';
 import { createRadioAudio } from '../radio/radioAudio';
-import { bindStations, createRadioRuntime, type RadioRuntime, type RadioSnapshot } from '../radio';
+import { bindStations, createRadioRuntime, RADIO_STATIONS, type RadioRuntime, type RadioSnapshot } from '../radio';
 import type { RadioAudioInput } from '../radio/radioAudio';
 import type { ShipAssembly } from '../ship/shipAssembly';
 import type { SierraWorld } from '../island/sierraSites';
@@ -51,6 +51,80 @@ export interface RaftRadioDeps {
   audio: AudioSystem;
   assembly: ShipAssembly;
   sierra: SierraWorld;
+  /**
+   * §T.156 — IS A HAND ON THE KNOB. Read at step time, so it is the walker's
+   * live grip and not a boot-time snapshot; absent = the set is always live,
+   * which is what the preview harness and the pure tests want.
+   */
+  power?: () => boolean;
+}
+
+/**
+ * §T.156 — A FIX, AS A BEARING TO STEER. The world direction from where the
+ * raft IS NOW to a station's aerial, in degrees clockwise from north — the
+ * HUD compass's own units. Recomputed per frame from the fix's stored (x, z),
+ * never from a bearing saved at lock time: the raft is what moves, so a saved
+ * bearing would point at where the island was an hour ago (§V71).
+ */
+export interface RadioBearing {
+  id: string;
+  /** the manifest's own name for the station */
+  label: string;
+  bearingDeg: number;
+}
+
+/**
+ * Pure: fixes + a position → what the compass draws. Exported and free of
+ * three.js and the DOM so the "does the marker point at the island" test needs
+ * neither (§V80).
+ */
+export function radioBearings(
+  snapshot: RadioSnapshot,
+  x: number,
+  z: number,
+  defs: readonly { id: string; title: string }[] = RADIO_STATIONS,
+): RadioBearing[] {
+  const px = Number.isFinite(x) ? x : 0;
+  const pz = Number.isFinite(z) ? z : 0;
+  const out: RadioBearing[] = [];
+  for (const f of snapshot.fixes) {
+    const deg = (Math.atan2(f.x - px, f.z - pz) * 180) / Math.PI;
+    out.push({
+      id: f.id,
+      label: defs.find((d) => d.id === f.id)?.title ?? f.id,
+      bearingDeg: ((deg % 360) + 360) % 360,
+    });
+  }
+  return out;
+}
+
+/**
+ * §T.156 — WHAT THE SET IS DOING, in one line for its own plaque.
+ *
+ * Lives here rather than in `main-raft` (§T.98 keeps the entry to boot) and
+ * beside the runtime rather than in the prompt (§V95 — the tuner owns the
+ * arithmetic; a plaque must not learn what a megahertz is). Off says so: a
+ * silent radio and a broken radio are the same thing from the outside, which
+ * is the half of USER's complaint that a mute button alone would have created.
+ */
+export function radioStatusLine(
+  s: RadioSnapshot,
+  on: boolean,
+  defs: readonly { id: string; title: string }[] = RADIO_STATIONS,
+): string {
+  if (!on) {
+    return s.fixes.length === 0
+      ? 'off — take the knob to listen'
+      : `off — ${s.fixes.length} bearing${s.fixes.length === 1 ? '' : 's'} on the compass`;
+  }
+  const band = `${s.freqMHz.toFixed(2)} MHz`;
+  const strength = `signal ${Math.round(s.signal * 100)}%`;
+  if (s.locked !== null) {
+    return `${band} · ${strength} · LOCK — ${defs.find((d) => d.id === s.locked)?.title ?? s.locked}`;
+  }
+  // the dwell is §V86's two seconds; saying it is what turns "nearly there"
+  // into a thing worth holding still for
+  return s.dwell > 0 ? `${band} · ${strength} · holding…` : `${band} · ${strength}`;
 }
 
 export interface RaftRadio {
@@ -99,8 +173,14 @@ export function createRaftRadio(d: RaftRadioDeps): RaftRadio {
     runtime,
     snapshot: () => runtime.snapshot(),
     step(dt: number, raft: ShipState, hour: number): RadioSnapshot {
+      if (d.power !== undefined) radio.on = d.power();
       const s = runtime.step({
         channel: radio.tune,
+        // §T.156 — the switch: alive while a hand is on the knob, dead the
+        // moment it is let go. USER: "it should only make sound when we
+        // interact with it." The store is written HERE, so `radio.on` is the
+        // one answer everything downstream reads (§V62).
+        on: radio.on,
         x: raft.position[0],
         z: raft.position[2],
         headingRad: yawOf(raft.quaternion),

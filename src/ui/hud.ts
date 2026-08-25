@@ -72,9 +72,25 @@ export interface HudOptions {
   onAnchorToggle?(): void;
 }
 
+/**
+ * §T.156 — A BEARING THE COMPASS CARRIES. One per station the radio has ever
+ * locked: the direction finder's whole payoff, and the reason the set does not
+ * have to be left hissing. The bearing is recomputed from the raft's live
+ * position by the caller (`main-raft`), never stored — see `RadioFix`.
+ */
+export interface RadioMark {
+  id: string;
+  /** what the plaque calls it, e.g. 'The Wiggle' */
+  label: string;
+  /** WORLD bearing to the aerial, degrees clockwise from north */
+  bearingDeg: number;
+}
+
 export interface Hud {
   /** heading in radians, 0 = north, clockwise */
   setHeading(rad: number): void;
+  /** §T.156 — the radio's fixes, drawn on the heading tape */
+  setRadioMarks(marks: readonly RadioMark[]): void;
   setSpeed(knots: number): void;
   /** apparent wind — bearing off the bow plus strength */
   setWind(w: WindReadout): void;
@@ -167,9 +183,30 @@ function plaqueCell(
   return { root, value: v, label: l };
 }
 
+/**
+ * §T.156 — WHERE A WORLD BEARING FALLS ON THE TAPE, in pixels either side of
+ * the lubber line. Wrapped to (−180, 180] so a station fine on the port bow is
+ * a few pixels to the LEFT and not 350° to the right — the same reading the
+ * tick tape gets from its own translate, expressed for one mark.
+ *
+ * Pure and exported: it is the whole of "does the marker point at the island",
+ * and it needs no DOM to be worth asserting (§V80).
+ */
+export function compassOffsetPx(bearingDeg: number, headingDeg: number, pxPerDeg: number): number {
+  const b = Number.isFinite(bearingDeg) ? bearingDeg : 0;
+  const h = Number.isFinite(headingDeg) ? headingDeg : 0;
+  const d = ((((b - h) % 360) + 540) % 360) - 180;
+  return d * (Number.isFinite(pxPerDeg) ? pxPerDeg : 0);
+}
+
 export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
   const tape = div('smt-compass-tape');
-  const compass = div('smt-compass', tape, div('smt-lubber'));
+  // the radio's fixes ride ABOVE the tick tape and below the lubber, in their
+  // own layer: they are placed against the lubber (see compassOffsetPx), not
+  // carried by the tape's translate, so one of them can never be drawn at the
+  // wrong end of a wrap
+  const marksLayer = div('smt-compass-marks');
+  const compass = div('smt-compass', tape, marksLayer, div('smt-lubber'));
 
   const speedValue = el('div', 'smt-plate-value', '0.0');
   const speedCell = div('smt-plate-cell', speedValue, el('div', 'smt-plate-label', 'knots'));
@@ -256,6 +293,32 @@ export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
     }
   }
 
+  // §T.156 — the fixes, and the heading they are drawn against. Both are
+  // retained because either can change without the other: the raft turns every
+  // frame, a station locks once an hour.
+  let radioMarks: readonly RadioMark[] = [];
+  let headingDeg = 0;
+  const markNodes = new Map<string, HTMLElement>();
+
+  function placeMarks(): void {
+    for (const m of radioMarks) {
+      const node = markNodes.get(m.id);
+      if (node === undefined) continue;
+      node.style.transform = `translateX(${compassOffsetPx(m.bearingDeg, headingDeg, tapePx).toFixed(1)}px)`;
+    }
+  }
+
+  function buildMarks(): void {
+    marksLayer.textContent = '';
+    markNodes.clear();
+    for (const m of radioMarks) {
+      const node = div('smt-radio-mark', div('smt-radio-pip'), el('span', 'smt-radio-name', m.label));
+      marksLayer.appendChild(node);
+      markNodes.set(m.id, node);
+    }
+    placeMarks();
+  }
+
   // the vane is damped, not snapped: a raw apparent-wind bearing jitters with
   // every wave the hull yaws over, and a twitching needle is unreadable
   let vaneBearing = 0;
@@ -270,6 +333,18 @@ export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
       tape.style.transform = `translateX(${(-deg * tapePx).toFixed(2)}px)`;
       headingValue.textContent =
         `${String(Math.round(deg) % 360).padStart(3, '0')}° ${cardinal(deg)}`;
+      headingDeg = deg;
+      placeMarks();
+    },
+    setRadioMarks(marks: readonly RadioMark[]): void {
+      // rebuild only when the SET of fixes changes; a bearing that merely moved
+      // is a transform, and rebuilding the DOM every frame would kill the
+      // label's own fade
+      const same = marks.length === radioMarks.length
+        && marks.every((m, i) => m.id === radioMarks[i].id && m.label === radioMarks[i].label);
+      radioMarks = marks.slice();
+      if (same) placeMarks();
+      else buildMarks();
     },
     setSpeed(knots: number): void {
       speedValue.textContent = Math.max(0, knots).toFixed(1);

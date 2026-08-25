@@ -22,6 +22,7 @@
  * assert the graph moved (§B100), rather than asserting a callback was
  * registered.
  */
+import { radioParams } from '../params/radio';
 import { whiteNoiseBuffer } from '../audio/ambience';
 import { decodeAudio } from '../audio/assets';
 import { createPanner, setPannerPosition } from '../audio/emitters';
@@ -57,8 +58,12 @@ export function createRadioAudio(
   buses: RadioBuses,
   defs: readonly RadioStationDef[] = RADIO_STATIONS,
 ): RadioAudio {
-  const hiss = createPanner(ctx, buses.ambience);
-  const voice = createPanner(ctx, buses.music);
+  // §B115/§V96 — the set's OWN reference distance. Both panners take it, so
+  // the hiss and the voice fade together as the player walks out of the cabin
+  // instead of following him around the raft at full gain.
+  const ref = { refDistance: radioParams.speakerRefM };
+  const hiss = createPanner(ctx, buses.ambience, ref);
+  const voice = createPanner(ctx, buses.music, ref);
   const bed: LoopLayer = createLoopLayer(ctx, hiss, { seed: NOISE_SEED, lowpass: true });
   bed.start(whiteNoiseBuffer(ctx, NOISE_SEED));
 
@@ -88,8 +93,11 @@ export function createRadioAudio(
       }
       const s = input.snapshot;
       const w = input.world;
-      setPannerPosition(hiss, w[0], w[1], w[2]);
-      setPannerPosition(voice, w[0], w[1], w[2]);
+      // re-read the ref every frame, like the shared distance params: §V16
+      // wants the speaker's reach on a slider, not in a rebuild
+      const live = { refDistance: radioParams.speakerRefM };
+      setPannerPosition(hiss, w[0], w[1], w[2], live);
+      setPannerPosition(voice, w[0], w[1], w[2], live);
       bed.update(
         { gain: s.mix.staticGain, cutoffHz: s.mix.staticHz, rate: s.mix.staticRate },
         Math.max(0, dt),

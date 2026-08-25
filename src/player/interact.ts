@@ -22,6 +22,8 @@ import {
   LOOKOUT_SOCKET,
   RAFT_ACTIONS,
   RAFT_STATIONS,
+  stationAnchor,
+  type PieceResolver,
   type RaftAction,
   type RaftStation,
 } from './stations';
@@ -56,6 +58,12 @@ export interface InteractOptions {
   groundAt?: (x: number, z: number) => number | null;
   /** WORLD sea height; absent = flat sea at y = 0. Step-off refuses ground deeper than swimDepth (§T.100) */
   waterAt?: (x: number, z: number) => number;
+  /**
+   * §T.157 — the live point on a PIECE nearest a world point
+   * (`ShipAssembly.pieceNearestPoint`). Absent = every station aims at its own
+   * socket, which is what it did before a station could name its object.
+   */
+  pieceNear?: PieceResolver;
   /** per-action gate (push-off only while beached, §T.100); absent = everything enabled */
   enabled?: (action: RaftAction) => boolean;
   /** starting channel values; defaults below */
@@ -172,13 +180,25 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
   let ladderReturn: Vec3 | null = null;
   let delta = 0;
 
-  /** socket in the player's current frame, or null */
-  const socketLocal = (id: string): Vec3 | null => {
-    const w = o.socketWorld(id);
+  /** a world point in the player's current frame */
+  const toLocal = (w: Vec3 | null): Vec3 | null => {
     if (w === null || !w.every(Number.isFinite)) return null;
     if (host.state.frame !== 'ship') return w;
     return (host.worldToShip ?? identity)(w);
   };
+
+  /** socket in the player's current frame, or null */
+  const socketLocal = (id: string): Vec3 | null => toLocal(o.socketWorld(id));
+
+  /**
+   * §T.157 — WHAT THE STATION'S OBJECT IS, in the walker's frame. The look
+   * cone is measured to THIS; the range stays measured to the stance, because
+   * a hand reaches from the body and the body stands at the socket (§B69).
+   * Looking at the tiller must offer the tiller, and the tiller is the oar —
+   * not the half-metre of bare log the helmsman's feet are on.
+   */
+  const anchorLocal = (a: RaftAction): Vec3 | null =>
+    toLocal(stationAnchor(a, o.socketWorld, o.pieceNear));
 
   /**
    * §T.145a — WHERE A STEP-OFF WOULD PUT THE WALKER, or null when it would put
@@ -242,12 +262,14 @@ export function createInteract(host: InteractHost, o: InteractOptions, p: Player
       if (o.enabled !== undefined && !o.enabled(a)) continue;
       const q = socketLocal(st.socket);
       if (q === null) continue;
-      const dx = q[0] - eye[0];
-      const dy = q[1] - eye[1];
-      const dz = q[2] - eye[2];
+      // range from the capsule to the STANCE, aim from the eye to the OBJECT
+      // (see capsuleDistance and anchorLocal)
+      const aim = anchorLocal(a) ?? q;
+      const dx = aim[0] - eye[0];
+      const dy = aim[1] - eye[1];
+      const dz = aim[2] - eye[2];
       const d = Math.hypot(dx, dy, dz);
       if (d < 1e-6) continue;
-      // range from the capsule, aim from the eye (see capsuleDistance)
       const range = capsuleDistance(s, q, p);
       if (range > maxRange || range <= minRange) continue;
       if (aimed) {

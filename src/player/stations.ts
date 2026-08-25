@@ -51,6 +51,28 @@ export type StationAxis = 'mouse-x' | 'mouse-y' | 'forward';
 
 export interface RaftStation {
   socket: string;
+  /**
+   * §T.157 — THE THING THE HAND TOUCHES, when that is not where the body
+   * stands. USER: "most of the interaction areas and labels for the things on
+   * the raft are not really aligned with where the object in question is."
+   *
+   * `socket` answers ONE question — where can a hand reach from — and for
+   * several stations it is deliberately a patch of DECK: `station-tiller` is
+   * the helmsman's stance half a metre forward of the stern block, and §B87
+   * moved `station-radio` to the nook's mouth precisely so the player would
+   * not be standing inside the crate. Anchoring the plaque, the cue dot and
+   * (§T.155) the outline on those points hangs them over bare planking.
+   *
+   * So a station may name the PIECE it operates; the anchor is then the point
+   * on that piece nearest the stance (`ShipAssembly.pieceNearestPoint`), which
+   * is the oar's tiller end for the helmsman, the set's face for the kneeling
+   * player and the board at deck level for a guara — live, so a piece that
+   * moves takes its label with it (§V71).
+   *
+   * Absent where the socket ALREADY sits on the object: the sheet stations are
+   * the belay pins themselves, the gangways are the deck edge you step from.
+   */
+  piece?: string;
   kind: StationKind;
   axis?: StationAxis;
   /** channel range for hold-* stations */
@@ -87,6 +109,8 @@ const sheets = Object.fromEntries(
 
 const guara = (n: 1 | 2 | 3 | 4 | 5): RaftStation => ({
   socket: `station-guara-${n}`,
+  // the socket is on the LOG the board pierces; the board is the thing
+  piece: `guara-${n}`,
   kind: 'hold-slide',
   axis: 'mouse-y',
   min: 0,
@@ -109,17 +133,18 @@ const guara = (n: 1 | 2 | 3 | 4 | 5): RaftStation => ({
  * is what refuses it back without one.
  */
 export const RAFT_STATIONS: Record<RaftAction, RaftStation> = {
-  tiller: { socket: 'station-tiller', kind: 'hold-turn', axis: 'mouse-x', min: -1, max: 1, dir: 1 },
+  tiller: { socket: 'station-tiller', kind: 'hold-turn', axis: 'mouse-x', min: -1, max: 1, dir: 1, piece: 'steering-oar' },
   'guara-1': guara(1),
   'guara-2': guara(2),
   'guara-3': guara(3),
   'guara-4': guara(4),
   'guara-5': guara(5),
   ...sheets,
-  halyard: { socket: 'station-halyard', kind: 'hold-slide', axis: 'mouse-y', min: 0, max: 1, dir: 1 },
-  radio: { socket: 'station-radio', kind: 'hold-turn', axis: 'mouse-x', min: 0, max: 1, dir: 1 },
-  sleep: { socket: 'station-mat', kind: 'toggle' },
-  ladder: { socket: 'station-ladder', kind: 'climb' },
+  // the halyard comes down the port leg of the bipod and is hauled at its foot
+  halyard: { socket: 'station-halyard', kind: 'hold-slide', axis: 'mouse-y', min: 0, max: 1, dir: 1, piece: 'bipod-leg-port' },
+  radio: { socket: 'station-radio', kind: 'hold-turn', axis: 'mouse-x', min: 0, max: 1, dir: 1, piece: 'radio-set' },
+  sleep: { socket: 'station-mat', kind: 'toggle', piece: 'berth-port' },
+  ladder: { socket: 'station-ladder', kind: 'climb', piece: 'mast-ladder' },
   'gangway-bow': { socket: 'station-gangway-bow', kind: 'step-off', out: [0, 1] },
   'gangway-port': { socket: 'station-gangway-port', kind: 'step-off', out: [-1, 0] },
   'gangway-starboard': { socket: 'station-gangway-starboard', kind: 'step-off', out: [1, 0] },
@@ -128,6 +153,40 @@ export const RAFT_STATIONS: Record<RaftAction, RaftStation> = {
 };
 
 export const RAFT_ACTIONS = Object.keys(RAFT_STATIONS) as RaftAction[];
+
+/** the same triple `playerStep` and the prompt use; re-declared, not imported,
+ *  so this table stays a pure-data module with no locomotion behind it */
+export type Vec3 = [number, number, number];
+/** …and the read-only shape the prompt hands round, which a `Vec3` satisfies */
+export type ReadVec3 = readonly [number, number, number];
+/** the live point on a piece nearest a world point — `ShipAssembly.pieceNearestPoint` */
+export type PieceResolver = (pieceId: string, near: ReadVec3) => ReadVec3 | null;
+
+/**
+ * §T.157 — WHERE THE STATION'S OBJECT IS, in world metres, or null.
+ *
+ * THE one answer to "what am I looking at", shared by the look cone
+ * (`interact.scan`), the plaque and the cue (`raftPrompt`) and §T.155's
+ * outline. A second copy of this rule is exactly the §V62 shape: a label free
+ * to point somewhere the cone does not.
+ *
+ * Falls back to the stance whenever the station names no piece, or names one
+ * the assembly has not built — a station is never anchored at the origin.
+ */
+export function stationAnchor(
+  action: RaftAction,
+  socketWorld: (id: string) => ReadVec3 | null,
+  pieceNear?: PieceResolver,
+): Vec3 | null {
+  const st = RAFT_STATIONS[action];
+  if (st === undefined) return null;
+  const stance = socketWorld(st.socket);
+  if (stance === null || !stance.every(Number.isFinite)) return null;
+  const copy = (v: ReadVec3): Vec3 => [v[0], v[1], v[2]];
+  if (st.piece === undefined || pieceNear === undefined) return copy(stance);
+  const on = pieceNear(st.piece, stance);
+  return on === null || !on.every(Number.isFinite) ? copy(stance) : copy(on);
+}
 
 /** the lookout the ladder climbs to; not an action, a destination */
 export const LOOKOUT_SOCKET = 'station-lookout';

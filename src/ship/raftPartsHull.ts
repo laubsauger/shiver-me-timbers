@@ -58,21 +58,22 @@ export function buildLogs(p: RaftParams, L: RaftLayout): PieceDef[] {
   add(1, logSocket(L.logs[1], 'anchor-channel-port-mizzen-1', 'rope-anchor', p.mizzenZ));
   add(n - 2, logSocket(L.logs[n - 2], 'anchor-channel-starboard-mizzen-1', 'rope-anchor', p.mizzenZ));
   /**
-   * §B104/§V71 — A SHEET STATION STANDS WHERE THE SHEET IS MADE FAST.
+   * §B104 / §T.149 — A SHEET STATION STANDS WHERE THE SHEET IS MADE FAST, AND
+   * THE SHEET IS MADE FAST WHERE YOU CAN SEE THE SAIL.
    *
-   * `station-sheet-p`/`-s` were sockets on `deck-fore`, at the cabin's forward
-   * corners (∓1.2, 0.63, +0.35), while the main's sheets actually belay on the
-   * mizzen's channel logs (∓1.83, 0.28, −5.4): the player hauled the main
-   * sheet 6.4 m from any sheet. A station is resolved against the ROPE IT
-   * WORKS, so it is authored HERE, on the same log piece and at the same z as
-   * the belay it serves — move the belay and the stance follows it.
+   * `station-sheet-p`/`-s` were sockets on `deck-fore` at the cabin's forward
+   * corners while the main's sheets belayed on the mizzen's channel logs
+   * 6.4 m away, so §B104 brought the two stances HERE, onto the logs abeam
+   * the mizzen where the planner had put the ropes. That satisfied §V71 and
+   * failed the player: USER, "it should be on the sides of the sail, on the
+   * masts, so that I can do it from being on deck while looking at it."
    *
-   * (Only the MAIN's sheets have stations: `RaftControls` carries one sheet
-   * scalar for every sail, so a topsail station would be a second knob on the
-   * same channel — §T.148's job, not this socket's.)
+   * §T.149 keeps §B104's property and moves the ANSWER — the belay AND the
+   * station together, up to the bipod at the mainsail's own foot
+   * (`raftPartsRig.buildBipodMast`, `raftRigging.SHEET_BELAY`). Nothing is
+   * parked away from its rope; the rope is simply somewhere better. The
+   * mizzen's channel sockets below stay: they are the mizzen pole's GUYS.
    */
-  add(1, logSocket(L.logs[1], 'station-sheet-p', 'fixture', p.mizzenZ, 0.35));
-  add(n - 2, logSocket(L.logs[n - 2], 'station-sheet-s', 'fixture', p.mizzenZ, -0.35));
 
   return L.logs.map((log, k) =>
     mkPiece(`log-${k}`, 'log', [log.x, p.logAxisY, (log.zStern + log.zBow) / 2], {
@@ -263,8 +264,8 @@ export function buildBambooDeck(p: RaftParams, L: RaftLayout): PieceDef[] {
   const fore = slab('deck-fore', outerP.x - outerP.r, outerS.x + outerS.r, L.cabinFrontZ, zFull, y0, y1, [
     // the halyard is hauled at the mast foot, where it comes down the leg
     // (§V84 — every sailing action has a place to stand). §B104 took the two
-    // SHEET stations off this slab: they belong on the logs abeam the mizzen,
-    // where the sheets are actually belayed (see `buildLogs`).
+    // SHEET stations off this slab; §T.149 put them on the bipod legs beside
+    // this one, on the pins their sheets belay to (see `buildBipodMast`).
     { id: 'station-halyard', type: 'fixture', position: [-0.8, (y1 - y0) / 2, L.mastZ - (L.cabinFrontZ + zFull) / 2] },
   ]);
   const taper = slab('deck-fore-taper',

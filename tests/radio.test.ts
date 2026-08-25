@@ -18,6 +18,7 @@
  *     registered is what §B100 says is not enough, twice over.
  */
 import { describe, expect, it } from 'vitest';
+import { compassOffsetPx } from '../src/ui/hud';
 import * as THREE from 'three';
 import type { Material } from 'three';
 import { radioParams, type RadioParams } from '../src/params/radio';
@@ -44,7 +45,7 @@ import {
   type RadioStationDef,
 } from '../src/radio';
 import { NO_FRAGMENT, radioMix, stepFragments } from '../src/radio/radioMix';
-import { createRaftRadio, isRadioNight } from '../src/raft/raftRadio';
+import { createRaftRadio, isRadioNight, radioBearings } from '../src/raft/raftRadio';
 import { radio, raftControls, applyRaftAction } from '../src/raft/raftActions';
 import { createInteract } from '../src/player/interact';
 import { RAFT_STATIONS } from '../src/player/stations';
@@ -524,6 +525,20 @@ describe('§B100 the dial drives the world, not a number', () => {
     expect(needle, 'there is no needle piece to turn').toBeTruthy();
     const raft = { position: [0, 0, 0], quaternion: [0, 0, 0, 1] } as unknown as Parameters<typeof set.step>[1];
 
+    // §T.156 — THE SET IS OFF UNTIL A HAND IS ON IT, and off is SILENT: no
+    // signal, no lock, no hiss, whatever the dial says. USER: "it should only
+    // make sound when we interact with it."
+    radio.on = false;
+    radio.tune = frequencyChannel(RADIO_STATIONS[0].freqMHz);
+    const dark = set.step(DT, raft, 12);
+    attached!.update(DT);
+    expect(dark.signal, 'a radio nobody switched on still heard a station').toBe(0);
+    expect(dark.locked, 'a radio nobody switched on locked one').toBeNull();
+    expect(dark.mix.staticGain, 'the set was off and still hissing').toBe(0);
+    expect(gains[0].value, 'the static bed was driven while the set was off').toBeLessThan(1e-3);
+
+    // …and now a hand takes the knob
+    radio.on = true;
     // OFF STATION, at the very bottom of the band
     radio.tune = 0;
     set.step(DT, raft, 12);
@@ -557,7 +572,50 @@ describe('§B100 the dial drives the world, not a number', () => {
     // AND IT LOCKED, which is the thing the whole mode turns on
     expect(snap.locked).toBe(target.id);
 
+    /**
+     * §T.156 — A LOCK IS A BEARING YOU KEEP. The point of the switch is that
+     * the player does not have to leave the set hissing to keep what it found:
+     * the fix outlives the power, and the bearing to it is RECOMPUTED from
+     * where the raft is now (§V71) rather than saved at lock time.
+     */
+    expect(snap.fixes.map((f) => f.id), 'the lock left no fix behind').toContain(target.id);
+    radio.on = false;
+    const dead = set.step(DT, raft, 12);
+    expect(dead.mix.staticGain, 'switching off did not silence the set').toBe(0);
+    expect(dead.locked, 'the lock survived the power being cut').toBeNull();
+    expect(dead.fixes.map((f) => f.id), 'the FIX did not survive the power being cut').toContain(target.id);
+
+    // the aerial is at (0, 900): due north of the origin, and due EAST of a
+    // raft that has sailed 900 m west of it
+    const here = radioBearings(dead, 0, 0);
+    expect(here[0].bearingDeg, 'a station dead ahead to the north did not read 000°').toBeCloseTo(0, 3);
+    const moved = radioBearings(dead, -900, 900);
+    expect(moved[0].bearingDeg, 'the bearing was frozen at lock time, not recomputed')
+      .toBeCloseTo(90, 3);
+    expect(here[0].label, 'the mark is labelled with an id, not the station name')
+      .toBe(RADIO_STATIONS[0].title);
+
     set.dispose();
     radio.tune = 0.5;
+    radio.on = false;
+  });
+
+  /**
+   * §T.156 — WHERE A FIX FALLS ON THE COMPASS. The tape reads clockwise from
+   * north under a fixed lubber line, so a mark is placed by the SHORTEST way
+   * round: a station 10° to port is a few pixels left of the lubber, ⊥ 350°
+   * of tape to the right. §V80 — this is the property, not the pixel count.
+   */
+  it('a compass mark takes the short way round the lubber line', () => {
+    expect(compassOffsetPx(10, 0, 2), 'a mark to starboard fell to port').toBe(20);
+    expect(compassOffsetPx(350, 0, 2), 'a mark 10° to port went the long way round').toBe(-20);
+    expect(compassOffsetPx(0, 350, 2)).toBe(20);
+    // dead ahead is exactly under the lubber, at every heading
+    for (const h of [0, 37, 180, 271, 359]) expect(compassOffsetPx(h, h, 3)).toBe(0);
+    // and the mark never leaves the band by more than half a turn
+    for (const b of [0, 90, 179.9, 180, 181, 270, 359.9]) {
+      expect(Math.abs(compassOffsetPx(b, 0, 1))).toBeLessThanOrEqual(180);
+    }
+    expect(compassOffsetPx(NaN, 0, 2), 'a NaN bearing escaped (§V28)').toBe(0);
   });
 });

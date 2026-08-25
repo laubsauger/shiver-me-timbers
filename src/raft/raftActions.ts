@@ -46,8 +46,18 @@ export interface RaftBeachHolder {
 
 export const raftBeach: RaftBeachHolder = { state: neutralRaftBeaching() };
 
-/** radio stub — the knob's value, read by nothing yet (§T.103 wires the tuner) */
-export const radio = { tune: 0 };
+/**
+ * The radio's two channels. `tune` is the knob (§T.103's tuner reads it);
+ * `on` is whether the set is POWERED, which until §T.156 was a `true` literal
+ * inside `radioMix`'s call site — a parameter that drove nothing, so the hiss
+ * ran from boot to tab-close (§B116). USER: "the radio is crazy loud … make it
+ * so it only makes sound when we interact with it."
+ *
+ * Both live HERE, in the one store `applyRaftAction`, the debug keys and the
+ * frame all write, so a hand on the knob and a keyboard cannot disagree about
+ * whether the set is alive (§V62).
+ */
+export const radio = { tune: 0, on: false };
 
 /**
  * Boot controls, matching the stations' own starting channel values

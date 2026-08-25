@@ -18,6 +18,7 @@ import { transitionFrame, type FrameContext } from './frames';
 import { LookAccumulator, attachPointerLock, type LockElement } from './pointerLock';
 import { PlayerKeys, attachPlayerKeys } from './playerInput';
 import { createInteract, type Interact, type SocketResolver } from './interact';
+import type { PieceResolver } from './stations';
 import type { RaftAction } from './stations';
 import { attachDebugKeys, type DebugChannel } from './debugKeys';
 import type { Hands } from './hands';
@@ -89,6 +90,12 @@ export interface PlayerOptions {
    * (push-off only while beached). `hands` is the placeholder mitt rig.
    */
   socketWorld?: SocketResolver;
+  /**
+   * §T.157 — `ShipAssembly.pieceNearestPoint`: the live point on the PIECE a
+   * station operates, nearest a given world point. Absent = the look cone aims
+   * at the stance, as it did before a station could name its object.
+   */
+  pieceNear?: PieceResolver;
   groundAt?: (x: number, z: number) => number | null;
   obstacleAt?: (x: number, z: number) => boolean;
   actionEnabled?: (action: RaftAction) => boolean;
@@ -204,7 +211,13 @@ export function createPlayer(o: PlayerOptions): Player {
       shipToWorld,
       worldToShip,
     },
-    { socketWorld: o.socketWorld ?? (() => null), groundAt: o.groundAt, waterAt, enabled: o.actionEnabled },
+    {
+      socketWorld: o.socketWorld ?? (() => null),
+      pieceNear: o.pieceNear,
+      groundAt: o.groundAt,
+      waterAt,
+      enabled: o.actionEnabled,
+    },
   );
   const frameCtx: FrameContext = {
     shipToWorld,

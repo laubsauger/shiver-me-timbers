@@ -66,6 +66,14 @@ export interface RadioParams {
   voiceGain: number;
   /** seconds between fragments while a station is held */
   fragmentGapSec: number;
+  /**
+   * §B115 — the SPEAKER's reference distance, metres: inside it the set is at
+   * full gain, beyond it the inverse model takes over. The shared
+   * `emitterRefDistance` is 10 m — wider than the raft — so the hiss played
+   * flat out at the tiller, at the masthead and in the cabin alike, which is
+   * most of USER's "crazy loud". A cabin set is an arm's-length source.
+   */
+  speakerRefM: number;
 }
 
 import { registerParams, type ParamMeta } from './registry';
@@ -98,6 +106,7 @@ export const radioParams: RadioParams = registerParams('radio', {
   staticRateOn: 0.72, // EST — a fifth of an octave down, plainly audible in a sweep
   voiceGain: 0.85, // EST
   fragmentGapSec: 9, // EST
+  speakerRefM: 1.1, // EST — arm's length: full in the nook, half of it by the cabin door
 } satisfies RadioParams, {
   bandLowMHz: m(3, 30, 0.1),
   bandHighMHz: m(3, 30, 0.1),
@@ -117,4 +126,5 @@ export const radioParams: RadioParams = registerParams('radio', {
   staticRateOn: m(0.25, 3),
   voiceGain: m(0, 2),
   fragmentGapSec: m(1, 60, 0.5),
+  speakerRefM: m(0.2, 12, 0.1),
 });

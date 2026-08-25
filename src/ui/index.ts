@@ -14,7 +14,8 @@ import type { GameSettings, SettingsStore } from './settingsStore';
 import { applyGraphicsSettings } from './graphicsFeatures';
 import { createPauseMenu } from './pauseMenu';
 import type { WeatherPresetName } from '../weather/presets';
-import { createHud } from './hud';
+import { createHud, type RadioMark } from './hud';
+export type { RadioMark } from './hud';
 import type { WindReadout } from './hud';
 import type { MusicStatus } from './settingsScreen';
 import { createFullscreen } from './fullscreen';
@@ -57,6 +58,8 @@ export interface GameUiCallbacks {
 
 export interface GameUi {
   setHeading(rad: number): void;
+  /** §T.156 — the radio's locked stations, as bearings on the heading tape */
+  setRadioMarks(marks: readonly RadioMark[]): void;
   setSpeed(knots: number): void;
   setWind(w: WindReadout): void;
   setTrim(trim: number): void;
@@ -115,6 +118,7 @@ export function createGameUI(callbacks: GameUiCallbacks): GameUi {
 
   return {
     setHeading: hud.setHeading,
+    setRadioMarks: hud.setRadioMarks,
     setSpeed: hud.setSpeed,
     setWind: hud.setWind,
     setTrim: hud.setTrim,

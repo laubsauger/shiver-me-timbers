@@ -36,7 +36,8 @@ import { createRaftFrame } from './raft/raftFrame';
 import { pushOffRaft, stepRaftShip, placeRaftAtStart } from './raft/raftShip';
 import { applyDebugChannel, bindRaftActions, radio, raftBeach, raftControls } from './raft/raftActions';
 import { installRaftDevHandle } from './raft/raftDevHandle';
-import { createRaftRadio } from './raft/raftRadio';
+import { createRaftRadio, radioBearings, radioStatusLine } from './raft/raftRadio';
+import { createStationResolvers } from './raft/raftResolvers';
 import { bootTimeOfDay, calmPreset, createDayClock } from './raft/raftWorld';
 import { raftWorldParams } from './params/raftWorld';
 
@@ -146,13 +147,7 @@ async function boot(): Promise<void> {
     const g = sea.archipelago.seabed.heightAt(x, z);
     return Number.isFinite(g) ? g : null;
   };
-  const socketWorld = (id: string): [number, number, number] | null => {
-    try {
-      return assembly.socketWorldPosition(id);
-    } catch {
-      return null;
-    }
-  };
+  const { socketWorld, pieceNear } = createStationResolvers(assembly);
   const setFp = (on: boolean): void => {
     player.setActive(on);
     followCam.setMode(on ? 'fp' : 'follow');
@@ -172,6 +167,7 @@ async function boot(): Promise<void> {
     canvas: app.renderer.domElement,
     hands: createHands({ hidden: () => ui.isPhotoMode() }), // §T.127: no mitts in a §V22 capture
     socketWorld,
+    pieceNear,
     groundAt,
     actionEnabled: (a) => a !== 'push-off' || raftBeach.state.beached,
     devLayerOn: () => ui.isDevLayerVisible(),
@@ -179,7 +175,8 @@ async function boot(): Promise<void> {
     onToggle: () => setFp(!player.isActive()),
   });
   bindRaftActions(player, raftControls, sinks);
-  const radioSet = createRaftRadio({ audio, assembly, sierra: sea.sierra });
+  // §T.156: the knob IS the switch (RaftRadioDeps.power)
+  const radioSet = createRaftRadio({ audio, assembly, sierra: sea.sierra, power: () => player.interact.held() === 'radio' });
   // §T.116: the station being offered, named on screen at its own socket. It
   // reads `player.interact` and the SAME live socket resolver the stations do
   // (§V71), and it goes dark whenever the frame is being captured (§I
@@ -191,11 +188,13 @@ async function boot(): Promise<void> {
     // the foot-rail the haul-out would actually take
     board: () => player.boardingAnchor(),
     socketWorld,
+    pieceNear,
     camera: () => app.camera,
     // photo mode only: cinematic == full screen (§I ui/cinematic), and most
     // people PLAY full screen — hiding the affordances there would take the
     // prompts away from the players who need them (§T.116 flagged this)
     hidden: () => ui.isPhotoMode() || !player.isActive(),
+    status: (a) => (a === 'radio' ? radioStatusLine(radioSet.snapshot(), radio.on) : null),
   });
   followCam.setPoseSource(() => player.cameraPose());
   setFp(true);
@@ -249,6 +248,7 @@ async function boot(): Promise<void> {
       const { headingRad, knots } = frame.renderVessel(alpha, frameDt);
       ui.setSpeed(knots);
       ui.setHeading(headingRad);
+      ui.setRadioMarks(radioBearings(radioSet.snapshot(), raft.position[0], raft.position[2]));
       ui.setTrim(raft.sailTrim);
       ui.setWind({
         windDirection: state.wind.direction, windSpeed: state.wind.speed,

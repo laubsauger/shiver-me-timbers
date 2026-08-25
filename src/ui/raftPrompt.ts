@@ -35,6 +35,8 @@ import {
   isHold,
   RAFT_LABELS,
   RAFT_STATIONS,
+  stationAnchor,
+  type PieceResolver,
   type RaftAction,
   type RaftStation,
 } from '../player/stations';
@@ -106,6 +108,14 @@ export interface PromptState {
    */
   readout: string | null;
   bar: { from: number; to: number } | null;
+  /**
+   * §T.156 — WHAT THE STATION ITSELF IS SAYING, when it has something to say
+   * that the channel cannot: the radio's live frequency, its signal, and the
+   * name of the station it has locked. Supplied by the wiring (`statusOf`),
+   * because the plaque knows about channels and sockets and must not learn
+   * what a megahertz is (§V95 — the tuner already owns that arithmetic).
+   */
+  status: string | null;
   /** §T.136d — the station is named but out of arm's reach; the plaque says so */
   outOfReach: boolean;
   x: number;
@@ -231,9 +241,18 @@ export interface PromptInput {
   board?: Vec3 | null;
   /** §T.136b — live channel of a hold station; absent = no readout */
   value?: (action: RaftAction) => number;
+  /** §T.156 — the station's own live line, or null; see `PromptState.status` */
+  statusOf?: (action: RaftAction) => string | null;
   /** photo or cinematic mode: nothing over the render at all */
   hidden: boolean;
   socketWorld: SocketResolver;
+  /**
+   * §T.157 — the live point on a PIECE nearest a world point. With it, the
+   * plaque and the dots hang on the OBJECT (the oar's tiller end, the radio's
+   * face); without it they fall back to the stance, which is where they used
+   * to hang and why the labels read as misplaced.
+   */
+  pieceNear?: PieceResolver;
   viewProj: ArrayLike<number>;
   width: number;
   height: number;
@@ -267,6 +286,7 @@ export function promptState(o: PromptInput): PromptState | null {
       release: null,
       readout: null,
       bar: null,
+      status: null,
       outOfReach: false,
       x: at.x,
       y: at.y,
@@ -278,7 +298,7 @@ export function promptState(o: PromptInput): PromptState | null {
   const station = RAFT_STATIONS[action];
   const label = RAFT_LABELS[action];
   if (station === undefined || label === undefined) return null;
-  const world = o.socketWorld(station.socket);
+  const world = stationAnchor(action, o.socketWorld, o.pieceNear);
   if (world === null) return null;
   const at = projectPoint(world, o.viewProj, o.width, o.height);
   if (at === null) return null;
@@ -300,6 +320,9 @@ export function promptState(o: PromptInput): PromptState | null {
     release: held ? `${keyLabel(CONTROL_CODES.interact)} to let go` : null,
     readout: v === null ? null : channelReadout(action, station, v),
     bar: v === null ? null : channelBar(station, v),
+    // the status is the station's own voice: offered whenever there is one,
+    // held or not, so a radio that has a lock still says so as you walk up
+    status: far !== null ? null : o.statusOf?.(action) ?? null,
     outOfReach: far !== null,
     x: at.x,
     y: at.y,
@@ -330,7 +353,7 @@ export function cuePoints(o: CueInput): Array<ScreenPoint & { action: RaftAction
     if (a === o.focus) continue; // the plaque is its cue
     const station = RAFT_STATIONS[a];
     if (station === undefined) continue;
-    const world = o.socketWorld(station.socket);
+    const world = stationAnchor(a, o.socketWorld, o.pieceNear);
     if (world === null) continue;
     const at = projectPoint(world, o.viewProj, o.width, o.height);
     if (at === null) continue;
@@ -365,6 +388,8 @@ export interface RaftPromptOptions {
   board?: () => Vec3 | null;
   /** LIVE socket resolver (§V71), the assembly's own */
   socketWorld: SocketResolver;
+  /** §T.157 — `ShipAssembly.pieceNearestPoint`, so a plaque hangs on its object */
+  pieceNear?: PieceResolver;
   /** the lens the frame was drawn through */
   camera: () => CameraLike | null;
   /**
@@ -373,6 +398,12 @@ export interface RaftPromptOptions {
    * keep a second flag.
    */
   hidden?: () => boolean;
+  /**
+   * §T.156 — the live line a station wants on its plaque, or null. The raft
+   * wiring supplies the radio's (frequency, signal, lock); everything else
+   * answers null and reads exactly as it did.
+   */
+  status?: (action: RaftAction) => string | null;
   /** viewport in CSS px; defaults to the window */
   size?: () => ScreenPoint;
   parent?: HTMLElement;
@@ -412,13 +443,16 @@ export function createRaftPrompt(o: RaftPromptOptions): RaftPrompt {
   // closer" of §T.136d, so an idle plaque is exactly the nameplate it was.
   const gesture = el('span', 'smt-prompt-gesture', '');
   const readout = el('span', 'smt-prompt-readout', '');
+  // §T.156 — the station's own line (the radio's frequency and lock)
+  const status = el('span', 'smt-prompt-status', '');
   const fill = div('smt-prompt-fill');
   const bar = div('smt-prompt-bar', fill);
   const release = el('span', 'smt-prompt-release', '');
   const far = el('span', 'smt-prompt-far', 'step closer');
   const line1 = div('smt-prompt-line', key, name, verb);
   const line2 = div('smt-prompt-line smt-prompt-how', gesture, bar, readout, release, far);
-  const plaque = div('smt-prompt', line1, line2);
+  const line3 = div('smt-prompt-line smt-prompt-how', status);
+  const plaque = div('smt-prompt', line1, line2, line3);
   plaque.setAttribute('role', 'status');
   plaque.style.opacity = '0';
   plaque.style.visibility = 'hidden';
@@ -474,8 +508,10 @@ export function createRaftPrompt(o: RaftPromptOptions): RaftPrompt {
         outOfReach: dark ? null : o.interact.outOfReach(),
         board: dark ? null : o.board?.() ?? null,
         value: (a) => o.interact.value(a),
+        statusOf: o.status,
         hidden: dark,
         socketWorld: o.socketWorld,
+        pieceNear: o.pieceNear,
         // §V71: resolved from THIS frame's lens, not a cached one
         viewProj: camera === null ? [] : viewProjection(camera),
         width: view.x,
@@ -501,6 +537,8 @@ export function createRaftPrompt(o: RaftPromptOptions): RaftPrompt {
         release.textContent = next.release ?? '';
         release.style.display = next.release === null ? 'none' : '';
         far.style.display = next.outOfReach ? '' : 'none';
+        status.textContent = next.status ?? '';
+        line3.style.display = next.status === null || next.status === '' ? 'none' : '';
         bar.style.display = next.bar === null ? 'none' : '';
         if (next.bar !== null) {
           fill.style.left = `${(next.bar.from * 100).toFixed(2)}%`;
