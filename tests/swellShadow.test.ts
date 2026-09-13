@@ -36,7 +36,7 @@ import {
   type ShelterSource,
   type SwellShadowInputs,
 } from '../src/ocean/swellShadow';
-import { createFetchField, sampleGrid, SWELL_SHADOW_MIN_FRAMES } from '../src/ocean/fetchField';
+import { createFetchField, sampleGrid } from '../src/ocean/fetchField';
 import type { SeabedField } from '../src/island/seabed';
 import {
   cascadeBand,
@@ -46,7 +46,8 @@ import {
 import { normalCdf } from '../src/foam/foamMath';
 import { oceanParams, type OceanParams } from '../src/params/ocean';
 import { seaPhysicsParams } from '../src/params/seaPhysics';
-import { weatherPresets } from '../src/weather/presets';
+import { SPECTRUM_KEYS, weatherPresets } from '../src/weather/presets';
+import { weatherParams } from '../src/params/weather';
 import { CpuOcean } from '../src/sea-physics/cpuOcean';
 
 function preset(name: 'calm' | 'swell' | 'storm' | 'glass'): OceanParams {
@@ -416,7 +417,7 @@ describe('T174 the built field carries the shadow in the fetch texture', () => {
   });
 
   /** frames until the field re-marches (Infinity if it never does within `limit`) */
-  const framesToRebuild = (limit = 3 * SWELL_SHADOW_MIN_FRAMES): number => {
+  const framesToRebuild = (limit = 45): number => {
     for (let f = 1; f <= limit; f++) if (field.update(p.windDirection)) return f;
     return Infinity;
   };
@@ -429,30 +430,42 @@ describe('T174 the built field carries the shadow in the fetch texture', () => {
     p.swellDirection = 0.001; // under fetchRebuildRadians
     expect(framesToRebuild()).toBe(Infinity);
     p.swellDirection = Math.PI / 2;
-    expect(framesToRebuild()).toBeLessThanOrEqual(SWELL_SHADOW_MIN_FRAMES);
+    // §B.119: on the FIRST call — a frame-count gate is a frame-rate-dependent sea
+    expect(framesToRebuild()).toBe(1);
     expect(field.shadowCount).toBe(before + 1);
     // and the lee has actually turned with it
     expect(field.shadowAt(0, 700)).toBeLessThan(0.7);
     expect(field.shadowAt(700, 0)).toBeGreaterThan(0.97);
     p.swellPeriod = oceanParams.swellPeriod * 1.2;
-    expect(framesToRebuild()).toBe(SWELL_SHADOW_MIN_FRAMES);
+    expect(framesToRebuild()).toBe(1);
     p.swellDirection = NaN;
     expect(framesToRebuild()).toBe(Infinity);
     expect(field.shadowCount).toBe(before + 2);
   });
 
-  it('a preset lerp re-marches at most once per gate, and still lands the final swell', () => {
-    // the swell turning 1.9 rad across a 4 s transition at 60 fps
+  it('a preset transition re-marches once per distinct swell it writes, and lands the final swell', () => {
+    // §B.119 removed the 15-frame throttle. What bounds the cost instead is
+    // that a preset never moves the bake inputs smoothly: both are spectrum
+    // lanes, whose progress applyPreset steps. If either leaves that list, a
+    // 4 s transition re-marches every few frames (8–12 ms each) — this fails.
+    expect(SPECTRUM_KEYS).toContain('swellDirection');
+    expect(SPECTRUM_KEYS).toContain('swellPeriod');
+    // the swell turning 1.9 rad across a 4 s transition at 60 fps, stepped as applyPreset steps it
     p.swellDirection = 0;
     p.swellPeriod = oceanParams.swellPeriod;
     framesToRebuild();
     const before = field.shadowCount;
     const frames = 240;
+    const steps = Math.max(1, Math.floor(weatherParams.spectrumLerpSteps) || 1);
+    const written = new Set<number>();
     for (let f = 1; f <= frames; f++) {
-      p.swellDirection = (1.9 * f) / frames;
+      const t = Math.round((f / frames) * steps) / steps;
+      p.swellDirection = t >= 1 ? 1.9 : 1.9 * t;
+      written.add(p.swellDirection);
       field.update(p.windDirection);
     }
-    expect(field.shadowCount - before).toBeLessThanOrEqual(Math.ceil(frames / SWELL_SHADOW_MIN_FRAMES));
+    written.delete(0);
+    expect(field.shadowCount - before).toBeLessThanOrEqual(written.size);
     framesToRebuild(); // the transition has ended; the last move must land
     const lee = 700;
     expect(field.shadowAt(Math.cos(1.9) * lee, Math.sin(1.9) * lee)).toBeLessThan(0.7);

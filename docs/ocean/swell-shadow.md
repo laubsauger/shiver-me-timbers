@@ -122,12 +122,8 @@ CPU `swellShadowGain` and TSL `swellShadowGainNode` live side by side in
 - **CPU**: `CpuOcean.bandGains` multiplies the same gain per mirrored cascade,
   sampled at the grid coord `q` (§V.72a). `fᵢ` is refreshed on the same tick
   path as the fetch coefficients.
-- **Rebuild**: `update()` re-marches K when the swell bearing moves more than
-  `fetchRebuildRadians`, or when kp or σθ moves more than 2% relative, and at
-  most once per `SWELL_SHADOW_MIN_FRAMES` (15) calls. The weather presets lerp
-  `swellDirection` (by up to about 1.9 rad) and `swellPeriod` over 4 s, so
-  without the gate it would re-march every few frames. The shadow lags the
-  swell by at most 0.25 s, and the final position always lands.
+- **Rebuild** (§B119): `fetchAt`/`shadowAt` run the rebuild check against the live params before sampling, so the grid a tick reads always matches that tick's params. It re-marches K when the swell bearing moves more than
+  `fetchRebuildRadians`, or when kp or σθ moves more than 2% relative. There is no call-count gate any more: a render-side gate made the sea hulls feel frame-rate dependent. Presets move the swell keys in 3 steps, so a preset change costs at most 3 re-marches of 8–12 ms. `update()` from render is usually a no-op; a `version` counter bumps on every rebuild.
   `swellShadowStrength` is a uniform and never rebuilds anything.
 - **Band limit (§V.48)**: the diffusion is itself a low-pass, then the same
   `fetchBlurTexels` box blur runs. The field border is faded to K = 1 over

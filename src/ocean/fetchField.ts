@@ -114,12 +114,26 @@ export interface FetchField extends FetchSource, SwellShadowSource {
    * field was built with) has moved far enough to matter — see
    * `swellShadowMoved`. Returns true when either actually rebuilt, so callers
    * can count the cost.
+   *
+   * §B.119: NOT the only place a rebuild can happen, and deliberately so.
+   * `fetchAt`/`shadowAt` run the same test against the live params before
+   * they sample (see `syncWind`/`syncSwell`), so the grids a tick reads are
+   * the params of THAT tick whether or not a frame has been drawn since.
+   * Callers pass the params' own `windDirection` (every page does); this is
+   * then the render's half of the same decision, and usually a no-op.
    */
   update(windDirection: number): boolean;
   /** how many sweeps have run — perf accounting, and a test hook */
   readonly sweepCount: number;
   /** how many swell-shadow marches have run — perf accounting, and a test hook */
   readonly shadowCount: number;
+  /**
+   * §B.119: bumps on every sweep AND every march. The CPU arrays and the
+   * packed texture are written by the same call, so this one number names the
+   * grid both sides hold — the handle a worker copy (docs/speedboat/sim-worker.md)
+   * or a determinism test compares.
+   */
+  readonly version: number;
   dispose(): void;
 }
 
@@ -130,18 +144,6 @@ function angleDelta(a: number, b: number): number {
   if (d < -Math.PI) d += Math.PI * 2;
   return d;
 }
-
-/**
- * T174: the fewest `update()` calls (render frames) between two swell-shadow
- * marches. MEASURED on the shipped archipelagos: one march + blur + pack is
- * 8–12 ms (pirate 5 islands, raft 6), and a weather preset lerps
- * `swellDirection` by up to ~1.9 rad over `transitionSeconds` (4 s) — ungated,
- * that re-marches every ~4 frames for the whole transition. At 15 it is ~4
- * marches a second during a transition and none otherwise; the shadow trails
- * the swell by ≤ 0.25 s, and the LAST move always lands because the test is
- * against the swell that was last marched, not against the previous frame.
- */
-export const SWELL_SHADOW_MIN_FRAMES = 15;
 
 /**
  * T174: has the swell moved far enough to re-march its shadow? Bearing against
@@ -384,7 +386,7 @@ export function createFetchField(
   let sweeps = 0;
   let marchedSwell: SwellShadowInputs = swellShadowInputs(op);
   let marches = 0;
-  let framesSinceMarch = 0;
+  let version = 0;
 
   const rebuild = (windDirection: number): void => {
     sweepFetch(land, res, cell, windDirection, cap, data);
@@ -393,6 +395,7 @@ export function createFetchField(
     tex.needsUpdate = true;
     sweptDirection = windDirection;
     sweeps++;
+    version++;
   };
   /**
    * T174 — the swell shadow, band-limited by the SAME blur as fetch (§V.48)
@@ -408,14 +411,86 @@ export function createFetchField(
     tex.needsUpdate = true;
     marchedSwell = inputs;
     marches++;
-    framesSinceMarch = 0;
+    version++;
   };
   rebuild(op.windDirection);
   rebuildShadow(marchedSwell);
 
+  /**
+   * §B.119 — THE REBUILD DECISION IS A FUNCTION OF THE SIM, NOT OF THE FRAME.
+   *
+   * These used to run only from `update()`, which every page calls from its
+   * RENDER block, and the swell half was further gated on 15 such calls. So a
+   * swell or wind turn reached the grids `CpuOcean` floats hulls on at a tick
+   * set by the display rate: at 30 fps the tick after a turn still read the
+   * old shelter, at 60 it read the new one, and with no renderer (the worker
+   * core) it never rebuilt at all — §V.2 broken through §V.8's own wiring.
+   *
+   * Now every READER runs the test first, against the live params. The params
+   * are sim state (`weather.update` writes them inside the tick, before the
+   * mirror samples), so the first read after an input is that tick's own
+   * read, whatever the cadence — and a render-side read or `update()` in
+   * between sees the identical params and so makes the identical decision.
+   * The hysteresis (compare to what was LAST built, not to the last call) is
+   * unchanged, and so is every value an unmoved field reports.
+   *
+   * The 15-call throttle is gone rather than moved to sim time, because its
+   * premise went first: it was sized for a preset lerping `swellDirection`
+   * every frame, but both bake inputs a preset moves (`swellDirection`,
+   * `swellPeriod`) are SPECTRUM_KEYS, whose progress `applyPreset` steps to
+   * `spectrumLerpSteps` (3) — so a transition is ≤ 3 marches of 8–12 ms, each
+   * landing on the same tick as a ~139 ms spectrum rebuild. A continuous
+   * panel drag of the swell bearing is the one path that now marches per
+   * frame; it is a dev control.
+   *
+   * Cost on the read path: one exact compare of the inputs against the last
+   * ones examined, so a steady sea pays three small arithmetic calls and no
+   * `swellShadowMoved`.
+   */
+  let seenSwell: SwellShadowInputs = marchedSwell;
+  let seenTolerance = op.fetchRebuildRadians;
+  const syncSwell = (): boolean => {
+    const swell = swellShadowInputs(op);
+    if (
+      swell.direction === seenSwell.direction &&
+      swell.wavenumber === seenSwell.wavenumber &&
+      swell.spread === seenSwell.spread &&
+      op.fetchRebuildRadians === seenTolerance
+    ) {
+      return false;
+    }
+    seenSwell = swell;
+    seenTolerance = op.fetchRebuildRadians;
+    // T174: a non-finite swell keeps the last good shadow (§V.28)
+    if (
+      !Number.isFinite(swell.direction) ||
+      !Number.isFinite(swell.wavenumber) ||
+      !Number.isFinite(swell.spread) ||
+      !swellShadowMoved(swell, marchedSwell, op.fetchRebuildRadians)
+    ) {
+      return false;
+    }
+    rebuildShadow(swell);
+    return true;
+  };
+  const syncWind = (windDirection: number): boolean => {
+    if (!Number.isFinite(windDirection)) return false;
+    const moved = Math.abs(angleDelta(windDirection, sweptDirection));
+    // the constructor has already swept once, so this is purely the turn test
+    if (moved <= Math.max(op.fetchRebuildRadians, 0)) return false;
+    rebuild(windDirection);
+    return true;
+  };
+
   return {
-    fetchAt: (x, z) => sampleGrid(data, res, origin, cell, x, z),
-    shadowAt: (x, z) => sampleGrid(shadow, res, origin, cell, x, z),
+    fetchAt: (x, z) => {
+      syncWind(op.windDirection);
+      return sampleGrid(data, res, origin, cell, x, z);
+    },
+    shadowAt: (x, z) => {
+      syncSwell();
+      return sampleGrid(shadow, res, origin, cell, x, z);
+    },
     texture: tex,
     origin,
     size,
@@ -423,34 +498,19 @@ export function createFetchField(
     cap,
     uniforms,
     update(windDirection: number): boolean {
-      let rebuilt = false;
       // T174: the swell is read live — a preset lerp moves it with no caller
-      // having to know. A non-finite swell keeps the last good shadow (§V.28).
-      framesSinceMarch++;
-      const swell = swellShadowInputs(op);
-      if (
-        framesSinceMarch >= SWELL_SHADOW_MIN_FRAMES &&
-        Number.isFinite(swell.direction) &&
-        Number.isFinite(swell.wavenumber) &&
-        Number.isFinite(swell.spread) &&
-        swellShadowMoved(swell, marchedSwell, op.fetchRebuildRadians)
-      ) {
-        rebuildShadow(swell);
-        rebuilt = true;
-      }
-      if (!Number.isFinite(windDirection)) return rebuilt;
-      const moved = Math.abs(angleDelta(windDirection, sweptDirection));
-      // NaN on the first call (sweptDirection starts NaN) compares false, but
-      // the constructor has already swept once, so this is purely the turn test
-      if (moved <= Math.max(op.fetchRebuildRadians, 0)) return rebuilt;
-      rebuild(windDirection);
-      return true;
+      // having to know
+      const marched = syncSwell();
+      return syncWind(windDirection) || marched;
     },
     get sweepCount(): number {
       return sweeps;
     },
     get shadowCount(): number {
       return marches;
+    },
+    get version(): number {
+      return version;
     },
     dispose(): void {
       tex.dispose();
