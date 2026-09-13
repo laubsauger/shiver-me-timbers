@@ -1,8 +1,9 @@
 /**
  * In-game HUD stylesheet (§V21). Compass is a masked engraved tape; the
- * bottom edge is a triptych of brass-edged plaques — wind to port, knots and
- * heading amidships, canvas to starboard — sharing one clipped-corner shape so
- * they read as three fittings on the same binnacle rather than three widgets.
+ * bottom edge is a row of brass-edged plaques in two corner wings — anchor and
+ * wind to port, knots/heading and canvas to starboard, the centre left to the
+ * view astern — sharing one clipped-corner shape so they read as fittings on
+ * the same binnacle rather than separate widgets.
  * Imported and injected by styles.ts (single <style> tag).
  *
  * POSITIONING RULE (§B.50). Exactly two things in this file are absolutely
@@ -190,12 +191,22 @@ export const HUD_CSS = /* css */ `
 /* the binnacle: the ONE absolutely-positioned box at the bottom of the frame.
    Its children stack bottom-up, so the plaque row stays pinned 18px off the
    edge while the seal, the diamonds and the true-wind line grow upward off it
-   and can never reach it. */
+   and can never reach it.
+   It spans the frame between two gutters, and the plaque row splits into a
+   port and a starboard wing pushed to the corners (§V21 — don't fight the
+   view): a chase lens puts the vessel on the centre line, so the lower centre
+   is the water astern, and the old centred 700 px row sat on the wake. The
+   seal stays centred — it only shows when she is NOT making way, i.e. when
+   there is no wake to hide. */
 .smt-binnacle {
-  position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+  position: absolute; bottom: 18px; left: 24px; right: 24px;
   display: flex; flex-direction: column; align-items: center; gap: 9px;
 }
-.smt-bottom { display: flex; align-items: stretch; gap: 10px; }
+.smt-bottom {
+  display: flex; align-items: stretch; justify-content: space-between; gap: 10px;
+  align-self: stretch;
+}
+.smt-wing { display: flex; align-items: stretch; gap: 10px; }
 .smt-plate {
   display: flex; align-items: center; gap: 16px; padding: 9px 30px;
   background: linear-gradient(180deg, rgba(26, 18, 10, 0.82), rgba(13, 9, 5, 0.88));
@@ -383,7 +394,8 @@ export const HUD_CSS = /* css */ `
    and the seal are their own rows and were never the problem.
    Breakpoint matches the quick-controls block above — one in this file. */
 @media (max-width: 760px) {
-  .smt-bottom { gap: 7px; }
+  .smt-binnacle { left: 8px; right: 8px; }
+  .smt-bottom, .smt-wing { gap: 7px; }
   .smt-plate { padding: 9px 18px; gap: 12px; }
   .smt-plate-side { padding: 7px 11px; gap: 8px; }
   .smt-plate-cell { min-width: 66px; }

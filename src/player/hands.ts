@@ -56,6 +56,31 @@ export interface HandsOptions {
    * read once at construction into a closure).
    */
   hidden?: () => boolean;
+  /**
+   * The lens the group is parented to. The mitts are a first-person
+   * viewmodel: they belong in the frame ONLY while that lens is the walker's
+   * eye. Parented to the camera, they otherwise follow it into the chase,
+   * the free flyer, the helm and every debug vantage, and sit in the bottom
+   * corners of a frame whose eye is 30 m astern (browser sync 2026-09-13).
+   * Omitted → no lens gate (the preview harness has no camera modes).
+   */
+  lens?: HandsLens;
+}
+
+/** the part of the camera rig the hands ask about — `FollowCam` satisfies it */
+export interface HandsLens {
+  getMode(): string;
+  isDebugPinned(): boolean;
+}
+
+/**
+ * True only while the lens IS the walker's eye: mode 'fp' and not parked at a
+ * debug vantage (a pin outranks every mode, so an 'fp' lens held 900 m over
+ * the sea is not first person). Read live, like `hidden` — C, H, the number
+ * row and `setFp` all move the mode mid-session.
+ */
+export function lensIsFirstPerson(lens: HandsLens): boolean {
+  return lens.getMode() === 'fp' && !lens.isDebugPinned();
 }
 
 export function createHands(opts: HandsOptions = {}): Hands {
@@ -70,7 +95,7 @@ export function createHands(opts: HandsOptions = {}): Hands {
   const apply = (): void => {
     // re-read every tick: the answer changes when the player presses P, and
     // the group is the one thing that decides whether a capture has mitts in it
-    group.visible = !(opts.hidden?.() ?? false);
+    group.visible = !(opts.hidden?.() ?? false) && (opts.lens === undefined || lensIsFirstPerson(opts.lens));
     for (const s of sides) {
       const t = blends[s].current(playerParams.handPoseTime);
       nodes[s].position.set(t.position[0], t.position[1], t.position[2]);

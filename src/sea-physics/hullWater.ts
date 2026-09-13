@@ -157,6 +157,8 @@ export interface HullWaterParams {
   coupledAddedMass: boolean;
   /** Kirchhoff −ω × (A·v) completion of the rotating-frame fluid load (see KIRCHHOFF COMPLETION in evaluate) */
   kirchhoff: boolean;
+  /** sectional 2D+t loads at the Wagner centres of pressure (see placeCentresOfPressure); false = geometric centroids (T165) */
+  wagnerCentreOfPressure: boolean;
   /** gearcase lateral foils on the drives (off = thrust vectoring only) */
   driveFoil: boolean;
   /** natural ventilation of the surface-piercing gearcases (off = wetted lift to stall) */
@@ -229,6 +231,7 @@ export const HULL_WATER_DEFAULTS: Readonly<HullWaterParams> = Object.freeze({
   lateralAddedMassCoeff: 1,
   standInDrivePowerW: STANDIN_THRUST.powerW,
   coupledAddedMass: true,
+  wagnerCentreOfPressure: true,
   kirchhoff: true,
   driveFoil: true,
   gearcaseVentilation: true,
@@ -560,6 +563,21 @@ export class HullWater {
   thrust = 0;
   private readonly dr = new Float64Array(3);
   private readonly pnl = new Float64Array(8);
+  /** per strip: sway-mode force direction f and moment m (world, per unit side force) */
+  private readonly lJf: Float64Array;
+  private readonly lJm: Float64Array;
+  /** per half: panel weight w_h and panel normal n̂_h of its strip's sway mode */
+  private readonly lpw: Float64Array;
+  private readonly lJfD: Float64Array;
+  private readonly lJmD: Float64Array;
+  private readonly lpwD: Float64Array;
+  private readonly lpn: Float64Array;
+  /** geometric wet centroid and the lateral (antisymmetric) Wagner centre of pressure per half, world */
+  private readonly hGeo: Float64Array;
+  private readonly hLat: Float64Array;
+  /** steady (symmetric Wagner) centre of pressure per half, world — the steady planing lift acts here */
+  private readonly hSteady: Float64Array;
+  private readonly sLiftSt: Float64Array;
   private readonly dd = new Float64Array(3);
   private readonly dn = new Float64Array(3);
   private readonly da = new Float64Array(3);
@@ -633,6 +651,17 @@ export class HullWater {
       centroid: new Float64Array(ns * 3),
     };
     this.prevMa = new Float64Array(2 * ns);
+    this.hGeo = new Float64Array(2 * ns * 3);
+    this.lJf = new Float64Array(ns * 3);
+    this.lJm = new Float64Array(ns * 3);
+    this.lpw = new Float64Array(2 * ns);
+    this.lJfD = new Float64Array(ns * 3);
+    this.lJmD = new Float64Array(ns * 3);
+    this.lpwD = new Float64Array(2 * ns);
+    this.lpn = new Float64Array(2 * ns * 3);
+    this.hLat = new Float64Array(2 * ns * 3);
+    this.hSteady = new Float64Array(2 * ns * 3);
+    this.sLiftSt = new Float64Array(2 * ns);
     this.sDepMax = new Float64Array(ns);
     this.sDepMin = new Float64Array(ns);
     this.lMa = new Float64Array(ns);
@@ -916,6 +945,7 @@ export class HullWater {
       HC[hI * 3] /= A;
       HC[hI * 3 + 1] /= A;
       HC[hI * 3 + 2] /= A;
+      for (let c = 0; c < 3; c++) this.hGeo[hI * 3 + c] = this.hLat[hI * 3 + c] = HC[hI * 3 + c];
     }
     HMA.fill(0);
     HVN.fill(0);
@@ -965,6 +995,7 @@ export class HullWater {
               const cgH = side === 0 ? cgP : cgS;
               const share = cgP * cgP + cgS * cgS > 0 ? (cgH * cgH) / (cgP * cgP + cgS * cgS) : 0.5;
               const ma = k * rho * HALF_PI * cW * cW * share;
+              this.placeCentresOfPressure(hI, i, cgH, byx, byy, byz, bzx, bzy, bzz);
               const rx = HC[hI * 3] - cgx;
               const ry = HC[hI * 3 + 1] - cgy;
               const rz = HC[hI * 3 + 2] - cgz;
@@ -1018,6 +1049,7 @@ export class HullWater {
         const kl = prm.lateralAddedMassCoeff;
         for (let i = 0; i < ns; i++) {
           this.lMa[i] = 0;
+          this.lpw[2 * i] = this.lpw[2 * i + 1] = this.lpwD[2 * i] = this.lpwD[2 * i + 1] = 0;
           this.lVL[i] = 0;
           this.lU[i] = 0;
           const nX = S.normal[i * 3];
@@ -1035,36 +1067,29 @@ export class HullWater {
           const rx = S.centroid[i * 3] - cgx;
           const ry = S.centroid[i * 3 + 1] - cgy;
           const rz = S.centroid[i * 3 + 2] - cgz;
-          const pvx = vx + (wy * rz - wz * ry);
-          const pvy = vy + (wz * rx - wx * rz);
-          const pvz = vz + (wx * ry - wy * rx);
-          this.lVL[i] = pvx * lx + pvy * ly + pvz * lz;
-          this.lU[i] = pvx * bzx + pvy * bzy + pvz * bzz;
+          this.lU[i] = (vx + (wy * rz - wz * ry)) * bzx + (vy + (wz * rx - wx * rz)) * bzy + (vz + (wx * ry - wy * rx)) * bzz;
+          this.lateralJacobian(i, lx, ly, lz, rx, ry, rz, bzx, bzy, bzz);
+          const JF = this.lJf;
+          const JM = this.lJm;
+          this.lVL[i] = JF[i * 3] * vx + JF[i * 3 + 1] * vy + JF[i * 3 + 2] * vz + JM[i * 3] * wx + JM[i * 3 + 1] * wy + JM[i * 3 + 2] * wz;
         }
         for (let i = 0; i < ns; i++) {
           const ml = this.lMa[i];
           if (ml <= 0) continue;
-          const lx = this.lDir[i * 3];
-          const ly = this.lDir[i * 3 + 1];
-          const lz = this.lDir[i * 3 + 2];
-          const rx = S.centroid[i * 3] - cgx;
-          const ry = S.centroid[i * 3 + 1] - cgy;
-          const rz = S.centroid[i * 3 + 2] - cgz;
-          const lbx = lx * bxx + ly * bxy + lz * bxz;
-          const lby = lx * byx + ly * byy + lz * byz;
-          const lbz = lx * bzx + ly * bzy + lz * bzz;
-          const rbx = rx * bxx + ry * bxy + rz * bxz;
-          const rby = rx * byx + ry * byy + rz * byz;
-          const rbz = rx * bzx + ry * bzy + rz * bzz;
+          const o = i * 3;
+          const F = this.lJf;
+          const Mv = this.lJm;
+          const fbx = F[o] * bxx + F[o + 1] * bxy + F[o + 2] * bxz;
+          const fby = F[o] * byx + F[o + 1] * byy + F[o + 2] * byz;
+          const mbx = Mv[o] * bxx + Mv[o + 1] * bxy + Mv[o + 2] * bxz;
+          const mby = Mv[o] * byx + Mv[o + 1] * byy + Mv[o + 2] * byz;
+          const mbz = Mv[o] * bzx + Mv[o + 1] * bzy + Mv[o + 2] * bzz;
           const mdz = ml * dz;
-          Ax += mdz * lbx * lbx;
-          Ay += mdz * lby * lby;
-          const cxb = rby * lbz - rbz * lby;
-          const cyb = rbz * lbx - rbx * lbz;
-          const czb = rbx * lby - rby * lbx;
-          dIx += mdz * cxb * cxb;
-          dIy += mdz * cyb * cyb;
-          dIz += mdz * czb * czb;
+          Ax += mdz * fbx * fbx;
+          Ay += mdz * fby * fby;
+          dIx += mdz * mbx * mbx;
+          dIy += mdz * mby * mby;
+          dIz += mdz * mbz * mbz;
         }
       }
       // added mass from the half-sections (diagonal about the CG, §V69)
@@ -1136,22 +1161,16 @@ export class HullWater {
       for (let i = 0; i < ns; i++) {
         const ml = this.lMa[i];
         if (ml <= 0 && !(hp && this.lPrev[i] > 0)) continue;
-        const lx = this.lDir[i * 3];
-        const ly = this.lDir[i * 3 + 1];
-        const lz = this.lDir[i * 3 + 2];
-        const rx = S.centroid[i * 3] - cgx;
-        const ry = S.centroid[i * 3 + 1] - cgy;
-        const rz = S.centroid[i * 3 + 2] - cgz;
         const J = this.j6;
-        J[0] = lx * bxx + ly * bxy + lz * bxz;
-        J[1] = lx * byx + ly * byy + lz * byz;
-        J[2] = lx * bzx + ly * bzy + lz * bzz;
-        const rbx = rx * bxx + ry * bxy + rz * bxz;
-        const rby = rx * byx + ry * byy + rz * byz;
-        const rbz = rx * bzx + ry * bzy + rz * bzz;
-        J[3] = rby * J[2] - rbz * J[1];
-        J[4] = rbz * J[0] - rbx * J[2];
-        J[5] = rbx * J[1] - rby * J[0];
+        const o = i * 3;
+        const F = this.lJf;
+        const Mv = this.lJm;
+        J[0] = F[o] * bxx + F[o + 1] * bxy + F[o + 2] * bxz;
+        J[1] = F[o] * byx + F[o + 1] * byy + F[o + 2] * byz;
+        J[2] = F[o] * bzx + F[o + 1] * bzy + F[o + 2] * bzz;
+        J[3] = Mv[o] * bxx + Mv[o + 1] * bxy + Mv[o + 2] * bxz;
+        J[4] = Mv[o] * byx + Mv[o + 1] * byy + Mv[o + 2] * byz;
+        J[5] = Mv[o] * bzx + Mv[o + 1] * bzy + Mv[o + 2] * bzz;
         const aK = (hp ? Math.min(this.lPrev[i], ml) : ml) * dz;
         for (let r = 0; r < 6; r++) {
           const kr = aK * J[r];
@@ -1251,18 +1270,12 @@ export class HullWater {
           const ml = this.lMa[i];
           const dA = (ml - this.lPrev[i]) * dz;
           if (!(dA > 0)) continue;
-          const lx = this.lDir[i * 3];
-          const ly = this.lDir[i * 3 + 1];
-          const lz = this.lDir[i * 3 + 2];
-          const rx = S.centroid[i * 3] - cgx;
-          const ry = S.centroid[i * 3 + 1] - cgy;
-          const rz = S.centroid[i * 3 + 2] - cgz;
-          const V = this.pointVelAt(rx, ry, rz, lx, ly, lz);
+          const V = this.gsVelJ(i);
           if (V === 0) continue;
-          const wInv = this.gsInvMassAt(rx, ry, rz, lx, ly, lz);
+          const wInv = this.gsInvMassJ(i);
           const J = (-dA * V) / (1 + dA * wInv);
-          this.gsApply(-1, lx, ly, lz, J);
-          this.addStripForce(i, (J * lx) / h, (J * ly) / h, (J * lz) / h);
+          this.gsApply(-1, 0, 0, 0, J);
+          this.addLateralStripForce(i, J / h);
         }
       }
       // ---- crossflow drag (normal ½ρ·C_Dc·c_half·V_n|V_n| per half, lateral ½ρ·C_Dc·A_side·V|V|) as
@@ -1272,9 +1285,20 @@ export class HullWater {
       for (let hI = 0; hI < nh; hI++) {
         if (HA[hI] <= 1e-9) continue;
         if (HMA[hI] > 0) this.gsDrag(hI, HN[hI * 3], HN[hI * 3 + 1], HN[hI * 3 + 2], halfRhoCd * 2 * HCW[hI] * (HMA[hI] / S.ma[hI >> 1]) * dz, h); // the half's share of ½ρ·C_Dc·2c
-        const vLat = this.pointVelAlong(hI, bxx, bxy, bxz);
-        const aSide = vLat > 0 ? this.sLatP[hI] : this.sLatM[hI];
-        if (aSide > 0) this.gsDrag(hI, bxx, bxy, bxz, halfRhoCd * aSide, h, true);
+      }
+      // lateral crossflow drag per strip on its sway Jacobian (velocity, inverse mass and force all through the
+      // same panel-pressure mode — see lateralJacobian)
+      for (let i = 0; i < ns; i++) {
+        if (this.lMa[i] <= 0) continue;
+        const V = this.gsVelJ(i, true);
+        if (V === 0) continue;
+        const aSide = V > 0 ? this.sLatP[2 * i] + this.sLatP[2 * i + 1] : this.sLatM[2 * i] + this.sLatM[2 * i + 1];
+        if (!(aSide > 0)) continue;
+        const kd = halfRhoCd * aSide * Math.abs(V) * h;
+        const w = this.gsInvMassJ(i, true);
+        const J = (-kd * V) / (1 + kd * w);
+        this.gsApply(-1, 0, 0, 0, J);
+        this.addLateralStripForce(i, J / h, true);
       }
       for (let hI = 0; hI < nh; hI++) this.prevMa[hI] = HMA[hI];
       for (let i = 0; i < ns; i++) this.lPrev[i] = this.lMa[i];
@@ -1383,29 +1407,26 @@ export class HullWater {
         for (let i = 0; i < ns; i++) {
           const ml = this.lMa[i];
           if (ml <= 0) continue;
-          const lx = this.lDir[i * 3];
-          const ly = this.lDir[i * 3 + 1];
-          const lz = this.lDir[i * 3 + 2];
-          const lbx = lx * bxx + ly * bxy + lz * bxz;
-          const lby = lx * byx + ly * byy + lz * byz;
-          const lbz = lx * bzx + ly * bzy + lz * bzz;
+          const o = i * 3;
+          const F = this.lJf;
+          const Mv = this.lJm;
+          const fbx = F[o] * bxx + F[o + 1] * bxy + F[o + 2] * bxz;
+          const fby = F[o] * byx + F[o + 1] * byy + F[o + 2] * byz;
+          const fbz = F[o] * bzx + F[o + 1] * bzy + F[o + 2] * bzz;
           const aN = ml * dz;
-          let f = aN * (lbx * ocx + lby * ocy + lbz * ocz);
+          let f = aN * (fbx * ocx + fby * ocy + fbz * ocz);
           if (C6) {
-            const rx = S.centroid[i * 3] - cgx;
-            const ry = S.centroid[i * 3 + 1] - cgy;
-            const rz = S.centroid[i * 3 + 2] - cgz;
-            const rbx = rx * bxx + ry * bxy + rz * bxz;
-            const rby = rx * byx + ry * byy + rz * byz;
-            const rbz = rx * bzx + ry * bzy + rz * bzz;
-            f += aN * ((rby * lbz - rbz * lby) * gx + (rbz * lbx - rbx * lbz) * gy + (rbx * lby - rby * lbx) * gz);
+            const mbx = Mv[o] * bxx + Mv[o + 1] * bxy + Mv[o + 2] * bxz;
+            const mby = Mv[o] * byx + Mv[o + 1] * byy + Mv[o + 2] * byz;
+            const mbz = Mv[o] * bzx + Mv[o + 1] * bzy + Mv[o + 2] * bzz;
+            f += aN * (mbx * gx + mby * gy + mbz * gz);
           }
-          this.addStripForce(i, f * lx, f * ly, f * lz);
+          this.addLateralStripForce(i, f);
           if (kirch) {
-            const vL = C6 ? this.lVL[i] : vx * lx + vy * ly + vz * lz;
-            const qx = aN * vL * lx;
-            const qy = aN * vL * ly;
-            const qz = aN * vL * lz;
+            const vL = C6 ? this.lVL[i] : vx * F[o] + vy * F[o + 1] + vz * F[o + 2];
+            const qx = aN * vL * F[o];
+            const qy = aN * vL * F[o + 1];
+            const qz = aN * vL * F[o + 2];
             plx += qx;
             ply += qy;
             plz += qz;
@@ -1426,7 +1447,6 @@ export class HullWater {
           this.fZ -= wx * ply - wy * plx;
         }
       }
-
       // ---- planing lift: −U·∂(m_a·V_n)/∂ξ per half-section, M sampled at half centroids, piecewise
       // linear. The momentum gained between two centres is placed at their shared boundary (half to each
       // wet neighbour). At the TRAILING section the half strip to the transom is extrapolated, then the
@@ -1434,6 +1454,8 @@ export class HullWater {
       // CG's body-z speed; magnitude uses each half's own |u|.
       const LF = this.sLift;
       LF.fill(0);
+      const LFS = this.sLiftSt;
+      LFS.fill(0);
       {
         const uCg = vx * bzx + vy * bzy + vz * bzz;
         const step = uCg >= 0 ? 1 : -1;
@@ -1457,19 +1479,36 @@ export class HullWater {
           const wUp = upWet ? 0.5 * Math.min(1, HA[up] / HA[hI]) : 0;
           const zc = mesh.strips.zCentre[i];
           // Garme on the STEADY part only (see `garmeANon`), evaluated where each piece of lift acts
-          const cb = liftSt * this.transomFactor(zc + 0.5 * step * dz) + (lift - liftSt);
+          const sP = liftSt * this.transomFactor(zc + 0.5 * step * dz);
+          const cb = sP + (lift - liftSt);
           if (cb > 0) {
+            const fs = cb * this.steadyShare(sP, lift - liftSt);
             LF[hI] += (1 - wUp) * cb;
-            if (upWet) LF[up] += wUp * cb;
+            LFS[hI] += (1 - wUp) * fs;
+            if (upWet) {
+              LF[up] += wUp * cb;
+              LFS[up] += wUp * fs;
+            }
           }
           if (i === trail) {
-            const ext = wUp * (liftSt * this.transomFactor(zc - 0.25 * step * dz) + (lift - liftSt));
-            if (ext > 0) LF[hI] += ext;
+            const sE = liftSt * this.transomFactor(zc - 0.25 * step * dz);
+            const ext = wUp * (sE + (lift - liftSt));
+            if (ext > 0) {
+              LF[hI] += ext;
+              LFS[hI] += ext * this.steadyShare(sE, lift - liftSt);
+            }
           }
         }
       }
       for (let hI = 0; hI < nh; hI++) {
-        if (LF[hI] > 0 && HA[hI] > 1e-9) this.addHalfForce(hI, LF[hI]);
+        if (!(LF[hI] > 0) || HA[hI] <= 1e-9) continue;
+        const fs = Math.min(LF[hI], Math.max(0, LFS[hI]));
+        const fu = LF[hI] - fs;
+        if (fu > 0) this.addHalfForce(hI, fu);
+        if (fs > 0) {
+          const P = this.hSteady;
+          this.addForceAt(hI, fs * HN[hI * 3], fs * HN[hI * 3 + 1], fs * HN[hI * 3 + 2], P[hI * 3] - cgx, P[hI * 3 + 1] - cgy, P[hI * 3 + 2] - cgz);
+        }
       }
       // ---- LATERAL MOMENTUM FLUX (slender-body side force, −U·∂(m_lat·V_L)/∂ξ along L̂): the planing lift's
       //      scheme on the sway momentum M = m_lat·V_L, boundary placement, trailing extrapolation, the flux
@@ -1973,7 +2012,7 @@ export class HullWater {
   private addStripForce(i: number, fx: number, fy: number, fz: number): void {
     const A = this.sections.wetArea[i];
     if (A <= 1e-9) return;
-    const C = this.hCentroid;
+    const C = this.hGeo;
     for (let side = 0; side < 2; side++) {
       const hI = 2 * i + side;
       const w = this.hArea[hI] / A;
@@ -1985,29 +2024,57 @@ export class HullWater {
   /**
    * A SWAY load of magnitude F along strip i's lateral axis L̂, carried as PRESSURE NORMAL TO THE BOTTOM
    * PANELS: each wet half gets f_h·n̂_h along its own panel normal (Σ over the wet triangles of that half, ⊥ body
-   * z) at its own centroid, with f_h = F·A_h·s_h / Σ A_k·s_k², s_h = n̂_h·L̂, so the lateral components add to F.
-   * For an upright V the normal components cancel (s_h = ∓ sin β) and what is left is WHERE the side force
-   * acts: both panel-normal lines meet c/sin2β above the keel, above a CG h over the keel while the wetted
-   * half-beam c is wide, so a hull sliding outward in a turn is rolled INTO it. Source for the mechanism: the
-   * side force on a drifting planing hull is "a strong pressure increase at one of the spray roots" (Marleaux,
-   * Simonis & Abdel-Maksoud, 35th Symp. Naval Hydrodynamics 2024, 2D+t BEM vs Brown & Klosinski 1994 tests).
-   * The same force through the strip centroid heels her OUT of the turn (measured −2…−5° at C_v 3–5).
-   * Used for the lateral momentum flux and the separated crossflow drag; the sway added-mass loads (rotating
-   * frame, entry exchange, Kirchhoff) act at the strip centroid, where the 6×6 puts their lever arm.
+   * z), with f_h = F·w_h (see lateralJacobian), so the lateral components add to F. For an upright V the normal
+   * components cancel and what is left is WHERE the side force acts: the panel-normal lines through the
+   * antisymmetric Wagner centres πc_W/4 meet the centre line well above the keel, so a hull sliding outward in
+   * a turn is rolled INTO it. Source for the mechanism: the side force on a drifting planing hull is "a strong
+   * pressure increase at one of the spray roots" (Marleaux, Simonis & Abdel-Maksoud, 35th Symp. Naval
+   * Hydrodynamics 2024, 2D+t BEM vs Brown & Klosinski 1994 tests). The same force through the strip centroid
+   * heels her OUT of the turn (measured −2…−5° at C_v 3–5, −13° at C_v 10). `drag` selects the crossflow set
+   * (geometric centroids). The sway rotating-frame and Kirchhoff loads also go through here.
    * No panel with a lateral slope (s = 0, a flat plate with dry sides) ⇒ plain force at the strip centroid.
    */
-  private addLateralStripForce(i: number, F: number): void {
-    const bzx = this.bzX;
-    const bzy = this.bzY;
-    const bzz = this.bzZ;
-    const lx = this.lDir[i * 3];
-    const ly = this.lDir[i * 3 + 1];
-    const lz = this.lDir[i * 3 + 2];
-    const P = this.pnl;
+  private addLateralStripForce(i: number, F: number, drag = false): void {
+    const W = drag ? this.lpwD : this.lpw;
+    if (W[2 * i] === 0 && W[2 * i + 1] === 0) {
+      this.addStripForce(i, F * this.lDir[i * 3], F * this.lDir[i * 3 + 1], F * this.lDir[i * 3 + 2]);
+      return;
+    }
+    const C = drag ? this.hGeo : this.hLat;
+    const Nn = this.lpn;
+    for (let side = 0; side < 2; side++) {
+      const hI = 2 * i + side;
+      const f = F * W[hI];
+      if (f === 0) continue;
+      this.addForceAt(hI, f * Nn[hI * 3], f * Nn[hI * 3 + 1], f * Nn[hI * 3 + 2], C[hI * 3] - this.cgx, C[hI * 3 + 1] - this.cgy, C[hI * 3 + 2] - this.cgz);
+    }
+  }
+
+  /**
+   * THE SWAY MODE OF STRIP i as ONE generalized coordinate (T179): the side force is panel pressure f_h·n̂_h with
+   * f_h = F·w_h, w_h = A_h·s_h/Σ A·s², so a unit F is the world force f = Σ w_h·n̂_h (≈ L̂) and moment
+   * m = Σ w_h·r_h × n̂_h. The SAME (f, m) is used for the strip's sway velocity V = f·v + m·ω, its added-mass
+   * contribution a·[f; m][f; m]ᵀ, and its Gauss–Seidel impulses — dissipative by construction (force·velocity).
+   * Taking the velocity at the strip centroid while the force acted along the panel lines (the first T179
+   * version) made a roll rate, which moves the keel sideways BELOW the CG, raise a side force whose line passes
+   * ABOVE the CG: negative roll damping (linearised about a C_v 8 steady turn: a 1.7 Hz roll–sway–heave mode
+   * growing at +1.8/s). Two sets, one per pressure distribution:
+   *  - potential (added mass, entry, rotating frame, momentum flux): r_h = the antisymmetric Wagner centre πc_W/4;
+   *  - separated crossflow drag: r_h = the geometric wet centroid (the pressure of a separated crossflow is spread
+   *    over the leading panel, not peaked at the spray root). Through the spray-root point the drag's heave- and
+   *    heel-dependent projected area drove the same roll–sway–heave mode (linearised growth +2/s at C_v 10 half
+   *    lock, −1/s with the drag at the centroid).
+   * No panel with lateral slope ⇒ f = L̂ at the strip centroid.
+   */
+  private lateralJacobian(i: number, lx: number, ly: number, lz: number, rcx: number, rcy: number, rcz: number, bzx: number, bzy: number, bzz: number): void {
+    const Nn = this.lpn;
+    const S2 = this.pnl;
     let den = 0;
     for (let side = 0; side < 2; side++) {
       const hI = 2 * i + side;
-      P[side * 4 + 3] = 0;
+      this.lpw[hI] = 0;
+      this.lpwD[hI] = 0;
+      S2[side] = 0;
       if (this.hArea[hI] <= 1e-9) continue;
       let nx = this.sSx[hI];
       let ny = this.sSy[hI];
@@ -2018,28 +2085,151 @@ export class HullWater {
       nz -= al * bzz;
       const nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
       if (nl <= 1e-12) continue;
-      nx /= nl;
-      ny /= nl;
-      nz /= nl;
-      const sh = nx * lx + ny * ly + nz * lz;
-      P[side * 4] = nx;
-      P[side * 4 + 1] = ny;
-      P[side * 4 + 2] = nz;
-      P[side * 4 + 3] = sh;
+      Nn[hI * 3] = nx / nl;
+      Nn[hI * 3 + 1] = ny / nl;
+      Nn[hI * 3 + 2] = nz / nl;
+      const sh = (nx * lx + ny * ly + nz * lz) / nl;
+      S2[side] = sh;
       den += this.hArea[hI] * sh * sh;
     }
-    if (den <= 1e-9 * this.sections.wetArea[i]) {
-      this.addStripForce(i, F * lx, F * ly, F * lz);
+    const o = i * 3;
+    for (let set = 0; set < 2; set++) {
+      const F = set === 0 ? this.lJf : this.lJfD;
+      const M = set === 0 ? this.lJm : this.lJmD;
+      const W = set === 0 ? this.lpw : this.lpwD;
+      const C = set === 0 ? this.hLat : this.hGeo;
+      if (den <= 1e-9 * this.sections.wetArea[i]) {
+        F[o] = lx;
+        F[o + 1] = ly;
+        F[o + 2] = lz;
+        M[o] = rcy * lz - rcz * ly;
+        M[o + 1] = rcz * lx - rcx * lz;
+        M[o + 2] = rcx * ly - rcy * lx;
+        continue;
+      }
+      F[o] = F[o + 1] = F[o + 2] = M[o] = M[o + 1] = M[o + 2] = 0;
+      for (let side = 0; side < 2; side++) {
+        const hI = 2 * i + side;
+        if (S2[side] === 0) continue;
+        const w = (this.hArea[hI] * S2[side]) / den;
+        W[hI] = w;
+        const nx = Nn[hI * 3];
+        const ny = Nn[hI * 3 + 1];
+        const nz = Nn[hI * 3 + 2];
+        const rx = C[hI * 3] - this.cgx;
+        const ry = C[hI * 3 + 1] - this.cgy;
+        const rz = C[hI * 3 + 2] - this.cgz;
+        F[o] += w * nx;
+        F[o + 1] += w * ny;
+        F[o + 2] += w * nz;
+        M[o] += w * (ry * nz - rz * ny);
+        M[o + 1] += w * (rz * nx - rx * nz);
+        M[o + 2] += w * (rx * ny - ry * nx);
+      }
+    }
+  }
+
+  /** GS working velocity of strip i's sway mode (drag = the crossflow set) */
+  private gsVelJ(i: number, drag = false): number {
+    const F = drag ? this.lJfD : this.lJf;
+    const M = drag ? this.lJmD : this.lJm;
+    const o = i * 3;
+    const v = this.gv;
+    const w = this.gw;
+    return F[o] * v[0] + F[o + 1] * v[1] + F[o + 2] * v[2] + M[o] * w[0] + M[o + 1] * w[1] + M[o + 2] * w[2];
+  }
+
+  /** j6 ← strip i's sway Jacobian in the body frame; returns its effective inverse mass */
+  private gsInvMassJ(i: number, drag = false): number {
+    const A = this.gsAxes;
+    const F = drag ? this.lJfD : this.lJf;
+    const M = drag ? this.lJmD : this.lJm;
+    const o = i * 3;
+    const j = this.j6;
+    j[0] = F[o] * A[0] + F[o + 1] * A[1] + F[o + 2] * A[2];
+    j[1] = F[o] * A[3] + F[o + 1] * A[4] + F[o + 2] * A[5];
+    j[2] = F[o] * A[6] + F[o + 1] * A[7] + F[o + 2] * A[8];
+    j[3] = M[o] * A[0] + M[o + 1] * A[1] + M[o + 2] * A[2];
+    j[4] = M[o] * A[3] + M[o + 1] * A[4] + M[o + 2] * A[5];
+    j[5] = M[o] * A[6] + M[o + 1] * A[7] + M[o + 2] * A[8];
+    if (this.gsC6) {
+      const Mi = this.minv6;
+      let wsum = 0;
+      for (let r = 0; r < 6; r++) {
+        let t = 0;
+        for (let c = 0; c < 6; c++) t += Mi[r * 6 + c] * j[c];
+        wsum += j[r] * t;
+      }
+      return wsum;
+    }
+    const iM = this.gsInvM;
+    const iI = this.gsInvI;
+    return j[0] * j[0] * iM[0] + j[1] * j[1] * iM[1] + j[2] * j[2] * iM[2] + j[3] * j[3] * iI[0] + j[4] * j[4] * iI[1] + j[5] * j[5] * iI[2];
+  }
+
+  /**
+   * WAGNER CENTRES OF PRESSURE (T179 heel). The half-section loads used to act at the half's GEOMETRIC wet
+   * centroid, half-way from keel to waterline. A planing section's pressure is not uniform. For Wagner's plate
+   * (half-width c_W, φ = 0 free surface; Wagner 1932, Faltinsen 2005 §8–9), per side:
+   *  - STEADY (symmetric, ċ-driven) pressure ∝ 1/√(c_W² − x²): centre x̄ = 2c_W/π  → `hSteady` (steady lift);
+   *  - SWAY (antisymmetric, ċ-driven) pressure: centre x̄ = πc_W/4 (checked numerically for a sign-type normal
+   *    velocity, scratch plate.py; the drift pressure peak sits "at one of the spray roots", Marleaux et al.
+   *    2024) → `hLat` (the sway mode's potential loads, see lateralJacobian);
+   *  - RATE terms (rotation, entry, crossflow, rotating frame, unsteady lift, GS impulse points, the 6×6 lever
+   *    arms): the point whose ±x̄ half-model reproduces the plate's roll added inertia m_a·c_W²/8, x̄ = c_W/(2√2)
+   *    → `hCentroid`. Putting those at 2c_W/π overstated roll damping and added inertia ≈3×.
+   * c_W = min((π/2)·c_g, chine), c_g the half's geometric wet width. The centroid form halved the lever of the
+   * steady lift about the keel — dynamic roll stiffness 0.27·mgB/rad at C_v 8 against ~0.57 measured by Brown &
+   * Klosinski — and put the side-force line below the CG once the chines dried: she heeled OUT of turns at C_v ≥ 8
+   * (−13° at C_v 10). Points move along the panel (same body z) from the keel line; hydrostatics and friction
+   * stay on the triangles; the crossflow drag and strip-level loads use the geometric centroid `hGeo`.
+   */
+  private placeCentresOfPressure(hI: number, i: number, cgH: number, byx: number, byy: number, byz: number, bzx: number, bzy: number, bzz: number): void {
+    const C = this.hCentroid;
+    const Lp = this.hLat;
+    const o = hI * 3;
+    this.hSteady[o] = C[o];
+    this.hSteady[o + 1] = C[o + 1];
+    this.hSteady[o + 2] = C[o + 2];
+    if (!this.params.wagnerCentreOfPressure) return;
+    const gx = C[o] - this.cgx;
+    const gy = C[o + 1] - this.cgy;
+    const gz = C[o + 2] - this.cgz;
+    const bxx = this.latX;
+    const bxy = this.latY;
+    const bxz = this.latZ;
+    const rbx = gx * bxx + gy * bxy + gz * bxz;
+    const rby = gx * byx + gy * byy + gz * byz;
+    const rbz = gx * bzx + gy * bzy + gz * bzz;
+    const ax = Math.abs(rbx);
+    if (ax <= 1e-6) {
+      this.hSteady[o] = C[o];
+      this.hSteady[o + 1] = C[o + 1];
+      this.hSteady[o + 2] = C[o + 2];
       return;
     }
-    const C = this.hCentroid;
-    for (let side = 0; side < 2; side++) {
-      const hI = 2 * i + side;
-      const sh = P[side * 4 + 3];
-      if (sh === 0) continue;
-      const f = (F * this.hArea[hI] * sh) / den;
-      this.addForceAt(hI, f * P[side * 4], f * P[side * 4 + 1], f * P[side * 4 + 2], C[hI * 3] - this.cgx, C[hI * 3 + 1] - this.cgy, C[hI * 3 + 2] - this.cgz);
+    const chine = this.mesh.strips.chineHalfBeam[i];
+    const kY = this.mesh.strips.keelY[i];
+    const cWh = Math.min(HALF_PI * cgH, chine);
+    const Sd = this.hSteady;
+    for (let pass = 0; pass < 3; pass++) {
+      // 0: steady (symmetric Wagner) centre 2c_W/π; 1: sway (antisymmetric) centre πc_W/4; 2: rate point c_W/(2√2)
+      const xbar = pass === 0 ? (2 / Math.PI) * cWh : pass === 1 ? (Math.PI / 4) * cWh : cWh / (2 * Math.SQRT2);
+      const T = pass === 0 ? Sd : pass === 1 ? Lp : C;
+      const sc = Math.min(3, Math.max(0.25, xbar / ax));
+      const px = rbx * sc;
+      const py = kY + (rby - kY) * sc;
+      T[o] = this.cgx + px * bxx + py * byx + rbz * bzx;
+      T[o + 1] = this.cgy + px * bxy + py * byy + rbz * bzy;
+      T[o + 2] = this.cgz + px * bxz + py * byz + rbz * bzz;
     }
+  }
+
+  /** fraction of a positive lift contribution s + u that is the steady part */
+  private steadyShare(s: number, u: number): number {
+    if (s <= 0) return 0;
+    if (u <= 0) return 1;
+    return s / (s + u);
   }
 
   /** a force of magnitude f along half-section hI's normal, at its wet centroid, into totals and samples */
@@ -2070,7 +2260,7 @@ export class HullWater {
    * implicit impulse over h (never reverses the point). Applied to the GS velocities and accumulated
    * into the half-section force and the totals as impulse/h.
    */
-  private gsDrag(hI: number, dx: number, dy: number, dz: number, coef: number, h: number, lateral = false): void {
+  private gsDrag(hI: number, dx: number, dy: number, dz: number, coef: number, h: number): void {
     const V = this.pointVelAlong(hI, dx, dy, dz);
     if (V === 0) return;
     const w = this.gsInvMass(hI, dx, dy, dz);
@@ -2082,16 +2272,6 @@ export class HullWater {
     const J = (-k * V) / (1 + k * w);
     this.gsApply(hI, dx, dy, dz, J);
     const C = this.hCentroid;
-    const i = hI >> 1;
-    if (lateral && this.lMa[i] > 0) {
-      // the separated crossflow's pressure acts on the bottom panels too (see addLateralStripForce): its
-      // component along the strip's lateral axis goes through the panels, the (heel) remainder at the half centroid
-      const L = this.lDir;
-      const fl = (J / h) * (dx * L[i * 3] + dy * L[i * 3 + 1] + dz * L[i * 3 + 2]);
-      this.addLateralStripForce(i, fl);
-      this.addForceAt(hI, (J * dx) / h - fl * L[i * 3], (J * dy) / h - fl * L[i * 3 + 1], (J * dz) / h - fl * L[i * 3 + 2], C[hI * 3] - this.cgx, C[hI * 3 + 1] - this.cgy, C[hI * 3 + 2] - this.cgz);
-      return;
-    }
     this.addForceAt(hI, (J * dx) / h, (J * dy) / h, (J * dz) / h, C[hI * 3] - this.cgx, C[hI * 3 + 1] - this.cgy, C[hI * 3 + 2] - this.cgz);
   }
 

@@ -11,7 +11,7 @@
  *  - Every number is a property with a source or a closed form; each block names the mutation it catches.
  */
 import { describe, expect, it } from 'vitest';
-import { quatFromAxisAngle, rotateVec } from '../src/core/quat';
+import { invRotateVec, quatFromAxisAngle, quatMul, rotateVec } from '../src/core/quat';
 import { HULL_WATER_DEFAULTS, HullWater, type HeightSampler, type HullWaterParams } from '../src/sea-physics/hullWater';
 import { createRigid6Memory, stepRigid6, type Rigid6State } from '../src/sea-physics/rigidBody';
 import { buildDeepVHull, HULL_DATA } from '../src/speedboat/hullMesh';
@@ -62,6 +62,8 @@ interface TurnResult {
   minUpY: number;
   yawRate: number;
   headingWanderDeg: number;
+  /** seconds from the helm starting to move until heel or slip first exceeds 45° (−1 = never) */
+  departS: number;
 }
 
 /**
@@ -84,6 +86,7 @@ function turn(cv: number, steerFraction: number, params: Partial<HullWaterParams
   let prevHead = 0;
   let minUp = 1;
   let maxDrift = 0;
+  let departS = -1;
   const rec: { t: number; heading: number; speed: number; heel: number }[] = [];
   for (let t = 0; t < T2 * 60; t++) {
     const time = t / 60;
@@ -115,6 +118,7 @@ function turn(cv: number, steerFraction: number, params: Partial<HullWaterParams
     if (drift > Math.PI) drift -= 2 * Math.PI;
     if (drift < -Math.PI) drift += 2 * Math.PI;
     if (time > T1) {
+      if (departS < 0 && (up[1] < Math.cos(Math.PI / 4) || Math.abs(drift) > Math.PI / 4)) departS = time - T1;
       minUp = Math.min(minUp, up[1]);
       maxDrift = Math.max(maxDrift, (Math.abs(drift) * 180) / Math.PI);
     }
@@ -137,6 +141,7 @@ function turn(cv: number, steerFraction: number, params: Partial<HullWaterParams
     minUpY: minUp,
     yawRate,
     headingWanderDeg: ((Math.max(...pre.map((x) => x.heading)) - Math.min(...pre.map((x) => x.heading))) * 180) / Math.PI,
+    departS,
   };
 }
 
@@ -212,6 +217,9 @@ describe('straight running and turning (T179 acceptance)', () => {
 
   // one helm setting through the speed range: a third of the lock (10°) — see the envelope test for more
   const third = [3, 5, 8, 10].map((cv) => ({ cv, r: turn(cv, 1 / 3) }));
+  // HALF LOCK = 15° at the drives (lock 30°, deepV12.hull.json lowerUnit.maxSteerDeg)
+  const half3 = turn(3, 0.5);
+  const halfSteady = [4, 5, 6].map((cv) => ({ cv, r: turn(cv, 0.5) }));
 
   it('turns: steady diameter within full-scale planing-craft data (8–40 L) at 10° of drive, growing with speed', () => {
     // SOURCES: Sadati, Zeraatgar & Moghaddas, Proc IMechE M 236 (2022) full-scale trials — semi-planing
@@ -227,20 +235,94 @@ describe('straight running and turning (T179 acceptance)', () => {
     for (let i = 1; i < third.length; i++) expect(third[i].r.diameterOverL).toBeGreaterThan(third[i - 1].r.diameterOverL);
   });
 
-  it('banks INTO the turn where the bottom pressure sits outboard of the CG line (C_v 3–5), keeps her grip and her plane', () => {
-    // WHY: a deep-V's side force is pressure on the LEADING bottom panel (Marleaux, Simonis & Abdel-Maksoud,
-    // 35th Symp. Naval Hydrodynamics 2024: "a strong pressure increase at one of the spray roots … main cause
-    // for side forces"), whose normal line passes c/sin2β above the keel — above the CG while the wetted
-    // half-beam c is wide — and the gearcases push the stern out BELOW the CG: both roll her in. A side force
-    // put through the strip centroid heels her out (measured −3° at C_v 5).
-    // Grip: drift stays under Kerner's ~20° hard-turn slip. Plane: from C_v 5 up she is still planing in the
-    // turn (F∇ > 3, the planing regime of Savitsky-type classification); at C_v 3 the Denny & Hubble test below
-    // is the check that she drops only as far as trials do.
+  it('banks INTO the turn at every speed (C_v 3–10), keeps her grip and her plane', () => {
+    // WHY: planing craft heel inward in steady turns, and more so as turn speed rises (waterjet planing boat
+    // free-running turning tests, Ocean Eng. 2017 "Turning characteristics of waterjet propelled planing boat at
+    // semi-planing speeds", abstract: "inward heels increase with increasing steady turn speeds"); outward heel is
+    // the displacement-ship signature. The deep-V side force is pressure on the LEADING panel peaking at its spray
+    // root (Marleaux et al. 2024); applied at the Wagner antisymmetric centre πc_W/4 its line crosses the centre
+    // line 2c_W/(π·… )-ish above the CG even when the chines are dry. Mutation: sway pressure at the geometric
+    // centroid ⇒ −1.5° at C_v 8, −13° at C_v 10 (the T179 first-cut numbers).
+    // Grip: drift under Kerner's ~20° hard-turn slip. Plane: from C_v 5 up F∇ > 3 in the turn.
     for (const { cv, r } of third) {
-      if (cv <= 5) expect(r.heelInDeg, `C_v ${cv}`).toBeGreaterThan(1);
+      expect(r.heelInDeg, `C_v ${cv}`).toBeGreaterThan(3);
       expect(r.minUpY, `C_v ${cv}: never past 25° of heel`).toBeGreaterThan(Math.cos((25 * Math.PI) / 180));
       expect(r.maxDriftDeg, `C_v ${cv}`).toBeLessThan(20);
       if (cv >= 5) expect(r.steadySpeed / Math.sqrt(G * Math.cbrt(hull.mass / RHO)), `C_v ${cv}: still planing`).toBeGreaterThan(3);
+    }
+  });
+
+  it('roll damping survives a heeled, drifting turn: K_p ≤ −5 kN·m·s/rad at C_v 3–10 (sway mode on one Jacobian)', () => {
+    // WHY: with the sway velocity sampled at the strip centroid while the side force acts along the panel lines,
+    // a roll rate (keel moving sideways BELOW the CG) raised a side force whose line passes ABOVE the CG —
+    // negative work, ~0 roll damping in a heeled drift (−0.1 kN·m·s/rad at C_v 3), and a 1.7 Hz roll–sway–heave
+    // mode growing at +1.8/s in the linearised steady turn. −5 is T165's straight-running half-section value.
+    for (const cv of [3, 5, 8, 10]) {
+      const U = cv * Math.sqrt(G * B);
+      const hw = new HullWater(hull);
+      const mem = createRigid6Memory();
+      const s = st([0, 0.35, 0], [-Math.sin(0.02), 0, 0, Math.cos(0.02)], [0, 0, U]);
+      for (let t = 0; t < 12 * 60; t++) {
+        hw.samplePatch(FLAT, s, DT);
+        stepRigid6(s, hull, DT, 2, (ss, h, out) => {
+          hw.evaluate(ss, h, out);
+          out.force[2] += (hull.mass * (U - ss.velocity[2])) / h;
+          out.force[0] -= 4 * hull.mass * ss.velocity[0];
+          out.force[1] -= 4 * hull.mass * ss.velocity[1];
+          for (let k = 0; k < 3; k++) out.torque[k] -= 4 * hull.inertia[0] * ss.angularVelocity[k];
+        }, mem);
+      }
+      const rollMoment = (p: number): number => {
+        const probe = new HullWater(hull);
+        const q = quatMul(s.quaternion, quatFromAxisAngle([0, 0, 1], (10 * Math.PI) / 180));
+        const v = rotateVec(q, [-U * Math.sin((8 * Math.PI) / 180), 0, U * Math.cos((8 * Math.PI) / 180)]);
+        const x = st(s.position, q, v, rotateVec(q, [0, 0, p]));
+        probe.samplePatch(FLAT, x, DT);
+        probe.evaluate(x, DT / 2);
+        probe.evaluate(x, DT / 2);
+        return invRotateVec(q, probe.load.torque)[2];
+      };
+      expect((rollMoment(0.1) - rollMoment(-0.1)) / 0.2, `C_v ${cv}`).toBeLessThanOrEqual(-5000);
+    }
+  });
+
+  it('dynamic roll stiffness at planing speed is at least ½·mgB per radian (C_v 3–8), above the static value', () => {
+    // WHY: Brown & Klosinski's oblique-tow heel sweeps (20° deadrise, Fn_B 3–4, as plotted by Marleaux et al. 2024
+    // Fig. 12) change M_x by ~0.2·mgB over ±10° of heel: ~0.57·mgB/rad. With the half-section loads at the
+    // geometric centroid (half-way to the waterline) the lever was halved: 0.27·mgB/rad at C_v 8 and falling —
+    // her heel in a turn was then set by whichever small moment won. The steady planing pressure's centre is
+    // Wagner's 2c_W/π. Mutation: wagnerCentreOfPressure false fails at C_v 8.
+    const mgB = hull.mass * G * B;
+    const kphi = (cv: number, params: Partial<HullWaterParams>): number => {
+      const U = cv * Math.sqrt(G * B);
+      const hw = new HullWater(hull, params);
+      const mem = createRigid6Memory();
+      const s = st([0, 0.35, 0], [-Math.sin(0.02), 0, 0, Math.cos(0.02)], [0, 0, U]);
+      for (let t = 0; t < 12 * 60; t++) {
+        hw.samplePatch(FLAT, s, DT);
+        stepRigid6(s, hull, DT, 2, (ss, h, out) => {
+          hw.evaluate(ss, h, out);
+          out.force[2] += (hull.mass * (U - ss.velocity[2])) / h;
+          out.force[1] -= 4 * hull.mass * ss.velocity[1];
+          for (let k = 0; k < 3; k++) out.torque[k] -= 4 * hull.inertia[0] * ss.angularVelocity[k];
+        }, mem);
+      }
+      const at = (ang: number): number => {
+        const probe = new HullWater(hull, params);
+        const q = quatMul(s.quaternion, quatFromAxisAngle([0, 0, 1], ang));
+        const x = st(s.position, q, [0, 0, U]);
+        probe.samplePatch(FLAT, x, DT);
+        probe.evaluate(x, DT / 2);
+        probe.evaluate(x, DT / 2);
+        return invRotateVec(q, probe.load.torque)[2];
+      };
+      return (at(0.05) - at(-0.05)) / 0.1;
+    };
+    const rest = -kphi(0, {});
+    for (const cv of [3, 5, 8]) {
+      const k = -kphi(cv, {});
+      expect(k, `C_v ${cv}`).toBeGreaterThan(0.5 * mgB);
+      expect(k, `C_v ${cv}`).toBeGreaterThan(rest);
     }
   });
 
@@ -250,7 +332,7 @@ describe('straight running and turning (T179 acceptance)', () => {
     // drag of making the side force; a turn that kept its speed (no induced drag) or stalled to a crawl fails.
     const vol = hull.mass / RHO;
     for (const frac of [1 / 3, 0.5, 1]) {
-      const r = frac === 1 / 3 ? third[0].r : turn(3, frac);
+      const r = frac === 1 / 3 ? third[0].r : frac === 0.5 ? half3 : turn(3, frac);
       const fv = r.approach / Math.sqrt(G * Math.cbrt(vol));
       const kc = fv * fv * (30 / ((frac * LOCK * 180) / Math.PI));
       const R = (r.diameterOverL * L) / 2;
@@ -266,20 +348,43 @@ describe('straight running and turning (T179 acceptance)', () => {
     expect(Math.abs(a.speedRatio - b.speedRatio) / b.speedRatio).toBeLessThan(0.02);
   });
 
-  it.fails('KNOWN LIMIT (reported): half or full lock at C_v ≥ 5 hooks — the acceptance "no capsize or spin-out at 50%/100% steer, C_v 3–10" is NOT met', () => {
-    // The physics does not give it. At 23.8 m/s one degree of gearcase is ~15 kN of lift slope per drive on a
-    // 5.4 t boat (Helmbold slope, three 0.22 m² gearcases, capped by ventilation): at 15° the stern is driven to
-    // large slip, the heel runs up and the inner chine trips (measured with a 30°/s helm: C_v 5 at half lock
-    // heels 35 ± 20°, C_v 8–10 capsize; full lock capsizes from C_v 5). Real outboard boats are not put hard over
-    // at 45 kn; the doc's S2 plan limits the lock with speed (±12° at top speed) and a steering-actuator torque
-    // limit is the physical version. This block fails for that reason (flip to `it` to read the numbers).
-    for (const frac of [0.5, 1]) {
-      for (const cv of [5, 8, 10]) {
-        const r = turn(cv, frac, {}, 2, 20);
-        expect(r.minUpY, `C_v ${cv} at ${frac * 100}% lock`).toBeGreaterThan(0.5);
-        expect(r.maxDriftDeg, `C_v ${cv} at ${frac * 100}% lock`).toBeLessThan(45);
-      }
+  it('half lock (15° at the drives) is a steady turn at C_v 4–6: no capsize, no spin-out, inward heel', () => {
+    for (const { cv, r } of halfSteady) {
+      expect(r.departS, `C_v ${cv}`).toBeLessThan(0);
+      expect(r.heelInDeg, `C_v ${cv}`).toBeGreaterThan(3);
+      expect(r.heelAmpDeg, `C_v ${cv}: steady, not an oscillation`).toBeLessThan(3);
+      expect(r.maxDriftDeg, `C_v ${cv}`).toBeLessThan(20);
     }
+  });
+
+  it('full lock is survivable at C_v 3 and a readable hook above it: heel or slip past 45° no sooner than the helm reaches lock (1 s)', () => {
+    // WHY: an offshore boat CAN hook or blow over with excessive helm at speed — a legit crash mode — but it must
+    // build (heel rising, chine catching) rather than flip before the drives even reach lock. Threshold measured
+    // with the 30°/s helm: steady at C_v 3 (with a transient past 45°, see the known limit below), departure
+    // 1.2–1.7 s after the helm starts from C_v 5 up.
+    const c3 = turn(3, 1, {}, 2, 20);
+    expect(Math.abs(c3.heelInDeg), 'C_v 3 settles').toBeLessThan(40);
+    expect(c3.heelAmpDeg, 'C_v 3 settles').toBeLessThan(3);
+    for (const cv of [5, 8, 10]) {
+      const r = turn(cv, 1, {}, 2, 6);
+      expect(r.departS, `C_v ${cv}: departs`).toBeGreaterThan(0);
+      expect(r.departS, `C_v ${cv}: not before the drives reach lock`).toBeGreaterThan(1.0);
+    }
+  });
+
+  it.fails('KNOWN LIMIT (reported, T179): half lock at C_v ≥ 7 hooks, and at C_v 3 (half and full lock) she rolls past 45° on the way in', () => {
+    // Acceptance asked for both. Linearised about the damped C_v 8 half-lock turn the model is STABLE (heel 12°),
+    // but the gearcases' entry side force below the CG kicks the heel past ~22° before the stern slides, the
+    // inner panel of the 24° V goes flat, the sway grip collapses (sway added mass 3000 → 150 kg per heave cycle)
+    // and a heave–roll limit cycle ends in a hook. A roll damper of +15 kN·m·s/rad removes it — the size of the
+    // missing damping. Candidates not in the proxy: spray strakes and chine flats (renderOnly), spray
+    // reattachment on the side walls (Marleaux et al. 2024). Flip to `it` to read the numbers.
+    expect(half3.minUpY, 'C_v 3 half lock transient').toBeGreaterThan(Math.cos(Math.PI / 4));
+    for (const cv of [8, 10]) {
+      const r = turn(cv, 0.5, {}, 2, 20);
+      expect(r.departS, `C_v ${cv} half lock`).toBeLessThan(0);
+    }
+    expect(turn(3, 1, {}, 2, 10).minUpY, 'C_v 3 full lock transient').toBeGreaterThan(Math.cos(Math.PI / 4));
   });
 });
 

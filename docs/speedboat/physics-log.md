@@ -221,3 +221,68 @@ roll kick decays (T165 test, still passing with drives). Substep N 2→4: D/L an
   New params: `lateralAddedMassCoeff`, `standInDrivePowerW`, `coupledAddedMass`, `kirchhoff`, `driveFoil`,
   `gearcaseVentilation`. `Rigid6Load.addedMass6?/coupled?` (optional; createRigid6Load allocates them).
   `HullWaterMesh.drives?`, `HullProxy.drives`, `driveUnits()`, JSON `lowerUnit` (added fields only).
+
+---
+
+# T179 round 2 — heel out of turn, hard-steer hooks, outboard height, roll arch
+
+Scratch tools: `scratchpad/t179/jac.test.ts` + `eig.py` (finite-difference Jacobian of the one-tick map about a
+damped steady turn, eigenmodes via numpy venv), `kphi.test.ts`, `kpdrift.test.ts`, `plate.py` (Wagner plate
+centres of pressure), `turn.test.ts` (ROLL=1 prints the per-term roll/side-force breakdown).
+
+## Root causes (each pinned by a test, mutation-checked)
+1. **Sectional loads at the geometric centroid.** Half-way from keel to waterline halves the steady-lift lever:
+   dynamic K_φ 0.27·mgB/rad at C_v 8 (Brown & Klosinski via Marleaux Fig. 12: ~0.57). Wagner plate centres
+   (`placeCentresOfPressure`): steady lift 2c_W/π, sway pressure πc_W/4 (numerically confirmed for a sign-type
+   antisymmetric velocity), rate terms c_W/(2√2) (reproduces the plate roll added inertia m_a·c_W²/8; putting them
+   at 2c_W/π overstated roll damping ≈3×). K_φ now 102/140/115/98 kN·m/rad at C_v 3/5/8/10 (static 45).
+   Test "dynamic roll stiffness ≥ ½·mgB/rad" (mutation wagnerCentreOfPressure:false fails).
+2. **Heel out at C_v ≥ 8 was the side-force line below the CG**: through the centroid the panel-normal lines
+   meet c/sin2β above the keel < VCG once the chines dry. Through the spray-root centres she heels IN at every
+   speed (10° drive: +16/+9.8/+9.0/+9.8° at C_v 3/5/8/10). Gearcases and thrust vector also roll her IN (below
+   CG, stern pushed out) — they were never the outward cause. Literature: inward heel growing with turn speed
+   (waterjet planing boat free-running tests, Ocean Eng. 2017 abstract); no documented outward heel found.
+3. **Sway velocity not on the force's Jacobian** (velocity at strip centroid, force along panel lines): roll rate
+   made negative work; linearised C_v 8 turn had a 1.7 Hz roll–sway–heave mode at +1.8/s. One generalized
+   coordinate per strip (`lateralJacobian`: same f, m for velocity, added mass, GS, force). Heeled-drift K_p
+   now −15/−9/−10/−5 kN·m·s/rad (mutation: −0.1 at C_v 3). Test "roll damping survives a heeled drift".
+4. **Crossflow drag at the spray-root centres**: its heave/heel-dependent projected area drove the same mode
+   (+2/s at C_v 10 half lock); separated-crossflow pressure is spread over the leading panel → own Jacobian at
+   the geometric centroid (−1/s). Mutation fails the half-lock and heel tests.
+Rejected: transom hollow lowering the drives (the practitioner source says a bracketed prop runs in a HUMP behind
+the hull; TwoMorrow/Boat Builder Central 2016); Wagner splash on m_lat ((π/2)d: 40–55° heel); gearcase immersion
+(+0.2 m plate: no change); ventilation off (no change) — the gearcase in a steady turn runs at α ≈ 0.1–1°.
+
+## Hard steer (30°/s helm, lock 30°, half lock = 15°)
+- 10°: steady C_v 3–10, D/L 15/25/33/42, U 0.85–0.91. Half lock: steady C_v 4–6 (heel 17–21°); C_v 3 settles
+  (25°) after a 49° transient; C_v ≥ 7 hooks 1.4–2.8 s in. Full lock: C_v 3 settles at 25° after a 61° transient;
+  C_v ≥ 5 hooks 1.15–1.7 s after the helm starts (the helm takes 1 s to reach lock).
+- Mechanism (trace + Jacobian): the damped C_v 8 half-lock turn (heel 12°) is linearly STABLE; the gearcases'
+  entry side force below the CG kicks the heel past ~22° before the stern slides, the inner panel of the 24° V
+  goes flat, sway added mass swings 3000 → 150 kg per heave cycle, a ~1 Hz heave–roll limit cycle ends in a hook.
+  A +15 kN·m·s/rad roll damper removes it: that is the size of the gap. Not in the proxy and plausible sources of
+  it: spray strakes / chine flats (renderOnly), side-wall spray reattachment (Marleaux 2024). OPEN, pinned by
+  `it.fails` (half lock C_v ≥ 7; >45° transient at C_v 3).
+- Gearcase check: 2.5 kN/deg per gearcase at 24 m/s (not "15" — earlier arithmetic slip), capped by ventilation.
+
+## Outboard height and roll arch (JSON)
+- AV plate +0.10 m above the keel line (planing: flush to +½ in; bracketed: ~+2 in, "prop runs in a hump behind the
+  hull" — TwoMorrow Holdings/Boat Builder Central 2016; forum setback rules +1 in per 4–10 in ⇒ +3…7.5 in at 30 in),
+  prop shaft 0.22 m below the plate ⇒ prop point −0.12 m (was −0.35), disc spanning the keel line (Sport Master is a
+  surface-piercing gearcase). Prop 0.55 m aft of the mount (was 0.30; ASSUMED from the cowl proportions). 450R
+  shafts 20/25/30 in (Boating Mag review): 30 in used. Lower unit: span 0.50, area 0.19 m² (A 1.3), CE 0.21 m below
+  the plate, 0.35 m aft of the mount.
+- Engine mass items y 1.10, z −0.95 (V8 block over the midsection); roll arch z 4.8 → 3.2 (0.64 m aft of the seat).
+  Derived: LCG 3.6060, VCG 0.8540, gyradii pitch 0.2599·L (band ≤ 0.26 binds; engine z −1.10 gave 0.2632), yaw 0.2593,
+  roll 0.3774. All T165 tests pass on the new mass budget.
+- Asset build (`node scripts/asset-build.mjs`) exit 0, checker OK. Anchors: prop body y −0.974, deck y 0.82 ⇒
+  clamp top (plate + 30 in) at body y 0.008, cowl top (outboard.py Y0 + H = +0.78) at ≈ 0.79 ⇒ **cowl top ≈ 0.03 m
+  BELOW the deck** (was 0.26 below). STYLE-SPEC's +0.60 m would need the plate ~0.6 m above the keel (dry at speed)
+  or a taller cowl than the parts model; not reachable with a real 30 in shaft on this 1.67 m transom.
+- Immersion change vs steering: grid essentially unchanged at 10° and half lock C_v ≤ 6 (heel within 1–2°).
+
+## Perf, API
+- µs per boat per tick (N=2, analytic sea, quiet): 7af5108 40 → now 63.
+- sim-worker `stepCore.ts`: stand-in drive removed; controls → `hw.setControls(steer·lock, throttle)`. Worker
+  determinism suite green.
+- New param `wagnerCentreOfPressure`. `Rigid6Load`, `HullWater` public API otherwise unchanged since round 1.

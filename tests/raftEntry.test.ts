@@ -59,7 +59,9 @@ import * as raftSailingParams from '../src/params/raftSailing';
 import { PRESET_STORMINESS, WEATHER_PRESET_NAMES } from '../src/weather/presets';
 import type { ShipState } from '../src/state/simState';
 import type { SkyParams } from '../src/params/sky';
-import { createHands } from '../src/player/hands';
+import { createHands, lensIsFirstPerson } from '../src/player/hands';
+import { FollowCam, type CamMode } from '../src/camera/followCam';
+import { PerspectiveCamera } from 'three';
 import mainRaftSource from '../src/main-raft.ts?raw';
 
 const P = { dayMinutes: 24, startHour: 7, clockRunning: true, maxStorminess: 0.12, defaultPreset: 'calm' as const };
@@ -481,7 +483,70 @@ describe('§T.127 photo mode takes the hands out of the frame', () => {
     // cinematic == full screen (§I ui/cinematic) and most people PLAY full
     // screen; hiding the hands there would take them out of normal play. Same
     // call the prompts make, deliberately.
-    expect(mainRaftSource).toMatch(/createHands\(\{\s*hidden:\s*\(\)\s*=>\s*ui\.isPhotoMode\(\)\s*\}\)/);
+    expect(mainRaftSource).toMatch(/createHands\(\{\s*hidden:\s*\(\)\s*=>\s*ui\.isPhotoMode\(\)/);
     expect(mainRaftSource).not.toMatch(/hands[\s\S]{0,80}isCinematic/);
+  });
+});
+
+/**
+ * Browser sync 2026-09-13 — THE MITTS FOLLOWED THE LENS OUT OF THE BODY. The
+ * hands are a first-person viewmodel parented to the camera, and their only
+ * gate was photo mode, so the follow cam, the free flyer, the helm POV and
+ * every `setDebugPose` vantage (the 900 m overhead frames) drew two brown
+ * boxes in the bottom corners. The property: the group draws IFF the lens is
+ * the walker's eye, re-read live, on the real `FollowCam` the raft wires in —
+ * a stub lens would pass while the real rig's mode names drifted.
+ */
+describe('the hands draw only while the lens is first person', () => {
+  it('every non-fp camera mode, and a pinned vantage, takes the mitts out', () => {
+    const prevWindow = (globalThis as Record<string, unknown>).window;
+    (globalThis as Record<string, unknown>).window = new EventTarget();
+    const cam = new FollowCam(new PerspectiveCamera(), new EventTarget() as unknown as HTMLElement);
+    const hands = createHands({ hidden: () => false, lens: cam });
+    try {
+      cam.setMode('fp');
+      hands.update(1 / 60);
+      expect(hands.group.visible).toBe(true);
+      for (const mode of ['follow', 'free', 'helm', 'orbit', 'station'] as CamMode[]) {
+        cam.setMode(mode);
+        hands.update(1 / 60);
+        expect(hands.group.visible, mode).toBe(false);
+        // …and back: switching modes is live, never latched
+        cam.setMode('fp');
+        hands.update(1 / 60);
+        expect(hands.group.visible, `${mode} → fp`).toBe(true);
+      }
+      // an fp lens parked 900 m over the sea is not a first-person frame
+      cam.setDebugPose([0, 900, 0], [0, 0, 1]);
+      expect(lensIsFirstPerson(cam)).toBe(false);
+      hands.update(1 / 60);
+      expect(hands.group.visible).toBe(false);
+      cam.clearDebugPose();
+      cam.setMode('fp');
+      hands.update(1 / 60);
+      expect(hands.group.visible).toBe(true);
+    } finally {
+      hands.dispose();
+      (globalThis as Record<string, unknown>).window = prevWindow;
+    }
+  });
+
+  it('photo mode still wins inside first person', () => {
+    const lens = { getMode: () => 'fp', isDebugPinned: () => false };
+    let photo = true;
+    const hands = createHands({ hidden: () => photo, lens });
+    try {
+      hands.update(1 / 60);
+      expect(hands.group.visible).toBe(false);
+      photo = false;
+      hands.update(1 / 60);
+      expect(hands.group.visible).toBe(true);
+    } finally {
+      hands.dispose();
+    }
+  });
+
+  it('the raft entry hands its camera rig to the mitts', () => {
+    expect(mainRaftSource).toMatch(/createHands\(\{[^}]*lens:\s*followCam[^}]*\}\)/);
   });
 });

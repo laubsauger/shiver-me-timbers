@@ -256,7 +256,17 @@ export function createHud(root: HTMLElement, opts: HudOptions = {}): Hud {
   const damageRow = div('smt-damage');
   const damageSlots = new Map<string, HTMLElement>();
 
-  const bottom = div('smt-bottom', anchorBtn, windCard, plate, canvasCard);
+  // TWO WINGS, NOT A TRIPTYCH (browser sync 2026-09-13, §V21). A chase lens
+  // frames the vessel on the centre line, so the water astern — the wake —
+  // runs straight down the lower centre of the frame, and a 700 px plaque row
+  // centred there hid exactly that. Same four plaques, same order port to
+  // starboard; the row pins them to the two bottom corners and leaves the
+  // centre to the sea.
+  const bottom = div(
+    'smt-bottom',
+    div('smt-wing is-port', anchorBtn, windCard),
+    div('smt-wing is-starboard', plate, canvasCard),
+  );
   // ONE flow column. The seal keeps its box when it is off (visibility, not
   // display) so that a ship running aground does not shove the whole binnacle
   // up the screen — and so that nothing below it has to guess its height.

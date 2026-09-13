@@ -165,7 +165,7 @@ async function boot(): Promise<void> {
     ceilingAt: createRaftCeiling(),
     spawn: [tillerLocal[0], tillerLocal[1], tillerLocal[2]],
     canvas: app.renderer.domElement,
-    hands: createHands({ hidden: () => ui.isPhotoMode() }), // §T.127: no mitts in a §V22 capture
+    hands: createHands({ hidden: () => ui.isPhotoMode(), lens: followCam }), // §T.127: no mitts in a §V22 capture; first-person lens only
     socketWorld,
     pieceNear,
     groundAt,
