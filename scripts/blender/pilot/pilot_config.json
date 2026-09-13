@@ -1,0 +1,192 @@
+{
+  "name": "speedboat pilot",
+  "version": 2,
+  "about": "Read by scripts/blender/pilot/*.py and scripts/blender/pilot/checkPilotGlb.mjs. Numbers the hull JSON / parts manifest do not carry, each with its source. docs/speedboat/pilot-log.md explains every decision.",
+  "mpfb": {
+    "extensionModule": "bl_ext.user_default.mpfb",
+    "version": "2.0.17",
+    "source": "https://extensions.blender.org/add-ons/mpfb/ (archive sha256 4f0a879d64a39bf646fbf5f53601ac678855da329d650617dca5737548239a87)",
+    "rig": "game_engine"
+  },
+  "assets": {
+    "about": "CC0 MakeHuman asset packs installed in MPFB's user data dir (pilot-log.md §Installs). The build verifies each file's sha256 and fails loud when one is missing or changed.",
+    "files": {
+      "eyes": {"path": "eyes/low-poly/low-poly.mhclo", "licence": "CC0", "pack": "makehuman_system_assets"},
+      "eyesTexture": {"path": "eyes/materials/brown_eye.png", "licence": "CC0", "pack": "makehuman_system_assets"},
+      "eyebrows": {"path": "eyebrows/eyebrow001/eyebrow001.mhclo", "licence": "CC0", "pack": "makehuman_system_assets"},
+      "eyebrowsTexture": {"path": "eyebrows/eyebrow001/eyebrow001.png", "licence": "CC0", "pack": "makehuman_system_assets"},
+      "eyelashes": {"path": "eyelashes/eyelashes01/eyelashes01.mhclo", "licence": "CC0", "pack": "makehuman_system_assets"},
+      "eyelashesTexture": {"path": "eyelashes/eyelashes01/eyelashes01.png", "licence": "CC0", "pack": "makehuman_system_assets"},
+      "skinHero": {"path": "skins/mindfront_aksel_skin/Aksel_Skin_diffuse.png", "licence": "CC0", "pack": "skins02 (Mindfront)"},
+      "skinHeroNormal": {"path": "skins/mindfront_aksel_skin/Aksel_Skin_NRM.png", "licence": "CC0", "pack": "skins02 (Mindfront)"},
+      "skinB": {"path": "skins/middleage_african_female/middleage_darkskinned_female_diffuse.png", "licence": "CC0", "pack": "makehuman_system_assets (mhmat header: explicitly released as CC0 in september 2020)"},
+      "skinC": {"path": "skins/old_asian_male/old_lightskinned_male_diffuse2.png", "licence": "CC0", "pack": "makehuman_system_assets (mhmat header: explicitly released as CC0 in september 2020)"}
+    }
+  },
+  "variants": {
+    "about": "Same topology, same UV layout, same skeleton. Shape = glTF morph target on every skinned mesh; skin = KHR_materials_variants swapping the skin albedo; hair = one of three card sets (Hair_<style>) + hair tint uniform. MakeHuman macros: age 0.5 = 25 y, 1.0 = 90 y.",
+    "hero": {
+      "label": "hero courier, mid 30s, sun-weathered, lean",
+      "macro": {"gender": 1.0, "age": 0.6, "muscle": 0.64, "weight": 0.4, "proportions": 0.62, "cupsize": 0.5, "firmness": 0.5, "race": {"asian": 0.2, "caucasian": 0.62, "african": 0.18}},
+      "targets": {
+        "cheek/l-cheek-bones-incr": 0.45,
+        "cheek/r-cheek-bones-incr": 0.45,
+        "cheek/l-cheek-volume-decr": 0.35,
+        "cheek/r-cheek-volume-decr": 0.35,
+        "chin/chin-prominent-incr": 0.3,
+        "chin/chin-width-incr": 0.35,
+        "chin/chin-bones-incr": 0.3,
+        "head/head-square": 0.35,
+        "nose/nose-hump-incr": 0.45,
+        "nose/nose-point-width-incr": 0.12,
+        "nose/nose-trans-in": 0.12,
+        "eyebrows/eyebrows-trans-down": 0.35,
+        "forehead/forehead-nubian-incr": 0.3,
+        "eyes/l-eye-height2-decr": 0.25,
+        "eyes/r-eye-height2-decr": 0.25,
+        "mouth/mouth-lowerlip-volume-decr": 0.3,
+        "mouth/mouth-upperlip-volume-decr": 0.25,
+        "mouth/mouth-laugh-lines-in": 0.35,
+        "neck/neck-scale-horiz-incr": 0.35
+      },
+      "skin": "skinHero",
+      "skinTint": [1.0, 0.9, 0.8],
+      "stubble": 0.75,
+      "sunLines": 1.0,
+      "scar": "brow_l",
+      "freckles": 0.35,
+      "hairColor": "#5E4634",
+      "hair": "swept"
+    },
+    "npc_b": {
+      "label": "rival, woman, early 40s, dark skin, hair pulled back in a knot",
+      "macro": {"gender": 0.0, "age": 0.63, "muscle": 0.58, "weight": 0.44, "proportions": 0.66, "cupsize": 0.55, "firmness": 0.6, "race": {"asian": 0.05, "caucasian": 0.1, "african": 0.85}},
+      "targets": {
+        "cheek/l-cheek-bones-incr": 0.4,
+        "cheek/r-cheek-bones-incr": 0.4,
+        "mouth/mouth-upperlip-volume-incr": 0.3,
+        "mouth/mouth-lowerlip-volume-incr": 0.3,
+        "mouth/mouth-cupidsbow-incr": 0.3,
+        "nose/nose-point-width-decr": 0.2,
+        "nose/nose-scale-horiz-decr": 0.1,
+        "chin/chin-width-decr": 0.35,
+        "chin/chin-prominent-decr": 0.15,
+        "head/head-oval": 0.4,
+        "eyebrows/eyebrows-trans-up": 0.25,
+        "eyebrows/eyebrows-angle-up": 0.2,
+        "eyes/l-eye-scale-incr": 0.15,
+        "eyes/r-eye-scale-incr": 0.15,
+        "forehead/forehead-nubian-decr": 0.35,
+        "neck/neck-scale-horiz-decr": 0.35
+      },
+      "skin": "skinB",
+      "skinTint": [1.0, 0.97, 0.95],
+      "stubble": 0.0,
+      "sunLines": 0.35,
+      "scar": null,
+      "freckles": 0.0,
+      "hairColor": "#1C1714",
+      "hair": "bun"
+    },
+    "npc_c": {
+      "label": "veteran, man, around 60, grey beard stubble, clipped grey buzz cut",
+      "macro": {"gender": 1.0, "age": 0.8, "muscle": 0.5, "weight": 0.62, "proportions": 0.52, "cupsize": 0.5, "firmness": 0.45, "race": {"asian": 0.55, "caucasian": 0.35, "african": 0.1}},
+      "targets": {"head/head-round": 0.3, "nose/nose-scale-horiz-incr": 0.25, "nose/nose-volume-incr": 0.25, "eyes/l-eye-bag-incr": 0.5, "eyes/r-eye-bag-incr": 0.5, "neck/neck-double-incr": 0.25, "chin/chin-jaw-drop-incr": 0.15, "eyebrows/eyebrows-angle-down": 0.3, "ears/l-ear-scale-incr": 0.2, "ears/r-ear-scale-incr": 0.2, "mouth/mouth-angles-down": 0.3},
+      "skin": "skinC",
+      "skinTint": [0.98, 0.92, 0.84],
+      "stubble": 1.0,
+      "sunLines": 0.8,
+      "scar": "cheek_r",
+      "freckles": 0.15,
+      "hairColor": "#7A7874",
+      "hair": "buzz"
+    }
+  },
+  "body": {
+    "heightM": 1.78,
+    "heightSource": "STYLE-SPEC §8: adult, 1.78 m, average build. Every variant is solved to the same stature so one skeleton serves all three",
+    "maxJointDeltaM": 0.06,
+    "jointDeltaNote": "variants keep one bone hierarchy; their own rest joint positions ship in root extras (variantJointHeads) and the runtime re-binds a variant clone to them, so a 4 cm shorter arm still bends at its own elbow"
+  },
+  "seat": {
+    "about": "Pilot frame = seat socket frame. Origin = the hull JSON seat station (renderOnly.cockpit.seats[0]: x, zFromTransom) at the top of the seat pan (well sole + 0.62). +Z = bow, +Y = up, metres. The runtime parents the pilot root to that point in the boat body frame: (seat.x, deckY - cockpitWell.soleBelowSheer + 0.62, zFromTransom - lcgFromTransom). v1 put the origin at the pan's front edge; scripts/blender/parts/seat.py builds the pan centred on the station (front edge at z +0.19), so v2 follows the parts build.",
+    "panAboveSole": 0.62,
+    "soleBelowPan": 0.62,
+    "panFrontEdgeZ": 0.19,
+    "backrestFaceZ": -0.17,
+    "backrestRakeDeg": 12,
+    "hipsZRange": [-0.05, 0.12],
+    "hipAbovePan": 0.085,
+    "maxLeanDeg": 48,
+    "gazeDownDeg": 9,
+    "sources": "scripts/blender/parts/seat.py (pan 0.44 x 0.34 centred 0.02 ahead of the station, rotated -8 deg; bucket back 0.16 behind the station raked 12 deg) and STYLE-SPEC par.2 (pan 0.62 above the sole)"
+  },
+  "helm": {
+    "about": "REAL parts sockets (pilot frame, three.js axes). Read from the parts build (commit b092f2e scripts/blender/parts/*, GLB assets/models/speedboat_pipeline_test.glb built against the current deepV12.hull.json: partsAnchors seatZ 0.234, deckY 0.82): Helm_LOD0 extras pivot/axis, Throttle_LOD0 extras pivot/axis/idleDeg/fullDeg, minus the seat socket (0, 0.69004, 0.234). Rim radius/tube and the throttle handle offset exist only in helm.py / throttle.py code (no extras), footrest in seat.py. The dash-cable jack has NO parts socket (still assumed).",
+    "wheelHub": [0.0, -0.07973, 0.72836],
+    "wheelAxis": [0.0, 0.32432, -0.94595],
+    "wheelRadius": 0.18,
+    "rimTube": 0.0165,
+    "gripClockDeg": 52,
+    "gripNote": "hands at ten-to-two (52 deg from 12 o'clock): the helm's three spokes sit at 12, 4 and 8 o'clock (helm.py), and the upper rim is 8 cm higher than 9-and-3 on this low wheel",
+    "throttleOrigin": [-0.67, -0.07004, 0.69],
+    "throttleRollDeg": 8,
+    "throttlePivotLocal": [0.0, 0.0, -0.02],
+    "throttleHandleLocal": [-0.015, 0.215, 0.006],
+    "throttleHandleRadius": 0.022,
+    "throttleIdleDeg": -28,
+    "throttleFullDeg": 32,
+    "footBar": [0.0, -0.4, 0.36],
+    "footBarRadius": 0.021,
+    "soleY": -0.62,
+    "eyeAnchorParts": [0.0, 0.63, 0.45],
+    "cableDashAnchor": [0.36, -0.2, 0.93],
+    "cableDashAnchorAssumed": true
+  },
+  "rig": {
+    "maxBones": 64,
+    "extraBones": {
+      "lowerarm_twist_l": {"parent": "lowerarm_l", "deform": true},
+      "lowerarm_twist_r": {"parent": "lowerarm_r", "deform": true},
+      "head_geo": {"parent": "head", "deform": true, "face": true, "about": "carries every head-weighted vertex (face, hair, eyes, goggles, headset): the cockpit camera collapses THIS bone, so head and cam_eye keep their transform"},
+      "goggles": {"parent": "head_geo", "deform": true, "face": true},
+      "eye_l": {"parent": "head_geo", "deform": true, "face": true},
+      "eye_r": {"parent": "head_geo", "deform": true, "face": true},
+      "ik_hand_l": {"parent": "Root", "deform": false},
+      "ik_hand_r": {"parent": "Root", "deform": false},
+      "ik_foot_l": {"parent": "Root", "deform": false},
+      "ik_foot_r": {"parent": "Root", "deform": false},
+      "ik_look": {"parent": "Root", "deform": false}
+    },
+    "sockets": {"cam_eye": {"parentBone": "head", "about": "cockpit camera: between the eyes, forwardM ahead of the eye midpoint so a near plane <= nearMaxM clears the goggle lenses; node -Z = view direction, +Y = up (glTF camera convention)", "forwardM": 0.055, "nearMaxM": 0.01}}
+  },
+  "lod": {
+    "trisMax": [18000, 8000, 2500],
+    "trisTarget": [17800, 7200, 2300],
+    "budgetNote": "v2 target: pilot LOD0 <= 18k worst variant (hero, swept hair) against the hero boat's 120k LOD0 total (hull ~40k + parts 63.6k). The parts manifest line is 14k: the coordinator rebalances ~4k from hull/parts or accepts ~122k. pilot-log.md §Budget has the per-piece split."
+  },
+  "clips": {
+    "seated_base": {"loop": false, "additive": false, "about": "reference pose for every additive clip"},
+    "idle_seated": {"loop": true, "additive": false},
+    "steer_left": {"loop": false, "additive": true},
+    "steer_right": {"loop": false, "additive": true},
+    "throttle_push": {"loop": false, "additive": true},
+    "brace_landing": {"loop": false, "additive": false},
+    "airborne_tuck": {"loop": false, "additive": false},
+    "impact_jolt": {"loop": false, "additive": true},
+    "capsize_hang": {"loop": true, "additive": false},
+    "look_back": {"loop": false, "additive": true},
+    "victory_fist": {"loop": false, "additive": false},
+    "goggles_up": {"loop": false, "additive": true, "about": "menus and results: goggles pushed up on the forehead"}
+  },
+  "materials": {
+    "M_Pilot": {"alphaMode": "OPAQUE", "doubleSided": false, "size": 2048, "surface": "suit, vest, harness, gloves, boots, headset, goggle frame + strap, air bottle, cable"},
+    "M_PilotSkin": {"alphaMode": "OPAQUE", "doubleSided": false, "size": 2048, "surface": "head, neck, eyes (hero albedo/normal 2048, NPC albedo variants 1024)"},
+    "M_PilotHair": {"alphaMode": "MASK", "alphaCutoff": 0.35, "doubleSided": true, "size": 1024, "surface": "hair cards, eyebrows, eyelashes"},
+    "M_PilotLens": {"alphaMode": "BLEND", "doubleSided": false, "size": 0, "surface": "goggle lenses (tinted clearcoat, samples the M_Pilot normal atlas)"}
+  },
+  "hair": {
+    "styles": ["swept", "bun", "buzz"],
+    "about": "one Hair_<style>_LOD0/1 node per style; a variant draws the style named by variants.<v>.hair (pilot-log.md §Hair)"
+  }
+}
