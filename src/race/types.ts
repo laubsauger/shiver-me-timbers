@@ -68,6 +68,32 @@ export interface RacerStanding {
   state: 'racing' | 'crashed' | 'respawning' | 'ghost' | 'finished';
   /** Surge boost, 0..3 segments (fractional while filling) */
   surge: number;
+  /** §T.184 addition: laps completed (`lap` is the lap being run, 1-based; 0 before the start line) */
+  lapsCompleted?: number;
+  /** §T.184 addition: time penalties so far, seconds (missed elements, jump start) */
+  penaltySeconds?: number;
+  /** §T.184 addition: travelling against the course */
+  wrongWay?: boolean;
+  /** §T.184 addition: seconds of Surge boost left (0 = not boosting) */
+  surgeBoostRemaining?: number;
+  /** §T.184 addition: did not finish (retired or timed out after the winner); `state` is 'finished' */
+  dnf?: boolean;
+}
+
+/** §T.184 addition: one classified line of the results (in place order). */
+export interface RaceResult {
+  racerId: number;
+  /** 1-based */
+  place: number;
+  status: 'finished' | 'dnf' | 'running';
+  lapsCompleted: number;
+  /** race time at the finish line, s (null unless finished) */
+  finishTime: number | null;
+  penaltySeconds: number;
+  /** finishTime + penaltySeconds (null unless finished) — the classified time */
+  totalTime: number | null;
+  lapTimes: readonly number[];
+  bestLap: number | null;
 }
 
 export interface RaceState {
@@ -77,4 +103,10 @@ export interface RaceState {
   standings: readonly RacerStanding[];
   /** per-lap split times per racer, seconds */
   lapTimes: readonly (readonly number[])[];
+  /** §T.184 addition: start lamps on the drowned radio tower */
+  lights?: { lit: number; of: number; green: boolean };
+  /** §T.184 addition: pace boat pose until it pulls off at green (null after) */
+  paceBoat?: { x: number; z: number; yaw: number; speed: number } | null;
+  /** §T.184 addition: classification, present once the first racer has finished */
+  results?: readonly RaceResult[];
 }
