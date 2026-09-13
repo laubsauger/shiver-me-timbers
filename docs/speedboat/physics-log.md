@@ -286,3 +286,99 @@ the hull; TwoMorrow/Boat Builder Central 2016); Wagner splash on m_lat ((π/2)d:
 - sim-worker `stepCore.ts`: stand-in drive removed; controls → `hw.setControls(steer·lock, throttle)`. Worker
   determinism suite green.
 - New param `wagnerCentreOfPressure`. `Rigid6Load`, `HullWater` public API otherwise unchanged since round 1.
+
+---
+
+# T179 part 3 — strakes/chine flats (literature), chine-wet added mass, 1.30 m hull, per-drive results
+
+Scratch (not in repo): `scratchpad/t179s/{env,gz,perf,sweep,sav,pw}.test.ts`, `jsonfix.ts` (writes the JSON),
+`lit/` (downloaded sources), `run.sh <name>`.
+
+## Strakes and chine flats: NOT modelled, because the sources give them nothing to model
+Hypothesis handed over: strakes/chine flats supply the ~15 kN·m·s/rad of roll damping whose absence lets the
+gearcase entry kick hook her. Checked against (access in brackets):
+- Clement, DTMB Report 1818, 1964 [full text]: spray strips change resistance −1…−6 % (only forward of the
+  high-speed stagnation line), and "no significant lift component resulted from the deflection of the thin sheet
+  of whisker spray"; rise and trim "nearly the same". Results stated NOT to apply to deadrise ≥ 20° (ours 24°).
+- Savitsky, DeLorme & Datla 2007 [abstract + formulas quoted by Olin et al. 2017]: strakes act on WHISKER spray
+  drag (up to 15 % of drag). This model has no whisker-spray drag term (friction is on Savitsky's pressure area), so
+  intercepting it removes nothing. Savitsky & Morabito 2011 [abstract + USNA EN486 notes]: spray root = π/2 wave
+  rise (our Wagner c); nothing on strakes.
+- Brown & Klosinski CG-D-04-95 [full text], prismatic 30°/20°/10° models WITH chine spray strips: roll damping
+  c = w·b⁴√(b/g)(1 − sinβ)[0.134 sin|ψ| + 0.0290 C_v + 0.0199 λ/b] (±20 %, C_v 1.5–4), added roll inertia
+  I_h = 0.010237 ρ b⁵ (λ/b)(1 − sinβ). On this hull (C_Δ 0.43 vs their 0.4375, L/B 5.2 vs 5):
+  | C_v | 1.5 | 2 | 3 | 4 | 5 | 8 | 10 |
+  |---|---|---|---|---|---|---|---|
+  | model K_p upright, kN·m·s/rad | 16.5 | 21.1 | 25.6 | 22.5 | 21.7 | 13.9 | 10.5 |
+  | B&K c (λ from model) | 9.2 | 9.5 | 11.0 | 13.2 | 15.4* | 21.8* | 26.2* |
+  (* extrapolated past C_v 4). Inside their data the model is ABOVE B&K; the model only falls below it past C_v 6,
+  where no data exist. Scratch: +½·B&K on top cures half lock at every C_v (heel peak ≤ 20°); full B&K on top makes
+  full lock hook 2.1–2.5 s in. NOT adopted: double-counts where data exist, extrapolates where they don't.
+- A 6 cm strake flat as its own 2D+t plate: m_a = ρ(π/2)(w/2)² = 1.45 kg/m; leading-edge roll damping
+  U·Σm_a·x² ≈ 0.3 kN·m·s/rad at C_v 8 (both sides, 3 strakes + chine flat). Jet deflection (Wagner jet momentum
+  (π/2)ρV²c, turned 24°): ≈ 0.6 kN·m·s/rad — and its jet-thickness formula is unverified (Faltinsen 2005 not accessed).
+- Lewandowski 1997 / Katayama 2006: spray on the side wall raises roll restoring (Lewandowski via Marleaux 2024,
+  heel ±10° only); Katayama [full text]: the centre-shift restoring term VANISHES once a chine is wet, and sections
+  with one chine wet and the other dry give strongly negative restoring. No source quantifies strakes or chine
+  flats in roll (searched; boating press only).
+Measured here (dynamic righting M and K_p at fixed heel, heave/trim free, speed held; `gz`): K_p collapses with heel
+(C_v 3: −25 / −18 / −6 / −2 kN·m·s/rad at 0/10/20/30°), M peaks ~20° (0.13–0.16 mgB) and falls; the lift line
+of the flat low panel passes near the CG past ~25°. Consistent with Katayama's chine-wet loss of restoring.
+
+## Chine-wet added mass under the LOW chine (kept, `chineWetAddedMass`)
+Payne 1994 (Ocean Eng. 21(3), as reproduced by Katayama et al. 2006): after chine wetting m′ grows with
+C_wet = (1 + 2z_c/b_x)·C_dry ⇒ c² = b² + b·z_c, z_c = d_chine + b(1 − 2/π)tanβ. Full symmetric growth moved
+Savitsky trim at C_v 3.1 to −1.21° (fails the 1° gate) ⇒ only the DIFFERENCE between the two chines is added, to
+the deeper one (upright load bit-identical: tested). Mesh: `HullStrips.chineV0/V1/T` (chine vertices per half).
+Effect: C_v 3 half lock no longer passes 45° on the 1.674 m hull (44.8°→24°); on the 1.30 m hull it is what keeps
+C_v 6 half lock steady (off: ±7.9° roll oscillation about 27°). Static K_p/M barely move (≤ 1 kN·m·s/rad): it
+acts in the entry transient. Deviation from Payne: symmetric part omitted (above).
+
+## Hull depth 1.674 → 1.30 m, pointed bow (JSON, coordinator request)
+- Depth keel→sheer at the transom 1.30 m, freeboard 0.788 m. Source: Apache 42 Renegade 3-view (REFERENCES a1),
+  measured: keel→rub rail 1.25–1.34 m near the transom, keel→deck edge 1.50 m; APBA 2026 Super Vee ≥ 48 in
+  (1.22 m) keel→deck ahead of the canopy (a15). No manufacturer hull-depth spec found (Cigarette/Fountain/Donzi).
+- Mass items: arch/seat/pilot y −0.374 (deck-referenced); shell y 0.8 → 0.643 (area-weighted section centroid
+  0.985 → 0.792) and own roll gyradius 0.966 → 0.905 (ASSUMED). Derived: VCG 0.854 → 0.739, roll gyradius
+  0.377 → 0.354·B (band ≥ 0.35), pitch 0.2597·L, LCG/mass unchanged.
+- Flare knuckle 0.45 → 0.19 m above the chine: overall beam 2.47 m (8°, test band 2.44–2.51). 0.28 m first FAILED the
+  asset checker (render deck max 0.586 vs proxy 0.561): near the stem the chine is only 0.31 m under the deck and the
+  render's knuckle blend (0.3·(deck − chine) above the knuckle) poked through the deck; `jsonfix.ts` now asserts it.
+- `node scripts/asset-build.mjs` exit 0, checker OK (tris/LOD 90417/13520/3397). Anchors: deck body y 0.561, prop
+  y −0.859 ⇒ clamp top 0.123, cowl top (outboard.py Y0 + H = +0.78) 0.903 ⇒ **cowl top +0.34 m above the deck**
+  (was −0.03; STYLE-SPEC +0.60 still needs a taller cowl or a higher plate). pilot_config.json's "about" text still
+  quotes deckY 0.82 (pilot agent's file).
+- Bow: `spec.stemHalfBeamFraction` 0.005 (was a hard 0.04 floor in `halfBeamAt`): chine half-beam 6 mm at the stem;
+  only z > 11.53 m changes (cos taper). Rake 0.35 m and 45° forefoot kept. Sheer constant; the upturn seen from below
+  is the keel rise (0.982 m over the forward 30 %).
+- Physics deltas (HEAD → now): rest trim 2.1° both; static M at 10/20/30° heel at rest −6.8/−10.7/−12.9 →
+  −7.8/−12.7/−15.9 kN·m; dynamic at C_v 3: M(10°) −11.9 → −14.3, K_p upright −25.3 → −28.0, at 20° −6.0 → −7.3;
+  C_v 8: K_p −13.9 → −14.7 (0°), −5.2 → −7.1 (20°). Savitsky (now): trim −0.79/−0.87/−0.88/−0.79/−0.65/−0.51° and R
+  −10.6/−10.2/−8.1/−5.4/−5.2/−7.0 % at C_v 3.1/3.7/4.3/5.0/5.6/6.0 (was −0.47…−0.86°, −6…−11 %).
+- SO(3) sweep test: the lower deck lid crossing the surface inverted (184° pitch) is 5.1 % of the torque range per
+  0.5° — steep, not a step (2.6 % per 0.25°, 1.0 % per 0.1°). The test now asserts the largest jump halves with the
+  step (a true discontinuity does not) plus < 8 % per 0.5°.
+
+## Envelope (assists off, helm 30°/s, throttle frozen, 20 s; tilt = acos(up·Ŷ); final code + 1.30 m hull)
+| C_v | 1/3 lock (10°) | half lock (15°) | full lock (30°) |
+|---|---|---|---|
+| 3 | steady, peak 14.5° | steady, peak 22.4° | hook 1.32 s (peak 44.5°) |
+| 4 | steady 12.9° | steady 22.0° | hook 1.98 s |
+| 5 | steady 13.5° | steady 23.4° | hook 1.70 s |
+| 6 | steady 15.2° | steady 25.9° | hook 1.53 s |
+| 7 | steady 17.2° | hook 4.02 s | hook 1.40 s |
+| 8 | steady 19.0° | hook 1.75 s | hook 1.32 s |
+| 9 | steady 20.6° | hook 1.53 s | hook 1.25 s |
+| 10 | steady 21.9° | hook 1.43 s | hook 1.18 s |
+Acceptance NOT met: half lock C_v 7–10 and full lock at C_v 3. `it.fails` kept with the numbers above.
+
+## Per-drive results (coordinator request, V77)
+`HullWater.driveThrust` (signed N), `driveProp` (world, 3k), `driveDir` (unit drive line, world, 3k),
+`driveAdvance`, `driveThrustFactor` (s^1.5), with `driveImmersion` — filled every evaluate(). Test: with the foils off
+Σ thrust·dir at prop = driveForce/driveTorque, dir yawed by the steer, signs follow reverse gear.
+The prop-wash adapter (src/wake/propWashHullWater.ts, not edited here) can read them; scratch `pw.test.ts` shows the
+rewrite gives the same jets as the current re-derivation to 1e-6.
+
+## Perf
+µs per boat per tick (N=2, analytic sea, same machine, back-to-back, min of 4): HEAD 61–62 → now 63–64 (+2, chine-depth
+lerps and per-drive writes).

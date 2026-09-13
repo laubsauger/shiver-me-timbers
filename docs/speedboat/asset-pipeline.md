@@ -1,8 +1,9 @@
 # Speedboat asset pipeline (§T176)
 
-Status, 2026-09-13: the pipeline runs end to end on a **pipeline-test hull**. That hull is not the hero
-model. It exists to prove every stage, and modelling of the real boat can start once the references
-are signed off. The plan behind it is [asset-pipeline-research.md](asset-pipeline-research.md);
+Status, 2026-09-13: the default build is the **SB-12 hero boat** (hero hull + 17 hero parts) →
+`assets/models/speedboat_hero.glb`; the hull is documented in [hull-log.md](hull-log.md), the parts in
+[parts-log.md](parts-log.md). The original **pipeline-test hull**, which proved every stage, stays
+reachable with `node scripts/asset-build.mjs --pipeline-test` (→ `speedboat_pipeline_test.glb`). The plan behind it is [asset-pipeline-research.md](asset-pipeline-research.md);
 deviations from that plan are listed at the end.
 
 ```
@@ -10,13 +11,14 @@ src/speedboat/hullMesh.ts + deepV12.hull.json  (physics proxy, owned by the phys
         │  scripts/blender/hullOffsets.ts   (vite-node: the proxy's own shape functions, 241 stations)
         ▼
 headless Blender 5.1  scripts/blender/build_pipeline_test.py  (+ sb_conventions.py)
-        │  loft hull LOD0/1/2, parts, UVs, Cycles bake stubs, 7 slots, extras → raw.glb
+        │  --hull-kind hero: scripts/blender/hull/ (hero hull, bakes, livery mask) | test: stand-in loft
+        │  hull LOD0/1/2, parts, UVs, Cycles bakes, ≤ 7 slots, extras → raw.glb
         ▼
 checker (raw)  scripts/blender/checkGlb.mjs   ── fails the build on any convention break
         ▼
-normalise alphaMode/clearcoat → dedup (not materials) → prune
+normalise alphaMode/clearcoat, attach the hero hull's 4th textures (hull_textures.json) → dedup (not materials) → prune
         ▼
-gltf-transform CLI: resize → UASTC (normal, ORM) → ETC1S (baseColor)      [KTX-Software `ktx`]
+gltf-transform CLI: resize → UASTC (normal, ORM, clearcoat carriers) → ETC1S (baseColor)      [KTX-Software `ktx`]
         ▼
 meshopt (JS API; positions stay float) → assets/models/<name>.glb
         ▼
@@ -34,7 +36,9 @@ runtime  src/speedboat/assets/  → lookdev  speedboat-lookdev.html
 | Keep intermediates (hull.json, raw.glb, baked PNGs, step GLBs) | `node scripts/asset-build.mjs --work /tmp/sb-build` |
 | Check any GLB | `node scripts/blender/checkGlb.mjs file.glb [--stage raw\|final] [--expect hull.json]` |
 | Hull offsets only | `npx vite-node scripts/blender/hullOffsets.ts -- hull.json 240` |
-| Blender step only | `/Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup --python-exit-code 1 -P scripts/blender/build_pipeline_test.py -- --hull hull.json --out raw.glb --work <dir>` |
+| Pipeline-test hull instead of the hero | `node scripts/asset-build.mjs --pipeline-test` |
+| Blender step only | `/Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup --python-exit-code 1 -P scripts/blender/build_pipeline_test.py -- --hull hull.json --out raw.glb --work <dir> --hull-kind hero` |
+| CPU renders of the hero hull (runtime livery formula) | `Blender -b --factory-startup -P scripts/blender/hull/render_hull.py -- --glb <work>/raw.glb --work <work> --views hero34,side --variant hero\|yellow\|turquoise --out-dir <dir>` |
 | CPU preview render of a raw GLB | `/Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup -P scripts/blender/render_preview.py -- --glb <work>/raw.glb --out p.png [--view three_quarter\|side\|front\|top\|below] [--lod N] [--clay]` |
 | Tests | `npx vitest run tests/assetPipeline*` |
 | Lookdev | `npm run dev`, then open `/speedboat-lookdev.html` (query params below) |
@@ -48,9 +52,9 @@ gave sha256 `7d1409154c7aefa7…` twice, from different work dirs. The quick fla
 twice. UASTC runs without RDO, so its non-deterministic multithreaded RDO is never used. The raw
 Blender GLB can differ between work dirs, but the packaged file does not.
 
-**Output today** (`assets/models/speedboat_pipeline_test.glb`): 1.14 MB. Tris per LOD 33 292 / 5 964 / 724.
-Draws per LOD 7 / 7 / 5. 7 materials. 3 textures, all 1024² KTX2 with mips.
-Whole build ≈ 5 s on the M3 Max.
+**Output today:** `assets/models/speedboat_hero.glb`. The current tris, draws, texture MB and build time are in
+[hull-log.md](hull-log.md) §Numbers. Historical: the first pipeline-test-only GLB was 1.14 MB, with tris per LOD
+33 292 / 5 964 / 724, draws 7 / 7 / 5, and a ≈ 5 s build.
 
 ## Conventions (the contract)
 
@@ -152,9 +156,9 @@ checker (node) and the runtime (TS, via `?raw`). Change it there only.
 
 ```ts
 const loader = await createBoatAssetLoader(app.renderer);     // after renderer.init()
-const asset = await loader.load(PIPELINE_TEST_BOAT_URL);      // GLTFLoader + KTX2Loader + MeshoptDecoder
+const asset = await loader.load(HERO_BOAT_URL);              // GLTFLoader + KTX2Loader + MeshoptDecoder
 const wetline = sea.caustics.attachHullWetline(wetlineOptions(asset.extras)); // BEFORE instantiate
-const boat = asset.instantiate({ variant: 'hero', water: true, livery: 0xd9442b });
+const boat = asset.instantiate({ variant: 'hero', water: true, livery: FLEET_LIVERIES.yellow }); // or one hex (band + cowls)
 scene.add(boat.object);                                       // THREE.LOD, origin = CG
 ```
 

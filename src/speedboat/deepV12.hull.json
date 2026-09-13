@@ -4,46 +4,47 @@
   "units": "metres, kilograms, degrees",
   "frame": "hull frame: x across the beam (symmetric, +x one side), y up from the keel baseline, z forward from the transom (z = 0 at the transom, z = loa at the stem)",
   "scaling": {
-    "law": "mass, LCG, VCG and inertia DERIVED from `massItems` (deriveMassProperties); geometry set by concept sign-off: 12 m LOA, 24 deg deadrise, chine beam 2.30 m, deck height kept at 1.674 m",
-    "check": "overall beam with 8 deg flare over the top 0.71 m of topside = 2.50 m, inside the 2.44-2.51 m of real 12 m deep-Vs (Cigarette 38 Top Gun: 11.43 m, 2.44 m beam, 24 deg, 4.49 t dry with twin sterndrives)"
+    "law": "mass, LCG, VCG and inertia DERIVED from `massItems` (deriveMassProperties); geometry set by concept sign-off: 12 m LOA, 24 deg deadrise, chine beam 2.30 m; hull depth keel to sheer 1.30 m at the transom (T179 part 3, was 1.674 m: see `derived.depthSource`)",
+    "check": "overall beam with 8 deg flare over the top 0.60 m of topside = 2.47 m (flare knuckle 0.19 m above the chine: at the stem the chine is only 0.31 m under the 1.30 m deck, and the render blends the knuckle 0.3·(deck − chine) above it, which must stay under the deck edge), inside the 2.44-2.51 m of real 12 m deep-Vs (Cigarette 38 Top Gun: 11.43 m, 2.44 m beam, 24 deg, 4.49 t dry with twin sterndrives)"
   },
   "spec": {
     "length": 12,
     "chineHalfBeam": 1.15,
     "deadriseDeg": 24,
-    "freeboard": 1.162,
+    "freeboard": 0.787987,
     "mass": 5351,
     "lcgFromTransom": 3.60602,
-    "vcgAboveKeel": 0.85397,
+    "vcgAboveKeel": 0.73912,
     "taperStart": 0.6,
     "keelRiseStart": 0.7,
     "bowKeelRise": 0.982,
     "segments": 28,
     "segmentsPerStrip": 2,
-    "gyradiusPitchOverL": 0.259942,
-    "gyradiusRollOverB": 0.377401,
+    "gyradiusPitchOverL": 0.259712,
+    "gyradiusRollOverB": 0.353936,
     "propBelowKeel": 0.12,
     "propAftOfTransom": 1.312,
     "propRadius": 0.2,
     "gyradiusYawOverL": 0.25927,
     "stemRake": 0.35,
     "bowDeadriseDeg": 45,
-    "warpStart": 0.618
+    "warpStart": 0.618,
+    "stemHalfBeamFraction": 0.005
   },
   "derived": {
     "loa": 12,
     "beamAtChine": 2.3,
-    "beamOverall": 2.5,
-    "deckHeightAboveKeel": 1.674,
+    "beamOverall": 2.468,
+    "deckHeightAboveKeel": 1.3,
     "transom": {
       "width": 2.3,
-      "heightAboveKeel": 1.674,
+      "heightAboveKeel": 1.3,
       "deadriseDeg": 24,
       "rakeDeg": 0
     },
     "cg": {
       "x": 0,
-      "yAboveKeel": 0.85397,
+      "yAboveKeel": 0.73912,
       "zFromTransom": 3.60602
     },
     "propPoint": {
@@ -53,8 +54,9 @@
       "note": "centreline EQUIVALENT of the three drives (physics thrust point); per-engine points in `engines`"
     },
     "sides": "vertical from chine to deck in the physics proxy (flare is render-only)",
-    "stem": "forefoot at z = 11.65 (keel length), deck-level stem at z = 12: rake 0.35 m, modelled in the proxy (STYLE-SPEC C4)",
-    "deadrise": "24 deg constant aft of z 7.2 m (60% LOA), warping (t^2) to 45 deg at the forefoot; per-station values in `stations[].deadriseDeg` (STYLE-SPEC C8). Sources: Sport Fishing Mag \"Perfect Boat Hull Designs\" (Regulator 24 deg transom to 48-49 deg forward); Ray Hunt Design deep-V Q&A (deadrise varies continuously). Savitsky uses the TRANSOM (constant, prismatic) deadrise: 24 deg"
+    "stem": "forefoot at z = 11.65 (keel length), deck-level stem at z = 12: rake 0.35 m, modelled in the proxy (STYLE-SPEC C4). Plan: the chine half-beam tapers as cos from 60 % of the keel length to `spec.stemHalfBeamFraction` x 1.15 m = 6 mm at the stem (pointed bow, STYLE-SPEC silhouette rule 4; was a 0.04 floor = 9 cm wide nose). The sheer is CONSTANT (deckY 1.30 m): the upturn seen from below is the keel rise (bowKeelRise 0.982 m over the forward 30 %), not sheer",
+    "deadrise": "24 deg constant aft of z 7.2 m (60% LOA), warping (t^2) to 45 deg at the forefoot; per-station values in `stations[].deadriseDeg` (STYLE-SPEC C8). Sources: Sport Fishing Mag \"Perfect Boat Hull Designs\" (Regulator 24 deg transom to 48-49 deg forward); Ray Hunt Design deep-V Q&A (deadrise varies continuously). Savitsky uses the TRANSOM (constant, prismatic) deadrise: 24 deg",
+    "depthSource": "Hull depth keel to sheer 1.30 m at the transom, freeboard chine to sheer 0.79 m. Measured off the 42 ft Apache Renegade 3-view (REFERENCES a1, drawing by Mark McManus Inc. 2015, 12.87 m LOA = 710 px): keel to rub rail 69-74 px = 1.25-1.34 m near the transom, keel to deck edge 83 px = 1.50 m, chine to rub rail about 0.9 m; lower bound APBA 2026 Offshore Rulebook Super Vee: >= 48 in (1.22 m) keel to deck ahead of the canopy (REFERENCES a15). No manufacturer publishes a hull depth for these boats (searched Cigarette, Fountain, Donzi specs). The old 1.674 m (chine 0.512 + freeboard 1.162) read as a workboat in the render. Deck-referenced mass items (roll arch, seat, pilot) moved down with the deck by 0.374 m; the FRP shell centroid scaled with the area-weighted section centroid (0.985 -> 0.792 m) and its own roll gyradius 0.966 -> 0.905 m (shorter topsides), mass unchanged (ASSUMED)"
   },
   "engines": [
     {
@@ -114,12 +116,12 @@
       "name": "hull shell, deck, stringers, cockpit liner (FRP) — ASSUMED",
       "mass": 3450,
       "x": 0,
-      "y": 0.8,
+      "y": 0.643,
       "z": 4.9,
       "k": {
         "pitch": 2.64,
         "yaw": 2.64,
-        "roll": 0.9659999999999999
+        "roll": 0.905
       }
     },
     {
@@ -168,21 +170,21 @@
       "name": "roll arch, a roll hoop 0.64 m AFT of the pilot's seat (concept 01c/04: behind the seat) — ASSUMED mass",
       "mass": 70,
       "x": 0,
-      "y": 2.4,
+      "y": 2.026,
       "z": 3.2
     },
     {
       "name": "centreline seat, 68% LOA from the bow — ASSUMED mass",
       "mass": 35,
       "x": 0,
-      "y": 1.9,
+      "y": 1.526,
       "z": 3.84
     },
     {
       "name": "pilot, 68% LOA from the bow — ASSUMED mass",
       "mass": 90,
       "x": 0,
-      "y": 2.1,
+      "y": 1.726,
       "z": 3.84
     }
   ],
@@ -217,7 +219,7 @@
       "downAngleDeg": 0
     },
     "topsideFlareDeg": 8,
-    "topsideFlareStartAboveChine": 0.45,
+    "topsideFlareStartAboveChine": 0.19,
     "cockpit": {
       "type": "open",
       "fromBowFraction": [
@@ -242,34 +244,34 @@
     }
   },
   "stations": [
-    {"z":0,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":0},
-    {"z":0.416071,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":0.416071},
-    {"z":0.832143,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":0.832143},
-    {"z":1.248214,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":1.248214},
-    {"z":1.664286,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":1.664286},
-    {"z":2.080357,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":2.080357},
-    {"z":2.496429,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":2.496429},
-    {"z":2.9125,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":2.9125},
-    {"z":3.328571,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":3.328571},
-    {"z":3.744643,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":3.744643},
-    {"z":4.160714,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":4.160714},
-    {"z":4.576786,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":4.576786},
-    {"z":4.992857,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":4.992857},
-    {"z":5.408929,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":5.408929},
-    {"z":5.825,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":5.825},
-    {"z":6.241071,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":6.241071},
-    {"z":6.657143,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":6.657143},
-    {"z":7.073214,"keelY":0,"chineHalfBeam":1.149548,"chineY":0.511812,"deadriseDeg":24,"deckHalfBeam":1.149548,"deckY":1.674013,"deckZ":7.073214},
-    {"z":7.489286,"keelY":0,"chineHalfBeam":1.133752,"chineY":0.506889,"deadriseDeg":24.088919,"deckHalfBeam":1.133752,"deckY":1.674013,"deckZ":7.489286},
-    {"z":7.905357,"keelY":0,"chineHalfBeam":1.095691,"chineY":0.499982,"deadriseDeg":24.527993,"deckHalfBeam":1.095691,"deckY":1.674013,"deckZ":7.905357},
-    {"z":8.321429,"keelY":0.002227,"chineHalfBeam":1.036114,"chineY":0.492752,"deadriseDeg":25.334186,"deckHalfBeam":1.036114,"deckY":1.674013,"deckZ":8.321429},
-    {"z":8.7375,"keelY":0.027278,"chineHalfBeam":0.95619,"chineY":0.504173,"deadriseDeg":26.507497,"deckHalfBeam":0.95619,"deckY":1.674013,"deckZ":8.7375},
-    {"z":9.153571,"keelY":0.080163,"chineHalfBeam":0.857488,"chineY":0.537018,"deadriseDeg":28.047927,"deckHalfBeam":0.857488,"deckY":1.674013,"deckZ":9.153571},
-    {"z":9.569643,"keelY":0.160883,"chineHalfBeam":0.741948,"chineY":0.588479,"deadriseDeg":29.955476,"deckHalfBeam":0.741948,"deckY":1.674013,"deckZ":9.569643},
-    {"z":9.985714,"keelY":0.269438,"chineHalfBeam":0.611837,"chineY":0.655182,"deadriseDeg":32.230143,"deckHalfBeam":0.611837,"deckY":1.674013,"deckZ":9.985714},
-    {"z":10.401786,"keelY":0.405827,"chineHalfBeam":0.469711,"chineY":0.733159,"deadriseDeg":34.871929,"deckHalfBeam":0.469711,"deckY":1.674013,"deckZ":10.401786},
-    {"z":10.817857,"keelY":0.57005,"chineHalfBeam":0.318361,"chineY":0.817716,"deadriseDeg":37.880834,"deckHalfBeam":0.318361,"deckY":1.674013,"deckZ":10.817857},
-    {"z":11.233929,"keelY":0.762108,"chineHalfBeam":0.160759,"chineY":0.903124,"deadriseDeg":41.256858,"deckHalfBeam":0.160759,"deckY":1.674013,"deckZ":11.233929},
-    {"z":11.65,"keelY":0.982,"chineHalfBeam":0.046,"chineY":1.028,"deadriseDeg":45,"deckHalfBeam":0.046,"deckY":1.674013,"deckZ":12}
+    {"z":0,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":0},
+    {"z":0.416071,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":0.416071},
+    {"z":0.832143,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":0.832143},
+    {"z":1.248214,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":1.248214},
+    {"z":1.664286,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":1.664286},
+    {"z":2.080357,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":2.080357},
+    {"z":2.496429,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":2.496429},
+    {"z":2.9125,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":2.9125},
+    {"z":3.328571,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":3.328571},
+    {"z":3.744643,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":3.744643},
+    {"z":4.160714,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":4.160714},
+    {"z":4.576786,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":4.576786},
+    {"z":4.992857,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":4.992857},
+    {"z":5.408929,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":5.408929},
+    {"z":5.825,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":5.825},
+    {"z":6.241071,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":6.241071},
+    {"z":6.657143,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.3,"deckZ":6.657143},
+    {"z":7.073214,"keelY":0,"chineHalfBeam":1.149548,"chineY":0.511812,"deadriseDeg":24,"deckHalfBeam":1.149548,"deckY":1.3,"deckZ":7.073214},
+    {"z":7.489286,"keelY":0,"chineHalfBeam":1.133752,"chineY":0.506889,"deadriseDeg":24.088919,"deckHalfBeam":1.133752,"deckY":1.3,"deckZ":7.489286},
+    {"z":7.905357,"keelY":0,"chineHalfBeam":1.095691,"chineY":0.499982,"deadriseDeg":24.527993,"deckHalfBeam":1.095691,"deckY":1.3,"deckZ":7.905357},
+    {"z":8.321429,"keelY":0.002227,"chineHalfBeam":1.036114,"chineY":0.492752,"deadriseDeg":25.334186,"deckHalfBeam":1.036114,"deckY":1.3,"deckZ":8.321429},
+    {"z":8.7375,"keelY":0.027278,"chineHalfBeam":0.95619,"chineY":0.504173,"deadriseDeg":26.507497,"deckHalfBeam":0.95619,"deckY":1.3,"deckZ":8.7375},
+    {"z":9.153571,"keelY":0.080163,"chineHalfBeam":0.857488,"chineY":0.537018,"deadriseDeg":28.047927,"deckHalfBeam":0.857488,"deckY":1.3,"deckZ":9.153571},
+    {"z":9.569643,"keelY":0.160883,"chineHalfBeam":0.741948,"chineY":0.588479,"deadriseDeg":29.955476,"deckHalfBeam":0.741948,"deckY":1.3,"deckZ":9.569643},
+    {"z":9.985714,"keelY":0.269438,"chineHalfBeam":0.611837,"chineY":0.655182,"deadriseDeg":32.230143,"deckHalfBeam":0.611837,"deckY":1.3,"deckZ":9.985714},
+    {"z":10.401786,"keelY":0.405827,"chineHalfBeam":0.469711,"chineY":0.733159,"deadriseDeg":34.871929,"deckHalfBeam":0.469711,"deckY":1.3,"deckZ":10.401786},
+    {"z":10.817857,"keelY":0.57005,"chineHalfBeam":0.318361,"chineY":0.817716,"deadriseDeg":37.880834,"deckHalfBeam":0.318361,"deckY":1.3,"deckZ":10.817857},
+    {"z":11.233929,"keelY":0.762108,"chineHalfBeam":0.160759,"chineY":0.903124,"deadriseDeg":41.256858,"deckHalfBeam":0.160759,"deckY":1.3,"deckZ":11.233929},
+    {"z":11.65,"keelY":0.982,"chineHalfBeam":0.00575,"chineY":0.98775,"deadriseDeg":45,"deckHalfBeam":0.00575,"deckY":1.3,"deckZ":12}
   ]
 }

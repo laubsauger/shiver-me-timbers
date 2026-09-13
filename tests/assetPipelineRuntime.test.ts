@@ -25,6 +25,7 @@ import {
   type TaggableObject,
 } from '../src/speedboat/assets/contract';
 import { assetFromGltf } from '../src/speedboat/assets/boatModel';
+import { FLEET_LIVERIES, HERO_LIVERY, numberGlyphs, resolveLivery } from '../src/speedboat/assets/livery';
 import { buildDeepVHull, REFERENCE_DEEP_V } from '../src/speedboat/hullMesh';
 
 const goodExtras = (): Record<string, unknown> => ({
@@ -106,7 +107,7 @@ describe('texture memory readout', () => {
   });
 });
 
-describe('the built pipeline-test GLB through GLTFLoader + MeshoptDecoder (no GPU)', () => {
+describe('the built hero GLB through GLTFLoader + MeshoptDecoder (no GPU)', () => {
   /** stands in for KTX2Loader, which needs a renderer and a worker: one tiny compressed texture per image */
   const fakeKtx2 = {
     load(_url: string, onLoad: (t: THREE.CompressedTexture) => void): void {
@@ -116,7 +117,7 @@ describe('the built pipeline-test GLB through GLTFLoader + MeshoptDecoder (no GP
   };
 
   const parse = async () => {
-    const bytes = readBytes(decodeURIComponent(new URL('../assets/models/speedboat_pipeline_test.glb', import.meta.url).pathname));
+    const bytes = readBytes(decodeURIComponent(new URL('../assets/models/speedboat_hero.glb', import.meta.url).pathname));
     await MeshoptDecoder.ready;
     const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
     loader.setKTX2Loader(fakeKtx2 as unknown as Parameters<GLTFLoader['setKTX2Loader']>[0]);
@@ -127,19 +128,19 @@ describe('the built pipeline-test GLB through GLTFLoader + MeshoptDecoder (no GP
     if (!hadSelf) g.self = globalThis;
     try {
       const gltf = await loader.parseAsync(buf, '');
-      return assetFromGltf(gltf.scene);
+      return { asset: assetFromGltf(gltf.scene), scene: gltf.scene };
     } finally {
       if (!hadSelf) delete g.self;
     }
   };
 
   it('extras sit on the physics proxy and every LOD is lighter than the last', async () => {
-    const asset = await parse();
+    const { asset } = await parse();
     const proxy = buildDeepVHull(REFERENCE_DEEP_V);
     expect(asset.extras.bowZ).toBeCloseTo(proxy.stemZ, 2);
     expect(asset.extras.sternZ).toBeCloseTo(proxy.transomZ, 2);
     expect(asset.extras.keelY).toBeCloseTo(proxy.keelBodyY, 2);
-    expect(asset.extras.pipelineTest).toBe(true);
+    expect(asset.extras.pipelineTest).toBe(false);
     expect(asset.stats.lods.length).toBe(ASSET_CONTRACT.lod.levels);
     for (let i = 1; i < asset.stats.lods.length; i++) expect(asset.stats.lods[i].tris).toBeLessThan(asset.stats.lods[i - 1].tris);
     expect(asset.stats.lods[0].tris).toBeLessThanOrEqual(ASSET_CONTRACT.assetKinds.player.triBudget[0]);
@@ -148,7 +149,7 @@ describe('the built pipeline-test GLB through GLTFLoader + MeshoptDecoder (no GP
   });
 
   it('instances: slot node materials shared across boats, hulls foam-tagged per LOD, livery per boat', async () => {
-    const asset = await parse();
+    const { asset } = await parse();
     const boats = Array.from({ length: 8 }, (_, i) => asset.instantiate({ variant: i === 0 ? 'hero' : 'npc', water: false, livery: 0x100000 * i }));
     const materials = new Set<THREE.Material>();
     for (const b of boats) {
@@ -188,5 +189,64 @@ describe('the built pipeline-test GLB through GLTFLoader + MeshoptDecoder (no GP
     expect(perspex(boats[0])?.transmission).toBeGreaterThan(0);
     expect(perspex(boats[1])?.transparent).toBe(true);
     expect(perspex(boats[1])?.transmission).toBe(0);
+  });
+});
+
+describe('fleet livery: eight boats, one texture set (STYLE-SPEC §4.2, §6)', () => {
+  it('a boat wears the livery on its root; partial liveries and the old single hue fill from the hero', () => {
+    // the rivals are the rendered 08 variants: a boat that silently fell back to the hero hues would race as the hero
+    expect(resolveLivery({ boatLivery: FLEET_LIVERIES.yellow })).toEqual(FLEET_LIVERIES.yellow);
+    expect(resolveLivery({ boatLivery: { band: 0x123456 } })).toEqual({ ...HERO_LIVERY, band: 0x123456 });
+    // liveryTint is the lookdev/older API: it recolours the band and the cowl tops, nothing else
+    expect(resolveLivery({ liveryTint: 0xd9442b })).toEqual({ ...HERO_LIVERY, band: 0xd9442b, dominant: 0xd9442b });
+    expect(resolveLivery({ boatLivery: { topsides: Number.NaN, number: 5 } })).toEqual({ ...HERO_LIVERY, number: 5 });
+    expect(resolveLivery(undefined)).toEqual(HERO_LIVERY);
+  });
+
+  it('dark-topsides rivals paint bone numerals, light ones black (the number must read, §4.3)', () => {
+    const lum = (hex: number): number => 0.2126 * ((hex >> 16) & 255) + 0.7152 * ((hex >> 8) & 255) + 0.0722 * (hex & 255);
+    for (const l of Object.values(FLEET_LIVERIES)) expect(Math.abs(lum(l.numeral) - lum(l.topsides))).toBeGreaterThan(60);
+  });
+
+  it('race numbers map to one or two glyphs, never a leading zero', () => {
+    expect(numberGlyphs(27)).toEqual([2, 7]);
+    expect(numberGlyphs(8)).toEqual([8]);
+    expect(numberGlyphs(10)).toEqual([1, 0]);
+    expect(numberGlyphs(127)).toEqual([2, 7]);
+  });
+
+  it('the hero hull carries its livery mask and non-skid detail as the 4th texture, with the channel contract in extras', async () => {
+    const bytes = readBytes(decodeURIComponent(new URL('../assets/models/speedboat_hero.glb', import.meta.url).pathname));
+    await MeshoptDecoder.ready;
+    const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+    loader.setKTX2Loader({
+      load(_url: string, onLoad: (t: THREE.CompressedTexture) => void): void {
+        onLoad(new THREE.CompressedTexture([{ data: new Uint8Array(64), width: 4, height: 4 }] as unknown as ImageData[], 4, 4, THREE.RGBA_ASTC_4x4_Format));
+      },
+    } as unknown as Parameters<GLTFLoader['setKTX2Loader']>[0]);
+    const g = globalThis as unknown as { self?: unknown };
+    const hadSelf = 'self' in g;
+    if (!hadSelf) g.self = globalThis;
+    try {
+      const gltf = await loader.parseAsync(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, '');
+      const mats = new Map<string, THREE.MeshPhysicalMaterial>();
+      gltf.scene.traverse((o) => {
+        const m = (o as THREE.Mesh).material as THREE.MeshPhysicalMaterial | undefined;
+        if (m && (o as THREE.Mesh).isMesh) mats.set(m.name, m);
+      });
+      // antifoul folded into the gelcoat: hull 2 + parts 4 leaves the 7th slot for the pilot
+      expect(mats.has('M_Antifoul')).toBe(false);
+      const gel = mats.get('M_Gelcoat') as THREE.MeshPhysicalMaterial;
+      const ns = mats.get('M_NonSlip') as THREE.MeshPhysicalMaterial;
+      expect(gel.clearcoatMap).toBeTruthy();
+      expect(ns.clearcoatNormalMap).toBeTruthy();
+      const hl = gel.userData.hullLivery as { glyphAtlas: Record<string, number>; numberField: Record<string, number> };
+      expect(hl.glyphAtlas.cellW).toBeGreaterThan(0);
+      // the number sits on the topsides under the cockpit, between the keel and the deck (body frame)
+      expect(hl.numberField.yCentre + REFERENCE_DEEP_V.vcgAboveKeel).toBeGreaterThan(0.5);
+      expect(ns.userData.nonSkid.tileMetres).toBeGreaterThan(0);
+    } finally {
+      if (!hadSelf) delete g.self;
+    }
   });
 });

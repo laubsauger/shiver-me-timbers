@@ -304,6 +304,24 @@ describe('checkGlb: each broken convention FAILS the build', () => {
     await failsWith(doc, /budget: LOD0 has \d+ draws > npc draw budget 12/);
   });
 
+  it('a race number that runs into the band or the boot line fails (hull v2: the freeboard dropped and "27" was clipped)', async () => {
+    const withNumber = (yCentre: number, height: number): Document => {
+      const doc = buildBoat();
+      const gel = doc.getRoot().listMaterials()[0];
+      gel.setExtras({
+        hullLivery: {
+          numberField: { zCentre: 1.2, yCentre, height, digitWidth: (height * 2) / 3, gap: height * 0.1 },
+          clearTopside: { top: 0.55, bottom: 0.05, zMin: -0.3, zMax: 2.7 },
+        },
+      });
+      return doc;
+    };
+    const { errors } = await check(withNumber(0.3, 0.4));
+    expect(errors.filter((e) => e.startsWith('livery'))).toEqual([]);
+    await failsWith(withNumber(0.45, 0.4), /race number top .* runs into the pinstripe\/band/);
+    await failsWith(withNumber(0.15, 0.4), /race number bottom .* runs into the boot line/);
+  });
+
   it('player LOD0 budget is 120k, not the NPC 50k', async () => {
     const { errors } = await check(buildBoat({ kind: 'player', extraLod0Tris: 50_000 }));
     expect(errors.filter((e) => e.startsWith('budget'))).toEqual([]);
@@ -326,10 +344,10 @@ describe('checkGlb: each broken convention FAILS the build', () => {
   });
 });
 
-describe('the built pipeline-test GLB (assets/models, from `node scripts/asset-build.mjs`)', () => {
+describe('the built hero GLB (assets/models, from `node scripts/asset-build.mjs`)', () => {
   // a vite asset import cannot carry .glb (not a known asset type, and vite.config is not ours to
   // widen), so the bytes come off disk through the checker's own reader
-  const bytes = (): Uint8Array => readBytes(decodeURIComponent(new URL('../assets/models/speedboat_pipeline_test.glb', import.meta.url).pathname));
+  const bytes = (): Uint8Array => readBytes(decodeURIComponent(new URL('../assets/models/speedboat_hero.glb', import.meta.url).pathname));
 
   it('passes the FINAL checker, sitting on the physics proxy (§V77: one set of numbers)', async () => {
     const proxyHull = buildDeepVHull(REFERENCE_DEEP_V);

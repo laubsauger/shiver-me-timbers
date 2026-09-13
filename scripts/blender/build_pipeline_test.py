@@ -63,6 +63,8 @@ def parse_args():
     p.add_argument('--parts', default=None)
     # save the built scene (textures attached, before export) for CPU preview renders
     p.add_argument('--blend', default=None)
+    # 'hero': the SB-12 hero hull (scripts/blender/hull/); 'test': the stand-in loft below
+    p.add_argument('--hull-kind', default='test', choices=['hero', 'test'])
     return p.parse_args(argv)
 
 
@@ -560,6 +562,19 @@ def main():
     vcg, lcg, L = spec['vcgAboveKeel'], spec['lcgFromTransom'], spec['length']
     deck_body_y = max(s['deckY'] for s in hull['stations']) - vcg
 
+    hhull = None
+    if args.hull_kind == 'hero':
+        # antifoul folds into M_Gelcoat (livery mask), so hull + 4 part slots + M_Pilot fit the 7-slot contract
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hull'))
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'parts'))
+        import anchors as hull_anchors  # noqa: E402
+        import hero_hull as HH  # noqa: E402
+        manifest_path = args.parts or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'parts', 'manifest.json')
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            hull_manifest = json.load(f)
+        hull_A = hull_anchors.Anchors(hull, hull_manifest)
+        hhull = HH.HeroHull(hull, hull_A)
+
     mats = {}
     mats['M_Antifoul'], _ = sb.principled_material(contract, 'M_Antifoul', roughness=0.82)
     mats['M_Gelcoat'], _ = sb.principled_material(contract, 'M_Gelcoat', roughness=0.12, coat=1.0, coat_roughness=0.08)
@@ -571,18 +586,22 @@ def main():
     mats['M_Carbon'], _ = sb.principled_material(contract, 'M_Carbon', base=(0.025, 0.025, 0.028, 1), roughness=0.35, coat=1.0)
     if args.parts:
         mats['M_Cockpit'], _ = sb.principled_material(contract, 'M_Cockpit', roughness=1.0)
-    hull_mats = [mats[s] for s in HULL_SLOTS]
+    hull_mats = [mats[s] for s in HULL_SLOTS] if hhull is None else [mats['M_Gelcoat'], mats['M_NonSlip']]
 
     root = sb.make_empty('SB_' + args.name, props={
         'assetKind': args.kind,
         'contractVersion': int(contract['version']),
-        'pipelineTest': True,
+        'pipelineTest': hhull is None,
+        'hullKind': args.hull_kind,
         'hullSource': hull.get('source', hull.get('name', '?')),
     })
     lods = [sb.make_empty(sb.lod_group_name(contract, l), parent=root, props={'lodLevel': l}) for l in range(len(LOD_LOFT))]
 
     # LOD0 first: the bake must not see the coarser LODs (they would occlude the AO rays)
-    hull0 = loft_hull(hull, 0, contract, hull_mats, lods[0])
+    if hhull is None:
+        hull0 = loft_hull(hull, 0, contract, hull_mats, lods[0])
+    else:
+        hull0 = HH.link_lod(hhull, 0, contract, hull_mats, lods[0], sb)
     hero = None
     if args.parts:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'parts'))
@@ -597,8 +616,14 @@ def main():
         finish_part_lod0(obj)
         parts0[name] = obj
 
-    base_img, orm_img, normal_img = bake_hull_textures(hull0, args, deck_body_y)
-    for slot in HULL_SLOTS:
+    if hhull is None:
+        base_img, orm_img, normal_img = bake_hull_textures(hull0, args, deck_body_y)
+        hull_slots = HULL_SLOTS
+    else:
+        import hull_textures  # noqa: E402
+        base_img, orm_img, normal_img, _ = hull_textures.bake_and_texture(hhull, hull0, args, hull_A)
+        hull_slots = ['M_Gelcoat', 'M_NonSlip']
+    for slot in hull_slots:
         mat = mats[slot]
         bsdf = mat.node_tree.nodes['Principled BSDF']
         sb.attach_texture_set(mat, bsdf, base_img, orm_img, normal_img, alpha_from_base=True)
@@ -607,7 +632,10 @@ def main():
         hero.bake_and_texture()
 
     for lod in range(1, len(LOD_LOFT)):
-        loft_hull(hull, lod, contract, hull_mats, lods[lod])
+        if hhull is None:
+            loft_hull(hull, lod, contract, hull_mats, lods[lod])
+        else:
+            HH.link_lod(hhull, lod, contract, hull_mats, lods[lod], sb)
         for name, obj0 in parts0.items():
             ratio = PART_LOD_RATIO[name][lod]
             if ratio is None:

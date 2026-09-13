@@ -1,6 +1,6 @@
 /**
  * Speedboat asset LOOKDEV harness (§V22 verification aid — NOT the game, NOT the hero model).
- * Loads a contract GLB (today: the pipeline-test hull from `node scripts/asset-build.mjs`) through
+ * Loads a contract GLB (today: the SB-12 hero boat from `node scripts/asset-build.mjs`) through
  * the runtime asset module, so what is on screen is exactly what a speedboat page would draw.
  *
  * Query params (all optional):
@@ -34,7 +34,7 @@ import { createWeatherSystem } from '../weather';
 import { createInitialState } from '../state/simState';
 import type { HullWetline } from '../caustics';
 import {
-  PIPELINE_TEST_BOAT_URL,
+  HERO_BOAT_URL,
   createBoatAssetLoader,
   wetlineOptions,
   type BoatInstance,
@@ -89,7 +89,7 @@ async function boot(): Promise<void> {
   }
 
   const loader = await createBoatAssetLoader(app.renderer);
-  const url = q.get('glb') ?? PIPELINE_TEST_BOAT_URL;
+  const url = q.get('glb') ?? HERO_BOAT_URL;
   const asset = await loader.load(url);
   const { extras, stats } = asset;
 

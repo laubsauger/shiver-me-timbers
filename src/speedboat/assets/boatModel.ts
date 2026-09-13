@@ -2,14 +2,15 @@
  * Speedboat GLB loader + instances (docs/speedboat/asset-pipeline.md §Runtime).
  *
  *   const loader = await createBoatAssetLoader(app.renderer);   // after renderer.init()
- *   const asset  = await loader.load(PIPELINE_TEST_BOAT_URL);
+ *   const asset  = await loader.load(HERO_BOAT_URL);
  *   // sea pages: setActiveCaustics(...) and caustics.attachHullWetline(wetlineOptions(asset.extras))
  *   // BEFORE instantiate — the slot materials bake waterLighting() at construction
- *   const boat = asset.instantiate({ variant: 'hero', water: true, livery: 0xd9442b });
+ *   const boat = asset.instantiate({ variant: 'hero', water: true, livery: FLEET_LIVERIES.yellow });
  *   scene.add(boat.object);
  *
  * One asset → any number of instances sharing geometry, textures and (per variant) materials:
- * ≤ 7 pipelines for all eight boats (doc §5.3). Livery is per instance via `userData.liveryTint`.
+ * ≤ 7 pipelines for all eight boats (doc §5.3). Livery is per instance via `userData.boatLivery` (hues + race
+ * number, livery.ts) or the older single hue `userData.liveryTint`.
  *
  * §V109: imports nothing from main.ts, main-raft.ts, raft/, combat/ or ai/
  * (tests/assetPipelineIsolation.test.ts walks the graph).
@@ -35,9 +36,12 @@ import {
   type SlotName,
   type TaggableObject,
 } from './contract';
+import type { BoatLivery } from './livery';
 import { createSlotMaterial, type BoatVariant } from './slotMaterials';
 
-/** the pipeline-test GLB built by `node scripts/asset-build.mjs` — NOT the hero model */
+/** the SB-12 hero boat (hero hull + parts) built by `node scripts/asset-build.mjs` */
+export const HERO_BOAT_URL = new URL('../../../assets/models/speedboat_hero.glb', import.meta.url).href;
+/** the pipeline-test GLB (`node scripts/asset-build.mjs --pipeline-test`) — NOT the hero model; only if built */
 export const PIPELINE_TEST_BOAT_URL = new URL('../../../assets/models/speedboat_pipeline_test.glb', import.meta.url).href;
 
 export interface BoatLodStats {
@@ -58,8 +62,8 @@ export interface BoatInstanceOptions {
   variant: BoatVariant;
   /** fold the sea's waterLighting() into the slot materials (needs setActiveCaustics first) */
   water: boolean;
-  /** livery hue (0xRRGGBB); omitted = the baked gelcoat */
-  livery?: number;
+  /** a full livery (hues + race number), or one hue (0xRRGGBB) for the band and cowl tops; omitted = the hero livery */
+  livery?: BoatLivery | number;
   /** vertical FOV the LOD thresholds are converted at (default 55°, App's camera) */
   fovDeg?: number;
 }
@@ -69,7 +73,7 @@ export interface BoatInstance {
   readonly object: THREE.LOD;
   /** foam-tagged hull meshes per LOD level */
   readonly hulls: THREE.Mesh[][];
-  setLivery(hex: number | null): void;
+  setLivery(livery: BoatLivery | number | null): void;
   /** re-derive LOD switch distances after a FOV change (thresholds are screen fractions) */
   setFov(fovDeg: number): void;
   currentLevel(): number;
@@ -177,7 +181,13 @@ export function assetFromGltf(scene: THREE.Group): BoatAsset {
       const lod = new THREE.LOD();
       lod.name = `${root.name}:${opts.variant}`;
       lod.userData = { ...root.userData, boatRoot: true };
-      if (opts.livery !== undefined) lod.userData.liveryTint = opts.livery;
+      const applyLivery = (l: BoatLivery | number | null | undefined): void => {
+        delete lod.userData.liveryTint;
+        delete lod.userData.boatLivery;
+        if (typeof l === 'number') lod.userData.liveryTint = l;
+        else if (l) lod.userData.boatLivery = { ...l };
+      };
+      applyLivery(opts.livery);
       const slotMaterial = new Map<THREE.Mesh, THREE.Material>();
       const hulls: THREE.Mesh[][] = [];
       const levelObjects = groups.map((g, level) => {
@@ -210,10 +220,7 @@ export function assetFromGltf(scene: THREE.Group): BoatAsset {
       return {
         object: lod,
         hulls,
-        setLivery(hex: number | null): void {
-          if (hex === null) delete lod.userData.liveryTint;
-          else lod.userData.liveryTint = hex;
-        },
+        setLivery: applyLivery,
         setFov: place,
         currentLevel: () => lod.getCurrentLevel(),
         overrideMaterials(pick): void {

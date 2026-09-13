@@ -85,9 +85,9 @@
  *  - aero, Kerner suction (default 0 in the doc): NOT here (out of scope).
  *
  * KNOWN LIMITS (measured): V104 at EQUILIBRIUM over Savitsky's valid range C_v 3.1–6.0.
- * MANEUVERING (T179, docs/speedboat/physics-log.md): above C_v ≈ 4 a drive angle beyond ~12° drives the stern
- * to large slip and she hooks (full lock at C_v ≥ 5 capsizes or spins); at C_v ≥ 8 with small helm she heels
- * slightly OUT of the turn (dry chines put the bottom-pressure line below the CG). A released hull keeps a
+ * MANEUVERING (T179, docs/speedboat/physics-log.md): half lock (15°) is a steady turn at C_v 3–6 and hooks 1.5–3 s
+ * after the helm starts at C_v 7–10; full lock hooks 1.25–1.6 s in at every C_v (past 45° at C_v 3 too). Spray
+ * strakes / chine flats are NOT modelled: the literature found gives them no lift or roll term (part 3). A released hull keeps a
  * few cm/s of horizontal speed from entry-only slam/crossflow along its trimmed normal.
  * Free-running at C_v 3.5–3.9 a pitch limit cycle remains (0.28° at 14 strips, ~0.9° as the strips are
  * refined — so it is the continuous model, not discretisation), far below the doc's porpoising limit;
@@ -121,6 +121,12 @@ export interface HullWaterMesh {
     zCentre: Float64Array;
     chineHalfBeam: Float64Array;
     keelY: Float64Array;
+    /** deadrise at the strip centre, rad (chine-wet added mass; absent ⇒ no chine-wet growth) */
+    deadrise?: Float64Array;
+    /** chine at the strip centre per half as a lerp of two vertices (see HullStrips); absent ⇒ no chine-wet growth */
+    chineV0?: Int32Array;
+    chineV1?: Int32Array;
+    chineT?: Float64Array;
   };
   mass: number;
   inertia: Vec3;
@@ -159,6 +165,8 @@ export interface HullWaterParams {
   kirchhoff: boolean;
   /** sectional 2D+t loads at the Wagner centres of pressure (see placeCentresOfPressure); false = geometric centroids (T165) */
   wagnerCentreOfPressure: boolean;
+  /** chine-wet added-mass growth under the DEEPER chine of a heeled section (Payne 1994; see chineWetGrowth) */
+  chineWetAddedMass: boolean;
   /** gearcase lateral foils on the drives (off = thrust vectoring only) */
   driveFoil: boolean;
   /** natural ventilation of the surface-piercing gearcases (off = wetted lift to stall) */
@@ -232,6 +240,7 @@ export const HULL_WATER_DEFAULTS: Readonly<HullWaterParams> = Object.freeze({
   standInDrivePowerW: STANDIN_THRUST.powerW,
   coupledAddedMass: true,
   wagnerCentreOfPressure: true,
+  chineWetAddedMass: true,
   kirchhoff: true,
   driveFoil: true,
   gearcaseVentilation: true,
@@ -558,6 +567,19 @@ export class HullWater {
   /** gearcase immersed-span fraction and prop immersion per drive, last evaluate() */
   readonly gearcaseImmersion: Float64Array;
   readonly driveImmersion: Float64Array;
+  /**
+   * PER-DRIVE RESULTS of the last evaluate() (V77/V101: one thrust expression, consumers read it here — the prop
+   * wash, spray, audio). `driveThrust[k]` N along the drive's line, SIGNED (reverse gear < 0; Σ|·| = `thrust`
+   * when all signs agree); `driveProp[3k..]` the prop point, world; `driveDir[3k..]` the unit drive line (the
+   * yawed body +z the thrust pushes along), world; `driveAdvance[k]` |advance speed| along it, m/s;
+   * `driveThrustFactor[k]` = s^1.5, the immersion/ventilation fraction of the rated thrust (s = `driveImmersion`).
+   * Filled for every drive whatever the throttle (thrust 0 at throttle 0).
+   */
+  readonly driveThrust: Float64Array;
+  readonly driveProp: Float64Array;
+  readonly driveDir: Float64Array;
+  readonly driveAdvance: Float64Array;
+  readonly driveThrustFactor: Float64Array;
   /** foil lateral (side) force magnitude summed over drives, N (signed along body x) */
   foilSideForce = 0;
   thrust = 0;
@@ -673,6 +695,11 @@ export class HullWater {
     const nd = mesh.drives ? mesh.drives.length : 0;
     this.gearcaseImmersion = new Float64Array(nd);
     this.driveImmersion = new Float64Array(nd);
+    this.driveThrust = new Float64Array(nd);
+    this.driveProp = new Float64Array(nd * 3);
+    this.driveDir = new Float64Array(nd * 3);
+    this.driveAdvance = new Float64Array(nd);
+    this.driveThrustFactor = new Float64Array(nd);
     {
       const cells = this.params.patchMaxAxis * this.params.patchMaxAxis;
       this.wake = {
@@ -952,6 +979,7 @@ export class HullWater {
     HU.fill(0);
     HCW.fill(0);
     HCG.fill(0);
+    const chineWet = prm.chineWetAddedMass && !!mesh.strips.chineV0 && !!mesh.strips.deadrise;
     if (prm.planing) {
       for (let i = 0; i < ns; i++) {
         let nX = 0;
@@ -994,7 +1022,8 @@ export class HullWater {
               const cgS = Math.max(0, (this.sSx[2 * i + 1] * nX + this.sSy[2 * i + 1] * nY + this.sSz[2 * i + 1] * nZ) / dz);
               const cgH = side === 0 ? cgP : cgS;
               const share = cgP * cgP + cgS * cgS > 0 ? (cgH * cgH) / (cgP * cgP + cgS * cgS) : 0.5;
-              const ma = k * rho * HALF_PI * cW * cW * share;
+              let ma = k * rho * HALF_PI * cW * cW * share;
+              if (chineWet) ma += k * rho * HALF_PI * this.chineWetGrowth(i, side);
               this.placeCentresOfPressure(hI, i, cgH, byx, byy, byz, bzx, bzy, bzz);
               const rx = HC[hI * 3] - cgx;
               const ry = HC[hI * 3 + 1] - cgy;
@@ -1837,10 +1866,21 @@ export class HullWater {
         const e = Math.min(1, Math.max(0, (depth + r) / (2 * r)));
         const imm = e * e * (3 - 2 * e);
         this.driveImmersion[k] = imm;
+        const ua = Math.abs(vx * D[0] + vy * D[1] + vz * D[2]);
+        const k3 = 3 * k;
+        this.driveProp[k3] = cgx + R[0];
+        this.driveProp[k3 + 1] = cgy + R[1];
+        this.driveProp[k3 + 2] = cgz + R[2];
+        this.driveDir[k3] = D[0];
+        this.driveDir[k3 + 1] = D[1];
+        this.driveDir[k3 + 2] = D[2];
+        this.driveAdvance[k] = ua;
+        this.driveThrustFactor[k] = imm * Math.sqrt(imm);
+        this.driveThrust[k] = 0;
         if (this.throttle !== 0 && imm > 0) {
-          const ua = Math.abs(vx * D[0] + vy * D[1] + vz * D[2]);
           const tMax = (STANDIN_THRUST.efficiency * pPer) / Math.max(ua, STANDIN_THRUST.refSpeed);
           const T = this.throttle * tMax * imm * Math.sqrt(imm);
+          this.driveThrust[k] = T;
           const fx = T * D[0];
           const fy = T * D[1];
           const fz = T * D[2];
@@ -2223,6 +2263,34 @@ export class HullWater {
       T[o + 1] = this.cgy + px * bxy + py * byy + rbz * bzy;
       T[o + 2] = this.cgz + px * bxz + py * byz + rbz * bzz;
     }
+  }
+
+  /**
+   * CHINE-WET ADDED MASS of a HEELED section (Δc² of half-section `side` of strip i). Once the splash-up reaches a
+   * chine the flow separates there, but the added mass does not stop growing with immersion: Payne (Ocean Eng.
+   * 21(3), 1994), as reproduced and used for roll restoring by Katayama, Fujimoto & Ikeda (J. JASNAOE 3, 2006),
+   * m′ = C·ρ(π/2)(b_x/2)²·f(A) with C_wet = (1 + 2z_c/b_x)·C_dry, z_c = the chine's immersion below the level at which
+   * the splash-up first wet it (b_x = chine beam). With half-beam b that is c² = b² + b·z_c, b·z_c/2 per side. The
+   * splash-up first wets the chine when the geometric half-width is 2b/π (Wagner), i.e. with the chine b(1 − 2/π)·tanβ
+   * above the surface, so z_c,h = d_chine,h + b(1 − 2/π)·tanβ.
+   * ONLY THE DIFFERENCE BETWEEN THE TWO CHINES is added, to the deeper one: Δc²_h = b·max(0, z⁺_c,h − z⁺_c,other)/2.
+   * The symmetric part is already inside the section this model was validated with (Wagner cap at the chine, Garme,
+   * side-wall hydrostatics — Savitsky within 1° of trim); adding Payne's symmetric growth on top moved the C_v 3.1
+   * equilibrium trim to 1.21° below Savitsky (measured), so it is not added. What the c_g² share cannot give is a
+   * section that sinks one chine: both halves hit the SAME section cap, so the heeled low half gained no added mass
+   * as its chine went under — dynamic roll stiffness and damping collapsed past ~20° of heel (C_v 3: K_p −25 → −2
+   * kN·m·s/rad from 0° to 30°), Katayama's chine-wet loss of restoring with nothing to answer it.
+   */
+  private chineWetGrowth(i: number, side: number): number {
+    const st = this.mesh.strips;
+    const t = st.chineT![i];
+    const lift = this.mesh.strips.chineHalfBeam[i] * (1 - 2 / Math.PI) * Math.tan(st.deadrise![i]);
+    const hI = 2 * i + side;
+    const oI = 2 * i + 1 - side;
+    const zc = this.pd[st.chineV0![hI]] * (1 - t) + this.pd[st.chineV1![hI]] * t + lift;
+    const zo = this.pd[st.chineV0![oI]] * (1 - t) + this.pd[st.chineV1![oI]] * t + lift;
+    const d = (zc > 0 ? zc : 0) - (zo > 0 ? zo : 0);
+    return d > 0 ? 0.5 * st.chineHalfBeam[i] * d : 0;
   }
 
   /** fraction of a positive lift contribution s + u that is the steady part */

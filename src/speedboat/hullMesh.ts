@@ -49,6 +49,11 @@ export interface DeepVHullSpec {
   vcgAboveKeel: number;
   /** fraction of L (from the transom) where the beam starts to taper to the stem */
   taperStart: number;
+  /**
+   * chine half-beam at the stem as a fraction of `chineHalfBeam` (the floor of the plan taper); omitted ⇒ 0.04
+   * (the blunt 9 cm nose before the T179 part-3 pointed bow)
+   */
+  stemHalfBeamFraction?: number;
   /** fraction of L where the keel starts to rise toward the stem */
   keelRiseStart: number;
   /** keel height at the stem, m */
@@ -232,6 +237,13 @@ export interface HullStrips {
   deadrise: Float64Array;
   /** body-frame y of the keel at the strip centre, m */
   keelY: Float64Array;
+  /**
+   * the chine at the strip centre as a lerp of two mesh vertices, per HALF (index 2·strip + side, side 0 = −x):
+   * position = V[chineV0]·(1 − chineT[strip]) + V[chineV1]·chineT[strip] (the contact reads their depths)
+   */
+  chineV0: Int32Array;
+  chineV1: Int32Array;
+  chineT: Float64Array;
 }
 
 export interface HullProxy {
@@ -288,7 +300,7 @@ export function halfBeamAt(spec: Readonly<DeepVHullSpec>, zFromTransom: number):
   const u = zFromTransom / keelLength(spec);
   if (u < spec.taperStart || spec.taperStart >= 1) return spec.chineHalfBeam;
   const t = (u - spec.taperStart) / (1 - spec.taperStart);
-  return spec.chineHalfBeam * Math.max(0.04, Math.cos(t * (Math.PI / 2)));
+  return spec.chineHalfBeam * Math.max(spec.stemHalfBeamFraction ?? 0.04, Math.cos(t * (Math.PI / 2)));
 }
 
 /** keel height above the baseline at hull-frame z (from the transom). */
@@ -381,6 +393,9 @@ export function buildDeepVHull(spec: Readonly<DeepVHullSpec> = REFERENCE_DEEP_V)
   const chine = new Float64Array(count);
   const dead = new Float64Array(count);
   const keelY = new Float64Array(count);
+  const chineV0 = new Int32Array(2 * count);
+  const chineV1 = new Int32Array(2 * count);
+  const chineT = new Float64Array(count);
   for (let s = 0; s < count; s++) {
     // strip centre sits at a station when segmentsPerStrip is even, else mid-segment: lerp either way
     const f = (s + 0.5) * spec.segmentsPerStrip;
@@ -395,6 +410,11 @@ export function buildDeepVHull(spec: Readonly<DeepVHullSpec> = REFERENCE_DEEP_V)
     chine[s] = cX;
     dead[s] = Math.atan2(cY - kY, cX);
     keelY[s] = kY;
+    chineV0[2 * s] = Cm(i0);
+    chineV1[2 * s] = Cm(i0 + 1);
+    chineV0[2 * s + 1] = Cp(i0);
+    chineV1[2 * s + 1] = Cp(i0 + 1);
+    chineT[s] = t;
   }
 
   const m = spec.mass;
@@ -413,7 +433,7 @@ export function buildDeepVHull(spec: Readonly<DeepVHullSpec> = REFERENCE_DEEP_V)
     indices: Uint16Array.from(tris),
     triCount: tris.length / 3,
     triStrip: Int16Array.from(stripOf),
-    strips: { count, dz: dzBody, zCentre, chineHalfBeam: chine, deadrise: dead, keelY },
+    strips: { count, dz: dzBody, zCentre, chineHalfBeam: chine, deadrise: dead, keelY, chineV0, chineV1, chineT },
     mass: m,
     inertia: [iPitch, iYaw, iRoll],
     propPoint: [0, -spec.propBelowKeel - cgY, -spec.propAftOfTransom - cgZ],

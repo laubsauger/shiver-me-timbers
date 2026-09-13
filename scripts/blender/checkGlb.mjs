@@ -239,6 +239,96 @@ export function sectionErrors(hull, expect, tol, samples = 24) {
 const isVec3 = (v) => Array.isArray(v) && v.length === 3 && v.every(isNum);
 
 /**
+ * Hero hull race number (STYLE-SPEC §4.3): the numeral field in M_Gelcoat's extras must sit wholly inside the clear
+ * topside the build derived (pinstripe bottom → boot line, with a margin), and that clear band must itself sit on the
+ * proxy topside: under the deck with room for the band, above the chine across the field's length. A freeboard change
+ * that would clip the number into the band fails here instead of on screen.
+ */
+export function liveryErrors(document, expect, margin = 0.03) {
+  const errors = [];
+  for (const mat of document.getRoot().listMaterials()) {
+    const hl = (mat.getExtras() ?? {}).hullLivery;
+    if (!hl) continue;
+    const nf = hl.numberField;
+    const ct = hl.clearTopside;
+    if (!nf || !ct || ![nf.zCentre, nf.yCentre, nf.height, nf.digitWidth, nf.gap, ct.top, ct.bottom, ct.zMin, ct.zMax].every(isNum)) {
+      errors.push(`livery: ${mat.getName()} hullLivery needs numberField {zCentre, yCentre, height, digitWidth, gap} and clearTopside {top, bottom, zMin, zMax}`);
+      continue;
+    }
+    const top = nf.yCentre + nf.height / 2;
+    const bottom = nf.yCentre - nf.height / 2;
+    const halfW = nf.digitWidth + nf.gap / 2;
+    if (top > ct.top - margin) errors.push(`livery: race number top ${top.toFixed(3)} runs into the pinstripe/band (clear topside top ${ct.top.toFixed(3)}, margin ${margin})`);
+    if (bottom < ct.bottom + margin) errors.push(`livery: race number bottom ${bottom.toFixed(3)} runs into the boot line (clear topside bottom ${ct.bottom.toFixed(3)}, margin ${margin})`);
+    if (nf.zCentre - halfW < ct.zMin || nf.zCentre + halfW > ct.zMax) errors.push(`livery: race number z ${(nf.zCentre - halfW).toFixed(2)}..${(nf.zCentre + halfW).toFixed(2)} leaves its field ${ct.zMin}..${ct.zMax}`);
+    if (expect?.proxy && expect?.stations && expect?.spec) {
+      const { spec, stations, proxy } = expect;
+      if (ct.top > proxy.deckBodyY - 0.10) errors.push(`livery: clear topside top ${ct.top.toFixed(3)} leaves < 0.10 m under the deck ${proxy.deckBodyY.toFixed(3)} for the band`);
+      const z0 = nf.zCentre - halfW + spec.lcgFromTransom;
+      const z1 = nf.zCentre + halfW + spec.lcgFromTransom;
+      let chine = -Infinity;
+      for (const st of stations) if (st.z >= z0 - 0.5 && st.z <= z1 + 0.5) chine = Math.max(chine, st.chineY - spec.vcgAboveKeel);
+      if (Number.isFinite(chine) && bottom < chine + margin) errors.push(`livery: race number bottom ${bottom.toFixed(3)} is below the proxy chine ${chine.toFixed(3)} + ${margin}`);
+    }
+  }
+  return errors;
+}
+
+/**
+ * Parts hanging below the hull bottom at the transom (a warning, not a failure: parts own the fix). A slab of
+ * parts vertices in the transom plane must not reach under the hull's own transom outline at the same x.
+ */
+export function transomOverhangWarnings(lod0, hull) {
+  const warnings = [];
+  if (!lod0 || !hull) return warnings;
+  const hb = bounds(hull);
+  const zT = hb.min[2];
+  // lower convex envelope of the transom outline in (|x|, y): the V bottom rises with |x|; strake notches
+  // (≤ 3 cm) only make the envelope slightly conservative, hence the 3 cm threshold below
+  const pts = hb.points.filter((p) => Math.abs(p[2] - zT) <= 0.01).map((p) => [Math.abs(p[0]), p[1]]).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const lower = [];
+  for (const p of pts) {
+    while (lower.length >= 2) {
+      const [o, a] = [lower[lower.length - 2], lower[lower.length - 1]];
+      if ((a[0] - o[0]) * (p[1] - o[1]) - (a[1] - o[1]) * (p[0] - o[0]) <= 0) lower.pop();
+      else break;
+    }
+    lower.push(p);
+  }
+  const floorAt = (ax) => {
+    if (lower.length < 2 || ax > lower[lower.length - 1][0]) return undefined;
+    for (let i = 1; i < lower.length; i++) {
+      if (ax <= lower[i][0]) {
+        const [a, b] = [lower[i - 1], lower[i]];
+        const t = b[0] > a[0] ? (ax - a[0]) / (b[0] - a[0]) : 0;
+        return a[1] + (b[1] - a[1]) * t;
+      }
+    }
+    return undefined;
+  };
+  let worst = null;
+  const walk = (n) => {
+    if (n.getMesh() && n !== hull) {
+      for (const prim of n.getMesh().listPrimitives()) {
+        for (const p of primitiveTriangles(n, prim).positions) {
+          if (p[2] < zT - 0.03 || p[2] > zT + 0.003) continue;
+          const floor = floorAt(Math.abs(p[0]));
+          if (floor === undefined) continue;
+          const below = floor - p[1];
+          if (below > 0.03 && (!worst || below > worst.below)) worst = { below, x: p[0], y: p[1], floor, node: n.getName() };
+        }
+      }
+    }
+    n.listChildren().forEach(walk);
+  };
+  lod0.listChildren().forEach(walk);
+  if (worst) {
+    warnings.push(`parts: '${worst.node}' reaches ${worst.below.toFixed(3)} m below the hull transom bottom (x ${worst.x.toFixed(3)}, y ${worst.y.toFixed(3)} vs hull ${worst.floor.toFixed(3)}, body frame)`);
+  }
+  return warnings;
+}
+
+/**
  * Hero parts (root extras `partsVersion`, scripts/blender/parts/manifest.json): the runtime spins props
  * and turns the wheel, dial, levers and outboards WITHOUT node transforms (identity rule), so every
  * animated node must carry its pivot + axis in the body frame, and LOD0 must have a prop per outboard
@@ -464,6 +554,17 @@ export function checkDocument(document, contract, opts = {}) {
   }
 
   if (rx.partsVersion !== undefined) errors.push(...partsErrors(byLevel.get(0)));
+  errors.push(...liveryErrors(document, opts.expect));
+  const lod0 = byLevel.get(0);
+  if (lod0) {
+    const hull0 = [];
+    const w0 = (n) => {
+      if (n.getMesh() && (n.getExtras() ?? {}).foamTarget === true) hull0.push(n);
+      n.listChildren().forEach(w0);
+    };
+    lod0.listChildren().forEach(w0);
+    if (hull0.length === 1) warnings.push(...transomOverhangWarnings(lod0, hull0[0]));
+  }
 
   // ── materials + textures ──────────────────────────────────────────────
   stats.materials = usedMaterials.size;

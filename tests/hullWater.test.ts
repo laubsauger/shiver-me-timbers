@@ -398,26 +398,37 @@ describe('total over SO(3) with contact (proposed V102)', () => {
   ] as const) {
     it(`a 360° ${name} sweep at the waterline gives a finite, continuous force and torque`, () => {
       const hw = new HullWater(hull, { viscous: false });
-      const F: Vec3[] = [];
-      const T: Vec3[] = [];
-      for (let deg = 0; deg <= 360; deg += 0.5) {
-        const s = st([0, 0, 0], quatFromAxisAngle([axis[0], axis[1], axis[2]], (deg * Math.PI) / 180));
-        hw.samplePatch(FLAT, s, DT);
-        hw.evaluate(s, DT);
-        expect(Number.isFinite(hw.load.force[1] + hw.load.torque[0] + hw.load.torque[2])).toBe(true);
-        F.push([...hw.load.force] as Vec3);
-        T.push([...hw.load.torque] as Vec3);
-      }
+      const sweep = (step: number): { F: Vec3[]; T: Vec3[]; jumpF: number; jumpT: number } => {
+        const F: Vec3[] = [];
+        const T: Vec3[] = [];
+        for (let i = 0; i * step <= 360 + 1e-9; i++) {
+          const s = st([0, 0, 0], quatFromAxisAngle([axis[0], axis[1], axis[2]], (i * step * Math.PI) / 180));
+          hw.samplePatch(FLAT, s, DT);
+          hw.evaluate(s, DT);
+          expect(Number.isFinite(hw.load.force[1] + hw.load.torque[0] + hw.load.torque[2])).toBe(true);
+          F.push([...hw.load.force] as Vec3);
+          T.push([...hw.load.torque] as Vec3);
+        }
+        let jumpF = 0;
+        let jumpT = 0;
+        for (let i = 1; i < F.length; i++) {
+          jumpF = Math.max(jumpF, Math.hypot(F[i][0] - F[i - 1][0], F[i][1] - F[i - 1][1], F[i][2] - F[i - 1][2]));
+          jumpT = Math.max(jumpT, Math.hypot(T[i][0] - T[i - 1][0], T[i][1] - T[i - 1][1], T[i][2] - T[i - 1][2]));
+        }
+        return { F, T, jumpF, jumpT };
+      };
       const range = (arr: Vec3[]): number => Math.max(...arr.map((v) => Math.hypot(...v)));
-      let jumpF = 0;
-      let jumpT = 0;
-      for (let i = 1; i < F.length; i++) {
-        jumpF = Math.max(jumpF, Math.hypot(F[i][0] - F[i - 1][0], F[i][1] - F[i - 1][1], F[i][2] - F[i - 1][2]));
-        jumpT = Math.max(jumpT, Math.hypot(T[i][0] - T[i - 1][0], T[i][1] - T[i - 1][1], T[i][2] - T[i - 1][2]));
-      }
-      expect(jumpF / range(F)).toBeLessThan(0.05);
-      expect(jumpT / range(T)).toBeLessThan(0.05);
+      const a = sweep(0.5);
+      const b = sweep(0.25);
+      // small steps, and CONTINUOUS: a real step in the load does not shrink with the angle step, a steep but continuous
+      // one halves (the flat deck lid of the 1.30 m hull crossing the surface inverted at 184° pitch is 5.1% of the range
+      // per 0.5°, 2.6% per 0.25° — steep, not a jump)
+      expect(a.jumpF / range(a.F)).toBeLessThan(0.08);
+      expect(a.jumpT / range(a.T)).toBeLessThan(0.08);
+      expect(b.jumpF / a.jumpF, 'force: largest jump halves with the step').toBeLessThan(0.6);
+      expect(b.jumpT / a.jumpT, 'torque: largest jump halves with the step').toBeLessThan(0.6);
       // 0° and 360° are the same pose
+      const F = a.F;
       expect(Math.hypot(F[0][0] - F[F.length - 1][0], F[0][1] - F[F.length - 1][1], F[0][2] - F[F.length - 1][2])).toBeLessThan(1e-6 * range(F));
     });
   }

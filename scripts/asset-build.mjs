@@ -4,7 +4,7 @@
  * → assets/models/<name>.glb. Deterministic and re-runnable; every step fails loud.
  * docs/speedboat/asset-pipeline.md has the full command reference.
  *
- *   node scripts/asset-build.mjs [--name speedboat_pipeline_test] [--kind player|npc]
+ *   node scripts/asset-build.mjs [--pipeline-test] [--kind player|npc]
  *        [--bake-size 1024] [--ao-samples 16] [--threads 4] [--max-texture 1024]
  *        [--work <dir>] [--keep] [--blender <path>] [--ktx-bin <dir>]
  *        [--parts <manifest.json> | --no-parts] [--blend <scene.blend>]
@@ -12,8 +12,8 @@
  * --parts (default scripts/blender/parts/manifest.json) builds the hero parts onto the hull:
  * outboards, props, bracket, arch, windscreen, cockpit, deck hardware, salvage dressing.
  *
- * Only the pipeline-test builder exists today (scripts/blender/build_pipeline_test.py); the hero
- * builder will take the same flags and slot into BUILDERS below.
+ * Default: the SB-12 hero hull (scripts/blender/hull/, docs/speedboat/hull-log.md) → speedboat_hero.glb.
+ * --pipeline-test builds the stand-in lofted hull instead → speedboat_pipeline_test.glb.
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -21,18 +21,21 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } fr
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PropertyType } from '@gltf-transform/core';
-import { EXTMeshoptCompression } from '@gltf-transform/extensions';
+import { PropertyType, TextureInfo } from '@gltf-transform/core';
+import { EXTMeshoptCompression, KHRMaterialsClearcoat } from '@gltf-transform/extensions';
 import { dedup, prune, quantize, reorder } from '@gltf-transform/functions';
 import { MeshoptEncoder } from 'meshoptimizer';
 import { checkDocument, createIO, loadContract } from './blender/checkGlb.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const BUILDERS = { speedboat_pipeline_test: 'scripts/blender/build_pipeline_test.py' };
+const BUILDERS = {
+  speedboat_hero: { script: 'scripts/blender/build_pipeline_test.py', hullKind: 'hero' },
+  speedboat_pipeline_test: { script: 'scripts/blender/build_pipeline_test.py', hullKind: 'test' },
+};
 
 function parseArgs(argv) {
   const out = {
-    name: 'speedboat_pipeline_test',
+    name: 'speedboat_hero',
     kind: 'player',
     bakeSize: 1024,
     aoSamples: 16,
@@ -55,6 +58,7 @@ function parseArgs(argv) {
       return v;
     };
     if (a === '--name') out.name = next();
+    else if (a === '--pipeline-test') out.name = 'speedboat_pipeline_test';
     else if (a === '--kind') out.kind = next();
     else if (a === '--bake-size') out.bakeSize = Number(next());
     else if (a === '--ao-samples') out.aoSamples = Number(next());
@@ -93,7 +97,8 @@ const sha = (path) => createHash('sha256').update(readFileSync(path)).digest('he
 
 async function check(io, contract, path, stage, expect) {
   const doc = await io.read(path);
-  const { errors, stats } = checkDocument(doc, contract, { stage, expect });
+  const { errors, warnings, stats } = checkDocument(doc, contract, { stage, expect });
+  for (const w of warnings) console.warn(`[check] warn: ${w}`);
   console.log(`[check] ${stage}: tris/LOD ${stats.tris.join(' / ')}, draws/LOD ${stats.drawsPerLod.join(' / ')}, materials ${stats.materials}, textures ${stats.textures}`);
   for (const e of errors) console.error(`[check] FAIL: ${e}`);
   if (errors.length > 0) throw new Error(`${path}: ${errors.length} convention violation(s) at stage '${stage}'`);
@@ -104,12 +109,43 @@ async function check(io, contract, path, stage, expect) {
  * gelcoat's baseColor alpha is a livery MASK, linked in Blender only so the channel survives
  * export), and a clearcoat extension with factor 0 is noise the runtime would have to ignore.
  */
-function normalise(document, contract) {
+function normalise(document, contract, work, hullKind) {
   for (const mat of document.getRoot().listMaterials()) {
     const slot = contract.slots[mat.getName()];
     if (slot) mat.setAlphaMode(slot.alphaMode);
     const coat = mat.getExtension('KHR_materials_clearcoat');
     if (coat && coat.getClearcoatFactor() === 0 && !coat.getClearcoatTexture()) mat.setExtension('KHR_materials_clearcoat', null);
+  }
+  if (hullKind === 'hero') attachHullTextures(document, work);
+}
+
+/**
+ * Hero hull: the 4th texture per hull slot, which glTF has no generic slot for (pilot-build.mjs precedent):
+ * M_Gelcoat's livery/wear mask as KHR_materials_clearcoat.clearcoatTexture, M_NonSlip's tiling non-skid
+ * normal as clearcoatNormalTexture (factor 0). Channel semantics ride in material extras
+ * (scripts/blender/hull/hull_textures.py writes hull_textures.json; slotMaterials.ts reads them).
+ */
+function attachHullTextures(document, work) {
+  const sidecar = join(work, 'hull_textures.json');
+  if (!existsSync(sidecar)) return;
+  const spec = JSON.parse(readFileSync(sidecar, 'utf8'));
+  const clearcoat = document.createExtension(KHRMaterialsClearcoat);
+  const png = (file) => {
+    const path = join(work, file);
+    if (!existsSync(path)) throw new Error(`hull texture ${path} missing (hull_textures.json names it)`);
+    return document.createTexture(file.replace(/\.png$/, '')).setImage(new Uint8Array(readFileSync(path))).setMimeType('image/png');
+  };
+  for (const mat of document.getRoot().listMaterials()) {
+    const s = spec[mat.getName()];
+    if (!s) continue;
+    const cc = clearcoat.createClearcoat().setClearcoatFactor(s.clearcoatFactor ?? 0).setClearcoatRoughnessFactor(s.clearcoatRoughness ?? 0);
+    if (s.clearcoatTexture) cc.setClearcoatTexture(png(s.clearcoatTexture));
+    if (s.clearcoatNormalTexture) {
+      cc.setClearcoatNormalTexture(png(s.clearcoatNormalTexture));
+      cc.getClearcoatNormalTextureInfo().setWrapS(TextureInfo.WrapMode.REPEAT).setWrapT(TextureInfo.WrapMode.REPEAT);
+    }
+    mat.setExtension('KHR_materials_clearcoat', cc);
+    mat.setExtras({ ...(mat.getExtras() ?? {}), ...(s.extras ?? {}) });
   }
 }
 
@@ -135,7 +171,8 @@ async function main() {
   const expect = JSON.parse(readFileSync(hullJson, 'utf8'));
 
   run('2/6 Blender headless build + bake + export', opt.blender, [
-    '-b', '--factory-startup', '--python-exit-code', '1', '-P', BUILDERS[opt.name], '--',
+    '-b', '--factory-startup', '--python-exit-code', '1', '-P', BUILDERS[opt.name].script, '--',
+    '--hull-kind', BUILDERS[opt.name].hullKind,
     '--hull', hullJson, '--out', raw, '--work', work, '--kind', opt.kind,
     '--bake-size', String(opt.bakeSize), '--ao-samples', String(opt.aoSamples), '--threads', String(opt.threads),
     '--name', opt.name,
@@ -150,7 +187,7 @@ async function main() {
 
   console.log('\n[asset-build] 4/6 normalise + dedup + prune');
   const doc = await io.read(raw);
-  normalise(doc, contract);
+  normalise(doc, contract, work, BUILDERS[opt.name].hullKind);
   // materials are NOT deduplicated: two slots with identical factors are still two slots (the
   // runtime factory maps by name), and merging them silently deletes a slot from the contract
   const slotsBefore = doc.getRoot().listMaterials().map((m) => m.getName()).sort().join(',');
@@ -164,7 +201,7 @@ async function main() {
     gltfTransform, 'resize', step(1), step(2), '--width', String(opt.maxTexture), '--height', String(opt.maxTexture),
   ], env);
   run('5/6 UASTC', process.execPath, [
-    gltfTransform, 'uastc', step(2), step(3), '--slots', '{normalTexture,occlusionTexture,metallicRoughnessTexture}',
+    gltfTransform, 'uastc', step(2), step(3), '--slots', '{normalTexture,occlusionTexture,metallicRoughnessTexture,clearcoatTexture,clearcoatNormalTexture}',
     '--level', '2', '--zstd', '18', '--jobs', '2',
   ], env);
   run('5/6 ETC1S', process.execPath, [

@@ -17,7 +17,9 @@ export {
   type SlotName,
 } from './contract';
 export { createSlotMaterial, type BoatVariant, type SlotMaterialOptions } from './slotMaterials';
+export { FLEET_LIVERIES, HERO_LIVERY, numberGlyphs, resolveLivery, type BoatLivery, type FleetLiveryName } from './livery';
 export {
+  HERO_BOAT_URL,
   PIPELINE_TEST_BOAT_URL,
   assetFromGltf,
   createBoatAssetLoader,

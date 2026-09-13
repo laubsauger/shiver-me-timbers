@@ -219,7 +219,7 @@ describe('straight running and turning (T179 acceptance)', () => {
   const third = [3, 5, 8, 10].map((cv) => ({ cv, r: turn(cv, 1 / 3) }));
   // HALF LOCK = 15° at the drives (lock 30°, deepV12.hull.json lowerUnit.maxSteerDeg)
   const half3 = turn(3, 0.5);
-  const halfSteady = [4, 5, 6].map((cv) => ({ cv, r: turn(cv, 0.5) }));
+  const halfSteady = [{ cv: 3, r: half3 }, ...[4, 5, 6].map((cv) => ({ cv, r: turn(cv, 0.5) }))];
 
   it('turns: steady diameter within full-scale planing-craft data (8–40 L) at 10° of drive, growing with speed', () => {
     // SOURCES: Sadati, Zeraatgar & Moghaddas, Proc IMechE M 236 (2022) full-scale trials — semi-planing
@@ -348,20 +348,51 @@ describe('straight running and turning (T179 acceptance)', () => {
     expect(Math.abs(a.speedRatio - b.speedRatio) / b.speedRatio).toBeLessThan(0.02);
   });
 
-  it('half lock (15° at the drives) is a steady turn at C_v 4–6: no capsize, no spin-out, inward heel', () => {
+  it('half lock (15° at the drives) is a steady turn at C_v 3–6: no capsize, no spin-out, inward heel, never past 45° on the way in', () => {
+    // WHY: 15° of drive at 27–45 kn is ordinary hard helm, not a crash input. `departS` < 0 also means the roll-in
+    // transient never passed 45°. On the 1.674 m hull C_v 3 did (44.8° then over, 3.95 s in); the 1.30 m hull's lower
+    // VCG and the chine-wet added mass under the heeled section's LOW chine (Payne 1994, HullWater.chineWetGrowth) hold
+    // it to 22°. Mutation: chineWetAddedMass false ⇒ C_v 6 settles into a ±8° roll oscillation about 27° of heel.
     for (const { cv, r } of halfSteady) {
       expect(r.departS, `C_v ${cv}`).toBeLessThan(0);
       expect(r.heelInDeg, `C_v ${cv}`).toBeGreaterThan(3);
       expect(r.heelAmpDeg, `C_v ${cv}: steady, not an oscillation`).toBeLessThan(3);
       expect(r.maxDriftDeg, `C_v ${cv}`).toBeLessThan(20);
     }
+    const off = turn(6, 0.5, { chineWetAddedMass: false });
+    expect(off.departS >= 0 || off.heelAmpDeg >= 3, `mutation: no chine-wet growth (amp ${off.heelAmpDeg.toFixed(1)}°)`).toBe(true);
+  });
+
+  it('chine-wet added mass acts on a HEELED section only: upright the load is bit-identical with it off, heeled 25° the sinking chine carries more', () => {
+    // WHY: the upright section is the one validated against Savitsky (trim within 1°); Payne's symmetric chine-wet growth
+    // on top of it moved the C_v 3.1 trim 1.21° off, so only the difference between the two chines' immersion is added.
+    // Heeled, the low chine goes under while the high one lifts: that half must gain added mass (lift, and with it roll
+    // restoring and damping), which a single section cap on both halves could not give.
+    const U = 4 * Math.sqrt(G * B);
+    const probe = (heelDeg: number, params: Partial<HullWaterParams>): { F: Vec3; T: Vec3; A: number } => {
+      const hw = new HullWater(hull, params);
+      const q = quatMul([-Math.sin(0.03), 0, 0, Math.cos(0.03)], quatFromAxisAngle([0, 0, 1], (heelDeg * Math.PI) / 180));
+      const x = st([0, 0.45, 0], q, [0, 0, U]);
+      hw.samplePatch(FLAT, x, DT);
+      hw.evaluate(x, DT / 2);
+      hw.evaluate(x, DT / 2);
+      return { F: [...hw.load.force] as Vec3, T: invRotateVec(q, hw.load.torque), A: hw.load.addedMass[1] };
+    };
+    const upOn = probe(0, {});
+    const upOff = probe(0, { chineWetAddedMass: false });
+    expect(upOn.F).toEqual(upOff.F);
+    expect(upOn.T).toEqual(upOff.T);
+    const on = probe(25, {});
+    const off = probe(25, { chineWetAddedMass: false });
+    expect(on.A, 'heave added mass of the heeled section').toBeGreaterThan(off.A * 1.02);
+    expect(on.F[1], 'lift').toBeGreaterThan(off.F[1]);
   });
 
   it('full lock is survivable at C_v 3 and a readable hook above it: heel or slip past 45° no sooner than the helm reaches lock (1 s)', () => {
     // WHY: an offshore boat CAN hook or blow over with excessive helm at speed — a legit crash mode — but it must
     // build (heel rising, chine catching) rather than flip before the drives even reach lock. Threshold measured
     // with the 30°/s helm: steady at C_v 3 (with a transient past 45°, see the known limit below), departure
-    // 1.2–1.7 s after the helm starts from C_v 5 up.
+    // 1.2–2.0 s after the helm starts from C_v 4 up (T179 part 3).
     const c3 = turn(3, 1, {}, 2, 20);
     expect(Math.abs(c3.heelInDeg), 'C_v 3 settles').toBeLessThan(40);
     expect(c3.heelAmpDeg, 'C_v 3 settles').toBeLessThan(3);
@@ -372,14 +403,15 @@ describe('straight running and turning (T179 acceptance)', () => {
     }
   });
 
-  it.fails('KNOWN LIMIT (reported, T179): half lock at C_v ≥ 7 hooks, and at C_v 3 (half and full lock) she rolls past 45° on the way in', () => {
-    // Acceptance asked for both. Linearised about the damped C_v 8 half-lock turn the model is STABLE (heel 12°),
-    // but the gearcases' entry side force below the CG kicks the heel past ~22° before the stern slides, the
-    // inner panel of the 24° V goes flat, the sway grip collapses (sway added mass 3000 → 150 kg per heave cycle)
-    // and a heave–roll limit cycle ends in a hook. A roll damper of +15 kN·m·s/rad removes it — the size of the
-    // missing damping. Candidates not in the proxy: spray strakes and chine flats (renderOnly), spray
-    // reattachment on the side walls (Marleaux et al. 2024). Flip to `it` to read the numbers.
-    expect(half3.minUpY, 'C_v 3 half lock transient').toBeGreaterThan(Math.cos(Math.PI / 4));
+  it.fails('KNOWN LIMIT (reported, T179 part 3): half lock at C_v ≥ 7 hooks, and at C_v 3 full lock she rolls past 45° on the way in', () => {
+    // Acceptance asked for both. Measured (docs/speedboat/physics-log.md, T179 part 3): half lock departs 1.4–4.0 s after
+    // the helm starts at C_v 7–10 (heel past 22° within 0.5–0.6 s, from the gearcases' entry side force below the CG);
+    // full lock at C_v 3 passes 45° 1.3 s in (1.30 m hull, chine-wet added mass on). The hypothesis that spray strakes and chine flats supply the missing
+    // ~15 kN·m·s/rad of roll damping is NOT supported: Clement (DTMB 1818, 1964) found no significant lift from spray
+    // strips (and excludes deadrise ≥ 20°); a 6 cm flat as a 2D+t plate adds ≈ 0.3 kN·m·s/rad. Brown & Klosinski's
+    // roll damping (CG-D-04-95, hulls with chine spray strips, valid C_v 1.5–4) is BELOW this model's there (10 vs 25
+    // kN·m·s/rad at C_v 3); only its extrapolation past C_v 6 exceeds the model — adding ½ of it cures half lock at every
+    // speed (scratch), a decision with no data behind it. Flip to `it` to read the numbers.
     for (const cv of [8, 10]) {
       const r = turn(cv, 0.5, {}, 2, 20);
       expect(r.departS, `C_v ${cv} half lock`).toBeLessThan(0);
@@ -417,6 +449,45 @@ describe('drives: thrust, gearcase foil, ventilation, air', () => {
     hw.evaluate(s, DT / 2);
     expect(hw.gearcaseImmersion[1]).toBe(1);
     expect(Math.abs(hw.foilSideForce)).toBeGreaterThan(10_000);
+  });
+
+  it('publishes each drive on the contact result: its thrust, prop point and line are the ones the load was built from (V77, one thrust expression)', () => {
+    // WHY: the prop wash, rooster tail and audio need per-drive thrust at the prop. A consumer that re-derives it from
+    // HullDrive + STANDIN_THRUST is a second copy of the thrust law that drifts the day the engine model lands (S2).
+    // Property: with the foils off the drive load IS Σ driveThrust·driveDir at driveProp (force and moment), and the
+    // published numbers follow steer, reverse gear and immersion.
+    const hw = new HullWater(hull, { driveFoil: false });
+    const q = quatFromAxisAngle([0, 1, 0], 0.4);
+    const s = st([3, 0.35, -2], quatMul(q, [-Math.sin(0.02), 0, 0, Math.cos(0.02)]), rotateVec(q, [0, 0, 15]), [0, 0.1, 0]);
+    for (const [steer, thr] of [[0.2, 0.8], [-0.1, -0.3], [0, 0]] as const) {
+      hw.setControls(steer, thr);
+      hw.samplePatch(FLAT, s, DT);
+      hw.evaluate(s, DT / 2);
+      const F: Vec3 = [0, 0, 0];
+      const T: Vec3 = [0, 0, 0];
+      let sum = 0;
+      for (let k = 0; k < hull.drives.length; k++) {
+        const t = hw.driveThrust[k];
+        const d = [hw.driveDir[3 * k], hw.driveDir[3 * k + 1], hw.driveDir[3 * k + 2]];
+        const r = [0, 1, 2].map((c) => hw.driveProp[3 * k + c] - s.position[c]);
+        expect(Math.hypot(d[0], d[1], d[2])).toBeCloseTo(1, 12);
+        // the line is body +z yawed by the steer angle
+        const db = invRotateVec(s.quaternion, d as Vec3);
+        expect(Math.atan2(db[0], db[2])).toBeCloseTo(steer, 12);
+        expect(hw.driveThrustFactor[k]).toBeCloseTo(hw.driveImmersion[k] ** 1.5, 12);
+        expect(Math.sign(t)).toBe(Math.sign(thr));
+        for (let c = 0; c < 3; c++) F[c] += t * d[c];
+        T[0] += r[1] * t * d[2] - r[2] * t * d[1];
+        T[1] += r[2] * t * d[0] - r[0] * t * d[2];
+        T[2] += r[0] * t * d[1] - r[1] * t * d[0];
+        sum += t;
+      }
+      expect(sum).toBeCloseTo(hw.thrust, 6);
+      for (let c = 0; c < 3; c++) {
+        expect(hw.driveForce[c]).toBeCloseTo(F[c], 6);
+        expect(hw.driveTorque[c]).toBeCloseTo(T[c], 5);
+      }
+    }
   });
 
   it('side force falls smoothly as the gearcase is lifted (immersed span and aspect ratio together), trimmed out to dry', () => {
