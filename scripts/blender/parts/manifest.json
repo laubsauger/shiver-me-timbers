@@ -1,0 +1,387 @@
+{
+  "name": "SB-12 hero parts",
+  "version": 1,
+  "about": "Parts manifest read by scripts/blender/parts/build_parts.py (called from build_pipeline_test.py --parts). Every part hangs off a named socket derived from the hull JSON (anchors.py); numbers here are the ones the hull JSON does not carry yet, each with its source. docs/speedboat/parts-log.md has the self-critique per part.",
+  "anchorsNotInHullJson": {
+    "cockpitWell": {
+      "aftFromBow": 0.8,
+      "fwdFromBow": 0.55,
+      "width": 1.6,
+      "soleBelowSheer": 0.75,
+      "source": "user pick 2026-09-13: cockpit at 55-80 % LOA from the bow (Apache 42, REFERENCES a1); width/sole STYLE-SPEC §2. Grown to contain the helm chain if the JSON seat sits outside it"
+    },
+    "helm": {
+      "eyeAboveSheer": 0.5,
+      "eyeAheadOfSeat": 0.45,
+      "dashAftOfSeat": 0.95,
+      "dashFwdOfSeat": 1.4,
+      "dashTopBelowSheer": 0.05,
+      "screenBaseCentreOfSeat": 1.4,
+      "screenBaseSideOfSeat": 0.8,
+      "screenHeight": 0.4,
+      "screenRakeDeg": 55,
+      "source": "STYLE-SPEC §2 ergonomics chain (eye sheer+0.50, eye 0.90 behind the screen base, dash 5.55-6.00, screen 0.40 tall raked 35°) re-expressed relative to the JSON seat so the helm follows renderOnly.cockpit.seats. Rake read as 35° FROM VERTICAL (55° from horizontal): at 35° from horizontal the top edge lands 0.33 m from the eye and fills the POV, unlike concept 05"
+    },
+    "antenna": {
+      "length": 2.4,
+      "source": "STYLE-SPEC §2 roll arch"
+    },
+    "outboard": {
+      "shaftLength": 0.762,
+      "cavPlateAboveProp": 0.22,
+      "cowlWidth": 0.575,
+      "cowlLength": 0.86,
+      "cowlHeight": 0.98,
+      "source": "Mercury Racing 450R class (REFERENCES d6): 30 in shaft, 26 in minimum centre spacing -> cowl <= 0.6 m wide"
+    },
+    "foredeckHatchFromBow": 0.15
+  },
+  "slots": {
+    "M_Carbon": {
+      "size": 2048,
+      "looks": "cowl paint, lower-unit paint, carbon dash, vents",
+      "ormScale": 0.5
+    },
+    "M_Metal": {
+      "size": 2048,
+      "looks": "trim sheet: stainless, aluminium, cast gearcase, props, rams, rubber rub rail, antenna",
+      "ormScale": 0.5
+    },
+    "M_Cockpit": {
+      "size": 2048,
+      "looks": "seat vinyl, harness, gauges, tablet, radio, governor, levers, jerry cans, cases, straps, rope"
+    },
+    "M_Perspex": {
+      "size": 1024,
+      "looks": "windscreen, gauge glass, nav lens",
+      "ormScale": 0.5,
+      "baseScale": 0.5
+    },
+    "note": "ormScale/baseScale downsample the composited map (2×2 box, deterministic) after the bake: exterior roughness/AO holds at half res; GPU texture memory is shared by all 8 boats and the hero hull + pilot still have to fit (browser sync 2026-09-13: 56 MB for this set)"
+  },
+  "texelDensity": {
+    "exterior": 512,
+    "cockpit": 1024,
+    "low": 256,
+    "note": "tier RATIOS are exact (1 : 2 : 0.5); absolute px/m is what the 2048² atlas fits and is printed per slot. Need: chase cam (7.5 m, 60° vFOV, 1080p) ≈ 125 px/m on screen → exterior ≥ 256; cockpit cam at 0.5–1 m ≈ 700–1400 px/m → cockpit tier carries fine detail in normal/roughness. 'low' = big simple surfaces only seen from outside (rub rail, bracket plates)"
+  },
+  "budget": {
+    "note": "player LOD0 <= 120k TOTAL (assetContract). Proposed split: hull 40k / parts 64k / pilot 14k / 2k margin; LOD1 hull 7k / parts 9.5k / pilot 2.5k / 1k; LOD2 hull 1.8k / parts 3k / pilot 0.8k / 0.4k",
+    "partsTris": [
+      64000,
+      9500,
+      3000
+    ]
+  },
+  "parts": [
+    {
+      "id": "Outboard_P",
+      "module": "outboard",
+      "args": {
+        "engine": "P"
+      },
+      "socket": "engine.P.mount",
+      "anim": "trimTilt+steer",
+      "lodTris": [
+        null,
+        1500,
+        500
+      ],
+      "nodes": [
+        "Outboard_P",
+        "Drives",
+        "Parts"
+      ]
+    },
+    {
+      "id": "Outboard_C",
+      "module": "outboard",
+      "args": {
+        "engine": "C"
+      },
+      "socket": "engine.C.mount",
+      "anim": "trimTilt+steer",
+      "lodTris": [
+        null,
+        1500,
+        500
+      ],
+      "nodes": [
+        "Outboard_C",
+        "Drives",
+        "Parts"
+      ]
+    },
+    {
+      "id": "Outboard_S",
+      "module": "outboard",
+      "args": {
+        "engine": "S"
+      },
+      "socket": "engine.S.mount",
+      "anim": "trimTilt+steer",
+      "lodTris": [
+        null,
+        1500,
+        500
+      ],
+      "nodes": [
+        "Outboard_S",
+        "Drives",
+        "Parts"
+      ]
+    },
+    {
+      "id": "Prop_P",
+      "module": "prop",
+      "args": {
+        "engine": "P"
+      },
+      "socket": "engine.P.prop",
+      "anim": "propSpin",
+      "lodTris": [
+        null,
+        200,
+        60
+      ],
+      "nodes": [
+        "Prop_P",
+        "Drives",
+        "Parts"
+      ]
+    },
+    {
+      "id": "Prop_C",
+      "module": "prop",
+      "args": {
+        "engine": "C"
+      },
+      "socket": "engine.C.prop",
+      "anim": "propSpin",
+      "lodTris": [
+        null,
+        200,
+        60
+      ],
+      "nodes": [
+        "Prop_C",
+        "Drives",
+        "Parts"
+      ]
+    },
+    {
+      "id": "Prop_S",
+      "module": "prop",
+      "args": {
+        "engine": "S"
+      },
+      "socket": "engine.S.prop",
+      "anim": "propSpin",
+      "lodTris": [
+        null,
+        200,
+        60
+      ],
+      "nodes": [
+        "Prop_S",
+        "Drives",
+        "Parts"
+      ]
+    },
+    {
+      "id": "Bracket",
+      "module": "bracket",
+      "socket": "transom",
+      "lodTris": [
+        null,
+        600,
+        200
+      ],
+      "nodes": [
+        "Parts",
+        "Parts",
+        "Parts"
+      ]
+    },
+    {
+      "id": "RollArch",
+      "module": "roll_arch",
+      "socket": "arch",
+      "lodTris": [
+        null,
+        550,
+        160
+      ],
+      "nodes": [
+        "Parts",
+        "Parts",
+        "Parts"
+      ]
+    },
+    {
+      "id": "Windscreen",
+      "module": "windscreen",
+      "socket": "windscreen",
+      "lodTris": [
+        null,
+        400,
+        120
+      ],
+      "nodes": [
+        "Parts",
+        "Parts",
+        "Parts"
+      ]
+    },
+    {
+      "id": "Dash",
+      "module": "dash",
+      "socket": "dash",
+      "lodTris": [
+        null,
+        350,
+        60
+      ],
+      "nodes": [
+        "Parts",
+        "Parts",
+        "Parts"
+      ]
+    },
+    {
+      "id": "Governor",
+      "module": "governor",
+      "socket": "dash",
+      "lodTris": [
+        null,
+        80,
+        null
+      ],
+      "nodes": [
+        "Parts",
+        "Parts",
+        "Parts"
+      ]
+    },
+    {
+      "id": "GovernorDial",
+      "module": "governor_dial",
+      "socket": "dash",
+      "anim": "governorDial",
+      "lodTris": [
+        null,
+        30,
+        null
+      ],
+      "nodes": [
+        "GovernorDial",
+        "Parts",
+        "Parts"
+      ]
+    },
+    {
+      "id": "Throttle",
+      "module": "throttle",
+      "socket": "dash",
+      "anim": "throttle",
+      "lodTris": [
+        null,
+        60,
+        null
+      ],
+      "nodes": [
+        "Throttle",
+        "Parts",
+        "Parts"
+      ],
+      "args": {
+        "base": false
+      }
+    },
+    {
+      "id": "ThrottleBase",
+      "module": "throttle",
+      "args": {
+        "base": true
+      },
+      "socket": "dash",
+      "lodTris": [
+        null,
+        60,
+        null
+      ],
+      "nodes": [
+        "Parts",
+        "Parts",
+        "Parts"
+      ]
+    },
+    {
+      "id": "Helm",
+      "module": "helm",
+      "socket": "dash",
+      "anim": "wheel",
+      "lodTris": [
+        null,
+        150,
+        40
+      ],
+      "nodes": [
+        "Helm",
+        "Parts",
+        "Parts"
+      ]
+    },
+    {
+      "id": "Seat",
+      "module": "seat",
+      "socket": "seat",
+      "lodTris": [
+        null,
+        400,
+        120
+      ],
+      "nodes": [
+        "Parts",
+        "Parts",
+        "Parts"
+      ]
+    },
+    {
+      "id": "DeckHardware",
+      "module": "deck_hardware",
+      "socket": "sheer",
+      "lodTris": [
+        null,
+        650,
+        160
+      ],
+      "nodes": [
+        "Parts",
+        "Parts",
+        "Parts"
+      ]
+    },
+    {
+      "id": "Salvage",
+      "module": "salvage",
+      "socket": "cockpitWell",
+      "lodTris": [
+        null,
+        450,
+        100
+      ],
+      "nodes": [
+        "Parts",
+        "Parts",
+        "Parts"
+      ]
+    }
+  ],
+  "nodeGroups": {
+    "note": "`nodes` names the GLB node a part joins at LOD0/1/2. Parts sharing a name are joined into one mesh (one primitive per slot) — the draw budget (assetContract drawBudget). Only animated parts keep their own node at LOD0; at LOD1 the outboards and props fold into `Drives` (trim about the common tilt-tube axis, extras carried), at LOD2 everything is `Parts`.",
+    "Drives": {
+      "animRole": "drives"
+    }
+  }
+}

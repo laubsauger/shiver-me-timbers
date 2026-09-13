@@ -1,0 +1,50 @@
+{
+  "name": "speedboat hero asset contract",
+  "version": 1,
+  "about": "ONE contract read by the Blender build (scripts/blender/*.py), the GLB checker (scripts/blender/checkGlb.mjs) and the runtime loader (src/speedboat/assets/). docs/speedboat/asset-pipeline.md explains each rule.",
+  "frame": {
+    "units": "metres",
+    "up": "+Y",
+    "forward": "+Z (bow)",
+    "origin": "CG = the body frame of src/speedboat/hullMesh.ts (hull frame minus CG)",
+    "blender": "Blender (x, y, z) = three (x, -z, y): the bow points to Blender -Y, up is Blender +Z; the glTF exporter's +Y-up conversion does the rest"
+  },
+  "maxMaterials": 7,
+  "maxTexturesPerMaterial": 4,
+  "slots": {
+    "M_Gelcoat": { "alphaMode": "OPAQUE", "surface": "hull topsides + transom gelcoat, clearcoat, livery mask in baseColor alpha" },
+    "M_Antifoul": { "alphaMode": "OPAQUE", "surface": "running bottom up to the chine" },
+    "M_NonSlip": { "alphaMode": "OPAQUE", "surface": "deck walk areas" },
+    "M_Carbon": { "alphaMode": "OPAQUE", "surface": "cowls, dash, spoiler" },
+    "M_Metal": { "alphaMode": "OPAQUE", "surface": "rails, cleats, props, trim tabs" },
+    "M_Perspex": { "alphaMode": "BLEND", "surface": "windscreen / canopy" },
+    "M_Rubber": { "alphaMode": "OPAQUE", "surface": "fenders, rub rail, seals" },
+    "M_Cockpit": { "alphaMode": "OPAQUE", "surface": "instrument panel, seats (hero only)" },
+    "M_Pilot": { "alphaMode": "OPAQUE", "surface": "suit, helmet" }
+  },
+  "assetKinds": {
+    "player": { "triBudget": [120000, 20000, 6000], "drawBudget": [24, 10, 8] },
+    "npc": { "triBudget": [50000, 20000, 6000], "drawBudget": [12, 10, 8] }
+  },
+  "drawBudgetNote": "primitives (draw calls, excluding shadow passes) per LOD for ONE boat: static parts merge into one node per slot; only animated nodes (outboards, props, wheel, dial, throttle levers) stay separate at LOD0, and they fold into merged nodes at LOD1/2 (browser sync 2026-09-13: 72 draws per boat before)",
+  "lod": {
+    "levels": 3,
+    "switchScreenFraction": [0.35, 0.12],
+    "hysteresis": 0.1
+  },
+  "extras": {
+    "root": ["assetKind", "contractVersion", "bowZ", "sternZ", "beam", "keelY", "deckY"],
+    "lodGroup": ["lodLevel"],
+    "mesh": ["lodLevel"],
+    "hull": ["foamTarget", "lodLevel"]
+  },
+  "names": {
+    "lodGroup": "LOD{level}",
+    "hull": "Hull_LOD{level}",
+    "meshSuffix": "_LOD{level}"
+  },
+  "tolerance": {
+    "extrasVsGeometry": 0.02,
+    "weld": 0.00001
+  }
+}

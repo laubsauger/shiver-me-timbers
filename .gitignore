@@ -37,3 +37,5 @@ docs/**/*.mov
 # the CI build — and therefore the deploy — down with it. They are useful
 # locally and worthless to anyone else. Keep them on disk, out of the repo.
 tests/zzScratch*
+docs/speedboat/refs/_local/
+!docs/speedboat/concept/*.png
