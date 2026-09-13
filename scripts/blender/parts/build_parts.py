@@ -44,6 +44,7 @@ class HeroParts:
         self.lods = lods
         self.args = args
         self.parts = []  # (spec, pieces, extras)
+        self.sockets = {}  # §T.192: named body-frame sockets the pilot build and runtime read (root extras partsSockets)
         self.report = {}
         self.only = set(filter(None, os.environ.get('SB_PARTS_ONLY', '').split(',')))
 
@@ -58,6 +59,10 @@ class HeroParts:
             mod = importlib.import_module(spec['module'])
             res = mod.build(self.A, **spec.get('args', {}))
             pieces, extras = res['pieces'], res.get('extras', {})
+            for k, v in (res.get('sockets') or {}).items():
+                if k in self.sockets:
+                    raise SystemExit(f"[parts] socket '{k}' exported twice ({spec['id']})")
+                self.sockets[k] = v
             for i, p in enumerate(pieces):
                 if p.slot not in SLOT_ORDER:
                     raise SystemExit(f"[parts] {spec['id']}/{p.name}: slot {p.slot} is not a parts slot {SLOT_ORDER}")
@@ -171,11 +176,13 @@ class HeroParts:
                 groups[lod].setdefault(node, []).append((ob, extras if node == spec['id'] else {}))
             table[spec['id']] = row
         group_extras = self.manifest.get('nodeGroups', {})
-        drives_src = {}
+        # LOD1 `Drive_<id>` = outboard + prop of ONE engine: it steers and trims about that outboard's own pivots
+        # (§T.192 — the old merged `Drives` node had one centre pivot, so the side cowls would have swung about x = 0)
+        drive_src = {}
         for spec, _, extras in self.parts:
-            if spec['id'] == 'Outboard_C':
-                drives_src = {'trimPivot': extras['trimPivot'], 'trimAxis': extras['trimAxis'],
-                              'steerPivot': extras['steerPivot'], 'steerAxis': extras['steerAxis']}
+            if spec['id'].startswith('Outboard_'):
+                drive_src['Drive_' + spec['id'][len('Outboard_'):]] = {
+                    k: extras[k] for k in ('engine', 'trimPivot', 'trimAxis', 'steerPivot', 'steerAxis')}
         self.report['nodes'] = []
         for lod in range(levels):
             for node, members in groups[lod].items():
@@ -189,9 +196,8 @@ class HeroParts:
                         merged[k] = v
                 for k, v in (group_extras.get(node) or {}).items():
                     merged[k] = v
-                if node == 'Drives':
-                    for k, v in drives_src.items():  # the three tilt tubes are colinear: one trim axis
-                        merged[k] = v
+                for k, v in drive_src.get(node, {}).items():
+                    merged[k] = v
                 if len(members) > 1:
                     merged['mergedParts'] = len(members)
                 self.report['nodes'].append((lod, merged.name, len(merged.data.materials)))
@@ -216,6 +222,7 @@ class HeroParts:
             'partsAnchors': json.dumps(self.A.summary()),
             'partsTris': json.dumps(self.report.get('totals')),
             'partsTexelDensity': json.dumps(self.report.get('texelDensity')),
+            'partsSockets': json.dumps(self.sockets),
         }
 
 

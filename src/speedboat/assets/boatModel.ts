@@ -36,8 +36,17 @@ import {
   type SlotName,
   type TaggableObject,
 } from './contract';
+import { createDriveRig, createPropBlurMaterial, type DriveRig, type DriveState } from './driveRig';
 import type { BoatLivery } from './livery';
-import { createSlotMaterial, type BoatVariant } from './slotMaterials';
+import { createSlotMaterial, type BoatVariant, type DeckEdge } from './slotMaterials';
+import {
+  GAUGE_GLASS_RENDER_ORDER,
+  PERSPEX_RENDER_ORDER,
+  createWaterMaskMaterial,
+  createWaterMaskMesh,
+  readWaterMask,
+  waterMaskGeometry,
+} from './waterMask';
 
 /** the SB-12 hero boat (hero hull + parts) built by `node scripts/asset-build.mjs` */
 export const HERO_BOAT_URL = new URL('../../../assets/models/speedboat_hero.glb', import.meta.url).href;
@@ -79,6 +88,16 @@ export interface BoatInstance {
   currentLevel(): number;
   /** swap every mesh's material, e.g. for a slot debug view; null restores the slot materials */
   overrideMaterials(pick: ((slot: SlotName, mesh: THREE.Mesh) => THREE.Material) | null): void;
+  /**
+   * RENDER (§T.192, USER: "the engines should move when steering … and the propeller rotating"): yaw every drive about
+   * its own swivel tube by the drives' actual steer angle, tilt it about the tilt tube by the trim angle, spin each prop
+   * at its rpm (a blur disc takes over at speed so the blades never strobe). `propRpm[i]` is the prop at the i-th
+   * smallest body x (starboard, centre, port for the SB-12 = `hull.drives` order, deepV12.hull.json `engines`);
+   * `dt` is the frame's seconds (render time: the spin phase is cosmetic, §V3). Nodes stay put when never called.
+   */
+  setDriveState(state: Readonly<DriveState>, dt: number): void;
+  /** the depth-only cap over the cockpit well that keeps the sea out of the hull (waterMask.ts); null without extras */
+  readonly waterMask: THREE.Mesh | null;
 }
 
 export interface BoatAsset {
@@ -87,6 +106,11 @@ export interface BoatAsset {
   readonly slots: readonly SlotName[];
   instantiate(opts: BoatInstanceOptions): BoatInstance;
   dispose(): void;
+}
+
+export interface AssetFromGltfOptions {
+  /** anisotropic filtering for every boat texture (§T.192 "textures look mushy from some angles"); default 1 */
+  anisotropy?: number;
 }
 
 export interface BoatAssetLoader {
@@ -109,6 +133,11 @@ function meshesOf(root: THREE.Object3D): THREE.Mesh[] {
   return out;
 }
 
+/** the glTF node name a mesh came from: the mesh itself, or its Group parent for a multi-primitive node */
+function nodeNameOf(mesh: THREE.Mesh): string {
+  return /_LOD\d+$/.test(mesh.name) ? mesh.name : (mesh.parent?.name ?? mesh.name);
+}
+
 function slotOf(mesh: THREE.Mesh): SlotName {
   const mat = mesh.material as THREE.Material;
   if (Array.isArray(mesh.material) || !isSlotName(mat.name)) {
@@ -122,7 +151,67 @@ const TEXTURE_KEYS = [
   'clearcoatMap', 'clearcoatRoughnessMap', 'clearcoatNormalMap', 'transmissionMap', 'thicknessMap',
 ] as const;
 
-export function assetFromGltf(scene: THREE.Group): BoatAsset {
+/**
+ * §T.192 / §V48: every texture of `root` filters anisotropically over its FULL mip chain (the KTX2 files carry every
+ * level, checker rule 12). WebGPU honours `maxAnisotropy` only when mag, min and mip filters are all linear
+ * (WebGPUTextureUtils.createSampler), so those are forced here too. Call BEFORE the first render — the sampler is
+ * created once per texture. Also for the pilot and course GLBs, which load through their own GLTFLoader:
+ *   applyTextureAnisotropy(gltf.scene, renderer.getMaxAnisotropy())
+ */
+export function applyTextureAnisotropy(root: THREE.Object3D, anisotropy: number): number {
+  const level = Math.max(1, Math.floor(Number.isFinite(anisotropy) ? anisotropy : 1));
+  const seen = new Set<THREE.Texture>();
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    for (const mat of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+      const rec = mat as unknown as Record<string, unknown>;
+      for (const key of TEXTURE_KEYS) {
+        const t = rec[key];
+        if (!(t instanceof THREE.Texture) || seen.has(t)) continue;
+        seen.add(t);
+        const mips = (t as THREE.CompressedTexture).mipmaps?.length ?? 0;
+        if (t.minFilter === THREE.NearestFilter || t.magFilter === THREE.NearestFilter) continue; // data textures stay exact
+        t.magFilter = THREE.LinearFilter;
+        t.minFilter = mips > 1 || t.generateMipmaps ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
+        t.anisotropy = level;
+        t.needsUpdate = true;
+      }
+    }
+  });
+  return seen.size;
+}
+
+/**
+ * §T.192 deck livery: the deck's plan outline off the LOD0 hull itself — the widest |x| of the vertices within 0.3 m of
+ * the deck height, in 64 z bins from the transom to the stem (empty bins take their neighbour). Measured, not copied
+ * from the hull JSON, so the paint follows whatever the build drew (camber, rounded edge, pointed bow).
+ */
+export function measureDeckEdge(lod0: THREE.Object3D | undefined, extras: BoatExtras, bins = 64): DeckEdge | null {
+  if (!lod0) return null;
+  const hull = lod0.children.find((c) => /^Hull_LOD0$/.test(c.name));
+  if (!hull) return null;
+  const half = new Array<number>(bins).fill(-1);
+  const dz = (extras.bowZ - extras.sternZ) / (bins - 1);
+  const v = new THREE.Vector3();
+  hull.traverse((o) => {
+    const g = (o as THREE.Mesh).geometry as THREE.BufferGeometry | undefined;
+    const pos = g?.getAttribute('position');
+    if (!pos) return;
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i);
+      if (v.y < extras.deckY - 0.3) continue;
+      const k = Math.round((v.z - extras.sternZ) / dz);
+      if (k >= 0 && k < bins) half[k] = Math.max(half[k], Math.abs(v.x));
+    }
+  });
+  if (half.every((h) => h < 0)) return null;
+  for (let k = 0; k < bins; k++) if (half[k] < 0) half[k] = k > 0 ? half[k - 1] : (half.find((h) => h >= 0) as number);
+  half[bins - 1] = Math.min(half[bins - 1], 0.01); // closes to the stem point
+  return { z0: extras.sternZ, dz, half, sternZ: extras.sternZ, deckY: extras.deckY };
+}
+
+export function assetFromGltf(scene: THREE.Group, options: AssetFromGltfOptions = {}): BoatAsset {
   if (scene.children.length !== 1) throw new Error(`speedboat asset: expected one root node, got ${scene.children.length}`);
   const root = scene.children[0];
   const extras = readBoatExtras(root.userData);
@@ -154,6 +243,7 @@ export function assetFromGltf(scene: THREE.Group): BoatAsset {
     }
     return { level, tris, draws };
   });
+  if (options.anisotropy !== undefined) applyTextureAnisotropy(root, options.anisotropy);
   if (sources.size > ASSET_CONTRACT.maxMaterials) {
     throw new Error(`speedboat asset: ${sources.size} material slots > contract ${ASSET_CONTRACT.maxMaterials}`);
   }
@@ -161,17 +251,22 @@ export function assetFromGltf(scene: THREE.Group): BoatAsset {
   for (const t of textures) bytes += textureBytes(t as unknown as Parameters<typeof textureBytes>[0]);
   const stats: BoatAssetStats = { lods, materials: sources.size, textures: textures.size, textureBytes: bytes };
 
+  const deckEdge = measureDeckEdge(groups[0], extras);
   const built = new Map<string, THREE.MeshPhysicalNodeMaterial>();
   const materialFor = (slot: SlotName, variant: BoatVariant, water: boolean): THREE.MeshPhysicalNodeMaterial => {
     const key = `${variant}:${water ? 'sea' : 'dry'}:${slot}`;
     let mat = built.get(key);
     if (mat === undefined) {
-      mat = createSlotMaterial(slot, sources.get(slot) as THREE.Material, { variant, water });
+      mat = createSlotMaterial(slot, sources.get(slot) as THREE.Material, { variant, water, deckEdge: deckEdge ?? undefined });
       built.set(key, mat);
     }
     return mat;
   };
   const length = extras.bowZ - extras.sternZ;
+  const maskSpec = readWaterMask(root.userData);
+  const maskGeometry = maskSpec ? waterMaskGeometry(maskSpec) : null;
+  const maskMaterial = maskSpec ? createWaterMaskMaterial() : null;
+  const propBlurMaterial = createPropBlurMaterial();
 
   return {
     extras,
@@ -200,6 +295,9 @@ export function assetFromGltf(scene: THREE.Group): BoatAsset {
           // doc §6.5: LOD0/1 cast and receive, coarser levels only cast
           mesh.castShadow = true;
           mesh.receiveShadow = level < 2;
+          // transparent-pass order around the water mask (waterMask.ts): gauge glass below the sheer draws before the
+          // cap, the windscreen after the ocean
+          if (mesh.userData.slot === 'M_Perspex') mesh.renderOrder = /^GaugeGlass_LOD\d+$/.test(nodeNameOf(mesh)) ? GAUGE_GLASS_RENDER_ORDER : PERSPEX_RENDER_ORDER;
         }
         hulls[level] = tagFoamTargets(copy as unknown as TaggableObject, FOAM_INJECTION_LAYER) as unknown as THREE.Mesh[];
         if (hulls[level].length === 0) throw new Error(`speedboat asset: LOD${level} has no foamTarget hull`);
@@ -217,9 +315,17 @@ export function assetFromGltf(scene: THREE.Group): BoatAsset {
         }
       };
       place(opts.fovDeg ?? 55);
+      let waterMask: THREE.Mesh | null = null;
+      if (maskGeometry && maskMaterial) {
+        waterMask = createWaterMaskMesh(maskGeometry, maskMaterial);
+        lod.add(waterMask); // not a LOD level: every level has the same well opening
+      }
+      const drives: DriveRig = createDriveRig(levelObjects, propBlurMaterial);
       return {
         object: lod,
         hulls,
+        waterMask,
+        setDriveState: (state, dt) => drives.set(state, dt),
         setLivery: applyLivery,
         setFov: place,
         currentLevel: () => lod.getCurrentLevel(),
@@ -231,6 +337,9 @@ export function assetFromGltf(scene: THREE.Group): BoatAsset {
       };
     },
     dispose(): void {
+      maskGeometry?.dispose();
+      maskMaterial?.dispose();
+      propBlurMaterial.dispose();
       for (const mat of built.values()) mat.dispose();
       for (const mat of sources.values()) mat.dispose();
       for (const t of textures) t.dispose();
@@ -256,7 +365,7 @@ export async function createBoatAssetLoader(renderer: THREE.WebGPURenderer): Pro
   return {
     async load(url: string): Promise<BoatAsset> {
       const result = await gltf.loadAsync(url);
-      return assetFromGltf(result.scene);
+      return assetFromGltf(result.scene, { anisotropy: renderer.getMaxAnisotropy() });
     },
     dispose(): void {
       ktx2.dispose();

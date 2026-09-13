@@ -33,8 +33,9 @@ def build(A):
     for dz in (-0.22, 0.22):
         base_z = z0 + dz
         top_z = z0 + dz * 0.45 - rake
-        path = [(xf, yd, base_z), (xt + 0.06, yt - 0.10, top_z + 0.02), (xt, yt, top_z), (-xt, yt, top_z),
-                (-xt - 0.06, yt - 0.10, top_z + 0.02), (-xf, yd, base_z)]
+        yfoot = A.deck_surface_y(xf, base_z)  # §T.192 cambered, tapering deck
+        path = [(xf, yfoot, base_z), (xt + 0.06, yt - 0.10, top_z + 0.02), (xt, yt, top_z), (-xt, yt, top_z),
+                (-xt - 0.06, yt - 0.10, top_z + 0.02), (-xf, yfoot, base_z)]
         path = kit.fillet_path(path, 0.14, 5)
         tube.extend(kit.sweep(path, R, 12, caps=True))
         hoops.append((base_z, top_z))
@@ -59,13 +60,14 @@ def build(A):
     ffast = []
     for sx in (1, -1):
         for bz in (bz0, bz1):
-            fl = kit.cylinder(0.075, 0.012, segs=16).translate((sx * xf, yd, bz))
-            fl.extend(kit.cylinder(0.042, 0.05, segs=12, r2=R + 0.004).translate((sx * xf, yd + 0.012, bz)))
+            yf_ = A.deck_surface_y(xf, bz) - 0.004  # flange sunk 4 mm: it sits on the camber all round
+            fl = kit.cylinder(0.075, 0.016, segs=16).translate((sx * xf, yf_, bz))
+            fl.extend(kit.cylinder(0.042, 0.05, segs=12, r2=R + 0.004).translate((sx * xf, yf_ + 0.016, bz)))
             feet.extend(fl)
-            welds.append((sx * xf, yd + 0.06, bz))
+            welds.append((sx * xf, yf_ + 0.064, bz))
             for k in range(4):
                 ang = math.pi / 4 + k * math.pi / 2
-                p = (sx * xf + math.cos(ang) * 0.055, yd + 0.012, bz + math.sin(ang) * 0.055)
+                p = (sx * xf + math.cos(ang) * 0.055, yf_ + 0.016, bz + math.sin(ang) * 0.055)
                 ffast.append((p, (0, 1, 0), 0.009, 'screw', False))
     pieces.append(Piece('feet', feet, 'M_Metal', 'stainless', max_lod=1, smooth=40, fasteners=ffast, welds=welds))
     bolts = Geo()
@@ -120,7 +122,8 @@ def build(A):
     lb.extend(kit.cylinder(0.03, 0.02, segs=16).translate(tuple(lp + Vector((0, 0.16, 0)))))
     lb.extend(kit.cylinder(0.03, 0.012, segs=16).translate(tuple(lp + Vector((0, 0.24, 0)))))
     pieces.append(Piece('light_base', lb, 'M_Metal', 'stainless', max_lod=1, bevel=(0.002, 1), smooth=40, welds=[tuple(lp)]))
-    lens = kit.cylinder(0.026, 0.06, segs=16).translate(tuple(lp + Vector((0, 0.18, 0))))
+    # §V98: the lens is seated 4 mm into the base disc and the cap, so no lens face lies on a metal face
+    lens = kit.cylinder(0.026, 0.068, segs=16).translate(tuple(lp + Vector((0, 0.176, 0))))
     pieces.append(Piece('light_lens', lens, 'M_Perspex', 'lens_white', max_lod=1, smooth=50))
 
     # whip antenna on a ratchet mount at the starboard aft corner, coax down the leg with ties

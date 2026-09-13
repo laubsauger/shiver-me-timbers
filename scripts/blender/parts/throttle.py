@@ -16,13 +16,19 @@ from kit import Geo, Piece
 def build(A, base=False):
     """base=True: the static pedestal/plate (joins the merged Parts node); False: the moving levers"""
     W = A.cockpit_well()
-    eye = Vector(A.eye())
-    x0 = -(W['halfWidth'] - 0.13)
-    y0 = A.deck_y - 0.20
-    z0 = eye.z + 0.24
-    M = Matrix.Translation((x0, y0, z0)) @ kit.rot('Z', 8)  # plate rolled toward the pilot
+    idle = -28.0
+    pivot_local = Vector((0, 0.0, -0.02))
+    handle_local = Vector((-0.015, 0.215, 0.006))  # the middle lever's handle centre, at the pivot frame before idle
+    roll = kit.rot('Z', 8)  # plate rolled toward the pilot
+    # §T.192 ergonomics (pilot-log v2): the quadrant is placed so the middle handle at idle lands on the manifest's
+    # reach point (0.40 outboard, forearm-rest height), not against the well wall 0.67 m off-centre
+    at_idle = roll @ Matrix.Translation(pivot_local) @ kit.rot('X', idle) @ handle_local
+    x0, y0, z0 = (Vector(A.throttle_handle()) - at_idle)
+    M = Matrix.Translation((x0, y0, z0)) @ roll
     pieces = []
-    ped = kit.box(0.16, 0.30, 0.30, center=(-0.01, -0.15, 0.0))
+    # a free-standing carbon pedestal from the sole up to the plate (it no longer leans on the well wall)
+    ped_h = max(0.30, y0 - W['soleY'])
+    ped = kit.box(0.16, ped_h, 0.30, center=(-0.01, -ped_h / 2, 0.0))
     ped.extend(kit.box(0.20, 0.02, 0.34, center=(-0.02, 0.0, 0.0)))
     pieces.append(Piece('pedestal', ped.transform(M), 'M_Carbon', 'carbon', max_lod=1, bevel=(0.006, 2), smooth=35, tier='cockpit'))
     plate = kit.box(0.15, 0.012, 0.26, center=(0, 0.016, 0))
@@ -36,8 +42,6 @@ def build(A, base=False):
     pieces.append(Piece('slots', slots.transform(M), 'M_Carbon', 'vent_black', max_lod=0, smooth=35, tier='cockpit'))
     levers = Geo()
     handles = Geo()
-    idle = -28.0
-    pivot_local = Vector((0, 0.0, -0.02))
     for k, xs in enumerate((-0.045, -0.015, 0.015)):
         R = Matrix.Translation(pivot_local) @ kit.rot('X', idle)
         lv = kit.box(0.006, 0.20, 0.018, center=(xs, 0.10, 0.0))
@@ -60,5 +64,10 @@ def build(A, base=False):
         Piece('trim_knob', knob, 'M_Cockpit', 'knob_black', max_lod=0, bevel=(0.001, 1), smooth=45, tier='cockpit'),
     ]
     pv = M @ pivot_local
-    return {'pieces': moving, 'extras': {'animRole': 'throttle', 'pivot': list(pv), 'axis': list((M.to_3x3() @ Vector((1, 0, 0))).normalized()),
-                                         'idleDeg': idle, 'fullDeg': 32.0}}
+    ax = (M.to_3x3() @ Vector((1, 0, 0))).normalized()
+    handle = M @ Matrix.Translation(pivot_local) @ kit.rot('X', idle) @ handle_local
+    sockets = {'throttleHandle': {'position': [round(c, 5) for c in handle], 'pivot': [round(c, 5) for c in pv], 'axis': [round(c, 5) for c in ax],
+                                  'radius': 0.022, 'idleDeg': idle, 'fullDeg': 32.0,
+                                  'about': 'middle handle centre at idle, body frame; the levers rotate about pivot/axis from idleDeg to fullDeg'}}
+    return {'pieces': moving, 'extras': {'animRole': 'throttle', 'pivot': list(pv), 'axis': list(ax), 'idleDeg': idle, 'fullDeg': 32.0},
+            'sockets': sockets}

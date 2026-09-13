@@ -354,3 +354,65 @@ Weak spots in these numbers:
   4 px bake margin.
 - The trim sheet's exterior tier (249 px/m) is marginally under the 256 chase-cam target.
 - The rub rail and bracket plates (`low`, 124 px/m) sit at about the chase-cam floor.
+
+## §T.192, 2026-09-13: playtest polish (z-fighting, drives, gauge glass, water mask, helm ergonomics, sockets)
+
+**Z-fighting (USER: "a bunch of z-fighting inside the cockpit").** New checker rule `coplanarErrors` (§V98 on the built
+GLB): every LOD0 triangle in world space through the real node matrices (§B118), binned by plane; same-facing faces
+(or opposite, if either material is double-sided) within 2 mm of each other's plane are clipped against each other,
+the overlaps clustered, and a cluster wider than 2 cm in both in-plane axes fails the build. A face pressed against an
+opposite-facing single-sided face (a cleat base on the deck) is buried and skipped. The first scan of the shipped GLB
+found 60 fights; the fixes, all geometric:
+- **coaming pads** (the cockpit report): their backs were the well wall's own plane over 2.14 × 0.11 m each side → 3 mm proud of the wall (`deck_hardware.py`)
+- ETOH stencils 1.5 mm off the deck → 4 mm; bow sidelight lenses face-on-face with the body → centred on the body face
+- harness shoulder straps overlapping 3 cm wide in one plane at the buckle → the port strap lies 6 mm on top (`seat.py`)
+- ratchet strap centre line on the small case lid → 4 mm up (`salvage.py`)
+- arch all-round light lens caps on the metal disc and cap → seated 4 mm into both (`roll_arch.py`)
+- outboards (×3 each): ram collars sharing the barrel end cap (8.4 cm and 6 cm discs), tilt-tube end cap on the port nut, trim pump face on the cross web, fuel-cap collar bases (`outboard.py`)
+- bracket truss: post and second diagonal shared side planes with the chords they butt into → 6 mm narrower (`bracket.py`)
+- hull bow doubler 3.5 mm proud came within 2 mm of the bulging bow section → 5 mm (`hero_hull.py PLATE_PROUD`)
+
+**Drive nodes (USER: "the engines should move when steering … and the propeller rotating").** LOD0 already had
+`Outboard_<id>` / `Prop_<id>` with pivots. LOD1's single merged `Drives` node had ONE centre pivot, so the side cowls
+would have swung about x = 0: LOD1 is now `Drive_<id>` per engine (outboard + prop, the outboard's own steer/trim
+extras), LOD1 draws 8 → 12 (contract budget 10 → 12, player and npc). Runtime: `BoatInstance.setDriveState`
+(`src/speedboat/assets/driveRig.ts`). New checker rules: LOD1 `Drive_<id>` must carry its pivots, and
+`driveLodErrors`: every coarse drive surface sample (vertices, edge midpoints, centroids) within 2 cm of its LOD0
+drive. Measured on the shipped GLB: LOD1 0.7 cm, LOD2 1.3–1.6 cm — **the LOD geometry does not poke out**, so the
+"NPC engine out of the water at > 10 m" report is not a decimation defect (see the T192 report).
+
+**Gauge glass** is its own LOD0 node `GaugeGlass` (manifest part `GaugeGlass`, `dash.py pieces='glass'`, LOD0 only):
+it is the one see-through surface below the sheer inside the well, and the runtime draws it before the hull water
+mask. LOD0 draws 20 → 21.
+
+**Helm ergonomics (pilot-log v2 blocker, coordinator fold-in).** Hub moved from (0, −0.08, 0.73) to
+(0, 0.30, 0.50) in the seat frame (pan top at the JSON station, manifest `helm.wheelHubAbovePan/AheadOfSeat`); the
+shaft now runs from the hub down to the dash face 0.20 below its top, under the gauge cluster, so the axis is
+(0, 0.678, −0.735) (43° column). The throttle quadrant is placed so the middle handle at idle lands 0.40 m outboard,
+0.20 above the pan, 0.40 ahead, on a free-standing pedestal down to the sole (was 0.67 m off-centre at the well wall).
+**The pilot GLB still grips the old wheel**: `scripts/blender/pilot/pilot_config.json helm` is hand-copied and not
+re-read from the parts GLB, so the pilot owner must paste the new values (the T192 report lists them).
+
+**Sockets.** Root extras `partsSockets` (JSON, body frame): `seat` (pan top, up, forward), `wheelRim` (centre, axis,
+radius 0.18, tube 0.0165), `throttleHandle` (middle handle at idle, pivot, axis, idle/full), `footrest` (centre,
+axis, half length, radius), `dashCableAnchor` (a new cable jack on the dash face, position + normal). Extras rather
+than nodes: node transforms must stay identity (contract), so a socket node could carry nothing but extras anyway.
+Checker `partsSocketErrors`: all present, `wheelRim.centre` = `Helm_LOD0` pivot and `throttleHandle.pivot` =
+`Throttle_LOD0` pivot (±1 cm), and reach bands in the seat frame (hub 0.15–0.45 up / 0.35–0.65 ahead; handle
+0.30–0.50 lateral / 0.05–0.35 up); the test fails the v1 helm and quadrant positions.
+
+**Budget.** Pilot v2 is 17.9k, not the 14k line. Real totals: hull 29.5k + parts + pilot. Parts LOD0 trimmed
+~1.8k (prop blades 9 × 7 → 7 × 5 per blade, −512 per prop: they run under water or behind the blur disc; cleat
+horns 8 → 6 sides; jerrycan spouts 16 → 12) and the manifest parts line lowered 64k → 62k.
+
+**Playtest round 2 (§T.192): deck, bow, transom.**
+- Every deck-standing part asks `anchors.deck_surface_y(x, z)` (cleats, fillers and stencils, vents and grilles,
+  hatch hinges/latches, grab rails and pads, fore hatch, arch feet, windscreen base, rub rail via the sheer polyline);
+  flanges are sunk 4 mm so they sit on the camber all round.
+- Bow ("a bit too blocky"): the square fairlead plate is replaced by a tapered stainless stem-head fitting that follows
+  the pointed deck to the stem with a raised bow eye, and a thin Ø 22 mm bow rail runs 0.18 m over each foredeck edge on
+  three stanchions, meeting over the stem head.
+- Transom ("could use a bit more"): stainless boarding grab handles either side of the bracket, flanged drain scuppers
+  low on the corners outboard of the bracket plate, and a riveted aluminium hull-ID plate with a stamped HIN; the tow
+  eyes and the bracket platform step were already there.
+- Budget line 64k (measured 63.7k before bakes): hull 29.5k + parts + pilot v2 17.9k ≈ 111k of 120k.

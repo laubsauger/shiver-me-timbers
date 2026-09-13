@@ -51,6 +51,22 @@ class Anchors:
     def y_body(self, y_hull):
         return y_hull - self.vcg
 
+    # ── deck shape (§T.192): camber + aft taper, render-only; the centreline stays on the proxy deck ──
+    def deck_drop(self, x, z_hull):
+        """how far the deck surface lies below the proxy deck height at (x, hull z), m (≥ 0)"""
+        d = self.extra.get('deckShape')
+        if not d:
+            return 0.0
+        u = min(abs(x) / d['crownHalfBeam'], 1.15)
+        crown = d['crownAtSheer'] * u * u
+        t = min(max(1.0 - z_hull / d['aftTaperLength'], 0.0), 1.0)
+        aft = d['aftDrop'] * t * t * (3 - 2 * t)
+        return crown + aft
+
+    def deck_surface_y(self, x, z_body):
+        """body-frame height of the deck surface at (x, body z): where a part standing on the deck must sit"""
+        return self.deck_y - self.deck_drop(x, z_body + self.lcg)
+
     # ── hull shape queries (hull frame in, body frame out where noted) ─────
     def deck_y_hull(self, z_hull):
         return _interp(self.stations, 'deckY', z_hull)
@@ -86,11 +102,13 @@ class Anchors:
                 continue
             h = max(0.0, s['deckY'] - s['chineY'] - self.flare_start)
             half = s['deckHalfBeam'] + h * math.tan(self.flare)
-            out.append(self.body(side * half, s['deckY'], s.get('deckZ', s['z'])))
+            zd = s.get('deckZ', s['z'])
+            out.append(self.body(side * half, s['deckY'] - self.deck_drop(half, zd), zd))
         return out
 
     def sheer_point(self, z_hull, side=1):
-        return self.body(side * self.sheer_half(z_hull), self.deck_y_hull(z_hull), z_hull)
+        half = self.sheer_half(z_hull)
+        return self.body(side * half, self.deck_y_hull(z_hull) - self.deck_drop(half, z_hull), z_hull)
 
     # ── sockets ─────────────────────────────────────────────────────────────
     @property
@@ -196,6 +214,23 @@ class Anchors:
             'sheerHalf': self.sheer_half(z_h),
             'antennaLength': self.extra['antenna']['length'],
         }
+
+    def pan_top(self):
+        """seat pan top centre (body frame): the pilot frame's origin (pilot-log v2)"""
+        s = self.seat()
+        return (s['x'], s['soleY'] + self.extra['seat']['panAboveSole'], s['z'])
+
+    def wheel_hub(self):
+        """§T.192 ergonomics: the wheel hub relative to the pan top (manifest helm, pilot-log v2 blocker)"""
+        h = self.extra['helm']
+        x, y, z = self.pan_top()
+        return (x, y + h['wheelHubAbovePan'], z + h['wheelHubAheadOfSeat'])
+
+    def throttle_handle(self):
+        """§T.192 ergonomics: the middle throttle handle at idle, on the pilot's right (−x), at forearm-rest height"""
+        h = self.extra['helm']
+        x, y, z = self.pan_top()
+        return (x - h['throttleHandleOutboard'], y + h['throttleHandleAbovePan'], z + h['throttleHandleAheadOfSeat'])
 
     def eye(self):
         h = self.extra['helm']

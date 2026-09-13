@@ -85,10 +85,12 @@ def build(A):
         a_bot, b_bot = (x, ybot_at(x) + 0.03, zT - 0.01), (x, ybot_m + 0.03, zM + 0.02)
         truss.extend(bar(a_top, b_top, t, 0.06))
         truss.extend(bar(a_bot, b_bot, t, 0.06))
-        truss.extend(bar((x, ybot_m + 0.03, zM + 0.03), (x, ytop - 0.03, zM + 0.03), t, 0.05, up=(0, 0, 1)))
+        # §V98 (§T.192 scan): members that meet at a joint may not share side planes — the post and the second
+        # diagonal are 6 mm narrower than the member they butt into (3 mm each side), as a welded box truss is
+        truss.extend(bar((x, ybot_m + 0.03, zM + 0.03), (x, ytop - 0.03, zM + 0.03), t - 0.006, 0.05, up=(0, 0, 1)))
         zm = (zT + zM) / 2
         truss.extend(bar((x, ybot_at(x) + 0.06, zT - 0.03), (x, ytop - 0.06, zm), t * 0.8, 0.045, up=(0, 0, 1)))
-        truss.extend(bar((x, ytop - 0.06, zm), ((x, ybot_m + 0.06, zM + 0.05)), t * 0.8, 0.045, up=(0, 0, 1)))
+        truss.extend(bar((x, ytop - 0.06, zm), ((x, ybot_m + 0.06, zM + 0.05)), t * 0.8 - 0.006, 0.045, up=(0, 0, 1)))
         for w in (a_top, a_bot, (x, ytop - 0.03, zm), (x, ybot_m + 0.03, zM + 0.03), (x, ytop - 0.03, zM + 0.03)):
             welds.append(w)
     pieces.append(Piece('truss', truss, 'M_Metal', 'alu_bare', max_lod=2, smooth=35, welds=welds, wear=1.2))

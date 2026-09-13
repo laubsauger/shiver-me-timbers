@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { Document, type Material, type Node } from '@gltf-transform/core';
-import { checkDocument, createIO, hullTopology, ktx2LevelCount, readBytes } from '../scripts/blender/checkGlb.mjs';
+import { checkDocument, coplanarOverlaps, createIO, driveLodDeviation, hullTopology, ktx2LevelCount, readBytes, waterMaskErrors } from '../scripts/blender/checkGlb.mjs';
 import { ASSET_CONTRACT } from '../src/speedboat/assets/contract';
 import { buildDeepVHull, REFERENCE_DEEP_V, deckHeight, hullStations, HULL_DATA } from '../src/speedboat/hullMesh';
 
@@ -342,6 +342,114 @@ describe('checkGlb: each broken convention FAILS the build', () => {
     await failsWith(withSlab(-0.7), /hangs 0\.\d+ m below the hull transom bottom/);
   });
 
+  /** a closed axis-aligned box as a mesh node under LOD`level` (12 outward-wound triangles) */
+  const addBox = (doc: Document, level: number, name: string, min: [number, number, number], max: [number, number, number], matIndex = 1): Node => {
+    const [x0, y0, z0] = min;
+    const [x1, y1, z1] = max;
+    const v = [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]];
+    const f = [[0, 3, 2], [0, 2, 1], [4, 5, 6], [4, 6, 7], [0, 1, 5], [0, 5, 4], [3, 7, 6], [3, 6, 2], [0, 4, 7], [0, 7, 3], [1, 2, 6], [1, 6, 5]];
+    const buffer = doc.getRoot().listBuffers()[0];
+    const pos = doc.createAccessor().setType('VEC3').setArray(new Float32Array(v.flat())).setBuffer(buffer);
+    const idx = doc.createAccessor().setType('SCALAR').setArray(new Uint32Array(f.flat())).setBuffer(buffer);
+    const mesh = doc.createMesh(name).addPrimitive(doc.createPrimitive().setAttribute('POSITION', pos).setIndices(idx).setMaterial(doc.getRoot().listMaterials()[matIndex]));
+    const node = doc.createNode(name).setMesh(mesh).setExtras({ lodLevel: level });
+    (doc.getRoot().listNodes().find((n) => n.getName() === `LOD${level}`) as Node).addChild(node);
+    return node;
+  };
+
+  it('§V98 on the GLB: two faces sharing a plane over more than 2 × 2 cm fail (§T.192 "z-fighting inside the cockpit")', async () => {
+    // the real defect, in miniature: a coaming pad whose back IS the well wall's plane (a 30 × 10 cm slab
+    // whose top face lies in another slab's top plane)
+    const withPads = (lift: number): Document => {
+      const doc = buildBoat();
+      addBox(doc, 0, 'Sole_LOD0', [-0.3, 0.2, 0.0], [0.3, 0.25, 1.0]);
+      addBox(doc, 0, 'Pad_LOD0', [-0.15, 0.2 + lift, 0.3], [0.15, 0.25 + lift, 0.4]);
+      return doc;
+    };
+    await failsWith(withPads(0), /z-fight: coplanar overlap 10\.0 × 30\.0 cm .* between Sole_LOD0.* and Pad_LOD0/);
+    // ON the other (3 mm up, > the 2 mm rule) passes: the fix is geometric, never a polygon offset
+    const lifted = await check(withPads(0.003));
+    expect(lifted.errors.filter((e) => e.startsWith('z-fight'))).toEqual([]);
+    // a strip narrower than 2 cm in one axis is a seam, not a fight
+    const doc = buildBoat();
+    addBox(doc, 0, 'A_LOD0', [0, 0.2, 0], [0.5, 0.21, 0.015]);
+    addBox(doc, 0, 'B_LOD0', [0, 0.2, 0], [0.5, 0.21, 0.015]);
+    const narrow = await check(doc);
+    expect(narrow.errors.filter((e) => e.startsWith('z-fight'))).toEqual([]);
+  });
+
+  it('§B118: the scan reads world matrices, and a face pressed against an opposite face (a plate on a deck) is buried, not a fight', async () => {
+    const io = await createIO();
+    // a plate resting ON a block: its bottom (down) meets the block's top (up) — nothing can see that plane
+    const doc = buildBoat();
+    addBox(doc, 0, 'Block_LOD0', [-0.2, 0.0, 0.0], [0.2, 0.3, 0.4]);
+    addBox(doc, 0, 'Plate_LOD0', [-0.1, 0.3, 0.1], [0.1, 0.31, 0.3]);
+    const lod0 = (await io.readBinary(await io.writeBinary(doc))).getRoot().listNodes().find((n: Node) => n.getName() === 'LOD0') as Node;
+    expect(coplanarOverlaps(lod0)).toEqual([]);
+  });
+
+  it('a coarse drive LOD that grows out of its LOD0 silhouette fails (§T.192 "engine of NPCs poking out of the water")', async () => {
+    const withDrive = (grow: number): Document => {
+      const doc = buildBoat({ extras: { partsVersion: 1 } });
+      const ob = addBox(doc, 0, 'Outboard_P_LOD0', [0.5, -1.0, -4.8], [0.8, 0.5, -4.2]);
+      ob.setExtras({ lodLevel: 0, steerPivot: [0.66, 0, -4.3], steerAxis: [0, 1, 0], trimPivot: [0.66, 0, -4.3], trimAxis: [1, 0, 0] });
+      const pr = addBox(doc, 0, 'Prop_P_LOD0', [0.6, -1.0, -4.9], [0.7, -0.9, -4.8]);
+      pr.setExtras({ lodLevel: 0, animRole: 'propSpin', pivot: [0.66, -0.95, -4.85], axis: [0, 0, 1], follows: 'Outboard_P' });
+      // LOD1: the same lower unit, its skeg pushed `grow` below the LOD0 shape
+      const d = addBox(doc, 1, 'Drive_P_LOD1', [0.5, -1.0 - grow, -4.8], [0.8, 0.5, -4.2]);
+      d.setExtras({ lodLevel: 1, steerPivot: [0.66, 0, -4.3], steerAxis: [0, 1, 0], trimPivot: [0.66, 0, -4.3], trimAxis: [1, 0, 0] });
+      return doc;
+    };
+    const io = await createIO();
+    const levels = async (doc: Document) => {
+      const d = await io.readBinary(await io.writeBinary(doc));
+      return ['LOD0', 'LOD1', 'LOD2'].map((n) => d.getRoot().listNodes().find((x: Node) => x.getName() === n) as Node);
+    };
+    const same = driveLodDeviation(await levels(withDrive(0))).find((r) => r.level === 1)!;
+    expect(same.worst).toBeLessThan(1e-4);
+    expect(same.samples).toBeGreaterThan(0);
+    const ok = await check(withDrive(0.01));
+    expect(ok.errors.filter((e) => e.startsWith('lod:'))).toEqual([]);
+    await failsWith(withDrive(0.06), /lod: engine P at LOD1 \('Drive_P_LOD1'\) stands 6\.0 cm off its LOD0 surface/);
+    // and the LOD1 drive must carry its own pivots: it steers about its own swivel
+    const noPivot = withDrive(0);
+    noPivot.getRoot().listNodes().find((n) => n.getName() === 'Drive_P_LOD1')?.setExtras({ lodLevel: 1 });
+    await failsWith(noPivot, /parts: 'Drive_P_LOD1' extras.steerPivot/);
+  });
+
+  it('the hull water mask must cover the well sole and stay inside the deck edge (§T.192 "water poking through the boat")', async () => {
+    // the synthetic shell's chine vertices (y = KEEL + HALF·0.45) stand in for a sole: an outline that misses them
+    // leaves water showing in that part of the well; one past the deck edge would hide the sea beside the hull
+    const soleY = KEEL + HALF * 0.45;
+    const ring = (hw: number, z0: number, z1: number): number[][] => [[hw, z0], [hw, (z0 + z1) / 2], [hw, z1], [0, z1], [-hw, z1], [-hw, (z0 + z1) / 2], [-hw, z0], [0, z0]];
+    const withMask = (mask: unknown): Document => buildBoat({ extras: { waterMask: JSON.stringify(mask) } });
+    // the synthetic shell has no well: its only vertices at that height are the OUTER chine, which is not a sole
+    await failsWith(withMask({ y: DECK, soleY, outline: ring(0.5, -1, 1) }), /water mask: no LOD0 hull vertex on the sole/);
+    await failsWith(withMask({ y: DECK, soleY, outline: ring(HALF + 0.1, STERN + 0.5, 4) }), /within 5 cm of the deck edge/);
+    await failsWith(withMask({ y: DECK - 0.3, soleY, outline: ring(0.5, -1, 1) }), /cap y .* is not on the deck/);
+    await failsWith(buildBoat({ extras: { hullKind: 'hero' } }), /hero hull root extras have no 'waterMask'/);
+  });
+
+  it('parts sockets: the pilot is seated and gripped from exported, reachable sockets (pilot-log v2 ergonomics blocker)', async () => {
+    const good = {
+      seat: { position: [0, 0.43, 0.23], up: [0, 1, 0], forward: [0, 0, 1] },
+      wheelRim: { centre: [0, 0.73, 0.73], axis: [0, 0.68, -0.73], radius: 0.18, tube: 0.0165 },
+      throttleHandle: { position: [-0.4, 0.63, 0.63], pivot: [-0.36, 0.44, 0.73], axis: [0.99, 0.14, 0] },
+      footrest: { centre: [0, 0.03, 0.59], axis: [1, 0, 0], halfLength: 0.15, radius: 0.021 },
+      dashCableAnchor: { position: [0.36, 0.23, 1.15], normal: [0, 0.32, -0.95] },
+    };
+    const withSockets = (s: unknown): Document => buildBoat({ extras: { partsVersion: 1, partsSockets: JSON.stringify(s) } });
+    const socketErrors = async (s: unknown) => (await check(withSockets(s))).errors.filter((e) => e.startsWith('sockets'));
+    expect(await socketErrors(good)).toEqual([]);
+    await failsWith(buildBoat({ extras: { partsVersion: 1 } }), /sockets: root extras have no 'partsSockets'/);
+    const { dashCableAnchor: _gone, ...noJack } = good;
+    await failsWith(withSockets(noJack), /sockets: 'dashCableAnchor' is missing/);
+    // the v1 helm: hub 8 cm BELOW the pan, 0.73 m ahead — the 43° lean
+    await failsWith(withSockets({ ...good, wheelRim: { ...good.wheelRim, centre: [0, 0.35, 0.96] } }), /wheel hub -0\.08 m above the seat pan/);
+    // the v1 quadrant at the well wall
+    await failsWith(withSockets({ ...good, throttleHandle: { ...good.throttleHandle, position: [-0.67, 0.56, 0.9] } }), /throttle handle 0\.67 m off the seat centreline/);
+  });
+
   it('player LOD0 budget is 120k, not the NPC 50k', async () => {
     const { errors } = await check(buildBoat({ kind: 'player', extraLod0Tris: 50_000 }));
     expect(errors.filter((e) => e.startsWith('budget'))).toEqual([]);
@@ -387,7 +495,14 @@ describe('the built hero GLB (assets/models, from `node scripts/asset-build.mjs`
     const { errors, stats } = checkDocument(doc, ASSET_CONTRACT, { stage: 'final', expect: { proxy, spec: REFERENCE_DEEP_V, stations, renderOnly } });
     expect(errors).toEqual([]);
     expect(stats.materials).toBeLessThanOrEqual(7);
-    const root = doc.getRoot().getDefaultScene()!.listChildren()[0].getExtras() as Record<string, number>;
+    const rootNode = doc.getRoot().getDefaultScene()!.listChildren()[0];
+    const root = rootNode.getExtras() as Record<string, number>;
+    // §T.192: the water mask covers the real well; shrink it 20 cm and the sole corners it no longer covers fail
+    const wm = JSON.parse(String((root as unknown as Record<string, string>).waterMask)) as { y: number; soleY: number; outline: number[][] };
+    const shrunk = { ...wm, outline: wm.outline.map(([x, z]) => [x * 0.8, z]) };
+    const lod0 = rootNode.listChildren().find((n: Node) => n.getName() === 'LOD0') as Node;
+    expect(waterMaskErrors(root, lod0)).toEqual([]);
+    expect(waterMaskErrors({ ...root, waterMask: JSON.stringify(shrunk) }, lod0).join('\n')).toMatch(/sole vertices lie outside the cap outline/);
     // the wetline maps ship-local z through (sternZ, 1/(bowZ − sternZ)): these ARE the proxy's
     expect(root.bowZ).toBeCloseTo(proxyHull.stemZ, 2);
     expect(root.sternZ).toBeCloseTo(proxyHull.transomZ, 2);

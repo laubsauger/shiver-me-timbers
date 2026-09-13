@@ -17,7 +17,9 @@ PITCH = 0.66
 BLADES = 4
 
 
-def blade(R, r_hub, nr=9, nc=7):
+def blade(R, r_hub, nr=7, nc=5):
+    # §T.192 budget (hull + parts + pilot ≤ 120k): 9 × 7 → 7 × 5 per blade, −512 tris per prop. The props run under
+    # water or behind the runtime blur disc at speed; the all-smooth shading carries the helical surface
     """one blade around +Z (three: forward), centred on the disc plane z = 0, for a RH prop"""
     top, bot = [], []
     for i in range(nr + 1):

@@ -6,10 +6,23 @@
  * RIGS
  *  - chase  7.5 m back / 2.4 m up, FOV 60→76° with speed, ≤ 30% roll follow, heave low-passed (0.8 s).
  *  - near   4 m / 1.5 m, FOV 68→82°.
+ *  - far    THE DEFAULT RIG (USER: "the default view distance should be the farthest out").
+ *           22 m / 7.5 m, looking at a point 4 m AFT of the CG, FOV 55→66° (§T.192 "see my own wake and the
+ *           engines"). FRAMING MATH (pivot = CG + 1 m, camera 8.5 m above the CG, water ≈ CG − 0.35):
+ *           pitch = atan(7.5 / (22 − 4)) = 22.6°; the frame's bottom ray is 22.6 + 27.5 = 50.1° down, so the water
+ *           comes into frame 8.85 / tan 50.1° = 7.4 m ahead of the lens, i.e. 22 − 3.6 (transom) − 7.4 ≈ 11 m of
+ *           wake astern of the transom plus the Kelvin arms (±3.9 m wide there, the frame is ±10 m) and the rooster
+ *           tail above it; the top ray is 4.9° ABOVE the horizon, so the horizon stays in frame. The hull spans
+ *           NDC y −0.16 (props) … +0.27 (bow): the boat sits just above centre, the wake fills the lower half.
+ *           The speedboat wake tier solves ≈ 300 m astern (docs/wake/w5c-speedboat-tier.md), so the frame never
+ *           reaches the end of the solved wake.
  *  - cockpit  rides the pilot's `cam_eye` node when `setEyeSource` provides it (else the hull-JSON seat anchor,
  *           raceCamEye.ts); head a lag on tilt beyond 12° (100% of the hull's pitch/roll up to 12°, the excess
  *           follows with a 0.25 s half-life); landing dip ≤ 6 cm; FOV 72→86°; `onCockpitChange` hides the head.
- *           Look back in the cockpit is the hoop mirror (the page reads `mirrorActive`), not a camera turn.
+ *           LOOK BACK turns the head over the LEFT shoulder (§T.192 "in first person we can't look back"): 160° of
+ *           yaw about the head's own up axis (neck ≈ 80° + torso twist), the eye leaning 0.22 m out to the left and
+ *           4 cm up so the headrest stays at the right edge of the view; eased in and out over 0.35 s (a rate-limited
+ *           ramp through a smoothstep: exact for any frame time). The head stays hidden throughout.
  *  - crash  world-anchored slow orbit about the crash point looking at the hull; returns with a blend. From the
  *           cockpit it cuts outside.
  *
@@ -37,7 +50,7 @@ import {
   velocityYaw,
 } from './raceCamMath';
 
-export type RaceCamMode = 'chase' | 'near' | 'cockpit' | 'crash';
+export type RaceCamMode = 'chase' | 'near' | 'far' | 'cockpit' | 'crash';
 export type RaceHeightFn = (x: number, z: number) => number;
 
 /** what the camera reads each frame: the RENDER-interpolated boat (pose and velocity lerped on alpha) */
@@ -59,13 +72,22 @@ export interface RaceRig {
   fovMin: number;
   fovMax: number;
   yawHalfLife: number;
+  /** this rig's look point ahead of the CG, m (default `RaceCamParams.lookAhead`; negative = astern) */
+  lookAhead?: number;
 }
 
 export interface RaceCamParams {
   chase: RaceRig;
   near: RaceRig;
+  far: RaceRig;
   cockpitFovMin: number;
   cockpitFovMax: number;
+  /** cockpit look back: head yaw over the left shoulder, deg (+ turns the view toward the pilot's left) */
+  cockpitLookBackDeg: number;
+  /** eye offset at full look back, camera-local metres before the turn (−x = the pilot's left, +y up) */
+  cockpitLookBackLean: readonly [number, number, number];
+  /** time for a full head turn (and back), s */
+  cockpitLookBackSeconds: number;
   /** look point ahead of the pivot along the heading, m, and above the CG */
   lookAhead: number;
   lookHeight: number;
@@ -101,6 +123,8 @@ export interface RaceCamParams {
   crashReturnSeconds: number;
   /** design §9: reduced motion = no shake and no head bob / dip */
   reducedMotion: boolean;
+  /** the rig a new camera starts on (USER §T.192: "the default view distance should be the farthest out") */
+  defaultMode: Exclude<RaceCamMode, 'crash'>;
 }
 
 const DEG = Math.PI / 180;
@@ -108,8 +132,13 @@ const DEG = Math.PI / 180;
 export const RACE_CAM_DEFAULTS: Readonly<RaceCamParams> = Object.freeze({
   chase: Object.freeze({ distance: 7.5, height: 2.4, fovMin: 60, fovMax: 76, yawHalfLife: 0.2 }),
   near: Object.freeze({ distance: 4, height: 1.5, fovMin: 68, fovMax: 82, yawHalfLife: 0.15 }),
+  // framing math in the header: ≈ 11 m of wake astern of the transom, the engines from above and behind, the horizon
+  far: Object.freeze({ distance: 22, height: 7.5, fovMin: 55, fovMax: 66, yawHalfLife: 0.3, lookAhead: -4 }),
   cockpitFovMin: 72,
   cockpitFovMax: 86,
+  cockpitLookBackDeg: 160,
+  cockpitLookBackLean: Object.freeze([-0.22, 0.04, 0]) as readonly [number, number, number],
+  cockpitLookBackSeconds: 0.35,
   lookAhead: 6,
   lookHeight: 1.0,
   headingBlendSeconds: 0.25,
@@ -135,14 +164,19 @@ export const RACE_CAM_DEFAULTS: Readonly<RaceCamParams> = Object.freeze({
   crashBlendInSeconds: 0.5,
   crashReturnSeconds: 0.8,
   reducedMotion: false,
+  defaultMode: 'far',
 }) as Readonly<RaceCamParams>;
 
-const CYCLE: readonly Exclude<RaceCamMode, 'crash'>[] = ['chase', 'near', 'cockpit'];
+/** V / Y cycles near → chase → far → cockpit → near (§T.192); the rig starts on `params.defaultMode` (far) */
+const CYCLE: readonly Exclude<RaceCamMode, 'crash'>[] = ['near', 'chase', 'far', 'cockpit'];
 const Q_FLIP_Y: Quat = [0, 1, 0, 0]; // 180° about Y: body +z forward → camera −Z view
 
 export class RaceCam {
   readonly params: RaceCamParams;
-  /** cockpit only: the page shows the hoop mirror while this is true */
+  /**
+   * the page's hoop-mirror flag. Since §T.192 the cockpit look back turns the head instead, so this stays false;
+   * kept so an existing reader compiles and simply never shows a mirror over the turned view
+   */
   mirrorActive = false;
   lookBack = false;
   /** head-hide hook: true entering the cockpit view, false leaving it (collapse / restore the `head_geo` bone) */
@@ -171,6 +205,8 @@ export class RaceCam {
   private dipV = 0;
   private headExcess = 0;
   private headExcessPrev = 0;
+  /** cockpit look back ramp 0 (ahead) … 1 (over the shoulder), before easing */
+  private lookBackRamp = 0;
   private tiltAxis: [number, number, number] = [1, 0, 0];
 
   private blend = 0;
@@ -190,6 +226,7 @@ export class RaceCam {
   private readonly eyePos = new Vector3();
   private readonly eyeQuat = new Quaternion();
   private readonly lastLook = new Vector3();
+  private readonly tmpLean = new Vector3();
 
   constructor(
     readonly camera: PerspectiveCamera,
@@ -197,7 +234,8 @@ export class RaceCam {
   ) {
     this.params = { ...RACE_CAM_DEFAULTS, ...params };
     this.eyeBody = cockpitEyeFallback();
-    this.fov = this.params.chase.fovMin;
+    this.modeV = this.prevMode = this.params.defaultMode;
+    this.fov = this.params.defaultMode === 'cockpit' ? this.params.cockpitFovMin : this.params[this.params.defaultMode].fovMin;
   }
 
   get mode(): RaceCamMode {
@@ -213,7 +251,12 @@ export class RaceCam {
     this.eyeSource = src;
   }
 
-  /** chase → near → cockpit → chase (design §3: V / Y); ignored during a crash */
+  /** cockpit head turn, 0 = looking ahead … 1 = fully over the shoulder (eased) */
+  get lookBackAmount(): number {
+    return smoothstep(0, 1, this.lookBackRamp);
+  }
+
+  /** near → chase → far → cockpit → near (design §3: V / Y; §T.192 far step); ignored during a crash */
   cycleMode(): void {
     if (this.modeV === 'crash') return;
     this.setMode(CYCLE[(CYCLE.indexOf(this.modeV) + 1) % CYCLE.length]);
@@ -227,6 +270,8 @@ export class RaceCam {
     if (m === this.modeV) return;
     const from = this.modeV;
     this.modeV = m;
+    // a head turned over the shoulder does not survive leaving or entering the cockpit
+    this.lookBackRamp = 0;
     if (from === 'cockpit' || m === 'cockpit') {
       // a cut: nothing to glide through between the pilot's eye and a chase boom
       this.blend = 0;
@@ -283,6 +328,7 @@ export class RaceCam {
     this.shakeAmp = 0;
     this.dipX = this.dipV = 0;
     this.headExcess = this.headExcessPrev = 0;
+    this.lookBackRamp = 0;
   }
 
   update(target: RaceCamTarget, frameDt: number, heightFn?: RaceHeightFn): void {
@@ -318,7 +364,8 @@ export class RaceCam {
       this.airBlend = target.wet ? 0 : 1;
       this.init = true;
     }
-    const rig = this.modeV === 'near' || (this.modeV === 'crash' && this.prevMode === 'near') ? p.near : p.chase;
+    const outside = this.modeV === 'crash' ? this.prevMode : this.modeV;
+    const rig = outside === 'near' ? p.near : outside === 'far' ? p.far : p.chase;
     {
       const from = this.yaw + wrapAngle(this.headingPrev - this.yaw);
       const to = from + wrapAngle(heading - this.headingPrev);
@@ -337,8 +384,8 @@ export class RaceCam {
 
     let fovTarget: number;
     const cam = this.camera;
-    this.mirrorActive = this.modeV === 'cockpit' && this.lookBack;
-    // look back is a CUT both ways (a swing through the side at 80 kn is disorienting): drop any running blend
+    // outside rigs: look back is a CUT both ways (a swing through the side at 80 kn is disorienting), so drop any
+    // running blend. The cockpit turns the head instead (applyCockpit), which is a person's motion, not a boom's.
     if (this.lookBack !== this.lookBackPrev) {
       this.lookBackPrev = this.lookBack;
       if (this.modeV !== 'cockpit' && this.modeV !== 'crash') this.blend = 0;
@@ -403,9 +450,10 @@ export class RaceCam {
     const cz = pz - hz * rig.distance;
     const cy = Math.max(this.pivotY + rig.height, water(cx, cz) + p.minHeightAboveWater);
     this.pos.set(cx, cy, cz);
-    let lx = px + hx * p.lookAhead;
+    const ahead = rig.lookAhead ?? p.lookAhead;
+    let lx = px + hx * ahead;
     let ly = this.pivotY;
-    let lz = pz + hz * p.lookAhead;
+    let lz = pz + hz * ahead;
     if (this.airBlend > 0 && !this.lookBack) {
       const land = ballisticLanding(target.position, target.velocity, water(px, pz));
       const k = p.airLookToLanding * this.airBlend;
@@ -470,6 +518,17 @@ export class RaceCam {
     if (qc) {
       const e = quatMul(qc, [this.eyeQuat.x, this.eyeQuat.y, this.eyeQuat.z, this.eyeQuat.w]);
       this.eyeQuat.set(e[0], e[1], e[2], e[3]).normalize();
+    }
+    // look back: a rate-limited ramp eased by a smoothstep (exact for any partition of time), then the lean in the
+    // head's frame and the yaw about the head's own up axis (local +Y: the view −Z swings toward local −X = left)
+    this.lookBackRamp = moveToward(this.lookBackRamp, this.lookBack ? 1 : 0, dt / Math.max(p.cockpitLookBackSeconds, 1e-3));
+    const turn = smoothstep(0, 1, this.lookBackRamp);
+    if (turn > 0) {
+      const [lx, ly, lz] = p.cockpitLookBackLean;
+      this.tmpLean.set(lx * turn, ly * turn, lz * turn).applyQuaternion(this.eyeQuat);
+      this.eyePos.add(this.tmpLean);
+      const t = quatMul([this.eyeQuat.x, this.eyeQuat.y, this.eyeQuat.z, this.eyeQuat.w], quatFromAxisAngle([0, 1, 0], p.cockpitLookBackDeg * DEG * turn));
+      this.eyeQuat.set(t[0], t[1], t[2], t[3]).normalize();
     }
     // landing dip, exact critically damped spring, bounded
     if (p.reducedMotion) this.dipX = this.dipV = 0;

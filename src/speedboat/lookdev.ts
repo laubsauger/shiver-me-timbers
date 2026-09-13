@@ -6,13 +6,17 @@
  * Query params (all optional):
  *   scene=studio|sea        studio: sky + grey ground, no ocean (cheap, default)
  *                           sea:    the shared buildSea() open sea, waterLighting + wetline + foam tag live
- *   variant=hero|npc        hero = transmissive perspex; npc = alpha perspex
+ *   variant=hero|npc        material set (both blend the perspex since §T.192)
  *   view=lit|slot|uv|normal|lod    material debug view (key [v] cycles)
  *   livery=<hex>            livery hue on the gelcoat mask, e.g. livery=d9442b (key [l] cycles)
  *   spin=0|1                turntable (key [space])
  *   count=1..8              instances in a row (draw-call sharing check; extra boats are npc)
  *   dist=<m>                initial camera distance      y=<m>  CG height above the sea (sea scene)
  *   tod=<h>                 time of day
+ *   weather=<preset>        sea scene weather (default calm)
+ *   mask=0                  hide the hull water mask (§T.192 before/after)
+ *   cam=px,py,pz,tx,ty,tz   fixed camera and target, boat frame (verification screenshots)
+ *   steer=<deg> rpm=<n> trim=<deg>   drive pose (§T.192 setDriveState); drive=1 sweeps steer ±20° and rpm 0…3000
  *
  * `window.__lookdev` exposes { app, asset, boats, setView } for scripted browser checks.
  * §V109: nothing here reaches main.ts, main-raft.ts, raft/, combat/ or ai/.
@@ -79,7 +83,7 @@ async function boot(): Promise<void> {
   let sea: Sea | null = null;
   if (sceneMode === 'sea') {
     const weather = createWeatherSystem({ seed: state.seed });
-    weather.apply('calm');
+    weather.apply(q.get('weather') ?? 'calm');
     sea = buildSea(app, state, sky, weather, { sites: [], wakeSpeedScale: 1, seaParams: seaPhysicsParams });
   } else {
     const ground = new THREE.Mesh(new THREE.CircleGeometry(60, 64), new THREE.MeshStandardNodeMaterial({ color: 0x8a8d90, roughness: 0.9 }));
@@ -111,6 +115,9 @@ async function boot(): Promise<void> {
     boats.push(b);
   }
   if (q.has('livery')) boats[0].setLivery(parseInt(q.get('livery') as string, 16));
+  if (q.get('mask') === '0') for (const b of boats) if (b.waterMask) b.waterMask.visible = false;
+  const driveSweep = q.get('drive') === '1';
+  const DEG = Math.PI / 180;
   const hero = boats[0];
 
   // camera: orbit + turntable around the hero's mid-deck
@@ -119,6 +126,12 @@ async function boot(): Promise<void> {
   const dist = num('dist', length * 1.35);
   app.camera.position.set(target.x + dist * 0.72, target.y + dist * 0.32, target.z + dist * 0.62);
   app.controls.target.copy(target);
+  // cam=px,py,pz,tx,ty,tz (boat frame, metres): a fixed verification view that survives a reload
+  const camQ = (q.get('cam') ?? '').split(',').map(Number);
+  if (camQ.length === 6 && camQ.every(Number.isFinite)) {
+    app.camera.position.set(camQ[0], boatY + camQ[1], camQ[2]);
+    app.controls.target.set(camQ[3], boatY + camQ[4], camQ[5]);
+  }
   app.controls.autoRotate = spinFromQuery;
   app.controls.autoRotateSpeed = 1.2;
   app.controls.update();
@@ -228,6 +241,14 @@ async function boot(): Promise<void> {
       sea.flowFoam.renderInjection(app.renderer, app.scene);
       sea.flowFoam.update(app.renderer, dt);
     }
+    const tt = state.time;
+    const rpm = driveSweep ? 1500 + 1500 * Math.sin(tt * 0.4) : num('rpm', 0);
+    const driveState = {
+      steerRad: (driveSweep ? 20 * Math.sin(tt * 0.9) : num('steer', 0)) * DEG,
+      trimRad: num('trim', 0) * DEG,
+      propRpm: [rpm, rpm, rpm],
+    };
+    for (const b of boats) b.setDriveState(driveState, dt);
     app.controls.update();
     if (sea !== null) {
       sea.clouds.update(state.time, sky.sunDirection);

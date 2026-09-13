@@ -66,6 +66,8 @@ SHARP_POINTS_COARSE = SHARP_POINTS | {'s0_f1', 's1_f1', 's2_f1', 'chine_c2', 'ed
 
 ISLAND_SHELL_P, ISLAND_SHELL_S, ISLAND_DECK, ISLAND_WELL, ISLAND_TRANSOM, ISLAND_PLATE, ISLAND_DECK_NUMBER = range(7)
 MAT_GELCOAT, MAT_NONSLIP = 0, 1
+# salvage plates stand this far proud of the shell (plate skin, rivet bases)
+PLATE_PROUD = 0.005
 
 
 class HeroHull:
@@ -183,6 +185,31 @@ class HeroHull:
             return hw
         return max(self.well_w_end, min(hw, self._scr_x(z)))
 
+    def water_mask(self, margin=0.02, samples=48):
+        """§T.192 WATER MASK: the cockpit well's opening at the sheer, body frame, for the runtime depth cap
+        (src/speedboat/assets/waterMask.ts). The shell is closed everywhere else, so this opening is the only way to
+        see water standing inside the hull (rest waterline ≈ 0.6 m above the keel, the sole 0.55 m).
+        Outline = the lip's outer edge (well half-width + lip radius) + `margin`, over z from the aft lip to the forward
+        lip. Fails loud if the cap would reach within 5 cm of the deck edge: a cap over the
+        topsides would hide real sea behind the boat."""
+        za, zf = self.well_aft, self.well_fwd_end
+        ext = self.lip_r + margin
+        pts_r = []
+        for i in range(samples + 1):
+            z = (za - ext) + (zf + ext - (za - ext)) * i / samples
+            w = self.well_width(min(max(z, za), zf)) + ext
+            edge = self.proxy_sheer_half(z)
+            if w > edge - 0.05:
+                raise RuntimeError(f'hero hull: water mask half-width {w:.3f} at z {z:.2f} reaches the deck edge {edge:.3f}')
+            pts_r.append((w, z))
+        # closed ring: the +x side aft → fwd, then the −x side fwd → aft (the runtime triangulates and faces it up)
+        ring = [(w, z) for (w, z) in pts_r] + [(-w, z) for (w, z) in reversed(pts_r)]
+        return {
+            'y': round(self.dy - self.vcg, 5),
+            'soleY': round(self.sole_y - self.vcg, 5),
+            'outline': [[round(x, 5), round(z - self.lcg, 5)] for (x, z) in ring],
+        }
+
     def well_nominal(self, z):
         """the flat-deck layout of the well columns (matches the adjacent well end ring)"""
         if z < self.well_aft:
@@ -286,7 +313,7 @@ class HeroHull:
         P['sr_root'] = (xtop(ysr), ysr)
         P['sr_out'] = (xtop(ysr) + e, ysr)
         P['sr_top'] = (xtop(ysr + 2.2 * e), ysr + 2.2 * e)
-        re = 0.015
+        re = self.A.extra.get('deckShape', {}).get('sheerEdgeRadius', 0.015)
         P['flare_a'] = (xtop(yk - h), yk - h)
         P['flare_b'] = (xtop(yk), yk)
         P['flare_c'] = (xtop(yk + h), yk + h)
@@ -409,11 +436,25 @@ class HeroHull:
         k = 0.02
         return min(self.dy, 0.5 * (keel + line + math.sqrt((keel - line) ** 2 + k * k)))
 
+    def _deck_shape(self, pts, z):
+        """§T.192 camber + aft taper (anchors.deck_drop): points at deck level drop fully, the topside below blends to
+        zero over 0.25 m, the well walls and sole stay put. Applied to [(name, x, y)]."""
+        dy = self.dy
+        out = []
+        for (n, x, y) in pts:
+            w = smoothstep(dy - 0.25, dy - 0.02, y)
+            if n.startswith(('wall_b0', 'sole_m', 'sole_b1')) and y < dy - 0.1:
+                w = 0.0
+            if n in ('top',) and y < dy - 0.1:
+                w = 0.0
+            out.append((n, x, y - w * self.A.deck_drop(x, z)))
+        return out
+
     def ring(self, z, kind):
         """closed ring [(name, x, y, z)] for a station"""
         if kind.startswith('transom'):
             half, yb, yt = self.half_section(0.0)
-            pts = self._ring_from_half(half, yb, yt)
+            pts = self._deck_shape(self._ring_from_half(half, yb, yt), 0.0)
             r = TRANSOM_R
             th = {'transom0': 0.0, 'transom1': math.pi / 4, 'transom2': math.pi / 2}[kind]
             inset = r * (1 - math.sin(th))
@@ -423,10 +464,10 @@ class HeroHull:
             if w is None:
                 raise RuntimeError(f'hero hull: well ring at z {z:.3f} outside the well')
             half, yb, yt = self.half_section(z, well=w)
-            return [(n, x, y, z) for (n, x, y) in self._ring_from_half(half, yb, yt)]
+            return [(n, x, y, z) for (n, x, y) in self._deck_shape(self._ring_from_half(half, yb, yt), z)]
         if kind == 'flat':
             half, yb, yt = self.half_section(z)
-            return [(n, x, y, z) for (n, x, y) in self._ring_from_half(half, yb, yt)]
+            return [(n, x, y, z) for (n, x, y) in self._deck_shape(self._ring_from_half(half, yb, yt), z)]
         # ext / nose: scale the z_x section
         half, yb0, yt = self.half_section(self.z_x)
         pts = self._ring_from_half(half, yb0, yt)
@@ -439,7 +480,7 @@ class HeroHull:
             sx *= math.sqrt(max(0.0, 1.0 - q * q))
         dy = self.dy
         sy = (dy - self.stem_y(z)) / (dy - yb0)
-        return [(n, x * sx, dy - (dy - y) * sy, z) for (n, x, y) in pts]
+        return [(n, x, y, z) for (n, x, y) in self._deck_shape([(n, x * sx, dy - (dy - y) * sy) for (n, x, y) in pts], z)]
 
     def apex(self):
         return (0.0, self.dy - 0.004, self.stem_z)
@@ -478,9 +519,11 @@ class HeroHull:
         return base[-1][0]
 
     def plate_geo(self, p, nu=18, nv=6):
-        """closed slab: outer skin 3.5 mm proud (chamfered 2 mm), back 2 mm inside the shell"""
+        """closed slab: outer skin 5 mm proud (chamfered 2.5 mm), back 2 mm inside the shell. §V98 (§T.192 scan): at
+        3.5 mm the doubler's forward corner, where the bow section bulges past the interpolated topside line, came
+        within 2 mm of the shell over 6 × 3 cm"""
         side = p['side']
-        out_off, back_off, ch = 0.0035, -0.002, 0.002
+        out_off, back_off, ch = PLATE_PROUD, -0.002, 0.0025
         grid_o, grid_b, uvs = [], [], []
         for i in range(nv + 1):
             f = i / nv
@@ -800,7 +843,7 @@ class HeroHull:
         side = p['side']
         r0, r1, h = 0.0065, 0.0042, 0.0026
         for (z, y) in self.plate_rivets(p):
-            xb = self.topside_x(z, y) + 0.0035 - 0.0006
+            xb = self.topside_x(z, y) + PLATE_PROUD - 0.0006
             rings = []
             for (rr, hh) in ((r0, 0.0), (r1, h * 0.75)):
                 ring = []

@@ -21,6 +21,7 @@ export { FLEET_LIVERIES, HERO_LIVERY, numberGlyphs, resolveLivery, type BoatLive
 export {
   HERO_BOAT_URL,
   PIPELINE_TEST_BOAT_URL,
+  applyTextureAnisotropy,
   assetFromGltf,
   createBoatAssetLoader,
   type BoatAsset,
@@ -29,3 +30,5 @@ export {
   type BoatInstance,
   type BoatInstanceOptions,
 } from './boatModel';
+export { PROP_BLUR_RPM, type DriveState } from './driveRig';
+export { GAUGE_GLASS_RENDER_ORDER, PERSPEX_RENDER_ORDER, WATER_MASK_RENDER_ORDER, readWaterMask, type WaterMaskSpec } from './waterMask';

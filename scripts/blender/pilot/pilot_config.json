@@ -123,13 +123,13 @@
   },
   "helm": {
     "about": "REAL parts sockets (pilot frame, three.js axes). Read from the parts build (commit b092f2e scripts/blender/parts/*, GLB assets/models/speedboat_pipeline_test.glb built against the current deepV12.hull.json: partsAnchors seatZ 0.234, deckY 0.82): Helm_LOD0 extras pivot/axis, Throttle_LOD0 extras pivot/axis/idleDeg/fullDeg, minus the seat socket (0, 0.69004, 0.234). Rim radius/tube and the throttle handle offset exist only in helm.py / throttle.py code (no extras), footrest in seat.py. The dash-cable jack has NO parts socket (still assumed).",
-    "wheelHub": [0.0, -0.07973, 0.72836],
-    "wheelAxis": [0.0, 0.32432, -0.94595],
+    "wheelHub": [0.0, 0.3, 0.5],
+    "wheelAxis": [0.0, 0.67814, -0.73493],
     "wheelRadius": 0.18,
     "rimTube": 0.0165,
     "gripClockDeg": 52,
     "gripNote": "hands at ten-to-two (52 deg from 12 o'clock): the helm's three spokes sit at 12, 4 and 8 o'clock (helm.py), and the upper rim is 8 cm higher than 9-and-3 on this low wheel",
-    "throttleOrigin": [-0.67, -0.07004, 0.69],
+    "throttleOrigin": [-0.35833, 0.01131, 0.51564],
     "throttleRollDeg": 8,
     "throttlePivotLocal": [0.0, 0.0, -0.02],
     "throttleHandleLocal": [-0.015, 0.215, 0.006],
@@ -140,8 +140,8 @@
     "footBarRadius": 0.021,
     "soleY": -0.62,
     "eyeAnchorParts": [0.0, 0.63, 0.45],
-    "cableDashAnchor": [0.36, -0.2, 0.93],
-    "cableDashAnchorAssumed": true
+    "cableDashAnchor": [0.36, -0.19708, 0.91649],
+    "cableDashAnchorAssumed": false
   },
   "rig": {
     "maxBones": 64,

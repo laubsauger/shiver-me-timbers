@@ -23,10 +23,10 @@
     "M_Pilot": { "alphaMode": "OPAQUE", "surface": "suit, helmet" }
   },
   "assetKinds": {
-    "player": { "triBudget": [120000, 20000, 6000], "drawBudget": [24, 10, 8] },
-    "npc": { "triBudget": [50000, 20000, 6000], "drawBudget": [12, 10, 8] }
+    "player": { "triBudget": [120000, 20000, 6000], "drawBudget": [24, 12, 8] },
+    "npc": { "triBudget": [50000, 20000, 6000], "drawBudget": [12, 12, 8] }
   },
-  "drawBudgetNote": "primitives (draw calls, excluding shadow passes) per LOD for ONE boat: static parts merge into one node per slot; only animated nodes (outboards, props, wheel, dial, throttle levers) stay separate at LOD0, and they fold into merged nodes at LOD1/2 (browser sync 2026-09-13: 72 draws per boat before)",
+  "drawBudgetNote": "primitives (draw calls, excluding shadow passes) per LOD for ONE boat: static parts merge into one node per slot; only animated nodes (outboards, props, wheel, dial, throttle levers, and the gauge glass that must draw before the water mask) stay separate at LOD0; at LOD1 each outboard + prop is one `Drive_<id>` node (2 slots × 3 engines: §T.192, every drive steers about its own swivel, so LOD1 is 12 not 10); LOD2 is all merged (browser sync 2026-09-13: 72 draws per boat before)",
   "lod": {
     "levels": 3,
     "switchScreenFraction": [0.35, 0.12],

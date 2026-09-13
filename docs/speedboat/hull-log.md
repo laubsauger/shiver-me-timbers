@@ -286,3 +286,33 @@ Renders: `scratchpad/hull/v3/{hero34,close_bow,rear34,below,top,foredeck,close_c
 - The doubler rivets read as rows of dark dots rather than bright domes (small scale, grazing light).
 - The bracket now sits inside the transom outline.
 - Bottom variation is visible but restrained. At distance the antifoul is still mostly one colour.
+
+## §T.192, 2026-09-13: water inside the hull, doubler proudness
+
+**Water mask (USER: "we see water poking through the boat's bottom").** Diagnosis, case (a): the rest waterline
+(≈ 0.60 m above the keel, `hero_hull.waterline`) stands above the cockpit sole (0.55 m), so the drawn sea surface passes
+through the open well at rest and on every crest. The shell is closed at every LOD (rule 7), so the well opening is
+the only window. The build now writes root extras `waterMask` = {y (deck), soleY, outline} — the well opening's lip
+edge + 2 cm, from `HeroHull.water_mask()`, failing loud if it comes within 5 cm of the deck edge. The runtime caps the
+opening with a depth-only mesh drawn after the opaque boat and before the (transparent) ocean
+(`src/speedboat/assets/waterMask.ts`): no ocean change, no sampler, no discard. Checker `waterMaskErrors`: on the deck,
+covering every sole vertex of LOD0 (interior vertices only), inside the deck edge; the hero GLB test fails an outline
+shrunk 20 %.
+
+**Bow doubler** stands 5 mm proud (was 3.5 mm, chamfer 2.5 mm): at 3.5 mm its forward corner came within 2 mm of the
+bulging bow section over 6 × 3 cm (the new §V98 checker rule).
+
+**Deck shape (USER: "the back and the top of the boat are too flat. a bit of a taper like in our initial reference").**
+Render-only, from manifest `anchorsNotInHullJson.deckShape`, applied to every ring (`HeroHull._deck_shape`) and to
+every part that stands on the deck (`anchors.deck_surface_y`):
+- camber: the deck falls away from the centreline as a parabola, 4.5 cm at 1.23 m half-beam
+- aft taper: the aft deck slopes down to the transom over its last 2.3 m, 7 cm at the transom (smoothstep)
+- sheer edge radius 15 → 35 mm
+- the deck centreline forward of the taper stays on the proxy deck, so the checker's deck ±2 cm, the section rule and
+  the water-mask height still hold; the well walls and sole do not move (the lip drops with the camber, the well is
+  2 cm shallower at its sides).
+
+**Deck livery (USER: player colour band, white band, rubber non-skid).** Runtime paint on `M_NonSlip`, no new
+texture: plan distance from the deck outline measured off `Hull_LOD0` (`boatModel.measureDeckEdge`, 64-entry uniform
+array) → 0.17 m band in the boat's dominant hue (round the transom edge, closing to a point at the stem), 0.05 m
+bone-white band, then the baked non-skid field; the paint lifts the non-skid relief and is satin.

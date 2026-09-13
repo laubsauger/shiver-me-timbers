@@ -113,12 +113,14 @@ A new rig. `followCam.ts` and `camMath.ts` are only imported.
 |---|---|
 | chase | 7.5 m back / 2.4 m up; FOV 60→76° over 15–45 m/s, slewed ≤ 20°/s; heave low-pass 0.8 s; roll follow 30% (fades out airborne or past 60° tilt); yaw half-life 0.2 s; airborne look target 30% toward the ballistic landing point |
 | near | 4 m / 1.5 m; FOV 68→82°; yaw half-life 0.15 s |
-| cockpit | `cam_eye` world pose via `setEyeSource`. Fallback: seat station + 0.63 above the sheer and 0.29 ahead of the seat (pilot-log blocker 1: the rigged eyes sit 0.13 m above and 0.16 m aft of the parts anchor). Head follows 100% of tilt up to 12°; beyond that it lags with a 0.25 s half-life. Landing dip ≤ 6 cm (exact critical spring). FOV 72→86°. `onCockpitChange(true/false)` → collapse/restore `head_geo`. Look back = `mirrorActive` (hoop mirror). |
+| far (§T.192) | 22 m back / 7.5 m up, looking 4 m **aft** of the CG; FOV 55→66°; yaw half-life 0.3 s. Framing: pitch atan(7.5/18) = 22.6°, bottom ray 50.1° down ⇒ water enters the frame 7.4 m ahead of the lens ⇒ ≈ 11 m of wake astern of the transom plus the Kelvin arms and the rooster tail; the top ray is 4.9° above the horizon; the hull spans NDC y −0.16 (props) … +0.27 (bow). Tested: props, cowl tops, bow, a wake point 10 m astern and its arm 3.5 m out, and the horizon are in frame at rest and at 40 m/s; the chase rig cannot see that wake point |
+| cockpit | `cam_eye` world pose via `setEyeSource`. Fallback: seat station + 0.63 above the sheer and 0.29 ahead of the seat (pilot-log blocker 1: the rigged eyes sit 0.13 m above and 0.16 m aft of the parts anchor). Head follows 100% of tilt up to 12°; beyond that it lags with a 0.25 s half-life. Landing dip ≤ 6 cm (exact critical spring). FOV 72→86°. `onCockpitChange(true/false)` → collapse/restore `head_geo`. **Look back (§T.192) turns the head over the left shoulder**: 160° of yaw about the head's own up axis, the eye leaning 0.22 m left and 4 cm up (the headrest stays at the right edge), eased over 0.35 s (rate-limited ramp → smoothstep, exact for any frame time); the head stays hidden. `mirrorActive` is kept for compatibility and is always false. |
 | crash | World-anchored orbit: radius 14 m, 5 m up, 12°/s, looking at the hull. Blends in from chase (0.5 s) and cuts from the cockpit. `endCrash` blends back over 0.8 s. `crashTimeScale` (0.35× for 1.2 s) and `crashCamAllowed` (20 s cooldown) are helpers for the page. |
 
 - **Frame-rate independence:** every smoother is `dampMoving`, a rate limit or a closed form.
 - **Heading:** hull yaw only while wet and |fwd_xz| > 0.5; otherwise velocity yaw; otherwise the last heading is held. The switch blends over 0.25 s. No Euler angles.
-- **Look back:** a cut both ways.
+- **Cycle (V / Y, §T.192):** near → chase → far → cockpit → near; the rig starts on **far** (`RACE_CAM_DEFAULTS.defaultMode`, USER: "the default view distance should be the farthest out").
+- **Look back:** a cut both ways on the outside rigs; a smooth head turn in the cockpit.
 - **Slam shake:** ≤ 1.5° per axis, 0.25 s half-life. Reduced motion turns off shake, dip and head lag.
 
 ## Tests
@@ -148,7 +150,7 @@ Command: `npx vitest run tests/speedboatControls.test.ts tests/speedboatAssist.t
   - landing assist beats off on 5 bars; bit-identical without a trim path
   - determinism
   - Mutation-checked: heel guard off, Governor off and landing sign flipped each fail their test.
-- **raceCam (18):**
+- **raceCam (27 since §T.192: + cycle order, far framing, far-is-the-wake-step, far frame-rate independence, cockpit look-back angle/lean/level horizon/head hidden, smooth turn and return, exact at 40 vs 200 fps, turn about the cam_eye head axis, outside look-back still a cut). Mutation-checked: far lookAhead +6 fails both framing tests; zero lean fails the look-back test.** Original 18:
   - 50/60/100/144/jittery fps within 1 mm and 0.1 px of 960 fps
   - the 50↔100 fps flip does not shake the hull on screen (jerk under 2× steady)
   - the smoothers are exercised (lag > 1°)

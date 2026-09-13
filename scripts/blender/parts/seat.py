@@ -29,7 +29,7 @@ def back_section(t):
 def build(A):
     S = A.seat()
     x0, z0, ys = S['x'], S['z'], S['soleY']
-    y_pan = ys + 0.62
+    y_pan = ys + A.extra['seat']['panAboveSole']
     pieces = []
 
     # ── pedestal ────────────────────────────────────────────────────────────
@@ -108,11 +108,13 @@ def build(A):
             p = Vector((x0 + side * (0.075 - 0.035 * (1 - i / 8)), back_y0, back_z0)) + up * (H * t) + fwd * 0.012
             path.append(tuple(p))
             ups.append(tuple(fwd))
-        # over the pan to the buckle
-        pan_top = Mp @ Vector((side * 0.02, 0.058, -0.05))
+        # over the pan to the buckle. §V98 (§T.192 scan): the two straps converge and overlapped 3 cm wide in ONE plane;
+        # the port strap lies on top of the starboard one (6 mm up: 3 mm webbing + clearance)
+        lift = 0.006 if side > 0 else 0.0
+        pan_top = Mp @ Vector((side * 0.02, 0.058 + lift, -0.05))
         path.append(tuple(pan_top))
         ups.append(tuple((Mp.to_3x3() @ Vector((0, 1, 0))).normalized()))
-        path.append(tuple(buckle_c + Vector((side * 0.01, 0.01, -0.02))))
+        path.append(tuple(buckle_c + (Mp.to_3x3() @ Vector((0, lift, 0))) + Vector((side * 0.01, 0.01, -0.02))))
         ups.append(tuple((Mp.to_3x3() @ Vector((0, 1, 0.3))).normalized()))
         straps.extend(kit.ribbon(path, 0.05, 0.003, ups))
         adj = Vector(path[3]) + fwd * 0.006
@@ -128,4 +130,10 @@ def build(A):
     cam.extend(kit.cylinder(0.02, 0.008, segs=16).transform(Matrix.Translation(buckle_c + (Mp.to_3x3() @ Vector((0, 0.014, 0.004)))) @ kit.frame((0, 0, 0), (1, 0, 0), (Mp.to_3x3() @ Vector((0, 1, 0.3))).normalized())))
     hard.extend(cam)
     pieces.append(Piece('harness_hardware', hard, 'M_Metal', 'alu_bare', max_lod=0, bevel=(0.002, 1), smooth=40))
-    return {'pieces': pieces, 'extras': {}}
+    sockets = {
+        'seat': {'position': [round(x0, 5), round(y_pan, 5), round(z0, 5)], 'up': [0.0, 1.0, 0.0], 'forward': [0.0, 0.0, 1.0],
+                 'about': 'pan top centre at the JSON seat station, body frame: the pilot frame origin (pilot-log v2)'},
+        'footrest': {'centre': [round(x0, 5), round(ys + 0.22, 5), round(z0 + 0.36, 5)], 'axis': [1.0, 0.0, 0.0], 'halfLength': 0.15, 'radius': 0.021,
+                     'about': 'rubber-gripped foot bar, body frame'},
+    }
+    return {'pieces': pieces, 'extras': {}, 'sockets': sockets}

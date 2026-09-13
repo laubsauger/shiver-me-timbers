@@ -20,7 +20,7 @@ import { createIO, readBytes } from '../scripts/blender/checkGlb.mjs';
 import { checkPilotDocument, loadPilotConfig } from '../scripts/blender/pilot/checkPilotGlb.mjs';
 
 const GLB = new URL('../assets/models/speedboat_pilot.glb', import.meta.url).pathname;
-const PARTS_GLB = new URL('../assets/models/speedboat_pipeline_test.glb', import.meta.url).pathname;
+const PARTS_GLB = new URL('../assets/models/speedboat_hero.glb', import.meta.url).pathname;
 const cfg = loadPilotConfig();
 
 async function load(path = GLB): Promise<Document> {

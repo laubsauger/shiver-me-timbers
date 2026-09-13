@@ -29,8 +29,9 @@ def jerrycan(M):
     for k in range(3):
         zz = -0.1 + 0.1 * k
         handles.extend(kit.sweep(kit.fillet_path([(0, h, zz - 0.03), (0, h + 0.045, zz - 0.03), (0, h + 0.045, zz + 0.03), (0, h, zz + 0.03)], 0.012, 2), 0.009, 6))
-    spout = kit.cylinder(0.024, 0.05, segs=16).transform(Matrix.Translation((0, h - 0.01, 0.13)) @ kit.rot('X', 25))
-    spout.extend(kit.cylinder(0.03, 0.03, segs=16).transform(Matrix.Translation((0, h + 0.03, 0.15)) @ kit.rot('X', 25)))
+    # §T.192 budget: 16 → 12 sides
+    spout = kit.cylinder(0.024, 0.05, segs=12).transform(Matrix.Translation((0, h - 0.01, 0.13)) @ kit.rot('X', 25))
+    spout.extend(kit.cylinder(0.03, 0.03, segs=12).transform(Matrix.Translation((0, h + 0.03, 0.15)) @ kit.rot('X', 25)))
     clamp = kit.box(0.03, 0.02, 0.07, center=(0, h + 0.03, 0.10))
     return g.transform(M), x.transform(M), handles.transform(M), spout.transform(M), clamp.transform(M)
 
@@ -98,7 +99,9 @@ def build(A):
     p1 = [(0.22, ys + 0.005, zc), (0.265, top_j - 0.12, zc), (0.28, top_j - 0.01, zc), (0.63, top_j - 0.01, zc),
           (0.645, top_j - 0.12, zc), (0.69, ys + 0.005, zc)]
     straps.extend(kit.ribbon(p1, 0.038, 0.003, [(-1, 0.2, 0), (-1, 0.1, 0), (0, 1, 0), (0, 1, 0), (1, 0.1, 0), (1, 0.2, 0)]))
-    top_c = ys + ch + 0.16 + 0.005
+    # §V98 (§T.192 scan): the strap's centre line lay ON the small case's lid (webbing faces within 1.5 mm of it over
+    # 26 cm); it now lies on top of the lid: centre 4 mm up, the 3 mm webbing's underside 2.5 mm clear
+    top_c = ys + ch + 0.16 + 0.009
     p2 = [(-0.69, ys + 0.005, zc + 0.01), (-0.655, ys + ch * 0.8, zc + 0.01), (-0.58, top_c - 0.005, zc + 0.01), (-0.22, top_c - 0.005, zc + 0.01),
           (-0.10, ys + ch * 0.95, zc + 0.01), (-0.03, ys + 0.005, zc + 0.01)]
     straps.extend(kit.ribbon(p2, 0.038, 0.003, [(-1, 0.3, 0), (-1, 0.3, 0), (0, 1, 0), (0, 1, 0), (1, 0.6, 0), (1, 0.3, 0)]))

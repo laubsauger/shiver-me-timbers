@@ -17,7 +17,17 @@ from kit import Geo, Piece
 from cockpit_frame import Face
 
 
-def build(A):
+def build(A, pieces='body'):
+    """pieces='body': everything but the gauge glass; 'glass': the gauge glass only. The glass is its own GLB node
+    (`GaugeGlass`) because it is the one see-through surface BELOW the sheer inside the well: the runtime draws it
+    before the hull's water mask, which would otherwise hide it (src/speedboat/assets/waterMask.ts, §T.192)"""
+    out = _build(A)
+    keep = (lambda p: p.name == 'gauge_glass') if pieces == 'glass' else (lambda p: p.name != 'gauge_glass')
+    return {'pieces': [p for p in out['pieces'] if keep(p)], 'extras': out['extras'] if pieces != 'glass' else {},
+            'sockets': out['sockets'] if pieces != 'glass' else {}}
+
+
+def _build(A):
     F = Face(A)
     D, W = F.D, F.W
     hw = W['halfWidth'] - 0.004
@@ -149,4 +159,11 @@ def build(A):
     Mg = F.matrix(-0.22, F.height - 0.035, 0.0075, spin_deg=-9)
     tape = kit.box(0.13, 0.048, 0.0012)
     pieces.append(Piece('gaffer_tape', tape.transform(Mg), 'M_Cockpit', 'tape_grey', max_lod=0, smooth=35, tier='cockpit', wear=1.4))
-    return {'pieces': pieces, 'extras': {'eye': list(A.eye())}}
+    # headset cable jack (the pilot's dash cable plugs in here): a threaded socket on the face panel, bottom right
+    Mj = F.matrix(0.36, 0.09, 0.006)
+    jack = kit.cylinder(0.011, 0.018, segs=10).transform(Mj @ kit.rot('X', 90))
+    jack.extend(kit.cylinder(0.016, 0.004, segs=10).transform(Mj @ Matrix.Translation((0, 0, -0.002)) @ kit.rot('X', 90)))  # collar sunk 2 mm: no shared base plane
+    pieces.append(Piece('cable_jack', jack, 'M_Metal', 'anodised_black', max_lod=0, smooth=40, tier='cockpit'))
+    sockets = {'dashCableAnchor': {'position': [round(c, 5) for c in (Mj @ Vector((0, 0, 0.018)))], 'normal': [round(c, 5) for c in F.n],
+                                   'about': 'headset cable jack mouth on the dash face, body frame; normal toward the pilot'}}
+    return {'pieces': pieces, 'extras': {'eye': list(A.eye())}, 'sockets': sockets}

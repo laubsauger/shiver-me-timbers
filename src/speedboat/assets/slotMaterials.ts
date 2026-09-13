@@ -21,25 +21,32 @@
  */
 import * as THREE from 'three/webgpu';
 import {
+  Fn,
   dFdx,
   dFdy,
   float,
   fwidth,
+  int,
   luminance,
+  min,
   mix,
   normalize,
   normalLocal,
   normalMap,
+  normalView,
+  normalWorld,
   normalWorldGeometry,
   objectGroup,
   positionLocal,
   positionView,
+  positionViewDirection,
   positionWorld,
   select,
   smoothstep,
   step,
   texture,
   uniform,
+  uniformArray,
   uv,
   vec2,
   vec3,
@@ -52,11 +59,38 @@ import { HERO_LIVERY, numberGlyphs, resolveLivery } from './livery';
 export type BoatVariant = 'hero' | 'npc';
 
 export interface SlotMaterialOptions {
-  /** hero pays for true transmission on the perspex; npc boats use cheap alpha (doc §5.4) */
+  /** materials are keyed per variant (the hero/npc split of doc §5.4); since §T.192 both blend the perspex the same way */
   variant: BoatVariant;
   /** fold in waterLighting(); false for a studio lookdev with no sea bound */
   water: boolean;
+  /** the deck's outline for the painted deck livery on M_NonSlip (boatModel measures it off Hull_LOD0) */
+  deckEdge?: DeckEdge;
 }
+
+/** plan outline of the deck: the widest hull half-beam near deck height per z bin, body frame */
+export interface DeckEdge {
+  z0: number;
+  dz: number;
+  half: number[];
+  sternZ: number;
+  deckY: number;
+}
+
+/**
+ * §T.192 DECK LIVERY (USER: "some kind of usage of the respective player colour … on the top of the boat… some orange
+ * band, resp. whatever player colour we got, and then a band of white and then the rubber decking anti-slip"). Painted
+ * in plan-view distance from the deck edge (the hull's own outline, a 64-entry uniform array — no texture, §V40), so
+ * every livery drives it and it runs round the transom edge and closes to a point at the bow:
+ *   0 … DECK_BAND_M      the boat's dominant colour (the first 35 mm is the rounded sheer edge)
+ *   … + DECK_STRIPE_M    bone-white pinstripe band
+ *   beyond               the moulded rubber non-skid field (baked albedo + the tiling detail normal)
+ * Edges anti-aliased with fwidth; paint is smooth (the non-skid relief is lifted off it) and satin (roughness 0.38),
+ * shaded by the baked AO so hardware bases and the hatch gap stay grounded. Only up-facing deck-height texels: the
+ * well walls, sole and lip keep their non-skid.
+ */
+export const DECK_BAND_M = 0.17;
+export const DECK_STRIPE_M = 0.05;
+const DECK_WHITE = 0xe9e5da;
 
 type SourceMaterial = THREE.MeshStandardMaterial & Partial<THREE.MeshPhysicalMaterial>;
 
@@ -184,6 +218,56 @@ function hullLiveryAlbedo(maskMap: THREE.Texture, map: TslNode, baseFactor: TslN
   return { albedo, boot, overlay };
 }
 
+/**
+ * §T.192 COCKPIT TOO DARK (USER: "cockpit a bit dark in general, so drowning stuff out a bit"). Two measured causes:
+ *  1. NO SPECULAR AMBIENT. The scene has a HemisphereLight and no environment, and a hemisphere light is diffuse-only:
+ *     a metal (M_Metal ORM metalness median 0.77 — rails, bezels, wheel, bracket, rams) has no diffuse, so everything
+ *     metal out of the sun rendered near black, and the carbon clearcoat had nothing to reflect.
+ *     Fix: a procedural SKY ENVIRONMENT for the boat slots, the scene's own hemisphere read back each render as
+ *     radiance (ground → sky over the reflected direction's height). L = C·intensity/π is exactly the radiance whose
+ *     irradiance the hemisphere light already applies (E = πL), so reflections are as bright as the ambient they
+ *     belong to, and they follow the time of day. The IRRADIANCE lookup returns 0: the hemisphere light keeps the
+ *     diffuse, nothing is counted twice. No texture, no sampler (§V40).
+ *  2. CRUSHED AO. The parts' Cycles AO (0.6 m rays) inside a 0.75 m deep well: M_Cockpit AO median 0.21, a quarter of
+ *     its texels 0 (M_Carbon a quarter < 0.06), so the ambient that does reach the cockpit was multiplied by ~0.2.
+ *     Fix: parts slots remap AO onto [AO_FLOOR_PARTS, 1] — contact shadows and cavities keep their ORDER and shape, the
+ *     well stops being a black pit. The hull's own AO (median 0.92) is untouched.
+ * Hemisphere lookup is cached per scene.
+ */
+export const AO_FLOOR_PARTS = 0.35;
+const PARTS_SLOTS: readonly SlotName[] = ['M_Carbon', 'M_Metal', 'M_Cockpit', 'M_Perspex'];
+const hemiOfScene = new WeakMap<object, THREE.HemisphereLight | null>();
+let skyEnvNode: TslNode | null = null;
+function skyEnvironment(): TslNode {
+  if (skyEnvNode) return skyEnvNode;
+  const sky = uniform(new THREE.Color(0.25, 0.28, 0.32));
+  const ground = uniform(new THREE.Color(0.1, 0.1, 0.1));
+  sky.onRenderUpdate(({ scene }) => {
+    if (!scene) return;
+    let hemi = hemiOfScene.get(scene);
+    if (hemi === undefined || (hemi && !hemi.parent)) {
+      hemi = null;
+      scene.traverse((o) => {
+        if (!hemi && (o as THREE.HemisphereLight).isHemisphereLight) hemi = o as THREE.HemisphereLight;
+      });
+      hemiOfScene.set(scene, hemi);
+    }
+    if (!hemi) return;
+    const k = Number.isFinite(hemi.intensity) ? Math.max(0, hemi.intensity) / Math.PI : 0;
+    (sky.value as THREE.Color).copy(hemi.color).multiplyScalar(k);
+    (ground.value as THREE.Color).copy(hemi.groundColor).multiplyScalar(k);
+  });
+  // a zero-parameter Fn receives the node builder (TSLCore: `jsFunc(builder)`), whose context is EnvironmentNode's
+  const envFn = Fn((builder: { context: { getUV?: () => TslNode } }) => {
+    const dir = builder.context.getUV?.();
+    // irradiance context (EnvironmentNode asks with normalWorld): the HemisphereLight already lights the diffuse
+    if (!dir || dir === normalWorld) return vec3(0);
+    return mix(ground, sky, smoothstep(-0.2, 0.35, (dir as TslNode).y));
+  }) as unknown as () => TslNode;
+  skyEnvNode = envFn();
+  return skyEnvNode;
+}
+
 export function createSlotMaterial(slot: SlotName, source: THREE.Material, opts: SlotMaterialOptions): THREE.MeshPhysicalNodeMaterial {
   const s = source as SourceMaterial;
   const m = new THREE.MeshPhysicalNodeMaterial();
@@ -220,14 +304,44 @@ export function createSlotMaterial(slot: SlotName, source: THREE.Material, opts:
   const orm = ormTex ? texture(ormTex) : null;
   const rough = orm ? orm.g.mul(s.roughness ?? 1) : float(s.roughness ?? 0.5);
   const metal = orm ? orm.b.mul(s.metalness ?? 1) : float(s.metalness ?? 0);
-  if (orm) m.aoNode = mix(float(1), orm.r, float(s.aoMapIntensity ?? 1));
+  if (orm) {
+    const ao = mix(float(1), orm.r, float(s.aoMapIntensity ?? 1));
+    m.aoNode = PARTS_SLOTS.includes(slot) ? mix(float(AO_FLOOR_PARTS), float(1), ao) : ao;
+  }
+  // specular ambient from the sky the hemisphere light describes (header, cause 1)
+  m.envNode = skyEnvironment();
 
   const w = opts.water
     ? waterLighting({ worldPos: positionWorld, normal: normalWorldGeometry, shipLocalPos: positionLocal, mode: 'both' })
     : null;
 
+  let deckPaint: TslNode | null = null;
+  let roughOut: TslNode = rough;
+  if (slot === 'M_NonSlip' && opts.deckEdge && opts.deckEdge.half.length >= 2) {
+    const de = opts.deckEdge;
+    const hue = uniform(new THREE.Color(HERO_LIVERY.dominant)).setGroup(objectGroup);
+    hue.onObjectUpdate((frame) => {
+      (hue.value as THREE.Color).set(resolveLivery(liveryOwner(frame.object)).dominant);
+    });
+    const halfArr = uniformArray(de.half, 'float');
+    const p = positionLocal;
+    const fi = p.z.sub(de.z0).div(Math.max(de.dz, 1e-4)).clamp(0, de.half.length - 1.001);
+    const i0 = int(fi.floor());
+    const halfAt = mix(halfArr.element(i0), halfArr.element(i0.add(1)), fi.fract());
+    const d = min(halfAt.sub(p.x.abs()), p.z.sub(de.sternZ));
+    const aw = fwidth(d).max(1e-4);
+    const inside = (edge: number): TslNode => smoothstep(float(edge).sub(aw), float(edge).add(aw), d); // 1 beyond the edge
+    const onTop = smoothstep(0.55, 0.8, normalLocal.y).mul(step(de.deckY - 0.3, p.y));
+    const band = inside(DECK_BAND_M).oneMinus().mul(onTop);
+    const white = inside(DECK_BAND_M).mul(inside(DECK_BAND_M + DECK_STRIPE_M).oneMinus()).mul(onTop);
+    const shade = orm ? mix(float(0.78), float(1), orm.r) : float(1);
+    albedo = mix(mix(albedo, uniform(new THREE.Color(DECK_WHITE)).mul(shade), white), hue.mul(shade), band);
+    deckPaint = band.add(white).clamp(0, 1);
+    roughOut = mix(rough, float(0.38), deckPaint);
+  }
+
   m.colorNode = w ? albedo.mul(w.tint) : albedo;
-  m.roughnessNode = (w ? rough.mul(w.roughnessScale) : rough).clamp(0.02, 1);
+  m.roughnessNode = (w ? roughOut.mul(w.roughnessScale) : roughOut).clamp(0.02, 1);
   m.metalnessNode = metal;
   if (w) m.emissiveNode = w.addLight;
   if (s.normalMap) {
@@ -238,7 +352,7 @@ export function createSlotMaterial(slot: SlotName, source: THREE.Material, opts:
       // non-skid, faded out with distance so it band-limits (§V48)
       const det = texture(s.clearcoatNormalMap, uv().mul(ns.atlasMetres / ns.tileMetres)).xyz.mul(2).sub(1);
       const base = texture(s.normalMap).xyz.mul(2).sub(1);
-      const k = map.a.mul(smoothstep(ns.fade[0], ns.fade[1], positionView.length()).oneMinus());
+      const k = map.a.mul(smoothstep(ns.fade[0], ns.fade[1], positionView.length()).oneMinus()).mul(deckPaint ? deckPaint.oneMinus() : float(1));
       const blended = normalize(vec3(base.xy.add(det.xy.mul(k)), base.z));
       m.normalNode = normalMap(blended.mul(0.5).add(0.5), w ? scale.mul(w.reliefScale) : scale);
     } else {
@@ -261,20 +375,27 @@ export function createSlotMaterial(slot: SlotName, source: THREE.Material, opts:
       m.clearcoat = s.clearcoat && s.clearcoat > 0 ? s.clearcoat : 1;
       m.clearcoatRoughness = s.clearcoatRoughness ?? 0.08;
       break;
-    case 'M_Perspex':
+    case 'M_Perspex': {
+      // §T.192 (USER: "the window shield seems to not be transparent at all"). The hero used `transmission`, whose
+      // backdrop is a viewport copy taken BEFORE the ocean draws (the ocean is itself a transparent-pass reader of the
+      // opaque scene, surfaceMaterial.ts §V.24) — so the screen refracted a sea-less backdrop and read as a grey slab.
+      // Every variant is now alpha-blended smoked polycarbonate drawn AFTER the ocean (PERSPEX_RENDER_ORDER):
+      //  - coverage = the baked opacity in baseColor alpha (smoke 0.38, scratches/salt/grime raise it; bake.py);
+      //  - Schlick Fresnel (F0 0.04, n 1.49) raises it toward grazing, so the sky reflection the physical specular
+      //    adds is not blended away where a real screen turns into a mirror;
+      //  - roughness from the ORM (scratch webs, salt film), relief from the normal map (crazing, chips).
+      // Both faces of the 12 mm slab exist, so FrontSide gives exactly one blend per crossing.
       m.ior = s.ior ?? 1.49;
-      if (opts.variant === 'hero') {
-        // one viewport-texture copy for the hero's screen, never ×8 (doc §5.4)
-        m.transmission = s.transmission && s.transmission > 0 ? s.transmission : 1;
-        m.thickness = 0.012;
-        m.side = THREE.DoubleSide;
-      } else {
-        m.transparent = true;
-        m.opacity = s.opacity < 1 ? s.opacity : 0.35;
-        m.depthWrite = false;
-        m.side = THREE.DoubleSide;
-      }
+      m.transparent = true;
+      m.depthWrite = false;
+      m.side = THREE.FrontSide;
+      const coverage = map ? map.a : float(s.opacity !== undefined && s.opacity < 1 ? s.opacity : 0.38);
+      const cosV = normalView.dot(positionViewDirection).abs().clamp(0, 1);
+      const fresnel = float(0.04).add(float(0.96).mul(cosV.oneMinus().pow(5)));
+      m.opacityNode = mix(coverage, float(1), fresnel).clamp(0, 1);
+      m.metalnessNode = float(0);
       break;
+    }
     default:
       break;
   }

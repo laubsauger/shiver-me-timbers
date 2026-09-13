@@ -20,7 +20,14 @@
       "screenBaseSideOfSeat": 0.8,
       "screenHeight": 0.4,
       "screenRakeDeg": 55,
-      "source": "STYLE-SPEC §2 ergonomics chain (eye sheer+0.50, eye 0.90 behind the screen base, dash 5.55-6.00, screen 0.40 tall raked 35°) re-expressed relative to the JSON seat so the helm follows renderOnly.cockpit.seats. Rake read as 35° FROM VERTICAL (55° from horizontal): at 35° from horizontal the top edge lands 0.33 m from the eye and fills the POV, unlike concept 05"
+      "source": "STYLE-SPEC §2 ergonomics chain (eye sheer+0.50, eye 0.90 behind the screen base, dash 5.55-6.00, screen 0.40 tall raked 35°) re-expressed relative to the JSON seat so the helm follows renderOnly.cockpit.seats. Rake read as 35° FROM VERTICAL (55° from horizontal): at 35° from horizontal the top edge lands 0.33 m from the eye and fills the POV, unlike concept 05",
+      "wheelHubAbovePan": 0.3,
+      "wheelHubAheadOfSeat": 0.5,
+      "shaftEntryBelowFaceTop": 0.2,
+      "throttleHandleOutboard": 0.4,
+      "throttleHandleAbovePan": 0.2,
+      "throttleHandleAheadOfSeat": 0.4,
+      "ergonomicsSource": "pilot-log v2 'Ergonomics blocker' (T192 fold-in): the old hub sat 8 cm BELOW the pan and 0.73 m ahead, forcing a 43° lean with the hands under the face and the wheel out of the cockpit view; the quadrant sat 0.67 m off-centre (24° torso roll + 54° wrist bend). Hub now 0.30 above / 0.50 ahead of the pan (upright racing seat, bent elbows), the shaft running down to the dash face below the gauge cluster; the middle throttle handle 0.40 outboard (natural reach 0.35–0.45), at forearm-rest height (pan + 0.20), 0.40 ahead"
     },
     "antenna": {
       "length": 2.4,
@@ -34,7 +41,19 @@
       "cowlHeight": 0.98,
       "source": "Mercury Racing 450R class (REFERENCES d6): 30 in shaft, 26 in minimum centre spacing -> cowl <= 0.6 m wide"
     },
-    "foredeckHatchFromBow": 0.15
+    "foredeckHatchFromBow": 0.15,
+    "seat": {
+      "panAboveSole": 0.62,
+      "source": "STYLE-SPEC §2 seat pan 0.62 above the sole (seat.py); the pilot frame's origin is this pan top at the JSON seat station (pilot-log v2)"
+    },
+    "deckShape": {
+      "crownAtSheer": 0.045,
+      "crownHalfBeam": 1.23,
+      "aftDrop": 0.07,
+      "aftTaperLength": 2.3,
+      "sheerEdgeRadius": 0.035,
+      "source": "USER playtest (§T.192): 'the back and the top of the boat are too flat. a bit of a taper like in our initial reference' (concept 04 / 06b). Render-only: the deck CENTRELINE stays on the proxy deck (checker deck ±2 cm); the deck falls away toward the sheer as a parabola (4.5 cm at 1.23 m half-beam, a 2.4 m offshore deck's usual camber) and the aft deck slopes down to the transom over its last 2.3 m (7 cm); the sheer edge radius grows 15 → 35 mm. Every part that lands on the deck asks anchors.deck_surface_y(x, z)"
+    }
   },
   "slots": {
     "M_Carbon": {
@@ -66,10 +85,10 @@
     "note": "tier RATIOS are exact (1 : 2 : 0.5); absolute px/m is what the 2048² atlas fits and is printed per slot. Need: chase cam (7.5 m, 60° vFOV, 1080p) ≈ 125 px/m on screen → exterior ≥ 256; cockpit cam at 0.5–1 m ≈ 700–1400 px/m → cockpit tier carries fine detail in normal/roughness. 'low' = big simple surfaces only seen from outside (rub rail, bracket plates)"
   },
   "budget": {
-    "note": "player LOD0 <= 120k TOTAL (assetContract). Proposed split: hull 40k / parts 64k / pilot 14k / 2k margin; LOD1 hull 7k / parts 9.5k / pilot 2.5k / 1k; LOD2 hull 1.8k / parts 3k / pilot 0.8k / 0.4k",
+    "note": "player LOD0 <= 120k TOTAL (assetContract). Measured split (§T.192): hull ~29.5k + parts ≤ 64k + pilot v2 17.9k ≈ 111k, 9k margin (the old 40k hull line was never used; pilot v2 is 17.9k not 14k). LOD1 hull 4.7k / parts 9.8k / pilot 6.1k; LOD2 hull 0.6k / parts 3k / pilot 2k",
     "partsTris": [
       64000,
-      9500,
+      9800,
       3000
     ]
   },
@@ -89,7 +108,7 @@
       ],
       "nodes": [
         "Outboard_P",
-        "Drives",
+        "Drive_P",
         "Parts"
       ]
     },
@@ -108,7 +127,7 @@
       ],
       "nodes": [
         "Outboard_C",
-        "Drives",
+        "Drive_C",
         "Parts"
       ]
     },
@@ -127,7 +146,7 @@
       ],
       "nodes": [
         "Outboard_S",
-        "Drives",
+        "Drive_S",
         "Parts"
       ]
     },
@@ -146,7 +165,7 @@
       ],
       "nodes": [
         "Prop_P",
-        "Drives",
+        "Drive_P",
         "Parts"
       ]
     },
@@ -165,7 +184,7 @@
       ],
       "nodes": [
         "Prop_C",
-        "Drives",
+        "Drive_C",
         "Parts"
       ]
     },
@@ -184,7 +203,7 @@
       ],
       "nodes": [
         "Prop_S",
-        "Drives",
+        "Drive_S",
         "Parts"
       ]
     },
@@ -244,6 +263,27 @@
       ],
       "nodes": [
         "Parts",
+        "Parts",
+        "Parts"
+      ],
+      "args": {
+        "pieces": "body"
+      }
+    },
+    {
+      "id": "GaugeGlass",
+      "module": "dash",
+      "args": {
+        "pieces": "glass"
+      },
+      "socket": "dash",
+      "lodTris": [
+        null,
+        null,
+        null
+      ],
+      "nodes": [
+        "GaugeGlass",
         "Parts",
         "Parts"
       ]
@@ -379,9 +419,15 @@
     }
   ],
   "nodeGroups": {
-    "note": "`nodes` names the GLB node a part joins at LOD0/1/2. Parts sharing a name are joined into one mesh (one primitive per slot) — the draw budget (assetContract drawBudget). Only animated parts keep their own node at LOD0; at LOD1 the outboards and props fold into `Drives` (trim about the common tilt-tube axis, extras carried), at LOD2 everything is `Parts`.",
-    "Drives": {
-      "animRole": "drives"
+    "note": "`nodes` names the GLB node a part joins at LOD0/1/2. Parts sharing a name are joined into one mesh (one primitive per slot) — the draw budget (assetContract drawBudget). Animated parts keep their own node at LOD0; at LOD1 each outboard folds its prop into `Drive_<id>` (§T.192: every drive steers about ITS OWN swivel tube, extras carried from the outboard), at LOD2 everything is `Parts`. `GaugeGlass` (LOD0 only) is the see-through surface below the sheer that the runtime must draw before the water mask.",
+    "Drive_P": {
+      "animRole": "drive"
+    },
+    "Drive_C": {
+      "animRole": "drive"
+    },
+    "Drive_S": {
+      "animRole": "drive"
     }
   }
 }

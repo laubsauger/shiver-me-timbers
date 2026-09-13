@@ -30,7 +30,9 @@ def build(A):
 
     def base(x):
         u = min(abs(x) / hw, 1.0)
-        return Vector((x, y0, zs + (zc - zs) * (1 - u ** 2.4)))
+        z = zs + (zc - zs) * (1 - u ** 2.4)
+        # §T.192: the deck is cambered, so the base follows the deck surface under each point
+        return Vector((x, A.deck_surface_y(x, z) + 0.012, z))
 
     def inward(x):
         # plan normal of the base curve, pointing into the cockpit

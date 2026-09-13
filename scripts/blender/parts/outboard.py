@@ -203,7 +203,7 @@ def build(A, engine):
     side = 1 if engine != 'S' else -1
     pc, nc = cowl_point(0.22, (0.35 if side > 0 else math.pi - 0.35))
     cap = kit.cylinder(0.034, 0.018, segs=14)
-    cap.extend(kit.cylinder(0.026, 0.028, segs=14).translate((0, 0.0, 0)))
+    cap.extend(kit.cylinder(0.026, 0.028, segs=14).translate((0, -0.003, 0)))  # §V98: not on the collar's base plane
     cap.extend(kit.torus(0.02, 0.004, 10, 4).translate((0, 0.03, 0)))
     cap.transform(Matrix.Translation(pc - nc * 0.004) @ kit.frame((0, 0, 0), Vector((0, 0, 1)).cross(nc), nc))
     P('fuel_cap', cap, 'M_Metal', 'rubber', max_lod=1, bevel=(0.002, 1), smooth=40)
@@ -327,7 +327,8 @@ def build(A, engine):
     tube = kit.cylinder(0.03, 0.44, segs=16, axis='x').translate((-0.22, 0.02, -0.08))
     for side in (1, -1):
         nut = kit.hex_prism(0.042, 0.03)
-        nut.transform(Matrix.Translation((side * 0.22, 0.02, -0.08)) @ kit.rot('Z', -90))
+        # §V98: the nut straddles the tube end (the end cap used to lie on the port nut's inner face)
+        nut.transform(Matrix.Translation((side * 0.22 - 0.015, 0.02, -0.08)) @ kit.rot('Z', -90))
         tube.extend(nut)
     P('tilt_tube', tube, 'M_Metal', 'stainless', max_lod=1, bevel=(0.002, 1), smooth=40)
     swivel = kit.cylinder(0.055, 0.50, segs=18).translate((0, -0.44, zs))
@@ -344,8 +345,9 @@ def build(A, engine):
         a, b = Vector(a), Vector(b)
         m = a + (b - a) * split
         body = kit.sweep([tuple(a), tuple(m)], r_body, 14)
+        # §V98: the collar starts 4 mm below the barrel's end cap (they shared that plane)
         body.extend(kit.cylinder(r_body * 1.35, 0.03, segs=14).transform(
-            Matrix.Translation(a) @ kit.frame((0, 0, 0), (b - a).orthogonal(), (b - a))))
+            Matrix.Translation(a - (b - a).normalized() * 0.004) @ kit.frame((0, 0, 0), (b - a).orthogonal(), (b - a))))
         rod = kit.sweep([tuple(m - (b - a) * 0.02), tuple(b)], r_rod, 10)
         eye = kit.cylinder(r_rod * 1.8, 0.03, segs=12, axis='x').translate((-0.015, 0, 0)).translate(tuple(b))
         P(name + '_body', body, 'M_Metal', 'powder_black', max_lod=1, smooth=45)
@@ -356,7 +358,7 @@ def build(A, engine):
         ram((side * 0.105, -0.40, -0.035), (side * 0.07, -0.13, zs - 0.03), 0.03, 0.013, name=f'trim_ram_{side}')
     ram((0.0, -0.43, -0.05), (0.0, -0.06, zs - 0.07), 0.042, 0.018, split=0.6, name='tilt_ram')
     # pump/reservoir block between the rams
-    pump = kit.box(0.09, 0.14, 0.07, center=(0.0, -0.30, -0.07))
+    pump = kit.box(0.09, 0.14, 0.07, center=(0.0, -0.30, -0.075))  # §V98: 5 mm behind the cross web's face
     pump.extend(kit.cylinder(0.02, 0.03, segs=12).translate((0.0, -0.23, -0.07)))
     P('trim_pump', pump, 'M_Metal', 'alu_cast', max_lod=1, bevel=(0.006, 2), smooth=40)
 
