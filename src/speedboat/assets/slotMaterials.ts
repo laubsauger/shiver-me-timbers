@@ -83,6 +83,7 @@ interface HullLiveryExtras {
   overspray: [number, number, number];
   numeralWear: [number, number];
   numberField: { zCentre: number; yCentre: number; height: number; digitWidth: number; gap: number };
+  deckNumberField?: { zCentre: number; xCentre: number; height: number; digitWidth: number; gap: number };
   glyphAtlas: { u0: number; v0: number; cellW: number; cellH: number };
 }
 interface NonSkidExtras {
@@ -137,28 +138,48 @@ function hullLiveryAlbedo(maskMap: THREE.Texture, map: TslNode, baseFactor: TslN
   const overlay = map.a;
   let albedo: TslNode = mix(paint, map.rgb.mul(baseFactor), overlay);
 
-  // race number: a planar field on each topside, read left→right from outside (bow to the right on starboard)
-  const nf = ex.numberField;
+  // race numbers: a planar field on each topside, read left→right from outside (bow to the right on starboard), and
+  // a larger one on the foredeck panel, glyph up = bow, read from aft/above. Both use one glyph sample (V23: no branches)
   const ga = ex.glyphAtlas;
   const p = positionLocal;
+  const numberCoords = (nf: { height: number; digitWidth: number; gap: number }, along: TslNode, up: TslNode) => {
+    const fieldW = digitCount.mul(nf.digitWidth).add(digitCount.sub(1).mul(nf.gap));
+    const gx = along.div(fieldW).add(0.5);
+    const gy = up.div(nf.height).add(0.5);
+    const gxm = gx.mul(fieldW);
+    const cx0 = gxm.div(nf.digitWidth);
+    const second = digitCount.greaterThan(1.5).and(gxm.greaterThan(nf.digitWidth + nf.gap / 2));
+    const cx = select(second, gxm.sub(nf.digitWidth + nf.gap).div(nf.digitWidth), cx0);
+    const inField = step(0, gx).mul(step(gx, 1)).mul(step(0, gy)).mul(step(gy, 1)).mul(step(0, cx)).mul(step(cx, 1));
+    return { gy, cx, cx0, second, inField };
+  };
+  const sideNf = ex.numberField;
   const side = step(0, p.x).mul(2).sub(1);
-  const along = side.negate().mul(p.z.sub(nf.zCentre));
-  const fieldW = digitCount.mul(nf.digitWidth).add(digitCount.sub(1).mul(nf.gap));
-  const gx = along.div(fieldW).add(0.5);
-  const gy = p.y.sub(nf.yCentre - nf.height / 2).div(nf.height);
-  const gxm = gx.mul(fieldW);
-  const cx0 = gxm.div(nf.digitWidth);
-  const second = digitCount.greaterThan(1.5).and(gxm.greaterThan(nf.digitWidth + nf.gap / 2));
-  const cx = select(second, gxm.sub(nf.digitWidth + nf.gap).div(nf.digitWidth), cx0);
+  const S = numberCoords(sideNf, side.negate().mul(p.z.sub(sideNf.zCentre)), p.y.sub(sideNf.yCentre));
+  let gy: TslNode = S.gy;
+  let cx: TslNode = S.cx;
+  let cx0: TslNode = S.cx0;
+  let second: TslNode = S.second;
+  let inField: TslNode = S.inField.mul(step(0.5, normalLocal.x.abs()));
+  if (ex.deckNumberField) {
+    const dn = ex.deckNumberField;
+    const Dk = numberCoords(dn, p.x.negate().sub(dn.xCentre), p.z.sub(dn.zCentre));
+    const onDeck = step(0.7, normalLocal.y);
+    const deck = onDeck.greaterThan(0.5);
+    gy = select(deck, Dk.gy, gy);
+    cx = select(deck, Dk.cx, cx);
+    cx0 = select(deck, Dk.cx0, cx0);
+    second = select(deck, Dk.second, second);
+    inField = mix(inField, Dk.inField, onDeck);
+  }
   const digit = select(second, digitB, digitA);
-  const inField = step(0, gx).mul(step(gx, 1)).mul(step(0, gy)).mul(step(gy, 1)).mul(step(0.5, normalLocal.x.abs())).mul(step(0, cx)).mul(step(cx, 1));
   const guv = vec2(float(ga.u0).add(digit.add(cx.clamp(0, 1)).mul(ga.cellW)), float(ga.v0).add(gy.clamp(0, 1).oneMinus().mul(ga.cellH)));
-  // gradients of the CONTINUOUS coordinates: no mip seam where the cell switches between the digits
+  // gradients of the CONTINUOUS coordinates: no mip seam where the cell switches between the digits (V48 band-limit)
   const gradX = vec2(dFdx(cx0).mul(ga.cellW), dFdx(gy).negate().mul(ga.cellH));
   const gradY = vec2(dFdy(cx0).mul(ga.cellW), dFdy(gy).negate().mul(ga.cellH));
   const glyph = aaStep(texture(maskMap, guv).grad(gradX, gradY).r);
   const wear = smoothstep(ex.numeralWear[0], ex.numeralWear[1], m.a).oneMinus();
-  const paintNum = glyph.mul(inField).mul(wear).mul(boot.oneMinus()).mul(0.92);
+  const paintNum = glyph.mul(inField).mul(wear).mul(boot.oneMinus()).mul(0.97);
   albedo = mix(albedo, numeral, paintNum);
   return { albedo, boot, overlay };
 }

@@ -8,7 +8,7 @@ CPU preview renders of the hero hull (Cycles CPU + OIDN; no GPU, no browser). do
 --work     the build's work dir: the hull preview maps (hull_preview_<variant>_albedo.png, _clearcoat.png)
            evaluate the RUNTIME livery formula (slotMaterials.ts) per texel, so variants render without a GPU
 --clay     flat grey materials (geometry review)
-Views: side rear34 hero34 front top below chase close_chine close_bow close_transom lod
+Views: side rear34 hero34 front top below chase foredeck deck34 close_chine close_bow close_transom
 """
 import argparse
 import math
@@ -240,6 +240,8 @@ def main():
             camera(scene, (-3.2, deck - 0.1, bow - 0.6), (-0.4, deck - 0.6, bow - 2.2), 32)
         elif view == 'close_transom':
             camera(scene, (-2.6, deck + 0.4, stern - 3.6), (-0.2, keel + 0.6, stern), 32)
+        elif view == 'foredeck':
+            camera(scene, (-1.6, deck + 2.2, mid - 1.2), (0.0, deck, mid + 3.2), 35)
         elif view == 'deck34':
             camera(scene, (-4.5, deck + 4.2, stern + 11.5), (0.0, deck, stern + 3.5), 32)
         else:

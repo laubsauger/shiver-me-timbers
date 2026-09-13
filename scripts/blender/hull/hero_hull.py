@@ -29,6 +29,7 @@ import math
 
 import bmesh
 import bpy
+import numpy as np
 
 TAN8 = math.tan(math.radians(8.0))
 TRANSOM_R = 0.004
@@ -63,7 +64,7 @@ SHARP_POINTS = {'s0_root', 's1_root', 's2_root', 's0_top', 's1_top', 's2_top', '
 # ...and at the coarser LODs, where the bevel arcs are gone, the convex feature corners too
 SHARP_POINTS_COARSE = SHARP_POINTS | {'s0_f1', 's1_f1', 's2_f1', 'chine_c2', 'edge_e1', 'lip1', 'wall_b0', 'sole_b1', 'lip0'}
 
-ISLAND_SHELL_P, ISLAND_SHELL_S, ISLAND_DECK, ISLAND_WELL, ISLAND_TRANSOM, ISLAND_PLATE = range(6)
+ISLAND_SHELL_P, ISLAND_SHELL_S, ISLAND_DECK, ISLAND_WELL, ISLAND_TRANSOM, ISLAND_PLATE, ISLAND_DECK_NUMBER = range(7)
 MAT_GELCOAT, MAT_NONSLIP = 0, 1
 
 
@@ -96,6 +97,7 @@ class HeroHull:
         self.z_x = zx
         self.z_nose = self.stem_z - 0.07
         self._well_setup()
+        self._deck_panel_setup()
         self._plates_setup()
         self.number_field = self._number_field()
 
@@ -147,6 +149,20 @@ class HeroHull:
         self.well_fwd_start = self._scr_z(self.well_half)
         self.well_fwd_end = self._scr_z(self.well_w_end)
 
+    def _deck_panel_setup(self):
+        """painted race-number panel on the foredeck ahead of the windscreen (reads from the chase cam above and
+        from aerial cams). Its width is framed by the deck's well columns, so it must sit where the deck is wide"""
+        rl = self.lip_r
+        z0, z1, half = 6.55, 7.65, 0.62
+        e2 = self.proxy_sheer_half(z1) - 0.015
+        if half - rl > 0.55 * e2 - rl:
+            raise RuntimeError(f'hero hull: foredeck too narrow at z {z1} for the number panel (deck edge {e2:.2f})')
+        margin_x, margin_z = 0.06, 0.10
+        H = min(0.80, (2 * (half - margin_x)) / (4 / 3 + 0.10), z1 - z0 - 2 * margin_z)
+        self.deck_panel = {'z0': z0, 'z1': z1, 'half': half, 'wn': half - rl}
+        self.deck_number_field = {'zCentre': 0.5 * (z0 + z1), 'xCentre': 0.0, 'height': round(H, 4),
+                                  'digitWidth': round(H * 2 / 3, 4), 'gap': round(H * 0.10, 4)}
+
     def _scr_z(self, x):
         u = min(abs(x) / self.scr_hw, 1.0)
         return self.scr_zs + (self.scr_zc - self.scr_zs) * (1 - u ** 2.4)
@@ -171,7 +187,9 @@ class HeroHull:
         """the flat-deck layout of the well columns (matches the adjacent well end ring)"""
         if z < self.well_aft:
             return self.well_half - self.well_r_aft
-        return self.well_w_end
+        # foredeck: widen from the well end ring to the deck number panel half-width (flat deck: any layout shades the same)
+        t = smoothstep(self.well_fwd_end + 0.05, self.well_fwd_end + 0.6, z)
+        return self.well_w_end + (self.deck_panel['wn'] - self.well_w_end) * t
 
     # ── the section ────────────────────────────────────────────────────────
     def half_section(self, z, well=None, nominal=None):
@@ -349,6 +367,8 @@ class HeroHull:
         special.append((self.well_fwd_start, 'well', 1))
         special.append((zfe, 'well', 2))
         special.append((zfe + 0.012, 'flat', 2))
+        special.append((self.deck_panel['z0'], 'flat', 2))
+        special.append((self.deck_panel['z1'], 'flat', 2))
         sz = [s[0] for s in special]
         for (zb, lod) in base:
             if any(abs(zb - q) < 0.03 for q in sz):
@@ -492,10 +512,16 @@ class HeroHull:
         self.stripe_gap = clamp(0.035 * h0, 0.02, 0.03)
         self.stripe_t = clamp(0.055 * h0, 0.03, 0.045)
         self.waterline = min(0.60, s0['chineY'] + 0.09)
+        self.number_zc = self.well_aft + 0.9 * (self.well_fwd_end - self.well_aft)
 
     def band_lo(self, zn):
-        """band bottom, depth below the deck; zn = z / L (numpy-safe). The band narrows 30 % toward the bow"""
-        return self.band_hidden + self.band_w * (1.0 - 0.3 * zn ** 1.5)
+        """band bottom, depth below the deck; zn = z / L (numpy-safe). The band narrows 30 % toward the bow and
+        steps up around the side race number (a real race-boat trick: the livery makes room for the number)"""
+        z = zn * self.stem_z
+        zc, span, ramp = self.number_zc, 0.78, 0.14
+        inside = np.clip((z - (zc - span - ramp)) / ramp, 0.0, 1.0) * np.clip(((zc + span + ramp) - z) / ramp, 0.0, 1.0)
+        step = inside * inside * (3.0 - 2.0 * inside)
+        return self.band_hidden + self.band_w * (1.0 - 0.3 * zn ** 1.5) - 0.62 * self.band_w * step
 
     def stripe_centre(self, zn):
         return self.band_lo(zn) + self.stripe_gap + self.stripe_t / 2
@@ -512,8 +538,8 @@ class HeroHull:
         """STYLE-SPEC §4.3: ~0.6 m numerals on the topsides under the cockpit, shrunk to fit the clear topside
         between the pinstripe and the boot line with margins (fails loud when they cannot fit)"""
         self._layout_setup()
-        margin = 0.05
-        zc = self.well_aft + 0.9 * (self.well_fwd_end - self.well_aft)
+        margin = 0.04
+        zc = self.number_zc
         H = 0.60
         for _ in range(4):
             dw, gap = H * 2 / 3, H * 0.10
@@ -546,6 +572,7 @@ class HeroHull:
         bm = bmesh.new()
         uv_layer = bm.loops.layers.uv.new('UVMap')
         isl_layer = bm.faces.layers.int.new('sb_island')
+        frac_layer = bm.verts.layers.float.new('sb_frac')
         verts = []
         params = []
         well_gap = self.well_gap()
@@ -560,7 +587,9 @@ class HeroHull:
             for j in idx:
                 n, x, y, zz = pts[j]
                 bx, by, bz = self.body(x, y, zz)
-                row_v.append(bm.verts.new((bx, -bz, by)))
+                vv = bm.verts.new((bx, -bz, by))
+                vv[frac_layer] = abs(x) / max(self.at(min(zz, self.Lk))['chineHalfBeam'], 0.02)
+                row_v.append(vv)
                 gs = girth[j] if j <= i_top else girth[-1] - girth[j] + math.hypot(pts[-1][1] - pts[0][1], pts[-1][2] - pts[0][2])
                 gw = girth[j] - girth[i_top]
                 row_p.append({'name': n, 'shell': (zz, gs), 'deck': (zz, x), 'well': (u_well, gw), 'x': x})
@@ -579,9 +608,17 @@ class HeroHull:
                 sk = seg_kind[k]
                 if sk == 'wellpart':
                     sk = 'well' if (ka == 'well' or kb == 'well') else 'deck'
+                    dp = self.deck_panel
+                    if sk == 'deck' and data[r][0] >= dp['z0'] - 1e-6 and data[r + 1][0] <= dp['z1'] + 1e-6:
+                        sk = 'decknum'
                 if sk == 'shell':
                     island = ISLAND_SHELL_P if (ra[k]['x'] + ra[k2]['x']) >= 0 else ISLAND_SHELL_S
                     key = 'shell'
+                    mat = MAT_GELCOAT
+                elif sk == 'decknum':
+                    # the foredeck race-number panel is painted gelcoat (per-boat mask system), not non-skid
+                    island = ISLAND_DECK_NUMBER
+                    key = 'deck'
                     mat = MAT_GELCOAT
                 else:
                     island = ISLAND_DECK if sk == 'deck' else ISLAND_WELL
@@ -651,6 +688,7 @@ class HeroHull:
         if lod == 0:
             for p in self.plates:
                 self._add_plate(bm, uv_layer, isl_layer, p, layout)
+                self._add_rivets(bm, uv_layer, isl_layer, frac_layer, p, layout)
         bmesh.ops.triangulate(bm, faces=bm.faces[:], quad_method='BEAUTY', ngon_method='EAR_CLIP')
         mesh = bpy.data.meshes.new(name)
         bm.to_mesh(mesh)
@@ -731,6 +769,70 @@ class HeroHull:
         for e in {e for f in new for e in f.edges}:
             if len(e.link_faces) == 2 and e.link_faces[0].normal.dot(e.link_faces[1].normal) < 0.5:
                 e.smooth = False
+
+    def plate_rivets(self, p):
+        """rivet centres (z, y) hull frame: rows 22 mm inside the edges, 70 mm pitch; the bow doubler has a
+        double row (a real doubler is set with staggered rows), the chine plate a single row"""
+        out = []
+        insets = (0.022, 0.046) if 'd_top' in p else (0.022,)
+        for k, ins in enumerate(insets):
+            stagger = 0.035 * k
+            z = p['z0'] + ins + stagger
+            while z < p['z1'] - p['rake'] - ins + 1e-6:
+                y_top = self.plate_outline(p, z, 0.0)
+                y_bot = self.plate_outline(p, z, 1.0)
+                out.append((z, y_top - ins))
+                out.append((z, y_bot + ins))
+                z += 0.07
+            for zedge, fwd in ((p['z0'] + ins, False), (None, True)):
+                n = max(1, int((self.plate_outline(p, p['z0'], 0.0) - self.plate_outline(p, p['z0'], 1.0) - 2 * ins) / 0.07))
+                for i in range(1, n):
+                    f = i / n
+                    # the forward edge is raked: walk down it, staying `ins` inside at every height
+                    z = zedge if not fwd else p['z1'] - p['rake'] * f - ins - 0.012
+                    y_top = self.plate_outline(p, z, 0.0) - ins
+                    y_bot = self.plate_outline(p, z, 1.0) + ins
+                    out.append((z, y_top + (y_bot - y_top) * f))
+        return out
+
+    def _add_rivets(self, bm, uv_layer, isl_layer, frac_layer, p, layout):
+        """domed rivet heads as closed 6-sided buttons on the plate skin (Ø13 mm, 2.6 mm proud)"""
+        side = p['side']
+        r0, r1, h = 0.0065, 0.0042, 0.0026
+        for (z, y) in self.plate_rivets(p):
+            xb = self.topside_x(z, y) + 0.0035 - 0.0006
+            rings = []
+            for (rr, hh) in ((r0, 0.0), (r1, h * 0.75)):
+                ring = []
+                for i in range(6):
+                    a = 2 * math.pi * i / 6
+                    P = (side * (xb + hh), y + rr * math.cos(a), z + rr * math.sin(a))
+                    ring.append(bm.verts.new((P[0], -(P[2] - self.lcg), P[1] - self.vcg)))
+                rings.append(ring)
+            P = (side * (xb + h), y, z)
+            top = bm.verts.new((P[0], -(P[2] - self.lcg), P[1] - self.vcg))
+            new = []
+            for i in range(6):
+                j = (i + 1) % 6
+                new.append(bm.faces.new((rings[0][i], rings[0][j], rings[1][j], rings[1][i])))
+                new.append(bm.faces.new((rings[1][i], rings[1][j], top)))
+            new.append(bm.faces.new(list(reversed(rings[0]))))
+            vol = 0.0
+            for f in new:
+                cs = [v.co for v in f.verts]
+                for i in range(1, len(cs) - 1):
+                    vol += cs[0].dot(cs[i].cross(cs[i + 1]))
+            if vol < 0:
+                bmesh.ops.reverse_faces(bm, faces=new)
+            for f in new:
+                f.material_index = MAT_GELCOAT
+                f.smooth = True
+                f[isl_layer] = ISLAND_PLATE
+                for loop in f.loops:
+                    co = loop.vert.co
+                    # a tiny UV patch at the rivet's plate position (never zero area: tangents stay finite)
+                    loop[uv_layer].uv = layout.uv(ISLAND_PLATE, -co.y + self.lcg, co.z + self.vcg, plate=p['name'])
+                    loop.vert[frac_layer] = 1.2
 
     def well_gap(self):
         return self.dy - self.sole_y
@@ -827,7 +929,9 @@ class UVLayout:
             bx += pw * 0.2 + m
         py += max(ph for (_, _, _, ph) in plates.values()) * 0.2 + m
         plate_w = max(pw for (_, _, pw, _) in plates.values())
-        width = max(m + (L + 0.01) + m, x + plate_w + m)
+        dp = H.deck_panel
+        self.rects[ISLAND_DECK_NUMBER] = (x + plate_w + m, y, dp['z0'] - 0.01, -dp['half'] - 0.01)
+        width = max(m + (L + 0.01) + m, x + plate_w + m + (dp['z1'] - dp['z0'] + 0.02) + m)
         height = max(y + max(well_h, th, py - y) + m, width * 0.0)
         self.S = max(width, height)
         self.extent = (width, height)

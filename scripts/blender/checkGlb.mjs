@@ -261,6 +261,19 @@ export function liveryErrors(document, expect, margin = 0.03) {
     if (top > ct.top - margin) errors.push(`livery: race number top ${top.toFixed(3)} runs into the pinstripe/band (clear topside top ${ct.top.toFixed(3)}, margin ${margin})`);
     if (bottom < ct.bottom + margin) errors.push(`livery: race number bottom ${bottom.toFixed(3)} runs into the boot line (clear topside bottom ${ct.bottom.toFixed(3)}, margin ${margin})`);
     if (nf.zCentre - halfW < ct.zMin || nf.zCentre + halfW > ct.zMax) errors.push(`livery: race number z ${(nf.zCentre - halfW).toFixed(2)}..${(nf.zCentre + halfW).toFixed(2)} leaves its field ${ct.zMin}..${ct.zMax}`);
+    const dn = hl.deckNumberField;
+    const dp = hl.deckPanel;
+    if (dn || dp) {
+      if (!dn || !dp || ![dn.zCentre, dn.xCentre, dn.height, dn.digitWidth, dn.gap, dp.zMin, dp.zMax, dp.halfWidth].every(isNum)) {
+        errors.push(`livery: ${mat.getName()} deck number needs deckNumberField {zCentre, xCentre, height, digitWidth, gap} and deckPanel {zMin, zMax, halfWidth}`);
+      } else {
+        const hw = dn.digitWidth + dn.gap / 2;
+        if (Math.abs(dn.xCentre) + hw > dp.halfWidth - margin) errors.push(`livery: deck race number (half-width ${hw.toFixed(3)}) runs off its panel (half-width ${dp.halfWidth})`);
+        if (dn.zCentre - dn.height / 2 < dp.zMin + margin || dn.zCentre + dn.height / 2 > dp.zMax - margin) {
+          errors.push(`livery: deck race number z ${(dn.zCentre - dn.height / 2).toFixed(3)}..${(dn.zCentre + dn.height / 2).toFixed(3)} runs off its panel ${dp.zMin}..${dp.zMax}`);
+        }
+      }
+    }
     if (expect?.proxy && expect?.stations && expect?.spec) {
       const { spec, stations, proxy } = expect;
       if (ct.top > proxy.deckBodyY - 0.10) errors.push(`livery: clear topside top ${ct.top.toFixed(3)} leaves < 0.10 m under the deck ${proxy.deckBodyY.toFixed(3)} for the band`);
@@ -275,10 +288,11 @@ export function liveryErrors(document, expect, margin = 0.03) {
 }
 
 /**
- * Parts hanging below the hull bottom at the transom (a warning, not a failure: parts own the fix). A slab of
+ * Parts hanging below the hull bottom at the transom FAIL the build (a bracket plate below the V reads as a broken
+ * hull in every airborne shot). A slab of
  * parts vertices in the transom plane must not reach under the hull's own transom outline at the same x.
  */
-export function transomOverhangWarnings(lod0, hull) {
+export function transomOverhangErrors(lod0, hull) {
   const warnings = [];
   if (!lod0 || !hull) return warnings;
   const hb = bounds(hull);
@@ -323,7 +337,7 @@ export function transomOverhangWarnings(lod0, hull) {
   };
   lod0.listChildren().forEach(walk);
   if (worst) {
-    warnings.push(`parts: '${worst.node}' reaches ${worst.below.toFixed(3)} m below the hull transom bottom (x ${worst.x.toFixed(3)}, y ${worst.y.toFixed(3)} vs hull ${worst.floor.toFixed(3)}, body frame)`);
+    warnings.push(`parts: '${worst.node}' hangs ${worst.below.toFixed(3)} m below the hull transom bottom (x ${worst.x.toFixed(3)}, y ${worst.y.toFixed(3)} vs hull ${worst.floor.toFixed(3)}, body frame) — clip it to the transom profile`);
   }
   return warnings;
 }
@@ -563,7 +577,7 @@ export function checkDocument(document, contract, opts = {}) {
       n.listChildren().forEach(w0);
     };
     lod0.listChildren().forEach(w0);
-    if (hull0.length === 1) warnings.push(...transomOverhangWarnings(lod0, hull0[0]));
+    if (hull0.length === 1) errors.push(...transomOverhangErrors(lod0, hull0[0]));
   }
 
   // ── materials + textures ──────────────────────────────────────────────

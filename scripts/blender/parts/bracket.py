@@ -49,11 +49,24 @@ def build(A):
     pieces = []
     welds = []
 
+    # the hull transom bottom is a V (hull JSON deadrise): nothing on the transom plane may hang below it.
+    # V line keel → chine at the transom + 5 cm clearance (keel pad lowering and the strakes' 3 cm flats)
+    v_slope = (T['chineY'] - T['keelY']) / max(T['chineHalf'], 1e-6)
+
+    def ybot_at(x):
+        return max(ybot_t, T['keelY'] + abs(x) * v_slope + 0.05)
+
     # transom plate + through bolts
-    tp = kit.box(2 * half + 0.06, ytop - ybot_t + 0.06, 0.014, center=(0, (ytop + ybot_t) / 2, zT - 0.007))
+    # transom plate: square top, bottom edge clipped to the hull V (so the corners follow the transom profile)
+    pw = half + 0.03
+    xb = [-pw + 2 * pw * i / 16 for i in range(17)]
+    kink = (ybot_t - T['keelY'] - 0.05) / max(v_slope, 1e-6)
+    xb = sorted(set([round(x, 6) for x in xb] + [-kink, kink] if 0 < kink < pw else xb))
+    poly = [(x, ybot_at(x) - 0.03) for x in xb] + [(pw, ytop + 0.03), (-pw, ytop + 0.03)]
+    tp = kit.extrude(poly, 0.014).translate((0, 0, zT - 0.007))
     bolt_f = []
     for bx in [-half + 0.08 + i * (2 * half - 0.16) / 7 for i in range(8)]:
-        for by in (ytop - 0.06, ybot_t + 0.06):
+        for by in (ytop - 0.06, ybot_at(bx) + 0.06):
             bolt_f.append(((bx, by, zT - 0.014), (0, 0, -1), 0.012, 'rivet', False))
     pieces.append(Piece('transom_plate', tp, 'M_Metal', 'alu_bare', max_lod=2, bevel=(0.004, 2), smooth=35, fasteners=bolt_f, tier='low'))
     # hex heads on the top row only (seen from the chase cam); the rest are normal-map domes
@@ -69,12 +82,12 @@ def build(A):
     for x in webs:
         t = 0.05 if abs(x) == half else 0.04
         a_top, b_top = (x, ytop - 0.03, zT - 0.01), (x, ytop - 0.03, zM + 0.02)
-        a_bot, b_bot = (x, ybot_t + 0.03, zT - 0.01), (x, ybot_m + 0.03, zM + 0.02)
+        a_bot, b_bot = (x, ybot_at(x) + 0.03, zT - 0.01), (x, ybot_m + 0.03, zM + 0.02)
         truss.extend(bar(a_top, b_top, t, 0.06))
         truss.extend(bar(a_bot, b_bot, t, 0.06))
         truss.extend(bar((x, ybot_m + 0.03, zM + 0.03), (x, ytop - 0.03, zM + 0.03), t, 0.05, up=(0, 0, 1)))
         zm = (zT + zM) / 2
-        truss.extend(bar((x, ybot_t + 0.06, zT - 0.03), (x, ytop - 0.06, zm), t * 0.8, 0.045, up=(0, 0, 1)))
+        truss.extend(bar((x, ybot_at(x) + 0.06, zT - 0.03), (x, ytop - 0.06, zm), t * 0.8, 0.045, up=(0, 0, 1)))
         truss.extend(bar((x, ytop - 0.06, zm), ((x, ybot_m + 0.06, zM + 0.05)), t * 0.8, 0.045, up=(0, 0, 1)))
         for w in (a_top, a_bot, (x, ytop - 0.03, zm), (x, ybot_m + 0.03, zM + 0.03), (x, ytop - 0.03, zM + 0.03)):
             welds.append(w)
@@ -90,7 +103,9 @@ def build(A):
 
     # sloped bottom skin + zinc anodes
     bot = Geo()
-    ring = [(-half, ybot_t, zT - 0.01), (half, ybot_t, zT - 0.01), (half, ybot_m, zM + 0.02), (-half, ybot_m, zM + 0.02)]
+    # the skin starts at the clipped transom edge and slopes down to the mount-plane chord
+    ring = [(-half, ybot_at(half), zT - 0.03), (0.0, ybot_t, zT - 0.03), (half, ybot_at(half), zT - 0.03),
+            (half, ybot_m, zM + 0.02), (0.0, ybot_m, zM + 0.02), (-half, ybot_m, zM + 0.02)]
     bot.extend(kit.grid_loft([[(p[0], p[1], p[2]) for p in ring], [(p[0], p[1] - 0.01, p[2]) for p in ring]], closed=True,
                              cap0=True, cap1=True))
     pieces.append(Piece('bottom_skin', bot, 'M_Metal', 'alu_bare', max_lod=2, smooth=35, wear=1.3, tier='low'))

@@ -215,16 +215,21 @@ def bake(hull_obj, size, ao_samples):
         return N.combine(lines(22.0, (140.0, 2.5, 140.0)), lines(-31.0, (120.0, 3.0, 120.0)), N.noise(g.outputs['Position'], 0.9, 2.0, 0.5))
 
     def p_long(nt, N):
-        # noise stretched along the hull (Blender Y): grounding scrapes and flow streaks on the bottom
-        vm = nt.nodes.new('ShaderNodeVectorMath')
-        vm.operation = 'MULTIPLY'
-        vm.inputs[1].default_value = (70.0, 0.9, 70.0)
-        nt.links.new(geo(nt).outputs['Position'], vm.inputs[0])
-        vm2 = nt.nodes.new('ShaderNodeVectorMath')
-        vm2.operation = 'MULTIPLY'
-        vm2.inputs[1].default_value = (14.0, 0.5, 14.0)
-        nt.links.new(geo(nt).outputs['Position'], vm2.inputs[0])
-        return N.combine(N.noise(vm.outputs['Vector'], 1.0, 2.0, 0.5), N.noise(vm2.outputs['Vector'], 1.0, 3.0, 0.5), 0.0)
+        # noise in HULL-SHAPED coordinates: across = fraction of the chine half-beam (vertex attribute sb_frac), along =
+        # hull length (Blender -Y). Streaks follow the strakes and converge to the bow like real flow marks
+        g = geo(nt)
+        attr = nt.nodes.new('ShaderNodeAttribute')
+        attr.attribute_type = 'GEOMETRY'
+        attr.attribute_name = 'sb_frac'
+        sep = nt.nodes.new('ShaderNodeSeparateXYZ')
+        nt.links.new(g.outputs['Position'], sep.inputs['Vector'])
+        side = N.math('SIGN', sep.outputs['X'])
+        frac = N.math('MULTIPLY', attr.outputs['Fac'], side)
+
+        def field(k_across, k_along, detail):
+            v = N.combine(N.math('MULTIPLY', frac, k_across), N.math('MULTIPLY', sep.outputs['Y'], k_along), N.math('MULTIPLY', sep.outputs['Z'], 3.0))
+            return N.noise(v, 1.0, detail, 0.5)
+        return N.combine(field(90.0, 0.9, 2.0), field(16.0, 0.45, 3.0), field(5.0, 0.25, 2.0))
 
     passes = [('POS', p_pos, 1), ('NRM', p_nrm, 1), ('EDGE', p_edge, 8), ('NOISE', p_noise, 1), ('VORO', p_voro, 1), ('SCR', p_scr, 1), ('LONG', p_long, 1),
               ('AO', None, ao_samples)]
@@ -462,7 +467,8 @@ def composite(H, D, size, anchors):
     shell = cov & ((isl == HH.ISLAND_SHELL_P) | (isl == HH.ISLAND_SHELL_S))
     transom = cov & (isl == HH.ISLAND_TRANSOM)
     plate_isl = cov & (isl == HH.ISLAND_PLATE)
-    gel = shell | transom | plate_isl
+    decknum = cov & (isl == HH.ISLAND_DECK_NUMBER)
+    gel = shell | transom | plate_isl | decknum
     deck = cov & (isl == HH.ISLAND_DECK)
     well = cov & (isl == HH.ISLAND_WELL)
     ns = deck | well
@@ -483,10 +489,11 @@ def composite(H, D, size, anchors):
     zn = np.clip(hz / L, 0, 1)
     # heights from the live JSON topside (hero_hull livery layout): nothing here assumes a freeboard
     band_lo = H.band_lo(zn)
-    sd_band = band_lo - d + 0.0025 * nf
+    # edge wobble only at ≥ 10 cm wavelengths: finer noise baked into the 1024² SDF aliases into a serrated edge (V48)
+    sd_band = band_lo - d + 0.003 * nm
     stripe_c = H.stripe_centre(zn)
     st_half = H.stripe_t / 2
-    sd_stripe = st_half - np.abs(d - stripe_c) + 0.0015 * nf
+    sd_stripe = st_half - np.abs(d - stripe_c) + 0.0015 * nm
     k = 0.05
     boot_y = H.boot_y(cy)
     del k
@@ -509,6 +516,8 @@ def composite(H, D, size, anchors):
     W = (0.60 * edge + 0.62 * e_chine + 0.45 * e_keel + 0.32 * e_stem + 0.45 * e_trans + 0.35 * e_sheer + 0.25 * e_spray
          + 0.30 * cluster + 0.05 * nf + 0.04 * nm)
     W = np.clip(W, 0, 1)
+    # the foredeck number panel is a recent repaint that only gets walked on: light, clustered wear
+    W = np.where(decknum, np.clip(0.10 + 0.22 * cluster + 0.04 * nf, 0, 0.4), W)
     cell = 1.0 - 2.0 * vd
     thr = 1.02 - 0.35 * WEAR_LEVEL
     chip_v = W + 0.20 * cell + 0.05 * nf - thr
@@ -516,14 +525,16 @@ def composite(H, D, size, anchors):
     chip_ring = np.clip(smooth(-0.03, -0.004, chip_v) - chips, 0, 1) * gel
 
     flake_b = smooth(-0.06, -0.04, W + 0.25 * cell - thr) * (np.abs(sd_band) < 0.035)
-    speck = smooth(0.2, 0.9, 0.5 + 0.35 * nf + 0.25 * nm)
+    speck = smooth(0.2, 0.9, 0.5 + 0.45 * nm + 0.2 * nl)
     R = 0.5 + np.clip(sd_band / BAND_SCALE, -0.5, 0.5)
-    R = R - 0.22 * flake_b * (sd_band > 0) - 0.12 * (1 - speck) * (sd_band < 0)
+    w_in = smooth(0.0, 0.02, sd_band)
+    w_out = smooth(0.0, -0.02, sd_band)
+    R = R - 0.22 * flake_b * w_in - 0.12 * (1 - speck) * w_out
     flake_s = smooth(-0.06, -0.04, W + 0.25 * cell - thr) * (np.abs(sd_stripe) < 0.03)
-    G = 0.5 + np.clip(sd_stripe / STRIPE_SCALE, -0.5, 0.5) - 0.3 * flake_s * (sd_stripe > 0)
+    G = 0.5 + np.clip(sd_stripe / STRIPE_SCALE, -0.5, 0.5) - 0.3 * flake_s * smooth(0.0, 0.008, sd_stripe)
     B = 0.5 + np.clip(sd_boot / BOOT_SCALE, -0.5, 0.5)
-    band_m = smooth(0.47, 0.53, R) * gel
-    boot_m = smooth(0.47, 0.53, B) * gel
+    band_m = smooth(0.47, 0.53, R) * (gel & ~decknum)
+    boot_m = smooth(0.47, 0.53, B) * (gel & ~decknum)
     scr_a = smooth(0.985, 0.998, 1.0 - np.abs(2.0 * D['SCR'][..., 0] - 1.0))
     scr_b = smooth(0.985, 0.998, 1.0 - np.abs(2.0 * D['SCR'][..., 1] - 1.0))
     scr_zone = smooth(0.4, 1.6, _norm(D['SCR'][..., 2], cov) + 0.3 * nm)
@@ -583,8 +594,25 @@ def composite(H, D, size, anchors):
     C, A = _over(C, A, hex_lin('#9A928A'), 0.38 * scrapes)
     rough = rough + 0.08 * scrapes
     height -= 0.00012 * scrapes
-    flow = smooth(0.8, 2.0, _norm(D['LONG'][..., 1], cov)) * boot_m
-    C, A = _over(C, A, hex_lin('#2E2A28'), 0.14 * flow)
+    flow = smooth(0.6, 1.9, _norm(D['LONG'][..., 1], cov)) * boot_m
+    C, A = _over(C, A, hex_lin('#2E2A28'), 0.18 * flow)
+    # antifoul tone: repainted and faded panels in hull-shaped bands, plus broad sun/wet mottling
+    tone = _norm(D['LONG'][..., 2], cov)
+    C, A = _over(C, A, hex_lin('#7B3429'), 0.30 * smooth(0.5, 1.4, tone) * boot_m)
+    C, A = _over(C, A, hex_lin('#9B6A5E'), 0.26 * smooth(-0.5, -1.4, tone) * boot_m)
+    C, A = _over(C, A, hex_lin('#3D221E'), 0.20 * smooth(0.9, 1.8, nl - 0.5 * tone) * boot_m)
+    rough = rough - 0.08 * smooth(0.5, 1.4, tone) * boot_m
+    # strake running-edge wear: the antifoul is worn to primer along each strake's outer edge and the chine flat edge
+    strake_w = np.zeros_like(A)
+    for sd_ in H.strakes:
+        fade = 1.0 - smooth(sd_['toZ'] - 0.6, sd_['toZ'], hz)
+        x_edge = sd_['atChineFraction'] * b + np.maximum(0.004, sd_['flatWidth'] * fade)
+        strake_w = np.maximum(strake_w, smooth(0.016, 0.004, np.abs(ax_ - x_edge)) * (hy < ky + (x_edge + 0.1) * 1.2) * (fade > 0.05))
+    strake_w = np.maximum(strake_w, smooth(0.016, 0.004, np.abs(ax_ - b)) * (hy < cy + 0.01))
+    edge_wear = strake_w * smooth(-0.4, 0.9, _norm(D['LONG'][..., 0], cov) + 0.4 * nm) * boot_m
+    C, A = _over(C, A, lerp(hex_lin('#A08A80'), PRIMER, 0.4), 0.7 * edge_wear)
+    rough = lerp(rough, 0.9, edge_wear)
+    height -= 0.00015 * edge_wear
     # antifoul wear at the edges it runs on: strakes, chines, keel, forefoot
     afw = smooth(0.58, 0.86, W + 0.12 * cell + 0.05 * nm) * boot_m
     C, A = _over(C, A, lerp(AF_PRIMER, AF_OLD, smooth(-0.5, 0.8, nl)[..., None]), 0.75 * afw)
@@ -649,6 +677,10 @@ def composite(H, D, size, anchors):
     height -= 0.00045 * deep
     # algae line (≤ 8 cm) and the salt crust band just above the waterline (§5.2.6)
     wl = hy - boot_y
+    # scum line: a thin brown-grey film right at the rest waterline, under the algae and the crust
+    scum = np.exp(-((wl - 0.004) / 0.012) ** 2) * np.clip(0.55 + 0.45 * nf, 0, 1) * gel * (hz < 11.2)
+    C, A = _over(C, A, hex_lin('#5F574A'), 0.55 * scum)
+    rough = lerp(rough, 0.6, scum * 0.5)
     algae = np.exp(-((wl + 0.01) / 0.022) ** 2) * np.clip(0.5 + 0.5 * nm, 0, 1) * gel * (hz < 11.2)
     C, A = _over(C, A, ALGAE, 0.5 * algae)
     rough = lerp(rough, 0.55, algae * 0.6)
@@ -684,38 +716,43 @@ def composite(H, D, size, anchors):
         on = (sd > 0) & (shell | plate_isl)
         on_isl = plate_isl & (side == p['side']) & (hz > p['z0'] - 0.02) & (hz < p['z1'] + 0.02)
         pm = np.maximum(on.astype(np.float32), on_isl.astype(np.float32))
-        # brushed/sanded aluminium: the stretched scratch field gives the grain (band-limited, no aliasing sin)
         grain = smooth(0.3, 0.9, 0.5 + 0.2 * nf)
         oxide = smooth(0.8, 1.8, 0.7 * nf + 0.5 * nm) * 0.7
         pcol = lerp(ALU * (1.02 + 0.04 * grain[..., None]), ALU_OXIDE, (0.5 * oxide)[..., None])
+        # oil-canning: the thin sheet dishes between the rivet rows (low, broad relief, darker in the hollows)
+        can = smooth(-1.2, 1.2, nm + 0.35 * nl)
+        pcol = pcol * (0.93 + 0.1 * can[..., None])
         # feathered filler around the doubler (STYLE-SPEC §5.3), then the sealant squeeze-out bead
         if 'd_top' in p:
             feather = smooth(0.05, 0.012, np.abs(sd) + 0.012 * nm) * (sd < 0) * shell * (side == p['side'])
             C, A = _over(C, A, FILLER, 0.55 * feather)
             rough = lerp(rough, 0.7, feather * 0.6)
-        seal = smooth(0.012, 0.003, np.abs(sd)) * (sd < 0) * shell * (side == p['side'])
-        C, A = _over(C, A, SEALANT, 0.85 * seal)
-        height += 0.0004 * seal
+        seal = smooth(0.010, 0.002, np.abs(sd) - 0.002 + 0.0015 * nf) * shell * (side == p['side'])
+        C, A = _over(C, A, lerp(SEALANT, hex_lin('#8F8A80'), smooth(-0.5, 1.2, nm)[..., None]), 0.9 * seal)
+        rough = lerp(rough, 0.8, seal)
+        height += 0.0009 * seal
         C = np.where(pm[..., None] > 0.5, pcol, C)
         A = np.where(pm > 0.5, 1.0, A)
         rough = np.where(pm > 0.5, 0.42 + 0.25 * oxide + 0.02 * nf, rough)
         metal = np.where(pm > 0.5, 0.75 - 0.5 * oxide, metal)
-        # rivet line 25 mm inside the edge, 60 mm pitch
-        zs = np.arange(p['z0'] + 0.035, p['z1'] - 0.02, 0.07)
-        for z in zs:
-            for f in (0.0, 1.0):
-                y = H.plate_outline(p, z, f) + (-0.025 if f == 0.0 else 0.025)
-                fasteners.append((p['side'], z, y, p['name'] == 'chine_plate'))
-        for f in np.linspace(0.0, 1.0, 6)[1:-1]:
-            for zz in (p['z0'] + 0.025,):
-                fasteners.append((p['side'], zz, H.plate_outline(p, zz, f), p['name'] == 'chine_plate'))
-    # rivet domes + rust / salt streaks (vectorised on a local subset per plate)
-    sel = np.flatnonzero(((shell | plate_isl) & (side < 0) & (((hz > 0.0) & (hz < 2.3)) | ((hz > 9.8) & (hz < 11.2)))).ravel())
+        height = np.where(pm > 0.5, height + 0.0011 * can, height)
+        # the same rivet pattern the LOD0 geometry carries (hero_hull.plate_rivets): steel pop rivets on the chine
+        # plate bleed rust; monel/alu rivets on the doubler bleed white oxide and dark galvanic streaks
+        for (z, y) in H.plate_rivets(p):
+            fasteners.append((p['side'], z, y, p['name'] == 'chine_plate'))
+    # rivet domes (texture relief for LOD1/2) + bleed (vectorised on a local subset around the plates)
+    near_plates = np.zeros((size, size), dtype=bool)
+    for p in H.plates:
+        near_plates |= (hz > p['z0'] - 0.05) & (hz < p['z1'] + 0.05)
+    sel = np.flatnonzero(((shell | plate_isl) & (side < 0) & near_plates).ravel())
     hzf, hyf = hz.ravel()[sel], hy.ravel()[sel]
     Cf, Af = C.reshape(-1, 3)[sel], A.ravel()[sel]
     hgt_f = np.zeros(sel.size, dtype=np.float32)
     rust_s = np.zeros(sel.size, dtype=np.float32)
     salt_s = np.zeros(sel.size, dtype=np.float32)
+    galv_s = np.zeros(sel.size, dtype=np.float32)
+    oxide_h = np.zeros(sel.size, dtype=np.float32)
+    ring_s = np.zeros(sel.size, dtype=np.float32)
     stf = streak.ravel()[sel]
     for (sgn, z, y, rusty) in fasteners:
         dz = hzf - z
@@ -724,22 +761,29 @@ def composite(H, D, size, anchors):
         if not near.any():
             continue
         r2 = dz * dz + dyv * dyv
-        dome = np.clip(1 - r2 / 0.008 ** 2, 0, 1)
-        hgt_f += np.sqrt(dome) * 0.003
-        run = (dyv < 0) & (dyv > -0.18) & (np.abs(dz) < 0.02)
-        s = run * np.exp(-np.abs(dz) / 0.005) * np.clip(1 + dyv / 0.18, 0, 1) ** 1.6 * np.clip(0.4 + 0.5 * stf, 0, 1) * (np.sin(z * 37.0) > -0.2)
-        halo = np.exp(-np.sqrt(r2) / 0.008)
+        rr = np.sqrt(r2)
+        dome = np.clip(1 - r2 / 0.0065 ** 2, 0, 1)
+        hgt_f += np.sqrt(dome) * 0.0026
+        ring_s = np.maximum(ring_s, smooth(0.0095, 0.0068, rr) * smooth(0.005, 0.0066, rr))
+        run = (dyv < 0) & (dyv > -0.22) & (np.abs(dz) < 0.02)
+        s = run * np.exp(-np.abs(dz) / 0.004) * np.clip(1 + dyv / 0.22, 0, 1) ** 1.4 * np.clip(0.4 + 0.5 * stf, 0, 1) * (np.sin(z * 37.0 + y * 11.0) > -0.3)
+        halo = np.exp(-rr / 0.009)
         if rusty:
             rust_s = np.maximum(rust_s, np.maximum(s, 0.8 * halo))
         else:
-            salt_s = np.maximum(salt_s, 0.6 * s)
-    Cf, Af = _over(Cf[None], Af[None], RUST, 0.45 * rust_s[None])
-    Cf, Af = _over(Cf, Af, SALT, 0.35 * salt_s[None])
+            galv_s = np.maximum(galv_s, 0.7 * s)
+            oxide_h = np.maximum(oxide_h, smooth(0.02, 0.007, rr))
+            salt_s = np.maximum(salt_s, 0.35 * s)
+    Cf, Af = _over(Cf[None], Af[None], hex_lin('#7E7A72'), 0.3 * ring_s[None])
+    Cf, Af = _over(Cf, Af, RUST, 0.45 * rust_s[None])
+    Cf, Af = _over(Cf, Af, hex_lin('#DCDDD6'), 0.55 * oxide_h[None])
+    Cf, Af = _over(Cf, Af, hex_lin('#3E3B37'), 0.32 * galv_s[None])
+    Cf, Af = _over(Cf, Af, SALT, 0.3 * salt_s[None])
     C.reshape(-1, 3)[sel] = Cf[0]
     A.ravel()[sel] = Af[0]
     height.ravel()[sel] += hgt_f
-    rough.ravel()[sel] = np.maximum(rough.ravel()[sel], 0.8 * rust_s)
-    metal.ravel()[sel] *= (1 - np.clip(rust_s + salt_s, 0, 1))
+    rough.ravel()[sel] = np.maximum(rough.ravel()[sel], 0.8 * np.maximum(rust_s, oxide_h))
+    metal.ravel()[sel] *= (1 - np.clip(rust_s + salt_s + galv_s + 0.6 * oxide_h, 0, 1))
 
     # transom: bronze drain plugs in the bottom corners, tea staining under the tow eyes
     bT = float(H.at(0.0)['chineHalfBeam'])
@@ -778,6 +822,9 @@ def composite(H, D, size, anchors):
     nsk *= smooth(0.33, 0.345, fh_r)
     nsk *= smooth(0.008, 0.013, ax_) * (hz > H.well_fwd_end + 0.1) + (hz <= H.well_fwd_end + 0.1)  # foredeck centre seam
     nsk *= (hz < 11.45)
+    dp = H.deck_panel
+    panel_d = np.maximum(np.maximum(dp['z0'] - hz, hz - dp['z1']), ax_ - dp['half'])
+    nsk *= smooth(0.055, 0.065, panel_d)             # bone frame round the painted number panel
     nsk = nsk * deck
     # well: bone walls, non-skid sole with a bone border
     sole = well & (hy < H.sole_y + 0.01)
@@ -864,7 +911,8 @@ def composite(H, D, size, anchors):
     texel_n = _height_normal(height, pos, cov, size)
 
     # ── mask (1024): fields + wear ramp, glyph strip over the deck row ────
-    mask2 = np.stack([np.where(gel, R, 0.0), np.where(gel, G, 0.0), np.where(gel, B, 0.0), np.where(cov, W, 0.0)], axis=-1).astype(np.float32)
+    paintf = gel & ~decknum      # the deck number panel wears the topsides hue only
+    mask2 = np.stack([np.where(paintf, R, 0.0), np.where(paintf, G, 0.0), np.where(paintf, B, 0.0), np.where(cov, W, 0.0)], axis=-1).astype(np.float32)
     msz = size // 2
     mask = mask2.reshape(msz, 2, msz, 2, 4).mean(axis=(1, 3))
     layout = H.uv_layout()
@@ -898,7 +946,7 @@ def composite(H, D, size, anchors):
         'mask': mask,
         'glyph': glyph_info,
         'stats': stats,
-        'cov': cov, 'gel': gel, 'ns': ns, 'pos': pos,
+        'cov': cov, 'gel': gel, 'ns': ns, 'pos': pos, 'decknum': decknum,
         'nxb': nxb,
     }
     return out
@@ -977,44 +1025,68 @@ def number_glyphs(n):
     return [n] if n < 10 else [n // 10, n % 10]
 
 
-def preview_albedo(H, T, size, livery):
-    """runtime formula: paint from mask fields, overlay by base alpha, number from the glyph strip"""
-    cov, gel, pos = T['cov'], T['gel'], T['pos']
+def _upsample(img, f):
+    """bilinear f× (texel centres), as a GPU samples a lower-resolution texture"""
+    h, w = img.shape[:2]
+    ys, xs = np.mgrid[0:f * h, 0:f * w].astype(np.float32)
+    return _sample_bilinear(img, (xs + 0.5) / (f * w), (ys + 0.5) / (f * h))
+
+
+def _aa(v):
+    """the runtime aaStep: smoothstep(0.5 ∓ 0.75·fwidth) with fwidth taken per preview texel"""
+    gy, gx = np.gradient(v)
+    w = np.maximum(np.abs(gx) + np.abs(gy), 1e-4) * 0.75
+    return smooth(0.5 - w, 0.5 + w, v)
+
+
+def preview_albedo(H, T, size, livery, scale=2):
+    """runtime formula (slotMaterials.ts hullLiveryAlbedo) per texel of a preview at `scale`× the atlas: paint from the
+    bilinearly sampled mask SDFs with a derivative-width threshold, overlay by base alpha, both race numbers"""
+    out = size * scale
     mask = T['mask']
-    up = _upsample2(mask)
+    up = _upsample(mask, out // mask.shape[0])
     R, G, B, Wr = up[..., 0], up[..., 1], up[..., 2], up[..., 3]
-    aa = lambda v: smooth(0.475, 0.525, v)  # noqa: E731
-    band, stripe, boot = aa(R), aa(G), aa(B)
+    band, stripe, boot = _aa(R), _aa(G), _aa(B)
     over = smooth(OVERSPRAY[0], OVERSPRAY[1], R) * (1 - band) * OVERSPRAY[2]
     top, bnd, stp, af = (hex_lin(livery[k]) for k in ('topsides', 'band', 'stripe', 'antifoul'))
     paint = lerp(top, bnd, np.maximum(band, over)[..., None])
     paint = lerp(paint, stp, stripe[..., None])
     paint = lerp(paint, af, boot[..., None])
-    base = T['base']
+    base = _upsample(T['base'], scale)
     ov_rgb = np.where(base[..., :3] <= 0.04045, base[..., :3] / 12.92, ((base[..., :3] + 0.055) / 1.055) ** 2.4)
     alb = lerp(paint, ov_rgb, base[..., 3:4])
-    # number field (body frame)
-    nfd = H.number_field
+    del up, base
+    pos = _upsample(T['pos'], scale)
+    rep = lambda a: np.repeat(np.repeat(a, scale, axis=0), scale, axis=1)  # noqa: E731
+    gel, nxb, decknum = rep(T['gel']), rep(T['nxb']), rep(T['decknum'])
     bx, by, bz = pos[..., 0], pos[..., 2], -pos[..., 1]
-    zc_b, yc_b = nfd['zCentre'] - H.lcg, nfd['yCentre'] - H.vcg
-    s = np.where(bx >= 0, 1.0, -1.0)
-    t = -s * (bz - zc_b)
+    del pos
     digits = number_glyphs(livery['number'])
-    dw, gp, hh = nfd['digitWidth'], nfd['gap'], nfd['height']
-    fw = dw * len(digits) + gp * (len(digits) - 1)
-    gx = t / fw + 0.5
-    gy = (by - (yc_b - hh / 2)) / hh
-    infield = (gx >= 0) & (gx <= 1) & (gy >= 0) & (gy <= 1) & (np.abs(T['nxb']) > 0.5) & gel
-    g = np.zeros(gx.shape, dtype=np.float32)
     gi = T['glyph']
-    for i, dig in enumerate(digits):
-        x0 = i * (dw + gp) / fw
-        cx = (gx - x0) * fw / dw
-        inside = infield & (cx >= 0) & (cx <= 1)
-        u = gi['u0'] + (dig + np.clip(cx, 0, 1)) * gi['cellW']
-        v = gi['v0'] + np.clip(gy, 0, 1) * gi['cellH']
-        val = _sample_bilinear(mask[..., :1], u, v)[..., 0]
-        g = np.where(inside, aa(val), g)
+    g = np.zeros(bx.shape, dtype=np.float32)
+
+    def paint_field(nfd, gx_m, gy_m, where):
+        dw, gp, hh = nfd['digitWidth'], nfd['gap'], nfd['height']
+        fw = dw * len(digits) + gp * (len(digits) - 1)
+        gx = gx_m / fw + 0.5
+        gy = gy_m / hh + 0.5
+        infield = (gx >= 0) & (gx <= 1) & (gy >= 0) & (gy <= 1) & where
+        res = np.zeros(bx.shape, dtype=np.float32)
+        for i, dig in enumerate(digits):
+            x0 = i * (dw + gp) / fw
+            cx = (gx - x0) * fw / dw
+            inside = infield & (cx >= 0) & (cx <= 1)
+            u = gi['u0'] + (dig + np.clip(cx, 0, 1)) * gi['cellW']
+            v = gi['v0'] + np.clip(gy, 0, 1) * gi['cellH']
+            val = _sample_bilinear(mask[..., :1], u, v)[..., 0]
+            res = np.where(inside, _aa(val), res)
+        return res
+
+    nfd = H.number_field
+    s = np.where(bx >= 0, 1.0, -1.0)
+    g = np.maximum(g, paint_field(nfd, -s * (bz - (nfd['zCentre'] - H.lcg)), by - (nfd['yCentre'] - H.vcg), (np.abs(nxb) > 0.5) & gel))
+    dnf = H.deck_number_field
+    g = np.maximum(g, paint_field(dnf, -bx - dnf['xCentre'], bz - (dnf['zCentre'] - H.lcg), decknum))
     g = g * (1 - smooth(NUMERAL_WEAR[0], NUMERAL_WEAR[1], Wr)) * (1 - boot)
     alb = lerp(alb, hex_lin(livery['numeral']), (0.97 * g)[..., None])
     alb = np.where(gel[..., None], alb, ov_rgb)
@@ -1093,6 +1165,9 @@ def bake_and_texture(H, hull_obj, args, anchors, preview_variants=('hero', 'yell
             # the clear topside the number must stay inside (pinstripe bottom → boot line, body frame; checkGlb liveryErrors)
             'clearTopside': {'top': round(nfd['clearTop'] - H.vcg, 5), 'bottom': round(nfd['clearBottom'] - H.vcg, 5),
                              'zMin': round(nfd['zMin'] - H.lcg, 5), 'zMax': round(nfd['zMax'] - H.lcg, 5)},
+            # foredeck race-number panel: glyph up = bow (+z), reading right = −x (as seen from aft and from above)
+            'deckNumberField': {k: round(v - (H.lcg if k == 'zCentre' else 0.0), 5) for k, v in H.deck_number_field.items()},
+            'deckPanel': {'zMin': round(H.deck_panel['z0'] - H.lcg, 5), 'zMax': round(H.deck_panel['z1'] - H.lcg, 5), 'halfWidth': H.deck_panel['half']},
             # glTF UV convention (v down): the strip's top edge
             'glyphAtlas': {'u0': round(g['u0'], 6), 'v0': round(1.0 - g['v0'] - g['cellH'], 6), 'cellW': round(g['cellW'], 6), 'cellH': round(g['cellH'], 6)},
             'clearcoat': 'coat = (1 - antifoul) * (1 - 0.9 * overlay) * smoothstep(0.62, 0.25, roughness)',

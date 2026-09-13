@@ -305,13 +305,15 @@ describe('checkGlb: each broken convention FAILS the build', () => {
   });
 
   it('a race number that runs into the band or the boot line fails (hull v2: the freeboard dropped and "27" was clipped)', async () => {
-    const withNumber = (yCentre: number, height: number): Document => {
+    const withNumber = (yCentre: number, height: number, deckH = 0.7): Document => {
       const doc = buildBoat();
       const gel = doc.getRoot().listMaterials()[0];
       gel.setExtras({
         hullLivery: {
           numberField: { zCentre: 1.2, yCentre, height, digitWidth: (height * 2) / 3, gap: height * 0.1 },
           clearTopside: { top: 0.55, bottom: 0.05, zMin: -0.3, zMax: 2.7 },
+          deckNumberField: { zCentre: 3.0, xCentre: 0, height: deckH, digitWidth: (deckH * 2) / 3, gap: deckH * 0.1 },
+          deckPanel: { zMin: 2.5, zMax: 3.5, halfWidth: 0.6 },
         },
       });
       return doc;
@@ -320,6 +322,24 @@ describe('checkGlb: each broken convention FAILS the build', () => {
     expect(errors.filter((e) => e.startsWith('livery'))).toEqual([]);
     await failsWith(withNumber(0.45, 0.4), /race number top .* runs into the pinstripe\/band/);
     await failsWith(withNumber(0.15, 0.4), /race number bottom .* runs into the boot line/);
+    // the foredeck number is sized to its painted panel: a bigger one runs off it
+    await failsWith(withNumber(0.3, 0.4, 1.0), /deck race number .* runs off its panel/);
+  });
+
+  it('a part hanging below the hull V at the transom fails (the bracket plate corners hung 0.149 m below the bottom)', async () => {
+    const withSlab = (y: number): Document => {
+      const doc = buildBoat();
+      const lod0 = doc.getRoot().listNodes().find((n) => n.getName() === 'LOD0') as Node;
+      const mat = doc.getRoot().listMaterials()[1];
+      // a thin plate on the transom plane at x ≈ 1.0, where the synthetic V bottom is at y ≈ −0.35
+      const p = doc.createAccessor().setType('VEC3').setArray(new Float32Array([0.95, y, STERN - 0.01, 1.05, y, STERN - 0.01, 1.0, y + 0.3, STERN - 0.01])).setBuffer(doc.getRoot().listBuffers()[0]);
+      const mesh = doc.createMesh('Bracket_LOD0').addPrimitive(doc.createPrimitive().setAttribute('POSITION', p).setMaterial(mat));
+      lod0.addChild(doc.createNode('Bracket_LOD0').setMesh(mesh).setExtras({ lodLevel: 0 }));
+      return doc;
+    };
+    const { errors } = await check(withSlab(-0.3));
+    expect(errors.filter((e) => e.startsWith('parts:'))).toEqual([]);
+    await failsWith(withSlab(-0.7), /hangs 0\.\d+ m below the hull transom bottom/);
   });
 
   it('player LOD0 budget is 120k, not the NPC 50k', async () => {
