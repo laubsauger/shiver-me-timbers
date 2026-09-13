@@ -39,8 +39,9 @@ import { buildSpeedboatBoats, buildSpeedboatSea } from './speedboat/page/speedbo
 import { createPlayerBoat } from './speedboat/page/playerBoat';
 import { createNpcFleetDriver } from './speedboat/page/npcFleet';
 import { createSpeedboatFrame } from './speedboat/page/speedboatFrame';
-import { createKeyboardControls } from './speedboat/page/controls';
-import { createChaseCamera, createKnotsHud, createNoCrashes, createSilentAudio, installAudioUnlock } from './speedboat/page/stubs';
+import { createRaceCameraRig } from './camera/raceCam';
+import { createRaceControls } from './speedboat/controls';
+import { createKnotsHud, createNoCrashes, createSilentAudio, installAudioUnlock } from './speedboat/page/stubs';
 import type { BoatAudioFrame, HudModel } from './speedboat/page/seams';
 
 /** rivals on the grid (design doc §2 slice: 7 NPCs) */
@@ -103,8 +104,8 @@ async function boot(): Promise<void> {
     spawn: (i) => course.spawn(i + 1),
   });
 
-  const camera = createChaseCamera(app.camera, app.renderer.domElement); // §T.182
-  const controls = createKeyboardControls({ enabled: () => !camera.capturesInput() }); // §T.182
+  const camera = createRaceCameraRig(app.camera, { player }); // §T.182
+  const controls = createRaceControls({ player, camera, enabled: () => !camera.capturesInput() }); // §T.182
   const crash = createNoCrashes(); // §T.188
   const hud = createKnotsHud(); // §T.185
   const audio = createSilentAudio(); // §T.183
