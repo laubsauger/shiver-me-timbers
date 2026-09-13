@@ -125,9 +125,11 @@ export interface AccumProfile {
    * (`simFoam.createSimFoamField().rateNode`: vec2 per second at a world-XZ
    * node). When present it REPLACES `wakeFieldNode`'s `.rg` doses in this tier;
    * `.ba` and the elevation still come from `wakeFieldNode`. Absent (the
-   * analytic backend) the pass is the pre-W5 graph, byte for byte.
+   * analytic backend) the pass is the pre-W5 graph, byte for byte. §T.180 b:
+   * it is handed this tier's texel (m, at construction) so the far tier can
+   * box-filter the sim over its own footprint.
    */
-  simFoam?: (worldXZ: any) => any;
+  simFoam?: (worldXZ: any, tierTexel: number) => any;
 }
 
 /** the near tier's profile — `createAccumulation`'s default, exported so a variant can spread it */
@@ -344,7 +346,7 @@ export function createAccumulation(
       const wake = field.rate;
       // §T.171: on the sim backend the doses are the sim's (simFoam.ts), not the analytic envelope's
       const rate = profile.simFoam
-        ? vec4(profile.simFoam(vec2(wx, wz)), 0, 0).mul(uDt).mul(uWakeScale)
+        ? vec4(profile.simFoam(vec2(wx, wz), profile.size() / res), 0, 0).mul(uDt).mul(uWakeScale)
         : wake.mul(uDt).mul(uWakeScale);
       const foam = prev.x.mul(uDecay).add(inject.mul(uInjectPerFrame)).add(rate.x).min(1);
       // the slick is a coverage that BUILDS and then relaxes — same accumulate/

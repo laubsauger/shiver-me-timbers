@@ -71,6 +71,7 @@ import {
   spongeGammaAxis,
   splatBinWeight,
   splatPeakHead,
+  spongeAdvectionScale,
   splatSigma,
   wakeButterflyTables,
   type WakeSourceBuffer,
@@ -134,6 +135,9 @@ export class WakeSolverGpu {
   private readonly uD1 = uniform(0);
   private readonly uD0Old = uniform(0);
   private readonly uD1Old = uniform(0);
+  /** per-axis sponge γ scale for the domain's own motion (§T.180, `spongeAdvectionScale`) */
+  private readonly uSpongeScaleX = uniform(1);
+  private readonly uSpongeScaleZ = uniform(1);
   private readonly uShiftX = uniform(0, 'int');
   private readonly uShiftZ = uniform(0, 'int');
   private pendingShiftX = 0;
@@ -148,6 +152,9 @@ export class WakeSolverGpu {
   /** per instance: share of the peak in the deep bin */
   private readonly binData: Float32Array;
   private readonly binAttr: THREE.InstancedBufferAttribute;
+  /** per instance: 1 for a JET source (§T.180 c), splatted into the head target's .b too */
+  private readonly jetData: Float32Array;
+  private readonly jetAttr: THREE.InstancedBufferAttribute;
   private readonly clearTmp = new THREE.Color();
 
   constructor(opts: WakeSolverGpuOptions = {}) {
@@ -203,6 +210,9 @@ export class WakeSolverGpu {
     this.binData = new Float32Array(WAKE_MAX_SAMPLES);
     this.binAttr = new THREE.InstancedBufferAttribute(this.binData, 1);
     this.binAttr.setUsage(THREE.DynamicDrawUsage);
+    this.jetData = new Float32Array(WAKE_MAX_SAMPLES);
+    this.jetAttr = new THREE.InstancedBufferAttribute(this.jetData, 1);
+    this.jetAttr.setUsage(THREE.DynamicDrawUsage);
     const quad = new THREE.PlaneGeometry(2, 2);
     this.splatGeometry = new THREE.InstancedBufferGeometry();
     this.splatGeometry.setIndex(quad.getIndex());
@@ -248,6 +258,12 @@ export class WakeSolverGpu {
     return { sx, sz };
   }
 
+  /** the domain's own velocity (m/s, world x/z) — scales the sponge per axis (↔ WakeSolverCpu.setDomainVelocity) */
+  setDomainVelocity(vx: number, vz: number): void {
+    this.uSpongeScaleX.value = spongeAdvectionScale(Number.isFinite(vx) ? vx : 0, this.n, this.texel);
+    this.uSpongeScaleZ.value = spongeAdvectionScale(Number.isFinite(vz) ? vz : 0, this.n, this.texel);
+  }
+
   /**
    * Upload the sources relative to the CURRENT centre (call after `setCenter`).
    * Samples are already finite and fy ≥ 0 by `WakeSourceBuffer`; σ_eff and
@@ -255,23 +271,26 @@ export class WakeSolverGpu {
    */
   setSources(src: WakeSourceBuffer): void {
     const { n, texel } = this;
-    const count = Math.min(src.count, WAKE_MAX_SAMPLES);
     const { d0, d1 } = src.depthBins();
     this.uD0.value = d0;
     this.uD1.value = d1;
     let live = 0;
-    for (let s = 0; s < count; s++) {
-      const o = s * WAKE_SAMPLE_STRIDE;
-      const sigma = splatSigma(src.data[o + 3], texel, n);
-      const peak = splatPeakHead(src.data[o + 2], sigma);
-      if (!(peak > 0)) continue;
-      const q = live * 4;
-      this.instanceData[q] = (src.data[o] - this.centerX) / texel + n / 2;
-      this.instanceData[q + 1] = (src.data[o + 1] - this.centerZ) / texel + n / 2;
-      this.instanceData[q + 2] = sigma / texel;
-      this.instanceData[q + 3] = peak;
-      this.binData[live] = splatBinWeight(src.data[o + 4], d0, d1);
-      live++;
+    const lists = [[src.data, src.count, 0], [src.jetData, src.jetCount, 1]] as const;
+    for (const [data, count, jet] of lists) {
+      for (let s = 0; s < count && live < WAKE_MAX_SAMPLES; s++) {
+        const o = s * WAKE_SAMPLE_STRIDE;
+        const sigma = splatSigma(data[o + 3], texel, n);
+        const peak = splatPeakHead(data[o + 2], sigma);
+        if (peak === 0 || !Number.isFinite(peak)) continue;
+        const q = live * 4;
+        this.instanceData[q] = (data[o] - this.centerX) / texel + n / 2;
+        this.instanceData[q + 1] = (data[o + 1] - this.centerZ) / texel + n / 2;
+        this.instanceData[q + 2] = sigma / texel;
+        this.instanceData[q + 3] = peak;
+        this.binData[live] = splatBinWeight(data[o + 4], d0, d1);
+        this.jetData[live] = jet;
+        live++;
+      }
     }
     this.sampleCount = live;
     this.splatGeometry.instanceCount = live;
@@ -281,6 +300,9 @@ export class WakeSolverGpu {
     this.binAttr.clearUpdateRanges();
     this.binAttr.addUpdateRange(0, Math.max(live, 1));
     this.binAttr.needsUpdate = true;
+    this.jetAttr.clearUpdateRanges();
+    this.jetAttr.addUpdateRange(0, Math.max(live, 1));
+    this.jetAttr.needsUpdate = true;
   }
 
   /**
@@ -300,19 +322,42 @@ export class WakeSolverGpu {
     return Promise.all([splat, renderer.computeAsync(this.computeNodes)]);
   }
 
+  /**
+   * §T.180 defect 4: clear the head target INSIDE the splat's own render pass
+   * (autoClear, loadOp clear) rather than with a separate `renderer.clear()`,
+   * which in three r180 is its own command encoder and `queue.submit`. Kept
+   * switchable so the pond can A/B it in one session (`__wakePond`).
+   */
+  mergeClear = true;
+  /** when true, `step` records its CPU phases (ms) into `lastStepCpu` — the pond's encode breakdown */
+  profile = false;
+  readonly lastStepCpu = { splat: 0, compute: 0 };
+
   /** splat + one compute group. Δt is finite-guarded and clamped to [0, WAKE_MAX_DT] (V28). */
   step(renderer: THREE.WebGPURenderer, dtIn: number): void {
     const dt = Number.isFinite(dtIn) ? Math.min(Math.max(dtIn, 0), WAKE_MAX_DT) : 0;
+    const t0 = this.profile ? performance.now() : 0;
     const prevTarget = renderer.getRenderTarget();
     // runtime getClearColor only target.copy()s, so a plain Color works (clouds/index.ts precedent)
     renderer.getClearColor(this.clearTmp as Parameters<typeof renderer.getClearColor>[0]);
     const prevAlpha = renderer.getClearAlpha();
     renderer.setClearColor(0x000000, 0); // the RT clear uses the renderer's colour — never the app sky
     renderer.setRenderTarget(this.headTarget);
-    renderer.clear(true, false, false);
-    renderer.render(this.splatScene, this.splatCamera);
+    if (this.mergeClear) {
+      const prevAuto = renderer.autoClear;
+      const prevAutoColor = renderer.autoClearColor;
+      renderer.autoClear = true;
+      renderer.autoClearColor = true;
+      renderer.render(this.splatScene, this.splatCamera);
+      renderer.autoClear = prevAuto;
+      renderer.autoClearColor = prevAutoColor;
+    } else {
+      renderer.clear(true, false, false);
+      renderer.render(this.splatScene, this.splatCamera);
+    }
     renderer.setRenderTarget(prevTarget);
     renderer.setClearColor(this.clearTmp, prevAlpha);
+    const t1 = this.profile ? performance.now() : 0;
 
     this.uDt.value = dt;
     this.uShiftX.value = this.pendingShiftX;
@@ -323,6 +368,10 @@ export class WakeSolverGpu {
     // the head just splatted is now the head the state holds (post stored its bins)
     this.uD0Old.value = this.uD0.value;
     this.uD1Old.value = this.uD1.value;
+    if (this.profile) {
+      this.lastStepCpu.splat = t1 - t0;
+      this.lastStepCpu.compute = performance.now() - t1;
+    }
   }
 
   dispose(): void {
@@ -356,11 +405,12 @@ export class WakeSolverGpu {
     const vSigma = varying(inst.z, 'vWakeSigma') as AnyNode;
     const vPeak = varying(inst.w, 'vWakePeak') as AnyNode;
     const vDeep = varying(instancedBufferAttribute(this.binAttr) as AnyNode, 'vWakeDeep') as AnyNode;
+    const vJet = varying(instancedBufferAttribute(this.jetAttr) as AnyNode, 'vWakeJet') as AnyNode;
     // ↔ splatFalloff: peak·e^(−r²/2σ²), r and σ both in texels. σ ≥ √2 texels by splatSigma (V28).
     const r2 = vOffset.dot(vOffset);
     const h = vPeak.mul(exp(r2.negate().div(vSigma.mul(vSigma).mul(2)))).toVar();
-    // ↔ WakeSolverCpu.splat: head += h, head1 += h·deep
-    m.fragmentNode = vec4(h, h.mul(vDeep), 0, 0);
+    // ↔ WakeSolverCpu.splat: head += h, head1 += h·deep, headJet += h·jet
+    m.fragmentNode = vec4(h, h.mul(vDeep), h.mul(vJet), 0);
     m.blending = THREE.CustomBlending;
     m.blendEquation = THREE.AddEquation;
     m.blendSrc = THREE.OneFactor;
@@ -461,7 +511,10 @@ export class WakeSolverGpu {
       const coord = ivec2(x, y);
       const a = textureLoad(in0, coord).mul(sign).toVar();
       const g = textureLoad(in1, coord).mul(sign).toVar();
-      const gamma = textureLoad(this.axisTexture, ivec2(x, 0)).y.add(textureLoad(this.axisTexture, ivec2(y, 0)).y);
+      // per-axis γ, each scaled for the domain's own motion along that axis (↔ WakeSolverCpu spongeAxisX/Z)
+      const gamma = textureLoad(this.axisTexture, ivec2(x, 0))
+        .y.mul(this.uSpongeScaleX)
+        .add(textureLoad(this.axisTexture, ivec2(y, 0)).y.mul(this.uSpongeScaleZ));
       const damp = exp(gamma.negate().mul(this.uDt)).toVar(); // ≤ 1 since γ ≥ 0, Δt ≥ 0
       const zeta = a.x.mul(damp).toVar();
       const phi = a.z.mul(damp);

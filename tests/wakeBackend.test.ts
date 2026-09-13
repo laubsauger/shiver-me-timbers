@@ -7,10 +7,11 @@
  *     wired to the sim deliberately. A default that drifted to 'sim', or a
  *     shared-graph edit that leaked into the analytic branch, would change the
  *     shipped sea with nobody asking for it.
- *  2. THE SIM COSTS THE OCEAN MATERIAL NOTHING (§V40). It is resampled into
- *     flowfoam's existing channels in a COMPUTE pass, so the ocean material's
- *     WGSL — and therefore every binding in both stages — is identical
- *     between backends. The fragment stage has one sampler of headroom.
+ *  2. THE SIM COSTS THE OCEAN MATERIAL NO BINDING (§V40). It is resampled into
+ *     flowfoam's existing channels in a COMPUTE pass, and its foam age (W5b)
+ *     is read off the same foam textures, so every stage binds as many
+ *     textures and samplers as the analytic backend. The fragment stage has
+ *     one sampler of headroom.
  *  3. THE RAFT'S SURFACE IS THE SIM'S (§V100). Her near advect pass binds the
  *     solver's height + slope textures, and the analytic injector is asked for
  *     doses only, never for the crests/elevation the sim replaces.
@@ -234,14 +235,44 @@ describe('1. pirate: the analytic backend is the default and is untouched', () =
   });
 });
 
-describe('2. §V40: the sim adds nothing to the ocean material', () => {
-  it('the ocean material WGSL is byte-identical under the sim backend (both stages, every binding)', async () => {
-    const analytic = await oceanWgsl(createFlowFoam());
+describe('2. §V40: the sim adds no BINDING to the ocean material', () => {
+  /**
+   * Re-cut at W5b (§T.180 d). W2b pinned "WGSL byte-identical in both
+   * backends" — a DECISION that held while the sim changed nothing the material
+   * reads. W5b gives sim wake foam an AGE (flowfoam's two decay clocks, read off
+   * the SAME foam textures), so the sim material legitimately differs. The
+   * PROPERTY §V40 protects is the binding budget: every stage binds exactly as
+   * many textures and samplers under the sim as under the analytic backend, and
+   * no solver texture reaches the material. The pirate side is held by the
+   * construction gate (`wakeFoamFreshnessNode === null` on analytic, so the
+   * analytic material builds the pre-W5b graph) and by §1.
+   */
+  const perStage = (wgsl: string) => {
+    const [vertex, fragment] = wgsl.split('\n----\n');
+    const count = (src: string, re: RegExp) => (src.match(re) ?? []).length;
+    return {
+      vTex: count(vertex, /:\s*texture_(?!storage)/g),
+      vSmp: count(vertex, /:\s*sampler\b/g),
+      fTex: count(fragment, /:\s*texture_(?!storage)/g),
+      fSmp: count(fragment, /:\s*sampler\b/g),
+    };
+  };
+
+  it('same per-stage texture + sampler count under the sim backend, no solver texture bound; the age term is sim-only', async () => {
+    const analyticFf = createFlowFoam();
+    expect(analyticFf.wakeFoamFreshnessNode).toBeNull();
+    const analytic = await oceanWgsl(analyticFf);
     const ff = simFoam();
+    expect(ff.wakeFoamFreshnessNode).not.toBeNull();
     const sim = await oceanWgsl(ff);
-    expect(sim.wgsl).toBe(analytic.wgsl);
+    expect(perStage(sim.wgsl)).toEqual(perStage(analytic.wgsl));
+    expect(perStage(analytic.wgsl).fSmp).toBeGreaterThan(0);
+    expect(sim.textures.size).toBe(analytic.textures.size);
     expect(sim.textures.has(ff.wakeSim!.solver.heightTexture)).toBe(false);
     expect(sim.textures.has(ff.wakeSim!.solver.slopeTexture)).toBe(false);
+    expect(sim.textures.has(ff.wakeSim!.solver.headTarget.texture)).toBe(false);
+    // liveness: the sim material really carries the age term
+    expect(sim.wgsl).not.toBe(analytic.wgsl);
   }, 120_000);
 });
 

@@ -329,6 +329,16 @@ export function foamDetailMask(
    * outside would double the fetches this exists to keep at two.
    */
   out?: { slope?: AnyNode },
+  /**
+   * §T.180 d — RETIRE THE DISSOLVE BY AGE, in [0, 1] (1 = the full torn gate,
+   * 0 = the gate's own sub-pixel average: a soft ramp of width `erodeDepth`).
+   * Aged wake foam is a thinning film, not a breaking lip, so its outline should
+   * be the AVERAGE of the tear rather than a 2 px contour — which is exactly the
+   * `resolved = 0` limit this function already derives (foamMath.dissolveKnee),
+   * so age multiplies `resolved` and no new shape is authored. Omitted (every
+   * caller but the sim wake) → the pre-W5b graph, node for node.
+   */
+  detailRetire?: AnyNode,
 ): AnyNode {
   const art = foamArtTexture();
   // per-position phase (§B.4: NO shared global timeline) — coarse value
@@ -614,7 +624,9 @@ export function foamDetailMask(
   // @band-limited-elsewhere: this IS the band limit — `pixelMetres` is the
   // measured screen footprint (dFdx+dFdy) against ONE breakup cell's world
   // size, and the amplitude half is the widening of `softness` below.
-  const resolved = smoothstep(cellMetres, cellMetres.mul(0.5), pixelMetres);
+  const resolvedCells = smoothstep(cellMetres, cellMetres.mul(0.5), pixelMetres);
+  // @band-limited-elsewhere: `detailRetire` only LOWERS `resolved` toward the band-limit's own sub-pixel limit (0)
+  const resolved = detailRetire !== undefined ? resolvedCells.mul(detailRetire.clamp(0, 1)) : resolvedCells;
   const erode = uErodeDepth.clamp(0, 1);
   // ONE-SIDED — [kneeLow, kneeLow + erode] — and it was tried the other way.
   // A SIGNED, mean-zero shift is the tempting version: it grows tendrils

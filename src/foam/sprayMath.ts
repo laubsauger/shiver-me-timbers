@@ -594,6 +594,24 @@ export function bowContactEmission(
 }
 
 /**
+ * ── THE CONTACT-MODE RISE (§T.180 defect 2) ────────────────────────────────
+ *
+ * `bowLaunchVelocity` launches `up = speed · bowRise · sheet`, so the apex is
+ * (speed·bowRise·sheet)²/2g. The legacy galleon ramp authored bowRise 0.35,
+ * which at the raft's 2 m/s puts the apex at (2·0.35·0.79)²/2g = 1.6 cm — the
+ * "few droplets, no sheet" the browser pass saw. What physics allows is set by
+ * the stagnation head: water meeting the bow at U can climb U²/2g and no
+ * higher (0.20 m at 2 m/s), and it leaves the stagnation region at up to U. A
+ * rise of exactly 1 makes the contact-mode apex (U·sheet)²/2g ≤ U²/2g — the
+ * Bernoulli bound itself, not a look number. So at 2 m/s the bow shows a low
+ * pile-up skirt up to ~13–20 cm hugging the stem plus the bury churn on the
+ * water (sim foam), and no airborne sheet: v²/2g does not reach one. The slam
+ * term (closing speed, not hull speed) is untouched and is what throws water
+ * clear. The pirate (legacy) path keeps `bowRise`.
+ */
+export const BOW_CONTACT_RISE = 1;
+
+/**
  * Bow spawn offset from the bow point, in world XZ meters (GPU mirror: bow
  * spawn pass). Particles are seeded along the CUTWATER — a short line ahead
  * of the bow point and a hash-chosen flank offset outboard — not from a

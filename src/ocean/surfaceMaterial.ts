@@ -1719,13 +1719,25 @@ export function buildOceanSurfaceMaterial(
       // "too solid white… should only do that on the leading edges".
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
       let wakeAlpha: any = float(0);
+      // §T.59 / §T.180 d WAKE FOAM AGE (sim backend only — flowfoam returns no
+      // node on the analytic backend, so this material is the pre-W5b graph
+      // there): stage-A weight from flowfoam's two decay clocks, no new binding.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+      let wakeFresh: any = null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+      let wakeMaskFresh: any = null;
       if (flowFoam) {
+        wakeFresh = flowFoam.wakeFoamFreshnessNode ? flowFoam.wakeFoamFreshnessNode(worldXZ) : null;
         // wake foam runs through the same crackle/mottle detail blend but
-        // slightly damped — bow/stern trails read softer than whitecaps
-        const wakeMask = foamDetailMask(
+        // slightly damped — bow/stern trails read softer than whitecaps;
+        // aged sim foam retires the torn dissolve to its soft average
+        const wakeMask = wakeFresh
+          ? foamDetailMask(flowFoam.foamSampleNode(worldXZ).clamp(0, 1), worldXZ, undefined, undefined, undefined, wakeFresh)
+          : foamDetailMask(
           flowFoam.foamSampleNode(worldXZ).clamp(0, 1),
           worldXZ,
         );
+        wakeMaskFresh = wakeMask;
         // OPTICAL DEPTH, not a hard alpha (§B, the sim-foam lesson): a straight
         // mask saturates, so every texel the wake covers reached full opacity
         // and the track rendered as one flat sheet with breakup holes punched
@@ -1821,10 +1833,18 @@ export function buildOceanSurfaceMaterial(
       // pigment floor and the underwater tint below see all the foam there is.
       const whitecapAmount = foamMask.clamp(0, 1).mul(0.9).mul(foamGain);
       col.assign(mix(col, foamCol, whitecapAmount));
-      const wakeCol = uWakeFoam
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+      let wakeCol: any = uWakeFoam
         .mul(foamTintNode())
         .mul(ndl.mul(uLightGain.mul(0.6)).mul(shade).add(uLightFloor.add(0.1)));
-      const wakeAmount = wakeAlpha.mul(foamGain);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+      let wakeAmount: any = wakeAlpha.mul(foamGain);
+      if (wakeFresh) {
+        // breaking-fresh wake whitewater IS whitecap water: the whitecap colour
+        // and alpha law; the aged lane keeps the wake material (§V23 mix)
+        wakeCol = mix(wakeCol, foamCol, wakeFresh);
+        wakeAmount = mix(wakeAlpha, wakeMaskFresh.clamp(0, 1).mul(0.9), wakeFresh).mul(foamGain);
+      }
       col.assign(mix(col, wakeCol, wakeAmount));
       foamAmount.assign(whitecapAmount.max(wakeAmount).clamp(0, 1));
     } else {

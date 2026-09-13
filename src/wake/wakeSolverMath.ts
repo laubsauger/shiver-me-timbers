@@ -116,12 +116,23 @@ export const WAKE_SAMPLE_STRIDE = 5;
  * two can never be fed different inputs.
  *
  * §V28: a sample with ANY non-finite field is dropped (counted, never drawn);
- * fy is clamped to ≥ 0 (a hull cannot pull the sea up by its keel).
+ * a HULL sample's fy is clamped to ≥ 0 (a hull cannot pull the sea up by its
+ * keel).
+ *
+ * JETS (§T.180 c, src/wake/propWash.ts) are a second, explicitly separate list:
+ * a prop's momentum jet is not a hull pressing on the water, so its head may be
+ * signed (fy < 0 lifts the surface where the jet boils up) and it is splatted
+ * into the head target's jet channel as well as the total, so consumers that
+ * mean "the hull's immersion field" (sim foam churn) can take it back out.
+ * Jets share the capacity with hull samples (hull first).
  */
 export class WakeSourceBuffer {
   /** [x, z, fy, footprint, depth] per sample — Float64 so kilometre world coords keep mm */
   readonly data: Float64Array;
   count = 0;
+  /** [x, z, fy (signed), footprint, depth] per jet */
+  readonly jetData: Float64Array;
+  jetCount = 0;
   /** samples rejected for non-finite fields since the last `clear()` */
   dropped = 0;
   /** samples rejected because the buffer was full since the last `clear()` */
@@ -129,10 +140,12 @@ export class WakeSourceBuffer {
 
   constructor(readonly capacity = WAKE_MAX_SAMPLES) {
     this.data = new Float64Array(capacity * WAKE_SAMPLE_STRIDE);
+    this.jetData = new Float64Array(capacity * WAKE_SAMPLE_STRIDE);
   }
 
   clear(): void {
     this.count = 0;
+    this.jetCount = 0;
     this.dropped = 0;
     this.overflowed = 0;
   }
@@ -148,7 +161,7 @@ export class WakeSourceBuffer {
       this.dropped++;
       return false;
     }
-    if (this.count >= this.capacity) {
+    if (this.count + this.jetCount >= this.capacity) {
       this.overflowed++;
       return false;
     }
@@ -159,6 +172,26 @@ export class WakeSourceBuffer {
     this.data[o + 3] = Math.max(0, footprint);
     this.data[o + 4] = Math.max(0, depth);
     this.count++;
+    return true;
+  }
+
+  /** a NON-HULL jet source (signed fy — see the class header); same §V28 rules */
+  pushJet(x: number, z: number, fy: number, footprint: number, depth = 0): boolean {
+    if (![x, z, fy, footprint, depth].every(Number.isFinite)) {
+      this.dropped++;
+      return false;
+    }
+    if (this.count + this.jetCount >= this.capacity) {
+      this.overflowed++;
+      return false;
+    }
+    const o = this.jetCount * WAKE_SAMPLE_STRIDE;
+    this.jetData[o] = x;
+    this.jetData[o + 1] = z;
+    this.jetData[o + 2] = fy;
+    this.jetData[o + 3] = Math.max(0, footprint);
+    this.jetData[o + 4] = Math.max(0, depth);
+    this.jetCount++;
     return true;
   }
 
@@ -187,20 +220,32 @@ export class WakeSourceBuffer {
 
   /**
    * The two source-depth bins for the current samples: min and max depth over
-   * samples that carry force. Equal (single bin) when every sample shares a
-   * depth — a level hull in calm water.
+   * samples (hull and jet) that carry force. Equal (single bin) when every
+   * sample shares a depth — a level hull in calm water.
    */
   depthBins(): { d0: number; d1: number } {
     let d0 = Infinity;
     let d1 = -Infinity;
-    for (let s = 0; s < this.count; s++) {
-      const o = s * WAKE_SAMPLE_STRIDE;
-      if (!(this.data[o + 2] > 0)) continue;
-      const d = this.data[o + 4];
-      if (d < d0) d0 = d;
-      if (d > d1) d1 = d;
+    for (const [list, n] of [[this.data, this.count], [this.jetData, this.jetCount]] as const) {
+      for (let s = 0; s < n; s++) {
+        const o = s * WAKE_SAMPLE_STRIDE;
+        if (list[o + 2] === 0) continue;
+        const d = list[o + 4];
+        if (d < d0) d0 = d;
+        if (d > d1) d1 = d;
+      }
     }
     return d0 <= d1 ? { d0, d1 } : { d0: 0, d1: 0 };
+  }
+
+  /** deepest HULL sample carrying force (m; 0 when none) — the column sim churn lifts against */
+  hullDepthMax(): number {
+    let d1 = 0;
+    for (let s = 0; s < this.count; s++) {
+      const o = s * WAKE_SAMPLE_STRIDE;
+      if (this.data[o + 2] > 0 && this.data[o + 4] > d1) d1 = this.data[o + 4];
+    }
+    return d1;
   }
 }
 
@@ -326,6 +371,25 @@ export function defaultSponge(n: number, texel: number): WakeSpongeParams {
   const cg = 0.5 * Math.sqrt(GRAVITY / k);
   const w = width * domain;
   return { width, gammaMax: (3 * Math.log(100) * cg) / (4 * w) };
+}
+
+/**
+ * THE SPONGE IN A MOVING DOMAIN (§T.180 defect 3). `defaultSponge` sizes γ so a
+ * wave crossing the ramp at its OWN group velocity c_g(L/4) loses ≥ 99% of its
+ * energy over exit + wrap ramps. But the domain is anchored on the hero and
+ * scrolls with her, so wake energy crosses the aft ramp at c_g PLUS the domain's
+ * own speed — a divergent wave at the cusp moves aft through the grid at up to
+ * ≈ U. At 10 m/s on the 160 m tier that cut the crossing time 3.5× and let 16%
+ * of the energy wrap round the periodic FFT into the bow's corners (measured,
+ * docs/wake/w5b.md). Scaling γ per axis by (c + |v_axis|)/c restores the same
+ * per-crossing absorption at any domain speed; at rest it is exactly 1, so every
+ * stationary sponge test and the step-rate invariance (per-SECOND γ) hold.
+ */
+export function spongeAdvectionScale(domainSpeedAxis: number, n: number, texel: number): number {
+  if (!Number.isFinite(domainSpeedAxis)) return 1;
+  const k = (2 * Math.PI) / ((n * texel) / 4);
+  const cg = 0.5 * Math.sqrt(GRAVITY / k);
+  return (cg + Math.abs(domainSpeedAxis)) / cg;
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +538,8 @@ export class WakeSolverCpu {
   readonly head: Float64Array;
   /** the part of `head` in the deep bin (depth `binDepth1`); the rest is at `binDepth0` */
   readonly head1: Float64Array;
+  /** the part of `head` splatted by JET sources (§T.180 c) — the GPU head target's .b */
+  readonly headJet: Float64Array;
   binDepth0 = 0;
   binDepth1 = 0;
   /** drawn/floated surface η_vis = ζ, clamped ±WAKE_ETA_CLAMP (m) — upload-ready Float32 */
@@ -499,11 +565,17 @@ export class WakeSolverCpu {
   private readonly rootKOverG: Float64Array;
   private readonly rootGOverK: Float64Array;
   private readonly gammaAxis: Float64Array;
-  private readonly spongeAxis: Float64Array;
+  private readonly spongeAxisX: Float64Array;
+  private readonly spongeAxisZ: Float64Array;
+  /** per-axis γ scale for the domain's own motion (`spongeAdvectionScale`) */
+  private spongeScaleX = 1;
+  private spongeScaleZ = 1;
   private cosT: Float64Array;
   private sinT: Float64Array;
   private tableDt = NaN;
   private spongeDt = NaN;
+  private spongeKeyX = NaN;
+  private spongeKeyZ = NaN;
   private readonly attCache = new Map<number, Float64Array>();
   private readonly w: Float64Array[];
 
@@ -520,6 +592,7 @@ export class WakeSolverCpu {
     this.phi = new Float64Array(nn);
     this.head = new Float64Array(nn);
     this.head1 = new Float64Array(nn);
+    this.headJet = new Float64Array(nn);
     this.prev0 = new Float64Array(nn);
     this.prev1 = new Float64Array(nn);
     this.surface = new Float32Array(nn);
@@ -545,7 +618,8 @@ export class WakeSolverCpu {
     }
     this.gammaAxis = new Float64Array(n);
     for (let i = 0; i < n; i++) this.gammaAxis[i] = spongeGammaAxis(i, n, this.sponge);
-    this.spongeAxis = new Float64Array(n);
+    this.spongeAxisX = new Float64Array(n);
+    this.spongeAxisZ = new Float64Array(n);
     this.cosT = new Float64Array(nn);
     this.sinT = new Float64Array(nn);
     this.w = Array.from({ length: 10 }, () => new Float64Array(nn));
@@ -584,37 +658,52 @@ export class WakeSolverCpu {
     return { sx, sz };
   }
 
+  /**
+   * The domain's own velocity (m/s, world x/z) — the rate the anchor scrolls the
+   * grid through the water. Scales the sponge per axis (`spongeAdvectionScale`).
+   * §V28: non-finite → at rest.
+   */
+  setDomainVelocity(vx: number, vz: number): void {
+    this.spongeScaleX = spongeAdvectionScale(Number.isFinite(vx) ? vx : 0, this.n, this.texel);
+    this.spongeScaleZ = spongeAdvectionScale(Number.isFinite(vz) ? vz : 0, this.n, this.texel);
+  }
+
   /** draw the sources into the head bins (replaces the previous head) */
   splat(src: WakeSourceBuffer): void {
-    const { n, texel, head, head1 } = this;
+    const { n, texel, head, head1, headJet } = this;
     head.fill(0);
     head1.fill(0);
+    headJet.fill(0);
     const { d0, d1 } = src.depthBins();
     this.binDepth0 = d0;
     this.binDepth1 = d1;
     this.headLive = false;
-    for (let s = 0; s < src.count; s++) {
-      const o = s * WAKE_SAMPLE_STRIDE;
-      const sigma = splatSigma(src.data[o + 3], texel, n);
-      const peak = splatPeakHead(src.data[o + 2], sigma);
-      if (!(peak > 0)) continue;
-      this.headLive = true;
-      const deep = splatBinWeight(src.data[o + 4], d0, d1);
-      const u = this.gridU(src.data[o]);
-      const v = this.gridV(src.data[o + 1]);
-      const r = (WAKE_SPLAT_RADIUS_SIGMAS * sigma) / texel;
-      // texel centres strictly inside the quad [u−r, u+r] — the rasteriser's rule
-      const i0 = Math.max(0, Math.ceil(u - r));
-      const i1 = Math.min(n - 1, Math.floor(u + r));
-      const j0 = Math.max(0, Math.ceil(v - r));
-      const j1 = Math.min(n - 1, Math.floor(v + r));
-      for (let j = j0; j <= j1; j++) {
-        const dz = (j - v) * texel;
-        for (let i = i0; i <= i1; i++) {
-          const dx = (i - u) * texel;
-          const h = peak * splatFalloff(dx * dx + dz * dz, sigma);
-          head[j * n + i] += h;
-          head1[j * n + i] += h * deep;
+    const lists = [[src.data, src.count, 0], [src.jetData, src.jetCount, 1]] as const;
+    for (const [data, count, jet] of lists) {
+      for (let s = 0; s < count; s++) {
+        const o = s * WAKE_SAMPLE_STRIDE;
+        const sigma = splatSigma(data[o + 3], texel, n);
+        const peak = splatPeakHead(data[o + 2], sigma);
+        if (peak === 0 || !Number.isFinite(peak)) continue;
+        this.headLive = true;
+        const deep = splatBinWeight(data[o + 4], d0, d1);
+        const u = this.gridU(data[o]);
+        const v = this.gridV(data[o + 1]);
+        const r = (WAKE_SPLAT_RADIUS_SIGMAS * sigma) / texel;
+        // texel centres strictly inside the quad [u−r, u+r] — the rasteriser's rule
+        const i0 = Math.max(0, Math.ceil(u - r));
+        const i1 = Math.min(n - 1, Math.floor(u + r));
+        const j0 = Math.max(0, Math.ceil(v - r));
+        const j1 = Math.min(n - 1, Math.floor(v + r));
+        for (let j = j0; j <= j1; j++) {
+          const dz = (j - v) * texel;
+          for (let i = i0; i <= i1; i++) {
+            const dx = (i - u) * texel;
+            const h = peak * splatFalloff(dx * dx + dz * dz, sigma);
+            head[j * n + i] += h;
+            head1[j * n + i] += h * deep;
+            if (jet) headJet[j * n + i] += h;
+          }
         }
       }
     }
@@ -721,12 +810,13 @@ export class WakeSolverCpu {
     fft2d(or, oi, n, invT);
     if (opts.slope) fft2d(gr, gi, n, invT);
     // post: un-centre, sponge, η_vis = ζ; the head ζ now contains becomes "old"
-    const sp = this.spongeAxis;
+    const spx = this.spongeAxisX;
+    const spz = this.spongeAxisZ;
     for (let j = 0; j < n; j++) {
       for (let i = 0; i < n; i++) {
         const idx = j * n + i;
         const sg = (i + j) & 1 ? -1 : 1;
-        const damp = sp[i] * sp[j] * sg;
+        const damp = spx[i] * spz[j] * sg;
         const zeta = or[idx] * damp;
         this.zeta[idx] = zeta;
         this.phi[idx] = oi[idx] * damp;
@@ -865,9 +955,14 @@ export class WakeSolverCpu {
       }
       this.tableDt = dt;
     }
-    if (dt !== this.spongeDt) {
-      for (let i = 0; i < this.n; i++) this.spongeAxis[i] = Math.exp(-this.gammaAxis[i] * dt);
+    if (dt !== this.spongeDt || this.spongeScaleX !== this.spongeKeyX || this.spongeScaleZ !== this.spongeKeyZ) {
+      for (let i = 0; i < this.n; i++) {
+        this.spongeAxisX[i] = Math.exp(-this.gammaAxis[i] * this.spongeScaleX * dt);
+        this.spongeAxisZ[i] = Math.exp(-this.gammaAxis[i] * this.spongeScaleZ * dt);
+      }
       this.spongeDt = dt;
+      this.spongeKeyX = this.spongeScaleX;
+      this.spongeKeyZ = this.spongeScaleZ;
     }
   }
 }

@@ -270,8 +270,13 @@ const LEDGER: readonly LedgerEntry[] = [
   {
     file: 'src/flowfoam/index.ts',
     source: flowFoamSource,
-    sites: 4,
+    sites: 5,
     /**
+     * §T.180 d RECOUNT: +1 CALL SITE, +0 BINDINGS. `wakeFoamFreshnessNode` (sim
+     * backend only; null on analytic) reads .r/.g of the SAME acc/far
+     * foamTexture objects the three fragment readers below sample, so it
+     * dedupes to their two bindings (UUID per stage). Fragment stays 2/2.
+     *
      * The ocean calls all four. THREE OF THEM ARE FRAGMENT AND COST TWO
      * BINDINGS BETWEEN THEM — foamSampleNode (white paint), wakeSmoothNode
      * (capillary damping) and wakeSlopeNode (the wake's own slope) all read the
@@ -296,7 +301,7 @@ const LEDGER: readonly LedgerEntry[] = [
     fragmentSamplers: 2,
     vertexTextures: 1,
     vertexSamplers: 1,
-    why: 'fragment foamSampleNode/wakeSmoothNode/wakeSlopeNode: acc.foamTexture'
+    why: 'fragment foamSampleNode/wakeSmoothNode/wakeSlopeNode/wakeFoamFreshnessNode: acc.foamTexture'
       + ' + far.foamTexture; vertex wakeHeightNode: acc.elevTexture',
   },
   {

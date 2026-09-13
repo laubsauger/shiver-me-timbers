@@ -24,11 +24,20 @@
  * §V28: a non-finite pose leaves the centre where it was (`setCenter` guards)
  * and a vessel with any non-finite sample is dropped whole
  * (`WakeSourceBuffer.pushVessel`); a non-finite or negative dt banks nothing.
+ *
+ * §T.180: the tick also measures the domain's own velocity (the unsnapped
+ * anchor's motion per tick) for the moving-domain sponge
+ * (`spongeAdvectionScale`), and takes the hero's prop jets (`propWash.ts`) as
+ * signed non-hull sources.
  */
 import type * as THREE from 'three/webgpu';
 import { rotateVec } from '../core/quat';
 import { WakeSolverGpu } from './wakeSolverPasses';
 import { WakeSourceBuffer, splatSigma, wakeAnchor, type HydroSample } from './wakeSolverMath';
+import { propJetSample, type PropWashInput } from './propWash';
+
+/** a domain moving faster than this between ticks was teleported, not sailed (m/s) */
+export const WAKE_SIM_MAX_DOMAIN_SPEED = 120;
 
 export interface WakeSimTier {
   /** grid resolution (power of two) */
@@ -50,6 +59,12 @@ export class WakeSim {
   private pendingDt = 0;
   /** a tick ran since the last dispatch (a centre move needs its scroll dispatched) */
   private dirty = false;
+  /** last tick's unsnapped anchor — the domain velocity is its motion per tick */
+  private anchorX = Number.NaN;
+  private anchorZ = Number.NaN;
+  /** the domain's velocity (m/s) the sponge was last scaled for */
+  readonly domainVelocity = { x: 0, z: 0 };
+  private readonly jetScratch: HydroSample = { x: 0, z: 0, fy: 0, footprint: 0, depth: 0 };
 
   constructor(tier: WakeSimTier) {
     this.solver = new WakeSolverGpu({ n: tier.n, texel: tier.texel });
@@ -61,14 +76,29 @@ export class WakeSim {
    * along her hull axis (m) — the anchor keeps the bow wave out of the front
    * sponge (`wakeAnchor`). The domain is a function of sim state only.
    */
-  tick(pose: WakeSimPose, samples: readonly HydroSample[], bowAhead: number, dt: number): void {
+  tick(pose: WakeSimPose, samples: readonly HydroSample[], bowAhead: number, dt: number, jets: readonly PropWashInput[] = []): void {
     const { solver } = this;
     const fwd = rotateVec(pose.quaternion as [number, number, number, number], [0, 0, 1]);
     const clearance = 4 * splatSigma(0, solver.texel, solver.n);
     const c = wakeAnchor(pose.position[0], pose.position[2], fwd[0], fwd[2], bowAhead, solver.domain, solver.sponge, clearance);
+    if (Number.isFinite(c.x) && Number.isFinite(c.z) && Number.isFinite(dt) && dt > 0) {
+      let vx = (c.x - this.anchorX) / dt;
+      let vz = (c.z - this.anchorZ) / dt;
+      // first tick, or a teleport faster than anything that floats: the domain is at rest this tick
+      if (!Number.isFinite(vx) || !Number.isFinite(vz) || Math.hypot(vx, vz) > WAKE_SIM_MAX_DOMAIN_SPEED) vx = vz = 0;
+      this.anchorX = c.x;
+      this.anchorZ = c.z;
+      this.domainVelocity.x = vx;
+      this.domainVelocity.z = vz;
+      solver.setDomainVelocity(vx, vz);
+    }
     solver.setCenter(c.x, c.z);
     this.sources.clear();
     this.sources.pushVessel(samples);
+    for (const j of jets) {
+      const q = propJetSample(j, this.jetScratch);
+      if (q) this.sources.pushJet(q.x, q.z, q.fy, q.footprint, q.depth);
+    }
     solver.setSources(this.sources);
     if (Number.isFinite(dt) && dt > 0) this.pendingDt += dt;
     this.dirty = true;

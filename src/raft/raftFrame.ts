@@ -124,6 +124,10 @@ export function createRaftFrame(d: RaftFrameDeps) {
       const wakeSim = sea.flowFoam.wakeSim;
       stepShipBuoyancy(raft, sea.cpuOcean, dt, raftSeaParams, undefined, wakeSim ? wakeSamples : undefined);
       vessel.hullContact.update(raft, sea.cpuOcean, state.time);
+      // §T.70 / §T.180: her stations' burial rates feed the sim churn (heave and pitch
+      // lay foam with no way on); the sea's band slope feeds the wake-breaking increment
+      sea.flowFoam.setHullBurial(vessel.hullContact);
+      sea.flowFoam.setAmbientSea(sea.ocean.cascades);
       // §T W2b WAKE SOURCES — fed in the FIXED tick with the samples buoyancy
       // just emitted, the domain anchored on her SIM pose (§V105). Visual-only
       // (§V8 amendment): nothing above reads it. flowFoam.update dispatches

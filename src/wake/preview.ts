@@ -24,6 +24,12 @@
  *   preset(name)          → switch to a calibration preset
  *   readout()             → W2a numbers measured on a GPU state readback
  *   readoutCpu(name?)     → the same numbers from a fresh CPU tow (+ wave resistance)
+ *   encode()              → §T.180: CPU encode breakdown (scenario / sources / splat / compute, min of the last 60)
+ *   setMergeClear(bool)   → §T.180: A/B the head-target clear merged into the splat pass
+ *
+ * §T.180: `speedboat-40` is her OWN contact (`SpeedboatTow`: HullWater on the
+ * rigid-6 step, towed in surge, free in heave/pitch/roll) plus her prop jets,
+ * not the W2a planing stand-in; the domain's own speed scales the sponge.
  *
  * No canvas readback for measurement (sky/preview.ts note): the solver state is
  * read from a FRESH float RenderTarget per call (docs/agent-browser-harness.md §2).
@@ -57,6 +63,8 @@ import {
   type WakeReadout,
 } from './wakeCalibration';
 import { WakeSolverGpu } from './wakeSolverPasses';
+import { SpeedboatTow } from './speedboatTow';
+import { propJetSample } from './propWash';
 
 const params = new URLSearchParams(location.search);
 // the tier: W1 modes run 256² × 0.5 m; a preset brings its own (wakeCalibration WAKE_PRESETS)
@@ -141,6 +149,9 @@ type Mode = 'kelvin' | 'fleet' | 'impulse' | 'preset';
 let mode: Mode = (params.get('mode') as Mode) ?? (params.get('preset') ? 'preset' : 'kelvin');
 let froude = Number(params.get('fr') ?? 0.45);
 let activePreset: WakePreset = presetByName(params.get('preset') ?? 'galleon-7');
+/** §T.180: the contact-driven speedboat for a speedboat preset (fresh per preset switch) */
+let activeTow: SpeedboatTow | null = null;
+const towFor = (p: WakePreset): SpeedboatTow | null => (p.kind === 'speedboat' ? new SpeedboatTow(p.speed) : null);
 let activeFrame: HullFrame = presetFrame(activePreset);
 const presetScratch: HydroSample[] = [];
 const SIGMA = 2; // m, effective splat σ of the towed patch
@@ -153,18 +164,29 @@ interface Frame {
   cz: number;
   srcX: number;
   srcZ: number;
+  /** the domain's velocity (m/s, world x) — the sponge's advection scale */
+  vx: number;
 }
 
-/** fill `buf` for sim time t and return the anchor; pure in (mode, fr, t) */
-function scenario(buf: WakeSourceBuffer, m: Mode, fr: number, t: number): Frame {
+/** fill `buf` for sim time t and return the anchor; pure in (mode, fr, t) and the tow's own tick sequence */
+function scenario(buf: WakeSourceBuffer, m: Mode, fr: number, t: number, tow: SpeedboatTow | null = activeTow): Frame {
   buf.clear();
   if (m === 'preset') {
     const x = activePreset.speed * t;
     const r = Math.min(1, t / 4);
     const ramp = r * r * (3 - 2 * r);
-    for (const q of presetSamples(activePreset, x, presetScratch)) buf.push(q.x, q.z, q.fy * ramp, q.footprint, q.depth);
+    if (tow) {
+      tow.advanceTo(x);
+      for (const q of tow.samples(presetScratch)) buf.push(q.x, q.z, q.fy * ramp, q.footprint, q.depth);
+      for (const j of tow.jets()) {
+        const q = propJetSample(j);
+        if (q) buf.pushJet(q.x, q.z, q.fy * ramp, q.footprint, q.depth);
+      }
+    } else {
+      for (const q of presetSamples(activePreset, x, presetScratch)) buf.push(q.x, q.z, q.fy * ramp, q.footprint, q.depth);
+    }
     const c = presetAnchor(activePreset, activeFrame, x);
-    return { cx: c.x, cz: c.z, srcX: x + activeFrame.stem, srcZ: 0 };
+    return { cx: c.x, cz: c.z, srcX: x + activeFrame.stem, srcZ: 0, vx: activePreset.speed };
   }
   if (m === 'kelvin') {
     const sigma = splatSigma(FOOTPRINT, TEXEL, N);
@@ -174,7 +196,7 @@ function scenario(buf: WakeSourceBuffer, m: Mode, fr: number, t: number): Frame 
     const peak = 0.25; // m of head
     buf.push(x, 0, peak * WAKE_RHO * GRAVITY * 2 * Math.PI * sigma * sigma * ramp * ramp * (3 - 2 * ramp), FOOTPRINT);
     const c = wakeAnchor(x, 0, 1, 0, 0, DOMAIN, sponge, 4 * sigma);
-    return { cx: c.x, cz: c.z, srcX: x, srcZ: 0 };
+    return { cx: c.x, cz: c.z, srcX: x, srcZ: 0, vx: U };
   }
   if (m === 'fleet') {
     // 8 hulls, 18 stations × 3 across, ≈ 12 m × 3 m, 0.25 m head, on circles
@@ -208,11 +230,11 @@ function scenario(buf: WakeSourceBuffer, m: Mode, fr: number, t: number): Frame 
       }
       buf.pushVessel(hull);
     }
-    return { cx: 0, cz: 0, srcX: NaN, srcZ: NaN };
+    return { cx: 0, cz: 0, srcX: NaN, srcZ: NaN, vx: 0 };
   }
   // impulse: 0.5 s press at the centre
   if (t < 0.5) buf.push(0, 0, 0.4 * WAKE_RHO * GRAVITY * 2 * Math.PI * 4, 1.5);
-  return { cx: 0, cz: 0, srcX: NaN, srcZ: NaN };
+  return { cx: 0, cz: 0, srcX: NaN, srcZ: NaN, vx: 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +243,8 @@ function scenario(buf: WakeSourceBuffer, m: Mode, fr: number, t: number): Frame 
 let simTime = 0;
 let paused = false;
 let lastEncodeMs = 0;
+/** §T.180: per-frame CPU encode phases (ms), a ring of the last 60 frames */
+const encodeRing: { scenario: number; sources: number; splat: number; compute: number; total: number }[] = [];
 let lastResidual = '—';
 let frameCount = 0;
 const DT = 1 / 60;
@@ -256,15 +280,28 @@ function frame(): void {
       // a fast hull must not jump more than ~0.4 σ per held step (towStep); the pond substeps
       const sub = mode === 'preset' ? Math.max(1, Math.ceil(DT / towStep(activePreset))) : 1;
       const t0 = performance.now();
-      let f: Frame = { cx: 0, cz: 0, srcX: NaN, srcZ: NaN };
+      let f: Frame = { cx: 0, cz: 0, srcX: NaN, srcZ: NaN, vx: 0 };
+      const ph = { scenario: 0, sources: 0, splat: 0, compute: 0, total: 0 };
+      solver.profile = true;
       for (let k = 0; k < sub; k++) {
+        const a = performance.now();
         f = scenario(sources, mode, froude, simTime);
+        const b = performance.now();
+        solver.setDomainVelocity(f.vx, 0);
         solver.setCenter(f.cx, f.cz);
         solver.setSources(sources);
+        const c = performance.now();
         solver.step(renderer, DT / sub);
+        ph.scenario += b - a;
+        ph.sources += c - b;
+        ph.splat += solver.lastStepCpu.splat;
+        ph.compute += solver.lastStepCpu.compute;
         simTime += DT / sub;
       }
       lastEncodeMs = performance.now() - t0;
+      ph.total = lastEncodeMs;
+      encodeRing.push(ph);
+      if (encodeRing.length > 60) encodeRing.shift();
       drawKelvinLines(f);
     }
     renderer.render(scene, camera);
@@ -275,7 +312,7 @@ function frame(): void {
         `wake pond  mode ${mode}${mode === 'preset' ? ` ${activePreset.name}` : ` Fr ${froude.toFixed(2)}`}  t ${simTime.toFixed(1)} s\n` +
         `grid ${N}² × ${TEXEL} m  dispatches ${solver.computeNodes.length} in 1 group  samples ${solver.sampleCount}\n` +
         `GPU compute group ${fmt(t.computeMs)} ms  splat ${fmt(t.splatMs)} ms  (min of 60)\n` +
-        `CPU encode ${lastEncodeMs.toFixed(3)} ms\n` +
+        `CPU encode ${lastEncodeMs.toFixed(3)} ms  (min60 ${(() => { const e = api.encode(); return `scen ${fmt(e.scenario)} src ${fmt(e.sources)} splat ${fmt(e.splat)} compute ${fmt(e.compute)} total ${fmt(e.total)}${e.mergeClear ? '' : ' [split clear]'}`; })()})\n` +
         `CPU↔GPU ${lastResidual}` +
         (mode === 'preset' ? `\n${lastReadout}` : '');
     }
@@ -344,9 +381,12 @@ async function compare(steps = 240, m: Mode = mode, fr = froude): Promise<Record
   const cpu = new WakeSolverCpu({ n: N, texel: TEXEL });
   const DT = m === 'preset' ? Math.min(1 / 60, towStep(activePreset)) : 1 / 60;
   const buf = new WakeSourceBuffer();
+  const tow = m === 'preset' ? towFor(activePreset) : null;
   try {
     for (let k = 0; k < steps; k++) {
-      const f = scenario(buf, m, fr, k * DT);
+      const f = scenario(buf, m, fr, k * DT, tow);
+      gpu.setDomainVelocity(f.vx, 0);
+      cpu.setDomainVelocity(f.vx, 0);
       gpu.setCenter(f.cx, f.cz);
       cpu.setCenter(f.cx, f.cz);
       gpu.setSources(buf);
@@ -440,9 +480,10 @@ async function readout(): Promise<WakeReadout> {
 /** the same numbers from a fresh CPU tow of a preset (steady, independent of the pond clock) */
 function readoutCpu(name = activePreset.name): WakeReadout & { waveResistanceOverWeight: number } {
   const preset = presetByName(name);
-  const tow = towPreset(preset);
+  const vessel = towFor(preset);
+  const tow = towPreset(preset, vessel ? { vessel } : {});
   const r = measureWake(tow.solver, tow.frame, tow.x, preset.speed);
-  const mass = seaParamsFor(preset.kind)?.mass ?? NaN;
+  const mass = seaParamsFor(preset.kind)?.mass ?? vessel?.hull.mass ?? NaN;
   const out = { ...r, waveResistanceOverWeight: tow.solver.waveResistance(1, 0) / (mass * GRAVITY) };
   if (name === activePreset.name) lastReadout = `CPU ${formatReadout(r, `  R_w/W ${out.waveResistanceOverWeight.toFixed(4)}`)}`;
   console.log('[wakePond] readoutCpu', name, out);
@@ -474,7 +515,8 @@ const api = {
   readoutCpu,
   preset(name: string): void {
     activePreset = presetByName(name);
-    activeFrame = presetFrame(activePreset);
+    activeTow = towFor(activePreset);
+    activeFrame = activeTow ? activeTow.frame : presetFrame(activePreset);
     mode = 'preset';
     lastReadout = 'readout: __wakePond.readout()';
     rebuild(activePreset.n, activePreset.texel);
@@ -483,6 +525,20 @@ const api = {
     return solver;
   },
   timing,
+  /** §T.180: min-of-60 CPU encode per phase (ms) and the clear mode it was measured in */
+  encode() {
+    const min = (k: 'scenario' | 'sources' | 'splat' | 'compute' | 'total'): number =>
+      encodeRing.length ? Math.min(...encodeRing.map((e) => e[k])) : NaN;
+    const med = (k: 'total'): number => {
+      const v = encodeRing.map((e) => e[k]).sort((a, b) => a - b);
+      return v.length ? v[v.length >> 1] : NaN;
+    };
+    return { mergeClear: solver.mergeClear, frames: encodeRing.length, scenario: min('scenario'), sources: min('sources'), splat: min('splat'), compute: min('compute'), total: min('total'), medianTotal: med('total') };
+  },
+  setMergeClear(on: boolean): void {
+    solver.mergeClear = on;
+    encodeRing.length = 0;
+  },
   compare,
   capture,
   health: () => timer?.health() ?? null,

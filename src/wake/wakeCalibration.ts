@@ -14,6 +14,7 @@ import { brigantineSeaParams, raftSeaParams, seaPhysicsParams, type SeaPhysicsPa
 import { equilibriumDraft, probeStations } from '../sea-physics/buoyancy';
 import type { ShipState } from '../state/simState';
 import { planingPatchSamples, stationSamples, type PlaningPatch } from './stationSources';
+import { propJetSample, type PropWashInput } from './propWash';
 import {
   WAKE_ETA_CLAMP,
   WAKE_MAX_DT,
@@ -204,34 +205,67 @@ export interface Tow {
  */
 export function towPreset(
   preset: WakePreset,
-  opts: { duration?: number; dt?: number; mutateSample?: (s: HydroSample) => void; hook?: (t: Tow, time: number) => void } = {},
+  opts: {
+    duration?: number;
+    dt?: number;
+    mutateSample?: (s: HydroSample) => void;
+    hook?: (t: Tow, time: number) => void;
+    /**
+     * §T.180: a stateful vessel in place of the stateless preset samples — the
+     * contact-driven speedboat (`speedboatTow.SpeedboatTow`), whose prop jets
+     * are splatted as signed jet sources. Its origin is towed to x = speed·t.
+     */
+    vessel?: PresetVessel;
+  } = {},
 ): Tow {
   const solver = new WakeSolverCpu({ n: preset.n, texel: preset.texel });
-  const frame = presetFrame(preset);
+  const frame = opts.vessel?.frame ?? presetFrame(preset);
   const dt = opts.dt ?? towStep(preset);
   const duration = opts.duration ?? towDuration(preset);
   const buf = new WakeSourceBuffer();
   const samples: HydroSample[] = [];
   const tow: Tow = { solver, x: 0, frame };
   const steps = Math.ceil(duration / dt);
+  // §T.180: the domain scrolls with her, so the sponge absorbs at c_g + U along her track
+  solver.setDomainVelocity(preset.speed, 0);
   for (let k = 0; k < steps; k++) {
     const time = k * dt;
     tow.x = preset.speed * time;
-    const c = presetAnchor(preset, frame, tow.x);
+    const c = wakeAnchor(tow.x, 0, 1, 0, frame.stem, preset.n * preset.texel, defaultSponge(preset.n, preset.texel), 4 * splatSigma(0, preset.texel, preset.n));
     solver.setCenter(c.x, c.z);
     const r = Math.min(1, time / 4);
     const ramp = r * r * (3 - 2 * r);
-    presetSamples(preset, tow.x, samples);
     buf.clear();
-    for (const s of samples) {
-      opts.mutateSample?.(s);
-      buf.push(s.x, s.z, s.fy * ramp, s.footprint, s.depth);
+    if (opts.vessel) {
+      opts.vessel.advanceTo(tow.x);
+      for (const s of opts.vessel.samples(samples)) {
+        opts.mutateSample?.(s);
+        buf.push(s.x, s.z, s.fy * ramp, s.footprint, s.depth);
+      }
+      for (const j of opts.vessel.jets()) {
+        const q = propJetSample(j);
+        if (q) buf.pushJet(q.x, q.z, q.fy * ramp, q.footprint, q.depth);
+      }
+    } else {
+      presetSamples(preset, tow.x, samples);
+      for (const s of samples) {
+        opts.mutateSample?.(s);
+        buf.push(s.x, s.z, s.fy * ramp, s.footprint, s.depth);
+      }
     }
     solver.splat(buf);
     solver.step(dt);
     opts.hook?.(tow, time + dt);
   }
   return tow;
+}
+
+/** a stateful towed vessel (§T.180 — `SpeedboatTow`): its own frame, samples and prop jets */
+export interface PresetVessel {
+  readonly frame: HullFrame;
+  advanceTo(x: number): void;
+  samples(out: HydroSample[]): HydroSample[];
+  jets(): readonly PropWashInput[];
 }
 
 /** a wake field as the pond reads it back or the CPU solver holds it */

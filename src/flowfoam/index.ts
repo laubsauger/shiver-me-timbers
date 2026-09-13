@@ -77,7 +77,7 @@ import { regionEdgeFadeCpu } from './flowMath';
 import { createFlowNoiseUniforms } from './flowNoise';
 import { createAccumulation, FOAM_INJECTION_LAYER, nearProfile, type AccumProfile } from './accumulation';
 import { intersectionMaskNode } from './intersectionMask';
-import { createSimFoamField } from './simFoam';
+import { bandSlopeVariance, createSimFoamField, type HullBurialInput, type PropWashInput, type SlopeSpectrumBand } from './simFoam';
 import { createSimWakeField, type WakeFieldFn } from './simInjection';
 import { bandKeepNode } from './slickInjection';
 import { createWakeInjector } from './wakeInjection';
@@ -85,6 +85,7 @@ import { WAKE_SHIP_TIER } from '../wake/wakeCalibration';
 import { WakeSim, type WakeSimTier } from '../wake/wakeSim';
 
 export { FOAM_INJECTION_LAYER };
+export type { PropWashInput, HullBurialInput, SlopeSpectrumBand } from './simFoam';
 export { intersectionMaskNode, worldIntersectionMaskNode } from './intersectionMask';
 
 /**
@@ -112,6 +113,41 @@ export interface FlowFoamOptions {
   wakeBackend?: WakeBackend;
   /** the sim's grid when `wakeBackend` is 'sim' (default WAKE_SHIP_TIER, 160 m) */
   wakeTier?: WakeSimTier;
+  /**
+   * §T.180 c: prop jets the sim foam compiles for (0 = none, the raft; the
+   * speedboat's three drives want 3). Construction-time: it sizes the shader.
+   */
+  propJets?: number;
+}
+
+/**
+ * STAGE-A WHITECAP LIFETIME (s): Monahan & Lu 1990 ("Acoustically relevant
+ * bubble assemblages and their dependence on meteorological parameters", IEEE
+ * JOE 15) measured the ACTIVE, dense bubble-plume stage of a whitecap decaying
+ * with τ_A ≈ 0.53 s, against τ_B ≈ 4.2 s for the thinning foam patch it
+ * leaves. It is the age at which wake whitewater stops reading as breaking
+ * water (the whitecap material) and starts reading as the aged foam lane.
+ */
+export const WHITECAP_STAGE_A_SECONDS = 0.53;
+
+/**
+ * Exponent turning a tier's two-clock ratio into the stage-A weight (§T.59, §T.180 d).
+ * A dose laid `a` seconds ago holds foam ∝ 2^(−a/T_f) and slick ∝ 2^(−a/T_s),
+ * so f = foam·k/slick = 2^(−a·(1/T_f − 1/T_s)) (k = slick per foam at injection)
+ * and e^(−a/τ_A) = f^e with e = 1/(ln2·τ_A·(1/T_f − 1/T_s)). When the clocks cannot
+ * be told apart (T_f ≥ T_s) the age is unmeasurable and everything reads aged.
+ */
+export function freshnessExponent(foamHalfLife: number, slickHalfLife: number, tauA = WHITECAP_STAGE_A_SECONDS): number {
+  const rate = 1 / foamHalfLife - 1 / slickHalfLife;
+  const e = 1 / (Math.LN2 * tauA * rate);
+  return Number.isFinite(e) && e > 0 ? Math.min(256, Math.max(0.05, e)) : 256;
+}
+
+/** CPU twin of the tier freshness (tests): (foam, slick) coverage → stage-A weight */
+export function tierFreshnessCpu(foam: number, slick: number, slickPerFoam: number, exponent: number): number {
+  const r = Math.max(0, foam) * Math.max(0, slickPerFoam);
+  const f = Math.min(1, Math.max(0, r / Math.max(slick, r, 1e-5)));
+  return Math.pow(f, exponent);
 }
 
 export function createFlowFoam(opts: FlowFoamOptions = {}) {
@@ -127,7 +163,12 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
    * read the zero field for `.ba`/elevation-free doses and `simFoam` for `.rg`.
    */
   const simField = wakeSim ? createSimWakeField(noAnalyticWake, wakeSim) : null;
-  const simFoam = wakeSim && simField ? createSimFoamField(wakeSim, p, simField.uSimCenter) : null;
+  const simFoam = wakeSim && simField ? createSimFoamField(wakeSim, p, simField.uSimCenter, { propJets: opts.propJets }) : null;
+  /** §T.180 a: the band the ambient slope is measured over — the sim's own (λ ≥ 2 sim texels) */
+  const ambientLambdaMin = wakeSim ? 2 * wakeSim.solver.texel : 0;
+  /** the cascades' slope totals the ambient σ was last measured from (no per-tick allocation) */
+  const ambientKey = new Float64Array(8);
+  let ambientKeyCount = -1;
   const acc = simField
     ? createAccumulation(p, flowU, simField.field, { ...nearProfile(p), blurSlope: false, simFoam: simFoam!.rateNode })
     : createAccumulation(p, flowU, wake.wakeFieldNode);
@@ -188,6 +229,10 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
    * user's "the wake looks painted on", alongside the known albedo-mix-only
    * defect: the paint was outliving the shape it was painted on.
    */
+  /** §T.180 d: slick per foam at injection and each tier's age exponent (freshnessExponent) */
+  const uSlickPerFoamAge = uniform(p.simSlickPerFoam);
+  const uNearAgeExp = uniform(freshnessExponent(p.decayHalfLife, p.slickHalfLife));
+  const uFarAgeExp = uniform(freshnessExponent(p.farDecayHalfLife, p.slickHalfLife));
   const uNearFeature = uniform((p.regionSize / p.resolution) * p.waveBandLow);
   const uFarFeature = uniform((p.farRegionSize / p.farResolution) * p.waveBandLow);
   let time = 0;
@@ -302,6 +347,42 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       : wake.setShip,
     /** §T.161 — this vessel's speed scale for the wake's own ramp (1 = galleon) */
     setSpeedScale: wake.setSpeedScale,
+
+    /**
+     * §T.180 a — THE AMBIENT SEA'S SLOPE, for the wake-breaking increment. Pass
+     * the ocean's cascades (`ocean.cascades`, their published slope histograms);
+     * the band is the sim's own, λ ≥ 2 sim texels. Cached on the cascades'
+     * totals, so calling it every tick costs a compare. No-op on the analytic
+     * backend.
+     */
+    setAmbientSea(bands: readonly SlopeSpectrumBand[]): void {
+      if (!simFoam) return;
+      let same = bands.length === ambientKeyCount;
+      const n = Math.min(bands.length, ambientKey.length);
+      for (let i = 0; i < n; i++) {
+        const v = bands[i].slopeVariance();
+        if (!Object.is(v, ambientKey[i])) same = false;
+        ambientKey[i] = v;
+      }
+      if (same) return;
+      ambientKeyCount = bands.length;
+      simFoam.setAmbientSlopeVariance(bandSlopeVariance(bands, ambientLambdaMin));
+    },
+
+    /**
+     * §T.70 / §T.180 e — the hero's hull contact, RIGHT AFTER its tick update
+     * (`hullContact.update`): her stations' burial rates feed the sim churn, so
+     * heave and pitch in a swell lay foam even with no way on. No-op on the
+     * analytic backend.
+     */
+    setHullBurial(contact: HullBurialInput | null): void {
+      simFoam?.setHullBurial(contact);
+    },
+
+    /** §T.180 c — this tick's prop jets (`wake/propWash.ts`) for the foam ribbon; the page hands the same list to `wakeSim.tick` */
+    setPropWash(inputs: readonly PropWashInput[]): void {
+      simFoam?.setPropWash(inputs);
+    },
 
     /** which field draws the wake's surface — fixed at construction */
     wakeBackend,
@@ -446,6 +527,9 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
         wakeSim.step(renderer); // @band-limited-elsewhere: a solver method named step, not a shader edge
         simField.uSimCenter.value.set(wakeSim.solver.centerX, wakeSim.solver.centerZ);
         simFoam?.update();
+        uSlickPerFoamAge.value = Math.max(0, Number.isFinite(p.simSlickPerFoam) ? p.simSlickPerFoam : 0);
+        uNearAgeExp.value = freshnessExponent(p.decayHalfLife, p.slickHalfLife);
+        uFarAgeExp.value = freshnessExponent(p.farDecayHalfLife, p.slickHalfLife);
       }
       acc.step(renderer, dt);
       far.step(renderer, dt);
@@ -471,6 +555,32 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
         farWeight(worldXZ),
       );
     },
+
+    /**
+     * §T.59 / §T.180 d — WAKE FOAM AGE, as the stage-A weight in [0, 1]: 1 where
+     * the foam is breaking-fresh (younger than ~τ_A), → 0 as it becomes the aged
+     * lane. NULL on the analytic backend, so the ocean material builds exactly the
+     * pre-W5b graph there (pirate WGSL byte-identical).
+     *
+     * NO NEW CHANNEL AND NO NEW BINDING. The age is the ratio of the two decay
+     * clocks the texture already carries — foam (.r, `decayHalfLife`) and slick
+     * (.g, `slickHalfLife`), injected in a fixed ratio by the sim — read from the
+     * SAME texture objects `foamSampleNode`/`wakeSmoothNode` sample, so the
+     * fragment stage dedupes them (§V40). Waterline-capture foam carries no slick
+     * and reads fresh, which it is. Band limit: a ratio of two channels of one
+     * filtered sample has no spatial frequency of its own.
+     */
+    wakeFoamFreshnessNode: simFoam
+      ? (worldXZ: any): any => {
+          const tier = (a: typeof acc, exponent: any) => {
+            const t = texture(a.foamTexture, regionUv(a, worldXZ));
+            const r = t.r.max(0).mul(uSlickPerFoamAge);
+            return r.div(t.g.max(r).max(1e-5)).clamp(0, 1).pow(exponent);
+          };
+          // §V23 functional mix — the same near/far handover as the foam itself
+          return mix(tier(acc, uNearAgeExp), tier(far, uFarAgeExp), farWeight(worldXZ));
+        }
+      : null,
 
     /**
      * ── THE CAPILLARY-DAMPING LANE (the wake's effect on the WATER) ────────

@@ -60,6 +60,7 @@ import {
   T_BOW_SIDE,
   T_BOW_UP,
   T_SIZE,
+  BOW_CONTACT_RISE,
   advanceBurstCursor,
   bowContactEmission,
   bowEmission,
@@ -230,7 +231,8 @@ export function createBowSpray() {
       contactMode = bow.contact !== undefined;
       uSpread.value = sprayParams.bowLaunchSpread;
       uForwardThrow.value = sprayParams.bowForwardThrow;
-      uRise.value = sprayParams.bowRise;
+      // §T.180: the contact model launches at its Bernoulli bound (sprayMath.BOW_CONTACT_RISE); uniform value only
+      uRise.value = contactMode ? BOW_CONTACT_RISE : sprayParams.bowRise;
       uSlamRise.value = Math.max(0, sprayParams.bowSlamRise);
       uSlamSpread.value = Math.max(0, sprayParams.bowSlamSpread);
       uSizeVar.value = Math.min(1, Math.max(0, sprayParams.sizeVariation));
