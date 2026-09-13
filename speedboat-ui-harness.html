@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>speedboat UI harness</title>
+    <style>
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #1e4b50; }
+      #app { position: fixed; inset: 0; --u: min(calc(100vw / 1280), calc(100vh / 720)); }
+      .hx-bg { position: absolute; inset: 0; }
+      .hx-bg[data-kind="none"] { background: #2f6e70; }
+      .hx-scene, .hx-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+      .hx-dash { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); width: calc(1280 * var(--u)); height: calc(200 * var(--u)); z-index: 5; }
+      .hx-dash[hidden] { display: none; }
+      .hx-dash-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+      .hx-dash-plotter { position: absolute; left: calc(91 * var(--u)); top: calc(55 * var(--u)); width: calc(188 * var(--u)); height: calc(104 * var(--u)); }
+      .hx-dash-led { position: absolute; left: calc(545 * var(--u)); top: calc(39 * var(--u)); width: calc(190 * var(--u)); height: calc(82 * var(--u)); }
+      .hx-dash-note { position: absolute; right: calc(12 * var(--u)); bottom: calc(6 * var(--u)); font: 600 calc(10 * var(--u)) system-ui, sans-serif; color: rgba(242, 244, 239, 0.45); }
+      .hx-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 100; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 4px 8px;
+        background: rgba(0, 0, 0, 0.72); font: 11px ui-monospace, Menlo, monospace; color: #ddd; }
+      .hx-bar[hidden] { display: none; }
+      .hx-btn { font: inherit; color: #eee; background: #333; border: 1px solid #555; border-radius: 3px; padding: 2px 6px; cursor: pointer; }
+      .hx-scrub { width: 220px; }
+      .hx-perf { color: #9fd39a; margin-left: 8px; }
+      .hx-log { color: #aaa; margin-left: 8px; max-width: 360px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/speedboat/ui/harness.ts"></script>
+  </body>
+</html>

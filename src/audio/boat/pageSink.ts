@@ -34,6 +34,8 @@ export interface BoatAudioFrameLike {
     driveAdvance?: ArrayLike<number>;
     driveImmersion?: ArrayLike<number>;
   };
+  /** the Governor setting (seams.ts `BoatAudioFrame.governor`) */
+  governor?: 'off' | 'air' | 'full';
 }
 
 /** the page's NpcFleet, structurally */
@@ -90,6 +92,7 @@ export function playerTelemetry(f: Readonly<BoatAudioFrameLike>, voice: VoiceKin
     propImmersion: f.contact.propImmersion,
     wettedArea: f.contact.wettedArea,
     slamImpulse: f.contact.slamImpulse,
+    governor: f.governor,
   };
 }
 
