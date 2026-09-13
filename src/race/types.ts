@@ -1,0 +1,80 @@
+/**
+ * Speedboat race CONTRACT (§T.181–§T.188). Shared shapes between the course
+ * author (src/circuit, §T.187), race logic (src/race, §T.184), NPC racers
+ * (src/race/ai, §T.186), the HUD (src/speedboat/ui, §T.185) and the page
+ * (src/main-speedboat.ts, §T.181). Owners extend by ADDING optional fields;
+ * renaming or removing a field is a coordinated change.
+ *
+ * Frame: world metres, y up, x/z the sea plane (same as ShipState).
+ * Pure data — no three.js imports (§V109: src/race never imports main.ts,
+ * main-raft.ts, raft/, combat/ or ai/).
+ */
+
+export type Vec2 = readonly [x: number, z: number];
+
+/** A pair of marker poles the boat must pass BETWEEN, in course order. */
+export interface Gate {
+  id: string;
+  /** left pole (seen travelling the course direction) */
+  left: Vec2;
+  /** right pole */
+  right: Vec2;
+  /** exposed = open-sea swell sector; sheltered = island lee (design doc §5) */
+  sector: 'exposed' | 'sheltered';
+}
+
+/** A single buoy the boat must round on the given side. */
+export interface TurnMark {
+  id: string;
+  at: Vec2;
+  /** side the MARK stays on while rounding */
+  keepOn: 'port' | 'starboard';
+  /** radius (m) inside which a boat has not rounded it */
+  radius: number;
+}
+
+export type CourseElement = { kind: 'gate'; gate: Gate } | { kind: 'mark'; mark: TurnMark };
+
+export interface Course {
+  id: string;
+  name: string;
+  /** elements in race order; the lap closes from the last back to the first */
+  elements: readonly CourseElement[];
+  /** start/finish line = this gate id (also element 0) */
+  startGateId: string;
+  laps: number;
+  /** a reference racing line through the elements (closed polyline), for AI seeding, minimap and respawn */
+  referenceLine: readonly Vec2[];
+  /** rolling-start: pace boat path before the start gate (polyline ending at the start gate) */
+  paceLine: readonly Vec2[];
+  /** minimap bounds */
+  bounds: { min: Vec2; max: Vec2 };
+}
+
+/** Per-racer state the race logic publishes each tick (HUD, AI, audio read it). */
+export interface RacerStanding {
+  racerId: number;
+  /** 1-based race position */
+  position: number;
+  lap: number;
+  /** next element index in `Course.elements` */
+  nextElement: number;
+  /** metres along the reference line from the start, including completed laps */
+  progress: number;
+  /** seconds behind the leader (0 for the leader) */
+  gapToLeader: number;
+  finished: boolean;
+  /** crash/respawn state for HUD overlay and AI */
+  state: 'racing' | 'crashed' | 'respawning' | 'ghost' | 'finished';
+  /** Surge boost, 0..3 segments (fractional while filling) */
+  surge: number;
+}
+
+export interface RaceState {
+  phase: 'prestart' | 'rolling' | 'countdown' | 'racing' | 'finished';
+  /** sim time since the race started (s); negative during rolling/countdown */
+  raceTime: number;
+  standings: readonly RacerStanding[];
+  /** per-lap split times per racer, seconds */
+  lapTimes: readonly (readonly number[])[];
+}
