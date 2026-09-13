@@ -82,6 +82,57 @@ export interface HullDataFile {
   stations: HullStation[];
   /** rough mass budget the spec's mass / LCG / VCG / gyradii are derived from (`deriveMassProperties`) */
   massItems: MassItem[];
+  engines: { mountX: number; mountZFromTransom: number; propPoint: { x: number; yAboveKeel: number; zFromTransom: number } }[];
+  lowerUnit: LowerUnitSpec;
+}
+
+/** one outboard gearcase as a lateral foil (deepV12.hull.json `lowerUnit`, hull frame, m / m² / deg) */
+export interface LowerUnitSpec {
+  avPlateYAboveKeel: number;
+  span: number;
+  lateralArea: number;
+  ceDepthBelowAvPlate: number;
+  ceAftOfMount: number;
+  stallDeg: number;
+  profileDragCoeff: number;
+  maxSteerDeg: number;
+}
+
+/**
+ * One steerable drive in the BODY frame (relative to the CG). The drive yaws by the steer angle δ about the
+ * body-y axis through `pivot`; `prop` (thrust point) and `foilCe` (gearcase centre of lateral effort) are given
+ * at δ = 0 and rotate with it.
+ */
+export interface DriveUnit {
+  pivot: Vec3;
+  prop: Vec3;
+  foilCe: Vec3;
+  /** body y of the anti-ventilation plate (root of the gearcase foil) */
+  avPlateY: number;
+  span: number;
+  lateralArea: number;
+  stallRad: number;
+  profileDragCoeff: number;
+  maxSteerRad: number;
+}
+
+/** the drives of the data file, placed on a hull whose CG is (vcg above keel, lcg from transom) */
+export function driveUnits(data: Readonly<HullDataFile>, spec: Readonly<DeepVHullSpec>): DriveUnit[] {
+  const lu = data.lowerUnit;
+  const cgY = spec.vcgAboveKeel;
+  const cgZ = spec.lcgFromTransom;
+  const deg = Math.PI / 180;
+  return data.engines.map((e) => ({
+    pivot: [e.mountX, lu.avPlateYAboveKeel - cgY, e.mountZFromTransom - cgZ] as Vec3,
+    prop: [e.propPoint.x, e.propPoint.yAboveKeel - cgY, e.propPoint.zFromTransom - cgZ] as Vec3,
+    foilCe: [e.mountX, lu.avPlateYAboveKeel - lu.ceDepthBelowAvPlate - cgY, e.mountZFromTransom - lu.ceAftOfMount - cgZ] as Vec3,
+    avPlateY: lu.avPlateYAboveKeel - cgY,
+    span: lu.span,
+    lateralArea: lu.lateralArea,
+    stallRad: lu.stallDeg * deg,
+    profileDragCoeff: lu.profileDragCoeff,
+    maxSteerRad: lu.maxSteerDeg * deg,
+  }));
 }
 
 /** one mass item, hull frame (x across, y above keel, z forward of transom); k = own gyradii */
@@ -207,6 +258,8 @@ export interface HullProxy {
   keelBodyY: number;
   /** overall beam, m */
   beam: number;
+  /** the outboards: thrust points and gearcase foils (from the data file's `engines` + `lowerUnit`) */
+  drives: DriveUnit[];
 }
 
 /** keel length: transom to forefoot (the stem rake overhangs it at the deck) */
@@ -369,5 +422,6 @@ export function buildDeepVHull(spec: Readonly<DeepVHullSpec> = REFERENCE_DEEP_V)
     stemZ: L - cgZ,
     keelBodyY: -cgY,
     beam: B,
+    drives: driveUnits(HULL_DATA, spec),
   };
 }

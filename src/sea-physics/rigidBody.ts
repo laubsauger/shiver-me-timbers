@@ -16,6 +16,10 @@
  * integrated from world ω; the path has no asin/atan decomposition, so a full
  * loop in any axis, inversion and a vertical bow are ordinary poses.
  *
+ * COUPLED ADDED MASS (T179): a provider may hand a body-frame 6×6 `addedMass6` with `coupled` set; the substep
+ * then solves (M + A6)·[a_lin; a_ang] = [F_b; τ_b] (Cholesky) and the gyroscopic step uses the RIGID inertia.
+ * In that mode the provider owns the entrained-water bookkeeping (keep) and the rotating-frame fluid loads.
+ *
  * Per substep h = dt/N (doc §1.3):
  *   F, τ   ← gravity + forceFn(state)                      accumulate only
  *   v      ← v + h·R·diag(1/(m + A))·Rᵀ·F                   body-frame added mass (§V69)
@@ -66,6 +70,15 @@ export interface Rigid6Load {
   addedMass: Vec3;
   /** body-frame diagonal added inertia, kg·m² (≥ 0) */
   addedInertia: Vec3;
+  /**
+   * OPTIONAL COUPLED ADDED MASS: body-frame symmetric positive semi-definite 6×6 about the CG, row-major,
+   * generalized order [surge-x, y, z, rot-x, rot-y, rot-z] (36 entries). Used instead of the diagonal
+   * `addedMass`/`addedInertia` for the substep when `coupled` is true. The provider owns its
+   * entrained-water bookkeeping in that mode (it hands the matrix the step must divide by), and the
+   * rotating-frame fluid loads (Kirchhoff) — the gyroscopic step then acts on the rigid inertia only.
+   */
+  addedMass6?: Float64Array;
+  coupled?: boolean;
 }
 
 /**
@@ -75,7 +88,7 @@ export interface Rigid6Load {
 export type Rigid6ForceFn = (state: Readonly<Rigid6State>, h: number, out: Rigid6Load) => void;
 
 export function createRigid6Load(): Rigid6Load {
-  return { force: [0, 0, 0], torque: [0, 0, 0], addedMass: [0, 0, 0], addedInertia: [0, 0, 0] };
+  return { force: [0, 0, 0], torque: [0, 0, 0], addedMass: [0, 0, 0], addedInertia: [0, 0, 0], addedMass6: new Float64Array(36), coupled: false };
 }
 
 function clearLoad(l: Rigid6Load): void {
@@ -83,6 +96,8 @@ function clearLoad(l: Rigid6Load): void {
   l.torque[0] = l.torque[1] = l.torque[2] = 0;
   l.addedMass[0] = l.addedMass[1] = l.addedMass[2] = 0;
   l.addedInertia[0] = l.addedInertia[1] = l.addedInertia[2] = 0;
+  if (l.addedMass6) l.addedMass6.fill(0);
+  l.coupled = false;
 }
 
 export const RIGID6_GRAVITY = 9.81;
@@ -134,10 +149,58 @@ export interface Rigid6Workspace {
   b0: Float64Array;
   b1: Float64Array;
   b2: Float64Array;
+  /** 6×6 system matrix and solution scratch (coupled added mass) */
+  s6: Float64Array;
+  x6: Float64Array;
 }
 
 export function createRigid6Workspace(): Rigid6Workspace {
-  return { load: createRigid6Load(), b0: new Float64Array(3), b1: new Float64Array(3), b2: new Float64Array(3) };
+  return {
+    load: createRigid6Load(),
+    b0: new Float64Array(3),
+    b1: new Float64Array(3),
+    b2: new Float64Array(3),
+    s6: new Float64Array(36),
+    x6: new Float64Array(6),
+  };
+}
+
+/** Cholesky-factor a symmetric positive-definite 6×6 (row-major) in place, lower triangle = L. false if not SPD. */
+export function factorSpd6(S: Float64Array): boolean {
+  for (let j = 0; j < 6; j++) {
+    let d = S[j * 6 + j];
+    for (let k = 0; k < j; k++) d -= S[j * 6 + k] * S[j * 6 + k];
+    if (!(d > 0)) return false;
+    const l = Math.sqrt(d);
+    S[j * 6 + j] = l;
+    for (let i = j + 1; i < 6; i++) {
+      let v = S[i * 6 + j];
+      for (let k = 0; k < j; k++) v -= S[i * 6 + k] * S[j * 6 + k];
+      S[i * 6 + j] = v / l;
+    }
+  }
+  return true;
+}
+
+/** x ← (L·Lᵀ)⁻¹·x for a matrix factored by `factorSpd6` */
+export function solveFactored6(L: Float64Array, x: Float64Array): void {
+  for (let i = 0; i < 6; i++) {
+    let v = x[i];
+    for (let k = 0; k < i; k++) v -= L[i * 6 + k] * x[k];
+    x[i] = v / L[i * 6 + i];
+  }
+  for (let i = 5; i >= 0; i--) {
+    let v = x[i];
+    for (let k = i + 1; k < 6; k++) v -= L[k * 6 + i] * x[k];
+    x[i] = v / L[i * 6 + i];
+  }
+}
+
+/** solve S·x = b in place (x holds b on entry) for a symmetric positive-definite 6×6 S, which is overwritten */
+export function solveSpd6(S: Float64Array, x: Float64Array): boolean {
+  if (!factorSpd6(S)) return false;
+  solveFactored6(S, x);
+  return true;
 }
 
 function toBody(q: Quat, x: number, y: number, z: number, out: Float64Array): void {
@@ -279,6 +342,41 @@ export function stepRigid6(
     const Inz = load.addedInertia[2];
     const fresh = !mem || !mem.valid;
 
+    if (load.coupled && load.addedMass6) {
+      // ---- COUPLED: (M + A6)·[a_lin; a_ang] = [F_b; τ_b], a_lin = world acceleration in body axes,
+      //      a_ang = ω̇_b + I⁻¹(ω_b × Iω_b) (the rigid gyroscopic step below supplies the latter)
+      const S6 = ws.s6;
+      const X6 = ws.x6;
+      const A6 = load.addedMass6;
+      for (let k = 0; k < 36; k++) S6[k] = A6[k];
+      S6[0] += m;
+      S6[7] += m;
+      S6[14] += m;
+      S6[21] += I0;
+      S6[28] += I1;
+      S6[35] += I2;
+      toBody(q, fx, fy, fz, B0);
+      X6[0] = B0[0];
+      X6[1] = B0[1];
+      X6[2] = B0[2];
+      toBody(q, tx, ty, tz, B0);
+      X6[3] = B0[0];
+      X6[4] = B0[1];
+      X6[5] = B0[2];
+      if (!solveSpd6(S6, X6)) throw new Error('rigid6: coupled added-mass system is not positive definite');
+      toBody(q, v[0], v[1], v[2], B1);
+      toWorld(q, B1[0] + h * X6[0], B1[1] + h * X6[1], B1[2] + h * X6[2], B2);
+      v[0] = B2[0];
+      v[1] = B2[1];
+      v[2] = B2[2];
+      toBody(q, w[0], w[1], w[2], B1);
+      gyroMidpoint(I0, I1, I2, B1[0], B1[1], B1[2], h, B0);
+      toWorld(q, B0[0] + h * X6[3], B0[1] + h * X6[4], B0[2] + h * X6[5], B2);
+      w[0] = B2[0];
+      w[1] = B2[1];
+      w[2] = B2[2];
+      if (memory) memory.valid = false;
+    } else {
     // ---- linear, body frame: the doc's v ← v + h·R·diag(1/(m + A))·Rᵀ·F, with A the kept added mass
     //      (see ENTRAINED-WATER MEMORY above)
     toBody(q, fx, fy, fz, B0);
@@ -334,6 +432,7 @@ export function stepRigid6(
       w[0] = B2[0];
       w[1] = B2[1];
       w[2] = B2[2];
+    }
     }
 
     // ---- position and orientation from the NEW velocities (symplectic Euler)

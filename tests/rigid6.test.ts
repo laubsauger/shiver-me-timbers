@@ -17,6 +17,7 @@ import { describe, expect, it } from 'vitest';
 import { quatFromAxisAngle, quatMul, rotateVec, invRotateVec } from '../src/core/quat';
 import {
   createRigid6Memory,
+  type Rigid6Load,
   rigid6AngularMomentum,
   rigid6KineticEnergy,
   stepRigid6,
@@ -290,6 +291,111 @@ describe('rigid6 translation', () => {
       A = Math.max(0, A - 400);
     }
     expect(st.velocity[1]).toBeCloseTo(2, 9);
+  });
+});
+
+describe('rigid6 coupled 6×6 added mass (T179)', () => {
+  const m = 5000;
+  const body: Rigid6Body = { mass: m, inertia: [60000, 60000, 7000] };
+
+  it('a diagonal coupled matrix is exactly the per-axis step (the coupled path adds coupling, nothing else)', () => {
+    // WHY: the coupled solve replaces diag(1/(m+A)) by (M+A6)⁻¹; with no off-diagonal terms both must agree,
+    // or switching the hull model to the 6×6 would silently change heave/pitch/roll periods.
+    const A: Vec3 = [800, 4000, 50];
+    const I: Vec3 = [9000, 3000, 1500];
+    const force = (coupled: boolean) => (s: Rigid6State, _h: number, out: Rigid6Load): void => {
+      out.force[1] += m * 9.81 + 700 * Math.sin(s.position[1] * 4);
+      out.force[2] += 300;
+      // rotation about ONE principal axis (body x ≡ world x here): ω×(I·ω) = 0 in both paths
+      out.torque[0] += 500 * Math.cos(s.velocity[1]);
+      if (coupled && out.addedMass6) {
+        out.coupled = true;
+        for (let k = 0; k < 3; k++) {
+          out.addedMass6[k * 7] = A[k];
+          out.addedMass6[21 + k * 7] = I[k];
+        }
+      } else {
+        for (let k = 0; k < 3; k++) {
+          out.addedMass[k] = A[k];
+          out.addedInertia[k] = I[k];
+        }
+      }
+    };
+    const a = freeState(quatFromAxisAngle([1, 0, 0], 0.3), [0.2, 0, 0], [1, 0.5, 8]);
+    const b = freeState(quatFromAxisAngle([1, 0, 0], 0.3), [0.2, 0, 0], [1, 0.5, 8]);
+    const ma = createRigid6Memory();
+    const mb = createRigid6Memory();
+    for (let t = 0; t < 120; t++) {
+      stepRigid6(a, body, DT, 2, force(true), ma);
+      stepRigid6(b, body, DT, 2, force(false), mb);
+    }
+    for (let k = 0; k < 3; k++) {
+      expect(a.velocity[k]).toBeCloseTo(b.velocity[k], 9);
+      expect(a.angularVelocity[k]).toBeCloseTo(b.angularVelocity[k], 9);
+      expect(a.position[k]).toBeCloseTo(b.position[k], 9);
+    }
+  });
+
+  it('with the rotating-frame loads A·(ω×v) − ω×(A·v) supplied, body + water momentum is conserved; without −ω×(A·v) it is not', () => {
+    // WHY (T179 resting drift): rigid6 divides world accelerations by body-axis added mass. For water carried
+    // by a rotating hull that alone does not conserve momentum; the hull model must add Kirchhoff's terms.
+    // Pitching and heaving with no external horizontal force, P = m·v + R·A·Rᵀ·v must stay put.
+    const A: number[][] = [
+      [900, 0, 0],
+      [0, 5000, 400],
+      [0, 400, 300],
+    ];
+    const run = (withKirchhoff: boolean): number => {
+      const s = freeState([0, 0, 0, 1], [0.4, 0, 0], [0, 0.5, 0.3]);
+      const P = (): Vec3 => {
+        const V = invRotateVec(s.quaternion, s.velocity);
+        const AV: Vec3 = [0, 1, 2].map((r) => A[r][0] * V[0] + A[r][1] * V[1] + A[r][2] * V[2]) as Vec3;
+        const pw = rotateVec(s.quaternion, AV);
+        return [m * s.velocity[0] + pw[0], m * s.velocity[1] + pw[1], m * s.velocity[2] + pw[2]];
+      };
+      const P0 = P();
+      let maxDev = 0;
+      for (let t = 0; t < 600; t++) {
+        stepRigid6(s, body, DT, 2, (ss, _h, out) => {
+          const q = ss.quaternion as Quat;
+          const V = invRotateVec(q, ss.velocity);
+          const W = invRotateVec(q, ss.angularVelocity);
+          const wxv: Vec3 = [W[1] * V[2] - W[2] * V[1], W[2] * V[0] - W[0] * V[2], W[0] * V[1] - W[1] * V[0]];
+          const AV: Vec3 = [0, 1, 2].map((r) => A[r][0] * V[0] + A[r][1] * V[1] + A[r][2] * V[2]) as Vec3;
+          const f: Vec3 = [0, 1, 2].map((r) => A[r][0] * wxv[0] + A[r][1] * wxv[1] + A[r][2] * wxv[2]) as Vec3;
+          if (withKirchhoff) {
+            f[0] -= W[1] * AV[2] - W[2] * AV[1];
+            f[1] -= W[2] * AV[0] - W[0] * AV[2];
+            f[2] -= W[0] * AV[1] - W[1] * AV[0];
+          }
+          const fw = rotateVec(q, f);
+          for (let k = 0; k < 3; k++) out.force[k] += fw[k];
+          out.force[1] += m * 9.81; // weight cancelled: no external force at all
+          // a pitch spring keeps her rocking about body x
+          const tw = rotateVec(q, [-60000 * 2 * q[0], 0, 0]);
+          for (let k = 0; k < 3; k++) out.torque[k] += tw[k];
+          if (out.addedMass6) {
+            out.coupled = true;
+            for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) out.addedMass6[r * 6 + c] = A[r][c];
+          }
+        }, null);
+        const p = P();
+        maxDev = Math.max(maxDev, Math.hypot(p[0] - P0[0], p[1] - P0[1], p[2] - P0[2]));
+      }
+      return maxDev / Math.hypot(...P0);
+    };
+    expect(run(true)).toBeLessThan(0.01);
+    expect(run(false)).toBeGreaterThan(0.03);
+  });
+
+  it('a coupled matrix that is not positive definite throws instead of integrating garbage', () => {
+    expect(() =>
+      stepRigid6(freeState(), { mass: 1, inertia: [1, 1, 1] }, DT, 1, (_s, _h, out) => {
+        if (!out.addedMass6) return;
+        out.coupled = true;
+        out.addedMass6[0] = -5;
+      }),
+    ).toThrow(/positive definite/);
   });
 });
 

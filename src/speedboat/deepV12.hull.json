@@ -94,6 +94,19 @@
       "propNote": "propeller disc ~0.30 m aft of the mounting plane (gearcase) — ASSUMED"
     }
   ],
+  "lowerUnit": {
+    "note": "Steering gearcase of each outboard as a low-aspect-ratio lateral foil (physics only; per-engine position from `engines[].mountX` / `mountZFromTransom`). ALL NUMBERS ASSUMED from the 30 in bracket and the prop point above: no gearcase drawing. Mercury Racing publish a 5.44 in (0.138 m) HD offshore torpedo; strut chord and skeg depth are typical-looking, not measured.",
+    "steerAxisNote": "the drive yaws about a vertical axis through the mount point (mountX, mountZFromTransom); steer + rotates the thrust line from body +z toward body +x",
+    "avPlateYAboveKeel": 0.0,
+    "span": 0.6,
+    "lateralArea": 0.22,
+    "ceDepthBelowAvPlate": 0.29,
+    "ceAftOfMount": 0.12,
+    "stallDeg": 22,
+    "profileDragCoeff": 0.02,
+    "maxSteerDeg": 30,
+    "areaNote": "strut 0.35 m x 0.30 m chord + torpedo 0.50 m x 0.138 m + skeg 0.25 m x 0.18 m = 0.22 m2; span AV plate to skeg tip 0.60 m, geometric AR = span^2/area = 1.64"
+  },
   "massItems": [
     {
       "name": "hull shell, deck, stringers, cockpit liner (FRP) — ASSUMED",

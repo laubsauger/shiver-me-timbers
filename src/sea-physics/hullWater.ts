@@ -56,10 +56,20 @@
  *                POST-slam velocity. DEVIATION from an explicit force: the explicit form
  *                threw a 25 m/s flat landing back up at +20 m/s at one substep per tick.
  *                All impulses reach rigid6 as impulse/h, so it stays the only integrator (V100).
- *      added mass (§V69): diagonal body-frame terms from the SAME strips —
- *                A_x,y = Σ m_a·Δz·N_b², ΔI = Σ m_a·Δz·(r_b×N_b)² + roll plate term m_a·c²/8·Δz;
- *                surge 0.05·m ramped by displaced fraction (doc: constant — ramped so a flying
- *                hull has no water to drag).
+ *      added mass (§V69): from the SAME strips. COUPLED (default, T179): A6 = Σ a·J·Jᵀ, J = [N̂_b; r_b×N̂_b]
+ *                per heave half-section and per sway strip, + roll plate m_a·c²/8·Δz, + surge — handed to rigid6
+ *                as `addedMass6` with a per-section keep min(a_old, a_new). The coupled form was UNSTABLE
+ *                in T165's trial only because the rotating-frame load was missing then; with it (and without
+ *                the angular Kirchhoff term, below) it passes every pitch/roll/Savitsky test. Diagonal option:
+ *                A_x,y = Σ m_a·Δz·N_b², ΔI = Σ m_a·Δz·(r_b×N_b)² + plate; surge 0.05·m ramped by displaced
+ *                fraction (doc: constant — ramped so a flying hull has no water to drag).
+ *  - LATERAL 2D+t (T179): sway added mass m_lat = k_lat·ρ(π/2)·d² per wet strip along L̂ = N̂ × ẑ_b; rotating-frame,
+ *                entry exchange and Kirchhoff loads at the strip centroid; the momentum flux (side force) and
+ *                the separated crossflow drag as pressure NORMAL TO THE BOTTOM PANELS (addLateralStripForce).
+ *  - DRIVES (T179): thrust (TEMPORARY curve) along each yawed drive line at its prop point; each gearcase a
+ *                Helmbold low-aspect-ratio foil with stall and natural ventilation, span from its immersion
+ *                (evaluateDrives). Reported in driveForce/driveTorque, NOT in `load` (V-W2 samples = contact).
+ *  - KIRCHHOFF −ω×(A·v) completion and the trailing-face wetting (T179 resting drift): see evaluate/faceFactor.
  *  - BOUNDED AT RESULT (proposed V110, §V44): if |F|/m or |τ_b/I| exceeds its cap, force,
  *    torque and the wake samples are scaled by ONE factor together.
  *
@@ -72,11 +82,13 @@
  *    does not enter V_n / v_t.
  *  - only running-surface strips get 2D+t terms: the deck lid, transom and stem cap get
  *    hydrostatics + viscous only (an INVERTED flat landing has no slam — known gap).
- *  - aero, Kerner suction (default 0 in the doc), skeg/drive foil: NOT here (out of scope).
+ *  - aero, Kerner suction (default 0 in the doc): NOT here (out of scope).
  *
- * KNOWN LIMITS (measured): V104 at EQUILIBRIUM over Savitsky's valid range C_v 3.1–6.0. Added mass is
- * DIAGONAL about the CG: the heave–pitch term A₃₅ (0.36 of the mass matrix at C_v 3.1) is dropped; a
- * coupled 6×6 with per-strip keep was tried and was UNSTABLE at every C_v (open question, reported).
+ * KNOWN LIMITS (measured): V104 at EQUILIBRIUM over Savitsky's valid range C_v 3.1–6.0.
+ * MANEUVERING (T179, docs/speedboat/physics-log.md): above C_v ≈ 4 a drive angle beyond ~12° drives the stern
+ * to large slip and she hooks (full lock at C_v ≥ 5 capsizes or spins); at C_v ≥ 8 with small helm she heels
+ * slightly OUT of the turn (dry chines put the bottom-pressure line below the CG). A released hull keeps a
+ * few cm/s of horizontal speed from entry-only slam/crossflow along its trimmed normal.
  * Free-running at C_v 3.5–3.9 a pitch limit cycle remains (0.28° at 14 strips, ~0.9° as the strips are
  * refined — so it is the continuous model, not discretisation), far below the doc's porpoising limit;
  * and a roll (chine-walk) limit cycle of ±30° appears at C_v ≥ 8. Both open, reported.
@@ -91,7 +103,7 @@
  * own same-tick wake source. Not enforceable from here; stated for the wiring stage.
  */
 import type { Quat, Vec3 } from '../state/simState';
-import type { Rigid6ForceFn, Rigid6Load, Rigid6State } from './rigidBody';
+import { factorSpd6, solveFactored6, type Rigid6ForceFn, type Rigid6Load, type Rigid6State } from './rigidBody';
 
 /** water surface (or pressure head) elevation at world (x, z), m */
 export type HeightSampler = (x: number, z: number) => number;
@@ -117,6 +129,8 @@ export interface HullWaterMesh {
   /** transom z and stem z in the body frame (length = stemZ − transomZ) */
   transomZ: number;
   stemZ: number;
+  /** steerable drives (thrust + gearcase foil); none ⇒ no drive load */
+  drives?: readonly HullDrive[];
 }
 
 export interface HullWaterParams {
@@ -131,6 +145,22 @@ export interface HullWaterParams {
   crossflowDrag: number;
   /** surge added mass / m (doc §1.3) */
   surgeAddedMassRatio: number;
+  /** k_lat in the sectional SWAY added mass m_lat = k_lat·ρ·(π/2)·d² (d = wetted depth of the section); 0 = no lateral 2D+t */
+  lateralAddedMassCoeff: number;
+  /** STAND-IN drive power for the temporary thrust curve, W (all engines together) — see `STANDIN_THRUST` */
+  standInDrivePowerW: number;
+  /**
+   * COUPLED 6×6 ADDED MASS (default): A6 = Σ a·J·Jᵀ, J = [N̂_b; r_b × N̂_b] over the heave half-sections and the sway
+   * strips, handed to rigid6 as `addedMass6` — heave–pitch (A₃₅), sway–roll and sway–yaw coupling included. false =
+   * the diagonal per-axis added mass of T165 (no lever arms).
+   */
+  coupledAddedMass: boolean;
+  /** Kirchhoff −ω × (A·v) completion of the rotating-frame fluid load (see KIRCHHOFF COMPLETION in evaluate) */
+  kirchhoff: boolean;
+  /** gearcase lateral foils on the drives (off = thrust vectoring only) */
+  driveFoil: boolean;
+  /** natural ventilation of the surface-piercing gearcases (off = wetted lift to stall) */
+  gearcaseVentilation: boolean;
   /**
    * Garme near-transom reduction length a_non (0 = off): every sectional load (hydrostatic and
    * 2D+t) is multiplied by C_T = tanh(2.5·x_T/(a_non·B·Fn_B)), x_T = distance from the trailing
@@ -166,6 +196,29 @@ export interface HullWaterParams {
   patchMaxAxis: number;
 }
 
+/**
+ * TEMPORARY THRUST CURVE (S1b; the engine/prop model with rpm is S2/S3). Per engine:
+ *   T = throttle · η·P/max(|U_a|, U_ref) · s^1.5,  s = prop immersion (doc §3.1 exponent), U_a = advance speed
+ * P = rated power (Mercury Racing 450R: 450 hp = 335.7 kW), η = 0.55 (doc §2.4 table), U_ref ASSUMED (a
+ * slipping prop at low advance speed; sets the static thrust η·P/U_ref ≈ 15 kN per engine).
+ * Constant power ⇒ thrust falls as 1/U, so a turn's added drag is paid in speed. Tests may raise
+ * `standInDrivePowerW` to hold a C_v the non-stepped proxy cannot reach on 1007 kW.
+ */
+export const STANDIN_THRUST = Object.freeze({ powerW: 3 * 335.7e3, efficiency: 0.55, refSpeed: 12 });
+
+/** a steerable drive (satisfied by `DriveUnit`, src/speedboat/hullMesh.ts); body frame, at steer 0 */
+export interface HullDrive {
+  pivot: Vec3;
+  prop: Vec3;
+  foilCe: Vec3;
+  avPlateY: number;
+  span: number;
+  lateralArea: number;
+  stallRad: number;
+  profileDragCoeff: number;
+  maxSteerRad: number;
+}
+
 export const HULL_WATER_DEFAULTS: Readonly<HullWaterParams> = Object.freeze({
   rho: 1025,
   gravity: 9.81,
@@ -173,6 +226,12 @@ export const HULL_WATER_DEFAULTS: Readonly<HullWaterParams> = Object.freeze({
   addedMassCoeff: 1,
   crossflowDrag: 1,
   surgeAddedMassRatio: 0.05,
+  lateralAddedMassCoeff: 1,
+  standInDrivePowerW: STANDIN_THRUST.powerW,
+  coupledAddedMass: true,
+  kirchhoff: true,
+  driveFoil: true,
+  gearcaseVentilation: true,
   garmeANon: 0.34,
   frictionAllowance: 0.0004,
   planing: true,
@@ -185,6 +244,15 @@ export const HULL_WATER_DEFAULTS: Readonly<HullWaterParams> = Object.freeze({
 });
 
 const HALF_PI = Math.PI / 2;
+/**
+ * TRANSOM WETTING by the transom-draft Froude number Fn_T = U/√(g·T), T = the keel's depth at the trailing edge
+ * (see `faceFactor`). The transom runs dry at Fn_T ≈ 2.5 in model tests, 2.4 in numerical simulation and ≈ 2.2
+ * at full-scale Reynolds number (Maki et al. 2006 geosim tests and "On transom clearance", Ocean Eng. 2015, as
+ * summarised in the literature search, primary PDFs not read). The wet end of the ramp, 1.1 = half the dry
+ * value, is ASSUMED: a smooth ramp only has to reach "wet" at rest and "dry" by planing speed.
+ */
+const TRANSOM_DRY_FN = 2.2;
+const TRANSOM_WET_FN = 1.1;
 
 /**
  * Per-hull height grid, sampled once per tick and read bilinearly by every substep.
@@ -464,6 +532,37 @@ export class HullWater {
   private readonly gsInvI = new Float64Array(3);
   private readonly gsAxes = new Float64Array(9);
   private readonly j6 = new Float64Array(6);
+  private readonly k6 = new Float64Array(36);
+  private readonly minv6 = new Float64Array(36);
+  private readonly s6 = new Float64Array(36);
+  private readonly x6 = new Float64Array(6);
+  private gsC6 = false;
+  // lateral sections, per strip
+  private readonly sDepMax: Float64Array;
+  private readonly sDepMin: Float64Array;
+  private readonly lMa: Float64Array;
+  private readonly lPrev: Float64Array;
+  private readonly lDir: Float64Array;
+  private readonly lVL: Float64Array;
+  private readonly lU: Float64Array;
+  private readonly lF: Float64Array;
+  // drive
+  steer = 0;
+  throttle = 0;
+  /** last evaluate(): drive load (world, about the CG), NOT part of `load` (which stays the hull contact) */
+  readonly driveForce: Vec3 = [0, 0, 0];
+  readonly driveTorque: Vec3 = [0, 0, 0];
+  /** gearcase immersed-span fraction and prop immersion per drive, last evaluate() */
+  readonly gearcaseImmersion: Float64Array;
+  readonly driveImmersion: Float64Array;
+  /** foil lateral (side) force magnitude summed over drives, N (signed along body x) */
+  foilSideForce = 0;
+  thrust = 0;
+  private readonly dr = new Float64Array(3);
+  private readonly pnl = new Float64Array(8);
+  private readonly dd = new Float64Array(3);
+  private readonly dn = new Float64Array(3);
+  private readonly da = new Float64Array(3);
   // per-call pose cache
   private cgx = 0;
   private cgy = 0;
@@ -481,6 +580,7 @@ export class HullWater {
   private beamMax = 0;
   /** 2.5/(a_non·B·Fn_B); 0 ⇒ no reduction (at rest, or disabled) */
   private garmeK = 0;
+  private trailWet = 0;
   private fX = 0;
   private fY = 0;
   private fZ = 0;
@@ -533,6 +633,17 @@ export class HullWater {
       centroid: new Float64Array(ns * 3),
     };
     this.prevMa = new Float64Array(2 * ns);
+    this.sDepMax = new Float64Array(ns);
+    this.sDepMin = new Float64Array(ns);
+    this.lMa = new Float64Array(ns);
+    this.lPrev = new Float64Array(ns);
+    this.lDir = new Float64Array(ns * 3);
+    this.lVL = new Float64Array(ns);
+    this.lU = new Float64Array(ns);
+    this.lF = new Float64Array(ns);
+    const nd = mesh.drives ? mesh.drives.length : 0;
+    this.gearcaseImmersion = new Float64Array(nd);
+    this.driveImmersion = new Float64Array(nd);
     {
       const cells = this.params.patchMaxAxis * this.params.patchMaxAxis;
       this.wake = {
@@ -575,6 +686,7 @@ export class HullWater {
   /** V108: forget every per-location memory (teleport, respawn, LOD handoff) */
   resetMemory(): void {
     this.prevMa.fill(0);
+    this.lPrev.fill(0);
     this.prevAdded.fill(0);
     this.hasPrev = false;
   }
@@ -627,6 +739,23 @@ export class HullWater {
       const fnB = bMax > 0 ? Math.abs(uCg) / Math.sqrt(prm.gravity * bMax) : 0;
       const denom = prm.garmeANon * bMax * fnB;
       this.garmeK = prm.garmeANon > 0 && denom > 1e-9 ? 2.5 / denom : 0;
+      this.trailWet = 0;
+      if (this.garmeK > 0 && mesh.strips.count > 0) {
+        const si = this.uForward ? 0 : mesh.strips.count - 1;
+        const bxk = 0;
+        const byk = mesh.strips.keelY[si];
+        const bzk = this.uForward ? mesh.transomZ : mesh.stemZ;
+        const tx = 2 * (qy * bzk - qz * byk);
+        const ty = 2 * (qz * bxk - qx * bzk);
+        const tz = 2 * (qx * byk - qy * bxk);
+        const x = cgx + bxk + qw * tx + (qy * tz - qz * ty);
+        const y = cgy + byk + qw * ty + (qz * tx - qx * tz);
+        const z = cgz + bzk + qw * tz + (qx * ty - qy * tx);
+        const dT = this.patch.heightAt(x, z) - y;
+        const fnT = dT > 1e-6 ? Math.abs(uCg) / Math.sqrt(prm.gravity * dT) : Infinity;
+        const e = Math.min(1, Math.max(0, (fnT - TRANSOM_WET_FN) / (TRANSOM_DRY_FN - TRANSOM_WET_FN)));
+        this.trailWet = 1 - e * e * (3 - 2 * e);
+      }
     }
 
     // ---- vertices → world, depth below the patch surface
@@ -661,6 +790,8 @@ export class HullWater {
     this.sLatM.fill(0);
     S.wetArea.fill(0);
     S.centroid.fill(0);
+    this.sDepMax.fill(0);
+    this.sDepMin.fill(Infinity);
     this.hArea.fill(0);
     this.hCentroid.fill(0);
     this.wet.count = 0;
@@ -727,7 +858,6 @@ export class HullWater {
         this.emit(ibx, iby, ibz, PX[c], PY[c], PZ[c], icx, icy, icz, 0, dc, 0, strip);
       }
     }
-
     // ---- 2D+t sections, split into PORT and STARBOARD HALF-SECTIONS (asymmetric wedge, doc §2.3
     //      "tilted by the local heel"). Each half carries its share of the section's added mass, its own
     //      normal velocity and upwind momentum flux, and acts at its own wet centroid along the SECTION
@@ -876,6 +1006,67 @@ export class HullWater {
           S.d[i] = patch.heightAt(x, z) - y;
         }
       }
+      // ---- LATERAL (SWAY) SECTIONS: each wet strip also carries a sway added mass along its lateral axis
+      //      L̂ = N̂ × ẑ_b (in the section plane, ⊥ the heave normal). Lewis-form/ellipse result: a body moving
+      //      along one semi-axis carries ρπ·(other semi-axis)² per length; the free surface at impact/high
+      //      frequency is φ = 0, so the wetted half-body carries half of the doubled body's value —
+      //      m_lat = k_lat·ρ·(π/2)·d², d = the section's wetted depth (lowest wet point to the waterline). The
+      //      same law gives the heave m_a = ρ(π/2)c² (semi-axes swapped), so heave and sway share one
+      //      convention; a deep-V is DEEP for its beam, which is how deadrise gives grip, and a wet chine adds
+      //      the side depth. (Faltinsen 2005 ch. 9 slender-body maneuvering; Newman 1977 §4.13 added mass.)
+      {
+        const kl = prm.lateralAddedMassCoeff;
+        for (let i = 0; i < ns; i++) {
+          this.lMa[i] = 0;
+          this.lVL[i] = 0;
+          this.lU[i] = 0;
+          const nX = S.normal[i * 3];
+          const nY = S.normal[i * 3 + 1];
+          const nZ = S.normal[i * 3 + 2];
+          if (kl <= 0 || S.wetArea[i] <= 1e-9 || nX * nX + nY * nY + nZ * nZ < 0.5) continue;
+          const lx = nY * bzz - nZ * bzy;
+          const ly = nZ * bzx - nX * bzz;
+          const lz = nX * bzy - nY * bzx;
+          this.lDir[i * 3] = lx;
+          this.lDir[i * 3 + 1] = ly;
+          this.lDir[i * 3 + 2] = lz;
+          const d = Math.max(0, this.sDepMax[i] - Math.max(0, this.sDepMin[i]));
+          this.lMa[i] = kl * rho * HALF_PI * d * d;
+          const rx = S.centroid[i * 3] - cgx;
+          const ry = S.centroid[i * 3 + 1] - cgy;
+          const rz = S.centroid[i * 3 + 2] - cgz;
+          const pvx = vx + (wy * rz - wz * ry);
+          const pvy = vy + (wz * rx - wx * rz);
+          const pvz = vz + (wx * ry - wy * rx);
+          this.lVL[i] = pvx * lx + pvy * ly + pvz * lz;
+          this.lU[i] = pvx * bzx + pvy * bzy + pvz * bzz;
+        }
+        for (let i = 0; i < ns; i++) {
+          const ml = this.lMa[i];
+          if (ml <= 0) continue;
+          const lx = this.lDir[i * 3];
+          const ly = this.lDir[i * 3 + 1];
+          const lz = this.lDir[i * 3 + 2];
+          const rx = S.centroid[i * 3] - cgx;
+          const ry = S.centroid[i * 3 + 1] - cgy;
+          const rz = S.centroid[i * 3 + 2] - cgz;
+          const lbx = lx * bxx + ly * bxy + lz * bxz;
+          const lby = lx * byx + ly * byy + lz * byz;
+          const lbz = lx * bzx + ly * bzy + lz * bzz;
+          const rbx = rx * bxx + ry * bxy + rz * bxz;
+          const rby = rx * byx + ry * byy + rz * byz;
+          const rbz = rx * bzx + ry * bzy + rz * bzz;
+          const mdz = ml * dz;
+          Ax += mdz * lbx * lbx;
+          Ay += mdz * lby * lby;
+          const cxb = rby * lbz - rbz * lby;
+          const cyb = rbz * lbx - rbx * lbz;
+          const czb = rbx * lby - rby * lbx;
+          dIx += mdz * cxb * cxb;
+          dIy += mdz * cyb * cyb;
+          dIz += mdz * czb * czb;
+        }
+      }
       // added mass from the half-sections (diagonal about the CG, §V69)
       for (let hI = 0; hI < nh; hI++) {
         const ma = HMA[hI];
@@ -911,6 +1102,83 @@ export class HullWater {
       S.d.fill(0);
     }
     const Az = prm.surgeAddedMassRatio * m * Math.min(1, (this.displacedVolume * rho) / m);
+    const C6 = prm.coupledAddedMass && prm.planing;
+    if (C6) {
+      const K6 = this.k6;
+      K6.fill(0);
+      const hp = this.hasPrev;
+      for (let hI = 0; hI < nh; hI++) {
+        const ma = HMA[hI];
+        if (ma <= 0 && !(hp && this.prevMa[hI] > 0)) continue;
+        const nX = HN[hI * 3];
+        const nY = HN[hI * 3 + 1];
+        const nZ = HN[hI * 3 + 2];
+        const rx = HC[hI * 3] - cgx;
+        const ry = HC[hI * 3 + 1] - cgy;
+        const rz = HC[hI * 3 + 2] - cgz;
+        const J = this.j6;
+        J[0] = nX * bxx + nY * bxy + nZ * bxz;
+        J[1] = nX * byx + nY * byy + nZ * byz;
+        J[2] = nX * bzx + nY * bzy + nZ * bzz;
+        const rbx = rx * bxx + ry * bxy + rz * bxz;
+        const rby = rx * byx + ry * byy + rz * byz;
+        const rbz = rx * bzx + ry * bzy + rz * bzz;
+        J[3] = rby * J[2] - rbz * J[1];
+        J[4] = rbz * J[0] - rbx * J[2];
+        J[5] = rbx * J[1] - rby * J[0];
+        const aK = (hp ? Math.min(this.prevMa[hI], ma) : ma) * dz;
+        for (let r = 0; r < 6; r++) {
+          const kr = aK * J[r];
+          for (let c = r; c < 6; c++) K6[r * 6 + c] += kr * J[c];
+        }
+        K6[35] += (aK * (HCW[hI] * HCW[hI])) / 8;
+      }
+      for (let i = 0; i < ns; i++) {
+        const ml = this.lMa[i];
+        if (ml <= 0 && !(hp && this.lPrev[i] > 0)) continue;
+        const lx = this.lDir[i * 3];
+        const ly = this.lDir[i * 3 + 1];
+        const lz = this.lDir[i * 3 + 2];
+        const rx = S.centroid[i * 3] - cgx;
+        const ry = S.centroid[i * 3 + 1] - cgy;
+        const rz = S.centroid[i * 3 + 2] - cgz;
+        const J = this.j6;
+        J[0] = lx * bxx + ly * bxy + lz * bxz;
+        J[1] = lx * byx + ly * byy + lz * byz;
+        J[2] = lx * bzx + ly * bzy + lz * bzz;
+        const rbx = rx * bxx + ry * bxy + rz * bxz;
+        const rby = rx * byx + ry * byy + rz * byz;
+        const rbz = rx * bzx + ry * bzy + rz * bzz;
+        J[3] = rby * J[2] - rbz * J[1];
+        J[4] = rbz * J[0] - rbx * J[2];
+        J[5] = rbx * J[1] - rby * J[0];
+        const aK = (hp ? Math.min(this.lPrev[i], ml) : ml) * dz;
+        for (let r = 0; r < 6; r++) {
+          const kr = aK * J[r];
+          for (let c = r; c < 6; c++) K6[r * 6 + c] += kr * J[c];
+        }
+      }
+      K6[14] += Az;
+      for (let r = 1; r < 6; r++) for (let c = 0; c < r; c++) K6[r * 6 + c] = K6[c * 6 + r];
+      // (M + K6)⁻¹ by columns
+      const S6m = this.s6;
+      const X = this.x6;
+      const Mi = this.minv6;
+      for (let k = 0; k < 36; k++) S6m[k] = K6[k];
+      S6m[0] += m;
+      S6m[7] += m;
+      S6m[14] += m;
+      S6m[21] += mesh.inertia[0];
+      S6m[28] += mesh.inertia[1];
+      S6m[35] += mesh.inertia[2];
+      if (!factorSpd6(S6m)) throw new Error('hullWater: coupled added-mass matrix is not positive definite');
+      for (let c = 0; c < 6; c++) {
+        X.fill(0);
+        X[c] = 1;
+        solveFactored6(S6m, X);
+        for (let r = 0; r < 6; r++) Mi[r * 6 + c] = X[r];
+      }
+    }
 
     if (prm.planing) {
       // ---- slam: inelastic momentum exchange, Gauss–Seidel over half-sections, with the SAME inverse
@@ -923,6 +1191,7 @@ export class HullWater {
       this.gsInvI[0] = 1 / (mesh.inertia[0] + (hp ? Math.min(pa[3], dIx) : dIx));
       this.gsInvI[1] = 1 / (mesh.inertia[1] + (hp ? Math.min(pa[4], dIy) : dIy));
       this.gsInvI[2] = 1 / (mesh.inertia[2] + (hp ? Math.min(pa[5], dIz) : dIz));
+      this.gsC6 = C6;
       this.gsAxes[0] = bxx;
       this.gsAxes[1] = bxy;
       this.gsAxes[2] = bxz;
@@ -975,6 +1244,27 @@ export class HullWater {
         SF[hI * 3 + 1] += jy / h;
         SF[hI * 3 + 2] += jz / h;
       }
+      // ---- lateral entry exchange: sway added mass that GROWS takes up the point's lateral velocity
+      //      inelastically (the heave slam's law on the lateral axis); shrinking water leaves with its momentum
+      if (hp) {
+        for (let i = 0; i < ns; i++) {
+          const ml = this.lMa[i];
+          const dA = (ml - this.lPrev[i]) * dz;
+          if (!(dA > 0)) continue;
+          const lx = this.lDir[i * 3];
+          const ly = this.lDir[i * 3 + 1];
+          const lz = this.lDir[i * 3 + 2];
+          const rx = S.centroid[i * 3] - cgx;
+          const ry = S.centroid[i * 3 + 1] - cgy;
+          const rz = S.centroid[i * 3 + 2] - cgz;
+          const V = this.pointVelAt(rx, ry, rz, lx, ly, lz);
+          if (V === 0) continue;
+          const wInv = this.gsInvMassAt(rx, ry, rz, lx, ly, lz);
+          const J = (-dA * V) / (1 + dA * wInv);
+          this.gsApply(-1, lx, ly, lz, J);
+          this.addStripForce(i, (J * lx) / h, (J * ly) / h, (J * lz) / h);
+        }
+      }
       // ---- crossflow drag (normal ½ρ·C_Dc·c_half·V_n|V_n| per half, lateral ½ρ·C_Dc·A_side·V|V|) as
       //      velocity-level impulses in the SAME Gauss–Seidel pass: the explicit force form is stiff
       //      (a flat 25 m/s entry: B·h/m ≫ 2, measured bounce to +20 m/s at one substep).
@@ -984,9 +1274,10 @@ export class HullWater {
         if (HMA[hI] > 0) this.gsDrag(hI, HN[hI * 3], HN[hI * 3 + 1], HN[hI * 3 + 2], halfRhoCd * 2 * HCW[hI] * (HMA[hI] / S.ma[hI >> 1]) * dz, h); // the half's share of ½ρ·C_Dc·2c
         const vLat = this.pointVelAlong(hI, bxx, bxy, bxz);
         const aSide = vLat > 0 ? this.sLatP[hI] : this.sLatM[hI];
-        if (aSide > 0) this.gsDrag(hI, bxx, bxy, bxz, halfRhoCd * aSide, h);
+        if (aSide > 0) this.gsDrag(hI, bxx, bxy, bxz, halfRhoCd * aSide, h, true);
       }
       for (let hI = 0; hI < nh; hI++) this.prevMa[hI] = HMA[hI];
+      for (let i = 0; i < ns; i++) this.lPrev[i] = this.lMa[i];
       pa[0] = Ax;
       pa[1] = Ay;
       pa[2] = Az;
@@ -1000,7 +1291,6 @@ export class HullWater {
       this.tX += slamLx / h;
       this.tY += slamLy / h;
       this.tZ += slamLz / h;
-
       // ---- ROTATING-FRAME ADDED-MASS LOAD: the m_a·∂V_n/∂t of a BODY-FIXED section includes the change
       //      of its normal velocity as the hull ROTATES in the stream, ∂V_n/∂t ⊃ N_b·(ω_b × v_b) — for
       //      pitch, m_a·q·u. rigid6 divides world accelerations by the added mass and cannot see it.
@@ -1027,6 +1317,113 @@ export class HullWater {
           const nby = nX * byx + nY * byy + nZ * byz;
           const nbz = nX * bzx + nY * bzy + nZ * bzz;
           this.addHalfForce(hI, ma * dz * (nbx * ocx + nby * ocy + nbz * ocz));
+        }
+        // ---- lateral sections: the same rotating-frame load on the sway added mass, at the strip centroid.
+        //      COUPLED (6×6): + A6·[0; I⁻¹(ω_b × Iω_b)] — the step's gyroscopic update acts on the RIGID inertia
+        //      only, so the part of the water's acceleration it implies must come from here (derivation in the
+        //      KIRCHHOFF note below).
+        const I0 = mesh.inertia[0];
+        const I1 = mesh.inertia[1];
+        const I2 = mesh.inertia[2];
+        const gx = (oby * I2 * obz - obz * I1 * oby) / I0;
+        const gy = (obz * I0 * obx - obx * I2 * obz) / I1;
+        const gz = (obx * I1 * oby - oby * I0 * obx) / I2;
+        // ---- KIRCHHOFF COMPLETION: −ω × p, p = the water's linear momentum (A·v). rigid6 integrates the
+        //      world velocity with the added mass per body axis; for water carried by a ROTATING hull
+        //      Kirchhoff's equations need, on top of the section loads above (A·(ω×v)),
+        //        F = −ω × (A·v)            (body frame; Lamb 1932 §124, Newman 1977 §4.13)
+        //      Without it a heaving, pitching hull at rest swapped momentum between body axes on every cycle —
+        //      horizontal momentum was not conserved and a hull released in calm water walked away (0.31 m/s
+        //      after settling from a 20 cm drop, measured, with the transom-face defect below fixed). Force only,
+        //      through the CG: the angular −ω×p_ang − v×p_lin is NOT added — v×p_lin is the Munk moment, which
+        //      the lift/lateral momentum flux already carries (measured: adding −ω×p_ang capsized the roll kick at
+        //      C_v 8). p from point velocities when coupled (p = A6·ν), from the CG velocity with the diagonal
+        //      step (whose A has no lever arms).
+        const kirch = prm.kirchhoff;
+        let plx = 0;
+        let ply = 0;
+        let plz = 0;
+        for (let hI = 0; hI < nh; hI++) {
+          const ma = HMA[hI];
+          if (ma <= 0) continue;
+          const nX = HN[hI * 3];
+          const nY = HN[hI * 3 + 1];
+          const nZ = HN[hI * 3 + 2];
+          const aN = ma * dz;
+          const rx = HC[hI * 3] - cgx;
+          const ry = HC[hI * 3 + 1] - cgy;
+          const rz = HC[hI * 3 + 2] - cgz;
+          if (C6) {
+            const nbx = nX * bxx + nY * bxy + nZ * bxz;
+            const nby = nX * byx + nY * byy + nZ * byz;
+            const nbz = nX * bzx + nY * bzy + nZ * bzz;
+            const rbx = rx * bxx + ry * bxy + rz * bxz;
+            const rby = rx * byx + ry * byy + rz * byz;
+            const rbz = rx * bzx + ry * bzy + rz * bzz;
+            this.addHalfForce(hI, aN * ((rby * nbz - rbz * nby) * gx + (rbz * nbx - rbx * nbz) * gy + (rbx * nby - rby * nbx) * gz));
+            // roll plate term of A6 (body z)
+            const tg = ((aN * HCW[hI] * HCW[hI]) / 8) * gz;
+            this.tX += tg * bzx;
+            this.tY += tg * bzy;
+            this.tZ += tg * bzz;
+          }
+          if (kirch) {
+            const vn = C6 ? vx * nX + vy * nY + vz * nZ + (wy * rz - wz * ry) * nX + (wz * rx - wx * rz) * nY + (wx * ry - wy * rx) * nZ : vx * nX + vy * nY + vz * nZ;
+            const qx = aN * vn * nX;
+            const qy = aN * vn * nY;
+            const qz = aN * vn * nZ;
+            plx += qx;
+            ply += qy;
+            plz += qz;
+            SF[hI * 3] -= wy * qz - wz * qy;
+            SF[hI * 3 + 1] -= wz * qx - wx * qz;
+            SF[hI * 3 + 2] -= wx * qy - wy * qx;
+          }
+        }
+        for (let i = 0; i < ns; i++) {
+          const ml = this.lMa[i];
+          if (ml <= 0) continue;
+          const lx = this.lDir[i * 3];
+          const ly = this.lDir[i * 3 + 1];
+          const lz = this.lDir[i * 3 + 2];
+          const lbx = lx * bxx + ly * bxy + lz * bxz;
+          const lby = lx * byx + ly * byy + lz * byz;
+          const lbz = lx * bzx + ly * bzy + lz * bzz;
+          const aN = ml * dz;
+          let f = aN * (lbx * ocx + lby * ocy + lbz * ocz);
+          if (C6) {
+            const rx = S.centroid[i * 3] - cgx;
+            const ry = S.centroid[i * 3 + 1] - cgy;
+            const rz = S.centroid[i * 3 + 2] - cgz;
+            const rbx = rx * bxx + ry * bxy + rz * bxz;
+            const rby = rx * byx + ry * byy + rz * byz;
+            const rbz = rx * bzx + ry * bzy + rz * bzz;
+            f += aN * ((rby * lbz - rbz * lby) * gx + (rbz * lbx - rbx * lbz) * gy + (rbx * lby - rby * lbx) * gz);
+          }
+          this.addStripForce(i, f * lx, f * ly, f * lz);
+          if (kirch) {
+            const vL = C6 ? this.lVL[i] : vx * lx + vy * ly + vz * lz;
+            const qx = aN * vL * lx;
+            const qy = aN * vL * ly;
+            const qz = aN * vL * lz;
+            plx += qx;
+            ply += qy;
+            plz += qz;
+            const A = S.wetArea[i];
+            for (let side = 0; side < 2; side++) {
+              const hI = 2 * i + side;
+              const w = this.hArea[hI] / A;
+              if (!(w > 0)) continue;
+              SF[hI * 3] -= w * (wy * qz - wz * qy);
+              SF[hI * 3 + 1] -= w * (wz * qx - wx * qz);
+              SF[hI * 3 + 2] -= w * (wx * qy - wy * qx);
+            }
+          }
+        }
+        if (kirch) {
+          this.fX -= wy * plz - wz * ply;
+          this.fY -= wz * plx - wx * plz;
+          this.fZ -= wx * ply - wy * plx;
         }
       }
 
@@ -1074,8 +1471,35 @@ export class HullWater {
       for (let hI = 0; hI < nh; hI++) {
         if (LF[hI] > 0 && HA[hI] > 1e-9) this.addHalfForce(hI, LF[hI]);
       }
+      // ---- LATERAL MOMENTUM FLUX (slender-body side force, −U·∂(m_lat·V_L)/∂ξ along L̂): the planing lift's
+      //      scheme on the sway momentum M = m_lat·V_L, boundary placement, trailing extrapolation, the flux
+      //      leaving at the transom (Kutta). NOT clamped: sway momentum has either sign. Its moment about the CG
+      //      contains the Munk yaw moment (directionally destabilising, as for any slender hull: the drives'
+      //      foils are what make her straight-running stable). Faltinsen 2005 §9 (2D+t maneuvering); Newman 1977 §7.
+      {
+        const LFl = this.lF;
+        LFl.fill(0);
+        const uCg = vx * bzx + vy * bzy + vz * bzz;
+        const step = uCg >= 0 ? 1 : -1;
+        const trail = uCg >= 0 ? 0 : ns - 1;
+        for (let i = 0; i < ns; i++) {
+          if (this.lMa[i] <= 0) continue;
+          const upS = i + step;
+          const upWet = upS >= 0 && upS < ns && this.lMa[upS] > 0;
+          const mI = this.lMa[i] * this.lVL[i];
+          const mUp = upWet ? this.lMa[upS] * this.lVL[upS] : 0;
+          const cb = -Math.abs(this.lU[i]) * (mI - mUp);
+          const wUp = upWet ? 0.5 * Math.min(1, S.wetArea[upS] / S.wetArea[i]) : 0;
+          LFl[i] += (1 - wUp) * cb;
+          if (upWet) LFl[upS] += wUp * cb;
+          if (i === trail) LFl[i] += wUp * cb;
+        }
+        for (let i = 0; i < ns; i++) {
+          const f = LFl[i];
+          if (f !== 0) this.addLateralStripForce(i, f);
+        }
+      }
     }
-
     // ---- SKIN FRICTION, ITTC-57 + ΔC_F on the SPRAY-ROOT-bounded wetted area (Savitsky 1964's
     //      pressure area S = λb²/cosβ): each running-surface triangle's clipped area is scaled by
     //      its strip's Wagner c / geometric c (≤ π/2, less once the chine is wet). Rn on the mean
@@ -1134,7 +1558,6 @@ export class HullWater {
         W.fy[j] += fy;
       }
     }
-
     // ---- V110 bound at the result, force and torque together
     this.rawForce[0] = this.fX;
     this.rawForce[1] = this.fY;
@@ -1194,14 +1617,205 @@ export class HullWater {
     L.addedInertia[0] = dIx;
     L.addedInertia[1] = dIy;
     L.addedInertia[2] = dIz;
+    this.evaluateDrives(state);
+    if (out && C6 && out.addedMass6 && this.k6[7] + this.k6[21] + this.k6[28] + this.k6[35] > 0) {
+      for (let k = 0; k < 36; k++) out.addedMass6[k] += this.k6[k];
+      out.coupled = true;
+    }
     if (out) {
       for (let c = 0; c < 3; c++) {
+        out.force[c] += this.driveForce[c];
+        out.torque[c] += this.driveTorque[c];
         out.force[c] += L.force[c];
         out.torque[c] += L.torque[c];
         out.addedMass[c] += L.addedMass[c];
         out.addedInertia[c] += L.addedInertia[c];
       }
     }
+  }
+
+  /** controls for the drives (S2 input): steer = drive yaw angle, rad (clamped to each drive's lock; + turns the
+   *  bow toward body −x), throttle ∈ [−0.3, 1] into the TEMPORARY thrust curve (`STANDIN_THRUST`) */
+  setControls(steer: number, throttle: number): void {
+    this.steer = Number.isFinite(steer) ? steer : 0;
+    this.throttle = Number.isFinite(throttle) ? (throttle < -0.3 ? -0.3 : throttle > 1 ? 1 : throttle) : 0;
+  }
+
+  /**
+   * DRIVES — thrust along each drive's line at its prop point, and the GEARCASE as a low-aspect-ratio lateral
+   * foil at its centre of effort, both yawed by the steer angle about the drive's pivot.
+   *  lift slope  C_Lα = 2πA/(2 + √(A² + 4))  (Helmbold 1942; → πA/2, Jones' slender wing, as A → 0), A = s_i²/S_i
+   *              on the IMMERSED span s_i: the anti-ventilation plate runs at the free surface, whose image at
+   *              planing speed is φ = 0, so no end-plate doubling of A (Molland & Turnock 2007 via Liu &
+   *              Hekkenberg 2017: k_Λ → 2 only against a solid plate).
+   *  stall       linear to α_s (JSON `stallDeg`; open-water rudders 15–20°, low-A later — Liu & Hekkenberg 2017),
+   *              then decaying to the flat-plate normal-force law C_N ≈ 1.2·sin α (Hoerner) — no lift cliff.
+   *  drag        C_D0 + C_L²/(πA) below stall (induced), → C_N·sin α beyond.
+   *  immersion   s_i = clamp(span + depth of the AV plate below the patch surface, 0, span): a gearcase lifted
+   *              out of the water (airborne, trimmed out, a wave trough) loses area AND aspect ratio, so side
+   *              force → 0 smoothly and she cannot steer in the air; thrust × s^1.5 at each prop (doc §3.1).
+   * Not part of `load` (the hull contact, whose samples sum to it, V-W2); added to the rigid6 load passed in.
+   */
+  private evaluateDrives(state: Readonly<Rigid6State>): void {
+    const DF = this.driveForce;
+    const DT = this.driveTorque;
+    DF[0] = DF[1] = DF[2] = DT[0] = DT[1] = DT[2] = 0;
+    this.foilSideForce = 0;
+    this.thrust = 0;
+    const drives = this.mesh.drives;
+    if (!drives || drives.length === 0) return;
+    const prm = this.params;
+    const [qx, qy, qz, qw] = state.quaternion;
+    const cgx = state.position[0];
+    const cgy = state.position[1];
+    const cgz = state.position[2];
+    const [vx, vy, vz] = state.velocity;
+    const [wx, wy, wz] = state.angularVelocity;
+    const rho = prm.rho;
+    const patch = this.patch;
+    const rot = (bx: number, by: number, bz: number, o: Float64Array): void => {
+      const tx = 2 * (qy * bz - qz * by);
+      const ty = 2 * (qz * bx - qx * bz);
+      const tz = 2 * (qx * by - qy * bx);
+      o[0] = bx + qw * tx + (qy * tz - qz * ty);
+      o[1] = by + qw * ty + (qz * tx - qx * tz);
+      o[2] = bz + qw * tz + (qx * ty - qy * tx);
+    };
+    const R = this.dr;
+    const D = this.dd;
+    const Nn = this.dn;
+    // body axes in world (for world → body of velocities)
+    const bxx = 1 - 2 * (qy * qy + qz * qz);
+    const bxy = 2 * (qx * qy + qw * qz);
+    const bxz = 2 * (qx * qz - qw * qy);
+    const nEng = drives.length;
+    const pPer = prm.standInDrivePowerW / nEng;
+    let side = 0;
+    for (let k = 0; k < nEng; k++) {
+      const dv = drives[k];
+      const lock = dv.maxSteerRad;
+      const del = this.steer < -lock ? -lock : this.steer > lock ? lock : this.steer;
+      const cs = Math.cos(del);
+      const sn = Math.sin(del);
+      // chord (thrust) direction and foil normal, body → world
+      rot(sn, 0, cs, D);
+      rot(cs, 0, -sn, Nn);
+      // ---- gearcase foil
+      {
+        const ox = dv.foilCe[0] - dv.pivot[0];
+        const oz = dv.foilCe[2] - dv.pivot[2];
+        const bx = dv.pivot[0] + ox * cs + oz * sn;
+        const bz = dv.pivot[2] - ox * sn + oz * cs;
+        rot(bx, dv.foilCe[1], bz, R);
+        const rx = R[0];
+        const ry = R[1];
+        const rz = R[2];
+        // immersed span from the AV plate's depth right above the centre of effort
+        rot(bx, dv.avPlateY, bz, this.da);
+        const depthAv = patch.heightAt(cgx + this.da[0], cgz + this.da[2]) - (cgy + this.da[1]);
+        const si = Math.min(dv.span, Math.max(0, dv.span + Math.min(0, depthAv)));
+        const frac = si / dv.span;
+        this.gearcaseImmersion[k] = frac;
+        if (frac > 0 && prm.driveFoil) {
+          const pvx = vx + (wy * rz - wz * ry);
+          const pvy = vy + (wz * rx - wx * rz);
+          const pvz = vz + (wx * ry - wy * rx);
+          const uc = pvx * D[0] + pvy * D[1] + pvz * D[2];
+          const un = pvx * Nn[0] + pvy * Nn[1] + pvz * Nn[2];
+          const V2 = uc * uc + un * un;
+          if (V2 > 1e-12) {
+            const V = Math.sqrt(V2);
+            const area = dv.lateralArea * frac;
+            const AR = (si * si) / area;
+            const cla = (2 * Math.PI * AR) / (2 + Math.sqrt(AR * AR + 4));
+            const a = Math.atan2(Math.abs(un), Math.abs(uc));
+            const as = dv.stallRad;
+            // wetted: linear to stall, then toward the flat-plate normal-force law
+            let cl: number;
+            let cd: number;
+            if (a <= as) {
+              cl = cla * a;
+              cd = dv.profileDragCoeff + (cl * cl) / (Math.PI * AR);
+            } else {
+              const wgt = Math.exp(-(a - as) / 0.15);
+              const sa = Math.sin(a);
+              const ca = Math.cos(a);
+              const clMax = cla * as;
+              cl = clMax * wgt + 1.2 * sa * ca * (1 - wgt);
+              cd = (dv.profileDragCoeff + (clMax * clMax) / (Math.PI * AR)) * wgt + (dv.profileDragCoeff + 1.2 * sa * sa) * (1 - wgt);
+            }
+            // NATURAL VENTILATION of the surface-piercing gearcase: air drawn down the suction side once the
+            // lift coefficient reaches C_L,i = [1 − exp(−σ_v·Fr_h)]·Fr_h^(−1/2) (Damley-Strnad et al. 2019, as
+            // quoted and tested by Aguiar Ferreira et al., JFM/arXiv:2503.18015, 2025), σ_v = 2(p0 − p_v)/(ρV²),
+            // Fr_h = V/√(g·s_i). Beyond it the lift falls, over a 4° band, to the ventilated flat-plate value, ¼ of
+            // the wetted slope (Tulin's linearised supercavitating plate, C_L = πα/2 vs 2πα). The wetted/ventilated
+            // HYSTERESIS (washout at a lower α) is not modelled; the anti-ventilation plate is not credited.
+            if (prm.gearcaseVentilation && cla > 0) {
+              const sigma = (2 * (101325 - 2500)) / (rho * V2);
+              const frh = V / Math.sqrt(prm.gravity * si);
+              const clI = (1 - Math.exp(-sigma * frh)) / Math.sqrt(frh);
+              const aI = Math.min(as, clI / cla);
+              if (a > aI) {
+                const e = Math.min(1, (a - aI) / (4 * (Math.PI / 180)));
+                const v = e * e * (3 - 2 * e);
+                const clV = 0.25 * cla * Math.sin(a) * Math.cos(a);
+                const clW = Math.min(cl, cla * aI);
+                cl = clW * (1 - v) + clV * v;
+                cd = cd * (1 - v) + (dv.profileDragCoeff + clV * Math.tan(a)) * v;
+              }
+            }
+            const q = 0.5 * rho * V2 * area;
+            // lift ⊥ the in-plane inflow, opposing its normal component; drag against it
+            const sgn = -(un >= 0 ? 1 : -1) * (uc >= 0 ? 1 : -1);
+            const px = (-un * D[0] + uc * Nn[0]) / V;
+            const py = (-un * D[1] + uc * Nn[1]) / V;
+            const pz = (-un * D[2] + uc * Nn[2]) / V;
+            const vhx = (uc * D[0] + un * Nn[0]) / V;
+            const vhy = (uc * D[1] + un * Nn[1]) / V;
+            const vhz = (uc * D[2] + un * Nn[2]) / V;
+            const fx = q * (cl * sgn * px - cd * vhx);
+            const fy = q * (cl * sgn * py - cd * vhy);
+            const fz = q * (cl * sgn * pz - cd * vhz);
+            DF[0] += fx;
+            DF[1] += fy;
+            DF[2] += fz;
+            DT[0] += ry * fz - rz * fy;
+            DT[1] += rz * fx - rx * fz;
+            DT[2] += rx * fy - ry * fx;
+            side += fx * bxx + fy * bxy + fz * bxz;
+          }
+        }
+      }
+      // ---- thrust (TEMPORARY curve) at the prop point along the drive line
+      {
+        const ox = dv.prop[0] - dv.pivot[0];
+        const oz = dv.prop[2] - dv.pivot[2];
+        const bx = dv.pivot[0] + ox * cs + oz * sn;
+        const bz = dv.pivot[2] - ox * sn + oz * cs;
+        rot(bx, dv.prop[1], bz, R);
+        const depth = patch.heightAt(cgx + R[0], cgz + R[2]) - (cgy + R[1]);
+        const r = this.mesh.propRadius;
+        const e = Math.min(1, Math.max(0, (depth + r) / (2 * r)));
+        const imm = e * e * (3 - 2 * e);
+        this.driveImmersion[k] = imm;
+        if (this.throttle !== 0 && imm > 0) {
+          const ua = Math.abs(vx * D[0] + vy * D[1] + vz * D[2]);
+          const tMax = (STANDIN_THRUST.efficiency * pPer) / Math.max(ua, STANDIN_THRUST.refSpeed);
+          const T = this.throttle * tMax * imm * Math.sqrt(imm);
+          const fx = T * D[0];
+          const fy = T * D[1];
+          const fz = T * D[2];
+          DF[0] += fx;
+          DF[1] += fy;
+          DF[2] += fz;
+          DT[0] += R[1] * fz - R[2] * fy;
+          DT[1] += R[2] * fx - R[0] * fz;
+          DT[2] += R[0] * fy - R[1] * fx;
+          this.thrust += T;
+        }
+      }
+    }
+    this.foilSideForce = side;
   }
 
   /** column-sum the signed wet samples into ≥ 0 plan-cell wake loads whose sum is max(0, netFy) */
@@ -1269,9 +1883,11 @@ export class HullWater {
   /** GS working point velocity of half-section hI's wet centroid along world direction d */
   private pointVelAlong(hI: number, dx: number, dy: number, dz: number): number {
     const C = this.hCentroid;
-    const rx = C[hI * 3] - this.cgx;
-    const ry = C[hI * 3 + 1] - this.cgy;
-    const rz = C[hI * 3 + 2] - this.cgz;
+    return this.pointVelAt(C[hI * 3] - this.cgx, C[hI * 3 + 1] - this.cgy, C[hI * 3 + 2] - this.cgz, dx, dy, dz);
+  }
+
+  /** GS working velocity at CG offset r (world) along world direction d */
+  private pointVelAt(rx: number, ry: number, rz: number, dx: number, dy: number, dz: number): number {
     const gv = this.gv;
     const gw = this.gw;
     const pvx = gv[0] + (gw[1] * rz - gw[2] * ry);
@@ -1283,10 +1899,11 @@ export class HullWater {
   /** j6 ← body [d_b; r_b×d_b] at half-section hI; returns the effective inverse mass j6ᵀ·diag(invM, invI)·j6 */
   private gsInvMass(hI: number, dx: number, dy: number, dz: number): number {
     const C = this.hCentroid;
+    return this.gsInvMassAt(C[hI * 3] - this.cgx, C[hI * 3 + 1] - this.cgy, C[hI * 3 + 2] - this.cgz, dx, dy, dz);
+  }
+
+  private gsInvMassAt(rx: number, ry: number, rz: number, dx: number, dy: number, dz: number): number {
     const A = this.gsAxes;
-    const rx = C[hI * 3] - this.cgx;
-    const ry = C[hI * 3 + 1] - this.cgy;
-    const rz = C[hI * 3 + 2] - this.cgz;
     const dbx = dx * A[0] + dy * A[1] + dz * A[2];
     const dby = dx * A[3] + dy * A[4] + dz * A[5];
     const dbz = dx * A[6] + dy * A[7] + dz * A[8];
@@ -1302,6 +1919,16 @@ export class HullWater {
     j[5] = rbx * dby - rby * dbx;
     const iM = this.gsInvM;
     const iI = this.gsInvI;
+    if (this.gsC6) {
+      const Mi = this.minv6;
+      let w = 0;
+      for (let r = 0; r < 6; r++) {
+        let t = 0;
+        for (let c = 0; c < 6; c++) t += Mi[r * 6 + c] * j[c];
+        w += j[r] * t;
+      }
+      return w;
+    }
     return j[0] * j[0] * iM[0] + j[1] * j[1] * iM[1] + j[2] * j[2] * iM[2] + j[3] * j[3] * iI[0] + j[4] * j[4] * iI[1] + j[5] * j[5] * iI[2];
   }
 
@@ -1311,6 +1938,22 @@ export class HullWater {
     const j = this.j6;
     const iM = this.gsInvM;
     const iI = this.gsInvI;
+    if (this.gsC6) {
+      const Mi = this.minv6;
+      const d = this.x6;
+      for (let r = 0; r < 6; r++) {
+        let t = 0;
+        for (let c = 0; c < 6; c++) t += Mi[r * 6 + c] * j[c];
+        d[r] = J * t;
+      }
+      this.gv[0] += d[0] * A[0] + d[1] * A[3] + d[2] * A[6];
+      this.gv[1] += d[0] * A[1] + d[1] * A[4] + d[2] * A[7];
+      this.gv[2] += d[0] * A[2] + d[1] * A[5] + d[2] * A[8];
+      this.gw[0] += d[3] * A[0] + d[4] * A[3] + d[5] * A[6];
+      this.gw[1] += d[3] * A[1] + d[4] * A[4] + d[5] * A[7];
+      this.gw[2] += d[3] * A[2] + d[4] * A[5] + d[5] * A[8];
+      return;
+    }
     const lvx = J * j[0] * iM[0];
     const lvy = J * j[1] * iM[1];
     const lvz = J * j[2] * iM[2];
@@ -1323,6 +1966,80 @@ export class HullWater {
     this.gw[0] += awx * A[0] + awy * A[3] + awz * A[6];
     this.gw[1] += awx * A[1] + awy * A[4] + awz * A[7];
     this.gw[2] += awx * A[2] + awy * A[5] + awz * A[8];
+  }
+
+  /** a world force on strip i, split between its wet half-sections by area and applied at their centroids
+   *  (Σ area-weighted half centroids = the strip centroid, so the torque is the strip's) */
+  private addStripForce(i: number, fx: number, fy: number, fz: number): void {
+    const A = this.sections.wetArea[i];
+    if (A <= 1e-9) return;
+    const C = this.hCentroid;
+    for (let side = 0; side < 2; side++) {
+      const hI = 2 * i + side;
+      const w = this.hArea[hI] / A;
+      if (w <= 0) continue;
+      this.addForceAt(hI, fx * w, fy * w, fz * w, C[hI * 3] - this.cgx, C[hI * 3 + 1] - this.cgy, C[hI * 3 + 2] - this.cgz);
+    }
+  }
+
+  /**
+   * A SWAY load of magnitude F along strip i's lateral axis L̂, carried as PRESSURE NORMAL TO THE BOTTOM
+   * PANELS: each wet half gets f_h·n̂_h along its own panel normal (Σ over the wet triangles of that half, ⊥ body
+   * z) at its own centroid, with f_h = F·A_h·s_h / Σ A_k·s_k², s_h = n̂_h·L̂, so the lateral components add to F.
+   * For an upright V the normal components cancel (s_h = ∓ sin β) and what is left is WHERE the side force
+   * acts: both panel-normal lines meet c/sin2β above the keel, above a CG h over the keel while the wetted
+   * half-beam c is wide, so a hull sliding outward in a turn is rolled INTO it. Source for the mechanism: the
+   * side force on a drifting planing hull is "a strong pressure increase at one of the spray roots" (Marleaux,
+   * Simonis & Abdel-Maksoud, 35th Symp. Naval Hydrodynamics 2024, 2D+t BEM vs Brown & Klosinski 1994 tests).
+   * The same force through the strip centroid heels her OUT of the turn (measured −2…−5° at C_v 3–5).
+   * Used for the lateral momentum flux and the separated crossflow drag; the sway added-mass loads (rotating
+   * frame, entry exchange, Kirchhoff) act at the strip centroid, where the 6×6 puts their lever arm.
+   * No panel with a lateral slope (s = 0, a flat plate with dry sides) ⇒ plain force at the strip centroid.
+   */
+  private addLateralStripForce(i: number, F: number): void {
+    const bzx = this.bzX;
+    const bzy = this.bzY;
+    const bzz = this.bzZ;
+    const lx = this.lDir[i * 3];
+    const ly = this.lDir[i * 3 + 1];
+    const lz = this.lDir[i * 3 + 2];
+    const P = this.pnl;
+    let den = 0;
+    for (let side = 0; side < 2; side++) {
+      const hI = 2 * i + side;
+      P[side * 4 + 3] = 0;
+      if (this.hArea[hI] <= 1e-9) continue;
+      let nx = this.sSx[hI];
+      let ny = this.sSy[hI];
+      let nz = this.sSz[hI];
+      const al = nx * bzx + ny * bzy + nz * bzz;
+      nx -= al * bzx;
+      ny -= al * bzy;
+      nz -= al * bzz;
+      const nl = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (nl <= 1e-12) continue;
+      nx /= nl;
+      ny /= nl;
+      nz /= nl;
+      const sh = nx * lx + ny * ly + nz * lz;
+      P[side * 4] = nx;
+      P[side * 4 + 1] = ny;
+      P[side * 4 + 2] = nz;
+      P[side * 4 + 3] = sh;
+      den += this.hArea[hI] * sh * sh;
+    }
+    if (den <= 1e-9 * this.sections.wetArea[i]) {
+      this.addStripForce(i, F * lx, F * ly, F * lz);
+      return;
+    }
+    const C = this.hCentroid;
+    for (let side = 0; side < 2; side++) {
+      const hI = 2 * i + side;
+      const sh = P[side * 4 + 3];
+      if (sh === 0) continue;
+      const f = (F * this.hArea[hI] * sh) / den;
+      this.addForceAt(hI, f * P[side * 4], f * P[side * 4 + 1], f * P[side * 4 + 2], C[hI * 3] - this.cgx, C[hI * 3 + 1] - this.cgy, C[hI * 3 + 2] - this.cgz);
+    }
   }
 
   /** a force of magnitude f along half-section hI's normal, at its wet centroid, into totals and samples */
@@ -1353,7 +2070,7 @@ export class HullWater {
    * implicit impulse over h (never reverses the point). Applied to the GS velocities and accumulated
    * into the half-section force and the totals as impulse/h.
    */
-  private gsDrag(hI: number, dx: number, dy: number, dz: number, coef: number, h: number): void {
+  private gsDrag(hI: number, dx: number, dy: number, dz: number, coef: number, h: number, lateral = false): void {
     const V = this.pointVelAlong(hI, dx, dy, dz);
     if (V === 0) return;
     const w = this.gsInvMass(hI, dx, dy, dz);
@@ -1365,6 +2082,16 @@ export class HullWater {
     const J = (-k * V) / (1 + k * w);
     this.gsApply(hI, dx, dy, dz, J);
     const C = this.hCentroid;
+    const i = hI >> 1;
+    if (lateral && this.lMa[i] > 0) {
+      // the separated crossflow's pressure acts on the bottom panels too (see addLateralStripForce): its
+      // component along the strip's lateral axis goes through the panels, the (heel) remainder at the half centroid
+      const L = this.lDir;
+      const fl = (J / h) * (dx * L[i * 3] + dy * L[i * 3 + 1] + dz * L[i * 3 + 2]);
+      this.addLateralStripForce(i, fl);
+      this.addForceAt(hI, (J * dx) / h - fl * L[i * 3], (J * dy) / h - fl * L[i * 3 + 1], (J * dz) / h - fl * L[i * 3 + 2], C[hI * 3] - this.cgx, C[hI * 3 + 1] - this.cgy, C[hI * 3 + 2] - this.cgz);
+      return;
+    }
     this.addForceAt(hI, (J * dx) / h, (J * dy) / h, (J * dz) / h, C[hI * 3] - this.cgx, C[hI * 3 + 1] - this.cgy, C[hI * 3 + 2] - this.cgz);
   }
 
@@ -1373,6 +2100,23 @@ export class HullWater {
     if (this.garmeK === 0) return 1;
     const xT = this.uForward ? bodyZ - this.mesh.transomZ : this.mesh.stemZ - bodyZ;
     return xT <= 0 ? 0 : Math.tanh(this.garmeK * xT);
+  }
+
+  /**
+   * Non-running-surface faces (transom, stem cap, deck lid) take hydrostatics without Garme's SECTIONAL
+   * reduction. RESTING-DRIFT ROOT CAUSE (T179): the transom face sits at x_T = 0 exactly, where tanh(k·x_T) is 0
+   * for any k > 0 — i.e. at any surge ≠ 0, however small — and 1 at exactly zero speed; with the rounding of
+   * x_T (±4e-16) and the sign of a 1e-7 m/s surge deciding which end is "trailing", the transom's hydrostatic
+   * push switched on and off: a one-way brake that turned bobbing into a 0.45 m walk in 30 s (and hid the
+   * missing Kirchhoff load, see evaluate). Now the TRAILING face is wet at rest and dries with its draft
+   * Froude number (TRANSOM_WET_FN → TRANSOM_DRY_FN): at planing speed it carries no pressure (a ventilated
+   * transom, which is what the Garme reduction was standing in for), at rest full hydrostatics.
+   */
+  private faceFactor(bodyZ: number): number {
+    if (this.garmeK === 0) return 1;
+    const L = this.mesh.stemZ - this.mesh.transomZ;
+    const xT = this.uForward ? bodyZ - this.mesh.transomZ : this.mesh.stemZ - bodyZ;
+    return xT <= 1e-6 * L ? this.trailWet : 1;
   }
 
   private latX = 1;
@@ -1422,7 +2166,7 @@ export class HullWater {
 
     // hydrostatic (force at the centroid is exact; torque below uses the centre of pressure),
     // × Garme's near-transom reduction at this triangle's distance from the trailing edge
-    const ct = this.transomFactor(rx * this.bzX + ry * this.bzY + rz * this.bzZ);
+    const ct = strip >= 0 ? this.transomFactor(rx * this.bzX + ry * this.bzY + rz * this.bzZ) : this.faceFactor(rx * this.bzX + ry * this.bzY + rz * this.bzZ);
     const ps = -this.params.rho * this.params.gravity * depth * A * ct;
     const fx = ps * nnx;
     const fy = ps * nny;
@@ -1472,6 +2216,10 @@ export class HullWater {
     W.sigma[j] = 0.5 * Math.sqrt(A * Math.abs(nny));
 
     if (half >= 0) {
+      const dMax = da > db ? (da > dc ? da : dc) : db > dc ? db : dc;
+      const dMin = da < db ? (da < dc ? da : dc) : db < dc ? db : dc;
+      if (dMax > this.sDepMax[strip]) this.sDepMax[strip] = dMax;
+      if (dMin < this.sDepMin[strip]) this.sDepMin[strip] = dMin;
       this.sSx[half] -= nnx * A;
       this.sSy[half] -= nny * A;
       this.sSz[half] -= nnz * A;

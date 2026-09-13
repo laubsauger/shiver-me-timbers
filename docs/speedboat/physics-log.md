@@ -117,3 +117,107 @@ Check first: set surgeAddedMassRatio 0 and measure.
 - `it.fails` blocks must fail for the stated reason — flip to `it` temporarily and read the message.
 - Timing numbers vary ~2× with machine load from parallel agents; measure several times.
 - Other agents edit concurrently; full-suite failures outside these two test files were not ours.
+
+---
+
+# T179 (S1b) — lateral/yaw hydrodynamics, drives, resting drift, 6×6 (handoff)
+
+Tests: `tests/hullWaterManeuver.test.ts` (15, one `it.fails` = known limit), `tests/rigid6.test.ts` +3 coupled.
+Scratch harnesses (not in repo): `scratchpad/t179/{turn,drift3,deriv,straight,perf}.test.ts`, run with
+`scratchpad/t179/run.sh <name>` (vitest config pointing at the repo).
+
+## Resting drift — two root causes (both pinned)
+1. **Transom face × Garme.** `transomFactor` gave tanh(k·x_T) to EVERY wet triangle; the transom face sits at
+   x_T = 0 (rounded ±4e-16) and k = 2.5/(a·B·Fn_B) is finite for any surge ≠ 0, so the face's hydrostatic
+   push was 0 or 1 by the sign of a 1e-7 m/s surge: a one-way brake. At the settled rest pose, released: 12.7 cm
+   in 60 s. Fix `faceFactor`: non-running-surface faces take no sectional Garme reduction; the TRAILING face is
+   wet at rest and dries by transom-draft Froude number (ramp Fn_T 1.1 → 2.2; dry values 2.2 full scale,
+   2.4–2.5 model — Maki et al. 2006 / "On transom clearance" 2015 via search summaries, primaries not read;
+   the 1.1 start is ASSUMED). Now 0.8 mm / 60 s. Test "stays put < 1 cm in 60 s" (mutation: old face law ⇒ 14.8 cm).
+2. **Missing Kirchhoff −ω×(A·v).** Masked by (1). rigid6 divides by body-axis added mass; a rotating hull then
+   does not conserve body + water momentum. Released 20 cm high with (1) fixed: 0.31 m/s steady FORWARD walk
+   (17 m / 60 s). Adding the force −ω×p (p = A·v; point velocities in the 6×6) → 2.2 cm/s residual, which is
+   the entry-only slam/crossflow impulse along the trimmed normal (bounded by tanθ·√(2gΔy), tested with the
+   mutation kirchhoff:false breaking the bound). NOT the angular part −ω×p_ang − v×p_lin: v×p is the Munk moment
+   the lift flux already carries; adding −ω×p_ang capsized the C_v 8 roll kick (88°). Surge added mass (the log's
+   suspect) was NOT it: zeroing it changed 0.45 → 0.48 m. Mock in rigid6 test: with A(ω×v) − ω×(A·v) the world
+   momentum is conserved (<1%), without it not.
+
+## 6×6 coupled added mass — KEPT (default `coupledAddedMass`)
+A6 = Σ keep·J·Jᵀ, J = [N̂_b; r_b×N̂_b] per heave half + [L̂_b; r_b×L̂_b] per sway strip + roll plate + surge;
+keep = min(a_old, a_new) per section; rigid6 `addedMass6`/`coupled` → Cholesky solve, gyro on rigid I; GS
+impulses use (M+K6)⁻¹. Provider adds A6·[0; I⁻¹(ω×Iω)]. Re-tested: all 46 T165 tests pass (Savitsky, pitch
+settling 14/28/56 strips, roll decay, drop, flips); T165's instability was the missing rotating-frame term. Why
+kept: it is what makes the sway loads at the strip centroid consistent (sway–roll/sway–yaw lever arms): the
+diagonal step + centroid loads heeled her out (−5° C_v 5 half lock) and capsized at C_v 8 half lock (2 s helm
+ramp); coupled survives C_v 3–5 at 1/3 lock with inward heel. Horizontal speed left by a 0.1 m/s heave +
+0.02 rad/s pitch kick at rest: 4.9 mm/s coupled vs 15–24 mm/s diagonal + Kirchhoff.
+
+## Lateral model (sources)
+- **Sway added mass** m_lat = k_lat·ρ(π/2)·d², d = wetted depth of the strip (lowest wet vertex to the
+  waterline, so a wet chine/heel adds depth). Ellipse law with semi-axes swapped (heave m_a = ρ(π/2)c²);
+  Newman 1977 §4.13, Faltinsen 2005 ch. 9 (2D+t). Upright wedge: m_lat/m_a = tan²β·(2/π)² (tested).
+- **Loads** along L̂ = N̂×ẑ_b: rotating-frame m_lat·L·(ω×v), inelastic entry on growth, Kirchhoff (at the strip
+  centroid); **momentum flux** −|u|·Δ(m_lat·V_L) with the lift's upwind/Kutta scheme (not clamped) and the
+  existing lateral crossflow drag, both as **pressure normal to the bottom panels** (`addLateralStripForce`):
+  side force on a drifting planing hull comes from the leading spray-root pressure (Marleaux, Simonis &
+  Abdel-Maksoud 2024, 35th SNH, readable PDF; compares with Brown & Klosinski 1994). Measured alternatives:
+  flux at the centroid ⇒ heel OUT (−2…−5° C_v 3–5, −12…−17° C_v 8–10); all lateral loads via panels ⇒ 22–32°
+  inward at C_v 3 (waterjet trial ≈ 5°) and a growing roll–trim oscillation at C_v 5 half lock, unchanged at
+  N = 8 (model, not numerics). The kept split still shows that oscillation at C_v 5 half lock (table).
+- **Yaw damping**: emergent (point velocities in the lateral strips + gearcase foils). Linear derivatives at C_v 5
+  (scratch `deriv`): hull N_r −71, drive N_r −371 kN·m·s; hull N_v +1.7 (Munk, destabilising), drive +82;
+  sway–yaw stability C > 0 at C_v 3–10.
+- Morabito 2015 (oblique impact side force), Lewandowski 2004 book, Plante et al. 1998, Denny & Hubble 1991 primary:
+  paywalled/not read; Denny & Hubble and Lewandowski used through Aslan, NPS thesis 2015 (read).
+
+## Drives (sources)
+- JSON `lowerUnit` (added, ASSUMED geometry): AV plate at keel level, span 0.60 m, lateral area 0.22 m²
+  (A = 1.64), CE 0.29 m below the plate and 0.12 m aft of the pivot, stall 22°, C_D0 0.02, lock 30°.
+  Mercury: 5.44 in HD torpedo only published number. `HullProxy.drives` from `engines` + `lowerUnit`.
+- Lift slope Helmbold 2πA/(2+√(A²+4)) (→ Jones πA/2), geometric A of the immersed span (free surface = φ=0, no
+  end-plate doubling; Liu & Hekkenberg 2017 review: k_Λ→2 only on a solid plate). Stall 15–20° open-water
+  rudders (same review); post-stall flat-plate C_N ≈ 1.2 sin α.
+- **Ventilation**: C_L,i = [1−exp(−σ_v·Fr_h)]·Fr_h^−½ (Damley-Strnad et al. 2019 as quoted/tested in Aguiar
+  Ferreira et al., arXiv:2503.18015, 2025, read); beyond it lift blends over 4° to ¼ of the wetted slope (Tulin
+  supercavitating plate). Inception α at 45 m/s ≈ 4.6°. No hysteresis; AV plate not credited.
+- Immersion: span = clamp(span + AV-plate depth, 0, span) → area and A shrink together; out of water ⇒ 0.
+- Thrust TEMPORARY: T = throttle·η·P/max(U_a, 12 m/s)·s^1.5 per engine at the yawed prop point, P 335.7 kW,
+  η 0.55. Tests raise `standInDrivePowerW` to 4 MW to hold C_v 8–10 on the non-stepped proxy.
+
+## Turning (30°/s helm, throttle frozen, 30 s, last 8 s mean; heel + = INTO the turn)
+| C_v | 1/3 lock (10°): D/L, U/U_a, heel, max drift | 1/2 lock | full lock |
+|---|---|---|---|
+| 3 | 12.3, 0.83, +14.9°, 7° | 5.6, 0.57, +18.7° | 2.1, 0.35, +18.6° (70° transient) |
+| 5 | 21.7, 0.90, +6.1°, 9° | 5.6, 0.58, 35±20° oscillating | capsize |
+| 8 | 30.9, 0.91, −1.5°, 10° | capsize (with a 2 s ramp: 17 L, +4.8°) | capsize |
+| 10 | 44.4, 0.93, −13.4°, 9° | capsize | capsize |
+Literature: full-scale planing craft 8–15 L semi-planing, up to 40 L planing (Sadati et al. 2022 abstract);
+Denny & Hubble trials 10–20 L; radius grows with speed (both via Aslan 2015). Lewandowski's regression
+(STD/L = 1.7 + 0.0222·F∇·(L/∇^⅓)^2.85·30/δ, rudder craft, F∇ < 4) gives 35 L at 10° / 13 L at 30° at C_v 3 —
+ours is 3–6× tighter (vectored thrust + three gearcases vs a rudder). "A few boat lengths" (task text) is not
+planing-craft data. Speed loss vs Denny & Hubble U_c/U_a = 1/√(1+K_c(L/R)²), K_c = F∇²·30/δ at C_v 3: within
+0.15 at 10°/15°/30° (tested; weak discriminator: k_lat 0 still passes, crossflow ×10 fails). Waterjet planing
+boat trials (Ocean Eng. 2017 abstract, 15° nozzle at 15 kn): heel ≈ 5°, yaw 10.5°/s — ours at C_v 1.6/15°:
+heel ≈ 10°, yaw 10.6°/s.
+Straight, helm centred, 60 s: heading wander ≤ 0.05° C_v 3–10 (driveFoil off: 0.63° ⇒ the gearcases are the
+directional stability). Chine walk: not emergent in calm straight running (roll range 0.000° over 60 s C_v 3–10);
+roll kick decays (T165 test, still passing with drives). Substep N 2→4: D/L and U change < 2% (C_v 5, 10°).
+
+## Open / deviations
+- **Acceptance NOT met**: no capsize/spin-out at 50%/100% steer for C_v ≥ 5 (and 50% at C_v 8–10 with a fast
+  helm). Physics, not a bug as far as measured: ~15 kN/deg per gearcase at 24 m/s. Needs the S2 speed-limited
+  lock (doc §3.2) or a steering-actuator hinge-moment limit. Pinned by `it.fails`.
+- Heel is OUT of the turn at C_v ≥ 8 with small helm (−1.5° C_v 8, −13° C_v 10): dry chines put the panel
+  pressure line below the CG. Missing candidates: spray reattachment on the side walls (Marleaux: raises roll
+  restoring), pressure centred at the spray root rather than the half centroid.
+- Released-hull residual 2.2 cm/s (entry-only slam along the trimmed normal; no radiation damping at rest).
+- Perf (µs per boat per tick, N=2, analytic sea, quiet machine): 7af5108 62 → diagonal+T179 81 → coupled 96.
+  Under parallel-agent load all three double. Cost: 6×6 factor per substep, (M+K6)⁻¹·J per GS impulse.
+- API (sim-worker): `HullWater.setControls(steer rad at the drives, throttle −0.3…1)`; `evaluate` now ADDS the
+  drive load (thrust + gearcase foils, `driveForce/driveTorque`) and a coupled `addedMass6` to `out`; `load`
+  stays the hull contact (V-W2). Drives act even at throttle 0 (foils). stepCore's `applyStandInDrive` would
+  now double the thrust if kept alongside setControls — replace it with `hw.setControls(steer·maxSteer, throttle)`.
+  New params: `lateralAddedMassCoeff`, `standInDrivePowerW`, `coupledAddedMass`, `kirchhoff`, `driveFoil`,
+  `gearcaseVentilation`. `Rigid6Load.addedMass6?/coupled?` (optional; createRigid6Load allocates them).
+  `HullWaterMesh.drives?`, `HullProxy.drives`, `driveUnits()`, JSON `lowerUnit` (added fields only).
