@@ -41,7 +41,8 @@ import { createNpcFleetDriver } from './speedboat/page/npcFleet';
 import { createSpeedboatFrame } from './speedboat/page/speedboatFrame';
 import { createRaceCameraRig } from './camera/raceCam';
 import { createRaceControls } from './speedboat/controls';
-import { createKnotsHud, createNoCrashes, createSilentAudio, installAudioUnlock } from './speedboat/page/stubs';
+import { createSpeedboatAudioSink } from './audio/boat/pageSink';
+import { createKnotsHud, createNoCrashes, installAudioUnlock } from './speedboat/page/stubs';
 import type { BoatAudioFrame, HudModel } from './speedboat/page/seams';
 
 /** rivals on the grid (design doc §2 slice: 7 NPCs) */
@@ -108,7 +109,7 @@ async function boot(): Promise<void> {
   const controls = createRaceControls({ player, camera, enabled: () => !camera.capturesInput() }); // §T.182
   const crash = createNoCrashes(); // §T.188
   const hud = createKnotsHud(); // §T.185
-  const audio = createSilentAudio(); // §T.183
+  const audio = createSpeedboatAudioSink({ camera: app.camera, npcs }); // §T.183
   installAudioUnlock(audio);
   const post = createPostPipeline(app.renderer, app.scene, app.camera, { sunDirection: () => sky.sunDirection });
   const usePost = createPostWarmGate({ enabled: () => postParams.enabled, warm: () => post.warmup() });

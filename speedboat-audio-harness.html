@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>speedboat audio harness</title>
+    <!-- §T.178 COI shim: crossOriginIsolated on GitHub Pages (no-op where headers already isolate) -->
+    <script src="./coi-register.js"></script>
+    <style>
+      body { margin: 0; padding: 16px; font: 13px/1.4 ui-monospace, Menlo, monospace; background: #14181c; color: #d8dee4; }
+      h1 { font-size: 15px; margin: 0 0 12px; }
+      fieldset { border: 1px solid #334; margin: 0 0 10px; padding: 8px 12px; }
+      label { display: grid; grid-template-columns: 150px 1fr 60px; gap: 8px; align-items: center; margin: 3px 0; }
+      input[type=range] { width: 100%; }
+      button { font: inherit; margin: 4px 6px 4px 0; padding: 4px 10px; }
+      pre { background: #0b0e11; padding: 8px; white-space: pre-wrap; }
+      .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    </style>
+  </head>
+  <body>
+    <h1>speedboat engine + hull audio harness (§T.183)</h1>
+    <button id="start">Start audio</button>
+    <pre id="readout">loading…</pre>
+    <fieldset>
+      <legend>player</legend>
+      <div class="row">voice <select id="voice"></select> governor
+        <select id="governor"><option>off</option><option>air</option><option>full</option></select></div>
+      <label>throttle <input id="throttle" type="range" min="-0.3" max="1" step="0.01" value="0" /><output for="throttle"></output></label>
+      <label>drive advance m/s <input id="advance" type="range" min="0" max="50" step="0.5" value="0" /><output for="advance"></output></label>
+      <label>prop immersion <input id="immersion" type="range" min="0" max="1" step="0.01" value="1" /><output for="immersion"></output></label>
+      <label>wetted fraction <input id="wet" type="range" min="0" max="1" step="0.01" value="1" /><output for="wet"></output></label>
+      <div class="row"><input id="airborne" type="checkbox" /> airborne (hold)</div>
+      <div class="row"><input id="useRpm" type="checkbox" /> override rpm (sim-published rpm path)</div>
+      <label>rpm override <input id="rpm" type="range" min="0" max="8000" step="10" value="650" /><output for="rpm"></output></label>
+    </fieldset>
+    <fieldset>
+      <legend>events</legend>
+      <label>slam strength <input id="slamStrength" type="range" min="0" max="1" step="0.01" value="0.5" /><output for="slamStrength"></output></label>
+      <label>jump air time s <input id="airTime" type="range" min="0.3" max="3" step="0.1" value="1.2" /><output for="airTime"></output></label>
+      <label>landing v_y m/s <input id="landingVy" type="range" min="0" max="12" step="0.5" value="6" /><output for="landingVy"></output></label>
+      <div class="row"><button id="slam">hull slam</button><button id="jump">jump + land</button><button id="wake">wake crossing</button></div>
+    </fieldset>
+    <fieldset>
+      <legend>NPCs</legend>
+      <div class="row"><input id="flyby" type="checkbox" /> flyby doppler demo, voice <select id="npcVoice"></select></div>
+      <label>flyby speed m/s <input id="flybySpeed" type="range" min="5" max="60" step="1" value="40" /><output for="flybySpeed"></output></label>
+      <label>flyby offset m <input id="flybyOffset" type="range" min="3" max="200" step="1" value="15" /><output for="flybyOffset"></output></label>
+      <label>extra circling rivals <input id="extraNpcs" type="range" min="0" max="9" step="1" value="0" /><output for="extraNpcs"></output></label>
+    </fieldset>
+    <script type="module" src="/src/audio/boat/harness.ts"></script>
+  </body>
+</html>
