@@ -48,6 +48,15 @@ export interface SprayPoolOptions {
   life?: () => number;
   /** per-pool drag override — heavier drag drops sheets out of the air fast */
   drag?: () => number;
+  /**
+   * §T.59 per-pool camera-distance fade. The shared `fadeNear`/`fadeFar` are
+   * tuned for crest mist spawned around the camera; a ship-attached emitter
+   * lives one follow-cam distance away and needs its own. A function so the
+   * emitter can decide per tick (bowSpray: contact mode only). Uniform values
+   * only — the sprite WGSL is the same with or without it.
+   */
+  fadeNear?: () => number;
+  fadeFar?: () => number;
 }
 
 export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}) {
@@ -221,10 +230,10 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
       uSoftness.value = Math.max(1, fin(sprayParams.softness, 1));
       uStreak.value = Math.max(1, fin(sprayParams.streak, 1));
       uStreakRef.value = Math.max(1e-3, fin(sprayParams.streakRefSpeed, 1));
-      uFadeNear.value = Math.max(0, fin(sprayParams.fadeNear, 40));
+      uFadeNear.value = Math.max(0, fin(options.fadeNear?.() ?? sprayParams.fadeNear, 40));
       uFadeFar.value = Math.max(
         uFadeNear.value + 1,
-        fin(sprayParams.fadeFar, 90),
+        fin(options.fadeFar?.() ?? sprayParams.fadeFar, 90),
       );
       if (!initialized) {
         run(renderer, initPass);

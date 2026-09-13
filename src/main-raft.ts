@@ -272,7 +272,7 @@ async function boot(): Promise<void> {
 
   bootProgress('shader compile');
   await withFullCoverage(app.scene, () =>
-    postParams.enabled ? post.warmup() : app.renderer.compileAsync(app.scene, app.camera),
+    Promise.all([postParams.enabled ? post.warmup() : app.renderer.compileAsync(app.scene, app.camera), sea.flowFoam.warmAsync(app.renderer)]),
   );
   bootProgress('first frame');
   sea.ocean.update(app.renderer, state.time);

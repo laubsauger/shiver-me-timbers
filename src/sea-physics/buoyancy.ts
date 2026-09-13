@@ -13,6 +13,8 @@ import { GRAVITY } from '../ocean/oceanMath';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../params/seaPhysics';
 import type { OceanHeightField } from './cpuOcean';
 import { buoyancyScale, floodListTorque, floodMassFactor } from './flooding';
+// engine-free (zero three imports) — the wake's sample contract and its density
+import { WAKE_RHO, type HydroSample } from '../wake/wakeSolverMath';
 
 /**
  * The design-waterline plan the stations are laid on — per CLASS (§T.73),
@@ -246,11 +248,48 @@ function clampSlope(s: number): number {
  * 2 m draft. A hull that bobs at twice the right frequency reads as light,
  * whatever it weighs.
  */
-function immersedDepth(d: number, p: SeaPhysicsParams): number {
+export function immersedDepth(d: number, p: SeaPhysicsParams): number {
   const e = d + p.hullDraft;
   if (e <= 0) return 0;
   const cap = p.hullDraft + p.hullFreeboard;
   return e > cap ? cap : e;
+}
+
+/** grow/shrink a caller's wake-sample buffer to `count` reusable objects (allocates only on growth) */
+export function sizeStationSamples(out: HydroSample[], count: number): HydroSample[] {
+  while (out.length < count) out.push({ x: 0, z: 0, fy: 0, footprint: 0, depth: 0 });
+  out.length = count;
+  return out;
+}
+
+/**
+ * §V101 / §T W2b — THE ONE DEFINITION of a buoyancy station's wake sample
+ * (docs/wake/w2a-source-model.md §3), written from the immersion the station
+ * loop has already solved:
+ *
+ *   fy        = buoyancySpring · immersion · weight · support   (the HYDROSTATIC share —
+ *               the relative-velocity damper is not wake-making pressure; W2a calibrated this)
+ *   footprint = √(weight · A_wp)/2 · probeLayoutScale,  A_wp = buoyancySpring/(ρg)
+ *   depth     = immersion · smithDepthScale — the keel depth that force acts at (§V68)
+ *
+ * `stepShipBuoyancy` calls it inside its own loop; `wake/stationSources.ts`
+ * calls it for the engine-free calibration tows. Nothing else re-derives it.
+ */
+export function writeStationSample(
+  s: HydroSample,
+  weight: number,
+  x: number,
+  z: number,
+  immersion: number,
+  support: number,
+  p: SeaPhysicsParams,
+): void {
+  const scale = p.probeLayoutScale;
+  s.x = x;
+  s.z = z;
+  s.fy = p.buoyancySpring * immersion * weight * support;
+  s.footprint = 0.5 * Math.sqrt(weight * (p.buoyancySpring / (WAKE_RHO * GRAVITY)) * scale * scale);
+  s.depth = immersion * Math.max(0, p.smithDepthScale);
 }
 
 /**
@@ -401,6 +440,12 @@ export function stepShipBuoyancy(
   p: SeaPhysicsParams = seaPhysicsParams,
   /** world-frame hole offsets for flood listing (§V.14); empty = intact */
   floodHoles: readonly Vec3[] = [],
+  /**
+   * §T W2b: when given, receives one wake sample per station (`writeStationSample`),
+   * from THIS tick's immersion — resized in place, no allocation after the
+   * first tick. Omitted (the pirate path) = not a single extra operation.
+   */
+  wakeOut?: HydroSample[],
 ): number {
   const pos = ship.position;
   const vel = ship.velocity;
@@ -417,6 +462,7 @@ export function stepShipBuoyancy(
 
   const stationSet = probeStations(p.probeSlices, p);
   const stations = stationSet.stations;
+  if (wakeOut) sizeStationSamples(wakeOut, stations.length);
   let mem = seaMemory.get(ship);
   if (mem === undefined || mem.prevHeights.length !== stations.length) {
     // resizing on a live `probeSlices` tweak costs one tick of surface-
@@ -578,6 +624,8 @@ export function stepShipBuoyancy(
     // the slice's own immersed depth, not the plane's: she is still floating
     // while the waterline plane is clear of the water (§B.27)
     const immersion = immersedDepth(depth, p);
+    // every station, dry ones as fy = 0 — the sample index IS the station index
+    if (wakeOut) writeStationSample(wakeOut[i], st.weight, px, pz, immersion, support, p);
     if (immersion <= 0) continue;
     submerged += st.weight;
     // entrained water builds as the section penetrates — see `addedWet`

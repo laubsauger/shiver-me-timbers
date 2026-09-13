@@ -6,6 +6,7 @@
  * change the other (same mirror contract as foamMath.ts / fluxMath.ts).
  */
 import { hash2Cpu } from '../terrain/noiseCpu';
+import { GRAVITY } from '../ocean/oceanMath';
 import type { SprayParams } from '../params/spray';
 import {
   NEVER_INJECT_BIAS,
@@ -460,6 +461,135 @@ export function bowEmission(
     // a slam throws a full sheet on its own — it does not have to also be fast
     sheet: Math.min(1, cruiseSheet + (1 - cruiseSheet) * Math.max(burst, slam)),
     slam,
+  };
+}
+
+/**
+ * ── BERNOULLI LIFT (§T.171 W5) — the one expression bow spray AND sim foam share ──
+ *
+ * Water meeting a face at relative normal speed v has stagnation head
+ * v²/2g: it can climb that high, and no higher. So of a column of water `d`
+ * deep that the face shoves, only the top min(d, v²/2g) can reach the surface
+ * and leave it as a pile-up, sheet or whitewater. The fraction is
+ *
+ *   lift(v, d) = min(1, v² / (2g·d))
+ *
+ * It is what makes a drifting hull throw nothing (0.5 m/s against a 0.3 m
+ * draft lifts 4%) and a galleon at 7 m/s against 2.4 m throw everything,
+ * with no speed ramp and no per-vessel `speedScale`. `d` is floored at 1 cm
+ * (§V28); a non-finite input lifts nothing.
+ */
+export const LIFT_DEPTH_FLOOR = 0.01;
+export function liftFraction(speed: number, depth: number): number {
+  if (!Number.isFinite(speed) || !Number.isFinite(depth)) return 0;
+  return Math.min(1, (speed * speed) / (2 * GRAVITY * Math.max(depth, LIFT_DEPTH_FLOOR)));
+}
+
+/**
+ * The hull↔water contact the bow emitter reads (§V101: the SAME
+ * `createHullContact` result the wetline, deck water and audio read) —
+ * structural, field names and units match src/sea-physics/hullContact.
+ * Stations come in (port, starboard) pairs per z slice, slice 0 at the bow.
+ */
+export interface BowContactInput {
+  inContact: boolean;
+  /** ship-space z per slice, bow → stern */
+  readonly sliceZ: ArrayLike<number>;
+  /** hull half-breadth per slice (m) */
+  readonly sliceHalfWidth: ArrayLike<number>;
+  /** per station: surface height above the design-waterline point (m), pairs per slice */
+  readonly depth: ArrayLike<number>;
+  /** the hull's design draft below that waterline plane (m) — immersion = draft + depth */
+  draft: number;
+}
+
+export interface BowContactEmission {
+  /** particles per second */
+  rate: number;
+  /** 0..1 size/rise multiplier (the `bowEmission` meaning) */
+  sheet: number;
+  /** 0..1 how much of a full slam this tick is */
+  slam: number;
+  /** lifted volume flux Σ v_n·min(d, v_n²/2g)·Δl over the faces pushing water (m³/s) */
+  flux: number;
+}
+
+/**
+ * CONTACT-DRIVEN BOW EMISSION (§T.171 W5). Replaces `bowEmission`'s galleon
+ * speed ramp and the raft's `speedScale` with the flux the hull actually
+ * shoves up out of the sea.
+ *
+ * The waterline outline is walked as segments between adjacent slices, per
+ * side, plus the transverse stem face when slice 0 has breadth (a bluff
+ * bow). For each segment with outward plan normal n̂, length Δl and
+ * immersion d = max(0, draft + mean station depth):
+ *
+ *   v_n  = u·n̂                    relative normal velocity (hull into water)
+ *   q    = v_n · min(d, v_n²/2g) · Δl     for v_n > 0  (d · liftFraction)
+ *
+ * Σ over an entrance gives U × projected half-beam × lifted head, whatever
+ * the waterline shape, so a fine and a bluff bow of equal beam shove the same
+ * water; the fine one lifts less of it because its v_n is smaller on the
+ * shoulders. The aft run (v_n < 0) throws nothing.
+ *
+ *   rate  = bowLiftRate · Σq  +  bowSlamRate · slam
+ *   sheet = cruiseSheet + (1 − cruiseSheet)·max(lift̄, slam),  lift̄ = Σ q·lift / Σ q
+ *
+ * The SLAM stays `bowEmission`'s: keyed on the cutwater burial rate alone, on
+ * the audio's thresholds, so the sheet and the boom cannot part company.
+ *
+ * `uLocalX/uLocalZ` = hull velocity relative to the water in SHIP space
+ * (+x starboard, +z forward). §V28: any non-finite input → nothing thrown.
+ */
+export function bowContactEmission(
+  c: BowContactInput,
+  uLocalX: number,
+  uLocalZ: number,
+  burialRate: number,
+  cutwaterDepth: number,
+  p: Pick<SprayParams, 'bowLiftRate' | 'bowCruiseSheet' | 'bowSlamRateOn' | 'bowSlamRateFull' | 'bowSlamRate' | 'bowContactDepth'>,
+): BowContactEmission {
+  const cruiseSheet = Math.min(1, Math.max(0, p.bowCruiseSheet));
+  const none: BowContactEmission = { rate: 0, sheet: cruiseSheet, slam: 0, flux: 0 };
+  if (!c.inContact) return none;
+  if (![uLocalX, uLocalZ, burialRate, cutwaterDepth, c.draft].every(Number.isFinite)) return none;
+  const nSlice = Math.min(c.sliceZ.length, c.sliceHalfWidth.length, Math.floor(c.depth.length / 2));
+  const draft = Math.max(0, c.draft);
+  let flux = 0;
+  let liftFlux = 0;
+  const face = (nx: number, nz: number, len: number, depthA: number, depthB: number): boolean => {
+    if (!Number.isFinite(depthA) || !Number.isFinite(depthB)) return false;
+    const vn = uLocalX * nx + uLocalZ * nz;
+    const d = Math.max(0, draft + (depthA + depthB) / 2);
+    if (!(vn > 0) || !(d > 0) || !(len > 0)) return true;
+    const lift = liftFraction(vn, d);
+    const q = vn * d * lift * len;
+    flux += q;
+    liftFlux += q * lift;
+    return true;
+  };
+  // the stem face across a bluff bow (normal +z), both slice-0 stations
+  const hw0 = Math.max(0, c.sliceHalfWidth[0] ?? 0);
+  if (nSlice > 0 && hw0 > 0 && !face(0, 1, 2 * hw0, c.depth[0], c.depth[1])) return none;
+  for (let s = 0; s + 1 < nSlice; s++) {
+    const ha = Math.max(0, c.sliceHalfWidth[s]);
+    const hb = Math.max(0, c.sliceHalfWidth[s + 1]);
+    const dz = c.sliceZ[s] - c.sliceZ[s + 1]; // > 0: slices run bow → stern
+    const len = Math.hypot(hb - ha, dz);
+    if (!(len > 1e-9)) continue;
+    for (const side of [-1, 1] as const) {
+      const k = side < 0 ? 0 : 1;
+      // outward normal of the outline (side·h(z), z) walked aft: (side·Δz, h_aft − h_fore)/len
+      if (!face((side * dz) / len, (hb - ha) / len, len, c.depth[2 * s + k], c.depth[2 * (s + 1) + k])) return none;
+    }
+  }
+  const slam = ramp01(burialRate, p.bowSlamRateOn, p.bowSlamRateFull) * ramp01(cutwaterDepth, 0, p.bowContactDepth);
+  const lift = flux > 0 ? liftFlux / flux : 0;
+  return {
+    rate: Math.max(0, p.bowLiftRate * flux + p.bowSlamRate * slam),
+    sheet: Math.min(1, cruiseSheet + (1 - cruiseSheet) * Math.max(lift, slam)),
+    slam,
+    flux,
   };
 }
 

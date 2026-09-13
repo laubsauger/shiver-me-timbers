@@ -71,29 +71,66 @@
  * against docs/flows.png is pending main-thread integration + screenshot.
  */
 import type * as THREE from 'three/webgpu';
-import { float, fwidth, mix, smoothstep, texture, uniform, vec2 } from 'three/tsl';
+import { float, fwidth, mix, smoothstep, texture, uniform, vec2, vec4 } from 'three/tsl';
 import { flowFoamParams, type FlowFoamParams } from '../params/flowfoam';
 import { regionEdgeFadeCpu } from './flowMath';
 import { createFlowNoiseUniforms } from './flowNoise';
-import { createAccumulation, FOAM_INJECTION_LAYER } from './accumulation';
+import { createAccumulation, FOAM_INJECTION_LAYER, nearProfile, type AccumProfile } from './accumulation';
 import { intersectionMaskNode } from './intersectionMask';
+import { createSimFoamField } from './simFoam';
+import { createSimWakeField, type WakeFieldFn } from './simInjection';
 import { bandKeepNode } from './slickInjection';
 import { createWakeInjector } from './wakeInjection';
+import { WAKE_SHIP_TIER } from '../wake/wakeCalibration';
+import { WakeSim, type WakeSimTier } from '../wake/wakeSim';
 
 export { FOAM_INJECTION_LAYER };
 export { intersectionMaskNode, worldIntersectionMaskNode } from './intersectionMask';
+
+/**
+ * Where the wake's SURFACE (vertex elevation + fragment slope) comes from
+ * (§T W2b, docs/wake/w2b-integration.md). A per-PAGE construction choice, not
+ * a live param: TSL bakes the advect graph at construction.
+ *   'analytic'  the Kelvin stationary-phase field (wakeInjection/slickInjection)
+ *               — the default, and the pirate page. Bit-identical to before W2b.
+ *   'sim'       the eWave solver (src/wake) resampled into the SAME channels by
+ *               the near advect pass (simInjection.ts). VISUAL-ONLY until §T.170
+ *               (§V8 amendment): `wakeHeightCpu` reads 0. Foam + slick doses
+ *               come from the sim too (simFoam.ts, §T.171 W5); the analytic
+ *               injector is not evaluated on this backend.
+ */
+export type WakeBackend = 'analytic' | 'sim';
+
+/** the sim backend's stand-in for the analytic injector: no doses, no surface (§T.171) */
+const noAnalyticWake: WakeFieldFn = () => ({ rate: vec4(0, 0, 0, 0), elev: float(0) });
 
 export interface FlowFoamOptions {
   params?: FlowFoamParams;
   /** water surface height (world y) for the injection waterline band */
   waterHeight?: number;
+  /** default 'analytic' — see `WakeBackend` */
+  wakeBackend?: WakeBackend;
+  /** the sim's grid when `wakeBackend` is 'sim' (default WAKE_SHIP_TIER, 160 m) */
+  wakeTier?: WakeSimTier;
 }
 
 export function createFlowFoam(opts: FlowFoamOptions = {}) {
   const p = opts.params ?? flowFoamParams;
   const flowU = createFlowNoiseUniforms(p);
   const wake = createWakeInjector(p);
-  const acc = createAccumulation(p, flowU, wake.wakeFieldNode);
+  const wakeBackend: WakeBackend = opts.wakeBackend ?? 'analytic';
+  const wakeSim = wakeBackend === 'sim' ? new WakeSim(opts.wakeTier ?? WAKE_SHIP_TIER) : null;
+  /**
+   * §T.171 W5: on the sim backend the foam and slick doses come from the sim
+   * too (simFoam.ts), so the analytic injector is not evaluated at all there —
+   * its surface was already replaced (W2b) and its doses are now. Both tiers
+   * read the zero field for `.ba`/elevation-free doses and `simFoam` for `.rg`.
+   */
+  const simField = wakeSim ? createSimWakeField(noAnalyticWake, wakeSim) : null;
+  const simFoam = wakeSim && simField ? createSimFoamField(wakeSim, p, simField.uSimCenter) : null;
+  const acc = simField
+    ? createAccumulation(p, flowU, simField.field, { ...nearProfile(p), blurSlope: false, simFoam: simFoam!.rateNode })
+    : createAccumulation(p, flowU, wake.wakeFieldNode);
   acc.uniforms.uWaterHeight.value = opts.waterHeight ?? 0;
   // Coarse FAR tier: the same analytic wake, accumulated over a region several
   // hundred metres across so the trail does not simply stop at the near
@@ -110,7 +147,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
   // exactly what the flow advection supplies. The stated cost (3 fbm per texel)
   // is 65k evaluations at 256² — a fifth of the near tier's, on a frame that is
   // CPU-bound with GPU at 6-10 ms against a 19-24 ms CPU encode.
-  const far = createAccumulation(p, flowU, wake.wakeFieldNode, {
+  const farProfile: AccumProfile = {
     res: p.farResolution,
     size: () => p.farRegionSize,
     decayHalfLife: () => p.farDecayHalfLife,
@@ -118,7 +155,11 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
     useCapture: false,
     useDetail: false, // 1.8 m/texel — transverse crests are below Nyquist there
     wakeScale: () => p.farInject,
-  });
+  };
+  // §T.171: the far tier carries the SIM trail on the sim backend — same rates, its own decay
+  const far = simFoam
+    ? createAccumulation(p, flowU, noAnalyticWake, { ...farProfile, simFoam: simFoam.rateNode })
+    : createAccumulation(p, flowU, wake.wakeFieldNode, farProfile);
   const uEdgeFade = uniform(p.edgeFade);
   const uFarStrength = uniform(p.farStrength);
   const uFarBlendStart = uniform(p.farBlendStart);
@@ -253,9 +294,31 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
      * available, true speed-through-water (including current) would be a
      * strictly better feed than |velocity|.
      */
-    setShip: wake.setShip,
+    setShip: simFoam
+      ? (pos: [number, number], yaw: number, speed: number, bowOffset: number, sternOffset: number, beam: number): void => {
+          wake.setShip(pos, yaw, speed, bowOffset, sternOffset, beam);
+          simFoam.setHull(yaw, speed); // §T.171: the hull velocity the sim churn is advected by
+        }
+      : wake.setShip,
     /** §T.161 — this vessel's speed scale for the wake's own ramp (1 = galleon) */
     setSpeedScale: wake.setSpeedScale,
+
+    /** which field draws the wake's surface — fixed at construction */
+    wakeBackend,
+    /**
+     * The GPU wake driver when `wakeBackend` is 'sim', else null. The page's
+     * FIXED TICK feeds it (`wakeSim.tick(pose, samples, bowAhead, dt)`); `update`
+     * dispatches its one compute group (§V104) before the advect pass reads it.
+     */
+    wakeSim,
+    /**
+     * BOOT WARM-UP of the sim wake's pipelines (splat + the one compute group)
+     * for the page's boot shader-compile list (core/bootCompile.ts), so the first tick-bearing frame
+     * does not compile them. Resolves immediately on the analytic backend.
+     */
+    warmAsync(renderer: THREE.WebGPURenderer): Promise<unknown> {
+      return wakeSim ? wakeSim.solver.compileAsync(renderer) : Promise.resolve();
+    },
 
     /** debug/tests: the live world-space cutwater history (index 0 = newest) */
     get wakeTrack() {
@@ -288,6 +351,10 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
      * exactly why it must be mirrored rather than argued away (§V.62).
      */
     wakeHeightCpu(x: number, z: number, smithDepth = 0): number {
+      // §V8 AMENDMENT (§T.168–§T.170): the SIM wake is visual-only — hulls do not
+      // feel it, and the analytic elevation is no longer drawn, so floating on
+      // it would be a sea that does not exist. The CPU band (§T.170) returns here.
+      if (wakeSim) return 0;
       const e = wake.elevationCpu(x, z, smithDepth);
       if (e === 0) return 0;
       const c = acc.uniforms.uCenter.value;
@@ -373,6 +440,13 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       uFarFeature.value = (p.farRegionSize / p.farResolution) * p.waveBandLow;
       // the track was aged in the SIM TICK (`advanceWake`); what is left here is
       // the GPU work, which is per-FRAME by definition
+      if (wakeSim && simField) {
+        // ONE group, advanced by banked SIM time (wakeSim.ts), then the advect
+        // pass resamples it about the centre that group scrolled to
+        wakeSim.step(renderer); // @band-limited-elsewhere: a solver method named step, not a shader edge
+        simField.uSimCenter.value.set(wakeSim.solver.centerX, wakeSim.solver.centerZ);
+        simFoam?.update();
+      }
       acc.step(renderer, dt);
       far.step(renderer, dt);
     },
@@ -507,6 +581,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
     dispose(): void {
       acc.dispose();
       far.dispose();
+      wakeSim?.dispose();
     },
   };
 }

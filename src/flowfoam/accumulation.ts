@@ -113,6 +113,34 @@ export interface AccumProfile {
    * into a saturated slab with no structure — which is exactly what it did.
    */
   wakeScale: () => number;
+  /**
+   * Blur the .ba slope with the foam (default true — the analytic path). §T W2b
+   * sets it false for the SIM surface (wake-research.md §5.3): the 3×3 kernel is
+   * harmless on the analytic field's ≥ 5.8 m crests but smears the sim's
+   * 1–2.5 m ones, and a bilinear upsample of a 0.5 m grid is already smooth.
+   */
+  blurSlope?: boolean;
+  /**
+   * §T.171 W5 — the FOAM (.r) and SLICK (.g) injection rates from the SIM wake
+   * (`simFoam.createSimFoamField().rateNode`: vec2 per second at a world-XZ
+   * node). When present it REPLACES `wakeFieldNode`'s `.rg` doses in this tier;
+   * `.ba` and the elevation still come from `wakeFieldNode`. Absent (the
+   * analytic backend) the pass is the pre-W5 graph, byte for byte.
+   */
+  simFoam?: (worldXZ: any) => any;
+}
+
+/** the near tier's profile — `createAccumulation`'s default, exported so a variant can spread it */
+export function nearProfile(p: FlowFoamParams): AccumProfile {
+  return {
+    res: p.resolution,
+    size: () => p.regionSize,
+    decayHalfLife: () => p.decayHalfLife,
+    useFlow: true,
+    useCapture: true,
+    useDetail: true,
+    wakeScale: () => 1,
+  };
 }
 
 export function createAccumulation(
@@ -126,15 +154,7 @@ export function createAccumulation(
    * accumulated).
    */
   wakeFieldNode?: (worldXZ: any, detail: boolean, texel: any) => any,
-  profile: AccumProfile = {
-    res: p.resolution,
-    size: () => p.regionSize,
-    decayHalfLife: () => p.decayHalfLife,
-    useFlow: true,
-    useCapture: true,
-    useDetail: true,
-    wakeScale: () => 1,
-  },
+  profile: AccumProfile = nearProfile(p),
 ) {
   const res = profile.res;
 
@@ -322,7 +342,10 @@ export function createAccumulation(
         ? wakeFieldNode(vec2(wx, wz), profile.useDetail, uSize.div(res))
         : { rate: vec4(0, 0, 0, 0), elev: float(0) };
       const wake = field.rate;
-      const rate = wake.mul(uDt).mul(uWakeScale);
+      // §T.171: on the sim backend the doses are the sim's (simFoam.ts), not the analytic envelope's
+      const rate = profile.simFoam
+        ? vec4(profile.simFoam(vec2(wx, wz)), 0, 0).mul(uDt).mul(uWakeScale)
+        : wake.mul(uDt).mul(uWakeScale);
       const foam = prev.x.mul(uDecay).add(inject.mul(uInjectPerFrame)).add(rate.x).min(1);
       // the slick is a coverage that BUILDS and then relaxes — same accumulate/
       // decay shape as the foam, an order of magnitude slower (a real slick
@@ -380,7 +403,10 @@ export function createAccumulation(
       textureStore(
         texA,
         ivec2(x, y),
-        vec4(v.x.min(1), v.y.min(1), v.z.clamp(-1, 1), v.w.clamp(-1, 1)),
+        profile.blurSlope === false
+          ? // §T W2b sim surface: .ba passes through unblurred (clamped ±1 in advect)
+            vec4(v.x.min(1), v.y.min(1), center.z, center.w)
+          : vec4(v.x.min(1), v.y.min(1), v.z.clamp(-1, 1), v.w.clamp(-1, 1)),
       ).toWriteOnly();
     });
   })().compute(res * res);

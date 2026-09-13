@@ -31,7 +31,7 @@ Numbers marked *tuning* are playtest starting points.
 ## 2. Core loop
 - Tune in (title = race channel, static resolves to race control during load) → hull & paint → circuit & conditions → rolling start → race (3 laps) → results → race again (reversed grid) / replay (P5) / menu. Crash → crash cam → reset on line → race.
 - Later: Race Weekend (practice ghost, one-lap qualifier, race); the Season (3 circuits, points 20-15-12-10-8-6-4-3, champion holds the routes); P6 courier runs (point-to-point with cargo).
-- **Slice:** Tower Reach (2.2 nm, 9 gates + 3 turn marks) on the race kit; V-39 salvage class (39 ft, 24°, 4.6 t, 2 × ethanol V8, 80 kn / Surge 90); 8 community paints + number + helmet; 7 NPCs, Club + National; Calm/Breeze/Working sea/Squall; 06:30/12:00/17:30; cameras chase, near chase, cockpit, look-back, crash; chase + cockpit HUDs, start, crash overlay, results, hull select, pause; race-control radio. Load to green ≤ 45 s cold, race again ≤ 5 s.
+- **Slice:** Tower Reach (2.2 nm, 9 gates + 3 turn marks) on the race kit; V-39 salvage class (12 m / 39 ft, 24°, ~5.8 t pending hull rebeam, 3 × ethanol V8 outboards on a setback bracket, 80 kn / Surge 90); 8 community paints + number + eyewear; 7 NPCs, Club + National; Calm/Breeze/Working sea/Squall; 06:30/12:00/17:30; cameras chase, near chase, cockpit, look-back, crash; chase + cockpit HUDs, start, crash overlay, results, hull select, pause; race-control radio. Load to green ≤ 45 s cold, race again ≤ 5 s.
 
 ## 3. Moment to moment
 - **Controls:** throttle W/RT; off/reverse S/LT; steer A D / LS↔; trim ↑ bow down ↓ bow up / RS↕ (invert); Surge Shift/A; look back C / RS click (cockpit: hoop mirror); camera V/Y (chase → near → cockpit); reset hold R / View 1 s; pause Esc/Menu.
@@ -70,17 +70,17 @@ Numbers marked *tuning* are playtest starting points.
 - P5: tower cam (broadcast view, replay default), pole cam, photo mode via `.is-photo` + `src/cine`. Replays need a deterministic wake sim.
 
 ## 7. Audio and radio
-- Player: twin rebuilt ethanol V8s (dry crackle, lumpy cam, open stacks, burble underwater at idle, bark on the plane, airborne over-rev + ventilation howl, Governor limiter bounce and fuel-cut re-fire).
+- Player: triple rebuilt ethanol V8 outboards (dry crackle, lumpy cam, three slightly detuned voices beating against each other, burble underwater at idle, bark on the plane, airborne over-rev + ventilation howl, Governor limiter bounce and fuel-cut re-fire).
 - Fleet voices: V8 (most), turbine (Shine), triple two-stroke (Flat Jack), inverter whine (Spark). Doppler via DelayNode (tech).
 - Hull/water: landing boom 60–120 Hz, chop chatter, wake double-knock, sandbar breaker roar. Salvage: rattles, buzzing tape, hoop hum (loudest in cockpit). World: guy wires singing, tower start siren, a few horns.
 - **Race control radio (core):** one voice on ch 16, band-limited, squelch tails, static growing with distance from the tower, same DSP family as the raft radio. Calls: grid, lamps and green, missed gates, crashes, lead changes, last lap, finish. Subtitled in the HUD radio strip. At the finish, island stations cut in to call the result (the only crowd). P5: rival pilots on an open channel.
 - No commentary and no in-race music. Menus/results music (rec): Raft's instruments played fast (taiko/frame drums, distorted koto, motorik synth bass, shakuhachi breath).
 
 ## 8. Art direction
-- "Same light, faster things in it." Ghibli colour and Firewatch planes from Raft, with salvaged machines at 80 kn. Closest reference: Porco Rosso. No grime.
+- "Same light, faster things in it." Ghibli colour and Firewatch planes from Raft, with salvaged machines at 80 kn. Closest reference: Porco Rosso. Heavy salvage wear, but not dirty: patched, chipped, salt-crusted, still cared for *(changed 2026-09-13, user chose heavy wear)*.
 - **Palette:** shared with Raft: deep water #2F6E70, lagoon #6FB2B0, granite #A9A39A, Kon-Tiki red #B2472A. Own: signal orange #FF6B1F, hi-vis yellow #E8B420, LED amber #F2B54A, reflective tape #DCE2E3, old gelcoat #E9E5DA, stencil black #151B1C.
-- **Community paint:** painted by a community, not a sponsor (reference: Ghanaian fishing canoes, Indonesian perahu). One band or pattern + one sigil, stencilled number on a painted square, optional reflective tape, mismatched salvaged panels kept as they are, one dominant hue per boat (HUD/plotter colour), faded not dirty. Systems: band + sigil / marker diagonals / patchwork.
-- **Hull and pilot:** pre-flood 39 ft deep-V, welded roll hoop + brace, low salvaged windscreen, velocity stacks, hoop mirror. Solo pilot with an open-face helmet in community colours, face never shown, strapped in through every crash.
+- **Community paint:** painted by a community, not a sponsor (reference: Ghanaian fishing canoes, Indonesian perahu). One band or pattern + one sigil, number hand-painted straight onto the hull, weathered, no disc (user pick 2026-09-13), optional reflective tape, mismatched salvaged panels kept as they are, one dominant hue per boat (HUD/plotter colour), faded not dirty. Systems: band + sigil / marker diagonals / patchwork.
+- **Hull and pilot:** pre-flood 39 ft deep-V, welded roll hoop + brace, low salvaged windscreen, open cockpit with roll arch + radio antenna, single centreline seat, triple outboards on a setback bracket, hoop mirror. Solo pilot, bare-headed (no helmet; strap goggles — user pick 2026-09-13 — headset), face visible at chase distance, strapped in through every crash. *(Changed 2026-09-13, user: no helmet; see Q6/Q9 and `concept/STYLE-SPEC.md` §8.)*
 - **Furniture:** channel-marker gate pairs; drowned transmission pylons as turn marks (hazard paint at the waterline, checker band); radio tower start/finish (shack, lamps, checker banner, guy anchors).
 - **VFX:** rooster tail, bow sheets (reuse T161), breaker line on sandbars, mist veil, ethanol pop (pale blue flame on lift-off), floating debris (hatch, jerrycan, cushions, taped panel), spray on glass (cockpit only).
 - **Grade moods:** race dusk 17:30 (Raft's dusk band, warmer), noon (clean cyan), squall steel (only the markers and tower lamps stay saturated).
@@ -103,8 +103,8 @@ Numbers marked *tuning* are playtest starting points.
 3. Landmark → **radio tower at start/finish; roofs as the Main Street chicane; dam for a later circuit.**
 4. Engines and fuel → **mixed fleet: ethanol V8s, one turbine, one electric.**
 5. Where relative to Raft 2100 → **different stretch of the same flood (drowned foothill line), nothing shared.**
-6. Crash taste with a visible solo pilot → **strapped in through every crash, face never shown, cockpit crashes cut outside.**
+6. Crash taste with a visible solo pilot → **strapped in and visible through every crash, cockpit crashes cut to the outside cam, nothing gory.** *(Changed 2026-09-13, user decision: no helmet, face shown; was "face never shown".)*
 7. Governor reframe → **yes, "Governor", physical OFF · AIR · FULL dial, and it explains why Surge is earned.**
 8. Menu/results music style → **Raft's instruments played fast (taiko, distorted koto, motorik bass, shakuhachi breath).**
-9. Player identity → **anonymous pilot; paint, number and helmet; called by number on the radio.**
+9. Player identity → **pilot with a visible face; paint, number and eyewear (helmet only as an optional later cosmetic); called by number on the radio.** *(Changed 2026-09-13, user decision: no helmet.)*
 10. Crossing sandbars → **crossable, biggest jump on the lap, never grounds.**

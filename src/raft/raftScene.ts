@@ -33,6 +33,8 @@ import { createDeckFieldTexture } from '../ship/deckFieldTexture';
 import { createPieceMaterialCache } from '../core/bootShared';
 import { buildRaftBlueprint } from '../ship/raftBlueprint';
 import { buildRaftDeckField } from '../ship/raftDeckField';
+import { WAKE_RAFT_TIER } from '../wake/wakeCalibration';
+import type { WakeBackend } from '../flowfoam';
 import { createDeckWater, setActiveDeckWater } from '../deckwater';
 import { createRopes } from '../ropes';
 import { applyRiggingPlan, buildBlockDescriptors } from '../ropes/shipRigging';
@@ -44,14 +46,31 @@ import { ropeParams } from '../params/ropes';
 import { raftMaterialParams } from '../params/raftMaterials';
 import { blueprintAabb } from '../ship/previewRaft';
 
+/**
+ * §T W2b: the raft sails on the SIM wake. `raft.html?wake=analytic` builds the
+ * pre-W2b analytic surface instead (and its §V.8 mirror coupling) — the A/B
+ * leg for docs/wake/w2b-integration.md's frame-time and look checks. A boot
+ * choice, not a live knob: TSL bakes the advect graph at construction.
+ */
+export function raftWakeBackend(search: string): WakeBackend {
+  return new URLSearchParams(search).get('wake') === 'analytic' ? 'analytic' : 'sim';
+}
+
 export function buildRaftSea(app: App, state: SimState, sky: SkyHandle, weather: WeatherSystem) {
   // §T.99 / §T.109: the raft sails the Sierra slices, not the pirate sites
   const sierra = generateSierraSites(state.seed);
   const sea = buildSea(app, state, sky, weather, {
     sites: sierra.sites,
     // §T.161: the wake ramp is the galleon's; this raft sails at a third her
-    // speed and never developed one on the shipped thresholds
+    // speed and never developed one on the shipped thresholds. Since §T W2b it
+    // scales the analytic FOAM and SLICK doses only (still analytic until W5,
+    // §T.171) — the wake's surface below is solved, not ramped
     wakeSpeedScale: raftWakeParams.speedScale,
+    // §T W2b / §T.169: the wake's SURFACE is the eWave solve of her own station
+    // pressures (`raftFrame.tickSea` feeds it), on her 0.5 m tier; visual-only
+    // until §T.170, so the mirror below carries no wake (§V8 amendment)
+    wakeBackend: raftWakeBackend(typeof location === 'undefined' ? '' : location.search),
+    wakeTier: WAKE_RAFT_TIER,
     // §T.173/§V.68: the mirror's Smith depth is HER draft (0.3 m), the same
     // params object `raftFrame.tickSea` steps her buoyancy with — the galleon's
     // 2.0 m low-passed every wave she feels as if she drew seven times as much

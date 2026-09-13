@@ -10,7 +10,7 @@
  * (clouds, reflection) runs in `renderVessel` AFTER the follow cam has
  * written the lens for this frame.
  */
-import { raftWakeParams } from '../params/raftSailing';
+import type { BowContactInput } from '../foam/sprayMath';
 import { Color, Quaternion, Vector2, Vector3, type PerspectiveCamera } from 'three/webgpu';
 import type { App } from '../core/app';
 import type { SkyHandle } from '../sky';
@@ -21,6 +21,8 @@ import { oceanParams } from '../ocean';
 import { skyParams } from '../params/sky';
 import { raftSeaParams } from '../params/seaPhysics';
 import { stepShipBuoyancy } from '../sea-physics/buoyancy';
+import { stationFrame } from '../wake/wakeCalibration';
+import type { HydroSample } from '../wake/wakeSolverMath';
 import { raftContactPoints } from '../sailing/raftBeaching';
 import { updateShipRig } from '../ship/rigTrim';
 import { palmWindStrength } from '../vegetation';
@@ -68,8 +70,17 @@ export function createRaftFrame(d: RaftFrameDeps) {
   // the raft is not reshaped mid-sail, and the set is ~60 points a tick
   const contacts = raftContactPoints();
   let lastOceanTime = Number.NaN;
+  // §T W2b: the raft's wake sources, written by her buoyancy step (54 reused station objects)
+  const wakeSamples: HydroSample[] = [];
   let bowImmersion = 0;
   let drop = 1;
+  // §T.171 W5 / §V101: the bow sheet reads the SAME contact result as the wetline and audio
+  const hull = vessel.hullContact;
+  const bowContact: BowContactInput = {
+    get inContact() { return hull.inContact; },
+    sliceZ: hull.sliceZ, sliceHalfWidth: hull.sliceHalfWidth, depth: hull.depth,
+    get draft() { return raftSeaParams.hullDraft; },
+  };
 
   // the hoisted per-frame audio input, built and filled the same way main.ts
   // does — one implementation, in core/bootShared (§V95)
@@ -108,8 +119,16 @@ export function createRaftFrame(d: RaftFrameDeps) {
       );
       sea.flowFoam.advanceWake(dt);
       // the raft's own displacement (§T.109): 15 t on a 0.3 m draft, not the galleon's 604 t on 2 m
-      stepShipBuoyancy(raft, sea.cpuOcean, dt, raftSeaParams);
+      // §V101: the SAME station loop that floats her writes her wake samples —
+      // only while a sim wake exists to read them
+      const wakeSim = sea.flowFoam.wakeSim;
+      stepShipBuoyancy(raft, sea.cpuOcean, dt, raftSeaParams, undefined, wakeSim ? wakeSamples : undefined);
       vessel.hullContact.update(raft, sea.cpuOcean, state.time);
+      // §T W2b WAKE SOURCES — fed in the FIXED tick with the samples buoyancy
+      // just emitted, the domain anchored on her SIM pose (§V105). Visual-only
+      // (§V8 amendment): nothing above reads it. flowFoam.update dispatches
+      // the one group (§V104).
+      if (wakeSim) wakeSim.tick(raft, wakeSamples, stationFrame(raftSeaParams).stem, dt);
       // §T.100 in place of keel grounding: the log undersides meet the sand, she
       // slows, and below beachHoldSpeed she is HELD until the crew push off
       const b = stepRaftBeach(raft, d.beach, contacts, sea.archipelago.seabed, dt);
@@ -156,8 +175,9 @@ export function createRaftFrame(d: RaftFrameDeps) {
         sea.bowSpray.update(app.renderer, {
           bowWorldPos: bowWorld, shipVelocity: shipVel, shipForward: shipFwd,
           immersionDepth: bowImmersion, cutwater: vessel.hullContact.cutwater,
-          // §T.161: the ramp is the galleon's; this raft is a third her speed
-          speedScale: raftWakeParams.speedScale,
+          // §T.171 W5: emission from her own contact (lifted flux), not the
+          // galleon's speed ramp — `raftWakeParams.speedScale` is retired here
+          contact: bowContact,
         });
       }
       sea.archipelago.update(

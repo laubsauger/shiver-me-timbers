@@ -24,7 +24,8 @@ import type { WeatherSystem } from '../weather';
 import { createOceanSim, oceanParams } from '../ocean';
 import { OceanSurface } from '../ocean/oceanSurface';
 import { createFoamSim, createSpray, createBowSpray } from '../foam';
-import { createFlowFoam } from '../flowfoam';
+import { createFlowFoam, type WakeBackend } from '../flowfoam';
+import type { WakeSimTier } from '../wake/wakeSim';
 import { createClouds } from '../clouds';
 import { createCaustics, setActiveCaustics } from '../caustics';
 import { createArchipelago, type IslandSite } from '../island';
@@ -45,6 +46,15 @@ export interface SeaOptions {
    * the SAME object the vessel's buoyancy steps with (§T.173)
    */
   seaParams: SeaPhysicsParams;
+  /**
+   * §T W2b: where the wake's SURFACE comes from (flowfoam `WakeBackend`). Default
+   * 'analytic'. 'sim' makes the page's fixed tick responsible for feeding
+   * `flowFoam.wakeSim` (see raft/raftFrame.ts `tickSea`), and the §V.8 mirror
+   * carries no wake at all while it is on (§V8 amendment: visual-only until §T.170).
+   */
+  wakeBackend?: WakeBackend;
+  /** the sim's grid when `wakeBackend` is 'sim' — the vessel's tier (wake/wakeCalibration.ts) */
+  wakeTier?: WakeSimTier;
 }
 
 export function buildSea(app: App, state: SimState, sky: SkyHandle, weather: WeatherSystem, opts: SeaOptions) {
@@ -55,7 +65,7 @@ export function buildSea(app: App, state: SimState, sky: SkyHandle, weather: Wea
     domain: c.domain,
   }));
   const foam = createFoamSim(bands, oceanParams.resolution, ocean);
-  const flowFoam = createFlowFoam();
+  const flowFoam = createFlowFoam({ wakeBackend: opts.wakeBackend, wakeTier: opts.wakeTier });
   flowFoam.setSpeedScale(opts.wakeSpeedScale);
   const clouds = createClouds({
     renderer: app.renderer,
@@ -103,7 +113,9 @@ export function buildSea(app: App, state: SimState, sky: SkyHandle, weather: Wea
   reflection?.excludeFromReflection(spray.mesh);
   reflection?.excludeFromReflection(bowSpray.mesh);
 
-  // §V.8: the mirror floats the hull on the SAME spectrum, seabed, fetch and wake
+  // §V.8: the mirror floats the hull on the SAME spectrum, seabed, fetch and wake.
+  // With the sim backend `flowFoam.wakeHeightCpu` reads 0 (§V8 amendment), so the
+  // pointer below carries no wake — one wiring for both backends.
   const cpuOcean = new CpuOcean(state.seed, oceanParams, opts.seaParams, ocean.spectrum);
   cpuOcean.setSeabed(archipelago.seabed, -archipelago.seabed.openHeight);
   caustics.setSeabedOpenDepth(-archipelago.seabed.openHeight);

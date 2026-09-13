@@ -409,6 +409,19 @@ export interface FlowFoamParams {
    * itself, and without it there is nothing to paint on. Rides the same lagged
    * `moundLag` speed, so it builds and subsides with the hull */
   moundSlope: number;
+
+  // --- §T.171 W5: FOAM + SLICK FROM THE SIM WAKE (wakeBackend 'sim' only) ----
+  // src/flowfoam/simFoam.ts owns the model; the thresholds (0.30 / 0.44 Stokes)
+  // and the Bernoulli lift are physics and live there as constants. These are
+  // the DOSE knobs — how much coverage a unit of breaking / churn lays down.
+  /** foam per second where the sim surface is at the Stokes limit (breaking = 1) */
+  simBreakRate: number;
+  /** foam dose per unit lifted churn: one hull passage lays ≈ this × lift × (1 + simSternChurn) */
+  simChurnRate: number;
+  /** transom (emerging) churn relative to bow (burying) churn — separated flow aft */
+  simSternChurn: number;
+  /** slick coverage injected per unit of foam injected: the lane is laid where the whitewater was made */
+  simSlickPerFoam: number;
 }
 
 export const flowFoamParams: FlowFoamParams = registerParams(
@@ -589,6 +602,13 @@ export const flowFoamParams: FlowFoamParams = registerParams(
     // 0.9 x half-beam = 3.8 m cores on the galleon — metres, as asked, and an
     // order of magnitude above the 0.234 m texel, so §V.48 never engages
     eddyRadius: 0.9,
+    // W5 doses — calibrated against the same dissolve gate the analytic trail
+    // was (0.005 + U[0, 0.22]); measured in tests/wakeFoamSim.test.ts and
+    // docs/wake/w5-foam.md §3. Browser judgement PENDING (§6 there).
+    simBreakRate: 1.2,
+    simChurnRate: 0.35,
+    simSternChurn: 1.0,
+    simSlickPerFoam: 1.0,
   },
   flowFoamParamsMeta(),
 );
@@ -691,5 +711,9 @@ function flowFoamParamsMeta(): Partial<Record<keyof FlowFoamParams, ParamMeta>> 
     moundSlope: { min: 0, max: 0.8, step: 0.005 },
     eddySlope: { min: 0, max: 0.5, step: 0.005 },
     eddyRadius: { min: 0.2, max: 4, step: 0.05 },
+    simBreakRate: { min: 0, max: 10, step: 0.05 },
+    simChurnRate: { min: 0, max: 4, step: 0.01 },
+    simSternChurn: { min: 0, max: 4, step: 0.05 },
+    simSlickPerFoam: { min: 0, max: 5, step: 0.05 },
   };
 }

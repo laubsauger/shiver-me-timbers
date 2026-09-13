@@ -61,7 +61,9 @@ import {
   T_BOW_UP,
   T_SIZE,
   advanceBurstCursor,
+  bowContactEmission,
   bowEmission,
+  type BowContactInput,
 } from './sprayMath';
 
 /**
@@ -114,14 +116,30 @@ export interface BowState {
    * and reads as having no bow wave at all.
    */
   speedScale?: number;
+  /**
+   * §T.171 W5 — THE HULL CONTACT ITSELF (§V101: `createHullContact`'s result
+   * plus the hull's design draft). When present, emission is
+   * `sprayMath.bowContactEmission` — the water the waterline faces LIFT, from
+   * relative normal velocity × immersion — and `speedScale` and the
+   * speed/immersion ramps are not read at all. Absent = the legacy ramp (the
+   * pirate page until W6), bit-identical.
+   */
+  contact?: BowContactInput;
 }
 
+/** an airborne cutwater: nothing in contact, whatever the stations say */
+const NO_CONTACT: BowContactInput = { inContact: false, sliceZ: [], sliceHalfWidth: [], depth: [], draft: 0 };
+
 export function createBowSpray() {
+  /** this tick's emission model — the §T.59 fade override is a contact-mode property */
+  let contactMode = false;
   // bow sheets are coarser than crest mist — same pool code, bigger sprites
   const pool = createSprayPool(sprayParams.bowCount, {
     sizeScale: () => sprayParams.bowSizeScale,
     life: () => sprayParams.bowLife,
     drag: () => sprayParams.bowDrag,
+    fadeNear: () => (contactMode ? sprayParams.bowContactFadeNear : sprayParams.fadeNear),
+    fadeFar: () => (contactMode ? sprayParams.bowContactFadeFar : sprayParams.fadeFar),
   });
   const count = pool.count; // sanitized — sizes the spawn dispatch too
 
@@ -209,6 +227,7 @@ export function createBowSpray() {
 
     /** run once per fixed sim tick (§V2); bow state from buoyancy probes */
     update(renderer: THREE.WebGPURenderer, bow: BowState): void {
+      contactMode = bow.contact !== undefined;
       uSpread.value = sprayParams.bowLaunchSpread;
       uForwardThrow.value = sprayParams.bowForwardThrow;
       uRise.value = sprayParams.bowRise;
@@ -299,14 +318,23 @@ export function createBowSpray() {
       // no contact signal yet → fall back to "immersed at all", the best
       // proxy a fixed geometric bow point can offer
       const inContact = cut ? cut.inContact : immersion > 0;
-      const { rate, sheet, slam } = bowEmission(
-        immersion,
-        speed,
-        burialRate,
-        inContact,
-        sprayParams,
-        bow.speedScale ?? 1,
-      );
+      let emission: { rate: number; sheet: number; slam: number };
+      if (bow.contact) {
+        // §T.171: hull velocity relative to the water in SHIP space — heading
+        // basis above (+z forward), starboard = (fz, −fx) for a y-up yaw
+        const f = uForward.value as THREE.Vector2;
+        emission = bowContactEmission(
+          inContact ? bow.contact : NO_CONTACT,
+          velX * f.y - velZ * f.x,
+          velX * f.x + velZ * f.y,
+          burialRate,
+          immersion,
+          sprayParams,
+        );
+      } else {
+        emission = bowEmission(immersion, speed, burialRate, inContact, sprayParams, bow.speedScale ?? 1);
+      }
+      const { rate, sheet, slam } = emission;
       if (rate <= 0) return;
       uSheet.value = sheet;
       // the LAUNCH takes the real closing speed, gated by the slam ramp so a

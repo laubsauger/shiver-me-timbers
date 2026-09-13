@@ -208,6 +208,23 @@ export interface SprayParams {
   bowSpeedThreshold: number;
   /** ship speed (m/s) at which the burst runs at full bowBurstRate */
   bowSpeedFull: number;
+  /**
+   * §T.171 W5 CONTACT-DRIVEN BOW: particles per second per m³/s of water the
+   * hull LIFTS (sprayMath.bowContactEmission: Σ v_n·min(d, v_n²/2g)·Δl). Used
+   * instead of the speed ramp above whenever the caller supplies hull contact
+   * (`BowState.contact`) — the raft today; the pirate page keeps the ramp
+   * until W6. The one look knob of that model: flux, lift and slam are physics.
+   */
+  bowLiftRate: number;
+  /**
+   * §T.59 — camera distance (m) where CONTACT-mode bow sheets start / finish
+   * fading. The shared `fadeNear`/`fadeFar` (25/55 m) are tuned for crest mist
+   * spawned AROUND THE CAMERA; a ship-attached sheet seen from a 25–37 m follow
+   * cam sat permanently inside that fade (measured distFade 0.64). A bow
+   * emitter is always about one follow distance away, so it fades past it.
+   */
+  bowContactFadeNear: number;
+  bowContactFadeFar: number;
 }
 
 export const sprayParams: SprayParams = registerParams(
@@ -276,6 +293,12 @@ export const sprayParams: SprayParams = registerParams(
     bowImmersionFull: 0.45,
     bowSpeedThreshold: 1.0,
     bowSpeedFull: 8.0,
+    // calibrated so the raft at 2 m/s on her marks lifts the same particle rate
+    // the §T.161 speedScale ramp gave her (tests/wakeFoamBow.test.ts)
+    bowLiftRate: 205,
+    // follow cam 25 m back / 17 m up = 30 m slant; 37 m worst measured — full strength there
+    bowContactFadeNear: 60,
+    bowContactFadeFar: 120,
   },
   sprayParamsMeta(),
 );
@@ -331,5 +354,8 @@ function sprayParamsMeta(): Partial<Record<keyof SprayParams, ParamMeta>> {
     bowImmersionFull: { min: 0.05, max: 4, step: 0.05 },
     bowSpeedThreshold: { min: 0, max: 10, step: 0.1 },
     bowSpeedFull: { min: 0.5, max: 20, step: 0.1 },
+    bowLiftRate: { min: 0, max: 2000, step: 5 },
+    bowContactFadeNear: { min: 5, max: 300, step: 5 },
+    bowContactFadeFar: { min: 10, max: 600, step: 5 },
   };
 }
