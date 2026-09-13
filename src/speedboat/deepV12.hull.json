@@ -1,0 +1,260 @@
+{
+  "name": "deepV12",
+  "description": "12 m offshore deep-V speedboat: the ONE set of defining numbers for the physics proxy (src/speedboat/hullMesh.ts) and the render hull (Blender). Physics builds its mesh from `spec`; `stations` is the generator's output at the proxy's own stations, pinned equal by tests/hullWater.test.ts.",
+  "units": "metres, kilograms, degrees",
+  "frame": "hull frame: x across the beam (symmetric, +x one side), y up from the keel baseline, z forward from the transom (z = 0 at the transom, z = loa at the stem)",
+  "scaling": {
+    "law": "mass, LCG, VCG and inertia DERIVED from `massItems` (deriveMassProperties); geometry set by concept sign-off: 12 m LOA, 24 deg deadrise, chine beam 2.30 m, deck height kept at 1.674 m",
+    "check": "overall beam with 8 deg flare over the top 0.71 m of topside = 2.50 m, inside the 2.44-2.51 m of real 12 m deep-Vs (Cigarette 38 Top Gun: 11.43 m, 2.44 m beam, 24 deg, 4.49 t dry with twin sterndrives)"
+  },
+  "spec": {
+    "length": 12,
+    "chineHalfBeam": 1.15,
+    "deadriseDeg": 24,
+    "freeboard": 1.162,
+    "mass": 5351,
+    "lcgFromTransom": 3.6357,
+    "vcgAboveKeel": 0.8452,
+    "taperStart": 0.6,
+    "keelRiseStart": 0.7,
+    "bowKeelRise": 0.982,
+    "segments": 28,
+    "segmentsPerStrip": 2,
+    "gyradiusPitchOverL": 0.259,
+    "gyradiusRollOverB": 0.3764,
+    "propBelowKeel": 0.35,
+    "propAftOfTransom": 1.06,
+    "propRadius": 0.2,
+    "gyradiusYawOverL": 0.2584,
+    "stemRake": 0.35,
+    "bowDeadriseDeg": 45,
+    "warpStart": 0.618
+  },
+  "derived": {
+    "loa": 12,
+    "beamAtChine": 2.3,
+    "beamOverall": 2.5,
+    "deckHeightAboveKeel": 1.674,
+    "transom": {
+      "width": 2.3,
+      "heightAboveKeel": 1.674,
+      "deadriseDeg": 24,
+      "rakeDeg": 0
+    },
+    "cg": {
+      "x": 0,
+      "yAboveKeel": 0.8452,
+      "zFromTransom": 3.6357
+    },
+    "propPoint": {
+      "x": 0,
+      "yAboveKeel": -0.35,
+      "zFromTransom": -1.06,
+      "note": "centreline EQUIVALENT of the three drives (physics thrust point); per-engine points in `engines`"
+    },
+    "sides": "vertical from chine to deck in the physics proxy (flare is render-only)",
+    "stem": "forefoot at z = 11.65 (keel length), deck-level stem at z = 12: rake 0.35 m, modelled in the proxy (STYLE-SPEC C4)",
+    "deadrise": "24 deg constant aft of z 7.2 m (60% LOA), warping (t^2) to 45 deg at the forefoot; per-station values in `stations[].deadriseDeg` (STYLE-SPEC C8). Sources: Sport Fishing Mag \"Perfect Boat Hull Designs\" (Regulator 24 deg transom to 48-49 deg forward); Ray Hunt Design deep-V Q&A (deadrise varies continuously). Savitsky uses the TRANSOM (constant, prismatic) deadrise: 24 deg"
+  },
+  "engines": [
+    {
+      "model": "Mercury Racing 450R V8 (4.6 L), 689 lb dry — ethanol variant assumed same mass",
+      "mountX": -0.66,
+      "mountZFromTransom": -0.762,
+      "mountNote": "30 in (0.762 m) setback bracket",
+      "propPoint": {
+        "x": -0.66,
+        "yAboveKeel": -0.35,
+        "zFromTransom": -1.06
+      },
+      "propNote": "propeller disc ~0.30 m aft of the mounting plane (gearcase) — ASSUMED"
+    },
+    {
+      "model": "Mercury Racing 450R V8 (4.6 L), 689 lb dry — ethanol variant assumed same mass",
+      "mountX": 0,
+      "mountZFromTransom": -0.762,
+      "mountNote": "30 in (0.762 m) setback bracket",
+      "propPoint": {
+        "x": 0,
+        "yAboveKeel": -0.35,
+        "zFromTransom": -1.06
+      },
+      "propNote": "propeller disc ~0.30 m aft of the mounting plane (gearcase) — ASSUMED"
+    },
+    {
+      "model": "Mercury Racing 450R V8 (4.6 L), 689 lb dry — ethanol variant assumed same mass",
+      "mountX": 0.66,
+      "mountZFromTransom": -0.762,
+      "mountNote": "30 in (0.762 m) setback bracket",
+      "propPoint": {
+        "x": 0.66,
+        "yAboveKeel": -0.35,
+        "zFromTransom": -1.06
+      },
+      "propNote": "propeller disc ~0.30 m aft of the mounting plane (gearcase) — ASSUMED"
+    }
+  ],
+  "massItems": [
+    {
+      "name": "hull shell, deck, stringers, cockpit liner (FRP) — ASSUMED",
+      "mass": 3450,
+      "x": 0,
+      "y": 0.8,
+      "z": 4.9,
+      "k": {
+        "pitch": 2.64,
+        "yaw": 2.64,
+        "roll": 0.9659999999999999
+      }
+    },
+    {
+      "name": "outboard port — Mercury Racing 450R V8, 689 lb dry",
+      "mass": 312,
+      "x": -0.66,
+      "y": 1.05,
+      "z": -0.9
+    },
+    {
+      "name": "outboard centre — Mercury Racing 450R V8, 689 lb dry",
+      "mass": 312,
+      "x": 0,
+      "y": 1.05,
+      "z": -0.9
+    },
+    {
+      "name": "outboard starboard — Mercury Racing 450R V8, 689 lb dry",
+      "mass": 312,
+      "x": 0.66,
+      "y": 1.05,
+      "z": -0.9
+    },
+    {
+      "name": "triple setback bracket (aluminium, flotation) — ASSUMED",
+      "mass": 110,
+      "x": 0,
+      "y": 0.55,
+      "z": -0.4
+    },
+    {
+      "name": "fuel, ~500 L E85 at 0.78 kg/L, ~60% load — ASSUMED",
+      "mass": 400,
+      "x": 0,
+      "y": 0.35,
+      "z": 4.6
+    },
+    {
+      "name": "batteries, rigging, steering, electrics — ASSUMED",
+      "mass": 260,
+      "x": 0,
+      "y": 0.6,
+      "z": 3
+    },
+    {
+      "name": "roll arch, forward edge of the cockpit (60% LOA from the bow) — ASSUMED mass",
+      "mass": 70,
+      "x": 0,
+      "y": 2.4,
+      "z": 4.8
+    },
+    {
+      "name": "centreline seat, 68% LOA from the bow — ASSUMED mass",
+      "mass": 35,
+      "x": 0,
+      "y": 1.9,
+      "z": 3.84
+    },
+    {
+      "name": "pilot, 68% LOA from the bow — ASSUMED mass",
+      "mass": 90,
+      "x": 0,
+      "y": 2.1,
+      "z": 3.84
+    }
+  ],
+  "renderOnly": {
+    "note": "Features below the physics proxy's resolution. The proxy does NOT model them; values are ASSUMED typical, not from a drawing.",
+    "strakes": [
+      {
+        "side": "both",
+        "atChineFraction": 0.25,
+        "flatWidth": 0.06,
+        "fromZ": 0,
+        "toZ": 9.4
+      },
+      {
+        "side": "both",
+        "atChineFraction": 0.5,
+        "flatWidth": 0.06,
+        "fromZ": 0,
+        "toZ": 9
+      },
+      {
+        "side": "both",
+        "atChineFraction": 0.75,
+        "flatWidth": 0.06,
+        "fromZ": 0,
+        "toZ": 8.4
+      }
+    ],
+    "strakesPhysics": "NOT in the physics proxy (5 cm flats are far below its 286-triangle resolution). Implication: real strakes stop the spray root at the first dry strake, so the Wagner splash-up width the proxy uses for the spray-root wetted area (friction) and for the 2D+t c may run wider than the real boat once c passes a strake; a strake-capped c is the proxy-side change if friction or lift reads high",
+    "chineFlat": {
+      "width": 0.08,
+      "downAngleDeg": 0
+    },
+    "topsideFlareDeg": 8,
+    "topsideFlareStartAboveChine": 0.45,
+    "cockpit": {
+      "type": "open",
+      "fromBowFraction": [
+        0.55,
+        0.8
+      ],
+      "zFromTransom": [
+        2.4,
+        5.4
+      ],
+      "reference": "Apache 42 (user decision)",
+      "rollArch": {
+        "zFromTransom": 4.8,
+        "heightAboveDeck": 0.9
+      },
+      "seats": [
+        {
+          "x": 0,
+          "zFromTransom": 3.84
+        }
+      ]
+    }
+  },
+  "stations": [
+    {"z":0,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":0},
+    {"z":0.416071,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":0.416071},
+    {"z":0.832143,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":0.832143},
+    {"z":1.248214,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":1.248214},
+    {"z":1.664286,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":1.664286},
+    {"z":2.080357,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":2.080357},
+    {"z":2.496429,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":2.496429},
+    {"z":2.9125,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":2.9125},
+    {"z":3.328571,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":3.328571},
+    {"z":3.744643,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":3.744643},
+    {"z":4.160714,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":4.160714},
+    {"z":4.576786,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":4.576786},
+    {"z":4.992857,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":4.992857},
+    {"z":5.408929,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":5.408929},
+    {"z":5.825,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":5.825},
+    {"z":6.241071,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":6.241071},
+    {"z":6.657143,"keelY":0,"chineHalfBeam":1.15,"chineY":0.512013,"deadriseDeg":24,"deckHalfBeam":1.15,"deckY":1.674013,"deckZ":6.657143},
+    {"z":7.073214,"keelY":0,"chineHalfBeam":1.149548,"chineY":0.511812,"deadriseDeg":24,"deckHalfBeam":1.149548,"deckY":1.674013,"deckZ":7.073214},
+    {"z":7.489286,"keelY":0,"chineHalfBeam":1.133752,"chineY":0.506889,"deadriseDeg":24.088919,"deckHalfBeam":1.133752,"deckY":1.674013,"deckZ":7.489286},
+    {"z":7.905357,"keelY":0,"chineHalfBeam":1.095691,"chineY":0.499982,"deadriseDeg":24.527993,"deckHalfBeam":1.095691,"deckY":1.674013,"deckZ":7.905357},
+    {"z":8.321429,"keelY":0.002227,"chineHalfBeam":1.036114,"chineY":0.492752,"deadriseDeg":25.334186,"deckHalfBeam":1.036114,"deckY":1.674013,"deckZ":8.321429},
+    {"z":8.7375,"keelY":0.027278,"chineHalfBeam":0.95619,"chineY":0.504173,"deadriseDeg":26.507497,"deckHalfBeam":0.95619,"deckY":1.674013,"deckZ":8.7375},
+    {"z":9.153571,"keelY":0.080163,"chineHalfBeam":0.857488,"chineY":0.537018,"deadriseDeg":28.047927,"deckHalfBeam":0.857488,"deckY":1.674013,"deckZ":9.153571},
+    {"z":9.569643,"keelY":0.160883,"chineHalfBeam":0.741948,"chineY":0.588479,"deadriseDeg":29.955476,"deckHalfBeam":0.741948,"deckY":1.674013,"deckZ":9.569643},
+    {"z":9.985714,"keelY":0.269438,"chineHalfBeam":0.611837,"chineY":0.655182,"deadriseDeg":32.230143,"deckHalfBeam":0.611837,"deckY":1.674013,"deckZ":9.985714},
+    {"z":10.401786,"keelY":0.405827,"chineHalfBeam":0.469711,"chineY":0.733159,"deadriseDeg":34.871929,"deckHalfBeam":0.469711,"deckY":1.674013,"deckZ":10.401786},
+    {"z":10.817857,"keelY":0.57005,"chineHalfBeam":0.318361,"chineY":0.817716,"deadriseDeg":37.880834,"deckHalfBeam":0.318361,"deckY":1.674013,"deckZ":10.817857},
+    {"z":11.233929,"keelY":0.762108,"chineHalfBeam":0.160759,"chineY":0.903124,"deadriseDeg":41.256858,"deckHalfBeam":0.160759,"deckY":1.674013,"deckZ":11.233929},
+    {"z":11.65,"keelY":0.982,"chineHalfBeam":0.046,"chineY":1.028,"deadriseDeg":45,"deckHalfBeam":0.046,"deckY":1.674013,"deckZ":12}
+  ]
+}
