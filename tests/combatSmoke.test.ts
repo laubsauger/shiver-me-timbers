@@ -20,11 +20,11 @@ import { createProfiles, fillProfiles } from '../src/combat/fxProfiles';
 import {
   sizeAt, stepVelocity, particleAspect, ASPECT_MAX, brightnessAt,
   splinterAspect, splinterTumble, SPLINTER_ASPECT_MAX,
-} from '../src/combat/fxMath';
+} from '../src/fx/fxMath';
 import { combatFxParams, combatParams } from '../src/params/combat';
 import { createCombatFx } from '../src/combat/combatFx';
 import type { CombatFrame } from '../src/combat/combatSystem';
-import type { FxProfile } from '../src/combat/fxMath';
+import type { FxProfile } from '../src/fx/fxMath';
 import { Object3D } from 'three';
 
 const DT = 1 / 60;

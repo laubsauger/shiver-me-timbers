@@ -31,6 +31,30 @@ function imports(src: string): string[] {
   return [...src.matchAll(/^\s*import\s[^;]*?from\s+['"]([^'"]+)['"]/gm)].map((m) => m[1]);
 }
 
+/** every module as source, and the relative-import resolver the depth walks share */
+const all = import.meta.glob('../src/**/*.ts', { query: '?raw', import: 'default', eager: true }) as Record<
+  string,
+  string
+>;
+const resolve = (fromKey: string, spec: string): string | null => {
+  if (!spec.startsWith('.')) return null; // three, vitest, bare deps
+  const base = fromKey.replace(/\/[^/]+$/, '');
+  const parts = `${base}/${spec}`.split('/');
+  const out: string[] = [];
+  for (const part of parts) {
+    if (part === '.' || part === '') continue;
+    if (part === '..') out.pop();
+    else out.push(part);
+  }
+  const path = out.join('/');
+  for (const cand of [`${path}.ts`, `${path}/index.ts`]) {
+    // the glob keys are '../src/…'; rebuild that prefix
+    const key = cand.startsWith('..') ? cand : `../${cand}`;
+    if (key in all) return key;
+  }
+  return null;
+};
+
 describe('§V81 the raft entry never reaches into the pirate boot', () => {
   const files: Record<string, string> = { 'src/main-raft.ts': mainRaft, ...raftDir };
 
@@ -65,28 +89,6 @@ describe('§V81 the raft entry never reaches into the pirate boot', () => {
    * one cannot hide behind an intermediary either.
    */
   it('§B71 nothing the raft entry reaches, at any depth, lives in combat or ai', () => {
-    const all = import.meta.glob('../src/**/*.ts', { query: '?raw', import: 'default', eager: true }) as Record<
-      string,
-      string
-    >;
-    const resolve = (fromKey: string, spec: string): string | null => {
-      if (!spec.startsWith('.')) return null; // three, vitest, bare deps
-      const base = fromKey.replace(/\/[^/]+$/, '');
-      const parts = `${base}/${spec}`.split('/');
-      const out: string[] = [];
-      for (const part of parts) {
-        if (part === '.' || part === '') continue;
-        if (part === '..') out.pop();
-        else out.push(part);
-      }
-      const path = out.join('/');
-      for (const cand of [`${path}.ts`, `${path}/index.ts`]) {
-        // the glob keys are '../src/…'; rebuild that prefix
-        const key = cand.startsWith('..') ? cand : `../${cand}`;
-        if (key in all) return key;
-      }
-      return null;
-    };
     const seen = new Set<string>(['../src/main-raft.ts']);
     const queue = ['../src/main-raft.ts'];
     while (queue.length > 0) {
@@ -155,9 +157,12 @@ describe('§V81 the raft entry never reaches into the pirate boot', () => {
   });
 
   it('owns the caustics/deck-water singletons itself rather than borrowing them (§I raft/app)', () => {
-    const all = Object.values(files).join('\n');
-    expect(all).toMatch(/setActiveCaustics\(/);
-    expect(all).toMatch(/setActiveDeckWater\(/);
+    const joined = Object.values(files).join('\n');
+    // §T.164: the caustics are bound inside the neutral `core/seaScene` builder,
+    // which the raft page calls itself — still this page's own singleton
+    expect(joined).toMatch(/buildSea\(/);
+    expect(all['../src/core/seaScene.ts']).toMatch(/setActiveCaustics\(/);
+    expect(joined).toMatch(/setActiveDeckWater\(/);
   });
   it('§V93: one vessel — the entry pushes exactly one ship and never an enemy/AI', () => {
     // createInitialState seeds an empty ships[]; the raft boot pushes the raft and nothing else.
@@ -167,6 +172,33 @@ describe('§V81 the raft entry never reaches into the pirate boot', () => {
       // identifiers, not prose: the header comment may SAY 'no enemy'
       expect(src).not.toMatch(/\b(buildBrigantineBlueprint|buildGalleonBlueprint|createCombatArena|createShipAi|enemyBlueprint)\b/);
       expect(imports(src).some((p) => /enemy|\/ai\b/.test(p))).toBe(false);
+    }
+  });
+
+  /**
+   * §T.163/§T.164: the neutral ground a THIRD entry (speedboat) will stand on.
+   * The sea builder, the heading helpers and the generic fx moved out of
+   * raft/, ai/ and combat/ precisely so another page can import them; if one
+   * of them reached back into main.ts, combat/ or ai/ at any depth, the move
+   * would have bought nothing.
+   */
+  it('§V95 neutral-ground modules reach no main.ts, combat or ai at any depth', () => {
+    const roots = ['../src/core/seaScene.ts', '../src/core/steering.ts', '../src/fx/debris.ts', '../src/fx/fxMath.ts'];
+    for (const root of roots) {
+      expect(root in all, `${root} is missing`).toBe(true);
+      const seen = new Set<string>([root]);
+      const queue = [root];
+      while (queue.length > 0) {
+        const key = queue.shift() as string;
+        for (const spec of imports(all[key] ?? '')) {
+          const next = resolve(key, spec);
+          if (next === null || seen.has(next)) continue;
+          seen.add(next);
+          queue.push(next);
+        }
+      }
+      const bad = [...seen].filter((k) => /\/(combat|ai)\/|\/main\.ts$/.test(k));
+      expect(bad, `${root} reaches ${bad.join(', ')}`).toEqual([]);
     }
   });
 

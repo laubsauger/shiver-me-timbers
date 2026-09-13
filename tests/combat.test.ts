@@ -31,7 +31,7 @@ import {
   sizeAt,
   stepVelocity,
   type FxProfile,
-} from '../src/combat/fxMath';
+} from '../src/fx/fxMath';
 import { combatParams, type CombatParams } from '../src/params/combat';
 
 const DEG = Math.PI / 180;

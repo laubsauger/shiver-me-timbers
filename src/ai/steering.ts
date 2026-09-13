@@ -10,33 +10,12 @@
  *  - wind.direction = bearing the wind blows TOWARD, so dead upwind
  *    (the "no-go" bearing) = direction + π.
  */
-import type { Quat, Vec3 } from '../state/simState';
-import { rotateVec } from '../core/quat';
 import type { AiParams } from '../params/ai';
+import { wrapAngle } from '../core/steering';
 
-/** Wrap an angle to (-π, π]. */
-export function wrapAngle(a: number): number {
-  const t = a % (2 * Math.PI);
-  if (t > Math.PI) return t - 2 * Math.PI;
-  if (t < -Math.PI) return t + 2 * Math.PI;
-  return t;
-}
-
-/** Yaw of a ship quaternion: heading of the world-space bow direction. */
-export function yawOf(q: Quat): number {
-  const f = rotateVec(q, [0, 0, 1]);
-  return Math.atan2(f[0], f[2]);
-}
-
-/** World bearing from `from` to the point (x, z), same convention as yaw. */
-export function bearingTo(from: Vec3, x: number, z: number): number {
-  return Math.atan2(x - from[0], z - from[2]);
-}
-
-/** Signed heading error, positive = target lies to starboard. */
-export function headingError(yaw: number, targetYaw: number): number {
-  return wrapAngle(targetYaw - yaw);
-}
+// §T.163: the mode-neutral heading helpers live in `core/steering` (§V95);
+// re-exported so every pirate caller keeps importing them from here
+export { wrapAngle, yawOf, bearingTo, headingError } from '../core/steering';
 
 /** Proportional rudder with deadband, clamped to [-1, 1]. */
 export function rudderFromError(error: number, p: AiParams): number {

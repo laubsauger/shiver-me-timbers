@@ -20,8 +20,9 @@
  * sat in `combat/`, which §V.81 keeps the raft out of; §T.113 moved the
  * module to neutral ground instead of keeping two of it.
  */
-import type { Quat, ShipState, Vec3 } from '../state/simState';
+import type { ShipState, Vec3 } from '../state/simState';
 import { quatFromAxisAngle, quatMul, rotateVec } from '../core/quat';
+import { yawOf } from '../core/steering';
 import type { Wind } from '../sailing/shipKinematics';
 import { raftCanvasSet, stepRaftSailing, type RaftControls, type RaftMotion, type RaftStep } from '../sailing/raftKinematics';
 import { RAFT_SAIL_KEYS } from '../ship/raftRigging';
@@ -39,12 +40,6 @@ function wrapPi(a: number): number {
 }
 function clamp(x: number, lo: number, hi: number): number {
   return x < lo ? lo : x > hi ? hi : x;
-}
-
-/** yaw about +y of a ship quaternion; yaw 0 = world +z, forward = [sin, 0, cos] */
-export function yawOf(q: Quat): number {
-  const f = rotateVec(q, [0, 0, 1]);
-  return Math.atan2(f[0], f[2]);
 }
 
 /** the planar slice of a ShipState, as a fresh RaftMotion */

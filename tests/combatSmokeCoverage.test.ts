@@ -20,7 +20,7 @@ import { describe, expect, it } from 'vitest';
 import { createCombatFx } from '../src/combat/combatFx';
 import {
   brightnessAt, discCoverage, stackOcclusion,
-} from '../src/combat/fxMath';
+} from '../src/fx/fxMath';
 import { combatFxParams, combatParams } from '../src/params/combat';
 import type { CombatFrame } from '../src/combat/combatSystem';
 import type { ShipState } from '../src/state/simState';

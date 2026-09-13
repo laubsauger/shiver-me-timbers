@@ -31,7 +31,7 @@ import type { ShipAssembly } from '../ship/shipAssembly';
 import type { SierraWorld } from '../island/sierraSites';
 import type { ShipState } from '../state/simState';
 import { radio } from './raftActions';
-import { yawOf } from './raftShip';
+import { yawOf } from '../core/steering';
 
 /**
  * Dusk to dawn, in the day clock's hours. Shortwave propagates further at

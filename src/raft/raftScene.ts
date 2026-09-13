@@ -24,20 +24,10 @@ import type { App } from '../core/app';
 import type { SimState } from '../state/simState';
 import type { SkyHandle } from '../sky';
 import type { WeatherSystem } from '../weather';
-import { createOceanSim, oceanParams } from '../ocean';
-import { OceanSurface } from '../ocean/oceanSurface';
-import { createFoamSim, createSpray, createBowSpray } from '../foam';
-import { createFlowFoam } from '../flowfoam';
-import { createClouds } from '../clouds';
-import { createCaustics, setActiveCaustics } from '../caustics';
-import { createArchipelago } from '../island';
+import { buildSea } from '../core/seaScene';
 import { generateSierraSites } from '../island/sierraSites';
-import { createFetchField } from '../ocean/fetchField';
-import { createPlanarReflection } from '../reflection';
-import { createRain } from '../rain';
-import { CpuOcean } from '../sea-physics/cpuOcean';
 import { createHullContact, waterlineFromBlueprint, waterlineFromBox } from '../sea-physics/hullContact';
-import { seaPhysicsParams } from '../params/seaPhysics';
+import { raftSeaParams } from '../params/seaPhysics';
 import { ShipAssembly } from '../ship/shipAssembly';
 import { createDeckFieldTexture } from '../ship/deckFieldTexture';
 import { createPieceMaterialCache } from '../core/bootShared';
@@ -55,77 +45,19 @@ import { raftMaterialParams } from '../params/raftMaterials';
 import { blueprintAabb } from '../ship/previewRaft';
 
 export function buildRaftSea(app: App, state: SimState, sky: SkyHandle, weather: WeatherSystem) {
-  const ocean = createOceanSim(state.seed);
-  const bands = ocean.cascades.map((c) => ({
-    displacement: c.displacement,
-    derivatives: c.derivatives,
-    domain: c.domain,
-  }));
-  const foam = createFoamSim(bands, oceanParams.resolution, ocean);
-  const flowFoam = createFlowFoam();
-  // §T.161: the wake ramp is the galleon's; this raft sails at a third her
-  // speed and never developed one on the shipped thresholds
-  flowFoam.setSpeedScale(raftWakeParams.speedScale);
-  const clouds = createClouds({
-    renderer: app.renderer,
-    camera: app.camera,
-    seed: state.seed,
-    stormAt: weather.stormAt,
-    stormCellsNear: weather.stormCellsNear,
-  });
-  clouds.attachTo(app.scene);
-  const caustics = createCaustics(ocean, { sunLight: sky.sunLight });
-  setActiveCaustics(caustics);
   // §T.99 / §T.109: the raft sails the Sierra slices, not the pirate sites
   const sierra = generateSierraSites(state.seed);
-  const archipelago = createArchipelago({ seed: state.seed, sites: sierra.sites });
-  app.scene.add(archipelago.group);
-  const fetchField = createFetchField(archipelago.seabed);
-  const reflection = createPlanarReflection({
-    sunLight: sky.sunLight,
-    planeY: 0,
-    clouds: {
-      blurred: clouds.blurredTexture,
-      seed: state.seed,
-      sunColorLive: clouds.sunColorLive,
-      skyColorLive: clouds.skyColorLive,
-      sunDirLive: clouds.sunDirLive,
-      shaftSlots: clouds.shaftSlotsLive,
-    },
+  const sea = buildSea(app, state, sky, weather, {
+    sites: sierra.sites,
+    // §T.161: the wake ramp is the galleon's; this raft sails at a third her
+    // speed and never developed one on the shipped thresholds
+    wakeSpeedScale: raftWakeParams.speedScale,
+    // §T.173/§V.68: the mirror's Smith depth is HER draft (0.3 m), the same
+    // params object `raftFrame.tickSea` steps her buoyancy with — the galleon's
+    // 2.0 m low-passed every wave she feels as if she drew seven times as much
+    seaParams: raftSeaParams,
   });
-  const surface = new OceanSurface(ocean, foam, flowFoam, {
-    sunLight: sky.sunLight,
-    seabed: archipelago.seabed,
-    fetch: fetchField,
-    reflection,
-    skyDomeColor: sky.skyDomeColor,
-    skySunTerm: sky.skySunTerm,
-  });
-  app.scene.add(surface.group);
-  surface.group.traverse((o) => {
-    if ((o as Mesh).isMesh) o.receiveShadow = true;
-  });
-  const spray = createSpray(bands, oceanParams.resolution);
-  const bowSpray = createBowSpray();
-  const rain = createRain();
-  app.scene.add(spray.mesh, bowSpray.mesh, rain.mesh);
-  reflection?.attachTo(app.scene);
-  reflection?.excludeFromReflection(clouds.compositeQuad);
-  reflection?.excludeFromReflection(spray.mesh);
-  reflection?.excludeFromReflection(bowSpray.mesh);
-
-  // §V.8: the mirror floats the hull on the SAME spectrum, seabed, fetch and wake
-  const cpuOcean = new CpuOcean(state.seed, oceanParams, seaPhysicsParams, ocean.spectrum);
-  cpuOcean.setSeabed(archipelago.seabed, -archipelago.seabed.openHeight);
-  caustics.setSeabedOpenDepth(-archipelago.seabed.openHeight);
-  caustics.setFetchField(fetchField);
-  cpuOcean.setFetch(fetchField);
-  cpuOcean.setWakeField(flowFoam);
-
-  return {
-    ocean, foam, flowFoam, clouds, caustics, archipelago, fetchField, reflection, sierra,
-    surface, spray, bowSpray, rain, cpuOcean,
-  };
+  return { ...sea, sierra };
 }
 export type RaftSea = ReturnType<typeof buildRaftSea>;
 

@@ -19,7 +19,7 @@
  */
 import * as THREE from 'three/webgpu';
 import type { CombatFxParams } from '../params/combat';
-import { sanitizeBoost, type FxKind, type FxProfile } from './fxMath';
+import { sanitizeBoost, type FxKind, type FxProfile } from '../fx/fxMath';
 
 /** §V.31: sRGB-authored tints enter through THREE.Color, never bare setRGB */
 const TINTS: Record<FxKind, THREE.Color> = {

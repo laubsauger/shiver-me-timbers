@@ -48,7 +48,7 @@ import {
   type ArenaCamera,
   type CombatArena,
 } from '../src/combat/combatArena';
-import { jitterScale } from '../src/combat/fxMath';
+import { jitterScale } from '../src/fx/fxMath';
 import { combatArenaParams, combatParams, combatFxParams } from '../src/params/combat';
 import { aiParams } from '../src/params/ai';
 import { elevationForRange, shotRange } from '../src/combat/ballistics';

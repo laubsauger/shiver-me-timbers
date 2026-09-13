@@ -55,7 +55,7 @@ import { combatFxParams, type CombatFxParams } from '../params/combat';
 import type { CombatFrame } from './combatSystem';
 import { createFlashLight, type FlashLight } from './flashLight';
 import { createImpactRings, type ImpactRings } from './impactRing';
-import { createDebris, type DebrisChunks } from './debris';
+import { createDebris, type DebrisChunks } from '../fx/debris';
 import { createProfiles, fillProfiles } from './fxProfiles';
 import { tornAlpha } from './smokeShape';
 import { createCameraShake, type CameraShake } from './cameraShake';
@@ -77,7 +77,7 @@ import {
   stepVelocity,
   type FxKind,
   type FxProfile,
-} from './fxMath';
+} from '../fx/fxMath';
 
 /** kinds that take the torn contour and the aspect stretch (§V.65) */
 const SMOKE_KINDS: ReadonlySet<FxKind> = new Set<FxKind>([

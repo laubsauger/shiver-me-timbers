@@ -88,6 +88,20 @@ export function createWakeInjector(p: FlowFoamParams) {
    * about when she is making way.
    */
   let speedScale = 1;
+  /**
+   * §T.173 — THE ONE PLACE THE SCALE MEETS THE RAMP. `p` seen through the
+   * vessel's speed scale: both ramp ends read scaled, every other field falls
+   * through to the live `p` (§V16). EVERY consumer of the ramp reads it here —
+   * the uniforms, the track, the slick injector's own uniform AND the CPU
+   * mirror's `slickFieldCpu`/`bowSlopeCpu` — so the drawn wake and the floated
+   * one cannot take the scale in two copies (§V77). The mirror used to be
+   * handed raw `p`: at 2 m/s the raft was DRAWN in a 0.62 m mound and FELT
+   * 0.16 m of it (§T.163 W0). `x · 1 === x`, so the galleon is bit-identical.
+   */
+  const ramp: FlowFoamParams = Object.create(p, {
+    speedThreshold: { get: () => p.speedThreshold * speedScale },
+    fullWakeSpeed: { get: () => p.fullWakeSpeed * speedScale },
+  });
   // (x, z, fx, fz) and (age, dist, speed, unused) per slot
   const posVecs = Array.from({ length: TRACK_SLOTS }, () => new THREE.Vector4(0, 0, 0, 1));
   const metaVecs = Array.from({ length: TRACK_SLOTS }, () => new THREE.Vector4());
@@ -131,8 +145,8 @@ export function createWakeInjector(p: FlowFoamParams) {
   const uVortexWidth = uniform(p.vortexWidth);
   const uVortexSpacing = uniform(p.vortexSpacing);
   const uVortexDecay = uniform(p.vortexDecay);
-  const uSpeedThreshold = uniform(p.speedThreshold);
-  const uFullWakeSpeed = uniform(p.fullWakeSpeed);
+  const uSpeedThreshold = uniform(ramp.speedThreshold);
+  const uFullWakeSpeed = uniform(ramp.fullWakeSpeed);
   const uTrackLife = uniform(p.trackLife);
   /** capacity-limited track length (m) — the OTHER eviction edge to fade over */
   const uTrackCapDist = uniform(0);
@@ -168,7 +182,7 @@ export function createWakeInjector(p: FlowFoamParams) {
   // the wake's effect on the WATER (glassy lane + transverse crests). It rides
   // this module's track projection instead of walking the polyline itself —
   // that walk is the only expensive part and the foam already pays for it.
-  const slick = createSlickInjector(p);
+  const slick = createSlickInjector(ramp);
 
   const track = createWakeTrack();
   const pose: TrackPose = { x: 0, z: 0, fx: 0, fz: 1, speed: 0 };
@@ -584,8 +598,8 @@ export function createWakeInjector(p: FlowFoamParams) {
       const texel = p.regionSize / Math.max(p.resolution, 1);
       const period = Math.max(p.vortexSpacing, EPS);
       const odo = track.odo - Math.floor(track.odo / period) * period;
-      const sk = slickFieldCpu(pts, wx, wz, hull, p, moundSpeed, texel, odo, smithDepth);
-      const bow = bowSlopeCpu(pts[0], wx, wz, moundSpeed, p, texel, smithDepth);
+      const sk = slickFieldCpu(pts, wx, wz, hull, ramp, moundSpeed, texel, odo, smithDepth);
+      const bow = bowSlopeCpu(pts[0], wx, wz, moundSpeed, ramp, texel, smithDepth);
       return sk.elev + bow.elev;
     },
 
@@ -616,7 +630,7 @@ export function createWakeInjector(p: FlowFoamParams) {
         capacity: TRACK_CAPACITY,
         spacing: Math.max(p.trackSpacing, EPS),
         life: Math.max(p.trackLife, EPS),
-        minSpeed: p.speedThreshold * speedScale,
+        minSpeed: ramp.speedThreshold,
         maxTurn: (Math.max(p.trackTurn, EPS) * Math.PI) / 180,
         coarsen: Math.max(p.trackCoarsen, EPS),
         coarsenStart: Math.max(p.trackCoarsenStart, 0),
@@ -692,8 +706,8 @@ export function createWakeInjector(p: FlowFoamParams) {
       uVortexWidth.value = p.vortexWidth;
       uVortexSpacing.value = p.vortexSpacing;
       uVortexDecay.value = p.vortexDecay;
-      uSpeedThreshold.value = p.speedThreshold * speedScale;
-      uFullWakeSpeed.value = p.fullWakeSpeed * speedScale;
+      uSpeedThreshold.value = ramp.speedThreshold;
+      uFullWakeSpeed.value = ramp.fullWakeSpeed;
       uTrackLife.value = p.trackLife;
       uTrackCapDist.value = trackReachCpu({
         capacity: TRACK_CAPACITY,
@@ -701,7 +715,7 @@ export function createWakeInjector(p: FlowFoamParams) {
         coarsen: Math.max(p.trackCoarsen, EPS),
         coarsenStart: Math.max(p.trackCoarsenStart, 0),
         life: p.trackLife,
-        minSpeed: p.speedThreshold * speedScale,
+        minSpeed: ramp.speedThreshold,
         maxTurn: 1,
       });
       uTailFade.value = p.tailFade;
