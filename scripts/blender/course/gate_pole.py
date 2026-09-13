@@ -120,20 +120,17 @@ def board_pieces(variant, outline, look_face):
     # stencil-black border band just proud of both faces, tape strip inside it
     border = Geo()
     tape = Geo()
-    n = len(outline)
-    c = Vector((sum(p[0] for p in outline) / n, sum(p[1] for p in outline) / n, 0))
     for side in (1, -1):
-        z = BOARD_Z + side * (BOARD_T / 2 + 0.002)
-        for i in range(n):
-            a = Vector((*outline[i], 0))
-            b = Vector((*outline[(i + 1) % n], 0))
-            for inset, w, g in ((0.0, 0.07, border), (0.1, 0.04, tape)):
-                ia = a + (c - a).normalized() * (inset + w / 2)
-                ib = b + (c - b).normalized() * (inset + w / 2)
-                seg = CK.member((ia.x, BOARD_Y + ia.y, z), (ib.x, BOARD_Y + ib.y, z), w, 0.003, up=(0, 0, 1))
-                g.extend(seg)
-    P.append(piece(variant, 'border', border, 'C_Paint', 'paint_stencil', max_lod=1, smooth=30, wear=1.2))
-    P.append(piece(variant, 'tape', tape, 'C_Paint', 'tape_reflective', max_lod=1, smooth=30, wear=1.2))
+        z = BOARD_Z + side * (BOARD_T / 2 + 0.0035)
+        to3d = lambda q, z=z, side=side: (q[0], BOARD_Y + q[1], z + side * q[2])  # noqa: E731
+        for inset, w, g in ((0.0, 0.07, border), (0.1, 0.04, tape)):
+            fr = CK.mitred_frame(outline, inset, w, 0.003, to3d)
+            # the back face mirrors z (det −1): flip the winding back outward
+            if side < 0:
+                fr.flip()
+            g.extend(fr)
+    P.append(piece(variant, 'border', border, 'C_Paint', 'paint_stencil', max_lod=1, smooth=None, recalc=False, wear=1.2))
+    P.append(piece(variant, 'tape', tape, 'C_Paint', 'tape_reflective', max_lod=1, smooth=None, recalc=False, wear=1.2))
     fast = [((x, BOARD_Y + y, BOARD_Z + BOARD_T / 2 + 0.004), (0, 0, 1), 0.014, 'bolt', True) for (x, y) in ((-0.2, -0.45), (0.2, -0.45), (-0.2, 0.45), (0.2, 0.45))]
     plate_piece = P[0]
     plate_piece.fasteners = fast

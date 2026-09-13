@@ -51,7 +51,8 @@ STAGING = {
     ],
     'course_pylon': [(['Pylon', 'Insulators'], (0, 0, 0), 0, {})],
     'course_radio_tower': [
-        (['Mast', 'Hut', 'LampRig', 'StartLamp1', 'StartLamp2', 'StartLamp3', 'StartLamp4', 'StartLamp5', 'StartGreen', 'Beacons'], (0, 0, 0), 0, {}),
+        # the placement's list (towerReachLayout TOWER.lean 0.075 rad ≈ 4.3°), leaning away from the grid (three −Z)
+        (['Mast', 'Hut', 'LampRig', 'StartLamp1', 'StartLamp2', 'StartLamp3', 'StartLamp4', 'StartLamp5', 'StartGreen', 'Beacons'], (0, 0, 0), 0, {'lean': 4.3}),
         (['GuyAnchor'], (-130.0, 0, 0), 0, {}),
         (['GuyAnchor'], (65.0, 0, 112.6), 0, {}),
         (['GuyAnchor'], (65.0, 0, -112.6), 0, {}),
@@ -108,7 +109,9 @@ def stage(asset, objs, lod, clay=None, x_shift=0.0):
             bpy.context.scene.collection.objects.link(o)
             o.parent = None
             lo = local.get(v, (0, 0, 0))
-            M = Matrix.Translation(T(off[0] + x_shift, off[1], off[2])) @ Matrix.Rotation(math.radians(yaw), 4, 'Z') @ Matrix.Translation(T(*lo))
+            # lean: degrees about three +X, pivoting at the mast foot 25 m down (Blender +X = three +X)
+            lean = Matrix.Translation(T(0, -25, 0)) @ Matrix.Rotation(math.radians(-local.get('lean', 0.0)), 4, 'X') @ Matrix.Translation(T(0, 25, 0))
+            M = Matrix.Translation(T(off[0] + x_shift, off[1], off[2])) @ Matrix.Rotation(math.radians(yaw), 4, 'Z') @ lean @ Matrix.Translation(T(*lo))
             o.matrix_world = M
             if clay is not None:
                 o.data = o.data.copy()

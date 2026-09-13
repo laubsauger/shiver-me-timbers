@@ -57,15 +57,15 @@ L = LK._L
 COURSE_LOOKS = {
     # C_Steel
     'galv_steel': L(base='#8E989A', alt1='#6F7778', rough=0.52, rough_alt=0.62, metal=0.75, under='#7A4526', rough_under=0.9,
-                    metal_under=0.1, edge=0.55, scratch=0.35, grime=0.7, salt=0.8, rust=0.9, streaks=0.9, pits=0.6, pattern='galv'),
+                    metal_under=0.1, edge=0.55, scratch=0.35, grime=0.3, salt=0.35, rust=0.9, streaks=1.0, pits=0.15, pattern='galv'),
     'steel_painted_grey': L(base='#6E7471', rough=0.55, under='#7A4526', rough_under=0.9, edge=0.8, chips=0.45, scratch=0.4,
-                            grime=0.6, salt=0.7, rust=1.0, streaks=0.8, pits=0.3, fade=0.15, pattern='cast'),
-    'steel_black': L(base='#23272A', rough=0.5, under='#7A4526', rough_under=0.9, edge=0.7, chips=0.3, grime=0.5, salt=0.6,
+                            grime=0.3, salt=0.4, rust=1.0, streaks=0.8, pits=0.3, fade=0.15, pattern='cast'),
+    'steel_black': L(base='#23272A', rough=0.5, under='#7A4526', rough_under=0.9, edge=0.7, chips=0.3, grime=0.2, salt=0.3,
                      rust=0.8, streaks=0.5, pattern='cast'),
     'tin_roof': L(base='#8A8D88', alt1='#6B4A34', rough=0.5, rough_alt=0.85, metal=0.7, under='#6E3F24', rough_under=0.95,
-                  metal_under=0.0, edge=0.6, scratch=0.2, grime=0.8, salt=0.9, rust=1.0, streaks=1.0, pits=0.5, pattern='corrugated'),
+                  metal_under=0.0, edge=0.6, scratch=0.2, grime=0.3, salt=0.4, rust=1.0, streaks=1.0, pits=0.5, pattern='corrugated'),
     'tank_steel': L(base='#B4AEA2', alt1='#7A4A2E', rough=0.55, rough_alt=0.9, metal=0.3, under='#6E3F24', rough_under=0.95, edge=0.8,
-                    chips=0.6, grime=0.7, salt=0.6, rust=1.0, streaks=1.2, fade=0.25, pattern='rust_bloom'),
+                    chips=0.5, grime=0.3, salt=0.35, rust=1.0, streaks=1.2, fade=0.2, pattern='rust_bloom'),
     'chain': L(base='#5A5650', rough=0.8, metal=0.6, under='#6E3F24', edge=0.4, grime=0.9, salt=1.0, rust=1.0, pits=1.0, pattern='cast'),
     # C_Paint
     # STYLE-SPEC §5.2 legibility guards outrank the look: daymark paint keeps its chroma and value (chips cluster
@@ -76,7 +76,7 @@ COURSE_LOOKS = {
                             grime=0.05, salt=0.06, fade=0.03, streaks=0.15, rust=0.2, pattern='cast'),
     'paint_hivis': L(base=HIVIS_YELLOW, rough=0.48, under='#8E8C84', rough_under=0.8, edge=0.8, chips=0.3, scratch=0.35, grime=0.15,
                      salt=0.2, fade=0.08, streaks=0.4, pattern='cast'),
-    'paint_stencil': L(base=STENCIL, rough=0.62, under='#9A968C', edge=0.4, chips=0.08, grime=0.05, salt=0.05, fade=0.02, pattern='cast'),
+    'paint_stencil': L(base=STENCIL, rough=0.62, under='#9A968C', edge=0.12, chips=0.04, grime=0.02, salt=0.03, fade=0.02, pattern='cast'),
     'paint_gelcoat': L(base=GELCOAT, rough=0.5, under='#8E8C84', edge=0.7, chips=0.35, grime=0.25, salt=0.25, fade=0.05, streaks=0.7,
                        rust=0.6, pattern='cast'),
     'tape_reflective': L(base=TAPE, alt1='#B9C0C2', rough=0.22, rough_alt=0.32, metal=0.2, under='#2C2F30', rough_under=0.7, edge=1.0,
@@ -98,24 +98,24 @@ COURSE_LOOKS = {
     'paint_teal_faded': L(base='#4F7F7C', rough=0.6, under='#B8AFA0', rough_under=0.85, edge=0.8, chips=0.6, grime=0.6, salt=0.6,
                           fade=0.35, streaks=0.9, rust=0.6, pattern='cast'),
     # C_Build
-    'shingles_cedar': L(base='#6B5847', alt1='#4B3E33', alt2='#8A7A63', rough=0.88, grime=0.8, salt=0.6, fade=0.25, pattern='shingles'),
-    'shingles_slate': L(base='#4E5557', alt1='#3A4042', alt2='#6A7170', rough=0.75, grime=0.7, salt=0.7, fade=0.15, pattern='shingles'),
-    'brick_red': L(base='#8A4B38', alt1='#B9B09F', alt2='#6E3A2C', rough=0.86, grime=0.8, salt=0.7, streaks=0.8, pattern='brick'),
-    'clapboard_sage': L(base='#9AAE9F', alt1='#7E8F82', rough=0.72, under='#8A8174', rough_under=0.9, edge=0.9, chips=0.7, grime=0.7,
-                        salt=0.6, fade=0.35, streaks=1.0, pattern='clapboard'),
-    'clapboard_bone': L(base='#D9D0BC', alt1='#B8AE98', rough=0.72, under='#8A8174', rough_under=0.9, edge=0.9, chips=0.7, grime=0.7,
-                        salt=0.6, fade=0.3, streaks=1.0, pattern='clapboard'),
-    'clapboard_ochre': L(base='#C39A55', alt1='#A07C42', rough=0.72, under='#8A8174', rough_under=0.9, edge=0.9, chips=0.7, grime=0.7,
-                         salt=0.6, fade=0.35, streaks=1.0, pattern='clapboard'),
-    'clapboard_rust': L(base='#8E4A36', alt1='#733B2C', rough=0.72, under='#8A8174', rough_under=0.9, edge=0.9, chips=0.7, grime=0.7,
-                        salt=0.6, fade=0.35, streaks=1.0, pattern='clapboard'),
+    'shingles_cedar': L(base='#6B5847', alt1='#4B3E33', alt2='#9A8468', rough=0.88, grime=0.25, salt=0.15, fade=0.12, streaks=0.4, pattern='shingles'),
+    'shingles_slate': L(base='#4E5557', alt1='#383E40', alt2='#6E7674', rough=0.75, grime=0.25, salt=0.15, fade=0.08, streaks=0.4, pattern='shingles'),
+    'brick_red': L(base='#8A4B38', alt1='#A89C88', alt2='#6E3A2C', rough=0.86, grime=0.3, salt=0.25, streaks=0.8, pattern='brick'),
+    'clapboard_sage': L(base='#9AAE9F', alt1='#7E8F82', rough=0.72, under='#8A8174', rough_under=0.9, edge=0.9, chips=0.4, grime=0.3,
+                        salt=0.3, fade=0.35, streaks=1.0, pattern='clapboard'),
+    'clapboard_bone': L(base='#D9D0BC', alt1='#B8AE98', rough=0.72, under='#8A8174', rough_under=0.9, edge=0.9, chips=0.4, grime=0.3,
+                        salt=0.3, fade=0.3, streaks=1.0, pattern='clapboard'),
+    'clapboard_ochre': L(base='#C39A55', alt1='#A07C42', rough=0.72, under='#8A8174', rough_under=0.9, edge=0.9, chips=0.4, grime=0.3,
+                         salt=0.3, fade=0.35, streaks=1.0, pattern='clapboard'),
+    'clapboard_rust': L(base='#8E4A36', alt1='#733B2C', rough=0.72, under='#8A8174', rough_under=0.9, edge=0.9, chips=0.4, grime=0.3,
+                        salt=0.3, fade=0.35, streaks=1.0, pattern='clapboard'),
     'timber_weathered': L(base='#8E857A', alt1='#6E665C', rough=0.9, grime=0.7, salt=0.8, streaks=0.8, pattern='woodgrain'),
     'timber_dark': L(base='#4F463D', alt1='#3A332C', rough=0.9, grime=0.8, salt=0.8, pattern='woodgrain'),
     'barnacle': L(base='#7C766A', alt1='#5E594F', rough=0.95, grime=0.6, salt=0.9, pits=1.0, pattern='concrete'),
     'concrete': L(base='#9A978E', alt1='#7F7C74', rough=0.9, grime=0.9, salt=0.9, streaks=1.0, pits=0.8, pattern='concrete'),
     'glass_dark': L(base='#1A2326', alt1='#3E4E52', rough=0.12, rough_alt=0.3, grime=0.5, salt=0.6, pattern='none'),
     'ceramic_glaze': L(base='#5E6B55', alt1='#7B8A70', rough=0.18, rough_alt=0.25, edge=0.4, chips=0.2, grime=0.4, salt=0.6, pattern='cast'),
-    'paint_white_trim': L(base='#E4DFD2', rough=0.6, under='#8A8174', edge=0.9, chips=0.7, grime=0.6, salt=0.5, fade=0.2, pattern='cast'),
+    'paint_white_trim': L(base='#E4DFD2', rough=0.6, under='#8A8174', edge=0.9, chips=0.45, grime=0.2, salt=0.25, fade=0.1, pattern='cast'),
     # C_Lamp
     'lens_amber': L(base=LED_AMBER, rough=0.12, scratch=0.4, grime=0.2, salt=0.3, pattern='fresnel'),
     'lens_red': L(base='#E0432F', rough=0.12, scratch=0.4, grime=0.2, salt=0.3, pattern='fresnel'),
@@ -184,13 +184,13 @@ def course_pattern_vector(nt, pattern):
         return N.combine(band, 0, N.math('MULTIPLY', N.noise(P, 40.0, 2.0), 0.05))
     if pattern == 'shingles':
         # courses every 0.14 m up the roof (world height), staggered butt joints every ~0.24 m, per-shingle tone
-        row = N.math('FLOOR', N.math('DIVIDE', Z, 0.14))
-        shift = N.math('MULTIPLY', N.math('FRACT', N.math('MULTIPLY', row, 0.5)), 0.12)
+        row = N.math('FLOOR', N.math('DIVIDE', Z, 0.2))
+        shift = N.math('MULTIPLY', N.math('FRACT', N.math('MULTIPLY', row, 0.5)), 0.17)
         run = N.math('ADD', N.math('ADD', X, Y), shift)
-        joint = N.math('LESS_THAN', N.math('FRACT', N.math('DIVIDE', run, 0.24)), 0.06)
-        cell = N.math('ADD', N.math('FLOOR', N.math('DIVIDE', run, 0.24)), N.math('MULTIPLY', row, 17.0))
+        joint = N.math('LESS_THAN', N.math('FRACT', N.math('DIVIDE', run, 0.34)), 0.06)
+        cell = N.math('ADD', N.math('FLOOR', N.math('DIVIDE', run, 0.34)), N.math('MULTIPLY', row, 17.0))
         tone = N.math('FRACT', N.math('MULTIPLY', N.math('SINE', N.math('MULTIPLY', cell, 12.9898)), 43758.55))
-        butt = N.math('FRACT', N.math('DIVIDE', Z, 0.14))
+        butt = N.math('FRACT', N.math('DIVIDE', Z, 0.2))
         h = N.math('SUBTRACT', N.math('MULTIPLY', butt, 3.0), N.math('MULTIPLY', joint, 1.5))
         return N.combine(N.math('MULTIPLY', N.smooth(0.55, 0.95, tone), 0.8), N.math('MULTIPLY', N.smooth(0.0, 0.2, tone), 0.5), h)
     if pattern == 'brick':
@@ -260,6 +260,39 @@ def member(a, b, w, h=None, up=(0, 1, 0)):
     for r in range(3):
         M[r][0], M[r][1], M[r][2], M[r][3] = x[r], y[r], z[r], A[r]
     return g.transform(M)
+
+
+def mitred_frame(outline, inset, w, t, to3d):
+    """a flat band `w` wide at `inset` inside a convex CCW 2D outline, `t` thick, as mitred trapezoid slabs meeting on
+    the corner bisectors. Butted members overlapped w/2 at every corner, and the coplanar overlap baked AO-black (the
+    black squares on the boards). to3d((x, y, dz)) → asset-frame point; the slabs' top faces point along +dz.
+    Winding is authored: pieces using this should pass recalc=False (thin shell)"""
+    from mathutils import Vector
+    n = len(outline)
+    pts = [Vector(p) for p in outline]
+
+    def ring(d):
+        out = []
+        for i in range(n):
+            e0 = (pts[i] - pts[i - 1]).normalized()
+            e1 = (pts[(i + 1) % n] - pts[i]).normalized()
+            n0, n1 = Vector((-e0.y, e0.x)), Vector((-e1.y, e1.x))
+            out.append(pts[i] + (n0 + n1) * (d / (1.0 + n0.dot(n1))))
+        return out
+
+    outer, inner = ring(inset), ring(inset + w)
+    g = kit.Geo()
+    for i in range(n):
+        j = (i + 1) % n
+        quad = [outer[i], outer[j], inner[j], inner[i]]
+        top = [g.vert(tuple(to3d((q.x, q.y, t / 2)))) for q in quad]
+        bot = [g.vert(tuple(to3d((q.x, q.y, -t / 2)))) for q in quad]
+        g.face(tuple(top))
+        g.face(tuple(reversed(bot)))
+        for a in range(4):
+            b = (a + 1) % 4
+            g.face((top[b], top[a], bot[a], bot[b]))
+    return g
 
 
 def _frame_along(a, b, roll_to):
@@ -371,7 +404,8 @@ def build_asset(name, module, args):
     # ── bake per slot: every piece shares its slot's atlas at one texel density (tiers scale it) ──
     size_full = int(spec['textureSize'])
     size = min(size_full, 1 << int(round(math.log2(max(64, args.bake_size * size_full / 1024)))))
-    tiers = {'exterior': 1.0, 'hero': 2.0, 'low': 0.5}
+    # 'close': small surfaces read up close whose pattern is finer than the slot's density (brick chimneys)
+    tiers = {'exterior': 1.0, 'hero': 2.0, 'low': 0.5, 'close': 4.0}
     stats = {}
     for slot in SLOT_ORDER:
         sp = [p for p in pieces if p.slot == slot]
@@ -379,14 +413,22 @@ def build_asset(name, module, args):
             continue
         mat, bsdf = mats[slot]
         # small-surface slots (lamp lenses) bake at a fraction of the asset's atlas: a lens is a few cm² of texture
-        slot_size = max(64, int(size * contract.get('slotTextureScale', {}).get(slot, 1.0)))
-        # many-island slots (lattices) pack with a thin margin: EXTEND bleeds the rest, and a lattice's colour is uniform
-        margin = res.get('uvMarginPx', {}).get(slot, max(2, size // 256))
+        # an asset may override per slot (the tower's glass + pontoon planks do not need a 2048² atlas)
+        scale = spec.get('slotTextureScale', {}).get(slot, contract.get('slotTextureScale', {}).get(slot, 1.0))
+        slot_size = max(64, int(size * scale))
+        # many-island slots (lattices) pack with a thin margin: EXTEND bleeds the rest, and a lattice's colour is uniform.
+        # The margin is in pixels OF THIS SLOT'S ATLAS: taken from the asset atlas it was 16 px on a 256² lamp atlas, a
+        # 6 % pad per island that packed every lens to nothing (tower C_Lamp coverage 0 → a solid fill → prune folded
+        # the emissive texture into a factor → the final checker failed).
+        margin = res.get('uvMarginPx', {}).get(slot, max(2, slot_size // 256))
         t0 = time.time()
         dens, used = BK.pack_slot(sp, tiers, margin_px=margin * 2, size=slot_size)
         data, id_of = BK.bake_slot(slot, sp, slot_size, args.ao_samples, margin)
         base, orm, normal, st = BK.composite(slot, data, id_of, sp, slot_size)
         del data
+        if used < 0.05 or st['coverage'] < 0.05:
+            raise SystemExit(f'[course] {name}/{slot}: atlas {slot_size}² is empty (uv used {used}, coverage {st["coverage"]}) — '
+                             f'the pack margin ({margin * 2} px) or the island count starves it')
         tag = f'{name}_{slot[2:].lower()}'
         img_b = BK.save_rgba(f'{tag}_baseColor', base, args.work, non_color=False)
         img_o = BK.save_rgba(f'{tag}_orm', orm, args.work, non_color=True)

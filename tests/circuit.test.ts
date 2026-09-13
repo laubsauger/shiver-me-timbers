@@ -47,6 +47,18 @@ import { generateSierraSites } from '../src/island/sierraSites';
 import { generateIslandHeightmap } from '../src/island/heightmap';
 import { registerSierraFamily, type KitArchetypeName } from '../src/island/sierraArchetypes';
 import { polylineDistance } from '../src/circuit/kitFamilies';
+import contractRaw from '../src/circuit/assets/courseAssetContract.json?raw';
+import { ROOF_CLEAR_DEPTH, courseColliders, roofColliders } from '../src/circuit/courseColliders';
+import type { RoofPlacement } from '../src/circuit/towerReach';
+import type { StaticCollider } from '../src/sea-physics/boatCollide';
+
+function segmentDistance(a: readonly number[], b: readonly number[], p: readonly number[]): number {
+  const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+  const L2 = ab[0] ** 2 + ab[1] ** 2 + ab[2] ** 2;
+  const t = L2 > 0 ? Math.max(0, Math.min(1, (ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / L2)) : 0;
+  return Math.hypot(ap[0] - ab[0] * t, ap[1] - ab[1] * t, ap[2] - ab[2] * t);
+}
 
 const hullJson = JSON.parse(hullRaw) as { spec: { mass: number; deadriseDeg: number; length: number }; derived: { beamOverall: number } };
 const SEED = 1965;
@@ -158,6 +170,45 @@ describe('gates and corridor fit the boat', () => {
     for (const s of f.stakes) expect(distanceToClosed(line, s.at)).toBeGreaterThan(50);
     expect(distanceToClosed(line, f.tower.at)).toBeGreaterThan(45);
     for (const a of f.tower.anchors) expect(distanceToClosed(line, a)).toBeGreaterThan(20);
+  });
+
+  it('Main Street crashes a boat that hits a roof, never one on the racing line or over a fully drowned house', () => {
+    // design doc §5 "drowned structure > 20 kn → reset": what pokes through must be solid to the crash code (§T.188),
+    // and a collider that bulges into the corridor would reset boats on the clean line
+    const contract = JSON.parse(contractRaw) as { roofs: Record<string, { eave: number; ridge: number; top: number }> };
+    const key = { gable: 'Gable', gableChimney: 'GableChimney', hip: 'Hip', shed: 'Shed', steeple: 'Steeple', waterTower: 'WaterTower' } as const;
+    const inside = (cs: StaticCollider[], p: [number, number, number]) => cs.some((c) => segmentDistance(c.a, c.b, p) <= c.radius + 1e-6);
+    const toWorld = (r: RoofPlacement, x: number, y: number, z: number): [number, number, number] => [
+      r.at[0] + x * Math.cos(r.yaw) + z * Math.sin(r.yaw), y + r.floor, r.at[1] - x * Math.sin(r.yaw) + z * Math.cos(r.yaw)];
+    const all = courseColliders(world);
+    let breaking = 0;
+    for (const r of world.furniture.roofs) {
+      const h = contract.roofs[key[r.kind]];
+      const mine = roofColliders(r);
+      if (h.top + r.floor <= ROOF_CLEAR_DEPTH) expect(mine, `${r.kind} under every hull`).toEqual([]);
+      if (h.ridge + r.floor > 0) {
+        breaking++;
+        // a hull at the waterline over the middle of the building (and over the ridge) is in contact
+        const zc = r.kind === 'steeple' ? -1 : 0;
+        expect(inside(mine, toWorld(r, 0, -r.floor, zc)), `${r.kind} at the waterline`).toBe(true);
+        // the store's tin roof falls from `ridge` at the front to `eave` at the back: its middle is halfway
+        const roofY = r.kind === 'shed' ? (h.ridge + h.eave) / 2 : h.ridge;
+        if (r.kind !== 'waterTower') expect(inside(mine, toWorld(r, 0, roofY - 0.05, zc)), `${r.kind} ridge`).toBe(true);
+      }
+      if (r.kind === 'gableChimney' && h.top + r.floor > 0) expect(inside(mine, toWorld(r, 7.6 * 0.26, h.top - 0.1, -2))).toBe(true);
+      for (const c of mine) {
+        expect(all).toContainEqual(c);
+        for (let t = 0; t <= 1; t += 0.25) {
+          const p: Vec2 = [c.a[0] + (c.b[0] - c.a[0]) * t, c.a[2] + (c.b[2] - c.a[2]) * t];
+          expect(distanceToClosed(world.course.referenceLine, p) - c.radius, r.kind).toBeGreaterThan(CORRIDOR_HALF_WIDTH);
+        }
+      }
+    }
+    expect(breaking).toBeGreaterThan(20); // "34 of 35 houses break the surface" (docs/speedboat/circuit.md)
+    // the same house sunk below a hull's draft stops colliding; raised, it collides again
+    const house = world.furniture.roofs.find((r) => r.kind === 'gable')!;
+    expect(roofColliders({ ...house, floor: -(contract.roofs.Gable.top + BOAT_DRAFT + 0.1) })).toEqual([]);
+    expect(roofColliders({ ...house, floor: -contract.roofs.Gable.eave })).not.toEqual([]);
   });
 
   it('no rock-garden boulder that could hit a hull lies in the corridor', () => {

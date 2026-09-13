@@ -62,13 +62,16 @@ def build(args):
     welds = [(0, TOP - 0.3, 0.15), (0, TOP - 0.9, 0.15)]
     P.append(piece(V, 'bracket', br, 'C_Steel', 'steel_painted_grey', max_lod=1, bevel=(0.004, 1), smooth=35, welds=welds, wear=1.5))
     x = Geo()
+    # the two bars are bolted one over the other: crossed in one plane their faces were coplanar at the crossing and
+    # the bake's AO went black there (a black diamond on the mark)
+    xz = {45: 0.3, -45: 0.3 + 0.037}
     for ang in (45, -45):
-        x.extend(kit.box(1.0, 0.16, 0.035).transform(Matrix.Translation((0, TOP + 0.2, 0.3)) @ kit.rot('Z', ang)))
+        x.extend(kit.box(1.0, 0.16, 0.035).transform(Matrix.Translation((0, TOP + 0.2, xz[ang])) @ kit.rot('Z', ang)))
     P.append(piece(V, 'topmark', x, 'C_Paint', 'paint_hivis', max_lod=2, bevel=(0.006, 1), smooth=35, wear=1.1))
     edge = Geo()
     for ang in (45, -45):
         for off in (0.085, -0.085):
-            edge.extend(kit.box(1.0, 0.012, 0.04).transform(Matrix.Translation((0, TOP + 0.2, 0.3)) @ kit.rot('Z', ang) @ Matrix.Translation((0, off, 0))))
+            edge.extend(kit.box(1.0, 0.012, 0.04).transform(Matrix.Translation((0, TOP + 0.2, xz[ang])) @ kit.rot('Z', ang) @ Matrix.Translation((0, off, 0))))
     P.append(piece(V, 'topmark_edge', edge, 'C_Paint', 'paint_stencil', max_lod=1, smooth=35))
     plate = kit.box(0.7, 0.34, 0.02, center=(0, TOP - 0.62, 0.285))
     P.append(piece(V, 'plate', plate, 'C_Paint', 'paint_hivis', max_lod=2, bevel=(0.004, 1), smooth=35, wear=1.1,

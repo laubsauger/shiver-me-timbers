@@ -126,7 +126,9 @@ async function buildOne(asset, opt, contract, env) {
   const slotsBefore = doc.getRoot().listMaterials().map((m) => m.getName()).sort().join(',');
   await doc.transform(
     dedup({ propertyTypes: [PropertyType.ACCESSOR, PropertyType.TEXTURE] }),
-    prune({ keepExtras: true, keepLeaves: false }),
+    // keepSolidTextures: prune would otherwise fold a single-colour texture into its factor and drop it from the
+    // slot (how the tower's lamp lost its emissive texture); the slot's texture set is contract, not an optimisation
+    prune({ keepExtras: true, keepLeaves: false, keepSolidTextures: true }),
   );
   await io.write(step(1), doc);
 

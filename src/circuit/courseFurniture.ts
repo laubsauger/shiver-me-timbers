@@ -115,7 +115,7 @@ async function createCourseLoader(renderer: THREE.WebGPURenderer): Promise<GLTFL
   return new GLTFLoader().setKTX2Loader(ktx2).setMeshoptDecoder(MeshoptDecoder);
 }
 
-function assetFromScene(name: CourseAssetName, scene: THREE.Group): LoadedAsset {
+function assetFromScene(name: CourseAssetName, scene: THREE.Group, anisotropy: number): LoadedAsset {
   const root = scene.getObjectByName(`CF_${name}`) ?? scene.children[0];
   if (!root) throw new Error(`course asset ${name}: no CF_${name} root`);
   const extras: Record<string, unknown> = {};
@@ -145,6 +145,10 @@ function assetFromScene(name: CourseAssetName, scene: THREE.Group): LoadedAsset 
   }
   let textureBytes = 0;
   for (const t of textures) {
+    // KTX2 mips are trilinear; without anisotropy the atlases go mushy at grazing angles (roofs, spars, the mast)
+    // — WebGPU applies it only with all filters linear, which the loader's full mip chains give
+    t.anisotropy = anisotropy;
+    t.needsUpdate = true;
     const img = t.image as { width?: number; height?: number } | undefined;
     if (img?.width && img?.height) textureBytes += img.width * img.height * 4 * (4 / 3) * 0.25; // KTX2 ≈ 1 byte/px + mips
   }
@@ -222,6 +226,8 @@ export interface CourseFurnitureStats {
   instances: number;
   trianglesDrawn: number;
   textureMB: number;
+  /** anisotropy applied to every furniture texture */
+  anisotropy: number;
   /** placements per LOD level */
   lodHistogram: number[];
 }
@@ -243,6 +249,8 @@ export interface CreateCourseFurnitureOptions {
   /** fold in waterLighting (a sea is bound); false for a studio view */
   water?: boolean;
   urls?: Partial<Record<CourseAssetName, string>>;
+  /** texture anisotropy cap (settings `maxAnisotropy`); default and ceiling: the renderer's max */
+  maxAnisotropy?: number;
 }
 
 const Y = new THREE.Vector3(0, 1, 0);
@@ -262,7 +270,9 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
   const urls = { ...COURSE_ASSET_URLS, ...opts.urls };
   const loader = await createCourseLoader(opts.renderer);
   const names = Object.keys(COURSE_ASSET_URLS) as CourseAssetName[];
-  const loaded = await Promise.all(names.map(async (n) => assetFromScene(n, (await loader.loadAsync(urls[n])).scene)));
+  const rendererMax = opts.renderer.getMaxAnisotropy();
+  const anisotropy = Math.max(1, Math.min(rendererMax, opts.maxAnisotropy ?? rendererMax));
+  const loaded = await Promise.all(names.map(async (n) => assetFromScene(n, (await loader.loadAsync(urls[n])).scene, anisotropy)));
   const assets = Object.fromEntries(loaded.map((a) => [a.name, a])) as Record<CourseAssetName, LoadedAsset>;
   const { data, course } = opts;
 
@@ -541,7 +551,7 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
         tris += (cables.geometry.index?.count ?? 0) / 3;
       }
       const textureMB = loaded.reduce((s, a) => s + a.textureBytes, 0) / (1024 * 1024);
-      return { draws, instances, trianglesDrawn: Math.round(tris), textureMB, lodHistogram: hist };
+      return { draws, instances, trianglesDrawn: Math.round(tris), textureMB, anisotropy, lodHistogram: hist };
     },
     dispose() {
       for (const b of buckets.values()) for (const mesh of b.meshes) mesh.dispose();

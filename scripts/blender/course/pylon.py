@@ -61,7 +61,11 @@ def build(args):
                 continue
             horiz.extend(CK.angle_member(a, b, 0.09, 0.009, roll_to=(0, 1, 0)))
             c = Vector(corner(k, y))
-            gussets.extend(kit.box(0.3, 0.28, 0.3, center=tuple(c)))
+            # gusset plates in the two lattice faces that meet at the leg (a cube at every node read as a block)
+            sgx = 1 if c.x > 0 else -1
+            sgz = 1 if c.z > 0 else -1
+            gussets.extend(kit.box(0.016, 0.42, 0.36, center=(c.x + sgx * 0.02, c.y, c.z - sgz * 0.14)))
+            gussets.extend(kit.box(0.36, 0.42, 0.016, center=(c.x - sgx * 0.14, c.y, c.z + sgz * 0.02)))
             for dy in (-0.06, 0.06):
                 fast.append(((c.x * 1.08, c.y + dy, c.z * 1.08), (c.x, 0, c.z), 0.02, 'bolt', True))
     for i in range(len(levels) - 1):
@@ -117,6 +121,14 @@ def build(args):
         j = (i + 1) % len(pts)
         zig.face((ids_b[i], ids_b[j], ids_f[j], ids_f[i]))
     P.append(piece(V, 'danger_bolt', zig, 'C_Paint', 'paint_stencil', max_lod=1, smooth=None))
+    # the league's chequer boards (design doc §8 "hazard paint at the waterline, checker band") bolted across the two
+    # faces the boats run past (±X, the arms' side), above the hazard band: Pylon Row reads as race furniture
+    ybd = 4.5
+    for sx in (1, -1):
+        hwb = half_width(ybd)
+        xb = sx * (hwb + 0.06)
+        P.append(piece(V, f'chequer_board_{"p" if sx > 0 else "n"}', kit.box(0.03, 1.2, 2.0 * hwb - 0.3, center=(xb, ybd, 0.0)), 'C_Paint', 'chequer',
+                       max_lod=2, smooth=None, wear=1.0, local=((xb + sx * 0.016, ybd - 0.6, -hwb), (0, 0, 1), (0, 1, 0))))
 
     # insulator strings: glazed discs + clamps, hanging from each arm tip
     ins = Geo()
@@ -135,6 +147,8 @@ def build(args):
     return {
         'pieces': P,
         'lodRatios': [1.0, 0.25, 0.06],
+        # ~3800 angle-member islands: 2 px pads, not 4 + 4 (the pads were most of the lattice's atlas; T187b)
+        'uvMarginPx': {'C_Steel': 2},
         'extras': {
             'heightAboveWater': PEAK_Y + 0.9 + 0.08,
             'baseY': BASE_Y,

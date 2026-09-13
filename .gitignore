@@ -39,3 +39,4 @@ docs/**/*.mov
 tests/zzScratch*
 docs/speedboat/refs/_local/
 !docs/speedboat/concept/*.png
+scripts/blender/**/__pycache__/

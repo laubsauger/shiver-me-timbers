@@ -28,16 +28,98 @@ from course_kit import piece
 CONTRACT = CK.load_contract()['roofs']
 
 
-def slab(corners, t):
-    """a thick quad slab from 4 top corners (CCW seen from above), extruded down by t along world −Y"""
-    g = Geo()
+def slab(corners, t, split=False):
+    """a thick slab from its top corners (CCW seen from above, 3 or 4), extruded down by t along world −Y.
+    split=True returns (weather face, underside + edges): the face that breaks the surface earns the texels,
+    the underside sits in the water under the eave and gets a low tier (T187b: it was half of a roof's atlas)"""
+    g, u = Geo(), Geo()
     top = [g.vert(tuple(c)) for c in corners]
-    bot = [g.vert((c[0], c[1] - t, c[2])) for c in corners]
+    utop = [u.vert(tuple(c)) for c in corners]
+    bot = [u.vert((c[0], c[1] - t, c[2])) for c in corners]
     g.face(tuple(top))
-    g.face(tuple(reversed(bot)))
-    for i in range(4):
-        j = (i + 1) % 4
-        g.face((top[j], top[i], bot[i], bot[j]))
+    u.face(tuple(reversed(bot)))
+    n = len(corners)
+    for i in range(n):
+        j = (i + 1) % n
+        u.face((utop[j], utop[i], bot[i], bot[j]))
+    if split:
+        return g, u
+    return g.extend(u)
+
+
+def coursed(E0, E1, R1, R0, rise=0.2, t=0.035, segs=1, top_gap=0.0):
+    """shingle/shake courses as geometry over the slope quad E0 E1 (eave edge) → R1 R0 (ridge edge), same winding
+    as slab(): a sawtooth whose butt steps sit on the texture's course lines (course_kit 'shingles': one row per
+    `rise` metres of height), so the rows stay crisp at the grazing angles a boat sees a drowned roof from, where
+    a flat textured slab went mushy. One param-UV island per slope (the sawtooth unfolded); returns (courses, caps)
+    — the end caps are tiny and get their own smart-UV piece."""
+    from mathutils import Vector
+    E0, E1, R1, R0 = (Vector(c) for c in (E0, E1, R1, R0))
+    n = (E1 - E0).cross(R0 - E0).normalized()
+    if n.y < 0:
+        n = -n
+    ye, yr = E0.y, R0.y - top_gap
+
+    def P(u, v):
+        e = E0.lerp(E1, v)
+        r = R0.lerp(R1, v)
+        return e.lerp(r, u)
+
+    bounds = [0.0]
+    y = (math.floor(ye / rise) + 1) * rise
+    while y < yr - rise * 0.35:
+        bounds.append((y - ye) / (R0.y - ye))
+        y += rise
+    bounds.append((yr - ye) / (R0.y - ye))
+    g, caps = Geo(), Geo()
+    s_acc = 0.0
+    vs = [j / segs for j in range(segs + 1)]
+    for k in range(len(bounds) - 1):
+        ua, ub = bounds[k], bounds[k + 1]
+        width = lambda u: (P(u, 1) - P(u, 0)).length  # noqa: E731
+        # butt face at ua (faces down-slope): unfolded as a strip of height t before the course's top
+        for j in range(segs):
+            va, vb = vs[j], vs[j + 1]
+            a, b = P(ua, va), P(ua, vb)
+            ids = [g.vert(tuple(a)), g.vert(tuple(b)), g.vert(tuple(b + n * t)), g.vert(tuple(a + n * t))]
+            wa = width(ua)
+            g.face(ids, [((va - 0.5) * wa, s_acc), ((vb - 0.5) * wa, s_acc), ((vb - 0.5) * wa, s_acc + t), ((va - 0.5) * wa, s_acc + t)])
+        s0 = s_acc + t
+        L = (P(ub, 0.5) - (P(ua, 0.5) + n * t)).length
+        for j in range(segs):
+            va, vb = vs[j], vs[j + 1]
+            a, b, c, d = P(ua, va) + n * t, P(ua, vb) + n * t, P(ub, vb), P(ub, va)
+            ids = [g.vert(tuple(x)) for x in (a, b, c, d)]
+            wa, wb = width(ua), width(ub)
+            g.face(ids, [((va - 0.5) * wa, s0), ((vb - 0.5) * wa, s0), ((vb - 0.5) * wb, s0 + L), ((va - 0.5) * wb, s0 + L)])
+        s_acc = s0 + L
+        for v, flip in ((0.0, False), (1.0, True)):
+            a, c = P(ua, v), P(ub, v)
+            tri = [caps.vert(tuple(a)), caps.vert(tuple(a + n * t)), caps.vert(tuple(c))]
+            caps.face(tuple(reversed(tri)) if flip else tuple(tri))
+    ub = bounds[-1]
+    if ub < 1.0 - 1e-6:
+        # the plain tip above the last course (a spire's point, a hip's apex): no hole into the building
+        apex = (R0 - R1).length < 1e-6
+        L = (P(1.0, 0.5) - P(ub, 0.5)).length
+        wb = (P(ub, 1) - P(ub, 0)).length
+        for j in range(segs):
+            va, vb = vs[j], vs[j + 1]
+            if apex:
+                ids = [g.vert(tuple(P(ub, va))), g.vert(tuple(P(ub, vb))), g.vert(tuple(R0))]
+                g.face(ids, [((va - 0.5) * wb, s_acc), ((vb - 0.5) * wb, s_acc), (0.0, s_acc + L)])
+            else:
+                w1 = (R1 - R0).length
+                ids = [g.vert(tuple(x)) for x in (P(ub, va), P(ub, vb), P(1.0, vb), P(1.0, va))]
+                g.face(ids, [((va - 0.5) * wb, s_acc), ((vb - 0.5) * wb, s_acc), ((vb - 0.5) * w1, s_acc + L), ((va - 0.5) * w1, s_acc + L)])
+    return g, caps
+
+
+def open_box(sx, sy, sz, center=(0, 0, 0)):
+    """kit.box without its top and bottom: walls under a roof and on the old ground floor never show those faces"""
+    g = kit.box(sx, sy, sz, center)
+    del g.f[2:4]
+    del g.uv[2:4]
     return g
 
 
@@ -47,20 +129,26 @@ def gable_roof(w, d, eave, ridge, over=0.45, t=0.14):
     hd = d / 2 + over
     slope = (ridge - eave) / (w / 2)
     ye = eave - over * slope
-    roof = Geo()
-    roof.extend(slab([(-hw, ye, -hd), (-hw, ye, hd), (0, ridge + 0.05, hd), (0, ridge + 0.05, -hd)], t))
-    roof.extend(slab([(0, ridge + 0.05, -hd), (0, ridge + 0.05, hd), (hw, ye, hd), (hw, ye, -hd)], t))
+    roof, under, courses, caps = Geo(), Geo(), Geo(), Geo()
+    for c in ([(-hw, ye, -hd), (-hw, ye, hd), (0, ridge + 0.05, hd), (0, ridge + 0.05, -hd)],
+              [(hw, ye, hd), (hw, ye, -hd), (0, ridge + 0.05, -hd), (0, ridge + 0.05, hd)]):
+        a, b = slab(c, t, split=True)
+        roof.extend(a)
+        under.extend(b)
+        cg, cc = coursed(*c)
+        courses.extend(cg)
+        caps.extend(cc)
     cap = CK.member((0, ridge + 0.08, -hd - 0.02), (0, ridge + 0.08, hd + 0.02), 0.22, 0.1)
     fascia = Geo()
     for sz in (1, -1):
         fascia.extend(CK.member((-hw, ye - 0.08, sz * hd), (0, ridge - 0.03, sz * hd), 0.22, 0.05, up=(0, 0, 1)))
         fascia.extend(CK.member((0, ridge - 0.03, sz * hd), (hw, ye - 0.08, sz * hd), 0.22, 0.05, up=(0, 0, 1)))
-    return roof, cap, fascia
+    return roof, under, cap, fascia, courses, caps
 
 
 def house_body(w, d, eave, windows_z=True):
     """clapboard walls to the eave with the gable triangles, window openings as dark insets with trim"""
-    walls = kit.box(w, eave, d, center=(0, eave / 2, 0))
+    walls = open_box(w, eave, d, center=(0, eave / 2, 0))
     glass = Geo()
     trim = Geo()
     rows = [2.1, 4.6]
@@ -117,11 +205,18 @@ def build_gable(V, chimney):
     eave, ridge = dims['eave'], dims['ridge']
     walls, glass, trim, corners = house_body(w, d, eave)
     look = 'clapboard_sage' if not chimney else 'clapboard_ochre'
-    P.append(piece(V, 'walls', walls.extend(gable_ends(w, d, eave, ridge)), 'C_Build', look, max_lod=2, smooth=None, wear=1.3))
+    # the walls stand in the water to ~1 m under the surface (eave + floor < 1.5 m, tests/circuitAssets): low tier;
+    # the gable triangles break the surface with the roof
+    P.append(piece(V, 'walls', walls, 'C_Build', look, tier='low', max_lod=2, smooth=None, recalc=False, wear=1.3))
+    P.append(piece(V, 'gable_ends', gable_ends(w, d, eave, ridge), 'C_Build', look, tier='hero', max_lod=2, smooth=None, wear=1.3))
     P.append(piece(V, 'glass', glass, 'C_Build', 'glass_dark', max_lod=1, smooth=None))
     P.append(piece(V, 'trim', trim.extend(corners), 'C_Paint', 'paint_white_trim', max_lod=1, smooth=None, wear=1.4))
-    roof, cap, fascia = gable_roof(w, d, eave, ridge)
-    P.append(piece(V, 'roof', roof, 'C_Build', 'shingles_cedar' if not chimney else 'shingles_slate', max_lod=2, smooth=None, wear=1.2, tier='hero'))
+    roof, under, cap, fascia, courses, caps = gable_roof(w, d, eave, ridge)
+    shingles = 'shingles_cedar' if not chimney else 'shingles_slate'
+    P.append(piece(V, 'roof_courses', courses, 'C_Build', shingles, max_lod=0, smooth=None, recalc=False, wear=1.2, tier='hero'))
+    P.append(piece(V, 'roof_course_ends', caps, 'C_Build', shingles, max_lod=0, smooth=None, recalc=False, wear=1.2, tier='low'))
+    P.append(piece(V, 'roof', roof, 'C_Build', shingles, min_lod=1, max_lod=2, smooth=None, recalc=False, wear=1.2))
+    P.append(piece(V, 'roof_under', under, 'C_Build', shingles, max_lod=2, smooth=None, recalc=False, wear=1.2, tier='low'))
     P.append(piece(V, 'ridge_cap', cap.extend(fascia), 'C_Paint', 'paint_white_trim', max_lod=1, smooth=None, wear=1.5))
     P.append(piece(V, 'gutters', gutters(w, d, eave, slope=(ridge - eave) / (w / 2)), 'C_Steel', 'steel_painted_grey', max_lod=0, smooth=50, wear=1.6))
     # attic window in the street gable
@@ -130,7 +225,7 @@ def build_gable(V, chimney):
         top = dims['top']
         ch = kit.box(0.9, top - eave + 1.2, 0.9, center=(w * 0.26, (eave - 1.2 + top) / 2 - 0.12, -d * 0.2))
         ch.extend(kit.box(1.05, 0.14, 1.05, center=(w * 0.26, top - 0.07, -d * 0.2)))
-        P.append(piece(V, 'chimney', ch, 'C_Build', 'brick_red', max_lod=2, bevel=(0.01, 1), smooth=None, wear=1.3))
+        P.append(piece(V, 'chimney', ch, 'C_Build', 'brick_red', tier='close', max_lod=2, bevel=(0.01, 1), smooth=None, wear=1.3))
         # shed dormer on the other slope
         slope = (ridge - eave) / (w / 2)
         dx = -w * 0.25
@@ -154,7 +249,7 @@ def build_hip():
     dims = CONTRACT[V]
     eave, ridge = dims['eave'], dims['ridge']
     walls, glass, trim, corners = house_body(w, d, eave)
-    P.append(piece(V, 'walls', walls, 'C_Build', 'clapboard_bone', max_lod=2, smooth=None, wear=1.3))
+    P.append(piece(V, 'walls', walls, 'C_Build', 'clapboard_bone', tier='low', max_lod=2, smooth=None, recalc=False, wear=1.3))
     P.append(piece(V, 'glass', glass, 'C_Build', 'glass_dark', max_lod=1, smooth=None))
     P.append(piece(V, 'trim', trim.extend(corners), 'C_Paint', 'paint_white_trim', max_lod=1, smooth=None, wear=1.4))
     over = 0.45
@@ -163,25 +258,24 @@ def build_hip():
     ye = eave - over * slope
     r = 1.0
     top = ridge + 0.04
-    roof = Geo()
+    roof, under = Geo(), Geo()
     quads = [
         [(-hw, ye, hd), (hw, ye, hd), (r, top, 0), (-r, top, 0)],
         [(hw, ye, -hd), (-hw, ye, -hd), (-r, top, 0), (r, top, 0)],
     ]
     tris = [[(hw, ye, hd), (hw, ye, -hd), (r, top, 0)], [(-hw, ye, -hd), (-hw, ye, hd), (-r, top, 0)]]
-    for q in quads:
-        roof.extend(slab(q, 0.14))
-    for tri in tris:
-        g = Geo()
-        a = [g.vert(p) for p in tri]
-        b = [g.vert((p[0], p[1] - 0.14, p[2])) for p in tri]
-        g.face((a[0], a[1], a[2]))
-        g.face((b[2], b[1], b[0]))
-        for i in range(3):
-            j = (i + 1) % 3
-            g.face((a[j], a[i], b[i], b[j]))
-        roof.extend(g)
-    P.append(piece(V, 'roof', roof, 'C_Build', 'shingles_slate', max_lod=2, smooth=None, wear=1.2, tier='hero'))
+    courses, caps = Geo(), Geo()
+    for q in quads + tris:
+        a, b = slab(q, 0.14, split=True)
+        roof.extend(a)
+        under.extend(b)
+        cg, cc = coursed(*(q if len(q) == 4 else q + [q[2]]), top_gap=0.12 if len(q) == 3 else 0.0)
+        courses.extend(cg)
+        caps.extend(cc)
+    P.append(piece(V, 'roof_courses', courses, 'C_Build', 'shingles_slate', max_lod=0, smooth=None, recalc=False, wear=1.2, tier='hero'))
+    P.append(piece(V, 'roof_course_ends', caps, 'C_Build', 'shingles_slate', max_lod=0, smooth=None, recalc=False, wear=1.2, tier='low'))
+    P.append(piece(V, 'roof', roof, 'C_Build', 'shingles_slate', min_lod=1, max_lod=2, smooth=None, recalc=False, wear=1.2))
+    P.append(piece(V, 'roof_under', under, 'C_Build', 'shingles_slate', max_lod=2, smooth=None, recalc=False, wear=1.2, tier='low'))
     cap = CK.member((-r - 0.05, top + 0.05, 0), (r + 0.05, top + 0.05, 0), 0.2, 0.1)
     P.append(piece(V, 'ridge_cap', cap, 'C_Paint', 'paint_white_trim', max_lod=1, smooth=None, wear=1.5))
     # a salvaged satellite dish on a bracket at the eave
@@ -203,7 +297,8 @@ def build_shed():
     # false front: the parapet facade to `top`, stepped, with a cornice
     face = kit.box(w + 0.4, top - 0.35, 0.5, center=(0, (top - 0.35) / 2, d / 2 + 0.25))
     face.extend(kit.box(w * 0.5, 0.35, 0.5, center=(0, top - 0.175, d / 2 + 0.25)))
-    P.append(piece(V, 'facade', face, 'C_Build', 'brick_red', max_lod=2, smooth=None, wear=1.3))
+    # the false front is what the street sees above the water: it earns the texels
+    P.append(piece(V, 'facade', face, 'C_Build', 'brick_red', tier='hero', max_lod=2, smooth=None, wear=1.3))
     cornice = kit.box(w + 0.8, 0.3, 0.8, center=(0, top - 0.5, d / 2 + 0.3))
     cornice.extend(kit.box(w * 0.5 + 0.3, 0.2, 0.7, center=(0, top - 0.02, d / 2 + 0.28)))
     for k in range(9):
@@ -235,24 +330,26 @@ def build_steeple():
     w, d = 9.0, 16.0
     dims = CONTRACT[V]
     eave, ridge, top = dims['eave'], dims['ridge'], dims['top']
-    walls = kit.box(w, eave, d, center=(0, eave / 2, -1.0))
-    walls.extend(gable_ends(w, d, eave, ridge).translate((0, 0, -1.0)))
-    P.append(piece(V, 'nave', walls, 'C_Build', 'clapboard_bone', max_lod=2, smooth=None, wear=1.2))
+    walls = open_box(w, eave, d, center=(0, eave / 2, -1.0))
+    P.append(piece(V, 'nave', walls, 'C_Build', 'clapboard_bone', max_lod=2, smooth=None, recalc=False, wear=1.2))
+    P.append(piece(V, 'nave_gables', gable_ends(w, d, eave, ridge).translate((0, 0, -1.0)), 'C_Build', 'clapboard_bone', max_lod=2, smooth=None, wear=1.2))
     glass = Geo()
     for z in (-6.5, -3.5, -0.5, 2.5):
         for sx in (1, -1):
             glass.extend(kit.box(0.05, 3.2, 1.1, center=(sx * (w / 2 + 0.005), 4.8, z)))
     P.append(piece(V, 'glass', glass, 'C_Build', 'glass_dark', max_lod=1, smooth=None))
-    roof, cap, fascia = gable_roof(w, d, eave, ridge, over=0.35)
-    roof.translate((0, 0, -1.0))
-    P.append(piece(V, 'roof', roof, 'C_Build', 'shingles_slate', max_lod=2, smooth=None, wear=1.2, tier='hero'))
+    roof, under, cap, fascia, courses, caps = gable_roof(w, d, eave, ridge, over=0.35)
+    P.append(piece(V, 'roof_courses', courses.translate((0, 0, -1.0)), 'C_Build', 'shingles_slate', max_lod=0, smooth=None, recalc=False, wear=1.2, tier='hero'))
+    P.append(piece(V, 'roof_course_ends', caps.translate((0, 0, -1.0)), 'C_Build', 'shingles_slate', max_lod=0, smooth=None, recalc=False, wear=1.2, tier='low'))
+    P.append(piece(V, 'roof', roof.translate((0, 0, -1.0)), 'C_Build', 'shingles_slate', min_lod=1, max_lod=2, smooth=None, recalc=False, wear=1.2))
+    P.append(piece(V, 'roof_under', under.translate((0, 0, -1.0)), 'C_Build', 'shingles_slate', max_lod=2, smooth=None, recalc=False, wear=1.2, tier='low'))
     P.append(piece(V, 'trim', cap.extend(fascia).translate((0, 0, -1.0)), 'C_Paint', 'paint_white_trim', max_lod=1, smooth=None, wear=1.4))
     # the tower at the street end, belfry louvres, a spire to `top`
     tw = 3.6
     tz = d / 2 - 1.0 + tw / 2 - 0.4
     tower_top = 15.2
-    tower = kit.box(tw, tower_top, tw, center=(0, tower_top / 2, tz))
-    P.append(piece(V, 'tower', tower, 'C_Build', 'clapboard_bone', max_lod=2, smooth=None, wear=1.2))
+    tower = open_box(tw, tower_top, tw, center=(0, tower_top / 2, tz))
+    P.append(piece(V, 'tower', tower, 'C_Build', 'clapboard_bone', max_lod=2, smooth=None, recalc=False, wear=1.2))
     lou = Geo()
     for rot in (0, 90, 180, 270):
         for k in range(5):
@@ -266,13 +363,21 @@ def build_steeple():
     spire = Geo()
     base = [(-tw / 2 - 0.05, tower_top + 0.35, tz - tw / 2 - 0.05), (tw / 2 + 0.05, tower_top + 0.35, tz - tw / 2 - 0.05),
             (tw / 2 + 0.05, tower_top + 0.35, tz + tw / 2 + 0.05), (-tw / 2 - 0.05, tower_top + 0.35, tz + tw / 2 + 0.05)]
-    apex = spire.vert((0, tower_top + 0.35 + spire_h, tz))
+    apex_p = (0, tower_top + 0.35 + spire_h, tz)
+    apex = spire.vert(apex_p)
     ids = [spire.vert(p) for p in base]
+    sc, se = Geo(), Geo()
     for i in range(4):
         j = (i + 1) % 4
         spire.face((ids[j], ids[i], apex))
+        cg, cc = coursed(base[j], base[i], apex_p, apex_p, top_gap=0.5)
+        sc.extend(cg)
+        se.extend(cc)
     spire.face(tuple(ids))
-    P.append(piece(V, 'spire', spire, 'C_Build', 'shingles_slate', max_lod=2, smooth=None, wear=1.2))
+    # the spire is the landmark's silhouette from the whole street: courses up close, the plain pyramid beyond
+    P.append(piece(V, 'spire_courses', sc, 'C_Build', 'shingles_slate', max_lod=0, smooth=None, recalc=False, wear=1.2))
+    P.append(piece(V, 'spire_course_ends', se, 'C_Build', 'shingles_slate', max_lod=0, smooth=None, recalc=False, wear=1.2, tier='low'))
+    P.append(piece(V, 'spire', spire, 'C_Build', 'shingles_slate', min_lod=1, max_lod=2, smooth=None, wear=1.2))
     vane = CK.tube((0, tower_top + 0.3 + spire_h, tz), (0, top, tz), 0.03, 6)
     vane.extend(kit.box(0.9, 0.18, 0.03, center=(0.2, top - 0.35, tz)))
     P.append(piece(V, 'weathervane', vane, 'C_Steel', 'steel_black', max_lod=1, smooth=None, wear=1.5))
@@ -342,6 +447,8 @@ def build(args):
     return {
         'pieces': P,
         'lodRatios': [1.0, 0.3, 0.1],
+        # ~1000 small trim/steel islands: a 2 px pad (4 px between islands) instead of 4 + 4 doubles the usable atlas
+        'uvMarginPx': {'C_Paint': 2, 'C_Steel': 2, 'C_Build': 3},
         'variantExtras': {k: {'eave': v['eave'], 'ridge': v['ridge'], 'top': v['top']} for k, v in CONTRACT.items() if k != 'about'},
         'extras': {'origin': 'old ground floor at the plot centre; +Z = street front'},
     }

@@ -13,6 +13,7 @@
   "maxMaterials": 4,
   "maxTexturesPerMaterial": 4,
   "slotTextureScale": { "C_Lamp": 0.125 },
+  "slotTextureScaleNote": "fraction of the asset's textureSize per slot; an asset's own slotTextureScale overrides this one slot by slot",
   "slots": {
     "C_Steel": {
       "alphaMode": "OPAQUE",
@@ -87,6 +88,7 @@
       "triBudget": [120000, 26000, 6000],
       "drawBudget": [28, 22, 16],
       "textureSize": 2048,
+      "slotTextureScale": { "C_Steel": 0.5, "C_Build": 0.25, "C_Lamp": 0.125 },
       "switchDistance": [260, 900],
       "variants": ["Mast", "Hut", "LampRig", "StartLamp1", "StartLamp2", "StartLamp3", "StartLamp4", "StartLamp5", "StartGreen", "Beacons", "GuyAnchor"]
     },
@@ -102,7 +104,7 @@
       ],
       "triBudget": [12000, 3000, 700],
       "drawBudget": [4, 4, 3],
-      "textureSize": 2048,
+      "textureSize": 1024,
       "switchDistance": [120, 380],
       "variants": ["Gable", "GableChimney", "Hip", "Shed", "Steeple", "WaterTower"]
     }

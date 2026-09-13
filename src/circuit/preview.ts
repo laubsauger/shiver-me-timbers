@@ -202,7 +202,12 @@ async function boot(): Promise<void> {
   furniture.update({ camera: app.camera, time: 0, dt: 0, waterHeightAt: waterAt });
   await withFullCoverage(app.scene, () => Promise.all([post.warmup(), sea.flowFoam.warmAsync(app.renderer)]));
   const stats = () => ({ ...furniture.stats(), lap: world.lapLength, hash: world.hash, tSea, tCourse });
-  (window as unknown as Record<string, unknown>).__circuit = { app, world, furniture, sea, setCam, stats };
+  // scripted checks go through the same path as the 1–6 keys (the fly loop owns the camera's orientation)
+  const setCamScripted = (name: string): void => {
+    setCam(name);
+    syncAngles();
+  };
+  (window as unknown as Record<string, unknown>).__circuit = { app, world, furniture, sea, setCam: setCamScripted, stats };
 
   const fwd = new THREE.Vector3();
   const right = new THREE.Vector3();
@@ -243,7 +248,7 @@ async function boot(): Promise<void> {
     const s = furniture.stats();
     hud.setNotes([
       `Tower Reach · seed ${seed} · lap ${world.lapLength.toFixed(0)} m · hash ${world.hash} · sea ${tSea.toFixed(0)} ms · course ${tCourse.toFixed(0)} ms`,
-      `furniture ${s.draws} draws · ${s.instances} instances · ${s.trianglesDrawn} tris · LOD ${s.lodHistogram.join('/')} · ~${s.textureMB.toFixed(1)} MB tex`,
+      `furniture ${s.draws} draws · ${s.instances} instances · ${s.trianglesDrawn} tris · LOD ${s.lodHistogram.join('/')} · ~${s.textureMB.toFixed(1)} MB tex · aniso ${s.anisotropy}×`,
       `gates ${world.gates.map((g) => `${g.id}:${g.k.toFixed(2)}`).join(' ')}`,
       `cam ${presetNames.map((n, i) => `${i + 1} ${n}`).join(' · ')} · lamps [L] ${lamps} · frame ${info.drawCalls} draws ${info.triangles} tris`,
     ]);

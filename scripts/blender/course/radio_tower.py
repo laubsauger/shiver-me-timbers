@@ -88,8 +88,14 @@ def mast_pieces():
     rungs, rails2, hoops = Geo(), Geo(), Geo()
     lx = -R - 0.35
     y = HUT_FLOOR + 3.0
+    # rails in 3.2 m lengths: one 85 m tube was one 85 m UV island, and the packer scaled all of C_Steel to fit it
+    # across the atlas (24 px/m, 10 % of the 2048² used; T187b)
     for sz in (-0.22, 0.22):
-        rails2.extend(CK.tube((lx, y, sz), (lx, TOP - 0.5, sz), 0.025, 6, caps=True))
+        n_seg = int(math.ceil((TOP - 0.5 - y) / 3.2))
+        for k in range(n_seg):
+            ya = y + (TOP - 0.5 - y) * k / n_seg
+            yb = y + (TOP - 0.5 - y) * (k + 1) / n_seg
+            rails2.extend(CK.tube((lx, ya, sz), (lx, yb, sz), 0.025, 6, caps=(k == 0 or k == n_seg - 1)))
     yy = y
     while yy < TOP - 0.6:
         rungs.extend(CK.tube((lx, yy, -0.22), (lx, yy, 0.22), 0.016, 6, caps=False))
@@ -106,6 +112,40 @@ def mast_pieces():
     cap = kit.cylinder(R + 0.25, 0.12, segs=12).translate((0, TOP, 0))
     whip = kit.cylinder(0.07, 8.0, segs=8, r2=0.018).translate((0, TOP + 0.12, 0))
     P.append(piece(V, 'top_cap', cap, 'C_Steel', 'steel_painted_grey', max_lod=2, smooth=40, wear=1.3))
+    # the relay that still earns the mast its keep ("the radio is the grandstand"): microwave drum dishes, FM ring bays
+    # and the coax runs down a leg. They break the 110 m stick into a readable landmark silhouette
+    shrouds, radomes, brackets, bays, coax = Geo(), Geo(), Geo(), Geo(), Geo()
+    for (k, y, turn, rr) in ((1, 44.0, 0.35, 0.95), (2, 44.0, -0.25, 0.95), (1, 67.0, -0.2, 0.75)):
+        a = LEG_AZ[k] + turn
+        out = Vector((math.cos(a), 0, math.sin(a)))
+        pl = Vector(leg(k, y))
+        centre = pl + out * 1.25
+        M = Matrix.Translation(tuple(centre)) @ kit.rot('Y', math.degrees(math.pi / 2 - a)) @ kit.rot('X', 90)
+        shrouds.extend(kit.revolve([(0.12, -0.3), (rr * 0.55, -0.26), (rr, -0.05), (rr, 0.3), (rr * 0.97, 0.3)], segs=24, caps=True).transform(M))
+        radomes.extend(kit.revolve([(rr * 0.96, 0.29), (rr * 0.6, 0.34), (0.0, 0.36)], segs=24, caps=False).transform(M))
+        back = centre - out * 0.3
+        for dy in (-0.45, 0.45):
+            brackets.extend(CK.tube(tuple(pl + Vector((0, dy, 0))), tuple(back + Vector((0, dy * 0.6, 0))), 0.04, 6))
+    k = 1
+    po = Vector((math.cos(LEG_AZ[k]), 0, math.sin(LEG_AZ[k])))
+    base_p = Vector(leg(k, 81.0)) + po * 0.75
+    brackets.extend(CK.tube(tuple(base_p), tuple(base_p + Vector((0, 11.0, 0))), 0.05, 8))
+    for yb in (82.0, 84.6, 87.2, 89.8, 92.4):
+        brackets.extend(CK.tube(tuple(Vector(leg(k, yb))), tuple(Vector(leg(k, yb)) + po * 0.75), 0.03, 6))
+    for yb in (83.3, 85.9, 88.5, 91.1):
+        bays.extend(kit.torus(0.42, 0.028, 18, 6).translate(tuple(base_p + po * 0.46 + Vector((0, yb - 81.0, 0)))))
+    for off in (-0.14, 0.14):
+        side = Vector((-po.z, 0, po.x)) * off
+        yy = HUT_FLOOR + 2.0
+        while yy < 81.0:
+            yb = min(81.0, yy + 3.2)
+            coax.extend(CK.tube(tuple(Vector(leg(k, yy)) + side - po * 0.12), tuple(Vector(leg(k, yb)) + side - po * 0.12), 0.035, 6, caps=False))
+            yy = yb
+    P.append(piece(V, 'dish_shrouds', shrouds, 'C_Steel', 'steel_painted_grey', max_lod=2, smooth=40, wear=1.2))
+    P.append(piece(V, 'dish_radomes', radomes, 'C_Paint', 'paint_gelcoat', max_lod=2, smooth=50, wear=1.1, tier='low'))
+    P.append(piece(V, 'relay_brackets', brackets, 'C_Steel', 'galv_steel', max_lod=1, smooth=45, wear=1.3))
+    P.append(piece(V, 'fm_bays', bays, 'C_Steel', 'galv_steel', max_lod=1, smooth=50, wear=1.1))
+    P.append(piece(V, 'coax', coax, 'C_Paint', 'rubber_black', max_lod=0, smooth=60, tier='low'))
     P.append(piece(V, 'whip', whip, 'C_Steel', 'galv_steel', max_lod=2, smooth=45, wear=1.1))
     return P, guys
 
@@ -140,6 +180,16 @@ def hut_pieces():
             p = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
             rail.extend(CK.tube((p[0], y0, p[1]), (p[0], y0 + 1.07, p[1]), 0.025, 6))
     P.append(piece(V, 'railing', rail, 'C_Steel', 'galv_steel', max_lod=1, smooth=50, wear=1.3))
+    # the chequer banner (design doc §8 "checker banner") zip-tied outside the course-side railing, facing the straight
+    bx = cx - hw - 0.05
+    banner = kit.box(0.02, 0.86, 4.8, center=(bx, y0 + 0.58, 0.0))
+    P.append(piece(V, 'banner', banner, 'C_Paint', 'chequer', max_lod=2, smooth=None, wear=0.9,
+                   local=((bx - 0.011, y0 + 0.15, -2.4), (0, 0, 1), (0, 1, 0))))
+    ties = Geo()
+    for zt in (-2.35, -1.2, 0.0, 1.2, 2.35):
+        for yt in (0.55, 1.05):
+            ties.extend(kit.box(0.05, 0.03, 0.035, center=(bx + 0.015, y0 + yt, zt)))
+    P.append(piece(V, 'banner_ties', ties, 'C_Paint', 'rubber_black', max_lod=0, smooth=None))
     walls = kit.box(w, h, d, center=(cx, y0 + h / 2, 0))
     P.append(piece(V, 'walls', walls, 'C_Paint', 'teal_corrugated', max_lod=2, smooth=None, wear=1.4, tier='hero'))
     # windows: a wide band to the course (−X), the grid side (+Z), a small one aft; frames
@@ -251,12 +301,11 @@ def rig_pieces():
     board = kit.box(3.6, 1.6, 0.14, center=(BOOM_X, RIG_Y - 0.1, 0.5))
     fast = [((BOOM_X + sx * 1.6, RIG_Y - 0.1 + sy * 0.68, 0.575), (0, 0, 1), 0.02, 'bolt', True) for sx in (-1, 1) for sy in (-1, 1)]
     P.append(piece(V, 'board', board, 'C_Steel', 'steel_black', max_lod=2, smooth=None, fasteners=fast, wear=1.2, tier='hero'))
-    border, tape = Geo(), Geo()
-    for (a, b) in (((-1.8, 0.8), (1.8, 0.8)), ((1.8, 0.8), (1.8, -0.8)), ((1.8, -0.8), (-1.8, -0.8)), ((-1.8, -0.8), (-1.8, 0.8))):
-        border.extend(CK.member((BOOM_X + a[0], RIG_Y - 0.1 + a[1], 0.58), (BOOM_X + b[0], RIG_Y - 0.1 + b[1], 0.58), 0.12, 0.02, up=(0, 0, 1)))
-        tape.extend(CK.member((BOOM_X + a[0] * 0.93, RIG_Y - 0.1 + a[1] * 0.83, 0.585), (BOOM_X + b[0] * 0.93, RIG_Y - 0.1 + b[1] * 0.83, 0.585), 0.05, 0.01, up=(0, 0, 1)))
-    P.append(piece(V, 'border', border, 'C_Paint', 'paint_signal_board', max_lod=1, smooth=None, wear=1.2))
-    P.append(piece(V, 'tape', tape, 'C_Paint', 'tape_reflective', max_lod=1, smooth=None, wear=1.2))
+    rect = [(-1.86, -0.86), (1.86, -0.86), (1.86, 0.86), (-1.86, 0.86)]
+    border = CK.mitred_frame(rect, 0.0, 0.12, 0.02, lambda q: (BOOM_X + q[0], RIG_Y - 0.1 + q[1], 0.58 + q[2]))
+    tape = CK.mitred_frame(rect, 0.14, 0.04, 0.008, lambda q: (BOOM_X + q[0], RIG_Y - 0.1 + q[1], 0.575 + q[2]))
+    P.append(piece(V, 'border', border, 'C_Paint', 'paint_signal_board', max_lod=1, smooth=None, recalc=False, wear=1.2))
+    P.append(piece(V, 'tape', tape, 'C_Paint', 'tape_reflective', max_lod=1, smooth=None, recalc=False, wear=1.2))
     hoods = Geo()
     for c in range(5):
         x = BOOM_X + (c - 2) * 0.62
