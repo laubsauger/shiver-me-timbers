@@ -1,5 +1,7 @@
 # Speedboat mode — tech research & design (vessel physics, crashes, NPC racing, engine audio, camera)
 
+> **SUPERSEDED 2026-09-13 (user decisions, see design-doc.md):** NO speed/power rubber-banding — trailing NPCs take riskier lines instead; respawn places the boat back ON THE RACING LINE behind the crash point, not at the last gate. Top speed ~80 kn (Surge ~90), hull 12 m, planing calibrated now (Garme + friction), 0.8 m wave patch all boats. The rubber-band and last-gate text below is kept for history only. §V numbers proposed here were renumbered in SPEC (V100–V109).
+
 Status: RESEARCH / DESIGN ONLY. No production code. The game design doc (separate agent) must be
 signed off before S1. The shared wake sim is designed in parallel in `docs/wake/wake-research.md`.
 That file **did not exist** when this was written, so §2.7 states the contract this physics offers it.
