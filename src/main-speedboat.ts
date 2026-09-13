@@ -109,7 +109,9 @@ async function boot(): Promise<void> {
   const controls = createRaceControls({ player, camera, enabled: () => !camera.capturesInput() }); // §T.182
   const crash = createNoCrashes(); // §T.188
   const hud = createKnotsHud(); // §T.185
-  const audio = createSpeedboatAudioSink({ camera: app.camera, npcs }); // §T.183
+  const audio = createSpeedboatAudioSink({ // §T.183
+    camera: app.camera, npcs, npcContact: (i) => npcs.contact(i), npcThrottle: (i) => npcs.throttle(i),
+  });
   installAudioUnlock(audio);
   const post = createPostPipeline(app.renderer, app.scene, app.camera, { sunDirection: () => sky.sunDirection });
   const usePost = createPostWarmGate({ enabled: () => postParams.enabled, warm: () => post.warmup() });
@@ -122,8 +124,13 @@ async function boot(): Promise<void> {
   const hudModel: HudModel = { knots: 0, headingRad: 0, npcTransport: npcs.fleet.kind, npcLagTicks: 0 };
   const audioFrame: BoatAudioFrame = {
     frameDt: 0, view: frame.view, boat, controls: lastControls,
-    contact: { wettedArea: 0, slamImpulse: 0, propImmersion: 0, driveThrust: player.hw.driveThrust },
+    contact: {
+      wettedArea: 0, slamImpulse: 0, propImmersion: 0,
+      driveThrust: player.hw.driveThrust, driveAdvance: player.hw.driveAdvance, driveImmersion: player.hw.driveImmersion,
+    },
   };
+  // the crash hook reads THIS tick's contact; audio reads the frame's (slams summed over its ticks)
+  const tickContact = { ...audioFrame.contact };
   const paused = false; // §T.185 pause menu
 
   const loop = new GameLoop(
@@ -137,10 +144,11 @@ async function boot(): Promise<void> {
       lastControls = controls.sample(dt, boat);
       frame.tickSea();
       player.tick(lastControls, state.time, dt);
-      const c = audioFrame.contact;
-      c.wettedArea = player.hw.wettedArea;
+      const c = tickContact;
+      c.wettedArea = audioFrame.contact.wettedArea = player.hw.wettedArea;
       c.slamImpulse = player.hw.slamImpulse;
-      c.propImmersion = player.hw.propImmersion;
+      audioFrame.contact.slamImpulse += player.hw.slamImpulse;
+      c.propImmersion = audioFrame.contact.propImmersion = player.hw.propImmersion;
       const ev = crash.tick(dt, boat, c);
       if (ev) {
         player.place(ev.respawn);
@@ -171,7 +179,10 @@ async function boot(): Promise<void> {
       hud.update(hudModel);
       audioFrame.frameDt = frameDt;
       audioFrame.controls = lastControls;
+      audioFrame.governor = controls.settings.governor.toLowerCase() as BoatAudioFrame['governor'];
       audio.update(audioFrame);
+      audioFrame.contact.slamImpulse = 0; // summed over the ticks this frame covered (§T.183 hook 2)
+      npcs.resetSlam();
       npcs.pump(state.tick); // frame end: the worker steps inside the next frame's gap
     },
     () => paused,

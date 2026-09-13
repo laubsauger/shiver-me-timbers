@@ -7,8 +7,8 @@
  *   waterLighting + the wetline) → rooster tail.
  *
  * SEA: `buildSea` with the course hook's sites (open sea today, §T.187 later), the SIM wake
- * backend (§T W2b) on the ship tier, and the page's speedboat sea params (seaParams.ts, the same
- * object the NPC fleet is built with).
+ * backend (§T W2b), one prop jet per drive for the sim foam (§T.180 c), and the page's speedboat
+ * sea params (params/speedboatSea.ts, the same object the NPC fleet is built with).
  */
 import type { Mesh } from 'three/webgpu';
 import type { App } from '../../core/app';
@@ -17,9 +17,10 @@ import { createRoosterTail } from '../../foam/roosterTail';
 import type { SeaPhysicsParams } from '../../params/seaPhysics';
 import type { SkyHandle } from '../../sky';
 import type { SimState } from '../../state/simState';
-import { WAKE_SHIP_TIER } from '../../wake/wakeCalibration';
+import { WAKE_SPEEDBOAT_TIER } from '../../wake/wakeCalibration';
 import type { WeatherSystem } from '../../weather';
 import { FLEET_LIVERIES, HERO_BOAT_URL, HERO_LIVERY, createBoatAssetLoader, wetlineOptions, type BoatInstance, type BoatLivery } from '../assets';
+import { HULL_DATA } from '../hullMesh';
 import type { CourseHook } from './seams';
 
 export function buildSpeedboatSea(app: App, state: SimState, sky: SkyHandle, weather: WeatherSystem, course: CourseHook, seaParams: SeaPhysicsParams) {
@@ -28,12 +29,14 @@ export function buildSpeedboatSea(app: App, state: SimState, sky: SkyHandle, wea
     // the analytic wake ramp's scale — not evaluated on the sim backend (flowfoam WakeBackend)
     wakeSpeedScale: 1,
     // §T W2b: the wake surface is solved from the player's own contact load, fed in the fixed tick
-    // (speedboatFrame.tickWake). Tier: the ship's 160 m domain, as wakeCalibration's
-    // 'speedboat-40' preset uses. HOOK NEEDED (core/seaScene.ts, not this task's): `SeaOptions`
-    // has no `propJets`, so `createFlowFoam` compiles the sim foam for 0 prop jets and
-    // `flowFoam.setPropWash` is inert here; the jets still reach the wake SOLVE via `wakeSim.tick`.
+    // (speedboatFrame.tickBoat). Tier: the speedboat's 448 m domain (256² × 1.75 m, ≈ 300 m of clear
+    // water astern for the divergent arms at 40 m/s — docs/wake/w5c-speedboat-tier.md), as
+    // wakeCalibration's 'speedboat-40' preset uses; same grid and dispatch count as the ship tier.
     wakeBackend: 'sim',
-    wakeTier: WAKE_SHIP_TIER,
+    wakeTier: WAKE_SPEEDBOAT_TIER,
+    // §T.180 c: the sim foam compiles one jet slot per drive, so `flowFoam.setPropWash` lays the
+    // prop wash ribbon the jets also force the wake solve with (`wakeSim.tick`)
+    propJets: HULL_DATA.engines.length,
     seaParams,
   });
 }

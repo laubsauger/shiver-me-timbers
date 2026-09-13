@@ -36,13 +36,53 @@ import { combineFeatures, type Feature } from './archetypes';
 import { sierraParams, type SierraParams } from '../params/sierra';
 
 export const SIERRA_ARCHETYPES = ['dome', 'drownedRidge', 'cirque', 'halfDome'] as const;
-export type SierraArchetypeName = (typeof SIERRA_ARCHETYPES)[number];
+/**
+ * §T.187: a family registered from OUTSIDE src/island (the speedboat race kit,
+ * src/circuit) that rides the whole sierra pipeline — composition, erosion,
+ * granite + DG-sand material, rocks, plants — without this directory learning
+ * what a sandbar is. The prefix keeps the namespaces apart.
+ */
+export type KitArchetypeName = `kit:${string}`;
+export type SierraArchetypeName = (typeof SIERRA_ARCHETYPES)[number] | KitArchetypeName;
 
 /** the three a player can land on — what the slice is built from */
 export const SIERRA_SLICE_ARCHETYPES = ['dome', 'drownedRidge', 'cirque'] as const;
 
+/** what a registered family supplies: its peak and its landmass term */
+export interface SierraFamily {
+  /** the family's peak (m) from the radius-derived raw peak */
+  peak(rawPeak: number, p: SierraParams): number;
+  /** the family's shape; `sinkOpenWater` and the ice azimuth are applied after, as for every family */
+  build(rng: () => number, extent: number, peak: number, blend: number, p: SierraParams): SierraShape;
+}
+
+const FAMILIES = new Map<string, SierraFamily>();
+
+/**
+ * Register a kit family. Idempotent for the same object (module re-imports);
+ * a DIFFERENT family under a taken name throws (§Rule 8) — two builders behind
+ * one name would make the same seed build two islands.
+ */
+export function registerSierraFamily(name: KitArchetypeName, family: SierraFamily): void {
+  const prev = FAMILIES.get(name);
+  if (prev && prev !== family) throw new Error(`registerSierraFamily: '${name}' is already registered`);
+  FAMILIES.set(name, family);
+}
+
+export function isSierraFamilyRegistered(name: string): boolean {
+  return FAMILIES.has(name);
+}
+
+function registeredFamily(name: string): SierraFamily {
+  const f = FAMILIES.get(name);
+  if (!f) throw new Error(`sierra family '${name}' is not registered (import its module before building the island)`);
+  return f;
+}
+
 export function isSierraArchetype(name: string): name is SierraArchetypeName {
-  return (SIERRA_ARCHETYPES as readonly string[]).includes(name);
+  // any `kit:` name is a sierra family: an unregistered one then fails loud in
+  // `registeredFamily` instead of silently falling through to the pirate branch
+  return (SIERRA_ARCHETYPES as readonly string[]).includes(name) || name.startsWith('kit:');
 }
 
 /** a dead pine standing in the water on the drowned crest, island-local */
@@ -115,6 +155,8 @@ export function sierraPeak(
       // the silhouette island's peak is authored absolutely (it is ONE island
       // and it has to read from 3 km) — the raw peak is its floor
       return Math.max(rawPeak * p.domeRelief, p.halfDomePeak);
+    default:
+      return registeredFamily(name).peak(rawPeak, p);
   }
 }
 
@@ -373,7 +415,7 @@ function buildCirque(
 // at 45° one metre above the waterline
 const SEABED_SINK = 10;
 const SEABED_SINK_GUARD = 20;
-function sinkOpenWater(land: number): number {
+export function sinkOpenWater(land: number): number {
   return land - SEABED_SINK * (1 - smoothstep01(land / SEABED_SINK_GUARD));
 }
 
@@ -400,6 +442,8 @@ export function buildSierraShape(
     case 'cirque':
       shape = buildCirque(rng, extent, peak, blend, p);
       break;
+    default:
+      shape = registeredFamily(name).build(rng, extent, peak, blend, p);
   }
   const raw = shape.landAt;
   shape.landAt = (x, z) => sinkOpenWater(raw(x, z));

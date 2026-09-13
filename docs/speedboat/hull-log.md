@@ -227,3 +227,62 @@ Renders: `scratchpad/hull/v2/{hero34,rear34,side,below,close_bow}.png`.
 - The repairs read as repairs rather than smudges, although at chase range they are subtle.
 - The doubler is plain flat aluminium at this distance.
 - The bottom still reads as an even colour field up close.
+
+## v3, 2026-09-13: last hull pass
+
+1. **Livery edge aliasing.**
+   - The runtime was already an SDF mask thresholded with `fwidth` (`aaStep`). The mask fields themselves had
+     two defects:
+     - hard `sd > 0` / `sd < 0` steps exactly at the 0.5 contour (flake and overspray terms), which snapped
+       the edge to the texel grid;
+     - ~2 cm noise baked into the 1024² SDF, which aliased into a serrated edge.
+   - Both are fixed: smooth weights, and only ≥ 10 cm edge wobble (V48).
+   - The Blender previews now evaluate the runtime formula at 2× the atlas (4096²), with a derivative-width
+     threshold like `aaStep`. `close_bow` shows smooth band and pinstripe edges.
+   - No resolution change: mask 1024², hull still 13.67 MB GPU, ≤ 4 textures per slot.
+2. **Race number: option (c), both.**
+   - *Side:* the band and pinstripe step up around the number (the band loses 62 % of its width over
+     z ± 0.78 m with 14 cm ramps, all from the live layout). The side numerals grew from 0.31 m to **0.45 m**.
+   - *Foredeck:* a painted gelcoat number panel, 1.24 × 1.10 m at z 6.55–7.65 m, carries **0.78 m** numerals.
+     - Glyph up is the bow, reading from aft or above.
+     - The panel faces are `M_Gelcoat` with their own UV island, so the per-boat mask/uniform system paints
+       them: topsides hue plus numeral colour.
+     - The deck well columns widen on the foredeck to frame the panel, with a bone border in the non-skid.
+   - Shader: `slotMaterials.ts` picks side or deck coordinates by `normalLocal.y` with one glyph sample, using the
+     gradients of the continuous coordinate.
+   - Checker: `liveryErrors` also fails a deck number that leaves its panel. The test covers both numbers.
+3. **Bow doubler.**
+   - Double staggered rivet rows as geometry (LOD0, closed 6-sided domes, ~2.7k tris, both plates). The same
+     pattern goes into the texture for LOD1/2.
+   - Darker 9 mm sealant bead with relief; white aluminium-oxide halos and dark galvanic bleed streaks under
+     the doubler rivets (rust stays on the chine plate's steel rivets).
+   - Broad oil-canning relief and tone in the normal and albedo.
+4. **Bracket (took over `scripts/blender/parts/bracket.py` for this fix).**
+   - The transom plate is an extruded polygon whose bottom edge follows the hull V from the JSON
+     (keel → chine at the transom, + 5 cm clearance for the pad and strakes).
+   - Bottom chords, diagonals, bolt rows and the bottom skin start from the same clipped edge.
+   - `checkGlb.mjs transomOverhangErrors` is now a **failure**. Test: a slab 0.35 m under the synthetic V fails,
+     one above it passes. The hero GLB passes.
+5. **Bottom.**
+   - Antifoul tone patches (fresh, faded, dark) in hull-shaped bands.
+   - A brown-grey scum line at the rest waterline under the algae and crust.
+   - Strake and chine running-edge wear from the strake table.
+   - Flow streaks baked in hull-shaped coordinates: vertex attribute `sb_frac` (fraction of the chine
+     half-beam) × length, so the streaks follow the strakes and converge at the bow.
+
+**v3 numbers:**
+- `node scripts/asset-build.mjs` exit 0, checker OK (raw and final), sha256 `4829b868527a3f21`, 15.0 MB
+- tris per LOD 93 341 / 13 702 / 3 461 (hull LOD0 29.5k); draws 20 / 8 / 6
+- hull textures 13.67 MB
+- chine residual under 1 mm, sheer 2 mm
+- `npx vitest run tests/assetPipeline*` 42/42
+
+Renders: `scratchpad/hull/v3/{hero34,close_bow,rear34,below,top,foredeck,close_chine,close_transom}.png`.
+
+**Honest read.**
+- Band and stripe edges are clean up close.
+- The stepped band reads as deliberate livery, and the side number is legible at hero34 range.
+- The foredeck "27" is big and clean from aft (`foredeck.png`); it reads upside down in the bow-down `top` render.
+- The doubler rivets read as rows of dark dots rather than bright domes (small scale, grazing light).
+- The bracket now sits inside the transom outline.
+- Bottom variation is visible but restrained. At distance the antifoul is still mostly one colour.

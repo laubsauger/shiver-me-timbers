@@ -76,7 +76,13 @@ export interface BoatAudioFrame {
     propImmersion: number;
     /** per drive, signed N */
     driveThrust: ArrayLike<number>;
+    /** per drive |advance speed| along the drive line, m/s (hullWater `driveAdvance`, §T.183 hook 1) */
+    driveAdvance?: ArrayLike<number>;
+    /** per drive prop immersion 0..1 (hullWater `driveImmersion`, §T.183 hook 1) */
+    driveImmersion?: ArrayLike<number>;
   };
+  /** the Governor assist's dial as audio spells it (§T.183 hook 5); absent = 'off' */
+  governor?: 'off' | 'air' | 'full';
 }
 
 export interface BoatAudioSink {

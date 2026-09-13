@@ -23,7 +23,7 @@ export default defineConfig({
     // two entries (§I raft/app, §V.81): the pirate sim and the raft share
     // modules and nothing else — `npm run dev` serves both
     rollupOptions: {
-      input: { main: 'index.html', raft: 'raft.html', speedboat: 'speedboat.html', speedboatLookdev: 'speedboat-lookdev.html', speedboatAudioHarness: 'speedboat-audio-harness.html', speedboatUiHarness: 'speedboat-ui-harness.html' },
+      input: { main: 'index.html', raft: 'raft.html', speedboat: 'speedboat.html', speedboatLookdev: 'speedboat-lookdev.html', speedboatAudioHarness: 'speedboat-audio-harness.html', speedboatUiHarness: 'speedboat-ui-harness.html', circuitPreview: 'circuit-preview.html' },
     },
   },
   // §T.178: bundled workers land under `speedboat-workers/`, i.e. inside the COI shim's scope

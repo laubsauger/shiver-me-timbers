@@ -6,6 +6,7 @@
  */
 import { BoatSimLayout, F, H, KICK_STOP, STATUS_ERROR } from './layout';
 import { BoatSimCore } from './stepCore';
+import { stepKick } from './batch';
 import type { SimMessage } from './transport';
 
 export interface HostPort {
@@ -23,14 +24,15 @@ export function runSimWorker(port: HostPort): void {
 
   const stepOnce = (L: BoatSimLayout): void => {
     const t0 = performance.now();
-    (core as BoatSimCore).step(L);
-    L.f64[F.STEP_MS] = performance.now() - t0;
+    // §T.181: one tick, or every row of a multi-tick kick (batch.ts); STEP_MS stays per TICK
+    const ticks = stepKick(core as BoatSimCore, L);
+    L.f64[F.STEP_MS] = (performance.now() - t0) / ticks;
   };
 
   port.listen((msg) => {
     if (msg.type === 'init') {
       try {
-        core = new BoatSimCore({ seed: msg.seed, oceanParams: msg.oceanParams, seaParams: msg.seaParams });
+        core = new BoatSimCore({ seed: msg.seed, oceanParams: msg.oceanParams, seaParams: msg.seaParams, pilot: msg.pilot, contacts: msg.contacts });
         layout = new BoatSimLayout(msg.buffer);
       } catch (e) {
         const buf = msg.buffer instanceof ArrayBuffer ? msg.buffer : undefined;

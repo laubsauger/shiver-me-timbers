@@ -60,6 +60,16 @@ export const H = {
   SHARD_END: 11,
   /** STATUS_* */
   STATUS: 12,
+  /** per-boat AI block length (0 = no NPC pilot in this layout; AI_BLOCK_LEN otherwise) — §T.186 */
+  AI_LEN: 13,
+  /**
+   * §T.188 main → stepper: bit i set ⇒ boat i makes and receives no boat↔boat contact this tick (respawn ghost, or
+   * placed since the last kick — its WORLD pose is the pre-teleport one). One mask every shard reads, so both boats
+   * of a pair agree (§V2). Boats ≥ 32 cannot collide (sea-physics/boatCollide throws).
+   */
+  CONTACT_OFF_MASK: 14,
+  /** §T.181 multi-tick kick: rows in the BATCH region (0 = no batch region; the layout is byte-identical to before) */
+  BATCH_CAP: 15,
 } as const;
 export const HEADER_I32 = 16;
 
@@ -107,19 +117,59 @@ export const B = {
 } as const;
 export const BOAT_FIXED = B.WAKE;
 
+/**
+ * NPC PILOT BLOCK (§T.186), appended after a boat's wake samples ONLY when the layout is built with
+ * `aiLen: AI_BLOCK_LEN` (a fleet with a pilot setup). A layout without it is byte-identical to before.
+ *   AI OUT  AI_OUT_LEN f64   the pilot's whole per-boat memory + its applied controls   (stepper writes, hashed)
+ *   AI IN   AI_IN_LEN  f64   race standing for tick k (position, gap, state, go, …)     (main writes)
+ * Slot meanings belong to src/race/ai/aiBlock.ts; this file only reserves the bytes.
+ */
+export const AI_OUT_LEN = 24;
+export const AI_IN_LEN = 8;
+export const AI_BLOCK_LEN = AI_OUT_LEN + AI_IN_LEN;
+
 export interface LayoutSpec {
   boats: number;
   wakeCap: number;
   oceanLen: number;
   seaLen: number;
+  /** 0/absent = no NPC pilot block; AI_BLOCK_LEN = one per boat (§T.186) */
+  aiLen?: number;
+  /** 0/absent = no BATCH region (one tick per kick only); n = up to n ticks per kick (§T.181) */
+  batchCap?: number;
 }
 
-export function boatBlockLength(wakeCap: number): number {
-  return BOAT_FIXED + wakeCap * WAKE_SAMPLE_LEN;
+/**
+ * MULTI-TICK KICK (§T.181 S0, §V2, §V110). Appended after the last boat block ONLY when the layout is built with
+ * `batchCap > 0`; a layout without it is byte-identical to before. One kick then carries up to `batchCap` ticks,
+ * each with its OWN inputs, so a fleet that trails the page catches up in one round trip instead of one tick per
+ * round trip — and every tick is still stepped with exactly the inputs a one-tick kick would have carried.
+ *
+ *   COUNT      1 f64                   ticks in this kick; 0 ⇒ the classic kick (TIME/OCEAN/SEA/CONTROLS as written)
+ *   PREV POSE  boats × 13 f64          each owned boat's pose BEFORE the kick's last tick (stepper writes) — the
+ *                                      render interpolation pair of a multi-tick kick, from stepper output
+ *   ROW j      tick, time, contact-off mask, ocean[oceanLen], sea[seaLen], per boat: controls[4] (+ AI IN[8] when aiLen)
+ *                                      main writes; the stepper copies row j into the normal slots, then steps
+ */
+export const BATCH_ROW_FIXED = 3;
+/** row slots; CONTACT_OFF_MASK is the §T.188 header mask for THAT tick (a uint32 held exactly in a double) */
+export const BATCH_ROW = { TICK: 0, TIME: 1, CONTACT_OFF_MASK: 2, PARAMS: 3 } as const;
+
+export function batchRowLength(s: LayoutSpec): number {
+  return BATCH_ROW_FIXED + s.oceanLen + s.seaLen + s.boats * (CONTROL_LEN + (s.aiLen ? AI_IN_LEN : 0));
+}
+
+export function batchRegionLength(s: LayoutSpec): number {
+  const cap = s.batchCap ?? 0;
+  return cap > 0 ? 1 + s.boats * POSE_LEN + cap * batchRowLength(s) : 0;
+}
+
+export function boatBlockLength(wakeCap: number, aiLen = 0): number {
+  return BOAT_FIXED + wakeCap * WAKE_SAMPLE_LEN + aiLen;
 }
 
 export function layoutByteLength(s: LayoutSpec): number {
-  return (HEADER_END_F64 + s.oceanLen + s.seaLen + s.boats * POSE_LEN + s.boats * boatBlockLength(s.wakeCap)) * 8;
+  return (HEADER_END_F64 + s.oceanLen + s.seaLen + s.boats * POSE_LEN + s.boats * boatBlockLength(s.wakeCap, s.aiLen ?? 0) + batchRegionLength(s)) * 8;
 }
 
 type AnyBuffer = ArrayBuffer | SharedArrayBuffer;
@@ -157,6 +207,10 @@ export class BoatSimLayout {
       i32[H.SEA_LEN] = spec.seaLen;
       i32[H.SHARD_START] = 0;
       i32[H.SHARD_END] = spec.boats;
+      const ai = spec.aiLen ?? 0;
+      if (ai !== 0 && ai !== AI_BLOCK_LEN) throw new Error(`sim layout: aiLen must be 0 or ${AI_BLOCK_LEN}, got ${ai}`);
+      i32[H.AI_LEN] = ai;
+      i32[H.BATCH_CAP] = spec.batchCap ?? 0;
     }
     if (i32[H.MAGIC] !== LAYOUT_MAGIC || i32[H.VERSION] !== LAYOUT_VERSION) {
       throw new Error(`sim layout: bad magic/version ${i32[H.MAGIC]}/${i32[H.VERSION]}`);
@@ -166,6 +220,9 @@ export class BoatSimLayout {
       wakeCap: i32[H.WAKE_CAP],
       oceanLen: i32[H.OCEAN_LEN],
       seaLen: i32[H.SEA_LEN],
+      // present only when set, so a pilot-less layout's spec is exactly what it was before §T.186
+      ...(i32[H.AI_LEN] > 0 ? { aiLen: i32[H.AI_LEN] } : {}),
+      ...(i32[H.BATCH_CAP] > 0 ? { batchCap: i32[H.BATCH_CAP] } : {}),
     });
     if (buffer.byteLength < layoutByteLength(this.spec)) {
       throw new Error(`sim layout: buffer ${buffer.byteLength} B too short for its own header`);
@@ -174,7 +231,7 @@ export class BoatSimLayout {
     this.seaOffset = this.oceanOffset + this.spec.oceanLen;
     this.worldOffset = this.seaOffset + this.spec.seaLen;
     this.boatsOffset = this.worldOffset + this.spec.boats * POSE_LEN;
-    this.blockLength = boatBlockLength(this.spec.wakeCap);
+    this.blockLength = boatBlockLength(this.spec.wakeCap, this.spec.aiLen ?? 0);
     this.bind(buffer);
   }
 
@@ -196,10 +253,41 @@ export class BoatSimLayout {
     return this.worldOffset + i * POSE_LEN;
   }
 
-  /** a byte-exact copy of the stepper's OUT region for one boat — what the V2 hash is taken over */
+  /** start of boat i's NPC pilot block (AI OUT, then AI IN); throws when the layout has none */
+  aiOffset(i: number): number {
+    if (!this.spec.aiLen) throw new Error('sim layout: no AI block (build the layout with aiLen)');
+    return this.boatOffset(i) + boatBlockLength(this.spec.wakeCap);
+  }
+
+  /** start of the BATCH region (its COUNT slot); throws when the layout has none (§T.181) */
+  batchOffset(): number {
+    if (!this.spec.batchCap) throw new Error('sim layout: no BATCH region (build the layout with batchCap)');
+    return this.boatsOffset + this.spec.boats * this.blockLength;
+  }
+
+  /** boat i's PREV POSE slot in the BATCH region */
+  batchPrevPoseOffset(i: number): number {
+    if (!(i >= 0 && i < this.spec.boats)) throw new Error(`sim layout: boat ${i} out of [0, ${this.spec.boats})`);
+    return this.batchOffset() + 1 + i * POSE_LEN;
+  }
+
+  /** start of batch row j */
+  batchRowOffset(j: number): number {
+    const cap = this.spec.batchCap ?? 0;
+    if (!(j >= 0 && j < cap)) throw new Error(`sim layout: batch row ${j} out of [0, ${cap})`);
+    return this.batchOffset() + 1 + this.spec.boats * POSE_LEN + j * batchRowLength(this.spec);
+  }
+
+  /** boat i's controls inside row `rowOffset` (AI IN, when present, follows at + CONTROL_LEN) */
+  batchBoatInputOffset(rowOffset: number, i: number): number {
+    if (!(i >= 0 && i < this.spec.boats)) throw new Error(`sim layout: boat ${i} out of [0, ${this.spec.boats})`);
+    return rowOffset + BATCH_ROW_FIXED + this.spec.oceanLen + this.spec.seaLen + i * (CONTROL_LEN + (this.spec.aiLen ? AI_IN_LEN : 0));
+  }
+
+  /** a byte-exact copy of the stepper's OUT region for one boat — what the V2 hash is taken over (AI OUT included, AI IN not) */
   outRange(i: number): [number, number] {
     const o = this.boatOffset(i);
-    return [o + B.POSE, o + this.blockLength];
+    return [o + B.POSE, o + boatBlockLength(this.spec.wakeCap) + (this.spec.aiLen ? AI_OUT_LEN : 0)];
   }
 }
 

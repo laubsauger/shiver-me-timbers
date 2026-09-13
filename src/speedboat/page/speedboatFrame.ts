@@ -10,24 +10,24 @@
  *                renderBoats hero + rivals at the interpolated poses, the lens, then the
  *                           camera-derived passes (clouds, reflection, surface)
  *
- * §V95 NOTE: `renderSea` repeats the sea-update sequence `raft/raftFrame.renderSea` runs (minus
- * the raft's vessel calls). tech-research §8 S0 planned that shared sequence as
- * `core/seaFrame.ts renderSeaCommon`; it does not exist yet and neither `src/core` nor `src/raft`
- * is this task's to reshape, so the extraction is reported rather than done. Nothing here is a
- * second implementation of a system — every call is into the shared module.
+ * §V95: the sea sequence (spectrum + mirror, wake track, sky → rain, spray, shore, flowfoam,
+ * camera passes, surface) is `core/seaFrame.ts`, the same runs `raft/raftFrame.ts` calls; this
+ * file adds only the speedboat's own calls between them.
+ *
+ * CONTACT VIEWS (§V101): `HullWaterStations` reads the player's contact patch after each step —
+ * its burial rates feed the sim churn (`setHullBurial`, §T.70) and its per-station waterline
+ * feeds the hull wetline, the same way the raft's `HullContact` feeds both.
  *
  * WAKE ANCHOR (§V105): `wakeSim.tick(player.state, …)` takes the SimState ship — the pose rigid6
  * just wrote — never the camera and never the interpolated render view.
  */
-import { Color, Quaternion, Vector2, Vector3, type PerspectiveCamera } from 'three/webgpu';
+import { Quaternion, Vector3 } from 'three/webgpu';
 import type { App } from '../../core/app';
-import { rotateVec } from '../../core/quat';
-import { oceanParams } from '../../ocean';
-import { skyParams } from '../../params/sky';
+import { createSeaFrame } from '../../core/seaFrame';
+import { HullWaterStations } from '../../sea-physics/hullWater';
 import type { Rigid6State } from '../../sea-physics/rigidBody';
 import type { SkyHandle } from '../../sky';
 import type { ShipState, SimState } from '../../state/simState';
-import { palmWindStrength } from '../../vegetation';
 import type { PropWashInput } from '../../wake/propWash';
 import type { HydroSample } from '../../wake/wakeSolverMath';
 import type { WeatherSample } from '../../weather';
@@ -49,9 +49,6 @@ export interface SpeedboatFrameDeps {
   placeCamera(view: ShipState, frameDt: number): void;
 }
 
-const hazeFallback = new Color(skyParams.horizonColor);
-const NO_CONTACTS = new Float32Array(0);
-
 export function createSpeedboatFrame(d: SpeedboatFrameDeps) {
   const { app, sea, boats, sky, state, player } = d;
   const boat = player.state;
@@ -62,16 +59,19 @@ export function createSpeedboatFrame(d: SpeedboatFrameDeps) {
   const currQuat = new Quaternion();
   const prevVel = new Vector3();
   const currVel = new Vector3();
-  const windVec = new Vector2();
   const tmpDir = new Vector3();
   const view: ShipState = structuredClone(boat);
   const npcView: Rigid6State = { position: [0, 0, 0], quaternion: [0, 0, 0, 1], velocity: [0, 0, 0], angularVelocity: [0, 0, 0] };
   const wakeSamples: HydroSample[] = [];
   const jets: PropWashInput[] = [];
-  let lastOceanTime = Number.NaN;
+  const seaFrame = createSeaFrame({ app, sea, sky, state, weatherHere: d.weatherHere, waterAt: d.waterAt });
+  // §V101: burial rates + per-station waterline, off the contact patch the player's step just used
+  const stations = new HullWaterStations(hull);
   let ticked = false;
 
   const snap = (): void => {
+    // V108: a teleport is not a burial — the next tick reports zero rate
+    stations.reset();
     currPos.fromArray(boat.position);
     currQuat.fromArray(boat.quaternion);
     currVel.fromArray(boat.velocity);
@@ -89,25 +89,19 @@ export function createSpeedboatFrame(d: SpeedboatFrameDeps) {
     snap,
     /** FIXED TICK, before the player's physics: the sea this tick's forces read */
     tickSea(): void {
-      sea.ocean.advanceSpectrum(oceanParams);
-      sea.cpuOcean.update(state.time);
+      seaFrame.tickSpectrum();
     },
     /** FIXED TICK, after the player's physics: wake, jets, spray, interpolation pair */
     tickBoat(dt: number): void {
       player.wakeSamples(wakeSamples);
       player.jets(jets);
-      const fwd = rotateVec(boat.quaternion, [0, 0, 1]);
-      const speed = Math.hypot(boat.velocity[0], boat.velocity[2]);
+      stations.update(player.hw, boat, dt);
       const ff = sea.flowFoam;
-      ff.setCenter(boat.position[0], boat.position[2]);
-      ff.setFlowDir([-boat.velocity[0], -boat.velocity[2]]);
-      ff.setShip([boat.position[0], boat.position[2]], Math.atan2(fwd[0], fwd[2]), speed, hull.stemZ, hull.transomZ, hull.beam);
-      ff.advanceWake(dt);
+      seaFrame.trackWake(boat, hull.stemZ, hull.transomZ, hull.beam, dt);
       ticked = true;
+      // §T.70 / §T.180 e: her chine stations' burial rates feed the sim churn; the sea's band slope the breaking increment
+      ff.setHullBurial(stations);
       ff.setAmbientSea(sea.ocean.cascades);
-      // HOOK NEEDED (§T.180 e): burial rates come from sea-physics `HullContact`; HullWater has no
-      // `HullBurialInput` view yet, so the sim churn gets no heave/pitch foam from this hull
-      ff.setHullBurial(null);
       ff.setPropWash(jets);
       // §V105: anchored on the SIM pose rigid6 just wrote; §V101: the samples of that same step
       ff.wakeSim?.tick(boat, wakeSamples, hull.stemZ, dt, jets);
@@ -121,44 +115,14 @@ export function createSpeedboatFrame(d: SpeedboatFrameDeps) {
     },
     /** RENDER, part one: everything that does not depend on this frame's camera */
     renderSea(frameDt: number, paused: boolean): void {
-      sky.setShadowFocus(boat.position[0], boat.position[1], boat.position[2]);
-      sky.update(skyParams.timeOfDay, { direction: state.wind.direction, speed: state.wind.speed, dt: frameDt });
-      if (paused || state.time !== lastOceanTime) {
-        lastOceanTime = state.time;
-        sea.ocean.update(app.renderer, state.time);
-      }
-      sea.foam.update(app.renderer, frameDt);
-      sea.caustics.update(sky.sunDirection);
-      sea.fetchField.update(oceanParams.windDirection);
-      sea.rain.update({ intensity: d.weatherHere.rain, dt: frameDt, seaSigma: sea.ocean.heightRms });
-      // HOOK NEEDED (§V101): a per-station waterline view of HullWater for the wetline; until then it dries
-      boats.wetline.updateFromContacts(frameDt, NO_CONTACTS);
-      sea.spray.centerUniform.value.set(boat.position[0], boat.position[2]);
-      windVec.set(Math.cos(state.wind.direction) * state.wind.speed, Math.sin(state.wind.direction) * state.wind.speed);
-      if (sea.spray.mesh.visible) {
-        sea.spray.update(app.renderer, windVec, {
-          heightRms: sea.ocean.heightRms, jacobianRms: sea.ocean.jacobianRms, choppiness: sea.ocean.effectiveChoppiness(),
-        });
-      }
-      sea.archipelago.update(
-        {
-          time: state.time,
-          windDir: [Math.cos(state.wind.direction), Math.sin(state.wind.direction)],
-          windStrength: palmWindStrength(state.wind.speed),
-          swell: sea.ocean.heightRms * 2,
-          sunDirection: sky.sunDirection,
-          hazeColor: app.scene.fog?.color ?? hazeFallback,
-          cameraPosition: app.camera.position,
-          camera: app.camera,
-        },
-        d.waterAt,
-      );
+      seaFrame.renderSeaBase(boat, frameDt, paused);
+      // §V101: the ship-local height the sea reached at each chine station, from the same contact patch
+      boats.wetline.updateFromHullContact(frameDt, stations.stations, stations.waterlineY);
+      seaFrame.renderSpray(boat);
+      seaFrame.renderShore();
       // a frame can land before the first tick (the loop runs 0 ticks on a short first frame): the
       // wake track is sim state, advanced only by tickBoat, and flowFoam.update reports an unadvanced one
-      if (ticked) {
-        sea.flowFoam.renderInjection(app.renderer, app.scene);
-        sea.flowFoam.update(app.renderer, frameDt);
-      }
+      if (ticked) seaFrame.renderFlowFoam(frameDt);
     },
     /** RENDER, part two: boats at the interpolated poses, the lens, the camera-derived passes */
     renderBoats(alpha: number, frameDt: number): { headingRad: number; knots: number } {
@@ -177,9 +141,8 @@ export function createSpeedboatFrame(d: SpeedboatFrameDeps) {
         o.quaternion.fromArray(npcView.quaternion);
       }
       d.placeCamera(view, frameDt);
-      sea.clouds.update(state.time, sky.sunDirection);
-      sea.reflection?.update(app.camera as PerspectiveCamera, state.time);
-      sea.surface.update(app.camera, state.time, sky.sunDirection);
+      seaFrame.renderCameraPasses();
+      seaFrame.renderSurface();
       const fwd = g.getWorldDirection(tmpDir);
       return { headingRad: Math.atan2(fwd.x, fwd.z), knots: Math.hypot(boat.velocity[0], boat.velocity[2]) * 1.944 };
     },

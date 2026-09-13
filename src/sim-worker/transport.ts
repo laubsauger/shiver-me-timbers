@@ -22,7 +22,10 @@
 import type { OceanParams } from '../params/ocean';
 import type { SeaPhysicsParams } from '../params/seaPhysics';
 import { BoatSimLayout, F, H, KICK_STOP, STATUS_ERROR, layoutByteLength, type LayoutSpec } from './layout';
+import type { PilotSetup } from '../race/ai/pilot';
+import type { BoatContactSetup } from '../sea-physics/boatCollide';
 import { BoatSimCore } from './stepCore';
+import { stepKick } from './batch';
 
 export type TransportKind = 'sab' | 'transfer' | 'main';
 
@@ -37,6 +40,10 @@ export interface SimInit {
   seed: number;
   oceanParams: OceanParams;
   seaParams: SeaPhysicsParams;
+  /** §T.186 NPC pilot setup (lines, profiles, archetypes); crosses to the worker once, in the init message */
+  pilot?: PilotSetup;
+  /** §T.188 collision hook (plain data: static colliders + switches); crosses to the worker once, in the init message */
+  contacts?: BoatContactSetup;
 }
 
 export type SimMessage =
@@ -87,7 +94,10 @@ function ownerFn(ranges: [number, number][]): (i: number) => number {
 
 /** a deep, independent copy: the in-process core must not share the page's live singletons either */
 function cloneInit(init: SimInit): SimInit {
-  return { seed: init.seed, oceanParams: structuredClone(init.oceanParams), seaParams: structuredClone(init.seaParams) };
+  const out: SimInit = { seed: init.seed, oceanParams: structuredClone(init.oceanParams), seaParams: structuredClone(init.seaParams) };
+  if (init.pilot) out.pilot = structuredClone(init.pilot);
+  if (init.contacts) out.contacts = structuredClone(init.contacts);
+  return out;
 }
 
 // ── main thread ────────────────────────────────────────────────────────────────────────────
@@ -112,8 +122,9 @@ export class MainThreadTransport implements BoatStepTransport {
   kick(): void {
     const L = this.layouts[0];
     const t0 = performance.now();
-    this.core.step(L);
-    L.f64[F.STEP_MS] = performance.now() - t0;
+    // §T.181: one tick, or every row of a multi-tick kick; STEP_MS stays per TICK
+    const ticks = stepKick(this.core, L);
+    L.f64[F.STEP_MS] = (performance.now() - t0) / ticks;
     L.i32[H.DONE] = ++L.i32[H.KICK];
   }
 

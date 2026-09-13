@@ -1,0 +1,161 @@
+{
+  "name": "speedboat course furniture contract",
+  "version": 1,
+  "about": "ONE contract read by the Blender course build (scripts/blender/course/*.py), the checker (scripts/blender/course/checkCourseGlb.mjs), the runtime (src/circuit/courseFurniture.ts) and tests/circuitAssets.test.ts. docs/speedboat/circuit.md explains each rule. Boats have their own contract (src/speedboat/assets/assetContract.json); the course reuses the pipeline, not the slots.",
+  "frame": {
+    "units": "metres",
+    "up": "+Y",
+    "forward": "+Z = the face toward the boats that approach it (daymark, lamp board, street front)",
+    "origin": "still water (y = 0) at the spar / buoy / stake / pylon axis; the old GROUND FLOOR for roofs; still water at the mast axis for the tower",
+    "blender": "Blender (x, y, z) = three (x, -z, y), as the boat pipeline (sb_conventions.three_to_blender)",
+    "instancing": "every node has an identity transform; the runtime draws each variant node as one InstancedMesh per primitive per LOD"
+  },
+  "maxMaterials": 4,
+  "maxTexturesPerMaterial": 4,
+  "slotTextureScale": { "C_Lamp": 0.125 },
+  "slots": {
+    "C_Steel": {
+      "alphaMode": "OPAQUE",
+      "surface": "galvanised and painted structural steel: lattice, spars, cages, rails, tin roofs"
+    },
+    "C_Paint": {
+      "alphaMode": "OPAQUE",
+      "surface": "painted panels: daymarks, buoy bodies, hazard and chequer bands, reflective tape, stencils"
+    },
+    "C_Build": {
+      "alphaMode": "OPAQUE",
+      "surface": "shingles, brick, clapboard, timber, concrete, ceramic"
+    },
+    "C_Lamp": {
+      "alphaMode": "OPAQUE",
+      "emissive": true,
+      "surface": "lamp lenses and strobes; the runtime drives emissive per node from extras.lamps"
+    }
+  },
+  "assets": {
+    "course_gate_pole": {
+      "kind": "gatePole",
+      "instances": [
+        ["Spar", "Strobe", "BoardSquare", "Numeral*"],
+        ["Spar", "Strobe", "BoardTriangle", "Numeral*"],
+        ["Spar", "Strobe", "BoardChequer"]
+      ],
+      "triBudget": [7000, 2000, 450],
+      "drawBudget": [10, 8, 5],
+      "textureSize": 1024,
+      "switchDistance": [90, 260],
+      "variants": ["Spar", "Strobe", "BoardSquare", "BoardTriangle", "BoardChequer", "Numeral1", "Numeral2", "Numeral3", "Numeral4", "Numeral5", "Numeral6", "Numeral7", "Numeral8"]
+    },
+    "course_turn_buoy": {
+      "kind": "turnBuoy",
+      "instances": [
+        ["Buoy", "Lantern", "Tag*"]
+      ],
+      "triBudget": [16000, 4000, 900],
+      "drawBudget": [8, 6, 4],
+      "textureSize": 1024,
+      "switchDistance": [110, 320],
+      "variants": ["Buoy", "Lantern", "Tag1", "Tag2", "Tag3"]
+    },
+    "course_bar_stake": {
+      "kind": "barStake",
+      "instances": [
+        ["Stake"]
+      ],
+      "triBudget": [3000, 900, 200],
+      "drawBudget": [3, 3, 2],
+      "textureSize": 512,
+      "switchDistance": [70, 200],
+      "variants": ["Stake"]
+    },
+    "course_pylon": {
+      "kind": "pylon",
+      "instances": [
+        ["Pylon", "Insulators"]
+      ],
+      "triBudget": [30000, 7000, 1400],
+      "drawBudget": [4, 4, 3],
+      "textureSize": 1024,
+      "switchDistance": [220, 600],
+      "variants": ["Pylon", "Insulators"]
+    },
+    "course_radio_tower": {
+      "kind": "tower",
+      "instances": [
+        ["Mast", "Hut", "LampRig", "StartLamp1", "StartLamp2", "StartLamp3", "StartLamp4", "StartLamp5", "StartGreen", "Beacons", "GuyAnchor", "GuyAnchor", "GuyAnchor"]
+      ],
+      "triBudget": [120000, 26000, 6000],
+      "drawBudget": [28, 22, 16],
+      "textureSize": 2048,
+      "switchDistance": [260, 900],
+      "variants": ["Mast", "Hut", "LampRig", "StartLamp1", "StartLamp2", "StartLamp3", "StartLamp4", "StartLamp5", "StartGreen", "Beacons", "GuyAnchor"]
+    },
+    "course_roofs": {
+      "kind": "roofs",
+      "instances": [
+        ["Gable"],
+        ["GableChimney"],
+        ["Hip"],
+        ["Shed"],
+        ["Steeple"],
+        ["WaterTower"]
+      ],
+      "triBudget": [12000, 3000, 700],
+      "drawBudget": [4, 4, 3],
+      "textureSize": 2048,
+      "switchDistance": [120, 380],
+      "variants": ["Gable", "GableChimney", "Hip", "Shed", "Steeple", "WaterTower"]
+    }
+  },
+  "roofs": {
+    "about": "per variant, metres above the old ground floor (the placement's `floor`). ridge = highest roof line, eave = lowest roof edge, top = highest point (chimney, parapet, spire, tank).",
+    "Gable": {
+      "eave": 6.1,
+      "ridge": 9.2,
+      "top": 9.3
+    },
+    "GableChimney": {
+      "eave": 6.1,
+      "ridge": 9.2,
+      "top": 10.7
+    },
+    "Hip": {
+      "eave": 6.0,
+      "ridge": 8.7,
+      "top": 8.8
+    },
+    "Shed": {
+      "eave": 7.4,
+      "ridge": 8.4,
+      "top": 9.8
+    },
+    "Steeple": {
+      "eave": 8.2,
+      "ridge": 12.6,
+      "top": 25.0
+    },
+    "WaterTower": {
+      "eave": 14.5,
+      "ridge": 18.2,
+      "top": 18.9
+    }
+  },
+  "lod": {
+    "levels": 3,
+    "hysteresis": 0.1
+  },
+  "extras": {
+    "root": ["assetKind", "contractVersion", "variants"],
+    "lodGroup": ["lodLevel"],
+    "mesh": ["lodLevel", "variant"]
+  },
+  "names": {
+    "root": "CF_{asset}",
+    "lodGroup": "LOD{level}",
+    "meshSuffix": "_LOD{level}"
+  },
+  "tolerance": {
+    "weld": 1e-05
+  },
+  "budgetNote": "triBudget / drawBudget are per PLACED INSTANCE: the heaviest of `instances` (each a list of variant nodes one placement draws; 'Name*' = the heaviest variant matching the prefix; a variant may repeat). Draws count primitives before instancing merges them across placements."
+}

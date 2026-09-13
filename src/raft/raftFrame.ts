@@ -9,25 +9,27 @@
  * `flowFoam.renderInjection` traverses for, and every camera-derived pass
  * (clouds, reflection) runs in `renderVessel` AFTER the follow cam has
  * written the lens for this frame.
+ *
+ * §V95: the sea runs (spectrum, wake track, sky → rain, spray, shore,
+ * flowfoam, camera passes, surface) are `core/seaFrame.ts`, shared with the
+ * speedboat page; this file keeps only the raft's own calls between them.
  */
 import type { BowContactInput } from '../foam/sprayMath';
-import { Color, Quaternion, Vector2, Vector3, type PerspectiveCamera } from 'three/webgpu';
+import { Quaternion, Vector3 } from 'three/webgpu';
 import type { App } from '../core/app';
 import type { SkyHandle } from '../sky';
 import type { ShipState, SimState } from '../state/simState';
 import type { WeatherSample } from '../weather';
 import type { AudioSystem } from '../audio';
-import { oceanParams } from '../ocean';
-import { skyParams } from '../params/sky';
 import { raftSeaParams } from '../params/seaPhysics';
 import { stepShipBuoyancy } from '../sea-physics/buoyancy';
 import { stationFrame } from '../wake/wakeCalibration';
 import type { HydroSample } from '../wake/wakeSolverMath';
 import { raftContactPoints } from '../sailing/raftBeaching';
 import { updateShipRig } from '../ship/rigTrim';
-import { palmWindStrength } from '../vegetation';
 import { rotateVec } from '../core/quat';
 import { createShipAudioFeed } from '../core/bootShared';
+import { createSeaFrame } from '../core/seaFrame';
 import { stepRaftBeach, type BeachHolder } from './raftShip';
 import type { RaftSea, RaftVessel } from './raftScene';
 
@@ -48,8 +50,6 @@ export interface RaftFrameDeps {
   placeCamera(view: ShipState, frameDt: number): void;
 }
 
-const hazeFallback = new Color(skyParams.horizonColor);
-
 export function createRaftFrame(d: RaftFrameDeps) {
   const { app, sea, vessel, sky, state, raft } = d;
   const prevPos = new Vector3();
@@ -60,7 +60,6 @@ export function createRaftFrame(d: RaftFrameDeps) {
   // pose, or it steps at 60 Hz under a faster render (main.ts does the same)
   const prevVel = new Vector3();
   const currVel = new Vector3();
-  const windVec = new Vector2();
   const bowWorld = new Vector3();
   const shipVel = new Vector3();
   const shipFwd = new Vector3();
@@ -69,7 +68,8 @@ export function createRaftFrame(d: RaftFrameDeps) {
   // the log undersides (§T.100): a pure function of raftParams, taken once —
   // the raft is not reshaped mid-sail, and the set is ~60 points a tick
   const contacts = raftContactPoints();
-  let lastOceanTime = Number.NaN;
+  // §V95: the sea sequence both hero-vessel entries run (core/seaFrame.ts)
+  const seaFrame = createSeaFrame({ app, sea, sky, state, weatherHere: d.weatherHere, waterAt: d.waterAt });
   // §T W2b: the raft's wake sources, written by her buoyancy step (54 reused station objects)
   const wakeSamples: HydroSample[] = [];
   let bowImmersion = 0;
@@ -107,17 +107,9 @@ export function createRaftFrame(d: RaftFrameDeps) {
     snap,
     /** sim tick, AFTER sailing wrote x/z/yaw: wake, buoyancy, contact, beaching, deck water */
     tickSea(dt: number): { aground: boolean; beached: boolean } {
-      sea.ocean.advanceSpectrum(oceanParams);
-      sea.cpuOcean.update(state.time);
-      const fwd = rotateVec(raft.quaternion, [0, 0, 1]);
+      seaFrame.tickSpectrum();
       const speed = Math.hypot(raft.velocity[0], raft.velocity[2]);
-      sea.flowFoam.setCenter(raft.position[0], raft.position[2]);
-      sea.flowFoam.setFlowDir([-raft.velocity[0], -raft.velocity[2]]);
-      sea.flowFoam.setShip(
-        [raft.position[0], raft.position[2]], Math.atan2(fwd[0], fwd[2]), speed,
-        vessel.stemZ, vessel.transomZ, vessel.beamHalf * 2,
-      );
-      sea.flowFoam.advanceWake(dt);
+      seaFrame.trackWake(raft, vessel.stemZ, vessel.transomZ, vessel.beamHalf * 2, dt);
       // the raft's own displacement (§T.109): 15 t on a 0.3 m draft, not the galleon's 604 t on 2 m
       // §V101: the SAME station loop that floats her writes her wake samples —
       // only while a sim wake exists to read them
@@ -151,24 +143,9 @@ export function createRaftFrame(d: RaftFrameDeps) {
     },
     /** render, part one: everything that does not depend on this frame's camera */
     renderSea(frameDt: number, paused: boolean): void {
-      sky.setShadowFocus(raft.position[0], raft.position[1], raft.position[2]);
-      sky.update(skyParams.timeOfDay, { direction: state.wind.direction, speed: state.wind.speed, dt: frameDt });
-      if (paused || state.time !== lastOceanTime) {
-        lastOceanTime = state.time;
-        sea.ocean.update(app.renderer, state.time);
-      }
-      sea.foam.update(app.renderer, frameDt);
-      sea.caustics.update(sky.sunDirection);
-      sea.fetchField.update(oceanParams.windDirection);
-      sea.rain.update({ intensity: d.weatherHere.rain, dt: frameDt, seaSigma: sea.ocean.heightRms });
+      seaFrame.renderSeaBase(raft, frameDt, paused);
       vessel.wetline.updateFromHullContact(frameDt, vessel.hullContact.stations, vessel.hullContact.depth);
-      sea.spray.centerUniform.value.set(raft.position[0], raft.position[2]);
-      windVec.set(Math.cos(state.wind.direction) * state.wind.speed, Math.sin(state.wind.direction) * state.wind.speed);
-      if (sea.spray.mesh.visible) {
-        sea.spray.update(app.renderer, windVec, {
-          heightRms: sea.ocean.heightRms, jacobianRms: sea.ocean.jacobianRms, choppiness: sea.ocean.effectiveChoppiness(),
-        });
-      }
+      seaFrame.renderSpray(raft);
       const bowLocal = rotateVec(raft.quaternion, [0, 0, vessel.stemZ]);
       bowWorld.set(raft.position[0] + bowLocal[0], raft.position[1] + bowLocal[1], raft.position[2] + bowLocal[2]);
       shipVel.fromArray(raft.velocity);
@@ -184,24 +161,8 @@ export function createRaftFrame(d: RaftFrameDeps) {
           contact: bowContact,
         });
       }
-      sea.archipelago.update(
-        {
-          time: state.time,
-          windDir: [Math.cos(state.wind.direction), Math.sin(state.wind.direction)],
-          windStrength: palmWindStrength(state.wind.speed),
-          swell: sea.ocean.heightRms * 2,
-          sunDirection: sky.sunDirection,
-          hazeColor: app.scene.fog?.color ?? hazeFallback,
-          cameraPosition: app.camera.position,
-          // §T.112g: the per-instance vegetation cull needs the frustum, not just
-          // the position. Passing the camera is the whole activation — the culler
-          // is built and tested; without this line it is inert.
-          camera: app.camera,
-        },
-        d.waterAt,
-      );
-      sea.flowFoam.renderInjection(app.renderer, app.scene);
-      sea.flowFoam.update(app.renderer, frameDt);
+      seaFrame.renderShore();
+      seaFrame.renderFlowFoam(frameDt);
     },
     /** render, part two: the hull at the interpolated pose, the lens, then the camera-derived passes */
     renderVessel(alpha: number, frameDt: number): { headingRad: number; knots: number } {
@@ -214,15 +175,14 @@ export function createRaftFrame(d: RaftFrameDeps) {
       renderShipView.velocity[1] = prevVel.y + (currVel.y - prevVel.y) * alpha;
       renderShipView.velocity[2] = prevVel.z + (currVel.z - prevVel.z) * alpha;
       d.placeCamera(renderShipView, frameDt);
-      sea.clouds.update(state.time, sky.sunDirection);
-      sea.reflection?.update(app.camera as PerspectiveCamera, state.time);
+      seaFrame.renderCameraPasses();
       // §V95: the SAME call the two square-riggers make in main.ts. The raft
       // carries no braceable yards, so `brace` is absent and the rig leaves
       // them where the blueprint put them — one path, not a raft-shaped copy.
       const rig = updateShipRig(raft, vessel.assembly, frameDt);
       drop = rig.drop;
       vessel.updateRopes(rig.furl);
-      sea.surface.update(app.camera, state.time, sky.sunDirection);
+      seaFrame.renderSurface();
       const fwd = g.getWorldDirection(tmpDir);
       return {
         headingRad: Math.atan2(fwd.x, fwd.z),

@@ -472,6 +472,57 @@ export function stepRigid6(
   }
 }
 
+/**
+ * CONTACT IMPULSE (§T.188, additive). Apply the world impulse J (N·s) at the world arm r (m, from the CG):
+ *   v ← v + J/m ;  ω ← ω + R·I⁻¹·Rᵀ·(r × J)
+ * RIGID mass and inertia only, no added mass: a boat↔boat or boat↔rock contact is resolved on the two
+ * rigid momenta, so Σ m·v of a pair is conserved exactly when the pair gets ±J (tests/boatCollide). The
+ * water's share arrives next substep through the hull contact, as for any other velocity change.
+ * VELOCITIES ONLY — position and quaternion stay this file's step's to integrate (V100), so this is a
+ * velocity-level constraint response, not a second integrator. Allocation-free; fails loud on NaN.
+ */
+export function applyRigid6Impulse(
+  state: Rigid6State,
+  body: Rigid6Body,
+  rx: number,
+  ry: number,
+  rz: number,
+  jx: number,
+  jy: number,
+  jz: number,
+): void {
+  if (!Number.isFinite(rx + ry + rz + jx + jy + jz)) {
+    throw new Error(`rigid6: non-finite impulse r=${rx},${ry},${rz} J=${jx},${jy},${jz}`);
+  }
+  const v = state.velocity;
+  const w = state.angularVelocity;
+  const q = state.quaternion;
+  const im = 1 / body.mass;
+  v[0] += jx * im;
+  v[1] += jy * im;
+  v[2] += jz * im;
+  // L = r × J (world) → body → ÷I → world
+  const lx = ry * jz - rz * jy;
+  const ly = rz * jx - rx * jz;
+  const lz = rx * jy - ry * jx;
+  const qx = -q[0];
+  const qy = -q[1];
+  const qz = -q[2];
+  const qw = q[3];
+  let tx = 2 * (qy * lz - qz * ly);
+  let ty = 2 * (qz * lx - qx * lz);
+  let tz = 2 * (qx * ly - qy * lx);
+  const bx = (lx + qw * tx + (qy * tz - qz * ty)) / body.inertia[0];
+  const by = (ly + qw * ty + (qz * tx - qx * tz)) / body.inertia[1];
+  const bz = (lz + qw * tz + (qx * ty - qy * tx)) / body.inertia[2];
+  tx = 2 * (-qy * bz + qz * by);
+  ty = 2 * (-qz * bx + qx * bz);
+  tz = 2 * (-qx * by + qy * bx);
+  w[0] += bx + qw * tx + (-qy * tz + qz * ty);
+  w[1] += by + qw * ty + (-qz * tx + qx * tz);
+  w[2] += bz + qw * tz + (-qx * ty + qy * tx);
+}
+
 /** kinetic energy ½m|v|² + ½ω_b·Iω_b (rigid inertia only), J */
 export function rigid6KineticEnergy(state: Readonly<Rigid6State>, body: Rigid6Body): number {
   const wb = worldToBody(state.quaternion, state.angularVelocity);

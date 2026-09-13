@@ -85,8 +85,8 @@ transfer:   main  postMessage({type:'tick', buffer}, [buffer]) → worker steps 
 - **Browser main thread.** `Atomics.wait` is forbidden on the browser main thread, so the page must never block.
   - **Kick at the end of a frame's sim ticks.**
   - **Collect at the next frame's first tick.** The worker gets the render/encode window (about 16 ms) to step.
-  - On a catch-up frame with several ticks, the second and later ticks `await fleet.done()`. The loop owner decides whether
-    that stall is taken in-frame or the tick moves to the next frame. Both are deterministic, because the sim is tick-indexed.
+  - On a catch-up frame with several ticks, the owed ticks go out as ONE multi-tick request (below), so nothing waits
+    in-frame and the fleet does not fall behind one tick per round trip.
 - **Tick order** (fleet.ts header), deterministic:
   1. Collect k.
   2. Read poses for render and logic.
@@ -95,7 +95,39 @@ transfer:   main  postMessage({type:'tick', buffer}, [buffer]) → worker steps 
 - **Transfer path.** While a tick is away, the buffers are not on this thread, and `BoatFleet` throws on any read or write
   in that window instead of letting it vanish. Its results also arrive only when the main thread yields to its event loop.
   That does not matter for the pipelined pattern, but it cannot be polled mid-frame the way SAB can.
-- **Render interpolation** is unchanged: the render lerps between the last two collected OUT poses, as it does today.
+- **Render interpolation** lerps between the last two collected tick poses. After a multi-tick request those are the
+  stepper's PREV POSE (its pose before the request's last tick) and its OUT pose, so the lerp still spans one tick.
+
+### Multi-tick kick (§T.181 S0)
+
+- **Layout.** `batchCap > 0` appends a BATCH region after the last boat block (`H.BATCH_CAP` = 15; without it the layout
+  is byte-identical): COUNT, PREV POSE (boats × 13), then `batchCap` rows of
+  `tick, time, contact-off mask, ocean[oceanLen], sea[seaLen], per boat controls[4] (+ AI IN[8] with aiLen)`.
+- **Main.** `setBatchTick(j, tick, time, paramsVector)`, `setBatchControls(j, i, …)` (`setBatchAiInput`), then
+  `kickBatch(n)`: rows must be consecutive ticks (checked); WORLD gets the current poses; the §T.188 placed mask rides on
+  row 0 only, the ghost mask on every row. `kick()` still exists and writes COUNT = 0.
+- **Stepper** (`batch.ts stepKick`, run by all three transports in place of `core.step`): COUNT 0 ⇒ one `core.step`, as
+  before. COUNT n ⇒ for each row: copy it into TICK / TIME / CONTACT_OFF_MASK / OCEAN+SEA (PARAMS_VERSION bumped iff a
+  leaf differs) / every boat's CONTROLS (+ AI IN); on a single-shard layout refresh WORLD from the OUT poses of tick j−1;
+  save PREV POSE before the last row; then the unchanged `BoatSimCore.step`. `STEP_MS` stays per tick.
+- **Several shards.** A shard cannot see another shard's poses mid-request, so WORLD stays the request-start snapshot.
+  Nothing reads WORLD without a pilot or contacts; with either, `fleet.maxBatch` is 1 on more than one shard.
+- **Driver** (`speedboat/page/npcFleet.ts`). `recordTick` queues every page tick's exact time and a params snapshot
+  (stored when a leaf changed), so NPC tick k runs on page tick k's sea however far the fleet trails; no tick is ever
+  dropped. `pump` kicks n = min(owed, maxBatch (60), ⌊budget / per-tick step EMA⌋ ≥ 1). Budget: 'main' 8 ms of
+  main-thread time per pump; workers max(12 ms, ¾ × measured interval between kicks). Controls are `controls(boat, tick)`
+  (a pose-reading fn could not be tick-exact inside a request). `lagTicks`, `catchUp {batches, lastBatch, maxBatch,
+  budgetTicks, maxLagTicks}` report it.
+- **Evidence** (`tests/simWorkerBatch.test.ts`, 3 boats, 480 ticks, reference = main transport one tick per kick,
+  hashed every tick): a 20 fps pattern (3 ticks/frame, results visible only after a frame boundary) plus a 360-tick
+  hidden-tab backlog with a wind shift inside it matches the reference hash at every collected tick (> 40 checkpoints)
+  and at tick 480, repaid in ≤ 8 requests of ≤ 60; a 6 ms budget gives the same hashes with every request within its
+  budget; sab×1, sab×2 and transfer×1 on real worker_threads match at all 46 request ends, and PREV POSE equals the
+  reference pose of tick k−1. Mutations (row time ignored, latest params on every row, controls of the request's first
+  tick, PREV POSE after the last step, row params not versioned) each fail 1–5 tests.
+- **Not carried per row, stated:** RESET requests (applied on the request's first tick, as with `kick`); §T.186 AI IN is
+  carried when a caller writes it per row, but the race standing for tick k needs tick k−1 poses the main thread does not
+  have mid-request, so the pilot's standings inside a request are the caller's to define (T186 integration note).
 - `workers` is configurable; the default is 1. Boats are split into contiguous ranges (`shardRanges`).
   - Each worker owns a `CpuOcean` mirror, so 2 workers cost about 1.4 ms more CPU per tick in total (see perf).
   - Splitting only pays when the boat work dominates the mirror.

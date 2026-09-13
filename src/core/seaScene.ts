@@ -55,6 +55,11 @@ export interface SeaOptions {
   wakeBackend?: WakeBackend;
   /** the sim's grid when `wakeBackend` is 'sim' — the vessel's tier (wake/wakeCalibration.ts) */
   wakeTier?: WakeSimTier;
+  /**
+   * §T.180 c: prop jets the sim foam compiles for (flowfoam `FlowFoamOptions.propJets`) — the
+   * speedboat's drive count. Construction-time (it sizes the shader); absent = none (the raft).
+   */
+  propJets?: number;
 }
 
 export function buildSea(app: App, state: SimState, sky: SkyHandle, weather: WeatherSystem, opts: SeaOptions) {
@@ -65,7 +70,13 @@ export function buildSea(app: App, state: SimState, sky: SkyHandle, weather: Wea
     domain: c.domain,
   }));
   const foam = createFoamSim(bands, oceanParams.resolution, ocean);
-  const flowFoam = createFlowFoam({ wakeBackend: opts.wakeBackend, wakeTier: opts.wakeTier });
+  // `propJets` travels only when the page asked for jets: a jet-less page's construction call is
+  // the one it always made (the raft's wiring fingerprint is unchanged, not merely equivalent)
+  const flowFoam = createFlowFoam({
+    wakeBackend: opts.wakeBackend,
+    wakeTier: opts.wakeTier,
+    ...(opts.propJets !== undefined ? { propJets: opts.propJets } : {}),
+  });
   flowFoam.setSpeedScale(opts.wakeSpeedScale);
   const clouds = createClouds({
     renderer: app.renderer,

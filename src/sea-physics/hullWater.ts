@@ -2539,3 +2539,151 @@ export function planingSubsteps(hw: HullWater, state: Readonly<Rigid6State>, dt:
   const n = Math.ceil((U * maMax * dt) / (mEff * 0.8));
   return n < 2 ? 2 : n > 4 ? 4 : n;
 }
+
+/** burial-rate clamp (m/s) for the station view — the same bound as `hullContact.ts` MAX_CONTACT_RATE (a K-tick mirror recompute steps the surface) */
+export const HULL_WATER_STATION_MAX_RATE = 20;
+
+/**
+ * PER-STATION VIEWS OF THE CONTACT for render-side consumers (§T.181 S0 hooks; additive, V77/V101). Two
+ * stations per 2D+t strip — the chine at the strip centre, per half (index 2·strip + side, side 0 = −x),
+ * exactly the points the contact itself reads (`chineV0/chineV1/chineT`, or ±chineHalfBeam at keelY when a
+ * mesh has no chine lerp). Everything is read off the SAME height patch the contact clipped the hull
+ * against this tick (`hw.patch`, the §V68 pressure head) at the pose rigid6 just wrote — no second sea
+ * sampler (V101), and the patch's `outside` counter is left as the contact left it.
+ *
+ *  - BURIAL (flowfoam `HullBurialInput`, §T.70 churn): `depth[k]` = patch height − station world y (> 0
+ *    under water) and `rate[k]` = its change per tick (> 0 burying), clamped to ±HULL_WATER_STATION_MAX_RATE,
+ *    0 on the first update after construction or `reset()` (V108: call it on every teleport/respawn).
+ *    `worldX/worldZ` the station plan positions; `sliceZ`/`sliceHalfWidth` the strip centres and chine
+ *    half-beams (the outline the rim length is measured on). Same semantics as `HullContact.rate`.
+ *    A station outside this tick's patch (the hull was placed since the build) has depth, rate and
+ *    waterline NaN — no data, not the patch edge's value; `fitBurialPlane` and the wetline skip NaN.
+ *  - WATERLINE (caustics `HullWetline.updateFromHullContact(dt, stations, waterlineY)`): `stations[k]` the
+ *    body-frame (x, z) and `waterlineY[k]` the BODY-frame y at which the patch surface meets the hull's
+ *    vertical line through that station — the ship-local height the sea reached. NaN when the hull's up axis
+ *    is within ~84° of horizontal (no vertical line to intersect) or before the patch exists; the wetline
+ *    skips NaN stations and dries them.
+ * It is the PRESSURE waterline (the contact's own surface), not the drawn sea's: at the deep-V's 0.5 m Smith
+ * depth the difference is the short-wave attenuation, a few cm.
+ */
+export class HullWaterStations {
+  /** body-frame station positions, per half (x signed: − = side 0) */
+  readonly stations: { x: number; y: number; z: number }[] = [];
+  readonly worldX: Float64Array;
+  readonly worldZ: Float64Array;
+  readonly depth: Float64Array;
+  readonly rate: Float64Array;
+  readonly waterlineY: Float64Array;
+  readonly sliceZ: Float64Array;
+  readonly sliceHalfWidth: Float64Array;
+  /** the contact wetted anything on its last evaluate */
+  inContact = false;
+  private readonly prevDepth: Float64Array;
+  private hasPrev = false;
+
+  constructor(mesh: HullWaterMesh) {
+    const st = mesh.strips;
+    const ns = st.count;
+    const P = mesh.positions;
+    for (let s = 0; s < ns; s++) {
+      for (let side = 0; side < 2; side++) {
+        const h = 2 * s + side;
+        if (st.chineV0 && st.chineV1 && st.chineT) {
+          const t = st.chineT[s];
+          const a = st.chineV0[h] * 3;
+          const b = st.chineV1[h] * 3;
+          this.stations.push({
+            x: P[a] * (1 - t) + P[b] * t,
+            y: P[a + 1] * (1 - t) + P[b + 1] * t,
+            z: P[a + 2] * (1 - t) + P[b + 2] * t,
+          });
+        } else {
+          this.stations.push({ x: (side === 0 ? -1 : 1) * st.chineHalfBeam[s], y: st.keelY[s], z: st.zCentre[s] });
+        }
+      }
+    }
+    const n = 2 * ns;
+    this.worldX = new Float64Array(n);
+    this.worldZ = new Float64Array(n);
+    this.depth = new Float64Array(n);
+    this.rate = new Float64Array(n);
+    this.waterlineY = new Float64Array(n).fill(Number.NaN);
+    this.prevDepth = new Float64Array(n);
+    this.sliceZ = Float64Array.from(st.zCentre.subarray(0, ns));
+    this.sliceHalfWidth = Float64Array.from(st.chineHalfBeam.subarray(0, ns));
+  }
+
+  /** V108: forget the previous depths (the next update reports zero burial rate) */
+  reset(): void {
+    this.hasPrev = false;
+  }
+
+  /** once per tick, AFTER the rigid6 step that evaluated `hw` (the patch is this tick's) */
+  update(hw: HullWater, state: Readonly<Rigid6State>, dt: number): void {
+    const n = this.stations.length;
+    this.inContact = hw.wettedArea > 0;
+    const patch = hw.patch;
+    if (patch.sampleCount === 0) {
+      this.rate.fill(0);
+      this.waterlineY.fill(Number.NaN);
+      this.inContact = false;
+      this.hasPrev = false;
+      return;
+    }
+    const outside = patch.outside;
+    const [qx, qy, qz, qw] = state.quaternion;
+    const [px, py, pz] = state.position;
+    // body +y's world y component: the vertical line's rise per unit body y
+    const upY = 1 - 2 * (qx * qx + qz * qz);
+    const rateOk = this.hasPrev && Number.isFinite(dt) && dt > 0;
+    for (let k = 0; k < n; k++) {
+      const b = this.stations[k];
+      // world = p + q·b (the rotation WaterPatch.build uses)
+      let tx = 2 * (qy * b.z - qz * b.y);
+      let ty = 2 * (qz * b.x - qx * b.z);
+      let tz = 2 * (qx * b.y - qy * b.x);
+      const wx = px + b.x + qw * tx + (qy * tz - qz * ty);
+      const wy = py + b.y + qw * ty + (qz * tx - qx * tz);
+      const wz = pz + b.z + qw * tz + (qx * ty - qy * tx);
+      const miss = patch.outside;
+      let d = patch.heightAt(wx, wz) - wy;
+      // a station off the patch has no water data this tick (a teleport since the build): NaN, not a clamped edge
+      if (patch.outside !== miss) d = Number.NaN;
+      this.worldX[k] = wx;
+      this.worldZ[k] = wz;
+      this.depth[k] = d;
+      if (!Number.isFinite(d)) {
+        this.rate[k] = Number.NaN;
+        this.prevDepth[k] = d;
+        this.waterlineY[k] = Number.NaN;
+        continue;
+      }
+      if (rateOk && Number.isFinite(this.prevDepth[k])) {
+        const r = (d - this.prevDepth[k]) / dt;
+        this.rate[k] = r > HULL_WATER_STATION_MAX_RATE ? HULL_WATER_STATION_MAX_RATE : r < -HULL_WATER_STATION_MAX_RATE ? -HULL_WATER_STATION_MAX_RATE : r;
+      } else {
+        this.rate[k] = 0;
+      }
+      this.prevDepth[k] = d;
+      // waterline: y on the body-vertical line through (x, z) where world y meets the patch surface;
+      // fixed-point on the height (the line leans with the hull, so XZ moves as y does)
+      if (!(upY > 0.1)) {
+        this.waterlineY[k] = Number.NaN;
+        continue;
+      }
+      let y = b.y;
+      for (let it = 0; it < 3; it++) {
+        tx = 2 * (qy * b.z - qz * y);
+        ty = 2 * (qz * b.x - qx * b.z);
+        tz = 2 * (qx * y - qy * b.x);
+        const lx = px + b.x + qw * tx + (qy * tz - qz * ty);
+        const ly = py + y + qw * ty + (qz * tx - qx * tz);
+        const lz = pz + b.z + qw * tz + (qx * ty - qy * tx);
+        y += (patch.heightAt(lx, lz) - ly) / upY;
+      }
+      this.waterlineY[k] = y;
+    }
+    patch.outside = outside;
+    this.hasPrev = true;
+  }
+}

@@ -41,6 +41,22 @@ import {
   type Rigid6State,
 } from '../sea-physics/rigidBody';
 import { buildDeepVHull, type HullProxy } from '../speedboat/hullMesh';
+import {
+  BOAT_COLLIDE_DEFAULTS,
+  beginContactTick,
+  buildCollisionHull,
+  collideBoatWithFleet,
+  collideBoatWithWorld,
+  createBoatCollideMemory,
+  prepareStaticWorld,
+  resetBoatCollideMemory,
+  type BoatCollideMemory,
+  type BoatCollideParams,
+  type BoatContactSetup,
+  type CollisionHull,
+  type StaticWorld,
+} from '../sea-physics/boatCollide';
+import { RacePilot, type PilotOutput, type PilotSetup } from '../race/ai/pilot';
 import { B, BoatSimLayout, F, H, WAKE_SAMPLE_LEN } from './layout';
 import { readParams } from './paramsVector';
 
@@ -57,12 +73,25 @@ export interface BoatSimCoreInit {
   /** the stepper's OWN copy (a structured clone on a worker); overwritten in place from the buffer */
   oceanParams: OceanParams;
   seaParams: SeaPhysicsParams;
+  /**
+   * NPC PILOT HOOK (§T.186). Present ⇒ every boat whose `pilot.boats[i]` is non-null is driven by `RacePilot`
+   * inside this step (controls IN ignored for it); the layout must carry the AI block (`aiLen`). Absent ⇒ the
+   * step is exactly the pre-T186 one.
+   */
+  pilot?: PilotSetup;
+  /**
+   * COLLISION HOOK (§T.188). Present ⇒ before each boat's step: boat↔boat contacts against the WORLD snapshot
+   * (skipping `H.CONTACT_OFF_MASK` boats) and boat↔static colliders, the same `sea-physics/boatCollide` calls the
+   * player boat makes. Absent ⇒ the step is exactly the pre-T188 one. The seabed is not wired into this core yet.
+   */
+  contacts?: BoatContactSetup;
 }
 
 interface BoatSlot {
   state: Rigid6State;
   memory: Rigid6Memory;
   hw: HullWater;
+  collide: BoatCollideMemory | null;
   resetSeq: number;
   throttle: number;
   steer: number;
@@ -78,6 +107,9 @@ export class BoatSimCore {
   private time = 0;
   private readonly sampler = (x: number, z: number): number => this.ocean.pressureHeadAt(x, z, this.time);
   private slot: BoatSlot | null = null;
+  readonly pilot: RacePilot | null;
+  private readonly contacts: { hull: CollisionHull; world: StaticWorld | null; boats: boolean; params: Readonly<BoatCollideParams> } | null;
+  private readonly pilotOut: PilotOutput = { steer: 0, throttle: 0 };
   /** the params every boat's contact is built with — `new HullWater(hull)`, no overrides, same as each slot */
   private readonly contactParams: Readonly<HullWater['params']>;
   private readonly force = (s: Readonly<Rigid6State>, h: number, out: Rigid6Load): void => {
@@ -91,6 +123,16 @@ export class BoatSimCore {
     this.ocean = new CpuOcean(init.seed, this.oceanParams, this.seaParams);
     this.hull = buildDeepVHull();
     this.contactParams = new HullWater(this.hull).params;
+    this.pilot = init.pilot ? new RacePilot(init.pilot) : null;
+    const c = init.contacts;
+    this.contacts = c
+      ? {
+          hull: buildCollisionHull(this.hull),
+          world: c.colliders && c.colliders.length > 0 ? prepareStaticWorld(c.colliders) : null,
+          boats: c.boats,
+          params: { ...BOAT_COLLIDE_DEFAULTS, ...(c.params ?? {}) },
+        }
+      : null;
   }
 
   private slotFor(i: number): BoatSlot {
@@ -100,6 +142,7 @@ export class BoatSimCore {
         state: { position: [0, 0, 0], quaternion: [0, 0, 0, 1], velocity: [0, 0, 0], angularVelocity: [0, 0, 0] },
         memory: createRigid6Memory(),
         hw: new HullWater(this.hull),
+        collide: this.contacts ? createBoatCollideMemory(this.contacts.hull) : null,
         resetSeq: 0,
         throttle: 0,
         steer: 0,
@@ -154,6 +197,7 @@ export class BoatSimCore {
       const o = L.boatOffset(i);
       const b = this.slotFor(i);
       const seq = f[o + B.RESET_SEQ];
+      const justReset = seq !== b.resetSeq && b.resetSeq !== 0;
       if (seq !== b.resetSeq) {
         // V108 teleport contract: pose from the request, every per-location memory forgotten
         const s = b.state;
@@ -164,14 +208,32 @@ export class BoatSimCore {
         for (let c = 0; c < 3; c++) s.angularVelocity[c] = f[r + 10 + c];
         resetRigid6Memory(b.memory);
         b.hw.resetMemory();
+        if (b.collide) resetBoatCollideMemory(b.collide);
         b.resetSeq = seq;
       }
       if (b.resetSeq === 0) throw new Error(`sim core: boat ${i} stepped before it was placed (write a reset pose first)`);
-      b.throttle = f[o + B.CONTROLS];
-      b.steer = f[o + B.CONTROLS + 1];
+      if (this.pilot !== null && this.pilot.drives(i)) {
+        // §T.186: the pilot reads tick-k state (own pose, WORLD, the mirror at this.time, its AI block) and
+        // returns the drive angle in rad; its memory stays in the buffer
+        const po = this.pilotOut;
+        this.pilot.control(i, L, b.state, this.ocean, this.time, justReset, po);
+        b.throttle = po.throttle;
+        b.steer = po.steer / this.hull.drives[0].maxSteerRad;
+        b.hw.setControls(po.steer, po.throttle);
+      } else {
+        b.throttle = f[o + B.CONTROLS];
+        b.steer = f[o + B.CONTROLS + 1];
 
-      const st = b.steer < -1 ? -1 : b.steer > 1 ? 1 : b.steer;
-      b.hw.setControls(st * this.hull.drives[0].maxSteerRad, b.throttle);
+        const st = b.steer < -1 ? -1 : b.steer > 1 ? 1 : b.steer;
+        b.hw.setControls(st * this.hull.drives[0].maxSteerRad, b.throttle);
+      }
+      const cx = this.contacts;
+      if (cx !== null && b.collide !== null) {
+        // §T.188: impulses from the tick-k WORLD snapshot, applied to this boat's velocities before its step
+        beginContactTick(b.collide);
+        if (cx.boats) collideBoatWithFleet(i, b.state, cx.hull, f, L.worldOffset, L.spec.boats, i32[H.CONTACT_OFF_MASK], SIM_DT, b.collide, cx.params);
+        if (cx.world) collideBoatWithWorld(b.state, cx.hull, cx.world, null, SIM_DT, b.collide, cx.params);
+      }
       b.hw.samplePatch(this.sampler, b.state, SIM_DT);
       const n = planingSubsteps(b.hw, b.state, SIM_DT);
       this.slot = b;

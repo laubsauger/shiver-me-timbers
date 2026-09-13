@@ -46,6 +46,100 @@ export const WAKE_DOMAIN_PER_LAMBDA_T = 2.4;
 export const WAKE_RAFT_TIER = { n: 256, texel: 0.5 } as const;
 
 /**
+ * HIGH-FROUDE TIER RULE (§T.181 hook 6, docs/wake/w5c-speedboat-tier.md). W2a's
+ * L_dom ≥ 2.4·λ_T is a TRANSVERSE-wave law; at 40 m/s λ_T = 2πU²/g = 1025 m and
+ * no 256² grid can hold it (512² costs 1.4–3.3 ms GPU, wake-research §2.4). A
+ * planing hull's visible wake is the DIVERGENT system instead: stationary waves at
+ * propagation angle θ have k = g/(U²cos²θ) and their energy sits on the ray
+ * tan α = tanθ/(1 + 2tan²θ) ≈ c_g(k)/U — narrow arms whose angle is set by the
+ * shortest wave the (band-limited) forcing still excites (`havelockArmAngleDeg`).
+ * Those waves are λ ≈ 2–25 m, so what the domain must hold is LENGTH ASTERN, not λ_T:
+ *
+ *   reach astern of the stem = 2·(0.5 − sponge.width)·n·texel − clearance,
+ *   clearance = 4·splatSigma(0, texel) = 4√2·texel (`wakeAnchor`)
+ *   ⇒ texel ≥ reach / (2(0.5 − w)·n − 4√2)
+ *
+ * The texel is ALSO the forcing's band limit (splat σ ≥ √2·texel, §V48): coarser
+ * texels push the dominant divergent wave longer and the arm wider. The rule takes
+ * the smallest texel (in 1/8 m) that reaches `reachAstern`; the resolution cost is
+ * checked against Rabaud & Moisy's hull-length law in tests/wakeSpeedboatTier.test.ts.
+ * Below the speed where 2.4·λ_T still fits the ship tier, the W2a tier stands.
+ */
+export const SPEEDBOAT_WAKE_REACH_ASTERN = 300;
+
+export function wakeTierForSpeed(maxSpeed: number, reachAstern = SPEEDBOAT_WAKE_REACH_ASTERN, n = 256): { n: number; texel: number } {
+  const lambdaT = (2 * Math.PI * maxSpeed * maxSpeed) / GRAVITY;
+  if (WAKE_DOMAIN_PER_LAMBDA_T * lambdaT <= WAKE_SHIP_TIER.n * WAKE_SHIP_TIER.texel) return { n: WAKE_SHIP_TIER.n, texel: WAKE_SHIP_TIER.texel };
+  const w = defaultSponge(n, 1).width; // a fraction of the domain, independent of the texel
+  const texel = Math.ceil((8 * reachAstern) / (2 * (0.5 - w) * n - 4 * Math.SQRT2)) / 8;
+  return { n, texel: Math.max(texel, WAKE_SHIP_TIER.texel) };
+}
+
+/** reach of the unsponged interior astern of the stem for a tier (m) — the inverse of the rule */
+export function wakeReachAstern(tier: { n: number; texel: number }): number {
+  const L = tier.n * tier.texel;
+  return 2 * (0.5 - defaultSponge(tier.n, tier.texel).width) * L - 4 * splatSigma(0, tier.texel, tier.n);
+}
+
+/** the speedboat's in-game wake tier: 256² × 1.75 m = 448 m, 304 m of interior astern of the stem at ≤ 40 m/s */
+export const WAKE_SPEEDBOAT_MAX_SPEED = 40;
+export const WAKE_SPEEDBOAT_TIER: { readonly n: number; readonly texel: number } = Object.freeze(wakeTierForSpeed(WAKE_SPEEDBOAT_MAX_SPEED));
+
+/**
+ * HAVELOCK'S FAR FIELD, EVALUATED FOR A SAMPLED SOURCE (Havelock 1908; the
+ * stationary-phase form Darmon, Benzaquen & Raphaël 2014 use). For a pressure P
+ * towed at U along +x the linear surface is
+ *   η(r, α) ≈ (1/ρg) ∫ dθ k² P̂(k cosθ, k sinθ) e^{i r G(θ)},  k = g/(U²cos²θ),  G = k·cos(θ − α)
+ * and stationary phase on the divergent branch (θ from the cusp 35.26° to 90°) puts
+ * amplitude A(α) ∝ k²|P̂| / √(r·|G''(θs)|) on the ray tan α = tan θs / (1 + 2tan²θs).
+ * The arm is the α maximising A√r. P̂ is the transform of the samples AS THE SOLVER
+ * DRAWS THEM (`band` given): Gaussian σ = splatSigma(footprint, texel, n), buried at
+ * `depth` (e^{−kd}); with `band` null the physical footprint is used. Large-Fr limit
+ * for one Gaussian: 12.85°/Fr_b (Darmon eq. 4.11); for a hull whose forcing has no
+ * structure shorter than L it tends to Rabaud–Moisy's 11.4°/Fr_L.
+ */
+export function havelockArmAngleDeg(
+  sources: readonly HydroSample[],
+  originX: number,
+  originZ: number,
+  speed: number,
+  band: { n: number; texel: number } | null,
+): { alphaDeg: number; lambda: number; thetaDeg: number } {
+  const k0 = GRAVITY / (speed * speed);
+  const cusp = Math.atan(Math.SQRT1_2);
+  let best = -1;
+  let out = { alphaDeg: NaN, lambda: NaN, thetaDeg: NaN };
+  for (let deg = (cusp * 180) / Math.PI + 0.01; deg < 89.99; deg += 0.01) {
+    const t = (deg * Math.PI) / 180;
+    const c = Math.cos(t);
+    const k = k0 / (c * c);
+    const kx = k * c;
+    const kz = k * Math.sin(t);
+    let re = 0;
+    let im = 0;
+    for (const s of sources) {
+      const sig = band ? splatSigma(s.footprint, band.texel, band.n) : s.footprint;
+      const w = s.fy * Math.exp((-k * k * sig * sig) / 2) * Math.exp(-k * Math.max(0, s.depth));
+      const ph = kx * (s.x - originX) + kz * (s.z - originZ);
+      re += w * Math.cos(ph);
+      im -= w * Math.sin(ph);
+    }
+    const tn = Math.tan(t);
+    const alpha = Math.atan(tn / (1 + 2 * tn * tn));
+    // G'' in closed form: G = k0·cos(θ−α)/cos²θ
+    const h = 1e-4;
+    const G = (x: number): number => (k0 * Math.cos(x - alpha)) / (Math.cos(x) * Math.cos(x));
+    const g2 = Math.abs((G(t + h) - 2 * G(t) + G(t - h)) / (h * h));
+    const a = (k * k * Math.hypot(re, im)) / Math.sqrt(g2);
+    if (a > best) {
+      best = a;
+      out = { alphaDeg: (alpha * 180) / Math.PI, lambda: (2 * Math.PI) / k, thetaDeg: deg };
+    }
+  }
+  return out;
+}
+
+/**
  * Speedboat reference (docs/speedboat/tech-research.md §2.4 Savitsky table,
  * 45 m/s row, 12 m boat of src/speedboat/hullMesh.ts: 5842 kg, chine beam
  * 2.618 m; wetted length 4.4 m × 12/11 scale; trim 1.4°).
@@ -69,7 +163,8 @@ export const WAKE_PRESETS: readonly WakePreset[] = [
   { name: 'galleon-10', kind: 'galleon', speed: 10, ...WAKE_SHIP_TIER },
   { name: 'brigantine-7', kind: 'brigantine', speed: 7, ...WAKE_SHIP_TIER },
   { name: 'raft-2', kind: 'raft', speed: 2, ...WAKE_RAFT_TIER },
-  { name: 'speedboat-40', kind: 'speedboat', speed: 40, ...WAKE_SHIP_TIER },
+  // §T.181 hook 6: the divergent tier (448 m), not the ship's 160 m — see wakeTierForSpeed
+  { name: 'speedboat-40', kind: 'speedboat', speed: 40, ...WAKE_SPEEDBOAT_TIER },
 ];
 
 export function presetByName(name: string): WakePreset {

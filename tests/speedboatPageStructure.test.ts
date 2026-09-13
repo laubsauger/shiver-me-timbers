@@ -183,7 +183,7 @@ describe('§V110/§T.178 NPC boats go through the capability-selected transport,
   });
 
   /**
-   * Main-thread transport (node has no browser Worker): one kick per pump, poll always true —
+   * Main-thread transport (node has no browser Worker): one request per pump, poll always true —
    * so "late round trips" are simulated by pumping less often than ticking. The rivals' OUT
    * hash after catching up must equal the every-tick run: NPC tick k was kicked with page tick
    * k's time whatever pump carried it.
@@ -196,6 +196,7 @@ describe('§V110/§T.178 NPC boats go through the capability-selected transport,
         seed: 2100, boats: 3, oceanParams: structuredClone(oceanParams), seaParams: speedboatSeaParams(hull),
         spawn: (i) => openSeaCourse().spawn(i + 1),
         caps: { crossOriginIsolated: false, sharedArrayBuffer: false, worker: false },
+        budgetMs: 1e6, // the batch size is the budget's business, the trajectory is not (tests/simWorkerBatch.test.ts)
       });
     const hash = (n: NpcFleet): number => {
       let h = HASH_SEED;
@@ -223,7 +224,9 @@ describe('§V110/§T.178 NPC boats go through the capability-selected transport,
       for (let k = 0; k < 4 * TICKS && lazy.collectedTick < TICKS; k++) lazy.pump(TICKS);
       expect(every.collectedTick).toBe(TICKS);
       expect(lazy.collectedTick).toBe(TICKS);
-      expect(lazy.droppedTicks).toBe(0);
+      // §T.181: owed ticks travel as ONE multi-tick request, and nothing is dropped (the tick count adds up)
+      expect(lazy.catchUp.maxBatch).toBeGreaterThanOrEqual(3);
+      expect(lazy.catchUp.batches).toBeLessThan(TICKS);
       expect(hash(lazy).toString(16)).toBe(hash(every).toString(16));
       // and the rivals are actually under way on their placeholder straight line
       expect(every.pose(0).velocity[2]).toBeGreaterThan(0.5);
@@ -240,7 +243,8 @@ describe('§V105 the wake is anchored on the player SIM pose', () => {
     expect(frame).toMatch(/const boat = player\.state;/);
     const tb = method(frame, 'tickBoat');
     expect(tb).toMatch(/wakeSim\?\.tick\(boat, wakeSamples, hull\.stemZ, dt, jets\)/);
-    expect(tb).toMatch(/setCenter\(boat\.position\[0\], boat\.position\[2\]\)/);
+    // the flowfoam region + wake track follow the same sim pose (core/seaFrame.trackWake → setCenter(ship.position))
+    expect(tb).toMatch(/seaFrame\.trackWake\(boat, hull\.stemZ, hull\.transomZ, hull\.beam, dt\)/);
     expect(tb).not.toMatch(/camera|view\b|alpha/);
     // the samples and jets are this step's contact (§V101)
     inOrder(tb, ['player.wakeSamples(', 'player.jets(', 'wakeSim?.tick(']);
