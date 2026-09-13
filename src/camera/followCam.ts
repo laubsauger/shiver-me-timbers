@@ -39,6 +39,7 @@ import { STATION_IDS, type StationId, type StationSource } from './camStations';
 import {
   clamp,
   dampFactor,
+  dampMoving,
   enforceMinHeight,
   sphericalOffset,
   stepFollowYaw,
@@ -83,6 +84,18 @@ export class FollowCam {
   private dragging = false;
   private smoothed = new Vector3();
   private initialized = false;
+  /**
+   * Last chase frame's desired position and last frame's stern heading. The
+   * chase integrates over how the target MOVED across the frame (dampMoving),
+   * which is what keeps its lag independent of the frame time. `chaseFrame`
+   * is the `frame` it was written on: any gap (a deck/free/fp excursion)
+   * means it is stale and the first chase frame back treats the target as
+   * still instead of reading the whole excursion as one frame's motion.
+   */
+  private prevDesired = new Vector3();
+  private prevBehind = Number.NaN;
+  private frame = 0;
+  private chaseFrame = -1;
   private lookTarget = new Vector3();
   private lookSmoothed = new Vector3();
   private tmp = new Vector3();
@@ -549,6 +562,9 @@ export class FollowCam {
     const fx = 2 * (q[0] * q[2] + q[3] * q[1]);
     const fz = 1 - 2 * (q[0] * q[0] + q[1] * q[1]);
     const behind = Math.atan2(fx, fz) + Math.PI; // camera sits astern
+    const prevBehind = Number.isFinite(this.prevBehind) ? this.prevBehind : behind;
+    this.prevBehind = behind;
+    this.frame++;
     // cached so a toggle back out of free mode can re-anchor on the ship
     this.lastPivot.set(pivotX, pivotY, pivotZ);
 
@@ -609,6 +625,7 @@ export class FollowCam {
         this.dragging,
         p.yawFollowHalfLife,
         dt,
+        prevBehind,
       );
     }
 
@@ -638,15 +655,18 @@ export class FollowCam {
       this.exitUp.set(0, 0, 0);
     }
 
+    if (this.chaseFrame !== this.frame - 1) this.prevDesired.set(desiredX, desiredY, desiredZ);
     if (!this.initialized) {
       this.smoothed.set(desiredX, desiredY, desiredZ);
       this.initialized = true;
     } else {
-      const k = dampFactor(posHalfLife, dt);
-      this.smoothed.x += (desiredX - this.smoothed.x) * k;
-      this.smoothed.y += (desiredY - this.smoothed.y) * k;
-      this.smoothed.z += (desiredZ - this.smoothed.z) * k;
+      const pd = this.prevDesired;
+      this.smoothed.x = dampMoving(this.smoothed.x, pd.x, desiredX, posHalfLife, dt);
+      this.smoothed.y = dampMoving(this.smoothed.y, pd.y, desiredY, posHalfLife, dt);
+      this.smoothed.z = dampMoving(this.smoothed.z, pd.z, desiredZ, posHalfLife, dt);
     }
+    this.prevDesired.set(desiredX, desiredY, desiredZ);
+    this.chaseFrame = this.frame;
     // clamp only when diving is disabled — the underwater mode (T29) owns
     // the below-surface experience and we need free dives for debugging
     const y = p.allowUnderwater

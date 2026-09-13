@@ -54,6 +54,10 @@ export function createRaftFrame(d: RaftFrameDeps) {
   const currPos = new Vector3();
   const prevQuat = new Quaternion();
   const currQuat = new Quaternion();
+  // the camera's look-ahead reads velocity: blended across the tick like the
+  // pose, or it steps at 60 Hz under a faster render (main.ts does the same)
+  const prevVel = new Vector3();
+  const currVel = new Vector3();
   const windVec = new Vector2();
   const bowWorld = new Vector3();
   const shipVel = new Vector3();
@@ -74,8 +78,10 @@ export function createRaftFrame(d: RaftFrameDeps) {
   const snap = (): void => {
     currPos.fromArray(raft.position);
     currQuat.fromArray(raft.quaternion);
+    currVel.fromArray(raft.velocity);
     prevPos.copy(currPos);
     prevQuat.copy(currQuat);
+    prevVel.copy(currVel);
   };
   snap();
 
@@ -114,8 +120,10 @@ export function createRaftFrame(d: RaftFrameDeps) {
       );
       prevPos.copy(currPos);
       prevQuat.copy(currQuat);
+      prevVel.copy(currVel);
       currPos.fromArray(raft.position);
       currQuat.fromArray(raft.quaternion);
+      currVel.fromArray(raft.velocity);
       return { aground: b.aground, beached: b.beach.beached };
     },
     /** render, part one: everything that does not depend on this frame's camera */
@@ -178,9 +186,9 @@ export function createRaftFrame(d: RaftFrameDeps) {
       g.quaternion.slerpQuaternions(prevQuat, currQuat, alpha);
       g.position.toArray(renderShipView.position);
       g.quaternion.toArray(renderShipView.quaternion);
-      renderShipView.velocity[0] = raft.velocity[0];
-      renderShipView.velocity[1] = raft.velocity[1];
-      renderShipView.velocity[2] = raft.velocity[2];
+      renderShipView.velocity[0] = prevVel.x + (currVel.x - prevVel.x) * alpha;
+      renderShipView.velocity[1] = prevVel.y + (currVel.y - prevVel.y) * alpha;
+      renderShipView.velocity[2] = prevVel.z + (currVel.z - prevVel.z) * alpha;
       d.placeCamera(renderShipView, frameDt);
       sea.clouds.update(state.time, sky.sunDirection);
       sea.reflection?.update(app.camera as PerspectiveCamera, state.time);

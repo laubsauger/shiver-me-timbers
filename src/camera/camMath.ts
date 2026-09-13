@@ -24,6 +24,41 @@ export function expDamp(current: number, target: number, halfLife: number, dt: n
   return current + (target - current) * dampFactor(halfLife, dt);
 }
 
+/**
+ * expDamp toward a MOVING target, exact for a target that moves linearly
+ * across the step (first-order hold): `prevTarget` is where the target was at
+ * the start of the step, `target` where it is at the end.
+ *
+ * WHY NOT expDamp. expDamp treats the target as if it had sat at its END
+ * value for the whole step, so a chase of a target moving at speed v settles
+ * at a lag of about v·(halfLife/ln2 − dt/2): the lag depends on the frame
+ * time. The render rate is not steady (50–100 fps is normal, and it drops
+ * exactly when the wake is on screen), so the chase distance breathed in and
+ * out with it — at 5 m/s, 99 mm of camera error at 50 fps vs 35 mm at 100 fps,
+ * the hull sliding a few pixels fore and aft every time the frame time moved.
+ * Integrating the same first-order lag exactly over a ramping target makes
+ * the steady lag v·halfLife/ln2 at ANY dt, so the camera path depends on
+ * scene time only, not on how the frames partition it.
+ *
+ * A still target (prevTarget === target) reduces to expDamp exactly, and a
+ * first-order lag never overshoots a monotone input, so this cannot ring.
+ */
+export function dampMoving(
+  current: number,
+  prevTarget: number,
+  target: number,
+  halfLife: number,
+  dt: number,
+): number {
+  if (halfLife <= 0) return target;
+  if (dt <= 0) return current;
+  const tau = halfLife / Math.LN2;
+  const e = Math.exp(-dt / tau);
+  // 1 − e, accurate when dt ≪ tau
+  const oneMinusE = -Math.expm1(-dt / tau);
+  return target + (current - prevTarget) * e - (target - prevTarget) * (tau / dt) * oneMinusE;
+}
+
 /** Wrap an angle to (-π, π]. */
 export function wrapAngle(a: number): number {
   const TAU = Math.PI * 2;
@@ -69,6 +104,10 @@ export function yawPitchFromDirection(x: number, y: number, z: number): [number,
  * `behind + offset`. Consequence (the whole point): a held orbit angle
  * survives indefinitely and only swings with the ship's turns — the camera
  * never crawls back to a default framing on its own.
+ * `prevBehind` is last frame's stern heading: the chase is integrated over
+ * the heading's motion across the frame (dampMoving), so the lag in a turn
+ * does not change with the frame time. Omitted, the heading is treated as
+ * still.
  * Returns [yaw, offset].
  */
 export function stepFollowYaw(
@@ -78,9 +117,13 @@ export function stepFollowYaw(
   dragging: boolean,
   halfLife: number,
   dt: number,
+  prevBehind: number = behind,
 ): [number, number] {
   if (dragging) return [yaw, wrapAngle(yaw - behind)];
-  return [dampAngle(yaw, behind + offset, halfLife, dt), offset];
+  // unwrap both target samples next to the current yaw, shortest way round
+  const from = yaw + wrapAngle(prevBehind + offset - yaw);
+  const to = from + wrapAngle(behind - prevBehind);
+  return [dampMoving(yaw, from, to, halfLife, dt), offset];
 }
 
 /**
