@@ -293,6 +293,16 @@ export interface OceanParams {
    * moves ~50 m between sweeps, under two texels, which the blur hides.
    */
   fetchRebuildRadians: number;
+  /**
+   * T174 SWELL SHADOW — how much of the swell train an island removes from its
+   * lee, 0..1. 1 is the physical model (docs/ocean/swell-shadow.md): each
+   * cascade's SWELL share is scaled by the baked diffraction coefficient K²,
+   * its wind-sea share is left to fetch. 0 is exactly the sea without the
+   * feature (the gain is √(1 − 0) = 1 bit for bit). A uniform on both sides,
+   * never a rebuild — the bake depends only on the swell's bearing, period and
+   * spread (src/ocean/swellShadow.ts).
+   */
+  swellShadowStrength: number;
 }
 
 export const oceanParams: OceanParams = registerParams('ocean', {
@@ -477,6 +487,7 @@ export const oceanParams: OceanParams = registerParams('ocean', {
   fetchFieldMargin: 3200,
   fetchBlurTexels: 3,
   fetchRebuildRadians: 0.03,
+  swellShadowStrength: 1,
 }, oceanParamsMeta());
 
 function oceanParamsMeta() {
@@ -516,5 +527,6 @@ function oceanParamsMeta() {
     fetchFieldMargin: { min: 0, max: 8000, step: 100 },
     fetchBlurTexels: { min: 0, max: 8, step: 1 },
     fetchRebuildRadians: { min: 0.005, max: 0.5, step: 0.005 },
+    swellShadowStrength: { min: 0, max: 1, step: 0.01 },
   };
 }

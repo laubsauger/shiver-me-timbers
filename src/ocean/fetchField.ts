@@ -66,6 +66,15 @@ import { texture, uniform } from 'three/tsl';
 import { oceanParams, type OceanParams } from '../params/ocean';
 import type { SeabedField } from '../island/seabed';
 import type { FetchSource } from './fetch';
+import {
+  fadeShadowBorder,
+  marchSwellShadow,
+  swellShadowGridSize,
+  swellShadowInputs,
+  swellShadowScratch,
+  type SwellShadowInputs,
+  type SwellShadowSource,
+} from './swellShadow';
 
 /** any TSL node — structural, not typed (file-local convention) */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -79,8 +88,12 @@ export interface FetchFieldParams {
   fetchRebuildRadians: number;
 }
 
-export interface FetchField extends FetchSource {
-  /** baked upwind-distance texture (r16f, metres) for materials */
+export interface FetchField extends FetchSource, SwellShadowSource {
+  /**
+   * baked texture for materials, rg16f: R = upwind distance (m), G = the swell
+   * diffraction coefficient K (T174, docs/ocean/swell-shadow.md). ONE texture
+   * so the swell shadow costs no binding (§V.40).
+   */
   texture: THREE.DataTexture;
   /** world XZ of the field's corner; uv = (worldXZ − origin) / size */
   origin: [number, number];
@@ -96,12 +109,17 @@ export interface FetchField extends FetchSource {
     invSize: ReturnType<typeof uniform>;
   };
   /**
-   * Re-sweep for a wind direction if it has turned far enough to matter.
-   * Returns true when it actually rebuilt, so callers can count the cost.
+   * Re-sweep for a wind direction if it has turned far enough to matter, and
+   * re-march the swell shadow if the swell (read live from the params this
+   * field was built with) has moved far enough to matter — see
+   * `swellShadowMoved`. Returns true when either actually rebuilt, so callers
+   * can count the cost.
    */
   update(windDirection: number): boolean;
   /** how many sweeps have run — perf accounting, and a test hook */
   readonly sweepCount: number;
+  /** how many swell-shadow marches have run — perf accounting, and a test hook */
+  readonly shadowCount: number;
   dispose(): void;
 }
 
@@ -111,6 +129,39 @@ function angleDelta(a: number, b: number): number {
   if (d > Math.PI) d -= Math.PI * 2;
   if (d < -Math.PI) d += Math.PI * 2;
   return d;
+}
+
+/**
+ * T174: the fewest `update()` calls (render frames) between two swell-shadow
+ * marches. MEASURED on the shipped archipelagos: one march + blur + pack is
+ * 8–12 ms (pirate 5 islands, raft 6), and a weather preset lerps
+ * `swellDirection` by up to ~1.9 rad over `transitionSeconds` (4 s) — ungated,
+ * that re-marches every ~4 frames for the whole transition. At 15 it is ~4
+ * marches a second during a transition and none otherwise; the shadow trails
+ * the swell by ≤ 0.25 s, and the LAST move always lands because the test is
+ * against the swell that was last marched, not against the previous frame.
+ */
+export const SWELL_SHADOW_MIN_FRAMES = 15;
+
+/**
+ * T174: has the swell moved far enough to re-march its shadow? Bearing against
+ * `fetchRebuildRadians` (the same tolerance the wind uses, and the same blur
+ * hides the step), wavenumber and spread against 2% relative — both enter the
+ * lateral variance linearly or quadratically, so 2% is a ~1% move of a shadow
+ * edge. The weather presets lerp `swellDirection` and `swellPeriod`, so this
+ * DOES fire during a preset change; the per-march cost is in the report.
+ */
+export function swellShadowMoved(
+  a: SwellShadowInputs,
+  b: SwellShadowInputs,
+  bearingTolerance: number,
+): boolean {
+  const rel = (x: number, y: number): number => Math.abs(x - y) / Math.max(Math.abs(y), 1e-9);
+  return (
+    !(Math.abs(angleDelta(a.direction, b.direction)) <= Math.max(bearingTolerance, 0)) ||
+    !(rel(a.wavenumber, b.wavenumber) <= 0.02) ||
+    !(rel(a.spread, b.spread) <= 0.02)
+  );
 }
 
 /**
@@ -301,8 +352,12 @@ export function createFetchField(
 
   const data = new Float32Array(res * res);
   const scratch = new Float32Array(res * res);
-  const half = new Uint16Array(res * res);
-  const tex = new THREE.DataTexture(half, res, res, THREE.RedFormat, THREE.HalfFloatType);
+  /** T174: swell diffraction coefficient K on the same grid (1 = open sea) */
+  const shadow = new Float32Array(res * res);
+  const marchScratch = swellShadowScratch(swellShadowGridSize(res));
+  // RG: R fetch, G swell shadow — interleaved, so two channels per texel
+  const half = new Uint16Array(res * res * 2);
+  const tex = new THREE.DataTexture(half, res, res, THREE.RGFormat, THREE.HalfFloatType);
   tex.name = 'ocean/fetchField';
   /**
    * §V.48: NO MIP CHAIN, and that is a decision rather than an omission. The
@@ -327,19 +382,40 @@ export function createFetchField(
 
   let sweptDirection = NaN;
   let sweeps = 0;
+  let marchedSwell: SwellShadowInputs = swellShadowInputs(op);
+  let marches = 0;
+  let framesSinceMarch = 0;
 
   const rebuild = (windDirection: number): void => {
     sweepFetch(land, res, cell, windDirection, cap, data);
     blurField(data, res, op.fetchBlurTexels, scratch);
-    for (let k = 0; k < data.length; k++) half[k] = THREE.DataUtils.toHalfFloat(data[k]);
+    for (let k = 0; k < data.length; k++) half[k * 2] = THREE.DataUtils.toHalfFloat(data[k]);
     tex.needsUpdate = true;
     sweptDirection = windDirection;
     sweeps++;
   };
+  /**
+   * T174 — the swell shadow, band-limited by the SAME blur as fetch (§V.48)
+   * and faded to exactly 1 over half the margin so clamp-to-edge cannot carry
+   * a truncated shadow to the horizon. Independent of `rebuild`: the wind and
+   * the swell turn separately and neither should pay for the other.
+   */
+  const rebuildShadow = (inputs: SwellShadowInputs): void => {
+    marchSwellShadow(land, res, cell, inputs, shadow, marchScratch);
+    blurField(shadow, res, op.fetchBlurTexels, scratch);
+    fadeShadowBorder(shadow, res, cell, margin / 2);
+    for (let k = 0; k < shadow.length; k++) half[k * 2 + 1] = THREE.DataUtils.toHalfFloat(shadow[k]);
+    tex.needsUpdate = true;
+    marchedSwell = inputs;
+    marches++;
+    framesSinceMarch = 0;
+  };
   rebuild(op.windDirection);
+  rebuildShadow(marchedSwell);
 
   return {
     fetchAt: (x, z) => sampleGrid(data, res, origin, cell, x, z),
+    shadowAt: (x, z) => sampleGrid(shadow, res, origin, cell, x, z),
     texture: tex,
     origin,
     size,
@@ -347,16 +423,34 @@ export function createFetchField(
     cap,
     uniforms,
     update(windDirection: number): boolean {
-      if (!Number.isFinite(windDirection)) return false;
+      let rebuilt = false;
+      // T174: the swell is read live — a preset lerp moves it with no caller
+      // having to know. A non-finite swell keeps the last good shadow (§V.28).
+      framesSinceMarch++;
+      const swell = swellShadowInputs(op);
+      if (
+        framesSinceMarch >= SWELL_SHADOW_MIN_FRAMES &&
+        Number.isFinite(swell.direction) &&
+        Number.isFinite(swell.wavenumber) &&
+        Number.isFinite(swell.spread) &&
+        swellShadowMoved(swell, marchedSwell, op.fetchRebuildRadians)
+      ) {
+        rebuildShadow(swell);
+        rebuilt = true;
+      }
+      if (!Number.isFinite(windDirection)) return rebuilt;
       const moved = Math.abs(angleDelta(windDirection, sweptDirection));
       // NaN on the first call (sweptDirection starts NaN) compares false, but
       // the constructor has already swept once, so this is purely the turn test
-      if (moved <= Math.max(op.fetchRebuildRadians, 0)) return false;
+      if (moved <= Math.max(op.fetchRebuildRadians, 0)) return rebuilt;
       rebuild(windDirection);
       return true;
     },
     get sweepCount(): number {
       return sweeps;
+    },
+    get shadowCount(): number {
+      return marches;
     },
     dispose(): void {
       tex.dispose();
@@ -370,6 +464,15 @@ export function createFetchField(
  * by the same shaders and a different mapping is how they would drift.
  */
 export function fetchFieldNode(field: FetchField, worldXZ: AnyNode): AnyNode {
+  return fetchFieldSampleNode(field, worldXZ).r;
+}
+
+/**
+ * TSL: the whole texel — `.r` clear upwind water (m), `.g` swell diffraction
+ * coefficient K (T174). A reader that needs both reads ONE sample node, so
+ * the two channels cost one texture fetch and one binding (§V.40).
+ */
+export function fetchFieldSampleNode(field: FetchField, worldXZ: AnyNode): AnyNode {
   const uv = worldXZ.sub(field.uniforms.origin).mul(field.uniforms.invSize);
-  return texture(field.texture, uv).r;
+  return texture(field.texture, uv);
 }

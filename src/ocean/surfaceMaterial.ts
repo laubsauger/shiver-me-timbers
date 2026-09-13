@@ -78,7 +78,8 @@ import {
   fullyDevelopedFetch,
   fullyDevelopedPeakWavenumber,
 } from './fetch';
-import { fetchFieldNode, type FetchField } from './fetchField';
+import { fetchFieldSampleNode, type FetchField } from './fetchField';
+import { swellBandShare, swellShadowGainNode } from './swellShadow';
 import type { PlanarReflection } from '../reflection';
 
 export interface OceanSurfaceMaterial {
@@ -514,6 +515,8 @@ export function buildOceanSurfaceMaterial(
   const uFetchC = sim.cascades.map(() => uniform(0));
   const uFetchFull = uniform(1);
   const uFetchMaxGain = uniform(oceanParams.fetchMaxGain);
+  /** T174 swell shadow: per-cascade swell share fᵢ (src/ocean/swellShadow.ts) */
+  const uSwellShare = sim.cascades.map(() => uniform(0));
   const refreshFetch = () => {
     const peakK = fullyDevelopedPeakWavenumber(oceanParams.windSpeed);
     for (const [i, c] of sim.cascades.entries()) {
@@ -521,6 +524,11 @@ export function buildOceanSurfaceMaterial(
     }
     uFetchFull.value = fullyDevelopedFetch(oceanParams.windSpeed, oceanParams);
     uFetchMaxGain.value = oceanParams.fetchMaxGain;
+    // T174: each cascade's swell share — live swell params over the band's
+    // measured variance, the same call CpuOcean.refreshFetch makes (§V.8)
+    for (const [i, c] of sim.cascades.entries()) {
+      uSwellShare[i].value = swellBandShare(oceanParams, i, c.heightVariance);
+    }
   };
   const refreshNormFoot = () => {
     for (const [i, c] of sim.cascades.entries()) {
@@ -691,9 +699,15 @@ export function buildOceanSurfaceMaterial(
    * coefficient — so interpolating it carries all three gains for one varying
    * and keeps the per-cascade law where the law lives.
    */
-  const fetchRatio = fetch
-    ? varying(developmentRatioNode(fetchFieldNode(fetch, worldXZ), uFetchFull))
+  // T174: the SAME sample also carries the swell diffraction coefficient K in
+  // G, so the varying widens to vec2 — no new texture, sampler or interpolant
+  // location, and the fragment normals see the same K the vertex displaced by.
+  const fetchSample = fetch ? fetchFieldSampleNode(fetch, worldXZ) : null;
+  const fetchVary = fetchSample
+    ? varying(vec2(developmentRatioNode(fetchSample.r, uFetchFull), fetchSample.g))
     : null;
+  const fetchRatio = fetchVary ? fetchVary.x : null;
+  const swellK = fetchVary ? fetchVary.y : null;
   /**
    * THE ONE PER-CASCADE GAIN, and it must stay one expression.
    *
@@ -714,7 +728,10 @@ export function buildOceanSurfaceMaterial(
   const shoal = sim.cascades.map((_, i) => {
     const s = shoalDepth ? shoalFactorNode(uShoalK[i], shoalDepth) : float(1);
     if (!fetchRatio) return s;
-    return s.mul(fetchBandGainNode(uFetchC[i], fetchRatio, uFetchMaxGain));
+    // T174: × the swell shadow, the one expression CpuOcean.bandGains multiplies
+    return s
+      .mul(fetchBandGainNode(uFetchC[i], fetchRatio, uFetchMaxGain))
+      .mul(swellShadowGainNode(uSwellShare[i], swellK));
   });
 
   // vertex displacement: Σ cascades (λDx, h, λDz, J), each Nyquist-gated and

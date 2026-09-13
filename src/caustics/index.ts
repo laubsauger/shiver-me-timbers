@@ -40,7 +40,7 @@
 import type * as THREE from 'three/webgpu';
 import { float, vec2, vec3 } from 'three/tsl';
 import type { OceanSimulation } from '../ocean/oceanCascades';
-import { fetchFieldNode, type FetchField } from '../ocean/fetchField';
+import { fetchFieldSampleNode, type FetchField } from '../ocean/fetchField';
 import { causticsParams } from '../params/caustics';
 import {
   createCausticsUniforms,
@@ -178,6 +178,11 @@ export class Caustics {
    * disagreement at a waterline and the two symptoms it produced.
    */
   waterHeight(worldXZ: TslNode, depth?: TslNode): TslNode {
+    // sampled HERE rather than asked of the caller: every receiver already
+    // hands us its world XZ, and making the shelter lookup the caller's job is
+    // how one of them ends up forgetting it. ONE sample node: `.r` fetch and
+    // `.g` swell shadow (T174) cost one texture fetch and one binding.
+    const shelter = depth && this.fetchField ? fetchFieldSampleNode(this.fetchField, worldXZ) : null;
     return waterHeightNode(
       this.sim,
       worldXZ,
@@ -185,10 +190,8 @@ export class Caustics {
         ? {
             u: this.shoaling,
             depth,
-            // sampled HERE rather than asked of the caller: every receiver
-            // already hands us its world XZ, and making the shelter lookup the
-            // caller's job is how one of them ends up forgetting it
-            fetch: this.fetchField ? fetchFieldNode(this.fetchField, worldXZ) : null,
+            fetch: shelter ? shelter.r : null,
+            swellK: shelter ? shelter.g : null,
           }
         : undefined,
     );

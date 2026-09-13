@@ -693,6 +693,9 @@ describe('§B.7 every spectrum-shaping param forces a rebuild', () => {
     'fetchFieldMargin',
     'fetchBlurTexels',
     'fetchRebuildRadians',
+    // T174: a per-cascade gain at the sampler like fetch — re-read every frame
+    // by `refreshFetch` on both sides (swellBandShare), never baked into h0
+    'swellShadowStrength',
   ]);
 
   it('the signature key list covers every spectral param in OceanParams', () => {

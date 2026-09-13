@@ -75,15 +75,16 @@
  *    the young sea's peak slightly and costs another exp() per band per vertex
  *    for something no cascade is narrow enough to resolve (§V.19 splits at 40 m
  *    and 8.3 m; γ's width is a few percent of ω_p).
- *  · SWELL BLOCKING, which this gets right for the wrong reason and it should
- *    be said out loud. `oceanParams.swellPeriod/swellAmplitude` inject a
- *    remotely generated swell train, and remote swell is NOT fetch-limited —
- *    it arrives fully formed. But it rides in cascade 0's spectrum, so the
- *    cascade-0 gain deletes it inside a rim. That is the correct PICTURE (a
- *    lagoon behind land has no swell) reached by the wrong MECHANISM: the real
- *    physics is blocking and diffraction, whose shadow geometry happens to be
- *    the same shadow this field already measures. One field serves both; do
- *    not let that coincidence be mistaken for a derivation.
+ *  · SWELL BLOCKING — that is NOT this file; it is `swellShadow.ts` (T174,
+ *    docs/ocean/swell-shadow.md). Remote swell is not fetch-limited, it
+ *    arrives fully formed, and its lee is set by blocking and diffraction
+ *    along the SWELL's bearing, not the wind's. That model scales each
+ *    cascade's swell share by a baked diffraction coefficient and multiplies
+ *    into the same per-cascade gain as this one. One overlap remains and is
+ *    known: the swell rides in cascade 0's spectrum, so inside a rim (or
+ *    directly downwind of land) THIS gain still deletes it as well. The two
+ *    compose as a product, so the overlap can only make sheltered water
+ *    calmer, never rougher, and open water is 1 × 1 for both.
  *
  * ── THE SECOND COMPRESSION: `fetchLongBandLimit`, and why it is not optional ─
  *

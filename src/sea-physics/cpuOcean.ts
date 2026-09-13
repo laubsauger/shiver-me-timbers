@@ -60,8 +60,12 @@ import {
   fetchBandCoefficient,
   fetchBandGain,
   fullyDevelopedPeakWavenumber,
-  type FetchSource,
 } from '../ocean/fetch';
+import {
+  swellBandShare,
+  swellShadowGain,
+  type ShelterSource,
+} from '../ocean/swellShadow';
 import { oceanParams, type OceanParams } from '../params/ocean';
 import { seaPhysicsParams, type SeaPhysicsParams } from '../params/seaPhysics';
 import type { SeabedField } from './grounding';
@@ -132,6 +136,8 @@ class MirrorCascade {
    * same band as the one the GPU draws (§V.8, §V.72).
    */
   readonly meanWavenumber: number;
+  /** band height variance from the same snapshot — T174's swell share divides by it */
+  readonly heightVariance: number;
   readonly height: Float32Array;
   /**
    * THE SMITH-CORRECTED HEIGHT — the field a hull actually feels (§V.68).
@@ -234,6 +240,7 @@ class MirrorCascade {
       );
     }
     this.meanWavenumber = spectrum.meanWavenumber;
+    this.heightVariance = spectrum.heightVariance;
     this.h0 = extractCentralBlock(spectrum.h0, p.resolution, redN);
     const size = redN * redN;
     this.omega = new Float32Array(size);
@@ -558,7 +565,7 @@ export class CpuOcean {
    * the open-ocean sea while the drawn water lies down inside the rim, which
    * is §B.34's disagreement arriving by a third route.
    */
-  private fetch: FetchSource | null = null;
+  private fetch: ShelterSource | null = null;
   /** §V.8 the ship's own wake — see `WakeElevationField` and `setWakeField` */
   private wake: WakeElevationField | null = null;
   /**
@@ -568,6 +575,8 @@ export class CpuOcean {
    * many times per tick by the hull stations.
    */
   private fetchC: number[] = [];
+  /** T174 per-cascade swell share fᵢ, refreshed with `fetchC` (same call as the material) */
+  private swellShare: number[] = [];
   /** scratch for `bandGains` — the hot path must not allocate */
   private readonly gains: number[] = [];
 
@@ -630,7 +639,7 @@ export class CpuOcean {
    * as `setSeabed`: call it once, at startup, with the SAME field the ocean
    * material and the caustics receiver were handed.
    */
-  setFetch(fetch: FetchSource | null): void {
+  setFetch(fetch: ShelterSource | null): void {
     this.fetch = fetch;
     this.refreshFetch();
   }
@@ -665,6 +674,9 @@ export class CpuOcean {
     this.fetchC = this.cascades.map((c) =>
       fetchBandCoefficient(peakK, c.meanWavenumber, this.oceanP),
     );
+    this.swellShare = this.cascades.map((c, i) =>
+      swellBandShare(this.oceanP, i, c.heightVariance),
+    );
   }
 
   /**
@@ -692,7 +704,15 @@ export class CpuOcean {
       this.oceanP.windSpeed,
       this.oceanP,
     );
-    for (let i = 0; i < n; i++) g[i] = fetchBandGain(this.fetchC[i], ratio, this.oceanP);
+    // T174: the swell shadow rides on the same grid-coord sample (§V.72a) and
+    // the same product as the vertex shader's `shoal[i]`. A bare FetchSource
+    // (tests) has no shadow ⟹ K = 1 ⟹ gain exactly 1.
+    const k = this.fetch.shadowAt ? this.fetch.shadowAt(qx, qz) : 1;
+    for (let i = 0; i < n; i++) {
+      g[i] =
+        fetchBandGain(this.fetchC[i], ratio, this.oceanP) *
+        swellShadowGain(this.swellShare[i], k);
+    }
     return g;
   }
 

@@ -40,6 +40,7 @@ import {
   fullyDevelopedFetch,
   fullyDevelopedPeakWavenumber,
 } from '../ocean/fetch';
+import { swellBandShare, swellShadowGainNode } from '../ocean/swellShadow';
 import { causticsParams as cp } from '../params/caustics';
 import { MIN_VERTICAL } from './causticsMath';
 
@@ -222,6 +223,11 @@ export interface ShoalingUniforms {
   fetchFull: TslNode;
   /** §V.44 ceiling on the young-sea steepening term */
   fetchMaxGain: TslNode;
+  /**
+   * T174 per-cascade swell share fᵢ — the third factor of the same gain, in
+   * the same bag for the same reason (docs/ocean/swell-shadow.md)
+   */
+  swellShare: TslNode[];
 }
 
 export function createShoalingUniforms(sim: OceanSimulation): ShoalingUniforms {
@@ -233,6 +239,7 @@ export function createShoalingUniforms(sim: OceanSimulation): ShoalingUniforms {
     fetchC: sim.cascades.map(() => uniform(0)),
     fetchFull: uniform(1),
     fetchMaxGain: uniform(oceanParams.fetchMaxGain),
+    swellShare: sim.cascades.map(() => uniform(0)),
   };
 }
 
@@ -261,6 +268,10 @@ export function refreshShoalingUniforms(
   }
   u.fetchFull.value = fullyDevelopedFetch(oceanParams.windSpeed, oceanParams);
   u.fetchMaxGain.value = oceanParams.fetchMaxGain;
+  // T174, the same call surfaceMaterial.refreshFetch and CpuOcean.refreshFetch make
+  for (const [i, c] of sim.cascades.entries()) {
+    u.swellShare[i].value = swellBandShare(oceanParams, i, c.heightVariance);
+  }
 }
 
 /**
@@ -299,7 +310,13 @@ export function refreshShoalingUniforms(
 export function waterHeightNode(
   sim: OceanSimulation,
   worldXZ: TslNode,
-  shoal?: { u: ShoalingUniforms; depth: TslNode; fetch?: TslNode | null },
+  shoal?: {
+    u: ShoalingUniforms;
+    depth: TslNode;
+    fetch?: TslNode | null;
+    /** T174 swell diffraction coefficient K — the `.g` of the SAME fetch-field sample */
+    swellK?: TslNode | null;
+  },
 ): TslNode {
   // §V.73: one ratio for every band — it is a property of the place, not of
   // the band. Absent shelter field ⟹ null ⟹ the whole term folds away and the
@@ -316,6 +333,10 @@ export function waterHeightNode(
     // `shoal[i]` and `CpuOcean.shoaledSum` build (§V.8)
     if (shoal && ratio) {
       t = t.mul(fetchBandGainNode(shoal.u.fetchC[i], ratio, shoal.u.fetchMaxGain));
+    }
+    // ...and by the swell shadow, the third factor of that product (T174)
+    if (shoal && shoal.swellK) {
+      t = t.mul(swellShadowGainNode(shoal.u.swellShare[i], shoal.swellK));
     }
     h = h === null ? t : h.add(t);
   }
