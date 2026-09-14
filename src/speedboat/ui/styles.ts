@@ -68,7 +68,8 @@ const HUD = /* css */ `
 }
 .sbh-frame [data-panel] { position: absolute; }
 .sbh [data-panel] { transition: opacity 0.22s ease; }
-.sbh.is-hidden-race [data-panel]:not([data-panel="radio"]), .sbh.is-crash [data-panel] { opacity: 0; }
+/* rolling start keeps the driving instruments (trim, speed) and the plotter: the player drives the pace run (user 2026-09-14) */
+.sbh.is-hidden-race [data-panel]:not([data-panel="radio"]):not([data-panel="trim"]):not([data-panel="speed"]):not([data-panel="plotter"]), .sbh.is-crash [data-panel] { opacity: 0; }
 .sbh.is-cockpit [data-panel="timer"], .sbh.is-cockpit [data-panel="plotter"], .sbh.is-cockpit [data-panel="sea"],
 .sbh.is-cockpit [data-panel="surge"] { display: none; }
 ${panelCss('.sbh.is-chase', CHASE_PANELS)}
