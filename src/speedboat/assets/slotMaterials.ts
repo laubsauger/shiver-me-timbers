@@ -107,8 +107,10 @@ const ledDeckNits = uniform(boatLightParams.deckStripNits);
 const ledSubmergedNits = uniform(boatLightParams.submergedStripNits);
 const ledHullWidth = uniform(boatLightParams.hullStripWidth);
 const ledDeckWidth = uniform(boatLightParams.deckStripWidth);
+const ledPilotFill = uniform(boatLightParams.pilotLedFill);
 export function setBoatLedLevel(level: number, p = boatLightParams): void {
   ledLevel.value = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
+  ledPilotFill.value = p.pilotLedFill;
   ledHullNits.value = p.stripNits;
   ledDeckNits.value = p.deckStripNits;
   ledSubmergedNits.value = p.submergedStripNits;
@@ -132,6 +134,26 @@ export function setBoatNightFill(moonLinear: THREE.Color, nightFactor: number, k
 }
 export function boatLedLevel(): number {
   return ledLevel.value as number;
+}
+/** the night fill's live moon terms (linear radiance): black by day */
+export function boatNightFillLevels(): { fill: THREE.Color; rim: THREE.Color } {
+  return { fill: nightFill.value as THREE.Color, rim: nightRim.value as THREE.Color };
+}
+/** the night fill as an emissive term over `albedo`: the rim toward the moon + a little sky (hulls and pilots) */
+export function nightFillNode(albedo: TslNode): TslNode {
+  const facing = normalView.dot(positionViewDirection).abs().clamp(0, 1);
+  const toward = normalWorldGeometry.dot(nightKeyDir).mul(0.5).add(0.5);
+  const rim = facing.oneMinus().pow(3).mul(toward.mul(0.7).add(0.3));
+  return nightRim.mul(rim).add(nightFill.mul(albedo));
+}
+/**
+ * §T.209 the pilot's LED fill: the boat's strips, pool and arch light bouncing up off the deck and the water onto him,
+ * in `hue` (his boat's LED colour, linear) × `albedo` × the LED level × `boatLightParams.pilotLedFill`. A hemisphere
+ * weight, not a light: 1 on down-facing normals, 0.65 on his front and sides, 0.3 on top. 0 when the LEDs are off.
+ */
+export function pilotLedFillNode(albedo: TslNode, hue: TslNode): TslNode {
+  const below = normalWorld.y.mul(-0.35).add(0.65);
+  return hue.mul(albedo).mul(below).mul(ledLevel).mul(ledPilotFill);
 }
 /** 1 inside a strip of full width `width` centred on `d = centre` (anti-aliased with the footprint of d) */
 const ledStrip = (d: TslNode, centre: TslNode, width: TslNode): TslNode => {
@@ -415,10 +437,7 @@ export function createSlotMaterial(slot: SlotName, source: THREE.Material, opts:
   m.colorNode = w ? albedo.mul(w.tint) : albedo;
   if (slot !== 'M_Perspex') {
     // §T.209 night fill (see setBoatNightFill): rim toward the moon + a little sky on the albedo
-    const facing = normalView.dot(positionViewDirection).abs().clamp(0, 1);
-    const toward = normalWorldGeometry.dot(nightKeyDir).mul(0.5).add(0.5);
-    const rim = facing.oneMinus().pow(3).mul(toward.mul(0.7).add(0.3));
-    const fill = nightRim.mul(rim).add(nightFill.mul(albedo));
+    const fill = nightFillNode(albedo);
     ledEmissive = ledEmissive ? ledEmissive.add(fill) : fill;
   }
   m.roughnessNode = (w ? roughOut.mul(w.roughnessScale) : roughOut).clamp(0.02, 1);

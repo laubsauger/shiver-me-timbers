@@ -40,6 +40,8 @@ export interface BoatLightParams {
   /** §T.209 night fill on every hull (moon hue × nightFactor): Fresnel rim radiance and albedo sky-fill factor */
   nightRim: number;
   nightFill: number;
+  /** §T.209 the pilot's fill in his boat's LED colour (× albedo × LED level; slotMaterials.ts `pilotLedFillNode`) */
+  pilotLedFill: number;
 }
 
 export const boatLightParams: BoatLightParams = registerParams(
@@ -64,6 +66,7 @@ export const boatLightParams: BoatLightParams = registerParams(
     glowScale: 1.5,
     nightRim: 0.05,
     nightFill: 0.04,
+    pilotLedFill: 0.35,
   },
   {
     stripNits: { min: 0, max: 60, step: 0.5 },
@@ -85,5 +88,6 @@ export const boatLightParams: BoatLightParams = registerParams(
     glowScale: { min: 0.5, max: 4, step: 0.05 },
     nightRim: { min: 0, max: 1, step: 0.005 },
     nightFill: { min: 0, max: 0.5, step: 0.005 },
+    pilotLedFill: { min: 0, max: 2, step: 0.01 },
   },
 );

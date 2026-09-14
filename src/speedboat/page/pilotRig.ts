@@ -40,6 +40,7 @@
  * export `createGltfLoader(renderer)` from `boatModel.ts` and use it in all three.
  */
 import * as THREE from 'three/webgpu';
+import { dFdx, dFdy, materialRoughness, normalView } from 'three/tsl';
 import { GLTFLoader, type GLTF } from 'three/addons/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
@@ -927,6 +928,38 @@ async function loadPilotGltf(renderer: THREE.WebGPURenderer, url: string): Promi
   }
 }
 
+/** the hair cards' roughness floor and anisotropy cap (see `pilotNodeMaterial`) */
+export const PILOT_HAIR_MIN_ROUGHNESS = 0.75;
+export const PILOT_HAIR_MAX_ANISOTROPY = 0.4;
+
+/**
+ * A glTF physical/standard pilot material as the node material WebGPURenderer would draw it (the same property copy), so
+ * the page can add node terms to it (page/boatLights.ts `lightPilots`: §T.209 night fill). Two look fixes ride along
+ * (USER, sunset look-back: "flashy specular streaks/sparkles on the hair and/or the goggle headband that crawl"):
+ *  - HAIR: roughness 0.55 → 0.75 and anisotropy 0.8 → 0.4. A strength-0.8 anisotropic lobe at 0.55 is a razor streak
+ *    across every alpha-tested card.
+ *  - EVERY SLOT: specular anti-aliasing off the SHADING normal's screen derivatives (normal map included; three's own
+ *    geometry-roughness term sees only the mesh normal). Kaplanyan/Tokuyoshi: α² += min(½(|∂n/∂x|² + |∂n/∂y|²), 0.18),
+ *    α = roughness². Sub-pixel normal-map relief (the strap's weave) widens the lobe instead of sparkling; where the
+ *    relief is resolved the derivatives are ~0 and the authored roughness stands.
+ */
+export function pilotNodeMaterial(src: THREE.Material): THREE.Material {
+  const s = src as THREE.MeshPhysicalMaterial;
+  if ((src as THREE.NodeMaterial).isNodeMaterial || !s.isMeshStandardMaterial) return src;
+  const m = s.isMeshPhysicalMaterial ? new THREE.MeshPhysicalNodeMaterial() : new THREE.MeshStandardNodeMaterial();
+  (s.isMeshPhysicalMaterial ? THREE.MeshPhysicalMaterial : THREE.MeshStandardMaterial).prototype.copy.call(m as unknown as THREE.MeshPhysicalMaterial, s);
+  if (s.name === 'M_PilotHair') {
+    m.roughness = Math.max(m.roughness, PILOT_HAIR_MIN_ROUGHNESS);
+    const pm = m as THREE.MeshPhysicalNodeMaterial;
+    pm.anisotropy = Math.min(pm.anisotropy, PILOT_HAIR_MAX_ANISOTROPY);
+  }
+  const dx = dFdx(normalView);
+  const dy = dFdy(normalView);
+  const kernel = dx.dot(dx).add(dy.dot(dy)).mul(0.5).min(0.18);
+  m.roughnessNode = materialRoughness.pow(4).add(kernel).clamp(0, 1).pow(0.25);
+  return m;
+}
+
 /**
  * Seat a pilot in the hero and every NPC boat. Never throws: a missing or broken GLB logs ONE warning and returns
  * pilots that do nothing, so the race still runs (fail loud, keep racing).
@@ -977,6 +1010,7 @@ export function seatPilots(gltf: GLTF, materials: readonly THREE.Material[], boa
   const heightM = typeof extras.heightM === 'number' ? extras.heightM : 1.78;
 
   const materialNamed = (name: string): THREE.Material | undefined => materials.find((m) => m.name === name);
+  const nodeCopies = new Map<THREE.Material, THREE.Material>();
   const clip = (name: string): THREE.AnimationClip | null => gltf.animations.find((a) => a.name === name) ?? null;
   const base = clip('seated_base');
   const idle = clip('idle_seated');
@@ -1073,6 +1107,10 @@ export function seatPilots(gltf: GLTF, materials: readonly THREE.Material[], boa
         const swap = mat && mat.name === 'M_PilotSkin' ? materialNamed(`M_PilotSkin@${spec.skinMaterialVariant}`) : undefined;
         if (swap) mesh.material = swap;
       }
+      // one node copy per GLB material, shared by every pilot that wears it (as the GLB materials were)
+      const src = mesh.material as THREE.Material;
+      if (!nodeCopies.has(src)) nodeCopies.set(src, pilotNodeMaterial(src));
+      mesh.material = nodeCopies.get(src) as THREE.Material;
       mesh.frustumCulled = false; // a skinned pose leaves the bind bounds (seated lean, steer)
     });
 

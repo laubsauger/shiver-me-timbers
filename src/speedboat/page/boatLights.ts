@@ -14,10 +14,11 @@
  * deterministic override is set (`setOverride`, the cine shot runner's hook). Colour: the livery's `ledColor`.
  */
 import * as THREE from 'three/webgpu';
-import { float, lights, objectGroup, smoothstep, uniform, uv } from 'three/tsl';
+import { diffuseColor, float, lights, objectGroup, smoothstep, uniform, uv } from 'three/tsl';
 import { boatLightParams } from '../../params/boatLights';
 import type { BoatLightPool } from '../../ocean/boatLightPool';
-import { setBoatLedLevel, setBoatNightFill } from '../assets/slotMaterials';
+import { nightFillNode, pilotLedFillNode, setBoatLedLevel, setBoatNightFill } from '../assets/slotMaterials';
+import type { TslNode } from '../../caustics/causticsNode';
 import { skyParams } from '../../params/sky';
 import { ledColor, resolveLivery, type BoatLivery } from '../assets/livery';
 import type { BoatExtras, BoatInstance } from '../assets';
@@ -35,6 +36,11 @@ export function ledLevel(nightFactor: number, override: number | null): number {
 /** the LED hex each boat throws, hero first then rivals — the pool slots' colours in slot order */
 export function poolLedColors(liveries: readonly Readonly<BoatLivery>[], max: number): number[] {
   return liveries.slice(0, max).map((l) => ledColor(l));
+}
+
+/** a pilot's night emissive over `albedo`: the hull's moon rim + sky fill and his boat's LED fill (0 by day) */
+export function pilotNightEmissive(albedo: TslNode, hue: TslNode): TslNode {
+  return nightFillNode(albedo).add(pilotLedFillNode(albedo, hue));
 }
 
 export interface BoatLightsDeps {
@@ -132,9 +138,44 @@ export function createBoatLights(d: BoatLightsDeps) {
     return linear[i];
   };
 
+  // ── the pilots (seated later, pilotRig.ts loads beside the boot): see `lightPilots` ──
+  const pilotMaterials = new Set<THREE.Material>();
+  const pilotHue = uniform(new THREE.Color(0, 0, 0)).setGroup(objectGroup);
+  pilotHue.onObjectUpdate((frame) => {
+    const c = frame.object?.userData.ledLinear as THREE.Color | undefined;
+    if (c) (pilotHue.value as THREE.Color).copy(c);
+  });
+
   return {
     pool,
     heroLights,
+    /**
+     * §T.209 PILOTS (USER: "in the night bow look-back the pilot is completely black"). The pilot GLB is not a boat slot,
+     * so its materials had none of the hull's night terms: moonlit from behind he was the key's back face over a navy
+     * ambient. `pilots[i]` sits in boat i (hero first, then the rivals: V110, every pilot alike). Each lit pilot material
+     * (a node material, pilotRig.ts `pilotNodeMaterial`; shared by every pilot wearing it) gets the hulls' light set
+     * (the player's two LED lights and the arch light) and an emissive night term: the hulls' moon rim + sky fill and
+     * `pilotLedFillNode` in his OWN boat's LED colour (per object, `userData.ledLinear` = this rig's live colour). Both
+     * scale with the night factor / LED level: exactly 0 by day. No sampler, no light.
+     */
+    lightPilots(pilots: readonly THREE.Object3D[]): void {
+      pilots.slice(0, boats.length).forEach((pilot, i) => {
+        pilot.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          if (!mesh.isMesh) return;
+          mesh.userData.ledLinear = linear[i];
+          for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+            const nm = m as THREE.MeshStandardNodeMaterial;
+            if (!nm.isNodeMaterial || nm.lights !== true || pilotMaterials.has(m)) continue;
+            pilotMaterials.add(m); // a pilot seated before this rig was built already has the light set, not the emissive
+            litMaterials.add(m);
+            nm.lightsNode = boatLightsNode;
+            nm.emissiveNode = pilotNightEmissive(diffuseColor.rgb, pilotHue);
+            nm.needsUpdate = true;
+          }
+        });
+      });
+    },
     /** deterministic LED level for offline renders: 0..1, or null to follow the sky again */
     setOverride(v: number | null): void {
       override = v === null || !Number.isFinite(v) ? null : Math.min(1, Math.max(0, v));

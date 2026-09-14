@@ -122,6 +122,7 @@ async function boot(): Promise<void> {
   let cockpitView = false; // a cockpit switch made while the pilot loads is not replayed by onCockpitChange
   void createPilots(app, boats).then((p) => {
     pilots = p;
+    boats.lights.lightPilots([p.hero.object, ...p.npcs.map((n) => n.object)]); // §T.209 the night fill reaches the pilots
     p.hero.setHeadVisible(!cockpitView);
   });
   setFeatureSink('shadows', (on) => (sky.sunLight.castShadow = on));
