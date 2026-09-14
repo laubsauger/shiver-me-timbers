@@ -65,9 +65,24 @@ tests/speedboatUiHotPath.test.ts. The harness bar shows the model + HUD update c
 - Results: order, pilot · community, per-lap times, classified time or gap, best lap with the fastest lap
   marked, your race stats (page-supplied), tower broadcast, Race again / Watch replay (disabled until P5) / Menu.
 - Hull & paint: V-39 spec sheet, 8 community paints, number (skips rival numbers), eyewear, sea/time/rivals.
-  `onPreviewMount(host)` hands the page an element for the 3D preview; `setPreviewLive(true)` hides the
-  2D profile.
-- Pause: Resume, Restart, Governor, Assists (preset Default/Pro plus dials), Camera, HUD size, Audio, Quit.
+  §T.201: no hull art of its own (the SVG sketches and `hullArt.ts` are gone; roster.ts keeps only name, HUD hue
+  and the livery join). The page (`page/boatPreview.ts`) renders the runtime GLB + seated hero pilot through the
+  slot materials in each livery (`liveryFor`, read from `assets/livery.ts` at call time) and hands the cards
+  their pictures with `setPaintThumb(paintId, dataUrl)`: lazily on the first open, cached per paint + number, one
+  offscreen render + one readback each (the card shows its hue chip until then). `onPreviewMount(host)` starts
+  the live turntable, drawn on the game canvas in the host's rect (view offset + scissor, no readback) on an
+  in-engine stage (sea-horizon gradient, livery-hue water glow, contact shadow); `setPreviewLive(true)` cuts a
+  clipped-corner hole in the dim over it. Drag to orbit, idle auto-rotate. Eyewear is not visualised (the pilot
+  GLB has one lens material and the race never applied the choice).
+- Pause: Resume, Restart, Boat select (Back returns to the paused race), Governor, Assists (preset Default/Pro plus
+  dials), Camera, HUD size, Audio, Graphics (quality preset, the shared settings store), Full screen, Dev
+  overlays, Quit. Open with Esc, gamepad Start, or the small pause button left of the plotter (`addPauseButton`).
+  §T.201 pad fix: `MenuNav.attach` takes the pad's held buttons as already seen, so the Start that opened the pause
+  is not read as Back (= Resume) on the next frame.
+- Page chrome (`page/pageChrome.ts`): dev overlays (perf HUD + Tweakpane, via `ui/devLayer.ts`) are hidden by
+  default; Tab/F1 or the pause row toggles them and the choice is remembered (`smt.speedboat.devOverlays`,
+  guarded storage); `?dev` forces them on, `?dev=0` off. Full screen: `F`, Alt+Enter or the pause row, through
+  `ui/fullscreen.ts`. The speedboat has no pointer lock.
 - Navigation: arrows/WASD, Enter/Space, Esc/Backspace; gamepad D-pad or left stick with repeat, A, B, Start;
   pointer hover and click. Left/right change values in place on rows that have values.
 

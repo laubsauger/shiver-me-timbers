@@ -5,7 +5,7 @@
  *   const asset  = await loader.load(HERO_BOAT_URL);
  *   // sea pages: setActiveCaustics(...) and caustics.attachHullWetline(wetlineOptions(asset.extras))
  *   // BEFORE instantiate — the slot materials bake waterLighting() at construction
- *   const boat = asset.instantiate({ variant: 'hero', water: true, livery: FLEET_LIVERIES.yellow });
+ *   const boat = asset.instantiate({ variant: 'hero', water: true, livery: FLEET_LIVERIES['dome-ten'] });
  *   scene.add(boat.object);
  *
  * One asset → any number of instances sharing geometry, textures and (per variant) materials:

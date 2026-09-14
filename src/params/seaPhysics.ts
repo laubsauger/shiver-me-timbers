@@ -11,6 +11,8 @@ import { raftParams, type RaftParams } from './raft';
 export interface SeaPhysicsParams {
   /** CPU mirror grid N×N, power of two ≤ ocean resolution (§V.8) */
   mirrorResolution: number;
+  /** Minimum resolution of the shorter mirrored band; preserves chop sampling as its domain grows. */
+  mirrorChopResolution: number;
   /** re-run CPU spectrum+IFFT every K sim ticks (grids cached between) */
   updateEveryTicks: number;
   /** fixed-point iterations for inverse-displacement height lookup */
@@ -281,6 +283,7 @@ export const seaPhysicsParams: SeaPhysicsParams = registerParams(
   'sea-galleon',
   {
     mirrorResolution: 64,
+    mirrorChopResolution: 128,
     updateEveryTicks: 1,
     inverseDisplacementIterations: 3,
     probeLayoutScale: 1,

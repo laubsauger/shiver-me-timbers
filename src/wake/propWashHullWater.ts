@@ -7,7 +7,8 @@
  */
 import type { HullDrive } from '../sea-physics/hullWater';
 import type { Rigid6State } from '../sea-physics/rigidBody';
-import type { PropWashInput } from './propWash';
+import { ventilationFactor, type EngineSpec } from '../sea-physics/engine';
+import { propLossPower, ventilationAirSpeed, type PropWashInput } from './propWash';
 
 /** the HullWater surface this adapter reads (structural; the physics agent owns the class) */
 export interface PropWashSource {
@@ -19,6 +20,10 @@ export interface PropWashSource {
   readonly driveAdvance: ArrayLike<number>;
   readonly driveImmersion: ArrayLike<number>;
   readonly patch: { heightAt(x: number, z: number): number };
+  /** §T.195 per drive: the engine's prop shaft torque (N·m) and prop rev/s of the last evaluate — the lost power (optional) */
+  readonly engines?: readonly { readonly propTorque: number; readonly propRps: number; readonly advanceRatio: number }[];
+  /** §T.195 the drive's engine + prop spec (pitch, diameter, ventilation curve) — the ventilation air (optional) */
+  readonly params?: { readonly engine?: Readonly<EngineSpec> };
 }
 
 /** The props of a `HullWater` after its `evaluate` this tick, as wash inputs. Reuses `out`'s objects; returns the live count. */
@@ -49,6 +54,13 @@ export function propWashFromHullWater(hw: PropWashSource, _state: Readonly<Rigid
     j.depth = j.surfaceY - y;
     j.advance = hw.driveAdvance[k];
     j.immersion = Math.max(0, Math.min(1, hw.driveImmersion[k] ?? 0));
+    const e = hw.engines?.[k];
+    const spec = hw.params?.engine;
+    j.lossPower = e ? propLossPower(e.propRps, e.propTorque, T, j.advance) : 0;
+    // §T.199 the rooster tail's blade tip speed (absent without an engine model: the emitter estimates it)
+    j.propRps = e && Number.isFinite(e.propRps) ? e.propRps : undefined;
+    j.ventAirSpeed =
+      e && spec ? ventilationAirSpeed(j.immersion, ventilationFactor(spec, e.advanceRatio / (spec.propPitch / spec.propDiameter)), spec.propPitch, e.propRps) : 0;
     live++;
   }
   out.length = live;

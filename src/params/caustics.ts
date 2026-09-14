@@ -580,11 +580,11 @@ export const causticsParams: CausticsParams = registerParams('caustics', {
   wetStations: 24,
   wetSideBlend: 0.6,
 
-  // Jerlov I–IB (clear tropical), nudged off pure I toward the coastal water
-  // an island demo actually sits in
+  // Clear tropical water: retain red absorption while letting more green/blue
+  // light reach submerged hulls and shallows through the shared optical path.
   submergedAbsorptionR: 0.36,
-  submergedAbsorptionG: 0.08,
-  submergedAbsorptionB: 0.03,
+  submergedAbsorptionG: 0.06,
+  submergedAbsorptionB: 0.02,
   // 1.8 → 1.4: still > 1 (light also travels back to the eye through water)
   // but 1.8 pushed a hull 2 m down to red = 27% of blue, which reads as the
   // same teal slab by a different route (§B.16)

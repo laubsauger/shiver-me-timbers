@@ -144,8 +144,8 @@ pure functions of:
 | SeaPhysicsParams, per tick | mirrorResolution, updateEveryTicks, inverseDisplacementIterations, Smith depth `hullDraft·smithDepthScale` (V105) | SEA vector |
 | time | wave phase | `TIME` as the exact float64 `SimState.time`, never re-derived as tick·dt |
 | construction tick | the scheduler's countdown/build is history | build the fleet on the same tick as the page mirror, before tick 0 |
-| seabed | shoal factor, breaker clip, grid-coord depth | **not wired** (see blockers) |
-| fetch + swell shadow | band gains | **not wired**; designed as SAB grids read with fetchField's exported `sampleGrid` |
+| seabed | shoal factor, breaker clip, grid-coord depth | init `world.seabed` (§T.191): the baked texel-centre grid BOTH mirrors sample |
+| fetch + swell shadow | band gains | init `world.fetch` land mask (§T.191); the core rebuilds the field from it + the per-tick params |
 | wake | `wakeHeightCpu` | **not wired**; §V8 amendment: hulls do not feel the sim wake until §T.170 |
 
 **Tested:** a core-owned scheduler and a page-style shared scheduler (advanced externally, then `update`, which is main.ts's
@@ -277,14 +277,30 @@ point. Replace it with `drive.ts` inside the core, and every transport picks up 
 
 ## Blockers and exports needed from other owners
 
-1. **Seabed in workers** (`src/island`). `SeabedField.heightAt` closes over `IslandHeightmap.heightAt`, whose sampler is an
-   inline closure (`island/heightmap.ts:814`).
-   - Needed: an exported pure `heightmapHeightAt(data, size, worldRadius, …, x, z)`, so a worker can rebuild
-     `sampleSeabedHeight(islands, x, z, p)` from shared `Float32Array` data (V77: one expression).
-   - Until then, rivals over shallows would float on open-ocean depth, so **do not race near islands on the worker path**.
-2. **Fetch/swell shadow in workers** (`src/ocean/fetchField.ts`). Needed: read access to the field's private `data` and
-   `shadow` grids (or a `copyInto(fetch, shadow)`) plus `res`/`origin`/`cell`. The worker then samples them with the already
-   exported `sampleGrid`. The render-frame gating finding above also applies.
+1. **Seabed, fetch/swell shadow, bed: DONE (§T.191, `src/sim-worker/worldData.ts`).** `SimWorldData` crosses once in the
+   init message (`FleetOptions.world`, structured-cloned):
+   - `seabed`: Float32 grid of the archipelago `heightAt` at texel centres (the GPU seabed texture's convention), sampled
+     with `sampleGrid`. The page's mirror ALSO switches to it (`cpuOcean.setSeabed(gridSeabed(world), −openHeight)`), so
+     both sides evaluate the same expression on the same numbers. Tower Reach (3086 m): 1024² = 3.01 m texels, 3.9 MB,
+     1.27 s bake; 2048² = 1.51 m, 15.6 MB, 3.4 s (measured under parallel-agent load). Default 1024 (`res` argument).
+   - `fetch`: the land mask `createFetchField` bakes, at its texel centres. The core builds its own field with
+     `createFetchField` over a seabed that answers that mask (`maskedFetchField`). The grids are a deterministic function
+     of (mask, params), and the batch rows carry each tick's params, so the core's sweeps/marches/versions/samples equal
+     the page field's with no per-version copy (read-back at texel centres is not bit-exact, and the grids are private).
+     Throws if `fetchFieldSize` changed after the bake.
+   - `bars` → `raceBed(world)` = `createRaceSeabed(gridSeabed.heightAt, bars)`, the `bed` of `collideBoatWithWorld` on
+     both sides (needs `contacts`).
+   - Evidence: `tests/simWorkerWorldData.test.ts` (Tower Reach seed 1965, ≥ 50 points incl. bar, gates, coasts, 90 ticks
+     through a wind and a swell turn): heightAt/pressureHeadAt `toBe`-identical, fetch versions equal per tick; mutations
+     (closure seabed on the page, no world on the core) differ.
+2. **External boats + trace + per-row contact-off (§T.191).** `externalBoats: n` = the last n fleet indices are main-driven
+   (the player): `setExternalPose` / `setBatchExternalPose(j, …)` (pose at the START of that tick; rows grow by n×13) →
+   WORLD, never stepped. `trace: true` = a TRACE region (`TR` slots, 36 f64 per row per boat: pose, substep END positions,
+   wetted/slam/prop, bow immersion, contact Δv/source/point/other/overlaps, fetch version, applied controls) read with
+   `readTrace`/`traceRecord`; the page fills the player's with the same `trace.ts writeTrace` + `SubstepPositions`.
+   `setBatchContactOff(j, mask)` replaces row j's ghost mask. Layout version 2: the Float64 header grew to 20 slots
+   (`F.EXTERNAL_BOATS`, `F.TRACE_LEN`); OUT content and hashes unchanged. Evidence: `tests/simWorkerExternal.test.ts`
+   (main, sab×1, transfer×1 batched = one tick per kick, every trace row).
 3. **Wake** (`src/flowfoam`, `src/wake`, T170). Needed: a CPU wake field as data (grid + origin) instead of a method on
    `FlowFoam`, to share read-only as described above.
 4. **Page wiring** (`src/core/loop.ts` owner / S0 speedboat entry): the kick-at-frame-end / collect-next-frame integration.

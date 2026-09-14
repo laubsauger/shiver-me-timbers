@@ -45,7 +45,7 @@
 import { float, int, ivec2, select, smoothstep, textureLoad, uniform, vec2, vec4 } from 'three/tsl';
 import * as THREE from 'three/webgpu';
 import { WAKE_TEX_CHANNEL } from '../wake/wakeSolverMath';
-import type { WakeSim } from '../wake/wakeSim';
+import { WAKE_NEAR_BLEND_WIDTHS, type WakeSim } from '../wake/wakeSim';
 
 /** the analytic injector's signature (`createWakeInjector().wakeFieldNode`) */
 export type WakeFieldFn = (worldXZ: any, detail: boolean, texel: any) => { rate: any; elev: any };
@@ -94,6 +94,38 @@ export interface SimSurface<S> {
 
 export function simGrid(sim: WakeSim): SimGrid {
   return { n: sim.solver.n, texel: sim.solver.texel, edge: Math.max(1, sim.solver.sponge.width * sim.solver.n) };
+}
+
+/** §T.199 the near-hull tier's grid (`WakeSim.near`), or null */
+export function simNearGrid(sim: WakeSim): SimGrid | null {
+  const s = sim.near;
+  return s ? { n: s.n, texel: s.texel, edge: Math.max(1, s.sponge.width * s.n) } : null;
+}
+
+/**
+ * §T.199 HOW MUCH OF THE DRAWN WAKE THE NEAR TIER OWNS at world (wx, wz): 0 in its sponge (what is there is being
+ * destroyed), smoothstep to 1 over the next `WAKE_NEAR_BLEND_WIDTHS` × sponge texels, 1 inside. The far tier owns the
+ * rest — a cross-fade, never a sum: both tiers solve the same sources, so inside the near interior the far tier's
+ * field is the band-limited copy of the near one. ONE expression for CPU and TSL (§V77).
+ */
+export function simNearWeight<S, T>(o: SimResampleOps<S, T>, g: SimGrid, blendTexels: number, wx: S, wz: S, cx: S, cz: S): S {
+  const inv = o.lit(1 / g.texel);
+  const half = o.lit(g.n / 2);
+  const gx = o.add(o.mul(o.sub(wx, cx), inv), half);
+  const gy = o.add(o.mul(o.sub(wz, cz), inv), half);
+  const zero = o.lit(0);
+  const ex = o.max(o.min(o.add(gx, o.lit(0.5)), o.sub(o.lit(g.n - 0.5), gx)), zero);
+  const ey = o.max(o.min(o.add(gy, o.lit(0.5)), o.sub(o.lit(g.n - 0.5), gy)), zero);
+  const e0 = o.lit(g.edge);
+  const e1 = o.lit(g.edge + Math.max(1, blendTexels));
+  // @band-limited-elsewhere: a ≥ 9 m window evaluated per texel in COMPUTE, never in a fragment stage
+  return o.mul(o.smoothstep(e0, e1, ex), o.smoothstep(e0, e1, ey));
+}
+
+/** far and near surfaces cross-faded by the near weight `w` (§T.199) */
+export function blendSimSurface<S, T>(o: SimResampleOps<S, T>, far: SimSurface<S>, near: SimSurface<S>, w: S): SimSurface<S> {
+  const lerp = (a: S, b: S): S => o.add(a, o.mul(o.sub(b, a), w));
+  return { elev: lerp(far.elev, near.elev), slopeX: lerp(far.slopeX, near.slopeX), slopeZ: lerp(far.slopeZ, near.slopeZ) };
 }
 
 /**
@@ -156,7 +188,28 @@ export function simSurfaceCpu(
   cx: number,
   cz: number,
 ): SimSurface<number> {
-  const ops: SimResampleOps<number, { t: SimTex; i: number; j: number }> = {
+  return simSurface(cpuResampleOps(g, tex), g, wx, wz, cx, cz);
+}
+
+/**
+ * §T.199 CPU evaluator of the two-tier surface (tests): the far tier everywhere, cross-faded to the near tier by
+ * `simNearWeight` — the expression the advect pass draws.
+ */
+export function simSurfaceTwoTierCpu(
+  far: { g: SimGrid; tex: { height: ArrayLike<number>; slope: ArrayLike<number> }; cx: number; cz: number },
+  near: { g: SimGrid; tex: { height: ArrayLike<number>; slope: ArrayLike<number> }; cx: number; cz: number },
+  wx: number,
+  wz: number,
+): SimSurface<number> & { nearWeight: number } {
+  const fo = cpuResampleOps(far.g, far.tex);
+  const no = cpuResampleOps(near.g, near.tex);
+  const w = simNearWeight(no, near.g, WAKE_NEAR_BLEND_WIDTHS * near.g.edge, wx, wz, near.cx, near.cz);
+  const surf = blendSimSurface(fo, simSurface(fo, far.g, wx, wz, far.cx, far.cz), simSurface(no, near.g, wx, wz, near.cx, near.cz), w);
+  return { ...surf, nearWeight: w };
+}
+
+function cpuResampleOps(g: SimGrid, tex: { height: ArrayLike<number>; slope: ArrayLike<number> }): SimResampleOps<number, { t: SimTex; i: number; j: number }> {
+  return {
     lit: (v) => v,
     add: (a, b) => a + b,
     sub: (a, b) => a - b,
@@ -174,7 +227,6 @@ export function simSurfaceCpu(
     channel: (q, c) =>
       q.i < 0 || q.j < 0 || q.i >= g.n || q.j >= g.n ? 0 : tex[q.t][(q.j * g.n + q.i) * 4 + c],
   };
-  return simSurface(ops, g, wx, wz, cx, cz);
 }
 
 /**
@@ -189,12 +241,32 @@ export function simSurfaceCpu(
 export function createSimWakeField(analytic: WakeFieldFn, sim: WakeSim) {
   const { solver } = sim;
   const g = simGrid(sim);
-  const n = g.n;
   const uSimCenter = uniform(new THREE.Vector2(solver.centerX, solver.centerZ));
-  const textures: Record<SimTex, THREE.Texture> = { height: solver.heightTexture, slope: solver.slopeTexture };
-  const swizzle = ['x', 'y', 'z', 'w'] as const;
+  const ops = gpuResampleOps(g.n, { height: solver.heightTexture, slope: solver.slopeTexture });
+  // §T.199 the near-hull tier, when the sim carries one: its own centre uniform, the same resample, a cross-fade
+  const ng = simNearGrid(sim);
+  // created only with a near tier: the single-tier graph must not gain a node (raft/pirate bit-identity)
+  const uNearCenter = sim.near ? uniform(new THREE.Vector2(sim.near.centerX, sim.near.centerZ)) : null;
+  const nearOps = sim.near && ng ? gpuResampleOps(ng.n, { height: sim.near.heightTexture, slope: sim.near.slopeTexture }) : null;
 
-  const ops: SimResampleOps<any, any> = {
+  const field: WakeFieldFn = (worldXZ, detail, tierTexel) => {
+    if (!detail) return analytic(worldXZ, false, tierTexel);
+    const doses = analytic(worldXZ, false, tierTexel);
+    const xz = vec2(worldXZ.x, worldXZ.y);
+    let surf = simSurface(ops, g, xz.x, xz.y, uSimCenter.x, uSimCenter.y);
+    if (nearOps && ng && uNearCenter) {
+      const w = simNearWeight(nearOps, ng, WAKE_NEAR_BLEND_WIDTHS * ng.edge, xz.x, xz.y, uNearCenter.x, uNearCenter.y).toVar();
+      surf = blendSimSurface(ops, surf, simSurface(nearOps, ng, xz.x, xz.y, uNearCenter.x, uNearCenter.y), w);
+    }
+    return { rate: vec4(...packSimRate(doses.rate.x, doses.rate.y, surf)), elev: surf.elev };
+  };
+
+  return { field, uSimCenter, uNearCenter };
+}
+
+function gpuResampleOps(n: number, textures: Record<SimTex, THREE.Texture>): SimResampleOps<any, any> {
+  const swizzle = ['x', 'y', 'z', 'w'] as const;
+  return {
     lit: (v) => float(v),
     add: (a, b) => a.add(b),
     sub: (a, b) => a.sub(b),
@@ -214,14 +286,4 @@ export function createSimWakeField(analytic: WakeFieldFn, sim: WakeSim) {
     },
     channel: (t, c) => t[swizzle[c]],
   };
-
-  const field: WakeFieldFn = (worldXZ, detail, tierTexel) => {
-    if (!detail) return analytic(worldXZ, false, tierTexel);
-    const doses = analytic(worldXZ, false, tierTexel);
-    const xz = vec2(worldXZ.x, worldXZ.y);
-    const surf = simSurface(ops, g, xz.x, xz.y, uSimCenter.x, uSimCenter.y);
-    return { rate: vec4(...packSimRate(doses.rate.x, doses.rate.y, surf)), elev: surf.elev };
-  };
-
-  return { field, uSimCenter };
 }

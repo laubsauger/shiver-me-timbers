@@ -29,7 +29,7 @@ import {
   muffleAmount,
   type VoiceTunables,
 } from './protocol';
-import { ENGINE_SPECS, createEngineState, stepEngine, type EngineSpec, type EngineState, type VoiceKind } from './engineModel';
+import { ENGINE_SPECS, createEngineState, detuneSpec, stepEngine, type EngineSpec, type EngineState, type VoiceKind } from './engineModel';
 import { WaterLayer, createEngineVoice, type EngineFrame, type EngineVoice, type WaterFrame } from './voices';
 
 export const CONTROL_SAMPLES = 32;
@@ -103,19 +103,8 @@ class BoatModel {
     this.kind = kind;
     this.spec = ENGINE_SPECS[kind];
     this.seed = seed;
-    for (let i = 0; i < MAX_ENGINES; i++) {
-      this.engines.push(createEngineState(this.spec));
-      // rebuilt engines are not identical: idle settles a few rpm apart — the triple beats
-      this.engines[i].rpm = this.spec.idleRpm * (1 + 0.012 * (i - 1));
-    }
+    for (let i = 0; i < MAX_ENGINES; i++) this.engines.push(createEngineState(detuneSpec(this.spec, i)));
   }
-}
-
-/** per-engine small spec perturbation: prop pitch / idle tune tolerance ⟹ natural detune (beating) */
-function detunedSpec(base: EngineSpec, index: number): EngineSpec {
-  if (index === 1) return base;
-  const d = index === 0 ? -1 : 1;
-  return { ...base, calRpm: base.calRpm * (1 + 0.004 * d), idleRpm: base.idleRpm * (1 + 0.015 * d), limitRpm: base.limitRpm + 25 * d };
 }
 
 class SlotState {
@@ -295,7 +284,7 @@ export class BoatSynthCore {
             rpmOverride: boat.hasOverride ? boat.rpmOverride[e] : undefined,
           }, dt);
           if (!Number.isFinite(st.rpm)) {
-            boat.engines[e] = createEngineState(boat.spec);
+            boat.engines[e] = createEngineState(detuneSpec(boat.spec, e));
             this.nanResets++;
           }
           loadSum += st.load;
@@ -325,8 +314,11 @@ export class BoatSynthCore {
         for (let e = 0; e < boat.count; e++) {
           const st = boat.engines[e];
           const f = frames[e];
-          f.rpmA = boat.rpmA[e];
-          f.rpmB = st.rpm;
+          // SOUND-ONLY: a sim running three identical drives publishes identical rpm; the design's "three slightly
+          // detuned voices beating" is a perceptual ±0.25 % on the override path (the local path detunes its specs)
+          const tune = boat.hasOverride ? 1 + 0.0025 * (e - 1) : 1;
+          f.rpmA = boat.rpmA[e] * tune;
+          f.rpmB = st.rpm * tune;
           f.load = st.load;
           f.bark = st.bark;
           f.thrEff = st.thrEff;
@@ -368,7 +360,7 @@ export class BoatSynthCore {
     const key = `${boat.kind}:${e}`;
     let s = this.detunedCache.get(key);
     if (!s) {
-      s = detunedSpec(boat.spec, e);
+      s = detuneSpec(boat.spec, e);
       this.detunedCache.set(key, s);
     }
     return s;

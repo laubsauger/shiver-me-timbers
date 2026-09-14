@@ -83,7 +83,21 @@ export function wakeReachAstern(tier: { n: number; texel: number }): number {
 
 /** the speedboat's in-game wake tier: 256² × 1.75 m = 448 m, 304 m of interior astern of the stem at ≤ 40 m/s */
 export const WAKE_SPEEDBOAT_MAX_SPEED = 40;
-export const WAKE_SPEEDBOAT_TIER: { readonly n: number; readonly texel: number } = Object.freeze(wakeTierForSpeed(WAKE_SPEEDBOAT_MAX_SPEED));
+/**
+ * §T.199 THE SPEEDBOAT'S NEAR-HULL TIER (docs/wake/w7-speedboat-look.md §3). USER: 'the water displacement / general 3D
+ * wake the boat does is a bit weak … is it on? is it tuned down too hard?' It was on and not tuned down: the 448 m tier's
+ * splat σ ≥ √2·1.75 = 2.5 m band-limits the forcing, so the divergent waves and bow lip a 12 m planing hull makes
+ * (λ ≈ 2–6 m) are not drawn. The raft tier's grid — 256² × 0.5 m = 128 m, σ ≥ 0.71 m — rides the hull (stem-led,
+ * `wakeNearStemLead`) in the SAME compute group and is cross-faded over the far tier. CPU tow, 30 m/s, contact hull
+ * [M]: near-hull peak-to-trough 0.023 → 0.242 m, max |ζ| within 15 m 0.074 → 0.209 m, max slope 0.021 → 0.221,
+ * divergent arm 10–40 m astern 0.026 → 0.32 m. Vertex spacing at a 20–45 m chase is 0.9–1.4 m (surfaceGeometry), so
+ * λ ≥ 2 m reaches the vertices; the forcing at λ = 1.4 m is e^(−k²σ²/2) ≈ 0.4 % — no sub-vertex aliasing to speak of.
+ */
+export const WAKE_SPEEDBOAT_NEAR_TIER = Object.freeze({ n: 256, texel: 0.5 });
+export const WAKE_SPEEDBOAT_TIER: { readonly n: number; readonly texel: number; readonly near?: { readonly n: number; readonly texel: number } } = Object.freeze({
+  ...wakeTierForSpeed(WAKE_SPEEDBOAT_MAX_SPEED),
+  near: WAKE_SPEEDBOAT_NEAR_TIER,
+});
 
 /**
  * HAVELOCK'S FAR FIELD, EVALUATED FOR A SAMPLED SOURCE (Havelock 1908; the

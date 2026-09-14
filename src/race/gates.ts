@@ -20,8 +20,10 @@ export type CrossingResult =
   | null;
 
 /**
- * Swept crossing of the pole segment left → right. Course direction is the side the right
- * pole lies to STARBOARD of: forward ⟺ cross2(right − left, motion) > 0.
+ * Swept crossing of the pole segment. Handedness (types.ts, §T.197): `left` is the PORT pole
+ * and `right` the STARBOARD pole seen travelling the course direction, so course direction is
+ * the one the right pole lies to STARBOARD of: forward ⟺ cross2(left − right, motion) > 0
+ * (cross2 > 0 ⟹ the second vector lies to STARBOARD of the first, polyline.ts).
  */
 export function segmentCrossesPoles(
   left: Vec2,
@@ -31,18 +33,19 @@ export function segmentCrossesPoles(
   x1: number,
   z1: number,
 ): CrossingResult {
-  const rx = right[0] - left[0];
-  const rz = right[1] - left[1];
+  // measured from the starboard pole along starboard → port
+  const rx = left[0] - right[0];
+  const rz = left[1] - right[1];
   // signed side: > 0 beyond the line in course direction
-  const s0 = cross2(rx, rz, x0 - left[0], z0 - left[1]);
-  const s1 = cross2(rx, rz, x1 - left[0], z1 - left[1]);
+  const s0 = cross2(rx, rz, x0 - right[0], z0 - right[1]);
+  const s1 = cross2(rx, rz, x1 - right[0], z1 - right[1]);
   let dir: 'forward' | 'reverse';
   if (s0 < 0 && s1 >= 0) dir = 'forward';
   else if (s0 > 0 && s1 <= 0) dir = 'reverse';
   else return null;
   const t = s0 / (s0 - s1);
-  const ix = x0 + (x1 - x0) * t - left[0];
-  const iz = z0 + (z1 - z0) * t - left[1];
+  const ix = x0 + (x1 - x0) * t - right[0];
+  const iz = z0 + (z1 - z0) * t - right[1];
   const u = (ix * rx + iz * rz) / (rx * rx + rz * rz);
   if (u < 0 || u > 1) return null; // outside a pole: tunnelled past it, does not count
   return { dir, t };
@@ -67,13 +70,14 @@ export function elementCenter(e: CourseElement): Vec2 {
  * sense `keepOn` demands, while outside `radius`. The rounding bearing points from the mark
  * to the outside of the turn: o ∝ side(d_in) + side(d_out) + (d_in − d_out), where d_in/d_out
  * are the approach/exit directions (previous element → mark → next element) and side() is the
- * side the boat passes on (port of d when the mark is kept to starboard). A straight pass gives
- * the pass side, a hairpin gives straight ahead of the approach, a 90° turn the corner apex.
+ * side of the course line the boat passes on, seen from the mark (port of d when the mark is
+ * kept to starboard). A straight pass gives the pass side, a hairpin gives straight ahead of the
+ * approach, a 90° turn the corner apex. Handedness: types.ts (port of d = (d.z, −d.x)).
  *
  * Sweeping the bearing past o in one substep ⟺ the substep segment crosses the ray
  * mark + [radius, capture]·o in the rotational direction, so the swept gate test does it
- * exactly, with no angle unwrapping. Mark kept to starboard ⟹ bearing (atan2(x, z) of the boat
- * relative to the mark) INCREASES ⟹ motion · starboard(o) > 0.
+ * exactly, with no angle unwrapping. Mark kept to starboard ⟹ the boat circles it turning to
+ * starboard ⟹ its bearing (atan2(x, z) relative to the mark) DECREASES ⟹ motion · starboard(o) < 0.
  */
 export function markRoundingPoles(
   mark: TurnMark,
@@ -94,21 +98,21 @@ export function markRoundingPoles(
   const oz = doutz0 / dout;
   // boat passes to PORT of the course direction when the mark is kept to starboard
   const portSign = mark.keepOn === 'starboard' ? 1 : -1;
-  // port(d) = (−d.z, d.x)
-  let rx = portSign * (-iz - oz) + (ix - ox);
-  let rz = portSign * (ix + ox) + (iz - oz);
+  // port(d) = (d.z, −d.x)
+  let rx = portSign * (iz + oz) + (ix - ox);
+  let rz = portSign * (-ix - ox) + (iz - oz);
   let n = Math.hypot(rx, rz);
   if (n < 1e-9) {
-    rx = portSign * -iz;
-    rz = portSign * ix;
+    rx = portSign * iz;
+    rz = portSign * -ix;
     n = 1;
   }
   rx /= n;
   rz /= n;
   const inner: Vec2 = [mx + rx * mark.radius, mz + rz * mark.radius];
   const outer: Vec2 = [mx + rx * captureRange, mz + rz * captureRange];
-  // forward ⟺ cross2(right − left, m) > 0. Starboard keep needs cross2(m, o) > 0, i.e.
-  // cross2(−o, m) > 0 ⟹ right − left = −o ⟹ left = outer, right = inner.
+  // forward ⟺ cross2(left − right, m) > 0. Starboard keep sweeps the bearing down: cross2(o, m) > 0
+  // (m to starboard of o) ⟹ left − right = o ⟹ left = outer, right = inner.
   return mark.keepOn === 'starboard' ? { left: outer, right: inner } : { left: inner, right: outer };
 }
 

@@ -51,6 +51,60 @@ function runFrames(frameDts: number[]): number {
   return steps;
 }
 
+describe('wall-clock frame timing stays separate from simulation time', () => {
+  it('reports actual frame intervals during fixed-time capture and freeze', () => {
+    const samples: number[][] = [];
+    let ticks = 0;
+    const loop = new GameLoop(() => { ticks++; },
+      (_alpha, dt, wallDt) => { samples.push([dt, wallDt]); });
+    const driver = driveLoop(loop);
+    try {
+      driver.step(0);
+      loop.setFixedDt(SIM_DT);
+      driver.step(100);
+      expect(samples[0]).toEqual([SIM_DT, 0.1]);
+      expect(ticks).toBe(1);
+      loop.setFixedDt(0);
+      driver.step(500);
+      expect(samples[1]).toEqual([0, 0.5]);
+      expect(ticks).toBe(1);
+      loop.setFixedDt(null);
+      driver.step(20);
+      expect(samples[2]).toEqual([0.02, 0.02]);
+      expect(ticks).toBe(2);
+    } finally { driver.stop(); }
+  });
+
+  it('retains long stalls in measurements while capping simulation catch-up', () => {
+    const samples: number[][] = [];
+    let ticks = 0;
+    const loop = new GameLoop(() => { ticks++; },
+      (_alpha, dt, wallDt) => { samples.push([dt, wallDt]); });
+    const driver = driveLoop(loop);
+    try {
+      driver.step(0);
+      driver.step(1000);
+      expect(samples).toEqual([[0.25, 1]]);
+      expect(ticks).toBe(MAX_SUBSTEPS);
+    } finally { driver.stop(); }
+  });
+
+  it('reports wall time while paused and fixed-time visuals remain frozen', () => {
+    const samples: number[][] = [];
+    let ticks = 0;
+    const loop = new GameLoop(() => { ticks++; },
+      (_alpha, dt, wallDt) => { samples.push([dt, wallDt]); }, () => true);
+    const driver = driveLoop(loop);
+    try {
+      loop.setFixedDt(0);
+      driver.step(0);
+      driver.step(75);
+      expect(samples).toEqual([[0, 0.075]]);
+      expect(ticks).toBe(0);
+    } finally { driver.stop(); }
+  });
+});
+
 describe('fixed-step accumulator (§V.2)', () => {
   it('60fps frames → exactly one step per frame', () => {
     const frames = Array(120).fill(SIM_DT);

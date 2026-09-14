@@ -72,7 +72,8 @@ class ExhaustExit {
   }
   /** once per chunk */
   configure(load: number, rpmN: number, brightHz: number): void {
-    this.airLp.set(brightHz * (0.55 + 0.45 * load) + 2600 * rpmN, 0.75, this.sr);
+    // T204: +2600·rpmN opened the in-air exit to 5.8 kHz at WOT; the bark lives below ~4 kHz
+    this.airLp.set(brightHz * (0.55 + 0.45 * load) + 1400 * rpmN, 0.7, this.sr);
     this.underLp.set(230 + 260 * rpmN + 150 * load, 0.9, this.sr);
   }
   /** a firing reached the hub: re-pitch the bubble */
@@ -90,7 +91,9 @@ class ExhaustExit {
     if (!this.cheap) {
       this.bubble.run(pulse * 0.6);
       this.relief.run(y);
-      under += this.bubble.bp * 1.4 + this.relief.hp * 0.1;
+      // the idle-relief port is a trace of rasp: at 0.1 it put MORE energy above 1 kHz into the
+      // through-the-hub exhaust than the in-air idle had (measured), the opposite of underwater
+      under += this.bubble.bp * 1.4 + this.relief.hp * 0.025;
     }
     return this.airLp.lp * (1 - muffle) + under * muffle;
   }
@@ -291,7 +294,7 @@ export class TwoStrokeVoice implements EngineVoice {
     for (let i = 0; i < 3; i++) this.cylGain[i] = 0.85 + 0.3 * rng.next();
     this.chamber = new Waveguide((sr * 2 * 0.62 * (1 + 0.03 * rng.bi())) / SPEED_OF_HOT_GAS, 0.7, 4200, sr);
     this.nasal.set(1050 * (1 + 0.05 * rng.bi()), 1.4, sr);
-    this.ding.set(2650 * (1 + 0.04 * rng.bi()), 28, sr);
+    this.ding.set(2650 * (1 + 0.04 * rng.bi()), 12, sr); // T204: Q 28 rang as a steady 2.7 kHz tone at idle
     this.exit = new ExhaustExit(sr, seed, cheap);
     this.pops = new Pops(sr, seed);
   }
@@ -376,21 +379,24 @@ export class TurbineVoice implements EngineVoice {
   ) {
     const rng = seeded(seed);
     this.noise = new Noise(seed ^ 0x7b1e);
-    this.blades = 11;
+    // T204: 11 blades on a 41 000 rpm spool put a constant 4.9 kHz whine (+9.8 kHz) on the idling grid —
+    // the menu's shrill tone. A big marine gas generator (22 000 rpm, 9 blades) whines at 2.2–3.3 kHz
+    this.blades = 9;
     this.n1Phase = rng.next();
     this.flutter.setHz(4, sr);
     this.rumble.set(85, 0.7, sr);
-    this.intake.set(4800, 0.7, sr);
+    this.intake.set(2400, 0.7, sr);
   }
   render(out: Float32Array, off: number, n: number, f: EngineFrame, _t: VoiceTunables, gain: number): void {
     const sr = this.sr;
     const spool = clamp(f.spool, 0, 1);
-    // gas generator 52%→100% of 41 000 rpm over the spool; the lever never sets pitch directly
-    const n1Hz = ((0.52 + 0.48 * spool) * 41000) / 60;
+    // gas generator 52%→100% of 22 000 rpm over the spool; the lever never sets pitch directly
+    const n1Hz = ((0.52 + 0.48 * spool) * 22000) / 60;
     const rpmMid = 0.5 * (f.rpmA + f.rpmB);
     const ptHz = ((rpmMid * 9) / 60) * 7; // power turbine through a 9:1 box, 7 blades
-    this.roar.set(520 + 2600 * spool, 0.6, sr);
-    const whineG = 0.05 + 0.22 * spool;
+    this.roar.set(520 + 2000 * spool, 0.6, sr);
+    // idle whine is a trace; it comes up with spool
+    const whineG = 0.012 + 0.16 * spool * spool;
     const roarG = 0.12 + 0.8 * Math.pow(spool, 1.5);
     const ptG = this.cheap ? 0 : 0.04 * (0.3 + f.load) * clamp(rpmMid / 3000, 0, 1);
     for (let s = 0; s < n; s++) {
@@ -401,7 +407,7 @@ export class TurbineVoice implements EngineVoice {
       this.bpPhase += (n1 * this.blades) / sr;
       if (this.bpPhase > 1) this.bpPhase -= 1;
       const bp = this.bpPhase;
-      let w = sin01(bp) * 0.5 + sin01(bp * 2) * 0.12 + sin01(bp + this.n1Phase) * 0.12 + sin01(bp - this.n1Phase) * 0.12;
+      let w = sin01(bp) * 0.5 + sin01(bp * 2) * 0.03 + sin01(bp + this.n1Phase) * 0.12 + sin01(bp - this.n1Phase) * 0.12;
       w += sin01(this.n1Phase * 2) * 0.18;
       const nz = this.noise.bi();
       this.roar.run(nz);
@@ -409,7 +415,7 @@ export class TurbineVoice implements EngineVoice {
       let y = w * whineG + this.roar.lp * roarG + this.rumble.lp * roarG * 2.2;
       if (!this.cheap) {
         this.intake.run(nz);
-        y += this.intake.hp * 0.05 * spool;
+        y += this.intake.bp * 0.05 * spool;
         this.ptPhase += ptHz / sr;
         if (this.ptPhase > 1) this.ptPhase -= 1;
         y += sin01(this.ptPhase) * ptG;
@@ -450,7 +456,8 @@ export class ElectricVoice implements EngineVoice {
     const rpmN = clamp(rpmMid / 7600, 0, 1);
     const alive = smoothstep(20, 250, rpmMid);
     const whineG = (0.1 + 0.3 * f.load) * alive;
-    const carrierG = this.cheap ? 0 : (0.015 + 0.09 * f.load) * smoothstep(0.005, 0.03, f.thrEff + rpmN);
+    // T204: carrier and the 12×/24× partials were within 8 dB of the fundamental at cruise (3.4 / 4.5 / 6.9 kHz)
+    const carrierG = this.cheap ? 0 : (0.005 + 0.03 * f.load) * smoothstep(0.005, 0.03, f.thrEff + rpmN);
     const gearG = this.cheap ? 0 : t.gearWhineGain * 2.5 * rpmN * (0.3 + f.load);
     for (let s = 0; s < n; s++) {
       const rpm = f.rpmA + (f.rpmB - f.rpmA) * (s * inv);
@@ -458,7 +465,7 @@ export class ElectricVoice implements EngineVoice {
       this.ePhase += fe / sr;
       if (this.ePhase > 1000) this.ePhase -= 1000;
       const e = this.ePhase;
-      let y = (sin01(e * 6) * 0.55 + sin01(e * 12) * 0.22 + sin01(e * 24) * 0.08) * whineG;
+      let y = (sin01(e * 6) * 0.55 + sin01(e * 12) * 0.08 + sin01(e * 24) * 0.015) * whineG;
       if (carrierG > 0) {
         this.cPhase += inverterCarrierHz(fe) / sr;
         if (this.cPhase > 1000) this.cPhase -= 1000;
@@ -468,7 +475,7 @@ export class ElectricVoice implements EngineVoice {
         if (this.gPhase > 1) this.gPhase -= 1;
         y += sin01(this.gPhase) * gearG;
         this.fan.run(this.noise.bi());
-        y += this.fan.hp * 0.03 * rpmN;
+        y += this.fan.hp * 0.012 * rpmN;
       }
       out[off + s] += y * 0.8 * gain;
     }
@@ -584,7 +591,7 @@ export class WaterLayer {
     const rushG = t.rushGain * wet * Math.pow(sN, 1.5) * 0.8 + 0.04 * wet;
     const imm = clamp(w.immersion, 0, 1);
     const sprayG = t.sprayGain * clamp(w.thrust, 0, 1.2) * Math.pow(sN, 1.2) * (0.35 + 0.65 * (1 - imm)) * (wet > 0 ? 1 : 0.3);
-    this.hiss.set(1100 + 3900 * sN, 0.8, sr);
+    this.hiss.set(1000 + 2600 * sN, 0.8, sr); // T204: was 1.1→6.2 kHz, a hiss centre above 5 kHz reads as a sizzle
     this.spray.set(900 + 1400 * sN, 0.55, sr);
     // ventilation: a prop partly out of the water screams at blade rate harmonics; fully in air it thins
     const vent = 1 - imm;

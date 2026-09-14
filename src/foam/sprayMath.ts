@@ -583,14 +583,212 @@ export function bowContactEmission(
       if (!face((side * dz) / len, (hb - ha) / len, len, c.depth[2 * s + k], c.depth[2 * (s + 1) + k])) return none;
     }
   }
+  return liftedFluxEmission(flux, flux > 0 ? liftFlux / flux : 0, burialRate, cutwaterDepth, p);
+}
+
+/**
+ * THE EMISSION RULE of a lifted-water flux (§V77: `bowContactEmission` and `waterlineSprayEmission` share it):
+ *   slam  = ramp(burial rate, slam on → full) · ramp(cutwater depth, 0 → bowContactDepth)
+ *   rate  = bowLiftRate · flux + bowSlamRate · slam
+ *   sheet = cruiseSheet + (1 − cruiseSheet)·max(lift̄, slam)
+ */
+export function liftedFluxEmission(
+  flux: number,
+  lift: number,
+  burialRate: number,
+  cutwaterDepth: number,
+  p: Pick<SprayParams, 'bowLiftRate' | 'bowCruiseSheet' | 'bowSlamRateOn' | 'bowSlamRateFull' | 'bowSlamRate' | 'bowContactDepth'>,
+): BowContactEmission {
+  const cruiseSheet = Math.min(1, Math.max(0, p.bowCruiseSheet));
   const slam = ramp01(burialRate, p.bowSlamRateOn, p.bowSlamRateFull) * ramp01(cutwaterDepth, 0, p.bowContactDepth);
-  const lift = flux > 0 ? liftFlux / flux : 0;
   return {
     rate: Math.max(0, p.bowLiftRate * flux + p.bowSlamRate * slam),
     sheet: Math.min(1, cruiseSheet + (1 - cruiseSheet) * Math.max(lift, slam)),
     slam,
     flux,
   };
+}
+
+// ---------------------------------------------------------------------------
+// §T.195 EVERY BOAT: the speedboat contact's spray, and the fleet's emitter budget
+// ---------------------------------------------------------------------------
+
+/** the slice of `HullWater` the waterline spray reads (structural; src/sea-physics/hullWater owns the class) */
+export interface WaterlineSprayInput {
+  /** the clipped cut edges this evaluate: world endpoints (3 per segment) and normal velocity into the water (m/s) */
+  readonly waterline: { readonly count: number; readonly a: ArrayLike<number>; readonly b: ArrayLike<number>; readonly vn: ArrayLike<number> };
+  /** per 2D+t strip: keel immersion (m, + under), penetration velocity (m/s), wetted area (m²) */
+  readonly sections: { readonly count: number; readonly d: ArrayLike<number>; readonly vn: ArrayLike<number>; readonly wetArea: ArrayLike<number> };
+  /** body z of each strip centre (m) — which wet strip is the cutwater */
+  readonly stripZ: ArrayLike<number>;
+}
+
+/** what one hull's waterline lifts this tick — param-free, so a worker can publish it and the page applies live params */
+export interface WaterlineSpray {
+  inContact: boolean;
+  /** Σ v_n·min(D, v_n²/2g)·Δl over the segments driving into the water (m³/s) */
+  flux: number;
+  /** flux-weighted lift fraction 0..1 */
+  lift: number;
+  /** flux-weighted normal speed (m/s) — how fast the lifted water leaves */
+  launch: number;
+  /** flux-weighted emission centroid, world (y on the waterline) */
+  x: number;
+  y: number;
+  z: number;
+  /** flux-weighted RMS distance across the hull from the centroid (m) */
+  halfWidth: number;
+  /** unit hull heading, world XZ */
+  fwdX: number;
+  fwdZ: number;
+  /** the forward-most wet strip: penetration velocity (m/s, + burying) and keel immersion (m) — the slam inputs */
+  burialRate: number;
+  cutwaterDepth: number;
+}
+
+export function createWaterlineSpray(): WaterlineSpray {
+  return { inContact: false, flux: 0, lift: 0, launch: 0, x: 0, y: 0, z: 0, halfWidth: 0, fwdX: 0, fwdZ: 1, burialRate: 0, cutwaterDepth: 0 };
+}
+
+/**
+ * THE SPEEDBOAT'S SPRAY FROM ITS OWN CONTACT (§T.195, §V101). `bowContactEmission`'s integral taken over the
+ * contact's REAL waterline — the clipped mesh ∩ water edges `HullWater` publishes with their normal velocity —
+ * instead of a station outline, so a planing hull's spray root (the oblique stagnation line under the bottom)
+ * lifts water and a buried bow lifts more:
+ *
+ *   q_j = v_n · min(D, v_n²/2g) · |b − a|      for v_n > 0      D = deepest wet keel immersion (floored 1 cm)
+ *
+ * The emitter is the flux centroid; its width the flux-weighted spread across the heading. The slam inputs are
+ * the forward-most wet strip's penetration velocity and immersion (the 2D+t section the stem enters with).
+ * STATED: D is the hull's deepest immersion, not each segment's own face depth (the waterline carries none).
+ * §V28: any non-finite read → nothing lifted (inContact false).
+ */
+export function waterlineSprayEmission(c: WaterlineSprayInput, quaternion: ArrayLike<number>, out: WaterlineSpray = createWaterlineSpray()): WaterlineSpray {
+  const [qx, qy, qz, qw] = [quaternion[0], quaternion[1], quaternion[2], quaternion[3]];
+  // body +z and +x in world (the quat rotation of the unit axes)
+  const fx = 2 * (qx * qz + qw * qy);
+  const fz = 1 - 2 * (qx * qx + qy * qy);
+  const flen = Math.hypot(fx, fz);
+  out.inContact = false;
+  out.flux = out.lift = out.launch = out.x = out.y = out.z = out.halfWidth = out.burialRate = out.cutwaterDepth = 0;
+  out.fwdX = 0;
+  out.fwdZ = 1;
+  if (![qx, qy, qz, qw].every(Number.isFinite) || !(flen > 1e-9)) return out;
+  const ux = fx / flen;
+  const uz = fz / flen;
+  const S = c.sections;
+  let depth = 0;
+  let wet = false;
+  let front = -Infinity;
+  let rate = 0;
+  let cut = 0;
+  for (let i = 0; i < S.count; i++) {
+    if (!(S.wetArea[i] > 0)) continue;
+    const d = S.d[i];
+    const v = S.vn[i];
+    if (!Number.isFinite(d) || !Number.isFinite(v) || !Number.isFinite(c.stripZ[i])) return out;
+    wet = true;
+    if (d > depth) depth = d;
+    if (c.stripZ[i] > front) {
+      front = c.stripZ[i];
+      rate = v;
+      cut = Math.max(0, d);
+    }
+  }
+  const D = Math.max(LIFT_DEPTH_FLOOR, depth);
+  const W = c.waterline;
+  let flux = 0;
+  let liftFlux = 0;
+  let launchFlux = 0;
+  let sx = 0;
+  let sy = 0;
+  let sz = 0;
+  for (let j = 0; j < W.count; j++) {
+    const vn = W.vn[j];
+    const ax = W.a[3 * j];
+    const ay = W.a[3 * j + 1];
+    const az = W.a[3 * j + 2];
+    const bx = W.b[3 * j];
+    const by = W.b[3 * j + 1];
+    const bz = W.b[3 * j + 2];
+    if (![vn, ax, ay, az, bx, by, bz].every(Number.isFinite)) return out;
+    if (!(vn > 0)) continue;
+    const len = Math.hypot(bx - ax, by - ay, bz - az);
+    const lift = liftFraction(vn, D);
+    const q = vn * D * lift * len;
+    if (!(q > 0)) continue;
+    flux += q;
+    liftFlux += q * lift;
+    launchFlux += q * vn;
+    sx += q * 0.5 * (ax + bx);
+    sy += q * 0.5 * (ay + by);
+    sz += q * 0.5 * (az + bz);
+  }
+  out.fwdX = ux;
+  out.fwdZ = uz;
+  out.inContact = wet || flux > 0;
+  out.burialRate = rate;
+  out.cutwaterDepth = cut;
+  if (!(flux > 0)) return out;
+  out.flux = flux;
+  out.lift = liftFlux / flux;
+  out.launch = launchFlux / flux;
+  out.x = sx / flux;
+  out.y = sy / flux;
+  out.z = sz / flux;
+  let lat2 = 0;
+  for (let j = 0; j < W.count; j++) {
+    const vn = W.vn[j];
+    if (!(vn > 0)) continue;
+    const len = Math.hypot(W.b[3 * j] - W.a[3 * j], W.b[3 * j + 1] - W.a[3 * j + 1], W.b[3 * j + 2] - W.a[3 * j + 2]);
+    const q = vn * D * liftFraction(vn, D) * len;
+    if (!(q > 0)) continue;
+    // across the heading: (−uz, ux)
+    const lat = (0.5 * (W.a[3 * j] + W.b[3 * j]) - out.x) * -uz + (0.5 * (W.a[3 * j + 2] + W.b[3 * j + 2]) - out.z) * ux;
+    lat2 += q * lat * lat;
+  }
+  out.halfWidth = Math.sqrt(lat2 / flux);
+  return out;
+}
+
+/**
+ * FIXED PARTICLE BUDGET, PRIORITY BY CAMERA DISTANCE (§T.195). A pool of `count` particles living `life` seconds
+ * can turn over at most count/life particles per second — anything asked beyond that finds no dead slot and is
+ * silently lost to whichever emitter the cursor happens to reach. So the budget is SPENT, nearest emitter first:
+ *
+ *   order    by camera distance (ties by index — deterministic), live requests only (rate > 0, finite)
+ *   slots    at most `slots` emitters get a uniform slot at all (the shader's literal bound, §V28)
+ *   grant    min(rate, budget left) in that order — a far rival starves before a near one thins
+ *
+ * Writes the chosen emitter indices and granted rates (slot order = priority order); returns the live slot count.
+ */
+export function prioritiseEmitters(
+  rates: ArrayLike<number>,
+  distances: ArrayLike<number>,
+  slots: number,
+  budgetRate: number,
+  outIndex: number[],
+  outRate: number[],
+): number {
+  const order: number[] = [];
+  for (let i = 0; i < rates.length; i++) {
+    const r = rates[i];
+    if (r > 0 && Number.isFinite(r)) order.push(i);
+  }
+  const dist = (i: number): number => (Number.isFinite(distances[i]) ? distances[i] : Infinity);
+  order.sort((a, b) => dist(a) - dist(b) || a - b);
+  let left = Number.isFinite(budgetRate) ? Math.max(0, budgetRate) : 0;
+  const n = Math.min(order.length, Math.max(0, Math.floor(slots)));
+  outIndex.length = 0;
+  outRate.length = 0;
+  for (let k = 0; k < n && left > 0; k++) {
+    const i = order[k];
+    const g = Math.min(rates[i], left);
+    outIndex.push(i);
+    outRate.push(g);
+    left -= g;
+  }
+  return outIndex.length;
 }
 
 /**

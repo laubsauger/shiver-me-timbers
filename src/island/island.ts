@@ -34,6 +34,8 @@ import type { IslandMaterials } from './islandMaterials';
 import { isSierraArchetype } from './sierraArchetypes';
 import { createSierraTerrainMaterial } from './sierraMaterial';
 import { createSierraPines } from '../vegetation/pineScatter';
+import { sierraParams } from '../params/sierra';
+import { kitHooksFor } from './kitIsland';
 
 /**
  * Everything an island is built from: the world tunables, plus the two
@@ -300,19 +302,33 @@ export function createIsland(opts: CreateIslandOptions): Island {
   // owns a one-layer atlas and its own handle.
   const ownAtlas = sierra && !shared ? createSierraAtlas(1) : null;
   const ownSierraTerrain = ownAtlas ? createSierraTerrainMaterial(undefined, { atlas: ownAtlas }) : null;
-  const terrainMaterial = sierra ? (shared?.sierraTerrain(heightmap) ?? ownSierraTerrain ?? undefined) : shared?.terrain;
+  // §T.194: a `kit:` island (src/island/kitIsland.ts) — the race kit's shader
+  // pair on the shared atlas, its OWN resolved params for the builders that
+  // otherwise read the globals, and its props. Every other island: all three
+  // are undefined/null and nothing below differs from before.
+  const kitHooks = sierra ? kitHooksFor(heightmap) : null;
+  const kitMaterials = kitHooks && shared ? shared.kit(heightmap) : null;
+  const kitIslandParams = kitHooks ? p : undefined;
+  const kitSierraParams = kitHooks ? kitHooks.sierraParams(heightmap, sierraParams) : undefined;
+  const terrainMaterial = kitMaterials
+    ? kitMaterials.terrain
+    : sierra
+      ? (shared?.sierraTerrain(heightmap) ?? ownSierraTerrain ?? undefined)
+      : shared?.terrain;
   const terrain = createIslandMesh(heightmap, p.skirtDepth, terrainMaterial);
   const rocks = createRocks({
     seed: opts.seed + ROCK_SEED_OFFSET,
     heightmap,
-    material: sierra ? shared?.sierraRock(heightmap).material : shared?.rock.material,
+    material: kitMaterials ? kitMaterials.rock.material : sierra ? shared?.sierraRock(heightmap).material : shared?.rock.material,
     atlas: ownAtlas ?? undefined,
+    ...(kitHooks ? { params: kitIslandParams, sierraParams: kitSierraParams } : {}),
   });
   const palms = sierra
     ? createSierraPines({
         seed: opts.seed + PALM_SEED_OFFSET,
         heightmap,
         shared: shared?.pines(),
+        ...(kitSierraParams ? { params: kitSierraParams } : {}),
       })
     : createIslandPalms({
         seed: opts.seed + PALM_SEED_OFFSET,
@@ -327,13 +343,24 @@ export function createIsland(opts: CreateIslandOptions): Island {
     // §T.112e: bunchgrass + deadfall + cones on a granite island, the tropical
     // grass/shrub pair on a pirate one — same material, same LOD gate
     sierra: sierra ? heightmap : undefined,
+    ...(kitSierraParams ? { sierraParams: kitSierraParams } : {}),
   });
   const structures = createStructures({
     seed: opts.seed + STRUCTURE_SEED_OFFSET,
     heightmap,
     material: shared?.structure.material,
+    ...(kitIslandParams ? { params: kitIslandParams } : {}),
   });
   const waterfallSocket = buildWaterfallSocket(heightmap);
+  const kitDecor = kitHooks
+    ? kitHooks.decorate({
+        seed: opts.seed,
+        heightmap,
+        rockMaterial: kitMaterials?.rock.material,
+        aerialOutput: shared ? (m) => shared.aerialOutput(m) : undefined,
+        castShadows: p.castShadows,
+      })
+    : null;
 
   const group = new THREE.Group();
   group.name = 'island';
@@ -345,6 +372,7 @@ export function createIsland(opts: CreateIslandOptions): Island {
     structures.mesh,
     waterfallSocket,
   );
+  if (kitDecor) group.add(kitDecor.group);
   // §T.132: WHICH island each draw belongs to. The sierra materials read the
   // horizon/info layer and the joint/sheet numbers off object-group uniforms
   // filled from this — so it has to be stamped before the first frame, and on
@@ -353,6 +381,7 @@ export function createIsland(opts: CreateIslandOptions): Island {
   if (sierra) {
     if (shared) shared.tagSierra(group, heightmap);
     else if (ownAtlas) tagSierraIsland(group, ownAtlas.bind(heightmap));
+    kitMaterials?.tag(group, heightmap);
   }
 
   const [px, pz] = opts.position;
@@ -363,7 +392,7 @@ export function createIsland(opts: CreateIslandOptions): Island {
   // model-view-projection the plant cull tests against
   const islandMatrix = new THREE.Matrix4().makeTranslation(px, 0, pz);
   const cullMvp = new THREE.Matrix4();
-  const foamTargets: THREE.Object3D[] = [terrain.mesh, ...rocks.foamTargets];
+  const foamTargets: THREE.Object3D[] = [terrain.mesh, ...rocks.foamTargets, ...(kitDecor?.foamTargets ?? [])];
   /**
    * THE PER-FRAME `castShadow` TRAVERSAL, HOISTED (already named as a CPU cost
    * worth attacking, and this frame is CPU-bound at 19-24 ms of encode).
@@ -447,6 +476,8 @@ export function createIsland(opts: CreateIslandOptions): Island {
       rocks.setVisible(dist <= p.lodRockCull);
       cover.setLodDistance(dist);
       structures.setLodDistance(dist);
+      kitDecor?.setLodDistance(dist);
+      kitDecor?.update?.(frame);
       // §V10/§V17: flowfoam re-tags every foamTarget in the scene each frame
       // and its capture region is ~120 m wide, so an island across the map is
       // pure wasted draws in that pass. Untag it until the ship is near.
@@ -461,6 +492,7 @@ export function createIsland(opts: CreateIslandOptions): Island {
     cover,
     structures,
     dispose(): void {
+      kitDecor?.dispose();
       structures.dispose();
       cover.dispose();
       palms.dispose();

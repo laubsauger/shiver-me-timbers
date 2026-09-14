@@ -120,7 +120,10 @@ describe('§V109 the speedboat page never reaches pirate or raft boot, raft/, co
     for (const key of [ENTRY, ...speedboatDir]) {
       const src = key === ENTRY ? mainSpeedboat : all[key];
       for (const spec of imports(src)) {
-        expect(spec, `${key} imports ${spec}`).not.toMatch(/(^|\/)main(\.ts)?$|(^|\/)main-raft(\.ts)?$|(^|\/)raft\/|(^|\/)combat(\/|$)|(^|\/)ai(\/|$)/);
+        // resolved, not a bare path match: `race/ai/` (the §T.186 rival pilots) is not the pirate `src/ai/`
+        const r = resolve(key, spec);
+        if (r !== null) expect(r, `${key} imports ${spec}`).not.toMatch(FORBIDDEN);
+        else expect(spec, `${key} imports ${spec}`).not.toMatch(/(^|\/)main(\.ts)?$|(^|\/)main-raft(\.ts)?$/);
       }
     }
   });

@@ -29,18 +29,18 @@ const DT = 1 / 60;
 /** gate across a leg: poles ±15 m either side of `at`, course direction `dir` */
 function gateAt(id: string, at: Vec2, dir: Vec2, sector: Gate['sector']): Gate {
   const [dx, dz] = dir;
-  // left = port = (−dz, dx)
-  return { id, left: [at[0] - dz * 15, at[1] + dx * 15], right: [at[0] + dz * 15, at[1] - dx * 15], sector };
+  // types.ts handedness (§T.197, as src/circuit authors it): left = PORT pole = at + (dz, −dx)·15
+  return { id, left: [at[0] + dz * 15, at[1] - dx * 15], right: [at[0] - dz * 15, at[1] + dx * 15], sector };
 }
 
 const REF: Vec2[] = [
   [0, 0],
-  [0, 400], // 90° right
-  [300, 400], // 90° right
-  [300, -100], // acute: ~149° right
-  [150, 150], // acute: ~149° right
-  [150, -200], // 90° right
-  [0, -200], // 90° right
+  [0, 400], // 90° to port (facing +z, port is +x)
+  [300, 400], // 90° to port
+  [300, -100], // acute: ~149° to port
+  [150, 150], // acute: ~149° to port
+  [150, -200], // 90° to port
+  [0, -200], // 90° to port
 ];
 
 function course(laps = 3, paceLine: Vec2[] = [[0, -100], [0, 0]]): Course {
@@ -55,13 +55,13 @@ function course(laps = 3, paceLine: Vec2[] = [[0, -100], [0, 0]]): Course {
     elements: [
       { kind: 'gate', gate: gateAt('G0', [0, 0], [0, 1], 'sheltered') },
       { kind: 'gate', gate: gateAt('G1', [0, 200], [0, 1], 'exposed') },
-      { kind: 'mark', mark: { id: 'M1', at: [15, 385], keepOn: 'starboard', radius: 8 } },
+      { kind: 'mark', mark: { id: 'M1', at: [15, 385], keepOn: 'port', radius: 8 } },
       { kind: 'gate', gate: gateAt('G2', [150, 400], [1, 0], 'exposed') },
       { kind: 'gate', gate: gateAt('G3', [300, 150], [0, -1], 'sheltered') },
       { kind: 'gate', gate: gateAt('G4', [150, 0], [0, -1], 'exposed') },
-      { kind: 'mark', mark: { id: 'M2', at: [135, -185], keepOn: 'starboard', radius: 8 } },
+      { kind: 'mark', mark: { id: 'M2', at: [135, -185], keepOn: 'port', radius: 8 } },
       { kind: 'gate', gate: gateAt('G5', [75, -200], [-1, 0], 'sheltered') },
-      { kind: 'mark', mark: { id: 'M3', at: [15, -185], keepOn: 'starboard', radius: 8 } },
+      { kind: 'mark', mark: { id: 'M3', at: [15, -185], keepOn: 'port', radius: 8 } },
     ],
   };
 }
@@ -304,7 +304,7 @@ describe('§T.184 laps and timing', () => {
 
   it('a boat that goes outside a gate pole is penalised once and still finishes the lap', () => {
     const race = new Race({ course: course(1), racerIds: [1], params: instantStart() });
-    // swing 25 m to starboard around G1 (right pole at x = 15)
+    // swing 25 m to port around G1 (the port pole is at x = 15)
     const swing = (u: number) => 25 * Math.max(0, Math.min(1, (u - 120) / 40, (280 - u) / 40));
     const script: Script = (t) => {
       const u = -10 + 40 * t;
@@ -346,9 +346,10 @@ describe('§T.184 rolling start', () => {
       const s = race.gridSlot(1, green);
       return { pos: [s.x, s.z + 30 * (t - green)] };
     };
+    // leaves its slot 3 s in at 60 m/s: at the line well before green (≈ 8.5 s on this 300 m pace line)
     const jumper: Script = (t) => {
-      const s = race.gridSlot(2, Math.min(t, 5));
-      return { pos: [s.x, s.z + 60 * Math.max(0, t - 5)] };
+      const s = race.gridSlot(2, Math.min(t, 3));
+      return { pos: [s.x, s.z + 60 * Math.max(0, t - 3)] };
     };
     const phases: string[] = [];
     const caps: (number | null)[] = [];
@@ -385,6 +386,82 @@ describe('§T.184 rolling start', () => {
     }), t).last.state.paceBoat!;
     expect(pace.z - s1.z).toBeCloseTo(params.start.firstRowGap, 6);
     expect(s1.yaw).toBeCloseTo(0, 9);
+  });
+
+  // §T.197 WHY: a slot off the pace line is water nobody cleared. Before, the rows at t = 0 were extrapolated along the
+  // first leg's tangent BEHIND the line's start (Tower Reach: into the lee chicane's rocks), so the page had to pad
+  // every pace line. The pace line is the start's contract: every slot, at every moment of the rolling start, is ON it.
+  describe('grid slots always lie on the pace line (§T.197)', () => {
+    /** a bent pace line: a straight, a 60° dogleg to port, a straight into the gate */
+    const bent = (lead: number): Vec2[] => {
+      const a: Vec2 = [0, -lead - 200];
+      const b: Vec2 = [0, -200];
+      const c2: Vec2 = [200 * Math.sin(Math.PI / 3) * 0.5, -200 + 200 * 0.5];
+      return [a, b, c2, [0, 0]];
+    };
+    const lateralOf = (idx: number): number => Math.abs((idx % params.start.gridColumns) - (params.start.gridColumns - 1) / 2) * params.start.columnSpacing;
+
+    function checkOnLine(paceLine: Vec2[], ids: number[]): { minSep: number; slotsChecked: number } {
+      const race = new Race({ course: course(3, paceLine), racerIds: ids, params });
+      const poly = race.paceLine;
+      let minSep = Infinity;
+      let slotsChecked = 0;
+      for (let t = 0; t <= race.schedule.green; t += 0.25) {
+        const slots = ids.map((id) => race.gridSlot(id, t));
+        slots.forEach((g, idx) => {
+          // back off the lateral offset along the slot heading's port normal: the centre point must be ON the polyline
+          const lat = ((idx % params.start.gridColumns) - (params.start.gridColumns - 1) / 2) * params.start.columnSpacing;
+          const tx = Math.sin(g.yaw);
+          const tz = Math.cos(g.yaw);
+          const cx = g.x - tz * lat;
+          const cz = g.z + tx * lat;
+          const near = poly.nearestArc(cx, cz);
+          expect(Math.sqrt(near.d2), `racer ${ids[idx]} t ${t}: centre off the pace line`).toBeLessThan(1e-6);
+          // and the slot itself is no further from the line than its column offset (no extrapolated tangent)
+          expect(Math.sqrt(poly.nearestArc(g.x, g.z).d2)).toBeLessThanOrEqual(lateralOf(idx) + 1e-6);
+          slotsChecked++;
+        });
+        for (let i = 0; i < slots.length; i++) {
+          for (let j = i + 1; j < slots.length; j++) minSep = Math.min(minSep, Math.hypot(slots[i].x - slots[j].x, slots[i].z - slots[j].z));
+        }
+      }
+      return { minSep, slotsChecked };
+    }
+
+    it('eight racers on a long bent line: on the line from t = 0 to green, never closer than the column spacing', () => {
+      const ids = [1, 2, 3, 4, 5, 6, 7, 0];
+      const { minSep, slotsChecked } = checkOnLine(bent(400), ids);
+      expect(slotsChecked).toBeGreaterThan(8 * 40);
+      // rows on a straight are rowSpacing apart, columns columnSpacing; the dogleg can only pull rows closer along a chord
+      expect(minSep).toBeGreaterThan(params.start.columnSpacing - 1e-6);
+    });
+
+    it('at t = 0 the last row sits on the line start and the pace boat gridDepth along it', () => {
+      const ids = [1, 2, 3, 4, 5, 6, 7, 0];
+      const race = new Race({ course: course(3, bent(400)), racerIds: ids, params });
+      const depth = params.start.firstRowGap + 3 * params.start.rowSpacing;
+      expect(race.schedule.paceStart).toBe(depth);
+      const last = race.gridSlot(0, 0);
+      const start = race.paceLine.pointAt(0);
+      expect(Math.hypot(last.x - start.x, last.z - start.z)).toBeCloseTo(params.start.columnSpacing / 2, 6);
+      // green is still the pull-off before the line's end: the pace boat runs length − pullOff − depth
+      expect(race.schedule.green).toBeCloseTo(params.start.prestartSeconds + (race.paceLine.length - params.start.pullOffDistance - depth) / params.start.paceSpeed, 9);
+    });
+
+    it('a pace line exactly as long as the grid does not collapse slots, and a shorter one fails loud', () => {
+      const ids = [1, 2, 3, 4, 5, 6, 7, 0];
+      const depth = params.start.firstRowGap + 3 * params.start.rowSpacing;
+      const exact: Vec2[] = [[0, -depth], [0, 0]];
+      const race = new Race({ course: course(3, exact), racerIds: ids, params });
+      const slots = ids.map((id) => race.gridSlot(id, 0));
+      const keys = new Set(slots.map((g) => `${g.x.toFixed(3)},${g.z.toFixed(3)}`));
+      expect(keys.size).toBe(8);
+      // rows exactly rowSpacing apart along the line, the last on its start (z = −depth)
+      expect(Math.min(...slots.map((g) => g.z))).toBeCloseTo(-depth, 9);
+      expect(slots[0].z - slots[2].z).toBeCloseTo(params.start.rowSpacing, 9);
+      expect(checkOnLine(exact, ids).minSep).toBeGreaterThan(params.start.columnSpacing - 1e-6);
+      expect(() => new Race({ course: course(3, [[0, -depth + 1], [0, 0]]), racerIds: ids, params })).toThrow(/shorter than the grid/);
+    });
   });
 });
 

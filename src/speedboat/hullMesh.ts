@@ -87,7 +87,7 @@ export interface HullDataFile {
   stations: HullStation[];
   /** rough mass budget the spec's mass / LCG / VCG / gyradii are derived from (`deriveMassProperties`) */
   massItems: MassItem[];
-  engines: { mountX: number; mountZFromTransom: number; propPoint: { x: number; yAboveKeel: number; zFromTransom: number } }[];
+  engines: { mountX: number; mountZFromTransom: number; propHand?: number; propPoint: { x: number; yAboveKeel: number; zFromTransom: number } }[];
   lowerUnit: LowerUnitSpec;
 }
 
@@ -101,6 +101,10 @@ export interface LowerUnitSpec {
   stallDeg: number;
   profileDragCoeff: number;
   maxSteerDeg: number;
+  /** trim pin above the AV plate, m, and trim range, deg (T189; absent ⇒ no trim) */
+  trimPivotAboveAvPlate?: number;
+  trimMinDeg?: number;
+  trimMaxDeg?: number;
 }
 
 /**
@@ -119,6 +123,11 @@ export interface DriveUnit {
   stallRad: number;
   profileDragCoeff: number;
   maxSteerRad: number;
+  /** body y of the trim pin, trim range (rad, + = out) and prop hand (+1 RH, −1 LH); T189 */
+  trimPivotY?: number;
+  trimMinRad?: number;
+  trimMaxRad?: number;
+  propHand?: number;
 }
 
 /** the drives of the data file, placed on a hull whose CG is (vcg above keel, lcg from transom) */
@@ -137,6 +146,10 @@ export function driveUnits(data: Readonly<HullDataFile>, spec: Readonly<DeepVHul
     stallRad: lu.stallDeg * deg,
     profileDragCoeff: lu.profileDragCoeff,
     maxSteerRad: lu.maxSteerDeg * deg,
+    ...(lu.trimPivotAboveAvPlate !== undefined
+      ? { trimPivotY: lu.avPlateYAboveKeel + lu.trimPivotAboveAvPlate - cgY, trimMinRad: (lu.trimMinDeg ?? 0) * deg, trimMaxRad: (lu.trimMaxDeg ?? 0) * deg }
+      : {}),
+    propHand: e.propHand ?? 1,
   }));
 }
 

@@ -316,3 +316,67 @@ every part that stands on the deck (`anchors.deck_surface_y`):
 texture: plan distance from the deck outline measured off `Hull_LOD0` (`boatModel.measureDeckEdge`, 64-entry uniform
 array) → 0.17 m band in the boat's dominant hue (round the transom edge, closing to a point at the stem), 0.05 m
 bone-white band, then the baked non-skid field; the paint lifts the non-skid relief and is satin.
+
+## §T.200, 2026-09-14: the livery reaches the GPU, a bold side stripe, two-tone cowls
+
+USER playtest: "we could use a stripe of player color on the side of the boat. and maybe a band of white on the bottom
+big bucket section of the engines so they are not totally solid in player color."
+
+**Root cause: the shipped GLB carried none of the livery masks.** gltf-transform's KTX commands pick the encoded
+channels from each slot's glTF meaning (`getTextureChannelMask`). An OPAQUE material's baseColor went out RGB only, and a
+`clearcoatTexture` R only. Decoded from the T192 GLB (`ktx info`: `ETC1S_RGB` without an alpha slice, `UASTC_RRR`):
+- `M_Gelcoat`/`M_NonSlip` baseColor had no A. The runtime read overlay = 1, so the hull drew the baked overlay colour (bone
+  topsides, red bottom) with no paint: no band, no pinstripe, no rival topsides (the T197 grid shot's hulls are all bone).
+- `hull_mask` had R only (G = B = R when sampled), so the pinstripe and antifoul fields were wrong and the wear ramp was gone.
+- `M_Carbon` baseColor had no A. The cowl livery mask read 1 everywhere, so the whole slot (lower cowl, midsection, lower
+  unit) took the livery hue: the "solid orange top to bottom" cowls.
+
+The Blender previews never showed it, because they sample the PNGs before packaging.
+
+Fix (`scripts/asset-build.mjs encodeDataTextures`): those four textures are encoded in-process with `ktx create` at the
+CLI's own settings, but keeping RGBA (ETC1S q160 sRGB; UASTC level 2 + zstd 18, linear). The CLI steps then skip them.
+The final checker's `liveryChannelErrors` reads each KTX2 Data Format Descriptor and fails a boat whose livery textures
+lose a channel. The test fails the pre-T200 RGB/RRR encoding, and the old GLB failed it with 4 errors.
+- GPU cost: on BPTC/ASTC devices (the WebGPU targets) ETC1S transcodes to 8 bpp with or without alpha. That is the 8 bpp
+  already in the texture table above, so the ledger is unchanged. A BC1-only device would pay 4 → 8 bpp for those 3 maps.
+
+**Side stripe (mask R band, G pinstripes; no new channel, no shader change).**
+- The sheer band is the player-colour stripe. It was 0.19 m (0.16 m visible under the rub rail). It is now 0.36 · topside,
+  clamped to 0.14–0.30 m: **0.28 m** at the 0.79 m transom topside, about 0.25 m visible. It narrows to about half at the
+  bow doubler, where the rising chine leaves a short topside (`band_lo`: 1 − 0.6·zn^2.2; a 30 % taper did not leave the
+  doubler 0.10 m).
+- Around the side number the band gives up 75 % of its width (was 62 %).
+- A secondary pinstripe, half as thick with a 0.6× gap, runs under the first. G is the union of both SDFs in the same
+  stripe hue.
+- `stripe_bottom_depth` now means the lowest line, so the number field, clear-topside extras and checker rule, doubler
+  top, fairing patches and transom repair all follow it.
+- The side numerals shrink **0.45 → 0.42 m**: the price of the bolder band.
+- The deck band (T192, dominant hue at the deck edge) wraps over the sheer into the hull band on every boat.
+
+**Rival liveries (`livery.ts`, taken over after T197).** The §T.197 one-colour rows (topsides = band = dominant) hid the
+stripe, the deck band edge and the cowl split. Every boat now wears the hero's scheme: a neutral-ish base, ONE signature
+hue on the band, deck band and cowl tops, and a pinstripe that contrasts with both. The signatures are T197's hues, so the
+roster's HUD/plotter hues still match.
+
+| Boat | Base | Signature | Pinstripe | ΔE00 band/base |
+|---|---|---|---|---|
+| hero | bone `#E9E5DA` | orange `#E4572E` | teal `#1F4E5F` | 38 |
+| dome-ten | charcoal `#2B2F33` | yellow `#FFD21F` | red `#C8372D` | 73 |
+| outer-bar | wet-sand bronze `#5A4F42` | lime `#6CC24A` | bone | 45 |
+| bench-hollow | sand `#CDBFA3` | wine `#7A1F2B` | black | 56 |
+| pine-cut | white `#F4F3EE` | olive `#6B6B1E` | black | 45 |
+| levee-town | concrete white `#D7DADB` | black `#141414` | red | 78 |
+| solar-ridge | taupe `#A89C84` | violet `#6A3FD0` | black | 50 |
+| the-stills | graphite `#3A3D40` | hot pink `#F25CB0` | bone | 42 |
+
+- `tests/speedboatLiveries.test.ts` checks signatures ≥ 25 apart, no sea lookalike (≥ 15), HUD hue = signature, and
+  band = dominant. It adds a new rule on every boat: band vs base ≥ 30, pinstripe vs base ≥ 25, pinstripe vs band ≥ 15.
+  The old one-colour row fails that rule.
+- The old "hulls ≥ 20 apart" rule is dropped. Neutral bases collide by design (bone/white ΔE 4), and identity rides on
+  the signature.
+- Not mine: `ui/roster.ts` COMMUNITY_PAINTS `hull`/`accent2` still describe the one-colour boats for the HUD hull art
+  (`ui/hullArt.ts`). `hue`/`accent` still match.
+
+**Renders** (`render_hull.py`): M_Carbon is now recoloured with the runtime cowl formula per `--variant`. New views
+`farchase` (22 m back, 7.5 m up) and `farchase34`. `hull_textures.FLEET` carries the eight grid rows (a test fails on
+drift from livery.ts) and the build writes a preview for each.

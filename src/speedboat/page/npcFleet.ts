@@ -37,10 +37,13 @@
  * message); the fleet stops kicking and `error` holds it, logged once.
  */
 import type { OceanParams } from '../../params/ocean';
+import type { PilotSetup } from '../../race/ai/pilot';
+import type { BoatContactSetup } from '../../sea-physics/boatCollide';
+import type { SimWorldData } from '../../sim-worker/worldData';
 import type { SeaPhysicsParams } from '../../params/seaPhysics';
 import type { Rigid6State } from '../../sea-physics/rigidBody';
 import type { BoatFleet } from '../../sim-worker/fleet';
-import { B } from '../../sim-worker/layout';
+import { AI_IN_LEN, B, POSE_LEN, TR, TR_RPM_DRIVES, TRACE_LEN } from '../../sim-worker/layout';
 import { paramsLength, writeParams } from '../../sim-worker/paramsVector';
 import type { TransportCaps } from '../../sim-worker/select';
 import { createNpcFleet, detectCaps } from '../../sim-worker/select';
@@ -78,7 +81,34 @@ export interface NpcFleetDeps {
   budgetMs?: number;
   /** clock for the kick-interval measurement; default performance.now */
   now?: () => number;
+  /** §T.186 pilot for the NPCs (`boats[d.boats]`, the player's slot, must be null) */
+  pilot?: PilotSetup;
+  /** §T.188 boat↔boat + static contacts inside the steppers */
+  contacts?: BoatContactSetup;
+  /** §T.191/§V110 the course's seabed, fetch mask and bars: rivals float on and ground against the player's world */
+  world?: SimWorldData;
+  /**
+   * §T.191: the player rides in the fleet as EXTERNAL boat index `boats` (never stepped by a core, its pose written
+   * per tick by the page), so rivals see, avoid, block and collide with the player through WORLD. Turns on the
+   * per-row step TRACE the race reads.
+   */
+  player?: boolean;
 }
+
+/** §T.191 what the page hands the fleet with each recorded tick (all tick-indexed, so a batch is tick-exact) */
+export interface NpcTickInputs {
+  /** the player's pose at the START of this tick */
+  playerPose: Readonly<Rigid6State>;
+  /** CONTACT_OFF mask for this tick, bit = fleet index (ghosts) */
+  contactOff: number;
+  /** §T.198 soft-contact mask for this tick, bit = fleet index (the rolling-start formation); absent = 0 */
+  contactSoft?: number;
+  /** AI IN for every NPC, AI_IN_LEN each (flattened), or null = no standing yet */
+  aiIn: Float64Array | null;
+}
+
+/** ticks of step trace kept after collect (the race reads them RACE_DELAY_TICKS behind the page) */
+export const NPC_TRACE_RING = 256;
 
 const pose = (): Rigid6State => ({ position: [0, 0, 0], quaternion: [0, 0, 0, 1], velocity: [0, 0, 0], angularVelocity: [0, 0, 0] });
 
@@ -104,7 +134,20 @@ export interface NpcFleet {
   readonly catchUp: Readonly<NpcCatchUp>;
   readonly error: Error | null;
   /** FIXED TICK: record page tick `tick`'s time and params (call after SimState.time and the weather advanced) */
-  recordTick(tick: number, time: number): void;
+  recordTick(tick: number, time: number, inputs?: Readonly<NpcTickInputs>): void;
+  /**
+   * §T.191 V108 teleport of NPC i that lands EXACTLY at the start of page tick `atTick` (the request carrying that
+   * tick starts there), whatever the batching — a respawn is part of the trajectory, not of the transport timing.
+   */
+  queueReset(i: number, pose: Readonly<Rigid6State>, atTick: number): void;
+  /** §T.191 step trace slot (`TR.*`) of fleet boat i after page tick `tick` (collected, within NPC_TRACE_RING) */
+  trace(tick: number, i: number, slot: number): number;
+  /** NPC i's boot placement (`spawn(i)`): the deterministic stand-in before any tick has a trace */
+  spawnPose(i: number): Readonly<Rigid6State>;
+  /** the fleet index of the player's external slot (−1 without `player`) */
+  readonly playerIndex: number;
+  /** applied steer (−1..1) at the last collected tick (render: outboard yaw, pilot rig) */
+  steer(i: number): number;
   /** end of a tick and end of a frame: collect if home, kick every owed tick the budget allows */
   pump(tick: number): void;
   /** the last two collected tick poses, interpolated */
@@ -129,6 +172,8 @@ export interface NpcContact {
   wettedArea: number;
   slamImpulse: number;
   propImmersion: number;
+  /** §T.191 per-drive rpm at the last collected tick (engine model, from the step trace; zeros without a trace) */
+  driveRpm: Float64Array;
 }
 
 /**
@@ -138,8 +183,16 @@ export interface NpcContact {
  */
 export async function createNpcFleetDriver(d: NpcFleetDeps): Promise<NpcFleet> {
   const batchCap = d.batchCap ?? NPC_BATCH_CAP;
+  const playerIndex = d.player ? d.boats : -1;
+  const fleetBoats = d.boats + (d.player ? 1 : 0);
   const fleet = createNpcFleet(
-    { seed: d.seed, boats: d.boats, oceanParams: d.oceanParams, seaParams: d.seaParams, batchCap },
+    {
+      seed: d.seed, boats: fleetBoats, oceanParams: d.oceanParams, seaParams: d.seaParams, batchCap,
+      ...(d.pilot ? { pilot: d.pilot } : {}),
+      ...(d.contacts ? { contacts: d.contacts } : {}),
+      ...(d.world ? { world: d.world } : {}),
+      ...(d.player ? { externalBoats: 1, trace: true } : {}),
+    },
     d.caps ?? detectCaps(),
   );
   await fleet.ready;
@@ -149,10 +202,13 @@ export async function createNpcFleetDriver(d: NpcFleetDeps): Promise<NpcFleet> {
   const floorMs = d.budgetMs ?? (onMain ? NPC_MAIN_BUDGET_MS : NPC_WORKER_BUDGET_MS);
   const prev = Array.from({ length: d.boats }, pose);
   const curr = Array.from({ length: d.boats }, pose);
-  const contacts: NpcContact[] = Array.from({ length: d.boats }, () => ({ wettedArea: 0, slamImpulse: 0, propImmersion: 0 }));
+  const contacts: NpcContact[] = Array.from({ length: d.boats }, () => ({ wettedArea: 0, slamImpulse: 0, propImmersion: 0, driveRpm: new Float64Array(TR_RPM_DRIVES) }));
   const throttles = new Float64Array(d.boats);
+  const steers = new Float64Array(d.boats);
+  const spawns: Rigid6State[] = [];
   for (let i = 0; i < d.boats; i++) {
     const p = d.spawn(i);
+    spawns.push(structuredClone(p));
     fleet.place(i, p);
     // OUT is zero until the first collect: both render poses start at the spawn
     for (const dst of [prev[i], curr[i]]) {
@@ -180,6 +236,24 @@ export async function createNpcFleetDriver(d: NpcFleetDeps): Promise<NpcFleet> {
   let lastKickAt = Number.NaN;
   let kickIntervalMs = 0;
   const catchUp: NpcCatchUp = { batches: 0, lastBatch: 0, maxBatch: 0, budgetTicks: 0, maxLagTicks: 0 };
+  // §T.191 per recorded tick: player pose, contact-off mask, AI IN (a ring: the page holds its sim when it would overflow)
+  const INPUT_RING = 512;
+  const inPose = new Float64Array(INPUT_RING * POSE_LEN);
+  const inMask = new Float64Array(INPUT_RING);
+  const inSoft = new Float64Array(INPUT_RING);
+  const inAi = new Float64Array(INPUT_RING * d.boats * AI_IN_LEN);
+  const inAiValid = new Uint8Array(INPUT_RING);
+  const traceRing = d.player ? new Float64Array(NPC_TRACE_RING * fleetBoats * TRACE_LEN) : null;
+  const scratchPose: Rigid6State = pose();
+  const aiRow = new Float64Array(AI_IN_LEN);
+  /** pending teleports: atTick → [(i, pose)] */
+  const resets = new Map<number, { i: number; pose: Rigid6State }[]>();
+  const copyPose = (p: Readonly<Rigid6State>): Rigid6State => ({
+    position: [...p.position] as Rigid6State['position'],
+    quaternion: [...p.quaternion] as Rigid6State['quaternion'],
+    velocity: [...p.velocity] as Rigid6State['velocity'],
+    angularVelocity: [...p.angularVelocity] as Rigid6State['angularVelocity'],
+  });
 
   const paramsAt = (tick: number): Float64Array => {
     let v = paramSteps[0].vec;
@@ -209,8 +283,21 @@ export async function createNpcFleetDriver(d: NpcFleetDeps): Promise<NpcFleet> {
       c.wettedArea = fleet.readOut(i, B.WETTED_AREA);
       c.slamImpulse += fleet.readOut(i, B.SLAM_IMPULSE);
       c.propImmersion = fleet.readOut(i, B.PROP_IMMERSION);
-      // a function of (boat, tick): the same value the stepper was handed for this tick
-      throttles[i] = controls(i, collected).throttle;
+      // piloted rivals: what the pilot applied (trace); otherwise a function of (boat, tick), as handed to the stepper
+      throttles[i] = traceRing ? fleet.readTrace(n - 1, i, TR.THROTTLE) : controls(i, collected).throttle;
+      steers[i] = traceRing ? fleet.readTrace(n - 1, i, TR.STEER) : controls(i, collected).steer;
+      if (traceRing) for (let k = 0; k < TR_RPM_DRIVES; k++) c.driveRpm[k] = fleet.readTrace(n - 1, i, TR.RPM + k);
+    }
+    if (traceRing) {
+      for (let j = 0; j < n; j++) {
+        const tick = collected - n + 1 + j;
+        const base = (tick % NPC_TRACE_RING) * fleetBoats * TRACE_LEN;
+        for (let i = 0; i < fleetBoats; i++) {
+          if (i === playerIndex) continue;
+          const o = base + i * TRACE_LEN;
+          for (let k = 0; k < TRACE_LEN; k++) traceRing[o + k] = fleet.readTrace(j, i, k);
+        }
+      }
     }
     times.splice(0, n);
     while (paramSteps.length > 1 && paramSteps[1].tick <= collected + 1) paramSteps.shift();
@@ -228,11 +315,47 @@ export async function createNpcFleetDriver(d: NpcFleetDeps): Promise<NpcFleet> {
       return recorded - collected;
     },
     catchUp,
+    playerIndex,
+    spawnPose(i) {
+      return spawns[i];
+    },
+    queueReset(i, p, atTick) {
+      if (!(i >= 0 && i < d.boats)) throw new Error(`[speedboat] NPC fleet: queueReset boat ${i}`);
+      if (atTick <= recorded) throw new Error(`[speedboat] NPC fleet: reset for tick ${atTick} but tick ${recorded} is already recorded`);
+      const list = resets.get(atTick) ?? [];
+      list.push({ i, pose: copyPose(p) });
+      resets.set(atTick, list);
+    },
+    trace(tick, i, slot) {
+      if (!traceRing) throw new Error('[speedboat] NPC fleet: no trace (build with player)');
+      if (!(tick <= collected && tick > collected - NPC_TRACE_RING && tick >= 1)) {
+        throw new Error(`[speedboat] NPC fleet: trace of tick ${tick} outside (${collected - NPC_TRACE_RING}, ${collected}]`);
+      }
+      return traceRing[((tick % NPC_TRACE_RING) * fleetBoats + i) * TRACE_LEN + slot];
+    },
+    steer(i) {
+      return steers[i];
+    },
     get error() {
       return error;
     },
-    recordTick(tick, time) {
+    recordTick(tick, time, inputs) {
       if (tick !== recorded + 1) throw new Error(`[speedboat] NPC fleet: page tick ${tick} recorded after ${recorded} (ticks must be recorded in order, none skipped)`);
+      if (tick - collected > INPUT_RING) throw new Error(`[speedboat] NPC fleet: ${tick - collected} ticks owed, input ring holds ${INPUT_RING}`);
+      if (d.player && !inputs) throw new Error('[speedboat] NPC fleet: a fleet with the player slot needs the tick inputs');
+      if (inputs) {
+        const r = tick % INPUT_RING;
+        const p = inputs.playerPose;
+        const o = r * POSE_LEN;
+        for (let c = 0; c < 3; c++) inPose[o + c] = p.position[c];
+        for (let c = 0; c < 4; c++) inPose[o + 3 + c] = p.quaternion[c];
+        for (let c = 0; c < 3; c++) inPose[o + 7 + c] = p.velocity[c];
+        for (let c = 0; c < 3; c++) inPose[o + 10 + c] = p.angularVelocity[c];
+        inMask[r] = inputs.contactOff >>> 0;
+        inSoft[r] = (inputs.contactSoft ?? 0) >>> 0;
+        inAiValid[r] = inputs.aiIn ? 1 : 0;
+        if (inputs.aiIn) inAi.set(inputs.aiIn.subarray(0, d.boats * AI_IN_LEN), r * d.boats * AI_IN_LEN);
+      }
       recorded = tick;
       times.push(time);
       const a = writeParams(d.oceanParams, scratch, 0);
@@ -252,13 +375,41 @@ export async function createNpcFleetDriver(d: NpcFleetDeps): Promise<NpcFleet> {
       if (Number.isFinite(lastKickAt)) kickIntervalMs = 0.8 * kickIntervalMs + 0.2 * (t - lastKickAt);
       const budgetMs = onMain ? floorMs : Math.max(floorMs, 0.75 * kickIntervalMs);
       const budgetTicks = Math.max(1, Math.floor(budgetMs / stepMs));
-      const n = Math.min(owed, fleet.maxBatch, budgetTicks);
+      let n = Math.min(owed, fleet.maxBatch, budgetTicks);
+      // a queued teleport lands on the FIRST row of a request: never carry its tick inside a longer one
+      const first = collected + 1;
+      const landing = resets.get(first);
+      if (landing) {
+        for (const r of landing) fleet.place(r.i, r.pose);
+        resets.delete(first);
+      }
+      for (const t of resets.keys()) if (t > first && t < first + n) n = t - first;
       for (let j = 0; j < n; j++) {
         const k = collected + 1 + j;
         fleet.setBatchTick(j, k, times[j], paramsAt(k));
         for (let i = 0; i < d.boats; i++) {
           const c = controls(i, k);
           fleet.setBatchControls(j, i, c.throttle, c.steer);
+        }
+        if (d.player) {
+          const r = k % INPUT_RING;
+          const o = r * POSE_LEN;
+          for (let c = 0; c < 3; c++) scratchPose.position[c] = inPose[o + c];
+          for (let c = 0; c < 4; c++) scratchPose.quaternion[c] = inPose[o + 3 + c];
+          for (let c = 0; c < 3; c++) scratchPose.velocity[c] = inPose[o + 7 + c];
+          for (let c = 0; c < 3; c++) scratchPose.angularVelocity[c] = inPose[o + 10 + c];
+          fleet.setBatchExternalPose(j, playerIndex, scratchPose);
+          let mask = inMask[r] >>> 0;
+          if (j === 0 && landing) for (const q of landing) mask |= 1 << q.i; // its WORLD pose is the pre-teleport one this tick
+          fleet.setBatchContactOff(j, mask >>> 0);
+          fleet.setBatchContactSoft(j, inSoft[r] >>> 0);
+          if (d.pilot) {
+            for (let i = 0; i < d.boats; i++) {
+              if (inAiValid[r]) aiRow.set(inAi.subarray((r * d.boats + i) * AI_IN_LEN, (r * d.boats + i + 1) * AI_IN_LEN));
+              else aiRow.fill(0);
+              fleet.setBatchAiInput(j, i, aiRow);
+            }
+          }
         }
       }
       fleet.kickBatch(n);

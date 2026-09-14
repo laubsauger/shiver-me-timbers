@@ -1,76 +1,90 @@
 /**
- * WAVE SHOALING (§V.8, §V.19, §V.72) — the sea calms itself over its own
- * shallows, and roughens back to the open-ocean swell on its own.
+ * WAVE SHOALING (§V.8, §V.19, §V.72 as amended by §T.190) — the sea feels its
+ * own shallows: waves GROW as the water shoals, BREAK when the column can no
+ * longer hold them, and decay through the surf zone to nothing at the
+ * waterline. Open water is untouched, bit for bit.
  *
- * THE ASK (user): "the swell should probably, at least towards beaches, tame
- * down — a little bit further out, and then blend into the open ocean swell …
- * so that we can still have rough cliffs basically, where the waves are just
- * doing what they're doing. But we should probably have some mechanism where,
- * if we generate shallows and beaches, that would automatically calm a certain
- * little area around this and then blend to open ocean."
+ * HISTORY, so the next reader does not "fix" it back: until §T.190 this file
+ * attenuated only (tanh(k·d) per band) — a deliberate artistic calming. The
+ * Tower Reach circuit needs its sandbars to be the lap's biggest water, and the
+ * attenuation made them the calmest (23–29% of the swell kept over the crest),
+ * so the user replaced it with linear theory end to end (2026-09-13).
  *
- * THE ONE DESIGN DECISION, AND IT IS WHY "ROUGH CLIFFS" NEEDS NO CODE:
- * everything here keys off DEPTH, never off distance to land. A shelving sand
- * beach has a wide band of shallow water, so it gets a wide zone of calm sea
- * and gentle lapping. A cliff plunging into 40 m has NO shallow band at all,
- * so it gets no attenuation and the sea stays rough right up to the rock.
- * The user's artistic direction falls out of the physics. DO NOT ADD A CLIFF
- * EXCEPTION — there is nothing for it to except.
+ * THE ONE DESIGN DECISION, unchanged: everything keys off DEPTH, never off
+ * distance to land. A shelving beach has a wide shallow band, so it gets a
+ * shoaling zone, a surf line and a surf zone; a cliff into 40 m has no shallow
+ * band at all, so the sea stays open-ocean rough to the rock. There is no cliff
+ * case and there must not be one.
  *
- * TWO TERMS, and they are deliberately disjoint (measured, see below):
+ * THREE TERMS, applied in this order, per cascade (§V.19 band-splits them, so
+ * each has its own wavelength and long swell feels the bottom first):
  *
- *  A. LINEAR SHOALING — `shoalFactor` = tanh(k·d), per cascade. This is not a
- *     smoothstep somebody liked the shape of: tanh(k·d) IS the deep/shallow
- *     transition function of linear wave theory (the same factor appears in
- *     the dispersion relation ω² = g·k·tanh(k·d) and in the dynamic pressure),
- *     and it reaches 0.996 at d = λ/2 — the textbook "a wave feels the bottom
- *     below half its wavelength" — for free, with no authored endpoints.
- *     Because k is PER CASCADE (§V.19 band-splits them), long swell calms far
- *     offshore and short chop stays lively until it is almost aground, which
- *     is what makes this read as real rather than as a global fade.
+ *  A. SHOALING GROWTH — `shoalingCoefficient`, Ks = √(cg_deep / cg(d)): linear
+ *     energy-flux conservation for a wave train walking into shallower water
+ *     with no reflection or loss (Dean & Dalrymple, "Water Wave Mechanics for
+ *     Engineers and Scientists", 1991, §4.10; Holthuijsen, "Waves in Oceanic
+ *     and Coastal Waters", 2007, §7.2). With ω² = g·k·tanh(k·d) and
+ *     n = ½(1 + 2kd/sinh 2kd), cg/cg_deep = 2n·tanh(kd), which the identity
+ *     sinh 2x = 2·tanh x/(1 − tanh²x) turns into
+ *         cg/cg_deep = T + kd·(1 − T²),   T = tanh(kd)
+ *     — no sinh, no division by T, exact in both limits (→ 1 deep, → 2kd
+ *     shallow, i.e. Green's law d^(−1/4) once kd ∝ √d). Ks dips to 0.91 near
+ *     kd ≈ 1.2 and then grows without bound; term B is what stops it.
+ *     The local kd comes from the deep-water band wavenumber by Fenton &
+ *     McKee's explicit dispersion solution (Coastal Engineering 14, 1990):
+ *         kd ≈ k₀d · coth((k₀d)^¾)^⅔,   within 1.7% of the exact root, ∀ depth.
  *
- *  B. DEPTH-LIMITED BREAKING — `breakerClip`, a soft clip on the SUMMED
- *     elevation. Exact identity while the wave occupies less than
- *     `shoalBreakerIndex` of the local water column (0.78, the McCowan breaker
- *     index — below it a wave is not breaking, so leave it alone), then
- *     saturating smoothly to `shoalColumnCeiling` (0.85), which is a hard
- *     guarantee that (1 − ceiling)·d of water always remains.
+ *  B. DEPTH-LIMITED BREAKING — `surfBreakingFactor`, ONE factor for all bands
+ *     from the local SIGNIFICANT height Hs = 4·√(Σ(σᵢ·gᵢ)²), soft-capped at
+ *     γ·d. One factor, not one per band, so the spectral shape (each cascade's
+ *     share of the energy) survives breaking: the surf zone is the same sea,
+ *     smaller. γ = `shoalSurfGamma` = 0.6 applies to Hs: Thornton & Guza
+ *     (JGR 88, 1983) measured the saturated inner surf zone at Hrms/h = 0.42,
+ *     i.e. Hs/h = 0.42·√2 = 0.59; for a Rayleigh sea H₁/₁₀ = 1.27·Hs, which
+ *     puts the highest tenth of the waves at 0.76·h — McCowan's (1894) 0.78
+ *     individual-wave limit. Exact identity below `shoalSurfOnset`·γ·d, C1
+ *     through the knee, saturating to γ·d: past the break Hs = γ·d, i.e. the
+ *     saturated surf zone decays linearly to ZERO at the waterline.
  *
- *     MEASURED, and this is why B is safe to ship: over 60 s of the CpuOcean
- *     mirror at every depth from 1 m to 200 m, term B NEVER FIRES at calm or
- *     at swell — 0.00% of samples reach the knee. The shipped seas therefore
- *     get pure linear shoaling and their look cannot move. It engages only at
- *     storm (21.6% of the surface at d = 1 m, 7.0% at 10 m, 0.8% at 20 m,
- *     0 at 45 m), which is the sea state that would otherwise drain the whole
- *     island: storm's raw trough is −24.3 m, so today everything shallower
- *     than 24 m goes dry once a cycle.
+ *  C. COLUMN GUARD — `breakerClip`, a soft clip on the SUMMED elevation at
+ *     `shoalBreakerIndex`·d saturating to `shoalColumnCeiling`·d. Unchanged
+ *     from before §T.190. With B holding Hs ≤ 0.6·d a sample reaches its knee
+ *     only past 5.2σ, so it is a geometric guarantee ((1 − ceiling)·d of water
+ *     always remains) rather than a look.
  *
- * WHAT IS DELIBERATELY NOT MODELLED, so it does not read as a physics error:
- * real shoaling STEEPENS AND GROWS waves before they break (Green's law, the
- * shoaling coefficient Ks = √(cg_deep/cg_local) > 1). We attenuate only. Two
- * reasons: the user asked for calming, and our world is scale-compressed, so a
- * growth term near shore would fight the runup/swash system that already owns
- * the beach (src/terrain/shoreRunup.ts). This is an artistic simplification
- * made on purpose, not an omission.
+ * DEEP WATER IS EXACTLY THE IDENTITY, and that is by construction: kd is
+ * clamped at π — d = λ/2, the textbook deep-water criterion — and Ks is
+ * normalised by its own value there, so every band with d ≥ λ/2 gets
+ * √(F(π)/F(π)) = 1 exactly, B is x/x = 1 exactly, and the product is the
+ * unshoaled sea bit for bit. The price is linear theory's last 1% (true
+ * Ks(π) = 0.990) folded into the shallows, and a slope change of 0.015 per
+ * unit kd at the clamp — two orders below anything that draws a ring.
  *
- * THE ONE HONEST COMPRESSION — `shoalWavenumberFloor`. Our sea floor is 45 m
- * (islandParams.seabedOpenDepth) where a real 143 m storm swell would need
- * 71 m to be in deep water, so the uncompressed criterion would damp the OPEN
- * OCEAN by 37% at storm. The floor pins every band's transition inside the
- * depth range the world actually has. Measured consequence: 1 − tanh(k·45) =
- * 5.7e-5 for every band at every preset, i.e. the shipped open ocean cannot
- * move. That is the whole price, and it is paid in one number.
+ * NOT MODELLED, said so it does not read as an omission:
+ *  · WAVELENGTH SHORTENING. The cascades are global FFT tiles with the
+ *    deep-water ω(k) (oceanMath.dispersion); a wave's phase is shared by the
+ *    whole tile, so shortening λ near shore would need a per-position phase
+ *    integrated along the ray (∫k(x)dx). A local coordinate warp tears the
+ *    tile. Kd above is used for the AMPLITUDE law only.
+ *  · CREST ASYMMETRY. §T.193 adds it as a vertical second harmonic in
+ *    src/ocean/shoalAsymmetry.ts, from the gains this file computes.
  *
- * §V.8 — THE TRANSLITERATION PAIR. The GPU displacement and the CPU mirror the
- * ship floats on must agree, so both sides call the CPU functions here or
- * their TSL twins immediately below them (same convention as bandLimit.ts,
- * shoreRunup.ts, foamMath.ts). A one-sided change floats the hull at
- * open-ocean height over a calmed lagoon. See §V.72 for the two traps that
- * make "same formula" insufficient on its own: WHERE the depth is sampled,
- * and WHAT it is measured against.
+ * THE ONE COMPRESSION, unchanged: `shoalWavenumberFloor`. The world floor is
+ * 45 m where a 143 m storm swell wants 71 m to be deep, so each band's k is
+ * floored at π/(shoalDeepFraction·openDepth). At 45 m every band at every
+ * preset has kd ≥ π, so the open ocean is the identity (see above).
  *
- * §V.23: no 3-arg chained math here at all — every expression is 1- or 2-arg.
- * §V.28: every divisor floored.
+ * §V.8 / §V.77 — ONE LAW. The GPU displacement, the CPU mirror the hulls float
+ * on, the caustics/terrain receiver and the shore foam all call the CPU
+ * functions here or their TSL twins beside them. `shoalBandGains` and
+ * `shoalBandGainNodes` are the ONLY way to get a band's gain; there is no
+ * per-band factor exported on its own any more, because B couples the bands
+ * and a consumer that applied A alone would be a second sea. See §V.72 for the
+ * two traps that make "same formula" insufficient: WHERE the depth is sampled
+ * (the grid coord), and WHAT it is measured against (still water).
+ *
+ * §V.23: no 3-arg chained math. §V.28: every divisor floored; d → 0 and dry
+ * land (d = 0) give a gain of exactly 0, never NaN.
  */
 import { float } from 'three/tsl';
 
@@ -109,6 +123,10 @@ export interface ShoalingParams {
   shoalBreakerIndex: number;
   /** fraction of the local column a wave may NEVER exceed */
   shoalColumnCeiling: number;
+  /** γ: the saturated surf zone's Hs / d (term B) */
+  shoalSurfGamma: number;
+  /** fraction of γ·d at which breaking starts to dissipate (term B's knee) */
+  shoalSurfOnset: number;
 }
 
 /**
@@ -148,21 +166,181 @@ export function shoalWavenumber(
   return Math.max(meanK, shoalWavenumberFloor(openDepth, p));
 }
 
+/** d = λ/2: past this every band is deep water and the law is the identity */
+export const SHOAL_DEEP_KD = Math.PI;
+
 /**
- * TERM A: how much of this band survives in `depth` metres of water, 0..1.
- * 0 at the waterline, 0.996 at d = λ/2, indistinguishable from 1 in open sea.
+ * The band's LOCAL kd at `depth`, from its deep-water wavenumber — Fenton &
+ * McKee (1990)'s explicit solution of ω² = g·k·tanh(k·d):
+ *   kd ≈ x·coth(x^¾)^⅔,   x = k₀·d.
+ * Exact in both limits (x deep, √x shallow), ≤ 1.7% between. The pow base is
+ * floored so d = 0 lands on kd = 1e-3 rather than 0·∞ (§V.28).
  */
-export function shoalFactor(shoalK: number, depth: number): number {
-  return tanhCpu(shoalK * Math.max(depth, 0));
+export function shallowWaterKd(shoalK: number, depth: number): number {
+  const x = Math.max(shoalK * Math.max(depth, 0), EPS);
+  return x * Math.pow(Math.max(tanhCpu(Math.pow(x, 0.75)), EPS), -2 / 3);
 }
 
-/** TSL twin of `shoalFactor`. `shoalK` is a uniform, `depth` a node. */
-export function shoalFactorNode(shoalK: AnyNode, depth: AnyNode): AnyNode {
-  return tanhNode(float(shoalK).mul(depth.max(0)));
+/** TSL twin of `shallowWaterKd` */
+export function shallowWaterKdNode(shoalK: AnyNode, depth: AnyNode): AnyNode {
+  const x = float(shoalK).mul(depth.max(0)).max(EPS);
+  return x.mul(tanhNode(x.pow(0.75)).max(EPS).pow(-2 / 3));
 }
 
 /**
- * TERM B, expressed once as the SATURATION 0..1 that both the clipped value
+ * cg / cg_deep at a local kd: 2n·tanh(kd) = T + kd·(1 − T²), T = tanh(kd).
+ * See the header for the identity; it is the energy-flux speed ratio term A
+ * conserves against.
+ */
+export function groupVelocityRatio(kd: number): number {
+  const t = tanhCpu(kd);
+  return t + kd * (1 - t * t);
+}
+
+/** TSL twin of `groupVelocityRatio` */
+function groupVelocityRatioNode(kd: AnyNode): AnyNode {
+  const t = tanhNode(kd);
+  return t.add(kd.mul(float(1).sub(t.mul(t))));
+}
+
+/** cg/cg_deep at the clamp — the normaliser that makes deep water exactly 1 */
+const FLUX_AT_DEEP = groupVelocityRatio(SHOAL_DEEP_KD);
+
+/**
+ * TERM A: the shoaling coefficient Ks for one band at `depth`.
+ * Exactly 1 for d ≥ λ/2; dips to 0.92 around kd ≈ 1.2; grows without bound as
+ * d → 0 (finite: 22.6 at d = 0), which is term B's job to stop.
+ */
+export function shoalingCoefficient(shoalK: number, depth: number): number {
+  const kd = Math.min(shallowWaterKd(shoalK, depth), SHOAL_DEEP_KD);
+  return Math.sqrt(FLUX_AT_DEEP / Math.max(groupVelocityRatio(kd), EPS));
+}
+
+/** TSL twin of `shoalingCoefficient`. `shoalK` is a uniform, `depth` a node. */
+export function shoalingCoefficientNode(shoalK: AnyNode, depth: AnyNode): AnyNode {
+  const kd = shallowWaterKdNode(shoalK, depth).min(SHOAL_DEEP_KD);
+  return float(FLUX_AT_DEEP).div(groupVelocityRatioNode(kd).max(EPS)).sqrt();
+}
+
+/**
+ * TERM B: the factor every band is multiplied by so the local significant
+ * height `hs` (m) respects depth-limited breaking at `depth`.
+ *
+ * limited = min(hs, knee) + head·tanh(max(hs − knee, 0)/head), with
+ * ceiling = γ·d, knee = onset·ceiling, head = ceiling − knee; factor =
+ * limited/hs. Below the knee tanh(0) is exactly 0, so the factor is hs/hs = 1
+ * EXACTLY — not a small tax on every sea. C1 through the knee in both hs and
+ * d (the same construction as `breakerClip`). Past it, limited → γ·d: the
+ * saturated surf zone, H ∝ d. On dry land d = 0 ⟹ ceiling = head = 0 ⟹
+ * the factor is exactly 0 (the head is floored only as a DIVISOR).
+ */
+export function surfBreakingFactor(hs: number, depth: number, p: ShoalingParams): number {
+  const ceiling = p.shoalSurfGamma * Math.max(depth, 0);
+  const knee = p.shoalSurfOnset * ceiling;
+  const head = ceiling - knee;
+  const excess = Math.max(hs - knee, 0) / Math.max(head, EPS);
+  const limited = Math.min(hs, knee) + head * tanhCpu(excess);
+  return limited / Math.max(hs, EPS);
+}
+
+/** TSL twin of `surfBreakingFactor`; `uSurf` = (γ, onset) */
+export function surfBreakingFactorNode(hs: AnyNode, depth: AnyNode, uSurf: AnyNode): AnyNode {
+  const ceiling = float(uSurf.x).mul(depth.max(0));
+  const knee = float(uSurf.y).mul(ceiling);
+  const head = ceiling.sub(knee);
+  const excess = hs.sub(knee).max(0).div(head.max(EPS));
+  const limited = hs.min(knee).add(head.mul(tanhNode(excess)));
+  return limited.div(hs.max(EPS));
+}
+
+/**
+ * THE PER-BAND GAIN — A × external × B, the only way to get one (§V.77).
+ *
+ * `shoalK[i]` is the band's floored deep-water wavenumber (`shoalWavenumber`),
+ * `sigma[i]` its spectral height RMS (m, √heightVariance), `external[i]` the
+ * gain the band already carries from fetch × swell shadow (1 when none).
+ * COMPOSITION, and why nothing is counted twice: fetch and shadow decide how
+ * much wave ARRIVES (they are about upwind water, not depth), shoaling grows
+ * what arrived, and breaking caps the grown result — so B is measured on
+ * σᵢ·Ksᵢ·externalᵢ and multiplies the same product. ALL bands go in, including
+ * any a consumer does not draw (the CPU mirror draws two of three): breaking
+ * is a property of the whole sea at that point.
+ *
+ * Writes into `out` (hot path, no allocation) and returns it. Deep water:
+ * out[i] = (1·external[i])·1 = external[i], bit for bit.
+ */
+export function shoalBandGains(
+  depth: number,
+  shoalK: ArrayLike<number>,
+  sigma: ArrayLike<number>,
+  external: ArrayLike<number> | null,
+  p: ShoalingParams,
+  out: number[],
+): number[] {
+  const n = shoalK.length;
+  let m0 = 0;
+  for (let i = 0; i < n; i++) {
+    const g = shoalingCoefficient(shoalK[i], depth) * (external ? external[i] : 1);
+    out[i] = g;
+    const a = sigma[i] * g;
+    m0 += a * a;
+  }
+  const b = surfBreakingFactor(4 * Math.sqrt(m0), depth, p);
+  for (let i = 0; i < n; i++) out[i] *= b;
+  return out;
+}
+
+/**
+ * How hard the water is breaking here, 0..1: the fraction of the ARRIVING wave
+ * energy (E ∝ H², so 1 − B²) that depth-limited breaking has dissipated. 0 at
+ * and outside the break line's onset, → 1 deep in a saturated surf zone. It is
+ * the breaking foam's injection key (src/foam/shoreFoam.ts), taken from the
+ * same B the gains carry, so foam can only appear where the drawn sea IS
+ * breaking. On dry land B = 0 ⟹ 1: every consumer must gate on a wet column.
+ */
+export function surfBreakingIntensity(breakingFactor: number): number {
+  return 1 - breakingFactor * breakingFactor;
+}
+
+/**
+ * TSL twin of `shoalBandGains` + `surfBreakingIntensity`: the gains and the
+ * breaking intensity share one B, so they cannot be derived apart.
+ * `external[i]` null ⟹ 1 (folds away).
+ */
+export function shoalSurfNodes(
+  depth: AnyNode,
+  uShoalK: readonly AnyNode[],
+  uSigma: readonly AnyNode[],
+  external: readonly (AnyNode | null)[] | null,
+  uSurf: AnyNode,
+): { gains: AnyNode[]; breaking: AnyNode } {
+  const pre = uShoalK.map((k, i) => {
+    const ks = shoalingCoefficientNode(k, depth);
+    const e = external ? external[i] : null;
+    return e ? ks.mul(e) : ks;
+  });
+  let m0: AnyNode = null;
+  for (let i = 0; i < pre.length; i++) {
+    const a = float(uSigma[i]).mul(pre[i]);
+    m0 = m0 === null ? a.mul(a) : m0.add(a.mul(a));
+  }
+  const b = surfBreakingFactorNode(m0.sqrt().mul(4), depth, uSurf);
+  return { gains: pre.map((g) => g.mul(b)), breaking: float(1).sub(b.mul(b)) };
+}
+
+/** the gains alone — see `shoalSurfNodes` */
+export function shoalBandGainNodes(
+  depth: AnyNode,
+  uShoalK: readonly AnyNode[],
+  uSigma: readonly AnyNode[],
+  external: readonly (AnyNode | null)[] | null,
+  uSurf: AnyNode,
+): AnyNode[] {
+  return shoalSurfNodes(depth, uShoalK, uSigma, external, uSurf).gains;
+}
+
+/**
+ * TERM C (the column guard; "term B" before §T.190), expressed once as the SATURATION 0..1 that both the clipped value
  * and its slope are built from.
  *
  * With a = |elevation|, knee = breakerIndex·d and head = (ceiling − index)·d:
@@ -192,7 +370,7 @@ export function breakerSaturation(
 }
 
 /**
- * TERM B applied: the surface elevation a wave is allowed to reach over
+ * TERM C applied: the surface elevation a wave is allowed to reach over
  * `depth` metres of water.
  *
  * Written as `min(|y|, knee) + head·saturation` rather than as a branch,

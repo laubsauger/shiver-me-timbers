@@ -403,6 +403,33 @@ function sail(
   return { points: trackPoints(t, pose), x: pose.x, z: pose.z, fx: pose.fx, fz: pose.fz };
 }
 
+describe('foam vortex phase stays with shed water', () => {
+  it('keeps port/starboard contrast at a fixed world point as the hull advances and odometer wraps', () => {
+    const p: WakeParams = { ...WP, cutIntensity: 0, bowIntensity: 0,
+      shoulderIntensity: 0, sternIntensity: 0, moundIntensity: 0, vortexSpread: 0 };
+    const offset = HULL.beam * 0.5 * p.vortexOffset;
+    const z = -(HULL.length + p.vortexSpacing * 2.25);
+    const contrast = (head: number, odometer: number) => {
+      const points: TrackSample[] = [
+        { x: 0, z: head, fx: 0, fz: 1, speed: 10, age: 0, dist: 0 },
+        { x: 0, z: -200, fx: 0, fz: 1, speed: 10, age: (head + 200) / 10, dist: head + 200 },
+      ];
+      const starboard = wakeTrailCpu(points, offset, z, HULL, p, 10, odometer);
+      const port = wakeTrailCpu(points, -offset, z, HULL, p, 10, odometer);
+      expect(starboard + port).toBeGreaterThan(0);
+      return (starboard - port) / (starboard + port);
+    };
+    const initial = contrast(0, 0);
+    for (const periods of [0.25, 0.5, 0.99, 1.01, 1.5]) {
+      const head = periods * p.vortexSpacing;
+      const wrapped = head - Math.floor(head / p.vortexSpacing) * p.vortexSpacing;
+      expect(contrast(head, wrapped)).toBeCloseTo(initial, 10);
+    }
+    // The old ship-relative phase reverses sides after half a spacing.
+    expect(Math.abs(contrast(p.vortexSpacing * 0.5, 0) - initial)).toBeGreaterThan(1);
+  });
+});
+
 describe('wake track: the water remembers (§V10 follow-up, user regression)', () => {
   // THE bug this whole model exists to kill. User, twice: "the trail we leave
   // in the water is very statically moving and immediately spraying out at a

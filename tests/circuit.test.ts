@@ -97,12 +97,44 @@ describe('Course contract (src/race/types.ts)', () => {
     expect(Math.abs(world.lapLength - lap)).toBeLessThan(5);
   });
 
-  it('the pace line is the lap run-up and ends on the start gate', () => {
+  // §T.202 WHY (user playtest): "the start is kinda confusing … we immediately have to pull through the houses before
+  // even making course". The grid rolls up a long STRAIGHT in open, deep water, well clear of Main Street and every
+  // structure, with the tower's start lamps ahead of it; the town is a highlight late in the lap, not second 1.
+  it('the pace line is a long straight run-in through open water, ending on the start gate', () => {
     const pace = world.course.paceLine;
-    let l = 0;
-    for (let i = 1; i < pace.length; i++) l += Math.hypot(pace[i][0] - pace[i - 1][0], pace[i][1] - pace[i - 1][1]);
-    expect(l).toBeGreaterThan(500);
-    for (const p of pace) expect(distanceToClosed(world.course.referenceLine, p)).toBeLessThan(1);
+    const s = world.gates[0];
+    const end = pace[pace.length - 1];
+    expect(Math.hypot(end[0] - s.mid[0], end[1] - s.mid[1])).toBeLessThan(1);
+    const len = Math.hypot(pace[0][0] - end[0], pace[0][1] - end[1]);
+    // grid room (page/course GRID_ROOM 175 m) + a 700 m pace run
+    expect(len).toBeGreaterThan(875);
+    const dir: Vec2 = [(end[0] - pace[0][0]) / len, (end[1] - pace[0][1]) / len];
+    const port = portOf(dir[0], dir[1]);
+    const f = world.furniture;
+    for (const p of pace) {
+      // straight: on the chord
+      expect(Math.abs((p[0] - pace[0][0]) * port[0] + (p[1] - pace[0][1]) * port[1])).toBeLessThan(0.5);
+      // open water across the two-column grid (±7 m) and a hull either side
+      for (const o of [-14, 0, 14]) expect(-world.seabedAt(p[0] + port[0] * o, p[1] + port[1] * o)).toBeGreaterThanOrEqual(CORRIDOR_MIN_DEPTH);
+      for (const r of f.roofs) expect(Math.hypot(p[0] - r.at[0], p[1] - r.at[1]), 'the grid rolls past Main Street').toBeGreaterThan(250);
+      for (const q of [...f.pylons.map((x) => x.at), ...f.stakes.map((x) => x.at), ...f.buoys.map((x) => x.at), ...f.tower.anchors, f.tower.at, ...f.startPontoons.map((x) => x.at)]) {
+        expect(Math.hypot(p[0] - q[0], p[1] - q[1])).toBeGreaterThan(30);
+      }
+    }
+    // the tower's lamps are in front of the grid all the way up the straight
+    const t = f.tower.at;
+    const toTower: Vec2 = [t[0] - pace[0][0], t[1] - pace[0][1]];
+    expect((toTower[0] * dir[0] + toTower[1] * dir[1]) / Math.hypot(...toTower)).toBeGreaterThan(Math.cos((20 * Math.PI) / 180));
+  });
+
+  it('Main Street comes late in the lap: no drowned house within 60 m of the line for the first half of the lap', () => {
+    const line = world.course.referenceLine;
+    let along = 0;
+    for (let i = 0; i < line.length; i++) {
+      if (i > 0) along += Math.hypot(line[i][0] - line[i - 1][0], line[i][1] - line[i - 1][1]);
+      if (world.furniture.roofs.some((r) => Math.hypot(line[i][0] - r.at[0], line[i][1] - r.at[1]) < 60)) break;
+    }
+    expect(along / world.lapLength).toBeGreaterThan(0.5);
   });
 
   it('turn marks are rounded to port, outside their rounding radius', () => {
@@ -170,6 +202,11 @@ describe('gates and corridor fit the boat', () => {
     for (const s of f.stakes) expect(distanceToClosed(line, s.at)).toBeGreaterThan(50);
     expect(distanceToClosed(line, f.tower.at)).toBeGreaterThan(45);
     for (const a of f.tower.anchors) expect(distanceToClosed(line, a)).toBeGreaterThan(20);
+    expect(f.startPontoons).toHaveLength(2);
+    for (const p of f.startPontoons) {
+      expect(distanceToClosed(line, p.at)).toBeGreaterThan(CORRIDOR_HALF_WIDTH + 20);
+      expect(p.depth).toBeGreaterThanOrEqual(CORRIDOR_MIN_DEPTH);
+    }
   });
 
   it('Main Street crashes a boat that hits a roof, never one on the racing line or over a fully drowned house', () => {
@@ -257,14 +294,15 @@ describe('sectors are measured swell shelter, not hand tags (§T.174)', () => {
       return (Math.acos(Math.max(-1, Math.min(1, g.heading[0] * sw[0] + g.heading[1] * sw[1]))) * 180) / Math.PI;
     };
     const sector = (id: string) => gatesOf(world.course).find((g) => g.id === id)!.sector;
-    for (const id of ['G2', 'G3']) {
+    // §T.202 lap order: S → T1 → The Bar G1–G2 → T2 → Pylon Row G3 → T3 → Stuff Run G4 → Main Street …
+    for (const id of ['G1', 'G2']) {
       expect(sector(id)).toBe('exposed');
       expect(angle(id), `${id} head sea`).toBeGreaterThan(135);
     }
+    expect(sector('G3')).toBe('exposed');
+    expect(Math.abs(angle('G3') - 90), 'G3 beam sea').toBeLessThan(35);
     expect(sector('G4')).toBe('exposed');
-    expect(Math.abs(angle('G4') - 90), 'G4 beam sea').toBeLessThan(35);
-    expect(sector('G5')).toBe('exposed');
-    expect(angle('G5'), 'G5 following sea').toBeLessThan(45);
+    expect(angle('G4'), 'G4 following sea').toBeLessThan(45);
   });
 });
 
@@ -308,7 +346,7 @@ describe('sandbars never ground a boat', () => {
     // and it blends (no step at the zone edge)
     const b = world.bars[0];
     let prev = phys.heightAt(x[0], x[1]);
-    const dir = world.gates.find((g) => g.id === 'G2')!.heading;
+    const dir = world.gates.find((g) => g.id === 'G1')!.heading;
     for (let s = 1; s < 200; s++) {
       const h = phys.heightAt(x[0] - dir[0] * s, x[1] - dir[1] * s);
       expect(Math.abs(h - prev)).toBeLessThan(1.2);

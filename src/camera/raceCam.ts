@@ -108,6 +108,14 @@ export interface RaceCamParams {
   switchBlendSeconds: number;
   cockpitHeadFreeDeg: number;
   cockpitHeadHalfLife: number;
+  /**
+   * T206 EYE STABILISER (vestibulo-ocular): half-life, s, of EACH of the two cascaded low-pass stages the cam_eye pose
+   * goes through in the BOAT's frame (position and rotation). The boat's own motion is followed exactly; only the
+   * pilot rig's motion relative to the seat is filtered.
+   */
+  cockpitEyeHalfLife: number;
+  /** a per-frame slam below this (m/s of vertical speed lost) is resting contact noise: no dip, no shake */
+  slamDeadbandDeltaV: number;
   /** landing dip: m per m/s of vertical speed lost, capped (design §6: 6 cm) */
   dipPerDeltaV: number;
   dipMax: number;
@@ -152,6 +160,13 @@ export const RACE_CAM_DEFAULTS: Readonly<RaceCamParams> = Object.freeze({
   switchBlendSeconds: 0.35,
   cockpitHeadFreeDeg: 12,
   cockpitHeadHalfLife: 0.25,
+  // T206 (user: "first person head shaking is way too intense and instant … even standing on the calm boat"). Measured
+  // on speedboat_pilot.glb `idle_seated` at cam_eye, relative to the seat: 20.8 mm / 1.36° excursion, up to 91°/s,
+  // 18 Hz key steps, and a 0.75° snap at the 2 s loop seam — the raw bone was the camera. Two stages at 0.7 s leave
+  // 1.7 mm of slow sway and < 0.1° (same clip, 60 and 144 Hz); a steer/throttle lean still arrives, over ~2 s.
+  cockpitEyeHalfLife: 0.7,
+  // resting in calm water HullWater reports ≤ 0.003 m/s per tick of slam; a planing landing is 0.1–0.2 per tick
+  slamDeadbandDeltaV: 0.05,
   dipPerDeltaV: 0.02,
   dipMax: 0.06,
   dipOmega: 14,
@@ -225,6 +240,14 @@ export class RaceCam {
   private readonly up = new Vector3(0, 1, 0);
   private readonly eyePos = new Vector3();
   private readonly eyeQuat = new Quaternion();
+  /** T206 stabiliser: the eye in the boat frame, two low-pass stages (position, rotation) */
+  private readonly eyeLocal1 = new Vector3();
+  private readonly eyeLocal2 = new Vector3();
+  private readonly eyeRot1 = new Quaternion();
+  private readonly eyeRot2 = new Quaternion();
+  private readonly bodyQuat = new Quaternion();
+  private readonly bodyInv = new Quaternion();
+  private eyeFiltered = false;
   private readonly lastLook = new Vector3();
   private readonly tmpLean = new Vector3();
 
@@ -286,7 +309,7 @@ export class RaceCam {
   addSlam(deltaV: number): void {
     const p = this.params;
     const dv = Number.isFinite(deltaV) ? Math.abs(deltaV) : 0;
-    if (p.reducedMotion || dv === 0) return;
+    if (p.reducedMotion || dv < p.slamDeadbandDeltaV || dv === 0) return;
     this.shakeAmp = Math.min(p.shakeMaxRad, this.shakeAmp + p.shakePerDeltaV * dv);
     this.dipV -= Math.min(p.dipMax * p.dipOmega, p.dipPerDeltaV * dv * p.dipOmega);
   }
@@ -329,6 +352,7 @@ export class RaceCam {
     this.dipX = this.dipV = 0;
     this.headExcess = this.headExcessPrev = 0;
     this.lookBackRamp = 0;
+    this.eyeFiltered = false;
   }
 
   update(target: RaceCamTarget, frameDt: number, heightFn?: RaceHeightFn): void {
@@ -394,7 +418,7 @@ export class RaceCam {
     if (this.modeV === 'cockpit') {
       fovTarget = speedFov(speed, p.cockpitFovMin, p.cockpitFovMax);
       this.fov = cut ? fovTarget : moveToward(this.fov, fovTarget, p.fovRateDegPerS * dt);
-      this.applyCockpit(target, dt);
+      this.applyCockpit(target, dt, cut);
     } else {
       if (this.modeV === 'crash') {
         fovTarget = rig.fovMin;
@@ -491,19 +515,46 @@ export class RaceCam {
     this.up.set(0, 1, 0);
   }
 
-  private applyCockpit(target: RaceCamTarget, dt: number): void {
+  private applyCockpit(target: RaceCamTarget, dt: number, cut: boolean): void {
     const p = this.params;
     const q = target.quaternion;
     const cam = this.camera;
-    if (!(this.eyeSource && this.eyeSource(this.eyePos, this.eyeQuat))) {
+    const [tx, ty, tz] = target.position;
+    const body = this.bodyQuat.set(q[0], q[1], q[2], q[3]);
+    this.bodyInv.copy(body).invert();
+    const raw = this.eyeSource !== null && this.eyeSource(this.eyePos, this.eyeQuat);
+    if (raw) {
+      // the bone's world pose → the boat frame (what the pilot rig adds on top of the seat)
+      this.eyePos.x -= tx;
+      this.eyePos.y -= ty;
+      this.eyePos.z -= tz;
+      this.eyePos.applyQuaternion(this.bodyInv);
+      this.eyeQuat.premultiply(this.bodyInv);
+    } else {
       const [bx, by, bz] = this.eyeBody;
-      this.eyePos.set(bx, by, bz).applyQuaternion(this.eyeQuat.set(q[0], q[1], q[2], q[3]));
-      this.eyePos.x += target.position[0];
-      this.eyePos.y += target.position[1];
-      this.eyePos.z += target.position[2];
-      const f = quatMul(q as Quat, Q_FLIP_Y);
-      this.eyeQuat.set(f[0], f[1], f[2], f[3]);
+      this.eyePos.set(bx, by, bz);
+      this.eyeQuat.set(Q_FLIP_Y[0], Q_FLIP_Y[1], Q_FLIP_Y[2], Q_FLIP_Y[3]);
     }
+    // T206 STABILISER: a head holds its gaze against the body's buzz. Two exponential stages in the boat frame (the
+    // boat's own motion is recomposed below unfiltered); a cut or a teleport seats the filter on the raw eye.
+    if (cut || !this.eyeFiltered || p.reducedMotion) {
+      this.eyeLocal1.copy(this.eyePos);
+      this.eyeLocal2.copy(this.eyePos);
+      this.eyeRot1.copy(this.eyeQuat);
+      this.eyeRot2.copy(this.eyeQuat);
+      this.eyeFiltered = true;
+    } else if (dt > 0) {
+      const a = 1 - Math.pow(0.5, dt / Math.max(p.cockpitEyeHalfLife, 1e-6));
+      this.eyeLocal1.lerp(this.eyePos, a);
+      this.eyeLocal2.lerp(this.eyeLocal1, a);
+      this.eyeRot1.slerp(this.eyeQuat, a);
+      this.eyeRot2.slerp(this.eyeRot1, a);
+    }
+    this.eyePos.copy(this.eyeLocal2).applyQuaternion(body);
+    this.eyePos.x += tx;
+    this.eyePos.y += ty;
+    this.eyePos.z += tz;
+    this.eyeQuat.copy(body).multiply(this.eyeRot2).normalize();
     // head: 100% of the hull's tilt up to `cockpitHeadFreeDeg`, the excess follows with a lag
     const tilt = tiltOf(q, this.tiltAxis);
     const excess = Math.max(0, tilt.angle - p.cockpitHeadFreeDeg * DEG);

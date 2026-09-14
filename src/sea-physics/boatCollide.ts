@@ -77,6 +77,13 @@ export interface BoatCollideParams {
   bedIterations: number;
   /** speed fraction a flexible pole takes on first contact (GDD §3: gate pole −10%) */
   flexibleSpeedLoss: number;
+  /**
+   * §T.198 SOFT boat↔boat contact (the rolling-start formation, `softMask`): horizontal |Δv|/dt bound of the gentle
+   * separation, m/s² — a fender rub that stops two converging hulls overlapping, never one that rolls a boat
+   */
+  softAccel: number;
+  /** §T.198 soft contact push-out speed cap, m/s */
+  softBiasSpeed: number;
 }
 
 export const BOAT_COLLIDE_DEFAULTS: Readonly<BoatCollideParams> = Object.freeze({
@@ -96,6 +103,8 @@ export const BOAT_COLLIDE_DEFAULTS: Readonly<BoatCollideParams> = Object.freeze(
   bedSkipMargin: 1,
   bedIterations: 4,
   flexibleSpeedLoss: 0.1,
+  softAccel: 3 * 9.81,
+  softBiasSpeed: 1,
 });
 
 // ── geometry ─────────────────────────────────────────────────────────────────────────────────
@@ -266,20 +275,64 @@ export interface StaticWorld {
   readonly count: number;
   /** stride 4: cx cy cz radius */
   readonly bounds: Float64Array;
+  /**
+   * §T.198 broadphase: a uniform xz grid of bounding-sphere footprints (CSR: `cellStart[k]..cellStart[k+1]` index
+   * `cellItems`). Tower Reach hands ~3 600 colliders (the drawn kit props); a linear scan cost 1–2.6 ms per boat per
+   * tick. The grid only NARROWS the candidates — they are then tested in collider index order, exactly as the scan did.
+   */
+  readonly grid: { readonly cell: number; readonly x0: number; readonly z0: number; readonly nx: number; readonly nz: number; readonly cellStart: Int32Array; readonly cellItems: Int32Array };
 }
+
+/** broadphase cell size, m (a hull's reach at 45 m/s is ≈ 7 m: a query spans ≤ 2×2 cells) */
+export const STATIC_GRID_CELL = 24;
 
 export function prepareStaticWorld(colliders: readonly StaticCollider[]): StaticWorld {
   const data = new Float64Array(colliders.length * 9);
   const bounds = new Float64Array(colliders.length * 4);
+  let minX = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxZ = -Infinity;
   colliders.forEach((c, i) => {
     if (!(c.radius > 0) || ![...c.a, ...c.b].every(Number.isFinite)) throw new Error(`boatCollide: bad static collider ${i}`);
     data.set([c.a[0], c.a[1], c.a[2], c.b[0], c.b[1], c.b[2], c.radius, c.flexible ? 1 : 0, c.id ?? i], i * 9);
     const cx = 0.5 * (c.a[0] + c.b[0]);
     const cy = 0.5 * (c.a[1] + c.b[1]);
     const cz = 0.5 * (c.a[2] + c.b[2]);
-    bounds.set([cx, cy, cz, 0.5 * Math.hypot(c.b[0] - c.a[0], c.b[1] - c.a[1], c.b[2] - c.a[2]) + c.radius], i * 4);
+    const r = 0.5 * Math.hypot(c.b[0] - c.a[0], c.b[1] - c.a[1], c.b[2] - c.a[2]) + c.radius;
+    bounds.set([cx, cy, cz, r], i * 4);
+    minX = Math.min(minX, cx - r);
+    minZ = Math.min(minZ, cz - r);
+    maxX = Math.max(maxX, cx + r);
+    maxZ = Math.max(maxZ, cz + r);
   });
-  return { data, count: colliders.length, bounds };
+  const cell = STATIC_GRID_CELL;
+  const n = colliders.length;
+  const x0 = n > 0 ? minX : 0;
+  const z0 = n > 0 ? minZ : 0;
+  const nx = n > 0 ? Math.max(1, Math.ceil((maxX - minX) / cell)) : 1;
+  const nz = n > 0 ? Math.max(1, Math.ceil((maxZ - minZ) / cell)) : 1;
+  const range = (i: number): [number, number, number, number] => {
+    const cx = bounds[i * 4];
+    const cz = bounds[i * 4 + 2];
+    const r = bounds[i * 4 + 3];
+    const clampX = (v: number): number => Math.max(0, Math.min(nx - 1, Math.floor((v - x0) / cell)));
+    const clampZ = (v: number): number => Math.max(0, Math.min(nz - 1, Math.floor((v - z0) / cell)));
+    return [clampX(cx - r), clampX(cx + r), clampZ(cz - r), clampZ(cz + r)];
+  };
+  const counts = new Int32Array(nx * nz + 1);
+  for (let i = 0; i < n; i++) {
+    const [ax, bx, az, bz] = range(i);
+    for (let gz = az; gz <= bz; gz++) for (let gx = ax; gx <= bx; gx++) counts[gz * nx + gx + 1]++;
+  }
+  for (let k = 0; k < nx * nz; k++) counts[k + 1] += counts[k];
+  const cellItems = new Int32Array(counts[nx * nz]);
+  const fill = counts.slice(0, nx * nz);
+  for (let i = 0; i < n; i++) {
+    const [ax, bx, az, bz] = range(i);
+    for (let gz = az; gz <= bz; gz++) for (let gx = ax; gx <= bx; gx++) cellItems[fill[gz * nx + gx]++] = i;
+  }
+  return { data, count: n, bounds, grid: { cell, x0, z0, nx, nz, cellStart: counts, cellItems } };
 }
 
 /** the sim worker's collision hook (plain data, structured-cloned into each worker once) */
@@ -402,6 +455,10 @@ export interface BoatCollideMemory {
   /** flexible collider ids this boat is inside (contact episodes), −1 = free slot */
   readonly flexTouching: Float64Array;
   readonly flexSeen: Uint8Array;
+  /** §T.198 broadphase candidates of the current query (grown once to the world's collider count) */
+  cand: Int32Array;
+  /** §T.198 the soft-contact params derived from the last `prm` seen (cached: no allocation per tick) */
+  soft: { from: Readonly<BoatCollideParams>; prm: BoatCollideParams } | null;
 }
 
 export function createBoatCollideMemory(hull: CollisionHull): BoatCollideMemory {
@@ -432,7 +489,17 @@ export function createBoatCollideMemory(hull: CollisionHull): BoatCollideMemory 
     bed: new Float64Array(hull.pointCount * 14),
     flexTouching: new Float64Array(8).fill(-1),
     flexSeen: new Uint8Array(8),
+    cand: new Int32Array(64),
+    soft: null,
   };
+}
+
+/** the pair params of a SOFT contact: no bounce, no friction, the gentle bias; the V110 bound set to the soft accel */
+function softParams(mem: BoatCollideMemory, prm: Readonly<BoatCollideParams>): Readonly<BoatCollideParams> {
+  if (mem.soft && mem.soft.from === prm) return mem.soft.prm;
+  const soft: BoatCollideParams = { ...prm, restitutionBoat: 0, frictionBoat: 0, maxBiasSpeed: prm.softBiasSpeed, maxImpactAccel: prm.softAccel, maxImpactAngularAccel: 1e12 };
+  mem.soft = { from: prm, prm: soft };
+  return soft;
 }
 
 /** V108 teleport: forget contact episodes (a flexible pole touched at the crash site is not touched at the respawn) */
@@ -978,6 +1045,11 @@ export function isGhost(mask: number, i: number): boolean {
  * as A = lo, B = hi, so a worker holding boat j computes the same numbers and applies the negative (§V2).
  * `ghostMask` bit i set ⇒ boat i makes and receives no boat contacts (respawn ghost, GDD 2 s), but overlap is
  * still reported so the ghost can end only when clear. Adds to `mem.report`; returns the contacts applied.
+ *
+ * §T.198 `softMask` bit i set (and neither boat a ghost) ⇒ the pair is a SOFT contact: the same swept pair with no
+ * restitution or friction, bounded at `softAccel`, applied as a HORIZONTAL impulse through the CG (no roll, heave or
+ * yaw). The rolling-start formation: hulls converging onto one line are kept apart instead of passing through each
+ * other (contacts off) or rolling each other over (full contacts, §T.191's smoke race).
  */
 export function collideBoatWithFleet(
   i: number,
@@ -990,6 +1062,7 @@ export function collideBoatWithFleet(
   dt: number,
   mem: BoatCollideMemory,
   prm: Readonly<BoatCollideParams> = BOAT_COLLIDE_DEFAULTS,
+  softMask = 0,
 ): number {
   if (count > 32) throw new Error(`boatCollide: the contact-off mask holds 32 boats, fleet has ${count}`);
   const rep = mem.report;
@@ -1003,15 +1076,41 @@ export function collideBoatWithFleet(
     readPose(poses, base, lo, mem.poseA);
     readPose(poses, base, hi, mem.poseB);
     const ghost = ghostI || isGhost(ghostMask, j);
+    const soft = !ghost && softMask !== 0 && (isGhost(softMask, i) || isGhost(softMask, j));
     const hLo = many ? (hulls as readonly CollisionHull[])[lo] : (hulls as CollisionHull);
     const hHi = many ? (hulls as readonly CollisionHull[])[hi] : (hulls as CollisionHull);
-    const pushed = boatPairContact(mem.poseA, hLo, mem.poseB, hHi, dt, mem, prm);
+    const pushed = boatPairContact(mem.poseA, hLo, mem.poseB, hHi, dt, mem, soft ? softParams(mem, prm) : prm);
     const c = mem.pair;
     if (c.hit && c.depth0 < 0) rep.overlapsBoat = true;
     if (ghost || !pushed) continue;
     const sign = i === hi ? 1 : -1;
     const arms = i === hi ? c.armsB : c.armsA;
     const body = i === hi ? hHi : hLo;
+    if (soft) {
+      // horizontal, through the CG, bounded again after dropping the vertical part (it only ever shrinks)
+      let jx = 0;
+      let jz = 0;
+      for (let k = 0; k < c.count; k++) {
+        jx += sign * c.impulses[k * 3];
+        jz += sign * c.impulses[k * 3 + 2];
+      }
+      const dv = Math.hypot(jx, jz) / body.mass;
+      if (dv === 0) continue;
+      self.velocity[0] += jx / body.mass;
+      self.velocity[2] += jz / body.mass;
+      applied++;
+      rep.count++;
+      rep.impulse[0] += jx;
+      rep.impulse[2] += jz;
+      if (dv > rep.maxDeltaV) {
+        rep.maxDeltaV = dv;
+        rep.source = CONTACT_BOAT;
+        rep.approachSpeed = c.approachSpeed;
+        rep.other = j;
+        rep.bodyPoint.fill(0);
+      }
+      continue;
+    }
     for (let k = 0; k < c.count; k++) {
       const o = k * 3;
       applyRigid6Impulse(self, body, arms[o], arms[o + 1], arms[o + 2], sign * c.impulses[o], sign * c.impulses[o + 1], sign * c.impulses[o + 2]);
@@ -1082,7 +1181,48 @@ export function collideBoatWithWorld(
     const Bd = world.bounds;
     for (let k = 0; k < mem.flexSeen.length; k++) mem.flexSeen[k] = 0;
     const wl = Math.hypot(w[0], w[1], w[2]);
-    for (let c = 0; c < world.count; c++) {
+    // broadphase: the grid cells under the hull's reach this tick, candidates de-duplicated and in index order
+    const G = world.grid;
+    const qr = hull.boundRadius + (Math.hypot(v[0], v[1], v[2]) + wl * hull.boundRadius) * dt + prm.touchSlop;
+    const gx0 = Math.floor((p[0] - qr - G.x0) / G.cell);
+    const gx1 = Math.floor((p[0] + qr - G.x0) / G.cell);
+    const gz0 = Math.floor((p[2] - qr - G.z0) / G.cell);
+    const gz1 = Math.floor((p[2] + qr - G.z0) / G.cell);
+    let nCand = 0;
+    if (gx1 >= 0 && gz1 >= 0 && gx0 < G.nx && gz0 < G.nz) {
+      for (let gz = Math.max(0, gz0); gz <= Math.min(G.nz - 1, gz1); gz++) {
+        for (let gx = Math.max(0, gx0); gx <= Math.min(G.nx - 1, gx1); gx++) {
+          const k = gz * G.nx + gx;
+          for (let e = G.cellStart[k]; e < G.cellStart[k + 1]; e++) {
+            const c = G.cellItems[e];
+            let dup = false;
+            for (let q2 = 0; q2 < nCand; q2++) {
+              if (mem.cand[q2] === c) {
+                dup = true;
+                break;
+              }
+            }
+            if (dup) continue;
+            if (nCand === mem.cand.length) {
+              const grown = new Int32Array(Math.min(Math.max(64, world.count), mem.cand.length * 2));
+              grown.set(mem.cand);
+              mem.cand = grown;
+            }
+            // insertion keeps index order: the contacts resolve in the same order as the full scan
+            let at = nCand++;
+            while (at > 0 && mem.cand[at - 1] > c) {
+              mem.cand[at] = mem.cand[at - 1];
+              at--;
+            }
+            mem.cand[at] = c;
+          }
+        }
+      }
+    }
+    // the chain is repacked only after something changed this boat's velocities (a pack per candidate was most of the cost)
+    let packed = false;
+    for (let ci = 0; ci < nCand; ci++) {
+      const c = mem.cand[ci];
       const bx = Bd[c * 4] - p[0];
       const by = Bd[c * 4 + 1] - p[1];
       const bz = Bd[c * 4 + 2] - p[2];
@@ -1098,7 +1238,10 @@ export function collideBoatWithWorld(
       cb[5] = D[o + 5];
       for (let k = 6; k < 12; k++) cb[k] = 0;
       cb[12] = D[o + 6];
-      packChain(state, hull, mem.chainA);
+      if (!packed) {
+        packChain(state, hull, mem.chainA);
+        packed = true;
+      }
       const hit = mem.hit;
       if (sweepChains(mem.chainA, hull.capsuleCount, cb, 1, dt, prm.touchSlop, S, hit) < 0) continue;
       const id = D[o + 8];
@@ -1118,6 +1261,7 @@ export function collideBoatWithWorld(
           v[0] *= keep;
           v[1] *= keep;
           v[2] *= keep;
+          packed = false;
           rep.flexibleHits++;
           noteWorld(rep, prm.flexibleSpeedLoss * Math.hypot(v[0], v[1], v[2]) / keep, CONTACT_FLEXIBLE, 0, id, q, 0, 0, 0);
         }
@@ -1132,6 +1276,7 @@ export function collideBoatWithWorld(
       const jz = -pc.impulse[2];
       if (jx === 0 && jy === 0 && jz === 0) continue;
       applyRigid6Impulse(state, hull, pc.armA[0], pc.armA[1], pc.armA[2], jx, jy, jz);
+      packed = false;
       rep.impulse[0] += jx;
       rep.impulse[1] += jy;
       rep.impulse[2] += jz;
@@ -1245,6 +1390,9 @@ function bedSolve(state: Rigid6State, hull: CollisionHull, bed: BedHeight, dt: n
     }
   }
   if (nc === 0) return;
+  const bv0x = v[0];
+  const bv0y = v[1];
+  const bv0z = v[2];
   const e = prm.restitutionWorld;
   const mu = prm.frictionWorld;
   for (let it = 0; it < prm.bedIterations; it++) {
@@ -1298,16 +1446,27 @@ function bedSolve(state: Rigid6State, hull: CollisionHull, bed: BedHeight, dt: n
       }
     }
   }
-  // report: the largest point impulse
+  // report: ONE bed contact whose |Δv| is the CG's over the whole solve (§T.198: the crash module's impact is "one
+  // collision |Δv| ≥ 8 m/s"; the largest single point's share of a shore hit spread over a dozen hull points read
+  // 7.7 m/s for a 20 m/s beaching in the live page), at the arm of the largest point impulse
+  let big = -1;
+  let bigJ = 0;
+  let approach = 0;
   for (let c = 0; c < nc; c++) {
     const o = c * BED_STRIDE;
     const jn = C[o + 9];
     if (jn <= 0) continue;
-    const jt = C[o + 10];
-    const dv = Math.hypot(jn, jt) / hull.mass;
     rep.impulse[0] += jn * C[o + 3];
     rep.impulse[1] += jn * C[o + 4];
     rep.impulse[2] += jn * C[o + 5];
-    noteWorld(rep, dv, CONTACT_BED, Math.max(0, -C[o + 8]), -1, q, C[o], C[o + 1], C[o + 2]);
+    approach = Math.max(approach, -C[o + 8]);
+    const jm = Math.hypot(jn, C[o + 10]);
+    if (jm > bigJ) {
+      bigJ = jm;
+      big = o;
+    }
   }
+  if (big < 0) return;
+  const dv = Math.hypot(v[0] - bv0x, v[1] - bv0y, v[2] - bv0z);
+  noteWorld(rep, dv, CONTACT_BED, approach, -1, q, C[big], C[big + 1], C[big + 2]);
 }

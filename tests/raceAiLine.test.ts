@@ -16,6 +16,7 @@ import { buildPilotSetup, LINE_LEVELS } from '../src/race/ai/pilot';
 import { speedProfile } from '../src/race/ai/profile';
 import type { Course } from '../src/race/types';
 import { AI_BLOCK_LEN, AI_IN_LEN, AI_OUT_LEN, B, BoatSimLayout, hashBoatOutput, layoutByteLength } from '../src/sim-worker/layout';
+import { FX_LEN } from '../src/sim-worker/fx';
 import { syntheticCourse } from './raceAiHarness';
 
 const course = syntheticCourse();
@@ -69,8 +70,10 @@ function checkCourse(c: Course, line: RacingLine, margin: number): { slack: numb
       const l = Math.hypot(q[0] - p[0], q[1] - p[1]);
       const dx = (q[0] - p[0]) / l;
       const dz = (q[1] - p[1]) / l;
-      // keepOn 'port' ⇒ the boat passes on the mark's starboard side of the chord direction
-      const hits = crossings(line, e.mark.at[0], e.mark.at[1], dz, -dx, dx, dz).filter((h) => Math.abs(h.u) < 200);
+      // race/types.ts handedness (T196: race/ai moved to it): keepOn 'port' ⇒ the mark on the boat's port ⇒ the boat passes
+      // on the STARBOARD side of the chord direction, (−dz, dx); 'starboard' ⇒ its port side, (dz, −dx)
+      const sg = e.mark.keepOn === 'port' ? -1 : 1;
+      const hits = crossings(line, e.mark.at[0], e.mark.at[1], sg * dz, -sg * dx, dx, dz).filter((h) => Math.abs(h.u) < 200);
       expect(hits.length, `mark ${e.mark.id}: rounded once`).toBe(1);
       expect(hits[0].u, `mark ${e.mark.id}: on the keepOn side, clear of its radius`).toBeGreaterThan(e.mark.radius);
       for (let i = 0; i < line.n; i++) {
@@ -127,7 +130,7 @@ describe('§T.186 racing line', () => {
     const port = corridorsOf(course, 5).find((c) => c.keepOut)!;
     const mirrored: Course = {
       ...course,
-      elements: course.elements.map((e) => (e.kind === 'mark' ? { kind: 'mark', mark: { ...e.mark, keepOn: 'starboard' } } : e)),
+      elements: course.elements.map((e) => (e.kind === 'mark' ? { kind: 'mark', mark: { ...e.mark, keepOn: e.mark.keepOn === 'port' ? 'starboard' : 'port' } } : e)),
     };
     const stbd = corridorsOf(mirrored, 5).find((c) => c.keepOut)!;
     const mk = port.keepOut!;
@@ -140,11 +143,14 @@ describe('§T.186 AI block in the sim buffer', () => {
   const base = { boats: 3, wakeCap: 4, oceanLen: 10, seaLen: 5 };
 
   it('a layout without a pilot is byte-for-byte the pre-T186 layout (existing hashes and offsets unchanged)', () => {
-    // the pre-T186 formula, restated on purpose: header 16 f64, params, WORLD, per-boat 44 + wakeCap×5
-    expect(layoutByteLength(base)).toBe((16 + 10 + 5 + 3 * 13 + 3 * (44 + 4 * 5)) * 8);
+    // the pre-T186 formula, restated on purpose: header f64, params, WORLD, per-boat 44 + wakeCap×5. The header is 20
+    // f64 since sim layout v2 (§T.191 F.EXTERNAL_BOATS / F.TRACE_LEN); what this pins is that a pilot-less layout adds
+    // no AI bytes, not the header size. Layout v3 (§T.195) put the per-boat EFFECTS record (FX_LEN f64) between the
+    // fixed boat slots and the wake samples (re-pinned T196): still no AI bytes without a pilot
+    expect(layoutByteLength(base)).toBe((20 + 10 + 5 + 3 * 13 + 3 * (44 + FX_LEN + 4 * 5)) * 8);
     const L = new BoatSimLayout(new ArrayBuffer(layoutByteLength(base)), base);
     expect(new BoatSimLayout(L.buffer).spec).toEqual(base);
-    expect(L.outRange(1)).toEqual([L.boatOffset(1) + B.POSE, L.boatOffset(1) + 44 + 4 * 5]);
+    expect(L.outRange(1)).toEqual([L.boatOffset(1) + B.POSE, L.boatOffset(1) + 44 + FX_LEN + 4 * 5]);
     expect(() => L.aiOffset(0)).toThrow(/no AI block/);
   });
 

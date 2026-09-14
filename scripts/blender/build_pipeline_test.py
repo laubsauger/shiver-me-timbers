@@ -659,6 +659,10 @@ def main():
     if hero:
         hero.assemble_lods()
         sb.set_props(root, hero.root_extras())
+    if hhull is not None:
+        # §T.192: the well opening the runtime caps so the sea never shows inside the hull (hero_hull.water_mask)
+        import json  # noqa: E402
+        sb.set_props(root, {'waterMask': json.dumps(hhull.water_mask())})
 
     report = []
     for lod_obj in lods:

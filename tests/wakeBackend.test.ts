@@ -151,7 +151,8 @@ function flowfoamPasses(ff: FlowFoam): Built[] {
   const rec = recorder();
   ff.advanceWake(1 / 60);
   ff.update(rec.r, 1 / 60);
-  return rec.computes.flatMap((c) => (Array.isArray(c) ? [] : [buildCompute(c)]));
+  // the wake's group is the one long array; the accumulation tiers submit [advect, blur] pairs since their batching
+  return rec.computes.flatMap((c) => (Array.isArray(c) ? (c.length > 2 ? [] : c.map(buildCompute)) : [buildCompute(c)]));
 }
 
 let oceanDeps: Promise<any> | null = null;
@@ -525,7 +526,7 @@ describe('6. §V104 + §V2: one compute group per frame, advanced by sim time', 
     const rec = recorder();
     ff.advanceWake(SIM_DT);
     ff.update(rec.r, 1 / 20);
-    const groups = rec.computes.filter((c) => Array.isArray(c)) as unknown[][];
+    const groups = rec.computes.filter((c) => Array.isArray(c) && c.length > 2) as unknown[][];
     expect(groups.length).toBe(1);
     expect(groups[0].length).toBe(wakeDispatchCount(WAKE_RAFT_TIER.n));
     expect(groups[0]).toBe(sim.solver.computeNodes);
@@ -535,7 +536,7 @@ describe('6. §V104 + §V2: one compute group per frame, advanced by sim time', 
     // a frame with no tick behind it dispatches no wake work at all
     const idle = recorder();
     ff.update(idle.r, 1 / 144);
-    expect(idle.computes.filter((c) => Array.isArray(c))).toHaveLength(0);
+    expect(idle.computes.filter((c) => Array.isArray(c) && c.length > 2)).toHaveLength(0);
     expect(idle.renders()).toBe(0);
     expect(steps).toHaveLength(1);
     ff.dispose();

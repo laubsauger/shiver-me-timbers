@@ -128,6 +128,8 @@ export interface PresetPatch {
     | 'clusterRadiusMax'
     | 'clusterFlatten'
     | 'clusterHeight'
+    | 'stormRadiusScale'
+    | 'stormBaseDrop'
     | 'heightBias'
     | 'lobeScaleMin'
     | 'lobeScaleMax'
@@ -241,6 +243,8 @@ export const weatherPresets: Readonly<
       ambientIntensity: 0.95,
     },
     clouds: {
+      stormRadiusScale: 2,
+      stormBaseDrop: 0.6,
       // §V11b again: an EMPTY sky is few clusters, never low coverage
       coverage: 0.8,
       clusterCount: 3,
@@ -289,6 +293,8 @@ export const weatherPresets: Readonly<
       ambientIntensity: 0.9, // bright open-sky bounce
     },
     clouds: {
+      stormRadiusScale: 2,
+      stormBaseDrop: 0.6,
       // §V11b semantics: `coverage` is PER-LOBE density on near-opaque
       // polygonal cores, so an open sky comes from FEWER CLUSTERS, not from a
       // low coverage. The old 0.25 was tuned for accumulating billboards and
@@ -358,6 +364,8 @@ export const weatherPresets: Readonly<
       ambientIntensity: 0.8,
     },
     clouds: {
+      stormRadiusScale: 2,
+      stormBaseDrop: 0.6,
       coverage: 0.82,
       clusterCount: 10, // filling in, but the sky is still open between them
       ringInner: 1600,
@@ -402,6 +410,8 @@ export const weatherPresets: Readonly<
       ambientIntensity: skyParams.ambientIntensity,
     },
     clouds: {
+      stormRadiusScale: 2,
+      stormBaseDrop: 0.6,
       coverage: cloudParams.coverage,
       clusterCount: cloudParams.clusterCount,
       ringInner: cloudParams.ringInner,
@@ -461,6 +471,8 @@ export const weatherPresets: Readonly<
       ambientIntensity: 0.65,
     },
     clouds: {
+      stormRadiusScale: 2,
+      stormBaseDrop: 0.6,
       coverage: 0.9,
       clusterCount: 11,
       ringInner: 2300,
@@ -515,6 +527,8 @@ export const weatherPresets: Readonly<
       ambientIntensity: 0.6,
     },
     clouds: {
+      stormRadiusScale: 2,
+      stormBaseDrop: 0.6,
       coverage: 0.96,
       clusterCount: 9,
       ringInner: 2250,
@@ -661,6 +675,9 @@ export const weatherPresets: Readonly<
     // 2.2–3.6 km out — it SITS ON THE HORIZON, which is the "Clouds: Concept"
     // read, and is why the placement ring moves out and the base drops.
     clouds: {
+      // This preset already authors the full storm radius and base altitude.
+      stormRadiusScale: 1,
+      stormBaseDrop: 0,
       coverage: 1, // per-lobe density: a storm cell is solid
       clusterCount: 7, // fewer, far bigger masses
       ringInner: 2200, // pushed out to the horizon
@@ -672,8 +689,9 @@ export const weatherPresets: Readonly<
       clusterFlatten: 1, // vertical development, not a pancake
       clusterHeight: 2.6, // towers: >1 is what builds height
       heightBias: 1, // lobes spread evenly up the tower, not pooled at base
-      lobeScaleMin: 0.13, // smaller lobes over a bigger mass = more structure
-      lobeScaleMax: 0.24,
+      // Retain enough support for the existing 30–46 lobes to form a mass.
+      lobeScaleMin: 0.24,
+      lobeScaleMax: 0.40,
       domeExponent: 8, // flat-topped, not domed
       waistWidth: 0.42, // the anvil stalk
       waistHeight: 0.55,

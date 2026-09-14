@@ -94,6 +94,7 @@ import {
   updateRockUniforms,
   type TerrainBlendMaterialHandle,
 } from '../terrain';
+import type { TerrainGroundContext } from '../terrain/sandMaterial';
 import { swissTurbulence2 } from '../terrain/noise';
 import { terrainParams } from '../params/terrain';
 import { bandLimitedEdge, coordFilter, periodResolved } from '../ship/bandLimit';
@@ -750,6 +751,36 @@ export interface SierraMaterialOptions {
    * 21 s of codegen for six islands under a comment claiming they shared.
    */
   atlas?: SierraAtlas;
+  /**
+   * §T.194: the race kit's surface hooks (src/circuit/kitMaterial.ts). Present
+   * ⇒ the granite surface is built INSIDE the blend material's pre-lighting
+   * ground (so bedrock under the water gets the §V34 caustics and absorption)
+   * and the kit composes it with its tidal zonation; the post-lighting land mix
+   * below is not used. Absent (every raft island) ⇒ the function body is the
+   * one it always was, node for node.
+   */
+  kit?: SierraKitHooks;
+}
+
+/** what a kit hook gets on top of the blend context: the granite, and what it was built from */
+export interface SierraKitSurfaceContext {
+  surface: SierraSurface;
+  info: TerrainInfoNodes | null;
+  skyAO: AnyNode;
+  u: SierraUniforms;
+  /** island-local xz (the joint sets' frame) */
+  localXZ: AnyNode;
+  jointDirA: AnyNode;
+  jointDirB: AnyNode;
+}
+
+export interface SierraKitHooks {
+  terrain(ctx: TerrainGroundContext & SierraKitSurfaceContext): { albedo: AnyNode; roughness: AnyNode; emissiveGate?: AnyNode; normal?: AnyNode };
+  rock(ctx: SierraKitSurfaceContext & { rockColor: AnyNode; rockRoughness: AnyNode; uniforms: ReturnType<typeof createRockUniforms> }): {
+    albedo: AnyNode;
+    roughness: AnyNode;
+    normal?: AnyNode;
+  };
 }
 
 interface IslandBindings {
@@ -799,6 +830,7 @@ export function createSierraTerrainMaterial(
   p: SierraParams = sierraParams,
   opts: SierraMaterialOptions = {},
 ): TerrainBlendMaterialHandle {
+  if (opts.kit) return createKitTerrainVariant(p, opts, opts.kit);
   const base = terrainBlendMaterial();
   const u = createSierraUniforms(p);
   const material = base.material;
@@ -863,6 +895,68 @@ export function createSierraTerrainMaterial(
 }
 
 /**
+ * §T.194 kit variant of the granite terrain (see `SierraMaterialOptions.kit`):
+ * the same uniforms, bindings, horizon and granite surface, built inside the
+ * blend's pre-lighting ground hook and handed to the kit to compose.
+ */
+function createKitTerrainVariant(p: SierraParams, opts: SierraMaterialOptions, kit: SierraKitHooks): TerrainBlendMaterialHandle {
+  const u = createSierraUniforms(p);
+  const bound = bindIsland(opts);
+  let rockUniforms: ReturnType<typeof createRockUniforms> | null = null;
+  let sand: TerrainGroundContext['uniforms']['sand'] | null = null;
+  const base = terrainBlendMaterial({}, {}, {
+    ground(ctx) {
+      rockUniforms = ctx.uniforms.rock;
+      sand = ctx.uniforms.sand;
+      const skyAO = bound.horizon ? horizonNodes(bound.horizon, ctx.uniforms.rock.sunDirection, u.shadowSoftness).skyAO : float(1);
+      const surface = buildSierraSurface({
+        info: bound.infoNodes,
+        skyAO,
+        graniteGrey: ctx.uniforms.rock.baseColor as AnyNode,
+        localXZ: positionLocal.xz,
+        jointOffset: bound.jointOffset,
+        jointDirA: bound.jointDirA,
+        jointDirB: bound.jointDirB,
+        bandPhase: bound.bandPhase,
+        roughness: ctx.roughness,
+        u,
+      });
+      return kit.terrain({
+        ...ctx,
+        surface,
+        info: bound.infoNodes,
+        skyAO,
+        u,
+        localXZ: positionLocal.xz,
+        jointDirA: bound.jointDirA,
+        jointDirB: bound.jointDirB,
+      });
+    },
+  });
+  const material = base.material;
+  if (bound.horizon) applyHorizon(material, bound.horizon, base.uniforms.rock.sunDirection, u);
+  const applyTones = (): void => {
+    rockUniforms!.baseColor.value.setHex(p.graniteBaseColor);
+    rockUniforms!.topColor.value.setHex(p.graniteTopColor);
+    rockUniforms!.creviceColor.value.setHex(p.graniteJointColor);
+    sand!.baseColor.value.setHex(p.dgSandColor);
+    sand!.shadeColor.value.setHex(p.dgSandShadeColor);
+    updateSierraUniforms(u, p);
+  };
+  applyTones();
+  return {
+    ...base,
+    updateFromParams(): void {
+      base.updateFromParams();
+      applyTones();
+    },
+    dispose(): void {
+      base.dispose();
+    },
+  };
+}
+
+/**
  * Sierra ROCK material for the boulders (§T.112a item 2, research D9): the
  * pirate rock node graph with granite tints, THE SAME SURFACE as the terrain
  * (masks, colours, info texture read at the instance's island-local
@@ -884,7 +978,8 @@ export function createSierraRockMaterial(
     skyAO,
     // the boulder's own banded/crevice colour stands in for flat granite,
     // so the sculpted look of the pirate rock survives under the sierra masks
-    graniteGrey: nodes.color,
+    // §T.194: the kit's blocks are fracture faces, not the pirate rock's painted posterize bands
+    graniteGrey: opts.kit ? uniforms.baseColor : nodes.color,
     localXZ: positionLocal.xz,
     jointOffset: bound.jointOffset,
     jointDirA: bound.jointDirA,
@@ -895,8 +990,27 @@ export function createSierraRockMaterial(
     fresh: float(1),
     u,
   });
-  material.colorNode = surface.albedo;
-  material.roughnessNode = surface.roughness;
+  if (opts.kit) {
+    // §T.194: the kit composes the block's zonation (barnacles, wet, algae) over the granite
+    const kitted = opts.kit.rock({
+      surface,
+      info: bound.infoNodes,
+      skyAO,
+      u,
+      localXZ: positionLocal.xz,
+      jointDirA: bound.jointDirA,
+      jointDirB: bound.jointDirB,
+      rockColor: nodes.color,
+      rockRoughness: nodes.roughness,
+      uniforms,
+    });
+    material.colorNode = kitted.albedo;
+    material.roughnessNode = kitted.roughness;
+    if (kitted.normal) material.normalNode = kitted.normal;
+  } else {
+    material.colorNode = surface.albedo;
+    material.roughnessNode = surface.roughness;
+  }
   material.metalness = 0;
 
   const applyTones = (): void => {

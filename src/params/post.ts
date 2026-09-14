@@ -103,6 +103,27 @@ export const postParams = registerParams(
     // --- god rays / fake volumetric light ------------------------------
     // Radial blur of a bright pass, marched toward the sun's screen position.
     // The ship's own rigging is the shaft generator — see src/core/postGodRays.
+    // --- lens flare (three's LensflareNode + AnamorphicNode) --------------
+    // OFF for the game, ON for a shoot. Both read the BLOOM texture, so they
+    // are free of a second scene pass and cost nothing while bloom is off.
+    flareEnabled: false,
+    /** ghost/bokeh chain strength — the coloured beads through frame centre */
+    flareStrength: 0.7,
+    /** higher = smaller, tighter ghosts (LensflareNode.threshold) */
+    flareThreshold: 0.55,
+    /** beads per bright spot */
+    flareGhosts: 6,
+    /** spacing of the beads along the line through screen centre */
+    flareSpacing: 0.22,
+    flareAttenuation: 22,
+    flareTintR: 1.0,
+    flareTintG: 0.82,
+    flareTintB: 0.62,
+    /** horizontal anamorphic streak off the same bloom */
+    streakEnabled: false,
+    streakStrength: 0.5,
+    streakThreshold: 0.92,
+    streakScale: 4,
     godRaysEnabled: true,
     /** overall gain. The additive term is bounded by godRayClamp × this. */
     godRayIntensity: 0.55,
@@ -230,6 +251,17 @@ export const postParams = registerParams(
     bloomStrength: { min: 0, max: 2, step: 0.01 },
     bloomRadius: { min: 0, max: 1, step: 0.01 },
     bloomClamp: { min: 1, max: 64, step: 0.5 },
+    flareStrength: { min: 0, max: 3, step: 0.01 },
+    flareThreshold: { min: 0.05, max: 2, step: 0.01 },
+    flareGhosts: { min: 1, max: 12, step: 1 },
+    flareSpacing: { min: 0.02, max: 1, step: 0.01 },
+    flareAttenuation: { min: 1, max: 60, step: 1 },
+    flareTintR: { min: 0, max: 1, step: 0.01 },
+    flareTintG: { min: 0, max: 1, step: 0.01 },
+    flareTintB: { min: 0, max: 1, step: 0.01 },
+    streakStrength: { min: 0, max: 3, step: 0.01 },
+    streakThreshold: { min: 0.05, max: 2, step: 0.01 },
+    streakScale: { min: 0.5, max: 12, step: 0.1 },
     godRayIntensity: { min: 0, max: 3, step: 0.01 },
     godRayDecay: { min: 0.5, max: 1, step: 0.001 },
     godRayThreshold: { min: 0, max: 3, step: 0.01 },

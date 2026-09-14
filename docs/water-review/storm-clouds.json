@@ -1,0 +1,33 @@
+{
+  "date": "2026-09-13",
+  "layout": {
+    "seeds": "1..20",
+    "globalStorm": { "lobes": 5244, "detached": 199, "detachedFraction": 0.03794813119755912, "mainMassFraction": 0.9220061022120518 },
+    "localStorm": { "lobes": 10495, "detached": 829, "detachedFraction": 0.07898999523582659 },
+    "baselineGlobalSeed1": { "lobes": 281, "detached": 176 },
+    "metric": "Connectivity of undisplaced axis-aligned ellipsoid support; not an exact displaced-mesh intersection test."
+  },
+  "capture": {
+    "seed": 1, "cluster": 0, "preset": "storm", "time": 0,
+    "viewport": [1280, 657], "camera": [0, 10, 1500],
+    "target": [-1586.3313504699204, 908.1578758358955, -1628.2224208223897],
+    "scope": "Actual cloud pipeline on a constant background; excludes atmosphere, ocean, and game postprocessing."
+  },
+  "shapeCostBeforeOptimization": {
+    "samples": 40,
+    "globalQueueMs": [1.5899999141693115, 1.684999942779541],
+    "localQueueMs": [1.5199999809265137, 2.0799999237060547],
+    "note": "Original versus revised shape, including cloud composite; different framing from optimization probe."
+  },
+  "optimization": {
+    "variants": ["original mesh and submissions", "batched blur", "indexed mesh and batched blur"],
+    "samples": 60,
+    "globalCpuMs": [0.13499999046325684, 0.13000011444091797, 0.11500000953674316],
+    "globalQueueMs": [1.8849999904632568, 1.7849998474121094, 1.6150000095367432],
+    "localCpuMs": [0.11500000953674316, 0.11500000953674316, 0.11999988555908203],
+    "localQueueMs": [2.200000047683716, 2.1549999713897705, 2],
+    "texture": [768, 432, 4], "type": "RGBA16F", "changedComponents": [0, 0, 0],
+    "defaultVertices": [540, 101], "defaultTriangles": 180,
+    "note": "Paired warmed cloud-core plus blur timings, alternating order; queue completion is not a GPU timestamp or whole-game frame time."
+  }
+}

@@ -91,15 +91,18 @@ export function corridorsOf(course: Course, margin: number): Corridor[] {
       let bz = iz + oz;
       const bl = Math.hypot(bx, bz);
       if (bl < 0.1) {
-        // a hairpin: the apex heading is the in-direction turned 90° toward the mark
-        bx = mk.keepOn === 'port' ? -iz : iz;
-        bz = mk.keepOn === 'port' ? ix : -ix;
+        // a hairpin: the apex heading is the in-direction turned 90° toward the mark (race/types.ts handedness: port of
+        // a heading (x, z) is (z, −x); a port rounding turns to port)
+        bx = mk.keepOn === 'port' ? iz : -iz;
+        bz = mk.keepOn === 'port' ? -ix : ix;
       } else {
         bx /= bl;
         bz /= bl;
       }
-      // starboard of the apex heading; the boat passes on the side AWAY from keepOn
-      const side = mk.keepOn === 'port' ? 1 : -1;
+      // the boat passes on the side AWAY from keepOn: a port rounding keeps the mark to port, so the corridor lies to the
+      // STARBOARD of the apex heading, (−bz, bx) (race/types.ts handedness, §T.197/B112; T196: was mirrored — the page
+      // handed the pilots `aiHandedCourse`)
+      const side = mk.keepOn === 'port' ? -1 : 1;
       const sx = bz * side;
       const sz = -bx * side;
       const r0 = mk.radius + margin;

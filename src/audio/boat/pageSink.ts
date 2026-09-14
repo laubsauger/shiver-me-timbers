@@ -4,8 +4,8 @@
  * and the page swaps `createSilentAudio()` for `createSpeedboatAudioSink(...)` with no other change.
  *
  * What the seam's `BoatAudioFrame` carries today and what it does not (docs/speedboat/audio.md, "hooks"):
- *  - player drive advance/immersion per drive are OPTIONAL extras here; absent ⟹ ground speed and the
- *    scalar `propImmersion` stand in;
+ *  - player drive advance/immersion/rpm per drive are OPTIONAL extras here; absent ⟹ ground speed and the
+ *    scalar `propImmersion` stand in, and the physics engine model integrates rpm locally;
  *  - `slamImpulse` is written per tick by the page; a frame covering two ticks sees only the last one;
  *  - NPCs are not in the frame: pass the fleet (`pose(i)`) and, when it exists, their contact summary.
  */
@@ -15,6 +15,7 @@ import { attachAudioSettings, type SettingsSource } from '../settingsBridge';
 import { rotateVec } from '../../core/quat';
 import type { Quat, Vec3 } from '../../state/simState';
 import { createBoatAudio, type BoatAudio } from './boatAudio';
+import { createRadioBus, type RadioBus } from './radioBus';
 import type { BoatFrameTelemetry } from './mixMath';
 import { boatAudioParams, type BoatAudioParams } from './params';
 import type { VoiceKind } from './engineModel';
@@ -33,6 +34,8 @@ export interface BoatAudioFrameLike {
     /** optional extras: hullWater `driveAdvance` / `driveImmersion` */
     driveAdvance?: ArrayLike<number>;
     driveImmersion?: ArrayLike<number>;
+    /** optional: hullWater `driveRpm` (§T.189) — when present the voice follows the sim's rpm (V77) */
+    driveRpm?: ArrayLike<number>;
   };
   /** the Governor setting (seams.ts `BoatAudioFrame.governor`) */
   governor?: 'off' | 'air' | 'full';
@@ -48,6 +51,15 @@ export interface NpcContactLike {
   wettedArea: number;
   slamImpulse: number;
   propImmersion: number;
+  /** per-drive sim rpm, if the fleet publishes it */
+  driveRpm?: ArrayLike<number>;
+}
+
+/** a published rpm array counts only once the sim has stepped it (hullWater zero-fills before the first evaluate) */
+export function simRpm(a: ArrayLike<number> | undefined): ArrayLike<number> | undefined {
+  if (!a || a.length === 0) return undefined;
+  for (let i = 0; i < a.length; i++) if (a[i] > 0) return a;
+  return undefined;
 }
 
 export interface SpeedboatAudioSinkOptions {
@@ -93,6 +105,7 @@ export function playerTelemetry(f: Readonly<BoatAudioFrameLike>, voice: VoiceKin
     wettedArea: f.contact.wettedArea,
     slamImpulse: f.contact.slamImpulse,
     governor: f.governor,
+    rpm: simRpm(f.contact.driveRpm),
   };
 }
 
@@ -102,16 +115,20 @@ export function createSpeedboatAudioSink(o: SpeedboatAudioSinkOptions): {
   dispose(): void;
   readonly boatAudio: BoatAudio;
   readonly engine: AudioEngine;
+  /** §T.197 race radio bus (radioBus.ts): `setLevel(radioBusLevel(master, radio))`, `call()` per new radio line */
+  readonly radio: RadioBus;
 } {
   const p = o.params ?? boatAudioParams;
   const engine = o.engine ?? createEngine();
   const boatAudio = createBoatAudio(engine, { params: p });
+  const radio = createRadioBus(engine);
   const detach = o.settings ? attachAudioSettings(engine, o.settings) : null;
   const voices = o.npcVoices ?? DEFAULT_NPC_VOICES;
   const frames: BoatFrameTelemetry[] = [];
   return {
     boatAudio,
     engine,
+    radio,
     unlock() {
       void engine.resume();
     },
@@ -133,6 +150,7 @@ export function createSpeedboatAudioSink(o: SpeedboatAudioSinkOptions): {
             propImmersion: c ? c.propImmersion : 0.85,
             wettedArea: c ? c.wettedArea : 5,
             slamImpulse: c ? c.slamImpulse : 0,
+            rpm: simRpm(c?.driveRpm),
           });
         }
       }
@@ -141,6 +159,7 @@ export function createSpeedboatAudioSink(o: SpeedboatAudioSinkOptions): {
     dispose() {
       detach?.();
       boatAudio.dispose();
+      radio.dispose();
       if (!o.engine) engine.dispose();
     },
   };

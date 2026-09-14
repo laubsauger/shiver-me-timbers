@@ -27,8 +27,10 @@
  *
  * SHOALING (§V.72) rides on top of all of that, from the SHARED definition in
  * src/ocean/shoaling.ts rather than from a second implementation: the sea
- * calms over its own shallows on the GPU, so it must calm identically here or
- * the hull floats at open-ocean height over a calmed lagoon. Two things make
+ * grows, breaks and dies over its own shallows on the GPU (§T.190), so it must
+ * do so identically here or the hull floats on a different sea from the one
+ * drawn. Breaking reads the Hs of ALL THREE bands (cascade 2 as statistics
+ * only, see `shoalSigma`), because the GPU's does. Two things make
  * "same formula" insufficient and are therefore load-bearing here —
  *  · the depth is read at the GRID COORD the inversion solves for, not at the
  *    query point, because that grid coord is the vertex the GPU displaced;
@@ -38,9 +40,9 @@
  * differ by its (σ ≈ 0.07 m) contribution exactly as they did before.
  */
 import { SIM_DT } from '../core/loop';
+import { createCpuIFFT2D } from './cpuFft';
 import {
   cascadeBand,
-  cpuButterflyIFFT,
   effectiveChoppiness,
   generateButterfly,
   GRAVITY,
@@ -52,9 +54,16 @@ import {
 } from '../ocean/spectrumRebuild';
 import {
   breakerClip,
-  shoalFactor,
+  shoalBandGains,
   shoalWavenumber,
 } from '../ocean/shoaling';
+import {
+  bandPropagation,
+  SHOAL_ASYMMETRY_BANDS,
+  shoalAsymmetryCoefficients,
+  shoalAsymmetrySample,
+  type AsymmetryBand,
+} from '../ocean/shoalAsymmetry';
 import {
   developmentRatio,
   fetchBandCoefficient,
@@ -73,32 +82,13 @@ import type { SeabedField } from './grounding';
 /** cascades mirrored for buoyancy (see header: cascade 2 excluded) */
 export const MIRRORED_CASCADES = 2;
 
-/** 2D inverse FFT: cpuButterflyIFFT applied row-wise then column-wise. */
+/** Standalone transform helper. Live cascades retain a plan across ticks. */
 export function cpuIFFT2D(
   grid: { re: Float32Array; im: Float32Array },
   butterfly: Float32Array,
   n: number,
 ): void {
-  const lineRe = new Float32Array(n);
-  const lineIm = new Float32Array(n);
-  for (let m = 0; m < n; m++) {
-    lineRe.set(grid.re.subarray(m * n, m * n + n));
-    lineIm.set(grid.im.subarray(m * n, m * n + n));
-    const out = cpuButterflyIFFT({ re: lineRe, im: lineIm }, butterfly, n);
-    grid.re.set(out.re, m * n);
-    grid.im.set(out.im, m * n);
-  }
-  for (let c = 0; c < n; c++) {
-    for (let m = 0; m < n; m++) {
-      lineRe[m] = grid.re[m * n + c];
-      lineIm[m] = grid.im[m * n + c];
-    }
-    const out = cpuButterflyIFFT({ re: lineRe, im: lineIm }, butterfly, n);
-    for (let m = 0; m < n; m++) {
-      grid.re[m * n + c] = out.re[m];
-      grid.im[m * n + c] = out.im[m];
-    }
-  }
+  createCpuIFFT2D(butterfly, n)(grid);
 }
 
 /** central k-space block of a full-res h0 grid (RGBA texels) — see header */
@@ -170,6 +160,7 @@ class MirrorCascade {
   readonly dx: Float32Array;
   readonly dz: Float32Array;
   private readonly n: number;
+  private readonly transform: ReturnType<typeof createCpuIFFT2D>;
   /**
    * The GPU's half-texel, expressed in THIS grid's index units (§B.34).
    *
@@ -200,7 +191,11 @@ class MirrorCascade {
    */
   private readonly cubic: boolean;
   private readonly h0: Float32Array;
+  /** Exact float32 frequencies shared by radial modes; no phase approximation. */
   private readonly omega: Float32Array;
+  private readonly phaseIndex: Uint32Array;
+  private readonly phaseCos: Float64Array;
+  private readonly phaseSin: Float64Array;
   private readonly kxN: Float32Array; // kx/|k|, 0 at DC
   private readonly kzN: Float32Array;
   private readonly kMag: Float32Array;
@@ -227,6 +222,7 @@ class MirrorCascade {
    */
   constructor(index: number, p: OceanParams, redN: number, spectrum: SpectrumData) {
     this.n = redN;
+    this.transform = createCpuIFFT2D(generateButterfly(redN), redN);
     this.domain = p.cascades[index].domain;
     this.halfTexel = redN / (2 * p.resolution);
     const band = cascadeBand(index, p.splitWavelengths);
@@ -243,7 +239,9 @@ class MirrorCascade {
     this.heightVariance = spectrum.heightVariance;
     this.h0 = extractCentralBlock(spectrum.h0, p.resolution, redN);
     const size = redN * redN;
-    this.omega = new Float32Array(size);
+    this.phaseIndex = new Uint32Array(size);
+    const frequencyIndices = new Map<number, number>();
+    const frequencies: number[] = [];
     this.kxN = new Float32Array(size);
     this.kzN = new Float32Array(size);
     this.kMag = new Float32Array(size);
@@ -254,13 +252,24 @@ class MirrorCascade {
         const kz = (2 * Math.PI * (m - redN / 2)) / this.domain;
         const k = Math.hypot(kx, kz);
         const i = m * redN + x;
-        this.omega[i] = Math.sqrt(GRAVITY * k);
+        const omega = Math.fround(Math.sqrt(GRAVITY * k));
+        let phaseIndex = frequencyIndices.get(omega);
+        if (phaseIndex === undefined) {
+          phaseIndex = frequencies.length;
+          frequencyIndices.set(omega, phaseIndex);
+          frequencies.push(omega);
+        }
+        this.phaseIndex[i] = phaseIndex;
         this.kMag[i] = k;
         const safeK = Math.max(k, 1e-6);
         this.kxN[i] = kx / safeK;
         this.kzN[i] = kz / safeK;
       }
     }
+    this.omega = new Float32Array(frequencies);
+    // Keep Math.sin/cos results at JS double precision until spectral packing.
+    this.phaseCos = new Float64Array(frequencies.length);
+    this.phaseSin = new Float64Array(frequencies.length);
     this.height = new Float32Array(size);
     this.head = new Float32Array(size);
     this.dx = new Float32Array(size);
@@ -284,7 +293,6 @@ class MirrorCascade {
    */
   compute(
     time: number,
-    butterfly: Float32Array,
     choppiness: number,
     smithDepth: number,
   ): void {
@@ -294,10 +302,15 @@ class MirrorCascade {
       for (let i = 0; i < n * n; i++) this.atten[i] = Math.exp(-this.kMag[i] * d);
       this.attenDepth = smithDepth;
     }
-    for (let i = 0; i < n * n; i++) {
+    for (let i = 0; i < this.omega.length; i++) {
       const phase = this.omega[i] * time;
-      const c = Math.cos(phase);
-      const s = Math.sin(phase);
+      this.phaseCos[i] = Math.cos(phase);
+      this.phaseSin[i] = Math.sin(phase);
+    }
+    for (let i = 0; i < n * n; i++) {
+      const phaseIndex = this.phaseIndex[i];
+      const c = this.phaseCos[phaseIndex];
+      const s = this.phaseSin[phaseIndex];
       const r0 = this.h0[i * 4];
       const i0 = this.h0[i * 4 + 1];
       const r1 = this.h0[i * 4 + 2];
@@ -314,8 +327,8 @@ class MirrorCascade {
       this.b.re[i] = -hIm * g;
       this.b.im[i] = hRe * g;
     }
-    cpuIFFT2D(this.a, butterfly, n);
-    cpuIFFT2D(this.b, butterfly, n);
+    this.transform(this.a);
+    this.transform(this.b);
     for (let m = 0; m < n; m++) {
       for (let x = 0; x < n; x++) {
         const i = m * n + x;
@@ -491,7 +504,7 @@ export interface OceanHeightField {
 }
 
 /**
- * WHAT IS LEFT OF THE MIRROR'S OWN REBUILD TRIGGER, and why it is one field.
+ * WHAT IS LEFT OF THE MIRROR'S OWN REBUILD TRIGGER: its sampling resolutions.
  *
  * Every SPECTRUM param used to be listed here, duplicating the GPU's
  * `spectrumSignature` — two lists that had to be kept identical by hand, and
@@ -500,16 +513,15 @@ export interface OceanHeightField {
  * snapshot, i.e. on the same statement the GPU adopts it, so "the same
  * spectrum params" is a pointer rather than a string comparison (§V.8).
  *
- * `mirrorResolution` is the one rebuild-shaped input the GPU does not have —
- * it is the mirror's own grid size — so it keeps a trigger of its own.
+ * The base and chop mirror resolutions are independent of the GPU grid,
+ * so changes to either must rebuild the mirror's sampling grids.
  */
 function mirrorSignature(seaP: SeaPhysicsParams): string {
-  return String(seaP.mirrorResolution);
+  return `${seaP.mirrorResolution}/${seaP.mirrorChopResolution}`;
 }
 
 export class CpuOcean {
   private cascades: MirrorCascade[];
-  private butterfly: Float32Array;
   private readonly oceanP: OceanParams;
   private readonly seaP: SeaPhysicsParams;
   private signature: string;
@@ -552,6 +564,30 @@ export class CpuOcean {
    * many times per tick by the hull stations.
    */
   private shoalK: number[] = [];
+  /**
+   * §T.190 per-band spectral height RMS (m) for EVERY cascade of the adopted
+   * spectrum — including the one this mirror does not draw. Depth-limited
+   * breaking caps the whole sea's Hs at a point, so the band the hull cannot
+   * feel still counts toward whether the water is breaking (the GPU sums all
+   * three; a two-band Hs here would break later than the drawn sea).
+   */
+  private shoalSigma: number[] = [];
+  /** scratch for `bandGains` → `shoalBandGains` — the hot path must not allocate */
+  private readonly shoalGains: number[] = [];
+  /**
+   * §T.193 shoaling asymmetry (src/ocean/shoalAsymmetry.ts): per mirrored band
+   * its mean k, propagation direction and directional moments, plus the Smith
+   * factor of its second harmonic e^(−2k̄T), refreshed with `shoalK`. The rest
+   * is hot-path scratch.
+   */
+  private asymBands: AsymmetryBand[] = [];
+  private asymHead: number[] = [];
+  private readonly asymSkew: number[] = [0, 0];
+  private readonly asymTilt: number[] = [0, 0];
+  private readonly asymRatio: number[] = [0, 0];
+  private readonly asymEta: number[] = [0, 0];
+  private readonly asymProj: number[] = [0, 0];
+  private readonly asymDy: number[] = [0, 0];
   /** open-ocean water depth (m) reported by the bed away from any island */
   private openDepth = 0;
   /**
@@ -593,7 +629,6 @@ export class CpuOcean {
     this.scheduler = scheduler ?? new SpectrumScheduler(seed, oceanP);
     this.adopted = this.scheduler.current;
     this.jacobianRms = this.adopted.jacobianRms;
-    this.butterfly = generateButterfly(seaP.mirrorResolution);
     this.cascades = [];
     this.buildCascades();
     this.refreshShoal();
@@ -607,13 +642,14 @@ export class CpuOcean {
    * 107.7 ms this used to cost (§B.51).
    */
   private buildCascades(): void {
-    const n = this.seaP.mirrorResolution;
     const snap = this.adopted;
     this.cascades = [];
     for (let i = 0; i < MIRRORED_CASCADES; i++) {
       // snap.params, not this.oceanP: an amortised build spans ticks and a
       // preset lerp moves the live singleton on every one of them, so the band
       // and the domain must come from the params the h0 was built with
+      const n = i === 0 ? this.seaP.mirrorResolution
+        : Math.max(this.seaP.mirrorResolution, this.seaP.mirrorChopResolution);
       this.cascades.push(new MirrorCascade(i, snap.params, n, snap.cascades[i]));
     }
     this.jacobianRms = snap.jacobianRms;
@@ -663,18 +699,33 @@ export class CpuOcean {
 
   /** per-cascade shoaling wavenumbers — see `shoalK` */
   private refreshShoal(): void {
-    this.shoalK = this.cascades.map((c) =>
+    // §T.190: every band of the ADOPTED spectrum (same SpectrumData the GPU's
+    // OceanCascade copies), not only the mirrored ones — see `shoalSigma`
+    const bands = this.adopted.cascades;
+    this.shoalK = bands.map((c) =>
       shoalWavenumber(c.meanWavenumber, this.openDepth, this.oceanP),
     );
+    this.shoalSigma = bands.map((c) => Math.sqrt(Math.max(c.heightVariance, 0)));
+    // §T.193: the same SpectrumData the GPU's uniforms read (moments cached per h0)
+    const smith = this.smithDepth();
+    this.asymBands = [];
+    this.asymHead = [];
+    for (let i = 0; i < SHOAL_ASYMMETRY_BANDS; i++) {
+      this.asymBands.push({ kMean: bands[i].meanWavenumber, ...bandPropagation(bands[i].h0) });
+      this.asymHead.push(Math.exp(-2 * bands[i].meanWavenumber * smith));
+    }
   }
 
   /** per-cascade fetch coefficients — see `fetchC` */
   private refreshFetch(): void {
     const peakK = fullyDevelopedPeakWavenumber(this.oceanP.windSpeed);
-    this.fetchC = this.cascades.map((c) =>
+    // §T.190: all adopted bands, so breaking sees the undrawn cascade's fetch
+    // and shadow too (the mirrored ones are the same SpectrumData, same values)
+    const bands = this.adopted.cascades;
+    this.fetchC = bands.map((c) =>
       fetchBandCoefficient(peakK, c.meanWavenumber, this.oceanP),
     );
-    this.swellShare = this.cascades.map((c, i) =>
+    this.swellShare = bands.map((c, i) =>
       swellBandShare(this.oceanP, i, c.heightVariance),
     );
   }
@@ -694,7 +745,7 @@ export class CpuOcean {
    */
   private bandGains(qx: number, qz: number): number[] {
     const g = this.gains;
-    const n = this.cascades.length;
+    const n = this.adopted.cascades.length;
     if (!this.fetch) {
       for (let i = 0; i < n; i++) g[i] = 1;
       return g;
@@ -714,6 +765,19 @@ export class CpuOcean {
         swellShadowGain(this.swellShare[i], k);
     }
     return g;
+  }
+
+  /**
+   * §T.190 THE ONE PER-BAND GAIN at a GRID coord: fetch × shadow (above), then
+   * shoaling growth and depth-limited breaking through `shoalBandGains` — the
+   * same function the vertex shader's TSL twin is, over ALL adopted bands.
+   * No bed ⟹ the external gains untouched (bit-identical to pre-shoaling).
+   * `depth` is the caller's `depthAt(q)`, so it is read once per lookup.
+   */
+  private shoaledGains(qx: number, qz: number, depth: number): number[] {
+    const ext = this.bandGains(qx, qz);
+    if (!this.seabed) return ext;
+    return shoalBandGains(depth, this.shoalK, this.shoalSigma, ext, this.oceanP, this.shoalGains);
   }
 
   /**
@@ -774,7 +838,6 @@ export class CpuOcean {
     const resized = sig !== this.signature;
     if (resized) {
       this.signature = sig;
-      this.butterfly = generateButterfly(this.seaP.mirrorResolution);
     }
     if (resized || this.scheduler.current !== this.adopted) {
       this.adopted = this.scheduler.current;
@@ -798,7 +861,7 @@ export class CpuOcean {
     const lambda = this.effectiveChoppiness();
     const depth = this.smithDepth();
     for (const c of this.cascades) {
-      c.compute(time, this.butterfly, lambda, depth);
+      c.compute(time, lambda, depth);
     }
     this.gridTime = time;
   }
@@ -862,12 +925,11 @@ export class CpuOcean {
       // unchanged — the vertex shader scales the WHOLE displacement, horizontal
       // included, by shoal·fetch, so the mirror must solve for the same point
       // or the two sides are inverting different equations.
-      const depth = this.depthAt(qx, qz);
-      const fetchG = this.bandGains(qx, qz);
+      // §T.190: growth and breaking ride the same product, horizontal included
+      const gain = this.shoaledGains(qx, qz, this.depthAt(qx, qz));
       for (let i = 0; i < this.cascades.length; i++) {
         const c = this.cascades[i];
-        const shoal = this.seabed ? shoalFactor(this.shoalK[i], depth) : 1;
-        const g = shoal * fetchG[i];
+        const g = gain[i];
         dx += c.sample(c.dx, qx, qz) * g;
         dz += c.sample(c.dz, qx, qz) * g;
       }
@@ -879,8 +941,8 @@ export class CpuOcean {
   }
 
   /**
-   * Σ over cascades of a grid, each band scaled by its own shoaling factor,
-   * then depth-limited (§V.72). ONE place, because `heightAt` and
+   * Σ over cascades of a grid, each band scaled by its own shoaling gain
+   * (growth × fetch × shadow × breaking, §T.190), then column-guarded (§V.72). ONE place, because `heightAt` and
    * `pressureHeadAt` must not be able to shoal differently — and because this
    * is the expression that has to stay in step with `positionNode` in
    * surfaceMaterial.ts.
@@ -902,18 +964,52 @@ export class CpuOcean {
       return sum;
     }
     const depth = this.depthAt(qx, qz);
-    const fetchG = this.bandGains(qx, qz);
+    const gain = this.shoaledGains(qx, qz, depth);
     let sum = 0;
     for (let i = 0; i < this.cascades.length; i++) {
       const c = this.cascades[i];
-      const shoal = this.seabed ? shoalFactor(this.shoalK[i], depth) : 1;
-      sum += c.sample(grid(c), qx, qz) * shoal * fetchG[i];
+      sum += c.sample(grid(c), qx, qz) * gain[i];
+    }
+    // §T.193 the shoaling second harmonic, before the column guard as on the
+    // GPU. The pressure head takes each band's harmonic at its own Smith
+    // depth, e^(−2k̄T) (it is a wave of twice the band's wavenumber).
+    if (this.seabed) {
+      const dy = this.asymmetryAt(qx, qz, depth, gain);
+      if (dy !== null) {
+        const head = grid(this.cascades[0]) === this.cascades[0].head;
+        for (let i = 0; i < SHOAL_ASYMMETRY_BANDS; i++) sum += dy[i] * (head ? this.asymHead[i] : 1);
+      }
     }
     // §V.73 is a SPECTRUM statement and term B is a WATER COLUMN statement, so
     // the clip still keys on the bed alone. With no bed there is no column to
     // limit against and `depthAt` reports 0 — clipping to that would flatten a
     // fetch-only scene to nothing.
     return this.seabed ? breakerClip(sum, depth, this.oceanP) : sum;
+  }
+
+  /**
+   * §T.193 each mirrored band's shoaling second harmonic (m) at GRID coord q,
+   * from src/ocean/shoalAsymmetry.ts, the functions the vertex shader's twin
+   * is. `gain` is the all-band `shoaledGains` at q. Null where every band is
+   * deep (the gate is exactly 0), so open water samples nothing extra and sums
+   * bit-identically.
+   */
+  private asymmetryAt(qx: number, qz: number, depth: number, gain: readonly number[]): number[] | null {
+    if (!shoalAsymmetryCoefficients(
+      depth, this.shoalK, this.asymBands, this.shoalSigma, gain, this.oceanP,
+      this.asymSkew, this.asymTilt, this.asymRatio,
+    )) return null;
+    for (let i = 0; i < SHOAL_ASYMMETRY_BANDS; i++) {
+      const c = this.cascades[i];
+      const b = this.asymBands[i];
+      this.asymEta[i] = c.sample(c.height, qx, qz) * gain[i];
+      this.asymProj[i] = (c.sample(c.dx, qx, qz) * b.x + c.sample(c.dz, qx, qz) * b.z) * gain[i];
+    }
+    shoalAsymmetrySample(
+      this.asymEta, this.asymProj, this.asymBands, this.asymSkew, this.asymTilt, this.asymRatio,
+      this.effectiveChoppiness(), this.asymDy,
+    );
+    return this.asymDy;
   }
 
   private readonly q: [number, number] = [0, 0];

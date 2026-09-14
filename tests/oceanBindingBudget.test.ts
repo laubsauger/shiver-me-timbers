@@ -120,6 +120,7 @@ import { describe, expect, it } from 'vitest';
 import appSource from '../src/core/app.ts?raw';
 import surfaceMaterialSource from '../src/ocean/surfaceMaterial.ts?raw';
 import foamSource from '../src/foam/index.ts?raw';
+import shoreFoamSource from '../src/foam/shoreFoam.ts?raw';
 import foamShadingSource from '../src/foam/foamShading.ts?raw';
 import flowFoamSource from '../src/flowfoam/index.ts?raw';
 import seabedSource from '../src/island/seabed.ts?raw';
@@ -214,7 +215,7 @@ const LEDGER: readonly LedgerEntry[] = [
   {
     file: 'src/foam/index.ts',
     source: foamSource,
-    sites: 2,
+    sites: 3,
     // shadingNode: lane.front for all 3 cascades + lane.coarse on cascades 0
     // AND 1. The second filtered tier is the ONE sampler reclaimed by
     // src/sky/uncoloredShadowNode.ts, spent deliberately and measured first:
@@ -231,7 +232,17 @@ const LEDGER: readonly LedgerEntry[] = [
     fragmentSamplers: 5,
     vertexTextures: 0,
     vertexSamplers: 0,
-    why: 'texture(lane.front) × 3 lanes + texture(lane.coarse) × 2 lanes',
+    why: 'texture(lane.front) × 3 lanes + texture(lane.coarse) × 2 lanes; shore.sample reuses lane 0 and its tier',
+  },
+  {
+    file: 'src/foam/shoreFoam.ts',
+    source: shoreFoamSource,
+    sites: 4,
+    fragmentTextures: 0,
+    fragmentSamplers: 0,
+    vertexTextures: 0,
+    vertexSamplers: 0,
+    why: 'shore samples reuse foam lane 0 front/coarse UUIDs; displacement and history-load sites are compute-only',
   },
   {
     file: 'src/foam/foamShading.ts',

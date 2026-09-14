@@ -191,3 +191,33 @@ export function swissTurbulence2(
   }
   return sum.div(norm.max(1e-6));
 }
+
+/**
+ * §T.194: 2D CELLULAR (Worley) noise — vec3(F1, F2, id). `id` ∈ [0, 1) is a
+ * hash of the nearest feature point's lattice cell, so a caller can give each
+ * cell its own material (rubble fragments) and draw a crack where F2 − F1 is
+ * small (granite fracture networks, the gaps between slabs). 3×3 neighbourhood,
+ * jitter 0.9 of a cell. The EDGE a caller builds on F2 − F1 is its own to
+ * band-limit (it is a distance in cell units, differentiable like any coord).
+ */
+export const cellular2 = /*@__PURE__*/ Fn(([p]: any[]) => {
+  const i = p.floor();
+  // @band-limited-elsewhere: lattice-cell fraction inside the Worley search; the distances it yields are continuous
+  const f = p.fract();
+  const f1 = float(8).toVar();
+  const f2 = float(8).toVar();
+  const id = float(0).toVar();
+  for (let y = -1; y <= 1; y++) {
+    for (let x = -1; x <= 1; x++) {
+      const o = vec2(x, y);
+      const c = i.add(o);
+      const jitter = vec2(hash2(c), hash2(c.add(vec2(17.3, 5.9)))).mul(0.9).add(0.05);
+      const d = o.add(jitter).sub(f).length();
+      const nearer = d.lessThan(f1);
+      f2.assign(nearer.select(f1, d.min(f2)));
+      id.assign(nearer.select(hash2(c.add(vec2(3.7, 11.1))), id));
+      f1.assign(d.min(f1));
+    }
+  }
+  return vec3(f1, f2, id);
+});

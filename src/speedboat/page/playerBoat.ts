@@ -27,6 +27,8 @@ import { propWashFromHullWater } from '../../wake/propWashHullWater';
 import { hullWaterSamples } from '../../wake/stationSources';
 import type { HydroSample } from '../../wake/wakeSolverMath';
 import type { HullProxy } from '../hullMesh';
+import { unitTrimToRad } from '../../sim-worker/stepCore';
+import { SubstepPositions } from '../../sim-worker/trace';
 import type { BoatControls } from './seams';
 
 export interface PlayerBoatDeps {
@@ -42,6 +44,11 @@ export interface PlayerBoat {
   readonly state: ShipState;
   /** substeps the last tick ran */
   readonly substeps: number;
+  /**
+   * §V107/§T.191: the substep END positions of the last tick, captured from the rigid6 force callback by the SAME
+   * `sim-worker/trace` helper the step core's trace uses for every rival (§V110: measured the same way).
+   */
+  readonly positions: SubstepPositions;
   /**
    * FIXED TICK: this tick's controls → one rigid6 step, the sea read at `time` = `SimState.time`
    * AFTER the tick's increment, the same float64 the mirror was updated to and the NPC fleet is
@@ -64,6 +71,7 @@ export function createPlayerBoat(d: PlayerBoatDeps, state: ShipState): PlayerBoa
   let substeps = 0;
   let stepped = false;
   const sampler = (x: number, z: number): number => d.pressureHeadAt(x, z, time);
+  const positions = new SubstepPositions();
   const force = (s: Readonly<Rigid6State>, h: number, out: Rigid6Load): void => hw.evaluate(s, h, out);
   const lock = hull.drives[0]?.maxSteerRad ?? 0;
 
@@ -74,13 +82,14 @@ export function createPlayerBoat(d: PlayerBoatDeps, state: ShipState): PlayerBoa
     get substeps() {
       return substeps;
     },
+    positions,
     tick(controls, t, dt = SIM_DT) {
       time = t;
       const steer = controls.steer < -1 ? -1 : controls.steer > 1 ? 1 : controls.steer;
-      hw.setControls(steer * lock, controls.throttle);
+      hw.setControls(steer * lock, controls.throttle, unitTrimToRad(controls.trim));
       hw.samplePatch(sampler, state, dt);
       substeps = planingSubsteps(hw, state, dt);
-      stepRigid6(state, hull, dt, substeps, force, memory);
+      stepRigid6(state, hull, dt, substeps, positions.begin(force), memory);
       stepped = true;
     },
     place(pose) {

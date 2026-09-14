@@ -78,6 +78,22 @@ export class MenuNav {
     if (this.attached) return;
     this.attached = true;
     window.addEventListener('keydown', this.onKey, true);
+    this.primePad();
+  }
+
+  /**
+   * §T.201: take the pad's CURRENT buttons as already seen. The race opens the pause on a Start edge; with a stale
+   * (all-up) record, the next frame's `poll` read that same held Start as a fresh press, which is Back = Resume, and the
+   * pause closed one frame after it opened. The same for A confirming the boat select into a screen that reads A.
+   */
+  private primePad(): void {
+    const pads = typeof navigator !== 'undefined' && navigator.getGamepads ? navigator.getGamepads() : null;
+    this.prevButtons.fill(0);
+    if (!pads) return;
+    let pad: Gamepad | null = null;
+    for (let i = 0; i < pads.length; i++) if (pads[i]?.connected) pad = pads[i];
+    if (!pad) return;
+    for (let i = 0; i < this.prevButtons.length; i++) this.prevButtons[i] = pad.buttons[i]?.pressed ? 1 : 0;
   }
 
   detach(): void {
@@ -95,7 +111,10 @@ export class MenuNav {
     else if (k === 'ArrowLeft' || k === 'a' || k === 'A') this.move('left');
     else if (k === 'ArrowRight' || k === 'd' || k === 'D') this.move('right');
     else if (k === 'Enter' || k === ' ') this.activate();
-    else if (k === 'Escape' || k === 'Backspace') this.onBack();
+    else if (k === 'Escape' || k === 'Backspace') {
+      // a held Esc auto-repeats: one press is one layer, never open → close → open at the key-repeat rate
+      if (!e.repeat) this.onBack();
+    }
     else handled = false;
     if (handled) {
       e.preventDefault();

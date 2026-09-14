@@ -38,6 +38,12 @@ export interface PauseState {
   audio: AudioSettings;
   /** race HUD size, one of HUD_SCALES[].scale (RaceHud.setScale) */
   hudScale: number;
+  /** §T.201 graphics quality label (the page's settings store); omitted = no Graphics row */
+  graphics?: string;
+  /** real full-screen state; null/omitted = the browser refuses it, no row */
+  fullscreen?: boolean | null;
+  /** dev overlays (perf HUD, Tweakpane) shown; omitted = no row */
+  devOverlays?: boolean;
 }
 
 export interface PauseCallbacks {
@@ -48,6 +54,13 @@ export interface PauseCallbacks {
   onCamera(c: HudCamera): void;
   onAudio(a: AudioSettings): void;
   onHudScale(scale: number): void;
+  /** §T.201: change boat mid-race (the select's Back returns here) */
+  onBoatSelect?(): void;
+  /** step the graphics quality; the page answers with `setState` */
+  onGraphics?(dir: -1 | 1): void;
+  /** MUST reach the fullscreen request inside this call (a user gesture); the page answers with `setState` */
+  onFullscreen?(): void;
+  onDevOverlays?(): void;
 }
 
 const GOV: GovernorMode[] = ['off', 'air', 'full'];
@@ -95,6 +108,8 @@ export class PauseScreen {
   private readonly audioItems: NavItem[] = [];
   private readonly refresh: (() => void)[] = [];
   private layer: 'menu' | 'assists' | 'audio' = 'menu';
+  private assistsRow!: HTMLElement;
+  private audioRow!: HTMLElement;
 
   constructor(parent: HTMLElement, initial: PauseState, private readonly cb: PauseCallbacks) {
     this.state = structuredClone(initial);
@@ -114,12 +129,28 @@ export class PauseScreen {
     const size = valueRow('HUD size', sizeV);
     const audio = h('button', 'sb-label sbs-item', 'Audio');
     const quit = h('button', 'sb-label sbs-item is-muted', 'Quit to menu');
-    const menu = h('div', 'sbs-menu', resume, restart, gov, assists, cam, size, audio, quit);
+    // §T.201 (USER: "missing a pause menu / ways to go fullscreen and hide the dev stuff"): rows the page may omit
+    const boat = h('button', 'sb-label sbs-item', 'Boat select');
+    const gfxV = txt('');
+    const gfx = valueRow('Graphics', gfxV);
+    const fullV = txt('');
+    const full = valueRow('Full screen', fullV);
+    const devV = txt('');
+    const dev = valueRow('Dev overlays', devV);
+    const menu = h('div', 'sbs-menu', resume, restart,
+      cb.onBoatSelect ? boat : null, gov, assists, cam, size, audio,
+      cb.onGraphics && initial.graphics !== undefined ? gfx : null,
+      cb.onFullscreen && typeof initial.fullscreen === 'boolean' ? full : null,
+      cb.onDevOverlays && initial.devOverlays !== undefined ? dev : null,
+      quit);
     this.refresh.push(() => {
       govV.data = GOV_LABEL[this.state.assists.governor];
       presetV.data = this.state.assists.preset === 'default' ? 'Default' : this.state.assists.preset === 'pro' ? 'Pro' : 'Custom';
       camV.data = CAM_LABEL[this.state.camera];
       sizeV.data = (HUD_SCALES.find((s) => s.scale === this.state.hudScale) ?? HUD_SCALES[1]).label;
+      gfxV.data = this.state.graphics ?? '';
+      fullV.data = this.state.fullscreen ? 'On' : 'Off';
+      devV.data = this.state.devOverlays ? 'Shown' : 'Hidden';
     });
 
     // — side: controls
@@ -180,9 +211,11 @@ export class PauseScreen {
       this.state.assists = { preset: next, ...ASSIST_PRESETS[next] };
       this.emitAssists();
     };
+    const onControls = (): void => this.showSide('controls');
     this.menuItems.push(
-      { el: resume, activate: () => cb.onResume(), focus: () => this.showSide('controls') },
-      { el: restart, activate: () => cb.onRestart(), focus: () => this.showSide('controls') },
+      { el: resume, activate: () => cb.onResume(), focus: onControls },
+      { el: restart, activate: () => cb.onRestart(), focus: onControls },
+      ...(menu.contains(boat) ? [{ el: boat, activate: () => cb.onBoatSelect?.(), focus: onControls }] : []),
       { el: gov, adjust: setGov, focus: () => this.showSide('assists') },
       { el: assists, activate: () => this.enter('assists'), adjust: () => cyclePreset(), focus: () => this.showSide('assists') },
       {
@@ -206,8 +239,13 @@ export class PauseScreen {
         focus: () => this.showSide('controls'),
       },
       { el: audio, activate: () => this.enter('audio'), focus: () => this.showSide('audio') },
-      { el: quit, activate: () => cb.onQuit(), focus: () => this.showSide('controls') },
+      ...(menu.contains(gfx) ? [{ el: gfx, adjust: (d: -1 | 1) => cb.onGraphics?.(d), focus: onControls }] : []),
+      ...(menu.contains(full) ? [{ el: full, activate: () => cb.onFullscreen?.(), adjust: () => cb.onFullscreen?.(), focus: onControls }] : []),
+      ...(menu.contains(dev) ? [{ el: dev, activate: () => cb.onDevOverlays?.(), adjust: () => cb.onDevOverlays?.(), focus: onControls }] : []),
+      { el: quit, activate: () => cb.onQuit(), focus: onControls },
     );
+    this.assistsRow = assists;
+    this.audioRow = audio;
     this.assistItems.push(
       { el: dPreset, adjust: () => cyclePreset(), activate: () => cyclePreset() },
       { el: dGov, adjust: setGov },
@@ -275,8 +313,8 @@ export class PauseScreen {
 
   private enter(layer: 'assists' | 'audio'): void {
     this.layer = layer;
-    this.menuItems[3].el.classList.toggle('is-open', layer === 'assists');
-    this.menuItems[6].el.classList.toggle('is-open', layer === 'audio');
+    this.assistsRow.classList.toggle('is-open', layer === 'assists');
+    this.audioRow.classList.toggle('is-open', layer === 'audio');
     this.showSide(layer);
     this.nav.setItems([...(layer === 'assists' ? this.assistItems : this.audioItems)]);
   }
@@ -289,7 +327,14 @@ export class PauseScreen {
     const from = this.layer;
     this.layer = 'menu';
     for (const it of this.menuItems) it.el.classList.remove('is-open');
-    this.nav.setItems(this.menuItems, from === 'assists' ? 3 : 6);
+    const row = from === 'assists' ? this.assistsRow : this.audioRow;
+    this.nav.setItems(this.menuItems, this.menuItems.findIndex((it) => it.el === row));
+  }
+
+  /** §T.201: the page's answer to a row it owns (graphics quality, real full-screen state, dev overlays) */
+  setState(patch: Partial<Pick<PauseState, 'graphics' | 'fullscreen' | 'devOverlays'>>): void {
+    Object.assign(this.state, patch);
+    this.sync();
   }
 
   open(summary: string, conditions: string, state?: PauseState): void {

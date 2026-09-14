@@ -84,15 +84,17 @@ describe('the rule: reach astern, not λ_T', () => {
     };
     ff.advanceWake(1 / 60);
     ff.update(rec as never, 1 / 60);
-    const groups = computes.filter((c) => Array.isArray(c)) as unknown[][];
+    // the wake's group is the one long array; the accumulation tiers submit [advect, blur] pairs
+    const groups = computes.filter((c) => Array.isArray(c) && c.length > 2) as unknown[][];
     expect(groups.length).toBe(1);
-    expect(groups[0]).toBe(sim.solver.computeNodes);
+    // §T.199: the one group carries the near-hull tier's dispatches after the 448 m tier's
+    expect(groups[0]).toEqual([...sim.solver.computeNodes, ...(sim.near ? sim.near.computeNodes : [])]);
     const stubCanvas = {
       width: 4, height: 4, style: {}, getContext: (): null => null,
       addEventListener: (): void => {}, removeEventListener: (): void => {},
       getRootNode: (): unknown => ({}), setAttribute: (): void => {},
     };
-    const passes = computes.filter((c) => !Array.isArray(c));
+    const passes = computes.flatMap((c) => (Array.isArray(c) ? (c.length > 2 ? [] : c) : [c]));
     expect(passes.length).toBeGreaterThan(0);
     for (const c of passes) {
       const renderer = new THREE.WebGPURenderer({ canvas: stubCanvas as never });

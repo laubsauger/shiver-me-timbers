@@ -18,6 +18,7 @@
  * Constructible without a renderer (lazy GPU touch), same as rockMaterial.
  */
 import * as THREE from 'three/webgpu';
+import { WaterLitMaterial } from './waterLitMaterial';
 import {
   cameraPosition,
   float,
@@ -263,9 +264,11 @@ function applyWaterLighting(
   };
   return {
     color: base.color.mul(mix(vec3(1, 1, 1), w.tint, inWater)),
+    specularAttenuation: mix(vec3(1, 1, 1), w.attenuation, inWater),
     /**
-     * THE FLOOR IS LOAD-BEARING — it is the whole of the fix for "massive blue
-     * reflection on the bottom of the sea from the sun" (backprop pending).
+     * The floor corrects the double-wetness mirror described below.
+     * WaterLitMaterial separately attenuates specular light through the water;
+     * roughness alone cannot remove an unattenuated deep-seabed highlight.
      * `w.roughnessScale` is a water-FILM gloss meant for a dry receiver, but
      * the sand branch has already crossfaded to `sandRoughnessWet` by the time
      * it arrives — `gloss` is 1 everywhere below the waterline — so the two
@@ -834,7 +837,6 @@ export function createSandMaterial(opts: SandMaterialOptions = {}) {
   const uniforms = createSandUniforms(opts);
   const shore = terrainParams.runupEnabled ? createShoreUniforms() : null;
   const nodes = buildSandNodes(uniforms, terrainParams.noiseOctaves, shore);
-  const material = new THREE.MeshStandardNodeMaterial();
   // §V34 water lighting, same contract as terrainBlendMaterial below
   const lit = applyWaterLighting(
     nodes,
@@ -843,6 +845,7 @@ export function createSandMaterial(opts: SandMaterialOptions = {}) {
     uniforms.underwaterRoughFloor,
     nodes.slopeVariance,
   );
+  const material = new WaterLitMaterial(lit.specularAttenuation);
   material.colorNode = lit.color;
   material.roughnessNode = lit.roughness;
   material.emissiveNode = lit.emissive;
@@ -894,6 +897,38 @@ function shoreControls(sand: SandUniforms, shore: ShoreUniforms | null) {
 export type SandMaterialHandle = ReturnType<typeof createSandMaterial>;
 
 /**
+ * §T.194: what a GROUND HOOK sees — the finished pre-lighting ground and the
+ * layer nodes it was blended from. The race kit (src/circuit) uses it to put
+ * bedrock, tidal bands and rubble under the §V34 water lighting, so a rock
+ * under the surface gets the caustics and absorption the sand does.
+ */
+export interface TerrainGroundContext {
+  albedo: any;
+  roughness: any;
+  /** 0 on rock, 1 on sand/cover (the slope blend) */
+  groundW: any;
+  /** 1 in the sand skirt at the water, 0 on the cover above it */
+  shoreW: any;
+  rock: ReturnType<typeof buildRockNodes>;
+  sand: ReturnType<typeof buildSandNodes>;
+  uniforms: {
+    rock: ReturnType<typeof createRockUniforms>;
+    sand: SandUniforms;
+    cover: ReturnType<typeof createCoverUniforms>;
+  };
+}
+
+export interface TerrainBlendHooks {
+  /**
+   * Replace the pre-lighting ground. `emissiveGate` (0..1) scales the sand
+   * sparkle, which is gated on the sand already — a hook that paints rock over
+   * sand passes its own sand weight so the glitter does not ride the rock.
+   * `normal` replaces the shading normal (the sand bedform's is `ctx.sand.reliefNormal`).
+   */
+  ground(ctx: TerrainGroundContext): { albedo: any; roughness: any; emissiveGate?: any; normal?: any };
+}
+
+/**
  * Combined island terrain material for T20: a THREE-layer stack — sand in the
  * shore band, green cover on the ground above it, rock wherever it is too
  * steep to hold either.
@@ -915,6 +950,8 @@ export type SandMaterialHandle = ReturnType<typeof createSandMaterial>;
 export function terrainBlendMaterial(
   rockOpts: RockMaterialOptions = {},
   sandOpts: SandMaterialOptions = {},
+  /** §T.194: absent for every pirate/raft material — the graph below is then the one it always was */
+  hooks?: TerrainBlendHooks,
 ) {
   const p = terrainParams;
   const rock = createRockUniforms(rockOpts);
@@ -960,7 +997,6 @@ export function terrainBlendMaterial(
   // 1 in the sand skirt at the water, 0 on the vegetated ground above it
   const shoreW = coverNodes.shoreWeight;
 
-  const material = new THREE.MeshStandardNodeMaterial();
   // §V10 composition note: the swash foam is painted on the SAND only. Where
   // rock pierces the waterline the foam ring comes from the intersection-foam
   // machinery (flowfoam depth-compare), which is why this is a plain blend and
@@ -970,8 +1006,23 @@ export function terrainBlendMaterial(
   // which slope rule applies is itself blended by the shore band, so the two
   // thresholds hand over exactly where the two materials do
   const groundW = mix(coverW, sandW, shoreW);
-  const albedo = mix(rockNodes.color, groundColor, groundW);
-  const roughness = mix(rockNodes.roughness, groundRough, groundW);
+  const blended = {
+    albedo: mix(rockNodes.color, groundColor, groundW),
+    roughness: mix(rockNodes.roughness, groundRough, groundW),
+  };
+  const hooked = hooks
+    ? hooks.ground({
+        albedo: blended.albedo,
+        roughness: blended.roughness,
+        groundW,
+        shoreW,
+        rock: rockNodes,
+        sand: sandNodes,
+        uniforms: { rock, sand, cover },
+      })
+    : null;
+  const albedo = hooked ? hooked.albedo : blended.albedo;
+  const roughness = hooked ? hooked.roughness : blended.roughness;
 
   // §V34: sun caustics over the shallows, sea bounce-fill, depth absorption.
   // The seabed and beach are the receivers the invariant names, and this is
@@ -989,13 +1040,16 @@ export function terrainBlendMaterial(
       roughness,
       // the sparkle is a SAND phenomenon: gate it on the shore band as well as
       // the slope, or dry glitter appears on a hillside and reads as fireflies
-      emissive: sandNodes.emissive.mul(groundW).mul(shoreW),
+      emissive: hooked?.emissiveGate
+        ? sandNodes.emissive.mul(groundW).mul(shoreW).mul(hooked.emissiveGate)
+        : sandNodes.emissive.mul(groundW).mul(shoreW),
     },
     sandNodes.depthBelow,
     sand.causticsBand,
     sand.underwaterRoughFloor,
     sandNodes.slopeVariance,
   );
+  const material = new WaterLitMaterial(lit.specularAttenuation);
   material.colorNode = lit.color;
   material.roughnessNode = lit.roughness;
   material.emissiveNode = lit.emissive;
@@ -1004,7 +1058,7 @@ export function terrainBlendMaterial(
   // waterline — no `groundW`/`shoreW` weighting is applied (and could not be:
   // those depend on the slope blend, which would make the shading normal
   // depend on itself).
-  material.normalNode = sandNodes.reliefNormal;
+  material.normalNode = hooked?.normal ?? sandNodes.reliefNormal;
   material.metalness = 0;
 
   // §V30/§V43 aerial perspective. The island melts into the atmosphere on the

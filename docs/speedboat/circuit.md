@@ -39,16 +39,16 @@ v = u turned +90°. On a top view the design doc's map reads straight. Every tur
 
 | Element | Sector (measured) | K | Width | What it tests |
 |---|---|---|---|---|
-| S start/finish | sheltered | 0.04 | 72 m | lee of Tower Cay, under the western guy |
-| G1 | sheltered | 0.22 | 70 m | top of the Tower straight |
-| T1 hairpin | – | – | r 28, line 48 | lift, hold trim |
-| G2, G3 The Bar | exposed | 0.95, 1.00 | 110 m | head sea (170°, 171° to the swell), the bar between them |
-| T2 → G4 Pylon Row → T3 | exposed | 1.00 | 80 m | beam sea (90°), between two drowned power lines |
-| G5 Stuff Run | exposed | 1.00 | 90 m | following sea (10°) |
-| G6 Main Street | sheltered | 0.37 | 46 m | down the drowned street between the roofs |
-| G7, G8 lee chicane | sheltered | 0.27, 0.22 | 42, 50 m | lee of Knuckle's rock garden |
+| S start/finish | sheltered | 0.12 | 72 m | top of the Tower straight, lee of Tower Cay, under the western guy; start pontoons |
+| T1 | – | – | r 28, line 48 | port turn onto the Bar run |
+| G1, G2 The Bar | exposed | 0.94, 1.00 | 110 m | head sea (178°, 171° to the swell), the bars between them |
+| T2 → G3 Pylon Row → T3 | exposed | 1.00 | 80 m | beam sea (90°), between two drowned power lines |
+| G4 Stuff Run | exposed | 1.00 | 90 m | following sea (8°) |
+| G5 Main Street | sheltered | 0.38 | 46 m | down the drowned street between the roofs |
+| G6, G7 lee chicane | sheltered | 0.29, 0.24 | 42, 50 m | lee of Knuckle's rock garden |
+| G8 Tower straight | sheltered | 0.11 | 70 m | the run to the line; the rolling start passes through it |
 
-Numbers at seed 1965; `buildTowerReach(seed).gates[i].k` is the live value. **Lap 4100.7 m** (2.2 nm = 4074 m, +0.65 %).
+Numbers at seed 1965; `buildTowerReach(seed).gates[i].k` is the live value. **Lap 4140.5 m** (2.2 nm = 4074 m, +1.6 %; §T202).
 Corridor (±14 m) keeps ≥ 6.2 m of water everywhere but the bar. Bar crest in the corridor: 2.5–2.7 m over seeds 1, 42, 777, 1965, 2100 (sheltered K ≤ 0.38, exposed K ≥ 0.94 on all of them). Main Street: 34 of 35 houses break the surface (ridges up to +2 m, chimneys and parapets higher), steeple and water tower stand 11–17 m proud.
 
 **Sectors are measured.** `sectorOf(K)` splits at 0.65, and tests require every gate DECISIVE (K ≤ 0.5 or ≥ 0.8) on an
@@ -71,6 +71,8 @@ New families, not the pirate or Sierra sites (user). Each authors ONE height fie
 sierra pipeline through a registry hook in `src/island/sierraArchetypes.ts` (`registerSierraFamily`, `kit:` names):
 land goes through sink⁻¹ → coast noise, beach apron, T130 profile, erosion, granite/DG-sand material, rocks and plants;
 water is pulled onto the authored depth by the `shape` hook, so contract depths (bar crest, bench, corridor) are exact.
+§T194: the rock garden is `exact` (the hook pulls its LAND onto the field too, erosion off), and every kit island renders
+through the kit hooks in `src/island/kitIsland.ts` — see §T194 at the end.
 
 | Family | Island | Shape |
 |---|---|---|
@@ -107,7 +109,7 @@ Green's-law growth (Ks > 1) ahead of a depth gradient plus a breaking crest prof
 
 - **§T.188 collisions (src/sea-physics/boatCollide.ts):** statics = `prepareStaticWorld(courseColliders(world))`
   (src/circuit/courseColliders.ts: gate poles flexible r 0.6 with id = element index, buoys r 1.35, stakes r 0.2,
-  pylons r 2.9 y −4→12, mast r 1.6 with its lean y −4→30, guy anchors r 0.7, and Main Street's `roofColliders`).
+  pylons r 3.9 (legs + T194 footings) y −4→12, mast r 1.6 with its lean y −4→30, guy anchors r 0.7, and Main Street's `roofColliders`).
   `BedHeight` = `createRaceSeabed(world.seabedAt, world.bars).heightAt` (sandbar pass-through; boulders are in the bed).
 - **sim-worker (docs/speedboat/sim-worker.md blockers 1–2):** the NPC mirrors float on open-ocean depth with no fetch/
   shadow. They need the archipelago seabed (1024² half-float, `seabed.texture` data + origin/size) and the fetch field
@@ -117,7 +119,7 @@ Green's-law growth (Ks > 1) ahead of a depth gradient plus a breaking crest prof
   today via `world.gates`), `Course.hazards` (bar crest polylines), `Course.swellDirection` (the reference bearing the
   sectors were measured on).
 - **speedboat page (`page/course.ts`):** `CourseHook` builds `course` before the sea; Tower Reach needs two phases (sites →
-  sea → course). Grid slots: the pace line's last 700 m ends on the start gate midpoint.
+  sea → course). Grid slots: the pace line is an 880 m straight run-in ending on the start gate midpoint (§T202).
 - **§V95 duplication to fold:** `courseFurniture.ts` has its own 10-line GLTF + KTX2 + meshopt loader setup, the same as
   `speedboat/assets/boatModel.ts`'s; that setup belongs in `core/` for both.
 - **flowfoam:** furniture InstancedMeshes straddling the water are tagged `userData.foamTarget` (`furniture.foamTargets`);
@@ -156,7 +158,7 @@ Tri/draw/MB per asset: printed by the build summary; the shipped numbers are in 
   physics pass-through, minimap, determinism, hook; asset contract, checker mutations, placements vs geometry (roofs
   poke, stakes reach the floor, cables ≥ 8 m, guys leg→anchor and ≥ 12 m over the course, lamp board faces the grid).
 - CPU renders: `--render <dir>` on the build (hero, detail, clay, LOD strip per asset).
-- Browser: `circuit-preview.html?cam=overhead|start|bar|pylons|street|tower` (keys 1–6), `window.__circuit`.
+- Browser: `circuit-preview.html?cam=overhead|start|bar|pylons|street|grid|tower&pace=0|1` (keys 1–7), `window.__circuit`.
 
 ## T187b (2026-09-13): packaging fix, rebuilds, review
 
@@ -249,3 +251,170 @@ steel drop to 512² / 1024² via the per-asset `slotTextureScale` (was 14.1 MB w
   is plain brown; the barnacle crust only shows at the base.
 - **Preview presets:** `bar` looks past the stakes at open water and does not show the bar; the ramps need the ocean
   hook (§Ramps over the bar).
+
+## T194 (2026-09-14): race island kit terrain
+
+### Why the kit islands looked untextured
+They WERE on the Sierra granite material. Four things made them smooth orange blobs:
+1. **Sierra shore band + T130 profile.** Everything below `shoreBandHeight + fade` (7.7 m) is DG sand, and T130's
+   profile apron re-grades the bottom 85 % of the peak. The rock garden's 17 m knob came out 12.7 m of sand.
+2. **Dead overrides.** `createRocks` / `createStructures` / sierra cover read the global params, not the island's, so
+   `rockCount/cliffCount/structureSettlements` never applied: the smooth domes in the street shot were pirate cliff
+   masses (and pirate stilt huts stood on Knuckle). Those shore rocks are seated at the waterline over any depth:
+   they are the floating scatter rocks the integration found.
+3. **No meso form.** A 256² grid over 800 m (3.1 m cells) and no sheets, joints or blocks in the field.
+4. **Sierra forest params.** Pines on a sand cay and in the surf.
+
+### What was built
+- **Hooks (`src/island/kitIsland.ts`)**, used for `kit:` archetypes only: resolved island params and a kit
+  `SierraParams` reach rocks, structures, pines and cover; a kit shader pair on the shared atlas; per-island props.
+  Additive options: `terrainBlendMaterial(…, hooks)` (pre-lighting ground), `createSierraTerrainMaterial/RockMaterial(p,
+  { kit })`, `createRocks({ params, sierraParams })`, `createStructures({ params })`, `createGroundCover({ sierraParams })`.
+- **Masks (`kitSurface.ts`)**: bedrock / rubble / swell exposure / strandline per island, from the heightmap (11–22 ms).
+- **Material (`kitMaterial.ts`)**: tidal zonation on granite (algae, barnacle crust + mussels, black lichen band,
+  orange lichen and salt on the exposed side), swash-wet rock, joint/crack relief near the surf; dune sand with a
+  wrack line and shells; rubble ground (soil with concrete/asphalt/brick fragments). All under the §V34 water lighting.
+- **Rock garden field**: roche-moutonnée whalebacks, phase-warped exfoliation sheets, patchy joint clefts, a Worley
+  block field in the ±3 m waterline band. Exact, erosion off.
+- **Props (`kitDecor.ts`)**: fractured convex granite blocks (box clipped by 10–18 planes) on the waterline, capping the
+  boulder field and as erratics (1212 on Knuckle, 3 draws); beachrock slabs and 327 driftwood logs/root wads on the
+  cays; 661 rubble pieces (rebar slabs, cinder blocks, planks) on Main Street. All kept clear of the corridor
+  (half-width + 6 m + own reach) and seated on their own ground (tested).
+- **Plants**: no pines/junipers/manzanita on kit islands; bunchgrass (×2.2 on the cays), little deadfall.
+- **Pylons**: concrete footings under every leg (measured off the GLB, 2.09 m out) with a tide band, rust bleed and
+  weed; tide band on the pylon steel and the roofs (`tideBand`). Pylon collider r 2.9 → 3.9.
+- **Bake**: kit field evaluations memoised per cell (knuckle 713 → 93 ms, bar head 2.5 s → 0.37 s).
+
+### Pirate/raft invariance
+sha256 over pirate (1, 1965) + raft (1965) heightmaps, rock placements, structure plans, vegetation plans and
+terrain-info bytes: GRID `7b3a0c61…`, FULL `c316a5b0…`, identical before and after. `tests/circuitKit.test.ts`
+re-hashes in-process after the kit registers its hooks. No sierra/sand material graph changes without a hook.
+
+### The bar (coordinator scope: "shape the course")
+T193 metrics, CpuOcean, 5 seeds (1965 42 777 1 2100). Neither a course sea preset (period 14–16 s, swell 0.4–0.55,
+calmer wind sea) nor a single reshaped bar (crest 2.0–4.5 m, broad shoal, steep face) makes the bar beat the MAX
+over ~100 exposed points. Those maxima are deep-water (20–36 m) wave-group extremes. Mean bar steepness is no higher
+than deep water, because breaking caps the crest and the FFT cannot shorten wavelength. Shipped: a **three-bar
+system** (outer +115 m, main, inner −115 m; crests 3.4–3.8 m on 6.5–7 m shoals, steep flank facing the arriving swell).
+
+| 5 seeds | base (T187 bar) | three bars |
+|---|---|---|
+| bar p99 face > exposed MAX | 1/5 | 2/5 |
+| bar p99 ramp > exposed MAX | 1/5 | 1/5 |
+| bar p99 face and ramp > exposed p90 | 1/5 | **5/5** |
+| launch pitch, best bar mean > best exposed mean (4 runs) | 0/5 | 2/5 |
+| best single launch, bar > exposed | – | 3/5 |
+
+**Acceptance as written is NOT met.** Meeting it needs the harmonic gain above the fit, or refraction.
+Circuit tests and the T190 shoaling tests pass: breaking only on the bars, crest ≥ 2 m, sectors decisive.
+
+### Swell direction (T193 finding, re-measured)
+CpuOcean, wind sea off: −∂η/∂t·(ŵ·∇η) < 0, and a +ŵ probe 20 m ahead leads by 1.2 s. **The swell travels opposite
+`swellDirection`.** The fetch field's swell shadow also lies on the +ŵ side (K at ±150 m from Tower Cay: +ŵ 0.02,
+−ŵ 0.67), so it shadows the side the swell ARRIVES from. The course frame is left unchanged. Flipping it alone
+scrambles the measured sectors (Tower straight K 1.0, Pylon Row 0.23). **The frame flip must land together with an
+ocean-side fix of the shadow sign.** Until then the bars are head sea on the true travel only by accident of their
+steep face, and G2/G3 "head sea" is geometrically following sea. Kit exposure (splash side) uses the measured travel.
+
+### Open issues and hand-offs
+- **T193 (ocean/caustics WIP):** `waterHeightNode` floods flat dry beaches on the GPU. The Tower Cay beach renders
+  sea-tinted with ripple moiré (`?nokit` shows it too), while CpuOcean is 0 there. Suspect the asymmetry nodes at
+  depth 0.
+- **islandMesh:** a kit heightmap at 320/384/512² drew long shard triangles from the level-0 mesh. It stayed broken
+  with the morph target unmounted and was clean at 256². Root cause not found; kit grids stay at 256.
+- **Perf** (headless, GPU lock held, interleaved A/B, second pair): frame median street 17.1 → 25.1 ms, rock garden
+  19.0 → 24.4 ms, overhead 39.9 → 49.8 ms. The kit terrain shader (two Worley + ~20 noise octaves) is the cost. Draws
+  244 → 212 and tris 3.39 M → 2.96 M. The GPU pass timer is not usable here: bloom passes read above 10 ms. Indicative
+  only; a Worley-free LOD for the terrain beyond ~150 m is the obvious next step.
+- **Verdict:** the rock garden and Main Street now read as granite skerries and a rubble knoll with tide lines, at or
+  above the raft islands. The cays are the weakest (dune sand is still flat; no dune-grass geometry beyond
+  bunchgrass). Not AAA yet.
+- Preview: `?world=sierra` (raft islands under the same sky/post), `?gputimer`, `__circuit.view/setTod/islands`.
+
+## T202 (2026-09-14): the start
+
+User playtest: *"the start is kinda confusing, the fact that we don't really get an indication where the steward is
+with some visual hint, and that we immediately have to pull through the houses before even making course is weird.
+I like the idea of drowned structures but maybe not at second 1."*
+
+### What was wrong
+The lap ran … Stuff Run → Main Street → lee chicane → a 260 m run → S. The page's `clearPaceLine` runs straight back
+from S along its heading: that line pointed at Main Street's knoll, and the grid's last row started ~110 m from it
+(swell frame [322, 544]) with the street's roofs 140 m off. Where the real prop colliders cut that straight short of
+`PACE_STRAIGHT_MIN`, the page fell back to the authored pace line, the lap's last 700 m: through the chicane and past
+the roofs.
+
+### The new start
+- **Lap order:** S → T1 → The Bar G1–G2 → T2 → Pylon Row G3 → T3 → Stuff Run G4 → Main Street G5 → lee chicane G6–G7 →
+  Tower straight G8 → S. The start gate moved one gate up the Tower straight (old G1's spot) and old S became G8, so
+  every gate id after S shifted down by one (old G2 is G1, …). Main Street now starts 70 % of the way round, after
+  the three exposed sectors (tested: no house within 60 m of the line for the first half of the lap).
+- **The run-in:** the straight is leaned (S heading 101° to the swell, G8 pushed east to [540, 40], T1 moved west to
+  [380, −560] so the line leaves S without a starboard wiggle). Straight back from S along its heading is open, deep,
+  sheltered water east of Tower Cay: the grid starts ~880 m out, 317 m from the knoll and > 350 m from every roof, and
+  rolls up through G8 (70 m wide, grid ±7 m) to the line with the tower's lamps ahead of it (5° off the pace heading).
+- **Authored `Course.paceLine`** is now that straight (`PACE_RUN_IN` 880 m, 8 m samples, ends on S's midpoint), not the
+  lap's last 700 m, so the page's fallback is the same clean straight. `clearPaceLine` (page) still trims it to what is
+  clear; on the layout's own furniture it keeps its full 840 m (+ 40 m tail). Page constants unchanged (GRID_ROOM 175,
+  PACE_STRAIGHT_MAX 875, PACE_STRAIGHT_MIN 425).
+- **Kept:** 9 gates + 3 marks, lap 4140.5 m (+1.6 %), sectors measured and decisive (sheltered S, G5–G8; exposed G1–G4),
+  head/beam/following sea on G1–G2/G3/G4, the three-bar jump sector and its crest depths, corridor ≥ 5.58 m outside
+  the bars, the tower 80 m east of S with its guy over the start straight.
+- **Fragile test, flagged (Rule 8):** `tests/shoalingCircuit.test.ts` samples the reference line every 20 m from S, so
+  its bar maxima depend on where S sits: over a 20 m slide of S the bar's peak breaking intensity swings 0.27–0.34
+  against a 0.30 bar, and the §T.193 p99 ramp gain 1.09–1.29 against 1.2. S at [455, −254] passes all six (0.318,
+  1.27); [455, −250] did not. The test's owner should sample the bar finer (e.g. 2 m inside the bar zones) so a layout
+  move cannot flip it.
+
+### Start pontoons and the pace boat (src/circuit/startMarkers.ts, in-engine meshes, no asset build)
+- `CourseFurnitureData.startPontoons`: a 9 × 3 m signal-orange pontoon outboard of each start pole (4 m gap), moored
+  14 m short of the line, with two chequer flags and a lamp board facing the approaching boats. The board repeats the
+  tower's start lamps (red 1–5 as `startLamps` counts up, green from `startGreen`), so the line itself counts down.
+  Colliders: the hull box as capsules (`courseColliders`); tested > 34 m from the line, ≥ 4 m of water.
+- **Pace rig:** a 7 m FOLLOW-ME mast aft on the marshal skiff, a 2.6 × 1.7 m chequer board facing the grid under a
+  double-flash amber strobe (HDR, blooms). Drawn by the furniture from a new optional frame field:
+
+```ts
+// CourseFurnitureFrame (src/circuit/courseFurniture.ts)
+pace?: { x: number; z: number; yaw: number } | null;   // yaw 0 = +z; null after green
+```
+
+- **Page hand-off (main-speedboat.ts, not this owner):** one field in the existing call —
+  `furniture.update({ …, pace: boats.pace.display.visible ? boats.pace.display : null })`. Use the smoothed
+  `display` (page/paceBoat), not `RaceState.paceBoat`, so the mast stays on the drawn hull.
+- Preview: `circuit-preview.html?cam=grid` (a parked pace rig 420 m short of S, camera 60 m behind it), `&pace=0` hides it.
+
+### HUD hand-off for T201 (src/speedboat/ui, not this owner)
+The world marks only help once the pace boat is on screen. Needed during `phase` ∈ prestart | rolling | countdown:
+
+```ts
+interface ScreenMarker {
+  /** CSS px in the HUD root; when off screen, the point clamped to a 48 px inset of the viewport edge */
+  x: number;
+  y: number;
+  onScreen: boolean;
+  /** rad, screen space (0 = right, +π/2 = down): the arrow's direction from screen centre when off screen */
+  angle: number;
+  /** metres from the player boat, horizontal */
+  distanceM: number;
+}
+hud.setPaceMarker(m: ScreenMarker | null);   // amber chevron + "PACE 64 m"; null hides (and after green)
+hud.setStartMarker(m: ScreenMarker | null);  // chequer tick + "START 812 m" on S's midpoint; null after green
+```
+
+Page side (raceHudFrame / raceUi): project `(pace.x, water + 8.5, pace.z)` (the strobe) and `(S.mid, 6)` with the
+chase camera; a point behind the camera (view-space z > 0) is off screen with its direction flipped; clamp to the
+inset rectangle along the centre→point ray. Distances from the player's CG. `RaceState.paceBoat` is the source
+(null at green); the start gate is `course.elements[0]`.
+
+### Verification
+- `npx vitest run tests/circuit.test.ts tests/circuitAssets.test.ts tests/circuitKit.test.ts tests/shoalingCircuit.test.ts
+  tests/speedboatCourseClearance.test.ts tests/speedboatCollisionCoverage.test.ts tests/simWorkerWorldData.test.ts`
+  (`--maxWorkers=2 --minWorkers=1`): exit 0, 7 files, 64/64. `npx tsc --noEmit`: 0 errors.
+- One GPU-locked headless look (circuit-preview, 1600×900, 45 s): grid view shows the FOLLOW-ME board, strobe and the
+  tower up the straight; the left start pontoon shows 3 red lamps with `lamps=3`. The western guy anchor sits ~14 m from the
+  left pontoon (reads busy, no clash). Not checked: the live page (needs the one-line `pace` hand-off above).
+- New/changed tests (tests/circuit.test.ts): the pace line is a ≥ 875 m straight ending on S, ±14 m of it keeps
+  ≥ 4 m of water, every point > 250 m from every roof and > 30 m from pylons, stakes, buoys, the tower, its anchors
+  and the pontoons, the tower ahead of the grid; Main Street not within 60 m of the line in the lap's first half;
+  pontoons clear of the corridor; head/beam/following sea on the renumbered gates.

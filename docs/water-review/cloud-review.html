@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+  <body style="margin: 0">
+    <script type="module">
+      import * as THREE from 'three/webgpu';
+      import { createClouds } from '/src/clouds/index.ts';
+      import { generateClusters } from '/src/clouds/cloudCores.ts';
+      import { cloudParams } from '/src/params/clouds.ts';
+      import { weatherPresets } from '/src/weather/presets.ts';
+
+      // Open through Vite. Add ?baseline=1 for the pre-fix storm layout.
+      // Both views use the same seed, camera, lighting, time and target.
+      Object.assign(cloudParams, weatherPresets.storm.clouds);
+      const cluster = generateClusters(1, cloudParams, () => 1)[0];
+      const target = new THREE.Vector3(cluster.x, cluster.y + cluster.radius, cluster.z);
+      if (new URLSearchParams(location.search).get('baseline') === '1') {
+        Object.assign(cloudParams, {
+          stormLobeScale: 0.62,
+          lobeScaleMin: 0.13,
+          lobeScaleMax: 0.24,
+          stormRadiusScale: 2,
+          stormBaseDrop: 0.6,
+        });
+      }
+
+      const renderer = new THREE.WebGPURenderer({ antialias: true });
+      await renderer.init();
+      renderer.setSize(1280, 657);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      document.body.appendChild(renderer.domElement);
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x73879c);
+      const camera = new THREE.PerspectiveCamera(55, 1280 / 657, 1, 30000);
+      camera.position.set(0, 10, 1500);
+      camera.lookAt(target);
+      camera.updateMatrixWorld();
+      const sun = new THREE.Vector3(-0.4, 0.7, 0.5).normalize();
+      const clouds = createClouds({ renderer, camera, seed: 1, stormAt: () => 1 });
+      clouds.attachTo(scene);
+      function draw() {
+        clouds.update(0, sun);
+        renderer.render(scene, camera);
+      }
+      window.review = { renderer, scene, camera, clouds, cloudParams, draw };
+      draw();
+    </script>
+  </body>
+</html>

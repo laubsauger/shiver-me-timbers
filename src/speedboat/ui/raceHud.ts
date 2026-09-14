@@ -496,6 +496,24 @@ export class RaceHud {
     setData(this.slowTag, `Slow-mo ${slowMo.toFixed(2)}×`);
   }
 
+  /**
+   * §T.201 the pause for mouse users (Esc and gamepad Start are the others): a small plane left of the plotter. It
+   * lives in the HUD frame so it hides with the HUD under every screen. Built once; `onClick` is the page's openPause.
+   */
+  addPauseButton(onClick: () => void): HTMLButtonElement {
+    const b = h('button', 'sbp-btn', svgRoot('0 0 12 14', '', s('path', { d: 'M0 0 H4 V14 H0 Z M8 0 H12 V14 H8 Z' })));
+    b.type = 'button';
+    b.tabIndex = -1; // the HUD root is aria-hidden; Esc is the keyboard path
+    b.title = 'Pause (Esc)';
+    b.addEventListener('click', (e) => {
+      e.preventDefault();
+      b.blur();
+      onClick();
+    });
+    this.frame.appendChild(b);
+    return b;
+  }
+
   /** edge: hide the in-race layer while a full screen (pause, results, select) is up */
   setVisible(visible: boolean): void {
     this.root.hidden = !visible;

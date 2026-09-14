@@ -627,7 +627,10 @@ export const cloudParams: CloudParams = registerParams(
     stormAnvilSpread: 1.2,
     stormRadiusScale: 2.0,
     stormBaseDrop: 0.6,
-    stormLobeScale: 0.62,
+    // Keep storm lobes overlapping as the column grows from 0.95 to 2.6
+    // cluster radii. The former 0.62 shrank their support during that growth.
+    // 1.4 is approximately the cube root of that volume increase.
+    stormLobeScale: 1.4,
     stormSunCut: 0.72,
     stormSkyCut: 0.28,
     stormQuantSteps: 24,
@@ -684,7 +687,8 @@ export const cloudParams: CloudParams = registerParams(
     // sharp / quite sharp" actually was: not a steep alpha gradient (measured
     // at 5 screenshot px 10-90, already soft) but dead-straight segments
     // metres long across a cloud's outline. No amount of blur or feathering
-    // fixes a straight line; only more tessellation does. 2 = 320 faces.
+    // fixes a straight line; only more tessellation does. In Three r180,
+    // detail 2 has 180 faces (detail 3 has 320).
     lobeDetail: 2,
 
     // 0.26 -> 0.34: the amplitude alone was never the problem (see the frame

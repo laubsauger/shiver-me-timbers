@@ -98,7 +98,9 @@ def _build(A):
     Mt = F.matrix(tu, tv, 0.006)
     case = kit.box(0.29, 0.21, 0.028, center=(0, 0, 0.014))
     for (cx, cy) in ((0.13, 0.09), (-0.13, 0.09), (0.13, -0.09), (-0.13, -0.09)):
-        case.extend(kit.box(0.05, 0.05, 0.036, center=(cx, cy, 0.016)))
+        # §V98: corner bumpers sink 3 mm into the face panel; at 2 mm their bevelled backs sat exactly on the §V98 plane
+        # tolerance from the case back and flipped to a z-fight with the T196 vcg shift (T200 build)
+        case.extend(kit.box(0.05, 0.05, 0.037, center=(cx, cy, 0.0155)))
     pieces.append(Piece('tablet_case', case.transform(Mt), 'M_Cockpit', 'plastic_rugged', max_lod=1, bevel=(0.006, 1), smooth=35, tier='cockpit'))
     scr = kit.box(0.235, 0.155, 0.004, center=(0, 0, 0.029)).transform(Mt)
     pieces.append(Piece('tablet_screen', scr, 'M_Cockpit', 'tablet_screen', max_lod=1, smooth=35, tier='cockpit',

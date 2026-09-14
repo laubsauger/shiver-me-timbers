@@ -41,8 +41,9 @@ import {
   simplifyClosed,
   tangentAt,
 } from './courseLine';
-import { kitOverrides, polylineDistance, registerKitIsland, type KitSpec } from './kitFamilies';
+import { cayBars, kitOverrides, polylineDistance, registerKitIsland, type KitSpec } from './kitFamilies';
 import { createShelterField, sectorOf } from './shelter';
+import { registerKitRenderInfo } from './kitRender';
 import {
   ELEMENTS,
   ISLANDS,
@@ -90,6 +91,13 @@ export const CORRIDOR_HALF_WIDTH = 14;
  * than any static margin.
  */
 export const BAR_MIN_CREST_DEPTH = 2.0;
+/**
+ * §T.202 the authored pace line's length (m): the page's longest wanted clear straight (page/course.ts
+ * PACE_STRAIGHT_MAX = grid room 175 + a 700 m pace run) plus sampling slack. The page shortens it to what is clear.
+ */
+export const PACE_RUN_IN = 880;
+/** §T.194: metres beyond the corridor half-width a kit prop (block, log, rubble) must keep clear, plus its own size */
+export const KIT_PROP_CORRIDOR_MARGIN = 6;
 
 export interface SwellFrame {
   direction: number;
@@ -124,6 +132,7 @@ function worldSpec(spec: KitSpec, f: SwellFrame): KitSpec {
         crestInland: spec.crestInland * L,
         shelf: spec.shelf * L,
         bar: spec.bar ? { ...spec.bar, crest: spec.bar.crest.map(P), halfWidth: spec.bar.halfWidth * L } : undefined,
+        bars: spec.bars?.map((b) => ({ ...b, crest: b.crest.map(P), halfWidth: b.halfWidth * L })),
       };
     case 'rockGarden': {
       const g = P([spec.garden.x, spec.garden.z]);
@@ -163,9 +172,35 @@ export interface TowerReachSites {
   specs: KitSpec[];
 }
 
+/**
+ * The lap's reference loop (world frame, 2 m spacing, index 0 at the start
+ * gate) and the element anchors. Layout only — no terrain — so the kit's props
+ * can keep clear of the corridor before the course itself is built (§T.194).
+ */
+export function referenceLoop(frame: SwellFrame): { anchor(i: number): Vec2; loop: Vec2[] } {
+  const W = (p: UV): Vec2 => frame.toWorld(p);
+  const n = ELEMENTS.length;
+  const anchor = (i: number): Vec2 => {
+    const e = ELEMENTS[(i + n) % n];
+    return W(e.kind === 'gate' ? e.gate.at : e.mark.at);
+  };
+  const waypoints: Vec2[] = [];
+  for (let i = 0; i < n; i++) {
+    const e = ELEMENTS[i];
+    if (e.kind === 'gate') waypoints.push(anchor(i));
+    else waypoints.push(...markArc(anchor(i - 1), anchor(i), anchor(i + 1), e.mark.clearance, e.mark.keepOn, 6));
+  }
+  const dense = resampleClosed(catmullRomClosed(waypoints, 14), 2);
+  // index 0 at the start gate
+  const s0 = nearestIndex(dense, anchor(0));
+  return { anchor, loop: [...dense.slice(s0), ...dense.slice(0, s0)] };
+}
+
 /** Register the kit families for this seed and return the site list (cheap, no terrain baked). */
 export function towerReachSites(seed: number): TowerReachSites {
   const frame = swellFrame();
+  // the corridor the kit's props keep clear of, resampled coarser (8 m) for the placement tests
+  const corridorLine = resampleClosed(referenceLoop(frame).loop, 8);
   const sites: IslandSite[] = [];
   const ids: string[] = [];
   const specs: KitSpec[] = [];
@@ -173,6 +208,18 @@ export function towerReachSites(seed: number): TowerReachSites {
     const siteSeed = seed + SITE_SEED_STRIDE * (i + 1);
     const spec = worldSpec(isl.spec, frame);
     const name = registerKitIsland(`kit:${TOWER_REACH_ID}/${seed}/${isl.id}` as KitArchetypeName, spec, siteSeed);
+    // the swell's MEASURED travel is opposite `swellDirection` (T193 finding, re-measured on
+    // CpuOcean for T194: −∂η/∂t·(ŵ·∇η) < 0 and a +ŵ probe LEADS by 1.2 s over 20 m), so the
+    // splash side of a rock faces +ŵ. The course frame itself is unchanged: see circuit.md §T194.
+    const at = frame.toWorld(isl.at);
+    registerKitRenderInfo(name, {
+      kind: spec.kind,
+      spec,
+      swellTravel: [-Math.cos(frame.direction), -Math.sin(frame.direction)],
+      seed: siteSeed,
+      corridor: corridorLine.map((p) => [p[0] - at[0], p[1] - at[1]] as const),
+      corridorClearance: CORRIDOR_HALF_WIDTH + KIT_PROP_CORRIDOR_MARGIN,
+    });
     sites.push({
       seed: siteSeed,
       position: frame.toWorld(isl.at) as [number, number],
@@ -273,8 +320,33 @@ export interface TowerPlacement {
   anchors: Vec2[];
 }
 
+/**
+ * §T.202 START PONTOONS: one moored just short of the start line outboard of each start pole, long axis along the line.
+ * Chequer flags and a lamp board that repeats the tower's start lamps face the boats running up to the line.
+ */
+export const START_PONTOON = {
+  /** along the gate line, beam across it, deck above still water, hull below it (m) */
+  length: 9,
+  beam: 3,
+  freeboard: 0.7,
+  draft: 0.5,
+  /** gap from the pole to the pontoon's near end, and how far short of the line its centre is moored (m) */
+  poleGap: 4,
+  shortOfLine: 14,
+};
+
+export interface StartPontoonPlacement {
+  side: 'left' | 'right';
+  /** pontoon centre on still water, world */
+  at: Vec2;
+  /** asset +Z (flags, lamp board) toward the boats running up to the line; asset X along the line */
+  yaw: number;
+  depth: number;
+}
+
 export interface CourseFurnitureData {
   poles: PolePlacement[];
+  startPontoons: StartPontoonPlacement[];
   buoys: BuoyPlacement[];
   stakes: StakePlacement[];
   pylons: PylonPlacement[];
@@ -356,22 +428,7 @@ export function buildTowerReach(seed: number, opts: BuildTowerReachOptions = {})
   // ── the reference line ────────────────────────────────────────────────────
   const W = (p: UV): Vec2 => frame.toWorld(p);
   const n = ELEMENTS.length;
-  const anchor = (i: number): Vec2 => {
-    const e = ELEMENTS[(i + n) % n];
-    return W(e.kind === 'gate' ? e.gate.at : e.mark.at);
-  };
-  const waypoints: Vec2[] = [];
-  const startWaypoint: number[] = [];
-  for (let i = 0; i < n; i++) {
-    const e = ELEMENTS[i];
-    startWaypoint.push(waypoints.length);
-    if (e.kind === 'gate') waypoints.push(anchor(i));
-    else waypoints.push(...markArc(anchor(i - 1), anchor(i), anchor(i + 1), e.mark.clearance, e.mark.keepOn, 6));
-  }
-  const dense = resampleClosed(catmullRomClosed(waypoints, 14), 2);
-  // index 0 at the start gate
-  const s0 = nearestIndex(dense, anchor(0));
-  const loop = [...dense.slice(s0), ...dense.slice(0, s0)];
+  const { anchor, loop } = referenceLoop(frame);
   const lapLength = closedLength(loop);
 
   // ── gates + marks ─────────────────────────────────────────────────────────
@@ -400,30 +457,35 @@ export function buildTowerReach(seed: number, opts: BuildTowerReachOptions = {})
   }
 
   const referenceLine = resampleClosed(loop, 8).map(rv);
-  // pace line: the last 700 m of the lap, ending ON the start gate midpoint
-  const paceSamples = Math.round(700 / 8);
-  const paceLine = [...referenceLine.slice(referenceLine.length - paceSamples), referenceLine[0]];
+  // §T.202 pace line: the STRAIGHT run-in along the start gate's heading, ending ON its midpoint. The layout points
+  // it into the open lee east of the Tower straight, clear of Main Street, so the grid rolls in open water (tested).
+  const s0 = gates[0];
+  const paceLine: Vec2[] = [];
+  for (let d = PACE_RUN_IN; d > 0; d -= 8) paceLine.push(rv([s0.mid[0] - s0.heading[0] * d, s0.mid[1] - s0.heading[1] * d]));
+  paceLine.push(s0.mid);
 
   // ── bars ──────────────────────────────────────────────────────────────────
   const bars: BarInfo[] = [];
   specs.forEach((spec, i) => {
-    if (spec.kind !== 'sandCay' || !spec.bar) return;
-    const c = sites[i].position;
-    const crest: Vec2[] = spec.bar.crest.map((p) => [p[0] + c[0], p[1] + c[1]]);
-    let crossing: Vec2 | null = null;
-    let corridorCrestDepth = Infinity;
-    for (let j = 0; j < loop.length; j += 1) {
-      const p = loop[j];
-      const b = polylineDistance(crest, p[0], p[1]);
-      if (b.d > spec.bar.halfWidth) continue;
-      if (b.d < 4 && !crossing) crossing = rv(p);
-      const t = tangentAt(loop, j);
-      const pt = portOf(t[0], t[1]);
-      for (const o of [-CORRIDOR_HALF_WIDTH, 0, CORRIDOR_HALF_WIDTH]) {
-        corridorCrestDepth = Math.min(corridorCrestDepth, depthAt([p[0] + pt[0] * o, p[1] + pt[1] * o]));
+    if (spec.kind !== 'sandCay') return;
+    for (const barSpec of cayBars(spec)) {
+      const c = sites[i].position;
+      const crest: Vec2[] = barSpec.crest.map((p) => [p[0] + c[0], p[1] + c[1]]);
+      let crossing: Vec2 | null = null;
+      let corridorCrestDepth = Infinity;
+      for (let j = 0; j < loop.length; j += 1) {
+        const p = loop[j];
+        const b = polylineDistance(crest, p[0], p[1]);
+        if (b.d > barSpec.halfWidth) continue;
+        if (b.d < 4 && !crossing) crossing = rv(p);
+        const t = tangentAt(loop, j);
+        const pt = portOf(t[0], t[1]);
+        for (const o of [-CORRIDOR_HALF_WIDTH, 0, CORRIDOR_HALF_WIDTH]) {
+          corridorCrestDepth = Math.min(corridorCrestDepth, depthAt([p[0] + pt[0] * o, p[1] + pt[1] * o]));
+        }
       }
+      bars.push({ island: ids[i], crest: crest.map(rv), crossing, corridorCrestDepth: r3(corridorCrestDepth), halfWidth: barSpec.halfWidth });
     }
-    bars.push({ island: ids[i], crest: crest.map(rv), crossing, corridorCrestDepth: r3(corridorCrestDepth), halfWidth: spec.bar.halfWidth });
   });
   const inBarZone = (p: Vec2): boolean =>
     bars.some((b) => polylineDistance(b.crest, p[0], p[1]).d <= b.halfWidth);
@@ -458,6 +520,20 @@ export function buildTowerReach(seed: number, opts: BuildTowerReachOptions = {})
       const sgn = side === 'left' ? 1 : -1;
       const at: Vec2 = [g.mid[0] + port[0] * hw * sgn, g.mid[1] + port[1] * hw * sgn];
       poles.push({ gateId: g.id, side, at: rv(at), yaw: r3(yaw), number: g.number, board: side === 'left' ? 'square' : 'triangle', depth: r3(depthAt(at)) });
+    }
+  }
+  const startPontoons: StartPontoonPlacement[] = [];
+  {
+    const g = gates[0];
+    const port = portOf(g.heading[0], g.heading[1]);
+    const out = g.width / 2 + START_PONTOON.poleGap + START_PONTOON.length / 2;
+    for (const side of ['left', 'right'] as const) {
+      const sgn = side === 'left' ? 1 : -1;
+      const at: Vec2 = [
+        g.mid[0] + port[0] * out * sgn - g.heading[0] * START_PONTOON.shortOfLine,
+        g.mid[1] + port[1] * out * sgn - g.heading[1] * START_PONTOON.shortOfLine,
+      ];
+      startPontoons.push({ side, at: rv(at), yaw: r3(Math.atan2(-g.heading[0], -g.heading[1])), depth: r3(depthAt(at)) });
     }
   }
   const buoys: BuoyPlacement[] = [];
@@ -584,6 +660,7 @@ export function buildTowerReach(seed: number, opts: BuildTowerReachOptions = {})
     maxZ = Math.max(maxZ, p[1]);
   };
   referenceLine.forEach(grow);
+  paceLine.forEach(grow);
   land.forEach((r) => r.forEach(grow));
   pylons.forEach((p) => grow(p.at));
   roofs.forEach((p) => grow(p.at));
@@ -610,7 +687,7 @@ export function buildTowerReach(seed: number, opts: BuildTowerReachOptions = {})
     paceLine,
     bounds,
   };
-  const furniture: CourseFurnitureData = { poles, buoys, stakes, pylons, spans, roofs, tower };
+  const furniture: CourseFurnitureData = { poles, startPontoons, buoys, stakes, pylons, spans, roofs, tower };
   const hash = fnv1a(JSON.stringify({ course, furniture, minimap, gates, bars, sites }));
 
   return {

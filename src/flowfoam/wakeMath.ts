@@ -283,6 +283,8 @@ export function wakeTrailCpu(
   p: WakeParams,
   /** LAGGED CURRENT hull speed — wake is only being GENERATED while under way */
   liveSpeed = points[0]?.speed ?? 0,
+  /** Cutwater odometer in metres; zero is the origin for static fixtures. */
+  odometer = 0,
 ): number {
   const n = projectOnTrack(points, wx, wz);
   if (!n.found) return 0;
@@ -395,7 +397,9 @@ export function wakeTrailCpu(
     // --- 4. shed vortex pair: two lobes, alternating port/starboard puffs ---
     const vOff = Math.min(hull.beam * 0.5 * p.vortexOffset + p.vortexSpread * as, aftCap);
     const side = n.lateral < 0 ? Math.PI : 0; // von Kármán: sides π out of phase
-    const phase = (2 * Math.PI * ds) / Math.max(p.vortexSpacing, 1e-6) + side;
+    // ds grows as the hull travels; subtract its odometer so a shed puff
+    // retains its phase at the water it was laid on.
+    const phase = (2 * Math.PI * (ds - odometer)) / Math.max(p.vortexSpacing, 1e-6) + side;
     const puff = 0.5 + 0.5 * Math.sin(phase);
     vortex =
       p.vortexIntensity *
@@ -448,9 +452,10 @@ export function wakeEnvelopeCpu(
   p: WakeParams,
   /** lagged speed driving the bow mound; defaults to the live stem speed */
   moundSpeed = points[0]?.speed ?? 0,
+  odometer = 0,
 ): number {
   const mound = points.length >= 2 ? bowMoundCpu(points[0], wx, wz, moundSpeed, p) : 0;
-  return wakeTrailCpu(points, wx, wz, hull, p, moundSpeed) + mound;
+  return wakeTrailCpu(points, wx, wz, hull, p, moundSpeed, odometer) + mound;
 }
 
 /** cos(45°) = sin(45°) — math constant for the rotated noise lattice */
@@ -487,9 +492,10 @@ export function wakeRateCpu(
   hull: WakeHull,
   p: WakeParams,
   moundSpeed = points[0]?.speed ?? 0,
+  odometer = 0,
 ): number {
   const mound = points.length >= 2 ? bowMoundCpu(points[0], wx, wz, moundSpeed, p) : 0;
-  const trail = wakeTrailCpu(points, wx, wz, hull, p, moundSpeed);
+  const trail = wakeTrailCpu(points, wx, wz, hull, p, moundSpeed, odometer);
   if (trail === 0) return mound;
   // Breakup COARSENS with age: turbulence loses its fine structure as it
   // decays, so old wake must become a soft wash rather than the high-frequency

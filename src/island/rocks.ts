@@ -576,6 +576,7 @@ export function generateRockPlacements(
   seed: number,
   hm: IslandHeightmap,
   p: IslandParams = islandParams,
+  sp: SierraParams = sierraParams,
 ): RockPlacement[] {
   const rng = createRng(seed);
   const placements: RockPlacement[] = [];
@@ -689,8 +690,8 @@ export function generateRockPlacements(
     const squash = p.cliffSquashMin + (p.cliffSquashMax - p.cliffSquashMin) * rng();
     push(x, z, scale, squash, p.cliffEmbed, true);
   }
-  placements.push(...generateInlandPlacements(seed, hm, p));
-  placements.push(...generateMesoPlacements(seed, hm, p));
+  placements.push(...generateInlandPlacements(seed, hm, p, sp));
+  placements.push(...generateMesoPlacements(seed, hm, p, sp));
   return placements;
 }
 
@@ -950,6 +951,13 @@ export interface CreateRocksOptions {
    * builds a graph here.
    */
   atlas?: SierraAtlas;
+  /**
+   * §T.194: the island's OWN params for placement and shape. Absent (every
+   * pirate and raft island) = the live globals, as before. A `kit:` island
+   * passes its resolved params so its rock counts are the kit's.
+   */
+  params?: IslandParams;
+  sierraParams?: SierraParams;
 }
 
 export interface Rocks {
@@ -972,9 +980,9 @@ export interface Rocks {
  * that sit clear of the water contribute nothing to it anyway (§V10).
  */
 export function createRocks(opts: CreateRocksOptions): Rocks {
-  const p = islandParams;
-  const sp = sierraParams;
-  const placements = generateRockPlacements(opts.seed, opts.heightmap, p);
+  const p = opts.params ?? islandParams;
+  const sp = opts.sierraParams ?? sierraParams;
+  const placements = generateRockPlacements(opts.seed, opts.heightmap, p, sp);
   const variants: THREE.BufferGeometry[] = [];
   for (let v = 0; v < p.rockGeoVariants; v++) {
     // families cycle, so the FIRST rockGeoVariants variants are guaranteed to

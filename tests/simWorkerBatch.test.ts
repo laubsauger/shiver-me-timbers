@@ -189,7 +189,8 @@ describe('§T.181 multi-tick kick: a trailing fleet is tick-exact against one ti
     const spec: LayoutSpec = { boats: 4, wakeCap: 8, oceanLen: paramsLength(oceanParams), seaLen: paramsLength(seaPhysicsParams) };
     const plain = new BoatSimLayout(new ArrayBuffer(layoutByteLength(spec)), spec);
     expect(plain.spec).toEqual(spec);
-    expect(layoutByteLength(spec)).toBe((16 + spec.oceanLen + spec.seaLen + 4 * POSE_LEN + 4 * (B.WAKE + 8 * 5)) * 8);
+    // 20 = the Float64 header of layout v2 (§T.191 added EXTERNAL_BOATS / TRACE_LEN + 2 reserved; v1 was 16)
+    expect(layoutByteLength(spec)).toBe((20 + spec.oceanLen + spec.seaLen + 4 * POSE_LEN + 4 * (B.WAKE + 8 * 5)) * 8);
     const batched = new BoatSimLayout(new ArrayBuffer(layoutByteLength({ ...spec, batchCap: 5 })), { ...spec, batchCap: 5 });
     expect(batched.boatOffset(3)).toBe(plain.boatOffset(3));
     expect(batched.batchOffset()).toBe(plain.boatOffset(3) + plain.blockLength);

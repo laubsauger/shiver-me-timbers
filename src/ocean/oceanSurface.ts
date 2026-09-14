@@ -115,6 +115,7 @@ export class OceanSurface {
   readonly group: THREE.Group;
   readonly mesh: THREE.Mesh;
   private sim: OceanSimulation;
+  private foam: FoamSim | undefined;
   private sunLight: THREE.DirectionalLight | null;
   /** guards the one-shot warning below */
   private warnedHdrMismatch = false;
@@ -144,6 +145,8 @@ export class OceanSurface {
     opts: OceanSurfaceOptions = {},
   ) {
     this.sim = sim;
+    this.foam = foam;
+    if (foam && opts.seabed) foam.configureShore(sim, opts.seabed, opts.fetch);
     this.sunLight = opts.sunLight ?? null;
     this.grid = opts.grid ?? gridFromParams();
     this.surface = buildOceanSurfaceMaterial(
@@ -173,6 +176,7 @@ export class OceanSurface {
 
   /** per-frame: follow camera (snapped), advance shading time, sync params */
   update(camera: THREE.Camera, time: number, sunDirection?: THREE.Vector3): void {
+    this.foam?.setShoreCenter(camera.position.x, camera.position.z);
     const [ox, oz] = snapToGrid(camera.position.x, camera.position.z, this.grid);
     this.group.position.set(ox, 0, oz);
     this.surface.originUniform.value.set(ox, oz);

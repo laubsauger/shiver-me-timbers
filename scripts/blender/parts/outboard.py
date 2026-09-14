@@ -154,22 +154,31 @@ def build(A, engine):
 
     salvaged = engine == 'S'
     # ── cowl ────────────────────────────────────────────────────────────────
-    lower = cowl_shell(0.0, 0.34, 6, lip0=False)
+    # §T.200 two-tone (USER: "a band of white on the bottom big bucket section of the engines so they are not totally
+    # solid in player color"; concept 04/08): the removable cowl top (upper cowl + cap) wears the livery, the lower cowl
+    # "bucket" stays bone with a thin livery pinstripe just under the split line. The lower cowl is one surface lofted
+    # in three pieces that share their boundary rings exactly (no gap, no overlap), so the livery mask (M_Carbon
+    # baseColor alpha) follows the geometry: bucket bone, 3 cm stripe livery, 6 cm collar bone up to the split
+    STRIPE_H0, STRIPE_H1 = 0.25, 0.28
+    lower = cowl_shell(0.0, STRIPE_H0, 4, lip0=False, lip1=False)
     # the lower cowl's open bottom is closed by a tray the midsection passes through
     ring0 = cowl_ring(0.0)
     tray = kit.grid_loft([cowl_ring(0.0, inset=0.05, dy=-0.015), ring0], closed=True, cap0=True)
     lower.extend(tray)
     lower_fast = []
     for side in (1, -1):
-        for h, ang in ((0.1, 0.25), (0.1, 1.1), (0.26, 0.2), (0.26, 1.2)):
+        for h, ang in ((0.1, 0.25), (0.1, 1.1), (0.31, 0.2), (0.31, 1.2)):
             p, n = cowl_point(h, ang if side > 0 else math.pi - ang)
             lower_fast.append((tuple(p + n * 0.001), tuple(n), 0.006, 'screw', False))
-    P('cowl_lower', lower, 'M_Carbon', 'cowl_bone', max_lod=2, smooth=50, recalc=False, wear=1.15, fasteners=lower_fast)
+    # the salvage decal (teal chevrons, orange bar) moves from the upper cowl onto the bone bucket, where it still reads
+    P('cowl_lower', lower, 'M_Carbon', 'cowl_decal' if engine != 'C' else 'cowl_bone', max_lod=2, smooth=50, recalc=False, wear=1.15,
+      fasteners=lower_fast,
+      local=(tuple(cowl_point(0.15, 0.05)[0] + Vector((0.0, 0.0, 0.10))), (0, 0, -1), (0, 1, 0)) if engine != 'C' else None)
+    P('cowl_stripe', cowl_shell(STRIPE_H0, STRIPE_H1, 1, lip0=False, lip1=False), 'M_Carbon', 'cowl_livery', max_lod=2, smooth=50,
+      recalc=False, wear=0.9)
+    P('cowl_collar', cowl_shell(STRIPE_H1, 0.34, 1, lip0=False), 'M_Carbon', 'cowl_bone', max_lod=2, smooth=50, recalc=False, wear=1.15)
     upper = cowl_shell(0.36, 0.80, 10, grooves=(0.585,))
-    P('cowl_upper', upper, 'M_Carbon', 'cowl_decal' if engine != 'C' else 'cowl_bone', max_lod=2, smooth=50, recalc=False,
-      wear=0.8 if engine == 'P' else 1.0,
-      local=(tuple(cowl_point(0.58, 0.05 if engine == 'P' else math.pi - 0.05)[0]), (0, 0, -1), (0, 1, 0)) if engine == 'P' else
-      (tuple(cowl_point(0.58, 0.05)[0]), (0, 0, -1), (0, 1, 0)) if engine == 'S' else None)
+    P('cowl_upper', upper, 'M_Carbon', 'cowl_livery', max_lod=2, smooth=50, recalc=False, wear=0.8 if engine == 'P' else 1.0)
     top = cowl_top(0.82)
     P('cowl_top', top, 'M_Carbon', 'cowl_livery', max_lod=2, smooth=50, recalc=False)
 

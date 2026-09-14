@@ -201,6 +201,37 @@ export interface OceanParams {
    * contour, which reads as a painted ring on the water.
    */
   shoalColumnCeiling: number;
+  /**
+   * §T.190 γ — depth-limited breaking on the SIGNIFICANT height: past the
+   * break Hs = γ·d, so the surf zone decays linearly to nothing at the
+   * waterline. 0.6 is measured, not tuned: Thornton & Guza (1983) saturated
+   * inner surf zone Hrms/h = 0.42 ⟹ Hs/h = 0.59, and Rayleigh H₁/₁₀ = 1.27·Hs
+   * puts the highest tenth at McCowan's 0.78·d. See src/ocean/shoaling.ts.
+   */
+  shoalSurfGamma: number;
+  /**
+   * Fraction of γ·d at which breaking starts to dissipate — the soft knee's
+   * width. Below it the breaking factor is EXACTLY 1; above it Hs saturates
+   * C1 to γ·d. At or near 1 the knee becomes a hard corner along a depth
+   * contour (a painted ring); near 0 every shallow sea is taxed.
+   */
+  shoalSurfOnset: number;
+  /**
+   * §T.193 multiplier on the Ruessink et al. (2012) nonlinearity B(Ur): the
+   * skewness and forward-leaning asymmetry of shoaling waves. 1 is the fitted
+   * field value; 0 turns the term off (linear shoaling). B is capped at 0.95,
+   * so values past ~1.1 saturate. See src/ocean/shoalAsymmetry.ts.
+   */
+  shoalAsymmetryGain: number;
+  /**
+   * §T.193 profile guard, as a FRACTION of the ratio at which a two-harmonic
+   * wave grows a second crest (0.25 for pure skewness … 0.5 for pure
+   * asymmetry, by the local biphase). A band's local second-harmonic ratio
+   * saturates at this fraction, identity below 75% of it. 0.95 keeps every
+   * shoaling wave single-crested; past 1 the steepest ones grow a second crest.
+   * The horizontal map is never touched.
+   */
+  shoalAsymmetryHarmonicCap: number;
 
   // -- fetch (§V.73): water with land upwind cannot grow the sea the wind asks
   /**
@@ -319,11 +350,14 @@ export const oceanParams: OceanParams = registerParams('ocean', {
   // the note below). 1010 m gives 5.3, and it costs NOTHING — same texture
   // size, same FFT, same bindings; only the metres-per-texel changes (0.82 →
   // 1.97 m), and cascade 0's shortest wavelength is 40 m = 20 texels, so it
-  // has plenty of margin. Non-commensurate is still checked: 1010/98 = 10.31,
-  // 98/22.7 = 4.32. The CPU buoyancy mirror's guard also still holds — its
+  // has plenty of margin. Non-commensurate is still checked: 1010/196 = 5.15,
+  // 196/22.7 = 8.63. The CPU buoyancy mirror's guard also still holds — its
   // 64² central block reaches k = π·64/1010 = 0.199 against a band kMax of
   // 2π/40 = 0.157 (§V.8, cpuOcean's ctor throws if that ever inverts).
-  cascades: [{ domain: 1010 }, { domain: 98 }, { domain: 22.7 }],
+  // Wider chop carries more independent modes and quarters tile-copy density. The
+  // CPU middle mirror uses 128² to preserve the former 98/64 m spacing.
+  // Keep the finest domain fixed: widening it would lose short waves.
+  cascades: [{ domain: 1010 }, { domain: 196 }, { domain: 22.7 }],
   // band edges scale with the domains so no cascade is asked for wavelengths
   // its grid can't hold (also keeps the CPU buoyancy mirror's kMax inside its
   // reduced grid — see sea-physics/cpuOcean ctor guard)
@@ -475,6 +509,12 @@ export const oceanParams: OceanParams = registerParams('ocean', {
   shoalDeepFraction: 0.6,
   shoalBreakerIndex: 0.78,
   shoalColumnCeiling: 0.85,
+  // §T.190: Thornton & Guza's saturated Hs/h, and the knee at 80% of it
+  shoalSurfGamma: 0.6,
+  shoalSurfOnset: 0.8,
+  // §T.193: Ruessink 2012 as fitted; harmonic ratio saturates just under the second-crest onset
+  shoalAsymmetryGain: 1,
+  shoalAsymmetryHarmonicCap: 0.95,
   // §V.73 — see the interface docs. 260 puts full development at 1043 m of
   // clear upwind water at the shipped 11 m/s, so the open sea between islands
   // is exactly the sea it was and the model acts inside rims and lee shadows.
@@ -513,6 +553,10 @@ function oceanParamsMeta() {
     shoalDeepFraction: { min: 0.05, max: 1.5, step: 0.01 },
     shoalBreakerIndex: { min: 0.1, max: 0.95, step: 0.01 },
     shoalColumnCeiling: { min: 0.15, max: 0.99, step: 0.01 },
+    shoalSurfGamma: { min: 0.3, max: 1, step: 0.01 },
+    shoalSurfOnset: { min: 0.3, max: 0.95, step: 0.01 },
+    shoalAsymmetryGain: { min: 0, max: 2, step: 0.01 },
+    shoalAsymmetryHarmonicCap: { min: 0.1, max: 1.5, step: 0.01 },
     // §V.73. The floor on `fetchWorldScale` is not cosmetic: at 1 the world is
     // uncompressed and every square metre of it is fetch-limited.
     fetchWorldScale: { min: 20, max: 4000, step: 10 },

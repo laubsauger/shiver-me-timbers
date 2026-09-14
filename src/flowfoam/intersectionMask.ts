@@ -34,7 +34,7 @@
  *    mask is a feathered band around the waterline,
  *    |mesh world height − water height| < threshold.
  */
-import { smoothstep } from 'three/tsl';
+import { float, smoothstep } from 'three/tsl';
 
 export interface IntersectionMaskInputs {
   /** linear view z of the opaque scene behind the fragment (negative in front of camera) */
@@ -61,6 +61,21 @@ function maskFromDelta(delta: any, thresholdNode: any, featherNode: any): any {
 export function intersectionMaskNode(i: IntersectionMaskInputs): any {
   const delta = i.sceneViewZNode.sub(i.waterViewZNode).abs();
   return maskFromDelta(delta, i.thresholdNode, i.featherNode);
+}
+
+/**
+ * Contact from the unrefracted, normalized linear depth already read by water.
+ * Keep the signed gap: clamping a foreground sample to zero creates a full rim.
+ * Width is measured along view Z, so this is a visible contact lip, not a
+ * world-space shoreline distance or a persistent foam accumulator.
+ */
+export function contactFoamNode(
+  sceneDepth: any, waterDepth: any, cameraFar: any,
+  width: any, feather: any,
+): any {
+  const gap = sceneDepth.sub(waterDepth).mul(cameraFar);
+  const valid = gap.greaterThanEqual(0).and(sceneDepth.lessThan(0.999999));
+  return valid.select(maskFromDelta(gap, width, feather), float(0));
 }
 
 export interface WorldMaskInputs {

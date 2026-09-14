@@ -1031,11 +1031,14 @@ export function breakupJitterAligned(
   warp: number,
   octaves: number,
   drift = 0,
+  direction = { x: 1, z: 0 },
 ): number {
   const e = Number.isFinite(elongation) ? Math.max(1, elongation) : 1;
-  const along = (worldX * frame.cos + worldZ * frame.sin) / e;
-  const across = -worldX * frame.sin + worldZ * frame.cos;
-  return breakupJitter(along, across, freq, warp, octaves, drift);
+  const x = worldX - drift * direction.x / freq;
+  const z = worldZ - drift * direction.z / freq;
+  const along = (x * frame.cos + z * frame.sin) / e;
+  const across = -x * frame.sin + z * frame.cos;
+  return breakupJitter(along, across, freq, warp, octaves);
 }
 
 /* -------------------------------------------------------------------------

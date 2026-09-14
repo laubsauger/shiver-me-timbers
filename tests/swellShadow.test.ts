@@ -621,7 +621,11 @@ describe('§V.77 T174 the terrain reconstructs the SAME shadowed sea', () => {
       const gains = nodes.filter((n) => {
         if (!(n.isMathNode && n.method === 'sqrt')) return false;
         const inner = allNodes(n);
-        return inner.some((m) => m.id === share.id) && inner.some((m) => m.id === kId);
+        // §T.190: the breaking law's √Σ(σᵢgᵢ)² also contains every share and K;
+        // the shadow gain is the sqrt that holds THIS cascade's share and no other's
+        const others = water.shoaling.swellShare.filter((_, j) => j !== i);
+        return inner.some((m) => m.id === share.id) && inner.some((m) => m.id === kId)
+          && !inner.some((m) => others.some((o) => o.id === m.id));
       });
       expect(gains.length, `cascade ${i}`).toBe(1);
       const prev = share.value;

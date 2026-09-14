@@ -268,6 +268,8 @@ export interface WaterReceiver {
 }
 
 export interface WaterLighting {
+  /** Existing water-path attenuation, already applied to diffuse albedo. */
+  attenuation: TslNode;
   /** vec3 ≤1 — MULTIPLY into the material's colorNode (albedo) */
   tint: TslNode;
   /** vec3 ≥0 — ADD into the material's emissiveNode */
@@ -411,6 +413,7 @@ export function waterLightingNode(
     .clamp(0, L.maxAddLight);
 
   return {
+    attenuation: absorb,
     // every factor here is in [0,1] by construction: wet tint, absorption,
     // caustic darkening and bounce tint. The albedo can be dimmed or
     // coloured, never driven negative or above its own value.

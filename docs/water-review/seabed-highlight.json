@@ -1,0 +1,28 @@
+{
+  "simulationTime": 76.56666666666361,
+  "viewport": [
+    1280,
+    657
+  ],
+  "shipPosition": [
+    -49.61223757670291,
+    -1.0789206151174984,
+    813.0871752996188
+  ],
+  "region": {
+    "x0": 600,
+    "y0": 435,
+    "x1Exclusive": 880,
+    "y1Exclusive": 533
+  },
+  "metric": "8-bit display RGB: B >= 90 and B > 1.5*G and B > 2*R",
+  "before": {
+    "image": "seabed-before.png",
+    "bluePixels": 4553
+  },
+  "after": {
+    "image": "seabed-after.png",
+    "bluePixels": 62
+  },
+  "scope": "Frozen matched frame; diagnostic only, not a radiometric metric or an art threshold."
+}

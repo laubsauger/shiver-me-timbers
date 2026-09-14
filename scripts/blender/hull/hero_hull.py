@@ -551,26 +551,37 @@ class HeroHull:
         h0 = self.dy - s0['chineY']
         clamp = lambda v, a, b: max(a, min(b, v))  # noqa: E731
         self.band_hidden = 0.03                        # under the rub rail
-        self.band_w = clamp(0.24 * h0, 0.12, 0.24)
+        # §T.200 (USER: "a stripe of player color on the side of the boat"): the sheer band is the player-colour side
+        # stripe, ~0.25 m visible on a 0.79 m topside (concept 06b/08 proportions) so it reads from the far chase cam
+        self.band_w = clamp(0.36 * h0, 0.14, 0.30)
+        self.band_step = 0.75                          # fraction of the band given up around the side number
         self.stripe_gap = clamp(0.035 * h0, 0.02, 0.03)
         self.stripe_t = clamp(0.055 * h0, 0.03, 0.045)
+        # §T.200 secondary pinstripe under the first (same mask field G, same stripe hue)
+        self.stripe2_gap = 0.6 * self.stripe_gap
+        self.stripe2_t = 0.5 * self.stripe_t
         self.waterline = min(0.60, s0['chineY'] + 0.09)
         self.number_zc = self.well_aft + 0.9 * (self.well_fwd_end - self.well_aft)
 
     def band_lo(self, zn):
-        """band bottom, depth below the deck; zn = z / L (numpy-safe). The band narrows 30 % toward the bow and
-        steps up around the side race number (a real race-boat trick: the livery makes room for the number)"""
+        """band bottom, depth below the deck; zn = z / L (numpy-safe). The band narrows toward the bow (~half at the
+        doubler, where the rising chine leaves a short topside; concept 08) and steps up around the side race number
+        (a real race-boat trick: the livery makes room for the number)"""
         z = zn * self.stem_z
         zc, span, ramp = self.number_zc, 0.78, 0.14
         inside = np.clip((z - (zc - span - ramp)) / ramp, 0.0, 1.0) * np.clip(((zc + span + ramp) - z) / ramp, 0.0, 1.0)
         step = inside * inside * (3.0 - 2.0 * inside)
-        return self.band_hidden + self.band_w * (1.0 - 0.3 * zn ** 1.5) - 0.62 * self.band_w * step
+        return self.band_hidden + self.band_w * (1.0 - 0.6 * zn ** 2.2) - self.band_step * self.band_w * step
 
     def stripe_centre(self, zn):
         return self.band_lo(zn) + self.stripe_gap + self.stripe_t / 2
 
+    def stripe2_centre(self, zn):
+        return self.stripe_centre(zn) + self.stripe_t / 2 + self.stripe2_gap + self.stripe2_t / 2
+
     def stripe_bottom_depth(self, z):
-        return self.stripe_centre(min(max(z / self.stem_z, 0.0), 1.0)) + self.stripe_t / 2
+        """depth below the deck of the lowest painted livery line (the secondary pinstripe's bottom edge)"""
+        return self.stripe2_centre(min(max(z / self.stem_z, 0.0), 1.0)) + self.stripe2_t / 2
 
     def boot_y(self, cy):
         """antifoul top (hull y): the rest waterline aft, riding the chine forward (numpy-safe smooth max)"""

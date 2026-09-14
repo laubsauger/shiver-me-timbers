@@ -126,7 +126,7 @@ export class Race {
     const [sx, sz] = elementCenter(first);
     this.line = new CourseLine(course.referenceLine, sx, sz);
     this.paceLine = new Polyline(course.paceLine, false);
-    this.schedule = startSchedule(this.paceLine, this.params.start);
+    this.schedule = startSchedule(this.paceLine, this.params.start, opts.racerIds.length);
     this.poles = elementPoles(course, this.params.markCaptureRange);
     this.elementArc = [0];
     for (let e = 1; e < course.elements.length; e++) {
@@ -135,6 +135,11 @@ export class Race {
       let a = this.line.nearest(cx, cz, prev).u;
       const L = this.line.length;
       while (a < prev) a += L;
+      // §T.197: a mark is passed where its ROUNDING RAY is crossed, not where the line is nearest its centre. On a
+      // turn sharper than 90° the ray points well past the apex (Tower Reach T1: crossed 51 m after the nearest
+      // point), so a boat sailing the reference line itself was called missed (missDistance 50) 1 m before rounding.
+      const el = course.elements[e];
+      if (el.kind === 'mark') a = Math.max(prev, this.roundingArc(this.poles[e], a));
       this.elementArc.push(a);
     }
     this.racers = opts.racerIds.map((id, index) => ({
@@ -167,6 +172,28 @@ export class Race {
       wrongWay: false,
       position: 0,
     }));
+  }
+
+  /** the line's forward crossing of a mark's rounding ray nearest `near` (within ± markCaptureRange), else `near` */
+  private roundingArc(poles: { left: Vec2; right: Vec2 }, near: number): number {
+    const reach = this.params.markCaptureRange;
+    const step = 1;
+    let best = near;
+    let bestGap = Infinity;
+    let p = this.line.at(near - reach);
+    for (let u = near - reach; u < near + reach; u += step) {
+      const q = this.line.at(u + step);
+      const c = segmentCrossesPoles(poles.left, poles.right, p.x, p.z, q.x, q.z);
+      if (c && c.dir === 'forward') {
+        const at = u + c.t * step;
+        if (Math.abs(at - near) < bestGap) {
+          bestGap = Math.abs(at - near);
+          best = at;
+        }
+      }
+      p = q;
+    }
+    return best;
   }
 
   /** sim time of the last completed tick, s */

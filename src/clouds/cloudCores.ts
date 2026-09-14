@@ -65,6 +65,7 @@ import { bandLimitAmplitude } from '../ship/bandLimit';
 import { createRng } from '../state/rng';
 import { hashCell } from '../weather/field';
 import type { StormCell } from '../weather/field';
+import { createCloudLobeGeometry } from './cloudGeometry';
 import type { CloudParams } from '../params/clouds';
 import type { ShaftSlot } from './cloudComposite';
 
@@ -690,7 +691,37 @@ function buildLobes(
       storm,
     });
   }
+  attachStormLobes(lobes, storm);
   return lobes;
+}
+
+/** Storm updraft lobes grow from lower lobes instead of floating separately.
+ * Move existing centres only; preserve radii, count, seeds and RNG consumption.
+ * Fair-weather placement is unchanged. Partial storms interpolate the movement.
+ */
+export function attachStormLobes(lobes: CloudLobe[], storm: number): void {
+  if (storm <= 0 || lobes.length < 2) return;
+  const ordered = [...lobes].sort((a, b) => a.heightN - b.heightN);
+  for (let i = 1; i < ordered.length; i++) {
+    const lobe = ordered[i];
+    // Height order is stable as heightBias changes: the same random heights
+    // undergo one monotone power. A nearest-neighbour parent can switch
+    // abruptly during weather transitions, moving a lobe by hundreds of metres.
+    const parent = ordered[i - 1];
+    const nearest = Math.hypot(
+      (lobe.x - parent.x) / (lobe.rx + parent.rx),
+      (lobe.y - parent.y) / (lobe.ry + parent.ry),
+      (lobe.z - parent.z) / (lobe.rz + parent.rz),
+    );
+    // Overlap by 35% rather than barely touching: displaced surfaces and the
+    // density threshold can otherwise reopen a thin gap after compositing.
+    if (nearest > 0.65) {
+      const keep = 1 - clamp01(storm) * (1 - 0.65 / nearest);
+      lobe.x = parent.x + (lobe.x - parent.x) * keep;
+      lobe.y = parent.y + (lobe.y - parent.y) * keep;
+      lobe.z = parent.z + (lobe.z - parent.z) * keep;
+    }
+  }
 }
 
 /**
@@ -1006,7 +1037,7 @@ export function createCloudCores(clusters: CloudCluster[], p: CloudParams) {
 
   // == polygonal lobes =======================================================
   const detail = Math.max(0, Math.min(3, Math.floor(p.lobeDetail) || 0));
-  const base = new THREE.IcosahedronGeometry(1, detail);
+  const base = createCloudLobeGeometry(detail);
   const lobeGeo = new THREE.InstancedBufferGeometry();
   // normal/uv are carried even though the shader derives its own normal:
   // NodeMaterial still builds the default lighting flow before `outputNode`

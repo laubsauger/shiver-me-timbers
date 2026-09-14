@@ -17,12 +17,12 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PropertyType, TextureInfo } from '@gltf-transform/core';
-import { EXTMeshoptCompression, KHRMaterialsClearcoat } from '@gltf-transform/extensions';
+import { EXTMeshoptCompression, KHRMaterialsClearcoat, KHRTextureBasisu } from '@gltf-transform/extensions';
 import { dedup, prune, quantize, reorder } from '@gltf-transform/functions';
 import { MeshoptEncoder } from 'meshoptimizer';
 import { checkDocument, createIO, loadContract } from './blender/checkGlb.mjs';
@@ -149,6 +149,42 @@ function attachHullTextures(document, work) {
   }
 }
 
+/**
+ * §T.200 DATA CHANNELS SURVIVE PACKAGING. gltf-transform's KTX commands choose the encoded channels from each slot's
+ * glTF meaning (functions getTextureChannelMask): an OPAQUE material's baseColor is written RGB only, and a
+ * clearcoatTexture R only. Our masks ride exactly there — M_Gelcoat/M_NonSlip baseColor A (overlay / non-skid
+ * coverage), M_Carbon baseColor A (cowl livery), the hull mask's G pinstripe, B antifoul and A wear — so until T200
+ * the shipped GLB had none of them: the runtime sampled A = 1 and G = B = R, the hull drew its overlay colour with no
+ * livery and M_Carbon took the livery hue everywhere (USER: "cowls solid in player colour", "no stripe on the side").
+ * Those textures are encoded here with every channel, at the CLI steps' own settings (ETC1S q160 sRGB, UASTC level 2
+ * + zstd 18 linear, full mip chains, 2 threads); the CLI steps then skip them as already KTX2.
+ * checkGlb.mjs `liveryChannelErrors` fails a final GLB that loses them again.
+ */
+const DATA_ALPHA_BASE = new Set(['M_Gelcoat', 'M_NonSlip', 'M_Carbon']);
+function encodeDataTextures(document, work, env) {
+  const jobs = new Map();
+  for (const mat of document.getRoot().listMaterials()) {
+    const base = mat.getBaseColorTexture();
+    if (base && DATA_ALPHA_BASE.has(mat.getName())) jobs.set(base, 'etc1s');
+    const cc = mat.getExtension('KHR_materials_clearcoat')?.getClearcoatTexture();
+    if (cc) jobs.set(cc, 'uastc');
+  }
+  let i = 0;
+  for (const [tex, mode] of jobs) {
+    if (tex.getMimeType() !== 'image/png') throw new Error(`data texture '${tex.getName()}' is ${tex.getMimeType()}, expected PNG before KTX2`);
+    const src = join(work, `data_tex_${i}.png`);
+    const dst = join(work, `data_tex_${i++}.ktx2`);
+    writeFileSync(src, tex.getImage());
+    const codec = mode === 'etc1s'
+      ? ['--encode', 'basis-lz', '--qlevel', '160', '--assign-tf', 'srgb', '--assign-primaries', 'bt709', '--format', 'R8G8B8A8_SRGB']
+      : ['--encode', 'uastc', '--uastc-quality', '2', '--zstd', '18', '--assign-tf', 'linear', '--assign-primaries', 'none', '--format', 'R8G8B8A8_UNORM'];
+    run(`5/6 ${mode.toUpperCase()} RGBA (data channels): ${tex.getName()}`, 'ktx', ['create', '--generate-mipmap', ...codec, '--threads', '2', src, dst], env);
+    tex.setImage(new Uint8Array(readFileSync(dst))).setMimeType('image/ktx2');
+    if (tex.getURI()) tex.setURI(tex.getURI().replace(/\.png$/, '') + '.ktx2');
+  }
+  if (jobs.size > 0) document.createExtension(KHRTextureBasisu).setRequired(true);
+}
+
 async function main() {
   const opt = parseArgs(process.argv.slice(2));
   const contract = loadContract();
@@ -200,8 +236,11 @@ async function main() {
   run('5/6 textures: resize, UASTC (normal/ORM), ETC1S (baseColor)', process.execPath, [
     gltfTransform, 'resize', step(1), step(2), '--width', String(opt.maxTexture), '--height', String(opt.maxTexture),
   ], env);
+  const dataDoc = await io.read(step(2));
+  encodeDataTextures(dataDoc, work, env);
+  await io.write(step('2b'), dataDoc);
   run('5/6 UASTC', process.execPath, [
-    gltfTransform, 'uastc', step(2), step(3), '--slots', '{normalTexture,occlusionTexture,metallicRoughnessTexture,clearcoatTexture,clearcoatNormalTexture}',
+    gltfTransform, 'uastc', step('2b'), step(3), '--slots', '{normalTexture,occlusionTexture,metallicRoughnessTexture,clearcoatTexture,clearcoatNormalTexture}',
     '--level', '2', '--zstd', '18', '--jobs', '2',
   ], env);
   run('5/6 ETC1S', process.execPath, [

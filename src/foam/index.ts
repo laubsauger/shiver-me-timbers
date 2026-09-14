@@ -35,6 +35,10 @@ import { advanceAccumulator, SIM_DT } from '../core/loop';
 import { createOutputTexture, type CascadeLayer } from '../ocean/oceanTextures';
 import { foamParams } from '../params/foam';
 import { oceanParams } from '../params/ocean';
+import type { OceanSimulation } from '../ocean/oceanCascades';
+import type { SeabedField } from '../island/seabed';
+import type { FetchField } from '../ocean/fetchField';
+import { createShoreFoam, type ShoreFoam } from './shoreFoam';
 import { cascadeBand } from '../ocean/oceanMath';
 import {
   blurMixPerStep,
@@ -213,8 +217,11 @@ export function createFoamSim(
     );
   }
   let time = 0;
+  let breakupOffsetX = 0;
+  let breakupOffsetZ = 0;
   /** leftover frame time, so the sim steps at SIM_DT and not at display rate */
   let accumulator = 0;
+  let shore: ShoreFoam | null = null;
 
   // Filtered far-field tier (§V6 sampling, ocean agent's horizon-sizzle
   // finding): StorageTextures have NO mip chain, so a distant pixel covering
@@ -292,6 +299,7 @@ export function createFoamSim(
       // measured against the sim grid, since a StorageTexture has no mip chain
       // and nothing downstream can filter an octave written sub-texel.
       octaves,
+      tensorRadius,
       inject: createInjectPass(
         cascades, i, front, back, resolution, lu, octaves, tensorRadius,
       ),
@@ -301,8 +309,27 @@ export function createFoamSim(
       reduce: coarse ? [createReducePass(front, coarse, coarseN, REDUCE_FACTOR)] : [],
     };
   });
+  // One ordered submission per fixed step. Keep inject → blur → reduction
+  // for each band; grouping changes no dependencies or dispatches.
+  const passes = lanes.flatMap((lane) => [lane.inject, lane.blurDecay, ...lane.reduce]);
 
   return {
+    /** Configure before the first dispatch/material build; BA ownership is exclusive. */
+    configureShore(sim: OceanSimulation, bed: SeabedField, fetch?: FetchField | null): void {
+      if (shore) throw new Error('foam: shoreline state is already configured');
+      if (time !== 0) throw new Error('foam: configure shoreline before stepping the simulation');
+      const lane = lanes[0];
+      if (!lane?.coarse) throw new Error('foam: shoreline state requires a cascade with a filtered tier');
+      shore = createShoreFoam(sim, bed, fetch, lane.front, lane.coarse, resolution);
+      lane.inject = createInjectPass(cascades, 0, lane.front, lane.back, resolution,
+        lane.u, lane.octaves, lane.tensorRadius, shore.inject);
+      lane.blurDecay = createBlurDecayPass(lane.back, lane.front, resolution, lane.u, true);
+      passes[0] = lane.inject;
+      passes[1] = lane.blurDecay;
+    },
+    setShoreCenter(x: number, z: number): void { shore?.setCenter(x, z); },
+    /** Null means the scene has no configured shoreline, not an alternate renderer. */
+    shoreSampleNode(worldXZ: any): any { return shore ? shore.sample(worldXZ) : null; },
     /** per-cascade foam textures (R = foam), index-aligned with `cascades` */
     foamTextures: lanes.map((l) => l.front),
 
@@ -316,7 +343,10 @@ export function createFoamSim(
      * lifetime a property of `decayHalfLife` alone, at any display rate.
      */
     update(renderer: THREE.WebGPURenderer, frameDt: number = SIM_DT): void {
-      const dt = Number.isFinite(frameDt) && frameDt > 0 ? frameDt : SIM_DT;
+      if (!Number.isFinite(frameDt) || frameDt < 0) {
+        throw new Error(`foam: frameDt must be finite and non-negative, got ${frameDt}`);
+      }
+      const dt = frameDt;
       const step = advanceAccumulator(accumulator, dt);
       accumulator = step.accumulator;
       time += step.steps * SIM_DT; // fixed-tick clock for the detail churn
@@ -383,6 +413,11 @@ export function createFoamSim(
       // offset on an 87 m wave.
       const leadDirX = Math.cos(oceanParams.windDirection);
       const leadDirZ = Math.sin(oceanParams.windDirection);
+      // Integrate velocity: time * current wind direction would teleport the
+      // entire pattern whenever weather turns the wind after a long voyage.
+      const breakupTravel = step.steps * SIM_DT * 0.013 * Math.max(0.5, foamParams.breakupMetres);
+      breakupOffsetX += breakupTravel * leadDirX;
+      breakupOffsetZ += breakupTravel * leadDirZ;
       for (const lane of lanes) {
         const steep = sea.cascades[lane.index].jacobianRms;
         const bandSigma = jacobianSigma(steep, lambda);
@@ -430,7 +465,8 @@ export function createFoamSim(
         // slow enough that a cap never sees it move (0.21 m/s at the shipped
         // 16 m cell) but fast enough that the same texels are not permanently
         // the foamy ones — the §B.4 lifecycle argument, at the breakup's scale
-        lane.u.uBreakupTime.value = time * 0.013;
+        lane.u.uBreakupOffsetX.value = breakupOffsetX;
+        lane.u.uBreakupOffsetZ.value = breakupOffsetZ;
         // what an infinitely-distant pixel of this band should see (§V.70) —
         // derived, not sampled, because reading a StorageTexture back per
         // frame is not on the table
@@ -483,13 +519,8 @@ export function createFoamSim(
       // frames that owe no sim step
       updateFoamShadingUniforms(foamParams, time, oceanParams.windDirection);
       for (let s = 0; s < step.steps; s++) {
-        for (const lane of lanes) {
-          renderer.compute(lane.inject as Parameters<THREE.WebGPURenderer['compute']>[0]);
-          renderer.compute(lane.blurDecay as Parameters<THREE.WebGPURenderer['compute']>[0]);
-          for (const pass of lane.reduce) {
-            renderer.compute(pass as Parameters<THREE.WebGPURenderer['compute']>[0]);
-          }
-        }
+        shore?.prepare(SIM_DT);
+        renderer.compute(passes as Parameters<THREE.WebGPURenderer['compute']>[0]);
       }
     },
 

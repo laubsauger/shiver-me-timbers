@@ -21,7 +21,7 @@ import {
 } from '../src/caustics';
 import { causticsParams } from '../src/params/caustics';
 import { oceanParams } from '../src/params/ocean';
-import { shoalFactor, shoalWavenumber } from '../src/ocean/shoaling';
+import { shoalBandGains, shoalWavenumber } from '../src/ocean/shoaling';
 import { skyParams } from '../src/params/sky';
 import {
   createWaterLightingUniforms,
@@ -317,7 +317,7 @@ describe('caustics are made of the key light (§B.41 twin)', () => {
  *
  * `waterHeightNode` sums the cascade displacement, which is the RAW open-ocean
  * spectrum. The ocean surface material draws its vertices at that sum times
- * `shoalFactor(kᵢ, depth)` per cascade, put through `breakerClip`, and
+ * the §T.190 band gain `shoalBandGains` per cascade, put through `breakerClip`, and
  * `CpuOcean.shoaledSum` mirrors it for buoyancy. A receiver that skipped the
  * shoaling therefore had a sea level that was wrong by the WHOLE shoaling
  * term — 1.0 offshore, 0.0 at the waterline — and the terrain is the receiver
@@ -351,6 +351,14 @@ describe('§V.72 receiver shoaling', () => {
     // and the breaker pair is the params', not a literal
     expect(water.shoaling.breaker.value.x).toBe(oceanParams.shoalBreakerIndex);
     expect(water.shoaling.breaker.value.y).toBe(oceanParams.shoalColumnCeiling);
+    // §T.190: breaking reads the whole sea's Hs — the receiver must carry the
+    // same per-band σ and (γ, onset) the material and CpuOcean.refreshShoal
+    // push, or it breaks the reconstructed sea at a different depth
+    for (const [i, c] of sim.cascades.entries()) {
+      expect(water.shoaling.sigma[i].value).toBe(Math.sqrt(Math.max(c.heightVariance, 0)));
+    }
+    expect(water.shoaling.surf.value.x).toBe(oceanParams.shoalSurfGamma);
+    expect(water.shoaling.surf.value.y).toBe(oceanParams.shoalSurfOnset);
   });
 
   it('is refreshed every frame, not only on rebuild (§V.62)', () => {
@@ -368,15 +376,16 @@ describe('§V.72 receiver shoaling', () => {
 
   it('collapses the sea to nothing at a waterline, at every wavelength', () => {
     const openDepth = 45;
-    for (const c of sim.cascades) {
-      const k = shoalWavenumber(c.meanWavenumber, openDepth, oceanParams);
-      // dry sand: the terrain passes max(-y, 0) = 0, so the reconstructed sea
-      // is EXACTLY 0 — a beach above the waterline cannot be told it is
-      // submerged by construction rather than by a threshold
-      expect(shoalFactor(k, 0)).toBe(0);
-      // and it is back to open ocean by the seabed's own floor depth
-      expect(shoalFactor(k, openDepth)).toBeGreaterThan(0.999);
-    }
+    const ks = sim.cascades.map((c) => shoalWavenumber(c.meanWavenumber, openDepth, oceanParams));
+    const sigma = sim.cascades.map((c) => Math.sqrt(c.heightVariance));
+    // dry sand: the terrain passes max(-y, 0) = 0, so the reconstructed sea
+    // is EXACTLY 0 — a beach above the waterline cannot be told it is
+    // submerged by construction rather than by a threshold. Since §T.190 the
+    // per-band growth is LARGE at d → 0 (Ks → 22); it is the one breaking
+    // factor (γ·0 = 0) that zeroes every band, so assert the GAIN, not a term.
+    for (const g of shoalBandGains(0, ks, sigma, null, oceanParams, [])) expect(g).toBe(0);
+    // and it is EXACTLY the open ocean by the seabed's own floor depth
+    for (const g of shoalBandGains(openDepth, ks, sigma, null, oceanParams, [])) expect(g).toBe(1);
   });
 
   it('accepts a depth and changes the graph it builds', () => {

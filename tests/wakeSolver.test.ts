@@ -546,9 +546,11 @@ describe('V-W7 one compute group + §V77/§V95 one implementation (structural, G
       .split('\n')
       .filter((l) => !/^\s*(\*|\/\/|\/\*\*)/.test(l))
       .join('\n');
+    // §T.199: one call per step path — `step` (this solver) and `stepGroup` (every solver of a WakeSim, concatenated)
     const calls = code.match(/renderer\.compute\(/g) ?? [];
-    expect(calls.length).toBe(1);
+    expect(calls.length).toBe(2);
     expect(passesSource).toMatch(/renderer\.compute\(this\.computeNodes\)/);
+    expect(passesSource).toMatch(/renderer\.compute\(nodes as AnyNode\[\]\)/);
     expect(passesSource).toMatch(/import \{ buildFftPasses \} from '\.\.\/ocean\/fftPasses'/);
     for (const shared of ['dispersion', 'splatSigma', 'splatPeakHead', 'spongeGammaAxis', 'modeWavenumber', 'wakeButterflyTables']) {
       expect(passesSource).toContain(shared);

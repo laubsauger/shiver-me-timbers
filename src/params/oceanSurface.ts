@@ -217,6 +217,8 @@ export const oceanSurfaceParams = registerParams(
     shallowTintStrength: 0.6,
     /** water depth (m) at which the shallow tint is fully gone */
     shallowFullDepth: 18,
+    /** Coverage injected into the visible contact lip; uses flowfoam's band width. */
+    contactFoamStrength: 0.18,
     /** world-space wavelength (m) of the largest body-variation octave */
     variationScale: 900,
     /**
@@ -886,7 +888,7 @@ export const oceanSurfaceParams = registerParams(
     // shallows; the flat teal tint was the depth-independent stand-in for the
     // curve that now does the job properly. There is one water — tune its
     // clarity in the CAUSTICS panel.
-    /** refraction offset strength (screen-space) at full water thickness */
+    /** refraction offset as a fraction of viewport height at full water thickness */
     refractionStrength: 0.06,
     /**
      * Water thickness (m) that earns the FULL refraction offset. Below it the
@@ -950,6 +952,7 @@ export const oceanSurfaceParams = registerParams(
     sssAmbient: { min: 0, max: 1, step: 0.01 },
     shallowTintStrength: { min: 0, max: 1, step: 0.01 },
     shallowFullDepth: { min: 1, max: 60, step: 0.5 },
+    contactFoamStrength: { min: 0, max: 0.5, step: 0.01 },
     refractionDepthFull: { min: 0.2, max: 30, step: 0.1 },
     foamFarDamp: { min: 0, max: 1, step: 0.01 },
     variationScale: { min: 100, max: 4000, step: 10 },

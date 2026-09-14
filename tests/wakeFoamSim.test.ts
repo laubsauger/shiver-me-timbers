@@ -320,8 +320,9 @@ function flowfoamWgsl(ff: FlowFoam): string[] {
   };
   ff.advanceWake(1 / 60);
   ff.update(rec as never, 1 / 60);
-  return computes.flatMap((c) => {
-    if (Array.isArray(c)) return [];
+  // the wake's group is the one long array; the accumulation tiers submit [advect, blur] pairs
+  const flat = computes.flatMap((c) => (Array.isArray(c) ? (c.length > 2 ? [] : c) : [c]));
+  return flat.flatMap((c) => {
     const renderer = new THREE.WebGPURenderer({ canvas: stubCanvas as never });
     const backend = (renderer as any).backend;
     backend.renderer = renderer;
@@ -360,7 +361,7 @@ describe('4b. one centre: the foam resample reads the centre the dispatched grou
     };
     ff.advanceWake(1 / 60);
     ff.update(rec as never, 1 / 60);
-    const passes = computes.filter((c) => !Array.isArray(c));
+    const passes = computes.flatMap((c) => (Array.isArray(c) ? (c.length > 2 ? [] : c) : [c]));
     const canvas = {
       width: 4, height: 4, style: {}, getContext: (): null => null, addEventListener: (): void => {},
       removeEventListener: (): void => {}, getRootNode: (): unknown => ({}), setAttribute: (): void => {},
@@ -384,23 +385,15 @@ describe('4b. one centre: the foam resample reads the centre the dispatched grou
   });
 });
 
-describe('5. pirate is frozen until W6: the analytic flowfoam graph is the pre-W5 one', () => {
-  /**
-   * The pre-W5 graph: the scratch fingerprint (docs/wake/w5-foam.md §4) hashed
-   * these passes before any W5 edit and after (sha256 cebaea3a…70e5 both, raw
-   * WGSL 219 662 B), and this pin was taken on that proven-identical tree
-   * (canonical NodeBuffer ids, 219 518 B). W5 is sim-backend-only;
-   * the analytic path is retired by W6 (§T.172), so ANY change to these four
-   * shaders before then is a change to the shipped pirate sea. If that change
-   * is deliberate, re-measure and re-pin here in the same commit, and say why.
-   */
-  const PINNED = { passes: 4, bytes: 219518, fnv: ['fd545f2c', '698cb172', '2c1f3331', '9761ee6a'] };
+describe('5. analytic shader baseline after the water corrections', () => {
+  // Deliberately repinned after exact source integration, captured projection
+  // winner and world-anchored vortex phase (water improvement plan, pass 19).
+  // Both blur shaders remain identical. Vessel-only foam changes must not leak here.
+  const PINNED = { passes: 4, bytes: 219431, fnv: ['ff52194e', '698cb172', '2366b0e9', '9761ee6a'] };
 
-  it('createFlowFoam() compiles the same four compute shaders it did before W5', () => {
+  it('createFlowFoam() retains the accepted analytic shaders', () => {
     const wgsl = flowfoamWgsl(createFlowFoam());
-    expect(wgsl.length).toBe(PINNED.passes);
-    expect(wgsl.join('\n====\n').length).toBe(PINNED.bytes);
-    expect(wgsl.map(fnv1a)).toEqual(PINNED.fnv);
+    expect({ passes: wgsl.length, bytes: wgsl.join('\n====\n').length, fnv: wgsl.map(fnv1a) }).toEqual(PINNED);
   });
 
   it('…and the sim backend\'s differ in exactly the dose source (liveness: the pin can see a change)', () => {

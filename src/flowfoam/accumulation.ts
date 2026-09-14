@@ -4,7 +4,7 @@
  *   1. renderInjection(): ortho capture of `userData.foamTarget` meshes with
  *      a cheap white waterline-band material → injection RT.
  *   2. advect pass: dst = bilerp(prevFoam @ backward flow lookup + region
- *      shift) · decay + capture·injectPerFrame + wakeRate·dt, clamped ≤ 1.
+ *      shift) · decay + capture/wake sources integrated over decay, clamped ≤ 1.
  *   3. blur pass: 3×3 gaussian (weights sum to 1 — §V6 lesson: only decay
  *      may remove foam) written back to the front texture.
  * Fixed pass directions (advect A→B, blur B→A) keep the material-facing
@@ -66,7 +66,7 @@ import {
 import { decayFactorPerFrame, GAUSSIAN_3X3 } from '../foam/foamMath';
 import { worldIntersectionMaskNode } from './intersectionMask';
 import { flowVectorNode, type FlowNoiseUniforms } from './flowNoise';
-import { blurMixForDt, regionShiftUv, snapToTexel } from './flowMath';
+import { blurMixForDt, decayedSourceDuration, regionShiftUv, snapToTexel } from './flowMath';
 import type { FlowFoamParams } from '../params/flowfoam';
 
 /** scene layer owned by the injection capture (tagged meshes get it) */
@@ -130,6 +130,12 @@ export interface AccumProfile {
    * box-filter the sim over its own footprint.
    */
   simFoam?: (worldXZ: any, tierTexel: number) => any;
+  /**
+   * §T.199 this tier's eddy gain inside the trail (default `p.wakeChurn`) — a uniform VALUE, same WGSL. The speedboat
+   * fleet sets its own (flowfoam index `FLEET_WAKE_CHURN`): ×(1 + 1.8) curl in saturated foam swirled the race trail
+   * 6–24 m sideways within its life — the round cloud of T199.
+   */
+  wakeChurn?: () => number;
 }
 
 /** the near tier's profile — `createAccumulation`'s default, exported so a variant can spread it */
@@ -204,7 +210,8 @@ export function createAccumulation(
   const uSlickDecay = uniform(1);
   const uAdvectDt = uniform(0);
   const uInjectPerFrame = uniform(0);
-  const uDt = uniform(0); // wake rate is foam/sec; scaled per fixed tick (§V2)
+  // Foam and slick have different decay clocks; integrate each source.
+  const uSourceDt = uniform(new THREE.Vector2(0, 0));
   const uWakeScale = uniform(profile.wakeScale());
   const uBlurRadius = uniform(p.blurRadius);
   /**
@@ -216,7 +223,7 @@ export function createAccumulation(
   const uBlurMix = uniform(
     blurMixForDt(p.blurSpread, profile.size() / res, p.blurRadius, 1 / 60),
   );
-  const uWakeChurn = uniform(p.wakeChurn);
+  const uWakeChurn = uniform(profile.wakeChurn ? profile.wakeChurn() : p.wakeChurn);
   /**
    * ── THE WATERLINE THE HULL SHEDS FOAM AT, AS A PLANE ────────────────────
    *
@@ -312,7 +319,13 @@ export function createAccumulation(
       const wz = uCenter.y.sub(v.sub(0.5).mul(uSize));
       // foam-scaled churn: eddies spin up INSIDE the trail (user review:
       // "internal motion, water pushed aside"), open ocean stays calm
-      const foamLocal = textureLoad(texA, ivec2(x, y)).r;
+      // History still belongs to the previous region. Read this WORLD cell
+      // there, just as the advection lookup below does. Centres snap to whole
+      // texels; rounding removes floating-point error in the UV conversion.
+      // A newly exposed cell has no old foam and therefore no extra churn.
+      const historyX = x.add(int(uShift.x.mul(res).add(0.5).floor()));
+      const historyY = y.add(int(uShift.y.mul(res).add(0.5).floor()));
+      const foamLocal = loadZero(texA, historyX, historyY).r;
       // far tier skips the flow field entirely — pure shift + decay + wake
       const flow = profile.useFlow
         ? flowVectorNode(vec2(wx, wz), flowU, foamLocal.mul(uWakeChurn).add(1))
@@ -346,8 +359,8 @@ export function createAccumulation(
       const wake = field.rate;
       // §T.171: on the sim backend the doses are the sim's (simFoam.ts), not the analytic envelope's
       const rate = profile.simFoam
-        ? vec4(profile.simFoam(vec2(wx, wz), profile.size() / res), 0, 0).mul(uDt).mul(uWakeScale)
-        : wake.mul(uDt).mul(uWakeScale);
+        ? profile.simFoam(vec2(wx, wz), profile.size() / res).mul(uSourceDt).mul(uWakeScale)
+        : wake.rg.mul(uSourceDt).mul(uWakeScale);
       const foam = prev.x.mul(uDecay).add(inject.mul(uInjectPerFrame)).add(rate.x).min(1);
       // the slick is a coverage that BUILDS and then relaxes — same accumulate/
       // decay shape as the foam, an order of magnitude slower (a real slick
@@ -412,6 +425,9 @@ export function createAccumulation(
       ).toWriteOnly();
     });
   })().compute(res * res);
+
+  // Ordered A→B→A kernels share one submission per tier.
+  const passes = [advectPass, blurPass];
 
   // --- region state ---
   const center = new THREE.Vector2(0, 0); // texel-snapped world XZ
@@ -478,23 +494,24 @@ export function createAccumulation(
 
     /** one sim step (§V2 fixed dt): pushes live params, advect+blur computes */
     step(renderer: THREE.WebGPURenderer, dt: number): void {
+      const foamDuration = decayedSourceDuration(profile.decayHalfLife(), dt);
+      const slickDuration = decayedSourceDuration(p.slickHalfLife, dt);
       uSize.value = profile.size();
       uDecay.value = decayFactorPerFrame(profile.decayHalfLife(), dt);
       uSlickDecay.value = decayFactorPerFrame(p.slickHalfLife, dt);
       uAdvectDt.value = p.advectSpeed * dt;
-      uInjectPerFrame.value = p.injectStrength * dt;
-      uDt.value = dt;
+      uInjectPerFrame.value = p.injectStrength * foamDuration;
+      uSourceDt.value.set(foamDuration, slickDuration);
       uWakeScale.value = profile.wakeScale();
       uBlurRadius.value = p.blurRadius;
       // §V2: diffusion is a rate per SECOND, so the kernel weight is solved
       // against this tick's dt and this tier's texel (flowMath.blurMixForDt)
       uBlurMix.value = blurMixForDt(p.blurSpread, uSize.value / res, p.blurRadius, dt);
-      uWakeChurn.value = p.wakeChurn;
+      uWakeChurn.value = profile.wakeChurn ? profile.wakeChurn() : p.wakeChurn;
       uThreshold.value = p.depthThreshold;
       uFeather.value = p.maskFeather;
       uShift.value.copy(pendingShift);
-      renderer.compute(advectPass);
-      renderer.compute(blurPass);
+      renderer.compute(passes);
       pendingShift.set(0, 0);
     },
 

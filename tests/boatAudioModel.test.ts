@@ -1,5 +1,7 @@
 /**
  * §T.183 rpm model — the physics the engine voice's pitch comes from (V112: pitch = rpm, never speed).
+ * The first blocks pin the temporary audio adapter (`rpmModel.ts`, still the turbine/two-stroke/electric model);
+ * the last block pins the §T.189 seam, where the V8 runs `sea-physics/engine.ts`.
  *
  * WHY each property:
  *  - AIRBORNE FLARE: the design doc's "airborne over-rev" must fall out of the prop losing its water
@@ -26,6 +28,8 @@ import {
   type EngineSpec,
   type EngineState,
 } from '../src/audio/boat/rpmModel';
+import * as SEAM from '../src/audio/boat/engineModel';
+import { MERCURY_450R, createEngineState as createPhysicsEngine, stepEngine as stepPhysicsEngine } from '../src/sea-physics/engine';
 
 const DT = 1 / 1500; // the worklet's control step (32 samples at 48 k)
 
@@ -196,5 +200,70 @@ describe('§T.183 rpm model — overrun, robustness, override', () => {
       stepEngine(b, V8_SPEC, inp, DT);
     }
     expect(a).toEqual(b);
+  });
+});
+
+describe('§T.189 engine-model seam: the V8 voice runs the SIM engine (sea-physics/engine.ts)', () => {
+  // WHY: V77 — thrust, the Governor and the voice must agree on rpm. These pin that the seam really drives
+  // the physics model (same limiter, same prop), that a sim-published rpm wins, and that the sound-only
+  // fuel-cut bookkeeping (pops) follows the physics limiter rather than a second copy of it.
+  const S = SEAM.ENGINE_SPECS.v8;
+  const runSeam = (st: SEAM.EngineState, input: SEAM.EngineInput, seconds: number, each?: (s: SEAM.EngineState, t: number) => void) => {
+    const n = Math.round(seconds / DT);
+    for (let i = 0; i < n; i++) {
+      SEAM.stepEngine(st, S, input, DT);
+      each?.(st, (i + 1) * DT);
+    }
+    return st;
+  };
+
+  it('the V8 spec IS the physics 450R (gear, idle, limiter), not the audio adapter', () => {
+    expect(S.physics).toBe(MERCURY_450R);
+    expect(S.gear).toBe(MERCURY_450R.gear);
+    expect(S.limitRpm).toBe(MERCURY_450R.limitRpm);
+  });
+
+  it('local integration matches the physics model step for step', () => {
+    const seam = SEAM.createEngineState(S);
+    const phys = createPhysicsEngine(MERCURY_450R);
+    const input = { throttle: 1, advance: 30, immersion: 0.9 };
+    for (let i = 0; i < 3000; i++) {
+      SEAM.stepEngine(seam, S, { ...input, governor: 'off' }, DT);
+      stepPhysicsEngine(phys, MERCURY_450R, input, DT);
+    }
+    expect(seam.rpm).toBe(phys.rpm);
+  });
+
+  it('airborne at WOT: physics limiter bounces, every cut is counted and re-fires (the pops)', () => {
+    const st = runSeam(SEAM.createEngineState(S), { throttle: 1, advance: MERCURY_450R.calSpeed, immersion: 1, governor: 'off' }, 8);
+    let peak = 0;
+    runSeam(st, { throttle: 1, advance: MERCURY_450R.calSpeed, immersion: 0, governor: 'off' }, 2, (s) => (peak = Math.max(peak, s.rpm)));
+    expect(st.cutCount).toBeGreaterThan(8);
+    expect(st.refireCount).toBeGreaterThanOrEqual(st.cutCount - 1);
+    expect(peak).toBeLessThan(MERCURY_450R.limitRpm + 150);
+  });
+
+  it('a sim-published rpm wins: the state follows it, and the limiter flags come from the physics thresholds applied to it', () => {
+    const st = SEAM.createEngineState(S);
+    runSeam(st, { throttle: 0.6, advance: 0, immersion: 1, governor: 'off', rpmOverride: 4321 }, 0.5);
+    expect(st.rpm).toBeCloseTo(4321, 0);
+    expect(st.limiterCut).toBe(false);
+    runSeam(st, { throttle: 1, advance: 0, immersion: 0, governor: 'off', rpmOverride: MERCURY_450R.limitRpm + 50 }, 0.3);
+    expect(st.limiterCut).toBe(true);
+    const cuts = st.cutCount;
+    runSeam(st, { throttle: 1, advance: 0, immersion: 0, governor: 'off', rpmOverride: MERCURY_450R.limitRpm - MERCURY_450R.limitHystRpm - 100 }, 0.3);
+    expect(st.limiterCut).toBe(false);
+    expect(st.refireCount).toBeGreaterThan(0);
+    expect(cuts).toBeGreaterThan(0);
+  });
+
+  it('lift at speed through the seam: the overrun cut silences combustion (load 0), then fuel returns', () => {
+    const st = runSeam(SEAM.createEngineState(S), { throttle: 1, advance: 35, immersion: 1, governor: 'off' }, 6);
+    runSeam(st, { throttle: 0, advance: 35, immersion: 1, governor: 'off' }, 0.3);
+    expect(st.overrun).toBe(true);
+    expect(st.load).toBe(0);
+    runSeam(st, { throttle: 0, advance: 0, immersion: 1, governor: 'off' }, 5);
+    expect(st.overrun).toBe(false);
+    expect(st.load).toBeGreaterThan(0);
   });
 });

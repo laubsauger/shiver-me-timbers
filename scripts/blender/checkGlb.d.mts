@@ -29,5 +29,23 @@ export function hullTopology(
   tol: number,
 ): { tris: number; degenerate: number; openEdges: number; nonManifoldEdges: number; windingConflicts: number; volume: number };
 export function ktx2LevelCount(bytes: Uint8Array | null): number;
+/** §T.200: which channels a KTX2 actually encodes (DFD), and the livery channels a packaged boat must keep */
+export function ktx2Channels(bytes: Uint8Array | null): { model: number; r: boolean; g: boolean; b: boolean; a: boolean } | null;
+export function liveryChannelErrors(document: Document): string[];
 export function checkDocument(document: Document, contract: unknown, opts?: CheckOptions): CheckResult;
 export function checkGlbFile(path: string, opts?: CheckOptions): Promise<CheckResult>;
+/** §V98 on the built GLB (§T.192): coplanar overlaps wider than 2 cm in both in-plane axes, world space */
+export function coplanarOverlaps(
+  lod0: import('@gltf-transform/core').Node | undefined,
+  opts?: { planeTol?: number; maxAngleDeg?: number; minExtent?: number },
+): { area: number; extent: [number, number]; centre: [number, number, number]; normal: [number, number, number]; nodes: [string, string]; materials: [string, string] }[];
+export function coplanarErrors(lod0: import('@gltf-transform/core').Node | undefined, opts?: { planeTol?: number; maxAngleDeg?: number; minExtent?: number }): string[];
+/** §T.192: per engine and coarse LOD, the worst distance of that LOD's drive surface samples from the LOD0 drive */
+export function driveLodDeviation(
+  lodGroups: (import('@gltf-transform/core').Node | undefined)[],
+): { level: number; engine: string; worst: number; at: [number, number, number] | null; node: string | null; samples: number }[];
+export function driveLodErrors(lodGroups: (import('@gltf-transform/core').Node | undefined)[], opts?: { tol?: number }): string[];
+/** §T.192: the hull water-mask extras cover the well sole and stay inside the deck edge */
+export function waterMaskErrors(rootExtras: Record<string, unknown>, lod0: import('@gltf-transform/core').Node | undefined, tol?: number): string[];
+/** §T.192 / pilot-log v2: seat, wheel rim, throttle handle, footrest and dash cable sockets exist, agree and are reachable */
+export function partsSocketErrors(rootExtras: Record<string, unknown>, lod0: import('@gltf-transform/core').Node | undefined): string[];

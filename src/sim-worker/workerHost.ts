@@ -32,7 +32,7 @@ export function runSimWorker(port: HostPort): void {
   port.listen((msg) => {
     if (msg.type === 'init') {
       try {
-        core = new BoatSimCore({ seed: msg.seed, oceanParams: msg.oceanParams, seaParams: msg.seaParams, pilot: msg.pilot, contacts: msg.contacts });
+        core = new BoatSimCore({ seed: msg.seed, oceanParams: msg.oceanParams, seaParams: msg.seaParams, pilot: msg.pilot, contacts: msg.contacts, world: msg.world });
         layout = new BoatSimLayout(msg.buffer);
       } catch (e) {
         const buf = msg.buffer instanceof ArrayBuffer ? msg.buffer : undefined;

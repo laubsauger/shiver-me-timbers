@@ -44,9 +44,14 @@ export interface ShelterField {
  * passed in (the page already has the archipelago's); the fetch field is always
  * its own, on REFERENCE_SEA.
  */
-export function createShelterField(islands: readonly SeabedIsland[], seabed?: SeabedField): ShelterField {
+export function createShelterField(
+  islands: readonly SeabedIsland[],
+  seabed?: SeabedField,
+  /** the sea to measure in (default REFERENCE_SEA) — tools comparing sea presets pass their own */
+  sea: Readonly<OceanParams> = REFERENCE_SEA,
+): ShelterField {
   const bed = seabed ?? createSeabedField(islands);
-  const fetch = createFetchField(bed, { ...REFERENCE_SEA });
+  const fetch = createFetchField(bed, { ...sea });
   return {
     seabed: bed,
     fetch,

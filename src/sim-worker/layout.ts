@@ -14,7 +14,7 @@
  *   WORLD             boats×13   f64  every boat's pose at tick k         (main writes, stepper READ-ONLY)
  *   BOAT i            BOAT_FIXED + wakeCap×5 f64 per boat:
  *     IN   controls[4], resetSeq, resetPose[13]                           (main writes)
- *     OUT  pose[13], contact summary, wake load samples                   (stepper writes, main reads)
+ *     OUT  pose[13], contact summary, effects record (§T.195 fx.ts), wake load samples (stepper writes, main reads)
  *
  * OWNERSHIP IS BY REGION, NOT BY LOCK. Between `kick` and `done` the main thread must not
  * touch the buffer; outside that window the stepper does not. A shard's stepper writes the
@@ -31,6 +31,8 @@
  * would be a second transferred buffer per shard. See docs/speedboat/sim-worker.md.
  */
 
+import { FX_LEN } from './fx';
+
 /** 13 channels, the order rigid6 owns them in: position 3, quaternion 4, velocity 3, angularVelocity 3 */
 export const POSE_LEN = 13;
 export const CONTROL_LEN = 4;
@@ -38,7 +40,9 @@ export const CONTROL_LEN = 4;
 export const WAKE_SAMPLE_LEN = 5;
 
 export const LAYOUT_MAGIC = 0x0b0a7178;
-export const LAYOUT_VERSION = 1;
+/** 2: §T.191 grew the Float64 header by 4 slots (external boats, trace) — every region moved by 32 bytes, OUT content unchanged */
+/** 3: §T.195 the boat block carries the EFFECTS record (`B.FX`, fx.ts) before the wake samples — `B.WAKE` moved by FX_LEN */
+export const LAYOUT_VERSION = 3;
 
 /** Int32 header slots */
 export const H = {
@@ -90,8 +94,19 @@ export const F = {
   MIRROR_RESOLUTION: 13,
   INVERSE_DISPLACEMENT_ITERATIONS: 14,
   UPDATE_EVERY_TICKS: 15,
+  /** §T.191 main-written at construction: the LAST n boats are EXTERNAL (main-driven poses, never stepped) */
+  EXTERNAL_BOATS: 16,
+  /** §T.191 main-written at construction: TRACE_LEN when the layout carries a TRACE region, else 0 */
+  TRACE_LEN: 17,
+  /**
+   * §T.198 main → stepper: bit i set ⇒ boat i's boat↔boat contacts this tick are SOFT (sea-physics/boatCollide
+   * `softMask`: the rolling-start formation's gentle separation). A uint32 held exactly in a double; one value every
+   * shard reads, so both boats of a pair agree (§V2). Ghosts (CONTACT_OFF_MASK) win over it.
+   */
+  CONTACT_SOFT_MASK: 18,
+  // 19 reserved
 } as const;
-const HEADER_END_F64 = 16;
+const HEADER_END_F64 = 20;
 
 /** boat block slots, relative to `boatOffset(i)` */
 export const B = {
@@ -113,7 +128,9 @@ export const B = {
   WAKE_RESCALE: 42,
   /** samples the contact produced beyond wakeCap (dropped — non-zero means raise the cap) */
   WAKE_OVERFLOW: 43,
-  WAKE: 44,
+  /** §T.195 the effects record: prop jets + waterline spray of this step (fx.ts, FX_LEN f64; stepper writes, hashed) */
+  FX: 44,
+  WAKE: 44 + FX_LEN,
 } as const;
 export const BOAT_FIXED = B.WAKE;
 
@@ -128,6 +145,42 @@ export const AI_OUT_LEN = 24;
 export const AI_IN_LEN = 8;
 export const AI_BLOCK_LEN = AI_OUT_LEN + AI_IN_LEN;
 
+/**
+ * TRACE (§T.191): per row per boat, what the page's race logic and crash machines need of a tick it never saw (a
+ * rival stepped inside a multi-tick request). Written by the core after each stepped boat's step; the player's is
+ * filled by the same `trace.ts writeTrace` on the page. Not hashed (OUT is).
+ */
+export const TR_MAX_POSITIONS = 4;
+export const TR = {
+  /** p3 q4 v3 ω3 after the step */
+  POSE: 0,
+  SUBSTEPS: 13,
+  /** substep END x, z pairs (up to TR_MAX_POSITIONS; unused pairs repeat the final position) */
+  POS: 14,
+  WETTED: 22,
+  SLAM: 23,
+  PROP_IMM: 24,
+  /** crash/sensors bowImmersion against the contact patch */
+  BOW_IMM: 25,
+  CONTACT_DV: 26,
+  CONTACT_SRC: 27,
+  /** body-frame point x, y, z */
+  CONTACT_POINT: 28,
+  CONTACT_OTHER: 31,
+  /** 0/1 */
+  OVERLAPS: 32,
+  /** the core's fetch field version after the step (NaN without world data) */
+  FETCH_VERSION: 33,
+  THROTTLE: 34,
+  /** normalised −1..1 applied */
+  STEER: 35,
+  /** §T.191 per-drive rpm of the §T.189 engine model (HullWater.driveRpm, drives 0..2; 0 past the hull's drives) — audio */
+  RPM: 36,
+} as const;
+export const TRACE_LEN = 39;
+/** drives whose rpm the trace carries */
+export const TR_RPM_DRIVES = 3;
+
 export interface LayoutSpec {
   boats: number;
   wakeCap: number;
@@ -137,6 +190,10 @@ export interface LayoutSpec {
   aiLen?: number;
   /** 0/absent = no BATCH region (one tick per kick only); n = up to n ticks per kick (§T.181) */
   batchCap?: number;
+  /** §T.191: the LAST n boats are external (main writes their pose; no core steps them); batch rows carry their pose */
+  externalBoats?: number;
+  /** §T.191: a TRACE region, max(1, batchCap) rows × boats × TRACE_LEN */
+  trace?: boolean;
 }
 
 /**
@@ -148,15 +205,19 @@ export interface LayoutSpec {
  *   COUNT      1 f64                   ticks in this kick; 0 ⇒ the classic kick (TIME/OCEAN/SEA/CONTROLS as written)
  *   PREV POSE  boats × 13 f64          each owned boat's pose BEFORE the kick's last tick (stepper writes) — the
  *                                      render interpolation pair of a multi-tick kick, from stepper output
- *   ROW j      tick, time, contact-off mask, ocean[oceanLen], sea[seaLen], per boat: controls[4] (+ AI IN[8] when aiLen)
+ *   ROW j      tick, time, contact-off mask, contact-soft mask (§T.198), ocean[oceanLen], sea[seaLen], per boat: controls[4] (+ AI IN[8] when aiLen)
  *                                      main writes; the stepper copies row j into the normal slots, then steps
  */
-export const BATCH_ROW_FIXED = 3;
-/** row slots; CONTACT_OFF_MASK is the §T.188 header mask for THAT tick (a uint32 held exactly in a double) */
-export const BATCH_ROW = { TICK: 0, TIME: 1, CONTACT_OFF_MASK: 2, PARAMS: 3 } as const;
+export const BATCH_ROW_FIXED = 4;
+/** row slots; CONTACT_OFF_MASK is the §T.188 header mask for THAT tick, CONTACT_SOFT_MASK §T.198's (uint32s held exactly in doubles) */
+export const BATCH_ROW = { TICK: 0, TIME: 1, CONTACT_OFF_MASK: 2, CONTACT_SOFT_MASK: 3, PARAMS: 4 } as const;
 
 export function batchRowLength(s: LayoutSpec): number {
-  return BATCH_ROW_FIXED + s.oceanLen + s.seaLen + s.boats * (CONTROL_LEN + (s.aiLen ? AI_IN_LEN : 0));
+  return BATCH_ROW_FIXED + s.oceanLen + s.seaLen + s.boats * (CONTROL_LEN + (s.aiLen ? AI_IN_LEN : 0)) + (s.externalBoats ?? 0) * POSE_LEN;
+}
+
+export function traceRegionLength(s: LayoutSpec): number {
+  return s.trace ? Math.max(1, s.batchCap ?? 0) * s.boats * TRACE_LEN : 0;
 }
 
 export function batchRegionLength(s: LayoutSpec): number {
@@ -169,7 +230,7 @@ export function boatBlockLength(wakeCap: number, aiLen = 0): number {
 }
 
 export function layoutByteLength(s: LayoutSpec): number {
-  return (HEADER_END_F64 + s.oceanLen + s.seaLen + s.boats * POSE_LEN + s.boats * boatBlockLength(s.wakeCap, s.aiLen ?? 0) + batchRegionLength(s)) * 8;
+  return (HEADER_END_F64 + s.oceanLen + s.seaLen + s.boats * POSE_LEN + s.boats * boatBlockLength(s.wakeCap, s.aiLen ?? 0) + batchRegionLength(s) + traceRegionLength(s)) * 8;
 }
 
 type AnyBuffer = ArrayBuffer | SharedArrayBuffer;
@@ -194,8 +255,13 @@ export class BoatSimLayout {
     const i32 = new Int32Array(buffer, 0, HEADER_I32);
     if (spec) {
       for (const [k, v] of Object.entries(spec)) {
+        if (k === 'trace') {
+          if (typeof v !== 'boolean') throw new Error(`sim layout: trace must be a boolean, got ${v}`);
+          continue;
+        }
         if (!Number.isInteger(v) || v < 0) throw new Error(`sim layout: ${k} must be a non-negative integer, got ${v}`);
       }
+      if ((spec.externalBoats ?? 0) > spec.boats) throw new Error(`sim layout: ${spec.externalBoats} external boats > ${spec.boats} boats`);
       if (buffer.byteLength < layoutByteLength(spec)) {
         throw new Error(`sim layout: buffer ${buffer.byteLength} B < ${layoutByteLength(spec)} B`);
       }
@@ -211,10 +277,18 @@ export class BoatSimLayout {
       if (ai !== 0 && ai !== AI_BLOCK_LEN) throw new Error(`sim layout: aiLen must be 0 or ${AI_BLOCK_LEN}, got ${ai}`);
       i32[H.AI_LEN] = ai;
       i32[H.BATCH_CAP] = spec.batchCap ?? 0;
+      const fh = new Float64Array(buffer, 0, HEADER_END_F64);
+      fh[F.EXTERNAL_BOATS] = spec.externalBoats ?? 0;
+      fh[F.TRACE_LEN] = spec.trace ? TRACE_LEN : 0;
     }
     if (i32[H.MAGIC] !== LAYOUT_MAGIC || i32[H.VERSION] !== LAYOUT_VERSION) {
       throw new Error(`sim layout: bad magic/version ${i32[H.MAGIC]}/${i32[H.VERSION]}`);
     }
+    const fh = new Float64Array(buffer, 0, HEADER_END_F64);
+    const ext = fh[F.EXTERNAL_BOATS];
+    const trLen = fh[F.TRACE_LEN];
+    if (!(Number.isInteger(ext) && ext >= 0 && ext <= i32[H.BOATS])) throw new Error(`sim layout: bad external boat count ${ext}`);
+    if (trLen !== 0 && trLen !== TRACE_LEN) throw new Error(`sim layout: trace record ${trLen} f64, this build writes ${TRACE_LEN}`);
     this.spec = Object.freeze({
       boats: i32[H.BOATS],
       wakeCap: i32[H.WAKE_CAP],
@@ -223,6 +297,8 @@ export class BoatSimLayout {
       // present only when set, so a pilot-less layout's spec is exactly what it was before §T.186
       ...(i32[H.AI_LEN] > 0 ? { aiLen: i32[H.AI_LEN] } : {}),
       ...(i32[H.BATCH_CAP] > 0 ? { batchCap: i32[H.BATCH_CAP] } : {}),
+      ...(ext > 0 ? { externalBoats: ext } : {}),
+      ...(trLen > 0 ? { trace: true } : {}),
     });
     if (buffer.byteLength < layoutByteLength(this.spec)) {
       throw new Error(`sim layout: buffer ${buffer.byteLength} B too short for its own header`);
@@ -282,6 +358,27 @@ export class BoatSimLayout {
   batchBoatInputOffset(rowOffset: number, i: number): number {
     if (!(i >= 0 && i < this.spec.boats)) throw new Error(`sim layout: boat ${i} out of [0, ${this.spec.boats})`);
     return rowOffset + BATCH_ROW_FIXED + this.spec.oceanLen + this.spec.seaLen + i * (CONTROL_LEN + (this.spec.aiLen ? AI_IN_LEN : 0));
+  }
+
+  /** §T.191: boat i is external (main-driven, never stepped) */
+  isExternal(i: number): boolean {
+    return i >= this.spec.boats - (this.spec.externalBoats ?? 0) && i < this.spec.boats;
+  }
+
+  /** §T.191: external boat i's pose slot inside batch row `rowOffset` */
+  batchExternalPoseOffset(rowOffset: number, i: number): number {
+    if (!this.isExternal(i)) throw new Error(`sim layout: boat ${i} is not external`);
+    const first = this.spec.boats - (this.spec.externalBoats ?? 0);
+    return rowOffset + BATCH_ROW_FIXED + this.spec.oceanLen + this.spec.seaLen + this.spec.boats * (CONTROL_LEN + (this.spec.aiLen ? AI_IN_LEN : 0)) + (i - first) * POSE_LEN;
+  }
+
+  /** §T.191: start of boat i's TRACE record for row j (row 0 = a classic kick's tick) */
+  traceOffset(j: number, i: number): number {
+    if (!this.spec.trace) throw new Error('sim layout: no TRACE region (build the layout with trace)');
+    const rows = Math.max(1, this.spec.batchCap ?? 0);
+    if (!(j >= 0 && j < rows)) throw new Error(`sim layout: trace row ${j} out of [0, ${rows})`);
+    if (!(i >= 0 && i < this.spec.boats)) throw new Error(`sim layout: boat ${i} out of [0, ${this.spec.boats})`);
+    return this.boatsOffset + this.spec.boats * this.blockLength + batchRegionLength(this.spec) + (j * this.spec.boats + i) * TRACE_LEN;
   }
 
   /** a byte-exact copy of the stepper's OUT region for one boat — what the V2 hash is taken over (AI OUT included, AI IN not) */

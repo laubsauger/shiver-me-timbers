@@ -603,6 +603,8 @@ export interface CreateGroundCoverOptions {
    * maps read its terrain-info bake and its route masks.
    */
   sierra?: IslandHeightmap;
+  /** §T.194: the sierra understory's params for this island (a `kit:` island); absent = the live globals */
+  sierraParams?: SierraParams;
 }
 
 export interface GroundCoverMeshes {
@@ -672,7 +674,7 @@ function createSierraCover(
   material: THREE.Material,
   own: CoverMeshMaterial | null,
 ): GroundCoverMeshes {
-  const sp = sierraParams;
+  const sp = opts.sierraParams ?? sierraParams;
   const grassGeo = buildBunchgrassGeometry(opts.seed, sp);
   const deadfallGeo = buildDeadfallGeometry(opts.seed + 5501, sp);
   const coneGeo = buildConeGeometry(opts.seed + 7717, sp);

@@ -341,6 +341,94 @@ describe('cockpit', () => {
     expect(low).toBeGreaterThanOrEqual(-0.06 - 1e-9);
     expect(low).toBeLessThan(-0.02);
   });
+
+  describe('T206 stabilised eye (USER: "first person head shaking is way too intense and instant … standing on the calm boat")', () => {
+    // WHY: the view is a head, not a bone. The pilot's idle clip, measured at cam_eye relative to the seat
+    // (speedboat_pilot.glb idle_seated): 20.8 mm / 1.36° excursion, 18 Hz key steps up to 91°/s, a 0.75° snap at the 2 s
+    // loop seam. Riding that bone raw was the shake. This source reproduces it: a 0.5 Hz 15 mm p-p sway, an 18 Hz
+    // 1.4° / 5 mm buzz, and the seam snap. The boat also bobs (it must be followed exactly), so jitter is measured in
+    // the BOAT's frame.
+    const DT = 1 / 60;
+    const boatAt = (t: number): RaceCamTarget => ({
+      position: [0.3 * Math.sin(t * 1.1), 0.35 + 0.2 * Math.sin(t * 0.9), 0.1 * t],
+      quaternion: quatFromAxisAngle([1, 0, 0], 1.5 * DEG * Math.sin(t * 1.3)) as RaceCamTarget['quaternion'],
+      velocity: [0, 0, 0.1],
+      wet: true,
+    });
+    const idleEye = (cam: RaceCam, clock: () => number, target: () => RaceCamTarget): void =>
+      cam.setEyeSource((pos, q) => {
+        const t = clock();
+        const seam = (t % 2) / 2 > 0.5 ? 0.75 * DEG : 0;
+        const buzz = Math.sign(Math.sin(2 * Math.PI * 18 * t));
+        const local = new Vector3(0, 1.4 + 0.0025 * buzz, 0.5 + 0.0075 * Math.sin(Math.PI * t));
+        const head = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), 0.7 * DEG * buzz + seam);
+        const tg = target();
+        const body = new Quaternion(...tg.quaternion);
+        pos.copy(local).applyQuaternion(body).add(new Vector3(...tg.position));
+        q.copy(body).multiply(new Quaternion(0, 1, 0, 0)).multiply(head);
+        return true;
+      });
+    const inBoat = (camera: PerspectiveCamera, tg: RaceCamTarget): { p: Vector3; q: Quaternion } => {
+      const inv = new Quaternion(...tg.quaternion).invert();
+      return { p: camera.position.clone().sub(new Vector3(...tg.position)).applyQuaternion(inv), q: inv.multiply(camera.quaternion) };
+    };
+
+    it('at rest in calm water the eye moves < 2 mm and < 0.2° against the seat, with no frame step (idle clip on the head)', () => {
+      const camera = new PerspectiveCamera();
+      const cam = new RaceCam(camera, CHASE);
+      let t = 0;
+      idleEye(cam, () => t, () => boatAt(t));
+      cam.setMode('cockpit');
+      const lo = new Vector3(Infinity, Infinity, Infinity);
+      const hi = new Vector3(-Infinity, -Infinity, -Infinity);
+      let ref: Quaternion | null = null;
+      let maxDeg = 0;
+      for (let k = 0; k < 60 * 20; k++, t += DT) {
+        cam.addSlam(0.003); // resting contact noise HullWater reports every tick in calm water
+        cam.update(boatAt(t), DT);
+        if (t < 8) continue;
+        const { p, q } = inBoat(camera, boatAt(t));
+        lo.min(p);
+        hi.max(p);
+        ref ??= q;
+        maxDeg = Math.max(maxDeg, q.angleTo(ref) / DEG);
+      }
+      const pp = hi.sub(lo).length() * 1000;
+      expect(pp, `eye p-p ${pp.toFixed(2)} mm`).toBeLessThan(2);
+      expect(maxDeg, `eye rotation ${maxDeg.toFixed(3)}°`).toBeLessThan(0.2);
+    });
+
+    it('a landing slam gives a bounded dip that decays; no instant snap of the view', () => {
+      const camera = new PerspectiveCamera();
+      const cam = new RaceCam(camera, CHASE);
+      let t = 0;
+      const still: RaceCamTarget = { position: [0, 0.35, 0], quaternion: [0, 0, 0, 1], velocity: [0, 0, 0], wet: true };
+      idleEye(cam, () => t, () => still);
+      cam.setMode('cockpit');
+      for (let k = 0; k < 60 * 8; k++, t += DT) cam.update(still, DT);
+      const rest = camera.position.clone();
+      const restQ = camera.quaternion.clone();
+      cam.addSlam(8); // a hard landing: 8 m/s of vertical speed lost
+      let low = 0;
+      let prev = camera.position.clone();
+      let maxStep = 0;
+      let maxDeg = 0;
+      const dev: number[] = [];
+      for (let k = 0; k < 90; k++, t += DT) {
+        cam.update(still, DT);
+        low = Math.min(low, camera.position.y - rest.y);
+        maxStep = Math.max(maxStep, camera.position.distanceTo(prev));
+        maxDeg = Math.max(maxDeg, camera.quaternion.angleTo(restQ) / DEG);
+        prev = camera.position.clone();
+        dev.push(camera.position.distanceTo(rest));
+      }
+      expect(low).toBeLessThan(-0.02); // it is felt
+      expect(low).toBeGreaterThanOrEqual(-RACE_CAM_DEFAULTS.dipMax - 0.002); // bounded
+      expect(maxStep).toBeLessThan(0.02); // < 2 cm per frame: a dip, not a snap
+      expect(maxDeg).toBeLessThan(0.2); // the dip is vertical: the view does not shake
+      expect(dev.at(-1)!).toBeLessThan(0.002); // gone within 1.5 s
+    });
+  });
 });
 
 describe('shake and crash cam', () => {

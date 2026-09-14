@@ -45,11 +45,20 @@ def lin_srgb(c):
 
 
 FLEET = {
-    # STYLE-SPEC §4.2 (+ numeral colour: black on light topsides, bone on charcoal)
-    'hero': {'topsides': '#E9E5DA', 'band': '#E4572E', 'stripe': '#1F4E5F', 'antifoul': '#6B2E25', 'numeral': '#151B1C', 'number': 27},
-    'yellow': {'topsides': '#2B2F33', 'band': '#E8B420', 'stripe': '#C8372D', 'antifoul': '#6B2E25', 'numeral': '#E9E5DA', 'number': 8},
-    'turquoise': {'topsides': '#3E8C8A', 'band': '#F2E6C8', 'stripe': '#2B2F33', 'antifoul': '#1E1F21', 'numeral': '#151B1C', 'number': 41},
-    'charcoal': {'topsides': '#2B2F33', 'band': '#E9E5DA', 'stripe': '#E4572E', 'antifoul': '#1E1F21', 'numeral': '#E9E5DA', 'number': 63},
+    # STYLE-SPEC §4.2 (+ numeral colour: black on light topsides, bone on charcoal); `dominant` = the cowl livery hue
+    'hero': {'topsides': '#E9E5DA', 'band': '#E4572E', 'stripe': '#1F4E5F', 'antifoul': '#6B2E25', 'numeral': '#151B1C', 'dominant': '#E4572E', 'number': 27},
+    'yellow': {'topsides': '#2B2F33', 'band': '#E8B420', 'stripe': '#C8372D', 'antifoul': '#6B2E25', 'numeral': '#E9E5DA', 'dominant': '#E8B420', 'number': 8},
+    'turquoise': {'topsides': '#3E8C8A', 'band': '#F2E6C8', 'stripe': '#2B2F33', 'antifoul': '#1E1F21', 'numeral': '#151B1C', 'dominant': '#3E8C8A', 'number': 41},
+    'charcoal': {'topsides': '#2B2F33', 'band': '#E9E5DA', 'stripe': '#E4572E', 'antifoul': '#1E1F21', 'numeral': '#E9E5DA', 'dominant': '#2B2F33', 'number': 63},
+    # the race grid, a copy of src/speedboat/assets/livery.ts FLEET_LIVERIES for the CPU previews (§T.200 stripe scheme;
+    # tests/assetPipelineRuntime.test.ts fails when the two drift)
+    'dome-ten': {'topsides': '#2B2F33', 'band': '#FFD21F', 'stripe': '#C8372D', 'antifoul': '#1E1F21', 'numeral': '#E9E5DA', 'dominant': '#FFD21F', 'number': 9},
+    'outer-bar': {'topsides': '#5A4F42', 'band': '#6CC24A', 'stripe': '#E9E5DA', 'antifoul': '#1E1F21', 'numeral': '#E9E5DA', 'dominant': '#6CC24A', 'number': 44},
+    'bench-hollow': {'topsides': '#CDBFA3', 'band': '#7A1F2B', 'stripe': '#151B1C', 'antifoul': '#1E1F21', 'numeral': '#151B1C', 'dominant': '#7A1F2B', 'number': 3},
+    'pine-cut': {'topsides': '#F4F3EE', 'band': '#6B6B1E', 'stripe': '#151B1C', 'antifoul': '#1E1F21', 'numeral': '#151B1C', 'dominant': '#6B6B1E', 'number': 56},
+    'levee-town': {'topsides': '#D7DADB', 'band': '#141414', 'stripe': '#C8372D', 'antifoul': '#1E1F21', 'numeral': '#151B1C', 'dominant': '#141414', 'number': 22},
+    'solar-ridge': {'topsides': '#A89C84', 'band': '#6A3FD0', 'stripe': '#151B1C', 'antifoul': '#1E1F21', 'numeral': '#151B1C', 'dominant': '#6A3FD0', 'number': 27},
+    'the-stills': {'topsides': '#3A3D40', 'band': '#F25CB0', 'stripe': '#E9E5DA', 'antifoul': '#1E1F21', 'numeral': '#E9E5DA', 'dominant': '#F25CB0', 'number': 11},
 }
 CHALK = hex_lin('#E4DFD3')
 SALT = hex_lin('#D9D3C4')
@@ -493,12 +502,14 @@ def composite(H, D, size, anchors):
     sd_band = band_lo - d + 0.003 * nm
     stripe_c = H.stripe_centre(zn)
     st_half = H.stripe_t / 2
-    sd_stripe = st_half - np.abs(d - stripe_c) + 0.0015 * nm
+    # G = the union of both pinstripes (§T.200 secondary pinstripe): one field, one hue, no extra channel
+    stripe2_c = H.stripe2_centre(zn)
+    sd_stripe = np.maximum(st_half - np.abs(d - stripe_c), H.stripe2_t / 2 - np.abs(d - stripe2_c)) + 0.0015 * nm
     k = 0.05
     boot_y = H.boot_y(cy)
     del k
-    # clear topside between the pinstripe and the boot line, as a 0..1 fraction (0 = under the stripe)
-    clear_d0 = stripe_c + st_half
+    # clear topside between the lowest pinstripe and the boot line, as a 0..1 fraction (0 = under the stripes)
+    clear_d0 = stripe2_c + H.stripe2_t / 2
     clear_h = np.maximum((dy - boot_y) - clear_d0, 0.05)
     fd = (d - clear_d0) / clear_h
     sd_boot = boot_y - hy + 0.004 * nm
@@ -1137,7 +1148,7 @@ def downsample(arr, f):
     return arr.reshape(h // f, f, w // f, f, *arr.shape[2:]).mean(axis=(1, 3))
 
 
-def bake_and_texture(H, hull_obj, args, anchors, preview_variants=('hero', 'yellow', 'turquoise')):
+def bake_and_texture(H, hull_obj, args, anchors, preview_variants=('hero', 'dome-ten', 'outer-bar', 'bench-hollow', 'pine-cut', 'levee-town', 'solar-ridge', 'the-stills')):
     size = 1 << int(round(math.log2(max(64, args.bake_size * 2))))
     work = args.work
     D = bake(hull_obj, size, args.ao_samples)

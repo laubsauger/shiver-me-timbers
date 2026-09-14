@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:changed": "node scripts/test-changed.mjs",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "cine:sink": "node scripts/cine-sink.mjs",
+    "cine:mux": "node scripts/cine-mux.mjs"
   },
   "dependencies": {
     "three": "^0.180.0",

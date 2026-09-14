@@ -1,0 +1,17 @@
+[
+  {
+    "scenario": "near-only",
+    "age": 1,
+    "coverage": 0.19999997317790985
+  },
+  {
+    "scenario": "far-only",
+    "age": 1,
+    "coverage": 0.20000003278255463
+  },
+  {
+    "scenario": "far-disabled",
+    "age": 1,
+    "coverage": 0.19999997317790985
+  }
+]

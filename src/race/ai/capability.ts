@@ -1,6 +1,8 @@
 /**
  * WHAT THE V-39 CAN DO, MEASURED (§T.186, tech-research §5.3). Committed output of `measure.ts#measureCapability`
- * — the real `HullWater` + `stepRigid6` on flat water, default params, the TEMPORARY stand-in thrust (T166).
+ * — the real `HullWater` + `stepRigid6` on flat water, default params, the engine + prop model (T189 engine.ts; re-measured
+ * T196: the stand-in thrust's 29.5 m/s top speed and 7.8 m/s² hole shot are gone; radiation damping, drives in the transom
+ * wake and the prop calibrated at running immersion re-measured too).
  * `tests/raceAiCapability.test.ts` re-measures and fails when the physics moves away from these numbers: then
  * paste the new `measureCapability()` output here (the printed JSON is exactly `MEASURED`).
  *
@@ -11,19 +13,19 @@
  */
 
 export const MEASURED = {
-  topSpeed: 29.5,
-  accel: [[4, 7.8021], [6, 7.1132], [8, 6.7951], [10, 6.7785], [12, 6.7698], [14, 5.9408], [16, 5.0875], [18, 3.5947], [20, 3.3734], [22, 2.1843], [24, 1.6019], [26, 1.0326], [27, 0.73299], [28, 0.43634], [29, 0.14416]],
-  coast: [[4, 0.26266], [6, 0.87806], [8, 1.2036], [10, 1.3813], [12, 1.4848], [14, 1.5825], [16, 1.7244], [18, 1.9185], [20, 2.1632], [22, 2.4524], [24, 2.7884], [26, 3.1095], [27, 3.3164], [28, 3.4436], [29, 3.4136]],
-  reverse: [[4, 2.6099], [6, 3.4093], [8, 3.6836], [10, 3.8474], [12, 3.9589], [14, 3.7658], [16, 3.6624], [18, 3.6578], [20, 3.745], [22, 3.902], [24, 4.103], [26, 4.3889], [27, 4.5133], [28, 4.5223], [29, 4.463]],
+  topSpeed: 33.912,
+  accel: [[4, 3.3127], [6, 4.1225], [8, 3.9423], [10, 3.4166], [12, 3.2936], [14, 3.3634], [16, 3.3003], [18, 3.0976], [20, 2.86], [22, 2.5858], [24, 2.1529], [26, 1.7537], [27, 1.5673], [28, 1.3664], [29, 1.1535], [30, 0.93284], [31, 0.7071], [32, 0.47172], [33, 0.22869]],
+  coast: [[4, 1.6337], [6, 0.87944], [8, 1.1477], [10, 1.311], [12, 1.3825], [14, 1.4374], [16, 1.5308], [18, 1.665], [20, 1.8525], [22, 2.074], [24, 2.3258], [26, 2.5642], [27, 2.6789], [28, 2.7985], [29, 2.9204], [30, 3.0267], [31, 3.1706], [32, 3.3494], [33, 3.3382]],
+  reverse: [[4, 1.7377], [6, 0.98961], [8, 1.253], [10, 1.4156], [12, 1.4884], [14, 1.5451], [16, 1.6393], [18, 1.7759], [20, 1.9614], [22, 2.184], [24, 2.4348], [26, 2.6774], [27, 2.7905], [28, 2.9071], [29, 3.0206], [30, 3.1198], [31, 3.2409], [32, 3.4026], [33, 3.3733]],
   turns: [
-    { steerDeg: 0, rows: [[6.0057, 0.000023467, 0.10546], [10.003, 0.0000031069, 0.16694], [14.002, 1.2052e-7, 0.21702], [18, 6.1648e-7, 0.32894], [21.993, 6.7423e-7, 0.5081], [25.983, 5.9254e-7, 0.75209], [29.451, 5.0767e-7, 1]] },
-    { steerDeg: 5, rows: [[6.0039, 0.009531, 0.10994], [10.003, 0.0071874, 0.16602], [14, 0.0051592, 0.22452], [17.993, 0.0040718, 0.34947], [21.982, 0.0035506, 0.54192], [25.964, 0.0031942, 0.80567], [28.665, 0.0028915, 1]] },
-    { steerDeg: 10, rows: [[5.9979, 0.019445, 0.12428], [9.9914, 0.013625, 0.19862], [13.987, 0.0094527, 0.26411], [17.973, 0.0076402, 0.40982], [21.948, 0.0068514, 0.63278], [25.906, 0.0063256, 0.94324], [26.774, 0.0062131, 1]] },
-    { steerDeg: 12.5, rows: [[5.9928, 0.024738, 0.13565], [9.9833, 0.016576, 0.221], [13.977, 0.011086, 0.29281], [17.959, 0.0087953, 0.44986], [21.924, 0.0079218, 0.69082], [25.607, 0.0075214, 1], [25.838, 0.00748, 1]] },
+    { steerDeg: 0, rows: [[5.9995, 0.000035333, 0.5005], [9.9938, 0.0000056454, 0.59936], [13.994, 2.6153e-7, 0.6245], [17.992, 4.6173e-7, 0.66465], [21.989, 1.7502e-7, 0.73343], [25.986, 3.0494e-8, 0.81744], [29.983, 1.4722e-7, 0.90351], [33.838, 1.7417e-7, 1]] },
+    { steerDeg: 5, rows: [[5.997, 0.0091257, 0.5058], [9.9969, 0.0067065, 0.58981], [13.993, 0.005009, 0.62737], [17.988, 0.0040928, 0.6804], [21.982, 0.0037055, 0.75795], [25.978, 0.0032606, 0.84846], [29.972, 0.0028413, 0.94422], [32.239, 0.0026439, 1]] },
+    { steerDeg: 10, rows: [[5.9894, 0.018722, 0.52375], [9.9889, 0.012957, 0.61566], [13.985, 0.0098486, 0.65803], [17.973, 0.008606, 0.73099], [21.963, 0.0077638, 0.82583], [25.955, 0.0069275, 0.93794], [28.104, 0.0065185, 1], [28.439, 0.0064452, 1]] },
+    { steerDeg: 15, rows: [[5.9761, 0.029219, 0.55451], [9.9727, 0.018709, 0.67305], [13.973, 0.01406, 0.71819], [17.953, 0.01264, 0.81137], [21.969, 0.01164, 0.93692], [23.11, 0.011164, 1], [23.48, 0.011053, 1], [23.759, 0.010976, 1]] },
+    { steerDeg: 19, rows: [[5.9599, 0.038848, 0.5889], [9.9456, 0.022505, 0.77931], [12.33, 0.021767, 1], [12.835, 0.021809, 1], [13.97, 0.01657, 0.81283], [17.933, 0.01399, 0.9317], [19.632, 0.01268, 1], [20.106, 0.012526, 1]] },
   ],
 } as const;
 
-const G = 9.81;
 /** chine beam, m (deepV12.hull.json `chineHalfBeam` × 2) — the C_v the physics-log envelope is stated in */
 export const CHINE_BEAM = 2.3;
 export const DEG = Math.PI / 180;
@@ -113,22 +115,21 @@ export function decelAt(v: number, brake: number): number {
 
 /**
  * THE NPC LOCK SCHEDULE (rad), the no-hook guarantee. Measured with `measureLockEntry` (full throttle held
- * through the entry, 30°/s helm — worse than the controller ever does):
- *   default power, 6–29.5 m/s: 12.5° never departs (peak tilt 18.6–25.6° from 10 m/s up, 39.5° at 6 m/s);
- *   15° departs at 6 m/s; 17.5° departs at every speed.
- *   4 MW (C_v 6–10): 10° never departs; 12.5° departs from C_v 8; 15° from C_v 6.
- * physics-log envelope (T179 part 3): half lock (15°) hooks C_v ≥ 7, full lock (30°) C_v ≥ 3.
- * Hence: 10° at walking speed (tilt), 12.5° from 12 m/s to C_v 6.5, back to 10° by C_v 7.5 and above.
+ * through the entry, 15°/s helm = HELM_RATE — worse than the controller ever does). Re-derived T196 (peak tilt °,
+ * D = departed; default drives):
+ *   6 m/s:  15° 30, 17.5° 40, 20° 44, 22.5° D          10 m/s: 20° 34, 25° 42, 30° D
+ *   14–33 m/s: 20° 15–22, 25° 22–41, 30° D
+ *   4 MW (C_v 6–10): 20° steady (tilt 15–19°); 25° departs at C_v 6/7/10, 27.5° at C_v 8.
+ * History: T186 (stand-in thrust) 12.5° was the edge from 10 m/s; T196 part A (T189 physics) 20–25°; the drives now running
+ * in the transom wake (hullWater `transomWake`: gearcases part-surfaced at speed) moved the edge to 30°.
+ * Hence 14.5° at walking speed (tilt), ramping to 19° by 10 m/s and 19° above — the teeth test's 1.6× departs everywhere.
  */
 export function lockLimit(v: number): number {
-  const cv = v / Math.sqrt(G * CHINE_BEAM);
-  const lo = 10 * DEG;
-  const hi = 12.5 * DEG;
+  const lo = 14.5 * DEG;
+  const hi = 19 * DEG;
   if (v <= 6) return lo;
-  if (v < 12) return lo + ((hi - lo) * (v - 6)) / 6;
-  if (cv <= 6.5) return hi;
-  if (cv >= 7.5) return lo;
-  return hi + ((lo - hi) * (cv - 6.5)) / 1;
+  if (v < 10) return lo + ((hi - lo) * (v - 6)) / 4;
+  return hi;
 }
 
 export const TOP_SPEED: number = MEASURED.topSpeed;

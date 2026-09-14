@@ -30,6 +30,10 @@ import {
   createWeatherSample,
 } from './weather';
 import { createRain } from './rain';
+import { createCine, type CineHandle, type ResolutionName } from './cine';
+import { cineStageRequested } from './cine/stage';
+import { applyGradeMode, gradeMode, GRADE_MODES, type GradeMode } from './grade';
+import { weatherParams } from './params/weather';
 import { createPostPipeline } from './core/postPipeline';
 import { createUnderwater } from './underwater';
 import {
@@ -129,6 +133,39 @@ async function boot(): Promise<void> {
   // map once, so these values have to be right the first time rather than
   // applied after the fact.
   const settings = initGraphicsSettings();
+
+  /**
+   * THE SHOOTING TIER. A cinematic render is not a frame budget — it is one
+   * frame taken as long as it needs — so a shoot runs at the top of every
+   * ladder regardless of what the player last chose.
+   *
+   * It has to happen HERE, above the renderer and every system, for the reason
+   * the comment above gives: `shadowMapSize` is allocated once when the sky is
+   * built and `resolutionScale` sizes the backing store, so both are boot
+   * decisions. Applying them after the fact is a no-op that looks like a
+   * setting.
+   *
+   * `applyQuality` carries the world block through untouched, so the player's
+   * time of day and wind survive — the shot list overwrites those per shot
+   * anyway, and clobbering them here would strand anyone who then went back to
+   * playing.
+   */
+  const openOceanBoot = cineStageRequested(window.location.search);
+  if (openOceanBoot) {
+    settings.applyQuality('high');
+    settings.set({ graphics: { resolutionScale: 1, shadowMapSize: 4096, foliageDensity: 1 } });
+    // The flare and streak nodes are baked into the post graph at
+    // construction, so they are a BOOT decision like the shadow map — a live
+    // toggle would be a no-op that looks like a setting. Their strengths stay
+    // live (grade modes drive those); only their existence is decided here.
+    postParams.flareEnabled = true;
+    // STREAK OFF by default. `anamorphic` is a 32-tap directional blur with its
+    // own downsample chain on top of the flare's, and switching it on took the
+    // render from ~16 fps to stalled — a 211-frame shot did not finish in ten
+    // minutes. It buys a horizontal bar the ghosts already imply. Opt in with
+    // `?cine=record&streak=1` if a shot really wants it.
+    postParams.streakEnabled = new URLSearchParams(window.location.search).has('streak');
+  }
 
   const bootT0 = performance.now();
   const bootTimings: Array<[string, number]> = [];
@@ -267,7 +304,15 @@ async function boot(): Promise<void> {
   // §T.33 islands: 5 at 1.2–3.1km sharing 3 materials. Built BEFORE the ocean
   // surface because its seabed field feeds the shallows tint, and TSL bakes
   // material graphs at construction.
-  const archipelago = createArchipelago({ seed: state.seed });
+  /**
+   * THE OPEN-OCEAN STAGE (src/cine/stage.ts). An empty site list is a world
+   * with no land in it — not an archipelago with the land turned invisible,
+   * which would leave the seabed shoaling the sea and grounding the hull.
+   */
+  const openOcean = openOceanBoot;
+  const archipelago = createArchipelago(
+    openOcean ? { seed: state.seed, sites: [] } : { seed: state.seed },
+  );
   // DEFERRED (§T.40): 1.2–3.1km away and three heavy materials (terrain, rock,
   // palm). Their seabed field still feeds the ocean material and grounding
   // from the moment it is built — only the DRAWING waits.
@@ -877,6 +922,169 @@ async function boot(): Promise<void> {
   /** HUD refresh divider for the GPU block — the sort is per-call, not per-frame */
   let perfFrame = 0;
 
+  /**
+   * Cinematic driver (src/cine). Declared here and assigned below because the
+   * loop's callbacks close over it while the handle itself needs the loop —
+   * null until then, and null whenever nothing is being shot.
+   */
+  let cine: CineHandle | null = null;
+
+  /**
+   * DISARM THE GAME FOR A SHOOT (src/cine).
+   *
+   * Everything here is a thing that ruined a take. The enemy AI closes and
+   * fires during the preroll — the first recorded shot came back as empty sea
+   * because the hero was on the bottom with `flood: 1` before frame one. Her
+   * own damage keeps flooding her after the shooting stops, and a holed hull
+   * sinks over a 22 s take even with nobody left to shoot at her.
+   *
+   * Held every tick rather than done once: the AI does not stay banished.
+   */
+  /**
+   * STRIKE THE SET FOR A SHOOT (src/cine).
+   *
+   * The reference is open ocean and nothing else. The first full take of the
+   * stern chase came back with an island sitting on the horizon behind the
+   * hull — a headland in a shot whose entire subject is emptiness. The enemy
+   * hull is hidden rather than merely moved: 20 km away is still in front of
+   * a 4.6 km sea disc under some framings, and "probably out of shot" is not
+   * a thing to bet a two-hour render on.
+   */
+  let shooting = false;
+  /** the window's own pixel ratio, held while a shoot renders at exact pixels */
+  let savedPixelRatio: number | null = null;
+  /** storm-cell params held aside while the weather is locked for a take */
+  let weatherLock: Record<string, number> | null = null;
+  /**
+   * On-screen readout for a shoot. The captured frames go to an offscreen
+   * target, so the CANVAS stops updating and the FPS counter reads zero for
+   * the whole render — a working two-hour job is indistinguishable from a hung
+   * page without this. It is a plain DOM node on purpose: it can never reach
+   * the recorded frames, which are read out of a render target.
+   */
+  let cineHud: HTMLDivElement | null = null;
+  const setShooting = (on: boolean): void => {
+    shooting = on;
+    // belt and braces: on the open-ocean stage there is nothing in this group
+    // to hide, and this only matters if someone shoots from a normal world
+    archipelago.group.visible = !on;
+    enemyAssembly.group.visible = !on;
+    enemyRopes.mesh.visible = !on;
+    combat.group.visible = !on;
+    // THE WEATHER HAS TO STAND STILL FOR A TAKE.
+    //
+    // Clouds were popping in and out mid-clip, and the cause is not the cloud
+    // system misbehaving — it is the cloud system working. `clouds.update`
+    // rebuilds every cluster when the storm CELLS near the camera change
+    // (`stormCellKey`), and a cinematic camera moves hundreds of metres inside
+    // one shot: the stern chase closes 40 m, the high aerial sits 600 m up.
+    // Every one of those crossings is a ~400-lobe regeneration, which reads as
+    // a sky that reshuffles itself while you watch.
+    //
+    // So the cell FIELD is switched off for the duration rather than the
+    // rebuild being suppressed: no cells means no cell key, no regeneration,
+    // and `weatherAt` returns the flat ambient preset everywhere — which is
+    // also what stops the §V.46 sampler walking the sea state around under a
+    // moving camera. Band drift and the composite's own time still run, so the
+    // sky moves; it just stops being re-dealt.
+    //
+    // `weather.update(dt)` is skipped as well (see the sim tick): it advances
+    // the field drift and the per-cell lifecycle clock, both of which would
+    // otherwise keep changing the answer even with coverage at zero.
+    if (on) {
+      weatherLock = {
+        cellCoverage: weatherParams.cellCoverage,
+        cellIntensity: weatherParams.cellIntensity,
+        cellDrift: weatherParams.cellDrift,
+        transitionSeconds: weatherParams.transitionSeconds,
+      };
+      weatherParams.cellCoverage = 0;
+      weatherParams.cellIntensity = 0;
+      weatherParams.cellDrift = 0;
+      // a shot is a CUT: lerping into its sea over the first 96 frames would
+      // put the transition in the picture
+      weatherParams.transitionSeconds = 0;
+    } else if (weatherLock !== null) {
+      Object.assign(weatherParams, weatherLock);
+      weatherLock = null;
+    }
+    applyGradeMode(on ? 'cine' : 'game');
+    // the game's own overlays never reach a captured frame either, but leaving
+    // them up means what you see is not what is being shot
+    const uiRoot = document.querySelector('.smt-ui');
+    if (uiRoot instanceof HTMLElement) uiRoot.style.display = on ? 'none' : '';
+    if (on && cineHud === null) {
+      cineHud = document.createElement('div');
+      cineHud.style.cssText =
+        'position:fixed;inset:auto 0 0 0;z-index:99999;font:12px ui-monospace,monospace;' +
+        'background:#000c;color:#8f8;padding:10px 14px;letter-spacing:.04em';
+      document.body.appendChild(cineHud);
+    }
+    if (!on && cineHud !== null) {
+      // leave the RESULT up for a few seconds rather than vanishing. A render
+      // that finishes by silently reverting looks exactly like one that
+      // crashed, and the numbers are the only record of how long it took.
+      const p = cine?.progress;
+      const done = document.createElement('div');
+      done.style.cssText = cineHud.style.cssText;
+      done.style.color = p?.phase === 'failed' ? '#f88' : '#8f8';
+      done.textContent =
+        p === undefined || p === null
+          ? '■ cine: stopped'
+          : p.phase === 'failed'
+            ? `■ cine FAILED at ${p.shotId} ${p.frame}/${p.frames} — ${p.message ?? ''}`
+            : `✔ cine DONE — ${p.shotCount} shot(s), ${p.frame}/${p.frames} frames, ` +
+              `${clock(p.elapsed)} at ${p.renderFps.toFixed(2)} fps`;
+      cineHud.remove();
+      cineHud = null;
+      document.body.appendChild(done);
+      window.setTimeout(() => done.remove(), 12000);
+    }
+  };
+
+  const clock = (sec: number): string => {
+    const s = Math.max(Math.round(sec), 0);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return h > 0
+      ? `${h}h${String(m).padStart(2, '0')}m`
+      : `${m}m${String(s % 60).padStart(2, '0')}s`;
+  };
+
+  const cineProgressLine = (): Text => {
+    const p = cine?.progress;
+    if (p === undefined || p === null) return document.createTextNode('● REC  starting…');
+    const pct = p.frames > 0 ? Math.round((p.frame / p.frames) * 100) : 0;
+    const rate =
+      p.renderFps > 0
+        ? `${p.renderFps.toFixed(2)} fps (${(1 / p.renderFps).toFixed(1)}s/frame)`
+        : 'measuring…';
+    return document.createTextNode(
+      `● REC  ${p.shotId}  shot ${p.shotIndex + 1}/${p.shotCount}  ${p.phase}  ` +
+        `${p.frame}/${p.frames} (${pct}%)   ${rate}   ` +
+        `elapsed ${clock(p.elapsed)}   left ${p.eta === null ? '—' : clock(p.eta)}   ` +
+        `· canvas frozen on purpose, frames go to an offscreen target`,
+    );
+  };
+
+  const clearCombat = (): void => {
+    playerShip.flood = 0;
+    // holes are DERIVED from damage each tick (combat.floodHoles), so clearing
+    // the damage map is what actually closes them
+    playerShip.damage = {};
+    for (const ship of state.ships) {
+      if (ship.kind !== 'enemy') continue;
+      ship.position[0] = 20000;
+      ship.position[2] = 20000;
+      ship.velocity[0] = 0;
+      ship.velocity[2] = 0;
+      ship.sailTrim = 0;
+      ship.anchored = true;
+    }
+  };
+
+  // Sum every fixed-tick mirror update owed by this rendered frame.
+  let mirrorCpuMs = 0;
   const loop = new GameLoop(
     (dt) => {
       if (paused) return;
@@ -885,7 +1093,9 @@ async function boot(): Promise<void> {
       // live wind follows ocean params (weather transitions lerp these)
       state.wind.speed = oceanParams.windSpeed;
       state.wind.direction = oceanParams.windDirection;
-      weather.update(dt);
+      // frozen for a take: this advances the field drift and the cell
+      // lifecycle clock, and both re-deal the sky mid-shot (see setShooting)
+      if (!shooting) weather.update(dt);
       // §V46: storm strength is a FIELD, not a global. Driving the ocean from
       // the sample at the ship's own position is what makes sailing into a
       // squall real — and because rain and cell drift both read oceanParams,
@@ -896,6 +1106,10 @@ async function boot(): Promise<void> {
       oceanAmbient.restore();
       weather.weatherAt(playerShip.position[0], playerShip.position[2], weatherHere);
       oceanAmbient.publish(weatherHere.ocean);
+      // AFTER the ambient hold has written this tick's ocean: a shot's world
+      // is re-asserted every tick precisely because that publish (and
+      // applyWorldSettings, for timeOfDay) would otherwise revert it.
+      cine?.applyWorld();
       const snapshot = input.sample(dt);
       // XOR, not assignment: key and button in the same tick are two toggles,
       // i.e. none — the same arithmetic the collector's own edge counter uses
@@ -922,7 +1136,9 @@ async function boot(): Promise<void> {
        * idempotent per frame.
        */
       ocean.advanceSpectrum(oceanParams);
+      const mirrorStart = performance.now();
       cpuOcean.update(state.time);
+      mirrorCpuMs += performance.now() - mirrorStart;
       /**
        * §V.2 + §V.8 — THE WAKE IS SIM STATE, so it is aged HERE.
        *
@@ -1062,8 +1278,10 @@ async function boot(): Promise<void> {
       currQuat.fromArray(playerShip.quaternion);
       currVel.fromArray(playerShip.velocity);
     },
-    (alpha, frameDt) => {
-      debug.hud.frame(frameDt * 1000);
+    (alpha, frameDt, wallFrameDt) => {
+      debug.hud.setPassTiming('buoyancy mirror cpu/frame', mirrorCpuMs);
+      mirrorCpuMs = 0;
+      debug.hud.frame(wallFrameDt * 1000);
       sky.setShadowFocus(playerShip.position[0], playerShip.position[1], playerShip.position[2]);
       // §T.47: the sky draws the wind now, so it needs the LIVE wind — the one
       // weather transitions write every tick, which the sails, flags, AI, palms
@@ -1243,6 +1461,10 @@ async function boot(): Promise<void> {
       followCam.update(renderShipView, frameDt, (x, z) => cpuOcean.heightAt(x, z, state.time));
       combat.shake.update(frameDt, app.camera);
       combat.shake.apply(app.camera);
+      // LAST WRITER OF THE CAMERA. Everything camera-derived below this line
+      // (clouds, surface, underwater, gunnery aim) then reads the shot's lens
+      // rather than the chase camera's.
+      cine?.applyCamera(frameDt);
 
       /**
        * CLOUDS RUN HERE, AFTER THE CAMERA IS FINAL — not before it.
@@ -1402,7 +1624,9 @@ async function boot(): Promise<void> {
           ship: playerShip,
           aimBearing: viewBearing(app.camera.matrixWorld.elements),
           seaHeight: (x, z) => cpuOcean.heightAt(x, z, state.time),
-          visible: !ui.isPhotoMode() && !ui.isPaused(),
+          // `shooting` is the cinematic flag (src/cine): the crosshair is an
+          // in-WORLD overlay, so unlike the DOM HUD it would land in the frame
+          visible: !ui.isPhotoMode() && !ui.isPaused() && !shooting,
         },
         frameDt,
       );
@@ -1416,7 +1640,16 @@ async function boot(): Promise<void> {
         (x, z) => cpuOcean.heightAt(x, z, state.time),
         state.time,
       );
-      if (cascadeView.isOn()) {
+      // BEFORE the draw: while recording this points the frame at the
+      // recorder's own render target, so the captured pixels never depend on
+      // the canvas being composited (src/cine/capture.ts). No-op otherwise.
+      cine?.beforeRender();
+      // A frame whose only job is to sit still while the last one encodes is a
+      // frame nobody sees. Skipping it is most of a cinematic render's budget.
+      if (cineHud !== null) cineHud.replaceChildren(cineProgressLine());
+      if (cine?.skipRender() === true) {
+        // nothing to draw — see Recorder.idleFrame
+      } else if (cascadeView.isOn()) {
         // INSTEAD OF the game frame, not on top of it (research-poseidon
         // §2.3). The sim above still ran, so the tile on screen is THIS
         // frame's data — and the 595 draws and 18 passes it replaces are
@@ -1428,6 +1661,9 @@ async function boot(): Promise<void> {
       } else {
         app.render();
       }
+      // AFTER the composite: the recorder grabs the canvas, and the canvas
+      // only holds this frame until the next present.
+      cine?.afterRender();
       debug.hud.setRenderStats(app.renderer.info.render);
       /**
        * DRAIN THE TIMESTAMP POOLS, or §V.39's own method breaks (third time).
@@ -1477,6 +1713,104 @@ async function boot(): Promise<void> {
     // interpolation alpha holds flat (§V.21) — see GameLoop.frame
     () => paused,
   );
+
+  /**
+   * CINEMATIC DRIVER (src/cine). The host is the only place the shot list is
+   * allowed to touch the sim: everything else in that module reads params and
+   * writes the camera. `?cine=play` previews, `?cine=record` shoots.
+   */
+  cine = createCine({
+    openOcean,
+    audio,
+    renderer: app.renderer,
+    canvas: app.renderer.domElement,
+    camera: app.camera,
+    loop,
+    host: {
+      heightAt: (x, z) => cpuOcean.heightAt(x, z, state.time),
+      // THE INTERPOLATED POSE, not the sim one.
+      //
+      // `playerShip` is the fixed-tick state: it changes in 1/60 steps and
+      // holds still in between. `renderShipView` is that pose lerped by the
+      // loop's alpha, and it exists precisely so the picture does not step —
+      // it is what followCam has always been handed. The director was reading
+      // the raw one, so every shot anchored to the hull (deck rigs, chases,
+      // anything in ship space) inherited a 60 Hz staircase and read as
+      // jitter. Same pose source as the game camera, same smoothness.
+      shipPose: () => renderShipView,
+      sunDirection: () => sky.sunDirection,
+      setShipSpeed: (knots) => {
+        const ms = knots / 1.944;
+        const fwd = rotateVec(playerShip.quaternion, [0, 0, 1]);
+        playerShip.velocity[0] = fwd[0] * ms;
+        playerShip.velocity[2] = fwd[2] * ms;
+      },
+      setShipAnchored: (anchored) => {
+        playerShip.anchored = anchored;
+      },
+      // instant, not the 4 s default: a shot is a cut, and lerping into its
+      // sea over the first 96 frames would put the transition in the picture
+      setWeather: (name) => weather.apply(name, { lerpSeconds: 0 }),
+      setShooting,
+      setRenderSize: (w, h) => {
+        // PIXEL RATIO FIRST, and this is not a detail. `setSize` multiplies by
+        // the device pixel ratio, so asking for 1920x1080 on a retina display
+        // silently renders 3840x2160 — 33 MB a frame into an x264 -preset slow
+        // pipe, which is exactly what a run that looked "stalled" at four
+        // frames a minute actually was. A shoot asks for EXACT pixels.
+        savedPixelRatio = app.renderer.getPixelRatio();
+        app.renderer.setPixelRatio(1);
+        app.renderer.setSize(w, h, false);
+        app.camera.aspect = w / h;
+        app.camera.updateProjectionMatrix();
+      },
+      restoreRenderSize: () => {
+        if (savedPixelRatio === null) return;
+        app.renderer.setPixelRatio(savedPixelRatio);
+        savedPixelRatio = null;
+        const el = app.renderer.domElement;
+        const w = el.clientWidth || window.innerWidth;
+        const h = el.clientHeight || window.innerHeight;
+        app.renderer.setSize(w, h, false);
+        app.camera.aspect = w / h;
+        app.camera.updateProjectionMatrix();
+      },
+      prepareScene: () => {
+        // OPEN WATER, KNOWN DEPTH. The boot anchorage sits in ~10 m over the
+        // shelf, which is both too shallow for the hull to float free once she
+        // takes any water and close enough to land to put an island in the
+        // back of a shot that is meant to be empty ocean. `spawn` is 45 m.
+        jump.jumpTo(SPAWN_TARGET.name);
+        clearCombat();
+      },
+      holdScene: () => clearCombat(),
+    },
+  });
+  {
+    // `?cine=record&only=D,M&w=1920&h=1080&fps=24` — the whole shoot is
+    // reachable from the URL, because the console is not available when the
+    // page is opened by something other than a person.
+    const q = new URLSearchParams(window.location.search);
+    const mode = q.get('cine');
+    const num = (k: string): number | undefined => {
+      const v = Number(q.get(k));
+      return Number.isFinite(v) && v > 0 ? v : undefined;
+    };
+    const only = q.get('only')?.split(',').filter((s) => s.length > 0);
+    const res = q.get('res') as ResolutionName | null;
+    if (mode === 'play') cine.play();
+    else if (mode === 'record') {
+      void cine.record({
+        only,
+        grade: (q.get('grade') as GradeMode | null) ?? undefined,
+        res: res ?? undefined,
+        width: num('w'),
+        height: num('h'),
+        fps: num('fps'),
+      });
+    } else if (mode === 'audio') void cine.recordAudio({ only });
+    else if (mode !== null) cine.play(mode);
+  }
   // Warm up BEFORE showing the world. compileAsync walks the scene and builds
   // every material's pipeline up front — otherwise the first frames stall for
   // seconds compiling shaders one material at a time, which is what the boot
@@ -1661,6 +1995,26 @@ async function boot(): Promise<void> {
     // re-rank over whatever has been warmed so far.
     compilePhases,
     compileRanking: (): ReturnType<typeof rankCompile> => rankCompile(compilePhases),
+    /** shot-list driver: `__game.cine.play()` / `.record()` — see src/cine */
+    cine,
+    /**
+     * §grade: `__game.setGradeMode('cine')` / `('game')`. The shooting look is
+     * a mode, not a render-only side effect, so it can be compared against the
+     * shipped one live rather than only in an mp4.
+     */
+    setGradeMode: (m: GradeMode): void => applyGradeMode(m),
+    getGradeMode: gradeMode,
+    gradeModes: GRADE_MODES,
+    /** the composite itself — the only way to A/B a post-processed readback */
+    post,
+    usePost,
+    /**
+     * §B.25 handle: the frame clock itself. `loop.setFixedDt(0)` freezes the
+     * sim while rendering continues, and `stop()`/`start()` re-registers the
+     * rAF callback — which is the only way to reconnect the chain once a
+     * hidden tab has throttled it to nothing (docs/agent-browser-harness.md §1).
+     */
+    loop,
     /** §T.52: `__game.jumpTo('lagoon')` / `('spawn')` — same path as the J key */
     jumpTo: jump.jumpTo,
     jumpTargets: jump.targets,

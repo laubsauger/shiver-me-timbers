@@ -868,6 +868,8 @@ export interface CreateStructuresOptions {
   heightmap: IslandHeightmap;
   /** shared material (islandMaterials); omit and this owns its own */
   material?: THREE.Material;
+  /** §T.194: the island's own params (a `kit:` island); absent = the live globals, as before */
+  params?: IslandParams;
 }
 
 export interface Structures {
@@ -880,7 +882,7 @@ export interface Structures {
 }
 
 export function createStructures(opts: CreateStructuresOptions): Structures {
-  const p = islandParams;
+  const p = opts.params ?? islandParams;
   const { geometry, plan } = buildStructureGeometry(opts.seed, opts.heightmap, p);
   const own: ShipMaterialHandle | null = opts.material ? null : createStructureMaterial();
   const material = opts.material ?? own!.material;

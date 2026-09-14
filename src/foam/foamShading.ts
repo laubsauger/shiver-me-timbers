@@ -39,6 +39,8 @@
  * §V20: warm-tinted foam via foamTintNode.
  */
 import {
+  Fn,
+  If,
   float,
   fwidth,
   mix,
@@ -247,16 +249,23 @@ export function bandLimitedFbm2(
  * cascade domain so it adds no repeat of its own).
  */
 export function crestAnisoCoord(coord: AnyNode): AnyNode {
-  const angle = fbm2(coord.mul(uCrestDirScale), 2).sub(0.5).mul(uCrestDirSwing);
-  const ca = angle.cos();
-  const sa = angle.sin();
-  // rotate the unit propagation direction — still unit length, so the frame
-  // below stays orthonormal and the elongation stays a pure shape change
-  const prop = vec2(uPropX.mul(ca).sub(uPropZ.mul(sa)), uPropX.mul(sa).add(uPropZ.mul(ca)));
-  const tan = vec2(prop.y.negate(), prop.x); // perp(prop) — along the crest
-  const along = coord.dot(tan).div(uElong.max(1)); // floored divisor (§V28)
-  const across = coord.dot(prop);
-  return tan.mul(along).add(prop.mul(across));
+  return Fn(() => {
+    const result = vec2(coord).toVar();
+    // The shipped isotropic setting is exactly the identity. This uniform
+    // branch skips the angle noise and trigonometry for every covered pixel;
+    // it also avoids roundoff from rotating large world coordinates twice.
+    If(uElong.greaterThan(1), () => {
+      const angle = fbm2(coord.mul(uCrestDirScale), 2).sub(0.5).mul(uCrestDirSwing);
+      const ca = angle.cos();
+      const sa = angle.sin();
+      const prop = vec2(uPropX.mul(ca).sub(uPropZ.mul(sa)), uPropX.mul(sa).add(uPropZ.mul(ca)));
+      const tan = vec2(prop.y.negate(), prop.x);
+      const along = coord.dot(tan).div(uElong.max(1));
+      const across = coord.dot(prop);
+      result.assign(tan.mul(along).add(prop.mul(across)));
+    });
+    return result;
+  })();
 }
 
 /**
@@ -335,10 +344,16 @@ export function foamDetailMask(
    * Aged wake foam is a thinning film, not a breaking lip, so its outline should
    * be the AVERAGE of the tear rather than a 2 px contour — which is exactly the
    * `resolved = 0` limit this function already derives (foamMath.dissolveKnee),
-   * so age multiplies `resolved` and no new shape is authored. Omitted (every
+   * so age multiplies `resolved`. It also selects the aged body pattern while
+   * retaining its established mean coverage. Omitted (every
    * caller but the sim wake) → the pre-W5b graph, node for node.
    */
   detailRetire?: AnyNode,
+  /** Body pattern age, independent of edge retirement for unmeasured wakes.
+   * Does not change the established coverage mean. */
+  bodyAge?: AnyNode,
+  /** Landed wake films keep their porous texture even at full simulation coverage. */
+  porousBody = false,
 ): AnyNode {
   const art = foamArtTexture();
   // per-position phase (§B.4: NO shared global timeline) — coarse value
@@ -518,7 +533,10 @@ export function foamDetailMask(
   //     `tear` is a filtered read of the art texture's mip chain (§V.48,
   //     foamTexture.ts). It only chooses between two taps already band-limited.
   const tear = softTex.b.sub(0.5).mul(uHandoverTear);
-  const torn = (breakingShare ?? rawFoam).add(tear);
+  // Wake age already retires the dissolve. Use it for the body pattern too,
+  // while retaining the established bodyMean below: replacing that mean with
+  // the soft channel mean would increase dense aged wake opacity by ~65%.
+  const torn = (breakingShare ?? bodyAge ?? detailRetire ?? rawFoam).add(tear);
   // @band-limited-elsewhere — reason four lines up (both inputs are filtered)
   const bodyFresh = smoothstep(float(0.25), float(0.8), torn);
   // saturated foam hands the body over to the BROAD lookup. `sheetBroaden`
@@ -546,7 +564,9 @@ export function foamDetailMask(
   const blendMean = mix(float(FOAM_SOFT_MEAN), float(FOAM_CREST_MEAN), bodyBlend);
   /** the mean the body MUST keep — the one `freshness` alone would have given */
   const bodyMean = mix(float(FOAM_SOFT_MEAN), float(FOAM_CREST_MEAN), freshness);
-  const flat = sheetN.mul(uSheetFlatten).clamp(0, 1);
+  // Dense storm caps may form a continuous sheet. A landed wake film should
+  // retain holes and visible water rather than brighten toward uniform white.
+  const flat = porousBody ? float(0) : sheetN.mul(uSheetFlatten).clamp(0, 1);
   // BODY — the interior of the patch (R = crest lace, G = soft mottle).
   // A FUNCTION OF THE CREST TAP, not a value, so the relief below can rebuild
   // it at two offset taps without a second copy of the algebra. Called with

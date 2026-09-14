@@ -198,9 +198,11 @@ export class WakeSourceBuffer {
   /**
    * One vessel's samples. A vessel with ANY non-finite sample is skipped whole
    * (§5.6: a non-finite pose poisons every station, so a partial hull would be
-   * a lie); returns the number accepted.
+   * a lie); returns the number accepted. §T.195 `weight` (0..1) scales every fy
+   * — the domain-edge fade of a vessel that is not the hero (`vesselDomainWeight`);
+   * 1 multiplies nothing (x·1 = x exactly, so the hero's samples are bit-identical).
    */
-  pushVessel(samples: readonly HydroSample[]): number {
+  pushVessel(samples: readonly HydroSample[], weight = 1): number {
     for (const s of samples) {
       if (
         !Number.isFinite(s.x) ||
@@ -214,7 +216,7 @@ export class WakeSourceBuffer {
       }
     }
     let n = 0;
-    for (const s of samples) if (this.push(s.x, s.z, s.fy, s.footprint, s.depth)) n++;
+    for (const s of samples) if (this.push(s.x, s.z, s.fy * weight, s.footprint, s.depth)) n++;
     return n;
   }
 
@@ -350,6 +352,39 @@ export function wakeAnchor(
   const interiorHalf = (0.5 - sponge.width) * domain;
   const ahead = bowAhead + clearance - interiorHalf; // centre offset along the axis (negative = astern)
   return { x: x + fx * ahead, z: z + fz * ahead };
+}
+
+/**
+ * §T.195 HOW MUCH OF A NON-HERO VESSEL THE DOMAIN TAKES (0..1). The domain follows the hero (§V105), so a rival is
+ * anywhere relative to it. Her splats reach `radius + reach` metres from her centre (reach = the splat's own
+ * WAKE_SPLAT_RADIUS_SIGMAS·σ); `e` is how far that footprint stays inside the grid border on the tighter axis:
+ *
+ *   e ≤ 0          any splat would be clipped at the border: the vessel is DROPPED WHOLE (0) — no partial hull,
+ *                  and nothing is ever drawn at the border for the periodic transform to wrap
+ *   0 < e < ramp   smoothstep(0, ramp, e), ramp = the sponge band (sponge.width·domain) — she fades in/out while
+ *                  crossing the band the sponge is already absorbing, so entering the domain is not an impulse
+ *   e ≥ ramp       1
+ *
+ * §V28: any non-finite input → 0.
+ */
+export function vesselDomainWeight(
+  x: number,
+  z: number,
+  radius: number,
+  reach: number,
+  centerX: number,
+  centerZ: number,
+  domain: number,
+  sponge: WakeSpongeParams,
+): number {
+  if (![x, z, radius, reach, centerX, centerZ, domain, sponge.width].every(Number.isFinite)) return 0;
+  const half = domain / 2;
+  const foot = Math.max(0, radius) + Math.max(0, reach);
+  const e = Math.min(half - Math.abs(x - centerX), half - Math.abs(z - centerZ)) - foot;
+  if (!(e > 0)) return 0;
+  const ramp = Math.max(1e-6, sponge.width * domain);
+  const t = Math.min(1, e / ramp);
+  return t * t * (3 - 2 * t);
 }
 
 /** signed wavenumber (rad/m) of spectral index m on a centred n-grid (the (−1)^(x+y) shift) */

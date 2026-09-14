@@ -185,10 +185,20 @@ export function measureTurn(speed: number, steer: number, params: Partial<HullWa
   };
 }
 
-/** the grids the committed table is measured on (capability.ts) */
-export const SPEED_GRID: readonly number[] = [4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 27, 28, 29];
-export const TURN_SPEEDS: readonly number[] = [6, 10, 14, 18, 22, 26, 29.5];
-export const TURN_STEER_DEG: readonly number[] = [0, 5, 10, 12.5];
+/**
+ * the grids the committed table is measured on (capability.ts). SPEED_GRID runs past any top speed on purpose: a grid
+ * speed the run never crosses is simply not in the table (T196: the T189 engine raised top speed 29.5 → 33.4 m/s and a
+ * grid ending at 29 left the top of the acceleration curve unmeasured). TURN_SPEEDS below the measured top speed, plus
+ * one entry just above it so every steer column ends on its full-throttle row (`turnTopSpeed` reads that row).
+ */
+export const SPEED_GRID: readonly number[] = [4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42];
+export const TURN_SPEEDS: readonly number[] = [6, 10, 14, 18, 22, 26, 30, 34, 38];
+export const TURN_STEER_DEG: readonly number[] = [0, 5, 10, 15, 19];
+
+/** the turn-run entry speeds for a boat whose straight-line top speed is `topSpeed` */
+export function turnSpeedsFor(topSpeed: number): number[] {
+  return [...TURN_SPEEDS.filter((v) => v < topSpeed - 1), topSpeed + 0.5];
+}
 
 export interface MeasuredCapability {
   topSpeed: number;
@@ -199,12 +209,12 @@ export interface MeasuredCapability {
   turns: { steerDeg: number; rows: [number, number, number][] }[];
 }
 
-/** everything `capability.ts` commits, measured now (~3 s of physics) */
+/** everything `capability.ts` commits, measured now (~5 s of physics) */
 export function measureCapability(): MeasuredCapability {
   const s = measureStraight(SPEED_GRID);
   const turns = TURN_STEER_DEG.map((deg) => ({
     steerDeg: deg,
-    rows: TURN_SPEEDS.map((V) => {
+    rows: turnSpeedsFor(s.topSpeed).map((V) => {
       const r = measureTurn(V, (deg * Math.PI) / 180);
       return [r.steadySpeed, r.curvature, r.throttle] as [number, number, number];
     }).sort((a, b) => a[0] - b[0]),

@@ -32,7 +32,7 @@ import { AI, AI_IN } from './aiBlock';
 import { ARCHETYPES, type Archetype, type ArchetypeId } from './archetypes';
 import { HELM_RATE, holdThrottle, lockLimit, steerForCurvature } from './capability';
 import { buildRacingLine, nearestSample, type RacingLine } from './line';
-import { speedProfile } from './profile';
+import { cornerSpeed, speedProfile } from './profile';
 
 export const LINE_LEVELS = 5;
 const G = 9.81;
@@ -69,7 +69,7 @@ export interface PilotSetup {
 
 /** what risk does to the line: margin off the poles, share of the measured turning, braking point */
 export function levelShape(risk: number): { margin: number; latUse: number; brakeUse: number } {
-  return { margin: 7 - 5 * risk, latUse: 0.72 + 0.2 * risk, brakeUse: 0.3 + 0.6 * risk };
+  return { margin: 7 - 3.5 * risk, latUse: 0.72 + 0.2 * risk, brakeUse: 0.3 + 0.6 * risk };
 }
 
 export function buildPilotSetup(course: Course, roster: readonly (ArchetypeId | Archetype | null)[], opts: { seed: number; catchUp?: boolean }): PilotSetup {
@@ -357,7 +357,7 @@ export class RacePilot {
     const hardLock = lockLimit(V);
     const settling = f[a + AI.TICKS] * DT < SETTLE_S || (recovering && f[a + AI.RECOVERY_T] > arch.recoveryS - SETTLE_S);
     const lock = hardLock * clamp((HEEL_ZERO - tilt) / (HEEL_ZERO - HEEL_EASE), 0, 1) * (settling ? 0.4 : 1);
-    let stbd = Math.sign(kappa) * steerForCurvature(Vs, kappa) + 0.12 * (kappa * Vs - state.angularVelocity[1]);
+    let stbd = Math.sign(kappa) * steerForCurvature(Vs, kappa) + 0.4 * (kappa * Vs - state.angularVelocity[1]);
     // roll helm (a skill, × waveSkill): the drives roll her INTO a turn (physics-log T179 r2), so steering away from a
     // heel rights her; only past 20° of heel (a steady turn sits below it), proportional + against roll rate. sinHeel > 0 = starboard side up = heeled to port.
     const sinHeel = 2 * (qx * qy + qw * qz);
@@ -386,6 +386,14 @@ export class RacePilot {
     if (mistake === 3) vT *= 1.06;
     if (go <= 0) vT = Math.min(vT, -go);
     if (stCode === 4) vT = Math.min(vT, 15);
+    // OFF THE LINE, SLOW TO THE TURN YOU ARE ACTUALLY ASKING FOR (T196): the profile's corner speed is for the LINE's
+    // curvature; a boat knocked off it (a mistake, traffic, a slide) pursues a tighter arc back. Measured on the T196 hull
+    // (drives part-surfaced, lock 19°): the rookie held full throttle at lock through a sweep with 12–18° of drift at 20 m/s
+    // and ran 46 m wide, missing gates 7 and 10 on laps 2–3. The same measured capability the profile uses, at the
+    // pursuit curvature: on the line it is never below the profile, so it only acts when the arc is tighter than the line.
+    // Only past 15 m of tracking error (well past the measured 4–6 m near-gate error on the line): closer in the pursuit arc is noisy and
+    // capping by it slowed every lap by 3–6 s and reordered the pack.
+    if (Math.abs(xte - offset) > 15) vT = Math.min(vT, cornerSpeed(kappa, lv.latUse));
     f[a + AI.TARGET_SPEED] = vT;
     const e = vT - V;
     const integ = clamp(f[a + AI.INTEGRAL] + e * DT, -4, 4);

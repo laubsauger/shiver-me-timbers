@@ -63,6 +63,11 @@ import type { Node, PassNode } from 'three/webgpu';
 import type { ShaderNodeObject } from 'three/tsl';
 import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+// three's own pseudo lens flare (John Chapman) and anamorphic streak, both
+// driven off the BLOOM texture rather than a second scene pass — which is why
+// they cost nothing when bloom is already on, and nothing at all when it isn't
+import { lensflare } from 'three/addons/tsl/display/LensflareNode.js';
+import { anamorphic } from 'three/addons/tsl/display/AnamorphicNode.js';
 import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
 import { smaa } from 'three/addons/tsl/display/SMAANode.js';
 import { postParams as pp } from '../params/post';
@@ -254,6 +259,45 @@ export function createPostPipeline(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let hdr: any = bloomPass === null ? lit.rgb : lit.rgb.add(bloomPass.rgb);
 
+  // --- lens flare + anamorphic streak -----------------------------------
+  //
+  // The reference's opening image is a hard sunstar with a chain of coloured
+  // ghosts running through frame centre, and god rays cannot make one: rays
+  // are radial FROM the source, while ghosts are the source mirrored through
+  // the centre and beaded along that line. This is three's own implementation
+  // of Chapman's pseudo-flare, fed the bloom texture, plus the anamorphic node
+  // for the horizontal streak.
+  //
+  // Both are additive and both are OFF by default (params/post.ts): they are a
+  // shooting look, not the game's, and the cine grade mode is what turns them
+  // on. Built only when enabled at construction — the graph is baked once, so
+  // these are reload-scoped switches like the rest of the chain.
+  const uFlareStrength = uniform(pp.flareStrength);
+  const uFlareTint = uniform(new THREE.Color(pp.flareTintR, pp.flareTintG, pp.flareTintB));
+  if (bloomPass !== null && pp.flareEnabled) {
+    const flare = lensflare(bloomPass, {
+      ghostTint: uFlareTint,
+      threshold: uniform(pp.flareThreshold),
+      ghostSamples: uniform(pp.flareGhosts),
+      ghostSpacing: uniform(pp.flareSpacing),
+      ghostAttenuationFactor: uniform(pp.flareAttenuation),
+      downSampleRatio: 4,
+    });
+    hdr = hdr.add(flare.rgb.mul(uFlareStrength));
+  }
+  const uStreakStrength = uniform(pp.streakStrength);
+  if (bloomPass !== null && pp.streakEnabled) {
+    const streak = anamorphic(
+      vec4(lit.rgb.clamp(float(0), uBloomClamp), lit.a),
+      // nodes, not numbers: `anamorphic` wraps them with nodeObject and the
+      // threshold/scale are read as Node<float>
+      float(pp.streakThreshold),
+      float(pp.streakScale),
+      32,
+    );
+    hdr = hdr.add(streak.rgb.mul(uStreakStrength));
+  }
+
   // --- god rays ---------------------------------------------------------
   // Fed the RAW scene colour, not `lit`: shafts are built from the sharp,
   // un-bloomed, un-defocused image, so DoF cannot soften the occluders that
@@ -350,6 +394,14 @@ export function createPostPipeline(
       bloomPass.radius.value = finite(pp.bloomRadius, 0);
       uBloomClamp.value = Math.max(finite(pp.bloomClamp, 12), 1e-3);
     }
+    // live while the graph exists; the ENABLED flags are reload-scoped
+    uFlareStrength.value = pp.flareEnabled ? finite(pp.flareStrength, 0) : 0;
+    uFlareTint.value.setRGB(
+      finite(pp.flareTintR, 1),
+      finite(pp.flareTintG, 1),
+      finite(pp.flareTintB, 1),
+    );
+    uStreakStrength.value = pp.streakEnabled ? finite(pp.streakStrength, 0) : 0;
 
     uDofFocus.value = Math.max(finite(pp.dofFocus, 28), 0.01);
     uDofRange.value = Math.max(finite(pp.dofRange, 45), 0.01);

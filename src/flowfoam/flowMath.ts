@@ -271,3 +271,19 @@ export function farBlendWeightCpu(
   const t = Math.min(1, Math.max(0, (dist - e0) / (e1 - e0)));
   return t * t * (3 - 2 * t);
 }
+
+
+/** Effective source duration for dc/dt = rate - ln(2)/halfLife * c.
+ * Assumes a constant source within the step. Injection decays during that same
+ * interval, so splitting a frame cannot change the surviving dose.
+ */
+export function decayedSourceDuration(halfLife: number, dt: number): number {
+  if (!Number.isFinite(halfLife) || halfLife <= 0) {
+    throw new RangeError('Foam half-life must be finite and positive');
+  }
+  if (!Number.isFinite(dt) || dt < 0) {
+    throw new RangeError('Foam timestep must be finite and nonnegative');
+  }
+  const rate = Math.LN2 / halfLife;
+  return -Math.expm1(-rate * dt) / rate;
+}

@@ -5,9 +5,8 @@
  *
  * DESIGN RULE (§V20): this node replaces the CONTENT of the ocean's reflected
  * colour, never its WEIGHT. The ocean keeps owning `fresnel × reflectionStrength`
- * (capped at 0.13 for the painted-water look), so wiring reflections in cannot
- * turn the sea into a mirror — the worst it can do is change what the 13% is
- * made of. The fresnel weighting §V26 asks for is therefore already in place
+ * and its transmission cap, so this module changes the reflected content
+ * without changing the interface weighting. The Fresnel weighting is in place
  * at the call site; what is added here is the break-up and the distance
  * dissolve that stop a flat RT from reading as a glass sheet.
  *
@@ -16,7 +15,10 @@
  * in a comment at the use site (§B.1/§B.2 both cost a session).
  */
 import * as THREE from 'three/webgpu';
-import { color, log2, mix, screenUV, smoothstep, uniform, vec2 } from 'three/tsl';
+import {
+  cameraViewMatrix, color, log2, mix, reflect, screenSize, screenUV,
+  smoothstep, uniform, vec2, vec3, vec4,
+} from 'three/tsl';
 import { reflectionParams as rp } from '../params/reflection';
 
 /**
@@ -27,6 +29,26 @@ import { reflectionParams as rp } from '../params/reflection';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type TslNode = any;
 
+/** Wave-reflected ray offset in the horizontally mirrored reflection UV. */
+export function reflectionDistortionNode(
+  normalWorld: TslNode,
+  viewDirection: TslNode,
+  viewMatrix: TslNode,
+  viewport: TslNode,
+  strength: TslNode,
+): TslNode {
+  const bent = reflect(viewDirection.negate(), normalWorld);
+  // Mirror the reflected ray back into the source camera's frame, then
+  // subtract the flat-water ray (-viewDirection). Half the ray deflection
+  // preserves the slope-strength calibration at small, near-normal tilts.
+  const rayDelta = vec3(bent.x, bent.y.negate(), bent.z).add(viewDirection).mul(0.5);
+  const tilt = viewMatrix.mul(vec4(rayDelta, 0));
+  // The virtual camera reverses screen right. Texture UV also points down,
+  // so both view-plane components are negated. Strength is viewport-height
+  // based; aspect correction keeps the displacement equal in screen pixels.
+  return vec2(tilt.x.negate().mul(viewport.y.div(viewport.x)), tilt.y.negate()).mul(strength);
+}
+
 export interface ReflectionShadeInput {
   /**
    * The ocean's own analytic sky reflection colour. It is the fallback when
@@ -36,6 +58,8 @@ export interface ReflectionShadeInput {
   skyColor: TslNode;
   /** world-space shading normal of the water surface (unit) */
   normalWorld: TslNode;
+  /** unit direction from the water surface toward the main camera */
+  viewDirection: TslNode;
   /** horizontal displacement magnitude in metres — the choppiness/steepness */
   chop: TslNode;
   /** distance from the eye to the shaded point, metres */
@@ -90,7 +114,7 @@ export function createReflectionShading(
   );
 
   const shade = (input: ReflectionShadeInput): TslNode => {
-    const { skyColor, normalWorld, chop, camDist, footprint } = input;
+    const { skyColor, normalWorld, viewDirection, chop, camDist, footprint } = input;
 
     // Break-up: push the lookup around by the wave's own slope plus its
     // horizontal (choppy) displacement, so the mirrored scene shears on chop
@@ -103,10 +127,13 @@ export function createReflectionShading(
     // only wobble a reflected shape, never break it up; the blur below is what
     // actually models the microfacet spread (see the lod block).
     const tilt = slope.length();
-    const offset = slope
-      .mul(uDistort.x)
-      .add(slope.mul(chop.mul(uDistort.y)))
-      .clamp(uDistort.z.negate(), uDistort.z);
+    const offset = reflectionDistortionNode(
+      normalWorld,
+      viewDirection,
+      cameraViewMatrix,
+      screenSize,
+      uDistort.x.add(chop.mul(uDistort.y)),
+    ).clamp(uDistort.z.negate(), uDistort.z);
     // flipX is NOT decoration: the virtual camera's basis comes out with its
     // right vector negated (see mirrorMath.mirrorCameraPose), so the render
     // target is horizontally mirrored relative to the screen.

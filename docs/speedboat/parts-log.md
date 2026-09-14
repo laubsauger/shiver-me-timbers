@@ -416,3 +416,20 @@ horns 8 → 6 sides; jerrycan spouts 16 → 12) and the manifest parts line lowe
   low on the corners outboard of the bracket plate, and a riveted aluminium hull-ID plate with a stamped HIN; the tow
   eyes and the bracket platform step were already there.
 - Budget line 64k (measured 63.7k before bakes): hull 29.5k + parts + pilot v2 17.9k ≈ 111k of 120k.
+
+**§T.200: two-tone cowls (USER: "a band of white on the bottom big bucket section of the engines").**
+- The removable cowl top (upper cowl h 0.36–0.80 + cap) is `cowl_livery`: the boat's dominant hue.
+- The lower cowl is lofted in three pieces sharing their boundary rings, so there is no gap and no overlap:
+  - bone bucket, h 0–0.25
+  - a 3 cm livery pinstripe, h 0.25–0.28
+  - a 6 cm bone collar up to the split line
+- The midsection and lower unit stay `lower_paint` bone.
+- The salvage decal (teal chevrons, orange bar) moved from the upper cowl onto the bucket of engines P and S.
+- Lower-cowl screws moved from h 0.26 to 0.31, off the stripe.
+- Row counts were trimmed (bucket 4, collar 1) to stay under the 64k parts line: 63 691.
+- None of this showed in game before T200: `M_Carbon` baseColor alpha, the livery mask, was dropped in KTX2 packaging
+  (hull-log §T.200). The runtime tinted the whole slot, and the parts preview renders sample the raw PNG, so they never
+  saw it.
+- `dash.py`, outside T200's files: the tablet case corner bumpers sink 3 mm into the face panel instead of 2 mm. Their
+  bevelled backs sat exactly on the §V98 2 mm plane tolerance from the case back. The T196 vcg shift (0.739 → 0.760)
+  tipped them into a raw-checker z-fight (2.8 × 2.8 cm at body 0.565, 0.207, 1.170), which blocked the build.

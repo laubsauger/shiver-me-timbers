@@ -2,7 +2,7 @@
 
 Status: built, node-tested, and the worklet was checked in the browser on the harness. It is **not wired into `speedboat.html` yet**, because the page belongs to T181. The swap is one line, shown under [Wiring](#wiring-for-the-page-t181).
 
-This file covers engine and hull audio only. Race-control radio is a separate task.
+This file covers engine and hull audio, plus the race radio bus (below). Race-control speech is not voiced.
 
 ## What it is
 
@@ -17,8 +17,8 @@ This file covers engine and hull audio only. Race-control radio is a separate ta
 
 | File | Role |
 |---|---|
-| `engineModel.ts` | **The V77 seam.** The only import point for the engine model; re-exports `rpmModel` until `sea-physics/engine.ts` lands |
-| `rpmModel.ts` | Temporary adapter: pure crank + propeller ODE per engine, plus archetype specs (V8, turbine, two-stroke, electric) |
+| `engineModel.ts` | **The V77 seam.** The only import point for engine models; adapts `sea-physics/engine.ts` (V8) and `rpmModel` (other kinds) |
+| `rpmModel.ts` | Temporary model for turbine, two-stroke and electric (its V8 spec is no longer used by the voices) |
 | `dsp.ts` | Noise, one-pole, TPT state-variable filter, waveguide, pulse table, sine table |
 | `voices.ts` | V8 / two-stroke / turbine / electric engine voices and the water layer |
 | `synthCore.ts` | Boats (rpm models) and slots (voices); ramp schedule, events, NaN guards, rpm report |
@@ -61,15 +61,31 @@ Measured values (`tests/boatAudioModel.test.ts`):
 | Lift at 41 m/s | windmills at 5140 rpm |
 | Airborne | limiter reached in < 0.35 s; bounce period ~60 ms (≈16 Hz) |
 
-### Engine-model seam (V77, §T.189)
+### Engine-model seam (V77, §T.189): V8 now runs the sim engine
 
-Thrust, the Governor assist and audio must read one rpm. The physics agent (T189) is building that model in `src/sea-physics/engine.ts`, using `rpmModel.ts` as a starting reference.
+The seam is `src/audio/boat/engineModel.ts`. It is the only boat-audio module that imports an engine model, and `tests/boatAudioGraph.test.ts` enforces that. `src/sea-physics/engine.ts` did not match the audio interface one-for-one, so the seam **adapts** it instead of re-exporting:
 
-- **The seam is `src/audio/boat/engineModel.ts`.** Every boat-audio module imports the engine model through it, and `tests/boatAudioGraph.test.ts` enforces that. Today it re-exports `./rpmModel`, which is a temporary adapter.
-- **The switch is one line** in that file: `from './rpmModel'` becomes `from '../../sea-physics/engine'`. It compiles unchanged if engine.ts exports `VoiceKind`, `GovernorMode`, `EngineSpec`, `EngineState`, `EngineInput`, `VOICE_KINDS`, `ENGINE_SPECS`, `createEngineState` and `stepEngine`, and provides the `EngineState` fields the voices read (listed in the file). The worklet bundle test already allows `sea-physics/engine.ts`.
-- **Physical state goes in engine.ts:** limiter and fuel cut, overrun, spool, ventilation flare.
-- **Sound-only behaviour stays in audio:** the 20 ms rpm de-zipper, pop timing, and cam-lope wobble.
-- **Once the sim integrates rpm**, the page passes it per boat as `telemetry.rpm`. That override path is already wired: the worklet follows the sim's rpm instead of integrating its own, and only the fuel-cut and overrun state machine keeps running. For exact V77 parity, that state machine should then also come from the sim, as per-drive `fuelCut` / `overrun` telemetry. Those fields do not exist yet; this is hook 8.
+- **V8 uses `sea-physics/engine.ts`.** The spec is `MERCURY_450R` (1.60:1 gear, surface-piercing prop). The adapter's local integration is step-for-step identical to the physics `stepEngine` (tested).
+- **Turbine, two-stroke and electric still use `./rpmModel`.** engine.ts has no specs for them yet. When it does, move each kind in `ENGINE_SPECS` over; nothing else in audio changes.
+- **Sim-published rpm wins.** When `hullWater.driveRpm` is passed per drive as `telemetry.rpm`, the adapter follows it with a 20 ms de-zipper, which is sound-only. The physics limiter and overrun logic then runs on the sim's rpm, using engine.ts's own thresholds, and those flags drive the pops.
+- **Without sim rpm** (NPCs on the worker path, the harness), the same physics ODE integrates locally from drive advance and immersion.
+- **Governor.** Physics takes a cap (`rpmLimit`). Audio's `GovernorMode` is mapped to that cap (5400 rpm when the props are out) only when audio integrates locally.
+- **Neutral.** Throttle exactly 0 maps to `neutral`, matching the hull.
+- **Sound-only fields** the physics does not own are derived in the adapter from its limiter and overrun transitions and its lagged throttle: `load`, `bark`, `refireCount`, `overrunTime`, `limiterActivity`. They shape loudness and pops, never rpm.
+- **Sound-only detune.** A sim running three identical drives publishes identical rpm. On the override path, the voices get a perceptual ±0.25% per engine so the triple still beats. On the local path the per-engine specs are detuned instead (idle ±1.5%, limiter ±25 rpm).
+
+Measured with the physics V8 through the seam:
+
+| Behaviour | V8 (physics) |
+|---|---|
+| Idle | 648 rpm |
+| Hole shot | 5910 rpm (the surface-piercing prop ventilates) |
+| 20 m/s, full throttle | 5026 rpm |
+| 38 m/s (calibration speed) | 6100 rpm |
+| Airborne | 97% of the limiter in 19 ms; bounce ~80 ms |
+| Governor 'air' peak | 5416 rpm |
+
+The `rpmModel` numbers above now apply only to the turbine, two-stroke and electric kinds.
 
 ## Voices (`voices.ts`)
 
@@ -86,7 +102,7 @@ Thrust, the Governor assist and audio must read one rpm. The physics agent (T189
   - The uneven L R R L R L L R bank sequence is what puts energy at the half orders. That is the lump.
   - The banks merge into a 92 Hz body resonance and a 420 Hz midsection resonance, then a load-dependent soft clip.
 - **Exhaust exit.**
-  - In air: a lowpass that opens with load and rpm (the bark).
+  - In air: a lowpass that opens with load and rpm (the bark), up to about 4.6 kHz at WOT (T204; it was 5.8 kHz).
   - Underwater at idle through the hub: a ~300 Hz lowpass with bubble amplitude modulation, a re-pitched bubble resonator, and idle-relief rasp.
 - **Pops.** Overrun, limiter and re-fire bursts are injected into the pipe, so they ring like the exhaust. The re-fire after a cut is a single bang.
 - **Extras.**
@@ -98,21 +114,21 @@ Thrust, the Governor assist and audio must read one rpm. The physics agent (T189
 
 - **Two-stroke triple ("Flat Jack").**
   - Fires 3 times per revolution into an expansion chamber (positive reflection), then a nasal 1 kHz band.
-  - At light load it skips firings irregularly, which gives the ring-ding character, with a 2.65 kHz high-Q ringing.
+  - At light load it skips firings irregularly, which gives the ring-ding character, with a 2.65 kHz ringing (Q 12; Q 28 read as a steady tone at idle, T204).
   - Pops and muffling behave the same as the V8.
 - **Turbine ("Shine").**
   - The gas generator spools behind the lever (τ 1.3 s up, 0.9 s down).
-  - Blade-pass whine (11 blades) with shaft sidebands.
+  - Blade-pass whine (9 blades on a 22 000 rpm gas generator, so 2.2 kHz at idle to 3.3 kHz at full spool) with shaft sidebands. The idle whine is a trace that comes up with spool². T204: the old 11 blades × 41 000 rpm put a constant 4.9 kHz tone (+9.8 kHz) on the idling grid, which was the shrill tone in boat select.
   - Combustor roar opens with spool, plus an exhaust rumble and a power-turbine tone.
   - The limiter is soft; there is no bounce.
 - **Electric ("Spark").**
-  - PMSM whine at 6×, 12× and 24× f_e (4 pole pairs).
+  - PMSM whine at 6×, 12× and 24× f_e (4 pole pairs); the 12× and 24× partials sit well under the fundamental (T204).
   - Inverter carrier: synchronous PWM ratios 45 / 27 / 15 / 9 below f_e = 200 Hz, so it audibly steps like a singing inverter; asynchronous 4.5 kHz above that.
-  - Sidebands at the carrier ± 2 f_e, plus gear whine and fan noise.
+  - Sidebands at the carrier ± 2 f_e, plus gear whine and fan noise. The carrier and fan were cut about 10 dB in T204 (they stood 8 dB under the whine at cruise).
 
 ### Water layer
 
-- **Planing hiss:** band-pass noise whose centre rises with speed. Gain scales with wetted^0.6 × speed².
+- **Planing hiss:** band-pass noise whose centre rises with speed (1 → 3.6 kHz at `speedRef`; T204 lowered it from 5 kHz). Gain scales with wetted^0.6 × speed².
 - **Water rush** and **prop-wash spray roar:** the roar scales with Σ|thrust| × speed and gets louder as the prop surfaces.
 - **Ventilation howl:** two resonant bands at 3× and 5× blade rate (4 blades from rpm) plus a 2× tone. It is gated on partial immersion and thins out when the prop is fully in air.
 - **Events:**
@@ -206,19 +222,19 @@ boatAudio.update(frames /* BoatFrameTelemetry[] */, frameDt, app.camera);
 
 None of these block the audio.
 
-1. **`BoatAudioFrame.contact.driveAdvance` / `driveImmersion`.** Point them at `player.hw.driveAdvance` / `player.hw.driveImmersion` (zero-copy, like `driveThrust`). Without them the rpm load uses ground speed and the scalar `propImmersion` for all three drives, which loses per-drive ventilation.
+1. **`BoatAudioFrame.contact.driveAdvance` / `driveImmersion`.** Added to seams.ts as optional fields, and `pageSink` forwards them. The page still has to point them at `player.hw.driveAdvance` / `driveImmersion`; without them the rpm load uses ground speed and the scalar `propImmersion` for all three drives.
 2. **`slamImpulse` should be summed over the ticks a frame covers.** The page currently overwrites it every tick, so on a frame that covers two ticks, the first tick's slam is lost. Change it to `c.slamImpulse += player.hw.slamImpulse` in the tick, and reset it to 0 after `audio.update`.
 3. **NPC contact.** The sim-worker already writes `WETTED_AREA`, `SLAM_IMPULSE` and `PROP_IMMERSION` per boat, but `NpcFleet` does not expose them. Without them, NPC slaps and landings are silent and rival ventilation is fixed at 0.85 immersion.
 4. **NPC throttle** from the race AI (T186). The default is 0.8.
-5. **`Governor` mode** from the assists (T182) into `telemetry.governor`. `pageSink` does not pass it yet because the seam frame lacks it.
+5. **`Governor` mode.** `BoatAudioFrame.governor` is now in seams.ts and `pageSink` forwards it. The page still has to set it from the T182 assists.
 6. **Wake crossing strength** from the wake system into `telemetry.wakeCrossing`. There is no source for it today.
 7. **Engine cluster offset.** `engineOffsetZ` = −4.6 m from the CG is an estimate. Using the mean of `hw.driveProp` as `enginePosition` would be exact.
-8. **Per-drive `fuelCut` / `overrun` flags** from `sea-physics/engine.ts`, once it lands. Audio currently re-derives them from its own copy of the limiter thresholds, even when the rpm is overridden.
+8. **`hw.driveRpm` into `BoatAudioFrame.contact.driveRpm`** (zero-copy, like `driveThrust`; seams.ts does not carry it yet). `pageSink` already forwards it as `telemetry.rpm` whenever it is present and non-zero; until then the player's rpm is integrated locally by the same physics model. NPCs need the worker to publish it too, via `npcContact(i).driveRpm`.
 
 ## Verification
 
-- `npx vitest run tests/boatAudio`: 58 tests pass, and 6 WAV renders are skipped unless `BOAT_AUDIO_WAV_DIR` is set.
-  - `boatAudioModel`: planing slip 5–20% for all 4 archetypes; rpm rises with advance and with ventilation; throttle lag; airborne reaches the limiter in < 0.35 s without overshoot; bounce period 40–250 ms; Governor 'air'; bog on re-entry; overrun windmill; NaN and extreme inputs; override; determinism.
+- `npx vitest run tests/boatAudio`: 63 tests pass, and 6 WAV renders are skipped unless `BOAT_AUDIO_WAV_DIR` is set.
+  - `boatAudioModel`: the seam (the V8 spec is the physics 450R; local integration identical to physics; limiter cuts and re-fires; sim rpm wins with limiter flags from it; overrun silences combustion); legacy model: planing slip 5–20% for all 4 archetypes; rpm rises with advance and with ventilation; throttle lag; airborne reaches the limiter in < 0.35 s without overshoot; bounce period 40–250 ms; Governor 'air'; bog on re-entry; overrun windmill; NaN and extreme inputs; override; determinism.
   - `boatAudioMix`: §V96 plateau measured vs. monotonic boat law; air absorption; doppler ratios and zipper; steal sequence; tier hysteresis; landing and slam detection; muffling; packing sanitisation.
   - `boatAudioSynth`: V8 firing line at rpm·8/120 ±3% at 900/2500/4500/6300 rpm; two-stroke at rpm·3/60; inverter at 6 f_e; identical pitch at 0 and 40 m/s; half-order energy (lump); underwater exhaust darker; limiter bounce visible in the envelope spectrum (4–25 Hz); three-engine beating; landing boom at 50–120 Hz; hiss grows with speed; ramp schedule; bit-identical renders; finite output on garbage input; CPU.
   - `boatAudioGraph`: ≤ 50 nodes and ≤ 2 HRTF with 8 and 12 boats; the graph does not grow; 7 slots with 3 full voices; §V109 walk; the worklet bundle stays inside `src/audio/boat`; engine-model seam; seam adapter; V112 phase scan.
@@ -263,3 +279,12 @@ Nobody has listened to these renders yet. They were judged from spectrograms, le
 - Water hiss and spray are filtered noise.
 
 **Tuning.** All levels are in the `boatAudio` params panel.
+
+## Race radio bus (§T.197)
+
+- **What is audible.** Race control's calls are text on the HUD strip (`page/raceRadio.ts`). Each new line plays a VHF squelch burst: 0.14 s of deterministic noise through a 1.8 kHz bandpass. No speech is synthesised.
+- **The bus.** `src/audio/boat/radioBus.ts` `createRadioBus(engine)` routes source → envelope → shared bandpass → radio bus gain → destination. The graph is built lazily once the context runs. It has 3 persistent nodes plus 2 per burst, and the per-burst nodes are released on `ended`.
+- **Level.** The level is `radioBusLevel(master, radio)`, the pause screen's Master × Race radio (`raceSettings.radioLevel`). `audio/engine.ts` does not expose its master gain, so master is folded in by the caller. Engines stay on the sfx bus, so Radio at 0 leaves them audible.
+- **Page wiring.** The sink exposes `radio`. `createRaceUi({ audio: { setVolume, radioCall } })` calls `radioCall` once per new radio line with text.
+- **Persistence.** `audio.radio` is stored in `speedboat.settings.v1` (default 0.7). A record without the field loads with the default.
+- **Tests.** `tests/boatAudioRadio.test.ts`.

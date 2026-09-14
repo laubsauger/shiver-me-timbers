@@ -27,6 +27,13 @@ export const RPM_PROXY = Object.freeze({
   idleThrottle: 0.02,
 });
 
+/**
+ * below this mean prop immersion the drive is OUT of the water: the Governor feathers. T206 (user: "everyone flies by
+ * me"): at 0.45 the planing props' normal dips (calm, full throttle: s 0.2–0.45 on ~10% of ticks, never < 0.2) cut the
+ * throttle to ~0.5 for a few ticks, and the engine's spool lag turned 3.9% capped ticks into −1.1 m/s (33.2 → 32.1 m/s)
+ * against the rivals, whose pilot feathers only below 0.05. At 0.1 calm planing is never capped (33.18 vs raw 33.21).
+ */
+export const VENT_IMMERSION = 0.1;
 export const LANDING_MIN_AIR = 0.3;
 export const LANDING_CAP_SECONDS = 0.6;
 export const LANDING_THROTTLE_CAP = 0.5;
@@ -80,7 +87,11 @@ export function stepGovernor(
     st.airTime = 0;
   }
   if (mode !== 'OFF') {
-    let cap = propLoad(airborne ? 0 : immersion);
+    // Feather only a prop that is actually OUT (s below VENT_IMMERSION). §T.196 made s ≈ 0.6–0.7 the normal planing
+    // point of the surface-piercing drives, dipping to 0.2; capping there made the assisted player slower than the
+    // unassisted rivals (§V110, T206).
+    const s = airborne ? 0 : immersion;
+    let cap = s < VENT_IMMERSION ? propLoad(s) : 1;
     if (mode === 'FULL' && st.landingCap > 0) {
       cap = Math.min(cap, LANDING_THROTTLE_CAP);
       st.landingCap = Math.max(0, st.landingCap - dt);

@@ -131,7 +131,9 @@ def root_extras(cfg, rep, rig):
         'frame': 'seat socket: metres, +Y up, +Z bow; origin = the hull JSON seat station on the seat pan top (pilot_config.json seat)',
         'seatSocket': 'PilotSeatSocket',
         'heightM': cfg['body']['heightM'],
-        'seated': {'hipsZ': pose['hipsZ'], 'leanDeg': pose['leanDeg'], 'eye': to3(pose['eyeSeated']),
+        # `eye` IS the cam_eye socket (the cockpit camera position, forwardM ahead of the eye midpoint), so a consumer of
+        # the extras and one of the node agree; the parts anchor error stays measured at the eye midpoint
+        'seated': {'hipsZ': pose['hipsZ'], 'leanDeg': pose['leanDeg'], 'eye': to3(cam['position']),
                    'partsEyeAnchor': helm['eyeAnchorParts'], 'partsEyeAnchorError': to3(pose['eyeError'])},
         'helm': {'source': 'parts build sockets (Helm_LOD0 pivot/axis, helm.py rim), pilot frame',
                  'hub': helm['wheelHub'], 'axis': helm['wheelAxis'], 'rimRadius': helm['wheelRadius'], 'rimTube': helm['rimTube'],

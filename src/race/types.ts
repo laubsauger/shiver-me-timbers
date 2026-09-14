@@ -8,6 +8,13 @@
  * Frame: world metres, y up, x/z the sea plane (same as ShipState).
  * Pure data — no three.js imports (§V109: src/race never imports main.ts,
  * main-raft.ts, raft/, combat/ or ai/).
+ *
+ * HANDEDNESS (§T.197: ONE convention, the physical one src/circuit authors in, §B112):
+ * yaw θ ⟹ forward (sin θ, cos θ); with y up a boat's PORT (left hand, facing the bow)
+ * of a heading d = (dx, dz) is (dz, −dx) and its STARBOARD is (−dz, dx). Facing +z, port
+ * is +x. Yaw increasing is a turn to PORT. `circuit/courseLine.ts portOf` is this rule.
+ * (src/race/ai still reads marks in the mirrored sense; the page hands its pilots an
+ * adapted course — speedboat/page/course.ts `aiHandedCourse`, race/ai owner item.)
  */
 
 export type Vec2 = readonly [x: number, z: number];
@@ -15,9 +22,9 @@ export type Vec2 = readonly [x: number, z: number];
 /** A pair of marker poles the boat must pass BETWEEN, in course order. */
 export interface Gate {
   id: string;
-  /** left pole (seen travelling the course direction) */
+  /** left pole = the PORT pole seen travelling the course direction: mid + (dz, −dx)·w */
   left: Vec2;
-  /** right pole */
+  /** right pole = the STARBOARD pole: mid + (−dz, dx)·w */
   right: Vec2;
   /** exposed = open-sea swell sector; sheltered = island lee (design doc §5) */
   sector: 'exposed' | 'sheltered';
@@ -27,7 +34,7 @@ export interface Gate {
 export interface TurnMark {
   id: string;
   at: Vec2;
-  /** side the MARK stays on while rounding */
+  /** side of the BOAT the mark stays on while rounding ('port' = the boat turns to port around it, yaw increasing) */
   keepOn: 'port' | 'starboard';
   /** radius (m) inside which a boat has not rounded it */
   radius: number;

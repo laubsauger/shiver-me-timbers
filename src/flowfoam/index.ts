@@ -70,10 +70,12 @@
  * §V22: agent/code done ≠ task done — visual verification of the foam trail
  * against docs/flows.png is pending main-thread integration + screenshot.
  */
+import type { ChineSheetEmitter } from '../wake/chineContact';
 import type * as THREE from 'three/webgpu';
 import { float, fwidth, mix, smoothstep, texture, uniform, vec2, vec4 } from 'three/tsl';
 import { flowFoamParams, type FlowFoamParams } from '../params/flowfoam';
 import { regionEdgeFadeCpu } from './flowMath';
+import { coverageWeightedAgeNode } from './foamAge';
 import { createFlowNoiseUniforms } from './flowNoise';
 import { createAccumulation, FOAM_INJECTION_LAYER, nearProfile, type AccumProfile } from './accumulation';
 import { intersectionMaskNode } from './intersectionMask';
@@ -82,7 +84,7 @@ import { createSimWakeField, type WakeFieldFn } from './simInjection';
 import { bandKeepNode } from './slickInjection';
 import { createWakeInjector } from './wakeInjection';
 import { WAKE_SHIP_TIER } from '../wake/wakeCalibration';
-import { WakeSim, type WakeSimTier } from '../wake/wakeSim';
+import { WAKE_MAX_VESSELS, WakeSim, type WakeSimTier } from '../wake/wakeSim';
 
 export { FOAM_INJECTION_LAYER };
 export type { PropWashInput, HullBurialInput, SlopeSpectrumBand } from './simFoam';
@@ -102,6 +104,17 @@ export { intersectionMaskNode, worldIntersectionMaskNode } from './intersectionM
  */
 export type WakeBackend = 'analytic' | 'sim';
 
+/**
+ * §T.199 THE FLEET'S EDDY GAIN inside the trail (`AccumProfile.wakeChurn`; the galleon/raft keep `wakeChurn` 1.8).
+ * USER: 'bow wake angle seems a bit round … not triangular enough'. Measured (flowMath CPU mirror, shipped flow
+ * params): the curl speed is median 0.42 / p90 0.86 m/s in open water and ×2.8 = 1.18 / 2.40 m/s where foam is
+ * saturated — which a planing hull's lane always is — so the race trail was swirled 6–24 m sideways over its
+ * 5–12 s life: the round cloud. A planing hull leaves a thin, fast-decaying turbulent layer, not the bluff-body
+ * eddy street the 1.8 was tuned on (galleon). 0 = the trail drifts with the ambient curl only. LOOK CALIBRATION
+ * against that playtest and the narrow straight-armed V of offshore-racing footage (docs/wake/w7-speedboat-look.md §2).
+ */
+export const FLEET_WAKE_CHURN = 0;
+
 /** the sim backend's stand-in for the analytic injector: no doses, no surface (§T.171) */
 const noAnalyticWake: WakeFieldFn = () => ({ rate: vec4(0, 0, 0, 0), elev: float(0) });
 
@@ -116,8 +129,15 @@ export interface FlowFoamOptions {
   /**
    * §T.180 c: prop jets the sim foam compiles for (0 = none, the raft; the
    * speedboat's three drives want 3). Construction-time: it sizes the shader.
+   * §T.195: PER VESSEL when `vessels` > 0 — the shader carries propJets × vessels.
    */
   propJets?: number;
+  /**
+   * §T.195 vessel slots the sim foam's churn and ribbons carry (simFoam `vessels`). Default: WAKE_MAX_VESSELS on a
+   * page that carries prop jets (the speedboat race — every boat marks the water), 0 otherwise (the raft: the
+   * single-hull graph, bit-identical). Construction-time.
+   */
+  vessels?: number;
 }
 
 /**
@@ -163,14 +183,18 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
    * read the zero field for `.ba`/elevation-free doses and `simFoam` for `.rg`.
    */
   const simField = wakeSim ? createSimWakeField(noAnalyticWake, wakeSim) : null;
-  const simFoam = wakeSim && simField ? createSimFoamField(wakeSim, p, simField.uSimCenter, { propJets: opts.propJets }) : null;
+  const vessels = opts.vessels ?? (opts.propJets ? WAKE_MAX_VESSELS : 0);
+  const propJets = vessels > 0 && opts.propJets ? opts.propJets * vessels : opts.propJets;
+  const simFoam = wakeSim && simField ? createSimFoamField(wakeSim, p, simField.uSimCenter, { propJets, vessels, uNearCenter: simField.uNearCenter }) : null;
+  /** §T.199 the fleet's eddy gain in the trail (`FLEET_WAKE_CHURN`); the single-hull pages keep `p.wakeChurn` */
+  const churnProfile: Partial<AccumProfile> = vessels > 0 && simFoam ? { wakeChurn: () => FLEET_WAKE_CHURN } : {};
   /** §T.180 a: the band the ambient slope is measured over — the sim's own (λ ≥ 2 sim texels) */
   const ambientLambdaMin = wakeSim ? 2 * wakeSim.solver.texel : 0;
   /** the cascades' slope totals the ambient σ was last measured from (no per-tick allocation) */
   const ambientKey = new Float64Array(8);
   let ambientKeyCount = -1;
   const acc = simField
-    ? createAccumulation(p, flowU, simField.field, { ...nearProfile(p), blurSlope: false, simFoam: simFoam!.rateNode })
+    ? createAccumulation(p, flowU, simField.field, { ...nearProfile(p), blurSlope: false, simFoam: simFoam!.rateNode, ...churnProfile })
     : createAccumulation(p, flowU, wake.wakeFieldNode);
   acc.uniforms.uWaterHeight.value = opts.waterHeight ?? 0;
   // Coarse FAR tier: the same analytic wake, accumulated over a region several
@@ -199,7 +223,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
   };
   // §T.171: the far tier carries the SIM trail on the sim backend — same rates, its own decay
   const far = simFoam
-    ? createAccumulation(p, flowU, noAnalyticWake, { ...farProfile, simFoam: simFoam.rateNode })
+    ? createAccumulation(p, flowU, noAnalyticWake, { ...farProfile, simFoam: simFoam.rateNode, ...churnProfile })
     : createAccumulation(p, flowU, wake.wakeFieldNode, farProfile);
   const uEdgeFade = uniform(p.edgeFade);
   const uFarStrength = uniform(p.farStrength);
@@ -379,9 +403,19 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       simFoam?.setHullBurial(contact);
     },
 
-    /** §T.180 c — this tick's prop jets (`wake/propWash.ts`) for the foam ribbon; the page hands the same list to `wakeSim.tick` */
+    /**
+     * §T.180 c — this tick's prop jets (`wake/propWash.ts`) for the foam ribbon; the page hands the same list to `wakeSim.tick`.
+     * §T.195: in vessel mode EVERY boat's jets, hero first then nearest (`vesselFx` builds the list); `jetSlots` drawn.
+     */
     setPropWash(inputs: readonly PropWashInput[]): void {
       simFoam?.setPropWash(inputs);
+    },
+    /**
+     * §T.199 vessel mode — this tick's hulls' waterline spray and speed (hero first, `vesselFx` builds the list): the
+     * chine sheet foam lines (simFoam `packChineSheet`). No-op without vessel slots.
+     */
+    setChineSheets(inputs: readonly ChineSheetEmitter[]): void {
+      simFoam?.setChineSheets(inputs);
     },
 
     /** which field draws the wake's surface — fixed at construction */
@@ -398,7 +432,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
      * does not compile them. Resolves immediately on the analytic backend.
      */
     warmAsync(renderer: THREE.WebGPURenderer): Promise<unknown> {
-      return wakeSim ? wakeSim.solver.compileAsync(renderer) : Promise.resolve();
+      return wakeSim ? wakeSim.compileAsync(renderer) : Promise.resolve();
     },
 
     /** debug/tests: the live world-space cutwater history (index 0 = newest) */
@@ -526,6 +560,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
         // pass resamples it about the centre that group scrolled to
         wakeSim.step(renderer); // @band-limited-elsewhere: a solver method named step, not a shader edge
         simField.uSimCenter.value.set(wakeSim.solver.centerX, wakeSim.solver.centerZ);
+        if (wakeSim.near && simField.uNearCenter) simField.uNearCenter.value.set(wakeSim.near.centerX, wakeSim.near.centerZ);
         simFoam?.update();
         uSlickPerFoamAge.value = Math.max(0, Number.isFinite(p.simSlickPerFoam) ? p.simSlickPerFoam : 0);
         uNearAgeExp.value = freshnessExponent(p.decayHalfLife, p.slickHalfLife);
@@ -572,13 +607,23 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
      */
     wakeFoamFreshnessNode: simFoam
       ? (worldXZ: any): any => {
-          const tier = (a: typeof acc, exponent: any) => {
+          const tier = (a: typeof acc, exponent: any, fade: any) => {
             const t = texture(a.foamTexture, regionUv(a, worldXZ));
             const r = t.r.max(0).mul(uSlickPerFoamAge);
-            return r.div(t.g.max(r).max(1e-5)).clamp(0, 1).pow(exponent);
+            return {
+              coverage: t.r.mul(regionEdge(a, fade, worldXZ)),
+              age: r.div(t.g.max(r).max(1e-5)).clamp(0, 1).pow(exponent),
+            };
           };
-          // §V23 functional mix — the same near/far handover as the foam itself
-          return mix(tier(acc, uNearAgeExp), tier(far, uFarAgeExp), farWeight(worldXZ));
+          const near = tier(acc, uNearAgeExp, uEdgeFade);
+          const distant = tier(far, uFarAgeExp, uFarEdgeFade);
+          const blend = farWeight(worldXZ);
+          // Match foamSampleNode's actual contributions, including edge fade
+          // and far strength. Empty or disabled tiers cannot change foam age.
+          return coverageWeightedAgeNode(
+            near.coverage.mul(blend.oneMinus()), near.age,
+            distant.coverage.mul(uFarStrength).mul(blend), distant.age,
+          );
         }
       : null,
 

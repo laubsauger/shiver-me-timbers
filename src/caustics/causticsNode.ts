@@ -32,7 +32,8 @@ import {
 import type { OceanSimulation } from '../ocean/oceanCascades';
 import { sampleCascadeLayer } from '../ocean/oceanTextures';
 import { oceanParams } from '../params/ocean';
-import { breakerClipNodes, shoalFactorNode, shoalWavenumber } from '../ocean/shoaling';
+import { breakerClipNodes, shoalBandGainNodes, shoalWavenumber } from '../ocean/shoaling';
+import { bandPropagation, SHOAL_ASYMMETRY_BANDS, shoalAsymmetryNodes } from '../ocean/shoalAsymmetry';
 import {
   developmentRatioNode,
   fetchBandCoefficient,
@@ -208,6 +209,10 @@ function stretchFromDerivatives(u: CausticsUniforms, der: TslNode) {
 export interface ShoalingUniforms {
   /** per-cascade shoaling wavenumber (rad/m) */
   k: TslNode[];
+  /** §T.190 per-cascade spectral height RMS (m) — depth-limited breaking reads the whole sea's Hs */
+  sigma: TslNode[];
+  /** §T.190 (shoalSurfGamma, shoalSurfOnset) */
+  surf: TslNode;
   /** (shoalBreakerIndex, shoalColumnCeiling) */
   breaker: TslNode;
   /**
@@ -228,11 +233,19 @@ export interface ShoalingUniforms {
    * the same bag for the same reason (docs/ocean/swell-shadow.md)
    */
   swellShare: TslNode[];
+  /** §T.193 per-cascade (mean k, q, R), ŝ, and (gain, harmonic cap) — src/ocean/shoalAsymmetry.ts */
+  asymBand: TslNode[];
+  asymDir: TslNode[];
+  asym: TslNode;
+  /** §T.193 the fold-capped choppiness the ocean displaces with (the Hilbert estimate divides by it) */
+  choppiness: TslNode;
 }
 
 export function createShoalingUniforms(sim: OceanSimulation): ShoalingUniforms {
   return {
     k: sim.cascades.map(() => uniform(0)),
+    sigma: sim.cascades.map(() => uniform(0)),
+    surf: uniform(new THREE.Vector2(oceanParams.shoalSurfGamma, oceanParams.shoalSurfOnset)),
     breaker: uniform(
       new THREE.Vector2(oceanParams.shoalBreakerIndex, oceanParams.shoalColumnCeiling),
     ),
@@ -240,6 +253,10 @@ export function createShoalingUniforms(sim: OceanSimulation): ShoalingUniforms {
     fetchFull: uniform(1),
     fetchMaxGain: uniform(oceanParams.fetchMaxGain),
     swellShare: sim.cascades.map(() => uniform(0)),
+    asymBand: sim.cascades.map(() => uniform(new THREE.Vector3(0, 1, 1))),
+    asymDir: sim.cascades.map(() => uniform(new THREE.Vector2(1, 0))),
+    asym: uniform(new THREE.Vector2(oceanParams.shoalAsymmetryGain, oceanParams.shoalAsymmetryHarmonicCap)),
+    choppiness: uniform(oceanParams.choppiness),
   };
 }
 
@@ -256,7 +273,9 @@ export function refreshShoalingUniforms(
 ): void {
   for (const [i, c] of sim.cascades.entries()) {
     u.k[i].value = shoalWavenumber(c.meanWavenumber, openDepth, oceanParams);
+    u.sigma[i].value = Math.sqrt(Math.max(c.heightVariance, 0));
   }
+  (u.surf.value as THREE.Vector2).set(oceanParams.shoalSurfGamma, oceanParams.shoalSurfOnset);
   (u.breaker.value as THREE.Vector2).set(
     oceanParams.shoalBreakerIndex,
     oceanParams.shoalColumnCeiling,
@@ -272,6 +291,14 @@ export function refreshShoalingUniforms(
   for (const [i, c] of sim.cascades.entries()) {
     u.swellShare[i].value = swellBandShare(oceanParams, i, c.heightVariance);
   }
+  // §T.193, the same call surfaceMaterial.refreshShoal and CpuOcean.refreshShoal make
+  for (const [i, c] of sim.cascades.slice(0, SHOAL_ASYMMETRY_BANDS).entries()) {
+    const m = bandPropagation(sim.spectrum.current.cascades[i].h0);
+    (u.asymBand[i].value as THREE.Vector3).set(c.meanWavenumber, m.q, m.r);
+    (u.asymDir[i].value as THREE.Vector2).set(m.x, m.z);
+  }
+  (u.asym.value as THREE.Vector2).set(oceanParams.shoalAsymmetryGain, oceanParams.shoalAsymmetryHarmonicCap);
+  u.choppiness.value = sim.effectiveChoppiness();
 }
 
 /**
@@ -280,11 +307,11 @@ export function refreshShoalingUniforms(
  * §V.72, AND THE BUG THIS SIGNATURE EXISTS TO CLOSE. Without `shoal` this is
  * the RAW open-ocean spectrum — the same quantity `CpuOcean.sampleRaw` returns
  * and, like it, NOT "how high is the water here". The ocean surface material
- * draws its vertices at Σ heightᵢ·shoalFactor(kᵢ, d) put through
- * `breakerClip`, so a receiver that asks this question without a depth gets a
- * sea level that disagrees with the one on screen by the whole shoaling term
- * — which goes to 1.0 offshore and to ZERO at the waterline, i.e. it is
- * wrong by the entire wave amplitude exactly where a beach is.
+ * draws its vertices at Σ heightᵢ·gainᵢ(d) (§T.190 growth × fetch × shadow ×
+ * breaking) put through `breakerClip`, so a receiver that asks this question
+ * without a depth gets a sea level that disagrees with the one on screen by
+ * the whole shoaling term — which is exactly 1 offshore and ZERO at the
+ * waterline, i.e. it is wrong by the entire wave amplitude where a beach is.
  *
  * Measured on the showcase island's 180° transect (swell preset, one instant):
  * raw swung -1.945 m … +1.610 m across the 100 m of beach either side of the
@@ -305,7 +332,7 @@ export function refreshShoalingUniforms(
  * bed's depth or nothing at all.
  *
  * This is the line-for-line TSL twin of `CpuOcean.shoaledSum` (§V.8), built
- * from the same `shoalFactor` / `breakerClip` exports.
+ * from the same `shoalBandGains` / `breakerClip` exports.
  */
 export function waterHeightNode(
   sim: OceanSimulation,
@@ -323,24 +350,42 @@ export function waterHeightNode(
   // reconstruction is bit-identically the shoaling-only one.
   const ratio =
     shoal && shoal.fetch ? developmentRatioNode(shoal.fetch, shoal.u.fetchFull) : null;
+  // the per-band external gain — fetch (§V.73) × swell shadow (T174) — the SAME
+  // product surfaceMaterial's `external` and `CpuOcean.bandGains` build (§V.8)
+  const external = shoal && (ratio || shoal.swellK)
+    ? sim.cascades.map((_, i) => {
+      let e: TslNode = null;
+      if (ratio) e = fetchBandGainNode(shoal.u.fetchC[i], ratio, shoal.u.fetchMaxGain);
+      if (shoal.swellK) {
+        const sh = swellShadowGainNode(shoal.u.swellShare[i], shoal.swellK);
+        e = e === null ? sh : e.mul(sh);
+      }
+      return e;
+    })
+    : null;
+  // §T.190: growth per band by its OWN wavenumber, × external, × the one
+  // depth-limited breaking factor — `shoalBandGainNodes`, the twin of the
+  // `shoalBandGains` CpuOcean.shoaledGains calls
+  const gains = shoal
+    ? shoalBandGainNodes(shoal.depth, shoal.u.k, shoal.u.sigma, external, shoal.u.surf)
+    : null;
   let h: TslNode = null;
+  const disp: TslNode[] = [];
   for (const [i, c] of sim.cascades.entries()) {
-    let t = texture(c.displacement, cascadeUv(worldXZ, c.domain)).y;
-    // per cascade, by its OWN wavenumber — long swell feels the bottom far
-    // offshore, short chop stays lively until it is almost aground (§V.19)
-    if (shoal) t = t.mul(shoalFactorNode(shoal.u.k[i], shoal.depth));
-    // ...and by its own band's fetch gain, the SAME product surfaceMaterial's
-    // `shoal[i]` and `CpuOcean.shoaledSum` build (§V.8)
-    if (shoal && ratio) {
-      t = t.mul(fetchBandGainNode(shoal.u.fetchC[i], ratio, shoal.u.fetchMaxGain));
-    }
-    // ...and by the swell shadow, the third factor of that product (T174)
-    if (shoal && shoal.swellK) {
-      t = t.mul(swellShadowGainNode(shoal.u.swellShare[i], shoal.swellK));
-    }
+    disp.push(texture(c.displacement, cascadeUv(worldXZ, c.domain)));
+    let t = disp[i].y;
+    if (gains) t = t.mul(gains[i]);
     h = h === null ? t : h.add(t);
   }
   if (!shoal) return h;
+  // §T.193 the shoaling second harmonic, as surfaceMaterial adds it before the clip
+  const asym = shoalAsymmetryNodes(
+    shoal.depth, shoal.u.k, shoal.u.asymBand, shoal.u.asymDir, shoal.u.sigma, gains!,
+    [disp[0].y.mul(gains![0]), disp[1].y.mul(gains![1])],
+    [disp[0].xz.mul(gains![0]), disp[1].xz.mul(gains![1])],
+    shoal.u.choppiness, shoal.u.asym,
+  );
+  h = h.add(asym[0].dy).add(asym[1].dy);
   // term B on the SUMMED elevation, same as the vertex stage (§V.72)
   return breakerClipNodes(h, shoal.depth, shoal.u.breaker.x, shoal.u.breaker.y).clipped;
 }

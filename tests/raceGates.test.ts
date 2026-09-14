@@ -12,10 +12,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import { gateCrossing, markRoundingPoles, segmentCrossesPoles } from '../src/race/gates';
-import type { Gate, TurnMark, Vec2 } from '../src/race/types';
+import type { Course, Gate, TurnMark, Vec2 } from '../src/race/types';
+import { markArc, portOf } from '../src/circuit/courseLine';
+import { aiHandedCourse } from '../src/speedboat/page/course';
 
-// course direction +z: left pole to port (−x), right to starboard (+x)
-const gate1m: Gate = { id: 'g', left: [-0.5, 0], right: [0.5, 0], sector: 'exposed' };
+// course direction +z. types.ts handedness (§T.197, physical, y up): facing +z the PORT (left) pole is at +x
+const gate1m: Gate = { id: 'g', left: [0.5, 0], right: [-0.5, 0], sector: 'exposed' };
 
 /** deterministic LCG, no Math.random (§V2) */
 function lcg(seed: number) {
@@ -72,9 +74,9 @@ describe('§T.184 swept gate crossing', () => {
   });
 
   it('tunnelling past a pole or outside it does not count', () => {
-    // crossing the gate line 0.05 m outside the right pole at 60 m/s
+    // crossing the gate line 0.05 m outside the port pole at 60 m/s
     expect(countCrossings(gate1m, straightRun(60, 0.3, 0.55, 1)).fwd).toBe(0);
-    // a chord whose endpoints bracket the line but which meets it outside the left pole
+    // a chord whose endpoints bracket the line but which meets it outside the starboard pole
     expect(gateCrossing(gate1m, -2, -0.5, -0.2, 0.5)).toBeNull();
     // while the same chord shifted to meet it inside does count (the test above is not vacuous)
     expect(gateCrossing(gate1m, -1.3, -0.5, 0.5, 0.5)?.dir).toBe('forward');
@@ -97,8 +99,8 @@ describe('§T.184 swept gate crossing', () => {
 });
 
 describe('§T.184 turn-mark rounding', () => {
-  // course: north up x = 0 to a mark at (15, 400), turn right (east). Mark kept to starboard.
-  const mark: TurnMark = { id: 'm', at: [15, 400], keepOn: 'starboard', radius: 8 };
+  // course: north up x = 0 to a mark at (15, 400), turn toward +x (east) = a turn to PORT. Mark kept to port.
+  const mark: TurnMark = { id: 'm', at: [15, 400], keepOn: 'port', radius: 8 };
   const prev: Vec2 = [0, 0];
   const next: Vec2 = [400, 415];
   const poles = markRoundingPoles(mark, prev, next, 150);
@@ -121,14 +123,14 @@ describe('§T.184 turn-mark rounding', () => {
     return fwd;
   }
 
-  it('sweeping around the mark with it to starboard, outside the radius, rounds it once', () => {
-    // bearing increasing = mark on starboard; from south-west (−3π/4) round to east (+π/2)
+  it('sweeping around the mark with it to port, outside the radius, rounds it once', () => {
+    // bearing increasing = circling to port with the mark on the port hand; from south-west (−3π/4) round to east (+π/2)
     expect(rounds(circle(15, 400, 25, (-3 * Math.PI) / 4, Math.PI / 2))).toBe(1);
     // a wide rounding 100 m out still counts
     expect(rounds(circle(15, 400, 100, (-3 * Math.PI) / 4, Math.PI / 2))).toBe(1);
   });
 
-  it('the same sweep the wrong way round (mark to port) does not round it', () => {
+  it('the same sweep the wrong way round (mark to starboard) does not round it', () => {
     expect(rounds(circle(15, 400, 25, Math.PI / 2, (-3 * Math.PI) / 4))).toBe(0);
   });
 
@@ -137,16 +139,16 @@ describe('§T.184 turn-mark rounding', () => {
   });
 
   it('passing on the other side of the mark does not round it', () => {
-    // straight north along x = 40: the mark stays to PORT the whole way
+    // straight north along x = 40: the mark stays to STARBOARD the whole way
     const path: Vec2[] = [];
     for (let z = 200; z <= 600; z += 0.7) path.push([40, z]);
     expect(rounds(path)).toBe(0);
-    // and a right turn south-east of the mark (inside the corner) likewise
+    // and a port turn south-east of the mark (inside the corner) likewise
     expect(rounds(circle(40, 380, 20, -Math.PI, Math.PI / 2))).toBe(0);
   });
 
-  it('a port-hand mark mirrors the rule', () => {
-    const portMark: TurnMark = { ...mark, at: [-15, 400], keepOn: 'port' };
+  it('a starboard-hand mark mirrors the rule', () => {
+    const portMark: TurnMark = { ...mark, at: [-15, 400], keepOn: 'starboard' };
     const p = markRoundingPoles(portMark, prev, [-400, 415], 150);
     const around = circle(-15, 400, 25, (3 * Math.PI) / 4, -Math.PI / 2);
     let fwd = 0;
@@ -155,5 +157,65 @@ describe('§T.184 turn-mark rounding', () => {
       if (c?.dir === 'forward') fwd++;
     }
     expect(fwd).toBe(1);
+  });
+});
+
+// §T.197 WHY: src/circuit authors every gate and mark, src/race judges them. When the two named sides in mirrored frames
+// (§T.191) every Tower Reach gate counted as MISSED and the page had to swap poles to race at all. These build the
+// geometry with the circuit's OWN helpers (courseLine.portOf for gate poles, exactly as towerReach.ts places them, and
+// markArc for the path a boat sails around a mark), so the test fails the moment the two conventions diverge again.
+describe('§T.197 one handedness: the circuit authors, the race judges', () => {
+  it('a gate with its left pole at circuit portOf(heading) is crossed FORWARD by a boat on that heading', () => {
+    for (const deg of [0, 37, 90, 151, 200, 270, 333]) {
+      const h: Vec2 = [Math.sin((deg * Math.PI) / 180), Math.cos((deg * Math.PI) / 180)];
+      const mid: Vec2 = [120, -40];
+      const port = portOf(h[0], h[1]);
+      const gate: Gate = { id: 'c', left: [mid[0] + port[0] * 12, mid[1] + port[1] * 12], right: [mid[0] - port[0] * 12, mid[1] - port[1] * 12], sector: 'exposed' };
+      const path: Vec2[] = [];
+      for (let k = -20; k <= 20; k++) path.push([mid[0] + h[0] * k * 0.7 + port[0] * 3, mid[1] + h[1] * k * 0.7 + port[1] * 3]);
+      expect(countCrossings(gate, path), `heading ${deg}°`).toEqual({ fwd: 1, rev: 0 });
+    }
+  });
+
+  it('the circuit markArc around a mark kept on a side rounds the race mark with that keepOn, and not the other', () => {
+    const prev: Vec2 = [0, 0];
+    const at: Vec2 = [30, 400];
+    const cases: { next: Vec2; keepOn: 'port' | 'starboard' }[] = [
+      { next: [400, 430], keepOn: 'port' }, // turn toward +x = to port
+      { next: [-340, 380], keepOn: 'starboard' }, // turn toward −x = to starboard
+      { next: [0, 0], keepOn: 'port' }, // hairpin
+      { next: [60, 800], keepOn: 'starboard' }, // nearly straight past it
+    ];
+    for (const c of cases) {
+      const arc = markArc(prev, at, c.next, 40, c.keepOn, 60);
+      const path: Vec2[] = [prev, ...arc, c.next];
+      const count = (keepOn: 'port' | 'starboard'): number => {
+        const p = markRoundingPoles({ id: 'm', at, keepOn, radius: 10 }, prev, c.next, 150);
+        let fwd = 0;
+        for (let i = 1; i < path.length; i++) if (segmentCrossesPoles(p.left, p.right, path[i - 1][0], path[i - 1][1], path[i][0], path[i][1])?.dir === 'forward') fwd++;
+        return fwd;
+      };
+      const other = c.keepOn === 'port' ? 'starboard' : 'port';
+      expect(count(c.keepOn), `${c.keepOn} → ${c.next}`).toBe(1);
+      expect(count(other), `${other} (wrong side) → ${c.next}`).toBe(0);
+    }
+  });
+
+  it("the pilots' adapter is exactly the §T.191 mirror (poles swapped, keepOn flipped) and nothing else", () => {
+    const course: Course = {
+      id: 'x', name: 'x', startGateId: 'g0', laps: 3, referenceLine: [[0, 0], [0, 10], [10, 10]], paceLine: [[0, -5], [0, 0]], bounds: { min: [0, 0], max: [1, 1] },
+      elements: [
+        { kind: 'gate', gate: { id: 'g0', left: [1, 0], right: [-1, 0], sector: 'exposed' } },
+        { kind: 'mark', mark: { id: 'm', at: [5, 5], keepOn: 'port', radius: 3 } },
+        { kind: 'mark', mark: { id: 'n', at: [6, 5], keepOn: 'starboard', radius: 3 } },
+      ],
+    };
+    const ai = aiHandedCourse(course);
+    expect(ai.elements).toEqual([
+      { kind: 'gate', gate: { id: 'g0', left: [-1, 0], right: [1, 0], sector: 'exposed' } },
+      { kind: 'mark', mark: { id: 'm', at: [5, 5], keepOn: 'starboard', radius: 3 } },
+      { kind: 'mark', mark: { id: 'n', at: [6, 5], keepOn: 'port', radius: 3 } },
+    ]);
+    expect({ ...ai, elements: null }).toEqual({ ...course, elements: null });
   });
 });

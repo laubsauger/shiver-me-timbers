@@ -110,7 +110,14 @@ function flowfoamComputes(ff: ReturnType<typeof createFlowFoam>): unknown[] {
   const rec = recorder();
   ff.advanceWake(1 / 60);
   ff.update(rec.r, 1 / 60);
-  return rec.computes.filter((c) => !Array.isArray(c));
+  // The final two submissions are the near/far accumulation batches.
+  const batches = rec.computes.slice(-2);
+  expect(batches).toHaveLength(2);
+  for (const batch of batches) {
+    expect(Array.isArray(batch)).toBe(true);
+    expect(batch).toHaveLength(2);
+  }
+  return batches.flat();
 }
 /** a deterministic standard normal stream (LCG + Box–Muller) */
 function normals(seed: number): () => number {
@@ -339,32 +346,36 @@ describe('c. prop wash: sim source, foam ribbon, rooster tail — from the drive
     let integral = 0;
     for (let z = -12; z <= 12; z += 0.01) integral += at(jet(), -0.5, z, 2.5) * 0.01;
     expect(peak).toBeLessThanOrEqual((integral / (Math.sqrt(2 * Math.PI) * 2.5)) * 1.001);
+    // §T.199: the ribbon's WIDTH now depends on U too (a jet in co-flow spreads at S·ΔV/(ΔV + U)), so the per-passage
+    // property is stated on the cross-track INTEGRAL of the dose — the time over the ribbon, whatever its width
     const dose = (U: number): number => {
       const j = jet({ advance: U, thrust: 2000 });
       let d = 0;
-      for (let s = 0; s < 80; s += 0.02) d += (at(j, -s, 0) * 0.02) / U;
+      for (let s = 0; s < 80; s += 0.1) for (let z = -6; z <= 6; z += 0.05) d += (at(j, -s, z) * 0.1 * 0.05) / U;
       return d / packPropJet(j)!.meta[0]; // strip the jet's own drive lift·ΔV: what is left is time over the ribbon
     };
     expect(dose(10) / dose(20)).toBeCloseTo(2, 1);
   });
 
-  it('rooster tail: only a SURFACE-PIERCING prop throws, peaking half-in; apex = the jet head ΔV²/2g; the emitter spawns for it', () => {
-    const e = (imm: number, over: Partial<PropWashInput> = {}) => roosterTailEmission(jet({ immersion: imm, advance: 15, thrust: 12000, ...over }), sprayParams);
+  // §T.199: the throw is the BLADE's (tip speed × the surface-crossing geometry), not the jet head ΔV²/2g the T180
+  // emitter launched at (a 4 cm skirt at race speed) — tests/wakeSpeedboatLook.test.ts §2 carries the plume's height
+  it('rooster tail: only a SURFACE-PIERCING prop throws, peaking half-in; flux = the exposed arc × sheet speed × disc; the emitter spawns for it', () => {
+    const e = (imm: number, over: Partial<PropWashInput> = {}) => roosterTailEmission(jet({ immersion: imm, advance: 15, thrust: 12000, propRps: 50, ...over }), sprayParams);
     expect(e(1).rate).toBe(0);
     expect(e(0).rate).toBe(0);
     expect(e(0.5).rate).toBeGreaterThan(e(0.25).rate);
     expect(e(0.5).rate).toBeGreaterThan(e(0.9).rate);
-    expect(e(0.5).flux).toBeCloseTo(e(0.5).launch * Math.PI * 0.04, 9);
+    expect(e(0.5).flux).toBeCloseTo(e(0.5).exposure * (e(0.5).launch / Math.sqrt(e(0.5).exposure)) * Math.PI * 0.04, 9);
     expect(roosterApex(e(0.5).launch)).toBeCloseTo(e(0.5).launch ** 2 / (2 * GRAVITY), 12);
     expect(e(0.5, { x: Number.NaN }).rate).toBe(0);
     const spawns = (imm: number): number => {
       const rt = createRoosterTail();
       const rec = recorder();
-      for (let t = 0; t < 3; t++) rt.update(rec.r, [jet({ immersion: imm, advance: 15, thrust: 12000 })]);
+      for (let t = 0; t < 3; t++) rt.update(rec.r, [jet({ immersion: imm, advance: 15, thrust: 12000, propRps: 50 })]);
       return rec.computes.length;
     };
-    expect(spawns(1)).toBe(1 + 3); // init + physics × 3, no spawn
-    expect(spawns(0.5)).toBeGreaterThan(1 + 3);
+    expect(spawns(1)).toBe(2 * (1 + 3)); // drops + mist: init + physics × 3 each, no spawn
+    expect(spawns(0.5)).toBeGreaterThan(2 * (1 + 3));
   });
 
   it('wired into the GPU: the tick splats jets (instance flag → head .b), and a prop-carrying flowfoam packs them into its advect uniforms', () => {
@@ -452,10 +463,10 @@ describe('d. wake foam age from the two decay clocks; aged foam dissolves soft',
     expect(Math.abs(width(0) / width(1) - 1)).toBeLessThan(0.2);
   });
 
-  it('wired: the sim material passes the age as foamDetailMask\'s retire and mixes to the whitecap law; analytic builds no age node', () => {
+  it('wired: the sim material passes composed ages to foamDetailMask and mixes to the whitecap law; analytic builds no age node', () => {
     const code = surfaceMaterialSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
     expect(code).toMatch(/wakeFoamFreshnessNode\(worldXZ\)/);
-    expect(code).toMatch(/foamDetailMask\([^;]*undefined,\s*undefined,\s*undefined,\s*wakeFresh\)/);
+    expect(code).toMatch(/foamDetailMask\([^;]*undefined,\s*undefined,\s*undefined,\s*ages.edge,\s*ages.body,?\s*\)/);
     expect(code).toMatch(/mix\(wakeCol,\s*foamCol,\s*wakeFresh\)/);
     expect(createFlowFoam().wakeFoamFreshnessNode).toBeNull();
   });
@@ -674,6 +685,6 @@ describe('V77: the jet ribbon is one expression', () => {
   it('CPU Σ jets = the generic expression on the packed uniforms', () => {
     const j: PropWashInput = { x: 1, z: 2, dirX: 0, dirZ: -1, thrust: 5000, discArea: 0.12, depth: 0.4, advance: 12, immersion: 1 };
     const p = packPropJet(j)!;
-    expect(propWashFoamCpu([j], 1.3, -3, 0.5)).toBe(jetFoamRate(NUM, 0.3, -5, p.pos[2], p.pos[3], p.meta[0], p.meta[1], 0.5));
+    expect(propWashFoamCpu([j], 1.3, -3, 0.5)).toBe(jetFoamRate(NUM, 0.3, -5, p.pos[2], p.pos[3], p.meta[0], p.meta[1], 0.5, p.meta[3]));
   });
 });

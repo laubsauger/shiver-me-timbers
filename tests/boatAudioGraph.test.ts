@@ -211,13 +211,14 @@ describe('§V109 boat audio isolation', () => {
     expect(graph.has('../src/audio/boat/synthCore.ts')).toBe(true);
   });
 
-  it('V77 seam: engineModel.ts is the ONLY boat-audio module importing the engine model, so the §T.189 switch is one line', () => {
+  it('V77 seam: engineModel.ts is the ONLY boat-audio module importing an engine model, and it imports the physics one', () => {
     const offenders = Object.entries(all)
       .filter(([k]) => k.startsWith('../src/audio/boat/') && k !== '../src/audio/boat/engineModel.ts')
       .filter(([, v]) => imports(v).some((spec) => /rpmModel|sea-physics\/engine/.test(spec)))
       .map(([k]) => k);
     expect(offenders).toEqual([]);
-    expect(imports(all['../src/audio/boat/engineModel.ts']).length).toBe(1);
+    // and the seam really is on the physics model (§T.189), not only the temporary adapter
+    expect(imports(all['../src/audio/boat/engineModel.ts'])).toContain('../../sea-physics/engine');
   });
 
   it('V112: no oscillator/crank phase in the voices advances by a speed', () => {
@@ -247,5 +248,13 @@ describe('§T.183 page seam adapter', () => {
     );
     expect(t).toMatchObject({ isPlayer: true, throttle: 0.7, wettedArea: 4, slamImpulse: 99, propImmersion: 0.6 });
     expect(t.driveThrust).toBe(thrust);
+    // no published rpm (or the zero-filled array before the sim's first step) ⟹ the voice integrates locally
+    expect(t.rpm).toBeUndefined();
+    const base = { frameDt: 1 / 60, view: { position: [0, 0, 0], quaternion: [0, 0, 0, 1] }, boat: { velocity: [0, 0, 0] }, controls: { throttle: 1 } };
+    const zero = playerTelemetry({ ...base, contact: { wettedArea: 4, slamImpulse: 0, propImmersion: 1, driveThrust: thrust, driveRpm: new Float64Array(3) } }, 'v8', boatAudioParams);
+    expect(zero.rpm).toBeUndefined();
+    const live = new Float64Array([6100, 6090, 6110]);
+    const pub = playerTelemetry({ ...base, contact: { wettedArea: 4, slamImpulse: 0, propImmersion: 1, driveThrust: thrust, driveRpm: live } }, 'v8', boatAudioParams);
+    expect(pub.rpm).toBe(live);
   });
 });

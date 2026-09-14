@@ -67,13 +67,13 @@ function boat(p: Vec3, heading: number, speed: number, extraV: Vec3 = [0, 0, 0],
 }
 
 /** one fixed tick for a fleet: contacts from the tick-start snapshot, then each boat's own step */
-function tick(boats: Boat[], opts: { world?: StaticWorld; bed?: BedHeight; mask?: number; sea?: HeightSampler; throttle?: number } = {}): void {
+function tick(boats: Boat[], opts: { world?: StaticWorld; bed?: BedHeight; mask?: number; soft?: number; sea?: HeightSampler; throttle?: number } = {}): void {
   const n = boats.length;
   const poses = new Float64Array(n * 13);
   boats.forEach((b, i) => writePose(poses, 0, i, b.s));
   boats.forEach((b, i) => {
     beginContactTick(b.cm);
-    collideBoatWithFleet(i, b.s, ch, poses, 0, n, opts.mask ?? 0, DT, b.cm);
+    collideBoatWithFleet(i, b.s, ch, poses, 0, n, opts.mask ?? 0, DT, b.cm, BOAT_COLLIDE_DEFAULTS, opts.soft ?? 0);
   });
   for (const b of boats) {
     if (opts.world || opts.bed) collideBoatWithWorld(b.s, ch, opts.world ?? null, opts.bed ?? null, DT, b.cm);
@@ -286,6 +286,44 @@ describe('§T.188 boat ↔ boat', () => {
     const b = boat([0, REST_Y, 20], Math.PI, 10);
     for (let k = 0; k < 90; k++) tick([a, b], { mask: 0b10 });
     expect(a.s.position[2]).toBeGreaterThan(b.s.position[2]);
+  });
+
+  /**
+   * §T.198 THE ROLLING-START FORMATION. Before green the rivals' pilots converge both grid columns onto one line; full
+   * contacts rolled boats over there (§T.191 smoke race) and contacts off let hulls sit inside each other (user: boats
+   * must not overlap). A soft contact keeps them apart with a horizontal push through the CG: no roll, no yaw kick.
+   */
+  it('soft contacts (rolling start): converging hulls are kept apart gently — no overlap, no heel, no yaw — where a ghost overlaps', () => {
+    const run = (o: { soft?: number; mask?: number }) => {
+      // two columns 7 m apart steering onto one line (a 4.6° closing angle each: ≈ 1.6 m/s lateral at 20 m/s)
+      const a = boat([-3.5, REST_Y, 0], 0.08, 20);
+      const b = boat([3.5, REST_Y, 1], -0.08, 20);
+      let minGap = Infinity;
+      let maxHeel = 0;
+      let maxYawRate = 0;
+      let maxDv = 0;
+      for (let k = 0; k < 150; k++) {
+        tick([a, b], { ...o, throttle: 0.4 });
+        maxDv = Math.max(maxDv, a.cm.report.maxDeltaV);
+        if (k % 3 === 0) minGap = Math.min(minGap, chainGap(a.s, b.s, 12));
+        for (const q of [a, b]) {
+          const up = rotate(q.s.quaternion, [0, 1, 0]);
+          maxHeel = Math.max(maxHeel, (Math.acos(Math.min(1, up[1])) * 180) / Math.PI);
+          maxYawRate = Math.max(maxYawRate, Math.abs(q.s.angularVelocity[1]));
+        }
+      }
+      return { minGap, maxHeel, maxYawRate, maxDv, momentumX: momentum([a, b])[0] };
+    };
+    const soft = run({ soft: 0b11 });
+    const ghost = run({ mask: 0b11 });
+    const full = run({});
+    // eslint-disable-next-line no-console
+    console.info('[boatCollide] formation soft', soft, 'ghost', ghost, 'full', full);
+    expect(ghost.minGap, 'contacts off: the hulls overlap').toBeLessThan(-1);
+    expect(soft.minGap, 'soft: kept apart (a few cm of speculative slop at most)').toBeGreaterThan(-0.15);
+    expect(soft.maxHeel, 'soft: no roll').toBeLessThan(6);
+    expect(soft.maxDv, 'soft: a fender push, bounded by softAccel per tick').toBeLessThanOrEqual(BOAT_COLLIDE_DEFAULTS.softAccel * DT + 1e-9);
+    expect(soft.maxYawRate).toBeLessThanOrEqual(full.maxYawRate + 1e-9);
   });
 });
 

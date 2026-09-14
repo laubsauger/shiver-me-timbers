@@ -10,6 +10,7 @@
  * (doc §5.3) is gone.
  */
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import * as THREE from 'three/webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
@@ -25,7 +26,7 @@ import {
   type TaggableObject,
 } from '../src/speedboat/assets/contract';
 import { assetFromGltf, measureDeckEdge } from '../src/speedboat/assets/boatModel';
-import { FLEET_LIVERIES, HERO_LIVERY, numberGlyphs, resolveLivery } from '../src/speedboat/assets/livery';
+import { CONCEPT_LIVERIES, FLEET_LIVERIES, HERO_LIVERY, numberGlyphs, resolveLivery } from '../src/speedboat/assets/livery';
 import { buildDeepVHull, REFERENCE_DEEP_V } from '../src/speedboat/hullMesh';
 
 const goodExtras = (): Record<string, unknown> => ({
@@ -342,8 +343,8 @@ describe('the built hero GLB through GLTFLoader + MeshoptDecoder (no GPU)', () =
 
 describe('fleet livery: eight boats, one texture set (STYLE-SPEC §4.2, §6)', () => {
   it('a boat wears the livery on its root; partial liveries and the old single hue fill from the hero', () => {
-    // the rivals are the rendered 08 variants: a boat that silently fell back to the hero hues would race as the hero
-    expect(resolveLivery({ boatLivery: FLEET_LIVERIES.yellow })).toEqual(FLEET_LIVERIES.yellow);
+    // a rival that silently fell back to the hero hues would race as the hero
+    expect(resolveLivery({ boatLivery: FLEET_LIVERIES['dome-ten'] })).toEqual(FLEET_LIVERIES['dome-ten']);
     expect(resolveLivery({ boatLivery: { band: 0x123456 } })).toEqual({ ...HERO_LIVERY, band: 0x123456 });
     // liveryTint is the lookdev/older API: it recolours the band and the cowl tops, nothing else
     expect(resolveLivery({ liveryTint: 0xd9442b })).toEqual({ ...HERO_LIVERY, band: 0xd9442b, dominant: 0xd9442b });
@@ -353,7 +354,18 @@ describe('fleet livery: eight boats, one texture set (STYLE-SPEC §4.2, §6)', (
 
   it('dark-topsides rivals paint bone numerals, light ones black (the number must read, §4.3)', () => {
     const lum = (hex: number): number => 0.2126 * ((hex >> 16) & 255) + 0.7152 * ((hex >> 8) & 255) + 0.0722 * (hex & 255);
-    for (const l of Object.values(FLEET_LIVERIES)) expect(Math.abs(lum(l.numeral) - lum(l.topsides))).toBeGreaterThan(60);
+    for (const l of [...Object.values(FLEET_LIVERIES), ...Object.values(CONCEPT_LIVERIES)]) expect(Math.abs(lum(l.numeral) - lum(l.topsides))).toBeGreaterThan(60);
+  });
+
+  it('§T.200: the CPU preview fleet (hull_textures.py FLEET) is the race grid exactly, so the livery renders show the game', () => {
+    const py = readFileSync(new URL('../scripts/blender/hull/hull_textures.py', import.meta.url), 'utf8');
+    const hex = (s: string): number => Number.parseInt(s.slice(1), 16);
+    for (const [id, l] of Object.entries(FLEET_LIVERIES)) {
+      const row = new RegExp(`'${id}': \\{([^}]*)\\}`).exec(py);
+      expect(row, `hull_textures.py FLEET has no '${id}' row`).not.toBeNull();
+      const field = (k: string): number => hex((new RegExp(`'${k}': '(#[0-9A-Fa-f]{6})'`).exec(row![1]) ?? ['', '#000000'])[1]);
+      for (const k of ['topsides', 'band', 'stripe', 'antifoul', 'numeral', 'dominant'] as const) expect(field(k), `${id}.${k}`).toBe(l[k]);
+    }
   });
 
   it('race numbers map to one or two glyphs, never a leading zero', () => {

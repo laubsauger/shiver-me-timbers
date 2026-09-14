@@ -9,7 +9,6 @@ import * as THREE from 'three/webgpu';
 import {
   Fn,
   If,
-  Loop,
   float,
   instanceIndex,
   int,
@@ -59,15 +58,20 @@ export function createCloudBlur(input: THREE.Texture, p: CloudParams) {
 
         const acc = vec4(0).toVar();
         const wsum = float(0).toVar();
-        Loop({ start: int(-TAPS), end: int(TAPS), condition: '<=' }, ({ i }) => {
-          const t = float(i).div(TAPS);
-          const off = t.mul(radius).round();
+        // The kernel is fixed. Build its weights once instead of evaluating
+        // 13 exponentials per pixel in each separable pass. Keep float32
+        // intermediate rounding; half-float output may differ by one step.
+        for (let i = -TAPS; i <= TAPS; i++) {
+          const t = Math.fround(i / TAPS);
+          const off = radius.mul(t).round();
           const sx = x.add(int(off.mul(dx))).clamp(0, w - 1);
           const sy = y.add(int(off.mul(dy))).clamp(0, h - 1);
-          const weight = float(t.mul(t).mul(-3.2).exp());
+          const weight = Math.fround(Math.exp(Math.fround(
+            Math.fround(t * t) * Math.fround(-3.2),
+          )));
           acc.addAssign(textureLoad(src, ivec2(sx, sy)).mul(weight));
           wsum.addAssign(weight);
-        });
+        }
         textureStore(dst, uvec2(ivec2(x, y)), acc.div(wsum)).toWriteOnly();
       });
     })().compute(w * h);
@@ -75,14 +79,16 @@ export function createCloudBlur(input: THREE.Texture, p: CloudParams) {
   const passH = makePass(input, texH, 1, 0);
   const passV = makePass(texH, texV, 0, 1);
 
+  // Preserve dispatch order while sharing one command submission.
+  const passes = [passH, passV];
+
   return {
     /** final blurred 4-channel texture, sampled by the composite quad */
     output: texV,
     uRadiusNear,
     uRadiusFar,
     run(renderer: THREE.WebGPURenderer): void {
-      renderer.compute(passH);
-      renderer.compute(passV);
+      renderer.compute(passes);
     },
     dispose(): void {
       texH.dispose();

@@ -242,8 +242,8 @@ async function boot(): Promise<void> {
       player.step(dt);
       radioSet.step(dt, raft, clock.hour); // §T.150: after the interact step wrote `radio.tune`
     },
-    (alpha, frameDt) => {
-      debug.hud.frame(frameDt * 1000);
+    (alpha, frameDt, wallFrameDt) => {
+      debug.hud.frame(wallFrameDt * 1000);
       frame.renderSea(frameDt, paused);
       const { headingRad, knots } = frame.renderVessel(alpha, frameDt);
       ui.setSpeed(knots);

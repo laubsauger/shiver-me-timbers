@@ -25,6 +25,15 @@ export interface CrashThresholds {
   hookHeelDeg: number;
   hookMinSpeed: number;
   /**
+   * HOOK by KNOCK-DOWN (T196): heel past this at racing speed, whatever the slip. On the T196 physics a full-lock departure
+   * slides first (C_v 5: slip 38° / yaw 0.89 rad/s / heel 31°; C_v 8: 34° / 1.06 / 28° — under the spin-out triple) and
+   * then lays over past 45° at 15–25 m/s before any spin; the four-at-once condition fired 0.6 s after the physical
+   * onset or not at all. 50° is past the test's own clean-run bound (heel < 45°, measured 19–27° in Working sea, T196)
+   * and past the 44° roll-in transient of full lock at C_v 3, which stays under the speed floor. In the water only: a roll in
+   * the air passing 50° is on its way to a barrel roll, and that kind owns it.
+   */
+  hookKnockdownHeelDeg: number;
+  /**
    * STUFF = green water over the foredeck AND the boat braking hard. Measured: a 30 m/s bow-down entry reads
    * 0.77 m / 1.4 g at 0.25 s and pitchpoles; a clean Working-sea run buries the bow 1.7 m once at < 1.5 g and
    * brakes 3.2 g once with the bow dry.
@@ -48,6 +57,7 @@ export const CRASH_THRESHOLDS: Readonly<CrashThresholds> = Object.freeze({
   hookYawRate: 1.0,
   hookHeelDeg: 20,
   hookMinSpeed: 15,
+  hookKnockdownHeelDeg: 50,
   stuffBowImmersion: 0.4,
   stuffDecelG: 1.5,
   stuffMinSpeed: 12,
@@ -107,7 +117,10 @@ export function isAirborne(s: Readonly<CrashSensors>, th: Readonly<CrashThreshol
 export function crashCondition(kind: CrashKind, s: Readonly<CrashSensors>, m: Readonly<CrashDetectMemory>, th: Readonly<CrashThresholds> = CRASH_THRESHOLDS): boolean {
   switch (kind) {
     case 'hook':
-      return s.slipDeg >= th.hookSlipDeg && Math.abs(s.yawRate) >= th.hookYawRate && Math.abs(s.heelDeg) >= th.hookHeelDeg && s.groundSpeed >= th.hookMinSpeed;
+      return (
+        s.groundSpeed >= th.hookMinSpeed &&
+        ((s.slipDeg >= th.hookSlipDeg && Math.abs(s.yawRate) >= th.hookYawRate && Math.abs(s.heelDeg) >= th.hookHeelDeg) || (Math.abs(s.heelDeg) >= th.hookKnockdownHeelDeg && !isAirborne(s, th)))
+      );
     case 'stuff':
       return s.bowImmersion >= th.stuffBowImmersion && m.decel >= th.stuffDecelG * G && m.speedBefore >= th.stuffMinSpeed;
     case 'blowOver':

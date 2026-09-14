@@ -8,6 +8,7 @@
  * the very slots a one-tick kick for that tick would have written, and calls the UNCHANGED `BoatSimCore.step`:
  *   TICK, TIME                           row tick, row time (the exact float64 SimState.time of that page tick)
  *   CONTACT_OFF_MASK                     row mask (§T.188: a placed boat is contact-off on its first tick only)
+ *   CONTACT_SOFT_MASK                    row mask (§T.198: the rolling-start formation's soft contacts)
  *   OCEAN, SEA                           row params; PARAMS_VERSION bumped iff a leaf differs (`writeParams` rule)
  *   CONTROLS (+ AI IN) of every boat     row inputs
  *   WORLD                                j ≥ 1 on a single-shard layout: every boat's OUT pose after tick j−1, which
@@ -16,12 +17,15 @@
  *                                        the batch-start snapshot (the fleet caps batches at 1 when a WORLD reader —
  *                                        the §T.186 pilot — runs on several shards)
  *   PREV POSE                            each owned boat's OUT pose just before the last tick (render pair)
+ *   EXTERNAL POSES (§T.191)              every row: each external boat's pose at the START of that tick → its WORLD
+ *                                        slot and its OUT POSE (main-driven boats are never stepped)
  * Not carried per row: RESET requests (applied on the batch's first tick, as on a one-tick kick).
  */
 import { BATCH_ROW, B, CONTROL_LEN, F, H, POSE_LEN, AI_IN_LEN, AI_OUT_LEN, type BoatSimLayout } from './layout';
 
 export interface BatchStepper {
-  step(L: BoatSimLayout): void;
+  /** `row`: the TRACE row this tick writes (0 for a classic kick) */
+  step(L: BoatSimLayout, row?: number): void;
 }
 
 /** ticks in the kick currently in the buffer (0 = classic one-tick kick) */
@@ -35,6 +39,7 @@ function applyRow(L: BoatSimLayout, j: number): void {
   L.i32[H.TICK] = f[r + BATCH_ROW.TICK];
   f[F.TIME] = f[r + BATCH_ROW.TIME];
   L.i32[H.CONTACT_OFF_MASK] = f[r + BATCH_ROW.CONTACT_OFF_MASK] | 0;
+  f[F.CONTACT_SOFT_MASK] = f[r + BATCH_ROW.CONTACT_SOFT_MASK];
   const n = L.spec.oceanLen + L.spec.seaLen;
   const src = r + BATCH_ROW.PARAMS;
   let changed = false;
@@ -56,13 +61,23 @@ function applyRow(L: BoatSimLayout, j: number): void {
       for (let k = 0; k < ai; k++) f[a + k] = f[s + CONTROL_LEN + k];
     }
   }
+  const ext = L.spec.externalBoats ?? 0;
+  for (let i = L.spec.boats - ext; i < L.spec.boats; i++) {
+    const src = L.batchExternalPoseOffset(r, i);
+    const w = L.worldPoseOffset(i);
+    const out = L.boatOffset(i) + B.POSE;
+    for (let c = 0; c < POSE_LEN; c++) {
+      f[w + c] = f[src + c];
+      f[out + c] = f[src + c];
+    }
+  }
 }
 
 /** step whatever kick is in the buffer: one tick (COUNT 0) or COUNT ticks, row by row */
 export function stepKick(core: BatchStepper, L: BoatSimLayout): number {
   const count = batchCount(L);
   if (!(count > 0)) {
-    core.step(L);
+    core.step(L, 0);
     return 1;
   }
   const cap = L.spec.batchCap ?? 0;
@@ -82,12 +97,13 @@ export function stepKick(core: BatchStepper, L: BoatSimLayout): number {
     }
     if (j === count - 1) {
       for (let i = start; i < end; i++) {
+        if (L.isExternal(i)) continue;
         const from = L.boatOffset(i) + B.POSE;
         const to = L.batchPrevPoseOffset(i);
         for (let c = 0; c < POSE_LEN; c++) f[to + c] = f[from + c];
       }
     }
-    core.step(L);
+    core.step(L, j);
   }
   return count;
 }

@@ -984,19 +984,24 @@ export function cpuButterflyIFFT(
   input: { re: Float32Array; im: Float32Array },
   butterfly: Float32Array,
   N: number,
+  /** Caller-owned workspace for repeated transforms; output aliases it. */
+  scratch: [Float32Array, Float32Array, Float32Array, Float32Array] = [
+    new Float32Array(N), new Float32Array(N), new Float32Array(N), new Float32Array(N),
+  ],
 ): { re: Float32Array; im: Float32Array } {
   const stages = Math.log2(N);
-  let pingRe = Float32Array.from(input.re);
-  let pingIm = Float32Array.from(input.im);
-  let pongRe = new Float32Array(N);
-  let pongIm = new Float32Array(N);
+  let [pingRe, pingIm, pongRe, pongIm] = scratch;
+  pingRe.set(input.re);
+  pingIm.set(input.im);
   for (let j = 0; j < stages; j++) {
     for (let x = 0; x < N; x++) {
       const i = (j * N + x) * 4;
       const twRe = butterfly[i];
       const twIm = butterfly[i + 1];
-      const a = butterfly[i + 2];
-      const b = butterfly[i + 3];
+      // Butterfly indices are exact integers stored beside float twiddles.
+      // Keep integer indexing explicit for the CPU typed-array hot loop.
+      const a = butterfly[i + 2] | 0;
+      const b = butterfly[i + 3] | 0;
       // out = in[a] + W·in[b]
       pongRe[x] = pingRe[a] + twRe * pingRe[b] - twIm * pingIm[b];
       pongIm[x] = pingIm[a] + twRe * pingIm[b] + twIm * pingRe[b];

@@ -37,7 +37,8 @@ export function advanceAccumulator(
 }
 
 export type TickFn = (dt: number) => void;
-export type RenderFn = (alpha: number, frameDt: number) => void;
+/** frameDt drives visuals; wallFrameDt measures the unclamped rAF interval. */
+export type RenderFn = (alpha: number, frameDt: number, wallFrameDt: number) => void;
 
 export class GameLoop {
   private accumulator = 0;
@@ -46,6 +47,8 @@ export class GameLoop {
   private running = false;
   /** last alpha handed to render — held flat while paused, see frame() */
   private alpha = 0;
+  /** see setFixedDt */
+  private fixedDt: number | null = null;
 
   constructor(
     private tick: TickFn,
@@ -53,6 +56,27 @@ export class GameLoop {
     /** pause is the LOOP's business, not the tick's — see frame() */
     private isPaused: () => boolean = () => false,
   ) {}
+
+  /**
+   * Drive the loop at an EXACT dt per rAF instead of the wall clock (§cine).
+   *
+   * Two things need this and neither is a debug convenience:
+   *
+   *  - A recorded frame must advance the world by exactly 1/fps of SCENE time
+   *    however long the GPU took, or the output is timed by the machine that
+   *    rendered it.
+   *  - `0` freezes the sim while still rendering. That is how the recorder
+   *    holds the world still across a slow canvas readback: the accumulator
+   *    does not advance, no tick runs, and rAF keeps turning — which matters
+   *    because three's Animation module bumps `nodeFrame.frameId` from its own
+   *    rAF, and post silently re-composites a STALE scene texture if that
+   *    stops (docs/agent-browser-harness.md §3).
+   *
+   * `null` hands the loop back to the wall clock.
+   */
+  setFixedDt(dt: number | null): void {
+    this.fixedDt = dt;
+  }
 
   start(): void {
     if (this.running) return;
@@ -65,7 +89,11 @@ export class GameLoop {
         this.lastTime = timeMs;
         return;
       }
-      const frameDt = Math.min((timeMs - this.lastTime) / 1000, 0.25);
+      const wallFrameDt = (timeMs - this.lastTime) / 1000;
+      const frameDt =
+        this.fixedDt !== null ? this.fixedDt : Math.min(wallFrameDt, 0.25);
+      // advanced even when overridden, so handing the clock back does not
+      // deliver one enormous catch-up frame
       this.lastTime = timeMs;
       // PAUSE FREEZES THE ACCUMULATOR, not merely the tick. Gating only the
       // tick leaves the accumulator advancing, so alpha saw-tooths 0→1 every
@@ -75,14 +103,14 @@ export class GameLoop {
       // scene. Holding alpha flat is what makes "sim halts, render continues"
       // actually mean a still picture.
       if (this.isPaused()) {
-        this.render(this.alpha, frameDt);
+        this.render(this.alpha, frameDt, wallFrameDt);
         return;
       }
       const res = advanceAccumulator(this.accumulator, frameDt);
       this.accumulator = res.accumulator;
       this.alpha = res.alpha;
       for (let i = 0; i < res.steps; i++) this.tick(SIM_DT);
-      this.render(res.alpha, frameDt);
+      this.render(res.alpha, frameDt, wallFrameDt);
     };
     this.rafId = requestAnimationFrame(frame);
   }

@@ -657,16 +657,21 @@ describe('one contact, every consumer; bounded; memory', () => {
     expect(rest.wake.rescale).toBeLessThanOrEqual(1 + 1e-12);
   });
 
-  it('bounds the result (V110): force and torque scaled by ONE factor, samples too', () => {
-    const hw = new HullWater(hull, { maxAccel: 5 * G });
-    // teleported 2 m under at 30 m/s: raw buoyancy + slam far exceed 5 g
-    const s = st([0, -2, 0], quatFromAxisAngle([0, 0, 1], 0.3), [0, -30, 10], [0, 0, 2]);
+  it('bounds the result (V110): the EXPLICIT flux loads are scaled by one factor to the cap, the impulses never (T189); samples follow', () => {
+    // WHY: the cap is for the explicit momentum-flux loads (rotating frame, Kirchhoff, lift, sway flux), whose rates are
+    // unbounded on a teleported or tumbling hull. The velocity-level impulses (slam, crossflow and face drag, sway entry)
+    // are bounded by construction (V103: they never reverse a point) — scaling THEM after the Gauss–Seidel pass handed
+    // back momentum the pass had removed: +550 kJ of rigid kinetic energy over one capped inverted re-entry (T189).
+    const hw = new HullWater(hull, { maxAccel: 0.5 * G, passivity: false });
+    const s = st([0, 0.25, 0], quatFromAxisAngle([0, 0, 1], 0.2), [0, -3, 25], [0.2, 0, 0.8]);
     hw.samplePatch(FLAT, s, DT);
     hw.evaluate(s, DT / 2);
-    const raw = hw.rawForce;
-    expect(hw.capScale).toBeLessThan(1);
-    expect(Math.hypot(...hw.load.force) / hull.mass).toBeLessThanOrEqual(5 * G * (1 + 1e-9));
-    for (let k = 0; k < 3; k++) expect(hw.load.force[k]).toBeCloseTo(raw[k] * hw.capScale, 6);
+    hw.evaluate(s, DT / 2);
+    const E = hw.explicitLoad;
+    const sc = hw.capScale;
+    expect(sc).toBeLessThan(1);
+    expect((Math.hypot(E[0], E[1], E[2]) * sc) / hull.mass).toBeLessThanOrEqual(0.5 * G * (1 + 1e-9));
+    for (let k = 0; k < 3; k++) expect(hw.load.force[k]).toBeCloseTo(hw.rawForce[k] - (1 - sc) * E[k], 6);
     let sum = 0;
     for (let j = 0; j < hw.wet.count; j++) sum += hw.wet.fy[j];
     expect(sum).toBeCloseTo(hw.load.force[1], 3);

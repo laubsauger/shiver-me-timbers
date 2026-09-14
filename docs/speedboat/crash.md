@@ -115,3 +115,73 @@ windscreen crack > 0.3, hoop bent > 0.6 (cockpit), hatch missing > 0.5 (bow). `d
 - **Physics/assists (T179/T182), found here:** Working sea, assists Default, throttle 0.8 and a ±0.1 weaving helm
   capsizes at ≈ 50 s (seed 188) and ≈ 21 s (seed 7); throttle 0.6 is clean. Without assists at 28 m/s she capsizes in
   ≈ 7 s and an inverted hull was launched 18 m into the air once — the inverted-landing slam gap in hullWater's header.
+
+## §T.198 collisions in the live game
+
+User playtest: "collision with rocks, buildings, any kind of obstacle is not a thing right now … as well as between
+boats". The collide step was wired and live on both sides (player: `raceSession.collide`, rivals: `stepCore`); the gap
+was what it was handed, and how some colliders were shaped.
+
+**Root causes, measured in the live page** (headless Chrome WebGPU, `window.__speedboat`; scripts and logs in the T198
+scratchpad `t198/`):
+- **No rock colliders at all.** Tower Reach's kit islands have `rockCount: 0` (§T.194 draws its granite with
+  `circuit/kitDecor.ts`), so `page/course.ts rockColliders` found 0 placements: 103 colliders (course furniture + roof
+  ridges) against ~2 300 drawn granite blocks, beachrock slabs, rubble and driftwood instances. The headless harness seeded pirate rock placements (no kit hooks), so it
+  tested a world with 647 rocks the page never had.
+- **Rounded tops at the waterline are ramps.** §T.197's roof ridge capsule (8–15 % of a gable within a hull's reach):
+  live, a 20 m/s hull rode over a gable 30 m past it, at 45 m/s it flew 6 m. A block fitted as a dome with its axis under
+  the surface did the same (2–4 m).
+- **Shore impacts under-reported:** the bed solve reported the largest single hull point's |Δv| (7.7 m/s for a 20 m/s
+  beaching spread over a dozen points), below the 8 m/s impact threshold.
+- **Rolling start:** boat↔boat contacts were fully off until green, so converging columns could overlap.
+
+**Fixes:**
+- `circuit/propColliders.ts` fits capsules to the RENDERED island instances (each InstancedMesh's vertices under its
+  instance × world matrix, §V77): one capsule for a block, a row of up to 4 for a slab. Which island meshes are solid
+  is a name list (`SOLID_PROP_MESHES` / `SOFT_PROP_MESHES`, plants soft); an unclassified island mesh is a console
+  error. `towerReachCourse().attach` takes each island's scene `group`; the SAME list goes to the player, to the workers
+  (`contacts.colliders`) and to grid / pace-line / respawn clearance. Islands without a group (headless) fall back to
+  `rockColliders`.
+- **The waterline is a wall.** Props: every fitted capsule ≥ 0.75 m crossing −0.6…+0.8 m also gets vertical capsules
+  along its axis projection, as wide as its widest slice in that band, up to its top (≤ 2 m) (`waterlineWall`). Roofs
+  (`courseColliders.ts prismCapsules`): a row of vertical capsules along the ridge (radius = the roof's half-width at
+  the draft line + 0.35 m, 0.7 r apart, end ones reaching the corners, up to +0.8 m) plus the circumscribed capsule of
+  the roof triangle above. Boxes (chimneys, the store, the steeple tower, the race-control hut, stake daymarks):
+  capsule rows (`boxCapsules`). Everything clipped to what a hull reaches (−0.6…+6 m). Cost: near a ridge or a dome's
+  top the wall stands ≤ 2 m proud of the drawn slope at deck height.
+- `prepareStaticWorld` builds a 24 m xz grid (CSR); `collideBoatWithWorld` tests only the cells under the hull's reach,
+  in collider index order (the scan's results), and repacks the hull chain only after an impulse. Node, 7 800 colliders:
+  0.8–1.7 µs per boat per tick in open water, 22 µs beside the rock garden (the linear scan over 3 600: 1.1–2.7 ms,
+  measured on a loaded machine).
+- Bed report: one contact whose |Δv| is the CG's over the whole bed solve.
+- Soft contacts (`collideBoatWithFleet(..., softMask)`, `BOAT_COLLIDE_DEFAULTS.softAccel` 3 g, `softBiasSpeed` 1 m/s):
+  the same swept pair without restitution or friction, applied horizontally through the CG. The race session sets it
+  for every racer under a rolling-start speed cap (`raceOutputs.soft`); ghosts still pass through. Workers read it as
+  `F.CONTACT_SOFT_MASK` / `BATCH_ROW.CONTACT_SOFT_MASK` (batch row fixed part 3 → 4 slots).
+- `page/course.ts SPAWN_CG_Y` is derived: `restCgHeight(buildDeepVHull())`, the level hydrostatic rest the grid is
+  placed at (0.260 m with §T.196's hull water; was a 0.2 literal).
+
+**Measured through the page tick with the real course colliders** (`speedboatCollisionDrive`, 20 / 45 m/s, dead aim
+from open water): tall kit granite, pylon, buoy, mast, guy anchor, water tower: |Δv| 21 / 24.5 m/s (the V110 cap),
+stopped, impact crash; low block (≤ 1.5 m): stopped or deflected, ≤ 1.9 m up over its footprint; a 0.4 m stone
+(no wall below r 0.75 m): a kick costing 10–40 %, the hull hops 2.8 / 4.2 m; shore: bed contact,
+speed halved within 0.5 s; gable: deflected along its wall (20 → 14, 38 → 20 m/s), no overlap, no ride-up; gate pole:
+−10 % once; a stationary rival T-boned: |Δv| 5.6 / 12.9 m/s, shoved, the player's bow may ride over its gunwale.
+Deepest hull overlap: ≤ one tick of travel. After a 45 m/s bow hit the hull can tumble and leave the water short of
+the obstacle: that is the impact crash, driven by hull↔water forces on a spinning hull (§T.196), not a collider.
+
+**Tests:** `tests/speedboatCollisionCoverage.test.ts` (every drawn solid prop instance a hull can reach: ≥ 99 % of
+vertices and ≥ 90 % of drawn surface inside the page's colliders; course furniture LOD0 GLB vertices in the hull band
+≥ 90 %), `tests/speedboatCollisionDrive.test.ts` (the drives above: contact, speed loss, deepest overlap, no ride-over,
+impact crash), `tests/speedboatCollisions.test.ts` (§T.197 roofs now a broadside gable, no ride-up),
+`tests/boatCollide.test.ts` soft formation, `tests/boatCollideWorker.test.ts` soft mask main ≡ sab×2 ≡ transfer×2.
+Shared fixture: `tests/speedboatCollisionWorld.ts` (kit decor built as island.ts does, handed to the page's attach).
+
+**Open (other owners):**
+- `tests/speedboatRaceHarness.ts` / `speedboatCourseClearance.test.ts` still build colliders from pirate rock
+  placements, not the drawn kit props (the live page's pace line and respawn clearance use the live list).
+- Live, after green, rivals hit Main Street roof walls 47–58 m off the reference line (worker trace CONTACT_SOLID
+  |Δv| 14–22 m/s, one rival rolled to 128° there): the rivals' line leaves the ±14 m corridor there (race/ai). Before this task
+  they drove through those roofs.
+- `tests/speedboatPageStructure.test.ts` pins the settled trimmed rest to a 0.197 literal; it should read the physics
+  (T196's measured value), not a number.

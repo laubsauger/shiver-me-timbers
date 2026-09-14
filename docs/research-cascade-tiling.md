@@ -1,7 +1,11 @@
 # Cascade tiling and the synchronous foam pulse
 
-**Status: diagnosed, fix evaluated, NOT landed. Do not re-attempt as a
-parameter change without reading §4.**
+**Status: middle-domain fix enabled with 128² middle CPU sampling.**
+The historical 98 m pitch-response regression is preserved on its reference
+fixture. Current-sea absolute hull bounds now run independently across three
+seeds/four headings. Real GPU time series show 35–44% less middle-band pulsing.
+See [current implementation and proof](water-improvement-plan.md#third-pass-enable-wider-waves-with-independent-hull-acceptance).
+The investigation below remains historical; its finest-band warning still applies.
 
 ---
 

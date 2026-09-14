@@ -232,6 +232,7 @@ export function activeCaustics(): Caustics | undefined {
 /** neutral result — every field is the identity for its material slot */
 function neutral(depth: TslNode): WaterLighting {
   return {
+    attenuation: vec3(1, 1, 1),
     tint: vec3(1, 1, 1),
     addLight: vec3(0, 0, 0),
     roughnessScale: float(1),

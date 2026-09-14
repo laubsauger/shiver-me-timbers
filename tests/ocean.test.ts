@@ -686,6 +686,14 @@ describe('§B.7 every spectrum-shaping param forces a rebuild', () => {
     'shoalDeepFraction',
     'shoalBreakerIndex',
     'shoalColumnCeiling',
+    // §T.190: depth-limited breaking — per-vertex post-processing like the
+    // three above, re-read every frame by the same refreshes
+    'shoalSurfGamma',
+    'shoalSurfOnset',
+    // §T.193: the shoaling second harmonic, built per vertex from the drawn
+    // bands and re-read every frame by the same refreshes
+    'shoalAsymmetryGain',
+    'shoalAsymmetryHarmonicCap',
     'fetchWorldScale',
     'fetchMaxGain',
     'fetchLongBandLimit',
@@ -1344,11 +1352,11 @@ describe('§V.48b the normal LOD converts what it removes into roughness', () =>
     const cut = slopeResolutionFootprint(b, oceanSurfaceParams.normalKeepCut);
     return smoothstep(cut, full, footprint);
   };
-  /** what the shader reconstructs: Σ (1 − lod_i)·σ²_i */
+  /** what the shader reconstructs: Σ (1 − lod_i²)·σ²_i */
   const unresolvedAt = (footprint: number, p = oceanParams) => {
     let acc = 0;
     for (let i = 0; i < 3; i++) {
-      acc += (1 - lodAt(i, footprint, p)) * slopeVarianceTotal(bins(i, p));
+      acc += (1 - lodAt(i, footprint, p) ** 2) * slopeVarianceTotal(bins(i, p));
     }
     return acc;
   };

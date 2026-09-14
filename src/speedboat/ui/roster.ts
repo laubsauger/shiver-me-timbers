@@ -2,47 +2,38 @@
  * The field as the HUD sees it: eight community paints (design doc §4 + §8 "Community paint"),
  * the seven rival couriers, and the eyewear options (STYLE-SPEC §0/§8: bare head, strap goggles).
  *
- * UI data only. `src/speedboat/assets/livery.ts` owns the hull-texture uniforms and at the time of
- * writing carries the STYLE-SPEC §4.2 four-boat table (hero/yellow/turquoise/charcoal, numbers
- * 27/8/41/63), which does not match the design doc's eight communities. `liveryKey` is the join
- * the page uses once the asset side has the eight; the HUD never reads hull uniforms.
+ * UI data only. `src/speedboat/assets/livery.ts` owns the hull colours; `liveryKey` is the join the page uses
+ * (`page/liveries.ts`); the HUD never reads hull uniforms.
+ *
+ * §T.201: a paint here is a NAME, a HUD hue and that join. The hull's colours (topsides, band, pinstripe, numeral)
+ * live only in livery.ts; the old SVG hull art kept its own copy of them and drifted from the boats on the water
+ * (§T.200 moved every boat to a neutral hull with a signature band). Boat-select pictures are rendered from the
+ * runtime GLB instead (page/boatPreview.ts).
  *
  * `hue` is the boat's dominant hue (HUD swatch, plotter dot). `ring` is a light second colour for
  * hues that vanish on the stencil-black planes (STYLE-SPEC C11: charcoal gets a light accent).
  */
 
-export type PaintPattern = 'band' | 'diagonals' | 'patchwork';
-
 export interface CommunityPaint {
   id: string;
   community: string;
-  /** hull topsides */
-  hull: string;
-  /** band / diagonals / patches */
-  accent: string;
-  /** second patch colour (patchwork) or sigil */
-  accent2: string;
-  pattern: PaintPattern;
-  /** numeral colour on this hull */
-  numeral: string;
-  /** dominant hue: HUD + plotter */
+  /** dominant hue: HUD + plotter (the livery's signature) */
   hue: string;
   /** light outline for dark hues on dark planes, or '' */
   ring: string;
-  reflectiveTape: boolean;
-  /** asset-side livery join (T181/assets); '' until it exists */
+  /** asset-side livery join: an `assets/livery.ts` FLEET_LIVERIES key (`speedboat/page/liveries.ts` COMMUNITY_LIVERIES) */
   liveryKey: string;
 }
 
 export const COMMUNITY_PAINTS: readonly CommunityPaint[] = [
-  { id: 'signal', community: 'Open courier', hull: '#E9E5DA', accent: '#FF6B1F', accent2: '#151B1C', pattern: 'band', numeral: '#151B1C', hue: '#FF6B1F', ring: '#F2F4EF', reflectiveTape: true, liveryKey: 'hero' },
-  { id: 'dome-ten', community: 'Dome Ten', hull: '#3A4E7A', accent: '#D9A640', accent2: '#E9E5DA', pattern: 'band', numeral: '#E9E5DA', hue: '#3A4E7A', ring: '#D9A640', reflectiveTape: false, liveryKey: '' },
-  { id: 'outer-bar', community: 'Outer Bar', hull: '#6FB2B0', accent: '#F2F2EE', accent2: '#151B1C', pattern: 'diagonals', numeral: '#151B1C', hue: '#6FB2B0', ring: '', reflectiveTape: false, liveryKey: 'turquoise' },
-  { id: 'bench-hollow', community: 'Bench Hollow', hull: '#E3CFA3', accent: '#B2472A', accent2: '#151B1C', pattern: 'band', numeral: '#151B1C', hue: '#E3CFA3', ring: '#B2472A', reflectiveTape: false, liveryKey: '' },
-  { id: 'pine-cut', community: 'Pine Cut', hull: '#A9A39A', accent: '#4F6F4A', accent2: '#E9E5DA', pattern: 'patchwork', numeral: '#151B1C', hue: '#8C9A72', ring: '', reflectiveTape: false, liveryKey: '' },
-  { id: 'levee-town', community: 'Levee Town', hull: '#E8B420', accent: '#151B1C', accent2: '#151B1C', pattern: 'diagonals', numeral: '#151B1C', hue: '#E8B420', ring: '', reflectiveTape: false, liveryKey: 'yellow' },
-  { id: 'solar-ridge', community: 'Solar Ridge', hull: '#E9E5DA', accent: '#8A5CC7', accent2: '#2B4A6F', pattern: 'patchwork', numeral: '#151B1C', hue: '#8A5CC7', ring: '', reflectiveTape: true, liveryKey: '' },
-  { id: 'the-stills', community: 'The Stills', hull: '#24292B', accent: '#D23C2A', accent2: '#D23C2A', pattern: 'diagonals', numeral: '#E9E5DA', hue: '#24292B', ring: '#D23C2A', reflectiveTape: false, liveryKey: 'charcoal' },
+  { id: 'signal', community: 'Open courier', hue: '#FF6B1F', ring: '#F2F4EF', liveryKey: 'hero' },
+  { id: 'dome-ten', community: 'Dome Ten', hue: '#FFD21F', ring: '', liveryKey: 'dome-ten' },
+  { id: 'outer-bar', community: 'Outer Bar', hue: '#6CC24A', ring: '', liveryKey: 'outer-bar' },
+  { id: 'bench-hollow', community: 'Bench Hollow', hue: '#7A1F2B', ring: '', liveryKey: 'bench-hollow' },
+  { id: 'pine-cut', community: 'Pine Cut', hue: '#6B6B1E', ring: '', liveryKey: 'pine-cut' },
+  { id: 'levee-town', community: 'Levee Town', hue: '#141414', ring: '#F2F4EF', liveryKey: 'levee-town' },
+  { id: 'solar-ridge', community: 'Solar Ridge', hue: '#6A3FD0', ring: '', liveryKey: 'solar-ridge' },
+  { id: 'the-stills', community: 'The Stills', hue: '#F25CB0', ring: '', liveryKey: 'the-stills' },
 ];
 
 export interface GogglesOption {

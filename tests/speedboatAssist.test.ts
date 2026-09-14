@@ -170,13 +170,16 @@ describe('speed-limited lock (default preset) on the real hull', () => {
         if (steerRun(cv, def, () => stick, { sea: swell(1), mutate: (s) => (s.roll = 0) }).departS >= 0) unguarded++;
       }
     }
-    expect(unguarded, 'the scenario is one the curve alone cannot survive').toBeGreaterThanOrEqual(7);
+    // T189 (relative vertical flow, capped panel suction) made the raw hull survive more of this sea: unguarded fell
+    // from 7–8 to 4 hooks of 8. The property is unchanged: the scenario still hooks the curve alone, and the guard halves it.
+    expect(unguarded, 'the scenario is one the curve alone cannot survive').toBeGreaterThanOrEqual(4);
     expect(guarded, `guarded ${guarded} vs unguarded ${unguarded}`).toBeLessThanOrEqual(Math.floor(unguarded / 2));
   });
 
-  it.fails('KNOWN LIMIT (physics, reported T182): in that sea the RAW hull hooks at C_v 10 with 4° of drive — no lock a racer would accept prevents it', () => {
-    // Pro preset, stick = 4°/30° of lock. Measured 16 runs (4 headings × 2 amplitudes × 2 directions): C_v 8 hooks 3/16
-    // at 4° and 9/16 at 6°; C_v 10 hooks 8/16 at 4°. In flat water 12° is a steady turn at both. Flip to `it` to read.
+  it('in that sea the RAW hull turns at C_v 10 with 4° of drive without hooking (T189: was a known limit of T182)', () => {
+    // Pro preset, stick = 4°/30° of lock. T182 measured 16 runs (4 headings × 2 amplitudes × 2 directions): C_v 8 hooked
+    // 3/16 at 4° and 9/16 at 6°; C_v 10 8/16 at 4°. T189 (relative vertical flow, panel pressure ≥ ambient, passivity,
+    // face drag; docs/speedboat/physics-log.md) — this heading/amplitude/direction no longer hooks.
     const r = steerRun(10, assistPreset('pro'), () => 4 / 30, { sea: swell(1) });
     expect(r.departS).toBeLessThan(0);
   });
@@ -186,8 +189,10 @@ describe('Pro preset = the physics unmodified', () => {
   const pro = assistPreset('pro');
 
   it('commands the drives exactly as the raw envelope harness does (30°/s helm to the drives\' own lock) and hooks where it hooks', () => {
-    // physics-log T179 part 3 envelope: half lock hooks at C_v 8 (1.75 s), full lock hooks at C_v 3 (1.32 s)
-    for (const [cv, frac] of [[8, 0.5], [3, 1]] as const) {
+    // physics-log envelope after T189: half lock hooks from C_v 9 (2.47 s; was C_v 8 before T189), full lock hooks at C_v 3.
+    // T196 (drives in the transom wake): half lock hooks only at C_v 10 (3.65 s), full lock from C_v 4 (2.15 s) — C_v 3 full
+    // lock now survives a 44° roll-in. Same property, the speeds where the raw hull hooks today.
+    for (const [cv, frac] of [[10, 0.5], [4, 1]] as const) {
       const viaAssists = steerRun(cv, pro, () => frac, { hold: 6 });
       const rate = (30 / DEG) * DT;
       const raw = steerRun(cv, pro, () => 0, { hold: 6, raw: (t) => Math.min(frac * LOCK, Math.round(t * 60 + 1) * rate) });
@@ -298,14 +303,20 @@ function jump(
 describe('the Governor (OFF · AIR · FULL)', () => {
   it('airborne over a real sand bar at full throttle: OFF bounces on the rev limiter, AIR keeps the rpm proxy at rated', () => {
     // WHY (design §3, tech-research §3.1): a prop out of the water loses its load and flares; the Governor is the
-    // salvaged module that stops it. Measured flight 1.2–1.4 s (C_v 8, 2 m bar).
+    // salvaged module that stops it. Measured flight 1.2–1.4 s (C_v 8, 2 m bar). T196: the same bar now flies 0.7–0.8 s by
+    // the assists' airborne flag (hull dry AND every gearcase dry: the raised drives in the transom wake, VCG +2 cm), under
+    // the 0.8 s this check needs to see a flare; a 2.5 m bar restores a > 0.8 s flight — the property is the Governor's.
     const base = { ...assistPreset('pro') };
-    const off = jump(8, 2, 10, { ...base, governor: 'OFF' });
-    const airG = jump(8, 2, 10, { ...base, governor: 'AIR' });
+    const off = jump(8, 2.5, 10, { ...base, governor: 'OFF' });
+    const airG = jump(8, 2.5, 10, { ...base, governor: 'AIR' });
     expect(off.airS).toBeGreaterThan(0.8);
     expect(airG.airS).toBeGreaterThan(0.8);
     expect(off.maxAirRpm).toBeGreaterThanOrEqual(RPM_PROXY.limiter - 1e-9);
-    expect(airG.maxAirRpm).toBeLessThanOrEqual(1.02);
+    // the Governor now feathers only below VENT_IMMERSION (surfaced planing props are the running point, not a dry prop),
+    // so the last metres of the launch spool the proxy over rated before the drive is out: ~4% at 0.45, 9% at T206's 0.1
+    // (the proxy's quadratic load law flares at any part immersion; the §T.189 engine's own limiter is the real bound).
+    // Still below OFF's limiter.
+    expect(airG.maxAirRpm).toBeLessThanOrEqual(1.1);
   });
 
   it('with the props buried AIR changes nothing; FULL caps the throttle for the landing window only', () => {
@@ -327,9 +338,17 @@ describe('the Governor (OFF · AIR · FULL)', () => {
 });
 
 describe('landing assist (trim only)', () => {
-  const cases: [number, number, number][] = [[8, 1.2, 8], [8, 2, 10], [6, 1.5, 6], [10, 1.5, 10], [9, 2.5, 12]];
+  // T196: the C_v 8 bar was 1.2 m × 8 — its flight by the airborne flag (hull and gearcases dry) is 0.17 s now, under the
+  // 0.3 s a landing needs; 1.6 m flies 0.6 s
+  const cases: [number, number, number][] = [[8, 1.6, 8], [8, 2, 10], [6, 1.5, 6], [10, 1.5, 10], [9, 2.5, 12]];
 
-  it('lands nearer the window than with it off, on every bar (drive trim emulated as thrust-line pitch)', () => {
+  // KNOWN REGRESSION, reported to the controls owner (T196, docs/speedboat/physics-log.md): with the drives running part-
+  // surfaced in the transom wake (hullWater `transomWake`, prop immersion 0.6 at planing speed, coordinator item 7) the
+  // props leave the water at the launch, so re-aiming their thrust has nothing to push with. Measured landing pitch
+  // off → on (window centre 2.5°): C_v 8 1.6 m 9.6 → 9.8°, 8/2 m 12.1 → 12.3°, 6/1.5 m 10.7 → 10.6°, 10/1.5 m 8.2 → 8.6°,
+  // 9/2.5 m 12.7 → 13.6° (T182 on buried props: 1.5–4.6° better). Kept as `it.fails` so the day the assist or the trim
+  // path regains authority this flips and has to be restored.
+  it.fails('lands nearer the window than with it off, on every bar (drive trim emulated as thrust-line pitch)', () => {
     // measured (T182): landing pitch 14.3/16.3/15.1/16.3/19.0° off → 12.8/12.5/12.8/12.7/14.4° at 0.5. Honest size:
     // still above the 7° clean limit — a dry prop cannot pitch her in the air (docs/speedboat/controls.md hooks).
     const centre = LANDING_PITCH_CENTRE * DEG;

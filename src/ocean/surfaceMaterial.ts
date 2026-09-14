@@ -19,6 +19,7 @@ import * as THREE from 'three/webgpu';
 import {
   Fn,
   cameraPosition,
+  cameraViewMatrix,
   color,
   dFdx,
   dFdy,
@@ -42,14 +43,22 @@ import {
   varying,
   vec2,
   vec3,
+  vec4,
   viewportDepthTexture,
   viewportTexture,
 } from 'three/tsl';
 import type { OceanSimulation } from './oceanCascades';
 import { sampleCascadeLayer } from './oceanTextures';
+import { refractionDepthNode, refractionOffsetNode } from './surfaceRefraction';
+import { reflectionSkyVisibilityNode, unresolvedSlopeVarianceNode } from './surfaceFiltering';
+import { sparkleDiscMean } from './sparkleMath';
 import type { FoamSim } from '../foam';
 import { foamDetailMask, foamTintNode } from '../foam';
+import { foamSourceAgesNode } from '../flowfoam/foamAge';
 import type { FlowFoam } from '../flowfoam';
+import { contactFoamNode } from '../flowfoam/intersectionMask';
+import { flowFoamParams } from '../params/flowfoam';
+import { valueNoise2 as valueNoise } from '../terrain/noise';
 import { oceanSurfaceParams as sp } from '../params/oceanSurface';
 // §V.33: the water's per-channel extinction K_d has ONE owner and it is not
 // this file — see `uAbsorption` below. Params module only, so no import cycle
@@ -68,9 +77,10 @@ import {
 } from '../island/seabed';
 import {
   breakerClipNodes,
-  shoalFactorNode,
+  shoalBandGainNodes,
   shoalWavenumber,
 } from './shoaling';
+import { bandPropagation, SHOAL_ASYMMETRY_BANDS, shoalAsymmetryNodes } from './shoalAsymmetry';
 import {
   developmentRatioNode,
   fetchBandCoefficient,
@@ -126,21 +136,6 @@ export interface OceanSurfaceMaterial {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type TslNode = any;
-
-/** 2D value noise on world meters — hash lattice + smooth interpolation. */
-function valueNoise(p: TslNode): TslNode {
-  const hash = (c: TslNode) =>
-    c.dot(vec2(127.1, 311.7)).sin().mul(43758.5453).fract();
-  const i = p.floor();
-  const f = p.fract();
-  // Hermite weights, written out (no smoothstep call — f is already 0..1)
-  const u = f.mul(f).mul(f.mul(-2).add(3));
-  const a = hash(i);
-  const b = hash(i.add(vec2(1, 0)));
-  const c = hash(i.add(vec2(0, 1)));
-  const d = hash(i.add(vec2(1, 1)));
-  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
 
 /**
  * THE CHURN WAVELETS: [dirX, dirZ, frequency multiplier, phase-speed multiplier].
@@ -308,6 +303,9 @@ export function buildOceanSurfaceMaterial(
     new THREE.Vector2(sp.sunHorizonFadeLow, sp.sunHorizonFadeHigh),
   );
   const uFoam = uniform(color(sp.foamColor));
+  const uContactStrength = uniform(sp.contactFoamStrength);
+  const uContactWidth = uniform(flowFoamParams.depthThreshold);
+  const uContactFeather = uniform(flowFoamParams.maskFeather);
   const uWakeFoam = uniform(color(sp.wakeFoamColor));
   const uWakeFoamDepth = uniform(sp.wakeFoamDepth);
   const uSssStrength = uniform(sp.sssStrength);
@@ -373,7 +371,11 @@ export function buildOceanSurfaceMaterial(
   /** gain on the ANALYTIC (spectral) sub-pixel slope variance — see `unresolvedVar` */
   const uSlopeVarAa = uniform(sp.slopeVarianceAa);
   const uSparkleShape = uniform(
-    new THREE.Vector2(sp.sparkleRadiusPixels, sp.sparkleResolveCells),
+    new THREE.Vector3(
+      sp.sparkleRadiusPixels,
+      sp.sparkleResolveCells,
+      sparkleDiscMean(Math.max(0.25, sp.sparkleRadiusPixels) / Math.max(0.5, sp.sparkleCellPixels)),
+    ),
   );
   const uMicroSamples = uniform(sp.microDetailSamplesFull);
   const uFoamSkyTint = uniform(sp.foamSkyTint);
@@ -484,8 +486,28 @@ export function buildOceanSurfaceMaterial(
    * params and would otherwise never move (§V.62).
    */
   const uShoalK = sim.cascades.map(() => uniform(0));
+  /**
+   * §T.190 per-cascade spectral height RMS (m) and (γ, onset): depth-limited
+   * breaking caps the local Hs of ALL bands, so it needs each band's energy.
+   * Spectrum σ, never `dispLod`-gated — the gate is a function of the camera
+   * and the mirror the hull floats on cannot see one (§V.8).
+   */
+  const uShoalSigma = sim.cascades.map(() => uniform(0));
+  const uSurf = uniform(
+    new THREE.Vector2(oceanParams.shoalSurfGamma, oceanParams.shoalSurfOnset),
+  );
   const uBreaker = uniform(
     new THREE.Vector2(oceanParams.shoalBreakerIndex, oceanParams.shoalColumnCeiling),
+  );
+  /**
+   * §T.193 shoaling asymmetry (src/ocean/shoalAsymmetry.ts): per cascade (mean k,
+   * q, R) and ŝ from the band's own h0, and (gain, harmonic cap). Only cascades 0
+   * and 1 are read; the arrays span all three so indices line up.
+   */
+  const uAsymBand = sim.cascades.map(() => uniform(new THREE.Vector3(0, 1, 1)));
+  const uAsymDir = sim.cascades.map(() => uniform(new THREE.Vector2(1, 0)));
+  const uAsym = uniform(
+    new THREE.Vector2(oceanParams.shoalAsymmetryGain, oceanParams.shoalAsymmetryHarmonicCap),
   );
   const refreshShoal = () => {
     // no seabed (open-ocean scene) ⟹ nothing to shoal against; the whole term
@@ -493,11 +515,20 @@ export function buildOceanSurfaceMaterial(
     const openDepth = seabed ? Math.max(-seabed.openHeight, 0) : 0;
     for (const [i, c] of sim.cascades.entries()) {
       uShoalK[i].value = shoalWavenumber(c.meanWavenumber, openDepth, oceanParams);
+      uShoalSigma[i].value = Math.sqrt(Math.max(c.heightVariance, 0));
     }
+    (uSurf.value as THREE.Vector2).set(oceanParams.shoalSurfGamma, oceanParams.shoalSurfOnset);
     (uBreaker.value as THREE.Vector2).set(
       oceanParams.shoalBreakerIndex,
       oceanParams.shoalColumnCeiling,
     );
+    // §T.193: the same SpectrumData CpuOcean.refreshShoal reads (moments cached per h0)
+    for (const [i, c] of sim.cascades.slice(0, SHOAL_ASYMMETRY_BANDS).entries()) {
+      const m = bandPropagation(sim.spectrum.current.cascades[i].h0);
+      (uAsymBand[i].value as THREE.Vector3).set(c.meanWavenumber, m.q, m.r);
+      (uAsymDir[i].value as THREE.Vector2).set(m.x, m.z);
+    }
+    (uAsym.value as THREE.Vector2).set(oceanParams.shoalAsymmetryGain, oceanParams.shoalAsymmetryHarmonicCap);
   };
   /**
    * §V.73 FETCH — per-cascade (k_pfull/k_band)², plus the two scalars the
@@ -672,9 +703,9 @@ export function buildOceanSurfaceMaterial(
     ? seabedHeightLodNode(seabed, worldXZ, spacing).negate().max(0)
     : null;
   /**
-   * Per-cascade survival fraction, 0..1 — see src/ocean/shoaling.ts for why
-   * this is tanh(k·d) and why keying on DEPTH rather than on distance-to-land
-   * is what gives the user rough cliffs for free.
+   * Per-cascade shoaling gain — growth (Ks), then depth-limited breaking
+   * (§T.190); see src/ocean/shoaling.ts for the law and why keying on DEPTH
+   * rather than on distance-to-land is what gives the user rough cliffs free.
    *
    * Without a seabed the factor is the constant 1 and every multiply below
    * folds away at compile time, so an open-ocean scene is bit-identical to
@@ -725,14 +756,17 @@ export function buildOceanSurfaceMaterial(
    * chain folds away at compile time, so an open-ocean scene is bit-identical
    * to what it was before either feature existed.
    */
-  const shoal = sim.cascades.map((_, i) => {
-    const s = shoalDepth ? shoalFactorNode(uShoalK[i], shoalDepth) : float(1);
-    if (!fetchRatio) return s;
-    // T174: × the swell shadow, the one expression CpuOcean.bandGains multiplies
-    return s
-      .mul(fetchBandGainNode(uFetchC[i], fetchRatio, uFetchMaxGain))
-      .mul(swellShadowGainNode(uSwellShare[i], swellK));
-  });
+  // T174: fetch × swell shadow, the one expression CpuOcean.bandGains multiplies
+  const external = fetchRatio
+    ? sim.cascades.map((_, i) =>
+      fetchBandGainNode(uFetchC[i], fetchRatio, uFetchMaxGain)
+        .mul(swellShadowGainNode(uSwellShare[i], swellK)))
+    : null;
+  // §T.190: growth × external × depth-limited breaking — `shoalBandGainNodes`
+  // is the TSL twin of the `shoalBandGains` CpuOcean.shoaledGains calls
+  const shoal = shoalDepth
+    ? shoalBandGainNodes(shoalDepth, uShoalK, uShoalSigma, external, uSurf)
+    : sim.cascades.map((_, i) => (external ? external[i] : float(1)));
 
   // vertex displacement: Σ cascades (λDx, h, λDz, J), each Nyquist-gated and
   // each shoaled by its OWN wavelength (§V.72)
@@ -769,18 +803,32 @@ export function buildOceanSurfaceMaterial(
    *
    * Exact identity until a wave occupies `shoalBreakerIndex` of the local
    * water column, then saturating to `shoalColumnCeiling` of it, so the sheet
-   * can never dig through the sand and flicker a lagoon dry. Measured: it
-   * never fires at calm or at swell, at any depth — the shipped seas get pure
-   * term A and their look cannot move. See shoaling.ts.
+   * can never dig through the sand and flicker a lagoon dry. Since §T.190
+   * the spectral breaking inside `shoal[i]` holds Hs ≤ 0.6·d, so this guard
+   * is reached only past 5.2σ — a guarantee, not a look. See shoaling.ts.
    *
    * `slope` is the clip's own derivative and it is NOT optional: the fragment
    * normals have to carry it or the flat trough bottoms this creates get shaded
    * with the slopes of the wave that was clipped away — a flat sheet wearing a
    * wave's reflections. It is free here (1 − saturation²).
    */
+  // §T.193 each band's shoaling second harmonic (skewed crest, steep front),
+  // the twin of what CpuOcean.shoaledSum adds, on cascades 0 and 1, before the
+  // column guard. Vertical only: the horizontal map and its Jacobian are unchanged.
+  const asym = shoalDepth
+    ? shoalAsymmetryNodes(
+      shoalDepth, uShoalK, uAsymBand, uAsymDir, uShoalSigma, shoal,
+      [d0.y.mul(shoal[0]), d1.y.mul(shoal[1])],
+      [d0.xz.mul(shoal[0]), d1.xz.mul(shoal[1])],
+      uChoppiness, uAsym,
+    )
+    : null;
+  const surfaceY = asym
+    ? rawDisp.y.add(asym[0].dy.mul(dispLod[0])).add(asym[1].dy.mul(dispLod[1]))
+    : rawDisp.y;
   const clip =
     shoalDepth !== null
-      ? breakerClipNodes(rawDisp.y, shoalDepth, uBreaker.x, uBreaker.y)
+      ? breakerClipNodes(surfaceY, shoalDepth, uBreaker.x, uBreaker.y)
       : null;
   const totalDisp = clip
     ? vec3(rawDisp.x, clip.clipped, rawDisp.z)
@@ -827,10 +875,10 @@ export function buildOceanSurfaceMaterial(
    * THE SLOPE VARIANCE THIS PIXEL CANNOT SEE — §V.48b's missing half, and the
    * quantity that makes the far sea a rough surface instead of a mirror.
    *
-   * `normLod[i]` is the fraction of cascade i's normals this pixel keeps, and
-   * `normFade` is the global far cut. So `1 − normLod[i]·normFade` is the
-   * fraction that was DELETED, and multiplying it by that cascade's own total
-   * slope variance recovers exactly the σ² the fade threw away. Summed across
+   * `normLod[i]` scales cascade i's slope amplitude, and `normFade` is the
+   * global far cut. Their product keeps its SQUARE of the original variance.
+   * The complement, `1 − (normLod[i]·normFade)²`, restores the variance removed
+   * by those amplitude fades. Summed across
    * the band-split cascades (§V.19 guarantees no wavelength appears twice, so
    * these add without double-counting) this is the sub-pixel slope variance —
    * analytically, from the Tessendorf spectrum, per cascade.
@@ -861,12 +909,14 @@ export function buildOceanSurfaceMaterial(
    * genuinely IS calmer, and there is no missing microfacet distribution to
    * account for. Routing it here would make a glassy lagoon shade as frosted
    * glass, i.e. the exact opposite of the look the calming exists to produce.
+   * (§T.190: the removed energy is now depth-limited BREAKING, which is surf,
+   * not microfacets — same conclusion.)
    * The energy shoaling removes belongs to the SHORE (runup, swash, breaking),
    * not to the specular lobe — see the note in the foam block below for where
    * that consumer should live and why it is not in this material.
    */
   const cascadeUnresolvedVar = sim.cascades
-    .map((_, i) => float(1).sub(normLod[i].mul(normFade)).max(0).mul(uSlopeVar[i]))
+    .map((_, i) => unresolvedSlopeVarianceNode(normLod[i].mul(normFade), uSlopeVar[i]))
     .reduce((a: TslNode, b: TslNode) => a.add(b));
   /**
    * THE SHADING NORMAL — and it MUST be built inside the fragment `Fn()`.
@@ -903,14 +953,23 @@ export function buildOceanSurfaceMaterial(
     // built with. Geometry and shading have to agree about how much wave is
     // here or the calmed water shades as open sea — and it is the same
     // expression, not a second one, so they cannot drift.
-    const derLong = sampleDeriv(0)
+    const deriv0 = sampleDeriv(0);
+    const deriv1 = sampleDeriv(1);
+    const derLong = deriv0
       .mul(normLod[0].mul(shoal[0]))
-      .add(sampleDeriv(1).mul(normLod[1].mul(shoal[1])))
+      .add(deriv1.mul(normLod[1].mul(shoal[1])))
       .mul(normFade)
       .toVar();
-    const der = derLong.add(
+    // §T.193: the shoaling harmonic's own slope, gated like the band it rides on
+    const asymSlope = asym
+      ? asym[0].slope(deriv0.xy.mul(shoal[0])).mul(normLod[0])
+        .add(asym[1].slope(deriv1.xy.mul(shoal[1])).mul(normLod[1]))
+        .mul(normFade)
+      : null;
+    const derBands = derLong.add(
       sampleDeriv(2).mul(normLod[2].mul(shoal[2])).mul(wakeSmooth).mul(normFade),
     );
+    const der = asymSlope ? derBands.add(vec4(asymSlope, 0, 0)) : derBands;
     // the SAME λ the vertex displacement was built with (anti-fold cap
     // applied), pushed per frame — a baked oceanParams.choppiness read here
     // meant the normals solved a different surface than the geometry drew
@@ -1085,7 +1144,11 @@ export function buildOceanSurfaceMaterial(
       // this wavelet's own wavelength — NOT microScale (§V.48: the sharpest
       // feature, never the repeat) — and shortened by whatever the warp can do
       // to it, so the gate still leads the aliasing rather than trailing it
-      const lambda = microScale.div(freqMul).mul(warpSqueeze);
+      // Local phase varies by a full turn over four wavelengths. Quintic
+      // value noise has component gradient <= 1.875, so its additional
+      // frequency is bounded by sqrt(2) * 1.875 / 4 of the carrier's.
+      const phaseFrequencyGain = 1 + Math.SQRT2 * 1.875 / 4;
+      const lambda = microScale.div(freqMul).mul(warpSqueeze).div(phaseFrequencyGain);
       // smoothstep(e0,e1,x), e0 > e1: 1 while a wavelength spans
       // microDetailSamplesFull pixels, 0 at 2 (Nyquist — a math constant, not
       // a tunable). Measured against fwidth(worldXZ), so grazing is included.
@@ -1110,18 +1173,26 @@ export function buildOceanSurfaceMaterial(
       // constant height.
       const amp = float(MICRO_AMP_SCALE / freqMul);
       const kAmp = k.mul(amp);
+      const travel = microPhase.mul(phaseMul);
+      // Move the phase field with this carrier. Independent offsets and
+      // wavelength scales prevent every train sharing the same bent stripes.
+      const packetCoord = microXZ.mul(k.div(8 * Math.PI))
+        .add(vec2(dirX, dirZ).mul(travel.div(8 * Math.PI)))
+        .add(vec2(freqMul * 13.7, phaseMul * 29.3));
+      const phaseJitter = valueNoise(packetCoord).sub(0.5).mul(2 * Math.PI);
       const arg = microXZ.x
         .mul(dirX)
         .add(microXZ.y.mul(dirZ))
         .mul(k)
-        .add(microPhase.mul(phaseMul));
+        .add(travel)
+        .add(phaseJitter);
       const d = arg.cos().mul(kAmp).mul(fade);
       // §V.48b: a sinusoid of slope amplitude k·amp has slope variance
-      // (k·amp)²/2, and the share this pixel can no longer resolve is (1 − fade)
-      // of it. Handed to the specular lobe instead of being dropped on the
+      // (k·amp)²/2, and the share removed by its amplitude fade is (1 − fade²).
+      // Handed to the specular lobe instead of being dropped on the
       // floor — this is the §V.64 path, and it must see the new amplitudes or
       // the roughness handover silently under-reports.
-      microUnresolvedRaw.addAssign(float(1).sub(fade).mul(kAmp).mul(kAmp).mul(0.5));
+      microUnresolvedRaw.addAssign(unresolvedSlopeVarianceNode(fade, kAmp.mul(kAmp).mul(0.5)));
       return { x: d.mul(dirX), z: d.mul(dirZ) };
     };
     const w = MICRO_WAVELETS.map((q) => wavelet(q[0], q[1], q[2], q[3]));
@@ -1407,16 +1478,17 @@ export function buildOceanSurfaceMaterial(
     // neither side of the waterline. Probe depth straight first (cheap, one
     // extra fetch), then bend by the offset that thickness earns.
     const straightDepth = linearDepth(viewportDepthTexture(screenUV));
+    const contactCoverage = contactFoamNode(
+      straightDepth, ownDepth, uCameraFar, uContactWidth, uContactFeather,
+    ).mul(uContactStrength).toVar();
     const probeThickness = straightDepth.sub(ownDepth).max(0).mul(uCameraFar);
     const refractRamp = smoothstep(float(0), uRefractDepthFull.max(0.05), probeThickness);
-    const refractedUV = screenUV.add(
-      vec2(normalWorld.x, normalWorld.z).mul(uRefractStrength).mul(refractRamp),
-    );
+    const refractedUV = screenUV.add(refractionOffsetNode(
+      normalWorld, cameraViewMatrix, screenSize, uRefractStrength,
+    ).mul(refractRamp));
     const sceneDepthBehind = linearDepth(viewportDepthTexture(refractedUV));
-    const thicknessMeters = sceneDepthBehind.sub(ownDepth).max(0).mul(uCameraFar);
-    // nothing meaningfully close behind → fully water-colored (also guards
-    // refraction pulling foreground pixels: fall back to straight UV)
-    const validRefraction = sceneDepthBehind.greaterThan(ownDepth.add(1e-5));
+    const refraction = refractionDepthNode(straightDepth, sceneDepthBehind, ownDepth);
+    const thicknessMeters = refraction.depth.sub(ownDepth).max(0).mul(uCameraFar);
     // vec3, not a scalar: Beer–Lambert PER CHANNEL (see `uAbsorption`). Red is
     // gone by ~4 m while blue is still 90% alive, and that DIFFERENCE is what
     // reads as water rather than as a grey veil over a photograph.
@@ -1427,9 +1499,9 @@ export function buildOceanSurfaceMaterial(
       .mul(thicknessMeters)
       .negate()
       .exp()
-      .mul(validRefraction.select(float(1), float(0)));
+      .mul(refraction.visible.select(float(1), float(0)));
     const sceneCol = viewportTexture(
-      validRefraction.select(refractedUV, screenUV),
+      refraction.useBent.select(refractedUV, screenUV),
       null,
       sceneColorTexture,
     ).rgb;
@@ -1586,6 +1658,13 @@ export function buildOceanSurfaceMaterial(
         ? skyDomeColor(refl)
         : mix(horizonLive, zenithLive, refl.y.clamp(0, 1).pow(0.6))
     ).toVar();
+    // The sky dome extends its horizon colour below y=0 for the background.
+    // A downward water-reflection ray sees the sea, not that bright sky.
+    // Use the already shaded sea body as the lower environment hemisphere;
+    // this is a local radiance approximation, not a traced wave intersection.
+    // Keep this inside the analytic environment so valid planar geometry
+    // reflections still replace it through their own coverage downstream.
+    const skyVisibility = reflectionSkyVisibilityNode(refl.y, fwidth(refl.y), unresolvedVar);
     // At grazing angles a white sky used to bleach the sea gray (user
     // critique), so the reflected sky is pulled toward the water's own hue by
     // grazingSaturation — it keeps the sky's VALUE but not its whiteness.
@@ -1610,7 +1689,8 @@ export function buildOceanSurfaceMaterial(
       uGrazingSat.y,
       smoothstep(float(0), uGrazingSat.z.max(1), camDist),
     ).mul(waterness);
-    const skyReflCol = mix(skyCol, skyCol.mul(bodyTint), grazSat);
+    const reflectedSky = mix(skyCol, skyCol.mul(bodyTint), grazSat);
+    const skyReflCol = mix(waterCol, reflectedSky, skyVisibility);
     // §V26 planar reflections: the module replaces the CONTENT of the
     // reflected colour, never its WEIGHT — fresnel × reflectionStrength stays
     // here, so §V20's painted-water bar is owned by this file alone.
@@ -1619,6 +1699,7 @@ export function buildOceanSurfaceMaterial(
       ? reflection.shade({
           skyColor: skyReflCol,
           normalWorld,
+          viewDirection: viewDir,
           chop: totalDisp.xz.length(),
           camDist,
           // §V.26 sub-pixel roughness: the mirror needs to know what one water
@@ -1726,16 +1807,26 @@ export function buildOceanSurfaceMaterial(
       let wakeFresh: any = null;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
       let wakeMaskFresh: any = null;
-      if (flowFoam) {
-        wakeFresh = flowFoam.wakeFoamFreshnessNode ? flowFoam.wakeFoamFreshnessNode(worldXZ) : null;
-        // wake foam runs through the same crackle/mottle detail blend but
-        // slightly damped — bow/stern trails read softer than whitecaps;
-        // aged sim foam retires the torn dissolve to its soft average
-        const wakeMask = wakeFresh
-          ? foamDetailMask(flowFoam.foamSampleNode(worldXZ).clamp(0, 1), worldXZ, undefined, undefined, undefined, wakeFresh)
-          : foamDetailMask(
-          flowFoam.foamSampleNode(worldXZ).clamp(0, 1),
-          worldXZ,
+      {
+        wakeFresh = flowFoam?.wakeFoamFreshnessNode ? flowFoam.wakeFoamFreshnessNode(worldXZ) : null;
+        const wakeCoverage = flowFoam
+          ? flowFoam.foamSampleNode(worldXZ).clamp(0, 1)
+          : float(0);
+        const shoreState = foam ? foam.shoreSampleNode(worldXZ) : null;
+        const shoreCoverage = shoreState ? shoreState.x : float(0);
+        const shoreFresh = shoreState ? shoreState.y.div(shoreState.x.max(1e-5)).clamp(0, 1) : float(0);
+        const combinedCoverage = wakeCoverage.max(contactCoverage).max(shoreCoverage);
+        const contactShare = contactCoverage.div(combinedCoverage.max(1e-5));
+        const ages = foamSourceAgesNode(
+          combinedCoverage, wakeFresh, contactShare,
+          shoreCoverage.div(combinedCoverage.max(1e-5)), shoreFresh,
+        );
+        wakeFresh = ages.lighting;
+        // Preserve the analytic wake's body, torn edge and colour when there
+        // is no measured age. Merely wiring shoreState must not make it fresh.
+        const wakeMask = foamDetailMask(
+          combinedCoverage, worldXZ, undefined, undefined, undefined,
+          ages.edge, ages.body, Boolean(flowFoam?.wakeFoamFreshnessNode),
         );
         wakeMaskFresh = wakeMask;
         // OPTICAL DEPTH, not a hard alpha (§B, the sim-foam lesson): a straight
@@ -1970,7 +2061,7 @@ export function buildOceanSurfaceMaterial(
      * (b) MEAN. (a) alone still leaves a per-cell coin flip, just with a round
      *     outline instead of a square one. So as the cell stops being able to
      *     hold a distinguishable point, BOTH binary terms fade to their own
-     *     expectations: the disc to its coverage (½πr²/c², the average the
+     *     expectations: the disc to its coverage (3πr²/10c² for an unclipped disc, the average the
      *     pixel should have seen) and the on/off hash to its probability
      *     (1 − thr). The two branches have EQUAL MEAN by construction, so
      *     energy is continuous across the whole crossfade — the sun path keeps
@@ -2008,7 +2099,7 @@ export function buildOceanSurfaceMaterial(
      *
      * THE CURE, and it is the cheap half of the two available. Size the glint
      * as a fixed FRACTION of its cell instead of a fixed number of pixels:
-     * `coverage` = π/2·(rad/cell)² and `cellPix/radPix` = `sparkleCellPixels /
+     * `coverage` depends only on (rad/cell) and `cellPix/radPix` = `sparkleCellPixels /
      * sparkleRadiusPixels` both become octave-invariant, so both
      * discontinuities go at once and at zero cost. The disc's screen radius
      * now breathes 0.40–0.80 px across an octave instead of sitting at 0.80 —
@@ -2019,9 +2110,9 @@ export function buildOceanSurfaceMaterial(
      * `sparkleRadiusPixels` keeps its meaning at the top of an octave, which is
      * where it was authored, so the shipped look is anchored where it was tuned.
      */
-    const radPix = cellPix
-      .mul(uSparkleShape.x.max(0.25).div(uSparkleCell.x.max(0.5)))
-      .max(0.05);
+    // Keep the authored radius/cell ratio at every footprint. An absolute
+    // pixel-radius floor changes the disc mean at the smallest cell sizes.
+    const radPix = cellPix.mul(uSparkleShape.x.max(0.25).div(uSparkleCell.x.max(0.5)));
     // Same class as `sparkleHash`: a hash of an integer cell index, constant
     // within the cell. It picks WHERE the glint sits; the glint's own extent is
     // `radPix`, sized in pixels against the footprint.
@@ -2037,13 +2128,10 @@ export function buildOceanSurfaceMaterial(
     // same footprint every band limit in this file is measured against). This
     // is the band limit itself, not an edge that still needs one.
     const disc = smoothstep(radPix, float(0), distPix);
-    // the disc's own mean over its cell (½ for the smoothstep profile), and the
-    // hash's own mean — the two values (b) fades to
-    const coverage = radPix
-      .mul(radPix)
-      .mul(Math.PI * 0.5)
-      .div(cellPix.mul(cellPix).max(1e-4))
-      .clamp(0, 1);
+    // The radial smoothstep integrates to 3πr²/10, not πr²/2. Its mean
+    // depends only on the authored radius/cell ratio, so compute it once on
+    // the CPU, including square clipping for oversized, centred discs.
+    const coverage = uSparkleShape.z;
     const onProb = float(1).sub(thr).clamp(0, 1);
     // smoothstep(e0,e1,x) ascending: 0 while the cell is under `resolveCells`
     // radii across (no room for a distinguishable point), 1 past twice that.
@@ -2488,6 +2576,9 @@ export function buildOceanSurfaceMaterial(
       sp.sunHorizonFadeHigh,
     );
     (uFoam.value as THREE.Color).set(sp.foamColor);
+    uContactStrength.value = Math.max(0, sp.contactFoamStrength);
+    uContactWidth.value = Math.max(0.001, flowFoamParams.depthThreshold);
+    uContactFeather.value = Math.max(0.001, Math.min(1, flowFoamParams.maskFeather));
     (uWakeFoam.value as THREE.Color).set(sp.wakeFoamColor);
     uWakeFoamDepth.value = sp.wakeFoamDepth;
     uSssStrength.value = sp.sssStrength;
@@ -2519,9 +2610,10 @@ export function buildOceanSurfaceMaterial(
     (uSparkleCell.value as THREE.Vector2).set(sp.sparkleCellPixels, sp.sparkleMinCell);
     (uSpecAA.value as THREE.Vector2).set(sp.specularAaStrength, sp.specularAaMax);
     uSlopeVarAa.value = sp.slopeVarianceAa;
-    (uSparkleShape.value as THREE.Vector2).set(
+    (uSparkleShape.value as THREE.Vector3).set(
       sp.sparkleRadiusPixels,
       sp.sparkleResolveCells,
+      sparkleDiscMean(Math.max(0.25, sp.sparkleRadiusPixels) / Math.max(0.5, sp.sparkleCellPixels)),
     );
     uMicroSamples.value = sp.microDetailSamplesFull;
     uMicroWarp.value = Math.max(0, sp.microDetailWarp);

@@ -335,8 +335,32 @@ export class WakeSolverGpu {
 
   /** splat + one compute group. Δt is finite-guarded and clamped to [0, WAKE_MAX_DT] (V28). */
   step(renderer: THREE.WebGPURenderer, dtIn: number): void {
-    const dt = Number.isFinite(dtIn) ? Math.min(Math.max(dtIn, 0), WAKE_MAX_DT) : 0;
     const t0 = this.profile ? performance.now() : 0;
+    this.beginStep(renderer, dtIn);
+    const t1 = this.profile ? performance.now() : 0;
+    renderer.compute(this.computeNodes);
+    this.endStep();
+    if (this.profile) {
+      this.lastStepCpu.splat = t1 - t0;
+      this.lastStepCpu.compute = performance.now() - t1;
+    }
+  }
+
+  /**
+   * §T.199 SEVERAL SOLVERS, ONE COMPUTE GROUP (§V104): every solver's splat, then ONE `renderer.compute` over
+   * `nodes` — the solvers' `computeNodes` concatenated in the order given (the caller caches the array) — then each
+   * solver's post-step bookkeeping. Each solver's passes read only its own textures, so the concatenation is the
+   * same work as stepping them one after another, in one submission.
+   */
+  static stepGroup(renderer: THREE.WebGPURenderer, solvers: readonly WakeSolverGpu[], nodes: readonly AnyNode[], dtIn: number): void {
+    for (const s of solvers) s.beginStep(renderer, dtIn);
+    renderer.compute(nodes as AnyNode[]);
+    for (const s of solvers) s.endStep();
+  }
+
+  /** the splat into this solver's head target and the step's uniforms (Δt clamped, the pending scroll) */
+  private beginStep(renderer: THREE.WebGPURenderer, dtIn: number): void {
+    const dt = Number.isFinite(dtIn) ? Math.min(Math.max(dtIn, 0), WAKE_MAX_DT) : 0;
     const prevTarget = renderer.getRenderTarget();
     // runtime getClearColor only target.copy()s, so a plain Color works (clouds/index.ts precedent)
     renderer.getClearColor(this.clearTmp as Parameters<typeof renderer.getClearColor>[0]);
@@ -357,21 +381,19 @@ export class WakeSolverGpu {
     }
     renderer.setRenderTarget(prevTarget);
     renderer.setClearColor(this.clearTmp, prevAlpha);
-    const t1 = this.profile ? performance.now() : 0;
 
     this.uDt.value = dt;
     this.uShiftX.value = this.pendingShiftX;
     this.uShiftZ.value = this.pendingShiftZ;
-    renderer.compute(this.computeNodes);
+  }
+
+  /** after the group ran: the scroll is consumed and the head just splatted is the head the state holds */
+  private endStep(): void {
     this.pendingShiftX = 0;
     this.pendingShiftZ = 0;
     // the head just splatted is now the head the state holds (post stored its bins)
     this.uD0Old.value = this.uD0.value;
     this.uD1Old.value = this.uD1.value;
-    if (this.profile) {
-      this.lastStepCpu.splat = t1 - t0;
-      this.lastStepCpu.compute = performance.now() - t1;
-    }
   }
 
   dispose(): void {

@@ -13,7 +13,7 @@
  * the pilot's own helm rate — and one notch past it must hook, or the check has no teeth.
  */
 import { describe, expect, it } from 'vitest';
-import { CHINE_BEAM, DEG, HELM_RATE, MEASURED, curvatureAt, lockLimit } from '../src/race/ai/capability';
+import { CHINE_BEAM, DEG, HELM_RATE, MEASURED, TOP_SPEED, curvatureAt, lockLimit } from '../src/race/ai/capability';
 import { measureCapability, measureLockEntry, measureTurn } from '../src/race/ai/measure';
 
 const close = (a: number, b: number, rel: number, abs: number): boolean => Math.abs(a - b) <= Math.max(abs, rel * Math.abs(b));
@@ -53,16 +53,17 @@ describe('§T.186 measured capability', () => {
 });
 
 describe('§T.186 no-hook lock schedule', () => {
-  const speeds = [6, 10, 14, 18, 22, 26, 29.5];
+  // up to the measured top speed (T196: 33.4 m/s on the engine model; the list ended at the stand-in's 29.5)
+  const speeds = [6, 10, 14, 18, 22, 26, 30, TOP_SPEED - 0.5];
 
-  it('at the schedule, full throttle through a 15°/s helm entry never departs (default drives, 6–29.5 m/s)', () => {
+  it('at the schedule, full throttle through a 15°/s helm entry never departs (default drives, 6 m/s to top speed)', () => {
     for (const v of speeds) {
       const r = measureLockEntry(v, lockLimit(v), {}, 10, HELM_RATE);
       expect(r.departed, `${v} m/s at ${(lockLimit(v) / DEG).toFixed(1)}°: peak tilt ${r.maxTiltDeg.toFixed(1)}°`).toBe(false);
     }
   }, 120_000);
 
-  it('the schedule tapers with C_v for faster drives (4 MW stand-in, C_v 7–10), where half lock is known to hook', () => {
+  it('the schedule also holds for faster drives (4 MW power scale, C_v 7–10), the speeds half and full lock hook at with a 30°/s helm', () => {
     for (const cv of [7, 8, 10]) {
       const v = cv * Math.sqrt(9.81 * CHINE_BEAM);
       const r = measureLockEntry(v, lockLimit(v), { standInDrivePowerW: 4e6 }, 10, HELM_RATE);
@@ -71,7 +72,8 @@ describe('§T.186 no-hook lock schedule', () => {
   }, 120_000);
 
   it('teeth: 60 % past the schedule the same entry DOES hook at most speeds, and 50 % past it at C_v 7–10 (the checks above can fail)', () => {
-    // measured at 15°/s: 1.6× departs at 6/14/18/22 m/s (peak tilt 58–81°), 2× at all seven; 4 MW 1.5× at C_v 7/8/10
+    // T196 sweep at 15°/s (capability.ts lockLimit): 22.5° departs at 6 m/s, 30° at 10–33 m/s ⇒ 1.6× the schedule
+    // departs at all eight speeds; 4 MW: 25° departs at C_v 6/7/10, 27.5° at C_v 8 ⇒ 1.5× (28.5°) at C_v 7/8/10
     let hooks = 0;
     for (const v of speeds) if (measureLockEntry(v, 1.6 * lockLimit(v), {}, 10, HELM_RATE).departed) hooks++;
     expect(hooks).toBeGreaterThanOrEqual(4);

@@ -3,7 +3,7 @@
  * circuit's kit islands, the course furniture at the measured placements, a free-fly camera and a minimap
  * overlay drawn from the Course/minimap data the HUD will get.
  *
- *   circuit-preview.html?cam=overhead|start|bar|pylons|street|tower&seed=1965&weather=swell&tod=17.5&lamps=0..5&green=1
+ *   circuit-preview.html?cam=overhead|start|bar|pylons|street|grid|tower&pace=0|1&seed=1965&weather=swell&tod=17.5&lamps=0..5&green=1
  *
  * Fly: drag = look, W/A/S/D = move, Q/E = down/up, Shift = fast, 1–6 = camera presets, L = cycle start lamps.
  * `window.__circuit` = { app, world, furniture, sea, setCam, stats } for scripted browser checks.
@@ -26,6 +26,8 @@ import { createWeatherSample, createWeatherSystem } from '../weather';
 import { createInitialState } from '../state/simState';
 import { buildTowerReach, towerReachSites } from './towerReach';
 import { createCourseFurniture } from './courseFurniture';
+import { generateSierraSites } from '../island/sierraSites';
+import { installGpuTimer } from '../debug/gpuTimer';
 import type { Vec2 } from '../race/types';
 
 const q = new URLSearchParams(location.search);
@@ -45,6 +47,8 @@ async function boot(): Promise<void> {
   const seed = Math.floor(num('seed', 1965));
   skyParams.timeOfDay = num('tod', 17.5);
   const app = await App.create(root);
+  // §T.194 A/B perf: `?gputimer` installs the per-pass GPU timer (src/debug/gpuTimer.ts, min-of-window)
+  const gpuTimer = q.has('gputimer') ? installGpuTimer(app.renderer) : null;
   app.controls.enabled = false;
   app.camera.far = 20000;
   app.camera.updateProjectionMatrix();
@@ -57,10 +61,18 @@ async function boot(): Promise<void> {
   sky.configureRenderer(app.renderer);
 
   const layout = towerReachSites(seed);
+  // §T.194 lookdev: `?world=sierra` puts the RAFT slice's islands under this same sky/sea/post, so a kit
+  // island and a raft island are compared in one renderer (the course still builds, off in the water)
+  const refSierra = q.get('world') === 'sierra';
   const t0 = performance.now();
-  const sea = buildSea(app, state, sky, weather, { sites: layout.sites, wakeSpeedScale: 1, seaParams: seaPhysicsParams });
+  const sea = buildSea(app, state, sky, weather, {
+    sites: refSierra ? generateSierraSites(seed).sites : layout.sites, wakeSpeedScale: 1, seaParams: seaPhysicsParams,
+  });
   const tSea = performance.now() - t0;
-  const world = buildTowerReach(seed, { heightmaps: sea.archipelago.islands.map((i) => i.heightmap), seabed: sea.archipelago.seabed });
+  const kitSea = refSierra ? null : sea;
+  const world = buildTowerReach(seed, kitSea
+    ? { heightmaps: kitSea.archipelago.islands.map((i) => i.heightmap), seabed: kitSea.archipelago.seabed }
+    : undefined);
   const tCourse = performance.now() - t0 - tSea;
   const waterAt = (x: number, z: number): number => sea.cpuOcean.heightAt(x, z, state.time);
   const furniture = await createCourseFurniture({
@@ -81,6 +93,18 @@ async function boot(): Promise<void> {
     app.camera.position.set(...from);
     app.camera.lookAt(new THREE.Vector3(...to));
   };
+  // §T.202 a pace boat parked on the authored pace line (the page drives the real one from RaceState.paceBoat)
+  const PREVIEW_PACE_BACK = 420;
+  const paceLine = world.course.paceLine;
+  const paceEnd = paceLine[paceLine.length - 1];
+  const paceDir = (() => {
+    const a = paceLine[0];
+    const l = Math.hypot(paceEnd[0] - a[0], paceEnd[1] - a[1]);
+    return [(paceEnd[0] - a[0]) / l, (paceEnd[1] - a[1]) / l] as const;
+  })();
+  const paceAt = (back: number) => ({ x: paceEnd[0] - paceDir[0] * back, z: paceEnd[1] - paceDir[1] * back, yaw: Math.atan2(paceDir[0], paceDir[1]) });
+  const paceStart = paceAt(0);
+  const pace = q.get('pace') === '0' ? null : paceAt(PREVIEW_PACE_BACK);
   const presets: Record<string, () => void> = {
     overhead: () => look([centre[0], Math.max(max[0] - min[0], max[1] - min[1]) * 1.05, centre[1] + 1], [centre[0], 0, centre[1]]),
     start: () => {
@@ -88,17 +112,22 @@ async function boot(): Promise<void> {
       look([s.mid[0] - s.heading[0] * 160, 2.2, s.mid[1] - s.heading[1] * 160], [s.mid[0] + s.heading[0] * 200, 8, s.mid[1] + s.heading[1] * 200]);
     },
     bar: () => {
-      const x = world.bars[0].crossing ?? gate('G2').mid;
-      const h = gate('G2').heading;
+      const x = world.bars[0].crossing ?? gate('G1').mid;
+      const h = gate('G1').heading;
       look([x[0] - h[0] * 140, 2.0, x[1] - h[1] * 140], [x[0] + h[0] * 60, 0, x[1] + h[1] * 60]);
     },
     pylons: () => {
-      const g = gate('G4');
+      const g = gate('G3');
       look([g.mid[0] - g.heading[0] * 260, 3.0, g.mid[1] - g.heading[1] * 260], [g.mid[0], 12, g.mid[1]]);
     },
     street: () => {
-      const g = gate('G6');
+      const g = gate('G5');
       look([g.mid[0] - g.heading[0] * 90, 2.0, g.mid[1] - g.heading[1] * 90], [g.mid[0] + g.heading[0] * 120, 1, g.mid[1] + g.heading[1] * 120]);
+    },
+    // §T.202 the player's view from the grid: 60 m behind the pace boat (`pace` below), the start lamps up the straight
+    grid: () => {
+      const b = paceAt(PREVIEW_PACE_BACK + 60);
+      look([b.x, 2.4, b.z], [paceStart.x, 6, paceStart.z]);
     },
     tower: () => {
       const t = world.furniture.tower.at;
@@ -207,7 +236,16 @@ async function boot(): Promise<void> {
     setCam(name);
     syncAngles();
   };
-  (window as unknown as Record<string, unknown>).__circuit = { app, world, furniture, sea, setCam: setCamScripted, stats };
+  // scripted lookdev: an explicit view, the hour, and where the islands are
+  const view = (from: [number, number, number], to: [number, number, number]): void => {
+    look(from, to);
+    syncAngles();
+  };
+  const setTod = (h: number): void => {
+    skyParams.timeOfDay = h;
+  };
+  const islands = sea.archipelago.islands.map((i) => ({ center: i.center, radius: i.heightmap.worldRadius, archetype: i.heightmap.archetype }));
+  (window as unknown as Record<string, unknown>).__circuit = { app, world, furniture, sea, setCam: setCamScripted, stats, view, setTod, islands, gpu: gpuTimer };
 
   const fwd = new THREE.Vector3();
   const right = new THREE.Vector3();
@@ -237,12 +275,13 @@ async function boot(): Promise<void> {
     seaFrame.renderFlowFoam(dt);
     furniture.update({
       camera: app.camera, time: state.time, dt, waterHeightAt: waterAt,
-      nextElement: 1, startLamps: Math.min(lamps, 5), startGreen: lamps === 6 || q.get('green') === '1',
+      nextElement: 1, startLamps: Math.min(lamps, 5), startGreen: lamps === 6 || q.get('green') === '1', pace,
     });
     seaFrame.renderCameraPasses();
     seaFrame.renderSurface();
     post.updateFromParams();
     post.render();
+    gpuTimer?.tick();
     const info = app.renderer.info.render;
     hud.hud.setRenderStats(info);
     const s = furniture.stats();

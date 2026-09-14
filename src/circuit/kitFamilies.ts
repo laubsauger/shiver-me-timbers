@@ -34,7 +34,7 @@
  *               on it) and a knoll that breaks the surface
  */
 import type { IslandParams } from '../params/island';
-import { fbm2Cpu, ridged2Cpu } from '../terrain/noiseCpu';
+import { fbm2Cpu } from '../terrain/noiseCpu';
 import type { Feature } from '../island/archetypes';
 import {
   isSierraFamilyRegistered,
@@ -143,6 +143,19 @@ export interface BarSpec {
   halfWidth: number;
   /** depth (m) of the sand shoal the bar rises from; it feathers out into the basin */
   shoalDepth: number;
+  /**
+   * §T.194 profile (defaults = the §T.187 bar): half-width multipliers of the
+   * two flanks — `faceWidth` on the crest polyline's right-hand side (side ≤ 0),
+   * which in the Tower Reach frame is the side the swell actually arrives from
+   * (+swellDirection, see circuit.md §T194), `backWidth` on the other — the
+   * across-bar profile power, and the apron width (× halfWidth).
+   */
+  faceWidth?: number;
+  backWidth?: number;
+  profilePower?: number;
+  apron?: number;
+  /** sand-wave relief on the crest (m, only ever deepens it) */
+  waveRelief?: number;
 }
 
 export interface SandCaySpec {
@@ -160,6 +173,16 @@ export interface SandCaySpec {
   /** e-folding distance (m) of the underwater shelf off the beach */
   shelf: number;
   bar?: BarSpec;
+  /**
+   * §T.194: more bars off the same cay — a multi-bar system (an outer bar the
+   * swell breaks on first, then the inner one), each with its own contract.
+   */
+  bars?: readonly BarSpec[];
+}
+
+/** every bar a sand cay carries, `bar` first */
+export function cayBars(spec: SandCaySpec): BarSpec[] {
+  return [...(spec.bar ? [spec.bar] : []), ...(spec.bars ?? [])];
 }
 
 export interface KnobSpec {
@@ -210,6 +233,12 @@ export interface KitField {
   /** authored land peak (m) */
   peak: number;
   axis: number;
+  /**
+   * §T.194: the authored field is the FINISHED land as well as the water — the
+   * sierra pipeline's beach apron, T130 profile and coast noise would turn a
+   * granite shore into a DG beach, so the `shape` hook pulls land onto it too.
+   */
+  exact?: boolean;
 }
 
 // ── fields ───────────────────────────────────────────────────────────────────
@@ -256,7 +285,7 @@ function warp(x: number, z: number, freq: number, amp: number, seed: number): V2
 }
 
 function sandCayField(spec: SandCaySpec, seed: number): KitField {
-  const { halfWidth, crestHeight, crestInland, floorDepth, shelf, bar } = spec;
+  const { halfWidth, crestHeight, crestInland, floorDepth, shelf } = spec;
   const spine = chaikin(spec.spine, 4);
   const land = (x0: number, z0: number): number => {
     const [x, z] = warp(x0, z0, 1 / 160, halfWidth * 0.22, seed);
@@ -276,30 +305,35 @@ function sandCayField(spec: SandCaySpec, seed: number): KitField {
     const rise = smoothstep(0, crestInland / Math.max(hw, 1e-3), q);
     return crestHeight * (0.5 + 0.5 * taper) * hum * rise * Math.min(body + 0.55 * fore, 1);
   };
-  const barCrest = bar ? chaikin(bar.crest, 3) : [];
-  const heightAt = (x0: number, z0: number): number => {
-    const base = land(x0, z0);
-    if (!bar) return base;
+  const barList = cayBars(spec).map((b) => ({ spec: b, crest: chaikin(b.crest, 3) }));
+  const barHeight = (bar: BarSpec, barCrest: V2[], x0: number, z0: number, base: number): number => {
     const [x, z] = warp(x0, z0, 1 / 240, bar.halfWidth * 0.35, seed + 7);
     const b = polylineDistance(barCrest, x, z);
     // a bar is broad in the middle, fades into the shoal at its ends, and is ASYMMETRIC:
-    // a long gentle back on the swell side, a short steep slip face in its lee
+    // one flank long and gentle, the other short and steep (`faceWidth` / `backWidth`)
     const mid = Math.sin(Math.PI * clamp01(b.t));
-    const w = bar.halfWidth * (0.55 + 0.45 * mid) * (b.side > 0 ? 1.35 : 0.7);
+    const w = bar.halfWidth * (0.55 + 0.45 * mid) * (b.side > 0 ? (bar.backWidth ?? 1.35) : (bar.faceWidth ?? 0.7));
     const endFade = smoothstep(0, 0.2, b.t) * smoothstep(1, 0.8, b.t);
     // crest undulation and sand waves only ever DEEPEN the crest: crestDepth is a floor on water
     const waves = 0.5 + 0.5 * Math.sin((x0 * 0.6 + z0 * 0.8) / 5.5 + hashNoise(x0 * 0.01, z0 * 0.01, seed) * 2);
-    const crest = bar.crestDepth + bar.crestUndulation * fbm2Cpu(b.t * 5 + 1.3, seed * 0.001 + 2.7, 3) + 0.3 * waves;
+    const crest = bar.crestDepth + bar.crestUndulation * fbm2Cpu(b.t * 5 + 1.3, seed * 0.001 + 2.7, 3) + (bar.waveRelief ?? 0.3) * waves;
     const crestHere = lerp(bar.shoalDepth, crest, endFade);
-    const across = Math.pow(clamp01(b.d / Math.max(w, 1e-3)), 1.25);
+    const across = Math.pow(clamp01(b.d / Math.max(w, 1e-3)), bar.profilePower ?? 1.25);
     const onBar = -lerp(crestHere, bar.shoalDepth, smoothstep(0, 1, across));
     // the shoal the bar sits on, feathering out into the basin over a wide apron
-    const apron = smoothstep(w, w + bar.halfWidth * 2.6, b.d);
-    const barH = lerp(onBar, base, apron);
-    if (base >= 0) return base;
-    const lifted = smax(base, barH, 2);
-    // THE CONTRACT: nothing about the bar ever brings the seabed above −crestDepth
-    return base < -bar.crestDepth ? Math.min(lifted, -bar.crestDepth) : Math.max(base, Math.min(lifted, base));
+    const apron = smoothstep(w, w + bar.halfWidth * (bar.apron ?? 2.6), b.d);
+    return lerp(onBar, base, apron);
+  };
+  const heightAt = (x0: number, z0: number): number => {
+    const base = land(x0, z0);
+    if (barList.length === 0 || base >= 0) return base;
+    let h = base;
+    for (const { spec: bar, crest } of barList) {
+      const lifted = smax(h, barHeight(bar, crest, x0, z0, base), 2);
+      // THE CONTRACT: nothing about a bar ever brings the seabed above −crestDepth
+      h = h < -bar.crestDepth ? Math.min(lifted, -bar.crestDepth) : Math.max(h, Math.min(lifted, h));
+    }
+    return h;
   };
   // bookkeeping features: one ridge per spine segment (bay scans, hm.features)
   const features: Feature[] = [];
@@ -376,9 +410,83 @@ const ellipseU = (x: number, z: number, cx: number, cz: number, a: number, b: nu
   return Math.hypot((dx * c + dz * s) / a, (-dx * s + dz * c) / b);
 };
 
+/** CPU Worley in cell units: [F1, F2, id of the nearest cell ∈ [0,1)] — the fractured waterline's blocks */
+function worley(x: number, z: number, seed: number): [number, number, number] {
+  const xi = Math.floor(x);
+  const zi = Math.floor(z);
+  let f1 = 9;
+  let f2 = 9;
+  let id = 0;
+  for (let j = -1; j <= 1; j++) {
+    for (let i = -1; i <= 1; i++) {
+      const cx = xi + i;
+      const cz = zi + j;
+      const jx = hash01(cx, cz, seed) * 0.9 + 0.05;
+      const jz = hash01(cx, cz, seed + 1) * 0.9 + 0.05;
+      const d = Math.hypot(cx + jx - x, cz + jz - z);
+      if (d < f1) {
+        f2 = f1;
+        f1 = d;
+        id = hash01(cx, cz, seed + 2);
+      } else if (d < f2) f2 = d;
+    }
+  }
+  return [f1, f2, id];
+}
+
+/** integer-lattice hash in [0, 1) */
+function hash01(i: number, j: number, seed: number): number {
+  let n = (i * 374761393 + j * 668265263 + seed * 1442695041) | 0;
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  n ^= n >>> 16;
+  return (n >>> 0) / 4294967296;
+}
+
+/** smooth exfoliation steps: quantise to `rise`, riser over the top `riser` fraction (sierraArchetypes' terraceSteps law) */
+function sheetSteps(h: number, rise: number, riser: number): number {
+  const k = h / rise;
+  const step = Math.floor(k);
+  const f = k - step;
+  return (step + smoothstep(1 - riser, 1, f)) * rise;
+}
+
+/**
+ * §T.194 ROCK GARDEN — granite whalebacks as the sea left them (the Bohuslän /
+ * Maine skerry read, Martel 2006 for the sheets):
+ *
+ *   form     a glaciated whaleback `(1 − u²)^k`, but a ROCHE MOUTONNÉE: the
+ *            lee end's outline is pulled in, so the stoss is long and polished
+ *            and the lee is a short plucked face
+ *   sheets   exfoliation steps 1.1-2.2 m tall, their phase warped so no step
+ *            is a contour line, blended in above the splash zone
+ *   joints   two clefts sets ~75° apart, patchy, a metre-plus deep — what cuts
+ *            a knob into blocks from a boat's eye
+ *   waterline a Worley block field in the ±3 m band: blocks stand proud or
+ *            drop by up to half a metre with a groove between them, the
+ *            fractured shore the surf works on
+ *   garden   the warped rock platform and the clustered boulder field (§T.187)
+ *
+ * Every term below −2.5 m fades out, so the corridor, the platform depth and
+ * the boulders' hazard tops (the course contracts) are untouched.
+ */
 function rockGardenField(spec: RockGardenSpec, rng: () => number, seed: number): KitField {
   const g = spec.garden;
   const boulders = rockGardenBoulders(spec, rng);
+  const knobs = spec.knobs.map((k, ki) => {
+    const lee = hash01(ki, 11, seed) < 0.5 ? -1 : 1;
+    const jointA = k.axis + 0.35 + 0.5 * hash01(ki, 12, seed);
+    return {
+      ...k,
+      lee,
+      ca: Math.cos(k.axis),
+      sa: Math.sin(k.axis),
+      rise: 1.1 + 1.1 * hash01(ki, 13, seed),
+      spacingA: 16 + 10 * hash01(ki, 14, seed),
+      spacingB: 22 + 12 * hash01(ki, 15, seed),
+      jA: [Math.cos(jointA), Math.sin(jointA)] as const,
+      jB: [Math.cos(jointA + 1.3), Math.sin(jointA + 1.3)] as const,
+    };
+  });
   const heightAt = (x0: number, z0: number): number => {
     // the platform edge is a reef line, not an ellipse: a strong warp on its outline
     const [gx, gz] = warp(x0, z0, 1 / 110, Math.min(g.a, g.b) * 0.55, seed + 3);
@@ -386,20 +494,48 @@ function rockGardenField(spec: RockGardenSpec, rng: () => number, seed: number):
     const [kx, kz] = warp(x0, z0, 1 / 70, 16, seed + 5);
     let shore = Infinity;
     let crown = -Infinity;
-    for (let ki = 0; ki < spec.knobs.length; ki++) {
-      const k = spec.knobs[ki];
-      const uk = ellipseU(kx, kz, k.x, k.z, k.a, k.b, k.axis);
-      shore = Math.min(shore, (uk - 1) * Math.min(k.a, k.b));
-      if (uk < 1) {
-        // a polished crown (the sierra dome law (1 − u²)^k) cut by joint sets: ridged noise grooves
-        const joints = 0.88 + 0.12 * ridged2Cpu(x0 / 28 + ki * 3.1, z0 / 28, 3);
-        crown = Math.max(crown, k.height * Math.pow(1 - uk * uk, 1.35) * joints);
+    for (let ki = 0; ki < knobs.length; ki++) {
+      const k = knobs[ki];
+      const along = ((kx - k.x) * k.ca + (kz - k.z) * k.sa) / k.a;
+      const leeW = smoothstep(0.1, 0.9, along * k.lee);
+      const u = ellipseU(kx, kz, k.x, k.z, k.a, k.b, k.axis) * (1 + 0.42 * leeW);
+      const minAxis = Math.min(k.a, k.b) / (1 + 0.42 * leeW);
+      shore = Math.min(shore, (u - 1) * minAxis);
+      if (u >= 1.2) continue;
+      // the form runs on under the water as a steep flank, not a tangent toe
+      let dome = u < 1 ? k.height * Math.pow(1 - u * u, 1.05) : -(u - 1) * minAxis * 0.55;
+      // flank steepening toward the waterline: the last metres drop, they do not shelve
+      dome -= 1.4 * smoothstep(0.55, 1, u);
+      // exfoliation sheets above the splash zone, phase-warped
+      const sw = (fbm2Cpu(x0 / 23 + ki * 5.3, z0 / 23 - ki * 2.1, 3) - 0.5) * k.rise * 1.3;
+      const stepped = sheetSteps(dome + sw, k.rise, 0.34) - sw;
+      dome += (stepped - dome) * 0.8 * smoothstep(0.4, 2.2, dome);
+      // joint clefts, patchy, fading out under the water
+      const gate = smoothstep(-2.5, 0.5, dome);
+      if (gate > 0) {
+        const cleft = (dir: readonly [number, number], spacing: number, salt: number): number => {
+          const c = (x0 * dir[0] + z0 * dir[1]) / spacing + (fbm2Cpu(x0 / 41 + salt, z0 / 41, 2) - 0.5) * 0.35;
+          const dist = Math.abs(c - Math.round(c)) * spacing;
+          // a joint opens in stretches, not as a ruled line across the whole knob
+          const patch = smoothstep(0.55, 0.7, fbm2Cpu(x0 / 45 - salt, z0 / 45 + salt, 3));
+          const depth = 0.6 + 1.1 * fbm2Cpu(x0 / 19 + salt * 2, z0 / 19, 2);
+          return depth * (1 - smoothstep(0.5, 2.2, dist)) * patch;
+        };
+        dome -= gate * Math.max(cleft(k.jA, k.spacingA, 3.7 + ki), cleft(k.jB, k.spacingB, 9.1 + ki));
       }
+      crown = Math.max(crown, dome);
     }
     let h = shelfDepth(shore, spec.floorDepth, spec.shelf);
     const platform = -spec.platformDepth + 2.2 * (fbm2Cpu(x0 * 0.03 + 7.7, z0 * 0.03, 4) - 0.5);
     h = smax(h, lerp(-spec.floorDepth, platform, smoothstep(1.3, 0.85, ug)), 2);
     if (crown > -Infinity) h = Math.max(h, crown);
+    // the fractured waterline: blocks proud or dropped, a groove between them
+    const band = smoothstep(-2.5, -1, h) * smoothstep(3.5, 1.5, h);
+    if (band > 0) {
+      const [f1, f2, id] = worley(x0 / 5.5, z0 / 5.5, seed + 71);
+      const groove = 1 - smoothstep(0.05, 0.22, f2 - f1);
+      h += band * ((id - 0.45) * 1.1 - 0.55 * groove) * smoothstep(0, 0.1, f1 + 0.1);
+    }
     for (const bd of boulders) {
       const reach = bd.r * bd.elong * 1.35;
       if (Math.abs(x0 - bd.x) > reach || Math.abs(z0 - bd.z) > reach) continue;
@@ -419,7 +555,7 @@ function rockGardenField(spec: RockGardenSpec, rng: () => number, seed: number):
     ...spec.knobs.map((k): Feature => ({ kind: 'cone', x: k.x, z: k.z, radius: Math.max(k.a, k.b), height: k.height, power: 0.8 })),
     ...boulders.map((b): Feature => ({ kind: 'sheer', x: b.x, z: b.z, radius: b.r * b.elong, height: b.top, power: 1 })),
   ];
-  return { heightAt, features, peak: spec.knobs[0].height, axis: spec.knobs[0].axis };
+  return { heightAt, features, peak: spec.knobs[0].height, axis: spec.knobs[0].axis, exact: true };
 }
 
 function drownedTownField(spec: DrownedTownSpec, seed: number): KitField {
@@ -490,14 +626,27 @@ export function kitFamily(spec: KitSpec, seed: number): SierraFamily {
     peak: () => unsink(spec.kind === 'sandCay' ? spec.crestHeight : spec.kind === 'rockGarden' ? spec.knobs[0].height : spec.knoll.height),
     build(rng, _extent, peak): SierraShape {
       const field = kitField(spec, rng, seed);
+      // the pipeline asks for the same point three times per cell (landAt for the
+      // field, shape, the uplift sweep): one evaluation, remembered (§T.194 bake cost)
+      let cx = NaN;
+      let cz = NaN;
+      let ch = 0;
+      const heightAt = (x: number, z: number): number => {
+        if (x !== cx || z !== cz) {
+          cx = x;
+          cz = z;
+          ch = field.heightAt(x, z);
+        }
+        return ch;
+      };
       return {
         features: field.features,
         meta: { name: 'kit:' as KitArchetypeName, axis: field.axis, terraceAzimuth: field.axis, terraceCount: 0, iceAzimuth: 0 },
         peak,
-        landAt: (x, z) => unsink(field.heightAt(x, z)),
+        landAt: (x, z) => unsink(heightAt(x, z)),
         shape: (h, _land, x, z) => {
-          const target = field.heightAt(x, z);
-          const w = waterWeight(target);
+          const target = heightAt(x, z);
+          const w = field.exact ? 1 : waterWeight(target);
           return w > 0 ? h + (target - h) * w : h;
         },
       };
@@ -530,7 +679,7 @@ export function registerKitIsland(name: KitArchetypeName, spec: KitSpec, seed: n
  * islets); the rim sits at the basin floor so the footprint edge is not a
  * submerged kerb across the corridor.
  */
-export function kitOverrides(spec: KitSpec, gridSize: number): Partial<IslandParams> {
+export function kitOverrides(spec: KitSpec, gridSize: number): Partial<IslandParams> & { erosion?: 'full' | 'shapeOnly' } {
   const common: Partial<IslandParams> = {
     headlandCount: 0,
     seaStackCount: 0,
@@ -555,21 +704,25 @@ export function kitOverrides(spec: KitSpec, gridSize: number): Partial<IslandPar
         beachBandWidth: 6,
         peakHeight: spec.crestHeight,
         minPeakHeight: spec.crestHeight * 0.7,
-        rockCount: 6,
+        rockCount: 0,
         cliffCount: 0,
       };
     case 'rockGarden':
       return {
         ...common,
+        // the authored field carries its own sheets and joints; the erosion
+        // stage's beach guard and debris would sand the granite over (§T.194)
+        erosion: 'shapeOnly',
         noiseSlope: 0.08,
         noiseOctaves: 3,
         coastNoiseSlope: 0.05,
         beachBandWidth: 4,
         peakHeight: spec.knobs[0].height,
         minPeakHeight: spec.knobs[0].height * 0.8,
-        rockCount: 60,
-        rockSpread: 26,
-        cliffCount: 4,
+        // §T.194: the granite is the kit's own angular blocks (kitDecor.ts), not the
+        // round pirate boulders these counts used to (fail to) configure
+        rockCount: 0,
+        cliffCount: 0,
       };
     case 'drownedTown':
       return {
@@ -580,7 +733,7 @@ export function kitOverrides(spec: KitSpec, gridSize: number): Partial<IslandPar
         beachBandWidth: 5,
         peakHeight: spec.knoll.height,
         minPeakHeight: spec.knoll.height * 0.75,
-        rockCount: 10,
+        rockCount: 0,
         cliffCount: 0,
       };
   }

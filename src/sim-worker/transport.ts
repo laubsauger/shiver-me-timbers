@@ -26,6 +26,7 @@ import type { PilotSetup } from '../race/ai/pilot';
 import type { BoatContactSetup } from '../sea-physics/boatCollide';
 import { BoatSimCore } from './stepCore';
 import { stepKick } from './batch';
+import type { SimWorldData } from './worldData';
 
 export type TransportKind = 'sab' | 'transfer' | 'main';
 
@@ -44,6 +45,8 @@ export interface SimInit {
   pilot?: PilotSetup;
   /** §T.188 collision hook (plain data: static colliders + switches); crosses to the worker once, in the init message */
   contacts?: BoatContactSetup;
+  /** §T.191 world data (seabed grid, fetch land mask, bars); crosses to the worker once, in the init message */
+  world?: SimWorldData;
 }
 
 export type SimMessage =
@@ -97,6 +100,7 @@ function cloneInit(init: SimInit): SimInit {
   const out: SimInit = { seed: init.seed, oceanParams: structuredClone(init.oceanParams), seaParams: structuredClone(init.seaParams) };
   if (init.pilot) out.pilot = structuredClone(init.pilot);
   if (init.contacts) out.contacts = structuredClone(init.contacts);
+  if (init.world) out.world = structuredClone(init.world);
   return out;
 }
 

@@ -265,7 +265,9 @@ export function createWakeInjector(p: FlowFoamParams) {
           const d2 = diff.dot(diff);
           // slot i+1 must exist: i + 2 ≤ count
           const valid = float(i).add(2).lessThanEqual(uTrackCount);
-          const better = valid.and(d2.lessThan(best.x));
+          // Capture before best.assign changes best.x. Re-evaluating this
+          // predicate afterward loses the winning side and track direction.
+          const better = valid.and(d2.lessThan(best.x)).toVar();
           best.assign(
             select(
               better,
@@ -360,10 +362,11 @@ export function createWakeInjector(p: FlowFoamParams) {
           .mul(onset);
 
         // 4. shed vortex pair — lobes off the transom corners, alternating
-        //    port/starboard (§B.4: phased by track DISTANCE, per-position)
+        //    port/starboard. Subtract the cutwater odometer so already-shed
+        //    puffs retain their phase in the water as the ship moves on.
         const vOff = uBeam.mul(0.5).mul(uVortexOffset).add(uVortexSpread.mul(as)).min(aftCap);
         const side = select(bestLat.lessThan(0), float(Math.PI), float(0));
-        const phase = ds.div(uVortexSpacing.max(EPS)).mul(Math.PI * 2).add(side);
+        const phase = ds.sub(uOdo).div(uVortexSpacing.max(EPS)).mul(Math.PI * 2).add(side);
         const puff = phase.sin().mul(0.5).add(0.5);
         const vortex = uVortexIntensity
           .mul(s)

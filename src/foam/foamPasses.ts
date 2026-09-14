@@ -70,8 +70,9 @@ export function createFoamUniforms() {
      * 2.48 / +0.96 — see foamMath, "THE BREAKUP TRADED SHAPE FOR SIZE".
      */
     uBreakupElong: uniform(1),
-    /** slow drift of the breakup field, so the same texels do not always foam */
-    uBreakupTime: uniform(0),
+    /** Integrated world-space drift of the foam birth pattern, in metres. */
+    uBreakupOffsetX: uniform(0),
+    uBreakupOffsetZ: uniform(0),
     /**
      * The MEAN foam this band settles at — what an infinitely-distant pixel of
      * it should see (§V.70, foamMath.expectedBandFoam). Read by the SHADING
@@ -216,6 +217,7 @@ export function createInjectPass(
   octaves = 0,
   /** structure-tensor ring radius in texels (foamMath.tensorRadiusTexels) */
   tensorRadius = 1,
+  shore?: (coord: any) => any,
 ) {
   const own = cascades[index];
   if (!own) throw new Error(`foam: inject pass for missing cascade ${index}`);
@@ -340,10 +342,13 @@ export function createInjectPass(
         .mul(select(s2.lessThan(0), float(-1), float(1)));
       // stretch the SAMPLE COORDINATE along the crest ⟹ the FEATURES stretch
       // along it, so the field cuts across the cap at intervals
-      const along = worldX.mul(ct).add(worldZ.mul(st)).div(u.uBreakupElong.max(1));
-      const across = worldX.mul(st).negate().add(worldZ.mul(ct));
+      // Backtrace in WORLD space before rotating into the local crest frame.
+      // Moving the lookup downwind would make visible features travel upwind.
+      const bx = worldX.sub(u.uBreakupOffsetX);
+      const bz = worldZ.sub(u.uBreakupOffsetZ);
+      const along = bx.mul(ct).add(bz.mul(st)).div(u.uBreakupElong.max(1));
+      const across = bx.mul(st).negate().add(bz.mul(ct));
       const bp = vec2(along, across).mul(u.uBreakupFreq).toVar();
-      const drift = u.uBreakupTime;
       // DOMAIN WARP, and it is the anti-lattice half. Value noise has round
       // level sets (§B.39), so on its own this would bite round holes and
       // leave round islands; bending the coordinate by a field with no period
@@ -351,9 +356,7 @@ export function createInjectPass(
       // wavelet lattice took, at a different scale.
       const wu = fbm2(bp.mul(0.35).add(vec2(11.3, -4.1)), 2).sub(0.5);
       const wv = fbm2(bp.mul(0.35).add(vec2(-7.7, 19.4)), 2).sub(0.5);
-      const warped = bp
-        .add(vec2(wu, wv).mul(u.uBreakupWarp))
-        .add(vec2(drift, drift.mul(-0.6)));
+      const warped = bp.add(vec2(wu, wv).mul(u.uBreakupWarp));
       // fbm2 is [0,1]; centre it so the jitter is zero-mean and the band's
       // total injection is preserved to first order (§V.64 — nothing deleted)
       metric.addAssign(u.uBreakupAmp.mul(fbm2(warped, octaves).sub(0.5).mul(2)));
@@ -366,7 +369,7 @@ export function createInjectPass(
     // foamMath.accumulateFoam: clamp ≤ 1 (mask feeds a mix factor)
     const residue = previous.r.add(injected).min(u.uAccumMax);
     const breaking = previous.g.add(injected).min(u.uAccumMax);
-    textureStore(dst, coord, vec4(residue, breaking, 0, 1)).toWriteOnly();
+    textureStore(dst, coord, vec4(residue, breaking, shore ? shore(coord) : vec2(0, 0))).toWriteOnly();
   })().compute(n * n);
 }
 
@@ -398,17 +401,15 @@ export function createReducePass(
     const y = int(instanceIndex.div(dstN)).toVar();
     const sx = x.mul(int(factor)).toVar();
     const sy = y.mul(int(factor)).toVar();
-    // BOTH channels: the tier is a filtered view of the whole mask, and a tier
-    // that carried only the residue would make distant water lose exactly the
-    // breaking foam this split exists to show
-    const sum = vec2(0, 0).toVar();
+    // RG whitecaps and BA shoreline history share the same filtered view.
+    const sum = vec4(0).toVar();
     for (let dy = 0; dy < factor; dy++) {
       for (let dx = 0; dx < factor; dx++) {
-        sum.addAssign(textureLoad(src, ivec2(sx.add(int(dx)), sy.add(int(dy)))).rg);
+        sum.addAssign(textureLoad(src, ivec2(sx.add(int(dx)), sy.add(int(dy)))));
       }
     }
     const mean = sum.mul(inv);
-    textureStore(dst, ivec2(x, y), vec4(mean.x, mean.y, 0, 1)).toWriteOnly();
+    textureStore(dst, ivec2(x, y), mean).toWriteOnly();
   })().compute(dstN * dstN);
 }
 
@@ -429,6 +430,7 @@ export function createBlurDecayPass(
   dst: THREE.StorageTexture,
   n: number,
   u: FoamUniforms,
+  preserveShore = false,
 ) {
   const wrap = (v: any) => v.add(int(n)).mod(int(n));
   return Fn(() => {
@@ -454,9 +456,10 @@ export function createBlurDecayPass(
     }
     // identity half of the mixed kernel — the tap the gaussian is blended
     // against, so total weight is exactly (1−w) + w·Σg = 1 (mass conserved)
-    sum.addAssign(textureLoad(src, ivec2(x, y)).rg.mul(float(1).sub(u.uBlurMix)));
+    const center = textureLoad(src, ivec2(x, y));
+    sum.addAssign(center.rg.mul(float(1).sub(u.uBlurMix)));
     const residue = sum.x.mul(u.uDecay).min(u.uAccumMax);
     const breaking = sum.y.mul(u.uDecayBreaking).min(u.uAccumMax);
-    textureStore(dst, ivec2(x, y), vec4(residue, breaking, 0, 1)).toWriteOnly();
+    textureStore(dst, ivec2(x, y), vec4(residue, breaking, preserveShore ? center.ba : vec2(0, 0))).toWriteOnly();
   })().compute(n * n);
 }

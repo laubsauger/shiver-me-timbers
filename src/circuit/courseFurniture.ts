@@ -25,7 +25,9 @@
  * put the neighbours, merged into ONE mesh.
  */
 import * as THREE from 'three/webgpu';
-import { attribute, float, mix, normalMap, normalWorldGeometry, positionWorld, texture, uniform, vec2 } from 'three/tsl';
+import { attribute, float, mix, normalMap, normalWorldGeometry, positionWorld, texture, uniform, vec2, vec3 } from 'three/tsl';
+import { fbm2, valueNoise2 } from '../terrain/noise';
+import { coordFilter, periodResolved } from '../ship/bandLimit';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
@@ -36,6 +38,7 @@ import contractRaw from './assets/courseAssetContract.json?raw';
 import { waterLighting } from '../caustics';
 import type { Course } from '../race/types';
 import type { CourseFurnitureData, RoofKind } from './towerReach';
+import { createStartMarkers } from './startMarkers';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Node = any;
@@ -155,16 +158,71 @@ function assetFromScene(name: CourseAssetName, scene: THREE.Group, anisotropy: n
   return { name, extras, variants, lods, textureBytes };
 }
 
+/** a [0,1] field faded to its mean once its period is sub-pixel (§V48b) */
+function fadedField(coord: Node, octaves: number): Node {
+  const f = coordFilter(coord);
+  return mix(float(0.5), fbm2(coord, octaves), periodResolved(coord, f.x.max(f.y)));
+}
+
+/**
+ * §T.194 TIDE LINE on a drowned structure (design doc §8: "hazard paint at the waterline" on the pylons,
+ * the circuit.md T187b review: "no tide line or weed at the waterline" on the roofs). World height against
+ * mean sea: weed and slime below, a barnacle crust at the line, rust bleeding down from steel above it,
+ * all broken up so no band is a ruler line. Albedo and roughness in, out; the water lighting goes on after.
+ */
+export function tideBand(albedo: Node, rough: Node, kind: 'steel' | 'build' | 'concrete'): { albedo: Node; rough: Node } {
+  const y = positionWorld.y;
+  const n = normalWorldGeometry;
+  const wc = positionWorld.xz.sub(n.xz.div(n.y.add(1)).mul(y));
+  const patch = fadedField(wc.mul(0.7), 2);
+  const yb = y.add(patch.sub(0.5).mul(0.35));
+  // @band-limited-elsewhere: elevation bands on world height (≥ 0.2 m ramps), not a spatial period
+  const weed = yb.smoothstep(0.15, -0.35);
+  // @band-limited-elsewhere: elevation band
+  const crust = yb.smoothstep(-0.45, -0.1).mul(yb.smoothstep(0.55, 0.2));
+  // @band-limited-elsewhere: elevation band (the splash-wet zone)
+  const wet = yb.smoothstep(1.3, 0.2);
+  const speckCoord = wc.mul(18);
+  const f = coordFilter(speckCoord);
+  const speck = mix(float(0.5), valueNoise2(speckCoord), periodResolved(speckCoord, f.x.max(f.y)));
+  let a: Node = albedo;
+  let r: Node = rough;
+  if (kind === 'steel') {
+    // rust bleeds DOWN from the joints: streaks long in y, narrow across
+    const streakCoord = vec2(wc.x.add(wc.y).mul(3.2), y.mul(0.35));
+    const streak = fadedField(streakCoord, 2);
+    // @band-limited-elsewhere: elevation band — rust thins out with height above the splash
+    const rustZone = yb.smoothstep(2.6, 0.3).mul(yb.smoothstep(-0.6, 0));
+    const rust = streak.smoothstep(0.42, 0.62).mul(rustZone);
+    a = mix(a, vec3(0.34, 0.15, 0.06).mul(patch.mul(0.4).add(0.8)), rust.mul(0.75));
+    r = mix(r, float(0.85), rust);
+  }
+  a = mix(a, a.mul(0.55), wet);
+  a = mix(a, vec3(0.62, 0.6, 0.55).mul(speck.mul(0.35).add(0.75)), crust.mul(speck.smoothstep(0.3, 0.6)).mul(0.8));
+  a = mix(a, mix(vec3(0.07, 0.09, 0.04), vec3(0.12, 0.13, 0.05), patch), weed.mul(0.85));
+  r = mix(r, float(0.3), wet.max(weed));
+  return { albedo: a, rough: r };
+}
+
 /** a slot material with the shared water lighting folded in (slotMaterials.ts's recipe, course slots) */
-function courseMaterial(slot: string, s: THREE.MeshStandardMaterial, water: boolean): THREE.MeshStandardNodeMaterial {
+function courseMaterial(
+  slot: string,
+  s: THREE.MeshStandardMaterial,
+  water: boolean,
+  /** §T.194: a drowned structure's tide line (pylons, roofs); absent for the maintained race furniture */
+  tide?: 'steel' | 'build',
+): THREE.MeshStandardNodeMaterial {
   const m = new THREE.MeshStandardNodeMaterial();
   m.name = `course:${slot}`;
   const factor = uniform(s.color ? s.color.clone() : new THREE.Color(1, 1, 1));
   const map = s.map ? texture(s.map) : null;
-  const albedo: Node = map ? map.rgb.mul(factor) : factor;
   const ormTex = s.roughnessMap ?? s.aoMap ?? s.metalnessMap ?? null;
   const orm = ormTex ? texture(ormTex) : null;
-  const rough: Node = orm ? orm.g.mul(s.roughness ?? 1) : float(s.roughness ?? 0.6);
+  const baseAlbedo: Node = map ? map.rgb.mul(factor) : factor;
+  const baseRough: Node = orm ? orm.g.mul(s.roughness ?? 1) : float(s.roughness ?? 0.6);
+  const tided = tide && slot !== 'C_Lamp' ? tideBand(baseAlbedo, baseRough, tide) : null;
+  const albedo: Node = tided ? tided.albedo : baseAlbedo;
+  const rough: Node = tided ? tided.rough : baseRough;
   const metal: Node = orm ? orm.b.mul(s.metalness ?? 1) : float(s.metalness ?? 0);
   if (orm) m.aoNode = mix(float(1), orm.r, float(s.aoMapIntensity ?? 1));
   const w = water ? waterLighting({ worldPos: positionWorld, normal: normalWorldGeometry, mode: 'both' }) : null;
@@ -182,6 +240,52 @@ function courseMaterial(slot: string, s: THREE.MeshStandardMaterial, water: bool
     m.emissiveNode = w.addLight;
   }
   return m;
+}
+
+/**
+ * §T.194: where the pylon's legs cross the waterline, in asset space — the four clusters of LOD0 'Pylon'
+ * vertices within ±0.4 m of y = 0, one per quadrant. Measured off the GLB, so a rebuilt pylon moves its
+ * footings with it.
+ */
+export function pylonLegsAtWaterline(asset: LoadedAsset): [number, number][] {
+  const prims = asset.lods[0]?.get('Pylon') ?? [];
+  // the legs are the OUTERMOST members of a lattice: per quadrant, the vertices within ±3 m of the
+  // waterline that lie at ≥ 85 % of that band's widest radius
+  const pts: [number, number][] = [];
+  let widest = 0;
+  for (const prim of prims) {
+    const pos = prim.geometry.getAttribute('position') as THREE.BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      if (Math.abs(pos.getY(i)) > 3) continue;
+      const x = pos.getX(i);
+      const z = pos.getZ(i);
+      pts.push([x, z]);
+      widest = Math.max(widest, Math.hypot(x, z));
+    }
+  }
+  const sum = [0, 0, 0, 0].map(() => ({ x: 0, z: 0, n: 0 }));
+  for (const [x, z] of pts) {
+    if (Math.hypot(x, z) < widest * 0.85) continue;
+    const q = (x >= 0 ? 0 : 1) + (z >= 0 ? 0 : 2);
+    sum[q].x += x;
+    sum[q].z += z;
+    sum[q].n++;
+  }
+  return sum.filter((c) => c.n > 0).map((c) => [c.x / c.n, c.z / c.n]);
+}
+
+/** a unit-height concrete pedestal (y 0 → 1), 1.3 m square with chamfered corners and a bevelled cap */
+function buildFootingGeometry(): THREE.BufferGeometry {
+  const body = new THREE.CylinderGeometry(0.78, 0.86, 1, 8, 1, false);
+  body.rotateY(Math.PI / 8);
+  body.translate(0, 0.5, 0);
+  const cap = new THREE.CylinderGeometry(0.62, 0.78, 0.08, 8, 1, false);
+  cap.rotateY(Math.PI / 8);
+  cap.translate(0, 1.0, 0);
+  const merged = mergeGeometries([body.toNonIndexed(), cap.toNonIndexed()], false)!;
+  merged.deleteAttribute('uv');
+  merged.computeVertexNormals();
+  return merged;
 }
 
 interface BobSpec {
@@ -219,6 +323,11 @@ export interface CourseFurnitureFrame {
   /** start lamps lit, 0..5 */
   startLamps?: number;
   startGreen?: boolean;
+  /**
+   * §T.202 the pace boat's DISPLAYED pose (page/paceBoat `display` while `visible`, yaw 0 = +z), null after green:
+   * the FOLLOW-ME mast and amber strobe ride it (src/circuit/startMarkers.ts)
+   */
+  pace?: { x: number; z: number; yaw: number } | null;
 }
 
 export interface CourseFurnitureStats {
@@ -353,7 +462,7 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
     const key = `${asset}:${prim.slot}`;
     let m = materials.get(key);
     if (!m) {
-      m = courseMaterial(prim.slot, prim.source, water);
+      m = courseMaterial(prim.slot, prim.source, water, asset === 'course_pylon' ? 'steel' : asset === 'course_roofs' ? 'build' : undefined);
       materials.set(key, m);
     }
     return m;
@@ -401,6 +510,48 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
         buckets.set(bucketKey(name, variant, lod), b);
       }
     }
+  }
+
+  // ── §T.194 pylon footings: a concrete pedestal under every leg, standing out of the sea ──
+  let footings: THREE.InstancedMesh | null = null;
+  const pylonPlacements = groups.filter((g) => g.asset === 'course_pylon');
+  const legs = pylonLegsAtWaterline(assets.course_pylon);
+  if (pylonPlacements.length && legs.length) {
+    const geo = buildFootingGeometry();
+    const fm = new THREE.MeshStandardNodeMaterial();
+    fm.name = 'course:footing';
+    const speckCoord = positionWorld.xz.add(vec2(positionWorld.y, positionWorld.y.mul(0.7))).mul(6);
+    const concrete = vec3(0.5, 0.49, 0.46).mul(fadedField(speckCoord, 2).mul(0.35).add(0.8));
+    const tided = tideBand(concrete, float(0.88), 'concrete');
+    // the rust the steel leg bleeds onto the cap and down its face
+    // @band-limited-elsewhere: elevation band on world height (the cap's top half metre)
+    const bleed = positionWorld.y.smoothstep(-0.6, 0.6).mul(fadedField(vec2(positionWorld.x.add(positionWorld.z).mul(4), positionWorld.y.mul(0.5)), 2).smoothstep(0.45, 0.65));
+    const albedo = mix(tided.albedo, vec3(0.36, 0.17, 0.07), bleed.mul(0.6));
+    const w = water ? waterLighting({ worldPos: positionWorld, normal: normalWorldGeometry, mode: 'both' }) : null;
+    fm.colorNode = w ? albedo.mul(w.tint) : albedo;
+    fm.roughnessNode = w ? tided.rough.mul(w.roughnessScale).clamp(0.02, 1) : tided.rough;
+    if (w) fm.emissiveNode = w.addLight;
+    footings = new THREE.InstancedMesh(geo, fm, pylonPlacements.length * legs.length);
+    footings.name = 'course-pylon-footings';
+    const m4 = new THREE.Matrix4();
+    let k = 0;
+    for (const g of pylonPlacements) {
+      for (const leg of legs) {
+        const at = new THREE.Vector3(leg[0], 0, leg[1]).applyMatrix4(g.base);
+        const floor = Math.min(opts.seabedAt(at.x, at.z), -1);
+        // the pedestal runs from the old ground (or 6 m down, whichever is shallower) to +0.7 m
+        const bottom = Math.max(floor, -6);
+        m4.makeTranslation(at.x, bottom, at.z).multiply(new THREE.Matrix4().makeScale(1, 0.7 - bottom, 1));
+        footings.setMatrixAt(k++, m4);
+      }
+    }
+    footings.instanceMatrix.needsUpdate = true;
+    footings.computeBoundingSphere();
+    footings.castShadow = true;
+    footings.receiveShadow = true;
+    footings.userData.foamTarget = true;
+    foamTargets.push(footings);
+    root.add(footings);
   }
 
   // ── cables: pylon spans + tower guys, one merged mesh ──────────────────
@@ -452,6 +603,10 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
     cables.castShadow = false;
     root.add(cables);
   }
+
+  // ── §T.202 start pontoons + the pace boat's follow-me rig (in-engine meshes) ──
+  const markers = createStartMarkers(data.startPontoons);
+  root.add(markers.group);
 
   // ── per frame ──────────────────────────────────────────────────────────
   const camPos = new THREE.Vector3();
@@ -530,6 +685,7 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
         });
         for (const attr of b.lamp) attr.needsUpdate = true;
       }
+      markers.update(f);
     },
     stats() {
       let draws = 0;
@@ -556,8 +712,11 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
     dispose() {
       for (const b of buckets.values()) for (const mesh of b.meshes) mesh.dispose();
       for (const m of materials.values()) m.dispose();
+      markers.dispose();
       cables?.geometry.dispose();
       (cables?.material as THREE.Material | undefined)?.dispose();
+      footings?.geometry.dispose();
+      (footings?.material as THREE.Material | undefined)?.dispose();
       for (const a of loaded) for (const lod of a.lods) for (const prims of lod?.values() ?? []) for (const p of prims) p.geometry.dispose();
     },
   };

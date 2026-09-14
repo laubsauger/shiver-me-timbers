@@ -1,0 +1,86 @@
+[
+  {
+    "dose": 0,
+    "seconds": 0,
+    "oldMean": 0,
+    "newMean": 0,
+    "meanDifference": 0
+  },
+  {
+    "dose": 0,
+    "seconds": 0.53,
+    "oldMean": 0,
+    "newMean": 0,
+    "meanDifference": 0
+  },
+  {
+    "dose": 0,
+    "seconds": 1.06,
+    "oldMean": 0,
+    "newMean": 0,
+    "meanDifference": 0
+  },
+  {
+    "dose": 0,
+    "seconds": 2.12,
+    "oldMean": 0,
+    "newMean": 0,
+    "meanDifference": 0
+  },
+  {
+    "dose": 0.2,
+    "seconds": 0,
+    "oldMean": 0.1318386905579606,
+    "newMean": 0.12932489973117225,
+    "meanDifference": 0.03845024097125442
+  },
+  {
+    "dose": 0.2,
+    "seconds": 0.53,
+    "oldMean": 0.14681425494052291,
+    "newMean": 0.14757537487582795,
+    "meanDifference": 0.006475034603454333
+  },
+  {
+    "dose": 0.2,
+    "seconds": 1.06,
+    "oldMean": 0.14228097876923584,
+    "newMean": 0.1420772246907518,
+    "meanDifference": 0.0008431667552031286
+  },
+  {
+    "dose": 0.2,
+    "seconds": 2.12,
+    "oldMean": 0.13745225434206532,
+    "newMean": 0.13717156512132078,
+    "meanDifference": 0.0011446085395618866
+  },
+  {
+    "dose": 0.7,
+    "seconds": 0,
+    "oldMean": 0.32443186919601885,
+    "newMean": 0.32178464409116714,
+    "meanDifference": 0.029544681564516395
+  },
+  {
+    "dose": 0.7,
+    "seconds": 0.53,
+    "oldMean": 0.32443186919601885,
+    "newMean": 0.3283551960596469,
+    "meanDifference": 0.0996523577765629
+  },
+  {
+    "dose": 0.7,
+    "seconds": 1.06,
+    "oldMean": 0.32443186919601885,
+    "newMean": 0.3243267514415038,
+    "meanDifference": 0.12824108041343152
+  },
+  {
+    "dose": 0.7,
+    "seconds": 2.12,
+    "oldMean": 0.32443186919601885,
+    "newMean": 0.32403451190589294,
+    "meanDifference": 0.1293884646030392
+  }
+]

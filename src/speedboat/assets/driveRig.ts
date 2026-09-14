@@ -16,6 +16,14 @@
  * blades never turn more than `PROP_MAX_STEP_RAD` per frame, and a blur disc (a translucent annulus the size of the
  * blades) fades in over `PROP_BLUR_RPM`; past the top of that ramp the blade mesh hides and only the disc remains.
  * Render-side only (§V3): nothing here feeds the sim.
+ *
+ * REST POSE (§T.197). Each animated node keeps its own glTF TRS as `rest` (composed with `updateMatrix()` BEFORE
+ * `matrixAutoUpdate` goes off — otherwise a node whose TRS is not identity renders at identity until the first `set`,
+ * and every `set` would drop it). The motion is applied in the PARENT (body) frame, where the pivots live:
+ *   drive  node.matrix = Trim · Steer · rest
+ *   prop   node.matrix = (Trim · Steer of its outboard) · Spin · rest
+ * At steer 0 / trim 0 / phase 0 every node sits exactly on its rest matrix (tests/assetPipelineRuntime.test.ts).
+ * Assumption, checked by the build: animated nodes are direct children of their LOD group, whose frame is the body frame.
  */
 import * as THREE from 'three/webgpu';
 import { float, length, objectGroup, positionLocal, smoothstep, uniform, vec3 } from 'three/tsl';
@@ -55,7 +63,10 @@ interface DriveNode {
   steerAxis: THREE.Vector3;
   trimPivot: THREE.Vector3;
   trimAxis: THREE.Vector3;
+  /** Trim · Steer in the body frame (the motion only; props that follow compose it) */
   matrix: THREE.Matrix4;
+  /** the node's own glTF transform */
+  rest: THREE.Matrix4;
 }
 
 interface PropNode {
@@ -68,6 +79,7 @@ interface PropNode {
   phase: number;
   disc: THREE.Mesh | null;
   discCentre: THREE.Vector3;
+  rest: THREE.Matrix4;
 }
 
 const _a = new THREE.Matrix4();
@@ -86,8 +98,17 @@ function rotateAbout(out: THREE.Matrix4, pivot: THREE.Vector3, axis: THREE.Vecto
   return out;
 }
 
-/** the prop's blade radius and the blades' mid-plane along the axis, from its own vertices (body frame) */
-function propDiscOf(object: THREE.Object3D, pivot: THREE.Vector3, axis: THREE.Vector3): { radius: number; centre: THREE.Vector3 } {
+/** the node's rest matrix, composed from its TRS before auto-update is switched off (see header) */
+function freezeRest(o: THREE.Object3D): THREE.Matrix4 {
+  o.updateMatrix();
+  const rest = o.matrix.clone();
+  o.matrixAutoUpdate = false;
+  o.matrixWorldNeedsUpdate = true;
+  return rest;
+}
+
+/** the prop's blade radius and the blades' mid-plane along the axis, from its own vertices placed by `rest` (body frame) */
+function propDiscOf(object: THREE.Object3D, pivot: THREE.Vector3, axis: THREE.Vector3, rest: THREE.Matrix4): { radius: number; centre: THREE.Vector3 } {
   let radius = 0;
   const pts: { r: number; t: number }[] = [];
   const v = new THREE.Vector3();
@@ -96,7 +117,7 @@ function propDiscOf(object: THREE.Object3D, pivot: THREE.Vector3, axis: THREE.Ve
     const pos = g?.getAttribute('position');
     if (!pos) return;
     for (let i = 0; i < pos.count; i++) {
-      v.fromBufferAttribute(pos, i).sub(pivot);
+      v.fromBufferAttribute(pos, i).applyMatrix4(rest).sub(pivot);
       const t = v.dot(axis);
       const r = Math.sqrt(Math.max(0, v.lengthSq() - t * t));
       radius = Math.max(radius, r);
@@ -162,8 +183,8 @@ export function createDriveRig(levels: readonly THREE.Object3D[], blurMaterial: 
           trimPivot: new THREE.Vector3(...ex.trimPivot),
           trimAxis: new THREE.Vector3(...ex.trimAxis).normalize(),
           matrix: new THREE.Matrix4(),
+          rest: freezeRest(o),
         };
-        o.matrixAutoUpdate = false;
         drives.set(`${level}:${m ? m[2] : '*'}`, d);
       }
     }
@@ -185,10 +206,10 @@ export function createDriveRig(levels: readonly THREE.Object3D[], blurMaterial: 
         phase: 0,
         disc: null,
         discCentre: pivot.clone(),
+        rest: freezeRest(o),
       };
-      o.matrixAutoUpdate = false;
       if (blurMaterial && o.parent) {
-        const { radius, centre } = propDiscOf(o, pivot, axis);
+        const { radius, centre } = propDiscOf(o, pivot, axis, p.rest);
         const disc = new THREE.Mesh(new THREE.RingGeometry(0.02, Math.max(radius, 0.05), 48, 1), blurMaterial);
         disc.name = `PropBlur_${m[2]}_LOD${m[3]}`;
         disc.userData = { propBlur: 0, propHubR: 0.045, propTipR: Math.max(radius, 0.05) };
@@ -220,7 +241,7 @@ export function createDriveRig(levels: readonly THREE.Object3D[], blurMaterial: 
         rotateAbout(_a, d.trimPivot, d.trimAxis, trim);
         rotateAbout(_b, d.steerPivot, d.steerAxis, steer);
         d.matrix.multiplyMatrices(_a, _b);
-        d.object.matrix.copy(d.matrix);
+        d.object.matrix.multiplyMatrices(d.matrix, d.rest);
         d.object.matrixWorldNeedsUpdate = true;
       }
       for (let k = 0; k < xs.length; k++) {
@@ -234,7 +255,7 @@ export function createDriveRig(levels: readonly THREE.Object3D[], blurMaterial: 
         p.phase = (p.phase + p.handed * turn) % (2 * Math.PI);
         const base = p.follows ? p.follows.matrix : _b.identity();
         rotateAbout(_a, p.pivot, p.axis, p.phase);
-        p.object.matrix.multiplyMatrices(base, _a);
+        p.object.matrix.multiplyMatrices(base, _a).multiply(p.rest);
         p.object.matrixWorldNeedsUpdate = true;
         p.object.visible = blur[k] < HIDE_BLADES_AT;
         if (p.disc) {

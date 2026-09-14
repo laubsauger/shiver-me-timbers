@@ -13,6 +13,7 @@ import { oceanParams } from '../src/params/ocean';
 import { seaPhysicsParams } from '../src/params/seaPhysics';
 import { BoatFleet } from '../src/sim-worker/fleet';
 import { B, HASH_SEED } from '../src/sim-worker/layout';
+import { writeParams } from '../src/sim-worker/paramsVector';
 import type { TransportKind, WorkerPort } from '../src/sim-worker/transport';
 import { buildWorkerBundle, nodeSpawner } from './simWorkerNode';
 
@@ -28,8 +29,9 @@ interface Run {
   lateral: number;
 }
 
-async function race(kind: TransportKind, workers: number, spawn?: () => WorkerPort, opts: { contacts?: boolean; ghost02?: boolean } = {}): Promise<Run> {
+async function race(kind: TransportKind, workers: number, spawn?: () => WorkerPort, opts: { contacts?: boolean; ghost02?: boolean; soft?: boolean } = {}): Promise<Run> {
   const fleet = new BoatFleet({
+    ...(opts.soft ? { batchCap: 1 } : {}),
     boats: 4,
     kind,
     workers,
@@ -49,9 +51,21 @@ async function race(kind: TransportKind, workers: number, spawn?: () => WorkerPo
     if (opts.ghost02) fleet.setGhost(2, true);
     let h = HASH_SEED;
     let time = 0;
+    const sea = { ...seaPhysicsParams, hullDraft: 0.54 };
+    const vec = new Float64Array(fleet.spec.oceanLen + fleet.spec.seaLen);
+    writeParams(oceanParams, vec, 0);
+    writeParams(sea, vec, fleet.spec.oceanLen);
     for (let tick = 0; tick < TICKS; tick++) {
-      for (let i = 0; i < 4; i++) fleet.setControls(i, 0.5, 0);
-      fleet.kick(tick, time, oceanParams, { ...seaPhysicsParams, hullDraft: 0.54 });
+      if (opts.soft) {
+        // §T.198: the soft-contact mask travels per batch row (the page's rolling-start formation)
+        fleet.setBatchTick(0, tick, time, vec);
+        for (let i = 0; i < 4; i++) fleet.setBatchControls(0, i, 0.5, 0);
+        fleet.setBatchContactSoft(0, 0b1111);
+        fleet.kickBatch(1);
+      } else {
+        for (let i = 0; i < 4; i++) fleet.setControls(i, 0.5, 0);
+        fleet.kick(tick, time, oceanParams, sea);
+      }
       await fleet.done();
       h = fleet.hash(h);
       time += SIM_DT;
@@ -105,4 +119,16 @@ describe('§T.188 collisions in the sim worker', () => {
       expect(runs[name].hash.toString(16)).toBe(runs.main.hash.toString(16));
     }, 120_000);
   }
+
+  // §T.198 the rolling-start formation's SOFT contacts ride the batch rows: still one contact per pair across shards
+  it('soft contacts (row mask): the boats still do not pass through, and main, sab×2 and transfer×2 agree bit for bit', async () => {
+    runs.softMain = await race('main', 1, undefined, { soft: true });
+    runs['soft sab×2'] = await race('sab', 2, spawn, { soft: true });
+    runs['soft transfer×2'] = await race('transfer', 2, spawn, { soft: true });
+    const m = runs.softMain;
+    expect(m.hash, 'soft is not the full contact').not.toBe(runs.main?.hash ?? (await race('main', 1)).hash);
+    expect(m.z0 < m.z2 || m.lateral > 2.3, `soft: kept apart (z0 ${m.z0.toFixed(1)}, z2 ${m.z2.toFixed(1)}, lateral ${m.lateral.toFixed(2)})`).toBe(true);
+    expect(runs['soft sab×2'].hash.toString(16)).toBe(m.hash.toString(16));
+    expect(runs['soft transfer×2'].hash.toString(16)).toBe(m.hash.toString(16));
+  }, 240_000);
 });

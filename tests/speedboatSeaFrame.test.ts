@@ -24,6 +24,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import mainSrc from '../src/main-speedboat.ts?raw';
+import sessionSrc from '../src/speedboat/page/raceSession.ts?raw';
 import { SIM_DT } from '../src/core/loop';
 import { oceanParams } from '../src/params/ocean';
 import { createNpcFleetDriver, STRAIGHT_LINE_THROTTLE } from '../src/speedboat/page/npcFleet';
@@ -140,7 +141,7 @@ describe('§T.180 c the speedboat sea compiles one prop-jet slot per drive', () 
 describe('§V101 burial and wetline read the player contact, not stubs', () => {
   it('tickBoat updates the station view after the step and hands it to the churn; renderSea feeds the wetline; snap forgets', () => {
     const tb = method(boat, 'tickBoat');
-    inOrder(tb, ['stations.update(player.hw, boat, dt)', 'setHullBurial(stations)', 'wakeSim?.tick(']);
+    inOrder(tb, ['stations.update(player.hw, boat, dt)', 'setHullBurial(stations)', 'vesselFx.tick(']);
     expect(boat).not.toMatch(/setHullBurial\(null\)/);
     expect(boat).not.toMatch(/NO_CONTACTS|updateFromContacts\(/);
     expect(method(boat, 'renderSea')).toMatch(/wetline\.updateFromHullContact\(frameDt, stations\.stations, stations\.waterlineY\)/);
@@ -171,7 +172,8 @@ describe('§T.183 audio hooks the page owes the sink', () => {
     expect(main).toMatch(/driveAdvance: player\.hw\.driveAdvance, driveImmersion: player\.hw\.driveImmersion/);
     expect(main).toMatch(/audioFrame\.contact\.slamImpulse \+= player\.hw\.slamImpulse/);
     expect(main).not.toMatch(/audioFrame\.contact\.slamImpulse = player/);
-    expect(main).toMatch(/c\.slamImpulse = player\.hw\.slamImpulse;[\s\S]*crash\.tick\(dt, boat, c\)/);
+    // the crash machines read THIS tick's contact: the race session's trace row is written from player.hw after the step
+    expect(code(sessionSrc)).toMatch(/writeTrace\(playerRing[\s\S]*contact: player\.hw/);
     inOrder(main, ['audio.update(audioFrame)', 'audioFrame.contact.slamImpulse = 0', 'npcs.resetSlam()']);
     expect(main).toMatch(/audioFrame\.governor = controls\.settings\.governor\.toLowerCase\(\)/);
     expect(main).toMatch(/npcContact: \(i\) => npcs\.contact\(i\), npcThrottle: \(i\) => npcs\.throttle\(i\)/);

@@ -9,7 +9,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { Document, type Material, type Node } from '@gltf-transform/core';
-import { checkDocument, coplanarOverlaps, createIO, driveLodDeviation, hullTopology, ktx2LevelCount, readBytes, waterMaskErrors } from '../scripts/blender/checkGlb.mjs';
+import { KHRMaterialsClearcoat } from '@gltf-transform/extensions';
+import { checkDocument, coplanarOverlaps, createIO, driveLodDeviation, hullTopology, ktx2Channels, ktx2LevelCount, liveryChannelErrors, readBytes, waterMaskErrors } from '../scripts/blender/checkGlb.mjs';
 import { ASSET_CONTRACT } from '../src/speedboat/assets/contract';
 import { buildDeepVHull, REFERENCE_DEEP_V, deckHeight, hullStations, HULL_DATA } from '../src/speedboat/hullMesh';
 
@@ -461,6 +462,52 @@ describe('checkGlb: each broken convention FAILS the build', () => {
     doc.getRoot().listMaterials()[0].setBaseColorTexture(doc.createTexture('png').setImage(new Uint8Array(8)).setMimeType('image/png'));
     await failsWith(doc, /is image\/png, not KTX2/, { stage: 'final' });
     await failsWith(buildBoat(), /not meshopt-compressed/, { stage: 'final' });
+  });
+
+  it('§T.200: a livery mask that loses its channels in packaging fails (the shipped hull drew no livery, the cowls were solid orange)', () => {
+    /** a KTX2 header + Data Format Descriptor with one sample per channel id (model 163 ETC1S, 166 UASTC) */
+    const ktx2 = (model: number, channelIds: number[]): Uint8Array => {
+      const off = 80;
+      const block = 24 + 16 * channelIds.length;
+      const b = new Uint8Array(off + 4 + block);
+      b.set([0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a]);
+      const dv = new DataView(b.buffer);
+      dv.setUint32(40, 12, true);
+      dv.setUint32(48, off, true);
+      dv.setUint32(52, 4 + block, true);
+      dv.setUint32(off, 4 + block, true);
+      dv.setUint16(off + 4 + 6, block, true);
+      dv.setUint8(off + 4 + 8, model);
+      channelIds.forEach((id, k) => dv.setUint8(off + 4 + 24 + 16 * k + 3, id));
+      return b;
+    };
+    const ETC1S_RGB = ktx2(163, [0]);
+    const ETC1S_RGBA = ktx2(163, [0, 15]);
+    const UASTC_RRR = ktx2(166, [4]);
+    const UASTC_RGBA = ktx2(166, [3]);
+    expect(ktx2Channels(ETC1S_RGB)).toMatchObject({ r: true, g: true, b: true, a: false });
+    expect(ktx2Channels(ETC1S_RGBA)).toMatchObject({ a: true });
+    expect(ktx2Channels(UASTC_RRR)).toMatchObject({ r: true, g: false, b: false, a: false });
+    expect(ktx2Channels(new Uint8Array(80))).toBeNull();
+
+    const boat = (base: Uint8Array, mask: Uint8Array): Document => {
+      const doc = new Document();
+      const tex = (name: string, bytes: Uint8Array) => doc.createTexture(name).setImage(bytes).setMimeType('image/ktx2');
+      const gel = doc.createMaterial('M_Gelcoat').setBaseColorTexture(tex('hull_baseColor', base)).setExtras({ hullLivery: {} });
+      const cc = doc.createExtension(KHRMaterialsClearcoat);
+      gel.setExtension('KHR_materials_clearcoat', cc.createClearcoat().setClearcoatTexture(tex('hull_mask', mask)));
+      doc.createMaterial('M_Carbon').setBaseColorTexture(tex('parts_carbon_baseColor', base));
+      // a slot whose baseColor alpha means nothing may be RGB
+      doc.createMaterial('M_Metal').setBaseColorTexture(tex('parts_metal_baseColor', ETC1S_RGB));
+      return doc;
+    };
+    expect(liveryChannelErrors(boat(ETC1S_RGBA, UASTC_RGBA))).toEqual([]);
+    // what gltf-transform's KTX step wrote before T200: OPAQUE baseColor → RGB, clearcoatTexture → R
+    const broken = liveryChannelErrors(boat(ETC1S_RGB, UASTC_RRR)).join('\n');
+    expect(broken).toMatch(/M_Gelcoat baseColor 'hull_baseColor' lost channel\(s\) A/);
+    expect(broken).toMatch(/M_Gelcoat hull mask 'hull_mask' lost channel\(s\) GBA/);
+    expect(broken).toMatch(/M_Carbon baseColor 'parts_carbon_baseColor' lost channel\(s\) A/);
+    expect(broken).not.toMatch(/M_Metal/);
   });
 
   it('KTX2 mip level count is read from the container header', () => {

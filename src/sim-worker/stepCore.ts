@@ -22,10 +22,10 @@
  *                                      from tick × dt (those differ in the last bits)
  *  - construction tick               → the scheduler's arm/build countdown is history; build
  *                                      this core at the same tick as the page mirror
- *  - seabed, fetch/swell shadow, wake → NOT wired yet (open sea only). See the doc for how
- *                                      each crosses: shelter via SAB grids + fetchField's
- *                                      exported `sampleGrid`; seabed and wake need exports
- *                                      from their owners (reported, not faked here).
+ *  - seabed, fetch/swell shadow       → §T.191 `world` (worldData.ts): the page's baked seabed grid and
+ *                                      fetch land mask, rebuilt here into the SAME mirror inputs the
+ *                                      page mirror uses (bit-identical, tests/simWorkerWorldData)
+ *  - wake                             → NOT wired (§T.170)
  */
 import { SIM_DT } from '../core/loop';
 import type { OceanParams } from '../params/ocean';
@@ -41,6 +41,7 @@ import {
   type Rigid6State,
 } from '../sea-physics/rigidBody';
 import { buildDeepVHull, type HullProxy } from '../speedboat/hullMesh';
+import { TRIM_MAX, TRIM_MIN } from '../speedboat/assists/trim';
 import {
   BOAT_COLLIDE_DEFAULTS,
   beginContactTick,
@@ -57,7 +58,11 @@ import {
   type StaticWorld,
 } from '../sea-physics/boatCollide';
 import { RacePilot, type PilotOutput, type PilotSetup } from '../race/ai/pilot';
+import type { FetchField } from '../ocean/fetchField';
 import { B, BoatSimLayout, F, H, WAKE_SAMPLE_LEN } from './layout';
+import { SubstepPositions, writeTrace } from './trace';
+import { writeBoatFx } from './fx';
+import { gridSeabed, maskedFetchField, raceBed, type SimWorldData } from './worldData';
 import { readParams } from './paramsVector';
 
 /**
@@ -85,6 +90,12 @@ export interface BoatSimCoreInit {
    * player boat makes. Absent ⇒ the step is exactly the pre-T188 one. The seabed is not wired into this core yet.
    */
   contacts?: BoatContactSetup;
+  /**
+   * WORLD DATA (§T.191, §V110). Present ⇒ this core's mirror shoals over the page's baked seabed grid and is
+   * fetch-limited/shadowed by a field rebuilt from the page's land mask (worldData.ts), and hull↔terrain contact
+   * (with `contacts`) reads the race bed. Absent ⇒ open sea, exactly the pre-T191 step.
+   */
+  world?: SimWorldData;
 }
 
 interface BoatSlot {
@@ -110,6 +121,12 @@ export class BoatSimCore {
   readonly pilot: RacePilot | null;
   private readonly contacts: { hull: CollisionHull; world: StaticWorld | null; boats: boolean; params: Readonly<BoatCollideParams> } | null;
   private readonly pilotOut: PilotOutput = { steer: 0, throttle: 0 };
+  /** §T.191 world data: the masked fetch field (null = open sea) and the race bed */
+  readonly fetchField: FetchField | null = null;
+  private readonly bed: ((x: number, z: number) => number) | null = null;
+  private readonly positions = new SubstepPositions();
+  /** bow deck point for the trace's bow immersion (the collision hull's, built lazily when no contacts) */
+  private bowDeck: readonly [number, number, number] | null = null;
   /** the params every boat's contact is built with — `new HullWater(hull)`, no overrides, same as each slot */
   private readonly contactParams: Readonly<HullWater['params']>;
   private readonly force = (s: Readonly<Rigid6State>, h: number, out: Rigid6Load): void => {
@@ -124,6 +141,15 @@ export class BoatSimCore {
     this.hull = buildDeepVHull();
     this.contactParams = new HullWater(this.hull).params;
     this.pilot = init.pilot ? new RacePilot(init.pilot) : null;
+    if (init.world) {
+      // the page's order (core/seaScene.ts): mirror, then seabed, then fetch
+      const bedGrid = gridSeabed(init.world);
+      this.ocean.setSeabed(bedGrid, -bedGrid.openHeight);
+      this.fetchField = maskedFetchField(init.world, this.oceanParams);
+      this.ocean.setFetch(this.fetchField);
+      const rb = raceBed(init.world);
+      this.bed = (x, z) => rb.heightAt(x, z);
+    }
     const c = init.contacts;
     this.contacts = c
       ? {
@@ -171,7 +197,7 @@ export class BoatSimCore {
    * Reads: params (if PARAMS_VERSION moved), TIME, each owned boat's controls + reset request.
    * Writes: each owned boat's OUT block, and the fidelity header slots.
    */
-  step(L: BoatSimLayout): void {
+  step(L: BoatSimLayout, row = 0): void {
     const f = L.f64;
     const i32 = L.i32;
     if (i32[H.PARAMS_VERSION] !== this.paramsVersion) {
@@ -193,7 +219,10 @@ export class BoatSimCore {
     const start = i32[H.SHARD_START];
     const end = i32[H.SHARD_END];
     const cap = L.spec.wakeCap;
+    const tracing = L.spec.trace === true;
     for (let i = start; i < end; i++) {
+      // §T.191: an external boat (the player) is main-driven: its WORLD/OUT pose is written by main, never stepped here
+      if (L.isExternal(i)) continue;
       const o = L.boatOffset(i);
       const b = this.slotFor(i);
       const seq = f[o + B.RESET_SEQ];
@@ -225,19 +254,20 @@ export class BoatSimCore {
         b.steer = f[o + B.CONTROLS + 1];
 
         const st = b.steer < -1 ? -1 : b.steer > 1 ? 1 : b.steer;
-        b.hw.setControls(st * this.hull.drives[0].maxSteerRad, b.throttle);
+        // §T.191/§T.189: controls[2] is the seam's normalised drive trim, the SAME mapping the player's step uses
+        b.hw.setControls(st * this.hull.drives[0].maxSteerRad, b.throttle, unitTrimToRad(f[o + B.CONTROLS + 2]));
       }
       const cx = this.contacts;
       if (cx !== null && b.collide !== null) {
         // §T.188: impulses from the tick-k WORLD snapshot, applied to this boat's velocities before its step
         beginContactTick(b.collide);
-        if (cx.boats) collideBoatWithFleet(i, b.state, cx.hull, f, L.worldOffset, L.spec.boats, i32[H.CONTACT_OFF_MASK], SIM_DT, b.collide, cx.params);
-        if (cx.world) collideBoatWithWorld(b.state, cx.hull, cx.world, null, SIM_DT, b.collide, cx.params);
+        if (cx.boats) collideBoatWithFleet(i, b.state, cx.hull, f, L.worldOffset, L.spec.boats, i32[H.CONTACT_OFF_MASK], SIM_DT, b.collide, cx.params, f[F.CONTACT_SOFT_MASK] >>> 0);
+        if (cx.world || this.bed) collideBoatWithWorld(b.state, cx.hull, cx.world, this.bed, SIM_DT, b.collide, cx.params);
       }
       b.hw.samplePatch(this.sampler, b.state, SIM_DT);
       const n = planingSubsteps(b.hw, b.state, SIM_DT);
       this.slot = b;
-      stepRigid6(b.state, this.hull, SIM_DT, n, this.force, b.memory);
+      stepRigid6(b.state, this.hull, SIM_DT, n, tracing ? this.positions.begin(this.force) : this.force, b.memory);
       this.slot = null;
 
       const s = b.state;
@@ -262,6 +292,8 @@ export class BoatSimCore {
       f[o + B.WAKE_DEFICIT] = w.deficit;
       f[o + B.WAKE_RESCALE] = w.rescale;
       f[o + B.WAKE_OVERFLOW] = w.count - kept;
+      // §T.195: this step's prop jets + waterline spray, next to the pose they belong to (fx.ts, the ONE writer)
+      writeBoatFx(hw, s, f, o + B.FX);
       const base = o + B.WAKE;
       for (let k = 0; k < cap; k++) {
         const q = base + k * WAKE_SAMPLE_LEN;
@@ -272,8 +304,32 @@ export class BoatSimCore {
         f[q + 3] = live ? w.sigma[k] : 0;
         f[q + 4] = live ? w.depth[k] : 0;
       }
+      if (tracing) {
+        if (this.bowDeck === null) this.bowDeck = (this.contacts?.hull ?? buildCollisionHull(this.hull)).bowDeck as unknown as [number, number, number];
+        writeTrace(f, L.traceOffset(row, i), {
+          state: s,
+          positions: this.positions,
+          contact: hw,
+          bowDeck: this.bowDeck,
+          collide: b.collide,
+          fetchVersion: this.fetchField ? this.fetchField.version : Number.NaN,
+          throttle: b.throttle,
+          steer: b.steer,
+        });
+      }
     }
   }
+}
+
+/**
+ * §T.191 the seam's normalised drive trim (−1 bow down … +1 bow up, `BoatControls.trim`) → HullWater's trim angle, rad:
+ * −1 → TRIM_MIN (−6°), +1 → TRIM_MAX (+8°), the range the §T.182 assists command. ONE mapping for the player's step
+ * (page/playerBoat.ts) and every rival's (§V110). The physics clamps to each drive's own range.
+ */
+export function unitTrimToRad(u: number): number {
+  if (!Number.isFinite(u)) return 0;
+  const c = u < -1 ? -1 : u > 1 ? 1 : u;
+  return c >= 0 ? c * TRIM_MAX : -c * TRIM_MIN;
 }
 
 /** pose → a boat's reset request; bumps the sequence so the stepper applies it exactly once */

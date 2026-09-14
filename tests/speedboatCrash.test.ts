@@ -155,7 +155,8 @@ describe('§T.188 crash detection: every kind within 0.5 s of its physical onset
       const tl = timeline(r, helmAt + 6, control, (s) => Math.abs(s.heelDeg) > 45 || s.slipDeg > 45, { from: helmAt });
       expect(tl.onsetT, `C_v ${cv}: she departs`).toBeGreaterThan(0);
       expect(tl.kind, `C_v ${cv}`).toBe('hook');
-      expect(Math.abs(tl.detectT - tl.onsetT), `C_v ${cv}: detect ${tl.detectT.toFixed(2)} vs onset ${tl.onsetT.toFixed(2)}`).toBeLessThanOrEqual(0.5);
+      // + 1e-9: both times are tick counts × 1/60; exactly 30 ticks apart reads 0.5000000000000249 (T196: C_v 5 on T189)
+      expect(Math.abs(tl.detectT - tl.onsetT), `C_v ${cv}: detect ${tl.detectT.toFixed(2)} vs onset ${tl.onsetT.toFixed(2)}`).toBeLessThanOrEqual(0.5 + 1e-9);
     }
   });
 
@@ -168,7 +169,12 @@ describe('§T.188 crash detection: every kind within 0.5 s of its physical onset
   });
 
   it('STUFF — a 30 m/s bow-down entry pitchpoles (onset: the foredeck under water above 12 m/s)', () => {
-    const r = rig(st([0, 0.6, 0], pitchQ(-10), [0, -2, 30]));
+    // the bow is still FALLING (0.5 rad/s, off a crest) as it meets the water. T196: a −10° entry with no pitch rate no
+    // longer stuffs on the T189 physics — its pitchpole was driven by planing lift on the aft sections of a bottom
+    // withdrawing along its normal, a lift with a forward (thrust) component that T189's passivity bound removes; the
+    // model now needs the foredeck actually driven under (−15° static, or −10° with this rate; the pre-T189 physics
+    // stuffs this entry too, at the same 0.20 s)
+    const r = rig(st([0, 0.6, 0], pitchQ(-10), [0, -2, 30], [0.5, 0, 0]));
     const tl = timeline(r, 3, () => [0, 0.5], (s) => s.bowImmersion > 0 && s.speed > 12);
     expect(tl.kind).toBe('stuff');
     expect(tl.detectT - tl.onsetT, `detect ${tl.detectT.toFixed(2)} vs onset ${tl.onsetT.toFixed(2)}`).toBeLessThanOrEqual(0.5);
@@ -312,9 +318,11 @@ const at = (run: Run, type: string): number => run.events.find((x) => x.e.type =
 
 describe('§T.188 crash state machine: recover in place or respawn on the line', () => {
   it('a 5 m/s nose into a pylon leg is a crash she sails away from: recovered in place, never respawned', () => {
-    // measured: the bow's |Δv| is ≈ 9 m/s at 5 m/s (the pitching bow closes faster than the CG) — an impact, below 20 kn
+    // measured: the bow's |Δv| is ≈ 8.4 m/s (the pitching bow closes faster than the CG) — an impact, below 20 kn.
+    // Throttle 0.8 (T196, was 0.3): on the T189 engine model 0.3 no longer accelerates her off 5 m/s through the hump
+    // (φ = 0.3^1.6 of WOT torque); she drifted in at 2.3 m/s, |Δv| 2.4, no crash. 0.8 arrives as 0.3 did on the stand-in.
     const pylon = prepareStaticWorld([{ a: [0, -4, 20], b: [0, 6, 20], radius: 0.4 }]);
-    const run = machineRun(rig(st([0, 0.2, 0], [0, 0, 0, 1], [0, 0, 5])), 6, () => [0, 0.3], { world: pylon });
+    const run = machineRun(rig(st([0, 0.2, 0], [0, 0, 0, 1], [0, 0, 5])), 6, () => [0, 0.8], { world: pylon });
     expect(eventTypes(run)).toEqual(['crash:impact', 'recovered']);
     const tRec = at(run, 'recovered') - at(run, 'crash');
     expect(tRec).toBeGreaterThanOrEqual(CRASH_TIMINGS.recoverMinTime + CRASH_TIMINGS.recoverHold - 1e-9);
@@ -359,7 +367,7 @@ describe('§T.188 crash state machine: recover in place or respawn on the line',
     for (let k = 0; k < 360; k++) {
       beginContactTick(r.cm);
       collideBoatWithWorld(r.s, ch, buoy, null, DT, r.cm);
-      r.hw.setControls(0, 0.3 * m.out.throttleScale);
+      r.hw.setControls(0, 0.8 * m.out.throttleScale); // 0.8: the pylon test's approach (T196 note there)
       r.hw.samplePatch(FLAT, r.s, DT);
       stepRigid6(r.s, hull, DT, 2, (ss, h, load) => r.hw.evaluate(ss, h, load), r.mem);
       r.time += DT;

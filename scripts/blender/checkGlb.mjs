@@ -913,6 +913,52 @@ export function partsSocketErrors(rx, lod0) {
   return errors;
 }
 
+/**
+ * KTX2 channel content from the Data Format Descriptor: which of R/G/B/A the file actually encodes. ETC1S (model 163)
+ * carries RGB, RRR, GGG and AAA slices; UASTC (model 166) one sample of RGB, RGBA, RRR, RRRG or RG; uncompressed
+ * formats one sample per channel (0 R, 1 G, 2 B, 15 A). null when the bytes are not a readable KTX2.
+ */
+export function ktx2Channels(bytes) {
+  if (ktx2LevelCount(bytes) < 0 || bytes.length < 56) return null;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const off = dv.getUint32(48, true);
+  if (off + 28 > bytes.length) return null;
+  const block = off + 4;
+  const model = dv.getUint8(block + 8);
+  const size = dv.getUint16(block + 6, true);
+  const ids = [];
+  for (let s = block + 24; s + 16 <= block + size && s + 16 <= bytes.length; s += 16) ids.push(dv.getUint8(s + 3) & 0x0f);
+  const has = { r: false, g: false, b: false, a: false };
+  const set = (k) => k.split('').forEach((c) => (has[c] = true));
+  for (const id of ids) {
+    if (model === 163) set({ 0: 'rgb', 3: 'r', 4: 'g', 15: 'a' }[id] ?? '');
+    else if (model === 166) set({ 0: 'rgb', 3: 'rgba', 4: 'r', 5: 'ra', 6: 'rg' }[id] ?? '');
+    else set({ 0: 'r', 1: 'g', 2: 'b', 15: 'a' }[id] ?? '');
+  }
+  return { model, ...has };
+}
+
+/**
+ * §T.200: the livery data channels must reach the packaged GLB. M_Gelcoat / M_NonSlip baseColor A (overlay, non-skid
+ * coverage) and M_Carbon baseColor A (cowl livery mask) need alpha; the hull mask (clearcoatTexture: R band, G
+ * pinstripes, B antifoul, A wear) needs all four. gltf-transform's KTX step silently dropped them all (asset-build.mjs
+ * `encodeDataTextures`): the shipped hull then drew no livery and the cowls took the livery hue top to bottom.
+ */
+export function liveryChannelErrors(document) {
+  const errors = [];
+  const need = (mat, tex, slotName, want) => {
+    if (!tex || tex.getMimeType() !== 'image/ktx2') return;
+    const ch = ktx2Channels(tex.getImage());
+    const missing = ch ? want.split('').filter((c) => !ch[c]) : ['header'];
+    if (missing.length) errors.push(`livery: ${mat.getName()} ${slotName} '${tex.getName()}' lost channel(s) ${missing.join('').toUpperCase()} in packaging (the runtime reads them as livery/overlay masks)`);
+  };
+  for (const mat of document.getRoot().listMaterials()) {
+    if (['M_Gelcoat', 'M_NonSlip', 'M_Carbon'].includes(mat.getName())) need(mat, mat.getBaseColorTexture(), 'baseColor', 'rgba');
+    if ((mat.getExtras() ?? {}).hullLivery) need(mat, mat.getExtension('KHR_materials_clearcoat')?.getClearcoatTexture(), 'hull mask', 'rgba');
+  }
+  return errors;
+}
+
 export function ktx2LevelCount(bytes) {
   const id = [0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a];
   if (!bytes || bytes.length < 48 || id.some((b, i) => bytes[i] !== b)) return -1;
@@ -1150,6 +1196,7 @@ export function checkDocument(document, contract, opts = {}) {
       const want = size ? Math.floor(Math.log2(Math.max(size[0], size[1]))) + 1 : 2;
       if (levelsInFile < want) errors.push(`package: KTX2 '${tex.getName()}' has ${levelsInFile} mip levels < full chain ${want} (§V48)`);
     }
+    errors.push(...liveryChannelErrors(document));
   }
   return { errors, warnings, stats };
 }

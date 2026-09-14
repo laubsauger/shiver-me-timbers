@@ -45,9 +45,9 @@ export interface ReflectionParams {
   strength: number;
   /** multiplier on the sampled reflection — desaturate/cool it into the sea */
   tint: string;
-  /** screen-space UV offset per unit of surface slope (fraction of screen) */
+  /** offset per unit of surface slope, as a fraction of viewport height */
   distortSlope: number;
-  /** extra offset per metre of horizontal (choppy) displacement */
+  /** extra viewport-height offset per metre of horizontal (choppy) displacement */
   distortChop: number;
   /** hard cap on the total screen offset — keeps the tap local (§V28) */
   distortMax: number;

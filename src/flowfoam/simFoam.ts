@@ -38,11 +38,14 @@
  *              and normalised by D, so one passage lays a dose ∝ lift (§V66).
  *   PROP WASH  Σ jets (`jetFoamRate`): an actuator-disc jet, excess speed
  *              V_j − U_a = √(U_a² + 2T/ρA) − U_a, as a turbulent ribbon aft of
- *              the prop (half-width r + 0.1·s, potential core 6 D) — injection
+ *              the prop (half-width r + S_c·s, S_c = 0.1·ΔV/(ΔV + U_a) the co-flow
+ *              spread §T.199, potential core 6 D) — injection
  *              lift(ΔV, d_prop)·ΔV_c(s)/b(s) across a Gaussian of that width,
  *              floored at the tier texel (the splat-σ law, so the cross-track
  *              integral is kept when it is band-limited).
- *   FOAM  (R)  breakRate·ΔB + churnRate·(churn + jet)
+ *   SHEETS     §T.199 vessel mode: each hull's chine spray sheets as two foam lines
+ *              aft-and-outboard at tan α = v_out/U (`packChineSheet`) — the V.
+ *   FOAM  (R)  breakRate·ΔB + churnRate·(churn + jet) + sheets
  *   SLICK (G)  slickPerFoam·FOAM — the turbulence proxy: the lane is laid where
  *              whitewater was made and outlives it by the slick half-life. The
  *              two decay clocks are what the ocean material reads as AGE
@@ -63,14 +66,18 @@
  * the jet ribbon is floored at the tier texel; the far tier is box-filtered.
  * Per-texel noise: none (§B4).
  */
-import { If, Loop, float, int, ivec2, select, smoothstep, textureLoad, uniform, uniformArray, vec2, vec4 } from 'three/tsl';
+import type { ChineSheetEmitter } from '../wake/chineContact';
+import { If, Loop, float, int, ivec2, mix, select, smoothstep, textureLoad, uniform, uniformArray, vec2, vec4 } from 'three/tsl';
 import * as THREE from 'three/webgpu';
-import { LIFT_DEPTH_FLOOR, liftFraction } from '../foam/sprayMath';
+import { waterlineSheetLaunch } from '../foam/bowSpray';
+import { LIFT_DEPTH_FLOOR, liftFraction, type WaterlineSpray } from '../foam/sprayMath';
+import { GRAVITY } from '../ocean/oceanMath';
+import { simNearWeight, type SimGrid, type SimResampleOps } from './simInjection';
 import { WAKE_TEX_CHANNEL } from '../wake/wakeSolverMath';
-import { JET_CORE_DIAMETERS, JET_SPREAD, jetExcessSpeed, propWashValid, type PropWashInput } from '../wake/propWash';
+import { JET_CORE_DIAMETERS, JET_SPREAD, aerationSpeed, jetExcessSpeed, jetSpreadRate, propWashValid, type PropWashInput } from '../wake/propWash';
 
 export { JET_CORE_DIAMETERS, JET_SPREAD, jetExcessSpeed, type PropWashInput };
-import type { WakeSim } from '../wake/wakeSim';
+import { WAKE_MAX_VESSELS, WAKE_NEAR_BLEND_WIDTHS, type WakeSim } from '../wake/wakeSim';
 import type { FlowFoamParams } from '../params/flowfoam';
 
 /** research §5.4: breaking onset slope */
@@ -79,6 +86,23 @@ export const BREAK_ONSET_SLOPE = 0.3;
 export const STOKES_SLOPE = 0.44;
 /** at most this many props per flowfoam (the speedboat carries 3) — a literal shader bound (§V28) */
 export const MAX_PROP_JETS = 4;
+/** §T.195 VESSEL MODE: prop jets across the whole fleet (8 boats × 3 drives), a literal shader bound (§V28) */
+export const MAX_FLEET_JETS = 32;
+/**
+ * §T.195 AERATION SHARE: ribbon drive (m/s) per unit aeration speed (`propWash.aerationSpeed`, the entrained air's
+ * volume flux over the disc). THE ONE LOOK NUMBER of the bubble trail — how white a unit of air reads — sized so a
+ * wide-open drive at race speed lays a ribbon dose of ≈ 0.5 (docs/wake/w6-multivessel.md §3).
+ */
+export const AERATION_SHARE = 0.033;
+/**
+ * §T.195 the jet ribbon's evaluated extent in vessel mode (m along the jet; ±4 half-widths across): 24 jets per texel
+ * cost a bounding test each, not a ribbon. Stated truncation: past 60 m the 1/s ribbon decay has fallen to core/60 of
+ * its core value (≈ 4 % for the speedboat's 0.39 m disc) and the accumulated trail — not the injection — carries it.
+ */
+export const JET_FOAM_REACH = 60;
+/** Visual bubble-source fade in vessel mode, metres. The momentum jet keeps
+ * its own transport law; deposited foam continues to advect and age normally. */
+export const JET_FOAM_FADE_METRES = 12;
 /** head-target channels: .r total h_P, .g deep-bin part, .b the jets' (non-hull) share (wakeSolverPasses splat) */
 export const HEAD_CHANNEL = { TOTAL: 0, JET: 2 } as const;
 
@@ -229,23 +253,32 @@ export function simFoamRateCpu(
  * Foam injection (1/s) of one jet at a point `(dx, dz)` from its prop, on a tier
  * of texel `texel` (header). `drive` = liftFraction(ΔV, d_prop)·ΔV (m/s).
  */
-export function jetFoamRate<T>(A: SimFoamArith<T>, dx: T, dz: T, dirX: T, dirZ: T, drive: T, radius: T, texel: T): T {
+export function jetFoamRate<T>(A: SimFoamArith<T>, dx: T, dz: T, dirX: T, dirZ: T, drive: T, radius: T, texel: T, spread: T = A.k(JET_SPREAD), finiteBubbles = false): T {
   const zero = A.k(0);
   const s = A.add(A.mul(dx, dirX), A.mul(dz, dirZ));
   const n = A.sub(A.mul(dz, dirX), A.mul(dx, dirZ));
   const ahead = A.max(s, zero);
-  const b = A.add(radius, A.mul(A.k(JET_SPREAD), ahead));
+  // §T.199 the co-flow spread (`propWash.jetSpreadRate`); JET_SPREAD when not given
+  const b = A.add(radius, A.mul(spread, ahead));
   // the splat-σ law: convolve with one tier texel so the ribbon cannot alias, integral across kept
   const bEff = A.sqrt(A.add(A.mul(b, b), A.mul(texel, texel)));
   const core = A.mul(radius, A.k(2 * JET_CORE_DIAMETERS));
   const decay = A.div(core, A.max(ahead, core));
   // @band-limited-elsewhere: a ramp over the prop DISC (≥ one tier texel below via bEff) along the jet axis, evaluated in COMPUTE
   const start = A.smoothstep(A.neg(bEff), bEff, s);
-  const across = A.exp(A.neg(A.div(A.mul(n, n), A.mul(A.k(2), A.mul(bEff, bEff)))));
+  let exponent = A.neg(A.div(A.mul(n, n), A.mul(A.k(2), A.mul(bEff, bEff))));
+  // Combine bubble depletion with the Gaussian's existing exponential. This
+  // limits fresh whitewater generation, not the lifetime of foam already laid.
+  if (finiteBubbles) exponent = A.sub(exponent, A.div(ahead, A.k(JET_FOAM_FADE_METRES)));
+  const across = A.exp(exponent);
   return A.mul(A.div(A.mul(A.mul(drive, decay), across), bEff), start);
 }
 
-/** packed per-jet uniform state: [x, z, dirX, dirZ] and [drive, radius, 0, 0] — zero drive is an idle slot */
+/**
+ * packed per-jet uniform state: [x, z, dirX, dirZ] and [lifted drive, radius, aeration drive, co-flow spread] — zero
+ * drive is an idle slot; §T.199 meta.w = `jetSpreadRate`. The ribbon's drive is meta.x + meta.z: the jet's lifted excess (§T.180 c) plus §T.195's aeration
+ * (`AERATION_SHARE · aerationSpeed`, 0 for a producer that publishes no lost power — the pre-§T.195 value).
+ */
 export function packPropJet(j: PropWashInput): { pos: [number, number, number, number]; meta: [number, number, number, number] } | null {
   if (!propWashValid(j)) return null;
   const len = Math.hypot(j.dirX, j.dirZ);
@@ -254,20 +287,188 @@ export function packPropJet(j: PropWashInput): { pos: [number, number, number, n
   const lift = liftFraction(excess, Math.max(0, j.depth));
   return {
     pos: [j.x, j.z, j.dirX / len, j.dirZ / len],
-    meta: [lift * excess, Math.sqrt(j.discArea / Math.PI), 0, 0],
+    meta: [lift * excess, Math.sqrt(j.discArea / Math.PI), AERATION_SHARE * aerationSpeed(j), jetSpreadRate(excess, j.advance)],
   };
 }
 
-/** CPU Σ jets at a world point (tests) */
-export function propWashFoamCpu(jets: readonly PropWashInput[], x: number, z: number, texel: number): number {
+/** §T.195 the vessel-mode ribbon bound (JET_FOAM_REACH): inside ⇔ the jet is evaluated at this point */
+export function jetInReach<T>(A: SimFoamArith<T> & { le(a: T, b: T): T; and(a: T, b: T): T }, dx: T, dz: T, dirX: T, dirZ: T, radius: T, texel: T): T {
+  const s = A.add(A.mul(dx, dirX), A.mul(dz, dirZ));
+  const n = A.sub(A.mul(dz, dirX), A.mul(dx, dirZ));
+  const bMax = A.add(A.add(radius, A.k(JET_SPREAD * JET_FOAM_REACH)), texel);
+  const across = A.mul(A.k(4), bMax);
+  return A.and(A.and(A.le(A.neg(across), s), A.le(s, A.k(JET_FOAM_REACH))), A.le(A.mul(n, n), A.mul(across, across)));
+}
+
+/** CPU Σ jets at a world point (tests); `reach` = the vessel-mode bound */
+export function propWashFoamCpu(jets: readonly PropWashInput[], x: number, z: number, texel: number, reach = false): number {
   let sum = 0;
+  const B = { ...NUM, le: (a: number, b: number) => (a <= b ? 1 : 0), and: (a: number, b: number) => a * b };
   for (const j of jets) {
     const packed = packPropJet(j);
     if (!packed) continue;
     const [px, pz, dx, dz] = packed.pos;
-    sum += jetFoamRate(NUM, x - px, z - pz, dx, dz, packed.meta[0], packed.meta[1], texel);
+    if (reach && !jetInReach(B, x - px, z - pz, dx, dz, packed.meta[1], texel)) continue;
+    sum += jetFoamRate(NUM, x - px, z - pz, dx, dz, packed.meta[0] + packed.meta[2], packed.meta[1], texel, packed.meta[3], reach);
   }
   return sum;
+}
+
+// ---------------------------------------------------------------------------
+// §T.199 THE CHINE SPRAY SHEETS — the V's two white lines
+// ---------------------------------------------------------------------------
+
+/** Landed-water thickness for full coverage (look calibration): 10 mm keeps the interior translucent. */
+export let CHINE_SHEET_THICKNESS = 0.01;
+/** Landed sheet mixing time, seconds (look calibration, not a measured fluid constant). */
+export let CHINE_SHEET_SLIDE = 0.45;
+/** scratch/tests only: set the two look numbers */
+export function setChineSheetLook(thickness: number, slide: number): void {
+  CHINE_SHEET_THICKNESS = thickness;
+  CHINE_SHEET_SLIDE = slide;
+}
+/** §T.199 landed half-width at the chine (m) and its growth per metre of line — the sheet's lateral scatter (look) */
+export const CHINE_SHEET_WIDTH = 0.25;
+export const CHINE_SHEET_SPREAD = 0.02;
+/** §T.199 the landing length never shorter than this (m): a sheet that barely leaves the water still lands aft of its root */
+export const CHINE_SHEET_MIN_LENGTH = 2;
+/** §T.199 lines evaluated to this many landing lengths (e^−5 ≈ 0.7 % left) */
+export const CHINE_SHEET_REACH = 5;
+
+/**
+ * Pack [x, z, halfWidth, Q_side/h] and [aftX, aftZ, launchSlope, L].
+ * L = U * (flight time + mixing time). The landed source follows
+ * y(s) = halfWidth + launchSlope * L * (1 - exp(-s/L)), not an endless straight ray.
+ * Each arm integrates to Q_side/h over its axial exponential and lateral Gaussian.
+ * A live emitter additionally bounds deposition by distance since contact began.
+ * This is a surface-foam model; airborne spray retains its ballistic launch.
+ */
+export function packChineSheet(bow: Readonly<WaterlineSpray>, speed: number): { a: [number, number, number, number]; b: [number, number, number, number] } | null {
+  if (!bow.inContact || !(bow.flux > 0)) return null;
+  const vals = [bow.x, bow.z, bow.halfWidth, bow.fwdX, bow.fwdZ, bow.flux, bow.launch, speed];
+  if (!vals.every(Number.isFinite)) return null;
+  const u = Math.abs(speed);
+  const l = waterlineSheetLaunch(u, bow.launch);
+  if (!(u > 0.5) || !(l.outboard > 0)) return null;
+  const len = Math.hypot(bow.fwdX, bow.fwdZ);
+  if (!(len > 1e-9)) return null;
+  const L = Math.max(CHINE_SHEET_MIN_LENGTH, u * ((2 * l.up) / GRAVITY + CHINE_SHEET_SLIDE));
+  return {
+    a: [bow.x, bow.z, Math.max(0.3, bow.halfWidth), (0.5 * bow.flux) / CHINE_SHEET_THICKNESS],
+    b: [-bow.fwdX / len, -bow.fwdZ / len, l.outboard / Math.max(u, l.outboard), L],
+  };
+}
+
+/** Live source axis follows translation, rather than rotating with the hull in sideslip. */
+export function packMovingChineSheet(e: ChineSheetEmitter) {
+  const q = packChineSheet(e.bow, e.speed);
+  if (q) { q.b[0] = -e.vx / e.speed; q.b[1] = -e.vz / e.speed; }
+  return q;
+}
+
+/**
+ * §T.199 coverage rate (1/s) the two sheet lines of one packed hull lay at (dx, dz) from her emission centroid (header of
+ * `packChineSheet`), on a tier of texel `texel` (the splat-σ law, as the ribbon). ONE expression for CPU and TSL.
+ */
+export function chineSheetFoamRate<T>(A: SimFoamArith<T>, dx: T, dz: T, a: readonly [T, T, T, T], b: readonly [T, T, T, T], texel: T, front?: T): T {
+  const zero = A.k(0);
+  const [, , halfWidth, drive] = a;
+  const [ax, az, tanA, L] = b;
+  const along = A.add(A.mul(dx, ax), A.mul(dz, az));
+  const lateral = A.sub(A.mul(dz, ax), A.mul(dx, az));
+  const ahead = A.max(along, zero);
+  // Landed water loses lateral momentum to the surface layer. This curve has
+  // the launch angle at the root, then approaches a finite outboard distance.
+  // The same exponential supplies the landing density; no extra exp per arm.
+  const survival = A.exp(A.neg(A.div(ahead, L)));
+  const outboard = A.add(halfWidth, A.mul(A.mul(tanA, L), A.sub(A.k(1), survival)));
+  const b0 = A.add(A.k(CHINE_SHEET_WIDTH), A.mul(A.k(CHINE_SHEET_SPREAD), ahead));
+  const bEff = A.sqrt(A.add(A.mul(b0, b0), A.mul(texel, texel)));
+  let start = A.smoothstep(A.neg(bEff), bEff, along);
+  if (front !== undefined) {
+    // Filter inward only. A source cannot deposit beyond its contact front.
+    start = A.mul(start, A.smoothstep(zero, bEff, A.sub(front, ahead)));
+  }
+  const landing = A.div(survival, L);
+  const rate = A.mul(A.div(A.mul(drive, landing), A.mul(A.k(Math.sqrt(2 * Math.PI)), bEff)), start);
+  let sum = zero;
+  for (const side of [-1, 1]) {
+    const n = A.sub(lateral, A.mul(A.k(side), outboard));
+    const across = A.exp(A.neg(A.div(A.mul(n, n), A.mul(A.k(2), A.mul(bEff, bEff)))));
+    sum = A.add(sum, A.mul(rate, across));
+  }
+  return sum;
+}
+
+/** §T.199 the sheet lines' evaluated extent: within CHINE_SHEET_REACH·L along and 4 widths across (both rays) */
+export function chineSheetInReach<T>(A: SimFoamArith<T> & { le(a: T, b: T): T; and(a: T, b: T): T }, dx: T, dz: T, a: readonly [T, T, T, T], b: readonly [T, T, T, T], texel: T): T {
+  const [, , halfWidth] = a;
+  const [ax, az, tanA, L] = b;
+  const reach = A.mul(A.k(CHINE_SHEET_REACH), L);
+  const along = A.add(A.mul(dx, ax), A.mul(dz, az));
+  const across = A.sub(A.mul(dz, ax), A.mul(dx, az));
+  const bMax = A.add(A.add(A.k(CHINE_SHEET_WIDTH), A.mul(A.k(CHINE_SHEET_SPREAD), reach)), texel);
+  const half = A.add(A.add(halfWidth, A.mul(tanA, L)), A.mul(A.k(4), bMax));
+  return A.and(A.and(A.le(A.neg(A.mul(A.k(4), bMax)), along), A.le(along, reach)), A.le(A.mul(across, across), A.mul(half, half)));
+}
+
+/** CPU Σ sheets at a world point (tests) */
+export function chineSheetFoamCpu(sheets: readonly ({ bow: Readonly<WaterlineSpray>; speed: number } | ChineSheetEmitter)[], x: number, z: number, texel: number): number {
+  const B = { ...NUM, le: (a: number, b: number) => (a <= b ? 1 : 0), and: (a: number, b: number) => a * b };
+  let sum = 0;
+  for (const e of sheets) {
+    const moving = 'front' in e;
+    const q = moving ? packMovingChineSheet(e) : packChineSheet(e.bow, e.speed);
+    if (!q) continue;
+    if (!chineSheetInReach(B, x - q.a[0], z - q.a[1], q.a, q.b, texel)) continue;
+    sum += chineSheetFoamRate(NUM, x - q.a[0], z - q.a[1], q.a, q.b, texel, moving ? e.front : undefined);
+  }
+  return sum;
+}
+
+// ---------------------------------------------------------------------------
+// §T.195 VESSEL MODE — every boat's hull churns at its own velocity
+// ---------------------------------------------------------------------------
+
+/** one vessel slot the churn blends over: plan centre, radius, velocity, lift, depth, burial share */
+export interface VesselChurnSlot<T> {
+  x: T;
+  z: T;
+  radius: T;
+  vx: T;
+  vz: T;
+  lift: T;
+  depth: T;
+}
+
+/**
+ * The hull velocity, lift and depth AT A POINT when several hulls press the one head field: each slot weighs
+ * g_i = exp(−d_i²/(2R_i²)) (R_i its plan radius), the churn reads Σ g·v / Σ g (and lift, depth alike), and the
+ * hero's burial plane is scaled by her share g_0/Σ g — so a rival's head is never advected at the hero's velocity
+ * and the hero's pitch plane is not extrapolated under a rival 100 m away. A lone vessel reads exactly its own
+ * values wherever its weight is non-negligible (share → 1). ONE expression for CPU and TSL (§V77).
+ */
+export function blendVessels<T>(A: SimFoamArith<T>, x: T, z: T, slots: readonly VesselChurnSlot<T>[]): { vx: T; vz: T; lift: T; depth: T; heroShare: T } {
+  let sum = A.k(0);
+  let vx = A.k(0);
+  let vz = A.k(0);
+  let lift = A.k(0);
+  let depth = A.k(0);
+  let hero = A.k(0);
+  slots.forEach((s, i) => {
+    const dx = A.sub(x, s.x);
+    const dz = A.sub(z, s.z);
+    const r = A.max(s.radius, A.k(1));
+    const g = A.exp(A.neg(A.div(A.add(A.mul(dx, dx), A.mul(dz, dz)), A.mul(A.k(2), A.mul(r, r)))));
+    sum = A.add(sum, g);
+    vx = A.add(vx, A.mul(g, s.vx));
+    vz = A.add(vz, A.mul(g, s.vz));
+    lift = A.add(lift, A.mul(g, s.lift));
+    depth = A.add(depth, A.mul(g, s.depth));
+    if (i === 0) hero = g;
+  });
+  const inv = A.div(A.k(1), A.max(sum, A.k(1e-6)));
+  return { vx: A.mul(vx, inv), vz: A.mul(vz, inv), lift: A.mul(lift, inv), depth: A.max(A.mul(depth, inv), A.k(LIFT_DEPTH_FLOOR)), heroShare: A.mul(hero, inv) };
 }
 
 // ---------------------------------------------------------------------------
@@ -530,6 +731,12 @@ export interface SimFoamCpuFrame {
   ambientSigma?: number;
   burial?: HullBurialPlane;
   jets?: readonly PropWashInput[];
+  /** §T.195 vessel mode: per-vessel slots (hero first) — hullVel/lift/depth are then blended per point, jets bounded */
+  vessels?: readonly VesselChurnSlot<number>[];
+  /** §T.199 vessel mode: each hull's waterline spray and speed (hero first) — the chine sheet lines */
+  sheets?: readonly { bow: Readonly<WaterlineSpray>; speed: number }[];
+  /** §T.199 the near-hull tier's fields: sampled where the tier's own texel resolves it, cross-faded in (`simNearWeight`) */
+  near?: SimFoamCpuFields;
 }
 
 /**
@@ -579,21 +786,74 @@ export function simFoamRateAtCpu(
   };
   const gx = (x - fields.centerX) / texel + n / 2;
   const gy = (z - fields.centerZ) / texel + n / 2;
-  const w = burial.a + burial.b * (x - burial.ox) + burial.c * (z - burial.oz);
-  const jet = frame.jets ? propWashFoamCpu(frame.jets, x, z, tierTexel) : 0;
+  let w = burial.a + burial.b * (x - burial.ox) + burial.c * (z - burial.oz);
+  if (frame.vessels && frame.vessels.length > 0) {
+    const b = blendVessels(NUM, x, z, frame.vessels);
+    f.hullVelX = b.vx;
+    f.hullVelZ = b.vz;
+    f.lift = b.lift;
+    f.depth = b.depth;
+    w *= b.heroShare;
+  }
+  const jet = frame.jets ? propWashFoamCpu(frame.jets, x, z, tierTexel, !!frame.vessels) : 0;
   const S = farSupersample(tierTexel, texel);
+  // §T.195 vessel mode: the ribbon is not the solver's — it is laid wherever a prop is, inside the domain or not
+  const fleet = !!frame.vessels;
   let sum = 0;
   for (let ky = 0; ky < S; ky++) {
     for (let kx = 0; kx < S; kx++) {
       const ox = (boxOffset(kx, S) * tierTexel) / texel;
       const oy = (boxOffset(ky, S) * tierTexel) / texel;
-      sum += simFoamSample(ops, texel, gx + ox, gy + oy, w, jet, f);
+      sum += simFoamSample(ops, texel, gx + ox, gy + oy, w, fleet ? 0 : jet, f);
     }
   }
   const edge = Math.max(1, fields.sponge.width * n);
-  const foam = (sum / (S * S)) * simEdgeWindow(NUM, n, edge, gx, gy);
+  let foam = (sum / (S * S)) * simEdgeWindow(NUM, n, edge, gx, gy);
+  const nf = frame.near;
+  if (nf && farSupersample(tierTexel, nf.texel) === 1) {
+    const nearOps = { ...ops, load: cpuLoad(nf) };
+    const ngx = (x - nf.centerX) / nf.texel + nf.n / 2;
+    const ngy = (z - nf.centerZ) / nf.texel + nf.n / 2;
+    const nedge = Math.max(1, nf.sponge.width * nf.n);
+    const nearFoam = simFoamSample(nearOps, nf.texel, ngx, ngy, w, fleet ? 0 : jet, f) * simEdgeWindow(NUM, nf.n, nedge, ngx, ngy);
+    const wn = simNearWeight(RESAMPLE_NUM, { n: nf.n, texel: nf.texel, edge: nedge }, WAKE_NEAR_BLEND_WIDTHS * nedge, x, z, nf.centerX, nf.centerZ);
+    foam += (nearFoam - foam) * wn;
+  }
+  if (fleet) foam += p.simChurnRate * jet;
+  if (fleet && frame.sheets) foam += chineSheetFoamCpu(frame.sheets, x, z, tierTexel);
   return [foam, p.simSlickPerFoam * foam];
 }
+
+/** §T.199 the CPU ops' texel load over one fields set (0 outside) */
+function cpuLoad(fields: SimFoamCpuFields): SimFoamOps<number, number[]>['load'] {
+  const { n } = fields;
+  const zero = { slope: [0, 0, 0, 0], head: [0, 0, 0, 0] };
+  return (tex, i, j) => {
+    if (i < 0 || j < 0 || i >= n || j >= n) return zero[tex];
+    const q = j * n + i;
+    if (tex === 'head') return [fields.head[q], 0, fields.headJet ? fields.headJet[q] : 0, 0];
+    const t = [0, 0, 0, 0];
+    t[WAKE_TEX_CHANNEL.SLOPE_DX] = fields.slopeX[q];
+    t[WAKE_TEX_CHANNEL.SLOPE_DZ] = fields.slopeZ[q];
+    return t;
+  };
+}
+
+/** §T.199 `simNearWeight`'s operator table over numbers */
+const RESAMPLE_NUM: SimResampleOps<number, never> = {
+  lit: (v) => v,
+  add: (a, b) => a + b,
+  sub: (a, b) => a - b,
+  mul: (a, b) => a * b,
+  min: Math.min,
+  max: Math.max,
+  floorIndex: Math.floor,
+  next: (i) => i + 1,
+  fract: (a) => a - Math.floor(a), // @band-limited-elsewhere: an operator table entry (CPU)
+  smoothstep: NUM.smoothstep,
+  load: () => undefined as never,
+  channel: () => 0,
+};
 
 // ---------------------------------------------------------------------------
 // THE GPU HALF
@@ -616,8 +876,20 @@ const NODE: SimFoamArith<any> = {
 };
 
 export interface SimFoamFieldOptions {
-  /** prop jets this flowfoam can carry (0 = none compiled, the raft; ≤ MAX_PROP_JETS) */
+  /** prop jets this flowfoam can carry (0 = none compiled, the raft; ≤ MAX_PROP_JETS, or ≤ MAX_FLEET_JETS with `vessels`) */
   propJets?: number;
+  /**
+   * §T.195 VESSEL MODE: vessel slots the churn blends over (0 = the single-hull graph, bit-identical to before;
+   * ≤ WAKE_MAX_VESSELS). Construction-time: it sizes the shader. On: the churn is advected per vessel
+   * (`blendVessels`), the jets are bounded (`jetInReach`) and laid outside the solver domain too (the far trail of a
+   * rival the domain does not hold).
+   */
+  vessels?: number;
+  /**
+   * §T.199 the near-hull tier's centre uniform (`createSimWakeField().uNearCenter`), when `sim.near` exists: tiers whose
+   * texel the near solver resolves (S = 1) sample it and cross-fade (`simNearWeight`). Absent: no near graph.
+   */
+  uNearCenter?: { value: THREE.Vector2 } | null;
 }
 
 /**
@@ -638,7 +910,13 @@ export function createSimFoamField(
   const n = solver.n;
   const texel = solver.texel;
   const edge = Math.max(1, solver.sponge.width * n);
-  const jetSlots = Math.max(0, Math.min(MAX_PROP_JETS, Math.floor(opts.propJets ?? 0)));
+  const vesselSlots = Math.max(0, Math.min(WAKE_MAX_VESSELS, Math.floor(opts.vessels ?? 0)));
+  const jetSlots = Math.max(0, Math.min(vesselSlots > 0 ? MAX_FLEET_JETS : MAX_PROP_JETS, Math.floor(opts.propJets ?? 0)));
+  /** §T.195 per vessel: (x, z, radius, lift) and (vx, vz, depth, 0) — a dead slot sits far away with radius 1 */
+  const vesselPos = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4(1e7, 1e7, 1, 0));
+  const vesselVel = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4(0, 0, LIFT_DEPTH_FLOOR, 0));
+  const uVesselPos = vesselSlots > 0 ? uniformArray(vesselPos) : null;
+  const uVesselVel = vesselSlots > 0 ? uniformArray(vesselVel) : null;
   const uHullVel = uniform(new THREE.Vector2(0, 0));
   const uLift = uniform(0);
   const uDepth = uniform(LIFT_DEPTH_FLOOR);
@@ -661,20 +939,34 @@ export function createSimFoamField(
   let burial: HullBurialPlane = { ...NO_BURIAL };
   let jets: PropWashInput[] = [];
 
-  const textures = { slope: solver.slopeTexture, head: solver.headTarget.texture };
   const swizzle = ['x', 'y', 'z', 'w'] as const;
-  const ops: SimFoamOps<any, any> = {
+  const makeOps = (nn: number, textures: { slope: THREE.Texture; head: THREE.Texture }): SimFoamOps<any, any> => ({
     ...NODE,
     floorIndex: (a) => int(a.floor()),
     next: (i) => i.add(1),
     // @band-limited-elsewhere: bilinear tap weights in a COMPUTE pass (no pixel footprint)
     fract: (a) => a.fract(),
     load: (tex, xi, yi) => {
-      const inside = xi.greaterThanEqual(int(0)).and(xi.lessThan(int(n))).and(yi.greaterThanEqual(int(0))).and(yi.lessThan(int(n)));
-      return select(inside, textureLoad(textures[tex as 'slope' | 'head'], ivec2(xi.clamp(0, n - 1), yi.clamp(0, n - 1))), vec4(0, 0, 0, 0));
+      const inside = xi.greaterThanEqual(int(0)).and(xi.lessThan(int(nn))).and(yi.greaterThanEqual(int(0))).and(yi.lessThan(int(nn)));
+      return select(inside, textureLoad(textures[tex as 'slope' | 'head'], ivec2(xi.clamp(0, nn - 1), yi.clamp(0, nn - 1))), vec4(0, 0, 0, 0));
     },
     channel: (t, c) => t[swizzle[c]],
-  };
+  });
+  const ops = makeOps(n, { slope: solver.slopeTexture, head: solver.headTarget.texture });
+  // §T.199 the near-hull tier (vessel mode only, when the sim carries one)
+  const nearSolver = vesselSlots > 0 && sim.near && opts.uNearCenter ? sim.near : null;
+  const uNearCenter = nearSolver ? opts.uNearCenter! : null;
+  const nearOps = nearSolver ? makeOps(nearSolver.n, { slope: nearSolver.slopeTexture, head: nearSolver.headTarget.texture }) : null;
+  const nearGrid: SimGrid | null = nearSolver ? { n: nearSolver.n, texel: nearSolver.texel, edge: Math.max(1, nearSolver.sponge.width * nearSolver.n) } : null;
+  const RESAMPLE_NODE = { ...NODE, lit: NODE.k } as unknown as SimResampleOps<any, any>;
+  // §T.199 per vessel slot: the chine sheet lines [x, z, halfWidth, drive] and [aftX, aftZ, tanα, L]; drive 0 = idle
+  const sheetA = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4(0, 0, 0.3, 0));
+  const sheetB = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4(0, 1, 0, 1));
+  const uSheetA = vesselSlots > 0 ? uniformArray(sheetA) : null;
+  const uSheetB = vesselSlots > 0 ? uniformArray(sheetB) : null;
+  const sheetFront = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4());
+  const uSheetFront = vesselSlots > 0 ? uniformArray(sheetFront) : null;
+  let sheets: readonly ChineSheetEmitter[] = [];
   const frame: SimFoamFrame<any> = {
     hullVelX: uHullVel.x,
     hullVelZ: uHullVel.y,
@@ -710,7 +1002,7 @@ export function createSimFoamField(
         const pos = uJetPos!.element(int(j));
         const meta = uJetMeta!.element(int(j));
         jetSum = jetSum.add(
-          jetFoamRate(NODE, worldXZ.x.sub(pos.x), worldXZ.y.sub(pos.y), pos.z, pos.w, meta.x, meta.y.max(1e-3), float(tierTexel)),
+          jetFoamRate(NODE, worldXZ.x.sub(pos.x), worldXZ.y.sub(pos.y), pos.z, pos.w, meta.x.add(meta.z), meta.y.max(1e-3), float(tierTexel), meta.w.clamp(0, JET_SPREAD)),
         );
       }
       const jet = jetSum.toVar();
@@ -733,13 +1025,95 @@ export function createSimFoamField(
     return out;
   };
 
+  /** §T.195 vessel mode (header of `vessels`): the per-vessel churn inside the domain + every bounded ribbon anywhere */
+  const NODE_BOOL = { ...NODE, le: (a: any, b: any) => a.lessThanEqual(b), and: (a: any, b: any) => a.and(b) };
+  const fleetRateNode = (worldXZ: any, tierTexel: number): any => {
+    const S = farSupersample(tierTexel, texel);
+    const g = worldXZ.sub(uCenter).div(texel).add(n / 2).toVar();
+    const reach = (0.5 * tierTexel) / texel + 1;
+    const foamOut = float(0).toVar();
+    const inside = g.x.greaterThan(-reach).and(g.x.lessThan(n - 1 + reach)).and(g.y.greaterThan(-reach)).and(g.y.lessThan(n - 1 + reach));
+    If(inside, () => {
+      const slots: VesselChurnSlot<any>[] = [];
+      for (let k = 0; k < vesselSlots; k++) {
+        const vp = uVesselPos!.element(int(k));
+        const vv = uVesselVel!.element(int(k));
+        slots.push({ x: vp.x, z: vp.y, radius: vp.z, lift: vp.w, vx: vv.x, vz: vv.y, depth: vv.z });
+      }
+      const b = blendVessels(NODE, worldXZ.x, worldXZ.y, slots);
+      const vx = b.vx.toVar();
+      const vz = b.vz.toVar();
+      const lift = b.lift.toVar();
+      const depth = b.depth.toVar();
+      const w = uBurial.x
+        .add(uBurial.y.mul(worldXZ.x.sub(uBurialOrigin.x)))
+        .add(uBurial.z.mul(worldXZ.y.sub(uBurialOrigin.y)))
+        .mul(b.heroShare)
+        .toVar();
+      const f: SimFoamFrame<any> = { ...frame, hullVelX: vx, hullVelZ: vz, lift, depth };
+      const zero = float(0);
+      const sum = float(0).toVar();
+      if (S === 1) {
+        sum.assign(simFoamSample(ops, texel, g.x, g.y, w, zero, f));
+      } else {
+        const step = tierTexel / texel;
+        Loop(S * S, ({ i }: { i: any }) => {
+          const kx = float(int(i).mod(S));
+          const ky = float(int(i).div(S));
+          const ox = boxOffsetOf(NODE, kx, S).mul(step);
+          const oy = boxOffsetOf(NODE, ky, S).mul(step);
+          sum.addAssign(simFoamSample(ops, texel, g.x.add(ox), g.y.add(oy), w, zero, f));
+        });
+      }
+      const farFoam = sum.mul(1 / (S * S)).mul(simEdgeWindow(NODE, n, edge, g.x, g.y));
+      if (nearSolver && nearOps && nearGrid && uNearCenter && farSupersample(tierTexel, nearSolver.texel) === 1) {
+        const gn = worldXZ.sub(uNearCenter).div(nearSolver.texel).add(nearSolver.n / 2).toVar();
+        const nearFoam = simFoamSample(nearOps, nearSolver.texel, gn.x, gn.y, w, zero, f).mul(simEdgeWindow(NODE, nearSolver.n, nearGrid.edge, gn.x, gn.y));
+        const nc = uNearCenter as any;
+        const wn = simNearWeight(RESAMPLE_NODE, nearGrid, WAKE_NEAR_BLEND_WIDTHS * nearGrid.edge, worldXZ.x, worldXZ.y, nc.x, nc.y);
+        foamOut.assign(mix(farFoam, nearFoam, wn));
+      } else {
+        foamOut.assign(farFoam);
+      }
+    });
+    const jet = float(0).toVar();
+    for (let j = 0; j < jetSlots; j++) {
+      const pos = uJetPos!.element(int(j));
+      const meta = uJetMeta!.element(int(j));
+      const dx = worldXZ.x.sub(pos.x);
+      const dz = worldXZ.y.sub(pos.y);
+      const radius = meta.y.max(1e-3);
+      If(jetInReach(NODE_BOOL, dx, dz, pos.z, pos.w, radius, float(tierTexel)), () => {
+        jet.addAssign(jetFoamRate(NODE, dx, dz, pos.z, pos.w, meta.x.add(meta.z), radius, float(tierTexel), meta.w.clamp(0, JET_SPREAD), true));
+      });
+    }
+    // §T.199 the chine sheet lines of every hull (header of `packChineSheet`)
+    const sheet = float(0).toVar();
+    for (let k = 0; k < vesselSlots; k++) {
+      const a = uSheetA!.element(int(k));
+      const b = uSheetB!.element(int(k));
+      const dx = worldXZ.x.sub(a.x);
+      const dz = worldXZ.y.sub(a.y);
+      const A4 = [a.x, a.y, a.z, a.w] as const;
+      const B4 = [b.x, b.y, b.z, b.w.max(1e-3)] as const;
+      If(a.w.greaterThan(0).and(dx.mul(b.x).add(dz.mul(b.y)).lessThan(uSheetFront!.element(int(k)).x)).and(chineSheetInReach(NODE_BOOL, dx, dz, A4, B4, float(tierTexel))), () => {
+        sheet.addAssign(chineSheetFoamRate(NODE, dx, dz, A4, B4, float(tierTexel), uSheetFront!.element(int(k)).x));
+      });
+    }
+    const foam = foamOut.add(uChurnRate.mul(jet)).add(sheet);
+    return vec2(foam, foam.mul(uSlickPerFoam));
+  };
+
   const fin = (v: number, fallback: number): number => (Number.isFinite(v) ? v : fallback);
 
   return {
-    rateNode,
+    rateNode: vesselSlots > 0 ? fleetRateNode : rateNode,
+    vesselSlots,
     /** subsamples per axis a tier of this texel gets (tests / docs) */
     supersample: (tierTexel: number) => farSupersample(tierTexel, texel),
-    uniforms: { uHullVel, uLift, uDepth, uAmbientSigma, uAmbientBreak, uBurial, uBurialOrigin, uJetPos, uJetMeta },
+    uniforms: { uHullVel, uLift, uDepth, uAmbientSigma, uAmbientBreak, uBurial, uBurialOrigin, uJetPos, uJetMeta, uVesselPos, uVesselVel, uSheetA, uSheetB },
+    /** §T.199 whether this graph samples a near-hull tier */
+    near: !!nearSolver,
     jetSlots,
     /** the `setShip` feed — heading (rad, atan2(fx, fz)) and speed over water (m/s) */
     setHull(yawIn: number, speedIn: number): void {
@@ -764,6 +1138,10 @@ export function createSimFoamField(
     setPropWash(inputs: readonly PropWashInput[]): void {
       jets = inputs.slice(0, jetSlots);
     },
+    /** §T.199 vessel mode: this tick's hulls' waterline spray + speed (hero first); at most `vesselSlots` drawn */
+    setChineSheets(inputs: readonly ChineSheetEmitter[]): void {
+      sheets = inputs.slice(0, vesselSlots);
+    },
     /** RENDER FRAME, after `wakeSim.step` (the caller writes the shared centre): this tick's hull */
     update(): void {
       uHullVel.value.set(Math.sin(yaw) * speed, Math.cos(yaw) * speed);
@@ -775,6 +1153,24 @@ export function createSimFoamField(
       uAmbientBreak.value = expectedBreakingCpu(0, sigma);
       uBurial.value.set(burial.a, burial.b, burial.c, burial.rimLength);
       uBurialOrigin.value.set(burial.ox, burial.oz);
+      for (let k = 0; k < vesselSlots; k++) {
+        const live = k < sim.vesselCount;
+        const v = sim.vessels[k];
+        if (live && k === 0) {
+          // the hero: the `setShip` feed (speed over water) and her burial rms, as the single-hull graph reads her
+          vesselPos[0].set(fin(v.x, 1e7), fin(v.z, 1e7), Math.max(1, fin(v.radius, 1)), liftFraction(Math.hypot(speed, burial.rms), Math.max(LIFT_DEPTH_FLOOR, fin(v.depth, 0))));
+          vesselVel[0].set(uHullVel.value.x, uHullVel.value.y, Math.max(LIFT_DEPTH_FLOOR, fin(v.depth, 0)), 0);
+        } else if (live) {
+          const d = Math.max(LIFT_DEPTH_FLOOR, fin(v.depth, 0));
+          const vx = fin(v.vx, 0);
+          const vz = fin(v.vz, 0);
+          vesselPos[k].set(fin(v.x, 1e7), fin(v.z, 1e7), Math.max(1, fin(v.radius, 1)), liftFraction(Math.hypot(vx, vz), d));
+          vesselVel[k].set(vx, vz, d, 0);
+        } else {
+          vesselPos[k].set(1e7, 1e7, 1, 0);
+          vesselVel[k].set(0, 0, LIFT_DEPTH_FLOOR, 0);
+        }
+      }
       for (let j = 0; j < jetSlots; j++) {
         const packed = j < jets.length ? packPropJet(jets[j]) : null;
         if (packed) {
@@ -783,6 +1179,18 @@ export function createSimFoamField(
         } else {
           jetPos[j].set(0, 0, 0, 1);
           jetMeta[j].set(0, 1, 0, 0);
+        }
+      }
+      for (let k = 0; k < vesselSlots; k++) {
+        const e = sheets[k];
+        const q = e ? packMovingChineSheet(e) : null;
+        sheetFront[k].x = e ? Math.max(0, e.front) : 0;
+        if (q && [...q.a, ...q.b].every(Number.isFinite)) {
+          sheetA[k].set(...q.a);
+          sheetB[k].set(...q.b);
+        } else {
+          sheetA[k].set(0, 0, 0.3, 0);
+          sheetB[k].set(0, 1, 0, 1);
         }
       }
       uBreakRate.value = Math.max(0, fin(p.simBreakRate, 0));

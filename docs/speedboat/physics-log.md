@@ -382,3 +382,296 @@ rewrite gives the same jets as the current re-derivation to 1e-6.
 ## Perf
 µs per boat per tick (N=2, analytic sea, same machine, back-to-back, min of 4): HEAD 61–62 → now 63–64 (+2, chine-depth
 lerps and per-drive writes).
+
+---
+
+# T189 — turning in waves, energy, at-rest stability, drive trim, engine + power
+
+Scratch (not in repo): `scratchpad/t189/{sea,trace,energy,tumble,inv,rest,work,jump,drag,topspeed,heel10,env,perf}.test.ts`,
+`lib.ts`, `hw_scratch.ts` (the instrumented copy with per-term work snapshots), `run.sh <name>`; engine research in
+`scratchpad/t189e/`, respawn/origin investigation in `scratchpad/t189r/`.
+Tests: `tests/hullWaterSea.test.ts` (6, new), `tests/engine.test.ts` (10, new); edits in hullWater/hullWaterManeuver
+(below); `tests/speedboatAssist.test.ts` `it.fails` → `it` (the only edit there).
+
+## Root causes (per-term roll work and energy audits; each pinned)
+1. **Still-water velocities in a sea.** Every fluid-momentum velocity (2D+t V_n, sway V_L, GS impulses, Kirchhoff p)
+   was the hull's over still water; a hull heaving WITH a swell was treated as slamming/planing through it. At rest in
+   Working sea (Hs 2.78 m, CpuOcean, 90 s) 3/4 seeds capsized (roll rates 125–290°/s); Kirchhoff off: 12–19° (it was the
+   main injector). Fix `waterVelocity`: vertical surface velocity ∂η/∂t from two consecutive patches
+   (`WaterPatch.verticalVelocityAt`, prev grid kept, `forgetPrevious()` on `resetMemory`). Now max heel 11–13°, roll
+   rate ≤ 30°/s, 4/4 seeds. Horizontal orbital velocity needs k (not in a height sampler): tried with the analytic
+   swell's exact orbital field — horizontal alone moved no hook, vertical moved most (9/11 → 5/7 hooks at 6°).
+2. **V110 rescaled the impulses.** Slam/crossflow/sway-entry impulses are applied to the GS velocities, then the cap
+   scaled their J/h by s < 1: momentum the pass removed was handed back (+550 kJ over one capped re-entry, measured as
+   rigid6 ΔKE − predicted). Fix: the cap acts on the explicit flux loads only (`explicitLoad`, `capScale`).
+3. **Explicit flux loads not energy-consistent outside validity.** Inverted/capsized re-entries (216 cases, 90–180°
+   heel, 15–35 m/s, flat water, throttle 0): +2.6 MJ (50 m of height) above initial energy; random tumbles +135 m.
+   Kirchhoff force alone does work (the Munk moment that would pair it destabilises the hooks, T179); rotating-frame,
+   lift and sway flux terms on side-on "bottoms". Fixes: `passivity` (explicit loads may add at most the kinetic energy
+   the entrained water holds, ½Σm_aV_n² + ½Σm_latV_L², solved as the largest σ ≤ 1 on the quadratic ΔKE(σ) through the
+   same (M + A₆)⁻¹), `planingFacing` (2D+t added mass fades as a panel turns from facing down to horizontal, n_y
+   0.26 → 0, ramp ASSUMED), `faceDragCoeff` 1.2 (Hoerner flat plate) on wet deck/transom/stem faces, implicit.
+   Now 216/216 re-entries and 100 random tumbles never exceed initial energy (worst +0.15 m).
+4. **Lee-panel suction on a wave face.** The sway momentum flux + sway rotating-frame load as panel pressure pulled up to
+   ~100 kN on the lee half (energy trace on the hooking runs: latFlux/latRot/lift feeding roll at water exit). A planing
+   half open to the air at its spray root cannot go below ambient. Fix `panelSuctionLimit`: suction on a half ≤ its
+   planing lift + hydrostatic normal load.
+Ruled out (measured): gearcase ventilation off, chine-wet off, patch 0.4 m, diagonal added mass, transom drying (face
+factor untouched), gearcase ventilation HYSTERESIS on re-entry (bit-identical hooks), roll damper 5–30 kN·m·s/rad
+(8→4/16 at 30 kN·m·s: not the gap), B&K side-force line (a 0.42·chine cap on the sway centre gave C_v 8 0/16 but broke
+K_p/D&H/heel tests; not adopted — B&K is 30° deadrise, lever 0.48 B vs model 0.83 B at C_v 3, 0.40 B at C_v 8).
+
+## Crossing swell (T182 set: 2 amplitudes × 4 headings × 2 directions, raw helm 30°/s, 4 MW scale)
+| | C_v 8 4° | C_v 8 6° | C_v 10 4° | C_v 10 6° |
+|---|---|---|---|---|
+| T179 model | 3 | 9 | 8 | 11 |
+| T189 fluid fixes, old thrust curve | 0 | 2 | 3 | 4 |
+| T189 final (engine thrust, C_D0 0.009) | 2 | 5 | 5 | 6 |
+**Acceptance (0/16 at 6°, C_v 8–10) NOT met.** Remaining hooks: 1.2–1.5 s flights off the A = 1 swell at 40–47 m/s,
+landing with 20–40° heel (asymmetric exit on crossing slopes) and the low chine/gearcases tripping her; at C_v 10 the
+harness is at full throttle and some runs slip out (drift > 45°) at modest heel. Clean symmetric jumps (C_v 6 over a
+1.5/2.5 m ridge, crossing 0/10/25°) keep airborne roll ≤ 3°/s at 1 MW (prop torque reaction off).
+
+## Envelope (flat water, assists off, 30°/s helm, 20 s) — user decision still holds: hard helm at speed hooks
+half lock (15°): steady C_v 3–8 (peak heel 20–30°), hooks C_v 9 (2.47 s), 10 (2.28 s) — was hooking from C_v 7.
+full lock: hooks at every C_v, 2.45 s (C_v 3) … 1.28 s (C_v 10) — C_v 3 was a 44.5° transient, now a hook.
+Inward heel at 10° drive: C_v 8 +7.8°, **C_v 10 +1.2° (was +10.6°)** — the suction limit; test threshold at C_v 10
+relaxed to > 0 (DEVIATION).
+
+## At rest (user: "tippy", "sits high")
+- Statics (proxy, flat water, heave+trim solved): rest CG 0.204 m above water, keel draft 0.536 m, trim 2.14°,
+  displaced 5.22 m³ = m/ρ (Archimedes exact). GM ≈ 0.97 m (GZ 0.034 m at 2°), GZ 0.151/0.246/0.306/0.363 m at
+  10/20/30/50°, max ≈ 0.36 m at 50°, vanishing ≈ 100°. Roll decay at rest from 10°: period 3.4 s, 8.4→6.8° per cycle
+  (ζ ≈ 0.03). Roll gyradius 0.354·B. These are a stiff, normal deep-V; the tippiness was root cause 1.
+- Render origin: GLB origin = physics CG to 0.4 mm, pose copied with no offset (`speedboatFrame.ts:130-141`) — the
+  "sits high" read came from the heavy rolling (CG 0.59 m above the local surface on average while rolling 33° rms).
+- SPAWN (page, not physics): `course.ts:16,28` spawns every boat at a fixed 0.2 m above STILL water, level, zero
+  velocity, ignoring the wave height (−2.08…+1.32 m at the grid slots): slot 1 starts 1.1 m under a crest, is thrown
+  out at 4.9 rad/s and lands at 174°. Fix for the page owner: CG at `pressureHeadAt(x,z,t) + 0.239 m` after the mirror
+  is updated to the spawn time (ideally tilted to the local slope). RESET: `main-speedboat.ts:110` uses
+  `createNoCrashes()` (`page/stubs.ts:44-46`), so holding R does nothing yet (T191 wiring); the crash machine's respawn
+  (`crash/teleport.ts:120-141`) follows the wave but reads the drawn `heightAt` (`:130`) — use `pressureHeadAt`.
+
+## Working sea at speed (crash agent's scenario: Default assists, throttle 0.8, ±0.1 weave, 120 s)
+T189 final, 8 seeds (188, 7, 1–6): throttle 0.8 capsizes 6/8 (22–61 s; T179 model: 2/2 of 188/7, 1/2 of 1/2); throttle 0.6: 0/4 in 120 s (seeds 188, 7, 1, 2). **Acceptance (0/8 at 0.8–1.0) NOT met.** Launches of 1.2–1.8 s (CG 5–7 m above the local surface) off 20–25° faces at
+25 m/s with a cross-slope roll rate of ~20–25°/s at takeoff land at 35–45° heel and trip. Hs 2.78 m is Beaufort 6; the
+energy injections are gone (above), what remains is flight + landing physics in that sea.
+
+## Drive trim (`setControls(steer, throttle, trim)`)
+Lower unit rotates about the clamp pin (JSON `lowerUnit.trimPivotAboveAvPlate` 0.762 m = the 30 in shaft) before the
+steer yaw: thrust line (sinδcosθ, −sinθ, cosδcosθ), prop/CE/AV plate move aft-up. Range −6…+20° from the task text
+(NOT verified: Mercury pages 403, no web budget). Effect at WOT: running trim 1.87° (0°) → 1.97° (+8°), top speed
++0.8 %. Savitsky check: a bow-up moment M shifts the centre of pressure aft by M/W; at λ ≈ 1.4, τ ∝ λ^−0.45 ⇒ +8° trim's
+12.5 kN·m ⇒ ≈ +0.1° — the thrust-line moment alone is small on this hull; the large real effect needs surface-piercing
+prop vertical force (not modelled; no coefficient source in hand).
+Airborne pitch authority: a dry prop's torque is ρ_air/ρ_water of the wet one (engine `airFloor` now 1.2e-3, was a 0.12
+flare heuristic that rolled the boat ~6°/s per second of flight); spinning the train up/down changes angular momentum by
+I·G·Δω ≈ 0.2·1.6·180 ≈ 57 N·m·s per engine ⇒ < 1°/s of roll, ~0.007 rad/s of pitch. Real but negligible: throttle and
+trim give no meaningful pitch control in the air. `propTorqueReaction` (−hand·(Q + I·dω/dt) about each drive line,
+outer pair counter-rotating ASSUMED) is implemented but DEFAULT OFF: the net one-engine torque (~840 N·m, 0.4° heel at
+top speed) breaks the left/right mirror and heading-wander guarantees (T182 `speedboatAssist` mirror 3.9° vs 0.5°,
+T179 wander 0.44° vs 0.25°) — a decision for the controls owner.
+
+## Engine (src/sea-physics/engine.ts, V77) and top speed
+From rpmModel (torque-curve shape, friction/pumping, throttle-body lag 0.12/0.07 s, idle air, limiter 6800/320 with a
+two-cycle cut, overrun cut) with 450R data: 450 prop-shaft hp, 439 lb-ft, 1.60:1 Sport Master (the 1.75 in rpmModel is
+the 400R), K_T/K_Q parabolas of a surface-piercing prop (Kim & Rhee, smp'24) with immersion^1.5 and a low-J ventilation
+factor, 15.25 × 26 in calibrated at 85 mph / 6100 rpm (slip 9.4 %, η0 0.57). Spool 0.47 s to 90 % thrust at 30 m/s.
+Throttle exactly 0 = NEUTRAL (added `EngineInput.neutral`; idle-in-gear crept 108 N per engine and moved the resting-drift
+test). Per drive `hw.engines[k]`, `driveRpm`, `resetEngines()`. `standInDrivePowerW` now = engine powerScale × 1007 kW.
+Cited 3×450R: Nor-Tech 390 Sport (39 ft, 24°, 11.5–12.5k lb) 87 mph; Mystic M4200 mid-80s ⇒ target 85 mph ± 5 %.
+**Top speed: 33.4 m/s (74.8 mph) at 0° trim, 33.8 (75.6 mph) at +8° — 11 % short: NOT met.**
+Drag/thrust verdict: thrust is right (engine delivers 15.1 kN at 38 m/s, rpm in window); DRAG is high. Gearcase
+C_D0 0.02 → 0.009 (Hoerner strut + torpedo, JSON note) cut 9.3 → 4.2 kN at 40 m/s. What remains: hull friction 17.4 of
+19.0 kN at 40 m/s on a 5.7 m² clipped (≈ 8.3 m² spray-root) area at 1.74° running trim — consistent with Savitsky at the
+MODEL's trim (Savitsky ≈ 12 kN at its own ~2.3°), i.e. the known −0.5…−0.9° trim deficit plus no aero lift and no SPP
+vertical prop force. Past C_v 6 Savitsky is invalid (dry chines); not re-fitted (T165 rule).
+
+## API / params
+`setControls(steer, throttle, trim = 0)`; `HullDrive.trimPivotY/trimMinRad/trimMaxRad/propHand` (optional);
+`HullWaterParams.waterVelocity/planingFacing/panelSuctionLimit/passivity/faceDragCoeff/engine/propTorqueReaction`;
+`HullWater.explicitLoad`, `passivityScale`, `engines`, `driveRpm`, `resetEngines()`; `WaterPatch.verticalVelocityAt`,
+`forgetPrevious`. JSON: `lowerUnit.profileDragCoeff` 0.02 → 0.009 (+ note), `trimPivotAboveAvPlate/trimMinDeg/trimMaxDeg`,
+`engines[].propHand`. `STANDIN_THRUST` kept as the power reference. Sim-worker step API unchanged (stepCore's 2-argument
+`setControls` still valid; trim → pass `fleet` CONTROLS trim through when wanted). Audio: import `engine.ts`
+(`EngineState` lacks audio's thrEff/load/bark/refire counters — audio keeps those as its own state).
+
+## Tests changed (why)
+- hullWater V110: cap on explicit loads only; asserts load = raw − (1 − s)·explicit and impulses unscaled.
+- maneuver drift mutation now `{kirchhoff, passivity, faceDragCoeff: 0}` off (all three hold her); chine-wet mutation
+  adds `panelSuctionLimit: false`; heel-in at C_v 10 > 0 (was > 3); drive publication test spools the engine first.
+- speedboatAssist `it.fails` (raw C_v 10 4° hooks) → `it` (no longer hooks).
+- STILL FAILING, not ours to edit (T182 controls): "in a 0.9 m sea the heel guard…" (unguarded 4 < 7: the sea no longer
+  hooks the curve alone) and "Pro … hooks where it hooks" (C_v 8 half lock no longer hooks; C_v 9 does, 2.47 s).
+
+## Perf (µs per boat per tick, N=2, analytic sea, throttle 0.7): under load average 31 from parallel agents — best of
+12 back-to-back: HEAD 91.5 → now 104.3 (+14 %: engine sub-steps 4 × 3 drives, per-half ∂η/∂t reads, passivity 6×6).
+
+## Weight distribution, squat, "floaty" (coordinator follow-up)
+- Mass items: three outboards 312 kg each at z −0.95 m (AFT of the transom, hull frame z from the transom), bracket 110 kg
+  at −0.40 ⇒ LCG 3.606 m from the transom (0.30 L). Player (`main-speedboat.ts:90`) and NPC worker (`stepCore.ts:139`)
+  build the SAME `buildDeepVHull()`.
+- Physics statics/steady trim (flat water, speed held): U 0 → trim +2.12° bow-up (stern down), AV plate 0.60 m BELOW the
+  surface, gearcase immersion 1.00; U 3/6/9/12/15 m/s → 2.7/3.8/5.3/5.1/4.1°, plate 0.65/0.72/0.74/0.61/0.48 m under.
+  Lower units are submerged at rest and at low speed in the physics. So "NPC engines out of the water" is not the physics
+  pose: lead for the page/assets owner — NPC render applies `setDriveState(npcDrive)` (`speedboatFrame.ts:212-222`),
+  which tilts each outboard about its tilt tube by the trim angle (`assets/boatModel.ts:93`); check the NPC trim value
+  fed there, and the NPC pose interpolation (`npcFleet.renderPose`). Not verified in a browser (no browser).
+- "Floaty": heave decay at rest from +0.2 m: period 2.23 s, successive same-sign peaks 0.151 → 0.122 → 0.101 m ⇒
+  ζ ≈ 0.034; pitch from +3°: period 2.3 s, ζ ≈ 0.046; roll ζ ≈ 0.03 (period 3.4 s). Buoyancy is exact Archimedes
+  (displaced 5.22 m³ = m/ρ at rest). The missing physics is ZERO-SPEED WAVE RADIATION DAMPING (T165 known gap: 2D+t
+  supplies damping ∝ U; at rest only entry impulses and crossflow drag remain). Order of magnitude for this hull
+  (estimate, not a citation I could re-check this session: 2D rectangular/V section heave damping at ω²b/g ≈ 0.9 of
+  ~0.6·ρ·S·ω per metre, Vugts 1968 via Journée & Massie) ⇒ ζ ≈ 0.1. NOT FIXED in T189 — a frequency-domain term that
+  must fade with speed and be re-validated against Savitsky/pitch/roll tests; next task.
+
+---
+
+# T196 — PART A DONE (the tree green again after T189)
+
+Scratch (not in repo): `scratchpad/t196/{crashprobe,stuffab,stuff2,stuff3,pylon,lock,lock4,cap,pack,track}.test.ts`, HEAD copy of
+hullWater in `scratchpad/t196/head/` for A/B, `run.sh <name>`.
+
+| failing test | call | why / what changed |
+|---|---|---|
+| raceAiCapability: committed table | LEGIT (engine) | re-measured. The engine model: top speed 29.5 → 33.4 m/s, full-throttle accel at 4 m/s 7.8 → 2.6 m/s², hold throttle at 6 m/s 0.11 → 0.48 (throttle^1.6 body law). The grids were STALE too: SPEED_GRID ended at 29 and TURN_SPEEDS at 29.5, so the 0°/5° columns ended below top speed at throttle 0.9 and `turnTopSpeed(0)` read 29.5 ⇒ `accelAt` shifted by 3.9 m/s. Grids now run past any top speed (unreached speeds drop out) and turn rows end at topSpeed + 0.5 (`turnSpeedsFor`); a 16° steer column added. |
+| raceAiCapability: teeth (1.6× the schedule hooks) | LEGIT (T189 suction/passivity) — schedule re-derived | sweep at the 15°/s helm, full throttle: departures now at 20° (6–10 m/s), 22.5° (14), 25° (18–33); 4 MW C_v 6–10: 20° steady, 22.5–25° capsize. The old 12.5° max sat 2× under the edge, so the teeth could not bite. `lockLimit` = 12.5° ≤ 6 m/s → 16° at ≥ 14 m/s; 1.6× departs at all 8 speeds, 1.5× at 4 MW C_v 7/8/10. Property unchanged (at the schedule never departs; one notch past does). |
+| raceAiPack: missed gates | LEGIT (engine) — harness start + line margin re-derived | (1) rookie missed the START gate: the harness put grid row 3 at 18 m/s inside the course's last corner; the stand-in's 3–4 m/s² of reverse braked for it, the engine's 1–1.7 m/s² (measured `reverse`) cannot. Grid now on the course's pace line (what the page does, course.ts). (2) hothead/swell missed chicane gates 5/6 by 0.3–0.5 m: measured |cross-track − offset| within 25 m of gates is 4–6 m at 31 m/s (faster boat, 16° lock), the risk-1 line margin was 2 m. `levelShape` margin 7 − 5·risk → 7 − 4·risk (3 m minimum). Lap spread/ratio/ordering assertions untouched and passing (55.8–59.6 s). |
+| speedboatCrash: HOOK C_v 5 | NOT PHYSICS (float) | detect 13.25, onset 13.75 — exactly 30 ticks = 0.5000000000000249 > 0.5; HEAD gave 13.25/13.72. Tolerance + 1e-9, as the file's other timing checks. |
+| speedboatCrash: STUFF | LEGIT (T189 passivity) — scenario re-cut | HEAD's −10° / 30 m/s pitchpole was powered by planing lift on the aft sections of a bottom WITHDRAWING along its normal (V_n = −3.2 m/s at 10° bow-down): `U·(M_i − M_up)` with both M negative and the deeper bow upstream gives positive lift aft with a forward (thrust) component — +1.2 MN·m bow-down, energy in. Passivity now removes it (σ = 0 on that entry). The model still stuffs when the foredeck is driven under (−15° static: stuff @0.37 s; −10° with a 0.5 rad/s bow-down rate: @0.20 s, same as HEAD). Test uses the falling-bow entry; onset/detect timing checks unchanged. Finding kept for Part B: σ = 0 zeroes ALL explicit loads on such entries (credit starts at 0, is banked only by explicit-load removals). |
+| speedboatCrash: pylon recover-in-place, fuel cut | LEGIT (engine) — throttle re-cut | at throttle 0.3 the engine no longer accelerates her off 5 m/s through the hump (φ = 0.3^1.6): she arrived at 2.3 m/s, bow |Δv| 2.4 < 8 ⇒ no crash. Sweep: 0.8 ⇒ |Δv| 8.4 (HEAD at 0.3: 8.2), below the 20 kn structure reset. Both tests at 0.8. |
+
+Gates after Part A: 212/213; the one failure is `raceAiLine` "a layout without a pilot is byte-for-byte…" (3592 vs 2128 bytes) —
+sim-worker layout header edits in progress by another agent (T191/T195, `src/sim-worker/layout.ts`), not physics. `tsc`: one
+error, `tests/sprayFleet.test.ts` (not ours). raceAiSea passes but is a single-realisation count on a sea where every NPC hooks
+10–20× per lap (Part B item 3); it moved ±50 % between runs of this part.
+
+---
+
+# T196 — PART B: radiation damping, heeled landings, Working sea, top speed, prop torque; + coordinator items 6–7 and
+# the T197 follow-ups
+
+Scratch (not in repo): `scratchpad/t196/rad/{frank.py,wedge.py,table.py,strip.py}` (2D radiation solver, venv with numpy/
+scipy in `t196/venv`), `t196/{decay,sea,trace,trace2,trace3,work,imm,top,jump,env,turnnums,mut,c10,solo,pack}.test.ts`,
+`hwdbg.ts` (instrumented copy: per-term roll moments and explicit-term power), `lib.ts` (T189 swell harness), `run.sh`.
+Literature used: Journée & Massie, Offshore Hydromechanics (TU Delft 2001, ch. 6–7, downloaded); Kim & Rhee smp'24 (read);
+Sun & Faltinsen 2007 (planing gravity, read); USNA EN441 ch. 3 Fig. 9 (Korvin-Kroukovsky, Savitsky & Lehman 1949 wake
+profile, read off the rendered figure); Boating Mag Nor-Tech 390 / Mystic M4200 tests (WebFetch).
+
+## B1 — floaty at rest: zero-speed wave radiation damping (`radiationDamping`, default on)
+- Solver: Frank (1967) pulsating-source close-fit, deep water, G = ln r − ln r′ − 2·PV∫e^{kY}cos kX/(k−ν)dk + 2πi e^{νY}cos νX
+  (PV integral in closed form Re{e^Z E₁(Z)} − πe^{νY}sin ν|X|, checked against quadrature to 1e-15; free-surface and
+  outgoing-wave signs derived and checked). Validation: semicircle heave added mass → ρπR²/2 at ω → ∞ (1.004); damping
+  rising toward the Haskind/Froude–Krylov limit ρωB² at ω → 0 (0.87 of it at νR 0.025); damping from the solver's own
+  far-field wave amplitude (J&M eq. 6.33) within 0.5 %; 20 vs 40 panels < 0.1 %.
+- Wedge tables (deadrise 8–45°, ξ = ω²b/g 0.02–8): heave damping b33 = N₃₃/(ρωB²) nearly independent of deadrise (0.31 at
+  ξ 1, 24°). Strip theory on this hull's REST sections (heave only, uncoupled): T 1.84 s ζ 0.33; pitch T 1.84 ζ 0.30; roll
+  T 2.09 ζ 0.11. At the MODEL's own periods and inertias (heave 2.25 s, pitch 2.3 s, roll 3.4 s — the model carries more
+  added mass at rest, Wagner's splash-up factor): ζ_heave 0.28, ζ_pitch 0.24, ζ_roll 0.02 — the cited reference.
+- Time domain: per wet strip a linear implicit damper on the strip centroid's vertical velocity relative to the water,
+  coefficient b33(β = atan(T/b), ξ_s)·ρωB²·Δz at the SECTION's heave natural frequency ξ_s = 1/(2(T/(4b) + a33)) (ω_s
+  3.3–3.9 rad/s; b33·ω is flat between ω_s and the hull's 2.8 rad/s, < 5 %). Heave only on the centre line: per-half
+  application would have made roll damping ≈ 8× the V-section's radiation value. Fade: 1 − smoothstep of the length Froude
+  number 0.4 → 1.0 (strip theory's usual range → Sun & Faltinsen's lower planing limit "Fn 1~1.2"); zero from C_v 2.3 up,
+  so Savitsky, pitch settling and roll-kick tests run on the untouched planing model.
+- Result (decay from +0.2 m / +3° / 10°): heave ζ 0.044 → 0.30 (T 2.25 → 2.30 s), pitch 0.078 → 0.30 first cycle / 0.25
+  after, roll unchanged 0.03 (radiation reference 0.02 + existing terms). ACCEPTANCE MET for heave/pitch (reference ± 30 %),
+  roll deliberately not raised. Test `hullWaterSea` "heave and pitch decay…" (mutation off ⇒ < 0.08) and the fade test.
+  The resting-drift mutation in `hullWaterManeuver` now also switches radiation off (it damps the heave–pitch cycle the walk
+  rectifies: 0.058 m/s with the three T189 terms off, under the bound).
+
+## B2 — hooks after heeled landings (crossing swell, 6° drive, T182 16-run set)
+| | C_v 8 | C_v 10 |
+|---|---|---|
+| T189 final | 5/16 | 6/16 |
+| + water-exit rule only | 5 | 7 |
+| + passivity scoped to the transfer loads, credited with impulse dissipation | 4 | 3 |
+| + drives in the transom wake, raised 0.12 m (item 7) | **2** | **1** |
+Acceptance ≤ 1/16: **met at C_v 10, NOT at C_v 8 (2/16)**. Mechanisms found (per-term roll-moment and power traces):
+1. **Exit sections carried planing momentum.** U·(M_i − M_up) with both M negative gave a positive pressure on a panel
+   moving AWAY from the water (+619 kW on a −10° / 30 m/s entry, the old pitchpole's engine). `waterExit`: M = 0 on a
+   withdrawing half, the rule the slam law already had. Test: flux-load power ≤ 0 on that entry (mutation +619 kW).
+2. **Passivity zeroed the righting lift.** On the ticks the bound bit (σ < 0.5, 0.5 % of ticks, all at touchdowns) the
+   rotating-frame/gyro/Kirchhoff loads put +54…+154 kW in while lift/sway flux took −63…−181 kW out; one σ over all of them
+   removed the lift and the transfer terms' own roll damping (+13…+19 kN·m opposing a −139°/s roll-through). Now σ scales
+   the transfer loads only (`explicitTransferLoad`), and the credit also banks the rigid kinetic energy the implicit impulses
+   (slam, entry, crossflow, radiation, face drag) took out this substep — the "plus what the dissipative terms have taken
+   out" the T189 doc promised; the credit started at 0 on every touchdown before. Energy test unchanged: 216 re-entries
+   never above initial energy (< 0.05 m); its T179 mutation now includes `waterExit: false` (the exit rule alone removes
+   the injection).
+3. **The drives steered her in the air.** In the remaining hooks the hull was dry for 0.5–1 s while the low-side gearcases
+   and props stayed buried (bow-up flight, stern low): drive roll moment ±3–6 kN·m spun her 20° → 45°. The transom-wake
+   immersion (item 7) takes the lower units out with the hull. The two C_v 8 hooks left: 1.0–1.3 s flights rolling 20 → 45°
+   with the low-side prop still in the water; touchdown at 45° with the roll rate being arrested (harness departure = 45°).
+Rejected: a deadrise-dependent splash-up factor (linear π/2 → 1 at 90°): 6/16 and 6/16, and it would move Savitsky.
+Brown & Klosinski's damping term 0.134 sin|ψ| is YAW angle, not heel (report text) — no heel dependence to borrow.
+
+## B3 — Working sea, Default assists, throttle 0.8, ±0.1 weave, 120 s
+0/8 capsizes (seeds 188, 7, 1–6): max tilt 19–27°, mean speed 12.8–15.8 m/s, longest flight 1.0–1.6 s. **ACCEPTANCE MET.**
+(T189: 6/8.) A/B seed 188, 60 s: transom wake off ⇒ mean 16.0 m/s vs 13.7 on (props surface in the sea too); radiation off
+⇒ same. The crash test's clean Working-sea run (throttle 0.6) now peaks tilt 15° / heel 11° (T188: 35° / 35°).
+
+## B4 — top speed vs the cited 87 mph — NOT MET, and the citation is the wrong hull
+- Both cited boats are STEPPED: Nor-Tech 390 Sport "hull steps … ran along the water like shark teeth" (Boating Mag test,
+  24°, 11,500 lb, triple 400R "breaking 80 mph"); Mystic M4200 "double-stepped hull" (quad 450R, 86 mph). The proxy is a
+  conventional non-stepped deep-V; no non-stepped 12 m triple-450R data found.
+- Savitsky for THIS hull (LCG 3.606 m, 24°, 5351 kg, extrapolated past C_v 6): τ 2.0°, R_hull 19.2 kN at 33.9 m/s, 23.1 kN
+  at 38 m/s. Model at WOT: 33.9 m/s (75.9 mph), running trim 1.84°, hull drag 16.0 kN, thrust 17.9 kN, 5747 rpm. The model
+  is 17 % BELOW Savitsky's drag at its own top speed and its trim within 0.2° of Savitsky's there — the in-range low-trim
+  bias (−0.5…−0.9° at C_v 3–6) is not what limits top speed. Savitsky's own non-stepped top speed with this thrust ≈ 31–32
+  m/s. Friction was not cut. Missing physics that would raise a real boat's trim (SPP vertical force, aero lift) has no
+  coefficient source in hand.
+
+## B5 — prop torque reaction: implemented, default OFF (unchanged). Documented in T189; nothing added.
+
+## Item 6 — Surge boost API
+`HullWater.setBoost(multiplier)` (≥ 1, clamped to `engine.boostMax` 1.3; persists) → `EngineInput.boost`: crank brake
+torque × boost at every throttle, limiter/Governor cut × √boost. Thrust comes from the prop curve: at 85 mph boost 1.2 ⇒
+thrust × 1.30, rpm × 1.04 (lower J raises K_T and K_Q); a dry prop gets nothing; boost 1 bit-identical. The page passes
+the race's Surge `thrustMultiplier` straight to `setBoost` (thrust gain ≈ multiplier^1.4 at speed). Sim-worker: not
+plumbed (no step API change); a fleet boat needs a control slot for it (owner: T191/T195).
+
+## Item 7 — props buried while planing → drives run in the transom wake
+- Measured before: prop immersion 1.00 at C_v 4/6/8, shaft 0.43–0.61 m under the undisturbed surface, gearcases fully wet.
+- `transomWake` (default on): prop and AV-plate depths against the Korvin-Kroukovsky/Savitsky/Lehman centreline wake profile
+  H/B = 0.02064 q² − 0.00448 q^2.44 + 0.0108 λ τ^0.34 X, q = X τ^0.7/C_v^0.6 (checked against the figure's worked example),
+  × the transom's Froude dry fraction. The water leaves the keel and rises slowly: at the props (X 0.57 B) it is ≈ at keel
+  height.
+- Mount: shaft at keel height (JSON `propPoint.yAboveKeel` −0.12 → 0, AV plate 0.10 → 0.22 m above the keel, outboard mass
+  items y 1.10 → 1.222 with the clamp): VCG 0.739 → 0.760 m, roll gyradius 0.3539 → 0.3586 B, pitch 0.2597 → 0.2599 L.
+  ASSUMED: "shaft at the keel line" rule for bracketed surfacing props; the T179 setback rule (+3…7.5 in) is exceeded.
+- Result: prop immersion 0.70 / 0.64 / 0.61 at C_v 4 / 6 / 8 (≈ I_T 0.66 / 0.60 / 0.57; Kim & Rhee test range 0.3–0.7,
+  boss cap at the surface at 0.5), gearcase span 0.65 / 0.62 / 0.61; at rest 1.00 and 1.00 (shaft 0.72 m under). Engine
+  re-calibrated at the running immersion (`calImmersion` 1 → 0.6): same WOT balance at 85 mph, so a buried prop (hole shot)
+  is 2.15× the old thrust.
+- Rest CG height 0.2036 → 0.2249 m above still water (trim 2.14° unchanged) — for T198 `SPAWN_CG_Y`. Intended (the raised
+  engines).
+- T197 render shots (engines clear of the water at 21 m/s, lower units barely in at rest) do NOT match this physics (at
+  rest the AV plate is 0.41 m under still water; at C_v 4 the props are 70 % immersed in the wake hollow): the render's
+  pose/outboard anchors or water height differ — page/asset owners (T192 anchors.py reads `yAboveKeel`; rebuild the GLB).
+  Not checked in a browser (no browser, GPU lock).
+
+## Consequences re-derived (explicit calls)
+- Envelope (flat, 30°/s, 4 MW, throttle frozen): half lock steady C_v 3–9, hooks C_v 10 (3.65 s); full lock hooks C_v 4–10
+  (2.15…1.42 s), C_v 3 survives a 44° roll-in. Wake off (same mount): half lock never hooks, full lock hooks C_v 3–10.
+- Crash detector: a full-lock departure now slides first (C_v 5: slip 38°, yaw 0.89 rad/s, heel 31° — under the spin-out
+  triple) and then lays over past 45°. New `hookKnockdownHeelDeg` 50°: heel ≥ 50° wet, above the speed floor, is a hook.
+  Air rolls stay barrelRoll's.
+- NPC lock schedule 14.5° (≤ 6 m/s) → 19° (≥ 10 m/s): the lock-entry departure edge moved to 22.5° at 6 m/s and 30° at
+  10–33 m/s; 4 MW 25–27.5°. Turn table columns 0/5/10/15/19°; the 19° column contains off-plane rows (a 30 m/s entry
+  settles at 12.3 m/s) — sorted by speed, the last row is still the column's full-throttle speed.
+- NPC pilot on the new boat: rookie/hothead (shortest lookaheads) slalomed on straights at lock with 12–19° drift
+  (pure-pursuit loop under-damped once the gearcases run part-surfaced). Yaw-rate term 0.12 → 0.4, hothead lookahead 1.6
+  → 1.8 s, line margin 7 − 3.5·risk (measured tracking error near chicane gates 4–6 m). Pack: laps 55.1–59.1 s, no misses.
+- Race/ai handedness moved to race/types.ts (coordinator T197 item 1): `corridorsOf` mark side and hairpin apex; the
+  synthetic course's marks are 'starboard' (same geometry); harness rounding line sign follows keepOn.
+- Test deviations (in the files): maneuver C_v 10 heel-in bound −5° (−1.8 ± 2.0°: the 4 MW harness over-speeds the prop onto
+  the rev limiter at 45 m/s, thrust pulses 20–39 kN, ventilated gearcases ≈ 1 kN side force; wake off +7.2°); full lock C_v 3
+  amplitude < 6° (27 ± 5°; wake off: hooks); half-lock mutation → Wagner centres off (chine-wet/suction off stays steady
+  now). Assist: Pro envelope speeds C_v 10 half / C_v 4 full; Governor bar 2 → 2.5 m (0.7 s flight by the airborne flag);
+  landing assist `it.fails` — KNOWN REGRESSION for the controls owner: with the props surfacing at the launch the emulated
+  trim has no thrust to re-aim (off → on landing pitch 9.6 → 9.8°, 12.1 → 12.3°, 10.7 → 10.6°, 8.2 → 8.6°, 12.7 → 13.6°).
+- Rookie 3-lap test then missed gates 7 and 10 on laps 2–3 (ran 46 m wide at lock with 12–18° drift at full throttle after a
+  mistake). Pilot: when |cross-track − offset| > 15 m the target speed is capped at the measured corner speed of the
+  PURSUIT curvature (`cornerSpeed(kappa, latUse)`). 6/9/12/15 m tried: 6 m slowed every lap 3–6 s; 12 m left the catch-up
+  spread 0.13 s over its bound; 9 and 15 m pass; 15 m kept. Laps 68.1 / 57.1 / 56.2 s, no misses.

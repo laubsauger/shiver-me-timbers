@@ -1,0 +1,25 @@
+{
+  "bitIdentical": true,
+  "comparedValues": 3932160,
+  "samples": 40,
+  "medianUpdateMs": [
+    5.875,
+    5.184999942779541
+  ],
+  "medianRebuildMs": [
+    2.884999990463257,
+    4.715000152587891
+  ],
+  "frequencies": [
+    {
+      "cells": 4096,
+      "unique": 457,
+      "addedBytes": 9140
+    },
+    {
+      "cells": 16384,
+      "unique": 1621,
+      "addedBytes": 32420
+    }
+  ]
+}

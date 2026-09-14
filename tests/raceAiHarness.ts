@@ -60,7 +60,9 @@ export function syntheticCourse(laps = 3): Course {
     const sx = dz / l;
     const sz = -dx / l;
     const id = `${sp.kind === 'gate' ? 'G' : 'M'}${k}`;
-    if (sp.kind === 'mark') return { kind: 'mark', mark: { id, at: sp.at, keepOn: 'port', radius: 6 } };
+    // counter-clockwise (x right, z up) is a loop of STARBOARD turns in race/types.ts handedness (facing +z, port is +x):
+    // the marks sit inside it, on the boat's starboard (T196: was 'port' in race/ai's old mirrored sense — same geometry)
+    if (sp.kind === 'mark') return { kind: 'mark', mark: { id, at: sp.at, keepOn: 'starboard', radius: 6 } };
     const h = (sp.width as number) / 2;
     return {
       kind: 'gate',
@@ -126,8 +128,9 @@ function crossingsOf(course: Course): Crossing[] {
     const l = Math.hypot(dx, dz);
     dx /= l;
     dz /= l;
-    // rounding line: perpendicular to the p→q chord through the mark; port rounding passes to its starboard
-    const sgn = e.mark.keepOn === 'port' ? 1 : -1;
+    // rounding line: perpendicular to the p→q chord through the mark; a port rounding (mark on the boat's port) passes to
+    // the chord's starboard (−dz, dx), a starboard rounding to its port (dz, −dx) — race/types.ts handedness (T196)
+    const sgn = e.mark.keepOn === 'port' ? -1 : 1;
     const ux = dz * sgn;
     const uz = -dx * sgn;
     return { ox: e.mark.at[0], oz: e.mark.at[1], ux, uz, dx, dz, pass: [e.mark.radius, 200], miss: [-200, e.mark.radius] };
@@ -239,8 +242,31 @@ export async function runRace(o: RaceOptions): Promise<RaceResult> {
         angularVelocity: [0, 0, 0],
       });
     };
+    // FLYING START ON THE COURSE'S PACE LINE (T196; the page rolls its grid down the pace line straight, course.ts
+    // gridRoomPaceLine): rows `gap` apart behind the start gate, ±6 m across, heading along the pace line's last leg.
+    // Was: stations −40 − gap·row back along the RACING line — on this course that put the third row inside the last
+    // corner at 18 m/s, a turn the stand-in thrust's 3–4 m/s² of reverse could brake for and the engine model's
+    // 1–1.7 m/s² (capability.ts `reverse`) cannot: the rookie missed the start gate before its lap began.
     const gap = o.gridGap ?? 22;
-    for (let i = 0; i < N; i++) placeOnLine(i, -40 - gap * Math.floor(i / 2), i % 2 === 0 ? -6 : 6, 18);
+    const pl = course.paceLine;
+    const [p0x, p0z] = pl[pl.length - 2];
+    const [p1x, p1z] = pl[pl.length - 1];
+    const pll = Math.hypot(p1x - p0x, p1z - p0z);
+    const ptx = (p1x - p0x) / pll;
+    const ptz = (p1z - p0z) / pll;
+    for (let i = 0; i < N; i++) {
+      const back = 40 + gap * Math.floor(i / 2);
+      const lateral = i % 2 === 0 ? -6 : 6;
+      const gx = p1x - ptx * back + ptz * lateral;
+      const gz = p1z - ptz * back - ptx * lateral;
+      const yaw = Math.atan2(ptx, ptz);
+      fleet.place(i, {
+        position: [gx, 0.35 + mirror.heightAt(gx, gz, now), gz],
+        quaternion: [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)],
+        velocity: [ptx * 18, 0, ptz * 18],
+        angularVelocity: [0, 0, 0],
+      });
+    }
 
     type St = {
       next: number;

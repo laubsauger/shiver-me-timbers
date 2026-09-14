@@ -1,0 +1,9 @@
+{
+  "components": 1327104,
+  "changed": 32039,
+  "maxError": 0.00048828125,
+  "rmsError": 4.516319036087479e-05,
+  "baselineQueueMs": 3.0150000154972076,
+  "candidateQueueMs": 2.798124998807907,
+  "samplesPerVariant": 16
+}

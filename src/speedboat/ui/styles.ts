@@ -290,6 +290,18 @@ const SCREENS = /* css */ `
 /* pause */
 .sbs-pause .sbs-dim { --dim-a: 0.74; }
 .sbs-menu { left: ${u(48)}; top: ${u(196)}; width: ${u(386)}; display: flex; flex-direction: column; gap: ${u(8)}; }
+/* §T.201: twelve rows (boat select, graphics, full screen, dev overlays joined) still clear the hint line */
+.sbs-pause .sbs-menu { top: ${u(176)}; gap: ${u(3)}; }
+.sbs-pause .sbs-menu .sbs-item { height: ${u(36)}; font-size: ${u(18)}; }
+
+/* §T.201 on-screen pause for mouse users: top right, left of the plotter (CHASE_PANELS plotter: right 24, w 160) */
+.sbp-btn { position: absolute; right: ${hu(196)}; top: ${hu(24)}; width: ${hu(34)}; height: ${hu(34)}; pointer-events: auto; cursor: pointer;
+  border: 0; background: var(--plane); color: var(--ink); display: grid; place-items: center; outline: none;
+  clip-path: polygon(0 0, calc(100% - ${hu(8)}) 0, 100% ${hu(8)}, 100% 100%, 0 100%); }
+.sbp-btn:hover, .sbp-btn:focus-visible { background: var(--orange); color: var(--black-ink); }
+.sbp-btn svg { width: ${hu(12)}; height: ${hu(14)}; }
+.sbp-btn svg path { fill: currentColor; }
+.sbh.is-cockpit .sbp-btn { top: ${hu(96)}; right: ${hu(24)}; }
 .sbs-side { left: ${u(690)}; top: ${u(196)}; width: ${u(534)}; height: ${u(444)}; padding: ${u(24)} ${u(24)}; --clip: ${u(16)}; }
 .sbs-side h2 { font-size: ${u(13)}; display: flex; justify-content: space-between; align-items: baseline; padding-bottom: ${u(12)}; border-bottom: 1px solid var(--dim); }
 .sbs-side h2 span { font-size: ${u(11)}; color: var(--mute); }
@@ -346,11 +358,27 @@ const SCREENS = /* css */ `
 .sbs-hull-l { left: ${u(64)}; top: ${u(72)}; font-size: ${u(13)}; color: var(--mute); }
 .sbs-hull-t { left: ${u(58)}; top: ${u(92)}; font-size: ${u(100)}; }
 .sbs-hull-s { left: ${u(66)}; top: ${u(200)}; font-size: ${u(13)}; }
-.sbs-preview { left: ${u(40)}; top: ${u(236)}; width: ${u(700)}; height: ${u(220)}; }
-.sbs-preview > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-.sbs-preview.is-3d > svg { display: none; }
-.sbs-preview-host { position: absolute; inset: 0; }
-.sbs-spec { left: ${u(64)}; top: ${u(478)}; width: ${u(680)}; display: grid; grid-template-columns: ${u(260)} ${u(230)} ${u(190)}; row-gap: ${u(22)}; }
+.sbs-preview { left: ${u(40)}; top: ${u(226)}; width: ${u(720)}; height: ${u(304)}; }
+/* §T.201: the preview is the page's in-engine render — a thumbnail until the live turntable draws into the host */
+.sbs-preview-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.sbs-preview-img[hidden] { display: none; }
+.sbs-preview.is-3d > .sbs-preview-img { display: none; }
+.sbs-preview-host { position: absolute; inset: 0; cursor: grab; }
+.sbs-preview-host:active { cursor: grabbing; }
+/* the turntable's stage furniture (the stage itself is drawn in-engine, page/boatPreview.ts): stencil corner brackets in
+   the paint's hue, a skewed signal bar and the number tag; the dim's hole clips the top-right corner like every plane */
+.sbs-stage-frame { position: absolute; inset: ${u(-7)}; pointer-events: none; --b: var(--player, var(--orange)); --l: ${u(30)}; --t: ${u(2)};
+  background:
+    linear-gradient(var(--b), var(--b)) left top / var(--l) var(--t) no-repeat, linear-gradient(var(--b), var(--b)) left top / var(--t) var(--l) no-repeat,
+    linear-gradient(var(--b), var(--b)) left bottom / var(--l) var(--t) no-repeat, linear-gradient(var(--b), var(--b)) left bottom / var(--t) var(--l) no-repeat,
+    linear-gradient(var(--b), var(--b)) right bottom / var(--l) var(--t) no-repeat, linear-gradient(var(--b), var(--b)) right bottom / var(--t) var(--l) no-repeat; }
+.sbs-stage-tag { position: absolute; left: ${u(22)}; bottom: ${u(18)}; display: flex; align-items: baseline; gap: ${u(12)}; pointer-events: none; }
+.sbs-stage-num { font-size: ${u(44)}; }
+.sbs-stage-name { font-size: ${u(12)}; color: var(--mute); }
+.sbs-stage-bar { position: absolute; left: ${u(22)}; bottom: ${u(10)}; width: ${u(120)}; height: ${u(4)}; background: var(--player, var(--orange)); transform: skewX(-30deg); transform-origin: left; pointer-events: none; }
+.sbs-stage-hint { position: absolute; right: ${u(20)}; bottom: ${u(16)}; font-size: ${u(10)}; color: var(--mute); pointer-events: none; }
+.sbs-preview:not(.is-3d) .sbs-stage-hint { display: none; }
+.sbs-spec { left: ${u(64)}; top: ${u(556)}; width: ${u(680)}; display: grid; grid-template-columns: ${u(260)} ${u(230)} ${u(190)}; row-gap: ${u(22)}; }
 .sbs-spec .sb-label { font-size: ${u(11)}; color: var(--mute); }
 .sbs-spec .sb-stencil { font-size: ${u(22)}; margin-top: ${u(8)}; white-space: nowrap; }
 .sbs-pick { left: ${u(804)}; top: ${u(64)}; width: ${u(420)}; }
@@ -359,7 +387,11 @@ const SCREENS = /* css */ `
 .sbs-paints { display: grid; grid-template-columns: repeat(2, ${u(200)}); gap: ${u(8)} ${u(16)}; }
 .sbs-paint { position: relative; height: ${u(66)}; padding: ${u(4)} ${u(8)} ${u(6)}; display: flex; flex-direction: column; justify-content: space-between;
   --clip: ${u(12)}; clip-path: polygon(0 0, calc(100% - var(--clip)) 0, 100% var(--clip), 100% 100%, 0 100%); background: rgba(21, 27, 28, 0.5); }
-.sbs-paint svg { width: 100%; height: ${u(40)}; }
+.sbs-thumb { position: relative; display: block; width: 100%; height: ${u(42)}; overflow: hidden;
+  background: linear-gradient(90deg, transparent 0 18%, var(--chip) 18% 82%, transparent 82%) center / 100% ${u(6)} no-repeat; }
+.sbs-thumb-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.sbs-thumb:has(.sbs-thumb-img:not([hidden])) { background: none; }
+.sbs-thumb-img[hidden] { display: none; }
 .sbs-paint .sb-label { font-size: ${u(10)}; color: var(--mute); }
 .sbs-paint.is-chosen::after { content: ""; position: absolute; inset: 0; box-shadow: inset 0 0 0 ${u(3)} var(--orange); }
 .sbs-paint.is-chosen .sb-label { color: var(--ink); }

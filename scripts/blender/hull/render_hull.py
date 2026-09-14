@@ -8,7 +8,8 @@ CPU preview renders of the hero hull (Cycles CPU + OIDN; no GPU, no browser). do
 --work     the build's work dir: the hull preview maps (hull_preview_<variant>_albedo.png, _clearcoat.png)
            evaluate the RUNTIME livery formula (slotMaterials.ts) per texel, so variants render without a GPU
 --clay     flat grey materials (geometry review)
-Views: side rear34 hero34 front top below chase foredeck deck34 close_chine close_bow close_transom
+Views: side rear34 hero34 front top below chase farchase farchase34 foredeck deck34 close_chine close_bow close_transom
+M_Carbon is recoloured with the runtime cowl-livery formula for --variant (hull_textures.FLEET)
 """
 import argparse
 import math
@@ -20,6 +21,7 @@ from mathutils import Vector
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..'))
+sys.path.insert(0, HERE)
 import sb_conventions as sb  # noqa: E402
 
 
@@ -162,6 +164,50 @@ def preview_hull_material(mat, work, variant, slot):
         bsdf.inputs['Coat Weight'].default_value = 0.0
 
 
+def hex_linear(h):
+    h = h.lstrip('#')
+    c = [int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4)]
+    return [v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in c]
+
+
+def preview_carbon_livery(mat, dominant):
+    """§T.200: M_Carbon as slotMaterials.ts draws it — mix(albedo, dominant · clamp(lum(albedo) / lum(hero orange), 0, 1.6),
+    baseColor.a), so the cowl livery mask (cap + upper cowl, lower-cowl pinstripe) and rival hues show in the renders"""
+    nt = mat.node_tree
+    bsdf = next((n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    link = next((lk for lk in nt.links if bsdf and lk.to_node == bsdf and lk.to_socket.name == 'Base Color'), None)
+    tex = link.from_node if link and link.from_node.type == 'TEX_IMAGE' else None
+    if tex is None:
+        print(f'[render] {mat.name}: no base colour image to recolour')
+        return
+    hero = hex_linear('#E4572E')
+    hero_lum = 0.2126 * hero[0] + 0.7152 * hero[1] + 0.0722 * hero[2]
+    lum = nt.nodes.new('ShaderNodeRGBToBW')
+    nt.links.new(tex.outputs['Color'], lum.inputs['Color'])
+    ratio = nt.nodes.new('ShaderNodeMath')
+    ratio.operation = 'DIVIDE'
+    nt.links.new(lum.outputs['Val'], ratio.inputs[0])
+    ratio.inputs[1].default_value = hero_lum
+    cl = nt.nodes.new('ShaderNodeClamp')
+    nt.links.new(ratio.outputs[0], cl.inputs['Value'])
+    cl.inputs['Max'].default_value = 1.6
+    tint = nt.nodes.new('ShaderNodeMix')
+    tint.data_type = 'RGBA'
+    tint.blend_type = 'MULTIPLY'
+    tint.inputs['Factor'].default_value = 1.0
+    tint.inputs['A'].default_value = (*hex_linear(dominant), 1.0)
+    comb = nt.nodes.new('ShaderNodeCombineColor')
+    for ch in ('Red', 'Green', 'Blue'):
+        nt.links.new(cl.outputs['Result'], comb.inputs[ch])
+    nt.links.new(comb.outputs['Color'], tint.inputs['B'])
+    mix = nt.nodes.new('ShaderNodeMix')
+    mix.data_type = 'RGBA'
+    nt.links.new(tex.outputs['Alpha'], mix.inputs['Factor'])
+    nt.links.new(tex.outputs['Color'], mix.inputs['A'])
+    nt.links.new(tint.outputs['Result'], mix.inputs['B'])
+    nt.links.new(mix.outputs['Result'], bsdf.inputs['Base Color'])
+
+
 def clay(mat):
     nt = mat.node_tree
     nt.nodes.clear()
@@ -209,6 +255,9 @@ def main():
             for link in list(mat.node_tree.links):
                 if link.to_socket.name == 'Alpha':
                     mat.node_tree.links.remove(link)
+        if slot == 'M_Carbon':
+            import hull_textures  # noqa: E402  (the preview fleet; imported late, it pulls in numpy + hero_hull)
+            preview_carbon_livery(mat, hull_textures.FLEET[args.variant]['dominant'])
     for img in bpy.data.images:
         img.alpha_mode = 'CHANNEL_PACKED'
     ext = {k: hull_obj.parent.parent[k] for k in ('bowZ', 'sternZ', 'keelY', 'deckY')} if hull_obj and hull_obj.parent and hull_obj.parent.parent and 'bowZ' in hull_obj.parent.parent else {'bowZ': 8.39, 'sternZ': -3.61, 'keelY': -0.854, 'deckY': 0.82}
@@ -232,6 +281,12 @@ def main():
             camera(scene, (0.0, 28.0, mid + 0.001), (0.0, 0.0, mid), 60)
         elif view == 'below':
             camera(scene, (-7.5, -6.0, bow + 3.5), (0.0, -0.6, mid + 0.5), 32)
+        elif view == 'farchase':
+            # §T.200: the race page's far chase framing, 22 m behind the CG and 7.5 m up (USER playtest screenshot)
+            camera(scene, (0.0, 7.5, -22.0), (0.0, 0.3, 2.0), 30)
+        elif view == 'farchase34':
+            # the same distance, 30° off the stern (a boat turning ahead of the chase cam shows its side)
+            camera(scene, (-11.0, 7.5, -19.1), (0.0, 0.3, 0.5), 30)
         elif view == 'chase':
             camera(scene, (0.0, deck + 2.6, stern - 10.0), (0.0, deck - 0.2, stern + 5.0), 38)
         elif view == 'close_chine':

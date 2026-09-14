@@ -57,7 +57,37 @@ export interface SprayPoolOptions {
    */
   fadeNear?: () => number;
   fadeFar?: () => number;
+  /** §T.195 per-pool gravity (m/s², + down) — a bubble rises; uniform value only (default sprayParams.gravity) */
+  gravity?: () => number;
+  /** §T.195 per-pool opacity — uniform value only (default sprayParams.opacity) */
+  opacity?: () => number;
+  /** §T.195 per-pool sprite colour node (default the shared foam tint); a GRAPH option — absent builds the same WGSL */
+  colorNode?: () => unknown;
+  /**
+   * §T.199 blend mode (pipeline state, not WGSL; default additive). A dense water plume (the rooster tail) OCCLUDES
+   * what is behind it — additive white over a sunlit sky or whitewater adds nothing and the plume vanishes.
+   */
+  blending?: THREE.Blending;
+  /**
+   * §T.199 draw order in the transparent pass (default 0). THE OCEAN IS A TRANSPARENT, DEPTH-WRITING MESH at
+   * renderOrder 0 (surfaceMaterial.ts), and three sorts equal renderOrders by the OBJECT's projected origin: a sprite
+   * pool's origin is the world origin, the ocean's the camera-snapped grid centre, so a pool whose origin lay farther
+   * than the ocean's drew FIRST and the sea painted over every particle above it (T199, measured sortZ 414 vs 3.8).
+   * An emitter above the water draws after the ocean (`SPRAY_OVER_WATER_ORDER`), depth-tested against its depth.
+   */
+  renderOrder?: number;
 }
+
+/**
+ * §T.199 transparent-pass slot for spray ABOVE the water: after the ocean (0), before cockpit glass
+ * (`PERSPEX_RENDER_ORDER` = 1, speedboat/assets/waterMask.ts), so spray seen through a windscreen is still behind it.
+ */
+export const SPRAY_OVER_WATER_ORDER = 0.5;
+/**
+ * §T.199 slot for particles UNDER the surface (prop bubbles): after the hull water-mask cap (−1), before the ocean,
+ * so they are in the framebuffer the ocean's refraction copies when it draws.
+ */
+export const SPRAY_UNDER_WATER_ORDER = -0.5;
 
 export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}) {
   // counts feed buffer sizes + dispatch counts at construction — sanitize
@@ -175,7 +205,8 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   // birth fade-in kills the pop of a sprite appearing at full size/alpha
   const born = smoothstep(float(0), float(0.12), ageN);
   const decayN = ageN.oneMinus().pow(1.4);
-  material.colorNode = foamTintNode(); // warm-white, shared with sea foam
+  // warm-white, shared with sea foam (§T.195: a pool may bring its own, e.g. the prop wash's aerated turquoise)
+  material.colorNode = (options.colorNode ? options.colorNode() : foamTintNode()) as typeof material.colorNode;
   material.opacityNode = shape
     .mul(born)
     .mul(decayN)
@@ -183,7 +214,7 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
     .mul(uOpacity)
     .clamp(0, 1);
   material.transparent = true;
-  material.blending = THREE.AdditiveBlending;
+  material.blending = options.blending ?? THREE.AdditiveBlending;
   material.depthWrite = false;
   // explicit, not defaulted: spray must be depth-TESTED against the hull or
   // particles behind the ship would draw over it and read as the deck being
@@ -195,6 +226,7 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   const mesh = new THREE.Sprite(material as unknown as THREE.SpriteMaterial);
   mesh.count = count;
   mesh.frustumCulled = false; // positions live GPU-side, CPU knows no bounds
+  if (options.renderOrder !== undefined && Number.isFinite(options.renderOrder)) mesh.renderOrder = options.renderOrder;
 
   let initialized = false;
   const run = (renderer: THREE.WebGPURenderer, pass: unknown) =>
@@ -219,14 +251,14 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
       uLife.value = Math.max(fin(options.life?.() ?? sprayParams.life, 1), 1e-3);
       // clamped < 1 so the shortest-lived slot keeps a positive lifetime
       uLifeVar.value = Math.min(0.9, Math.max(0, fin(sprayParams.lifeVariation, 0)));
-      uGravity.value = fin(sprayParams.gravity, 0);
+      uGravity.value = fin(options.gravity?.() ?? sprayParams.gravity, 0);
       uDragFactor.value = Math.exp(
         -Math.max(0, fin(options.drag?.() ?? sprayParams.drag, 0)) * SIM_DT,
       );
       uSizeScale.value = Math.max(0, fin(options.sizeScale?.() ?? 1, 1));
       uSizeMin.value = fin(sprayParams.sizeMin, 0);
       uSizeMax.value = fin(sprayParams.sizeMax, 0);
-      uOpacity.value = fin(sprayParams.opacity, 0);
+      uOpacity.value = fin(options.opacity?.() ?? sprayParams.opacity, 0);
       uSoftness.value = Math.max(1, fin(sprayParams.softness, 1));
       uStreak.value = Math.max(1, fin(sprayParams.streak, 1));
       uStreakRef.value = Math.max(1e-3, fin(sprayParams.streakRefSpeed, 1));

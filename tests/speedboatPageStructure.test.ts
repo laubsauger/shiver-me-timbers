@@ -23,13 +23,14 @@ import mainSpeedboat from '../src/main-speedboat.ts?raw';
 import frameSrc from '../src/speedboat/page/speedboatFrame.ts?raw';
 import sceneSrc from '../src/speedboat/page/speedboatScene.ts?raw';
 import npcSrc from '../src/speedboat/page/npcFleet.ts?raw';
+import sessionSrc from '../src/speedboat/page/raceSession.ts?raw';
 import playerSrc from '../src/speedboat/page/playerBoat.ts?raw';
 import { SIM_DT } from '../src/core/loop';
 import { oceanParams } from '../src/params/ocean';
 import { buildDeepVHull } from '../src/speedboat/hullMesh';
 import { createPlayerBoat } from '../src/speedboat/page/playerBoat';
 import { createNpcFleetDriver, type NpcFleet } from '../src/speedboat/page/npcFleet';
-import { gridSlot, openSeaCourse } from '../src/speedboat/page/course';
+import { gridSlot, openSeaCourse, SPAWN_CG_Y } from '../src/speedboat/page/course';
 import { keyboardTargets, KEYBOARD_STEER_LIMIT } from '../src/speedboat/page/controls';
 import { speedboatSeaParams } from '../src/speedboat/page/seaParams';
 import { hashBoatOutput, HASH_SEED } from '../src/sim-worker/layout';
@@ -43,8 +44,8 @@ const frame = code(frameSrc);
 /** the body of the loop's tick and render callbacks, split at the render callback's signature */
 function loopBodies(src: string): { tick: string; render: string } {
   const start = src.indexOf('new GameLoop(');
-  const renderAt = src.indexOf('(alpha, frameDt) =>', start);
-  const end = src.indexOf('() => paused', renderAt);
+  const renderAt = src.search(/\(alpha, frameDt(, \w+)?\) =>/);
+  const end = src.indexOf('() => ui.blocking', renderAt);
   expect(start, 'new GameLoop(').toBeGreaterThan(-1);
   expect(renderAt, 'render callback').toBeGreaterThan(start);
   expect(end, 'pause predicate').toBeGreaterThan(renderAt);
@@ -78,20 +79,27 @@ describe('§T.181 boot order', () => {
       'createWeatherSystem(',
       'createSky(',
       'buildSpeedboatSea(',
+      'course.attach(sea)',
+      'createCourseFurniture(',
       'createPlayerBoat(',
       'buildSpeedboatBoats(',
+      'createPilots(',
       'createNpcFleetDriver(',
+      'createRaceSession(',
+      'createRaceUi(',
       'new GameLoop(',
       'withFullCoverage(',
       'flowFoam.warmAsync(',
       'presentAsync()',
       'loop.start()',
       'bootReady()',
+      'ui.openSelect()',
     ]);
   });
 
-  it('Working sea by default with storm cells off, on the SIM wake backend', () => {
-    expect(main).toMatch(/DEFAULT_SEA = 'swell'/); // 'swell' is WEATHER_PRESET_INFO's "Working sea"
+  it('the course dictates the sea (Tower Reach: Calm, start in the lee), storm cells off, on the SIM wake backend', () => {
+    // user playtest 2026-09-13: "start on calm sea or whatever is dictated by map and luv/lee design"
+    expect(main).toMatch(/weather\.apply\(query\.get\('weather'\) \?\? course\.seaPreset/);
     expect(main).toMatch(/weatherParams\.cellIntensity = 0/);
     expect(code(sceneSrc)).toMatch(/wakeBackend: 'sim'/);
   });
@@ -119,12 +127,15 @@ describe('§T.181 boot order', () => {
 describe('§V2/§V3 the player boat is stepped in the FIXED tick only', () => {
   const { tick, render } = loopBodies(main);
 
-  it('the tick runs controls → sea → physics → crash hook → wake → NPC record + pump, in that order', () => {
-    inOrder(tick, ['controls.sample(', 'frame.tickSea()', 'player.tick(', 'crash.tick(', 'frame.tickBoat(', 'npcs.recordTick(', 'npcs.pump(']);
+  it('the tick runs sea → race session → wake → NPC pump; the session runs controls → collide → physics → crash → race → outputs', () => {
+    inOrder(tick, ['frame.tickSea()', 'session.tick(state.tick, state.time, dt)', 'frame.tickBoat(', 'npcs.pump(']);
+    const s = code(sessionSrc);
+    const body = s.slice(s.indexOf('    tick(tick: number, time: number, dt: number): void {'));
+    inOrder(body, ['session.controls(dt, tick)', 'session.collide(tick, time)', 'player.tick(c, time, dt)', 'session.crash(tick)', 'session.step(tick)', 'session.applyOutputs(tick)']);
   });
 
   it('the render callback never steps physics, samples the sea for forces, or feeds the wake', () => {
-    for (const bad of ['player.tick(', 'stepRigid6', 'samplePatch', 'tickSea', 'tickBoat', 'controls.sample(', 'recordTick']) {
+    for (const bad of ['player.tick(', 'stepRigid6', 'samplePatch', 'tickSea', 'tickBoat', 'controls.sample(', 'recordTick', 'session.tick(', 'session.start(']) {
       expect(render, bad).not.toContain(bad);
     }
     for (const bad of ['stepRigid6', 'samplePatch', 'player.tick(', 'wakeSim']) {
@@ -152,7 +163,8 @@ describe('§V2/§V3 the player boat is stepped in the FIXED tick only', () => {
       return { restY, state, samples: boat.wakeSamples([]).length, jets: boat.jets([]).length };
     };
     const straight = run(0);
-    expect(Math.abs(straight.restY - 0.197)).toBeLessThan(0.02); // hydrostatic rest, the spawn height
+    // restCgHeight is the static solve; the free boat settles 3.5 cm lower after 2 s (running trim of the aft engine mass)
+    expect(Math.abs(straight.restY - SPAWN_CG_Y)).toBeLessThan(0.05); // hydrostatic rest ≈ the spawn height (§T.198 derives it from the hull)
     expect(straight.state.velocity[2]).toBeGreaterThan(15); // under way along +z
     expect(straight.samples).toBeGreaterThan(0); // §V101: the wake reads this step's contact
     expect(straight.jets).toBe(hull.drives.length);
@@ -242,12 +254,14 @@ describe('§V105 the wake is anchored on the player SIM pose', () => {
   it('tickBoat feeds wakeSim with the SimState ship rigid6 wrote, and only the fixed tick calls tickBoat', () => {
     expect(frame).toMatch(/const boat = player\.state;/);
     const tb = method(frame, 'tickBoat');
-    expect(tb).toMatch(/wakeSim\?\.tick\(boat, wakeSamples, hull\.stemZ, dt, jets\)/);
+    // §T.195: every boat's wake goes through vesselFx, anchored on the player's SIM pose (`state: boat`), this step's
+    // contact (`hw: player.hw`) and the rivals' collected FX records; the camera is only the spray pools' viewer
+    expect(tb).toMatch(/vesselFx\.tick\(app\.renderer, \{ hw: player\.hw, state: boat, bowAhead: hull\.stemZ \+ 120 \}, d\.npcs\.fleet, dt, app\.camera\.position\)/);
     // the flowfoam region + wake track follow the same sim pose (core/seaFrame.trackWake → setCenter(ship.position))
     expect(tb).toMatch(/seaFrame\.trackWake\(boat, hull\.stemZ, hull\.transomZ, hull\.beam, dt\)/);
-    expect(tb).not.toMatch(/camera|view\b|alpha/);
+    expect(tb.replace('app.camera.position)', ')')).not.toMatch(/camera|view\b|alpha/);
     // the samples and jets are this step's contact (§V101)
-    inOrder(tb, ['player.wakeSamples(', 'player.jets(', 'wakeSim?.tick(']);
+    inOrder(tb, ['player.wakeSamples(', 'player.jets(', 'vesselFx.tick(']);
     const { tick, render } = loopBodies(main);
     expect(tick).toContain('frame.tickBoat(dt)');
     expect(render).not.toContain('tickBoat');

@@ -37,6 +37,7 @@ import {
 import { createSierraAtlas, tagSierraIsland, type SierraAtlas } from './sierraAtlas';
 import type { IslandHeightmap } from './heightmap';
 import { createPineMaterialSet, type PineMaterialSet } from '../vegetation/pineScatter';
+import { kitHooksFor, type KitMaterialSet } from './kitIsland';
 
 export interface IslandMaterials {
   terrain: TerrainBlendMaterialHandle;
@@ -84,6 +85,15 @@ export interface IslandMaterials {
   releaseSierra(hm: IslandHeightmap): void;
   /** pines/junipers/dead pines — same lazy rule, one shader world-wide */
   pines(): PineMaterialSet;
+  /**
+   * §T.194: the kit shader pair for a `kit:` island (kitIsland.ts), built on
+   * first request off the SAME atlas, its layer bound. Null for every other
+   * island, and when no kit registered hooks — a world without kit islands
+   * never builds it.
+   */
+  kit(hm: IslandHeightmap): KitMaterialSet | null;
+  /** §T.194: put a prop material on the island aerial curve (the §B67 rule the rocks and palms follow) */
+  aerialOutput(material: THREE.Material): void;
   /**
    * Per-frame push for every shared shader. `waterLevel` is the live sea
    * height at the shore being looked at (§V8: same CpuOcean mirror buoyancy
@@ -149,6 +159,7 @@ export function createIslandMaterials(): IslandMaterials {
   let sierraTerrain: TerrainBlendMaterialHandle | null = null;
   let sierraRock: SierraRockMaterialHandle | null = null;
   let pines: PineMaterialSet | null = null;
+  let kit: KitMaterialSet | null = null;
   const getSierraTerrain = (hm?: IslandHeightmap): TerrainBlendMaterialHandle => {
     const a = getAtlas();
     if (hm) a.bind(hm);
@@ -191,7 +202,37 @@ export function createIslandMaterials(): IslandMaterials {
       atlas?.release(hm);
     },
     pines: getPines,
+    aerialOutput(m): void {
+      const node = m as THREE.MeshStandardNodeMaterial;
+      node.fog = false;
+      node.outputNode = aerialOutputNode(aerial);
+    },
+    kit(hm): KitMaterialSet | null {
+      const hooks = kitHooksFor(hm);
+      if (!hooks) return null;
+      const a = getAtlas();
+      const binding = a.bind(hm);
+      if (!kit) {
+        kit = hooks.createMaterials(a);
+        // §B67: one haze curve per island, as for the sierra rock
+        kit.rock.material.fog = false;
+        kit.rock.material.outputNode = aerialOutputNode(aerial);
+      }
+      kit.bind(hm, binding.layer);
+      return kit;
+    },
     update(frame): void {
+      if (kit) {
+        kit.terrain.updateFromParams();
+        kit.terrain.setSunDirection(frame.sunDirection);
+        kit.terrain.setHazeColor(frame.hazeColor);
+        kit.terrain.setTime(frame.time);
+        kit.terrain.setSwell(frame.swell);
+        kit.terrain.setWaterline(frame.waterLevel);
+        kit.rock.updateFromParams();
+        (kit.rock.uniforms.sunDirection.value as THREE.Vector3).copy(frame.sunDirection).normalize();
+        kit.update(frame);
+      }
       if (sierraTerrain) {
         sierraTerrain.updateFromParams();
         sierraTerrain.setSunDirection(frame.sunDirection);
@@ -237,6 +278,7 @@ export function createIslandMaterials(): IslandMaterials {
     dispose(): void {
       sierraTerrain?.dispose();
       sierraRock?.dispose();
+      kit?.dispose();
       atlas?.dispose();
       pines?.pine.material.dispose();
       terrain.dispose();

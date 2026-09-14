@@ -171,9 +171,9 @@ export class OceanCascade {
   update(renderer: THREE.WebGPURenderer, time: number, choppiness: number): void {
     this.timeUniform.value = time;
     this.choppinessUniform.value = choppiness;
-    for (const pass of this.passes) {
-      renderer.compute(pass as Parameters<THREE.WebGPURenderer['compute']>[0]);
-    }
+    // Ordered dispatches share one submission; each FFT stage still reads the
+    // preceding stage's output. The array identity stays stable between frames.
+    renderer.compute(this.passes as Parameters<THREE.WebGPURenderer['compute']>[0]);
   }
 }
 

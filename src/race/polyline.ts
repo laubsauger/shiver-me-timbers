@@ -2,11 +2,12 @@
  * Arc-length polyline on the sea plane (§T.184). Pure math, no three.js (§V109).
  *
  * Frame and heading convention match `core/steering.ts`: yaw θ ⇒ forward
- * [sin θ, cos θ] in (x, z); starboard of a direction d is (d.z, −d.x).
+ * [sin θ, cos θ] in (x, z). Handedness is types.ts (§T.197, physical, y up): starboard of a
+ * direction d is (−d.z, d.x), port is (d.z, −d.x).
  */
 import type { Vec2 } from './types';
 
-/** z-component of the 2D cross product a × b in (x, z). Positive ⟹ b lies to PORT of a. */
+/** a.x·b.z − a.z·b.x in (x, z). Positive ⟹ b lies to STARBOARD of a (types.ts handedness: facing +z, +x is port). */
 export function cross2(ax: number, az: number, bx: number, bz: number): number {
   return ax * bz - az * bx;
 }
@@ -78,8 +79,8 @@ export class Polyline {
 
   /**
    * Point and tangent at arc length `s`. Closed: `s` wraps. Open: beyond either end the
-   * point is extrapolated along the end segment's tangent (a grid slot behind the start of
-   * the pace line still has a place to be).
+   * point is extrapolated along the end segment's tangent (grid slots never ask for that:
+   * rollingStart keeps them on the line, §T.197).
    */
   pointAt(s: number): LinePoint {
     let a = s;

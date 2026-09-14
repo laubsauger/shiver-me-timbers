@@ -20,6 +20,7 @@
  */
 import type { IslandSite } from '../../island';
 import type { Course } from '../../race/types';
+import type { CrashKind as CrashMachineKind } from '../crash/detect';
 import type { Rigid6State } from '../../sea-physics/rigidBody';
 import type { ShipState } from '../../state/simState';
 
@@ -80,6 +81,8 @@ export interface BoatAudioFrame {
     driveAdvance?: ArrayLike<number>;
     /** per drive prop immersion 0..1 (hullWater `driveImmersion`, §T.183 hook 1) */
     driveImmersion?: ArrayLike<number>;
+    /** per drive rpm of the §T.189 engine model (hullWater `driveRpm`; zeros before the first step) */
+    driveRpm?: ArrayLike<number>;
   };
   /** the Governor assist's dial as audio spells it (§T.183 hook 5); absent = 'off' */
   governor?: 'off' | 'air' | 'full';
@@ -117,15 +120,25 @@ export interface HudSink {
 export interface CourseHook {
   /** the islands `buildSea` places (construction-time: the seabed feeds the ocean material) */
   readonly sites: IslandSite[];
-  /** the race course, or null for open sea */
+  /** the race course, or null for open sea (a two-phase hook reports null until `attach`) */
   readonly course: Course | null;
   /** grid slot → spawn pose (index 0 = player, 1..n = NPCs), tick 0. Velocity/rates may be non-zero (rolling start) */
   spawn(slot: number): Rigid6State;
+  /**
+   * §T.191 PHASE TWO, optional: called once right after `buildSea` with the built sea (the circuit needs the
+   * archipelago's finished heightmaps and seabed). Returns the course world the race runs on. Absent = open sea.
+   */
+  attach?(sea: unknown): unknown;
 }
 
 // ── crash / respawn (§T.188) ───────────────────────────────────────────────────────────────
 
-export type CrashKind = 'capsize' | 'stuff' | 'blowOver' | 'structure' | 'offCourse';
+/**
+ * §T.191: ONE set of crash kind names — the crash module's (`speedboat/crash/detect.ts`: hook | stuff | blowOver |
+ * barrelRoll | impact). The S0 placeholder names (capsize, structure, offCourse) are gone: a capsize is a barrelRoll,
+ * a structure hit an impact, and off-course belongs to the race logic (`RacerSensors.respawnRequested`).
+ */
+export type CrashKind = CrashMachineKind;
 
 export interface CrashEvent {
   kind: CrashKind;
