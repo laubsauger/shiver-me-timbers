@@ -70,7 +70,7 @@ const HUD = /* css */ `
 .sbh [data-panel] { transition: opacity 0.22s ease; }
 .sbh.is-hidden-race [data-panel]:not([data-panel="radio"]), .sbh.is-crash [data-panel] { opacity: 0; }
 .sbh.is-cockpit [data-panel="timer"], .sbh.is-cockpit [data-panel="plotter"], .sbh.is-cockpit [data-panel="sea"],
-.sbh.is-cockpit [data-panel="trim"], .sbh.is-cockpit [data-panel="surge"], .sbh.is-cockpit [data-panel="speed"] { display: none; }
+.sbh.is-cockpit [data-panel="surge"] { display: none; }
 ${panelCss('.sbh.is-chase', CHASE_PANELS)}
 ${panelCss('.sbh.is-cockpit', COCKPIT_PANELS)}
 .sbh .sb-float { text-shadow: 0 0 ${hu(3)} rgba(21, 27, 28, 0.6), 0 ${hu(1)} ${hu(1)} rgba(21, 27, 28, 0.5); }

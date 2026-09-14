@@ -55,6 +55,10 @@ export const COCKPIT_PANELS: readonly HudPanelRect[] = [
   { id: 'position', anchor: 'tl', x: 28, y: 96, w: 176, h: 70 },
   { id: 'standings', anchor: 'tl', x: 28, y: 172, w: 190, h: 44 },
   { id: 'radio', anchor: 'tc', x: 0, y: 112, w: 420, h: 30 },
+  // until the 3D dash displays are wired (DashDisplays is built, not mounted on the dash part), the overlay carries
+  // the trim dial and speed/rpm compactly: the cockpit view had NO trim or speed readout (user 2026-09-14)
+  { id: 'trim', anchor: 'bl', x: 28, y: 14, w: 176, h: 96 },
+  { id: 'speed', anchor: 'br', x: 24, y: 14, w: 176, h: 96 },
 ];
 
 /** HUD size option (pause → HUD size); the whole race HUD scales by `--hud-scale` */

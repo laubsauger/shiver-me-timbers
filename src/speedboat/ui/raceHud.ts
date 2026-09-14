@@ -320,9 +320,10 @@ export class RaceHud {
     this.lastClock.update(m.lastLap);
     this.bestClock.update(m.bestLap);
     this.updateRadio(m, dt);
+    // trim + speed show in both layouts (cockpit overlay carries them until the 3D dash displays are mounted)
+    this.trim.update(m.attitudeDeg, m.airborne, m.landing);
+    this.speed.update(m.knots, m.rpmAvg, m.rpmFrac, m.governor, m.surgeActive);
     if (!cockpit) {
-      this.trim.update(m.attitudeDeg, m.airborne, m.landing);
-      this.speed.update(m.knots, m.rpmAvg, m.rpmFrac, m.governor, m.surgeActive);
       this.surge.update(m.surge);
       this.plotter.update(m.racerX, m.racerZ, m.racerHeading, m.racerActive, m.nextElement, m.nextLabel, m.gateDistanceM);
       if (m.seaHeading !== this.sea$ || Math.round(m.swellM * 10) !== this.swellTenth) this.rebuildSea(m.seaHeading, m.swellM);
