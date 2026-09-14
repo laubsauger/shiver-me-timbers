@@ -228,6 +228,29 @@ export function nightWindGate(gate: number, night: number, density: number): num
   return gate * (1 - n * (1 - keep));
 }
 
+/**
+ * The streak's authored amplitude after dark: `brightness` at day, `brightness × dim` at full night, linear in the one
+ * night clock between.
+ */
+export function windLineNightAmp(brightness: number, night: number, dim: number): number {
+  const n = Math.min(1, Math.max(0, finite(night)));
+  const d = Math.min(1, Math.max(0, finite(dim)));
+  return Math.max(0, finite(brightness)) * (1 - n * (1 - d));
+}
+
+/**
+ * How far the streak's tint is lifted from the live haze toward absolute WHITE (radiance 1): `whiteness` by day, 0 at
+ * full night. The lift is a DAYLIGHT term: at noon white and the haze are the same order of radiance (haze luminance
+ * ≈ 0.72), so it only reads as "whiter". At night the haze is ≈ 0.04, so a 0.65 lift toward 1 made each streak ~15×
+ * the sky's own radiance at the same amplitude: white scratches on a navy sky in every trailer night frame (final look
+ * review), with the amplitude dim already applied. Unlifted, a streak is the haze's own hue at the haze's own
+ * brightness, the way lit air is.
+ */
+export function windLineNightWhiteness(whiteness: number, night: number): number {
+  const n = Math.min(1, Math.max(0, finite(night)));
+  return Math.min(1, Math.max(0, finite(whiteness))) * (1 - n);
+}
+
 /** the two undulation wavenumbers, radians⁻¹ along the streak */
 export function waveNumbers(waveFreq: number): [number, number] {
   const k = TAU * Math.max(0, finite(waveFreq));
@@ -628,14 +651,13 @@ export function createWindLines(p: SkyParams) {
       // Tint: the live haze colour lifted toward white. Both are already in the
       // linear working space, so this is a straight lerp — feeding sRGB numbers
       // into it is §B9, the white wash.
-      const white = Math.min(1, Math.max(0, finite(p.windLineWhiteness)));
-      uTint.value.copy(haze).lerp(WHITE, white);
+      // The white lift fades out with the night clock (`windLineNightWhiteness`).
+      uTint.value.copy(haze).lerp(WHITE, windLineNightWhiteness(p.windLineWhiteness, night));
 
       // Wind lines are LIT AIR. After dark there is almost nothing lighting
       // them, so they fall away to a trace rather than glowing on as white
       // scratches over a night sky.
-      const dim = Math.min(1, Math.max(0, finite(p.windLineNightDim)));
-      uAmp.value = Math.max(0, finite(p.windLineBrightness)) * (1 - night * (1 - dim));
+      uAmp.value = windLineNightAmp(p.windLineBrightness, night, p.windLineNightDim);
     },
   };
 }
