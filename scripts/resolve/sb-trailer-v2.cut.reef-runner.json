@@ -1,0 +1,474 @@
+{
+ "_doc": "The MAIN cut, to 'Reef Runner EX' (203.6 s, 112.3 BPM, bar 2.14 s) played UNEDITED from 0:00 (user: no music edits), faded out over 3.5 s with the picture's end. Song structure found: intro 0-8.5, low 8.5-11.1, build 11.1-28, MAIN DROP bar 14 (28.05), groove, a one-bar dip ~59.6 and the re-drop bar 30 (61.74), long high section with dips ~120-128, drop bar 62 (128.5), break ~140.5, night drop ~151.2, peak 181-183, fade 196.5-203.6. Structure (user): the sunset horizon R6 + title → 01 bow at the waterline → 02-05 long holds → 06 throttle (lever FULL on the main drop 28.05, music dips from the glove touch) → PEAK 1 launch → sunset action → the hand (06c, R5 blend; FULL on bar 27, music dip) + the setup-10 nightfall time-lapse, each camera once, wide → close → silhouette, ~3.1 s each, hard cuts on the beat → PEAK 2 full night on the re-drop 61.74 → night solo → rivals → the R3 pack → PEAK 3 jumps (bar 43, ~88.8) → R7 + 'made by @laub69'; the song plays unedited and fades 3.5 s into bar 52. Time of day never steps back. Lever frames from shotlist.ts (reach ends 0.1 s before the throttle rises at shot t 0, full at 1.2 s) + handles, checked on frame strips. 'until'/'on' = [song bar, beat]; align = source second atSrc lands there; duck = a subtle music dip (-3.5 dB, 4-frame ramp, snaps back on the lever-full frame) between two source seconds of the event; engineAccent = the event's engine stem on SFX extra.",
+ "timeline": "★ sb-trailer-v2 — MAIN (Reef Runner EX)",
+ "plan": "sb-trailer-v2",
+ "music": {
+  "file": "/private/tmp/claude-501/-Users-flo-work-code-shiver-me-timbers/adc53218-9260-41a8-8d6a-476d5936a376/scratchpad/edit/music/reef_runner_ex.mp3",
+  "beats": "/private/tmp/claude-501/-Users-flo-work-code-shiver-me-timbers/adc53218-9260-41a8-8d6a-476d5936a376/scratchpad/edit/music/reef_beats.json",
+  "offsetS": 0.0,
+  "db": 0.0,
+  "fadeOutS": 3.5
+ },
+ "sfxDb": -15.0,
+ "fadeInS": 2.0,
+ "fadeOutS": 2.0,
+ "events": [
+  {
+   "id": "R6",
+   "clip": "sb-trailer-v2_R6_intro-horizon",
+   "until": [
+    4,
+    0
+   ],
+   "src": 5.9,
+   "sfxDb": -8.0,
+   "music": "open on the sunset horizon: the title, engine on the stem",
+   "titles": [
+    {
+     "atS": 1.0,
+     "kind": "wordmark",
+     "text": "speedboat"
+    }
+   ]
+  },
+  {
+   "id": "01",
+   "clip": "sb-trailer-v2_01_waterline-bow",
+   "until": [
+    6,
+    0
+   ],
+   "src": 0.5,
+   "dissolveS": 1.0,
+   "music": "the bow at the waterline: the sunset reveal, long holds"
+  },
+  {
+   "id": "02",
+   "clip": "sb-trailer-v2_02_number-slide",
+   "until": [
+    8,
+    0
+   ],
+   "src": 0.4,
+   "dissolveS": 0.6
+  },
+  {
+   "id": "03",
+   "clip": "sb-trailer-v2_03_outboards-dolly",
+   "until": [
+    10,
+    0
+   ],
+   "src": 0.4,
+   "dissolveS": 0.6
+  },
+  {
+   "id": "04",
+   "clip": "sb-trailer-v2_04_foredeck-glide",
+   "until": [
+    12,
+    0
+   ],
+   "src": 0.4,
+   "dissolveS": 0.6
+  },
+  {
+   "id": "05",
+   "clip": "sb-trailer-v2_05_first-reveal",
+   "until": [
+    13,
+    1
+   ],
+   "src": 0.4,
+   "dissolveS": 0.6
+  },
+  {
+   "id": "06",
+   "clip": "sb-trailer-v2_06_throttle-insert_sunset",
+   "until": [
+    14,
+    0
+   ],
+   "align": {
+    "atSrc": 2.7,
+    "on": [
+     14,
+     0
+    ]
+   },
+   "duck": {
+    "fromSrc": 1.4,
+    "toSrc": 2.7,
+    "db": -3.5
+   },
+   "engineAccent": {
+    "fromSrc": 1.5,
+    "db": -4.0
+   },
+   "note": "lever data (shotlist 06, handle 1.5 s): glove on the lever src 1.40 (f42), push 1.50 (f45), FULL 2.70 (f81) = the drop; music dips 1.40→2.70"
+  },
+  {
+   "id": "07",
+   "clip": "sb-trailer-v2_07_rear-chase-launch",
+   "src": 1.0,
+   "until": [
+    14,
+    3
+   ],
+   "sfxDb": -3.0,
+   "music": "PEAK 1: the lever hits full on the main drop (28.05): launch roar",
+   "engineAccent": {
+    "db": 0.0
+   }
+  },
+  {
+   "id": "07wb",
+   "clip": "sb-trailer-v2_07_rear-chase-launch_cam-windshield-back",
+   "src": 2.6,
+   "until": [
+    15,
+    2
+   ]
+  },
+  {
+   "id": "07ab",
+   "clip": "sb-trailer-v2_07_rear-chase-launch_cam-abeam-stbd",
+   "src": 4.1,
+   "until": [
+    16,
+    1
+   ]
+  },
+  {
+   "id": "08rb",
+   "clip": "sb-trailer-v2_08_side-tracking_cam-insert-rooster-backlit",
+   "src": 3.0,
+   "until": [
+    17,
+    2
+   ],
+   "note": "hold the backlit rooster"
+  },
+  {
+   "id": "08",
+   "clip": "sb-trailer-v2_08_side-tracking",
+   "src": 4.8,
+   "until": [
+    18,
+    2
+   ]
+  },
+  {
+   "id": "08pov",
+   "clip": "sb-trailer-v2_08_side-tracking_cam-pov-forward",
+   "src": 6.3,
+   "until": [
+    19,
+    2
+   ]
+  },
+  {
+   "id": "09",
+   "clip": "sb-trailer-v2_09_rocky-point-pass",
+   "src": 4.2,
+   "until": [
+    21,
+    0
+   ],
+   "note": "Doppler pass 1.4 s in"
+  },
+  {
+   "id": "R1wh",
+   "clip": "sb-trailer-v2_R1_duel_cam-insert-rival-whoosh",
+   "src": 4.2,
+   "until": [
+    21,
+    3
+   ],
+   "sfxDb": -4.0,
+   "music": "duel: pass whoosh up"
+  },
+  {
+   "id": "R1tele",
+   "clip": "sb-trailer-v2_R1_duel_cam-tele",
+   "src": 5.2,
+   "until": [
+    23,
+    0
+   ],
+   "note": "long lens into the sun"
+  },
+  {
+   "id": "R1wb",
+   "clip": "sb-trailer-v2_R1_duel_cam-windshield-back",
+   "src": 6.2,
+   "until": [
+    24,
+    0
+   ],
+   "note": "rival alongside"
+  },
+  {
+   "id": "R2pov",
+   "clip": "sb-trailer-v2_R2_overtake-wake_cam-pov-forward",
+   "src": 4.6,
+   "until": [
+    25,
+    2
+   ],
+   "note": "rival ahead"
+  },
+  {
+   "id": "hand",
+   "clip": "sb-trailer-v2_blend-06c-R5-slow",
+   "until": [
+    26,
+    2
+   ],
+   "align": {
+    "atSrc": 3.2,
+    "on": [
+     26,
+     2
+    ]
+   },
+   "sfxFrom": "sb-trailer-v2_R5_throttle-to-night_sunset",
+   "sfxDb": -6.0,
+   "duck": {
+    "fromSrc": 1.9,
+    "toSrc": 3.2,
+    "db": -3.5
+   },
+   "music": "THE HAND BRINGS THE NIGHT: glove on the lever src 1.90 (f57), push 2.00 (f60), FULL 3.20 (f96) on the beat that cuts to the wide"
+  },
+  {
+   "id": "NF1",
+   "clip": "sb-trailer-v2_blend-10-nightfall-bow-aft",
+   "until": [
+    28,
+    0
+   ],
+   "align": {
+    "atSrc": 7.8,
+    "on": [
+     30,
+     0
+    ]
+   },
+   "sfxFrom": "sb-trailer-v2_10_bow-lookback_dusk",
+   "engineAccent": {
+    "db": -2.0
+   },
+   "music": "the cameras complete it: WIDE from the bow, sky and sea changing"
+  },
+  {
+   "id": "NF2",
+   "clip": "sb-trailer-v2_blend-10-nightfall-windshield-back",
+   "until": [
+    29,
+    2
+   ],
+   "align": {
+    "atSrc": 7.8,
+    "on": [
+     30,
+     0
+    ]
+   },
+   "sfxFrom": "sb-trailer-v2_10_bow-lookback_dusk",
+   "note": "close on the pilot, LEDs coming on"
+  },
+  {
+   "id": "NF3",
+   "clip": "sb-trailer-v2_blend-10-nightfall-shoulder",
+   "until": [
+    31,
+    0
+   ],
+   "align": {
+    "atSrc": 7.8,
+    "on": [
+     30,
+     0
+    ]
+   },
+   "sfxFrom": "sb-trailer-v2_10_bow-lookback_dusk",
+   "sfxDb": -6.0,
+   "music": "PEAK 2: full night lands inside the final silhouette on the re-drop (61.74)"
+  },
+  {
+   "id": "11",
+   "clip": "sb-trailer-v2_11_front-quarter-carve",
+   "until": [
+    32,
+    2
+   ],
+   "src": 3.0,
+   "music": "night: solo runs"
+  },
+  {
+   "id": "13",
+   "clip": "sb-trailer-v2_13_head-on-swells",
+   "until": [
+    33,
+    2
+   ],
+   "src": 3.0
+  },
+  {
+   "id": "13tele",
+   "clip": "sb-trailer-v2_13_head-on-swells_cam-tele",
+   "until": [
+    34,
+    2
+   ],
+   "src": 4.0
+  },
+  {
+   "id": "15",
+   "clip": "sb-trailer-v2_15_rock-gap-burst",
+   "until": [
+    35,
+    3
+   ],
+   "src": 3.5
+  },
+  {
+   "id": "16",
+   "clip": "sb-trailer-v2_16_horizon-rise",
+   "until": [
+    37,
+    0
+   ],
+   "src": 3.0
+  },
+  {
+   "id": "R4fl",
+   "clip": "sb-trailer-v2_R4_night-pack-cruise_cam-front-low",
+   "until": [
+    38,
+    0
+   ],
+   "src": 3.0,
+   "music": "rivals join"
+  },
+  {
+   "id": "R3wb",
+   "clip": "sb-trailer-v2_R3_night-pack_cam-windshield-back",
+   "until": [
+    39,
+    0
+   ],
+   "src": 4.0,
+   "note": "the pack both sides of the pilot"
+  },
+  {
+   "id": "R3chase",
+   "clip": "sb-trailer-v2_R3_night-pack_cam-chase",
+   "until": [
+    40,
+    0
+   ],
+   "src": 4.0,
+   "music": "THE PACK",
+   "note": "low tracker through the pack"
+  },
+  {
+   "id": "R3dw",
+   "clip": "sb-trailer-v2_R3_night-pack_cam-drone-wide",
+   "until": [
+    41,
+    2
+   ],
+   "src": 0.8,
+   "note": "drone wide"
+  },
+  {
+   "id": "R3",
+   "clip": "sb-trailer-v2_R3_night-pack",
+   "until": [
+    43,
+    0
+   ],
+   "src": 4.5,
+   "note": "the chevron on the moon road"
+  },
+  {
+   "id": "14a",
+   "clip": "sb-trailer-v2_14a_steering-insert",
+   "until": [
+    43,
+    2
+   ],
+   "src": 3.0,
+   "music": "PEAK 3: the jumps (~90.9-94.5)"
+  },
+  {
+   "id": "14b",
+   "clip": "sb-trailer-v2_14b_side-clears-swell",
+   "until": [
+    44,
+    0
+   ],
+   "src": 3.1
+  },
+  {
+   "id": "14c",
+   "clip": "sb-trailer-v2_14c_chase-landing",
+   "until": [
+    44,
+    3
+   ],
+   "src": 3.3,
+   "sfxDb": -3.0,
+   "note": "landing thump up"
+  },
+  {
+   "id": "R3moon",
+   "clip": "sb-trailer-v2_R3_night-pack_cam-insert-moon-road",
+   "until": [
+    46,
+    0
+   ],
+   "src": 4.0
+  },
+  {
+   "id": "10ba",
+   "clip": "sb-trailer-v2_10_bow-lookback_cam-bow-aft_night",
+   "until": [
+    47,
+    0
+   ],
+   "src": 4.0
+  },
+  {
+   "id": "16moon",
+   "clip": "sb-trailer-v2_16_horizon-rise_cam-insert-moon-road",
+   "until": [
+    48,
+    0
+   ],
+   "src": 3.0
+  },
+  {
+   "id": "end",
+   "clip": "sb-trailer-v2_R7_outro-moonroad",
+   "src": 3.0,
+   "until": [
+    52,
+    0
+   ],
+   "music": "R7 outro, credits; song fades 3.5 s into the phrase line 109.69",
+   "title": {
+    "atS": 2.0,
+    "kind": "credits",
+    "lines": [
+     {
+      "text": "made by @laub69",
+      "emPx": 72
+     }
+    ]
+   }
+  }
+ ]
+}

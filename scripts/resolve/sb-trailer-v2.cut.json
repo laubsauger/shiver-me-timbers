@@ -1,0 +1,8 @@
+{
+ "_doc": "The unscored rough cut: the same cut as sb-trailer-v2.cut.dead-channel.json (timed on that temp song's arranged beat grid), without the song on MUSIC (user) and with the SFX mix at full level. Change the cut there.",
+ "base": "sb-trailer-v2.cut.dead-channel.json",
+ "timeline": "ZZ alt — unscored",
+ "music": {
+  "place": false
+ }
+}

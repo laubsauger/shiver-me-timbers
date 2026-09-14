@@ -1,0 +1,372 @@
+{
+ "_doc": "ALTERNATE cut to the temp track 'Dead Channel / 80s Digital Dub x Breakbeat' (64.76 s, 99.4 BPM), UNEDITED from 0:00 (user: no music edits), 3 s fade at the picture end. Song: intro bars 1-5, MAIN DROP bar 6 (12.73), A to the break bar 14 beat 2 (32.53), B entry pickup 38.59, breakdown bar 21, hit block bar 22 beat 2 (51.90), final hit bar 25 (58.54), tail to silence ~63.8. 'until'/'on' = [song bar, beat]; the rest as in sb-trailer-v2.cut.reef-runner.json (the MAIN cut).",
+ "timeline": "ZZ alt — temp music (Dead Channel)",
+ "plan": "sb-trailer-v2",
+ "music": {
+  "file": "/private/tmp/claude-501/-Users-flo-work-code-shiver-me-timbers/adc53218-9260-41a8-8d6a-476d5936a376/scratchpad/edit/music/dead_channel_temp.mp3",
+  "beats": "/private/tmp/claude-501/-Users-flo-work-code-shiver-me-timbers/adc53218-9260-41a8-8d6a-476d5936a376/scratchpad/edit/music/beats.json",
+  "offsetS": 0.0,
+  "db": 0.0,
+  "fadeOutS": 3.0
+ },
+ "sfxDb": -15.0,
+ "fadeInS": 2.0,
+ "fadeOutS": 2.0,
+ "events": [
+  {
+   "id": "intro",
+   "clip": "sb-trailer-v2_R6_intro-horizon",
+   "until": [
+    3,
+    0
+   ],
+   "src": 7.5,
+   "sfxDb": -8.0,
+   "music": "intro: the horizon, the logo once",
+   "titles": [
+    {
+     "atS": 0.3,
+     "kind": "wordmark",
+     "text": "speedboat",
+     "ground": false
+    }
+   ]
+  },
+  {
+   "id": "01",
+   "clip": "sb-trailer-v2_01_waterline-bow",
+   "until": [
+    4,
+    0
+   ],
+   "src": 1.0,
+   "dissolveS": 0.6
+  },
+  {
+   "id": "02",
+   "clip": "sb-trailer-v2_02_number-slide",
+   "until": [
+    5,
+    0
+   ],
+   "src": 1.0,
+   "dissolveS": 0.6
+  },
+  {
+   "id": "05",
+   "clip": "sb-trailer-v2_05_first-reveal",
+   "until": [
+    5,
+    2
+   ],
+   "src": 0.4,
+   "dissolveS": 0.6
+  },
+  {
+   "id": "06",
+   "clip": "sb-trailer-v2_06_throttle-insert_sunset",
+   "until": [
+    6,
+    0
+   ],
+   "align": {
+    "atSrc": 2.2,
+    "on": [
+     6,
+     0
+    ]
+   },
+   "note": "reach, grip, push",
+   "duck": {
+    "fromSrc": 1.4,
+    "toSrc": 2.7,
+    "db": -3.5
+   }
+  },
+  {
+   "id": "07",
+   "clip": "sb-trailer-v2_07_rear-chase-launch",
+   "until": [
+    6,
+    3
+   ],
+   "src": 1.0,
+   "sfxDb": -3.0,
+   "music": "MAIN DROP (12.73): launch"
+  },
+  {
+   "id": "07wb",
+   "clip": "sb-trailer-v2_07_rear-chase-launch_cam-windshield-back",
+   "until": [
+    7,
+    2
+   ],
+   "src": 2.8
+  },
+  {
+   "id": "08rb",
+   "clip": "sb-trailer-v2_08_side-tracking_cam-insert-rooster-backlit",
+   "until": [
+    8,
+    2
+   ],
+   "src": 3.0
+  },
+  {
+   "id": "08",
+   "clip": "sb-trailer-v2_08_side-tracking",
+   "until": [
+    9,
+    2
+   ],
+   "src": 4.8
+  },
+  {
+   "id": "09",
+   "clip": "sb-trailer-v2_09_rocky-point-pass",
+   "until": [
+    10,
+    3
+   ],
+   "src": 4.0
+  },
+  {
+   "id": "R1wh",
+   "clip": "sb-trailer-v2_R1_duel_cam-insert-rival-whoosh",
+   "until": [
+    11,
+    2
+   ],
+   "src": 4.1,
+   "sfxDb": -4.0
+  },
+  {
+   "id": "R1tele",
+   "clip": "sb-trailer-v2_R1_duel_cam-tele",
+   "until": [
+    12,
+    2
+   ],
+   "src": 5.2
+  },
+  {
+   "id": "R1wb",
+   "clip": "sb-trailer-v2_R1_duel_cam-windshield-back",
+   "until": [
+    13,
+    2
+   ],
+   "src": 6.2
+  },
+  {
+   "id": "R2pov",
+   "clip": "sb-trailer-v2_R2_overtake-wake_cam-pov-forward",
+   "until": [
+    14,
+    1
+   ],
+   "src": 4.6
+  },
+  {
+   "id": "07fl",
+   "clip": "sb-trailer-v2_07_rear-chase-launch_cam-front-low-port",
+   "until": [
+    14,
+    3
+   ],
+   "src": 1.0,
+   "music": "BREAK (32.53)"
+  },
+  {
+   "id": "hand",
+   "clip": "sb-trailer-v2_blend-06c-R5-slow",
+   "until": [
+    15,
+    1
+   ],
+   "align": {
+    "atSrc": 3.2,
+    "on": [
+     15,
+     1
+    ]
+   },
+   "sfxFrom": "sb-trailer-v2_R5_throttle-to-night_sunset",
+   "sfxDb": -6.0,
+   "music": "the hand brings the night",
+   "duck": {
+    "fromSrc": 1.9,
+    "toSrc": 3.2,
+    "db": -3.5
+   }
+  },
+  {
+   "id": "NF1",
+   "clip": "sb-trailer-v2_blend-10-nightfall-bow-aft",
+   "until": [
+    16,
+    1
+   ],
+   "align": {
+    "atSrc": 7.8,
+    "on": [
+     17,
+     0
+    ]
+   },
+   "sfxFrom": "sb-trailer-v2_10_bow-lookback_dusk"
+  },
+  {
+   "id": "NF2",
+   "clip": "sb-trailer-v2_blend-10-nightfall-windshield-back",
+   "until": [
+    17,
+    0
+   ],
+   "align": {
+    "atSrc": 7.8,
+    "on": [
+     17,
+     0
+    ]
+   },
+   "sfxFrom": "sb-trailer-v2_10_bow-lookback_dusk"
+  },
+  {
+   "id": "NF3",
+   "clip": "sb-trailer-v2_blend-10-nightfall-shoulder",
+   "until": [
+    17,
+    3
+   ],
+   "align": {
+    "atSrc": 7.8,
+    "on": [
+     17,
+     0
+    ]
+   },
+   "sfxFrom": "sb-trailer-v2_10_bow-lookback_dusk",
+   "music": "full night"
+  },
+  {
+   "id": "11",
+   "clip": "sb-trailer-v2_11_front-quarter-carve",
+   "until": [
+    18,
+    1
+   ],
+   "src": 3.0
+  },
+  {
+   "id": "R4fl",
+   "clip": "sb-trailer-v2_R4_night-pack-cruise_cam-front-low",
+   "until": [
+    18,
+    2
+   ],
+   "src": 3.0
+  },
+  {
+   "id": "R3chase",
+   "clip": "sb-trailer-v2_R3_night-pack_cam-chase",
+   "until": [
+    19,
+    1
+   ],
+   "src": 4.0,
+   "music": "the pack"
+  },
+  {
+   "id": "R3dw",
+   "clip": "sb-trailer-v2_R3_night-pack_cam-drone-wide",
+   "until": [
+    20,
+    0
+   ],
+   "src": 0.8
+  },
+  {
+   "id": "R3",
+   "clip": "sb-trailer-v2_R3_night-pack",
+   "until": [
+    21,
+    0
+   ],
+   "src": 4.5
+  },
+  {
+   "id": "R3tele",
+   "clip": "sb-trailer-v2_R3_night-pack_cam-tele",
+   "until": [
+    22,
+    1
+   ],
+   "src": 5.5
+  },
+  {
+   "id": "14a",
+   "clip": "sb-trailer-v2_14a_steering-insert",
+   "until": [
+    22,
+    2
+   ],
+   "src": 3.0,
+   "music": "hit block (51.9): the jumps"
+  },
+  {
+   "id": "14b",
+   "clip": "sb-trailer-v2_14b_side-clears-swell",
+   "until": [
+    22,
+    3
+   ],
+   "src": 3.1
+  },
+  {
+   "id": "14c",
+   "clip": "sb-trailer-v2_14c_chase-landing",
+   "until": [
+    23,
+    0
+   ],
+   "src": 3.3,
+   "sfxDb": -3.0
+  },
+  {
+   "id": "15",
+   "clip": "sb-trailer-v2_15_rock-gap-burst",
+   "until": [
+    24,
+    0
+   ],
+   "src": 3.5
+  },
+  {
+   "id": "16",
+   "clip": "sb-trailer-v2_16_horizon-rise",
+   "until": [
+    25,
+    0
+   ],
+   "src": 3.0
+  },
+  {
+   "id": "end",
+   "clip": "sb-trailer-v2_R7_outro-moonroad",
+   "src": 3.0,
+   "dur": 6.2,
+   "music": "final hit (58.54): R7, credits, the song's own tail + 3 s fade",
+   "title": {
+    "atS": 0.5,
+    "kind": "credits",
+    "lines": [
+     {
+      "text": "made by @laub69",
+      "emPx": 72
+     }
+    ]
+   }
+  }
+ ]
+}

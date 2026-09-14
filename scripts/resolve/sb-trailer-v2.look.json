@@ -1,0 +1,189 @@
+{
+ "_doc": "Starting-point look for trailer_edit.py (redo on the final renders; everything stays live in Resolve). grade: an ASC CDL per time of day on node 1 of every picture clip, clips in Sunset/Night/... colour groups. finishing: the Fusion chain on the full-length LOOK adjustment clip (V4) — 'less CGI, less flat': soften the CG edge a touch, Film Look Creator (filmic contrast + highlight rolloff, lifted toned blacks, warm-high/teal-low split tone, halation, bloom as diffusion, a hint of flicker and gate weave; its own grain off), glint glow, a faint anamorphic streak on the brightest points, slight barrel distortion + edge chromatic aberration, vignette, then 35 mm-ish Film Grain weighted to the shadows. vhs: the disabled 'VHS 80s (off)' adjustment clip (V5): softened resolution, AnalogDamage (tape noise, chroma bleed/offset, tracking wobble), stronger fringing, a scanline hint — enable it for selected passages (e.g. the intro build or the title). letterbox: the disabled 'LETTERBOX 2.39 (off)' clip (V6); enable for the 2.39:1 version. The master-bus limiter/glue compressor is not reachable by the scripting API: Fairlight > Bus 1 > Dynamics by hand (limiter -1 dBTP, 2:1 glue, slow attack). Inputs by Fusion input ID; numbers are deliberately light (user: the first vignette was a dark tunnel; ~12 % edge darkening now, everything subtle — go lighter when in doubt), to be judged to be judged on the 1080p renders.",
+ "grade": {
+  "sunset": {
+   "slope": [
+    1.0,
+    0.975,
+    0.93
+   ],
+   "offset": [
+    -0.012,
+    -0.012,
+    -0.006
+   ],
+   "power": [
+    1.06,
+    1.05,
+    1.0
+   ],
+   "saturation": 0.9
+  },
+  "dusk": {
+   "slope": [
+    0.99,
+    0.98,
+    0.97
+   ],
+   "offset": [
+    -0.012,
+    -0.01,
+    -0.006
+   ],
+   "power": [
+    1.05,
+    1.05,
+    1.03
+   ],
+   "saturation": 0.92
+  },
+  "night": {
+   "slope": [
+    0.96,
+    0.985,
+    1.04
+   ],
+   "offset": [
+    -0.014,
+    -0.01,
+    0.0
+   ],
+   "power": [
+    1.08,
+    1.07,
+    1.03
+   ],
+   "saturation": 0.9
+  }
+ },
+ "finishing": [
+  {
+   "tool": "Blur",
+   "name": "SoftenCG",
+   "inputs": {
+    "XBlurSize": 0.5,
+    "Blend": 0.35
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.FilmLook",
+   "name": "FilmLook",
+   "inputs": {
+    "colorContrast2": 1.06,
+    "colorHighlightRolloff": 0.55,
+    "colorFade": 0.06,
+    "colorPostSat": 1.0,
+    "splitIsEnable": 1,
+    "splitAmount": 0.1,
+    "splitAngle": 20.0,
+    "vignetteIsEnable": 0,
+    "halationIsEnable": 1,
+    "halationAmount": 0.12,
+    "halationRadius": 3.0,
+    "bloomIsEnable": 1,
+    "bloomAmount": 0.08,
+    "bloomRadius": 10.0,
+    "grainIsEnable": 0,
+    "flickerIsEnable": 1,
+    "flickerAmount": 0.012,
+    "gateWeaveIsEnable": 1,
+    "gateWeaveAmount": 0.04,
+    "Blend": 0.6
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.Glow",
+   "name": "GlintGlow",
+   "inputs": {
+    "threshold": 0.9,
+    "spread": 0.3,
+    "brightness": 0.2,
+    "opacity": 0.15
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.Glow",
+   "name": "AnamorphicStreak",
+   "inputs": {
+    "threshold": 0.95,
+    "spread": 0.9,
+    "hvRatio": 1.0,
+    "brightness": 0.15,
+    "opacity": 0.08
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.LensDistortion",
+   "name": "LensBarrel",
+   "inputs": {
+    "distortionAmountR": -0.02,
+    "distortionAmountG": -0.02,
+    "distortionAmountB": -0.02
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.ChromaticAberration",
+   "name": "EdgeFringe",
+   "inputs": {
+    "curvatureRed": 0.01,
+    "curvatureBlue": -0.01
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.Vignette",
+   "name": "Vignette",
+   "inputs": {
+    "size": 1.0,
+    "softness": 1.0,
+    "transparency": 0.88
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.FilmGrain",
+   "name": "Grain35",
+   "inputs": {
+    "Opacity": 0.25,
+    "GrainSize": 0.55,
+    "shadowGain": 0.6,
+    "midtoneGain": 0.4,
+    "highlightGain": 0.2
+   }
+  }
+ ],
+ "vhs": [
+  {
+   "tool": "Blur",
+   "name": "TapeSoft",
+   "inputs": {
+    "XBlurSize": 2.2
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.AnalogDamage",
+   "name": "VHS",
+   "inputs": {
+    "pluginPreset": "PRESET_CLEAN_VHS"
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.ChromaticAberration",
+   "name": "ChromaOffset",
+   "inputs": {
+    "curvatureRed": 0.08,
+    "curvatureBlue": -0.08
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.ScanlineV2",
+   "name": "Scanlines",
+   "inputs": {
+    "frequency": 40.0,
+    "width": 0.5,
+    "Blend": 0.12
+   }
+  }
+ ],
+ "letterbox": {
+  "aspect": 2.39
+ }
+}

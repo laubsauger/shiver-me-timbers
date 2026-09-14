@@ -10,8 +10,8 @@ clips and stems; everything here happens in Resolve on top of the edit plan (`do
   - Candidate material (in-engine takes): an empty sunset horizon, the drowned radio tower in silhouette, the low sun
     on glassy water, with engine sound approaching from a distance on the stems before the boat appears.
 - **End screen with credits.** Short and tasteful, nothing excessive; it should make the piece feel finished.
-  - Title card, then credits including: **Laub** (the user); made with **Claude Fable** and **Claude Opus**.
-    Add further credits as decided at edit time.
+  - Title card (the speedboat placeholder wordmark, half-submerged under the wave), then a single credits line:
+    **made by @laub69**. Then fade out.
   - Candidate background: the night moon road after the pack has passed, LED glow fading, or black.
 - **Day → night transition.** A match-cut or dissolve on the second throttle-grab insert (06c). The sunset and night
   takes are frame-identical and stacked on V1/V2; the cut point is the lever push-start frame marked in the edit plan.

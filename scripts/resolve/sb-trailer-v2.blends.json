@@ -1,0 +1,249 @@
+{
+ "_doc": "tod_blend.py: time-of-day blends of frame-identical looks (setup 10 take03 has noon/golden/sunset/dusk/night on 4 cameras). 10-dayburn-*: 'the day burns down', noon → golden → sunset (source 4.63 / 6.78 s, 2 s each: on Reef Runner bars 5.5 / 6.5 with source 1.5 at bar 4; sunset settles from 7.78). 10-nightfall-*: 'the hand brings the night', sunset → dusk → night (0.8 s / 2.0 s, 6.6 s / 2.4 s; full night 7.8 on the re-drop 61.74; the wide opens already a fifth of the way to dusk, past the hand's mix). 06c-R5-slow: the hand, sunset → night starting 0.6 s after the push over 2 s; ~22 % of the way at the lever-full cut to the nightfall cameras (which start half-way to dusk), so the time of day never steps back. 06c-R5 / 06c-06: the 1.6 s / 1.0 s hand blends the alternates use.",
+ "plan": "sb-trailer-v2",
+ "blends": [
+  {
+   "name": "06c-R5",
+   "layers": [
+    {
+     "clip": "sb-trailer-v2_R5_throttle-to-night_sunset"
+    },
+    {
+     "clip": "sb-trailer-v2_R5_throttle-to-night_night"
+    }
+   ],
+   "stops": [
+    {
+     "centerS": 2.3,
+     "durS": 1.6
+    }
+   ]
+  },
+  {
+   "name": "06c-06",
+   "layers": [
+    {
+     "clip": "sb-trailer-v2_06_throttle-insert_sunset"
+    },
+    {
+     "clip": "sb-trailer-v2_06_throttle-insert_night"
+    }
+   ],
+   "stops": [
+    {
+     "centerS": 1.8,
+     "durS": 1.0
+    }
+   ]
+  },
+  {
+   "name": "06c-R5-slow",
+   "layers": [
+    {
+     "clip": "sb-trailer-v2_R5_throttle-to-night_sunset"
+    },
+    {
+     "clip": "sb-trailer-v2_R5_throttle-to-night_night"
+    }
+   ],
+   "stops": [
+    {
+     "centerS": 3.6,
+     "durS": 2.0
+    }
+   ]
+  },
+  {
+   "name": "10-dayburn-main",
+   "layers": [
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_noon"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_golden"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_sunset"
+    }
+   ],
+   "stops": [
+    {
+     "centerS": 4.63,
+     "durS": 2.0
+    },
+    {
+     "centerS": 6.78,
+     "durS": 2.0
+    }
+   ]
+  },
+  {
+   "name": "10-nightfall-main",
+   "layers": [
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_sunset"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_dusk"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_night"
+    }
+   ],
+   "stops": [
+    {
+     "centerS": 0.8,
+     "durS": 2.0
+    },
+    {
+     "centerS": 6.6,
+     "durS": 2.4
+    }
+   ]
+  },
+  {
+   "name": "10-dayburn-windshield-back",
+   "layers": [
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-windshield-back_noon"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-windshield-back_golden"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-windshield-back_sunset"
+    }
+   ],
+   "stops": [
+    {
+     "centerS": 4.63,
+     "durS": 2.0
+    },
+    {
+     "centerS": 6.78,
+     "durS": 2.0
+    }
+   ]
+  },
+  {
+   "name": "10-nightfall-windshield-back",
+   "layers": [
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-windshield-back_sunset"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-windshield-back_dusk"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-windshield-back_night"
+    }
+   ],
+   "stops": [
+    {
+     "centerS": 0.8,
+     "durS": 2.0
+    },
+    {
+     "centerS": 6.6,
+     "durS": 2.4
+    }
+   ]
+  },
+  {
+   "name": "10-dayburn-shoulder",
+   "layers": [
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-insert-shoulder-silhouette_noon"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-insert-shoulder-silhouette_golden"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-insert-shoulder-silhouette_sunset"
+    }
+   ],
+   "stops": [
+    {
+     "centerS": 4.63,
+     "durS": 2.0
+    },
+    {
+     "centerS": 6.78,
+     "durS": 2.0
+    }
+   ]
+  },
+  {
+   "name": "10-nightfall-shoulder",
+   "layers": [
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-insert-shoulder-silhouette_sunset"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-insert-shoulder-silhouette_dusk"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-insert-shoulder-silhouette_night"
+    }
+   ],
+   "stops": [
+    {
+     "centerS": 0.8,
+     "durS": 2.0
+    },
+    {
+     "centerS": 6.6,
+     "durS": 2.4
+    }
+   ]
+  },
+  {
+   "name": "10-dayburn-bow-aft",
+   "layers": [
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-bow-aft_noon"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-bow-aft_golden"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-bow-aft_sunset"
+    }
+   ],
+   "stops": [
+    {
+     "centerS": 4.63,
+     "durS": 2.0
+    },
+    {
+     "centerS": 6.78,
+     "durS": 2.0
+    }
+   ]
+  },
+  {
+   "name": "10-nightfall-bow-aft",
+   "layers": [
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-bow-aft_sunset"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-bow-aft_dusk"
+    },
+    {
+     "clip": "sb-trailer-v2_10_bow-lookback_cam-bow-aft_night"
+    }
+   ],
+   "stops": [
+    {
+     "centerS": 0.8,
+     "durS": 2.0
+    },
+    {
+     "centerS": 6.6,
+     "durS": 2.4
+    }
+   ]
+  }
+ ]
+}

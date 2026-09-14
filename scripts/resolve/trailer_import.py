@@ -1,348 +1,365 @@
 #!/usr/bin/env python3
 """
-Build a DaVinci Resolve timeline from a cine edit plan (docs/cine/trailer-edit-plan.md).
+Build DaVinci Resolve bins and timelines from a cine edit plan (docs/cine/trailer-edit-plan.md).
 
-Usage (Resolve Studio running, Preferences → General → External scripting using: Local):
+Usage (Resolve Studio running, Preferences → System → General → External scripting using: Local):
 
-    python3 scripts/resolve/trailer_import.py out/cine/sb-trailer-v1/edit-plan.json \
-        [--project "Shiver - Speedboat Trailer - MCP"] [--proxy] [--replace]
+    python3 scripts/resolve/trailer_import.py <out>/edit-plan.json \
+        [--project "Shiver - Speedboat Trailer - MCP"] [--format 1920x1080] [--settle 60] [--no-coverage] [--tier A|B|C]
 
---proxy    link the proxy files (plan.shots[].proxy) to the imported masters
---replace  delete an existing timeline with the plan's name first (otherwise a suffix is added)
+Re-run it whenever the render agent lands new takes: it is idempotent.
 
-Slots: an `intro` slot with a negative recordInS shifts the assembly (shots, markers, slots) right by its length; an
-`end` slot past `durationS` extends the timeline. Both become cream range markers.
+- Only COMPLETE takes are used: `_FAILED` / `.part` files, files modified less than --settle seconds ago and files ffprobe
+  cannot read are skipped (and listed). A shot whose video is not ready is left out; its sfx/stems likewise.
+- Media is imported once, found again by file path; a clip already in the pool is moved to the bin its role says.
+- Timelines are generated: each is rebuilt only when the clips it should hold differ from what it holds (a new take
+  landed), never duplicated. Hand edits belong in a duplicate of a generated timeline.
 
-Time-of-day alternates (plan.shots[].alternates, optional): the same take at other times of day. Each variant name
-gets its own video track above V1 ("ToD: night", "ToD: dusk", in first-seen order), the alternate is placed at the
-primary's record position with the same handles, the track is disabled (V1 stays the picture; blade and enable to cut a
-flicker), and the clips also go into a "ToD variants" bin. A plan without alternates adds no tracks and no bin.
+Timeline format: --format (default 1920x1080 = the delivery), NOT the plan's width/height, which is the render size of
+whatever pass is on disk (640×360 look-pass stand-ins, later the 1080p masters under the same clip names — see
+relink_final.py). The frame rate is the plan's.
 
-Split SFX stems (plan.shots[].sfxStems, optional): A1 carries the SFX MIX (`sfx`); each stem the plan names gets its own
-stereo track from A4 on ("SFX engine", "SFX water", "SFX amb"), laid at the same record position and source range as the
-mix and MUTED, so a stem is there to push against the music without doubling the mix. No stems, no extra tracks.
+Bins, under `<plan name>/`:
+  Coverage/<setup>_<setupName>/[<time>/]   every lens of a setup (sub-bins when the setup has several times of day)
+  Inserts/<setup>_<setupName>/[<time>/]    the `insert-*` coverage cameras
+  ToD variants/<setup>_<setupName>/        the main lens at a setup's non-primary time of day (shot alternates)
+  SFX mix/                                 one mix per setup
+  SFX stems/                               engine / water / amb stems
 
-Coverage (plan.coverage, optional): every lens of every setup (docs/cine/trailer-edit-plan.md §Coverage). After the
-assembly timeline, each setup gets a bin `<plan name>/Coverage/<setup>_<setupName>/` (sub-bins per time of day when the
-setup has more than one), every clip imported there with its Start TC set from the setup clock (01:00:00:00 + the clip's
-sourceStartS relative to the setup's earliest clip, so every camera of a setup shares one TC) and its camera / kind /
-tier / time in the clip comments; then ONE timeline per setup, "<plan name> — cov <setup> <setupName>", with each
-camera × time on its own video track ("<camera> · <time>") at the same record frame, only the main lens of the primary
-time enabled, and the setup's SFX stem on A1. Resolve's scripting API cannot create multicam clips: these stacked-track
-timelines are the substitute — or select a setup's bin clips and "Create Multicam Clip Using Selected Clips" by Start TC.
+Assembly timeline "ZZ old assembly" (--assembly-name; the plan's default 60 s order): V1 video, A1 SFX mix, A2 SFX extra, A3 MUSIC (user),
+stems from A4 on ("SFX engine", "SFX water", "SFX amb") with those tracks disabled (= muted: the mix already contains
+them). Time-of-day alternates on disabled video tracks above V1 ("ToD: night", …). Slots: an `intro` slot with a
+negative recordInS shifts the assembly right by its length; `intro`/`end` become cream range markers.
 
---no-coverage   skip the coverage bins and timelines
---tier A|B|C    coverage clips up to this tier (A ⊂ B ⊂ C; default C = all)
+Coverage (plan.coverage): every clip gets Start TC 01:00:00:00 + (sourceStartS − the setup's earliest), so every lens
+of a setup shares one clock; camera / kind / tier / time go into the clip comments. One stacked timeline per setup,
+`<plan name> — cov <setup> <setupName>` (in the Coverage bin): each camera × time on its own video track ("<camera> · <time>") at the same
+record frame, only the main lens at the primary time enabled, the setup's SFX mix on A1, a purple marker on a `cutS`
+(06c: the lever push-start frame). Resolve's scripting API cannot create multicam clips: for one, select a setup's bin
+clips and use Create Multicam Clip Using Selected Clips (sync by Start TC).
+
+API facts (Resolve Studio 21.0.0.47, checked live): AppendToTimeline's endFrame is EXCLUSIVE; there is no SetTrackMute
+(SetTrackEnable('audio', i, False) mutes the track); Start TC and comments are settable clip properties.
 """
 import argparse
 import json
 import os
 import sys
 
-API = "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting"
-LIB = "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so"
-os.environ.setdefault("RESOLVE_SCRIPT_API", API)
-os.environ.setdefault("RESOLVE_SCRIPT_LIB", LIB)
-sys.path.append(os.path.join(os.environ["RESOLVE_SCRIPT_API"], "Modules"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resolve_common import (PROJECT, PoolIndex, connect, fail, find_timeline, frames_to_tc, log,  # noqa: E402
+                            ready, sub_folder)
 
-import DaVinciResolveScript as dvr  # noqa: E402
-
-
-def fail(msg):
-    print(f"[trailer_import] ERROR: {msg}", file=sys.stderr)
-    sys.exit(1)
+TAG = "trailer_import"
+TIERS = ["A", "B", "C"]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("plan")
-    ap.add_argument("--project", default="Shiver - Speedboat Trailer - MCP")
-    ap.add_argument("--proxy", action="store_true")
-    ap.add_argument("--replace", action="store_true")
+    ap.add_argument("--project", default=PROJECT)
+    ap.add_argument("--format", default="1920x1080", help="timeline WxH (the delivery, not the render size)")
+    ap.add_argument("--settle", type=float, default=60.0, help="seconds a file must be unmodified to count as done")
     ap.add_argument("--no-coverage", action="store_true")
-    ap.add_argument("--tier", choices=["A", "B", "C"], default="C")
+    ap.add_argument("--tier", choices=TIERS, default="C")
+    ap.add_argument("--assembly-name", default="ZZ old assembly", help="name of the plan's default-order timeline")
     a = ap.parse_args()
 
     plan_path = os.path.abspath(a.plan)
     base = os.path.dirname(plan_path)
-    with open(plan_path) as f:
+    with open(plan_path, encoding="utf-8") as f:
         plan = json.load(f)
     fps = float(plan["fps"])
+    width, height = (int(x) for x in a.format.lower().split("x"))
 
-    resolve = dvr.scriptapp("Resolve")
-    if not resolve:
-        fail("Resolve not reachable (running? external scripting Local?)")
-    pm = resolve.GetProjectManager()
-    project = pm.LoadProject(a.project) or fail(f"project not found: {a.project}")
-
-    # the timeline format must be set before the first timeline exists in a fresh project
+    resolve, pm, project = connect(a.project, TAG)
     fps_s = str(int(fps)) if fps.is_integer() else str(fps)
-    for k, v in (("timelineFrameRate", fps_s), ("timelineResolutionWidth", str(plan["width"])),
-                 ("timelineResolutionHeight", str(plan["height"]))):
-        if project.GetSetting(k) != v and not project.SetSetting(k, v):
-            print(f"[trailer_import] warning: could not set {k}={v} (timelines already exist?)")
+    for k, v in (("timelineFrameRate", fps_s), ("timelineResolutionWidth", str(width)),
+                 ("timelineResolutionHeight", str(height))):
+        cur = project.GetSetting(k)
+        if cur not in (v, f"{v}.0") and not project.SetSetting(k, v):
+            fail(TAG, f"could not set {k}={v} (is {cur}; the frame rate is locked once a timeline exists)")
 
     pool = project.GetMediaPool()
-    root = pool.GetRootFolder()
-    folder = next((s for s in root.GetSubFolderList() if s.GetName() == plan["name"]), None) \
-        or pool.AddSubFolder(root, plan["name"])
-    pool.SetCurrentFolder(folder)
+    ix = PoolIndex(pool)
+    root = sub_folder(pool, pool.GetRootFolder(), plan["name"])
 
-    def import_one(rel):
+    skipped = []
+    ok_cache = {}
+
+    def usable(rel):
+        if not rel:
+            return None
         path = os.path.join(base, rel)
-        if not os.path.exists(path):
-            fail(f"missing file: {path}")
-        items = pool.ImportMedia([path])
-        if not items:
-            fail(f"Resolve refused to import: {path}")
-        return items[0]
+        if path not in ok_cache:
+            ok_cache[path] = ready(path, a.settle)
+            if not ok_cache[path]:
+                skipped.append(rel)
+        return path if ok_cache[path] else None
 
-    # timeline
-    existing = [project.GetTimelineByIndex(i + 1) for i in range(project.GetTimelineCount())]
-    name = plan["name"]
-    clash = next((t for t in existing if t.GetName() == name), None)
-    if clash:
-        if a.replace:
-            pool.DeleteTimelines([clash])
-        else:
-            name = f"{name} ({len(existing) + 1})"
-    tl = pool.CreateEmptyTimeline(name) or fail("could not create timeline")
-    project.SetCurrentTimeline(tl)
-    while tl.GetTrackCount("audio") < 3:
-        tl.AddTrack("audio", "stereo")
-    tl.SetTrackName("audio", 1, "SFX mix")
-    tl.SetTrackName("audio", 2, "SFX extra")
-    tl.SetTrackName("audio", 3, "Music (user)")
-    start = int(tl.GetStartFrame())
-    # an INTRO slot before 0 s (a fade from black before the first shot) shifts the whole assembly right by its length,
-    # so the plan's record seconds stay the trailer's own clock; the end slot simply extends past 60 s
+    roles = clip_roles(plan)
+    start_tc = clip_start_tcs(plan, fps)
+    moved = imported = 0
+
+    def pool_item(rel, bin_names):
+        nonlocal moved, imported
+        path = usable(rel)
+        if not path:
+            return None
+        folder = root
+        for n in bin_names:
+            folder = sub_folder(pool, folder, n)
+        item, fresh = ix.import_into(folder, path, TAG)
+        if not item:
+            return None
+        imported += fresh
+        # Start TC before the clip is placed anywhere: a TC change under placed timeline items unlinks them
+        tc = start_tc.get(rel, frames_to_tc(round(3600 * fps), fps))
+        if item.GetClipProperty("Start TC") != tc and not item.SetClipProperty("Start TC", tc):
+            log(TAG, f"warning: could not set Start TC {tc} on {rel}")
+        have = ix.folder_of.get(item.GetUniqueId())
+        if not fresh and have is not None and have.GetUniqueId() != folder.GetUniqueId():
+            if pool.MoveClips([item], folder):
+                ix.folder_of[item.GetUniqueId()] = folder
+                moved += 1
+        return item
+
+    def video_item(rel):
+        return pool_item(rel, roles.get(rel, ["Coverage", "unsorted"]))
+
+    def sfx_item(rel):
+        return pool_item(rel, ["SFX mix"])
+
+    def stem_item(rel):
+        return pool_item(rel, ["SFX stems"])
+
+    timelines_bin = sub_folder(pool, root, "Timelines")
+
+    # ------------------------------------------------------------------ assembly
     lead = max([0.0] + [-s["recordInS"] for s in plan.get("slots", []) if "recordInS" in s])
-
-    # time-of-day alternates: one disabled video track per variant, above V1, in first-seen order
     variants = []
     for shot in plan["shots"]:
         for alt in shot.get("alternates", []):
             if alt["variant"] not in variants:
                 variants.append(alt["variant"])
-    alt_track = {}
-    tod_bin = None
-    if variants:
-        tod_bin = next((s for s in folder.GetSubFolderList() if s.GetName() == "ToD variants"), None) \
-            or pool.AddSubFolder(folder, "ToD variants")
-        for v in variants:
-            tl.AddTrack("video")
-            idx = tl.GetTrackCount("video")
-            tl.SetTrackName("video", idx, f"ToD: {v}")
-            alt_track[v] = idx
-
-    # split stems: one muted stereo track per stem name, A4 on, in a fixed order
     stem_order = [k for k in ("engine", "water", "amb") if any(k in (sh.get("sfxStems") or {}) for sh in plan["shots"])]
-    stem_track = {}
-    for k in stem_order:
-        tl.AddTrack("audio", "stereo")
-        idx = tl.GetTrackCount("audio")
-        tl.SetTrackName("audio", idx, f"SFX {k}")
-        stem_track[k] = idx
 
+    video_tracks = ["V1"] + [f"ToD: {v}" for v in variants]
+    audio_tracks = ["SFX mix", "SFX extra", "MUSIC (user)"] + [f"SFX {k}" for k in stem_order]
+    placements = []  # (trackType, trackIndex, item, srcIn, srcOutExcl, recordOffset)
     placed = []
-    alternates = 0
-    stems = 0
     for shot in sorted(plan["shots"], key=lambda s: s["recordInS"]):
-        dur = shot["recordOutS"] - shot["recordInS"]
+        video = video_item(shot["video"])
+        if not video:
+            continue
+        frames = round((shot["recordOutS"] - shot["recordInS"]) * fps)
         src_in = round(shot.get("handleS", 0.0) * fps)
-        src_out = src_in + round(dur * fps) - 1
-        rec = start + round((shot["recordInS"] + lead) * fps)
-        video = import_one(shot["video"])
-        if a.proxy and shot.get("proxy"):
-            video.LinkProxyMedia(os.path.join(base, shot["proxy"]))
-        clips = [{"mediaPoolItem": video, "startFrame": src_in, "endFrame": src_out,
-                  "recordFrame": rec, "trackIndex": 1, "mediaType": 1}]
-        if shot.get("sfx"):
-            clips.append({"mediaPoolItem": import_one(shot["sfx"]), "startFrame": src_in, "endFrame": src_out,
-                          "recordFrame": rec, "trackIndex": 1, "mediaType": 2})
+        rec = round((shot["recordInS"] + lead) * fps)
+        placements.append(("video", 1, video, src_in, src_in + frames, rec))
+        sfx = sfx_item(shot.get("sfx"))
+        if sfx:
+            placements.append(("audio", 1, sfx, src_in, src_in + frames, rec))
         for k, rel in (shot.get("sfxStems") or {}).items():
-            clips.append({"mediaPoolItem": import_one(rel), "startFrame": src_in, "endFrame": src_out,
-                          "recordFrame": rec, "trackIndex": stem_track[k], "mediaType": 2})
-            stems += 1
-        if not pool.AppendToTimeline(clips):
-            fail(f"AppendToTimeline failed for shot {shot['id']}")
+            stem = stem_item(rel)
+            if stem:
+                placements.append(("audio", 4 + stem_order.index(k), stem, src_in, src_in + frames, rec))
+        for alt in shot.get("alternates", []):
+            item = video_item(alt["video"])
+            if item:
+                placements.append(("video", 2 + variants.index(alt["variant"]), item, src_in, src_in + frames, rec))
         placed.append(shot["id"])
-        if shot.get("alternates"):
-            pool.SetCurrentFolder(tod_bin)
-            for alt in shot["alternates"]:
-                item = import_one(alt["video"])
-                if a.proxy and alt.get("proxy"):
-                    item.LinkProxyMedia(os.path.join(base, alt["proxy"]))
-                if not pool.AppendToTimeline([{"mediaPoolItem": item, "startFrame": src_in, "endFrame": src_out,
-                                               "recordFrame": rec, "trackIndex": alt_track[alt["variant"]],
-                                               "mediaType": 1}]):
-                    fail(f"AppendToTimeline failed for shot {shot['id']} alternate {alt['variant']}")
-                alternates += 1
-            pool.SetCurrentFolder(folder)
 
-    # the stems are there to push against the music, not to double the mix: muted until the editor wants one
-    for idx in stem_track.values():
-        if hasattr(tl, "SetTrackMute"):
-            tl.SetTrackMute("audio", idx, True)
-        else:
-            print(f"[trailer_import] warning: this Resolve has no SetTrackMute; mute audio track {idx} by hand")
-
-    # the alternates are there to blade into, not to be seen: V1 stays the picture
-    for idx in alt_track.values():
-        if hasattr(tl, "SetTrackEnable"):
-            tl.SetTrackEnable("video", idx, False)
-        else:
-            print(f"[trailer_import] warning: this Resolve has no SetTrackEnable; disable video track {idx} by hand")
-
-    for m in plan.get("markers", []):
-        tl.AddMarker(round((m["atS"] + lead) * fps), m.get("color", "Blue"), m["name"], m.get("note", ""), 1)
+    markers = [(round((m["atS"] + lead) * fps), m.get("color", "Blue"), m["name"], m.get("note", ""), 1)
+               for m in plan.get("markers", [])]
     for s in plan.get("slots", []):
         if "recordInS" in s:
             d = max(1, round((s["recordOutS"] - s["recordInS"]) * fps))
             color = {"intro": "Cream", "end": "Cream"}.get(s["kind"], "Yellow")
-            tl.AddMarker(round((s["recordInS"] + lead) * fps), color, s["name"], f"slot: {s['kind']}", d)
+            markers.append((round((s["recordInS"] + lead) * fps), color, s["name"], f"slot: {s['kind']}", d))
 
-    print(f"[trailer_import] timeline '{name}' @ {fps_s} fps {plan['width']}x{plan['height']}: "
-          f"{len(placed)} shots ({', '.join(placed)}), {len(plan.get('markers', []))} markers, "
-          f"{alternates} time-of-day alternates on {len(alt_track)} track(s), "
-          f"{stems} split SFX stems on {len(stem_track)} muted track(s)")
+    pool.SetCurrentFolder(timelines_bin)
+    state = build_timeline(project, pool, a.assembly_name, video_tracks, audio_tracks, placements, markers,
+                           disabled_video=list(range(2, 2 + len(variants))),
+                           disabled_audio=list(range(4, 4 + len(stem_order))))
+    log(TAG, f"assembly '{a.assembly_name}' {state} @ {fps_s} fps {width}x{height}: {len(placed)}/{len(plan['shots'])} "
+             f"shots ({', '.join(placed)}), {len(markers)} markers, {len(variants)} ToD track(s), "
+             f"{len(stem_order)} muted stem track(s)")
 
     if not a.no_coverage and plan.get("coverage"):
-        import_coverage(project, pool, folder, plan, base, fps, a, existing_names={t.GetName() for t in existing})
+        import_coverage(project, pool, plan, fps, a, video_item, sfx_item, usable, timelines_bin)
+
+    pool.SetCurrentFolder(root)
+    log(TAG, f"media: {imported} imported, {moved} moved to their bin, {len(ix.by_path)} file clips in the pool")
+    if skipped:
+        log(TAG, f"skipped {len(skipped)} file(s) not ready (FAILED/.part/growing/unreadable): "
+                 + ", ".join(sorted(set(os.path.basename(s) for s in skipped))))
 
 
-TIERS = ["A", "B", "C"]
+def clip_start_tcs(plan, fps):
+    """plan-relative path → Start TC: 01:00:00:00 + (sourceStartS − the setup's earliest) for every clip of a setup
+    (its video and its sfx/stems), so all lenses of a setup share one clock"""
+    base_tc = round(3600 * fps)
+    out = {}
+    cov = plan.get("coverage") or []
+    for setup in dict.fromkeys(c["setup"] for c in cov):
+        mine = [c for c in cov if c["setup"] == setup]
+        t0 = min(c.get("sourceStartS", 0.0) for c in mine)
+        for c in mine:
+            tc = frames_to_tc(base_tc + round((c.get("sourceStartS", 0.0) - t0) * fps), fps)
+            out[c["video"]] = tc
+            if c.get("sfx"):
+                out.setdefault(c["sfx"], tc)
+    return out
 
 
-def frames_to_tc(frames, fps):
-    """non-drop-frame HH:MM:SS:FF at an integer-rounded rate (the trailer renders 30 or 60)"""
-    r = int(round(fps))
-    ff = frames % r
-    s = frames // r
-    return f"{s // 3600:02d}:{(s // 60) % 60:02d}:{s % 60:02d}:{ff:02d}"
+def clip_roles(plan):
+    """video path (plan-relative) → bin names under the plan folder"""
+    roles = {}
+    cov = plan.get("coverage") or []
+    for setup in dict.fromkeys(c["setup"] for c in cov):
+        mine = [c for c in cov if c["setup"] == setup]
+        label = f"{setup}_{mine[0].get('setupName', '')}"
+        times = list(dict.fromkeys(c["timeOfDay"] for c in mine))
+        primary = next((c["timeOfDay"] for c in mine if c.get("onAssembly")), None) \
+            or next((c["timeOfDay"] for c in mine if c["camera"] == "main"), times[0])
+        for c in mine:
+            tod = [c["timeOfDay"]] if len(times) > 1 else []
+            if c["camera"] == "main" and c["timeOfDay"] != primary:
+                roles[c["video"]] = ["ToD variants", label]
+            elif c["camera"].startswith("insert"):
+                roles[c["video"]] = ["Inserts", label] + tod
+            else:
+                roles[c["video"]] = ["Coverage", label] + tod
+    for shot in plan["shots"]:
+        label = f"{shot['id']}_{shot['name']}"
+        roles.setdefault(shot["video"], ["Coverage", label])
+        for alt in shot.get("alternates", []):
+            roles.setdefault(alt["video"], ["ToD variants", label])
+    return roles
 
 
-def sub_folder(pool, parent, name):
-    return next((s for s in parent.GetSubFolderList() if s.GetName() == name), None) or pool.AddSubFolder(parent, name)
+MARKER_COLORS = {"Blue", "Cyan", "Green", "Yellow", "Red", "Pink", "Purple", "Fuchsia", "Rose", "Lavender", "Sky",
+                 "Mint", "Lemon", "Sand", "Cocoa", "Cream"}
+MARKER_ALIASES = {"Orange": "Sand", "White": "Cream", "Magenta": "Fuchsia"}
 
 
-def import_coverage(project, pool, folder, plan, base, fps, a, existing_names):
+def add_markers(tl, markers, name):
+    """Resolve refuses unknown colours (the plan's 'Orange') and a second marker on an occupied frame"""
+    used = set()
+    for frame, color, mname, note, dur in sorted(markers, key=lambda m: m[0]):
+        color = color if color in MARKER_COLORS else MARKER_ALIASES.get(color, "Sand")
+        while frame in used:
+            frame += 1
+        used.add(frame)
+        if not tl.AddMarker(frame, color, mname, note, dur):
+            log(TAG, f"warning: marker '{mname}' not placed at frame {frame} on '{name}'")
+
+
+def build_timeline(project, pool, name, video_tracks, audio_tracks, placements, markers,
+                   disabled_video=(), disabled_audio=(), enabled_video_only=None):
+    """create or rebuild a generated timeline; returns 'unchanged' / 'built' / 'rebuilt' / 'empty'"""
+    if not placements:
+        return "empty"
+    project.SetCurrentTimeline(find_timeline(project, name) or project.GetCurrentTimeline())
+    want = sorted((t, i, it.GetName(), s, e, rec) for t, i, it, s, e, rec in placements)
+    tl = find_timeline(project, name)
+    state = "built"
+    if tl:
+        start = int(tl.GetStartFrame())
+        have = []
+        for t in ("video", "audio"):
+            for i in range(1, tl.GetTrackCount(t) + 1):
+                for x in tl.GetItemListInTrack(t, i) or []:
+                    mpi = x.GetMediaPoolItem()
+                    src = x.GetSourceStartFrame()
+                    have.append((t, i, mpi.GetName() if mpi else x.GetName(), src,
+                                 None if src is None else src + x.GetDuration(), x.GetStart() - start))
+        if sorted(have) == want:
+            return "unchanged"
+        if not pool.DeleteTimelines([tl]):
+            fail(TAG, f"could not delete timeline '{name}' to rebuild it")
+        state = "rebuilt"
+    tl = pool.CreateEmptyTimeline(name) or fail(TAG, f"could not create timeline {name}")
+    project.SetCurrentTimeline(tl)
+    while tl.GetTrackCount("video") < len(video_tracks):
+        tl.AddTrack("video")
+    while tl.GetTrackCount("audio") < len(audio_tracks):
+        tl.AddTrack("audio", "stereo")
+    for i, n in enumerate(video_tracks):
+        tl.SetTrackName("video", i + 1, n)
+    for i, n in enumerate(audio_tracks):
+        tl.SetTrackName("audio", i + 1, n)
+    start = int(tl.GetStartFrame())
+    clips = [{"mediaPoolItem": it, "startFrame": s, "endFrame": e, "recordFrame": start + rec, "trackIndex": i,
+              "mediaType": 1 if t == "video" else 2} for t, i, it, s, e, rec in placements]
+    got = pool.AppendToTimeline(clips)
+    if not got or len(got) != len(clips):
+        fail(TAG, f"AppendToTimeline placed {len(got or [])}/{len(clips)} clips on '{name}'")
+    for i in disabled_video:
+        tl.SetTrackEnable("video", i, False)
+    for i in disabled_audio:
+        tl.SetTrackEnable("audio", i, False)
+    add_markers(tl, markers, name)
+    return state
+
+
+def import_coverage(project, pool, plan, fps, a, video_item, sfx_item, usable, timelines_bin):
     max_tier = TIERS.index(a.tier)
     cov = [c for c in plan["coverage"] if TIERS.index(c.get("tier", "C")) <= max_tier]
     if not cov:
-        print(f"[trailer_import] coverage: nothing at tier <= {a.tier}")
+        log(TAG, f"coverage: nothing at tier <= {a.tier}")
         return
-    cov_root = sub_folder(pool, folder, "Coverage")
-    setups = []
-    for c in cov:
-        if c["setup"] not in setups:
-            setups.append(c["setup"])
-    base_tc = round(3600 * fps)  # 01:00:00:00
-    clips_total = 0
+    total = 0
+    setups = list(dict.fromkeys(c["setup"] for c in cov))
     for setup in setups:
         mine = [c for c in cov if c["setup"] == setup]
         name = mine[0].get("setupName", "")
-        times = []
-        for c in mine:
-            if c["timeOfDay"] not in times:
-                times.append(c["timeOfDay"])
-        # the primary time is the one the main lens renders first (on the assembly, or the first listed)
+        times = list(dict.fromkeys(c["timeOfDay"] for c in mine))
         primary = next((c["timeOfDay"] for c in mine if c.get("onAssembly")), None) \
             or next((c["timeOfDay"] for c in mine if c["camera"] == "main"), times[0])
-        setup_bin = sub_folder(pool, cov_root, f"{setup}_{name}")
         t0 = min(c.get("sourceStartS", 0.0) for c in mine)
-
         items = []
         for c in mine:
-            path = os.path.join(base, c["video"])
-            if not os.path.exists(path):
-                print(f"[trailer_import] warning: coverage clip missing, skipped: {path}")
+            item = video_item(c["video"])
+            if not item:
                 continue
-            pool.SetCurrentFolder(sub_folder(pool, setup_bin, c["timeOfDay"]) if len(times) > 1 else setup_bin)
-            got = pool.ImportMedia([path])
-            if not got:
-                print(f"[trailer_import] warning: Resolve refused to import: {path}")
-                continue
-            item = got[0]
-            if a.proxy and c.get("proxy"):
-                item.LinkProxyMedia(os.path.join(base, c["proxy"]))
-            tc = frames_to_tc(base_tc + round((c.get("sourceStartS", 0.0) - t0) * fps), fps)
-            try:
-                if not item.SetClipProperty("Start TC", tc):
-                    print(f"[trailer_import] warning: could not set Start TC {tc} on {c['video']}")
-            except Exception as e:  # noqa: BLE001 — an optional nicety must not stop the import
-                print(f"[trailer_import] warning: Start TC on {c['video']}: {e}")
-            note = f"setup {setup} {name} · camera {c['camera']} ({c.get('kind', '')}) · tier {c.get('tier', '')} · {c['timeOfDay']}"
-            try:
-                item.SetClipProperty("Comments", f"{note}. {c.get('notes', '')}".strip())
-                if hasattr(item, "SetMetadata"):
-                    item.SetMetadata("Camera #", c["camera"])
-            except Exception as e:  # noqa: BLE001
-                print(f"[trailer_import] warning: clip metadata on {c['video']}: {e}")
+            note = (f"setup {setup} {name} · camera {c['camera']} ({c.get('kind', '')}) · tier {c.get('tier', '')} · "
+                    f"{c['timeOfDay']}. {c.get('notes', '')}").strip()
+            if item.GetClipProperty("Comments") != note:
+                item.SetClipProperty("Comments", note)
             items.append((c, item))
-        pool.SetCurrentFolder(setup_bin)
         if not items:
             continue
-
-        tl_name = f"{plan['name']} — cov {setup} {name}"
-        if tl_name in existing_names:
-            clash = next((project.GetTimelineByIndex(i + 1) for i in range(project.GetTimelineCount())
-                          if project.GetTimelineByIndex(i + 1).GetName() == tl_name), None)
-            if clash is not None and a.replace:
-                pool.DeleteTimelines([clash])
-            else:
-                tl_name = f"{tl_name} ({project.GetTimelineCount() + 1})"
-        tl = pool.CreateEmptyTimeline(tl_name)
-        if not tl:
-            print(f"[trailer_import] warning: could not create coverage timeline {tl_name}")
-            continue
-        project.SetCurrentTimeline(tl)
-        start = int(tl.GetStartFrame())
-        # main first, then the cameras in plan order; the primary time before the others
         order = sorted(items, key=lambda ci: (ci[0]["camera"] != "main", ci[0]["timeOfDay"] != primary))
-        placed = 0
+        placements, vtracks, disabled = [], [], []
         for k, (c, item) in enumerate(order):
-            idx = k + 1
-            while tl.GetTrackCount("video") < idx:
-                tl.AddTrack("video")
-            tl.SetTrackName("video", idx, f"{c['camera']} · {c['timeOfDay']}")
-            frames = max(1, round(c.get("durationS", 0.0) * fps))
-            rec = start + round((c.get("sourceStartS", 0.0) - t0) * fps)
-            if not pool.AppendToTimeline([{"mediaPoolItem": item, "startFrame": 0, "endFrame": frames - 1,
-                                           "recordFrame": rec, "trackIndex": idx, "mediaType": 1}]):
-                print(f"[trailer_import] warning: AppendToTimeline failed: setup {setup} {c['camera']} {c['timeOfDay']}")
-                continue
-            placed += 1
-            enabled = c["camera"] == "main" and c["timeOfDay"] == primary
-            if not enabled:
-                if hasattr(tl, "SetTrackEnable"):
-                    tl.SetTrackEnable("video", idx, False)
-                else:
-                    print(f"[trailer_import] warning: no SetTrackEnable; disable video track {idx} of '{tl_name}' by hand")
-        stem = next((c.get("sfx") for c, _ in order if c.get("sfx")), None)
-        if stem and os.path.exists(os.path.join(base, stem)):
-            got = pool.ImportMedia([os.path.join(base, stem)])
+            frames = min(round(c.get("durationS", 0.0) * fps), int(item.GetClipProperty("Frames") or 10 ** 9))
+            rec = round((c.get("sourceStartS", 0.0) - t0) * fps)
+            placements.append(("video", k + 1, item, 0, frames, rec))
+            vtracks.append(f"{c['camera']} · {c['timeOfDay']}")
+            if not (c["camera"] == "main" and c["timeOfDay"] == primary):
+                disabled.append(k + 1)
+        mix = next((c.get("sfx") for c, _ in order if c.get("sfx") and usable(c.get("sfx"))), None)
+        if mix:
+            sfx = sfx_item(mix)
             c0 = order[0][0]
-            frames = max(1, round(c0.get("durationS", 0.0) * fps))
-            if not got or not pool.AppendToTimeline([{"mediaPoolItem": got[0], "startFrame": 0, "endFrame": frames - 1,
-                                                      "recordFrame": start + round((c0.get("sourceStartS", 0.0) - t0) * fps),
-                                                      "trackIndex": 1, "mediaType": 2}]):
-                print(f"[trailer_import] warning: setup {setup}: SFX stem not placed")
-            else:
-                tl.SetTrackName("audio", 1, "SFX mix")
-        # a marked cut between the setup's time-of-day takes (06c: the lever's push-start frame) — a marker on the timeline
+            if sfx:
+                frames = round(c0.get("durationS", 0.0) * fps)
+                placements.append(("audio", 1, sfx, 0, frames, round((c0.get("sourceStartS", 0.0) - t0) * fps)))
+        markers = []
         cut = next((c.get("cutS") for c, _ in order if c.get("cutS") is not None), None)
         if cut is not None:
             c0 = order[0][0]
-            cut_frame = round((c0.get("sourceStartS", 0.0) - t0 + cut) * fps)
-            if not tl.AddMarker(cut_frame, "Purple", "cut: time of day",
-                                f"push-start frame (source {cut:.3f} s): cut or centre the dissolve here", 1):
-                print(f"[trailer_import] warning: setup {setup}: cut marker not placed at frame {cut_frame}")
-        clips_total += placed
-        print(f"[trailer_import] coverage '{tl_name}': {placed} clip(s) on {len(order)} track(s), times {', '.join(times)}"
-              + (f", cut marker at source {cut:.3f} s" if cut is not None else ""))
-    pool.SetCurrentFolder(folder)
-    print(f"[trailer_import] coverage: {clips_total} clips in {len(setups)} setup timeline(s), tier <= {a.tier}")
+            markers.append((round((c0.get("sourceStartS", 0.0) - t0 + cut) * fps), "Purple", "cut: time of day",
+                            f"push-start frame (source {cut:.3f} s): cut or centre the dissolve here", 1))
+        tl_name = f"{plan['name']} — cov {setup} {name}"
+        pool.SetCurrentFolder(sub_folder(pool, sub_folder(pool, pool.GetRootFolder(), plan["name"]), "Coverage"))
+        state = build_timeline(project, pool, tl_name, vtracks, ["SFX mix"], placements, markers,
+                               disabled_video=disabled)
+        total += len(items)
+        log(TAG, f"coverage '{tl_name}' {state}: {len(items)}/{len(mine)} clip(s), times {', '.join(times)}"
+                 + (f", cut marker at source {cut:.3f} s" if cut is not None else ""))
+    log(TAG, f"coverage: {total} clips in {len(setups)} setup(s), tier <= {a.tier}")
 
 
 if __name__ == "__main__":
