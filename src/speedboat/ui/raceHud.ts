@@ -9,7 +9,7 @@
  */
 import { h, s, svgRoot, transformPair, txt } from './dom';
 import { ClockText, Flag, GapText, Plotter, ScaleBar, SpeedTach, SurgeCells, TrimDial } from './gauges';
-import { unitFor } from './layout';
+import { unitFor, type ScreenMarker } from './layout';
 import {
   CRASH_TITLES,
   SEA_HEADING_LABEL,
@@ -24,6 +24,67 @@ import type { HudRacer } from './roster';
 import { INT, setData } from './text';
 
 const RC = 'RC · ch16';
+
+/** §T.202 one start marker (pace boat / start line): SVG in viewport px, updated from the page's ScreenMarker */
+class StartMark {
+  readonly g: SVGGElement;
+  private readonly move: SVGTransform;
+  private readonly turn: SVGTransform;
+  private readonly labelMove: SVGTransform;
+  private readonly pointerScale: SVGTransform;
+  private readonly labelScale: SVGTransform;
+  private readonly dist = txt('0');
+  private readonly hidden: Flag;
+  private step = -1;
+
+  /** `below`: the on-screen label sits under the pointer (the start mark), so pace and start never stack on one spot */
+  constructor(owner: SVGSVGElement, cls: string, label: string, icon: SVGElement, private readonly below = false) {
+    // the pointer: a chevron whose tip is the origin, pointing +x (turned toward the target)
+    const pointer = s('g', {}, s('path', { class: 'sbh-mark-arrow', d: 'M0 0 L-16 -11 L-11 0 L-16 11 Z' }));
+    this.turn = transformPair(owner, pointer).turn;
+    this.pointerScale = owner.createSVGTransform();
+    pointer.transform.baseVal.appendItem(this.pointerScale);
+    const text = s('text', { class: 'sbh-mark-text', x: 0, y: 0, 'text-anchor': 'middle', 'dominant-baseline': 'middle', 'font-size': 14 });
+    text.append(label, ' · ', this.dist, ' M');
+    const labelG = s('g', {}, icon, text);
+    this.labelMove = transformPair(owner, labelG).move;
+    this.labelScale = owner.createSVGTransform();
+    labelG.transform.baseVal.appendItem(this.labelScale);
+    this.g = s('g', { class: `sbh-mark ${cls}` }, pointer, labelG);
+    this.move = transformPair(owner, this.g).move;
+    owner.appendChild(this.g);
+    this.hidden = new Flag(this.g, 'is-hidden');
+    this.hidden.set(true);
+  }
+
+  /** edge: HUD unit changed (resize / HUD size) */
+  resize(px: number): void {
+    this.pointerScale.setScale(px, px);
+    this.labelScale.setScale(px, px);
+  }
+
+  /** hot path: SVG transforms, Text.data from the INT table, one class flag */
+  update(m: ScreenMarker | null, px: number): void {
+    this.hidden.set(m === null);
+    if (m === null) return;
+    const d = m.distanceM < 0 ? 0 : m.distanceM;
+    const step = d < 100 ? Math.round(d) : Math.round(d / 10) * 10;
+    if (step !== this.step) {
+      this.step = step;
+      setData(this.dist, INT[step > 999 ? 999 : step]);
+    }
+    this.move.setTranslate(m.x, m.y);
+    if (m.onScreen) {
+      // over the point: the chevron points at it from above (pace) or below (start), its label beyond the chevron
+      this.turn.setRotate(this.below ? -90 : 90, 0, 0);
+      this.labelMove.setTranslate(0, (this.below ? 34 : -34) * px);
+    } else {
+      // at the edge: the chevron points out toward the target, the label sits inboard of it
+      this.turn.setRotate((m.angle * 180) / Math.PI, 0, 0);
+      this.labelMove.setTranslate(-Math.cos(m.angle) * 64 * px, -Math.sin(m.angle) * 30 * px);
+    }
+  }
+}
 const RC_ALL = 'RC · ch16 → all stations';
 
 export class RaceHud {
@@ -89,6 +150,11 @@ export class RaceHud {
   private gateLabel$ = '';
   private gateDistStep = -1;
   private gateSide = 2;
+  // §T.202 start markers
+  private readonly paceMark: StartMark;
+  private readonly startMark: StartMark;
+  private paceM: ScreenMarker | null = null;
+  private startM: ScreenMarker | null = null;
   private vw = 1280;
   private vh = 720;
   private px = 1;
@@ -208,6 +274,12 @@ export class RaceHud {
     this.gateMove = gm.move;
     this.gateSvg.appendChild(gateG);
     this.gateHidden = new Flag(this.gateSvg, 'is-hidden');
+    // — §T.202 pace boat + start line markers (viewport px, same svg as the gate marker)
+    this.paceMark = new StartMark(this.gateSvg, 'is-pace', 'PACE', s('path', { class: 'sbh-mark-chev', d: 'M-78 -6 L-72 0 L-78 6 M-72 -6 L-66 0 L-72 6' }));
+    const chequer = s('g', { class: 'sbh-mark-chequer' },
+      s('rect', { x: -80, y: -7, width: 7, height: 7 }), s('rect', { x: -73, y: 0, width: 7, height: 7 }),
+      s('rect', { class: 'is-open', x: -73, y: -7, width: 7, height: 7 }), s('rect', { class: 'is-open', x: -80, y: 0, width: 7, height: 7 }));
+    this.startMark = new StartMark(this.gateSvg, 'is-start', 'START', chequer, true);
 
     // — toast
     const toast = h('div', 'sbh-toast sb-float', h('span', 'sb-stencil sbh-toast-t', this.toastT), h('span', 'sb-label sbh-toast-d', this.toastD));
@@ -283,6 +355,20 @@ export class RaceHud {
     this.cond$ = '';
   }
 
+  /**
+   * §T.202 the marshal's pace boat on screen (docs/speedboat/circuit.md §T202 HUD hand-off): amber chevron + "PACE · 64 M".
+   * The page passes its projection every frame (or null after green); shown in prestart · rolling · countdown only.
+   * The HUD keeps the reference and draws it in `update`.
+   */
+  setPaceMarker(m: ScreenMarker | null): void {
+    this.paceM = m;
+  }
+
+  /** §T.202 the start gate midpoint: chequer tick + "START · 812 M"; null after green */
+  setStartMarker(m: ScreenMarker | null): void {
+    this.startM = m;
+  }
+
   /** edge: on window resize (the gate marker works in viewport px) */
   resize(vw: number, vh: number): void {
     this.vw = vw;
@@ -291,6 +377,8 @@ export class RaceHud {
     this.gateText.setAttribute('font-size', (14 * this.px).toFixed(2));
     this.gateText.setAttribute('y', (-22 * this.px).toFixed(2));
     const a = 9 * this.px;
+    this.paceMark.resize(this.px);
+    this.startMark.resize(this.px);
     this.gateSvg.querySelector('.sbh-gate-arrow')?.setAttribute('d', `M${-a} ${-1.5 * a} L${a} ${-1.5 * a} L0 0 Z`);
   }
 
@@ -320,7 +408,7 @@ export class RaceHud {
     this.lastClock.update(m.lastLap);
     this.bestClock.update(m.bestLap);
     this.updateRadio(m, dt);
-    // trim + speed show in both layouts (cockpit overlay carries them until the 3D dash displays are mounted)
+    // trim + speed show in both layouts (the cockpit overlay keeps them for a glance; the 3D dash repeats them, §T.208)
     this.trim.update(m.attitudeDeg, m.airborne, m.landing);
     this.speed.update(m.knots, m.rpmAvg, m.rpmFrac, m.governor, m.surgeActive);
     if (!cockpit) {
@@ -329,6 +417,9 @@ export class RaceHud {
       if (m.seaHeading !== this.sea$ || Math.round(m.swellM * 10) !== this.swellTenth) this.rebuildSea(m.seaHeading, m.swellM);
     }
     this.updateGate(m, starting || crashing || finished);
+    const marks = m.phase === 'prestart' || m.phase === 'rolling' || m.phase === 'countdown';
+    this.paceMark.update(marks ? this.paceM : null, this.px);
+    this.startMark.update(marks ? this.startM : null, this.px);
     this.updateToast(m);
     if (starting) this.updateStart(m);
     if (crashing) this.updateCrash(m);

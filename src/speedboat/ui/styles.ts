@@ -200,6 +200,17 @@ ${panelCss('.sbh.is-cockpit', COCKPIT_PANELS)}
 .sbh-gate-arrow { fill: var(--orange); filter: drop-shadow(0 0 ${hu(2)} rgba(21, 27, 28, 0.35)); }
 .sbh-gate-text { font-family: var(--stencil); fill: var(--ink); filter: drop-shadow(0 0 ${hu(2)} rgba(21, 27, 28, 0.6)); }
 .sbh-gate.is-hidden { visibility: hidden; }
+/* §T.202 start markers: pace boat (amber) and start line (chequer) */
+/* the marks share the gate marker's svg, which hides during the start: they carry their own visibility */
+.sbh-mark { visibility: visible; }
+.sbh-mark.is-hidden { visibility: hidden; }
+.sbh-mark-arrow { fill: var(--amber); stroke: rgba(21, 27, 28, 0.55); stroke-width: 1.2; }
+.sbh-mark.is-start .sbh-mark-arrow { fill: var(--ink); }
+.sbh-mark-text { font-family: var(--stencil); fill: var(--ink); filter: drop-shadow(0 0 ${hu(2)} rgba(21, 27, 28, 0.7)); }
+.sbh-mark.is-pace .sbh-mark-text { fill: var(--amber); }
+.sbh-mark-chev { fill: none; stroke: var(--amber); stroke-width: 2.4; stroke-linejoin: round; }
+.sbh-mark-chequer rect { fill: var(--ink); stroke: rgba(21, 27, 28, 0.6); stroke-width: 0.8; }
+.sbh-mark-chequer rect.is-open { fill: rgba(21, 27, 28, 0.85); }
 
 /* toast */
 .sbh-toast { position: absolute; left: 50%; top: ${hu(150)}; transform: translateX(-50%); text-align: center; opacity: 0; transition: opacity 0.18s ease; }

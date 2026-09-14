@@ -26,6 +26,8 @@ import { planKitDecor, propReach, type Placed } from '../src/circuit/kitDecor';
 import { sampleKitSurface } from '../src/circuit/kitSurface';
 import { distanceToClosed } from '../src/circuit/courseLine';
 import { clipPolyhedron } from '../src/circuit/kitDecor';
+import { kitField } from '../src/circuit/kitFamilies';
+import { createRng } from '../src/state/rng';
 
 const SEED = 1965;
 
@@ -54,6 +56,26 @@ beforeAll(() => {
 }, 240_000);
 
 describe('§T.194 the kit hooks reach kit islands only', () => {
+  it('authored cay beaches stay above still water through the terrain pipeline', () => {
+    for (const { id, hm } of kit) {
+      const info = kitRenderInfo(hm);
+      if (info.kind !== 'sandCay') continue;
+      const field = kitField(info.spec, createRng(info.seed), info.seed);
+      let beach = 0, drowned = 0, authoredSum = 0, actualSum = 0;
+      const r = hm.worldRadius;
+      for (let z = -r * 0.7; z < r * 0.7; z += 3) for (let x = -r * 0.7; x < r * 0.7; x += 3) {
+        const authored = field.heightAt(x, z);
+        if (authored < 0.3 || authored > 1.5) continue;
+        beach++;
+        authoredSum += authored;
+        actualSum += hm.heightAt(x, z);
+        if (hm.heightAt(x, z) < 0) drowned++;
+      }
+      expect(beach, id).toBeGreaterThan(20);
+      console.log('cay beach', id, { beach, drowned, authoredMean: authoredSum / beach, actualMean: actualSum / beach });
+      expect(drowned / beach, id).toBeLessThan(0.02);
+    }
+  });
   it('pirate and raft islands are byte-identical after the race kit registers its render hooks', () => {
     expect(pirateRaftHash()).toBe(beforeKit);
   }, 240_000);

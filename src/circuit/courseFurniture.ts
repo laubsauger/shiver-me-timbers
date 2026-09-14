@@ -2,11 +2,16 @@
  * COURSE FURNITURE RUNTIME (§T.187): the course GLBs (scripts/blender/course, contract
  * src/circuit/assets/courseAssetContract.json) drawn at the placements `buildTowerReach` measured.
  *
- * DRAWS. Every variant node of every asset is one InstancedMesh per primitive per LOD, shared by all
- * placements of that variant — 18 gate poles cost the same draws as one. Each placement is a GROUP of
- * variants (a pole = Spar + Strobe + board + numeral) that picks its LOD as one object, by camera
- * distance against the contract's `switchDistance` with hysteresis, and the per-LOD meshes are
- * re-packed (matrices + lamp levels) only when an assignment or a pose changed.
+ * DRAWS (perf-baseline.md "Applied"). Each placement is a GROUP of variants (a pole = Spar + Strobe + board +
+ * numeral) that picks its LOD as one object, by camera distance against the contract's `switchDistance` with
+ * hysteresis, and is not drawn at all past its asset's `COURSE_CULL_DISTANCE`. Every non-lamp primitive of every
+ * variant of an asset lives in ONE BatchedMesh per material slot per LOD band (LOD0 | LOD1+2), so a slot is one
+ * draw whatever mix of boards, numerals, tags and roof kinds is in view; each instance is frustum-culled per pass
+ * (main, shadow, foam capture) by the BatchedMesh itself. The LOD0 band is the §V10 foam target and both bands
+ * cast shadows (roofs neither), as the LOD0/LOD1 meshes did. `C_Lamp` primitives stay one InstancedMesh per
+ * variant per LOD (they carry the per-instance `lampLevel` attribute), packed only with groups in view, and a mesh
+ * with nothing packed is hidden so it costs no render object. T205 measured the old layout (one InstancedMesh per
+ * variant per primitive per LOD, empties included) at 137 draw calls and 4.1 ms of CPU.
  *
  * MATERIALS. One node material per asset per slot, rebuilt from the loaded glTF material with the shared
  * `waterLighting()` folded in exactly as `speedboat/assets/slotMaterials.ts` does (tint × albedo, bounce
@@ -80,6 +85,21 @@ export const ROOF_VARIANT: Record<RoofKind, string> = {
 /** emissive radiance of a fully lit lamp lens (the scene is lit in physical-ish sun units) */
 const LAMP_NITS = 18;
 const BOB_PROBE = 1.2;
+
+/**
+ * Camera distance (m) past which a placement is not drawn (hysteresis: `COURSE_CONTRACT.lod.hysteresis`). Each is
+ * where the asset's tallest feature is ~2-3 px at 1080p with the chase camera's ~60° field: a 4 m spar or buoy at
+ * 1.5 km, a 2.5 m stake at 0.9 km, a roof at 1.8 km, a 30 m pylon at 3.5 km. The tower (and its guy anchors) is the
+ * course's landmark and is never culled.
+ */
+export const COURSE_CULL_DISTANCE: Record<CourseAssetName, number> = {
+  course_gate_pole: 1500,
+  course_turn_buoy: 1500,
+  course_bar_stake: 900,
+  course_pylon: 3500,
+  course_radio_tower: Number.POSITIVE_INFINITY,
+  course_roofs: 1800,
+};
 
 interface Prim {
   geometry: THREE.BufferGeometry;
@@ -306,10 +326,34 @@ interface Group {
   members: { variant: string; local?: THREE.Matrix4; lamp?: (f: CourseFurnitureFrame) => number }[];
   bob?: BobSpec;
   lod: number;
+  /** past `COURSE_CULL_DISTANCE`: not drawn, not bobbed */
+  culled: boolean;
+  /** pose changed since the batches last read it */
+  moved: boolean;
   heave: number;
   tiltX: number;
   tiltZ: number;
   pose: THREE.Matrix4;
+  /** bounding sphere of the LOD0 members in asset space (lamp frustum test) */
+  sphere: THREE.Sphere;
+  /** batched instances of this group's non-lamp primitives */
+  slots: BatchedSlot[];
+}
+
+/** one non-lamp primitive of one member of one group, as an instance in each LOD band's BatchedMesh */
+interface BatchedSlot {
+  local?: THREE.Matrix4;
+  /** LOD0 band */
+  near: THREE.BatchedMesh | null;
+  nearId: number;
+  nearGeometry: number;
+  nearShown: boolean;
+  /** LOD1+2 band: geometry per level (index 1, 2), null where the variant has no such primitive */
+  far: THREE.BatchedMesh | null;
+  farId: number;
+  farGeometry: (number | null)[];
+  farShown: boolean;
+  farCurrent: number;
 }
 
 export interface CourseFurnitureFrame {
@@ -388,7 +432,7 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
   // ── placements → groups ────────────────────────────────────────────────
   const groups: Group[] = [];
   const add = (asset: CourseAssetName, x: number, z: number, base: THREE.Matrix4, members: Group['members'], bob?: BobSpec): void => {
-    groups.push({ asset, x, z, base, members, bob, lod: -1, heave: 0, tiltX: 0, tiltZ: 0, pose: base.clone() });
+    groups.push({ asset, x, z, base, members, bob, lod: -1, culled: false, moved: true, heave: 0, tiltX: 0, tiltZ: 0, pose: base.clone(), sphere: new THREE.Sphere(), slots: [] });
   };
   const elementIndex = new Map(course.elements.map((e, i) => [e.kind === 'gate' ? e.gate.id : e.mark.id, i]));
   const flash = (hz: number, t: number, duty = 0.18): number => ((t * hz) % 1 < duty ? 1 : 0.08);
@@ -454,7 +498,7 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
   const anchorBob: BobSpec = { pivotY: -0.4, heaveGain: 1, tiltGain: 0.1, lagSeconds: 0.9, maxTiltRad: 0.08 };
   t.anchors.forEach((a) => add('course_radio_tower', a[0], a[1], new THREE.Matrix4().makeTranslation(a[0], 0, a[1]), [{ variant: 'GuyAnchor' }], anchorBob));
 
-  // ── instanced meshes per (asset, variant, lod, primitive) ──────────────
+  // ── batched meshes per (asset, slot, LOD band); lamp primitives instanced per (asset, variant, lod) ──
   const root = new THREE.Group();
   root.name = 'course-furniture';
   const materials = new Map<string, THREE.MeshStandardNodeMaterial>();
@@ -477,38 +521,151 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
   const bucketKey = (asset: string, variant: string, lod: number): string => `${asset}|${variant}|${lod}`;
   const foamTargets: THREE.Object3D[] = [];
   const straddles = new Set(['Spar', 'Buoy', 'Stake', 'Pylon', 'Mast', 'GuyAnchor']);
+  const batches: THREE.BatchedMesh[] = [];
+  const isLamp = (prim: Prim): boolean => prim.slot === 'C_Lamp';
+  /**
+   * A BatchedMesh copies each attribute into a plain array of the source's element type, dropping the glTF's
+   * 4-byte-aligned interleaving: the meshopt normals (int16 × 3 = 6 bytes) then fail WebGPU's "arrayStride multiple
+   * of 4" check. Such attributes go into the batch dequantised to float32 (the values the shader already received).
+   */
+  const batchable = (g: THREE.BufferGeometry): THREE.BufferGeometry => {
+    const out = new THREE.BufferGeometry();
+    for (const [key, attr] of Object.entries(g.attributes)) {
+      const bytes = (attr as THREE.BufferAttribute).array.BYTES_PER_ELEMENT * attr.itemSize;
+      if (bytes % 4 === 0 && !(attr as THREE.InterleavedBufferAttribute).isInterleavedBufferAttribute) {
+        out.setAttribute(key, attr);
+        continue;
+      }
+      const arr = new Float32Array(attr.count * attr.itemSize);
+      for (let i = 0; i < attr.count; i++) for (let c = 0; c < attr.itemSize; c++) arr[i * attr.itemSize + c] = attr.getComponent(i, c);
+      out.setAttribute(key, new THREE.BufferAttribute(arr, attr.itemSize));
+    }
+    out.setIndex(g.index);
+    return out;
+  };
+  const countOf = (g: THREE.BufferGeometry): [number, number] => [g.getAttribute('position').count, g.index ? g.index.count : g.getAttribute('position').count];
   for (const name of names) {
     const a = assets[name];
+    const mine = groups.filter((g) => g.asset === name);
+    // ── lamps: as before, one InstancedMesh per lamp primitive per variant per LOD ──
     const capacity = new Map<string, number>();
-    for (const g of groups) if (g.asset === name) for (const m of g.members) capacity.set(m.variant, (capacity.get(m.variant) ?? 0) + 1);
+    for (const g of mine) for (const m of g.members) capacity.set(m.variant, (capacity.get(m.variant) ?? 0) + 1);
     for (let lod = 0; lod < a.lods.length; lod++) {
       for (const [variant, prims] of a.lods[lod] ?? new Map()) {
         const cap = capacity.get(variant) ?? 0;
-        if (cap === 0) continue;
+        const lampPrims = (prims as Prim[]).filter(isLamp);
+        if (cap === 0 || lampPrims.length === 0) continue;
         const b: Bucket = { meshes: [], lamp: [], packed: [] };
-        for (const prim of prims) {
+        for (const prim of lampPrims) {
           const geom = prim.geometry;
           const mesh = new THREE.InstancedMesh(geom, materialFor(name, prim), cap);
           mesh.name = `${name}/${variant}_LOD${lod}/${prim.slot}`;
           mesh.count = 0;
+          mesh.visible = false;
           mesh.frustumCulled = false;
           mesh.castShadow = lod < 2 && name !== 'course_roofs';
           mesh.receiveShadow = true;
-          if (prim.slot === 'C_Lamp') {
-            const attr = new THREE.InstancedBufferAttribute(new Float32Array(cap), 1);
-            attr.setUsage(THREE.DynamicDrawUsage);
-            geom.setAttribute('lampLevel', attr);
-            b.lamp.push(attr);
-          }
-          if (lod === 0 && straddles.has(variant)) {
-            mesh.userData.foamTarget = true;
-            foamTargets.push(mesh);
-          }
+          const attr = new THREE.InstancedBufferAttribute(new Float32Array(cap), 1);
+          attr.setUsage(THREE.DynamicDrawUsage);
+          geom.setAttribute('lampLevel', attr);
+          b.lamp.push(attr);
           b.meshes.push(mesh);
           root.add(mesh);
         }
         buckets.set(bucketKey(name, variant, lod), b);
       }
+    }
+    // ── every other slot: one BatchedMesh per slot per band ──
+    const bandLods = [[0], [1, 2]];
+    const slotNames = new Set<string>();
+    for (const lod of a.lods) for (const prims of lod?.values() ?? []) for (const prim of prims) if (!isLamp(prim)) slotNames.add(prim.slot);
+    for (const slot of slotNames) {
+      for (let band = 0; band < 2; band++) {
+        const lods = bandLods[band].filter((l) => a.lods[l]);
+        // per variant: slot primitives per level, and the instances a member needs (the most primitives at any level)
+        const perVariant = new Map<string, { prims: Map<number, Prim[]>; width: number }>();
+        for (const lod of lods) {
+          for (const [variant, prims] of a.lods[lod]) {
+            const inSlot = prims.filter((p) => p.slot === slot);
+            if (!inSlot.length) continue;
+            const e = perVariant.get(variant) ?? { prims: new Map(), width: 0 };
+            e.prims.set(lod, inSlot);
+            e.width = Math.max(e.width, inSlot.length);
+            perVariant.set(variant, e);
+          }
+        }
+        let vertices = 0;
+        let indices = 0;
+        let instances = 0;
+        let source: Prim | null = null;
+        for (const e of perVariant.values()) {
+          for (const prims of e.prims.values()) {
+            for (const prim of prims) {
+              const [v, i] = countOf(prim.geometry);
+              vertices += v;
+              indices += i;
+              source ??= prim;
+            }
+          }
+        }
+        for (const g of mine) for (const m of g.members) instances += perVariant.get(m.variant)?.width ?? 0;
+        if (!source || instances === 0) continue;
+        const bm = new THREE.BatchedMesh(instances, vertices, indices, materialFor(name, source));
+        bm.name = `${name}/${slot}/${band === 0 ? 'LOD0' : 'LOD1-2'}`;
+        // per-instance culling runs per pass; the whole-object sphere would be computed once and go stale as things bob
+        bm.frustumCulled = false;
+        bm.perObjectFrustumCulled = true;
+        bm.sortObjects = false;
+        bm.castShadow = name !== 'course_roofs';
+        bm.receiveShadow = true;
+        const geometryIds = new Map<string, number>();
+        for (const [variant, e] of perVariant) {
+          for (const [lod, prims] of e.prims) prims.forEach((prim, k) => geometryIds.set(`${variant}|${lod}|${k}`, bm.addGeometry(batchable(prim.geometry))));
+        }
+        for (const g of mine) {
+          for (const m of g.members) {
+            const e = perVariant.get(m.variant);
+            if (!e) continue;
+            for (let k = 0; k < e.width; k++) {
+              if (band === 0) {
+                const id = geometryIds.get(`${m.variant}|0|${k}`);
+                if (id === undefined) continue;
+                const inst = bm.addInstance(id);
+                bm.setVisibleAt(inst, false);
+                g.slots.push({ local: m.local, near: bm, nearId: inst, nearGeometry: id, nearShown: false, far: null, farId: -1, farGeometry: [], farShown: false, farCurrent: -1 });
+              } else {
+                const farGeometry = [null, geometryIds.get(`${m.variant}|1|${k}`) ?? null, geometryIds.get(`${m.variant}|2|${k}`) ?? null];
+                const first = farGeometry.find((x) => x !== null);
+                if (first === undefined || first === null) continue;
+                const inst = bm.addInstance(first);
+                bm.setVisibleAt(inst, false);
+                g.slots.push({ local: m.local, near: null, nearId: -1, nearGeometry: -1, nearShown: false, far: bm, farId: inst, farGeometry, farShown: false, farCurrent: first });
+              }
+            }
+          }
+        }
+        if (band === 0 && [...perVariant.keys()].some((v) => straddles.has(v))) {
+          bm.userData.foamTarget = true;
+          foamTargets.push(bm);
+        }
+        batches.push(bm);
+        root.add(bm);
+      }
+    }
+    // lamp frustum test: the group's LOD0 members in asset space
+    for (const g of mine) {
+      const box = new THREE.Box3();
+      for (const m of g.members) {
+        for (const prim of a.lods[0]?.get(m.variant) ?? []) {
+          prim.geometry.computeBoundingBox();
+          const b = prim.geometry.boundingBox!.clone();
+          if (m.local) b.applyMatrix4(m.local);
+          box.union(b);
+        }
+      }
+      if (!box.isEmpty()) box.getBoundingSphere(g.sphere);
+      // bob heave and tilt swing it by up to a metre or two
+      g.sphere.radius += 2;
     }
   }
 
@@ -612,31 +769,76 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
   const camPos = new THREE.Vector3();
   const tmp = new THREE.Matrix4();
   const tilt = new THREE.Matrix4();
+  const rot = new THREE.Matrix4();
+  const back = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const n = new THREE.Vector3();
-  let dirty = true;
+  const frustum = new THREE.Frustum();
+  const sphere = new THREE.Sphere();
   const hyst = COURSE_CONTRACT.lod.hysteresis;
+  const lampGroups = groups.filter((g) => g.members.some((m) => [0, 1, 2].some((lod) => buckets.has(bucketKey(g.asset, m.variant, lod)))));
 
-  const repack = (): void => {
-    for (const b of buckets.values()) {
-      for (const mesh of b.meshes) mesh.count = 0;
-      b.packed.length = 0;
+  /** push a group's pose, LOD and cull state into its batched instances */
+  const syncBatched = (g: Group): void => {
+    for (const sl of g.slots) {
+      if (sl.near) {
+        const show = !g.culled && g.lod === 0;
+        if (show && (g.moved || !sl.nearShown)) {
+          tmp.copy(g.pose);
+          if (sl.local) tmp.multiply(sl.local);
+          sl.near.setMatrixAt(sl.nearId, tmp);
+        }
+        if (show !== sl.nearShown) {
+          sl.near.setVisibleAt(sl.nearId, show);
+          sl.nearShown = show;
+        }
+      } else if (sl.far) {
+        const geometry = !g.culled && g.lod >= 1 ? sl.farGeometry[g.lod] : null;
+        const show = geometry !== null && geometry !== undefined;
+        if (show) {
+          if (geometry !== sl.farCurrent) {
+            sl.far.setGeometryIdAt(sl.farId, geometry);
+            sl.farCurrent = geometry;
+          }
+          if (g.moved || !sl.farShown) {
+            tmp.copy(g.pose);
+            if (sl.local) tmp.multiply(sl.local);
+            sl.far.setMatrixAt(sl.farId, tmp);
+          }
+        }
+        if (show !== sl.farShown) {
+          sl.far.setVisibleAt(sl.farId, show);
+          sl.farShown = show;
+        }
+      }
     }
-    for (const g of groups) {
+    g.moved = false;
+  };
+
+  /** the lamp buckets hold only groups in view this frame; an empty bucket is hidden */
+  const packLamps = (): void => {
+    for (const b of buckets.values()) b.packed.length = 0;
+    for (const g of lampGroups) {
+      if (g.culled) continue;
+      sphere.copy(g.sphere).applyMatrix4(g.pose);
+      if (!frustum.intersectsSphere(sphere)) continue;
       for (const m of g.members) {
         const b = buckets.get(bucketKey(g.asset, m.variant, g.lod));
         if (!b) continue;
         const i = b.packed.length;
         tmp.copy(g.pose);
         if (m.local) tmp.multiply(m.local);
-        for (const mesh of b.meshes) {
-          mesh.setMatrixAt(i, tmp);
-          mesh.count = i + 1;
-        }
+        for (const mesh of b.meshes) mesh.setMatrixAt(i, tmp);
         b.packed.push({ g, m });
       }
     }
-    for (const b of buckets.values()) for (const mesh of b.meshes) mesh.instanceMatrix.needsUpdate = true;
+    for (const b of buckets.values()) {
+      for (const mesh of b.meshes) {
+        mesh.count = b.packed.length;
+        mesh.visible = b.packed.length > 0;
+        if (mesh.visible) mesh.instanceMatrix.needsUpdate = true;
+      }
+    }
   };
 
   return {
@@ -644,6 +846,9 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
     foamTargets,
     update(f) {
       f.camera.getWorldPosition(camPos);
+      f.camera.updateMatrixWorld();
+      tmp.multiplyMatrices(f.camera.projectionMatrix, f.camera.matrixWorldInverse);
+      frustum.setFromProjectionMatrix(tmp, f.camera.coordinateSystem);
       for (const g of groups) {
         const d = Math.hypot(camPos.x - g.x, camPos.z - g.z, camPos.y);
         const sw = COURSE_CONTRACT.assets[g.asset].switchDistance;
@@ -652,15 +857,21 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
         if (lod === 1 && d < sw[0] * (1 - hyst)) lod = 0;
         if (lod === 1 && d > sw[1] * (1 + hyst)) lod = 2;
         if (lod === 2 && d < sw[1] * (1 - hyst)) lod = 1;
-        if (lod !== g.lod) {
-          g.lod = lod;
-          dirty = true;
+        let changed = lod !== g.lod;
+        g.lod = lod;
+        const far = COURSE_CULL_DISTANCE[g.asset];
+        const culled = g.culled ? d > far : d > far * (1 + hyst);
+        // back in range: the bob filter restarts from the sea it is on now, not from where it was left
+        const snap = g.culled && !culled;
+        if (culled !== g.culled) {
+          g.culled = culled;
+          changed = true;
         }
-        if (g.bob && f.waterHeightAt) {
+        if (!culled && g.bob && f.waterHeightAt) {
           const h = f.waterHeightAt(g.x, g.z);
           const sx = (f.waterHeightAt(g.x + BOB_PROBE, g.z) - f.waterHeightAt(g.x - BOB_PROBE, g.z)) / (2 * BOB_PROBE);
           const sz = (f.waterHeightAt(g.x, g.z + BOB_PROBE) - f.waterHeightAt(g.x, g.z - BOB_PROBE)) / (2 * BOB_PROBE);
-          const k = 1 - Math.exp(-Math.max(f.dt, 0) / Math.max(g.bob.lagSeconds, 1e-3));
+          const k = snap ? 1 : 1 - Math.exp(-Math.max(f.dt, 0) / Math.max(g.bob.lagSeconds, 1e-3));
           g.heave += (h * g.bob.heaveGain - g.heave) * k;
           const cap = g.bob.maxTiltRad;
           g.tiltX += (Math.max(-cap, Math.min(cap, -sx * g.bob.tiltGain)) - g.tiltX) * k;
@@ -668,17 +879,15 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
           // pivot below the waterline: the spar swings about its float, not about its top
           n.set(-g.tiltX, 1, -g.tiltZ).normalize();
           q.setFromUnitVectors(Y, n);
-          tilt.makeTranslation(g.x, g.heave + g.bob.pivotY, g.z).multiply(new THREE.Matrix4().makeRotationFromQuaternion(q)).multiply(new THREE.Matrix4().makeTranslation(-g.x, -g.bob.pivotY, -g.z));
+          tilt.makeTranslation(g.x, g.heave + g.bob.pivotY, g.z).multiply(rot.makeRotationFromQuaternion(q)).multiply(back.makeTranslation(-g.x, -g.bob.pivotY, -g.z));
           g.pose.multiplyMatrices(tilt, g.base);
-          dirty = true;
+          g.moved = true;
         }
+        if (changed || g.moved) syncBatched(g);
       }
-      if (dirty) {
-        repack();
-        dirty = false;
-      }
+      packLamps();
       for (const b of buckets.values()) {
-        if (!b.lamp.length) continue;
+        if (!b.packed.length) continue;
         b.packed.forEach(({ m }, i) => {
           const level = m.lamp ? m.lamp(f) : 0;
           for (const attr of b.lamp) attr.setX(i, level);
@@ -688,20 +897,32 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
       markers.update(f);
     },
     stats() {
-      let draws = 0;
+      const drawn = new Set<THREE.Object3D>();
       let instances = 0;
       let tris = 0;
       const hist = [0, 0, 0];
+      const range = { start: 0, count: 0 } as THREE.BatchedMeshGeometryRange;
+      for (const g of groups) {
+        for (const sl of g.slots) {
+          const bm = sl.nearShown ? sl.near : sl.farShown ? sl.far : null;
+          if (!bm) continue;
+          drawn.add(bm);
+          instances++;
+          bm.getGeometryRangeAt(sl.nearShown ? sl.nearGeometry : sl.farCurrent, range);
+          tris += range.count / 3;
+        }
+      }
       for (const b of buckets.values()) {
         for (const mesh of b.meshes) {
           if (mesh.count === 0) continue;
-          draws++;
+          drawn.add(mesh);
           instances += mesh.count;
           const idx = mesh.geometry.index;
           tris += ((idx ? idx.count : mesh.geometry.attributes.position.count) / 3) * mesh.count;
         }
       }
-      for (const g of groups) if (g.lod >= 0) hist[g.lod]++;
+      let draws = drawn.size;
+      for (const g of groups) if (g.lod >= 0 && !g.culled) hist[g.lod]++;
       if (cables) {
         draws++;
         tris += (cables.geometry.index?.count ?? 0) / 3;
@@ -711,6 +932,7 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
     },
     dispose() {
       for (const b of buckets.values()) for (const mesh of b.meshes) mesh.dispose();
+      for (const bm of batches) bm.dispose();
       for (const m of materials.values()) m.dispose();
       markers.dispose();
       cables?.geometry.dispose();

@@ -55,8 +55,9 @@ export const COCKPIT_PANELS: readonly HudPanelRect[] = [
   { id: 'position', anchor: 'tl', x: 28, y: 96, w: 176, h: 70 },
   { id: 'standings', anchor: 'tl', x: 28, y: 172, w: 190, h: 44 },
   { id: 'radio', anchor: 'tc', x: 0, y: 112, w: 420, h: 30 },
-  // until the 3D dash displays are wired (DashDisplays is built, not mounted on the dash part), the overlay carries
-  // the trim dial and speed/rpm compactly: the cockpit view had NO trim or speed readout (user 2026-09-14)
+  // the 3D dash carries speed/rpm/trim/plotter since §T.208 (page/dashMount.ts), but its gauges are ~6 cm discs below
+  // the eye line: the overlay keeps the trim dial and speed/rpm compactly so they read at a glance (user 2026-09-14:
+  // "no indication anymore where we're at in first person view")
   { id: 'trim', anchor: 'bl', x: 28, y: 14, w: 176, h: 96 },
   { id: 'speed', anchor: 'br', x: 24, y: 14, w: 176, h: 96 },
 ];
@@ -163,4 +164,56 @@ export function panelCss(scope: string, panels: readonly HudPanelRect[]): string
       return `${scope} [data-panel="${p.id}"]{${pos}width:${hu(p.w)};height:${hu(p.h)};}`;
     })
     .join('\n');
+}
+
+/** §T.202 a world point the HUD marks during the start (docs/speedboat/circuit.md §T202 HUD hand-off) */
+export interface ScreenMarker {
+  /** CSS px in the HUD root; when off screen, the point clamped to `MARKER_INSET_PX` of the viewport edge */
+  x: number;
+  y: number;
+  onScreen: boolean;
+  /** rad, screen space (0 = right, +π/2 = down): direction from the screen centre to the point */
+  angle: number;
+  /** metres from the player boat, horizontal */
+  distanceM: number;
+}
+
+export const MARKER_INSET_PX = 48;
+
+/**
+ * NDC (three `Vector3.project`: z > 1 = behind the camera, x/y mirrored by the negative w) → a ScreenMarker, in place.
+ * Off screen the point slides to the inset rectangle along the centre → point ray; a clamp that lands in the §B121
+ * lower-centre keep-out (a marker behind the boat) moves sideways out of it, so the wake stays clear.
+ */
+export function placeScreenMarker(ndc: { x: number; y: number; z: number }, vw: number, vh: number, distanceM: number, out: ScreenMarker): ScreenMarker {
+  const behind = ndc.z > 1;
+  const nx = behind ? -ndc.x : ndc.x;
+  const ny = behind ? -ndc.y : ndc.y;
+  const cx = vw / 2;
+  const cy = vh / 2;
+  let x = cx + nx * cx;
+  let y = cy - ny * cy;
+  let dx = x - cx;
+  let dy = y - cy;
+  if (dx === 0 && dy === 0) dy = behind ? 1 : -1; // dead astern: point down; dead ahead: up
+  out.distanceM = Number.isFinite(distanceM) ? distanceM : 0;
+  out.angle = Math.atan2(dy, dx);
+  out.onScreen = !behind && Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x <= vw && y >= 0 && y <= vh;
+  if (!out.onScreen) {
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) {
+      dx = 0;
+      dy = 1;
+      out.angle = Math.PI / 2;
+    }
+    const hx = Math.max(1, cx - MARKER_INSET_PX);
+    const hy = Math.max(1, cy - MARKER_INSET_PX);
+    const t = Math.min(dx === 0 ? Infinity : hx / Math.abs(dx), dy === 0 ? Infinity : hy / Math.abs(dy));
+    x = cx + dx * t;
+    y = cy + dy * t;
+    const keep = lowerCentreKeepOut(vw, vh);
+    if (x > keep.left && x < keep.right && y > keep.top) x = x < cx ? keep.left : keep.right;
+  }
+  out.x = x;
+  out.y = y;
+  return out;
 }

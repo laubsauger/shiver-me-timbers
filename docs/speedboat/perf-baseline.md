@@ -179,3 +179,43 @@ Low value (each < 0.5 ms): reflection, vesselFx and ambient spray, shadow map (0
 - **Who drove.** The player ran the autopilot, and its `session.controls` cost (≈0.07 ms) is included. On Working sea it drove behind the pack, so the pack numbers come from Calm.
 - **Instrumentation overhead.** About 50 wrapped functions, a `writeBuffer` counter (1.1% of the main thread), and per-frame timestamp resolves. These inflate CPU work by an estimated ≤ 0.5 ms and the GPU slightly.
 - **Background load.** `mediaanalysisd` ran at ≈145% CPU when the session started (GPU idle 0–1% beforehand). There were no other agents or GPU jobs.
+
+## Applied (2026-09-14): knob 1 (kit terrain shading LOD) and knob 6 (furniture draws)
+
+Measured with T205's headless method (same machine, Chrome, `speedboat.html?autopilot`, 1920×1080, DPR 1, GPU lock held; scratch in `scratchpad/knobs/`). Three sessions: `before` (live windows + frozen far A/B), `before-ab` (frozen far and near A/B), `after` (all of it, plus the LOD on/off toggle). Other agents' uncommitted WIP (HUD/dash, wake, flowfoam, ocean surface material) changed between the before and after sessions, so **the same-frame A/B rows are the numbers to trust**; the live rows are indicative.
+
+### What changed
+
+- **Kit terrain (`src/circuit/kitMaterial.ts`, `kitTerrainLod`).** The kit terrain fragment now takes a real WGSL branch. Past 150→230 m from the camera, or 5→9 m below still water, it evaluates a *far surface*: the same tidal band heights, black/barnacle/algae bands, dune tint and rubble ground, with every sub-metre field (cracks, joints, grain, clump, speck, the two Worley fields, wrack, shells) replaced by the mean it already fades to under §V48b. Inside the band both run and crossfade (no pop). Nearer than 150 m and above −5 m, the full path runs alone and its mix weight is exactly 0. Uniforms: `kitTerrainLod.{enabled, near, far, depthStart, depthEnd}`. The underwater band is the "don't shade what the sea covers" half. The terrain can't be culled outright, because the ocean refracts the opaque colour copy and the water is clear down to tens of metres (§V.33). Below 5–9 m it gets the cheap surface instead. **Pirate/raft output is unchanged:** WGSL generated headlessly (nodeTypeCache-style build) is byte-identical before/after for terrain blend, sand, rock, sierra terrain, sierra rock and kit rock. Only the kit terrain program differs. Kit heightmaps, placements and colliders are untouched.
+- **Course furniture (`src/circuit/courseFurniture.ts`).**
+  - Every non-lamp primitive now lives in ONE `BatchedMesh` per asset × material slot × LOD band (LOD0 | LOD1+2). Before, it was one `InstancedMesh` per variant × primitive × LOD, empties included.
+  - Per-instance LOD is `setGeometryIdAt`. Frustum culling runs per pass inside the BatchedMesh (main, shadow, foam capture).
+  - New per-asset distance cull `COURSE_CULL_DISTANCE`: poles/buoys 1.5 km, stakes 0.9 km, roofs 1.8 km, pylons 3.5 km, tower never, with the contract hysteresis. Culled groups are not bobbed, and they snap to the sea when they come back.
+  - Only groups that moved or changed LOD are re-uploaded.
+  - `C_Lamp` primitives stay instanced (per-instance `lampLevel`). They are packed only with groups in the camera frustum and hidden when empty.
+  - The meshopt int16 normals are dequantised to float32 for the batch (WebGPU rejects a 6-byte stride).
+  - Placement matrices are unchanged, and `courseColliders` never read these meshes (`speedboatCollisionCoverage` still passes).
+- **Start markers (`src/circuit/startMarkers.ts`).** Pontoon hulls, poles+posts, flags and boards are one `InstancedMesh` each for all pontoons (was 16 meshes), frustum-culled on a padded sphere.
+
+### Same-frame A/B (sim held, same camera; GPU busy / main-pass ms, CPU work ms)
+
+| view | kit terrain LOD off → on | furniture cost before (hide A/B) | furniture cost after (hide A/B) | furniture draws in main pass |
+|---|---|---|---|---|
+| far chase, W | **−3.4 busy / −3.3 main** | 3.1 GPU / 4.6 CPU | 1.4 GPU / 2.4 CPU | 168 → 47 |
+| near chase, W | **−1.7 busy / −1.7 main** | 3.2 GPU / 4.9 CPU | 1.8 GPU / 2.0 CPU | 168 → 46 |
+
+- **Kit terrain:** −1.7 to −3.4 ms GPU. That is below the −4 to −8 estimate. In the frozen frame no island was nearer than the LOD band, so the saving came mostly from submerged benches and far shore. Visual change: the same-frame screenshot diff of LOD on vs off has mean |Δ| 0.03/255 (far) and 0.004 (near). The only pixels over 16/255 (0.06%) are ocean glints over refracted terrain. Neither frame had an island inside 150–300 m, so the crossfade band itself was not inspected on screen.
+- **Furniture:** −2.2 to −2.9 ms CPU and −1.4 to −1.7 ms GPU against the −3 CPU / −2 GPU estimate. `furniture.stats().draws` went from 66 to 28 on W far. (`stats` counts non-empty meshes; the main-pass column is the renderer's.)
+
+### Live windows (12 s each, rAF frame ms, GPU busy / main pass ms, CPU work ms)
+
+| window | p50 | p95 | GPU busy | main pass | CPU work | main-pass draws |
+|---|---|---|---|---|---|---|
+| W far | 33.3 → 33.3 | 33.3 → 33.3 | 24.0 → 25.6 | 18.0 → 19.7 | 18.6 → 13.9 | 284 → 166 |
+| W near | 33.3 → 33.3 | 50 → 50 | 29.6 → 28.7 | 23.7 → 23.0 | 18.5 → 13.9 | 265 → 151 |
+| C far | 16.7 → 16.7 | 33.3 → 33.3 | 19.5 → 18.4 | 13.4 → 12.4 | 18.0 → 13.8 | 242 → 179 |
+| C near | 33.3 → 16.7 | 33.3 → 33.3 | 21.0 → 21.7 | 15.1 → 16.0 | 17.7 → 13.5 | 260 → 165 |
+
+- **CPU work fell 4.2–4.7 ms in every window.** That is more than the furniture A/B explains (≈2.5), so some of it probably comes from the other WIP.
+- **Live GPU and p50/p95 did not move measurably.** Frames are still vsync-quantised at 30 fps. The views also differ between runs: Calm "far" was 593 m from the pack before and 15 m in it after.
+- **Rolling start not measured.**

@@ -31,7 +31,7 @@
  * one Worley and ~9 octaves on the rocks. Measured in docs/speedboat/circuit.md §T194.
  */
 import * as THREE from 'three/webgpu';
-import { float, mix, normalWorldGeometry, positionLocal, positionWorld, texture, uniform, vec2, vec3 } from 'three/tsl';
+import { Fn, If, cameraPosition, float, int, mat3, max, mix, normalWorldGeometry, positionLocal, positionWorld, texture, uniform, vec2, vec3 } from 'three/tsl';
 import { fbm2, cellular2, valueNoise2 } from '../terrain/noise';
 import { bandLimitedEdge, coordFilter, periodResolved } from '../ship/bandLimit';
 import { reliefNormal } from '../ship/surfaceRelief';
@@ -114,6 +114,33 @@ export function kitSierraParams(base: SierraParams = sierraParams): SierraParams
     jointStrength: base.jointStrength * 0.35,
   };
 }
+
+/**
+ * TERRAIN SHADING LOD (perf-baseline.md "Applied"). The kit terrain fragment was ~9 ms of the 1080p main pass
+ * (T205): two Worley evaluations and ~36 value-noise octaves on top of the sierra granite, for every pixel of
+ * every kit island, including the kilometres of far shore and the submerged benches the sea draws over.
+ *
+ * Past a camera-distance band, or a depth band below still water, the fragment takes a real WGSL branch to
+ * the FAR SURFACE: the same tidal band heights, dune tint and rubble ground with every sub-metre pattern
+ * replaced by the mean the full path fades it to (§V48b), the metre-scale band wobble and algae field kept,
+ * and no crack/joint/grain relief. Inside the band both are evaluated and crossfaded, so there is no pop.
+ * Below `near` and above `depthStart` (the 5-30 m a boat passes an island at) the full path runs alone and
+ * its output is the pre-LOD graph's, node for node (mix weight 0).
+ *
+ * One set of uniforms for the world (one kit material pair). `enabled` = 0 forces the full path everywhere
+ * (A/B and screenshots).
+ */
+export const kitTerrainLod = {
+  enabled: uniform(1),
+  /** camera distance (m) where the far surface starts to blend in */
+  near: uniform(150),
+  /** camera distance (m) past which only the far surface is evaluated */
+  far: uniform(230),
+  /** metres below still water where the far surface starts to blend in */
+  depthStart: uniform(5),
+  /** metres below still water past which only the far surface is evaluated */
+  depthEnd: uniform(9),
+};
 
 const color = (hex: number) => uniform(new THREE.Color(hex));
 
@@ -204,6 +231,8 @@ function graniteZonation(
   u: KitUniforms,
   /** a loose block: its whole height sits in the tidal bands, so they are laid on thinner */
   block = false,
+  /** the 11 m patch and 1.7 m mid fields, when the caller already built them (the terrain shares them with its far surface) */
+  fields?: { patches: AnyNode; mid: AnyNode },
 ): Zonation {
   const bandOpacity = block ? 0.55 : 1;
   const wc = faceCoord();
@@ -214,7 +243,7 @@ function graniteZonation(
   const cells = cellular2(crackCoord);
   const crackDist = cells.y.sub(cells.x);
   const crackFilter = fieldFilter(crackCoord);
-  const patches = fadedFbm(wc.mul(0.09), 3);
+  const patches = fields?.patches ?? fadedFbm(wc.mul(0.09), 3);
   // cracks run where the rock is jointed and the surf works it — a net over a whole dome read as crazy paving
   // @band-limited-elsewhere: elevation gate on world height (the splash zone), not a spatial period
   const surfWorked = positionWorld.y.smoothstep(3.5, 1.0);
@@ -244,8 +273,7 @@ function graniteZonation(
 
   // ── zonation heights, wobbled so no band is a contour line ────────────────
   const lift = exposure.mul(u.splashLift);
-  const midCoord = wc.mul(0.6);
-  const mid = fadedFbm(midCoord, 3);
+  const mid = fields?.mid ?? fadedFbm(wc.mul(0.6), 3);
   const wobble = patches.sub(0.5).mul(u.bandWobble).mul(2).add(mid.sub(0.5).mul(0.3));
   const yb = y.add(wobble);
   const barnacleTop = u.barnacleTop.add(lift.mul(0.4));
@@ -379,6 +407,76 @@ function rubbleGround(base: { albedo: AnyNode; roughness: AnyNode }, rubble: Any
   };
 }
 
+// ── the far surface (see `kitTerrainLod`) ───────────────────────────────────
+
+/**
+ * `graniteZonation` at range: the band heights and colours, the 11 m patch and 1.7 m mid fields that shape the
+ * bands (resolved at every distance this path runs at), and every finer field at the mean it fades to: clump,
+ * speck and grain 0.5, cracks and joints 0. Constants below are those means pushed through the full path's
+ * thresholds (e.g. smoothstep(0.3, 0.62, 0.5) · (0.5·0.5 + 0.6) = 0.581 barnacle crust).
+ */
+function graniteFar(granite: { albedo: AnyNode; roughness: AnyNode }, exposure: AnyNode, wet: AnyNode, patches: AnyNode, mid: AnyNode, u: KitUniforms): { albedo: AnyNode; roughness: AnyNode } {
+  const y = positionWorld.y;
+  const lift = exposure.mul(u.splashLift);
+  const wobble = patches.sub(0.5).mul(u.bandWobble).mul(2).add(mid.sub(0.5).mul(0.3));
+  const yb = y.add(wobble);
+  const barnacleTop = u.barnacleTop.add(lift.mul(0.4));
+  const blackTop = u.blackTop.add(lift.mul(0.8));
+  // @band-limited-elsewhere: elevation bands on world height (≥ 0.2 m wide), not a spatial period — graniteZonation's
+  const subtidal = yb.smoothstep(u.subtidalTop.add(0.15), u.subtidalTop.sub(0.2));
+  // @band-limited-elsewhere: elevation band
+  const barnacleBand = yb.smoothstep(u.subtidalTop.sub(0.3), u.subtidalTop.add(0.1)).mul(yb.smoothstep(barnacleTop.add(0.1), barnacleTop.sub(0.2)));
+  // @band-limited-elsewhere: elevation band
+  const blackBand = yb.smoothstep(barnacleTop.sub(0.25), barnacleTop.add(0.1)).mul(yb.smoothstep(blackTop.add(0.1), blackTop.sub(0.4)));
+  let albedo: AnyNode = granite.albedo;
+  let roughness: AnyNode = granite.roughness;
+  // splash lichen and salt threshold the 45 cm clump field, which is 0.5 at range: none
+  const blackCover = blackBand.mul(float(1).sub(mid.smoothstep(0.55, 0.75).mul(0.8)));
+  albedo = mix(albedo, u.blackLichenColor, blackCover.mul(0.72));
+  roughness = mix(roughness, float(0.6), blackCover);
+  const crust = float(0.581);
+  albedo = mix(albedo, albedo.mul(0.42), barnacleBand);
+  albedo = mix(albedo, u.barnacleColor, barnacleBand.mul(crust).mul(0.75));
+  roughness = mix(roughness, float(0.8), barnacleBand.mul(crust));
+  const algae = subtidal.mul(mid.smoothstep(0.36, 0.58));
+  albedo = mix(albedo, albedo.mul(0.5), subtidal);
+  albedo = mix(albedo, mix(u.algaeColor, u.kelpColor, 0.5), algae.mul(0.85));
+  roughness = mix(roughness, float(0.35), subtidal);
+  albedo = albedo.mul(float(1).sub(wet.mul(u.wetDarken)));
+  roughness = mix(roughness, u.wetRoughness, wet);
+  return { albedo, roughness };
+}
+
+/** `strandline` at range: the 60 cm weed clumps and the shells threshold fields that are 0.5 there, so only the dune tint remains */
+function strandlineFar(sand: { albedo: AnyNode; roughness: AnyNode }, u: KitUniforms): { albedo: AnyNode; roughness: AnyNode } {
+  // @band-limited-elsewhere: elevation band on world height (dry dune above the swash reach)
+  const dune = positionWorld.y.smoothstep(1.2, 2.6);
+  const luma = sand.albedo.dot(vec3(0.3, 0.59, 0.11));
+  return { albedo: mix(sand.albedo, mix(vec3(luma, luma, luma), sand.albedo, 0.62).mul(u.duneLift), dune), roughness: sand.roughness };
+}
+
+/**
+ * `rubbleGround` at range: soil with the fragments at their area mean. Fragments cover where the 4 m cover field
+ * clears 0.52-0.66 (≈ a third of a 3-octave fbm) outside the Worley gaps (≈ 0.8), ≈ 0.22 of the ground, in the
+ * id-weighted mix of concrete (0.66), asphalt (0.18) and brick (0.16 · 0.8).
+ */
+function rubbleFar(base: { albedo: AnyNode; roughness: AnyNode }, rubble: AnyNode, wet: AnyNode, u: KitUniforms): { albedo: AnyNode; roughness: AnyNode } {
+  const y = positionWorld.y;
+  const frag: AnyNode = u.concreteColor.mul(0.66).add(u.asphaltColor.mul(0.18)).add(u.brickColor.mul(0.128));
+  let albedo: AnyNode = mix(u.soilColor, frag, 0.22);
+  // @band-limited-elsewhere: elevation band on world height (weeds above the splash line, cover at its mean)
+  const weeds = y.smoothstep(1.2, 2.4).mul(0.78 * 0.156);
+  albedo = mix(albedo, vec3(0.2, 0.22, 0.11), weeds.mul(0.7));
+  // @band-limited-elsewhere: elevation band on world height
+  const sub = y.smoothstep(0.3, -0.4);
+  albedo = mix(albedo, mix(albedo.mul(0.5), u.algaeColor, 0.35), sub);
+  albedo = albedo.mul(float(1).sub(wet.mul(u.wetDarken)));
+  const roughness = mix(mix(float(0.9), float(0.62), 0.18 * 0.22), u.wetRoughness, wet);
+  // @band-limited-elsewhere: elevation band on world height
+  const shoreOnly = rubble.mul(y.smoothstep(-3.5, -1.5));
+  return { albedo: mix(base.albedo, albedo, shoreOnly), roughness: mix(base.roughness, roughness, shoreOnly) };
+}
+
 // ── the mask atlas ─────────────────────────────────────────────────────────
 
 function createMaskTexture(layers: number): THREE.DataArrayTexture {
@@ -422,28 +520,46 @@ export function createKitMaterialSet(atlas: SierraAtlas, deps: KitMaterialDeps):
       const rubble = mask.g.mul(float(1).sub(bedrock));
       const exposure = mask.b;
       const wet = ctx.sand.wet;
-      const granite = graniteZonation(
-        { albedo: ctx.surface.albedo, roughness: ctx.surface.roughness },
-        exposure,
-        wet,
-        ctx.jointDirA,
-        ctx.jointDirB,
-        ctx.localXZ,
-        u,
-      );
-      const sandLayer = strandline({ albedo: ctx.sand.color, roughness: ctx.sand.roughness }, mask.a, wet, u);
-      const ground = rubbleGround(sandLayer, rubble, wet, u);
-      const albedo = mix(ground.albedo, granite.albedo, bedrock);
-      const roughness = mix(ground.roughness, granite.roughness, bedrock);
-      // NOT the sierra sheet risers: they are a function of world height, which is linear per triangle,
-      // so their screen-space gradient steps at every triangle edge and drew the 3 m mesh as a crack net
-      const relief = mix(ground.relief, granite.relief, bedrock);
       const solid = bedrock.add(rubble).clamp(0, 1);
+      const granite0 = { albedo: ctx.surface.albedo, roughness: ctx.surface.roughness };
+      const sand0 = { albedo: ctx.sand.color, roughness: ctx.sand.roughness };
+      // the band-shaping fields both surfaces read, built once before the branch
+      const wc = faceCoord();
+      const fields = { patches: fadedFbm(wc.mul(0.09), 3), mid: fadedFbm(wc.mul(0.6), 3) };
+      // 0 = full surface only, 1 = far surface only (see `kitTerrainLod`)
+      const L = kitTerrainLod;
+      // @band-limited-elsewhere: camera distance and depth below still water, no period
+      const lod = max(
+        positionWorld.distance(cameraPosition).smoothstep(L.near, L.far),
+        u.waterLevel.sub(positionWorld.y).smoothstep(L.depthStart, L.depthEnd),
+      ).mul(L.enabled);
+      // ONE branch for albedo, roughness and relief: packed so every output reads the same evaluation
+      const surface = Fn(() => {
+        const farGranite = graniteFar(granite0, exposure, wet, fields.patches, fields.mid, u);
+        const farGround = rubbleFar(strandlineFar(sand0, u), rubble, wet, u);
+        const albedo = mix(farGround.albedo, farGranite.albedo, bedrock).toVar();
+        // (roughness, relief, unused): the far surface has no relief
+        // float(): the shared blend hands the kit a vec2 roughness (the sand's filter width leaks its type), of which
+        // the lighting reads .x; float() takes that same component
+        const rough = vec3(float(mix(farGround.roughness, farGranite.roughness, bedrock)), 0, 0).toVar();
+        If(lod.lessThan(1), () => {
+          const granite = graniteZonation(granite0, exposure, wet, ctx.jointDirA, ctx.jointDirB, ctx.localXZ, u, false, fields);
+          const ground = rubbleGround(strandline(sand0, mask.a, wet, u), rubble, wet, u);
+          albedo.assign(mix(mix(ground.albedo, granite.albedo, bedrock), albedo, lod));
+          // NOT the sierra sheet risers: they are a function of world height, which is linear per triangle,
+          // so their screen-space gradient steps at every triangle edge and drew the 3 m mesh as a crack net
+          const relief = mix(ground.relief, granite.relief, bedrock);
+          rough.assign(vec3(mix(float(mix(ground.roughness, granite.roughness, bedrock)), rough.x, lod), float(relief).mul(float(1).sub(lod)), 0));
+        });
+        return (mat3 as AnyNode)(albedo, rough, vec3(0));
+      })().toVar();
+      const packedAlbedo = surface.element(int(0));
+      const packedRough = surface.element(int(1));
       return {
-        albedo,
-        roughness,
+        albedo: packedAlbedo,
+        roughness: packedRough.x,
         emissiveGate: float(1).sub(bedrock).mul(float(1).sub(rubble)),
-        normal: mix(ctx.sand.reliefNormal, reliefNormal(relief, float(1)), solid).normalize(),
+        normal: mix(ctx.sand.reliefNormal, reliefNormal(packedRough.y, float(1)), solid).normalize(),
       };
     },
     rock(ctx) {

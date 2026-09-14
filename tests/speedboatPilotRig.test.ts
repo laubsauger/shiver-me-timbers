@@ -31,7 +31,8 @@ import * as THREE from 'three/webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
-import { makeClipAdditiveToRest, pilotClipTimes, pilotVariantFor, seatSocketFromAnchors } from '../src/speedboat/page/pilotRig';
+import { makeClipAdditiveToRest, pilotClipTimes, pilotVariantFor, seatPilots, seatSocketFromAnchors, wheelAngleFor } from '../src/speedboat/page/pilotRig';
+import { assetFromGltf } from '../src/speedboat/assets/boatModel';
 import { PACE_PREDICT_S, PACE_SNAP_M, createPaceDisplay, stepPaceDisplay } from '../src/speedboat/page/paceBoat';
 import { PLACEHOLDER_IDLE_RPM, PLACEHOLDER_RATED_RPM, jetStats, placeholderPropRpm } from '../src/speedboat/page/speedboatFrame';
 import type { PropWashInput } from '../src/wake/propWash';
@@ -153,6 +154,97 @@ describe('§T.197 the seated pose survives the clips', () => {
     expect(deps).toBeGreaterThan(0);
     expect(deps).toBeLessThan(body.indexOf('ktx2.dispose()'));
   });
+});
+
+describe('§T.203 the hands grip the rim in the running rig', () => {
+  // USER: "hands of the pilot are not touching the wheel. they are like an inch or so off." The asset's bind grip was
+  // right (tests/assetPilot); the page's rig was not: (1) every NPC re-bind refilled the Skeleton.boneInverses array the
+  // clones share with the hero, so the hero glove was skinned with NPC proportions (3.5–6 cm off); (2) the steer clips
+  // turn the grips round a wheel the page never turned, and the bake's left arm cannot reach a right lock (fingertips
+  // 4 cm, thumb 7.5 cm off); (3) the throttle clip lifted the right hand 9–18 cm off the rim at any race throttle.
+  // Built through `seatPilots` (what createPilots runs after the load) on the real GLBs, WITH an NPC so the re-bind runs.
+  const loadGlb = async (path: string) => {
+    const bytes = readFileSync(new URL(path, import.meta.url));
+    await MeshoptDecoder.ready;
+    const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+    const fakeKtx2 = { load(_u: string, onLoad: (t: THREE.CompressedTexture) => void): void { onLoad(new THREE.CompressedTexture([{ data: new Uint8Array(64), width: 4, height: 4 }] as unknown as ImageData[], 4, 4, THREE.RGBA_ASTC_4x4_Format)); } };
+    loader.setKTX2Loader(fakeKtx2 as unknown as Parameters<GLTFLoader['setKTX2Loader']>[0]);
+    const g = globalThis as unknown as { self?: unknown };
+    const hadSelf = 'self' in g;
+    if (!hadSelf) g.self = globalThis;
+    try {
+      const gltf = await loader.parseAsync(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, '');
+      const materials = (await gltf.parser.getDependencies('material')) as THREE.Material[]; // the NPC skin variants too
+      return { gltf, materials };
+    } finally {
+      if (!hadSelf) delete g.self;
+    }
+  };
+
+  /** per hand: each fingertip's (distal phalanx, thumb included) closest skinned glove vertex to the rim tube surface, m */
+  const fingertipGaps = (pilot: THREE.Object3D, boat: THREE.Object3D): Record<'l' | 'r', number[]> => {
+    const rim = (JSON.parse(boat.userData.partsSockets as string) as { wheelRim: { centre: number[]; axis: number[]; radius: number; tube: number } }).wheelRim;
+    const hub = new THREE.Vector3(...rim.centre);
+    const axis = new THREE.Vector3(...rim.axis).normalize();
+    boat.updateMatrixWorld(true);
+    const toBoat = boat.matrixWorld.clone().invert();
+    const best = new Map<string, number>();
+    const v = new THREE.Vector3();
+    const rel = new THREE.Vector3();
+    pilot.traverse((o) => {
+      const mesh = o as THREE.SkinnedMesh;
+      if (!mesh.isSkinnedMesh || !/^Pilot_M_Pilot_LOD0$/.test(mesh.name)) return;
+      const geo = mesh.geometry;
+      const pos = geo.getAttribute('position');
+      const si = geo.getAttribute('skinIndex');
+      const sw = geo.getAttribute('skinWeight');
+      const morphs = geo.morphAttributes.position ?? [];
+      for (let i = 0; i < pos.count; i++) {
+        let bone = 0;
+        for (let k = 1; k < 4; k++) if (sw.getComponent(i, k) > sw.getComponent(i, bone)) bone = k;
+        const name = mesh.skeleton.bones[si.getComponent(i, bone)].name;
+        if (!/^(thumb|index|middle|ring|pinky)_03_[lr]$/.test(name)) continue;
+        v.fromBufferAttribute(pos, i);
+        morphs.forEach((m, k) => v.addScaledVector(rel.fromBufferAttribute(m, i), mesh.morphTargetInfluences?.[k] ?? 0));
+        mesh.applyBoneTransform(i, v);
+        v.applyMatrix4(mesh.matrixWorld).applyMatrix4(toBoat);
+        rel.subVectors(v, hub);
+        const along = rel.dot(axis);
+        const gap = Math.hypot(Math.sqrt(Math.max(0, rel.lengthSq() - along * along)) - rim.radius, along) - rim.tube;
+        best.set(name, Math.min(best.get(name) ?? Infinity, gap));
+      }
+    });
+    const side = (s: string): number[] => [...best].filter(([n]) => n.endsWith(`_${s}`)).map(([, d]) => d);
+    return { l: side('l'), r: side('r') };
+  };
+
+  it('helm centred and at either lock, full throttle, hero and NPC: fingertips on the rim (< 1 cm), none lifted (< 2 cm)', async () => {
+    const heroGlb = await loadGlb('../assets/models/speedboat_hero.glb');
+    const pilotGlb = await loadGlb('../assets/models/speedboat_pilot.glb');
+    const asset = assetFromGltf(heroGlb.gltf.scene);
+    const hero = asset.instantiate({ variant: 'hero', water: false });
+    const npc = asset.instantiate({ variant: 'hero', water: false });
+    hero.object.position.set(40, 0.3, -12);
+    hero.object.rotation.set(0.05, 1.1, -0.08); // a boat under way, not the identity frame
+    const pilots = seatPilots(pilotGlb.gltf, pilotGlb.materials, { hero, npcs: [npc] }, 55);
+    const helm = hero.object.getObjectByName('Helm_LOD0') as THREE.Object3D;
+    for (const steer of [0, 1, -1]) {
+      const controls = { steer, throttle: 1 };
+      pilots.update(0.4, controls, () => controls);
+      for (const [who, p, boat] of [['hero', pilots.hero, hero], ['npc', pilots.npcs[0], npc]] as const) {
+        const gaps = fingertipGaps(p.object, boat.object);
+        for (const s of ['l', 'r'] as const) {
+          expect(gaps[s].length, `${who} ${s} fingertips`).toBe(5);
+          const cm = gaps[s].map((d) => (d * 100).toFixed(1)).join(', ');
+          expect(Math.min(...gaps[s]), `${who} hand ${s} steer ${steer}: fingertip gaps ${cm} cm`).toBeLessThan(0.01);
+          expect(Math.max(...gaps[s]), `${who} hand ${s} steer ${steer}: fingertip gaps ${cm} cm`).toBeLessThan(0.02);
+        }
+      }
+      // the wheel turns under the hands by the angle they are carried round (spokes and grips agree)
+      const turned = new THREE.Quaternion().setFromRotationMatrix(helm.matrix);
+      expect(2 * Math.acos(Math.min(1, Math.abs(turned.w)))).toBeCloseTo(Math.abs(wheelAngleFor(steer)), 4);
+    }
+  }, 60_000);
 });
 
 describe('pace boat display', () => {

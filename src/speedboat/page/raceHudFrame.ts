@@ -34,6 +34,8 @@ export interface RaceHudFrameDeps {
   driveRpm: ArrayLike<number>;
   oceanParams: Readonly<OceanParams>;
   seaLabel(): string;
+  /** §T.202 the drawn pace boat (page/paceBoat `display`), for the HUD's pace marker */
+  pace?: Readonly<{ visible: boolean; x: number; z: number }>;
 }
 
 export function createRaceHudFrame(d: RaceHudFrameDeps): { fill(dt: number): RaceUiFrame } {
@@ -56,6 +58,7 @@ export function createRaceHudFrame(d: RaceHudFrameDeps): { fill(dt: number): Rac
       out.z = v.z;
     },
     sea,
+    pace: d.pace ?? null,
   };
   return {
     fill(dt) {

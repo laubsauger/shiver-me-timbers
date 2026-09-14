@@ -7,7 +7,7 @@
  * SEAT. The hero boat GLB has no seat socket node (pilot-log "Helm, sockets": "No seat socket node in the parts
  * GLB"), so the socket is DERIVED from the two assets' own anchors, no page constant: the boat's
  * `partsAnchors.eye` (body frame) minus the pilot's `seated.partsEyeAnchor` (pilot frame) — both name the same
- * parts eye point. For the current build that is (0, 0.431, 0.234): z = partsAnchors.seatZ, as it must be.
+ * parts eye point. For the current build that is (0, 0.410, 0.234): z = partsAnchors.seatZ, as it must be.
  *
  * VARIANTS. hero = the file's bind; NPCs alternate npc_b / npc_c: morph weights `variant_b`/`variant_c`, the hair
  * card set per `variants.<v>.hairStyle`, the skin material clone `M_PilotSkin@<v>` (the `KHR_materials_variants`
@@ -22,8 +22,11 @@
  * HEAD. `firstPerson.collapseBone` (`head_geo`) scales to ~0 in the cockpit camera; `head` and `cam_eye` keep their
  * transforms, so `eyeSource` stays valid for raceCam `setEyeSource`.
  *
+ * HANDS (§T.203). The helm node turns with the steer (`wheelAngleFor`, the clips' own 90° × ease) and both hands are
+ * re-solved onto the turned rim after the mixer (`createHandGrip`); the throttle clip is not played (see `seatPilots`).
+ *
  * NOT DONE HERE (reported): the pilot's runtime materials (skin SSS, hair Kajiya-Kay, accent-hue tint, hair tint)
- * — GLTFLoader's standard materials draw; IK to the helm sockets (the bind is already on the helm); LOD by the
+ * — GLTFLoader's standard materials draw; the throttle lever and a throttle hand; LOD by the
  * asset's `lodScreenFraction`, which IS done, with `lodDistances` from the boat contract.
  *
  * LOADER. `speedboat/assets` exposes only a contract-checked `load` (a pilot is not a boat contract), so the
@@ -42,6 +45,8 @@ import { lodDistances, type BoatInstance, applyTextureAnisotropy } from '../asse
 
 export const PILOT_URL = new URL('../../../assets/models/speedboat_pilot.glb', import.meta.url).href;
 
+const clamp01 = (v: number): number => (Number.isFinite(v) ? (v < 0 ? 0 : v > 1 ? 1 : v) : 0);
+
 export type PilotVariant = 'hero' | 'npc_b' | 'npc_c';
 /** NPC i's pilot: the two NPC variants alternate so neighbours on the grid differ */
 export const pilotVariantFor = (npcIndex: number): PilotVariant => (npcIndex % 2 === 0 ? 'npc_b' : 'npc_c');
@@ -53,14 +58,24 @@ export interface PilotControls {
   throttle: number;
 }
 
+/** the steer clips' wheel turn at full lock (scripts/blender/pilot/anim.py `steer`: 90° × ease(k), + = left turn) */
+export const WHEEL_LOCK_RAD = Math.PI / 2;
+const ease = (t: number): number => t * t * (3 - 2 * t);
+/**
+ * §T.203 the helm's turn for a steer (−1 left .. +1 right), rad about the wheel axis (toward the pilot, so + = counter-
+ * clockwise as the pilot sees it = a left turn): the same `LOCK × ease(k)` the steer clips bake, so wheel and torso agree.
+ */
+export const wheelAngleFor = (steer: number): number => {
+  const k = clamp01(Math.abs(steer));
+  return (steer < 0 ? 1 : -1) * WHEEL_LOCK_RAD * ease(k);
+};
+
 /** clip times as a fraction of each scrubbed clip's length (pure; tests pin the mapping) */
 export interface PilotClipTimes {
   steerLeft: number;
   steerRight: number;
   throttle: number;
 }
-
-const clamp01 = (v: number): number => (Number.isFinite(v) ? (v < 0 ? 0 : v > 1 ? 1 : v) : 0);
 
 /** steer right deflects only the right clip, left only the left; reverse throttle leaves the lever at idle */
 export function pilotClipTimes(c: Readonly<PilotControls>, out: PilotClipTimes = { steerLeft: 0, steerRight: 0, throttle: 0 }): PilotClipTimes {
@@ -128,6 +143,147 @@ export function seatSocketFromAnchors(boatUserData: Record<string, unknown>, pil
   return [e[0] - p[0], e[1] - p[1], e[2] - p[2]];
 }
 
+/** a hand's bind grip on the rim, pilot frame: the hand bone's head and world orientation in the seated bind */
+export interface BindGrip {
+  position: THREE.Vector3;
+  quaternion: THREE.Quaternion;
+}
+
+const _S = new THREE.Vector3();
+const _E = new THREE.Vector3();
+const _W = new THREE.Vector3();
+const _T = new THREE.Vector3();
+const _u = new THREE.Vector3();
+const _v = new THREE.Vector3();
+const _d1 = new THREE.Vector3();
+const _d2 = new THREE.Vector3();
+const _sc = new THREE.Vector3();
+const _q1 = new THREE.Quaternion();
+const _q2 = new THREE.Quaternion();
+const _qw = new THREE.Quaternion();
+const _qr = new THREE.Quaternion();
+const _qLod = new THREE.Quaternion();
+/** the arm may stretch to this fraction of upper + lower length before the hand slides along the rim instead */
+const REACH_MAX = 0.985;
+
+const worldQuat = (o: THREE.Object3D, out: THREE.Quaternion): THREE.Quaternion => {
+  o.matrixWorld.decompose(_sc, out, _sc);
+  return out;
+};
+
+/** turn `bone` in WORLD space by the shortest arc taking direction `from` to `to` (unit vectors) */
+function turnBone(bone: THREE.Object3D, from: THREE.Vector3, to: THREE.Vector3): void {
+  _q1.setFromUnitVectors(from, to);
+  worldQuat(bone, _qw);
+  const parent = bone.parent as THREE.Object3D;
+  worldQuat(parent, _q2).invert();
+  bone.quaternion.copy(_q2.multiply(_q1).multiply(_qw)).normalize();
+  bone.updateMatrixWorld(true);
+}
+
+/**
+ * §T.203 HANDS ON THE RIM. The steer clips were baked with the wheel turning under two-bone IK, but the page never
+ * turned the wheel, and at a right lock the left arm cannot reach 90° (the bake clamps it: 8.9 cm off the rim, fingertips
+ * 4 cm, thumb 7.5 cm), and the additive stack on the idle layer drifts the grips further. So after the mixer each hand is
+ * re-solved every frame: its bind grip carried round the hub by the wheel angle (the rim is a torus about that axis, so
+ * the carried glove stays exactly where the build wrapped it), a two-bone IK on upperarm/lowerarm keeping the elbow on its
+ * clip side, and the hand's world orientation set to the carried bind orientation. A hand that cannot reach the carried
+ * grip slides back along the rim to the largest turn it reaches (a real driver's hand slips too). Render only (§V3).
+ */
+export function createHandGrip(
+  lod: THREE.Object3D,
+  grips: Readonly<Record<'l' | 'r', BindGrip>>,
+  hub: THREE.Vector3,
+  axis: THREE.Vector3,
+): ((wheelRad: number) => void) | null {
+  const arms = (['l', 'r'] as const).map((s) => ({
+    upper: lod.getObjectByName(`upperarm_${s}`),
+    lower: lod.getObjectByName(`lowerarm_${s}`),
+    hand: lod.getObjectByName(`hand_${s}`),
+    grip: grips[s],
+  }));
+  if (arms.some((a) => !a.upper || !a.lower || !a.hand || a.hand.parent !== a.lower || a.lower.parent !== a.upper)) return null;
+  const ax = axis.clone().normalize();
+  /** carried grip for a turn, pilot frame → world */
+  const target = (g: BindGrip, rad: number, out: THREE.Vector3): THREE.Vector3 =>
+    out.copy(g.position).sub(hub).applyAxisAngle(ax, rad).add(hub).applyMatrix4(lod.matrixWorld);
+  return (wheelRad) => {
+    lod.updateMatrixWorld(true);
+    worldQuat(lod, _qLod);
+    for (const arm of arms) {
+      const upper = arm.upper as THREE.Object3D;
+      const lower = arm.lower as THREE.Object3D;
+      const hand = arm.hand as THREE.Object3D;
+      _S.setFromMatrixPosition(upper.matrixWorld);
+      _E.setFromMatrixPosition(lower.matrixWorld);
+      _W.setFromMatrixPosition(hand.matrixWorld);
+      const a = _E.distanceTo(_S);
+      const b = _W.distanceTo(_E);
+      const reach = REACH_MAX * (a + b);
+      let rad = Number.isFinite(wheelRad) ? wheelRad : 0;
+      if (target(arm.grip, rad, _T).distanceTo(_S) > reach) {
+        let lo = 0;
+        let hi = rad;
+        for (let i = 0; i < 8; i++) {
+          const mid = (lo + hi) / 2;
+          if (target(arm.grip, mid, _T).distanceTo(_S) > reach) hi = mid;
+          else lo = mid;
+        }
+        rad = lo;
+        target(arm.grip, rad, _T);
+      }
+      _u.subVectors(_T, _S);
+      const d = Math.min(Math.max(_u.length(), Math.abs(a - b) + 1e-4), reach);
+      _u.normalize();
+      _v.subVectors(_E, _S);
+      _v.addScaledVector(_u, -_v.dot(_u));
+      if (_v.lengthSq() < 1e-12) continue; // arm dead straight at the target: nothing to bend
+      _v.normalize();
+      const cosA = Math.min(1, Math.max(-1, (a * a + d * d - b * b) / (2 * a * d)));
+      // upper arm: shoulder → new elbow
+      _d1.subVectors(_E, _S).normalize();
+      _d2.copy(_u).multiplyScalar(cosA).addScaledVector(_v, Math.sqrt(1 - cosA * cosA)).normalize();
+      turnBone(upper, _d1, _d2);
+      // forearm: new elbow → the grip
+      _E.setFromMatrixPosition(lower.matrixWorld);
+      _W.setFromMatrixPosition(hand.matrixWorld);
+      _d1.subVectors(_W, _E).normalize();
+      _d2.copy(_S).addScaledVector(_u, d).sub(_E).normalize();
+      turnBone(lower, _d1, _d2);
+      // hand: the bind orientation carried round the hub
+      _qr.setFromAxisAngle(ax, rad);
+      _qw.copy(_qLod).multiply(_qr).multiply(arm.grip.quaternion);
+      worldQuat(lower, _q2).invert();
+      hand.quaternion.copy(_q2.multiply(_qw)).normalize();
+      hand.updateMatrixWorld(true);
+    }
+  };
+}
+
+/** the helm node's turn about its own pivot/axis (body frame extras), on top of its rest matrix; null without the node */
+export function createHelmTurn(boat: THREE.Object3D): ((wheelRad: number) => void) | null {
+  const helm = boat.getObjectByName('Helm_LOD0');
+  const ex = (helm?.userData ?? {}) as { pivot?: number[]; axis?: number[] };
+  const ok = (v: number[] | undefined): v is number[] => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
+  if (!helm || !ok(ex.pivot) || !ok(ex.axis)) return null;
+  const pivot = new THREE.Vector3(...ex.pivot);
+  const axis = new THREE.Vector3(...ex.axis).normalize();
+  helm.updateMatrix();
+  const rest = helm.matrix.clone();
+  helm.matrixAutoUpdate = false;
+  const m = new THREE.Matrix4();
+  const t = new THREE.Matrix4();
+  let last = Number.NaN;
+  return (rad) => {
+    if (rad === last) return;
+    last = rad;
+    // T(p) · R · T(−p) · rest
+    m.makeTranslation(pivot.x, pivot.y, pivot.z).multiply(t.makeRotationAxis(axis, rad)).multiply(t.makeTranslation(-pivot.x, -pivot.y, -pivot.z));
+    helm.matrix.multiplyMatrices(m, rest);
+    helm.matrixWorldNeedsUpdate = true;
+  };
+}
+
 export interface PilotInstance {
   readonly variant: PilotVariant;
   /** child of the boat instance at the seat socket */
@@ -190,6 +346,23 @@ async function loadPilotGltf(renderer: THREE.WebGPURenderer, url: string): Promi
  * pilots that do nothing, so the race still runs (fail loud, keep racing).
  */
 export async function createPilots(app: App, boats: { hero: BoatInstance; npcs: readonly BoatInstance[] }, opts: CreatePilotsOptions = {}): Promise<Pilots> {
+  let gltf: GLTF;
+  let materials: THREE.Material[];
+  try {
+    ({ gltf, materials } = await loadPilotGltf(app.renderer, opts.url ?? PILOT_URL));
+  } catch (e) {
+    return inertPilots(boats, e);
+  }
+  // §T.192: the same anisotropic filtering every boat texture gets (textures read mushy at grazing angles otherwise) —
+  // over EVERY material, the NPC skin variants included (no mesh in the scene carries those until a pilot swaps them in)
+  const allMaterials = new THREE.Group();
+  for (const m of materials) allMaterials.add(new THREE.Mesh(undefined, m));
+  applyTextureAnisotropy(allMaterials, app.renderer.getMaxAnisotropy());
+  return seatPilots(gltf, materials, boats, opts.fovDeg ?? app.camera.fov);
+}
+
+/** pilots that do nothing, after ONE warning (fail loud, keep racing) */
+function inertPilots(boats: { npcs: readonly unknown[] }, why: unknown): Pilots {
   const inert = (variant: PilotVariant): PilotInstance => ({
     variant,
     object: new THREE.Group(),
@@ -197,23 +370,16 @@ export async function createPilots(app: App, boats: { hero: BoatInstance; npcs: 
     eyeSource: () => false,
     update() {},
   });
-  const fallback = (why: unknown): Pilots => {
-    console.warn('[speedboat] pilot not seated:', why);
-    return { hero: inert('hero'), npcs: boats.npcs.map((_, i) => inert(pilotVariantFor(i))), update() {}, dispose() {} };
-  };
+  console.warn('[speedboat] pilot not seated:', why);
+  return { hero: inert('hero'), npcs: boats.npcs.map((_, i) => inert(pilotVariantFor(i))), update() {}, dispose() {} };
+}
 
-  let gltf: GLTF;
-  let materials: THREE.Material[];
-  try {
-    ({ gltf, materials } = await loadPilotGltf(app.renderer, opts.url ?? PILOT_URL));
-  } catch (e) {
-    return fallback(e);
-  }
-  // §T.192: the same anisotropic filtering every boat texture gets (textures read mushy at grazing angles otherwise) —
-  // over EVERY material, the NPC skin variants included (no mesh in the scene carries those until a pilot swaps them in)
-  const allMaterials = new THREE.Group();
-  for (const m of materials) allMaterials.add(new THREE.Mesh(undefined, m));
-  applyTextureAnisotropy(allMaterials, app.renderer.getMaxAnisotropy());
+/**
+ * The loaded pilot GLB seated in every boat: what `createPilots` does after the load, with no renderer (tests build the
+ * page's rig through this on the real GLBs). `materials` = every material the GLB declares (the NPC skin variants).
+ */
+export function seatPilots(gltf: GLTF, materials: readonly THREE.Material[], boats: { hero: BoatInstance; npcs: readonly BoatInstance[] }, fov: number): Pilots {
+  const fallback = (why: unknown): Pilots => inertPilots(boats, why);
   const root = gltf.scene.getObjectByName('SB_Pilot') ?? gltf.scene.children[0];
   if (!root) return fallback('no SB_Pilot root');
   const extras = root.userData as Record<string, unknown>;
@@ -236,13 +402,30 @@ export async function createPilots(app: App, boats: { hero: BoatInstance; npcs: 
   };
   const steerL = additive('steer_left');
   const steerR = additive('steer_right');
-  const throttle = additive('throttle_push');
-  const missing = [['seated_base', base], ['idle_seated', idle], ['steer_left', steerL], ['steer_right', steerR], ['throttle_push', throttle]]
+  // §T.203: `throttle_push` is NOT scrubbed. It takes the right hand off the wheel from the first % of throttle (its first
+  // 0.3 s is the reach, so any race throttle left the hand 9–18 cm off the rim in mid-air) to a lever that never moves.
+  const missing = [['seated_base', base], ['idle_seated', idle], ['steer_left', steerL], ['steer_right', steerR]]
     .filter(([, c]) => !c)
     .map(([n]) => n);
   if (missing.length) console.warn(`[speedboat] pilot clips missing: ${missing.join(', ')} (the pilot sits in the bind pose)`);
-  const fov = opts.fovDeg ?? app.camera.fov;
   const tmp1 = new THREE.Vector3();
+  // §T.203 the hero bind's grips (pilot frame) and the rim they were wrapped on (pilot extras `helm`, from the parts build)
+  const helm = parse<{ hub?: number[]; axis?: number[] }>(extras.helm);
+  root.updateMatrixWorld(true);
+  const bindGrip = (s: 'l' | 'r'): BindGrip | null => {
+    const hand = root.getObjectByName(`hand_${s}`);
+    if (!hand) return null;
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    root.matrixWorld.clone().invert().multiply(hand.matrixWorld).decompose(position, quaternion, tmp1);
+    return { position, quaternion };
+  };
+  const gl = bindGrip('l');
+  const gr = bindGrip('r');
+  const grips = gl && gr && helm?.hub?.length === 3 && helm.axis?.length === 3
+    ? { l: gl, r: gr, hub: new THREE.Vector3(...helm.hub), axis: new THREE.Vector3(...helm.axis) }
+    : null;
+  if (!grips) console.warn('[speedboat] pilot helm grips missing (extras helm / hand bones): hands follow the clips unglued');
 
   const build = (boat: BoatInstance, variant: PilotVariant): PilotInstance => {
     const copy = cloneSkinned(root);
@@ -301,6 +484,11 @@ export async function createPilots(app: App, boats: { hero: BoatInstance; npcs: 
       }
       for (const mesh of skinned) {
         mesh.updateMatrixWorld(true);
+        // §T.203 ROOT CAUSE of "hands an inch off the wheel": `SkeletonUtils.clone` gives every clone a Skeleton that
+        // SHARES the source's `boneInverses` array, and `calculateInverses` refills that array in place — so each NPC
+        // re-bind rewrote the hero's (and every other pilot's) inverse binds, and the hero's glove was skinned with the
+        // last NPC's proportions: 3.5–6 cm off the rim. A fresh array per clone keeps the re-bind to this pilot.
+        mesh.skeleton.boneInverses = [];
         mesh.skeleton.calculateInverses();
       }
     }
@@ -323,9 +511,10 @@ export async function createPilots(app: App, boats: { hero: BoatInstance; npcs: 
     if (idle) mixer.clipAction(idle).play();
     const aL = scrub(steerL);
     const aR = scrub(steerR);
-    const aT = scrub(throttle);
     const times: PilotClipTimes = { steerLeft: 0, steerRight: 0, throttle: 0 };
     boat.object.add(lod);
+    const turnHelm = createHelmTurn(boat.object);
+    const glue = grips ? createHandGrip(lod, grips, grips.hub, grips.axis) : null;
 
     return {
       variant,
@@ -343,8 +532,10 @@ export async function createPilots(app: App, boats: { hero: BoatInstance; npcs: 
         pilotClipTimes(c, times);
         if (aL) aL.time = times.steerLeft * aL.getClip().duration;
         if (aR) aR.time = times.steerRight * aR.getClip().duration;
-        if (aT) aT.time = times.throttle * aT.getClip().duration;
         mixer.update(Number.isFinite(dt) && dt > 0 ? dt : 0);
+        const wheel = wheelAngleFor(Number.isFinite(c.steer) ? c.steer : 0);
+        turnHelm?.(wheel);
+        glue?.(wheel);
       },
     };
   };

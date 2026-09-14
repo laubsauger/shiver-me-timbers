@@ -18,8 +18,11 @@ import {
   HUD_SCALES,
   centralKeepOut,
   intersects,
+  MARKER_INSET_PX,
   lowerCentreKeepOut,
   placePanel,
+  placeScreenMarker,
+  type ScreenMarker,
   unitFor,
   type HudPanelRect,
 } from '../src/speedboat/ui/layout';
@@ -136,5 +139,40 @@ describe('legibility floors', () => {
     const sizes = [...hudCss.matchAll(/font-size:\s*calc\(([\d.]+) \* var\(--hu\)\)/g)].map((m) => Number(m[1]));
     expect(sizes.length).toBeGreaterThan(30);
     expect(Math.min(...sizes) * u720 * smallest).toBeGreaterThanOrEqual(8);
+  });
+});
+
+describe('§T.202 start markers: the steward and the line are always findable, never on the wake', () => {
+  // USER: "we don't really get an indication where the steward is with some visual hint". A marker that vanishes when the
+  // pace boat is behind or beside the camera (it is, on the grid), or that points the wrong way for a point behind the
+  // camera (three's projection mirrors it), sends the player hunting; one clamped onto the lower centre covers the wake.
+  const at = (x: number, y: number, z: number, vw = 1920, vh = 1080): ScreenMarker =>
+    placeScreenMarker({ x, y, z }, vw, vh, 64, { x: 0, y: 0, onScreen: false, angle: 0, distanceM: 0 });
+
+  it('on screen at the projected point; off screen on the inset edge along the true direction; never in the lower centre', () => {
+    const ahead = at(0.2, 0.1, 0.99);
+    expect([ahead.onScreen, ahead.x, ahead.y, ahead.distanceM]).toEqual([true, 1152, 486, 64]);
+
+    // far off to the right, a little up: pinned to the right inset, pointing right
+    const right = at(3, 0.3, 0.98);
+    expect(right.onScreen).toBe(false);
+    expect(right.x).toBeCloseTo(1920 - MARKER_INSET_PX, 6);
+    expect(right.angle).toBeLessThan(0);
+    expect(right.angle).toBeGreaterThan(-Math.PI / 4);
+
+    // behind the camera: three mirrors x/y (negative w), so NDC (−0.5, 0.2) behind is really right and down
+    const behind = at(-0.5, 0.2, 1.02);
+    expect(behind.onScreen).toBe(false);
+    expect(Math.cos(behind.angle)).toBeGreaterThan(0); // right, not the mirrored left
+    expect(behind.y).toBeGreaterThanOrEqual(MARKER_INSET_PX - 1e-6);
+    expect(behind.x).toBeLessThanOrEqual(1920 - MARKER_INSET_PX + 1e-6);
+
+    // dead astern and low (the grid's pace boat behind a chase camera): clamped to the bottom edge, pushed out of §B121
+    for (const [vw, vh] of VIEWPORTS) {
+      const astern = at(0.05, 0.6, 1.1, vw, vh);
+      const keep = lowerCentreKeepOut(vw, vh);
+      expect(astern.onScreen).toBe(false);
+      expect(astern.x <= keep.left || astern.x >= keep.right || astern.y <= keep.top, `${vw}x${vh} marker at ${astern.x},${astern.y}`).toBe(true);
+    }
   });
 });

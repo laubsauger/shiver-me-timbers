@@ -19,4 +19,4 @@ export { PauseScreen, ASSIST_PRESETS, type AssistSettings, type AudioSettings, t
 export { ResultsScreen, type ResultsCallbacks, type ResultsMeta } from './results';
 export { BoatSelectScreen, DEFAULT_SELECTION, type BoatSelectCallbacks, type BoatSelection } from './boatSelect';
 export { COMMUNITY_PAINTS, GOGGLES, RIVALS, buildRoster, type CommunityPaint, type GogglesOption, type HudRacer } from './roster';
-export { CHASE_PANELS, COCKPIT_PANELS, HUD_SCALES, placePanel, lowerCentreKeepOut, centralKeepOut } from './layout';
+export { CHASE_PANELS, COCKPIT_PANELS, HUD_SCALES, MARKER_INSET_PX, placePanel, placeScreenMarker, lowerCentreKeepOut, centralKeepOut, type ScreenMarker } from './layout';

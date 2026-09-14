@@ -38,6 +38,7 @@ import {
   formatLapTime,
   injectSpeedboatUiCss,
   loadSpeedboatFonts,
+  placeScreenMarker,
   prepareCourse,
   updateRaceHudModel,
   type AudioSettings,
@@ -45,10 +46,12 @@ import {
   type CrashKind as HudCrashKind,
   type HudCamera,
   type HudRacer,
+  type ScreenMarker,
   type SeaHeading,
 } from '../ui';
 import type { Quality, SettingsStore } from '../../ui/settingsStore';
 import type { BoatPreview } from './boatPreview';
+import type { DashMount } from './dashMount';
 import type { PageChrome } from './pageChrome';
 import { RaceRadio } from './raceRadio';
 import { applyUiAssists, defaultRaceSettings, loadRaceSettings, saveRaceSettings, type KeyValueStore } from './raceSettings';
@@ -80,6 +83,8 @@ export interface RaceUiDeps {
   chrome?: PageChrome;
   /** §T.201 the shared graphics settings (quality preset) for the pause menu's Graphics row */
   graphics?: Pick<SettingsStore, 'get' | 'applyQuality'>;
+  /** §T.208 the instruments on the hero's 3D dash (page/dashMount.ts); fed the same model as the HUD */
+  dash?: Pick<DashMount, 'setCourse' | 'setRoster' | 'update'> | null;
 }
 
 export interface RaceUiFrame {
@@ -110,6 +115,8 @@ export interface RaceUiFrame {
   project(x: number, y: number, z: number, out: { x: number; y: number; z: number }): void;
   /** swellDirRad and windFromRad in the physics yaw convention (travel direction of the swell; bearing the wind comes from) */
   sea: { label: string; windKn: number; windFromRad: number; swellM: number; swellDirRad: number };
+  /** §T.202 the drawn pace boat (page/paceBoat `display`: smoothed, on the hull); absent = no pace marker */
+  pace?: Readonly<{ visible: boolean; x: number; z: number }> | null;
 }
 
 export interface RaceUi {
@@ -207,6 +214,9 @@ export function ndcToViewport(ndc: { x: number; y: number; z: number }, out: { x
 export const RESULTS_DELAY_S = 2.5;
 /** gate marker height above the water, m (poles stand ~6.6 m; the drum float's top reads at ~1.5 m) */
 export const GATE_MARKER_Y = 1.5;
+/** §T.202 the pace skiff's FOLLOW-ME strobe (circuit.md §T202: 8.5 m over the water) and the start line mark height, m */
+export const PACE_MARKER_Y = 8.5;
+export const START_MARKER_Y = 6;
 
 // ── the UI ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -223,8 +233,10 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
   const hc = prepareCourse(d.course);
   const hud = new RaceHud(d.parent);
   hud.setCourse(hc);
+  d.dash?.setCourse(hc);
   let roster: HudRacer[] = buildRoster(selection.paintId, selection.number);
   hud.setRoster(roster);
+  d.dash?.setRoster(roster);
   hud.setScale(settings.hudScale);
   const model = createRaceHudModel(8);
   const tel = createHudTelemetry(8);
@@ -258,6 +270,8 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
   let conditions = '';
   const ndc = { x: 0, y: 0, z: 0 };
   const vp = { x: 0.5, y: 0.45, valid: false, behind: false };
+  const paceMarker: ScreenMarker = { x: 0, y: 0, onScreen: false, angle: 0, distanceM: 0 };
+  const startMarker: ScreenMarker = { x: 0, y: 0, onScreen: false, angle: 0, distanceM: 0 };
   let startWasDown = false;
 
   const QUALITIES: readonly Quality[] = ['low', 'medium', 'high'];
@@ -348,6 +362,7 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
       selection = sel;
       roster = buildRoster(sel.paintId, sel.number);
       hud.setRoster(roster);
+      d.dash?.setRoster(roster);
       d.preview?.setSelection(sel.paintId, sel.number);
       d.onSelectionChange?.(sel);
     },
@@ -368,6 +383,7 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
       persist();
       roster = buildRoster(sel.paintId, sel.number);
       hud.setRoster(roster);
+      d.dash?.setRoster(roster);
       beginRace();
       d.onStart(sel);
     },
@@ -495,6 +511,17 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
       tel.gateBehind = vp.behind;
       tel.gateScreenX = vp.x;
       tel.gateScreenY = vp.y;
+      // §T.202 where the steward is and where the line is, until green
+      const starting = st.phase === 'prestart' || st.phase === 'rolling' || st.phase === 'countdown';
+      const pace = starting && st.paceBoat && f.pace?.visible ? f.pace : null;
+      if (pace) {
+        f.project(pace.x, PACE_MARKER_Y, pace.z, ndc);
+        hud.setPaceMarker(placeScreenMarker(ndc, window.innerWidth, window.innerHeight, Math.hypot(pace.x - f.playerX, pace.z - f.playerZ), paceMarker));
+      } else hud.setPaceMarker(null);
+      if (starting) {
+        f.project(hc.ex[0], START_MARKER_Y, hc.ez[0], ndc);
+        hud.setStartMarker(placeScreenMarker(ndc, window.innerWidth, window.innerHeight, Math.hypot(hc.ex[0] - f.playerX, hc.ez[0] - f.playerZ), startMarker));
+      } else hud.setStartMarker(null);
       tel.seaHeading = seaHeadingFor(f.playerYaw, f.sea.swellDirRad, f.sea.swellM);
       tel.swellM = f.sea.swellM;
       tel.seaLabel = f.sea.label;
@@ -518,8 +545,7 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
       tel.toastId = radio.toastId;
       tel.toastTitle = radio.toastTitle;
       tel.toastDetail = radio.toastDetail;
-      const pace = st.paceBoat;
-      if (pace) tel.paceKn = pace.speed * MPS_TO_KNOTS;
+      if (st.paceBoat) tel.paceKn = st.paceBoat.speed * MPS_TO_KNOTS;
 
       view.phase = st.phase;
       view.raceTime = st.raceTime;
@@ -529,7 +555,10 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
       view.paceBoat = st.paceBoat;
       view.results = st.results;
       updateRaceHudModel(model, view, hc, 0, tel, f.dt);
-      if (!block) hud.update(model, f.dt);
+      if (!block) {
+        hud.update(model, f.dt);
+        d.dash?.update(model, f.dt);
+      }
 
       // results once the finish has been seen
       const me = st.standings.find((s) => s.racerId === 0);

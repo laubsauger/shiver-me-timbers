@@ -11,7 +11,6 @@
  * (page/paceBoat `display`), hidden when the pose is null. Render only: the race owns the pose.
  */
 import * as THREE from 'three/webgpu';
-import type { Vec2 } from '../race/types';
 import { START_PONTOON, type StartPontoonPlacement } from './towerReach';
 
 /** HDR radiance of a lit lamp (the post pipeline blooms above ~1) */
@@ -97,52 +96,55 @@ export function createStartMarkers(pontoons: readonly StartPontoonPlacement[]): 
   const lampGeo = own(new THREE.SphereGeometry(1, 14, 10));
   const boxGeo = own(new THREE.BoxGeometry(1, 1, 1));
 
-  // ── start pontoons: static meshes under one heaving group each ─────────────────
+  // ── start pontoons: one InstancedMesh per part kind for all pontoons, each pontoon's parts under its heaving pose ──
   const LAMPS = 5;
   const lampCount = pontoons.length * (LAMPS + 1);
   const lamps = own(new THREE.InstancedMesh(lampGeo, lampMat, Math.max(1, lampCount)));
   lamps.name = 'start-lamps';
-  lamps.frustumCulled = false;
   lamps.count = lampCount;
-  const pontoonGroups: { g: THREE.Group; at: Vec2; heave: number }[] = [];
   const m4 = new THREE.Matrix4();
-  pontoons.forEach((sp) => {
-    const g = new THREE.Group();
-    g.name = `start-pontoon-${sp.side}`;
-    g.position.set(sp.at[0], 0, sp.at[1]);
-    g.rotation.y = sp.yaw;
-    const hull = new THREE.Mesh(hullGeo, paint);
-    hull.position.y = (P.freeboard - P.draft) / 2;
-    hull.castShadow = true;
-    hull.receiveShadow = true;
-    g.add(hull);
-    // two flag poles at the pontoon's ends, chequer flags toward the approaching boats (+Z)
-    for (const end of [-1, 1]) {
-      const pole = new THREE.Mesh(poleGeo, steel);
-      pole.scale.set(1, 6.5, 1);
-      pole.position.set(end * (P.length / 2 - 0.6), P.freeboard + 3.25, 0);
-      g.add(pole);
-      const f = new THREE.Mesh(flagGeo, flag);
-      f.scale.set(2.2, 1.4, 1);
-      // flags fly inboard of each pole, above the lamp board, face +Z
-      f.position.set(end * (P.length / 2 - 0.6) - end * 1.15, P.freeboard + 5.6, 0.05);
-      g.add(f);
-    }
-    // the lamp board between the poles: five reds in a row and a green above them
-    const b = new THREE.Mesh(boxGeo, board);
-    b.scale.set(4.6, 1.9, 0.18);
-    b.position.set(0, P.freeboard + 3.2, 0);
-    g.add(b);
-    for (const post of [-1.8, 1.8]) {
-      const p = new THREE.Mesh(poleGeo, steel);
-      p.scale.set(1, 2.3, 1);
-      p.position.set(post, P.freeboard + 1.15, 0);
-      g.add(p);
-    }
-    g.updateMatrixWorld(true);
-    pontoonGroups.push({ g, at: sp.at, heave: 0 });
-    root.add(g);
+  /** part transforms in the pontoon frame (+Z toward the approaching boats) */
+  const hullParts = [new THREE.Matrix4().makeTranslation(0, (P.freeboard - P.draft) / 2, 0)];
+  const steelParts: THREE.Matrix4[] = [];
+  const flagParts: THREE.Matrix4[] = [];
+  // two flag poles at the pontoon's ends, chequer flags toward the approaching boats (+Z)
+  for (const end of [-1, 1]) {
+    steelParts.push(new THREE.Matrix4().makeTranslation(end * (P.length / 2 - 0.6), P.freeboard + 3.25, 0).scale(new THREE.Vector3(1, 6.5, 1)));
+    // flags fly inboard of each pole, above the lamp board, face +Z
+    flagParts.push(new THREE.Matrix4().makeTranslation(end * (P.length / 2 - 0.6) - end * 1.15, P.freeboard + 5.6, 0.05).scale(new THREE.Vector3(2.2, 1.4, 1)));
+  }
+  // the lamp board between the poles: five reds in a row and a green above them
+  const boardParts = [new THREE.Matrix4().makeTranslation(0, P.freeboard + 3.2, 0).scale(new THREE.Vector3(4.6, 1.9, 0.18))];
+  for (const post of [-1.8, 1.8]) steelParts.push(new THREE.Matrix4().makeTranslation(post, P.freeboard + 1.15, 0).scale(new THREE.Vector3(1, 2.3, 1)));
+  const parts = ([
+    ['start-pontoon-hulls', hullGeo, paint, hullParts, true],
+    ['start-pontoon-steel', poleGeo, steel, steelParts, false],
+    ['start-pontoon-flags', flagGeo, flag, flagParts, false],
+    ['start-pontoon-boards', boxGeo, board, boardParts, false],
+  ] as const).map(([name, geo, mat, local, shadow]) => {
+    const mesh = own(new THREE.InstancedMesh(geo, mat, Math.max(1, pontoons.length * local.length)));
+    mesh.name = name;
+    mesh.count = pontoons.length * local.length;
+    mesh.castShadow = shadow;
+    mesh.receiveShadow = shadow;
+    root.add(mesh);
+    return { mesh, local };
   });
+  const pontoonPoses = pontoons.map((sp) => ({ at: sp.at, yaw: sp.yaw, heave: 0, matrix: new THREE.Matrix4() }));
+  const up = new THREE.Vector3(0, 1, 0);
+  const place = (): void => {
+    pontoonPoses.forEach((p, k) => {
+      p.matrix.makeRotationAxis(up, p.yaw).setPosition(p.at[0], p.heave, p.at[1]);
+      for (const part of parts) part.local.forEach((local, i) => part.mesh.setMatrixAt(k * part.local.length + i, m4.multiplyMatrices(p.matrix, local)));
+    });
+    for (const part of parts) part.mesh.instanceMatrix.needsUpdate = true;
+  };
+  place();
+  // frustum culling on the instances' union, padded for the heave (the sphere is computed once)
+  for (const mesh of [...parts.map((q) => q.mesh), lamps]) {
+    mesh.computeBoundingSphere();
+    if (mesh.boundingSphere) mesh.boundingSphere.radius += 3;
+  }
   root.add(lamps);
   const lampLocal: THREE.Vector3[] = [];
   for (let i = 0; i < LAMPS; i++) lampLocal.push(new THREE.Vector3(-1.72 + i * 0.86, P.freeboard + 2.85, 0.16));
@@ -178,15 +180,14 @@ export function createStartMarkers(pontoons: readonly StartPontoonPlacement[]): 
     group: root,
     update(f) {
       const lit = f.startLamps ?? 0;
-      pontoonGroups.forEach((p, k) => {
-        if (f.waterHeightAt) {
-          const kk = 1 - Math.exp(-Math.max(f.dt, 0) / 0.8);
-          p.heave += (f.waterHeightAt(p.at[0], p.at[1]) - p.heave) * kk;
-          p.g.position.y = p.heave;
-          p.g.updateMatrixWorld(true);
-        }
+      if (f.waterHeightAt) {
+        const kk = 1 - Math.exp(-Math.max(f.dt, 0) / 0.8);
+        for (const p of pontoonPoses) p.heave += (f.waterHeightAt(p.at[0], p.at[1]) - p.heave) * kk;
+        place();
+      }
+      pontoonPoses.forEach((p, k) => {
         lampLocal.forEach((local, i) => {
-          v.copy(local).applyMatrix4(p.g.matrixWorld);
+          v.copy(local).applyMatrix4(p.matrix);
           m4.makeScale(0.26, 0.26, 0.26).setPosition(v);
           lamps.setMatrixAt(k * (LAMPS + 1) + i, m4);
           const on = i < LAMPS ? !f.startGreen && lit > i : !!f.startGreen;

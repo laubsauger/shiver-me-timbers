@@ -40,6 +40,7 @@ import { createPlayerBoat } from './speedboat/page/playerBoat';
 import { createNpcFleetDriver } from './speedboat/page/npcFleet';
 import { createSpeedboatFrame } from './speedboat/page/speedboatFrame';
 import { createPilots, type Pilots } from './speedboat/page/pilotRig';
+import { createDashMount } from './speedboat/page/dashMount';
 import { createRaceSession, RIVAL_ARCHETYPES } from './speedboat/page/raceSession';
 import { createAutopilotControls } from './speedboat/page/autopilot';
 import { createRaceUi } from './speedboat/page/raceUi';
@@ -173,6 +174,7 @@ async function boot(): Promise<void> {
     audio: { setVolume: (a) => (audio.engine.setVolumes(engineVolumes(a)), audio.radio.setLevel(radioLevel(a))), radioCall: () => audio.radio.call() },
     defaultSea: 'Calm', chrome, graphics: settings,
     preview: createBoatPreview({ renderer: app.renderer, asset: boats.asset, pilot: () => pilots.hero.object ?? null }), // §T.201
+    dash: createDashMount(boats.hero), // §T.208
     onStart: (sel) => {
       weather.apply(SEA_PRESET[sel.sea] ?? course.seaPreset, { lerpSeconds: 0 });
       boats.hero.setLivery(liveryFor(sel.paintId, sel.number));
@@ -186,7 +188,7 @@ async function boot(): Promise<void> {
   });
   const hudFrame = createRaceHudFrame({
     session, npcs, controls, camera: app.camera, cameraMode: () => camera.cam.mode, view: frame.view, boat,
-    wettedArea: () => player.hw.wettedArea, driveRpm: player.hw.driveRpm, oceanParams, seaLabel: () => ui.selection.sea,
+    wettedArea: () => player.hw.wettedArea, driveRpm: player.hw.driveRpm, oceanParams, seaLabel: () => ui.selection.sea, pace: boats.pace.display,
   });
   const npcCtl = { steer: 0, throttle: 0 };
   const npcControls = (i: number): typeof npcCtl => ((npcCtl.steer = npcs.steer(i)), (npcCtl.throttle = npcs.throttle(i)), npcCtl);
