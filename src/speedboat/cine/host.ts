@@ -44,7 +44,7 @@ import type { CineRivals } from './rivals';
 import { createCineDrive, nearestS, pathAt, type CineDrive, type DriveKey } from './drive';
 import { timeForSunElevation } from '../../cine/director';
 import { skyParams } from '../../params/sky';
-import { trailerClipName, trailerEditPlan } from './editPlan';
+import { subsetLooks, trailerClipName, trailerEditPlan } from './editPlan';
 import { TIME_LED, type TrailerTime } from './look';
 import { SEA_SETTLE, TRAILER_FPS, TRAILER_MASTER, TRAILER_RUNS, TRAILER_SAMPLES, TRAILER_SHOTS, TRAILER_SHUTTER_DEG, cameraShot, coverageFor, trailerTakes, type CoverageTier, type TrailerShot } from './shotlist';
 
@@ -143,6 +143,12 @@ export type TrailerRecordOpts = RecordOpts & {
   variants?: readonly TrailerTime[];
   /** coverage cameras rendered with each run: up to this tier (A ⊂ B ⊂ C); default C = all. 'none' = the run's own lens only */
   tier?: CoverageTier | 'none';
+  /**
+   * CLIP SUBSET: deliver only these clips (names with or without `_takeNN`, e.g. an edit's used clips). The run is
+   * simulated whole — every camera's director still integrates every frame, so a clip is the same whether its siblings
+   * render or not — only the looks not listed are neither drawn nor written. Pass `only` = the shots that have one.
+   */
+  clips?: readonly string[];
 };
 
 /** the coverage cameras a run renders under these options */
@@ -312,7 +318,7 @@ export function createSpeedboatCine(d: SpeedboatCineDeps) {
       const o = opts as TrailerRecordOpts;
       const takes = trailerTakes([shot as TrailerShot], o.variants);
       const cams = camerasOf(shot as TrailerShot, o);
-      if (takes.length <= 1 && cams.length === 0) return null;
+      if (takes.length <= 1 && cams.length === 0 && o.clips === undefined) return null;
       const looks = [];
       for (let c = 0; c <= cams.length; c++) {
         const cam = c === 0 ? undefined : cams[c - 1];
@@ -331,7 +337,10 @@ export function createSpeedboatCine(d: SpeedboatCineDeps) {
           });
         }
       }
-      return looks;
+      if (o.clips === undefined) return looks;
+      const sub = subsetLooks(looks, o.clips);
+      if (sub === null) console.warn(`[cine] clips: nothing of ${shot.id} is in the subset — only its placeholder look runs`);
+      return sub ?? [{ ...(looks[0] as (typeof looks)[number]), discard: true }];
     },
     host: {
       heightAt: d.waterAt,
@@ -516,6 +525,7 @@ export function createSpeedboatCine(d: SpeedboatCineDeps) {
       sink: q.get('sink') ?? undefined,
       variants: (q.get('variants')?.split(',').filter((v) => v.length > 0) as TrailerTime[] | undefined) ?? undefined,
       tier: (q.get('tier') as TrailerRecordOpts['tier'] | null) ?? undefined,
+      clips: q.get('clips')?.split(',').filter((c) => c.length > 0) ?? undefined,
     };
     const fail = (e: unknown): void => console.error('[cine]', e);
     if (m === 'play') cine.play();

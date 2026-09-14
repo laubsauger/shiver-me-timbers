@@ -20,6 +20,22 @@ export function trailerClipName(shot: Pick<Shot, 'id' | 'slug'> & { variant?: Tr
   return `${TRAILER_NAME}_${shot.id}_${shot.slug}${c}${v}_take${String(take).padStart(2, '0')}`;
 }
 
+/** a clip name without its take (`…_night_take03` → `…_night`): a clip subset names clips across takes */
+export const clipBase = (name: string): string => name.replace(/\.mov$/, '').replace(/^video\//, '').replace(/_take\d+$/, '');
+
+/**
+ * A CLIP SUBSET of one run's looks (record `clips`, e.g. only the clips an edit uses): the looks named in `wanted` (take
+ * ignored) are delivered, the rest are not rendered. Look 0 is kept FIRST either way — the recorder draws it right after
+ * the tick, which has re-applied the run's own world and lens (recorder.ts `RecordLook.discard`) — as a discarded
+ * placeholder when it is not wanted. Null = no look of this run is wanted. Pure: no looks are built or applied here.
+ */
+export function subsetLooks<L extends { clip: string; discard?: boolean }>(looks: readonly L[], wanted: readonly string[]): L[] | null {
+  const want = new Set(wanted.map(clipBase));
+  const keep = looks.map((l, i) => ({ l, i, on: want.has(clipBase(l.clip)) })).filter((x) => x.on || x.i === 0);
+  if (!keep.some((x) => x.on)) return null;
+  return keep.map((x) => (x.on ? x.l : { ...x.l, discard: true }));
+}
+
 /**
  * One COVERAGE clip (docs/cine/trailer-edit-plan.md §Coverage): a lens on a setup's run. Every clip of a setup covers the
  * same simulated interval, so `sourceStartS` (the setup's shot time at the clip's first frame) is its source timecode

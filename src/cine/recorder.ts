@@ -87,6 +87,12 @@ export interface RecorderOpts {
 }
 
 export interface RecordLook {
+  /**
+   * A look that is not delivered (a clip subset, host.ts `clips`): not drawn (`discardDraw`), not grabbed, not posted, no
+   * clip at the sink. Only look 0 needs it — look 0 must stay the run's own world and lens, because the tick re-applies
+   * the shot's world before it is drawn — so a subset without that clip keeps look 0 as a discarded placeholder.
+   */
+  discard?: boolean;
   /** the clip this look's frames are written to */
   clip: string;
   /** which of the run's cameras draws it (cine/index.ts `cameras`): 0 = the shot's own lens */
@@ -221,6 +227,11 @@ export class Recorder {
    * draw is safe precisely because nothing moved: `Capture.bind` bumps the
    * node-frame id itself, so post does not depend on a draw happening here.
    */
+  /** the look about to be drawn is a discarded one (RecordLook `discard`): skip its draw, it is never grabbed */
+  get discardDraw(): boolean {
+    return this.running && this.phase === 'capture' && this.looks[this.look]?.discard === true;
+  }
+
   get idleFrame(): boolean {
     return this.running && this.busy;
   }
@@ -354,14 +365,15 @@ export class Recorder {
   private writeFrame(shot: Shot, look: number, resolved: boolean): void {
     const index = this.frame;
     const clip = (this.looks[look] as RecordLook).clip;
+    const discard = (this.looks[look] as RecordLook).discard === true;
     this.busy = true;
     this.o.loop.setFixedDt(0); // hold the world still across readback + write
-    void this.capture
-      .grab(look)
+    void (discard ? Promise.resolve(null) : this.capture.grab(look))
       .then((bytes) => {
         // a take whose world did not apply or whose GPU errored is not the take: fail it loudly (host check)
         const unhealthy = look === 0 ? this.o.healthy?.(shot, index) : null;
         if (unhealthy) throw new Error(unhealthy);
+        if (bytes === null) return; // a discarded look: nothing to write
         const h = hashBytes(bytes);
         if (look > 0) {
           // a variant's frame is a different picture of the same instant: the repeat guard watches look 0 only
@@ -453,6 +465,7 @@ export class Recorder {
     if (finished !== null && this.frame > 0) {
       const key = this.o.settingsKey?.(finished);
       for (const l of this.looks) {
+        if (l.discard === true) continue;
         const k = key !== undefined ? `&key=${encodeURIComponent(key)}` : '';
         // the frame count lets the sink refuse a short take (it writes it as _FAILED, never as a valid clip)
         void this.post(`endshot?clip=${encodeURIComponent(l.clip)}${k}&frames=${this.frames}`, '', 'text/plain').catch(() => undefined);
@@ -511,6 +524,7 @@ export class Recorder {
     console.error(`[cine] ${id} FAILED — ${message}. Continuing with the next shot.`);
     // close its clips at the sink AS FAILED, before nextShot() cues the next one
     for (const l of this.looks) {
+      if (l.discard === true) continue;
       void this.post(`endshot?clip=${encodeURIComponent(l.clip)}&failed=${encodeURIComponent(message.slice(0, 200))}`, '', 'text/plain').catch(() => undefined);
     }
     this.frame = 0; // nextShot must not also send a normal endshot for these clips

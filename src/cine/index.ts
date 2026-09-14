@@ -354,7 +354,7 @@ export function createCine(o: CineOpts): CineHandle {
 
     skipRender(): boolean {
       // the audio pass does not use its picture (recordAudio): no draw keeps the sim on real time
-      return (recorder?.idleFrame ?? false) || (recorder?.prerolling ?? false) || audioPass;
+      return (recorder?.idleFrame ?? false) || (recorder?.prerolling ?? false) || (recorder?.discardDraw ?? false) || audioPass;
     },
 
     afterRender(): void {
@@ -390,7 +390,7 @@ export function createCine(o: CineOpts): CineHandle {
         const keep: Shot[] = [];
         for (const sh of shots) {
           const key = o.settingsKey(sh, opts);
-          const clips = (o.looks?.(sh, opts) ?? null)?.map((l) => l.clip) ?? [nameOf(sh)];
+          const clips = (o.looks?.(sh, opts) ?? null)?.filter((l) => l.discard !== true).map((l) => l.clip) ?? [nameOf(sh)];
           let all = true;
           for (const c of clips) {
             const r = await fetch(`${sinkUrl}/have?clip=${encodeURIComponent(c)}&key=${encodeURIComponent(key)}`).then((x) => x.json()).catch(() => ({ have: false }));

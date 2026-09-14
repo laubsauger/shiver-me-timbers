@@ -10,7 +10,7 @@ import { shotDuration, shotHead, shotTail } from '../src/cine/types';
 import { LOCATIONS } from '../src/speedboat/cine/locations';
 import { CAMERA_PRIMITIVES, TRAILER_BEATS, TRAILER_SECONDS, TRAILER_SHOTS, TRAILER_SLOTS, cameraShot, coverageFor, trailerTakes } from '../src/speedboat/cine/shotlist';
 import { TIME_LOOK } from '../src/speedboat/cine/look';
-import { trailerEditPlan } from '../src/speedboat/cine/editPlan';
+import { subsetLooks, trailerEditPlan } from '../src/speedboat/cine/editPlan';
 import { CINE_CHROME_CLASS, CINE_CHROME_CSS, CINE_KEEP_ATTR, createCineChrome, type ChromeElement } from '../src/speedboat/cine/cineChrome';
 import { applyDevLayer, devLayerVisible } from '../src/ui/devLayer';
 import captureSrc from '../src/cine/capture.ts?raw';
@@ -132,6 +132,29 @@ describe('speedboat trailer v2 shot list', () => {
     // a variant run covers cameras × times
     const ten = plan.coverage?.filter((c) => c.setup === '10') ?? [];
     expect(ten.length).toBe((1 + coverageFor(TRAILER_SHOTS.find((s) => s.id === '10') ?? {}).length) * 5);
+  });
+
+  it('a clip subset (the edit’s used clips) renders only those looks, and keeps the run’s own look first', () => {
+    // WHY look 0 stays: the recorder draws look 0 right after the sim tick, and the tick re-applies the run's own world and
+    // lens — any other look in that slot would come out in the wrong sky or DOF. So an unwanted look 0 is kept as a
+    // discarded placeholder (not drawn, not written), and a used clip from an older take still matches by base name.
+    const ten = trailerEditPlan({ fps: 30, width: 640, height: 360 }, 1).coverage?.filter((c) => c.setup === '10') ?? [];
+    const looks = ten.map((c) => ({ clip: c.video.replace(/^video\/|\.mov$/g, '') }));
+    expect(looks[0]?.clip).toBe('sb-trailer-v2_10_bow-lookback_dusk_take01'); // the run's own time, main lens
+    const sub = subsetLooks(looks, ['sb-trailer-v2_10_bow-lookback_cam-windshield-back_night_take03', 'sb-trailer-v2_10_bow-lookback_golden_take03']);
+    expect(sub?.map((l) => [l.clip, l.discard === true])).toEqual([
+      ['sb-trailer-v2_10_bow-lookback_dusk_take01', true],
+      ['sb-trailer-v2_10_bow-lookback_golden_take01', false],
+      ['sb-trailer-v2_10_bow-lookback_cam-windshield-back_night_take01', false],
+    ]);
+    // wanted look 0 is delivered as itself
+    expect(subsetLooks(looks, ['sb-trailer-v2_10_bow-lookback_dusk'])?.map((l) => l.discard === true)).toEqual([false]);
+    // nothing of this run wanted: no looks to deliver
+    expect(subsetLooks(looks, ['sb-trailer-v2_09_rocky-point-pass_take01'])).toBeNull();
+    // the recorder honours it: a discarded look is never grabbed, posted or closed at the sink, and its draw is skipped
+    expect(recorderSrc).toMatch(/discard \? Promise\.resolve\(null\) : this\.capture\.grab\(look\)/);
+    expect(recorderSrc.match(/if \(l\.discard === true\) continue;/g)?.length).toBe(2);
+    expect(hostSrc).toMatch(/subsetLooks\(looks, o\.clips\)/);
   });
 
   it('cine hides every overlay but the canvas, turns the dev layer off, and gives both back', () => {
