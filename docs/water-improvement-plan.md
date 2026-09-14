@@ -1898,3 +1898,13 @@ Actual GPU mask comparison changes shape while average coverage shifts only
 tests and TypeScript pass. A frozen sunset comparison did not identify DOF as
 the main cause of distant detail loss; camera and lens remain unchanged.
 Moving planing/impact review remains open alongside W8's source/spray work.
+
+## 35. Remove the night sky's horizontal shelf
+
+Replaced the cloud sheet's hard range clamp with a continuous bounded
+projection. Detail now continues below the old cutoff instead of every streak
+ending against the same uniform haze strip. The original detail-fade range
+fraction remains; stars and cloud density are unchanged. Actual speedboat
+night/day GPU review completed; user approved the night result. 105 cloud
+checks and TypeScript pass. See `water-review/night-horizon-transition.md`
+for matched captures and the superseded widening experiment. No commits.

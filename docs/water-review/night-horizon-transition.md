@@ -1,41 +1,47 @@
-# Night sky: horizon transition review
+# Night sky: horizon shelf fixed at the projection
 
-## Final change
+Status: GPU-reviewed in the actual speedboat scene; user approved the result
+("that's much better") on September 14. Changes remain uncommitted.
 
-The banded cloud layer retains its original range-transition span
-(`bandDegenerateFade: 0.2`, approximately 3.54–4.42° at a 2 m eye height).
-Only its linear interpolation changes to cubic easing with zero slope at
-both endpoints. Star visibility and wind-line settings are unchanged.
-No new textures or rendering passes are added.
+## Cause and final change
 
-A wider 0.6 span was tried and visually reviewed. Its improvement was marginal,
-and the user preferred preserving detailed sky closer to the horizon. That
-parameter change was removed. Do not describe the final patch as a wider fade.
+The cloud sheet used `min(height / rayUp, bandRange)`. At a 2 m eye height,
+the 2100 m deck and 34000 m limit froze the lookup radius below 3.54°.
+That entire angular strip lost its elevation coordinate. The resulting
+footprint collapse was suppressed by replacing its structure with a uniform
+veil, producing the shared horizontal stop above the sea.
 
-## GPU visual review
+The range is now `height / sqrt(rayUp² + (height / bandRange)²)`: continuous,
+monotonic and bounded by the same range. It approaches the plane intersection
+away from the horizon and approaches the range limit only at the horizon.
+Cloud detail can therefore continue below the former cutoff, with uneven ends,
+while its existing density and horizon attenuation taper it out.
 
-Rendered the actual sky and cloud pipeline, including its packed cloud target,
-blur and composite, at 1280 × 720 in an isolated WebGPU scene. Seed 2100,
-camera height 2 m, FOV 55°, fixed time, several view bearings. Compared the
-original linear 0.2 transition, the wider cubic experiment, and final cubic 0.2.
-Checked both the current moonlit preset and an older brighter 22:00 night.
+The original `bandDegenerateFade: 0.2` remains, with cubic endpoints. The earlier
+0.6 widening experiment was rejected: it made little difference and removed
+interesting detail higher in the sky. Stars, cloud population, haze colors and
+wind-line population are unchanged. No new texture, rendering pass or CPU
+per-frame work; the cloud-sheet fragment adds a square root and scalar arithmetic.
 
-Disabling the cloud sheet for diagnosis removes the large wisps; these are
-not primarily the separate wind-line effect. The final transition change is
-subtle and does not establish that the user's whole horizon shelf is fixed.
-Daylight comparison showed no obvious regression. Full-game confirmation is
-still limited by the concurrent spray/DOF import mismatch: this review excludes
-boats, ocean, cinematic DOF and the final game grade.
+## Verification
 
-- [Original night](horizon-night-original.png)
-- [Final night](horizon-night-final.png)
-- [Original daylight](horizon-day-original.png)
-- [Final daylight](horizon-day-final.png)
+- 105 cloud and coupling tests pass, single worker. Tests prove bounded range,
+  no derivative jump at the old cutoff, retained detail below it, monotonic
+  fading, smooth endpoints and the correct horizon mean.
+- TypeScript passes.
+- Actual WebGPU sky/cloud pipeline checked along and across the band direction,
+  with the current moonlit preset, an older brighter night, and daylight.
+- Full speedboat scene rendered at 1280 × 720, paused free roam, same camera,
+  seed and night lighting for the old/new projection comparison. The earlier
+  spray/DOF import mismatch had cleared, allowing full-game verification.
+- Full-game daylight checked. No FPS claim under shared machine load.
 
-All 108 cloud and cloud-coupling tests pass, including zero slope at both
-transition endpoints, zero detail in the degenerate projection, and preservation
-of the distant coverage mean. No performance claim or commit.
+[Original night](horizon-game-before.png) · [Revised night](horizon-game-after.png)
+· [Daylight](horizon-game-day.png) · [Crosswind diagnostic](horizon-crosswind-after.png)
 
-Separate small fix: race clock parsing rejects overflowing minutes, and invalid
-labels cannot disable an active night preset. Both regressions were reproduced
-before the fix; the 11 clock/night tests pass.
+The isolated diagnostics remain useful but are not the final acceptance images.
+The approved full-game comparison is the record to use for this change.
+
+Separate small fix completed earlier: race clock parsing rejects overflowing
+minutes, and invalid labels cannot disable an active night preset. Both
+regressions were reproduced before the fix; the 11 clock/night tests pass.
