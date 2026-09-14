@@ -19,6 +19,7 @@ import { AI_BLOCK_LEN, AI_OUT_LEN, BoatSimLayout, layoutByteLength } from '../sr
 import { writeResetPose } from '../src/sim-worker/stepCore';
 import { seaParams, syntheticCourse } from './raceAiHarness';
 import { CpuOcean } from '../src/sea-physics/cpuOcean';
+import { keepOutClearance } from '../src/race/ai/keepOut';
 import type { ArchetypeId } from '../src/race/ai/archetypes';
 
 const course = syntheticCourse();
@@ -198,6 +199,61 @@ describe('§T.186 pilot', () => {
       expect(t).toBeLessThanOrEqual(1);
       expect(t).toBeGreaterThanOrEqual(-0.3);
     }
+  });
+
+  // WHY: the trim request was computed and dropped (HullWater had no trim input). The sim core can only apply what the
+  // pilot hands it: the request must leave the pilot in its output, as the seam's unit trim, and be the value it records.
+  it('trim: the request is returned in the output (bow down over a steep sea, a little bow up on a fast flat straight)', () => {
+    const trimOver = (sea: SeaHeight): number[] => {
+      const setup = buildPilotSetup(course, ['swell'], { seed: 3 });
+      const pilot = new RacePilot(setup);
+      const L = layoutFor(1);
+      const p = poseAt(setup, 40, 0, 25);
+      const out: PilotOutput = { steer: 0, throttle: 0 };
+      const trims: number[] = [];
+      for (let k = 0; k < 90; k++) {
+        publish(L, [p]);
+        pilot.control(0, L, p, sea, k * SIM_DT, false, out);
+        expect(out.trim, 'output = recorded request').toBe(L.f64[L.aiOffset(0) + AI.TRIM]);
+        trims.push(out.trim as number);
+      }
+      return trims;
+    };
+    expect(trimOver(flatSea).at(-1)).toBeGreaterThan(0);
+    expect(Math.min(...trimOver({ heightAt: (x, z) => 3 * Math.sin((x + z) * 0.2) })), 'bow down for the waves').toBeLessThan(-0.2);
+  });
+
+  // WHY: collisions with statics are solid (§T.198); a pilot knocked off its line pursues a chord straight back to it,
+  // and on Tower Reach that chord crossed Main Street's roof walls. A keep-out between the boat and its line must bend
+  // the pursuit around it; the same run without keep-outs proves the chord really went through the wall.
+  it('keep-outs: a boat off its line steers around a wall between it and the line instead of through it', () => {
+    const open = buildPilotSetup(course, ['veteran'], { seed: 1 });
+    const ln = open.levels[2].line;
+    const wall: { a: number[]; b: number[]; radius: number }[] = [];
+    for (let st = 60; st <= 150; st += 3) {
+      const i = Math.round(st / ln.ds);
+      const wx = ln.x[i] + ln.tz[i] * 10;
+      const wz = ln.z[i] - ln.tx[i] * 10;
+      wall.push({ a: [wx, -0.5, wz], b: [wx, 1, wz], radius: 1.5 });
+    }
+    const minClear = (withKeepOuts: boolean): number => {
+      const setup = buildPilotSetup(course, ['veteran'], { seed: 1, colliders: withKeepOuts ? wall : undefined });
+      const probe = buildPilotSetup(course, ['veteran'], { seed: 1, colliders: wall }).keepOuts!;
+      const pilot = new RacePilot(setup);
+      const L = layoutFor(1);
+      const p = poseAt(open, 40, 20, 20);
+      const out: PilotOutput = { steer: 0, throttle: 0 };
+      let m = Infinity;
+      for (let k = 0; k < 360; k++) {
+        publish(L, [p]);
+        pilot.control(0, L, p, flatSea, k * SIM_DT, false, out);
+        advance(p, out);
+        m = Math.min(m, keepOutClearance(probe, p.position[0], p.position[2]));
+      }
+      return m;
+    };
+    expect(minClear(false), 'without keep-outs the pursuit chord runs through the wall').toBeLessThan(0);
+    expect(minClear(true), 'with keep-outs the hull stays clear of it').toBeGreaterThan(1.5);
   });
 
   it('a capsized boat or a crashed standing cuts the throttle and centres the helm', () => {

@@ -11,24 +11,61 @@
  *  - THE SAME HASH AT 60 FPS AND AT 20 FPS PACING (§V2): the race runs RACE_DELAY_TICKS behind the page precisely so
  *    that the rivals coming home late cannot change the race. This pumps the fleet every tick in one run and only at
  *    3-tick frame ends in the other (the loop holds when the fleet trails) and requires identical fleet OUT, player
- *    state and standings at tick 1500.
+ *    state and standings at HASH_TICK (after green).
  *  - A RESET PUTS HER BACK ON THE WATER, LEVEL (user playtest 2026-09-13: "reset is throwing us out of the water and
  *    rotating us, making us land upside down"): hold reset → crash machine → the race's respawn point on the line →
  *    V108 teleport. The pose must be level at the rest float height on the surface, heading down the line, with no
  *    angular velocity; the first tick exchanges no leaked-memory slam (< 10 N·s against > 100 N·s); a second later she
  *    is upright on the water.
+ *  - THE RIVALS RACE CLEANLY (race/ai racecraft): all eight classified as finished with no penalty (every gate and
+ *    mark, T1's rounding radius included), no rival crash of any kind, and no rival touching a static solid — rolling start
+ *    included (a rival once hit a tower guy anchor there) — on the page's real collider list (Main Street's roof walls,
+ *    the drawn kit props). Collisions are solid (§T.198): a rival that leaves its line into a roof crashes.
+ *  - THE GRID HOLDS: half a second before green every rival is within SLOT_TOL of its grid slot behind the pace boat
+ *    (race/rollingStart). Without the hold the columns converged onto one racing line and trailed their slots by 70 m.
  * Working-sea capsizes are §T.189's known physics issue; this slice runs Calm and does not gate on them.
  */
 import { describe, expect, it } from 'vitest';
 import { RACE_DELAY_TICKS } from '../src/speedboat/page/raceSession';
 import type { Rigid6State } from '../src/sea-physics/rigidBody';
+import { CONTACT_SOLID } from '../src/sea-physics/boatCollide';
+import { TR } from '../src/sim-worker/layout';
+import { SIM_DT } from '../src/core/loop';
 import { NPCS, runSlice } from './speedboatRaceHarness';
 
 const LAP_TICKS_MAX = 60 * 60 * 8; // 8 min of sim: rolling start (~30 s) + a 4.1 km lap well inside it
+/** m: a quarter of a row (race/params start.rowSpacing 30) — the slot, not the neighbouring one */
+const SLOT_TOL = 6;
+/** a post-green tick: the hash covers the formation's release onto the racing lines */
+const HASH_TICK = 2400;
 
 describe('§T.191 headless race slice on Tower Reach', () => {
   it('one lap in Calm completes with results for all eight racers, no NaN, and a pacing-independent hash', async () => {
-    const full = await runSlice({ sea: 'calm', laps: 1, maxTicks: LAP_TICKS_MAX, untilPlayerFinish: true, hashTicks: [1500] });
+    const crashes: string[] = [];
+    const solid: string[] = [];
+    const slotMiss: string[] = [];
+    let slotChecked = 0;
+    const full = await runSlice({
+      sea: 'calm', laps: 1, maxTicks: LAP_TICKS_MAX, untilAllClassified: true, hashTicks: [HASH_TICK],
+      onTick: (tick, s) => {
+        const race = s.session.race;
+        for (const e of s.session.drain().crashEvents) if (e.event.type === 'crash' && e.racerId !== 0) crashes.push(`#${e.racerId} ${e.event.kind} tick ${tick}`);
+        const rt = tick - RACE_DELAY_TICKS + 1;
+        if (!race || rt < 2) return;
+        for (let i = 0; i < NPCS; i++) {
+          if (s.npcs.trace(rt, i, TR.CONTACT_SRC) === CONTACT_SOLID) solid.push(`#${i + 1} tick ${rt} (${s.npcs.trace(rt, i, TR.POSE).toFixed(0)}, ${s.npcs.trace(rt, i, TR.POSE + 2).toFixed(0)})`);
+        }
+        const t = (rt - 1) * SIM_DT;
+        if (rt === Math.round((race.schedule.green - 0.5) / SIM_DT) + 1) {
+          for (let i = 0; i < NPCS; i++) {
+            const g = race.gridSlot(i + 1, t);
+            const d = Math.hypot(s.npcs.trace(rt, i, TR.POSE) - g.x, s.npcs.trace(rt, i, TR.POSE + 2) - g.z);
+            slotChecked++;
+            if (d > SLOT_TOL) slotMiss.push(`#${i + 1} ${d.toFixed(1)} m`);
+          }
+        }
+      },
+    });
     const st = full.state;
     expect(full.nonFinite).toBeNull();
     expect(full.slice.session.starvedTicks).toBe(0);
@@ -45,13 +82,18 @@ describe('§T.191 headless race slice on Tower Reach', () => {
     expect(me?.lapTimes.length).toBe(1);
     // a real lap of a 4.1 km course, not a start-line shuffle: ≥ 60 s at ≤ 70 m/s
     expect(me?.lapTimes[0] ?? 0).toBeGreaterThan(60);
-    const finished = results.filter((r) => r.status === 'finished').length;
-    expect(finished).toBeGreaterThanOrEqual(1);
+    expect(results.filter((r) => r.status === 'finished').length, 'all eight finished').toBe(NPCS + 1);
+    expect(results.filter((r) => r.penaltySeconds > 0).map((r) => `#${r.racerId} +${r.penaltySeconds}s`), 'missed gates/marks').toEqual([]);
+    expect(crashes, 'rival crashes').toEqual([]);
+    expect(solid.slice(0, 10), `${solid.length} rival ticks touching a static solid`).toEqual([]);
+    expect(slotChecked, 'the slot check ran').toBe(NPCS);
+    expect(slotMiss, 'rivals off their grid slot before green').toEqual([]);
 
-    const paced = await runSlice({ sea: 'calm', laps: 1, maxTicks: 1500, ticksPerFrame: 3, pumpInTicks: false, hashTicks: [1500] });
+    const paced = await runSlice({ sea: 'calm', laps: 1, maxTicks: HASH_TICK, ticksPerFrame: 3, pumpInTicks: false, hashTicks: [HASH_TICK] });
     expect(paced.heldFrames, '20 fps pacing must actually make the fleet trail and the loop hold').toBeGreaterThan(0);
     expect(paced.nonFinite).toBeNull();
-    expect(paced.hashes.get(1500)).toBe(full.hashes.get(1500));
+    expect(full.hashes.get(HASH_TICK)).toBeDefined();
+    expect(paced.hashes.get(HASH_TICK)).toBe(full.hashes.get(HASH_TICK));
   }, 3_600_000);
 
   it('a held reset lands the player level on the water, on the line, with no slam and no spin (V108)', async () => {

@@ -12,8 +12,7 @@
  * same hash whether the fleet is pumped every tick at 60 fps or three ticks late at 20 fps.
  */
 import { SIM_DT } from '../src/core/loop';
-import { buildTowerReach, CORRIDOR_HALF_WIDTH, type TowerReachWorld } from '../src/circuit';
-import { courseColliders } from '../src/circuit/courseColliders';
+import type { TowerReachWorld } from '../src/circuit';
 import { createSeabedField, type SeabedField } from '../src/island/seabed';
 import { createFetchField, type FetchField } from '../src/ocean/fetchField';
 import { oceanParams, type OceanParams } from '../src/params/ocean';
@@ -25,8 +24,7 @@ import { HASH_SEED, TRACE_LEN } from '../src/sim-worker/layout';
 import { bakeSimWorldData, gridSeabed, raceBed, type SimWorldData } from '../src/sim-worker/worldData';
 import { buildDeepVHull } from '../src/speedboat/hullMesh';
 import { createAutopilotControls } from '../src/speedboat/page/autopilot';
-import { aiHandedCourse, clearPaceLine, respawnClear, rockColliders, TOWER_REACH_SEED } from '../src/speedboat/page/course';
-import { generateRockPlacements } from '../src/island/rocks';
+import { aiHandedCourse, respawnClear } from '../src/speedboat/page/course';
 import type { StaticCollider } from '../src/sea-physics/boatCollide';
 import { createNpcFleetDriver, type NpcFleet } from '../src/speedboat/page/npcFleet';
 import { createPlayerBoat } from '../src/speedboat/page/playerBoat';
@@ -34,6 +32,7 @@ import { createRaceSession, RACE_DELAY_TICKS, RIVAL_ARCHETYPES, type RaceSession
 import { speedboatSeaParams } from '../src/speedboat/page/seaParams';
 import type { ShipState } from '../src/state/simState';
 import { weatherPresets } from '../src/weather/presets';
+import { collisionWorld } from './speedboatCollisionWorld';
 
 export const NPCS = 7;
 
@@ -45,24 +44,29 @@ export interface CourseFixture {
   course: Course;
   /** the pilots' mirrored course (page/course.ts `aiHandedCourse`), as the page hands buildPilotSetup */
   aiCourse: Course;
-  /** course colliders + the island rock scatter as the page builds them (page/course.ts rockColliders) */
+  /**
+   * the page's collider list (page/course.ts `towerReachCourse().attach`): course furniture + roofs + capsules fitted to
+   * the DRAWN kit island props (circuit/propColliders, §T.198), via tests/speedboatCollisionWorld.ts
+   */
   colliders: StaticCollider[];
 }
 
 let fixture: CourseFixture | null = null;
-/** Tower Reach + its seabed + the rivals' lines, built once per test file (the terrain bake is the slow part) */
+/**
+ * Tower Reach as the PAGE builds it + its seabed + the rivals' lines, built once per test file (the terrain bake is the
+ * slow part). §T.198: the colliders, the clear pace line and the course are the page's own `attach` output over the
+ * drawn kit decor — not pirate rock placements the page never had.
+ */
 export function courseFixture(seed = 2100): CourseFixture {
   if (fixture) return fixture;
-  const world = buildTowerReach(TOWER_REACH_SEED);
+  const cw = collisionWorld();
+  const world = cw.world;
   const seabed = createSeabedField(world.heightmaps.map((hm, i) => ({ heightmap: hm, center: world.sites[i].position })));
-  // the island rock scatter exactly as island/island.ts createIsland seeds it (site seed + ROCK_SEED_OFFSET 1013, the
-  // live island + sierra params: no kit hooks registered headless)
-  const rocks = world.sites.map((site, i) => ({ center: site.position, rocks: { placements: generateRockPlacements(site.seed + 1013, world.heightmaps[i]) } }));
-  const colliders = [...courseColliders(world), ...rockColliders(rocks, { line: world.course.referenceLine, halfWidth: CORRIDOR_HALF_WIDTH }).colliders];
-  const bedField = raceBed(bakeSimWorldData(seabed, seaOcean('calm'), world.bars));
-  const course: Course = { ...world.course, paceLine: clearPaceLine(world.course, colliders, (x, z) => bedField.heightAt(x, z)) };
+  const colliders = cw.page.colliders;
+  const course: Course = cw.page.course;
   const aiCourse = aiHandedCourse(course);
-  const pilot = buildPilotSetup(course, [...RIVAL_ARCHETYPES, null], { seed });
+  // as the page must: the rivals' lines, room and pursuit keep clear of the same colliders the physics collides with
+  const pilot = buildPilotSetup(course, [...RIVAL_ARCHETYPES, null], { seed, colliders });
   fixture = { world, seabed, pilot, course, aiCourse, colliders };
   return fixture;
 }
@@ -84,6 +88,8 @@ export interface SliceOptions {
   maxTicks: number;
   /** stop once every racer has a result that is not 'running' (or the player finished and `untilPlayerFinish`) */
   untilPlayerFinish?: boolean;
+  /** stop once every racer's result is classified (finished or DNF) */
+  untilAllClassified?: boolean;
   ticksPerFrame?: number;
   /** pump at the end of every tick as well as every frame (the page does both) */
   pumpInTicks?: boolean;
@@ -218,6 +224,7 @@ export async function runSlice(o: SliceOptions): Promise<SliceResult> {
       npcs.pump(tick);
       const st = session.state;
       if (o.untilPlayerFinish && st?.results && st.standings.find((q) => q.racerId === 0)?.finished) break;
+      if (o.untilAllClassified && st?.results && st.results.length === NPCS + 1 && st.results.every((r) => r.status !== 'running')) break;
     }
   } finally {
     npcs.dispose();

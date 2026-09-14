@@ -30,7 +30,7 @@ export const AI = {
   STEER: 4,
   /** applied throttle −0.3..1 */
   THROTTLE: 5,
-  /** requested trim (−1 bow down .. +1 bow up); NOT applied: HullWater has no trim input yet (reported) */
+  /** requested trim (−1 bow down .. +1 bow up), the seam's unit trim; returned as `PilotOutput.trim` for `unitTrimToRad` */
   TRIM: 6,
   /** mulberry32 state (uint32 stored exactly in a double) */
   RNG: 7,
@@ -59,8 +59,12 @@ export const AI = {
   UPSET: 20,
   /** 1 on the tick the pilot saw a respawn */
   RESPAWNED: 21,
-  /** sample index hint on the current level */
-  HINT: 22,
+  /**
+   * rolling-start clock: > 0 = seconds of rolling start counted (ticks with a rolling-start speed cap in GO, since the pace
+   * boat began to move); < 0 = seconds of opening caution left after green (pilot.ts CAUTION_S); 0 on the grid and after.
+   * Was HINT (the sample-index hint), now derived from STATION.
+   */
+  ROLL: 22,
   /** running mean of the predicted airtime ahead (s, ~4 s memory): how rough the water is here */
   SEA: 23,
 } as const;

@@ -2,8 +2,8 @@
  * THE RACING LINE (§T.186, tech-research §5.2). A closed, uniformly re-sampled polyline through the course's
  * corridors, relaxed to minimum Σκ² (elastic band, the iterative form of Kapania et al. 2016's first step).
  *
- *  corridor   gate: the segment between the poles shrunk by `margin` at each end.
- *             mark: a segment on the rounding side, from `radius + margin` to `radius + MARK_REACH` off the mark,
+ *  corridor   gate: the segment between the poles shrunk by `gateMargin` (max(margin + GATE_TRACK, GATE_SHARE·width)).
+ *             mark: a segment on the rounding side, from `radius + margin + MARK_TRACK` to `radius + MARK_REACH` off the mark,
  *             perpendicular to the bisector of the in/out directions (keepOn 'port' ⇒ the mark is on the boat's
  *             left ⇒ the segment is to the mark's starboard).
  *  relax      Gauss–Seidel on the discrete bi-Laplacian (p_i = (4(p_{i−1}+p_{i+1}) − (p_{i−2}+p_{i+2}))/6, the
@@ -11,17 +11,37 @@
  *             every sample pushed out of every mark's keep-out circle. Coarse → fine (12, 6, 3 m), re-sampled by
  *             arc length between the corridor samples after every block so spacing stays uniform (a
  *             second difference is only curvature at uniform spacing). Fixed iteration counts: deterministic.
+ *  keep-outs  (optional) every sample pushed LINE_CLEAR off each static solid a hull can reach (keepOut.ts: roof walls,
+ *             granite, anchors), and the lateral room clipped where a hull ROOM_CLEAR off the offset line would touch one.
  *  output     uniform ds ≈ 2 m; s = 0 at the start gate; κ signed (+ = turning to starboard, yaw increasing,
  *             core/steering convention); lateral room to the corridor edges for avoidance/blocking offsets.
  *
  * Frame: x/z sea plane; forward (sin θ, cos θ); starboard of a direction d is (d.z, −d.x).
  */
 import type { Course, Vec2 } from '../types';
+import { keepOutClearance, keepOutPush, type KeepOuts, type Push } from './keepOut';
 
 /** how far past the keep-out radius a mark's rounding corridor reaches (m) */
 export const MARK_REACH = 90;
 /** lateral room cap between corridors (m): open water, but a line never wanders far off */
 export const ROOM_CAP = 12;
+/** metres a mark's keep-out adds for tracking error (measured 4–6 m off the line near an element) */
+export const MARK_TRACK = 6;
+/**
+ * metres a gate's corridor adds to the level margin for tracking error: at a 4.4 m margin (risk 0.75) a boat 7 m off
+ * its line out of the lee chicane crossed 3 m outside G8's pole on Tower Reach
+ */
+export const GATE_TRACK = 3;
+/**
+ * share of a gate's width its corridor keeps off each pole, when that is more than margin + GATE_TRACK: a wide gate costs
+ * the line nothing to hold well inside (Tower Reach: G8 70 m ⇒ 12.6 m; a rookie over-speeding into it at risk 0.75 ran 11 m
+ * off her line and crossed 4 m outside the pole)
+ */
+export const GATE_SHARE = 0.18;
+/** metres the line keeps off a static solid's surface: half a 12 m hull + the measured 2–6 m tracking error */
+export const LINE_CLEAR = 10;
+/** metres an OFFSET line (avoidance, blocking) keeps off a static solid's surface: a half beam + tracking error */
+export const ROOM_CLEAR = 5;
 
 export interface Corridor {
   ax: number;
@@ -30,7 +50,7 @@ export interface Corridor {
   bz: number;
   element: number;
   sheltered: boolean;
-  /** mark keep-out circle (radius + margin), or null for a gate */
+  /** mark keep-out circle (radius + margin + MARK_TRACK), or null for a gate */
   keepOut: { x: number; z: number; r: number } | null;
 }
 
@@ -59,6 +79,11 @@ const center = (course: Course, k: number): Vec2 => {
   return e.kind === 'gate' ? [(e.gate.left[0] + e.gate.right[0]) / 2, (e.gate.left[1] + e.gate.right[1]) / 2] : e.mark.at;
 };
 
+/** metres a gate corridor keeps off each pole at a level margin, for a gate `w` wide */
+export function gateMargin(margin: number, w: number): number {
+  return Math.min(Math.max(margin + GATE_TRACK, GATE_SHARE * w), w / 2 - 0.5);
+}
+
 export function corridorsOf(course: Course, margin: number): Corridor[] {
   const m = course.elements.length;
   const out: Corridor[] = [];
@@ -70,7 +95,7 @@ export function corridorsOf(course: Course, margin: number): Corridor[] {
       const w = Math.hypot(right[0] - left[0], right[1] - left[1]);
       const ux = (right[0] - left[0]) / w;
       const uz = (right[1] - left[1]) / w;
-      const mm = Math.min(margin, w / 2 - 0.5);
+      const mm = gateMargin(margin, w);
       sheltered = e.gate.sector === 'sheltered';
       out.push({ ax: left[0] + ux * mm, az: left[1] + uz * mm, bx: right[0] - ux * mm, bz: right[1] - uz * mm, element: k, sheltered, keepOut: null });
     } else {
@@ -105,7 +130,9 @@ export function corridorsOf(course: Course, margin: number): Corridor[] {
       const side = mk.keepOn === 'port' ? -1 : 1;
       const sx = bz * side;
       const sz = -bx * side;
-      const r0 = mk.radius + margin;
+      // the keep-out holds the LINE the pilot's tracking error (MARK_TRACK) clear of the rounding radius: a line at radius +
+      // margin (31.5–35 m round T1's 28 m) let a boat 4–6 m inside it cut the radius and be called missed (§T.191 smoke race)
+      const r0 = mk.radius + margin + MARK_TRACK;
       const r1 = mk.radius + MARK_REACH;
       // left pole seen along the course = the one nearer the mark for a port rounding
       const near: Vec2 = [mk.at[0] + sx * r0, mk.at[1] + sz * r0];
@@ -163,7 +190,9 @@ function resample(xs: number[], zs: number[], anchors: number[], ds: number, cor
   return band;
 }
 
-function relax(b: Band, cor: readonly Corridor[], sweeps: number): void {
+const scratchPush: Push = { x: 0, z: 0, depth: 0 };
+
+function relax(b: Band, cor: readonly Corridor[], sweeps: number, ko: KeepOuts | null): void {
   const n = b.x.length;
   const x = b.x;
   const z = b.z;
@@ -196,6 +225,11 @@ function relax(b: Band, cor: readonly Corridor[], sweeps: number): void {
           pz = k.z + (dz / d) * k.r;
         }
       }
+      if (ko !== null) {
+        keepOutPush(ko, px, pz, LINE_CLEAR, scratchPush);
+        px = scratchPush.x;
+        pz = scratchPush.z;
+      }
       x[i] = px;
       z[i] = pz;
     }
@@ -209,6 +243,8 @@ export interface LineOptions {
   ds?: number;
   /** false = corridor midpoints joined and re-sampled, no relaxation (the A/B baseline the tests compare against) */
   relax?: boolean;
+  /** static solids the line and its lateral room keep clear of (keepOut.ts); absent = open water */
+  keepOuts?: KeepOuts | null;
 }
 
 export function buildRacingLine(course: Course, opts: LineOptions): RacingLine {
@@ -227,7 +263,7 @@ export function buildRacingLine(course: Course, opts: LineOptions): RacingLine {
   ] as const) {
     for (let blk = 0; blk < blocks; blk++) {
       const b = resample(xs, zs, anchors, ds, corOfAnchor);
-      if (opts.relax !== false) relax(b, cor, sweeps);
+      if (opts.relax !== false) relax(b, cor, sweeps, opts.keepOuts ?? null);
       xs = b.x;
       zs = b.z;
       anchors = [];
@@ -329,6 +365,26 @@ export function buildRacingLine(course: Course, opts: LineOptions): RacingLine {
       roomPort[i] = Math.min(ROOM_CAP, rp[k] + (rp[(k + 1) % m] - rp[k]) * t + open * ROOM_CAP);
       roomStbd[i] = Math.min(ROOM_CAP, rs[k] + (rs[(k + 1) % m] - rs[k]) * t + open * ROOM_CAP);
       sheltered[i] = cor[(k + 1) % m].sheltered ? 1 : 0;
+    }
+  }
+  const ko = opts.keepOuts ?? null;
+  if (ko !== null) {
+    // a solid beside the line takes the room on its side: the first 1 m step at which a hull ROOM_CLEAR wide touches it
+    for (let i = 0; i < n; i++) {
+      const nx = TZ[i];
+      const nz = -TX[i];
+      for (const side of [1, -1] as const) {
+        const cap = side === 1 ? roomStbd[i] : roomPort[i];
+        let room = cap;
+        for (let d = 1; d <= Math.ceil(cap); d++) {
+          if (keepOutClearance(ko, X[i] + nx * d * side, Z[i] + nz * d * side) < ROOM_CLEAR) {
+            room = Math.max(0, d - 1);
+            break;
+          }
+        }
+        if (side === 1) roomStbd[i] = room;
+        else roomPort[i] = room;
+      }
     }
   }
   return { n, ds, length, x: X, z: Z, tx: TX, tz: TZ, kappa: K, roomPort, roomStbd, sheltered, elementSample };

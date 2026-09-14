@@ -22,21 +22,52 @@
  *  mistakes seeded mulberry32 in the buffer: throttle fumble, missed wave read, over-speed into a corner.
  *  traffic  avoidance from WORLD poses (closest approach over 2 s < 8 m ⇒ lateral offset away, held 1.5 s);
  *           blocking: someone faster 4–35 m behind ⇒ offset to the inside of the next turn (× aggression).
- *           Offsets stay inside the corridor room the line was built with.
+ *           Offsets stay inside the corridor room the line was built with (clamped outright where a corridor binds); blocking
+ *           never moves toward an overlapping boat; for CAUTION_S after green, overlapping boats keep AVOID_LAT apart and a
+ *           boat in the lane ahead is followed at FOLLOW_GAP.
+ *  keep-outs static solids (keepOut.ts, the page's colliders): the line keeps LINE_CLEAR off them, the room for offsets
+ *           ends ROOM_CLEAR short of them, and the pursuit chord (boat → target) is pushed PURSUIT_CLEAR clear.
+ *  grid     rolling start (GO < 0 or 0): the pilot holds its grid slot behind the pace boat — the slot race/rollingStart
+ *           computes, from the pace line and start params in the setup and the pilot's own clock of rolling ticks
+ *           (AI.ROLL) — pursuing the pace line at its column, speed set by the along-line error to the slot. At green
+ *           it re-projects onto its racing line.
+ *  trim     the wave read's bow-down request (and a little bow-up on a fast straight) is returned in `PilotOutput.trim`,
+ *           the seam's unit trim (−1..1) for `unitTrimToRad`.
  */
 import { SIM_DT } from '../../core/loop';
 import { B, AI_OUT_LEN, type BoatSimLayout } from '../../sim-worker/layout';
 import type { Rigid6State } from '../../sea-physics/rigidBody';
+import { raceParams } from '../params';
+import { gridDepth, type RollingStartParams } from '../rollingStart';
 import type { Course } from '../types';
 import { AI, AI_IN } from './aiBlock';
 import { ARCHETYPES, type Archetype, type ArchetypeId } from './archetypes';
 import { HELM_RATE, holdThrottle, lockLimit, steerForCurvature } from './capability';
-import { buildRacingLine, nearestSample, type RacingLine } from './line';
+import { buildKeepOuts, keepOutPush, type CapsuleLike, type KeepOuts, type Push } from './keepOut';
+import { buildRacingLine, nearestSample, ROOM_CAP, type RacingLine } from './line';
 import { cornerSpeed, speedProfile } from './profile';
 
 export const LINE_LEVELS = 5;
 const G = 9.81;
 const AVOID_R = 8;
+/**
+ * THE OPENING CAUTION (s after green): the rolling start delivers the whole grid bunched onto one line, and for this long
+ * the pilots keep AVOID_LAT beside and FOLLOW_GAP behind each other. Tower Reach, calm, without it: two columns merging
+ * after the start gate touched and hooked a boat; two boats nose to tail through G1 (27 s after green) touched and hooked
+ * the follower. Not for the whole race: on the synthetic 11-element course the same rules kept the pack from passing
+ * (hothead 6 s slower than the veteran, catch-up no longer closing the pack — tests/raceAiPack).
+ */
+const CAUTION_S = 40;
+/** lateral separation (m, CG to CG) a pilot keeps from a boat overlapping it along the line: two 2.5 m beams + yaw slack */
+const AVOID_LAT = 9;
+/** |along| (m) inside which another boat overlaps this one: a 12 m hull, bow to stern */
+const ALONGSIDE = 13;
+/**
+ * CG-to-CG metres a pilot keeps behind a boat in its lane (|lat| < FOLLOW_LANE): a 12 m hull + 2 m. Two boats nose to tail at
+ * 12.5 m through G1 touched when the leader yawed into the gate, and the follower hooked (Tower Reach, calm)
+ */
+const FOLLOW_GAP = 14;
+const FOLLOW_LANE = 4;
 const WAVE_T = [0, 0.3, 0.6, 0.9, 1.2] as const;
 const BOW_AHEAD = 7;
 const HEEL_EASE = (22 * Math.PI) / 180;
@@ -46,6 +77,31 @@ const ROLL_KP = 0.8;
 const ROLL_KD = 0.15;
 /** seconds after a placement (grid, respawn) the helm is held to a fraction of the lock while the hull settles */
 const SETTLE_S = 1.5;
+/** metres the pursuit chord keeps off a static solid's surface (a half beam + slack) */
+const PURSUIT_CLEAR = 4;
+/** the largest sideways move of the pursuit target a keep-out may ask for (m) */
+const PURSUIT_SHIFT_MAX = 25;
+/** rolling start: m/s of speed per metre of along-line error to the slot */
+const SLOT_GAIN = 0.35;
+/** lookahead (m) per metre of distance off the (offset) line: far off it, the pursuit aims further along so the arc back is one the boat can turn */
+const RECOVER_LOOK = 2.5;
+
+/** the rolling start as a pilot sees it: the pace line (flat, structured-clone safe) and the grid geometry */
+export interface PilotStart {
+  /** pace line vertices x, z and arc length at each vertex */
+  x: Float64Array;
+  z: Float64Array;
+  cum: Float64Array;
+  paceSpeed: number;
+  /** metres along the pace line the pace boat starts at (race/rollingStart gridDepth) */
+  paceStart: number;
+  firstRowGap: number;
+  rowSpacing: number;
+  columnSpacing: number;
+  gridColumns: number;
+  /** grid index per fleet boat index (race/raceSession grid order: fleet index = grid index) */
+  grid: Int32Array;
+}
 
 export interface LineLevel {
   risk: number;
@@ -65,6 +121,10 @@ export interface PilotSetup {
   levels: LineLevel[];
   /** per fleet boat index; null = not piloted (the player, a pace boat) */
   boats: (Archetype | null)[];
+  /** rolling-start slot hold, or null (no pace line) */
+  start: PilotStart | null;
+  /** static solids to keep clear of, or null (open water) */
+  keepOuts: KeepOuts | null;
 }
 
 /** what risk does to the line: margin off the poles, share of the measured turning, braking point */
@@ -72,12 +132,49 @@ export function levelShape(risk: number): { margin: number; latUse: number; brak
   return { margin: 7 - 3.5 * risk, latUse: 0.72 + 0.2 * risk, brakeUse: 0.3 + 0.6 * risk };
 }
 
-export function buildPilotSetup(course: Course, roster: readonly (ArchetypeId | Archetype | null)[], opts: { seed: number; catchUp?: boolean }): PilotSetup {
+export interface PilotSetupOptions {
+  seed: number;
+  catchUp?: boolean;
+  /** the page's static colliders (page/course.ts CourseWorld.colliders): the lines, room and pursuit keep clear of them */
+  colliders?: readonly CapsuleLike[];
+  /** rolling-start params (default raceParams.start) */
+  start?: RollingStartParams;
+  /** grid index per fleet boat (default: fleet index, the race session's grid order) */
+  grid?: readonly number[];
+}
+
+function pilotStart(course: Course, racers: number, p: RollingStartParams, grid: readonly number[] | undefined): PilotStart | null {
+  const pts: [number, number][] = [];
+  for (const q of course.paceLine) {
+    const l = pts[pts.length - 1];
+    if (!l || Math.hypot(q[0] - l[0], q[1] - l[1]) > 1e-9) pts.push([q[0], q[1]]);
+  }
+  if (pts.length < 2) return null;
+  const cum = new Float64Array(pts.length);
+  for (let i = 1; i < pts.length; i++) cum[i] = cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+  const paceStart = gridDepth(p, racers);
+  if (cum[pts.length - 1] < paceStart) return null;
+  return {
+    x: Float64Array.from(pts, (q) => q[0]),
+    z: Float64Array.from(pts, (q) => q[1]),
+    cum,
+    paceSpeed: p.paceSpeed,
+    paceStart,
+    firstRowGap: p.firstRowGap,
+    rowSpacing: p.rowSpacing,
+    columnSpacing: p.columnSpacing,
+    gridColumns: p.gridColumns,
+    grid: Int32Array.from({ length: racers }, (_, i) => grid?.[i] ?? i),
+  };
+}
+
+export function buildPilotSetup(course: Course, roster: readonly (ArchetypeId | Archetype | null)[], opts: PilotSetupOptions): PilotSetup {
+  const keepOuts = opts.colliders ? buildKeepOuts(opts.colliders) : null;
   const levels: LineLevel[] = [];
   for (let k = 0; k < LINE_LEVELS; k++) {
     const risk = k / (LINE_LEVELS - 1);
     const shape = levelShape(risk);
-    const line = buildRacingLine(course, { margin: shape.margin });
+    const line = buildRacingLine(course, { margin: shape.margin, keepOuts });
     levels.push({ risk, ...shape, line, speed: speedProfile(line, shape) });
   }
   return {
@@ -86,6 +183,8 @@ export function buildPilotSetup(course: Course, roster: readonly (ArchetypeId | 
     catchUp: opts.catchUp ?? true,
     levels,
     boats: roster.map((r) => (r === null ? null : typeof r === 'string' ? { ...ARCHETYPES[r] } : { ...r })),
+    start: pilotStart(course, roster.length, opts.start ?? raceParams.start, opts.grid),
+    keepOuts,
   };
 }
 
@@ -97,6 +196,8 @@ export interface PilotOutput {
   /** drive angle, rad (+ = bow to port) — straight into HullWater.setControls */
   steer: number;
   throttle: number;
+  /** unit drive trim −1 bow down .. +1 bow up (AI.TRIM) — for `HullWater.setControls(steer, throttle, unitTrimToRad(trim))`; written every tick */
+  trim?: number;
 }
 
 const clamp = (x: number, a: number, b: number): number => (x < a ? a : x > b ? b : x);
@@ -116,6 +217,7 @@ export class RacePilot {
   private pz = 0;
   private pnx = 0;
   private pnz = 0;
+  private readonly push: Push = { x: 0, z: 0, depth: 0 };
 
   constructor(setup: PilotSetup) {
     if (setup.version !== 1) throw new Error(`race pilot: setup version ${setup.version}`);
@@ -139,6 +241,42 @@ export class RacePilot {
     this.pnx = line.tz[i];
     this.pnz = -line.tx[i];
     return i;
+  }
+
+  /** pace line point (px, pz) + PORT normal (pnx, pnz) = (tz, −tx) at arc length s (extrapolated past either end) */
+  private paceAt(st: PilotStart, s: number): void {
+    const n = st.x.length;
+    let i = 0;
+    while (i < n - 2 && st.cum[i + 1] < s) i++;
+    const l = st.cum[i + 1] - st.cum[i];
+    const tx = (st.x[i + 1] - st.x[i]) / l;
+    const tz = (st.z[i + 1] - st.z[i]) / l;
+    const u = s - st.cum[i];
+    this.px = st.x[i] + tx * u;
+    this.pz = st.z[i] + tz * u;
+    this.pnx = tz;
+    this.pnz = -tx;
+  }
+
+  /** arc length of the pace line point nearest (x, z) (segments extended past both ends) */
+  private paceProject(st: PilotStart, x: number, z: number): number {
+    const n = st.x.length;
+    let best = 0;
+    let bd = Infinity;
+    for (let i = 0; i < n - 1; i++) {
+      const ux = st.x[i + 1] - st.x[i];
+      const uz = st.z[i + 1] - st.z[i];
+      const l = Math.hypot(ux, uz);
+      let t = ((x - st.x[i]) * ux + (z - st.z[i]) * uz) / (l * l);
+      if (i > 0) t = Math.max(0, t);
+      if (i < n - 2) t = Math.min(1, t);
+      const d = Math.hypot(st.x[i] + ux * t - x, st.z[i] + uz * t - z);
+      if (d < bd) {
+        bd = d;
+        best = st.cum[i] + t * l;
+      }
+    }
+    return best;
   }
 
   private levelFor(risk: number): number {
@@ -206,20 +344,45 @@ export class RacePilot {
       let d = frac - (old - Math.floor(old));
       d -= Math.round(d);
       f[a + AI.STATION] = first ? frac : old + d;
-      f[a + AI.HINT] = idx;
       f[a + AI.INTEGRAL] = 0;
       f[a + AI.STEER] = 0;
       f[a + AI.OFFSET] = 0;
       f[a + AI.AVOID_T] = 0;
       f[a + AI.WAVE_LIFT] = 0;
       f[a + AI.JUMP] = 0;
-      if (first) f[a + AI.SEA] = 0;
+      if (first) {
+        f[a + AI.SEA] = 0;
+        f[a + AI.ROLL] = 0;
+      }
       f[a + AI.INIT] = 1;
     }
+    // rolling start: the pilot's own clock of capped ticks; at green, a global re-projection onto the racing line (the
+    // formation ran on the pace line, which the tracking window may have lost)
+    const st = this.setup.start;
+    let greenMerge = false;
+    const cautionBefore = f[a + AI.ROLL] < 0;
+    const rolling = st !== null && valid && go <= 0 && stCode !== 1 && stCode !== 2;
+    if (rolling) {
+      if (go < 0) f[a + AI.ROLL] += DT;
+    } else if (f[a + AI.ROLL] < 0) {
+      f[a + AI.ROLL] = Math.min(0, f[a + AI.ROLL] + DT);
+    } else if (f[a + AI.ROLL] > 0) {
+      f[a + AI.ROLL] = -CAUTION_S;
+      greenMerge = true;
+      const ln = this.setup.levels[level].line;
+      const idx = this.project(ln, x, z, fx, fz);
+      const old = f[a + AI.STATION];
+      let d = idx / ln.n - (old - Math.floor(old));
+      d -= Math.round(d);
+      f[a + AI.STATION] = old + d;
+    }
+    const caution = cautionBefore || greenMerge;
     let lv = this.setup.levels[level];
     let line = lv.line;
     const track = (): { idx: number; s: number } => {
-      const hint = f[a + AI.HINT];
+      // the sample hint is the station's fraction of this level (STATION is kept to ± one sample of the last match)
+      const hf = f[a + AI.STATION] - Math.floor(f[a + AI.STATION]);
+      const hint = Math.round(hf * line.n) % line.n;
       const win = Math.ceil((V * DT * 4 + 24) / line.ds);
       const idx = nearestSample(line, x, z, hint, win);
       const along = (x - line.x[idx]) * line.tx[idx] + (z - line.z[idx]) * line.tz[idx];
@@ -229,7 +392,6 @@ export class RacePilot {
       let d = s / line.length - (old - Math.floor(old));
       d -= Math.round(d);
       f[a + AI.STATION] = old + d;
-      f[a + AI.HINT] = idx;
       return { idx, s };
     };
     let { idx, s } = track();
@@ -243,11 +405,9 @@ export class RacePilot {
     f[a + AI.RISK] = risk;
     const want = risk * (LINE_LEVELS - 1);
     if (Math.abs(want - level) > 0.7) {
-      const frac = f[a + AI.STATION] - Math.floor(f[a + AI.STATION]);
       level = this.levelFor(risk);
       lv = this.setup.levels[level];
       line = lv.line;
-      f[a + AI.HINT] = Math.round(frac * line.n) % line.n;
       ({ idx, s } = track());
     }
     f[a + AI.LEVEL] = level;
@@ -255,6 +415,9 @@ export class RacePilot {
     const nz = -line.tx[idx];
     const xte = (x - line.x[idx]) * nx + (z - line.z[idx]) * nz;
     f[a + AI.CROSS_TRACK] = xte;
+    // green: the columns do not snap onto one line — each boat starts from the offset it is at and merges at the offset
+    // slew, the alongside rule keeping the pair apart (a snap merged the columns at 12 m/s lateral and hooked two boats)
+    if (greenMerge) f[a + AI.OFFSET] = xte;
 
     // ── mistakes (seeded) ──────────────────────────────────────────────────────────────────────────────────
     if (f[a + AI.MISTAKE_T] > 0) {
@@ -278,8 +441,10 @@ export class RacePilot {
       f[a + AI.THROTTLE] = 0;
       f[a + AI.INTEGRAL] = 0;
       f[a + AI.WAVE_LIFT] = 0;
+      f[a + AI.TRIM] = 0;
       out.steer = steer;
       out.throttle = 0;
+      out.trim = 0;
       return;
     }
 
@@ -287,8 +452,14 @@ export class RacePilot {
     const ltx = line.tx[idx];
     const ltz = line.tz[idx];
     let avoid = 0;
+    let beside = 0;
+    let besideNeed = 0;
+    let followCap = Infinity;
+    let overlapPlus = false;
+    let overlapMinus = false;
+    let followLat = 0;
     let blocking = false;
-    for (let j = 0; j < L.spec.boats; j++) {
+    for (let j = 0; j < L.spec.boats && !rolling; j++) {
       if (j === i) continue;
       const w = L.worldPoseOffset(j);
       if (f[w + 3] === 0 && f[w + 4] === 0 && f[w + 5] === 0 && f[w + 6] === 0) continue; // never placed
@@ -304,6 +475,28 @@ export class RacePilot {
       const cx = dx + rvx * tStar;
       const cz = dz + rvz * tStar;
       const dmin = Math.hypot(cx, cz);
+      if (Math.abs(along) < ALONGSIDE && Math.abs(lat) < AVOID_LAT) {
+        // a boat overlapping this one on that side: blocking never moves toward it (a blocker covering the inside of T2
+        // leaned on a rival overlapping it there for 8 s and hooked)
+        if (lat >= 0) overlapPlus = true;
+        else overlapMinus = true;
+      }
+      if (caution && Math.abs(along) < ALONGSIDE && Math.abs(lat) < AVOID_LAT) {
+        // alongside: keep AVOID_LAT of lateral separation (both boats do; a dead-level pair splits by fleet index)
+        const need = AVOID_LAT - Math.abs(lat);
+        if (need > besideNeed) {
+          besideNeed = need;
+          beside = lat > 0 || (lat === 0 && j > i) ? -1 : 1;
+        }
+      }
+      if (caution && along > 0 && along < FOLLOW_GAP + 5 && Math.abs(lat) < FOLLOW_LANE) {
+        // in this lane just ahead: no closer than FOLLOW_GAP, closing at 0.5 m/s per metre of gap beyond it
+        const cap = f[w + 7] * ltx + f[w + 9] * ltz + 0.5 * (along - FOLLOW_GAP);
+        if (cap < followCap) {
+          followCap = cap;
+          followLat = lat;
+        }
+      }
       if (dmin < AVOID_R && along > -6) {
         const latAt = cx * nx + cz * nz;
         const cand = (latAt >= 0 ? -1 : 1) * 8 * ((AVOID_R - dmin) / AVOID_R);
@@ -312,11 +505,37 @@ export class RacePilot {
         blocking = true;
       }
     }
-    const Ld = clamp(arch.lookaheadS * V, 25, 70);
+    // far off the line (an overshoot, traffic, a respawn) the 25 m floor asked for an arc tighter than the boat turns at any
+    // speed: the off-line corner cap then reversed a rookie to 4 m/s, 30 m off her line, for 15 s (Tower Reach, G5→G6; the
+    // synthetic lap: 8 s lost after a mark). 1.5× still crawled; 2.5× and 3× both gave laps within 2 %.
+    const Ld = clamp(Math.max(arch.lookaheadS * V, RECOVER_LOOK * Math.abs(xte - f[a + AI.OFFSET])), 25, 70);
     this.at(line, s + Ld);
+    // rolling start: this boat's slot on the pace line (race/rollingStart gridSlotPose: rows behind the pace boat along
+    // the line, columns abreast, column 0 to starboard) and the pursuit point at the slot's column, Ld ahead of the boat
+    let slotErr = 0;
+    let slotLat = 0;
+    if (rolling && st !== null) {
+      const g = st.grid[i] ?? i;
+      const row = Math.floor(g / st.gridColumns);
+      const col = g % st.gridColumns;
+      const sSlot = st.paceStart + f[a + AI.ROLL] * st.paceSpeed - st.firstRowGap - row * st.rowSpacing;
+      const sBoat = this.paceProject(st, x, z);
+      slotErr = sSlot - sBoat;
+      slotLat = (col - (st.gridColumns - 1) / 2) * st.columnSpacing;
+      // (pnx, pnz) = (tz, −tx), the pace line's PORT normal: gridSlotPose's lateral, + to port
+      this.paceAt(st, sBoat + Ld);
+    }
     let target: number;
     let offset = f[a + AI.OFFSET];
-    if (avoid !== 0) {
+    // held up in a lane by a slower boat: pull out to pass (the side away from it), the follow cap lifts once clear of its lane
+    const heldUp = followCap < Infinity && followCap < V - 1;
+    if (besideNeed > 0) {
+      f[a + AI.AVOID_T] = 1.5;
+      target = offset + beside * besideNeed;
+    } else if (heldUp && avoid === 0 && !rolling) {
+      f[a + AI.AVOID_T] = 1.5;
+      target = offset + (followLat >= 0 ? -1 : 1) * AVOID_LAT;
+    } else if (avoid !== 0) {
       f[a + AI.AVOID_T] = 1.5;
       target = avoid;
     } else if (f[a + AI.AVOID_T] > 0) {
@@ -327,10 +546,16 @@ export class RacePilot {
       const span = Math.round(150 / line.ds);
       for (let q = 0; q < span; q++) k += line.kappa[(idx + q) % line.n];
       target = Math.sign(k) * arch.aggression * 6;
+      if ((target > offset && overlapPlus) || (target < offset && overlapMinus)) target = offset;
     } else {
       target = 0;
     }
-    f[a + AI.BLOCKING] = blocking && avoid === 0 && arch.aggression > 0 ? 1 : 0;
+    if (rolling) {
+      target = 0;
+      offset = 0;
+      f[a + AI.AVOID_T] = 0;
+    }
+    f[a + AI.BLOCKING] = blocking && avoid === 0 && besideNeed === 0 && arch.aggression > 0 ? 1 : 0;
     // the offset must fit the corridor over the whole lookahead, not just at its ends (a gate between them binds),
     // less a metre for tracking error
     let roomP = Infinity;
@@ -341,11 +566,41 @@ export class RacePilot {
     }
     target = clamp(target, -Math.max(0, roomP - 1), Math.max(0, roomS - 1));
     offset += clamp(target - offset, -3 * DT, 3 * DT);
+    // a corridor that binds inside the lookahead (room under the cap) clamps the offset itself, not just its target: an
+    // alongside/avoid offset slewing back at 3 m/s from outside the room ran a hothead 1.6 m outside a 36 m chicane gate
+    if (roomP < ROOM_CAP || roomS < ROOM_CAP) offset = clamp(offset, -Math.max(0, roomP - 1), Math.max(0, roomS - 1));
     f[a + AI.OFFSET] = offset;
 
     // ── steer: pure pursuit on the (offset) line ────────────────────────────────────────────────────────────
-    const tgx = this.px + this.pnx * offset;
-    const tgz = this.pz + this.pnz * offset;
+    const lat = rolling ? slotLat : offset;
+    let tgx = this.px + this.pnx * lat;
+    let tgz = this.pz + this.pnz * lat;
+    // KEEP-OUTS: the chord to the target, every 3 m from 4 m ahead, must stay PURSUIT_CLEAR off every static solid; the
+    // deepest intrusion moves the target sideways, away from the solid, scaled out to the target's distance
+    const ko = this.setup.keepOuts;
+    if (ko !== null) {
+      const cx = tgx - x;
+      const cz = tgz - z;
+      const cl = Math.hypot(cx, cz);
+      if (cl > 5) {
+        const ux = cx / cl;
+        const uz = cz / cl;
+        let shift = 0;
+        for (let d = 4; d <= cl; d += 3) {
+          const qx = x + ux * d;
+          const qz = z + uz * d;
+          const p = keepOutPush(ko, qx, qz, PURSUIT_CLEAR, this.push);
+          if (p.depth > 0) {
+            // sideways (starboard of the chord = (uz, −ux)) part of the push, carried out to the target
+            const side = ((p.x - qx) * uz - (p.z - qz) * ux) * (cl / d);
+            if (Math.abs(side) > Math.abs(shift)) shift = side;
+          }
+        }
+        shift = clamp(shift, -PURSUIT_SHIFT_MAX, PURSUIT_SHIFT_MAX);
+        tgx += uz * shift;
+        tgz -= ux * shift;
+      }
+    }
     const courseYaw = V > 3 ? Math.atan2(vx, vz) : Math.atan2(fx, fz);
     let alpha = Math.atan2(tgx - x, tgz - z) - courseYaw;
     alpha = Math.atan2(Math.sin(alpha), Math.cos(alpha));
@@ -384,8 +639,10 @@ export class RacePilot {
     // sea respect (× waveSkill × (1 − risk)): rough water ahead ⇒ a careful pilot runs slower than the flat-water profile
     vT *= 1 - arch.waveSkill * (1 - risk) * clamp((f[a + AI.SEA] - 0.15) / 0.5, 0, 0.4);
     if (mistake === 3) vT *= 1.06;
+    if (rolling) vT = clamp(st.paceSpeed + SLOT_GAIN * slotErr, 0, 1e9);
     if (go <= 0) vT = Math.min(vT, -go);
     if (stCode === 4) vT = Math.min(vT, 15);
+    if (!rolling) vT = Math.min(vT, Math.max(0, followCap));
     // OFF THE LINE, SLOW TO THE TURN YOU ARE ACTUALLY ASKING FOR (T196): the profile's corner speed is for the LINE's
     // curvature; a boat knocked off it (a mistake, traffic, a slide) pursues a tighter arc back. Measured on the T196 hull
     // (drives part-surfaced, lock 19°): the rookie held full throttle at lock through a sweep with 12–18° of drift at 20 m/s
@@ -393,7 +650,7 @@ export class RacePilot {
     // pursuit curvature: on the line it is never below the profile, so it only acts when the arc is tighter than the line.
     // Only past 15 m of tracking error (well past the measured 4–6 m near-gate error on the line): closer in the pursuit arc is noisy and
     // capping by it slowed every lap by 3–6 s and reordered the pack.
-    if (Math.abs(xte - offset) > 15) vT = Math.min(vT, cornerSpeed(kappa, lv.latUse));
+    if (!rolling && Math.abs(xte - offset) > 15) vT = Math.min(vT, cornerSpeed(kappa, lv.latUse));
     f[a + AI.TARGET_SPEED] = vT;
     const e = vT - V;
     const integ = clamp(f[a + AI.INTEGRAL] + e * DT, -4, 4);
@@ -440,8 +697,10 @@ export class RacePilot {
     // props out of the water (last tick's contact): feather unless the pilot likes to land pinned
     if (f[L.boatOffset(i) + B.PROP_IMMERSION] < 0.05 && arch.jumpAppetite < 0.7) thr = Math.min(thr, 0.4);
     f[a + AI.THROTTLE] = thr;
-    f[a + AI.TRIM] = waveLift > 0.2 ? -waveLift : V > 20 ? 0.3 : 0;
+    const trim = waveLift > 0.2 ? -waveLift : V > 20 ? 0.3 : 0;
+    f[a + AI.TRIM] = trim;
     out.steer = steer;
     out.throttle = thr;
+    out.trim = trim;
   }
 }

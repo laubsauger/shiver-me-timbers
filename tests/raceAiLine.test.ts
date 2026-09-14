@@ -11,7 +11,8 @@
 import { describe, expect, it } from 'vitest';
 import { AI, AI_IN, encodeStanding } from '../src/race/ai/aiBlock';
 import { accelAt, curvatureAt, decelAt, lockLimit, steerForCurvature } from '../src/race/ai/capability';
-import { buildRacingLine, corridorsOf, type RacingLine } from '../src/race/ai/line';
+import { buildRacingLine, corridorsOf, gateMargin, LINE_CLEAR, MARK_TRACK, ROOM_CAP, ROOM_CLEAR, type RacingLine } from '../src/race/ai/line';
+import { buildKeepOuts, keepOutClearance } from '../src/race/ai/keepOut';
 import { buildPilotSetup, LINE_LEVELS } from '../src/race/ai/pilot';
 import { speedProfile } from '../src/race/ai/profile';
 import type { Course } from '../src/race/types';
@@ -61,9 +62,12 @@ function checkCourse(c: Course, line: RacingLine, margin: number): { slack: numb
       const hits = crossings(line, left[0], left[1], ux, uz, -uz, ux).filter((h) => h.u > -3 * w && h.u < 4 * w);
       expect(hits.length, `gate ${e.gate.id}: crossed once in the course direction`).toBe(1);
       const u = hits[0].u;
-      expect(u, `gate ${e.gate.id}: ≥ margin off the left pole`).toBeGreaterThanOrEqual(margin - 0.05);
-      expect(u, `gate ${e.gate.id}: ≥ margin off the right pole`).toBeLessThanOrEqual(w - margin + 0.05);
-      slack.push(Math.min(u - margin, w - margin - u));
+      // gateMargin: + the pilot's tracking error near a gate, and a share of a wide gate (a 4.4 m margin let a boat 7 m off
+      // its line miss G8)
+      const gm = gateMargin(margin, w);
+      expect(u, `gate ${e.gate.id}: ≥ margin + tracking off the left pole`).toBeGreaterThanOrEqual(gm - 0.05);
+      expect(u, `gate ${e.gate.id}: ≥ margin + tracking off the right pole`).toBeLessThanOrEqual(w - gm + 0.05);
+      slack.push(Math.min(u - gm, w - gm - u));
     } else {
       const p = ctr((k + m - 1) % m);
       const q = ctr((k + 1) % m);
@@ -76,8 +80,9 @@ function checkCourse(c: Course, line: RacingLine, margin: number): { slack: numb
       const hits = crossings(line, e.mark.at[0], e.mark.at[1], sg * dz, -sg * dx, dx, dz).filter((h) => Math.abs(h.u) < 200);
       expect(hits.length, `mark ${e.mark.id}: rounded once`).toBe(1);
       expect(hits[0].u, `mark ${e.mark.id}: on the keepOn side, clear of its radius`).toBeGreaterThan(e.mark.radius);
+      // + MARK_TRACK: the pilot tracks its line to 4–6 m; a line at radius + margin let a boat cut the rounding radius
       for (let i = 0; i < line.n; i++) {
-        expect(Math.hypot(line.x[i] - e.mark.at[0], line.z[i] - e.mark.at[1]), `mark ${e.mark.id} keep-out at sample ${i}`).toBeGreaterThanOrEqual(e.mark.radius + margin - 0.05);
+        expect(Math.hypot(line.x[i] - e.mark.at[0], line.z[i] - e.mark.at[1]), `mark ${e.mark.id} keep-out at sample ${i}`).toBeGreaterThanOrEqual(e.mark.radius + margin + MARK_TRACK - 0.05);
       }
     }
   });
@@ -124,6 +129,48 @@ describe('§T.186 racing line', () => {
         expect(-dv2, `sample ${i}: decel`).toBeLessThanOrEqual(decelAt(v[j], lv.brakeUse) + 1e-6);
       }
     }
+  });
+
+  // WHY: statics are solid (§T.198). The line knew only gates and marks, and between corridors it offered avoidance and
+  // blocking a flat ROOM_CAP of room: on Tower Reach that room reached Main Street's roof walls. A solid wall laid ON the
+  // open-water line must push the line LINE_CLEAR off it, and a wall beside the line must take the room on its side.
+  it('keep-outs: the line bends LINE_CLEAR around a static solid on it, and a solid beside it takes the room on that side', () => {
+    const open = setup.levels[2];
+    const ln = open.line;
+    const wallAt = (lat: number, from: number, to: number): { a: number[]; b: number[]; radius: number }[] => {
+      const w: { a: number[]; b: number[]; radius: number }[] = [];
+      for (let st = from; st <= to; st += 2) {
+        const i = Math.round(st / ln.ds);
+        const x = ln.x[i] + ln.tz[i] * lat;
+        const z = ln.z[i] - ln.tx[i] * lat;
+        w.push({ a: [x, -0.5, z], b: [x, 1, z], radius: 1 });
+      }
+      return w;
+    };
+    // on the line, mid-way between the start gates (open water), and 6 m to the side further on
+    const on = wallAt(0, 80, 90);
+    const beside = wallAt(-(ROOM_CLEAR + 4), 120, 170);
+    const ko = buildKeepOuts([...on, ...beside]);
+    const line = buildRacingLine(course, { margin: open.margin, keepOuts: ko });
+    const clear = (l: RacingLine): number => Math.min(...Array.from(l.x, (x, i) => keepOutClearance(ko, x, l.z[i])));
+    expect(clear(ln), 'the open-water line runs through the wall').toBeLessThan(0);
+    expect(clear(line)).toBeGreaterThanOrEqual(LINE_CLEAR - 0.5);
+    checkCourse(course, line, open.margin);
+    // beside: every sample's room toward the wall ends ROOM_CLEAR short of it (the wall is at lateral −(ROOM_CLEAR + 4))
+    const wallOnly = buildKeepOuts(beside);
+    const lineB = buildRacingLine(course, { margin: open.margin, keepOuts: wallOnly });
+    let checked = 0;
+    for (let i = 0; i < lineB.n; i++) {
+      const c = keepOutClearance(wallOnly, lineB.x[i], lineB.z[i]);
+      if (c >= ROOM_CAP + ROOM_CLEAR) continue;
+      const side = -1; // the wall lies to −n; room on −n is roomPort (line.ts: (tz, −tx) is the + side, roomStbd)
+      const room = side < 0 ? lineB.roomPort[i] : lineB.roomStbd[i];
+      const px = lineB.x[i] - lineB.tz[i] * room;
+      const pz = lineB.z[i] + lineB.tx[i] * room;
+      expect(keepOutClearance(wallOnly, px, pz), `sample ${i}: the offset hull clears the wall`).toBeGreaterThanOrEqual(ROOM_CLEAR - 1.01);
+      checked++;
+    }
+    expect(checked, 'samples beside the wall').toBeGreaterThan(10);
   });
 
   it('marks: the rounding corridor sits on the side away from keepOn (a starboard mark mirrors a port one)', () => {

@@ -19,11 +19,12 @@ harness `tests/raceAiHarness.ts`.
 |---|---|
 | `measure.ts` | Headless measurement on real `HullWater` + `stepRigid6`: straight accel/coast/reverse, steady turns, lock entries. Not imported by the pilot. |
 | `capability.ts` | Committed `MEASURED` table + interpolation (`curvatureAt`, `steerForCurvature`, `holdThrottle`, `turnTopSpeed`, `accelAt`, `decelAt`), `lockLimit(v)` (no-hook schedule), `HELM_RATE` 15°/s |
-| `line.ts` | Corridors (gate poles − margin; marks: rounding segment on the side away from `keepOn`, keep-out circle), elastic-band min-Σκ² relaxation, uniform 2 m resample, signed κ, lateral room |
+| `line.ts` | Corridors (gate poles − margin; marks: rounding segment on the side away from `keepOn`, keep-out circle radius + margin + `MARK_TRACK`), elastic-band min-Σκ² relaxation, static keep-outs (`LINE_CLEAR`), uniform 2 m resample, signed κ, lateral room (clipped `ROOM_CLEAR` short of a solid) |
+| `keepOut.ts` | The page's solid colliders a hull can reach as xz discs on a 24 m grid (`buildKeepOuts`, `keepOutPush`, `keepOutClearance`); structured-clone safe |
 | `profile.ts` | Speed profile: lateral cap from the measured turning (bisection), helm-rate cap, forward/backward passes with measured accel/decel |
 | `archetypes.ts` | The seven couriers (design doc §4) as parameter sets |
 | `aiBlock.ts` | Slot map of the per-boat AI block in the sim buffer; `encodeStanding` |
-| `pilot.ts` | `buildPilotSetup` (5 risk levels × line + profile), `RacePilot.control` |
+| `pilot.ts` | `buildPilotSetup(course, roster, { seed, colliders?, start?, grid? })` (5 risk levels × line + profile, keep-outs, rolling-start data), `RacePilot.control` |
 
 ## How it works
 
@@ -70,7 +71,8 @@ harness `tests/raceAiHarness.ts`.
 
 - **AI OUT (24 slots).** The pilot's entire memory plus its applied controls. Stepper-written and inside the V2 hash:
   station, level, PI integral, applied steer (rad) / throttle / trim request, rng, mistake/recovery timers, risk,
-  offset, avoid timer, wave lift, jump, target speed, cross-track, ticks, blocking, upset, respawned, hint, sea mean.
+  offset, avoid timer, wave lift, jump, target speed, cross-track, ticks, blocking, upset, respawned, rolling-start clock
+  (`ROLL`, was the sample hint — now derived from the station), sea mean.
 - **AI IN (8 slots).** Main-written before `kick` via `encodeStanding`, not hashed: valid, position, racers, lap,
   progress, gapToLeader, state code, go/speed-cap. The cap can only slow a boat.
 
@@ -161,8 +163,9 @@ Lateral acceleration at 12.5° runs from 1.5 m/s² at 6 m/s to 5.0 m/s² at 25 m
    capsizes at 10–29 m/s. This is the physics log's open roll-damping gap (~15 kN·m·s/rad), not the AI. The design's
    "veteran never crashes / Shine ≥ 3× Longhaul" cannot be met until it is fixed. The sea test bounds are today's
    reality.
-2. **Trim.** `HullWater.setControls(steer, throttle)` has no trim/drive-tilt input. The pilot computes a trim request
-   (`AI.TRIM`) and nothing applies it.
+2. **Trim (sim-worker owner).** `HullWater.setControls(steer, throttle, trim)` exists now and the pilot returns its
+   request as `PilotOutput.trim` (unit, −1 bow down … +1 bow up). Not applied until `stepCore.ts` passes it (see Racecraft
+   below) — untested on the physics.
 3. **Thrust is TEMPORARY** (stand-in, T166). When the drive model lands, `raceAiCapability` fails; paste the new
    `measureCapability()` JSON into `capability.ts#MEASURED`, then re-check the lock tests (4 MW rows cover faster
    drives).
@@ -177,3 +180,39 @@ Lateral acceleration at 12.5° runs from 1.5 m/s² at 6 m/s to 5.0 m/s² at 25 m
 7. **Flipped roll-helm A/B aborted.** A NaN placement height appeared once in the harness (`CpuOcean.heightAt` at
    t = 0 on a fresh mirror, run with flipped roll gains). It was not reproduced. The harness now throws with the
    values if it happens again.
+
+## Racecraft on Tower Reach (rival AI fixes after §T.198/§T.202)
+
+Headless evidence: `tests/speedboatRaceHarness.ts` now races on the page's own world (`tests/speedboatCollisionWorld.ts`
+→ `towerReachCourse().attach`: course furniture, roof walls, capsules fitted to the drawn kit props; 7 668 colliders in the
+tree, 7 839 at HEAD a4c02bf — the difference is uncommitted circuit WIP), not pirate rock placements.
+
+| # | Cause (measured) | Fix |
+|---|---|---|
+| 1 Main Street walls | The line knew only gates and marks; between corridors every offset (avoidance, blocking) got a flat 12 m of room, and a boat far off its line pursued a chord straight back through whatever stood between. The line itself runs 38 m off the reference line on the G4→G5 leg, so a boat at full room offset sat ~50 m off it: the 47–58 m of the live report. In the harness (1 lap, then the post-finish lap at the 15 m/s cap) boats that had lost their line pressed against Main Street roof walls 45–60 m off it (124 solid-contact ticks). | `keepOut.ts`: solids a hull can reach as discs. The line relaxation pushes every sample `LINE_CLEAR` (10 m) off them; the lateral room stops `ROOM_CLEAR` (5 m) short of them; the pursuit chord (boat → target, every 3 m) is kept `PURSUIT_CLEAR` (4 m) clear by moving the target sideways (≤ 25 m). Far off the line the lookahead grows to 2.5 × the distance off it, so the arc back is one the boat can turn (the off-line corner cap reversed a rookie to 4 m/s, 30 m off her line, for 15 s; on the synthetic course it cost a rookie lap 8 s). `buildPilotSetup(…, { colliders })`. |
+| 2 T1 miss | The mark keep-out was radius + margin: the lines rounded T1 at 31.9–35 m (radius 28), and a boat 4–6 m off its line cut the radius. With the §T.202 lap order the harness lap did not reproduce the miss, but the margin was the same. | Mark keep-out = radius + margin + `MARK_TRACK` (6 m): T1 now 37.5–41 m. Gates get the same treatment: `gateMargin` = max(margin + `GATE_TRACK` 3 m, `GATE_SHARE` 18 % of the width), after a lee 7 m and a (catch-up, over-speeding) rookie 11 m off their lines crossed 3–4 m outside G8's pole. |
+| 3 no grid hold | The pilot rode its racing line from its slot; the columns converged and trailed their slots by 70 m. | While GO ≤ 0 the pilot holds its slot: `PilotSetup.start` carries the pace line and grid geometry (race/params start, `gridDepth`, grid index = fleet index), `AI.ROLL` counts rolling ticks (the slot `HINT` is now derived from `STATION`), the target is the pace line at the slot's column and the speed is pace + 0.35 × the along-line error, under the cap. At green: global re-projection onto the racing line and `OFFSET` = the cross-track it is at (merge at the offset slew). Then 40 s of **opening caution** (`CAUTION_S`, `AI.ROLL` < 0): overlapping within 13 m along ⇒ keep 9 m lateral; in a boat's lane (±4 m) ⇒ no closer than 14 m, pull out to pass. Without it the columns touched after the start gate and a follower nose-to-tail through G1 touched its leader; both hooked. Race-long, the same two rules kept the synthetic pack from passing (tests/raceAiPack: hothead 6 s slower than the veteran, catch-up no longer closing the pack), so they end with the caution. Measured: every rival ≤ 1 m along / 0.2 m across its slot at green (the peak lag, ~55 m, is the acceleration from 0 behind a pace boat that starts at pace speed). |
+| 4 trim | `setControls` had no trim input; the request was computed and dropped. | `PilotOutput.trim` (unit −1..1, = `AI.TRIM`). Needs the sim-worker/page owner to pass it (below). |
+| — pack, found on the way | A blocker covering the inside of T2 leaned on a rival overlapping it for 8 s and hooked; an avoid/alongside offset slewing back at 3 m/s from outside a tight corridor ran a hothead 1.6 m outside a 36 m chicane gate. | Blocking never moves toward a boat overlapping on that side. A corridor that binds inside the lookahead (room under the 12 m cap) clamps the offset itself, not only its target. |
+| 5 guy anchor | Same as 3: off the pace line, a rival could reach an anchor. | Slot hold on the clear pace line + keep-outs (all static solids, anchors included). |
+| 6 harness world | Pirate rock placements. | `courseFixture` uses `collisionWorld()`; the clearance test asserts the list is the page's and holds > 1 000 drawn-prop capsules. |
+
+**Result (HEAD a4c02bf physics, scratch worktree; the tree's physics was mid-edit by T207):** Calm 1-lap smoke race —
+all 8 finished, 0 penalties, 0 rival crashes, 0 rival ticks touching a static solid, every rival ≤ 6 m from its grid slot
+0.5 s before green (measured ≤ 1 m), same hash at tick 2400 at 60 fps and 20 fps pacing; rivals 147.2–153.1 s, the
+autopiloted player 162.0 s. Synthetic suites: raceAiLine/Pilot/Pack/Laps green (Pack at HEAD also green; Laps lap 3 had
+regressed to +13 % with the 1.5× recovery lookahead, fixed with 2.5×). The same smoke race on the working tree of
+2026-09-14 13:40 (T207's boat-wake field and circuit WIP uncommitted): 0 penalties, all 8 finished, but 2 rival hooks
+(#3 veteran at tick 8942 and one more) — not gated here until that physics settles.
+
+**Working sea** (HEAD physics, the 'swell' preset, 230 s from the start, 200 s after green; nobody completed the lap):
+crashes hothead 34, rookie 28, swell 26, lee 26, rival 22, blocker 20, veteran 20 (162 hooks, 14 barrel rolls; 4
+before green). Open item 1 (roll damping) still dominates.
+
+**Wiring needed from other owners (not edited here):**
+- `src/sim-worker/stepCore.ts` (pilot branch): `b.hw.setControls(po.steer, po.throttle);` →
+  `b.hw.setControls(po.steer, po.throttle, unitTrimToRad(po.trim ?? 0));`
+- `src/speedboat/page/autopilot.ts` `sample()`: after `out.throttle = po.throttle;` add `out.trim = po.trim ?? 0;`
+- `src/main-speedboat.ts`: `buildPilotSetup(world.course, [...RIVAL_ARCHETYPES, null], { seed: state.seed, colliders: world.colliders })`
+  — without it the page's rivals have no keep-outs (the grid hold works without it).
+- The trim request policy (−wave lift, +0.3 above 20 m/s) has never run on the physics; check it when the stepCore line lands.
