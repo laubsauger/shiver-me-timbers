@@ -200,7 +200,9 @@ describe('drive spin placeholder and rooster tail gate', () => {
     expect(placeholderPropRpm(-0.3, 1)[0]).toBeGreaterThan(PLACEHOLDER_IDLE_RPM);
   });
 
-  const jet = (immersion: number): PropWashInput => ({ x: 0, z: 0, dirX: 0, dirZ: -1, thrust: 6000, discArea: Math.PI * 0.04, depth: 0, advance: 25, immersion });
+  // §T.199: the tail is thrown at blade-tip speed, so the jet carries its rev/s as the drive publishes it
+  // (propWashHullWater); without propRps and a pitch the estimate is 0 rps and nothing is thrown at any immersion.
+  const jet = (immersion: number): PropWashInput => ({ x: 0, z: 0, dirX: 0, dirZ: -1, thrust: 6000, discArea: Math.PI * 0.04, depth: 0, advance: 25, immersion, propRps: 50 });
 
   it('a buried prop throws nothing, a half-exposed one throws the tail', () => {
     expect(jetStats([jet(1)]).roosterRate).toBe(0);

@@ -466,7 +466,9 @@ describe('d. wake foam age from the two decay clocks; aged foam dissolves soft',
   it('wired: the sim material passes composed ages to foamDetailMask and mixes to the whitecap law; analytic builds no age node', () => {
     const code = surfaceMaterialSource.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
     expect(code).toMatch(/wakeFoamFreshnessNode\(worldXZ\)/);
-    expect(code).toMatch(/foamDetailMask\([^;]*undefined,\s*undefined,\s*undefined,\s*ages.edge,\s*ages.body,?\s*\)/);
+    // e28d0a4 added an 8th arg, `porousBody` (landed sim-wake films keep their porous texture), gated on the
+    // sim backend's age node; the composed ages still have to arrive as detailRetire / bodyAge.
+    expect(code).toMatch(/foamDetailMask\([^;]*undefined,\s*undefined,\s*undefined,\s*ages\.edge,\s*ages\.body,\s*(?:Boolean\(flowFoam\?\.wakeFoamFreshnessNode\),?\s*)?\)/);
     expect(code).toMatch(/mix\(wakeCol,\s*foamCol,\s*wakeFresh\)/);
     expect(createFlowFoam().wakeFoamFreshnessNode).toBeNull();
   });

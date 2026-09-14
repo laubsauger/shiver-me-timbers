@@ -59,8 +59,10 @@ export function propWashFromHullWater(hw: PropWashSource, _state: Readonly<Rigid
     j.lossPower = e ? propLossPower(e.propRps, e.propTorque, T, j.advance) : 0;
     // §T.199 the rooster tail's blade tip speed (absent without an engine model: the emitter estimates it)
     j.propRps = e && Number.isFinite(e.propRps) ? e.propRps : undefined;
+    // the blades draw air only while they load the water: in neutral the gearcase decouples the prop (propTorque 0)
+    // but the engine still reports the crank's idle rev/s, which would ventilate a coasting boat (propWash.aerationSpeed: 0 in neutral)
     j.ventAirSpeed =
-      e && spec ? ventilationAirSpeed(j.immersion, ventilationFactor(spec, e.advanceRatio / (spec.propPitch / spec.propDiameter)), spec.propPitch, e.propRps) : 0;
+      e && spec && e.propTorque !== 0 ? ventilationAirSpeed(j.immersion, ventilationFactor(spec, e.advanceRatio / (spec.propPitch / spec.propDiameter)), spec.propPitch, e.propRps) : 0;
     live++;
   }
   out.length = live;

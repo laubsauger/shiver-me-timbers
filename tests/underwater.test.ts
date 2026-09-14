@@ -323,8 +323,10 @@ describe('aquatic perspective (Beer–Lambert on the SHARED Jerlov coefficients)
     // The visibility limit is not a separate far-clip or fog wall; it is the
     // same exponential. Nothing survives 4 km of water in ANY channel.
     expect(transmittance(KB, 4000)).toBeLessThan(1e-6);
-    // and the useful range is tens of metres, not kilometres
-    expect(transmittance(KB, 150)).toBeLessThan(0.02);
+    // and the useful range is a couple of hundred metres at most, not kilometres.
+    // e28d0a4 cleared the water on purpose (K_B 0.03 → 0.02/m, clear tropical); 2% is now reached at
+    // 200 m instead of 150 m (e^−4 = 0.018).
+    expect(transmittance(KB, 200)).toBeLessThan(0.02);
   });
 
   it('murkiness scales all three channels together (a water TYPE, not a new set)', () => {
