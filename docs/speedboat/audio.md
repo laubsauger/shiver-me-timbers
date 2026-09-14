@@ -130,7 +130,20 @@ The `rpmModel` numbers above now apply only to the turbine, two-stroke and elect
 
 - **Planing hiss:** band-pass noise whose centre rises with speed (1 → 3.6 kHz at `speedRef`; T204 lowered it from 5 kHz). Gain scales with wetted^0.6 × speed².
 - **Water rush** and **prop-wash spray roar:** the roar scales with Σ|thrust| × speed and gets louder as the prop surfaces.
-- **Ventilation howl:** two resonant bands at 3× and 5× blade rate (4 blades from rpm) plus a 2× tone. It is gated on partial immersion and thins out when the prop is fully in air.
+- **Ventilation churn (T205):** a hollow low-Q band (Q 2.2) on blade rate (5 blades, from the ventilating drives' rpm) plus a lowpassed whoosh at 2.5× blade rate, chopped ±25% at blade rate, then a 1.6 kHz one-pole. Tunable: `howlGain`.
+  - **Level is per drive, beyond normal running.** `ventilationWeight(s)` is ~0 in the T196 surfaced band (0.02 at s = 0.65), full by s = 0.15, and 20% for a prop in clear air. The layer takes the mean over drives.
+  - **Slow.** Attack 200 ms, release 350 ms; the pitch follows rpm with τ 150 ms, so a limiter bounce does not warble it.
+  - **Why it changed.** The old layer was two resonant noise bands at 3× and 5× blade rate (Q 14/18, peak gain ~50) plus a 2× sine, on mean immersion with a 26 ms lag, pitched on engine 0's raw rpm. That put 87% of the water energy in 600–1500 Hz whistles, which warbled with the limiter bounce.
+  - **Measured** (planing 38 m/s, WOT, 3 drives; `ventilation states` WAV render; water layer vs the engine bed):
+
+    | State | Water before | Water after | Mix before → after | Water energy 600–1500 Hz |
+    |---|---|---|---|---|
+    | All props at 1.0 | −12.1 dB | −12.1 dB | −14.0 → −14.1 dBFS | unchanged |
+    | All at 0.65 (normal) | **−1.1 dB** | −13.1 dB | −11.6 → −13.9 dBFS | 85% → 5% |
+    | One prop at 0.2 | **+6.4 dB** | −3.7 dB | −8.3 → −14.3 dBFS | 86% → 14% (77% now < 600 Hz) |
+    | All airborne | **+6.1 dB** | −2.5 dB | −14.8 → −19.8 dBFS | 87% → 17% |
+
+  - **Still in the physics.** A drive at s = 0.2 bounces its limiter (6340–6785 rpm). The engine voice follows that bounce; its layer stays dark (0.8% of energy above 3 kHz).
 - **Events:**
   - Hull slap: 118 and 265 Hz body resonances plus a splash band.
   - Landing: a boom gliding from 112 Hz to 50 Hz, a low crash, and a 1 s spray tail.
@@ -233,7 +246,7 @@ None of these block the audio.
 
 ## Verification
 
-- `npx vitest run tests/boatAudio`: 63 tests pass, and 6 WAV renders are skipped unless `BOAT_AUDIO_WAV_DIR` is set.
+- `npx vitest run tests/boatAudio`: 69 tests pass, and 7 WAV renders are skipped unless `BOAT_AUDIO_WAV_DIR` is set.
   - `boatAudioModel`: the seam (the V8 spec is the physics 450R; local integration identical to physics; limiter cuts and re-fires; sim rpm wins with limiter flags from it; overrun silences combustion); legacy model: planing slip 5–20% for all 4 archetypes; rpm rises with advance and with ventilation; throttle lag; airborne reaches the limiter in < 0.35 s without overshoot; bounce period 40–250 ms; Governor 'air'; bog on re-entry; overrun windmill; NaN and extreme inputs; override; determinism.
   - `boatAudioMix`: §V96 plateau measured vs. monotonic boat law; air absorption; doppler ratios and zipper; steal sequence; tier hysteresis; landing and slam detection; muffling; packing sanitisation.
   - `boatAudioSynth`: V8 firing line at rpm·8/120 ±3% at 900/2500/4500/6300 rpm; two-stroke at rpm·3/60; inverter at 6 f_e; identical pitch at 0 and 40 m/s; half-order energy (lump); underwater exhaust darker; limiter bounce visible in the envelope spectrum (4–25 Hz); three-engine beating; landing boom at 50–120 Hz; hiss grows with speed; ramp schedule; bit-identical renders; finite output on garbage input; CPU.
@@ -250,6 +263,7 @@ None of these block the audio.
   - `04-v8-limiter-bounce-then-governor-air`
   - `05..08-npc-{v8,turbine,twostroke,electric}-flyby-40ms-15m` (stereo, emulated delay and equalpower pan)
   - `09-v8-wake-crossing-and-chop`
+  - `vent-{planing-imm100,surfaced-imm065,one-prop-lifted-imm020,airborne}` (T205; logs level, band shares and rpm; `BOAT_AUDIO_VENT_PROBE=howlGain` renders with that tunable at 0)
 
 ## Samples
 
@@ -266,7 +280,7 @@ Nobody has listened to these renders yet. They were judged from spectrograms, le
 - Clearly pitched harmonic stacks that track rpm.
 - A grouped, uneven idle waveform (lumpy).
 - Beating between the three engines.
-- A bright howl band while airborne.
+- A hollow ventilation churn (under 1.6 kHz) when a prop lifts (T205; it was a bright howl band).
 - Visible limiter chop, and the Governor's lower band.
 - Doppler bends on the flybys.
 - Roughly 18 dB between idle and WOT.

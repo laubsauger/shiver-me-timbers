@@ -17,7 +17,7 @@
  *   TWO-STROKE   3 cyl/rev, expansion-chamber positive reflection, nasal band, ring-ding skip-firing
  *   TURBINE      gas-generator blade-pass whine + shaft sidebands, combustor roar, power-turbine tone
  *   ELECTRIC     PMSM 6/12/24× electrical whine, inverter carrier (synchronous steps below base, async above)
- *   WATER        planing hiss, water rush, prop-wash spray roar, ventilation howl at blade rate,
+ *   WATER        planing hiss, water rush, prop-wash spray roar, ventilation churn (hollow, < 2 kHz) at blade rate,
  *                hull slap, landing boom, wake double-knock
  */
 import { DcBlock, Noise, OnePole, Svf, Waveguide, clamp, pulseShape, sin01, smoothstep, softClip } from './dsp';
@@ -505,11 +505,34 @@ export interface WaterFrame {
   thrust: number;
   /** mean prop immersion 0..1 */
   immersion: number;
-  /** engine 0 rpm and reduction: the ventilation howl sits on blade rate */
+  /** 0..1 ventilation BEYOND normal surfaced running, mean over drives (`ventilationWeight`) */
+  vent: number;
+  /** crank rpm of the ventilating drives (vent-weighted) and reduction: the churn sits on blade rate */
   rpm: number;
   gear: number;
   throttle: number;
 }
+
+/**
+ * One drive's contribution to the ventilation churn, 0..1. T196 surfaced props run at 0.6–0.7 immersion at speed, so
+ * that band is NORMAL running and adds (almost) nothing; the churn builds as the prop climbs out of the water (full by
+ * 0.15), and a prop in clear air keeps 20 % of it — there is little water left to churn.
+ */
+export function ventilationWeight(immersion: number): number {
+  const s = clamp(immersion, 0, 1);
+  return smoothstep(0.7, 0.15, s) * (0.2 + 0.8 * smoothstep(0, 0.08, s));
+}
+
+/** churn mix: hollow blade-rate body, lowpassed whoosh (levels set against the engine bed, docs/speedboat/audio.md) */
+const HOWL_BODY = 14;
+const HOWL_WHOOSH = 8.5;
+/** 450R surface-piercing prop (sea-physics MERCURY_450R: five-blade) */
+const PROP_BLADES = 5;
+/** ventilation churn envelope, s (T205: a 26 ms attack made every surfacing prop a scream onset) */
+const VENT_ATTACK_S = 0.2;
+const VENT_RELEASE_S = 0.35;
+/** churn pitch follows the drive rpm this slowly, so a limiter bounce does not warble it */
+const VENT_PITCH_TAU_S = 0.15;
 
 export class WaterLayer {
   private hiss = new Svf();
@@ -518,7 +541,9 @@ export class WaterLayer {
   private howl = new Svf();
   private howl2 = new Svf();
   private chop = new OnePole();
-  private ventLag = new OnePole();
+  private howlTop = new OnePole();
+  private ventEnv = 0;
+  private ventRpm = -1;
   private slap1 = new Svf();
   private slap2 = new Svf();
   private splashHp = new Svf();
@@ -548,7 +573,7 @@ export class WaterLayer {
   ) {
     this.noise = new Noise(seed ^ 0x3a7e2);
     this.chop.setHz(2.5, sr);
-    this.ventLag.setHz(6, sr);
+    this.howlTop.setHz(1600, sr);
     this.rush.set(380, 0.7, sr);
     this.slap1.set(118, 4, sr);
     this.slap2.set(265, 3, sr);
@@ -593,13 +618,23 @@ export class WaterLayer {
     const sprayG = t.sprayGain * clamp(w.thrust, 0, 1.2) * Math.pow(sN, 1.2) * (0.35 + 0.65 * (1 - imm)) * (wet > 0 ? 1 : 0.3);
     this.hiss.set(1000 + 2600 * sN, 0.8, sr); // T204: was 1.1→6.2 kHz, a hiss centre above 5 kHz reads as a sizzle
     this.spray.set(900 + 1400 * sN, 0.55, sr);
-    // ventilation: a prop partly out of the water screams at blade rate harmonics; fully in air it thins
-    const vent = 1 - imm;
+    // VENTILATION CHURN (T205). Was two resonant noise bands at 3×/5× blade rate (Q 14/18, peak gain ~50) plus a
+    // sine, gated on mean immersion with a 26 ms lag and pitched on engine 0's raw rpm: 600–1500 Hz whistles that
+    // warbled with the limiter bounce, level with the engines in NORMAL surfaced running and +6 dB over them with
+    // one prop lifted. Now: a hollow low-Q band on blade rate plus a lowpassed whoosh, chopped lightly at blade rate, all
+    // under ~1.6 kHz, scaled by ventilation beyond the normal running band, with slow attack/release and pitch.
     const rpmN = clamp(w.rpm / 6800, 0, 1.2);
-    const howlAmt = this.cheap ? 0 : t.howlGain * smoothstep(0.08, 0.55, vent) * (1 - 0.55 * smoothstep(0.9, 1, vent)) * rpmN * rpmN * smoothstep(0.05, 0.3, w.throttle);
-    const bladeHz = (Math.max(0, w.rpm) / 60 / Math.max(0.3, w.gear)) * 4;
-    this.howl.set(bladeHz * 3, 14, sr);
-    this.howl2.set(bladeHz * 5, 18, sr);
+    const ventTarget = this.cheap ? 0 : t.howlGain * clamp(w.vent, 0, 1) * rpmN * rpmN * smoothstep(0.05, 0.3, w.throttle);
+    const tau = ventTarget > this.ventEnv ? VENT_ATTACK_S : VENT_RELEASE_S;
+    this.ventEnv += (ventTarget - this.ventEnv) * (1 - Math.exp(-n / (tau * sr)));
+    const rpmIn = Math.max(0, w.rpm);
+    this.ventRpm = this.ventRpm < 0 ? rpmIn : this.ventRpm + (rpmIn - this.ventRpm) * (1 - Math.exp(-n / (VENT_PITCH_TAU_S * sr)));
+    const bladeHz = (this.ventRpm / 60 / Math.max(0.3, w.gear)) * PROP_BLADES;
+    const howlG = this.ventEnv;
+    if (howlG > 0.0005) {
+      this.howl.set(bladeHz, 2.2, sr);
+      this.howl2.set(bladeHz * 2.5, 0.7, sr);
+    }
     for (let s = 0; s < n; s++) {
       const nz = this.noise.bi();
       const chop = 0.65 + 0.7 * Math.max(0, 0.5 + this.chop.lp(nz * 4));
@@ -612,13 +647,13 @@ export class WaterLayer {
       }
       this.spray.run(this.noise.bi());
       y += (this.spray.lp * 0.7 + this.spray.bp * 0.6) * sprayG;
-      if (howlAmt > 0.0005) {
-        const v = this.ventLag.lp(howlAmt);
+      if (howlG > 0.0005) {
         this.howl.run(nz);
-        this.howl2.run(nz);
-        this.howlPhase += (bladeHz * 2 * (1 + 0.004 * nz)) / sr;
+        this.howl2.run(this.noise.bi());
+        this.howlPhase += bladeHz / sr;
         if (this.howlPhase > 1) this.howlPhase -= 1;
-        y += (this.howl.bp * 3.5 + this.howl2.bp * 2 + sin01(this.howlPhase) * 0.12) * v;
+        const chopAm = 1 + 0.25 * sin01(this.howlPhase);
+        y += this.howlTop.lp((this.howl.bp * HOWL_BODY + this.howl2.lp * HOWL_WHOOSH) * chopAm) * howlG;
       }
       if (!this.cheap) {
         if (this.pendingKnock >= 0 && this.pendingKnock-- === 0) this.slam(this.pendingKnockAmp);

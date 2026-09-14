@@ -38,6 +38,8 @@ interface BoatCtl {
   throttle?: number;
   advance?: number;
   immersion?: number;
+  /** per-drive immersion (overrides `immersion`) */
+  immersions?: number[];
   speed?: number;
   wet?: number;
   thrust?: number;
@@ -58,7 +60,7 @@ function packCtl(out: Float32Array, b: number, c: BoatCtl): void {
   out[o + BI.GOVERNOR] = c.governor ?? 0;
   for (let e = 0; e < 3; e++) {
     out[o + BI.ADVANCE + e] = c.advance ?? 0;
-    out[o + BI.IMMERSION + e] = c.immersion ?? 1;
+    out[o + BI.IMMERSION + e] = c.immersions?.[e] ?? c.immersion ?? 1;
     out[o + BI.RPM_OVERRIDE + e] = (c.rpm ?? 0) * (1 + 0.003 * (e - 1));
   }
   out[o + BI.HAS_OVERRIDE] = c.rpm !== undefined ? 1 : 0;
@@ -523,6 +525,70 @@ describe.runIf(!!WAV_DIR)('§T.183 WAV renders (BOAT_AUDIO_WAV_DIR)', () => {
     writeWav('06-npc-turbine-flyby-40ms-15m', flyby('turbine', 40, 15, 12));
     writeWav('07-npc-twostroke-flyby-40ms-15m', flyby('twoStroke', 40, 15, 12));
     writeWav('08-npc-electric-flyby-40ms-15m', flyby('electric', 40, 15, 12));
+  });
+
+  /**
+   * Ventilation states at planing speed (T196 surfaced props: 0.6–0.7 is normal running). 2 s of normal running,
+   * then the state for 4 s; the spectrum is read over the settled tail. Logged, not asserted: a listening aid.
+   */
+  it('ventilation states: planing buried / surfaced / one prop lifted / airborne', () => {
+    const states: [string, number[], number][] = [
+      ['planing-imm100', [1, 1, 1], 1],
+      ['surfaced-imm065', [0.65, 0.65, 0.65], 0.8],
+      ['one-prop-lifted-imm020', [0.2, 0.65, 0.65], 0.7],
+      ['airborne', [0, 0, 0], 0],
+    ];
+    const db = (x: number): string => (20 * Math.log10(Math.max(1e-9, x))).toFixed(1);
+    const layerProbe = process.env.BOAT_AUDIO_VENT_PROBE; // e.g. 'howlGain' or 'sprayGain': render with that layer at 0
+    for (const [name, imm, wet] of states) {
+      const core = new BoatSynthCore(SR, SLOT_COUNT);
+      if (layerProbe) core.setTunables({ [layerProbe]: 0 });
+      const rpms: number[] = [];
+      const outs = render(6, (t) => {
+        if (t >= 3.5) {
+          const r = core.report();
+          if (r.count) rpms.push(r.data[1]);
+        }
+        const on = t >= 2;
+        const im = on ? imm : [0.65, 0.65, 0.65];
+        return player({ throttle: 1, advance: 38, speed: 38, immersions: im, wet: on ? wet : 0.8, thrust: 0.9 * (im[0] + im[1] + im[2]) / 3 / 0.65 });
+      }, core);
+      const m = mix(outs);
+      writeWav(`vent-${name}`, [m]);
+      const a = Math.round(3.5 * SR);
+      const mag = magSpectrum(m, a);
+      const tot = bandEnergy(mag, 20, 20000);
+      const peaks: string[] = [];
+      const b = binHz();
+      const cand: { hz: number; prom: number; mag: number }[] = [];
+      for (let i = Math.round(1500 / b); i < Math.round(12000 / b); i++) {
+        if (!(mag[i] > mag[i - 1] && mag[i] >= mag[i + 1])) continue;
+        const w = Array.from(mag.slice(i - Math.round(150 / b), i + Math.round(150 / b))).sort((x, y) => x - y);
+        const prom = mag[i] / w[w.length >> 1];
+        if (prom > 4) cand.push({ hz: i * b, prom, mag: mag[i] });
+      }
+      cand.sort((x, y) => y.mag - x.mag);
+      let maxMag = 0;
+      for (let i = 1; i < mag.length; i++) maxMag = Math.max(maxMag, mag[i]);
+      for (const c of cand.slice(0, 6)) peaks.push(`${c.hz.toFixed(0)}Hz ${db(c.mag / maxMag)}dB(+${db(c.prom)})`);
+      const eMag = magSpectrum(outs[0], a);
+      const eTot = bandEnergy(eMag, 20, 20000);
+      const wMag = magSpectrum(outs[1], a);
+      const wTot = bandEnergy(wMag, 20, 20000);
+      const edges = [20, 300, 600, 1000, 1500, 3000, 20000];
+      const wBands = edges.slice(1).map((hi, k) => `${edges[k]}–${hi}:${((100 * bandEnergy(wMag, edges[k], hi)) / wTot).toFixed(0)}%`).join(' ');
+      console.log(
+        `[vent]   engine-only >1.5k ${((100 * bandEnergy(eMag, 1500, 20000)) / eTot).toFixed(1)}% >3k ${((100 * bandEnergy(eMag, 3000, 20000)) / eTot).toFixed(1)}% | ` +
+          `water-only >1.5k ${((100 * bandEnergy(wMag, 1500, 20000)) / wTot).toFixed(1)}% >3k ${((100 * bandEnergy(wMag, 3000, 20000)) / wTot).toFixed(1)}% centroid ${centroid(wMag).toFixed(0)} Hz | water bands ${wBands}`,
+      );
+      const rmin = Math.min(...rpms);
+      const rmax = Math.max(...rpms);
+      console.log(
+        `[vent] ${name}: mix ${db(rms(m, 3.5, 5.5))} dBFS, engine ${db(rms(outs[0], 3.5, 5.5))}, water ${db(rms(outs[1], 3.5, 5.5))} | ` +
+          `>1.5k ${((100 * bandEnergy(mag, 1500, 20000)) / tot).toFixed(1)}%, >3k ${((100 * bandEnergy(mag, 3000, 20000)) / tot).toFixed(1)}% | ` +
+          `centroid ${centroid(mag).toFixed(0)} Hz | rpm0 ${rmin.toFixed(0)}–${rmax.toFixed(0)} | peaks>1.5k: ${peaks.join(', ') || 'none'}`,
+      );
+    }
   });
 
   it('wake crossing double-knock and chop slaps at speed', () => {

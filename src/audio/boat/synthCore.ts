@@ -30,7 +30,7 @@ import {
   type VoiceTunables,
 } from './protocol';
 import { ENGINE_SPECS, createEngineState, detuneSpec, stepEngine, type EngineSpec, type EngineState, type VoiceKind } from './engineModel';
-import { WaterLayer, createEngineVoice, type EngineFrame, type EngineVoice, type WaterFrame } from './voices';
+import { WaterLayer, createEngineVoice, ventilationWeight, type EngineFrame, type EngineVoice, type WaterFrame } from './voices';
 
 export const CONTROL_SAMPLES = 32;
 const ENGINE_WEIGHT = [1.12, 0.95, 0.8];
@@ -181,7 +181,7 @@ export class BoatSynthCore {
   private readonly tierSamples: number;
   private reportBuf = new Float32Array(REPORT_STRIDE * 16);
   private readonly engineFrames: EngineFrame[][];
-  private readonly waterFrame: WaterFrame = { speed: 0, wet: 1, thrust: 0, immersion: 1, rpm: 0, gear: 1, throttle: 0 };
+  private readonly waterFrame: WaterFrame = { speed: 0, wet: 1, thrust: 0, immersion: 1, vent: 0, rpm: 0, gear: 1, throttle: 0 };
   nanResets = 0;
 
   constructor(sampleRate: number, slotCount: number) {
@@ -335,10 +335,22 @@ export class BoatSynthCore {
         w.speed = boat.speed.value;
         w.wet = boat.wet.value;
         w.thrust = boat.thrust.value;
+        // per drive: one lifted prop churns on ITS rpm, the drives still in the water add nothing
         let imm = 0;
-        for (let e = 0; e < boat.count; e++) imm += boat.immersion[e].value;
+        let vent = 0;
+        let ventRpm = 0;
+        let rpmSum = 0;
+        for (let e = 0; e < boat.count; e++) {
+          const s = boat.immersion[e].value;
+          const vw = ventilationWeight(s);
+          imm += s;
+          vent += vw;
+          ventRpm += vw * boat.engines[e].rpm;
+          rpmSum += boat.engines[e].rpm;
+        }
         w.immersion = imm / boat.count;
-        w.rpm = boat.engines[0].rpm;
+        w.vent = vent / boat.count;
+        w.rpm = vent > 1e-6 ? ventRpm / vent : rpmSum / boat.count;
         w.gear = boat.spec.gear;
         w.throttle = Math.abs(boat.throttle);
         slot.render(out, off, m, boat, frames, w, t);
