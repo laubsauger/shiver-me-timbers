@@ -31,8 +31,11 @@
  *           computes, from the pace line and start params in the setup and the pilot's own clock of rolling ticks
  *           (AI.ROLL) — pursuing the pace line at its column, speed set by the along-line error to the slot. At green
  *           it re-projects onto its racing line.
- *  trim     the wave read's bow-down request (and a little bow-up on a fast straight) is returned in `PilotOutput.trim`,
- *           the seam's unit trim (−1..1) for `unitTrimToRad`.
+ *  wakes    (§T.207 wake field layouts) the other boats' wake field is added to the wave read's surface (a wake crest
+ *           lifts like a wave ramp); its roll slope across the path lifts a cornering pilot; and in a corner she keeps
+ *           WAKE_GAP behind a boat whose Kelvin wedge she is in and steps out past its edge (WAKE WORLD records).
+ *  trim     neutral at launch, bow down in corners and lifts, bow up on a fast straight, slewed; returned in
+ *           `PilotOutput.trim`, the seam's unit trim (−1..1) for `unitTrimToRad`.
  */
 import { SIM_DT } from '../../core/loop';
 import { B, AI_OUT_LEN, type BoatSimLayout } from '../../sim-worker/layout';
@@ -46,6 +49,7 @@ import { HELM_RATE, holdThrottle, lockLimit, steerForCurvature } from './capabil
 import { buildKeepOuts, keepOutPush, type CapsuleLike, type KeepOuts, type Push } from './keepOut';
 import { buildRacingLine, nearestSample, ROOM_CAP, type RacingLine } from './line';
 import { cornerSpeed, speedProfile } from './profile';
+import { WakeField, WS } from '../../wake/wakeField';
 
 export const LINE_LEVELS = 5;
 const G = 9.81;
@@ -85,6 +89,37 @@ const PURSUIT_SHIFT_MAX = 25;
 const SLOT_GAIN = 0.35;
 /** lookahead (m) per metre of distance off the (offset) line: far off it, the pursuit aims further along so the arc back is one the boat can turn */
 const RECOVER_LOOK = 2.5;
+/**
+ * WAKES (§T.207 wake field: every hull floats on every other boat's wake). The Kelvin wedge's half-angle tangent (19.47°)
+ * plus a hull's half beam and slack: inside tan·X + WAKE_BEAM of a source's track, X astern, a boat sits in its wake.
+ * Tower Reach, calm, pilots blind to wakes: a lee 16 m behind a blocker at 30 m/s through a sweeper, in its stern hollow
+ * (−0.3 m at the CG, 6 % roll slope), heeled 18° → 38° in 0.4 s with the props out and hooked; a rookie 26 m behind the
+ * blocker at 14 m/s rolled over in a turn on the post-finish lap. Trailing straight 30–60 m astern costs nothing.
+ */
+const WAKE_TAN = Math.tan((19.47 * Math.PI) / 180);
+const WAKE_BEAM = 4;
+/** m astern a pilot keeps from a boat whose wake quarter it would otherwise turn in */
+const WAKE_GAP = 45;
+/** a source slower than this (m/s) throws no wake worth a detour */
+const WAKE_CARE_U = 10;
+/** line curvature (1/m) over the next CORNER_S of travel above which the pilot counts it as cornering */
+const CORNER_K = 1 / 400;
+const CORNER_S = 2;
+const HEEL_CORNER = (10 * Math.PI) / 180;
+/** m/s of closing speed allowed per metre short of WAKE_GAP */
+const WAKE_CLOSE = 0.3;
+/** wake roll slope (m/m, across the path within 0.9 s ahead) where a pilot starts to lift in a corner, and the span to a full lift */
+const WAKE_ROLL = 0.02;
+const WAKE_ROLL_SPAN = 0.04;
+/** the least wave skill a pilot reads another boat's wake with: every archetype knows a wake (it saw it being made) */
+const WAKE_SKILL = 0.6;
+/** unit trim: bow down in a corner / rough water (measured flat water at −0.25: R −3 % at 18–30 m/s), bow up on a fast straight
+ * (top speed 33.9 → 35.1 m/s at +0.3; +1.0 blows out to 29.7), slewed at TRIM_RATE /s */
+const TRIM_CORNER = -0.2;
+const TRIM_STRAIGHT = 0.3;
+const TRIM_RATE = 1.5;
+/** the running mean of predicted airtime (AI.SEA, s) up to which the water counts as smooth: calm (synthetic course) stays ≤ 0.18 */
+const SEA_SMOOTH = 0.25;
 
 /** the rolling start as a pilot sees it: the pace line (flat, structured-clone safe) and the grid geometry */
 export interface PilotStart {
@@ -218,6 +253,8 @@ export class RacePilot {
   private pnx = 0;
   private pnz = 0;
   private readonly push: Push = { x: 0, z: 0, depth: 0 };
+  /** scratch: the other boats' wakes along this boat's path (its node-table cache is a pure function of the records) */
+  private readonly wake = new WakeField();
 
   constructor(setup: PilotSetup) {
     if (setup.version !== 1) throw new Error(`race pilot: setup version ${setup.version}`);
@@ -459,8 +496,43 @@ export class RacePilot {
     let overlapMinus = false;
     let followLat = 0;
     let blocking = false;
+    // cornering: the line bends within CORNER_S of travel, or she is already laid over
+    const tilt = Math.acos(clamp(upY, -1, 1));
+    let cornerK = 0;
+    for (let q = 0, c = Math.ceil((V * CORNER_S) / line.ds); q <= c; q++) cornerK = Math.max(cornerK, Math.abs(line.kappa[(idx + q) % line.n]));
+    const cornering = cornerK > CORNER_K || tilt > HEEL_CORNER;
+    const wakes = L.spec.wakeField === true;
+    let wakeCap = Infinity;
+    let wakeNeed = 0;
+    let wakeSide = 0;
     for (let j = 0; j < L.spec.boats && !rolling; j++) {
       if (j === i) continue;
+      if (wakes && cornering) {
+        // WAKE QUARTER: turning inside another boat's Kelvin wedge within WAKE_GAP of its stern ⇒ drop back to WAKE_GAP
+        // (spacing behind a leader in a turn) and step out past the wedge edge, the side she is already on. From its
+        // wake record (WAKE WORLD, the same numbers her hull's field is built from): course, speed, established run.
+        const r = L.wakeWorldOffset(j);
+        const U = Math.hypot(f[r + WS.VX], f[r + WS.VZ]);
+        if (f[r + WS.F] > 1 && U > WAKE_CARE_U) {
+          const tx = f[r + WS.VX] / U;
+          const tz = f[r + WS.VZ] / U;
+          const ex = x - f[r + WS.X];
+          const ez = z - f[r + WS.Z];
+          const X = -(ex * tx + ez * tz);
+          const Y = ez * tx - ex * tz;
+          const edge = WAKE_TAN * X + WAKE_BEAM;
+          if (X > 0 && X < WAKE_GAP && X < f[r + WS.RUN] && Math.abs(Y) < edge) {
+            const cap = U * (tx * ltx + tz * ltz) - WAKE_CLOSE * (WAKE_GAP - X);
+            if (cap < wakeCap) wakeCap = cap;
+            const need = edge - Math.abs(Y);
+            if (need > wakeNeed) {
+              wakeNeed = need;
+              const side = ex * nx + ez * nz;
+              wakeSide = side > 0 || (side === 0 && j < i) ? 1 : -1;
+            }
+          }
+        }
+      }
       const w = L.worldPoseOffset(j);
       if (f[w + 3] === 0 && f[w + 4] === 0 && f[w + 5] === 0 && f[w + 6] === 0) continue; // never placed
       const dx = f[w] - x;
@@ -535,6 +607,9 @@ export class RacePilot {
     } else if (heldUp && avoid === 0 && !rolling) {
       f[a + AI.AVOID_T] = 1.5;
       target = offset + (followLat >= 0 ? -1 : 1) * AVOID_LAT;
+    } else if (wakeNeed > 0 && avoid === 0 && !rolling) {
+      f[a + AI.AVOID_T] = 1.5;
+      target = offset + wakeSide * wakeNeed;
     } else if (avoid !== 0) {
       f[a + AI.AVOID_T] = 1.5;
       target = avoid;
@@ -608,7 +683,6 @@ export class RacePilot {
     const Vs = Math.max(V, 6);
     // heel limiter: past HEEL_EASE the lock shrinks to nothing at HEEL_ZERO (a pilot eases the helm when she lays
     // over; the measured steady turns sit at 18–26° tilt, the physics departs past 45°)
-    const tilt = Math.acos(clamp(upY, -1, 1));
     const hardLock = lockLimit(V);
     const settling = f[a + AI.TICKS] * DT < SETTLE_S || (recovering && f[a + AI.RECOVERY_T] > arch.recoveryS - SETTLE_S);
     const lock = hardLock * clamp((HEEL_ZERO - tilt) / (HEEL_ZERO - HEEL_EASE), 0, 1) * (settling ? 0.4 : 1);
@@ -642,7 +716,7 @@ export class RacePilot {
     if (rolling) vT = clamp(st.paceSpeed + SLOT_GAIN * slotErr, 0, 1e9);
     if (go <= 0) vT = Math.min(vT, -go);
     if (stCode === 4) vT = Math.min(vT, 15);
-    if (!rolling) vT = Math.min(vT, Math.max(0, followCap));
+    if (!rolling) vT = Math.min(vT, Math.max(0, followCap), Math.max(0, wakeCap));
     // OFF THE LINE, SLOW TO THE TURN YOU ARE ACTUALLY ASKING FOR (T196): the profile's corner speed is for the LINE's
     // curvature; a boat knocked off it (a mistake, traffic, a slide) pursues a tighter arc back. Measured on the T196 hull
     // (drives part-surfaced, lock 19°): the rookie held full throttle at lock through a sweep with 12–18° of drift at 20 m/s
@@ -656,7 +730,10 @@ export class RacePilot {
     const integ = clamp(f[a + AI.INTEGRAL] + e * DT, -4, 4);
     f[a + AI.INTEGRAL] = integ;
     let thr = holdThrottle(vT, steer) + 0.35 * e + 0.08 * integ;
-    thr = clamp(thr, e < -1.5 ? -0.3 : 0, 1);
+    // reverse is the brake only while she is (nearly) upright: backing the drives laid over in a turn spun a hothead closing on
+    // a rookie (drift 32°, heel 49°) and snapped a rookie braking in a blocker's wake from 30° of heel to 50° the other way
+    // (Tower Reach, calm, wakes on)
+    thr = clamp(thr, e < -1.5 && tilt <= HEEL_CORNER ? -0.3 : 0, 1);
     if (mistake === 1) thr = Math.min(thr, 0.35);
 
     // ── wave reading ────────────────────────────────────────────────────────────────────────────────────────
@@ -669,11 +746,21 @@ export class RacePilot {
         let slopePrev = 0;
         let maxAir = 0;
         let stuff = 0;
+        let wakeRoll = 0;
+        // the other boats' wakes over the path (prepared around its middle; the field culls 16 m around that point)
+        const wn = wakes && !rolling ? this.wake.prepare(f, L.wakeWorldOffset(0), L.spec.boats, i, x + vx * 0.6, z + vz * 0.6) : 0;
         for (let k = 0; k < WAVE_T.length; k++) {
           this.at(line, s + BOW_AHEAD + V * WAVE_T[k]);
+          const hx = this.px + this.pnx * xte;
+          const hz = this.pz + this.pnz * xte;
           // the surface AT THIS TICK: CpuOcean.heightAt(…, t ≠ its time) runs update(t), which rebuilds the mirror
           // and steps the spectrum scheduler — a future-time read would move the sea every boat floats on
-          const h = sea.heightAt(this.px + this.pnx * xte, this.pz + this.pnz * xte, time);
+          let h = sea.heightAt(hx, hz, time);
+          if (wn > 0) {
+            // a wake crest is a ramp like any other (the airtime/stuff read below lifts for it); across the path, its roll slope
+            h += this.wake.heightAt(hx, hz);
+            if (WAVE_T[k] <= 0.9) wakeRoll = Math.max(wakeRoll, Math.abs(this.wake.heightAt(hx + 2 * this.pnx, hz + 2 * this.pnz) - this.wake.heightAt(hx - 2 * this.pnx, hz - 2 * this.pnz)) / 4);
+          }
           if (k > 0) {
             const slope = (h - hPrev) / (V * (WAVE_T[k] - WAVE_T[k - 1]));
             if (slope > 0) maxAir = Math.max(maxAir, (2 * V * slope) / G);
@@ -685,6 +772,8 @@ export class RacePilot {
         const tol = arch.airTolerance + 0.35 * risk + (exposed ? 0.3 * arch.jumpAppetite : 0);
         const need = Math.min(1, clamp((maxAir - tol) / 0.4, 0, 1) + clamp((stuff - (0.1 + 0.1 * risk)) / 0.15, 0, 1));
         lift = mistake === 2 ? 0 : need * arch.waveSkill;
+        // crossing a wake at a heel: the slope across the path rolls her further over — lift before it, not in it
+        if (cornering && wakeRoll > WAKE_ROLL) lift = Math.max(lift, clamp((wakeRoll - WAKE_ROLL) / WAKE_ROLL_SPAN, 0, 1) * Math.max(arch.waveSkill, WAKE_SKILL));
         jump = exposed && arch.jumpAppetite > 0.5 && maxAir > 0.35 && maxAir <= tol ? 1 : 0;
         f[a + AI.SEA] += (maxAir - f[a + AI.SEA]) * ((3 * DT) / 4);
       }
@@ -694,10 +783,20 @@ export class RacePilot {
     const waveLift = f[a + AI.WAVE_LIFT];
     if (thr > 0) thr *= 1 - waveLift;
     if (f[a + AI.JUMP] === 1 && e > -1) thr = Math.max(thr, 0.95);
+    // HEEL IN SMOOTH WATER: the drives roll her into the turn (physics-log T179 r2), so past HEEL_EASE she eases the throttle with
+    // the helm (to 30 % at HEEL_ZERO): heeled 18° → 38° at full throttle is how the wake upsets ended (rival hooks, Tower Reach).
+    // Not in a sea (SEA_SMOOTH): there the heel is the waves', and cutting drive made the veterans crash more than the rookies
+    // (raceAiSea 28 vs 19 ungated; 14 vs 20 gated)
+    if (thr > 0 && f[a + AI.SEA] <= SEA_SMOOTH) thr *= clamp((HEEL_ZERO - tilt) / (HEEL_ZERO - HEEL_EASE), 0.3, 1);
     // props out of the water (last tick's contact): feather unless the pilot likes to land pinned
     if (f[L.boatOffset(i) + B.PROP_IMMERSION] < 0.05 && arch.jumpAppetite < 0.7) thr = Math.min(thr, 0.4);
     f[a + AI.THROTTLE] = thr;
-    const trim = waveLift > 0.2 ? -waveLift : V > 20 ? 0.3 : 0;
+    // TRIM (pilot tuning, measured flat water, trim 0 = the capability table): neutral at launch (below 15 m/s), bow down
+    // in a corner or a lift (props deeper, R −3 %), bow up on a straight at speed (+1.2 m/s top speed at +0.3); slewed.
+    // The old request (+0.3 above 20 m/s everywhere, −waveLift up to −6°) had never run on the physics; once §T.207 applied it,
+    // raceAiLaps' lap-to-lap bound failed (11 %) and raceAiPack hooked a courier (physics-log T207).
+    const trimWant = rolling || V < 15 ? 0 : waveLift > 0.2 ? -0.5 * waveLift : cornering ? TRIM_CORNER : V > 24 ? TRIM_STRAIGHT : 0;
+    const trim = f[a + AI.TRIM] + clamp(trimWant - f[a + AI.TRIM], -TRIM_RATE * DT, TRIM_RATE * DT);
     f[a + AI.TRIM] = trim;
     out.steer = steer;
     out.throttle = thr;

@@ -73,6 +73,8 @@
 import type { ChineSheetEmitter } from '../wake/chineContact';
 import type * as THREE from 'three/webgpu';
 import { float, fwidth, mix, smoothstep, texture, uniform, vec2, vec4 } from 'three/tsl';
+import { Vector2 as THREE_Vector2 } from 'three/webgpu';
+import { bandLimitedFbm2, coordFootprint } from '../foam/foamShading';
 import { flowFoamParams, type FlowFoamParams } from '../params/flowfoam';
 import { regionEdgeFadeCpu } from './flowMath';
 import { coverageWeightedAgeNode } from './foamAge';
@@ -114,6 +116,23 @@ export type WakeBackend = 'analytic' | 'sim';
  * against that playtest and the narrow straight-armed V of offshore-racing footage (docs/wake/w7-speedboat-look.md §2).
  */
 export const FLEET_WAKE_CHURN = 0;
+/**
+ * W8 WHITE WATER BREAKS UP BY AGE (docs/wake/w8-foam-readability.md §9). The material's froth used to be
+ * freshness × a smooth density ramp: a saturated planing lane stayed a uniform white stripe for as long as its foam/slick
+ * ratio read fresh, then faded as a whole. Now the white is a GATE on a ridged, band-limited, flow-aligned fbm blend
+ * (patches, filaments, bubbles — round 3) whose edge rises as the foam ages and where the lane thins: fresh dense churn
+ * (edgeFresh) is solid white, ageing water keeps only the ridges (lace, filaments), aged aerated water (edgeAged) keeps
+ * sparse surfacing flecks at `fleckGain` — the bubbles popping on a boil or an old lane. (The wake mask itself carries no
+ * usable texture at saturation: measured, a gate on it drew flat white sheets.) LOOK CALIBRATION against the chase/top-down shots (dense 15–30 m, lace by 40–60 m at planing).
+ */
+export const WAKE_LACE = { freshLow: 0.25, freshHigh: 0.92, edgeFresh: 0.22, edgeAged: 0.72, fleckGain: 0.9, drift: 0.07 } as const;
+/** W8 vessel mode: the near window's centre trails the hull by this many seconds of her speed … */
+export const NEAR_ASTERN_SECONDS = 1.2;
+/** W8 round 3 LOOK: churned-core relief height scale (m of fbm value) and its finite-difference step (m) */
+export const WAKE_CHURN_RELIEF = 0.35;
+export const WAKE_CHURN_STEP = 0.2;
+/** … at most this fraction of the window (0.2 × 120 m = 24 m: her stem stays inside the far-blend start, 0.3 × 120 m) */
+export const NEAR_ASTERN_MAX_FRACTION = 0.2;
 
 /** the sim backend's stand-in for the analytic injector: no doses, no surface (§T.171) */
 const noAnalyticWake: WakeFieldFn = () => ({ rate: vec4(0, 0, 0, 0), elev: float(0) });
@@ -258,6 +277,10 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
   const uNearAgeExp = uniform(freshnessExponent(p.decayHalfLife, p.slickHalfLife));
   const uFarAgeExp = uniform(freshnessExponent(p.farDecayHalfLife, p.slickHalfLife));
   const uNearFeature = uniform((p.regionSize / p.resolution) * p.waveBandLow);
+  /** W8 white-water breakup (`wakeWhiteNode`): freshness knees, lace edges fresh/aged, aged fleck gain, lace feature (m) */
+  const uLaceFresh = uniform(new THREE_Vector2(WAKE_LACE.freshLow, WAKE_LACE.freshHigh));
+  const uLaceEdge = uniform(new THREE_Vector2(WAKE_LACE.edgeFresh, WAKE_LACE.edgeAged));
+  const uFleckGain = uniform(WAKE_LACE.fleckGain);
   const uFarFeature = uniform((p.farRegionSize / p.farResolution) * p.waveBandLow);
   let time = 0;
   /** has the sim tick ever driven the track? — see `advanceWake`/`update` */
@@ -322,7 +345,20 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
     },
 
     setCenter(x: number, z: number): void {
-      acc.setCenter(x, z);
+      // W8 vessel mode (docs/wake/w8-foam-readability.md §9): the near region carries the wake's SURFACE and its
+      // detailed foam, and a planing hull's divergent arms and aerated band run far astern of her while nothing
+      // happens far ahead. Centred on her, 60 m of the 120 m window was spent ahead of the stem and the drawn surface
+      // ended 60 m astern. Slide it back by NEAR_ASTERN_SECONDS of her own run, capped so the stem stays well inside.
+      // Raft and galleon (single-hull graph) keep the centred window.
+      if (vessels > 0 && simFoam) {
+        const h = simFoam.hull();
+        const back = Math.min(NEAR_ASTERN_MAX_FRACTION * p.regionSize, NEAR_ASTERN_SECONDS * h.speed);
+        const bx = Number.isFinite(back) ? Math.sin(h.yaw) * back : 0;
+        const bz = Number.isFinite(back) ? Math.cos(h.yaw) * back : 0;
+        acc.setCenter(x - bx, z - bz);
+      } else {
+        acc.setCenter(x, z);
+      }
       far.setCenter(x, z);
     },
     renderInjection: acc.renderInjection,
@@ -605,6 +641,80 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
      * and reads fresh, which it is. Band limit: a ratio of two channels of one
      * filtered sample has no spatial frequency of its own.
      */
+    /**
+     * W8 the WHITE share of the wake foam (0..1) at a world-XZ node, from the material's own wake mask (`foamDetailMask` output), the
+     * coverage it was built from, the stage-A freshness (`wakeFoamFreshnessNode`) and the pixel footprint (header of
+     * WAKE_LACE). Sim backend only (null on analytic). Band limit: the gate's knee widens with fwidth of the mask
+     * texture, and past a `featureMetres` pixel it resolves to its own mean (1 − edge).
+     */
+    /**
+     * W8 round 3: the share (0..1) of a steep wake CREST at a world-XZ node — smoothstep(0.18, 0.35, |∇η_wake|) of the
+     * near tier's wake slope (the same texture tap as `wakeSlopeNode`: no binding). Below the 0.30 breaking onset crests
+     * micro-break and spill (lighter, laced); the white breaking itself is the sim foam's. Sim vessel mode only.
+     */
+    wakeCrestNode: vessels > 0 && simFoam
+      ? (worldXZ: any): any => {
+          // @band-limited-elsewhere: a VALUE gate on a slope magnitude of one filtered sample (the tier's resampled wake slope)
+          return smoothstep(0.18, 0.35, texture(acc.foamTexture, regionUv(acc, worldXZ)).ba.length()).mul(regionEdge(acc, uEdgeFade, worldXZ));
+        }
+      : null,
+    /** W8 live look uniforms of `wakeWhiteNode` (debug / browser tuning) */
+    laceUniforms: { uLaceFresh, uLaceEdge, uFleckGain },
+    wakeWhiteNode: simFoam
+      ? (worldXZ: any, maskFresh: any, coverage: any, fresh: any, _pixWorld: any, contact: any = float(0)): any => {
+          // round 5: the AREA footprint √(fx·fz) of the screen derivatives in world units — the caller's max() is the
+          // along-view stretch of a grazing view, which faded a close (7 m) camera's lace to its mean (a milky sheet).
+          // The fbm octaves band-limit themselves per axis (coordFootprint) and the gate's knee widens with fwidth.
+          const fw = fwidth(worldXZ);
+          const pixWorld = fw.x.mul(fw.y).max(1e-8).sqrt();
+          // W8 round 3: ANISOTROPIC, multi-scale — the flow frame of her track (along, across); streaks run with the
+          // wake. Three scales blended before the ridge: patches (6 × 24 m), filaments (0.9 × 5 m), bubbles (0.3 m).
+          // Heading remains defined at rest. Normalizing velocity with a
+          // fixed northward offset distorted the frame at crawling speeds.
+          const dir = simFoam.uniforms.uHullDirection;
+          const along = worldXZ.dot(dir);
+          const across = worldXZ.dot(vec2(dir.y.negate(), dir.x));
+          const drift = flowU.uTime.mul(WAKE_LACE.drift);
+          const fbmAt = (c: any, oct: number): any => bandLimitedFbm2(c, oct, coordFootprint(c));
+          const patch = fbmAt(vec2(across.div(6), along.div(24)).add(vec2(drift.mul(0.3), 0)), 2);
+          const filCoord = vec2(across.div(0.9), along.div(5)).add(vec2(drift, drift.mul(-0.4)));
+          const fil = fbmAt(filCoord, 3);
+          const bub = fbmAt(worldXZ.div(0.3).add(vec2(drift.mul(3), drift.mul(-2))), 2);
+          // round 3: the hull-contact line is cm–dm lace, not a stroke — at the contact share the blend swaps its patches
+          // for 8 cm bubbles and its edge rises (a thin broken line)
+          const fine = fbmAt(worldXZ.div(0.08).add(vec2(drift.mul(6), drift.mul(-5))), 2);
+          const c = contact.clamp(0, 1);
+          const m = mix(fil.mul(0.55).add(patch.mul(0.3)).add(bub.mul(0.15)), fine.mul(0.55).add(bub.mul(0.25)).add(fil.mul(0.2)), c);
+          // ridged: filaments where the blend crosses its mean. Round 6 (the 03 sheet, found by toggling the white term):
+          // blending three fbm fields shrinks the spread to σ ≈ 0.1 about 0.5, so the ridge sat near its maximum almost
+          // everywhere and the gate passed as a solid film. Restore a ~uniform spread (×4 about the mean) before ridging.
+          const ridge = float(1).sub(m.sub(0.5).mul(4).clamp(-0.5, 0.5).mul(2).abs()).pow(2);
+          // @band-limited-elsewhere: a VALUE gate on freshness (a ratio of two channels of one filtered sample, no period)
+          const t = smoothstep(uLaceFresh.x, uLaceFresh.y, fresh);
+          // the lane's thin margins break up first: the edge rises where the wake mask is not dense
+          const edge = mix(uLaceEdge.y, uLaceEdge.x, t).add(smoothstep(0.1, 0.7, maskFresh).oneMinus().mul(0.22)).add(c.mul(0.3)).min(0.97);
+          const knee = fwidth(ridge).mul(1.5).max(0.04);
+          const gate = smoothstep(edge, edge.add(knee), ridge);
+          // past the lace cell's pixel scale the gate resolves to its own mean: P(r² > e) = 1 − √e for a ~uniform ridge r
+          // @band-limited-elsewhere: this IS the band limit — the caller's pixel footprint (fwidth of worldXZ) against the lace cell
+          // round 4: against the FILAMENT's width (~0.1 m: a ridge² line of a 0.9 m cell), not the cell — past it the
+          // far wake is the soft pale mean, not grey hair. @band-limited-elsewhere: this IS the band limit (pixel footprint)
+          // round 6 (the 03 pale sheet, found by toggling each term): an UNRESOLVED fbm returns its mean 0.5, and the
+          // ridge of 0.5 is its MAXIMUM (1), so wherever the filament field faded — a grazing close view stretches its
+          // footprint along the view — the gate passed everywhere and drew a solid pale sheet. The gate is also retired
+          // by the filament field's own footprint (cells per pixel, both axes), not just the pixel area.
+          // @band-limited-elsewhere: these two ARE the band limit (the field's coordinate footprint and the pixel area)
+          const filResolved = smoothstep(float(0.35), float(0.12), coordFootprint(filCoord));
+          // @band-limited-elsewhere: as above
+          const resolved = smoothstep(float(0.09), float(0.025), pixWorld).mul(filResolved);
+          // even dense churn is not a flat decal: its brightness follows the same filaments
+          // round 6: the unresolved fallback is the gate's area share SQUARED — a lace whose filaments cannot be resolved
+          // reads as a faint pale tint of the water, not an opaque white film (the 03 grazing close view)
+          const lace = mix(float(1).sub(edge.max(0).sqrt()).pow(2), gate, resolved).mul(ridge.mul(0.35).add(0.65));
+          return lace.mul(mix(uFleckGain, float(1), t)).mul(smoothstep(0.01, float(0.08).max(fwidth(coverage).mul(2).add(0.01)), coverage));
+        }
+      : null,
+
     wakeFoamFreshnessNode: simFoam
       ? (worldXZ: any): any => {
           const tier = (a: typeof acc, exponent: any, fade: any) => {
@@ -681,9 +791,31 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
      */
     wakeSlopeNode(worldXZ: any, pixWorld?: any): any {
       const px = footprint(worldXZ, pixWorld);
-      return texture(acc.foamTexture, regionUv(acc, worldXZ))
-        .ba.mul(regionEdge(acc, uEdgeFade, worldXZ))
-        .mul(bandKeepNode(px, uNearFeature, uSlickBandFull, uSlickBandCut));
+      const t = texture(acc.foamTexture, regionUv(acc, worldXZ));
+      const edge = regionEdge(acc, uEdgeFade, worldXZ);
+      const wave = t.ba.mul(edge).mul(bandKeepNode(px, uNearFeature, uSlickBandFull, uSlickBandCut));
+      if (!(vessels > 0 && simFoam)) return wave;
+      // W8 round 3 CHURN ROUGHNESS (vessel mode): the prop wash boils — a lumpy, moving surface where the foam is dense,
+      // not a mirror-flat plane under a decal. A band-limited fbm height (WAKE_CHURN_RELIEF m over ~1 m lumps, scrolled
+      // two ways so it boils) differentiated over WAKE_CHURN_STEP, × coverage: churned water is never a mirror (the
+      // 5 kn prop wash read as a glassy sheet at ×coverage²); the faint band edge stays soft. Octaves fade to their mean below the pixel (bandLimitedFbm2), so the relief
+      // does too. Same texture tap as the wave slope: no binding.
+      const cov = t.r.mul(edge).clamp(0, 1);
+      const tt = flowU.uTime;
+      const hAt = (p: any): any => {
+        const c1 = p.div(1.1).add(vec2(tt.mul(0.35), tt.mul(-0.2)));
+        const c2 = p.div(0.7).add(vec2(tt.mul(-0.25), tt.mul(0.3)));
+        return bandLimitedFbm2(c1, 2, coordFootprint(c1)).add(bandLimitedFbm2(c2, 2, coordFootprint(c2))).mul(0.5);
+      };
+      const h0 = hAt(worldXZ);
+      const hx = hAt(worldXZ.add(vec2(WAKE_CHURN_STEP, 0)));
+      const hz = hAt(worldXZ.add(vec2(0, WAKE_CHURN_STEP)));
+      // round 4: the relief is a sub-metre lump field — fade it (to a smooth mean surface) once a pixel spans a lump's
+      // tenth, so a grazing or night view does not alias it into streaky glints
+      // @band-limited-elsewhere: this IS the band limit — the pixel footprint against the lump scale
+      const fwr = fwidth(worldXZ);
+      const k = cov.mul(WAKE_CHURN_RELIEF / WAKE_CHURN_STEP).mul(smoothstep(0.12, 0.04, fwr.x.mul(fwr.y).max(1e-8).sqrt()));
+      return wave.add(vec2(hx.sub(h0), hz.sub(h0)).mul(k));
     },
 
     /**

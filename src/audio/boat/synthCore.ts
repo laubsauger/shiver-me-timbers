@@ -12,7 +12,7 @@
  * chunk boundaries. So a given (frames, arrival quantum) sequence always renders the same samples,
  * whatever the page's frame rate did.
  */
-import { DcBlock, OnePole, clamp, finite } from './dsp';
+import { DcBlock, OnePole, clamp, finite, smoothstep } from './dsp';
 import {
   BI,
   BOAT_STRIDE,
@@ -23,7 +23,9 @@ import {
   REPORT_STRIDE,
   RI,
   SI,
+  SLOT_COUNT,
   SLOT_STRIDE,
+  STEM_WATER_OUTPUT0,
   governorOf,
   kindOf,
   muffleAmount,
@@ -120,12 +122,22 @@ class SlotState {
   private readonly air = new OnePole();
   private readonly dc = new DcBlock();
   private readonly scratch: Float32Array;
+  /**
+   * cine stems: the water layer renders here first, then is added into `scratch`. Float64 so the add is EXACT: 0 + y·g keeps
+   * y·g unrounded, and scratch[s] += it rounds once to float32 exactly as the old in-place add did (bit-identical mix).
+   */
+  private readonly waterScratch: Float64Array;
+  /** water-only stem: the same air absorption / DC / gain ramp as the slot, on the water alone */
+  private readonly stemAir = new OnePole();
+  private readonly stemDc = new DcBlock();
   constructor(
     private sr: number,
     readonly index: number,
   ) {
     this.scratch = new Float32Array(CONTROL_SAMPLES);
+    this.waterScratch = new Float64Array(CONTROL_SAMPLES);
     this.dc.setHz(15, sr);
+    this.stemDc.setHz(15, sr);
   }
   bind(boat: BoatModel | null): void {
     this.boatId = boat ? boat.id : -1;
@@ -139,9 +151,10 @@ class SlotState {
     this.cheap = createEngineVoice(boat.kind, this.sr, seed + 31337, true);
     this.water = new WaterLayer(this.sr, seed + 4242, false);
   }
-  render(out: Float32Array, off: number, n: number, boat: BoatModel, frames: EngineFrame[], waterFrame: WaterFrame, t: VoiceTunables): void {
+  render(out: Float32Array, off: number, n: number, boat: BoatModel, frames: EngineFrame[], waterFrame: WaterFrame, t: VoiceTunables, stem?: Float32Array): void {
     const buf = this.scratch;
     buf.fill(0, 0, n);
+    let water = false;
     const fm = this.fullMix.value;
     if (this.mask & LAYER_ENGINE) {
       const eg = t.engineGain / Math.sqrt(Math.max(1, boat.count));
@@ -151,17 +164,31 @@ class SlotState {
     }
     if (this.mask & LAYER_WATER && this.water) {
       // cheap tier keeps the water at a lower level; the layer's events are only fed to full slots
-      this.water.render(buf, 0, n, waterFrame, t, t.waterGain * (0.6 + 0.4 * fm));
+      const wb = this.waterScratch;
+      wb.fill(0, 0, n);
+      this.water.render(wb, 0, n, waterFrame, t, t.waterGain * (0.6 + 0.4 * fm));
+      for (let s = 0; s < n; s++) buf[s] += wb[s];
+      water = true;
     }
     const g0 = this.gain.value;
     const g1 = this.gain.advance(n);
-    this.air.setHz(this.airHz.advance(n), this.sr);
+    const airHz = this.airHz.advance(n);
+    this.air.setHz(airHz, this.sr);
     this.fullMix.advance(n);
     const inv = 1 / n;
     for (let s = 0; s < n; s++) {
       let y = this.dc.run(this.air.lp(buf[s]));
       y *= g0 + (g1 - g0) * (s * inv);
       out[off + s] += Number.isFinite(y) ? y : 0;
+    }
+    if (stem && water) {
+      const wb = this.waterScratch;
+      this.stemAir.setHz(airHz, this.sr);
+      for (let s = 0; s < n; s++) {
+        let y = this.stemDc.run(this.stemAir.lp(wb[s]));
+        y *= g0 + (g1 - g0) * (s * inv);
+        stem[off + s] += Number.isFinite(y) ? y : 0;
+      }
     }
   }
 }
@@ -183,6 +210,8 @@ export class BoatSynthCore {
   private readonly engineFrames: EngineFrame[][];
   private readonly waterFrame: WaterFrame = { speed: 0, wet: 1, thrust: 0, immersion: 1, vent: 0, rpm: 0, gear: 1, throttle: 0 };
   nanResets = 0;
+  /** cine stems: also write each NPC slot's water-only stem to outputs[STEM_WATER_OUTPUT0 + slot − 2] (off: those stay silent) */
+  stems = false;
 
   constructor(sampleRate: number, slotCount: number) {
     this.sr = sampleRate;
@@ -256,7 +285,7 @@ export class BoatSynthCore {
     }
   }
 
-  /** render n samples into one mono buffer per slot (ADDS; callers pass zeroed buffers) */
+  /** render n samples into one mono buffer per slot, then the NPC water stems when `stems` (ADDS; callers pass zeroed buffers) */
   process(outputs: (Float32Array | undefined)[], n: number): void {
     const sr = this.sr;
     const t = this.tun;
@@ -315,8 +344,10 @@ export class BoatSynthCore {
           const st = boat.engines[e];
           const f = frames[e];
           // SOUND-ONLY: a sim running three identical drives publishes identical rpm; the design's "three slightly
-          // detuned voices beating" is a perceptual ±0.25 % on the override path (the local path detunes its specs)
-          const tune = boat.hasOverride ? 1 + 0.0025 * (e - 1) : 1;
+          // detuned voices beating" is a perceptual ±0.25 % on the override path (the local path detunes its specs).
+          // T206: at idle ±0.25 % beat once every ~9 s at the firing rate; real rebuilt triples idle ~1 % apart, the
+          // local path's ±1.5 % idle spec. Widened to ±1.15 % below 900 rpm, back to ±0.25 % by 2000
+          const tune = boat.hasOverride ? 1 + (0.0025 + 0.009 * (1 - smoothstep(900, 2000, st.rpm))) * (e - 1) : 1;
           f.rpmA = boat.rpmA[e] * tune;
           f.rpmB = st.rpm * tune;
           f.load = st.load;
@@ -353,7 +384,8 @@ export class BoatSynthCore {
         w.rpm = vent > 1e-6 ? ventRpm / vent : rpmSum / boat.count;
         w.gear = boat.spec.gear;
         w.throttle = Math.abs(boat.throttle);
-        slot.render(out, off, m, boat, frames, w, t);
+        const stemOut = this.stems && i >= 2 && i < SLOT_COUNT ? outputs[STEM_WATER_OUTPUT0 + i - 2] : undefined;
+        slot.render(out, off, m, boat, frames, w, t, stemOut);
       }
       // events are consumed by the first chunk after their frame
       for (const boat of this.boats.values()) {

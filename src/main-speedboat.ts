@@ -48,14 +48,16 @@ import { createIdleNpcFleet, freeRoamRules, sessionModeFrom } from './speedboat/
 import { createBoatPreview } from './speedboat/page/boatPreview';
 import { createPageChrome } from './speedboat/page/pageChrome';
 import { createRaceHudFrame } from './speedboat/page/raceHudFrame';
-import { engineVolumes, radioLevel, SEA_PRESET } from './speedboat/page/raceSettings';
+import { engineVolumes, radioLevel, SEA_PRESET, seaApplyArgs } from './speedboat/page/raceSettings';
 import { liveryFor } from './speedboat/page/liveries';
+import { applyRaceTime } from './speedboat/page/raceTime';
 import { createRaceCameraRig } from './camera/raceCam';
 import { createRaceControls } from './speedboat/controls';
 import { createSpeedboatAudioSink } from './audio/boat/pageSink';
 import { installAudioUnlock } from './speedboat/page/stubs';
 import type { BoatAudioFrame } from './speedboat/page/seams';
 import { cineSettings, createCineBoot, createSpeedboatCine } from './speedboat/cine';
+import { CINE_RIVAL_MAX, createCineRivals } from './speedboat/cine/rivals';
 
 /** rivals on the grid (design doc §2 slice: 7 NPCs) */
 const NPC_COUNT = 7;
@@ -113,7 +115,8 @@ async function boot(): Promise<void> {
   player.place(course.spawn(0));
 
   stage('boat models');
-  const boats = await buildSpeedboatBoats(app, sea, mode === 'free' ? 0 : NPC_COUNT, { waterAt });
+  const boats = await buildSpeedboatBoats(app, sea, mode === 'free' ? (query.has('cine') ? CINE_RIVAL_MAX : 0) : NPC_COUNT, { waterAt }); // ?cine: hidden trailer rivals
+  const cineRivals = mode === 'free' && query.has('cine') ? createCineRivals({ hull, hero: player, pressureHeadAt: (x, z, t) => sea.cpuOcean.pressureHeadAt(x, z, t), waterAt, colliders: world.colliders, bed: world.bed, instances: boats.npcs }) : null;
   // pilots are cosmetic: they load BESIDE the boot, never gate it (a KTX2 transcode stalls in a hidden tab, §V.39)
   let pilots: Pick<Pilots, 'hero' | 'update'> = { hero: { setHeadVisible: () => undefined, eyeSource: () => false } as unknown as Pilots['hero'], update: () => undefined };
   let cockpitView = false; // a cockpit switch made while the pilot loads is not replayed by onCockpitChange
@@ -150,7 +153,7 @@ async function boot(): Promise<void> {
   const usePost = createPostWarmGate({ enabled: () => postParams.enabled, warm: () => post.warmup() });
 
   const frame = createSpeedboatFrame({
-    app, sea, boats, sky, state, player, npcs, weatherHere, waterAt,
+    app, sea, boats, sky, state, player, npcs, weatherHere, waterAt, rivals: cineRivals ?? undefined,
     placeCamera: (view, dt) => (camera.update(view, dt, waterAt), cine.applyCamera(dt)),
   });
   // ?autopilot: the player's boat runs the rivals' §T.186 pilot (browser checks, and the smoke race's controls)
@@ -177,11 +180,13 @@ async function boot(): Promise<void> {
   const ui = createRaceUi({
     parent: document.body, course: world.course, racerIds: session.gridOrder, controls, camera,
     audio: { setVolume: (a) => (audio.engine.setVolumes(engineVolumes(a)), audio.radio.setLevel(radioLevel(a))), radioCall: () => audio.radio.call() },
-    defaultSea: 'Calm', chrome, graphics: settings, mode, onSea: (s) => weather.apply(SEA_PRESET[s] ?? course.seaPreset),
+    defaultSea: 'Calm', chrome, graphics: settings, mode, onSea: (s) => weather.apply(...seaApplyArgs(SEA_PRESET[s] ?? course.seaPreset)),
+    onTime: (t) => applyRaceTime(t), // §T.209 free roam's pause Time row
     preview: createBoatPreview({ renderer: app.renderer, asset: boats.asset, pilot: () => pilots.hero.object ?? null }), // §T.201
     dash: createDashMount(boats.hero), // §T.208
     onStart: (sel) => {
-      weather.apply(SEA_PRESET[sel.sea] ?? course.seaPreset, { lerpSeconds: 0 });
+      weather.apply(...seaApplyArgs(SEA_PRESET[sel.sea] ?? course.seaPreset, 0));
+      applyRaceTime(sel.time); // §T.209 'Night' = the moonlit preset; the clock labels restore the page's sky
       boats.hero.setLivery(liveryFor(sel.paintId, sel.number));
       session.start(state.tick);
     },
@@ -196,7 +201,8 @@ async function boot(): Promise<void> {
     wettedArea: () => player.hw.wettedArea, driveRpm: player.hw.driveRpm, oceanParams, seaLabel: () => ui.selection.sea, pace: boats.pace.display,
   });
   const npcCtl = { steer: 0, throttle: 0 };
-  const npcControls = (i: number): typeof npcCtl => ((npcCtl.steer = npcs.steer(i)), (npcCtl.throttle = npcs.throttle(i)), npcCtl);
+  const npcSteer = (i: number): number => (cineRivals ?? npcs).steer(i), npcThrottle = (i: number): number => (cineRivals ?? npcs).throttle(i);
+  const npcControls = (i: number): typeof npcCtl => ((npcCtl.steer = npcSteer(i)), (npcCtl.throttle = npcThrottle(i)), npcCtl);
   const audioFrame: BoatAudioFrame = {
     frameDt: 0, view: frame.view, boat, controls: session.applied,
     contact: {
@@ -215,6 +221,7 @@ async function boot(): Promise<void> {
       weather.weatherAt(boat.position[0], boat.position[2], weatherHere);
       cine.applyWorld(); // a shot's world + placement, after the weather writes and before the session steps her
       frame.tickSea();
+      cineRivals?.tick(state.time, dt); // trailer rivals: contacts + wakes with the hero, then their step, before hers
       session.tick(state.tick, state.time, dt);
       audioFrame.contact.wettedArea = player.hw.wettedArea;
       audioFrame.contact.slamImpulse += player.hw.slamImpulse;
@@ -226,7 +233,7 @@ async function boot(): Promise<void> {
       debug.hud.frame(wallFrameDt * 1000);
       frame.renderSea(frameDt, ui.blocking);
       const ctl = session.applied;
-      frame.renderBoats(alpha, frameDt, { heroSteer: ctl.steer, heroThrottle: ctl.throttle, heroTrim: ctl.trim, heroPropRpm: player.hw.driveRpm, npcSteer: (i) => npcs.steer(i), npcThrottle: (i) => npcs.throttle(i) });
+      frame.renderBoats(alpha, frameDt, { heroSteer: ctl.steer, heroThrottle: ctl.throttle, heroTrim: ctl.trim, heroPropRpm: player.hw.driveRpm, npcSteer, npcThrottle });
       pilots.update(frameDt, ctl, npcControls);
       const race = session.state;
       boats.pace.update(race?.paceBoat ?? null, frameDt);
@@ -257,7 +264,7 @@ async function boot(): Promise<void> {
     },
     () => ui.blocking || session.holdSim(state.tick),
   );
-  const cine = createSpeedboatCine({ app, loop, sky, weather, session, state, view: frame.view, camera, chrome, audio, hero: boats.hero, mode, drive: cineDrive, waterAt });
+  const cine = createSpeedboatCine({ app, loop, sky, weather, session, state, view: frame.view, camera, chrome, audio, hero: boats.hero, lights: boats.lights, rivals: cineRivals ?? undefined, wetted: () => player.hw.wettedArea, lodFov: (fov) => { boats.hero.setFov(fov); for (const n of boats.npcs) n.setFov(fov); }, mode, drive: cineDrive, waterAt });
 
   stage('shader compile');
   await withFullCoverage(app.scene, () =>

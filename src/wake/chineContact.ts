@@ -25,7 +25,16 @@ export class ChineContactHistory {
       this.boats.set(id, state);
     }
     state.time = Math.max(state.time + dt, (tick + 1) * dt);
-    state.emissions = state.emissions.filter(e => state!.time - e.time < CHINE_EMISSION_LIFE);
+    // Emission times stay ordered: new packets append, and coalescing only
+    // moves the newest packet forward. Retire the expired prefix in place
+    // instead of allocating an array on every fixed update (including dry ones).
+    let expired = 0;
+    while (expired < state.emissions.length
+      && state.time - state.emissions[expired].time >= CHINE_EMISSION_LIFE) expired++;
+    if (expired > 0) {
+      state.emissions.copyWithin(0, expired);
+      state.emissions.length -= expired;
+    }
     if (tick !== state.tick) {
       if (tick < state.tick) state.emissions.length = 0;
       const elapsed = state.wet && tick > state.tick ? (tick - state.tick) * dt : dt;

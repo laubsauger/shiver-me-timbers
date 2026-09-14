@@ -24,6 +24,7 @@
  * costs. Projected width in pixels is the quantity the artefact actually
  * depends on, so it is the quantity the regimes switch on.
  */
+import { minWidthResponse } from '../core/minWidth';
 
 /** guards every divisor here — a rope exactly at the eye must not produce NaN
  *  and feed it into a vertex position (§V28, and §B5 for what that costs) */
@@ -70,9 +71,8 @@ export function phoneWire(
   params: PhoneWireParams,
 ): { widen: number; alpha: number; drawnWidthPx: number } {
   const width = Math.max(projectedPx, 0);
-  const widen = Math.max(1, params.minWidthPx / Math.max(width, EPS));
-  // equivalently 1/widen, written so a zero-width rope is alpha 0, not 0/0
-  const alpha = Math.min(1, width / Math.max(params.minWidthPx, EPS));
+  // the shared response (src/core/minWidth.ts, §V95): zero width is alpha 0, not 0/0
+  const { widen, coverage: alpha } = minWidthResponse(width, params.minWidthPx);
   return { widen, alpha, drawnWidthPx: width * widen };
 }
 

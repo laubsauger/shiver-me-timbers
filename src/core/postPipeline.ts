@@ -68,7 +68,7 @@ import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 // they cost nothing when bloom is already on, and nothing at all when it isn't
 import { lensflare } from 'three/addons/tsl/display/LensflareNode.js';
 import { anamorphic } from 'three/addons/tsl/display/AnamorphicNode.js';
-import { dof } from 'three/addons/tsl/display/DepthOfFieldNode.js';
+import { skyDof } from './skyDof';
 import { smaa } from 'three/addons/tsl/display/SMAANode.js';
 import { postParams as pp } from '../params/post';
 import { gradeParams } from '../params/grade';
@@ -242,7 +242,7 @@ export function createPostPipeline(
   const uDofRange = uniform(pp.dofRange);
   const uDofBokeh = uniform(pp.dofBokeh);
   if (pp.dofEnabled) {
-    lit = dof(lit, scenePass.getViewZNode(), uDofFocus, uDofRange, uDofBokeh);
+    lit = skyDof(lit, scenePass, scene, camera, uDofFocus, uDofRange, uDofBokeh);
   }
 
   // --- bloom ------------------------------------------------------------

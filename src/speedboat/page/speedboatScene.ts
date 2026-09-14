@@ -13,6 +13,8 @@
 import type { Mesh } from 'three/webgpu';
 import type { App } from '../../core/app';
 import { buildSea } from '../../core/seaScene';
+import { createBoatLightPool, setActiveBoatLightPool } from '../../ocean/boatLightPool';
+import { createHullMask, setActiveHullMask } from '../../ocean/hullVolumeMask';
 import type { SeaPhysicsParams } from '../../params/seaPhysics';
 import type { SkyHandle } from '../../sky';
 import type { SimState } from '../../state/simState';
@@ -24,10 +26,20 @@ import { HULL_DATA } from '../hullMesh';
 import { COMMUNITY_PAINTS, RIVALS } from '../ui/roster';
 import { liveryFor } from './liveries';
 import { createPaceBoat } from './paceBoat';
+import { createBoatLights } from './boatLights';
 import type { CourseHook } from './seams';
 
 export function buildSpeedboatSea(app: App, state: SimState, sky: SkyHandle, weather: WeatherSystem, course: CourseHook, seaParams: SeaPhysicsParams) {
-  return buildSea(app, state, sky, weather, {
+  // §T.209: the boats' LED light pools are baked into the ocean's colour graph, so the pool is active BEFORE buildSea
+  // (and stays active: a rebuilt surface keeps its pools). ocean/boatLightPool.ts
+  const boatLightPool = createBoatLightPool();
+  setActiveBoatLightPool(boatLightPool);
+  // hull volume mask: baked into the ocean and every spray pool (the crest spray inside buildSea, the boats' pools in
+  // createVesselFx), fed by each boat's depth cap at render (ocean/hullVolumeMask.ts, assets/waterMask.ts)
+  // `?hullmask=0` builds without it (perf A/B and a kill switch; the depth caps still lid the wells)
+  const maskOff = typeof location !== 'undefined' && new URLSearchParams(location.search).get('hullmask') === '0';
+  setActiveHullMask(maskOff ? undefined : createHullMask());
+  const sea = buildSea(app, state, sky, weather, {
     sites: course.sites,
     // the analytic wake ramp's scale — not evaluated on the sim backend (flowfoam WakeBackend)
     wakeSpeedScale: 1,
@@ -42,6 +54,7 @@ export function buildSpeedboatSea(app: App, state: SimState, sky: SkyHandle, wea
     propJets: HULL_DATA.engines.length,
     seaParams,
   });
+  return Object.assign(sea, { boatLightPool });
 }
 export type SpeedboatSea = ReturnType<typeof buildSpeedboatSea>;
 
@@ -78,6 +91,9 @@ export async function buildSpeedboatBoats(app: App, sea: SpeedboatSea, npcCount:
   // bubbles — the player's from her contact, the rivals' from the worker's per-step FX record — one pool each
   const vesselFx = createVesselFx({ scene: app.scene, flowFoam: sea.flowFoam, reflection: sea.reflection as unknown as { excludeFromReflection(o: Mesh): void } | null });
 
-  return { loader, asset, wetline, hero, npcs, pace, vesselFx };
+  // §T.209 LEDs: strips (slot materials), water pools, underwater glow, the player's two real lights (page/boatLights.ts)
+  const lights = createBoatLights({ scene: app.scene, pool: sea.boatLightPool, hero, npcs, extras: asset.extras });
+
+  return { loader, asset, wetline, hero, npcs, pace, vesselFx, lights };
 }
 export type SpeedboatBoats = Awaited<ReturnType<typeof buildSpeedboatBoats>>;

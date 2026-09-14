@@ -28,8 +28,10 @@ COWL = [
     (0.05, -0.140, -0.640, 0.190, 2.9),
     (0.12, -0.105, -0.720, 0.222, 3.2),
     (0.22, -0.085, -0.790, 0.246, 3.6),
-    (0.33, -0.075, -0.835, 0.254, 3.8),
-    (0.34, -0.074, -0.838, 0.255, 3.8),
+    # the bone collar (h 0.28 → the split at 0.36) is one straight row, so the table is linear across it and the collar
+    # loft, cowl_point and the upper cowl's first row agree at the split: flush, no step (the old 0.33/0.34 rows put
+    # a 2 cm width / 3 cm length step under the upper cowl's edge). 0.28 is the old 0.22→0.33 line, the bucket is unchanged
+    (0.28, -0.0796, -0.8146, 0.2504, 3.709),
     (0.36, -0.058, -0.872, 0.274, 4.0),
     (0.42, -0.052, -0.890, 0.281, 4.2),
     (0.60, -0.048, -0.905, 0.2875, 4.4),
@@ -84,8 +86,10 @@ def cowl_point(h, ang):
     return Vector((x, Y0 + H * h + _slope(h, z), z)), nrm
 
 
-def cowl_shell(h0, h1, rows, lip0=True, lip1=True, gap=0.004, grooves=()):
-    """one cowl panel between h0 and h1 with rolled lips (real panel gaps) and moulded grooves"""
+def cowl_shell(h0, h1, rows, lip0=True, lip1=True, gap=0.004, grooves=(), bevel=0.0015):
+    """one cowl panel between h0 and h1 with rolled lips (real panel gaps) and moulded grooves.
+    A lip is a 45° edge bevel (catches a highlight) then a 12 mm flange turned in; two shells lipped at the same h
+    leave a `gap` panel line between their flanges"""
     hs = [(h0 + (h1 - h0) * i / rows, 0.0) for i in range(rows + 1)]
     for hg in grooves:  # a 2.5 cm moulded character groove, 4 mm deep, with crisp shoulders
         hs = [(h, i) for (h, i) in hs if not (hg - 0.024 < h < hg + 0.024)]
@@ -94,23 +98,37 @@ def cowl_shell(h0, h1, rows, lip0=True, lip1=True, gap=0.004, grooves=()):
     rings = []
     if lip0:
         rings.append(cowl_ring(h0, inset=0.012, dy=gap * 0.5))
-        rings.append(cowl_ring(h0, inset=0.003, dy=gap * 0.5))
+        rings.append(cowl_ring(h0, inset=bevel, dy=gap * 0.5))
     for i, (h, ins) in enumerate(hs):
-        dy = gap * 0.5 if (i == 0 and lip0) else (-gap * 0.5 if (i == len(hs) - 1 and lip1) else 0.0)
+        dy = gap * 0.5 + bevel if (i == 0 and lip0) else (-gap * 0.5 - bevel if (i == len(hs) - 1 and lip1) else 0.0)
         rings.append(cowl_ring(h, inset=ins, dy=dy))
     if lip1:
-        rings.append(cowl_ring(h1, inset=0.003, dy=-gap * 0.5))
+        rings.append(cowl_ring(h1, inset=bevel, dy=-gap * 0.5))
         rings.append(cowl_ring(h1, inset=0.012, dy=-gap * 0.5))
     return kit.grid_loft(rings, closed=True)
 
 
-def cowl_top(h0, rows=6):
+def cowl_top(h0, rows=6, gap=0.004, bevel=0.0015):
+    """the livery cap, lipped like cowl_shell so it closes onto an upper cowl lipped at the same h0"""
     hs = [h0 + (1.0 - h0) * (1 - math.cos(0.5 * math.pi * i / rows)) for i in range(rows + 1)]
-    rings = [cowl_ring(h0, inset=0.012, dy=0.002), cowl_ring(h0, inset=0.003, dy=0.002)]
+    rings = [cowl_ring(h0, inset=0.012, dy=gap * 0.5), cowl_ring(h0, inset=bevel, dy=gap * 0.5)]
     for i, h in enumerate(hs):
-        rings.append(cowl_ring(h, dy=0.002 if i == 0 else 0.0))
+        rings.append(cowl_ring(h, dy=gap * 0.5 + bevel if i == 0 else 0.0))
     g = kit.grid_loft(rings, closed=True, cap1=True)
     return g
+
+
+def cowl_seal(h):
+    """black rubber band behind the 4 mm panel line of two shells lipped at h (inside their 12 mm flanges)"""
+    return kit.grid_loft([cowl_ring(h, inset=0.007, dy=-0.0025), cowl_ring(h, inset=0.007, dy=0.0025)], closed=True)
+
+
+def check_joints(joints, tol=0.001):
+    """stacked sections must meet: (name, top of the lower section, bottom of the upper section) in metres. A gap wider
+    than `tol` fails the build (a 2 cm hole under the upper cowl and another under the cap shipped once)"""
+    bad = [f'{n}: {1000 * (b - a):.1f} mm open' for (n, a, b) in joints if b - a > tol]
+    if bad:
+        raise SystemExit('[outboard] open joints: ' + '; '.join(bad))
 
 
 def foil_section(chord_le, chord_te, y, thick, segs=12, x0=0.0):
@@ -159,8 +177,10 @@ def build(A, engine):
     # "bucket" stays bone with a thin livery pinstripe just under the split line. The lower cowl is one surface lofted
     # in three pieces that share their boundary rings exactly (no gap, no overlap), so the livery mask (M_Carbon
     # baseColor alpha) follows the geometry: bucket bone, 3 cm stripe livery, 6 cm collar bone up to the split
-    STRIPE_H0, STRIPE_H1 = 0.25, 0.28
-    lower = cowl_shell(0.0, STRIPE_H0, 4, lip0=False, lip1=False)
+    # stacked cowl sections (h0, h1), bottom up: one table drives the lofts AND check_joints below
+    CS = {'bucket': (0.0, 0.25), 'stripe': (0.25, 0.28), 'collar': (0.28, 0.36), 'upper': (0.36, 0.80), 'cap': (0.80, 1.0)}
+    STRIPE_H0, STRIPE_H1 = CS['stripe']
+    lower = cowl_shell(*CS['bucket'], 4, lip0=False, lip1=False)
     # the lower cowl's open bottom is closed by a tray the midsection passes through
     ring0 = cowl_ring(0.0)
     tray = kit.grid_loft([cowl_ring(0.0, inset=0.05, dy=-0.015), ring0], closed=True, cap0=True)
@@ -174,12 +194,19 @@ def build(A, engine):
     P('cowl_lower', lower, 'M_Carbon', 'cowl_decal' if engine != 'C' else 'cowl_bone', max_lod=2, smooth=50, recalc=False, wear=1.15,
       fasteners=lower_fast,
       local=(tuple(cowl_point(0.15, 0.05)[0] + Vector((0.0, 0.0, 0.10))), (0, 0, -1), (0, 1, 0)) if engine != 'C' else None)
-    P('cowl_stripe', cowl_shell(STRIPE_H0, STRIPE_H1, 1, lip0=False, lip1=False), 'M_Carbon', 'cowl_livery', max_lod=2, smooth=50,
+    P('cowl_stripe', cowl_shell(*CS['stripe'], 1, lip0=False, lip1=False), 'M_Carbon', 'cowl_livery', max_lod=2, smooth=50,
       recalc=False, wear=0.9)
-    P('cowl_collar', cowl_shell(STRIPE_H1, 0.34, 1, lip0=False), 'M_Carbon', 'cowl_bone', max_lod=2, smooth=50, recalc=False, wear=1.15)
-    upper = cowl_shell(0.36, 0.80, 10, grooves=(0.585,))
+    # the split: the collar and the upper cowl are lipped at the SAME h (the collar used to stop at 0.34 under an upper
+    # cowl starting at 0.36 — a 2 cm open slot you could see into). A dark rubber seal closes the 4 mm panel line.
+    # The cap closes onto the upper cowl the same way at CAP_H (it used to start at 0.82 over a lip at 0.80).
+    SPLIT_H, CAP_H = CS['upper']
+    P('cowl_collar', cowl_shell(*CS['collar'], 1, lip0=False), 'M_Carbon', 'cowl_bone', max_lod=2, smooth=50, recalc=False, wear=1.15)
+    seal = cowl_seal(CS['collar'][1])
+    seal.extend(cowl_seal(CS['upper'][1]))
+    P('cowl_seal', seal, 'M_Metal', 'rubber', max_lod=1, smooth=60, recalc=False)
+    upper = cowl_shell(*CS['upper'], 10, grooves=(0.585,))
     P('cowl_upper', upper, 'M_Carbon', 'cowl_livery', max_lod=2, smooth=50, recalc=False, wear=0.8 if engine == 'P' else 1.0)
-    top = cowl_top(0.82)
+    top = cowl_top(CS['cap'][0])
     P('cowl_top', top, 'M_Carbon', 'cowl_livery', max_lod=2, smooth=50, recalc=False)
 
     # rear top vent: a recessed louvre box on the cap's rear slope
@@ -200,14 +227,18 @@ def build(A, engine):
             gill = gill.mirror_x()
         gill.transform(Matrix.Translation(pg - ng * 0.006) @ kit.frame((0, 0, 0), Vector((side * 0.2, 0.1, 1.0)).normalized(), (0, 1, 0)))
         P(f'gill_{side}', gill, 'M_Carbon', 'vent_black', max_lod=1, bevel=(0.002, 1), smooth=35)
-    # cowl latches at the split line, stainless levers
+    # cowl latches: small flush stainless keepers straddling the seam (half on the collar, half on the upper cowl), on
+    # ring vertices so they sit on the loft, not on a chord; laid along the surface's own slope across the split
     for side in (1, -1):
-        for ang in (0.35, 1.2):
-            pl, nl = cowl_point(0.35, ang if side > 0 else math.pi - ang)
-            lat = kit.box(0.012, 0.05, 0.03)
-            lat.extend(kit.box(0.018, 0.012, 0.036, center=(0.004, 0.02, 0)))
-            lat.transform(Matrix.Translation(pl + nl * 0.004) @ kit.frame((0, 0, 0), nl, (0, 1, 0)))
-            P('latch', lat, 'M_Metal', 'stainless', max_lod=0, bevel=(0.0015, 1), smooth=35)
+        for k in (2, 6):
+            ang = 2 * math.pi * k / SEG
+            ang = ang if side > 0 else math.pi - ang
+            pl, nl = cowl_point(SPLIT_H, ang)
+            up = (cowl_point(SPLIT_H + 0.03, ang)[0] - cowl_point(SPLIT_H - 0.03, ang)[0]).normalized()
+            nl = (nl - up * nl.dot(up)).normalized()
+            lat = kit.box(0.004, 0.032, 0.016)
+            lat.transform(Matrix.Translation(pl + nl * 0.0005) @ kit.frame((0, 0, 0), nl, up))
+            P('latch', lat, 'M_Metal', 'stainless', max_lod=0, bevel=(0.001, 1), smooth=35)
     # fuel / primer port cap on the port flank (09: round black cap with a cable loop)
     side = 1 if engine != 'S' else -1
     pc, nc = cowl_point(0.22, (0.35 if side > 0 else math.pi - 0.35))
@@ -264,10 +295,13 @@ def build(A, engine):
 
     # ── midsection: foil loft from the cavitation plate up into the lower cowl ──
     mid_rings = []
-    ys = [yc + 0.01, yc + 0.12, yc + 0.28, yc + 0.45, -0.30, Y0 + 0.02]
+    # the open foot starts at the plate's mid-plane, inside the 14 mm plate, with its nose inside the plate outline (it
+    # used to hang 3 mm above the plate top and 1 cm past its nose: a see-through slit into the hollow midsection)
+    PLATE_T = 0.014
+    ys = [yc, yc + 0.12, yc + 0.28, yc + 0.45, -0.30, Y0 + 0.02]
     for i, y in enumerate(ys):
         t = i / (len(ys) - 1)
-        le = kit.lerp(zp + 0.31, zs + 0.06, t ** 1.2)
+        le = kit.lerp(zp + 0.28, zs + 0.06, t ** 1.2)
         te = kit.lerp(zp - 0.0, zs - 0.44, t ** 1.0)
         mid_rings.append(foil_section(le, te, y, kit.lerp(0.30, 0.44, t), segs=10))
     mid = kit.grid_loft(mid_rings, closed=True, cap0=False, cap1=True)
@@ -281,7 +315,7 @@ def build(A, engine):
     # ── anti-ventilation plate ──────────────────────────────────────────────
     plate_poly = [(0.07, zp + 0.30), (0.12, zp + 0.18), (0.155, zp + 0.02), (0.15, zp - 0.10), (0.11, zp - 0.13),
                   (-0.11, zp - 0.13), (-0.15, zp - 0.10), (-0.155, zp + 0.02), (-0.12, zp + 0.18), (-0.07, zp + 0.30)]
-    plate = kit.extrude([(x, z) for (x, z) in plate_poly], 0.014)
+    plate = kit.extrude([(x, z) for (x, z) in plate_poly], PLATE_T)
     plate.transform(Matrix.Translation((0, yc, 0)) @ kit.rot('X', 90))
     plate_fast = [((sx * 0.1, yc + 0.0075, zp + 0.1), (0, 1, 0), 0.007, 'screw', False) for sx in (1, -1)]
     P('cav_plate', plate, 'M_Carbon', 'lower_paint', max_lod=2, bevel=(0.004, 2), smooth=35, fasteners=plate_fast)
@@ -300,6 +334,14 @@ def build(A, engine):
     strut_rings = [foil_section(zp + 0.29, zp + 0.01, y, 0.17, segs=10) for y in (yp + 0.02, yc)]
     strut = kit.grid_loft(strut_rings, closed=True)
     P('strut', strut, 'M_Carbon', 'lower_paint', max_lod=2, smooth=55, recalc=False, wear=1.3)
+    # every stacked joint, bottom up, as (top of the lower section, bottom of the upper one); cowl heights are y0 + H·h
+    tray_y = Y0 - 0.015
+    check_joints([
+        ('torpedo/strut', yp + tr, yp + 0.02),
+        ('strut/cav plate', yc, yc - PLATE_T / 2),
+        ('cav plate/midsection', yc + PLATE_T / 2, ys[0]),
+        ('midsection/cowl tray', ys[-1], tray_y),
+    ] + [(f'{a}/{b}', H * CS[a][1], H * CS[b][0]) for a, b in zip(list(CS)[:-1], list(CS)[1:])])
     skeg_rings = [foil_section(zp + 0.24, zp + 0.05, yp - 0.03, 0.16, segs=8),
                   foil_section(zp + 0.16, zp + 0.02, yp - 0.16, 0.14, segs=8),
                   foil_section(zp + 0.09, zp + 0.0, yp - 0.27, 0.12, segs=8)]

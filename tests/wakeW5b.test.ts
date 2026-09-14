@@ -323,36 +323,40 @@ describe('c. prop wash: sim source, foam ribbon, rooster tail — from the drive
     expect(churnAt(hullOnly, 4.5)).toBeGreaterThan(0);
   });
 
-  it('foam ribbon: aft of the prop only, more thrust more foam, cross-track integral kept on a coarse tier, dose per passage ∝ 1/U', () => {
+  it('foam ribbon: aft of the prop only, more AIR more foam, cross-track integral kept on a coarse tier, dose per passage ∝ 1/U', () => {
     const at = (j: PropWashInput, x: number, z: number, texel = 0.234): number => propWashFoamCpu([j], x, z, texel);
-    expect(at(jet(), 2, 0)).toBe(0); // ahead (jet points −x)
-    expect(at(jet(), -3, 0)).toBeGreaterThan(0);
+    const aired = (over: Partial<PropWashInput> = {}) => jet({ lossPower: 60_000, ...over });
+    expect(at(aired(), 2, 0)).toBe(0); // ahead (jet points −x)
+    expect(at(aired(), -3, 0)).toBeGreaterThan(0);
+    // W8: bubbles need air. A jet with thrust but no air (no lost power, no surface draw, no exhaust) lays NO foam —
+    // its upwelling is the sim surface's (propJetSample), not whitewater: that lifted excess is what painted the
+    // displacement-speed lane solid (docs/wake/w8-foam-readability.md §2)
+    for (const T of [1000, 16000]) expect(at(jet({ thrust: T }), -3, 0)).toBe(0);
     let prev = 0;
-    for (const T of [1000, 4000, 8000, 16000]) {
-      const v = at(jet({ thrust: T }), -3, 0);
+    for (const P of [10_000, 40_000, 80_000, 160_000]) {
+      const v = at(aired({ lossPower: P }), -3, 0);
       expect(v).toBeGreaterThan(prev);
       prev = v;
     }
-    expect(at(jet({ thrust: 0 }), -3, 0)).toBe(0);
     const across = (texel: number): number => {
       let s = 0;
-      for (let z = -12; z <= 12; z += 0.05) s += at(jet(), -6, z, texel) * 0.05;
+      for (let z = -12; z <= 12; z += 0.05) s += at(aired(), -6, z, texel) * 0.05;
       return s;
     };
     expect(Math.abs(across(2.5) / across(0.234) - 1)).toBeLessThan(0.02);
     // …and band-limited there: near the disc the ribbon is narrower than a far texel, so the tier must see it
     // at least one texel wide (Gaussian σ ≥ texel ⇒ peak ≤ integral/(√2π·texel)) or it aliases into blots
-    const peak = at(jet(), -0.5, 0, 2.5);
+    const peak = at(aired(), -0.5, 0, 2.5);
     let integral = 0;
-    for (let z = -12; z <= 12; z += 0.01) integral += at(jet(), -0.5, z, 2.5) * 0.01;
+    for (let z = -12; z <= 12; z += 0.01) integral += at(aired(), -0.5, z, 2.5) * 0.01;
     expect(peak).toBeLessThanOrEqual((integral / (Math.sqrt(2 * Math.PI) * 2.5)) * 1.001);
     // §T.199: the ribbon's WIDTH now depends on U too (a jet in co-flow spreads at S·ΔV/(ΔV + U)), so the per-passage
     // property is stated on the cross-track INTEGRAL of the dose — the time over the ribbon, whatever its width
     const dose = (U: number): number => {
-      const j = jet({ advance: U, thrust: 2000 });
+      const j = aired({ advance: U, thrust: 2000 });
       let d = 0;
       for (let s = 0; s < 80; s += 0.1) for (let z = -6; z <= 6; z += 0.05) d += (at(j, -s, z) * 0.1 * 0.05) / U;
-      return d / packPropJet(j)!.meta[0]; // strip the jet's own drive lift·ΔV: what is left is time over the ribbon
+      return d / packPropJet(j)!.meta[2]; // strip the jet's own air drive: what is left is time over the ribbon
     };
     expect(dose(10) / dose(20)).toBeCloseTo(2, 1);
   });
@@ -469,7 +473,14 @@ describe('d. wake foam age from the two decay clocks; aged foam dissolves soft',
     // e28d0a4 added an 8th arg, `porousBody` (landed sim-wake films keep their porous texture), gated on the
     // sim backend's age node; the composed ages still have to arrive as detailRetire / bodyAge.
     expect(code).toMatch(/foamDetailMask\([^;]*undefined,\s*undefined,\s*undefined,\s*ages\.edge,\s*ages\.body,\s*(?:Boolean\(flowFoam\?\.wakeFoamFreshnessNode\),?\s*)?\)/);
-    expect(code).toMatch(/mix\(wakeCol,\s*foamCol,\s*wakeFresh\)/);
+    // W8: fresh froth is the surface film (whitecap colour over the reflection); the aged remainder is aerated water
+    // UNDER the interface — the body's transmitted term re-tinted, lit by the body's own coloured irradiance
+    // W8 round 2: on the sim backend the white share is flowfoam's age-driven breakup gate (lace, flecks)
+    expect(code).toMatch(/flowFoam\.wakeWhiteNode\(worldXZ,\s*wakeMaskFresh[^,]*,\s*wakeCoverageW8[^,]*,\s*wakeFresh[^,]*,\s*pixWorld,\s*wakeContactW8\)/);
+    expect(createFlowFoam().wakeWhiteNode).toBeNull();
+    expect(code).toMatch(/aerTint\.mul\(wakeLed \? lightWrap\.add\(wakeLed\) : lightWrap\)\.sub\(transmitted\)\.mul\(aerated\)\.mul\(reflWeight\.oneMinus\(\)\)/);
+    // W8 round 3: the white film takes the water body's coloured irradiance (sky + sun colour) at albedo 0.8
+    expect(code).toMatch(/wakeCol = uFoam\.mul\(foamTintNode\(\)\)\.mul\(0\.8\)\s*\.mul\(skylightCol\.mul\(uLightFloor\.add\(0\.1\)\)[\s\S]{0,80}\.add\(uSunLightColor\.mul\(ndl\.mul\(uLightGain\)\.mul\(0\.6\)\.mul\(shade\)\)\)/);
     expect(createFlowFoam().wakeFoamFreshnessNode).toBeNull();
   });
 });

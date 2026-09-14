@@ -333,7 +333,10 @@ describe('feel target: the hull keeps CONTACT with the sea', () => {
     // (at 3× sailing weather the forefoot flies whatever the damping does,
     // correctly: real ships leave the water in a real gale). Normalising by
     // RMS elevation makes "sailing weather" mean the same thing next week.
-    const op = seaOfSpectralRms(0.6, { windSpeed: 11 });
+    // 0.6·√2: the spectrum's bookkeeping used to under-count the realised sea 2× in variance (oceanMath
+    // H0_AMPLITUDE_SCALE). The thresholds below were calibrated on the REALISED sea of the old 0.6 target, so the
+    // target moves to keep that same measured water (rms check below), not to keep a number.
+    const op = seaOfSpectralRms(0.6 * Math.SQRT2, { windSpeed: 11 });
 
     // BOTH hulls fly through ONE sea. This is a damping comparison, so the
     // two runs are only meaningful against the SAME water — and they always

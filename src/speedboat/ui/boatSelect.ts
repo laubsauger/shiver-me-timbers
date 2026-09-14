@@ -32,11 +32,12 @@ export interface BoatSelectCallbacks {
   onPreviewMount?(host: HTMLElement): (() => void) | void;
 }
 
-export const SEA_OPTIONS = ['Calm', 'Breeze', 'Working sea', 'Squall'] as const;
-export const TIME_OPTIONS = ['06:30', '12:00', '17:30'] as const;
+export const SEA_OPTIONS = ['Calm', 'Working sea', 'Open swell', 'Squall'] as const;
+/** §T.209 the sky's hour (page/raceTime.ts); '15:00' = the page's signed-off default look (skyParams default), 'Night' = the moonlit race night */
+export const TIME_OPTIONS = ['06:30', '12:00', '15:00', '17:30', 'Night'] as const;
 export const RIVAL_OPTIONS = ['Club', 'National'] as const;
 
-export const DEFAULT_SELECTION: BoatSelection = { paintId: 'signal', number: 1, gogglesId: 'strap-amber', sea: 'Working sea', time: '17:30', rivals: 'National' };
+export const DEFAULT_SELECTION: BoatSelection = { paintId: 'signal', number: 1, gogglesId: 'strap-amber', sea: 'Working sea', time: '15:00', rivals: 'National' };
 
 /** next free race number in direction d (1..99, skipping the rivals' numbers) */
 export function stepNumber(n: number, d: -1 | 1): number {

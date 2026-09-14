@@ -23,7 +23,8 @@
  */
 import type * as THREE from 'three/webgpu';
 import { createBowSprayFleet, type BowFleetEmitter } from '../foam/bowSpray';
-import { createPropBubbles, createRoosterTail } from '../foam/roosterTail';
+import { createPropBubbles, createRoosterTail, strutSheetEmission, type RoosterExtraSource } from '../foam/roosterTail';
+import { sprayParams } from '../params/spray';
 import type { WakeLoadSamples } from '../sea-physics/hullWater';
 import type { Rigid6State } from '../sea-physics/rigidBody';
 import type { BoatEffects } from '../sim-worker/fleet';
@@ -33,6 +34,31 @@ import { hullWaterSamples } from './stationSources';
 import { WAKE_MAX_VESSELS, type VesselWakeInput, type WakeSim } from './wakeSim';
 import type { HydroSample } from './wakeSolverMath';
 import { ChineContactHistory, type ChineSheetEmitter } from './chineContact';
+import { appendageSample, strutsFromJets, type AppendageInput } from './appendages';
+import { hollowSamples } from './transomHollow';
+
+/**
+ * W8 round 3 (impacts): time over which a hull's wake LOAD may rise (s). A landing's contact load arrives on one tick,
+ * but the water takes the impact over the few hundredths of a second the hull needs to bury (the slamming pressure
+ * pulse, ~20–80 ms for a planing hull — Faltinsen 2005 ch. 8); the solver was handed a one-tick delta and the whole
+ * splash wave appeared at once. Falling loads pass straight through (an airborne hull pushes nothing).
+ */
+export const WAKE_LOAD_RISE_SECONDS = 0.08;
+
+/** the rise-limited load share (0..1] of this tick's Σ fy against the running load (`state.load`), and the new state */
+export function wakeLoadRamp(state: { load: number }, total: number, dt: number): number {
+  if (!Number.isFinite(total) || !(total > 0)) {
+    state.load = 0;
+    return 1;
+  }
+  if (total <= state.load) {
+    state.load = total;
+    return 1;
+  }
+  const next = Math.max(0, state.load) + (total - Math.max(0, state.load)) * (1 - Math.exp(-Math.max(0, dt) / WAKE_LOAD_RISE_SECONDS));
+  state.load = next;
+  return next / total;
+}
 
 /** jets the fleet's rooster tail and bubbles carry: every drive of every boat the domain can hold */
 export const VESSEL_FX_JETS = WAKE_MAX_VESSELS * 3;
@@ -84,7 +110,8 @@ export interface VesselFxTick {
 export function createVesselFx(d: VesselFxDeps) {
   const bow = createBowSprayFleet();
   // §T.199 4096 per pool: the plume's drops live ≈ 2.4 s, so 2048 turned over ≈ 630/s for the whole fleet (sparse balls)
-  const rooster = createRoosterTail({ maxJets: VESSEL_FX_JETS, count: 4096 });
+  // W8 round 3: 16384 per pool — small streak sprites, the plume's weight is their count (roosterTail ROOSTER_SPRITE_DENSITY)
+  const rooster = createRoosterTail({ maxJets: 2 * VESSEL_FX_JETS, count: 16384 });
   const bubbles = createPropBubbles({ maxJets: VESSEL_FX_JETS });
   /** bow sheet, rooster drops, prop bubbles, rooster mist (§T.199: the mist pool appended last) */
   const meshes = [bow.mesh, rooster.meshes[0], bubbles.mesh, rooster.meshes[1]];
@@ -94,6 +121,14 @@ export function createVesselFx(d: VesselFxDeps) {
   const heroRecord = new Float64Array(FX_LEN);
   const heroFx: BoatFx = createBoatFx();
   const heroSamples: HydroSample[] = [];
+  /** W8 round 3: drive struts (hero + rivals) and the rivals' sample lists with theirs appended, reused */
+  const struts: AppendageInput[] = [];
+  const strutSamples: HydroSample[] = [];
+  const rivalSamples: HydroSample[][] = [];
+  const heroLoad = { load: 0 };
+  const fxStruts: AppendageInput[] = [];
+  const extras: RoosterExtraSource[] = [];
+  const extraPool: RoosterExtraSource[] = [];
   const others: VesselWakeInput[] = [];
   const jets: PropWashInput[] = [];
   const emitters: BowFleetEmitter[] = [];
@@ -150,6 +185,21 @@ export function createVesselFx(d: VesselFxDeps) {
       for (let k = 0; k < heroFx.jets.length; k++) heroFx.jets[k].propRps = hero.hw.engines?.[k]?.propRps;
       rooster.setPitch(hero.hw.params?.engine?.propPitch ?? Number.NaN);
       hullWaterSamples(hero.hw.wake, heroSamples);
+      // W8 round 3: the impact pulse rises over WAKE_LOAD_RISE_SECONDS, not one tick
+      let total = 0;
+      for (const sm of heroSamples) total += sm.fy;
+      const share = wakeLoadRamp(heroLoad, total, dt);
+      if (share < 1) for (const sm of heroSamples) sm.fy *= share;
+      const pushStruts = (jets: readonly PropWashInput[], into: HydroSample[]): void => {
+        const n = strutsFromJets(jets, struts);
+        for (let k = 0; k < n; k++) {
+          const q = appendageSample(struts[k], (strutSamples[k] ??= { x: 0, z: 0, fy: 0, footprint: 0, depth: 0 }));
+          if (q) into.push({ ...q });
+        }
+      };
+      pushStruts(heroFx.jets, heroSamples);
+      // W8 round 5: the transom hollow as a virtual hull extension (wake/transomHollow.ts) — once HullWater publishes it
+      hollowSamples(heroFx.hollow, heroSamples);
       const hx = hero.state.position[0];
       const hz = hero.state.position[2];
 
@@ -183,7 +233,12 @@ export function createVesselFx(d: VesselFxDeps) {
       for (const k of order) {
         const e = effects[k];
         const p = e.pose;
-        others.push({ samples: e.wake, jets: e.fx.jets, x: p.position[0], z: p.position[2], vx: p.velocity[0], vz: p.velocity[2] });
+        const rs = (rivalSamples[others.length] ??= []);
+        rs.length = 0;
+        for (const sm of e.wake) rs.push(sm);
+        pushStruts(e.fx.jets, rs);
+        if (e.fx.hollow) hollowSamples(e.fx.hollow, rs);
+        others.push({ samples: rs, jets: e.fx.jets, x: p.position[0], z: p.position[2], vx: p.velocity[0], vz: p.velocity[2] });
         for (const j of e.fx.jets) jets.push(j);
         sheets.push(contact.update(ids[k], e.tick, e.fx.bow, p.velocity[0], p.velocity[2], dt));
       }
@@ -201,7 +256,18 @@ export function createVesselFx(d: VesselFxDeps) {
       last.sources = sim ? sim.sources.count + sim.sources.jetCount : 0;
       last.bow = visible ? bow.update(renderer, emitters, viewer) : 0;
       if (visible) sun();
-      last.rooster = visible ? rooster.update(renderer, jets, viewer) : 0;
+      // W8 round 3: every drive strut's leading-edge sheet, nearest first, in the slots the props leave
+      extras.length = 0;
+      const ns = strutsFromJets(jets, fxStruts);
+      for (let k = 0; k < ns; k++) {
+        const jet = jets[k];
+        const y = jet.surfaceY;
+        if (y === undefined || !Number.isFinite(y)) continue;
+        const e = strutSheetEmission(fxStruts[k], y, sprayParams, (extraPool[k] ??= { speed: 0, x: 0, surfaceY: 0, z: 0, dirX: 0, dirZ: 1, launch: 0, aft: 0, lateral: 0, rate: 0 }));
+        if (e) extras.push(e);
+      }
+      extras.sort((a, b) => (a.x - viewer.x) ** 2 + (a.z - viewer.z) ** 2 - ((b.x - viewer.x) ** 2 + (b.z - viewer.z) ** 2));
+      last.rooster = visible ? rooster.update(renderer, jets, viewer, extras) : 0;
       last.bubbles = visible ? bubbles.update(renderer, jets, viewer) : 0;
       return last;
     },

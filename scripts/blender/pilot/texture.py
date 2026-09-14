@@ -198,7 +198,8 @@ def atlas_uvs(objs, margin_px, size):
         arr = np.empty(len(uv) * 2)
         uv.foreach_get('uv', arr)
         uv.foreach_set('uv', arr * m)
-    # the sleeves fill the cockpit camera: the suit's arm islands get 1.45x the suit's density
+    # the sleeves fill the cockpit camera: the suit's arm islands get 1.45x the suit's density (v2.1: a no-op, the
+    # MakeHuman suit UVs are ONE island, so the sleeves stay at the suit's ~400 px/m; a sleeve re-UV is needed)
     suit = next((o for o in objs if o.name == 'Suit'), None)
     if suit is not None:
         arms = [f'{b}_{s}' for s in ('l', 'r') for b in ('upperarm', 'lowerarm', 'lowerarm_twist')]
@@ -389,6 +390,12 @@ def ridges(phase, sharp=2.5):
     return (1 - np.abs(np.sin(phase * math.pi))) ** sharp
 
 
+def soft_folds(phase):
+    """rounded cloth folds for the sleeves: a sinusoid, 1 at the crest, 0 in the valley. The crisp ridges() profile
+    tilted the baked normal 50-60 deg at 7-18 texels per fold and aliased into dark stripes in grazing light (v2.1)"""
+    return 0.5 - 0.5 * np.cos(phase * 2 * math.pi)
+
+
 def stitch_line(dist, along, offset=0.0025, pitch=0.004, width=0.0006):
     """two parallel dashed stitch lines either side of a seam (dist = signed distance to the seam, m)"""
     dash = np.sin(along * 2 * math.pi / pitch) > 0.1
@@ -485,27 +492,27 @@ def composite_suit(P, Nw, look, ao, n1, n2, n3, rig, col, rough, height):
         on_u = ru < 0.1
         seam_dark += np.exp(-((su - 0.02) / 0.0015) ** 2) * on_u
         stitch += stitch_line(su - 0.02, arc(ru, au)) * on_u
-        h_s += 1.5 * ridges(su / 0.04 + 0.5 * n1, 2.0) * np.exp(-((su - 0.06) / 0.07) ** 2) * on_u * smooth(0.0, 1.0, -np.cos(au))
+        h_s += 0.7 * soft_folds(su / 0.04 + 0.5 * n1) * np.exp(-((su - 0.06) / 0.07) ** 2) * on_u * smooth(0.0, 1.0, -np.cos(au))
         lf = Limb(rig, f'lowerarm_{s}', f'hand_{s}', eb)
         sf, rf, af = lf.coords(P)
         on_f = rf < 0.1
         elbow_g = np.exp(-(sf / 0.12) ** 2) * on_f
         inner_e = smooth(-0.3, 0.9, np.cos(af))
         ph = sf / 0.026 + 0.3 * n2 + 0.1 * np.sin(af * 2)
-        h_s += 3.2 * ridges(ph, 3.0) * elbow_g * (0.35 + 0.65 * inner_e) * (0.6 + 0.4 * n1)
-        valley += elbow_g * inner_e * (1 - ridges(ph))
+        h_s += 1.1 * soft_folds(ph) * elbow_g * (0.35 + 0.65 * inner_e) * (0.6 + 0.4 * n1)
+        valley += 0.6 * elbow_g * inner_e * (1 - soft_folds(ph))
         # the sleeve bunches where it is pushed up the forearm above the gauntlet (which covers the
         # last ~9 cm), and hangs in long twisted pipe folds between elbow and bunching
         wrist_g = smooth(lf.L - 0.22, lf.L - 0.15, sf) * smooth(lf.L - 0.05, lf.L - 0.08, sf) * on_f
-        ph_w = sf / 0.017 + 0.35 * n2 + 0.15 * np.sin(af * 3 + sf * 40)
-        h_s += 3.0 * ridges(ph_w, 2.5) * wrist_g
-        valley += wrist_g * (1 - ridges(ph_w, 2.0))
+        ph_w = sf / 0.022 + 0.35 * n2 + 0.15 * np.sin(af * 3 + sf * 40)
+        h_s += 1.0 * soft_folds(ph_w) * wrist_g
+        valley += 0.6 * wrist_g * (1 - soft_folds(ph_w))
         pipe = (sf * math.cos(0.6) + arc(rf, af) * math.sin(0.6)) / 0.045 + 0.4 * n1
-        h_s += 2.2 * ridges(pipe, 2.5) * on_f * smooth(0.02, 0.1, sf) * smooth(lf.L - 0.06, lf.L - 0.1, sf)
+        h_s += 0.8 * soft_folds(pipe) * on_f * smooth(0.02, 0.1, sf) * smooth(lf.L - 0.06, lf.L - 0.1, sf)
         la_up = Limb(rig, f'upperarm_{s}', f'lowerarm_{s}', eb)
         s_up, r_up, a_up = la_up.coords(P)
         drape = (s_up * math.cos(0.9) + arc(r_up, a_up) * math.sin(0.9)) / 0.06 + 0.5 * n1
-        h_s += 1.6 * ridges(drape, 2.5) * (r_up < 0.1) * smooth(0.04, 0.12, s_up) * smooth(la_up.L + 0.02, la_up.L - 0.06, s_up)
+        h_s += 0.7 * soft_folds(drape) * (r_up < 0.1) * smooth(0.04, 0.12, s_up) * smooth(la_up.L + 0.02, la_up.L - 0.06, s_up)
         e_d = np.hypot(sf / 0.07, arc(rf, af, math.pi) / 0.05)
         ep = (e_d < 1.0) & on_f & suit
         c[ep] = lin('#B5A382') * (0.93 + 0.1 * n2[ep, None])

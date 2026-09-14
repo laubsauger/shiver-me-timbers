@@ -20,12 +20,10 @@
  *    TEXTURE is the obvious implementation and it is the one thing we cannot
  *    afford. Hence hash-cells on the view ray.
  *
- * 3. §V.48, BOTH HALVES. A star is a sub-pixel dot — the worst case the
- *    band-limit invariant exists for. Widening alone leaves a fat smear;
- *    fading alone leaves a crawling step. Both are applied through
- *    `src/ship/bandLimit`, which is the single owner of the 2-px floor and the
- *    energy ratio: this is the project's TENTH band-limited procedural
- *    feature, not a new idea, and it does not get a private variant.
+ * 3. Subpixel stars conserve energy and filter coverage. The star-specific
+ *    disc uses four quarter-pixel samples, allowing a 1.2-pixel radius instead
+ *    of the point-sampled two-pixel floor used by material detail. This keeps
+ *    stars compact without changing the shared material anti-aliasing rule.
  *
  * ── WHY A CUBE-FACE GRID, AND WHY THE JACOBIAN IS NOT OPTIONAL ────────────
  * The field is one candidate star per cell of a grid laid over the six faces
@@ -44,7 +42,6 @@
  */
 import { Fn, float, mix, smoothstep, step, time, uniform, vec2, vec3 } from 'three/tsl';
 import * as THREE from 'three/webgpu';
-import { bandLimitAmplitude, bandLimitEnergy, bandLimitWidth } from '../ship/bandLimit';
 import { hash3 } from '../terrain/noise';
 import { hash3Cpu } from '../terrain/noiseCpu';
 import type { SkyParams } from '../params/sky';
@@ -179,18 +176,23 @@ export function starsPerSteradian(cellsPerEdge: number): number {
   return 1 / (cell * cell);
 }
 
-/**
- * §V.48b's amplitude ratio in its 2D (disc) form.
- *
- * The exponent is 2 and not 1 because a star is a DISC: its integrated flux
- * goes as r², so this is the factor that holds flux constant while half (a)
- * widens the disc to the sample grid — i.e. the mean the pixel should have
- * seen. `bandLimitEnergy` is the 1D owner and is squared here rather than
- * re-derived, so the 2-px floor stays in one place.
- */
+/** Radius floor for the four-sample star disc; material detail retains its own filter. */
+export const STAR_FILTER_RADIUS = 1.2;
+
+/** Disc energy compensation, paired with the GPU radius below. */
 export function bandLimitEnergy2D(trueRadius: number, pixelAngle: number): number {
-  const r = bandLimitEnergy(trueRadius, pixelAngle);
-  return r * r;
+  const ratio = Math.max(0, trueRadius) / Math.max(trueRadius, STAR_FILTER_RADIUS * pixelAngle, EPS);
+  return ratio * ratio;
+}
+
+/** CPU coverage mirror for subpixel-motion regression. Coordinates are pixels. */
+export function starPixelProfile(x: number, y: number, radius: number): number {
+  let sum = 0;
+  for (const dx of [-0.25, 0.25]) for (const dy of [-0.25, 0.25]) {
+    const t = Math.min(1, Math.hypot(x + dx, y + dy) / Math.max(radius, EPS));
+    sum += 1 - t * t * (3 - 2 * t);
+  }
+  return sum * 0.25;
 }
 
 /**
@@ -361,12 +363,19 @@ export function createStarfield(p: SkyParams) {
     // twice the radius and a quarter of the peak. Over-estimating is the safe
     // direction for an edge, but "safe" here means "silently deletes the
     // feature", so the override exists (see bandLimit.ts's own note).
-    const pixelAngle = dir.dFdx().length().max(dir.dFdy().length()).max(EPS).toVar();
-    const dist = dir.sub(starDir).length();
-    const ratio = bandLimitAmplitude(uRadius, dir, pixelAngle).toVar();
-    const drawn = bandLimitWidth(uRadius, dir, pixelAngle).toVar();
-    const profile = smoothstep(0, drawn, dist).oneMinus();
-    const energy = ratio.mul(ratio); // a disc's flux goes as r², not as r
+    const dx = dir.dFdx().toVar();
+    const dy = dir.dFdy().toVar();
+    const pixelAngle = dx.length().max(dy.length()).max(EPS).toVar();
+    const drawn = uRadius.max(pixelAngle.mul(STAR_FILTER_RADIUS)).max(EPS).toVar();
+    const delta = dir.sub(starDir).toVar();
+    // Four coverage samples share one star lookup/hash. Sampling the local
+    // ray differential avoids another cube-face lookup at each subpixel.
+    let profile: AnyNode = float(0);
+    for (const x of [-0.25, 0.25]) for (const y of [-0.25, 0.25]) {
+      const distance = delta.add(dx.mul(x)).add(dy.mul(y)).length();
+      profile = profile.add(smoothstep(0, drawn, distance).oneMinus().mul(0.25));
+    }
+    const energy = uRadius.div(drawn).pow(2);
 
     // ── 5. twinkle (§B.4, §V.55) ────────────────────────────────────────
     // §B.4 was one shared time phase making every ocean sparkle cell flip in

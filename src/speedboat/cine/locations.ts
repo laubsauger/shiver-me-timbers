@@ -15,7 +15,7 @@
  */
 import type { Vec2 } from '../../race/types';
 
-export type LocationId = 'bay' | 'openSwell' | 'rockyPoint' | 'towerTip' | 'knuckleGap' | 'horizon';
+export type LocationId = 'bay' | 'bayDetail' | 'bayThrottle' | 'swellHead' | 'horizonInbound' | 'openSwell' | 'rockyPoint' | 'towerTip' | 'knuckleGap' | 'horizon';
 
 export interface Location {
   id: LocationId;
@@ -42,6 +42,32 @@ export const LOCATIONS: Readonly<Record<LocationId, Location>> = {
     k: 0.0,
     why: 'Full swell shadow (K 0.0) ~90 m off the NE shore of Tower Cay: the glassiest water on the map, 10 m deep, the island silhouette and the sunset behind her.',
   },
+  bayDetail: {
+    id: 'bayDetail',
+    label: 'Tower Cay lee bay, turned to the sun',
+    at: [140, -330],
+    // the same mooring as `bay`, parked pointing NNE (heading 150°): the setting sun then stands 30° aft of her
+    // STARBOARD beam and rakes the flank the detail lenses (01–03, keys at body +x) look along. Pointing east (`bay`)
+    // put that flank in its own shadow with the sun dead astern: the 27 and the orange band were black against amber
+    // (720p look pass, three headings side by side: east, 150° and 120°/6°; 150° reads the livery and keeps the rake)
+    path: [[140, -330], [440, -850]],
+    depthM: 14.6,
+    k: 0.0,
+    why: 'The bay mooring (at rest, no path driven), turned so the low sun lights the side the detail shots see.',
+  },
+  bayThrottle: {
+    id: 'bayThrottle',
+    label: 'Tower Cay lee bay, sun on the throttle',
+    at: [140, -330],
+    // the bay spot again, bow SSE (heading 20°): the throttle quadrant is on her PORT side (Throttle_LOD0 x −0.36), and
+    // this puts the low western sun across it from the side and a little behind, where a lens looking aft from the dash
+    // gets a raking key on the knuckles and the levers instead of a silhouette against the sunset (06 review: "the hand
+    // is a near-black silhouette against the sun"). She only makes ~20 m of way in the take, well short of the island.
+    path: [[140, -330], [208, -142]],
+    depthM: 14.6,
+    k: 0.0,
+    why: 'The bay, turned so the sunset side-lights the port throttle quadrant for the 06 macro insert.',
+  },
   openSwell: {
     id: 'openSwell',
     label: 'West reach, open swell',
@@ -52,6 +78,27 @@ export const LOCATIONS: Readonly<Record<LocationId, Location>> = {
     depthM: 30,
     k: 1.0,
     why: 'Up-swell of the whole group: K 1.0 and 28-45 m of water for a kilometre, nothing on the horizon to the west.',
+  },
+  swellHead: {
+    id: 'swellHead',
+    label: 'North-west reach, into the swell',
+    at: [-730, 675],
+    // heading −32.4° (NNW), head-on INTO the swell (it travels (0.536, −0.844), oceanMath.swellSpectrum): the jump triple
+    // 14a–c ran the openSwell line WITH the swell, which on the retuned `open` sea gives no air at all
+    path: [[-300, 0], [-1157, 1351]],
+    depthM: 26.5,
+    k: 1.0,
+    why: 'Up-swell of the whole group, 1.6 km long, K 1.00 all along, 26.5 m at the shallowest, 103 m to the nearest collider; running into the swell gives the launches.',
+  },
+  horizonInbound: {
+    id: 'horizonInbound',
+    label: 'West reach, inbound out of the sunset',
+    at: [-700, 260],
+    // the `horizon` line driven the other way (heading +x): out of the western horizon toward a lens looking into the sun
+    path: [[-2800, 260], [-650, 260]],
+    depthM: 34,
+    k: 1.0,
+    why: 'The horizon line reversed, for the intro: open water to the edge of the world behind her, nothing on that bearing.',
   },
   rockyPoint: {
     id: 'rockyPoint',

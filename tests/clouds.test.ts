@@ -48,6 +48,7 @@ import {
   bandSkyAt,
   bandSunAt,
   bandNonDegenerate,
+  bandProjectionRange,
 } from '../src/clouds/cloudBands';
 import {
   cloudParams,
@@ -1789,116 +1790,67 @@ describe('§T.119(b) no perfect circle anywhere in the silhouette', () => {
   });
 });
 
-describe('§B91 the banded deck stops drawing where its own map degenerates', () => {
+describe('banded cloud projection has no horizontal shelf', () => {
   const p = PRISTINE;
-  /** eye at 2 m under the shipped 2100 m deck */
-  const RISE = p.bandAltitude - 2;
-  /** sin(elevation) at which `bandRange` starts clamping */
-  const UP_CLAMP = RISE / p.bandRange;
+  const rise = p.bandAltitude - 2;
+  const oldCutoff = rise / p.bandRange;
+  const weight = (up: number): number => bandNonDegenerate(up, rise, p.bandRange, p.bandDegenerateFade);
 
-  it('THE DEFECT: below the clamp the hit point carries NO elevation information', () => {
-    // User, on a night frame: "the clouds bending 90° and pointing vertically
-    // into the sea". It is not a bend. Once `rise/up` exceeds `bandRange` the
-    // clamp freezes the ray/plane hit onto a circle of CONSTANT RADIUS, so the
-    // sampled field depends on azimuth alone — every feature is then painted
-    // as a column of constant value, i.e. a mathematically exact vertical
-    // stripe. This states the degeneracy directly: two rays at the same
-    // azimuth and different elevations land on the same point.
-    const hitRadius = (up: number): number =>
-      Math.min(Math.max(1e-4, RISE) / Math.max(1e-4, up), p.bandRange);
-    expect(hitRadius(UP_CLAMP * 0.5)).toBe(hitRadius(UP_CLAMP * 0.1));
-    // ...and the elevation it reaches to is 3.5°, high enough to be a band of
-    // sky rather than a hairline
-    expect((Math.asin(UP_CLAMP) * 180) / Math.PI).toBeGreaterThan(2);
-  });
-
-  it('...and horizonFade alone does NOT cover it, which is why it shipped', () => {
-    // the layer already had a horizon fade; at the top of the degenerate zone
-    // it is still ~0.75, so the stripes rendered at nearly full strength
-    const fade = (up: number): number => 1 - Math.exp(-up / Math.max(1e-4, p.bandHorizonFade));
-    expect(fade(UP_CLAMP)).toBeGreaterThan(0.5);
-  });
-
-  it('THE FIX: structure is exactly 0 through the whole degenerate zone', () => {
-    const nd = (up: number): number =>
-      bandNonDegenerate(up, RISE, p.bandRange, p.bandDegenerateFade);
-    // ...including at the mathematical horizon, exactly — `range` is
-    // `min(reach, bandRange)`, so the ratio is 1 there and no EPS floor leaks
-    // a fraction of a percent of structure through
-    expect(nd(0)).toBe(0);
-    expect(nd(UP_CLAMP * 0.01)).toBe(0);
-    expect(nd(UP_CLAMP * 0.99)).toBe(0);
-    expect(nd(UP_CLAMP)).toBe(0);
-    // ...and it is fully back well inside a degree of sky above the clamp
-    expect(nd(UP_CLAMP / (1 - p.bandDegenerateFade))).toBeCloseTo(1, 6);
-    expect(nd(1)).toBe(1);
-  });
-
-  it('AND IT CLOSES THE HORIZONTAL LINE, the half a horizon fade misses', () => {
-    // The second symptom, and the one that made the first attempt at this fix
-    // wrong. Immediately ABOVE the clamp the coordinate's screen footprint is
-    // enormous and `bandLimitAmplitude` has already taken the structure to ~0;
-    // immediately BELOW, the frozen hit point collapses that footprint and the
-    // structure snaps back to full. That step is the dead-straight horizontal
-    // cut across the whole sky in docs/raft2100/lookdev/pitch/night.png, at
-    // ~3.8° by pixel count against a clamp computed at 3.53°.
-    //
-    // A weight that is 1 at the boundary and falls only below it removes the
-    // stripes and LEAVES THE LINE. So the property is that the weight is
-    // already 0 at the boundary and rises continuously from there — no step
-    // anywhere, in either direction.
-    const nd = (up: number): number =>
-      bandNonDegenerate(up, RISE, p.bandRange, p.bandDegenerateFade);
-    let prev = 0;
-    let biggestStep = 0;
-    const N = 4000;
-    for (let i = 0; i <= N; i++) {
-      const v = nd((i / N) * UP_CLAMP * 4);
-      expect(v).toBeGreaterThanOrEqual(prev - 1e-12); // monotone: never a dip
-      biggestStep = Math.max(biggestStep, v - prev);
-      prev = v;
+  it('keeps changing below the old hard range limit without exceeding the bound', () => {
+    const oldRange = (up: number): number => Math.min(rise / up, p.bandRange);
+    expect(oldRange(oldCutoff * 0.5)).toBe(oldRange(oldCutoff * 0.9));
+    let previous = p.bandRange;
+    for (let i = 1; i <= 1000; i++) {
+      const range = bandProjectionRange(i / 1000, rise, p.bandRange);
+      expect(range).toBeLessThan(previous);
+      expect(range).toBeGreaterThan(0);
+      previous = range;
     }
-    // no jump anywhere near the size of the 0→1 snap the bug drew
-    expect(biggestStep).toBeLessThan(0.02);
+    expect(bandProjectionRange(0, rise, p.bandRange)).toBeCloseTo(p.bandRange, 9);
+    expect(bandProjectionRange(1, rise, p.bandRange) / rise).toBeGreaterThan(0.995);
   });
 
-  it('and it dissolves into the layer\'s own MEAN, not into a hole (§V70)', () => {
-    // the veil must still THIN toward the sea — the night reference has it
-    // brightening as it approaches the water — so the degenerate zone loses
-    // its STRUCTURE, not its coverage. `bandShapeAt` at resolved 0 is exactly
-    // `bandFarMean`, which is what an infinitely distant pixel really sees.
+  it('has no derivative jump across the old cutoff', () => {
+    const h = oldCutoff * 1e-4;
+    const r = (up: number): number => bandProjectionRange(up, rise, p.bandRange);
+    const left = (r(oldCutoff) - r(oldCutoff - h)) / h;
+    const right = (r(oldCutoff + h) - r(oldCutoff)) / h;
+    expect(Math.abs(left / right - 1)).toBeLessThan(0.001);
+  });
+
+  it('preserves detail below the old cutoff and fades monotonically to the horizon mean', () => {
+    expect(weight(oldCutoff)).toBe(1);
+    expect(weight(oldCutoff * 0.5)).toBeGreaterThan(0.4);
+    expect(weight(0)).toBe(0);
+    let previous = 0;
+    for (let i = 0; i <= 4000; i++) {
+      const next = weight(i / 4000 * oldCutoff * 4);
+      expect(next).toBeGreaterThanOrEqual(previous - 1e-12);
+      expect(next - previous).toBeLessThan(0.02);
+      previous = next;
+    }
     for (const field of [-1, -0.3, 0, 0.4, 1]) {
-      const atHorizon = bandShapeAt(
-        field,
-        bandNonDegenerate(1e-6, RISE, p.bandRange, p.bandDegenerateFade),
-        p,
-      );
-      expect(atHorizon).toBeCloseTo(p.bandFarMean, 9);
-    }
-    expect(p.bandFarMean).toBeGreaterThan(0);
-  });
-
-  it('no view elevation in the degenerate zone keeps ANY structure', () => {
-    // the sweep the §V22 reviewer would otherwise have to do by eye
-    const full = Math.abs(bandShapeAt(1, 1, p) - bandShapeAt(-1, 1, p));
-    expect(full).toBeGreaterThan(0.1); // the control: there IS structure to lose
-    for (let i = 0; i <= 400; i++) {
-      const up = (i / 400) * UP_CLAMP;
-      const resolved = bandNonDegenerate(up, RISE, p.bandRange, p.bandDegenerateFade);
-      const spread = Math.abs(bandShapeAt(1, resolved, p) - bandShapeAt(-1, resolved, p));
-      expect(spread, `up=${up.toFixed(6)}`).toBe(0);
+      expect(bandShapeAt(field, weight(0), p)).toBe(p.bandFarMean);
     }
   });
 
+  it('eases both endpoints without moving the detailed sky upward', () => {
+    // Invert the new range map to sample uniformly through its detail weight.
+    const at = (t: number): number => weight(oldCutoff * Math.sqrt(1 / (1 - t * p.bandDegenerateFade) ** 2 - 1));
+    const h = 1e-4;
+    expect((at(h) - at(0)) / h).toBeLessThan(0.001);
+    expect((at(1) - at(1 - h)) / h).toBeLessThan(0.001);
+    expect(p.bandDegenerateFade).toBe(0.2);
+  });
 
-  it('is finite for every hostile input a freecam can produce (§V28)', () => {
+  it('keeps the detail weight finite for invalid or below-deck camera inputs', () => {
     for (const up of [-1, 0, 1e-9, 1, NaN, Infinity]) {
-      for (const rise of [-500, 0, 2098, NaN, Infinity]) {
+      for (const height of [-500, 0, 2098, NaN, Infinity]) {
         for (const range of [0, 1, 34000, NaN, -5]) {
-          const v = bandNonDegenerate(up, rise, range, NaN);
-          expect(Number.isFinite(v)).toBe(true);
-          expect(v).toBeGreaterThanOrEqual(0);
-          expect(v).toBeLessThanOrEqual(1);
+          const value = bandNonDegenerate(up, height, range, NaN);
+          expect(Number.isFinite(value)).toBe(true);
+          expect(value).toBeGreaterThanOrEqual(0);
+          expect(value).toBeLessThanOrEqual(1);
         }
       }
     }

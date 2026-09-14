@@ -5,10 +5,11 @@
  *
  * Messages in:  { t: 'frame', boats: Float32Array, nBoats, slots: Float32Array }
  *               { t: 'tunables', v: Partial<VoiceTunables> }
+ *               { t: 'stems', on: boolean }   cine stems: render the NPC water-only stem outputs
  * Messages out: { t: 'report', data: Float32Array, count, nanResets } ~15 Hz
  */
 import { BoatSynthCore } from './synthCore';
-import { REPORT_STRIDE, SLOT_COUNT, WORKLET_NAME, type VoiceTunables } from './protocol';
+import { OUTPUT_COUNT, REPORT_STRIDE, SLOT_COUNT, WORKLET_NAME, type VoiceTunables } from './protocol';
 
 declare const sampleRate: number;
 declare function registerProcessor(name: string, ctor: new (options?: unknown) => AudioWorkletProcessorShape): void;
@@ -20,12 +21,13 @@ declare const AudioWorkletProcessor: { prototype: AudioWorkletProcessorShape; ne
 
 type InMsg =
   | { t: 'frame'; boats: Float32Array; nBoats: number; slots: Float32Array }
-  | { t: 'tunables'; v: Partial<VoiceTunables> };
+  | { t: 'tunables'; v: Partial<VoiceTunables> }
+  | { t: 'stems'; on: boolean };
 
 class BoatAudioProcessor extends AudioWorkletProcessor {
   private core = new BoatSynthCore(sampleRate, SLOT_COUNT);
   private sinceReport = 0;
-  private readonly mono: (Float32Array | undefined)[] = new Array(SLOT_COUNT);
+  private readonly mono: (Float32Array | undefined)[] = new Array(OUTPUT_COUNT);
   constructor(options?: unknown) {
     super(options);
     this.port.onmessage = (e: MessageEvent<InMsg>) => {
@@ -33,11 +35,12 @@ class BoatAudioProcessor extends AudioWorkletProcessor {
       if (!m) return;
       if (m.t === 'frame') this.core.applyFrame(m.boats, m.nBoats, m.slots);
       else if (m.t === 'tunables') this.core.setTunables(m.v);
+      else if (m.t === 'stems') this.core.stems = m.on === true;
     };
   }
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const n = outputs[0]?.[0]?.length ?? 128;
-    for (let i = 0; i < SLOT_COUNT; i++) this.mono[i] = outputs[i]?.[0];
+    for (let i = 0; i < OUTPUT_COUNT; i++) this.mono[i] = outputs[i]?.[0];
     this.core.process(this.mono, n);
     this.sinceReport += n;
     if (this.sinceReport >= sampleRate / 15) {

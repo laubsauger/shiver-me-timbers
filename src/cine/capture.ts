@@ -29,6 +29,7 @@
  * producing `Invalid BindGroup` errors out of the WebGPU backend.
  */
 import * as THREE from 'three/webgpu';
+import { sRGBTransferEOTF, sRGBTransferOETF, texture, uniform, vec4 } from 'three/tsl';
 
 async function stage<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -42,15 +43,114 @@ async function stage<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   }
 }
 
+/**
+ * SUPERSAMPLED CAPTURE (`samples`, the offline anti-aliasing). The post pipeline renders its scene pass with
+ * `samples: 0` whenever a stage reads depth (DOF, refraction — core/postPipeline.ts), so a captured frame has no
+ * anti-aliasing at all: the antenna, the rails, the hull edges and the far shoreline crawl, and a 4K master does not
+ * fix a crawl. The recorder therefore draws each output frame `samples` times with the world frozen and the
+ * projection shifted by a sub-pixel Halton offset (recorder.ts), and this class sums the subframes and resolves the
+ * mean: a jittered box filter over one pixel, the same every frame, so a thin line is stable instead of shimmering.
+ *
+ * WHERE THE COLOUR GOES. Each subframe is drawn into a half-float target with NO colour space — the post chain's own
+ * output transform (renderOutput: ACES + sRGB) is already in the pixels, so the GPU must not encode it again. The
+ * subframes are averaged in LINEAR light (decoded, summed, divided, re-encoded) — averaging display values darkens
+ * every anti-aliased edge — and the mean is written to a plain `rgba8unorm` target, so the bytes that reach the sink
+ * are exactly the display-encoded picture.
+ *
+ * The single-sample path below it (`samples` undefined) is the original capture, kept byte-for-byte for the pirate
+ * piece. Its `SRGBColorSpace` 8-bit target is an `rgba8unorm-srgb` texture on WebGPU (WebGPUTextureUtils), i.e. the
+ * GPU sRGB-encodes a picture the post chain has already encoded — see docs/cine/speedboat-trailer-v1.md §Look for the
+ * side-by-side that measured it.
+ */
+class Accumulator {
+  readonly sub: THREE.RenderTarget;
+  private readonly sum: THREE.RenderTarget;
+  readonly out: THREE.RenderTarget;
+  private readonly add: THREE.QuadMesh;
+  private readonly resolveQuad: THREE.QuadMesh;
+  private readonly count = uniform(1);
+  private readonly clear = new THREE.Color();
+
+  constructor(
+    private renderer: THREE.WebGPURenderer,
+    width: number,
+    height: number,
+  ) {
+    const float = { type: THREE.HalfFloatType, format: THREE.RGBAFormat, colorSpace: THREE.NoColorSpace, samples: 0 };
+    this.sub = new THREE.RenderTarget(width, height, { ...float, depthBuffer: true });
+    this.sum = new THREE.RenderTarget(width, height, { ...float, depthBuffer: false });
+    this.out = new THREE.RenderTarget(width, height, {
+      type: THREE.UnsignedByteType,
+      format: THREE.RGBAFormat,
+      colorSpace: THREE.NoColorSpace,
+      depthBuffer: false,
+      samples: 0,
+    });
+    const add = new THREE.NodeMaterial();
+    add.fragmentNode = vec4(sRGBTransferEOTF(texture(this.sub.texture).rgb), 1);
+    add.blending = THREE.AdditiveBlending;
+    add.transparent = true;
+    add.depthTest = false;
+    add.depthWrite = false;
+    this.add = new THREE.QuadMesh(add);
+    const resolve = new THREE.NodeMaterial();
+    resolve.fragmentNode = vec4(sRGBTransferOETF(texture(this.sum.texture).rgb.div(this.count)), 1);
+    resolve.depthTest = false;
+    resolve.depthWrite = false;
+    this.resolveQuad = new THREE.QuadMesh(resolve);
+  }
+
+  /** add the subframe just drawn into `sub` to the running sum; `first` starts a new frame */
+  accumulate(first: boolean): void {
+    const r = this.renderer;
+    const prev = r.getRenderTarget();
+    const autoClear = r.autoClear;
+    r.setRenderTarget(this.sum);
+    if (first) {
+      r.getClearColor(this.clear as Parameters<THREE.WebGPURenderer["getClearColor"]>[0]);
+      const alpha = r.getClearAlpha();
+      r.setClearColor(0x000000, 0);
+      r.clear(true, false, false);
+      r.setClearColor(this.clear, alpha);
+    }
+    r.autoClear = false;
+    this.add.render(r);
+    r.autoClear = autoClear;
+    r.setRenderTarget(prev);
+  }
+
+  /** the mean of `n` subframes, re-encoded, into `out` */
+  resolve(n: number): void {
+    const r = this.renderer;
+    const prev = r.getRenderTarget();
+    this.count.value = Math.max(1, n);
+    r.setRenderTarget(this.out);
+    this.resolveQuad.render(r);
+    r.setRenderTarget(prev);
+  }
+
+  dispose(): void {
+    this.sub.dispose();
+    this.sum.dispose();
+    this.out.dispose();
+    (this.add.material as THREE.Material).dispose();
+    (this.resolveQuad.material as THREE.Material).dispose();
+  }
+}
+
 export class Capture {
   private target: THREE.RenderTarget | null = null;
   private prev: THREE.RenderTarget | null = null;
   private packed: Uint8Array | null = null;
+  /** one accumulator per LOOK (recorder.ts `looks`): the looks of one subframe are summed side by side */
+  private accs: Accumulator[] = [];
 
+  /** `samples` set = the supersampled path (Accumulator); undefined = the original single-sample capture */
   constructor(
     private renderer: THREE.WebGPURenderer,
     public width: number,
     public height: number,
+    readonly samples?: number,
   ) {}
 
   resize(width: number, height: number): void {
@@ -59,7 +159,19 @@ export class Capture {
     this.height = height;
     this.target?.dispose();
     this.target = null;
+    for (const a of this.accs) a.dispose();
+    this.accs = [];
     this.packed = null;
+  }
+
+  /** add the subframe just drawn (look `look`) to that look's sum (supersampled path only) */
+  accumulate(first: boolean, look = 0): void {
+    this.accs[look]?.accumulate(first);
+  }
+
+  /** resolve the mean of `n` subframes of look `look` into the target `grab(look)` reads (supersampled path only) */
+  resolve(n: number, look = 0): void {
+    this.accs[look]?.resolve(n);
   }
 
   /**
@@ -81,8 +193,14 @@ export class Capture {
   }
 
   /** point the next render at our own target instead of the canvas */
-  bind(): void {
+  bind(look = 0): void {
     this.bumpNodeFrame();
+    if (this.samples !== undefined) {
+      while (this.accs.length <= look) this.accs.push(new Accumulator(this.renderer, this.width, this.height));
+      this.prev = this.renderer.getRenderTarget();
+      this.renderer.setRenderTarget((this.accs[look] as Accumulator).sub);
+      return;
+    }
     if (this.target === null) {
       this.target = new THREE.RenderTarget(this.width, this.height, {
         type: THREE.UnsignedByteType,
@@ -103,8 +221,8 @@ export class Capture {
   }
 
   /** tightly packed, top-down RGBA — ready to POST as-is */
-  async grab(): Promise<Uint8Array> {
-    const t = this.target;
+  async grab(look = 0): Promise<Uint8Array> {
+    const t = this.samples !== undefined ? (this.accs[look]?.out ?? null) : this.target;
     if (t === null) throw new Error('cine: grab() without bind()');
     const w = this.width;
     const h = this.height;
@@ -127,6 +245,8 @@ export class Capture {
   dispose(): void {
     this.target?.dispose();
     this.target = null;
+    for (const a of this.accs) a.dispose();
+    this.accs = [];
     this.packed = null;
   }
 }

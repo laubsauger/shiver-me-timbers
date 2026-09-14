@@ -201,15 +201,22 @@ describe('§T.183 audio hooks the page owes the sink', () => {
       });
       let time = 0;
       let perTick = 0;
+      let hardest = 0;
       for (let tick = 1; tick <= 40; tick++) {
         time += SIM_DT;
         npcs.recordTick(tick, time);
         npcs.pump(tick);
         npcs.pump(tick);
-        perTick += npcs.fleet.readOut(0, B.SLAM_IMPULSE);
+        const slam = npcs.fleet.readOut(0, B.SLAM_IMPULSE);
+        perTick += slam;
+        hardest = Math.max(hardest, slam);
       }
+      // the landing is heard: some tick publishes an entry slam. NOT the signed sum over the window — the contact's
+      // impulse also carries the momentum a shrinking section sheds (negative), so after the touchdown the sum can go
+      // either way with the sea under the spawn (it went −190 N·s when the realised sea lost its √2, oceanMath
+      // H0_AMPLITUDE_SCALE)
+      expect(hardest).toBeGreaterThan(0);
       // never reset: the published sum is every collected tick's slam (one tick per request here)
-      expect(perTick).toBeGreaterThan(0);
       expect(npcs.contact(0).slamImpulse).toBeCloseTo(perTick, 6);
       for (let i = 0; i < 2; i++) {
         expect(npcs.contact(i).wettedArea).toBeGreaterThan(1); // afloat at the spawn: real wetted area, not the sink's default

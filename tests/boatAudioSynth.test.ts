@@ -11,7 +11,12 @@
  *  - UNDERWATER EXHAUST: idle through the hub is darker than the same idle in air.
  *  - LIMITER BOUNCE: airborne at the limit the loudness is chopped at the bounce rate (the fuel cut
  *    silences combustion) — an envelope line between 4 and 25 Hz, or the limiter is inaudible.
- *  - LANDING: the boom lands in the 50–120 Hz band the design doc names.
+ *  - IDLE (T206, playtest "weird, not V8 brrr"): the idle is dark (body under 400 Hz, nothing ringing in 400–1500 Hz,
+ *    no narrow tone above 1.5 kHz in ANY voice — the boat-select grid idles all four) yet still warm in 150–400 Hz,
+ *    and the cam lope puts more energy on the half orders than the T183 idle did.
+ *  - IMPACTS (T206, playtest "boomy, sine-wavy" / "too white-noisy, too high"): a hit is a hull thwack, not a sine
+ *    and not hiss. A landing's energy sits in the 150–600 Hz body with a noise sub under it, no single bin holds it,
+ *    and its spray tail stops under 8 kHz; a chop slap is dark, short, and much lighter than a landing.
  *  - SCHEDULE / DETERMINISM: identical frames render identical samples, and every continuous input
  *    ramps linearly over RAMP_SECONDS (a step would click).
  *  - NaN / CPU: sim garbage must not poison the audio thread, and 8 boats must render faster than
@@ -22,7 +27,7 @@
 import { describe, expect, it } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { BoatSynthCore, CONTROL_SAMPLES, RAMP_SECONDS, Ramp } from '../src/audio/boat/synthCore';
-import { BI, BOAT_STRIDE, SI, SLOT_COUNT, SLOT_STRIDE, LAYER_ENGINE, LAYER_WATER, kindIndex } from '../src/audio/boat/protocol';
+import { BI, BOAT_STRIDE, OUTPUT_COUNT, SI, SLOT_COUNT, SLOT_STRIDE, STEM_WATER_OUTPUT0, LAYER_ENGINE, LAYER_WATER, kindIndex } from '../src/audio/boat/protocol';
 import { ENGINE_SPECS, type VoiceKind } from '../src/audio/boat/engineModel';
 import { DopplerTrack, RampClock, airAbsorptionCutoffHz, distanceGain } from '../src/audio/boat/mixMath';
 import { boatAudioParams as P } from '../src/audio/boat/params';
@@ -177,6 +182,20 @@ function centroid(mag: Float64Array, hi = 8000): number {
   }
   return num / den;
 }
+/** narrow tones: local maxima ≥ 6× the ±150 Hz median and within 50 dB of the spectrum's peak */
+function narrowPeaks(mag: Float64Array, lo: number, hi: number): number[] {
+  const b = binHz();
+  let max = 0;
+  for (let i = 1; i < mag.length; i++) max = Math.max(max, mag[i]);
+  const w = Math.round(150 / b);
+  const out: number[] = [];
+  for (let i = Math.round(lo / b); i < Math.round(hi / b); i++) {
+    if (!(mag[i] > mag[i - 1] && mag[i] >= mag[i + 1]) || !(mag[i] > 0.003 * max)) continue;
+    const win = Array.from(mag.slice(i - w, i + w)).sort((x, y) => x - y);
+    if (mag[i] > 6 * win[win.length >> 1]) out.push(Math.round(i * b));
+  }
+  return out;
+}
 const rms = (x: Float32Array, a: number, b: number): number => {
   let s = 0;
   for (let i = Math.round(a * SR); i < Math.round(b * SR); i++) s += x[i] * x[i];
@@ -270,6 +289,38 @@ describe('§T.183 V8 character', () => {
     expect(centroid(magSpectrum(under, SR / 2))).toBeLessThan(0.7 * centroid(magSpectrum(air, SR / 2)));
   });
 
+  it('T206 idle is a dark, lumpy burble: body under 400 Hz but warm, lope on the half orders, no ring or whine', () => {
+    const rpm = 648;
+    const [out] = render(3, engineOnly({ throttle: 0, advance: 0, immersion: 1, rpm }));
+    const mag = magSpectrum(out, SR / 2);
+    const tot = bandEnergy(mag, 20, 20000);
+    // T183 idle: centroid 306 Hz, 2 % in 400–1500 Hz (the Q 7 bubble re-pitched at random: a "bloop" melody)
+    expect(centroid(mag)).toBeLessThan(260);
+    expect(bandEnergy(mag, 400, 1500) / tot).toBeLessThan(0.01);
+    // dark is not a sub hum: the warm band keeps real energy
+    expect(bandEnergy(mag, 150, 400) / tot).toBeGreaterThan(0.05);
+    expect(narrowPeaks(mag, 1500, 12000)).toEqual([]);
+    // order analysis on ONE engine (a detuned triple's orders do not line up bin for bin)
+    const [one] = render(3, engineOnly({ engines: 1, throttle: 0, advance: 0, immersion: 1, rpm }));
+    const m1 = magSpectrum(one, SR / 2);
+    const cyc = rpm / 120;
+    let half = 0;
+    let firing = 0;
+    for (let k = 1; k <= 60; k++) {
+      const e = bandEnergy(m1, k * cyc - 1.2, k * cyc + 1.2);
+      if (k % 8 === 0) firing += e;
+      else half += e;
+    }
+    // T183 idle 0.33: its lope was per-firing white variance, which spreads into noise instead of onto the cycle orders
+    expect(half / firing).toBeGreaterThan(0.55);
+  });
+
+  it.each(['v8', 'turbine', 'twoStroke', 'electric'] as VoiceKind[])('T206 no narrow tone above 1.5 kHz at idle (boat-select grid): %s', (kind) => {
+    const [out] = render(3, engineOnly({ kind, throttle: 0, advance: 0, immersion: 1 }));
+    // T204 fixed the turbine's 4.9 kHz; its 2.06 kHz blade-pass trace still stood 18 dB out of the idle roar
+    expect(narrowPeaks(magSpectrum(out, SR / 2), 1500, 12000)).toEqual([]);
+  });
+
   it('limiter bounce is audible: airborne at the limit, the loudness envelope has a line at the bounce rate (4–25 Hz)', () => {
     const [out] = render(6, (t) => ({
       boats: [{ engines: 1, throttle: 1, advance: 41, immersion: t < 3 ? 0.85 : 0, wet: t < 3 ? 1 : 0 }],
@@ -338,19 +389,53 @@ function magSpectrumSmall(x: Float32Array): Float64Array {
 }
 
 describe('§T.183 water layer', () => {
-  it('a landing puts a boom in the 50–120 Hz band; planing hiss grows with wetted speed', () => {
-    const outs = render(3, (t) => ({
-      boats: [{ throttle: 0, advance: 20, speed: 20, landing: Math.abs(t - 1) < 0.008 ? 1 : 0 }],
-      slots: [{ boat: 1, mask: LAYER_WATER }],
-    }));
-    const before = magSpectrum(outs[0], Math.round(0.2 * SR), 1 << 14);
-    const after = magSpectrum(outs[0], Math.round(1.0 * SR), 1 << 14);
-    const b = (m: Float64Array): number => {
-      let e = 0;
-      for (let i = Math.round(50 / (SR / (1 << 14))); i <= Math.round(120 / (SR / (1 << 14))); i++) e += m[i] * m[i];
-      return e;
-    };
-    expect(b(after)).toBeGreaterThan(20 * b(before));
+  const S14 = 1 << 14;
+  const b14 = SR / S14;
+  const band14 = (m: Float64Array, lo: number, hi: number): number => {
+    let e = 0;
+    for (let i = Math.max(1, Math.round(lo / b14)); i <= Math.min(m.length - 1, Math.round(hi / b14)); i++) e += m[i] * m[i];
+    return e;
+  };
+  /** still water (no hiss, no spray roar): only the event sounds */
+  const event = (kind: 'slam' | 'landing', strength: number) =>
+    render(2, (t) => ({ boats: [{ throttle: 0, advance: 0, speed: 0, wet: 0, [kind]: Math.abs(t - 0.5) < 0.008 ? strength : 0 }], slots: [{ boat: 1, mask: LAYER_WATER }] }))[0];
+
+  it('T206 a landing is a hull hit, not a sine boom: body in 150–600 Hz, a noise sub under it, spray tail under 8 kHz', () => {
+    const x = event('landing', 1);
+    const m = magSpectrum(x, Math.round(0.48 * SR), S14);
+    const tot = band14(m, 1, 24000);
+    // T183: a sine gliding 112 → 50 Hz put 93 % of the hit under 120 Hz and 42 % in its three strongest bins
+    expect(band14(m, 150, 600)).toBeGreaterThan(band14(m, 1, 120));
+    expect(band14(m, 150, 600) / tot).toBeGreaterThan(0.25);
+    expect(band14(m, 1, 120) / tot).toBeGreaterThan(0.05);
+    let best = 1;
+    for (let i = 1; i < m.length - 1; i++) if (m[i] > m[best]) best = i;
+    expect((m[best - 1] ** 2 + m[best] ** 2 + m[best + 1] ** 2) / tot).toBeLessThan(0.15);
+    // the spray tail after the body: band-limited droplets, not a steady hiss to 20 kHz
+    const tail = magSpectrum(x, Math.round(0.62 * SR), S14);
+    expect(band14(tail, 8000, 24000) / band14(tail, 1, 24000)).toBeLessThan(0.01);
+    expect(band14(tail, 400, 5000) / band14(tail, 1, 24000)).toBeGreaterThan(0.5);
+  });
+
+  it('T206 a chop slap is dark, short, and lighter than a landing; harder slaps are louder', () => {
+    const slap = event('slam', 0.3);
+    const m = magSpectrum(slap, Math.round(0.48 * SR), S14);
+    const tot = band14(m, 1, 24000);
+    // T183: a 1.3 kHz highpass of white noise put 62 % of the slap above 8 kHz (centroid 11 kHz)
+    expect(band14(m, 8000, 24000) / tot).toBeLessThan(0.02);
+    let num = 0;
+    for (let i = 1; i < m.length; i++) num += i * b14 * m[i] * m[i];
+    const c = num / tot;
+    expect(c).toBeGreaterThan(400);
+    expect(c).toBeLessThan(2500);
+    const land = event('landing', 1);
+    expect(rms(slap, 0.5, 0.8)).toBeLessThan(0.3 * rms(land, 0.5, 0.8));
+    // short: 0.25 s after the hit a slap has all but gone, a landing's body and spray still ring
+    expect(rms(slap, 0.75, 1.0)).toBeLessThan(0.1 * rms(land, 0.75, 1.0));
+    expect(rms(event('slam', 0.5), 0.5, 0.8)).toBeGreaterThan(1.4 * rms(event('slam', 0.18), 0.5, 0.8));
+  });
+
+  it('planing hiss grows with wetted speed', () => {
     const hiss = (speed: number): number => rms(render(1.5, () => ({ boats: [{ advance: speed, speed, throttle: 0 }], slots: [{ boat: 1, mask: LAYER_WATER }] }))[0], 0.5, 1.5);
     expect(hiss(35)).toBeGreaterThan(3 * hiss(8));
   });
@@ -387,6 +472,53 @@ describe('§T.183 schedule, determinism, robustness, cost', () => {
     expect(same(a[0], b[0])).toBe(true);
     expect(same(a[1], b[1])).toBe(true);
     expect(a[0].some((v) => v !== 0)).toBe(true);
+  });
+
+  it('cine SFX stems: the game outputs are bit-identical with stems on, and mix − water stem is the engine alone', () => {
+    const scene = (mask: number) => (t: number) => ({
+      boats: [{ throttle: t < 0.5 ? 0 : 0.9, advance: t * 12, speed: t * 12, immersion: 0.8, slam: Math.abs(t - 0.8) < 0.01 ? 0.5 : 0, landing: Math.abs(t - 1.5) < 0.01 ? 1 : 0 }],
+      slots: [{ boat: -1, mask: 0 }, { boat: -1, mask: 0 }, { boat: 1, mask, gain: 0.6, airHz: 5000 }],
+    });
+    const stemCore = (): BoatSynthCore => {
+      const c = new BoatSynthCore(SR, SLOT_COUNT);
+      c.stems = true;
+      return c;
+    };
+    const n = Math.round(2.2 * SR);
+    const run = (core: BoatSynthCore, mask: number): Float32Array[] => {
+      const outs = Array.from({ length: OUTPUT_COUNT }, () => new Float32Array(n));
+      for (let s = 0; s < n; s += FRAME) {
+        const { boats, slots } = scene(mask)(s / SR);
+        const bb = new Float32Array(BOAT_STRIDE);
+        packCtl(bb, 0, boats[0]);
+        const ss = new Float32Array(SLOT_COUNT * SLOT_STRIDE);
+        slots.forEach((sl, i) => {
+          const o = i * SLOT_STRIDE;
+          ss[o + SI.BOAT] = sl.boat;
+          ss[o + SI.FULL] = 1;
+          ss[o + SI.GAIN] = sl.gain ?? 1;
+          ss[o + SI.AIR_HZ] = sl.airHz ?? 18000;
+          ss[o + SI.MASK] = sl.mask;
+        });
+        core.applyFrame(bb, 1, ss);
+        for (let q = 0; q < FRAME && s + q < n; q += 128) {
+          const m = Math.min(128, FRAME - q, n - s - q);
+          core.process(outs.map((o) => o.subarray(s + q, s + q + m)), m);
+        }
+      }
+      return outs;
+    };
+    const off = run(new BoatSynthCore(SR, SLOT_COUNT), 3);
+    const on = run(stemCore(), 3);
+    for (let i = 0; i < SLOT_COUNT; i++) expect(on[i].every((v, k) => Object.is(v, off[i][k]))).toBe(true);
+    const stem = on[STEM_WATER_OUTPUT0];
+    expect(off[STEM_WATER_OUTPUT0].every((v) => v === 0)).toBe(true);
+    expect(rms(stem, 0.8, 2.2)).toBeGreaterThan(1e-3);
+    // the cine engine stem is the NPC panner minus the water mirror: that difference must be the engine layer alone
+    const engine = run(stemCore(), 1)[2];
+    let err = 0;
+    for (let k = 0; k < n; k++) err = Math.max(err, Math.abs(on[2][k] - stem[k] - engine[k]));
+    expect(err).toBeLessThan(1e-5);
   });
 
   it('slot gain changes ramp: no sample-to-sample step larger than the ramp allows', () => {

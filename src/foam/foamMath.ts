@@ -441,10 +441,15 @@ export function minEigenvalue(trace: number, det: number): number {
  * carries, and for the same reason (§V36: a gate whose σ silently drifts).
  * ---------------------------------------------------------------------- */
 
-/** E[λ−] − 1, per unit of λ·jacobianRms. Negative: λ− ≤ ½·tr always. */
-export const EIGEN_MEAN_PER_TRACE = -0.592;
+/**
+ * E[λ−] − 1, per unit of λ·jacobianRms. Negative: λ− ≤ ½·tr always.
+ * −0.592 → −0.419 and 0.754 → 0.533 (÷√2, exact: λ− − 1 is linear in the gradients) when the realised sea stopped
+ * carrying √2 the height its spectrum books (oceanMath `H0_AMPLITUDE_SCALE`): the constants were measured on the
+ * realised field against the booked jacobianRms, so they carried the same factor. The gate keeps its σ-multiple.
+ */
+export const EIGEN_MEAN_PER_TRACE = -0.419;
 /** σ(λ−) per unit of λ·jacobianRms. */
-export const EIGEN_SIGMA_PER_TRACE = 0.754;
+export const EIGEN_SIGMA_PER_TRACE = 0.533;
 
 /** where λ− sits on an undisturbed sea of this band — NOT 1 (see above) */
 export function eigenRestValue(traceRms: number, choppiness: number): number {

@@ -277,8 +277,9 @@ describe('§T.195 the sim foam churns each hull at its OWN velocity (vessel mode
       return { x: v.x, z: v.z, radius: v.radius, vx: v.vx, vz: v.vz, lift: 1, depth: 0.3 };
     };
     const frame = { hullVelX: 10, hullVelZ: 0, lift: 1, depth: 0.3 };
+    // W8: vessel mode also gates the churn at the air-entrainment onset; 0 here isolates the per-vessel velocity
     const at = (x: number, z: number, vessels: boolean): number =>
-      simFoamRateAtCpu(cpu, x, z, 0.234, vessels ? { ...frame, vessels: [slot(0), slot(1)] } : frame, p)[0];
+      simFoamRateAtCpu(cpu, x, z, 0.234, vessels ? { ...frame, vessels: [slot(0), slot(1)], airOnset: 0 } : frame, p)[0];
     // her bow is at −x (she runs −x): bury there, nothing at her transom (sternChurn 0 in this test)
     const bow = at(-9.5, 20, true);
     const stern = at(-0.5, 20, true);

@@ -323,18 +323,19 @@ export function foamDetailMask(
   coord: AnyNode,
   /**
    * MEASURED freshness in [0,1] — the breaking channel's share of this mask
-   * (foam/index.shadingNode). Optional because the wake foam (§V.10) has no
-   * such channel and the surface material passes two arguments; when it is
-   * absent the old VALUE proxy is used, which is also what makes
+   * (foam/index.shadingNode). Wake callers pass their measured age separately
+   * through detailRetire / bodyAge. When breakingShare is absent, the
+   * freshness calculation uses the VALUE proxy, which also makes
    * `breakingWeight = 0` reproduce the pre-split look bit for bit.
    */
   breakingShare?: AnyNode,
   /**
    * Local surface elevation in units of the sea's own RMS (σ), i.e. a
    * zero-mean, roughly-unit-variance "how near a wave tip is this pixel".
-   * Optional: the wake foam (§V.10) rides a ship-made surface the ocean's σ
-   * does not describe, and omitting it reproduces the un-carved dissolve
-   * exactly. See `breakup` below for why it is the elevation and not det J.
+   * Whitecaps use this to move the detail lookup with the ambient waves.
+   * Wake callers omit it: ambient RMS does not describe the ship-made
+   * surface, and the visual review found crest-height holes in the lane.
+   * See `breakup` below for why it is the elevation and not det J.
    */
   surfaceLift?: AnyNode,
   /**

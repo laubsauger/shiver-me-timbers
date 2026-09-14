@@ -18,6 +18,13 @@
  * plateau would make a rival at 1 km as loud as one at 350 m). `createPanner`/`setPannerPosition`
  * re-apply that shared model every frame, which is why this file positions its own panners.
  * Two HRTF panners only (player); NPCs are equalpower.
+ *
+ * CINE SFX STEMS (`stemTaps()`, built on first call, never before): parallel sends for the trailer's stem pass.
+ * Post-voice (post-panner), pre-bus/compressor/master; nothing in the game path is rerouted, so the mix is unchanged.
+ *   worklet out 9+k (slot k's WATER only) ─► Delay ─► Gain ─► Panner   mirrors of slot k's chain, same automation
+ *   water  = player-water panner + the 7 water mirrors
+ *   engine = player-engine panner + the 7 NPC panners (engine + water) + Gain(−1) ◄─ the 7 water mirrors
+ * +22 nodes (48 total, budget ≤ 50).
  */
 import type { AudioEngine } from '../engine';
 import { applyListenerPose, listenerPoseFromMatrix, type HasWorldMatrix, type ListenerPose } from '../emitters';
@@ -35,6 +42,8 @@ import {
   SI,
   SLOT_COUNT,
   SLOT_STRIDE,
+  STEM_WATER_OUTPUT0,
+  OUTPUT_COUNT,
   WORKLET_NAME,
   type VoiceTunables,
 } from './protocol';
@@ -76,7 +85,18 @@ export interface BoatAudio {
   slots(): readonly NpcSlot[];
   /** the load error, if the worklet failed to load (fail loud, audio never breaks the page) */
   error(): string | null;
+  /**
+   * cine stems: split SFX stems as tap nodes (connect each node of a stem into your recorder; never reroute them).
+   * engine = every engine voice (player + NPCs), water = hull slap / landing / spray / wake / hiss (player + NPCs).
+   * Post-voice, pre-master; the game mix is unchanged. null until the worklet graph exists (audio unlocked).
+   */
+  stemTaps(): BoatStemTaps | null;
   dispose(): void;
+}
+
+export interface BoatStemTaps {
+  engine: readonly AudioNode[];
+  water: readonly AudioNode[];
 }
 
 export interface BoatAudioOptions {
@@ -93,6 +113,7 @@ interface Graph {
   playerWater: PannerNode;
   npc: { delay: DelayNode; steal: GainNode; panner: PannerNode; clock: RampClock; boat: number }[];
   created: number;
+  stems: { taps: BoatStemTaps; water: { delay: DelayNode; steal: GainNode; panner: PannerNode }[]; invert: GainNode } | null;
 }
 
 function placePanner(p: PannerNode, x: number, y: number, z: number): void {
@@ -125,8 +146,8 @@ export function buildBoatGraph(ctx: BaseAudioContext, out: AudioNode, p: BoatAud
   const node = count(
     new AudioWorkletNode(ctx, WORKLET_NAME, {
       numberOfInputs: 0,
-      numberOfOutputs: SLOT_COUNT,
-      outputChannelCount: new Array(SLOT_COUNT).fill(1),
+      numberOfOutputs: OUTPUT_COUNT,
+      outputChannelCount: new Array(OUTPUT_COUNT).fill(1),
     }),
   );
   const bus = count(ctx.createGain());
@@ -157,7 +178,38 @@ export function buildBoatGraph(ctx: BaseAudioContext, out: AudioNode, p: BoatAud
     panner.connect(bus);
     npc.push({ delay, steal, panner, clock: new RampClock(), boat: -1 });
   }
-  return { node, bus, comp, playerEngine, playerWater, npc, created };
+  return { node, bus, comp, playerEngine, playerWater, npc, created, stems: null };
+}
+
+/** cine stems: the stem mirrors (see header); exported for the node-budget test */
+export function buildStemTaps(ctx: BaseAudioContext, g: Graph, p: BoatAudioParams): BoatStemTaps {
+  if (g.stems) return g.stems.taps;
+  const invert = ctx.createGain();
+  invert.gain.value = -1;
+  const water: NonNullable<Graph['stems']>['water'] = [];
+  for (let i = 0; i < NPC_SLOTS; i++) {
+    const src = g.npc[i];
+    const delay = ctx.createDelay(Math.max(0.1, p.maxDelay));
+    delay.delayTime.value = src.delay.delayTime.value;
+    const steal = ctx.createGain();
+    steal.gain.value = src.steal.gain.value;
+    const panner = directionOnlyPanner(ctx, 'equalpower');
+    const sp = src.panner as PannerNode & { positionX?: AudioParam };
+    if (sp.positionX) placePanner(panner, sp.positionX.value, src.panner.positionY.value, src.panner.positionZ.value);
+    g.node.connect(delay, STEM_WATER_OUTPUT0 + i);
+    delay.connect(steal);
+    steal.connect(panner);
+    panner.connect(invert);
+    water.push({ delay, steal, panner });
+  }
+  g.created += 1 + 3 * NPC_SLOTS;
+  const taps: BoatStemTaps = {
+    engine: [g.playerEngine, ...g.npc.map((n) => n.panner), invert],
+    water: [g.playerWater, ...water.map((w) => w.panner)],
+  };
+  g.stems = { taps, water, invert };
+  g.node.port.postMessage({ t: 'stems', on: true });
+  return taps;
 }
 
 export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBuses'>, opts: BoatAudioOptions = {}): BoatAudio {
@@ -217,6 +269,10 @@ export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBus
     nodeCount: () => graph?.created ?? 0,
     slots: () => npcSlots,
     rpmOf: (id) => reports.get(id) ?? null,
+    stemTaps: () => {
+      const ctx = engine.getContext();
+      return graph && ctx ? buildStemTaps(ctx, graph, p) : null;
+    },
 
     update(frames, dt, camera) {
       const h = Math.min(0.25, Math.max(0, finite(dt)));
@@ -289,10 +345,13 @@ export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBus
       for (let i = 0; i < NPC_SLOTS; i++) {
         const s = npcSlots[i];
         const n = g.npc[i];
+        // cine stems: the water stem mirror gets the SAME automation, so engine = NPC panner − mirror cancels the water
+        const m = g.stems?.water[i];
         const info = s.boat >= 0 ? npcInfo.get(s.boat) : undefined;
         const o = (2 + i) * SLOT_STRIDE;
         if (s.boat < 0 || !info) {
           n.steal.gain.setTargetAtTime(0, now, 0.01);
+          m?.steal.gain.setTargetAtTime(0, now, 0.01);
           continue;
         }
         let tr = tracks.get(s.boat);
@@ -302,13 +361,23 @@ export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBus
           tr.reset(info.d, p.maxDelay);
           delayTime.cancelScheduledValues(now);
           delayTime.setValueAtTime(tr.delay, now);
+          m?.delay.delayTime.cancelScheduledValues(now);
+          m?.delay.delayTime.setValueAtTime(tr.delay, now);
           n.boat = s.boat;
         } else {
           const v = tr.step(info.d, h, p.dopplerTau, p.maxDelay);
-          delayTime.linearRampToValueAtTime(v, n.clock.next(now, h));
+          const at = n.clock.next(now, h);
+          delayTime.linearRampToValueAtTime(v, at);
+          m?.delay.delayTime.linearRampToValueAtTime(v, at);
         }
         placePanner(n.panner, info.x, info.y, info.z);
-        n.steal.gain.setTargetAtTime(s.phase === 'playing' ? 1 : 0, now, s.phase === 'playing' ? 0.015 : p.stealFade / 3);
+        const stealTo = s.phase === 'playing' ? 1 : 0;
+        const stealTau = s.phase === 'playing' ? 0.015 : p.stealFade / 3;
+        n.steal.gain.setTargetAtTime(stealTo, now, stealTau);
+        if (m) {
+          placePanner(m.panner, info.x, info.y, info.z);
+          m.steal.gain.setTargetAtTime(stealTo, now, stealTau);
+        }
         slots[o + SI.BOAT] = s.boat;
         slots[o + SI.FULL] = s.full ? 1 : 0;
         slots[o + SI.GAIN] = info.gain;
@@ -334,6 +403,14 @@ export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBus
         graph.playerWater.disconnect();
         graph.bus.disconnect();
         graph.comp.disconnect();
+        if (graph.stems) {
+          for (const w of graph.stems.water) {
+            w.delay.disconnect();
+            w.steal.disconnect();
+            w.panner.disconnect();
+          }
+          graph.stems.invert.disconnect();
+        }
       }
       graph = null;
       detectors.clear();

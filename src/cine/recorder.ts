@@ -21,7 +21,7 @@
  * still shot is worthless.
  */
 import type * as THREE from 'three/webgpu';
-import { Vector2 } from 'three';
+import { Vector2, type PerspectiveCamera } from 'three';
 import type { GameLoop } from '../core/loop';
 import { Capture } from './capture';
 import type { Director } from './director';
@@ -53,6 +53,59 @@ export interface RecorderOpts {
    * gone, still rendering at 1920x1080, HUD still reading "REC".
    */
   onFinished?: (ok: boolean) => void;
+  /**
+   * SUPERSAMPLING (capture.ts `Accumulator`): draw every output frame this many times with the world frozen and the
+   * projection jittered by a sub-pixel Halton offset, and write the mean. Omitted = the original single-sample capture.
+   * Needs `camera` (the one the director drives). Jitter only — the subframes share one instant, so there is no motion
+   * blur: a shutter would need the sim stepped between subframes.
+   */
+  samples?: number;
+  camera?: PerspectiveCamera;
+  /**
+   * LOOK VARIANTS of a shot (cine/index.ts `looks`): each output frame is drawn once per look, from the SAME simulated
+   * instant — the world is frozen (dt 0) while `apply()` rewrites the sky/grade/lights and the next look is drawn and
+   * grabbed, and look 0 is put back before the sim advances. Every look goes to its own clip. The poses, the camera and
+   * the jitter are therefore identical across looks by construction, not by a deterministic re-run (which this engine
+   * does not give: two takes of one shot drift by centimetres, doc §Variants). Omitted / null = one look, `clipName`.
+   */
+  looks?: (shot: Shot) => readonly RecordLook[] | null;
+  /**
+   * MOTION BLUR: the shutter angle (deg) the `samples` subframes are spread over — 180 = half of 1/fps. The world is
+   * stepped between subframes (the loop's accumulator: boats and camera interpolate between fixed ticks at each
+   * subframe time), and the next frame starts exactly 1/fps after this one. Needs `samples` > 1. 0 / omitted = jitter
+   * only. What moves inside the shutter: everything the render interpolates or the director advances (boats, pilots,
+   * camera, dampers); what does NOT: state stepped only on the 1/60 s sim tick (sea surface time, wake, foam, spray),
+   * which a 1/60 s shutter samples at the one or two tick states that fall inside it.
+   */
+  shutter?: number;
+  /** the settings key a finished clip is recorded under at the sink (resumable records, cine/index.ts `resume`) */
+  settingsKey?: (shot: Shot) => string;
+  /** a shot was cued at shot time `t` (the run's coverage cameras cue with it) */
+  onCue?: (shot: Shot, t: number) => void;
+  /** per captured frame (look 0): null = fine, else why this take is broken (the recorder fails the shot) */
+  healthy?: (shot: Shot, frame: number) => string | null;
+}
+
+export interface RecordLook {
+  /** the clip this look's frames are written to */
+  clip: string;
+  /** which of the run's cameras draws it (cine/index.ts `cameras`): 0 = the shot's own lens */
+  camera?: number;
+  /** rewrite the world for this look (render path; no tick runs until the frame's last look is grabbed) */
+  apply(): void;
+}
+
+/** radical inverse, base b: the Halton sequence the jitter walks (index 1.., so subframe 0 is not the pixel centre) */
+export function halton(index: number, base: number): number {
+  let f = 1;
+  let r = 0;
+  let i = index;
+  while (i > 0) {
+    f /= base;
+    r += f * (i % base);
+    i = Math.floor(i / base);
+  }
+  return r;
 }
 
 export interface Progress {
@@ -122,6 +175,12 @@ export class Recorder {
   private failed: string[] = [];
   private bound = false;
   private readonly capture: Capture;
+  /** subframes per output frame (1 without supersampling) and the one being drawn */
+  private readonly samples: number;
+  private sub = 0;
+  /** the shot's looks (one without variants) and the one being drawn */
+  private looks: readonly RecordLook[] = [];
+  private look = 0;
   /**
    * Wall-clock accounting. An offline render is measured in FRAMES PER MINUTE
    * and takes hours, so "is it working" and "how long" are the two questions
@@ -142,7 +201,9 @@ export class Recorder {
     // on a retina display leaves `canvas.width` at 3840 and a capture sized
     // from the element would read back a quarter of the frame
     const size = o.renderer.getDrawingBufferSize(new Vector2());
-    this.capture = new Capture(o.renderer, Math.round(size.x), Math.round(size.y));
+    const ss = o.samples !== undefined && o.camera !== undefined ? Math.max(1, Math.round(o.samples)) : undefined;
+    this.samples = ss ?? 1;
+    this.capture = new Capture(o.renderer, Math.round(size.x), Math.round(size.y), ss);
   }
 
   get running(): boolean {
@@ -164,6 +225,15 @@ export class Recorder {
     return this.running && this.busy;
   }
 
+  /**
+   * True while a shot's preroll is being fast-forwarded: nothing of it is captured, so it need not be drawn (USER: the
+   * unrecorded run-up to steady speed must not cost full-quality frames). The render path still runs — camera dampers,
+   * boat interpolation, sea and wake updates — only the draw is skipped.
+   */
+  get prerolling(): boolean {
+    return this.phase === 'preroll';
+  }
+
   async start(): Promise<void> {
     this.startedAt = Date.now();
     this.capturedTotal = 0;
@@ -182,6 +252,10 @@ export class Recorder {
       this.capture.unbind();
       this.bound = false;
     }
+    if (this.samples > 1) this.o.camera?.clearViewOffset();
+    this.sub = 0;
+    if (this.look !== 0) this.looks[0]?.apply(); // never leave the world in a variant's sky
+    this.look = 0;
     this.capture.dispose();
     this.o.loop.setFixedDt(null);
     this.o.director.release();
@@ -197,8 +271,15 @@ export class Recorder {
    */
   beforeRender(): void {
     if (!this.running || this.busy || this.phase !== 'capture') return;
-    this.capture.bind();
+    this.capture.bind(this.look);
     this.bound = true;
+    const cam = this.o.camera;
+    if (this.samples > 1 && cam !== undefined) {
+      // a sub-pixel shift of the whole projection, AFTER the director's camera is final for this frame
+      const w = this.capture.width;
+      const h = this.capture.height;
+      cam.setViewOffset(w, h, halton(this.sub + 1, 2) - 0.5, halton(this.sub + 1, 3) - 0.5, w, h);
+    }
   }
 
   /**
@@ -230,15 +311,61 @@ export class Recorder {
     if (!this.bound) return;
     this.capture.unbind();
     this.bound = false;
+    const K = this.looks.length;
+    if (this.o.samples !== undefined && this.o.camera !== undefined) {
+      // SUPERSAMPLED: every subframe draws every look at the same instant (dt 0 between looks); subframes are spread
+      // over the shutter (motion blur) or share one instant (jitter only)
+      if (this.samples > 1) this.o.camera.clearViewOffset();
+      this.capture.accumulate(this.sub === 0, this.look);
+      if (this.look + 1 < K) {
+        this.look++;
+        (this.looks[this.look] as RecordLook).apply();
+        this.o.loop.setFixedDt(0);
+        return;
+      }
+      if (K > 1) {
+        this.look = 0;
+        (this.looks[0] as RecordLook).apply();
+      }
+      this.sub++;
+      if (this.sub < this.samples) {
+        this.o.loop.setFixedDt(this.shutterStep); // 0 without motion blur: the next subframe is the same instant
+        return;
+      }
+      this.sub = 0;
+      for (let k = 0; k < K; k++) this.capture.resolve(this.samples, k);
+      this.writeFrame(shot, 0, true);
+      return;
+    }
+    this.writeFrame(shot, this.look, false);
+  }
 
+  /** subframe spacing (s) when the shutter is open: the shutter angle's share of a frame, split over the subframes */
+  private get shutterStep(): number {
+    const deg = Math.max(0, Math.min(360, this.o.shutter ?? 0));
+    return this.samples > 1 && deg > 0 ? deg / 360 / this.fps / this.samples : 0;
+  }
+
+  /**
+   * Grab look `look` of the frame, post it, then: the next look (resolved: straight on; single-sample: draw it first),
+   * or the next frame. The world is frozen (dt 0) for the whole chain; the next frame's advance is 1/fps minus the
+   * time the shutter already moved it, so frames stay exactly 1/fps apart.
+   */
+  private writeFrame(shot: Shot, look: number, resolved: boolean): void {
     const index = this.frame;
+    const clip = (this.looks[look] as RecordLook).clip;
     this.busy = true;
     this.o.loop.setFixedDt(0); // hold the world still across readback + write
     void this.capture
-      .grab()
+      .grab(look)
       .then((bytes) => {
+        // a take whose world did not apply or whose GPU errored is not the take: fail it loudly (host check)
+        const unhealthy = look === 0 ? this.o.healthy?.(shot, index) : null;
+        if (unhealthy) throw new Error(unhealthy);
         const h = hashBytes(bytes);
-        if (h === this.lastHash && this.frame > 0) {
+        if (look > 0) {
+          // a variant's frame is a different picture of the same instant: the repeat guard watches look 0 only
+        } else if (h === this.lastHash && this.frame > 0) {
           this.repeats++;
           // TOLERANCE, not zero tolerance. Three identical frames is NOT proof
           // of a dead readback: the extreme-high shot is a near-black frame
@@ -260,9 +387,9 @@ export class Recorder {
         } else {
           this.repeats = 0;
         }
-        this.lastHash = h;
+        if (look === 0) this.lastHash = h;
         return this.postBytes(
-          `frame?shot=${encodeURIComponent(this.clipName(shot))}` +
+          `frame?shot=${encodeURIComponent(clip)}&group=${encodeURIComponent((this.looks[0] as RecordLook).clip)}` +
             `&n=${String(index).padStart(5, '0')}` +
             `&w=${this.capture.width}&h=${this.capture.height}`,
           bytes,
@@ -270,6 +397,21 @@ export class Recorder {
       })
       .then(() => {
         this.busy = false;
+        if (look + 1 < this.looks.length) {
+          if (resolved) {
+            this.writeFrame(shot, look + 1, true); // already accumulated: grab the next look now
+            return;
+          }
+          // single-sample: draw the same instant again under the next look
+          this.look = look + 1;
+          (this.looks[this.look] as RecordLook).apply();
+          this.o.loop.setFixedDt(0);
+          return;
+        }
+        if (!resolved && this.looks.length > 1) {
+          this.look = 0;
+          (this.looks[0] as RecordLook).apply(); // look 0 before the sim advances (the tick re-applies it anyway)
+        }
         this.frame++;
         this.capturedTotal++;
         this.recent.push(Date.now());
@@ -277,7 +419,7 @@ export class Recorder {
         if (this.frame >= this.frames) {
           this.nextShot();
         } else {
-          this.o.loop.setFixedDt(1 / this.fps);
+          this.o.loop.setFixedDt(1 / this.fps - this.shutterStep * (this.samples - 1));
           // every frame: the on-screen readout is the only sign of life a
           // shoot gives, and once a second is a long time to look hung
           this.report('capture');
@@ -309,11 +451,12 @@ export class Recorder {
     // them all open cost
     const finished = this.shot;
     if (finished !== null && this.frame > 0) {
-      void this.post(
-        `endshot?clip=${encodeURIComponent(this.clipName(finished))}`,
-        '',
-        'text/plain',
-      ).catch(() => undefined);
+      const key = this.o.settingsKey?.(finished);
+      for (const l of this.looks) {
+        const k = key !== undefined ? `&key=${encodeURIComponent(key)}` : '';
+        // the frame count lets the sink refuse a short take (it writes it as _FAILED, never as a valid clip)
+        void this.post(`endshot?clip=${encodeURIComponent(l.clip)}${k}&frames=${this.frames}`, '', 'text/plain').catch(() => undefined);
+      }
     }
     this.shotIndex++;
     if (this.shotIndex >= this.shots.length) {
@@ -332,6 +475,10 @@ export class Recorder {
     const shot = this.shots[this.shotIndex] as Shot;
     this.shot = shot;
     this.frame = 0;
+    this.sub = 0;
+    this.look = 0;
+    const looks = this.o.looks?.(shot) ?? null;
+    this.looks = looks !== null && looks.length > 0 ? looks : [{ clip: this.clipName(shot), apply: () => undefined }];
     this.lastHash = 0;
     this.repeats = 0;
     // A dissolve needs the OUTGOING shot to keep running under the incoming
@@ -343,6 +490,7 @@ export class Recorder {
     this.phase = 'preroll';
     this.busy = false;
     this.o.director.cue(shot, -(shot.preroll ?? 6));
+    this.o.onCue?.(shot, -(shot.preroll ?? 6));
     this.o.loop.setFixedDt(PREROLL_DT);
     this.report('preroll');
   }
@@ -361,6 +509,11 @@ export class Recorder {
     const id = this.shot?.id ?? '?';
     this.failed.push(`${id}: ${message}`);
     console.error(`[cine] ${id} FAILED — ${message}. Continuing with the next shot.`);
+    // close its clips at the sink AS FAILED, before nextShot() cues the next one
+    for (const l of this.looks) {
+      void this.post(`endshot?clip=${encodeURIComponent(l.clip)}&failed=${encodeURIComponent(message.slice(0, 200))}`, '', 'text/plain').catch(() => undefined);
+    }
+    this.frame = 0; // nextShot must not also send a normal endshot for these clips
     this.busy = false;
     this.bound = false;
     this.nextShot();

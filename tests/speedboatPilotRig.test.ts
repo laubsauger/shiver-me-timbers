@@ -31,7 +31,9 @@ import * as THREE from 'three/webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
-import { makeClipAdditiveToRest, pilotClipTimes, pilotVariantFor, seatPilots, seatSocketFromAnchors, wheelAngleFor } from '../src/speedboat/page/pilotRig';
+import { WHEEL_LOCK_RAD, cineThrottle, makeClipAdditiveToRest, pilotClipTimes, pilotVariantFor, seatPilots, seatSocketFromAnchors, wheelAngleFor } from '../src/speedboat/page/pilotRig';
+import { stepHelm } from '../src/speedboat/assists/steering';
+import { assistPreset } from '../src/speedboat/assists/settings';
 import { assetFromGltf } from '../src/speedboat/assets/boatModel';
 import { PACE_PREDICT_S, PACE_SNAP_M, createPaceDisplay, stepPaceDisplay } from '../src/speedboat/page/paceBoat';
 import { PLACEHOLDER_IDLE_RPM, PLACEHOLDER_RATED_RPM, jetStats, placeholderPropRpm } from '../src/speedboat/page/speedboatFrame';
@@ -47,7 +49,22 @@ function glbRootExtras(path: string): Record<string, unknown> {
 describe('pilot clips follow the helm', () => {
   it('right lock deflects only the right clip to its last frame; left only the left', () => {
     expect(pilotClipTimes({ steer: 1, throttle: 0 })).toEqual({ steerLeft: 0, steerRight: 1, throttle: 0 });
-    expect(pilotClipTimes({ steer: -0.5, throttle: 0 })).toEqual({ steerLeft: 0.5, steerRight: 0, throttle: 0 });
+    expect(pilotClipTimes({ steer: -1, throttle: 0 })).toEqual({ steerLeft: 1, steerRight: 0, throttle: 0 });
+    expect(pilotClipTimes({ steer: -0.5, throttle: 0 }).steerRight).toBe(0);
+  });
+
+  // USER (helm fix): "the steering wheel does not actually turn … needs to actually steer and turn properly, with the
+  // right speed". The torso/shoulder lean is the steer clip's; the wheel is `wheelAngleFor`. If the clip is scrubbed on
+  // a different curve the pilot leans into a turn the wheel has not made (or the reverse).
+  it('each steer clip is scrubbed to the frame whose baked wheel turn (90° × ease) is the drawn wheel, held past 90°', () => {
+    const ease = (t: number): number => t * t * (3 - 2 * t);
+    for (const steer of [0.05, 0.2, 0.4, 0.6, 2 / 3, 0.8, 1]) {
+      for (const s of [steer, -steer]) {
+        const t = pilotClipTimes({ steer: s, throttle: 0 });
+        const clipWheel = (Math.PI / 2) * ease(s > 0 ? t.steerRight : t.steerLeft);
+        expect(clipWheel, `steer ${s}`).toBeCloseTo(Math.min(Math.PI / 2, Math.abs(wheelAngleFor(s))), 9);
+      }
+    }
   });
 
   it('the throttle lever rides forward throttle only; reverse and garbage leave it at idle', () => {
@@ -61,6 +78,64 @@ describe('pilot clips follow the helm', () => {
       expect(pilotVariantFor(i)).not.toBe('hero');
       expect(pilotVariantFor(i)).not.toBe(pilotVariantFor(i + 1));
     }
+  });
+});
+
+describe('the wheel turns with the drive steer', () => {
+  // WHY: the page turns `Helm_LOD0` about its extras; a GLB whose wheel is merged into a static node, or lost its
+  // pivot/axis, draws a solid wheel under turning hands (createHelmTurn returns null, silently). Rivals share the hero GLB.
+  it.each(['speedboat_hero', 'speedboat_pipeline_test'])('%s.glb: Helm_LOD0 is its own node with a unit axis and its pivot on the rim socket', (name) => {
+    const b = readFileSync(new URL(`../assets/models/${name}.glb`, import.meta.url));
+    const json = JSON.parse(b.subarray(20, 20 + b.readUInt32LE(12)).toString()) as { scenes: { nodes: number[] }[]; nodes: { name?: string; mesh?: number; extras?: Record<string, unknown> }[] };
+    const helm = json.nodes.filter((n) => n.name === 'Helm_LOD0');
+    expect(helm.length).toBe(1);
+    expect(helm[0].mesh).toBeTypeOf('number');
+    const ex = helm[0].extras ?? {};
+    const vec = (v: unknown): number[] => (Array.isArray(v) && v.length === 3 && v.every(Number.isFinite) ? (v as number[]) : []);
+    expect(ex.animRole).toBe('wheel');
+    expect(vec(ex.pivot)).toHaveLength(3);
+    expect(Math.hypot(...vec(ex.axis))).toBeCloseTo(1, 3);
+    const rootExtras = json.nodes[json.scenes[0].nodes[0]].extras ?? {};
+    if (typeof rootExtras.partsSockets === 'string') {
+      const rim = (JSON.parse(rootExtras.partsSockets) as { wheelRim: { centre: number[] } }).wheelRim;
+      expect(Math.hypot(...vec(ex.pivot).map((p, i) => p - rim.centre[i]))).toBeLessThan(0.01);
+    }
+  });
+
+  // WHY: the wheel was an eased 90° of the steer — small corrections (race-speed drive angles are ≤ 12–16° of the 30°
+  // lock) barely moved it while the outboards swung. It is LINEAR in the drive angle: right drive = clockwise (−) as the
+  // pilot sees it, and 4× the outboards' angle at every instant.
+  it('sign and ratio: right drive turns it clockwise, the wheel angle is WHEEL_LOCK_RAD × the drive fraction', () => {
+    expect(WHEEL_LOCK_RAD).toBeCloseTo((120 * Math.PI) / 180, 12);
+    expect(wheelAngleFor(1)).toBeCloseTo(-WHEEL_LOCK_RAD, 12);
+    expect(wheelAngleFor(-1)).toBeCloseTo(WHEEL_LOCK_RAD, 12);
+    for (const s of [0.02, 0.1, 0.4, 0.75]) {
+      expect(wheelAngleFor(s)).toBeCloseTo(-s * WHEEL_LOCK_RAD, 12);
+      expect(wheelAngleFor(-s)).toBeCloseTo(s * WHEEL_LOCK_RAD, 12);
+    }
+    expect(wheelAngleFor(3)).toBeCloseTo(-WHEEL_LOCK_RAD, 12);
+    expect(Math.abs(wheelAngleFor(Number.NaN))).toBe(0);
+  });
+
+  // WHY: "with the right speed". The page feeds the drive angle the physics ran (the helm actuator, `stepHelm` at the
+  // assist's rate), so a stick snapped to full lock turns the wheel at the actuator's rate times the ratio — never a snap —
+  // and wheel and outboards arrive together.
+  it('a stick snap: the wheel follows the rate-limited drive, never faster than the helm rate × ratio', () => {
+    const hull = buildDeepVHull();
+    const lock = hull.drives[0].maxSteerRad;
+    const rate = (assistPreset('default').helmRateDegPerS * Math.PI) / 180;
+    const ratio = WHEEL_LOCK_RAD / lock;
+    let helm = 0;
+    let prev = wheelAngleFor(0);
+    let ticks = 0;
+    for (; ticks < 1000 && helm < lock; ticks++) {
+      helm = stepHelm(helm, 1, lock, rate, SIM_DT);
+      const wheel = wheelAngleFor(helm / lock);
+      expect(wheel).toBeCloseTo(-helm * ratio, 9); // together with the outboards
+      expect(prev - wheel).toBeLessThanOrEqual(rate * ratio * SIM_DT + 1e-9); // right = clockwise, rate-limited
+      prev = wheel;
+    }
+    expect(ticks * SIM_DT).toBeCloseTo(lock / rate, 1); // 1 s to the 30° lock at 30°/s: the wheel takes 1 s to 120° too
   });
 });
 
@@ -228,9 +303,27 @@ describe('§T.203 the hands grip the rim in the running rig', () => {
     hero.object.rotation.set(0.05, 1.1, -0.08); // a boat under way, not the identity frame
     const pilots = seatPilots(pilotGlb.gltf, pilotGlb.materials, { hero, npcs: [npc] }, 55);
     const helm = hero.object.getObjectByName('Helm_LOD0') as THREE.Object3D;
-    for (const steer of [0, 1, -1]) {
+    // each hand's grip in the TURNED wheel's frame (boat frame, the helm's turn undone): a hand that rides the rim keeps
+    // it; one that slid back because the arm ran out of reach does not. The hand PULLING the rim down (right hand in a
+    // right turn) must ride it to full lock — that bounds WHEEL_LOCK_RAD (135° slips it 3.7 cm). The hand reaching across
+    // slides along the rim past ~30° at any lock (the bake's reach), so it is held to the fingertip gaps only.
+    const gripOnWheel = (p: typeof pilots.hero, boat: THREE.Object3D, s: 'l' | 'r'): THREE.Vector3 => {
+      boat.updateMatrixWorld(true);
+      const v = new THREE.Vector3().setFromMatrixPosition((p.object.getObjectByName(`hand_${s}`) as THREE.Object3D).matrixWorld);
+      const turn = (boat.getObjectByName('Helm_LOD0') as THREE.Object3D).matrix;
+      return v.applyMatrix4(boat.matrixWorld.clone().invert()).applyMatrix4(turn.clone().invert());
+    };
+    const centred = { steer: 0, throttle: 1 };
+    pilots.update(0.4, centred, () => centred);
+    const home = { hero: { l: gripOnWheel(pilots.hero, hero.object, 'l'), r: gripOnWheel(pilots.hero, hero.object, 'r') }, npc: { l: gripOnWheel(pilots.npcs[0], npc.object, 'l'), r: gripOnWheel(pilots.npcs[0], npc.object, 'r') } };
+    for (const steer of [0, 1, -1, 0.5, -0.5]) {
       const controls = { steer, throttle: 1 };
       pilots.update(0.4, controls, () => controls);
+      for (const [who, p, boat] of [['hero', pilots.hero, hero], ['npc', pilots.npcs[0], npc]] as const) {
+        const pulling = steer >= 0 ? 'r' : 'l';
+        const slip = gripOnWheel(p, boat.object, pulling).distanceTo(home[who][pulling]);
+        expect(slip, `${who} hand ${pulling} steer ${steer}: ${(slip * 100).toFixed(1)} cm off its grip on the turned rim`).toBeLessThan(0.01);
+      }
       for (const [who, p, boat] of [['hero', pilots.hero, hero], ['npc', pilots.npcs[0], npc]] as const) {
         const gaps = fingertipGaps(p.object, boat.object);
         for (const s of ['l', 'r'] as const) {
@@ -243,6 +336,136 @@ describe('§T.203 the hands grip the rim in the running rig', () => {
       // the wheel turns under the hands by the angle they are carried round (spokes and grips agree)
       const turned = new THREE.Quaternion().setFromRotationMatrix(helm.matrix);
       expect(2 * Math.acos(Math.min(1, Math.abs(turned.w)))).toBeCloseTo(Math.abs(wheelAngleFor(steer)), 4);
+    }
+  }, 60_000);
+
+  // TRAILER close-ups (insert 06, windscreen and over-the-shoulder cams): a finger through the rim, a spoke or the throttle
+  // handles is the first thing a macro shot shows. The bake's lever grip was solved on a 22 mm cylinder while the three
+  // ganged handles are a 60 × 40 mm block: the palm sank 5.7 mm and the ring fingertip came out of the front (31 glove
+  // edges crossing). Counted on the skinned LOD0 glove against the boat's own Helm_LOD0 / Throttle_LOD0 triangles.
+  it('no glove edge passes through the helm at any lock, or through the throttle lever during the cine push', async () => {
+    const heroGlb = await loadGlb('../assets/models/speedboat_hero.glb');
+    const pilotGlb = await loadGlb('../assets/models/speedboat_pilot.glb');
+    const asset = assetFromGltf(heroGlb.gltf.scene);
+    const hero = asset.instantiate({ variant: 'hero', water: false });
+    const npc = asset.instantiate({ variant: 'hero', water: false });
+    hero.object.position.set(-8, 0.2, 30);
+    hero.object.rotation.set(-0.04, -2.3, 0.06);
+    const pilots = seatPilots(pilotGlb.gltf, pilotGlb.materials, { hero, npcs: [npc] }, 55);
+    /** triangles of a boat node and glove edges (dominant bone on the given hand), both in the boat frame */
+    const trianglesOf = (boat: THREE.Object3D, node: string): THREE.Triangle[] => {
+      boat.updateMatrixWorld(true);
+      const toBoat = boat.matrixWorld.clone().invert();
+      const out: THREE.Triangle[] = [];
+      (boat.getObjectByName(node) as THREE.Object3D).traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (!m.isMesh) return;
+        const pos = m.geometry.getAttribute('position');
+        const idx = m.geometry.getIndex();
+        const mw = toBoat.clone().multiply(m.matrixWorld);
+        const at = (k: number): THREE.Vector3 => new THREE.Vector3().fromBufferAttribute(pos, idx ? idx.getX(k) : k).applyMatrix4(mw);
+        for (let t = 0; t < (idx ? idx.count : pos.count); t += 3) out.push(new THREE.Triangle(at(t), at(t + 1), at(t + 2)));
+      });
+      return out;
+    };
+    const crossing = (pilot: THREE.Object3D, boat: THREE.Object3D, side: 'l' | 'r', tris: THREE.Triangle[]): { edges: number; closest: number } => {
+      const toBoat = boat.matrixWorld.clone().invert();
+      let mesh: THREE.SkinnedMesh | undefined;
+      pilot.traverse((o) => {
+        if ((o as THREE.SkinnedMesh).isSkinnedMesh && o.name === 'Pilot_M_Pilot_LOD0') mesh = o as THREE.SkinnedMesh;
+      });
+      const m = mesh as THREE.SkinnedMesh;
+      const geo = m.geometry;
+      const [pos, si, sw] = [geo.getAttribute('position'), geo.getAttribute('skinIndex'), geo.getAttribute('skinWeight')];
+      const onHand = new RegExp(`^(hand|thumb|index|middle|ring|pinky)(_0[123])?_${side}$`);
+      const verts = new Map<number, THREE.Vector3 | null>();
+      const vertex = (i: number): THREE.Vector3 | null => {
+        if (!verts.has(i)) {
+          let b = 0;
+          for (let k = 1; k < 4; k++) if (sw.getComponent(i, k) > sw.getComponent(i, b)) b = k;
+          const v = onHand.test(m.skeleton.bones[si.getComponent(i, b)].name) ? m.applyBoneTransform(i, new THREE.Vector3().fromBufferAttribute(pos, i)).applyMatrix4(m.matrixWorld).applyMatrix4(toBoat) : null;
+          verts.set(i, v);
+        }
+        return verts.get(i) as THREE.Vector3 | null;
+      };
+      const box = new THREE.Box3();
+      for (const t of tris) box.expandByPoint(t.a).expandByPoint(t.b).expandByPoint(t.c);
+      const ray = new THREE.Ray();
+      const hit = new THREE.Vector3();
+      const cp = new THREE.Vector3();
+      const index = geo.getIndex() as THREE.BufferAttribute;
+      let edges = 0;
+      let closest = Infinity;
+      for (let t = 0; t < index.count; t += 3) {
+        for (let e = 0; e < 3; e++) {
+          const a = vertex(index.getX(t + e));
+          const b = vertex(index.getX(t + ((e + 1) % 3)));
+          if (!a || !b) continue;
+          if (e === 0 && box.distanceToPoint(a) < 0.02) for (const tr of tris) closest = Math.min(closest, tr.closestPointToPoint(a, cp).distanceTo(a));
+          if (!new THREE.Box3().setFromPoints([a, b]).intersectsBox(box)) continue;
+          const len = a.distanceTo(b);
+          ray.set(a, b.clone().sub(a).normalize());
+          if (tris.some((tr) => ray.intersectTriangle(tr.a, tr.b, tr.c, false, hit) !== null && hit.distanceTo(a) < len)) edges++;
+        }
+      }
+      return { edges, closest };
+    };
+    for (const steer of [0, 0.5, 1, -0.5, -1]) {
+      const controls = { steer, throttle: 1 };
+      pilots.update(0.2, controls, () => controls);
+      for (const [who, p, boat] of [['hero', pilots.hero, hero], ['npc', pilots.npcs[0], npc]] as const) {
+        const helm = trianglesOf(boat.object, 'Helm_LOD0');
+        for (const s of ['l', 'r'] as const) expect(crossing(p.object, boat.object, s, helm).edges, `${who} glove ${s} through the helm at steer ${steer}`).toBe(0);
+      }
+    }
+    try {
+      cineThrottle.active = true;
+      for (const [reach, lever] of [[0.8, 0], [1, 0], [1, 0.5], [1, 1]] as const) {
+        cineThrottle.reach = reach;
+        cineThrottle.lever = lever;
+        const controls = { steer: 0, throttle: 1 };
+        for (let i = 0; i < 2; i++) pilots.update(0.2, controls, () => controls);
+        const { edges, closest } = crossing(pilots.hero.object, hero.object, 'r', trianglesOf(hero.object, 'Throttle_LOD0'));
+        expect(edges, `right glove through the throttle lever at reach ${reach}, lever ${lever}`).toBe(0);
+        if (reach === 1) expect(closest, `right glove ${(closest * 1000).toFixed(1)} mm off the handles (holding, not hovering)`).toBeLessThan(0.008);
+      }
+      // USER (night insert): "fingers mangled … not positioned so each finger takes one lever". With the lever at idle, each
+      // of index / middle / ring curls over the front of ITS handle (index on the inboard one): its fingertip glove is nearest
+      // that handle, within a few mm, and in front of the handle's centre.
+      cineThrottle.reach = 1;
+      cineThrottle.lever = 0;
+      const still = { steer: 0, throttle: 1 };
+      for (let i = 0; i < 2; i++) pilots.update(0.2, still, () => still);
+      const th = (JSON.parse(hero.object.userData.partsSockets as string) as { throttleHandle: { position: number[]; pivot: number[]; axis: number[] } }).throttleHandle;
+      const axis = new THREE.Vector3(...th.axis).normalize();
+      const up = new THREE.Vector3(...th.position).sub(new THREE.Vector3(...th.pivot));
+      up.addScaledVector(axis, -up.dot(axis)).normalize();
+      const fore = new THREE.Vector3().crossVectors(axis, up);
+      const handleCentre = (i: number): THREE.Vector3 => new THREE.Vector3(...th.position).addScaledVector(axis, i * 0.03);
+      hero.object.updateMatrixWorld(true);
+      const toBoat = hero.object.matrixWorld.clone().invert();
+      let glove: THREE.SkinnedMesh | undefined;
+      pilots.hero.object.traverse((o) => {
+        if ((o as THREE.SkinnedMesh).isSkinnedMesh && o.name === 'Pilot_M_Pilot_LOD0') glove = o as THREE.SkinnedMesh;
+      });
+      const g = glove as THREE.SkinnedMesh;
+      const [pos, si, sw] = [g.geometry.getAttribute('position'), g.geometry.getAttribute('skinIndex'), g.geometry.getAttribute('skinWeight')];
+      for (const [finger, own] of [['index', 1], ['middle', 0], ['ring', -1]] as const) {
+        const tip: THREE.Vector3[] = [];
+        for (let i = 0; i < pos.count; i++) {
+          let b = 0;
+          for (let k = 1; k < 4; k++) if (sw.getComponent(i, k) > sw.getComponent(i, b)) b = k;
+          if (g.skeleton.bones[si.getComponent(i, b)].name === `${finger}_03_r`) tip.push(g.applyBoneTransform(i, new THREE.Vector3().fromBufferAttribute(pos, i)).applyMatrix4(g.matrixWorld).applyMatrix4(toBoat));
+        }
+        const mean = tip.reduce((a, v) => a.add(v), new THREE.Vector3()).multiplyScalar(1 / tip.length);
+        const along = mean.clone().sub(handleCentre(0)).dot(axis) / 0.03;
+        expect(Math.abs(along - own), `${finger} fingertip over handle ${along.toFixed(2)} (want ${own}: index inboard, middle centre, ring outboard)`).toBeLessThan(0.5);
+        expect(mean.clone().sub(handleCentre(own)).dot(fore), `${finger} fingertip in front of its handle`).toBeGreaterThan(0.01);
+      }
+    } finally {
+      cineThrottle.active = false;
+      cineThrottle.reach = 0;
+      cineThrottle.lever = 0;
     }
   }, 60_000);
 });

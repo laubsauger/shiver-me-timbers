@@ -417,9 +417,25 @@ export interface BowSprayFleetOptions {
  * launch is `waterlineSheetLaunch`; spawn seeds along her waterline centroid ± her flux half-width, aft over
  * `bowStemLength`. §V28: every uniform finite-guarded; a non-finite emitter is not granted a slot.
  */
+/** W8 round 5 LOOK: whisker-spray drops (2 cm, |v|·1/120 s, ≤ 10 widths, ≤ 6 mrad), sprites per sheet unit, pool factor, opacity */
+export const BOW_WHISKER_BLUR = Object.freeze({ width: 0.02, shutter: 1 / 120, maxRatio: 10, angularCap: 0.006 });
+export const BOW_WHISKER_DENSITY = 8;
+export const BOW_WHISKER_POOL_FACTOR = 4;
+export const BOW_WHISKER_OPACITY = 0.5;
+
 export function createBowSprayFleet(opts: BowSprayFleetOptions = {}) {
   const slots = Math.max(1, Math.min(16, Math.floor(opts.slots ?? BOW_FLEET_SLOTS)));
-  const pool = createSprayPool(opts.count ?? sprayParams.bowCount * 4, {
+  let killY = -1e6;
+  // W8 round 5 SPRAY ROOT / WHISKER SPRAY: the planing bottom's sheet leaves as fine drops — physical motion-blur streaks
+  // (`SprayPoolOptions.motionBlur`), BOW_WHISKER_DENSITY sprites per unit of the sheet's lifted flux, killed where they
+  // fall back into the water. Only the fleet emitter; the raft/pirate `createBowSpray` pool is unchanged.
+  const pool = createSprayPool((opts.count ?? sprayParams.bowCount * 4) * BOW_WHISKER_POOL_FACTOR, {
+    droplets: true,
+    motionBlur: BOW_WHISKER_BLUR,
+    dropletAgeFalloff: 1.3,
+    dropletNearFade: [0.3, 1.5],
+    killBelow: () => killY,
+    opacity: () => BOW_WHISKER_OPACITY,
     sizeScale: () => sprayParams.bowSizeScale,
     life: () => sprayParams.bowLife,
     drag: () => sprayParams.bowDrag,
@@ -513,13 +529,16 @@ export function createBowSprayFleet(opts: BowSprayFleetOptions = {}) {
         const b = e.bow;
         const ok = b.inContact && [b.x, b.y, b.z, b.fwdX, b.fwdZ, b.halfWidth, b.launch, e.speed].every(Number.isFinite);
         const em = ok ? liftedFluxEmission(b.flux, b.lift, b.burialRate, b.cutwaterDepth, sprayParams) : null;
-        rates.push(em ? em.rate : 0);
+        rates.push(em ? em.rate * BOW_WHISKER_DENSITY : 0);
         dists.push(ok ? Math.hypot(b.x - camera.x, b.y - camera.y, b.z - camera.z) : Infinity);
         return em;
       });
       const life = Math.max(1e-3, fin(sprayParams.bowLife, 1)) * (1 + Math.min(0.9, Math.max(0, fin(sprayParams.lifeVariation))));
       prioritiseEmitters(rates, dists, slots, count / life, pick, grant);
       let total = 0;
+      let ySum = 0;
+      for (let k = 0; k < pick.length; k++) ySum += emitters[pick[k]].bow.y;
+      if (pick.length > 0) killY = ySum / pick.length - 0.05;
       for (let k = 0; k < slots; k++) {
         const live = k < pick.length;
         if (!live) {

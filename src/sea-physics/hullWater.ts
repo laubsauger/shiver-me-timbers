@@ -38,7 +38,7 @@
  *    the spray-root width (Wagner c / geometric c), Rn on the mean wetted length λb = A_plan/B.
  *  - GARME NEAR-TRANSOM REDUCTION on the STEADY sectional load (hydrostatic + steady lift):
  *    C_T = tanh(2.5·x_T/(a_non·B·Fn_B)). Formula NOT verified against the primary source (see
- *    `garmeANon`); a_non = Garme's 0.34 (not fitted).
+ *    `garmeANon`); a_non = Garme's 0.34 (not fitted; the Savitsky fit, 0.9, is measured but not adopted — see there).
  *  - 2D+t MOMENTUM STRIPS (Zarnick 1978 / Faltinsen 2005 ch. 9): per strip, from the
  *    clipped geometry — N̂ = normalised Σ(−n̂A) ⊥ body z, geometric wetted half-beam
  *    c_g = |Σ(−n̂A)|/(2Δz), Wagner c = min((π/2)·c_g, b_chine), m_a = k·ρ·(π/2)·c².
@@ -264,8 +264,14 @@ export interface HullWaterParams {
    * heave/pitch rate, V_n·dm_a/dt, crossflow drag) keep their full 2D+t value: Garme's function was
    * chosen from steady pressures and running attitude, and applied to the rate terms it removed the
    * near-transom heave/pitch damping — a free-running limit cycle at C_v ≤ 3.7 (3.4° p2p).
-   * NOT FITTED: Garme's own 0.34. On the signed-off hull (2.30 m chine, triple outboards, LCG 3.65 m)
-   * it gives equilibrium trim within −0.48…−0.86° of Savitsky over the valid range.
+   * NOT FITTED: Garme's own 0.34 (as quoted by Niazmand Bilandi et al. 2018; primary unread). It leaves the equilibrium
+   * trim 0.48–0.87° BELOW Savitsky 1964 at every valid C_v (prismatic oracle hull: 4.19/2.67/2.21/1.95° vs 4.97/3.55/2.99/
+   * 2.43° at C_v 3.1/4.3/5.0/6.0) — the steady load kept too near the transom, so she runs flat (user 2026-09-14: "not
+   * sitting in the water on the back"). MEASURED FIT, NOT ADOPTED: 0.9 gives −0.17…+0.14° over C_v 3.1–6.0 and
+   * resistance −5…−6 % (0.2/0.6/0.8/1.0 scanned), player hull 20/30 m/s 2.75/1.93° → 3.51/2.50°. It moves the
+   * manoeuvring envelope (Denny & Hubble speed loss, the C_v 3/5 full-lock hook/survival pair, crossing-swell hooks at
+   * C_v 8 2 → 4/16), the race AI's measured capability table, the pack band and three crash-machine scenarios — a
+   * decision for the physics/AI owners, not a silent default (docs/speedboat/physics-log.md, T-seakeeping section).
    */
   garmeANon: number;
   /** skin-friction roughness allowance ΔC_F added to the ITTC-57 line (Savitsky 1964 procedure) */
@@ -2285,6 +2291,16 @@ export class HullWater {
    * rooster-tail hump further aft is not credited), × the transom's dry fraction (1 − trailWet), and 0 ahead of the transom.
    * The centreline profile is used for the outer drives too (±0.66 m = 0.29 B; ASSUMED).
    */
+  /**
+   * PUBLISHED for the drawn sea (§V101, one contact result, many consumers): the same transom hollow the drives' immersion
+   * is taken against, m below the local undisturbed surface at world (x, z), from the last evaluate() (0 ahead of the
+   * transom, with `transomWake` off, or with the transom wet). A render that draws this hollow shows the props in the
+   * water the physics runs them in.
+   */
+  transomWakeDepthAt(x: number, z: number): number {
+    return this.transomWakeDepression(x, z);
+  }
+
   private transomWakeDepression(x: number, z: number): number {
     if (!this.params.transomWake || !(this.trDepth > 0) || !this.uForward) return 0;
     const dry = 1 - this.trailWet;

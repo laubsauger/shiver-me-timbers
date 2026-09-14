@@ -61,7 +61,8 @@ describe('§V110 rivals pitch and roll on the Working sea like the player', () =
     console.warn = warn;
     const P = { pitch: [] as number[], roll: [] as number[] };
     let playerCapsized = false;
-    const N = [0, 1, 2].map(() => ({ pitch: [] as number[], roll: [] as number[] }));
+    const N = [0, 1, 2].map(() => ({ pitch: [] as number[], roll: [] as number[], speed: [] as number[] }));
+    const playerSpeed: number[] = [];
     const capsized = [false, false, false];
     const pose: Rigid6State = { position: [0, 0, 0], quaternion: [0, 0, 0, 1], velocity: [0, 0, 0], angularVelocity: [0, 0, 0] };
     let time = 0;
@@ -79,6 +80,7 @@ describe('§V110 rivals pitch and roll on the Working sea like the player', () =
         else {
           P.pitch.push(a.pitch);
           P.roll.push(a.roll);
+          playerSpeed.push(Math.hypot(state.velocity[0], state.velocity[2]));
         }
         for (let i = 0; i < 3; i++) {
           const b = attitude(npcs.renderPose(i, 0.5, pose).quaternion);
@@ -89,12 +91,13 @@ describe('§V110 rivals pitch and roll on the Working sea like the player', () =
           }
           N[i].pitch.push(b.pitch);
           N[i].roll.push(b.roll);
+          N[i].speed.push(Math.hypot(npcs.pose(i).velocity[0], npcs.pose(i).velocity[2]));
         }
       }
     } finally {
       npcs.dispose();
     }
-    console.log('capsized (§T.189, not gated)', capsized, 'player', std(P.pitch).toFixed(3), std(P.roll).toFixed(3), 'rivals', N.map((n) => `${std(n.pitch).toFixed(3)}/${std(n.roll).toFixed(3)} maxRoll ${Math.max(...n.roll.map(Math.abs)).toFixed(0)}`).join(' | '));
+    console.log('capsized (§T.189, not gated)', capsized, 'player', std(P.pitch).toFixed(3), std(P.roll).toFixed(3), 'rivals', N.map((n) => `${std(n.pitch).toFixed(3)}/${std(n.roll).toFixed(3)} maxRoll ${Math.max(...n.roll.map(Math.abs)).toFixed(0)} v̄ ${(n.speed.reduce((q, b) => q + b, 0) / n.speed.length).toFixed(2)}`).join(' | '), 'player v̄', (playerSpeed.reduce((q, b) => q + b, 0) / playerSpeed.length).toFixed(2));
     const ps = std(P.pitch);
     const pr = std(P.roll);
     expect(P.pitch.length, 'player upright record').toBeGreaterThanOrEqual(150);
@@ -110,10 +113,15 @@ describe('§V110 rivals pitch and roll on the Working sea like the player', () =
       expect(ns).toBeLessThan(ps * 10);
       expect(nr, `rival ${i} roll std ${nr.toFixed(3)}° vs player ${pr.toFixed(3)}°`).toBeGreaterThan(pr / 10);
       expect(nr).toBeLessThan(pr * 10);
-      // under way like the player on the same throttle (not drifting, not on a scripted speed)
+      // under way like the player on the same throttle (not drifting, not on a scripted speed). MEAN speed over the upright
+      // record, not the last tick's: at 0.6 throttle every hull in this sea climbs and falls off the swell at 1–7 m/s, so
+      // one instantaneous sample is a coin toss. [M] the swell-travel sign fix (src/ocean/oceanMath.ts swellSpectrum, 9ddbf7e)
+      // changed the realization and the final-tick sample went 3.17 m/s player vs 7.20 rival (fail) while the means stayed
+      // within 2× of each other.
       if (!capsized[i] && !playerCapsized) {
-        const vn = Math.hypot(npcs.pose(i).velocity[0], npcs.pose(i).velocity[2]);
-        const vp = Math.hypot(state.velocity[0], state.velocity[2]);
+        const mean = (v: number[]): number => v.reduce((q, b) => q + b, 0) / v.length;
+        const vn = mean(N[i].speed);
+        const vp = mean(playerSpeed);
         expect(vn, `rival ${i} ${vn.toFixed(1)} m/s vs player ${vp.toFixed(1)} m/s`).toBeGreaterThan(0.5 * vp);
         expect(vn).toBeLessThan(2 * vp);
       }

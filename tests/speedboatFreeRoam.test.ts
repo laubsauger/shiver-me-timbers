@@ -43,7 +43,8 @@ describe('?mode=free: the race map as a sandbox', () => {
 
   it('no fleet boats: the page builds 0 NPC hulls and the idle fleet instead of the worker driver', () => {
     const main = code(mainSrc);
-    expect(main).toMatch(/buildSpeedboatBoats\(app, sea, mode === 'free' \? 0 : NPC_COUNT/);
+    // 0 hulls; only a `?cine` page (the trailer) builds its hidden scripted rivals (speedboat/cine/rivals.ts), never a fleet
+    expect(main).toMatch(/buildSpeedboatBoats\(app, sea, mode === 'free' \? \(query\.has\('cine'\) \? CINE_RIVAL_MAX : 0\) : NPC_COUNT/);
     expect(main).toMatch(/mode === 'free' \? createIdleNpcFleet\(\) : await createNpcFleetDriver\(/);
     expect(main).toMatch(/query\.has\('autopilot'\) && mode === 'race'/);
     expect(mainSrc.split('\n').length).toBeLessThanOrEqual(301); // main-speedboat.ts ≤ 300 lines

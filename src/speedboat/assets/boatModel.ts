@@ -39,12 +39,15 @@ import {
 import { createDriveRig, createPropBlurMaterial, type DriveRig, type DriveState } from './driveRig';
 import type { BoatLivery } from './livery';
 import { createSlotMaterial, type BoatVariant, type DeckEdge } from './slotMaterials';
+import { activeHullMask } from '../../ocean/hullVolumeMask';
 import {
   GAUGE_GLASS_RENDER_ORDER,
   PERSPEX_RENDER_ORDER,
+  attachHullMaskSlot,
   createWaterMaskMaterial,
   createWaterMaskMesh,
   readWaterMask,
+  speedboatHullMaskShape,
   waterMaskGeometry,
 } from './waterMask';
 
@@ -319,6 +322,9 @@ export function assetFromGltf(scene: THREE.Group, options: AssetFromGltfOptions 
       if (maskGeometry && maskMaterial) {
         waterMask = createWaterMaskMesh(maskGeometry, maskMaterial);
         lod.add(waterMask); // not a LOD level: every level has the same well opening
+        // the hull volume mask (ocean/hullVolumeMask.ts) on a sea page: the cap writes this boat's pose each render call
+        const hullMask = activeHullMask();
+        if (hullMask) attachHullMaskSlot(waterMask, hullMask, speedboatHullMaskShape());
       }
       const drives: DriveRig = createDriveRig(levelObjects, propBlurMaterial);
       return {

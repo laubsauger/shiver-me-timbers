@@ -8,6 +8,7 @@
  * `window.__sbHarness` exposes seek/cam/open/rects for browser checks.
  */
 import {
+  ASSIST_PRESETS,
   BoatSelectScreen,
   DEFAULT_SELECTION,
   DashDisplays,
@@ -127,7 +128,7 @@ hud.setScale(hudScale);
 let camera: HudCamera =params.get('cam') === 'cockpit' ? 'cockpit' : params.get('cam') === 'near' ? 'near' : 'chase';
 
 const pause = new PauseScreen(app, {
-  assists: { preset: 'default', governor: 'air', landingAssist: 0.5, steeringLock: true, autoReset: true },
+  assists: { preset: 'default', ...ASSIST_PRESETS.default },
   camera,
   audio: { master: 0.8, engines: 0.9, radio: 0.7, music: 0.5 },
   hudScale,

@@ -148,6 +148,53 @@ export interface Shot {
     headingOnly?: boolean;
   };
   /**
+   * A CAMERA PLATFORM with its own mass (a chase boat or a drone), instead of a rig bolted to the hull. Frame `ship`.
+   * USER: "the camera is weirdly attached and bounces with it… like it's connected on a steel beam to the boat".
+   *
+   *  - position: a critically damped spring onto her position AND her smoothed velocity, so at a steady speed it holds
+   *    station with no lag and on an impact or a surge it answers over `lag` seconds — the boat moves in the frame;
+   *  - heading: her smoothed COURSE (velocity direction), low-passed over `headingLag` — not her yaw jitter;
+   *  - height: the smoothed sea under the lens (`heightLag`) + `rideSwell` (or the key's y) — never her heave; the
+   *    `waterClearance` clamp still applies;
+   *  - aim: the key's aim point is taken relative to a low-passed point at her CG (`aimLag`), which only moves once
+   *    she leaves a `deadZone` (m) around it — on a slam she moves inside the frame;
+   *  - the platform's own motion: a slow roll of `roll`° over `rollPeriod` s (a camera boat), plus the shot's wobble;
+   *  - her pitch and roll never transfer: the horizon stays level.
+   * Keys are in the platform's heading frame, as for `ship`. `follow` is ignored when this is set.
+   */
+  platform?: {
+    /** s, position response (critically damped); 0.4–1.0 for a chase */
+    lag: number;
+    /** s, heading low-pass (default 1.0) */
+    headingLag?: number;
+    /** s, sea-height low-pass under the lens (default 1.5) */
+    heightLag?: number;
+    /** s, aim-point low-pass (default 0.35) */
+    aimLag?: number;
+    /** m, the aim point eases in as she leaves this zone around it (soft, default 1.2) */
+    deadZone?: number;
+    /** deg, the platform's own slow roll amplitude (default 1) */
+    roll?: number;
+    /** s (default 5) */
+    rollPeriod?: number;
+  };
+  /**
+   * A HARD MOUNT's isolation (frame `hull`): her attitude reaches the lens through a spring of this half-life (s)
+   * instead of 1:1, so a slam arrives as a quick lean rather than a jolt. The lens stays bolted in position (it is
+   * inside or on the boat). 0.04–0.1 s reads as a GoPro on a rubber mount. Omitted = rigid.
+   */
+  mountIsolation?: number;
+  /**
+   * Half-life (s) of the water height `rideSwell` samples: the lens follows the swell, not every ripple under it.
+   * Omitted = the raw sample every frame.
+   */
+  rideSmooth?: number;
+  /**
+   * Keep the lens at least this far (m) above the sea surface under it — a chase or follow camera must never dive into
+   * a crest. Not applied to `hull` rigs (they are inside or on the boat). Omitted = no clamp.
+   */
+  waterClearance?: number;
+  /**
    * Park the lens this many metres above the SAMPLED water height instead of
    * using the key's y. What makes the waterline shots ride the swell for free.
    */

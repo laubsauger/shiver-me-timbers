@@ -655,6 +655,19 @@ export function effectiveChoppiness(
 }
 
 /**
+ * THE REALISED SEA MATCHES ITS SPECTRUM (user decision 2026-09-14, "it has been too extreme anyway, too quickly").
+ *
+ * Each FFT mode is h(k,t) = h0(k)e^{iωt} + conj(h0(−k))e^{−iωt}: TWO independent complex Gaussians of variance
+ * 2·amp(k)² and 2·amp(−k)² land on the same mode, so the drawn and floated surface carried Σ 4·amp² while every moment
+ * below (heightVariance, steepness, Jacobian, slope bins — the ladder's Hs labels, the fold cap, the foam σ, the
+ * shoaling σ) counts Σ 2·amp². Measured on the CPU mirror, swell only, choppiness 0, 1 km², seeds 2100/7/188: spectrum
+ * Hs 1.18 m → realised 1.69–1.73 m (×√2); the shipped Working sea 2.83 → 3.64–3.82 m. The h0 AMPLITUDE carries 1/√2 so
+ * the realised variance equals the bookkeeping; the moments are untouched (they were the right numbers for the wrong
+ * field). GPU and CPU read the same h0, so they stay one sea (§V.8).
+ */
+export const H0_AMPLITUDE_SCALE = Math.SQRT1_2;
+
+/**
  * Initial spectrum h0 for one cascade.
  * Texel (n,m) → k = 2π(n − N/2)/L. RGBA texel packs:
  *   [h0(k).re, h0(k).im, h0(−k).re, h0(−k).im]
@@ -683,8 +696,8 @@ export function generateH0(
         amp = Math.sqrt(waveSpectrum(kx, kz, p) / 2) / domain;
       }
       const i = m * N + n;
-      re[i] = g1 * amp;
-      im[i] = g2 * amp;
+      re[i] = g1 * amp * H0_AMPLITUDE_SCALE;
+      im[i] = g2 * amp * H0_AMPLITUDE_SCALE;
     }
   }
   const out = new Float32Array(N * N * 4);
@@ -846,8 +859,8 @@ export class SpectrumBuild {
         const inBand = k > band.kMin && k <= band.kMax;
         const amp = inBand ? Math.sqrt(waveSpectrum(kx, kz, p) / 2) / domain : 0;
         const i = m * N + n;
-        re[i] = g1 * amp;
-        im[i] = g2 * amp;
+        re[i] = g1 * amp * H0_AMPLITUDE_SCALE;
+        im[i] = g2 * amp * H0_AMPLITUDE_SCALE;
         if (!inBand || k < 1e-9) continue;
         // spectralSteepness — transfer kx²/|k|
         const transfer = (kx * kx) / k;

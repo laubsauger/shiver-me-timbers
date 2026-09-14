@@ -39,7 +39,8 @@
  * §V28: non-finite jets are dropped whole; every uniform finite-guarded; dead particles are the pool's zero-size quads.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, If, cameraPosition, float, instanceIndex, int, positionWorld, select, uniform, uniformArray, vec2, vec3, vec4 } from 'three/tsl';
+import { Fn, If, Loop, cameraPosition, float, instanceIndex, int, positionWorld, select, uniform, uniformArray, vec2, vec3, vec4 } from 'three/tsl';
+import { activeBoatLightPool } from '../ocean/boatLightPool';
 import { SIM_DT } from '../core/loop';
 import { GRAVITY } from '../ocean/oceanMath';
 import { sprayParams, type SprayParams } from '../params/spray';
@@ -62,15 +63,50 @@ const T_MIST = 3.7;
 export const ROOSTER_SHEET_FRACTION = 0.22;
 /** §T.199 linearised air drag (1/s) of the sheet's drops (r ≈ 2 mm) and its mist (r ≈ 0.3 mm) — header */
 export const ROOSTER_DROP_DRAG = 1.2;
-export const ROOSTER_MIST_DRAG = 2.5;
+export const ROOSTER_MIST_DRAG = 1.35;
 /** §T.199 mist leaves at this share of the drops' launch — torn off the same sheet, carried in its air wake */
-export const ROOSTER_MIST_SPEED = 0.8;
+export const ROOSTER_MIST_SPEED = 0.95;
 /** §T.199 Henyey–Greenstein asymmetry of mm water drops (forward-scattering Mie regime) */
 export const ROOSTER_PHASE_G = 0.6;
-/** §T.199 plume brightness = AMBIENT + GAIN·min(4π·HG, CAP) — look numbers: down-sun ≈ 0.65, backlit ≈ 1.55 */
-export const ROOSTER_AMBIENT = 0.6;
-export const ROOSTER_SUN_GAIN = 0.12;
-export const ROOSTER_PHASE_CAP = 8;
+/**
+ * W8 plume radiance = ω·[key·(M + (1 − M)·min(HG, CAP)) + ambient] (docs/wake/w8-foam-readability.md §4). `key` is the
+ * sun's Lambert radiance (E/π) and HG has mean 1 over the sphere, so a white Lambert card is `key`. Water drops do not
+ * absorb in the visible (single-scattering albedo ω ≈ 1: ROOSTER_AMBIENT = 1, the sky's full fill). A plume a few drops
+ * thick scatters more than once, which spreads its light over all angles: M = ROOSTER_MULTIPLE_SCATTER of the key is
+ * isotropic, the rest keeps the forward HG lobe. Down-sun ≈ 0.58·key + sky (white-warm); backlit ≈ 4.5·key + sky (glow).
+ * It was AMBIENT 0.6 + 0.12·HG: 0.02·key front-lit, grey-brown smoke darker than the water behind it.
+ */
+export const ROOSTER_AMBIENT = 1;
+/** W8 LOOK: sprite scale over sprayParams.sizeMin..Max (drops 0.14→0.58 m, mist 0.28→1.1 m; were ×4 / ×9 soft discs) */
+export const ROOSTER_DROP_SIZE = 1.8;
+/** W8 round 4: a drop sprite is its motion blur — 2.5 cm wide, |v|·1/120 s long (≤ 10 widths), ≤ 6 mrad on screen */
+export const ROOSTER_DROP_BLUR = Object.freeze({ width: 0.025, shutter: 1 / 120, maxRatio: 10, angularCap: 0.006 });
+/** W8 round 4: the drop pool is this many times the emitter's `count` (tiny sprites: the weight is the count) */
+export const ROOSTER_DROP_POOL_FACTOR = 4;
+/** W8 round 4: mist particles per drop particle, and the mist lens-plane fade (m) — a soft volume must not fog the lens */
+export const ROOSTER_MIST_SHARE = 0.3;
+export const ROOSTER_MIST_NEAR_FADE: readonly [number, number] = [1.5, 6];
+/**
+ * W8 round 3 LOOK: sprites per unit of the bow sheet's density (`bowLiftRate`·flux). The plume's visual weight is its
+ * COUNT: a round-2 sprite is ~1/9 the area of the old puff, so it takes several to carry the same sheet.
+ */
+export const ROOSTER_SPRITE_DENSITY = 40;
+/** W8 round 3 LED on spray: lamp height above the boat reference (m), lamp size R (m) of the 1/(1 + d²/R²) falloff, gain (look) */
+export const ROOSTER_LED_HEIGHT = 0.6;
+export const ROOSTER_LED_RADIUS = 8;
+export const ROOSTER_LED_GAIN = 3;
+export const ROOSTER_MIST_SIZE = 8;
+export const ROOSTER_MIST_OPACITY = 0.05;
+/** W8 round 6: mist radiance share (an envelope, not a glowing blob) */
+export const ROOSTER_MIST_BRIGHTNESS = 0.6;
+/** W8 round 3: denser cores so the plume reads as a volume */
+export const ROOSTER_DROP_OPACITY = 0.55;
+/** W8 LOOK: streak squash at the pool's reference speed (a drop at 10–30 m/s is a dash, not a ball) */
+export const ROOSTER_STREAK = 5;
+/** W8 lens-plane depth fade (m): only drops at the glass (round 3: close/hard-mounted cameras see the plume past 1.5 m) */
+export const ROOSTER_NEAR_FADE: readonly [number, number] = [0.3, 1.5];
+export const ROOSTER_MULTIPLE_SCATTER = 0.5;
+export const ROOSTER_PHASE_CAP = 3;
 
 export interface RoosterJetEmission {
   /** particles per second */
@@ -107,7 +143,7 @@ export function roosterTailEmission(j: PropWashInput, p: Pick<SprayParams, 'bowL
   const lateral = 0.5 * sheet * Math.sqrt(Math.max(0, 1 - exposure));
   const flux = exposure * sheet * j.discArea;
   if (!(flux > 0) || !Number.isFinite(flux)) return { ...none, exposure, tip: Number.isFinite(tip) ? tip : 0, aft };
-  return { rate: Math.max(0, p.bowLiftRate) * flux, launch, aft, lateral, exposure, tip, flux };
+  return { rate: Math.max(0, p.bowLiftRate) * ROOSTER_SPRITE_DENSITY * flux, launch, aft, lateral, exposure, tip, flux };
 }
 
 /** apex (m) of the tallest particle a launch speed can throw without drag — V²/2g */
@@ -142,6 +178,55 @@ export function roosterFlightTime(v: number, k: number): number {
   return hi;
 }
 
+/**
+ * W8 round 3: an extra plume source the emitter carries beside the props — a surface-piercing strut's leading-edge
+ * sheet (`strutSheetEmission`). Same launch model as a jet slot: UP launch, AFT launch, OUTBOARD scale (both sides).
+ */
+export interface RoosterExtraSource {
+  /** the source's own speed along its path (m/s) — sub-tick emission */
+  speed: number;
+  x: number;
+  surfaceY: number;
+  z: number;
+  dirX: number;
+  dirZ: number;
+  launch: number;
+  aft: number;
+  lateral: number;
+  rate: number;
+}
+
+/**
+ * W8 round 3: the SHEET a surface-piercing strut throws off its leading edge (USER: "water thrown to the side from the
+ * engines"). Water meeting the nose leaves along the reflection off its entrance half-angle α = atan(2t/c) at
+ * v_n = U·sin α (the same reflection `waterlineSheetLaunch` uses for the hull): up v_n, outboard 2·v_n·cos α, left behind
+ * in the world. Flux per side q = v_n·min(h, v_n²/2g)·t (the nose width, Bernoulli-capped climb), rate =
+ * bowLiftRate·ROOSTER_SPRITE_DENSITY·2q. A slow strut throws nothing (v_n below the entrainment onset).
+ */
+export function strutSheetEmission(a: { x: number; z: number; dirX: number; dirZ: number; chord: number; thickness: number; depth: number; speed: number }, surfaceY: number, p: Pick<SprayParams, 'bowLiftRate'>, out: RoosterExtraSource): RoosterExtraSource | null {
+  const vals = [a.x, a.z, a.dirX, a.dirZ, a.chord, a.thickness, a.depth, a.speed, surfaceY, p.bowLiftRate];
+  if (!vals.every(Number.isFinite) || !(a.depth > 0) || !(a.chord > 0)) return null;
+  const alpha = Math.atan((2 * a.thickness) / a.chord);
+  const vn = Math.abs(a.speed) * Math.sin(alpha);
+  if (!(vn > STRUT_SHEET_ONSET)) return null;
+  const q = vn * Math.min(a.depth, (vn * vn) / (2 * GRAVITY)) * a.thickness;
+  out.x = a.x;
+  out.z = a.z;
+  out.speed = Math.abs(a.speed);
+  out.surfaceY = surfaceY;
+  out.dirX = a.dirX;
+  out.dirZ = a.dirZ;
+  out.launch = vn;
+  out.aft = 0;
+  out.lateral = 2 * vn * Math.cos(alpha);
+  out.rate = Math.max(0, p.bowLiftRate) * ROOSTER_SPRITE_DENSITY * STRUT_SHEET_SHARE * 2 * q;
+  return out;
+}
+/** W8 round 3: below this normal speed (m/s) a strut's nose only splits a ripple (the plunge-entrainment onset) */
+export const STRUT_SHEET_ONSET = 1;
+/** W8 round 3 LOOK: share of the nose flux that leaves as airborne sheet (the rest climbs and falls back along the strut) */
+export const STRUT_SHEET_SHARE = 0.4;
+
 export interface RoosterTailOptions {
   /** jet slots (default ROOSTER_MAX_JETS; §T.195 the fleet wants 8 boats × 3 drives) — literal shader bound */
   maxJets?: number;
@@ -159,6 +244,7 @@ export interface SprayViewer {
 export function createRoosterTail(opts: RoosterTailOptions = {}) {
   const MAX_JETS = Math.max(1, Math.min(64, Math.floor(opts.maxJets ?? ROOSTER_MAX_JETS)));
   let dropLife = sprayParams.bowLife;
+  let killY = -1e6;
   let mistLife = sprayParams.bowLife;
   const uSun = uniform(new THREE.Vector3(0.3, 0.8, 0.5).normalize());
   /** HG forward scattering (header) — the sprite's own world position against the camera */
@@ -167,14 +253,42 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
     const c = view.dot(uSun).clamp(-1, 1);
     const g = ROOSTER_PHASE_G;
     const hg = float(1 - g * g).div(float(1 + g * g).sub(c.mul(2 * g)).max(1e-3).pow(1.5));
-    return foamTintNode().mul(light.key.mul(hg.min(ROOSTER_PHASE_CAP).mul(ROOSTER_SUN_GAIN))
-      .add(light.ambient.mul(ROOSTER_AMBIENT)));
+    const lobe = hg.min(ROOSTER_PHASE_CAP).mul(1 - ROOSTER_MULTIPLE_SCATTER).add(ROOSTER_MULTIPLE_SCATTER);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
+    let radiance: any = light.key.mul(lobe).add(light.ambient.mul(ROOSTER_AMBIENT));
+    // W8 round 3: BOAT LEDs light the spray (the page's pool, `ocean/boatLightPool`, the same uniform arrays the water
+    // reads — no texture, no sampler, §V40). Each LED is a point source at its boat: irradiance ∝ colour/(1 + d²/R²)
+    // (inverse square past the lamp's own size R), scattered with the same drop phase function toward the camera, so
+    // spray between the camera and a boat glows that boat's colour. Absent pool (raft/pirate, day builds): no node.
+    const pool = activeBoatLightPool();
+    if (pool) {
+      const { positions, colors } = pool.nodes;
+      const led = vec3(0).toVar();
+      Loop(pool.max, ({ i }: { i: any }) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+        const pp = positions.element(i);
+        const toDrop = positionWorld.sub(pp.xyz.add(vec3(0, ROOSTER_LED_HEIGHT, 0)));
+        const d2 = toDrop.dot(toDrop);
+        const cl = view.dot(toDrop.div(d2.max(1e-4).sqrt())).clamp(-1, 1);
+        const hgL = float(1 - g * g).div(float(1 + g * g).sub(cl.mul(2 * g)).max(1e-3).pow(1.5)).min(ROOSTER_PHASE_CAP);
+        const lobeL = hgL.mul(1 - ROOSTER_MULTIPLE_SCATTER).add(ROOSTER_MULTIPLE_SCATTER);
+        led.addAssign(colors.element(i).xyz.mul(lobeL).div(d2.div(ROOSTER_LED_RADIUS * ROOSTER_LED_RADIUS).add(1)));
+      });
+      radiance = radiance.add(led.mul(ROOSTER_LED_GAIN));
+    }
+    return foamTintNode().mul(radiance);
   };
-  const drops = createSprayPool(opts.count ?? sprayParams.bowCount, {
-    sizeScale: () => 4,
+  // W8 round 4 (docs/wake/w8-foam-readability.md §14): the plume is MANY tiny drops, each a physical motion-blur streak
+  // (≈ 1.5 cm wide, |v| × 1/200 s long), faint one by one, plus a soft low-opacity mist volume that carries the
+  // silhouette. Both die where they fall back into the water.
+  const drops = createSprayPool((opts.count ?? sprayParams.bowCount) * ROOSTER_DROP_POOL_FACTOR, {
+    droplets: true,
+    motionBlur: ROOSTER_DROP_BLUR,
+    dropletAgeFalloff: 1.2,
+    dropletNearFade: ROOSTER_NEAR_FADE,
+    killBelow: () => killY,
     life: () => dropLife,
     drag: () => ROOSTER_DROP_DRAG,
-    opacity: () => 0.7,
+    opacity: () => ROOSTER_DROP_OPACITY,
     fadeNear: () => sprayParams.bowContactFadeNear * 2,
     fadeFar: () => sprayParams.bowContactFadeFar * 2.5,
     colorNode: litTint,
@@ -182,13 +296,17 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
     renderOrder: SPRAY_OVER_WATER_ORDER,
   });
   const mist = createSprayPool(opts.count ?? sprayParams.bowCount, {
-    sizeScale: () => 9,
+    sizeScale: () => ROOSTER_MIST_SIZE,
+    mistStructure: true,
+    dropletNearFade: ROOSTER_MIST_NEAR_FADE,
+    killBelow: () => killY,
     life: () => mistLife,
     drag: () => ROOSTER_MIST_DRAG,
-    opacity: () => 0.22,
+    opacity: () => ROOSTER_MIST_OPACITY,
     fadeNear: () => sprayParams.bowContactFadeNear * 2,
     fadeFar: () => sprayParams.bowContactFadeFar * 2.5,
-    colorNode: litTint,
+    // round 6: the mist is a faint ENVELOPE — dimmer than the drops that carry the plume's detail
+    colorNode: (light) => (litTint(light) as { mul(v: number): unknown }).mul(ROOSTER_MIST_BRIGHTNESS),
     blending: THREE.NormalBlending,
     renderOrder: SPRAY_OVER_WATER_ORDER,
   });
@@ -234,8 +352,18 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
         const across = vec2(aft.y.negate(), aft.x);
         const sideSign = select(rSide.lessThan(0.5), float(-1), float(1));
         const velXZ = aft.mul(dir.w.mul(rMag.mul(0.4).add(0.6))).add(across.mul(side.x.mul(rMag).mul(sideSign)));
-        const vy = pos.w.mul(rUp.mul(0.45).add(0.55));
-        pool.posAge.element(instanceIndex).assign(vec4(vec3(pos.x, pos.y, pos.z), 0));
+        const vy0 = pos.w.mul(rUp.mul(0.45).add(0.55));
+        // W8 round 4 SUB-TICK EMISSION: a tick's particles leave along the path the prop swept during the tick, not all
+        // from its end point (at 30 m/s that is 0.5 m of path per tick: the clumps). Each is born rT ∈ [0, 1) of a tick
+        // ago where the prop was then (aft of it by advance·rT·dt; side.y = advance), and has already flown rT·dt.
+        const rT = hash2(vec2(s.mul(97.1 + hSalt), uTime.add(13.7 + tSalt)));
+        const back = side.y.mul(rT).mul(SIM_DT);
+        const flown = rT.mul(SIM_DT * speed);
+        const vy = vy0.sub(rT.mul(SIM_DT * GRAVITY));
+        pool.posAge.element(instanceIndex).assign(vec4(
+          vec3(pos.x.add(aft.x.mul(back)).add(velXZ.x.mul(flown)), pos.y.add(vy0.mul(flown)), pos.z.add(aft.y.mul(back)).add(velXZ.y.mul(flown))),
+          rT.mul(SIM_DT),
+        ));
         const rSize = hash2(vec2(s.mul(H_SIZE + hSalt), uTime.add(T_SIZE + tSalt)));
         pool.velSize.element(instanceIndex).assign(vec4(vec3(velXZ.x, vy, velXZ.y).mul(speed), uSizeVar.mul(rSize).oneMinus()));
       });
@@ -280,16 +408,35 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
      * One fixed tick (§V2): this tick's props. Returns the total particle rate
      * (particles/s) it budgeted — 0 when no prop is surface-piercing.
      */
-    update(renderer: THREE.WebGPURenderer, jets: readonly PropWashInput[], viewer?: SprayViewer): number {
+    update(renderer: THREE.WebGPURenderer, jets: readonly PropWashInput[], viewer?: SprayViewer, extras: readonly RoosterExtraSource[] = []): number {
       uSizeVar.value = Math.min(1, Math.max(0, Number.isFinite(sprayParams.sizeVariation) ? sprayParams.sizeVariation : 0));
       uTime.value += SIM_DT;
       let total = 0;
       let maxLaunch = 0;
+      let surfSum = 0;
+      let surfN = 0;
       const rates: number[] = [];
       // §T.195: with a viewer, the slots go to the nearest surface-piercing props within the pool's turnover budget
       const sel = viewer ? prioritised(jets, viewer, count, pitch) : null;
+      // W8 round 3: the strut sheets take the slots the props leave free (props first, then the nearest sheets)
+      let free = 0;
       for (let j = 0; j < MAX_JETS; j++) {
         const jet = sel ? (j < sel.index.length ? jets[sel.index[j]] : undefined) : jets[j];
+        if (!jet && free < extras.length) {
+          const x = extras[free++];
+          if (x.rate > 0) {
+            rates.push(x.rate);
+            total += x.rate;
+            maxLaunch = Math.max(maxLaunch, x.launch);
+            const len = Math.hypot(x.dirX, x.dirZ) || 1;
+            jetPos[j].set(x.x, x.surfaceY, x.z, x.launch);
+            jetDir[j].set(x.dirX / len, x.dirZ / len, 0, x.aft);
+            jetSide[j].set(x.lateral, x.speed, 0, 0);
+            surfSum += x.surfaceY;
+            surfN++;
+            continue;
+          }
+        }
         const e = jet ? roosterTailEmission(jet, sprayParams, pitch) : null;
         const y = jet && Number.isFinite(jet.surfaceY) ? (jet.surfaceY as number) : NaN;
         const ok = !!e && e.rate > 0 && Number.isFinite(y);
@@ -301,7 +448,9 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
           const len = Math.hypot(jet!.dirX, jet!.dirZ);
           jetPos[j].set(jet!.x, y, jet!.z, e!.launch);
           jetDir[j].set(jet!.dirX / len, jet!.dirZ / len, 0, e!.aft);
-          jetSide[j].set(e!.lateral, 0, 0, 0);
+          jetSide[j].set(e!.lateral, Math.abs(jet!.advance), 0, 0);
+          surfSum += y;
+          surfN++;
         } else {
           jetPos[j].set(0, -1000, 0, 0);
           jetDir[j].set(0, 1, 0, 0);
@@ -315,9 +464,12 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
         jetDir[j].z = total > 0 ? (j === MAX_JETS - 1 ? 1 : acc / total) : 1;
       }
       dropLife = Math.max(sprayParams.bowLife, roosterFlightTime(maxLaunch, ROOSTER_DROP_DRAG));
-      mistLife = Math.max(sprayParams.bowLife, 1.6 * roosterFlightTime(maxLaunch * ROOSTER_MIST_SPEED, ROOSTER_MIST_DRAG));
+      // round 3: mist falls with the drops (its old 1.6× life and 2.5/s drag left a floating cloud behind the boat)
+      mistLife = Math.max(sprayParams.bowLife, roosterFlightTime(maxLaunch * ROOSTER_MIST_SPEED, ROOSTER_MIST_DRAG));
+      // W8 round 4: particles die where they fall back into the water (the sources' mean surface, 5 cm below)
+      if (surfN > 0) killY = surfSum / surfN - 0.05;
       dropSpawn.run(renderer, total);
-      mistSpawn.run(renderer, total);
+      mistSpawn.run(renderer, total * ROOSTER_MIST_SHARE);
       return total;
     },
     dispose(): void {

@@ -103,7 +103,12 @@ The `rpmModel` numbers above now apply only to the turbine, two-stroke and elect
   - The banks merge into a 92 Hz body resonance and a 420 Hz midsection resonance, then a load-dependent soft clip.
 - **Exhaust exit.**
   - In air: a lowpass that opens with load and rpm (the bark), up to about 4.6 kHz at WOT (T204; it was 5.8 kHz).
-  - Underwater at idle through the hub: a ~300 Hz lowpass with bubble amplitude modulation, a re-pitched bubble resonator, and idle-relief rasp.
+  - Underwater at idle through the hub: a ~300 Hz lowpass with bubble amplitude modulation, a low-Q hull gulp (140–340 Hz, Q 2.2), and idle-relief rasp.
+- **Idle character (T206).** All of it scales with the existing lope weight (fades by 2400 rpm and with load; cruise/WOT renders are sample-identical to before):
+  - A repeating per-cylinder charge (0.35–1.65) and spark-point (±1.6 % of a cycle) signature, plus a ±30 % per-cycle swing. The old ±50 % per-firing white variance became ±25 %.
+  - Fatter blowdown at idle (peak ×1.9, ~3 ms): a whump, not a click. The level is compensated, so idle stays at its T183 level.
+  - A trace of valvetrain tick (2.1 kHz band, 0.6 ms per firing), idle only.
+  - Sim-rpm path: the triple's sound-only detune widens to ±1.15 % below 900 rpm (±0.25 % from 2000), so it beats like the local path's ±1.5 % idle spec.
 - **Pops.** Overrun, limiter and re-fire bursts are injected into the pipe, so they ring like the exhaust. The re-fire after a cut is a single bang.
 - **Extras.**
   - Lower-unit gear whine at 14× crank.
@@ -144,10 +149,21 @@ The `rpmModel` numbers above now apply only to the turbine, two-stroke and elect
     | All airborne | **+6.1 dB** | −2.5 dB | −14.8 → −19.8 dBFS | 87% → 17% |
 
   - **Still in the physics.** A drive at s = 0.2 bounces its limiter (6340–6785 rpm). The engine voice follows that bounce; its layer stays dark (0.8% of energy above 3 kHz).
-- **Events:**
-  - Hull slap: 118 and 265 Hz body resonances plus a splash band.
-  - Landing: a boom gliding from 112 Hz to 50 Hz, a low crash, and a 1 s spray tail.
+- **Events (T206):** every hit is a transient (noise under a 1.8–3.4 kHz lowpass, 2.5 ms) plus a noise-excited hull body (two low-Q modes) plus droplet grains (1–5 ms noise grains, each a random pitch in a band that brightens with the impulse, under a 4.2 kHz ceiling). Each hit draws its own body tuning (±14 %), decay and spray colour from the layer's seeded noise.
+  - Chop slap: body 270 / 560 Hz, ~35 ms; spray ~90 ms.
+  - Landing: body 165 / 360 Hz, ~100 ms; a noise sub (band-pass sliding 105 → 48 Hz, not a sine); spray tail ~0.45 s.
   - Wake crossing: two slaps 0.16 s apart.
+  - **Why it changed** (playtest: landings "boomy, sine-wavy", slaps "white-noisy, too high"). Measured on the still-water event render (window of 0.34 s):
+
+    | | Before | After |
+    |---|---|---|
+    | Slap 0.3: energy above 8 kHz / centroid | 62 % / 11.2 kHz | 0.4 % / 0.9 kHz |
+    | Landing 1.0: energy under 120 Hz / 150–600 Hz | 93 % / 1.3 % | 18 % / 45 % |
+    | Landing 1.0: share in its 3 strongest bins | 42 % (the sine) | 7 % |
+    | Landing tail above 8 kHz | 5 % | 0.3 % |
+    | A-weighted level, slaps / landings | reference | −2…−6 dB / −3…−4 dB |
+
+- **Idle (T206)**, 648 rpm sim rpm, triple, at the dock: power centroid 151 → 98 Hz; 400–1500 Hz 1.9 → 0.2 %; 150–400 Hz 37 → 12 %; half-order/firing energy on one engine 0.33 → 0.75; RMS held (−35.9 → −35.7 dBFS). There is no narrow tone above 1.5 kHz in any voice at idle. The turbine's idle blade-pass trace dropped from 0.012 to 0.004: at 2.06 kHz it stood 18 dB out of the idle roar.
 
 ## Graph and node budget (`boatAudio.ts`)
 
@@ -163,6 +179,12 @@ AudioWorkletNode 'boat-audio' (9 mono outputs)
 - The test counts through `createBoatAudio` on a mock context with 8 boats and with 12.
 - **Tiers.** The 7 NPC slots take the 7 most audible rivals (distance gain × activity). The top 3 get full voices; the rest get a cheap voice (one engine, no pops, whine or events). Both assignments use 1.26× (2 dB) hysteresis, and tier changes crossfade over 80 ms.
 - **Steal sequence.** Fade 40 ms, then switch the boat and set the delay instantly, then wait out the new boat's propagation delay, then play. Without the wait, the DelayNode would replay the previous boat.
+
+**Cine SFX stems.** `boatAudio.stemTaps()` (also the sink's `stemTaps()`, which `src/speedboat/cine/host.ts` reads as `audio.stemTaps`) returns `{ engine: AudioNode[]; water: AudioNode[] } | null`. Connect every node of a stem into the recorder; never reroute them. The result is null until the worklet graph exists, and the nodes are built on the first call.
+- `engine` is the player-engine panner, the 7 NPC panners, and a Gain(−1) fed by the NPC water mirrors. `water` is the player-water panner and the 7 NPC water mirrors.
+- The worklet grows 7 water-only outputs (`STEM_WATER_OUTPUT0`), rendered only after `{ t: 'stems', on: true }`. Each mirror (Delay → Gain → Panner) receives the same doppler, steal and position automation as its NPC slot chain.
+- The taps sit post-voice and pre-bus/compressor. They add 22 nodes, for 48 in total.
+- Tested: the slot outputs are bit-identical with stems on and match the pre-stem code; mix − water stem equals the engine layer to within 1e-5.
 
 **Panners set direction only** (`linear`, rolloff 0). Distance gain and air absorption are applied in the worklet. `emitters.createPanner` and `setPannerPosition` are not used, because they re-apply the shared inverse/350 m model every frame. If a shared "direction-only panner" helper is wanted under §V95, it belongs in `src/audio/emitters.ts`, which this task does not own.
 
@@ -246,10 +268,10 @@ None of these block the audio.
 
 ## Verification
 
-- `npx vitest run tests/boatAudio`: 69 tests pass, and 7 WAV renders are skipped unless `BOAT_AUDIO_WAV_DIR` is set.
+- `npx vitest run tests/boatAudio`: 78 tests pass, and 7 WAV renders are skipped unless `BOAT_AUDIO_WAV_DIR` is set.
   - `boatAudioModel`: the seam (the V8 spec is the physics 450R; local integration identical to physics; limiter cuts and re-fires; sim rpm wins with limiter flags from it; overrun silences combustion); legacy model: planing slip 5–20% for all 4 archetypes; rpm rises with advance and with ventilation; throttle lag; airborne reaches the limiter in < 0.35 s without overshoot; bounce period 40–250 ms; Governor 'air'; bog on re-entry; overrun windmill; NaN and extreme inputs; override; determinism.
   - `boatAudioMix`: §V96 plateau measured vs. monotonic boat law; air absorption; doppler ratios and zipper; steal sequence; tier hysteresis; landing and slam detection; muffling; packing sanitisation.
-  - `boatAudioSynth`: V8 firing line at rpm·8/120 ±3% at 900/2500/4500/6300 rpm; two-stroke at rpm·3/60; inverter at 6 f_e; identical pitch at 0 and 40 m/s; half-order energy (lump); underwater exhaust darker; limiter bounce visible in the envelope spectrum (4–25 Hz); three-engine beating; landing boom at 50–120 Hz; hiss grows with speed; ramp schedule; bit-identical renders; finite output on garbage input; CPU.
+  - `boatAudioSynth`: V8 firing line at rpm·8/120 ±3% at 900/2500/4500/6300 rpm; two-stroke at rpm·3/60; inverter at 6 f_e; identical pitch at 0 and 40 m/s; half-order energy (lump); underwater exhaust darker; limiter bounce visible in the envelope spectrum (4–25 Hz); three-engine beating; T206 dark lumpy idle (centroid, no 400–1500 Hz ring, warm 150–400 Hz, half orders ≥ 0.55) and no narrow tone above 1.5 kHz at idle in any voice; T206 landing is a hull hit (body over sub, no dominant bin, tail under 8 kHz) and slaps are dark, short and lighter; hiss grows with speed; ramp schedule; bit-identical renders; finite output on garbage input; CPU.
   - `boatAudioGraph`: ≤ 50 nodes and ≤ 2 HRTF with 8 and 12 boats; the graph does not grow; 7 slots with 3 full voices; §V109 walk; the worklet bundle stays inside `src/audio/boat`; engine-model seam; seam adapter; V112 phase scan.
 - **Browser** (Chrome, Vite dev on :5247, COOP/COEP):
   - `crossOriginIsolated` true; the worklet loads through `?worker&url`; the console shows only Vite's connect messages.

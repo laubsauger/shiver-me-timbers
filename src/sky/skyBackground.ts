@@ -25,9 +25,11 @@ import * as THREE from 'three/webgpu';
 import {
   Fn,
   cameraPosition,
+  exp,
   float,
   fwidth,
   mix,
+  normalize,
   positionWorld,
   smoothstep,
   uniform,
@@ -119,6 +121,10 @@ export function createSkyBackground(p: SkyParams) {
    *  than by MOON_SURGE: the surge is a reflectance law about light leaving
    *  the regolith, while an aura is bloom off the disc you can see. */
   const uMoonBright = uniform(0);
+  // §T.209 moon surface (params/sky.ts `moonLimbDarkening` / `moonEarthshine` / `moonMaria`; 0 = the old disc)
+  const uMoonLimbDark = uniform(p.moonLimbDarkening);
+  const uMoonEarthshine = uniform(p.moonEarthshine);
+  const uMoonMaria = uniform(p.moonMaria);
 
   // ── stars (§T.46) ──────────────────────────────────────────────────────
   // Same rule as the discs, and this one is the whole reason the field is
@@ -267,12 +273,34 @@ export function createSkyBackground(p: SkyParams) {
   // converges on the disc's own mean brightness rather than on a step.
   const soft = uMoonTermSoft.max(EPS).max(fwidth(dx).mul(2));
   const lit = smoothstep(termEdge.sub(soft), termEdge.add(soft), dx);
+  // §T.209 SURFACE. μ = cos of the angle from the disc centre; limb darkening dims toward the rim, the dark side
+  // keeps an earthshine fraction, and the maria are seven wide Gaussian blobs laid out like the near side in a
+  // MOON-FIXED frame (north = world up projected onto the disc), so they do not swing with the phase axis. Every
+  // term is a smooth function spanning ≥ 8 px of a ~40 px disc — nothing here needs its own band limit.
+  const mu = float(1).sub(dx.mul(dx).add(dy.mul(dy))).max(0).sqrt();
+  const limb = mix(float(1), mu.sqrt().mul(0.65).add(0.35), uMoonLimbDark);
+  const north = normalize(vec3(0, 1, 0).sub(uMoonDir.mul(uMoonDir.y)).add(vec3(1e-3, 0, 0)));
+  const east = uMoonDir.cross(north);
+  const mx = viewDir.dot(east).mul(inv);
+  const my = viewDir.dot(north).mul(inv);
+  const mare = (cx: number, cy: number, r: number, w: number) =>
+    exp(mx.sub(cx).mul(mx.sub(cx)).add(my.sub(cy).mul(my.sub(cy))).div(-(r * r))).mul(w);
+  const maria = mare(-0.38, 0.42, 0.26, 0.9) // Imbrium
+    .add(mare(-0.58, 0.02, 0.34, 0.8)) // Procellarum
+    .add(mare(0.16, 0.38, 0.17, 0.9)) // Serenitatis
+    .add(mare(0.34, 0.08, 0.2, 0.85)) // Tranquillitatis
+    .add(mare(0.7, 0.3, 0.1, 0.9)) // Crisium
+    .add(mare(0.55, -0.2, 0.14, 0.7)) // Fecunditatis
+    .add(mare(-0.18, -0.38, 0.16, 0.7)) // Nubium
+    .clamp(0, 1);
+  const surface = limb.mul(float(1).sub(maria.mul(uMoonMaria).mul(0.45)));
   // Same treatment for the limb: `moonDiscSoftness` is authored in degrees,
   // but a wide FOV can push that under a pixel, so it too is floored by the
   // screen footprint of the cosine it is thresholding.
   const limbSoft = fwidth(md).mul(2);
   const moonDisc = smoothstep(uMoonCosOuter.sub(limbSoft), uMoonCosInner.add(limbSoft), md)
-    .mul(lit)
+    .mul(lit.add(lit.oneMinus().mul(uMoonEarthshine)))
+    .mul(surface)
     .mul(uMoonIntensity);
   const toMoon = md.clamp(0, 1); // clamp before pow — negative base = NaN (§V28)
   const moonGlow = toMoon.pow(uMoonGlowPower.max(EPS)).mul(uMoonGlowStrength);
@@ -435,6 +463,9 @@ export function createSkyBackground(p: SkyParams) {
       uMoonGlowStrength.value = p.moonGlowStrength;
       uMoonHaloPower.value = p.moonHaloPower;
       uMoonHaloStrength.value = p.moonHaloStrength;
+      uMoonLimbDark.value = p.moonLimbDarkening;
+      uMoonEarthshine.value = p.moonEarthshine;
+      uMoonMaria.value = p.moonMaria;
       uMoonBright.value = key.moonLitFraction;
 
       starfield.update(key);

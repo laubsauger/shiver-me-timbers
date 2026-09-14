@@ -91,6 +91,9 @@ import {
 import { fetchFieldSampleNode, type FetchField } from './fetchField';
 import { swellBandShare, swellShadowGainNode } from './swellShadow';
 import type { PlanarReflection } from '../reflection';
+import { activeBoatLightPool, boatLightPoolNode } from './boatLightPool';
+import { wakeLedIrradianceNode } from '../flowfoam/wakeLight';
+import { activeHullMask, hullMaskOceanNode } from './hullVolumeMask';
 
 export interface OceanSurfaceMaterial {
   material: THREE.MeshBasicNodeMaterial;
@@ -1250,6 +1253,9 @@ export function buildOceanSurfaceMaterial(
     shadowMask = vec3(node).x.clamp(0, 1);
   }
 
+  // §T.209 boat LED light pools: opt-in at build (speedboat page only); absent ⇒ no node, bit-identical sea
+  const boatPool = activeBoatLightPool();
+
   const colorNode = Fn(() => {
     // FIRST, and inside the Fn on purpose — see buildSurfaceSlope's header.
     const { wakeSmooth, microUnresolvedVar, normalWorld } = buildSurfaceSlope();
@@ -1807,6 +1813,8 @@ export function buildOceanSurfaceMaterial(
       let wakeFresh: any = null;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
       let wakeMaskFresh: any = null;
+      let wakeCoverageW8: any = null; // eslint-disable-line @typescript-eslint/no-explicit-any -- W8: the mask's coverage (wakeWhiteNode)
+      let wakeContactW8: any = float(0); // eslint-disable-line @typescript-eslint/no-explicit-any -- W8: hull-contact share of it
       {
         wakeFresh = flowFoam?.wakeFoamFreshnessNode ? flowFoam.wakeFoamFreshnessNode(worldXZ) : null;
         const wakeCoverage = flowFoam
@@ -1815,8 +1823,15 @@ export function buildOceanSurfaceMaterial(
         const shoreState = foam ? foam.shoreSampleNode(worldXZ) : null;
         const shoreCoverage = shoreState ? shoreState.x : float(0);
         const shoreFresh = shoreState ? shoreState.y.div(shoreState.x.max(1e-5)).clamp(0, 1) : float(0);
-        const combinedCoverage = wakeCoverage.max(contactCoverage).max(shoreCoverage);
-        const contactShare = contactCoverage.div(combinedCoverage.max(1e-5));
+        // W8 round 3 (sim backend): the hull contact line breaks only where water works against the hull — scaled by the
+        // wake's own coverage there (the bow shoulder and quarters the sim churns); a hull merely resting keeps 20 %
+        const contactFlow = flowFoam?.wakeWhiteNode
+          // @band-limited-elsewhere: a VALUE gate on the filtered wake coverage sample, no spatial period
+          ? contactCoverage.mul(smoothstep(0.03, 0.4, wakeCoverage).mul(0.8).add(0.2))
+          : contactCoverage;
+        const combinedCoverage = wakeCoverage.max(contactFlow).max(shoreCoverage);
+        const contactShare = contactFlow.div(combinedCoverage.max(1e-5));
+        wakeContactW8 = contactShare;
         const ages = foamSourceAgesNode(
           combinedCoverage, wakeFresh, contactShare,
           shoreCoverage.div(combinedCoverage.max(1e-5)), shoreFresh,
@@ -1825,10 +1840,13 @@ export function buildOceanSurfaceMaterial(
         // Preserve the analytic wake's body, torn edge and colour when there
         // is no measured age. Merely wiring shoreState must not make it fresh.
         const wakeMask = foamDetailMask(
+          // §V.10: the wake is NOT carved by ambient crest elevation (that is the whitecap mask's law) — the sea's σ does
+          // not describe a ship-made surface, and carving tore crest-height holes in the lane
           combinedCoverage, worldXZ, undefined, undefined, undefined,
           ages.edge, ages.body, Boolean(flowFoam?.wakeFoamFreshnessNode),
         );
         wakeMaskFresh = wakeMask;
+        wakeCoverageW8 = combinedCoverage;
         // OPTICAL DEPTH, not a hard alpha (§B, the sim-foam lesson): a straight
         // mask saturates, so every texel the wake covers reached full opacity
         // and the track rendered as one flat sheet with breakup holes punched
@@ -1938,9 +1956,46 @@ export function buildOceanSurfaceMaterial(
         // Freshness alone cannot make the entire aerated body white. Only
         // dense fresh froth reaches white; thin bubbles retain turquoise and
         // optical transmission. Reuse the existing porous density mask.
-        const froth = wakeFresh.mul(smoothstep(0.35, 0.9, wakeMaskFresh));
-        wakeCol = mix(wakeCol, foamCol, froth);
-        wakeAmount = mix(wakeAlpha, wakeMaskFresh.clamp(0, 1).mul(0.9), froth).mul(foamGain);
+        // W8 round 3: steep wake crests (bow wave, shoulders, divergent arms) spill: a crest share from the wake's own
+        // slope (same texture tap) lightens them and gives them lace, so bow → arms → lane read as one system
+        const crest = flowFoam?.wakeCrestNode ? flowFoam.wakeCrestNode(worldXZ).toVar() : float(0);
+        const froth = flowFoam?.wakeWhiteNode
+          ? flowFoam.wakeWhiteNode(worldXZ, wakeMaskFresh.max(crest.mul(0.5)), wakeCoverageW8.max(crest.mul(0.3)), wakeFresh.max(crest.mul(0.35)), pixWorld, wakeContactW8).toVar()
+          : wakeFresh.mul(smoothstep(0.35, 0.9, wakeMaskFresh));
+        // W8 AERATED WATER IS SUBSURFACE (docs/wake/w8-foam-readability.md §3).
+        // Bubbles under the surface back-scatter the light the body already
+        // receives: the aged lane is the water BODY with a turquoise albedo,
+        // lit by the body's own coloured irradiance (`lightWrap`: sky + sun,
+        // so a sunset warms it), UNDER the interface — the Fresnel reflection
+        // and the ripples stay on top. It used to be a scalar-lit teal mixed
+        // over the reflection, which glowed the same teal under any sky. Only
+        // fresh froth is a surface film over them.
+        // round 3: the band's density follows the blurred COVERAGE (soft falloff over the tier's blur, not the torn
+        // dissolve's crisp outline), at a lower saturation (half-way to its own luminance), plus the crest share
+        const aerSoft = flowFoam?.wakeWhiteNode
+          ? float(1).sub(wakeCoverageW8.mul(1.6).add(crest.mul(0.35)).negate().exp())
+          : wakeAlpha;
+        const aerated = aerSoft.mul(froth.oneMinus()).mul(foamGain).mul(whitecapAmount.oneMinus());
+        const aerTint = flowFoam?.wakeWhiteNode ? mix(uWakeFoam, vec3(uWakeFoam.dot(vec3(0.2126, 0.7152, 0.0722))), 0.45) : uWakeFoam;
+        // W8 round 5: the boats' LEDs reach their own lanes (flowfoam/wakeLight.ts; speedboat page only, else no node)
+        // round 6: only where the lane's foam is (× its coverage), never the open water between boats
+        // @band-limited-elsewhere: a VALUE gate on the filtered wake coverage sample
+        const wakeLed = boatPool && flowFoam?.wakeWhiteNode ? wakeLedIrradianceNode(boatPool, surfacePos).mul(smoothstep(0.05, 0.4, wakeCoverageW8)).toVar() : null;
+        col.addAssign(aerTint.mul(wakeLed ? lightWrap.add(wakeLed) : lightWrap).sub(transmitted).mul(aerated).mul(reflWeight.oneMinus()));
+        // Wake froth follows the combined ocean + solver normal. The
+        // whitecap relief belongs to a different mask and must not emboss
+        // the wake with unrelated lace. Reuse the existing water normal;
+        // no extra slope taps or simulation pass.
+        // W8 round 3: lit by the SAME coloured irradiance the water body uses
+        // (sky colour + sun colour, `lightWrap`'s terms), at a foam albedo of
+        // 0.8 — a sunset warms it, night darkens it; the LED pools add later.
+        // The sun term carries the shadow map (`shade`); the sky term is occluded by the hull at the contact line, where
+        // a hull side hides about half the sky dome (the contact share is the depth-compare proximity to it).
+        wakeCol = uFoam.mul(foamTintNode()).mul(0.8)
+          .mul(skylightCol.mul(uLightFloor.add(0.1)).mul(wakeContactW8.mul(0.5).oneMinus())
+            .add(uSunLightColor.mul(ndl.mul(uLightGain).mul(0.6).mul(shade)))
+            .add(wakeLed ?? vec3(0)));
+        wakeAmount = froth.mul(0.9).mul(foamGain);
       }
       col.assign(mix(col, wakeCol, wakeAmount));
       foamAmount.assign(whitecapAmount.max(wakeAmount).clamp(0, 1));
@@ -2388,6 +2443,9 @@ export function buildOceanSurfaceMaterial(
     // the source for the skylight/foam/sky-tint terms above — those want ONE
     // scene-wide sky, not a per-pixel azimuth.
     const hazeTarget = skyDomeColor ? skyDomeColor(viewDir.negate()) : uHazeColor;
+    // §T.209: before the haze, so distant pools melt with the water they light (ocean/boatLightPool.ts)
+    const boatLight = boatPool ? boatLightPoolNode(boatPool, surfacePos, normalWorld, viewDir, foamAmount).toVar() : null;
+    if (boatLight) col.addAssign(boatLight);
     col.assign(mix(col, hazeTarget, hazeT));
     // glints punch partway through the haze — a sun path fading to nothing
     // at 2 km looks like fog, not distance
@@ -2533,6 +2591,7 @@ export function buildOceanSurfaceMaterial(
     const under = mix(ceiling, windowCol, snellWindow).toVar();
     // whitecaps and wake still read as bright patches from below
     under.assign(mix(under, uFoam.mul(0.9), foamAmount.mul(0.6)));
+    if (boatLight) under.addAssign(boatLight); // §T.209: the LEDs from below, through the same surface
 
     return frontFacing.select(col, under);
   })();
@@ -2542,6 +2601,10 @@ export function buildOceanSurfaceMaterial(
   const material = new THREE.MeshBasicNodeMaterial();
   material.positionNode = positionNode;
   material.colorNode = colorNode;
+  // hull volume mask (ocean/hullVolumeMask.ts): no water inside any boat's hull + cockpit column; opt-in, absent ⇒ no node
+  // (an alpha-0 sheet, NOT maskNode's discard: a discard costs the whole sea its early depth test, +2–2.8 ms measured)
+  const hullMask = activeHullMask();
+  if (hullMask) material.opacityNode = hullMaskOceanNode(hullMask);
   // §V.24: transparent flag routes the mesh into the transparent pass where
   // viewportSharedTexture/viewportDepthTexture hold the opaque scene behind.
   material.transparent = true;

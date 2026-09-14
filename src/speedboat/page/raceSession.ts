@@ -315,8 +315,16 @@ export function createRaceSession(d: RaceSessionDeps) {
         machines[PLAYER_RACER_ID] = createCrashMachine();
         teleport.fill(null);
         frozen.fill(null);
+        // the crash machine reads the trace D − 1 ticks late (`collect`, rt = tick − D + 1): without this its first rows
+        // after a (re)start are the OLD pose — the last speed, then a position jump — and a cine placement straight after
+        // a fast shot "crashed" at its spawn point with the previous shot's speed (trailer look pass, docs/cine)
+        nextRaceTick = atTick + 1;
         const pose = d.freeRoam.spawn();
         player.place(pose);
+        // a (re)start is a fresh boat: `place` forgets location memory but not the engines, so a take placed after a fast
+        // shot inherited that shot's rpm and its first seconds depended on the run order (trailer drive sim: shot 10 hooked
+        // at t 2.1 from idle, at t 0.0 with the previous shot's engines)
+        player.hw.resetEngines();
         resetBoatCollideMemory(mem);
         d.onPlayerTeleport?.(pose);
         return;

@@ -6,19 +6,19 @@
  *   V8 (cross-plane, firing order 1-8-4-3-6-5-7-2)
  *     crank phase ─► per-cylinder exhaust pulse  g(t) = v·e^(1−v), width ∝ 1/rpm, sharper on load
  *                   + turbulence noise under the pulse (dry ethanol grit)
- *                   + per-cylinder gain/timing signature, per-cycle lope variance at idle
+ *                   + per-cylinder gain/timing signature; at idle a cam-lope pattern, fatter pulses, valvetrain tick
  *        bank L (1,3,5,7) ─► pipe waveguide 0.85 m ─┐   odd/even bank sequence L R R L R L L R is
  *        bank R (2,4,6,8) ─► pipe waveguide 1.15 m ─┴► collector   what makes the half-order lump
  *     collector ─► body 95 Hz + midsection 420 Hz ─► soft clip (drive ∝ load)
  *        ├─ in air:     lowpass opening with load + rpm ............... bark
- *        └─ underwater: lowpass ~300 Hz × bubble AM + bubble resonator + idle-relief rasp
+ *        └─ underwater: lowpass ~300 Hz × bubble AM + low-Q hull gulp + idle-relief rasp
  *     pops: overrun/limiter/re-fire bursts injected INTO the pipe, so they ring like the exhaust
  *     lower-unit gear whine at pinion mesh (14 × crank)
  *   TWO-STROKE   3 cyl/rev, expansion-chamber positive reflection, nasal band, ring-ding skip-firing
  *   TURBINE      gas-generator blade-pass whine + shaft sidebands, combustor roar, power-turbine tone
  *   ELECTRIC     PMSM 6/12/24× electrical whine, inverter carrier (synchronous steps below base, async above)
  *   WATER        planing hiss, water rush, prop-wash spray roar, ventilation churn (hollow, < 2 kHz) at blade rate,
- *                hull slap, landing boom, wake double-knock
+ *                impacts (transient + noise-excited hull body + droplet grains, noise sub under landings), wake double-knock
  */
 import { DcBlock, Noise, OnePole, Svf, Waveguide, clamp, pulseShape, sin01, smoothstep, softClip } from './dsp';
 import type { VoiceTunables } from './protocol';
@@ -64,6 +64,8 @@ class ExhaustExit {
     private sr: number,
     seed: number,
     private cheap: boolean,
+    /** T206: the V8's hull gulp carries its idle warmth; the two-stroke keeps its T183 level */
+    private bubbleGain = 1.4,
   ) {
     this.noise = new Noise(seed ^ 0xb0bb1e);
     this.bubbleAm.setHz(7, sr);
@@ -78,22 +80,25 @@ class ExhaustExit {
   }
   /** a firing reached the hub: re-pitch the bubble */
   kick(): void {
-    this.bubbleHz = 140 + 380 * this.noise.next();
-    this.bubble.set(this.bubbleHz, 7, this.sr);
+    // T206: was Q 7 re-pitched anywhere in 140–520 Hz twice a cycle — a random-pitch "bloop" melody over the idle,
+    // the tonal oddity in "weird". A low-Q gulp in the hull band keeps the bubble without a pitch to follow
+    this.bubbleHz = 140 + 200 * this.noise.next();
+    this.bubble.set(this.bubbleHz, 2.2, this.sr);
   }
   run(x: number, pulse: number, muffle: number): number {
     const y = this.dc.run(x);
     this.airLp.run(y);
     if (muffle <= 0.001) return this.airLp.lp;
     this.underLp.run(y);
-    const am = 0.45 + 1.6 * Math.max(0, this.bubbleAm.lp(this.noise.bi() * 3));
-    let under = this.underLp.lp * am * 1.1;
+    // T206: bubble AM depth ~halved (0.45…2.05 → 0.7…1.5): a random 7 Hz tremolo was smearing the cam lope
+    const am = 0.7 + 0.8 * Math.max(0, this.bubbleAm.lp(this.noise.bi() * 3));
+    let under = this.underLp.lp * am;
     if (!this.cheap) {
       this.bubble.run(pulse * 0.6);
       this.relief.run(y);
       // the idle-relief port is a trace of rasp: at 0.1 it put MORE energy above 1 kHz into the
       // through-the-hub exhaust than the in-air idle had (measured), the opposite of underwater
-      under += this.bubble.bp * 1.4 + this.relief.hp * 0.025;
+      under += this.bubble.bp * this.bubbleGain + this.relief.hp * 0.025;
     }
     return this.airLp.lp * (1 - muffle) + under * muffle;
   }
@@ -160,6 +165,13 @@ export class V8Voice implements EngineVoice {
   private noise: Noise;
   private lope = new OnePole();
   private whinePhase = 0;
+  /** T206 cam-lope signature: each cylinder's own idle charge and spark point, and this cycle's charge */
+  private readonly idleSig = new Float32Array(8);
+  private readonly idleTiming = new Float32Array(8);
+  private cycleGain = 1;
+  private tick = new Svf();
+  private tickEnv = 0;
+  private readonly tickDecay: number;
   private readonly sr: number;
   private readonly cheap: boolean;
 
@@ -183,9 +195,16 @@ export class V8Voice implements EngineVoice {
     this.pipeR = new Waveguide((sr * 2 * lenR) / SPEED_OF_HOT_GAS, -0.52, 2800, sr);
     this.body.set(92 * (1 + 0.05 * rng.bi()), 1.3, sr);
     this.mid.set(420 * (1 + 0.06 * rng.bi()), 1.6, sr);
-    this.exit = new ExhaustExit(sr, seed, cheap);
+    this.exit = new ExhaustExit(sr, seed, cheap, 2.6);
     this.pops = new Pops(sr, seed);
     this.lope.setHz(1.6, sr);
+    // drawn after everything above, so the pipes and resonances of a given seed are unchanged
+    for (let i = 0; i < 8; i++) {
+      this.idleSig[i] = 0.35 + 1.3 * rng.next();
+      this.idleTiming[i] = 0.016 * rng.bi();
+    }
+    this.tick.set(2100 * (1 + 0.08 * rng.bi()), 1.1, sr);
+    this.tickDecay = Math.exp(-1 / (0.0006 * sr));
   }
 
   render(out: Float32Array, off: number, n: number, f: EngineFrame, t: VoiceTunables, gain: number): void {
@@ -202,10 +221,16 @@ export class V8Voice implements EngineVoice {
     this.exit.configure(load, rpmN, bright);
     const popP = this.cheap ? 0 : this.pops.rate(f, t, sr, rpmMid);
     const whine = this.cheap ? 0 : t.gearWhineGain * (0.2 + load) * rpmN * rpmN * (1 - 0.7 * f.muffle);
+    // T206 idle thump: at idle the blowdown is slow and fat (a "whump", not a click); it tightens back to the
+    // T183 pulse as the lope fades with rpm and load, so cruise/WOT are untouched
+    const thump = 1 + 0.9 * lope;
+    // valvetrain tick from the powerhead, in air whatever the exhaust does; a trace, idle-weighted
+    const tickG = this.cheap || lope < 0.02 ? 0 : 0.007 * lope;
     const inv = 1 / n;
     // LOUDNESS LAW. Pulse energy ∝ width ∝ 1/rpm while pulse rate ∝ rpm, so the synthesis alone keeps
     // idle within ~3 dB of full throttle. A real outboard spans ~15 dB idle → WOT: set it explicitly.
-    const norm = 1.25 * loudness(load, rpmN, f.overrun);
+    // T206: the fatter idle pulse and the wider lope signature carry more energy; this holds idle at its T183 level
+    const norm = (1.25 * loudness(load, rpmN, f.overrun)) / (Math.sqrt(thump) * (1 + 0.1 * lope));
 
     for (let s = 0; s < n; s++) {
       const rpm = f.rpmA + (f.rpmB - f.rpmA) * (s * inv);
@@ -215,21 +240,25 @@ export class V8Voice implements EngineVoice {
       // firing: angles k/8 (+ signature timing), phase wraps once per cycle
       while (this.phase >= this.nextAngle) {
         const k = this.next;
-        const variance = 1 + lope * 0.5 * this.noise.bi();
-        this.amp[k] = pulseAmp * this.cylGain[k] * variance;
+        // T206: the lope is a REPEATING per-cylinder pattern (energy on the cycle-rate orders: the burble) plus
+        // a per-cycle swing; the old ±50 % per-firing white variance read as roughness, not lope
+        const variance = 1 + lope * 0.25 * this.noise.bi();
+        this.amp[k] = pulseAmp * this.cylGain[k] * (1 + lope * (this.idleSig[k] - 1)) * this.cycleGain * variance;
         this.age[k] = 0;
+        this.tickEnv = 1;
         if (k === 0 || k === 4) this.exit.kick();
         this.next = k + 1;
         if (this.next === 8) {
           this.next = 0;
           this.phase -= 1;
+          this.cycleGain = lope > 0 ? 1 + lope * 0.3 * this.noise.bi() : 1;
         }
-        this.nextAngle = this.next / 8 + this.timing[this.next] + lope * 0.006 * this.noise.next();
+        this.nextAngle = this.next / 8 + this.timing[this.next] + lope * (this.idleTiming[this.next] + 0.006 * this.noise.next());
       }
       // exhaust pulses: peak time ∝ 1/rpm, sharper on load; clamped to physical 0.5–5 ms
       const width = 40 / Math.max(300, rpm);
-      // blowdown front: ~1.5 ms at idle, sub-ms on load — the transient IS the V8's crackle
-      const peak = clamp(width * (0.028 - 0.014 * load), 0.00035, 0.0016);
+      // blowdown front: ~3.5 ms at idle (T206 thump), sub-ms on load — the load transient IS the V8's crackle
+      const peak = clamp(width * (0.028 - 0.014 * load) * thump, 0.00035, 0.0016 * thump);
       const invPeak = 1 / peak;
       let bl = 0;
       let br = 0;
@@ -258,6 +287,11 @@ export class V8Voice implements EngineVoice {
       x = softClip(x * drive) / (0.35 * drive + 0.65);
       let y = this.exit.run(x, pulseSum, f.muffle);
       y += pop * 0.25 * (1 - f.muffle);
+      if (tickG > 0 && this.tickEnv > 1e-3) {
+        this.tick.run(this.noise.bi() * this.tickEnv);
+        this.tickEnv *= this.tickDecay;
+        y += this.tick.bp * tickG;
+      }
       if (whine > 0) {
         this.whinePhase += (rpm / 60) * 14 / sr;
         if (this.whinePhase > 1) this.whinePhase -= 1;
@@ -395,8 +429,9 @@ export class TurbineVoice implements EngineVoice {
     const rpmMid = 0.5 * (f.rpmA + f.rpmB);
     const ptHz = ((rpmMid * 9) / 60) * 7; // power turbine through a 9:1 box, 7 blades
     this.roar.set(520 + 2000 * spool, 0.6, sr);
-    // idle whine is a trace; it comes up with spool
-    const whineG = 0.012 + 0.16 * spool * spool;
+    // idle whine is a trace; it comes up with spool (T206: 0.012 still stood 18 dB out of the idle roar at 2.06 kHz,
+    // the one narrow tone above 1.5 kHz left in any idling voice)
+    const whineG = 0.004 + 0.16 * spool * spool;
     const roarG = 0.12 + 0.8 * Math.pow(spool, 1.5);
     const ptG = this.cheap ? 0 : 0.04 * (0.3 + f.load) * clamp(rpmMid / 3000, 0, 1);
     for (let s = 0; s < n; s++) {
@@ -544,28 +579,39 @@ export class WaterLayer {
   private howlTop = new OnePole();
   private ventEnv = 0;
   private ventRpm = -1;
-  private slap1 = new Svf();
-  private slap2 = new Svf();
-  private splashHp = new Svf();
-  private crashLp = new Svf();
-  private tailHp = new Svf();
   private noise: Noise;
-  private slapEnv = 0;
-  private splashEnv = 0;
-  private boomEnv = 0;
-  private boomHz = 100;
-  private boomPhase = 0;
-  private crashEnv = 0;
-  private tailEnv = 0;
   private howlPhase = 0;
   private pendingKnock = -1;
   private pendingKnockAmp = 0;
-  private readonly kSlap: number;
-  private readonly kSplash: number;
-  private readonly kBoom: number;
-  private readonly kBoomHz: number;
-  private readonly kCrash: number;
-  private readonly kTail: number;
+  // IMPACTS (T206). Was: slap = noise through 118/265 Hz resonators + a 1.3 kHz HIGHPASS of white noise (65 % of the
+  // slap's energy above 8 kHz: the hiss); landing = a SINE gliding 112 → 50 Hz (42 % of the hit in one bin, 93 %
+  // under 120 Hz: the boom). Now every hit is transient + noise-excited hull body + band-limited droplet grains,
+  // with a pitch-dropping noise sub only under landings; each hit draws its own body tuning, decay and spray colour.
+  private hitLp = new Svf();
+  private bodyA = new Svf();
+  private bodyB = new Svf();
+  private sub = new Svf();
+  private grainBp = new Svf();
+  private sprayLp = new Svf();
+  private hitEnv = 0;
+  private bodyEnv = 0;
+  private kBody = 0;
+  private bodyGain = 1;
+  private subEnv = 0;
+  private subHz = 100;
+  private sprayEnv = 0;
+  private kSpray = 0;
+  /** grains per sample at sprayEnv = 1 */
+  private grainRate = 0;
+  private grainEnv = 0;
+  private kGrain = 0;
+  /** 0 = dark small-slap spray … 1 = the brightest big-landing spray */
+  private sprayBright = 0;
+  /** 0 = slap levels (slapGain) … 1 = landing levels (landingGain) */
+  private bigMix = 0;
+  private readonly kHit: number;
+  private readonly kSub: number;
+  private readonly kSubHz: number;
   constructor(
     private sr: number,
     seed: number,
@@ -575,32 +621,47 @@ export class WaterLayer {
     this.chop.setHz(2.5, sr);
     this.howlTop.setHz(1600, sr);
     this.rush.set(380, 0.7, sr);
-    this.slap1.set(118, 4, sr);
-    this.slap2.set(265, 3, sr);
-    this.splashHp.set(1300, 0.7, sr);
-    this.crashLp.set(520, 0.7, sr);
-    this.tailHp.set(2600, 0.7, sr);
-    this.kSlap = Math.exp(-1 / (0.006 * sr));
-    this.kSplash = Math.exp(-1 / (0.07 * sr));
-    this.kBoom = Math.exp(-1 / (0.42 * sr));
-    this.kBoomHz = Math.exp(-1 / (0.22 * sr));
-    this.kCrash = Math.exp(-1 / (0.22 * sr));
-    this.kTail = Math.exp(-1 / (0.95 * sr));
+    this.sprayLp.set(4200, 0.6, sr);
+    this.kHit = Math.exp(-1 / (0.0025 * sr));
+    this.kSub = Math.exp(-1 / (0.16 * sr));
+    this.kSubHz = Math.exp(-1 / (0.12 * sr));
+  }
+  /** chop slap (small, mid, short) or landing (heavier, lower body, a sub under it, a long spray tail) */
+  private hit(strength: number, big: boolean): void {
+    const s = Math.min(1.5, strength);
+    const sr = this.sr;
+    const r = (): number => this.noise.bi();
+    const body = big ? 0.9 * Math.pow(s, 0.8) : Math.pow(s, 0.8);
+    if (body >= this.bodyEnv) {
+      this.bigMix = big ? 1 : 0;
+      this.bodyGain = big ? 4.5 : 2.2;
+      // hull panel + cavity modes: slaps ring higher and shorter, landings load the whole bottom
+      this.bodyA.set((big ? 165 : 270) * (1 + 0.14 * r()), big ? 2.2 : 3, sr);
+      this.bodyB.set((big ? 360 : 560) * (1 + 0.12 * r()), 2.6, sr);
+      this.kBody = Math.exp(-1 / ((big ? 0.1 : 0.035) * (1 + 0.25 * r()) * sr));
+      this.hitLp.set(1800 + 1600 * Math.min(1, s), 0.6, sr);
+    }
+    this.hitEnv = Math.max(this.hitEnv, Math.pow(s, 0.9));
+    this.bodyEnv = Math.max(this.bodyEnv, body);
+    if (big) {
+      this.subEnv = Math.max(this.subEnv, 0.7 * s);
+      this.subHz = 105 * (1 + 0.1 * r());
+    }
+    const spray = (big ? 0.7 : 0.9) * Math.pow(s, 0.9);
+    if (spray >= this.sprayEnv) {
+      this.kSpray = Math.exp(-1 / ((big ? 0.45 : 0.09) * (1 + 0.2 * r()) * sr));
+      this.grainRate = (big ? 420 : 160) / sr;
+      this.sprayBright = clamp(s / 1.5, 0, 1);
+    }
+    this.sprayEnv = Math.max(this.sprayEnv, spray);
   }
   slam(strength: number): void {
     if (this.cheap || !(strength > 0)) return;
-    const s = Math.min(1.5, strength);
-    this.slapEnv = Math.max(this.slapEnv, s);
-    this.splashEnv = Math.max(this.splashEnv, 0.6 * s);
+    this.hit(strength, false);
   }
   landing(strength: number): void {
     if (this.cheap || !(strength > 0)) return;
-    const s = Math.min(1.5, strength);
-    this.boomEnv = Math.max(this.boomEnv, s);
-    this.boomHz = 112;
-    this.crashEnv = Math.max(this.crashEnv, s);
-    this.tailEnv = Math.max(this.tailEnv, 0.7 * s);
-    this.slam(s);
+    this.hit(strength, true);
   }
   wakeKnock(strength: number): void {
     if (this.cheap || !(strength > 0)) return;
@@ -608,7 +669,7 @@ export class WaterLayer {
     this.pendingKnock = Math.round(0.16 * this.sr);
     this.pendingKnockAmp = 0.55 * strength;
   }
-  render(out: Float32Array, off: number, n: number, w: WaterFrame, t: VoiceTunables, gain: number): void {
+  render(out: Float32Array | Float64Array, off: number, n: number, w: WaterFrame, t: VoiceTunables, gain: number): void {
     const sr = this.sr;
     const sN = clamp(w.speed / Math.max(1, t.speedRef), 0, 1.3);
     const wet = clamp(w.wet, 0, 1);
@@ -657,25 +718,39 @@ export class WaterLayer {
       }
       if (!this.cheap) {
         if (this.pendingKnock >= 0 && this.pendingKnock-- === 0) this.slam(this.pendingKnockAmp);
-        if (this.slapEnv > 1e-4 || this.splashEnv > 1e-4) {
-          const burst = nz * this.slapEnv;
-          this.slap1.run(burst);
-          this.slap2.run(burst);
-          this.splashHp.run(this.noise.bi());
-          y += (this.slap1.bp * 3.2 + this.slap2.bp * 2.2) * t.slapGain + this.splashHp.hp * this.splashEnv * 0.5 * t.slapGain;
-          this.slapEnv *= this.kSlap;
-          this.splashEnv *= this.kSplash;
-        }
-        if (this.boomEnv > 1e-4 || this.tailEnv > 1e-4) {
-          this.boomHz = 50 + (this.boomHz - 50) * this.kBoomHz;
-          this.boomPhase += this.boomHz / sr;
-          if (this.boomPhase > 1) this.boomPhase -= 1;
-          this.crashLp.run(nz);
-          this.tailHp.run(this.noise.bi());
-          y += (sin01(this.boomPhase) * this.boomEnv * 0.9 + this.crashLp.lp * this.crashEnv * 1.4 + this.tailHp.hp * this.tailEnv * 0.35) * t.landingGain;
-          this.boomEnv *= this.kBoom;
-          this.crashEnv *= this.kCrash;
-          this.tailEnv *= this.kTail;
+        if (this.bodyEnv > 1e-4 || this.sprayEnv > 1e-4 || this.subEnv > 1e-4) {
+          const g = t.slapGain + (t.landingGain - t.slapGain) * this.bigMix;
+          // transient: the first few ms, broadband but not a click of white noise
+          this.hitLp.run(nz * this.hitEnv);
+          // hull body: noise-excited low-Q modes (bp peak gain = Q, so the weights read ≈ 1/Q)
+          const nb = this.noise.bi() * this.bodyEnv;
+          this.bodyA.run(nb);
+          this.bodyB.run(nb);
+          let hit = this.hitLp.lp * 0.55 + (this.bodyA.bp * 0.5 + this.bodyB.bp * 0.22) * this.bodyGain;
+          // landing sub: noise, not a sine, sliding down as the hull settles
+          if (this.subEnv > 1e-4) {
+            this.subHz = 48 + (this.subHz - 48) * this.kSubHz;
+            this.sub.set(this.subHz, 1.6, sr);
+            this.sub.run(nz * this.subEnv);
+            hit += this.sub.bp * 2.2;
+            this.subEnv *= this.kSub;
+          }
+          // spray: droplet grains, each its own pitch inside a band that brightens with the impulse, under a 4.2 kHz ceiling
+          if (this.noise.next() < this.grainRate * this.sprayEnv * 4) {
+            const lo = 450 + 550 * this.sprayBright;
+            const oct = 2.2 * this.noise.next();
+            this.grainBp.set(lo * Math.pow(2, oct), 1.4, sr);
+            this.grainEnv = Math.max(this.grainEnv, (0.35 + 0.65 * this.noise.next()) * Math.min(1, this.sprayEnv * 1.6));
+            this.kGrain = Math.exp(-1 / ((0.0012 + 0.0035 * this.noise.next()) * sr));
+          }
+          this.grainBp.run(this.noise.bi() * (this.grainEnv + 0.18 * this.sprayEnv));
+          this.sprayLp.run(this.grainBp.bp);
+          hit += this.sprayLp.lp * 0.45;
+          y += hit * g;
+          this.grainEnv *= this.kGrain;
+          this.hitEnv *= this.kHit;
+          this.bodyEnv *= this.kBody;
+          this.sprayEnv *= this.kSpray;
         }
       }
       out[off + s] += y * gain;

@@ -433,3 +433,29 @@ horns 8 → 6 sides; jerrycan spouts 16 → 12) and the manifest parts line lowe
 - `dash.py`, outside T200's files: the tablet case corner bumpers sink 3 mm into the face panel instead of 2 mm. Their
   bevelled backs sat exactly on the §V98 2 mm plane tolerance from the case back. The T196 vcg shift (0.739 → 0.760)
   tipped them into a raw-checker z-fight (2.8 × 2.8 cm at body 0.565, 0.207, 1.170), which blocked the build.
+
+**Outboard joint fix (USER close-up at sunset: "a weird gap between coloured and white parts", then the same at
+every stacked joint).**
+- Causes, in `outboard.py`, with each joint audited bottom up:
+  - collar / upper cowl: the T200 collar stopped at h 0.34, but the upper cowl started at 0.36. That left a ~2 cm open
+    slot all round: you could see into the cowl, and the latches (at h 0.35) floated in it. The `COWL` table also
+    stepped 2 cm wider and 3 cm longer between its 0.34 and 0.36 rows, so the upper cowl's edge overhung the collar.
+  - upper cowl / cap: the upper cowl ended at 0.80, but the cap started at 0.82, which left a ~2.4 cm open slot.
+  - cav plate / midsection: the open midsection foot hung at yc + 10 mm, 3 mm above the 14 mm plate's top, and
+    its nose ran 1 cm past the plate outline. Both left a slit into the hollow midsection.
+  - midsection / cowl tray and torpedo / strut / plate: these already overlap (checked; no change).
+- Fix:
+  - One section table `CS` (bucket 0–0.25, stripe –0.28, collar –0.36, upper –0.80, cap –1.0) drives the lofts.
+  - The collar/upper and upper/cap pairs are lipped at the same h. `cowl_shell` and `cowl_top` lips are a 1.5 mm 45°
+    edge bevel plus a 12 mm flange, leaving a 4 mm panel line. A black rubber `cowl_seal` band (inset 7 mm) closes
+    each line.
+  - The table's 0.33/0.34 rows are replaced by one 0.28 row on the old 0.22→0.33 line. The bucket and stripe are
+    unchanged, the collar is linear up to the split, and the two edges share one ring profile (flush). The collar is
+    2 cm taller (8 cm); the cap starts 2 cm lower.
+  - The latches are small single stainless keepers (16 × 32 × 4 mm) straddling the split on ring vertices, tilted to
+    the surface slope.
+  - The midsection foot starts at the plate's mid-plane with its nose at zp + 0.28, inside the plate.
+- Guard: `check_joints` fails the build (SystemExit) if any stacked joint opens by more than 1 mm. It covers the
+  torpedo, strut, plate, midsection and tray pairs, and every consecutive `CS` pair. Checked by putting the old
+  collar (0.28, 0.34) back in a scratch copy: it reports "collar/upper: 19.6 mm open".
+- Tris per drive: seals +128, latches 352 → 176. Parts LOD0 63 691 → 63 547.

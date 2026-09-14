@@ -221,6 +221,13 @@ export function windLineWeight(h: number, gate: number, power: number): number {
   return Math.pow(base, Math.max(EPS, power));
 }
 
+/** Thin the hashed candidate population at night; never select every nth line. */
+export function nightWindGate(gate: number, night: number, density: number): number {
+  const n = Math.min(1, Math.max(0, finite(night)));
+  const keep = Math.min(1, Math.max(0, finite(density)));
+  return gate * (1 - n * (1 - keep));
+}
+
 /** the two undulation wavenumbers, radians⁻¹ along the streak */
 export function waveNumbers(waveFreq: number): [number, number] {
   const k = TAU * Math.max(0, finite(waveFreq));
@@ -577,6 +584,7 @@ export function createWindLines(p: SkyParams) {
      *              drift from the sky's the moment either is tuned.
      */
     update(key: KeyLight, wind: WindFrame, haze: THREE.Color): void {
+      const night = Math.min(1, Math.max(0, finite(key.nightFactor)));
       const { axis, side } = windAxis(wind.direction);
       uAxis.value.set(axis[0], axis[1], axis[2]);
       uSide.value.set(side[0], side[1], side[2]);
@@ -595,12 +603,13 @@ export function createWindLines(p: SkyParams) {
       uWaveK2.value = k2;
       uWaveSlope.value = windLineWaveSlope(waveAmount, p.windLineWaveFreq);
       uGustK.value = TAU * Math.max(0, finite(p.windLineGustFreq));
-      uGustDepth.value = Math.min(1, Math.max(0, finite(p.windLineGustDepth)));
+      const gustDepth = Math.min(1, Math.max(0, finite(p.windLineGustDepth)));
+      uGustDepth.value = gustDepth + (Math.max(gustDepth, 0.96) - gustDepth) * night;
       uDensityPower.value = Math.max(EPS, finite(p.windLineDensityPower, 1));
       uHorizonFade.value = Math.max(EPS, finite(p.windLineHorizonFade, 0.03));
 
       const speed = Math.max(0, finite(wind.speed));
-      uGate.value = windLineGate(speed, p.windLineOnset, p.windLineFull);
+      uGate.value = nightWindGate(windLineGate(speed, p.windLineOnset, p.windLineFull), night, p.windLineNightDensity);
 
       // §V.55: three accumulators, each advanced at its OWN wavenumber so all
       // three families of feature travel down the streak at the same ANGULAR
@@ -625,7 +634,6 @@ export function createWindLines(p: SkyParams) {
       // Wind lines are LIT AIR. After dark there is almost nothing lighting
       // them, so they fall away to a trace rather than glowing on as white
       // scratches over a night sky.
-      const night = Math.min(1, Math.max(0, finite(key.nightFactor)));
       const dim = Math.min(1, Math.max(0, finite(p.windLineNightDim)));
       uAmp.value = Math.max(0, finite(p.windLineBrightness)) * (1 - night * (1 - dim));
     },

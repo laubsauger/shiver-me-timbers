@@ -24,6 +24,11 @@ export interface BoatLivery {
   dominant: number;
   /** race number 0–99 */
   number: number;
+  /**
+   * §T.209 optional LED hex (sRGB) when the signature does not survive as a light: a saturated orange paint
+   * (#e4572e) emitted at full brightness tonemaps to RED under ACES, so the hero names her orange explicitly
+   */
+  led?: number;
 }
 
 const BONE = 0xe9e5da;
@@ -63,7 +68,7 @@ const paint = (topsides: number, signature: number, stripe: number, number: numb
  * hull mask grows a pattern channel.
  */
 export const FLEET_LIVERIES = {
-  hero: { topsides: BONE, band: 0xe4572e, stripe: 0x1f4e5f, antifoul: 0x6b2e25, numeral: STENCIL, dominant: 0xe4572e, number: 27 },
+  hero: { topsides: BONE, band: 0xe4572e, stripe: 0x1f4e5f, antifoul: 0x6b2e25, numeral: STENCIL, dominant: 0xe4572e, number: 27, led: 0xff7a1a },
   'dome-ten': paint(0x2b2f33, 0xffd21f, 0xc8372d, 9, true), // charcoal / signal yellow / red (concept 08's yellow rival)
   'outer-bar': paint(0x5a4f42, 0x6cc24a, BONE, 44, true), // wet-sand bronze / lime / bone
   'bench-hollow': paint(0xcdbfa3, 0x7a1f2b, STENCIL, 3, false), // sand / wine / black
@@ -104,6 +109,9 @@ export function resolveLivery(userData: Record<string, unknown> | undefined): Bo
       if (isHex(full[k])) out[k] = full[k] as number;
     }
     if (typeof full.number === 'number' && Number.isFinite(full.number)) out.number = full.number;
+    // the hero's LED names HER orange: a livery with its own signature (dominant) lights in that, never in hers
+    if (isHex(full.led)) out.led = full.led;
+    else if (isHex(full.dominant) && full.dominant !== HERO_LIVERY.dominant) delete out.led;
     return out;
   }
   if (isHex(userData.liveryTint)) {
@@ -111,6 +119,27 @@ export function resolveLivery(userData: Record<string, unknown> | undefined): Bo
     out.dominant = userData.liveryTint;
   }
   return out;
+}
+
+/**
+ * §T.209 LED COLOUR: the boat's signature hue (`dominant`) as an LED would emit it — the same hue at full brightness
+ * (max channel scaled to 1), since an LED is a light, not a paint: olive drab lights as yellow-olive, wine as red.
+ * A signature too dark or too grey to carry a hue (levee-town's black, max channel < 0.2 or chroma < 0.25 of max)
+ * falls back to the pinstripe, then to bone white. 0xRRGGBB sRGB, pure.
+ */
+export function ledColor(l: Readonly<BoatLivery>): number {
+  if (isHex(l.led)) return l.led;
+  for (const hex of [l.dominant, l.stripe]) {
+    const r = (hex >> 16) & 255;
+    const g = (hex >> 8) & 255;
+    const b = hex & 255;
+    const hi = Math.max(r, g, b);
+    const lo = Math.min(r, g, b);
+    if (hi < 0.2 * 255 || hi - lo < 0.25 * hi) continue;
+    const k = 255 / hi;
+    return (Math.round(r * k) << 16) | (Math.round(g * k) << 8) | Math.round(b * k);
+  }
+  return BONE;
 }
 
 /** the glyphs painted for a race number: one digit below 10, else tens and ones (the number wraps at 100) */

@@ -783,3 +783,43 @@ Scratch (not in repo): tests/zzScratchT207Assist.test.ts, tests/zzScratchT207Ass
   mapping. Consequence [M]: raceAiLaps rookie metric 0.109 vs bound 0.04 and raceAiPack 3 failures (a hook, lap band,
   catch-up spread) with it; without it raceAiLaps passes and raceAiPack fails only the catch-up spread (2.90 vs 2.74 s).
   The pilot's −waveLift bow-down requests (up to −6° drive trim) were never run through the physics — pilot owner.
+
+# Seakeeping review, 2026-09-14 (trailer review: "water through the boat", "diving between waves", "toy-like")
+
+Scratch (not in repo): `scratchpad/sk/phys/` (`sea.test.ts` page-step seakeeping harness, env `PRESET KN HEAD HEADREF SEED
+SECS P OCEAN`; `rest.test.ts`, `drop.test.ts`), `scratchpad/sk/sea/` (`real.test.ts` realised Hs, `trim.test.ts` static/running
+trim, `savfit.test.ts` Savitsky scan, `filt.test.ts` response vs wavelength). Presets and ride numbers: docs/speedboat/sea-presets.md.
+
+## Measured, no change justified
+- Flat-water natural periods heave/pitch/roll 2.33/2.42/3.42 s (ζ 0.32/0.30/0.03); mass 5351 kg; pitch/yaw/roll inertia
+  52.1/51.8/3.6 t·m² (gyradii 0.260 L, 0.259 L, 0.359 B; the outboards' 4.56 m lever ≈ 19.5 t·m² of pitch); added mass
+  at rest heave 3.55 m, pitch 2.75 I; at 25 m/s 1.37 m, 0.67 I.
+- Landings (flat water, 1–2.5 m drops at 15–25 m/s): rebound ratio 0.10–0.14, no second flight, sink 0.09–0.18 m.
+- A/B in breeze/Working sea (2 seeds, 50 kn): proxy flare +8°, 0.45 m sheer spring, addedMassCoeff 1.5, waterVelocity off,
+  transomWake off, driveFoil off — none reduced bow stuffing (several worse). The stuffing, 40–49 % downwind airtime and
+  the > 2 Hz chatter came from the sea: the old Working sea realised Hs 3.6–3.8 m (see the √2 root cause below) of short,
+  steep wind sea.
+- Static trim 2.14° stern down; transom keel 0.67 m, AV plate 0.49 m, prop 0.72 m under still water; LCG 31 % from the
+  transom. Render pose = physics pose (browser: 2.14/2.14°, 3.06/3.06° at 20.4 m/s); GLB prop anchor body y −0.760 =
+  physics prop point.
+- Response vs regular head-sea wavelength at 30 m/s (a = min(0.15, λ/28) m): heave std 0.000/0.000/0.004/0.045/0.130/
+  0.152 m at λ 2/4/8/16/32/64 m — the wetted-surface integration filters waves shorter than ~2× the wetted length.
+  Caveat: a steep λ = 2 × patch spacing (1.6 m at 0.8 m) aliases in the 0.8 m patch (heave diverges at a 0.057 m);
+  in the real sea the mirror's Smith factor e^(−k·0.54) is 0.12 there (0.015 at λ 0.8 m), and a 0.01 m wave shows
+  nothing; patch 0.4 m removes it (T207 perf note: not adopted).
+- Smith effect: `CpuOcean` pressure head attenuates every mode e^(−k·T), T = the deep-V's rest keel depth (0.54 m);
+  orbital vertical velocity (`waterVelocity`) is ∂/∂t of that attenuated head; the 2D+t slam is V_n·dm_a/dt with the
+  Wagner half-beam growing at (π/2)V/tanβ (force ∝ 1/tanβ, pressure ∝ 1/tan²β), deadrise warped to 45° forward. All
+  four effects the user described are in the model; none was missing.
+
+## Root cause found and fixed: the realised sea was √2 taller than its spectrum (all modes)
+h0(k)e^{iωt} + conj(h0(−k))e^{−iωt} puts two independent Gaussians on each mode: realised variance 2× every moment the
+spectrum books. `H0_AMPLITUDE_SCALE` = 1/√2 on h0 (src/ocean/oceanMath.ts). Swell-only 1.18 m spectrum: realised 1.69–1.73
+→ 1.18–1.21 m. Tests re-derived to keep their intent: foam λ− constants ÷√2, hullContact sea target ×√2, §V.69 reference
+forcing ×2 energy, shoaling Sk bound 20 → 30 % (measured −24 %), audio slam assertion on the entry slam.
+
+## Running trim: Savitsky fit measured, NOT adopted
+`garmeANon` 0.34 leaves equilibrium trim 0.48–0.87° under Savitsky (C_v 3.1–6.0); 0.9 fits within −0.17…+0.14° (player
+hull 20/30 m/s 2.75/1.93 → 3.51/2.50°) but moves the manoeuvring envelope, crossing-swell hooks (2 → 4/16 at C_v 8), the AI
+capability table, pack band and three crash scenarios (11 tests). Coordinator: keep 0.34, separate task. Drive trim
+authority stays ≈ 0.1° (no surface-piercing prop vertical-force source in hand).

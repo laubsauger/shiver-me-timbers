@@ -13,6 +13,13 @@ export const PLAYER_ENGINE_SLOT = 0;
 export const PLAYER_WATER_SLOT = 1;
 export const NPC_SLOTS = 7;
 export const SLOT_COUNT = 2 + NPC_SLOTS;
+/**
+ * Cine SFX stems: after the slots, one WATER-ONLY output per NPC slot (the NPC slot outputs mix engine + water; the
+ * player's two slots are already split). Silent until the page asks for stems (`{ t: 'stems', on: true }`), and never
+ * part of the game mix: the slot outputs are sample-identical with stems on or off (tests/boatAudioSynth).
+ */
+export const STEM_WATER_OUTPUT0 = SLOT_COUNT;
+export const OUTPUT_COUNT = SLOT_COUNT + NPC_SLOTS;
 /** engines rendered per boat (triple outboards); turbine/electric boats use 1 */
 export const MAX_ENGINES = 3;
 

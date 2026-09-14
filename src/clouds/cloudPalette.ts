@@ -66,7 +66,7 @@
  */
 import * as THREE from 'three/webgpu';
 import { lowSunWarmth, skyPalette, sunElevation } from '../sky/sunCycle';
-import { keyDirectionWeight, keyLight } from '../sky/moonCycle';
+import { keyDirectionWeight, keyLight, moonAboveHorizon, moonBrightness, nightRamp } from '../sky/moonCycle';
 import { skyParams } from '../params/sky';
 
 export interface CloudPaletteInput {
@@ -117,6 +117,26 @@ export interface CloudPaletteInput {
    * tuned — holds by construction, not by clamping afterwards.
    */
   skyDarken: number;
+  /** §T.209 moonlight deficit levels (params/clouds.ts) */
+  nightLitFloor: number;
+  nightSkyFloor: number;
+  nightMoonTint: number;
+  nightFullMoonKey: number;
+}
+
+/**
+ * §T.209 — how much of a FULL MOON's light the night is missing, 0..1. `nightRamp` (0 while the sun still lights the
+ * scene) × (1 − the moon's delivered light relative to a full moon that is up: `moonAboveHorizon × moonBrightness`,
+ * the same two factors `moonKeyWeight` uses). Exactly 0 by day and under the full moon the night look was pinned at.
+ */
+export function moonlightDeficit(timeOfDay = skyParams.timeOfDay, fullMoonKey = 0.75): number {
+  const k = keyLight(timeOfDay, skyParams);
+  // the moon's delivered key vs a full, risen moon at the pinned key level (a preset that turns `moonIntensity` down
+  // for a moodier night is a deficit too)
+  const full = moonBrightness(0.5) * Math.max(1e-3, fullMoonKey);
+  const moonKey = moonAboveHorizon(k.moonElevation) * moonBrightness(skyParams.moonPhase) * Math.max(0, skyParams.moonIntensity);
+  const rel = clamp01(moonKey / full);
+  return clamp01(nightRamp(k.sunElevation) * (1 - rel));
 }
 
 /**
@@ -287,6 +307,28 @@ export function resolveCloudPalette(
   _baseSky.setHex(p.skyColor);
   outSun.copy(_baseSun);
   outSky.copy(_baseSky);
+  resolveDayPalette(p, key, dome, outSun, outSky);
+  // §T.209: the night's missing moonlight dims (and silvers) both halves; 0 by day and under a full moon
+  const deficit = moonlightDeficit(skyParams.timeOfDay, p.nightFullMoonKey);
+  if (deficit > 0) {
+    _tint.setHex(skyParams.moonColor); // hue only (params/sky.ts), sRGB → linear
+    const hueScale = Math.max(_tint.r, _tint.g, _tint.b, 1e-4);
+    const lum = 0.2126 * outSun.r + 0.7152 * outSun.g + 0.0722 * outSun.b;
+    const tintLum = (0.2126 * _tint.r + 0.7152 * _tint.g + 0.0722 * _tint.b) / hueScale;
+    _tint.multiplyScalar(lum / Math.max(tintLum, 1e-4) / hueScale); // the moon's hue at the lit face's luminance
+    outSun.lerp(_tint, clamp01(p.nightMoonTint) * deficit);
+    outSun.multiplyScalar(1 - deficit * (1 - clamp01(p.nightLitFloor)));
+    outSky.multiplyScalar(1 - deficit * (1 - clamp01(p.nightSkyFloor)));
+  }
+}
+
+function resolveDayPalette(
+  p: CloudPaletteInput,
+  key: THREE.Color | null | undefined,
+  dome: THREE.Color | null | undefined,
+  outSun: THREE.Color,
+  outSky: THREE.Color,
+): void {
 
   const { sunOwn, warm } = keyWeights();
 

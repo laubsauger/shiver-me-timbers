@@ -318,13 +318,12 @@ export interface CloudParams {
   /** deck altitude (m). Above the cumulus tops (~900 m at defaults): the
    *  banded layer sits behind and over them, as in the references. */
   bandAltitude: number;
-  /** max ray/deck distance (m). Bounds the grazing divide — flooring the
-   *  divisor bounds the division, not the quotient (§V44), and an unbounded
-   *  coordinate near the horizon is also unbounded aliasing. */
+  /** Smooth upper limit of ray/deck distance (m). Keeps horizon coordinates
+   *  bounded without freezing an entire angular band at one radius. */
   bandRange: number;
   /** §B91 0..1. The span, as a fraction of `bandRange`, over which the layer's
-   *  STRUCTURE fades out as the ray/plane map degenerates toward the horizon.
-   *  Reaches 0 at the clamp itself, not below it — see cloudBands.ts. */
+   *  STRUCTURE fades to its mean as the continuous projection approaches
+   *  its horizon limit. See cloudBands.ts. */
   bandDegenerateFade: number;
   /** metres below the deck over which the layer fades out as a camera climbs
    *  into it — a freecam above the deck sees nothing, not an inverted sheet */
@@ -447,6 +446,20 @@ export interface CloudParams {
    *  CloudPaletteInput.skyDarken for why a constant fill level was most of
    *  "the clouds are grey at a warm sunset". */
   skyDarken: number;
+  /**
+   * §T.209 MOONLIGHT DEFICIT. Night clouds were pinned at the authored day lightness whatever the moon did, so under a
+   * half moon (or none) they read as daylit white against a black sky. These act ONLY on the share of a FULL MOON's
+   * light that is missing (`cloudPalette.moonlightDeficit`: 0 by day, 0 under a full moon that is up — the pinned
+   * night look — and up to 1 on a moonless night), so day and the full-moon night are bit-identical.
+   *  - `nightLitFloor`: the lit faces' level with no moon at all (fraction of authored);
+   *  - `nightSkyFloor`: the skylight fill's level with no moon at all;
+   *  - `nightMoonTint`: how far the lit faces take the moon's blue-silver hue at full deficit.
+   */
+  nightLitFloor: number;
+  nightSkyFloor: number;
+  nightMoonTint: number;
+  /** §T.209 the moon key (`moonIntensity`) the pinned full-moon night look was tuned under: a dimmer moon is a deficit */
+  nightFullMoonKey: number;
 }
 
 const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
@@ -569,6 +582,10 @@ const cloudParamsMeta: Partial<Record<keyof CloudParams, ParamMeta>> = {
   paletteSatFollow: { min: 0, max: 1, step: 0.01 },
   sunDarken: { min: 0, max: 1, step: 0.01 },
   skyDarken: { min: 0, max: 1, step: 0.01 },
+  nightLitFloor: { min: 0, max: 1, step: 0.01 },
+  nightSkyFloor: { min: 0, max: 1, step: 0.01 },
+  nightMoonTint: { min: 0, max: 1, step: 0.01 },
+  nightFullMoonKey: { min: 0.05, max: 4, step: 0.01 },
 };
 
 export const cloudParams: CloudParams = registerParams(
@@ -802,10 +819,8 @@ export const cloudParams: CloudParams = registerParams(
     // pinning it against the cumulus rather than as a bare number.
     bandAltitude: 2100,
     bandRange: 34000,
-    // 0.2 -> full structure by range = 0.8*bandRange, i.e. 4.4 deg at the
-    // shipped altitude against a clamp at 3.53 deg. Under a degree of sky, and
-    // all of it inside the span where the coordinate's screen footprint had
-    // already flattened the layer to bandFarMean anyway.
+    // Retain the original range fraction. The continuous projection carries
+    // detail below the former cutoff and reaches its mean at the horizon.
     bandDegenerateFade: 0.2,
     bandAboveFade: 400,
     // 0.045 in sin(elev) ≈ 2.6°, where the fade is 63% — the layer is gone by
@@ -896,6 +911,12 @@ export const cloudParams: CloudParams = registerParams(
     // interior on the magenta side of the lit top -- cooler, as a shadow must
     // be -- while taking the violet cast off the mass.
     skyDarken: 0.40,
+    // §T.209: a half moon (22:00 race night, 18% of full) lands the lit faces at ~0.31 of authored and the fill at
+    // ~0.30 — dim blue-grey cloud against the night sky, the moon's forward lobe still silvering the edges near it
+    nightLitFloor: 0.08,
+    nightSkyFloor: 0.1,
+    nightMoonTint: 0.55,
+    nightFullMoonKey: 0.75,
   },
   cloudParamsMeta,
 );

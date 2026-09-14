@@ -61,7 +61,7 @@
  * by construction), but the PATTERN is keyed on world XZ. Finite height plus
  * world-locked pattern is exactly what buys the parallax in (3); a layer keyed
  * on view direction would be wallpaper glued to the sky, which is the tell for
- * a painted backdrop. The ray range is clamped (`bandRange`) so the pattern
+ * a painted backdrop. The ray range approaches a smooth limit (`bandRange`) so the pattern
  * coordinate is bounded near the horizon rather than exploding through the
  * grazing divide (§V44's corollary: flooring a divisor bounds the DIVISION,
  * not the QUOTIENT).
@@ -157,17 +157,13 @@ export function bandShapeAt(field: number, resolved: number, p: BandProfile): nu
   return far + (sharp - far) * clamp01(resolved);
 }
 
-/**
- * §B91 CPU MIRROR — how much of the field's structure the ray/plane map can
- * still carry at this elevation, 0..1.
- *
- * Exactly 0 everywhere the `bandRange` clamp is biting (where the map has lost
- * its elevation axis and paints vertical stripes) AND for `degenerateFade` of
- * reach above it (which is what closes the horizontal step the band-limit's
- * own footprint collapse used to draw). 1 once the map is honest again. It
- * multiplies the band-limit's `resolved`, so the shape blends to `bandFarMean`
- * over that whole span. See the graph in `createCloudBands` for the argument.
- */
+/** Smoothly bounded ray/deck distance; no interval of elevation maps to one radius. */
+export function bandProjectionRange(rayUp: number, rise: number, bandRange: number): number {
+  const height = Math.max(EPS, rise);
+  return height / Math.hypot(Math.max(0, rayUp), height / Math.max(1, bandRange));
+}
+
+/** Detail-to-mean weight as the continuous projection approaches its horizon limit. */
 export function bandNonDegenerate(
   rayUp: number,
   rise: number,
@@ -176,11 +172,10 @@ export function bandNonDegenerate(
 ): number {
   if (!Number.isFinite(rayUp) || !Number.isFinite(rise)) return 0;
   const R = Math.max(1, Number.isFinite(bandRange) ? bandRange : 1);
-  const up = Math.max(EPS, rayUp);
-  const reach = Math.max(EPS, rise) / up;
-  const range = Math.min(reach, R);
+  const range = bandProjectionRange(rayUp, rise, R);
   const fade = Math.min(1, Math.max(0.02, Number.isFinite(degenerateFade) ? degenerateFade : 0.2));
-  return clamp01((1 - range / R) / fade);
+  const t = clamp01((1 - range / R) / fade);
+  return t * t * (3 - 2 * t);
 }
 
 /** Coverage the layer writes — shape × the layer's volume knob. */
@@ -322,75 +317,24 @@ export function createCloudBands(p: CloudParams, seed: number) {
   const rise = uAltitude.sub(cameraPosition.y);
   const aboveFade = rise.div(uAboveFade.max(EPS)).clamp(0, 1);
 
-  // ray/plane distance. `up` is floored, and the RESULT is clamped too — a
-  // floored divisor bounds the division, not the quotient (§V44).
-  const reach = rise.max(EPS).div(up.max(EPS));
-  const range = reach.min(uRange.max(1));
+  // Smooth range limiting: h / sqrt(up² + (h/R)²). Near the zenith this
+  // approaches the plane intersection h/up; at the horizon it approaches R.
+  // Unlike min(h/up, R), it has no finite angular interval with a frozen hit
+  // radius. That interval used to collapse the texture footprint and force
+  // all cloud structure into a uniform horizontal haze shelf.
+  const height = rise.max(EPS);
+  const horizonRatio = height.div(uRange.max(1));
+  const range = height.div(up.mul(up).add(horizonRatio.mul(horizonRatio)).sqrt());
   const hit = cameraPosition.xz.add(ray.xz.mul(range));
-  /**
-   * §B91 — THE VERTICAL STREAKS ALONG THE HORIZON, and they were this clamp.
-   *
-   * User, on a night frame: "the clouds bending 90° and pointing vertically
-   * into the sea" — thin pale near-vertical marks standing all along the
-   * skyline, under a dead-straight horizontal cut across the whole sky.
-   *
-   * IT IS NOT A BEND, AND THERE ARE TWO SYMPTOMS FROM ONE CAUSE. Once `reach`
-   * exceeds `bandRange` the clamp freezes the ray/plane hit onto a circle of
-   * CONSTANT RADIUS, so the sampled field becomes a function of the ray's
-   * AZIMUTH ALONE and carries no elevation information at all:
-   *
-   *  1. every feature is painted as a column of constant value from the
-   *     skyline upward — a mathematically exact VERTICAL STRIPE; and
-   *  2. because the hit point stops moving with elevation, the coordinate's
-   *     screen-space footprint COLLAPSES, so `bandLimitAmplitude` reports the
-   *     pattern as fully resolved again. Immediately above the clamp the
-   *     footprint is enormous and the layer is correctly a flat veil at
-   *     `bandFarMean`; immediately below it snaps back to full contrast. That
-   *     step in STRUCTURE is the straight horizontal line, and it is why the
-   *     zone reads as a brighter slab rather than as a fade.
-   *
-   * MEASURED against `docs/raft2100/lookdev/pitch/night.png`: at the shipped
-   * numbers (altitude 2100, range 34000, eye ~2 m) the clamp elevation is
-   * asin(2098/34000) = 3.53°, and the cut in that capture sits at ~3.8° by
-   * pixel count — the same line.
-   *
-   * THE FIX IS NOT TO PUSH THE CLAMP OUT (that moves the artefact down and
-   * makes it thinner) and it is NOT to fade the layer out (that deletes the
-   * veil the night reference wants brightening toward the sea). The clamp is
-   * correct and §V44 requires it. What is wrong is letting a DEGENERATE
-   * parametrisation claim its structure is resolvable — §V70's failure in a
-   * form this file's header did not anticipate: it handles structure going
-   * SUB-PIXEL, and this is structure losing an axis entirely.
-   *
-   * So the layer's own §V70 machinery is reused rather than a new fade being
-   * invented. `range/bandRange` is the fraction of the maximum reach this ray
-   * uses; it is exactly 1 everywhere in the degenerate zone and falls as you
-   * look higher, and the weight below drives `resolved` — the same "how much
-   * of the field's structure is really there" number the octave band-limit
-   * produces. Structure therefore dissolves into `bandFarMean` across the
-   * whole degenerate zone AND for the short span just above it, which is what
-   * closes the step: both sides of the old line now sit at the same flat veil.
-   *
-   * WHY IT REACHES ZERO AT THE CLAMP RATHER THAN AT THE HORIZON, which was the
-   * first attempt and was wrong: a weight that is 1 at the clamp boundary and
-   * falls below it removes the stripes but LEAVES THE LINE, because the
-   * band-limit has already taken the structure to ~0 on the other side. The
-   * discontinuity is at the top of the zone, so the fade has to be too.
-   *
-   * `bandDegenerateFade` is the span it fades over, in units of that fraction:
-   * 0.2 puts full structure back by `range = 0.8·bandRange`, i.e. 4.4° at the
-   * shipped numbers — under a degree of sky, all of it inside the span the
-   * footprint had already flattened.
-   *
-   * No `step`, no `smoothstep`, no `fract` — a ratio and a clamp, so it adds
-   * nothing to the §V.48 tripwire population. And unlike a fade keyed on `up`
-   * it needs no EPS floor: `range` is `min(reach, bandRange)`, so the ratio is
-   * exactly 1 at the horizon and the weight is exactly 0 there.
-   */
-  const nonDegenerate = float(1)
+  // Retire only as the continuous projection reaches its limit. The original
+  // 0.2 setting now preserves structure below the former hard cutoff instead
+  // of deleting more of the detailed sky above it.
+  const rangeWeight = float(1)
     .sub(range.div(uRange.max(1)))
     .div(uDegenFade.clamp(0.02, 1))
     .clamp(0, 1);
+  // Cubic interpolation of a broad range weight; CPU twin: bandNonDegenerate.
+  const nonDegenerate = rangeWeight.mul(rangeWeight).mul(float(3).sub(rangeWeight.mul(2)));
 
   // ── the field ──────────────────────────────────────────────────────────
   // rotate world XZ into the band frame, then scale ANISOTROPICALLY: long
@@ -433,9 +377,8 @@ export function createCloudBands(p: CloudParams, seed: number) {
   OCTAVES.forEach((o, i) => {
     const c = warped.mul(o.freq) as N;
     const amp = bandLimitAmplitude(float(NOISE_FEATURE), c.x, footprint(c));
-    // §B91: the clamped-range zone carries no elevation information, so its
-    // structure is not "there" in the same sense the band limit means. Same
-    // weight, same consumer — see `nonDegenerate` above.
+    // Fade toward the area mean only as the continuous map approaches its
+    // horizon limit; the octave footprint still handles ordinary minification.
     if (i === 0) resolved = amp.mul(nonDegenerate) as N;
     field = field.add(mx_noise_float(vec3(c.x, c.y, zOff[i])).mul(o.amp).mul(amp)) as N;
   });

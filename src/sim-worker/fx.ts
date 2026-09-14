@@ -22,6 +22,7 @@ import type { Rigid6State } from '../sea-physics/rigidBody';
 import { createWaterlineSpray, waterlineSprayEmission, type WaterlineSpray } from '../foam/sprayMath';
 import type { PropWashInput } from '../wake/propWash';
 import { propWashFromHullWater } from '../wake/propWashHullWater';
+import { HOLLOW_DEPTHS, createHollowRecord, measureHollow, type HollowRecord } from '../wake/transomHollow';
 
 /** drives one record carries (the speedboat has 3) */
 export const FX_DRIVES = 4;
@@ -37,21 +38,27 @@ export const FX = {
   DRIVE: 1,
   BOW: 1 + FX_DRIVES * FX_DRIVE_LEN,
 } as const;
-export const FX_LEN = FX.BOW + FX_BOW_LEN;
+/** W8 round 5: the transom hollow — x, z, fwdX, fwdZ, length, width, HOLLOW_DEPTHS depths (wake/transomHollow.ts) */
+export const FX_HOLLOW_LEN = 6 + HOLLOW_DEPTHS;
+export const FX_HOLLOW = FX.BOW + FX_BOW_LEN;
+export const FX_LEN = FX_HOLLOW + FX_HOLLOW_LEN;
 
 /** one boat's decoded effects record */
 export interface BoatFx {
   /** live entries of `jets` */
   jets: PropWashInput[];
   bow: WaterlineSpray;
+  /** W8 round 5: the transom hollow (length 0 = none) */
+  hollow: HollowRecord;
 }
 
 export function createBoatFx(): BoatFx {
-  return { jets: [], bow: createWaterlineSpray() };
+  return { jets: [], bow: createWaterlineSpray(), hollow: createHollowRecord() };
 }
 
 const jetScratch: PropWashInput[] = [];
 const bowScratch = createWaterlineSpray();
+const hollowScratch = createHollowRecord();
 
 /** the `HullWater` read by the writer: the drive publications, the waterline and the strips (after `evaluate`) */
 export type BoatFxSource = Pick<
@@ -95,6 +102,30 @@ export function writeBoatFx(hw: BoatFxSource, state: Readonly<Rigid6State>, f: F
   f[w + 9] = b.fwdZ;
   f[w + 10] = b.burialRate;
   f[w + 11] = b.cutwaterDepth;
+  // W8 round 5: the transom hollow from the physics' own depth field (a HullWater without it publishes none)
+  const h = o + FX_HOLLOW;
+  const depthAt = (hw as { transomWakeDepthAt?: (x: number, z: number) => number }).transomWakeDepthAt;
+  if (depthAt) {
+    const q = state.quaternion;
+    const tz = hw.mesh.transomZ;
+    // body (0, 0, z) → world: R·(0,0,1) = (2(xz + wy), 2(yz − wx), 1 − 2(x² + y²))
+    const fwX = 2 * (q[0] * q[2] + q[3] * q[1]);
+    const fwZ = 1 - 2 * (q[0] * q[0] + q[1] * q[1]);
+    let beam = 0;
+    const cb = hw.mesh.strips.chineHalfBeam;
+    for (let i = 0; i < cb.length; i++) beam = Math.max(beam, 2 * cb[i]);
+    measureHollow((x, z) => depthAt.call(hw, x, z), state.position[0] + fwX * tz, state.position[2] + fwZ * tz, fwX, fwZ, beam, hollowScratch);
+  } else {
+    hollowScratch.length = 0;
+    hollowScratch.depths.fill(0);
+  }
+  f[h] = hollowScratch.x;
+  f[h + 1] = hollowScratch.z;
+  f[h + 2] = hollowScratch.fwdX;
+  f[h + 3] = hollowScratch.fwdZ;
+  f[h + 4] = hollowScratch.length;
+  f[h + 5] = hollowScratch.width;
+  for (let c = 0; c < HOLLOW_DEPTHS; c++) f[h + 6 + c] = hollowScratch.depths[c];
 }
 
 /** decode f[o .. o + FX_LEN) into `out` (reuses its objects) */
@@ -133,5 +164,14 @@ export function readBoatFx(f: ArrayLike<number>, o: number, out: BoatFx): BoatFx
   b.fwdZ = f[w + 9];
   b.burialRate = f[w + 10];
   b.cutwaterDepth = f[w + 11];
+  const h = o + FX_HOLLOW;
+  const r = (out.hollow ??= createHollowRecord());
+  r.x = f[h];
+  r.z = f[h + 1];
+  r.fwdX = f[h + 2];
+  r.fwdZ = f[h + 3];
+  r.length = f[h + 4];
+  r.width = f[h + 5];
+  for (let c = 0; c < HOLLOW_DEPTHS; c++) r.depths[c] = f[h + 6 + c];
   return out;
 }

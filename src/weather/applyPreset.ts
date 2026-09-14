@@ -17,6 +17,7 @@ import {
   LAYOUT_KEYS,
   SPECTRUM_KEYS,
   weatherPresets,
+  type PresetPatch,
   type WeatherPresetName,
 } from './presets';
 
@@ -39,6 +40,12 @@ export interface ApplyPresetOpts {
   lerpSeconds?: number;
   /** integrator's SimState.weather writer — invoked once, at apply time */
   setWeather?: (w: WeatherPresetName) => void;
+  /**
+   * A mode's own sea on this weather: replaces the preset's TARGETS for these ocean keys (same keys, same lerp, so the
+   * switch stays reversible). The speedboat's calm / working / open seas (params/speedboatSea.ts) ride the ladder's
+   * skies this way. Absent: the preset exactly.
+   */
+  ocean?: Partial<PresetPatch['ocean']>;
 }
 
 export interface WeatherTransition {
@@ -102,7 +109,9 @@ export function applyWeatherPreset(
       }
       continue;
     }
-    for (const [key, to] of Object.entries(patch as Record<string, number>)) {
+    const override = system === 'ocean' ? (opts.ocean as Record<string, number> | undefined) : undefined;
+    for (const [key, presetTo] of Object.entries(patch as Record<string, number>)) {
+      const to = override?.[key] ?? presetTo;
       const cur = entry.params[key];
       // a key the preset names but the params module does not have is the
       // same class of silent drop, one level down — the write would create a

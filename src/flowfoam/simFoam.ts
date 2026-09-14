@@ -36,13 +36,21 @@
  *              heaving waterplane pushes out. bury = max(0, ∂h/∂t), emerge =
  *              max(0, −∂h/∂t), scaled by Bernoulli `liftFraction(√(U²+w²), D)`
  *              and normalised by D, so one passage lays a dose ∝ lift (§V66).
+ *              W8 vessel mode: bury/emerge count only the vertical surface speed
+ *              past the air-entrainment onset V_e (`SHEET_ENTRAINMENT_ONSET`):
+ *              water displaced slower than ≈ 1 m/s folds in no air. The raft
+ *              and galleon (single-hull graph) keep the W5 law.
  *   PROP WASH  Σ jets (`jetFoamRate`): an actuator-disc jet, excess speed
  *              V_j − U_a = √(U_a² + 2T/ρA) − U_a, as a turbulent ribbon aft of
  *              the prop (half-width r + S_c·s, S_c = 0.1·ΔV/(ΔV + U_a) the co-flow
  *              spread §T.199, potential core 6 D) — injection
- *              lift(ΔV, d_prop)·ΔV_c(s)/b(s) across a Gaussian of that width,
+ *              drive·ΔV_c(s)/(ΔV·b(s)) across a Gaussian of that width,
  *              floored at the tier texel (the splat-σ law, so the cross-track
- *              integral is kept when it is band-limited).
+ *              integral is kept when it is band-limited). W8: the drive is the
+ *              AIR the slipstream carries (`AERATION_SHARE·aerationSpeed`), not
+ *              the jet's lifted excess — no air, no bubbles.
+ *   EXHAUST    W8 vessel mode: the through-hub gas that rises out as a boil
+ *              (`exhaustBoilRate`), a patch where the plume surfaces.
  *   SHEETS     Vessel mode: retained world-space emissions, carrying their own
  *              launch direction, volume and age. Later hull motion cannot reorient them.
  *   FOAM  (R)  breakRate·ΔB + churnRate·(churn + jet) + sheets
@@ -67,18 +75,20 @@
  * Per-texel noise: none (§B4).
  */
 import type { ChineSheetEmitter } from '../wake/chineContact';
-import { CHINE_EMISSION_SLOTS, packChineEmission, type PackedChineEmission } from '../wake/chineEmissions';
+import { CHINE_EMISSION_SLOTS, SHEET_ENTRAINMENT_ONSET, packChineEmission, sheetAirShare, type PackedChineEmission } from '../wake/chineEmissions';
 import { If, Loop, float, int, ivec2, mix, select, smoothstep, textureLoad, uniform, uniformArray, vec2, vec4 } from 'three/tsl';
 import * as THREE from 'three/webgpu';
 import { waterlineSheetLaunch } from '../foam/bowSpray';
 import { LIFT_DEPTH_FLOOR, liftFraction, type WaterlineSpray } from '../foam/sprayMath';
 import { GRAVITY } from '../ocean/oceanMath';
+import { SIM_DT } from '../core/loop';
 import { simNearWeight, type SimGrid, type SimResampleOps } from './simInjection';
 import { WAKE_TEX_CHANNEL } from '../wake/wakeSolverMath';
-import { JET_CORE_DIAMETERS, JET_SPREAD, aerationSpeed, jetExcessSpeed, jetSpreadRate, propWashValid, type PropWashInput } from '../wake/propWash';
+import { JET_CORE_DIAMETERS, JET_SPREAD, aerationSpeed, exhaustBoil, jetExcessSpeed, jetSpreadRate, propWashValid, type PropWashInput } from '../wake/propWash';
 
 export { JET_CORE_DIAMETERS, JET_SPREAD, jetExcessSpeed, type PropWashInput };
 import { WAKE_MAX_VESSELS, WAKE_NEAR_BLEND_WIDTHS, type WakeSim } from '../wake/wakeSim';
+import { DRIVE_STRUT, appendageFoamDrive, strutsFromJets, type AppendageInput } from '../wake/appendages';
 import type { FlowFoamParams } from '../params/flowfoam';
 
 /** research §5.4: breaking onset slope */
@@ -144,6 +154,12 @@ export interface SimFoamInputs<T> {
   rimLength: T;
   /** Σ prop-wash jet injection at this point (1/s, `jetFoamRate`) */
   jet: T;
+  /**
+   * W8 vessel mode: the plunge speed below which displaced water folds in no air (`SHEET_ENTRAINMENT_ONSET`, m/s) —
+   * the churn counts only the vertical surface speed past it. Absent (the single-hull raft/galleon graph): the W5 law,
+   * node for node.
+   */
+  airOnset?: T;
 }
 
 export type SimFoamParams = Pick<FlowFoamParams, 'simBreakRate' | 'simChurnRate' | 'simSternChurn' | 'simSlickPerFoam'>;
@@ -197,8 +213,9 @@ export function simFoamRate<T>(A: SimFoamArith<T>, i: SimFoamInputs<T>, p: { [K 
   // ∂h_P/∂t at this point: translation plus the vertical burial carried out through the rim
   const vertical = A.div(A.mul(A.mul(i.burialRate, i.rimLength), i.headGrad), d);
   const rise = A.add(A.neg(i.headAdvect), vertical);
-  const bury = A.max(zero, rise);
-  const emerge = A.max(zero, A.neg(rise));
+  // W8 (vessel mode): rise·(1 − V_e/rise) past the entrainment onset — Ervine's air share, as the chine sheets use
+  const bury = i.airOnset === undefined ? A.max(zero, rise) : A.max(zero, A.sub(rise, i.airOnset));
+  const emerge = i.airOnset === undefined ? A.max(zero, A.neg(rise)) : A.max(zero, A.sub(A.neg(rise), i.airOnset));
   const churn = A.div(A.mul(i.lift, A.add(bury, A.mul(p.simSternChurn, emerge))), d);
   const foam = A.add(A.mul(p.simBreakRate, breaking), A.mul(p.simChurnRate, A.add(churn, i.jet)));
   return [foam, A.mul(p.simSlickPerFoam, foam)];
@@ -276,20 +293,99 @@ export function jetFoamRate<T>(A: SimFoamArith<T>, dx: T, dz: T, dirX: T, dirZ: 
 }
 
 /**
- * packed per-jet uniform state: [x, z, dirX, dirZ] and [lifted drive, radius, aeration drive, co-flow spread] — zero
- * drive is an idle slot; §T.199 meta.w = `jetSpreadRate`. The ribbon's drive is meta.x + meta.z: the jet's lifted excess (§T.180 c) plus §T.195's aeration
- * (`AERATION_SHARE · aerationSpeed`, 0 for a producer that publishes no lost power — the pre-§T.195 value).
+ * W8 EXHAUST BOIL LOOK CALIBRATION: gas volume (m) per unit area that reads as full coverage. A monolayer of ~2 mm
+ * bubbles holds ≈ 3 mm of gas per m². Measured in the browser (free roam, 0.7 m/s): with the near tier's blur the boil
+ * spreads to σ ≈ 3 m within its life, so an idling drive's patch lands mid-gate at this value, where 13 mm left it
+ * invisible (docs/wake/w8-foam-readability.md §2).
  */
-export function packPropJet(j: PropWashInput): { pos: [number, number, number, number]; meta: [number, number, number, number] } | null {
+export const EXHAUST_FOAM_LAYER = 0.002;
+
+/**
+ * packed per-jet uniform state: [x, z, dirX, dirZ], [boil amplitude, radius, aeration drive, co-flow spread] and
+ * [boil along, boil σ, 0, 0] — zero drive and zero amplitude is an idle slot; §T.199 meta.w = `jetSpreadRate`.
+ *
+ * W8 (docs/wake/w8-foam-readability.md §2): the RIBBON's drive is the AIR only, meta.z = AERATION_SHARE·aerationSpeed.
+ * It used to add the jet's Bernoulli-lifted excess lift(ΔV, d)·ΔV (§T.180 c): 1.9–2.8 m/s at 5 m/s against an air drive
+ * of 0.3, so the ribbon was widest and whitest at displacement speed and faded as ΔV fell with speed — the inverse of
+ * the real thing. A jet that carries no air lays no bubbles; its upwelling is drawn by the SURFACE (`propJetSample`,
+ * the wake solver's jet head). meta.x is the exhaust boil's peak amplitude φ·Q_ex/(2π·EXHAUST_FOAM_LAYER) (`exhaustBoil`).
+ */
+export function packPropJet(j: PropWashInput): { pos: [number, number, number, number]; meta: [number, number, number, number]; boil: [number, number, number, number] } | null {
   if (!propWashValid(j)) return null;
   const len = Math.hypot(j.dirX, j.dirZ);
   // the drive model already scaled thrust by the prop's immersion
   const excess = jetExcessSpeed(j.advance, j.thrust, j.discArea);
-  const lift = liftFraction(excess, Math.max(0, j.depth));
+  const ex = exhaustBoil(j);
+  const amp = j.immersion > 0 ? (ex.share * ex.flux) / (2 * Math.PI * EXHAUST_FOAM_LAYER) : 0;
   return {
     pos: [j.x, j.z, j.dirX / len, j.dirZ / len],
-    meta: [lift * excess, Math.sqrt(j.discArea / Math.PI), AERATION_SHARE * aerationSpeed(j), jetSpreadRate(excess, j.advance)],
+    meta: [amp, Math.sqrt(j.discArea / Math.PI), AERATION_SHARE * aerationSpeed(j), jetSpreadRate(excess, j.advance)],
+    // W8 round 3: boil.z = the drive strut's streak drive (`appendages.appendageFoamDrive`), boil.w its lead ahead of the prop
+    boil: [Math.min(ex.along, JET_FOAM_REACH), ex.sigma, strutDriveOf(j), DRIVE_STRUT.lead],
   };
+}
+
+/**
+ * W8 the exhaust boil (1/s) at (dx, dz) from its prop: a Gaussian patch of the surfacing gas, `along` aft on the jet
+ * axis, widened by one tier texel (the splat-σ law) so its area integral φ·Q_ex/EXHAUST_FOAM_LAYER is kept. ONE
+ * expression for CPU and TSL.
+ */
+export function exhaustBoilRate<T>(A: SimFoamArith<T>, dx: T, dz: T, dirX: T, dirZ: T, amp: T, along: T, sigma: T, texel: T): T {
+  const s = A.sub(A.add(A.mul(dx, dirX), A.mul(dz, dirZ)), along);
+  const n = A.sub(A.mul(dz, dirX), A.mul(dx, dirZ));
+  const v = A.add(A.mul(sigma, sigma), A.mul(texel, texel));
+  return A.mul(A.div(amp, v), A.exp(A.neg(A.div(A.add(A.mul(s, s), A.mul(n, n)), A.mul(A.k(2), v)))));
+}
+
+/**
+ * W8 round 4 (impacts): a ribbon exists only as far aft as the prop has been laying it. After a landing, a prop that
+ * re-enters the water laid the steady 12–60 m ribbon on its first tick — the lane "appearing within two frames". The
+ * window is 1 up to `run` metres aft (the distance run since the prop re-entered), falling to 0 over the next 2 m.
+ * ONE expression for CPU and TSL.
+ */
+export function jetRunWindow<T>(A: SimFoamArith<T>, dx: T, dz: T, dirX: T, dirZ: T, run: T): T {
+  const s = A.add(A.mul(dx, dirX), A.mul(dz, dirZ));
+  // @band-limited-elsewhere: a 2 m window along the jet axis, evaluated in COMPUTE (no pixel footprint)
+  return A.smoothstep(A.add(run, A.k(2)), run, s);
+}
+
+const strutScratch: AppendageInput[] = [];
+function strutDriveOf(j: PropWashInput): number {
+  return strutsFromJets([j], strutScratch) > 0 ? appendageFoamDrive(strutScratch[0]) : 0;
+}
+
+/**
+ * W8 round 3: the streak (1/s) behind a drive strut at (dx, dz) from its PROP — the ribbon law (`jetFoamRate`) from the
+ * strut's trailing edge, its half-width the strut's thickness, still-water spread (an unventilated eddy street or a
+ * ventilated cavity spreads like a small jet, not like the co-flowing slipstream), bubble source faded over
+ * JET_FOAM_FADE_METRES. ONE expression for CPU and TSL.
+ */
+export function strutFoamRate<T>(A: SimFoamArith<T>, dx: T, dz: T, dirX: T, dirZ: T, drive: T, lead: T, texel: T): T {
+  const sx = A.add(dx, A.mul(dirX, lead));
+  const sz = A.add(dz, A.mul(dirZ, lead));
+  return jetFoamRate(A, sx, sz, dirX, dirZ, drive, A.k(DRIVE_STRUT.thickness), texel, A.k(JET_SPREAD), true);
+}
+
+/** CPU Σ drive-strut streaks at a world point (vessel mode) */
+export function strutFoamCpu(jets: readonly PropWashInput[], x: number, z: number, texel: number): number {
+  let sum = 0;
+  for (const j of jets) {
+    const q = packPropJet(j);
+    if (!q || !(q.boil[2] > 0)) continue;
+    sum += strutFoamRate(NUM, x - q.pos[0], z - q.pos[1], q.pos[2], q.pos[3], q.boil[2], q.boil[3], texel);
+  }
+  return sum;
+}
+
+/** CPU Σ exhaust boils at a world point (tests; vessel mode lays them) */
+export function exhaustBoilFoamCpu(jets: readonly PropWashInput[], x: number, z: number, texel: number): number {
+  let sum = 0;
+  for (const j of jets) {
+    const q = packPropJet(j);
+    if (!q || !(q.meta[0] > 0)) continue;
+    sum += exhaustBoilRate(NUM, x - q.pos[0], z - q.pos[1], q.pos[2], q.pos[3], q.meta[0], q.boil[0], q.boil[1], texel);
+  }
+  return sum;
 }
 
 /** §T.195 the vessel-mode ribbon bound (JET_FOAM_REACH): inside ⇔ the jet is evaluated at this point */
@@ -310,7 +406,7 @@ export function propWashFoamCpu(jets: readonly PropWashInput[], x: number, z: nu
     if (!packed) continue;
     const [px, pz, dx, dz] = packed.pos;
     if (reach && !jetInReach(B, x - px, z - pz, dx, dz, packed.meta[1], texel)) continue;
-    sum += jetFoamRate(NUM, x - px, z - pz, dx, dz, packed.meta[0] + packed.meta[2], packed.meta[1], texel, packed.meta[3], reach);
+    sum += jetFoamRate(NUM, x - px, z - pz, dx, dz, packed.meta[2], packed.meta[1], texel, packed.meta[3], reach);
   }
   return sum;
 }
@@ -350,12 +446,12 @@ export function packChineSheet(bow: Readonly<WaterlineSpray>, speed: number): { 
   if (!vals.every(Number.isFinite)) return null;
   const u = Math.abs(speed);
   const l = waterlineSheetLaunch(u, bow.launch);
-  if (!(u > 0.5) || !(l.outboard > 0)) return null;
+  if (!(u > 0.5) || !(l.outboard > 0) || !(sheetAirShare(l.up) > 0)) return null;
   const len = Math.hypot(bow.fwdX, bow.fwdZ);
   if (!(len > 1e-9)) return null;
   const L = Math.max(CHINE_SHEET_MIN_LENGTH, u * ((2 * l.up) / GRAVITY + CHINE_SHEET_SLIDE));
   return {
-    a: [bow.x, bow.z, Math.max(0.3, bow.halfWidth), (0.5 * bow.flux) / CHINE_SHEET_THICKNESS],
+    a: [bow.x, bow.z, Math.max(0.3, bow.halfWidth), (0.5 * bow.flux * sheetAirShare(l.up)) / CHINE_SHEET_THICKNESS],
     b: [-bow.fwdX / len, -bow.fwdZ / len, l.outboard / Math.max(u, l.outboard), L],
   };
 }
@@ -658,6 +754,8 @@ export interface SimFoamFrame<S> {
   churnRate: S;
   sternChurn: S;
   slickPerFoam: S;
+  /** W8 vessel mode only (`SimFoamInputs.airOnset`) */
+  airOnset?: S;
 }
 
 /**
@@ -711,6 +809,7 @@ export function simFoamSample<S, T>(o: SimFoamOps<S, T>, texel: number, gx: S, g
       headGrad: o.sqrt(o.add(o.mul(dhdx, dhdx), o.mul(dhdz, dhdz))),
       rimLength: f.rimLength,
       jet,
+      airOnset: f.airOnset,
     },
     { simBreakRate: f.breakRate, simChurnRate: f.churnRate, simSternChurn: f.sternChurn, simSlickPerFoam: f.slickPerFoam },
   );
@@ -766,6 +865,8 @@ export interface SimFoamCpuFrame {
   sheets?: readonly ({ bow: Readonly<WaterlineSpray>; speed: number } | ChineSheetEmitter)[];
   /** §T.199 the near-hull tier's fields: sampled where the tier's own texel resolves it, cross-faded in (`simNearWeight`) */
   near?: SimFoamCpuFields;
+  /** W8 vessel mode's air-entrainment onset (default `SHEET_ENTRAINMENT_ONSET`; tests isolate other terms with 0) */
+  airOnset?: number;
 }
 
 /**
@@ -822,7 +923,9 @@ export function simFoamRateAtCpu(
     f.hullVelZ = b.vz;
     f.lift = b.lift;
     f.depth = b.depth;
-    w *= b.heroShare;
+    f.airOnset = frame.airOnset ?? SHEET_ENTRAINMENT_ONSET;
+    // W8 round 3 (impacts): no instant rim churn from vertical burial in vessel mode — `w` below
+    w = 0;
   }
   const jet = frame.jets ? propWashFoamCpu(frame.jets, x, z, tierTexel, !!frame.vessels) : 0;
   const S = farSupersample(tierTexel, texel);
@@ -849,6 +952,8 @@ export function simFoamRateAtCpu(
     foam += (nearFoam - foam) * wn;
   }
   if (fleet) foam += p.simChurnRate * jet;
+  // W8 the exhaust boils (vessel mode, like the ribbon: laid wherever a prop is)
+  if (fleet && frame.jets) foam += exhaustBoilFoamCpu(frame.jets, x, z, tierTexel) + p.simChurnRate * strutFoamCpu(frame.jets, x, z, tierTexel);
   if (fleet && frame.sheets) foam += chineSheetFoamCpu(frame.sheets, x, z, tierTexel);
   return [foam, p.simSlickPerFoam * foam];
 }
@@ -947,6 +1052,7 @@ export function createSimFoamField(
   const uVesselPos = vesselSlots > 0 ? uniformArray(vesselPos) : null;
   const uVesselVel = vesselSlots > 0 ? uniformArray(vesselVel) : null;
   const uHullVel = uniform(new THREE.Vector2(0, 0));
+  const uHullDirection = uniform(new THREE.Vector2(0, 1));
   const uLift = uniform(0);
   const uDepth = uniform(LIFT_DEPTH_FLOOR);
   const uAmbientSigma = uniform(0);
@@ -962,6 +1068,13 @@ export function createSimFoamField(
   const jetMeta = Array.from({ length: Math.max(1, jetSlots) }, () => new THREE.Vector4());
   const uJetPos = jetSlots > 0 ? uniformArray(jetPos) : null;
   const uJetMeta = jetSlots > 0 ? uniformArray(jetMeta) : null;
+  /** W8 per jet: exhaust boil (along, σ, 0, 0) — `packPropJet().boil` */
+  const jetBoil = Array.from({ length: Math.max(1, jetSlots) }, () => new THREE.Vector4());
+  const uJetBoil = jetSlots > 0 && vesselSlots > 0 ? uniformArray(jetBoil) : null;
+  /** W8 round 4: per jet slot, metres run since the prop last entered the water (x) — `jetRunWindow` */
+  const jetRun = Array.from({ length: Math.max(1, jetSlots) }, () => new THREE.Vector4(1e4, 0, 0, 0));
+  const uJetRun = jetSlots > 0 && vesselSlots > 0 ? uniformArray(jetRun) : null;
+  const runs = new Float64Array(Math.max(1, jetSlots)).fill(1e4);
   let yaw = 0;
   let speed = 0;
   let ambientVariance = 0;
@@ -1033,7 +1146,7 @@ export function createSimFoamField(
         const pos = uJetPos!.element(int(j));
         const meta = uJetMeta!.element(int(j));
         jetSum = jetSum.add(
-          jetFoamRate(NODE, worldXZ.x.sub(pos.x), worldXZ.y.sub(pos.y), pos.z, pos.w, meta.x.add(meta.z), meta.y.max(1e-3), float(tierTexel), meta.w.clamp(0, JET_SPREAD)),
+          jetFoamRate(NODE, worldXZ.x.sub(pos.x), worldXZ.y.sub(pos.y), pos.z, pos.w, meta.z, meta.y.max(1e-3), float(tierTexel), meta.w.clamp(0, JET_SPREAD)),
         );
       }
       const jet = jetSum.toVar();
@@ -1076,12 +1189,13 @@ export function createSimFoamField(
       const vz = b.vz.toVar();
       const lift = b.lift.toVar();
       const depth = b.depth.toVar();
-      const w = uBurial.x
-        .add(uBurial.y.mul(worldXZ.x.sub(uBurialOrigin.x)))
-        .add(uBurial.z.mul(worldXZ.y.sub(uBurialOrigin.y)))
-        .mul(b.heroShare)
-        .toVar();
-      const f: SimFoamFrame<any> = { ...frame, hullVelX: vx, hullVelZ: vz, lift, depth };
+      // W8 round 3 (impacts): the vertical burial term laid the whole waterplane rim white on the landing tick. A planing
+      // hull's impact water leaves as the chine sheet — retained emissions that fly and spread outward over their life
+      // (`chineEmissionRate`) — so counting it again as instant rim churn was a double count with no time evolution.
+      // Vessel mode drops it; the single-hull raft/galleon graph keeps §T.70.
+      const w = float(0);
+      void b.heroShare;
+      const f: SimFoamFrame<any> = { ...frame, hullVelX: vx, hullVelZ: vz, lift, depth, airOnset: float(SHEET_ENTRAINMENT_ONSET) };
       const zero = float(0);
       const sum = float(0).toVar();
       if (S === 1) {
@@ -1108,6 +1222,7 @@ export function createSimFoamField(
       }
     });
     const jet = float(0).toVar();
+    const boil = float(0).toVar();
     for (let j = 0; j < jetSlots; j++) {
       const pos = uJetPos!.element(int(j));
       const meta = uJetMeta!.element(int(j));
@@ -1115,7 +1230,12 @@ export function createSimFoamField(
       const dz = worldXZ.y.sub(pos.y);
       const radius = meta.y.max(1e-3);
       If(jetInReach(NODE_BOOL, dx, dz, pos.z, pos.w, radius, float(tierTexel)), () => {
-        jet.addAssign(jetFoamRate(NODE, dx, dz, pos.z, pos.w, meta.x.add(meta.z), radius, float(tierTexel), meta.w.clamp(0, JET_SPREAD), true));
+        // @band-limited-elsewhere: a window along the jet axis over 2 m (≥ 8 near texels), evaluated in COMPUTE
+        const laid = jetRunWindow(NODE, dx, dz, pos.z, pos.w, uJetRun!.element(int(j)).x);
+        jet.addAssign(jetFoamRate(NODE, dx, dz, pos.z, pos.w, meta.z, radius, float(tierTexel), meta.w.clamp(0, JET_SPREAD), true).mul(laid));
+        const b = uJetBoil!.element(int(j));
+        boil.addAssign(exhaustBoilRate(NODE, dx, dz, pos.z, pos.w, meta.x, b.x, b.y, float(tierTexel)));
+        jet.addAssign(strutFoamRate(NODE, dx, dz, pos.z, pos.w, b.z, b.w, float(tierTexel)).mul(laid));
       });
     }
     // Reject whole vessel histories before scanning their bounded packet lists.
@@ -1143,7 +1263,7 @@ export function createSimFoamField(
         });
       });
     }
-    const foam = foamOut.add(uChurnRate.mul(jet)).add(sheet);
+    const foam = foamOut.add(uChurnRate.mul(jet)).add(boil).add(sheet);
     return vec2(foam, foam.mul(uSlickPerFoam));
   };
 
@@ -1154,10 +1274,14 @@ export function createSimFoamField(
     vesselSlots,
     /** subsamples per axis a tier of this texel gets (tests / docs) */
     supersample: (tierTexel: number) => farSupersample(tierTexel, texel),
-    uniforms: { uHullVel, uLift, uDepth, uAmbientSigma, uAmbientBreak, uBurial, uBurialOrigin, uJetPos, uJetMeta, uVesselPos, uVesselVel, uSheetA, uSheetB },
+    uniforms: { uHullVel, uHullDirection, uLift, uDepth, uAmbientSigma, uAmbientBreak, uBurial, uBurialOrigin, uJetPos, uJetMeta, uJetBoil, uVesselPos, uVesselVel, uSheetA, uSheetB },
     /** §T.199 whether this graph samples a near-hull tier */
     near: !!nearSolver,
     jetSlots,
+    /** W8 the last good hull heading (rad) and speed over water (m/s) the churn is advected by */
+    hull(): { yaw: number; speed: number } {
+      return { yaw, speed };
+    },
     /** the `setShip` feed — heading (rad, atan2(fx, fz)) and speed over water (m/s) */
     setHull(yawIn: number, speedIn: number): void {
       // §V28: a non-finite pose keeps the last good one
@@ -1180,6 +1304,12 @@ export function createSimFoamField(
     /** §T.180 c: this tick's props (at most `jetSlots` are drawn) */
     setPropWash(inputs: readonly PropWashInput[]): void {
       jets = inputs.slice(0, jetSlots);
+      // W8 round 4: per FIXED TICK — the distance each slot's prop has run since it last entered the water
+      for (let j = 0; j < jetSlots; j++) {
+        const q = jets[j];
+        const wet = !!q && propWashValid(q) && q.immersion > 0;
+        runs[j] = wet ? Math.min(1e4, runs[j] + Math.abs(q.advance) * SIM_DT) : 0;
+      }
     },
     /** Retained per-vessel emissions (hero first); at most `vesselSlots` histories drawn. */
     setChineSheets(inputs: readonly ChineSheetEmitter[]): void {
@@ -1188,7 +1318,8 @@ export function createSimFoamField(
     },
     /** RENDER FRAME, after `wakeSim.step` (the caller writes the shared centre): this tick's hull */
     update(): void {
-      uHullVel.value.set(Math.sin(yaw) * speed, Math.cos(yaw) * speed);
+      uHullDirection.value.set(Math.sin(yaw), Math.cos(yaw));
+      uHullVel.value.copy(uHullDirection.value).multiplyScalar(speed);
       const d = sim.sources.hullDepthMax();
       uDepth.value = Math.max(LIFT_DEPTH_FLOOR, fin(d, 0));
       uLift.value = liftFraction(Math.hypot(speed, burial.rms), uDepth.value);
@@ -1220,9 +1351,13 @@ export function createSimFoamField(
         if (packed) {
           jetPos[j].set(...packed.pos);
           jetMeta[j].set(...packed.meta);
+          jetBoil[j].set(...packed.boil);
+          jetRun[j].set(runs[j], 0, 0, 0);
         } else {
           jetPos[j].set(0, 0, 0, 1);
           jetMeta[j].set(0, 1, 0, 0);
+          jetBoil[j].set(0, 1, 0, 0);
+          jetRun[j].set(0, 0, 0, 0);
         }
       }
       for (let k = 0; k < vesselSlots; k++) {

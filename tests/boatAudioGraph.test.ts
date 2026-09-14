@@ -139,6 +139,32 @@ describe('§T.183 node budget through createBoatAudio', () => {
     expect(created.length).toBe(count);
   });
 
+  it('cine stem taps: parallel mirrors built once on demand, inside the budget, carrying the game chain\'s automation', async () => {
+    const audio = await drive(12);
+    const before = created.length;
+    const taps = audio.stemTaps()!;
+    expect(taps).not.toBeNull();
+    // player engine + 7 NPC panners + the water inverter; player water + 7 water mirrors
+    expect(taps.engine.length).toBe(9);
+    expect(taps.water.length).toBe(8);
+    const invert = taps.engine[8] as unknown as MockNode;
+    expect(invert.gain.value).toBe(-1);
+    expect(created.length).toBe(before + 22);
+    expect(created.length).toBe(audio.nodeCount());
+    expect(created.length).toBeLessThanOrEqual(50);
+    expect(posted.some((m) => m.t === 'stems')).toBe(true);
+    expect(audio.stemTaps()).toBe(taps);
+    for (let f = 0; f < 30; f++) audio.update(fleet(12, 2 + f / 60), 1 / 60, camera);
+    expect(created.length).toBe(before + 22);
+    // each water mirror must track its NPC chain exactly, or engine = panner − mirror leaks water (or cancels engine)
+    const delays = created.filter((c) => c.kind === 'delay').map((c) => c.node);
+    const panners = created.filter((c) => c.kind === 'panner' && c.node.panningModel === 'equalpower').map((c) => c.node);
+    for (let i = 0; i < 7; i++) {
+      expect(delays[7 + i].delayTime.value).toBe(delays[i].delayTime.value);
+      expect(panners[7 + i].positionX.value).toBe(panners[i].positionX.value);
+    }
+  });
+
   it('12 boats: player on its two slots, 7 NPC slots bound, exactly 3 full voices — the most audible', async () => {
     await drive(12);
     const frame = [...posted].reverse().find((m) => m.t === 'frame')!;

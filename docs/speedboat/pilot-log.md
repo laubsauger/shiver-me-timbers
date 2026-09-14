@@ -481,3 +481,37 @@ Honest comparison against concept 11 / 12 / 05:
 - **Below AAA and why:** hair (cards, no groom bake, no runtime hair shader to judge); face form (MakeHuman topology, no sculpt pass beyond targets and a baked height layer, no wrinkle maps or expression rig); cloth silhouettes (folds are normal-map only at LOD0 budget); gloves (one inflated MakeHuman hand, no modelled seams); the pose (dictated by the parts helm).
 - **Not verified:** runtime shaders (skin SSS, hair anisotropy, detail normals, alpha-to-coverage), GPU cost, browser.
 
+
+## v2.1 (2026-09-14): trailer close-ups, grips and sleeves
+
+Scope (coordinator, after the user reviewed the throttle and over-the-shoulder shots): no glove remodel, no face work;
+fix the grips, and the sleeve stripes if cheap.
+
+**Grips, solved at seat time (`src/speedboat/page/pilotRig.ts` §FINGER GRIPS).** The bake's wraps were wrong for close-ups:
+`throttle_push` solved the lever grip on a 22 mm cylinder through the middle handle while the three ganged handles are
+separate 26 x 60 x 40 mm blocks on a 30 mm pitch (throttle.py), so the palm sank 5.7 mm and fingers came out through the
+front (31 glove edges crossing); the user saw "mangled" fingers not one per lever. On the rim the fingers floated ~8 mm off.
+Both grips are now finger-bone rotations solved when the pilots are seated, on the LOD0 glove: each phalanx carries the
+glove vertices (and edge midpoints) it dominates, half-blended with its parent near the knuckle as LBS does, against a
+signed distance field of the real target, 3 mm clearance.
+- rim: the bake's hand placement, the fingers grid-searched (MCP 30-80, PIP 40-100, DIP 10-50 deg) to rest on the
+  torus. Solved per pilot on its own re-bound, morphed hand (a hero pose on an NPC hand went through the rim).
+- lever (cine): the palm rests on top of/behind the handle heads (palm tilt and knuckle position searched); index,
+  middle and ring each curl over the front of their own handle (index inboard), the pinky relaxed, the thumb laid along
+  the inboard handle's outer side (CCD). The hand comes down onto the bank from above with the fingers open, and
+  closes over 0.2 s once it arrives; the grip rides the lever. Measured curl: MCP 30-40, PIP 50, DIP 15-35 deg (less than
+  a free hook: the handles are only 40 mm deep).
+- seat cost: ~0.3 s for the hero, +35 ms per NPC (node).
+- tests (`tests/speedboatPilotRig.test.ts`): no glove edge through the helm at steer -1..1 (hero and NPC) or through the
+  lever during the reach and the push; each of index/middle/ring's fingertip over its own handle and in front of it.
+- CPU raster of the running rig for checking: `scratchpad/pilot/grip.png` (session scratchpad).
+
+**Sleeve stripes.** Measured on the build's gear atlas: the sleeves got ~400 px/m (2.5 mm per texel) and the fold relief
+was crisp ridges (`ridges()`, sharp 2.5-3) at 17-45 mm periods and 2-3 mm height through a Bump node at Distance 3, a
+50-60 deg normal tilt at 7-18 texels per fold, which aliases into dark stripes at grazing light. Texture-only rebuild:
+sleeve folds are rounded (`soft_folds`) at a third of the height (elbow ~20 deg tilt), the wrist bunching period is 22 mm,
+rebuilt with `--stages texture,anim,lod,export` (geometry, UVs and triangle counts unchanged, checker OK). Not changed:
+the sleeve texel density: `atlas_uvs` meant to give the arm islands 1.45x, but the MakeHuman suit UVs are ONE island
+(3,020 faces), so it never applied; raising it needs a sleeve re-UV. Also not changed: LOD0 collapse decimation still drags suit UVs
+across island seams (upper-arm 3D-to-UV anisotropy p90 2.2, max 41 at LOD0 vs 2.7 on the source); `islands` LOD mode
+for the Suit would fix it but moves the LOD0 triangle count against an 18,000 cap with 37 to spare.

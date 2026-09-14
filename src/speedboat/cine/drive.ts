@@ -47,6 +47,11 @@ export interface DriveSpec {
   lookaheadS?: number;
   /** steer authority above 14 m/s (default 0.55: full lock hooks the hull above C_v ≈ 5, page/controls.ts) */
   steerLimit?: number;
+  /**
+   * TRAILER SHOT LIST ONLY (shotlist.ts `withLook`): an at-speed run whose `startS` is where she must be at shot time 0,
+   * placed at full speed early enough to be settled before the first recorded frame. The driver ignores it.
+   */
+  steady?: { s0: number; v: number };
 }
 
 export const keyAt = (keys: readonly DriveKey[], t: number): number => {
@@ -208,6 +213,8 @@ export interface CineDrive {
   readonly time: number | null;
   /** crash respawns the session asked for while armed — a take with one is not the take that was scripted */
   readonly respawns: number;
+  /** the throttle the driver last put on the controls, 0 when unarmed (render reads it: the 06 lever, pilotRig `cineThrottle`) */
+  readonly throttle: number;
 }
 
 export function createCineDrive(waterAt: (x: number, z: number) => number): CineDrive {
@@ -252,6 +259,9 @@ export function createCineDrive(waterAt: (x: number, z: number) => number): Cine
     },
     get respawns() {
       return respawns;
+    },
+    get throttle() {
+      return follower === null ? 0 : follower.out.throttle;
     },
   };
 }

@@ -95,8 +95,9 @@ describe('§T.186 the pack, calm water, real physics', () => {
         expect(x.minThrottle).toBeGreaterThanOrEqual(-0.3);
       }
     }
-    // … the pilot's outputs reach the physics through setControls and nothing else …
-    expect(stepCoreSrc).toMatch(/b\.hw\.setControls\(po\.steer, po\.throttle\)/);
+    // … the pilot's outputs (drive angle, throttle and, since §T.207, the trim request through the player's own seam mapping)
+    // reach the physics through setControls and nothing else …
+    expect(stepCoreSrc).toMatch(/b\.hw\.setControls\(po\.steer, po\.throttle, unitTrimToRad\(po\.trim \?\? 0\)\);/);
     // … and no AI source names a power, thrust or drive parameter it could scale
     const forbidden = /powerW|STANDIN_THRUST|standInDrivePower|thrust|HullWater|setControls|params\s*\[|\.params\b/i;
     for (const [name, src] of Object.entries({ pilotSrc, profileSrc, capabilitySrc, archetypesSrc, lineSrc, aiBlockSrc })) {

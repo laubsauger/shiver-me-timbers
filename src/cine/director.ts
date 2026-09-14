@@ -256,6 +256,17 @@ export class Director {
   private locked: ShipPose | null = null;
   /** `follow` — the damped pose the keys resolve against */
   private followed: { x: number; y: number; z: number; yaw: number } | null = null;
+  /** `platform`: the camera platform's own state (see Shot.platform) */
+  private plat: {
+    x: number; z: number; vx: number; vz: number;
+    svx: number; svz: number; px: number; pz: number;
+    course: number; sea: number | null;
+    ax: number; ay: number; az: number;
+  } | null = null;
+  /** `mountIsolation`: the attitude the hard mount has been sprung to */
+  private mountQ: [number, number, number, number] | null = null;
+  /** `rideSmooth`: the smoothed water height under the lens */
+  private rideY: number | null = null;
 
   /** the game's own world, held while a shoot rewrites it */
   private saved: Record<string, Record<string, unknown>> | null = null;
@@ -312,7 +323,25 @@ export class Director {
     this.lastWeather = '';
     this.locked = null;
     this.followed = null;
+    this.plat = null;
+    this.mountQ = null;
+    this.rideY = null;
     this.host.prepareScene(shot, t);
+  }
+
+  /**
+   * A COVERAGE CAMERA's director (cine/index.ts `cameras`): the same cue state as `cue` — keys, dampers, the platform —
+   * without touching the scene. The run's own director places the boat and writes the world; this one only resolves a
+   * second lens onto the same boat from the same instant.
+   */
+  cueCamera(shot: Shot, t: number): void {
+    this.shot = shot;
+    this.t = t;
+    this.locked = null;
+    this.followed = null;
+    this.plat = null;
+    this.mountQ = null;
+    this.rideY = null;
   }
 
   release(): void {
@@ -333,27 +362,6 @@ export class Director {
   applyWorld(): void {
     const s = this.shot;
     if (s === null) return;
-    const apply = (w: WorldPatch | undefined): void => {
-      if (w === undefined) return;
-      if (w.sunElevationDeg !== undefined) {
-        skyParams.timeOfDay = timeForSunElevation(w.sunElevationDeg, w.sunSide ?? 'morning');
-      } else if (w.timeOfDay !== undefined) {
-        skyParams.timeOfDay = w.timeOfDay;
-      }
-      patch(skyParams as unknown as Record<string, unknown>, w.sky as Record<string, unknown>);
-      patch(cloudParams as unknown as Record<string, unknown>, w.clouds as Record<string, unknown>);
-      patch(oceanParams as unknown as Record<string, unknown>, w.ocean as Record<string, unknown>);
-      patch(
-        oceanSurfaceParams as unknown as Record<string, unknown>,
-        w.oceanSurface as Record<string, unknown>,
-      );
-      patch(postParams as unknown as Record<string, unknown>, w.post as Record<string, unknown>);
-      patch(gradeParams as unknown as Record<string, unknown>, w.grade as Record<string, unknown>);
-      patch(
-        lanternParams as unknown as Record<string, unknown>,
-        w.lanterns as Record<string, unknown>,
-      );
-    };
     this.host.holdScene(s);
     const w = s.world;
 
@@ -368,12 +376,33 @@ export class Director {
       this.host.setWeather?.(w.weather);
     }
 
-    apply(this.global);
-    apply(s.world);
+    this.applyPatch(this.global);
+    this.applyPatch(s.world);
 
     if (w === undefined) return;
     if (w.shipAnchored !== undefined) this.host.setShipAnchored?.(w.shipAnchored);
     if (w.shipKnots !== undefined) this.host.setShipSpeed?.(w.shipKnots);
+  }
+
+  /**
+   * Write a world patch's sun, sky, sea and post values NOW — no weather preset, no placement, no ship state. The
+   * tick's `applyWorld` is built on it, and so is a LOOK VARIANT (cine/index.ts `looks`): the same simulated instant
+   * drawn again under another sky from the render path, which is only the same instant because no tick runs between.
+   */
+  applyPatch(w: WorldPatch | undefined): void {
+    if (w === undefined) return;
+    if (w.sunElevationDeg !== undefined) {
+      skyParams.timeOfDay = timeForSunElevation(w.sunElevationDeg, w.sunSide ?? 'morning');
+    } else if (w.timeOfDay !== undefined) {
+      skyParams.timeOfDay = w.timeOfDay;
+    }
+    patch(skyParams as unknown as Record<string, unknown>, w.sky as Record<string, unknown>);
+    patch(cloudParams as unknown as Record<string, unknown>, w.clouds as Record<string, unknown>);
+    patch(oceanParams as unknown as Record<string, unknown>, w.ocean as Record<string, unknown>);
+    patch(oceanSurfaceParams as unknown as Record<string, unknown>, w.oceanSurface as Record<string, unknown>);
+    patch(postParams as unknown as Record<string, unknown>, w.post as Record<string, unknown>);
+    patch(gradeParams as unknown as Record<string, unknown>, w.grade as Record<string, unknown>);
+    patch(lanternParams as unknown as Record<string, unknown>, w.lanterns as Record<string, unknown>);
   }
 
   /** RENDER PATH, after the camera chain is final. */
@@ -419,6 +448,86 @@ export class Director {
       ship = { position: [f.x, f.y, f.z], quaternion: [0, h, 0, Math.cos(f.yaw * 0.5)] };
     }
 
+    // CAMERA PLATFORM (Shot.platform): the anchor, course and aim are the platform's own, not hers
+    let platAim: [number, number, number] | null = null;
+    let platY: number | null = null;
+    let platRoll = 0;
+    if (s.platform !== undefined) {
+      const P = s.platform;
+      const bx = ship.position[0];
+      const by = ship.position[1];
+      const bz = ship.position[2];
+      const dt = this.dt;
+      if (this.plat === null) {
+        this.plat = { x: bx, z: bz, vx: 0, vz: 0, svx: 0, svz: 0, px: bx, pz: bz, course: yawOf(ship.quaternion), sea: null, ax: bx, ay: by, az: bz };
+      } else if (dt > 0) {
+        const p = this.plat;
+        // her velocity, smoothed over a third of the lag: the spring's feed-forward and the course
+        const kv = 1 - Math.pow(0.5, dt / Math.max(P.lag / 3, 1e-3));
+        p.svx += ((bx - p.px) / dt - p.svx) * kv;
+        p.svz += ((bz - p.pz) / dt - p.svz) * kv;
+        p.px = bx;
+        p.pz = bz;
+        // critically damped onto her position and her smoothed velocity (semi-implicit, stable for dt << lag)
+        const w = 2 / Math.max(P.lag, 1e-3);
+        const axx = w * w * (bx - p.x) + 2 * w * (p.svx - p.vx);
+        const azz = w * w * (bz - p.z) + 2 * w * (p.svz - p.vz);
+        p.vx += axx * dt;
+        p.vz += azz * dt;
+        p.x += p.vx * dt;
+        p.z += p.vz * dt;
+        // course: the smoothed velocity's direction once she is making way, her heading before that
+        const speed = Math.hypot(p.svx, p.svz);
+        const want = speed > 2 ? Math.atan2(p.svx, p.svz) : yawOf(ship.quaternion);
+        let d = want - p.course;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        p.course += d * (1 - Math.pow(0.5, dt / Math.max(P.headingLag ?? 1, 1e-3)));
+        // aim point: her CG low-passed, and only once she has left the dead zone
+        const ex = bx - p.ax;
+        const ey = by - p.ay;
+        const ez = bz - p.az;
+        const dist = Math.hypot(ex, ey, ez);
+        // a SOFT dead zone: the follow gain ramps in smoothly from half the zone to 1.5× it. The hard edge it replaced
+        // switched the aim from still to chasing in one frame — a velocity kink a 12° lens showed as a jolt (R1 tele:
+        // rotation 2nd difference p95 16× its median, jitter review)
+        const dz = P.deadZone ?? 1.2;
+        const u = Math.min(1, Math.max(0, (dist - 0.5 * dz) / dz));
+        const gain = u * u * (3 - 2 * u);
+        if (gain > 0) {
+          const ka = 1 - Math.pow(0.5, dt / Math.max(P.aimLag ?? 0.35, 1e-3));
+          const move = gain * ka;
+          p.ax += ex * move;
+          p.ay += ey * move;
+          p.az += ez * move;
+        }
+        // a steady-speed boat runs ahead of a lagging aim point: carry the aim on her smoothed velocity too
+        p.ax += p.svx * dt;
+        p.az += p.svz * dt;
+      }
+      const p = this.plat;
+      const h = Math.sin(p.course * 0.5);
+      ship = { position: [p.x, by, p.z], quaternion: [0, h, 0, Math.cos(p.course * 0.5)] };
+      platAim = [p.ax, p.ay, p.az];
+      platRoll = (P.roll ?? 1) * Math.sin((this.t / Math.max(P.rollPeriod ?? 5, 1e-3)) * Math.PI * 2);
+      // the lens height is resolved below, once its x/z are known (smoothed sea under the lens)
+      platY = 0;
+    }
+
+    if (s.frame === 'hull' && s.mountIsolation !== undefined) {
+      const live = ship.quaternion;
+      if (this.mountQ === null || this.dt <= 0) {
+        this.mountQ ??= [live[0], live[1], live[2], live[3]];
+      } else {
+        const k = 1 - Math.pow(0.5, this.dt / Math.max(s.mountIsolation, 1e-3));
+        tmpShipQ.set(this.mountQ[0], this.mountQ[1], this.mountQ[2], this.mountQ[3]);
+        tmpHeadingQ.set(live[0], live[1], live[2], live[3]);
+        tmpShipQ.slerp(tmpHeadingQ, k);
+        this.mountQ = [tmpShipQ.x, tmpShipQ.y, tmpShipQ.z, tmpShipQ.w];
+      }
+      ship = { position: ship.position, quaternion: this.mountQ };
+    }
+
     if (s.frame === 'locked') {
       // captured at the END of the preroll, not at cue: the hull settles,
       // makes her way and picks up a heading during those seconds, and locking
@@ -460,12 +569,32 @@ export class Director {
       tmpAim.z += ship.position[2];
     }
 
+    if (platAim !== null && this.plat !== null) {
+      // aim: the key's aim offset (heading frame) laid on the platform's low-passed point at her CG
+      tmpAim.x += platAim[0] - ship.position[0];
+      tmpAim.y += platAim[1] - ship.position[1];
+      tmpAim.z += platAim[2] - ship.position[2];
+      // height: the smoothed sea under the lens, never her heave
+      const sea = this.host.heightAt(tmpV.x, tmpV.z);
+      const P = s.platform as NonNullable<Shot['platform']>;
+      if (this.plat.sea === null || this.dt <= 0) this.plat.sea ??= sea;
+      else this.plat.sea += (sea - this.plat.sea) * (1 - Math.pow(0.5, this.dt / Math.max(P.heightLag ?? 1.5, 1e-3)));
+      platY = this.plat.sea + (s.rideSwell ?? (tmpV.y - ship.position[1]));
+      tmpV.y = platY;
+    }
     tmpV.y += wob.alt;
     // rideSwell OVERRIDES y rather than adding to it: the whole point is that
     // the lens sits a fixed height above THIS frame's surface, so the bob and
     // the roll fall out of the sea itself and cost nothing.
-    if (s.rideSwell !== undefined) {
-      tmpV.y = this.host.heightAt(tmpV.x, tmpV.z) + s.rideSwell;
+    if (s.rideSwell !== undefined && s.platform === undefined) {
+      const water = this.host.heightAt(tmpV.x, tmpV.z);
+      if (s.rideSmooth === undefined || this.rideY === null) this.rideY = water;
+      else if (this.dt > 0) this.rideY += (water - this.rideY) * (1 - Math.pow(0.5, this.dt / Math.max(s.rideSmooth, 1e-3)));
+      tmpV.y = this.rideY + s.rideSwell;
+    }
+    // never under the surface: a chase lens that rides a smoothed swell or a heaving anchor can still meet a crest
+    if (s.waterClearance !== undefined && s.frame !== 'hull') {
+      tmpV.y = Math.max(tmpV.y, this.host.heightAt(tmpV.x, tmpV.z) + s.waterClearance);
     }
 
     // AIM AT HER, live and with her full attitude: a static lens that pans with
@@ -508,7 +637,7 @@ export class Director {
     camera.position.copy(tmpV);
     camera.up.set(0, 1, 0);
     camera.lookAt(tmpAim);
-    const roll = (k.roll + wob.roll) * DEG;
+    const roll = (k.roll + wob.roll + platRoll) * DEG;
     if (roll !== 0) camera.rotateZ(roll);
     camera.updateMatrixWorld(true);
 

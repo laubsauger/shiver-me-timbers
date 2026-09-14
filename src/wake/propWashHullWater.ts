@@ -60,7 +60,8 @@ export function propWashFromHullWater(hw: PropWashSource, _state: Readonly<Rigid
     // §T.199 the rooster tail's blade tip speed (absent without an engine model: the emitter estimates it)
     j.propRps = e && Number.isFinite(e.propRps) ? e.propRps : undefined;
     // the blades draw air only while they load the water: in neutral the gearcase decouples the prop (propTorque 0)
-    // but the engine still reports the crank's idle rev/s, which would ventilate a coasting boat (propWash.aerationSpeed: 0 in neutral)
+    // but the engine still reports the crank's idle rev/s, which would ventilate a coasting boat (no surface draw in neutral;
+    // W8: the idling engine's exhaust still leaves through the hub — propWash.exhaustGasFlux reads that rev/s)
     j.ventAirSpeed =
       e && spec && e.propTorque !== 0 ? ventilationAirSpeed(j.immersion, ventilationFactor(spec, e.advanceRatio / (spec.propPitch / spec.propDiameter)), spec.propPitch, e.propRps) : 0;
     live++;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ChineContactHistory } from '../src/wake/chineContact';
-import { CHINE_EMISSION_LIFE, CHINE_EMISSION_SLOTS, packChineEmission } from '../src/wake/chineEmissions';
+import { CHINE_EMISSION_LIFE, CHINE_EMISSION_SLOTS, SHEET_ENTRAINMENT_ONSET, packChineEmission, sheetAirShare } from '../src/wake/chineEmissions';
+import { waterlineSheetLaunch } from '../src/foam/bowSpray';
 import { createWaterlineSpray } from '../src/foam/sprayMath';
 import { retainedChineFoamCpu, packedChineFoamCpu } from '../src/flowfoam/simFoam';
 
@@ -8,6 +9,22 @@ const wet = (x: number, z: number, flux = 0.1) => ({ ...createWaterlineSpray(), 
 const dt = 1 / 60;
 
 describe('retained chine emissions', () => {
+  it('expires only old packets across skipped ticks, then accepts a new impact after draining', () => {
+    const h = new ChineContactHistory();
+    h.update(0, 0, wet(0, 0), 0, 20, dt);
+    h.resetContact(0);
+    const two = h.update(0, 60, wet(0, 20), 0, 20, dt);
+    expect(two.emissions).toHaveLength(2);
+    const survivor = structuredClone(two.emissions[1]);
+    const one = h.update(0, 91, createWaterlineSpray(), 0, 20, dt);
+    expect(one.emissions).toEqual([survivor]);
+    expect(h.update(0, 200, createWaterlineSpray(), 0, 20, dt).emissions).toHaveLength(0);
+    const impact = h.update(0, 201, wet(0, 67), 0, 20, dt);
+    expect(impact.emissions).toHaveLength(1);
+    expect(impact.emissions[0].volume).toBeCloseTo(0.1 * dt, 12);
+    expect(impact.emissions[0].z).toBe(67);
+  });
+
   it('an abrupt turn cannot move, rotate or brighten previously emitted water', () => {
     const h = new ChineContactHistory();
     let e = h.update(0, 0, wet(0, 0), 0, 20, dt);
@@ -89,6 +106,17 @@ describe('retained chine emissions', () => {
     for (let age = step / 2; age < CHINE_EMISSION_LIFE; age += step) {
       deposited += packChineEmission(p, p.time + age, 0.01, 0.45)!.a[3] * 2 * step;
     }
-    expect(deposited).toBeCloseTo(p.volume / 0.01, 5);
+    // W8: the landed water makes whitewater in proportion to the air it folds in, (1 − V_e/V) of its plunge speed
+    expect(deposited).toBeCloseTo((sheetAirShare(waterlineSheetLaunch(p.speed, p.launch).up) * p.volume) / 0.01, 5);
+  });
+
+  it('W8: a sheet that lands slower than the air-entrainment onset lays no whitewater; a faster one lays its air share', () => {
+    // a displacement-speed bow wave barely climbs the hull (v_n ≈ 1 m/s): it lands without folding air in
+    const h = new ChineContactHistory();
+    const slow = h.update(0, 0, { ...wet(0, 0), launch: 0.9 * SHEET_ENTRAINMENT_ONSET }, 0, 8, dt).emissions[0];
+    expect(packChineEmission(slow, slow.time + 0.1, 0.01, 0.45)).toBeNull();
+    expect(sheetAirShare(SHEET_ENTRAINMENT_ONSET)).toBe(0);
+    expect(sheetAirShare(2 * SHEET_ENTRAINMENT_ONSET)).toBeCloseTo(0.5, 12);
+    expect(sheetAirShare(Number.NaN)).toBe(0);
   });
 });

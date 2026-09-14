@@ -23,7 +23,7 @@
 import { gradeParams } from '../params/grade';
 import { postParams } from '../params/post';
 
-export type GradeMode = 'game' | 'cine' | 'cine-flat';
+export type GradeMode = 'game' | 'cine' | 'cine-flat' | 'cine-sunset';
 
 type Patch = {
   grade?: Partial<typeof gradeParams>;
@@ -138,10 +138,71 @@ export const CINE_FLAT: Patch = {
   grade: { enabled: false },
 };
 
+/**
+ * WARM FILMIC SUNSET — the speedboat trailer's shooting grade
+ * (docs/cine/speedboat-trailer-v1.md §Look). The brief is "low sunset, amber
+ * reflections, deep shadows, readable orange livery", and the clean plate of
+ * the first takes answered it with a pink, lifted, hazy picture: the engine's
+ * golden-hour sky is rose-salmon and nothing pulled the blacks down.
+ *
+ * Built on the clean plate, not on `cine`: no grain (fixed-pattern, see
+ * CINE_FLAT) and only a light lens vignette. What it adds is the colour
+ * decision the look needs baked in so a low-res look pass can be judged:
+ *   - blacks down and a touch of gamma: deep shadows without crushing the hull
+ *   - gain warm (R up, B down): amber, not rose — the pink lives in the blue
+ *     channel of the sky's mid band, and a gain is where it comes out cleanly
+ *   - split tone: a cool-teal shadow against amber highlights, the classic
+ *     sunset separation that keeps the orange cowls reading against the water
+ *   - LUT off: the page's time-of-day LUT bands are the GAME's grade
+ *   - bloom earlier and a little stronger for the sun glints on the water
+ *
+ * `enabled` is a construction gate (params/grade.ts): this mode has to be
+ * applied BEFORE the post graph is built, which is what createCineBoot does.
+ */
+export const CINE_SUNSET: Patch = {
+  post: {
+    ...CINE_FLAT.post,
+    vignetteEnabled: true,
+    vignetteStrength: 0.28,
+    vignetteStart: 0.5,
+    vignetteEnd: 0.9,
+    bloomThreshold: 0.8,
+    bloomStrength: 0.6,
+    bloomRadius: 0.55,
+    flareTintR: 1.0,
+    flareTintG: 0.72,
+    flareTintB: 0.45,
+  },
+  grade: {
+    enabled: true,
+    lutMix: 0,
+    liftR: -0.02,
+    liftG: -0.03,
+    liftB: -0.035,
+    gammaR: 0.96,
+    gammaG: 0.97,
+    gammaB: 1.0,
+    gainR: 1.04,
+    gainG: 0.99,
+    gainB: 0.88,
+    saturation: 1.08,
+    splitPivot: 0.4,
+    splitSoftness: 0.3,
+    splitStrength: 0.16,
+    shadowTintR: 0.42,
+    shadowTintG: 0.5,
+    shadowTintB: 0.54,
+    highlightTintR: 0.62,
+    highlightTintG: 0.52,
+    highlightTintB: 0.38,
+  },
+};
+
 const MODES: Record<GradeMode, Patch> = {
   game: SHIPPED,
   cine: CINE_GRADE,
   'cine-flat': CINE_FLAT,
+  'cine-sunset': CINE_SUNSET,
 };
 
 let current: GradeMode = 'game';
@@ -173,4 +234,4 @@ export function gradeMode(): GradeMode {
   return current;
 }
 
-export const GRADE_MODES: readonly GradeMode[] = ['game', 'cine', 'cine-flat'];
+export const GRADE_MODES: readonly GradeMode[] = ['game', 'cine', 'cine-flat', 'cine-sunset'];

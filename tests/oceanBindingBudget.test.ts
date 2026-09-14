@@ -281,8 +281,12 @@ const LEDGER: readonly LedgerEntry[] = [
   {
     file: 'src/flowfoam/index.ts',
     source: flowFoamSource,
-    sites: 5,
+    sites: 6,
     /**
+     * W8 round 3 RECOUNT: +1 CALL SITE, +0 BINDINGS. `wakeCrestNode` (sim vessel mode only; null elsewhere) reads .ba
+     * of the SAME acc.foamTexture object `wakeSlopeNode` samples in the fragment stage, so it dedupes (UUID per stage).
+     * Fragment stays 2/2.
+     *
      * §T.180 d RECOUNT: +1 CALL SITE, +0 BINDINGS. `wakeFoamFreshnessNode` (sim
      * backend only; null on analytic) reads .r/.g of the SAME acc/far
      * foamTexture objects the three fragment readers below sample, so it

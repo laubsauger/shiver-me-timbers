@@ -56,7 +56,7 @@ import type { PageChrome } from './pageChrome';
 import { RaceRadio } from './raceRadio';
 import { applyUiAssists, defaultRaceSettings, loadRaceSettings, saveRaceSettings, type KeyValueStore } from './raceSettings';
 import { SESSION_MODE_LABEL, sessionModeHref, type SessionMode } from './sessionMode';
-import { SEA_OPTIONS } from '../ui/boatSelect';
+import { SEA_OPTIONS, TIME_OPTIONS } from '../ui/boatSelect';
 
 export interface RaceUiDeps {
   parent: HTMLElement;
@@ -94,6 +94,8 @@ export interface RaceUiDeps {
   mode?: SessionMode;
   /** free roam's pause Sea row changed the sea (a SEA_OPTIONS label) */
   onSea?(sea: string): void;
+  /** §T.209 free roam's pause Time row changed the time (a TIME_OPTIONS label) */
+  onTime?(time: string): void;
 }
 
 export interface RaceUiFrame {
@@ -301,7 +303,7 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
   });
   const pauseState = () => ({
     assists: settings.assists, camera: cameraMode, audio: settings.audio, hudScale: settings.hudScale, ...chromeState(),
-    mode: SESSION_MODE_LABEL[mode], ...(free ? { sea: selection.sea } : {}),
+    mode: SESSION_MODE_LABEL[mode], ...(free ? { sea: selection.sea, time: selection.time } : {}),
   });
 
   /** the boat select was opened from the pause: its Back returns to the paused race */
@@ -329,6 +331,16 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
             persist();
             d.onSea?.(selection.sea);
             pause.setState({ sea: selection.sea });
+          }
+        : undefined,
+      onTime: free
+        ? (dir) => {
+            const i = TIME_OPTIONS.indexOf(selection.time as (typeof TIME_OPTIONS)[number]);
+            selection = { ...selection, time: TIME_OPTIONS[(Math.max(0, i) + dir + TIME_OPTIONS.length) % TIME_OPTIONS.length] };
+            settings.lastSelection = { ...selection };
+            persist();
+            d.onTime?.(selection.time);
+            pause.setState({ time: selection.time });
           }
         : undefined,
       onGraphics: d.graphics

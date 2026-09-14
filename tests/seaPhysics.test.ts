@@ -840,7 +840,18 @@ describe('§V.69: added moment of inertia — she cannot reverse her pitch in a 
         // Retain the original reference forcing and sampling. Increasing
         // inertia shifts resonance; a peak-angle ratio is not invariant to
         // a different spectrum realization. Current-sea bounds are below.
-        testOceanParams({ amplitude: oceanParams.amplitude,
+        // The swell-travel sign fix (src/ocean/oceanMath.ts swellSpectrum,
+        // 9ddbf7e) moved the swell train to the opposite half-plane of k, which
+        // is a different realization of this sea: [M] lumped 7.46° → added
+        // 8.35° peak angle there, against 8.12° → 6.78° in the reference. The
+        // reference swell is restored by turning the authored direction half
+        // a turn (identical spectrum magnitudes, same seeds); the ACTUAL sea
+        // is covered by the current-sea bounds below.
+        // The realised-height fix (oceanMath H0_AMPLITUDE_SCALE, 1/√2) halved this sea's variance; the REFERENCE
+        // forcing is the realised sea this ratio was measured on, so its energy is booked back ×2 (wind amplitude ×2,
+        // swell RMS ×√2) — same water, same resonance, same seeds.
+        testOceanParams({ amplitude: oceanParams.amplitude * 2, swellAmplitude: oceanParams.swellAmplitude * Math.SQRT2,
+          swellDirection: oceanParams.swellDirection + Math.PI,
           cascades: [{ domain: 1010 }, { domain: 98 }, { domain: 22.7 }],
         }),
         { ...p, mirrorResolution: 64, mirrorChopResolution: 64 },

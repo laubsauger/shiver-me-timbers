@@ -12,13 +12,13 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three/webgpu';
 import { BOW_FLEET_SLOTS, createBowSprayFleet, waterlineSheetLaunch } from '../src/foam/bowSpray';
-import { BUBBLE_LIFE, BUBBLE_MAX_JETS, createPropBubbles, createRoosterTail, propBubbleRate, roosterTailEmission } from '../src/foam/roosterTail';
+import { BUBBLE_LIFE, BUBBLE_MAX_JETS, ROOSTER_DROP_BLUR, ROOSTER_MIST_OPACITY, ROOSTER_MIST_DRAG, ROOSTER_NEAR_FADE, ROOSTER_SPRITE_DENSITY, createPropBubbles, roosterFlightTime, strutSheetEmission, createRoosterTail, propBubbleRate, roosterTailEmission } from '../src/foam/roosterTail';
 import { createWaterlineSpray, prioritiseEmitters, waterlineSprayEmission } from '../src/foam/sprayMath';
 import { sprayParams } from '../src/params/spray';
 import { flowFoamParams } from '../src/params/flowfoam';
 import { MERCURY_450R, ventilationFactor } from '../src/sea-physics/engine';
 import { AERATION_SHARE, JET_FOAM_REACH, packPropJet, propWashFoamCpu } from '../src/flowfoam/simFoam';
-import { aerationSpeed, propLossPower, ventilationAirSpeed, type PropWashInput } from '../src/wake/propWash';
+import { aerationSpeed, exhaustGasFlux, propLossPower, ventilationAirSpeed, type PropWashInput } from '../src/wake/propWash';
 import { SpeedboatTow } from '../src/wake/speedboatTow';
 
 function recorder() {
@@ -134,12 +134,16 @@ describe('§T.195 the prop bubble trail: from the drive, zero at idle-off, bound
     const half = at(0.5);
     const full = at(1);
     expect(off.lossPower).toBe(0);
-    expect(aerationSpeed(off)).toBe(0);
-    expect(propBubbleRate(off)).toBe(0);
-    expect(packPropJet(off)!.meta[2]).toBe(0);
+    // W8: a closed throttle still idles the engine, and its exhaust leaves through the hub — a trace of air, not a
+    // trail; with the engine OFF (no rev/s) there is none at all
+    const engineOff = { ...off, propRps: 0 };
+    expect(aerationSpeed(engineOff)).toBe(0);
+    expect(propBubbleRate(engineOff)).toBe(0);
+    expect(packPropJet(engineOff)!.meta[2]).toBe(0);
     expect(full.thrust).toBeGreaterThan(half.thrust);
     expect(aerationSpeed(full)).toBeGreaterThan(aerationSpeed(half));
     expect(aerationSpeed(half)).toBeGreaterThan(0);
+    expect(aerationSpeed(off)).toBeLessThan(0.05 * aerationSpeed(full));
     expect(propBubbleRate(full)).toBeGreaterThan(propBubbleRate(half));
     // the ribbon 8 m aft of the prop, on its axis
     const aft = (j: PropWashInput) => propWashFoamCpu([j], j.x + 8 * j.dirX, j.z + 8 * j.dirZ, 0.234);
@@ -150,16 +154,24 @@ describe('§T.195 the prop bubble trail: from the drive, zero at idle-off, bound
   it('the aeration is linear in lost power and grows with ventilation at the same lost power', () => {
     const base: PropWashInput = { x: 0, z: 0, dirX: -1, dirZ: 0, thrust: 5000, discArea: 0.118, depth: 0.4, advance: 20, immersion: 1, lossPower: 50_000 };
     expect(aerationSpeed({ ...base, lossPower: 100_000 })).toBeCloseTo(2 * aerationSpeed(base), 9);
-    // a fully buried prop above the ventilation J draws no air; the hole shot's low J and a half-out prop do
+    // W8: surface air needs a path to the surface. A BURIED prop draws none at any advance — its low-J ventilation is
+    // its own exhaust gas (exhaustGasFlux, counted once); only the arc that pierces the surface draws air, e·P·n
     const spec = MERCURY_450R;
     const pd = spec.propPitch / spec.propDiameter;
     const n = 50;
     expect(ventilationAirSpeed(1, ventilationFactor(spec, 1.0), spec.propPitch, n)).toBe(0);
-    const holeShot = ventilationAirSpeed(1, ventilationFactor(spec, 0.05 / pd), spec.propPitch, n);
+    expect(ventilationAirSpeed(1, ventilationFactor(spec, 0.05 / pd), spec.propPitch, n)).toBe(0);
     const halfOut = ventilationAirSpeed(0.5, ventilationFactor(spec, 1.0), spec.propPitch, n);
-    expect(holeShot).toBeGreaterThan(0);
-    expect(halfOut).toBeGreaterThan(holeShot);
+    expect(halfOut).toBeCloseTo(spec.propPitch * n, 9);
     expect(ventilationAirSpeed(0, ventilationFactor(spec, 0.05 / pd), spec.propPitch, n)).toBe(0);
+    // the exhaust: a 4.6 L four-stroke idling in gear passes litres per second, at race load tenths of a m³/s
+    const idle = exhaustGasFlux({ propRps: 650 / 60 / spec.gear, lossPower: 800, thrust: 300, advance: 1 });
+    const race = exhaustGasFlux({ propRps: 6000 / 60 / spec.gear, lossPower: 100_000, thrust: 5500, advance: 30 });
+    expect(idle).toBeGreaterThan(0.005);
+    expect(idle).toBeLessThan(0.02);
+    expect(race).toBeGreaterThan(0.2);
+    expect(race).toBeLessThan(0.6);
+    expect(exhaustGasFlux({ propRps: 0, lossPower: 800, thrust: 300, advance: 1 })).toBe(0);
     expect(aerationSpeed({ ...base, ventAirSpeed: halfOut })).toBeGreaterThan(aerationSpeed(base));
     // lost power: shaft minus thrust power, never negative
     expect(propLossPower(10, 1000, 5000, 3)).toBeCloseTo(2 * Math.PI * 10 * 1000 - 15000, 9);
@@ -193,5 +205,40 @@ describe('§T.195 the prop bubble trail: from the drive, zero at idle-off, bound
     expect(b.granted.index).toEqual(a.granted.index);
     expect(b.granted.rate).toEqual(a.granted.rate);
     void THREE;
+  });
+});
+
+describe('W8 the rooster tail is water, not puffs: it never hides the hull from a chase camera', () => {
+  it('drops and mist are small ligament sprites that vanish at the lens, not screen-filling soft discs', () => {
+    // at a 25 m rear chase (fov 55°, 900 px) one metre is ~34 px: the oldest, largest mist sprite stays a streak, not a
+    // blob wider than the 2.3 m transom it flies behind (the regression was 2.9 m discs, 1.3 m drops)
+    // round 4: a drop sprite is its physical motion blur — cm wide, at most a dozen widths long, and never more than a
+    // few mrad on screen; the mist is a faint volume (low opacity), not puffs
+    expect(ROOSTER_DROP_BLUR.width * ROOSTER_DROP_BLUR.maxRatio).toBeLessThanOrEqual(0.25);
+    expect(ROOSTER_DROP_BLUR.angularCap).toBeLessThanOrEqual(0.01);
+    expect(ROOSTER_MIST_OPACITY).toBeLessThanOrEqual(0.15);
+    // only a drop at the glass fades (depth to the lens plane); a close or hard-mounted camera still sees the plume
+    // beyond ~2 m, and a 20–40 m chase never loses it (round 3: an 8 m sphere had emptied a close night insert)
+    expect(ROOSTER_NEAR_FADE[0]).toBeGreaterThan(0);
+    expect(ROOSTER_NEAR_FADE[1]).toBeGreaterThan(ROOSTER_NEAR_FADE[0]);
+    expect(ROOSTER_NEAR_FADE[1]).toBeLessThanOrEqual(2);
+    // the plume's weight is its sprite COUNT: small sprites, several per unit of the sheet's density
+    expect(ROOSTER_SPRITE_DENSITY).toBeGreaterThan(1);
+  });
+});
+
+describe('W8 round 3: the drive struts throw water to the side at speed, and the plume falls instead of floating', () => {
+  const strut = (speed: number) => ({ x: 0, z: 0, dirX: -1, dirZ: 0, chord: 0.38, thickness: 0.07, depth: 0.4, speed });
+  it('a strut at 30 m/s throws a sheet up and outboard (metres high, both sides); at 5 kn it throws nothing', () => {
+    const out = { speed: 0, x: 0, surfaceY: 0, z: 0, dirX: 0, dirZ: 1, launch: 0, aft: 0, lateral: 0, rate: 0 };
+    const fast = strutSheetEmission(strut(30), 0, sprayParams, out)!;
+    expect(fast.rate).toBeGreaterThan(0);
+    expect((fast.launch * fast.launch) / (2 * 9.81)).toBeGreaterThan(1.5); // drag-free apex, metres
+    expect(fast.lateral).toBeGreaterThan(fast.launch); // a sideways sheet, not a column
+    expect(strutSheetEmission(strut(2.6), 0, sprayParams, { ...out })).toBeNull();
+  });
+  it('mist no longer outlives and outfloats the drops (the detached cloud behind the boat)', () => {
+    expect(roosterFlightTime(6 * 0.8, ROOSTER_MIST_DRAG)).toBeLessThan(1.6);
+    expect(ROOSTER_MIST_DRAG).toBeLessThan(2);
   });
 });

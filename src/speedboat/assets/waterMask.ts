@@ -26,8 +26,19 @@
  *
  * The outline comes from the build (root extras `waterMask`, scripts/blender/hull/hero_hull.py `water_mask`), checked
  * by `checkGlb.mjs waterMaskErrors`: it covers every sole vertex and stays ≥ 5 cm inside the deck edge.
+ *
+ * WHAT THE CAP CANNOT DO, and the volume mask that does it (ocean/hullVolumeMask.ts, trailer review 2026-09-14): water
+ * ABOVE the sheer (a buried bow, a heeled landing), an eye under the local surface, and spray streaming through the boat
+ * are all in front of the cap or in another pass. Every cap therefore also hosts its boat's slot in the active hull
+ * volume mask (`attachHullMaskSlot`): the ocean and every spray pool discard fragments inside the hull + cockpit column
+ * of every boat, at the boat's render pose. The cap stays: it is what claims the slot, and on a page without an active
+ * volume mask (lookdev, preview) it is still the well's lid. The ocean's side of the mask is an alpha-0 sheet, not a
+ * discard, so the "no discard, early-Z" point above still holds.
  */
 import * as THREE from 'three/webgpu';
+import type { HullMask, HullMaskShape } from '../../ocean/hullVolumeMask';
+import { HULL_MASK_STATIONS } from '../../ocean/hullVolumeMask';
+import { HULL_DATA, type HullDataFile } from '../hullMesh';
 
 /** transparent-pass order: gauge glass (under the sheer) → water mask → ocean (0) → windscreen */
 export const GAUGE_GLASS_RENDER_ORDER = -2;
@@ -110,4 +121,71 @@ export function createWaterMaskMesh(geometry: THREE.BufferGeometry, material: TH
   mesh.receiveShadow = false;
   mesh.userData.waterMask = true;
   return mesh;
+}
+
+/** the hull volume mask's margins (ocean/hullVolumeMask.ts): see `speedboatHullMaskShape` */
+export const HULL_MASK_INSET = 0.05;
+/** sheer → top of the masked column: over the pilot's head (eye at sheer + 0.63, raceCamEye.ts) and the roll arch */
+export const HULL_MASK_COLUMN = 1.3;
+
+/**
+ * The SB-12's volume for the hull mask, BODY frame, from the same station table the render hull is lofted from
+ * (deepV12.hull.json `stations` + `renderOnly.topsideFlare*`, scripts/blender/hull/hero_hull.py `at`/`proxy_sheer_half`).
+ * Below the chine the section is the straight V from keel to chine: the render keel pad and strakes only ADD material
+ * outboard/below it, so the V is inside the drawn shell; the keel arc (≤ 2.2 cm) and the deck-edge bevels are inside the
+ * `inset`. Above the sheer the column keeps the sheer half-width.
+ */
+export function speedboatHullMaskShape(
+  data: Readonly<Pick<HullDataFile, 'spec' | 'stations'>> = HULL_DATA,
+  opts: { inset?: number; columnHeight?: number } = {},
+): HullMaskShape {
+  const st = data.stations;
+  if (st.length < 2) throw new Error('hull mask: the hull JSON needs ≥ 2 stations');
+  const vcg = data.spec.vcgAboveKeel;
+  const lcg = data.spec.lcgFromTransom;
+  const ro = (data as unknown as { renderOnly?: { topsideFlareDeg?: number; topsideFlareStartAboveChine?: number } }).renderOnly;
+  const z0 = st[0].z;
+  const z1 = st[st.length - 1].z;
+  const stations = new Float32Array(HULL_MASK_STATIONS * 3);
+  for (let k = 0; k < HULL_MASK_STATIONS; k++) {
+    const z = z0 + ((z1 - z0) * k) / (HULL_MASK_STATIONS - 1);
+    let j = 0;
+    while (j < st.length - 2 && st[j + 1].z < z) j++;
+    const a = st[j];
+    const b = st[j + 1];
+    const f = Math.min(1, Math.max(0, (z - a.z) / Math.max(b.z - a.z, 1e-9)));
+    stations[k * 3] = a.keelY + (b.keelY - a.keelY) * f - vcg;
+    stations[k * 3 + 1] = a.chineY + (b.chineY - a.chineY) * f - vcg;
+    stations[k * 3 + 2] = a.chineHalfBeam + (b.chineHalfBeam - a.chineHalfBeam) * f;
+  }
+  return {
+    sternZ: z0 - lcg,
+    keelEndZ: z1 - lcg,
+    deckY: st[0].deckY - vcg,
+    columnHeight: opts.columnHeight ?? HULL_MASK_COLUMN,
+    inset: opts.inset ?? HULL_MASK_INSET,
+    flareStartAboveChine: ro?.topsideFlareStartAboveChine ?? 0,
+    flareDeg: ro?.topsideFlareDeg ?? 0,
+    stations,
+  };
+}
+
+const _maskPos = new THREE.Vector3();
+const _maskQuat = new THREE.Quaternion();
+const _maskScale = new THREE.Vector3();
+const _maskCam = new THREE.Vector3();
+
+/**
+ * Make a boat's depth cap host its slot in `mask`: every render call the cap draws in (never frustum-culled, so a boat
+ * just off screen still masks its own spray) writes the boat's world pose. The cap's origin is the boat object's (the
+ * physics CG), so its world matrix IS the pose the volume is defined in.
+ */
+export function attachHullMaskSlot(cap: THREE.Mesh, mask: HullMask, shape: HullMaskShape): void {
+  if (mask.shape === null) mask.setShape(shape);
+  cap.frustumCulled = false;
+  cap.onBeforeRender = (renderer, _scene, camera) => {
+    cap.matrixWorld.decompose(_maskPos, _maskQuat, _maskScale);
+    _maskCam.setFromMatrixPosition(camera.matrixWorld);
+    mask.claim((renderer as unknown as { info: { calls: number } }).info.calls, _maskPos, _maskQuat, _maskPos.distanceTo(_maskCam));
+  };
 }

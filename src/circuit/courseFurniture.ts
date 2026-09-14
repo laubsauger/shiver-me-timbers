@@ -28,6 +28,11 @@
  * CABLES. Conductors and earth wires between neighbouring pylons, and the tower's nine guys, are
  * catenaries built here from the GLB attach points (extras.attach / extras.guys) to wherever the layout
  * put the neighbours, merged into ONE mesh.
+ *
+ * THIN MEMBERS (core/minWidth.ts, §V41). The pylon lattice, the radio mast, the spars and stakes are drawn never
+ * narrower than ~1 px, with the widening paid back as a hashed coverage (USER: "the power poles in the distance get
+ * too thin and then aliasing eats them"); the cables the same, blended. The far band keeps the members LOD1 has:
+ * the pylon's and the mast's LOD2 drop their diagonals outright, which is a pop the coverage fade exists to avoid.
  */
 import * as THREE from 'three/webgpu';
 import { attribute, float, mix, normalMap, normalWorldGeometry, positionWorld, texture, uniform, vec2, vec3 } from 'three/tsl';
@@ -44,6 +49,8 @@ import { waterLighting } from '../caustics';
 import type { Course } from '../race/types';
 import type { CourseFurnitureData, RoofKind } from './towerReach';
 import { createStartMarkers } from './startMarkers';
+import { applyMinWidth, computeThinAxes, THIN_AXIS_ATTRIBUTE } from '../core/minWidth';
+import { SPRAY_OVER_WATER_ORDER } from '../foam/sprayPool';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Node = any;
@@ -100,6 +107,24 @@ export const COURSE_CULL_DISTANCE: Record<CourseAssetName, number> = {
   course_radio_tower: Number.POSITIVE_INFINITY,
   course_roofs: 1800,
 };
+
+/**
+ * The variants whose members get minimum projected width (core/minWidth.ts). Members only: boards, numerals, the hut
+ * and the lamp rig's banner are flat artwork that triangulates into slivers too, and must not dither.
+ */
+const THIN_VARIANTS: Partial<Record<CourseAssetName, readonly string[]>> = {
+  course_pylon: ['Pylon'],
+  course_radio_tower: ['Mast'],
+  course_gate_pole: ['Spar'],
+  course_bar_stake: ['Stake'],
+};
+
+/**
+ * assets whose LATTICE variant (THIN_VARIANTS) draws LOD1 at level 2 too: their LOD2 deletes members outright
+ * (max_lod=1 diagonals). The lattice variant has the same primitives at both levels, so this adds triangles, not batch
+ * instances; the asset's other variants keep LOD2 (the insulators' clamps would add one instance per pylon).
+ */
+const FAR_KEEPS_LOD1: ReadonlySet<CourseAssetName> = new Set(['course_pylon', 'course_radio_tower']);
 
 interface Prim {
   geometry: THREE.BufferGeometry;
@@ -428,6 +453,22 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
   const loaded = await Promise.all(names.map(async (n) => assetFromScene(n, (await loader.loadAsync(urls[n])).scene, anisotropy)));
   const assets = Object.fromEntries(loaded.map((a) => [a.name, a])) as Record<CourseAssetName, LoadedAsset>;
   const { data, course } = opts;
+  // member axes for the thin variants; every other non-lamp primitive of the asset carries zeros, because a
+  // BatchedMesh slot needs one attribute set across all of its geometries
+  for (const a of loaded) {
+    const thin = THIN_VARIANTS[a.name];
+    if (!thin) continue;
+    for (const lod of a.lods) {
+      for (const [variant, prims] of lod ?? new Map<string, Prim[]>()) {
+        for (const prim of prims) {
+          if (prim.slot === 'C_Lamp') continue;
+          const g = prim.geometry;
+          const axes = thin.includes(variant) ? computeThinAxes(g) : new Float32Array(g.getAttribute('position').count * 4);
+          g.setAttribute(THIN_AXIS_ATTRIBUTE, new THREE.BufferAttribute(axes, 4));
+        }
+      }
+    }
+  }
 
   // ── placements → groups ────────────────────────────────────────────────
   const groups: Group[] = [];
@@ -507,6 +548,7 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
     let m = materials.get(key);
     if (!m) {
       m = courseMaterial(prim.slot, prim.source, water, asset === 'course_pylon' ? 'steel' : asset === 'course_roofs' ? 'build' : undefined);
+      if (THIN_VARIANTS[asset] && prim.slot !== 'C_Lamp') applyMinWidth(m, 'hash');
       materials.set(key, m);
     }
     return m;
@@ -577,6 +619,7 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
     }
     // ── every other slot: one BatchedMesh per slot per band ──
     const bandLods = [[0], [1, 2]];
+    const keepsLod1 = (variant: string): boolean => FAR_KEEPS_LOD1.has(name) && (THIN_VARIANTS[name]?.includes(variant) ?? false);
     const slotNames = new Set<string>();
     for (const lod of a.lods) for (const prims of lod?.values() ?? []) for (const prim of prims) if (!isLamp(prim)) slotNames.add(prim.slot);
     for (const slot of slotNames) {
@@ -634,7 +677,8 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
                 bm.setVisibleAt(inst, false);
                 g.slots.push({ local: m.local, near: bm, nearId: inst, nearGeometry: id, nearShown: false, far: null, farId: -1, farGeometry: [], farShown: false, farCurrent: -1 });
               } else {
-                const farGeometry = [null, geometryIds.get(`${m.variant}|1|${k}`) ?? null, geometryIds.get(`${m.variant}|2|${k}`) ?? null];
+                const lod1 = geometryIds.get(`${m.variant}|1|${k}`) ?? null;
+                const farGeometry = [null, lod1, keepsLod1(m.variant) ? lod1 : (geometryIds.get(`${m.variant}|2|${k}`) ?? null)];
                 const first = farGeometry.find((x) => x !== null);
                 if (first === undefined || first === null) continue;
                 const inst = bm.addInstance(first);
@@ -720,7 +764,13 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
       const s = i / n;
       pts.push(new THREE.Vector3().lerpVectors(a, b, s).addScaledVector(Y, -4 * sag * s * (1 - s)));
     }
-    cableGeoms.push(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), n, radius, 5, false));
+    const tube = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), n, radius, 5, false);
+    // a tube's normals ARE its unit offsets from the centreline
+    const normal = tube.getAttribute('normal');
+    const axes = new Float32Array(normal.count * 4);
+    for (let i = 0; i < normal.count; i++) axes.set([normal.getX(i) * radius, normal.getY(i) * radius, normal.getZ(i) * radius, radius], i * 4);
+    tube.setAttribute(THIN_AXIS_ATTRIBUTE, new THREE.BufferAttribute(axes, 4));
+    cableGeoms.push(tube);
   };
   const pylonGroups = groups.filter((g) => g.asset === 'course_pylon');
   const attach = (assets.course_pylon.extras.attach ?? []) as [number, number, number][];
@@ -755,9 +805,15 @@ export async function createCourseFurniture(opts: CreateCourseFurnitureOptions):
     for (const g of cableGeoms) g.dispose();
     const cm = new THREE.MeshStandardNodeMaterial({ color: 0x4a4e50, roughness: 0.42, metalness: 0.85 });
     cm.name = 'course:cables';
+    // coverage blended, as the far ropes are: sub-pixel wires neither occlude nor write depth, and they draw after the
+    // ocean (a transparent, depth-writing mesh at order 0) so the sea behind a span does not paint over it
+    applyMinWidth(cm, 'blend');
+    cm.transparent = true;
+    cm.depthWrite = false;
     cables = new THREE.Mesh(merged, cm);
     cables.name = 'course-cables';
     cables.castShadow = false;
+    cables.renderOrder = SPRAY_OVER_WATER_ORDER;
     root.add(cables);
   }
 

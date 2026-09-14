@@ -1,3 +1,4 @@
+import { STAR_FILTER_RADIUS, starPixelProfile } from '../src/sky/starfield';
 /**
  * §T.46 starfield + the moon disc's appearance.
  *
@@ -154,11 +155,11 @@ describe('a star never reaches its own cell wall (one cell is read per pixel)', 
     const cellAngle = 2 / P.starDensity;
     const clearance = CELL_CLEARANCE * cellAngle;
     for (const height of [1080, 720]) {
-      const drawn = Math.max(P.starSize * DEG, 2 * pixelAngleFor(55, height));
+      const drawn = Math.max(P.starSize * DEG, STAR_FILTER_RADIUS * pixelAngleFor(55, height));
       expect(clearance).toBeGreaterThan(drawn);
     }
     // and it is a real margin at the shipped resolution, not a hair
-    const drawn1080 = Math.max(P.starSize * DEG, 2 * pixelAngleFor(55, 1080));
+    const drawn1080 = Math.max(P.starSize * DEG, STAR_FILTER_RADIUS * pixelAngleFor(55, 1080));
     expect(clearance / drawn1080).toBeGreaterThan(1.5);
   });
 });
@@ -170,7 +171,7 @@ describe('§V.48b — a sub-pixel star must converge, not crawl', () => {
     // flux ∝ peak × drawnRadius². If that moves, the star gets brighter or
     // dimmer purely because the window resized — which is the crawl.
     const flux = (px: number) => {
-      const drawn = Math.max(r, 2 * px);
+      const drawn = Math.max(r, STAR_FILTER_RADIUS * px);
       return starPeakRadiance(P.starBrightness, 1, r, px) * drawn * drawn;
     };
     const ref = flux(1e-6);
@@ -191,7 +192,7 @@ describe('§V.48b — a sub-pixel star must converge, not crawl', () => {
 
   it('stops fading once the star is genuinely resolved', () => {
     // a star two pixels across at 1080p pays nothing
-    const big = 2 * pixelAngleFor(55, 1080);
+    const big = STAR_FILTER_RADIUS * pixelAngleFor(55, 1080);
     expect(bandLimitEnergy2D(big, pixelAngleFor(55, 1080))).toBeCloseTo(1, 12);
   });
 
@@ -205,9 +206,9 @@ describe('§V.48b — a sub-pixel star must converge, not crawl', () => {
   it('renders the shipped default at the brightness it is documented at', () => {
     const px = pixelAngleFor(55, 1080);
     expect(bandLimitEnergy2D(r, px)).toBeCloseTo(0.131, 3);
-    expect(starPeakRadiance(P.starBrightness, 1, r, px)).toBeCloseTo(1.57, 2);
+    expect(starPeakRadiance(P.starBrightness, 1, r, px)).toBeCloseTo(1.573, 3);
     // median star: magnitude 0.125 at power 3
-    expect(starPeakRadiance(P.starBrightness, 0.125, r, px)).toBeGreaterThan(0.15);
+    expect(starPeakRadiance(P.starBrightness, 0.125, r, px)).toBeCloseTo(0.1967, 4);
   });
 });
 
@@ -384,7 +385,7 @@ describe('THE MOON DISC — a crescent, decoupled from the light (§T.46 refs)',
     // Pinning the authored width means the floor stays a safety net, not the
     // thing that decides how soft the terminator is.
     const softDeg = P.moonTerminatorSoftness * P.moonDiscSize;
-    expect(softDeg * DEG).toBeGreaterThan(2 * pixelAngleFor(55, 1080));
+    expect(softDeg * DEG).toBeGreaterThan(STAR_FILTER_RADIUS * pixelAngleFor(55, 1080));
   });
 });
 
@@ -399,5 +400,23 @@ describe('integration surface — the node graph builds (§V.22: not "it works")
     // a real one rather than a zero, so this covers the drift path too.
     const wind = { direction: Math.PI / 4, speed: 11, dt: 1 / 60 };
     for (let t = 0; t < 24; t += 0.25) bg.update(keyLight(t, P), wind);
+  });
+});
+
+
+describe('compact star footprint', () => {
+  it('stays compact while conserving sampled brightness across pixel phases', () => {
+    const sums: number[] = [];
+    for (let ix = 0; ix <= 20; ix++) for (let iy = 0; iy <= 20; iy++) {
+      let sum = 0;
+      for (let x = -3; x <= 3; x++) for (let y = -3; y <= 3; y++) {
+        sum += starPixelProfile(x - ix / 20, y - iy / 20, STAR_FILTER_RADIUS);
+      }
+      sums.push(sum);
+    }
+    const mean = sums.reduce((a, b) => a + b, 0) / sums.length;
+    expect((Math.max(...sums) - Math.min(...sums)) / mean).toBeLessThan(0.02);
+    expect(starPixelProfile(1.5, 0, STAR_FILTER_RADIUS)).toBe(0);
+    expect(starPixelProfile(0, 0, STAR_FILTER_RADIUS)).toBeGreaterThan(0.7);
   });
 });

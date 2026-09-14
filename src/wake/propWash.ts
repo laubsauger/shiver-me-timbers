@@ -83,10 +83,9 @@ export interface PropWashInput {
    */
   lossPower?: number;
   /**
-   * §T.195 air a VENTILATING prop draws in, as a speed over its disc (m/s, ≥ 0): χ·P·|n| — the blades sweep the
-   * nominal pitch volume A·P·n per second, χ of it through air. χ = 1 − (1 − e)·v(J): e = 4·imm·(1 − imm) the
-   * surface-piercing arc (0 buried, 1 half-in), v(J) the engine model's low-advance full-ventilation factor
-   * (`engine.ventilationFactor`, 0.55 at the hole shot → 1 above J/(P/D) 0.42). Optional: absent reads 0.
+   * §T.195 air a VENTILATING prop draws in, as a speed over its disc (m/s, ≥ 0): e·P·|n| — the blades sweep the
+   * nominal pitch volume A·P·n per second, the surface-piercing arc e = 4·imm·(1 − imm) of it through air (W8: a
+   * buried prop draws no surface air at any J — `ventilationAirSpeed`). Optional: absent reads 0.
    */
   ventAirSpeed?: number;
   /**
@@ -131,9 +130,12 @@ export const AIR_ENTRAINMENT_EFFICIENCY = 0.3;
  * TURBULENT term: the air volume the lost power can drive one prop diameter down against buoyancy (ρ·g·D per m³),
  * η_e = AIR_ENTRAINMENT_EFFICIENCY; × immersion (a prop clear of the water churns no water). LINEAR in power, so a
  * prop idling in gear boils at (n_idle/n_WOT)³ ≈ 0.1 % of wide open. VENTILATION term: `ventAirSpeed` (the air the
- * blades draw straight in). 0 in neutral, idle-off, or out of the water (no torque, no rpm).
+ * blades draw straight in). EXHAUST term (W8): the through-hub gas the boil does not release, (1 − φ)·Q_ex/A
+ * (`exhaustBoil`) — present whenever the engine turns (in neutral too: the gas still leaves through the hub).
+ * SLIP term (W8 round 3): the surface air a loaded buried prop draws through its vortices (`slipAirSpeed`).
+ * 0 with the engine off and out of the water.
  */
-export function aerationSpeed(j: Pick<PropWashInput, 'discArea' | 'immersion' | 'lossPower' | 'ventAirSpeed'>): number {
+export function aerationSpeed(j: Pick<PropWashInput, 'discArea' | 'immersion' | 'lossPower' | 'ventAirSpeed'> & Partial<Pick<PropWashInput, 'propRps' | 'thrust' | 'advance' | 'depth'>>): number {
   if (!Number.isFinite(j.discArea) || !(j.discArea > 0) || !Number.isFinite(j.immersion)) return 0;
   const P = j.lossPower ?? 0;
   const v = j.ventAirSpeed ?? 0;
@@ -141,18 +143,130 @@ export function aerationSpeed(j: Pick<PropWashInput, 'discArea' | 'immersion' | 
   const D = 2 * Math.sqrt(j.discArea / Math.PI);
   const turb = Number.isFinite(P) && P > 0 ? (AIR_ENTRAINMENT_EFFICIENCY * imm * P) / (WAKE_RHO * GRAVITY * j.discArea * D) : 0;
   const vent = Number.isFinite(v) && v > 0 ? v : 0;
-  return turb + vent;
+  // W8: the exhaust gas the plume does not boil out rides the slipstream (`exhaustBoil`)
+  const ex = exhaustBoil({ propRps: j.propRps, lossPower: j.lossPower, thrust: j.thrust ?? 0, advance: j.advance ?? 0, depth: j.depth ?? 0, discArea: j.discArea });
+  const draw = slipAirSpeed({ propRps: j.propRps, lossPower: j.lossPower, thrust: j.thrust ?? 0, advance: j.advance ?? 0, depth: j.depth ?? 0, discArea: j.discArea, immersion: j.immersion });
+  return turb + vent + draw + (imm > 0 ? (ex.flux * (1 - ex.share)) / j.discArea : 0);
 }
 
-/** §T.195 χ·P·|n| (`PropWashInput.ventAirSpeed`): pitch-normalised advance jp = J/(P/D), v = ventilation factor at jp */
+/**
+ * §T.195 / W8 SURFACE AIR a prop draws, e·P·|n| (`PropWashInput.ventAirSpeed`): only the blade arc that pierces the
+ * surface, e = 4·imm·(1 − imm), has air to draw. W8 (docs/wake/w8-foam-readability.md §2): the old χ = 1 − (1 − e)·v(J)
+ * gave a BURIED prop at low advance (J below the ventilation band) 45 % of its pitch volume in air — 1.4 m/s at idle
+ * 0.7 m down, with no air path to it. What a buried through-hub prop ventilates with is its own exhaust gas, which
+ * `exhaustGasFlux` counts once. `ventFactor` is kept in the signature (the engine's curve) but a buried prop draws no
+ * surface air at any J.
+ */
 export function ventilationAirSpeed(immersion: number, ventFactor: number, pitch: number, propRps: number): number {
   if (![immersion, ventFactor, pitch, propRps].every(Number.isFinite)) return 0;
   const imm = Math.min(1, Math.max(0, immersion));
-  const e = 4 * imm * (1 - imm);
   // a prop clear of the water draws no air INTO water
   if (!(imm > 0)) return 0;
-  const chi = 1 - (1 - e) * Math.min(1, Math.max(0, ventFactor));
-  return Math.max(0, chi) * Math.max(0, pitch) * Math.abs(propRps);
+  const e = 4 * imm * (1 - imm);
+  return e * Math.max(0, pitch) * Math.abs(propRps);
+}
+
+/** W8 the fleet engine's swept volume (Mercury Racing 450R: 4.6 L V8, `sea-physics/engine` MERCURY_450R header), m³ */
+export const EXHAUST_DISPLACEMENT = 4.6e-3;
+/** W8 gearcase reduction and efficiency, and the crank's peak brake torque (N·m) — MERCURY_450R's, restated (propWash reads no spec) */
+export const EXHAUST_GEAR = 1.6;
+export const EXHAUST_GEAR_EFFICIENCY = 0.95;
+export const EXHAUST_PEAK_TORQUE = 439 * 1.3558;
+/**
+ * W8 manifold pressure over ambient against crank load τ = brake torque / peak: ≈ 0.3 closed-throttle idle (spark-ignition
+ * manifold vacuum ~30 kPa) to ≈ 1.5 at full supercharger boost. Linear between (ASSUMED shape; ends are textbook
+ * SI-engine values, Heywood 1988 ch. 7).
+ */
+export const EXHAUST_MAP_IDLE = 0.3;
+export const EXHAUST_MAP_PER_LOAD = 1.2;
+/** W8 water-injected exhaust gas at ≈ 80 °C: volume over intake (≈ 20 °C) volume, 353/293 */
+export const EXHAUST_TEMP_RATIO = 1.2;
+
+/**
+ * W8 THROUGH-HUB EXHAUST GAS, m³/s per drive: a four-stroke swallows V_d/2 per crank rev at manifold density, and all of
+ * it leaves through the prop hub (water-cooled):
+ *
+ *   Q_ex = (V_d / 2) · n_crank · MAP(τ) · T_ex/T_in          n_crank = |n_prop| · gear
+ *   τ = (P_shaft / (2π·|n_prop|)) / (gear · η_g) / T_peak      P_shaft = P_loss + T·U_a
+ *
+ * Idle in gear (650 rpm): ≈ 10 L/s. Race load (6000 rpm, boosted): ≈ 0.3–0.5 m³/s. 0 with the engine off (no rev/s) or
+ * for a producer that publishes no rev/s (the pre-W8 records). Reads only published jet fields, so rivals get it too.
+ */
+export function exhaustGasFlux(j: Pick<PropWashInput, 'propRps' | 'lossPower' | 'thrust' | 'advance'>): number {
+  const n = Math.abs(j.propRps ?? 0);
+  if (!Number.isFinite(n) || !(n > 0)) return 0;
+  return (EXHAUST_DISPLACEMENT / 2) * n * EXHAUST_GEAR * (EXHAUST_MAP_IDLE + EXHAUST_MAP_PER_LOAD * engineLoad(j)) * EXHAUST_TEMP_RATIO;
+}
+
+/** W8 crank load τ = brake torque / peak (0..1) from the published shaft power (lost + thrust power) and rev/s */
+export function engineLoad(j: Pick<PropWashInput, 'propRps' | 'lossPower' | 'thrust' | 'advance'>): number {
+  const n = Math.abs(j.propRps ?? 0);
+  if (!Number.isFinite(n) || !(n > 0)) return 0;
+  const loss = Number.isFinite(j.lossPower) ? Math.max(0, j.lossPower ?? 0) : 0;
+  const push = Number.isFinite(j.thrust) && Number.isFinite(j.advance) ? Math.max(0, j.thrust * Math.abs(j.advance)) : 0;
+  const crankTorque = (loss + push) / (2 * Math.PI * n) / (EXHAUST_GEAR * EXHAUST_GEAR_EFFICIENCY);
+  return Math.min(1, Math.max(0, crankTorque / EXHAUST_PEAK_TORQUE));
+}
+
+/** W8 round 3: the fleet prop's nominal pitch (m) — MERCURY_450R's 26 in, restated (propWash reads no spec) */
+export const SLIP_PROP_PITCH = 26 * 0.0254;
+/**
+ * W8 round 3 LOOK CALIBRATION: air a LOADED, BURIED prop draws down from the surface through its tip and hub vortices,
+ * per unit of slip·P·|n|·e^(−d/D)·τ. The mechanism is vortex (free-surface) ventilation: a shallow prop (d/D ≲ 2) under
+ * high slip pulls surface air and exhaust into its blade vortices (Kozlowska & Steen; Califano & Steen 2011). Sized so
+ * a deep-V pushing through the hump (8–20 kn, slip 0.3–0.6, τ 0.2–0.5) lays a moderate churned white wash.
+ */
+export const SLIP_DRAW_GAIN = 40;
+/** W8 round 3 tip-vortex cavitation band: closed above σ = 1, fully open at σ = 0.4 */
+export const SLIP_SIGMA_OPEN = 1;
+export const SLIP_SIGMA_FULL = 0.4;
+
+/**
+ * W8 round 3 SLIP-DRIVEN AIR (m/s over the disc): K·slip·P·|n|·e^(−d/D)·τ·(1 − e)·open(σ_tip), slip = 1 − U_a/(P·|n|), e the
+ * surface-piercing arc. (1 − e): a prop already piercing the surface is air-filled on its suction side and counted by
+ * `ventAirSpeed`. Idle (τ ≈ 0) and planing (e ≈ 1) draw ~nothing; the hump draws most. 0 with no rev/s.
+ */
+export function slipAirSpeed(j: Pick<PropWashInput, 'propRps' | 'lossPower' | 'thrust' | 'advance' | 'depth' | 'discArea' | 'immersion'>): number {
+  const n = Math.abs(j.propRps ?? 0);
+  if (!Number.isFinite(n) || !(n > 0) || !Number.isFinite(j.discArea) || !(j.discArea > 0) || !Number.isFinite(j.immersion)) return 0;
+  const pn = SLIP_PROP_PITCH * n;
+  const slip = Math.max(0, 1 - Math.abs(Number.isFinite(j.advance) ? j.advance : 0) / pn);
+  const D = 2 * Math.sqrt(j.discArea / Math.PI);
+  const d = Math.max(0, Number.isFinite(j.depth) ? j.depth : 0);
+  const imm = Math.min(1, Math.max(0, j.immersion));
+  if (!(imm > 0)) return 0;
+  const e = 4 * imm * (1 - imm);
+  // the tip vortex only opens a path for air once its core cavitates: tip cavitation number σ = (p_a + ρgd)/(½ρV_tip²)
+  // below the inception band (≈ 1 → 0.4, the order of tip-vortex σ_i for loaded props) — an idling prop's vortex is shut
+  const vTip = Math.PI * n * D;
+  const sigma = (101325 + WAKE_RHO * GRAVITY * d) / (0.5 * WAKE_RHO * vTip * vTip);
+  const x = Math.min(1, Math.max(0, (SLIP_SIGMA_OPEN - sigma) / (SLIP_SIGMA_OPEN - SLIP_SIGMA_FULL)));
+  const open = x * x * (3 - 2 * x);
+  const u = SLIP_DRAW_GAIN * slip * pn * Math.exp(-d / D) * engineLoad(j) * (1 - e) * open;
+  return Number.isFinite(u) ? u : 0;
+}
+
+/** W8 rise speed of the exhaust's large bubbles (m/s): 1–10 mm air bubbles in water rise at 0.22–0.3 (Clift, Grace & Weber 1978) */
+export const EXHAUST_RISE = 0.3;
+/** W8 bubble-plume spread per metre of path (half-width growth; entrainment α ≈ 0.1, Milgram 1983) */
+export const EXHAUST_PLUME_SPREAD = 0.1;
+
+/**
+ * W8 WHERE THE EXHAUST BOILS. Gas leaves the hub d below the surface, rises at w = EXHAUST_RISE while the water carries
+ * it aft at U_a: it surfaces at s = d·U_a/w aft of the prop, spread over σ = r + d + S_p·d·√(1 + (U_a/w)²) — the disc, the
+ * radial surface outflow a surfacing bubble plume drives (it reaches about the source depth out, Milgram & Van Houten
+ * 1982) and the plume's own growth along its slanted path. The share that
+ * rises out as a BOIL rather than being shredded into the slipstream is φ = w/(w + U_a) (the plume's rise against its
+ * advection): ≈ 0.23 at 1 m/s, 0.06 at 5 m/s, 0.01 at race speed — visible at idle, swallowed by the wash at speed.
+ * The remaining (1 − φ)·Q_ex is slipstream air (`aerationSpeed`).
+ */
+export function exhaustBoil(j: Pick<PropWashInput, 'propRps' | 'lossPower' | 'thrust' | 'advance' | 'depth' | 'discArea'>): { flux: number; share: number; along: number; sigma: number } {
+  const q = exhaustGasFlux(j);
+  const u = Math.abs(Number.isFinite(j.advance) ? j.advance : 0);
+  const d = Math.max(0, Number.isFinite(j.depth) ? j.depth : 0);
+  const r = Number.isFinite(j.discArea) && j.discArea > 0 ? Math.sqrt(j.discArea / Math.PI) : 0;
+  const share = EXHAUST_RISE / (EXHAUST_RISE + u);
+  return { flux: q, share, along: (d * u) / EXHAUST_RISE, sigma: r + d + EXHAUST_PLUME_SPREAD * d * Math.hypot(1, u / EXHAUST_RISE) };
 }
 
 /** actuator-disc jet excess V_j − U_a = √(U_a² + 2T/(ρA)) − U_a (m/s, ≥ 0); 0 for any non-physical input */

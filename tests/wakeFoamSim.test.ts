@@ -287,6 +287,27 @@ describe('4. §V28: non-finite inputs inject nothing', () => {
     expect(liftFraction(2, Number.NaN)).toBe(0);
   });
 
+  it('foam heading stays unit length and aligned at rest and crawling speeds', () => {
+    const sim = new WakeSim(WAKE_RAFT_TIER);
+    const field = createSimFoamField(sim, { ...flowFoamParams }, { value: new THREE.Vector2() });
+    try {
+      for (const yaw of [0, Math.PI / 2, Math.PI, -Math.PI / 2, 0.7]) {
+        for (const speed of [0, 0.0005, 0.001, 0.002, 20]) {
+          field.setHull(yaw, speed);
+          field.update();
+          const direction = field.uniforms.uHullDirection.value;
+          expect(direction.length()).toBeCloseTo(1, 12);
+          expect(direction.x).toBeCloseTo(Math.sin(yaw), 12);
+          expect(direction.y).toBeCloseTo(Math.cos(yaw), 12);
+          expect(field.uniforms.uHullVel.value.x).toBeCloseTo(direction.x * speed, 12);
+          expect(field.uniforms.uHullVel.value.y).toBeCloseTo(direction.y * speed, 12);
+        }
+      }
+    } finally {
+      sim.dispose();
+    }
+  });
+
   it('the GPU uniforms never take a non-finite hull pose or param', () => {
     const sim = new WakeSim(WAKE_RAFT_TIER);
     const params = { ...flowFoamParams };

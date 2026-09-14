@@ -186,13 +186,26 @@ export interface SkyParams {
   moonHaloPower: number;
   moonHaloStrength: number;
   /**
+   * §T.209 MOON SURFACE (all 0 = the disc as it always was; the speedboat night preset turns them on).
+   *  - `moonLimbDarkening` 0..1: the disc dims toward its rim (mix(1, 0.35 + 0.65·√μ, k), μ = cos from centre);
+   *  - `moonEarthshine` 0..0.2: the unlit side's level as a fraction of the lit disc;
+   *  - `moonMaria` 0..1: how dark the seven big near-side maria read (analytic blobs in a moon-fixed frame, no texture).
+   * `moonRoadRadiusDeg`: the angular radius of the moon's SOURCE on the water's glint road once it owns the key
+   * (the day road uses `sunDiscSize + sunGlareRadiusDeg`, §V92). Default 2.6 = exactly that, so a night that never
+   * sets it lays the road it always did; a small value turns the broad mirrored-disc plateaus into fine glitter.
+   */
+  moonLimbDarkening: number;
+  moonEarthshine: number;
+  moonMaria: number;
+  moonRoadRadiusDeg: number;
+  /**
    * STARFIELD (§T.46 — src/sky/starfield.ts holds the whole argument).
    *
    * `starDensity` is cells per cube-face edge, so the sky holds 6·N² candidate
    * cells; the count is uniform per steradian, not per cell, because the
    * gnomonic Jacobian gates it. `starSize` is the TRUE angular radius in
-   * degrees — the drawn radius is floored at 2 px of the view ray's own
-   * footprint (§V.48) and the amplitude is scaled by (true/drawn)², so what
+   * degrees — the disc radius is floored at 1.2 px of the view ray's own
+   * footprint with four subpixel coverage samples, and the amplitude is scaled by (true/drawn)², so what
    * this knob really sets is a star's FLUX, and the drawn peak at 1080p / 55°
    * fov is about 0.15 of `starBrightness`.
    *
@@ -255,6 +268,8 @@ export interface SkyParams {
   windLineDensityPower: number;
   windLineWhiteness: number;
   windLineNightDim: number;
+  /** fraction of candidate wind streaks retained at full night */
+  windLineNightDensity: number;
   /** viewDir.y over which the streaks fade in above the horizon */
   windLineHorizonFade: number;
   /** analytic sun disc angular radius (degrees) and its soft edge (degrees) */
@@ -577,6 +592,10 @@ export const skyParams: SkyParams = registerParams(
     moonGlowStrength: 0.9,
     moonHaloPower: 24,
     moonHaloStrength: 0.2,
+    moonLimbDarkening: 0,
+    moonEarthshine: 0,
+    moonMaria: 0,
+    moonRoadRadiusDeg: 2.6,
     // ── STARFIELD ─────────────────────────────────────────────────────────
     // 72 cells per cube-face edge = 31,104 candidate cells over the sphere,
     // 1.59° apart at a face centre, 1296 per steradian. At 55° fov / 16:9 the
@@ -586,15 +605,11 @@ export const skyParams: SkyParams = registerParams(
     // looking at JITTER: a denser grid is a smaller cell, and the clearance a
     // star needs to avoid being clipped by its own cell wall is in DEGREES.
     starDensity: 72,
-    // TRUE radius. The drawn radius is floored at 2 px (§V.48), so at 1080p
-    // this is 0.04/0.110 = 0.36 of what is drawn and the energy factor is
-    // 0.131 — the star is ~4 px across with a ~2 px core, and gets no bigger
-    // as the window shrinks, only fainter.
-    starSize: 0.04,
-    // Peak for a magnitude-1 star BEFORE the §V.48b energy factor. 12 × 0.131
-    // = 1.57 linear at 1080p, which ACES at exposure 1.1 puts at ~221 on
-    // screen against a night zenith of ~(0,1,17): the brightest stars read
-    // near-white, the median (mag 0.125) lands at ~72 — dim but present.
+    // Smaller true radius lowers integrated star flux and bloom spread. Keep
+    // a compact 1.2-pixel disc with four coverage samples for stability.
+    starSize: 0.024,
+    // Magnitude-1 scale at 1080p: 12 * 0.131 = 1.573 linear before
+    // the four-sample profile. Less total flux, concentrated in a smaller dot.
     starBrightness: 12,
     starMagnitudePower: 3,
     starTwinkleAmount: 0.35,
@@ -656,8 +671,9 @@ export const skyParams: SkyParams = registerParams(
     // Mostly white, but carrying a third of the live horizon haze, so the
     // streaks warm with the sky at golden hour instead of staying chalk (§T39)
     windLineWhiteness: 0.65,
-    // lit air, and there is almost nothing lighting it after dark
-    windLineNightDim: 0.15,
+    // Retain occasional faint wisps, with irregular gaps between surviving lines.
+    windLineNightDim: 0.035,
+    windLineNightDensity: 1 / 3,
     // ~1.7°: shallow on purpose. The vanishing point sits ON the horizon and
     // is the most legible part of the bearing read, so unlike the starfield
     // this must NOT fade the bottom of the sky away.
@@ -720,6 +736,10 @@ export const skyParams: SkyParams = registerParams(
     moonGlowStrength: { min: 0, max: 4, step: 0.01 },
     moonHaloPower: { min: 1, max: 64, step: 0.5 },
     moonHaloStrength: { min: 0, max: 1, step: 0.01 },
+    moonLimbDarkening: { min: 0, max: 1, step: 0.01 },
+    moonEarthshine: { min: 0, max: 0.2, step: 0.005 },
+    moonMaria: { min: 0, max: 1, step: 0.01 },
+    moonRoadRadiusDeg: { min: 0.05, max: 6, step: 0.05 },
     starDensity: { min: 8, max: 160, step: 1 },
     starSize: { min: 0.005, max: 0.3, step: 0.005 },
     starBrightness: { min: 0, max: 60, step: 0.5 },
@@ -742,6 +762,7 @@ export const skyParams: SkyParams = registerParams(
     windLineDensityPower: { min: 0.2, max: 6, step: 0.1 },
     windLineWhiteness: { min: 0, max: 1, step: 0.01 },
     windLineNightDim: { min: 0, max: 1, step: 0.01 },
+    windLineNightDensity: { min: 0, max: 1, step: 0.01 },
     windLineHorizonFade: { min: 0.005, max: 0.3, step: 0.005 },
     sunDiscSize: { min: 0.2, max: 6, step: 0.05 },
     sunDiscSoftness: { min: 0.05, max: 3, step: 0.05 },

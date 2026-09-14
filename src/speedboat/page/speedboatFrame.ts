@@ -30,6 +30,7 @@ import type { Rigid6State } from '../../sea-physics/rigidBody';
 import type { SkyHandle } from '../../sky';
 import type { ShipState, SimState } from '../../state/simState';
 import type { PropWashInput } from '../../wake/propWash';
+import type { RivalEffects } from '../../wake/vesselFx';
 import type { HydroSample } from '../../wake/wakeSolverMath';
 import type { WeatherSample } from '../../weather';
 import { roosterApex, roosterTailEmission } from '../../foam/roosterTail';
@@ -114,6 +115,11 @@ export interface SpeedboatFrameDeps {
   waterAt(x: number, z: number): number;
   /** the camera rig writes the lens between the boats and the camera-derived passes */
   placeCamera(view: ShipState, frameDt: number): void;
+  /**
+   * the trailer's scripted rivals (speedboat/cine/rivals.ts, `?cine` in free roam): they, not the idle fleet, pose
+   * `boats.npcs` and feed vesselFx's rival wakes and spray
+   */
+  rivals?: { renderPose(i: number, alpha: number, out: Rigid6State): Rigid6State; readonly fx: RivalEffects };
 }
 
 export function createSpeedboatFrame(d: SpeedboatFrameDeps) {
@@ -181,7 +187,7 @@ export function createSpeedboatFrame(d: SpeedboatFrameDeps) {
       // step + each rival's last collected step), bow sheet / rooster tail / bubbles. §V105: anchored on the SIM pose
       // rigid6 just wrote. `bowAhead` = stem + 120 m: ~130 m of clear water ahead, so rivals in front keep their wakes
       // (coordinator decision, w6-multivessel.md §1). The camera is only the spray pools' priority viewer (visual-only).
-      roosterRate = boats.vesselFx.tick(app.renderer, { hw: player.hw, state: boat, bowAhead: hull.stemZ + 120 }, d.npcs.fleet, dt, app.camera.position).rooster;
+      roosterRate = boats.vesselFx.tick(app.renderer, { hw: player.hw, state: boat, bowAhead: hull.stemZ + 120 }, d.rivals ? d.rivals.fx : d.npcs.fleet, dt, app.camera.position).rooster;
       wakeSampleCount = wakeSamples.length;
       wakeLoadN = 0;
       for (const w of wakeSamples) wakeLoadN += w.fy;
@@ -214,7 +220,8 @@ export function createSpeedboatFrame(d: SpeedboatFrameDeps) {
       view.velocity[1] = prevVel.y + (currVel.y - prevVel.y) * alpha;
       view.velocity[2] = prevVel.z + (currVel.z - prevVel.z) * alpha;
       for (let i = 0; i < boats.npcs.length; i++) {
-        d.npcs.renderPose(i, alpha, npcView);
+        if (d.rivals) d.rivals.renderPose(i, alpha, npcView);
+        else d.npcs.renderPose(i, alpha, npcView);
         const o = boats.npcs[i].object;
         o.position.fromArray(npcView.position);
         o.quaternion.fromArray(npcView.quaternion);
@@ -235,6 +242,7 @@ export function createSpeedboatFrame(d: SpeedboatFrameDeps) {
         else heroDrive.propRpm = placeholderPropRpm(drive.heroThrottle, hull.drives.length, heroRpm);
         ht.setDriveState(heroDrive, frameDt);
       }
+      boats.lights.update(sky.nightFactor, sky.sunDirection); // §T.209 LEDs at this frame's poses, before any pass draws
       d.placeCamera(view, frameDt);
       seaFrame.renderCameraPasses();
       seaFrame.renderSurface();

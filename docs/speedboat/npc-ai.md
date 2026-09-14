@@ -215,4 +215,27 @@ before green). Open item 1 (roll damping) still dominates.
 - `src/speedboat/page/autopilot.ts` `sample()`: after `out.throttle = po.throttle;` add `out.trim = po.trim ?? 0;`
 - `src/main-speedboat.ts`: `buildPilotSetup(world.course, [...RIVAL_ARCHETYPES, null], { seed: state.seed, colliders: world.colliders })`
   — without it the page's rivals have no keep-outs (the grid hold works without it).
-- The trim request policy (−wave lift, +0.3 above 20 m/s) has never run on the physics; check it when the stepCore line lands.
+- ~~The trim request policy (−wave lift, +0.3 above 20 m/s) has never run on the physics~~ — landed in §T.207, re-tuned below.
+
+## Wakes and trim (after §T.207: wakes move every hull, the pilot's trim reaches the drives)
+
+Headless evidence: `tests/speedboatRaceSmoke` (Tower Reach, calm, 1 lap, wakes on) + a seed sweep of the same race
+(seeds 2100–2105, scratch, not committed) counting rival crashes and tilt > 32° episodes.
+
+| # | Cause (measured) | Fix (`pilot.ts`) |
+|---|---|---|
+| wake hooks | Pilots were blind to wakes. A lee 16 m behind a blocker at 30 m/s through a sweeper, in its stern hollow (−0.3 m at the CG, 6 % roll slope), heeled 18° → 38° in 0.4 s with the props out and hooked; a rookie 26 m behind the blocker rolled over in a turn on the post-finish lap; a rookie braking in full reverse 30 m behind a blocker (wake crest +0.25 m, 12 % roll slope) snapped from 30° of heel to 50° the other way. | (1) The wave read adds the other boats' wake field (`WakeField` from WAKE WORLD, prepared 0.6 s ahead) to the surface, so a wake crest lifts like a ramp; its roll slope across the path within 0.9 s lifts a cornering pilot (≥ `WAKE_SKILL` 0.6 of the lift). (2) Cornering inside another boat's Kelvin wedge (tan 19.47°·X + 4 m) within `WAKE_GAP` 45 m of its stern: speed cap closing ≤ 0.3 m/s per metre short of the gap, and a lateral step past the wedge edge on the side she is on. (3) Reverse is the brake only below 10° of tilt. (4) In smooth water (`AI.SEA` ≤ 0.25) past 22° of heel she eases the throttle to 30 % at 38° (the drives roll her into the turn). Formation (rolling start) ignores wakes: a wake-lifted rookie sat 14.7 m off its grid slot. |
+| trim | +0.3 above 20 m/s everywhere and −waveLift (to −6°) had never run on the physics; applied: raceAiLaps lap-to-lap 11 %, raceAiPack a hook. | Neutral below 15 m/s and in the formation; −0.5·lift in a lift; −0.2 cornering (line κ > 1/400 within 2 s, or tilt > 10°); +0.3 on a straight above 24 m/s; slewed 1.5/s. Flat water [M]: +0.3 top speed 33.9 → 35.1 m/s (+1.0 blows out, 29.7); −0.25 R −3 % in steady turns; a lock-to-lock reversal at 14–30 m/s peaks at the same tilt/drift (±1°) at trim −0.3…+0.3. Capability table unchanged (measured at trim 0; `raceAiCapability` green). |
+| sea | Easing throttle at heel everywhere made the veterans crash more than the rookies in the Working sea (raceAiSea veterans 28 vs rookies 19). | The heel ease only in smooth water (above). |
+
+**Results.** Smoke race (seed 2100): 0 rival crashes, 0 penalties, 0 solid contacts, grid slots held, paced hash equal; all 8
+finish, rivals 147–192 s (slower tail than before: the wake spacing costs time in corners). Seed sweep with the same race:
+pilots blind to wakes (wake terms off, heel ease on, reverse at any heel) 62 tilt episodes and 10 rival crashes over 6 seeds; wake-aware (with heel
+ease, before the sea gate) 30 episodes, 2 crashes; the final policy 0 crashes over seeds 2100–2102 (13 episodes).
+raceAiLaps rookie 66.5 / 62.4 / 61.0 s; raceAiPack, raceAiSea (veterans 14 vs rookies 20), raceAiDeterminism green.
+
+**Fragile, stated.** raceAiLaps (lap-to-lap ≤ 4 % for the rookie, whose seeded mistakes and off-line recoveries cost 3–6 s
+a lap), raceAiPack (archetype spread > 1.5 s and hothead < veteran, when traffic compresses all seven laps to ±1 s against a
+10 s profile spread) and raceAiSea (one realisation) are single-seed checks that flip with any pilot change: across seeds
+1–5 each policy tried (including no trim at all) failed laps on 1–2 seeds and pack on 2 of 3. The pinned seeds pass.
+The player's autopilot (`page/autopilot.ts`) has no WAKE WORLD in its private layout, so it stays wake-blind.

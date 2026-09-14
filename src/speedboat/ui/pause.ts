@@ -8,6 +8,7 @@ import { chevrons, h, txt } from './dom';
 import { MenuNav, type NavItem } from './nav';
 import type { GovernorMode, HudCamera } from './model';
 import { HUD_SCALES } from './layout';
+import { ASSIST_PRESETS as CONTROL_PRESETS } from '../assists/settings';
 
 export interface AssistSettings {
   preset: 'default' | 'pro' | 'custom';
@@ -21,8 +22,9 @@ export interface AssistSettings {
 
 /** design doc §3: AIR is default; Pro sets the assists off; auto reset stays on in both */
 export const ASSIST_PRESETS: Record<'default' | 'pro', Omit<AssistSettings, 'preset'>> = {
-  default: { governor: 'air', landingAssist: 0.5, steeringLock: true, autoReset: true },
-  pro: { governor: 'off', landingAssist: 0, steeringLock: false, autoReset: true },
+  // §V95 one source of truth: the landing-assist dial reads the controls' preset (assists/settings.ts; Default 0 since §T.207)
+  default: { governor: 'air', landingAssist: CONTROL_PRESETS.default.landingAssist, steeringLock: true, autoReset: true },
+  pro: { governor: 'off', landingAssist: CONTROL_PRESETS.pro.landingAssist, steeringLock: false, autoReset: true },
 };
 
 export interface AudioSettings {
@@ -46,6 +48,8 @@ export interface PauseState {
   devOverlays?: boolean;
   /** free roam (page/sessionMode.ts): the sea preset label; omitted = no row (the race picks its sea at boat select) */
   sea?: string;
+  /** §T.209 free roam: the time option label (boatSelect TIME_OPTIONS); omitted = no row */
+  time?: string;
   /** the session mode label ('Race' / 'Free roam'); omitted = no row */
   mode?: string;
 }
@@ -68,6 +72,8 @@ export interface PauseCallbacks {
   onDevOverlays?(): void;
   /** step the sea preset; the page answers with `setState` */
   onSea?(dir: -1 | 1): void;
+  /** §T.209 step the time option; the page answers with `setState` */
+  onTime?(dir: -1 | 1): void;
   /** switch to the other session mode (the page reloads) */
   onMode?(): void;
 }
@@ -149,11 +155,13 @@ export class PauseScreen {
     const dev = valueRow('Dev overlays', devV);
     const seaV = txt('');
     const sea = valueRow('Sea', seaV);
+    const timeV = txt('');
+    const time = valueRow('Time', timeV);
     const modeV = txt('');
     const mode = valueRow('Mode', modeV);
     const menu = h('div', 'sbs-menu', resume, cb.onRestart ? restart : null,
       cb.onBoatSelect ? boat : null, cb.onMode && initial.mode !== undefined ? mode : null,
-      cb.onSea && initial.sea !== undefined ? sea : null, gov, assists, cam, size, audio,
+      cb.onSea && initial.sea !== undefined ? sea : null, cb.onTime && initial.time !== undefined ? time : null, gov, assists, cam, size, audio,
       cb.onGraphics && initial.graphics !== undefined ? gfx : null,
       cb.onFullscreen && typeof initial.fullscreen === 'boolean' ? full : null,
       cb.onDevOverlays && initial.devOverlays !== undefined ? dev : null,
@@ -167,6 +175,7 @@ export class PauseScreen {
       fullV.data = this.state.fullscreen ? 'On' : 'Off';
       devV.data = this.state.devOverlays ? 'Shown' : 'Hidden';
       seaV.data = this.state.sea ?? '';
+      timeV.data = this.state.time ?? '';
       modeV.data = this.state.mode ?? '';
     });
 
@@ -235,6 +244,7 @@ export class PauseScreen {
       ...(menu.contains(boat) ? [{ el: boat, activate: () => cb.onBoatSelect?.(), focus: onControls }] : []),
       ...(menu.contains(mode) ? [{ el: mode, activate: () => cb.onMode?.(), adjust: () => cb.onMode?.(), focus: onControls }] : []),
       ...(menu.contains(sea) ? [{ el: sea, adjust: (d: -1 | 1) => cb.onSea?.(d), focus: onControls }] : []),
+      ...(menu.contains(time) ? [{ el: time, adjust: (d: -1 | 1) => cb.onTime?.(d), focus: onControls }] : []),
       { el: gov, adjust: setGov, focus: () => this.showSide('assists') },
       { el: assists, activate: () => this.enter('assists'), adjust: () => cyclePreset(), focus: () => this.showSide('assists') },
       {
@@ -351,7 +361,7 @@ export class PauseScreen {
   }
 
   /** §T.201: the page's answer to a row it owns (graphics quality, real full-screen state, dev overlays) */
-  setState(patch: Partial<Pick<PauseState, 'graphics' | 'fullscreen' | 'devOverlays' | 'sea' | 'mode'>>): void {
+  setState(patch: Partial<Pick<PauseState, 'graphics' | 'fullscreen' | 'devOverlays' | 'sea' | 'time' | 'mode'>>): void {
     Object.assign(this.state, patch);
     this.sync();
   }

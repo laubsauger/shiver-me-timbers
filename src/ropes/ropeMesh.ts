@@ -30,14 +30,11 @@
  */
 import * as THREE from 'three/webgpu';
 import {
-  cameraProjectionMatrix,
-  cameraViewMatrix,
   cross,
   float,
   instanceIndex,
   int,
   max,
-  min,
   normalize,
   positionGeometry,
   select,
@@ -45,11 +42,10 @@ import {
   uint,
   uniform,
   vec3,
-  vec4,
-  viewport,
 } from 'three/tsl';
 import type { ShaderNodeObject } from 'three/tsl';
 import { Z_MIN } from './catenaryMath';
+import { minWidthWiden, projectedWidthPx } from '../core/minWidth';
 import { ropeParams } from '../params/ropes';
 import { pushParam, type RopeCompute } from './ropeCompute';
 
@@ -67,6 +63,10 @@ export interface RegimeUniforms {
   uNearWidthPx: TSLNode;
 }
 
+/** moved to src/core/minWidth.ts (§V95: one implementation, shared with the course furniture); re-exported for
+ *  blocks.ts */
+export { projectedWidthPx };
+
 /**
  * §V41 phone-wire response at a world-space point, for geometry of world
  * `radius`. Exported because RATLINES must get exactly this treatment and not
@@ -77,20 +77,6 @@ export interface RegimeUniforms {
  * Returns the widened radius to draw at, the alpha that pays that widening
  * back, and how far into the cheap unlit regime the geometry is.
  */
-export function projectedWidthPx(worldPos: TSLNode, radius: TSLNode): TSLNode {
-  // A view-space offset of `radius` along X pushed through the projection
-  // matrix gives the NDC half-width directly; dividing by the point's own clip
-  // w applies the perspective foreshortening, and NDC spans 2 across the
-  // viewport so the full width covers (ndcHalf · viewportWidth) pixels. No
-  // FOV, aspect or resolution appears explicitly — which is the point: the
-  // same code is correct in the half-res reflection pass (§V36 lesson).
-  // src/ropes/phoneWireAA.ts projectedWidthPx() is the tested CPU mirror.
-  const clip = cameraProjectionMatrix.mul(cameraViewMatrix.mul(vec4(worldPos, 1)));
-  const clipW = max(clip.w, float(Z_MIN));
-  const ndcHalf = cameraProjectionMatrix.mul(vec4(radius, 0, 0, 0)).x.abs();
-  return ndcHalf.div(clipW).mul(viewport.z);
-}
-
 export function phoneWireRegime(
   worldPos: TSLNode,
   radius: TSLNode,
@@ -98,8 +84,8 @@ export function phoneWireRegime(
 ) {
   const widthPx = projectedWidthPx(worldPos, radius);
 
-  const widen = max(float(1), u.uMinWidthPx.div(max(widthPx, float(Z_MIN))));
-  const aaAlpha = min(float(1), widthPx.div(max(u.uMinWidthPx, float(Z_MIN))));
+  // the shared minimum-width response (src/core/minWidth.ts, §V95) — the course's pylons and cables run the same one
+  const { widen, coverage: aaAlpha } = minWidthWiden(widthPx, u.uMinWidthPx);
   // reading: smoothstep(far, near, width) is 0 at the far edge and 1 at the
   // near edge — FUNCTIONAL 3-arg form, never the chained receiver-is-factor
   // one (§V23/§B1). Inverted because a THIN rope is a FAR rope.

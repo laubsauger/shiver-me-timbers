@@ -8,7 +8,20 @@ show 35–44% less middle-band foam pulsing. Contact foam, regional shoreline
 memory, ripple decorrelation, downwind birth noise and FFT optimizations remain.
 See the third-pass evidence below; earlier rollout decisions are historical.
 
-**Latest checkpoint (thirtieth pass):** whitecap coverage and detail reuse one
+**Latest checkpoint (thirty-third pass):** sky stays sharp through cinematic
+DOF. Night wisps remain, with one-third hashed density and stronger along-line
+breakup. See the night-lighting handoff and sky DOF GPU regression.
+
+**Previous checkpoint (thirty-second pass):** night stars use a smaller,
+subpixel-filtered disc; night wind streaks and LED hotspots are reduced.
+Submerged hull strips and red cockpit courtesy lights are implemented. See
+`water-review/night-lighting-handoff.md` for exact values, tests and GPU checks.
+
+**Previous checkpoint (thirty-first pass):** chine history retires expired packets
+in place. Live frame benchmarking is deferred under concurrent machine load;
+performance claims in this pass concern allocations and work bounds only.
+
+**Previous checkpoint (thirtieth pass):** whitecap coverage and detail reuse one
 filtered warp. The full foam mask passes near/middle/far GPU comparison; see
 pass 30 for numerical tolerance and validation limits.
 
@@ -1813,3 +1826,75 @@ with the filtering from pass 29 and then booted again with warp reuse enabled
 before/after comparison and is not used to claim a visible improvement.
 119 foam, texture and material-resource tests pass; production build passes
 (3.74 s). No commits performed.
+
+## 31. Remove per-update chine-history array allocation
+
+The machine is shared with other active projects and agents. The live race
+benchmark was stopped and its isolated browser/server closed. No FPS or
+wall-clock performance result from that run is accepted. Resume controlled
+frame profiling when system load permits it; deterministic behavior and work
+counts can be checked now without that timing assumption.
+
+`ChineContactHistory.update` previously filtered the entire packet list into
+a newly allocated array on every call, including empty/dry histories. Packet
+timestamps are ordered: new emissions append and coalescing updates only the
+newest packet toward a later timestamp. Expiry can therefore remove the old
+prefix in place with `copyWithin` and length truncation. Updates with no expired
+packet now check only the oldest packet. Remaining movement, volume and expiry
+laws are unchanged, and the existing fixed capacity remains enforced.
+
+This removes one packet-array allocation per update: 480 arrays per second
+if eight vessels are updated at 60 Hz. Other allocations remain, including the
+returned emitter object and newly emitted packets. This is not a zero-allocation
+claim or a measured frame-time saving.
+
+Regression coverage includes skipped worker ticks that expire the oldest packet
+while retaining the younger packet unchanged, full expiry, and a fresh impact
+after the list drains. The existing long-running capacity, turn, emission volume
+and detached-splash tests remain in place. Eleven chine tests and 25 additional
+wake-shape, simulation and prop-lifetime tests pass (36 total). TypeScript
+checking passes; `git diff --check` is clean. These correctness checks ran with
+one test worker; their elapsed durations are not performance measurements.
+No commits performed.
+
+## 32. Compact stars and local night lighting
+
+The detailed record is `water-review/night-lighting-handoff.md`. Star filtering
+uses a 1.2-pixel disc and four coverage samples instead of a two-pixel sampled
+disc. Submerged hull lines reuse the existing material. Red courtesy fixtures
+mount beneath the authored roll arch; one short-range hero spotlight is included
+only in the boat-material light set. No new lights on terrain or ocean, no
+shadow pass. Eight night-visible fixture draws are added for an eight-boat fleet.
+
+The compact stars and cockpit light each compiled and rendered in small isolated
+WebGPU scenes. Tests cover subpixel motion, actual GLB anchors, boat motion,
+day/night behavior and resource cleanup. Eleven cockpit/night tests and the
+preceding 87 sky/star checks pass. Final TypeScript checking passes after the
+concurrent trailer edits settled. No loaded-machine FPS claim and no commits.
+A matched gameplay-camera review remains necessary for final visual approval.
+
+## 33. Correct night sky after post-processing
+
+See `water-review/night-lighting-handoff.md`, final sky composite section.
+The actual DOF pass was blurring the reduced star discs. Sky depth-clear pixels
+now retain sharp color, while scene geometry keeps photographic defocus.
+Wind wisps are retained at one-third hashed night density and faint radiance,
+with stronger along-line gaps. No cloud removal. GPU DOF regression passes,
+72 focused tests pass, and TypeScript checking passes. The sky-only diagnostic
+is not a complete gameplay approval. No commits or frame-time claims.
+
+## 34. Couple wake detail to ocean shape
+
+Update: the subsequent W8 visual review removed the ambient-elevation carve
+after it produced holes at wave crests. The measurements below record the
+earlier experiment; they do not approve the current combined wake appearance.
+See `water-review/wake-wave-coupling.md` for the superseding decision.
+
+See `water-review/wake-wave-coupling.md`. Wake breakup now uses the existing
+wave elevation, and fresh froth lighting follows the combined water normal
+instead of the unrelated whitecap relief. No new bindings or simulation passes.
+Actual GPU mask comparison changes shape while average coverage shifts only
+0.024 percentage points. The 102 foam/readability tests, four binding-budget
+tests and TypeScript pass. A frozen sunset comparison did not identify DOF as
+the main cause of distant detail loss; camera and lens remain unchanged.
+Moving planing/impact review remains open alongside W8's source/spray work.

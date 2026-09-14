@@ -255,8 +255,9 @@ describe('§V105 the wake is anchored on the player SIM pose', () => {
     expect(frame).toMatch(/const boat = player\.state;/);
     const tb = method(frame, 'tickBoat');
     // §T.195: every boat's wake goes through vesselFx, anchored on the player's SIM pose (`state: boat`), this step's
-    // contact (`hw: player.hw`) and the rivals' collected FX records; the camera is only the spray pools' viewer
-    expect(tb).toMatch(/vesselFx\.tick\(app\.renderer, \{ hw: player\.hw, state: boat, bowAhead: hull\.stemZ \+ 120 \}, d\.npcs\.fleet, dt, app\.camera\.position\)/);
+    // contact (`hw: player.hw`) and the rivals' collected FX records (the trailer's scripted rivals' on a `?cine` page);
+    // the camera is only the spray pools' viewer
+    expect(tb).toMatch(/vesselFx\.tick\(app\.renderer, \{ hw: player\.hw, state: boat, bowAhead: hull\.stemZ \+ 120 \}, d\.rivals \? d\.rivals\.fx : d\.npcs\.fleet, dt, app\.camera\.position\)/);
     // the flowfoam region + wake track follow the same sim pose (core/seaFrame.trackWake → setCenter(ship.position))
     expect(tb).toMatch(/seaFrame\.trackWake\(boat, hull\.stemZ, hull\.transomZ, hull\.beam, dt\)/);
     expect(tb.replace('app.camera.position)', ')')).not.toMatch(/camera|view\b|alpha/);

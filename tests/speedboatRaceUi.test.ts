@@ -25,6 +25,7 @@ import { PRIORITY, RADIO_HOLD_S, RaceRadio } from '../src/speedboat/page/raceRad
 import {
   RACE_SETTINGS_KEY,
   SEA_PRESET,
+  seaApplyArgs,
   applyUiAssists,
   defaultRaceSettings,
   loadRaceSettings,
@@ -222,8 +223,8 @@ describe('settings persistence', () => {
     expect(got.lastSelection?.sea).toBe('Working sea');
   });
 
-  it('every boat-select sea option names a real weather preset', () => {
-    for (const opt of SEA_OPTIONS) expect(weatherPresets, opt).toHaveProperty(SEA_PRESET[opt]);
+  it('every boat-select sea option names a real weather preset (a speedboat sea through its sky rung)', () => {
+    for (const opt of SEA_OPTIONS) expect(weatherPresets, opt).toHaveProperty(seaApplyArgs(SEA_PRESET[opt])[0]);
   });
 });
 

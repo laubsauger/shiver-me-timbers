@@ -13,6 +13,7 @@
  * (assists/settings.ts) and is kept from the controls. Mismatch reported: the UI's Pro preset keeps auto reset ON
  * (design doc §3 "auto reset stays on in both") while `assists` ASSIST_PRESETS.pro has autoReset false.
  */
+import { SPEEDBOAT_SEAS, type SpeedboatSeaPreset } from '../../params/speedboatSea';
 import type { Volumes } from '../../audio/engine';
 import { radioBusLevel } from '../../audio/boat/radioBus';
 import type { AssistSettings as ControlAssists, GovernorMode as ControlGovernor } from '../assists/settings';
@@ -158,5 +159,15 @@ export function radioLevel(a: Readonly<AudioSettings>): number {
   return radioBusLevel(a.master, a.radio);
 }
 
-/** boat-select sea option → weather preset name (weather/presets.ts) */
-export const SEA_PRESET: Readonly<Record<string, string>> = Object.freeze({ Calm: 'calm', Breeze: 'breeze', 'Working sea': 'swell', Squall: 'squall' });
+/**
+ * boat-select sea option → the sea the page applies: one of the speedboat's own seas (params/speedboatSea.ts, a weather
+ * rung's sky under a long swell on the course's bearing) or, for Squall, the weather rung as it is (weather/presets.ts)
+ */
+export const SEA_PRESET: Readonly<Record<string, string>> = Object.freeze({ Calm: 'calm', 'Working sea': 'working', 'Open swell': 'open', Squall: 'squall' });
+
+/** `weather.apply` arguments for a speedboat sea or weather rung name (a speedboat sea wins a shared name: `calm`) */
+export function seaApplyArgs(name: string, lerpSeconds?: number): [string, { lerpSeconds?: number; ocean?: SpeedboatSeaPreset['ocean'] }] {
+  const sea = (SPEEDBOAT_SEAS as Readonly<Record<string, Readonly<SpeedboatSeaPreset>>>)[name];
+  const opts = lerpSeconds === undefined ? {} : { lerpSeconds };
+  return sea ? [sea.weather, { ...opts, ocean: sea.ocean }] : [name, opts];
+}

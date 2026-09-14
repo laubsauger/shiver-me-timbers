@@ -54,7 +54,8 @@ import {
 import { waterLighting } from '../../caustics';
 import type { TslNode } from '../../caustics/causticsNode';
 import type { SlotName } from './contract';
-import { HERO_LIVERY, numberGlyphs, resolveLivery } from './livery';
+import { HERO_LIVERY, ledColor, numberGlyphs, resolveLivery } from './livery';
+import { boatLightParams } from '../../params/boatLights';
 
 export type BoatVariant = 'hero' | 'npc';
 
@@ -91,6 +92,54 @@ export interface DeckEdge {
 export const DECK_BAND_M = 0.17;
 export const DECK_STRIPE_M = 0.05;
 const DECK_WHITE = 0xe9e5da;
+
+/**
+ * §T.209 BOAT LEDs (USER: "cool LED lighting … in the respective player color"). Two emissive strips per boat, in the
+ * livery's `ledColor` (livery.ts): an UNDERGLOW strip on each topside just above the boot line (the antifoul field of
+ * the hull mask, metric: B = 0.5 + signed distance / HULL_BOOT_SCALE, hull_textures.py), and a deck COURTESY strip on
+ * the seam between the white deck band and the non-skid. ONE scene-wide level (`setBoatLedLevel`; page/boatLights.ts
+ * drives it from `sky.nightFactor` or a cine override): at 0 both strips add exactly 0. No texture, no sampler (§V40).
+ */
+const HULL_BOOT_SCALE = 0.16;
+const ledLevel = uniform(0);
+const ledHullNits = uniform(boatLightParams.stripNits);
+const ledDeckNits = uniform(boatLightParams.deckStripNits);
+const ledSubmergedNits = uniform(boatLightParams.submergedStripNits);
+const ledHullWidth = uniform(boatLightParams.hullStripWidth);
+const ledDeckWidth = uniform(boatLightParams.deckStripWidth);
+export function setBoatLedLevel(level: number, p = boatLightParams): void {
+  ledLevel.value = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
+  ledHullNits.value = p.stripNits;
+  ledDeckNits.value = p.deckStripNits;
+  ledSubmergedNits.value = p.submergedStripNits;
+  ledHullWidth.value = p.hullStripWidth;
+  ledDeckWidth.value = p.deckStripWidth;
+}
+/**
+ * §T.209 NIGHT FILL. Under a half moon the key is ~4% of noon and the hemisphere ambient is a dark navy, so the hulls
+ * rendered as pure black silhouettes (nothing zeroes them: that is the physically-lit level). A small moonlight term
+ * keeps the hull SHAPE readable: a Fresnel rim biased toward the key (moon) direction plus a little sky fill on the
+ * albedo, both in the moon's hue × `sky.nightFactor` × `boatLightParams.nightRim / nightFill`. Exactly 0 by day.
+ */
+const nightFill = uniform(new THREE.Color(0, 0, 0));
+const nightRim = uniform(new THREE.Color(0, 0, 0));
+const nightKeyDir = uniform(new THREE.Vector3(0, 1, 0));
+export function setBoatNightFill(moonLinear: THREE.Color, nightFactor: number, keyDir: THREE.Vector3, p = boatLightParams): void {
+  const n = Number.isFinite(nightFactor) ? Math.min(1, Math.max(0, nightFactor)) : 0;
+  (nightFill.value as THREE.Color).copy(moonLinear).multiplyScalar(n * p.nightFill);
+  (nightRim.value as THREE.Color).copy(moonLinear).multiplyScalar(n * p.nightRim);
+  (nightKeyDir.value as THREE.Vector3).copy(keyDir).normalize();
+}
+export function boatLedLevel(): number {
+  return ledLevel.value as number;
+}
+/** 1 inside a strip of full width `width` centred on `d = centre` (anti-aliased with the footprint of d) */
+const ledStrip = (d: TslNode, centre: TslNode, width: TslNode): TslNode => {
+  const aw = fwidth(d).max(1e-4);
+  const half = width.mul(0.5);
+  // @band-limited-elsewhere: `aw` IS fwidth(d) one line up — the strip edge is filtered on its own footprint
+  return smoothstep(half.sub(aw), half.add(aw), d.sub(centre).abs()).oneMinus();
+};
 
 type SourceMaterial = THREE.MeshStandardMaterial & Partial<THREE.MeshPhysicalMaterial>;
 
@@ -137,7 +186,7 @@ const aaStep = (v: TslNode): TslNode => {
  * overlays (chips, filler, salt, plates…) from baseColor alpha, the race number from the glyph strip in the
  * mask, all hues per object. Mirrors `preview_albedo` in hull_textures.py, which the CPU renders use.
  */
-function hullLiveryAlbedo(maskMap: THREE.Texture, map: TslNode, baseFactor: TslNode, ex: HullLiveryExtras): { albedo: TslNode; boot: TslNode; overlay: TslNode } {
+function hullLiveryAlbedo(maskMap: THREE.Texture, map: TslNode, baseFactor: TslNode, ex: HullLiveryExtras): { albedo: TslNode; boot: TslNode; overlay: TslNode; bootField: TslNode; led: TslNode } {
   const hue = (hex: number) => uniform(new THREE.Color(hex)).setGroup(objectGroup);
   const topsides = hue(HERO_LIVERY.topsides);
   const band = hue(HERO_LIVERY.band);
@@ -147,8 +196,10 @@ function hullLiveryAlbedo(maskMap: THREE.Texture, map: TslNode, baseFactor: TslN
   const digitA = uniform(2).setGroup(objectGroup);
   const digitB = uniform(7).setGroup(objectGroup);
   const digitCount = uniform(2).setGroup(objectGroup);
+  const led = hue(ledColor(HERO_LIVERY));
   topsides.onObjectUpdate((frame) => {
     const l = resolveLivery(liveryOwner(frame.object));
+    (led.value as THREE.Color).set(ledColor(l));
     (topsides.value as THREE.Color).set(l.topsides);
     (band.value as THREE.Color).set(l.band);
     (stripe.value as THREE.Color).set(l.stripe);
@@ -215,7 +266,7 @@ function hullLiveryAlbedo(maskMap: THREE.Texture, map: TslNode, baseFactor: TslN
   const wear = smoothstep(ex.numeralWear[0], ex.numeralWear[1], m.a).oneMinus();
   const paintNum = glyph.mul(inField).mul(wear).mul(boot.oneMinus()).mul(0.97);
   albedo = mix(albedo, numeral, paintNum);
-  return { albedo, boot, overlay };
+  return { albedo, boot, overlay, bootField: m.b, led };
 }
 
 /**
@@ -316,12 +367,31 @@ export function createSlotMaterial(slot: SlotName, source: THREE.Material, opts:
     : null;
 
   let deckPaint: TslNode | null = null;
+  let ledEmissive: TslNode | null = null;
+  if (heroHull) {
+    // metres below the boot line (+) / above it (−); the strip sits just above it, on the sides only
+    const sd = heroHull.bootField.sub(0.5).mul(HULL_BOOT_SCALE);
+    // @band-limited-elsewhere: a broad ramp over the hull's NORMAL (transom vs sides), not a spatial edge
+    const sides = smoothstep(0.2, 0.45, normalLocal.x.abs());
+    const strip = ledStrip(sd, ledHullWidth.mul(-0.5).sub(0.008), ledHullWidth).mul(sides);
+    // A second continuous line on the actual hull, 45 mm below its boot line.
+    // Stay inside the mask's ±80 mm signed-distance range; the saturated
+    // antifoul field must not turn the whole bottom into an emissive surface.
+    // Actual immersion follows hull motion and the existing water depth pass.
+    const submerged = ledStrip(sd, float(0.045), float(0.02)).mul(sides);
+    ledEmissive = heroHull.led.mul(
+      strip.mul(ledHullNits).add(submerged.mul(ledSubmergedNits)).mul(ledLevel),
+    );
+  }
   let roughOut: TslNode = rough;
   if (slot === 'M_NonSlip' && opts.deckEdge && opts.deckEdge.half.length >= 2) {
     const de = opts.deckEdge;
     const hue = uniform(new THREE.Color(HERO_LIVERY.dominant)).setGroup(objectGroup);
+    const led = uniform(new THREE.Color(ledColor(HERO_LIVERY))).setGroup(objectGroup);
     hue.onObjectUpdate((frame) => {
-      (hue.value as THREE.Color).set(resolveLivery(liveryOwner(frame.object)).dominant);
+      const l = resolveLivery(liveryOwner(frame.object));
+      (hue.value as THREE.Color).set(l.dominant);
+      (led.value as THREE.Color).set(ledColor(l));
     });
     const halfArr = uniformArray(de.half, 'float');
     const p = positionLocal;
@@ -337,13 +407,24 @@ export function createSlotMaterial(slot: SlotName, source: THREE.Material, opts:
     const shade = orm ? mix(float(0.78), float(1), orm.r) : float(1);
     albedo = mix(mix(albedo, uniform(new THREE.Color(DECK_WHITE)).mul(shade), white), hue.mul(shade), band);
     deckPaint = band.add(white).clamp(0, 1);
+    // §T.209 courtesy strip on the white band / non-skid seam
+    ledEmissive = led.mul(ledStrip(d, float(DECK_BAND_M + DECK_STRIPE_M), ledDeckWidth).mul(onTop).mul(ledLevel).mul(ledDeckNits));
     roughOut = mix(rough, float(0.38), deckPaint);
   }
 
   m.colorNode = w ? albedo.mul(w.tint) : albedo;
+  if (slot !== 'M_Perspex') {
+    // §T.209 night fill (see setBoatNightFill): rim toward the moon + a little sky on the albedo
+    const facing = normalView.dot(positionViewDirection).abs().clamp(0, 1);
+    const toward = normalWorldGeometry.dot(nightKeyDir).mul(0.5).add(0.5);
+    const rim = facing.oneMinus().pow(3).mul(toward.mul(0.7).add(0.3));
+    const fill = nightRim.mul(rim).add(nightFill.mul(albedo));
+    ledEmissive = ledEmissive ? ledEmissive.add(fill) : fill;
+  }
   m.roughnessNode = (w ? roughOut.mul(w.roughnessScale) : roughOut).clamp(0.02, 1);
   m.metalnessNode = metal;
-  if (w) m.emissiveNode = w.addLight;
+  if (w) m.emissiveNode = ledEmissive ? w.addLight.add(ledEmissive) : w.addLight;
+  else if (ledEmissive) m.emissiveNode = ledEmissive;
   if (s.normalMap) {
     const scale = vec2(s.normalScale?.x ?? 1, s.normalScale?.y ?? 1);
     const ns = extras.nonSkid;

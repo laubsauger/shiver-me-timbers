@@ -24,6 +24,8 @@ import { buildOceanGrid, snapToGrid, type SurfaceGridOptions } from './surfaceGe
 import { oceanSurfaceParams as sp } from '../params/oceanSurface';
 import { skyParams } from '../params/sky';
 import { keyRadianceScale } from '../sky/lighting';
+import { keyDirectionWeight } from '../sky/moonCycle';
+import { sunElevation } from '../sky/sunCycle';
 import type { SeabedField } from '../island/seabed';
 import type { FetchField } from './fetchField';
 import type { PlanarReflection } from '../reflection';
@@ -189,11 +191,13 @@ export class OceanSurface {
     if (sunDirection) this.surface.sunDirectionUniform.value.copy(sunDirection);
     // §V92 the sun's width, live from the sky params (§V62: every frame, not
     // captured at construction). The material never reads the sky params.
-    const src = sunSourceVector(
-      skyParams.sunDiscSize,
-      skyParams.sunGlareRadiusDeg,
-      skyParams.bodyHorizonMargin,
-    );
+    // §T.209: once the MOON owns the key the source is the moon's road radius (`moonRoadRadiusDeg`, default = the
+    // sun's disc + glare, so day and any night that never set it are unchanged); blended on the key-direction weight.
+    const moonW = keyDirectionWeight(sunElevation(skyParams.timeOfDay, skyParams.latitude));
+    const sunSrc = skyParams.sunDiscSize + skyParams.sunGlareRadiusDeg;
+    const srcRadius = sunSrc + (skyParams.moonRoadRadiusDeg - sunSrc) * moonW;
+    const disc = skyParams.sunDiscSize + (Math.min(skyParams.sunDiscSize, skyParams.moonRoadRadiusDeg) - skyParams.sunDiscSize) * moonW;
+    const src = sunSourceVector(disc, Math.max(0, srcRadius - disc), skyParams.bodyHorizonMargin);
     this.surface.sunSourceUniform.value.set(src[0], src[1], src[2], src[3]);
     // Live key RADIANCE — colour x level, not colour alone (§V.72).
     //

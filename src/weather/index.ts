@@ -32,7 +32,7 @@
  */
 import { oceanParams } from '../params/ocean';
 import { weatherParams } from '../params/weather';
-import { applyWeatherPreset, type WeatherTransition } from './applyPreset';
+import { applyWeatherPreset, type ApplyPresetOpts, type WeatherTransition } from './applyPreset';
 import {
   advanceDrift,
   stormAt,
@@ -56,7 +56,7 @@ export interface WeatherSystemOpts {
 
 export interface WeatherSystem {
   /** switch preset; throws on unknown name. Replaces any running transition. */
-  apply(name: string, opts?: { lerpSeconds?: number }): void;
+  apply(name: string, opts?: { lerpSeconds?: number; ocean?: ApplyPresetOpts['ocean'] }): void;
   /** advance the preset transition AND the storm-cell drift by dt (sim tick) */
   update(dt: number): void;
   /**

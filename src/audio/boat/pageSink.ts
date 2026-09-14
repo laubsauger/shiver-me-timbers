@@ -14,7 +14,7 @@ import type { HasWorldMatrix } from '../emitters';
 import { attachAudioSettings, type SettingsSource } from '../settingsBridge';
 import { rotateVec } from '../../core/quat';
 import type { Quat, Vec3 } from '../../state/simState';
-import { createBoatAudio, type BoatAudio } from './boatAudio';
+import { createBoatAudio, type BoatAudio, type BoatStemTaps } from './boatAudio';
 import { createRadioBus, type RadioBus } from './radioBus';
 import type { BoatFrameTelemetry } from './mixMath';
 import { boatAudioParams, type BoatAudioParams } from './params';
@@ -117,6 +117,11 @@ export function createSpeedboatAudioSink(o: SpeedboatAudioSinkOptions): {
   readonly engine: AudioEngine;
   /** §T.197 race radio bus (radioBus.ts): `setLevel(radioBusLevel(master, radio))`, `call()` per new radio line */
   readonly radio: RadioBus;
+  /**
+   * cine stems: split SFX stems for the cine audio pass (src/speedboat/cine/host.ts `audio.stemTaps`): tap nodes, connect
+   * only (§V95: the same graph, no second audio path). null until the boat audio graph exists (audio unlocked).
+   */
+  stemTaps(): BoatStemTaps | null;
 } {
   const p = o.params ?? boatAudioParams;
   const engine = o.engine ?? createEngine();
@@ -129,6 +134,7 @@ export function createSpeedboatAudioSink(o: SpeedboatAudioSinkOptions): {
     boatAudio,
     engine,
     radio,
+    stemTaps: () => boatAudio.stemTaps(),
     unlock() {
       void engine.resume();
     },

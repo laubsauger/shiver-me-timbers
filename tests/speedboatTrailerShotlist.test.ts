@@ -8,7 +8,8 @@
 import { describe, expect, it } from 'vitest';
 import { shotDuration, shotHead, shotTail } from '../src/cine/types';
 import { LOCATIONS } from '../src/speedboat/cine/locations';
-import { CAMERA_PRIMITIVES, TRAILER_BEATS, TRAILER_SECONDS, TRAILER_SHOTS, TRAILER_SLOTS } from '../src/speedboat/cine/shotlist';
+import { CAMERA_PRIMITIVES, TRAILER_BEATS, TRAILER_SECONDS, TRAILER_SHOTS, TRAILER_SLOTS, cameraShot, coverageFor, trailerTakes } from '../src/speedboat/cine/shotlist';
+import { TIME_LOOK } from '../src/speedboat/cine/look';
 import { trailerEditPlan } from '../src/speedboat/cine/editPlan';
 import { CINE_CHROME_CLASS, CINE_CHROME_CSS, CINE_KEEP_ATTR, createCineChrome, type ChromeElement } from '../src/speedboat/cine/cineChrome';
 import { applyDevLayer, devLayerVisible } from '../src/ui/devLayer';
@@ -17,7 +18,7 @@ import recorderSrc from '../src/cine/recorder.ts?raw';
 import hostSrc from '../src/speedboat/cine/host.ts?raw';
 import mainSpeedboat from '../src/main-speedboat.ts?raw';
 
-describe('speedboat trailer v1 shot list', () => {
+describe('speedboat trailer v2 shot list', () => {
   it('17 script beats tile the 60 s timeline with no gap and no overlap', () => {
     expect(TRAILER_BEATS.map((b) => b.beat)).toEqual(Array.from({ length: 17 }, (_, i) => String(i + 1).padStart(2, '0')));
     expect(TRAILER_BEATS[0]?.in).toBe(0);
@@ -57,11 +58,80 @@ describe('speedboat trailer v1 shot list', () => {
       expect(p).toMatchObject({ handleS: s.handle, recordInS: s.in, recordOutS: s.out });
       // one name for master, proxy and stem, so the importer can pair them
       const base = p?.video.replace(/^video\/|\.mov$/g, '');
-      expect(base).toBe(`sb-trailer-v1_${s.id}_${s.slug}_take03`);
+      expect(base).toBe(`sb-trailer-v2_${s.id}_${s.slug}${s.variant !== undefined ? `_${s.variant}` : ''}_take03`);
       expect(p?.proxy).toBe(`proxy/${base}.mov`);
       expect(p?.sfx).toBe(`sfx/${base}.wav`);
+      // the split stems sit beside the mix under the same name, so the importer can stack them under A1
+      expect(p?.sfxStems).toEqual({ engine: `sfx/${base}_engine.wav`, water: `sfx/${base}_water.wav`, amb: `sfx/${base}_amb.wav` });
     }
     expect(plan.markers.some((m) => m.atS === 15 && /drop/.test(m.name))).toBe(true);
+  });
+
+  it('a time-of-day variant is the SAME take under another sky, stacked as alternates with one sound stem', () => {
+    // the edit strobes between variants on a beat, so anything that moves the boat or the lens must be identical and
+    // only the look may differ; the importer stacks alternates at the primary's record range, the audio is shared
+    const ten = TRAILER_SHOTS.find((s) => s.id === '10');
+    expect(ten?.variants).toEqual(expect.arrayContaining(['sunset', 'dusk', 'night']));
+    const takes = trailerTakes(TRAILER_SHOTS.filter((s) => s.id === '10'));
+    expect(takes.map((t) => t.variant)).toEqual(['dusk', 'sunset', 'night']);
+    for (const t of takes) {
+      expect(t.drive).toEqual(ten?.drive);
+      expect(t.keys).toBe(ten?.keys);
+      expect([t.frame, t.in, t.out, t.handle, t.preroll, t.world?.weather]).toEqual([ten?.frame, ten?.in, ten?.out, ten?.handle, ten?.preroll, ten?.world?.weather]);
+      expect(t.world?.sky?.exposure).toBe(TIME_LOOK[t.variant ?? 'dusk'].sky?.exposure);
+    }
+    // a bay shot's 3.5° sunset sun must not survive into its night variant (an elevation outranks the night clock)
+    const bayNight = trailerTakes(TRAILER_SHOTS.filter((s) => s.id === '05'), ['night'])[1];
+    expect(bayNight?.world?.sunElevationDeg).toBeUndefined();
+    expect(bayNight?.world?.timeOfDay).toBe(TIME_LOOK.night.timeOfDay);
+    // a shot without variants is one take, no suffix
+    expect(trailerTakes(TRAILER_SHOTS.filter((s) => s.id === '09')).map((t) => t.variant)).toEqual([undefined]);
+
+    const plan = trailerEditPlan({ fps: 60, width: 3840, height: 2160 }, 1);
+    const p10 = plan.shots.find((p) => p.id === '10');
+    expect(p10?.video).toBe('video/sb-trailer-v2_10_bow-lookback_dusk_take01.mov');
+    expect(p10?.alternates?.map((a) => a.variant)).toEqual(['sunset', 'night']);
+    expect(p10?.alternates?.[1]?.video).toBe('video/sb-trailer-v2_10_bow-lookback_night_take01.mov');
+    expect(plan.shots.find((p) => p.id === '09')?.alternates).toBeUndefined();
+    // the whole-trailer flag: every shot gets alternates, the stem keeps the name the audio pass writes
+    const all = trailerEditPlan({ fps: 60, width: 3840, height: 2160 }, 1, TRAILER_SHOTS, ['sunset', 'night']);
+    const p09 = all.shots.find((p) => p.id === '09');
+    expect(p09?.video).toBe('video/sb-trailer-v2_09_rocky-point-pass_sunset_take01.mov');
+    expect(p09?.alternates?.map((a) => a.variant)).toEqual(['night']);
+    expect(p09?.sfx).toBe('sfx/sb-trailer-v2_09_rocky-point-pass_take01.wav');
+    // one sound per shot across every time of day: the stems too
+    expect(p09?.sfxStems?.engine).toBe('sfx/sb-trailer-v2_09_rocky-point-pass_take01_engine.wav');
+    expect(p10?.sfxStems?.water).toBe('sfx/sb-trailer-v2_10_bow-lookback_dusk_take01_water.wav');
+  });
+
+  it('coverage: every lens of a run is the same run, named per camera, and lines up on the setup clock', () => {
+    // multicam only works if a coverage camera changes nothing but the lens: same drive, rivals, sea, time and length,
+    // one sound stem for the setup, and a clip that starts at the same setup time as the main lens
+    const seven = TRAILER_SHOTS.find((s) => s.id === '07');
+    const cams = coverageFor(seven ?? {}, 'C');
+    expect(cams.length).toBeGreaterThan(0);
+    expect(new Set(cams.map((c) => c.cam)).size).toBe(cams.length);
+    for (const c of cams) {
+      const cs = cameraShot(seven as NonNullable<typeof seven>, c);
+      expect(cs.drive).toBe(seven?.drive);
+      expect([cs.in, cs.out, cs.handle, cs.preroll, cs.timeOfDay, cs.world?.weather]).toEqual([seven?.in, seven?.out, seven?.handle, seven?.preroll, seven?.timeOfDay, seven?.world?.weather]);
+      expect(cs.keys).toBe(c.keys);
+      expect(cs.throttleHand).toBe(false);
+    }
+    expect(coverageFor(seven ?? {}, 'A').every((c) => c.tier === 'A')).toBe(true);
+    const plan = trailerEditPlan({ fps: 30, width: 1920, height: 1080 }, 1);
+    const cov = plan.coverage?.filter((c) => c.setup === '07') ?? [];
+    expect(cov.filter((c) => c.onAssembly).map((c) => c.camera)).toEqual(['main']);
+    expect(cov.find((c) => c.camera === 'windshield-back')?.video).toBe('video/sb-trailer-v2_07_rear-chase-launch_cam-windshield-back_take01.mov');
+    expect(new Set(cov.map((c) => c.sfx)).size).toBe(1);
+    expect(new Set(cov.map((c) => `${c.sourceStartS}/${c.durationS}`)).size).toBe(1);
+    // 06c (R5): the sunset and night takes of one run, both carrying the push-start cut in source seconds
+    const r5 = plan.coverage?.filter((c) => c.setup === 'R5') ?? [];
+    expect(r5.map((c) => c.timeOfDay)).toEqual(['sunset', 'night']);
+    expect(r5.every((c) => c.cutS === 2 && c.sourceStartS === -2)).toBe(true);
+    // a variant run covers cameras × times
+    const ten = plan.coverage?.filter((c) => c.setup === '10') ?? [];
+    expect(ten.length).toBe((1 + coverageFor(TRAILER_SHOTS.find((s) => s.id === '10') ?? {}).length) * 3);
   });
 
   it('cine hides every overlay but the canvas, turns the dev layer off, and gives both back', () => {

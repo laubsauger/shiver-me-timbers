@@ -94,7 +94,7 @@ for (const shot of manifest.shots) {
     );
   }
   // the audio pass drops a sibling next to the clip (src/cine/audio.ts)
-  const sound = ['webm', 'ogg', 'm4a']
+  const sound = ['wav', 'webm', 'ogg', 'm4a']
     .map((e) => join(SEG, `${shot.clip ?? shot.id}.${e}`))
     .find((f) => existsSync(f));
   rendered.push({ ...shot, file: seg, sound, actualFrames: frames });
