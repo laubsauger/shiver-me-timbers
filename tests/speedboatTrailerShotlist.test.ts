@@ -73,7 +73,7 @@ describe('speedboat trailer v2 shot list', () => {
     const ten = TRAILER_SHOTS.find((s) => s.id === '10');
     expect(ten?.variants).toEqual(expect.arrayContaining(['sunset', 'dusk', 'night']));
     const takes = trailerTakes(TRAILER_SHOTS.filter((s) => s.id === '10'));
-    expect(takes.map((t) => t.variant)).toEqual(['dusk', 'sunset', 'night']);
+    expect(takes.map((t) => t.variant)).toEqual(['dusk', 'sunset', 'night', 'noon', 'golden']);
     for (const t of takes) {
       expect(t.drive).toEqual(ten?.drive);
       expect(t.keys).toBe(ten?.keys);
@@ -90,7 +90,7 @@ describe('speedboat trailer v2 shot list', () => {
     const plan = trailerEditPlan({ fps: 60, width: 3840, height: 2160 }, 1);
     const p10 = plan.shots.find((p) => p.id === '10');
     expect(p10?.video).toBe('video/sb-trailer-v2_10_bow-lookback_dusk_take01.mov');
-    expect(p10?.alternates?.map((a) => a.variant)).toEqual(['sunset', 'night']);
+    expect(p10?.alternates?.map((a) => a.variant)).toEqual(['sunset', 'night', 'noon', 'golden']);
     expect(p10?.alternates?.[1]?.video).toBe('video/sb-trailer-v2_10_bow-lookback_night_take01.mov');
     expect(plan.shots.find((p) => p.id === '09')?.alternates).toBeUndefined();
     // the whole-trailer flag: every shot gets alternates, the stem keeps the name the audio pass writes
@@ -131,7 +131,7 @@ describe('speedboat trailer v2 shot list', () => {
     expect(r5.every((c) => c.cutS === 2 && c.sourceStartS === -2)).toBe(true);
     // a variant run covers cameras × times
     const ten = plan.coverage?.filter((c) => c.setup === '10') ?? [];
-    expect(ten.length).toBe((1 + coverageFor(TRAILER_SHOTS.find((s) => s.id === '10') ?? {}).length) * 3);
+    expect(ten.length).toBe((1 + coverageFor(TRAILER_SHOTS.find((s) => s.id === '10') ?? {}).length) * 5);
   });
 
   it('cine hides every overlay but the canvas, turns the dev layer off, and gives both back', () => {

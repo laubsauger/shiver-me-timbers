@@ -29,9 +29,10 @@
 import type { WorldPatch } from '../../cine/types';
 import { CINE_SUNSET } from '../../grade';
 import { MOONLIT_NIGHT } from '../../sky/nightPreset';
+import { raceTimeHour } from '../page/raceTime';
 
-export type TrailerTime = 'sunset' | 'dusk' | 'night';
-export const TRAILER_TIMES: readonly TrailerTime[] = ['sunset', 'dusk', 'night'];
+export type TrailerTime = 'sunset' | 'dusk' | 'night' | 'noon' | 'golden';
+export const TRAILER_TIMES: readonly TrailerTime[] = ['sunset', 'dusk', 'night', 'noon', 'golden'];
 
 type SkyPatch = NonNullable<WorldPatch['sky']>;
 type GradePatch = NonNullable<WorldPatch['grade']>;
@@ -111,10 +112,21 @@ const NIGHT_SKY: SkyPatch = {
   moonPhase: MOONLIT_NIGHT.moonPhase,
 };
 
+/**
+ * DAY LOOKS for the edit's time-lapse (10's `noon` / `golden` variants): the race Time option's own clocks (page/raceTime.ts
+ * labels '12:00' / '17:30'), the engine's shipped day palette, no hand-tuned sky. Untuned first pass: judged on the look
+ * pass, not by numbers.
+ */
+const DAY_SKY: SkyPatch = { ...SKY_DEFAULTS };
+
 /** the grade mode's own values, with the blue gain eased off: at 0.88 the sky, the sea and the hull were one orange */
 const SUNSET_GRADE: GradePatch = { ...CINE_SUNSET.grade, gainB: 0.92, saturation: 1.0 };
 /** half-way back to neutral: the warm gain would turn the blue hour brown */
 const DUSK_GRADE: GradePatch = { ...SUNSET_GRADE, gainR: 1.0, gainG: 0.99, gainB: 0.96, highlightTintR: 0.58, highlightTintG: 0.52, highlightTintB: 0.44, splitStrength: 0.12 };
+/** noon: the grade node stays on (a construction gate) but neutral — no warm gain on a blue midday sea */
+const NOON_GRADE: GradePatch = { ...SUNSET_GRADE, liftR: 0, liftG: 0, liftB: 0, gammaR: 1, gammaG: 1, gammaB: 1, gainR: 1, gainG: 1, gainB: 1, saturation: 1.0, splitStrength: 0, highlightTintR: 0.5, highlightTintG: 0.5, highlightTintB: 0.5, shadowTintR: 0.5, shadowTintG: 0.5, shadowTintB: 0.5 };
+/** golden hour: dusk's half-way warmth over the shipped day sky */
+const GOLDEN_GRADE: GradePatch = { ...DUSK_GRADE };
 /** deep blacks, a cool shadow, NEUTRAL highlights so the LED colours and lamps stay their own */
 const NIGHT_GRADE: GradePatch = {
   ...SUNSET_GRADE,
@@ -177,6 +189,9 @@ export const TIME_LOOK: Readonly<Record<TrailerTime, WorldPatch>> = {
   dusk: { sunElevationDeg: -4, sunSide: 'evening', sky: DUSK_SKY, grade: DUSK_GRADE, post: NIGHT_POST, oceanSurface: NIGHT_SURFACE, clouds: DUSK_CLOUDS },
   // timeOfDay, not an elevation: T209's preset is a clock + a moon phase, and the moon's place depends on both
   night: { timeOfDay: MOONLIT_NIGHT.timeOfDay, sky: NIGHT_SKY, grade: NIGHT_GRADE, post: NIGHT_POST, oceanSurface: NIGHT_SURFACE, clouds: NIGHT_CLOUDS },
+  // the race Time labels' clocks; the sun's own place, the shipped sea glint, the day cloud count
+  noon: { timeOfDay: raceTimeHour('12:00') ?? 12, sky: DAY_SKY, grade: NOON_GRADE, post: SUNSET_POST, oceanSurface: NIGHT_SURFACE, clouds: SUNSET_CLOUDS },
+  golden: { timeOfDay: raceTimeHour('17:30') ?? 17.5, sky: DAY_SKY, grade: GOLDEN_GRADE, post: SUNSET_POST, oceanSurface: SUNSET_SURFACE, clouds: SUNSET_CLOUDS },
 };
 
 /**
@@ -184,5 +199,5 @@ export const TIME_LOOK: Readonly<Record<TrailerTime, WorldPatch>> = {
  * pinned 0 keeps a sunset VARIANT of a night shot from lighting up. Dusk: 0.4, "the strips just on" (T209: the sky's
  * night factor only starts under +1.7° and a variant must not depend on it). Night: full.
  */
-export const TIME_LED: Readonly<Record<TrailerTime, number>> = { sunset: 0, dusk: 0.4, night: 1 };
+export const TIME_LED: Readonly<Record<TrailerTime, number>> = { sunset: 0, dusk: 0.4, night: 1, noon: 0, golden: 0 };
 

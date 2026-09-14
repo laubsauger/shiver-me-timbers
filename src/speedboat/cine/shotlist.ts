@@ -331,7 +331,8 @@ const SHOTS: readonly TrailerShot[] = [
   {
     ...base, id: '10', beat: '10', timeOfDay: 'dusk', slug: 'bow-lookback', in: 26, out: 30, location: 'openSwell', primitive: 'mount',
     // the dusk time cut at three times of day (straight cuts / dissolves only, no flicker — the day→night switch is R5 06c)
-    variants: ['sunset', 'dusk', 'night'], handle: HANDLE + 1.5,
+    // + noon / golden (USER: the edit's time-lapse segment): the same take at the race Time option's 12:00 and 17:30
+    variants: ['sunset', 'dusk', 'night', 'noon', 'golden'], handle: HANDLE + 1.5,
     // 26 m/s from s 420, weave 0.04: at 32 m/s from s 600 with a 0.1 weave she hooked (heel 50°) at t 2.1 with idle
     // engines and at t 0.0 with warm ones (headless crash machine); every s 420-660 placement at 26 m/s with a 0.06 weave
     // still hooked in 1-6 of 14 runs, this one in 1 (+80 m, warm). `calm` would be 14/14 clean at 31-34 m/s if it has to be.

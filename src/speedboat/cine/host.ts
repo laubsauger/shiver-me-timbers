@@ -261,6 +261,23 @@ export function createSpeedboatCine(d: SpeedboatCineDeps) {
     }
   };
 
+  /**
+   * SILENT RENDERS (USER: the engine played out of the machine's speakers for hours of rendering). A record or an audio pass
+   * (the only callers of setRenderSize; `play` previews stay audible) takes the MASTER gain to 0 and puts it back after.
+   * Every capture tap sits before the master (the mix on the sfx/ambience buses, the stems on the boat panners, audio.ts),
+   * so the stems are unchanged.
+   */
+  let masterBefore: number | null = null;
+  const renderMute = (on: boolean): void => {
+    if (on && masterBefore === null) {
+      masterBefore = d.audio.engine.getVolumes().master;
+      d.audio.engine.setVolumes({ master: 0 });
+    } else if (!on && masterBefore !== null) {
+      d.audio.engine.setVolumes({ master: masterBefore });
+      masterBefore = null;
+    }
+  };
+
   const cine: CineHandle = createCine({
     renderer: app.renderer,
     canvas: app.renderer.domElement,
@@ -357,6 +374,7 @@ export function createSpeedboatCine(d: SpeedboatCineDeps) {
       },
       setShooting,
       setRenderSize: (w, h) => {
+        renderMute(true);
         // EXACT pixels: setSize multiplies by the device pixel ratio (docs/cine/README.md)
         savedPixelRatio ??= app.renderer.getPixelRatio();
         app.renderer.setPixelRatio(1);
@@ -365,6 +383,7 @@ export function createSpeedboatCine(d: SpeedboatCineDeps) {
         app.camera.updateProjectionMatrix();
       },
       restoreRenderSize: () => {
+        renderMute(false);
         if (savedPixelRatio === null) return;
         app.renderer.setPixelRatio(savedPixelRatio);
         savedPixelRatio = null;
