@@ -60,7 +60,8 @@ export const boatLightParams: BoatLightParams = registerParams(
     poolStripHalfLength: 5.2,
     poolStripHalfBeam: 1.3,
     poolFoamGain: 2.5,
-    playerLightIntensity: 6,
+    // with page/boatLights.ts HERO_LIGHT_STANDOFF: bounds the peak on her own white topside (see there)
+    playerLightIntensity: 3,
     playerLightRange: 6,
     glowIntensity: 0.18,
     glowScale: 1.5,

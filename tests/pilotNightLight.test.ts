@@ -21,6 +21,7 @@ import { PILOT_HAIR_MAX_ANISOTROPY, PILOT_HAIR_MIN_ROUGHNESS, pilotNodeMaterial 
 import { createBoatLightPool } from '../src/ocean/boatLightPool';
 import { boatLedLevel, boatNightFillLevels, boatPilotFillLevel, pilotFillLevel, twilightFillRamp } from '../src/speedboat/assets/slotMaterials';
 import { nightFactor } from '../src/sky/moonCycle';
+import { boatLightParams } from '../src/params/boatLights';
 import { TIME_LED } from '../src/speedboat/cine/look';
 import { ledColor, resolveLivery } from '../src/speedboat/assets/livery';
 import type { BoatExtras, BoatInstance } from '../src/speedboat/assets';
@@ -134,6 +135,32 @@ describe('§T.209 the pilots get the boats\' night light', () => {
       expect(pilotFillLevel(n, n)).toBeGreaterThanOrEqual(n); // never below the LED level itself
       prev = v;
     }
+    r.lights.dispose();
+  });
+
+  /**
+   * WHY (final look review, night LED-strip inserts 12/13/R3/R4): the white topside beside the strip was one flat orange
+   * card. Her own two lights sit a fixed standoff outboard; the peak on her topside is the inverse-square at that
+   * standoff, evaluated here with three's own punctual falloff (LightUtils getDistanceAttenuation: 1/d^decay × the
+   * range window) on a white gelcoat. It must stay well under the night bloom threshold and far under the strip, and
+   * still fall off visibly along the flank (a gradient, not a uniformly lit wall).
+   */
+  it('her own lights light her topside as a gradient, never a blown-out card', () => {
+    const r = rig();
+    r.lights.update(1);
+    const light = r.lights.heroLights[1];
+    const atten = (d: number): number => (1 / Math.max(d ** light.decay, 0.01)) * Math.min(1, Math.max(0, 1 - (d / light.distance) ** 4)) ** 2;
+    const albedo = 0.8;
+    const hue = light.color.r; // the brightest channel of the LED hue
+    const radianceAt = (alongZ: number): number => {
+      const flank = new THREE.Vector3(EXTRAS.beam / 2, light.position.y, light.position.z + alongZ);
+      return ((albedo / Math.PI) * light.intensity * hue * atten(flank.distanceTo(light.position)));
+    };
+    const peak = radianceAt(0);
+    expect(peak).toBeGreaterThan(0.1); // she is still lit
+    expect(peak).toBeLessThan(0.4); // was ≈ 1.3 (1.1 m, 6 cd): over the night bloom threshold 0.8
+    expect(peak).toBeLessThan(boatLightParams.stripNits / 20); // the strip glows, the hull does not compete
+    expect(peak / radianceAt(2.5)).toBeGreaterThan(2.5); // a gradient along the flank
     r.lights.dispose();
   });
 

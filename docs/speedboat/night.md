@@ -32,7 +32,7 @@ Why the real lights are not in the scene graph: as scene lights, every lit fragm
 - Hulls: `slotMaterials.setBoatNightFill` adds a Fresnel rim biased toward the key (the moon) plus a little sky fill on the albedo, in the moon's hue × `nightFactor` (`boatLightParams.nightRim / nightFill`). It is 0 by day and ignores the LED override.
 - Hero LED: `FLEET_LIVERIES.hero.led = 0xff7a1a`. A full-brightness `#e4572e` tonemapped to red. Liveries with their own signature never inherit it.
 
-- The roll-arch courtesy light (`page/cockpitLights.ts`) takes each boat's LED colour. The hero's two real lights sit 1.1 m out from the hull, so the topsides get no hot spot. Pool shading lights the water from the strip as a line source (diffuse on N·L plus tight glints): the ripples and the strip reflections read, not a flat sheet. The glow sheet is down to 0.18.
+- The roll-arch courtesy light (`page/cockpitLights.ts`) takes each boat's LED colour. The hero's two real lights sit 1.6 m out from the hull at 3 cd (`HERO_LIGHT_STANDOFF`), so the topsides get no hot spot: at 1.1 m / 6 cd the flank next to the strip blew out to flat orange in the close-up inserts. Pool shading lights the water from the strip as a line source (diffuse on N·L plus tight glints): the ripples and the strip reflections read, not a flat sheet. The glow sheet is down to 0.18.
 
 ## Ocean hook (shared with the water session)
 

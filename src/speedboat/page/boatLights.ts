@@ -27,6 +27,16 @@ import { createCockpitLights } from './cockpitLights';
 /** drawn before the ocean (0) and the gauge glass (−2): inside the scene copy the water refracts */
 export const GLOW_RENDER_ORDER = -3;
 
+/**
+ * How far outboard of the max beam the player's two lights sit (m): the MINIMUM light-to-topside distance, so it bounds
+ * the inverse-square peak on her own hull. Final look review (night LED-strip inserts): at 1.1 m and 6 cd the white
+ * topside next to the strip took ≈ 1.3 linear radiance (albedo 0.8 · 6 / 1.1² / π), ~100× the night sky and over the
+ * night bloom threshold (0.8), and tonemapped to one flat orange card with only the dark numerals left. At 1.6 m and
+ * 3 cd the peak is ≈ 0.3 (under half that threshold, ~1/25 of the strip's own 8 nits) and the falloff along the flank
+ * still reads as a gradient (tests/pilotNightLight.test.ts).
+ */
+export const HERO_LIGHT_STANDOFF = 1.6;
+
 /** the LED level 0..1: an override (clamped) wins, else the sky's night factor */
 export function ledLevel(nightFactor: number, override: number | null): number {
   const v = override ?? nightFactor;
@@ -59,7 +69,7 @@ export function createBoatLights(d: BoatLightsDeps) {
   const lineY = extras.keelY + 0.4 * (extras.deckY - extras.keelY);
 
   // ── the player's two real lights ──
-  const heroLightOffsets = [-1, 1].map((side) => new THREE.Vector3(side * (extras.beam / 2 + 1.1), lineY + 0.25, midZ - 0.8)); // 1.1 m out: no hot spot on the topsides
+  const heroLightOffsets = [-1, 1].map((side) => new THREE.Vector3(side * (extras.beam / 2 + HERO_LIGHT_STANDOFF), lineY + 0.25, midZ - 0.8));
   const heroLights = heroLightOffsets.map((_, k) => {
     const l = new THREE.PointLight(0xffffff, 0, boatLightParams.playerLightRange, 2);
     l.name = `boat-led-${k === 0 ? 'port' : 'starboard'}`;
