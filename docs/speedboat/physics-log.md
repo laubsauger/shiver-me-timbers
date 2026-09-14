@@ -675,3 +675,111 @@ plumbed (no step API change); a fleet boat needs a control slot for it (owner: T
   mistake). Pilot: when |cross-track − offset| > 15 m the target speed is capped at the measured corner speed of the
   PURSUIT curvature (`cornerSpeed(kappa, latUse)`). 6/9/12/15 m tried: 6 m slowed every lap 3–6 s; 12 m left the catch-up
   spread 0.13 s over its bound; 9 and 15 m pass; 15 m kept. Laps 68.1 / 57.1 / 56.2 s, no misses.
+
+---
+
+# T207 — wakes move every boat (symmetrically), Surge for every engine
+
+Scratch (not in repo): tests/zzScratchT207{Kelvin,Quad,Sym,Perf,Parity,Smoke,Det}.test.ts; scratchpad t207/tree (attribution copy).
+
+## Wake force model (`src/wake/wakeField.ts`)
+- NOT the W4 CPU band: an analytic per-boat LINEAR STEADY SHIP-WAVE field (Havelock 1908; Lamb §242 2D check), evaluated
+  from a compact per-boat RECORD (11 f64: CG x/z, v_x/v_z, distance run since placement, and the low-passed Σfy + fy-weighted along/across
+  offsets, second moments and depth of the contact's `hw.wake` samples). Amplitude = the hull's own contact load, each
+  sample drawn as the wake solver splats it at the NEAR tier's band (σ = splatSigma(fp, 0.5 m, 256) ≥ 0.71 m), reduced
+  to one moment-matched Gaussian — no fudge factor anywhere.
+- η(X, Y) = (1/πρU²) ∫du k|p̂| [H(X−Yu) sin(−Ks(X−Yu)) + sin(−Ks(X+Yu))]: an 80-node trapezoid on a per-source node
+  table (stride 4/2/1 by phase range) near the source, stationary-phase (Airy-floored cusp) past a phase range of
+  250–320 rad. [M] vs a 20 000-node reference, U 6–40 m/s, X 13–290 m, Y/X 0–0.32: rms error 0.4–2.3 mm on an rms
+  field of 20–92 mm. Stationary phase alone was 2–100× off within ~0.8U²/g astern near the track (it misses the hollow
+  directly behind a planing hull: −0.13 m at 20 m astern, 30 m/s) — why the quadrature is there.
+- Gaussian reduction vs the full 22-sample transform (tow 15 / 30 m/s, X 20–80 m): peak |η| within 5 %.
+- Laid straight astern along the source's course over ground (fades 240–300 m astern). A circular-path variant
+  (κ = ω_y/U) was REJECTED on measurement: in the Tower Reach smoke race hooking/tumbling boats' yaw rates (1–6 rad/s)
+  whipped tiny arcs across the pack, ∂η/∂t at receivers' CGs 4–38 m/s, 27 crash events vs 5 straight (before the established-length fade). Established length:
+  the record carries the distance run since placement and the pattern fades from run/2 to run astern (divergent group
+  velocity = ½ phase velocity) — no full steady wake thrown at the boat behind on a grid start or a respawn.
+  Wave memory: the record's load moments low-passed 1 s (ASSUMED; timing only) so an airborne emitter's wake does not
+  vanish and no receiver sees a one-tick ∂η/∂t spike. Not modelled: local near field, Smith attenuation, finite depth,
+  true wave history (a transient turn swings the pattern).
+- §V108: `WakeField.prepare` skips the receiver's own record. [M] a lone boat is bit-identical wakes on/off.
+
+## Plumbing (§V2/§V110)
+- Layout: optional `wakeField` → WAKE WORLD (boats × 11, main-written tick-k records, frozen like WORLD) + WAKE OUT
+  (rows × boats × 11, stepper-written); batch rows carry each external boat's record; header F slot 19 = record length.
+  Absent ⇒ byte-identical layout (pinned sizes in simWorkerBatch/raceAiLine unchanged). A wake fleet is a WORLD reader
+  (multi-shard batches cap at 1, as with pilot/contacts).
+- Step core: prepare the field from WAKE WORLD (excluding i) → sampler = pressure head + wake → step → record into WAKE
+  OUT from its own previous record (reset on a placement). Player (`playerBoat`): the SAME two calls; `wakeRecord` goes
+  to the rivals through `NpcTickInputs.playerWake`, rivals' records come back per tick (`npcFleet.wakeSource`, ring like
+  the trace). `raceSession` feeds the player the rivals' records of trace tick tA carried to the tick start (the pose
+  rule); npcFleet turns wakes on with `player: true` (the race page).
+- Asymmetry left (as for collisions): the player reads rival records D−2 ticks old, extrapolated; rivals read the
+  player's exact tick-start record.
+
+## Numbers
+- Symmetry (crossing a 30 m/s leader's wake at 45°, 80 m astern, calm): player-in-rival's-wake and rival-in-player's
+  ride bit-identical here; max |v_y| 1.56 m/s vs 0.98 without wakes, max pitch 3.28° vs 2.86°, speed −0.07 m/s. Trailing
+  straight 30–60 m astern at WOT: speed −0.04 %…+0.2 %, mean pitch +0.1°. Peak |η| at a receiver's CG ≈ 0.09–0.10 m.
+- Cost: inner loop on a 4096-entry table sine (error 3e-7, plain float arithmetic) and per-boat node tables shared by
+  every receiver of a tick: ≈ 0.01 ms per receiver–source pair (108 patch samples). 8-boat 2×4 pack at 30 m/s, main
+  transport, machine at load 11: 3.4–4.8 → 5.6–5.9 ms/tick (+1–2 ms, noisy); before the table sine +4–7 ms.
+- Race smoke (tests/speedboatRaceSmoke, NOT in the T207 gates, not edited): wakes on ⇒ 1–2 rival hooks per calm lap
+  (e.g. #3 hook tick 3097), wakes off (same tree) ⇒ 0. Deterministic (paced vs unpaced hashes equal at 1200/2400/3200,
+  same crash both). With the far tier's band (σ ≥ 2.5 m, ~10× weaker short waves) still 1 hook (#1 tick 3240): the pack
+  race is chaotic, the pilots (race/ai) do not read wakes. Owner call: accept crashes in a pack, or pilot wake-awareness.
+- speedboatNpcSea "rival pitch std within 10× of the player" (7.20 vs bound 6.34) fails identically WITHOUT T207 (my
+  files reverted in a copy): pre-existing, not this task.
+- Parity test now runs in clean water (rivals abeam); wake coupling moved to tests/speedboatWakeSymmetry.test.ts.
+
+## Surge
+- Controls slot 3 (was reserved) = the race's `thrustMultiplier`; `BoatSimCore.step` → `hw.setBoost` for every stepped
+  boat (pilot or not); `setControls/setBatchControls(…, boost)`; npcFleet records `NpcTickInputs.boost` per tick;
+  raceSession stores `RacerOutputs.thrustMultiplier` in `raceOutputs.boost` and calls `player.hw.setBoost` in `controls`.
+  Slot ≤ 1 = stock, bit-identical. Test: tests/simWorkerSurge.test.ts (rows ≡ one-tick kicks; boosted twin +speed).
+
+# T207 — Governor on the engine's rpm; landing assist out of Default
+Scratch (not in repo): tests/zzScratchT207Assist.test.ts, tests/zzScratchT207AssistCalm.test.ts.
+## Governor (src/speedboat/assists/governor.ts) — the T182 rpm proxy is gone
+- Reads BoatSimSample.rpm (max hw.driveRpm), ratedRpm (6100), propImmersion. AIR/FULL act ONLY with the props OUT:
+  airborne, mean immersion < 0.1, or a one-tick immersion fall ≥ 0.25 (launch 0.9 → 0.3 → 0; calm WOT ≤ 0.095/tick).
+  Then an rpm governor at rated: lead = rpm + max(0, Δrpm/dt)·0.15 s, throttle ≤ max(0.05, 1 − 40·(lead/rated − 1)).
+- WET NOTHING IS CAPPED, even over rated: unassisted calm WOT itself ventilates to 6790 rpm (rises to 19 000 rpm/s,
+  immersion min 0.13). A first law with a wet over-rated cap (lead on the rise) cut the parity player to 30.43 vs
+  33.6–34.0 m/s; a wet cap only above 1.12 × rated still −6.1 % (30 cut ticks: the spool lag turns cuts into speed).
+- Why the lead: a dry prop gains ≈ 26 000 rpm/s, the throttle closes in 0.07 s, the sample is a tick old. Lead 0:
+  flights 6760–6814 rpm; lead 0.15 s gain 20: ~6280 held; gain 40: 6061–6178; gain 60 no better.
+- Results: calm WOT Default 33.827 = Pro 33.827 m/s (speedboatParity green); 0.9 m swell AIR = OFF 33.255 m/s;
+  2.5 m bar C_v 8 OFF 6837 (limiter), AIR 6178 whole flight; C_v 10 1.5 m bar AIR 6798 on the launch tick (wet,
+  ventilated face — the 4 MW harness runs 6400–6800 rpm wet before the bar), 6069–6165 from 0.25 s into the flight.
+- Tests: OFF ≥ limitRpm; AIR ≤ 1.02 × rated (whole flight on 2.5 m, after 0.25 s on C_v 10); unit: wet over rated
+  uncapped, dry flare governed, launch cut before rated.
+## Landing assist — removed from Default (landingAssist 0.5 → 0)
+- Real trim path (setControls trim), 5 bars, off → on: 13.28→12.32, 19.35→16.01, 10.26→11.21, 12.75→11.48,
+  22.01→18.31° (centre 2.5°): worse at C_v 6. Full trim-OUT on the face (opposite command): 10.57/15.96/10.23/12.16/
+  16.57° — as flat or flatter on 4 of 5: tilting a drive either way lifts the prop and costs launch thrust; no direction
+  to steer with. Trim only in the air: 0.00° (props dry).
+- Test: it.fails replaced — Default landingAssist 0; air-only trim < 0.3°; fails if the assist ever lands nearer on
+  every bar with mean gain > 1°. Page UI defaults (ui/pause.ts, ui/harness.ts) still say 0.5 — owners to change.
+
+# T207 (coordinator priority) — player and rivals on ONE sea schedule; pilot trim reaches the drives
+- Checked in the Working sea with a preset change mid-run (tests/speedboatSeaParity.test.ts): a rival (fleet driver → step
+  core, own mirror) and the player (page wiring: `OceanSimulation.advanceSpectrum` → `CpuOcean` on the simulation's own
+  scheduler → `createPlayerBoat`, render `OceanSimulation.update` every frame), same start pose and controls, 50 s.
+  Physics fidelity, params (mirror/chop resolution, update cadence, inverse iterations, Smith depth), hull and step were
+  already identical: with one render frame per tick the trajectories are bit-identical.
+- ROOT CAUSE found: `OceanSimulation.update` stepped the spectrum schedule itself on any rendered frame that had no sim
+  tick (> 60 Hz display, `holdSim`, a paused select screen), so the page adopted rebuilt spectra at frame-rate-dependent
+  ticks while the worker's mirror steps once per tick. [M] 120 fps: first differing tick 1221 (1 s after the preset
+  change), 334 m apart by the end, heave std player 1.30 vs rival 1.55 m, top speed 28.06 vs 28.10 m/s. It also broke
+  §V2 for the page itself (a replay at another frame rate is another sea).
+- Fix (src/ocean/oceanCascades.ts, 3 lines): once any tick has called `advanceSpectrum`, `update` never steps the schedule
+  (`tickDriven`); render-only callers keep stepping it in `update`. After: bit-identical at 60 and 120 fps (heave/pitch/roll
+  variance and top speed equal by construction). Side effect: a sea chosen while the sim is held (select/pause screens)
+  swaps in on the first ticks after it resumes (≤ 41 ticks), on the page and on the worker alike.
+- Not fixed here (stated): `tests/seaPhysics` §V.69 "pitch-kick improvement in the 98 m reference sea" (8.35 vs 6.72) and
+  `tests/speedboatNpcSea` (rival pitch std 7.20 vs bound 6.34) fail identically without any T207 change (attribution copy).
+- Pilot trim (AI agent's request): `stepCore` now passes `unitTrimToRad(po.trim ?? 0)` to `setControls`, the player's
+  mapping. Consequence [M]: raceAiLaps rookie metric 0.109 vs bound 0.04 and raceAiPack 3 failures (a hook, lap band,
+  catch-up spread) with it; without it raceAiLaps passes and raceAiPack fails only the catch-up spread (2.90 vs 2.74 s).
+  The pilot's −waveLift bow-down requests (up to −6° drive trim) were never run through the physics — pilot owner.

@@ -207,7 +207,7 @@ export function createVesselFx(d: VesselFxDeps) {
     },
 
     /** A player teleport starts a new contact source without deleting old foam. */
-    resetContact(): void { contact.remove(0); },
+    resetContact(): void { contact.resetContact(0); },
 
     /** the page's spray toggle (graphics settings): hidden pools are not stepped */
     setVisible(on: boolean): void {

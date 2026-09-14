@@ -22,7 +22,10 @@ export interface AssistSettings {
   helmRateDegPerS: number;
   /** throttle limiter: OFF · AIR (feather airborne / ventilating) · FULL (AIR + a throttle cap on landing) */
   governor: GovernorMode;
-  /** 0…1 landing assist: nudges the drive trim toward the landing pitch window (design: AIR applies 0.5) */
+  /**
+   * 0…1 landing assist: nudges the drive trim toward the landing pitch window (design: AIR applies 0.5). OFF in both
+   * presets since §T.207: through the real trim path it has no directional authority (trim.ts header, measured).
+   */
   landingAssist: number;
   /** design §3: auto reset on by default; read by the crash state machine (§T.188), not by these functions */
   autoReset: boolean;
@@ -31,7 +34,9 @@ export interface AssistSettings {
 export type AssistPresetName = 'default' | 'pro';
 
 export const ASSIST_PRESETS: Readonly<Record<AssistPresetName, Readonly<AssistSettings>>> = Object.freeze({
-  default: Object.freeze({ speedLimitedLock: 1, helmRateDegPerS: 30, governor: 'AIR', landingAssist: 0.5, autoReset: true }),
+  // §T.207: landingAssist 0 — the drive trim cannot steer the landing pitch (trim.ts header), so Default does not carry an
+  // assist that only moves the drives (and, on every rising face in a sea, lifts the props out of the water).
+  default: Object.freeze({ speedLimitedLock: 1, helmRateDegPerS: 30, governor: 'AIR', landingAssist: 0, autoReset: true }),
   // Pro = all assists off. The helm rate stays the physical actuator's (it is not an assist; see above).
   pro: Object.freeze({ speedLimitedLock: 0, helmRateDegPerS: 30, governor: 'OFF', landingAssist: 0, autoReset: false }),
 });

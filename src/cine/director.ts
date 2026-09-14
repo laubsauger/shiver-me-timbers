@@ -28,7 +28,6 @@ import { postParams } from '../params/post';
 import { gradeParams } from '../params/grade';
 import { lanternParams } from '../params/lanterns';
 import { cloudParams } from '../params/clouds';
-import { GLOBAL_WORLD, SHOTS } from './shotlist';
 import type { Shot, ShotKey, Vec3, WorldPatch } from './types';
 
 export interface ShipPose {
@@ -37,6 +36,12 @@ export interface ShipPose {
   quaternion: readonly [number, number, number, number];
 }
 
+/**
+ * Everything the shot list may touch of a page, implemented PER PAGE: the
+ * pirate host lives in src/main.ts, the speedboat host in
+ * src/speedboat/cine/host.ts. The director, recorder and capture know nothing
+ * else about the game they are shooting.
+ */
 export interface DirectorHost {
   /** live sea height, world XZ — the same fn followCam is handed */
   heightAt(x: number, z: number): number;
@@ -44,14 +49,16 @@ export interface DirectorHost {
   shipPose(): ShipPose;
   /** normalized world direction toward the key light (sky.sunDirection) */
   sunDirection(): Vector3;
-  /** drive the hull without waiting on the wind (__game.setSpeed) */
-  setShipSpeed(knots: number): void;
-  setShipAnchored(anchored: boolean): void;
+  /** drive the hull without waiting on the wind (__game.setSpeed). Sailing pages only. */
+  setShipSpeed?(knots: number): void;
+  setShipAnchored?(anchored: boolean): void;
   /** weather preset switch; the director asks for an instant one */
-  setWeather(name: string): void;
+  setWeather?(name: string): void;
   /**
    * Put the world into a state a shot can be taken in. Called once per shot
-   * cue, not per tick.
+   * cue, not per tick, with the shot and the shot-local time it is cued at
+   * (negative = preroll) — a page that choreographs its hero per shot reads
+   * them; one that does not can ignore both.
    *
    * THIS IS NOT HOUSEKEEPING. The first recorded shot came back as open water
    * with no ship in it: the enemy AI had spent the 10 s preroll putting two
@@ -59,12 +66,13 @@ export interface DirectorHost {
    * with `flood: 1` before the first frame was captured. A cinematic run has
    * to disarm the game.
    */
-  prepareScene(): void;
+  prepareScene(shot: Shot, t: number): void;
   /**
    * Re-assert that state every tick — the AI re-approaches and the sea keeps
    * flooding a holed hull, so preparing once is not enough over a 22 s take.
+   * FIXED TICK (it is called from `applyWorld`), so it may drive the sim.
    */
-  holdScene(): void;
+  holdScene(shot: Shot): void;
   /**
    * Strike the set. The reference is open ocean and nothing else, so a shoot
    * hides the archipelago, the second hull and every in-world overlay; a
@@ -213,6 +221,7 @@ const tmpAim = new V3();
 const tmpEuler = new Euler();
 const tmpFwd = new V3();
 const tmpRight = new V3();
+const tmpFocus = new V3();
 const UP = new V3(0, 1, 0);
 
 /** heading only, from a quaternion — the Y term of a YXZ decomposition */
@@ -251,7 +260,14 @@ export class Director {
   /** the game's own world, held while a shoot rewrites it */
   private saved: Record<string, Record<string, unknown>> | null = null;
 
-  constructor(private host: DirectorHost) {}
+  /**
+   * `global` is the page's per-shot world default, applied under every shot's
+   * own patch (the pirate list's `GLOBAL_WORLD`).
+   */
+  constructor(
+    private host: DirectorHost,
+    private global: WorldPatch = {},
+  ) {}
 
   /**
    * Take the world the game was in, so it can be given back.
@@ -296,7 +312,7 @@ export class Director {
     this.lastWeather = '';
     this.locked = null;
     this.followed = null;
-    this.host.prepareScene();
+    this.host.prepareScene(shot, t);
   }
 
   release(): void {
@@ -338,7 +354,7 @@ export class Director {
         w.lanterns as Record<string, unknown>,
       );
     };
-    this.host.holdScene();
+    this.host.holdScene(s);
     const w = s.world;
 
     // WEATHER FIRST. A preset is a BATCH OF PARAM WRITES (§V7) — it sets
@@ -349,23 +365,25 @@ export class Director {
     // would restart the transition forever.
     if (w?.weather !== undefined && w.weather !== this.lastWeather) {
       this.lastWeather = w.weather;
-      this.host.setWeather(w.weather);
+      this.host.setWeather?.(w.weather);
     }
 
-    apply(GLOBAL_WORLD);
+    apply(this.global);
     apply(s.world);
 
     if (w === undefined) return;
-    if (w.shipAnchored !== undefined) this.host.setShipAnchored(w.shipAnchored);
-    if (w.shipKnots !== undefined) this.host.setShipSpeed(w.shipKnots);
+    if (w.shipAnchored !== undefined) this.host.setShipAnchored?.(w.shipAnchored);
+    if (w.shipKnots !== undefined) this.host.setShipSpeed?.(w.shipKnots);
   }
 
   /** RENDER PATH, after the camera chain is final. */
   applyCamera(camera: PerspectiveCamera): void {
     const s = this.shot;
     if (s === null) return;
-    const k = sampleKeys(s.keys, Math.max(this.t, 0));
-    const wob = wobbleAt(s.wobble, Math.max(this.t, 0));
+    // unclamped: a head handle (`shot.handle`) is footage, so a dolly keeps moving
+    // through it on keys authored at negative t; before the first key it holds
+    const k = sampleKeys(s.keys, this.t);
+    const wob = wobbleAt(s.wobble, this.t);
 
     // --- resolve the key frame into world space -----------------------
     let ship = this.host.shipPose();
@@ -392,6 +410,11 @@ export class Director {
         f.yaw += d * k;
       }
       const f = this.followed;
+      if (s.follow.headingOnly === true) {
+        f.x = ship.position[0];
+        f.y = ship.position[1];
+        f.z = ship.position[2];
+      }
       const h = Math.sin(f.yaw * 0.5);
       ship = { position: [f.x, f.y, f.z], quaternion: [0, h, 0, Math.cos(f.yaw * 0.5)] };
     }
@@ -401,7 +424,7 @@ export class Director {
       // makes her way and picks up a heading during those seconds, and locking
       // to the pose she had before any of that happened aims the shot at where
       // she used to be
-      if (this.locked === null && this.t >= 0) {
+      if (this.locked === null && this.t >= -(s.handle ?? 0)) {
         this.locked = {
           position: [ship.position[0], ship.position[1], ship.position[2]],
           quaternion: [
@@ -445,6 +468,19 @@ export class Director {
       tmpV.y = this.host.heightAt(tmpV.x, tmpV.z) + s.rideSwell;
     }
 
+    // AIM AT HER, live and with her full attitude: a static lens that pans with
+    // the boat rather than a hand-written aim that guesses where she will be
+    if (s.aimShip !== undefined || s.focusShip === true) {
+      const live = this.host.shipPose();
+      const p = s.aimShip ?? [0, 0, 0];
+      tmpShipQ.set(live.quaternion[0], live.quaternion[1], live.quaternion[2], live.quaternion[3]);
+      tmpFocus.set(p[0], p[1], p[2]).applyQuaternion(tmpShipQ);
+      tmpFocus.x += live.position[0];
+      tmpFocus.y += live.position[1];
+      tmpFocus.z += live.position[2];
+      if (s.aimShip !== undefined) tmpAim.copy(tmpFocus);
+    }
+
     // --- aim ----------------------------------------------------------
     if (s.aimSun !== undefined) {
       // point AT the key light, then swing off it. Keeps the framing correct
@@ -480,7 +516,10 @@ export class Director {
       camera.fov = k.fov;
       camera.updateProjectionMatrix();
     }
+
+    // FOLLOW FOCUS. Render path, before post reads its params this frame.
+    if (s.focusShip === true) {
+      postParams.dofFocus = Math.min(Math.max(tmpV.distanceTo(tmpFocus), 1), 400);
+    }
   }
 }
-
-export { SHOTS };

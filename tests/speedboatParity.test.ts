@@ -8,9 +8,10 @@
  * mirror floats the player on but the worker's does not, a contact only one side makes) shows up here as a speed gap.
  * Measured before the fix: the AIR Governor capped the player at prop immersion < 0.45, 3.5% slower than the rival.
  *
- * One run, calm sea, full throttle, helm centred: the player (default assists) with a rival 30 m AHEAD in her lane
- * (the player in its wake), a rival 30 m BEHIND (in hers), and a rival in clean water 50 m abeam. The sim wake is
- * visual-only for hull forces (§V8 amendment) on every boat, so the trailing boats must run as fast as the clean one.
+ * One run, calm sea, full throttle, helm centred: the player (default assists) and three rivals abeam of her, all in
+ * CLEAN water — §T.207 made wakes move every hull, so a boat in another's wake is no longer expected to run as fast;
+ * that the player and a rival feel a wake alike is tests/speedboatWakeSymmetry.test.ts. Here the only difference left
+ * between the player and a rival is the step path (page vs worker) and the assists.
  */
 import { describe, expect, it } from 'vitest';
 import { SIM_DT } from '../src/core/loop';
@@ -29,10 +30,10 @@ import type { ShipState } from '../src/state/simState';
 import { seaOcean } from './speedboatRaceHarness';
 
 const at = (x: number, z: number): Rigid6State => ({ position: [x, SPAWN_CG_Y, z], quaternion: [0, 0, 0, 1], velocity: [0, 0, 0], angularVelocity: [0, 0, 0] });
-const SPAWNS = [at(0, 30), at(0, -30), at(50, 0)]; // ahead (player in its wake), behind (in the player's), clean
+const SPAWNS = [at(-50, 0), at(50, 0), at(100, 0)]; // abeam, outside every Kelvin wedge (19.5°) of a boat at the same z
 
-describe('§V110 player and rival: same controls, same speed, wake or not', () => {
-  it('full throttle on a calm straight: player (default assists) within 1% of a clean-water rival, trailing costs nobody', async () => {
+describe('§V110 player and rival: same controls, same speed', () => {
+  it('full throttle on a calm straight, clean water: player (default assists) within 1% of every rival', async () => {
     const hull = buildDeepVHull();
     const seed = 2100;
     const ocean = seaOcean('calm');
@@ -84,13 +85,12 @@ describe('§V110 player and rival: same controls, same speed, wake or not', () =
       npcs.dispose();
     }
     const vP = mean.player / n;
-    const [vAhead, vBehind, vClean] = mean.rival.map((v) => v / n);
-    const msg = `player ${vP.toFixed(2)} | rival ahead ${vAhead.toFixed(2)}, behind ${vBehind.toFixed(2)}, clean ${vClean.toFixed(2)} m/s`;
-    expect(vClean, msg).toBeGreaterThan(30); // planing at top speed, not a stalled run
-    // same controls ⟹ same top speed (the player's assists must not cost speed at the planing running point)
-    expect(Math.abs(vP - vClean) / vClean, msg).toBeLessThan(0.01);
-    // the player in a rival's wake and a rival in the player's wake: neither pays for it
-    expect(Math.abs(vP - vAhead) / vAhead, msg).toBeLessThan(0.01);
-    expect(Math.abs(vBehind - vClean) / vClean, msg).toBeLessThan(0.01);
+    const vR = mean.rival.map((v) => v / n);
+    const msg = `player ${vP.toFixed(2)} | rivals ${vR.map((v) => v.toFixed(2)).join(', ')} m/s`;
+    for (const v of vR) {
+      expect(v, msg).toBeGreaterThan(30); // planing at top speed, not a stalled run
+      // same controls ⟹ same top speed (the player's assists must not cost speed at the planing running point)
+      expect(Math.abs(vP - v) / v, msg).toBeLessThan(0.01);
+    }
   }, 120000);
 });

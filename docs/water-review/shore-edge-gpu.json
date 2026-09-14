@@ -1,0 +1,35 @@
+{
+  "size": 256,
+  "results": [
+    {
+      "gain": 0,
+      "zeroLevelBefore": 1,
+      "zeroLevelAfter": 0,
+      "peakBefore": 1,
+      "peakAfter": 0,
+      "matureDifference": 0,
+      "residualDifference": 0,
+      "otherChannelsDifference": 0
+    },
+    {
+      "gain": 0.1,
+      "zeroLevelBefore": 1,
+      "zeroLevelAfter": 0.011150677688419819,
+      "peakBefore": 1,
+      "peakAfter": 0.4319951832294464,
+      "matureDifference": 0,
+      "residualDifference": 0,
+      "otherChannelsDifference": 0
+    },
+    {
+      "gain": 1,
+      "zeroLevelBefore": 1,
+      "zeroLevelAfter": 0.029643641784787178,
+      "peakBefore": 1,
+      "peakAfter": 1,
+      "matureDifference": 0,
+      "residualDifference": 0,
+      "otherChannelsDifference": 0
+    }
+  ]
+}

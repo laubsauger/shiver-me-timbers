@@ -2,7 +2,7 @@
  * SPEEDBOAT entry (§T.181 S0 → §T.191 one playable race). Boot only — scene construction is
  * `speedboat/page/speedboatScene.ts`, the course world `page/course.ts`, the fixed-tick race `page/raceSession.ts`,
  * the per-tick/per-frame plumbing `page/speedboatFrame.ts`, the NPC fleet's pipelined worker `page/npcFleet.ts`,
- * the HUD and screens `page/raceUi.ts`.
+ * the HUD and screens `page/raceUi.ts`. `?mode=free`: FREE ROAM, no rivals and no race (`page/sessionMode.ts`).
  *
  * §V109: nothing reached from here imports main.ts, main-raft.ts, raft/, combat/ or ai/
  * (tests/speedboatIsolation.test.ts walks the graph).
@@ -44,6 +44,7 @@ import { createDashMount } from './speedboat/page/dashMount';
 import { createRaceSession, RIVAL_ARCHETYPES } from './speedboat/page/raceSession';
 import { createAutopilotControls } from './speedboat/page/autopilot';
 import { createRaceUi } from './speedboat/page/raceUi';
+import { createIdleNpcFleet, freeRoamRules, sessionModeFrom } from './speedboat/page/sessionMode';
 import { createBoatPreview } from './speedboat/page/boatPreview';
 import { createPageChrome } from './speedboat/page/pageChrome';
 import { createRaceHudFrame } from './speedboat/page/raceHudFrame';
@@ -54,6 +55,7 @@ import { createRaceControls } from './speedboat/controls';
 import { createSpeedboatAudioSink } from './audio/boat/pageSink';
 import { installAudioUnlock } from './speedboat/page/stubs';
 import type { BoatAudioFrame } from './speedboat/page/seams';
+import { cineSettings, createCineBoot, createSpeedboatCine } from './speedboat/cine';
 
 /** rivals on the grid (design doc §2 slice: 7 NPCs) */
 const NPC_COUNT = 7;
@@ -72,13 +74,14 @@ async function boot(): Promise<void> {
     renderGatePage(root);
     return;
   }
-  const settings = initGraphicsSettings();
+  const settings = initGraphicsSettings(cineSettings(location.search)); // ?cine: the maximum tier, in memory only
   stage('renderer');
   const app = await App.create(root);
   app.controls.enabled = false;
   stage('scene build');
   const state: SimState = createInitialState(2100);
   const query = new URLSearchParams(location.search);
+  const mode = sessionModeFrom(query);
 
   // the course's own sea (Tower Reach: Calm, the start in the lee); no storm cells drift in (§V46)
   const course = towerReachCourse(); // §T.187/§T.191: sites now, the world after buildSea
@@ -110,7 +113,7 @@ async function boot(): Promise<void> {
   player.place(course.spawn(0));
 
   stage('boat models');
-  const boats = await buildSpeedboatBoats(app, sea, NPC_COUNT, { waterAt });
+  const boats = await buildSpeedboatBoats(app, sea, mode === 'free' ? 0 : NPC_COUNT, { waterAt });
   // pilots are cosmetic: they load BESIDE the boot, never gate it (a KTX2 transcode stalls in a hidden tab, §V.39)
   let pilots: Pick<Pilots, 'hero' | 'update'> = { hero: { setHeadVisible: () => undefined, eyeSource: () => false } as unknown as Pilots['hero'], update: () => undefined };
   let cockpitView = false; // a cockpit switch made while the pilot loads is not replayed by onCockpitChange
@@ -127,8 +130,8 @@ async function boot(): Promise<void> {
 
   // §T.178/§V110: same step, same sea, same seabed and colliders, off the main thread where the page allows it
   stage('npc physics');
-  const pilotSetup = buildPilotSetup(world.course, [...RIVAL_ARCHETYPES, null], { seed: state.seed }); // §T.196: race/ai reads the physical handedness
-  const npcs = await createNpcFleetDriver({
+  const pilotSetup = buildPilotSetup(world.course, [...RIVAL_ARCHETYPES, null], { seed: state.seed, colliders: world.colliders }); // §T.196: race/ai reads the physical handedness
+  const npcs = mode === 'free' ? createIdleNpcFleet() : await createNpcFleetDriver({
     seed: state.seed, boats: NPC_COUNT, oceanParams, seaParams,
     spawn: (i) => course.spawn(i + 1),
     pilot: pilotSetup, contacts: { boats: true, colliders: world.colliders }, world: world.simWorld, player: true,
@@ -142,22 +145,23 @@ async function boot(): Promise<void> {
     camera: app.camera, npcs, npcContact: (i) => npcs.contact(i), npcThrottle: (i) => npcs.throttle(i),
   });
   installAudioUnlock(audio);
+  const cineDrive = createCineBoot(query, waterAt); // trailer (docs/cine/speedboat-trailer-v1.md): ?cine grade BEFORE the post graph
   const post = createPostPipeline(app.renderer, app.scene, app.camera, { sunDirection: () => sky.sunDirection });
   const usePost = createPostWarmGate({ enabled: () => postParams.enabled, warm: () => post.warmup() });
 
   const frame = createSpeedboatFrame({
     app, sea, boats, sky, state, player, npcs, weatherHere, waterAt,
-    placeCamera: (view, dt) => camera.update(view, dt, waterAt),
+    placeCamera: (view, dt) => (camera.update(view, dt, waterAt), cine.applyCamera(dt)),
   });
   // ?autopilot: the player's boat runs the rivals' §T.186 pilot (browser checks, and the smoke race's controls)
-  const autopilot = query.has('autopilot')
+  const autopilot = query.has('autopilot') && mode === 'race'
     ? createAutopilotControls({
         setup: pilotSetup, index: npcs.playerIndex, boats: NPC_COUNT + 1, lockRad: hull.drives[0].maxSteerRad, sea: sea.cpuOcean,
         time: () => state.time, world: () => session.snapshot, standing: () => session.playerAiIn, propImmersion: () => player.hw.propImmersion,
       })
     : null;
   const session = createRaceSession({
-    course: world.course, hull, player, npcs, controls: autopilot ?? controls,
+    course: world.course, hull, player, npcs, controls: cineDrive.over(autopilot ?? controls),
     resetPressed: () => controls.input.reset, surgePressed: () => controls.input.surge, autoReset: () => controls.settings.autoReset,
     colliders: world.colliders, bed: world.bed, isClear: respawnClear(world.colliders, world.bed), waterAt: (x, z) => sea.cpuOcean.pressureHeadAt(x, z, state.time), fetchVersion: () => sea.fetchField.version,
     onPlayerTeleport: () => {
@@ -168,11 +172,12 @@ async function boot(): Promise<void> {
       autopilot?.reset();
     },
     onPlayerCrash: (_ev, at) => camera.cam.beginCrash(at),
+    freeRoam: mode === 'free' ? cineDrive.rules(freeRoamRules(world.course, respawnClear(world.colliders, world.bed), (x, z) => sea.cpuOcean.pressureHeadAt(x, z, state.time))) : undefined,
   });
   const ui = createRaceUi({
     parent: document.body, course: world.course, racerIds: session.gridOrder, controls, camera,
     audio: { setVolume: (a) => (audio.engine.setVolumes(engineVolumes(a)), audio.radio.setLevel(radioLevel(a))), radioCall: () => audio.radio.call() },
-    defaultSea: 'Calm', chrome, graphics: settings,
+    defaultSea: 'Calm', chrome, graphics: settings, mode, onSea: (s) => weather.apply(SEA_PRESET[s] ?? course.seaPreset),
     preview: createBoatPreview({ renderer: app.renderer, asset: boats.asset, pilot: () => pilots.hero.object ?? null }), // §T.201
     dash: createDashMount(boats.hero), // §T.208
     onStart: (sel) => {
@@ -208,6 +213,7 @@ async function boot(): Promise<void> {
       state.wind.direction = oceanParams.windDirection;
       weather.update(dt);
       weather.weatherAt(boat.position[0], boat.position[2], weatherHere);
+      cine.applyWorld(); // a shot's world + placement, after the weather writes and before the session steps her
       frame.tickSea();
       session.tick(state.tick, state.time, dt);
       audioFrame.contact.wettedArea = player.hw.wettedArea;
@@ -230,17 +236,18 @@ async function boot(): Promise<void> {
         nextElement: race?.standings.find((s) => s.racerId === 0)?.nextElement, startLamps: lights?.lit, startGreen: lights?.green,
         pace: boats.pace.display.visible ? boats.pace.display : null, // §T.202 marshal skiff mast + strobe
       });
-      if (usePost()) {
+      if (cine.beginFrame()) { /* a captured frame is encoding and the world is frozen: nothing to draw */ } else if (usePost()) {
         post.updateFromParams();
         post.render();
       } else {
         app.render();
       }
+      cine.afterRender();
       debug.hud.setRenderStats(app.renderer.info.render);
       // App builds the renderer with trackTimestamp (§V.39): unresolved query pools overflow and warn
       void app.renderer.resolveTimestampsAsync(TimestampQuery.RENDER).catch(() => undefined);
       void app.renderer.resolveTimestampsAsync(TimestampQuery.COMPUTE).catch(() => undefined);
-      ui.update(hudFrame.fill(frameDt));
+      if (!cine.active) ui.update(hudFrame.fill(frameDt)); // a shot has no HUD (speedboat/cine/cineChrome.ts)
       audioFrame.frameDt = frameDt;
       audioFrame.governor = controls.settings.governor.toLowerCase() as BoatAudioFrame['governor'];
       audio.update(audioFrame);
@@ -250,6 +257,7 @@ async function boot(): Promise<void> {
     },
     () => ui.blocking || session.holdSim(state.tick),
   );
+  const cine = createSpeedboatCine({ app, loop, sky, weather, session, state, view: frame.view, camera, chrome, audio, hero: boats.hero, mode, drive: cineDrive, waterAt });
 
   stage('shader compile');
   await withFullCoverage(app.scene, () =>
@@ -272,7 +280,7 @@ async function boot(): Promise<void> {
   ui.openSelect();
 
   // console/browser-verification handle (§V22): read-only use expected
-  (window as unknown as Record<string, unknown>).__speedboat = { app, state, sea, boats, player, npcs, controls, camera, loop, session, ui, world, furniture, frame, get pilots() { return pilots; } };
+  (window as unknown as Record<string, unknown>).__speedboat = { mode, cine, app, state, sea, boats, player, npcs, controls, camera, loop, session, ui, world, furniture, frame, get pilots() { return pilots; } };
 }
 
 // fail loud (§Rule 8): a boot that throws leaves a black page; the stage and the error are readable from the console

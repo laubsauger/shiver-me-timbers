@@ -121,10 +121,11 @@ export function swellSpectrum(kx: number, kz: number, p: OceanParams): number {
   const wx = Math.cos(p.swellDirection);
   const wz = Math.sin(p.swellDirection);
   const dotKW = (kx / k) * wx + (kz / k) * wz;
-  // Swell runs ONE way. Unlike wind sea there is no opposing train to damp:
-  // it was radiated by a single distant storm and has travelled since.
-  if (dotKW <= 0) return 0;
-  const spread = Math.pow(dotKW, swellEffectiveDirectionality(p));
+  // Positive IFFT spatial phase plus h0(k) exp(+iωt) travels toward -k.
+  // Select -travel here so CPU/GPU waves agree with swell shadow and the
+  // course's authored travel vector, without changing wind-sea evolution.
+  if (dotKW >= 0) return 0;
+  const spread = Math.pow(-dotKW, swellEffectiveDirectionality(p));
   return (swellScale(p) * radial * spread) / k;
 }
 

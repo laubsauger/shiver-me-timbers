@@ -46,6 +46,7 @@ import { sprayParams, type SprayParams } from '../params/spray';
 import { hash2 } from '../terrain/noise';
 import { aerationSpeed, jetExcessSpeed, propRpsEstimate, propWashValid, type PropWashInput } from '../wake/propWash';
 import { foamTintNode } from './foamShading';
+import type { particleLighting } from '../sky/particleLighting';
 import { SPRAY_OVER_WATER_ORDER, SPRAY_UNDER_WATER_ORDER, createSprayPool, type SprayPool } from './sprayPool';
 import { H_BOW_MAG, H_BOW_SIDE, H_BOW_UP, H_SIZE, PHI, T_BOW_MAG, T_BOW_SIDE, T_BOW_UP, T_SIZE, advanceBurstCursor, prioritiseEmitters } from './sprayMath';
 
@@ -161,12 +162,13 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
   let mistLife = sprayParams.bowLife;
   const uSun = uniform(new THREE.Vector3(0.3, 0.8, 0.5).normalize());
   /** HG forward scattering (header) — the sprite's own world position against the camera */
-  const litTint = (): unknown => {
+  const litTint = (light: typeof particleLighting): unknown => {
     const view = positionWorld.sub(cameraPosition).normalize();
     const c = view.dot(uSun).clamp(-1, 1);
     const g = ROOSTER_PHASE_G;
     const hg = float(1 - g * g).div(float(1 + g * g).sub(c.mul(2 * g)).max(1e-3).pow(1.5));
-    return foamTintNode().mul(hg.min(ROOSTER_PHASE_CAP).mul(ROOSTER_SUN_GAIN).add(ROOSTER_AMBIENT));
+    return foamTintNode().mul(light.key.mul(hg.min(ROOSTER_PHASE_CAP).mul(ROOSTER_SUN_GAIN))
+      .add(light.ambient.mul(ROOSTER_AMBIENT)));
   };
   const drops = createSprayPool(opts.count ?? sprayParams.bowCount, {
     sizeScale: () => 4,
@@ -400,7 +402,7 @@ export function createPropBubbles(opts: PropBubblesOptions = {}) {
     opacity: () => 0.3,
     fadeNear: () => 25,
     fadeFar: () => 80,
-    colorNode: () => vec3(0.78, 0.97, 0.93),
+    colorNode: (light) => vec3(0.78, 0.97, 0.93).mul(light.ambient.add(light.key)),
     // §T.199 under the surface: drawn before the ocean so its refraction carries them (sprayPool.ts)
     renderOrder: SPRAY_UNDER_WATER_ORDER,
   });

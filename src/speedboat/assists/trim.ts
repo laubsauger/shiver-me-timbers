@@ -1,5 +1,5 @@
 /**
- * DRIVE TRIM + LANDING ASSIST (design doc §3: trim is a PERSISTENT drive angle; landing assist 0.5 by default).
+ * DRIVE TRIM + LANDING ASSIST (design doc §3: trim is a PERSISTENT drive angle; landing assist 0.5 by default — off since §T.207).
  *
  * TRIM. The stick/keys are a RATE: holding ↓ trims out (bow up) at `TRIM_RATE`, letting go leaves the drives where
  * they are. Range −6°…+8° (tech-research §3.1 trim axis). Rate 8°/s is ASSUMED (the full range in 1.75 s; tech-research
@@ -9,9 +9,11 @@
  * −2…+7°, centre 2.5°). It predicts the pitch at touchdown from the pitch rate and a ballistic time to land, and
  * commands trim against the error. Acts while the boat is RISING off a face (vy > 0.5 m/s) or airborne; decays back
  * to the player's trim otherwise. It never writes a force: the trim angle reaches the hull only through the drives.
- * Measured sensitivity (scratch T182, thrust-line emulation, 1.2–2 m ramps at C_v 6–10): −6° vs +8° of trim held
- * through the launch moves the landing pitch by 10–18°; the same through the air alone moves nothing, because a dry
- * prop makes no thrust — see docs/speedboat/controls.md "hooks" for the airborne trim authority the design wants.
+ * §T.207 DECISION: NOT in the Default preset (settings.ts; kept as a dial, cheap). Measured through the REAL trim path
+ * (HullWater.setControls trim, sand bars C_v 6–10 × 1.5–2.5 m, tests/speedboatAssist.test.ts), landing pitch off → on:
+ * 13.3 → 12.3°, 19.4 → 16.0°, 10.3 → 11.2°, 12.8 → 11.5°, 22.0 → 18.3° (worse at C_v 6) — and not because of the
+ * direction it trims: full trim-OUT on the face lands as flat or flatter on 4 of 5 bars (10.6/16.0/10.2/12.2/16.6°);
+ * tilting a drive either way lifts the prop about its pivot, less launch thrust. Trim swung only in the air: 0.0°.
  */
 import { GRAVITY, type BoatSimSample } from './simSample';
 

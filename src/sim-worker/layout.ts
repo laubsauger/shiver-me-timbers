@@ -15,6 +15,7 @@
  *   BOAT i            BOAT_FIXED + wakeCap×5 f64 per boat:
  *     IN   controls[4], resetSeq, resetPose[13]                           (main writes)
  *     OUT  pose[13], contact summary, effects record (§T.195 fx.ts), wake load samples (stepper writes, main reads)
+ *   (optional regions follow: AI per boat, BATCH, TRACE, WAKE WORLD + WAKE OUT — §T.207 `wakeRegionLength`)
  *
  * OWNERSHIP IS BY REGION, NOT BY LOCK. Between `kick` and `done` the main thread must not
  * touch the buffer; outside that window the stepper does not. A shard's stepper writes the
@@ -26,12 +27,12 @@
  * another boat (collision proxy, wake riding) reads WORLD, never another shard's OUT block:
  * OUT blocks are being written concurrently by other workers, WORLD is frozen for the tick,
  * so the result is a function of tick-k inputs only (§V2) regardless of which worker a boat
- * lives on. A shared WAKE FIELD belongs in a separate read-only SharedArrayBuffer written by
- * the main thread between ticks (one copy for every worker); on the transferable path it
- * would be a second transferred buffer per shard. See docs/speedboat/sim-worker.md.
+ * lives on. §T.207 the wake every hull feels follows the same rule: WAKE WORLD holds every
+ * boat's compact wake record (src/wake/wakeField.ts), frozen for the tick like WORLD.
  */
 
 import { FX_LEN } from './fx';
+import { WAKE_SRC_LEN } from '../wake/wakeField';
 
 /** 13 channels, the order rigid6 owns them in: position 3, quaternion 4, velocity 3, angularVelocity 3 */
 export const POSE_LEN = 13;
@@ -104,13 +105,14 @@ export const F = {
    * shard reads, so both boats of a pair agree (§V2). Ghosts (CONTACT_OFF_MASK) win over it.
    */
   CONTACT_SOFT_MASK: 18,
-  // 19 reserved
+  /** §T.207 main-written at construction: WAKE_SRC_LEN when the layout carries the WAKE regions, else 0 */
+  WAKE_SRC_LEN: 19,
 } as const;
 const HEADER_END_F64 = 20;
 
 /** boat block slots, relative to `boatOffset(i)` */
 export const B = {
-  CONTROLS: 0, // throttle, steer, trim, reserved
+  CONTROLS: 0, // throttle, steer, trim, Surge boost (§T.207: engine boost multiplier, ≤ 1 = stock)
   RESET_SEQ: 4,
   RESET_POSE: 5,
   POSE: 18,
@@ -194,6 +196,24 @@ export interface LayoutSpec {
   externalBoats?: number;
   /** §T.191: a TRACE region, max(1, batchCap) rows × boats × TRACE_LEN */
   trace?: boolean;
+  /**
+   * §T.207 wakes move every boat: a WAKE WORLD region (boats × WAKE_SRC_LEN, every boat's wake record at tick k — main
+   * writes, stepper READ-ONLY, like WORLD) and a WAKE OUT region (max(1, batchCap) rows × boats × WAKE_SRC_LEN, each
+   * stepped boat's record after that row's step — stepper writes); batch rows carry each external boat's record.
+   * Absent ⇒ no hull reads a wake and the layout is byte-identical to before.
+   */
+  wakeField?: boolean;
+}
+
+/**
+ * WAKE REGIONS (§T.207, src/wake/wakeField.ts), appended after TRACE only when `wakeField`:
+ *   WAKE WORLD  boats × WAKE_SRC_LEN                every boat's wake record at the START of tick k (after its step k−1)
+ *   WAKE OUT    rows × boats × WAKE_SRC_LEN          row j: each stepped boat's record after its step j
+ * The same freeze rule as WORLD: a stepper reads other boats' records from WAKE WORLD only, so a hull's field is a
+ * function of tick-k inputs whichever shard it lives on, and never its own same-tick wake (§V108).
+ */
+export function wakeRegionLength(s: LayoutSpec): number {
+  return s.wakeField ? (s.boats + Math.max(1, s.batchCap ?? 0) * s.boats) * WAKE_SRC_LEN : 0;
 }
 
 /**
@@ -213,7 +233,7 @@ export const BATCH_ROW_FIXED = 4;
 export const BATCH_ROW = { TICK: 0, TIME: 1, CONTACT_OFF_MASK: 2, CONTACT_SOFT_MASK: 3, PARAMS: 4 } as const;
 
 export function batchRowLength(s: LayoutSpec): number {
-  return BATCH_ROW_FIXED + s.oceanLen + s.seaLen + s.boats * (CONTROL_LEN + (s.aiLen ? AI_IN_LEN : 0)) + (s.externalBoats ?? 0) * POSE_LEN;
+  return BATCH_ROW_FIXED + s.oceanLen + s.seaLen + s.boats * (CONTROL_LEN + (s.aiLen ? AI_IN_LEN : 0)) + (s.externalBoats ?? 0) * (POSE_LEN + (s.wakeField ? WAKE_SRC_LEN : 0));
 }
 
 export function traceRegionLength(s: LayoutSpec): number {
@@ -230,7 +250,7 @@ export function boatBlockLength(wakeCap: number, aiLen = 0): number {
 }
 
 export function layoutByteLength(s: LayoutSpec): number {
-  return (HEADER_END_F64 + s.oceanLen + s.seaLen + s.boats * POSE_LEN + s.boats * boatBlockLength(s.wakeCap, s.aiLen ?? 0) + batchRegionLength(s) + traceRegionLength(s)) * 8;
+  return (HEADER_END_F64 + s.oceanLen + s.seaLen + s.boats * POSE_LEN + s.boats * boatBlockLength(s.wakeCap, s.aiLen ?? 0) + batchRegionLength(s) + traceRegionLength(s) + wakeRegionLength(s)) * 8;
 }
 
 type AnyBuffer = ArrayBuffer | SharedArrayBuffer;
@@ -255,8 +275,8 @@ export class BoatSimLayout {
     const i32 = new Int32Array(buffer, 0, HEADER_I32);
     if (spec) {
       for (const [k, v] of Object.entries(spec)) {
-        if (k === 'trace') {
-          if (typeof v !== 'boolean') throw new Error(`sim layout: trace must be a boolean, got ${v}`);
+        if (k === 'trace' || k === 'wakeField') {
+          if (typeof v !== 'boolean') throw new Error(`sim layout: ${k} must be a boolean, got ${v}`);
           continue;
         }
         if (!Number.isInteger(v) || v < 0) throw new Error(`sim layout: ${k} must be a non-negative integer, got ${v}`);
@@ -280,6 +300,7 @@ export class BoatSimLayout {
       const fh = new Float64Array(buffer, 0, HEADER_END_F64);
       fh[F.EXTERNAL_BOATS] = spec.externalBoats ?? 0;
       fh[F.TRACE_LEN] = spec.trace ? TRACE_LEN : 0;
+      fh[F.WAKE_SRC_LEN] = spec.wakeField ? WAKE_SRC_LEN : 0;
     }
     if (i32[H.MAGIC] !== LAYOUT_MAGIC || i32[H.VERSION] !== LAYOUT_VERSION) {
       throw new Error(`sim layout: bad magic/version ${i32[H.MAGIC]}/${i32[H.VERSION]}`);
@@ -289,6 +310,8 @@ export class BoatSimLayout {
     const trLen = fh[F.TRACE_LEN];
     if (!(Number.isInteger(ext) && ext >= 0 && ext <= i32[H.BOATS])) throw new Error(`sim layout: bad external boat count ${ext}`);
     if (trLen !== 0 && trLen !== TRACE_LEN) throw new Error(`sim layout: trace record ${trLen} f64, this build writes ${TRACE_LEN}`);
+    const wsLen = fh[F.WAKE_SRC_LEN];
+    if (wsLen !== 0 && wsLen !== WAKE_SRC_LEN) throw new Error(`sim layout: wake record ${wsLen} f64, this build writes ${WAKE_SRC_LEN}`);
     this.spec = Object.freeze({
       boats: i32[H.BOATS],
       wakeCap: i32[H.WAKE_CAP],
@@ -299,6 +322,7 @@ export class BoatSimLayout {
       ...(i32[H.BATCH_CAP] > 0 ? { batchCap: i32[H.BATCH_CAP] } : {}),
       ...(ext > 0 ? { externalBoats: ext } : {}),
       ...(trLen > 0 ? { trace: true } : {}),
+      ...(wsLen > 0 ? { wakeField: true } : {}),
     });
     if (buffer.byteLength < layoutByteLength(this.spec)) {
       throw new Error(`sim layout: buffer ${buffer.byteLength} B too short for its own header`);
@@ -379,6 +403,28 @@ export class BoatSimLayout {
     if (!(j >= 0 && j < rows)) throw new Error(`sim layout: trace row ${j} out of [0, ${rows})`);
     if (!(i >= 0 && i < this.spec.boats)) throw new Error(`sim layout: boat ${i} out of [0, ${this.spec.boats})`);
     return this.boatsOffset + this.spec.boats * this.blockLength + batchRegionLength(this.spec) + (j * this.spec.boats + i) * TRACE_LEN;
+  }
+
+  /** §T.207: boat i's slot in WAKE WORLD (tick-k record, main-written); throws without the wake regions */
+  wakeWorldOffset(i: number): number {
+    if (!this.spec.wakeField) throw new Error('sim layout: no WAKE regions (build the layout with wakeField)');
+    if (!(i >= 0 && i < this.spec.boats)) throw new Error(`sim layout: boat ${i} out of [0, ${this.spec.boats})`);
+    return this.boatsOffset + this.spec.boats * this.blockLength + batchRegionLength(this.spec) + traceRegionLength(this.spec) + i * WAKE_SRC_LEN;
+  }
+
+  /** §T.207: boat i's WAKE OUT record for row j (row 0 = a classic kick's tick) */
+  wakeOutOffset(j: number, i: number): number {
+    const rows = Math.max(1, this.spec.batchCap ?? 0);
+    if (!(j >= 0 && j < rows)) throw new Error(`sim layout: wake row ${j} out of [0, ${rows})`);
+    return this.wakeWorldOffset(0) + (this.spec.boats + j * this.spec.boats + i) * WAKE_SRC_LEN;
+  }
+
+  /** §T.207: external boat i's wake record slot inside batch row `rowOffset` (after the external poses) */
+  batchExternalWakeOffset(rowOffset: number, i: number): number {
+    if (!this.spec.wakeField) throw new Error('sim layout: no WAKE regions (build the layout with wakeField)');
+    const ext = this.spec.externalBoats ?? 0;
+    const k = i - (this.spec.boats - ext);
+    return this.batchExternalPoseOffset(rowOffset, i) + (ext - k) * POSE_LEN + k * WAKE_SRC_LEN;
   }
 
   /** a byte-exact copy of the stepper's OUT region for one boat — what the V2 hash is taken over (AI OUT included, AI IN not) */

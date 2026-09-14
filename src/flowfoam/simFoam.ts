@@ -43,8 +43,8 @@
  *              lift(ΔV, d_prop)·ΔV_c(s)/b(s) across a Gaussian of that width,
  *              floored at the tier texel (the splat-σ law, so the cross-track
  *              integral is kept when it is band-limited).
- *   SHEETS     §T.199 vessel mode: each hull's chine spray sheets as two foam lines
- *              aft-and-outboard at tan α = v_out/U (`packChineSheet`) — the V.
+ *   SHEETS     Vessel mode: retained world-space emissions, carrying their own
+ *              launch direction, volume and age. Later hull motion cannot reorient them.
  *   FOAM  (R)  breakRate·ΔB + churnRate·(churn + jet) + sheets
  *   SLICK (G)  slickPerFoam·FOAM — the turbulence proxy: the lane is laid where
  *              whitewater was made and outlives it by the slick half-life. The
@@ -67,6 +67,7 @@
  * Per-texel noise: none (§B4).
  */
 import type { ChineSheetEmitter } from '../wake/chineContact';
+import { CHINE_EMISSION_SLOTS, packChineEmission, type PackedChineEmission } from '../wake/chineEmissions';
 import { If, Loop, float, int, ivec2, mix, select, smoothstep, textureLoad, uniform, uniformArray, vec2, vec4 } from 'three/tsl';
 import * as THREE from 'three/webgpu';
 import { waterlineSheetLaunch } from '../foam/bowSpray';
@@ -340,7 +341,7 @@ export const CHINE_SHEET_REACH = 5;
  * L = U * (flight time + mixing time). The landed source follows
  * y(s) = halfWidth + launchSlope * L * (1 - exp(-s/L)), not an endless straight ray.
  * Each arm integrates to Q_side/h over its axial exponential and lateral Gaussian.
- * A live emitter additionally bounds deposition by distance since contact began.
+ * This is the steady-tow reference; live vessels use retained emission packets.
  * This is a surface-foam model; airborne spray retains its ballistic launch.
  */
 export function packChineSheet(bow: Readonly<WaterlineSpray>, speed: number): { a: [number, number, number, number]; b: [number, number, number, number] } | null {
@@ -359,18 +360,11 @@ export function packChineSheet(bow: Readonly<WaterlineSpray>, speed: number): { 
   };
 }
 
-/** Live source axis follows translation, rather than rotating with the hull in sideslip. */
-export function packMovingChineSheet(e: ChineSheetEmitter) {
-  const q = packChineSheet(e.bow, e.speed);
-  if (q) { q.b[0] = -e.vx / e.speed; q.b[1] = -e.vz / e.speed; }
-  return q;
-}
-
 /**
  * §T.199 coverage rate (1/s) the two sheet lines of one packed hull lay at (dx, dz) from her emission centroid (header of
  * `packChineSheet`), on a tier of texel `texel` (the splat-σ law, as the ribbon). ONE expression for CPU and TSL.
  */
-export function chineSheetFoamRate<T>(A: SimFoamArith<T>, dx: T, dz: T, a: readonly [T, T, T, T], b: readonly [T, T, T, T], texel: T, front?: T): T {
+export function chineSheetFoamRate<T>(A: SimFoamArith<T>, dx: T, dz: T, a: readonly [T, T, T, T], b: readonly [T, T, T, T], texel: T): T {
   const zero = A.k(0);
   const [, , halfWidth, drive] = a;
   const [ax, az, tanA, L] = b;
@@ -384,11 +378,7 @@ export function chineSheetFoamRate<T>(A: SimFoamArith<T>, dx: T, dz: T, a: reado
   const outboard = A.add(halfWidth, A.mul(A.mul(tanA, L), A.sub(A.k(1), survival)));
   const b0 = A.add(A.k(CHINE_SHEET_WIDTH), A.mul(A.k(CHINE_SHEET_SPREAD), ahead));
   const bEff = A.sqrt(A.add(A.mul(b0, b0), A.mul(texel, texel)));
-  let start = A.smoothstep(A.neg(bEff), bEff, along);
-  if (front !== undefined) {
-    // Filter inward only. A source cannot deposit beyond its contact front.
-    start = A.mul(start, A.smoothstep(zero, bEff, A.sub(front, ahead)));
-  }
+  const start = A.smoothstep(A.neg(bEff), bEff, along);
   const landing = A.div(survival, L);
   const rate = A.mul(A.div(A.mul(drive, landing), A.mul(A.k(Math.sqrt(2 * Math.PI)), bEff)), start);
   let sum = zero;
@@ -417,13 +407,52 @@ export function chineSheetFoamCpu(sheets: readonly ({ bow: Readonly<WaterlineSpr
   const B = { ...NUM, le: (a: number, b: number) => (a <= b ? 1 : 0), and: (a: number, b: number) => a * b };
   let sum = 0;
   for (const e of sheets) {
-    const moving = 'front' in e;
-    const q = moving ? packMovingChineSheet(e) : packChineSheet(e.bow, e.speed);
-    if (!q) continue;
-    if (!chineSheetInReach(B, x - q.a[0], z - q.a[1], q.a, q.b, texel)) continue;
-    sum += chineSheetFoamRate(NUM, x - q.a[0], z - q.a[1], q.a, q.b, texel, moving ? e.front : undefined);
+    if ('emissions' in e) {
+      sum += retainedChineFoamCpu([e], x, z, texel);
+      continue;
+    }
+    // Steady-tow calibration inputs have no emission timeline. Live vessel
+    // inputs above always use their retained packets, as the GPU does.
+    const q = packChineSheet(e.bow, e.speed);
+    if (!q || !chineSheetInReach(B, x - q.a[0], z - q.a[1], q.a, q.b, texel)) continue;
+    sum += chineSheetFoamRate(NUM, x - q.a[0], z - q.a[1], q.a, q.b, texel);
   }
   return sum;
+}
+
+/** Normalized two-sided packet footprint; CPU and GPU share this expression. */
+export function chineEmissionRate<T>(A: SimFoamArith<T>, along: T, across: T, offset: T, rate: T, varAlong: T, varAcross: T): T {
+  const axial = A.div(A.mul(along, along), varAlong);
+  let sum = A.k(0);
+  for (const side of [-1, 1]) {
+    const n = A.sub(across, A.mul(A.k(side), offset));
+    const exponent = A.mul(A.k(-0.5), A.add(axial, A.div(A.mul(n, n), varAcross)));
+    sum = A.add(sum, A.exp(exponent));
+  }
+  return A.div(A.mul(rate, sum), A.mul(A.k(2 * Math.PI), A.sqrt(A.mul(varAlong, varAcross))));
+}
+
+export function packedChineFoamCpu(packets: readonly PackedChineEmission[], x: number, z: number, texel: number): number {
+  let sum = 0;
+  for (const q of packets) {
+    const [cx, cz, offset, rate] = q.a;
+    const [fx, fz, va, vl] = q.b;
+    const along = (x - cx) * fx + (z - cz) * fz;
+    const across = (z - cz) * fx - (x - cx) * fz;
+    const varAlong = va + texel * texel, varAcross = vl + texel * texel;
+    if (along * along >= 16 * varAlong || Math.abs(across) >= offset + 4 * Math.sqrt(varAcross)) continue;
+    sum += chineEmissionRate(NUM, along, across, offset, rate, varAlong, varAcross);
+  }
+  return sum;
+}
+
+export function retainedChineFoamCpu(sheets: readonly ChineSheetEmitter[], x: number, z: number, texel: number): number {
+  const packets: PackedChineEmission[] = [];
+  for (const e of sheets) for (const emission of e.emissions) {
+    const q = packChineEmission(emission, e.time, CHINE_SHEET_THICKNESS, CHINE_SHEET_SLIDE);
+    if (q) packets.push(q);
+  }
+  return packedChineFoamCpu(packets, x, z, texel);
 }
 
 // ---------------------------------------------------------------------------
@@ -733,8 +762,8 @@ export interface SimFoamCpuFrame {
   jets?: readonly PropWashInput[];
   /** §T.195 vessel mode: per-vessel slots (hero first) — hullVel/lift/depth are then blended per point, jets bounded */
   vessels?: readonly VesselChurnSlot<number>[];
-  /** §T.199 vessel mode: each hull's waterline spray and speed (hero first) — the chine sheet lines */
-  sheets?: readonly { bow: Readonly<WaterlineSpray>; speed: number }[];
+  /** Live vessels carry retained emissions; bare bow/speed inputs are steady-tow calibration references. */
+  sheets?: readonly ({ bow: Readonly<WaterlineSpray>; speed: number } | ChineSheetEmitter)[];
   /** §T.199 the near-hull tier's fields: sampled where the tier's own texel resolves it, cross-faded in (`simNearWeight`) */
   near?: SimFoamCpuFields;
 }
@@ -959,13 +988,15 @@ export function createSimFoamField(
   const nearOps = nearSolver ? makeOps(nearSolver.n, { slope: nearSolver.slopeTexture, head: nearSolver.headTarget.texture }) : null;
   const nearGrid: SimGrid | null = nearSolver ? { n: nearSolver.n, texel: nearSolver.texel, edge: Math.max(1, nearSolver.sponge.width * nearSolver.n) } : null;
   const RESAMPLE_NODE = { ...NODE, lit: NODE.k } as unknown as SimResampleOps<any, any>;
-  // §T.199 per vessel slot: the chine sheet lines [x, z, halfWidth, drive] and [aftX, aftZ, tanα, L]; drive 0 = idle
-  const sheetA = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4(0, 0, 0.3, 0));
-  const sheetB = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4(0, 1, 0, 1));
+  const packetSlots = Math.max(1, vesselSlots * CHINE_EMISSION_SLOTS);
+  const sheetA = Array.from({ length: packetSlots }, () => new THREE.Vector4());
+  const sheetB = Array.from({ length: packetSlots }, () => new THREE.Vector4(0, 1, 1, 1));
+  const sheetBounds = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4());
   const uSheetA = vesselSlots > 0 ? uniformArray(sheetA) : null;
   const uSheetB = vesselSlots > 0 ? uniformArray(sheetB) : null;
-  const sheetFront = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4());
-  const uSheetFront = vesselSlots > 0 ? uniformArray(sheetFront) : null;
+  const uSheetBounds = vesselSlots > 0 ? uniformArray(sheetBounds) : null;
+  const sheetCounts = Array.from({ length: Math.max(1, vesselSlots) }, () => new THREE.Vector4());
+  const uSheetCounts = vesselSlots > 0 ? uniformArray(sheetCounts) : null;
   let sheets: readonly ChineSheetEmitter[] = [];
   const frame: SimFoamFrame<any> = {
     hullVelX: uHullVel.x,
@@ -1087,17 +1118,29 @@ export function createSimFoamField(
         jet.addAssign(jetFoamRate(NODE, dx, dz, pos.z, pos.w, meta.x.add(meta.z), radius, float(tierTexel), meta.w.clamp(0, JET_SPREAD), true));
       });
     }
-    // §T.199 the chine sheet lines of every hull (header of `packChineSheet`)
+    // Reject whole vessel histories before scanning their bounded packet lists.
     const sheet = float(0).toVar();
     for (let k = 0; k < vesselSlots; k++) {
-      const a = uSheetA!.element(int(k));
-      const b = uSheetB!.element(int(k));
-      const dx = worldXZ.x.sub(a.x);
-      const dz = worldXZ.y.sub(a.y);
-      const A4 = [a.x, a.y, a.z, a.w] as const;
-      const B4 = [b.x, b.y, b.z, b.w.max(1e-3)] as const;
-      If(a.w.greaterThan(0).and(dx.mul(b.x).add(dz.mul(b.y)).lessThan(uSheetFront!.element(int(k)).x)).and(chineSheetInReach(NODE_BOOL, dx, dz, A4, B4, float(tierTexel))), () => {
-        sheet.addAssign(chineSheetFoamRate(NODE, dx, dz, A4, B4, float(tierTexel), uSheetFront!.element(int(k)).x));
+      const bounds = uSheetBounds!.element(int(k));
+      const margin = 4 * Math.SQRT2 * tierTexel;
+      const inside = bounds.z.greaterThan(bounds.x).and(worldXZ.x.greaterThan(bounds.x.sub(margin))).and(worldXZ.x.lessThan(bounds.z.add(margin)))
+        .and(worldXZ.y.greaterThan(bounds.y.sub(margin))).and(worldXZ.y.lessThan(bounds.w.add(margin)));
+      If(inside, () => {
+        Loop({ start: int(0), end: int(uSheetCounts!.element(int(k)).x), condition: '<' }, ({ i }: { i: any }) => {
+          const index = i.add(k * CHINE_EMISSION_SLOTS);
+          const a = uSheetA!.element(index);
+          const b = uSheetB!.element(index);
+          const dx = worldXZ.x.sub(a.x);
+          const dz = worldXZ.y.sub(a.y);
+          const along = dx.mul(b.x).add(dz.mul(b.y));
+          const across = dz.mul(b.x).sub(dx.mul(b.y));
+          const longitudinal = b.z.add(tierTexel * tierTexel);
+          const lateral = b.w.add(tierTexel * tierTexel);
+          If(a.w.greaterThan(0).and(along.mul(along).lessThan(longitudinal.mul(16)))
+            .and(across.abs().lessThan(a.z.add(lateral.sqrt().mul(4)))), () => {
+            sheet.addAssign(chineEmissionRate(NODE, along, across, a.z, a.w, longitudinal, lateral));
+          });
+        });
       });
     }
     const foam = foamOut.add(uChurnRate.mul(jet)).add(sheet);
@@ -1138,8 +1181,9 @@ export function createSimFoamField(
     setPropWash(inputs: readonly PropWashInput[]): void {
       jets = inputs.slice(0, jetSlots);
     },
-    /** §T.199 vessel mode: this tick's hulls' waterline spray + speed (hero first); at most `vesselSlots` drawn */
+    /** Retained per-vessel emissions (hero first); at most `vesselSlots` histories drawn. */
     setChineSheets(inputs: readonly ChineSheetEmitter[]): void {
+      if (inputs.some(e => e.emissions.length > CHINE_EMISSION_SLOTS)) throw new RangeError('Too many retained chine emissions');
       sheets = inputs.slice(0, vesselSlots);
     },
     /** RENDER FRAME, after `wakeSim.step` (the caller writes the shared centre): this tick's hull */
@@ -1183,15 +1227,27 @@ export function createSimFoamField(
       }
       for (let k = 0; k < vesselSlots; k++) {
         const e = sheets[k];
-        const q = e ? packMovingChineSheet(e) : null;
-        sheetFront[k].x = e ? Math.max(0, e.front) : 0;
-        if (q && [...q.a, ...q.b].every(Number.isFinite)) {
-          sheetA[k].set(...q.a);
-          sheetB[k].set(...q.b);
-        } else {
-          sheetA[k].set(0, 0, 0.3, 0);
-          sheetB[k].set(0, 1, 0, 1);
+        let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+        const count = e ? e.emissions.length : 0;
+        sheetCounts[k].x = count;
+        for (let j = 0; j < count; j++) {
+          const index = k * CHINE_EMISSION_SLOTS + j;
+          const emission = e?.emissions[j];
+          const q = emission ? packChineEmission(emission, e.time, CHINE_SHEET_THICKNESS, CHINE_SHEET_SLIDE) : null;
+          if (q) {
+            sheetA[index].set(...q.a);
+            sheetB[index].set(...q.b);
+            const radius = q.a[2] + 4 * Math.sqrt(q.b[2] + q.b[3]);
+            minX = Math.min(minX, q.a[0] - radius); minZ = Math.min(minZ, q.a[1] - radius);
+            maxX = Math.max(maxX, q.a[0] + radius); maxZ = Math.max(maxZ, q.a[1] + radius);
+          } else {
+            sheetA[index].set(0, 0, 0, 0);
+            sheetB[index].set(0, 1, 1, 1);
+          }
         }
+        // A zero-area box explicitly marks an empty history.
+        if (minX === Infinity) sheetBounds[k].set(0, 0, 0, 0);
+        else sheetBounds[k].set(minX, minZ, maxX, maxZ);
       }
       uBreakRate.value = Math.max(0, fin(p.simBreakRate, 0));
       uChurnRate.value = Math.max(0, fin(p.simChurnRate, 0));

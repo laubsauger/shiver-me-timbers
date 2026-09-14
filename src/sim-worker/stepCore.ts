@@ -25,7 +25,8 @@
  *  - seabed, fetch/swell shadow       → §T.191 `world` (worldData.ts): the page's baked seabed grid and
  *                                      fetch land mask, rebuilt here into the SAME mirror inputs the
  *                                      page mirror uses (bit-identical, tests/simWorkerWorldData)
- *  - wake                             → NOT wired (§T.170)
+ *  - wake                             → §T.207 `wakeField` layouts: every other boat's record in WAKE WORLD
+ *                                      (src/wake/wakeField.ts), added to the pressure head this hull samples
  */
 import { SIM_DT } from '../core/loop';
 import type { OceanParams } from '../params/ocean';
@@ -64,6 +65,7 @@ import { SubstepPositions, writeTrace } from './trace';
 import { writeBoatFx } from './fx';
 import { gridSeabed, maskedFetchField, raceBed, type SimWorldData } from './worldData';
 import { readParams } from './paramsVector';
+import { WakeField, writeWakeSource } from '../wake/wakeField';
 
 /**
  * CONTROLS → DRIVES (§T.179). The drive lives in the hull contact: `HullWater.setControls(steer, throttle)` yaws the
@@ -116,7 +118,11 @@ export class BoatSimCore {
   private readonly slots = new Map<number, BoatSlot>();
   private paramsVersion = Number.NaN;
   private time = 0;
-  private readonly sampler = (x: number, z: number): number => this.ocean.pressureHeadAt(x, z, this.time);
+  /** §T.207 the field of every OTHER boat's wake, prepared per boat before its patch is sampled (§V108) */
+  private readonly wakeField = new WakeField();
+  private wakeOn = false;
+  private readonly sampler = (x: number, z: number): number =>
+    this.wakeOn ? this.ocean.pressureHeadAt(x, z, this.time) + this.wakeField.heightAt(x, z) : this.ocean.pressureHeadAt(x, z, this.time);
   private slot: BoatSlot | null = null;
   readonly pilot: RacePilot | null;
   private readonly contacts: { hull: CollisionHull; world: StaticWorld | null; boats: boolean; params: Readonly<BoatCollideParams> } | null;
@@ -227,6 +233,7 @@ export class BoatSimCore {
       const b = this.slotFor(i);
       const seq = f[o + B.RESET_SEQ];
       const justReset = seq !== b.resetSeq && b.resetSeq !== 0;
+      const placed = seq !== b.resetSeq;
       if (seq !== b.resetSeq) {
         // V108 teleport contract: pose from the request, every per-location memory forgotten
         const s = b.state;
@@ -241,6 +248,8 @@ export class BoatSimCore {
         b.resetSeq = seq;
       }
       if (b.resetSeq === 0) throw new Error(`sim core: boat ${i} stepped before it was placed (write a reset pose first)`);
+      // §T.207 Surge: the race's thrust multiplier as the engine boost (controls[3]; 0/≤ 1 = stock, bit-identical)
+      b.hw.setBoost(f[o + B.CONTROLS + 3]);
       if (this.pilot !== null && this.pilot.drives(i)) {
         // §T.186: the pilot reads tick-k state (own pose, WORLD, the mirror at this.time, its AI block) and
         // returns the drive angle in rad; its memory stays in the buffer
@@ -248,7 +257,8 @@ export class BoatSimCore {
         this.pilot.control(i, L, b.state, this.ocean, this.time, justReset, po);
         b.throttle = po.throttle;
         b.steer = po.steer / this.hull.drives[0].maxSteerRad;
-        b.hw.setControls(po.steer, po.throttle);
+        // §T.207: the pilot's trim request reaches the drives through the SAME seam mapping the player's step uses
+        b.hw.setControls(po.steer, po.throttle, unitTrimToRad(po.trim ?? 0));
       } else {
         b.throttle = f[o + B.CONTROLS];
         b.steer = f[o + B.CONTROLS + 1];
@@ -264,7 +274,10 @@ export class BoatSimCore {
         if (cx.boats) collideBoatWithFleet(i, b.state, cx.hull, f, L.worldOffset, L.spec.boats, i32[H.CONTACT_OFF_MASK], SIM_DT, b.collide, cx.params, f[F.CONTACT_SOFT_MASK] >>> 0);
         if (cx.world || this.bed) collideBoatWithWorld(b.state, cx.hull, cx.world, this.bed, SIM_DT, b.collide, cx.params);
       }
+      const wakes = L.spec.wakeField === true;
+      if (wakes) this.wakeOn = this.wakeField.prepare(f, L.wakeWorldOffset(0), L.spec.boats, i, b.state.position[0], b.state.position[2]) > 0;
       b.hw.samplePatch(this.sampler, b.state, SIM_DT);
+      this.wakeOn = false;
       const n = planingSubsteps(b.hw, b.state, SIM_DT);
       this.slot = b;
       stepRigid6(b.state, this.hull, SIM_DT, n, tracing ? this.positions.begin(this.force) : this.force, b.memory);
@@ -292,6 +305,8 @@ export class BoatSimCore {
       f[o + B.WAKE_DEFICIT] = w.deficit;
       f[o + B.WAKE_RESCALE] = w.rescale;
       f[o + B.WAKE_OVERFLOW] = w.count - kept;
+      // §T.207: this boat's wake record after its step (its previous one is its own WAKE WORLD slot; V108 on a placement)
+      if (wakes) writeWakeSource(f, L.wakeOutOffset(row, i), f, L.wakeWorldOffset(i), placed, s, hw.wake, SIM_DT);
       // §T.195: this step's prop jets + waterline spray, next to the pose they belong to (fx.ts, the ONE writer)
       writeBoatFx(hw, s, f, o + B.FX);
       const base = o + B.WAKE;

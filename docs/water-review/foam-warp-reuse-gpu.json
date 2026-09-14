@@ -1,0 +1,23 @@
+{
+  "size": 128,
+  "results": [
+    {
+      "metresPerPixel": 0.125,
+      "maxDifference": 2.3290514945983887e-05,
+      "minMask": 0,
+      "maxMask": 0.8398215770721436
+    },
+    {
+      "metresPerPixel": 2,
+      "maxDifference": 0,
+      "minMask": 0.0018091504462063313,
+      "maxMask": 0.8504084944725037
+    },
+    {
+      "metresPerPixel": 16,
+      "maxDifference": 0,
+      "minMask": 0.00040508504025638103,
+      "maxMask": 0.9499789476394653
+    }
+  ]
+}

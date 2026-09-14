@@ -181,3 +181,9 @@ preset. In the shipped worlds, 27% (pirate) and 20% (raft) of the field has
 K < 0.9. The raft berths lie in the default swell's lee (drownedRidge K 0.05,
 dome 0.12, cirque 0.35), so the raft now starts on calmer water. That is the
 feature doing its job, not a regression.
+
+
+Current packing note (water pass 27): the original R/G channels documented
+above are unchanged, but the texture now uses RGBA16F. B/A extend offshore
+fetch/K onto land for shore runup. This adds no sampler; see
+`docs/water-improvement-plan.md` pass 27 for memory, bake cost and validation.

@@ -25,10 +25,14 @@ export interface BoatSimSample {
   airborne: boolean;
   /** mean prop immersion over the drives, 0 (dry) … 1 (buried) — HullWater.driveImmersion */
   propImmersion: number;
+  /** highest drive crank rpm of the engine model (HullWater.driveRpm), rpm — §T.207 the Governor reads it */
+  rpm: number;
+  /** the engine's rated crank rpm (HullWater params.engine.ratedRpm); 0 = unknown */
+  ratedRpm: number;
 }
 
 export function emptySimSample(): BoatSimSample {
-  return { speed: 0, pitch: 0, pitchRate: 0, roll: 0, vy: 0, heightAboveWater: 0, airborne: false, propImmersion: 1 };
+  return { speed: 0, pitch: 0, pitchRate: 0, roll: 0, vy: 0, heightAboveWater: 0, airborne: false, propImmersion: 1, rpm: 0, ratedRpm: 0 };
 }
 
 /** fill `out` from a rigid6 state and the HullWater that last evaluated it */
@@ -58,5 +62,9 @@ export function readBoatSim(hw: Readonly<HullWater>, s: Readonly<Rigid6State>, o
   }
   out.propImmersion = n > 0 ? imm / n : 1;
   out.airborne = hw.wet.count === 0 && gear === 0;
+  let rpm = 0;
+  for (let k = 0; k < hw.driveRpm.length; k++) if (hw.driveRpm[k] > rpm) rpm = hw.driveRpm[k];
+  out.rpm = rpm;
+  out.ratedRpm = hw.params.engine.ratedRpm;
   return out;
 }

@@ -34,6 +34,7 @@ import type { SkyParams } from '../params/sky';
 import { shadowTexelSize, snapShadowCenter } from './shadowMath';
 import { installUncoloredShadow } from './uncoloredShadowNode';
 import type { KeyLight } from './moonCycle';
+import { updateParticleLighting } from './particleLighting';
 import {
   fogRange,
   hemisphereColors,
@@ -218,6 +219,7 @@ export function createLighting(scene: THREE.Scene, p: SkyParams) {
       // nightAmbientFloor keeps silhouettes readable on a MOONLESS night; a
       // moon lifts it further. Bounded 0..1 at source in ambientLevel().
       hemi.intensity = p.ambientIntensity * key.ambient;
+      updateParticleLighting(sunLight, hemi);
 
       // Fog colour must equal what the SKY paints at eye level, or the far
       // water meets the horizon on a visible seam. The background node

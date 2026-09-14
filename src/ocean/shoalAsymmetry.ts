@@ -322,7 +322,7 @@ export function shoalAsymmetrySample(
  * energy-weighted mean of −k̂. The sign is measured, not assumed:
  * h(k,t) = h0(k)e^{iωt} + conj(h0(−k))e^{−iωt} sends the h0(k) energy toward
  * −k, and tests/shoalingAsymmetry.test.ts checks ŝ against −∂η/∂t·∇η on the
- * mirror. For the swell train this is OPPOSITE `swellDirection`. k̂ needs no
+ * mirror. For the swell train this now agrees with `swellDirection`. k̂ needs no
  * domain. Cached per h0 array, which every rebuild replaces rather than mutates.
  */
 type BandMoments = { x: number; z: number; q: number; r: number };

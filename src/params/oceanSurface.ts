@@ -831,7 +831,7 @@ export const oceanSurfaceParams = registerParams(
      * "depending on the sun angle it's too much" — which side of the bloom knee
      * the wake lands on was being decided by the sky.
      */
-    wakeFoamColor: '#b9ccc4',
+    wakeFoamColor: '#70bbb5',
     /**
      * Optical depth of the wake's aerated layer. The wake mask was compositing
      * through a hard alpha, so every texel above the dissolve gate reached full

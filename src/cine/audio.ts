@@ -21,7 +21,18 @@
  * one sanctioned way to reach the shared context and buses without a second
  * audio path.
  */
-import type { AudioSystem } from '../audio';
+import type { EngineBuses } from '../audio/engine';
+
+/**
+ * What a shoot needs of a page's audio: the unlock, and the §V95 seam onto the
+ * ONE graph. The pirate `AudioSystem` is this as-is; the speedboat page adapts
+ * its `AudioEngine` (src/speedboat/cine/host.ts). Structural, so this module
+ * pulls in neither page's audio.
+ */
+export interface CineAudioSource {
+  resume(): Promise<void>;
+  attach(make: (ctx: BaseAudioContext, buses: EngineBuses) => { update(dt: number): void; dispose(): void }): () => void;
+}
 
 /** what the browser will actually give us, best first */
 const MIME_CANDIDATES = [
@@ -49,7 +60,7 @@ export class ShotAudio {
   private startedAt = 0;
   private mime = '';
 
-  constructor(private audio: AudioSystem) {}
+  constructor(private audio: CineAudioSource) {}
 
   static get supported(): boolean {
     return pickMime() !== undefined;

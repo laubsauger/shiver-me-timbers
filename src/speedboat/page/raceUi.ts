@@ -55,6 +55,8 @@ import type { DashMount } from './dashMount';
 import type { PageChrome } from './pageChrome';
 import { RaceRadio } from './raceRadio';
 import { applyUiAssists, defaultRaceSettings, loadRaceSettings, saveRaceSettings, type KeyValueStore } from './raceSettings';
+import { SESSION_MODE_LABEL, sessionModeHref, type SessionMode } from './sessionMode';
+import { SEA_OPTIONS } from '../ui/boatSelect';
 
 export interface RaceUiDeps {
   parent: HTMLElement;
@@ -85,6 +87,13 @@ export interface RaceUiDeps {
   graphics?: Pick<SettingsStore, 'get' | 'applyQuality'>;
   /** §T.208 the instruments on the hero's 3D dash (page/dashMount.ts); fed the same model as the HUD */
   dash?: Pick<DashMount, 'setCourse' | 'setRoster' | 'update'> | null;
+  /**
+   * page/sessionMode.ts. 'free': no boat select (`openSelect` starts the ride with the stored selection), no race panels
+   * or radio, pause without restart/boat select and with a Sea row (`onSea`). Default 'race'.
+   */
+  mode?: SessionMode;
+  /** free roam's pause Sea row changed the sea (a SEA_OPTIONS label) */
+  onSea?(sea: string): void;
 }
 
 export interface RaceUiFrame {
@@ -218,11 +227,19 @@ export const GATE_MARKER_Y = 1.5;
 export const PACE_MARKER_Y = 8.5;
 export const START_MARKER_Y = 6;
 
+/** free roam's HUD input: no race, the player alone on the water (instruments and crash overlay only) */
+const FREE_ROAM_STATE: RaceState = {
+  phase: 'racing', raceTime: 0, lapTimes: [],
+  standings: [{ racerId: 0, position: 1, lap: 1, nextElement: 0, progress: 0, gapToLeader: 0, finished: false, state: 'racing', surge: 0 }],
+};
+
 // ── the UI ─────────────────────────────────────────────────────────────────────────────────────
 
 export function createRaceUi(d: RaceUiDeps): RaceUi {
   injectSpeedboatUiCss();
   void loadSpeedboatFonts();
+  const mode: SessionMode = d.mode ?? 'race';
+  const free = mode === 'free';
   const store = d.store;
   const settings = loadRaceSettings(store);
   let selection: BoatSelection = settings.lastSelection ?? { ...DEFAULT_SELECTION, sea: d.defaultSea ?? 'Calm' };
@@ -232,6 +249,7 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
 
   const hc = prepareCourse(d.course);
   const hud = new RaceHud(d.parent);
+  hud.setFreeRoam(free);
   hud.setCourse(hc);
   d.dash?.setCourse(hc);
   let roster: HudRacer[] = buildRoster(selection.paintId, selection.number);
@@ -281,7 +299,11 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
     fullscreen: d.chrome?.fullscreen.supported() ? d.chrome.fullscreen.isActive() : null,
     devOverlays: d.chrome?.devOverlays(),
   });
-  const pauseState = () => ({ assists: settings.assists, camera: cameraMode, audio: settings.audio, hudScale: settings.hudScale, ...chromeState() });
+  const pauseState = () => ({
+    assists: settings.assists, camera: cameraMode, audio: settings.audio, hudScale: settings.hudScale, ...chromeState(),
+    mode: SESSION_MODE_LABEL[mode], ...(free ? { sea: selection.sea } : {}),
+  });
+
   /** the boat select was opened from the pause: its Back returns to the paused race */
   let selectFromPause = false;
 
@@ -291,11 +313,24 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
     pauseState(),
     {
       onResume: closePause,
-      onBoatSelect: () => {
-        pause.close();
-        selectFromPause = true;
-        openSelectScreen();
-      },
+      onBoatSelect: free
+        ? undefined
+        : () => {
+            pause.close();
+            selectFromPause = true;
+            openSelectScreen();
+          },
+      onMode: () => location.assign(sessionModeHref(free ? 'race' : 'free', location.href)),
+      onSea: free
+        ? (dir) => {
+            const i = SEA_OPTIONS.indexOf(selection.sea as (typeof SEA_OPTIONS)[number]);
+            selection = { ...selection, sea: SEA_OPTIONS[(Math.max(0, i) + dir + SEA_OPTIONS.length) % SEA_OPTIONS.length] };
+            settings.lastSelection = { ...selection };
+            persist();
+            d.onSea?.(selection.sea);
+            pause.setState({ sea: selection.sea });
+          }
+        : undefined,
       onGraphics: d.graphics
         ? (dir) => {
             const g = d.graphics as NonNullable<typeof d.graphics>;
@@ -306,15 +341,20 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
         : undefined,
       onFullscreen: d.chrome ? () => d.chrome?.fullscreen.toggle() : undefined,
       onDevOverlays: d.chrome ? () => d.chrome?.toggleDev() : undefined,
-      onRestart: () => {
-        closePause();
-        restart();
-      },
-      onQuit: () => {
-        closePause();
-        d.onQuit();
-        openSelect();
-      },
+      onRestart: free
+        ? undefined
+        : () => {
+            closePause();
+            restart();
+          },
+      // free roam has no menu of its own: quitting goes to the race's boat select
+      onQuit: free
+        ? () => location.assign(sessionModeHref('race', location.href))
+        : () => {
+            closePause();
+            d.onQuit();
+            openSelect();
+          },
       onAssists: (a) => {
         settings.assists = a;
         applyUiAssists(a, d.controls.settings);
@@ -420,11 +460,17 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
     results.close();
     raceRunning = false;
     selectFromPause = false;
+    if (free) {
+      // no boat select in free roam: the ride starts at once with the stored paint, number and sea
+      beginRace();
+      d.onStart({ ...selection });
+      return;
+    }
     openSelectScreen();
   }
   function openPause(): void {
     if (select.isOpen || results.isOpen || pause.isOpen) return;
-    const summary = `Lap ${model.lap} / ${model.laps} · P${model.position} · ${formatLapTime(model.lapTime)}`;
+    const summary = free ? `${SESSION_MODE_LABEL.free} · ${d.course.name}` : `Lap ${model.lap} / ${model.laps} · P${model.position} · ${formatLapTime(model.lapTime)}`;
     pause.open(summary, conditions, pauseState());
   }
   const blocking = (): boolean => select.isOpen || pause.isOpen || results.isOpen;
@@ -437,7 +483,7 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
   }
 
   const onKey = (e: KeyboardEvent): void => {
-    if (e.key !== 'Escape' || e.repeat || !raceRunning || blocking()) return;
+    if (e.key !== 'Escape' || e.repeat || !raceRunning || blocking() || d.chrome?.peelEscape()) return;
     e.preventDefault();
     openPause();
   };
@@ -470,17 +516,21 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
       startWasDown = startDown;
 
       const block = blocking();
-      if (hud.root.hidden !== block) hud.setVisible(!block);
+      // photo mode (P, the shared view rules in page/pageChrome.ts): no HUD for clean shots
+      const show = !block && !d.chrome?.isPhoto();
+      if (hud.root.hidden === show) hud.setVisible(show);
       for (const { racerId, event } of f.crashEvents) if (racerId === 0 && event.type === 'impact') impactSource = event.source;
-      radio.ingest(f.events, f.crashEvents);
-      radio.step(f.dt);
-      if (radio.radioId !== radioHeard) {
-        radioHeard = radio.radioId;
-        if (radio.radioText) d.audio?.radioCall?.(radio.radioText);
+      if (!free) {
+        radio.ingest(f.events, f.crashEvents);
+        radio.step(f.dt);
+        if (radio.radioId !== radioHeard) {
+          radioHeard = radio.radioId;
+          if (radio.radioText) d.audio?.radioCall?.(radio.radioText);
+        }
       }
       cameraMode = f.cameraMode;
       conditions = `${f.sea.label} · swell ${f.sea.swellM.toFixed(1)} m · wind ${Math.round(f.sea.windKn)} kn ${compassFromYaw(f.sea.windFromRad)} · ${selection.time}`;
-      const st = f.state;
+      const st = f.state ?? (free ? FREE_ROAM_STATE : null);
       if (!st) return;
       standingsRef = st.standings;
 

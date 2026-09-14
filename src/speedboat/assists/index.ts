@@ -89,7 +89,7 @@ export function stepAssists(
   st.helmRad = stepHelm(st.helmRad, input.steer, st.lockRad, (settings.helmRateDegPerS * Math.PI) / 180, dt);
   out.steerRad = st.helmRad;
   const lever = leverToThrottle(st, input.throttle, sim.speed, dt);
-  out.throttle = stepGovernor(st.governor, settings.governor, lever, sim.airborne, sim.propImmersion, dt);
+  out.throttle = stepGovernor(st.governor, settings.governor, lever, sim, dt);
   out.trimRad = stepTrim(st.trim, input.trim, sim, settings.landingAssist, dt);
   return out;
 }

@@ -55,6 +55,7 @@ export function createAutopilotControls(d: AutopilotDeps): ControlSource & { res
       justReset = false;
       out.steer = d.lockRad > 0 ? po.steer / d.lockRad : 0;
       out.throttle = po.throttle;
+      out.trim = po.trim ?? 0;
       return out;
     },
     reset() {

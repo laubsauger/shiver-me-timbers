@@ -1,5 +1,8 @@
 /**
- * Cinematic shot-list types (docs/cine/warfish-alan-watts-camera-script.md).
+ * Cinematic shot-list types — shared by every page that shoots: the pirate
+ * piece (docs/cine/warfish-alan-watts-camera-script.md) and the speedboat
+ * trailer (docs/cine/speedboat-trailer-v1.md). "Ship" below means whichever
+ * hull the page's DirectorHost frames.
  *
  * A Shot is DATA. The director (director.ts) is the only thing that reads it,
  * and the recorder (recorder.ts) is the only thing that decides when. Nothing
@@ -136,7 +139,14 @@ export interface Shot {
    * anywhere she goes, it just stops twitching when she does. 1.5-4 s is a
    * drone holding station; below ~0.5 s there is no point.
    */
-  follow?: { halfLife: number };
+  follow?: {
+    halfLife: number;
+    /**
+     * Damp the HEADING only; hold her position exactly. A position damper lags by speed × halfLife / ln 2 — a
+     * few metres on an 8 kn brigantine, 15-70 m on a 30 m/s speedboat, which drops her out of a chase frame.
+     */
+    headingOnly?: boolean;
+  };
   /**
    * Park the lens this many metres above the SAMPLED water height instead of
    * using the key's y. What makes the waterline shots ride the swell for free.
@@ -158,8 +168,34 @@ export interface Shot {
    * frame-RIGHT, `pitch` positive toward frame-TOP.
    */
   aimSun?: { yaw: number; pitch: number };
+  /**
+   * Aim at a point ON THE HULL (hull frame, her full live attitude) instead of
+   * the key's `aim`. What a static long lens on a moving boat needs: the lens
+   * stays put (`frame: 'world'`) and pans with her, so she can grow from a speck
+   * to a close pass without a hand-written aim that has to guess where she is.
+   */
+  aimShip?: Vec3;
+  /**
+   * Pull focus to her every frame: `post.dofFocus` = lens → aim point distance.
+   * DOF itself is a construction gate of the post pipeline (postPipeline.ts),
+   * so this only reads when the page was BUILT with `dofEnabled`.
+   */
+  focusShip?: boolean;
+  /**
+   * Seconds of extra footage rendered BEFORE `in` and AFTER `out`, for an edit
+   * cut to music. The shot's own duration is the target; the editor trims into
+   * the handles. Omitted = 0 (the take is exactly the shot).
+   */
+  handle?: number;
   /** why this shot is framed the way it is — kept next to the numbers */
   note?: string;
 }
+
+/** first frame of a take, shot-local seconds (negative when it carries a head handle) */
+export const shotHead = (s: Shot): number => s.handle ?? 0;
+
+/** seconds rendered past `out`: the edit handle plus a dissolve's overlap frames */
+export const shotTail = (s: Shot): number =>
+  (s.handle ?? 0) + (s.transition === 'dissolve' ? (s.transitionSeconds ?? 1) : 0);
 
 export const shotDuration = (s: Shot): number => s.out - s.in;

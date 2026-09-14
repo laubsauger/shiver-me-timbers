@@ -1,0 +1,29 @@
+{
+  "size": 128,
+  "results": [
+    {
+      "metresPerPixel": 0.125,
+      "difference": 7.301568984985352e-07,
+      "beforePeak": 0.6406912803649902,
+      "afterPeak": 0.6406912803649902,
+      "beforeMotion": 0.013337312270419344,
+      "afterMotion": 0.013337312280878533
+    },
+    {
+      "metresPerPixel": 2,
+      "difference": 0.22902605682611465,
+      "beforePeak": 0.6658203601837158,
+      "afterPeak": 0.46691638231277466,
+      "beforeMotion": 0.012461449215657394,
+      "afterMotion": 0.008183005681535321
+    },
+    {
+      "metresPerPixel": 16,
+      "difference": 0.6736335158348083,
+      "beforePeak": 0.6736335158348083,
+      "afterPeak": 0,
+      "beforeMotion": 0.012514038156877957,
+      "afterMotion": 0
+    }
+  ]
+}

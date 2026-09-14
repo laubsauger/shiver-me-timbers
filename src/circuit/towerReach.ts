@@ -208,14 +208,12 @@ export function towerReachSites(seed: number): TowerReachSites {
     const siteSeed = seed + SITE_SEED_STRIDE * (i + 1);
     const spec = worldSpec(isl.spec, frame);
     const name = registerKitIsland(`kit:${TOWER_REACH_ID}/${seed}/${isl.id}` as KitArchetypeName, spec, siteSeed);
-    // the swell's MEASURED travel is opposite `swellDirection` (T193 finding, re-measured on
-    // CpuOcean for T194: −∂η/∂t·(ŵ·∇η) < 0 and a +ŵ probe LEADS by 1.2 s over 20 m), so the
-    // splash side of a rock faces +ŵ. The course frame itself is unchanged: see circuit.md §T194.
+    // Spectrum travel now agrees with the authored direction and swell shadow.
     const at = frame.toWorld(isl.at);
     registerKitRenderInfo(name, {
       kind: spec.kind,
       spec,
-      swellTravel: [-Math.cos(frame.direction), -Math.sin(frame.direction)],
+      swellTravel: [Math.cos(frame.direction), Math.sin(frame.direction)],
       seed: siteSeed,
       corridor: corridorLine.map((p) => [p[0] - at[0], p[1] - at[1]] as const),
       corridorClearance: CORRIDOR_HALF_WIDTH + KIT_PROP_CORRIDOR_MARGIN,

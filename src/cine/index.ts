@@ -1,7 +1,9 @@
 /**
- * Cinematic system entry — the shot list, the director and the recorder wired
- * to one handle that main.ts calls from three places (see the INTEGRATION
- * block below). Inert until `play()` or `record()`; when inert every hook is a
+ * Cinematic system entry — a shot list, the director and the recorder wired
+ * to one handle that a page calls from three places (see the INTEGRATION
+ * block below). MODE-AGNOSTIC: the page hands in its shot list and its
+ * DirectorHost; the pirate piece is the default list, the speedboat trailer
+ * passes its own (src/speedboat/cine). Inert until `play()` or `record()`; when inert every hook is a
  * single null check, so the normal game frame is unaffected.
  *
  * INTEGRATION (src/main.ts):
@@ -32,35 +34,57 @@
 import type { PerspectiveCamera } from 'three';
 import type * as THREE from 'three/webgpu';
 import type { GameLoop } from '../core/loop';
-import type { AudioSystem } from '../audio';
 import { Director, type DirectorHost } from './director';
-import { Recorder, clipName, type Progress } from './recorder';
-import { ShotAudio } from './audio';
+import { PREROLL_DT, Recorder, clipName, type Progress } from './recorder';
+import { ShotAudio, type CineAudioSource } from './audio';
 import { startPump, type Pump } from './pump';
 import { applyGradeMode, type GradeMode } from '../grade';
-import { SHOTS, TIMELINE_END, shotById } from './shotlist';
-import type { Shot } from './types';
-import { shotDuration } from './types';
+import { GLOBAL_WORLD, SHOTS, TIMELINE_END } from './shotlist';
+import type { Shot, WorldPatch } from './types';
+import { shotDuration, shotHead, shotTail } from './types';
 
 export type { Shot, ShotKey, WorldPatch } from './types';
 export { SHOTS, TIMELINE_END, shotById } from './shotlist';
-export { Director } from './director';
-export { Recorder } from './recorder';
+export { Director, type DirectorHost, type ShipPose } from './director';
+export { Recorder, clipName, type Progress } from './recorder';
+export type { CineAudioSource } from './audio';
 
 export interface CineOpts {
   /**
    * Whether the world was BUILT on the open-ocean stage (src/cine/stage.ts).
    * It is a boot-time choice, so a console `record()` on a normal world cannot
-   * fix it — it can only say so, which is what it does.
+   * fix it — it can only say so, which is what it does. Pages whose shots WANT
+   * land (the speedboat trailer) leave it out.
    */
-  openOcean: boolean;
+  openOcean?: boolean;
   renderer: THREE.WebGPURenderer;
   canvas: HTMLCanvasElement;
   camera: PerspectiveCamera;
   loop: GameLoop;
   host: DirectorHost;
   /** for the second, real-time pass that records SFX + ambience */
-  audio: AudioSystem;
+  audio: CineAudioSource;
+  /** the timeline, in order. Default: the pirate piece (./shotlist.ts). */
+  shots?: readonly Shot[];
+  /** the page's per-shot world default. Default: the pirate `GLOBAL_WORLD`. */
+  global?: WorldPatch;
+  /** clip file name. Default: `04-D-slug`, ordinal in `shots`. */
+  clipName?: (shot: Shot) => string;
+  /** record/recordAudio defaults, under whatever the call passes */
+  defaults?: RecordOpts;
+  /**
+   * Run each shot's PREROLL in preview too (fast-forwarded, like a render).
+   * A page whose hero is choreographed per shot needs it: without the preroll
+   * the boat is still at her placement when the camera starts. Default false —
+   * the pirate preview cues straight into the shot.
+   */
+  prerollPreview?: boolean;
+  /**
+   * An edit plan for the run, POSTed to the sink's `/plan` when a record or an
+   * audio pass starts (docs/cine/trailer-edit-plan.md). The sink keeps only the
+   * clips that exist on disk.
+   */
+  editPlan?: (run: { fps: number; width: number; height: number }) => unknown;
 }
 
 /**
@@ -135,13 +159,13 @@ export interface CineHandle {
 }
 
 /** resolve `only` to shots, loudly — a typo'd id must not silently render less */
-function pick(only: readonly string[] | undefined): readonly Shot[] {
-  if (only === undefined) return SHOTS;
+function pick(shots: readonly Shot[], only: readonly string[] | undefined): readonly Shot[] {
+  if (only === undefined) return shots;
   return only.map((id) => {
-    const s = shotById(id);
+    const s = shots.find((x) => x.id === id);
     if (s === undefined) {
       throw new Error(
-        `cine: no shot "${id}". Have: ${SHOTS.map((x) => x.id).join(', ')}`,
+        `cine: no shot "${id}". Have: ${shots.map((x) => x.id).join(', ')}`,
       );
     }
     return s;
@@ -149,7 +173,10 @@ function pick(only: readonly string[] | undefined): readonly Shot[] {
 }
 
 export function createCine(o: CineOpts): CineHandle {
-  const director = new Director(o.host);
+  const SHOTLIST = o.shots ?? SHOTS;
+  const END = o.shots === undefined ? TIMELINE_END : Math.max(...SHOTLIST.map((s) => s.out));
+  const nameOf = o.clipName ?? ((s: Shot): string => clipName(s, SHOTLIST));
+  const director = new Director(o.host, o.global ?? GLOBAL_WORLD);
   let recorder: Recorder | null = null;
   let pump: Pump | null = null;
   let watchdog: ReturnType<typeof setInterval> | null = null;
@@ -158,10 +185,21 @@ export function createCine(o: CineOpts): CineHandle {
   /** the real-time audio pass drives the director itself */
   let audioPass = false;
   let previewLoop: Shot | null = null;
+  /** `prerollPreview` timeline: the shot being previewed, by index */
+  let previewSeq: number | null = null;
+  /** `prerollPreview`: fast-forwarding the current shot's preroll */
+  let previewSettling = false;
   let progress: Progress | null = null;
 
+  /** preview cue with the preroll run fast, as a render would */
+  const cueSettled = (s: Shot): void => {
+    director.cue(s, -(s.preroll ?? 6));
+    previewSettling = true;
+    o.loop.setFixedDt(PREROLL_DT);
+  };
+
   const cueForTimeline = (t: number): void => {
-    const s = SHOTS.find((x) => t >= x.in && t < x.out) ?? SHOTS[SHOTS.length - 1];
+    const s = SHOTLIST.find((x) => t >= x.in && t < x.out) ?? SHOTLIST[SHOTLIST.length - 1];
     if (s === undefined) return;
     if (director.current?.id !== s.id) director.cue(s, t - s.in);
     else director.advance(0);
@@ -184,6 +222,8 @@ export function createCine(o: CineOpts): CineHandle {
     o.host.setShooting(false);
     previewT = null;
     previewLoop = null;
+    previewSeq = null;
+    previewSettling = false;
     director.release();
     // LAST: hand the game back the world it was in before the shoot
     director.restoreWorld();
@@ -202,7 +242,7 @@ export function createCine(o: CineOpts): CineHandle {
       return director.active;
     },
     get shots(): readonly Shot[] {
-      return SHOTS;
+      return SHOTLIST;
     },
     get director(): Director {
       return director;
@@ -220,12 +260,26 @@ export function createCine(o: CineOpts): CineHandle {
       // the recorder owns the clock while recording; preview runs on the frame
       if (recorder !== null || audioPass) {
         director.advance(frameDt);
+      } else if (o.prerollPreview === true && (previewLoop !== null || previewSeq !== null)) {
+        director.advance(frameDt);
+        if (previewSettling && director.shotTime >= 0) {
+          previewSettling = false;
+          o.loop.setFixedDt(null);
+        }
+        const cur = director.current;
+        if (cur !== null && director.shotTime >= shotDuration(cur)) {
+          if (previewLoop !== null) cueSettled(previewLoop);
+          else if (previewSeq !== null) {
+            previewSeq = (previewSeq + 1) % SHOTLIST.length;
+            cueSettled(SHOTLIST[previewSeq] as Shot);
+          }
+        }
       } else if (previewLoop !== null) {
         director.advance(frameDt);
         if (director.shotTime >= shotDuration(previewLoop)) director.cue(previewLoop, 0);
       } else if (previewT !== null) {
         previewT += frameDt;
-        if (previewT >= TIMELINE_END) previewT = 0;
+        if (previewT >= END) previewT = 0;
         cueForTimeline(previewT);
         director.advance(frameDt);
       }
@@ -249,22 +303,26 @@ export function createCine(o: CineOpts): CineHandle {
       director.snapshotWorld();
       o.host.setShooting(true);
       if (shotId === undefined) {
+        if (o.prerollPreview === true) {
+          previewSeq = 0;
+          cueSettled(SHOTLIST[0] as Shot);
+          return;
+        }
         previewT = 0;
         cueForTimeline(0);
         return;
       }
-      const s = shotById(shotId);
-      if (s === undefined) {
-        throw new Error(`cine: no shot "${shotId}". Have: ${SHOTS.map((x) => x.id).join(', ')}`);
-      }
+      const s = pick(SHOTLIST, [shotId])[0] as Shot;
       previewLoop = s;
-      director.cue(s, 0);
+      if (o.prerollPreview === true) cueSettled(s);
+      else director.cue(s, 0);
     },
 
-    async record(opts: RecordOpts = {}): Promise<void> {
+    async record(callOpts: RecordOpts = {}): Promise<void> {
       stop();
-      const shots = pick(opts.only);
-      if (!o.openOcean) {
+      const opts: RecordOpts = { ...o.defaults, ...callOpts };
+      const shots = pick(SHOTLIST, opts.only);
+      if (o.openOcean === false) {
         console.warn(
           '[cine] this world was built WITH LAND. The islands and their group ' +
             'are hidden for the shoot, but the seabed underneath them still ' +
@@ -279,6 +337,10 @@ export function createCine(o: CineOpts): CineHandle {
       applyGradeMode(opts.grade ?? 'cine-flat');
       const [rw, rh] = RESOLUTIONS[opts.res ?? '1080p'];
       o.host.setRenderSize(opts.width ?? rw, opts.height ?? rh);
+      const sink = opts.sink ?? 'http://127.0.0.1:7654';
+      if (o.editPlan !== undefined) {
+        await postPlan(sink, o.editPlan({ fps: opts.fps ?? 24, width: opts.width ?? rw, height: opts.height ?? rh }));
+      }
       if (opts.pump !== false) {
         pump = startPump(60);
         // The app's pending rAF callback is held by the REAL rAF, which is
@@ -296,6 +358,7 @@ export function createCine(o: CineOpts): CineHandle {
         fps: opts.fps,
         sink: opts.sink,
         shots,
+        clipName: nameOf,
         onFinished: () => {
           recorder = null;
           teardown();
@@ -339,15 +402,20 @@ export function createCine(o: CineOpts): CineHandle {
       }, 5000);
     },
 
-    async recordAudio(opts: RecordOpts = {}): Promise<void> {
+    async recordAudio(callOpts: RecordOpts = {}): Promise<void> {
+      const opts: RecordOpts = { ...o.defaults, ...callOpts };
       if (!ShotAudio.supported) throw new Error('cine: no MediaRecorder audio codec here');
       // A browser will not start an AudioContext without a gesture, and a page
       // opened straight from a URL has not had one. Fail here rather than per
       // shot: "recording started and nothing happened" is what that looks like.
       await o.audio.resume();
       stop();
-      const shots = pick(opts.only);
+      const shots = pick(SHOTLIST, opts.only);
       const sink = opts.sink ?? 'http://127.0.0.1:7654';
+      if (o.editPlan !== undefined) {
+        const [rw, rh] = RESOLUTIONS[opts.res ?? '1080p'];
+        await postPlan(sink, o.editPlan({ fps: opts.fps ?? 24, width: opts.width ?? rw, height: opts.height ?? rh }));
+      }
       director.snapshotWorld();
       o.host.setShooting(true);
       audioPass = true;
@@ -358,7 +426,10 @@ export function createCine(o: CineOpts): CineHandle {
         // this pass runs in REAL TIME, so it takes as long as the film plus
         // every preroll — minutes with nothing on screen unless it says so
         const started = Date.now();
-        const totalSec = shots.reduce((a, sh) => a + shotDuration(sh) + (sh.preroll ?? 6), 0);
+        const totalSec = shots.reduce(
+          (a, sh) => a + shotHead(sh) + shotDuration(sh) + shotTail(sh) + (sh.preroll ?? 6),
+          0,
+        );
         let doneSec = 0;
         const say = (shot: Shot, i: number, phase: 'preroll' | 'capture'): void => {
           progress = {
@@ -376,14 +447,16 @@ export function createCine(o: CineOpts): CineHandle {
         };
         for (const [i, shot] of shots.entries()) {
           director.cue(shot, -(shot.preroll ?? 6));
-          const dur = shotDuration(shot);
+          // the SAME span the video take holds: head handle, shot, tail
+          const head = shotHead(shot);
+          const dur = head + shotDuration(shot) + shotTail(shot);
           console.info(
             `[cine:audio] ${shot.id} — ${(shot.preroll ?? 6).toFixed(0)}s preroll, ` +
               `${dur.toFixed(1)}s take`,
           );
           // the preroll runs at real speed too: the wake and the bed have to
           // settle in the SAME seconds the sound will be recorded over
-          while (director.shotTime < 0) {
+          while (director.shotTime < -head) {
             say(shot, i, 'preroll');
             doneSec += 1 / 60;
             await frame();
@@ -399,7 +472,7 @@ export function createCine(o: CineOpts): CineHandle {
           const t = await take.stop();
           const ext = t.mime.includes('ogg') ? 'ogg' : t.mime.includes('mp4') ? 'm4a' : 'webm';
           const res = await fetch(
-            `${sink}/audio?clip=${encodeURIComponent(clipName(shot))}&ext=${ext}`,
+            `${sink}/audio?clip=${encodeURIComponent(nameOf(shot))}&ext=${ext}&dur=${dur.toFixed(4)}`,
             { method: 'POST', headers: { 'content-type': t.mime }, body: t.blob },
           );
           if (!res.ok) throw new Error(`sink: ${res.status} ${res.statusText}`);
@@ -413,6 +486,16 @@ export function createCine(o: CineOpts): CineHandle {
 
     stop,
   };
+}
+
+/** the run's edit plan to the sink — loud, a plan that did not land is a timeline that will not build */
+async function postPlan(sink: string, plan: unknown): Promise<void> {
+  const res = await fetch(`${sink}/plan`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(plan),
+  });
+  if (!res.ok) throw new Error(`cine: sink /plan ${res.status} ${res.statusText}`);
 }
 
 /** one rendered frame — the audio pass paces itself on the display, not a timer */

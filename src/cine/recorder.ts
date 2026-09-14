@@ -26,8 +26,7 @@ import type { GameLoop } from '../core/loop';
 import { Capture } from './capture';
 import type { Director } from './director';
 import type { Shot } from './types';
-import { shotDuration } from './types';
-import { SHOTS } from './shotlist';
+import { shotDuration, shotHead, shotTail } from './types';
 
 export interface RecorderOpts {
   renderer: THREE.WebGPURenderer;
@@ -40,6 +39,8 @@ export interface RecorderOpts {
   sink?: string;
   /** shots to render, in order. Omit for the whole list. */
   shots: readonly Shot[];
+  /** the file name a shot's clip (and its sound) is written under — see `clipName` */
+  clipName: (shot: Shot) => string;
   /** called on every state change, for the on-screen readout */
   onProgress?: (p: Progress) => void;
   /**
@@ -71,19 +72,19 @@ export interface Progress {
 }
 
 /** coarse dt for settling: MAX_SUBSTEPS * SIM_DT, the most one rAF can carry */
-const PREROLL_DT = 5 / 60;
+export const PREROLL_DT = 5 / 60;
 
 /**
  * `04-D-stern-chase-the-money-shot`.
  *
- * The ordinal is the shot's place in the FULL timeline, not in the run, so
- * re-rendering one shot on its own drops a file that still sorts into the edit
- * where it belongs — the whole point of shooting per-shot rather than as one
- * continuous take. Shared with the audio pass so a clip and its sound land on
- * the same name.
+ * The ordinal is the shot's place in the FULL timeline (`timeline`), not in the
+ * run, so re-rendering one shot on its own drops a file that still sorts into
+ * the edit where it belongs — the whole point of shooting per-shot rather than
+ * as one continuous take. Shared with the audio pass so a clip and its sound
+ * land on the same name. A page with its own naming scheme passes its own.
  */
-export function clipName(shot: Shot): string {
-  const ord = SHOTS.findIndex((s) => s.id === shot.id) + 1;
+export function clipName(shot: Shot, timeline: readonly Shot[]): string {
+  const ord = timeline.findIndex((s) => s.id === shot.id) + 1;
   const slug = shot.slug
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -211,11 +212,19 @@ export class Recorder {
     if (shot === null) return;
 
     if (this.phase === 'preroll') {
-      if (this.o.director.shotTime < 0) return; // keep settling
+      // LAND ON THE FIRST FRAME EXACTLY. Coarse preroll steps overshoot the
+      // take's start by up to PREROLL_DT, which puts every clip a few frames
+      // late and — with a head handle — moves the cut point the editor was
+      // promised. The last step is shortened to hit it.
+      const gap = -shotHead(shot) - this.o.director.shotTime;
+      if (gap > 1e-9) {
+        this.o.loop.setFixedDt(Math.min(PREROLL_DT, gap));
+        return; // keep settling
+      }
       this.phase = 'capture';
-      this.o.loop.setFixedDt(1 / this.fps);
+      this.o.loop.setFixedDt(0); // frame 0 is drawn AT the first frame time
       this.report('capture');
-      return; // capture starts on the NEXT rendered frame, at shot time 0
+      return; // capture starts on the NEXT rendered frame
     }
 
     if (!this.bound) return;
@@ -287,22 +296,8 @@ export class Recorder {
       });
   }
 
-  /**
-   * `04-D-stern-chase.mp4`.
-   *
-   * The ordinal is the shot's place in the FULL timeline, not in this run, so
-   * re-rendering one shot on its own drops a file that still sorts into the
-   * edit where it belongs — which is the whole point of shooting per-shot
-   * rather than as one continuous take.
-   */
   private clipName(shot: Shot): string {
-    const ord = SHOTS.findIndex((s) => s.id === shot.id) + 1;
-    const slug = shot.slug
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '')
-      .slice(0, 32);
-    return `${String(ord).padStart(2, '0')}-${shot.id}-${slug}`;
+    return this.o.clipName(shot);
   }
 
   /* -------------------------------------------------------------- */
@@ -342,9 +337,9 @@ export class Recorder {
     // A dissolve needs the OUTGOING shot to keep running under the incoming
     // one. There is one camera, so the overlap cannot be rendered in a single
     // pass — the tail is rendered here as handle frames and ffmpeg does the
-    // mix (scripts/cine-mux.mjs).
-    const handle = shot.transition === 'dissolve' ? (shot.transitionSeconds ?? 1) : 0;
-    this.frames = Math.round((shotDuration(shot) + handle) * this.fps);
+    // mix (scripts/cine-mux.mjs). An edit handle (`shot.handle`) adds footage
+    // on both sides for an editor cutting to music.
+    this.frames = this.takeFrames(shot);
     this.phase = 'preroll';
     this.busy = false;
     this.o.director.cue(shot, -(shot.preroll ?? 6));
@@ -389,11 +384,14 @@ export class Recorder {
   private framesLeft(): number {
     let left = Math.max(this.frames - this.frame, 0);
     for (let i = this.shotIndex + 1; i < this.shots.length; i++) {
-      const s = this.shots[i] as Shot;
-      const handle = s.transition === 'dissolve' ? (s.transitionSeconds ?? 1) : 0;
-      left += Math.round((shotDuration(s) + handle) * this.fps);
+      left += this.takeFrames(this.shots[i] as Shot);
     }
     return left;
+  }
+
+  /** frames in one take: head handle + the shot + tail (handle, dissolve overlap) */
+  private takeFrames(s: Shot): number {
+    return Math.round((shotHead(s) + shotDuration(s) + shotTail(s)) * this.fps);
   }
 
   private report(message: string): void {
@@ -426,11 +424,8 @@ export class Recorder {
         duration: shotDuration(s),
         transition: s.transition,
         transitionSeconds: s.transitionSeconds ?? 0,
-        frames: Math.round(
-          (shotDuration(s) +
-            (s.transition === 'dissolve' ? (s.transitionSeconds ?? 1) : 0)) *
-            this.fps,
-        ),
+        handle: s.handle ?? 0,
+        frames: this.takeFrames(s),
       })),
     };
   }

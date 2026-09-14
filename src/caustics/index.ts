@@ -41,6 +41,8 @@ import type * as THREE from 'three/webgpu';
 import { float, vec2, vec3 } from 'three/tsl';
 import type { OceanSimulation } from '../ocean/oceanCascades';
 import { fetchFieldSampleNode, type FetchField } from '../ocean/fetchField';
+import { developmentRatioNode, fetchBandGainNode } from '../ocean/fetch';
+import { swellShadowGainNode } from '../ocean/swellShadow';
 import { causticsParams } from '../params/caustics';
 import {
   createCausticsUniforms,
@@ -178,12 +180,32 @@ export class Caustics {
    * disagreement at a waterline and the two symptoms it produced.
    */
   waterHeight(worldXZ: TslNode, depth?: TslNode): TslNode {
+    return this.waterSurface(worldXZ, depth).height;
+  }
+
+  /** One shelter sample serves actual water height (RG) and shore exposure (BA). */
+  waterSurface(worldXZ: TslNode, depth?: TslNode): { height: TslNode; shoreGain: TslNode } {
     // sampled HERE rather than asked of the caller: every receiver already
     // hands us its world XZ, and making the shelter lookup the caller's job is
     // how one of them ends up forgetting it. ONE sample node: `.r` fetch and
     // `.g` swell shadow (T174) cost one texture fetch and one binding.
     const shelter = depth && this.fetchField ? fetchFieldSampleNode(this.fetchField, worldXZ) : null;
-    return waterHeightNode(
+    let shoreGain: TslNode = float(1);
+    if (shelter) {
+      const ratio = developmentRatioNode(shelter.b, this.shoaling.fetchFull);
+      let energy: TslNode = float(0), total: TslNode = float(0);
+      for (let i = 0; i < this.shoaling.sigma.length; i++) {
+        const variance = this.shoaling.sigma[i].pow(2);
+        const gain = fetchBandGainNode(this.shoaling.fetchC[i], ratio, this.shoaling.fetchMaxGain)
+          .mul(swellShadowGainNode(this.shoaling.swellShare[i], shelter.a));
+        energy = energy.add(variance.mul(gain.pow(2)));
+        total = total.add(variance);
+      }
+      // No depth damping here: this is incoming offshore energy, not wave
+      // height evaluated on dry land. The swash model owns the runup.
+      shoreGain = energy.div(total.max(1e-12)).max(0).sqrt();
+    }
+    const height = waterHeightNode(
       this.sim,
       worldXZ,
       depth
@@ -195,6 +217,7 @@ export class Caustics {
           }
         : undefined,
     );
+    return { height, shoreGain };
   }
 
   /** per frame, after the ocean sim updates */

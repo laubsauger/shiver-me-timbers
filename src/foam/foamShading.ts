@@ -293,10 +293,24 @@ export function capVariationNode(worldXZ: AnyNode): AnyNode {
  * eddies read as pushed-around, not baked).
  */
 export function foamWarpVec(coord: AnyNode): AnyNode {
-  const drift = uTime.mul(uScroll).mul(0.5);
-  const wx = fbm2(coord.mul(uWarpScale).add(vec2(drift, 0)), 2);
-  const wy = fbm2(coord.mul(uWarpScale).add(vec2(17.3, 9.1)).sub(vec2(0, drift)), 2);
-  return vec2(wx, wy).sub(0.5).mul(uWarpMeters);
+  const scaled = coord.mul(uWarpScale);
+  const footprint = coordFootprint(scaled);
+  // Filter the displacement itself, not only the textures it addresses.
+  // Unresolved warp noise otherwise jitters the sim and art lookups between
+  // pixels. Each retired octave tends to 0.5, hence zero signed displacement.
+  // Both offsets share a footprint: translation changes neither derivative.
+  return Fn(() => {
+    const warp = vec2(0).toVar();
+    // Derivatives are evaluated above the branch. Once even the largest
+    // octave is unresolved, avoid all four value-noise evaluations.
+    If(footprint.lessThan(1), () => {
+      const drift = uTime.mul(uScroll).mul(0.5);
+      const wx = bandLimitedFbm2(scaled.add(vec2(drift, 0)), 2, footprint);
+      const wy = bandLimitedFbm2(scaled.add(vec2(17.3, 9.1)).sub(vec2(0, drift)), 2, footprint);
+      warp.assign(vec2(wx, wy).sub(0.5).mul(uWarpMeters));
+    });
+    return warp;
+  })();
 }
 
 /**
@@ -354,6 +368,8 @@ export function foamDetailMask(
   bodyAge?: AnyNode,
   /** Landed wake films keep their porous texture even at full simulation coverage. */
   porousBody = false,
+  /** Reuse a caller's identical world-space warp for coverage and detail. */
+  lookupWarp?: AnyNode,
 ): AnyNode {
   const art = foamArtTexture();
   // per-position phase (§B.4: NO shared global timeline) — coarse value
@@ -361,7 +377,7 @@ export function foamDetailMask(
   const phase = valueNoise2(coord.mul(0.021)).mul(37.0);
   const t = uTime.add(phase).mul(uScroll);
   // shared low-freq churn warps both lookups (internal motion)
-  const churn = foamWarpVec(coord).mul(0.6);
+  const churn = (lookupWarp ?? foamWarpVec(coord)).mul(0.6);
   // crest-aligned sample space: the art texture is STRETCHED along the ridge,
   // which is what turns its cells into the streaks the reference shows running
   // down a wave face. The stretch axis is a FIELD, not one global vector

@@ -19,9 +19,12 @@
  *   PREV POSE                            each owned boat's OUT pose just before the last tick (render pair)
  *   EXTERNAL POSES (§T.191)              every row: each external boat's pose at the START of that tick → its WORLD
  *                                        slot and its OUT POSE (main-driven boats are never stepped)
+ *   WAKE WORLD (§T.207)                  as WORLD: j ≥ 1 on a single shard, every stepped boat's WAKE OUT record of
+ *                                        tick j−1; an external boat's record comes with every row
  * Not carried per row: RESET requests (applied on the batch's first tick, as on a one-tick kick).
  */
 import { BATCH_ROW, B, CONTROL_LEN, F, H, POSE_LEN, AI_IN_LEN, AI_OUT_LEN, type BoatSimLayout } from './layout';
+import { WAKE_SRC_LEN } from '../wake/wakeField';
 
 export interface BatchStepper {
   /** `row`: the TRACE row this tick writes (0 for a classic kick) */
@@ -70,6 +73,11 @@ function applyRow(L: BoatSimLayout, j: number): void {
       f[w + c] = f[src + c];
       f[out + c] = f[src + c];
     }
+    if (L.spec.wakeField) {
+      const ws = L.batchExternalWakeOffset(r, i);
+      const wd = L.wakeWorldOffset(i);
+      for (let c = 0; c < WAKE_SRC_LEN; c++) f[wd + c] = f[ws + c];
+    }
   }
 }
 
@@ -93,6 +101,12 @@ export function stepKick(core: BatchStepper, L: BoatSimLayout): number {
         const from = L.boatOffset(i) + B.POSE;
         const to = L.worldPoseOffset(i);
         for (let c = 0; c < POSE_LEN; c++) f[to + c] = f[from + c];
+        // §T.207: the stepped boats' wake records after tick j−1 (an external boat's came with the row)
+        if (L.spec.wakeField && !L.isExternal(i)) {
+          const ws = L.wakeOutOffset(j - 1, i);
+          const wd = L.wakeWorldOffset(i);
+          for (let c = 0; c < WAKE_SRC_LEN; c++) f[wd + c] = f[ws + c];
+        }
       }
     }
     if (j === count - 1) {

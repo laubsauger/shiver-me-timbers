@@ -44,11 +44,16 @@ export interface PauseState {
   fullscreen?: boolean | null;
   /** dev overlays (perf HUD, Tweakpane) shown; omitted = no row */
   devOverlays?: boolean;
+  /** free roam (page/sessionMode.ts): the sea preset label; omitted = no row (the race picks its sea at boat select) */
+  sea?: string;
+  /** the session mode label ('Race' / 'Free roam'); omitted = no row */
+  mode?: string;
 }
 
 export interface PauseCallbacks {
   onResume(): void;
-  onRestart(): void;
+  /** omitted = no Restart row (free roam has no race to restart) */
+  onRestart?(): void;
   onQuit(): void;
   onAssists(a: AssistSettings): void;
   onCamera(c: HudCamera): void;
@@ -61,6 +66,10 @@ export interface PauseCallbacks {
   /** MUST reach the fullscreen request inside this call (a user gesture); the page answers with `setState` */
   onFullscreen?(): void;
   onDevOverlays?(): void;
+  /** step the sea preset; the page answers with `setState` */
+  onSea?(dir: -1 | 1): void;
+  /** switch to the other session mode (the page reloads) */
+  onMode?(): void;
 }
 
 const GOV: GovernorMode[] = ['off', 'air', 'full'];
@@ -77,6 +86,7 @@ const CONTROLS: [string, string, string][] = [
   ['Look back / mirror', 'C', 'R stick click'],
   ['Camera', 'V', 'Y'],
   ['Reset', 'Hold R', 'Hold View'],
+  ['Photo mode (no HUD)', 'P', '—'],
 ];
 
 function valueRow(label: string, value: Text | Node, cls = ''): HTMLButtonElement {
@@ -137,8 +147,13 @@ export class PauseScreen {
     const full = valueRow('Full screen', fullV);
     const devV = txt('');
     const dev = valueRow('Dev overlays', devV);
-    const menu = h('div', 'sbs-menu', resume, restart,
-      cb.onBoatSelect ? boat : null, gov, assists, cam, size, audio,
+    const seaV = txt('');
+    const sea = valueRow('Sea', seaV);
+    const modeV = txt('');
+    const mode = valueRow('Mode', modeV);
+    const menu = h('div', 'sbs-menu', resume, cb.onRestart ? restart : null,
+      cb.onBoatSelect ? boat : null, cb.onMode && initial.mode !== undefined ? mode : null,
+      cb.onSea && initial.sea !== undefined ? sea : null, gov, assists, cam, size, audio,
       cb.onGraphics && initial.graphics !== undefined ? gfx : null,
       cb.onFullscreen && typeof initial.fullscreen === 'boolean' ? full : null,
       cb.onDevOverlays && initial.devOverlays !== undefined ? dev : null,
@@ -151,6 +166,8 @@ export class PauseScreen {
       gfxV.data = this.state.graphics ?? '';
       fullV.data = this.state.fullscreen ? 'On' : 'Off';
       devV.data = this.state.devOverlays ? 'Shown' : 'Hidden';
+      seaV.data = this.state.sea ?? '';
+      modeV.data = this.state.mode ?? '';
     });
 
     // — side: controls
@@ -214,8 +231,10 @@ export class PauseScreen {
     const onControls = (): void => this.showSide('controls');
     this.menuItems.push(
       { el: resume, activate: () => cb.onResume(), focus: onControls },
-      { el: restart, activate: () => cb.onRestart(), focus: onControls },
+      ...(menu.contains(restart) ? [{ el: restart, activate: () => cb.onRestart?.(), focus: onControls }] : []),
       ...(menu.contains(boat) ? [{ el: boat, activate: () => cb.onBoatSelect?.(), focus: onControls }] : []),
+      ...(menu.contains(mode) ? [{ el: mode, activate: () => cb.onMode?.(), adjust: () => cb.onMode?.(), focus: onControls }] : []),
+      ...(menu.contains(sea) ? [{ el: sea, adjust: (d: -1 | 1) => cb.onSea?.(d), focus: onControls }] : []),
       { el: gov, adjust: setGov, focus: () => this.showSide('assists') },
       { el: assists, activate: () => this.enter('assists'), adjust: () => cyclePreset(), focus: () => this.showSide('assists') },
       {
@@ -332,7 +351,7 @@ export class PauseScreen {
   }
 
   /** §T.201: the page's answer to a row it owns (graphics quality, real full-screen state, dev overlays) */
-  setState(patch: Partial<Pick<PauseState, 'graphics' | 'fullscreen' | 'devOverlays'>>): void {
+  setState(patch: Partial<Pick<PauseState, 'graphics' | 'fullscreen' | 'devOverlays' | 'sea' | 'mode'>>): void {
     Object.assign(this.state, patch);
     this.sync();
   }

@@ -47,6 +47,7 @@ import { AI_IN_LEN, B, POSE_LEN, TR, TR_RPM_DRIVES, TRACE_LEN } from '../../sim-
 import { paramsLength, writeParams } from '../../sim-worker/paramsVector';
 import type { TransportCaps } from '../../sim-worker/select';
 import { createNpcFleet, detectCaps } from '../../sim-worker/select';
+import { WAKE_SRC_LEN } from '../../wake/wakeField';
 
 /** ticks one request may carry (1 s of sim): bounds the BATCH region (49 KB per shard buffer for 7 boats, measured) */
 export const NPC_BATCH_CAP = 60;
@@ -93,6 +94,12 @@ export interface NpcFleetDeps {
    * per-row step TRACE the race reads.
    */
   player?: boolean;
+  /**
+   * §T.207 wakes move every boat: each rival's hull reads every other boat's wake (the player's included, from
+   * `NpcTickInputs.playerWake`), and `wakeSource` publishes each rival's record per tick for the player's hull.
+   * Default: on with `player` (the race page), off otherwise.
+   */
+  wakes?: boolean;
 }
 
 /** §T.191 what the page hands the fleet with each recorded tick (all tick-indexed, so a batch is tick-exact) */
@@ -105,6 +112,10 @@ export interface NpcTickInputs {
   contactSoft?: number;
   /** AI IN for every NPC, AI_IN_LEN each (flattened), or null = no standing yet */
   aiIn: Float64Array | null;
+  /** §T.207 the player's wake record at the START of this tick (`PlayerBoat.wakeRecord`); absent = no wake */
+  playerWake?: ArrayLike<number>;
+  /** §T.207 Surge: each NPC's race thrust multiplier for this tick (`RacerOutputs.thrustMultiplier`); absent = stock */
+  boost?: ArrayLike<number>;
 }
 
 /** ticks of step trace kept after collect (the race reads them RACE_DELAY_TICKS behind the page) */
@@ -146,6 +157,10 @@ export interface NpcFleet {
   spawnPose(i: number): Readonly<Rigid6State>;
   /** the fleet index of the player's external slot (−1 without `player`) */
   readonly playerIndex: number;
+  /** §T.207 the fleet carries wakes (`NpcFleetDeps.wakes`) */
+  readonly wakes: boolean;
+  /** §T.207 NPC i's wake record after page tick `tick` into `out[o..]` (collected, within NPC_TRACE_RING) */
+  wakeSource(tick: number, i: number, out: Float64Array, o?: number): void;
   /** applied steer (−1..1) at the last collected tick (render: outboard yaw, pilot rig) */
   steer(i: number): number;
   /** end of a tick and end of a frame: collect if home, kick every owed tick the budget allows */
@@ -185,6 +200,7 @@ export async function createNpcFleetDriver(d: NpcFleetDeps): Promise<NpcFleet> {
   const batchCap = d.batchCap ?? NPC_BATCH_CAP;
   const playerIndex = d.player ? d.boats : -1;
   const fleetBoats = d.boats + (d.player ? 1 : 0);
+  const wakes = d.wakes ?? d.player === true;
   const fleet = createNpcFleet(
     {
       seed: d.seed, boats: fleetBoats, oceanParams: d.oceanParams, seaParams: d.seaParams, batchCap,
@@ -192,6 +208,7 @@ export async function createNpcFleetDriver(d: NpcFleetDeps): Promise<NpcFleet> {
       ...(d.contacts ? { contacts: d.contacts } : {}),
       ...(d.world ? { world: d.world } : {}),
       ...(d.player ? { externalBoats: 1, trace: true } : {}),
+      ...(wakes ? { wakeField: true } : {}),
     },
     d.caps ?? detectCaps(),
   );
@@ -244,6 +261,10 @@ export async function createNpcFleetDriver(d: NpcFleetDeps): Promise<NpcFleet> {
   const inAi = new Float64Array(INPUT_RING * d.boats * AI_IN_LEN);
   const inAiValid = new Uint8Array(INPUT_RING);
   const traceRing = d.player ? new Float64Array(NPC_TRACE_RING * fleetBoats * TRACE_LEN) : null;
+  // §T.207 per recorded tick: the player's wake record and every NPC's boost; per collected tick: every NPC's wake record
+  const inWake = new Float64Array(wakes && d.player ? INPUT_RING * WAKE_SRC_LEN : 0);
+  const inBoost = new Float64Array(INPUT_RING * d.boats);
+  const wakeRing = new Float64Array(wakes ? NPC_TRACE_RING * d.boats * WAKE_SRC_LEN : 0);
   const scratchPose: Rigid6State = pose();
   const aiRow = new Float64Array(AI_IN_LEN);
   /** pending teleports: atTick → [(i, pose)] */
@@ -287,6 +308,12 @@ export async function createNpcFleetDriver(d: NpcFleetDeps): Promise<NpcFleet> {
       throttles[i] = traceRing ? fleet.readTrace(n - 1, i, TR.THROTTLE) : controls(i, collected).throttle;
       steers[i] = traceRing ? fleet.readTrace(n - 1, i, TR.STEER) : controls(i, collected).steer;
       if (traceRing) for (let k = 0; k < TR_RPM_DRIVES; k++) c.driveRpm[k] = fleet.readTrace(n - 1, i, TR.RPM + k);
+    }
+    if (wakes) {
+      for (let j = 0; j < n; j++) {
+        const tick = collected - n + 1 + j;
+        for (let i = 0; i < d.boats; i++) fleet.readWakeSource(j, i, wakeRing, ((tick % NPC_TRACE_RING) * d.boats + i) * WAKE_SRC_LEN);
+      }
     }
     if (traceRing) {
       for (let j = 0; j < n; j++) {
@@ -336,6 +363,15 @@ export async function createNpcFleetDriver(d: NpcFleetDeps): Promise<NpcFleet> {
     steer(i) {
       return steers[i];
     },
+    wakes,
+    wakeSource(tick, i, out, o = 0) {
+      if (!wakes) throw new Error('[speedboat] NPC fleet: no wakes (build with wakes)');
+      if (!(tick <= collected && tick > collected - NPC_TRACE_RING && tick >= 1)) {
+        throw new Error(`[speedboat] NPC fleet: wake record of tick ${tick} outside (${collected - NPC_TRACE_RING}, ${collected}]`);
+      }
+      const base = ((tick % NPC_TRACE_RING) * d.boats + i) * WAKE_SRC_LEN;
+      for (let c = 0; c < WAKE_SRC_LEN; c++) out[o + c] = wakeRing[base + c];
+    },
     get error() {
       return error;
     },
@@ -343,6 +379,11 @@ export async function createNpcFleetDriver(d: NpcFleetDeps): Promise<NpcFleet> {
       if (tick !== recorded + 1) throw new Error(`[speedboat] NPC fleet: page tick ${tick} recorded after ${recorded} (ticks must be recorded in order, none skipped)`);
       if (tick - collected > INPUT_RING) throw new Error(`[speedboat] NPC fleet: ${tick - collected} ticks owed, input ring holds ${INPUT_RING}`);
       if (d.player && !inputs) throw new Error('[speedboat] NPC fleet: a fleet with the player slot needs the tick inputs');
+      {
+        const r = tick % INPUT_RING;
+        for (let i = 0; i < d.boats; i++) inBoost[r * d.boats + i] = inputs?.boost ? inputs.boost[i] : 0;
+        if (inWake.length > 0) for (let c = 0; c < WAKE_SRC_LEN; c++) inWake[r * WAKE_SRC_LEN + c] = inputs?.playerWake ? inputs.playerWake[c] : 0;
+      }
       if (inputs) {
         const r = tick % INPUT_RING;
         const p = inputs.playerPose;
@@ -387,10 +428,12 @@ export async function createNpcFleetDriver(d: NpcFleetDeps): Promise<NpcFleet> {
       for (let j = 0; j < n; j++) {
         const k = collected + 1 + j;
         fleet.setBatchTick(j, k, times[j], paramsAt(k));
+        const rk = k % INPUT_RING;
         for (let i = 0; i < d.boats; i++) {
           const c = controls(i, k);
-          fleet.setBatchControls(j, i, c.throttle, c.steer);
+          fleet.setBatchControls(j, i, c.throttle, c.steer, 0, inBoost[rk * d.boats + i]);
         }
+        if (inWake.length > 0) fleet.setBatchExternalWakeSource(j, playerIndex, inWake, rk * WAKE_SRC_LEN);
         if (d.player) {
           const r = k % INPUT_RING;
           const o = r * POSE_LEN;

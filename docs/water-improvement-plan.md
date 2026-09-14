@@ -8,10 +8,45 @@ show 35–44% less middle-band foam pulsing. Contact foam, regional shoreline
 memory, ripple decorrelation, downwind birth noise and FFT optimizations remain.
 See the third-pass evidence below; earlier rollout decisions are historical.
 
-**Latest checkpoint (twentieth pass):** vessel foam now grows from continuous
-contact, uses a bounded lateral spread, and retains a porous material body.
-Fresh prop foam fades locally; shared water absorption is clearer. GPU birth-front
-proof and validation are recorded in the twentieth pass below.
+**Latest checkpoint (thirtieth pass):** whitecap coverage and detail reuse one
+filtered warp. The full foam mask passes near/middle/far GPU comparison; see
+pass 30 for numerical tolerance and validation limits.
+
+**Previous checkpoint (twenty-ninth pass):** foam lookup warp now filters each
+noise octave by pixel footprint and skips noise once unresolved. Nearby detail
+is preserved; see pass 29 for fragment-stage GPU regression measurements.
+
+**Previous checkpoint (twenty-eighth pass):** swash edge foam now emerges with
+runup height instead of painting a full-strength contour between waves. Mature
+edges and stranded residue are preserved. See pass 28 for GPU regression proof.
+
+**Previous checkpoint (twenty-seventh pass):** shore runup now uses local offshore
+fetch/swell energy. Exposed dry beaches retain swash; sheltered beaches get
+less runup. See pass 27 for GPU parity, memory and bake-cost measurements.
+
+**Previous checkpoint (twenty-sixth pass):** airborne spray now follows actual
+sky/key light; stranded shore foam fades independently of wet sand. Day/night
+and storm captures, GPU residue/cost probe, and tests are recorded below.
+
+**Previous checkpoint (twenty-fourth pass):** surface wake and whitecaps now
+follow live sky/key intensity instead of glowing at night. Day/night GPU
+captures saved; airborne spray has the same separate lighting defect, still
+pending. See pass 24.
+
+**Previous checkpoint (twenty-third pass):** storm beach swash no longer hashes
+continuous spatial coordinates into per-pixel amplitude jumps. GPU continuity
+probe and matched storm-wave captures are recorded in pass 23 below.
+
+**Previous checkpoint (twenty-second pass):** swell now travels along its authored
+direction, matching the existing swell shadow. Cay beaches retain their authored
+elevation; thin fresh aeration keeps turquoise instead of turning solid white.
+See pass 22 below for measurements and limits.
+
+**Previous checkpoint (twenty-first pass):** live bow-foam envelopes have been
+replaced by retained world-space emissions. Turns, takeoff and later impacts
+no longer reposition or re-drive older sources. Each emission carries its own
+volume, direction and age, and retires smoothly. GPU and CPU costs, the turning
+capture, and regression evidence are recorded in the twenty-first pass below.
 
 **Performance checkpoint (eighteenth pass):** the three sea-page HUDs now measure
 unclamped wall-clock frame intervals, independently of fixed-time capture or
@@ -1366,7 +1401,7 @@ traversal. The source shares axial decay across its two arms and rejects cells
 ahead of the contact front before evaluating them. No whole-frame speedup is
 claimed from this pass.
 
-Limits / next work: this is a causal growth envelope, not a retained trajectory
+Historical limit, resolved by the twenty-first pass below: this was a causal growth envelope, not a retained trajectory
 for every emitted parcel. Already deposited foam stays in world space, but the
 live source envelope still uses current position, flux and direction. Abrupt
 turns or strong flux changes during uninterrupted contact need a bounded
@@ -1374,3 +1409,407 @@ history of emissions to preserve their full downstream evolution. Worker
 snapshots cannot reconstruct contact transitions that were never collected.
 The race view still warrants further tuning of prop-wash breakup and aging;
 underwater atmosphere remains deferred. Nothing committed.
+
+## Twenty-first pass — retained emissions through turns and impacts
+
+The live-front shortcut from the previous pass is now removed. `chineContact`
+retains numeric snapshots of emitted water: world position, motion direction,
+volume, source width, launch speed and birth time. Subsequent hull position,
+heading or contact intensity does not feed those older records. A takeoff
+stops new emission but leaves existing sources spreading; a player teleport
+starts a separate source without joining the old location to the new one.
+Race-clock restart clears the old timeline. Rival identity still survives
+camera-distance sorting, and repeated worker records age existing water without
+emitting another dose.
+
+Emissions coalesce over 50 ms only when their directions differ by less than
+five degrees. Coalescing preserves volume and volume-weighted attributes. A
+sharper turn starts another packet immediately, including a reversal within the
+same interval. Each packet uses its recorded launch to move forward/outboard;
+its displacement approaches a finite limit as lateral momentum decays. The
+longitudinal footprints overlap to keep the 20 Hz packet cadence from appearing
+as stripes. A regression limits that modulation to 6% at 40 m/s.
+
+Fresh-source history lasts 1.5 seconds; deposited foam continues on the existing
+advection and decay textures afterward. Deposition is proportional to
+`exp(-age/tau) - exp(-lifetime/tau)`, normalized by its time integral. This
+reaches zero at expiry instead of abruptly switching off, while depositing the
+complete recorded water volume. The lifetime and mixing time remain visual
+calibrations. This does not change hull forces or the separate airborne spray
+particle model.
+
+The GPU receives packed packet footprints and a bounding box per vessel. It
+rejects a whole history outside that box, then scans only its active packets.
+The capacity is 92 packets per vessel: enough for a separate emission every
+60 Hz physics tick over the source lifetime, including boundary rounding.
+Steady motion normally uses 31. Rapid contact/no-contact bursts therefore do
+not overflow a buffer sized only for steady coalescing. Eight boats reserve
+23.25 KiB of source uniforms. No extra texture or compute pass is introduced.
+
+Final paired measurements on the same 512² source grid, eight vessels,
+alternating before/after execution with the page render loop stopped:
+
+| Source workload | Prior live envelope | Retained emissions | Added GPU time |
+| --- | ---: | ---: | ---: |
+| Turning, 31 packets per boat | 0.058 ms | 0.125 ms | 0.067 ms |
+| Burst stress, 90 packets per boat | 0.057 ms | 0.259 ms | 0.202 ms |
+
+These are isolated source-kernel timings, not total ocean time or frame FPS.
+The retained CPU/GPU samples agree within 7e-8, including old-leg water after
+a right-angle turn and empty water outside both trajectories. Earlier paired
+runs varied with GPU load; all reported timings are the final run's medians.
+The preserved comparison module lives in the isolated review snapshot as
+`simFoamBeforeEmissions.ts`, not in production.
+
+CPU microbenchmarks for eight vessels: retained history costs 0.0024 ms per
+fixed tick; render-frame source packing costs 0.0243 ms, previously 0.0023 ms.
+These exclude unrelated vessel physics and are not whole-frame measurements.
+Evidence: `water-review/chine-history-probe.js`, `chine-history-gpu.json`,
+`chine-history-cpu-probe.js`, and `chine-history-cpu.json`.
+
+Validation: 40 focused tests pass across retained contact, burst capacity,
+reversal/turn isolation, volume conservation, smooth source retirement,
+packet-cadence filtering, fleet ordering, source shaders, sea-frame wiring and
+speedboat look. The width tests now evaluate retained packets rather than the
+old steady envelope. Typecheck and production build pass. The in-game turning
+capture is `water-review/chine-history-turn.png`; it shows the retained model
+before the final smooth-retirement and cadence-filter refinements. The final
+shader was additionally booted and measured in the normal and burst GPU probes.
+
+The old steady-tow envelope remains only as an explicit calibration input for
+CPU callers without a timeline and in the archived pass-20 comparison. Live
+vessels always use retained emissions; there is no envelope fallback. Worker
+records still cannot recover an unobserved contact transition between collected
+snapshots, but collected motion and source changes no longer rewrite old water.
+No git commit, checkout or reset was performed.
+
+
+## 22. Swell travel, cay elevation, turquoise aeration
+
+The shared spectrum evolved positive-k swell toward negative k while
+`swellDirection` was documented as travel. The shadow march already used the
+positive authored direction. A temporal spatial-field regression measured
+negative transport (−16.5 to −17.1 m/s) at three headings before the fix.
+`swellSpectrum` now selects the negative-k half-plane; CPU and GPU use the same
+spectrum without changing their phase evolution or wind-sea behavior. Removed
+Tower Reach's compensating negative exposure vector. Measured-band shoaling
+continues to derive direction from actual h0 energy. Existing shadow marching
+needs no sign change. This changes seeded swell phases and the side receiving
+swell exposure; it does not rotate the authored course or bars.
+
+Cay beaches were not below still water in the sampled authored 0.3–1.5 m band,
+but Tower Cay's mean elevation was compressed from 0.862 m to 0.482 m by the
+generic beach pipeline. Its already-authored dune/beach/shelf field now uses
+the existing exact-field hook. Finished mean is 0.926 m; Bar Head changes
+1.184→1.556 m (authored mean 1.125 m; the existing peak floor still applies).
+The regression protects beach elevation and dry-ground fraction. Course depth,
+bar clearance, prop placement and byte-identical unrelated islands pass.
+This removes excess geometric susceptibility to flooding; it does not suppress
+legitimate swash or prove storm-time dryness.
+
+Aerated wake color is now #70bbb5. Freshness is multiplied by a density gate
+(smoothstep 0.35–0.9 on the existing porous wake mask) before mixing toward
+white froth. Thin fresh bubbles retain turquoise and optical-depth transmission;
+dense froth and whitecaps retain their white material. No added texture reads,
+GPU passes, source particles or CPU frame loops. No frame-time improvement is
+claimed: this is a small fragment arithmetic change and a terrain-build fix.
+
+Validation: 219 targeted checks pass across swell travel/shadow, ocean spectrum,
+shoaling asymmetry, circuit/kit, wake appearance contracts and resource budget.
+Production build passes with existing chunk-size and COI-script warnings.
+Live WebGPU game boots and renders with the changed material. The calm-water
+43 kn capture `docs/water-review/turquoise-aeration.png` shows turquoise
+translucent margins and white broken froth; measured flood is zero. Multi-weather
+visual tuning remains a separate follow-up. No commits performed by this agent.
+
+
+## 23. Coherent shore swash under storm waves
+
+The storm-wave beach review exposed granular white speckling across the wet
+sand. `buildShoreNodes` fed `phase * 97` (continuous spatial noise) into a hash
+for each wave's amplitude. Adjacent pixels therefore got unrelated runup
+heights. This was not foam texture detail: it changed the elevation of the
+entire swash tongue and its drying history.
+
+The amplitude now interpolates two hashes keyed only by discrete wave identity,
+using the existing smooth phase field. Per-cycle variation remains; rush-up,
+drainage, wet memory, amplitude limits and foam source strength remain unchanged.
+No texture reads, noise-field evaluations, CPU work or render passes were added.
+There are three additional scalar hashes and interpolation arithmetic in the
+swash graph (two hashes instead of one for each of three remembered waves).
+
+The paired 512² GPU probe evaluates actual old/new TSL sheet, wetness, foam and
+height outputs over a 10.24 m patch at 2 cm spacing. At 42.6667 s and storm
+swell input 4.801 m, the old height jumps by up to 0.483 m between neighbors;
+new maximum is 0.0000446 m. Old field has 259,765 jumps exceeding 2 cm out of
+261,632 comparisons; new field has zero. The reusable probe also throws if
+new adjacent height jumps exceed 5 mm. Retained-patch median GPU time is
+0.02575 ms before / 0.02946 ms after (+0.00371 ms); samples include scheduling
+outliers, so this is a component probe, not a frame-rate claim. Artifacts: `shore-phase-probe.js` and
+`shore-phase-gpu.json` in `docs/water-review/`.
+
+Matched camera captures `shore-phase-before.png` / `shore-phase-after.png`
+show the removal of beach glitter. Tower Cay remains exposed under this storm
+wave state (measured ocean RMS 2.4005 m). Camera [150,110,-120], target
+[5,0,-270], seed 1965, time 42.6667 s, 1280×800. These use direct scene rendering
+without postprocessing, and inspect storm waves rather than validate the full
+storm atmosphere or every point over a storm cycle.
+
+Validation: 52 terrain/kit checks pass; production build passes. A coverage-
+erosion experiment produced overly coarse shore foam and was removed after
+visual inspection. Remaining work: coherent foam breakup/dissolve along the
+shore, runup response to local shelter (it still takes global swell strength),
+and matched day/night wake-color checks. No commits performed by this agent.
+
+
+## 24. Surface foam follows available light
+
+Noon / 18:30 / midnight review found that surface wake stayed nearly daylight
+bright while the boat and sea darkened. The foam term used N·L and a constant
+ambient floor, but neither the sky nor key intensity. The water body already
+had the correct live radiance uniforms.
+
+Whitecaps and aerated wake now multiply ambient by sky luminance, and directional
+light by the live key's luminance. Their own color/tint remains intact; both
+use the same computed terms, preserving foam's own shading normal. No extra
+uniform, texture, pass, CPU work or source-state change. The new arithmetic
+is two luminance/light terms shared across wake and whitecaps.
+
+`docs/water-review/wake-night.png` and `wake-night-fixed.png` show the surface
+wake losing its false glow. `wake-noon.png` / `wake-noon-fixed.png` confirm the
+turquoise body remains visible by day. Each version uses a controlled open-water
+run from [3000,0.5,3000], then freezes simulation for light changes; separate
+runs are not pixel-matched wave/particle states. These are direct scene captures
+without postprocessing. HUD sea/time text belongs to race selection and does
+not reflect the review-only sky override.
+
+The corrected night frame exposes the same defect in airborne spray:
+`foam/roosterTail.ts`'s `litTint` uses a direction-only HG lobe plus a constant
+ambient, while default `sprayPool.ts` color is an unlit tint. Fixing those
+requires passing actual light intensity through the shared sprite path;
+do not relight the surface wake to conceal it. This is the next specific
+lighting task. Shore foam breakup/local-shelter response remain pending too.
+
+Validation: 58 terrain, wake-look and shader-resource checks pass. The final
+workspace build is blocked by concurrent unrelated test type errors:
+`speedboatAssist.test.ts` omits required `GovernorSample.propImmersion`, and
+`speedboatFreeRoam.test.ts` omits `ControlSource.dispose`. The isolated review
+snapshot carries the final water files without those concurrent edits and passes
+`npm run build` (source type-check plus production bundle). Live WebGPU
+material compiles and renders at noon and midnight. No frame-time performance
+claim for this lighting change. No commits performed by this agent.
+
+
+## 25. Live lighting for airborne spray and prop bubbles
+
+`sky/particleLighting.ts` publishes two linear radiance uniforms from the sky
+rig after its actual DirectionalLight/HemisphereLight update. Key is color ×
+intensity / pi; ambient averages the two hemisphere colors × intensity.
+Values start black until the sky publishes a frame. There is no synthetic
+sun, scene traversal, or hidden fallback for unbound lighting.
+
+`sprayPool.ts` gives all default spray the live light. Custom color callbacks
+receive the same terms. Rooster tails multiply their existing HG directional
+lobe by key radiance and their ambient term by ambient radiance. Prop bubbles
+retain their turquoise albedo but take the same illumination. Bow spray,
+ambient crest spray and all fleet pools therefore darken without changing
+emission rates, flight, transparency or particle budgets. Sky updates these
+uniforms once per frame, including paused simulation; no per-particle CPU loop,
+extra texture, extra pass or new scene query.
+
+`spray-night-fixed.png` and `spray-noon-fixed.png` in `docs/water-review/`
+show the same frozen particle state under midnight/noon lighting. Midnight
+key RGB is [0.06458,0.09472,0.16053], ambient [0.01071,0.01868,0.03326].
+Direct scene rendering, no postprocessing; HUD time is still race selection.
+The previous pass's `wake-night-fixed.png` records the white airborne plume
+before this correction (different particle state, not a pixel-difference pair).
+
+Three regression tests cover complete extinction at zero light, independent
+key/ambient scaling, and publication by the real sky rig without a particle
+tick. Existing 47 spray and 98 sky/moon/fleet tests also pass. Production build
+passes. Daytime plume is deliberately less opaque-looking because its fixed
+0.6 brightness floor is gone; opacity and particle count themselves did not
+change. No whole-frame speed claim.
+
+## 26. Stranded foam has its own lifetime
+
+The shore shader previously equated stranded foam with `wet - sheet`. That
+made sand drying time control foam lifetime, and moved the foam boundary as
+the wet-sand height contracted. Foam now remembers each of three wave deposits
+at its original runup height, then attenuates coverage with a quarter-cycle
+e-folding time after the wave peak. The returning sheet removes visible
+residue under water. Wet sand retains its existing longer drying history.
+This is an analytic approximation to deposited foam, not a new fluid simulation.
+
+Actual old/new TSL graphs are exercised by `shore-decay-probe.js`: 256² samples
+span one wave cycle and elevations 0–6 m. Changing sand drying from 1 to 30 s
+changed old foam by up to 0.2183 coverage; new foam is bit-identical while wet
+sand still changes by up to 1. In 17,266 stranded-foam samples away from the
+moving edge, mean coverage changes 0.21784→0.02471, with nonzero peak 0.11166.
+Assertions reject either dependence on sand drying or removing residue entirely.
+
+With the selection preview closed and the game loop stopped, paired GPU medians
+are 0.00896 ms old and 0.00875–0.00921 ms new. This component probe detects no
+material cost increase; it is not a game-frame benchmark. An earlier contended
+run with the preview active was discarded for timing. No new texture/noise
+sample or pass; three scalar coverage/age calculations replace the wet-mask
+subtraction. `shore-decay-gpu.json` stores raw timings and assertions' inputs.
+
+`shore-decay-storm.png` uses the previous storm beach camera/time; wet sand
+remains after foam fades instead of keeping a white inland stripe. The 43
+terrain tests pass after this change, and the final production build passes.
+No commits performed by this agent.
+
+### Local runup energy: requirements (implemented in pass 27)
+
+Runup amplitude still uses global sea RMS from `core/seaFrame.ts`. A sheltered
+beach therefore gets the exposed beach's analytic runup, even though its drawn
+waves use fetch and swell shadow. Do not multiply runup by the shelter value
+sampled on dry land: land cells are blockers, and that would also extinguish
+exposed swash. The next implementation needs a stable seaward shoreline sample
+(or a baked shore exposure field) and the shared per-band fetch/swell gains.
+Keep genuine storm overtopping. Acceptance: exposed/lee beaches under identical
+waves differ in runup; rotating swell moves the sheltered side; dry-land samples
+do not kill exposed swash; cost stays bounded without per-pixel CPU queries.
+
+
+## 27. Offshore exposure drives local runup
+
+`shoreSampling.ts` bakes a geometry-only mapping from beach cells to water
+outside a two-cell land dilation. A four-neighbor breadth-first extension
+chooses the nearest offshore seed in grid distance. Land dilation visits land
+cells only, and the extension queues only the offshore rim rather than the
+entire ocean. The map is retained and reused when weather changes. A domain
+with no offshore water throws instead of inventing exposure.
+
+The shelter texture is now RGBA16F. R/G retain the exact physical fetch and
+swell-shadow values used by waves and buoyancy. B/A copy those same values from
+the mapped offshore cell onto the beach. Each wind/swell rebuild updates its
+own physical and offshore channels together. CPU `fetchAt`/`shadowAt` and
+worker sampling retain the same arrays and meanings.
+
+`Caustics.waterSurface` returns actual water height and local shore-energy
+gain from ONE shelter texture sample. It combines existing per-band fetch
+and swell gains with the spectrum's measured variances, then takes the local /
+open RMS ratio. It does not apply zero-depth shoaling on dry sand: that would
+extinguish exposed swash. Sand passes this gain into the existing analytic
+runup amplitude, scaling current and remembered waves together. Stand-alone
+sand without the active sea keeps its existing authored runup behavior.
+No new texture sampler, render pass, CPU frame query or terrain rebuild.
+
+Regression coverage: exposed dry sand gets offshore energy; lee sand gets less;
+turning swell 180° swaps the sheltered beach; changing wind updates offshore
+fetch without changing swell shadow; original R/G still match CPU sampling.
+All mapped cells are checked clear of land, and a no-offshore domain is rejected.
+116 shore/fetch/swell/terrain/resource-budget checks pass. Final production
+build passes (5.41 s); `git diff --check` is clean.
+
+Actual GPU gain vs CPU shared wave laws, synthetic island and dry beach points:
+exposed 0.96277833 vs 0.96277830; lee 0.27829498 vs 0.27829494. Other sampled
+coasts agree within 0.000058 (half-texture interpolation precision). The probe
+throws above 0.0001 disagreement or if exposed gain is no greater than lee gain.
+Artifacts: `shore-exposure-probe.js`, `shore-exposure-gpu.json`, and the real
+Tower Cay storm capture `shore-exposure-storm.png` in `docs/water-review/`.
+The capture uses the established camera/time and direct scene rendering.
+
+Cost at 512²: +2 MiB persistent CPU (mapping plus added texture channels),
++1 MiB GPU texture. Bake median 27.23→34.30 ms (+7.07 ms), once per world;
+initial unoptimized mapping added about 14 ms. Temporary bake storage includes
+a 1 MiB queue and 0.25 MiB dilated mask. GPU 256² runup probe median
+0.00971→0.01025 ms (+0.00054 ms), compared with global-amplitude swash.
+Previous timing run had a +0.005 ms difference; raw samples are saved and no
+whole-frame FPS improvement is claimed. Material binding count stays unchanged.
+
+Limit: this remains coarse-grid offshore energy, not a fluid simulation of
+surf uprush. Narrow channels/beaches below shelter-grid resolution cannot
+carry independent exposure. Grid-distance ties can meet on inland dividing
+lines; these are not wave fronts. Real storm overtopping is not suppressed.
+No commits performed by this agent.
+
+## 28. Swash edge grows with the tongue
+
+The sand material's edge mask was solely a distance from the swash elevation.
+At zero elevation it still produced full-strength foam, including when local
+shore energy was zero. That created a stationary contour between tongues and
+prevented sheltered runup from fully suppressing the analytic swash edge.
+
+`shoreRunup.ts` now multiplies this edge by a smooth onset over the existing
+foam elevation width. The tongue develops its edge as it climbs; the edge
+recedes smoothly as the tongue drains. Once runup exceeds that width, the
+original edge brightness is unchanged. The independent stranded-foam history
+still survives between waves. No new tuning parameter, texture, pass, CPU
+frame work, or fallback was added; the shader adds one scalar smoothstep and
+multiply. No GPU frame-time improvement is claimed.
+
+The isolated WebGPU regression renders 256² height/phase samples for zero,
+weak and full shore-energy gain, comparing the previous and new shaders.
+With foam noise disabled, zero-energy peak foam falls from 1 to 0. At the
+cycle boundary, full-energy foam falls from 1 to 0.02964 (surviving residue),
+and weak-energy foam from 1 to 0.01115. Full-energy peak foam remains 1.
+Mature edges, stranded residue beyond the edge, sheet coverage, wet-sand
+coverage and runup elevation agree exactly between versions in this probe.
+The regression throws if those contracts fail. This is a shader diagnostic,
+not a new gameplay visual comparison.
+
+Artifacts: `docs/water-review/shore-edge-probe.js` and `shore-edge-gpu.json`.
+Run the probe with a WebGPU renderer and a URL for the pre-change module;
+keep a copy beside `shoreRunup.ts` so its relative imports resolve. Fifty
+terrain, shore-exposure and material-resource tests pass. Production build
+passes (3.61 s). No commits performed.
+
+## 29. Filter foam lookup displacement
+
+`foamWarpVec` fed unfiltered two-octave value noise into both the foam simulation
+lookup and the foam art lookup. Texture mipmaps filter their input images;
+they do not remove unresolved displacement in the coordinates addressing them.
+Consequently distant pixels continued receiving different warp offsets as the
+camera moved, even after the warp's lattice was smaller than a pixel.
+
+Both warp components now use the existing `bandLimitedFbm2` rule with one
+shared derivative footprint. Each octave retires toward its own mean, making
+the signed displacement tend toward zero. Once the largest octave is fully
+unresolved, a fragment branch skips all four value-noise evaluations. The
+footprint is evaluated before the branch. No texture, sampler, pass or CPU
+frame work was added. Filtering adds derivative/scalar work nearby; no measured
+whole-frame performance improvement is claimed.
+
+The fragment-stage WebGPU probe compares the original and filtered functions
+on a 128² float target, at three pixel footprints and two camera offsets.
+At 0.125 m/pixel, maximum component difference is 0.00000073 m. At 2 m/pixel,
+mean warp change for a 0.25 m camera translation falls from 0.01246 to
+0.00818 m (34%). At 16 m/pixel, peak warp falls from 0.674 m to exactly zero;
+translation-induced warp change is also zero. This measures coordinate
+stability, not final image shimmer or physical foam transport.
+
+Artifacts: `docs/water-review/foam-warp-probe.js` and `foam-warp-gpu.json`.
+The probe requires a WebGPU renderer and the pre-change module URL, with that
+copy beside `foamShading.ts` to retain relative imports. It asserts resolved
+agreement, unresolved retirement, and reduced motion in the transition.
+119 foam, texture and material-resource tests pass. Final production build
+passes (3.64 s), and `git diff --check` is clean. No commits performed.
+
+## 30. Reuse whitecap lookup warp
+
+Whitecap shading constructed the same world-coordinate warp twice: once for
+simulation coverage sampling and again for the foam-art churn. `shadingNode`
+now stores that warp in a TSL variable and supplies it to `foamDetailMask`.
+Callers without a precomputed warp still construct their existing warp. This
+is expression reuse, with no new source, transport law, or tuning parameter.
+It removes one duplicate four-noise warp graph from the whitecap path. No CPU
+frame work, textures or bindings were added. GPU frame-time savings have not
+been measured, so this is not an FPS claim.
+
+The GPU probe builds the real detail mask with variable coverage and compares
+independent versus shared warp. At 0.125 m/pixel the largest mask difference
+is 0.0000233 from floating-point evaluation; at 2 and 16 m/pixel it is exactly
+zero. The explicit acceptance tolerance is 0.0001, and each sample must contain
+a nonconstant foam mask. This is numerical equivalence within tolerance,
+not bit-exact equivalence.
+
+Artifacts: `docs/water-review/foam-warp-reuse-probe.js` and
+`foam-warp-reuse-gpu.json`. The full ocean scene also rendered successfully
+with the filtering from pass 29 and then booted again with warp reuse enabled
+(first rendered frame at 8.13 s in the isolated browser). The coastal diagnostic is not a controlled
+before/after comparison and is not used to claim a visible improvement.
+119 foam, texture and material-resource tests pass; production build passes
+(3.74 s). No commits performed.

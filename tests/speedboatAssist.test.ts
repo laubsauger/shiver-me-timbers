@@ -13,21 +13,23 @@
  * needs `standInDrivePowerW` 4 MW to hold C_v 8–10).
  */
 import { describe, expect, it } from 'vitest';
-import { invRotateVec, rotateVec } from '../src/core/quat';
+import { rotateVec } from '../src/core/quat';
 import { HullWater, type HeightSampler } from '../src/sea-physics/hullWater';
 import { createRigid6Memory, stepRigid6, type Rigid6State } from '../src/sea-physics/rigidBody';
 import {
   assistPreset,
   createAssistState,
   createGovernorState,
-  LANDING_PITCH_CENTRE,
-  RPM_PROXY,
+  GOVERNOR,
   readBoatSim,
   safeLockRad,
   speedCoefficient,
   stepAssists,
   stepGovernor,
   stepHelm,
+  LANDING_PITCH_CENTRE,
+  TRIM_MIN,
+  TRIM_RATE,
   type AssistSettings,
   type BoatSimSample,
 } from '../src/speedboat/assists';
@@ -213,14 +215,17 @@ describe('Pro preset = the physics unmodified', () => {
   });
 });
 
+/** how the drive trim reaches the physics over a jump: none, the assists' own command, or full trim-in only while airborne */
+type TrimPath = 'none' | 'assist' | 'airOnly';
+
 /** C_v run at speed into a Gaussian sand-bar ridge of height A, half-width w: a real launch and landing */
 function jump(
   cv: number,
   A: number,
   w: number,
   settings: AssistSettings,
-  opts: { emulateTrim?: boolean } = {},
-): { airS: number; landingPitchDeg: number | null; maxAirRpm: number; states: Rigid6State[]; throttles: number[] } {
+  trimPath: TrimPath = 'none',
+): { airS: number; landingPitchDeg: number | null; maxAirRpm: number; lateAirRpm: number; states: Rigid6State[]; throttles: number[] } {
   const U = cv * Math.sqrt(G * B);
   const hw = new HullWater(hull, { standInDrivePowerW: 4e6 });
   const mem = createRigid6Memory();
@@ -236,8 +241,9 @@ function jump(
   let maxAir = 0;
   let launched = false;
   let landing: number | null = null;
-  let trim = 0;
   let maxAirRpm = 0;
+  let lateAirRpm = 0;
+  let trim = 0;
   const states: Rigid6State[] = [];
   const throttles: number[] = [];
   for (let t = 0; t < 18 * 60; t++) {
@@ -252,122 +258,122 @@ function jump(
       // the pilot holds the throttle wide open over the bar
       input.throttle = 1;
       const cmd = stepAssists(input, sim, settings, st, DT, LOCK);
-      hw.setControls(cmd.steerRad, cmd.throttle);
       throttles.push(cmd.throttle);
-      trim = cmd.trimRad;
-      if (sim.airborne) maxAirRpm = Math.max(maxAirRpm, st.governor.rpm);
+      if (trimPath === 'assist') trim = cmd.trimRad;
+      else if (trimPath === 'airOnly') {
+        const max = TRIM_RATE * DT;
+        trim += Math.max(-max, Math.min(max, (sim.airborne ? TRIM_MIN : 0) - trim));
+      }
+      // the real drive trim path (T189 `setControls(steer, throttle, trim)`)
+      hw.setControls(cmd.steerRad, cmd.throttle, trim);
     }
     hw.samplePatch(sampler, s, DT);
-    stepRigid6(
-      s,
-      hull,
-      DT,
-      2,
-      (ss, h, out) => {
-        hw.evaluate(ss, h, out);
-        if (!opts.emulateTrim || trim === 0) return;
-        // TEST-ONLY drive-trim emulation (HullWater has no trim input yet): each drive's published thrust re-aimed
-        // about body x by the trim angle (+ = trim out: the thrust line tips DOWN, stern down, bow up)
-        const c = Math.cos(trim);
-        const sn = Math.sin(trim);
-        for (let k = 0; k < hw.driveThrust.length; k++) {
-          const T = hw.driveThrust[k];
-          if (T === 0) continue;
-          const d0: Vec3 = [hw.driveDir[3 * k], hw.driveDir[3 * k + 1], hw.driveDir[3 * k + 2]];
-          const d = invRotateVec(ss.quaternion, d0);
-          const dw = rotateVec(ss.quaternion, [d[0], d[1] * c - d[2] * sn, d[1] * sn + d[2] * c]);
-          const f = [T * (dw[0] - d0[0]), T * (dw[1] - d0[1]), T * (dw[2] - d0[2])];
-          const r = [0, 1, 2].map((i) => hw.driveProp[3 * k + i] - ss.position[i]);
-          for (let i = 0; i < 3; i++) out.force[i] += f[i];
-          out.torque[0] += r[1] * f[2] - r[2] * f[1];
-          out.torque[1] += r[2] * f[0] - r[0] * f[2];
-          out.torque[2] += r[0] * f[1] - r[1] * f[0];
-        }
-      },
-      mem,
-    );
+    stepRigid6(s, hull, DT, 2, (ss, h, out) => hw.evaluate(ss, h, out), mem);
     if (time >= 10) states.push({ position: [...s.position] as Vec3, quaternion: [...s.quaternion] as Quat, velocity: [...s.velocity] as Vec3, angularVelocity: [...s.angularVelocity] as Vec3 });
     const after = readBoatSim(hw, s);
     if (after.airborne) {
       air += DT;
       launched = true;
       maxAir = Math.max(maxAir, air);
+      if (time >= 10) maxAirRpm = Math.max(maxAirRpm, after.rpm);
+      if (time >= 10 && air > 0.25) lateAirRpm = Math.max(lateAirRpm, after.rpm);
     } else {
       if (launched && landing === null && air > 0.3) landing = after.pitch * DEG;
       air = 0;
     }
   }
-  return { airS: maxAir, landingPitchDeg: landing, maxAirRpm, states, throttles };
+  return { airS: maxAir, landingPitchDeg: landing, maxAirRpm, lateAirRpm, states, throttles };
 }
 
 describe('the Governor (OFF · AIR · FULL)', () => {
-  it('airborne over a real sand bar at full throttle: OFF bounces on the rev limiter, AIR keeps the rpm proxy at rated', () => {
+  it('airborne over a real sand bar at full throttle: OFF bounces on the engine\'s rev limiter, AIR governs the flight at rated', () => {
     // WHY (design §3, tech-research §3.1): a prop out of the water loses its load and flares; the Governor is the
-    // salvaged module that stops it. Measured flight 1.2–1.4 s (C_v 8, 2 m bar). T196: the same bar now flies 0.7–0.8 s by
-    // the assists' airborne flag (hull dry AND every gearcase dry: the raised drives in the transom wake, VCG +2 cm), under
-    // the 0.8 s this check needs to see a flare; a 2.5 m bar restores a > 0.8 s flight — the property is the Governor's.
+    // salvaged module that stops it. §T.207: judged on the ENGINE MODEL's own rpm (hw.driveRpm, §V77), not a proxy. This
+    // 4 MW harness runs the props past rated on the approach (6400–6800 rpm wet, ventilating on the face), which the
+    // Governor deliberately leaves alone (wet = the running point, §T.206). Measured: 2.5 m bar at C_v 8 flies 1.08 s —
+    // OFF 6837 rpm (limiter 6800 + its cut overshoot), AIR 6178 over the whole flight (1.013 × rated); C_v 10 1.5 m bar
+    // flies 0.6 s — AIR 6798 on the launch tick (the face), 6069–6165 from 0.25 s on (1.011 × rated).
     const base = { ...assistPreset('pro') };
     const off = jump(8, 2.5, 10, { ...base, governor: 'OFF' });
     const airG = jump(8, 2.5, 10, { ...base, governor: 'AIR' });
+    const spec = new HullWater(hull).params.engine;
     expect(off.airS).toBeGreaterThan(0.8);
     expect(airG.airS).toBeGreaterThan(0.8);
-    expect(off.maxAirRpm).toBeGreaterThanOrEqual(RPM_PROXY.limiter - 1e-9);
-    // the Governor now feathers only below VENT_IMMERSION (surfaced planing props are the running point, not a dry prop),
-    // so the last metres of the launch spool the proxy over rated before the drive is out: ~4% at 0.45, 9% at T206's 0.1
-    // (the proxy's quadratic load law flares at any part immersion; the §T.189 engine's own limiter is the real bound).
-    // Still below OFF's limiter.
-    expect(airG.maxAirRpm).toBeLessThanOrEqual(1.1);
+    expect(off.maxAirRpm).toBeGreaterThanOrEqual(spec.limitRpm);
+    expect(airG.maxAirRpm).toBeLessThanOrEqual(1.02 * spec.ratedRpm);
+    const fast = jump(10, 1.5, 10, { ...base, governor: 'AIR' });
+    expect(fast.airS).toBeGreaterThan(0.5);
+    expect(fast.lateAirRpm).toBeLessThanOrEqual(1.02 * spec.ratedRpm);
   });
 
-  it('with the props buried AIR changes nothing; FULL caps the throttle for the landing window only', () => {
+  it('wet, AIR changes nothing even over rated; props out, it governs at rated with a lead; FULL caps the landing window only', () => {
+    // WHY: the wet running point (calm WOT itself ventilates to 6790 rpm) must cost nothing (§T.206, §V110), while a
+    // flaring dry prop is cut on the rise, before the throttle lag lets it reach the limiter
+    const wet = (rpm: number, propImmersion = 0.6) => ({ airborne: false, propImmersion, rpm, ratedRpm: 6100 });
+    const dry = (rpm: number) => ({ airborne: true, propImmersion: 0, rpm, ratedRpm: 6100 });
     const st = createGovernorState();
-    expect(stepGovernor(st, 'AIR', 1, false, 1, DT)).toBe(1);
+    expect(stepGovernor(st, 'AIR', 1, wet(5744), DT)).toBe(1);
+    expect(stepGovernor(st, 'AIR', 1, wet(6790, 0.52), DT)).toBe(1);
+    expect(stepGovernor(createGovernorState(), 'AIR', 1, wet(6790, 0.19), DT)).toBe(1);
+    expect(stepGovernor(createGovernorState(), 'AIR', 1, dry(5000), DT)).toBe(1);
+    expect(stepGovernor(createGovernorState(), 'AIR', 1, dry(6400), DT)).toBeLessThan(1);
+    expect(stepGovernor(createGovernorState(), 'AIR', 1, dry(6800), DT)).toBe(GOVERNOR.airThrottle);
+    // a launch: immersion 0.9 → 0.3 in one tick while the rpm jumps 5700 → 5950 — cut before rated is reached
+    const launching = createGovernorState();
+    stepGovernor(launching, 'AIR', 1, wet(5700, 0.9), DT);
+    expect(stepGovernor(launching, 'AIR', 1, wet(5950, 0.3), DT)).toBeLessThan(1);
+    expect(stepGovernor(createGovernorState(), 'OFF', 1, dry(6800), DT)).toBe(1);
     // 0.5 s of air, then touchdown
     const full = createGovernorState();
-    for (let k = 0; k < 30; k++) stepGovernor(full, 'FULL', 1, true, 0, DT);
+    for (let k = 0; k < 30; k++) stepGovernor(full, 'FULL', 1, dry(5000), DT);
     const caps: number[] = [];
-    for (let k = 0; k < 60; k++) caps.push(stepGovernor(full, 'FULL', 1, false, 1, DT));
+    for (let k = 0; k < 60; k++) caps.push(stepGovernor(full, 'FULL', 1, wet(5000), DT));
     expect(caps[0]).toBeLessThanOrEqual(0.5);
     expect(caps[35]).toBeLessThanOrEqual(0.5);
     expect(caps[40]).toBe(1);
     // a hop shorter than LANDING_MIN_AIR is not a landing
     const hop = createGovernorState();
-    for (let k = 0; k < 10; k++) stepGovernor(hop, 'FULL', 1, true, 0, DT);
-    expect(stepGovernor(hop, 'FULL', 1, false, 1, DT)).toBe(1);
+    for (let k = 0; k < 10; k++) stepGovernor(hop, 'FULL', 1, dry(5000), DT);
+    expect(stepGovernor(hop, 'FULL', 1, wet(5000), DT)).toBe(1);
   });
 });
 
-describe('landing assist (trim only)', () => {
+describe('landing assist (trim only) — not in the Default preset (§T.207)', () => {
   // T196: the C_v 8 bar was 1.2 m × 8 — its flight by the airborne flag (hull and gearcases dry) is 0.17 s now, under the
   // 0.3 s a landing needs; 1.6 m flies 0.6 s
   const cases: [number, number, number][] = [[8, 1.6, 8], [8, 2, 10], [6, 1.5, 6], [10, 1.5, 10], [9, 2.5, 12]];
 
-  // KNOWN REGRESSION, reported to the controls owner (T196, docs/speedboat/physics-log.md): with the drives running part-
-  // surfaced in the transom wake (hullWater `transomWake`, prop immersion 0.6 at planing speed, coordinator item 7) the
-  // props leave the water at the launch, so re-aiming their thrust has nothing to push with. Measured landing pitch
-  // off → on (window centre 2.5°): C_v 8 1.6 m 9.6 → 9.8°, 8/2 m 12.1 → 12.3°, 6/1.5 m 10.7 → 10.6°, 10/1.5 m 8.2 → 8.6°,
-  // 9/2.5 m 12.7 → 13.6° (T182 on buried props: 1.5–4.6° better). Kept as `it.fails` so the day the assist or the trim
-  // path regains authority this flips and has to be restored.
-  it.fails('lands nearer the window than with it off, on every bar (drive trim emulated as thrust-line pitch)', () => {
-    // measured (T182): landing pitch 14.3/16.3/15.1/16.3/19.0° off → 12.8/12.5/12.8/12.7/14.4° at 0.5. Honest size:
-    // still above the 7° clean limit — a dry prop cannot pitch her in the air (docs/speedboat/controls.md hooks).
+  it('the assist does not earn a place in Default: through the real trim path it lands no nearer the window', () => {
+    // WHY: Default is what an unaware player drives with, and every rising face it trims the drives (in a sea: many per
+    // lap) — only worth it if it lands her nearer the window BECAUSE of the direction it trims. T182 measured 1.5–4.6°
+    // better on buried props with an emulated thrust line. Through the REAL trim path (T189 `setControls` trim; §T.207,
+    // Governor AIR on engine rpm), landing pitch off → on (window centre 2.5°): 13.28 → 12.32°, 19.35 → 16.01°,
+    // 10.26 → 11.21°, 12.75 → 11.48°, 22.01 → 18.31° — worse at C_v 6. And not for the assist's reason: full trim-OUT on
+    // the face (the opposite command) lands 10.57 / 15.96 / 10.23 / 12.16 / 16.57°, as flat or flatter on 4 of 5 bars —
+    // tilting a drive either way lifts its prop about the pivot and costs launch thrust; trim swung only in the AIR moves
+    // the landing 0.00° (props dry). Removed from Default (settings.ts); the day the assist lands nearer on every bar
+    // with > 1° mean gain, this fails and it goes back.
+    expect(assistPreset('default').landingAssist).toBe(0);
     const centre = LANDING_PITCH_CENTRE * DEG;
-    let gain = 0;
+    const gains: number[] = [];
     for (const [cv, A, w] of cases) {
-      const off = jump(cv, A, w, { ...assistPreset('default'), landingAssist: 0 }, { emulateTrim: true });
-      const on = jump(cv, A, w, assistPreset('default'), { emulateTrim: true });
-      expect(off.landingPitchDeg, `C_v ${cv} bar ${A}: lands`).not.toBeNull();
-      const eOff = Math.abs((off.landingPitchDeg as number) - centre);
-      const eOn = Math.abs((on.landingPitchDeg as number) - centre);
-      expect(eOn, `C_v ${cv} bar ${A}`).toBeLessThan(eOff - 1);
-      gain += eOff - eOn;
+      const off = jump(cv, A, w, { ...assistPreset('default'), landingAssist: 0 }, 'assist').landingPitchDeg;
+      const on = jump(cv, A, w, { ...assistPreset('default'), landingAssist: 0.5 }, 'assist').landingPitchDeg;
+      const air = jump(cv, A, w, { ...assistPreset('default'), landingAssist: 0 }, 'airOnly').landingPitchDeg;
+      const tag = `C_v ${cv} bar ${A}: off ${off?.toFixed(2)} on ${on?.toFixed(2)} air-only trim ${air?.toFixed(2)}`;
+      expect(off, tag).not.toBeNull();
+      expect(on, tag).not.toBeNull();
+      expect(air, tag).not.toBeNull();
+      expect(Math.abs((air as number) - (off as number)), tag).toBeLessThan(0.3);
+      gains.push(Math.abs((off as number) - centre) - Math.abs((on as number) - centre));
     }
-    expect(gain / cases.length).toBeGreaterThan(2);
+    const mean = gains.reduce((a, b) => a + b, 0) / gains.length;
+    expect(Math.min(...gains) > 0 && mean > 1, `gains ${gains.map((g) => g.toFixed(2)).join(', ')}`).toBe(false);
   });
 
   it('never applies a force: with no trim path into the physics, assist on and off fly bit-identical paths', () => {
     const off = jump(8, 2, 10, { ...assistPreset('default'), landingAssist: 0 });
-    const on = jump(8, 2, 10, assistPreset('default'));
+    const on = jump(8, 2, 10, { ...assistPreset('default'), landingAssist: 0.5 });
     expect(on.states.length).toBe(off.states.length);
     for (let k = 0; k < on.states.length; k++) {
       expect(on.states[k].position).toEqual(off.states[k].position);
@@ -381,7 +387,7 @@ describe('determinism (§V2)', () => {
     const settings = assistPreset('default');
     const seq = (k: number): [number, BoatSimSample] => [
       Math.sin(k * 0.37),
-      { speed: 20 + 10 * Math.sin(k * 0.05), pitch: 0.05 * Math.sin(k * 0.2), pitchRate: 0.3 * Math.cos(k * 0.2), roll: 0.3 * Math.sin(k * 0.11), vy: Math.sin(k * 0.3), heightAboveWater: 0.35 + Math.max(0, Math.sin(k * 0.1)), airborne: Math.sin(k * 0.1) > 0.5, propImmersion: Math.max(0, Math.cos(k * 0.1)) },
+      { speed: 20 + 10 * Math.sin(k * 0.05), pitch: 0.05 * Math.sin(k * 0.2), pitchRate: 0.3 * Math.cos(k * 0.2), roll: 0.3 * Math.sin(k * 0.11), vy: Math.sin(k * 0.3), heightAboveWater: 0.35 + Math.max(0, Math.sin(k * 0.1)), airborne: Math.sin(k * 0.1) > 0.5, propImmersion: Math.max(0, Math.cos(k * 0.1)), rpm: 5800 + 600 * Math.sin(k * 0.13), ratedRpm: 6100 },
     ];
     const run = (): number[] => {
       const st = createAssistState();

@@ -74,6 +74,7 @@ describe('§T.194 the kit hooks reach kit islands only', () => {
       expect(beach, id).toBeGreaterThan(20);
       console.log('cay beach', id, { beach, drowned, authoredMean: authoredSum / beach, actualMean: actualSum / beach });
       expect(drowned / beach, id).toBeLessThan(0.02);
+      expect(actualSum / authoredSum, `${id} beach elevation retained`).toBeGreaterThan(0.85);
     }
   });
   it('pirate and raft islands are byte-identical after the race kit registers its render hooks', () => {

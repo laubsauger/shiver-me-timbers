@@ -1844,9 +1844,10 @@ export function buildOceanSurfaceMaterial(
           .oneMinus()
           .clamp(0, 1);
       }
-      // foam sits in the same light as the water (wrap floor+gain). Scalar
-      // light only — sunTint here would double the warm tint (foamTintNode
-      // already warms it) and low-alpha foam went beige-brown on deep teal.
+      // Foam shares the water's sky and key intensity. Keep scalar lighting
+      // here: the foam albedo already carries its sky/warm tint. A constant
+      // floor and direction-only key made wake glow at daylight strength
+      // after sunset, even when the moon/key intensity was zero.
       // THE INTERIM PER-PIXEL CREST GATE WAS DELETED HERE (§B).
       //
       // It existed for one stated reason — "the foam sim owns real whitecap
@@ -1915,9 +1916,12 @@ export function buildOceanSurfaceMaterial(
             normalWorld.z.add(foamRelief.slope.y),
           )).dot(sunDirectionUniform).max(0)
         : ndl;
+      const foamAmbient = skyLum.mul(uLightFloor.add(0.1));
+      const foamDirect = uSunLightColor.dot(vec3(0.2126, 0.7152, 0.0722))
+        .mul(uLightGain.mul(0.6)).mul(shade);
       const foamCol = foamBase
         .mul(foamTintNode())
-        .mul(foamNdl.mul(uLightGain.mul(0.6)).mul(shade).add(uLightFloor.add(0.1)));
+        .mul(foamNdl.mul(foamDirect).add(foamAmbient));
       // whitecaps first, then the wake over them in ITS own colour. Two
       // composites rather than one over a `max`, which is what lets the two
       // carry different materials; `foamAmount` still reports the union so the
@@ -1927,14 +1931,16 @@ export function buildOceanSurfaceMaterial(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
       let wakeCol: any = uWakeFoam
         .mul(foamTintNode())
-        .mul(ndl.mul(uLightGain.mul(0.6)).mul(shade).add(uLightFloor.add(0.1)));
+        .mul(ndl.mul(foamDirect).add(foamAmbient));
       // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
       let wakeAmount: any = wakeAlpha.mul(foamGain);
       if (wakeFresh) {
-        // breaking-fresh wake whitewater IS whitecap water: the whitecap colour
-        // and alpha law; the aged lane keeps the wake material (§V23 mix)
-        wakeCol = mix(wakeCol, foamCol, wakeFresh);
-        wakeAmount = mix(wakeAlpha, wakeMaskFresh.clamp(0, 1).mul(0.9), wakeFresh).mul(foamGain);
+        // Freshness alone cannot make the entire aerated body white. Only
+        // dense fresh froth reaches white; thin bubbles retain turquoise and
+        // optical transmission. Reuse the existing porous density mask.
+        const froth = wakeFresh.mul(smoothstep(0.35, 0.9, wakeMaskFresh));
+        wakeCol = mix(wakeCol, foamCol, froth);
+        wakeAmount = mix(wakeAlpha, wakeMaskFresh.clamp(0, 1).mul(0.9), froth).mul(foamGain);
       }
       col.assign(mix(col, wakeCol, wakeAmount));
       foamAmount.assign(whitecapAmount.max(wakeAmount).clamp(0, 1));

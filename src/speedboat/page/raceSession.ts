@@ -29,8 +29,11 @@
  * throttle AND for every rival's recorded AI IN `GO` — instead of being carried 8 ticks. Same tick index on both
  * sides: deterministic and symmetric. What stays lagged, and why (docs/speedboat/page.md §T.197 latency):
  * the crash input cut (the rivals' crash machines need their collected trace; a player-only early cut is asymmetric
- * and its respawn needs the race's lagged respawn point) and Surge (earned from race events; `thrustMultiplier` has
- * no physics input yet, §T.189).
+ * and its respawn needs the race's lagged respawn point) and Surge (earned from race events; §T.207: the race's
+ * `thrustMultiplier` reaches every engine through `HullWater.setBoost` — the player's here, each rival's through its
+ * recorded tick input, both from the same lagged race output on the same page tick).
+ * WAKES (§T.207): the player's hull reads each rival's wake record of trace tick tA, carried to the tick start like its
+ * pose; each rival's hull reads the player's record of the tick start (recorded with its inputs).
  *
  * Identity: racerId 0 is the player (fleet index `npcs.playerIndex`), racerId k ≥ 1 is NPC k − 1 (fleet index k − 1).
  */
@@ -55,6 +58,7 @@ import {
 } from '../../sea-physics/boatCollide';
 import type { Rigid6State } from '../../sea-physics/rigidBody';
 import { AI_IN_LEN, AI_OUT_LEN, POSE_LEN, TR, TRACE_LEN } from '../../sim-worker/layout';
+import { WAKE_SRC_LEN, WS } from '../../wake/wakeField';
 import { writeTrace } from '../../sim-worker/trace';
 import {
   CRASH_TIMINGS,
@@ -74,6 +78,7 @@ import { SPAWN_CG_Y } from './course';
 import type { NpcFleet, NpcTickInputs } from './npcFleet';
 import type { PlayerBoat } from './playerBoat';
 import type { BoatControls, ControlSource } from './seams';
+import type { FreeRoamRules } from './sessionMode';
 
 /** race ticks behind the page (see header): ≥ MAX_SUBSTEPS + 3 so a whole frame of ticks fits the guarantee */
 export const RACE_DELAY_TICKS = 8;
@@ -111,6 +116,11 @@ export interface RaceSessionDeps {
   onPlayerCrash?(ev: Extract<CrashEvent, { type: 'crash' }>, at: readonly [number, number, number]): void;
   /** racer ids in grid order; default rivals 1..7 ahead, the player last on the grid */
   gridOrder?: readonly number[];
+  /**
+   * FREE ROAM (page/sessionMode.ts): never a `Race` — `start` places the player at `spawn()`, and her crash machine runs
+   * without one (same D-tick lag, same trace), respawning at `respawn(q)`. Build it with the idle fleet (0 rivals).
+   */
+  freeRoam?: FreeRoamRules;
 }
 
 export interface CrashEventRecord {
@@ -192,7 +202,9 @@ export function createRaceSession(d: RaceSessionDeps) {
   /** a teleport decided at race tick r lands at r + D: until then the race sees the respawn point */
   const frozen: ({ x: number; z: number; speed: number; until: number } | null)[] = new Array(racers).fill(null);
   const zeroWater = (): number => 0;
-  const raceOutputs: { throttleScale: Float64Array; steerScale: Float64Array; speedCap: (number | null)[]; ghost: Uint8Array; soft: Uint8Array } = {
+  const raceOutputs: { throttleScale: Float64Array; steerScale: Float64Array; speedCap: (number | null)[]; ghost: Uint8Array; soft: Uint8Array; boost: Float64Array } = {
+    /** §T.207 Surge: RacerOutputs.thrustMultiplier → the engine boost */
+    boost: new Float64Array(racers).fill(1),
     throttleScale: new Float64Array(racers).fill(1),
     steerScale: new Float64Array(racers).fill(1),
     speedCap: new Array(racers).fill(null),
@@ -209,7 +221,11 @@ export function createRaceSession(d: RaceSessionDeps) {
   const events: RaceEvent[] = [];
   const crashEvents: CrashEventRecord[] = [];
   const machineEvents: CrashEvent[] = [];
-  const npcInputs: NpcTickInputs = { playerPose: startPose, contactOff: 0, aiIn: null };
+  const npcBoost = new Float64Array(nNpc).fill(1);
+  /** §T.207 the rivals' wake records the player's hull reads this tick */
+  const rivalWake = new Float64Array(nNpc * WAKE_SRC_LEN);
+  if (npcs.wakes) player.setWakeSources(rivalWake, nNpc);
+  const npcInputs: NpcTickInputs = { playerPose: startPose, contactOff: 0, aiIn: null, boost: npcBoost, ...(npcs.wakes ? { playerWake: player.wakeRecord } : {}) };
 
   /**
    * the cap acting on page tick `tick`: the race's output for the END of tick − 1, as an undelayed race loop would hand
@@ -244,6 +260,7 @@ export function createRaceSession(d: RaceSessionDeps) {
   };
 
   const resetOutputs = (): void => {
+    raceOutputs.boost.fill(1);
     raceOutputs.throttleScale.fill(1);
     raceOutputs.steerScale.fill(1);
     raceOutputs.speedCap.fill(null);
@@ -293,6 +310,17 @@ export function createRaceSession(d: RaceSessionDeps) {
 
     /** new race from the grid at page tick `atTick` (between ticks: the sim is paused on the select screen) */
     start(atTick: number): void {
+      if (d.freeRoam) {
+        resetOutputs();
+        machines[PLAYER_RACER_ID] = createCrashMachine();
+        teleport.fill(null);
+        frozen.fill(null);
+        const pose = d.freeRoam.spawn();
+        player.place(pose);
+        resetBoatCollideMemory(mem);
+        d.onPlayerTeleport?.(pose);
+        return;
+      }
       race = new Race({ course: d.course, racerIds: gridOrder, dt: SIM_DT, isClear: d.isClear ?? (d.bed ? (x, z) => (d.bed as BedHeight)(x, z) < -3 : undefined) });
       startTick = atTick;
       nextRaceTick = atTick + 1;
@@ -356,7 +384,14 @@ export function createRaceSession(d: RaceSessionDeps) {
           // the rival's pose at the START of this tick: its trace pose after tick tA, carried D − 2 ticks along
           const h = (tick - 1 - tA) * SIM_DT;
           for (let c = 0; c < 3; c++) npcPose.position[c] += npcPose.velocity[c] * h;
+          if (npcs.wakes) {
+            const w = i * WAKE_SRC_LEN;
+            npcs.wakeSource(tA, i, rivalWake, w);
+            rivalWake[w + WS.X] += rivalWake[w + WS.VX] * h;
+            rivalWake[w + WS.Z] += rivalWake[w + WS.VZ] * h;
+          }
         } else {
+          if (npcs.wakes) rivalWake.fill(0, i * WAKE_SRC_LEN, (i + 1) * WAKE_SRC_LEN);
           // never a render pose here: which pose is "collected" depends on the wall clock (§V2, found by the
           // pacing hash in tests/speedboatRaceSmoke.test.ts — the player's autopilot reads this snapshot)
           const sp = npcs.spawnPose(i);
@@ -377,6 +412,7 @@ export function createRaceSession(d: RaceSessionDeps) {
       out.throttle = capThrottle(c.throttle * raceOutputs.throttleScale[id], Math.hypot(boat.velocity[0], boat.velocity[2]), capFor(id, tick));
       out.trim = c.trim;
       out.surge = c.surge;
+      player.hw.setBoost(raceOutputs.boost[id]);
       return out;
     },
 
@@ -389,6 +425,7 @@ export function createRaceSession(d: RaceSessionDeps) {
       npcInputs.contactSoft = contactSoftMask();
       // §T.197: each rival's GO for THIS tick (the standings in the block stay the race's lagged ones)
       if (race && aiValid) for (let i = 0; i < nNpc; i++) aiIn[i * AI_IN_LEN + AI_IN.GO] = goOf(capFor(i + 1, tick));
+      for (let i = 0; i < nNpc; i++) npcBoost[i] = raceOutputs.boost[i + 1];
       npcInputs.aiIn = aiValid ? aiIn : null;
       npcs.recordTick(tick, time, npcInputs);
     },
@@ -403,7 +440,7 @@ export function createRaceSession(d: RaceSessionDeps) {
       playerSurge[tick % PLAYER_RING] = d.surgePressed() ? 1 : 0;
 
       const rt = tick - D + 1;
-      if (!race || rt < nextRaceTick || npcs.collectedTick < rt) return;
+      if (!(race || d.freeRoam) || rt < 1 || rt < nextRaceTick || npcs.collectedTick < rt) return;
       for (let id = 0; id < racers; id++) {
         const s = sensors[id];
         s.racerId = gridOrder[id];
@@ -446,7 +483,7 @@ export function createRaceSession(d: RaceSessionDeps) {
             resetRequested: id === PLAYER_RACER_ID && playerReset[rt % PLAYER_RING] === 1,
           },
           {
-            respawn: (q) => respawnPoint[id] ?? { x: q.crashPosition[0], z: q.crashPosition[2], heading: q.crashHeading, speed: designRespawnSpeed(q.speedBeforeCrash) },
+            respawn: (q) => respawnPoint[id] ?? d.freeRoam?.respawn(q) ?? { x: q.crashPosition[0], z: q.crashPosition[2], heading: q.crashHeading, speed: designRespawnSpeed(q.speedBeforeCrash) },
             teleport: (p) => {
               teleport[id] = { position: [...p.position] as Rigid6State['position'], quaternion: [...p.quaternion] as Rigid6State['quaternion'], velocity: [...p.velocity] as Rigid6State['velocity'], angularVelocity: [...p.angularVelocity] as Rigid6State['angularVelocity'] };
             },
@@ -486,6 +523,13 @@ export function createRaceSession(d: RaceSessionDeps) {
         s.pitch = (cs.pitchDeg * Math.PI) / 180;
         s.roll = (cs.heelDeg * Math.PI) / 180;
         s.crashed = m.phase === 'crashed';
+      }
+      // free roam: no Race.step hands the crash machine's outputs on, so they act from here (input cut, ghost)
+      if (!race && d.freeRoam) {
+        const o = machines[PLAYER_RACER_ID].out;
+        raceOutputs.throttleScale[PLAYER_RACER_ID] = o.throttleScale;
+        raceOutputs.steerScale[PLAYER_RACER_ID] = o.steerScale;
+        raceOutputs.ghost[PLAYER_RACER_ID] = o.ghost ? 1 : 0;
       }
     },
 
@@ -554,6 +598,7 @@ export function createRaceSession(d: RaceSessionDeps) {
       raceOutputs.throttleScale[id] = m.out.throttleScale;
       raceOutputs.steerScale[id] = m.out.steerScale;
       raceOutputs.speedCap[id] = q.speedCap;
+      raceOutputs.boost[id] = q.thrustMultiplier;
       // FORMATION (§T.198): SOFT boat↔boat contacts until green. The rivals' pilot has no grid-slot hold (§T.186 open
       // item): it rides its racing line from the slot it was placed in, so both grid columns converge onto one line
       // behind the pace boat. Full contacts rolled boats over on the grid (§T.191 smoke race); no contacts let hulls

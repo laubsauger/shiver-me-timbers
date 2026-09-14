@@ -65,6 +65,7 @@ import * as THREE from 'three/webgpu';
 import { texture, uniform } from 'three/tsl';
 import { oceanParams, type OceanParams } from '../params/ocean';
 import type { SeabedField } from '../island/seabed';
+import { shoreSamplingMap } from './shoreSampling';
 import type { FetchSource } from './fetch';
 import {
   fadeShadowBorder,
@@ -90,9 +91,10 @@ export interface FetchFieldParams {
 
 export interface FetchField extends FetchSource, SwellShadowSource {
   /**
-   * baked texture for materials, rg16f: R = upwind distance (m), G = the swell
+   * baked texture for materials, rgba16f: R = upwind distance (m), G = the swell
    * diffraction coefficient K (T174, docs/ocean/swell-shadow.md). ONE texture
-   * so the swell shadow costs no binding (§V.40).
+   * so the swell shadow costs no binding (§V.40). B/A extend the same two
+   * values from offshore water onto the beach for runup, not wave displacement.
    */
   texture: THREE.DataTexture;
   /** world XZ of the field's corner; uv = (worldXZ − origin) / size */
@@ -357,9 +359,10 @@ export function createFetchField(
   /** T174: swell diffraction coefficient K on the same grid (1 = open sea) */
   const shadow = new Float32Array(res * res);
   const marchScratch = swellShadowScratch(swellShadowGridSize(res));
-  // RG: R fetch, G swell shadow — interleaved, so two channels per texel
-  const half = new Uint16Array(res * res * 2);
-  const tex = new THREE.DataTexture(half, res, res, THREE.RGFormat, THREE.HalfFloatType);
+  const shoreSource = shoreSamplingMap(land, res);
+  // RG remains the physical shelter. BA carries offshore exposure for swash.
+  const half = new Uint16Array(res * res * 4);
+  const tex = new THREE.DataTexture(half, res, res, THREE.RGBAFormat, THREE.HalfFloatType);
   tex.name = 'ocean/fetchField';
   /**
    * §V.48: NO MIP CHAIN, and that is a decision rather than an omission. The
@@ -391,7 +394,8 @@ export function createFetchField(
   const rebuild = (windDirection: number): void => {
     sweepFetch(land, res, cell, windDirection, cap, data);
     blurField(data, res, op.fetchBlurTexels, scratch);
-    for (let k = 0; k < data.length; k++) half[k * 2] = THREE.DataUtils.toHalfFloat(data[k]);
+    for (let k = 0; k < data.length; k++) half[k * 4] = THREE.DataUtils.toHalfFloat(data[k]);
+    for (let k = 0; k < data.length; k++) half[k * 4 + 2] = half[shoreSource[k] * 4];
     tex.needsUpdate = true;
     sweptDirection = windDirection;
     sweeps++;
@@ -407,7 +411,8 @@ export function createFetchField(
     marchSwellShadow(land, res, cell, inputs, shadow, marchScratch);
     blurField(shadow, res, op.fetchBlurTexels, scratch);
     fadeShadowBorder(shadow, res, cell, margin / 2);
-    for (let k = 0; k < shadow.length; k++) half[k * 2 + 1] = THREE.DataUtils.toHalfFloat(shadow[k]);
+    for (let k = 0; k < shadow.length; k++) half[k * 4 + 1] = THREE.DataUtils.toHalfFloat(shadow[k]);
+    for (let k = 0; k < shadow.length; k++) half[k * 4 + 3] = half[shoreSource[k] * 4 + 1];
     tex.needsUpdate = true;
     marchedSwell = inputs;
     marches++;
@@ -529,8 +534,8 @@ export function fetchFieldNode(field: FetchField, worldXZ: AnyNode): AnyNode {
 
 /**
  * TSL: the whole texel — `.r` clear upwind water (m), `.g` swell diffraction
- * coefficient K (T174). A reader that needs both reads ONE sample node, so
- * the two channels cost one texture fetch and one binding (§V.40).
+ * coefficient K (T174). `.b`/`.a` carry the offshore versions for shore runup.
+ * All four channels share one texture fetch and one binding (§V.40).
  */
 export function fetchFieldSampleNode(field: FetchField, worldXZ: AnyNode): AnyNode {
   const uv = worldXZ.sub(field.uniforms.origin).mul(field.uniforms.invSize);

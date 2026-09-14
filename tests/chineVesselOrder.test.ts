@@ -27,20 +27,20 @@ it('camera ordering and missing rival slots cannot transfer contact age between 
   const renderer = {} as THREE.WebGPURenderer;
   try {
     fx.tick(renderer, hero, rivals, 1 / 60, { x: 0, y: 0, z: 0 });
-    boats[0].tick = boats[1].tick = 60;
+    boats[0].tick = boats[1].tick = 3;
     boats[0].pose.position[0] = 30;
     boats[1].fx.bow.inContact = true;
     fx.tick(renderer, hero, rivals, 1 / 60, { x: 0, y: 0, z: 0 });
     expect(sheets[1].bow).toBe(boats[1].fx.bow);
-    expect(sheets[1].front).toBe(0);
-    expect(sheets[2].front).toBe(10);
+    expect(sheets[1].emissions).toHaveLength(1);
+    expect(sheets[2].emissions).toHaveLength(2);
     boats[0].tick = -1;
-    boats[1].tick = 61;
+    boats[1].tick = 4;
     fx.tick(renderer, hero, rivals, 1 / 60, { x: 0, y: 0, z: 0 });
     expect(sheets).toHaveLength(2);
-    expect(sheets[1].front).toBeCloseTo(1 / 6);
-    boats[0].tick = 62;
+    expect(sheets[1].emissions.reduce((sum, e) => sum + e.volume, 0)).toBeCloseTo(0.1 * 2 / 60);
+    boats[0].tick = 5;
     fx.tick(renderer, hero, rivals, 1 / 60, { x: 0, y: 0, z: 0 });
-    expect(sheets[2].front).toBe(0);
+    expect(sheets[2].emissions).toHaveLength(1);
   } finally { fx.dispose(); }
 });

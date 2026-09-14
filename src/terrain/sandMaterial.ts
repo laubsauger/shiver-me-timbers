@@ -210,8 +210,9 @@ function seaDepthNode(u: SandUniforms, worldXZ: any) {
    * than by a threshold.
    */
   const shoalDepth: any = positionWorld.y.negate().max(0);
-  const seaY: any = active ? active.waterHeight(worldXZ, shoalDepth) : u.waterline;
-  return { seaY, depthBelow: seaY.sub(positionWorld.y), live: Boolean(active) };
+  const surface = active ? active.waterSurface(worldXZ, shoalDepth) : null;
+  const seaY: any = surface ? surface.height : u.waterline;
+  return { seaY, depthBelow: seaY.sub(positionWorld.y), live: Boolean(active), shoreGain: surface?.shoreGain };
 }
 
 /**
@@ -673,7 +674,7 @@ export function buildSandNodes(
   const staticWet = heightAbove.smoothstep(float(0), u.wetBand.max(1e-3)).oneMinus();
 
   // T33 swash: the wave tongue, its foam line, and the drying wet memory
-  const swash = shore ? buildShoreNodes(shore, heightAbove, ground) : null;
+  const swash = shore ? buildShoreNodes(shore, heightAbove, ground, sea.shoreGain) : null;
   const wet = swash ? staticWet.max(swash.wet) : staticWet;
   albedo = albedo.mul(wet.mul(u.wetDarken).oneMinus());
   if (swash && shore) {

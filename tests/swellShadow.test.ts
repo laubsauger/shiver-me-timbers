@@ -392,15 +392,15 @@ describe('T174 the built field carries the shadow in the fetch texture', () => {
 
   it('packs K into G of the SAME texture the shader already samples (§V.40)', () => {
     const tex = field.texture;
-    expect(tex.format).toBe(THREE.RGFormat);
+    expect(tex.format).toBe(THREE.RGBAFormat);
     const data = tex.image.data as Uint16Array;
-    expect(data.length).toBe(128 * 128 * 2);
+    expect(data.length).toBe(128 * 128 * 4);
     // texel under the lee: G decodes to the CPU array's K, R to its fetch
     const i = Math.floor((700 + 3000) / field.texelSize);
     const j = Math.floor((0 + 3000) / field.texelSize);
     const cx = -3000 + (i + 0.5) * field.texelSize;
     const cz = -3000 + (j + 0.5) * field.texelSize;
-    const k = (j * 128 + i) * 2;
+    const k = (j * 128 + i) * 4;
     expect(THREE.DataUtils.fromHalfFloat(data[k + 1])).toBeCloseTo(field.shadowAt(cx, cz), 3);
     expect(THREE.DataUtils.fromHalfFloat(data[k]) / field.fetchAt(cx, cz)).toBeCloseTo(1, 3);
   });

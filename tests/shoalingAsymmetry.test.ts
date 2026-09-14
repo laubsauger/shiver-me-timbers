@@ -394,7 +394,7 @@ describe('§T.193 the direction a band travels, measured', () => {
     const len = Math.hypot(vx, vz);
     const dir = bandPropagation(sched.current.cascades[0].h0);
     expect((vx * dir.x + vz * dir.z) / len).toBeGreaterThan(0.95);
-    expect(dir.x * Math.cos(p.swellDirection) + dir.z * Math.sin(p.swellDirection)).toBeLessThan(-0.95);
+    expect(dir.x * Math.cos(p.swellDirection) + dir.z * Math.sin(p.swellDirection)).toBeGreaterThan(0.95);
     expect(dir.q).toBeGreaterThan(dir.r - 1e-12); // √⟨cos²⟩ ≥ ⟨cos⟩
   });
 });

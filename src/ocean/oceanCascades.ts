@@ -231,8 +231,14 @@ export class OceanSimulation {
   readonly spectrum: SpectrumScheduler;
   /** last snapshot installed into the cascade textures — swap detector */
   private adopted: SpectrumSnapshot;
-  /** guards `advanceSpectrum` to exactly one step per rendered frame */
-  private advancedThisFrame = false;
+  /**
+   * §T.207/§V110: set by the first `advanceSpectrum` — from then on ONLY the sim tick steps the schedule. A render frame
+   * that also stepped it (a frame with no tick: a >60 Hz display, the speedboat race's `holdSim`, a paused select
+   * screen) made the page's spectrum swaps depend on the frame rate, while the sim-worker's mirror steps once per tick:
+   * [M] Working sea, a wind change mid-run, one extra step per tick ⇒ the player's and an identical rival's trajectories
+   * split 1 s after the change (tests/speedboatSeaParity.test.ts). It also broke §V2 for the page's own replay.
+   */
+  private tickDriven = false;
 
   constructor(seed: number, p: OceanParams = oceanParams) {
     const butterfly = createDataTexture(
@@ -301,20 +307,20 @@ export class OceanSimulation {
    * up on the same tick, before buoyancy runs — which is what the old
    * "identical arm-at-15 countdown on both sides" bought, kept exactly.
    *
-   * If nobody calls it, `update` below calls it, so a caller that only renders
-   * (tests, the headless suite) still gets a live spectrum. The flag is what
-   * stops it being stepped twice on a frame that does both.
+   * If nobody ever calls it, `update` below steps the schedule, so a caller
+   * that only renders (tests, the headless suite) still gets a live spectrum.
+   * Once a tick has called it, rendering never steps it again (`tickDriven`).
    */
   advanceSpectrum(p: OceanParams = oceanParams): void {
-    // ALWAYS steps, and the dedupe lives in `update` instead. The other way
-    // round — `advanceSpectrum` skipping when a flag is set, `update` clearing
-    // it — freezes the scheduler FOREVER for any caller that steps the sim
-    // without also rendering it, and freezing is silent: the sea simply never
-    // rebuilds again (§B.7's symptom, §Rule 8). This way the worst a
-    // mis-wiring can do is step the build twice in a frame, which settles the
-    // sea sooner and cannot desynchronise the two sides, because both read the
-    // same snapshot whenever it appears.
-    this.advancedThisFrame = true;
+    // ALWAYS steps. It must not skip on a flag `update` clears — that froze the
+    // scheduler forever for a caller that steps without rendering (§B.7). The
+    // other direction is closed too (§T.207): a frame-rate-dependent extra step
+    // desynchronised the page's sea from the sim-worker's, which steps per tick.
+    this.tickDriven = true;
+    this.stepSpectrum(p);
+  }
+
+  private stepSpectrum(p: OceanParams): void {
     if (!this.spectrum.advance(p)) return;
     // THE SWAP. Until this line the textures still hold the previous complete
     // h0; after it they hold the new one. There is no reachable in-between.
@@ -327,8 +333,7 @@ export class OceanSimulation {
 
   /** call once per rendered frame with sim time (§V.2: time from SimState) */
   update(renderer: THREE.WebGPURenderer, time: number, p: OceanParams = oceanParams): void {
-    if (!this.advancedThisFrame) this.advanceSpectrum(p);
-    this.advancedThisFrame = false;
+    if (!this.tickDriven) this.stepSpectrum(p);
     // anti-fold cap, NOT the raw slider: storm raises amplitude AND choppiness,
     // and the summed displacement gradient then passes −1 over ~1.5% of the
     // surface — the sheet turns inside out (faceted crests) and every folded

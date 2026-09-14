@@ -26,6 +26,7 @@ import type { PropWashInput } from '../../wake/propWash';
 import { propWashFromHullWater } from '../../wake/propWashHullWater';
 import { hullWaterSamples } from '../../wake/stationSources';
 import type { HydroSample } from '../../wake/wakeSolverMath';
+import { WAKE_SRC_LEN, WakeField, writeWakeSource } from '../../wake/wakeField';
 import type { HullProxy } from '../hullMesh';
 import { unitTrimToRad } from '../../sim-worker/stepCore';
 import { SubstepPositions } from '../../sim-worker/trace';
@@ -61,6 +62,16 @@ export interface PlayerBoat {
   wakeSamples(out: HydroSample[]): HydroSample[];
   /** this tick's prop jets (per-drive thrust from the same evaluate), reusing `out`'s objects */
   jets(out: PropWashInput[]): PropWashInput[];
+  /**
+   * §T.207 this boat's wake record after its last step (src/wake/wakeField.ts) — what every rival's hull reads of her
+   * (npcFleet `NpcTickInputs.playerWake`). Written by `tick` with the SAME `writeWakeSource` the step core runs.
+   */
+  readonly wakeRecord: Float64Array;
+  /**
+   * §T.207 the OTHER boats' wake records for the next `tick` (`count` × WAKE_SRC_LEN from `rec[0]`): her hull reads their
+   * field on top of the sea, as a rival's does in the step core. Never her own (§V108). Kept until set again.
+   */
+  setWakeSources(rec: Float64Array, count: number): void;
 }
 
 export function createPlayerBoat(d: PlayerBoatDeps, state: ShipState): PlayerBoat {
@@ -70,7 +81,14 @@ export function createPlayerBoat(d: PlayerBoatDeps, state: ShipState): PlayerBoa
   let time = 0;
   let substeps = 0;
   let stepped = false;
-  const sampler = (x: number, z: number): number => d.pressureHeadAt(x, z, time);
+  // §T.207 the other boats' wakes on top of the sea (the step core's sampler, same order of the sum)
+  const wakeField = new WakeField();
+  const wakeRecord = new Float64Array(WAKE_SRC_LEN);
+  let wakeSrc: Float64Array | null = null;
+  let wakeCount = 0;
+  let wakeOn = false;
+  let placed = true;
+  const sampler = (x: number, z: number): number => (wakeOn ? d.pressureHeadAt(x, z, time) + wakeField.heightAt(x, z) : d.pressureHeadAt(x, z, time));
   const positions = new SubstepPositions();
   const force = (s: Readonly<Rigid6State>, h: number, out: Rigid6Load): void => hw.evaluate(s, h, out);
   const lock = hull.drives[0]?.maxSteerRad ?? 0;
@@ -87,9 +105,13 @@ export function createPlayerBoat(d: PlayerBoatDeps, state: ShipState): PlayerBoa
       time = t;
       const steer = controls.steer < -1 ? -1 : controls.steer > 1 ? 1 : controls.steer;
       hw.setControls(steer * lock, controls.throttle, unitTrimToRad(controls.trim));
+      wakeOn = wakeSrc !== null && wakeField.prepare(wakeSrc, 0, wakeCount, -1, state.position[0], state.position[2]) > 0;
       hw.samplePatch(sampler, state, dt);
+      wakeOn = false;
       substeps = planingSubsteps(hw, state, dt);
       stepRigid6(state, hull, dt, substeps, positions.begin(force), memory);
+      writeWakeSource(wakeRecord, 0, wakeRecord, 0, placed, state, hw.wake, dt);
+      placed = false;
       stepped = true;
     },
     place(pose) {
@@ -100,6 +122,12 @@ export function createPlayerBoat(d: PlayerBoatDeps, state: ShipState): PlayerBoa
       resetRigid6Memory(memory);
       hw.resetMemory();
       stepped = false;
+      placed = true; // V108: the wake record's moments start again from this placement
+    },
+    wakeRecord,
+    setWakeSources(rec, count) {
+      wakeSrc = rec;
+      wakeCount = count;
     },
     wakeSamples(out) {
       // no contact result before the first step after a placement (the patch is unbuilt)

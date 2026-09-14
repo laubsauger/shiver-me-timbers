@@ -108,6 +108,7 @@ export function buildShoreNodes(
   u: ShoreUniforms,
   heightAbove: any,
   worldXZ: any,
+  shoreGain: any = float(1),
 ): ShoreNodes {
   // Alongshore phase: without this every beach on every island laps in
   // lockstep and the shoreline reads as one pulsing ring.
@@ -123,9 +124,15 @@ export function buildShoreNodes(
   // mix(1, swell, response): response 0 ignores the sea, 1 scales linearly
   // with swell AMPLITUDE (≈Hs/2 ≈ 1.4 m in the default sea), so heavier
   // weather runs the tongue further up the sand for free.
-  const ampScale = mix(float(1), u.swell.max(0), u.swellResponse);
+  const ampScale = mix(float(1), u.swell.max(0), u.swellResponse).mul(shoreGain);
   const ampOf = (k: any) =>
-    mix(u.heightMin, u.heightMax, hash2(vec2(k, phase.mul(97))))
+    // Hash only discrete wave identities. Hashing the continuous spatial
+    // phase produced sub-pixel amplitude jumps and glittering foam on sand.
+    // Interpolate two seeded amplitudes with the existing smooth phase field.
+    mix(u.heightMin, u.heightMax, mix(
+      hash2(vec2(k, float(0))), hash2(vec2(k, float(1))),
+      smoothstep(float(0), float(1), phase),
+    ))
       .mul(ampScale);
   const a0 = ampOf(n);
   const a1 = ampOf(n.sub(1));
@@ -156,8 +163,23 @@ export function buildShoreNodes(
   // Foam line on the moving edge + lace stranded on sand the water has left.
   const foamWidth = u.foamWidth.max(1e-3);
   // DECREASING ramp: 1 at the edge, 0 one band-width away from it
-  const edge = smoothstep(foamWidth, float(0), heightAbove.sub(level).abs());
-  const residual = wet.sub(sheet).max(0).mul(u.residualStrength);
+  // The swash edge must emerge with the tongue. A full-strength band at
+  // level=0 painted a stationary white contour between waves, even with no
+  // incoming shore energy. Use its existing elevation width as the onset
+  // distance; mature tongues retain their authored edge brightness.
+  const edge = smoothstep(foamWidth, float(0), heightAbove.sub(level).abs())
+    .mul(smoothstep(float(0), foamWidth, level));
+  // Foam collapses sooner than the sand dries. Keep each wave's deposited
+  // band at its original height and fade its coverage, instead of shrinking
+  // a wet-sand height and treating everything below it as surviving foam.
+  // Quarter-cycle e-fold: the previous wave is faint, not a permanent stripe.
+  const stranded = (height: any, ageCycles: any) =>
+    smoothstep(height, height.sub(feather.mul(2)), heightAbove)
+      .mul(ageCycles.max(0).mul(-4).exp());
+  const foamMemory = stranded(a0.mul(up), p.sub(rise))
+    .max(stranded(a1, p.add(1).sub(rise)))
+    .max(stranded(a2, p.add(2).sub(rise)));
+  const residual = foamMemory.sub(sheet).max(0).mul(u.residualStrength);
   // break the band up so it reads as lace, never as a painted contour
   const lace = mix(
     u.foamNoiseStrength.oneMinus(),

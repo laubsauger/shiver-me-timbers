@@ -38,6 +38,7 @@ import { SIM_DT } from '../core/loop';
 import { sprayParams } from '../params/spray';
 import { hash2 } from '../terrain/noise';
 import { foamTintNode } from './foamShading';
+import { particleLighting } from '../sky/particleLighting';
 import { DEAD_AGE, H_LIFE, PHI, T_LIFE, sanitizePoolCount } from './sprayMath';
 
 export interface SprayPoolOptions {
@@ -61,8 +62,8 @@ export interface SprayPoolOptions {
   gravity?: () => number;
   /** §T.195 per-pool opacity — uniform value only (default sprayParams.opacity) */
   opacity?: () => number;
-  /** §T.195 per-pool sprite colour node (default the shared foam tint); a GRAPH option — absent builds the same WGSL */
-  colorNode?: () => unknown;
+  /** Custom scattering receives live sky/key radiance, just like the default tint. */
+  colorNode?: (light: typeof particleLighting) => unknown;
   /**
    * §T.199 blend mode (pipeline state, not WGSL; default additive). A dense water plume (the rooster tail) OCCLUDES
    * what is behind it — additive white over a sunlit sky or whitewater adds nothing and the plume vanishes.
@@ -206,7 +207,9 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   const born = smoothstep(float(0), float(0.12), ageN);
   const decayN = ageN.oneMinus().pow(1.4);
   // warm-white, shared with sea foam (§T.195: a pool may bring its own, e.g. the prop wash's aerated turquoise)
-  material.colorNode = (options.colorNode ? options.colorNode() : foamTintNode()) as typeof material.colorNode;
+  material.colorNode = (options.colorNode
+    ? options.colorNode(particleLighting)
+    : foamTintNode().mul(particleLighting.ambient.add(particleLighting.key))) as typeof material.colorNode;
   material.opacityNode = shape
     .mul(born)
     .mul(decayN)

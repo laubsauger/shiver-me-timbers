@@ -543,7 +543,8 @@ export function createFoamSim(
     ): any {
       // fbm domain-warp on the LOOKUP (world meters) — the low-res sim RT's
       // texel grid otherwise reads as boxy patches (§V20 critique)
-      const warped = worldXZ.add(foamWarpVec(worldXZ));
+      const warp = foamWarpVec(worldXZ).toVar();
+      const warped = worldXZ.add(warp);
       // Sampling-rate-driven band retirement + filtered far tier. Each
       // cascade's full-res sample is worth reading only while its texels
       // still resolve on screen; past that it is aliasing and must hand over
@@ -631,7 +632,10 @@ export function createFoamSim(
       // the dissolve (foamShading, "THE WAVE CARVES THE FOAM"). Passed through
       // rather than derived here: this module has no access to the surface,
       // and the material that calls it already holds both numbers.
-      return foamDetailMask(clamp(covered, 0, 1), worldXZ, share, surfaceLift, relief);
+      return foamDetailMask(
+        clamp(covered, 0, 1), worldXZ, share, surfaceLift, relief,
+        undefined, undefined, false, warp,
+      );
     },
 
     dispose(): void {

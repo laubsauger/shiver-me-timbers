@@ -20,6 +20,7 @@ import { paramsLength, writeParams } from './paramsVector';
 import { writeResetPose } from './stepCore';
 import { createBoatFx, readBoatFx, type BoatFx } from './fx';
 import type { HydroSample } from '../wake/wakeSolverMath';
+import { WAKE_SRC_LEN } from '../wake/wakeField';
 import {
   MainThreadTransport,
   SabWorkerTransport,
@@ -61,13 +62,17 @@ export interface FleetOptions extends SimInit {
   externalBoats?: number;
   /** §T.191: per-row TRACE region (readTrace) */
   trace?: boolean;
+  /** §T.207: every hull feels every other boat's wake (layout WAKE regions; `setExternalWakeSource` for external boats) */
+  wakeField?: boolean;
 }
 
 export class BoatFleet {
   readonly transport: BoatStepTransport;
   readonly spec: LayoutSpec;
-  /** a stepper reads other boats from WORLD this fleet (§T.186 pilot, §T.188 contacts) */
+  /** a stepper reads other boats from WORLD this fleet (§T.186 pilot, §T.188 contacts, §T.207 wakes) */
   private readonly worldReaders: boolean;
+  /** §T.207 external boats' wake records for the next one-tick kick (main-owned) */
+  private readonly extWake: Float64Array;
 
   constructor(opts: FleetOptions) {
     this.spec = {
@@ -81,8 +86,10 @@ export class BoatFleet {
       ...(opts.batchCap ? { batchCap: opts.batchCap } : {}),
       ...(opts.externalBoats ? { externalBoats: opts.externalBoats } : {}),
       ...(opts.trace ? { trace: true } : {}),
+      ...(opts.wakeField ? { wakeField: true } : {}),
     };
-    this.worldReaders = !!(opts.pilot || opts.contacts);
+    this.worldReaders = !!(opts.pilot || opts.contacts || opts.wakeField);
+    this.extWake = new Float64Array(opts.wakeField ? opts.boats * WAKE_SRC_LEN : 0);
     const init: SimInit = { seed: opts.seed, oceanParams: opts.oceanParams, seaParams: opts.seaParams };
     if (opts.pilot) init.pilot = opts.pilot;
     if (opts.contacts) init.contacts = opts.contacts;
@@ -206,13 +213,63 @@ export class BoatFleet {
     return { f64: L.f64, offset: L.traceOffset(j, i) };
   }
 
-  setControls(i: number, throttle: number, steer: number, trim = 0): void {
+  /** `boost`: §T.207 the race's Surge thrust multiplier, fed to the engine (`HullWater.setBoost`; ≤ 1 = stock) */
+  setControls(i: number, throttle: number, steer: number, trim = 0, boost = 0): void {
     const L = this.home(i);
     const o = L.boatOffset(i) + B.CONTROLS;
     L.f64[o] = throttle;
     L.f64[o + 1] = steer;
     L.f64[o + 2] = trim;
-    L.f64[o + CONTROL_LEN - 1] = 0;
+    L.f64[o + CONTROL_LEN - 1] = boost;
+  }
+
+  /** §T.207: external boat i's wake record (src/wake/wakeField.ts) at the start of the next one-tick kick's tick */
+  setExternalWakeSource(i: number, rec: ArrayLike<number>, offset = 0): void {
+    if (!this.spec.wakeField) throw new Error('fleet: no wake regions (build the fleet with wakeField)');
+    if (!this.isExternal(i)) throw new Error(`fleet: boat ${i} is not external`);
+    for (let c = 0; c < WAKE_SRC_LEN; c++) this.extWake[i * WAKE_SRC_LEN + c] = rec[offset + c];
+  }
+
+  /** §T.207: row j's wake record of external boat i (its record at the START of that row's tick), into every shard */
+  setBatchExternalWakeSource(j: number, i: number, rec: ArrayLike<number>, offset = 0): void {
+    if (!this.spec.wakeField) throw new Error('fleet: no wake regions (build the fleet with wakeField)');
+    if (!this.isExternal(i)) throw new Error(`fleet: boat ${i} is not external`);
+    for (const L of this.batchLayouts(j)) {
+      const o = L.batchExternalWakeOffset(L.batchRowOffset(j), i);
+      for (let c = 0; c < WAKE_SRC_LEN; c++) L.f64[o + c] = rec[offset + c];
+    }
+    // the next one-tick kick starts from the latest record main gave
+    for (let c = 0; c < WAKE_SRC_LEN; c++) this.extWake[i * WAKE_SRC_LEN + c] = rec[offset + c];
+  }
+
+  /** §T.207: stepped boat i's wake record after row j of the last collected kick, into `out[o..]` */
+  readWakeSource(j: number, i: number, out: Float64Array, o = 0): void {
+    const L = this.home(i);
+    const rows = this.lastKickTicks();
+    if (!(j >= 0 && j < rows)) throw new Error(`fleet: wake row ${j} outside the last kick's ${rows} rows`);
+    const src = L.wakeOutOffset(j, i);
+    for (let c = 0; c < WAKE_SRC_LEN; c++) out[o + c] = L.f64[src + c];
+  }
+
+  /**
+   * §T.207 WAKE WORLD for the kick about to go out: every stepped boat's record after the last collected tick (its home
+   * shard's WAKE OUT, last row), every external boat's from main — the same freeze as the WORLD poses.
+   */
+  private writeWakeWorld(layouts: readonly BoatSimLayout[]): void {
+    if (!this.spec.wakeField) return;
+    const lastRow = this.lastKickTicks() - 1;
+    for (const L of layouts) {
+      for (let i = 0; i < this.spec.boats; i++) {
+        const to = L.wakeWorldOffset(i);
+        if (this.isExternal(i)) {
+          for (let c = 0; c < WAKE_SRC_LEN; c++) L.f64[to + c] = this.extWake[i * WAKE_SRC_LEN + c];
+        } else {
+          const src = layouts[this.transport.ownerOf(i)];
+          const from = src.wakeOutOffset(lastRow, i);
+          for (let c = 0; c < WAKE_SRC_LEN; c++) L.f64[to + c] = src.f64[from + c];
+        }
+      }
+    }
   }
 
   readPose(i: number, out: Rigid6State): Rigid6State {
@@ -267,6 +324,7 @@ export class BoatFleet {
     const layouts = this.transport.layouts;
     for (const L of layouts) if (L.buffer.byteLength === 0) throw new Error("fleet: kick while buffers are away");
     if (!this.transport.poll()) throw new Error('fleet: kick before the previous tick was collected');
+    this.writeWakeWorld(layouts);
     for (const L of layouts) {
       if (this.spec.batchCap) L.f64[L.batchOffset()] = 0; // §T.181: a one-tick kick, whatever the last batch was
       L.i32[H.TICK] = tick;
@@ -334,13 +392,13 @@ export class BoatFleet {
   }
 
   /** row j's controls for boat i (same slots and meaning as `setControls`) */
-  setBatchControls(j: number, i: number, throttle: number, steer: number, trim = 0): void {
+  setBatchControls(j: number, i: number, throttle: number, steer: number, trim = 0, boost = 0): void {
     for (const L of this.batchLayouts(j)) {
       const o = L.batchBoatInputOffset(L.batchRowOffset(j), i);
       L.f64[o] = throttle;
       L.f64[o + 1] = steer;
       L.f64[o + 2] = trim;
-      L.f64[o + CONTROL_LEN - 1] = 0;
+      L.f64[o + CONTROL_LEN - 1] = boost;
     }
   }
 
@@ -370,6 +428,7 @@ export class BoatFleet {
       const t = L0.f64[L0.batchRowOffset(j) + BATCH_ROW.TICK];
       if (t !== t0 + j) throw new Error(`fleet: batch row ${j} is tick ${t}, expected ${t0 + j} (rows must be consecutive ticks)`);
     }
+    this.writeWakeWorld(layouts);
     for (const L of layouts) {
       L.f64[L.batchOffset()] = count;
       for (let j = 0; j < count; j++) {

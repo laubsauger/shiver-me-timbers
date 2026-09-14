@@ -146,8 +146,7 @@ export interface BarSpec {
   /**
    * §T.194 profile (defaults = the §T.187 bar): half-width multipliers of the
    * two flanks — `faceWidth` on the crest polyline's right-hand side (side ≤ 0),
-   * which in the Tower Reach frame is the side the swell actually arrives from
-   * (+swellDirection, see circuit.md §T194), `backWidth` on the other — the
+   * (+swellDirection in Tower Reach), `backWidth` on the other — the
    * across-bar profile power, and the apron width (× halfWidth).
    */
   faceWidth?: number;
@@ -345,7 +344,9 @@ function sandCayField(spec: SandCaySpec, seed: number): KitField {
   }
   const a = spine[0];
   const bpt = spine[spine.length - 1];
-  return { heightAt, features, peak: crestHeight, axis: Math.atan2(bpt[1] - a[1], bpt[0] - a[0]) };
+  // The field already authors the beach grade, foredune and shelf. Applying
+  // the generic beach apron again halves Tower Cay's low-beach elevation.
+  return { heightAt, features, peak: crestHeight, axis: Math.atan2(bpt[1] - a[1], bpt[0] - a[0]), exact: true };
 }
 
 /** one granite block in a rock garden */

@@ -32,10 +32,12 @@ import {
 } from '../src/foam/roosterTail';
 import { waterlineSprayEmission } from '../src/foam/sprayMath';
 import { sprayParams } from '../src/params/spray';
-import { chineSheetFoamCpu, packChineSheet, propWashFoamCpu } from '../src/flowfoam/simFoam';
+import { packedChineFoamCpu, packChineSheet, propWashFoamCpu, CHINE_SHEET_THICKNESS, CHINE_SHEET_SLIDE } from '../src/flowfoam/simFoam';
 import { GRAVITY } from '../src/ocean/oceanMath';
 import { MERCURY_450R } from '../src/sea-physics/engine';
 import { propRpsEstimate, type PropWashInput } from '../src/wake/propWash';
+import { ChineContactHistory } from '../src/wake/chineContact';
+import { packChineEmission } from '../src/wake/chineEmissions';
 import { SpeedboatTow } from '../src/wake/speedboatTow';
 import { WAKE_SPEEDBOAT_NEAR_TIER, WAKE_SPEEDBOAT_TIER, measureWake, towPreset, type WakePreset } from '../src/wake/wakeCalibration';
 import { WakeSim } from '../src/wake/wakeSim';
@@ -166,14 +168,19 @@ describe('3. landed chine foam has bounded lateral spread, with the prop lane in
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const hw = (tow as any).hw;
     const bow = waterlineSprayEmission({ waterline: hw.waterline, sections: hw.sections, stripZ: hw.mesh.strips.zCentre }, tow.pose.quaternion);
-    const sheets = [{ bow, speed: U }];
+    const history = new ChineContactHistory();
+    let emitter = history.update(0, 0, { ...bow, x: bow.x - 2 * U }, U, 0, 1 / 60);
+    for (let tick = 1; tick <= 120; tick++) {
+      emitter = history.update(0, tick, { ...bow, x: bow.x + U * (tick / 60 - 2) }, U, 0, 1 / 60);
+    }
+    const packets = emitter.emissions.map(e => packChineEmission(e, emitter.time, CHINE_SHEET_THICKNESS, CHINE_SHEET_SLIDE)!).filter(Boolean);
     const cov = (a: number, y: number): number => {
       let c = 0;
       const dt = 0.5 / U;
       for (let t = 0; t < 12; t += dt) {
         const aa = a - U * t;
         if (aa < -5) break;
-        c += chineSheetFoamCpu(sheets, bow.x - aa, bow.z + y, 0.234) * dt * Math.pow(2, -t / 5);
+        c += packedChineFoamCpu(packets, bow.x - aa, bow.z + y, 0.234) * dt * Math.pow(2, -t / 5);
       }
       return Math.min(1, c);
     };

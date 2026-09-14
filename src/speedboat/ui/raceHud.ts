@@ -204,6 +204,7 @@ export class RaceHud {
   private readonly fCrash: Flag;
   private readonly fCrashCam: Flag;
   private readonly fFinished: Flag;
+  private readonly fFree: Flag;
 
   constructor(parent: HTMLElement) {
     // — position + lap
@@ -335,6 +336,7 @@ export class RaceHud {
     this.fCrash = new Flag(this.root, 'is-crash');
     this.fCrashCam = new Flag(this.root, 'is-crashcam');
     this.fFinished = new Flag(this.root, 'is-finished');
+    this.fFree = new Flag(this.root, 'is-free');
     parent.appendChild(this.root);
     this.resize(window.innerWidth, window.innerHeight);
   }
@@ -604,6 +606,11 @@ export class RaceHud {
     });
     this.frame.appendChild(b);
     return b;
+  }
+
+  /** edge: free roam (page/sessionMode.ts) — the stylesheet keeps speed/rpm and trim and drops every race panel */
+  setFreeRoam(on: boolean): void {
+    this.fFree.set(on);
   }
 
   /** edge: hide the in-race layer while a full screen (pause, results, select) is up */

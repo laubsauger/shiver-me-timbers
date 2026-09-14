@@ -1,8 +1,8 @@
-/** GPU source-only proof: the live vessel field cannot inject ahead of contact age. */
-export async function probeChineFront(renderer, sim) {
+/** Historical pass-20 proof. Supply the archived pre-emission simFoam module. */
+export async function probeChineFront(renderer, sim, historicalModule) {
   const T = await import('three/webgpu');
   const { Fn, int, instanceIndex, ivec2, textureStore, uniform, uniformArray, vec2, vec4 } = await import('three/tsl');
-  const { createSimFoamField, chineSheetFoamCpu, packMovingChineSheet } = await import('../../src/flowfoam/simFoam.ts');
+  const { createSimFoamField, chineSheetFoamCpu, packMovingChineSheet } = historicalModule;
   const { flowFoamParams } = await import('../../src/params/flowfoam.ts');
   const { createWaterlineSpray } = await import('../../src/foam/sprayMath.ts');
   const bow = { ...createWaterlineSpray(), inContact: true, flux: 0.1, launch: 2, halfWidth: 1 };
