@@ -139,7 +139,7 @@ describe('speedboat trailer v2 shot list', () => {
     // lens — any other look in that slot would come out in the wrong sky or DOF. So an unwanted look 0 is kept as a
     // discarded placeholder (not drawn, not written), and a used clip from an older take still matches by base name.
     const ten = trailerEditPlan({ fps: 30, width: 640, height: 360 }, 1).coverage?.filter((c) => c.setup === '10') ?? [];
-    const looks = ten.map((c) => ({ clip: c.video.replace(/^video\/|\.mov$/g, '') }));
+    const looks: { clip: string; discard?: boolean }[] = ten.map((c) => ({ clip: c.video.replace(/^video\/|\.mov$/g, '') }));
     expect(looks[0]?.clip).toBe('sb-trailer-v2_10_bow-lookback_dusk_take01'); // the run's own time, main lens
     const sub = subsetLooks(looks, ['sb-trailer-v2_10_bow-lookback_cam-windshield-back_night_take03', 'sb-trailer-v2_10_bow-lookback_golden_take03']);
     expect(sub?.map((l) => [l.clip, l.discard === true])).toEqual([
