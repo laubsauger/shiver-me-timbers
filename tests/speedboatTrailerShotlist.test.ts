@@ -10,6 +10,8 @@ import { shotDuration, shotHead, shotTail } from '../src/cine/types';
 import { LOCATIONS } from '../src/speedboat/cine/locations';
 import { CAMERA_PRIMITIVES, TRAILER_BEATS, TRAILER_SECONDS, TRAILER_SHOTS, TRAILER_SLOTS, cameraShot, coverageFor, trailerTakes } from '../src/speedboat/cine/shotlist';
 import { TIME_LOOK } from '../src/speedboat/cine/look';
+import { skyParams } from '../src/params/sky';
+import { skyPalette, sunElevation } from '../src/sky/sunCycle';
 import { subsetLooks, trailerEditPlan } from '../src/speedboat/cine/editPlan';
 import { CINE_CHROME_CLASS, CINE_CHROME_CSS, CINE_KEEP_ATTR, createCineChrome, type ChromeElement } from '../src/speedboat/cine/cineChrome';
 import { applyDevLayer, devLayerVisible } from '../src/ui/devLayer';
@@ -102,6 +104,33 @@ describe('speedboat trailer v2 shot list', () => {
     // one sound per shot across every time of day: the stems too
     expect(p09?.sfxStems?.engine).toBe('sfx/sb-trailer-v2_09_rocky-point-pass_take01_engine.wav');
     expect(p10?.sfxStems?.water).toBe('sfx/sb-trailer-v2_10_bow-lookback_dusk_take01_water.wav');
+  });
+
+  it('golden hour (17:30) paints an amber-gold sky under a blue zenith, not the shipped rose sunset palette', () => {
+    // final look review: 10's golden variant read PINK. At 17:30 the sun is ~7° up and the golden-hour weight is ~0.94,
+    // so the sky IS the sunset palette; the shipped one is salmon (hue ≈ 11°) under a mauve zenith. Resolved the way the
+    // page resolves it (the world patch over the sky params, then `skyPalette` at the clock's sun), not by reading hexes.
+    const hue = ([r, g, b]: readonly number[]): number => {
+      const mx = Math.max(r, g, b);
+      const mn = Math.min(r, g, b);
+      if (mx - mn < 1e-6) return 0;
+      const h = mx === r ? ((g - b) / (mx - mn)) % 6 : mx === g ? (b - r) / (mx - mn) + 2 : (r - g) / (mx - mn) + 4;
+      return (h * 60 + 360) % 360;
+    };
+    const golden = TIME_LOOK.golden;
+    const p = { ...skyParams, ...golden.sky };
+    const elev = sunElevation(golden.timeOfDay ?? Number.NaN, p.latitude);
+    const pal = skyPalette(elev, p);
+    expect(pal.warm).toBeGreaterThan(0.8); // the sunset hexes really are what 17:30 paints
+    for (const band of [pal.mid, pal.horizon]) {
+      expect(hue(band)).toBeGreaterThanOrEqual(25); // amber/gold, not salmon or rose
+      expect(hue(band)).toBeLessThanOrEqual(50);
+    }
+    expect(hue(pal.zenith)).toBeGreaterThan(190); // blue overhead, not mauve/magenta (270–345)
+    expect(hue(pal.zenith)).toBeLessThan(250);
+    // the shipped palette at the same clock is the pink one this replaces (the test would pass without the look change
+    // only if the engine's defaults were amber already)
+    expect(hue(skyPalette(elev, { ...skyParams, ...TIME_LOOK.noon.sky }).mid)).toBeLessThan(25);
   });
 
   it('coverage: every lens of a run is the same run, named per camera, and lines up on the setup clock', () => {

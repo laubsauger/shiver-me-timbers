@@ -19,7 +19,9 @@ import { lights as lightsOf } from 'three/tsl';
 import { createBoatLights } from '../src/speedboat/page/boatLights';
 import { PILOT_HAIR_MAX_ANISOTROPY, PILOT_HAIR_MIN_ROUGHNESS, pilotNodeMaterial } from '../src/speedboat/page/pilotRig';
 import { createBoatLightPool } from '../src/ocean/boatLightPool';
-import { boatLedLevel, boatNightFillLevels } from '../src/speedboat/assets/slotMaterials';
+import { boatLedLevel, boatNightFillLevels, boatPilotFillLevel, pilotFillLevel, twilightFillRamp } from '../src/speedboat/assets/slotMaterials';
+import { nightFactor } from '../src/sky/moonCycle';
+import { TIME_LED } from '../src/speedboat/cine/look';
 import { ledColor, resolveLivery } from '../src/speedboat/assets/livery';
 import type { BoatExtras, BoatInstance } from '../src/speedboat/assets';
 
@@ -92,6 +94,46 @@ describe('§T.209 the pilots get the boats\' night light', () => {
     expect(boatLedLevel()).toBe(0);
     const { fill, rim } = boatNightFillLevels();
     expect([fill.r, fill.g, fill.b, rim.r, rim.g, rim.b]).toEqual([0, 0, 0, 0, 0, 0]);
+    r.lights.dispose();
+  });
+
+  /**
+   * WHY (final look review, 10 dusk): at −4° the light rig is at its darkest (no sun key, moon not yet handed over, the
+   * ambient on its night floor) but the night fill followed the raw night factor (0.38) and the pilot's LED fill the
+   * pinned dusk LED level (0.4): a black silhouette. Dusk must read as the transition, most of the way to night, while
+   * the sunset shots (+3°, LEDs pinned 0) stay bit-identical and LEDs switched off never light the pilot.
+   */
+  it('the fill ramps in through twilight: most of night\'s at dusk, exactly zero at the sunset stop and with LEDs off', () => {
+    const r = rig();
+    r.lights.lightPilots(r.pilots);
+    const deg = Math.PI / 180;
+    const at = (elevDeg: number, time: 'sunset' | 'dusk' | 'night') => {
+      r.lights.setOverride(TIME_LED[time]);
+      r.lights.update(nightFactor(elevDeg * deg));
+      return { pilot: boatPilotFillLevel(), fill: boatNightFillLevels().fill.r };
+    };
+    const night = at(-40, 'night');
+    const dusk = at(-4, 'dusk');
+    const sunset = at(3, 'sunset');
+    expect(night.pilot).toBe(1);
+    expect(dusk.pilot).toBeGreaterThan(0.6 * night.pilot); // was 0.4: the LED level alone
+    expect(dusk.pilot).toBeLessThan(night.pilot); // a transition, not night
+    expect(dusk.fill).toBeGreaterThan(0.6 * night.fill); // was 0.38 of night's
+    expect(dusk.fill).toBeLessThan(night.fill);
+    expect([sunset.pilot, sunset.fill]).toEqual([0, 0]);
+    // LEDs forced off at full night: the pilot's LED-hue fill is off with them
+    r.lights.setOverride(0);
+    r.lights.update(1);
+    expect(boatPilotFillLevel()).toBe(0);
+    // monotone through the whole dusk
+    let prev = 0;
+    for (let k = 0; k <= 50; k++) {
+      const n = k / 50;
+      const v = twilightFillRamp(n);
+      expect(v).toBeGreaterThanOrEqual(prev);
+      expect(pilotFillLevel(n, n)).toBeGreaterThanOrEqual(n); // never below the LED level itself
+      prev = v;
+    }
     r.lights.dispose();
   });
 

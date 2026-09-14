@@ -108,8 +108,29 @@ const ledSubmergedNits = uniform(boatLightParams.submergedStripNits);
 const ledHullWidth = uniform(boatLightParams.hullStripWidth);
 const ledDeckWidth = uniform(boatLightParams.deckStripWidth);
 const ledPilotFill = uniform(boatLightParams.pilotLedFill);
+/** the pilot LED fill's level (`pilotFillLevel`): the LED level, lifted through twilight */
+const ledPilotLevel = uniform(0);
+/**
+ * TWILIGHT. `sky.nightFactor` is linear-ish from +1.7° to −12°, so at dusk (the trailer's −4°: 0.38) every night fill
+ * term was a third of night's, in the one hour whose light rig is darkest: the sun's key and daylight ambient are gone
+ * and the moon's handover has not begun (moonCycle.ts `ambientLevel` sits on its night floor). The pilot in 10 dusk was
+ * a black silhouette against a bright twilight sky (final look review). The fill terms ride this ramp instead: the same
+ * clock, exactly 0 wherever the night factor is (sunset at +3° included), full by n = TWILIGHT_FILL_FULL (≈ −6.5°).
+ */
+export const TWILIGHT_FILL_FULL = 0.6;
+export function twilightFillRamp(nightFactor: number): number {
+  const n = Number.isFinite(nightFactor) ? Math.min(1, Math.max(0, nightFactor / TWILIGHT_FILL_FULL)) : 0;
+  return n * n * (3 - 2 * n);
+}
+/** the pilot's LED fill level: 0 with the LEDs off, else the LED level lifted to the twilight ramp (never below it) */
+export function pilotFillLevel(ledLevel: number, nightFactor: number): number {
+  const l = Number.isFinite(ledLevel) ? Math.min(1, Math.max(0, ledLevel)) : 0;
+  return l > 0 ? Math.max(l, twilightFillRamp(nightFactor)) : 0;
+}
+let lastNightFactor = 0;
 export function setBoatLedLevel(level: number, p = boatLightParams): void {
   ledLevel.value = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0;
+  ledPilotLevel.value = pilotFillLevel(ledLevel.value as number, lastNightFactor);
   ledPilotFill.value = p.pilotLedFill;
   ledHullNits.value = p.stripNits;
   ledDeckNits.value = p.deckStripNits;
@@ -121,19 +142,26 @@ export function setBoatLedLevel(level: number, p = boatLightParams): void {
  * §T.209 NIGHT FILL. Under a half moon the key is ~4% of noon and the hemisphere ambient is a dark navy, so the hulls
  * rendered as pure black silhouettes (nothing zeroes them: that is the physically-lit level). A small moonlight term
  * keeps the hull SHAPE readable: a Fresnel rim biased toward the key (moon) direction plus a little sky fill on the
- * albedo, both in the moon's hue × `sky.nightFactor` × `boatLightParams.nightRim / nightFill`. Exactly 0 by day.
+ * albedo, both in the moon's hue × `twilightFillRamp(sky.nightFactor)` × `boatLightParams.nightRim / nightFill`. Exactly 0
+ * by day.
  */
 const nightFill = uniform(new THREE.Color(0, 0, 0));
 const nightRim = uniform(new THREE.Color(0, 0, 0));
 const nightKeyDir = uniform(new THREE.Vector3(0, 1, 0));
 export function setBoatNightFill(moonLinear: THREE.Color, nightFactor: number, keyDir: THREE.Vector3, p = boatLightParams): void {
-  const n = Number.isFinite(nightFactor) ? Math.min(1, Math.max(0, nightFactor)) : 0;
+  lastNightFactor = Number.isFinite(nightFactor) ? Math.min(1, Math.max(0, nightFactor)) : 0;
+  ledPilotLevel.value = pilotFillLevel(ledLevel.value as number, lastNightFactor);
+  const n = twilightFillRamp(lastNightFactor);
   (nightFill.value as THREE.Color).copy(moonLinear).multiplyScalar(n * p.nightFill);
   (nightRim.value as THREE.Color).copy(moonLinear).multiplyScalar(n * p.nightRim);
   (nightKeyDir.value as THREE.Vector3).copy(keyDir).normalize();
 }
 export function boatLedLevel(): number {
   return ledLevel.value as number;
+}
+/** the pilots' live LED fill level (see `pilotFillLevel`) */
+export function boatPilotFillLevel(): number {
+  return ledPilotLevel.value as number;
 }
 /** the night fill's live moon terms (linear radiance): black by day */
 export function boatNightFillLevels(): { fill: THREE.Color; rim: THREE.Color } {
@@ -148,12 +176,12 @@ export function nightFillNode(albedo: TslNode): TslNode {
 }
 /**
  * §T.209 the pilot's LED fill: the boat's strips, pool and arch light bouncing up off the deck and the water onto him,
- * in `hue` (his boat's LED colour, linear) × `albedo` × the LED level × `boatLightParams.pilotLedFill`. A hemisphere
+ * in `hue` (his boat's LED colour, linear) × `albedo` × `pilotFillLevel` × `boatLightParams.pilotLedFill`. A hemisphere
  * weight, not a light: 1 on down-facing normals, 0.65 on his front and sides, 0.3 on top. 0 when the LEDs are off.
  */
 export function pilotLedFillNode(albedo: TslNode, hue: TslNode): TslNode {
   const below = normalWorld.y.mul(-0.35).add(0.65);
-  return hue.mul(albedo).mul(below).mul(ledLevel).mul(ledPilotFill);
+  return hue.mul(albedo).mul(below).mul(ledPilotLevel).mul(ledPilotFill);
 }
 /** 1 inside a strip of full width `width` centred on `d = centre` (anti-aliased with the footprint of d) */
 const ledStrip = (d: TslNode, centre: TslNode, width: TslNode): TslNode => {

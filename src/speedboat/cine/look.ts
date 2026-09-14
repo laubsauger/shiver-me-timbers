@@ -119,6 +119,23 @@ const NIGHT_SKY: SkyPatch = {
  */
 const DAY_SKY: SkyPatch = { ...SKY_DEFAULTS };
 
+/**
+ * GOLDEN HOUR (17:30). The shipped palette is NOT a day palette at this clock: the sun is 7.2° up, where the sky's
+ * golden-hour weight is already 0.94 (sunCycle.ts `lowSunWarmth`), so 17:30 painted the shipped SUNSET hexes, rose-salmon
+ * body (#e37156, hue 11°) under a mauve zenith: the pink golden variant of 10 (final look review). Golden hour is amber
+ * and gold under a sky still blue overhead: the sunset look's amber family, one step lighter (the sun is higher than
+ * the sunset stop's 3°), a soft blue zenith instead of the sunset's slate. Day exposure, ambient and sun disc stay as
+ * shipped. The clouds follow (clouds/cloudPalette.ts reads `skyPalette`).
+ */
+const GOLDEN_SKY: SkyPatch = {
+  ...SKY_DEFAULTS,
+  sunsetZenithColor: 0x5a78a6,
+  sunsetMidColor: 0xdca062,
+  sunsetHorizonColor: 0xffc878,
+  horizonWarmColor: 0xffa445,
+  sunColorLow: 0xff9a38,
+};
+
 /** the grade mode's own values, with the blue gain eased off: at 0.88 the sky, the sea and the hull were one orange */
 const SUNSET_GRADE: GradePatch = { ...CINE_SUNSET.grade, gainB: 0.92, saturation: 1.0 };
 /** half-way back to neutral: the warm gain would turn the blue hour brown */
@@ -191,7 +208,7 @@ export const TIME_LOOK: Readonly<Record<TrailerTime, WorldPatch>> = {
   night: { timeOfDay: MOONLIT_NIGHT.timeOfDay, sky: NIGHT_SKY, grade: NIGHT_GRADE, post: NIGHT_POST, oceanSurface: NIGHT_SURFACE, clouds: NIGHT_CLOUDS },
   // the race Time labels' clocks; the sun's own place, the shipped sea glint, the day cloud count
   noon: { timeOfDay: raceTimeHour('12:00') ?? 12, sky: DAY_SKY, grade: NOON_GRADE, post: SUNSET_POST, oceanSurface: NIGHT_SURFACE, clouds: SUNSET_CLOUDS },
-  golden: { timeOfDay: raceTimeHour('17:30') ?? 17.5, sky: DAY_SKY, grade: GOLDEN_GRADE, post: SUNSET_POST, oceanSurface: SUNSET_SURFACE, clouds: SUNSET_CLOUDS },
+  golden: { timeOfDay: raceTimeHour('17:30') ?? 17.5, sky: GOLDEN_SKY, grade: GOLDEN_GRADE, post: SUNSET_POST, oceanSurface: SUNSET_SURFACE, clouds: SUNSET_CLOUDS },
 };
 
 /**
