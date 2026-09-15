@@ -146,7 +146,8 @@ describe('radio volume persistence', () => {
     const s = memStore();
     s.setItem(RACE_SETTINGS_KEY, JSON.stringify({ camera: 'near', audio: { master: 0.4, engines: 0.2, music: 0.1 } }));
     const got = loadRaceSettings(s);
-    expect(got.audio).toEqual({ master: 0.4, engines: 0.2, radio: DEFAULT_AUDIO.radio, music: 0.1 });
+    // an older record also lacks §T.212's ambience level: it loads at its default the same way
+    expect(got.audio).toEqual({ master: 0.4, engines: 0.2, radio: DEFAULT_AUDIO.radio, music: 0.1, ambience: DEFAULT_AUDIO.ambience });
     expect(got.camera).toBe('near');
   });
 });

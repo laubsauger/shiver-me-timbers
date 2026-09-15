@@ -32,6 +32,8 @@ export interface AudioSettings {
   engines: number;
   radio: number;
   music: number;
+  /** §T.212 wind, water bed, distant sea, gulls/bell (the ambience bus) */
+  ambience: number;
 }
 
 export interface PauseState {
@@ -206,7 +208,7 @@ export class PauseScreen {
     });
 
     // — side: audio
-    const levels: [keyof AudioSettings, string][] = [['master', 'Master'], ['engines', 'Engines'], ['radio', 'Race radio'], ['music', 'Menu music']];
+    const levels: [keyof AudioSettings, string][] = [['master', 'Master'], ['engines', 'Engines'], ['ambience', 'Ambience'], ['radio', 'Race radio'], ['music', 'Menu music']];
     const audioRows = levels.map(([key, label]) => {
       const m = meter();
       const row = valueRow(label, m.el);

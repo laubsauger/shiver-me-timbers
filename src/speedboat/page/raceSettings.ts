@@ -38,7 +38,7 @@ export interface KeyValueStore {
   setItem(key: string, value: string): void;
 }
 
-export const DEFAULT_AUDIO: Readonly<AudioSettings> = Object.freeze({ master: 0.8, engines: 0.9, radio: 0.7, music: 0.5 });
+export const DEFAULT_AUDIO: Readonly<AudioSettings> = Object.freeze({ master: 0.8, engines: 0.9, ambience: 0.7, radio: 0.7, music: 0.5 });
 
 export function defaultRaceSettings(): RaceSettings {
   return {
@@ -78,7 +78,7 @@ export function sanitizeRaceSettings(raw: unknown): RaceSettings {
   d.camera = oneOf(['chase', 'near', 'cockpit'] as const, r.camera, d.camera);
   d.hudScale = oneOf(HUD_SCALES.map((s) => s.scale as number), r.hudScale, d.hudScale);
   const au = (r.audio ?? {}) as Record<string, unknown>;
-  d.audio = { master: num01(au.master, DEFAULT_AUDIO.master), engines: num01(au.engines, DEFAULT_AUDIO.engines), radio: num01(au.radio, DEFAULT_AUDIO.radio), music: num01(au.music, DEFAULT_AUDIO.music) };
+  d.audio = { master: num01(au.master, DEFAULT_AUDIO.master), engines: num01(au.engines, DEFAULT_AUDIO.engines), radio: num01(au.radio, DEFAULT_AUDIO.radio), music: num01(au.music, DEFAULT_AUDIO.music), ambience: num01(au.ambience, DEFAULT_AUDIO.ambience) };
   const s = r.lastSelection as Record<string, unknown> | null | undefined;
   if (s && typeof s === 'object') {
     d.lastSelection = {
@@ -148,7 +148,7 @@ export function uiAssistsFrom(c: Readonly<ControlAssists>): UiAssists {
  * bus (audio/boat/boatAudio.ts), so 'engines' drives sfx. 'radio' is NOT an engine bus: see `radioLevel`.
  */
 export function engineVolumes(a: Readonly<AudioSettings>): Partial<Volumes> {
-  return { master: a.master, sfx: a.engines, music: a.music };
+  return { master: a.master, sfx: a.engines, ambience: a.ambience, music: a.music };
 }
 
 /**

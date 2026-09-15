@@ -130,7 +130,7 @@ let camera: HudCamera =params.get('cam') === 'cockpit' ? 'cockpit' : params.get(
 const pause = new PauseScreen(app, {
   assists: { preset: 'default', ...ASSIST_PRESETS.default },
   camera,
-  audio: { master: 0.8, engines: 0.9, radio: 0.7, music: 0.5 },
+  audio: { master: 0.8, engines: 0.9, ambience: 0.7, radio: 0.7, music: 0.5 },
   hudScale,
 }, {
   onHudScale: (sc) => hud.setScale(sc),
