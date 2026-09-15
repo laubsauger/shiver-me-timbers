@@ -138,6 +138,9 @@ python3 scripts/resolve/relink_final.py <final out> [--blends-out <dir> --python
 python3 scripts/resolve/render_review.py <out.mp4> [--timeline …] [--lock <gpu.lock>]
 ```
 
+- **Hand edits are never overwritten silently**: `trailer_edit.py` imports the new build as `<name> (candidate)`,
+  compares every item (track, name, start, duration, source in; titles excluded) with the existing timeline and stops
+  with the list of differences unless `--accept-overwrite`. Put hand edits into the cut list (e.g. MAIN's R6 trim).
 - **Timelines**: `★ sb-trailer-v2 — MAIN (Reef Runner EX)` (primary), `ZZ alt — temp music (Dead Channel)`, `ZZ alt —
   unscored` (a `base` variant of the Dead Channel cut without the song), `ZZ old assembly` (the plan's 60 s default
   order); per-setup `sb-trailer-v2 — cov …` timelines live in the Coverage bin.
@@ -197,5 +200,13 @@ API facts learned live (they shaped the scripts):
   volume takes the same `Key Frames` form (used for the music dips).
 - Fusion effects on adjustment clips work, but a freshly (re)built Fusion chain can take seconds to show in the viewer:
   `ExportCurrentFrameAsStill` right after a change may grab the unprocessed frame; renders are always processed.
+- **A Fusion comp added to an adjustment clip must NOT be `comp.Lock()`ed**: a Lock()ed new comp shows its tools in
+  the API but neither renders nor survives a save/reload (proven by one-frame look-on/off renders, 2026-09-15; every
+  review before that had NO finishing). `DeleteFusionCompByName` returns False and deletes nothing: reuse comp 1 and
+  delete its tools. Prove a look with a one-frame render (MarkIn = MarkOut, PNG), never with `ExportCurrentFrameAsStill`.
+- AnalogDamage's clean-VHS preset simulates a 4:3 CRT scan (black side bars, shifted picture): `scanIsEnabled` 0.
+- After `RelinkClips` to a bigger file the pool item keeps reporting the old Resolution; renders use the new file.
+- The full-res record pads its WAVs with digital silence (to 1.0884× or 3× the clip); the audio itself starts at
+  sample 0 and ends at the video length, so relinking them keeps sync (relink with --force for audio).
 - `SetRenderSettings` refuses the whole dict for one unsupported key (`VideoQuality: "High"` for H.264): set keys one by
   one. A 107 s 1080p review of the 640×360 stand-ins renders in ~12 s.

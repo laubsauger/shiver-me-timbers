@@ -1,5 +1,5 @@
 {
- "_doc": "The MAIN cut, to 'Reef Runner EX' (203.6 s, 112.3 BPM, bar 2.14 s) played UNEDITED from 0:00 (user: no music edits), faded out over 3.5 s with the picture's end. Song structure found: intro 0-8.5, low 8.5-11.1, build 11.1-28, MAIN DROP bar 14 (28.05), groove, a one-bar dip ~59.6 and the re-drop bar 30 (61.74), long high section with dips ~120-128, drop bar 62 (128.5), break ~140.5, night drop ~151.2, peak 181-183, fade 196.5-203.6. Structure (user): the sunset horizon R6 + title → 01 bow at the waterline → 02-05 long holds → 06 throttle (lever FULL on the main drop 28.05, music dips from the glove touch) → PEAK 1 launch → sunset action → the hand (06c, R5 blend; FULL on bar 27, music dip) + the setup-10 nightfall time-lapse, each camera once, wide → close → silhouette, ~3.1 s each, hard cuts on the beat → PEAK 2 full night on the re-drop 61.74 → night solo → rivals → the R3 pack → PEAK 3 jumps (bar 43, ~88.8) → R7 + 'made by @laub69'; the song plays unedited and fades 3.5 s into bar 52. Time of day never steps back. Lever frames from shotlist.ts (reach ends 0.1 s before the throttle rises at shot t 0, full at 1.2 s) + handles, checked on frame strips. 'until'/'on' = [song bar, beat]; align = source second atSrc lands there; duck = a subtle music dip (-3.5 dB, 4-frame ramp, snaps back on the lever-full frame) between two source seconds of the event; engineAccent = the event's engine stem on SFX extra.",
+ "_doc": "The MAIN cut, to 'Reef Runner EX' (203.6 s, 112.3 BPM, bar 2.14 s) played UNEDITED from 0:00 (user: no music edits), faded out over 3.5 s with the picture's end. Song structure found: intro 0-8.5, low 8.5-11.1, build 11.1-28, MAIN DROP bar 14 (28.05), groove, a one-bar dip ~59.6 and the re-drop bar 30 (61.74), long high section with dips ~120-128, drop bar 62 (128.5), break ~140.5, night drop ~151.2, peak 181-183, fade 196.5-203.6. Structure (user): the sunset horizon R6 + title → 01 bow at the waterline → 02-05 long holds → 06 throttle (lever FULL on the main drop 28.05, music dips from the glove touch) → PEAK 1 launch → sunset action → the hand (06c, R5 blend; FULL on bar 27, music dip) + the setup-10 nightfall time-lapse, each camera once, wide → close → silhouette, ~3.1 s each, hard cuts on the beat → PEAK 2 full night on the re-drop 61.74 → night solo → rivals → the R3 pack → PEAK 3 jumps (bar 43, ~88.8) → R7 + 'made by @laub69'; the song plays unedited and fades 3.5 s into bar 52. Time of day never steps back. Lever frames from shotlist.ts (reach ends 0.1 s before the throttle rises at shot t 0, full at 1.2 s) + handles, checked on frame strips. 'until'/'on' = [song bar, beat]; align = source second atSrc lands there; duck = a subtle music dip (-3.5 dB, 4-frame ramp, snaps back on the lever-full frame) between two source seconds of the event; engineAccent = the event's engine stem on SFX extra. vhs: true = the VHS treatment over that event (V5). 2026-09-15 user decision (c): R6 hand trim kept (src 9.0 s, 194 f, 20 f dissolve); the 01-04 cuts moved one beat earlier and 05 holds 0.5 s longer so the 06 lever-full frame and the 07 launch stay on the main drop (28.05); after 07 unchanged.",
  "timeline": "★ sb-trailer-v2 — MAIN (Reef Runner EX)",
  "plan": "sb-trailer-v2",
  "music": {
@@ -16,11 +16,7 @@
   {
    "id": "R6",
    "clip": "sb-trailer-v2_R6_intro-horizon",
-   "until": [
-    4,
-    0
-   ],
-   "src": 5.9,
+   "src": 9.0,
    "sfxDb": -8.0,
    "music": "open on the sunset horizon: the title, engine on the stem",
    "titles": [
@@ -29,25 +25,28 @@
      "kind": "wordmark",
      "text": "speedboat"
     }
-   ]
+   ],
+   "vhs": true,
+   "dur": 6.4667,
+   "note": "user hand trim kept (2026-09-15): source 9.0 s, 194 frames"
   },
   {
    "id": "01",
    "clip": "sb-trailer-v2_01_waterline-bow",
    "until": [
-    6,
-    0
+    5,
+    3
    ],
    "src": 0.5,
-   "dissolveS": 1.0,
+   "dissolveS": 0.6667,
    "music": "the bow at the waterline: the sunset reveal, long holds"
   },
   {
    "id": "02",
    "clip": "sb-trailer-v2_02_number-slide",
    "until": [
-    8,
-    0
+    7,
+    3
    ],
    "src": 0.4,
    "dissolveS": 0.6
@@ -56,8 +55,8 @@
    "id": "03",
    "clip": "sb-trailer-v2_03_outboards-dolly",
    "until": [
-    10,
-    0
+    9,
+    3
    ],
    "src": 0.4,
    "dissolveS": 0.6
@@ -66,8 +65,8 @@
    "id": "04",
    "clip": "sb-trailer-v2_04_foredeck-glide",
    "until": [
-    12,
-    0
+    11,
+    3
    ],
    "src": 0.4,
    "dissolveS": 0.6
@@ -80,7 +79,8 @@
     1
    ],
    "src": 0.4,
-   "dissolveS": 0.6
+   "dissolveS": 0.6,
+   "note": "hold the reveal (absorbs the 0.5 s the R6 trim gave back, so 06/07 stay on the drop)"
   },
   {
    "id": "06",

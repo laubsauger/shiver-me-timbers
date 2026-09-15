@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Quick H.264 review render of a timeline through Resolve's render queue.
+Review / master render of a timeline through Resolve's render queue (H.264 .mp4 by default).
 
-    python3 scripts/resolve/render_review.py <out.mp4> [--timeline "<name>"] [--lock <dir>] [--max-min 10]
+    python3 scripts/resolve/render_review.py <out.mp4|.mov> [--timeline "<name>"] [--format mov --codec ProRes422HQ]
+        [--bitrate-kbps 40000] [--lock <dir>] [--max-min 10]
 
 --lock: a shared GPU lock directory (mkdir-atomic, see the agents' GPU-LOCK-RULES.md). The render waits until it can
 create it, writes an owner line, and removes it when done or on failure; --max-min stops a render that overruns.
@@ -25,6 +26,9 @@ def main():
     ap.add_argument("--timeline", default="★ sb-trailer-v2 — MAIN (Reef Runner EX)")
     ap.add_argument("--lock")
     ap.add_argument("--max-min", type=float, default=10.0)
+    ap.add_argument("--format", default="mp4")
+    ap.add_argument("--codec", default="H264", help="Resolve codec id (project.GetRenderCodecs(format)), e.g. ProRes422HQ")
+    ap.add_argument("--bitrate-kbps", type=int, help="H.264/H.265 VideoQuality as a bitrate (default: Resolve's)")
     a = ap.parse_args()
 
     out = os.path.abspath(a.out)
@@ -32,13 +36,15 @@ def main():
     tl = find_timeline(project, a.timeline) or fail(TAG, f"no timeline '{a.timeline}'")
     project.SetCurrentTimeline(tl)
     resolve.OpenPage("deliver")
-    if not project.SetCurrentRenderFormatAndCodec("mp4", "H264"):
-        fail(TAG, "mp4/H264 not available")
+    if not project.SetCurrentRenderFormatAndCodec(a.format, a.codec):
+        fail(TAG, f"{a.format}/{a.codec} not available")
     project.SetCurrentRenderMode(1)
     settings = {"SelectAllFrames": True, "TargetDir": os.path.dirname(out),
                 "CustomName": os.path.splitext(os.path.basename(out))[0], "FormatWidth": 1920, "FormatHeight": 1080,
                 "FrameRate": float(tl.GetSetting("timelineFrameRate") or 30), "ExportVideo": True, "ExportAudio": True,
-                "VideoQuality": "High", "AudioCodec": "aac"}
+                "AudioCodec": "aac" if a.format == "mp4" else "lpcm"}
+    if a.bitrate_kbps:
+        settings["VideoQuality"] = a.bitrate_kbps
     essential = {"SelectAllFrames", "TargetDir", "CustomName", "FormatWidth", "FormatHeight"}
     for k, v in settings.items():  # one by one: Resolve refuses a whole dict for one unsupported key
         if not project.SetRenderSettings({k: v}):
@@ -55,8 +61,8 @@ def main():
                     log(TAG, "GPU lock busy, waiting 20 s")
                     time.sleep(20)
             locked = True
-            with open(os.path.join(a.lock, "owner"), "w") as f:
-                f.write(f"resolve-review-render {int(time.time())} Resolve H.264 review of '{a.timeline}'\n")
+            with open(os.path.join(a.lock, "owner"), "w", encoding="utf-8") as f:
+                f.write(f"resolve-review-render {int(time.time())} Resolve {a.codec} render of '{a.timeline}'\n")
         project.DeleteAllRenderJobs()
         job = project.AddRenderJob() or fail(TAG, "AddRenderJob failed")
         t0 = time.time()

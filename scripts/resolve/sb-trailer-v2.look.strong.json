@@ -1,0 +1,222 @@
+{
+ "_doc": "Decision variant 'a bit stronger' of sb-trailer-v2.look.json (same chain): FilmLook contrast 1.06→1.12, halation 0.12→0.30, bloom 0.08→0.15, blend 0.6→0.85; glint glow opacity 0.15→0.30; grain opacity 0.25→0.50. Vignette and lens unchanged.",
+ "grade": {
+  "sunset": {
+   "slope": [
+    1.0,
+    0.975,
+    0.93
+   ],
+   "offset": [
+    -0.012,
+    -0.012,
+    -0.006
+   ],
+   "power": [
+    1.06,
+    1.05,
+    1.0
+   ],
+   "saturation": 0.9
+  },
+  "dusk": {
+   "slope": [
+    0.99,
+    0.98,
+    0.97
+   ],
+   "offset": [
+    -0.012,
+    -0.01,
+    -0.006
+   ],
+   "power": [
+    1.05,
+    1.05,
+    1.03
+   ],
+   "saturation": 0.92
+  },
+  "night": {
+   "slope": [
+    0.96,
+    0.985,
+    1.04
+   ],
+   "offset": [
+    -0.014,
+    -0.01,
+    0.0
+   ],
+   "power": [
+    1.08,
+    1.07,
+    1.03
+   ],
+   "saturation": 0.9
+  }
+ },
+ "finishing": [
+  {
+   "tool": "Blur",
+   "name": "SoftenCG",
+   "inputs": {
+    "XBlurSize": 0.5,
+    "Blend": 0.35
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.FilmLook",
+   "name": "FilmLook",
+   "inputs": {
+    "colorContrast2": 1.12,
+    "colorHighlightRolloff": 0.55,
+    "colorFade": 0.06,
+    "colorPostSat": 1.0,
+    "splitIsEnable": 1,
+    "splitAmount": 0.1,
+    "splitAngle": 20.0,
+    "vignetteIsEnable": 0,
+    "halationIsEnable": 1,
+    "halationAmount": 0.3,
+    "halationRadius": 3.0,
+    "bloomIsEnable": 1,
+    "bloomAmount": 0.15,
+    "bloomRadius": 10.0,
+    "grainIsEnable": 0,
+    "flickerIsEnable": 1,
+    "flickerAmount": 0.012,
+    "gateWeaveIsEnable": 1,
+    "gateWeaveAmount": 0.04,
+    "Blend": 0.85
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.Glow",
+   "name": "GlintGlow",
+   "inputs": {
+    "threshold": 0.9,
+    "spread": 0.3,
+    "brightness": 0.2,
+    "opacity": 0.3
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.Glow",
+   "name": "AnamorphicStreak",
+   "inputs": {
+    "threshold": 0.95,
+    "spread": 0.9,
+    "hvRatio": 1.0,
+    "brightness": 0.15,
+    "opacity": 0.08
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.LensDistortion",
+   "name": "LensBarrel",
+   "inputs": {
+    "distortionAmountR": -0.02,
+    "distortionAmountG": -0.02,
+    "distortionAmountB": -0.02,
+    "edgeBehaviour": "EDGE_BEHAVIOUR_REPLICATE"
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.ChromaticAberration",
+   "name": "EdgeFringe",
+   "inputs": {
+    "curvatureRed": 0.01,
+    "curvatureBlue": -0.01
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.Vignette",
+   "name": "Vignette",
+   "inputs": {
+    "size": 1.0,
+    "softness": 1.0,
+    "transparency": 0.88,
+    "Blend": 0.45
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.FilmGrain",
+   "name": "Grain35",
+   "inputs": {
+    "Opacity": 0.5,
+    "GrainSize": 0.55,
+    "shadowGain": 0.6,
+    "midtoneGain": 0.4,
+    "highlightGain": 0.2
+   }
+  }
+ ],
+ "vhs": [
+  {
+   "tool": "Blur",
+   "name": "TapeSoft",
+   "inputs": {
+    "XBlurSize": 2.2
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.AnalogDamage",
+   "name": "VHS",
+   "inputs": {
+    "pluginPreset": "PRESET_CLEAN_VHS",
+    "scanIsEnabled": 0,
+    "dialsBrightness": -0.08,
+    "dialsContrast": 1.1,
+    "dialsSaturation": 1.15,
+    "dialsTint": 0.0,
+    "signalNoise": 0.25,
+    "signalChromaNoise": 0.45,
+    "signalDetailLoss": 0.3,
+    "signalChromaDetailLoss": 0.5,
+    "signalChromaOffset": 0.004
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.ChromaticAberration",
+   "name": "ChromaOffset",
+   "inputs": {
+    "curvatureRed": 0.08,
+    "curvatureBlue": -0.08
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.ScanlineV2",
+   "name": "Scanlines",
+   "inputs": {
+    "frequency": 40.0,
+    "width": 0.5,
+    "Blend": 0.12
+   }
+  }
+ ],
+ "letterbox": {
+  "aspect": 2.39
+ },
+ "vhsRamp": {
+  "inFrames": 5,
+  "outFrames": 8,
+  "spikes": [
+   [
+    "TapeSoft",
+    "XBlurSize",
+    7.0
+   ],
+   [
+    "ChromaOffset",
+    "curvatureRed",
+    0.35
+   ],
+   [
+    "ChromaOffset",
+    "curvatureBlue",
+    -0.35
+   ]
+  ]
+ }
+}

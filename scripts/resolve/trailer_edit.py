@@ -6,8 +6,10 @@ Build the trailer's rough-cut timeline in DaVinci Resolve from a cut list, on wh
     python3 scripts/resolve/trailer_edit.py <out>/edit-plan.json \
         [--cut scripts/resolve/sb-trailer-v2.cut.json] [--look scripts/resolve/sb-trailer-v2.look.json] [--look-only]
 
-The timeline (cut.timeline, "sb-trailer-v2 edit") is GENERATED: every run rebuilds it from the cut list (re-run after
-new takes land: stand-ins are swapped for the wanted clips). Hand edits belong in a duplicate or in the cut list.
+The timeline (cut.timeline) is GENERATED from the cut list (re-run after new takes land: stand-ins are swapped for the
+wanted clips). The new build is imported as "<name> (candidate)" and compared item by item with the existing timeline;
+if they differ (a hand edit in Resolve, or a changed cut list) the run stops and lists the differences — put hand edits
+into the cut list, or pass --accept-overwrite.
 
 How it is built (the only API route that gives all of it — Resolve Studio 21.0.0.47):
 1. a Resolve-flavoured .otio written to --work and imported with ImportTimelineFromFile, linked to the EXISTING pool
@@ -39,7 +41,7 @@ TAG = "trailer_edit"
 HERE = os.path.dirname(os.path.abspath(__file__))
 V_PICTURE, V_SWITCH, V_TITLES, V_LOOK, V_VHS, V_LETTERBOX = 1, 2, 3, 4, 5, 6
 A_MIX, A_EXTRA, A_MUSIC, A_ENGINE, A_WATER = 1, 2, 3, 4, 5
-VIDEO_TRACKS = ["PICTURE", "06c NIGHT", "TITLES", "LOOK", "VHS 80s (off)", "LETTERBOX 2.39 (off)"]
+VIDEO_TRACKS = ["PICTURE", "06c NIGHT", "TITLES", "LOOK", "VHS 80s", "LETTERBOX 2.39 (off)"]
 AUDIO_TRACKS = ["SFX mix", "SFX extra", "MUSIC (user)", "SFX engine", "SFX water"]
 TIMES = ("sunset", "dusk", "night")
 
@@ -53,6 +55,8 @@ def main():
     ap.add_argument("--no-look", action="store_true", help="build the cut without the grade/finishing")
     ap.add_argument("--look-only", action="store_true", help="re-apply the look to the existing edit timeline")
     ap.add_argument("--settle", type=float, default=60.0)
+    ap.add_argument("--accept-overwrite", action="store_true",
+                    help="replace the timeline even when it differs from what the cut list builds (hand edits are lost)")
     ap.add_argument("--work", default=tempfile.gettempdir(), help="where the generated .otio is written")
     a = ap.parse_args()
 
@@ -119,6 +123,7 @@ def main():
     markers, titles, shots = [], [], []
     standins = pending = 0
     dissolves, dissolve_prev = {}, {}  # record frame → half length; record end frame → (clip, source end)
+    vhs_spans = []  # (record frame, frames) of events flagged "vhs"
     ducks, extra = [], []  # music dips [(from, to, dB)] in timeline frames; A2 engine accents
     for ev in cut["events"]:
         dur = length(ev, rec)
@@ -128,6 +133,8 @@ def main():
             markers.append((rec, "Pink", f"MUSIC: {ev['music']}", f"cut event {ev['id']}", 1))
         for spec in ([ev["title"]] if ev.get("title") else []) + ev.get("titles", []):
             titles.append((rec + fr(spec.get("atS", 0.0)), spec, ev["id"]))
+        if ev.get("vhs"):  # the VHS treatment over this event only (user: selective, the intro + title)
+            vhs_spans.append((rec, dur))
         if ev.get("kind") == "black":
             rec += dur
             continue
@@ -234,8 +241,7 @@ def main():
         otio_track(VIDEO_TRACKS[1], "Video", sequence(switch, fps)[0] or [otio_gap(total, fps)]),
         otio_track(VIDEO_TRACKS[2], "Video", [otio_gap(total, fps)]),
         otio_track(VIDEO_TRACKS[3], "Video", [otio_generator("Adjustment Clip", total, fps, name="LOOK")]),
-        otio_track(VIDEO_TRACKS[4], "Video", [otio_generator("Adjustment Clip", total, fps, enabled=False,
-                                                              name="VHS 80s")]),
+        otio_track(VIDEO_TRACKS[4], "Video", vhs_track(vhs_spans, total, fps)),
         otio_track(VIDEO_TRACKS[5], "Video", [otio_generator("Adjustment Clip", total, fps, enabled=False,
                                                               name="LETTERBOX 2.39")]),
         otio_track(AUDIO_TRACKS[0], "Audio", a1),
@@ -254,14 +260,29 @@ def main():
     plan_root = sub_folder(pool, pool.GetRootFolder(), cut.get("plan", plan["name"]))
     search = all_folders(plan_root)
     old = find_timeline(project, cut["timeline"])
-    if old and not pool.DeleteTimelines([old]):
-        fail(TAG, f"could not delete the previous '{cut['timeline']}'")
+    candidate_name = f"{cut['timeline']} (candidate)"
+    stale = find_timeline(project, candidate_name)
+    if stale:
+        pool.DeleteTimelines([stale])
     pool.SetCurrentFolder(sub_folder(pool, plan_root, "Timelines"))
     n_before = len(ix.by_path)
-    tl = pool.ImportTimelineFromFile(otio_path, {"timelineName": cut["timeline"], "importSourceClips": False,
+    tl = pool.ImportTimelineFromFile(otio_path, {"timelineName": candidate_name, "importSourceClips": False,
                                                  "sourceClipsFolders": search})
     if not tl:
         fail(TAG, f"ImportTimelineFromFile refused {otio_path}")
+    if old:  # never replace a timeline that differs from what this cut list builds without being told to
+        diff = layout_diff(layout(old), layout(tl))
+        if diff and not a.accept_overwrite:
+            pool.DeleteTimelines([tl])
+            for line in diff[:40]:
+                log(TAG, "  " + line)
+            fail(TAG, f"'{cut['timeline']}' differs from the cut list in {len(diff)} item(s) (a hand edit, or a cut-list "
+                      f"change): put hand edits into the cut list, or re-run with --accept-overwrite to replace it")
+        if diff:
+            log(TAG, f"replacing '{cut['timeline']}': {len(diff)} item(s) differ from the previous build (accepted)")
+        if not pool.DeleteTimelines([old]):
+            fail(TAG, f"could not delete the previous '{cut['timeline']}'")
+    tl.SetName(cut["timeline"]) or fail(TAG, f"could not rename the candidate to '{cut['timeline']}'")
     project.SetCurrentTimeline(tl)
     if len(PoolIndex(pool).by_path) != n_before:
         log(TAG, "warning: the OTIO import added media to the pool (expected none)")
@@ -289,6 +310,20 @@ def main():
     pm.SaveProject()
     log(TAG, f"'{cut['timeline']}': {total / fps:.1f} s, {len(shots)} picture events ({' '.join(shots)}; *=stand-in), "
              f"{standins} stand-in(s), {pending} pending, {len(titles)} title(s), otio {otio_path}")
+
+
+def vhs_track(spans, total, fps):
+    """enabled VHS adjustment clips over the flagged events (merged when they touch); none flagged: one full-length
+    disabled clip to switch on by hand"""
+    if not spans:
+        return [otio_generator("Adjustment Clip", total, fps, enabled=False, name="VHS 80s")]
+    merged = []
+    for rec, n in sorted(spans):
+        if merged and rec <= merged[-1][0] + merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], rec + n - merged[-1][0])
+        else:
+            merged.append([rec, n])
+    return sequence([(rec, otio_generator("Adjustment Clip", n, fps, name="VHS 80s"), n) for rec, n in merged], fps)[0]
 
 
 def music_track(music, grid, pool, plan, ix, fps, total, fr, ducks=()):
@@ -565,6 +600,32 @@ def build_card(comp, spec, frames, fps):
     comp.Unlock()
 
 
+def layout(tl):
+    """every item except titles (added after the import): track, name, start/duration/source-in relative to the
+    timeline start — what a hand edit in Resolve changes"""
+    s0 = int(tl.GetStartFrame())
+    out = []
+    for t in ("video", "audio"):
+        for i in range(1, tl.GetTrackCount(t) + 1):
+            if t == "video" and i == V_TITLES:
+                continue
+            for x in tl.GetItemListInTrack(t, i) or []:
+                src = x.GetSourceStartFrame() if x.GetMediaPoolItem() else None
+                out.append((f"{t[0].upper()}{i}", x.GetName(), int(x.GetStart()) - s0, int(x.GetDuration()), src))
+    return out
+
+
+def layout_diff(old, new):
+    if old == new:
+        return []
+    rows = [f"timeline has {len(old)} items, the cut list builds {len(new)}"] if len(old) != len(new) else []
+    for a, b in zip(old, new):
+        if a != b:
+            rows.append(f"{a[0]} {a[1]}: start {a[2]} dur {a[3]} src {a[4]}  →  {b[0]} {b[1]}: start {b[2]} dur {b[3]} "
+                        f"src {b[4]}")
+    return rows
+
+
 def signature(tl):
     return [(t, i, x.GetStart(), x.GetDuration()) for t in ("video", "audio")
             for i in range(1, tl.GetTrackCount(t) + 1) if not (t == "video" and i == V_TITLES)
@@ -593,41 +654,67 @@ def apply_look(resolve, project, tl, look, items):
              f"({', '.join(sorted(set(t for _, t in items)))}), colour groups {sorted(groups)}")
     for track, chain, label in ((V_LOOK, look.get("finishing") or [], "LOOK"), (V_VHS, look.get("vhs") or [], "VHS"),
                                 (V_LETTERBOX, [], "LETTERBOX")):
-        adj = (tl.GetItemListInTrack("video", track) or [None])[0]
-        if not adj:
+        clips = [x for x in tl.GetItemListInTrack("video", track) or [] if not x.GetMediaPoolItem()]
+        if not clips:
             log(TAG, f"warning: no adjustment clip on V{track} for {label}")
-            continue
-        for name in list(adj.GetFusionCompNameList() or []):
-            adj.DeleteFusionCompByName(name)
-        comp = adj.AddFusionComp() or fail(TAG, f"could not add a Fusion comp to {label}")
-        comp.Lock()
-        tools = {t.GetAttrs()["TOOLS_RegID"]: t for t in comp.GetToolList().values()}
-        prev = tools["MediaIn"]
-        if label == "LETTERBOX":  # black bars for a 2.39:1 frame over the 16:9 picture (enable the clip to see it)
-            aspect = (look.get("letterbox") or {}).get("aspect", 2.39)
-            bars = comp.AddTool("Background", 1, 1)
-            bars.SetInput("TopLeftAlpha", 1.0)
-            mask = comp.AddTool("RectangleMask", 1, 2)
-            mask.SetInput("Width", 1.0)
-            mask.SetInput("Height", (1920.0 / aspect) / 1080.0)
-            mask.SetInput("Invert", 1)
-            bars.ConnectInput("EffectMask", mask)
-            prev = merge(comp, prev, bars, 2)
-        for i, step in enumerate(chain):
-            t = comp.AddTool(step["tool"], i + 1, 0) or fail(TAG, f"{label}: Fusion has no tool {step['tool']}")
-            t.SetAttrs({"TOOLS_Name": step["name"]})
-            for k, v in step.get("inputs", {}).items():
-                t.SetInput(k, v)
-                got = t.GetInput(k)
-                if isinstance(v, (int, float)) and (got is None or abs(float(got) - v) > 1e-4):
-                    log(TAG, f"warning: {label}/{step['name']}.{k} = {got}, wanted {v}")
-            ins = {x.GetAttrs()["INPS_ID"] for x in t.GetInputList().values()}
-            t.ConnectInput("Source" if "Source" in ins else "Input", prev)  # ResolveFX: Source; Fusion tools: Input
-            prev = t
-        tools["MediaOut"].ConnectInput("Input", prev)
-        comp.Unlock()
-        log(TAG, f"look: {label} adjustment clip ← {' → '.join(s['name'] for s in chain)}"
-                 + ("" if adj.GetClipEnabled() else " (clip disabled)"))
+        for adj in clips:
+            build_adjustment(adj, chain, label, look)
+        log(TAG, f"look: {label} on {len(clips)} adjustment clip(s) ← {' → '.join(s['name'] for s in chain) or 'bars'}"
+                 f" ({sum(bool(x.GetClipEnabled()) for x in clips)} enabled)")
+
+
+def build_adjustment(adj, chain, label, look):
+    # DeleteFusionCompByName returns False and deletes nothing (Resolve 21.0.0.47), so adding a comp per run piled them
+    # up: reuse comp 1 and clear its tools instead
+    comp = adj.GetFusionCompByIndex(1) if adj.GetFusionCompCount() else adj.AddFusionComp()
+    comp or fail(TAG, f"could not add a Fusion comp to {label}")
+    # no comp.Lock() here: a Lock()ed new comp on an adjustment clip neither renders nor saves (Resolve 21.0.0.47)
+    for t in list(comp.GetToolList().values()):
+        if t.GetAttrs()["TOOLS_RegID"] not in ("MediaIn", "MediaOut"):
+            t.Delete()
+    tools = {t.GetAttrs()["TOOLS_RegID"]: t for t in comp.GetToolList().values()}
+    prev = tools["MediaIn"]
+    if label == "LETTERBOX":  # black bars for a 2.39:1 frame over the 16:9 picture (enable the clip to see it)
+        aspect = (look.get("letterbox") or {}).get("aspect", 2.39)
+        bars = comp.AddTool("Background", 1, 1)
+        bars.SetInput("TopLeftAlpha", 1.0)
+        mask = comp.AddTool("RectangleMask", 1, 2)
+        mask.SetInput("Width", 1.0)
+        mask.SetInput("Height", (1920.0 / aspect) / 1080.0)
+        mask.SetInput("Invert", 1)
+        bars.ConnectInput("EffectMask", mask)
+        prev = merge(comp, prev, bars, 2)
+    named = {}
+    for i, step in enumerate(chain):
+        t = comp.AddTool(step["tool"], i + 1, 0) or fail(TAG, f"{label}: Fusion has no tool {step['tool']}")
+        t.SetAttrs({"TOOLS_Name": step["name"]})
+        for k, v in step.get("inputs", {}).items():
+            t.SetInput(k, v)
+            got = t.GetInput(k)
+            if isinstance(v, (int, float)) and (got is None or abs(float(got) - v) > 1e-4):
+                log(TAG, f"warning: {label}/{step['name']}.{k} = {got}, wanted {v}")
+        ins = {x.GetAttrs()["INPS_ID"] for x in t.GetInputList().values()}
+        t.ConnectInput("Source" if "Source" in ins else "Input", prev)  # ResolveFX: Source; Fusion tools: Input
+        named[step["name"]] = t
+        prev = t
+    ramp = (look.get("vhsRamp") or {}) if label == "VHS" else {}
+    if ramp:  # a quick tracking glitch in and out: blur + fringe spike while the treatment mixes over the clean picture
+        n = int(adj.GetDuration())
+        fin, fout = int(ramp.get("inFrames", 5)), int(ramp.get("outFrames", 7))
+        mix = merge(comp, tools["MediaIn"], prev, len(chain) + 1)
+        if mix.AddModifier("Blend", "BezierSpline"):
+            for t, v in ((0, 0.0), (fin, 1.0), (n - 1 - fout, 1.0), (n - 1, 0.0)):
+                mix.SetInput("Blend", v, t)
+        for name, key, peak in ramp.get("spikes", []):
+            t = named.get(name)
+            if t is None or not t.AddModifier(key, "BezierSpline"):
+                log(TAG, f"warning: VHS ramp cannot animate {name}.{key}")
+                continue
+            base = float(next(s for s in chain if s["name"] == name)["inputs"].get(key, 0.0))
+            for f, v in ((0, peak), (fin, base), (n - 1 - fout, base), (n - 1, peak)):
+                t.SetInput(key, v, f)
+        prev = mix
+    tools["MediaOut"].ConnectInput("Input", prev)
 
 
 if __name__ == "__main__":

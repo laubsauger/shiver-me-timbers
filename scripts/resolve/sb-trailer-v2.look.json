@@ -1,5 +1,5 @@
 {
- "_doc": "Starting-point look for trailer_edit.py (redo on the final renders; everything stays live in Resolve). grade: an ASC CDL per time of day on node 1 of every picture clip, clips in Sunset/Night/... colour groups. finishing: the Fusion chain on the full-length LOOK adjustment clip (V4) — 'less CGI, less flat': soften the CG edge a touch, Film Look Creator (filmic contrast + highlight rolloff, lifted toned blacks, warm-high/teal-low split tone, halation, bloom as diffusion, a hint of flicker and gate weave; its own grain off), glint glow, a faint anamorphic streak on the brightest points, slight barrel distortion + edge chromatic aberration, vignette, then 35 mm-ish Film Grain weighted to the shadows. vhs: the disabled 'VHS 80s (off)' adjustment clip (V5): softened resolution, AnalogDamage (tape noise, chroma bleed/offset, tracking wobble), stronger fringing, a scanline hint — enable it for selected passages (e.g. the intro build or the title). letterbox: the disabled 'LETTERBOX 2.39 (off)' clip (V6); enable for the 2.39:1 version. The master-bus limiter/glue compressor is not reachable by the scripting API: Fairlight > Bus 1 > Dynamics by hand (limiter -1 dBTP, 2:1 glue, slow attack). Inputs by Fusion input ID; numbers are deliberately light (user: the first vignette was a dark tunnel; ~12 % edge darkening now, everything subtle — go lighter when in doubt), to be judged to be judged on the 1080p renders.",
+ "_doc": "Starting-point look for trailer_edit.py (redo on the final renders; everything stays live in Resolve). grade: an ASC CDL per time of day on node 1 of every picture clip, clips in Sunset/Night/... colour groups. finishing: the Fusion chain on the full-length LOOK adjustment clip (V4) — 'less CGI, less flat': soften the CG edge a touch, Film Look Creator (filmic contrast + highlight rolloff, lifted toned blacks, warm-high/teal-low split tone, halation, bloom as diffusion, a hint of flicker and gate weave; its own grain off), glint glow, a faint anamorphic streak on the brightest points, slight barrel distortion + edge chromatic aberration, vignette, then 35 mm-ish Film Grain weighted to the shadows. vhs: adjustment clips on V5 over the cut events flagged \"vhs\" (MAIN: the R6 intro + title), else one disabled full-length clip: softened resolution, AnalogDamage (tape noise, chroma bleed/offset, tracking wobble), stronger fringing, a scanline hint — enable it for selected passages (e.g. the intro build or the title). letterbox: the disabled 'LETTERBOX 2.39 (off)' clip (V6); enable for the 2.39:1 version. The master-bus limiter/glue compressor is not reachable by the scripting API: Fairlight > Bus 1 > Dynamics by hand (limiter -1 dBTP, 2:1 glue, slow attack). Inputs by Fusion input ID; numbers are deliberately light (user: the first vignette was a dark tunnel; the first finish that actually rendered (2026-09-15) measured: Vignette -11 % at the corners with Blend 0.45 (-25 % without), LensBarrel edge REPLICATE (CONSTANT pulled black into the corners), FilmLook -6 luma, everything subtle — go lighter when in doubt), to be judged to be judged on the 1080p renders. vhsRamp: the treatment mixes in/out over inFrames/outFrames with a blur + fringe spike (a quick tracking glitch). VHS: AnalogDamage's clean-VHS preset simulates a 4:3 CRT scan (black side bars, a shifted/tiled picture) and hot dials: scan off, dials near neutral, the tape signal kept.",
  "grade": {
   "sunset": {
    "slope": [
@@ -118,7 +118,8 @@
    "inputs": {
     "distortionAmountR": -0.02,
     "distortionAmountG": -0.02,
-    "distortionAmountB": -0.02
+    "distortionAmountB": -0.02,
+    "edgeBehaviour": "EDGE_BEHAVIOUR_REPLICATE"
    }
   },
   {
@@ -135,7 +136,8 @@
    "inputs": {
     "size": 1.0,
     "softness": 1.0,
-    "transparency": 0.88
+    "transparency": 0.88,
+    "Blend": 0.45
    }
   },
   {
@@ -162,7 +164,17 @@
    "tool": "ofx.com.blackmagicdesign.resolvefx.AnalogDamage",
    "name": "VHS",
    "inputs": {
-    "pluginPreset": "PRESET_CLEAN_VHS"
+    "pluginPreset": "PRESET_CLEAN_VHS",
+    "scanIsEnabled": 0,
+    "dialsBrightness": -0.08,
+    "dialsContrast": 1.1,
+    "dialsSaturation": 1.15,
+    "dialsTint": 0.0,
+    "signalNoise": 0.25,
+    "signalChromaNoise": 0.45,
+    "signalDetailLoss": 0.3,
+    "signalChromaDetailLoss": 0.5,
+    "signalChromaOffset": 0.004
    }
   },
   {
@@ -185,5 +197,26 @@
  ],
  "letterbox": {
   "aspect": 2.39
+ },
+ "vhsRamp": {
+  "inFrames": 5,
+  "outFrames": 8,
+  "spikes": [
+   [
+    "TapeSoft",
+    "XBlurSize",
+    7.0
+   ],
+   [
+    "ChromaOffset",
+    "curvatureRed",
+    0.35
+   ],
+   [
+    "ChromaOffset",
+    "curvatureBlue",
+    -0.35
+   ]
+  ]
  }
 }
