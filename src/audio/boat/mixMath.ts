@@ -4,7 +4,7 @@
  * stealing/prioritisation, and slam/landing event detection. No WebAudio in this file.
  */
 import { clamp, finite, smoothstep } from './dsp';
-import { BI, BOAT_STRIDE, GOVERNORS, MAX_ENGINES, kindIndex } from './protocol';
+import { AI, AMB_STRIDE, BI, BOAT_STRIDE, GOVERNORS, MAX_ENGINES, kindIndex } from './protocol';
 import type { GovernorMode, VoiceKind } from './engineModel';
 import type { BoatAudioParams } from './params';
 
@@ -362,4 +362,88 @@ export function packBoat(tel: BoatFrameTelemetry, ev: BoatEvents, out: Float32Ar
 /** a boat's audibility for prioritisation: distance law × how hard it is working */
 export function audibility(gain: number, throttle: number): number {
   return gain * (0.45 + 0.55 * clamp(Math.abs(finite(throttle)), 0, 1));
+}
+
+// ───────────────────────────── T212 ambience ─────────────────────────────
+
+/** what the world around the player sounds like (the page reads it off weather/ocean/sky params: pageSink `ambienceEnvFromParams`) */
+export interface BoatAmbienceEnv {
+  /** weather wind, m/s */
+  windSpeed: number;
+  /** direction the wind blows TOWARD, rad, (cos θ, sin θ) → (x, z) (the ocean's convention) */
+  windDirection: number;
+  /** 0..1 (calm ~0.09, working ~0.23, open ~0.63: pageSink `seaStateOf`) */
+  seaState: number;
+  /** 0..1 */
+  night: number;
+  /** 0..1 proximity to course furniture / islands (0 = none near, or the page gives none) */
+  landmark: number;
+}
+
+export const CALM_AMBIENCE: Readonly<BoatAmbienceEnv> = Object.freeze({ windSpeed: 3, windDirection: Math.PI * 0.25, seaState: 0.09, night: 0, landmark: 0 });
+
+/**
+ * Camera proximity to the hull, 0.15..1: cockpit (≤ 1.6 m) 1, near (~4.3 m) 0.82, chase (~7.9 m) 0.66, far (~23 m) 0.38.
+ * Wind is louder the closer the camera rides to the hull (its turbulence, the cockpit buffet), and the hull's water bed
+ * is a near-field sound.
+ */
+export function cameraNearness(distance: number): number {
+  return clamp(1.2 - 0.6 * Math.log10(Math.max(1, finite(distance, 1000))), 0.15, 1);
+}
+
+/** air speed over a listener moving at (vx, vz) in the weather wind, m/s */
+export function airspeedAt(vx: number, vz: number, windSpeed: number, windDirection: number): number {
+  const w = Math.max(0, finite(windSpeed));
+  const th = finite(windDirection);
+  return Math.hypot(finite(vx) - w * Math.cos(th), finite(vz) - w * Math.sin(th));
+}
+
+/** listener ground velocity from its pose, smoothed (τ 0.15 s); a camera cut (> 120 m/s) keeps the previous estimate */
+export class ListenerMotion {
+  vx = 0;
+  vz = 0;
+  private x = 0;
+  private z = 0;
+  private primed = false;
+  step(x: number, z: number, dt: number): void {
+    const px = finite(x);
+    const pz = finite(z);
+    if (!this.primed || !(dt > 1e-4)) {
+      this.x = px;
+      this.z = pz;
+      this.primed = true;
+      return;
+    }
+    const ix = (px - this.x) / dt;
+    const iz = (pz - this.z) / dt;
+    this.x = px;
+    this.z = pz;
+    if (Math.hypot(ix, iz) > 120) return;
+    const k = 1 - Math.exp(-dt / 0.15);
+    this.vx += (ix - this.vx) * k;
+    this.vz += (iz - this.vz) * k;
+  }
+}
+
+/** pack the ambience record (`AI` offsets). `player` null ⟹ ON 0 (the ambience fades out) */
+export function ambienceRecord(
+  out: Float32Array,
+  player: BoatFrameTelemetry | null,
+  listenerDistance: number,
+  listenerVelocity: { vx: number; vz: number },
+  env: Readonly<BoatAmbienceEnv>,
+): Float32Array {
+  out.fill(0, 0, AMB_STRIDE);
+  out[AI.WIND] = clamp(finite(env.windSpeed), 0, 60);
+  out[AI.SEA] = clamp(finite(env.seaState), 0, 1);
+  out[AI.NIGHT] = clamp(finite(env.night), 0, 1);
+  out[AI.LANDMARK] = clamp(finite(env.landmark), 0, 1);
+  if (!player) return out;
+  out[AI.ON] = 1;
+  out[AI.AIR] = clamp(airspeedAt(listenerVelocity.vx, listenerVelocity.vz, env.windSpeed, env.windDirection), 0, 120);
+  out[AI.NEAR] = cameraNearness(listenerDistance);
+  out[AI.SPEED] = clamp(horizontalSpeed(player.velocity), 0, 120);
+  out[AI.WET] = clamp(finite(player.wettedArea) / WET_AREA_REF, 0, 1);
+  out[AI.HEAVE] = clamp(Math.abs(finite(player.velocity[1])), 0, 20);
+  return out;
 }

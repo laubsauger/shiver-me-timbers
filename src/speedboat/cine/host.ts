@@ -114,7 +114,7 @@ export interface SpeedboatCineDeps {
    * player-engine and player-water panners both feed ONE compressed bus inside src/audio/boat/boatAudio.ts, so nothing
    * outside it can tell them apart. When the page's audio sink exposes the nodes, the stems are written with no change here.
    */
-  audio: { engine: AudioEngine; stemTaps?(): { engine?: readonly AudioNode[]; water?: readonly AudioNode[] } | null };
+  audio: { engine: AudioEngine; stemTaps?(): { engine?: readonly AudioNode[]; water?: readonly AudioNode[]; amb?: readonly AudioNode[] } | null };
   /** the hero BoatInstance: livery, and its object for the cine-only courier cargo (cargo.ts) */
   hero: { setLivery(l: BoatLivery): void; readonly object: THREE.Object3D };
   /** §T.209 the boats' LEDs (page/boatLights.ts): a shot pins their level to its time of day (look.ts TIME_LED) */
@@ -204,12 +204,12 @@ export function createSpeedboatCine(d: SpeedboatCineDeps) {
       const a = make(ctx, buses);
       return () => a.dispose();
     },
-    // no `amb`: nothing on this page plays into the ambience bus, and a stem of digital silence is not a stem.
+    // `amb` (T212): the boat audio's ambience output (wind, hull water bed, sea wash), the node feeding the ambience bus.
     // null = the boat-audio graph is not built yet (it loads its worklet after the unlock): the tap waits for it
     stems: () => {
       if (d.audio.stemTaps === undefined) return {};
       const t = d.audio.stemTaps();
-      return t === null ? null : { engine: t.engine, water: t.water };
+      return t === null ? null : { engine: t.engine, water: t.water, amb: t.amb };
     },
   };
 

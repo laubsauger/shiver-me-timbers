@@ -13,10 +13,13 @@ import { createEngine, type AudioEngine } from '../engine';
 import type { HasWorldMatrix } from '../emitters';
 import { attachAudioSettings, type SettingsSource } from '../settingsBridge';
 import { rotateVec } from '../../core/quat';
+import { oceanParams, type OceanParams } from '../../params/ocean';
+import { skyParams, type SkyParams } from '../../params/sky';
 import type { Quat, Vec3 } from '../../state/simState';
 import { createBoatAudio, type BoatAudio, type BoatStemTaps } from './boatAudio';
 import { createRadioBus, type RadioBus } from './radioBus';
-import type { BoatFrameTelemetry } from './mixMath';
+import type { BoatAmbienceEnv, BoatFrameTelemetry } from './mixMath';
+import { clamp, finite, smoothstep } from './dsp';
 import { boatAudioParams, type BoatAudioParams } from './params';
 import type { VoiceKind } from './engineModel';
 
@@ -74,8 +77,62 @@ export interface SpeedboatAudioSinkOptions {
   /** design doc §4/§7: most rivals V8, Shine turbine, Flat Jack two-stroke, Spark electric */
   npcVoices?: readonly VoiceKind[];
   settings?: SettingsSource;
+  /**
+   * T212: course furniture / islands (structurally the page's `StaticCollider`s: `world.colliders`). Near a fixed one,
+   * the ambience adds far gulls (day) and a bell buoy; flexible gate poles do not count. Absent ⟹ no gulls, no bell.
+   */
+  landmarks?: readonly LandmarkLike[];
   engine?: AudioEngine;
   params?: BoatAudioParams;
+}
+
+export interface LandmarkLike {
+  a: ArrayLike<number>;
+  b: ArrayLike<number>;
+  radius: number;
+  flexible?: boolean;
+}
+
+/**
+ * T212 sea state 0..1 from the live ocean (the speedboat seas write swellAmplitude + windSpeed): calm (0.04 m, 3 m/s)
+ * ≈ 0.09, working (0.12, 4) ≈ 0.23, open (0.36, 6.5) ≈ 0.63, a squall (≥ 14 m/s) saturates.
+ */
+export function seaStateOf(o: Pick<OceanParams, 'swellAmplitude' | 'windSpeed'>): number {
+  return clamp((0.6 * clamp(finite(o.swellAmplitude), 0, 0.45)) / 0.45 + (0.4 * clamp(finite(o.windSpeed) - 2, 0, 12)) / 12, 0, 1);
+}
+
+/** 0 by day … 1 at night (the §T.209 night preset writes timeOfDay 2); dawn 5–7 h, dusk 18.5–20.5 h */
+export function nightOf(timeOfDay: number): number {
+  const h = finite(timeOfDay, 15);
+  return 1 - smoothstep(5, 7, h) * (1 - smoothstep(18.5, 20.5, h));
+}
+
+/** 0..1 proximity to the nearest fixed landmark's surface: 1 inside 40 m, 0 beyond 350 m */
+export function landmarkProximity(x: number, z: number, landmarks: readonly LandmarkLike[] | undefined): number {
+  if (!landmarks || landmarks.length === 0) return 0;
+  let best = Infinity;
+  for (const l of landmarks) {
+    if (l.flexible) continue;
+    // distance to the segment a–b in plan
+    const ax = l.a[0];
+    const az = l.a[2];
+    const dx = l.b[0] - ax;
+    const dz = l.b[2] - az;
+    const len2 = dx * dx + dz * dz;
+    const u = len2 > 1e-9 ? clamp(((x - ax) * dx + (z - az) * dz) / len2, 0, 1) : 0;
+    const d = Math.hypot(x - (ax + u * dx), z - (az + u * dz)) - finite(l.radius);
+    if (d < best) best = d;
+  }
+  return Number.isFinite(best) ? 1 - smoothstep(40, 350, best) : 0;
+}
+
+/** the ambience env from the live params the page already drives (weather → ocean, race time → sky) */
+export function ambienceEnvFromParams(
+  ocean: Pick<OceanParams, 'swellAmplitude' | 'windSpeed' | 'windDirection'>,
+  sky: Pick<SkyParams, 'timeOfDay'>,
+  landmark: number,
+): BoatAmbienceEnv {
+  return { windSpeed: Math.max(0, finite(ocean.windSpeed)), windDirection: finite(ocean.windDirection), seaState: seaStateOf(ocean), night: nightOf(sky.timeOfDay), landmark };
 }
 
 export const DEFAULT_NPC_VOICES: readonly VoiceKind[] = ['v8', 'turbine', 'v8', 'twoStroke', 'v8', 'electric', 'v8'];
@@ -160,7 +217,8 @@ export function createSpeedboatAudioSink(o: SpeedboatAudioSinkOptions): {
           });
         }
       }
-      boatAudio.update(frames, frame.frameDt, o.camera);
+      const pos = frame.view.position;
+      boatAudio.update(frames, frame.frameDt, o.camera, ambienceEnvFromParams(oceanParams, skyParams, landmarkProximity(pos[0], pos[2], o.landmarks)));
     },
     dispose() {
       detach?.();

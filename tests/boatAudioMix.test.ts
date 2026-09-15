@@ -15,9 +15,18 @@
  *    or the DelayNode replays the previous boat; and full voices go to the closest three with
  *    hysteresis, or two rivals at similar range swap voices every frame (audible chatter).
  *  - EVENTS: a landing must be a landing (air time) and slam strength must grow with the impulse.
+ *  - T212 AMBIENCE INPUTS: the wind is the air moving past the CAMERA (a chase camera riding at 80 kn hears the rush, a
+ *    parked camera hears only the weather), louder the closer the camera rides to the hull; a camera cut must not read
+ *    as a 1000 m/s gust; with no player boat the ambience fades out instead of holding its last wind.
  */
 import { describe, expect, it } from 'vitest';
+import { AI, AMB_STRIDE } from '../src/audio/boat/protocol';
 import {
+  CALM_AMBIENCE,
+  ListenerMotion,
+  airspeedAt,
+  ambienceRecord,
+  cameraNearness,
   BoatEventDetector,
   DopplerTrack,
   RampClock,
@@ -243,5 +252,51 @@ describe('§T.183 events and packing', () => {
     for (const v of out) expect(Number.isFinite(v)).toBe(true);
     expect(out[BI.IMMERSION]).toBeCloseTo(0.4, 5);
     expect(out[BI.ENGINES]).toBe(3);
+  });
+});
+
+describe('T212 ambience inputs', () => {
+  it('camera nearness: cockpit > near > chase > far, a fixed floor far away', () => {
+    const [cockpit, near, chase, far] = [1.5, 4.3, 7.9, 23].map(cameraNearness);
+    expect(cockpit).toBe(1);
+    expect(near).toBeLessThan(cockpit);
+    expect(chase).toBeLessThan(near - 0.1);
+    expect(far).toBeLessThan(chase - 0.2);
+    expect(cameraNearness(5000)).toBe(0.15);
+    expect(cameraNearness(NaN)).toBe(0.15);
+  });
+
+  it('airspeed is the listener against the weather wind: running downwind at wind speed is still air', () => {
+    expect(airspeedAt(0, 0, 3, 0)).toBeCloseTo(3, 9);
+    expect(airspeedAt(3, 0, 3, 0)).toBeCloseTo(0, 9);
+    expect(airspeedAt(-41, 0, 3, 0)).toBeCloseTo(44, 9);
+  });
+
+  it('listener motion follows a moving camera and ignores a cut', () => {
+    const m = new ListenerMotion();
+    for (let f = 0; f <= 120; f++) m.step(40 * (f / 60), 0, 1 / 60);
+    expect(m.vx).toBeCloseTo(40, 1);
+    m.step(5000, 0, 1 / 60); // a cut
+    expect(m.vx).toBeCloseTo(40, 1);
+    for (let f = 1; f <= 120; f++) m.step(5000, 0, 1 / 60); // parked after the cut
+    expect(Math.abs(m.vx)).toBeLessThan(0.5);
+  });
+
+  it('the record: ON only with a player, speed/wet/heave from the player, the env passed through', () => {
+    const out = new Float32Array(AMB_STRIDE);
+    const env = { ...CALM_AMBIENCE, seaState: 0.6, night: 1, landmark: 0.5 };
+    ambienceRecord(out, null, 8, { vx: 0, vz: 0 }, env);
+    expect(out[AI.ON]).toBe(0);
+    expect(out[AI.AIR]).toBe(0);
+    expect(out[AI.SEA]).toBeCloseTo(0.6, 6);
+    const player: BoatFrameTelemetry = { id: 0, isPlayer: true, voice: 'v8', position: [0, 0, 0], velocity: [0, -2, -30], throttle: 1, wettedArea: 3, slamImpulse: 0 };
+    ambienceRecord(out, player, 1.2, { vx: 0, vz: -30 }, env);
+    expect(out[AI.ON]).toBe(1);
+    expect(out[AI.SPEED]).toBeCloseTo(30, 4);
+    expect(out[AI.AIR]).toBeGreaterThan(28);
+    expect(out[AI.NEAR]).toBe(1);
+    expect(out[AI.WET]).toBeCloseTo(0.5, 6);
+    expect(out[AI.HEAVE]).toBeCloseTo(2, 6);
+    expect(out[AI.NIGHT]).toBe(1);
   });
 });

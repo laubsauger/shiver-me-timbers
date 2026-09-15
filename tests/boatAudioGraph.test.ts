@@ -11,11 +11,14 @@
  *    worklet bundle must stay inside src/audio/boat + pure helpers (the AudioWorkletGlobalScope has no
  *    DOM; a module that touches `window` would throw on load and silence every boat).
  *  - V112: no phase accumulator in the voices reads a speed.
+ *  - T212 AMBIENCE: wind / hull water bed / sea wash play on the ENGINE'S AMBIENCE BUS (the trailer's amb stem was silent
+ *    because nothing did), through one node that is also the cine `amb` stem tap — the sfx bus and its compressor never
+ *    carry it, so the Engines volume does not duck the wind.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createBoatAudio, type BoatFrameTelemetry } from '../src/audio/boat/boatAudio';
-import { BOAT_STRIDE, SI, SLOT_COUNT, SLOT_STRIDE } from '../src/audio/boat/protocol';
-import { enginePositionOf, playerTelemetry } from '../src/audio/boat/pageSink';
+import { AI, AMB_STRIDE, BOAT_STRIDE, SI, SLOT_COUNT, SLOT_STRIDE } from '../src/audio/boat/protocol';
+import { enginePositionOf, landmarkProximity, nightOf, playerTelemetry, seaStateOf } from '../src/audio/boat/pageSink';
 import { boatAudioParams } from '../src/audio/boat/params';
 
 const all = import.meta.glob('../src/**/*.ts', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
@@ -60,10 +63,13 @@ class MockNode {
   positionX = new Param();
   positionY = new Param();
   positionZ = new Param();
-  connect() {}
+  readonly to: unknown[] = [];
+  connect(target: unknown) {
+    this.to.push(target);
+  }
   disconnect() {}
 }
-const posted: { t: string; boats?: Float32Array; nBoats?: number; slots?: Float32Array }[] = [];
+const posted: { t: string; boats?: Float32Array; nBoats?: number; slots?: Float32Array; amb?: Float32Array }[] = [];
 class MockWorkletNode extends MockNode {
   port = { postMessage: (m: never) => posted.push(m), onmessage: null as unknown };
   constructor(_ctx: unknown, _name: string, _opts: unknown) {
@@ -113,9 +119,10 @@ describe('§T.183 node budget through createBoatAudio', () => {
     delete (globalThis as { AudioWorkletNode?: unknown }).AudioWorkletNode;
   });
 
+  let buses = { sfx: new MockNode(), ambience: new MockNode(), music: new MockNode() };
   async function drive(boats: number) {
     const ctx = mockContext();
-    const buses = { sfx: new MockNode(), ambience: new MockNode(), music: new MockNode() };
+    buses = { sfx: new MockNode(), ambience: new MockNode(), music: new MockNode() };
     const audio = createBoatAudio({ getContext: () => ctx as never, getBuses: () => buses as never }, { workletUrl: 'mock://worklet' });
     audio.update(fleet(boats, 0), 1 / 60, camera);
     await new Promise((r) => setTimeout(r, 0));
@@ -147,6 +154,10 @@ describe('§T.183 node budget through createBoatAudio', () => {
     // player engine + 7 NPC panners + the water inverter; player water + 7 water mirrors
     expect(taps.engine.length).toBe(9);
     expect(taps.water.length).toBe(8);
+    // T212: the amb stem is the ambience output's own gain, the one node feeding the ambience bus (no mirror needed)
+    expect(taps.amb.length).toBe(1);
+    expect((taps.amb[0] as unknown as MockNode).to).toEqual([buses.ambience]);
+    expect(created.filter((c) => c.node.to.includes(buses.ambience)).map((c) => c.node)).toEqual([taps.amb[0]]);
     const invert = taps.engine[8] as unknown as MockNode;
     expect(invert.gain.value).toBe(-1);
     expect(created.length).toBe(before + 22);
@@ -179,6 +190,10 @@ describe('§T.183 node budget through createBoatAudio', () => {
     const maxCheap = Math.max(...npc.filter((s) => !s.full && s.boat >= 0).map((s) => s.gain));
     expect(minFull).toBeGreaterThan(maxCheap * 0.79);
     expect(frame.nBoats).toBe(12);
+    // T212: the frame carries the ambience record for the player (a far camera 10 m off, the boat at 40 m/s)
+    expect(frame.amb!.length).toBe(AMB_STRIDE);
+    expect(frame.amb![AI.ON]).toBe(1);
+    expect(frame.amb![AI.SPEED]).toBeCloseTo(40, 3);
     expect(frame.boats!.length).toBe(12 * BOAT_STRIDE);
   });
 });
@@ -253,6 +268,33 @@ describe('§V109 boat audio isolation', () => {
     expect(phaseLines.length).toBeGreaterThan(8);
     for (const l of phaseLines) expect(l).not.toMatch(/speed|advance|sN\b/);
     expect(Object.entries(all).filter(([k, v]) => k.startsWith('../src/audio/boat/') && /playbackRate/.test(v))).toEqual([]);
+  });
+});
+
+describe('T212 page ambience env', () => {
+  it('sea state orders the speedboat seas calm < working < open < squall, and the night preset reads as night', () => {
+    const calm = seaStateOf({ swellAmplitude: 0.04, windSpeed: 3 });
+    const working = seaStateOf({ swellAmplitude: 0.12, windSpeed: 4 });
+    const open = seaStateOf({ swellAmplitude: 0.36, windSpeed: 6.5 });
+    const squall = seaStateOf({ swellAmplitude: 0.6, windSpeed: 14 });
+    expect(calm).toBeLessThan(0.12);
+    expect(working).toBeGreaterThan(calm + 0.08);
+    expect(open).toBeGreaterThan(working + 0.25);
+    expect(squall).toBe(1);
+    expect(nightOf(2)).toBe(1); // sky/nightPreset.ts MOONLIT_NIGHT.timeOfDay
+    expect(nightOf(15)).toBe(0); // the page default
+    expect(nightOf(6)).toBeGreaterThan(0.2);
+    expect(nightOf(6)).toBeLessThan(0.8);
+  });
+
+  it('gulls and the bell need a FIXED landmark nearby: gate poles (flexible) do not count, and it fades out by 350 m', () => {
+    const rock = { a: [100, 0, 0], b: [100, 10, 0], radius: 20 };
+    const pole = { a: [0, 0, 0], b: [0, 3, 0], radius: 0.3, flexible: true };
+    expect(landmarkProximity(0, 0, undefined)).toBe(0);
+    expect(landmarkProximity(0, 0, [pole])).toBe(0);
+    expect(landmarkProximity(60, 0, [pole, rock])).toBe(1);
+    expect(landmarkProximity(300, 0, [rock])).toBeGreaterThan(0);
+    expect(landmarkProximity(500, 0, [rock])).toBe(0);
   });
 });
 

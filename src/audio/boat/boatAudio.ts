@@ -4,7 +4,7 @@
  *   const boatAudio = createBoatAudio(engine);          // engine = src/audio/engine.ts createEngine()
  *   loop: boatAudio.update(frames, dt, camera);          // every render frame
  *
- * GRAPH (26 nodes with 7 NPC slots; budget ≤ 50, tech-research §6.3):
+ * GRAPH (27 nodes with 7 NPC slots; budget ≤ 50, tech-research §6.3):
  *
  *   AudioWorkletNode 'boat-audio' (1 node, 9 mono outputs, all DSP + rpm models inside)
  *     out 0 player engines ─► Panner HRTF ───────────────────────────┐
@@ -12,6 +12,7 @@
  *     out k NPC slot       ─► DelayNode (doppler) ─► Gain (steal) ─► Panner equalpower ─┤
  *                                                                    ▼
  *                                                     bus Gain ─► DynamicsCompressor ─► engine sfx bus
+ *     out 16 AMBIENCE (stereo: wind, hull water bed, sea wash, far gulls/bell) ─► Gain ─► engine AMBIENCE bus   (T212)
  *
  * Panners do DIRECTION only (distanceModel 'linear', rolloff 0): distance gain and air absorption
  * are applied inside the worklet from `mixMath` (§V96 — the shared `emitterMaxDistance` 350 m
@@ -24,12 +25,15 @@
  *   worklet out 9+k (slot k's WATER only) ─► Delay ─► Gain ─► Panner   mirrors of slot k's chain, same automation
  *   water  = player-water panner + the 7 water mirrors
  *   engine = player-engine panner + the 7 NPC panners (engine + water) + Gain(−1) ◄─ the 7 water mirrors
- * +22 nodes (48 total, budget ≤ 50).
+ *   amb    = the ambience Gain (T212; a node of the game graph itself, so it costs nothing extra)
+ * +22 nodes (49 total, budget ≤ 50).
  */
 import type { AudioEngine } from '../engine';
 import { applyListenerPose, listenerPoseFromMatrix, type HasWorldMatrix, type ListenerPose } from '../emitters';
 import { finite } from './dsp';
 import {
+  AMB_OUTPUT,
+  AMB_STRIDE,
   BOAT_STRIDE,
   DEFAULT_VOICE_TUNABLES,
   LAYER_ENGINE,
@@ -48,7 +52,10 @@ import {
   type VoiceTunables,
 } from './protocol';
 import {
+  CALM_AMBIENCE,
   BoatEventDetector,
+  ListenerMotion,
+  ambienceRecord,
   DopplerTrack,
   RampClock,
   airAbsorptionCutoffHz,
@@ -57,13 +64,14 @@ import {
   createNpcSlots,
   distanceGain,
   packBoat,
+  type BoatAmbienceEnv,
   type BoatFrameTelemetry,
   type NpcSlot,
   type VoiceCandidate,
 } from './mixMath';
 import { boatAudioParams, type BoatAudioParams } from './params';
 
-export type { BoatFrameTelemetry } from './mixMath';
+export type { BoatAmbienceEnv, BoatFrameTelemetry } from './mixMath';
 
 export interface BoatRpmReport {
   rpm: [number, number, number];
@@ -75,8 +83,11 @@ export interface BoatRpmReport {
 export interface BoatAudio {
   /** true once the worklet module has loaded and the graph exists */
   ready(): boolean;
-  /** per render frame. `camera` drives the WebAudio listener; pass null if the page sets the listener itself */
-  update(frames: readonly BoatFrameTelemetry[], dt: number, camera: HasWorldMatrix | null): void;
+  /**
+   * per render frame. `camera` drives the WebAudio listener; pass null if the page sets the listener itself.
+   * `env` (T212): the weather/sea/sky around the player for the ambience; absent ⟹ a calm day at sea (`CALM_AMBIENCE`)
+   */
+  update(frames: readonly BoatFrameTelemetry[], dt: number, camera: HasWorldMatrix | null, env?: Readonly<BoatAmbienceEnv>): void;
   /** last worklet report for a boat (~15 Hz), or null */
   rpmOf(id: number): BoatRpmReport | null;
   /** AudioNodes this system created (excludes the engine's own buses) */
@@ -87,7 +98,8 @@ export interface BoatAudio {
   error(): string | null;
   /**
    * cine stems: split SFX stems as tap nodes (connect each node of a stem into your recorder; never reroute them).
-   * engine = every engine voice (player + NPCs), water = hull slap / landing / spray / wake / hiss (player + NPCs).
+   * engine = every engine voice (player + NPCs), water = hull slap / landing / spray / wake / hiss (player + NPCs),
+   * amb = wind, the player's hull water bed, the distant sea, far gulls / bell (T212; the node feeding the ambience bus).
    * Post-voice, pre-master; the game mix is unchanged. null until the worklet graph exists (audio unlocked).
    */
   stemTaps(): BoatStemTaps | null;
@@ -97,6 +109,7 @@ export interface BoatAudio {
 export interface BoatStemTaps {
   engine: readonly AudioNode[];
   water: readonly AudioNode[];
+  amb: readonly AudioNode[];
 }
 
 export interface BoatAudioOptions {
@@ -111,6 +124,8 @@ interface Graph {
   comp: DynamicsCompressorNode;
   playerEngine: PannerNode;
   playerWater: PannerNode;
+  /** T212 ambience output → the engine's ambience bus */
+  amb: GainNode;
   npc: { delay: DelayNode; steal: GainNode; panner: PannerNode; clock: RampClock; boat: number }[];
   created: number;
   stems: { taps: BoatStemTaps; water: { delay: DelayNode; steal: GainNode; panner: PannerNode }[]; invert: GainNode } | null;
@@ -137,7 +152,7 @@ function directionOnlyPanner(ctx: BaseAudioContext, model: PanningModelType): Pa
 }
 
 /** build the node graph on a context whose worklet module is loaded; exported for the node-budget test */
-export function buildBoatGraph(ctx: BaseAudioContext, out: AudioNode, p: BoatAudioParams): Graph {
+export function buildBoatGraph(ctx: BaseAudioContext, out: AudioNode, p: BoatAudioParams, ambOut: AudioNode): Graph {
   let created = 0;
   const count = <T>(n: T): T => {
     created++;
@@ -147,9 +162,13 @@ export function buildBoatGraph(ctx: BaseAudioContext, out: AudioNode, p: BoatAud
     new AudioWorkletNode(ctx, WORKLET_NAME, {
       numberOfInputs: 0,
       numberOfOutputs: OUTPUT_COUNT,
-      outputChannelCount: new Array(OUTPUT_COUNT).fill(1),
+      outputChannelCount: Array.from({ length: OUTPUT_COUNT }, (_, i) => (i === AMB_OUTPUT ? 2 : 1)),
     }),
   );
+  const amb = count(ctx.createGain());
+  amb.gain.value = p.ambienceGain;
+  node.connect(amb, AMB_OUTPUT);
+  amb.connect(ambOut);
   const bus = count(ctx.createGain());
   bus.gain.value = p.busGain;
   const comp = count(ctx.createDynamicsCompressor());
@@ -178,7 +197,7 @@ export function buildBoatGraph(ctx: BaseAudioContext, out: AudioNode, p: BoatAud
     panner.connect(bus);
     npc.push({ delay, steal, panner, clock: new RampClock(), boat: -1 });
   }
-  return { node, bus, comp, playerEngine, playerWater, npc, created, stems: null };
+  return { node, bus, comp, playerEngine, playerWater, amb, npc, created, stems: null };
 }
 
 /** cine stems: the stem mirrors (see header); exported for the node-budget test */
@@ -206,6 +225,7 @@ export function buildStemTaps(ctx: BaseAudioContext, g: Graph, p: BoatAudioParam
   const taps: BoatStemTaps = {
     engine: [g.playerEngine, ...g.npc.map((n) => n.panner), invert],
     water: [g.playerWater, ...water.map((w) => w.panner)],
+    amb: [g.amb],
   };
   g.stems = { taps, water, invert };
   g.node.port.postMessage({ t: 'stems', on: true });
@@ -223,13 +243,14 @@ export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBus
   const npcSlots = createNpcSlots(NPC_SLOTS);
   let lastTunables = '';
   let pose: ListenerPose = { px: 0, py: 0, pz: 0, fx: 0, fy: 0, fz: -1, ux: 0, uy: 1, uz: 0 };
+  const listenerMotion = new ListenerMotion();
 
-  const build = async (ctx: AudioContext, out: AudioNode): Promise<void> => {
+  const build = async (ctx: AudioContext, out: AudioNode, ambOut: AudioNode): Promise<void> => {
     building = true;
     try {
       const url = opts.workletUrl ?? (await import('./workletUrl')).default;
       await ctx.audioWorklet.addModule(url);
-      graph = buildBoatGraph(ctx, out, p);
+      graph = buildBoatGraph(ctx, out, p, ambOut);
       graph.node.port.onmessage = (e: MessageEvent) => {
         const m = e.data as { t: string; data: Float32Array; count: number; nanResets: number };
         if (m?.t !== 'report') return;
@@ -261,6 +282,7 @@ export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBus
     lastTunables = key;
     g.node.port.postMessage({ t: 'tunables', v });
     g.bus.gain.value = p.busGain;
+    g.amb.gain.value = p.ambienceGain;
   };
 
   return {
@@ -274,7 +296,7 @@ export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBus
       return graph && ctx ? buildStemTaps(ctx, graph, p) : null;
     },
 
-    update(frames, dt, camera) {
+    update(frames, dt, camera, env) {
       const h = Math.min(0.25, Math.max(0, finite(dt)));
       // events are detected even before audio unlocks, so a landing's air time is never lost
       const events = frames.map((f) => {
@@ -286,7 +308,7 @@ export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBus
       const buses = engine.getBuses();
       if (!ctx || !buses || ctx.state !== 'running' || failed) return;
       if (!graph) {
-        if (!building) void build(ctx, buses.sfx);
+        if (!building) void build(ctx, buses.sfx, buses.ambience);
         return;
       }
       const g = graph;
@@ -295,6 +317,7 @@ export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBus
         pose = listenerPoseFromMatrix(camera.matrixWorld.elements);
         applyListenerPose(ctx.listener, pose);
       }
+      listenerMotion.step(pose.px, pose.pz, h);
       const dist = (x: number, y: number, z: number): number => Math.hypot(x - pose.px, y - pose.py, z - pose.pz);
 
       const boats = new Float32Array(Math.max(1, frames.length) * BOAT_STRIDE);
@@ -305,6 +328,8 @@ export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBus
       const npcInfo = new Map<number, { d: number; gain: number; x: number; y: number; z: number }>();
       let nBoats = 0;
       let playerSeen = false;
+      let playerFrame: BoatFrameTelemetry | null = null;
+      let playerDist = Infinity;
       for (let i = 0; i < frames.length; i++) {
         const f = frames[i];
         const ex = f.enginePosition ? finite(f.enginePosition[0]) : finite(f.position[0]);
@@ -315,12 +340,14 @@ export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBus
         packBoat(f, events[i], boats, nBoats++, (f.id * 2654435761) >>> 0);
         if (f.isPlayer && !playerSeen) {
           playerSeen = true;
+          playerFrame = f;
           placePanner(g.playerEngine, ex, ey, ez);
           const wx = finite(f.position[0]);
           const wy = finite(f.position[1]);
           const wz = finite(f.position[2]);
           placePanner(g.playerWater, wx, wy, wz);
           const dw = dist(wx, wy, wz);
+          playerDist = dw;
           const eo = PLAYER_ENGINE_SLOT * SLOT_STRIDE;
           slots[eo + SI.BOAT] = f.id;
           slots[eo + SI.FULL] = 1;
@@ -387,7 +414,8 @@ export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBus
       for (const id of tracks.keys()) if (!npcInfo.has(id)) tracks.delete(id);
       for (const id of detectors.keys()) if (!frames.some((f) => f.id === id)) detectors.delete(id);
 
-      g.node.port.postMessage({ t: 'frame', boats, nBoats, slots }, [boats.buffer, slots.buffer]);
+      const amb = ambienceRecord(new Float32Array(AMB_STRIDE), playerFrame, playerDist, listenerMotion, env ?? CALM_AMBIENCE);
+      g.node.port.postMessage({ t: 'frame', boats, nBoats, slots, amb }, [boats.buffer, slots.buffer, amb.buffer]);
     },
 
     dispose() {
@@ -401,6 +429,7 @@ export function createBoatAudio(engine: Pick<AudioEngine, 'getContext' | 'getBus
         }
         graph.playerEngine.disconnect();
         graph.playerWater.disconnect();
+        graph.amb.disconnect();
         graph.bus.disconnect();
         graph.comp.disconnect();
         if (graph.stems) {

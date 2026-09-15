@@ -19,7 +19,13 @@ export const SLOT_COUNT = 2 + NPC_SLOTS;
  * part of the game mix: the slot outputs are sample-identical with stems on or off (tests/boatAudioSynth).
  */
 export const STEM_WATER_OUTPUT0 = SLOT_COUNT;
-export const OUTPUT_COUNT = SLOT_COUNT + NPC_SLOTS;
+/**
+ * T212 AMBIENCE: the last worklet output, STEREO (wind, the player's hull water bed, the distant sea, far gulls / a buoy
+ * bell). It feeds the engine's ambience bus, not the boat bus. `BoatSynthCore.process` takes it as two mono buffers,
+ * left at `AMB_OUTPUT` and right at `AMB_OUTPUT + 1` (absent ⟹ the ambience is not rendered at all).
+ */
+export const AMB_OUTPUT = SLOT_COUNT + NPC_SLOTS;
+export const OUTPUT_COUNT = AMB_OUTPUT + 1;
 /** engines rendered per boat (triple outboards); turbine/electric boats use 1 */
 export const MAX_ENGINES = 3;
 
@@ -56,6 +62,22 @@ export const SLOT_STRIDE = 5;
 
 export const LAYER_ENGINE = 1;
 export const LAYER_WATER = 2;
+
+/**
+ * T212 ambience record (one per frame, main → worklet), built by `mixMath.ambienceRecord`:
+ *   ON        1 while a player boat is in the frame (0 fades the whole ambience out)
+ *   AIR       airspeed at the listener, m/s (the camera's own motion against the weather wind, gusts included)
+ *   WIND      weather wind, m/s (gust depth, the distant wash's energy)
+ *   NEAR      0..1 camera proximity to the player hull (cockpit 1, chase ~0.66, far ~0.38)
+ *   SPEED     player boat speed over ground, m/s
+ *   WET       player wetted fraction 0..1 (0 = airborne)
+ *   HEAVE     |player vertical velocity|, m/s (hull motion drives the lapping)
+ *   SEA       0..1 sea state (calm ~0.09, working ~0.23, open ~0.63: pageSink `seaStateOf`)
+ *   NIGHT     0..1 (quieter wash, no gulls)
+ *   LANDMARK  0..1 proximity to course furniture / islands (gulls, the bell buoy); 0 when the page gives none
+ */
+export const AI = { ON: 0, AIR: 1, WIND: 2, NEAR: 3, SPEED: 4, WET: 5, HEAVE: 6, SEA: 7, NIGHT: 8, LANDMARK: 9 } as const;
+export const AMB_STRIDE = 10;
 
 /** per-boat report record (worklet → main, ~15 Hz) */
 export const RI = { ID: 0, RPM: 1, CUT: 4, OVERRUN: 7, LOAD: 10 } as const;
@@ -94,23 +116,41 @@ export interface VoiceTunables {
   muffleSpeedHi: number;
   /** planing hiss / spray reference speed, m/s */
   speedRef: number;
+  /** T212 ambience (the stereo ambience output): air rush at the listener */
+  windGain: number;
+  /** calm lapping / slosh against the player's hull at low speed */
+  lapGain: number;
+  /** passing-water hiss/rush along the player's hull at speed */
+  passGain: number;
+  /** distant open-water wash */
+  washGain: number;
+  /** far gulls and a bell buoy near course furniture (daytime; the bell also at night) */
+  birdGain: number;
 }
 
 export const DEFAULT_VOICE_TUNABLES: Readonly<VoiceTunables> = Object.freeze({
   engineGain: 0.55,
-  waterGain: 0.6,
+  // T212: the water layer +6 dB against the engines (was 0.6; the landing water stem sat 13 dB under the engine stem).
+  // The ventilation churn is held at its T205 level (howlGain halved), the impacts get a further +2 dB (slap 1.0,
+  // landing 1.2), so slaps and landings read over the planing hiss
+  waterGain: 1.2,
   hissGain: 0.55,
   rushGain: 0.7,
   sprayGain: 0.5,
-  howlGain: 0.35,
-  slapGain: 1.0,
-  landingGain: 1.2,
+  howlGain: 0.175,
+  slapGain: 1.26,
+  landingGain: 1.51,
   popRate: 16,
   gearWhineGain: 0.018,
   lopeDepth: 1,
   muffleSpeedLo: 4,
   muffleSpeedHi: 14,
   speedRef: 42,
+  windGain: 1,
+  lapGain: 1,
+  passGain: 1,
+  washGain: 1,
+  birdGain: 1,
 });
 
 /**

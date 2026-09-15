@@ -8,6 +8,8 @@ import { DEFAULT_VOICE_TUNABLES, type VoiceTunables } from './protocol';
 export interface BoatAudioParams extends VoiceTunables {
   /** boat bus level into sfx, before the bus compressor */
   busGain: number;
+  /** T212 ambience output level into the engine's ambience bus (no compressor) */
+  ambienceGain: number;
   /**
    * §V96 DISTANCE LAW, measured against the space the boats sound in (see docs/speedboat/audio.md):
    * gain = (ref / max(ref, d))^rolloff with NO max-distance clamp. ref ≈ the size of the source
@@ -50,7 +52,9 @@ export const boatAudioParams: BoatAudioParams = registerParams(
   'boatAudio',
   {
     ...DEFAULT_VOICE_TUNABLES,
-    busGain: 0.9,
+    // T212: was 0.9. The water layer's +6 dB raised the planing / landing mix ~1 dB (harness renders); this holds it
+    busGain: 0.8,
+    ambienceGain: 1,
     refDistance: 1.0,
     rolloff: 1.0,
     unityDistance: 8,
@@ -85,6 +89,12 @@ export const boatAudioParams: BoatAudioParams = registerParams(
     muffleSpeedHi: { min: 1, max: 40, step: 0.5 },
     speedRef: { min: 10, max: 60, step: 1 },
     busGain: { min: 0, max: 2, step: 0.01 },
+    ambienceGain: { min: 0, max: 2, step: 0.01 },
+    windGain: { min: 0, max: 3, step: 0.01 },
+    lapGain: { min: 0, max: 3, step: 0.01 },
+    passGain: { min: 0, max: 3, step: 0.01 },
+    washGain: { min: 0, max: 3, step: 0.01 },
+    birdGain: { min: 0, max: 3, step: 0.01 },
     refDistance: { min: 0.25, max: 20, step: 0.25 },
     rolloff: { min: 0.3, max: 2, step: 0.05 },
     unityDistance: { min: 1, max: 40, step: 0.5 },

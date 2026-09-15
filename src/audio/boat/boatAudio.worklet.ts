@@ -3,13 +3,13 @@
  * node tests run the same code). Loaded by boatAudio.ts through Vite's `?worker&url`, which bundles
  * this module graph into one ES file under `speedboat-workers/` (inside the COI shim scope).
  *
- * Messages in:  { t: 'frame', boats: Float32Array, nBoats, slots: Float32Array }
+ * Messages in:  { t: 'frame', boats: Float32Array, nBoats, slots: Float32Array, amb?: Float32Array }   (T212 ambience record)
  *               { t: 'tunables', v: Partial<VoiceTunables> }
  *               { t: 'stems', on: boolean }   cine stems: render the NPC water-only stem outputs
  * Messages out: { t: 'report', data: Float32Array, count, nanResets } ~15 Hz
  */
 import { BoatSynthCore } from './synthCore';
-import { OUTPUT_COUNT, REPORT_STRIDE, SLOT_COUNT, WORKLET_NAME, type VoiceTunables } from './protocol';
+import { AMB_OUTPUT, OUTPUT_COUNT, REPORT_STRIDE, SLOT_COUNT, WORKLET_NAME, type VoiceTunables } from './protocol';
 
 declare const sampleRate: number;
 declare function registerProcessor(name: string, ctor: new (options?: unknown) => AudioWorkletProcessorShape): void;
@@ -20,20 +20,24 @@ interface AudioWorkletProcessorShape {
 declare const AudioWorkletProcessor: { prototype: AudioWorkletProcessorShape; new (options?: unknown): AudioWorkletProcessorShape };
 
 type InMsg =
-  | { t: 'frame'; boats: Float32Array; nBoats: number; slots: Float32Array }
+  | { t: 'frame'; boats: Float32Array; nBoats: number; slots: Float32Array; amb?: Float32Array }
   | { t: 'tunables'; v: Partial<VoiceTunables> }
   | { t: 'stems'; on: boolean };
 
 class BoatAudioProcessor extends AudioWorkletProcessor {
   private core = new BoatSynthCore(sampleRate, SLOT_COUNT);
   private sinceReport = 0;
-  private readonly mono: (Float32Array | undefined)[] = new Array(OUTPUT_COUNT);
+  /** one mono buffer per output, plus the ambience output's right channel at AMB_OUTPUT + 1 */
+  private readonly mono: (Float32Array | undefined)[] = new Array(OUTPUT_COUNT + 1);
   constructor(options?: unknown) {
     super(options);
     this.port.onmessage = (e: MessageEvent<InMsg>) => {
       const m = e.data;
       if (!m) return;
-      if (m.t === 'frame') this.core.applyFrame(m.boats, m.nBoats, m.slots);
+      if (m.t === 'frame') {
+        this.core.applyFrame(m.boats, m.nBoats, m.slots);
+        if (m.amb) this.core.applyAmbience(m.amb);
+      }
       else if (m.t === 'tunables') this.core.setTunables(m.v);
       else if (m.t === 'stems') this.core.stems = m.on === true;
     };
@@ -41,6 +45,7 @@ class BoatAudioProcessor extends AudioWorkletProcessor {
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const n = outputs[0]?.[0]?.length ?? 128;
     for (let i = 0; i < OUTPUT_COUNT; i++) this.mono[i] = outputs[i]?.[0];
+    this.mono[AMB_OUTPUT + 1] = outputs[AMB_OUTPUT]?.[1];
     this.core.process(this.mono, n);
     this.sinceReport += n;
     if (this.sinceReport >= sampleRate / 15) {

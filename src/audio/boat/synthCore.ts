@@ -14,6 +14,9 @@
  */
 import { DcBlock, OnePole, clamp, finite, smoothstep } from './dsp';
 import {
+  AI,
+  AMB_OUTPUT,
+  AMB_STRIDE,
   BI,
   BOAT_STRIDE,
   DEFAULT_VOICE_TUNABLES,
@@ -33,6 +36,7 @@ import {
 } from './protocol';
 import { ENGINE_SPECS, createEngineState, detuneSpec, stepEngine, type EngineSpec, type EngineState, type VoiceKind } from './engineModel';
 import { WaterLayer, createEngineVoice, ventilationWeight, type EngineFrame, type EngineVoice, type WaterFrame } from './voices';
+import { AmbienceVoice, type AmbienceFrame } from './ambienceVoice';
 
 export const CONTROL_SAMPLES = 32;
 const ENGINE_WEIGHT = [1.12, 0.95, 0.8];
@@ -212,12 +216,17 @@ export class BoatSynthCore {
   nanResets = 0;
   /** cine stems: also write each NPC slot's water-only stem to outputs[STEM_WATER_OUTPUT0 + slot − 2] (off: those stay silent) */
   stems = false;
+  /** T212 ambience: its inputs ramp like a boat's; rendered into outputs[AMB_OUTPUT] (L) and outputs[AMB_OUTPUT + 1] (R) */
+  private readonly amb: AmbienceVoice;
+  private readonly ambRamps: Ramp[] = Array.from({ length: AMB_STRIDE }, () => new Ramp(0));
+  private readonly ambFrame: AmbienceFrame = { on: 0, air: 0, wind: 0, near: 0, speed: 0, wet: 0, heave: 0, sea: 0, night: 0, landmark: 0 };
 
   constructor(sampleRate: number, slotCount: number) {
     this.sr = sampleRate;
     this.rampSamples = Math.round(RAMP_SECONDS * sampleRate);
     this.tierSamples = Math.round(TIER_FADE_S * sampleRate);
     for (let i = 0; i < slotCount; i++) this.slots.push(new SlotState(sampleRate, i));
+    this.amb = new AmbienceVoice(sampleRate, 0x7212);
     this.engineFrames = [];
     for (let i = 0; i < slotCount; i++) {
       const fr: EngineFrame[] = [];
@@ -237,6 +246,13 @@ export class BoatSynthCore {
 
   tunables(): Readonly<VoiceTunables> {
     return this.tun;
+  }
+
+  /** T212: one packed ambience record (AMB_STRIDE, `AI` offsets); every field ramps over RAMP_SECONDS */
+  applyAmbience(amb: Float32Array): void {
+    const R = this.rampSamples;
+    const lim = [1, 120, 60, 1, 120, 1, 20, 1, 1, 1];
+    for (let i = 0; i < AMB_STRIDE; i++) this.ambRamps[i].set(clamp(finite(amb[i]), 0, lim[i]), i === AI.ON ? 0 : R);
   }
 
   /** apply one packed frame (boats: nBoats × BOAT_STRIDE, slots: slotCount × SLOT_STRIDE) */
@@ -386,6 +402,23 @@ export class BoatSynthCore {
         w.throttle = Math.abs(boat.throttle);
         const stemOut = this.stems && i >= 2 && i < SLOT_COUNT ? outputs[STEM_WATER_OUTPUT0 + i - 2] : undefined;
         slot.render(out, off, m, boat, frames, w, t, stemOut);
+      }
+      // ---- T212 ambience (stereo output; skipped when that output is not given, or nothing in it can be heard)
+      const ambL = outputs[AMB_OUTPUT];
+      if (ambL) {
+        const r = this.ambRamps;
+        const a = this.ambFrame;
+        a.on = r[AI.ON].advance(m);
+        a.air = r[AI.AIR].advance(m);
+        a.wind = r[AI.WIND].advance(m);
+        a.near = r[AI.NEAR].advance(m);
+        a.speed = r[AI.SPEED].advance(m);
+        a.wet = r[AI.WET].advance(m);
+        a.heave = r[AI.HEAVE].advance(m);
+        a.sea = r[AI.SEA].advance(m);
+        a.night = r[AI.NIGHT].advance(m);
+        a.landmark = r[AI.LANDMARK].advance(m);
+        if (a.on > 0 || this.amb.audible()) this.amb.render(ambL, outputs[AMB_OUTPUT + 1], off, m, a, t);
       }
       // events are consumed by the first chunk after their frame
       for (const boat of this.boats.values()) {

@@ -21,12 +21,13 @@ This file covers engine and hull audio, plus the race radio bus (below). Race-co
 | `rpmModel.ts` | Temporary model for turbine, two-stroke and electric (its V8 spec is no longer used by the voices) |
 | `dsp.ts` | Noise, one-pole, TPT state-variable filter, waveguide, pulse table, sine table |
 | `voices.ts` | V8 / two-stroke / turbine / electric engine voices and the water layer |
+| `ambienceVoice.ts` | T212 stereo ambience: wind, the player's hull water bed, distant sea wash, far gulls and a bell buoy |
 | `synthCore.ts` | Boats (rpm models) and slots (voices); ramp schedule, events, NaN guards, rpm report |
 | `protocol.ts` | Packed message layout shared by the page side and the worklet, plus the muffling law |
 | `boatAudio.worklet.ts` | AudioWorkletProcessor shell, loaded via Vite `?worker&url` (`workletUrl.ts`) |
 | `mixMath.ts` | Telemetry type, §V96 distance law, air absorption, doppler track, ramp clock, voice stealing, slam/landing detection |
 | `boatAudio.ts` | `createBoatAudio(engine)`: node graph and per-frame `update(frames, dt, camera)` |
-| `pageSink.ts` | `createSpeedboatAudioSink(...)`: adapter onto the page's `BoatAudioSink` seam |
+| `pageSink.ts` | `createSpeedboatAudioSink(...)`: adapter onto the page's `BoatAudioSink` seam; the ambience env from the live ocean/sky params |
 | `params.ts` | `registerParams('boatAudio', …)`; voice tunables are forwarded to the worklet when they change |
 | `harness.ts`, `/speedboat-audio-harness.html` | Listening harness |
 
@@ -163,32 +164,86 @@ The `rpmModel` numbers above now apply only to the turbine, two-stroke and elect
     | Landing tail above 8 kHz | 5 % | 0.3 % |
     | A-weighted level, slaps / landings | reference | −2…−6 dB / −3…−4 dB |
 
+- **Level against the engines (T212).** The trailer's landing take had the water stem at −41 dB mean against the engine stem's −28. `waterGain` 0.6 → 1.2 (+6 dB on the whole layer); `howlGain` 0.35 → 0.175, so the ventilation churn keeps its T205 level; `slapGain` 1.0 → 1.26 and `landingGain` 1.2 → 1.51 (a further +2 dB on impacts). `busGain` 0.9 → 0.8 (−1 dB) holds the planing/landing mix, which the rebalance had raised by 1 dB. Engine voices are unchanged. Measured on the harness renders (engine slot gain 1, water 0.8, pre-bus):
+
+  | Render | Water − engine before | After |
+  |---|---|---|
+  | Rest, calm, 20 s (mean) | −20.9 dB | −14.9 dB |
+  | 0 → 80 kn run, 22 s (mean) | −10.6 dB | −4.6 dB |
+  | Landing take, 12 s (mean) | −8.8 dB | −3.3 dB |
+  | Landing 0.6, 0.35 s window | −4.8 dB | +0.9 dB |
+  | Landing 1.0, 0.35 s window | −4.0 dB | +3.0 dB |
+
+  The slot mix before the bus rose 1.0 dB at speed (−17.0 → −16.0 dBFS) and 1.1 dB in the landing take; the bus trim takes that back.
 - **Idle (T206)**, 648 rpm sim rpm, triple, at the dock: power centroid 151 → 98 Hz; 400–1500 Hz 1.9 → 0.2 %; 150–400 Hz 37 → 12 %; half-order/firing energy on one engine 0.33 → 0.75; RMS held (−35.9 → −35.7 dBFS). There is no narrow tone above 1.5 kHz in any voice at idle. The turbine's idle blade-pass trace dropped from 0.012 to 0.004: at 2.06 kHz it stood 18 dB out of the idle roar.
 
 ## Graph and node budget (`boatAudio.ts`)
 
 ```
-AudioWorkletNode 'boat-audio' (9 mono outputs)
+AudioWorkletNode 'boat-audio' (9 mono slot outputs, 7 stem outputs, 1 stereo ambience output)
   out 0 player engines → Panner HRTF ─────────────────────────────┐
   out 1 player water   → Panner HRTF ─────────────────────────────┤
   out 2..8 NPC slot    → DelayNode (doppler) → Gain (steal) → Panner equalpower ─┤
                                                      bus Gain → DynamicsCompressor → engine sfx bus
+  out 16 ambience (2 ch) → Gain (ambienceGain) → engine AMBIENCE bus          (T212)
 ```
 
-- **26 nodes**, regardless of boat count (budget ≤ 50). There are 2 HRTF panners.
+- **27 nodes**, regardless of boat count (budget ≤ 50). There are 2 HRTF panners.
 - The test counts through `createBoatAudio` on a mock context with 8 boats and with 12.
 - **Tiers.** The 7 NPC slots take the 7 most audible rivals (distance gain × activity). The top 3 get full voices; the rest get a cheap voice (one engine, no pops, whine or events). Both assignments use 1.26× (2 dB) hysteresis, and tier changes crossfade over 80 ms.
 - **Steal sequence.** Fade 40 ms, then switch the boat and set the delay instantly, then wait out the new boat's propagation delay, then play. Without the wait, the DelayNode would replay the previous boat.
 
-**Cine SFX stems.** `boatAudio.stemTaps()` (also the sink's `stemTaps()`, which `src/speedboat/cine/host.ts` reads as `audio.stemTaps`) returns `{ engine: AudioNode[]; water: AudioNode[] } | null`. Connect every node of a stem into the recorder; never reroute them. The result is null until the worklet graph exists, and the nodes are built on the first call.
+**Cine SFX stems.** `boatAudio.stemTaps()` (also the sink's `stemTaps()`, which `src/speedboat/cine/host.ts` reads as `audio.stemTaps`) returns `{ engine: AudioNode[]; water: AudioNode[]; amb: AudioNode[] } | null`. Connect every node of a stem into the recorder; never reroute them. The result is null until the worklet graph exists, and the nodes are built on the first call.
 - `engine` is the player-engine panner, the 7 NPC panners, and a Gain(−1) fed by the NPC water mirrors. `water` is the player-water panner and the 7 NPC water mirrors.
 - The worklet grows 7 water-only outputs (`STEM_WATER_OUTPUT0`), rendered only after `{ t: 'stems', on: true }`. Each mirror (Delay → Gain → Panner) receives the same doppler, steal and position automation as its NPC slot chain.
-- The taps sit post-voice and pre-bus/compressor. They add 22 nodes, for 48 in total.
+- `amb` (T212) is the ambience output's Gain, the one node feeding the ambience bus; it is part of the game graph, so it adds no node. The host passes it on as the cine `amb` stem.
+- The taps sit post-voice and pre-bus/compressor. They add 22 nodes, for 49 in total.
 - Tested: the slot outputs are bit-identical with stems on and match the pre-stem code; mix − water stem equals the engine layer to within 1e-5.
 
 **Panners set direction only** (`linear`, rolloff 0). Distance gain and air absorption are applied in the worklet. `emitters.createPanner` and `setPannerPosition` are not used, because they re-apply the shared inverse/350 m model every frame. If a shared "direction-only panner" helper is wanted under §V95, it belongs in `src/audio/emitters.ts`, which this task does not own.
 
-**CPU.** Eight boats (player plus 3 full and 4 cheap NPCs) cost 16–31% of one core in node, depending on machine load. The browser audio thread is not profiled yet.
+**CPU.** Eight boats (player plus 3 full and 4 cheap NPCs) cost 16–31% of one core in node, depending on machine load. The T212 ambience with every layer on (wind, passing water, open sea, gulls and bell) costs 1.5% of one core alone; interleaved A/B it takes the 8-boat render from 17.3% to 18.3% (+6%), and the budget test measured 21% with it. The browser audio thread is not profiled yet.
+
+## Ambience (T212)
+
+Before T212 nothing played on the ambience bus in speedboat mode, so the trailer's `amb` stem was silent. The ambience is one more voice in the same worklet (`ambienceVoice.ts`), rendered to a stereo output that feeds the engine's ambience bus. It is not compressed and is not under the Engines slider; Master applies. The race settings have no ambience slider; if one is added, it drives `Volumes.ambience`.
+
+**Inputs.** `boatAudio.update(frames, dt, camera, env?)` packs one `AI` record per frame (`mixMath.ambienceRecord`):
+
+- **Airspeed at the listener.** The camera's own ground velocity (`ListenerMotion`: from its pose, τ 0.15 s; a jump over 120 m/s is a cut and is ignored) against the weather wind (`oceanParams.windSpeed` / `windDirection`). A camera riding the boat hears the rush; a parked camera hears only the weather.
+- **Camera nearness.** `cameraNearness(d)` = clamp(1.2 − 0.6·log10 d, 0.15, 1), d = listener to the player's CG: cockpit 1, near 0.82, chase 0.66, far 0.38.
+- **Player.** Speed over ground, wetted fraction, |vertical velocity| (heave).
+- **Env** (`pageSink.ambienceEnvFromParams`, read every frame from the params the page already drives): `seaStateOf` (0.6 × swellAmplitude/0.45 + 0.4 × (windSpeed − 2)/12: calm 0.09, working 0.23, open 0.63, squall 1), `nightOf(skyParams.timeOfDay)` (the night preset's 02:00 is 1), and `landmarkProximity` (1 within 40 m of a fixed collider's surface, 0 beyond 350 m; gate poles do not count). Without `env`, `CALM_AMBIENCE` applies (the harness).
+
+**Layers.**
+
+| Layer | Sound | Driven by |
+|---|---|---|
+| Wind | Stereo noise (72% own, 28% shared) through a resonant lowpass (Q 1.15, 170 Hz → ~2 kHz at 80 kn) plus a 75 Hz buffet close to the hull | Level ∝ airspeed², × nearness^1.5; gusts every 1.5–4 s, depth from the weather wind |
+| Hull lapping | Band-passed noise grains (180–650 Hz, 8–20 ms attack, 60–220 ms decay, random pan) and a slow 320 Hz slosh on the swell | Sea state, heave; fades out 2 → 9 m/s; × nearness^1.3; silent airborne |
+| Passing water | Band-passed hiss (1.7 → 3 kHz) and a 650 Hz rush along the hull | smoothstep(3, 32 m/s); × nearness^1.3; silent airborne |
+| Sea wash | Stereo lowpassed noise (380 → 900 Hz with sea state) breathing on two wave periods, a faint break hiss on the crests | Sea state, wind; −5 dB at night; not camera-dependent |
+| Gulls | 1–3 falling harmonic calls ("kyow", 1.5–2.1 kHz, rasped, 3.2 kHz air lowpass), 6–22 s apart | Landmark proximity, day only |
+| Bell buoy | Five inharmonic partials (610 Hz × 1, 2, 2.41, 3, 4.18; 2.2–0.45 s decays), sometimes a double clang | Landmark proximity, more often in a working sea |
+
+Rivals get no ambience; only their existing water layer. Nothing in the ambience is pitched by a speed (V112).
+
+**Tunables** (`boatAudio` params): `windGain`, `lapGain`, `passGain`, `washGain`, `birdGain` (forwarded to the worklet), and `ambienceGain` (the output gain).
+
+**Measured** (harness renders, chase camera 7.9 m unless noted, dBFS RMS; engine slot at gain 1):
+
+| Render | Ambience | Engine |
+|---|---|---|
+| Rest, calm, 20 s | −54.3 (63% 150–600 Hz: lapping) | −36.1 |
+| Rest, working / open sea (28 s) | −50.9 / −43.9 | −36.0 |
+| Rest, calm, night | −57.0 | −36.0 |
+| 0 → 80 kn, last 2 s: cockpit / chase / far | −25.8 / −33.1 / −38.9 | −16.9 |
+| 0 → 80 kn, 2 s windows (chase) | −55.1 −51.2 −45.8 −41.0 −38.4 −35.0 −34.2 −34.2 −33.9 −32.1 −33.1 | |
+| Landing take, 12 s mean | −34.8 | −17.5 |
+
+The wind alone at rest in a 3 m/s breeze is −76 dBFS. Birds and bell at a landmark average about −69 dBFS over 28 s; they are sparse events.
+
+**Hook for the page (T181).** Gulls and the bell need `landmarks` on the sink: `createSpeedboatAudioSink({ ..., landmarks: world.colliders })` in `src/main-speedboat.ts`. Without it those two layers never play; wind, lapping, passing water and the sea wash do.
 
 ## §V96: distance law measured against race distances
 
@@ -265,10 +320,11 @@ None of these block the audio.
 6. **Wake crossing strength** from the wake system into `telemetry.wakeCrossing`. There is no source for it today.
 7. **Engine cluster offset.** `engineOffsetZ` = −4.6 m from the CG is an estimate. Using the mean of `hw.driveProp` as `enginePosition` would be exact.
 8. **`hw.driveRpm` into `BoatAudioFrame.contact.driveRpm`** (zero-copy, like `driveThrust`; seams.ts does not carry it yet). `pageSink` already forwards it as `telemetry.rpm` whenever it is present and non-zero; until then the player's rpm is integrated locally by the same physics model. NPCs need the worker to publish it too, via `npcContact(i).driveRpm`.
+9. **T212 `landmarks: world.colliders`** on `createSpeedboatAudioSink`, for gulls and the bell buoy near islands (see [Ambience](#ambience-t212)).
 
 ## Verification
 
-- `npx vitest run tests/boatAudio`: 78 tests pass, and 7 WAV renders are skipped unless `BOAT_AUDIO_WAV_DIR` is set.
+- `npx vitest run tests/boatAudio`: 89 tests pass, and 11 WAV renders (7 T183, 4 T212) are skipped unless `BOAT_AUDIO_WAV_DIR` is set.
   - `boatAudioModel`: the seam (the V8 spec is the physics 450R; local integration identical to physics; limiter cuts and re-fires; sim rpm wins with limiter flags from it; overrun silences combustion); legacy model: planing slip 5–20% for all 4 archetypes; rpm rises with advance and with ventilation; throttle lag; airborne reaches the limiter in < 0.35 s without overshoot; bounce period 40–250 ms; Governor 'air'; bog on re-entry; overrun windmill; NaN and extreme inputs; override; determinism.
   - `boatAudioMix`: §V96 plateau measured vs. monotonic boat law; air absorption; doppler ratios and zipper; steal sequence; tier hysteresis; landing and slam detection; muffling; packing sanitisation.
   - `boatAudioSynth`: V8 firing line at rpm·8/120 ±3% at 900/2500/4500/6300 rpm; two-stroke at rpm·3/60; inverter at 6 f_e; identical pitch at 0 and 40 m/s; half-order energy (lump); underwater exhaust darker; limiter bounce visible in the envelope spectrum (4–25 Hz); three-engine beating; T206 dark lumpy idle (centroid, no 400–1500 Hz ring, warm 150–400 Hz, half orders ≥ 0.55) and no narrow tone above 1.5 kHz at idle in any voice; T206 landing is a hull hit (body over sub, no dominant bin, tail under 8 kHz) and slaps are dark, short and lighter; hiss grows with speed; ramp schedule; bit-identical renders; finite output on garbage input; CPU.
@@ -286,6 +342,8 @@ None of these block the audio.
   - `05..08-npc-{v8,turbine,twostroke,electric}-flyby-40ms-15m` (stereo, emulated delay and equalpower pan)
   - `09-v8-wake-crossing-and-chop`
   - `vent-{planing-imm100,surfaced-imm065,one-prop-lifted-imm020,airborne}` (T205; logs level, band shares and rpm; `BOAT_AUDIO_VENT_PROBE=howlGain` renders with that tunable at 0)
+  - T212: `t212-{rest-calm-20s,run-0-80kn,landings}-{mix,engine,water,amb}` (mix and amb stereo) and `t212-amb-rest-{open,working-landmark}`; logs stem levels, 2 s windows, the ambience's band shares, the landing windows and the run at three cameras. `T212_PROBE=windGain,passGain` renders with those tunables at 0.
+- **T212 tests** (`boatAudioSynth`, `boatAudioMix`, `boatAudioGraph`): the air rush rises with airspeed, is under −60 dBFS at rest in calm air, and the cockpit hears > 2.5× the far camera; the ambience at rest is not silent, an open sea is louder and a night sea quieter; no player ⟹ it fades out; rendering it changes no sample of the engine/water outputs; a hard landing at planing speed stands above the engine bed while the churn keeps its T205 level and the dock idle stays dry; garbage ambience records render finite; camera nearness, airspeed, listener motion (cut ignored), record packing; sea state ordering, night, landmark proximity (gate poles excluded); the amb stem is the one node on the ambience bus; the frame carries the record.
 
 ## Samples
 

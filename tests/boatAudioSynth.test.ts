@@ -21,15 +21,20 @@
  *    ramps linearly over RAMP_SECONDS (a step would click).
  *  - NaN / CPU: sim garbage must not poison the audio thread, and 8 boats must render faster than
  *    real time with headroom.
+ *  - T212 AMBIENCE (the trailer's amb stem was digital silence): the ambience output plays whenever the player is on the
+ *    water; the air rush rises with airspeed and is near silent at rest in calm air; a far camera hears less of the hull
+ *    than the cockpit; a night sea is quieter; and rendering it changes no sample of the game's engine/water outputs.
+ *  - T212 MIX (playtest trailer: the landing water stem sat 13 dB under the engines): a hard landing at planing speed now
+ *    stands above the engine bed, while the ventilation churn keeps its T205 level and the dock idle stays dry.
  *
  * With BOAT_AUDIO_WAV_DIR set, the scenarios are also written as WAVs for listening.
  */
 import { describe, expect, it } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { BoatSynthCore, CONTROL_SAMPLES, RAMP_SECONDS, Ramp } from '../src/audio/boat/synthCore';
-import { BI, BOAT_STRIDE, OUTPUT_COUNT, SI, SLOT_COUNT, SLOT_STRIDE, STEM_WATER_OUTPUT0, LAYER_ENGINE, LAYER_WATER, kindIndex } from '../src/audio/boat/protocol';
+import { AMB_OUTPUT, AMB_STRIDE, BI, BOAT_STRIDE, OUTPUT_COUNT, SI, SLOT_COUNT, SLOT_STRIDE, STEM_WATER_OUTPUT0, LAYER_ENGINE, LAYER_WATER, kindIndex, type VoiceTunables } from '../src/audio/boat/protocol';
 import { ENGINE_SPECS, type VoiceKind } from '../src/audio/boat/engineModel';
-import { DopplerTrack, RampClock, airAbsorptionCutoffHz, distanceGain } from '../src/audio/boat/mixMath';
+import { CALM_AMBIENCE, DopplerTrack, RampClock, airAbsorptionCutoffHz, ambienceRecord, distanceGain, type BoatAmbienceEnv, type BoatFrameTelemetry } from '../src/audio/boat/mixMath';
 import { boatAudioParams as P } from '../src/audio/boat/params';
 
 const SR = 48000;
@@ -86,12 +91,20 @@ interface SlotCtl {
   mask: number;
 }
 
-/** render `seconds`; `script(t)` returns boats and slot bindings for each 60 Hz frame */
-function render(seconds: number, script: (t: number) => { boats: BoatCtl[]; slots: SlotCtl[] }, core = new BoatSynthCore(SR, SLOT_COUNT)): Float32Array[] {
+/**
+ * render `seconds`; `script(t)` returns boats and slot bindings for each 60 Hz frame, and (T212) optionally the ambience
+ * record. `withAmb` also hands the core the stereo ambience output (outs[AMB_OUTPUT], outs[AMB_OUTPUT + 1])
+ */
+function render(
+  seconds: number,
+  script: (t: number) => { boats: BoatCtl[]; slots: SlotCtl[]; amb?: Float32Array },
+  core = new BoatSynthCore(SR, SLOT_COUNT),
+  withAmb = false,
+): Float32Array[] {
   const n = Math.round(seconds * SR);
-  const outs = Array.from({ length: SLOT_COUNT }, () => new Float32Array(n));
+  const outs = Array.from({ length: withAmb ? AMB_OUTPUT + 2 : SLOT_COUNT }, () => new Float32Array(n));
   for (let s = 0; s < n; s += FRAME) {
-    const { boats, slots } = script(s / SR);
+    const { boats, slots, amb } = script(s / SR);
     const bb = new Float32Array(Math.max(1, boats.length) * BOAT_STRIDE);
     boats.forEach((b, i) => packCtl(bb, i, b));
     const ss = new Float32Array(SLOT_COUNT * SLOT_STRIDE);
@@ -106,6 +119,7 @@ function render(seconds: number, script: (t: number) => { boats: BoatCtl[]; slot
       ss[o + SI.MASK] = sl.mask;
     });
     core.applyFrame(bb, boats.length, ss);
+    if (amb) core.applyAmbience(amb);
     for (let q = 0; q < FRAME && s + q < n; q += 128) {
       const m = Math.min(128, FRAME - q, n - s - q);
       core.process(
@@ -228,6 +242,45 @@ function writeWav(name: string, chans: Float32Array[]): void {
   // the in-game bus compressor is not in this render: a gentle tanh stands in so peaks do not wrap
   for (let i = 0; i < n; i++) for (let c = 0; c < nc; c++) dv.setInt16(44 + (i * nc + c) * 2, Math.round(Math.tanh(chans[c][i] * 1.2) * 32000), true);
   writeFileSync(`${WAV_DIR}/${name}.wav`, bytes);
+}
+
+// ───────────── T212 ambience helpers ─────────────
+const CAM = { cockpit: 1.5, chase: 7.9, far: 23 };
+interface Shot {
+  ctl: BoatCtl;
+  /** player vertical velocity, m/s (heave) */
+  vy?: number;
+}
+/** the player on its two slots at the harness gains (engine 1, water 0.8), the ambience with the camera riding the boat `camDist` from its CG */
+function renderAmb(
+  seconds: number,
+  shot: (t: number) => Shot,
+  camDist: number,
+  env: BoatAmbienceEnv = CALM_AMBIENCE,
+  tun: Partial<VoiceTunables> = {},
+): { eng: Float32Array; wat: Float32Array; ambL: Float32Array; ambR: Float32Array; amb: Float32Array } {
+  const core = new BoatSynthCore(SR, SLOT_COUNT);
+  core.setTunables(tun);
+  // listening aid: T212_PROBE=windGain,passGain renders with those tunables at 0
+  for (const k of (process.env.T212_PROBE ?? '').split(',').filter(Boolean)) core.setTunables({ [k]: 0 });
+  const outs = render(
+    seconds,
+    (t) => {
+      const { ctl, vy } = shot(t);
+      const v = ctl.speed ?? 0;
+      const tel: BoatFrameTelemetry = { id: 1, isPlayer: true, voice: 'v8', position: [0, 0, 0], velocity: [0, vy ?? 0, -v], throttle: ctl.throttle ?? 0, wettedArea: (ctl.wet ?? 1) * 6, slamImpulse: 0 };
+      return {
+        boats: [ctl],
+        slots: [{ boat: 1, mask: LAYER_ENGINE, gain: 1 }, { boat: 1, mask: LAYER_WATER, gain: 0.8 }],
+        amb: ambienceRecord(new Float32Array(AMB_STRIDE), tel, camDist, { vx: 0, vz: -v }, env),
+      };
+    },
+    core,
+    true,
+  );
+  const ambL = outs[AMB_OUTPUT];
+  const ambR = outs[AMB_OUTPUT + 1];
+  return { eng: outs[0], wat: outs[1], ambL, ambR, amb: ambL.map((x, i) => 0.5 * (x + ambR[i])) };
 }
 
 // ───────────── tests ─────────────
@@ -441,6 +494,65 @@ describe('§T.183 water layer', () => {
   });
 });
 
+describe('T212 ambience output and water/engine balance', () => {
+  const at = (speed: number) => (t: number): Shot => ({ ctl: { throttle: speed > 0 ? 1 : 0, advance: speed, speed, immersion: speed > 12 ? 0.7 : 1, wet: 1 }, vy: 0.2 * Math.sin(t * 1.7) });
+  const WIND_ONLY: Partial<VoiceTunables> = { lapGain: 0, passGain: 0, washGain: 0, birdGain: 0 };
+
+  it('the air rush rises with airspeed, is near silent at rest in calm air, and a far camera hears less than the cockpit', () => {
+    const wind = (speed: number, cam: number): number => rms(renderAmb(2.5, at(speed), cam, CALM_AMBIENCE, WIND_ONLY).amb, 1, 2.5);
+    expect(wind(0, CAM.chase)).toBeLessThan(1e-3); // < −60 dBFS in a 3 m/s breeze
+    expect(wind(20, CAM.chase)).toBeGreaterThan(3 * wind(0, CAM.chase));
+    expect(wind(41, CAM.chase)).toBeGreaterThan(2 * wind(20, CAM.chase));
+    expect(wind(41, CAM.cockpit)).toBeGreaterThan(2.5 * wind(41, CAM.far));
+    // restrained: at 80 kn in the chase camera the whole ambience stays well under the engines
+    const run = renderAmb(2.5, at(41), CAM.chase);
+    expect(rms(run.amb, 1, 2.5)).toBeGreaterThan(3e-3);
+    expect(rms(run.amb, 1, 2.5)).toBeLessThan(0.3 * rms(run.eng, 1, 2.5));
+  });
+
+  it('at rest the hull water bed and the sea are not silent; an open sea is louder, a night sea quieter', () => {
+    const rest = at(0);
+    const lvl = (env: BoatAmbienceEnv): number => rms(renderAmb(6, rest, CAM.chase, env).amb, 1, 6);
+    const calm = lvl(CALM_AMBIENCE);
+    expect(calm).toBeGreaterThan(3e-4); // > −70 dBFS: the amb stem is a stem
+    expect(lvl({ ...CALM_AMBIENCE, windSpeed: 6.5, seaState: 0.63 })).toBeGreaterThan(2 * calm);
+    expect(lvl({ ...CALM_AMBIENCE, night: 1 })).toBeLessThan(0.9 * calm);
+    // no player boat ⟹ the ambience fades out
+    const gone = render(1.5, (t) => ({ boats: [], slots: [], amb: ambienceRecord(new Float32Array(AMB_STRIDE), t < 0.5 ? { id: 1, isPlayer: true, voice: 'v8', position: [0, 0, 0], velocity: [0, 0, 0], throttle: 0, wettedArea: 6, slamImpulse: 0 } : null, 8, { vx: 0, vz: 0 }, CALM_AMBIENCE) }), undefined, true);
+    expect(rms(gone[AMB_OUTPUT], 1.2, 1.5)).toBeLessThan(1e-5);
+  });
+
+  it('rendering the ambience changes no sample of the engine and water outputs', () => {
+    const shot = at(30);
+    const withAmb = renderAmb(2, shot, CAM.chase);
+    const without = render(2, (t) => ({ boats: [shot(t).ctl], slots: [{ boat: 1, mask: LAYER_ENGINE, gain: 1 }, { boat: 1, mask: LAYER_WATER, gain: 0.8 }] }));
+    expect(withAmb.eng.every((v, i) => Object.is(v, without[0][i]))).toBe(true);
+    expect(withAmb.wat.every((v, i) => Object.is(v, without[1][i]))).toBe(true);
+  });
+
+  it('a hard landing at planing speed stands above the engine bed; the churn keeps its T205 level; the dock idle stays dry', () => {
+    const landing = (t: number): Shot => {
+      const air = t > 0.6 && t < 1.6;
+      return { ctl: { throttle: 1, advance: 36, speed: 36, immersion: air ? 0 : 0.75, wet: air ? 0 : 1, landing: Math.abs(t - 1.6) < 0.009 ? 1 : 0 } };
+    };
+    const r = renderAmb(2.2, landing, CAM.chase);
+    // T206 tunables: water −4 dB under the engines in this window
+    expect(rms(r.wat, 1.6, 1.95)).toBeGreaterThan(1.2 * rms(r.eng, 1.6, 1.95));
+    expect(P.waterGain * P.howlGain).toBeCloseTo(0.6 * 0.35, 9);
+    const dock = renderAmb(3, at(0), CAM.chase);
+    expect(rms(dock.wat, 1, 3)).toBeLessThan(0.3 * rms(dock.eng, 1, 3));
+  });
+
+  it('garbage in the ambience record renders finite samples', () => {
+    const bad = new Float32Array([NaN, Infinity, -Infinity, 1e30, -5, NaN, Infinity, 7, NaN, -1]);
+    const outs = render(0.5, () => ({ boats: [{ throttle: 0.5, advance: 10 }], slots: [{ boat: 1, mask: 3 }], amb: bad }), undefined, true);
+    let nonFinite = 0;
+    for (const v of outs[AMB_OUTPUT]) if (!Number.isFinite(v)) nonFinite++;
+    for (const v of outs[AMB_OUTPUT + 1]) if (!Number.isFinite(v)) nonFinite++;
+    expect(nonFinite).toBe(0);
+  });
+});
+
 describe('§T.183 schedule, determinism, robustness, cost', () => {
   it('Ramp: a target is reached linearly in exactly RAMP samples, in chunk-sized steps', () => {
     const R = Math.round(RAMP_SECONDS * SR);
@@ -557,15 +669,21 @@ describe('§T.183 schedule, determinism, robustness, cost', () => {
     expect(core.nanResets).toBe(0);
   });
 
-  it('8 boats (player engine+water, 3 full NPCs, 4 cheap) render ≥ 2× faster than real time in node', () => {
+  it('8 boats (player engine+water, 3 full NPCs, 4 cheap) + the T212 ambience render ≥ 2× faster than real time in node', () => {
     const kinds: VoiceKind[] = ['v8', 'turbine', 'twoStroke', 'electric', 'v8', 'v8', 'v8'];
+    // every ambience layer on: wind at 35 m/s near the hull, passing water, an open sea, gulls and the bell
+    const amb = ambienceRecord(new Float32Array(AMB_STRIDE), { id: 1, isPlayer: true, voice: 'v8', position: [0, 0, 0], velocity: [0, 0.5, -35], throttle: 1, wettedArea: 5, slamImpulse: 0 }, 3, { vx: 0, vz: -35 }, { ...CALM_AMBIENCE, seaState: 0.6, landmark: 1 });
     const script = () => ({
       boats: [{ id: 1, throttle: 1, advance: 35, immersion: 0.6 }, ...kinds.map((kind, i) => ({ id: 10 + i, kind, throttle: 0.9, advance: 35, immersion: 0.8 }))],
       slots: [{ boat: 1, mask: LAYER_ENGINE }, { boat: 1, mask: LAYER_WATER }, ...kinds.map((_, i) => ({ boat: 10 + i, mask: 3, full: i < 3, gain: 0.3 }))],
+      amb,
     });
-    render(0.5, script); // warm the JIT
+    render(0.5, script, undefined, true); // warm the JIT
+    const ta = performance.now();
+    render(3, (t) => ({ boats: [], slots: [], amb: amb.map((v, i) => (i === 4 && t > 1.5 ? 1 : v)) }), undefined, true);
+    console.log(`[boatAudioSynth] T212 ambience alone: ${((performance.now() - ta) / 30).toFixed(1)} % of real time`);
     const t0 = performance.now();
-    render(3, script);
+    render(3, script, undefined, true);
     const ratio = (performance.now() - t0) / 3000;
     console.log(`[boatAudioSynth] 8-boat render cost: ${(ratio * 100).toFixed(1)} % of real time (node, one core)`);
     expect(ratio).toBeLessThan(0.5);
@@ -726,5 +844,85 @@ describe.runIf(!!WAV_DIR)('§T.183 WAV renders (BOAT_AUDIO_WAV_DIR)', () => {
   it('wake crossing double-knock and chop slaps at speed', () => {
     const outs = render(6, (t) => player({ throttle: 0.8, advance: 32, speed: 32, immersion: 0.8, wake: Math.abs(t - 2) < 0.009 || Math.abs(t - 4.2) < 0.009 ? 1 : 0, slam: t > 3 && t < 4 && Math.sin(t * 40) > 0.97 ? 0.4 : 0 }));
     writeWav('09-v8-wake-crossing-and-chop', [mix(outs)]);
+  });
+});
+
+// ───────────── T212 ambience + mix renders ─────────────
+describe.runIf(!!WAV_DIR)('T212 speedboat ambience + water/engine mix renders (BOAT_AUDIO_WAV_DIR)', () => {
+  const db = (x: number): string => (20 * Math.log10(Math.max(1e-9, x))).toFixed(1);
+  const ratio = (a: number, b: number): string => (20 * Math.log10(a / b)).toFixed(1);
+  const KN = 0.514444;
+  const scenarios: [string, number, (t: number) => Shot][] = [
+    ['t212-rest-calm-20s', 20, (t) => ({ ctl: { throttle: 0, advance: 0, speed: 0, immersion: 1, wet: 1 }, vy: 0.18 * Math.sin(t * 1.3) })],
+    [
+      't212-run-0-80kn',
+      22,
+      (t) => {
+        const v = t < 2 ? 0 : Math.min(80 * KN, 41.2 * (1 - Math.exp(-(t - 2) / 6)) * 1.08);
+        return { ctl: { throttle: t < 2 ? 0 : 1, advance: v, speed: v, immersion: v < 12 ? 1 : 0.7, wet: 1, thrust: t < 2 ? 0 : 0.9 }, vy: 0.3 * Math.sin(t * 2.1) };
+      },
+    ],
+    [
+      't212-landings',
+      12,
+      (t) => {
+        const air = (t > 2.5 && t < 3.3) || (t > 6 && t < 7.3);
+        const land = Math.abs(t - 3.3) < 0.009 ? 0.6 : Math.abs(t - 7.3) < 0.009 ? 1 : 0;
+        const slam = t > 9 && t < 11 && Math.sin(t * 23) > 0.985 ? 0.45 : 0;
+        const vy = air ? (t < 3.3 ? 3 - 7.5 * (t - 2.5) : 4 - 7.5 * (t - 6)) : 0;
+        return { ctl: { throttle: 1, advance: 36, speed: 36, immersion: air ? 0 : 0.75, wet: air ? 0 : 1, landing: land, slam }, vy };
+      },
+    ],
+  ];
+  for (const [name, seconds, shot] of scenarios) {
+    it(name, () => {
+      const { eng, wat, ambL, ambR, amb } = renderAmb(seconds, shot, CAM.chase);
+      const m = new Float32Array(eng.length);
+      for (let i = 0; i < m.length; i++) m[i] = eng[i] + wat[i];
+      writeWav(`${name}-mix`, [m.map((v, i) => v + ambL[i]), m.map((v, i) => v + ambR[i])]);
+      writeWav(`${name}-engine`, [eng]);
+      writeWav(`${name}-water`, [wat]);
+      writeWav(`${name}-amb`, [ambL, ambR]);
+      const win = (x: Float32Array): string => Array.from({ length: Math.floor(seconds / 2) }, (_, k) => db(rms(x, 2 * k, 2 * k + 2))).join(' ');
+      console.log(`[t212] ${name}: mean rms slots ${db(rms(m, 0, seconds))} engine ${db(rms(eng, 0, seconds))} water ${db(rms(wat, 0, seconds))} amb ${db(rms(amb, 0, seconds))} dBFS | water−engine ${ratio(rms(wat, 0, seconds), rms(eng, 0, seconds))} dB`);
+      console.log(`[t212] ${name} 2 s windows  engine: ${win(eng)}`);
+      console.log(`[t212] ${name} 2 s windows  water:  ${win(wat)}`);
+      console.log(`[t212] ${name} 2 s windows  amb:    ${win(amb)}`);
+      const S = 1 << 15;
+      const mag = magSpectrum(amb, Math.max(0, amb.length - S - SR), S);
+      let tot = 0;
+      const b = SR / S;
+      for (let i = 1; i < S / 2; i++) tot += mag[i] * mag[i];
+      const share = (lo: number, hi: number): string => {
+        let e = 0;
+        for (let i = Math.round(lo / b); i <= Math.round(hi / b); i++) e += mag[i] * mag[i];
+        return ((100 * e) / tot).toFixed(0);
+      };
+      console.log(`[t212] ${name} amb spectrum (last ~0.7 s): <150 ${share(1, 150)}% 150–600 ${share(150, 600)}% 600–2k ${share(600, 2000)}% 2–5k ${share(2000, 5000)}% >5k ${share(5000, 23999)}%`);
+      if (name === 't212-landings') {
+        for (const at of [3.3, 7.3]) console.log(`[t212] landing @${at}s 0.35 s window: water ${db(rms(wat, at, at + 0.35))} engine ${db(rms(eng, at, at + 0.35))} | water−engine ${ratio(rms(wat, at, at + 0.35), rms(eng, at, at + 0.35))} dB`);
+      }
+      if (name === 't212-run-0-80kn') {
+        for (const [cam, d] of Object.entries(CAM)) {
+          console.log(`[t212] run amb @${cam} (${d} m) 2 s windows: ${win(renderAmb(seconds, shot, d).amb)}`);
+        }
+      }
+    });
+  }
+  it('t212 sea presets, night, landmark (rest, chase, logged)', () => {
+    const rest = (t: number): Shot => ({ ctl: { throttle: 0, advance: 0, speed: 0, immersion: 1, wet: 1 }, vy: 0.18 * Math.sin(t * 1.3) });
+    const cases: [string, BoatAmbienceEnv][] = [
+      ['calm', { ...CALM_AMBIENCE }],
+      ['working', { ...CALM_AMBIENCE, windSpeed: 4, seaState: 0.23 }],
+      ['open', { ...CALM_AMBIENCE, windSpeed: 6.5, seaState: 0.63 }],
+      ['calm-night', { ...CALM_AMBIENCE, night: 1 }],
+      ['working-landmark', { ...CALM_AMBIENCE, windSpeed: 4, seaState: 0.23, landmark: 1 }],
+    ];
+    for (const [label, env] of cases) {
+      const r = renderAmb(30, rest, CAM.chase, env);
+      const a = r.amb;
+      if (label === 'working-landmark' || label === 'open') writeWav(`t212-amb-rest-${label}`, [r.ambL, r.ambR]);
+      console.log(`[t212] rest amb ${label}: ${db(rms(a, 2, 30))} dBFS (engine idle ${db(rms(r.eng, 2, 30))})`);
+    }
   });
 });
