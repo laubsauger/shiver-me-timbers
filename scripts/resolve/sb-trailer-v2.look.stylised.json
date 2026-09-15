@@ -1,0 +1,215 @@
+{
+ "_doc": "COMPARISON look 'STYLISED (VHS + film damage)' for the whole trailer (timeline 'ZZ alt — STYLISED (VHS + film damage)', cut sb-trailer-v2.cut.stylised.json with vhs 'all'): same chain as sb-trailer-v2.look.json, pushed: softer CG edge, FilmLook contrast 1.15 with lifted blacks (fade 0.10), post saturation 1.2, warm/teal split 0.35, halation 0.45, bloom 0.2, flicker 0.05, gate weave 0.15; stronger fringe and grain (0.7, size 0.9); VHS over the full length: tape blur, AnalogDamage (CRT scan off, noise 0.4, saturation 1.35 against the tape's grey-out, chroma noise 0.6, detail loss 0.45, chroma offset 0.008, ghosting 0.06, bottom tracking wobble 0.3), chroma offset, an occasional tracking glitch (Custom tool: a displaced bright band sweeping the frame on a few percent of frames), scanlines 0.18. The glitch timing is in degrees (Fusion sin): about 3 % of frames.",
+ "grade": {
+  "sunset": {
+   "slope": [
+    1.0,
+    0.975,
+    0.93
+   ],
+   "offset": [
+    -0.012,
+    -0.012,
+    -0.006
+   ],
+   "power": [
+    1.06,
+    1.05,
+    1.0
+   ],
+   "saturation": 0.9
+  },
+  "dusk": {
+   "slope": [
+    0.99,
+    0.98,
+    0.97
+   ],
+   "offset": [
+    -0.012,
+    -0.01,
+    -0.006
+   ],
+   "power": [
+    1.05,
+    1.05,
+    1.03
+   ],
+   "saturation": 0.92
+  },
+  "night": {
+   "slope": [
+    0.96,
+    0.985,
+    1.04
+   ],
+   "offset": [
+    -0.014,
+    -0.01,
+    0.0
+   ],
+   "power": [
+    1.08,
+    1.07,
+    1.03
+   ],
+   "saturation": 0.9
+  }
+ },
+ "finishing": [
+  {
+   "tool": "Blur",
+   "name": "SoftenCG",
+   "inputs": {
+    "XBlurSize": 1.0,
+    "Blend": 0.7
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.FilmLook",
+   "name": "FilmLook",
+   "inputs": {
+    "colorContrast2": 1.15,
+    "colorHighlightRolloff": 0.6,
+    "colorFade": 0.1,
+    "colorPostSat": 1.2,
+    "splitIsEnable": 1,
+    "splitAmount": 0.35,
+    "splitAngle": 20.0,
+    "vignetteIsEnable": 0,
+    "halationIsEnable": 1,
+    "halationAmount": 0.45,
+    "halationRadius": 5.0,
+    "bloomIsEnable": 1,
+    "bloomAmount": 0.2,
+    "bloomRadius": 14.0,
+    "grainIsEnable": 0,
+    "flickerIsEnable": 1,
+    "flickerAmount": 0.05,
+    "gateWeaveIsEnable": 1,
+    "gateWeaveAmount": 0.15,
+    "Blend": 1.0
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.Glow",
+   "name": "GlintGlow",
+   "inputs": {
+    "threshold": 0.9,
+    "spread": 0.3,
+    "brightness": 0.2,
+    "opacity": 0.35
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.Glow",
+   "name": "AnamorphicStreak",
+   "inputs": {
+    "threshold": 0.95,
+    "spread": 0.9,
+    "hvRatio": 1.0,
+    "brightness": 0.15,
+    "opacity": 0.15
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.LensDistortion",
+   "name": "LensBarrel",
+   "inputs": {
+    "distortionAmountR": -0.02,
+    "distortionAmountG": -0.02,
+    "distortionAmountB": -0.02,
+    "edgeBehaviour": "EDGE_BEHAVIOUR_REPLICATE"
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.ChromaticAberration",
+   "name": "EdgeFringe",
+   "inputs": {
+    "curvatureRed": 0.03,
+    "curvatureBlue": -0.03
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.Vignette",
+   "name": "Vignette",
+   "inputs": {
+    "size": 1.0,
+    "softness": 1.0,
+    "transparency": 0.88,
+    "Blend": 0.45
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.FilmGrain",
+   "name": "Grain35",
+   "inputs": {
+    "Opacity": 0.7,
+    "GrainSize": 0.9,
+    "shadowGain": 0.6,
+    "midtoneGain": 0.4,
+    "highlightGain": 0.2
+   }
+  }
+ ],
+ "vhs": [
+  {
+   "tool": "Blur",
+   "name": "TapeSoft",
+   "inputs": {
+    "XBlurSize": 1.6
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.AnalogDamage",
+   "name": "VHS",
+   "inputs": {
+    "pluginPreset": "PRESET_CLEAN_VHS",
+    "scanIsEnabled": 0,
+    "dialsBrightness": -0.16,
+    "dialsContrast": 1.05,
+    "dialsSaturation": 1.35,
+    "dialsTint": 0.0,
+    "signalNoise": 0.4,
+    "signalChromaNoise": 0.6,
+    "signalDetailLoss": 0.45,
+    "signalChromaDetailLoss": 0.6,
+    "signalChromaOffset": 0.008,
+    "signalGhosting": 0.06,
+    "vhsShakyFootJitter": 0.3
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.ChromaticAberration",
+   "name": "ChromaOffset",
+   "inputs": {
+    "curvatureRed": 0.1,
+    "curvatureBlue": -0.1
+   }
+  },
+  {
+   "tool": "Custom",
+   "name": "TrackingGlitch",
+   "inputs": {
+    "Intermediate1": "if(sin(time*21.2)*sin(time*6.47) > 0.9, 1, 0)",
+    "Intermediate2": "i1*if(abs(y - (time*0.031 - floor(time*0.031))) < 0.015, 1, 0)",
+    "RedExpression": "getr1b(x + 0.012*i2, y) + i2*0.25*(0.5 + 0.5*sin(x*900 + time*31))",
+    "GreenExpression": "getg1b(x + 0.012*i2, y) + i2*0.25*(0.5 + 0.5*sin(x*900 + time*31))",
+    "BlueExpression": "getb1b(x + 0.012*i2, y) + i2*0.25*(0.5 + 0.5*sin(x*900 + time*31))",
+    "AlphaExpression": "a1"
+   }
+  },
+  {
+   "tool": "ofx.com.blackmagicdesign.resolvefx.ScanlineV2",
+   "name": "Scanlines",
+   "inputs": {
+    "frequency": 40.0,
+    "width": 0.5,
+    "Blend": 0.18
+   }
+  }
+ ],
+ "letterbox": {
+  "aspect": 2.39
+ }
+}

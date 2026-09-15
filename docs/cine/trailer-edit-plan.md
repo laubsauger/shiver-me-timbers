@@ -141,6 +141,11 @@ python3 scripts/resolve/render_review.py <out.mp4> [--timeline …] [--lock <gpu
 - **Hand edits are never overwritten silently**: `trailer_edit.py` imports the new build as `<name> (candidate)`,
   compares every item (track, name, start, duration, source in; titles excluded) with the existing timeline and stops
   with the list of differences unless `--accept-overwrite`. Put hand edits into the cut list (e.g. MAIN's R6 trim).
+- **Final master (2026-09-15)**: MAIN with `sb-trailer-v2.look.json` → `out/cine/sb-trailer-v2/master/` (ProRes 422 HQ
+  + H.264 delivery, `render_review.py --format mov --codec ProRes422HQ --set AudioBitDepth=24`). Comparison timeline
+  `ZZ alt — STYLISED (VHS + film damage)` = `sb-trailer-v2.cut.stylised.json` (base MAIN, `vhs: "all"`) +
+  `sb-trailer-v2.look.stylised.json`. Resolve refuses `/` in timeline names; `SetTrackEnable` does nothing while the
+  Deliver page is open; an audio-only render job (ExportVideo False) never starts, and the setting sticks for later jobs.
 - **Timelines**: `★ sb-trailer-v2 — MAIN (Reef Runner EX)` (primary), `ZZ alt — temp music (Dead Channel)`, `ZZ alt —
   unscored` (a `base` variant of the Dead Channel cut without the song), `ZZ old assembly` (the plan's 60 s default
   order); per-setup `sb-trailer-v2 — cov …` timelines live in the Coverage bin.

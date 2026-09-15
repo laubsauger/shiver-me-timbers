@@ -1,0 +1,6 @@
+{
+ "_doc": "COMPARISON variant of the MAIN cut: identical picture, titles, audio and timing (base), the VHS treatment over the whole length. Build with --look scripts/resolve/sb-trailer-v2.look.stylised.json.",
+ "base": "sb-trailer-v2.cut.reef-runner.json",
+ "timeline": "ZZ alt — STYLISED (VHS + film damage)",
+ "vhs": "all"
+}

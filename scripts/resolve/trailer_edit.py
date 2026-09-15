@@ -241,7 +241,7 @@ def main():
         otio_track(VIDEO_TRACKS[1], "Video", sequence(switch, fps)[0] or [otio_gap(total, fps)]),
         otio_track(VIDEO_TRACKS[2], "Video", [otio_gap(total, fps)]),
         otio_track(VIDEO_TRACKS[3], "Video", [otio_generator("Adjustment Clip", total, fps, name="LOOK")]),
-        otio_track(VIDEO_TRACKS[4], "Video", vhs_track(vhs_spans, total, fps)),
+        otio_track(VIDEO_TRACKS[4], "Video", vhs_track([(0, total)] if cut.get("vhs") == "all" else vhs_spans, total, fps)),
         otio_track(VIDEO_TRACKS[5], "Video", [otio_generator("Adjustment Clip", total, fps, enabled=False,
                                                               name="LETTERBOX 2.39")]),
         otio_track(AUDIO_TRACKS[0], "Audio", a1),
@@ -252,13 +252,15 @@ def main():
         otio_track(AUDIO_TRACKS[4], "Audio", sequence(water, fps)[0] or [otio_gap(total, fps)]),
     ]
     start_frame = round(3600 * fps)
-    otio_path = os.path.join(a.work, f"{cut['timeline'].replace(' ', '_')}.otio")
+    otio_path = os.path.join(a.work, f"{re.sub(r'[ /]', '_', cut['timeline'])}.otio")
     with open(otio_path, "w") as f:
         json.dump(otio_timeline(cut["timeline"], tracks, fps, start_frame), f)
 
     # ------------------------------------------------------------------ import
     plan_root = sub_folder(pool, pool.GetRootFolder(), cut.get("plan", plan["name"]))
     search = all_folders(plan_root)
+    if "/" in cut["timeline"]:
+        fail(TAG, f"Resolve refuses '/' in a timeline name (SetName fails): {cut['timeline']}")
     old = find_timeline(project, cut["timeline"])
     candidate_name = f"{cut['timeline']} (candidate)"
     stale = find_timeline(project, candidate_name)
@@ -282,7 +284,9 @@ def main():
             log(TAG, f"replacing '{cut['timeline']}': {len(diff)} item(s) differ from the previous build (accepted)")
         if not pool.DeleteTimelines([old]):
             fail(TAG, f"could not delete the previous '{cut['timeline']}'")
-    tl.SetName(cut["timeline"]) or fail(TAG, f"could not rename the candidate to '{cut['timeline']}'")
+    if not tl.SetName(cut["timeline"]):
+        pool.DeleteTimelines([tl])
+        fail(TAG, f"could not rename the candidate to '{cut['timeline']}'")
     project.SetCurrentTimeline(tl)
     if len(PoolIndex(pool).by_path) != n_before:
         log(TAG, "warning: the OTIO import added media to the pool (expected none)")
@@ -694,7 +698,8 @@ def build_adjustment(adj, chain, label, look):
             if isinstance(v, (int, float)) and (got is None or abs(float(got) - v) > 1e-4):
                 log(TAG, f"warning: {label}/{step['name']}.{k} = {got}, wanted {v}")
         ins = {x.GetAttrs()["INPS_ID"] for x in t.GetInputList().values()}
-        t.ConnectInput("Source" if "Source" in ins else "Input", prev)  # ResolveFX: Source; Fusion tools: Input
+        # ResolveFX: Source; most Fusion tools: Input; Custom: Image1
+        t.ConnectInput(next(k for k in ("Source", "Input", "Image1") if k in ins), prev)
         named[step["name"]] = t
         prev = t
     ramp = (look.get("vhsRamp") or {}) if label == "VHS" else {}

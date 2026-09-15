@@ -3,12 +3,13 @@
 Review / master render of a timeline through Resolve's render queue (H.264 .mp4 by default).
 
     python3 scripts/resolve/render_review.py <out.mp4|.mov> [--timeline "<name>"] [--format mov --codec ProRes422HQ]
-        [--bitrate-kbps 40000] [--lock <dir>] [--max-min 10]
+        [--bitrate-kbps 40000] [--set AudioBitDepth=24 ...] [--lock <dir>] [--max-min 10]
 
 --lock: a shared GPU lock directory (mkdir-atomic, see the agents' GPU-LOCK-RULES.md). The render waits until it can
 create it, writes an owner line, and removes it when done or on failure; --max-min stops a render that overruns.
 """
 import argparse
+import json
 import os
 import sys
 import time
@@ -29,6 +30,8 @@ def main():
     ap.add_argument("--format", default="mp4")
     ap.add_argument("--codec", default="H264", help="Resolve codec id (project.GetRenderCodecs(format)), e.g. ProRes422HQ")
     ap.add_argument("--bitrate-kbps", type=int, help="H.264/H.265 VideoQuality as a bitrate (default: Resolve's)")
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                    help="extra render setting (value parsed as JSON when it can be), e.g. AudioBitDepth=24")
     a = ap.parse_args()
 
     out = os.path.abspath(a.out)
@@ -45,6 +48,12 @@ def main():
                 "AudioCodec": "aac" if a.format == "mp4" else "lpcm"}
     if a.bitrate_kbps:
         settings["VideoQuality"] = a.bitrate_kbps
+    for kv in a.set:
+        k, _, v = kv.partition("=")
+        try:
+            settings[k] = json.loads(v)
+        except ValueError:
+            settings[k] = v
     essential = {"SelectAllFrames", "TargetDir", "CustomName", "FormatWidth", "FormatHeight"}
     for k, v in settings.items():  # one by one: Resolve refuses a whole dict for one unsupported key
         if not project.SetRenderSettings({k: v}):
