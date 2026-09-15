@@ -205,6 +205,7 @@ export class RaceHud {
   private readonly fCrashCam: Flag;
   private readonly fFinished: Flag;
   private readonly fFree: Flag;
+  private readonly fDash: Flag;
 
   constructor(parent: HTMLElement) {
     // — position + lap
@@ -337,6 +338,7 @@ export class RaceHud {
     this.fCrashCam = new Flag(this.root, 'is-crashcam');
     this.fFinished = new Flag(this.root, 'is-finished');
     this.fFree = new Flag(this.root, 'is-free');
+    this.fDash = new Flag(this.root, 'is-dash-live');
     parent.appendChild(this.root);
     this.resize(window.innerWidth, window.innerHeight);
   }
@@ -410,7 +412,7 @@ export class RaceHud {
     this.lastClock.update(m.lastLap);
     this.bestClock.update(m.bestLap);
     this.updateRadio(m, dt);
-    // trim + speed show in both layouts (the cockpit overlay keeps them for a glance; the 3D dash repeats them, §T.208)
+    // trim + speed show in both layouts (the cockpit overlay keeps them unless the 3D dash is legible, §T.208 setDashCovers)
     this.trim.update(m.attitudeDeg, m.airborne, m.landing);
     this.speed.update(m.knots, m.rpmAvg, m.rpmFrac, m.governor, m.surgeActive);
     if (!cockpit) {
@@ -611,6 +613,14 @@ export class RaceHud {
   /** edge: free roam (page/sessionMode.ts) — the stylesheet keeps speed/rpm and trim and drops every race panel */
   setFreeRoam(on: boolean): void {
     this.fFree.set(on);
+  }
+
+  /**
+   * §T.208 the hero's 3D dash is on screen and readable (page/dashMount.ts `legible`): the cockpit overlay drops its trim
+   * and speed panels, which the dash shows. The chase layout ignores it. Called every frame; the flag writes on change.
+   */
+  setDashCovers(on: boolean): void {
+    this.fDash.set(on);
   }
 
   /** edge: hide the in-race layer while a full screen (pause, results, select) is up */

@@ -12,8 +12,9 @@ const hud = new RaceHud(document.body); hud.setCourse(prepareCourse(course)); hu
 const model = createRaceHudModel(8); const tel = createHudTelemetry(8);
 // every frame
 updateRaceHudModel(model, raceState, hudCourse, playerId, tel, dt);
+dash.update(model, dt);                 // page/dashMount.ts: needles every frame, canvases at DASH_HZ, only while in view
+hud.setDashCovers(dash.legible);        // cockpit overlay drops trim + speed while the dash reads
 hud.update(model, dt);
-if (model.camera === 'cockpit') dash.update(model, dt); // DashDisplays canvases → dash CanvasTextures
 pause.poll(now); results.poll(now); select.poll(now);    // gamepad, only while open
 ```
 
@@ -34,9 +35,33 @@ pause.poll(now); results.poll(now); select.poll(now);    // gamepad, only while 
 - Chase: position + lap and the three nearest places top left; lap clock and radio strip top centre; north-up
   plotter top right; sea chip + trim/pitch dial bottom left; Surge cells + LED tach + knots + Governor
   bottom right.
-- Cockpit: position/lap, the gaps either side, radio strip, gate marker. Speed, rpm, trim, Surge, Governor
-  and the plotter belong to the dash. `DashDisplays` paints the plotter tablet and the LED speed + Surge
-  lamps into canvases and exposes the tach needle, trim bubble and Governor detent poses for the 3D parts.
+- Cockpit: position/lap, the gaps either side, radio strip, gate marker, and compact trim + speed panels (user
+  2026-09-14: trim must be visible in every view). Surge, Governor and the plotter belong to the dash.
+
+## Live dash (§T.208, `ui/dash.ts` + `page/dashMount.ts`)
+
+The hero's modelled dash carries live instruments, fed the same `RaceHudModel` as the HUD:
+
+- Tablet: the plotter canvas (course, rivals, player arrow, next mark, lap and clock), repainted at `DASH_HZ` (10).
+- Gauge glasses, one canvas tile each: tach face, LED knots + Surge lamps over a Governor lamp (OFF dark, AIR
+  amber, FULL orange), trim face. The faces paint once; the middle tile repaints only when knots, Surge or the
+  Governor change. The GLB's baked needles are covered.
+- Needles: two quads over the tach and trim faces, turned every frame (a quaternion, no repaint). The trim needle
+  reads drive trim (`TRIM_DIAL_DEG` over ±60°), not hull pitch. The Governor knob turns to its detent.
+- When: by what the lens sees, not the camera mode (`dashScreenRadius`). Below `DASH_VISIBLE_MIN` (gauge radius
+  ≈ 9 px at 1080p) nothing poses or paints, so chase costs nothing and a trailer insert at the gauges is live.
+- `legible`: every gauge WHOLE inside the frame (clear of the edge by its own size + 2 % of the height) with radius
+  ≥ 3.7 % of the viewport height (≈ 40 px at 1080p, numerals ≈ 11 px), dropping below 3.1 % (hysteresis). While legible
+  in the cockpit camera the overlay hides its trim and speed panels (`.is-dash-live`); look back, look up or drop the
+  dash out of frame and they return, so trim is always on screen somewhere. In the default cockpit view (eyes on the
+  horizon) the gauges sit at the bottom edge and are NOT legible, so the compact panels stay — they go only when the
+  pilot's view actually frames the dash (glancing down, over-the-shoulder and gauge inserts in the trailer).
+- Light: unlit screens × `dashBrightness(LED level)`: 1 by day, 0.75 at full night (the night preset's LED level).
+- Cine: `ui.update(frame, cine.active)` runs only the telemetry → model → dash path while a shot is cued (no HUD).
+- Failure: a throw while mounting or updating logs once and drops the dash; the page keeps running.
+- Measured (1080p, headless Chrome under the GPU lock, 2026-09-15): `dash.update` 0.019–0.030 ms mean per frame
+  (max 1.9 ms on the first paint of the faces), +4 draw calls, no new sampler outside the dash materials; the GPU
+  delta of the four quads was below the noise floor of a loaded machine.
 
 Size cut on 2026-09-13 (user: "too large and chunky"): corner blocks as a share of a 16:9 viewport went
 TL 7.8 → 3.9 %, BL 6.4 → 3.3 %, BR 6.3 → 3.3 %, TR 3.7 → 2.3 %, all planes 25.3 → 13.6 %.

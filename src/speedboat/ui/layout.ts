@@ -57,7 +57,8 @@ export const COCKPIT_PANELS: readonly HudPanelRect[] = [
   { id: 'radio', anchor: 'tc', x: 0, y: 112, w: 420, h: 30 },
   // the 3D dash carries speed/rpm/trim/plotter since §T.208 (page/dashMount.ts), but its gauges are ~6 cm discs below
   // the eye line: the overlay keeps the trim dial and speed/rpm compactly so they read at a glance (user 2026-09-14:
-  // "no indication anymore where we're at in first person view")
+  // "no indication anymore where we're at in first person view"). Only while the dash is on screen AND legible does the
+  // overlay drop these two (styles.ts `.is-dash-live`, raceHud setDashCovers), so trim is always somewhere in view.
   { id: 'trim', anchor: 'bl', x: 28, y: 14, w: 176, h: 96 },
   { id: 'speed', anchor: 'br', x: 24, y: 14, w: 176, h: 96 },
 ];

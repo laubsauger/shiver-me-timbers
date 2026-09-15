@@ -179,13 +179,13 @@ async function boot(): Promise<void> {
     onPlayerCrash: (_ev, at) => camera.cam.beginCrash(at),
     freeRoam: mode === 'free' ? cineDrive.rules(freeRoamRules(world.course, respawnClear(world.colliders, world.bed), (x, z) => sea.cpuOcean.pressureHeadAt(x, z, state.time))) : undefined,
   });
+  const dash = createDashMount(boats.hero, app.camera); // §T.208 the live instruments on her dash
   const ui = createRaceUi({
     parent: document.body, course: world.course, racerIds: session.gridOrder, controls, camera,
     audio: { setVolume: (a) => (audio.engine.setVolumes(engineVolumes(a)), audio.radio.setLevel(radioLevel(a))), radioCall: () => audio.radio.call() },
-    defaultSea: 'Calm', chrome, graphics: settings, mode, onSea: (s) => weather.apply(...seaApplyArgs(SEA_PRESET[s] ?? course.seaPreset)),
+    defaultSea: 'Calm', chrome, graphics: settings, mode, dash, onSea: (s) => weather.apply(...seaApplyArgs(SEA_PRESET[s] ?? course.seaPreset)),
     onTime: (t) => applyRaceTime(t), // §T.209 free roam's pause Time row
     preview: createBoatPreview({ renderer: app.renderer, asset: boats.asset, pilot: () => pilots.hero.object ?? null }), // §T.201
-    dash: createDashMount(boats.hero), // §T.208
     onStart: (sel) => {
       weather.apply(...seaApplyArgs(SEA_PRESET[sel.sea] ?? course.seaPreset, 0));
       applyRaceTime(sel.time); // §T.209 'Night' = the moonlit preset; the clock labels restore the page's sky
@@ -256,7 +256,7 @@ async function boot(): Promise<void> {
       // App builds the renderer with trackTimestamp (§V.39): unresolved query pools overflow and warn
       void app.renderer.resolveTimestampsAsync(TimestampQuery.RENDER).catch(() => undefined);
       void app.renderer.resolveTimestampsAsync(TimestampQuery.COMPUTE).catch(() => undefined);
-      if (!cine.active) ui.update(hudFrame.fill(frameDt)); // a shot has no HUD (speedboat/cine/cineChrome.ts)
+      ui.update(hudFrame.fill(frameDt), cine.active); // a shot has no HUD (speedboat/cine/cineChrome.ts), only the in-world dash
       audioFrame.frameDt = frameDt;
       audioFrame.governor = controls.settings.governor.toLowerCase() as BoatAudioFrame['governor'];
       audio.update(audioFrame);
@@ -289,7 +289,7 @@ async function boot(): Promise<void> {
   ui.openSelect();
 
   // console/browser-verification handle (§V22): read-only use expected
-  (window as unknown as Record<string, unknown>).__speedboat = { mode, cine, app, state, sea, boats, player, npcs, controls, camera, loop, session, ui, world, furniture, frame, get pilots() { return pilots; } };
+  (window as unknown as Record<string, unknown>).__speedboat = { mode, cine, app, state, sea, boats, player, npcs, controls, camera, loop, session, ui, dash, world, furniture, frame, get pilots() { return pilots; } };
 }
 
 // fail loud (§Rule 8): a boot that throws leaves a black page; the stage and the error are readable from the console

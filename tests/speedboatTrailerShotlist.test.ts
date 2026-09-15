@@ -19,6 +19,7 @@ import captureSrc from '../src/cine/capture.ts?raw';
 import recorderSrc from '../src/cine/recorder.ts?raw';
 import hostSrc from '../src/speedboat/cine/host.ts?raw';
 import mainSpeedboat from '../src/main-speedboat.ts?raw';
+import raceUiSrc from '../src/speedboat/page/raceUi.ts?raw';
 
 describe('speedboat trailer v2 shot list', () => {
   it('17 script beats tile the 60 s timeline with no gap and no overlap', () => {
@@ -222,7 +223,10 @@ describe('speedboat trailer v2 shot list', () => {
     // wired, not optional: the host locks the chrome and forces photo mode when shooting, the page skips its HUD
     expect(hostSrc).toMatch(/chrome\.set\(true\)/);
     expect(hostSrc).toMatch(/pressPhoto\(\)/);
-    expect(mainSpeedboat).toMatch(/if \(!cine\.active\) ui\.update\(/);
+    // §T.208: while a shot is cued the page runs only the in-world dash path of the UI — never the HUD
+    expect(mainSpeedboat).toMatch(/ui\.update\(hudFrame\.fill\(frameDt\), cine\.active\)/);
+    expect(raceUiSrc).toMatch(/update\(f, instrumentsOnly = false\)/);
+    expect(raceUiSrc).toMatch(/if \(instrumentsOnly\) \{/);
   });
 
   it('capture reads the renderer, never the page: no DOM or screen capture path exists', () => {

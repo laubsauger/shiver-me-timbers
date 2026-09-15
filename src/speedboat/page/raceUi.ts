@@ -85,8 +85,11 @@ export interface RaceUiDeps {
   chrome?: PageChrome;
   /** §T.201 the shared graphics settings (quality preset) for the pause menu's Graphics row */
   graphics?: Pick<SettingsStore, 'get' | 'applyQuality'>;
-  /** §T.208 the instruments on the hero's 3D dash (page/dashMount.ts); fed the same model as the HUD */
-  dash?: Pick<DashMount, 'setCourse' | 'setRoster' | 'update'> | null;
+  /**
+   * §T.208 the instruments on the hero's 3D dash (page/dashMount.ts); fed the same model as the HUD. While the dash is
+   * `legible` in the cockpit camera the overlay drops its trim and speed panels (the dash shows them); otherwise they stay.
+   */
+  dash?: Pick<DashMount, 'setCourse' | 'setRoster' | 'update' | 'legible'> | null;
   /**
    * page/sessionMode.ts. 'free': no boat select (`openSelect` starts the ride with the stored selection), no race panels
    * or radio, pause without restart/boat select and with a Sea row (`onSea`). Default 'race'.
@@ -131,7 +134,11 @@ export interface RaceUiFrame {
 }
 
 export interface RaceUi {
-  update(f: RaceUiFrame): void;
+  /**
+   * every rendered frame. `instrumentsOnly` (the trailer's cine: no HUD in a shot, cine/cineChrome.ts): the in-world dash
+   * still reads the telemetry, but no screen, HUD, radio or results work runs
+   */
+  update(f: RaceUiFrame, instrumentsOnly?: boolean): void;
   openSelect(): void;
   openPause(): void;
   closePause(): void;
@@ -500,6 +507,36 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
     openPause();
   };
   const onResize = (): void => hud.resize(window.innerWidth, window.innerHeight);
+  /** the instruments' telemetry (HUD and dash): speed, rpm, trim, attitude, Governor, camera, every racer's pose */
+  const fillInstruments = (f: RaceUiFrame): void => {
+    tel.speedMps = f.speedMps;
+    for (let i = 0; i < tel.rpm.length; i++) tel.rpm[i] = f.rpm[i] ?? 0;
+    tel.trimDeg = f.trimDeg;
+    tel.pitchDeg = f.pitchDeg;
+    tel.airTimeS = f.airborne ? tel.airTimeS + f.dt : 0;
+    tel.airborne = f.airborne;
+    tel.governor = f.governor;
+    tel.camera = f.cameraMode;
+    tel.x = f.playerX;
+    tel.z = f.playerZ;
+    tel.headingRad = hudHeadingFromYaw(f.playerYaw);
+    const cap = tel.racerX.length;
+    for (let id = 0; id < cap && id < f.racerX.length; id++) {
+      tel.racerX[id] = f.racerX[id];
+      tel.racerZ[id] = f.racerZ[id];
+      tel.racerHeading[id] = hudHeadingFromYaw(f.racerYaw[id]);
+    }
+  };
+  const fillView = (st: Readonly<RaceState>): RaceState => {
+    view.phase = st.phase;
+    view.raceTime = st.raceTime;
+    view.standings = st.standings;
+    view.lapTimes = laps.update(st.lapTimes);
+    view.lights = st.lights;
+    view.paceBoat = st.paceBoat;
+    view.results = st.results;
+    return view;
+  };
   window.addEventListener('keydown', onKey);
   window.addEventListener('resize', onResize);
 
@@ -514,7 +551,16 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
     openPause,
     closePause,
     showResults,
-    update(f) {
+    update(f, instrumentsOnly = false) {
+      if (instrumentsOnly) {
+        if (!d.dash) return;
+        const st = f.state ?? (free ? FREE_ROAM_STATE : null);
+        if (!st) return;
+        fillInstruments(f);
+        updateRaceHudModel(model, fillView(st), hc, 0, tel, f.dt);
+        d.dash.update(model, f.dt);
+        return;
+      }
       const now = performance.now();
       if (select.isOpen) d.preview?.render(f.dt);
       pause.poll(now);
@@ -546,24 +592,7 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
       if (!st) return;
       standingsRef = st.standings;
 
-      // telemetry the HUD cannot derive from the race
-      tel.speedMps = f.speedMps;
-      for (let i = 0; i < tel.rpm.length; i++) tel.rpm[i] = f.rpm[i] ?? 0;
-      tel.trimDeg = f.trimDeg;
-      tel.pitchDeg = f.pitchDeg;
-      tel.airTimeS = f.airborne ? tel.airTimeS + f.dt : 0;
-      tel.airborne = f.airborne;
-      tel.governor = f.governor;
-      tel.camera = f.cameraMode;
-      tel.x = f.playerX;
-      tel.z = f.playerZ;
-      tel.headingRad = hudHeadingFromYaw(f.playerYaw);
-      const cap = tel.racerX.length;
-      for (let id = 0; id < cap && id < f.racerX.length; id++) {
-        tel.racerX[id] = f.racerX[id];
-        tel.racerZ[id] = f.racerZ[id];
-        tel.racerHeading[id] = hudHeadingFromYaw(f.racerYaw[id]);
-      }
+      fillInstruments(f); // telemetry the HUD cannot derive from the race
       let next = 0;
       for (const s of st.standings) if (s.racerId === 0) next = s.nextElement;
       if (next < 0 || next >= hc.labels.length) next = 0;
@@ -609,17 +638,11 @@ export function createRaceUi(d: RaceUiDeps): RaceUi {
       tel.toastDetail = radio.toastDetail;
       if (st.paceBoat) tel.paceKn = st.paceBoat.speed * MPS_TO_KNOTS;
 
-      view.phase = st.phase;
-      view.raceTime = st.raceTime;
-      view.standings = st.standings;
-      view.lapTimes = laps.update(st.lapTimes);
-      view.lights = st.lights;
-      view.paceBoat = st.paceBoat;
-      view.results = st.results;
-      updateRaceHudModel(model, view, hc, 0, tel, f.dt);
+      updateRaceHudModel(model, fillView(st), hc, 0, tel, f.dt);
       if (!block) {
-        hud.update(model, f.dt);
         d.dash?.update(model, f.dt);
+        hud.setDashCovers(d.dash?.legible === true);
+        hud.update(model, f.dt);
       }
 
       // results once the finish has been seen

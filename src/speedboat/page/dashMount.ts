@@ -11,19 +11,48 @@
  * its 0.235 × 0.155 m screen 0.031 m proud. H (the face height) is solved from the centre gauge glass, not assumed.
  *
  * WHAT. Canvas-textured quads just proud of the real surfaces, children of the LOD0 level (they leave with it):
- * the plotter on the tablet screen, and one `gauges` tile over each gauge glass (tach · LED speed + Surge · trim —
- * the baked needles are static, so the tiles cover them). The Governor knob turns to the detent of the HUD's mode.
+ * the plotter on the tablet screen, and one `gauges` tile over each gauge glass (tach face · LED speed + Surge +
+ * Governor lamp · trim face — the baked needles are static, so the tiles cover them), and two needle quads over the
+ * tach and trim faces that turn EVERY frame (a quaternion, no repaint). The Governor knob turns to the HUD's mode.
  *
- * COST. DashDisplays paints at `DASH_HZ` in the cockpit camera only (the plotter itself ≤ 15 Hz) and a texture uploads
- * only when its canvas was repainted; two draws. Outside the cockpit nothing repaints (the dash is a few pixels).
+ * WHEN. Not by camera mode but by what the lens sees (`dashScreenRadius`): the cockpit camera, a trailer insert over the
+ * shoulder or at the gauges all get a live dash, and the chase camera (the dash a few pixels, or behind the seat) costs
+ * nothing. `legible` (every gauge on screen and large enough to read at 1080p, with hysteresis) lets the HUD drop its
+ * cockpit trim/speed panels while the dash itself shows them; look back or away and the panels return.
+ *
+ * LIGHT. Backlit: unlit materials at `dashBrightness(boat LED level)` — full by day, dimmed to a soft glow at night
+ * (the LED level is the night preset's single dusk clock, page/boatLights.ts).
+ *
+ * COST. The needles pose per frame; DashDisplays paints at `DASH_HZ` (the plotter every paint, the gauge tiles on
+ * change) and a texture uploads only when its canvas was repainted; four draws, no sampler outside these materials.
  */
 import * as THREE from 'three/webgpu';
+import { materialColor, uniform } from 'three/tsl';
 import type { BoatInstance } from '../assets';
+import { boatLedLevel } from '../assets/slotMaterials';
 import { DashDisplays, type HudCourse, type HudRacer, type RaceHudModel } from '../ui';
+import { GAUGE_TILE_PX, NEEDLE_PX } from '../ui/dash';
 
-/** instrument repaint rate in the cockpit camera */
-export const DASH_HZ = 20;
+/** instrument repaint rate while the dash is in view (the needles pose every frame) */
+export const DASH_HZ = 10;
 const PERIOD = 1 / DASH_HZ;
+/** on-screen gauge radius as a fraction of the viewport height: below this (≈ 9 px radius at 1080p) nothing repaints or poses */
+export const DASH_VISIBLE_MIN = 0.008;
+/**
+ * every gauge at least this (≈ 40 px radius at 1080p: the tach numerals, 22/160 of the disc, ≈ 11 px tall) and on
+ * screen → `legible`; it drops below `DASH_LEGIBLE_OFF` (hysteresis, no flicker on a bump)
+ */
+export const DASH_LEGIBLE_ON = 0.037;
+export const DASH_LEGIBLE_OFF = 0.031;
+/** …and clear of the frame edge by its own size plus 2 % of the height: a gauge cut by the bottom edge is not read */
+const LEGIBLE_INSET = 0.02;
+/** backlight: linear gain on the screens by day and at full night (LED level 1) */
+export const DASH_BRIGHTNESS = { day: 1, night: 0.75 } as const;
+
+export const dashBrightness = (ledLevel: number): number => {
+  const l = Number.isFinite(ledLevel) ? (ledLevel < 0 ? 0 : ledLevel > 1 ? 1 : ledLevel) : 0;
+  return DASH_BRIGHTNESS.day + (DASH_BRIGHTNESS.night - DASH_BRIGHTNESS.day) * l;
+};
 
 /** scripts/blender/parts/dash.py layout, face frame (u = body +x, v = up the face, n = toward the pilot), metres */
 const JACK = { u: 0.36, v: 0.09, n: 0.006 + 0.018 };
@@ -35,6 +64,8 @@ const PLOTTER_ASPECT = 320 / 180;
 const PROUD = 0.0015;
 /** gauge tile radius: inside the bezel's inner lip (0.058) */
 const GAUGE_R = 0.057;
+/** the needle quads over the gauge tiles */
+const NEEDLE_LIFT = 0.001;
 
 export interface DashFace {
   origin: THREE.Vector3;
@@ -91,26 +122,56 @@ export function locateDash(level0: THREE.Object3D, boatUserData: Record<string, 
   return { origin, u, v, n, height, gauges, tablet };
 }
 
+const scratch = new THREE.Vector3();
+const scratchN = new THREE.Vector3();
+
+/**
+ * the on-screen radius of a disc of `radius` metres at `centre` (world) facing `normal` (world, unit), as a fraction of
+ * the viewport height; 0 when it is behind the lens, seen from behind, or off screen.
+ *
+ * `inset` (fractions of the viewport height) asks for the WHOLE disc plus that margin to be inside the frame instead of
+ * only its centre: a gauge half cut off by the bottom of the screen is not one the pilot reads, whatever its size.
+ */
+export function dashScreenRadius(centre: THREE.Vector3, normal: THREE.Vector3, radius: number, camera: THREE.Camera, inset = 0): number {
+  camera.getWorldPosition(scratchN);
+  if (scratchN.sub(centre).dot(normal) <= 0) return 0;
+  const v = scratch.copy(centre).applyMatrix4(camera.matrixWorldInverse);
+  const depth = -v.z;
+  if (!(depth > 1e-3)) return 0;
+  const p = camera.projectionMatrix.elements;
+  // projectionMatrix[5] = zoom / tan(fov/2): a height h at depth d spans h·P5/d of the 2-unit NDC height
+  const r = (radius * p[5]) / (2 * depth);
+  v.applyMatrix4(camera.projectionMatrix);
+  const pad = inset > 0 ? 2 * r + inset : 0;
+  const padX = inset > 0 ? (pad * p[5]) / p[0] : 0; // the same margin in NDC x (NDC x is the wider axis)
+  if (v.x < -1 + padX || v.x > 1 - padX || v.y < -1 + pad || v.y > 1 - pad) return 0;
+  return r;
+}
+
 export interface DashMount {
   readonly displays: DashDisplays;
-  /** the quads (plotter, gauges), children of the boat's LOD0 level */
+  /** the quads (plotter, gauges, tach needle, trim needle), children of the boat's LOD0 level */
   readonly meshes: readonly THREE.Mesh[];
   readonly face: DashFace;
+  /** the last update saw every gauge on screen and large enough to read (the HUD may drop its cockpit trim/speed) */
+  readonly legible: boolean;
   setCourse(hc: HudCourse): void;
   setRoster(roster: readonly HudRacer[]): void;
   update(m: RaceHudModel, dt: number): void;
 }
+
+const brightness = uniform(1).onRenderUpdate(() => dashBrightness(boatLedLevel()));
 
 const screenMaterial = (canvas: HTMLCanvasElement): { mat: THREE.MeshBasicNodeMaterial; tex: THREE.CanvasTexture } => {
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
   const mat = new THREE.MeshBasicNodeMaterial({ map: tex });
+  mat.colorNode = materialColor.mul(brightness);
   mat.fog = false;
   mat.name = 'DashScreen';
   return { mat, tex };
 };
-
 /** a quad in the face plane (x = the pilot's right = −u, y = v, normal n) centred on `c` */
 const facePlaced = (mesh: THREE.Mesh, face: DashFace, c: THREE.Vector3): THREE.Mesh => {
   const basis = new THREE.Matrix4().makeBasis(face.u.clone().negate(), face.v, face.n);
@@ -121,8 +182,46 @@ const facePlaced = (mesh: THREE.Mesh, face: DashFace, c: THREE.Vector3): THREE.M
   return mesh;
 };
 
-/** mount DashDisplays on the hero dash; null (one warning) when the GLB lacks the dash nodes */
-export function createDashMount(boat: BoatInstance): DashMount | null {
+/**
+ * mount DashDisplays on the hero dash, seen through `camera`; null (one warning) when the GLB lacks the dash nodes.
+ * The dash is cosmetic: a throw while mounting or updating is logged loudly once and the dash is dropped, never the page.
+ */
+export function createDashMount(boat: BoatInstance, camera: THREE.Camera): DashMount | null {
+  let mount: DashMount | null;
+  try {
+    mount = mountDash(boat, camera);
+  } catch (e) {
+    console.error('[speedboat] dash displays not mounted: mounting threw', e);
+    return null;
+  }
+  if (!mount) return null;
+  const inner = mount;
+  let broken = false;
+  return {
+    get displays() {
+      return inner.displays;
+    },
+    meshes: inner.meshes,
+    face: inner.face,
+    get legible() {
+      return !broken && inner.legible;
+    },
+    setCourse: (hc) => inner.setCourse(hc),
+    setRoster: (r) => inner.setRoster(r),
+    update(m, dt) {
+      if (broken) return;
+      try {
+        inner.update(m, dt);
+      } catch (e) {
+        broken = true;
+        for (const mesh of inner.meshes) mesh.visible = false;
+        console.error('[speedboat] dash displays disabled: update threw', e);
+      }
+    },
+  };
+}
+
+function mountDash(boat: BoatInstance, camera: THREE.Camera): DashMount | null {
   const level0 = boat.object.levels[0]?.object;
   const face = level0 ? locateDash(level0, boat.object.userData as Record<string, unknown>) : null;
   if (!level0 || !face) {
@@ -165,7 +264,32 @@ export function createDashMount(boat: BoatInstance): DashMount | null {
   merged.setIndex(idx);
   const gaugeMesh = facePlaced(new THREE.Mesh(merged, gauges.mat), face, face.tablet);
   gaugeMesh.name = 'DashGauges';
-  level0.add(plotterMesh, gaugeMesh);
+  // the needles: one tapered quad each, pivoting on its gauge centre (tile 0 tach, tile 2 trim), just proud of the tile
+  const pxM = GAUGE_R / (GAUGE_TILE_PX / 2);
+  const needleGeo = new THREE.PlaneGeometry(NEEDLE_PX.width * pxM, (NEEDLE_PX.tail + NEEDLE_PX.tip) * pxM);
+  needleGeo.translate(0, ((NEEDLE_PX.tip - NEEDLE_PX.tail) / 2) * pxM, 0);
+  const np = needleGeo.getAttribute('position');
+  for (let i = 0; i < np.count; i++) if (np.getY(i) > 0) np.setX(i, np.getX(i) * 0.45); // taper to the tip
+  const needleMat = new THREE.MeshBasicNodeMaterial({ color: new THREE.Color('#FF6B1F') });
+  needleMat.colorNode = materialColor.mul(brightness);
+  needleMat.fog = false;
+  needleMat.name = 'DashNeedle';
+  const needles = [0, 2].map((k) => {
+    const mesh = facePlaced(new THREE.Mesh(needleGeo, needleMat), face, face.gauges[k]);
+    mesh.position.addScaledVector(face.n, NEEDLE_LIFT);
+    mesh.name = k === 0 ? 'DashTachNeedle' : 'DashTrimNeedle';
+    return mesh;
+  });
+  const faceQ = needles[0].quaternion.clone();
+  const turnQ = new THREE.Quaternion();
+  const Z = new THREE.Vector3(0, 0, 1);
+  const poseNeedles = (): void => {
+    // canvas angles run clockwise as the pilot sees the face; the quad's +z faces the pilot, so a clockwise turn is −z
+    needles[0].quaternion.copy(faceQ).multiply(turnQ.setFromAxisAngle(Z, -displays.rpmNeedleRad));
+    needles[1].quaternion.copy(faceQ).multiply(turnQ.setFromAxisAngle(Z, -displays.trimNeedleRad));
+  };
+  poseNeedles();
+  level0.add(plotterMesh, gaugeMesh, ...needles);
 
   // the Governor knob: detents in degrees about its pivot/axis, the GLB built at `builtAt`
   const dial = level0.getObjectByName('GovernorDial_LOD0');
@@ -181,11 +305,36 @@ export function createDashMount(boat: BoatInstance): DashMount | null {
   const turn = new THREE.Matrix4();
   const tmp = new THREE.Matrix4();
 
+  // what the lens sees: the gauges and the tablet, in world space at the last drawn pose
+  const world = new THREE.Vector3();
+  const normal = new THREE.Vector3();
+  const tabletR = ph / 2;
+  let legible = false;
+  const look = (): number => {
+    if (!level0.visible || !boat.object.visible) return 0;
+    const mw = level0.matrixWorld;
+    normal.copy(face.n).transformDirection(mw);
+    let least = Infinity;
+    let most = 0;
+    for (const g of face.gauges) {
+      world.copy(g).applyMatrix4(mw);
+      const r = dashScreenRadius(world, normal, GAUGE_R, camera);
+      if (r > most) most = r;
+      const inside = r > 0 ? dashScreenRadius(world, normal, GAUGE_R, camera, LEGIBLE_INSET) : 0;
+      if (inside < least) least = inside;
+    }
+    legible = legible ? least >= DASH_LEGIBLE_OFF : least >= DASH_LEGIBLE_ON;
+    return Math.max(most, dashScreenRadius(world.copy(face.tablet).applyMatrix4(mw), normal, tabletR, camera));
+  };
+
   let acc = Infinity;
   return {
     displays,
-    meshes: [plotterMesh, gaugeMesh],
+    meshes: [plotterMesh, gaugeMesh, ...needles],
     face,
+    get legible() {
+      return legible;
+    },
     setCourse: (hc) => displays.setCourse(hc),
     setRoster: (r) => displays.setRoster(r),
     update(m, dt) {
@@ -197,10 +346,12 @@ export function createDashMount(boat: BoatInstance): DashMount | null {
         dial.matrix.multiplyMatrices(turn, dialRest);
         dial.matrixWorldNeedsUpdate = true;
       }
-      if (m.camera !== 'cockpit') {
-        acc = Infinity; // repaint on the first cockpit frame
+      if (look() < DASH_VISIBLE_MIN) {
+        acc = Infinity; // repaint on the first frame it is seen again
         return;
       }
+      displays.pose(m);
+      poseNeedles();
       acc += Number.isFinite(dt) && dt > 0 ? dt : 0;
       if (acc + 1e-6 < PERIOD) return;
       displays.update(m, PERIOD);

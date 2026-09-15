@@ -72,6 +72,8 @@ const HUD = /* css */ `
 .sbh.is-hidden-race [data-panel]:not([data-panel="radio"]):not([data-panel="trim"]):not([data-panel="speed"]):not([data-panel="plotter"]), .sbh.is-crash [data-panel] { opacity: 0; }
 .sbh.is-cockpit [data-panel="timer"], .sbh.is-cockpit [data-panel="plotter"], .sbh.is-cockpit [data-panel="sea"],
 .sbh.is-cockpit [data-panel="surge"] { display: none; }
+/* §T.208 the live 3D dash is on screen and legible (page/dashMount.ts): it carries trim and speed, so the overlay drops them */
+.sbh.is-cockpit.is-dash-live [data-panel="trim"], .sbh.is-cockpit.is-dash-live [data-panel="speed"] { display: none; }
 /* free roam (page/sessionMode.ts): speed/rpm and trim only — no race panels, markers, start, toasts, finish or radio */
 .sbh.is-free [data-panel]:not([data-panel="trim"]):not([data-panel="speed"]), .sbh.is-free .sbh-gate, .sbh.is-free .sbh-start,
 .sbh.is-free .sbh-toast, .sbh.is-free .sbh-finish, .sbh.is-free .sbh-crash-radio, .sbh.is-free .sbh-crash-gov, .sbh.is-free .sbh-crash-pos { display: none; }

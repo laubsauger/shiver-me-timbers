@@ -67,7 +67,7 @@ const HOT: [string, string, string[]][] = [
   ['text.ts', textSrc, ['setData']],
   ['gauges.ts', gaugesSrc, ['set', 'update', 'showWord', 'windowClass', 'mx', 'mz']],
   ['raceHud.ts', hudSrc, ['update', 'updatePosition', 'updateRows', 'updateRadio', 'updateGate', 'updateToast', 'updateStart', 'updateCrash']],
-  ['dash.ts', dashSrc, ['update', 'updateLed', 'updatePlotter', 'mx', 'mz']],
+  ['dash.ts', dashSrc, ['update', 'pose', 'updateGauges', 'tick', 'updateLed', 'updatePlotter', 'mx', 'mz']],
 ];
 
 describe('per-frame HUD path: no markup, no allocation, no layout reads', () => {

@@ -12,8 +12,14 @@
  *
  * §T.208 `gauges` canvas: the SB-12 GLB bakes its three round gauge needles into the merged parts mesh (no needle nodes),
  * so the page covers the three gauge glasses with this canvas, one square tile each, left → right as the pilot sees
- * them: tach (needle from `rpmNeedleRad`), the LED speed readout (the `led` canvas), trim (needle from `trimBubble`).
- * `plotterDirty` / `gaugesDirty` say which texture to upload.
+ * them: tach, the LED speed readout (the `led` canvas) over the Governor lamp, trim. `plotterDirty` / `gaugesDirty` say
+ * which texture to upload.
+ *
+ * §T.208 live needles: the canvas carries the dial FACES only (ticks, numerals); the tach and trim needles are 3D quads
+ * the page turns every frame from `pose()` (`rpmNeedleRad`, `trimNeedleRad`, canvas angle convention: clockwise from 12
+ * o'clock as the pilot sees it). So the needles move at the frame rate while the canvases repaint on change at a low
+ * rate: the faces once, the middle tile when the knots, Surge or Governor change. The trim needle reads DRIVE trim
+ * (a gauge on the drive, not the hull's pitch), `TRIM_DIAL_DEG` over ±60°.
  */
 import { COUNTDOWN_LAMPS, RPM_MAX, RPM_REDLINE, SURGE_SEGMENTS, TRIM_DIAL_DEG, surgeSegmentFill, type HudCourse, type RaceHudModel } from './model';
 import type { HudRacer } from './roster';
@@ -30,8 +36,23 @@ export const GAUGE_TILE_PX = 160;
 
 /** tach needle sweep, radians either side of straight up */
 export const RPM_NEEDLE_SWEEP = (135 * Math.PI) / 180;
+/** trim needle sweep, radians either side of straight up (TRIM_DIAL_DEG min .. max) */
+export const TRIM_NEEDLE_SWEEP = Math.PI / 3;
 /** Governor dial detents OFF · AIR · FULL */
 export const GOVERNOR_DETENTS = { off: -0.7, air: 0, full: 0.7 } as const;
+/** the needle quads in gauge-tile px (tile T = GAUGE_TILE_PX, its disc radius T/2): tail behind the hub, tip, width, hub radius */
+export const NEEDLE_PX = { tail: 10, tip: 64, width: 5, hub: 7 } as const;
+const GOV_TEXT = { off: 'GOV OFF', air: 'GOV AIR', full: 'GOV FULL' } as const;
+const GOV_CODE = { off: 0, air: 1, full: 2 } as const;
+const LAMP_DARK = '#2A3133';
+
+/** the trim needle angle for a drive trim in degrees, clamped to the dial */
+export function trimNeedleRadFor(trimDeg: number): number {
+  const span = (TRIM_DIAL_DEG.max - TRIM_DIAL_DEG.min) / 2;
+  const mid = (TRIM_DIAL_DEG.max + TRIM_DIAL_DEG.min) / 2;
+  const b = (trimDeg - mid) / span;
+  return (b < -1 ? -1 : b > 1 ? 1 : b) * TRIM_NEEDLE_SWEEP;
+}
 
 export class DashDisplays {
   readonly plotter: HTMLCanvasElement;
@@ -39,7 +60,11 @@ export class DashDisplays {
   rpmNeedleRad = -RPM_NEEDLE_SWEEP;
   /** −1 (bow down, bubble aft) .. +1 */
   trimBubble = 0;
+  /** drive trim needle, −TRIM_NEEDLE_SWEEP (TRIM_DIAL_DEG.min) .. +TRIM_NEEDLE_SWEEP */
+  trimNeedleRad = 0;
   governorDetentRad = 0;
+  /** the Governor lamp as last painted: 0 off · 1 air · 2 full, −1 before the first paint */
+  governorLamp = -1;
   /** a canvas was repainted this frame */
   dirty = false;
   readonly gauges: HTMLCanvasElement;
@@ -111,20 +136,25 @@ export class DashDisplays {
     return this.oz + (z - this.minZ) * this.sx;
   }
 
-  update(m: RaceHudModel, dt: number): void {
-    this.dirty = false;
-    this.plotterDirty = false;
-    this.gaugesDirty = false;
-    const f = m.rpmFrac;
-    this.rpmNeedleRad = -RPM_NEEDLE_SWEEP + 2 * RPM_NEEDLE_SWEEP * f;
+  /** every frame, no painting: the needle and knob poses from the model (the same telemetry the HUD reads) */
+  pose(m: RaceHudModel): void {
+    this.rpmNeedleRad = -RPM_NEEDLE_SWEEP + 2 * RPM_NEEDLE_SWEEP * m.rpmFrac;
     const span = (TRIM_DIAL_DEG.max - TRIM_DIAL_DEG.min) / 2;
     const mid = (TRIM_DIAL_DEG.max + TRIM_DIAL_DEG.min) / 2;
     const b = (m.attitudeDeg - mid) / span;
     this.trimBubble = b < -1 ? -1 : b > 1 ? 1 : b;
+    this.trimNeedleRad = trimNeedleRadFor(m.trimDeg);
     this.governorDetentRad = GOVERNOR_DETENTS[m.governor];
+  }
+
+  update(m: RaceHudModel, dt: number): void {
+    this.dirty = false;
+    this.plotterDirty = false;
+    this.gaugesDirty = false;
+    this.pose(m);
     const ledKey = this.ledKey;
     this.updateLed(m);
-    this.updateGauges(ledKey !== this.ledKey);
+    this.updateGauges(m, ledKey !== this.ledKey);
     this.plotAcc += dt;
     if (this.plotAcc >= 1 / PLOT_HZ) {
       this.plotAcc = 0;
@@ -132,41 +162,55 @@ export class DashDisplays {
     }
   }
 
-  /** tach · LED · trim tiles; repainted only when a needle moves a visible step or the LED changed */
-  private updateGauges(ledChanged: boolean): void {
-    const rpmStep = Math.round(((this.rpmNeedleRad + RPM_NEEDLE_SWEEP) / (2 * RPM_NEEDLE_SWEEP)) * 270);
-    const trimStep = Math.round((this.trimBubble + 1) * 60);
-    const key = rpmStep * 1000 + trimStep;
-    if (key === this.gaugeKey && !ledChanged) return;
-    this.gaugeKey = key;
+  private tick(cx: number, a: number, r0: number, r1: number): void {
+    const c = this.gc;
+    const cy = GAUGE_TILE_PX / 2;
+    c.beginPath();
+    c.moveTo(cx + Math.sin(a) * r0, cy - Math.cos(a) * r0);
+    c.lineTo(cx + Math.sin(a) * r1, cy - Math.cos(a) * r1);
+    c.stroke();
+  }
+
+  /** tach · LED + Governor lamp · trim tiles: the outer faces once, the middle tile when the LED or the Governor changed */
+  private updateGauges(m: RaceHudModel, ledChanged: boolean): void {
+    const gov = GOV_CODE[m.governor];
+    const faces = this.gaugeKey < 0;
+    if (!faces && !ledChanged && gov === this.governorLamp) return;
+    this.gaugeKey = 1;
+    this.governorLamp = gov;
     this.dirty = true;
     this.gaugesDirty = true;
     const c = this.gc;
     const T = GAUGE_TILE_PX;
+    c.textBaseline = 'middle';
+    // the middle tile: LED speed readout and the Governor lamp under it
+    const cx = T + T / 2;
+    c.fillStyle = SCREEN;
+    c.fillRect(T, 0, T, T);
+    c.drawImage(this.led, cx - 72, T / 2 - 40, 144, 63);
+    c.beginPath();
+    c.arc(cx - 40, T / 2 + 42, 7, 0, Math.PI * 2);
+    c.fillStyle = gov === 0 ? LAMP_DARK : gov === 1 ? AMBER : ORANGE;
+    c.fill();
+    c.font = '600 17px "SB Saira Condensed", "Saira Condensed", sans-serif';
+    c.textAlign = 'left';
+    c.fillStyle = gov === 0 ? '#6E7A7B' : AMBER;
+    c.fillText(GOV_TEXT[m.governor], cx - 28, T / 2 + 43);
+    if (faces) this.paintFaces();
+  }
+
+  /** the tach and trim dial faces (no needles: those are the page's 3D quads) */
+  private paintFaces(): void {
+    const c = this.gc;
+    const T = GAUGE_TILE_PX;
     const R = T / 2 - 2;
     c.fillStyle = SCREEN;
-    c.fillRect(0, 0, 3 * T, T);
+    c.fillRect(0, 0, T, T);
+    c.fillRect(2 * T, 0, T, T);
     c.lineCap = 'round';
     c.textAlign = 'center';
     c.textBaseline = 'middle';
     // tach: 0..7 ×1000 over ±135°, red from the redline
-    const tick = (cx: number, a: number, r0: number, r1: number): void => {
-      const sx = Math.sin(a);
-      const cy = -Math.cos(a);
-      c.beginPath();
-      c.moveTo(cx + sx * r0, T / 2 + cy * r0);
-      c.lineTo(cx + sx * r1, T / 2 + cy * r1);
-      c.stroke();
-    };
-    const needle = (cx: number, a: number): void => {
-      c.strokeStyle = ORANGE;
-      c.lineWidth = 5;
-      tick(cx, a, -10, R - 14);
-      c.fillStyle = PAPER;
-      c.beginPath();
-      c.arc(cx, T / 2, 7, 0, Math.PI * 2);
-      c.fill();
-    };
     let cx = T / 2;
     c.lineWidth = 7;
     c.strokeStyle = '#D0402E';
@@ -179,32 +223,33 @@ export class DashDisplays {
     for (let k = 0; k <= 7; k++) {
       const a = -RPM_NEEDLE_SWEEP + (2 * RPM_NEEDLE_SWEEP * k) / 7;
       c.lineWidth = 4;
-      tick(cx, a, R - 22, R - 4);
+      this.tick(cx, a, R - 22, R - 4);
       c.fillText(INT[k], cx + Math.sin(a) * (R - 40), T / 2 - Math.cos(a) * (R - 40));
     }
     c.font = '600 15px "SB Saira Condensed", "Saira Condensed", sans-serif';
     c.fillStyle = AMBER;
     c.fillText('RPM ×1000', cx, T / 2 + 42);
-    needle(cx, this.rpmNeedleRad);
-    // LED speed readout, centred in the middle tile
-    cx = T + T / 2;
-    c.drawImage(this.led, cx - 72, T / 2 - 32, 144, 63);
     // trim: TRIM_DIAL_DEG over ±60° (bow down left), a tick every 3°
     cx = 2 * T + T / 2;
     c.strokeStyle = PAPER;
     c.fillStyle = PAPER;
     c.font = '600 20px "SB Saira Condensed", "Saira Condensed", sans-serif';
-    const span = TRIM_DIAL_DEG.max - TRIM_DIAL_DEG.min;
     for (let d: number = TRIM_DIAL_DEG.min; d <= TRIM_DIAL_DEG.max; d += 3) {
-      const a = ((d - TRIM_DIAL_DEG.min) / span - 0.5) * (2 * Math.PI) / 3;
+      const a = trimNeedleRadFor(d);
       c.lineWidth = d === 0 ? 6 : 3;
-      tick(cx, a, R - (d % 6 === 0 ? 22 : 14), R - 4);
+      this.tick(cx, a, R - (d % 6 === 0 ? 22 : 14), R - 4);
       if (d % 6 === 0) c.fillText(d > 0 ? `+${INT[d]}` : d < 0 ? `−${INT[-d]}` : '0', cx + Math.sin(a) * (R - 40), T / 2 - Math.cos(a) * (R - 40));
     }
     c.font = '600 15px "SB Saira Condensed", "Saira Condensed", sans-serif';
     c.fillStyle = AMBER;
     c.fillText('TRIM °', cx, T / 2 + 42);
-    needle(cx, (this.trimBubble * Math.PI) / 3);
+    // the needle hubs (the needle quads pivot here)
+    c.fillStyle = PAPER;
+    for (cx = T / 2; cx < 3 * T; cx += 2 * T) {
+      c.beginPath();
+      c.arc(cx, T / 2, NEEDLE_PX.hub, 0, Math.PI * 2);
+      c.fill();
+    }
   }
 
   private updateLed(m: RaceHudModel): void {
