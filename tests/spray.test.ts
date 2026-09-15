@@ -34,6 +34,7 @@ import {
   type ParticleState,
 } from '../src/foam/sprayMath';
 import { sprayParams } from '../src/params/spray';
+import { EIGEN_MEAN_PER_TRACE, EIGEN_SIGMA_PER_TRACE } from '../src/foam/foamMath';
 import { getParamsEntry } from '../src/params/registry';
 
 const DT = 1 / 60; // §V2 fixed sim tick
@@ -431,8 +432,10 @@ describe('crest spawn gating (§V6 — only genuinely breaking crests spray)', (
     const sea = { trace: 0.1651, lambda: 0.95 }; // swell, measured
     const gate = sprayEigenGate(0.6, sea.trace, sea.lambda, 0);
     // at extraSigma 0 it IS the foam onset: same z, expressed in λ− units
-    const rest = 1 + -0.592 * sea.trace * sea.lambda;
-    const sigma = 0.754 * sea.trace * sea.lambda;
+    // Use the current spectrum calibration. foam.test independently measures
+    // these constants; this contract checks that spray shares foam's z-score.
+    const rest = 1 + EIGEN_MEAN_PER_TRACE * sea.trace * sea.lambda;
+    const sigma = EIGEN_SIGMA_PER_TRACE * sea.trace * sea.lambda;
     const zFoam = (1 - 0.6) / (sea.trace * sea.lambda);
     expect(gate).toBeCloseTo(rest - zFoam * sigma, 9);
     expect(zFoam).toBeGreaterThan(2); // and it is a real threshold, not "never"
@@ -442,8 +445,8 @@ describe('crest spawn gating (§V6 — only genuinely breaking crests spray)', (
     expect(sprayEigenGate(0.6, sea.trace, sea.lambda, -9)).toBe(gate); // floored
     // storms spray harder than calm for the same reason they foam harder
     const zOf = (bias: number, trace: number, lambda: number) =>
-      (1 + -0.592 * trace * lambda - sprayEigenGate(bias, trace, lambda, 0)) /
-      (0.754 * trace * lambda);
+      (1 + EIGEN_MEAN_PER_TRACE * trace * lambda - sprayEigenGate(bias, trace, lambda, 0)) /
+      (EIGEN_SIGMA_PER_TRACE * trace * lambda);
     expect(zOf(0.25, 0.3932, 1.2977)).toBeLessThan(zOf(0.12, 0.1467, 0.85));
   });
 

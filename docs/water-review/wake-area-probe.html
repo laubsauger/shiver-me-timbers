@@ -1,0 +1,28 @@
+<!doctype html>
+<title>Wake pixel area rotation probe</title>
+<script type="module">
+import * as THREE from 'three/webgpu';
+import {uv,uniform,vec2,vec4,fwidth,mix} from 'three/tsl';
+import {coordAreaFootprint} from '/src/foam/foamShading.ts';
+const renderer=new THREE.WebGPURenderer({antialias:false});
+renderer.setSize(256,256);await renderer.init();document.body.append(renderer.domElement);
+const scene=new THREE.Scene(), camera=new THREE.OrthographicCamera(-1,1,1,-1,0,2);
+camera.position.z=1;
+const angle=uniform(0), old=uniform(0);
+const p=uv().mul(vec2(1,16));
+const c=vec2(p.x.mul(angle.cos()).sub(p.y.mul(angle.sin())),p.x.mul(angle.sin()).add(p.y.mul(angle.cos())));
+const fw=fwidth(c), area=coordAreaFootprint(c);
+const value=mix(area,fw.x.mul(fw.y).sqrt(),old);
+const mat=new THREE.MeshBasicNodeMaterial();mat.fragmentNode=vec4(value.mul(8),value.mul(8),value.mul(8),1);
+scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2,2),mat));
+const target=new THREE.RenderTarget(256,256,{type:THREE.FloatType,format:THREE.RGBAFormat});
+window.probe=async(a,b)=>{angle.value=a;old.value=b;renderer.setRenderTarget(target);renderer.render(scene,camera);const pixels=await renderer.readRenderTargetPixelsAsync(target,128,128,1,1);renderer.setRenderTarget(null);renderer.render(scene,camera);return Array.from(pixels)};
+window.results=[];for(const a of [0,Math.PI/8,Math.PI/4,Math.PI/2])window.results.push({angle:a,old:await window.probe(a,1),fixed:await window.probe(a,0)});
+
+const expected=0.125;
+const pass=window.results.every(r=>Math.abs(r.fixed[0]-expected)<1e-5);
+const report=document.createElement('pre');
+report.textContent=JSON.stringify({pass,results:window.results},null,2);
+document.body.append(report);
+if(!pass)throw new Error('Projected pixel area changes under rotation');
+</script>

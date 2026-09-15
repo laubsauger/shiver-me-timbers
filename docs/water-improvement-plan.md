@@ -1908,3 +1908,81 @@ fraction remains; stars and cloud density are unchanged. Actual speedboat
 night/day GPU review completed; user approved the night result. 105 cloud
 checks and TypeScript pass. See `water-review/night-horizon-transition.md`
 for matched captures and the superseded widening experiment. No commits.
+
+## 36. Retain wake lace direction with emitted foam
+
+The vessel shader no longer rotates all old and rival lace with the player's
+current heading. The far accumulation tier's unused .ba channels now retain
+source-weighted line orientation, sharing the foam's transport, decay and
+saturation. No added textures, render passes or CPU history. Equal crossing
+wakes become isotropic; opposite travel directions share the same axis.
+
+Actual WebGPU readback verifies channel scaling, saturation, decay and region
+scrolling. A resolved 2 m lace patch is pixel-identical after changing the
+player's heading. 114 focused tests and TypeScript pass. Full-game surface
+review completed with airborne spray hidden separately to isolate the water.
+See `water-review/wake-retained-orientation.md` for evidence and remaining limits.
+
+## 37. Keep spray return heights local to their sources
+
+Hull clumps, prop droplets and mist previously died against the current fleet's
+mean surface height. A rival on a higher wave could kill another boat's spray
+while it was still above its own water. Each particle now retains the original
+source height in its spawn pass, including sub-tick prop births and reused slots.
+The actual fleet adds 448 KiB of GPU storage, with no new pass, particle or draw.
+
+Eight GPU regression assertions reproduce the old failure and verify the fix.
+81 focused tests and TypeScript pass. A controlled in-game hop shows zero new
+hull spray airborne, onset at contact, then rising and falling emission through
+the impact. See `water-review/spray-return-height.md`. The retained plane is a
+local approximation, not collision against the evolving wave surface.
+
+## 38. Break up the solid hull-spray clumps
+
+Layer isolation confirmed the round white puffs came from hull clumps. Their
+old mask changed only the rim around an opaque core. The clump mask now has
+warped interior erosion, an irregular boundary and a varying motion-aligned
+silhouette that narrows with age. One filtered noise octave supplies breakup;
+unresolved holes fade toward partial coverage. No new particles or passes.
+
+Matched GPU mask captures and a controlled in-game wake view are in
+`water-review/spray-breakup.md`. 81 focused tests and TypeScript pass. GPU timing
+samples were variable, so no performance gain or frame-rate claim is made.
+
+
+## 39. Give stern water visible arcs and fix directional wash artifacts
+
+Implemented age-dependent rooster fragments, coherent hull-sheet launch angles,
+finite jet-driven wash growth at standstill, and exhaust transport during rise.
+Removed ambient crest alignment from the porous wake mask. Corrected section 36's
+world-position-dependent direction transform: blend fixed-axis field values
+instead, preventing distant-origin combs. Surface froth keeps holes and uses the
+existing optical-depth control rather than linear near-opaque paint.
+
+Review, validation, GPU observations and remaining simulation limits:
+[`water-review/stern-wash.md`](water-review/stern-wash.md).
+No new pools/passes/bindings; more near-source overdraw and one extra noise octave.
+No frame-rate claim. Changes remain uncommitted.
+
+## 40. Gameplay performance: spray lighting and trustworthy measurements
+
+Moved rooster mist/drop scattering into vertex shading, restored the LED loop's
+shader function scope, and skip zero-colour light slots in spray/ocean shading.
+Calibrated restored LED spill to avoid a neon plume. No particle or water-quality
+reduction. Three shader-codegen regressions and day/night WebGPU review cover it.
+
+GPU pass timestamp intervals overlap on this Metal run; their sum falsely reports
+hundreds of milliseconds. Use completed-frame latency and normal-loop pacing for
+comparisons. One-boat renders still take roughly 28 ms; 60 FPS is not established.
+Evidence and remaining budget work: [gameplay-performance.md](water-review/gameplay-performance.md).
+
+## 41. Collect finished rival work before holding simulation
+
+The race's pause decision could read stale collected ticks even when worker
+results had arrived between frames. `holdSim` now pumps an apparently trailing
+fleet before applying the unchanged lag guard. Live comparison released 82
+otherwise avoidable holds, with no trace starvation; no FPS gain is claimed.
+
+Regression reproduced before editing; 23 timing/batch tests and TypeScript pass.
+See [gameplay-performance.md](water-review/gameplay-performance.md) for the
+comparison, safety limits and remaining throughput work.

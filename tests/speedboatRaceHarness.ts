@@ -81,6 +81,8 @@ export function seaOcean(sea: SeaName): OceanParams {
 
 export interface SliceOptions {
   sea: SeaName;
+  /** the ocean params to race on instead of `seaOcean(sea)` (§T.213: the speedboat's own seas, tests/raceAiHarness seaOceanParams) */
+  ocean?: OceanParams;
   seed?: number;
   /** laps of the race (Tower Reach is authored at 3) */
   laps?: number;
@@ -149,9 +151,11 @@ export function sliceHash(s: Slice): string {
 
 export async function runSlice(o: SliceOptions): Promise<SliceResult> {
   const seed = o.seed ?? 2100;
-  const fx = courseFixture(seed);
+  const fx0 = courseFixture(seed);
+  // the fixture's lines are built once per file; the pilots' seeded mistakes follow this race's seed (§T.213 seed sweeps)
+  const fx = fx0.pilot.seed === seed >>> 0 ? fx0 : { ...fx0, pilot: { ...fx0.pilot, seed: seed >>> 0 } };
   const hull = buildDeepVHull();
-  const ocean = seaOcean(o.sea);
+  const ocean = o.ocean ?? seaOcean(o.sea);
   const seaParams = speedboatSeaParams(hull);
   const fetch = createFetchField(fx.seabed, ocean);
   const simWorld = bakeSimWorldData(fx.seabed, ocean, fx.world.bars);

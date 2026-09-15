@@ -234,8 +234,64 @@ pilots blind to wakes (wake terms off, heel ease on, reverse at any heel) 62 til
 ease, before the sea gate) 30 episodes, 2 crashes; the final policy 0 crashes over seeds 2100–2102 (13 episodes).
 raceAiLaps rookie 66.5 / 62.4 / 61.0 s; raceAiPack, raceAiSea (veterans 14 vs rookies 20), raceAiDeterminism green.
 
-**Fragile, stated.** raceAiLaps (lap-to-lap ≤ 4 % for the rookie, whose seeded mistakes and off-line recoveries cost 3–6 s
-a lap), raceAiPack (archetype spread > 1.5 s and hothead < veteran, when traffic compresses all seven laps to ±1 s against a
-10 s profile spread) and raceAiSea (one realisation) are single-seed checks that flip with any pilot change: across seeds
-1–5 each policy tried (including no trim at all) failed laps on 1–2 seeds and pack on 2 of 3. The pinned seeds pass.
-The player's autopilot (`page/autopilot.ts`) has no WAKE WORLD in its private layout, so it stays wake-blind.
+**Fragile, stated (fixed in §T.213 below).** raceAiLaps (lap-to-lap ≤ 4 % for the rookie), raceAiPack (archetype spread
+and hothead < veteran) and raceAiSea were single-seed checks that flipped with any pilot change: across seeds 1–5 each
+policy tried failed laps on 1–2 seeds and pack on 2 of 3. The player's autopilot (`page/autopilot.ts`) has no WAKE WORLD
+in its private layout, so it stays wake-blind.
+
+## Racing across seeds, not on one (§T.213)
+
+Evidence: `tests/raceAiSweep.ts` + `scripts/race-ai-sweep.mjs` — one race per process (CPU only, no browser), the seed
+moving BOTH the sea realisation and the pilots' mistake dice. Two courses: `pack` (the synthetic 11-element course, seven
+couriers, 1 lap, 30 m grid rows, wakes AND boat contacts on — the harness carried neither before) and `tower` (Tower Reach
+exactly as the page builds it: colliders, seabed lee, rolling start, crash machines, race logic, the autopiloted player).
+The seas are the speedboat's own (`params/speedboatSea.ts`): calm Hs ≈ 0.16 m, working ≈ 0.5 m (the race default), open ≈ 1.5 m;
+the harness used to race the ladder's `swell` rung (Hs 2.8 m) and called it "Working".
+
+**Baseline → after, per 12 seeds × {calm, working}** (crash-free races / all races, and the first-to-last rival finish spread):
+
+| | Tower Reach calm | Tower Reach working | pack calm | pack working |
+|---|---|---|---|---|
+| before | 9/12, worst 3, spread 25.7 s | 10/12, worst 2, 29.3 s | 11/12, 31.5 s | 10/12, 31.1 s |
+| after | 12/12, spread 13.0 s | 12/12, spread 13.6 s | 24/24 seeds, 14.3 s | 22/24 seeds, worst 1, 15.8 s |
+
+Missed gates: Tower Reach 0 before and after; the synthetic pack 3 → 10 marginal misses in 48 races (below).
+
+**Root causes found (each measured, then fixed generally — no per-seed constants):**
+
+| # | Cause (measured) | Fix (`pilot.ts`) |
+|---|---|---|
+| 1 wake lift ate the pack | The §T.207 wake-roll LIFT fired on 27–45 % of every follower's wave reads (the pack lives inside wakes): the hothead lost 16 s of profile speed to it in one lap, the swell 20 s, while the leader lost none. Pack spread 31 s, and the order was the grid order — nobody passed. | The wake read no longer lifts the throttle. What a wake does is roll her, so it now reduces the HELM (`AI.WAKE_BRACE`, below) instead of the drive. |
+| 2 no passing rule | Traffic was avoidance (closest approach < 8 m) + a 40 s opening caution + a corner-only "wake quarter" cap that dropped a boat 45 m astern of anything it turned inside. A faster boat behind had no way past and no lane of its own. | PASS/FOLLOW, race-long: the boat in this lane ahead (its lane, below) is passed on the side that fits the corridor room, `PASS_LAT` off ITS offset; while still in its lane the closing speed is capped to hold the gap; no side fits ⇒ follow at the gap. The alongside rule (`AVOID_LAT`) is now race-long too, and the caution's own follow rule is gone. |
+| 3 how big a wake is depends on how fast its maker is | Measured on the field the pilot reads: a 24 m/s source leaves ≤ 0.1 m and ≤ 3 % of roll slope outside \|Y\| 6 m; an 8–11 m/s one (a corner, a queue, a boat that has just been passed) leaves 0.2–0.3 m and 6–7 % along its cusp (0.35·X out) to 60 m astern — and a 12 m hull crossing that at 12–20 m/s with helm on capsizes. Straight-line crossings at any speed peak at 8° of tilt (measured), so it is wake + helm, not wake alone. | The lane a boat ahead owns is its own beam when it is quick (`LANE_HALF` 6 m) and its whole Kelvin wedge when it is at hump speed, blended over `WAKE_SLOW_TOP` 22 → 10 m/s; the gap behind it grows the same way (25 → 45 m). |
+| 4 a follow cap compounds into a standstill | With the cap free to fall below the leader's own speed, a queue through the tight mark collapsed to 6 m/s and then to 0 — and a queue at hump speed is a queue of the wakes in row 3. | The cap never asks for less than the leader's speed − `FOLLOW_SLACK` (3 m/s), nor less than `FOLLOW_FLOOR` (6 m/s) while the leader is above it. |
+| 5 the offset outran the boat | A pass/avoid offset slewing at 3 m/s reached 11 m while the hull was still on the old line: at the pursuit lookahead that is a 20° heading step, and the overshoot ran boats 30–40 m off their line, into the next gate's pole. | `OFFSET_LEAD`: the offset never leads the boat's own cross-track by more than 4 m. |
+| 6 the heel limiter took the righting helm away too | The symmetric tilt limiter faded the lock to nothing at 38° whichever way the helm was going, so a hull past it could only wait — and the roll helm (× `waveSkill`) was 0.2 of a helm for a rookie. Boats rolled 25° → 45° with the helm centred. | Directional limit on the heel `HELM_HEEL_TAU` (0.5 s) AHEAD: the helm TOWARD the heeled side eases from 18° to nothing at 30°, the righting helm keeps the full lock. Plus a roll damper at every heel and a `ROLL_SKILL_MIN` floor of 0.6 on both: keeping the boat under her is not an archetype trait. |
+| 7 a wake crest with the helm on | 60°/s of roll rate arrived from a 0.27 m crest with 14 % of slope across the hull, 20 m astern of two slow boats. | `AI.WAKE_BRACE` (the slot the one-tick RESPAWNED flag had): the wake roll slope across the path within 0.9 s takes up to `BRACE_LOCK` (50 %) of the helm lock, decaying over 0.5 s — she crosses crests nearer upright. Released as she runs off her line (`BRACE_RELEASE` 8 m), where the helm is what puts her back through the gate. |
+| 8 finished boats parked on the racing line | The post-finish 15 m/s cap put a boat at cruising speed on the line the pack was still racing down, with the wake of a boat at hump speed. | A finished pilot pulls to the outside of what comes next first; the cool-down cap applies once she is 8 m off the line. |
+
+§T.213 acceptance (12 seeds × calm + working): Tower Reach — 24/24 races crash-free, every rival classified finished, no
+missed gate, no static-solid contact. Synthetic pack (24 seeds) — 46/48 crash-free, never more than 1 crash in a race,
+everyone finished, 10 marginal misses (below).
+
+**Still open, stated.**
+- **The pack spread is 13–16 s over ONE lap, not the design band** (design doc §4: median P1–P8 ≤ 25 s over a 3-lap race,
+  i.e. ≈ 8 s a lap). Halved from 26–31 s, and no rubber band: it is line risk, traffic and catch-up only.
+- **Marginal misses on the synthetic course**: 10 in 48 pack races (0 in 24 Tower Reach races), all boats 8–35 m off their
+  line under full catch-up risk crossing 0.3–6 m outside a 36 m chicane pole or the last gate. Raising the gate corridor's
+  tracking allowance (`GATE_TRACK` 3 → 5 m) and the level margin did NOT fix them and cost crashes elsewhere (19/24 clean).
+- **A physics blow-up, not the AI**: in the `open` sea (and once in calm), two boats in contact at ~30 m/s came out of one
+  tick at 460 and 1068 m/s — `sea-physics` boat↔boat contact, reproducible from the sweep (pack, open, seed 101, t 18.5 s).
+  The `open` sweep rows are meaningless until that is fixed.
+- `tests/speedboatRaceSmoke`'s pacing assertion (`paced.heldFrames > 0` — 20 fps pacing must make the fleet trail) fails on
+  this machine AT HEAD as well, with the §T.213 pilot reverted: it is a fleet-pacing/budget check, not an AI one. The race
+  it runs is clean either way (all eight classified finished, no penalty, no rival crash, no solid contact).
+- The player's autopilot still has no WAKE WORLD in its private layout (`page/autopilot.ts`), so it is wake-blind: it runs
+  the same policy, but its wake read finds nothing. Unchanged by §T.213.
+
+**Tests.** `raceAiLaps` (3 seeds × calm/working, rookie, 3 laps), `raceAiPack` (6 seeds × calm/working on real worker
+threads: clean racing per race, spread/ordering on the median, catch-up A/B, no thrust path), `raceAiSea` (3 seeds ×
+working/open: everyone finishes, the wave read is live, the open sea costs time). The full sweep is opt-in:
+`node scripts/race-ai-sweep.mjs` (12 seeds × calm/working + 3 open, both courses, ~25 min on 8 processes;
+`--course pack --seeds 24` for the fast half, `--log <file.jsonl>` to survive an interrupted shell, `--events` for the
+per-crash situation lines).

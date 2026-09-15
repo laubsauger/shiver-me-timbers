@@ -305,7 +305,12 @@ export function createRaceSession(d: RaceSessionDeps) {
     /** loop predicate: hold the whole frame while a frame of ticks could outrun the collected rival trace */
     holdSim(tick: number): boolean {
       if (npcs.error) return false;
-      return npcs.collectedTick < tick + MAX_SUBSTEPS + 1 - D;
+      const required = tick + MAX_SUBSTEPS + 1 - D;
+      // A worker can finish after the previous frame's final pump. Refresh
+      // its collected trace before deciding to lose another frame of sim time.
+      // pump is non-blocking on workers; the same lag limit still applies.
+      if (npcs.collectedTick < required) npcs.pump(tick);
+      return npcs.collectedTick < required;
     },
 
     /** new race from the grid at page tick `atTick` (between ticks: the sim is paused on the select screen) */

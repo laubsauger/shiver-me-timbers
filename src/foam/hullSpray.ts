@@ -55,7 +55,7 @@ export const HULL_SPRAY_LOOK = {
   keyGain: 0.6,
   ambientGain: 1.5,
   /** opacity × (1 − age)^ageFalloff: dense at the hull, thinning astern (contrast, not a uniform carpet) */
-  ageFalloff: 2.5,
+  ageFalloff: 1.5,
   life: 0.8,
   drag: 1.4,
   pool: 32768,
@@ -105,7 +105,6 @@ export interface HullSprayOptions {
 export function createHullSpray(opts: HullSprayOptions = {}) {
   const slots = Math.max(1, Math.min(32, Math.floor(opts.slots ?? HULL_SPRAY_SLOTS)));
   const L = HULL_SPRAY_LOOK;
-  let killY = -1e6;
   const uSun = uniform(new THREE.Vector3(0.3, 0.8, 0.5).normalize());
   // whitewater clumps are optically THICK (bubbles + drops, many scatterings): mostly isotropic, a weak forward lobe —
   // unlike the rooster's thin drop plume, which glows backlit
@@ -120,7 +119,7 @@ export function createHullSpray(opts: HullSprayOptions = {}) {
     drag: () => L.drag,
     opacity: () => L.opacity,
     clumpAgeFalloff: () => L.ageFalloff,
-    killBelow: () => killY,
+    returnBelowBirth: 0.05,
     // a boat-attached effect seen from a chase/tracking camera: visible to ~250 m, gone by 400 m
     fadeNear: () => 250,
     fadeFar: () => 400,
@@ -184,11 +183,15 @@ export function createHullSpray(opts: HullSprayOptions = {}) {
       const lateral = sign.mul(halfW.mul(float(1).sub(A.w.mul(float(1).sub(rFill))))).add(rJit.sub(0.5).mul(0.1));
       const xz = vec2(P.x, P.z).add(axis.mul(A.z.mul(rAlong))).add(side.mul(lateral));
       pool.posAge.element(instanceIndex).assign(vec4(xz.x, P.y, xz.y, 0));
+      pool.birthHeight!.element(instanceIndex).assign(P.y);
       // outboard in proportion to where across the run it was born (a sheet root: ±1; a boil: a self-similar fan that
       // stays filled at its centre instead of emptying into two lanes)
       const across = lateral.div(halfW.max(0.05)).clamp(-1, 1);
       const velXZ = side.mul(across.mul(V.x).mul(rMag.mul(0.45).add(0.55))).add(axis.mul(V.z.mul(rMag.mul(0.5).add(0.5))));
-      const vy = V.y.mul(rUp.mul(0.55).add(0.45));
+      // A sheet leaves at one reflection angle: vary speed along that ray.
+      // Independent vertical/lateral samples immediately turned it into a
+      // diffuse cloud. Filled boil emitters retain their turbulent launch fan.
+      const vy = V.y.mul(select(A.w.lessThan(0.5), rMag.mul(0.45).add(0.55), rUp.mul(0.55).add(0.45)));
       // size multiplier: the emitter's, jittered (the pool grows each sprite over its life, HULL_SPRAY_LOOK sizes)
       pool.velSize.element(instanceIndex).assign(vec4(velXZ.x, vy, velXZ.y, W.z.mul(rSize.mul(0.5).add(0.5))));
     });
@@ -226,7 +229,6 @@ export function createHullSpray(opts: HullSprayOptions = {}) {
       }
       prioritiseEmitters(rates, dists, slots, count / Math.max(1e-3, L.life), pick, grant);
       let total = 0;
-      let ySum = 0;
       for (let k = 0; k < slots; k++) {
         if (k >= pick.length) {
           posV[k].set(0, -1000, 0, 1);
@@ -242,15 +244,14 @@ export function createHullSpray(opts: HullSprayOptions = {}) {
         widthV[k].set(Math.max(0, e.width0), Math.max(0, e.width1), Math.min(1, Math.max(0, e.size)), 0);
         launchV[k].set(e.out, e.up, e.along, 0);
         total += grant[k];
-        ySum += e.y;
       }
       let acc = 0;
       for (let k = 0; k < slots; k++) {
         if (k < pick.length) acc += grant[k];
         posV[k].w = total > 0 ? (k >= pick.length - 1 ? 1 : acc / total) : 1;
       }
-      // W8 round 4 rule: a falling clump dies at the water (the emitters' mean surface, 5 cm below)
-      if (pick.length > 0) killY = ySum / pick.length - 0.05;
+      // Each clump retains its own surface at birth; a rival on a higher wave
+      // cannot raise the return plane and prematurely kill this boat's spray.
       // @band-limited-elsewhere: a pool method named step, not a shader edge
       pool.step(renderer);
       if (!(total > 0)) return 0;

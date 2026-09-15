@@ -284,8 +284,12 @@ const LEDGER: readonly LedgerEntry[] = [
   {
     file: 'src/flowfoam/index.ts',
     source: flowFoamSource,
-    sites: 6,
+    sites: 7,
     /**
+     * Retained lace orientation: +1 call site, +0 bindings. wakeWhiteNode reads
+     * .ba of the SAME far.foamTexture already sampled by the fragment stage.
+     * The two foam texture objects and their samplers remain the full set.
+     *
      * W8 round 3 RECOUNT: +1 CALL SITE, +0 BINDINGS. `wakeCrestNode` (sim vessel mode only; null elsewhere) reads .ba
      * of the SAME acc.foamTexture object `wakeSlopeNode` samples in the fragment stage, so it dedupes (UUID per stage).
      * Fragment stays 2/2.
@@ -319,7 +323,7 @@ const LEDGER: readonly LedgerEntry[] = [
     fragmentSamplers: 2,
     vertexTextures: 1,
     vertexSamplers: 1,
-    why: 'fragment foamSampleNode/wakeSmoothNode/wakeSlopeNode/wakeFoamFreshnessNode: acc.foamTexture'
+    why: 'fragment foamSampleNode/wakeSmoothNode/wakeSlopeNode/wakeFoamFreshnessNode/wakeWhiteNode: acc.foamTexture'
       + ' + far.foamTexture; vertex wakeHeightNode: acc.elevTexture',
   },
   {

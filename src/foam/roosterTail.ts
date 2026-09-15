@@ -39,7 +39,7 @@
  * §V28: non-finite jets are dropped whole; every uniform finite-guarded; dead particles are the pool's zero-size quads.
  */
 import * as THREE from 'three/webgpu';
-import { Fn, If, Loop, cameraPosition, float, instanceIndex, int, positionWorld, select, uniform, uniformArray, vec2, vec3, vec4 } from 'three/tsl';
+import { Fn, If, Loop, cameraPosition, float, instanceIndex, int, positionWorld, select, uniform, uniformArray, varying, vec2, vec3, vec4 } from 'three/tsl';
 import { activeBoatLightPool } from '../ocean/boatLightPool';
 import { SIM_DT } from '../core/loop';
 import { GRAVITY } from '../ocean/oceanMath';
@@ -80,7 +80,12 @@ export const ROOSTER_AMBIENT = 1;
 /** W8 LOOK: sprite scale over sprayParams.sizeMin..Max (drops 0.14→0.58 m, mist 0.28→1.1 m; were ×4 / ×9 soft discs) */
 export const ROOSTER_DROP_SIZE = 1.8;
 /** W8 round 4: a drop sprite is its motion blur — 2.5 cm wide, |v|·1/120 s long (≤ 10 widths), ≤ 6 mrad on screen */
-export const ROOSTER_DROP_BLUR = Object.freeze({ width: 0.025, shutter: 1 / 120, maxRatio: 10, angularCap: 0.006 });
+export const ROOSTER_DROP_BLUR = Object.freeze({
+  width: 0.025, shutter: 1 / 120, maxRatio: 10, angularCap: 0.006,
+  // Look calibration: a shed fragment remains visible at the prop/strut root
+  // for roughly a quarter second, then separates into the existing fine drops.
+  sheet: Object.freeze({ width: 0.11, breakupTime: 0.24, angularCap: 0.02 }),
+});
 /** W8 round 4: the drop pool is this many times the emitter's `count` (tiny sprites: the weight is the count) */
 export const ROOSTER_DROP_POOL_FACTOR = 4;
 /** W8 round 4: mist particles per drop particle, and the mist lens-plane fade (m) — a soft volume must not fog the lens */
@@ -94,7 +99,9 @@ export const ROOSTER_SPRITE_DENSITY = 40;
 /** W8 round 3 LED on spray: lamp height above the boat reference (m), lamp size R (m) of the 1/(1 + d²/R²) falloff, gain (look) */
 export const ROOSTER_LED_HEIGHT = 0.6;
 export const ROOSTER_LED_RADIUS = 8;
-export const ROOSTER_LED_GAIN = 3;
+// Subtle spill from the hull strips. The old gain of 3 was calibrated while
+// the unscoped LED loop emitted no light; restoring it made the plume neon.
+export const ROOSTER_LED_GAIN = 0.18;
 export const ROOSTER_MIST_SIZE = 8;
 export const ROOSTER_MIST_OPACITY = 0.05;
 /** W8 round 6: mist radiance share (an envelope, not a glowing blob) */
@@ -237,7 +244,10 @@ export const STRUT_SHEET_SHARE = 0.4;
 export function dropRadianceNode(uSun: any, scatter: { multiple: number; cap: number; keyGain?: any; ambientGain?: any } = { multiple: ROOSTER_MULTIPLE_SCATTER, cap: ROOSTER_PHASE_CAP }): (light: typeof particleLighting) => unknown {
   const M = scatter.multiple;
   const CAP = scatter.cap;
-  return (light: typeof particleLighting): unknown => {
+  // Keep the LED loop inside the function's shader flow. A bare Loop built
+  // outside Fn can leave only its zero-initialised accumulator in the shader,
+  // especially when this result is consumed through a vertex varying.
+  return (light: typeof particleLighting): unknown => Fn(() => {
     const view = positionWorld.sub(cameraPosition).normalize();
     const c = view.dot(uSun).clamp(-1, 1);
     const g = ROOSTER_PHASE_G;
@@ -254,18 +264,21 @@ export function dropRadianceNode(uSun: any, scatter: { multiple: number; cap: nu
       const { positions, colors } = pool.nodes;
       const led = vec3(0).toVar();
       Loop(pool.max, ({ i }: { i: any }) => { // eslint-disable-line @typescript-eslint/no-explicit-any
-        const pp = positions.element(i);
-        const toDrop = positionWorld.sub(pp.xyz.add(vec3(0, ROOSTER_LED_HEIGHT, 0)));
-        const d2 = toDrop.dot(toDrop);
-        const cl = view.dot(toDrop.div(d2.max(1e-4).sqrt())).clamp(-1, 1);
-        const hgL = float(1 - g * g).div(float(1 + g * g).sub(cl.mul(2 * g)).max(1e-3).pow(1.5)).min(CAP);
-        const lobeL = hgL.mul(1 - M).add(M);
-        led.addAssign(colors.element(i).xyz.mul(lobeL).div(d2.div(ROOSTER_LED_RADIUS * ROOSTER_LED_RADIUS).add(1)));
+        const pc = colors.element(i);
+        If(pc.x.notEqual(0).or(pc.y.notEqual(0)).or(pc.z.notEqual(0)), () => {
+          const pp = positions.element(i);
+          const toDrop = positionWorld.sub(pp.xyz.add(vec3(0, ROOSTER_LED_HEIGHT, 0)));
+          const d2 = toDrop.dot(toDrop);
+          const cl = view.dot(toDrop.div(d2.max(1e-4).sqrt())).clamp(-1, 1);
+          const hgL = float(1 - g * g).div(float(1 + g * g).sub(cl.mul(2 * g)).max(1e-3).pow(1.5)).min(CAP);
+          const lobeL = hgL.mul(1 - M).add(M);
+          led.addAssign(pc.xyz.mul(lobeL).div(d2.div(ROOSTER_LED_RADIUS * ROOSTER_LED_RADIUS).add(1)));
+        });
       });
       radiance = radiance.add(led.mul(ROOSTER_LED_GAIN));
     }
     return foamTintNode().mul(radiance);
-  };
+  })();
 }
 
 export interface RoosterTailOptions {
@@ -285,7 +298,6 @@ export interface SprayViewer {
 export function createRoosterTail(opts: RoosterTailOptions = {}) {
   const MAX_JETS = Math.max(1, Math.min(64, Math.floor(opts.maxJets ?? ROOSTER_MAX_JETS)));
   let dropLife = sprayParams.bowLife;
-  let killY = -1e6;
   let mistLife = sprayParams.bowLife;
   const uSun = uniform(new THREE.Vector3(0.3, 0.8, 0.5).normalize());
   const litTint = dropRadianceNode(uSun);
@@ -297,13 +309,15 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
     motionBlur: ROOSTER_DROP_BLUR,
     dropletAgeFalloff: 1.2,
     dropletNearFade: ROOSTER_NEAR_FADE,
-    killBelow: () => killY,
+    returnBelowBirth: 0.05,
     life: () => dropLife,
     drag: () => ROOSTER_DROP_DRAG,
     opacity: () => ROOSTER_DROP_OPACITY,
     fadeNear: () => sprayParams.bowContactFadeNear * 2,
     fadeFar: () => sprayParams.bowContactFadeFar * 2.5,
-    colorNode: litTint,
+    // The sun/sky and broad boat-light lobes are smooth across a drop too.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node
+    colorNode: (light) => varying(litTint(light) as any),
     blending: THREE.NormalBlending,
     renderOrder: SPRAY_OVER_WATER_ORDER,
   });
@@ -311,14 +325,17 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
     sizeScale: () => ROOSTER_MIST_SIZE,
     mistStructure: true,
     dropletNearFade: ROOSTER_MIST_NEAR_FADE,
-    killBelow: () => killY,
+    returnBelowBirth: 0.05,
     life: () => mistLife,
     drag: () => ROOSTER_MIST_DRAG,
     opacity: () => ROOSTER_MIST_OPACITY,
     fadeNear: () => sprayParams.bowContactFadeNear * 2,
     fadeFar: () => sprayParams.bowContactFadeFar * 2.5,
-    // round 6: the mist is a faint ENVELOPE — dimmer than the drops that carry the plume's detail
-    colorNode: (light) => (litTint(light) as { mul(v: number): unknown }).mul(ROOSTER_MIST_BRIGHTNESS),
+    // Mist overlaps over many pixels. Sun/sky and the broad LED falloff vary smoothly
+    // across each sprite: interpolate vertex lighting, like hullSpray, instead of
+    // repeating the fleet's light loop in every translucent fragment.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node
+    colorNode: (light) => varying(litTint(light) as any).mul(ROOSTER_MIST_BRIGHTNESS),
     blending: THREE.NormalBlending,
     renderOrder: SPRAY_OVER_WATER_ORDER,
   });
@@ -376,6 +393,8 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
           vec3(pos.x.add(aft.x.mul(back)).add(velXZ.x.mul(flown)), pos.y.add(vy0.mul(flown)), pos.z.add(aft.y.mul(back)).add(velXZ.y.mul(flown))),
           rT.mul(SIM_DT),
         ));
+        // Keep the actual source surface, before the sub-tick ballistic offset.
+        pool.birthHeight!.element(instanceIndex).assign(pos.y);
         const rSize = hash2(vec2(s.mul(H_SIZE + hSalt), uTime.add(T_SIZE + tSalt)));
         pool.velSize.element(instanceIndex).assign(vec4(vec3(velXZ.x, vy, velXZ.y).mul(speed), uSizeVar.mul(rSize).oneMinus()));
       });
@@ -425,8 +444,6 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
       uTime.value += SIM_DT;
       let total = 0;
       let maxLaunch = 0;
-      let surfSum = 0;
-      let surfN = 0;
       const rates: number[] = [];
       // §T.195: with a viewer, the slots go to the nearest surface-piercing props within the pool's turnover budget
       const sel = viewer ? prioritised(jets, viewer, count, pitch) : null;
@@ -444,8 +461,6 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
             jetPos[j].set(x.x, x.surfaceY, x.z, x.launch);
             jetDir[j].set(x.dirX / len, x.dirZ / len, 0, x.aft);
             jetSide[j].set(x.lateral, x.speed, 0, 0);
-            surfSum += x.surfaceY;
-            surfN++;
             continue;
           }
         }
@@ -461,8 +476,6 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
           jetPos[j].set(jet!.x, y, jet!.z, e!.launch);
           jetDir[j].set(jet!.dirX / len, jet!.dirZ / len, 0, e!.aft);
           jetSide[j].set(e!.lateral, Math.abs(jet!.advance), 0, 0);
-          surfSum += y;
-          surfN++;
         } else {
           jetPos[j].set(0, -1000, 0, 0);
           jetDir[j].set(0, 1, 0, 0);
@@ -478,8 +491,8 @@ export function createRoosterTail(opts: RoosterTailOptions = {}) {
       dropLife = Math.max(sprayParams.bowLife, roosterFlightTime(maxLaunch, ROOSTER_DROP_DRAG));
       // round 3: mist falls with the drops (its old 1.6× life and 2.5/s drag left a floating cloud behind the boat)
       mistLife = Math.max(sprayParams.bowLife, roosterFlightTime(maxLaunch * ROOSTER_MIST_SPEED, ROOSTER_MIST_DRAG));
-      // W8 round 4: particles die where they fall back into the water (the sources' mean surface, 5 cm below)
-      if (surfN > 0) killY = surfSum / surfN - 0.05;
+      // The spawn passes retain each source's own surface for the returning
+      // drops and mist; the current fleet cannot move an old particle's plane.
       dropSpawn.run(renderer, total);
       mistSpawn.run(renderer, total * ROOSTER_MIST_SHARE);
       return total;

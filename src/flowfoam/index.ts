@@ -74,7 +74,8 @@ import type { ChineSheetEmitter } from '../wake/chineContact';
 import type * as THREE from 'three/webgpu';
 import { float, fwidth, mix, smoothstep, texture, uniform, vec2, vec4 } from 'three/tsl';
 import { Vector2 as THREE_Vector2 } from 'three/webgpu';
-import { bandLimitedFbm2, coordFootprint } from '../foam/foamShading';
+import { bandLimitedFbm2, coordAreaFootprint, coordFootprint } from '../foam/foamShading';
+import { orientationWeights, type OrientationOps } from './wakeOrientation';
 import { flowFoamParams, type FlowFoamParams } from '../params/flowfoam';
 import { regionEdgeFadeCpu } from './flowMath';
 import { coverageWeightedAgeNode } from './foamAge';
@@ -125,7 +126,7 @@ export const FLEET_WAKE_CHURN = 0;
  * sparse surfacing flecks at `fleckGain` — the bubbles popping on a boil or an old lane. (The wake mask itself carries no
  * usable texture at saturation: measured, a gate on it drew flat white sheets.) LOOK CALIBRATION against the chase/top-down shots (dense 15–30 m, lace by 40–60 m at planing).
  */
-export const WAKE_LACE = { freshLow: 0.25, freshHigh: 0.92, edgeFresh: 0.22, edgeAged: 0.72, fleckGain: 0.9, drift: 0.07, boilLow: 0.55, boilHigh: 0.9, edgeBoil: 0.03 } as const;
+export const WAKE_LACE = { freshLow: 0.25, freshHigh: 0.92, edgeFresh: 0.22, edgeAged: 0.72, fleckGain: 0.9, drift: 0.07, boilLow: 0.55, boilHigh: 0.9, edgeBoil: 0.16 } as const;
 /** W8 vessel mode: the near window's centre trails the hull by this many seconds of her speed … */
 export const NEAR_ASTERN_SECONDS = 1.2;
 /** W8 round 3 LOOK: churned-core relief height scale (m of fbm value) and its finite-difference step (m) */
@@ -242,7 +243,12 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
   };
   // §T.171: the far tier carries the SIM trail on the sim backend — same rates, its own decay
   const far = simFoam
-    ? createAccumulation(p, flowU, noAnalyticWake, { ...farProfile, simFoam: simFoam.rateNode, ...churnProfile })
+    ? createAccumulation(p, flowU, noAnalyticWake, {
+        ...farProfile,
+        simFoam: vessels > 0 ? simFoam.orientedRateNode! : simFoam.rateNode,
+        carryOrientation: vessels > 0,
+        ...churnProfile,
+      })
     : createAccumulation(p, flowU, wake.wakeFieldNode, farProfile);
   const uEdgeFade = uniform(p.edgeFade);
   const uFarStrength = uniform(p.farStrength);
@@ -662,29 +668,57 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
     laceUniforms: { uLaceFresh, uLaceEdge, uFleckGain },
     wakeWhiteNode: simFoam
       ? (worldXZ: any, maskFresh: any, coverage: any, fresh: any, _pixWorld: any, contact: any = float(0)): any => {
-          // round 5: the AREA footprint √(fx·fz) of the screen derivatives in world units — the caller's max() is the
+          // round 5: the area footprint in world units — the caller's max() is the
           // along-view stretch of a grazing view, which faded a close (7 m) camera's lace to its mean (a milky sheet).
           // The fbm octaves band-limit themselves per axis (coordFootprint) and the gate's knee widens with fwidth.
-          const fw = fwidth(worldXZ);
-          const pixWorld = fw.x.mul(fw.y).max(1e-8).sqrt();
-          // W8 round 3: ANISOTROPIC, multi-scale — the flow frame of her track (along, across); streaks run with the
-          // wake. Three scales blended before the ridge: patches (6 × 24 m), filaments (0.9 × 5 m), bubbles (0.3 m).
-          // Heading remains defined at rest. Normalizing velocity with a
-          // fixed northward offset distorted the frame at crawling speeds.
-          const dir = simFoam.uniforms.uHullDirection;
-          const along = worldXZ.dot(dir);
-          const across = worldXZ.dot(vec2(dir.y.negate(), dir.x));
+          const pixWorld = coordAreaFootprint(worldXZ);
+          // Vessel lace reads the emission history in the far tier's spare
+          // channels, not the player's current heading. Crossing wakes lose
+          // anisotropy smoothly. Blend values from fixed coordinate frames:
+          // rotating world coordinates by a varying field creates combs.
+          const orientationOps: OrientationOps<any> = {
+            k: float, add: (a, b) => a.add(b), sub: (a, b) => a.sub(b),
+            mul: (a, b) => a.mul(b), div: (a, b) => a.div(b), max: (a, b) => a.max(b),
+          };
+          const history = vessels > 0 ? texture(far.foamTexture, regionUv(far, worldXZ)) : null;
+          const q = history ? history.ba.div(history.r.max(1e-6)).mul(regionEdge(far, uFarEdgeFade, worldXZ)) : null;
+          const laceCoord = (width: number, length: number): any => {
+            const dir = simFoam.uniforms.uHullDirection;
+            return vec2(worldXZ.dot(vec2(dir.y.negate(), dir.x)).div(width), worldXZ.dot(dir).div(length));
+          };
           const drift = flowU.uTime.mul(WAKE_LACE.drift);
           const fbmAt = (c: any, oct: number): any => bandLimitedFbm2(c, oct, coordFootprint(c));
-          const patch = fbmAt(vec2(across.div(6), along.div(24)).add(vec2(drift.mul(0.3), 0)), 2);
-          const filCoord = vec2(across.div(0.9), along.div(5)).add(vec2(drift, drift.mul(-0.4)));
-          const fil = fbmAt(filCoord, 3);
+          const patch = fbmAt((q ? worldXZ.div(6) : laceCoord(6, 24)).add(vec2(drift.mul(0.3), 0)), 2);
+          let fil: any;
+          let filFootprint: any;
+          if (q) {
+            const weights = orientationWeights(orientationOps, q.x, q.y);
+            const bent = worldXZ.add(vec2(worldXZ.y.mul(0.23).sin(), worldXZ.x.mul(0.29).sin()).mul(0.4));
+            const axes = [[1, 0], [Math.SQRT1_2, Math.SQRT1_2], [0, 1], [-Math.SQRT1_2, Math.SQRT1_2]];
+            const centred = float(0).toVar(), energy = float(0).toVar(), fp = float(0).toVar();
+            axes.forEach(([x, z], i) => {
+              const c = vec2(bent.dot(vec2(-z, x)).div(0.9), bent.dot(vec2(x, z)).div(5))
+                .add(vec2(drift, drift.mul(-0.4)));
+              const footprint = coordFootprint(c);
+              centred.addAssign(bandLimitedFbm2(c, 1, footprint).sub(0.5).mul(weights[i]));
+              energy.addAssign(weights[i].mul(weights[i]));
+              fp.addAssign(footprint.mul(weights[i]));
+            });
+            // Retain contrast while fields blend; do not let a crossing's
+            // average collapse to the ridge function's solid-white maximum.
+            fil = centred.div(energy.sqrt()).add(0.5);
+            filFootprint = fp;
+          } else {
+            const c = laceCoord(0.9, 5).add(vec2(drift, drift.mul(-0.4)));
+            fil = fbmAt(c, 3);
+            filFootprint = coordFootprint(c);
+          }
           const bub = fbmAt(worldXZ.div(0.3).add(vec2(drift.mul(3), drift.mul(-2))), 2);
           // round 3: the hull-contact line is cm–dm lace, not a stroke — at the contact share the blend swaps its patches
           // for 8 cm bubbles and its edge rises (a thin broken line)
           const fine = fbmAt(worldXZ.div(0.08).add(vec2(drift.mul(6), drift.mul(-5))), 2);
           const c = contact.clamp(0, 1);
-          const m = mix(fil.mul(0.55).add(patch.mul(0.3)).add(bub.mul(0.15)), fine.mul(0.55).add(bub.mul(0.25)).add(fil.mul(0.2)), c);
+          const m = mix(fil.mul(0.45).add(patch.mul(0.2)).add(bub.mul(0.35)), fine.mul(0.55).add(bub.mul(0.25)).add(fil.mul(0.2)), c);
           // ridged: filaments where the blend crosses its mean. Round 6 (the 03 sheet, found by toggling the white term):
           // blending three fbm fields shrinks the spread to σ ≈ 0.1 about 0.5, so the ridge sat near its maximum almost
           // everywhere and the gate passed as a solid film. Restore a ~uniform spread (×4 about the mean) before ridging.
@@ -701,7 +735,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
           // @band-limited-elsewhere: a VALUE gate on the filtered coverage sample and freshness (no spatial period)
           const boil = smoothstep(WAKE_LACE.boilLow, WAKE_LACE.boilHigh, coverage).mul(t);
           const edge = mix(lacyEdge, float(WAKE_LACE.edgeBoil), boil);
-          const knee = fwidth(ridge).mul(1.5).max(0.04);
+          const knee = fwidth(ridge).mul(1.5).max(0.08);
           const gate = smoothstep(edge, edge.add(knee), ridge);
           // past the lace cell's pixel scale the gate resolves to its own mean: P(r² > e) = 1 − √e for a ~uniform ridge r
           // @band-limited-elsewhere: this IS the band limit — the caller's pixel footprint (fwidth of worldXZ) against the lace cell
@@ -712,7 +746,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
           // footprint along the view — the gate passed everywhere and drew a solid pale sheet. The gate is also retired
           // by the filament field's own footprint (cells per pixel, both axes), not just the pixel area.
           // @band-limited-elsewhere: these two ARE the band limit (the field's coordinate footprint and the pixel area)
-          const filResolved = smoothstep(float(0.35), float(0.12), coordFootprint(filCoord));
+          const filResolved = smoothstep(float(0.35), float(0.12), filFootprint);
           // @band-limited-elsewhere: as above
           const resolved = smoothstep(float(0.09), float(0.025), pixWorld).mul(filResolved);
           // even dense churn is not a flat decal: its brightness follows the same filaments
@@ -821,8 +855,7 @@ export function createFlowFoam(opts: FlowFoamOptions = {}) {
       // round 4: the relief is a sub-metre lump field — fade it (to a smooth mean surface) once a pixel spans a lump's
       // tenth, so a grazing or night view does not alias it into streaky glints
       // @band-limited-elsewhere: this IS the band limit — the pixel footprint against the lump scale
-      const fwr = fwidth(worldXZ);
-      const k = cov.mul(WAKE_CHURN_RELIEF / WAKE_CHURN_STEP).mul(smoothstep(0.12, 0.04, fwr.x.mul(fwr.y).max(1e-8).sqrt()));
+      const k = cov.mul(WAKE_CHURN_RELIEF / WAKE_CHURN_STEP).mul(smoothstep(0.12, 0.04, coordAreaFootprint(worldXZ)));
       return wave.add(vec2(hx.sub(h0), hz.sub(h0)).mul(k));
     },
 

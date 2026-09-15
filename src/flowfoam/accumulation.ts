@@ -26,6 +26,9 @@
  *   ba transverse Kelvin slope (signed) — OVERWRITTEN every frame, never
  *      accumulated: the Kelvin pattern is steady in the SHIP's frame, so at a
  *      fixed world texel its phase advances and a time integral averages to 0.
+ *   Far vessel tier only: .ba instead carry foam-weighted line orientation.
+ *      This tier has no surface slope. Its moments share foam's advection,
+ *      decay, saturation and diffusion, so later steering cannot rotate history.
  *
  * A SECOND, SEPARATE TEXTURE carries the wake's ELEVATION (`elevTexture`, near
  * tier only, RGBA16F, .r used). Three reasons it is its own texture and not a
@@ -68,6 +71,7 @@ import { worldIntersectionMaskNode } from './intersectionMask';
 import { flowVectorNode, type FlowNoiseUniforms } from './flowNoise';
 import { blurMixForDt, decayedSourceDuration, regionShiftUv, snapToTexel } from './flowMath';
 import type { FlowFoamParams } from '../params/flowfoam';
+import { retainOrientation } from './wakeOrientation';
 
 /** scene layer owned by the injection capture (tagged meshes get it) */
 export const FOAM_INJECTION_LAYER = 27;
@@ -130,6 +134,9 @@ export interface AccumProfile {
    * box-filter the sim over its own footprint.
    */
   simFoam?: (worldXZ: any, tierTexel: number) => any;
+  /** Far vessel tier only: simFoam returns RGBA; .ba are foam-weighted line
+   * orientation moments, advected, decayed and blurred with .r. */
+  carryOrientation?: boolean;
   /**
    * §T.199 this tier's eddy gain inside the trail (default `p.wakeChurn`) — a uniform VALUE, same WGSL. The speedboat
    * fleet sets its own (flowfoam index `FLEET_WAKE_CHURN`): ×(1 + 1.8) curl in saturated foam swirled the race trail
@@ -164,6 +171,9 @@ export function createAccumulation(
   wakeFieldNode?: (worldXZ: any, detail: boolean, texel: any) => any,
   profile: AccumProfile = nearProfile(p),
 ) {
+  if (profile.carryOrientation && (profile.useDetail || !profile.simFoam || profile.blurSlope === false)) {
+    throw new Error('Wake orientation requires a non-detail sim tier with all channels blurred');
+  }
   const res = profile.res;
 
   const makeState = (): THREE.StorageTexture => {
@@ -340,11 +350,16 @@ export function createAccumulation(
       const y0 = int(ty.floor());
       const fx = tx.fract();
       const fy = ty.fract();
-      // only .rg advect — the transverse slope is a fresh analytic write
-      const t00 = loadZero(texA, x0, y0).rg;
-      const t10 = loadZero(texA, x0.add(1), y0).rg;
-      const t01 = loadZero(texA, x0, y0.add(1)).rg;
-      const t11 = loadZero(texA, x0.add(1), y0.add(1)).rg;
+      // Near .ba are instantaneous slope. Far vessel .ba retain orientation
+      // and must use exactly the same history lookup as their foam coverage.
+      const history = (xi: any, yi: any): any => {
+        const t = loadZero(texA, xi, yi);
+        return profile.carryOrientation ? t : t.rg;
+      };
+      const t00 = history(x0, y0);
+      const t10 = history(x0.add(1), y0);
+      const t01 = history(x0, y0.add(1));
+      const t11 = history(x0.add(1), y0.add(1));
       // §V23 functional mix(a, b, t)
       const prev = mix(mix(t00, t10, fx), mix(t01, t11, fx), fy);
       const inject = profile.useCapture
@@ -358,20 +373,31 @@ export function createAccumulation(
         : { rate: vec4(0, 0, 0, 0), elev: float(0) };
       const wake = field.rate;
       // §T.171: on the sim backend the doses are the sim's (simFoam.ts), not the analytic envelope's
+      // uSourceDt is vec2(foam duration, slick duration). Both orientation
+      // channels use the FOAM duration; implicit vec2-to-vec4 padding would
+      // zero .b and give .a a full second of injection on every frame.
       const rate = profile.simFoam
-        ? profile.simFoam(vec2(wx, wz), profile.size() / res).mul(uSourceDt).mul(uWakeScale)
+        ? profile.simFoam(vec2(wx, wz), profile.size() / res)
+            .mul(profile.carryOrientation ? vec4(uSourceDt, uSourceDt.x, uSourceDt.x) : uSourceDt).mul(uWakeScale)
         : wake.rg.mul(uSourceDt).mul(uWakeScale);
-      const foam = prev.x.mul(uDecay).add(inject.mul(uInjectPerFrame)).add(rate.x).min(1);
+      const uncappedFoam = prev.x.mul(uDecay).add(inject.mul(uInjectPerFrame)).add(rate.x);
+      const foam = uncappedFoam.min(1);
       // the slick is a coverage that BUILDS and then relaxes — same accumulate/
       // decay shape as the foam, an order of magnitude slower (a real slick
       // outlives the whitewater that made it by minutes)
       const slick = prev.y.mul(uSlickDecay).add(rate.y).min(1);
-      // .ba: NOT accumulated. §V44 clamped at source — the material adds these
-      // straight onto the surface slope.
+      // Capping coverage must scale its orientation moment by the same factor;
+      // otherwise saturated cells would retain more than unit anisotropy.
+      const ba = profile.carryOrientation
+        ? retainOrientation<any>({
+            k: float, add: (a, b) => a.add(b), sub: (a, b) => a.sub(b),
+            mul: (a, b) => a.mul(b), div: (a, b) => a.div(b), max: (a, b) => a.max(b),
+          }, prev.ba, rate.ba, uDecay, foam, uncappedFoam)
+        : null;
       textureStore(
         texB,
         ivec2(x, y),
-        vec4(foam, slick, wake.z.clamp(-1, 1), wake.w.clamp(-1, 1)),
+        profile.carryOrientation ? vec4(foam, slick, ba) : vec4(foam, slick, wake.z.clamp(-1, 1), wake.w.clamp(-1, 1)),
       ).toWriteOnly();
       /**
        * The elevation, written NOT scaled by dt and NOT by `uWakeScale`: it is

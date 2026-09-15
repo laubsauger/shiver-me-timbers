@@ -54,6 +54,20 @@ export function jetSpreadRate(excess: number, advance: number): number {
 /** potential-core length of a round jet, in diameters (Rajaratnam 1976: ≈ 6 D) */
 export const JET_CORE_DIAMETERS = 6;
 
+/** Advance the finite wash front relative to its prop (metres). Boat travel
+ * leaves water behind, while a powered stationary prop also transports water
+ * aft. Outside the potential core, axial excess decreases as core/distance.
+ * Integrate that decaying contribution exactly before adding this tick's
+ * boat travel; a long-lived stationary jet cannot grow at nozzle speed forever.
+ * Inputs are finite, nonnegative source values supplied by setPropWash. */
+export function advanceJetRun(run: number, advance: number, excess: number, radius: number, dt: number): number {
+  const core = 2 * JET_CORE_DIAMETERS * radius;
+  const inCoreTime = excess > 0 ? Math.min(dt, Math.max(0, core - run) / excess) : 0;
+  const start = run + excess * inCoreTime;
+  const transported = Math.sqrt(start * start + 2 * excess * core * (dt - inCoreTime));
+  return transported + Math.abs(advance) * dt;
+}
+
 /**
  * One prop's wash, handed per tick by the vessel that owns the drive.
  */
@@ -253,11 +267,12 @@ export const EXHAUST_PLUME_SPREAD = 0.1;
 
 /**
  * W8 WHERE THE EXHAUST BOILS. Gas leaves the hub d below the surface, rises at w = EXHAUST_RISE while the water carries
- * it aft at U_a: it surfaces at s = d·U_a/w aft of the prop, spread over σ = r + d + S_p·d·√(1 + (U_a/w)²) — the disc, the
+ * it aft through the boat-relative stream and the prop's decaying jet. The
+ * finite jet transport over its rise time gives s; σ = r + d + S_p·√(d² + s²) — the disc, the
  * radial surface outflow a surfacing bubble plume drives (it reaches about the source depth out, Milgram & Van Houten
  * 1982) and the plume's own growth along its slanted path. The share that
- * rises out as a BOIL rather than being shredded into the slipstream is φ = w/(w + U_a) (the plume's rise against its
- * advection): ≈ 0.23 at 1 m/s, 0.06 at 5 m/s, 0.01 at race speed — visible at idle, swallowed by the wash at speed.
+ * rises out as a BOIL rather than being shredded into the slipstream is φ = w/(w + U_transport), using the mean
+ * transport speed during rise. In neutral this reduces to the boat-relative stream; under load the jet also carries gas aft.
  * The remaining (1 − φ)·Q_ex is slipstream air (`aerationSpeed`).
  */
 export function exhaustBoil(j: Pick<PropWashInput, 'propRps' | 'lossPower' | 'thrust' | 'advance' | 'depth' | 'discArea'>): { flux: number; share: number; along: number; sigma: number } {
@@ -265,8 +280,12 @@ export function exhaustBoil(j: Pick<PropWashInput, 'propRps' | 'lossPower' | 'th
   const u = Math.abs(Number.isFinite(j.advance) ? j.advance : 0);
   const d = Math.max(0, Number.isFinite(j.depth) ? j.depth : 0);
   const r = Number.isFinite(j.discArea) && j.discArea > 0 ? Math.sqrt(j.discArea / Math.PI) : 0;
-  const share = EXHAUST_RISE / (EXHAUST_RISE + u);
-  return { flux: q, share, along: (d * u) / EXHAUST_RISE, sigma: r + d + EXHAUST_PLUME_SPREAD * d * Math.hypot(1, u / EXHAUST_RISE) };
+  const excess = jetExcessSpeed(u, j.thrust, j.discArea);
+  const riseTime = d / EXHAUST_RISE;
+  const along = advanceJetRun(0, u, excess, r, riseTime);
+  const transport = riseTime > 0 ? along / riseTime : u + excess;
+  const share = EXHAUST_RISE / (EXHAUST_RISE + transport);
+  return { flux: q, share, along, sigma: r + d + EXHAUST_PLUME_SPREAD * Math.hypot(d, along) };
 }
 
 /** actuator-disc jet excess V_j − U_a = √(U_a² + 2T/(ρA)) − U_a (m/s, ≥ 0); 0 for any non-physical input */
@@ -296,4 +315,3 @@ export function propJetSample(j: PropWashInput, out: HydroSample = { x: 0, z: 0,
   out.depth = d;
   return out;
 }
-

@@ -23,10 +23,12 @@ import { nearestSample } from '../src/race/ai/line';
 import { buildPilotSetup, type PilotSetup } from '../src/race/ai/pilot';
 import type { Course, CourseElement, RacerStanding, Vec2 } from '../src/race/types';
 import { BoatFleet } from '../src/sim-worker/fleet';
-import { AI_IN_LEN, AI_OUT_LEN, HASH_SEED } from '../src/sim-worker/layout';
+import { AI_IN_LEN, AI_OUT_LEN, HASH_SEED, TR } from '../src/sim-worker/layout';
+import { CONTACT_BOAT } from '../src/sea-physics/boatCollide';
 import type { TransportKind, WorkerPort } from '../src/sim-worker/transport';
 import { CpuOcean } from '../src/sea-physics/cpuOcean';
 import { weatherPresets } from '../src/weather/presets';
+import { SPEEDBOAT_SEAS, type SpeedboatSeaName } from '../src/params/speedboatSea';
 
 // ── the synthetic course: 9 gates + 2 turn marks, ≈ 1.5 km, counter-clockwise ─────────────────────────────────
 interface Spot {
@@ -84,15 +86,26 @@ export function syntheticCourse(laps = 3): Course {
   };
 }
 
-export type SeaState = 'calm' | 'breeze' | 'working';
+/**
+ * The speedboat's own seas (src/params/speedboatSea.ts SPEEDBOAT_SEAS, what the page applies over the weather rung):
+ * calm (Hs ≈ 0.16 m), working (the race default, Hs ≈ 0.5 m), open (Hs ≈ 1.5 m). The synthetic course has no seabed, so
+ * no lee: every element meets the open sea. 'swell' = the shipped default ocean (the ladder's 'swell' rung, Hs 2.8 m wind
+ * sea), the race's Working sea before the speedboat presets.
+ */
+export type SeaState = SpeedboatSeaName | 'swell';
 
-/** Calm = the weather preset 'calm'. Working sea = the shipped default sea ('swell' preset: Beaufort 6, 11 m/s wind,
- *  0.34 m RMS swell) — no speedboat sea-state presets exist yet (design doc §5 names them, T181+ owns them). */
-export function seaParams(sea: SeaState): { ocean: OceanParams; sea: SeaPhysicsParams } {
+export function seaOceanParams(sea: SeaState): OceanParams {
   const ocean = structuredClone(oceanParams);
-  if (sea === 'calm') Object.assign(ocean, structuredClone(weatherPresets.calm.ocean));
-  if (sea === 'breeze') Object.assign(ocean, structuredClone(weatherPresets.breeze.ocean));
-  return { ocean, sea: { ...structuredClone(seaPhysicsParams), hullDraft: 0.5 } };
+  if (sea !== 'swell') {
+    const pr = SPEEDBOAT_SEAS[sea];
+    Object.assign(ocean, structuredClone(weatherPresets[pr.weather].ocean), structuredClone(pr.ocean));
+  }
+  return ocean;
+}
+
+/** hullDraft 0.5 m = the deep-V's rest draft (params/speedboatSea.ts speedboatDraft at the page's spawn CG: 0.5002) */
+export function seaParams(sea: SeaState): { ocean: OceanParams; sea: SeaPhysicsParams } {
+  return { ocean: seaOceanParams(sea), sea: { ...structuredClone(seaPhysicsParams), hullDraft: 0.5 } };
 }
 
 // ── gate geometry (independent of the pilot's corridors) ───────────────────────────────────────────────────────
@@ -148,6 +161,11 @@ function cross(c: Crossing, ax: number, az: number, bx: number, bz: number): num
   return (hx - c.ox) * c.ux + (hz - c.oz) * c.uz;
 }
 
+/** ticks of per-boat history kept for the event diagnostics (1.5 s) */
+const HIST = 90;
+/** deg: heel past this is a near miss (the measured steady turns sit at 18–26°, the departure test is 45°) */
+const HEEL_SCARE = 35;
+
 // ── the race ──────────────────────────────────────────────────────────────────────────────────────────────────
 export interface RaceOptions {
   roster: (ArchetypeId | Archetype)[];
@@ -166,6 +184,13 @@ export interface RaceOptions {
   gridGap?: number;
   /** stop after this many ticks regardless of laps (determinism runs) */
   ticks?: number;
+  /**
+   * §T.207 wakes: every hull floats on every other boat's wake, and the pilots read them (default true — the page's
+   * fleet carries wakes whenever a player is on it, npcFleet.ts)
+   */
+  wakes?: boolean;
+  /** §T.188 boat↔boat contacts inside the steppers (default true, as on the page) */
+  contacts?: boolean;
   /** diagnostics: called after every step for every boat */
   trace?: (tick: number, i: number, f: BoatFleet, info: { V: number; upY: number; drift: number; x: number; z: number; state: string }) => void;
 }
@@ -186,6 +211,17 @@ export interface RacerResult {
   missLog: string[];
   /** sim time of each crash */
   crashTimes: number[];
+  /** boat↔boat contact episodes this boat was in (a run of contact ticks counts once) */
+  boatContacts: number;
+  /** near misses: episodes of heel past HEEL_SCARE (35°) that did not end in a crash or hook (a run counts once) */
+  scares: number;
+  /**
+   * DIAGNOSTICS (§T.213): one line per crash / hook / miss / boat contact with the situation it happened in — the next
+   * element, speed, heel, drift, the pilot's controls, trim, wave lift, risk, cross-track and offset, the running sea read,
+   * the peak heel over the previous 1.5 s, the sea surface slope at the CG, and the nearest boat (its X astern / Y across,
+   * + inside its Kelvin wedge)
+   */
+  events: string[];
 }
 
 export interface RaceResult {
@@ -208,7 +244,13 @@ export async function runRace(o: RaceOptions): Promise<RaceResult> {
   const setup = o.setup ?? buildPilotSetup(course, o.roster, { seed, catchUp: o.catchUp ?? true });
   const N = o.roster.length;
   const p = seaParams(o.sea);
-  const fleet = new BoatFleet({ boats: N, kind: o.kind ?? 'main', workers: o.workers, spawn: o.spawn, seed, oceanParams: p.ocean, seaParams: p.sea, pilot: setup });
+  const wakes = o.wakes ?? true;
+  const contacts = o.contacts ?? true;
+  const fleet = new BoatFleet({
+    boats: N, kind: o.kind ?? 'main', workers: o.workers, spawn: o.spawn, seed, oceanParams: p.ocean, seaParams: p.sea, pilot: setup,
+    ...(wakes ? { wakeField: true } : {}),
+    ...(contacts ? { contacts: { boats: true }, trace: true } : {}),
+  });
   const wall0 = performance.now();
   try {
     await fleet.ready;
@@ -294,8 +336,50 @@ export async function runRace(o: RaceOptions): Promise<RaceResult> {
       vN: number;
       missLog: string[];
       crashTimes: number[];
+      boatContacts: number;
+      inContact: boolean;
+      scares: number;
+      scared: boolean;
+      events: string[];
+      /** ring of the last HIST ticks: tilt (deg), speed */
+      hTilt: Float64Array;
+      hV: Float64Array;
     };
-    const st: St[] = Array.from({ length: N }, () => ({ next: 0, started: false, lapStart: 0, laps: [], finished: -1, missed: 0, passed: 0, crashes: 0, hooks: 0, stuck: 0, tiltT: 0, crashT: 0, ghostT: 0, slowT: 0, hooked: false, state: 'racing', px: 0, pz: 0, progress: 0, maxThr: -Infinity, minThr: Infinity, vSum: 0, vN: 0, missLog: [], crashTimes: [] }));
+    const st: St[] = Array.from({ length: N }, () => ({ next: 0, started: false, lapStart: 0, laps: [], finished: -1, missed: 0, passed: 0, crashes: 0, hooks: 0, stuck: 0, tiltT: 0, crashT: 0, ghostT: 0, slowT: 0, hooked: false, state: 'racing', px: 0, pz: 0, progress: 0, maxThr: -Infinity, minThr: Infinity, vSum: 0, vN: 0, missLog: [], crashTimes: [], boatContacts: 0, inContact: false, scares: 0, scared: false, events: [], hTilt: new Float64Array(HIST), hV: new Float64Array(HIST) }));
+    const DEGR = 180 / Math.PI;
+    const poses: { x: number; z: number; vx: number; vz: number }[] = Array.from({ length: N }, () => ({ x: 0, z: 0, vx: 0, vz: 0 }));
+    const situation = (i: number, kind: string, V: number, upY: number, drift: number): string => {
+      const s = st[i];
+      const me = poses[i];
+      const ai = (slot: number): number => fleet.readAi(i, slot);
+      let peak = 0;
+      for (let k = 0; k < HIST; k++) peak = Math.max(peak, s.hTilt[k]);
+      const v0 = s.hV[(tick + 1) % HIST];
+      // the sea under her: surface slope along/across the course (m/m over ±3 m)
+      const U = Math.max(1e-6, Math.hypot(me.vx, me.vz));
+      const tx = me.vx / U;
+      const tz = me.vz / U;
+      const h = (dx: number, dz: number): number => mirror.heightAt(me.x + dx, me.z + dz, now);
+      const pitchSl = (h(3 * tx, 3 * tz) - h(-3 * tx, -3 * tz)) / 6;
+      const rollSl = (h(3 * tz, -3 * tx) - h(-3 * tz, 3 * tx)) / 6;
+      let near = '';
+      let nd = 60;
+      for (let j = 0; j < N; j++) {
+        if (j === i) continue;
+        const b = poses[j];
+        const d = Math.hypot(b.x - me.x, b.z - me.z);
+        if (d >= nd) continue;
+        nd = d;
+        const bu = Math.hypot(b.vx, b.vz);
+        const btx = bu > 1 ? b.vx / bu : 0;
+        const btz = bu > 1 ? b.vz / bu : 0;
+        const X = -((me.x - b.x) * btx + (me.z - b.z) * btz);
+        const Y = (me.z - b.z) * btx - (me.x - b.x) * btz;
+        const inWake = X > 0 && Math.abs(Y) < Math.tan((19.47 * Math.PI) / 180) * X + 4;
+        near = ` near #${j}(${(setup.boats[j] as Archetype).id}) d${d.toFixed(0)} X${X.toFixed(0)} Y${Y.toFixed(0)} U${bu.toFixed(0)}${inWake ? ' IN-WAKE' : ''}`;
+      }
+      return `${kind} t${now.toFixed(1)} next${s.next} V${V.toFixed(1)} (1.5s ago ${v0.toFixed(1)}) tilt${(Math.acos(Math.max(-1, Math.min(1, upY))) * DEGR).toFixed(0)} peak${peak.toFixed(0)} drift${(drift * DEGR).toFixed(0)} thr${ai(AI.THROTTLE).toFixed(2)} steer${(ai(AI.STEER) * DEGR).toFixed(1)} trim${ai(AI.TRIM).toFixed(2)} lift${ai(AI.WAVE_LIFT).toFixed(2)} risk${ai(AI.RISK).toFixed(2)} lvl${ai(AI.LEVEL)} xte${ai(AI.CROSS_TRACK).toFixed(1)} off${ai(AI.OFFSET).toFixed(1)} vT${ai(AI.TARGET_SPEED).toFixed(1)} sea${ai(AI.SEA).toFixed(2)} slope${(pitchSl * 100).toFixed(0)}/${(rollSl * 100).toFixed(0)}%${near}`;
+    };
     const pose = { position: [0, 0, 0], quaternion: [0, 0, 0, 1], velocity: [0, 0, 0], angularVelocity: [0, 0, 0] } as Parameters<BoatFleet['readPose']>[1];
     const envelope: number[] = [];
     const positions: number[][] = [];
@@ -354,6 +438,10 @@ export async function runRace(o: RaceOptions): Promise<RaceResult> {
         const [qx, qy, qz, qw] = pose.quaternion;
         const upY = 1 - 2 * (qx * qx + qz * qz);
         const V = Math.hypot(pose.velocity[0], pose.velocity[2]);
+        poses[i].x = x;
+        poses[i].z = z;
+        poses[i].vx = pose.velocity[0];
+        poses[i].vz = pose.velocity[2];
         const thr = fleet.readAi(i, AI.THROTTLE);
         s.maxThr = Math.max(s.maxThr, thr);
         s.minThr = Math.min(s.minThr, thr);
@@ -385,10 +473,12 @@ export async function runRace(o: RaceOptions): Promise<RaceResult> {
           } else if (u !== null && u >= c.miss[0] && u <= c.miss[1]) {
             s.missed++;
             s.missLog.push(`${k}@${time.toFixed(1)}:${u.toFixed(1)}`);
+            s.events.push(situation(i, `MISS ${k} u${u.toFixed(1)}`, V, upY, 0));
             onPass(k);
           } else if (u2 !== null && u2 >= crossings[k2].pass[0] && u2 <= crossings[k2].pass[1] && (s.started || k !== 0)) {
             s.missed++;
             s.missLog.push(`${k}@${time.toFixed(1)}:skipped`);
+            s.events.push(situation(i, `SKIP ${k}`, V, upY, 0));
             onPass(k);
             s.passed++;
             onPass(k2);
@@ -411,7 +501,24 @@ export async function runRace(o: RaceOptions): Promise<RaceResult> {
         let drift = Math.atan2(fx, fz) - Math.atan2(pose.velocity[0], pose.velocity[2]);
         drift = Math.abs(Math.atan2(Math.sin(drift), Math.cos(drift)));
         const dep = V > 5 && (upY < Math.SQRT1_2 || drift > Math.PI / 4);
-        if (dep && !s.hooked && s.state !== 'crashed') s.hooks++;
+        if (dep && !s.hooked && s.state !== 'crashed') {
+          s.hooks++;
+          s.events.push(situation(i, 'HOOK', V, upY, drift));
+        }
+        if (contacts) {
+          const src = fleet.readTrace(0, i, TR.CONTACT_SRC);
+          const touching = src === CONTACT_BOAT && s.state !== 'crashed';
+          if (touching && !s.inContact) {
+            s.boatContacts++;
+            s.events.push(`${situation(i, 'CONTACT', V, upY, drift)} with #${fleet.readTrace(0, i, TR.CONTACT_OTHER)} dv${fleet.readTrace(0, i, TR.CONTACT_DV).toFixed(2)}`);
+          }
+          s.inContact = touching;
+        }
+        s.hTilt[tick % HIST] = Math.acos(Math.max(-1, Math.min(1, upY))) * DEGR;
+        const scare = s.hTilt[tick % HIST] > HEEL_SCARE && s.state !== 'crashed';
+        if (scare && !s.scared) s.scares++;
+        s.scared = scare;
+        s.hV[tick % HIST] = V;
         o.trace?.(tick, i, fleet, { V, upY, drift, x, z, state: s.state });
         s.hooked = dep;
         // crash / respawn
@@ -444,13 +551,18 @@ export async function runRace(o: RaceOptions): Promise<RaceResult> {
             if (s.tiltT >= 0.3) {
               s.crashes++;
               s.crashTimes.push(time);
+              s.events.push(situation(i, 'CRASH', V, upY, 0));
+            } else {
+              s.stuck++;
+              s.events.push(situation(i, 'STUCK', V, upY, 0));
             }
-            else s.stuck++;
             s.state = 'crashed';
             s.crashT = 0;
           }
         }
         if (s.finished >= 0 && s.state !== 'finished') s.state = 'finished';
+        // the respawn ghost (crash machine `out.ghost` on the page): no boat↔boat contacts while crashed or ghosting
+        if (contacts) fleet.setGhost(i, s.state === 'crashed' || s.state === 'ghost');
         if (s.finished < 0) allDone = false;
       }
       if (allDone && o.ticks === undefined) {
@@ -476,6 +588,9 @@ export async function runRace(o: RaceOptions): Promise<RaceResult> {
         meanSpeed: s.vN ? s.vSum / s.vN : 0,
         missLog: s.missLog,
         crashTimes: s.crashTimes,
+        boatContacts: s.boatContacts,
+        scares: s.scares,
+        events: s.events,
       })),
       order,
       positions,

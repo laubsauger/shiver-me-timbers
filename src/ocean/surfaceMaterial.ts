@@ -2019,7 +2019,10 @@ export function buildOceanSurfaceMaterial(
           .mul(skylightCol.mul(uLightFloor.add(0.1)).mul(wakeContactW8.mul(0.5).oneMinus())
             .add(uSunLightColor.mul(ndl.mul(uLightGain).mul(0.6).mul(shade)))
             .add(wakeLed ?? vec3(0)));
-        wakeAmount = froth.mul(0.9).mul(foamGain);
+        // Froth is an optical layer, not a nearly opaque replacement for the
+        // surface. Keep the same depth control as the wake mask above so
+        // dense engine wash still reveals the displaced water beneath it.
+        wakeAmount = froth.mul(uWakeFoamDepth).negate().exp().oneMinus().mul(0.9).mul(foamGain);
       }
       col.assign(mix(col, wakeCol, wakeAmount));
       foamAmount.assign(whitecapAmount.max(wakeAmount).clamp(0, 1));

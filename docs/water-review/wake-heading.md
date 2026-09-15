@@ -18,8 +18,7 @@ The complete wake-foam simulation suite and ocean binding-budget suite pass
 (16 tests, single worker). Cockpit light tests were separately updated for
 the current per-boat LED-color API and pass (2 tests).
 
-This is deliberately a small correction. The filament frame still uses the
-current hero heading across the field, so turns can rotate older detail and
-rival trails. Correcting that requires historical or local flow orientation;
-it is deferred while only small changes are authorized. No GPU review or
-frame-rate claim accompanies this patch.
+This small correction originally left the filament frame tied to the current
+hero heading. The vessel path now retains source orientation in its existing
+far accumulation texture; see `wake-retained-orientation.md` for the subsequent
+implementation and GPU checks. The single-hull path keeps this unit-heading fix.

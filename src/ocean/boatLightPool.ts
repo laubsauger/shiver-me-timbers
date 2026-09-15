@@ -12,11 +12,11 @@
  * OPT-IN AT BUILD TIME, the `setActiveCaustics` convention: `setActiveBoatLightPool(pool)` BEFORE `buildSea`. With no
  * active pool `buildOceanSurfaceMaterial` adds no node at all, so the raft and pirate oceans are bit-identical.
  *
- * Colours arrive LINEAR and already multiplied by the LED level (0 = off), so an unused slot costs its arithmetic and
- * contributes exactly 0.
+ * Colours arrive LINEAR and already multiplied by the LED level (0 = off). Uniform zero-colour slots skip
+ * their lighting arithmetic; daylight and unused fleet slots contribute exactly 0.
  */
 import * as THREE from 'three/webgpu';
-import { Loop, cos, float, normalize, pow, sin, sign, uniform, uniformArray, vec3 } from 'three/tsl';
+import { If, Loop, cos, float, normalize, pow, sin, sign, uniform, uniformArray, vec3 } from 'three/tsl';
 import { boatLightParams, type BoatLightParams } from '../params/boatLights';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union (surfaceMaterial.ts convention)
@@ -88,30 +88,32 @@ export function boatLightPoolNode(pool: BoatLightPool, surfacePos: TslNode, norm
   const acc = vec3(0).toVar();
   const foamBoost = float(1).add(foam.mul(shape.w));
   Loop(pool.max, ({ i }: { i: TslNode }) => {
-    const pp = positions.element(i);
     const pc = colors.element(i);
-    const rel = surfacePos.sub(pp.xyz);
-    const c = cos(pp.w);
-    const s = sin(pp.w);
-    // body frame: forward (sin yaw, 0, cos yaw), right (cos yaw, 0, −sin yaw); metres
-    const alongM = rel.x.mul(s).add(rel.z.mul(c));
-    const acrossM = rel.x.mul(c).sub(rel.z.mul(s));
-    const along = alongM.div(shape.x);
-    const across = acrossM.div(shape.y);
-    const e2 = along.mul(along).add(across.mul(across));
-    // windowed (reaches exactly 0 at the ellipse) with a bright core near the hull
-    const win = float(1).sub(e2).max(0);
-    const fall = win.mul(win);
-    // the strip's nearest point on this fragment's side of the boat
-    const a = alongM.clamp(spec.z.negate(), spec.z);
-    const b = sign(acrossM).mul(spec.w);
-    const strip = vec3(pp.xyz.x.add(s.mul(a)).add(c.mul(b)), pp.xyz.y.add(GLINT_SOURCE_Y), pp.xyz.z.add(c.mul(a)).sub(s.mul(b)));
-    const L = normalize(strip.sub(surfacePos));
-    const diffuse = normal.dot(L).max(0);
-    const body = fall.div(e2.mul(5).add(1)).mul(shape.z).mul(diffuse.mul(1.6).add(0.12)).mul(foamBoost);
-    const H = normalize(L.add(viewDir));
-    const glint = pow(normal.dot(H).max(0), spec.x).mul(spec.y).mul(fall);
-    acc.addAssign(pc.xyz.mul(body.add(glint)));
+    If(pc.x.notEqual(0).or(pc.y.notEqual(0)).or(pc.z.notEqual(0)), () => {
+      const pp = positions.element(i);
+      const rel = surfacePos.sub(pp.xyz);
+      const c = cos(pp.w);
+      const s = sin(pp.w);
+      // body frame: forward (sin yaw, 0, cos yaw), right (cos yaw, 0, −sin yaw); metres
+      const alongM = rel.x.mul(s).add(rel.z.mul(c));
+      const acrossM = rel.x.mul(c).sub(rel.z.mul(s));
+      const along = alongM.div(shape.x);
+      const across = acrossM.div(shape.y);
+      const e2 = along.mul(along).add(across.mul(across));
+      // windowed (reaches exactly 0 at the ellipse) with a bright core near the hull
+      const win = float(1).sub(e2).max(0);
+      const fall = win.mul(win);
+      // the strip's nearest point on this fragment's side of the boat
+      const a = alongM.clamp(spec.z.negate(), spec.z);
+      const b = sign(acrossM).mul(spec.w);
+      const strip = vec3(pp.xyz.x.add(s.mul(a)).add(c.mul(b)), pp.xyz.y.add(GLINT_SOURCE_Y), pp.xyz.z.add(c.mul(a)).sub(s.mul(b)));
+      const L = normalize(strip.sub(surfacePos));
+      const diffuse = normal.dot(L).max(0);
+      const body = fall.div(e2.mul(5).add(1)).mul(shape.z).mul(diffuse.mul(1.6).add(0.12)).mul(foamBoost);
+      const H = normalize(L.add(viewDir));
+      const glint = pow(normal.dot(H).max(0), spec.x).mul(spec.y).mul(fall);
+      acc.addAssign(pc.xyz.mul(body.add(glint)));
+    });
   });
   return acc;
 }

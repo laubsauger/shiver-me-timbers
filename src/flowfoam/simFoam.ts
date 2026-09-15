@@ -84,12 +84,13 @@ import { GRAVITY } from '../ocean/oceanMath';
 import { SIM_DT } from '../core/loop';
 import { simNearWeight, type SimGrid, type SimResampleOps } from './simInjection';
 import { WAKE_TEX_CHANNEL } from '../wake/wakeSolverMath';
-import { JET_CORE_DIAMETERS, JET_SPREAD, aerationSpeed, exhaustBoil, jetExcessSpeed, jetSpreadRate, propWashValid, type PropWashInput } from '../wake/propWash';
+import { JET_CORE_DIAMETERS, JET_SPREAD, advanceJetRun, aerationSpeed, exhaustBoil, jetExcessSpeed, jetSpreadRate, propWashValid, type PropWashInput } from '../wake/propWash';
 
 export { JET_CORE_DIAMETERS, JET_SPREAD, jetExcessSpeed, type PropWashInput };
 import { WAKE_MAX_VESSELS, WAKE_NEAR_BLEND_WIDTHS, type WakeSim } from '../wake/wakeSim';
 import { DRIVE_STRUT, appendageFoamDrive, strutsFromJets, type AppendageInput } from '../wake/appendages';
 import type { FlowFoamParams } from '../params/flowfoam';
+import { orientationMoment } from './wakeOrientation';
 
 /** research §5.4: breaking onset slope */
 export const BREAK_ONSET_SLOPE = 0.3;
@@ -1171,11 +1172,12 @@ export function createSimFoamField(
 
   /** §T.195 vessel mode (header of `vessels`): the per-vessel churn inside the domain + every bounded ribbon anywhere */
   const NODE_BOOL = { ...NODE, le: (a: any, b: any) => a.lessThanEqual(b), and: (a: any, b: any) => a.and(b) };
-  const fleetRateNode = (worldXZ: any, tierTexel: number): any => {
+  const fleetRateNode = (worldXZ: any, tierTexel: number, carryOrientation = false): any => {
     const S = farSupersample(tierTexel, texel);
     const g = worldXZ.sub(uCenter).div(texel).add(n / 2).toVar();
     const reach = (0.5 * tierTexel) / texel + 1;
     const foamOut = float(0).toVar();
+    const orientation = carryOrientation ? vec2(0, 0).toVar() : null;
     const inside = g.x.greaterThan(-reach).and(g.x.lessThan(n - 1 + reach)).and(g.y.greaterThan(-reach)).and(g.y.lessThan(n - 1 + reach));
     If(inside, () => {
       const slots: VesselChurnSlot<any>[] = [];
@@ -1220,6 +1222,7 @@ export function createSimFoamField(
       } else {
         foamOut.assign(farFoam);
       }
+      if (orientation) orientation.addAssign(vec2(...orientationMoment(NODE, vx, vz, foamOut)));
     });
     const jet = float(0).toVar();
     const boil = float(0).toVar();
@@ -1232,10 +1235,16 @@ export function createSimFoamField(
       If(jetInReach(NODE_BOOL, dx, dz, pos.z, pos.w, radius, float(tierTexel)), () => {
         // @band-limited-elsewhere: a window along the jet axis over 2 m (≥ 8 near texels), evaluated in COMPUTE
         const laid = jetRunWindow(NODE, dx, dz, pos.z, pos.w, uJetRun!.element(int(j)).x);
-        jet.addAssign(jetFoamRate(NODE, dx, dz, pos.z, pos.w, meta.z, radius, float(tierTexel), meta.w.clamp(0, JET_SPREAD), true).mul(laid));
+        const jetRate = jetFoamRate(NODE, dx, dz, pos.z, pos.w, meta.z, radius, float(tierTexel), meta.w.clamp(0, JET_SPREAD), true).mul(laid).toVar();
+        jet.addAssign(jetRate);
         const b = uJetBoil!.element(int(j));
-        boil.addAssign(exhaustBoilRate(NODE, dx, dz, pos.z, pos.w, meta.x, b.x, b.y, float(tierTexel)));
-        jet.addAssign(strutFoamRate(NODE, dx, dz, pos.z, pos.w, b.z, b.w, float(tierTexel)).mul(laid));
+        // Surfacing exhaust cannot appear beyond water reached since this
+        // prop entered. The steady plume centre alone would pop in remotely.
+        const boilRate = exhaustBoilRate(NODE, dx, dz, pos.z, pos.w, meta.x, b.x, b.y, float(tierTexel)).mul(laid).toVar();
+        const strutRate = strutFoamRate(NODE, dx, dz, pos.z, pos.w, b.z, b.w, float(tierTexel)).mul(laid).toVar();
+        boil.addAssign(boilRate);
+        jet.addAssign(strutRate);
+        if (orientation) orientation.addAssign(vec2(...orientationMoment(NODE, pos.z, pos.w, jetRate.add(strutRate).mul(uChurnRate).add(boilRate))));
       });
     }
     // Reject whole vessel histories before scanning their bounded packet lists.
@@ -1258,19 +1267,23 @@ export function createSimFoamField(
           const lateral = b.w.add(tierTexel * tierTexel);
           If(a.w.greaterThan(0).and(along.mul(along).lessThan(longitudinal.mul(16)))
             .and(across.abs().lessThan(a.z.add(lateral.sqrt().mul(4)))), () => {
-            sheet.addAssign(chineEmissionRate(NODE, along, across, a.z, a.w, longitudinal, lateral));
+            const sheetRate = chineEmissionRate(NODE, along, across, a.z, a.w, longitudinal, lateral).toVar();
+            sheet.addAssign(sheetRate);
+            if (orientation) orientation.addAssign(vec2(...orientationMoment(NODE, b.x, b.y, sheetRate)));
           });
         });
       });
     }
     const foam = foamOut.add(uChurnRate.mul(jet)).add(boil).add(sheet);
-    return vec2(foam, foam.mul(uSlickPerFoam));
+    return orientation ? vec4(foam, foam.mul(uSlickPerFoam), orientation) : vec2(foam, foam.mul(uSlickPerFoam));
   };
 
   const fin = (v: number, fallback: number): number => (Number.isFinite(v) ? v : fallback);
 
   return {
     rateNode: vesselSlots > 0 ? fleetRateNode : rateNode,
+    /** Far tier only: the two spare channels carry source-weighted orientation. */
+    orientedRateNode: vesselSlots > 0 ? (worldXZ: any, tierTexel: number) => fleetRateNode(worldXZ, tierTexel, true) : null,
     vesselSlots,
     /** subsamples per axis a tier of this texel gets (tests / docs) */
     supersample: (tierTexel: number) => farSupersample(tierTexel, texel),
@@ -1304,11 +1317,13 @@ export function createSimFoamField(
     /** §T.180 c: this tick's props (at most `jetSlots` are drawn) */
     setPropWash(inputs: readonly PropWashInput[]): void {
       jets = inputs.slice(0, jetSlots);
-      // W8 round 4: per FIXED TICK — the distance each slot's prop has run since it last entered the water
+      // Per fixed tick: travel plus the jet's own finite aft transport. At
+      // standstill, thrust must still grow a wash behind the prop.
       for (let j = 0; j < jetSlots; j++) {
         const q = jets[j];
         const wet = !!q && propWashValid(q) && q.immersion > 0;
-        runs[j] = wet ? Math.min(1e4, runs[j] + Math.abs(q.advance) * SIM_DT) : 0;
+        runs[j] = wet ? Math.min(1e4, advanceJetRun(runs[j], q.advance,
+          jetExcessSpeed(q.advance, q.thrust, q.discArea), Math.sqrt(q.discArea / Math.PI), SIM_DT)) : 0;
       }
     },
     /** Retained per-vessel emissions (hero first); at most `vesselSlots` histories drawn. */

@@ -1,0 +1,62 @@
+<!doctype html>
+<title>Spray return height GPU regression</title>
+<pre id="report">Running WebGPU spray checks…</pre>
+<script type="module">
+import * as THREE from 'three/webgpu';
+import { Fn, If, float, instanceIndex, vec4 } from 'three/tsl';
+import { createSprayPool } from '/src/foam/sprayPool.ts';
+
+const renderer = new THREE.WebGPURenderer();
+await renderer.init();
+const common = { life: () => 2, gravity: () => 9.81, drag: () => 0 };
+const legacy = createSprayPool(2, { ...common, killBelow: () => 1.95 });
+const local = createSprayPool(2, { ...common, returnBelowBirth: 0.05 });
+const results = [];
+function spawn(pool, onlyFirst = false, height = 0, age = 0) {
+  const pass = Fn(() => {
+    If(instanceIndex.lessThan(onlyFirst ? 1 : 2), () => {
+      pool.posAge.element(instanceIndex).assign(vec4(0, float(instanceIndex).mul(4).add(height + age), 0, age));
+      pool.velSize.element(instanceIndex).assign(vec4(0, 1, 0, 1));
+      if (pool.birthHeight) pool.birthHeight.element(instanceIndex).assign(float(instanceIndex).mul(4).add(height));
+    });
+  })().compute(pool.count);
+  pool.run(renderer, pass);
+}
+async function read(pool) { return new Float32Array(await renderer.getArrayBufferAsync(pool.posAge.value)); }
+function check(label, pass, values) {
+  results.push({ label, pass, values });
+  if (!pass) throw new Error(label);
+}
+try {
+  legacy.step(renderer); local.step(renderer);
+  spawn(legacy); spawn(local);
+  for (let i = 0; i < 8; i++) { legacy.step(renderer); local.step(renderer); }
+  const old = await read(legacy), fresh = await read(local);
+  check('old shared plane kills the lower boat early', old[3] > 2 && old[7] < 2, [old[3], old[7]]);
+  check('both local sprays survive above their own surface', fresh[3] < 2 && fresh[7] < 2, [fresh[3], fresh[7]]);
+  check('vertical translation preserves trajectory', Math.abs((fresh[5] - fresh[1]) - 4) < 1e-5, [fresh[1], fresh[5]]);
+  for (let i = 0; i < 12; i++) local.step(renderer);
+  const landed = await read(local);
+  check('both sprays die after returning below their own surface', landed[3] > 2 && landed[7] > 2, [landed[3], landed[7]]);
+  spawn(local, true, 10);
+  for (let i = 0; i < 8; i++) local.step(renderer);
+  const reused = await read(local);
+  check('reused slot captures its new launch surface', reused[3] < 2 && reused[1] > 10, [reused[1], reused[3]]);
+  for (let i = 0; i < 12; i++) local.step(renderer);
+  const returned = await read(local);
+  check('reused slot returns to the new surface', returned[3] > 2, [returned[1], returned[3]]);
+  spawn(local, true, 0, 0.008);
+  for (let i = 0; i < 8; i++) local.step(renderer);
+  const subTick = await read(local);
+  check('sub-tick birth replaces the previous surface', subTick[3] < 2 && subTick[1] > 0, [subTick[1], subTick[3]]);
+  for (let i = 0; i < 12; i++) local.step(renderer);
+  const subTickReturn = await read(local);
+  check('sub-tick birth returns to its actual source surface', subTickReturn[3] > 2, [subTickReturn[1], subTickReturn[3]]);
+  window.result = { pass: true, results };
+} catch (error) {
+  window.result = { pass: false, results, error: String(error) };
+} finally {
+  document.querySelector('#report').textContent = JSON.stringify(window.result, null, 2);
+  legacy.dispose(); local.dispose(); renderer.dispose();
+}
+</script>

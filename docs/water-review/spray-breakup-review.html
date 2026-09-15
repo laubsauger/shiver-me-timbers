@@ -1,0 +1,18 @@
+<!doctype html>
+<title>Spray breakup: current production shader</title>
+<body style="margin:0;background:#071b25">
+<script type="module">
+import * as THREE from 'three/webgpu';
+import {Fn,If,float,instanceIndex,vec4,vec3} from 'three/tsl';
+import {createSprayPool as after} from '/src/foam/sprayPool.ts';
+const renderer=new THREE.WebGPURenderer({antialias:false,trackTimestamp:true});
+renderer.setSize(1280,720);await renderer.init();document.body.append(renderer.domElement);
+const camera=new THREE.PerspectiveCamera(45,1280/720,.1,100);camera.position.set(0,2,12);camera.lookAt(0,2,0);
+const pools=[after].map(make=>make(24,{clumps:true,sizeScale:()=>2,life:()=>1,drag:()=>0,gravity:()=>0,opacity:()=>1,clumpAgeFalloff:()=>2.5,colorNode:()=>vec3(.85,.88,.8),blending:THREE.NormalBlending}));
+const scenes=pools.map(pool=>{const scene=new THREE.Scene();scene.background=new THREE.Color('#071b25');scene.add(pool.mesh);return scene});
+for(const pool of pools){pool.step(renderer);const init=Fn(()=>{If(instanceIndex.lessThan(24),()=>{const i=float(instanceIndex);pool.posAge.element(instanceIndex).assign(vec4(i.mod(8).sub(3.5).mul(1.15),i.div(8).floor().mul(1.3).add(.25),0,i.div(8).floor().mul(.2).add(.04)));pool.velSize.element(instanceIndex).assign(vec4(0,.5,0,1));});})().compute(24);pool.run(renderer,init);}
+window.show=async(index)=>{renderer.render(scenes[index],camera);await renderer.backend.device.queue.onSubmittedWorkDone();return index;};
+window.cost=async(index)=>{const times=[];for(let i=0;i<25;i++){renderer.render(scenes[index],camera);await renderer.resolveTimestampsAsync('render');if(i>=5)times.push(renderer.info.render.timestamp);}return times;};
+window.renderer=renderer;await window.show(0);
+
+</script>

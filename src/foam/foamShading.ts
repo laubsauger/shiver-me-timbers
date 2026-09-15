@@ -190,6 +190,19 @@ export function coordFootprint(coord: AnyNode): AnyNode {
 }
 
 /**
+ * Square root of the projected pixel's area in a two-dimensional coordinate.
+ * The Jacobian determinant preserves area under rotation and shear; multiplying
+ * fwidth components instead measures an axis-aligned bounding box. Use only
+ * for secondary detail fades: octave filtering still needs coordFootprint to
+ * account for long, thin pixels at grazing angles.
+ */
+export function coordAreaFootprint(coord: AnyNode): AnyNode {
+  const dx = coord.dFdx();
+  const dy = coord.dFdy();
+  return dx.x.mul(dy.y).sub(dx.y.mul(dy.x)).abs().max(1e-8).sqrt();
+}
+
+/**
  * fbm whose every octave fades to its OWN MEAN once that octave's lattice
  * cell is narrower than {@link FILTER_CELLS} pixels — §V48(b), done per
  * octave rather than per field.
@@ -383,7 +396,10 @@ export function foamDetailMask(
   // which is what turns its cells into the streaks the reference shows running
   // down a wave face. The stretch axis is a FIELD, not one global vector
   // (§B.33 (c) — a single tilt on every streak in the world is the lattice).
-  const aniso = crestAnisoCoord(coord.add(churn));
+  // The landed wake has its own retained source direction in wakeWhiteNode.
+  // Applying the ambient crest stretch here first carves crosswise combs
+  // through that wake, including a stationary prop's aft-directed wash.
+  const aniso = porousBody ? coord.add(churn) : crestAnisoCoord(coord.add(churn));
 
   // COVERAGE-ADAPTIVE BREADTH (user, storm preset: "blobby noise in parts").
   // Detail texture that reads well at 10% coverage reads as high-frequency

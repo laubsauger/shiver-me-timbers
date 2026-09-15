@@ -19,7 +19,6 @@ import * as THREE from 'three/webgpu';
 import {
   Fn,
   If,
-  atan,
   cameraPosition,
   cameraProjectionMatrix,
   cameraViewMatrix,
@@ -41,7 +40,7 @@ import {
 import { SIM_DT } from '../core/loop';
 import { sprayParams } from '../params/spray';
 import { hash2 } from '../terrain/noise';
-import { foamTintNode } from './foamShading';
+import { bandLimitedFbm2, coordFootprint, foamTintNode } from './foamShading';
 import { particleLighting } from '../sky/particleLighting';
 import { POST_PARTICLE_LAYER } from '../core/skyDof';
 import { DEAD_AGE, H_LIFE, PHI, T_LIFE, sanitizePoolCount } from './sprayMath';
@@ -102,12 +101,21 @@ export interface SprayPoolOptions {
    * `angularCap` radians (a drop at the lens is a speck). The quad is square, so its scale is the length and the shape
    * is squashed across by length/width. Replaces the droplet sprite size law; construction-time.
    */
-  motionBlur?: { width: number; shutter: number; maxRatio: number; angularCap: number };
+  motionBlur?: {
+    width: number; shutter: number; maxRatio: number; angularCap: number;
+    /** Young shed water remains a broad fragment before separating into drops.
+     * Width is in metres and breakupTime in seconds, independent of pool lifetime. */
+    sheet?: { width: number; breakupTime: number; angularCap: number };
+  };
   /**
    * W8 round 4: world y (m) below which a FALLING particle dies — it has hit the water (a uniform value; the emitter
    * passes the local mean surface of its sources). Absent: no kill, the pre-W8 physics pass node for node.
    */
   killBelow?: () => number;
+  /** Metres below each particle's source surface at which it dies while falling.
+   * Emitters must write birthHeight in their spawn pass, including births with
+   * a sub-tick age. Other vessels and later emitter motion cannot change it. */
+  returnBelowBirth?: number;
   /**
    * W8 round 6: break a soft mist pool's uniform envelope into drifting clumps — opacity × a smooth 3-D density field of
    * the sprite's world position (~2–4 m lumps, moving with time), so the plume has internal structure along its arc.
@@ -139,10 +147,14 @@ export const SPRAY_OVER_WATER_ORDER = 0.5;
 export const SPRAY_UNDER_WATER_ORDER = -0.5;
 
 export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}) {
+  if (options.returnBelowBirth !== undefined && (
+    !Number.isFinite(options.returnBelowBirth) || options.returnBelowBirth < 0 || options.killBelow !== undefined
+  )) throw new Error('Spray returnBelowBirth requires a finite nonnegative offset and no shared killBelow plane');
   // counts feed buffer sizes + dispatch counts at construction — sanitize
   const count = sanitizePoolCount(rawCount, 1024);
   const posAge = instancedArray(count, 'vec4');
   const velSize = instancedArray(count, 'vec4');
+  const birthHeight = options.returnBelowBirth !== undefined ? instancedArray(count, 'float') : null;
   // separate read-only VIEWS for the sprite vertex stage: posAge.toReadOnly()
   // would mutate the shared node and silently drop every compute write to it
   // (init + physics), freezing the whole pool at buffer-zero — see §B.8
@@ -200,10 +212,11 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
         .mul(uDragFactor)
         .toVar();
       velSize.element(instanceIndex).assign(vec4(vel, vs.w));
-      if (options.killBelow) {
+      if (options.killBelow || birthHeight) {
         const next = pa.xyz.add(vel.mul(SIM_DT)).toVar();
         // W8 round 4: a falling particle that reaches the water dies there (no drops lying on the lane)
-        const hit = next.y.lessThan(uKillY).and(vel.y.lessThan(0));
+        const plane = birthHeight ? birthHeight.element(instanceIndex).sub(options.returnBelowBirth!) : uKillY;
+        const hit = next.y.lessThan(plane).and(vel.y.lessThan(0));
         posAge.element(instanceIndex).assign(vec4(next, select(hit, float(DEAD_AGE), pa.w.add(SIM_DT))));
       } else {
         posAge
@@ -239,8 +252,18 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   // root and left only the aged cloud visible, detached behind the boat)
   const mb = options.droplets ? options.motionBlur : undefined;
   const viewDepth = cameraViewMatrix.mul(vec4(el.xyz, 1)).z.negate().max(0.05);
-  const blurLen = mb ? vel.length().mul(mb.shutter).clamp(mb.width, mb.width * mb.maxRatio) : null;
-  const trueSize = mb && blurLen ? blurLen.mul(sizeMul.mul(0.5).add(0.5)).min(viewDepth.mul(mb.angularCap)) : null;
+  const fragmentSeed = float(instanceIndex).add(1).mul(PHI).fract();
+  const breakup = mb?.sheet
+    ? smoothstep(float(0), float(mb.sheet.breakupTime).mul(fragmentSeed.mul(0.4).add(0.8)), el.w)
+    : null;
+  const dropWidth = mb ? (mb.sheet && breakup
+    ? mix(float(mb.sheet.width), float(mb.width), breakup)
+    : float(mb.width)) : null;
+  const blurLen = mb && dropWidth ? vel.length().mul(mb.shutter).max(dropWidth).min(dropWidth.mul(mb.maxRatio)) : null;
+  const angularCap = mb ? (mb.sheet && breakup
+    ? mix(float(mb.sheet.angularCap), float(mb.angularCap), breakup)
+    : float(mb.angularCap)) : null;
+  const trueSize = mb && blurLen && angularCap ? blurLen.mul(sizeMul.mul(0.5).add(0.5)).min(viewDepth.mul(angularCap)) : null;
   // round 5 COVERAGE CONSERVATION: a drop smaller than ~1.5 px is drawn at 1.5 px with its opacity × (true/drawn)²,
   // so a far plume of sub-pixel drops reads as the haze their summed cross-section makes instead of vanishing
   // (sub-pixel quads miss pixel centres). One pixel at depth z spans 2z/(P₁₁·H) m.
@@ -277,7 +300,13 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   const along = q.dot(dir);
   const across = q.dot(vec2(dir.y.negate(), dir.x));
   const streakN = smoothstep(float(0), uStreakRef.max(1e-3), vel.length());
-  const squash = mb && blurLen && drawnSize ? blurLen.div(mb.width).min(drawnSize.div(minSize).max(1)) : mix(float(1), uStreak.max(1), streakN);
+  const velocitySquash = mb && blurLen && drawnSize && dropWidth ? blurLen.div(dropWidth).min(drawnSize.div(minSize).max(1)) : mix(float(1), uStreak.max(1), streakN);
+  // Broad silhouette variation survives when small interior holes no longer
+  // resolve. Older sheet fragments narrow along their projected motion rather
+  // than all settling into identical circular puffs.
+  const squash = options.clumps
+    ? velocitySquash.mul(float(instanceIndex).add(1).mul(PHI).fract().mul(0.8).add(1.35).add(ageN.mul(0.5)))
+    : velocitySquash;
   const r2 = along.mul(along).add(across.mul(squash).pow(2));
   // pow of a clamped-non-negative base: softness ≥ 1 gives a mist-soft edge
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- TSL node union
@@ -286,17 +315,38 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
     // W8 round 4: one drop's motion-blur streak — a soft capsule (length = the quad, width = length/squash), no hashed
     // dots; the plume's grain is the COUNT of these. @band-limited-elsewhere: per-sprite shape, no world period
     shape = r2.oneMinus().max(0).pow(1.5);
+    if (mb?.sheet && breakup) {
+      // The young sheet has a ragged, elongated outline. It narrows into the
+      // existing drop silhouette over time; it never paints a prebuilt trail.
+      const edge = along.mul(9).add(fragmentSeed.mul(31)).sin().mul(0.12).add(0.86);
+      const sheetR2 = along.pow(2).add(across.mul(squash).div(edge).pow(2).mul(2.5));
+      const sheetShape = sheetR2.oneMinus().max(0).pow(0.65);
+      shape = mix(sheetShape, shape, breakup);
+    }
   }
   if (options.clumps) {
-    // W9: 3 × 5 lobes around the rim, phase hashed per particle; the rim radius swings 1 → 0.55.
-    // @band-limited-elsewhere: an angular pattern of ≤ 5 lobes per SPRITE (no world period); a clump sprite is ≥ ~6 px
-    // across wherever it is drawn (hullSpray's sizes against its fade distance), so the lobes are resolved
+    // Break the interior as well as the silhouette. A scalloped rim around an
+    // opaque radial core still reads as a row of balls, even with size jitter.
+    // The field follows the projected motion, drifts during breakup, and has
+    // an independent phase per particle. Octaves filter at their own footprint.
     const seed = float(instanceIndex).add(1).mul(PHI).fract();
-    const ang = atan(q.y, q.x);
-    const lobes = ang.mul(3).add(seed.mul(41.3)).sin().mul(ang.mul(5).sub(seed.mul(23.9)).sin()).mul(0.5).add(0.5);
-    const rim = float(1).sub(lobes.mul(0.45));
-    // foam is OPAQUE: a flat core with a soft rim (the mist law's pow(softness) reads as smoke once clumps overlap)
-    shape = rim.sub(r2).div(rim).max(0).pow(0.6);
+    const base = vec2(along.mul(0.8).sub(across.mul(squash).mul(0.6)),
+      along.mul(0.6).add(across.mul(squash).mul(0.8))).mul(3.2)
+      .add(vec2(seed.mul(31.7), seed.mul(73.1)))
+      .add(vec2(ageN.mul(0.8), ageN.mul(-0.5)));
+    // Bend the noise lattice so erosion cannot expose straight grid-aligned
+    // cutouts. Its derivative participates in the octave footprint below.
+    const coord = base.add(vec2(base.y.mul(0.73).sin(), base.x.mul(0.67).sin()).mul(0.55));
+    const footprint = coordFootprint(coord);
+    const breakup = bandLimitedFbm2(coord, 1, footprint);
+    const rim = breakup.mul(0.6).add(0.4);
+    const erosion = ageN.mul(0.22).add(0.34);
+    const holes = smoothstep(erosion, erosion.add(breakup.fwidth().max(0.1)), breakup);
+    // @band-limited-elsewhere: this is the cell footprint fade. Unresolved
+    // holes resolve to partial coverage instead of a solid opaque core.
+    const detail = smoothstep(float(1), float(0.25), footprint);
+    const coverageMean = mix(float(0.6), float(0.25), ageN);
+    shape = rim.sub(r2).div(rim).max(0).pow(0.6).mul(mix(coverageMean, holes, detail));
   }
 
   // birth fade-in kills the pop of a sprite appearing at full size/alpha
@@ -360,6 +410,8 @@ export function createSprayPool(rawCount: number, options: SprayPoolOptions = {}
   return {
     posAge,
     velSize,
+    /** Source water height, written alongside posAge/velSize by retained-plane emitters. */
+    birthHeight,
     mesh,
     /** sanitized pool size — emitters must size their spawn passes with THIS */
     count,

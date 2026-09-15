@@ -57,8 +57,11 @@ export const AI = {
   BLOCKING: 19,
   /** 1 while upset (capsized / crashed): throttle cut */
   UPSET: 20,
-  /** 1 on the tick the pilot saw a respawn */
-  RESPAWNED: 21,
+  /**
+   * 0..1 wake brace (§T.213): another boat's wake crest across her path within 0.9 s — the helm lock is reduced by it so she
+   * crosses it near upright. Decays over 0.5 s. Was RESPAWNED (a one-tick flag nothing read).
+   */
+  WAKE_BRACE: 21,
   /**
    * rolling-start clock: > 0 = seconds of rolling start counted (ticks with a rolling-start speed cap in GO, since the pace
    * boat began to move); < 0 = seconds of opening caution left after green (pilot.ts CAUTION_S); 0 on the grid and after.

@@ -20,20 +20,24 @@
  *  risk     base + sector bias + catch-up (trailing ⇒ riskier LEVEL and tolerance — never more thrust: the throttle
  *           is the physics' own −0.3..1 and nothing here touches power) + recovery mood.
  *  mistakes seeded mulberry32 in the buffer: throttle fumble, missed wave read, over-speed into a corner.
- *  traffic  avoidance from WORLD poses (closest approach over 2 s < 8 m ⇒ lateral offset away, held 1.5 s);
- *           blocking: someone faster 4–35 m behind ⇒ offset to the inside of the next turn (× aggression).
- *           Offsets stay inside the corridor room the line was built with (clamped outright where a corridor binds); blocking
- *           never moves toward an overlapping boat; for CAUTION_S after green, overlapping boats keep AVOID_LAT apart and a
- *           boat in the lane ahead is followed at FOLLOW_GAP.
+ *  traffic  (§T.213) pass or follow: the boat in this lane ahead is passed on the side that fits the corridor room,
+ *           PASS_LAT off ITS offset, closing no nearer than the gap until she is laterally clear; no side fits ⇒ follow at
+ *           the gap. Overlapping boats keep AVOID_LAT apart, race-long. Avoidance from WORLD poses (closest approach over
+ *           2 s < 8 m ⇒ lateral offset away, held 1.5 s); blocking: someone faster 4–35 m behind ⇒ offset to the inside of
+ *           the next turn (× aggression). Offsets stay inside the corridor room the line was built with (clamped outright
+ *           where a corridor binds) and never lead the boat's own cross-track by more than OFFSET_LEAD; blocking never
+ *           moves toward an overlapping boat. A finished boat pulls aside before it slows.
  *  keep-outs static solids (keepOut.ts, the page's colliders): the line keeps LINE_CLEAR off them, the room for offsets
  *           ends ROOM_CLEAR short of them, and the pursuit chord (boat → target) is pushed PURSUIT_CLEAR clear.
  *  grid     rolling start (GO < 0 or 0): the pilot holds its grid slot behind the pace boat — the slot race/rollingStart
  *           computes, from the pace line and start params in the setup and the pilot's own clock of rolling ticks
  *           (AI.ROLL) — pursuing the pace line at its column, speed set by the along-line error to the slot. At green
  *           it re-projects onto its racing line.
- *  wakes    (§T.207 wake field layouts) the other boats' wake field is added to the wave read's surface (a wake crest
- *           lifts like a wave ramp); its roll slope across the path lifts a cornering pilot; and in a corner she keeps
- *           WAKE_GAP behind a boat whose Kelvin wedge she is in and steps out past its edge (WAKE WORLD records).
+ *  wakes    (§T.207 wake field layouts, §T.213) the other boats' wake field is added to the wave read's surface (a wake
+ *           crest lifts like a wave ramp). What a wake mostly does is ROLL her, so its slope across the path takes helm
+ *           lock away instead of throttle (AI.WAKE_BRACE), and the lane + gap she keeps behind a boat grow as that boat
+ *           slows (its pattern scales as F/ρU²): a beam's width behind a quick one, its whole Kelvin wedge behind one at
+ *           hump speed.
  *  trim     neutral at launch, bow down in corners and lifts, bow up on a fast straight, slewed; returned in
  *           `PilotOutput.trim`, the seam's unit trim (−1..1) for `unitTrimToRad`.
  */
@@ -49,7 +53,7 @@ import { HELM_RATE, holdThrottle, lockLimit, steerForCurvature } from './capabil
 import { buildKeepOuts, keepOutPush, type CapsuleLike, type KeepOuts, type Push } from './keepOut';
 import { buildRacingLine, nearestSample, ROOM_CAP, type RacingLine } from './line';
 import { cornerSpeed, speedProfile } from './profile';
-import { WakeField, WS } from '../../wake/wakeField';
+import { WakeField } from '../../wake/wakeField';
 
 export const LINE_LEVELS = 5;
 const G = 9.81;
@@ -71,7 +75,6 @@ const ALONGSIDE = 13;
  * 12.5 m through G1 touched when the leader yawed into the gate, and the follower hooked (Tower Reach, calm)
  */
 const FOLLOW_GAP = 14;
-const FOLLOW_LANE = 4;
 const WAVE_T = [0, 0.3, 0.6, 0.9, 1.2] as const;
 const BOW_AHEAD = 7;
 const HEEL_EASE = (22 * Math.PI) / 180;
@@ -79,6 +82,13 @@ const HEEL_ZERO = (38 * Math.PI) / 180;
 const ROLL_DEADBAND = Math.sin((20 * Math.PI) / 180);
 const ROLL_KP = 0.8;
 const ROLL_KD = 0.15;
+/** always-on roll damper gain (helm per rad/s of roll rate) and the wave skill every pilot keeps her boat under her with */
+const ROLL_DAMP = 0.2;
+const ROLL_SKILL_MIN = 0.6;
+/** the helm's own heel limits (§T.213, directional): eased from HELM_HEEL_EASE to nothing at HELM_HEEL_ZERO, on the heel HELM_HEEL_TAU ahead */
+const HELM_HEEL_EASE = (18 * Math.PI) / 180;
+const HELM_HEEL_ZERO = (30 * Math.PI) / 180;
+const HELM_HEEL_TAU = 0.5;
 /** seconds after a placement (grid, respawn) the helm is held to a fraction of the lock while the hull settles */
 const SETTLE_S = 1.5;
 /** metres the pursuit chord keeps off a static solid's surface (a half beam + slack) */
@@ -90,29 +100,44 @@ const SLOT_GAIN = 0.35;
 /** lookahead (m) per metre of distance off the (offset) line: far off it, the pursuit aims further along so the arc back is one the boat can turn */
 const RECOVER_LOOK = 2.5;
 /**
- * WAKES (§T.207 wake field: every hull floats on every other boat's wake). The Kelvin wedge's half-angle tangent (19.47°)
- * plus a hull's half beam and slack: inside tan·X + WAKE_BEAM of a source's track, X astern, a boat sits in its wake.
- * Tower Reach, calm, pilots blind to wakes: a lee 16 m behind a blocker at 30 m/s through a sweeper, in its stern hollow
- * (−0.3 m at the CG, 6 % roll slope), heeled 18° → 38° in 0.4 s with the props out and hooked; a rookie 26 m behind the
- * blocker at 14 m/s rolled over in a turn on the post-finish lap. Trailing straight 30–60 m astern costs nothing.
+ * WAKES (§T.207 wake field: every hull floats on every other boat's wake; §T.213 seed sweeps). A hull's Kelvin pattern
+ * scales as F/(ρU²), so how much water a rival throws depends on how fast she is going. MEASURED on the very field the
+ * pilot reads (tests/raceAiSweep seed sweeps, docs/speedboat/npc-ai.md): a 24 m/s source leaves ≤ 0.1 m and ≤ 3 % of roll
+ * slope outside |Y| 6 m; an 8–11 m/s one (a corner, a queue) leaves 0.2–0.3 m and 6–7 % right along its cusp line
+ * (tan 19.47°·X out) to 60 m astern — and a 12 m hull that meets that at 12–20 m/s with the helm on goes over.
+ * So the lane a boat owns is its own beam when it is quick and its whole wedge when it is slow, and the spacing behind it
+ * grows the same way.
  */
 const WAKE_TAN = Math.tan((19.47 * Math.PI) / 180);
 const WAKE_BEAM = 4;
-/** m astern a pilot keeps from a boat whose wake quarter it would otherwise turn in */
-const WAKE_GAP = 45;
-/** a source slower than this (m/s) throws no wake worth a detour */
-const WAKE_CARE_U = 10;
+/** m/s: at and above this a source's wake is its own beam wide; at WAKE_SLOW_LOW and below it is the whole wedge */
+const WAKE_SLOW_TOP = 22;
+const WAKE_SLOW_LOW = 10;
+/** half-width (m) of the lane a quick boat ahead owns: a 12 m hull's beam + tracking slack */
+const LANE_HALF = 6;
+/** CG-to-CG metres kept behind a boat in this lane: WAKE_GAP_MIN quick, + WAKE_GAP_SLOW at hump speed */
+const WAKE_GAP_MIN = 25;
+const WAKE_GAP_SLOW = 20;
+/** the closing speed allowed per metre inside the gap, and the floors that keep a queue from compounding to a standstill */
+const FOLLOW_CLOSE = 0.5;
+const FOLLOW_SLACK = 3;
+const FOLLOW_FLOOR = 6;
+/** how far ahead (s of travel, at least PASS_LOOK_MIN m) a boat in this lane is taken as traffic */
+const PASS_LOOK_S = 1.6;
+const PASS_LOOK_MIN = 55;
+/** m the lateral offset may lead the boat's own cross-track by (§T.213: a bigger step is a pursuit overshoot) */
+const OFFSET_LEAD = 4;
+/** wake roll slope (m/m across the path, within 0.9 s) where the brace starts, its span to full, and its decay (s) */
+const BRACE_ROLL = 0.04;
+const BRACE_ROLL_SPAN = 0.06;
+const BRACE_HOLD = 0.5;
+/** share of the helm lock the full brace takes away, and the cross-track error (m) at which it is released */
+const BRACE_LOCK = 0.5;
+const BRACE_RELEASE = 8;
 /** line curvature (1/m) over the next CORNER_S of travel above which the pilot counts it as cornering */
 const CORNER_K = 1 / 400;
 const CORNER_S = 2;
 const HEEL_CORNER = (10 * Math.PI) / 180;
-/** m/s of closing speed allowed per metre short of WAKE_GAP */
-const WAKE_CLOSE = 0.3;
-/** wake roll slope (m/m, across the path within 0.9 s ahead) where a pilot starts to lift in a corner, and the span to a full lift */
-const WAKE_ROLL = 0.02;
-const WAKE_ROLL_SPAN = 0.04;
-/** the least wave skill a pilot reads another boat's wake with: every archetype knows a wake (it saw it being made) */
-const WAKE_SKILL = 0.6;
 /** unit trim: bow down in a corner / rough water (measured flat water at −0.25: R −3 % at 18–30 m/s), bow up on a fast straight
  * (top speed 33.9 → 35.1 m/s at +0.3; +1.0 blows out to 29.7), slewed at TRIM_RATE /s */
 const TRIM_CORNER = -0.2;
@@ -359,7 +384,6 @@ export class RacePilot {
     // ── projection onto the line ───────────────────────────────────────────────────────────────────────────
     let level = f[a + AI.LEVEL];
     const first = f[a + AI.INIT] !== 1;
-    f[a + AI.RESPAWNED] = 0;
     if (first || justReset) {
       if (first) {
         level = this.levelFor(arch.risk);
@@ -372,7 +396,6 @@ export class RacePilot {
         f[a + AI.STATION] = 0;
       } else {
         f[a + AI.RECOVERY_T] = arch.recoveryS;
-        f[a + AI.RESPAWNED] = 1;
       }
       const line = this.setup.levels[level].line;
       const idx = this.project(line, x, z, fx, fz);
@@ -387,6 +410,7 @@ export class RacePilot {
       f[a + AI.AVOID_T] = 0;
       f[a + AI.WAVE_LIFT] = 0;
       f[a + AI.JUMP] = 0;
+      f[a + AI.WAKE_BRACE] = 0;
       if (first) {
         f[a + AI.SEA] = 0;
         f[a + AI.ROLL] = 0;
@@ -397,7 +421,6 @@ export class RacePilot {
     // formation ran on the pace line, which the tracking window may have lost)
     const st = this.setup.start;
     let greenMerge = false;
-    const cautionBefore = f[a + AI.ROLL] < 0;
     const rolling = st !== null && valid && go <= 0 && stCode !== 1 && stCode !== 2;
     if (rolling) {
       if (go < 0) f[a + AI.ROLL] += DT;
@@ -413,7 +436,6 @@ export class RacePilot {
       d -= Math.round(d);
       f[a + AI.STATION] = old + d;
     }
-    const caution = cautionBefore || greenMerge;
     let lv = this.setup.levels[level];
     let line = lv.line;
     const track = (): { idx: number; s: number } => {
@@ -494,7 +516,6 @@ export class RacePilot {
     let followCap = Infinity;
     let overlapPlus = false;
     let overlapMinus = false;
-    let followLat = 0;
     let blocking = false;
     // cornering: the line bends within CORNER_S of travel, or she is already laid over
     const tilt = Math.acos(clamp(upY, -1, 1));
@@ -502,37 +523,15 @@ export class RacePilot {
     for (let q = 0, c = Math.ceil((V * CORNER_S) / line.ds); q <= c; q++) cornerK = Math.max(cornerK, Math.abs(line.kappa[(idx + q) % line.n]));
     const cornering = cornerK > CORNER_K || tilt > HEEL_CORNER;
     const wakes = L.spec.wakeField === true;
-    let wakeCap = Infinity;
-    let wakeNeed = 0;
-    let wakeSide = 0;
+    /** the boat in this lane ahead: how far along, across, its speed along this line and over ground, its lane and how slow it is */
+    let aheadAlong = Infinity;
+    let aheadLat = 0;
+    let aheadU = 0;
+    let aheadLane = 0;
+    let aheadSpeed = 0;
+    let aheadSlow = 0;
     for (let j = 0; j < L.spec.boats && !rolling; j++) {
       if (j === i) continue;
-      if (wakes && cornering) {
-        // WAKE QUARTER: turning inside another boat's Kelvin wedge within WAKE_GAP of its stern ⇒ drop back to WAKE_GAP
-        // (spacing behind a leader in a turn) and step out past the wedge edge, the side she is already on. From its
-        // wake record (WAKE WORLD, the same numbers her hull's field is built from): course, speed, established run.
-        const r = L.wakeWorldOffset(j);
-        const U = Math.hypot(f[r + WS.VX], f[r + WS.VZ]);
-        if (f[r + WS.F] > 1 && U > WAKE_CARE_U) {
-          const tx = f[r + WS.VX] / U;
-          const tz = f[r + WS.VZ] / U;
-          const ex = x - f[r + WS.X];
-          const ez = z - f[r + WS.Z];
-          const X = -(ex * tx + ez * tz);
-          const Y = ez * tx - ex * tz;
-          const edge = WAKE_TAN * X + WAKE_BEAM;
-          if (X > 0 && X < WAKE_GAP && X < f[r + WS.RUN] && Math.abs(Y) < edge) {
-            const cap = U * (tx * ltx + tz * ltz) - WAKE_CLOSE * (WAKE_GAP - X);
-            if (cap < wakeCap) wakeCap = cap;
-            const need = edge - Math.abs(Y);
-            if (need > wakeNeed) {
-              wakeNeed = need;
-              const side = ex * nx + ez * nz;
-              wakeSide = side > 0 || (side === 0 && j < i) ? 1 : -1;
-            }
-          }
-        }
-      }
       const w = L.worldPoseOffset(j);
       if (f[w + 3] === 0 && f[w + 4] === 0 && f[w + 5] === 0 && f[w + 6] === 0) continue; // never placed
       const dx = f[w] - x;
@@ -553,7 +552,7 @@ export class RacePilot {
         if (lat >= 0) overlapPlus = true;
         else overlapMinus = true;
       }
-      if (caution && Math.abs(along) < ALONGSIDE && Math.abs(lat) < AVOID_LAT) {
+      if (Math.abs(along) < ALONGSIDE && Math.abs(lat) < AVOID_LAT) {
         // alongside: keep AVOID_LAT of lateral separation (both boats do; a dead-level pair splits by fleet index)
         const need = AVOID_LAT - Math.abs(lat);
         if (need > besideNeed) {
@@ -561,13 +560,19 @@ export class RacePilot {
           beside = lat > 0 || (lat === 0 && j > i) ? -1 : 1;
         }
       }
-      if (caution && along > 0 && along < FOLLOW_GAP + 5 && Math.abs(lat) < FOLLOW_LANE) {
-        // in this lane just ahead: no closer than FOLLOW_GAP, closing at 0.5 m/s per metre of gap beyond it
-        const cap = f[w + 7] * ltx + f[w + 9] * ltz + 0.5 * (along - FOLLOW_GAP);
-        if (cap < followCap) {
-          followCap = cap;
-          followLat = lat;
-        }
+      const uj = f[w + 7] * ltx + f[w + 9] * ltz;
+      // HOW BIG ITS WAKE IS: a hull's Kelvin pattern grows as F/(ρU²) — measured on the field this pilot reads, a 24 m/s source
+      // puts ≤ 0.1 m and ≤ 3 % of roll slope outside |Y| 6 m, a 8–11 m/s one 0.2–0.3 m and 6–7 % right along its cusp
+      // (0.35·X out) to 60 m astern. So the lane a slow boat owns is its wedge, a fast one's is its own beam.
+      const slowJ = wakes && uj >= 2 ? clamp((WAKE_SLOW_TOP - uj) / (WAKE_SLOW_TOP - WAKE_SLOW_LOW), 0, 1) : 0;
+      const laneJ = LANE_HALF + slowJ * Math.max(0, WAKE_TAN * along + WAKE_BEAM - LANE_HALF);
+      if (along > 0 && along < Math.max(PASS_LOOK_S * V, PASS_LOOK_MIN) && Math.abs(lat) < Math.max(AVOID_LAT, laneJ + 2) && along < aheadAlong) {
+        aheadAlong = along;
+        aheadLat = lat;
+        aheadU = uj;
+        aheadSpeed = Math.hypot(f[w + 7], f[w + 9]);
+        aheadLane = laneJ;
+        aheadSlow = slowJ;
       }
       if (dmin < AVOID_R && along > -6) {
         const latAt = cx * nx + cz * nz;
@@ -597,25 +602,58 @@ export class RacePilot {
       // (pnx, pnz) = (tz, −tx), the pace line's PORT normal: gridSlotPose's lateral, + to port
       this.paceAt(st, sBoat + Ld);
     }
+    let roomP = Infinity;
+    let roomS = Infinity;
+    for (let q = idx, c = 0; c <= Math.ceil((Ld + BOW_AHEAD) / line.ds); c++, q = (q + 1) % line.n) {
+      if (line.roomPort[q] < roomP) roomP = line.roomPort[q];
+      if (line.roomStbd[q] < roomS) roomS = line.roomStbd[q];
+    }
     let target: number;
     let offset = f[a + AI.OFFSET];
+    // PASS / FOLLOW (§T.213): a boat in this lane ahead (|lat| < PASS_LAT, within passLook). Faster than it ⇒ take the
+    // nearer side that fits the room, PASS_LAT off its offset, closing no nearer than the gap until laterally clear; no
+    // side fits ⇒ follow at the gap (longer in a corner: the stern hollow)
+    let passTarget = NaN;
+    if (aheadAlong < Infinity) {
+      const passLat = Math.max(AVOID_LAT, aheadLane + 2);
+      const gapM = wakes ? WAKE_GAP_MIN + WAKE_GAP_SLOW * aheadSlow : FOLLOW_GAP;
+      const uP = (s + V) / line.ds;
+      const vProf = lv.speed[((Math.floor(uP) % line.n) + line.n) % line.n];
+      const jOff = xte + aheadLat;
+      if (Math.max(vProf, V) > aheadU + 0.5) {
+        let best = NaN;
+        let k = 0;
+        for (let q = 0, span = Math.round(150 / line.ds); q < span; q++) k += line.kappa[(idx + q) % line.n];
+        for (const side of [1, -1]) {
+          const tgt = jOff + side * passLat;
+          if (tgt < -Math.max(0, roomP - 1) || tgt > Math.max(0, roomS - 1)) continue;
+          if (Number.isNaN(best) || Math.abs(tgt - offset) < Math.abs(best - offset) - 0.5 || (Math.abs(Math.abs(tgt - offset) - Math.abs(best - offset)) <= 0.5 && Math.sign(k) === side)) best = tgt;
+        }
+        passTarget = best;
+      }
+      // still in its lane ⇒ close no nearer than the gap; the cap is never below the leader's own pace (a cap under it
+      // compounds down a queue into a standstill, and a queue crawling at 6 m/s is a queue of hump-speed wakes)
+      if (Math.abs(aheadLat) < aheadLane) followCap = aheadU + FOLLOW_CLOSE * (aheadAlong - gapM);
+      if (followCap < Infinity) followCap = Math.max(followCap, aheadSpeed - FOLLOW_SLACK, Math.min(aheadU, FOLLOW_FLOOR));
+    }
     // held up in a lane by a slower boat: pull out to pass (the side away from it), the follow cap lifts once clear of its lane
-    const heldUp = followCap < Infinity && followCap < V - 1;
     if (besideNeed > 0) {
       f[a + AI.AVOID_T] = 1.5;
       target = offset + beside * besideNeed;
-    } else if (heldUp && avoid === 0 && !rolling) {
+    } else if (!Number.isNaN(passTarget) && avoid === 0) {
       f[a + AI.AVOID_T] = 1.5;
-      target = offset + (followLat >= 0 ? -1 : 1) * AVOID_LAT;
-    } else if (wakeNeed > 0 && avoid === 0 && !rolling) {
-      f[a + AI.AVOID_T] = 1.5;
-      target = offset + wakeSide * wakeNeed;
+      target = passTarget;
     } else if (avoid !== 0) {
       f[a + AI.AVOID_T] = 1.5;
       target = avoid;
     } else if (f[a + AI.AVOID_T] > 0) {
       f[a + AI.AVOID_T] -= DT;
       target = offset;
+    } else if (stCode === 4) {
+      // finished: out of the way of the boats still racing, to the outside of what comes next
+      let k = 0;
+      for (let q = 0, span = Math.round(150 / line.ds); q < span; q++) k += line.kappa[(idx + q) % line.n];
+      target = k >= 0 ? -ROOM_CAP : ROOM_CAP;
     } else if (blocking && arch.aggression > 0) {
       let k = 0;
       const span = Math.round(150 / line.ds);
@@ -633,14 +671,10 @@ export class RacePilot {
     f[a + AI.BLOCKING] = blocking && avoid === 0 && besideNeed === 0 && arch.aggression > 0 ? 1 : 0;
     // the offset must fit the corridor over the whole lookahead, not just at its ends (a gate between them binds),
     // less a metre for tracking error
-    let roomP = Infinity;
-    let roomS = Infinity;
-    for (let q = idx, c = 0; c <= Math.ceil((Ld + BOW_AHEAD) / line.ds); c++, q = (q + 1) % line.n) {
-      if (line.roomPort[q] < roomP) roomP = line.roomPort[q];
-      if (line.roomStbd[q] < roomS) roomS = line.roomStbd[q];
-    }
     target = clamp(target, -Math.max(0, roomP - 1), Math.max(0, roomS - 1));
-    offset += clamp(target - offset, -3 * DT, 3 * DT);
+    // the offset never runs more than OFFSET_LEAD ahead of where the boat actually is: a target the hull is 11 m from is a
+    // 20° heading step at the pursuit lookahead, and the overshoot that follows took a boat 30 m off her line (§T.213)
+    if (!((target - offset) * (offset - xte) > 0 && Math.abs(offset - xte) >= OFFSET_LEAD)) offset += clamp(target - offset, -3 * DT, 3 * DT);
     // a corridor that binds inside the lookahead (room under the cap) clamps the offset itself, not just its target: an
     // alongside/avoid offset slewing back at 3 m/s from outside the room ran a hothead 1.6 m outside a 36 m chicane gate
     if (roomP < ROOM_CAP || roomS < ROOM_CAP) offset = clamp(offset, -Math.max(0, roomP - 1), Math.max(0, roomS - 1));
@@ -681,25 +715,42 @@ export class RacePilot {
     alpha = Math.atan2(Math.sin(alpha), Math.cos(alpha));
     const kappa = (2 * Math.sin(alpha)) / Ld;
     const Vs = Math.max(V, 6);
-    // heel limiter: past HEEL_EASE the lock shrinks to nothing at HEEL_ZERO (a pilot eases the helm when she lays
-    // over; the measured steady turns sit at 18–26° tilt, the physics departs past 45°)
     const hardLock = lockLimit(V);
     const settling = f[a + AI.TICKS] * DT < SETTLE_S || (recovering && f[a + AI.RECOVERY_T] > arch.recoveryS - SETTLE_S);
-    const lock = hardLock * clamp((HEEL_ZERO - tilt) / (HEEL_ZERO - HEEL_EASE), 0, 1) * (settling ? 0.4 : 1);
     let stbd = Math.sign(kappa) * steerForCurvature(Vs, kappa) + 0.4 * (kappa * Vs - state.angularVelocity[1]);
     // roll helm (a skill, × waveSkill): the drives roll her INTO a turn (physics-log T179 r2), so steering away from a
     // heel rights her; only past 20° of heel (a steady turn sits below it), proportional + against roll rate. sinHeel > 0 = starboard side up = heeled to port.
     const sinHeel = 2 * (qx * qy + qw * qz);
     const w = state.angularVelocity;
     const rollRate = w[0] * fx + w[1] * (2 * (qy * qz - qw * qx)) + w[2] * fz;
+    // ROLL SKILL FLOOR (§T.213): keeping the boat under her is not an archetype trait — a wake crest can put 60°/s of roll
+    // rate on any hull, and a rookie with waveSkill 0.2 had no answer. The roll damper runs at every heel, the righting
+    // helm past the deadband; both at max(waveSkill, ROLL_SKILL_MIN).
+    const rollSkill = Math.max(arch.waveSkill, ROLL_SKILL_MIN);
+    stbd += rollSkill * ROLL_DAMP * rollRate;
     if (Math.abs(sinHeel) > ROLL_DEADBAND) {
-      stbd += arch.waveSkill * (ROLL_KP * (sinHeel - Math.sign(sinHeel) * ROLL_DEADBAND) + ROLL_KD * rollRate);
+      stbd += rollSkill * (ROLL_KP * (sinHeel - Math.sign(sinHeel) * ROLL_DEADBAND) + ROLL_KD * rollRate);
     }
-    stbd = clamp(stbd, -lock, lock);
+    // heel limits on the helm to starboard (stbd > 0) and to port: symmetric (tilt) unless directional
+    // DIRECTIONAL HEEL LIMIT (§T.213): the drives roll her into the turn, so the helm TOWARD the side she is heeled (or
+    // rolling) to is eased — on the heel HELM_HEEL_TAU ahead, not the heel now; the righting helm keeps the full lock.
+    // The old symmetric tilt limiter took the righting helm away too, and a hull past HEEL_ZERO could only wait.
+    const heelPort = Math.asin(clamp(sinHeel, -1, 1)) + rollRate * HELM_HEEL_TAU;
+    const settleF = settling ? 0.4 : 1;
+    let lockPos = hardLock * clamp((HELM_HEEL_ZERO + heelPort) / (HELM_HEEL_ZERO - HELM_HEEL_EASE), 0, 1) * settleF;
+    let lockNeg = hardLock * clamp((HELM_HEEL_ZERO - heelPort) / (HELM_HEEL_ZERO - HELM_HEEL_EASE), 0, 1) * settleF;
+    // WAKE BRACE: a wake crest across her path ⇒ cross it with less helm on (upright). Released as she runs off her line,
+    // where the helm is what puts her back through the gate (braced to the last metre, boats ran wide and missed).
+    const brace = 1 - BRACE_LOCK * f[a + AI.WAKE_BRACE] * clamp(1 - Math.abs(xte - offset) / BRACE_RELEASE, 0, 1);
+    lockPos *= brace;
+    lockNeg *= brace;
+    stbd = clamp(stbd, -lockNeg, lockPos);
     const prevSteer = f[a + AI.STEER];
     let steer = prevSteer + clamp(-stbd - prevSteer, -HELM_RATE * DT, HELM_RATE * DT);
     // easing off past the heel/settle limit gets a second helm-rate's worth: a pilot unwinds faster than she winds on
-    if (Math.abs(steer) > lock) steer -= Math.sign(steer) * Math.min(Math.abs(steer) - lock, HELM_RATE * DT);
+    // (steer < 0 is a starboard helm)
+    if (steer < -lockPos) steer += Math.min(-lockPos - steer, HELM_RATE * DT);
+    if (steer > lockNeg) steer -= Math.min(steer - lockNeg, HELM_RATE * DT);
     steer = clamp(steer, -hardLock, hardLock);
     f[a + AI.STEER] = steer;
 
@@ -715,8 +766,9 @@ export class RacePilot {
     if (mistake === 3) vT *= 1.06;
     if (rolling) vT = clamp(st.paceSpeed + SLOT_GAIN * slotErr, 0, 1e9);
     if (go <= 0) vT = Math.min(vT, -go);
-    if (stCode === 4) vT = Math.min(vT, 15);
-    if (!rolling) vT = Math.min(vT, Math.max(0, followCap), Math.max(0, wakeCap));
+    // finished: the cool-down cap once she is aside (finAside), not on the line the pack is still racing down
+    if (stCode === 4 && Math.abs(xte) > 8) vT = Math.min(vT, 15);
+    if (!rolling) vT = Math.min(vT, Math.max(0, followCap));
     // OFF THE LINE, SLOW TO THE TURN YOU ARE ACTUALLY ASKING FOR (T196): the profile's corner speed is for the LINE's
     // curvature; a boat knocked off it (a mistake, traffic, a slide) pursues a tighter arc back. Measured on the T196 hull
     // (drives part-surfaced, lock 19°): the rookie held full throttle at lock through a sweep with 12–18° of drift at 20 m/s
@@ -741,6 +793,7 @@ export class RacePilot {
     if (ticks % 3 === 0) {
       let lift = 0;
       let jump = 0;
+      let wakeRollAll = 0;
       if (V > 8) {
         let hPrev = 0;
         let slopePrev = 0;
@@ -769,15 +822,15 @@ export class RacePilot {
           }
           hPrev = h;
         }
+        wakeRollAll = wakeRoll;
         const tol = arch.airTolerance + 0.35 * risk + (exposed ? 0.3 * arch.jumpAppetite : 0);
         const need = Math.min(1, clamp((maxAir - tol) / 0.4, 0, 1) + clamp((stuff - (0.1 + 0.1 * risk)) / 0.15, 0, 1));
         lift = mistake === 2 ? 0 : need * arch.waveSkill;
-        // crossing a wake at a heel: the slope across the path rolls her further over — lift before it, not in it
-        if (cornering && wakeRoll > WAKE_ROLL) lift = Math.max(lift, clamp((wakeRoll - WAKE_ROLL) / WAKE_ROLL_SPAN, 0, 1) * Math.max(arch.waveSkill, WAKE_SKILL));
         jump = exposed && arch.jumpAppetite > 0.5 && maxAir > 0.35 && maxAir <= tol ? 1 : 0;
         f[a + AI.SEA] += (maxAir - f[a + AI.SEA]) * ((3 * DT) / 4);
       }
       f[a + AI.WAVE_LIFT] = Math.max(lift, f[a + AI.WAVE_LIFT] - (3 * DT) / 0.6);
+      f[a + AI.WAKE_BRACE] = Math.max(clamp((wakeRollAll - BRACE_ROLL) / BRACE_ROLL_SPAN, 0, 1), f[a + AI.WAKE_BRACE] - (3 * DT) / BRACE_HOLD);
       f[a + AI.JUMP] = jump;
     }
     const waveLift = f[a + AI.WAVE_LIFT];
