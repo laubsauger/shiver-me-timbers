@@ -48,6 +48,8 @@ import * as THREE from 'three/webgpu';
 import {
   float,
   mix,
+  mrt,
+  output,
   pass,
   renderOutput,
   screenCoordinate,
@@ -75,6 +77,7 @@ import { gradeParams } from '../params/grade';
 import { skyParams } from '../params/sky';
 import { sunDirection as solarDirection } from '../sky/sunCycle';
 import { buildGodRays } from './postGodRays';
+import { AO_RECEIVER_OUTPUT, aoReceiverNode } from './aoReceiver';
 import { createGradeNode, type GradeNode } from './grade';
 
 export interface PostOptions {
@@ -164,6 +167,11 @@ export function createPostPipeline(
   const scenePass = readsDepth
     ? pass(scene, camera, { samples: 0 })
     : pass(scene, camera);
+  if (pp.aoEnabled) {
+    // B124: one 8-bit receptivity target beside the colour, only while AO exists to use it (aoReceiver.ts)
+    scenePass.setMRT(mrt({ output, [AO_RECEIVER_OUTPUT]: aoReceiverNode }));
+    scenePass.getTexture(AO_RECEIVER_OUTPUT).type = THREE.UnsignedByteType;
+  }
 
   /**
    * §V.62 fail-loud. Every `*Enabled` below is read ONCE, here, into a baked
@@ -230,7 +238,10 @@ export function createPostPipeline(
     // clamp before use: an AO sample that ever reads garbage must not be able
     // to multiply the whole frame to black (§V.28).
     const aoRgb = aoPass.getTextureNode().rgb.clamp(0, 1);
-    lit = vec4(color.rgb.mul(mix(vec3(1), aoRgb, uAoAmount)), color.a);
+    // B124: the sea writes depth, so GTAO marches the grazing water itself and printed blocky bars on the far sea.
+    // AO lands only on surfaces that receive it; the ocean is exempt (aoReceiver.ts)
+    const aoReceiver = scenePass.getTextureNode(AO_RECEIVER_OUTPUT).r;
+    lit = vec4(color.rgb.mul(mix(vec3(1), aoRgb, uAoAmount.mul(aoReceiver))), color.a);
   }
 
   // --- depth of field --------------------------------------------------

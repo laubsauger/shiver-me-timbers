@@ -96,6 +96,7 @@ import type { PlanarReflection } from '../reflection';
 import { activeBoatLightPool, boatLightPoolNode } from './boatLightPool';
 import { wakeLedIrradianceNode } from '../flowfoam/wakeLight';
 import { activeHullMask, hullMaskOceanNode } from './hullVolumeMask';
+import { markAoExempt } from '../core/aoReceiver';
 
 export interface OceanSurfaceMaterial {
   material: THREE.MeshBasicNodeMaterial;
@@ -2639,6 +2640,9 @@ export function buildOceanSurfaceMaterial(
   // depth lets early-Z drop the hidden ones. Measured 100 fps / 9.8 ms with
   // this on at 512² and a 4.6 km rim.
   material.depthWrite = true;
+  // B124: and because it does, screen-space AO would march this sheet and darken it with its own depth. The sea does
+  // not receive AO (core/aoReceiver.ts): what occludes its reflection is the mirror's business.
+  markAoExempt(material);
   // §V25: visible from below (see the Snell's-window branch above).
   // forceSinglePass keeps DoubleSide but stops three compiling AND drawing a
   // separate back-side pipeline: without it this material's 524k triangles are
